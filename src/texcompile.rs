@@ -18,14 +18,18 @@ static PORTABLE_TECTONIC_LOCK: Mutex<()> = Mutex::new(());
 /// GUI 程序启动控制台型 TeX 引擎时，Windows 默认会短暂创建命令行窗口。
 /// 仅编译子进程使用 `CREATE_NO_WINDOW`；stdout/stderr 仍由父进程捕获用于错误提示。
 fn tex_command(program: &Path) -> Command {
-    let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new(program);
         command.creation_flags(CREATE_NO_WINDOW);
+        command
     }
-    command
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new(program)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

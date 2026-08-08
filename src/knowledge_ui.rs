@@ -192,7 +192,7 @@ fn doc_list(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         ui.separator();
                         ui.weak(format!(
                             "更新：{}",
-                            &doc.updated_at.get(..10).unwrap_or(&doc.updated_at)
+                            doc.updated_at.get(..10).unwrap_or(&doc.updated_at)
                         ));
                     });
                 });
