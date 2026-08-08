@@ -142,6 +142,7 @@ Copy-Item -LiteralPath (Join-Path $projectRoot "target\release\gongwen-assistant
 Copy-Item -LiteralPath $runtimeRoot -Destination (Join-Path $OutputDir "runtime") -Recurse
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $OutputDir
 Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.md") -Destination $OutputDir
+Copy-Item -LiteralPath (Join-Path $projectRoot "font\licenses") -Destination (Join-Path $OutputDir "licenses\fonts") -Recurse
 
 $outputPrefix = $OutputDir.TrimEnd("\", "/") + [System.IO.Path]::DirectorySeparatorChar
 $manifest = Get-ChildItem -LiteralPath $OutputDir -Recurse -File |

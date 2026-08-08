@@ -71,6 +71,7 @@ jobs:
           New-Item -ItemType Directory -Path $staging | Out-Null
           Copy-Item "target/release/$($env:BINARY_NAME)" $staging
           Copy-Item README.md, THIRD_PARTY_NOTICES.md, LICENSE, config.example.json $staging
+          Copy-Item -LiteralPath "font/licenses" -Destination (Join-Path $staging "licenses/fonts") -Recurse
           $asset = "gongwen-assistant-$version-$($env:SUFFIX).zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $asset
           Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {

@@ -516,7 +516,8 @@ pub const FONT_BIAOSONG: &str = "gw-biaosong";
 
 /// 应用界面使用的本地字体。通过 `include_bytes!` 编译进可执行文件，运行时不依赖
 /// 字体文件或系统是否安装了该字体。
-const UI_FONT_BYTES: &[u8] = include_bytes!("../font/sfss.ttf");
+const BRIGHT_MEDIUM_FONT_BYTES: &[u8] = include_bytes!("../font/LXGWBright-Medium.ttf");
+const BRIGHT_CODE_FONT_BYTES: &[u8] = include_bytes!("../font/LXGWBrightCode-Regular.ttf");
 
 /// 取公文字体族。字体缺失时 `configure_fonts` 会使用独立的预览后备字体，不会报错。
 pub fn official_family(name: &str) -> egui::FontFamily {
@@ -552,24 +553,33 @@ pub fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let bundled_fonts = crate::portable_runtime::find_font_dir();
 
-    // 界面通用字体固定为随应用打包的 sfss.ttf。比例字体和等宽字体族都把它放在
-    // 首位，因此普通界面、电话等旧有 monospace 文本以及 Markdown 源码保持一致；
-    // 公文预览仍使用下方四个独立的专用字体族。
-    let ui_font = "gw-ui".to_owned();
+    // 界面正文使用随应用内置的 LXGW Bright Medium，Markdown/等宽文本使用 LXGW Bright Code。
+    // 两个字体在编译前由 build.rs 从 GitHub 最新 Release 下载并校验。
+    let bright_font = "gw-bright".to_owned();
+    let bright_code_font = "gw-bright-code".to_owned();
     fonts.font_data.insert(
-        ui_font.clone(),
-        egui::FontData::from_static(UI_FONT_BYTES).into(),
+        bright_font.clone(),
+        egui::FontData::from_static(BRIGHT_MEDIUM_FONT_BYTES).into(),
+    );
+    fonts.font_data.insert(
+        bright_code_font.clone(),
+        egui::FontData::from_static(BRIGHT_CODE_FONT_BYTES).into(),
     );
     fonts
         .families
         .entry(egui::FontFamily::Proportional)
         .or_default()
-        .insert(0, ui_font.clone());
+        .insert(0, bright_font.clone());
     fonts
         .families
         .entry(egui::FontFamily::Monospace)
         .or_default()
-        .insert(0, ui_font);
+        .insert(0, bright_code_font.clone());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(1, bright_font);
 
     // 公文预览专用字体缺失时使用独立的系统后备字体，不影响界面字体选择。
     let preview_fallback = load_font(
@@ -586,7 +596,7 @@ pub fn configure_fonts(ctx: &egui::Context) {
             ],
         ),
     );
-    // 公文专用字体缺失时也不回退到 sfss，保持预览与界面字体相互隔离。
+    // 公文专用字体缺失时也不回退到界面字体，保持预览与界面字体相互隔离。
     let mut fallback = Vec::new();
     if let Some(font) = &preview_fallback {
         fallback.push(font.clone());
