@@ -1,0 +1,7 @@
+The five document fonts under runtime/fonts are deployment assets.
+Their OpenType embedding flags permit the tested PDF embedding modes, but that
+does not itself grant permission to redistribute the original font files.
+
+Before distributing a portable package, the distributor must verify that its
+font licenses permit software redistribution and PDF embedding in the intended
+deployment environment.

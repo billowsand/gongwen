@@ -1,0 +1,20 @@
+* text=auto
+
+*.md text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.cls text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.svg text eol=lf
+*.txt text eol=lf
+*.ps1 text eol=crlf
+
+*.png binary
+*.ico binary
+*.ttf binary
+*.exe binary
+*.ttb binary
+*.pdf binary
+*.zip binary

@@ -1,0 +1,40 @@
+[package]
+name = "gongwen-assistant"
+version = "0.3.0"
+edition = "2024"
+description = "基于 egui 与本地 LM Studio 的离线公文写作助手"
+license = "MIT"
+
+[package.metadata.winresource]
+ProductName = "公文助手"
+FileDescription = "公文助手"
+OriginalFilename = "gongwen-assistant.exe"
+
+[dependencies]
+anyhow = "1.0"
+calamine = "0.30"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6.0"
+docx-rs = "0.4.22"
+eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"] }
+egui = "0.35.0"
+egui_extras = { version = "0.35.0", features = ["image", "svg"] }
+jieba-rs = "0.8"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rfd = "0.15"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rust_xlsxwriter = "0.79"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = "4.3"
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
+[profile.release]
+lto = "thin"
+strip = true

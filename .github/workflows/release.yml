@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows x64
+            suffix: win-x64
+            binary: gongwen-assistant.exe
+          - os: ubuntu-latest
+            name: Linux x64
+            suffix: linux-x64
+            binary: gongwen-assistant
+          - os: macos-latest
+            name: macOS ARM64
+            suffix: macos-arm64
+            binary: gongwen-assistant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb1-dev \
+            libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package release zip
+        shell: pwsh
+        env:
+          BINARY_NAME: ${{ matrix.binary }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $staging = Join-Path $env:RUNNER_TEMP 'staging'
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/release/$($env:BINARY_NAME)" $staging
+          Copy-Item README.md, THIRD_PARTY_NOTICES.md, LICENSE, config.example.json $staging
+          $asset = "gongwen-assistant-$version-$($env:SUFFIX).zip"
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $asset
+          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
+            "$($_.Hash.ToLowerInvariant())  $asset"
+          } | Set-Content "$asset.sha256" -Encoding utf8
+          "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: gongwen-assistant-*.zip*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" ./*.zip ./*.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" ./*.zip ./*.sha256 --generate-notes
+          fi

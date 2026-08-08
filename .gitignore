@@ -1,0 +1,49 @@
+# Rust / Cargo
+/target/
+*.rs.bk
+
+# Generated application output
+/dist/
+/output/
+/.tmp/
+*.aux
+*.log
+*.synctex.gz
+*.synctex.gz(busy)
+*.d
+*.pdb
+
+# Local runtime assets: downloaded or supplied by the package distributor
+/runtime/tectonic/*.exe
+/runtime/texbundle/*.ttb
+/runtime/fonts/*.ttf
+
+# Development fonts, except the UI font embedded in the binary
+/font/*
+!/font/sfss.ttf
+
+# Local user configuration
+/config.json
+.env
+.env.*
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.code-workspace
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+
+# Tool-local state
+.claude/
+.codex-tmp/
+.reasonix
