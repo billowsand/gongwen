@@ -39,7 +39,7 @@ cargo run
 
 首次使用：在“设置”中配置 LM Studio 接口并选择模型；在“标准词库”维护单位与人员；在“起草”页选择文种、填写要素并生成草稿；审校后导出。
 
-词库模板见 [标准词库模板.md](标准词库模板.md)，示例配置见 `config.example.json`。运行时配置默认保存在用户配置目录的 `LocalTools/GongwenAssistant/config/config.json`，稿件库为同目录的 `manuscripts.db`。
+词库模板可在“标准词库”页点击「下载空白模板」得到 `.xlsx` 空白模板（仅表头 + 数据验证），填好后用「导入 Excel」按编码优先合并；也可「导出 Excel」备份当前词库。示例配置见 `config.example.json`。运行时配置默认保存在用户配置目录的 `LocalTools/GongwenAssistant/config/config.json`，稿件库为同目录的 `manuscripts.db`。
 
 ## 项目结构
 

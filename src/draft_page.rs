@@ -74,15 +74,19 @@ impl ExportKind {
     }
 }
 
-/// 导出目录里最近一次产出的 tex/pdf/docx，供工具栏那三枚入口点亮与打开。
+/// 导出目录里当前文稿最近一次产出的 tex/pdf/docx，供工具栏那三枚入口点亮与打开。
 ///
 /// 导出的落盘结构是 `输出目录/<文件名主干>/<文件名主干>.{md,docx,tex,pdf}`，
-/// 一次导出一个子目录。所以这里按子目录修改时间从新到旧翻，先翻到的就是"最近一次"，
-/// 三种格式都找齐即停——正常只需读一两个目录。逐帧翻盘太贵，按目录 + 节流缓存，
-/// 导出完成时由外壳调 [`ExportLinks::invalidate`] 主动作废。
+/// 一次导出一个子目录；同一文稿多次导出会按分钟时间戳攒出多个子目录，也会和
+/// 别的文稿的目录混在一起。所以这里先按当前文稿的导出主干前缀过滤出属于它的
+/// 子目录，再按目录修改时间从新到旧翻，先翻到的就是"最近一次"，三种格式都找齐
+/// 即停。逐帧翻盘太贵，按目录 + 前缀 + 节流缓存，导出完成时由外壳调
+/// [`ExportLinks::invalidate`] 主动作废。
 #[derive(Default)]
 pub(crate) struct ExportLinks {
     dir: String,
+    /// 当前文稿的导出主干前缀（`document_stem_prefix`）；换文稿后缓存自动作废。
+    stem: Option<String>,
     scanned_at: Option<Instant>,
     tex: Option<PathBuf>,
     pdf: Option<PathBuf>,
@@ -106,12 +110,32 @@ impl ExportLinks {
         }
     }
 
-    fn refresh(&mut self, dir: &str) {
-        let fresh = self.dir == dir && self.scanned_at.is_some_and(|at| at.elapsed() < Self::TTL);
+    /// 目录条目是否属于当前绑定的文稿：未绑定时全部认；绑定时按导出主干前缀
+    /// 匹配——`stem` 本身、`stem-N` 编号变体（同名覆盖关掉后同分钟多次导出），
+    /// 或摊在根目录的 `stem.<ext>` 成品。用 `-`/`.` 作分界而不是裸前缀，
+    /// 避免“关于X”误匹配“关于X的补充”这类邻居。
+    fn matches(&self, file_name: &std::ffi::OsStr) -> bool {
+        let Some(stem) = self.stem.as_deref() else {
+            return true;
+        };
+        let Some(name) = file_name.to_str() else {
+            return false;
+        };
+        name == stem
+            || name
+                .strip_prefix(stem)
+                .is_some_and(|suffix| suffix.starts_with('-') || suffix.starts_with('.'))
+    }
+
+    fn refresh(&mut self, dir: &str, stem: Option<&str>) {
+        let fresh = self.dir == dir
+            && self.stem.as_deref() == stem
+            && self.scanned_at.is_some_and(|at| at.elapsed() < Self::TTL);
         if fresh {
             return;
         }
         self.dir = dir.to_owned();
+        self.stem = stem.map(str::to_owned);
         self.scanned_at = Some(Instant::now());
         self.tex = None;
         self.pdf = None;
@@ -132,8 +156,10 @@ impl ExportLinks {
             };
             if meta.is_dir() {
                 let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                dirs.push((modified, entry.path()));
-            } else {
+                if self.matches(&entry.file_name()) {
+                    dirs.push((modified, entry.path()));
+                }
+            } else if self.matches(&entry.file_name()) {
                 loose.push(entry.path());
             }
         }
@@ -243,6 +269,8 @@ pub(crate) struct DraftSession {
     pub(crate) pending_render_jump: bool,
     /// 审校区查找/替换条的状态。
     pub(crate) markdown_find: MarkdownFindState,
+    /// 审校区的特殊标记符号栏是否显示（可隐藏，用于快速插入正文/附件等区段标记）。
+    pub(crate) mark_toolbar_visible: bool,
     /// 审校区的语法高亮缓存。
     pub(crate) highlighter: MarkdownHighlighter,
     /// 本篇正在跑生成/优化/导出。任务按篇计数，切到别的稿件照常编辑。
@@ -357,6 +385,7 @@ impl DraftSession {
             pending_source_selection: None,
             pending_render_jump: false,
             markdown_find: MarkdownFindState::default(),
+            mark_toolbar_visible: true,
             highlighter: MarkdownHighlighter::default(),
             busy: false,
             job_seq: 0,
@@ -1310,10 +1339,18 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 仿 WinEdt 的成品入口：TEX / PDF / WORD 三枚，导出目录里有对应成品才点亮，
-    /// 点开的是最近一次导出（子目录修改时间最新）留下的那一份。右键可在文件管理器里定位。
+    /// 仿 WinEdt 的成品入口：TEX / PDF / WORD 三枚，当前文稿的导出目录里有
+    /// 对应成品才点亮，点开的是当前文稿最近一次导出（属于它的子目录中修改时间
+    /// 最新）留下的那一份。右键可在文件管理器里定位。
     fn export_open_buttons(&mut self, ui: &mut egui::Ui) {
-        self.export_links.refresh(&self.config.output_dir);
+        // 导出目录里同一文稿的文件夹都以“去掉时间戳的导出主干”为前缀，
+        // 用它过滤出属于当前文稿的目录，避免打开别的文稿的成品。
+        let stem = export::document_stem_prefix(
+            &self.doc.draft,
+            &export::extract_title(&self.doc.generated_markdown, &self.doc.draft.title_hint),
+        );
+        self.export_links
+            .refresh(&self.config.output_dir, Some(&stem));
         let mut action = None;
         for kind in ExportKind::ALL {
             let path = self.export_links.path(kind).map(Path::to_path_buf);
@@ -1584,6 +1621,19 @@ impl DraftPage<'_> {
                 {
                     self.doc.markdown_find.open = true;
                     self.doc.markdown_find.focus_query = true;
+                }
+                if theme::nav_button(
+                    ui,
+                    self.doc.mark_toolbar_visible,
+                    theme::Icon::BookmarkCheck,
+                    "标记",
+                )
+                .on_hover_text(
+                    "显示/隐藏审校区的特殊标记符号栏（快速插入正文标记、附件标记）",
+                )
+                .clicked()
+                {
+                    self.doc.mark_toolbar_visible = !self.doc.mark_toolbar_visible;
                 }
                 if theme::icon_button_enabled(ui, has_draft, theme::Icon::Copy, "复制全文")
                     .clicked()
@@ -2532,11 +2582,110 @@ impl DraftPage<'_> {
         ui.add_space(8.0);
     }
 
+    /// 审校区的特殊标记符号栏：一排快速插入按钮，把 `<!-- [正文] -->`、
+    /// `<!-- [附件] -->` 这类区段标记按独占一行插到编辑器光标所在行首，
+    /// 没有光标时追加到文末。右侧的收起按钮可整条隐藏，工具栏“标记”按钮再唤出。
+    fn mark_toolbar_ui(&mut self, ui: &mut egui::Ui) {
+        let editable = !self.doc.read_only();
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.horizontal(|ui| {
+                ui.strong("特殊标记");
+                ui.add_enabled_ui(editable, |ui| {
+                    for (label, marker, tip) in [
+                        (
+                            "正文标记",
+                            "<!-- [正文] -->",
+                            "在光标处插入“<!-- [正文] -->”，声明正式标题之后的正文区段起点",
+                        ),
+                        (
+                            "附件标记",
+                            "<!-- [附件] -->",
+                            "在光标处插入“<!-- [附件] -->”，把其后内容切换为附件区段",
+                        ),
+                    ] {
+                        if ui.button(label).on_hover_text(tip).clicked() {
+                            self.insert_section_marker(ui, marker, label);
+                        }
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, theme::Icon::Collapse, "隐藏特殊标记栏")
+                        .on_hover_text("隐藏特殊标记栏；需要时从工具栏的“标记”按钮再打开")
+                        .clicked()
+                    {
+                        self.doc.mark_toolbar_visible = false;
+                    }
+                });
+            });
+        });
+    }
+
+    /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：编辑框有焦点时插到
+    /// 光标所在行行首，否则追加到文末。标记必须独占一行导出器才认，
+    /// 已存在同名标记时不再重复插入。
+    fn insert_section_marker(&mut self, ui: &egui::Ui, marker: &str, label: &str) {
+        if self.doc.read_only() {
+            return;
+        }
+        if self
+            .doc
+            .generated_markdown
+            .lines()
+            .any(|line| line.trim() == marker)
+        {
+            *self.status = format!("{label}已在稿中，不重复插入。");
+            return;
+        }
+        let cursor_char = if ui.ctx().memory(|memory| memory.has_focus(editor_id())) {
+            egui::TextEdit::load_state(ui.ctx(), editor_id())
+                .and_then(|state| state.cursor.char_range())
+                .map(|range| range.primary.index.0)
+        } else {
+            None
+        };
+        let text = &mut self.doc.generated_markdown;
+        let pos = match cursor_char {
+            Some(char_index) => text
+                .char_indices()
+                .nth(char_index)
+                .map_or(text.len(), |(byte, _)| byte),
+            None => text.len(),
+        };
+        let line_start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = text[line_start..]
+            .find('\n')
+            .map_or(text.len(), |i| line_start + i);
+        let line_empty = text[line_start..line_end].trim().is_empty();
+        let insertion = if line_empty {
+            format!("{marker}\n")
+        } else {
+            format!("\n{marker}\n")
+        };
+        text.insert_str(line_start, &insertion);
+        *self.status = format!("已插入{label}。");
+        // 让编辑框下一次绘制时把光标挪到插入内容之后并滚动到位。
+        self.doc.pending_source_jump = Some(line_start + insertion.len());
+    }
+
     pub(crate) fn preview_ui(&mut self, ui: &mut egui::Ui) {
         if self.doc.markdown_find.open {
             egui::Panel::top("preview_find")
                 .frame(theme::panel(theme::SURFACE, 12))
                 .show(ui, |ui| self.markdown_find_ui(ui));
+        }
+        // 特殊标记符号栏：仅在有源码编辑器的视图（源码/实时排版/对照）里
+        // 显示在编辑器上方，可整条隐藏。
+        if self.doc.mark_toolbar_visible
+            && matches!(
+                self.doc.preview_mode,
+                PreviewMode::Source | PreviewMode::Hybrid | PreviewMode::Split
+            )
+        {
+            egui::Panel::top("preview_mark_toolbar")
+                .frame(theme::panel(theme::SURFACE, 12))
+                .show(ui, |ui| self.mark_toolbar_ui(ui));
         }
 
         egui::CentralPanel::default()
@@ -3476,6 +3625,123 @@ impl DraftPage<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 前缀匹配必须用 `-` 作分界：`关于X` 不应误匹配 `关于X的补充`，
+    /// 同时要认得同分钟重复导出产生的 `stem-N` 编号变体。
+    #[test]
+    fn export_links_stem_matching_uses_dash_boundary() {
+        let mut links = ExportLinks {
+            stem: Some("普通公文-关于X".into()),
+            ..ExportLinks::default()
+        };
+        let matches = |name: &str| {
+            ExportLinks {
+                stem: Some("普通公文-关于X".into()),
+                ..ExportLinks::default()
+            }
+            .matches(std::ffi::OsStr::new(name))
+        };
+        assert!(matches("普通公文-关于X-202601011200"));
+        assert!(matches("普通公文-关于X-2"));
+        assert!(matches("普通公文-关于X"));
+        // 摊在根目录的成品（不带文件夹）也认。
+        assert!(matches("普通公文-关于X.pdf"));
+        // 标题互为前缀时不能误匹配。
+        assert!(!matches("普通公文-关于X的补充-202601011300"));
+        assert!(!matches("普通公文-关于X的补充.pdf"));
+        // 完全无关的文稿。
+        assert!(!matches("电话通知-202601011300"));
+        assert!(!matches("其他文件.txt"));
+        // 未绑定文稿时全部认（退化为旧行为）。
+        links.stem = None;
+        assert!(links.matches(std::ffi::OsStr::new("电话通知-202601011300")));
+    }
+
+    /// 输出目录里混着当前文稿的多次导出与别的文稿的最新导出时，
+    /// 三枚成品入口必须只认当前文稿最新时间戳文件夹里的文件，不能串到别的文稿。
+    #[test]
+    fn export_links_only_open_latest_dir_of_current_stem() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let stem = "XX〔2025〕12号-关于测试的通知";
+
+        // 按时间顺序创建：当前文稿旧导出 → 当前文稿新导出 → 别的文稿最新导出。
+        let a_old = dir.join(format!("{stem}-202601011000"));
+        let a_new = dir.join(format!("{stem}-202601011100"));
+        let b_latest = dir.join("YY〔2025〕3号-关于别的事-202601011200");
+        for folder in [&a_old, &a_new, &b_latest] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        // 当前文稿旧导出只产 tex+pdf；新导出三格式齐全。
+        touch_export(&a_old, "tex");
+        touch_export(&a_old, "pdf");
+        touch_export(&a_new, "tex");
+        touch_export(&a_new, "pdf");
+        touch_export(&a_new, "docx");
+        // 别的文稿最新导出也有 pdf——旧实现会在这里取到它的 pdf/docx。
+        touch_export(&b_latest, "pdf");
+        touch_export(&b_latest, "docx");
+        // 拉开目录修改时间，避免同一时间单位内排序不稳。
+        std::thread::sleep(Duration::from_millis(20));
+
+        let mut links = ExportLinks::default();
+        links.refresh(dir.to_str().unwrap(), Some(stem));
+        for kind in ExportKind::ALL {
+            let path = links.path(kind).expect("当前文稿最新导出应点亮该格式按钮");
+            assert_eq!(
+                path.parent().map(Path::to_path_buf),
+                Some(a_new.clone()),
+                "{kind:?} 应指向当前文稿最新导出目录"
+            );
+        }
+    }
+
+    /// 当前文稿最新目录缺某种格式时，可以从同文稿更早的导出补齐，
+    /// 但不能越过它去拿别的文稿的成品。
+    #[test]
+    fn export_links_fills_missing_kind_from_older_dir_of_same_stem() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let stem = "普通公文-工作安排";
+
+        let a_old = dir.join(format!("{stem}-202601011000"));
+        let a_new = dir.join(format!("{stem}-202601011100"));
+        let b_latest = dir.join("普通公文-别的工作-202601011200");
+        for folder in [&a_old, &a_new, &b_latest] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        touch_export(&a_old, "tex");
+        touch_export(&a_new, "docx");
+        // 别的文稿有 pdf。
+        touch_export(&b_latest, "pdf");
+        std::thread::sleep(Duration::from_millis(20));
+
+        let mut links = ExportLinks::default();
+        links.refresh(dir.to_str().unwrap(), Some(stem));
+        assert_eq!(
+            links
+                .path(ExportKind::Tex)
+                .map(|p| p.parent().unwrap().to_path_buf()),
+            Some(a_old.clone()),
+            "tex 应从同文稿更早导出补齐"
+        );
+        assert_eq!(
+            links
+                .path(ExportKind::Word)
+                .map(|p| p.parent().unwrap().to_path_buf()),
+            Some(a_new.clone())
+        );
+        assert!(
+            links.path(ExportKind::Pdf).is_none(),
+            "pdf 不能取自别的文稿"
+        );
+    }
+
+    /// 按导出的落盘命名：成品文件名主干与所在文件夹同名。
+    fn touch_export(folder: &std::path::Path, extension: &str) {
+        let stem = folder.file_name().unwrap().to_string_lossy();
+        std::fs::write(folder.join(format!("{stem}.{extension}")), b"x").unwrap();
+    }
 
     #[test]
     fn markdown_find_returns_utf8_safe_ranges() {

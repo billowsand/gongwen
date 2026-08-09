@@ -148,16 +148,15 @@ pub fn export_all(
     Ok(files)
 }
 
-/// 导出文件名的主干按文稿类型区分，`title` 已由 `extract_title` 取好：
-/// - 会议议程：名称 + 会议时间（会议时间留空时回落名称，靠同名编号区分版本）；
-/// - 白头件：`白头` + 名称 + 时间戳；
-/// - 公函：函号 + 名称 + 时间戳（草稿期未编序号时回落机关代字，均缺失时用“公函”）；
-/// - 电话通知：`电话通知` + 时间戳。
-/// - 普通公文：`普通公文` + 名称 + 时间戳。
-fn document_stem(input: &DraftInput, title: &str) -> String {
+/// 导出文件名的固定前缀（不含分钟级时间戳）。导出目录里属于同一文稿的
+/// 文件夹都以它为前缀，工具栏“打开最近导出”靠它识别当前文稿的文件夹：
+/// - 会议议程：名称（或 名称 + 会议时间，两者都不带时间戳，前缀即完整主干）；
+/// - 白头件：`白头` + 名称；
+/// - 公函：函号 + 名称（草稿期未编序号时回落机关代字，均缺失时用“公函”）；
+/// - 电话通知：`电话通知`；
+/// - 普通公文：`普通公文` + 名称。
+pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
     let title = safe_filename(title);
-    // 时间戳为分钟级，同一分钟内反复导出保持同名，由 overwrite/同名编号决定是否覆盖。
-    let timestamp = chrono::Local::now().format("%Y%m%d%H%M").to_string();
     match input.kind {
         TemplateKind::MeetingAgenda => {
             if input.meeting_time.trim().is_empty() {
@@ -166,10 +165,22 @@ fn document_stem(input: &DraftInput, title: &str) -> String {
                 format!("{title}-{}", safe_filename(&input.meeting_time))
             }
         }
-        TemplateKind::WhitePaper => format!("白头-{title}-{timestamp}"),
-        TemplateKind::OfficialLetter => format!("{}-{title}-{timestamp}", letter_prefix(input)),
-        TemplateKind::PhoneNotice => format!("电话通知-{timestamp}"),
-        TemplateKind::PlainDocument => format!("普通公文-{title}-{timestamp}"),
+        TemplateKind::WhitePaper => format!("白头-{title}"),
+        TemplateKind::OfficialLetter => format!("{}-{title}", letter_prefix(input)),
+        TemplateKind::PhoneNotice => "电话通知".to_string(),
+        TemplateKind::PlainDocument => format!("普通公文-{title}"),
+    }
+}
+
+/// 导出文件名的主干按文稿类型区分，`title` 已由 `extract_title` 取好：
+/// 会议议程没有时间戳，其余类型在固定前缀后追加分钟级时间戳。
+pub(crate) fn document_stem(input: &DraftInput, title: &str) -> String {
+    // 时间戳为分钟级，同一分钟内反复导出保持同名，由 overwrite/同名编号决定是否覆盖。
+    let timestamp = chrono::Local::now().format("%Y%m%d%H%M").to_string();
+    let prefix = document_stem_prefix(input, title);
+    match input.kind {
+        TemplateKind::MeetingAgenda => prefix,
+        _ => format!("{prefix}-{timestamp}"),
     }
 }
 
