@@ -4,13 +4,13 @@
 
 use crate::{
     app::{
-        accent, CONTENT_WIDTH, DocJob, DraftAction, FORM_CONTENT_MIN_WIDTH, FORM_CONTROL_HEIGHT,
+        CONTENT_WIDTH, DocJob, DraftAction, FORM_CONTENT_MIN_WIDTH, FORM_CONTROL_HEIGHT,
         FORM_FIELD_MIN_WIDTH, FORM_LAYOUT_GUTTER, FORM_PANEL_DEFAULT_WIDTH, FORM_PANEL_MAX_WIDTH,
         FORM_PANEL_MIN_WIDTH, LABEL_WIDTH, SelectOption, TOGGLE_WIDTH, VersionScope,
-        VersionSwitchPrompt, VersionTarget, warn, WorkerResult, contact_pair, export_and_compile,
+        VersionSwitchPrompt, VersionTarget, WorkerResult, accent, contact_pair, export_and_compile,
         layout_options, multi_select, open_in_os, plain_options, reveal_in_os, row_label,
         row_label_with_info, section_heading_with_info, single_select, summarize,
-        switch_template_profile, truncate, version_hover, visible_rows,
+        switch_template_profile, truncate, version_hover, visible_rows, warn,
     },
     diff,
     diff_view::{self, DiffViewAction, DiffViewConfig, DiffViewState},
@@ -3129,7 +3129,9 @@ impl DraftPage<'_> {
         if theme::icon_button(ui, theme::Icon::ZoomIn, "放大").clicked() {
             self.doc.preview_zoom = Some((current + 0.1).min(2.0));
         }
-        ui.label(egui::RichText::new(format!("{:.0}%", current * 100.0)).color(theme::text_muted()));
+        ui.label(
+            egui::RichText::new(format!("{:.0}%", current * 100.0)).color(theme::text_muted()),
+        );
         if theme::icon_button(ui, theme::Icon::ZoomOut, "缩小").clicked() {
             self.doc.preview_zoom = Some((current - 0.1).max(0.4));
         }

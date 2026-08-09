@@ -640,7 +640,11 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
 
     // 列表：项目符号用强调色，内容照常走行内规则。
     if let Some(rest) = trimmed.strip_prefix("- ").or(trimmed.strip_prefix("* ")) {
-        job.append(&trimmed[..2], 0.0, format(body.clone(), theme::md::bullet()));
+        job.append(
+            &trimmed[..2],
+            0.0,
+            format(body.clone(), theme::md::bullet()),
+        );
         append_inline(job, rest, &format(body, theme::md::body()));
         return;
     }

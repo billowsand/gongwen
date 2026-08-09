@@ -5326,7 +5326,12 @@ impl GongwenApp {
                                 ui.strong(format!("v{}", version.version_number));
                                 ui.label(&version.name);
                                 if version.is_latest {
-                                    theme::chip(ui, "最新", theme::success(), theme::success_soft());
+                                    theme::chip(
+                                        ui,
+                                        "最新",
+                                        theme::success(),
+                                        theme::success_soft(),
+                                    );
                                 }
                                 ui.weak(short_date(&version.created_at));
                             });

@@ -472,7 +472,12 @@ fn result_card(
                 (theme::surface_sunk(), theme::text_soft())
             };
             theme::chip(ui, &format!("#{}", index + 1), fg, bg);
-            theme::chip(ui, chunk.kind.label(), theme::accent(), theme::surface_sunk());
+            theme::chip(
+                ui,
+                chunk.kind.label(),
+                theme::accent(),
+                theme::surface_sunk(),
+            );
             ui.label(egui::RichText::new(&chunk.doc_title).strong());
             if !chunk.section.trim().is_empty() {
                 ui.weak(format!("· {}", chunk.section));

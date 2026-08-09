@@ -391,7 +391,7 @@ pub fn info() -> Color32 {
 
 /// Markdown 审校区的语法高亮取色。整体保持低饱和，只让结构性符号跳出来。
 pub mod md {
-    use super::{current, Color32};
+    use super::{Color32, current};
 
     /// 普通正文。
     pub fn body() -> Color32 {
@@ -852,8 +852,7 @@ fn icon_button_impl(
     dangerous: bool,
 ) -> egui::Response {
     let image = if dangerous {
-        icon
-            .image()
+        icon.image()
             .tint(if enabled { danger() } else { text_muted() })
     } else {
         icon.image()
@@ -1168,7 +1167,7 @@ pub fn configure_style(ctx: &egui::Context) {
 mod tests {
     use super::configure_icons;
     use crate::models::ThemeName;
-    use crate::theme::{by_name, Theme};
+    use crate::theme::{Theme, by_name};
 
     #[test]
     fn configure_icons_installs_png_loader() {
@@ -1183,11 +1182,7 @@ mod tests {
     fn all_presets_are_light_themes() {
         for name in ThemeName::ALL {
             let theme: Theme = by_name(name);
-            let (r, g, b) = (
-                theme.canvas.r(),
-                theme.canvas.g(),
-                theme.canvas.b(),
-            );
+            let (r, g, b) = (theme.canvas.r(), theme.canvas.g(), theme.canvas.b());
             assert!(
                 r >= 220 && g >= 220 && b >= 220,
                 "{:?} 的画布底不是明色：{:02X}{:02X}{:02X}",

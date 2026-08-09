@@ -1255,12 +1255,8 @@ mod tests {
         assert_eq!(back.theme, ThemeName::Sky, "round-trip 后主题不变");
 
         // 去掉 theme 键模拟旧配置：载入后回退默认。
-        let mut value: serde_json::Value =
-            serde_json::from_str(&json).expect("应能解析为 JSON 值");
-        value
-            .as_object_mut()
-            .expect("配置应为对象")
-            .remove("theme");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("应能解析为 JSON 值");
+        value.as_object_mut().expect("配置应为对象").remove("theme");
         let old: AppConfig = serde_json::from_value(value).expect("旧配置应能反序列化");
         assert_eq!(old.theme, ThemeName::default(), "旧配置回退默认主题");
     }
