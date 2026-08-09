@@ -22,9 +22,9 @@
 
 ### 获取发布版
 
-GitHub Releases 提供 Windows x64、Linux x64 与 macOS ARM64 的源码构建二进制，压缩包内含可执行文件、README、许可与示例配置。这些二进制不包含 Tectonic、TeX bundle 与字体；使用 TeX/PDF 导出时可调用本机 XeLaTeX/Tectonic，Markdown 与 Word 导出不依赖 TeX。
+GitHub Releases 提供 Windows x64 与 Linux ARM64 的源码构建二进制，压缩包内含可执行文件、README、许可与示例配置。这些精简包不包含 Tectonic、TeX bundle 与字体；使用 TeX/PDF 导出时可调用本机 XeLaTeX/Tectonic，Markdown 与 Word 导出不依赖 TeX。
 
-完整 Windows 便携包由维护者通过 `scripts/package-portable.ps1` 构建并附加到 Release，包含应用、Tectonic、TeX bundle 与字体。相关资产受授权和体积限制，不进入源码仓库。
+完整便携包同样随 Release 发布（文件名带 `-full`），由发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起打包应用、Tectonic、离线 bundle 与字体。Windows x64 输出 zip，Linux ARM64 输出 tar.gz。相关资产受授权和体积限制，不进入源码仓库。
 
 ### 从源码构建
 

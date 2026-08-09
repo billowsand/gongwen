@@ -1,16 +1,36 @@
 param(
+    [string]$Suffix = "",
+    [string]$BinaryName = "",
+    [string]$RuntimeManifest = "",
     [string]$OutputDir = "",
-    [switch]$Force
+    [ValidateSet("none", "zip", "tar.gz")]
+    [string]$ArchiveFormat = "none",
+    [string]$ArchivePath = "",
+    [switch]$Force,
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
-$runtimeRoot = Join-Path $projectRoot "runtime"
-$checksumFile = Join-Path $runtimeRoot "SHA256SUMS.txt"
+$runtimeRoot = [System.IO.Path]::Combine($projectRoot, "runtime")
+$isWindows = $env:OS -eq "Windows_NT"
 
-if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-    $OutputDir = Join-Path $projectRoot "dist\gongwen-assistant-win-x64"
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $Suffix = if ($isWindows) { "win-x64" } else { "linux-arm64" }
 }
+if ([string]::IsNullOrWhiteSpace($BinaryName)) {
+    $BinaryName = if ($Suffix -eq "win-x64") { "gongwen-assistant.exe" } else { "gongwen-assistant" }
+}
+if ([string]::IsNullOrWhiteSpace($RuntimeManifest)) {
+    $RuntimeManifest = [System.IO.Path]::Combine($runtimeRoot, "SHA256SUMS.$Suffix.txt")
+    if (-not (Test-Path -LiteralPath $RuntimeManifest -PathType Leaf)) {
+        $RuntimeManifest = [System.IO.Path]::Combine($runtimeRoot, "SHA256SUMS.txt")
+    }
+}
+if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+    $OutputDir = [System.IO.Path]::Combine($projectRoot, "dist", "gongwen-assistant-$Suffix")
+}
+$RuntimeManifest = [System.IO.Path]::GetFullPath($RuntimeManifest)
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 
 function Test-SamePath([string]$Left, [string]$Right) {
@@ -43,16 +63,26 @@ function Assert-DirectoryNotInUse([string]$Path) {
     }
 }
 
+function Get-RuntimeDestination([string]$Relative, [string]$PlatformSuffix) {
+    $normalized = $Relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar)
+    $platformPrefix = [System.IO.Path]::Combine("tectonic", $PlatformSuffix) + [System.IO.Path]::DirectorySeparatorChar
+    if ($normalized.StartsWith($platformPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $leaf = [System.IO.Path]::GetFileName($normalized)
+        return [System.IO.Path]::Combine("tectonic", $leaf)
+    }
+    return $normalized
+}
+
 # Overwrite removes the output recursively, so protect drive and project roots.
 $protectedPaths = @(
     [System.IO.Path]::GetPathRoot($OutputDir),
     $projectRoot,
     $runtimeRoot,
-    (Join-Path $projectRoot ".git"),
-    (Join-Path $projectRoot "src"),
-    (Join-Path $projectRoot "scripts"),
-    (Join-Path $projectRoot "font"),
-    (Join-Path $projectRoot "target")
+    [System.IO.Path]::Combine($projectRoot, ".git"),
+    [System.IO.Path]::Combine($projectRoot, "src"),
+    [System.IO.Path]::Combine($projectRoot, "scripts"),
+    [System.IO.Path]::Combine($projectRoot, "font"),
+    [System.IO.Path]::Combine($projectRoot, "target")
 )
 foreach ($protectedPath in $protectedPaths) {
     if (Test-SamePath $OutputDir ([System.IO.Path]::GetFullPath($protectedPath))) {
@@ -92,21 +122,23 @@ if (Test-Path -LiteralPath $OutputDir) {
     }
 }
 
-if (-not (Test-Path -LiteralPath $checksumFile -PathType Leaf)) {
-    throw "Missing runtime checksum manifest: $checksumFile"
+if (-not (Test-Path -LiteralPath $RuntimeManifest -PathType Leaf)) {
+    throw "Missing runtime checksum manifest: $RuntimeManifest"
 }
 
-foreach ($line in Get-Content -LiteralPath $checksumFile -Encoding UTF8) {
-    if ([string]::IsNullOrWhiteSpace($line)) {
+$runtimeEntries = @()
+foreach ($line in Get-Content -LiteralPath $RuntimeManifest -Encoding UTF8) {
+    $trimmed = $line.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
         continue
     }
-    $parts = $line -split "\s+", 2
+    $parts = $trimmed -split "\s+", 2
     if ($parts.Count -ne 2) {
         throw "Invalid checksum line: $line"
     }
     $expected = $parts[0].ToUpperInvariant()
     $relative = $parts[1].Trim().Replace("/", [System.IO.Path]::DirectorySeparatorChar)
-    $asset = Join-Path $runtimeRoot $relative
+    $asset = [System.IO.Path]::Combine($runtimeRoot, $relative)
     if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
         throw "Missing portable runtime asset: $asset"
     }
@@ -114,17 +146,28 @@ foreach ($line in Get-Content -LiteralPath $checksumFile -Encoding UTF8) {
     if ($actual -ne $expected) {
         throw "SHA-256 mismatch for $asset`nexpected: $expected`nactual:   $actual"
     }
-}
-
-Push-Location $projectRoot
-try {
-    cargo build --release
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo build --release failed with exit code $LASTEXITCODE"
+    $runtimeEntries += [PSCustomObject]@{
+        Source = $asset
+        Destination = [System.IO.Path]::Combine("runtime", (Get-RuntimeDestination $relative $Suffix))
     }
 }
-finally {
-    Pop-Location
+
+if (-not $SkipBuild) {
+    Push-Location $projectRoot
+    try {
+        cargo build --release
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build --release failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+$binarySource = [System.IO.Path]::Combine($projectRoot, "target", "release", $BinaryName)
+if (-not (Test-Path -LiteralPath $binarySource -PathType Leaf)) {
+    throw "Built binary not found: $binarySource"
 }
 
 if ($overwriteExisting) {
@@ -138,13 +181,34 @@ if ($overwriteExisting) {
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-Copy-Item -LiteralPath (Join-Path $projectRoot "target\release\gongwen-assistant.exe") -Destination $OutputDir
-Copy-Item -LiteralPath $runtimeRoot -Destination (Join-Path $OutputDir "runtime") -Recurse
-Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $OutputDir
-Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.md") -Destination $OutputDir
-Copy-Item -LiteralPath (Join-Path $projectRoot "font\licenses") -Destination (Join-Path $OutputDir "licenses\fonts") -Recurse
+Copy-Item -LiteralPath $binarySource -Destination (Join-Path $OutputDir $BinaryName)
 
-$outputPrefix = $OutputDir.TrimEnd("\", "/") + [System.IO.Path]::DirectorySeparatorChar
+foreach ($entry in $runtimeEntries) {
+    $destination = Join-Path $OutputDir $entry.Destination
+    $destinationDirectory = Split-Path -Parent $destination
+    New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+    Copy-Item -LiteralPath $entry.Source -Destination $destination
+}
+
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "README.md")) -Destination $OutputDir
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "THIRD_PARTY_NOTICES.md")) -Destination $OutputDir
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "LICENSE")) -Destination $OutputDir
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "config.example.json")) -Destination $OutputDir
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "font", "licenses")) -Destination ([System.IO.Path]::Combine($OutputDir, "licenses", "fonts")) -Recurse
+
+if (-not $isWindows) {
+    foreach ($executable in @($BinaryName, [System.IO.Path]::Combine("runtime", "tectonic", "tectonic"))) {
+        $executablePath = Join-Path $OutputDir $executable
+        if (Test-Path -LiteralPath $executablePath) {
+            & chmod +x $executablePath
+            if ($LASTEXITCODE -ne 0) {
+                throw "chmod +x failed: $executablePath"
+            }
+        }
+    }
+}
+
+$outputPrefix = $OutputDir.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 $manifest = Get-ChildItem -LiteralPath $OutputDir -Recurse -File |
     Sort-Object FullName |
     ForEach-Object {
@@ -154,4 +218,37 @@ $manifest = Get-ChildItem -LiteralPath $OutputDir -Recurse -File |
     }
 $manifest | Set-Content -LiteralPath (Join-Path $OutputDir "SHA256SUMS.txt") -Encoding UTF8
 
-Write-Output "Portable package created: $OutputDir"
+if ($ArchiveFormat -ne "none") {
+    if ([string]::IsNullOrWhiteSpace($ArchivePath)) {
+        $extension = if ($ArchiveFormat -eq "tar.gz") { "tar.gz" } else { "zip" }
+        $ArchivePath = "$OutputDir.$extension"
+    }
+    $ArchivePath = [System.IO.Path]::GetFullPath($ArchivePath)
+    $archiveDirectory = Split-Path -Parent $ArchivePath
+    New-Item -ItemType Directory -Force -Path $archiveDirectory | Out-Null
+    if (Test-Path -LiteralPath $ArchivePath) {
+        Remove-Item -LiteralPath $ArchivePath -Force
+    }
+    if ($ArchiveFormat -eq "zip") {
+        Compress-Archive -Path (Join-Path $OutputDir "*") -DestinationPath $ArchivePath -CompressionLevel Optimal
+        if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+            throw "Compress-Archive did not create: $ArchivePath"
+        }
+    }
+    else {
+        Push-Location $OutputDir
+        try {
+            & tar -czf $ArchivePath .
+            if ($LASTEXITCODE -ne 0) {
+                throw "tar -czf failed with exit code $LASTEXITCODE"
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    Write-Output "Portable archive created: $ArchivePath"
+}
+else {
+    Write-Output "Portable package created: $OutputDir"
+}

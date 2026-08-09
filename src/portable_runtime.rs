@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 
 pub const TECTONIC_VERSION: &str = "0.17.0";
 pub const BUNDLE_FILE_NAME: &str = "gongwen-texlive.ttb";
+#[cfg(windows)]
+pub const TECTONIC_BINARY: &str = "tectonic.exe";
+#[cfg(not(windows))]
+pub const TECTONIC_BINARY: &str = "tectonic";
 pub const FONT_FILES: &[&str] = &[
     "FangSong.ttf",
     "KaiTi.ttf",
@@ -28,7 +32,7 @@ pub struct PortableTexRuntime {
 impl PortableTexRuntime {
     fn candidate(root: PathBuf) -> Self {
         Self {
-            tectonic: root.join("tectonic").join("tectonic.exe"),
+            tectonic: root.join("tectonic").join(TECTONIC_BINARY),
             bundle: root.join("texbundle").join(BUNDLE_FILE_NAME),
             fonts: root.join("fonts"),
             root,
@@ -46,7 +50,7 @@ impl PortableTexRuntime {
     }
 }
 
-/// 找到完整的便携式 TeX 运行时。只要发现了 `tectonic.exe`，其余资源缺失就明确
+/// 找到完整的便携式 TeX 运行时。只要发现了 Tectonic 可执行文件，其余资源缺失就明确
 /// 报错，避免静默回退到另一套不可复现的系统环境。
 pub fn find_tex_runtime() -> Result<Option<PortableTexRuntime>> {
     for root in runtime_roots() {
@@ -121,7 +125,11 @@ mod tests {
     #[test]
     fn runtime_layout_uses_stable_release_names() {
         let runtime = PortableTexRuntime::candidate(PathBuf::from("runtime"));
-        assert!(runtime.tectonic.ends_with("tectonic/tectonic.exe"));
+        assert!(
+            runtime
+                .tectonic
+                .ends_with(format!("tectonic/{TECTONIC_BINARY}"))
+        );
         assert!(runtime.bundle.ends_with("texbundle/gongwen-texlive.ttb"));
         assert!(runtime.fonts.ends_with("fonts"));
     }

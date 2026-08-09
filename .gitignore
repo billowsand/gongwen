@@ -13,8 +13,9 @@
 *.d
 *.pdb
 
-# Local runtime assets: downloaded or supplied by the package distributor
-/runtime/tectonic/*.exe
+# Local runtime binaries: downloaded or supplied by the package distributor
+/runtime/tectonic/win-x64/
+/runtime/tectonic/linux-arm64/
 /runtime/texbundle/*.ttb
 /runtime/fonts/*.ttf
 
