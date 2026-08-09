@@ -4,10 +4,10 @@
 
 use crate::{
     app::{
-        ACCENT, CONTENT_WIDTH, DocJob, DraftAction, FORM_CONTENT_MIN_WIDTH, FORM_CONTROL_HEIGHT,
+        accent, CONTENT_WIDTH, DocJob, DraftAction, FORM_CONTENT_MIN_WIDTH, FORM_CONTROL_HEIGHT,
         FORM_FIELD_MIN_WIDTH, FORM_LAYOUT_GUTTER, FORM_PANEL_DEFAULT_WIDTH, FORM_PANEL_MAX_WIDTH,
         FORM_PANEL_MIN_WIDTH, LABEL_WIDTH, SelectOption, TOGGLE_WIDTH, VersionScope,
-        VersionSwitchPrompt, VersionTarget, WARN, WorkerResult, contact_pair, export_and_compile,
+        VersionSwitchPrompt, VersionTarget, warn, WorkerResult, contact_pair, export_and_compile,
         layout_options, multi_select, open_in_os, plain_options, reveal_in_os, row_label,
         row_label_with_info, section_heading_with_info, single_select, summarize,
         switch_template_profile, truncate, version_hover, visible_rows,
@@ -715,7 +715,7 @@ fn paint_editor_line_numbers(ui: &egui::Ui, output: &egui::text_edit::TextEditOu
             egui::Align2::RIGHT_CENTER,
             (index + 1).to_string(),
             font.clone(),
-            theme::TEXT_MUTED,
+            theme::text_muted(),
         );
     }
 }
@@ -1390,7 +1390,7 @@ impl DraftPage<'_> {
             let path = self.export_links.path(kind).map(Path::to_path_buf);
             let lit = path.is_some();
             let label = kind.label();
-            let tint = if lit { ACCENT } else { theme::TEXT_MUTED };
+            let tint = if lit { accent() } else { theme::text_muted() };
             let response = ui.add_enabled(
                 lit,
                 egui::Button::image(kind.icon().image_sized(20.0).tint(tint))
@@ -1439,13 +1439,13 @@ impl DraftPage<'_> {
 
     pub(crate) fn create_ui(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("draft_toolbar")
-            .frame(theme::panel(theme::SURFACE, 10))
+            .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.toolbar(ui));
         if self.doc.versions_open {
             egui::Panel::right("draft_versions")
                 .default_size(300.0)
                 .size_range(240.0..=460.0)
-                .frame(theme::panel(theme::CANVAS, 12))
+                .frame(theme::panel(theme::canvas(), 12))
                 .show(ui, |ui| self.versions_drawer(ui));
         }
         if self.doc.result_drawer_open {
@@ -1454,7 +1454,7 @@ impl DraftPage<'_> {
             egui::Panel::right("review_result_drawer_right_v1")
                 .default_size(300.0)
                 .size_range(240.0..=460.0)
-                .frame(theme::panel(theme::CANVAS, 12))
+                .frame(theme::panel(theme::canvas(), 12))
                 .show(ui, |ui| self.result_drawer_ui(ui));
         }
         if !self.doc.form_collapsed {
@@ -1462,7 +1462,7 @@ impl DraftPage<'_> {
             egui::Panel::left("create_form_compact_v3")
                 .default_size(FORM_PANEL_DEFAULT_WIDTH)
                 .size_range(FORM_PANEL_MIN_WIDTH..=FORM_PANEL_MAX_WIDTH)
-                .frame(theme::panel(theme::CANVAS, 12))
+                .frame(theme::panel(theme::canvas(), 12))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.strong("公文要素填报");
@@ -1498,7 +1498,7 @@ impl DraftPage<'_> {
                 {
                     ui.group(|ui| {
                         ui.colored_label(
-                            ACCENT,
+                            accent(),
                             format!(
                                 "当前编辑内容来自版本 v{}《{}》，提交版本将追加为新版本。",
                                 loaded.version_number, loaded.name
@@ -1519,7 +1519,7 @@ impl DraftPage<'_> {
         let published = self.doc.record_status == ManuscriptStatus::Published;
         ui.horizontal(|ui| {
             ui.colored_label(
-                WARN,
+                warn(),
                 if published {
                     "这篇已发布，当前为只读。可预览、导出、看版本，但不能改。"
                 } else {
@@ -1569,7 +1569,7 @@ impl DraftPage<'_> {
                 for row in versions.iter().rev() {
                     let active = current == VersionTarget::Version(row.version_number);
                     let frame = if active {
-                        theme::card().fill(theme::ACCENT_SOFT)
+                        theme::card().fill(theme::accent_soft())
                     } else {
                         theme::card()
                     };
@@ -1581,7 +1581,7 @@ impl DraftPage<'_> {
                             );
                             ui.label(truncate(&row.name, 14));
                             if row.is_latest {
-                                theme::chip(ui, "最新", theme::SUCCESS, theme::SUCCESS_SOFT);
+                                theme::chip(ui, "最新", theme::success(), theme::success_soft());
                             }
                         });
                         if !row.comment.trim().is_empty() {
@@ -1883,8 +1883,8 @@ impl DraftPage<'_> {
         {
             let style = ui.style_mut();
             style.spacing.interact_size.y = FORM_CONTROL_HEIGHT;
-            style.visuals.widgets.inactive.bg_fill = theme::SURFACE;
-            style.visuals.widgets.inactive.weak_bg_fill = theme::SURFACE;
+            style.visuals.widgets.inactive.bg_fill = theme::surface();
+            style.visuals.widgets.inactive.weak_bg_fill = theme::surface();
         }
         let free_text = self.config.allow_free_text;
         // 单位共用一份名录：发文、主送、抄送、承办、落款都从这里选，一律按层级缩进显示。
@@ -2573,7 +2573,7 @@ impl DraftPage<'_> {
                     ui.label("");
                     ui.add_sized(
                         [field_width, 20.0],
-                        egui::Label::new(egui::RichText::new(message).color(WARN))
+                        egui::Label::new(egui::RichText::new(message).color(warn()))
                             .wrap_mode(egui::TextWrapMode::Wrap),
                     );
                     ui.end_row();
@@ -2769,7 +2769,7 @@ impl DraftPage<'_> {
     pub(crate) fn preview_ui(&mut self, ui: &mut egui::Ui) {
         if self.doc.markdown_find.open {
             egui::Panel::top("preview_find")
-                .frame(theme::panel(theme::SURFACE, 12))
+                .frame(theme::panel(theme::surface(), 12))
                 .show(ui, |ui| self.markdown_find_ui(ui));
         }
         // 特殊标记符号栏：仅在有源码编辑器的视图（源码/实时排版/对照）里
@@ -2781,12 +2781,12 @@ impl DraftPage<'_> {
             )
         {
             egui::Panel::top("preview_mark_toolbar")
-                .frame(theme::panel(theme::SURFACE, 12))
+                .frame(theme::panel(theme::surface(), 12))
                 .show(ui, |ui| self.mark_toolbar_ui(ui));
         }
 
         egui::CentralPanel::default()
-            .frame(theme::panel(theme::CANVAS, 10))
+            .frame(theme::panel(theme::canvas(), 10))
             .show(ui, |ui| match self.doc.preview_mode {
                 PreviewMode::Source => self.markdown_editor(ui),
                 PreviewMode::Hybrid => self.markdown_hybrid_editor(ui),
@@ -2831,20 +2831,20 @@ impl DraftPage<'_> {
                 // 否则只剩状态栏一闪而过的一行，看不到全文。
                 if let Some(error) = &self.doc.export_error {
                     egui::Frame::new()
-                        .fill(theme::DANGER_SOFT)
-                        .stroke(egui::Stroke::new(1.0, theme::DANGER.gamma_multiply(0.35)))
+                        .fill(theme::danger_soft())
+                        .stroke(egui::Stroke::new(1.0, theme::danger().gamma_multiply(0.35)))
                         .corner_radius(egui::CornerRadius::same(8))
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(
                                 egui::RichText::new("导出失败")
-                                    .color(theme::DANGER)
+                                    .color(theme::danger())
                                     .strong(),
                             );
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(error).color(theme::TEXT_SOFT),
+                                    egui::RichText::new(error).color(theme::text_soft()),
                                 )
                                 .wrap_mode(egui::TextWrapMode::Wrap),
                             );
@@ -2921,7 +2921,7 @@ impl DraftPage<'_> {
             } else {
                 format!("{} / {}", self.doc.markdown_find.current + 1, matches.len())
             };
-            ui.label(egui::RichText::new(count).color(theme::TEXT_MUTED));
+            ui.label(egui::RichText::new(count).color(theme::text_muted()));
             if theme::icon_button_enabled(
                 ui,
                 !matches.is_empty(),
@@ -2969,7 +2969,7 @@ impl DraftPage<'_> {
             }
         });
         if let Some(error) = &regex_error {
-            ui.colored_label(WARN, format!("正则表达式无效：{error}"));
+            ui.colored_label(warn(), format!("正则表达式无效：{error}"));
         }
         ui.horizontal(|ui| {
             ui.strong("替换");
@@ -3129,7 +3129,7 @@ impl DraftPage<'_> {
         if theme::icon_button(ui, theme::Icon::ZoomIn, "放大").clicked() {
             self.doc.preview_zoom = Some((current + 0.1).min(2.0));
         }
-        ui.label(egui::RichText::new(format!("{:.0}%", current * 100.0)).color(theme::TEXT_MUTED));
+        ui.label(egui::RichText::new(format!("{:.0}%", current * 100.0)).color(theme::text_muted()));
         if theme::icon_button(ui, theme::Icon::ZoomOut, "缩小").clicked() {
             self.doc.preview_zoom = Some((current - 0.1).max(0.4));
         }
@@ -3221,7 +3221,7 @@ impl DraftPage<'_> {
                         ui.add_space(side_space);
                         egui::Frame::new()
                             .fill(egui::Color32::WHITE)
-                            .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+                            .stroke(egui::Stroke::new(1.0, theme::border_strong()))
                             .shadow(egui::epaint::Shadow {
                                 offset: [0, 3],
                                 blur: 14,
@@ -3361,15 +3361,15 @@ impl DraftPage<'_> {
     pub(crate) fn warnings_ui(&mut self, ui: &mut egui::Ui) {
         if self.doc.warnings.is_empty() {
             ui.horizontal(|ui| {
-                theme::dot(ui, theme::SUCCESS);
+                theme::dot(ui, theme::success());
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("暂无审校提示").color(theme::TEXT_MUTED));
+                ui.label(egui::RichText::new("暂无审校提示").color(theme::text_muted()));
             });
             return;
         }
         egui::Frame::new()
-            .fill(theme::WARN_SOFT)
-            .stroke(egui::Stroke::new(1.0, theme::WARN.gamma_multiply(0.35)))
+            .fill(theme::warn_soft())
+            .stroke(egui::Stroke::new(1.0, theme::warn().gamma_multiply(0.35)))
             .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
@@ -3379,7 +3379,7 @@ impl DraftPage<'_> {
                     // 提示往往很长，必须显式换行，否则会把底部面板顶宽。
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(format!("· {warning}")).color(theme::TEXT_SOFT),
+                            egui::RichText::new(format!("· {warning}")).color(theme::text_soft()),
                         )
                         .wrap_mode(egui::TextWrapMode::Wrap),
                     );
@@ -3499,7 +3499,7 @@ impl DraftPage<'_> {
         ui.add_space(28.0);
         ui.vertical_centered(|ui| {
             ui.add(
-                egui::Label::new(egui::RichText::new(message).color(theme::TEXT_MUTED))
+                egui::Label::new(egui::RichText::new(message).color(theme::text_muted()))
                     .wrap_mode(egui::TextWrapMode::Wrap),
             );
         });

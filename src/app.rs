@@ -16,7 +16,7 @@ use crate::{
     manuscript_io,
     models::{
         AiPrompt, AppConfig, DraftInput, ExportSelection, FontConfig, FontRole, GeneratedDraft,
-        ManuscriptStatus, RerankMode, SecurityLevel, TemplateKind, VocabularyCategory,
+        ManuscriptStatus, RerankMode, SecurityLevel, TemplateKind, ThemeName, VocabularyCategory,
         VocabularyEntry, builtin_ai_prompts, join_units, split_units,
     },
     preview, prompt, rag, storage, system_fonts, texcompile, theme, units,
@@ -32,8 +32,12 @@ use std::{
     thread,
 };
 
-pub(crate) const ACCENT: egui::Color32 = theme::ACCENT;
-pub(crate) const WARN: egui::Color32 = theme::WARN;
+pub(crate) fn accent() -> egui::Color32 {
+    theme::accent()
+}
+pub(crate) fn warn() -> egui::Color32 {
+    theme::warn()
+}
 /// 四个汉字约 58 px，另留 18 px 呼吸空间；超长标签显式换行而不扩大此列。
 pub(crate) const LABEL_WIDTH: f32 = 76.0;
 /// 单选/多选下拉右侧“手填/选择”图标文字切换按钮占用的宽度。
@@ -543,6 +547,7 @@ impl GongwenApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut config = storage::load().unwrap_or_default();
         // 预览字体要按配置装，所以先读配置再装字体。
+        theme::set_current(config.theme);
         theme::configure_fonts(&cc.egui_ctx, &config.fonts);
         theme::configure_icons(&cc.egui_ctx);
         theme::configure_style(&cc.egui_ctx);
@@ -2005,7 +2010,7 @@ impl GongwenApp {
                     }
                     ui.label(
                         egui::RichText::new(format!("{:.0}%", current * 100.0))
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                     );
                     if theme::icon_button(ui, theme::Icon::ZoomOut, "缩小").clicked() {
                         preview.zoom = Some((current - 0.1).max(0.4));
@@ -2361,7 +2366,7 @@ impl GongwenApp {
                     ui.rect_contains_pointer(rect),
                     TAB_HOVER_ANIM,
                 );
-                let color = theme::ACCENT.lerp_to_gamma(theme::ACCENT_HOVER, active_hover);
+                let color = theme::accent().lerp_to_gamma(theme::accent_hover(), active_hover);
                 ui.painter().rect_filled(
                     egui::Rect::from_min_max(
                         egui::pos2(left, rect.bottom() - 2.0),
@@ -2427,7 +2432,7 @@ impl GongwenApp {
             .layout_no_wrap(
                 truncate_middle(&title, DOC_TAB_TITLE_CHARS),
                 font,
-                theme::TEXT,
+                theme::text(),
             )
             .size()
             .x;
@@ -2501,14 +2506,14 @@ impl GongwenApp {
         );
 
         // 背景：选中淡入白底；未选中从沉色经悬停色到按下的更深色。
-        let mut bg = theme::SURFACE_SUNK.lerp_to_gamma(theme::SURFACE, sel_t);
-        bg = bg.lerp_to_gamma(theme::SURFACE_HOVER, hover_t * (1.0 - sel_t));
-        bg = bg.lerp_to_gamma(theme::SURFACE_ACTIVE, press_t * (1.0 - sel_t));
+        let mut bg = theme::surface_sunk().lerp_to_gamma(theme::surface(), sel_t);
+        bg = bg.lerp_to_gamma(theme::surface_hover(), hover_t * (1.0 - sel_t));
+        bg = bg.lerp_to_gamma(theme::surface_active(), press_t * (1.0 - sel_t));
         // 边框：悬停加深，选中渐变到主题橙。
-        let border = theme::BORDER
-            .lerp_to_gamma(theme::BORDER_STRONG, hover_t * (1.0 - sel_t))
-            .lerp_to_gamma(theme::ACCENT, sel_t);
-        let text_color = theme::TEXT_SOFT.lerp_to_gamma(theme::TEXT, sel_t.max(hover_t));
+        let border = theme::border()
+            .lerp_to_gamma(theme::border_strong(), hover_t * (1.0 - sel_t))
+            .lerp_to_gamma(theme::accent(), sel_t);
+        let text_color = theme::text_soft().lerp_to_gamma(theme::text(), sel_t.max(hover_t));
         ui.painter().rect(
             rect,
             egui::CornerRadius::same(6),
@@ -2531,7 +2536,7 @@ impl GongwenApp {
         if busy {
             content.spinner();
         } else if !mark.is_empty() {
-            content.colored_label(theme::ACCENT, mark);
+            content.colored_label(theme::accent(), mark);
         } else if let Some(icon) = icon {
             // Lucide 图标用 currentColor 描边，这里跟随文字色渐变。
             content.add(
@@ -2572,8 +2577,8 @@ impl GongwenApp {
             content.rect_contains_pointer(close_rect),
             TAB_HOVER_ANIM,
         );
-        let close_base = theme::TEXT_MUTED.gamma_multiply(0.55 + 0.45 * hover_t);
-        let close_color = close_base.lerp_to_gamma(theme::DANGER, close_hover_t);
+        let close_base = theme::text_muted().gamma_multiply(0.55 + 0.45 * hover_t);
+        let close_color = close_base.lerp_to_gamma(theme::danger(), close_hover_t);
         if content
             .add(
                 egui::Button::new(egui::RichText::new("×").color(close_color))
@@ -2647,12 +2652,12 @@ impl GongwenApp {
                 if self.any_busy() {
                     ui.spinner();
                 } else {
-                    theme::dot(ui, theme::SUCCESS);
+                    theme::dot(ui, theme::success());
                 }
                 ui.add_space(2.0);
                 ui.add_sized(
                     [status_limit, ROW_HEIGHT],
-                    egui::Label::new(egui::RichText::new(status).color(theme::TEXT_SOFT))
+                    egui::Label::new(egui::RichText::new(status).color(theme::text_soft()))
                         .truncate(),
                 );
                 let left_bound = ui.min_rect().right();
@@ -2669,9 +2674,9 @@ impl GongwenApp {
                             "审校通过".to_string()
                         };
                         let review_tint = if warnings_count > 0 {
-                            theme::WARN
+                            theme::warn()
                         } else {
-                            theme::SUCCESS
+                            theme::success()
                         };
                         if status_icon_button(
                             ui,
@@ -2716,9 +2721,9 @@ impl GongwenApp {
                         format!("模型：{}", truncate_middle(&model, 36))
                     };
                     let (fg, bg) = if model.is_empty() {
-                        (theme::WARN, theme::WARN_SOFT)
+                        (theme::warn(), theme::warn_soft())
                     } else {
-                        (theme::SUCCESS, theme::SURFACE_SUNK)
+                        (theme::success(), theme::surface_sunk())
                     };
                     // 对齐整条状态栏的中线；只有窗口太窄、居中会压到两侧时才让位。
                     let chip_width = (gap_right - gap_left).min(420.0);
@@ -2784,7 +2789,7 @@ impl GongwenApp {
                     self.open_version_commit(VersionScope::Config);
                 }
                 ui.menu_image_text_button(
-                    theme::Icon::ArrowUpDown.image().tint(theme::TEXT_SOFT),
+                    theme::Icon::ArrowUpDown.image().tint(theme::text_soft()),
                     "导入 / 导出",
                     |ui| {
                         if ui
@@ -2868,13 +2873,13 @@ impl GongwenApp {
             ui.add_space(6.0);
             ui.group(|ui| {
                 ui.colored_label(
-                    WARN,
+                    warn(),
                     "将清空当前标准词库中的全部单位和人员。此操作尚未保存到磁盘。",
                 );
                 ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new(
-                            egui::RichText::new("确认清空").color(WARN),
+                            egui::RichText::new("确认清空").color(warn()),
                         ))
                         .clicked()
                     {
@@ -2895,7 +2900,7 @@ impl GongwenApp {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(
-                        WARN,
+                        warn(),
                         format!("导入失败（{} 项冲突）：修正后重新上传", conflicts.len()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3144,7 +3149,7 @@ impl GongwenApp {
 
                 ui.monospace(if code.is_empty() { "--" } else { code.as_str() });
                 let label = if orphan {
-                    egui::RichText::new(&name).color(WARN)
+                    egui::RichText::new(&name).color(warn())
                 } else {
                     egui::RichText::new(&name)
                 };
@@ -3258,7 +3263,7 @@ impl GongwenApp {
                             && e.code.trim() == code
                     });
                     if dup {
-                        ui.colored_label(WARN, "编码重复");
+                        ui.colored_label(warn(), "编码重复");
                     }
                 }
             } else {
@@ -3325,7 +3330,7 @@ impl GongwenApp {
             };
             ui.group(|ui| {
                 ui.colored_label(
-                    WARN,
+                    warn(),
                     if is_unit {
                         format!(
                             "将删除本单位及其下级：共 {units_count} 个单位、{people_count} 名人员"
@@ -3337,7 +3342,7 @@ impl GongwenApp {
                 ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new(
-                            egui::RichText::new("确认删除").color(WARN),
+                            egui::RichText::new("确认删除").color(warn()),
                         ))
                         .clicked()
                     {
@@ -3500,7 +3505,7 @@ impl GongwenApp {
         ui.add_space(4.0);
         let name = self.config.vocabulary[index].canonical.trim().to_string();
         if name.is_empty() {
-            ui.colored_label(WARN, "单位名称为空：下级单位和人员无法挂靠。");
+            ui.colored_label(warn(), "单位名称为空：下级单位和人员无法挂靠。");
         }
         let abbr = UnitDisplay::new(&self.config.vocabulary)
             .abbr_spaced(&self.config.vocabulary[index].code);
@@ -3698,7 +3703,7 @@ impl GongwenApp {
         for (index, entry) in self.config.ai_prompts.iter().enumerate() {
             let selected = self.ai_prompt_selected == Some(entry.id);
             let frame = if selected {
-                theme::card().fill(theme::ACCENT_SOFT)
+                theme::card().fill(theme::accent_soft())
             } else {
                 theme::card()
             };
@@ -3707,7 +3712,7 @@ impl GongwenApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(&entry.name).strong());
                     if entry.is_builtin() {
-                        theme::chip(ui, "内置", theme::INFO, theme::SURFACE_SUNK);
+                        theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if entry.is_builtin() {
@@ -3750,7 +3755,7 @@ impl GongwenApp {
                 } else {
                     summarize(&entry.instruction, 60)
                 };
-                ui.label(egui::RichText::new(preview).color(theme::TEXT_SOFT));
+                ui.label(egui::RichText::new(preview).color(theme::text_soft()));
                 if ui
                     .add(theme::icon_text_button(theme::Icon::Edit, "编辑"))
                     .clicked()
@@ -3798,9 +3803,9 @@ impl GongwenApp {
             self.ai_prompt_delete_confirm = None;
             return;
         };
-        theme::card().fill(theme::DANGER_SOFT).show(ui, |ui| {
+        theme::card().fill(theme::danger_soft()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.colored_label(theme::DANGER, format!("删除提示词“{name}”？"));
+            ui.colored_label(theme::danger(), format!("删除提示词“{name}”？"));
             ui.horizontal(|ui| {
                 if ui
                     .add(theme::warning_icon_button(theme::Icon::Trash, "确认删除"))
@@ -3842,7 +3847,7 @@ impl GongwenApp {
                     .strong(),
                 );
                 if !draft.builtin_key.is_empty() {
-                    theme::chip(ui, "内置", theme::INFO, theme::SURFACE_SUNK);
+                    theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
                 }
             });
             ui.add_space(6.0);
@@ -3885,7 +3890,7 @@ impl GongwenApp {
 
             if let Some(error) = &draft.error {
                 ui.add_space(4.0);
-                ui.colored_label(WARN, error);
+                ui.colored_label(warn(), error);
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -4094,7 +4099,7 @@ impl GongwenApp {
                 ));
                 if drafting {
                     ui.colored_label(
-                        ACCENT,
+                        accent(),
                         "当前审校稿为空：下面写明要起草什么，将结合左侧公文要素从零生成。",
                     );
                 }
@@ -4129,7 +4134,7 @@ impl GongwenApp {
                         for entry in &matches {
                             let last_used = self.config.last_ai_prompt == entry.id;
                             let frame = if last_used {
-                                theme::card().fill(theme::ACCENT_SOFT)
+                                theme::card().fill(theme::accent_soft())
                             } else {
                                 theme::card()
                             };
@@ -4142,8 +4147,8 @@ impl GongwenApp {
                                             theme::chip(
                                                 ui,
                                                 "上次使用",
-                                                theme::ACCENT,
-                                                theme::SURFACE_SUNK,
+                                                theme::accent(),
+                                                theme::surface_sunk(),
                                             );
                                         }
                                     });
@@ -4153,7 +4158,7 @@ impl GongwenApp {
                                         summarize(&entry.instruction, 70)
                                     };
                                     ui.label(
-                                        egui::RichText::new(preview).color(theme::TEXT_SOFT),
+                                        egui::RichText::new(preview).color(theme::text_soft()),
                                     );
                                 })
                                 .response
@@ -4225,11 +4230,11 @@ impl GongwenApp {
 
     fn manuscript_ui(&mut self, ui: &mut egui::Ui) {
         if let Some(error) = self.manuscript_error.clone() {
-            ui.colored_label(WARN, error);
+            ui.colored_label(warn(), error);
             return;
         }
         if self.manuscript_store.is_none() {
-            ui.colored_label(WARN, "稿件库不可用。");
+            ui.colored_label(warn(), "稿件库不可用。");
             return;
         }
 
@@ -4267,7 +4272,7 @@ impl GongwenApp {
             .resizable(true)
             .default_size(320.0)
             .size_range(280.0..=440.0)
-            .frame(theme::panel(theme::SURFACE, 10))
+            .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.manuscript_detail_ui(ui, &mut action))
             .inner;
         self.manuscript_list_ui(ui, &mut action);
@@ -4525,7 +4530,7 @@ impl GongwenApp {
             let mut do_delete = false;
             let mut do_cancel = false;
             ui.group(|ui| {
-                ui.colored_label(WARN, "删除后不可恢复，确认删除这篇稿件吗？");
+                ui.colored_label(warn(), "删除后不可恢复，确认删除这篇稿件吗？");
                 ui.horizontal(|ui| {
                     if ui.button("确认删除").clicked() {
                         do_delete = true;
@@ -4562,7 +4567,7 @@ impl GongwenApp {
             let mut cancel = false;
             ui.group(|ui| {
                 ui.colored_label(
-                    WARN,
+                    warn(),
                     format!(
                         "确认删除所选的 {} 篇可删除稿件吗？此操作不可恢复。",
                         deletable.len()
@@ -4598,7 +4603,7 @@ impl GongwenApp {
                 let mut do_cancel = false;
                 ui.group(|ui| {
                     ui.colored_label(
-                        WARN,
+                        warn(),
                         "归档将冻结该稿件：标题、正文、时间等关键信息此后均不可修改。",
                     );
                     ui.horizontal_wrapped(|ui| {
@@ -4847,9 +4852,9 @@ impl GongwenApp {
                             // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
                             let indexed = self.knowledge_indexed_manuscripts.contains(&row.id);
                             let indexed_cell = if indexed {
-                                egui::RichText::new("已入库").color(ACCENT)
+                                egui::RichText::new("已入库").color(accent())
                             } else {
-                                egui::RichText::new("—").color(theme::TEXT_MUTED)
+                                egui::RichText::new("—").color(theme::text_muted())
                             };
                             row_cell(
                                 ui.selectable_label(row_selected, indexed_cell)
@@ -5113,7 +5118,7 @@ impl GongwenApp {
                                 ui.strong(format!("v{}", version.version_number));
                                 ui.label(&version.name);
                                 if version.is_latest {
-                                    theme::chip(ui, "最新", theme::SUCCESS, theme::SUCCESS_SOFT);
+                                    theme::chip(ui, "最新", theme::success(), theme::success_soft());
                                 }
                                 ui.weak(short_date(&version.created_at));
                             });
@@ -5919,7 +5924,7 @@ impl GongwenApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.label(format!("当前内容相对{}有未提交修改。", prompt.base_label));
-                ui.colored_label(WARN, format!("直接切到{target_label}会丢弃这些修改。"));
+                ui.colored_label(warn(), format!("直接切到{target_label}会丢弃这些修改。"));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if theme::primary_icon_button(ui, theme::Icon::GitCommit, "提交为新版本后切换")
@@ -6048,10 +6053,10 @@ impl GongwenApp {
                 if has_changes {
                     ui.weak("提交后固化为一个新版本，追加在版本链末尾。");
                 } else {
-                    ui.colored_label(WARN, "相对上一版本没有内容变更，不能提交。");
+                    ui.colored_label(warn(), "相对上一版本没有内容变更，不能提交。");
                 }
                 if let Some(error) = &draft.error {
-                    ui.colored_label(WARN, error);
+                    ui.colored_label(warn(), error);
                 }
                 ui.horizontal(|ui| {
                     if ui
@@ -6400,9 +6405,9 @@ impl GongwenApp {
         } else {
             for change in &report.vocabulary {
                 let color = match change.action {
-                    "新增" => theme::SUCCESS,
-                    "删除" => theme::WARN,
-                    _ => theme::ACCENT,
+                    "新增" => theme::success(),
+                    "删除" => theme::warn(),
+                    _ => theme::accent(),
                 };
                 ui.horizontal(|ui| {
                     ui.colored_label(
@@ -6422,7 +6427,7 @@ impl GongwenApp {
                         });
                         ui.label("→");
                         ui.colored_label(
-                            ACCENT,
+                            accent(),
                             if field.after.is_empty() {
                                 "—".to_string()
                             } else {
@@ -6511,13 +6516,13 @@ impl GongwenApp {
                     ui.add_space(6.0);
                     ui.group(|ui| {
                         ui.colored_label(
-                            WARN,
+                            warn(),
                             format!("将用配置版本 v{n} 替换当前配置，未保存的词库更改会丢失。"),
                         );
                         ui.horizontal(|ui| {
                             if ui
                                 .add(egui::Button::new(
-                                    egui::RichText::new("确认应用").color(WARN),
+                                    egui::RichText::new("确认应用").color(warn()),
                                 ))
                                 .clicked()
                             {
@@ -6646,7 +6651,7 @@ impl GongwenApp {
                 ui.label(format!(
                     "将用 v{version_number} 的内容覆盖这篇稿件的当前内容。"
                 ));
-                ui.colored_label(WARN, "当前未提交的修改会丢失；已提交的版本不受影响。");
+                ui.colored_label(warn(), "当前未提交的修改会丢失；已提交的版本不受影响。");
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui
@@ -6709,6 +6714,79 @@ impl GongwenApp {
             Ok(None) => self.status = "版本不存在或已被删除。".into(),
             Err(error) => self.status = format!("载入版本失败：{error:#}"),
         }
+    }
+
+    /// 界面主题：明色配色预设，点选立即生效并保存。公文纸面（预览、导出）按
+    /// 红头文件规范固定为白纸黑字，不随主题变化。
+    fn theme_settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("界面主题");
+        ui.label(
+            "界面的明色配色预设，点选后立即生效并保存。公文纸面（预览与导出）不受影响，\
+             仍按规范为白纸黑字红头。",
+        );
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            for name in ThemeName::ALL {
+                let palette = theme::by_name(name);
+                let selected = name == self.config.theme;
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(168.0, 76.0), egui::Sense::click());
+                if ui.is_rect_visible(rect) {
+                    let painter = ui.painter_at(rect);
+                    // 卡片底与描边：选中时用强调色加粗描边。
+                    painter.rect_filled(rect, 10.0, palette.surface);
+                    let stroke = if selected {
+                        egui::Stroke::new(2.0, palette.accent)
+                    } else {
+                        egui::Stroke::new(1.0, palette.border_strong)
+                    };
+                    painter.rect_stroke(rect, 10.0, stroke, egui::StrokeKind::Inside);
+
+                    // 色板行：画布底、沉底、强调淡底、强调色四枚色块。
+                    let swatch = 16.0;
+                    let gap = 6.0;
+                    let start = egui::pos2(rect.left() + 12.0, rect.top() + 12.0);
+                    for (index, color) in [
+                        palette.canvas,
+                        palette.surface_sunk,
+                        palette.accent_soft,
+                        palette.accent,
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        let min = start + egui::vec2(index as f32 * (swatch + gap), 0.0);
+                        let max = min + egui::vec2(swatch, swatch);
+                        painter.rect_filled(egui::Rect::from_min_max(min, max), 4.0, *color);
+                    }
+
+                    // 主题名与选中标记。
+                    painter.text(
+                        egui::pos2(rect.left() + 12.0, rect.top() + 42.0),
+                        egui::Align2::LEFT_TOP,
+                        palette.label,
+                        egui::FontId::proportional(14.0),
+                        palette.text,
+                    );
+                    if selected {
+                        painter.text(
+                            egui::pos2(rect.right() - 12.0, rect.top() + 10.0),
+                            egui::Align2::RIGHT_TOP,
+                            "✓ 当前",
+                            egui::FontId::proportional(12.0),
+                            palette.accent,
+                        );
+                    }
+                }
+                if response.clicked() && self.config.theme != name {
+                    self.config.theme = name;
+                    theme::set_current(name);
+                    theme::configure_style(ui.ctx());
+                    self.status = format!("界面主题已切换为「{}」。", palette.label);
+                    let _ = storage::save(&self.config);
+                }
+            }
+        });
     }
 
     /// 字体设置：界面字体 + 编译字体（五个位置各自可以换成本机字体）。
@@ -7037,7 +7115,7 @@ impl GongwenApp {
                     if let Some((ok, message)) = self.rerank_verify_result.clone() {
                         ui.horizontal_wrapped(|ui| {
                             ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
-                            ui.colored_label(if ok { theme::ACCENT } else { WARN }, message);
+                            ui.colored_label(if ok { theme::accent() } else { warn() }, message);
                         });
                     }
                 }
@@ -7076,6 +7154,10 @@ impl GongwenApp {
 
                 ui.add_space(12.0);
                 ui.separator();
+                self.theme_settings_ui(ui);
+
+                ui.add_space(12.0);
+                ui.separator();
                 self.font_settings_ui(ui);
 
                 ui.add_space(12.0);
@@ -7092,7 +7174,7 @@ impl GongwenApp {
                     ui.checkbox(&mut self.config.export.tex, "LaTeX");
                 });
                 if !self.config.export.any() {
-                    ui.colored_label(WARN, "未勾选任何导出格式，起草页的导出按钮不会产生文件。");
+                    ui.colored_label(warn(), "未勾选任何导出格式，起草页的导出按钮不会产生文件。");
                 }
                 ui.checkbox(&mut self.config.auto_export, "AI 起草或优化完成后自动导出一次")
                     .on_hover_text("不勾选则只出稿，什么时候导出完全由你决定");
@@ -7184,10 +7266,10 @@ impl eframe::App for GongwenApp {
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
         egui::Panel::top("app_top")
-            .frame(theme::panel(theme::SURFACE, 12))
+            .frame(theme::panel(theme::surface(), 12))
             .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("app_status")
-            .frame(theme::panel(theme::SURFACE, 8))
+            .frame(theme::panel(theme::surface(), 8))
             .show(ui, |ui| self.status_bar(ui));
         // 标签全关光了就补一格稿件管理，主区不能空着。
         if self.tabs.is_empty() {
@@ -7239,7 +7321,7 @@ impl eframe::App for GongwenApp {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::CANVAS.to_normalized_gamma_f32()
+        theme::canvas().to_normalized_gamma_f32()
     }
 }
 
@@ -7334,7 +7416,7 @@ fn joined_metadata(values: &[&str]) -> String {
 }
 
 fn metadata_grid_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.label(egui::RichText::new(label).color(theme::TEXT_MUTED));
+    ui.label(egui::RichText::new(label).color(theme::text_muted()));
     ui.add(egui::Label::new(present_or_dash(value)).wrap_mode(egui::TextWrapMode::Wrap));
     ui.end_row();
 }
@@ -7342,21 +7424,21 @@ fn metadata_grid_row(ui: &mut egui::Ui, label: &str, value: &str) {
 /// 稿件状态的徽标颜色：新建（仅历史遗留）灰、草稿蓝、发布绿、归档橙。
 pub(crate) fn status_color(status: ManuscriptStatus) -> egui::Color32 {
     match status {
-        ManuscriptStatus::New => theme::TEXT_MUTED,
-        ManuscriptStatus::Draft => theme::ACCENT,
-        ManuscriptStatus::Published => theme::SUCCESS,
-        ManuscriptStatus::Archived => theme::INFO,
+        ManuscriptStatus::New => theme::text_muted(),
+        ManuscriptStatus::Draft => theme::accent(),
+        ManuscriptStatus::Published => theme::success(),
+        ManuscriptStatus::Archived => theme::info(),
     }
 }
 
 /// 稿件列表密级颜色：由蓝到红逐级增强；未标密使用弱化文字。
 pub(crate) fn security_level_color(level: SecurityLevel) -> egui::Color32 {
     match level {
-        SecurityLevel::Unmarked => theme::TEXT_MUTED,
-        SecurityLevel::Internal => theme::INFO,
-        SecurityLevel::Secret => theme::WARN,
-        SecurityLevel::Confidential => theme::ACCENT_ACTIVE,
-        SecurityLevel::TopSecret => theme::DANGER,
+        SecurityLevel::Unmarked => theme::text_muted(),
+        SecurityLevel::Internal => theme::info(),
+        SecurityLevel::Secret => theme::warn(),
+        SecurityLevel::Confidential => theme::accent_active(),
+        SecurityLevel::TopSecret => theme::danger(),
     }
 }
 
@@ -7770,7 +7852,7 @@ pub(crate) fn single_select(
     ui.horizontal(|ui| {
         if manual {
             if options.is_empty() && !allow_free_text {
-                ui.colored_label(WARN, "标准词库中暂无该类词条，请先到“标准词库”页维护");
+                ui.colored_label(warn(), "标准词库中暂无该类词条，请先到“标准词库”页维护");
                 return;
             }
             changed = ui
@@ -7834,7 +7916,7 @@ pub(crate) fn multi_select(
         ui.horizontal(|ui| {
             if manual {
                 if options.is_empty() && !allow_free_text {
-                    ui.colored_label(WARN, "标准词库中暂无该类词条，请先到“标准词库”页维护");
+                    ui.colored_label(warn(), "标准词库中暂无该类词条，请先到“标准词库”页维护");
                     return;
                 }
                 changed = ui
@@ -7984,7 +8066,7 @@ pub(crate) fn contact_pair(
                 );
             } else if phone.trim().is_empty() {
                 ui.colored_label(
-                    WARN,
+                    warn(),
                     if person.trim().is_empty() {
                         "选择联系人后自动带出".to_string()
                     } else {

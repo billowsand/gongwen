@@ -221,5 +221,6 @@
     "heading2": { "family": "", "display": "", "path": "" },
     "body": { "family": "", "display": "", "path": "" },
     "page_number": { "family": "", "display": "", "path": "" }
-  }
+  },
+  "theme": "claude"
 }

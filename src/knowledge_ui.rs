@@ -13,7 +13,7 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     // 一个必然失败的按钮。与稿件管理页的处置一致。
     if app.knowledge_store.is_none() {
         ui.colored_label(
-            theme::WARN,
+            theme::warn(),
             app.knowledge_error
                 .clone()
                 .unwrap_or_else(|| "知识库不可用。".to_string()),
@@ -31,7 +31,7 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
 
     if let Some(error) = app.knowledge_error.clone() {
         ui.horizontal(|ui| {
-            ui.colored_label(theme::WARN, error);
+            ui.colored_label(theme::warn(), error);
             if ui.small_button("知道了").clicked() {
                 app.knowledge_error = None;
             }
@@ -40,7 +40,7 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     }
     // 换过 embedding 模型后旧文档会静默退出向量召回，必须显式提醒重建。
     if let Some(hint) = app.knowledge_embed_model_mismatch() {
-        ui.colored_label(theme::WARN, hint);
+        ui.colored_label(theme::warn(), hint);
         ui.add_space(4.0);
     }
 
@@ -161,7 +161,7 @@ fn doc_list(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        theme::chip(ui, doc.kind.label(), theme::ACCENT, theme::SURFACE_SUNK);
+                        theme::chip(ui, doc.kind.label(), theme::accent(), theme::surface_sunk());
                         ui.label(egui::RichText::new(&doc.title).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
@@ -249,7 +249,7 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
         }
         // 降级告警：embedding 连不上、rerank 端点不对等，以前只写进服务端日志。
         for warning in &app.knowledge_search_warnings {
-            ui.colored_label(theme::WARN, warning);
+            ui.colored_label(theme::warn(), warning);
         }
         if app.knowledge_test_results.is_empty() {
             if !app.knowledge_test_query.trim().is_empty() {
@@ -297,12 +297,12 @@ fn result_card(
         ui.horizontal(|ui| {
             // 排名徽章。
             let (bg, fg) = if index == 0 {
-                (theme::ACCENT, egui::Color32::WHITE)
+                (theme::accent(), egui::Color32::WHITE)
             } else {
-                (theme::SURFACE_SUNK, theme::TEXT_SOFT)
+                (theme::surface_sunk(), theme::text_soft())
             };
             theme::chip(ui, &format!("#{}", index + 1), fg, bg);
-            theme::chip(ui, chunk.kind.label(), theme::ACCENT, theme::SURFACE_SUNK);
+            theme::chip(ui, chunk.kind.label(), theme::accent(), theme::surface_sunk());
             ui.label(egui::RichText::new(&chunk.doc_title).strong());
             if !chunk.section.trim().is_empty() {
                 ui.weak(format!("· {}", chunk.section));
@@ -315,11 +315,11 @@ fn result_card(
                 ui.label(
                     egui::RichText::new(format!("{label} {:.3}", score))
                         .strong()
-                        .color(theme::ACCENT),
+                        .color(theme::accent()),
                 );
             });
         });
-        ui.label(egui::RichText::new(truncate_chars(&chunk.text, 220)).color(theme::TEXT_SOFT));
+        ui.label(egui::RichText::new(truncate_chars(&chunk.text, 220)).color(theme::text_soft()));
         ui.weak(format!(
             "向量 {:.3} · 关键词 {:.3} · 融合 {:.4}{}",
             chunk.vector_score,

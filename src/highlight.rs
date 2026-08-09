@@ -203,16 +203,16 @@ pub fn highlight(
 
     for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
-            job.append("\n", 0.0, format(body.clone(), theme::md::BODY));
+            job.append("\n", 0.0, format(body.clone(), theme::md::body()));
         }
         highlight_line(&mut job, line, base_size, &family);
     }
     for range in search_matches {
-        paint_range(&mut job, range, theme::md::SEARCH_BG);
+        paint_range(&mut job, range, theme::md::search_bg());
     }
     if let Some(anchor) = anchor {
         // 当前命中（或预览点击锚点）最后绘制，以更醒目的强调色盖过普通命中。
-        paint_range(&mut job, anchor, theme::md::ANCHOR_BG);
+        paint_range(&mut job, anchor, theme::md::anchor_bg());
     }
     job
 }
@@ -281,10 +281,10 @@ pub fn hybrid_highlight(
         );
     }
     for range in search_matches {
-        paint_range(&mut job, range, theme::md::SEARCH_BG);
+        paint_range(&mut job, range, theme::md::search_bg());
     }
     if let Some(anchor) = anchor {
-        paint_range(&mut job, anchor, theme::md::ANCHOR_BG);
+        paint_range(&mut job, anchor, theme::md::anchor_bg());
     }
     job
 }
@@ -313,8 +313,8 @@ fn hybrid_line(
     if trimmed.starts_with("<!--") || trimmed.starts_with('<') {
         let marker = if active {
             let mut format = body;
-            format.color = theme::md::COMMENT;
-            format.background = theme::md::COMMENT_BG;
+            format.color = theme::md::comment();
+            format.background = theme::md::comment_bg();
             format
         } else {
             hidden_marker(OFFICIAL_LINE_PT)
@@ -339,7 +339,7 @@ fn hybrid_line(
         let text_format = official_format(family, size, OFFICIAL_LINE_PT, Color32::BLACK);
         let marker = if active {
             let mut format = text_format.clone();
-            format.color = theme::md::MARKER;
+            format.color = theme::md::marker();
             format
         } else {
             hidden_marker(OFFICIAL_LINE_PT)
@@ -387,7 +387,7 @@ fn hybrid_line(
         }
         let marker = if active {
             let mut format = table.clone();
-            format.color = theme::md::TABLE_PIPE;
+            format.color = theme::md::table_pipe();
             format
         } else {
             hidden_marker(OFFICIAL_TABLE_LINE_PT)
@@ -438,7 +438,7 @@ fn hybrid_line(
     if let Some(rest) = trimmed.strip_prefix("- ").or(trimmed.strip_prefix("* ")) {
         let marker = if active {
             let mut format = body.clone();
-            format.color = theme::md::BULLET;
+            format.color = theme::md::bullet();
             format
         } else {
             hidden_marker(OFFICIAL_LINE_PT)
@@ -485,7 +485,7 @@ fn append_hybrid_inline(
             Inline::Strong => {
                 let marker = if active {
                     let mut format = base.clone();
-                    format.color = theme::md::MARKER;
+                    format.color = theme::md::marker();
                     format
                 } else {
                     hidden_marker(OFFICIAL_LINE_PT)
@@ -503,7 +503,7 @@ fn append_hybrid_inline(
             Inline::Code => {
                 let marker = if active {
                     let mut format = base.clone();
-                    format.color = theme::md::MARKER;
+                    format.color = theme::md::marker();
                     format
                 } else {
                     hidden_marker(OFFICIAL_LINE_PT)
@@ -569,12 +569,12 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
     let body = FontId::new(base_size, family.clone());
     let trimmed = line.trim_start();
     if trimmed.is_empty() {
-        job.append(line, 0.0, format(body, theme::md::BODY));
+        job.append(line, 0.0, format(body, theme::md::body()));
         return;
     }
     let indent = &line[..line.len() - trimmed.len()];
     if !indent.is_empty() {
-        job.append(indent, 0.0, format(body.clone(), theme::md::BODY));
+        job.append(indent, 0.0, format(body.clone(), theme::md::body()));
     }
 
     // 区段标记 `<!-- 附件 -->` 与裸 HTML：整行弱化为注释色。
@@ -582,7 +582,7 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
         job.append(
             trimmed,
             0.0,
-            filled(body, theme::md::COMMENT, theme::md::COMMENT_BG),
+            filled(body, theme::md::comment(), theme::md::comment_bg()),
         );
         return;
     }
@@ -603,15 +603,15 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
         };
         let font = FontId::new((base_size * scale).round(), family.clone());
         let color = if hashes == 1 {
-            theme::md::TITLE
+            theme::md::title()
         } else {
-            theme::md::HEADING
+            theme::md::heading()
         };
         let split = hashes + 1;
         job.append(
             &trimmed[..split],
             0.0,
-            format(font.clone(), theme::md::MARKER),
+            format(font.clone(), theme::md::marker()),
         );
         append_inline(job, &trimmed[split..], &format(font, color));
         return;
@@ -620,11 +620,11 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
     // 表格：竖线压成浅色，分隔行整行弱化，单元格内容用独立的蓝灰色。
     if trimmed.contains('|') && trimmed.matches('|').count() >= 2 {
         if is_separator_row(trimmed) {
-            job.append(trimmed, 0.0, format(body, theme::md::TABLE_RULE));
+            job.append(trimmed, 0.0, format(body, theme::md::table_rule()));
             return;
         }
-        let cell = format(body.clone(), theme::md::TABLE_CELL);
-        let pipe = format(body, theme::md::TABLE_PIPE);
+        let cell = format(body.clone(), theme::md::table_cell());
+        let pipe = format(body, theme::md::table_pipe());
         for piece in trimmed.split_inclusive('|') {
             let (content, bar) = match piece.strip_suffix('|') {
                 Some(content) => (content, true),
@@ -640,12 +640,12 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
 
     // 列表：项目符号用强调色，内容照常走行内规则。
     if let Some(rest) = trimmed.strip_prefix("- ").or(trimmed.strip_prefix("* ")) {
-        job.append(&trimmed[..2], 0.0, format(body.clone(), theme::md::BULLET));
-        append_inline(job, rest, &format(body, theme::md::BODY));
+        job.append(&trimmed[..2], 0.0, format(body.clone(), theme::md::bullet()));
+        append_inline(job, rest, &format(body, theme::md::body()));
         return;
     }
 
-    append_inline(job, trimmed, &format(body, theme::md::BODY));
+    append_inline(job, trimmed, &format(body, theme::md::body()));
 }
 
 fn is_separator_row(line: &str) -> bool {
@@ -684,16 +684,16 @@ fn append_inline(job: &mut LayoutJob, text: &str, base: &TextFormat) {
             job.append(&text[plain_start..index], 0.0, base.clone());
         }
         let (color, background, keep_marks) = match kind {
-            Inline::Strong => (theme::md::STRONG, theme::md::STRONG_BG, false),
-            Inline::Code => (theme::md::CODE, theme::md::COMMENT_BG, false),
-            Inline::Todo => (theme::md::TODO, theme::md::TODO_BG, true),
-            Inline::Quoted => (theme::md::QUOTED, Color32::TRANSPARENT, true),
+            Inline::Strong => (theme::md::strong(), theme::md::strong_bg(), false),
+            Inline::Code => (theme::md::code(), theme::md::comment_bg(), false),
+            Inline::Todo => (theme::md::todo(), theme::md::todo_bg(), true),
+            Inline::Quoted => (theme::md::quoted(), Color32::TRANSPARENT, true),
         };
         let content = filled(font.clone(), color, background);
         if keep_marks {
             job.append(&rest[..span_end], 0.0, content);
         } else {
-            let marker = format(font.clone(), theme::md::MARKER);
+            let marker = format(font.clone(), theme::md::marker());
             job.append(&rest[..open_len], 0.0, marker.clone());
             job.append(&rest[open_len..content_end], 0.0, content);
             job.append(&rest[content_end..span_end], 0.0, marker);
@@ -821,7 +821,7 @@ mod tests {
             let (start, end) = (section.byte_range.start.0, section.byte_range.end.0);
             let inside = anchor.start <= start && end <= anchor.end;
             assert_eq!(
-                section.format.background == theme::md::ANCHOR_BG,
+                section.format.background == theme::md::anchor_bg(),
                 inside,
                 "分段 {:?} 的底色与是否落在锚点内不符",
                 &text[start..end]
@@ -855,19 +855,19 @@ mod tests {
         );
         assert!(job.sections.iter().any(|section| {
             section.byte_range.start.0 == matches[0].start
-                && section.format.background == theme::md::SEARCH_BG
+                && section.format.background == theme::md::search_bg()
         }));
         assert!(job.sections.iter().any(|section| {
             section.byte_range.start.0 == current.start
-                && section.format.background == theme::md::ANCHOR_BG
+                && section.format.background == theme::md::anchor_bg()
         }));
     }
 
     #[test]
     fn headings_dim_the_hashes_and_color_the_text() {
         let sections = sections("## 一级标题");
-        assert_eq!(sections[0], ("## ".to_string(), theme::md::MARKER));
-        assert_eq!(sections[1], ("一级标题".to_string(), theme::md::HEADING));
+        assert_eq!(sections[0], ("## ".to_string(), theme::md::marker()));
+        assert_eq!(sections[1], ("一级标题".to_string(), theme::md::heading()));
     }
 
     #[test]
@@ -1002,7 +1002,7 @@ mod tests {
     #[test]
     fn document_title_uses_the_accent_color() {
         let sections = sections("# 关于开展工作的函");
-        assert_eq!(sections[1].1, theme::md::TITLE);
+        assert_eq!(sections[1].1, theme::md::title());
     }
 
     #[test]
@@ -1019,8 +1019,8 @@ mod tests {
     fn strong_marks_are_dimmed_and_content_is_highlighted() {
         let sections = sections("这是**重点**内容");
         let colors = sections.iter().map(|(_, color)| *color).collect::<Vec<_>>();
-        assert!(colors.contains(&theme::md::STRONG));
-        assert_eq!(sections[1], ("**".to_string(), theme::md::MARKER));
+        assert!(colors.contains(&theme::md::strong()));
+        assert_eq!(sections[1], ("**".to_string(), theme::md::marker()));
     }
 
     #[test]
@@ -1028,12 +1028,12 @@ mod tests {
         let sections = sections("【待核实：文号】与“规范”");
         assert_eq!(
             sections[0],
-            ("【待核实：文号】".to_string(), theme::md::TODO)
+            ("【待核实：文号】".to_string(), theme::md::todo())
         );
         assert!(
             sections
                 .iter()
-                .any(|(text, color)| text == "“规范”" && *color == theme::md::QUOTED)
+                .any(|(text, color)| text == "“规范”" && *color == theme::md::quoted())
         );
     }
 
@@ -1043,25 +1043,25 @@ mod tests {
         assert!(
             sections
                 .iter()
-                .any(|(text, color)| text == "|" && *color == theme::md::TABLE_PIPE)
+                .any(|(text, color)| text == "|" && *color == theme::md::table_pipe())
         );
         assert!(
             sections
                 .iter()
-                .any(|(_, color)| *color == theme::md::TABLE_CELL)
+                .any(|(_, color)| *color == theme::md::table_cell())
         );
     }
 
     #[test]
     fn separator_rows_are_dimmed_as_a_whole() {
         let sections = sections("|---|---|");
-        assert_eq!(sections[0].1, theme::md::TABLE_RULE);
+        assert_eq!(sections[0].1, theme::md::table_rule());
     }
 
     #[test]
     fn section_markers_render_as_comments() {
         let sections = sections("<!-- 附件 -->");
-        assert_eq!(sections[0].1, theme::md::COMMENT);
+        assert_eq!(sections[0].1, theme::md::comment());
     }
 
     #[test]

@@ -767,6 +767,21 @@ impl TemplateProfile {
     }
 }
 
+/// 界面明色主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeName {
+    #[default]
+    Claude,
+    Sky,
+    Lilac,
+}
+
+impl ThemeName {
+    /// 全部可选主题，顺序与设置页展示一致。
+    pub const ALL: [ThemeName; 3] = [Self::Claude, Self::Sky, Self::Lilac];
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -794,6 +809,8 @@ pub struct AppConfig {
     pub rag: RagConfig,
     /// 编译公文时使用的字体。默认沿用随应用分发的内置字体。
     pub fonts: FontConfig,
+    /// 界面明色主题。旧配置没有该字段时回退默认。
+    pub theme: ThemeName,
 }
 
 impl Default for AppConfig {
@@ -817,6 +834,7 @@ impl Default for AppConfig {
             last_ai_prompt: 0,
             rag: RagConfig::default(),
             fonts: FontConfig::default(),
+            theme: ThemeName::default(),
         }
     }
 }
@@ -1224,6 +1242,26 @@ mod tests {
         let back: FontConfig = serde_json::from_str(&json).expect("应能反序列化");
         assert_eq!(config, back);
         assert_eq!(back.active_ui_font().unwrap().family, "Microsoft YaHei");
+    }
+
+    /// 主题字段序列化后能原样读回；旧配置没有 `theme` 字段时回退默认 Claude。
+    #[test]
+    fn theme_name_round_trips_and_old_config_defaults_to_claude() {
+        let mut config = AppConfig::default();
+        config.theme = ThemeName::Sky;
+        let json = serde_json::to_string(&config).expect("应能序列化");
+        let back: AppConfig = serde_json::from_str(&json).expect("应能反序列化");
+        assert_eq!(back.theme, ThemeName::Sky, "round-trip 后主题不变");
+
+        // 去掉 theme 键模拟旧配置：载入后回退默认。
+        let mut value: serde_json::Value =
+            serde_json::from_str(&json).expect("应能解析为 JSON 值");
+        value
+            .as_object_mut()
+            .expect("配置应为对象")
+            .remove("theme");
+        let old: AppConfig = serde_json::from_value(value).expect("旧配置应能反序列化");
+        assert_eq!(old.theme, ThemeName::default(), "旧配置回退默认主题");
     }
 
     /// 补齐是幂等的：反复载入不会把预置项复制成好几份，也不会重排用户改过的内容。

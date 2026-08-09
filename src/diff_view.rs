@@ -89,8 +89,8 @@ pub fn manuscript_diff_ui(
         theme::chip(
             ui,
             &format!("共 {} 处变更", diff.total()),
-            theme::ACCENT,
-            theme::ACCENT_SOFT,
+            theme::accent(),
+            theme::accent_soft(),
         );
         ui.checkbox(&mut state.only_changes, "只看变化")
             .on_hover_text("关掉后未改动的段落也全量显示，便于通读整篇");
@@ -98,7 +98,7 @@ pub fn manuscript_diff_ui(
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("正文第 {} / {} 处", state.focus + 1, total_body))
-                    .color(theme::TEXT_MUTED),
+                    .color(theme::text_muted()),
             );
             if theme::icon_button(ui, theme::Icon::ArrowUp, "上一处修改").clicked() {
                 state.focus = if state.focus == 0 {
@@ -184,7 +184,7 @@ pub fn field_changes_table(
                     .on_hover_text(cell_hover(&change.before));
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(cell_text(&change.after)).color(theme::ACCENT),
+                        egui::RichText::new(cell_text(&change.after)).color(theme::accent()),
                     )
                     .truncate(),
                 )
@@ -240,7 +240,7 @@ fn body_ui(
                     let label = format!("…… {} 段未修改", context.len());
                     if ui
                         .add(
-                            egui::Label::new(egui::RichText::new(label).color(theme::TEXT_MUTED))
+                            egui::Label::new(egui::RichText::new(label).color(theme::text_muted()))
                                 .sense(egui::Sense::click()),
                         )
                         .on_hover_text("点击展开这段未修改的内容")
@@ -312,7 +312,7 @@ fn context_cell(
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!("{:>3}", line.new_line))
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .monospace(),
         );
         let mut job = egui::text::LayoutJob::default();
@@ -322,7 +322,7 @@ fn context_cell(
             0.0,
             egui::TextFormat {
                 font_id: egui::TextStyle::Body.resolve(ui.style()),
-                color: theme::TEXT_MUTED,
+                color: theme::text_muted(),
                 ..Default::default()
             },
         );
@@ -366,21 +366,21 @@ fn change_cell(
         ),
     };
     let fill = if absent {
-        theme::SURFACE_SUNK
+        theme::surface_sunk()
     } else {
         match (side, change.kind) {
-            (_, ChangeKind::Replace) => theme::WARN_SOFT,
-            (Side::Old, ChangeKind::Delete) => theme::DANGER_SOFT,
-            (Side::New, ChangeKind::Insert) => theme::SUCCESS_SOFT,
-            _ => theme::SURFACE_SUNK,
+            (_, ChangeKind::Replace) => theme::warn_soft(),
+            (Side::Old, ChangeKind::Delete) => theme::danger_soft(),
+            (Side::New, ChangeKind::Insert) => theme::success_soft(),
+            _ => theme::surface_sunk(),
         }
     };
     let frame = egui::Frame::new()
         .fill(fill)
         .stroke(if focused {
-            egui::Stroke::new(1.0, theme::ACCENT)
+            egui::Stroke::new(1.0, theme::accent())
         } else {
-            egui::Stroke::new(1.0, theme::BORDER)
+            egui::Stroke::new(1.0, theme::border())
         })
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(6, 4));
@@ -393,7 +393,7 @@ fn change_cell(
                     ChangeKind::Insert => "（本版没有这一段）",
                     _ => "（已删除）",
                 })
-                .color(theme::TEXT_MUTED)
+                .color(theme::text_muted())
                 .italics(),
             ));
             return;
@@ -401,7 +401,7 @@ fn change_cell(
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(format!("{line:>3}"))
-                    .color(theme::TEXT_MUTED)
+                    .color(theme::text_muted())
                     .monospace(),
             );
             // 必须先排好版再交给 Label：直接把 LayoutJob 交给 Label，egui 会用
@@ -441,20 +441,20 @@ fn spans_job(
     for span in spans {
         let mut format = egui::TextFormat {
             font_id: font.clone(),
-            color: theme::TEXT,
+            color: theme::text(),
             ..Default::default()
         };
         match span.kind {
             SpanKind::Same => {}
             SpanKind::Removed => {
-                format.color = theme::DANGER;
-                format.background = theme::DANGER_SOFT;
-                format.strikethrough = egui::Stroke::new(1.0, theme::DANGER);
+                format.color = theme::danger();
+                format.background = theme::danger_soft();
+                format.strikethrough = egui::Stroke::new(1.0, theme::danger());
             }
             SpanKind::Added => {
-                format.color = theme::SUCCESS;
-                format.background = theme::SUCCESS_SOFT;
-                format.underline = egui::Stroke::new(1.0, theme::SUCCESS);
+                format.color = theme::success();
+                format.background = theme::success_soft();
+                format.underline = egui::Stroke::new(1.0, theme::success());
             }
         }
         // 一侧只会出现自己那类标记；另一类若混进来（不该发生）按未变处理。
@@ -464,7 +464,7 @@ fn spans_job(
             format.background = egui::Color32::TRANSPARENT;
             format.strikethrough = egui::Stroke::NONE;
             format.underline = egui::Stroke::NONE;
-            format.color = theme::TEXT;
+            format.color = theme::text();
         }
         job.append(&span.text, 0.0, format);
     }

@@ -955,7 +955,7 @@ fn clickable(
         *scroll_to_anchor = false;
     }
     let fill = if anchored {
-        theme::ACCENT_SOFT
+        theme::accent_soft()
     } else if response.hovered() {
         HOVER_TINT
     } else {
@@ -977,7 +977,7 @@ fn sheet(ui: &mut egui::Ui, metrics: &Metrics, add_contents: impl FnOnce(&mut eg
             ui.set_max_width(metrics.page);
             egui::Frame::new()
                 .fill(Color32::WHITE)
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .stroke(Stroke::new(1.0, theme::border()))
                 .corner_radius(egui::CornerRadius::same(3))
                 .shadow(egui::epaint::Shadow {
                     offset: [0, 2],
