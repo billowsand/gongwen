@@ -775,11 +775,12 @@ pub enum ThemeName {
     Claude,
     Sky,
     Lilac,
+    Green,
 }
 
 impl ThemeName {
     /// 全部可选主题，顺序与设置页展示一致。
-    pub const ALL: [ThemeName; 3] = [Self::Claude, Self::Sky, Self::Lilac];
+    pub const ALL: [ThemeName; 4] = [Self::Claude, Self::Sky, Self::Lilac, Self::Green];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -238,6 +238,54 @@ impl Theme {
             },
         }
     }
+
+    /// 浅绿：草绿白底 + 森林绿强调。
+    const fn green() -> Self {
+        Self {
+            label: "浅绿",
+            canvas: Color32::from_rgb(0xEF, 0xF5, 0xEE),
+            surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+            surface_sunk: Color32::from_rgb(0xE3, 0xEE, 0xE1),
+            surface_hover: Color32::from_rgb(0xD7, 0xE7, 0xD4),
+            surface_active: Color32::from_rgb(0xC8, 0xDD, 0xC4),
+            border: Color32::from_rgb(0xD8, 0xE4, 0xD5),
+            border_strong: Color32::from_rgb(0xB8, 0xCD, 0xB4),
+            text: Color32::from_rgb(0x1C, 0x2A, 0x1E),
+            text_soft: Color32::from_rgb(0x3E, 0x4F, 0x41),
+            text_muted: Color32::from_rgb(0x7A, 0x8C, 0x7D),
+            accent: Color32::from_rgb(0x3E, 0x8E, 0x4E),
+            accent_hover: Color32::from_rgb(0x56, 0xA2, 0x62),
+            accent_active: Color32::from_rgb(0x2F, 0x70, 0x40),
+            accent_soft: Color32::from_rgb(0xDC, 0xED, 0xDB),
+            warn: Color32::from_rgb(0xA1, 0x62, 0x2E),
+            warn_soft: Color32::from_rgb(0xF6, 0xEB, 0xDD),
+            danger: Color32::from_rgb(0xC0, 0x49, 0x3E),
+            danger_soft: Color32::from_rgb(0xF9, 0xE4, 0xE1),
+            success: Color32::from_rgb(0x2E, 0x7D, 0x5B),
+            success_soft: Color32::from_rgb(0xDE, 0xEE, 0xE7),
+            info: Color32::from_rgb(0x3D, 0x6F, 0x6E),
+            md: MdPalette {
+                body: Color32::from_rgb(0x21, 0x30, 0x24),
+                marker: Color32::from_rgb(0x7F, 0xA8, 0x7F),
+                title: Color32::from_rgb(0x3E, 0x8E, 0x4E),
+                heading: Color32::from_rgb(0x15, 0x23, 0x18),
+                strong: Color32::from_rgb(0x2F, 0x7A, 0x3F),
+                strong_bg: Color32::from_rgb(0xDC, 0xED, 0xDB),
+                bullet: Color32::from_rgb(0x3E, 0x8E, 0x4E),
+                table_pipe: Color32::from_rgb(0xA9, 0xC4, 0xA7),
+                table_rule: Color32::from_rgb(0x95, 0xB3, 0x92),
+                table_cell: Color32::from_rgb(0x2E, 0x4A, 0x38),
+                comment: Color32::from_rgb(0x5F, 0x7A, 0x6B),
+                comment_bg: Color32::from_rgb(0xE7, 0xEF, 0xEB),
+                todo: Color32::from_rgb(0xC0, 0x49, 0x3E),
+                todo_bg: Color32::from_rgb(0xF9, 0xE4, 0xE1),
+                code: Color32::from_rgb(0x4E, 0x7A, 0x52),
+                quoted: Color32::from_rgb(0x2F, 0x6B, 0x4A),
+                anchor_bg: Color32::from_rgb(0xDC, 0xED, 0xDB),
+                search_bg: Color32::from_rgb(0xFF, 0xF1, 0xB8),
+            },
+        }
+    }
 }
 
 /// 按配置里的主题名取色板，未知名字回退默认主题。
@@ -246,6 +294,7 @@ pub fn by_name(name: ThemeName) -> Theme {
         ThemeName::Claude => Theme::claude(),
         ThemeName::Sky => Theme::sky(),
         ThemeName::Lilac => Theme::lilac(),
+        ThemeName::Green => Theme::green(),
     }
 }
 
