@@ -58,6 +58,12 @@ const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12
 const DOC_TAB_TITLE_CHARS: usize = 14;
 /// 标签里除标题以外的固定占位：内边距 + 状态标记 + 关闭按钮。
 const DOC_TAB_CHROME_WIDTH: f32 = 74.0;
+/// 标签条统一动效时长（秒）。悬停/按下短促，指示条滑动稍长，三者构成一套节奏。
+const TAB_HOVER_ANIM: f32 = 0.12;
+const TAB_PRESS_ANIM: f32 = 0.15;
+const TAB_SELECT_ANIM: f32 = 0.16;
+const TAB_CLOSE_ANIM: f32 = 0.15;
+const TAB_INDICATOR_ANIM: f32 = 0.16;
 pub(crate) const FORM_PANEL_MAX_WIDTH: f32 = 620.0;
 /// 表单内容的宽度区间。可调整面板必须拿到确定的宽度：控件一旦请求
 /// `f32::INFINITY`，面板会被内容顶到远超 `size_range` 的宽度。
@@ -2293,15 +2299,43 @@ impl GongwenApp {
 
         let mut select: Option<usize> = None;
         let mut close: Option<usize> = None;
+        let mut active_rect: Option<egui::Rect> = None;
         ui.spacing_mut().item_spacing.x = 4.0;
         for &tab in &shown {
             let width = (desired[tab] * scale).max(DOC_TAB_MIN_WIDTH);
-            let (clicked, closed) = self.tab_button(ui, tab, width);
+            let (clicked, closed, rect) = self.tab_button(ui, tab, width);
             if clicked {
                 select = Some(tab);
             }
             if closed {
                 close = Some(tab);
+            }
+            if tab == self.active_tab {
+                active_rect = Some(rect);
+            }
+        }
+        // 活动标签底部的主题橙下划线：左右两边各自插值，切换标签时平滑滑过去。
+        if let Some(rect) = active_rect {
+            let ctx = ui.ctx();
+            let left = ctx.animate_value_with_time(
+                egui::Id::new("tab_indicator_left"),
+                rect.left() + 1.0,
+                TAB_INDICATOR_ANIM,
+            );
+            let right = ctx.animate_value_with_time(
+                egui::Id::new("tab_indicator_right"),
+                rect.right() - 1.0,
+                TAB_INDICATOR_ANIM,
+            );
+            if right > left {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(left, rect.bottom() - 2.0),
+                        egui::pos2(right, rect.bottom()),
+                    ),
+                    egui::CornerRadius::same(1),
+                    theme::ACCENT,
+                );
             }
         }
         let hidden: Vec<usize> = (0..self.tabs.len())
@@ -2366,8 +2400,14 @@ impl GongwenApp {
         (text + DOC_TAB_CHROME_WIDTH).clamp(DOC_TAB_MIN_WIDTH, DOC_TAB_MAX_WIDTH)
     }
 
-    /// 画一格标签，返回（是否点了标签体, 是否点了关闭）。
-    fn tab_button(&mut self, ui: &mut egui::Ui, tab: usize, width: f32) -> (bool, bool) {
+    /// 画一格标签，返回（是否点了标签体, 是否点了关闭, 标签占位矩形）。
+    ///
+    /// 动效统一在这里：背景/边框/文字色由 `animate_bool_with_time` 插值
+    /// （悬停 120ms、按下 150ms、选中 160ms），关闭按钮悬停标签才渐显、
+    /// 悬停它本身时渐变到危险红。下划线指示条由调用方 `tab_strip` 负责，
+    /// 因为要跨标签共享动画状态。交互状态来自先占位拿到的 response，
+    /// 颜色才能在画背景之前算好。
+    fn tab_button(&mut self, ui: &mut egui::Ui, tab: usize, width: f32) -> (bool, bool, egui::Rect) {
         let selected = tab == self.active_tab;
         let (mark, title) = self.tab_label(tab);
         let (icon, hover, busy) = match self.tabs[tab] {
@@ -2387,86 +2427,122 @@ impl GongwenApp {
             TabRef::Page(page) => (Some(page.icon()), page.label().to_string(), false),
         };
 
+        // 先占位拿到交互状态，才能在同一帧内驱动颜色动画。
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(width, TOOLBAR_CONTROL_HEIGHT),
+            egui::Sense::click(),
+        );
+
+        // Context 是 Arc，克隆断开与 ui 的借用，new_child 才能拿到可变借用。
+        let ctx = ui.ctx().clone();
+        let hover_t = ctx.animate_bool_with_time(
+            egui::Id::new("tab_hover").with(tab),
+            response.hovered(),
+            TAB_HOVER_ANIM,
+        );
+        let press_t = ctx.animate_bool_with_time(
+            egui::Id::new("tab_press").with(tab),
+            response.is_pointer_button_down_on(),
+            TAB_PRESS_ANIM,
+        );
+        let sel_t = ctx.animate_bool_with_time(
+            egui::Id::new("tab_select").with(tab),
+            selected,
+            TAB_SELECT_ANIM,
+        );
+
+        // 背景：选中淡入白底；未选中从沉色经悬停色到按下的更深色。
+        let mut bg = theme::SURFACE_SUNK.lerp_to_gamma(theme::SURFACE, sel_t);
+        bg = bg.lerp_to_gamma(theme::SURFACE_HOVER, hover_t * (1.0 - sel_t));
+        bg = bg.lerp_to_gamma(theme::SURFACE_ACTIVE, press_t * (1.0 - sel_t));
+        // 边框：悬停加深，选中渐变到主题橙。
+        let border = theme::BORDER
+            .lerp_to_gamma(theme::BORDER_STRONG, hover_t * (1.0 - sel_t))
+            .lerp_to_gamma(theme::ACCENT, sel_t);
+        let text_color = theme::TEXT_SOFT.lerp_to_gamma(theme::TEXT, sel_t.max(hover_t));
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(6),
+            bg,
+            egui::Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
+        );
+
         let mut clicked = false;
         let mut closed = false;
-        let frame = egui::Frame::new()
-            .fill(if selected {
-                theme::SURFACE
-            } else {
-                theme::SURFACE_SUNK
-            })
-            .stroke(egui::Stroke::new(
-                1.0,
-                if selected {
-                    theme::ACCENT
-                } else {
-                    theme::BORDER
-                },
-            ))
-            .corner_radius(egui::CornerRadius::same(6))
-            .inner_margin(egui::Margin::symmetric(8, 4));
-        frame.show(ui, |ui| {
-            ui.set_width(width - 16.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                if busy {
-                    ui.spinner();
-                } else if !mark.is_empty() {
-                    ui.colored_label(theme::ACCENT, mark);
-                } else if let Some(icon) = icon {
-                    // Lucide 图标用 currentColor 描边，裸 Image 不跟随文字色，
-                    // 落在选中标签的白底上会看不见，这里显式染色。
-                    ui.add(
-                        icon.image()
-                            .tint(if selected {
-                                theme::TEXT
-                            } else {
-                                theme::TEXT_MUTED
-                            })
-                            .fit_to_exact_size(egui::vec2(14.0, 14.0)),
-                    );
-                }
-                // 关闭按钮先占右端，标题再吃掉剩下的宽度，标题长短不会挤走它。
-                let close_width = 18.0;
-                let label_width = (ui.available_width() - close_width).max(24.0);
-                let response = ui.add_sized(
-                    [label_width, TOOLBAR_CONTROL_HEIGHT - 8.0],
-                    egui::Label::new(
-                        egui::RichText::new(truncate_middle(&title, DOC_TAB_TITLE_CHARS)).color(
-                            if selected {
-                                theme::TEXT
-                            } else {
-                                theme::TEXT_SOFT
-                            },
-                        ),
-                    )
-                    .truncate()
-                    .sense(egui::Sense::click()),
-                );
-                if response.clicked() {
-                    clicked = true;
-                }
-                // 中键关闭：浏览器和编辑器都是这个习惯。
-                if response.middle_clicked() {
-                    closed = true;
-                }
-                response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(hover);
-                if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new("×").color(theme::TEXT_MUTED))
-                            .frame(false)
-                            .min_size(egui::vec2(close_width, 16.0)),
-                    )
-                    .on_hover_text("关闭这个标签")
-                    .clicked()
-                {
-                    closed = true;
-                }
-            });
-        });
-        (clicked, closed)
+
+        // 内容区：图标/脏标记在左，关闭按钮钉死在右端，标题吃掉中间。
+        let inner = rect.shrink2(egui::vec2(8.0, 4.0));
+        let mut content = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        content.spacing_mut().item_spacing.x = 4.0;
+        if busy {
+            content.spinner();
+        } else if !mark.is_empty() {
+            content.colored_label(theme::ACCENT, mark);
+        } else if let Some(icon) = icon {
+            // Lucide 图标用 currentColor 描边，这里跟随文字色渐变。
+            content.add(
+                icon.image()
+                    .tint(text_color)
+                    .fit_to_exact_size(egui::vec2(14.0, 14.0)),
+            );
+        }
+        let close_width = 18.0;
+        let label_width = (content.available_width() - close_width).max(24.0);
+        let label_response = content.add_sized(
+            [label_width, TOOLBAR_CONTROL_HEIGHT - 8.0],
+            egui::Label::new(
+                egui::RichText::new(truncate_middle(&title, DOC_TAB_TITLE_CHARS))
+                    .color(text_color),
+            )
+            .truncate()
+            .sense(egui::Sense::click()),
+        );
+        // 点击标签空白处也选中；中键关闭是浏览器/编辑器的习惯，任意位置都认。
+        if label_response.clicked() || response.clicked() {
+            clicked = true;
+        }
+        if label_response.middle_clicked() || response.middle_clicked() {
+            closed = true;
+        }
+        label_response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(hover);
+        // 关闭按钮：悬停标签才渐显，悬停它本身时渐变到危险红。它钉死在
+        // 内容右端、位置可精确预估，hover 检测才能在画按钮之前拿到。
+        let close_vis_t = ctx.animate_bool_with_time(
+            egui::Id::new("tab_close_vis").with(tab),
+            response.hovered(),
+            TAB_CLOSE_ANIM,
+        );
+        let close_rect = egui::Rect::from_min_size(
+            egui::pos2(inner.right() - close_width, inner.center().y - 8.0),
+            egui::vec2(close_width, 16.0),
+        );
+        let close_hover_t = ctx.animate_bool_with_time(
+            egui::Id::new("tab_close_hover").with(tab),
+            content.rect_contains_pointer(close_rect),
+            TAB_HOVER_ANIM,
+        );
+        let mut close_color = theme::TEXT_MUTED.lerp_to_gamma(theme::DANGER, close_hover_t);
+        close_color = close_color.gamma_multiply(close_vis_t);
+        if content
+            .add(
+                egui::Button::new(egui::RichText::new("×").color(close_color))
+                    .frame(false)
+                    .min_size(egui::vec2(close_width, 16.0)),
+            )
+            .on_hover_text("关闭这个标签")
+            .clicked()
+        {
+            closed = true;
+        }
+
+        (clicked, closed, rect)
     }
 
     /// 底部状态栏。整条只有一行：左边状态文案，中间模型名，右边仿 Zed 的抽屉入口。
