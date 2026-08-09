@@ -6857,10 +6857,10 @@ impl GongwenApp {
     /// 界面主题：明色配色预设，点选立即生效并保存。公文纸面（预览、导出）按
     /// 红头文件规范固定为白纸黑字，不随主题变化。
     fn theme_settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("界面主题");
-        ui.label(
-            "界面的明色配色预设，点选后立即生效并保存。公文纸面（预览与导出）不受影响，\
-             仍按规范为白纸黑字红头。",
+        section_heading_with_info(
+            ui,
+            "界面主题",
+            "界面的明色配色预设，点选后立即生效并保存。公文纸面（预览与导出）不受影响，仍按规范为白纸黑字红头。",
         );
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -6937,10 +6937,10 @@ impl GongwenApp {
         let before = self.config.fonts.clone();
 
         // 界面字体不受“使用本机字体编译”开关控制，选了就生效，随时可以换回内置。
-        ui.heading("界面字体");
-        ui.label(
-            "应用窗口、菜单与列表使用的字体。默认随应用内置霞鹜文楷（LXGW Bright）；\
-             所选字体文件缺失或读取失败时自动退回内置。",
+        section_heading_with_info(
+            ui,
+            "界面字体",
+            "应用窗口、菜单与列表使用的字体。默认随应用内置霞鹜文楷（LXGW Bright）；所选字体文件缺失或读取失败时自动退回内置。",
         );
         ui.add_space(4.0);
         let mut message = {
@@ -6975,10 +6975,10 @@ impl GongwenApp {
         });
         ui.add_space(12.0);
 
-        ui.heading("编译字体");
-        ui.label(
-            "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体。\
-             改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。",
+        section_heading_with_info(
+            ui,
+            "编译字体",
+            "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体。改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
         );
         ui.add_space(4.0);
         ui.checkbox(&mut self.config.fonts.use_system_fonts, "使用本机字体编译")
@@ -7001,13 +7001,6 @@ impl GongwenApp {
                     message = Some(text);
                 }
             }
-            ui.horizontal_wrapped(|ui| {
-                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
-                ui.weak(
-                    "只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，\
-                     按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
-                );
-            });
         }
 
         if let Some(text) = message {
@@ -7024,8 +7017,11 @@ impl GongwenApp {
             .id_salt("settings_scroll")
             .show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.heading("本地模型服务设置");
-                ui.label("应用调用本机 OpenAI 兼容接口，如 LM Studio（http://127.0.0.1:1234/v1）或 Ollama（http://127.0.0.1:11434/v1）。正文不会主动发送到互联网。");
+                section_heading_with_info(
+                    ui,
+                    "本地模型服务设置",
+                    "应用调用本机 OpenAI 兼容接口，如 LM Studio（http://127.0.0.1:1234/v1）或 Ollama（http://127.0.0.1:11434/v1）。正文不会主动发送到互联网。",
+                );
                 ui.add_space(8.0);
                 field(
                     ui,
@@ -7098,8 +7094,11 @@ impl GongwenApp {
 
                 ui.add_space(12.0);
                 ui.separator();
-                ui.heading("知识库（检索增强起草）");
-                ui.label("用本地模型服务（LM Studio / Ollama 等 OpenAI 兼容服务）的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。两个模型与上面的对话模型相互独立。");
+                section_heading_with_info(
+                    ui,
+                    "知识库（检索增强起草）",
+                    "用本地模型服务（LM Studio / Ollama 等 OpenAI 兼容服务）的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。两个模型与上面的对话模型相互独立。",
+                );
                 ui.add_space(4.0);
                 ui.checkbox(&mut self.config.rag.enabled, "启用知识库检索增强")
                     .on_hover_text("关闭后，起草页的“参考知识库”开关不生效");
@@ -7151,9 +7150,20 @@ impl GongwenApp {
                     "本地服务通常可留空",
                 );
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("重排（可选，用于精排检索结果）").strong());
+                ui.label(egui::RichText::new("重排（可选，用于精排检索结果）").strong())
+                    .on_hover_text(
+                        "rerank 响应字段名等进阶项可在 config.json 的 rag.rerank 节调整，适配不同服务。",
+                    );
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("重排方式"));
+                    row_label_with_info(
+                        ui,
+                        "重排方式",
+                        match self.config.rag.rerank.mode {
+                            RerankMode::None => "直接按混合召回的融合分取前 N 条。够用，只是排序不如重排精准。",
+                            RerankMode::Api => "需要能提供 rerank 接口的服务（Jina / Cohere / TEI / Infinity 等）。注意：LM Studio 与 Ollama 目前均不提供该专用接口。",
+                            RerankMode::Llm => "复用上面的对话模型给候选片段打分，不必另起服务。代价是每次检索多一次模型调用（低温短输出，通常几秒）。",
+                        },
+                    );
                     egui::ComboBox::from_id_salt("rerank_mode_selector")
                         .selected_text(self.config.rag.rerank.mode.label())
                         .width(360.0)
@@ -7166,14 +7176,6 @@ impl GongwenApp {
                                 );
                             }
                         });
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
-                    ui.weak(match self.config.rag.rerank.mode {
-                        RerankMode::None => "直接按混合召回的融合分取前 N 条。够用，只是排序不如重排精准。",
-                        RerankMode::Api => "需要能提供 rerank 接口的服务（Jina / Cohere / TEI / Infinity 等）。注意：LM Studio 与 Ollama 目前均不提供该专用接口。",
-                        RerankMode::Llm => "复用上面的对话模型给候选片段打分，不必另起服务。代价是每次检索多一次模型调用（低温短输出，通常几秒）。",
-                    });
                 });
                 if self.config.rag.rerank.mode == RerankMode::Api {
                     field(
@@ -7257,13 +7259,13 @@ impl GongwenApp {
                         });
                     }
                 }
-                if self.config.rag.rerank.mode == RerankMode::Api {
-                    ui.weak("rerank 响应字段名等进阶项可在 config.json 的 rag.rerank 节调整，适配不同服务。");
-                }
-
                 ui.add_space(12.0);
                 ui.separator();
-                ui.heading("输出与录入");
+                section_heading_with_info(
+                    ui,
+                    "输出与录入",
+                    "导出 TeX 时会自动检测 XeLaTeX 或 Tectonic；检测到后编译 PDF 并清理中间文件。",
+                );
                 ui.horizontal(|ui| {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("输出目录"));
                     ui.text_edit_singleline(&mut self.config.output_dir);
@@ -7286,9 +7288,6 @@ impl GongwenApp {
                     "Markdown 源码与实时排版模式显示行号",
                 )
                 .on_hover_text("行号只用于定位，不会写入稿件或导出文件");
-                ui.weak(
-                    "导出 TeX 时会自动检测 XeLaTeX 或 Tectonic；检测到后编译 PDF 并清理中间文件。",
-                );
 
                 ui.add_space(12.0);
                 ui.separator();
@@ -7300,8 +7299,11 @@ impl GongwenApp {
 
                 ui.add_space(12.0);
                 ui.separator();
-                ui.heading("导出格式");
-                ui.label("这里的选择对所有稿件生效；起草页的“导出”按钮按这里勾选的格式产出。");
+                section_heading_with_info(
+                    ui,
+                    "导出格式",
+                    "这里的选择对所有稿件生效；起草页的“导出”按钮按这里勾选的格式产出。",
+                );
                 // Word 导出尚未达到当前 LaTeX 链路的成熟度，入口保留但暂不允许启用。
                 self.config.export.docx = false;
                 ui.horizontal(|ui| {
@@ -7321,18 +7323,22 @@ impl GongwenApp {
 
                 ui.add_space(12.0);
                 ui.separator();
-                ui.heading("保存与现场");
+                section_heading_with_info(
+                    ui,
+                    "保存与现场",
+                    "新建的稿件在第一次真正改动时自动入库；下次启动会恢复本次打开的标签。",
+                );
                 ui.checkbox(&mut self.config.auto_save, "自动保存到稿件库")
                     .on_hover_text(
                         "每 2 分钟以及切换标签、关闭窗口前，把改动静默写回稿件库。
 自动保存不会提交版本——版本链什么时候留痕，始终由你决定。",
                     );
-                ui.weak("新建的稿件在第一次真正改动时自动入库；下次启动会恢复本次打开的标签。");
 
                 ui.add_space(12.0);
                 ui.separator();
-                ui.heading("密级与保密期限规则");
-                ui.label(
+                section_heading_with_info(
+                    ui,
+                    "密级与保密期限规则",
                     "默认取自《保守国家秘密法》第十五条：绝密级不超过三十年、机密级不超过二十年、秘密级不超过十年。本单位口径不同的，直接改下面三个上限。",
                 );
                 egui::Grid::new("security_rules_grid")
@@ -7374,8 +7380,9 @@ impl GongwenApp {
                     self.persist();
                 }
                 ui.separator();
-                ui.heading("建议流程");
-                ui.label(
+                section_heading_with_info(
+                    ui,
+                    "建议流程",
                     "1. 在本地模型服务中加载中文指令模型并启动服务（LM Studio 启动 Local Server；Ollama 执行 ollama serve）。\n2. 刷新模型并选择模型。\n3. 在“标准词库”维护全称、常见错写和联系人电话。\n4. 为每类模板保存默认单位、联系人和呈报领导。\n5. 生成草稿 → 在右侧改稿 → 处理审校提示 → 导出签发稿。",
                 );
                 ui.add_space(8.0);
