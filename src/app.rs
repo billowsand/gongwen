@@ -2445,7 +2445,12 @@ impl GongwenApp {
     /// 关闭按钮常态低对比常显，悬停它本身时渐变到危险红。下划线指示条由
     /// 调用方 `tab_strip` 负责（要跨标签共享动画状态）。交互状态来自先
     /// 占位拿到的 response，颜色才能在画背景之前算好。
-    fn tab_button(&mut self, ui: &mut egui::Ui, tab: usize, width: f32) -> (bool, bool, egui::Rect) {
+    fn tab_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        tab: usize,
+        width: f32,
+    ) -> (bool, bool, egui::Rect) {
         let selected = tab == self.active_tab;
         let (mark, title) = self.tab_label(tab);
         let (icon, hover, busy) = match self.tabs[tab] {
@@ -2540,8 +2545,7 @@ impl GongwenApp {
         let label_response = content.add_sized(
             [label_width, TOOLBAR_CONTROL_HEIGHT - 8.0],
             egui::Label::new(
-                egui::RichText::new(truncate_middle(&title, DOC_TAB_TITLE_CHARS))
-                    .color(text_color),
+                egui::RichText::new(truncate_middle(&title, DOC_TAB_TITLE_CHARS)).color(text_color),
             )
             .truncate()
             .sense(egui::Sense::click()),
@@ -7197,9 +7201,11 @@ impl eframe::App for GongwenApp {
             ctx.animate_bool_with_time(egui::Id::new("content_fade"), false, 0.0);
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            let fade = ui
-                .ctx()
-                .animate_bool_with_time(egui::Id::new("content_fade"), true, CONTENT_FADE_ANIM);
+            let fade = ui.ctx().animate_bool_with_time(
+                egui::Id::new("content_fade"),
+                true,
+                CONTENT_FADE_ANIM,
+            );
             ui.set_opacity(fade);
             match active {
                 TabRef::Doc(_) => self.draft_page().create_ui(ui),

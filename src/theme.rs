@@ -562,7 +562,12 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let bright_font = "gw-bright".to_owned();
     let bright_code_font = "gw-bright-code".to_owned();
     let ui_font_loaded = config.active_ui_font().is_some_and(|choice| {
-        load_font(&mut fonts, &bright_font, &[PathBuf::from(choice.path.trim())]).is_some()
+        load_font(
+            &mut fonts,
+            &bright_font,
+            &[PathBuf::from(choice.path.trim())],
+        )
+        .is_some()
     });
     if !ui_font_loaded {
         fonts.font_data.insert(
