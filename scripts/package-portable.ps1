@@ -13,10 +13,10 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $runtimeRoot = [System.IO.Path]::Combine($projectRoot, "runtime")
-$isWindows = $env:OS -eq "Windows_NT"
+$isWindowsHost = $env:OS -eq "Windows_NT"
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
-    $Suffix = if ($isWindows) { "win-x64" } else { "linux-arm64" }
+    $Suffix = if ($isWindowsHost) { "win-x64" } else { "linux-arm64" }
 }
 if ([string]::IsNullOrWhiteSpace($BinaryName)) {
     $BinaryName = if ($Suffix -eq "win-x64") { "gongwen-assistant.exe" } else { "gongwen-assistant" }
@@ -196,7 +196,7 @@ Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "LICENSE")) -Des
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "config.example.json")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "font", "licenses")) -Destination ([System.IO.Path]::Combine($OutputDir, "licenses", "fonts")) -Recurse
 
-if (-not $isWindows) {
+if (-not $isWindowsHost) {
     foreach ($executable in @($BinaryName, [System.IO.Path]::Combine("runtime", "tectonic", "tectonic"))) {
         $executablePath = Join-Path $OutputDir $executable
         if (Test-Path -LiteralPath $executablePath) {
