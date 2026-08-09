@@ -24,13 +24,9 @@ jobs:
             name: Windows x64
             suffix: win-x64
             binary: gongwen-assistant.exe
-          - os: ubuntu-latest
-            name: Linux x64
-            suffix: linux-x64
-            binary: gongwen-assistant
-          - os: macos-latest
-            name: macOS ARM64
-            suffix: macos-arm64
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64
+            suffix: linux-arm64
             binary: gongwen-assistant
     steps:
       - uses: actions/checkout@v4
