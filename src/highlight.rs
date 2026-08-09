@@ -929,7 +929,7 @@ mod tests {
     fn hybrid_centers_every_visual_row_of_a_wrapped_document_title() {
         let text = "# 关于报送2026年度政务服务事项标准化建设情况的函\n正文";
         let ctx = egui::Context::default();
-        theme::configure_fonts(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let mut centered = None;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);

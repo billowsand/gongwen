@@ -134,6 +134,20 @@ mod tests {
         assert!(runtime.fonts.ends_with("fonts"));
     }
 
+    /// 每个位置的内置字体都必须真的随运行时分发，否则未配置本机字体的位置会
+    /// 指向一个不存在的文件，编译才报错。
+    #[test]
+    fn every_font_role_maps_to_a_bundled_file() {
+        for role in crate::models::FontRole::ALL {
+            assert!(
+                FONT_FILES.contains(&role.bundled_file()),
+                "{} 的内置字体 {} 不在运行时字体清单里",
+                role.label(),
+                role.bundled_file()
+            );
+        }
+    }
+
     #[test]
     fn font_dir_validation_checks_expected_filenames() {
         let dir = tempfile::tempdir().expect("temporary directory must be creatable");

@@ -5,8 +5,8 @@ use super::{
     title::{self, TitlePlan},
 };
 use crate::models::{
-    DraftInput, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind, split_period_digits,
-    split_units,
+    DraftInput, FontConfig, FontRole, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind,
+    split_period_digits, split_units,
 };
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
@@ -20,6 +20,7 @@ pub fn write_tex(
     input: &DraftInput,
     markdown: &str,
     display: &UnitDisplay,
+    fonts: &FontConfig,
 ) -> Result<()> {
     let content = match input.kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
@@ -28,6 +29,11 @@ pub fn write_tex(
         TemplateKind::PlainDocument => plain_document_tex(input, markdown),
         TemplateKind::WhitePaper => white_paper_tex(input, markdown, display),
         TemplateKind::MeetingAgenda => meeting_agenda_tex(input, markdown),
+    };
+    // 选了本机字体才注入钩子；没选时产出的 TeX 与从前逐字节一致。
+    let content = match font_setup_hook(fonts) {
+        Some(hook) => format!("{hook}{content}"),
+        None => content,
     };
     fs::write(path, content).with_context(|| format!("无法写入 TeX 文件：{}", path.display()))?;
     // 五种模板均使用 gonghan-gwa.cls，随 tex 一并输出类文件。
@@ -44,6 +50,104 @@ pub fn write_tex(
             .with_context(|| format!("无法写入 {}", class_path.display()))?;
     }
     Ok(())
+}
+
+/// 字体名里可能出现的、会被 TeX 当成控制字符的符号。字体名本身不该有这些，
+/// 出现了也只可能是配置被手工改坏，直接剔除而不是让编译在别处报错。
+fn sanitize_font_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '\\' | '{' | '}' | '%' | '#' | '$' | '&' | '~' | '^' | '_'
+            )
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// 生成注入到 `\documentclass` 之前的字体设置钩子。类文件见到
+/// `\GwaFontSetupHook` 有定义就改用它，顶替内置字体那段默认设置。
+///
+/// 钩子内部保留按名字、按文件两条分支：内置 Tectonic 编译时用拷进临时目录的
+/// 字体文件，导出的 `.tex` 拿到别的机器上编译时则按字体名加载。没有配置的位置
+/// 沿用内置字体，行为与不注入钩子时一致。
+fn font_setup_hook(fonts: &FontConfig) -> Option<String> {
+    if !fonts.any_active() {
+        return None;
+    }
+    let file = |role: FontRole| match fonts.active(role) {
+        Some(choice) => choice.compiled_file_name(role),
+        None => role.bundled_file().to_string(),
+    };
+    let name = |role: FontRole| match fonts.active(role) {
+        Some(choice) => sanitize_font_name(&choice.family),
+        None => role.bundled_family().to_string(),
+    };
+
+    let (title_name, title_file) = (name(FontRole::Title), file(FontRole::Title));
+    let (heiti_name, heiti_file) = (name(FontRole::Heading1), file(FontRole::Heading1));
+    let (kai_name, kai_file) = (name(FontRole::Heading2), file(FontRole::Heading2));
+    let (body_name, body_file) = (name(FontRole::Body), file(FontRole::Body));
+    let (song_name, song_file) = (name(FontRole::PageNumber), file(FontRole::PageNumber));
+
+    // 方正小标宋没有统一的字体名，未指定标题字体时沿用类文件的两段探测。
+    let title_by_name = if title_name.is_empty() {
+        r"        \IfFontExistsTF{FZXiaoBiaoSong-B05}{%
+            \setCJKfamilyfont{xbs}{FZXiaoBiaoSong-B05}%
+            \newfontfamily\enbt{FZXiaoBiaoSong-B05}%
+        }{%
+            \IfFontExistsTF{FZXiaoBiaoSong-B05S}{%
+                \setCJKfamilyfont{xbs}{FZXiaoBiaoSong-B05S}%
+                \newfontfamily\enbt{FZXiaoBiaoSong-B05S}%
+            }{%
+                \ClassError{gonghan-gwa}{未找到方正小标宋字体}{请安装 FZXiaoBiaoSong-B05 或 FZXiaoBiaoSong-B05S}%
+            }%
+        }%"
+            .to_string()
+    } else {
+        format!(
+            r"        \setCJKfamilyfont{{xbs}}{{{title_name}}}%
+        \newfontfamily\enbt{{{title_name}}}%"
+        )
+    };
+
+    Some(format!(
+        r"\makeatletter
+\def\GwaFontSetupHook{{%
+    \ifx\GwaFontPath\@empty
+        \setCJKmainfont[ItalicFont={{{kai_name}}}, AutoFakeBold=true]{{{body_name}}}%
+{title_by_name}
+        \setCJKfamilyfont{{kaiti}}[AutoFakeBold=true]{{{kai_name}}}%
+        \setCJKfamilyfont{{songti}}{{{song_name}}}%
+        \newfontfamily\ennumber{{{song_name}}}%
+        \newfontfamily\ensong{{{song_name}}}%
+        \newfontfamily\enheiti{{{heiti_name}}}%
+        \setCJKfamilyfont{{heiti}}{{{heiti_name}}}%
+        \setCJKfamilyfont{{fangsong}}[AutoFakeBold=true]{{{body_name}}}%
+        \setmainfont[ItalicFont={{{kai_name}}}]{{{body_name}}}%
+        \setCJKmonofont{{{heiti_name}}}%
+        \setmonofont{{{heiti_name}}}%
+    \else
+        \setCJKmainfont[Path={{\GwaFontPath}}, ItalicFont={{{kai_file}}}, AutoFakeBold=true]{{{body_file}}}%
+        \setCJKfamilyfont{{xbs}}[Path={{\GwaFontPath}}]{{{title_file}}}%
+        \newfontfamily\enbt[Path={{\GwaFontPath}}]{{{title_file}}}%
+        \setCJKfamilyfont{{kaiti}}[Path={{\GwaFontPath}}, AutoFakeBold=true]{{{kai_file}}}%
+        \setCJKfamilyfont{{songti}}[Path={{\GwaFontPath}}]{{{song_file}}}%
+        \newfontfamily\ennumber[Path={{\GwaFontPath}}]{{{song_file}}}%
+        \newfontfamily\ensong[Path={{\GwaFontPath}}]{{{song_file}}}%
+        \newfontfamily\enheiti[Path={{\GwaFontPath}}]{{{heiti_file}}}%
+        \setCJKfamilyfont{{heiti}}[Path={{\GwaFontPath}}]{{{heiti_file}}}%
+        \setCJKfamilyfont{{fangsong}}[Path={{\GwaFontPath}}, AutoFakeBold=true]{{{body_file}}}%
+        \setmainfont[Path={{\GwaFontPath}}, ItalicFont={{{kai_file}}}]{{{body_file}}}%
+        \setCJKmonofont[Path={{\GwaFontPath}}]{{{heiti_file}}}%
+        \setmonofont[Path={{\GwaFontPath}}]{{{heiti_file}}}%
+    \fi
+}}
+\makeatother
+"
+    ))
 }
 
 fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
@@ -1074,7 +1178,14 @@ mod tests {
         input.profile.reporting_leaders = "张三".into();
         input.profile.issuing_unit = "某单位".into();
         input.date = "2026年8月5日".into();
-        write_tex(&path, &input, "# 标题\n\n正文。", &UnitDisplay::new(&[])).unwrap();
+        write_tex(
+            &path,
+            &input,
+            "# 标题\n\n正文。",
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
         let tex = std::fs::read_to_string(&path).unwrap();
         assert!(tex.contains("\\documentclass[noforcenewpage,whitepaper]{gonghan-gwa}"));
         let class_path = temp.path().join("gonghan-gwa.cls");
@@ -1098,6 +1209,128 @@ mod tests {
         assert!(GONGHAN_CLASS.contains("\\RequirePackage[fontset=none]{ctex}"));
         assert!(GONGHAN_CLASS.contains("AutoFakeBold=true"));
         assert!(!GONGHAN_CLASS.contains("BoldFont={SimHei}"));
+    }
+
+    /// 类文件必须留着本机字体的逃生口，否则注入的钩子无人调用。
+    #[test]
+    fn class_defers_to_injected_font_hook() {
+        assert!(GONGHAN_CLASS.contains("\\providecommand{\\GwaFontSetupHook}{}"));
+        assert!(GONGHAN_CLASS.contains("\\ifx\\GwaFontSetupHook\\@empty"));
+        assert!(GONGHAN_CLASS.contains("\\GwaFontSetupHook\n\\fi"));
+    }
+
+    fn system_font(family: &str, path: &str) -> crate::models::FontChoice {
+        crate::models::FontChoice {
+            family: family.into(),
+            display: family.into(),
+            path: path.into(),
+        }
+    }
+
+    /// 没选本机字体时不注入任何东西：产出的 TeX 与从前逐字节一致。
+    #[test]
+    fn font_hook_is_absent_without_system_fonts() {
+        assert!(font_setup_hook(&FontConfig::default()).is_none());
+        // 填了但总开关关着，同样不生效。
+        let fonts = FontConfig {
+            use_system_fonts: false,
+            body: system_font("FangSong", "C:/Windows/Fonts/simfang.ttf"),
+            ..FontConfig::default()
+        };
+        assert!(font_setup_hook(&fonts).is_none());
+    }
+
+    /// 钩子的两条分支：按文件加载用拷进临时目录的固定文件名，按名字加载用家族名。
+    /// 没配的位置继续用内置字体，两边都要保持原样。
+    #[test]
+    fn font_hook_covers_both_file_and_name_branches() {
+        let fonts = FontConfig {
+            use_system_fonts: true,
+            body: system_font(
+                "Source Han Serif SC",
+                "C:/Windows/Fonts/SourceHanSerifSC.otf",
+            ),
+            page_number: system_font("NSimSun", "C:/Windows/Fonts/nsimsun.ttf"),
+            ..FontConfig::default()
+        };
+        let hook = font_setup_hook(&fonts).expect("配了本机字体就该注入钩子");
+        // `\@empty` 要在 @ 是字母的环境里读进来。
+        assert!(hook.starts_with("\\makeatletter\n"));
+        assert!(hook.ends_with("\\makeatother\n"));
+        assert!(hook.contains("\\def\\GwaFontSetupHook{%"));
+
+        // 按文件：正文与页码用重命名后的文件，其余仍是内置字体文件。
+        assert!(hook.contains(
+            "\\setCJKmainfont[Path={\\GwaFontPath}, ItalicFont={KaiTi.ttf}, AutoFakeBold=true]{gwa-body.otf}"
+        ));
+        assert!(hook.contains("\\newfontfamily\\ensong[Path={\\GwaFontPath}]{gwa-pagenumber.ttf}"));
+        assert!(hook.contains("\\setCJKfamilyfont{xbs}[Path={\\GwaFontPath}]{XiaoBiaoSong.ttf}"));
+        assert!(hook.contains("\\setCJKfamilyfont{heiti}[Path={\\GwaFontPath}]{SimHei.ttf}"));
+
+        // 按名字：用家族名，未配置的位置沿用类文件原来的字体名。
+        assert!(hook.contains(
+            "\\setCJKmainfont[ItalicFont={KaiTi_GB2312}, AutoFakeBold=true]{Source Han Serif SC}"
+        ));
+        assert!(hook.contains("\\newfontfamily\\ensong{NSimSun}"));
+        assert!(hook.contains("\\setCJKfamilyfont{heiti}{SimHei}"));
+        // 未指定标题字体时保留方正小标宋的两段探测。
+        assert!(hook.contains("\\IfFontExistsTF{FZXiaoBiaoSong-B05}"));
+        assert!(hook.contains("\\IfFontExistsTF{FZXiaoBiaoSong-B05S}"));
+    }
+
+    /// 指定标题字体后，方正小标宋的探测让位给所选字体。
+    #[test]
+    fn font_hook_replaces_xiaobiaosong_probe_when_title_is_chosen() {
+        let fonts = FontConfig {
+            use_system_fonts: true,
+            title: system_font("STZhongsong", "C:/Windows/Fonts/STZHONGS.TTF"),
+            ..FontConfig::default()
+        };
+        let hook = font_setup_hook(&fonts).unwrap();
+        assert!(!hook.contains("IfFontExistsTF"));
+        assert!(hook.contains("\\setCJKfamilyfont{xbs}{STZhongsong}"));
+        assert!(hook.contains("\\newfontfamily\\enbt{STZhongsong}"));
+        // 扩展名统一转小写，与拷贝时的目标文件名一致。
+        assert!(hook.contains("\\setCJKfamilyfont{xbs}[Path={\\GwaFontPath}]{gwa-title.ttf}"));
+    }
+
+    /// 字体名里混进 TeX 控制字符时要剔除，不能让它破坏后面的排版。
+    #[test]
+    fn font_hook_strips_tex_control_characters_from_names() {
+        let fonts = FontConfig {
+            use_system_fonts: true,
+            body: system_font("Bad\\Name{}%", "C:/Windows/Fonts/bad.ttf"),
+            ..FontConfig::default()
+        };
+        let hook = font_setup_hook(&fonts).unwrap();
+        assert!(hook.contains("AutoFakeBold=true]{BadName}"));
+    }
+
+    /// 注入的钩子必须排在 `\documentclass` 之前：类文件加载时就要用上它。
+    #[test]
+    fn write_tex_puts_font_hook_before_documentclass() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("test.tex");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::WhitePaper;
+        input.profile.issuing_unit = "某单位".into();
+        let fonts = FontConfig {
+            use_system_fonts: true,
+            body: system_font("FangSong", "C:/Windows/Fonts/simfang.ttf"),
+            ..FontConfig::default()
+        };
+        write_tex(
+            &path,
+            &input,
+            "# 标题\n\n正文。",
+            &UnitDisplay::new(&[]),
+            &fonts,
+        )
+        .unwrap();
+        let tex = std::fs::read_to_string(&path).unwrap();
+        let hook = tex.find("\\def\\GwaFontSetupHook").expect("应注入字体钩子");
+        let class = tex.find("\\documentclass").expect("应保留 documentclass");
+        assert!(hook < class, "字体钩子必须排在 documentclass 之前：{tex}");
     }
 
     #[test]

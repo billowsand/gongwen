@@ -19,6 +19,7 @@ mod prompt;
 mod rag;
 mod rag_client;
 mod storage;
+mod system_fonts;
 mod texcompile;
 mod theme;
 mod units;

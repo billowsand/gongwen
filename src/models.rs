@@ -792,6 +792,8 @@ pub struct AppConfig {
     pub last_ai_prompt: u32,
     /// 知识库检索增强（RAG）配置。
     pub rag: RagConfig,
+    /// 编译公文时使用的字体。默认沿用随应用分发的内置字体。
+    pub fonts: FontConfig,
 }
 
 impl Default for AppConfig {
@@ -814,7 +816,195 @@ impl Default for AppConfig {
             ai_prompts: vec![],
             last_ai_prompt: 0,
             rag: RagConfig::default(),
+            fonts: FontConfig::default(),
         }
+    }
+}
+
+/// 公文排版里可以单独换字体的五个位置。
+///
+/// 与 `gonghan-gwa.cls` 的字体族一一对应，且互不复用：换其中一项不会牵动另一项，
+/// 唯一的例外是二级标题字体同时充当正文的 `ItalicFont`（类文件历来如此）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontRole {
+    /// 公文大标题与附件标题，内置为方正小标宋。
+    Title,
+    /// `##` 一级标题「一、」，内置为黑体。
+    Heading1,
+    /// `###` 二级标题「（一）」，内置为楷体。
+    Heading2,
+    /// 正文、四级标题与表格，内置为仿宋。
+    Body,
+    /// 页脚页码，内置为宋体。
+    PageNumber,
+}
+
+impl FontRole {
+    pub const ALL: [FontRole; 5] = [
+        Self::Title,
+        Self::Heading1,
+        Self::Heading2,
+        Self::Body,
+        Self::PageNumber,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Title => "标题字体",
+            Self::Heading1 => "一级标题字体",
+            Self::Heading2 => "二级标题字体",
+            Self::Body => "正文字体",
+            Self::PageNumber => "页码字体",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Title => "公文大标题与附件标题，内置为方正小标宋",
+            Self::Heading1 => "一级标题「一、」、表头与附件名，内置为黑体",
+            Self::Heading2 => "二级标题「（一）」，内置为楷体；同时用作正文的斜体字面",
+            Self::Body => "正文、四级标题与表格，内置为仿宋",
+            Self::PageNumber => "页脚页码，内置为宋体",
+        }
+    }
+
+    /// 内置字体文件名，未配置本机字体时使用。必须是
+    /// `portable_runtime::FONT_FILES` 里的一项，由单元测试守住。
+    pub fn bundled_file(self) -> &'static str {
+        match self {
+            Self::Title => "XiaoBiaoSong.ttf",
+            Self::Heading1 => "SimHei.ttf",
+            Self::Heading2 => "KaiTi.ttf",
+            Self::Body => "FangSong.ttf",
+            Self::PageNumber => "SimSun.ttf",
+        }
+    }
+
+    /// 未配置本机字体时按名字加载所用的字体名。方正小标宋没有稳定的字体名，
+    /// 由类文件另行探测，因此这里返回空串。
+    pub fn bundled_family(self) -> &'static str {
+        match self {
+            Self::Title => "",
+            Self::Heading1 => "SimHei",
+            Self::Heading2 => "KaiTi_GB2312",
+            Self::Body => "FangSong_GB2312",
+            Self::PageNumber => "SimSun",
+        }
+    }
+
+    /// 内置字体的中文名，用于界面上说明“不选就用什么”。
+    pub fn bundled_label(self) -> &'static str {
+        match self {
+            Self::Title => "方正小标宋",
+            Self::Heading1 => "黑体",
+            Self::Heading2 => "楷体",
+            Self::Body => "仿宋",
+            Self::PageNumber => "宋体",
+        }
+    }
+
+    /// 配置键与临时字体文件名里用的短标识。
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Heading1 => "heading1",
+            Self::Heading2 => "heading2",
+            Self::Body => "body",
+            Self::PageNumber => "pagenumber",
+        }
+    }
+}
+
+/// 某一个位置选定的本机字体。家族名与文件路径都要留：前者给导出的 `.tex`
+/// 拿到别的机器上按名字编译，后者给内置 Tectonic 按文件加载。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontChoice {
+    /// 英文家族名，写进 `.tex` 的按名字加载分支。
+    pub family: String,
+    /// 本地化字体名，只用于界面显示。
+    pub display: String,
+    /// 字体文件绝对路径。
+    pub path: String,
+}
+
+impl FontChoice {
+    pub fn is_set(&self) -> bool {
+        !self.family.trim().is_empty() && !self.path.trim().is_empty()
+    }
+
+    /// 界面上显示的名字：优先本地化名。
+    pub fn label(&self) -> &str {
+        let display = self.display.trim();
+        if display.is_empty() {
+            self.family.trim()
+        } else {
+            display
+        }
+    }
+
+    /// 拷进临时字体目录后的文件名。扩展名沿用原文件，fontspec 靠它判断格式；
+    /// 重命名后目录里不存在同名的粗体、斜体文件，字面选择因此是确定的。
+    pub fn compiled_file_name(&self, role: FontRole) -> String {
+        let extension = std::path::Path::new(self.path.trim())
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_lowercase())
+            .filter(|ext| ext == "ttf" || ext == "otf")
+            .unwrap_or_else(|| "ttf".to_string());
+        format!("gwa-{}.{extension}", role.key())
+    }
+}
+
+/// 编译公文时使用的字体。字段全为空即表示沿用内置字体。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontConfig {
+    /// 总开关。关掉时下面五项即使填了也不生效，方便临时对照内置版式。
+    pub use_system_fonts: bool,
+    pub title: FontChoice,
+    pub heading1: FontChoice,
+    pub heading2: FontChoice,
+    pub body: FontChoice,
+    pub page_number: FontChoice,
+}
+
+impl FontConfig {
+    pub fn choice(&self, role: FontRole) -> &FontChoice {
+        match role {
+            FontRole::Title => &self.title,
+            FontRole::Heading1 => &self.heading1,
+            FontRole::Heading2 => &self.heading2,
+            FontRole::Body => &self.body,
+            FontRole::PageNumber => &self.page_number,
+        }
+    }
+
+    pub fn choice_mut(&mut self, role: FontRole) -> &mut FontChoice {
+        match role {
+            FontRole::Title => &mut self.title,
+            FontRole::Heading1 => &mut self.heading1,
+            FontRole::Heading2 => &mut self.heading2,
+            FontRole::Body => &mut self.body,
+            FontRole::PageNumber => &mut self.page_number,
+        }
+    }
+
+    /// 真正生效的选择：总开关关掉或者这一项没配就返回 `None`，调用方据此
+    /// 回退到内置字体。
+    pub fn active(&self, role: FontRole) -> Option<&FontChoice> {
+        if !self.use_system_fonts {
+            return None;
+        }
+        let choice = self.choice(role);
+        choice.is_set().then_some(choice)
+    }
+
+    /// 有没有任何一项本机字体生效。全都没有时导出的 `.tex` 与从前完全一致。
+    pub fn any_active(&self) -> bool {
+        FontRole::ALL
+            .iter()
+            .any(|role| self.active(*role).is_some())
     }
 }
 

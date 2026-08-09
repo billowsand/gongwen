@@ -3,7 +3,7 @@ mod latex;
 mod table;
 mod title;
 
-use crate::models::{DraftInput, ExportSelection, TemplateKind, split_units};
+use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -109,6 +109,7 @@ pub fn export_all(
     markdown: &str,
     selection: &ExportSelection,
     display: &UnitDisplay,
+    fonts: &FontConfig,
 ) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
@@ -142,7 +143,7 @@ pub fn export_all(
     }
     if selection.tex {
         let path = document_dir.join(format!("{export_stem}.tex"));
-        latex::write_tex(&path, input, markdown, display)?;
+        latex::write_tex(&path, input, markdown, display, fonts)?;
         files.push(path);
     }
     Ok(files)
@@ -917,6 +918,7 @@ mod tests {
             markdown,
             &ExportSelection::default(),
             &UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         assert_eq!(files.len(), 3);
@@ -963,6 +965,7 @@ mod tests {
             markdown,
             &selection,
             &UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let second = export_all(
@@ -971,6 +974,7 @@ mod tests {
             markdown,
             &selection,
             &UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         assert_eq!(first, second);
@@ -985,6 +989,7 @@ mod tests {
             markdown,
             &versioned,
             &UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         assert_ne!(first, third);

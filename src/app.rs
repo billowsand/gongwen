@@ -14,11 +14,11 @@ use crate::{
     },
     manuscript_io,
     models::{
-        AiPrompt, AppConfig, DraftInput, ExportSelection, GeneratedDraft, ManuscriptStatus,
-        RerankMode, SecurityLevel, TemplateKind, VocabularyCategory, VocabularyEntry,
-        builtin_ai_prompts, join_units, split_units,
+        AiPrompt, AppConfig, DraftInput, ExportSelection, FontConfig, FontRole, GeneratedDraft,
+        ManuscriptStatus, RerankMode, SecurityLevel, TemplateKind, VocabularyCategory,
+        VocabularyEntry, builtin_ai_prompts, join_units, split_units,
     },
-    preview, prompt, rag, storage, texcompile, theme, units,
+    preview, prompt, rag, storage, system_fonts, texcompile, theme, units,
     units::UnitDisplay,
     validator, vocabulary_xlsx,
 };
@@ -139,6 +139,8 @@ pub(crate) enum WorkerResult {
     Doc { key: DocKey, seq: u64, job: DocJob },
     /// 知识库任务：与具体稿件无关的全局任务（索引构建 / 检索测试）。
     Knowledge(KnowledgeJob),
+    /// 扫描本机字体目录的结果。中文字体文件很大，扫描放在后台线程。
+    SystemFonts(Vec<system_fonts::SystemFont>),
 }
 
 /// 知识库后台任务的结果。
@@ -470,6 +472,12 @@ pub struct GongwenApp {
     pub(crate) rerank_verify_result: Option<(bool, String)>,
     /// 知识库文档预览弹窗：标题、文种、原文。
     pub(crate) knowledge_preview: Option<KnowledgePreviewState>,
+    /// 扫描到的本机字体；空表示还没扫过，设置页会在需要时触发一次。
+    pub(crate) system_fonts: Vec<system_fonts::SystemFont>,
+    pub(crate) system_fonts_busy: bool,
+    /// 每个字体下拉框的筛选词，按 `FontRole::key()` 存。本机字体动辄几百个，
+    /// 没有筛选框的下拉列表没法用。
+    pub(crate) font_filter: BTreeMap<&'static str, String>,
 }
 
 /// 知识库文档预览弹窗的状态。
@@ -520,11 +528,12 @@ pub(crate) enum DraftAction {
 
 impl GongwenApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::configure_fonts(&cc.egui_ctx);
+        let mut config = storage::load().unwrap_or_default();
+        // 预览字体要按配置装，所以先读配置再装字体。
+        theme::configure_fonts(&cc.egui_ctx, &config.fonts);
         theme::configure_icons(&cc.egui_ctx);
         theme::configure_style(&cc.egui_ctx);
 
-        let mut config = storage::load().unwrap_or_default();
         // 载入即整理：补齐词条 id，按层级重排单位并重新生成层级编码。
         units::normalize(&mut config.vocabulary);
         // 旧配置没有提示词库，这里补齐预置项并给未编号的条目分配 id。
@@ -626,6 +635,9 @@ impl GongwenApp {
             knowledge_import: None,
             embedding_models: Vec::new(),
             rerank_models: Vec::new(),
+            system_fonts: Vec::new(),
+            system_fonts_busy: false,
+            font_filter: BTreeMap::new(),
             embedding_probe_busy: false,
             rerank_probe_busy: false,
             rerank_verify_result: None,
@@ -1334,6 +1346,19 @@ impl GongwenApp {
     }
 
     /// 探测知识库 embedding 端点已加载的模型。
+    /// 扫描本机字体。中文字体文件动辄十几兆，整轮扫描要一两秒，放后台线程做。
+    fn start_system_font_scan(&mut self) {
+        if self.system_fonts_busy {
+            return;
+        }
+        self.system_fonts_busy = true;
+        self.status = "正在扫描本机字体…".into();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let _ = tx.send(WorkerResult::SystemFonts(system_fonts::scan()));
+        });
+    }
+
     fn start_embedding_probe(&mut self) {
         if self.embedding_probe_busy {
             return;
@@ -1559,6 +1584,15 @@ impl GongwenApp {
                 }
                 WorkerResult::Doc { key, seq, job } => self.apply_doc_job(key, seq, job),
                 WorkerResult::Knowledge(job) => self.apply_knowledge_job(job),
+                WorkerResult::SystemFonts(fonts) => {
+                    self.system_fonts_busy = false;
+                    self.status = if fonts.is_empty() {
+                        "没有在本机字体目录里找到可用的 ttf/otf 字体。".into()
+                    } else {
+                        format!("已找到 {} 个本机字体。", fonts.len())
+                    };
+                    self.system_fonts = fonts;
+                }
                 WorkerResult::EmbeddingModels(result) => {
                     self.embedding_probe_busy = false;
                     match result {
@@ -6537,6 +6571,72 @@ impl GongwenApp {
         }
     }
 
+    /// 编译字体设置：五个位置各自可以换成本机字体，不选就用内置的那套。
+    fn font_settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("编译字体");
+        ui.label(
+            "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体。\
+             改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。",
+        );
+        ui.add_space(4.0);
+        let before = self.config.fonts.clone();
+        ui.checkbox(&mut self.config.fonts.use_system_fonts, "使用本机字体编译")
+            .on_hover_text("不勾选时下面的选择仍然保留，只是不生效，方便和内置版式来回对照");
+
+        if self.config.fonts.use_system_fonts {
+            // 第一次勾选时才扫盘：没用到这个功能的用户不必为此付启动时间。
+            if self.system_fonts.is_empty() && !self.system_fonts_busy {
+                self.start_system_font_scan();
+            }
+            ui.add_space(4.0);
+            let mut message = None;
+            for role in FontRole::ALL {
+                let filter = self.font_filter.entry(role.key()).or_default();
+                if let Some(text) = font_choice_row(
+                    ui,
+                    role,
+                    self.config.fonts.choice_mut(role),
+                    &self.system_fonts,
+                    filter,
+                ) {
+                    message = Some(text);
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+                if ui
+                    .add_enabled(
+                        !self.system_fonts_busy,
+                        theme::icon_text_button(theme::Icon::Refresh, "重新扫描本机字体"),
+                    )
+                    .clicked()
+                {
+                    self.start_system_font_scan();
+                }
+                if self.system_fonts_busy {
+                    ui.weak("正在扫描…");
+                } else {
+                    ui.weak(format!("已收录 {} 个字体", self.system_fonts.len()));
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+                ui.weak(
+                    "只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，\
+                     按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
+                );
+            });
+            if let Some(text) = message {
+                self.status = text;
+            }
+        }
+
+        if self.config.fonts != before {
+            // 预览也跟着换，否则屏幕上的版式和编译出来的 PDF 对不上。
+            theme::configure_fonts(ui.ctx(), &self.config.fonts);
+        }
+    }
+
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("settings_scroll")
@@ -6807,6 +6907,10 @@ impl GongwenApp {
                 ui.weak(
                     "导出 TeX 时会自动检测 XeLaTeX 或 Tectonic；检测到后编译 PDF 并清理中间文件。",
                 );
+
+                ui.add_space(12.0);
+                ui.separator();
+                self.font_settings_ui(ui);
 
                 ui.add_space(12.0);
                 ui.separator();
@@ -7270,6 +7374,98 @@ pub(crate) fn visible_rows(ui: &egui::Ui) -> usize {
     (((height - 12.0) / row_height).floor() as i64).clamp(8, 200) as usize
 }
 
+/// 一个位置的字体选择行：下拉选本机字体，或浏览一个字体文件。
+/// 返回需要显示在状态栏的提示（选了不支持的文件时给出）。
+fn font_choice_row(
+    ui: &mut egui::Ui,
+    role: FontRole,
+    choice: &mut crate::models::FontChoice,
+    available: &[system_fonts::SystemFont],
+    filter: &mut String,
+) -> Option<String> {
+    let mut message = None;
+    ui.horizontal(|ui| {
+        ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(role.label()));
+        let selected = if choice.is_set() {
+            choice.label().to_string()
+        } else {
+            format!("内置（{}）", role.bundled_label())
+        };
+        egui::ComboBox::from_id_salt(format!("font_role_{}", role.key()))
+            .selected_text(selected)
+            .width(300.0)
+            .show_ui(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(filter)
+                        .hint_text("输入字体名筛选")
+                        .desired_width(280.0),
+                );
+                ui.separator();
+                if ui
+                    .selectable_label(!choice.is_set(), format!("内置（{}）", role.bundled_label()))
+                    .clicked()
+                {
+                    *choice = crate::models::FontChoice::default();
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        let needle = filter.trim().to_lowercase();
+                        let mut shown = 0usize;
+                        for font in available.iter().filter(|font| {
+                            needle.is_empty()
+                                || font.display.to_lowercase().contains(&needle)
+                                || font.family.to_lowercase().contains(&needle)
+                        }) {
+                            shown += 1;
+                            // 中文名和英文名不一致时两个都显示：写进 TeX 的是英文名。
+                            let label = if font.display == font.family {
+                                font.family.clone()
+                            } else {
+                                format!("{}（{}）", font.display, font.family)
+                            };
+                            let picked = choice.family == font.family;
+                            if ui.selectable_label(picked, label).clicked() {
+                                *choice = font.to_choice();
+                            }
+                        }
+                        if shown == 0 {
+                            ui.weak("没有匹配的字体。");
+                        }
+                    });
+            })
+            .response
+            .on_hover_text(role.hint());
+        if theme::icon_button(ui, theme::Icon::Folder, "浏览字体文件").clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("字体文件", system_fonts::SUPPORTED_EXTENSIONS)
+                .pick_file()
+        {
+            match system_fonts::read_font(&path) {
+                Some(font) => *choice = font.to_choice(),
+                None => {
+                    message = Some(format!(
+                        "无法把「{}」用作{}：只支持 ttf 与 otf，字体集合（ttc）需要额外指定字面序号，暂不支持。",
+                        path.display(),
+                        role.label()
+                    ));
+                }
+            }
+        }
+        if choice.is_set() && theme::icon_button(ui, theme::Icon::RotateCcw, "恢复内置字体").clicked()
+        {
+            *choice = crate::models::FontChoice::default();
+        }
+    });
+    if choice.is_set() {
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+            ui.weak(choice.path.clone());
+        });
+    }
+    message
+}
+
 pub(crate) fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) -> bool {
     ui.horizontal(|ui| {
         row_label(ui, label);
@@ -7713,26 +7909,30 @@ pub(crate) fn export_and_compile(
     markdown: &str,
     selection: &ExportSelection,
     vocabulary: &[VocabularyEntry],
+    fonts: &FontConfig,
     mut progress: impl FnMut(&str),
 ) -> anyhow::Result<(Vec<PathBuf>, Option<String>)> {
     progress("正在生成导出文件…");
     let display = UnitDisplay::new(vocabulary);
-    let mut files = export::export_all(output_dir, input, markdown, selection, &display)?;
-    let mut warning = None;
+    // 字体文件在写 TeX 之前就要落实：TeX 里写死了按哪个文件加载，等到编译时
+    // 才发现文件不在就只能报错，而这里还来得及退回内置字体。
+    let (fonts, mut warnings) = system_fonts::resolve(fonts);
+    let mut files = export::export_all(output_dir, input, markdown, selection, &display, &fonts)?;
     if let Some(tex) = files
         .iter()
         .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
     {
         progress("正在使用内置 Tectonic 离线编译 PDF…");
-        match texcompile::compile_pdf_if_available(tex) {
+        match texcompile::compile_pdf_if_available(tex, &fonts) {
             Ok(Some(pdf)) => {
                 files.push(pdf);
                 progress("PDF 编译完成，正在整理导出结果…");
             }
             Ok(None) => {}
-            Err(error) => warning = Some(format!("{error:#}")),
+            Err(error) => warnings.push(format!("{error:#}")),
         }
     }
+    let warning = (!warnings.is_empty()).then(|| warnings.join("\n"));
     Ok((files, warning))
 }
 

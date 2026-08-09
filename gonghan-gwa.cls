@@ -76,7 +76,11 @@
 % 正文 Markdown 加粗沿用当前字体，通过 xeCJK 自动伪粗实现，不切换为独立黑体。
 % 应用内置 Tectonic 编译时会在 \documentclass 前注入 \GwaFontPath，直接按文件
 % 加载随应用分发的字体；单独使用导出的 TeX 时则保留系统字体兼容路径。
+% 在设置里改用本机字体时，应用会另外注入 \GwaFontSetupHook 顶替下面这段默认设置，
+% 钩子内部同样按 \GwaFontPath 分按文件、按名字两种加载方式。
 \providecommand{\GwaFontPath}{}
+\providecommand{\GwaFontSetupHook}{}
+\ifx\GwaFontSetupHook\@empty
 \ifx\GwaFontPath\@empty
     \setCJKmainfont[ItalicFont={KaiTi_GB2312}, AutoFakeBold=true]{FangSong_GB2312}
     \IfFontExistsTF{FZXiaoBiaoSong-B05}{%
@@ -114,6 +118,9 @@
     \setmainfont[Path={\GwaFontPath}, ItalicFont={KaiTi.ttf}]{FangSong.ttf}
     \setCJKmonofont[Path={\GwaFontPath}]{SimHei.ttf}
     \setmonofont[Path={\GwaFontPath}]{SimHei.ttf}
+\fi
+\else
+    \GwaFontSetupHook
 \fi
 \newcommand{\bs}{\CJKfamily{xbs}}
 \newcommand{\kai}{\CJKfamily{kaiti}}

@@ -213,5 +213,13 @@
     "chunk_overlap_chars": 80,
     "rrf_k": 60.0,
     "min_score_ratio": 0.5
+  },
+  "fonts": {
+    "use_system_fonts": false,
+    "title": { "family": "", "display": "", "path": "" },
+    "heading1": { "family": "", "display": "", "path": "" },
+    "heading2": { "family": "", "display": "", "path": "" },
+    "body": { "family": "", "display": "", "path": "" },
+    "page_number": { "family": "", "display": "", "path": "" }
   }
 }

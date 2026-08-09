@@ -1484,7 +1484,7 @@ mod tests {
     fn centered_heading_is_centered_within_the_content_width() {
         // 单行与多行的小标宋标题都要以版心宽居中，单行不能贴左缘。
         let ctx = egui::Context::default();
-        theme::configure_fonts(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let available = 1000.0;
         let metrics = Metrics::new(available, Some(1.0));
         for title in ["重点工作通知", "关于做好二〇二六年重点工作有关事项的通知"]
@@ -1524,7 +1524,7 @@ mod tests {
     fn official_font_families_do_not_contain_a_separate_latin_font() {
         // 英文、数字随对应的中文字体排：字体族里不再把 Times New Roman 放在最前。
         let ctx = egui::Context::default();
-        theme::configure_fonts(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         // 字体集要跑过一帧才就绪。
         let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
         let definitions = ctx.fonts(|fonts| fonts.definitions().clone());

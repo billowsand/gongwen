@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::models::{FontConfig, FontRole};
 use crate::portable_runtime::{self, PortableTexRuntime};
 
 static COMPILE_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
@@ -109,7 +110,7 @@ fn common_xelatex_install_paths() -> Vec<PathBuf> {
 
 /// 检测到 TeX 引擎时编译 `.pdf`；未检测到时返回 `Ok(None)` 并保留 `.tex`。
 /// 编译失败时返回错误，调用方仍可把已经生成的 `.tex` 展示给用户。
-pub fn compile_pdf_if_available(tex_path: &Path) -> Result<Option<PathBuf>> {
+pub fn compile_pdf_if_available(tex_path: &Path, fonts: &FontConfig) -> Result<Option<PathBuf>> {
     let Some(engine) = find_tex_engine()? else {
         return Ok(None);
     };
@@ -122,7 +123,7 @@ pub fn compile_pdf_if_available(tex_path: &Path) -> Result<Option<PathBuf>> {
 
     match engine {
         TexEngine::PortableTectonic(runtime) => {
-            compile_with_portable_tectonic(tex_path, dir, stem, &runtime)?;
+            compile_with_portable_tectonic(tex_path, dir, stem, &runtime, fonts)?;
         }
         TexEngine::Xelatex(program) => {
             // 两遍排版以解析目录、页码和交叉引用。
@@ -171,12 +172,13 @@ fn compile_with_portable_tectonic(
     dir: &Path,
     stem: &str,
     runtime: &PortableTexRuntime,
+    fonts: &FontConfig,
 ) -> Result<()> {
     let _compile_guard = PORTABLE_TECTONIC_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let workspace =
-        PortableCompileWorkspace::create(tex_path, dir, &runtime.fonts, &runtime.bundle)?;
+        PortableCompileWorkspace::create(tex_path, dir, &runtime.fonts, &runtime.bundle, fonts)?;
     let cache_dir = portable_runtime::tectonic_cache_dir()?;
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("无法创建 Tectonic 格式缓存目录：{}", cache_dir.display()))?;
@@ -248,6 +250,7 @@ impl PortableCompileWorkspace {
         dir: &Path,
         runtime_fonts: &Path,
         runtime_bundle: &Path,
+        fonts: &FontConfig,
     ) -> Result<Self> {
         let id = COMPILE_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
         let stem = format!("__gongwen_tectonic_{}_{}", std::process::id(), id);
@@ -274,6 +277,26 @@ impl PortableCompileWorkspace {
                 if std::fs::hard_link(&source, &destination).is_err() {
                     std::fs::copy(&source, &destination)
                         .with_context(|| format!("无法准备便携式字体：{}", source.display()))?;
+                }
+            }
+            // 选了本机字体的位置额外拷一份，文件名与 TeX 里的钩子约定一致。
+            // 重命名后目录里不存在同名的粗体、斜体文件，fontspec 选到的字面
+            // 因此是确定的；未选的位置继续用上面那批内置字体。
+            for role in FontRole::ALL {
+                let Some(choice) = fonts.active(role) else {
+                    continue;
+                };
+                let source = PathBuf::from(choice.path.trim());
+                let destination = font_dir.join(choice.compiled_file_name(role));
+                if std::fs::hard_link(&source, &destination).is_err() {
+                    std::fs::copy(&source, &destination).with_context(|| {
+                        format!(
+                            "无法准备{}“{}”的字体文件：{}",
+                            role.label(),
+                            choice.label(),
+                            source.display()
+                        )
+                    })?;
                 }
             }
 
@@ -401,13 +424,16 @@ mod tests {
             "# 关于报送某某工作情况的报告\n\n现将有关情况报告如下。\n",
             &selection,
             &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
             .iter()
             .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
             .unwrap();
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
         assert_eq!(pdf.file_stem(), tex.file_stem());
     }
@@ -443,6 +469,7 @@ mod tests {
             "# 关于代章测试的函\n\n正文。",
             &selection,
             &crate::units::UnitDisplay::new(&vocabulary),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
@@ -454,7 +481,9 @@ mod tests {
             content.contains("\\renewcommand{\\SignatureSealOnBehalf}{（代章）}"),
             "应注入代章命令：{content}"
         );
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
         // 便于排查：把生成的 tex 与 pdf 各保留一份到固定路径。
         let _ = std::fs::copy(tex, ".tmp/verify/seal-letter.tex");
@@ -492,6 +521,7 @@ mod tests {
             "# 测试函\n\n正文。",
             &selection,
             &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
@@ -500,7 +530,9 @@ mod tests {
             .unwrap();
         // 便于排查：把生成的 tex 保留一份到固定路径。
         let _ = std::fs::copy(tex, ".tmp/verify/generated-joint.tex");
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
         assert_eq!(pdf.file_stem(), tex.file_stem());
         // 中间文件被清理，.tex 源文件保留。
@@ -536,13 +568,16 @@ mod tests {
             "# 关于开展测试工作的函\n<!-- [正文] -->\n现就（有关事项）函告如下。\n<!-- [附件] -->\n# 附件1\n## 统计表\n内容。\n# 附件2\n## 说明材料\n内容。",
             &selection,
             &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
             .iter()
             .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
             .unwrap();
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
         assert_eq!(pdf.file_stem(), tex.file_stem());
         // 便于排查：把生成的 tex 与 pdf 各保留一份到固定路径。
@@ -574,6 +609,7 @@ mod tests {
             markdown,
             &selection,
             &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
@@ -583,7 +619,9 @@ mod tests {
         let content = std::fs::read_to_string(tex).unwrap();
         assert_eq!(content.matches("\\begin{landscape}").count(), 1);
         assert_eq!(content.matches("\\end{landscape}").count(), 1);
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
     }
 
@@ -614,6 +652,7 @@ mod tests {
             markdown,
             &selection,
             &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
@@ -622,7 +661,9 @@ mod tests {
             .unwrap();
         let content = std::fs::read_to_string(tex).unwrap();
         assert!(content.trim_end().contains("\\end{landscape}"));
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
     }
 
@@ -649,6 +690,7 @@ mod tests {
             "# 关于转发国家互联网信息办公室有关网络安全和信息化工作重点任务实施方案的通知\n\n现函告如下。",
             &selection,
             &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
@@ -661,7 +703,9 @@ mod tests {
             content.contains("\\\\"),
             "换行标题应含 \\\\ 分段：{content}"
         );
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
         assert_eq!(pdf.file_stem(), tex.file_stem());
     }
@@ -689,6 +733,7 @@ mod tests {
             "# 关于认真做好网络安全与信息化重点工作验收的函\n\n现函告如下。",
             &selection,
             &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
         )
         .unwrap();
         let tex = files
@@ -700,8 +745,146 @@ mod tests {
             content.contains("\\scalebox{0.91}[1]"),
             "压缩标题应含 \\scalebox：{content}"
         );
-        let pdf = compile_pdf_if_available(tex).unwrap().unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
         assert!(pdf.exists());
         assert_eq!(pdf.file_stem(), tex.file_stem());
+    }
+
+    /// 五个位置全换成本机字体后仍能编译出 PDF。这条最关键：注入的钩子、临时目录里
+    /// 的重命名字体文件和 Tectonic 的受限文件访问要同时成立，任何一环错了都编译不出来。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 与常见中文字体才能运行"]
+    fn compiles_letter_with_system_fonts_for_every_role() {
+        // 都是 Windows 自带的单字面 ttf；缺任何一个就跳过，不把测试变成环境断言。
+        let candidates = [
+            (FontRole::Title, r"C:\Windows\Fonts\simhei.ttf"),
+            (FontRole::Heading1, r"C:\Windows\Fonts\simhei.ttf"),
+            (FontRole::Heading2, r"C:\Windows\Fonts\simkai.ttf"),
+            (FontRole::Body, r"C:\Windows\Fonts\simfang.ttf"),
+            (FontRole::PageNumber, r"C:\Windows\Fonts\simkai.ttf"),
+        ];
+        let mut fonts = FontConfig {
+            use_system_fonts: true,
+            ..FontConfig::default()
+        };
+        for (role, path) in candidates {
+            let Some(font) = crate::system_fonts::read_font(Path::new(path)) else {
+                return;
+            };
+            *fonts.choice_mut(role) = font.to_choice();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某单位".into();
+        input.profile.recipient = "某部门".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "# 关于开展本机字体编译测试的函\n\n## 一、任务目标\n\n验证换字体后仍能排版。\n\n### （一）具体要求\n\n照常执行。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &fonts,
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let content = std::fs::read_to_string(tex).unwrap();
+        assert!(content.contains("\\def\\GwaFontSetupHook"));
+        let pdf = compile_pdf_if_available(tex, &fonts).unwrap().unwrap();
+        assert!(pdf.exists());
+        // 字体目录是临时的，编译完必须清干净，不留在用户的导出目录里。
+        let leftovers: Vec<_> = std::fs::read_dir(pdf.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("_fonts"))
+            .collect();
+        assert!(leftovers.is_empty(), "临时字体目录应已清理");
+    }
+
+    /// 导出的 `.tex` 拿到别的机器上编译时走按字体名加载那条分支：这里直接调
+    /// xelatex 编译，不经过内置 Tectonic，确认写进去的字体名真的能被解析。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 与常见中文字体才能运行"]
+    fn compiles_exported_tex_by_font_name_with_xelatex() {
+        let Some(xelatex) = find_xelatex() else {
+            return;
+        };
+        let Some(body) = crate::system_fonts::read_font(Path::new(r"C:\Windows\Fonts\simfang.ttf"))
+        else {
+            return;
+        };
+        let Some(title) = crate::system_fonts::read_font(Path::new(r"C:\Windows\Fonts\simhei.ttf"))
+        else {
+            return;
+        };
+        let mut fonts = FontConfig {
+            use_system_fonts: true,
+            ..FontConfig::default()
+        };
+        *fonts.choice_mut(FontRole::Body) = body.to_choice();
+        // 标题必须指定：不指定时按名字加载会去找方正小标宋，本机不一定装了。
+        *fonts.choice_mut(FontRole::Title) = title.to_choice();
+        *fonts.choice_mut(FontRole::Heading1) = title.to_choice();
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某单位".into();
+        input.profile.recipient = "某部门".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "# 关于按字体名编译的函\n\n## 一、任务目标\n\n验证按名字加载。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &fonts,
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let dir = tex.parent().unwrap();
+        let output = tex_command(&xelatex)
+            .current_dir(dir)
+            .arg("-interaction=nonstopmode")
+            .arg("-halt-on-error")
+            .arg(tex.file_name().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "按字体名加载应能直接用 xelatex 编译：\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            dir.join(format!(
+                "{}.pdf",
+                tex.file_stem().unwrap().to_string_lossy()
+            ))
+            .is_file()
+        );
     }
 }

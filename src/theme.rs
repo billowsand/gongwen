@@ -3,6 +3,7 @@
 //! 取色思路与 Claude 一致：奶油色纸面打底、黏土橙（clay）作唯一强调色、
 //! 暖灰而非纯黑的文字。界面上所有颜色都从这里取，避免各处硬编码 RGB。
 
+use crate::models::{FontConfig, FontRole};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 use std::path::{Path, PathBuf};
 
@@ -549,7 +550,9 @@ fn font_candidates(bundled: Option<&Path>, file: &str, system: &[&str]) -> Vec<P
         .collect()
 }
 
-pub fn configure_fonts(ctx: &egui::Context) {
+/// 配置界面与公文预览的字体。`config` 里选了本机字体的位置，预览也跟着换，
+/// 否则屏幕上看到的版式和编译出来的 PDF 对不上。
+pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let mut fonts = egui::FontDefinitions::default();
     let bundled_fonts = crate::portable_runtime::find_font_dir();
 
@@ -609,9 +612,10 @@ pub fn configure_fonts(ctx: &egui::Context) {
             .unwrap_or_default(),
     );
 
-    for (family, bundled_file, system_candidates) in [
+    for (family, role, bundled_file, system_candidates) in [
         (
             FONT_FANGSONG,
+            FontRole::Body,
             "FangSong.ttf",
             &[
                 r"C:\Windows\Fonts\simfang.ttf",
@@ -620,6 +624,7 @@ pub fn configure_fonts(ctx: &egui::Context) {
         ),
         (
             FONT_HEITI,
+            FontRole::Heading1,
             "SimHei.ttf",
             &[
                 r"C:\Windows\Fonts\simhei.ttf",
@@ -628,6 +633,7 @@ pub fn configure_fonts(ctx: &egui::Context) {
         ),
         (
             FONT_KAITI,
+            FontRole::Heading2,
             "KaiTi.ttf",
             &[
                 r"C:\Windows\Fonts\simkai.ttf",
@@ -636,6 +642,7 @@ pub fn configure_fonts(ctx: &egui::Context) {
         ),
         (
             FONT_BIAOSONG,
+            FontRole::Title,
             "XiaoBiaoSong.ttf",
             &[
                 r"C:\Windows\Fonts\方正小标宋简.TTF",
@@ -647,7 +654,12 @@ pub fn configure_fonts(ctx: &egui::Context) {
     ] {
         // 每个字体族只放对应的中文字体：英文、数字也用它自带的全角字形，不把
         // Times New Roman 放在最前作西文优先（与国标一致，预览不单独设英文字体）。
-        let candidates = font_candidates(bundled_fonts.as_deref(), bundled_file, system_candidates);
+        let mut candidates =
+            font_candidates(bundled_fonts.as_deref(), bundled_file, system_candidates);
+        // 设置里指定了本机字体就排在最前；读不出来（文件被删）时照旧回退。
+        if let Some(choice) = config.active(role) {
+            candidates.insert(0, PathBuf::from(choice.path.trim()));
+        }
         let list = match load_font(&mut fonts, family, &candidates) {
             Some(key) => vec![key],
             // 一个都没装上时退回界面字体：预览的字体不对，但排版仍然成立。

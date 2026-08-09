@@ -13,8 +13,8 @@
 
 use crate::manuscript::VersionRecord;
 use crate::models::{
-    AppConfig, DraftInput, JointContact, TemplateKind, TemplateProfile, VocabularyCategory,
-    VocabularyEntry,
+    AppConfig, DraftInput, FontChoice, FontRole, JointContact, TemplateKind, TemplateProfile,
+    VocabularyCategory, VocabularyEntry,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -865,7 +865,30 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
         yes_no(a.security_rules.allow_long_term),
         yes_no(b.security_rules.allow_long_term),
     );
+    field(
+        &mut out,
+        "使用本机字体编译",
+        yes_no(a.fonts.use_system_fonts),
+        yes_no(b.fonts.use_system_fonts),
+    );
+    for role in FontRole::ALL {
+        field(
+            &mut out,
+            role.label(),
+            font_choice_label(a.fonts.choice(role)),
+            font_choice_label(b.fonts.choice(role)),
+        );
+    }
     out
+}
+
+/// 字体在版本对照里按“显示名（文件路径）”比对：同名不同文件也算改动。
+fn font_choice_label(choice: &FontChoice) -> String {
+    if choice.is_set() {
+        format!("{}（{}）", choice.label(), choice.path.trim())
+    } else {
+        "内置".to_string()
+    }
 }
 
 fn joint_contacts(contacts: &[JointContact]) -> String {
