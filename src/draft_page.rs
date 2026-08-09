@@ -148,7 +148,7 @@ impl ExportLinks {
         let Ok(entries) = std::fs::read_dir(root) else {
             return;
         };
-        let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        let mut dirs: Vec<(std::time::SystemTime, String, PathBuf)> = Vec::new();
         let mut loose: Vec<PathBuf> = Vec::new();
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else {
@@ -157,14 +157,19 @@ impl ExportLinks {
             if meta.is_dir() {
                 let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
                 if self.matches(&entry.file_name()) {
-                    dirs.push((modified, entry.path()));
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    dirs.push((modified, name, entry.path()));
                 }
             } else if self.matches(&entry.file_name()) {
                 loose.push(entry.path());
             }
         }
-        dirs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-        for (_, dir) in dirs.iter().take(Self::MAX_DIRS) {
+        // 文件系统时间戳精度不足时同一批目录会得到相同 mtime，此时按目录名倒序
+        // 兜底：导出目录名带分钟级时间戳，名字越靠后就是越新的导出。
+        dirs.sort_by(|(a_modified, a_name, _), (b_modified, b_name, _)| {
+            b_modified.cmp(a_modified).then_with(|| b_name.cmp(a_name))
+        });
+        for (_, _, dir) in dirs.iter().take(Self::MAX_DIRS) {
             if self.complete() {
                 return;
             }
