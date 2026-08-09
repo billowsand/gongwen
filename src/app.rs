@@ -481,6 +481,9 @@ pub struct GongwenApp {
     /// 扫描到的本机字体；空表示还没扫过，设置页会在需要时触发一次。
     pub(crate) system_fonts: Vec<system_fonts::SystemFont>,
     pub(crate) system_fonts_busy: bool,
+    /// 是否已经扫过一次本机字体。扫描结果为空（比如没有任何字体目录）时也
+    /// 只扫一次，避免设置页每次重进都重新扫盘。
+    pub(crate) system_fonts_scanned: bool,
     /// 每个字体下拉框的筛选词，按 `FontRole::key()` 存。本机字体动辄几百个，
     /// 没有筛选框的下拉列表没法用。
     pub(crate) font_filter: BTreeMap<&'static str, String>,
@@ -643,6 +646,7 @@ impl GongwenApp {
             rerank_models: Vec::new(),
             system_fonts: Vec::new(),
             system_fonts_busy: false,
+            system_fonts_scanned: false,
             font_filter: BTreeMap::new(),
             embedding_probe_busy: false,
             rerank_probe_busy: false,
@@ -1592,6 +1596,7 @@ impl GongwenApp {
                 WorkerResult::Knowledge(job) => self.apply_knowledge_job(job),
                 WorkerResult::SystemFonts(fonts) => {
                     self.system_fonts_busy = false;
+                    self.system_fonts_scanned = true;
                     self.status = if fonts.is_empty() {
                         "没有在本机字体目录里找到可用的 ttf/otf 字体。".into()
                     } else {
@@ -6647,30 +6652,73 @@ impl GongwenApp {
         }
     }
 
-    /// 编译字体设置：五个位置各自可以换成本机字体，不选就用内置的那套。
+    /// 字体设置：界面字体 + 编译字体（五个位置各自可以换成本机字体）。
     fn font_settings_ui(&mut self, ui: &mut egui::Ui) {
+        // 界面字体与编译字体共用本机字体列表，首次进入设置页就扫盘；结果为空也
+        // 只扫一次，需要时点“重新扫描本机字体”。
+        if !self.system_fonts_scanned && !self.system_fonts_busy {
+            self.start_system_font_scan();
+        }
+        let before = self.config.fonts.clone();
+
+        // 界面字体不受“使用本机字体编译”开关控制，选了就生效，随时可以换回内置。
+        ui.heading("界面字体");
+        ui.label(
+            "应用窗口、菜单与列表使用的字体。默认随应用内置霞鹜文楷（LXGW Bright）；\
+             所选字体文件缺失或读取失败时自动退回内置。",
+        );
+        ui.add_space(4.0);
+        let mut message = {
+            let filter = self.font_filter.entry("ui").or_default();
+            font_choice_row(
+                ui,
+                "ui",
+                "界面字体",
+                "霞鹜文楷（LXGW Bright）",
+                "应用窗口、菜单与列表使用的字体；不影响公文预览与导出的字体",
+                &mut self.config.fonts.ui_font,
+                &self.system_fonts,
+                filter,
+            )
+        };
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+            if ui
+                .add_enabled(
+                    !self.system_fonts_busy,
+                    theme::icon_text_button(theme::Icon::Refresh, "重新扫描本机字体"),
+                )
+                .clicked()
+            {
+                self.start_system_font_scan();
+            }
+            if self.system_fonts_busy {
+                ui.weak("正在扫描…");
+            } else {
+                ui.weak(format!("已收录 {} 个字体", self.system_fonts.len()));
+            }
+        });
+        ui.add_space(12.0);
+
         ui.heading("编译字体");
         ui.label(
             "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体。\
              改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。",
         );
         ui.add_space(4.0);
-        let before = self.config.fonts.clone();
         ui.checkbox(&mut self.config.fonts.use_system_fonts, "使用本机字体编译")
             .on_hover_text("不勾选时下面的选择仍然保留，只是不生效，方便和内置版式来回对照");
 
         if self.config.fonts.use_system_fonts {
-            // 第一次勾选时才扫盘：没用到这个功能的用户不必为此付启动时间。
-            if self.system_fonts.is_empty() && !self.system_fonts_busy {
-                self.start_system_font_scan();
-            }
             ui.add_space(4.0);
-            let mut message = None;
             for role in FontRole::ALL {
                 let filter = self.font_filter.entry(role.key()).or_default();
                 if let Some(text) = font_choice_row(
                     ui,
-                    role,
+                    role.key(),
+                    role.label(),
+                    role.bundled_label(),
+                    role.hint(),
                     self.config.fonts.choice_mut(role),
                     &self.system_fonts,
                     filter,
@@ -6678,23 +6726,6 @@ impl GongwenApp {
                     message = Some(text);
                 }
             }
-            ui.horizontal(|ui| {
-                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
-                if ui
-                    .add_enabled(
-                        !self.system_fonts_busy,
-                        theme::icon_text_button(theme::Icon::Refresh, "重新扫描本机字体"),
-                    )
-                    .clicked()
-                {
-                    self.start_system_font_scan();
-                }
-                if self.system_fonts_busy {
-                    ui.weak("正在扫描…");
-                } else {
-                    ui.weak(format!("已收录 {} 个字体", self.system_fonts.len()));
-                }
-            });
             ui.horizontal_wrapped(|ui| {
                 ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
                 ui.weak(
@@ -6702,11 +6733,11 @@ impl GongwenApp {
                      按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
                 );
             });
-            if let Some(text) = message {
-                self.status = text;
-            }
         }
 
+        if let Some(text) = message {
+            self.status = text;
+        }
         if self.config.fonts != before {
             // 预览也跟着换，否则屏幕上的版式和编译出来的 PDF 对不上。
             theme::configure_fonts(ui.ctx(), &self.config.fonts);
@@ -7452,22 +7483,29 @@ pub(crate) fn visible_rows(ui: &egui::Ui) -> usize {
 
 /// 一个位置的字体选择行：下拉选本机字体，或浏览一个字体文件。
 /// 返回需要显示在状态栏的提示（选了不支持的文件时给出）。
+///
+/// `key` 只用于下拉框的 id，`label` 是行标题，`bundled_label` 是“内置（…）”
+/// 里显示的内置字体名，`hint` 是悬停说明。编译字体的五个位置与界面字体共用。
+#[allow(clippy::too_many_arguments)] // Shared form helper; call sites keep these options explicit.
 fn font_choice_row(
     ui: &mut egui::Ui,
-    role: FontRole,
+    key: &str,
+    label: &str,
+    bundled_label: &str,
+    hint: &str,
     choice: &mut crate::models::FontChoice,
     available: &[system_fonts::SystemFont],
     filter: &mut String,
 ) -> Option<String> {
     let mut message = None;
     ui.horizontal(|ui| {
-        ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(role.label()));
+        ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(label));
         let selected = if choice.is_set() {
             choice.label().to_string()
         } else {
-            format!("内置（{}）", role.bundled_label())
+            format!("内置（{bundled_label}）")
         };
-        egui::ComboBox::from_id_salt(format!("font_role_{}", role.key()))
+        egui::ComboBox::from_id_salt(format!("font_role_{key}"))
             .selected_text(selected)
             .width(300.0)
             .show_ui(ui, |ui| {
@@ -7478,7 +7516,7 @@ fn font_choice_row(
                 );
                 ui.separator();
                 if ui
-                    .selectable_label(!choice.is_set(), format!("内置（{}）", role.bundled_label()))
+                    .selectable_label(!choice.is_set(), format!("内置（{bundled_label}）"))
                     .clicked()
                 {
                     *choice = crate::models::FontChoice::default();
@@ -7511,7 +7549,7 @@ fn font_choice_row(
                     });
             })
             .response
-            .on_hover_text(role.hint());
+            .on_hover_text(hint);
         if theme::icon_button(ui, theme::Icon::Folder, "浏览字体文件").clicked()
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("字体文件", system_fonts::SUPPORTED_EXTENSIONS)
@@ -7521,9 +7559,8 @@ fn font_choice_row(
                 Some(font) => *choice = font.to_choice(),
                 None => {
                     message = Some(format!(
-                        "无法把「{}」用作{}：只支持 ttf 与 otf，字体集合（ttc）需要额外指定字面序号，暂不支持。",
+                        "无法把「{}」用作{label}：只支持 ttf 与 otf，字体集合（ttc）需要额外指定字面序号，暂不支持。",
                         path.display(),
-                        role.label()
                     ));
                 }
             }

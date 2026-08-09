@@ -962,6 +962,9 @@ impl FontChoice {
 pub struct FontConfig {
     /// 总开关。关掉时下面五项即使填了也不生效，方便临时对照内置版式。
     pub use_system_fonts: bool,
+    /// 应用界面（窗口、菜单、列表）字体。留空用内置霞鹜文楷；不受
+    /// `use_system_fonts` 开关控制，随时可以换回内置。
+    pub ui_font: FontChoice,
     pub title: FontChoice,
     pub heading1: FontChoice,
     pub heading2: FontChoice,
@@ -998,6 +1001,11 @@ impl FontConfig {
         }
         let choice = self.choice(role);
         choice.is_set().then_some(choice)
+    }
+
+    /// 界面字体：不受 `use_system_fonts` 编译开关影响，配了就生效。
+    pub fn active_ui_font(&self) -> Option<&FontChoice> {
+        self.ui_font.is_set().then_some(&self.ui_font)
     }
 
     /// 有没有任何一项本机字体生效。全都没有时导出的 `.tex` 与从前完全一致。
@@ -1183,6 +1191,39 @@ mod tests {
             .expect("应有格式规整预置项");
         assert!(format.instruction.is_empty());
         assert!(format.kinds.is_empty());
+    }
+
+    /// 旧配置的 `fonts` 没有 `ui_font` 字段：载入后应为空选择（回退内置字体），
+    /// 且编译字体不受影响。
+    #[test]
+    fn old_font_config_without_ui_font_stays_empty() {
+        let json = r#"{
+            "use_system_fonts": true,
+            "title": {"family": "SimSun", "display": "宋体", "path": "C:\\Windows\\Fonts\\simsun.ttc"},
+            "heading1": {"family": "SimHei", "display": "黑体", "path": "C:\\Windows\\Fonts\\simhei.ttf"},
+            "heading2": {"family": "KaiTi", "display": "楷体", "path": "C:\\Windows\\Fonts\\simkai.ttf"},
+            "body": {"family": "FangSong", "display": "仿宋", "path": "C:\\Windows\\Fonts\\simfang.ttf"},
+            "pagenumber": {"family": "SimSun", "display": "宋体", "path": "C:\\Windows\\Fonts\\simsun.ttc"}
+        }"#;
+        let config: FontConfig = serde_json::from_str(json).expect("旧配置应能反序列化");
+        assert!(!config.ui_font.is_set());
+        assert!(config.active_ui_font().is_none());
+        assert_eq!(config.active(FontRole::Body).unwrap().family, "FangSong");
+    }
+
+    /// 带 `ui_font` 的新配置序列化后能原样读回。
+    #[test]
+    fn ui_font_round_trips_through_json() {
+        let mut config = FontConfig::default();
+        config.ui_font = FontChoice {
+            family: "Microsoft YaHei".into(),
+            display: "微软雅黑".into(),
+            path: "C:\\Windows\\Fonts\\msyh.ttc".into(),
+        };
+        let json = serde_json::to_string(&config).expect("应能序列化");
+        let back: FontConfig = serde_json::from_str(&json).expect("应能反序列化");
+        assert_eq!(config, back);
+        assert_eq!(back.active_ui_font().unwrap().family, "Microsoft YaHei");
     }
 
     /// 补齐是幂等的：反复载入不会把预置项复制成好几份，也不会重排用户改过的内容。

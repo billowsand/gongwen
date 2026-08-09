@@ -556,14 +556,20 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let mut fonts = egui::FontDefinitions::default();
     let bundled_fonts = crate::portable_runtime::find_font_dir();
 
-    // 界面正文使用随应用内置的 LXGW Bright Medium，Markdown/等宽文本使用 LXGW Bright Code。
-    // 两个字体在编译前由 build.rs 从 GitHub 最新 Release 下载并校验。
+    // 界面正文默认使用随应用内置的 LXGW Bright Medium；设置里指定了本机字体就
+    // 优先用它，文件被删或读不出来时照旧回退内置。Markdown/等宽文本仍用
+    // LXGW Bright Code。两个内置字体在编译前由 build.rs 从 GitHub 下载并校验。
     let bright_font = "gw-bright".to_owned();
     let bright_code_font = "gw-bright-code".to_owned();
-    fonts.font_data.insert(
-        bright_font.clone(),
-        egui::FontData::from_static(BRIGHT_MEDIUM_FONT_BYTES).into(),
-    );
+    let ui_font_loaded = config.active_ui_font().is_some_and(|choice| {
+        load_font(&mut fonts, &bright_font, &[PathBuf::from(choice.path.trim())]).is_some()
+    });
+    if !ui_font_loaded {
+        fonts.font_data.insert(
+            bright_font.clone(),
+            egui::FontData::from_static(BRIGHT_MEDIUM_FONT_BYTES).into(),
+        );
+    }
     fonts.font_data.insert(
         bright_code_font.clone(),
         egui::FontData::from_static(BRIGHT_CODE_FONT_BYTES).into(),
