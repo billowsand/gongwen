@@ -65,3 +65,11 @@ LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
+
+## Inno Setup Simplified Chinese translation
+
+The Windows installer embeds `scripts/ChineseSimplified.isl` from the Inno
+Setup source repository, maintained by Zhenghan Yang (Kira) and distributed
+with the Inno Setup project.
+
+- Source: https://github.com/jrsoftware/issrc

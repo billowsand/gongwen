@@ -100,6 +100,23 @@ jobs:
           $env:GONGWEN_RUNTIME_DIR = [System.IO.Path]::Combine($staging, "runtime")
           cargo test --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
 
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup -y --no-progress --accept-license
+
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $staging = [System.IO.Path]::Combine($env:GITHUB_WORKSPACE, "dist", "win-x64-full")
+          ./scripts/package-installer.ps1 -Version $version -SourceDir $staging -OutputDir $env:GITHUB_WORKSPACE -Force
+          $asset = "gongwen-assistant-$version-win-x64-setup.exe"
+          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
+            "$($_.Hash.ToLowerInvariant())  $asset"
+          } | Set-Content "${asset}.sha256" -Encoding utf8
+
       - name: Package release zip
         shell: pwsh
         env:
@@ -126,6 +143,7 @@ jobs:
           path: |
             gongwen-assistant-*.zip*
             gongwen-assistant-*.tar.gz*
+            gongwen-assistant-*-setup.exe*
           if-no-files-found: error
 
   release:
@@ -145,7 +163,7 @@ jobs:
           set -euo pipefail
           cd release-assets
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" ./*.zip ./*.tar.gz ./*.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$GITHUB_REF_NAME" ./*.zip ./*.tar.gz ./*.sha256 ./*-setup.exe --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" ./*.zip ./*.tar.gz ./*.sha256 --repo "$GITHUB_REPOSITORY" --generate-notes
+            gh release create "$GITHUB_REF_NAME" ./*.zip ./*.tar.gz ./*.sha256 ./*-setup.exe --repo "$GITHUB_REPOSITORY" --generate-notes
           fi
