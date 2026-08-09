@@ -39,6 +39,9 @@ fn main() -> eframe::Result {
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([980.0, 680.0])
             .with_title(version::APP_TITLE)
+            // 自绘窗口：去掉系统标题栏，标题与最小化/最大化/关闭按钮由应用自己
+            // 绘制（见 app.rs 的 window_titlebar），三平台外观一致。
+            .with_decorations(false)
             .with_icon(app_icon),
         ..Default::default()
     };

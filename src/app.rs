@@ -21,7 +21,7 @@ use crate::{
     },
     preview, prompt, rag, storage, system_fonts, texcompile, theme, units,
     units::UnitDisplay,
-    validator, vocabulary_xlsx,
+    validator, version, vocabulary_xlsx,
 };
 use anyhow::Context;
 use eframe::egui;
@@ -2144,6 +2144,144 @@ impl GongwenApp {
                 // 失败原因全文挂在审校抽屉顶上，弹出来让人看见。
                 doc.result_drawer_open = true;
             }
+        }
+    }
+
+    /// 自绘标题栏：无边框窗口的标题与窗口控制按钮。
+    ///
+    /// 窗口由系统装饰改为自绘（`main.rs` 的 `with_decorations(false)`）后，
+    /// 这里补上标题、拖拽与最小化/最大化/关闭按钮，三平台外观一致。
+    fn window_titlebar(&mut self, ui: &mut egui::Ui) {
+        const HEIGHT: f32 = 34.0;
+        const BTN_W: f32 = 46.0;
+
+        let ctx = ui.ctx().clone();
+        let maximized = ctx
+            .input(|input| input.viewport().maximized)
+            .unwrap_or(false);
+        // 失焦时标题和图标弱化，提示窗口不在前台。
+        let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
+        let title_color = if focused {
+            theme::text_soft()
+        } else {
+            theme::text_muted()
+        };
+
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), HEIGHT),
+            egui::Sense::hover(),
+        );
+
+        // 左侧标题区：整条可拖拽移动窗口，双击切换最大化。
+        let title_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 14.0, rect.top()),
+            egui::pos2(rect.right() - 3.0 * BTN_W, rect.bottom()),
+        );
+        if title_rect.width() > 60.0 {
+            ui.painter().text(
+                title_rect.left_center(),
+                egui::Align2::LEFT_CENTER,
+                version::APP_TITLE,
+                egui::FontId::proportional(13.0),
+                title_color,
+            );
+        }
+        let drag = ui.interact(
+            title_rect,
+            ui.id().with("titlebar_drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if drag.double_clicked() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        } else if drag.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
+        // 右侧三个窗口控制按钮：最小化 / 最大化·还原 / 关闭。
+        let mut action: Option<TitlebarAction> = None;
+        for (index, kind) in [
+            TitlebarBtn::Minimize,
+            TitlebarBtn::Maximize,
+            TitlebarBtn::Close,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let btn_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - (3 - index) as f32 * BTN_W, rect.top()),
+                egui::vec2(BTN_W, HEIGHT),
+            );
+            let response = ui
+                .interact(
+                    btn_rect,
+                    ui.id().with(("titlebar_btn", index)),
+                    egui::Sense::click(),
+                )
+                .on_hover_text(match kind {
+                    TitlebarBtn::Minimize => "最小化",
+                    TitlebarBtn::Maximize => {
+                        if maximized {
+                            "还原"
+                        } else {
+                            "最大化"
+                        }
+                    }
+                    TitlebarBtn::Close => "关闭",
+                });
+            let is_close = kind == TitlebarBtn::Close;
+            let hovered = response.hovered();
+            let pressed = response.is_pointer_button_down_on();
+            let fill = if hovered {
+                if is_close {
+                    // 关闭键按下再加深一档，与其余按钮的按压手感一致。
+                    if pressed {
+                        theme::danger().gamma_multiply(0.85)
+                    } else {
+                        theme::danger()
+                    }
+                } else if pressed {
+                    theme::surface_active()
+                } else {
+                    theme::surface_hover()
+                }
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            if fill != egui::Color32::TRANSPARENT {
+                ui.painter().rect_filled(btn_rect, 0.0, fill);
+            }
+            // 关闭键悬停用红底白字（Windows 惯例），其余按钮保持文字色。
+            let icon_color = if is_close && hovered {
+                egui::Color32::WHITE
+            } else {
+                title_color
+            };
+            let glyph = match kind {
+                TitlebarBtn::Minimize => WindowGlyph::Minimize,
+                TitlebarBtn::Maximize if maximized => WindowGlyph::Restore,
+                TitlebarBtn::Maximize => WindowGlyph::Maximize,
+                TitlebarBtn::Close => WindowGlyph::Close,
+            };
+            draw_window_glyph(ui.painter(), btn_rect.center(), glyph, icon_color);
+            if response.clicked() {
+                action = Some(match kind {
+                    TitlebarBtn::Minimize => TitlebarAction::Minimize,
+                    TitlebarBtn::Maximize => TitlebarAction::Maximize(!maximized),
+                    TitlebarBtn::Close => TitlebarAction::Close,
+                });
+            }
+        }
+        match action {
+            Some(TitlebarAction::Minimize) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+            Some(TitlebarAction::Maximize(next)) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(next));
+            }
+            Some(TitlebarAction::Close) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            None => {}
         }
     }
 
@@ -7265,6 +7403,13 @@ impl eframe::App for GongwenApp {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
+        egui::Panel::top("window_titlebar")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::surface())
+                    .inner_margin(egui::Margin::ZERO),
+            )
+            .show(ui, |ui| self.window_titlebar(ui));
         egui::Panel::top("app_top")
             .frame(theme::panel(theme::surface(), 12))
             .show(ui, |ui| self.top_bar(ui));
@@ -7322,6 +7467,90 @@ impl eframe::App for GongwenApp {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::canvas().to_normalized_gamma_f32()
+    }
+}
+
+/// 自绘标题栏右侧窗口控制按钮的点击动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitlebarAction {
+    Minimize,
+    Maximize(bool),
+    Close,
+}
+
+/// 自绘标题栏右侧的窗口控制按钮种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitlebarBtn {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// 标题栏按钮上绘制的图形符号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowGlyph {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+/// 用纯图形绘制标题栏按钮的符号（横线、方框、叠框、叉）。
+///
+/// 只画三四个几何形，不为三个小按钮引入额外图标资产；颜色跟随主题，
+/// 悬停态由调用方决定底色后传入。
+fn draw_window_glyph(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    glyph: WindowGlyph,
+    color: egui::Color32,
+) {
+    let stroke = egui::Stroke::new(1.4, color);
+    match glyph {
+        WindowGlyph::Minimize => {
+            // 一条短横线。
+            painter.rect_filled(
+                egui::Rect::from_center_size(center, egui::vec2(10.0, 1.6)),
+                0.0,
+                color,
+            );
+        }
+        WindowGlyph::Maximize => {
+            // 单个方框。
+            painter.rect_stroke(
+                egui::Rect::from_center_size(center, egui::vec2(11.0, 11.0)),
+                egui::CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        WindowGlyph::Restore => {
+            // 主框右下完整，副框左上只露上边和左边，形成 Windows 惯用的「还原」叠框。
+            let main =
+                egui::Rect::from_center_size(center + egui::vec2(1.5, 1.5), egui::vec2(10.0, 10.0));
+            painter.rect_stroke(
+                main,
+                egui::CornerRadius::same(1),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            let sub =
+                egui::Rect::from_center_size(center - egui::vec2(1.5, 1.5), egui::vec2(10.0, 10.0));
+            painter.line_segment([sub.left_top(), sub.right_top()], stroke);
+            painter.line_segment([sub.left_top(), sub.left_bottom()], stroke);
+        }
+        WindowGlyph::Close => {
+            // 两条交叉斜线。
+            let d = 4.0;
+            painter.line_segment(
+                [center - egui::vec2(d, d), center + egui::vec2(d, d)],
+                stroke,
+            );
+            painter.line_segment(
+                [center - egui::vec2(d, -d), center + egui::vec2(d, -d)],
+                stroke,
+            );
+        }
     }
 }
 
