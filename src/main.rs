@@ -17,6 +17,7 @@ mod models;
 mod portable_runtime;
 mod preview;
 mod prompt;
+mod qa;
 mod rag;
 mod rag_client;
 mod storage;

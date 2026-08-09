@@ -19,7 +19,7 @@ use crate::{
         ManuscriptStatus, RerankMode, SecurityLevel, TemplateKind, ThemeName, VocabularyCategory,
         VocabularyEntry, builtin_ai_prompts, join_units, split_units,
     },
-    preview, prompt, rag, storage, system_fonts, texcompile, theme, units,
+    preview, prompt, qa, rag, storage, system_fonts, texcompile, theme, units,
     units::UnitDisplay,
     validator, version, vocabulary_xlsx,
 };
@@ -170,6 +170,20 @@ pub(crate) enum KnowledgeJob {
     },
     /// 检索测试的结果。
     SearchDone(Result<rag::RetrievalOutcome, String>),
+    /// 知识库问答的结果。`question` 是发起时的原始提问，回来时连同答案一起入历史。
+    QaDone {
+        question: String,
+        result: Result<qa::QaOutcome, String>,
+    },
+}
+
+/// 知识库页输入区的模式：检索片段列表，还是基于片段生成问答答案。
+/// 两种模式共用同一个输入框，切换只改变「发送后干什么」，互不清空各自结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum KnowledgeMode {
+    #[default]
+    Search,
+    Qa,
 }
 
 /// 起草页发起的后台任务的结果。
@@ -464,6 +478,12 @@ pub struct GongwenApp {
     /// 检索测试框。
     pub(crate) knowledge_test_query: String,
     pub(crate) knowledge_test_results: Vec<rag::RetrievedChunk>,
+    /// 输入区模式：检索 / 问答。
+    pub(crate) knowledge_mode: KnowledgeMode,
+    /// 问答历史：每轮一个问题 + 答案 + 引用片段 + 降级告警。
+    pub(crate) knowledge_qa_history: Vec<qa::QaTurn>,
+    /// 正在生成的问答问题（等待答案期间显示在对话区）。
+    pub(crate) knowledge_qa_pending: Option<String>,
     /// 上次检索的降级告警（embedding / rerank 不可用等），显示在检索区。
     pub(crate) knowledge_search_warnings: Vec<String>,
     /// 已入库的稿件 id，稿件管理列表据此打「已入库」标记。
@@ -646,6 +666,9 @@ impl GongwenApp {
             knowledge_index_result: None,
             knowledge_test_query: String::new(),
             knowledge_test_results: Vec::new(),
+            knowledge_mode: KnowledgeMode::default(),
+            knowledge_qa_history: Vec::new(),
+            knowledge_qa_pending: None,
             knowledge_search_warnings: Vec::new(),
             knowledge_indexed_manuscripts: std::collections::HashSet::new(),
             knowledge_embed_models: Vec::new(),
@@ -1717,6 +1740,22 @@ impl GongwenApp {
                 self.knowledge_search_warnings = Vec::new();
                 self.status = format!("知识库检索失败：{error}");
             }
+            KnowledgeJob::QaDone { question, result } => {
+                self.knowledge_busy = false;
+                self.knowledge_qa_pending = None;
+                match result {
+                    Ok(outcome) => self.knowledge_qa_history.push(qa::QaTurn {
+                        question,
+                        answer: outcome.answer,
+                        references: outcome.references,
+                        warnings: outcome.warnings,
+                    }),
+                    Err(error) => {
+                        // 与检索测试同口径：致命错误走全局状态条，不打断页面。
+                        self.status = format!("知识库问答失败：{error}");
+                    }
+                }
+            }
         }
     }
 
@@ -1950,6 +1989,37 @@ impl GongwenApp {
             let result = rag::retrieve(&cfg, &chat, &db_path, &query, kind)
                 .map_err(|error| format!("{error:#}"));
             let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::SearchDone(result)));
+        });
+    }
+
+    /// 在后台线程跑一次知识库问答：检索片段 → 生成答案。问题带回时连同答案
+    /// 一起入历史，等待期间 `knowledge_qa_pending` 记录原问题供对话区展示。
+    pub(crate) fn knowledge_ask(&mut self) {
+        if self.knowledge_busy {
+            return;
+        }
+        let question = self.knowledge_test_query.trim().to_string();
+        if question.is_empty() {
+            return;
+        }
+        let Some(db_path) = storage::manuscript_db_path().ok() else {
+            return;
+        };
+        self.knowledge_busy = true;
+        self.knowledge_qa_pending = Some(question.clone());
+        let cfg = self.config.rag.clone();
+        // 问答要调对话模型生成答案，重排若走「对话大模型」模式也需要聊天配置。
+        let chat = self.config.lm_studio.clone();
+        let kind = self.knowledge_filter_kind;
+        let history = self.knowledge_qa_history.clone();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result = qa::qa_answer(&cfg, &chat, &db_path, &history, &question, kind)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::QaDone {
+                question,
+                result,
+            }));
         });
     }
 
