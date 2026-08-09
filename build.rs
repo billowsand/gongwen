@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
 const ICON_PATH: &str = "assets/app-icon/app-icon.ico";
 const FONT_DIR: &str = "font";
 const VERSION_STAMP: &str = ".font-version";
