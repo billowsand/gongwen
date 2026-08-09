@@ -3,6 +3,7 @@
 mod app;
 mod diff;
 mod diff_view;
+mod doc_import;
 mod draft_page;
 mod export;
 mod highlight;

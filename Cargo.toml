@@ -1,6 +1,6 @@
 [package]
 name = "gongwen-assistant"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 description = "基于 egui 与本地 LM Studio 的离线公文写作助手"
 license = "MIT"
@@ -11,6 +11,7 @@ FileDescription = "公文助手"
 OriginalFilename = "gongwen-assistant.exe"
 
 [dependencies]
+anydoc = "0.1.7"
 anyhow = "1.0"
 calamine = "0.30"
 chrono = { version = "0.4", features = ["serde"] }

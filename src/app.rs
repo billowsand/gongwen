@@ -1,6 +1,7 @@
 use crate::{
     diff,
     diff_view::{self, DiffViewConfig, DiffViewState},
+    doc_import,
     draft_page::{
         DocKey, DraftPage, DraftSession, ExportLinks, LoadedVersion, TOOLBAR_CONTROL_HEIGHT,
         editor_id, toolbar_separator,
@@ -2196,6 +2197,22 @@ impl GongwenApp {
             {
                 open = None;
                 self.new_blank_manuscript();
+                ui.close();
+            }
+            if ui
+                .add(
+                    egui::Button::image_and_text(theme::Icon::FileUp.image(), "从文档新建公文")
+                        .image_tint_follows_text_color(true)
+                        .frame(false),
+                )
+                .on_hover_text(format!(
+                    "把 Word / Excel / PPT / ODF / RTF / EPUB / CSV 转成 Markdown 新开一篇稿件（可导入 {}）",
+                    doc_import::supported_summary()
+                ))
+                .clicked()
+            {
+                open = None;
+                self.new_manuscript_from_document();
                 ui.close();
             }
             ui.separator();
@@ -5559,6 +5576,26 @@ impl GongwenApp {
         let session = DraftSession::blank(0, &self.config);
         self.open_doc(session);
         self.status = "已新建空白稿件：点“保存到稿件库”将新增一条草稿记录。".into();
+    }
+
+    /// 选一个现成文档，把它转成 markdown，作为一篇新稿件打开。
+    /// 只带正文——抬头、文号这些要素还得在左侧要素区自己填。
+    fn new_manuscript_from_document(&mut self) {
+        let Some(path) = doc_import::pick_file() else {
+            return;
+        };
+        match doc_import::to_markdown(&path) {
+            Ok(markdown) => {
+                let chars = markdown.chars().count();
+                let session = DraftSession::with_markdown(0, &self.config, markdown);
+                self.open_doc(session);
+                self.status = format!(
+                    "已从 {} 新建稿件（{chars} 字）：请核对正文结构并补齐左侧公文要素。",
+                    doc_import::file_label(&path)
+                );
+            }
+            Err(error) => self.status = format!("导入失败：{error:#}"),
+        }
     }
 
     fn export_manuscripts_zip(&mut self) {

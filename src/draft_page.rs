@@ -14,7 +14,7 @@ use crate::{
     },
     diff,
     diff_view::{self, DiffViewAction, DiffViewConfig, DiffViewState},
-    export,
+    doc_import, export,
     highlight::MarkdownHighlighter,
     lmstudio, manuscript,
     manuscript::ManuscriptStore,
@@ -340,6 +340,12 @@ impl RagKindFilter {
 impl DraftSession {
     /// 新开一篇空白稿件。文种与版式沿用配置里最近一次使用的。
     pub(crate) fn blank(key: DocKey, config: &AppConfig) -> Self {
+        Self::with_markdown(key, config, String::new())
+    }
+
+    /// 新开一篇以现成正文打底的稿件（从外部文档导入）。要素仍按配置留空，
+    /// 只有正文是给定的；内容指纹算在正文之上，所以“导入完还没动”不算改过。
+    pub(crate) fn with_markdown(key: DocKey, config: &AppConfig, markdown: String) -> Self {
         let kind = config.last_template;
         let mut profile = config.profile(kind);
         if profile.document_year.trim().is_empty() {
@@ -353,7 +359,7 @@ impl DraftSession {
                 profile,
                 ..Default::default()
             },
-            String::new(),
+            markdown,
         )
     }
 
@@ -981,6 +987,26 @@ pub(crate) fn jump_to_source(
         .pos_from_cursor(cursor)
         .translate(output.galley_pos.to_vec2());
     ui.scroll_to_rect(rect, Some(egui::Align::Center));
+}
+
+/// 在插入点的一侧要补几个换行，才能让插入的块级内容独占段落。
+///
+/// `before` 为真时看的是插入点之前那半段（补在它后面），否则看之后那半段。
+/// 那一侧已经是空的（插在文首/文末）就什么都不补。
+fn blank_line_padding(side: &str, before: bool) -> &'static str {
+    if side.is_empty() {
+        return "";
+    }
+    let (one, two) = if before {
+        (side.ends_with('\n'), side.ends_with("\n\n"))
+    } else {
+        (side.starts_with('\n'), side.starts_with("\n\n"))
+    };
+    match (two, one) {
+        (true, _) => "",
+        (false, true) => "\n",
+        (false, false) => "\n\n",
+    }
 }
 
 /// 选中查找命中的完整字节范围，并把当前命中滚动到编辑器中央。
@@ -1642,6 +1668,15 @@ impl DraftPage<'_> {
                 .clicked()
                 {
                     self.doc.mark_toolbar_visible = !self.doc.mark_toolbar_visible;
+                }
+                if theme::icon_button_enabled(ui, editable, theme::Icon::FileUp, "导入文档")
+                    .on_hover_text(
+                        "从已有的 Word / Excel / PPT / ODF / RTF / EPUB / CSV 文件提取内容，\
+                         转成 Markdown 插到光标处",
+                    )
+                    .clicked()
+                {
+                    self.import_document(ui);
                 }
                 if theme::icon_button_enabled(ui, has_draft, theme::Icon::Copy, "复制全文")
                     .clicked()
@@ -2677,6 +2712,60 @@ impl DraftPage<'_> {
         self.doc.pending_source_jump = Some(line_start + insertion.len());
     }
 
+    /// 工具栏“导入文档”：选一个现成文档，转成 markdown 插到编辑器光标处。
+    ///
+    /// 转换本身在主线程同步做——`anydoc` 的量级是毫秒（实测 docx 6ms、xlsx 0.5ms），
+    /// 而它前面那个文件选择框本来就要阻塞界面，再为它铺一套后台任务通道不划算。
+    fn import_document(&mut self, ui: &egui::Ui) {
+        if self.doc.read_only() {
+            return;
+        }
+        let Some(path) = doc_import::pick_file() else {
+            return;
+        };
+        match doc_import::to_markdown(&path) {
+            Ok(markdown) => self.insert_imported_markdown(ui, &markdown, &path),
+            Err(error) => *self.status = format!("导入失败：{error:#}"),
+        }
+    }
+
+    /// 把导入的 markdown 插进审校稿：编辑框有焦点时插到光标处，否则追加到文末。
+    ///
+    /// 插入点前后按需补空行——导入的是标题、表格这类块级内容，紧贴着上一行会被
+    /// markdown 当成同一段，表格更是直接不成表。
+    fn insert_imported_markdown(&mut self, ui: &egui::Ui, markdown: &str, path: &Path) {
+        let cursor_char = if ui.ctx().memory(|memory| memory.has_focus(editor_id())) {
+            egui::TextEdit::load_state(ui.ctx(), editor_id())
+                .and_then(|state| state.cursor.char_range())
+                .map(|range| range.primary.index.0)
+        } else {
+            None
+        };
+        let text = &mut self.doc.generated_markdown;
+        let pos = match cursor_char {
+            Some(char_index) => text
+                .char_indices()
+                .nth(char_index)
+                .map_or(text.len(), |(byte, _)| byte),
+            None => text.len(),
+        };
+        let lead = blank_line_padding(text[..pos].trim_end_matches(' '), true);
+        let tail = blank_line_padding(text[pos..].trim_start_matches(' '), false);
+        let insertion = format!("{lead}{markdown}{tail}");
+        text.insert_str(pos, &insertion);
+        // 光标落到导入内容的末尾，方便接着往下写。
+        self.doc.pending_source_jump = Some(pos + lead.len() + markdown.len());
+        self.revalidate();
+        *self.status = format!(
+            "已从 {} 导入 {} 字。",
+            doc_import::file_label(path),
+            markdown.chars().count()
+        );
+        if !self.doc.warnings.is_empty() {
+            self.open_result_drawer();
+        }
+    }
+
     pub(crate) fn preview_ui(&mut self, ui: &mut egui::Ui) {
         if self.doc.markdown_find.open {
             egui::Panel::top("preview_find")
@@ -3633,6 +3722,26 @@ impl DraftPage<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 导入内容要独占段落：插入点两侧各自补到有空行为止，文首文末不补。
+    #[test]
+    fn imported_block_gets_blank_lines_on_both_sides() {
+        let splice = |text: &str, pos: usize, block: &str| {
+            let lead = blank_line_padding(&text[..pos], true);
+            let tail = blank_line_padding(&text[pos..], false);
+            let mut out = text.to_string();
+            out.insert_str(pos, &format!("{lead}{block}{tail}"));
+            out
+        };
+        // 空稿：两侧都不补。
+        assert_eq!(splice("", 0, "# 标题"), "# 标题");
+        // 插在一行中间：前后各补一个空行，把那一行切开（偏移按字节，汉字占 3 字节）。
+        assert_eq!(splice("前后", 3, "表格"), "前\n\n表格\n\n后");
+        // 已有一个换行的一侧只补差的那个。
+        assert_eq!(splice("上\n", 4, "块"), "上\n\n块");
+        // 两侧已经是空行就一个都不补。
+        assert_eq!(splice("上\n\n\n\n下", 5, "块"), "上\n\n块\n\n下");
+    }
 
     /// 前缀匹配必须用 `-` 作分界：`关于X` 不应误匹配 `关于X的补充`，
     /// 同时要认得同分钟重复导出产生的 `stem-N` 编号变体。
