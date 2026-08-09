@@ -62,8 +62,9 @@ const DOC_TAB_CHROME_WIDTH: f32 = 74.0;
 const TAB_HOVER_ANIM: f32 = 0.12;
 const TAB_PRESS_ANIM: f32 = 0.15;
 const TAB_SELECT_ANIM: f32 = 0.16;
-const TAB_CLOSE_ANIM: f32 = 0.15;
 const TAB_INDICATOR_ANIM: f32 = 0.16;
+/// 切换标签后内容区整体淡入的时长：这是「场景切换」的主要视觉信号。
+const CONTENT_FADE_ANIM: f32 = 0.18;
 pub(crate) const FORM_PANEL_MAX_WIDTH: f32 = 620.0;
 /// 表单内容的宽度区间。可调整面板必须拿到确定的宽度：控件一旦请求
 /// `f32::INFINITY`，面板会被内容顶到远超 `size_range` 的宽度。
@@ -132,7 +133,7 @@ impl NavPage {
 }
 
 pub(crate) enum WorkerResult {
-    /// 全局任务：探测 LM Studio 已加载的模型。
+    /// 全局任务：探测本地模型服务已加载的模型。
     Models(Result<Vec<String>, String>),
     /// 探测知识库 embedding 端点已加载的模型。
     EmbeddingModels(Result<Vec<String>, String>),
@@ -487,6 +488,8 @@ pub struct GongwenApp {
     /// 每个字体下拉框的筛选词，按 `FontRole::key()` 存。本机字体动辄几百个，
     /// 没有筛选框的下拉列表没法用。
     pub(crate) font_filter: BTreeMap<&'static str, String>,
+    /// 上一帧的活动标签。标签变化时重置内容淡入动画，给场景切换一个明确的信号。
+    last_content_tab: Option<TabRef>,
 }
 
 /// 知识库文档预览弹窗的状态。
@@ -622,7 +625,7 @@ impl GongwenApp {
             exit_prompt: None,
             exit_confirmed: false,
             last_autosave: std::time::Instant::now(),
-            status: "就绪。先在“设置”中连接 LM Studio。".into(),
+            status: "就绪。先在“设置”中连接本地模型服务。".into(),
             busy: false,
             sender,
             receiver,
@@ -648,6 +651,7 @@ impl GongwenApp {
             system_fonts_busy: false,
             system_fonts_scanned: false,
             font_filter: BTreeMap::new(),
+            last_content_tab: None,
             embedding_probe_busy: false,
             rerank_probe_busy: false,
             rerank_verify_result: None,
@@ -1346,7 +1350,7 @@ impl GongwenApp {
             return;
         }
         self.busy = true;
-        self.status = "正在连接 LM Studio 并读取已加载模型…".into();
+        self.status = "正在连接本地模型服务并读取已加载模型…".into();
         let config = self.config.lm_studio.clone();
         let tx = self.sender.clone();
         thread::spawn(move || {
@@ -1406,7 +1410,7 @@ impl GongwenApp {
 
     /// 真跑一次 rerank，验证端点路径与响应字段是否对得上。
     ///
-    /// 只查 `/v1/models` 是不够的：LM Studio 对不认识的路径会记
+    /// 只查 `/v1/models` 是不够的：有些服务（如 LM Studio）对不认识的路径会记
     /// `Unexpected endpoint or method` 却仍返回 200，于是"连接成功"，
     /// 而每次检索的 rerank 都在静默失败。
     fn start_rerank_verify(&mut self) {
@@ -1583,9 +1587,9 @@ impl GongwenApp {
                         self.config.lm_studio.model = self.models[0].clone();
                     }
                     self.status = if self.models.is_empty() {
-                        "LM Studio 已连接，但没有已加载模型。".into()
+                        "已连接，但没有已加载模型。".into()
                     } else {
-                        format!("LM Studio 连接成功，发现 {} 个模型。", self.models.len())
+                        format!("连接成功，发现 {} 个模型。", self.models.len())
                     };
                 }
                 WorkerResult::Models(Err(error)) => {
@@ -1652,7 +1656,7 @@ impl GongwenApp {
                                     "用对话大模型重排失败：{error}　可换一个指令跟随更好的对话模型，或把重排方式改为「不重排」。",
                                 ),
                                 _ => format!(
-                                    "rerank 端点验证失败：{error}　请核对「端点路径」——服务对不认识的路径可能照样返回 200，看着像连上了，实际每次重排都会静默失败。LM Studio 目前不提供该接口，可改用「用对话大模型重排」。",
+                                    "rerank 端点验证失败：{error}　请核对「端点路径」——服务对不认识的路径可能照样返回 200，看着像连上了，实际每次重排都会静默失败。LM Studio / Ollama 目前不提供 rerank 专用接口，可改用「用对话大模型重排」。",
                                 ),
                             },
                         ),
@@ -2304,7 +2308,7 @@ impl GongwenApp {
 
         let mut select: Option<usize> = None;
         let mut close: Option<usize> = None;
-        let mut active_rect: Option<egui::Rect> = None;
+        let mut active_rect: Option<(usize, egui::Rect)> = None;
         ui.spacing_mut().item_spacing.x = 4.0;
         for &tab in &shown {
             let width = (desired[tab] * scale).max(DOC_TAB_MIN_WIDTH);
@@ -2316,11 +2320,11 @@ impl GongwenApp {
                 close = Some(tab);
             }
             if tab == self.active_tab {
-                active_rect = Some(rect);
+                active_rect = Some((tab, rect));
             }
         }
         // 活动标签底部的主题橙下划线：左右两边各自插值，切换标签时平滑滑过去。
-        if let Some(rect) = active_rect {
+        if let Some((active_idx, rect)) = active_rect {
             let ctx = ui.ctx();
             let left = ctx.animate_value_with_time(
                 egui::Id::new("tab_indicator_left"),
@@ -2333,13 +2337,21 @@ impl GongwenApp {
                 TAB_INDICATOR_ANIM,
             );
             if right > left {
+                // 悬停活动标签时指示条增亮，提示「这就是当前场景」。
+                // 与 tab_button 复用同一动画 id，同帧取值一致。
+                let active_hover = ctx.animate_bool_with_time(
+                    egui::Id::new("tab_hover").with(active_idx),
+                    ui.rect_contains_pointer(rect),
+                    TAB_HOVER_ANIM,
+                );
+                let color = theme::ACCENT.lerp_to_gamma(theme::ACCENT_HOVER, active_hover);
                 ui.painter().rect_filled(
                     egui::Rect::from_min_max(
                         egui::pos2(left, rect.bottom() - 2.0),
                         egui::pos2(right, rect.bottom()),
                     ),
                     egui::CornerRadius::same(1),
-                    theme::ACCENT,
+                    color,
                 );
             }
         }
@@ -2407,11 +2419,15 @@ impl GongwenApp {
 
     /// 画一格标签，返回（是否点了标签体, 是否点了关闭, 标签占位矩形）。
     ///
-    /// 动效统一在这里：背景/边框/文字色由 `animate_bool_with_time` 插值
-    /// （悬停 120ms、按下 150ms、选中 160ms），关闭按钮悬停标签才渐显、
-    /// 悬停它本身时渐变到危险红。下划线指示条由调用方 `tab_strip` 负责，
-    /// 因为要跨标签共享动画状态。交互状态来自先占位拿到的 response，
-    /// 颜色才能在画背景之前算好。
+    /// 动效统一在这里，构成一套闭合的交互：
+    /// - **悬停**：背景/边框/文字 120ms 变深，关闭按钮从低对比升到实色；
+    /// - **移出**：同样时长平滑回到常态；
+    /// - **按下**：背景 150ms 再深一档；
+    /// - **选中**：白底橙边深字 160ms 淡入。
+    ///
+    /// 关闭按钮常态低对比常显，悬停它本身时渐变到危险红。下划线指示条由
+    /// 调用方 `tab_strip` 负责（要跨标签共享动画状态）。交互状态来自先
+    /// 占位拿到的 response，颜色才能在画背景之前算好。
     fn tab_button(&mut self, ui: &mut egui::Ui, tab: usize, width: f32) -> (bool, bool, egui::Rect) {
         let selected = tab == self.active_tab;
         let (mark, title) = self.tab_label(tab);
@@ -2440,14 +2456,20 @@ impl GongwenApp {
 
         // Context 是 Arc，克隆断开与 ui 的借用，new_child 才能拿到可变借用。
         let ctx = ui.ctx().clone();
+        // hover/按下用纯几何判断而非 response.hovered()：后者会被更上层的
+        // 标题、关闭按钮抢走交互（指针落在它们上面时标签反而算「未悬停」），
+        // 且必须与指示条 `rect_contains_pointer` 的输入一致，同一动画 id
+        // 才不会一帧内收到两个相反的目标而抖动。
+        let hovered = ui.rect_contains_pointer(rect);
+        let pressed = hovered && ctx.input(|i| i.pointer.primary_down());
         let hover_t = ctx.animate_bool_with_time(
             egui::Id::new("tab_hover").with(tab),
-            response.hovered(),
+            hovered,
             TAB_HOVER_ANIM,
         );
         let press_t = ctx.animate_bool_with_time(
             egui::Id::new("tab_press").with(tab),
-            response.is_pointer_button_down_on(),
+            pressed,
             TAB_PRESS_ANIM,
         );
         let sel_t = ctx.animate_bool_with_time(
@@ -2517,13 +2539,9 @@ impl GongwenApp {
         label_response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(hover);
-        // 关闭按钮：悬停标签才渐显，悬停它本身时渐变到危险红。它钉死在
+        // 关闭按钮：常态低对比**常显**（不悬停也看得见），悬停标签时升到
+        // 实色、悬停它本身时渐变到危险红——三个档位各自明确。按钮钉死在
         // 内容右端、位置可精确预估，hover 检测才能在画按钮之前拿到。
-        let close_vis_t = ctx.animate_bool_with_time(
-            egui::Id::new("tab_close_vis").with(tab),
-            response.hovered(),
-            TAB_CLOSE_ANIM,
-        );
         let close_rect = egui::Rect::from_min_size(
             egui::pos2(inner.right() - close_width, inner.center().y - 8.0),
             egui::vec2(close_width, 16.0),
@@ -2533,8 +2551,8 @@ impl GongwenApp {
             content.rect_contains_pointer(close_rect),
             TAB_HOVER_ANIM,
         );
-        let mut close_color = theme::TEXT_MUTED.lerp_to_gamma(theme::DANGER, close_hover_t);
-        close_color = close_color.gamma_multiply(close_vis_t);
+        let close_base = theme::TEXT_MUTED.gamma_multiply(0.55 + 0.45 * hover_t);
+        let close_color = close_base.lerp_to_gamma(theme::DANGER, close_hover_t);
         if content
             .add(
                 egui::Button::new(egui::RichText::new("×").color(close_color))
@@ -6749,8 +6767,8 @@ impl GongwenApp {
             .id_salt("settings_scroll")
             .show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.heading("LM Studio 设置");
-                ui.label("应用调用本机 OpenAI 兼容接口，默认地址为 http://127.0.0.1:1234/v1。正文不会主动发送到互联网。");
+                ui.heading("本地模型服务设置");
+                ui.label("应用调用本机 OpenAI 兼容接口，如 LM Studio（http://127.0.0.1:1234/v1）或 Ollama（http://127.0.0.1:11434/v1）。正文不会主动发送到互联网。");
                 ui.add_space(8.0);
                 field(
                     ui,
@@ -6824,7 +6842,7 @@ impl GongwenApp {
                 ui.add_space(12.0);
                 ui.separator();
                 ui.heading("知识库（检索增强起草）");
-                ui.label("用 LM Studio 的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。两个模型与上面的对话模型相互独立。");
+                ui.label("用本地模型服务（LM Studio / Ollama 等 OpenAI 兼容服务）的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。两个模型与上面的对话模型相互独立。");
                 ui.add_space(4.0);
                 ui.checkbox(&mut self.config.rag.enabled, "启用知识库检索增强")
                     .on_hover_text("关闭后，起草页的“参考知识库”开关不生效");
@@ -6896,7 +6914,7 @@ impl GongwenApp {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
                     ui.weak(match self.config.rag.rerank.mode {
                         RerankMode::None => "直接按混合召回的融合分取前 N 条。够用，只是排序不如重排精准。",
-                        RerankMode::Api => "需要能提供 rerank 接口的服务（Jina / Cohere / TEI / Infinity / llama.cpp 等）。注意：LM Studio 目前不提供该接口。",
+                        RerankMode::Api => "需要能提供 rerank 接口的服务（Jina / Cohere / TEI / Infinity 等）。注意：LM Studio 与 Ollama 目前均不提供该专用接口。",
                         RerankMode::Llm => "复用上面的对话模型给候选片段打分，不必另起服务。代价是每次检索多一次模型调用（低温短输出，通常几秒）。",
                     });
                 });
@@ -7097,7 +7115,7 @@ impl GongwenApp {
                 ui.separator();
                 ui.heading("建议流程");
                 ui.label(
-                    "1. 在 LM Studio 加载中文指令模型并启动 Local Server。\n2. 刷新模型并选择模型。\n3. 在“标准词库”维护全称、常见错写和联系人电话。\n4. 为每类模板保存默认单位、联系人和呈报领导。\n5. 生成草稿 → 在右侧改稿 → 处理审校提示 → 导出签发稿。",
+                    "1. 在本地模型服务中加载中文指令模型并启动服务（LM Studio 启动 Local Server；Ollama 执行 ollama serve）。\n2. 刷新模型并选择模型。\n3. 在“标准词库”维护全称、常见错写和联系人电话。\n4. 为每类模板保存默认单位、联系人和呈报领导。\n5. 生成草稿 → 在右侧改稿 → 处理审校提示 → 导出签发稿。",
                 );
                 ui.add_space(8.0);
             });
@@ -7135,13 +7153,25 @@ impl eframe::App for GongwenApp {
             self.open_page(NavPage::Manuscript);
         }
         let active = self.tabs[self.active_tab.min(self.tabs.len() - 1)];
-        egui::CentralPanel::default().show(ui, |ui| match active {
-            TabRef::Doc(_) => self.draft_page().create_ui(ui),
-            TabRef::Page(NavPage::Vocabulary) => self.vocabulary_ui(ui),
-            TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(ui),
-            TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(ui),
-            TabRef::Page(NavPage::Knowledge) => crate::knowledge_ui::knowledge_ui(self, ui),
-            TabRef::Page(NavPage::Settings) => self.settings_ui(ui),
+        // 场景切换：活动标签变了就重置淡入动画（0 时长直接落位），
+        // 下面的 CentralPanel 再从 0 淡入到 1，让切换有明确的「进入新场景」感。
+        if self.last_content_tab != Some(active) {
+            self.last_content_tab = Some(active);
+            ctx.animate_bool_with_time(egui::Id::new("content_fade"), false, 0.0);
+        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            let fade = ui
+                .ctx()
+                .animate_bool_with_time(egui::Id::new("content_fade"), true, CONTENT_FADE_ANIM);
+            ui.set_opacity(fade);
+            match active {
+                TabRef::Doc(_) => self.draft_page().create_ui(ui),
+                TabRef::Page(NavPage::Vocabulary) => self.vocabulary_ui(ui),
+                TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(ui),
+                TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(ui),
+                TabRef::Page(NavPage::Knowledge) => crate::knowledge_ui::knowledge_ui(self, ui),
+                TabRef::Page(NavPage::Settings) => self.settings_ui(ui),
+            }
         });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。
         self.apply_draft_actions();

@@ -323,7 +323,7 @@ pub enum RerankMode {
     /// 专用 rerank 端点（Jina / Cohere / TEI / Infinity / llama.cpp 等）。
     #[default]
     Api,
-    /// 用对话大模型逐条打分重排。**LM Studio 不提供 rerank 端点**，
+    /// 用对话大模型逐条打分重排。**LM Studio / Ollama 不提供 rerank 端点**，
     /// 这是不另起服务的替代方案：复用已配好的对话模型，代价是每次检索
     /// 多一次 LLM 调用（低温、短输出，通常几秒）。
     Llm,

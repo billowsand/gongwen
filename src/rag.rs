@@ -632,7 +632,7 @@ pub fn retrieve(
             crate::models::RerankMode::Api => {
                 rag_client::rerank(&config.rerank, query, &docs, config.rerank_top_n)
             }
-            // LM Studio 没有 rerank 端点时的替代路径：用对话模型打分。
+            // 本地模型服务没有 rerank 端点时的替代路径：用对话模型打分。
             crate::models::RerankMode::Llm => {
                 rag_client::rerank_with_llm(chat, query, &docs, config.rerank_top_n)
             }

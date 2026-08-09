@@ -114,7 +114,7 @@ const LLM_RERANK_SNIPPET_CHARS: usize = 300;
 
 /// 用对话大模型给候选片段打相关分，作为专用 rerank 端点的替代。
 ///
-/// LM Studio 至今不提供 rerank 端点，而重排对检索质量的影响又实打实。
+/// LM Studio / Ollama 至今不提供 rerank 端点，而重排对检索质量的影响又实打实。
 /// 这里复用已配好的对话模型：一次调用给全部候选打分（listwise），比逐条
 /// 打分（pointwise）少 N 倍往返，也让模型能横向比较。
 ///
@@ -237,7 +237,7 @@ fn preview(text: &str) -> String {
 
 /// 真发一次最小 rerank 请求，验证**端点路径与响应字段**都对得上。
 ///
-/// 光用 `/v1/models` 探测是不够的：LM Studio 遇到不认识的路径会打日志
+/// 光用 `/v1/models` 探测是不够的：有些服务（如 LM Studio）遇到不认识的路径会打日志
 /// `Unexpected endpoint or method` 却照样返回 200，于是"连接成功"，实际
 /// 每次 rerank 都在静默失败。这里必须走完整条链路才算数。
 pub fn probe_rerank(config: &RerankConfig) -> Result<usize> {

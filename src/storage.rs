@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(config.rag.embedding.batch_size, 32);
         assert!(!config.rag.enabled);
         assert_eq!(config.rag.min_score_ratio, 0.5);
-        // LM Studio 不提供 rerank 端点，示例配置默认走对话大模型重排。
+        // 本地模型服务（LM Studio / Ollama）不提供 rerank 端点，示例配置默认走对话大模型重排。
         assert_eq!(config.rag.rerank.mode, crate::models::RerankMode::Llm);
     }
 

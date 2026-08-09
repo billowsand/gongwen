@@ -88,7 +88,7 @@ pub fn generate_with(
     max_tokens: u32,
 ) -> Result<String> {
     if config.model.trim().is_empty() {
-        bail!("请先在设置中选择 LM Studio 模型");
+        bail!("请先在设置中选择模型");
     }
     let payload = json!({
         "model": config.model,
@@ -106,19 +106,19 @@ pub fn generate_with(
     if !config.api_key.trim().is_empty() {
         request = request.bearer_auth(config.api_key.trim());
     }
-    let response = request.send().context("调用 LM Studio 失败")?;
+    let response = request.send().context("调用模型服务失败")?;
     let status = response.status();
-    let body = response.text().context("读取 LM Studio 响应失败")?;
+    let body = response.text().context("读取模型服务响应失败")?;
     if !status.is_success() {
-        bail!("LM Studio 返回 HTTP {}：{}", status, body);
+        bail!("模型服务返回 HTTP {}：{}", status, body);
     }
     let parsed: ChatResponse =
-        serde_json::from_str(&body).context("LM Studio 响应不是兼容的 Chat Completions 格式")?;
+        serde_json::from_str(&body).context("模型服务响应不是兼容的 Chat Completions 格式")?;
     parsed
         .choices
         .into_iter()
         .next()
         .and_then(|c| c.message.content)
         .filter(|s| !s.trim().is_empty())
-        .context("LM Studio 未返回正文")
+        .context("模型服务未返回正文")
 }

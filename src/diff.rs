@@ -764,7 +764,7 @@ fn profile_set_changes(a: &AppConfig, b: &AppConfig) -> Vec<KindChanges> {
     out
 }
 
-/// 设置项变化（词库与版式单列，这里比较 LM Studio / 输出 / 导出 / 密级规则等）。
+/// 设置项变化（词库与版式单列，这里比较模型服务 / 输出 / 导出 / 密级规则等）。
 fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     let mut out = Vec::new();
     field(
