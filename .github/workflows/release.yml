@@ -12,6 +12,11 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Runtime assets are versioned independently of the app; bump this tag only
+# when the runtime contents actually change.
+env:
+  RUNTIME_RELEASE_TAG: v0.3.5
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
@@ -69,7 +74,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path runtime | Out-Null
           $asset = "runtime-$env:RUNTIME_SUFFIX.zip"
-          gh release download "$env:GITHUB_REF_NAME" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
+          gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
 
