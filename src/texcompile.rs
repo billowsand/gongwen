@@ -368,7 +368,11 @@ mod tests {
     #[test]
     fn common_install_paths_include_texlive_and_miktex() {
         let paths = common_xelatex_install_paths();
-        assert!(paths.iter().any(|path| path.ends_with("xelatex.exe")));
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.to_string_lossy().ends_with("xelatex.exe"))
+        );
     }
 
     /// 白头件落款要先装箱量高再决定是否另起一页（见 cls 的 `\WhitePaperClosing`）。
