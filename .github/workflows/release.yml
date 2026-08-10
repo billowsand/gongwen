@@ -172,7 +172,7 @@ jobs:
           )"
           echo "ELF machine: [$machine]"
           case "$machine" in
-            AArch64*) ;;
+            *AArch64*) ;;
             *) echo "Expected AArch64, got: $machine" >&2; exit 1 ;;
           esac
 
