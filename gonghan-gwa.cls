@@ -100,6 +100,7 @@
         }%
     }%
     \setCJKfamilyfont{kaiti}[AutoFakeBold=true]{KaiTi_GB2312}
+    \newfontfamily\enkai{KaiTi_GB2312}
     \setCJKfamilyfont{songti}{SimSun}
     \newfontfamily\ennumber{SimSun}
     \newfontfamily\ensong{SimSun}
@@ -114,6 +115,7 @@
     \setCJKfamilyfont{xbs}[Path={\GwaFontPath}]{XiaoBiaoSong.ttf}
     \newfontfamily\enbt[Path={\GwaFontPath}]{XiaoBiaoSong.ttf}
     \setCJKfamilyfont{kaiti}[Path={\GwaFontPath}, AutoFakeBold=true]{KaiTi.ttf}
+    \newfontfamily\enkai[Path={\GwaFontPath}]{KaiTi.ttf}
     \setCJKfamilyfont{songti}[Path={\GwaFontPath}]{SimSun.ttf}
     \newfontfamily\ennumber[Path={\GwaFontPath}]{SimSun.ttf}
     \newfontfamily\ensong[Path={\GwaFontPath}]{SimSun.ttf}
@@ -201,7 +203,7 @@
 }
 \SetTblrInner[longtblr]{
     cells={font=\fs, halign=c, valign=m},
-    row{1}={font=\heiti, bg=white}
+    row{1}={font=\heiti\enheiti, bg=white}
 }
 \DefTblrTemplate{contfoot-text}{default}{下一页继续}
 % 公文表格直接列出，不设置“表1/表2”等标题和跨页续表标题。
@@ -346,7 +348,7 @@
 % 2. 版心排不下——沿用整体缩放，保证一行放得下。
 \newcommand{\IssuingUnitHeader}{%
     \begingroup
-        \bs\fontsize{\HeaderFontSize}{\HeaderFontSize}\selectfont
+        \bs\enbt\fontsize{\HeaderFontSize}{\HeaderFontSize}\selectfont
         % 默认字距下的自然宽度
         \settowidth{\gwa@hdnatural}{\IssuingUnit{}}%
         % 字距拉到上限时的宽度；与自然宽度之差正好是“字数-1”个最大字距，
@@ -391,7 +393,7 @@
     \fi
 
     \ifthenelse{\equal{\SecurityLevel}{}}{}{%
-        {\noindent \heiti\bfseries \zihao{3} \SecurityLine{} \hfill}
+        {\noindent \heiti\enheiti\bfseries \zihao{3} \SecurityLine{} \hfill}
     }
 }
 
@@ -417,7 +419,7 @@
 % 白头件（呈批件）抬头：顶格密级，密级后空 10 行；无红头、无函号。
 \newcommand{\WhitePaperHeader}{%
     \ifthenelse{\equal{\SecurityLevel}{}}{}{%
-        {\noindent \heiti\bfseries \zihao{3} \SecurityLine{}\par}%
+        {\noindent \heiti\enheiti\bfseries \zihao{3} \SecurityLine{}\par}%
     }%
     \vspace{10\baselineskip}%
 }
@@ -425,7 +427,7 @@
 % 会议议程抬头：顶格密级，密级后空 1 行直接标题；无红头、无函号、无落款。
 \newcommand{\MeetingAgendaHeader}{%
     \ifthenelse{\equal{\SecurityLevel}{}}{}{%
-        {\noindent \heiti\bfseries \zihao{3} \SecurityLine{}\par}%
+        {\noindent \heiti\enheiti\bfseries \zihao{3} \SecurityLine{}\par}%
     }%
     \vspace{\baselineskip}%
 }
@@ -433,7 +435,7 @@
 % 普通公文抬头：只保留可选密级行；无红头、函号及其他修饰。
 \newcommand{\PlainDocumentHeader}{%
     \ifthenelse{\equal{\SecurityLevel}{}}{}{%
-        {\noindent \heiti\bfseries \zihao{3} \SecurityLine{}\par}%
+        {\noindent \heiti\enheiti\bfseries \zihao{3} \SecurityLine{}\par}%
         \vspace{\baselineskip}%
     }%
 }
@@ -605,7 +607,7 @@
     \else
         % 呈报领导（白头件）／主送机关（函稿、电话通知）
         \vspace{\BodyBaselineSkip}
-        {\noindent \zihao{3}\kai\Recipient{}：}
+        {\noindent \zihao{3}\kai\enkai\Recipient{}：}
 
         % 正文
         {\zihao{3}

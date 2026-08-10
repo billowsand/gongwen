@@ -334,7 +334,7 @@ pub(super) fn to_longtblr(rows: &[Vec<String>]) -> String {
         .join(" ");
 
     let mut output = format!(
-        "\\begin{{longtblr}}[\n  label = none,\n  entry = none,\n]{{\n  colspec = {{{colspec}}},\n  rowhead = 1,\n  hlines,\n  vlines,\n  row{{1}} = {{c, font=\\heiti}},\n}}\n"
+        "\\begin{{longtblr}}[\n  label = none,\n  entry = none,\n]{{\n  colspec = {{{colspec}}},\n  rowhead = 1,\n  hlines,\n  vlines,\n  row{{1}} = {{c, font=\\heiti\\enheiti}},\n}}\n"
     );
     for (row_index, row) in rows.iter().enumerate() {
         let cells = row
@@ -369,7 +369,7 @@ pub(super) fn to_longtblr(rows: &[Vec<String>]) -> String {
                         .collect::<String>()
                 };
                 if row_index == 0 {
-                    format!("\\heiti {escaped}")
+                    format!("\\heiti\\enheiti {escaped}")
                 } else {
                     escaped
                 }

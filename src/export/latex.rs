@@ -125,6 +125,7 @@ fn font_setup_hook(fonts: &FontConfig) -> Option<String> {
         \setCJKmainfont[ItalicFont={{{kai_name}}}, AutoFakeBold=true]{{{body_name}}}%
 {title_by_name}
         \setCJKfamilyfont{{kaiti}}[AutoFakeBold=true]{{{kai_name}}}%
+        \newfontfamily\enkai{{{kai_name}}}%
         \setCJKfamilyfont{{songti}}{{{song_name}}}%
         \newfontfamily\ennumber{{{song_name}}}%
         \newfontfamily\ensong{{{song_name}}}%
@@ -139,6 +140,7 @@ fn font_setup_hook(fonts: &FontConfig) -> Option<String> {
         \setCJKfamilyfont{{xbs}}[Path={{\GwaFontPath}}]{{{title_file}}}%
         \newfontfamily\enbt[Path={{\GwaFontPath}}]{{{title_file}}}%
         \setCJKfamilyfont{{kaiti}}[Path={{\GwaFontPath}}, AutoFakeBold=true]{{{kai_file}}}%
+        \newfontfamily\enkai[Path={{\GwaFontPath}}]{{{kai_file}}}%
         \setCJKfamilyfont{{songti}}[Path={{\GwaFontPath}}]{{{song_file}}}%
         \newfontfamily\ennumber[Path={{\GwaFontPath}}]{{{song_file}}}%
         \newfontfamily\ensong[Path={{\GwaFontPath}}]{{{song_file}}}%
@@ -591,8 +593,8 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
                     let body_escaped = body_text_to_tex(body_text);
                     // 标题段采用与独立标题一致的层级字体：2 级黑体、3 级楷体、4 级仿宋、5 级黑体加粗。
                     let title_tex = match *level {
-                        2 => format!("\\heiti {number}{heading_escaped}。"),
-                        3 => format!("\\kai {number}{heading_escaped}。"),
+                        2 => format!("\\heiti\\enheiti {number}{heading_escaped}。"),
+                        3 => format!("\\kai\\enkai {number}{heading_escaped}。"),
                         4 => format!("{number}{heading_escaped}。"),
                         5 => format!("\\textbf{{{number}{heading_escaped}。}}"),
                         _ => unreachable!(),
@@ -733,8 +735,8 @@ fn official_heading_to_tex(level: u8, text: &str, counters: &mut [usize; 4]) -> 
     let escaped = tex_escape(&plain_text(text));
     let number = heading_number_prefix(level, counters)?;
     let rendered = match level {
-        2 => format!("\\noindent\\hspace*{{2em}}{{\\heiti {number}{escaped}}}\\par"),
-        3 => format!("\\noindent\\hspace*{{2em}}{{\\kai {number}{escaped}}}\\par"),
+        2 => format!("\\noindent\\hspace*{{2em}}{{\\heiti\\enheiti {number}{escaped}}}\\par"),
+        3 => format!("\\noindent\\hspace*{{2em}}{{\\kai\\enkai {number}{escaped}}}\\par"),
         4 => format!("\\noindent\\hspace*{{2em}}{number}{escaped}\\par"),
         5 => format!("\\noindent\\hspace*{{2em}}\\textbf{{{number}{escaped}}}\\par"),
         _ => return None,
@@ -891,7 +893,7 @@ fn body_text_to_tex(text: &str) -> String {
             content = format!("\\textbf{{{content}}}");
         }
         if segment.parenthesized {
-            out.push_str(&format!("{{\\kai\\zihao{{4}} {content}}}"));
+            out.push_str(&format!("{{\\kai\\enkai\\zihao{{4}} {content}}}"));
         } else {
             out.push_str(&content);
         }
@@ -1060,7 +1062,7 @@ mod tests {
         // 正文沿用函稿/白头件渲染；完整括号及内容改用四号楷体。
         assert!(
             tex.contains(
-                "一、时间地点：2026年8月5日{\\kai\\zihao{4} （星期三）}14:30，3C会议室。\\par"
+                "一、时间地点：2026年8月5日{\\kai\\enkai\\zihao{4} （星期三）}14:30，3C会议室。\\par"
             ),
             "{tex}"
         );
@@ -1072,10 +1074,10 @@ mod tests {
         input.kind = TemplateKind::MeetingAgenda;
         input.profile.style_mode = StyleMode::Compact;
         let tex = meeting_agenda_tex(&input, "# 标题\n\n## 任务目标\n测试正文。");
-        assert!(tex.contains("{\\heiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
         input.profile.style_mode = StyleMode::Normal;
         let tex = meeting_agenda_tex(&input, "# 标题\n\n## 任务目标\n测试正文。");
-        assert!(tex.contains("{\\heiti 一、任务目标}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
     }
 
     #[test]
@@ -1123,7 +1125,7 @@ mod tests {
         assert!(tex.contains("\\renewcommand{\\SignatureMonth}{8}"));
         assert!(tex.contains("\\renewcommand{\\SignatureDay}{5}"));
         // 正文与函稿同格式：标题编号 + 紧缩合并。
-        assert!(tex.contains("{\\heiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
     }
 
     #[test]
@@ -1176,7 +1178,7 @@ mod tests {
             "# 标题\n\n## 任务目标\n测试正文。",
             &UnitDisplay::new(&[]),
         );
-        assert!(tex.contains("{\\heiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
         // 正常：标题独立成段。
         input.profile.style_mode = StyleMode::Normal;
         let tex = white_paper_tex(
@@ -1184,7 +1186,7 @@ mod tests {
             "# 标题\n\n## 任务目标\n测试正文。",
             &UnitDisplay::new(&[]),
         );
-        assert!(tex.contains("{\\heiti 一、任务目标}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
         // 未填成文日期时不再注入日期命令，沿用类默认（年份取当前年、日期留空）。
         input.date = String::new();
         let tex = white_paper_tex(&input, "# 标题\n\n正文。", &UnitDisplay::new(&[]));
@@ -1332,12 +1334,14 @@ mod tests {
         assert!(hook.contains("\\newfontfamily\\ensong[Path={\\GwaFontPath}]{gwa-pagenumber.ttf}"));
         assert!(hook.contains("\\setCJKfamilyfont{xbs}[Path={\\GwaFontPath}]{XiaoBiaoSong.ttf}"));
         assert!(hook.contains("\\setCJKfamilyfont{heiti}[Path={\\GwaFontPath}]{SimHei.ttf}"));
+        assert!(hook.contains("\\newfontfamily\\enkai[Path={\\GwaFontPath}]{KaiTi.ttf}"));
 
         // 按名字：用家族名，未配置的位置沿用类文件原来的字体名。
         assert!(hook.contains(
             "\\setCJKmainfont[ItalicFont={KaiTi_GB2312}, AutoFakeBold=true]{Source Han Serif SC}"
         ));
         assert!(hook.contains("\\newfontfamily\\ensong{NSimSun}"));
+        assert!(hook.contains("\\newfontfamily\\enkai{KaiTi_GB2312}"));
         assert!(hook.contains("\\setCJKfamilyfont{heiti}{SimHei}"));
         // 未指定标题字体时保留方正小标宋的两段探测。
         assert!(hook.contains("\\IfFontExistsTF{FZXiaoBiaoSong-B05}"));
@@ -1494,7 +1498,7 @@ mod tests {
         assert!(tex.contains("他说：“\\textbf{重要事项}”"), "{tex}");
         assert!(
             tex.contains(
-                "现就{\\kai\\zihao{4} （有关事项）}及{\\kai\\zihao{4} 【特别说明】}函告如下。\\par"
+                "现就{\\kai\\enkai\\zihao{4} （有关事项）}及{\\kai\\enkai\\zihao{4} 【特别说明】}函告如下。\\par"
             ),
             "{tex}"
         );
@@ -1941,17 +1945,17 @@ mod tests {
         let main_at = tex.find("\\renewcommand{\\MainContent}").unwrap();
         let attachment_at = tex.find("\\SetAttachmentContent").unwrap();
         assert!(main_at < attachment_at);
-        assert!(tex.contains("\\heiti 一、总体要求"));
-        assert!(tex.contains("\\kai （一）具体事项"));
+        assert!(tex.contains("\\heiti\\enheiti 一、总体要求"));
+        assert!(tex.contains("\\kai\\enkai （一）具体事项"));
         assert!(tex.contains("\\heiti\\enheiti\\zihao{3} 附件1"));
         assert!(tex.contains(
             "\\vspace{\\BodyBaselineSkip}\n{\\centering\\bs\\enbt\\zihao{2}\\setlength{\\baselineskip}{\\BodyBaselineSkip} 统计表\\par}"
         ));
-        assert!(tex.contains("\\hspace*{2em}{\\heiti 一、总体要求}"));
-        assert!(tex.contains("\\hspace*{2em}{\\kai （一）具体事项}"));
+        assert!(tex.contains("\\hspace*{2em}{\\heiti\\enheiti 一、总体要求}"));
+        assert!(tex.contains("\\hspace*{2em}{\\kai\\enkai （一）具体事项}"));
         assert!(!tex.contains("\\clearpage"));
         assert_eq!(
-            tex.matches("\\heiti 一、").count(),
+            tex.matches("\\heiti\\enheiti 一、").count(),
             2,
             "附件标题计数应重新开始"
         );
@@ -1963,11 +1967,11 @@ mod tests {
         input.profile.style_mode = StyleMode::Compact;
         let tex = letter_tex(&input, "# 测试函\n\n## 任务目标\n测试正文。");
         // 标题部分用黑体并带顿号编号与句号，正文部分沿用正文字体，合并为一行。
-        assert!(tex.contains("{\\heiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
         // 正常风格不合并。
         input.profile.style_mode = StyleMode::Normal;
         let tex = letter_tex(&input, "# 测试函\n\n## 任务目标\n测试正文。");
-        assert!(tex.contains("{\\heiti 一、任务目标}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
     }
 
     #[test]
@@ -1976,7 +1980,7 @@ mod tests {
         input.profile.style_mode = StyleMode::Compact;
         // 标题后跟列表时不合并，仍输出独立标题段。
         let tex = letter_tex(&input, "# 测试函\n\n## 任务目标\n- 第一项\n- 第二项");
-        assert!(tex.contains("{\\heiti 一、任务目标}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
         assert!(tex.contains("\\noindent • 第一项\\par"));
     }
 
@@ -1990,17 +1994,17 @@ mod tests {
             "# 测试函\n\n## 一、总体要求\n开头段落。\n### （一）任务一\n任务一正文。\n### （二）任务二\n任务二正文。",
         );
         // 2 级标题不合并，仍输出独立标题段，其后的段落单独成段。
-        assert!(tex.contains("{\\heiti 一、总体要求}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、总体要求}\\par"));
         assert!(tex.contains("开头段落。\\par"));
         // 3 级标题每个都与紧随正文合并，用楷体与“（一）”“（二）”编号。
         assert_eq!(
-            tex.matches("{\\kai （一）任务一。}任务一正文。\\par")
+            tex.matches("{\\kai\\enkai （一）任务一。}任务一正文。\\par")
                 .count(),
             1,
             "每个最深层标题都应合并：{tex}"
         );
         assert_eq!(
-            tex.matches("{\\kai （二）任务二。}任务二正文。\\par")
+            tex.matches("{\\kai\\enkai （二）任务二。}任务二正文。\\par")
                 .count(),
             1
         );
