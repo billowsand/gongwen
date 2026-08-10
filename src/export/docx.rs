@@ -362,7 +362,8 @@ fn official_signature_date(input: &DraftInput) -> String {
 }
 
 /// 附件概要：正文结束后、落款之前，与正文之间空两行、首行缩进两个汉字，
-/// 按顺序列出附件名称。单个附件写“附件：名称”；多个附件写“附件1：名称”“附件2：名称”…。
+/// 按顺序列出附件名称。单个附件写“附件：名称”；多个附件只有第一行写“附件N：名称”，
+/// 其余行的“附件”二字用两个全角空格占位对齐、不再重复。
 fn add_attachment_summary(mut doc: Docx, names: &[String]) -> Docx {
     // 与正文之间空两行。
     for _ in 0..2 {
@@ -375,10 +376,13 @@ fn add_attachment_summary(mut doc: Docx, names: &[String]) -> Docx {
         );
     }
     for (index, name) in names.iter().enumerate() {
+        // 多个附件只有第一行保留“附件”二字，其余行用两个全角空格占位，使序号列对齐。
         let label = if names.len() == 1 {
             format!("附件：{name}")
-        } else {
+        } else if index == 0 {
             format!("附件{}：{name}", index + 1)
+        } else {
+            format!("　　{}：{name}", index + 1)
         };
         let mut paragraph = Paragraph::new()
             .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
@@ -1732,7 +1736,7 @@ mod tests {
         assert_eq!(xml.matches(r#"w:type="page""#).count(), 2, "{xml}");
         // 附件概要：正文结束后、落款前按顺序列出附件名称，与正文空两行、首行缩进两个汉字。
         assert!(xml.contains("附件1：统计表"), "{xml}");
-        assert!(xml.contains("附件2：说明材料"), "{xml}");
+        assert!(xml.contains("　　2：说明材料"), "{xml}");
         let summary = paragraph_containing(&xml, "附件1：统计表");
         assert!(summary.contains("w:eastAsia=\"仿宋_GB2312\""));
         assert!(!summary.contains("w:eastAsia=\"黑体\""));

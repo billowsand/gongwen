@@ -1173,10 +1173,13 @@ pub fn official_preview(
         if !names.is_empty() {
             ui.add_space(metrics.line * 2.0);
             for (index, name) in names.iter().enumerate() {
+                // 多个附件只有第一行保留“附件”二字，其余行用两个全角空格占位对齐。
                 let label = if names.len() == 1 {
                     format!("附件：{name}")
-                } else {
+                } else if index == 0 {
                     format!("附件{}：{name}", index + 1)
+                } else {
+                    format!("　　{}：{name}", index + 1)
                 };
                 body_block(ui, &metrics, &label, true);
             }

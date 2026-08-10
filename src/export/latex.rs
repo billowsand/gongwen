@@ -925,7 +925,8 @@ fn security_commands(input: &DraftInput) -> String {
 }
 
 /// 附件概要：正文结束后、落款之前，与正文之间空两行、首行缩进两个汉字，
-/// 按顺序列出附件名称。单个附件写“附件：名称”，多个附件写“附件1：名称”“附件2：名称”…。
+/// 按顺序列出附件名称。单个附件写“附件：名称”；多个附件只有第一行写“附件N：名称”，
+/// 其余行的“附件”二字用 `\qquad`（两个汉字宽）占位对齐、不再重复。
 fn attachment_summary_tex(blocks: &[MarkdownBlock]) -> Option<String> {
     let names = attachment_names(blocks);
     if names.is_empty() {
@@ -935,13 +936,20 @@ fn attachment_summary_tex(blocks: &[MarkdownBlock]) -> Option<String> {
     // 与正文之间空两行。
     out.push_str("\\vspace{2\\baselineskip}\n");
     for (index, name) in names.iter().enumerate() {
-        let label = if names.len() == 1 {
-            format!("附件：{name}")
+        // 多个附件只有第一行保留“附件”二字，其余行用 \qquad 占位，使序号列对齐。
+        let prefix = if names.len() == 1 || index == 0 {
+            "附件"
         } else {
-            format!("附件{}：{name}", index + 1)
+            "\\qquad "
+        };
+        let label = if names.len() == 1 {
+            format!("：{name}")
+        } else {
+            format!("{}：{name}", index + 1)
         };
         out.push_str(&format!(
-            "\\noindent\\hspace*{{2em}}{}\\par",
+            "\\noindent\\hspace*{{2em}}{}{}\\par",
+            prefix,
             body_text_to_tex(&label)
         ));
     }
@@ -1519,7 +1527,7 @@ mod tests {
             single.contains("\\noindent\\hspace*{2em}附件：统计表\\par"),
             "{single}"
         );
-        // 多附件逐行“附件N：名称”。
+        // 多附件逐行“附件N：名称”，第二个起“附件”二字用 \qquad 占位对齐。
         let multi = letter_tex(
             &input,
             "# 测试函\n<!-- [附件] -->\n# 附件1\n## 统计表\n内容。\n# 附件2\n## 说明材料\n内容。",
@@ -1529,7 +1537,7 @@ mod tests {
             "{multi}"
         );
         assert!(
-            multi.contains("\\noindent\\hspace*{2em}附件2：说明材料\\par"),
+            multi.contains("\\noindent\\hspace*{2em}\\qquad 2：说明材料\\par"),
             "{multi}"
         );
         // 概要前空两行，且位于 MainContent（正文）内、附件区之前。
