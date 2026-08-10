@@ -162,9 +162,11 @@ fn center_document_title_rows(galley: &mut Arc<egui::Galley>, text: &str, width:
     };
     let galley = Arc::make_mut(galley);
     let mut logical_line = 0usize;
+    let mut centered_max_x = 0.0f32;
     for placed in &mut galley.rows {
         if logical_line == title_line {
             placed.pos.x = ((width - placed.size.x) * 0.5).max(0.0);
+            centered_max_x = centered_max_x.max(placed.pos.x + placed.size.x);
         }
         if placed.ends_with_newline {
             logical_line += 1;
@@ -173,6 +175,19 @@ fn center_document_title_rows(galley: &mut Arc<egui::Galley>, text: &str, width:
             }
         }
     }
+    // 居中会把标题行移到内容包围盒之外，而 galley.rect 仍是布局时的旧值。
+    // TextEdit（multiline 布局）按 galley.size()（=rect 内容包围盒）报告控件宽度，
+    // 于是文档只有短标题时编辑区被压成标题行那么宽，居中后的标题落在裁剪区外
+    // ——表现为“大标题显示不出来”，后续正文/二级标题够长把 rect 撑宽后才恢复。
+    // 这里把包围盒扩展到编辑区宽度（left 保持 0、高度不变），让控件始终占满
+    // wrap 宽度，标题完整居中显示；mesh_bounds 同步扩展，避免 culling 误判。
+    galley.rect.max.x = width.max(galley.rect.max.x);
+    galley.rect.max.x = galley.rect.max.x.max(centered_max_x);
+    let bounds = egui::Rect::from_min_max(
+        egui::pos2(0.0, galley.rect.min.y),
+        egui::pos2(galley.rect.max.x, galley.rect.max.y),
+    );
+    galley.mesh_bounds = galley.mesh_bounds.union(bounds);
 }
 
 /// 把整篇 Markdown 编译成带颜色的 `LayoutJob`；普通查找命中铺黄色底，当前命中
@@ -1109,5 +1124,55 @@ mod tests {
         );
         assert_covers("孤立的 ** 与 【 与 “ 不成对");
         assert_covers("中文**加粗**混排 ASCII `code` 与【待核实：日期】");
+    }
+
+    /// 历史 bug：文档只有一行短标题（`# 标题`）时，居中把标题行移到内容包围盒
+    /// 之外，而 TextEdit 按 galley.rect 报告控件宽度，编辑区被压成标题行那么宽，
+    /// 居中后的标题落在裁剪区外显示不出来；后续内容够长把 rect 撑宽后才恢复。
+    /// 修复后 rect/mesh_bounds 必须扩展到 wrap 宽度，标题行始终落在包围盒内。
+    #[test]
+    fn centered_short_title_expands_galley_rect_to_wrap_width() {
+        let ctx = egui::Context::default();
+        // headless 测试：先用默认字体绑定公文字体族（不加载真实字体文件），
+        // 再跑一帧让字体可用；布局几何不依赖具体字体。
+        {
+            let mut fonts = egui::FontDefinitions::default();
+            let fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+            for family in [
+                theme::FONT_FANGSONG,
+                theme::FONT_HEITI,
+                theme::FONT_KAITI,
+                theme::FONT_BIAOSONG,
+            ] {
+                fonts
+                    .families
+                    .insert(egui::FontFamily::Name(family.into()), fallback.clone());
+            }
+            ctx.set_fonts(fonts);
+        }
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        for text in ["# 大标题\n", "# 大标题", "# 大标题\n\n正文。\n"] {
+            let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+            let mut galley = ctx.fonts_mut(|fonts| fonts.layout_job(job));
+            center_document_title_rows(&mut galley, text, 600.0);
+            assert!(
+                galley.rect.max.x >= 600.0,
+                "仅短标题时 rect 应扩展到 wrap 宽度：{text:?} rect={:?}",
+                galley.rect,
+            );
+            assert!(
+                galley.rect.min.x == 0.0 && galley.rect.max.x <= 600.0 + 0.5,
+                "rect 不应向左偏移或超出 wrap 宽度：{text:?} rect={:?}",
+                galley.rect,
+            );
+            let title_row = &galley.rows[0];
+            assert!(
+                title_row.pos.x + title_row.size.x <= galley.rect.max.x + 0.5
+                    && title_row.pos.x >= galley.rect.min.x - 0.5,
+                "标题行居中后应落在扩展后的包围盒内：{text:?} row_pos={:?} rect={:?}",
+                title_row.pos,
+                galley.rect,
+            );
+        }
     }
 }

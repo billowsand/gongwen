@@ -8,9 +8,9 @@ use crate::{
         FORM_FIELD_MIN_WIDTH, FORM_LAYOUT_GUTTER, FORM_PANEL_DEFAULT_WIDTH, FORM_PANEL_MAX_WIDTH,
         FORM_PANEL_MIN_WIDTH, LABEL_WIDTH, SelectOption, TOGGLE_WIDTH, VersionScope,
         VersionSwitchPrompt, VersionTarget, WorkerResult, accent, contact_pair, export_and_compile,
-        layout_options, multi_select, open_in_os, plain_options, reveal_in_os, row_label,
-        row_label_with_info, section_heading_with_info, single_select, summarize,
-        switch_template_profile, truncate, version_hover, visible_rows, warn,
+        joint_responsible_editor, layout_options, multi_select, open_in_os, plain_options,
+        reveal_in_os, row_label, row_label_with_info, section_heading_with_info, single_select,
+        summarize, switch_template_profile, truncate, version_hover, visible_rows, warn,
     },
     diff,
     diff_view::{self, DiffViewAction, DiffViewConfig, DiffViewState},
@@ -19,9 +19,9 @@ use crate::{
     images, lmstudio, manuscript,
     manuscript::ManuscriptStore,
     models::{
-        AppConfig, CorrespondenceScope, DraftInput, GeneratedDraft, JointContact,
-        JointIssuanceMode, LetterVersion, ManuscriptStatus, SecurityLevel, StyleMode, TemplateKind,
-        VocabularyCategory, join_units, split_units,
+        AppConfig, CorrespondenceScope, DraftInput, GeneratedDraft, JointIssuanceMode,
+        LetterVersion, ManuscriptStatus, SecurityLevel, StyleMode, TemplateKind,
+        VocabularyCategory, split_units,
     },
     preview, prompt, rag, storage, theme, units,
     units::UnitDisplay,
@@ -1957,22 +1957,6 @@ impl DraftPage<'_> {
         } else {
             None
         };
-        let mut joint_contact_names = join_units(
-            &self
-                .doc
-                .draft
-                .profile
-                .joint_contacts
-                .iter()
-                .map(|contact| contact.name.clone())
-                .collect::<Vec<_>>(),
-        );
-        let people = plain_options(
-            &contacts
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>(),
-        );
         let leader_options = contacts
             .iter()
             .map(|(name, _)| {
@@ -2303,13 +2287,12 @@ impl DraftPage<'_> {
 
                     row_label(ui, "承办单位");
                     if self.doc.draft.profile.joint_issuance_mode == JointIssuanceMode::Mode1 {
-                        multi_select(
+                        // 联合发文：承办单位与联系人成对录入，数量天然一致、一一对应。
+                        joint_responsible_editor(
                             ui,
-                            "joint_responsible_units",
-                            &mut self.doc.draft.profile.joint_responsible_units,
+                            &mut self.doc.draft.profile,
                             &units,
-                            &[],
-                            "",
+                            &self.config.vocabulary,
                             &mut self.doc.manual_fields,
                             free_text,
                             field_width,
@@ -2328,40 +2311,11 @@ impl DraftPage<'_> {
                     }
                     ui.end_row();
 
-                    let mut contact_tip = people_filter_note.clone().unwrap_or_else(|| {
-                        "联系人从标准词库选择，并自动带出与姓名绑定的电话。".to_string()
-                    });
-                    if self.doc.draft.profile.joint_issuance_mode == JointIssuanceMode::Mode1
-                        && !joint_contact_names.trim().is_empty()
-                    {
-                        let phone_summary = split_units(&joint_contact_names)
-                            .into_iter()
-                            .map(|name| {
-                                let phone = contacts
-                                    .iter()
-                                    .find(|(candidate, _)| candidate == &name)
-                                    .map(|(_, phone)| phone.as_str())
-                                    .unwrap_or("（未维护电话）");
-                                format!("{name}：{phone}")
-                            })
-                            .collect::<Vec<_>>()
-                            .join("；");
-                        contact_tip.push_str(&format!(" 当前联系人及电话：{phone_summary}"));
-                    }
-                    row_label_with_info(ui, "联系人\n及电话", contact_tip);
-                    if self.doc.draft.profile.joint_issuance_mode == JointIssuanceMode::Mode1 {
-                        multi_select(
-                            ui,
-                            "joint_contacts",
-                            &mut joint_contact_names,
-                            &people,
-                            &[],
-                            "",
-                            &mut self.doc.manual_fields,
-                            false,
-                            field_width,
-                        );
-                    } else {
+                    if self.doc.draft.profile.joint_issuance_mode != JointIssuanceMode::Mode1 {
+                        let contact_tip = people_filter_note.clone().unwrap_or_else(|| {
+                            "联系人从标准词库选择，并自动带出与姓名绑定的电话。".to_string()
+                        });
+                        row_label_with_info(ui, "联系人\n及电话", contact_tip);
                         contact_pair(
                             ui,
                             &mut self.doc.draft.profile.contact_person,
@@ -2371,8 +2325,8 @@ impl DraftPage<'_> {
                             free_text,
                             field_width,
                         );
+                        ui.end_row();
                     }
-                    ui.end_row();
                 }
                 TemplateKind::PhoneNotice => {
                     row_label_with_info(
@@ -2479,29 +2433,6 @@ impl DraftPage<'_> {
                     ui.end_row();
                 }
             });
-
-        if self.doc.draft.kind == TemplateKind::OfficialLetter
-            && self.doc.draft.profile.joint_issuance_mode == JointIssuanceMode::Mode1
-        {
-            let previous = self.doc.draft.profile.joint_contacts.clone();
-            self.doc.draft.profile.joint_contacts = split_units(&joint_contact_names)
-                .into_iter()
-                .map(|name| {
-                    let phone = contacts
-                        .iter()
-                        .find(|(candidate, _)| candidate == &name)
-                        .map(|(_, phone)| phone.clone())
-                        .or_else(|| {
-                            previous
-                                .iter()
-                                .find(|contact| contact.name == name)
-                                .map(|contact| contact.phone.clone())
-                        })
-                        .unwrap_or_default();
-                    JointContact { name, phone }
-                })
-                .collect();
-        }
 
         ui.add_space(10.0);
         ui.heading(if self.doc.draft.kind == TemplateKind::PlainDocument {

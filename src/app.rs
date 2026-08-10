@@ -25,6 +25,7 @@ use crate::{
 };
 use anyhow::Context;
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -5132,222 +5133,299 @@ impl GongwenApp {
             ui.weak("没有符合条件的稿件。在起草页点“保存到稿件库”，或调整过滤条件。");
             return;
         }
-        egui::ScrollArea::both()
-            .id_salt("manuscript_list")
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                egui::Grid::new("manuscript_grid")
-                    .striped(true)
-                    .min_col_width(40.0)
-                    .show(ui, |ui| {
-                        let visible_ids = self
-                            .manuscript_rows
-                            .iter()
-                            .map(|row| row.id)
-                            .collect::<Vec<_>>();
-                        let mut all_selected = !visible_ids.is_empty()
-                            && visible_ids
-                                .iter()
-                                .all(|id| self.manuscript_selected.contains(id));
-                        if ui
-                            .checkbox(&mut all_selected, "")
-                            .on_hover_text(if all_selected {
-                                "取消选择当前列表全部稿件"
-                            } else {
-                                "选择当前列表全部稿件"
-                            })
-                            .changed()
-                        {
-                            if all_selected {
-                                self.manuscript_selected.extend(visible_ids);
-                            } else {
-                                for id in visible_ids {
-                                    self.manuscript_selected.remove(&id);
-                                }
+        // 表格列宽支持拖拽调整（resizable）：勾选列按内容自适应，操作列吃剩余宽度
+        // 且不可拖拽（避免把操作按钮挤出可视区），其余列可拖拽并设最小宽度。
+        const ROW_HEIGHT: f32 = 26.0;
+        let ctx = ui.ctx().clone();
+        TableBuilder::new(ui)
+            .id_salt("manuscript_table")
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::auto().at_least(28.0)) // 勾选
+            .column(Column::initial(52.0).at_least(44.0)) // 状态
+            .column(Column::initial(60.0).at_least(44.0)) // 文种
+            .column(Column::initial(48.0).at_least(40.0)) // 密级
+            .column(Column::initial(240.0).at_least(120.0)) // 标题
+            .column(Column::initial(160.0).at_least(100.0)) // 文号
+            .column(Column::initial(76.0).at_least(56.0)) // 成文日期
+            .column(Column::initial(76.0).at_least(56.0)) // 更新
+            .column(Column::initial(76.0).at_least(56.0)) // 归档
+            .column(Column::initial(56.0).at_least(44.0)) // 知识库
+            .column(Column::remainder().at_least(120.0).resizable(false)) // 操作
+            .header(ROW_HEIGHT, |mut header| {
+                let visible_ids = self
+                    .manuscript_rows
+                    .iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>();
+                let mut all_selected = !visible_ids.is_empty()
+                    && visible_ids
+                        .iter()
+                        .all(|id| self.manuscript_selected.contains(id));
+                header.col(|ui| {
+                    if ui
+                        .checkbox(&mut all_selected, "")
+                        .on_hover_text(if all_selected {
+                            "取消选择当前列表全部稿件"
+                        } else {
+                            "选择当前列表全部稿件"
+                        })
+                        .changed()
+                    {
+                        if all_selected {
+                            self.manuscript_selected.extend(visible_ids);
+                        } else {
+                            for id in visible_ids {
+                                self.manuscript_selected.remove(&id);
                             }
                         }
-                        ui.strong("状态");
-                        ui.strong("文种");
-                        ui.strong("密级");
-                        ui.strong("标题");
-                        ui.strong("文号");
-                        ui.strong("成文日期");
-                        ui.strong("更新");
-                        ui.strong("归档");
-                        ui.strong("知识库");
-                        ui.strong("操作");
-                        ui.end_row();
-                        for row in self.manuscript_rows.iter() {
-                            // 新行淡入：新增行首次出现时从不透明 0 平滑升到 1。
-                            let seen_t = ui.ctx().animate_bool_with_time(
-                                egui::Id::new(("manuscript_row_seen", row.id)),
-                                true,
-                                theme::anim::SLOW,
-                            );
-                            ui.set_opacity(seen_t);
-                            let mut batch_selected = self.manuscript_selected.contains(&row.id);
-                            if ui.checkbox(&mut batch_selected, "").changed() {
-                                if batch_selected {
-                                    self.manuscript_selected.insert(row.id);
-                                } else {
-                                    self.manuscript_selected.remove(&row.id);
-                                }
-                            }
-                            let row_selected = self
-                                .manuscript_detail
-                                .as_ref()
-                                .is_some_and(|detail| detail.id == row.id);
-                            let mut row_clicked = false;
-                            let mut row_double_clicked = false;
-                            let mut row_cell = |response: egui::Response| {
-                                row_clicked |= response.clicked();
-                                row_double_clicked |= response.double_clicked();
-                            };
-                            row_cell(
-                                ui.selectable_label(
-                                    row_selected,
-                                    egui::RichText::new(row.status.label())
-                                        .color(status_color(row.status)),
-                                ),
-                            );
-                            row_cell(ui.selectable_label(row_selected, row.kind.label()));
-                            let security_level = SecurityLevel::from_marking(&row.security_level);
-                            row_cell(
-                                ui.selectable_label(
-                                    row_selected,
-                                    egui::RichText::new(security_level_list_label(security_level))
-                                        .color(security_level_color(security_level)),
-                                ),
-                            );
-                            row_cell(ui.add_sized(
-                                [260.0, 20.0],
-                                egui::Button::selectable(row_selected, &row.title).truncate(),
-                            ));
-                            row_cell(ui.add_sized(
-                                [180.0, 20.0],
-                                egui::Button::selectable(row_selected, &row.doc_number).truncate(),
-                            ));
-                            row_cell(ui.selectable_label(row_selected, short_date(&row.doc_date)));
-                            row_cell(
-                                ui.selectable_label(row_selected, short_date(&row.updated_at)),
-                            );
-                            row_cell(
-                                ui.selectable_label(
-                                    row_selected,
-                                    row.archived_at
-                                        .as_deref()
-                                        .map(short_date)
-                                        .unwrap_or_else(|| "—".to_string()),
-                                ),
-                            );
-                            // 已入库标记：导入前就看得出哪些进过知识库，免得同一篇
-                            // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
-                            let indexed = self.knowledge_indexed_manuscripts.contains(&row.id);
-                            let indexed_cell = if indexed {
-                                egui::RichText::new("已入库").color(accent())
+                    }
+                });
+                header.col(|ui| {
+                    ui.strong("状态");
+                });
+                header.col(|ui| {
+                    ui.strong("文种");
+                });
+                header.col(|ui| {
+                    ui.strong("密级");
+                });
+                header.col(|ui| {
+                    ui.strong("标题");
+                });
+                header.col(|ui| {
+                    ui.strong("文号");
+                });
+                header.col(|ui| {
+                    ui.strong("成文日期");
+                });
+                header.col(|ui| {
+                    ui.strong("更新");
+                });
+                header.col(|ui| {
+                    ui.strong("归档");
+                });
+                header.col(|ui| {
+                    ui.strong("知识库");
+                });
+                header.col(|ui| {
+                    ui.strong("操作");
+                });
+            })
+            .body(|body| {
+                body.rows(ROW_HEIGHT, self.manuscript_rows.len(), |mut row| {
+                    let index = row.index();
+                    let data = &self.manuscript_rows[index];
+                    // 新行淡入：新增行首次出现时从不透明 0 平滑升到 1。
+                    let seen_t = ctx.animate_bool_with_time(
+                        egui::Id::new(("manuscript_row_seen", data.id)),
+                        true,
+                        theme::anim::SLOW,
+                    );
+                    let mut batch_selected = self.manuscript_selected.contains(&data.id);
+                    let row_selected = self
+                        .manuscript_detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.id == data.id);
+                    // 行点击/双击跨多个单元格收集，用 Cell 避免多个 col 闭包争夺可变借用。
+                    let row_clicked = std::cell::Cell::new(false);
+                    let row_double_clicked = std::cell::Cell::new(false);
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        if ui.checkbox(&mut batch_selected, "").changed() {
+                            if batch_selected {
+                                self.manuscript_selected.insert(data.id);
                             } else {
-                                egui::RichText::new("—").color(theme::text_muted())
-                            };
-                            row_cell(
-                                ui.selectable_label(row_selected, indexed_cell)
-                                    .on_hover_text(if indexed {
-                                        "这篇稿件已加入知识库，再次导入会覆盖旧的索引"
-                                    } else {
-                                        "尚未加入知识库，可勾选后用工具栏的「导入到知识库」"
-                                    }),
-                            );
-                            if row_double_clicked {
-                                *action = Some(ManuscriptAction::Edit(row.id));
-                            } else if row_clicked {
-                                *action = Some(ManuscriptAction::Detail(row.id));
+                                self.manuscript_selected.remove(&data.id);
                             }
-                            ui.horizontal(|ui| match row.status {
-                                ManuscriptStatus::Archived => {
-                                    if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
-                                        .on_hover_text("在只读公文界面中打开")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::Edit(row.id));
-                                    }
-                                    if theme::icon_button(ui, theme::Icon::Copy, "基于此公文新建")
-                                        .on_hover_text(
-                                            "复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件",
-                                        )
-                                        .clicked()
-                                    {
-                                        *action =
-                                            Some(ManuscriptAction::CreateFromExisting(row.id));
-                                    }
-                                }
-                                ManuscriptStatus::Published => {
-                                    if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
-                                        .on_hover_text("在只读公文界面中打开")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::Edit(row.id));
-                                    }
-                                    if theme::icon_button(ui, theme::Icon::Undo, "退回草稿")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::RevertToDraft(row.id));
-                                    }
-                                    if theme::icon_button(ui, theme::Icon::Copy, "基于此公文新建")
-                                        .on_hover_text(
-                                            "复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件",
-                                        )
-                                        .clicked()
-                                    {
-                                        *action =
-                                            Some(ManuscriptAction::CreateFromExisting(row.id));
-                                    }
-                                    if theme::icon_button(ui, theme::Icon::Archive, "归档")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::ArchivePending(row.id));
-                                    }
-                                    if theme::danger_icon_button(ui, theme::Icon::Trash, "删除")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::DeletePending(row.id));
-                                    }
-                                }
-                                _ => {
-                                    if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
-                                        .on_hover_text("打开公文编辑界面")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::Edit(row.id));
-                                    }
-                                    if theme::icon_button(ui, theme::Icon::Copy, "基于此公文新建")
-                                        .on_hover_text(
-                                            "复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件",
-                                        )
-                                        .clicked()
-                                    {
-                                        *action =
-                                            Some(ManuscriptAction::CreateFromExisting(row.id));
-                                    }
-                                    if theme::icon_button(ui, theme::Icon::Publish, "发布")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::Publish(row.id));
-                                    }
-                                    if theme::icon_button(ui, theme::Icon::Archive, "归档")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::ArchivePending(row.id));
-                                    }
-                                    if theme::danger_icon_button(ui, theme::Icon::Trash, "删除")
-                                        .clicked()
-                                    {
-                                        *action = Some(ManuscriptAction::DeletePending(row.id));
-                                    }
-                                }
-                            });
-                            ui.end_row();
-                            ui.set_opacity(1.0);
                         }
                     });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let response = ui.selectable_label(
+                            row_selected,
+                            egui::RichText::new(data.status.label())
+                                .color(status_color(data.status)),
+                        );
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let response = ui.selectable_label(row_selected, data.kind.label());
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let security_level = SecurityLevel::from_marking(&data.security_level);
+                        let response = ui.selectable_label(
+                            row_selected,
+                            egui::RichText::new(security_level_list_label(security_level))
+                                .color(security_level_color(security_level)),
+                        );
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let response = ui.add_sized(
+                            [ui.available_width(), 20.0],
+                            egui::Button::selectable(row_selected, &data.title).truncate(),
+                        );
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let response = ui.add_sized(
+                            [ui.available_width(), 20.0],
+                            egui::Button::selectable(row_selected, &data.doc_number).truncate(),
+                        );
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let response =
+                            ui.selectable_label(row_selected, short_date(&data.doc_date));
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let response =
+                            ui.selectable_label(row_selected, short_date(&data.updated_at));
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let response = ui.selectable_label(
+                            row_selected,
+                            data.archived_at
+                                .as_deref()
+                                .map(short_date)
+                                .unwrap_or_else(|| "—".to_string()),
+                        );
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    // 已入库标记：导入前就看得出哪些进过知识库，免得同一篇
+                    // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        let indexed = self.knowledge_indexed_manuscripts.contains(&data.id);
+                        let indexed_cell = if indexed {
+                            egui::RichText::new("已入库").color(accent())
+                        } else {
+                            egui::RichText::new("—").color(theme::text_muted())
+                        };
+                        let response = ui
+                            .selectable_label(row_selected, indexed_cell)
+                            .on_hover_text(if indexed {
+                                "这篇稿件已加入知识库，再次导入会覆盖旧的索引"
+                            } else {
+                                "尚未加入知识库，可勾选后用工具栏的「导入到知识库」"
+                            });
+                        row_clicked.set(row_clicked.get() | response.clicked());
+                        row_double_clicked
+                            .set(row_double_clicked.get() | response.double_clicked());
+                    });
+                    if row_double_clicked.get() {
+                        *action = Some(ManuscriptAction::Edit(data.id));
+                    } else if row_clicked.get() {
+                        *action = Some(ManuscriptAction::Detail(data.id));
+                    }
+                    row.col(|ui| {
+                        ui.set_opacity(seen_t);
+                        ui.horizontal(|ui| match data.status {
+                            ManuscriptStatus::Archived => {
+                                if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
+                                    .on_hover_text("在只读公文界面中打开")
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::Edit(data.id));
+                                }
+                                if theme::icon_button(ui, theme::Icon::Copy, "基于此公文新建")
+                                    .on_hover_text(
+                                        "复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件",
+                                    )
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::CreateFromExisting(data.id));
+                                }
+                            }
+                            ManuscriptStatus::Published => {
+                                if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
+                                    .on_hover_text("在只读公文界面中打开")
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::Edit(data.id));
+                                }
+                                if theme::icon_button(ui, theme::Icon::Undo, "退回草稿").clicked()
+                                {
+                                    *action = Some(ManuscriptAction::RevertToDraft(data.id));
+                                }
+                                if theme::icon_button(ui, theme::Icon::Copy, "基于此公文新建")
+                                    .on_hover_text(
+                                        "复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件",
+                                    )
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::CreateFromExisting(data.id));
+                                }
+                                if theme::icon_button(ui, theme::Icon::Archive, "归档").clicked()
+                                {
+                                    *action = Some(ManuscriptAction::ArchivePending(data.id));
+                                }
+                                if theme::danger_icon_button(ui, theme::Icon::Trash, "删除")
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::DeletePending(data.id));
+                                }
+                            }
+                            _ => {
+                                if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
+                                    .on_hover_text("打开公文编辑界面")
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::Edit(data.id));
+                                }
+                                if theme::icon_button(ui, theme::Icon::Copy, "基于此公文新建")
+                                    .on_hover_text(
+                                        "复制行文要素和正文，新稿不会继承状态、版本或 PDF 附件",
+                                    )
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::CreateFromExisting(data.id));
+                                }
+                                if theme::icon_button(ui, theme::Icon::Publish, "发布").clicked()
+                                {
+                                    *action = Some(ManuscriptAction::Publish(data.id));
+                                }
+                                if theme::icon_button(ui, theme::Icon::Archive, "归档").clicked()
+                                {
+                                    *action = Some(ManuscriptAction::ArchivePending(data.id));
+                                }
+                                if theme::danger_icon_button(ui, theme::Icon::Trash, "删除")
+                                    .clicked()
+                                {
+                                    *action = Some(ManuscriptAction::DeletePending(data.id));
+                                }
+                            }
+                        });
+                    });
+                });
             });
     }
 
@@ -8490,6 +8568,177 @@ pub(crate) fn single_select(
             toggle_manual_button(ui, id, manual, manual_fields);
         }
     });
+    changed
+}
+
+/// 联合发文承办单位 ↔ 联系人成对录入：每行一个承办单位 + 一个联系人（自动带出
+/// 绑定电话），数量天然一致、一一对应，从源头避免“承办单位 3 个、联系人只有 2 个”
+/// 这类错配；联系人按该行承办单位过滤（规格 §2.3“人随事走”）。返回本帧是否有改动。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn joint_responsible_editor(
+    ui: &mut egui::Ui,
+    profile: &mut crate::models::TemplateProfile,
+    unit_options: &[SelectOption],
+    vocabulary: &[VocabularyEntry],
+    manual_fields: &mut BTreeSet<String>,
+    allow_free_text: bool,
+    width: f32,
+) -> bool {
+    use crate::models::{JointContact, JointResponsibleEntry, sync_joint_responsible};
+    let display = crate::units::UnitDisplay::new(vocabulary);
+    // 旧稿件可能只有承办单位字符串、没有联系人条目：补齐成对条目，避免既有单位
+    // 丢失。行数以较大者为准——旧数据承办单位与联系人按索引配对，数量不必相等。
+    {
+        let units = split_units(&profile.joint_responsible_units);
+        if units.len() > profile.joint_contacts.len() {
+            profile
+                .joint_contacts
+                .extend(
+                    units
+                        .iter()
+                        .skip(profile.joint_contacts.len())
+                        .map(|unit| JointContact {
+                            unit: unit.clone(),
+                            name: String::new(),
+                            phone: String::new(),
+                        }),
+                );
+        }
+    }
+    // 在副本上编辑，避免渲染中与 profile 反复借用冲突；结束后整体写回并同步两个字段。
+    let mut entries = profile.joint_contacts.clone();
+    let mut changed = false;
+    let mut remove_index = None;
+    // 该编辑器位于 Grid 的横向单元格中：必须用 vertical 包住，每行 ui.horizontal
+    // 才会向下堆叠；否则多个承办单位会在同一行向右排开。
+    ui.vertical(|ui| {
+        let row_count = entries.len();
+        let unit_width = ((width - 60.0) * 0.5).max(120.0);
+        let contact_width = width - unit_width - 40.0;
+        for (index, entry) in entries.iter_mut().enumerate() {
+            let unit_key = format!("joint_resp_unit_{index}");
+            let unit_manual = manual_fields.contains(&unit_key) || unit_options.is_empty();
+            let people = display.responsible_people_of(&entry.unit);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                // 承办单位：下拉选择，或（允许手填时）切换为文本框。
+                if unit_manual {
+                    if unit_options.is_empty() && !allow_free_text {
+                        ui.colored_label(warn(), "标准词库中暂无单位，请先到“标准词库”页维护");
+                    } else {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut entry.unit)
+                                    .hint_text("承办单位")
+                                    .desired_width(unit_width),
+                            )
+                            .changed();
+                    }
+                } else {
+                    let selected_text = if entry.unit.trim().is_empty() {
+                        "（未选择）".to_string()
+                    } else {
+                        unit_options
+                            .iter()
+                            .find(|option| option.value == entry.unit)
+                            .map(|option| option.full.clone())
+                            .unwrap_or_else(|| entry.unit.clone())
+                    };
+                    egui::ComboBox::from_id_salt(&unit_key)
+                        .selected_text(selected_text)
+                        .width(unit_width)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(entry.unit.trim().is_empty(), "（未选择）")
+                                .clicked()
+                            {
+                                entry.unit.clear();
+                                changed = true;
+                            }
+                            for option in unit_options {
+                                let response = ui.selectable_label(
+                                    entry.unit == option.value,
+                                    indented_label(option),
+                                );
+                                let response = if option.full == option.label {
+                                    response
+                                } else {
+                                    response.on_hover_text(&option.full)
+                                };
+                                if response.clicked() {
+                                    entry.unit = option.value.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                }
+                if allow_free_text && !unit_options.is_empty() {
+                    toggle_manual_button(ui, &unit_key, unit_manual, manual_fields);
+                }
+                // 联系人：按该行承办单位过滤，选中后自动带出绑定电话。
+                let contact_selected = if entry.name.trim().is_empty() {
+                    "（未选择）".to_string()
+                } else {
+                    entry.name.clone()
+                };
+                egui::ComboBox::from_id_salt(format!("joint_resp_contact_{index}"))
+                    .selected_text(contact_selected)
+                    .width(contact_width)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(entry.name.trim().is_empty(), "（未选择）")
+                            .clicked()
+                        {
+                            entry.name.clear();
+                            entry.phone.clear();
+                            changed = true;
+                        }
+                        if people.is_empty() && !entry.unit.trim().is_empty() {
+                            ui.weak("该单位下暂无可选联系人");
+                        }
+                        for (candidate, phone) in &people {
+                            if ui
+                                .selectable_label(entry.name == *candidate, candidate)
+                                .clicked()
+                            {
+                                entry.name = candidate.clone();
+                                entry.phone = phone.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+                if row_count > 1
+                    && theme::danger_icon_button(ui, theme::Icon::Trash, "删除该行").clicked()
+                {
+                    remove_index = Some(index);
+                }
+            });
+            if remove_index.is_some() {
+                break;
+            }
+        }
+        if let Some(index) = remove_index {
+            entries.remove(index);
+            changed = true;
+        }
+        if ui.button("＋ 添加一行").clicked() {
+            entries.push(JointContact::default());
+            changed = true;
+        }
+    });
+    if changed {
+        sync_joint_responsible(
+            profile,
+            &entries
+                .iter()
+                .map(|contact| JointResponsibleEntry {
+                    unit: contact.unit.clone(),
+                    name: contact.name.clone(),
+                    phone: contact.phone.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
     changed
 }
 

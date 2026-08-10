@@ -204,7 +204,17 @@ fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay
     };
     let joint_mode_one = input.kind == TemplateKind::OfficialLetter
         && input.profile.joint_issuance_mode == JointIssuanceMode::Mode1;
-    let joint_option = if joint_mode_one { ",jointmodeone" } else { "" };
+    // 落款按“多家单位并列”排版只发生在发文单位多于 1 个时；只剩 1 个时回落
+    // 单独发文的右侧落款。版记不受此影响：只要是联合发文模式 1，承办单位、
+    // 联系人、电话就按行逐条列出，因此 jointrecord 与 jointmodeone 分开给。
+    let joint_signature = crate::models::is_joint_signature(input);
+    let joint_option = if joint_signature {
+        ",jointmodeone"
+    } else if joint_mode_one {
+        ",jointrecord"
+    } else {
+        ""
+    };
     let joint_commands = if joint_mode_one {
         joint_mode_one_commands(
             input,
@@ -212,6 +222,7 @@ fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay
             signature_month,
             &signature_day,
             display,
+            joint_signature,
         )
     } else {
         String::new()
@@ -252,15 +263,22 @@ fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay
         display.abbr(&input.profile.responsible_unit)
     };
     let signature_display = {
-        let raw = if input.profile.signing_unit.trim().is_empty() {
-            &input.profile.issuing_unit
+        let raw = if !input.profile.signing_unit.trim().is_empty() {
+            input.profile.signing_unit.trim().to_string()
+        } else if joint_mode_one {
+            // 联合发文模式 1 只剩 1 个发文单位：落款回落右侧单列，单位取该唯一发文
+            // 单位（联合发文的单位存在 joint_issuing_units，issuing_unit 是空的）。
+            split_units(&input.profile.joint_issuing_units)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| input.profile.issuing_unit.trim().to_string())
         } else {
-            &input.profile.signing_unit
+            input.profile.issuing_unit.trim().to_string()
         };
         if input.kind == TemplateKind::PhoneNotice {
-            display.abbr_spaced(raw)
+            display.abbr_spaced(&raw)
         } else {
-            display.full_name_for(raw, input.uses_external_unit_names())
+            display.full_name_for(&raw, input.uses_external_unit_names())
         }
     };
 
@@ -369,12 +387,15 @@ fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
     )
 }
 
+/// 联合发文模式 1 的落款与版记内容。`with_signature` 为假时只输出版记
+/// （发文单位只剩 1 个，落款交给类默认的右侧单列，不需要并列落款内容）。
 fn joint_mode_one_commands(
     input: &DraftInput,
     year: &str,
     month: &str,
     day: &str,
     display: &UnitDisplay,
+    with_signature: bool,
 ) -> String {
     let units = split_units(&input.profile.joint_issuing_units);
     let row_count = units.len().div_ceil(2).max(1);
@@ -417,14 +438,13 @@ fn joint_mode_one_commands(
             ));
         }
     }
-    let responsible = split_units(&input.profile.joint_responsible_units);
-    let contacts = &input.profile.joint_contacts;
-    let record_rows = responsible.len().max(contacts.len()).max(1);
+    let entries = crate::models::joint_responsible_entries(&input.profile);
+    let record_rows = entries.len().max(1);
     let mut record_lines = Vec::new();
     for index in 0..record_rows {
-        let contact = contacts.get(index);
-        let responsible_name = display.abbr(responsible.get(index).map_or("", String::as_str));
-        let contact_name = contact.map_or("", |value| value.name.as_str());
+        let entry = entries.get(index);
+        let responsible_name = display.abbr(entry.map_or("", |value| value.unit.as_str()));
+        let contact_name = entry.map_or("", |value| value.name.as_str());
         // 规格 §3.2 版记对齐：第 2 行起承办单位名称前加 5em、联系人前加 4em 占位，
         // 使后续行的名称与第一行标签后的位置对齐。用 \hspace* 而非连续 \quad，
         // 规避个别 TeX 发行版对单元格起始处多个 \quad 的解析问题。
@@ -439,7 +459,7 @@ fn joint_mode_one_commands(
             contact_pad,
             latex_name(contact_name),
             if index == 0 { "联系电话：" } else { "" },
-            tex_escape(contact.map_or("", |value| value.phone.as_str())),
+            tex_escape(entry.map_or("", |value| value.phone.as_str())),
         ));
     }
     // 落款需要多高由类在排版时装箱量出（见 cls 的 \gwa@placeclosing），
@@ -461,8 +481,9 @@ fn joint_mode_one_commands(
         ),
         _ => closing_content,
     };
-    format!(
-        r#"\SetJointSignatureContent{{%
+    let signature_command = if with_signature {
+        format!(
+            r#"\SetJointSignatureContent{{%
 \begin{{center}}
 \renewcommand{{\arraystretch}}{{1}}
 \begin{{tabular}}{{@{{}}>{{\centering\arraybackslash}}p{{72mm}}>{{\centering\arraybackslash}}p{{72mm}}@{{}}}}
@@ -472,7 +493,15 @@ fn joint_mode_one_commands(
 {closing}
 \end{{center}}
 }}
-\SetJointFooterRecord{{%
+"#,
+            signature_rows = signature_rows.join("\n"),
+            closing = closing,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"{signature_command}\SetJointFooterRecord{{%
 \par
 \vspace*{{\fill}}
 \setlength{{\parindent}}{{0pt}}
@@ -489,8 +518,7 @@ fn joint_mode_one_commands(
 \bottomrule[0.6mm]
 \end{{tabularx}}\par
 }}"#,
-        signature_rows = signature_rows.join("\n"),
-        closing = closing,
+        signature_command = signature_command,
         record_lines = record_lines.join("\n"),
     )
 }
@@ -1732,6 +1760,60 @@ mod tests {
     }
 
     #[test]
+    fn joint_mode_one_single_unit_falls_back_to_single_signature() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::OfficialLetter;
+        input.profile.joint_issuance_mode = JointIssuanceMode::Mode1;
+        input.profile.joint_issuing_units = "甲单位".into();
+        input.profile.main_issuing_unit = "甲单位".into();
+        input.profile.department_code = "甲函".into();
+        input.profile.document_number = "9".into();
+        input.profile.joint_responsible_units = "甲处室、乙处室".into();
+        input.profile.joint_contacts = vec![
+            JointContact {
+                unit: "甲处室".into(),
+                name: "张三".into(),
+                phone: "010-11111111".into(),
+            },
+            JointContact {
+                unit: "乙处室".into(),
+                name: "李四".into(),
+                phone: "010-22222222".into(),
+            },
+        ];
+        input.date = "2026年8月5日".into();
+
+        let tex = letter_tex(&input, "# 单单位联合函\n\n正文。");
+        // 只剩一个发文单位时不启用 jointmodeone 排版选项，落款回到类默认的右侧块。
+        assert!(!tex.contains("jointmodeone"), "{tex}");
+        // 不出现联合落款的两列 72mm tabular。
+        assert!(!tex.contains(r"p{72mm}"), "{tex}");
+        // 唯一发文单位既是红头单位，也是落款单位——落款不能是空的。
+        assert!(
+            tex.contains(r"\renewcommand{\IssuingUnit}{甲单位}"),
+            "{tex}"
+        );
+        assert!(
+            tex.contains(r"\renewcommand{\SignatureUnit}{甲单位}"),
+            "{tex}"
+        );
+        // 版记仍按联合发文逐行列出承办单位、联系人、电话（jointrecord 选项）。
+        assert!(tex.contains(",jointrecord]"), "{tex}");
+        assert!(tex.contains(r"\SetJointFooterRecord"), "{tex}");
+        // 两字姓名中间加 1em，与联合发文多单位时的版记一致。
+        assert!(
+            tex.contains("承办单位：甲处室 & 联系人：张\\hspace{1em}三 & 联系电话：010-11111111"),
+            "{tex}"
+        );
+        assert!(
+            tex.contains("\\hspace*{5em}乙处室 & \\hspace*{4em}李\\hspace{1em}四 & 010-22222222"),
+            "{tex}"
+        );
+        // 落款并列内容不再输出（类不会用到，避免留下死内容）。
+        assert!(!tex.contains(r"\SetJointSignatureContent"), "{tex}");
+    }
+
+    #[test]
     fn external_letter_latex_uses_external_names_and_keeps_abbr() {
         let mut input = DraftInput::default();
         input.profile.correspondence_scope = crate::models::CorrespondenceScope::External;
@@ -1770,10 +1852,12 @@ mod tests {
         input.profile.joint_responsible_units = "甲处室、乙处室".into();
         input.profile.joint_contacts = vec![
             JointContact {
+                unit: "甲处室".into(),
                 name: "张三".into(),
                 phone: "010-11111111".into(),
             },
             JointContact {
+                unit: "乙处室".into(),
                 name: "李四".into(),
                 phone: "010-22222222".into(),
             },

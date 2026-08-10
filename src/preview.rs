@@ -627,11 +627,20 @@ fn signature_block(
         return;
     }
     ui.add_space(metrics.mm(CLOSING_GAP_MM));
-    if is_joint_mode_one(input) {
+    if crate::models::is_joint_signature(input) {
         joint_signature_block(ui, metrics, input, display);
         return;
     }
-    let unit = signature_unit(input, display);
+    let unit = if is_joint_mode_one(input) {
+        // 联合发文模式 1 只剩 1 个发文单位：回落右侧落款，单位取该唯一发文单位。
+        let raw = split_units(&input.profile.joint_issuing_units)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        display.full_name_for(&raw, input.uses_external_unit_names())
+    } else {
+        signature_unit(input, display)
+    };
     if unit.trim().is_empty() {
         return;
     }
@@ -777,18 +786,18 @@ fn footer_record(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, displ
         format!("抄送：{copies_to}")
     };
 
-    // 承办单位/联系人/电话：联合发文有多行，其余只有一行。
+    // 承办单位/联系人/电话：联合发文有多行，其余只有一行。联合发文的承办单位
+    // 与联系人成对录入（一一对应），旧稿件按索引回落配对。
     let rows: Vec<[String; 3]> = if joint {
-        let responsible = split_units(&input.profile.joint_responsible_units);
-        let contacts = &input.profile.joint_contacts;
-        let count = responsible.len().max(contacts.len()).max(1);
+        let entries = crate::models::joint_responsible_entries(&input.profile);
+        let count = entries.len().max(1);
         (0..count)
             .map(|index| {
-                let contact = contacts.get(index);
+                let entry = entries.get(index);
                 [
-                    display.abbr(responsible.get(index).map_or("", String::as_str)),
-                    contact.map_or(String::new(), |value| value.name.clone()),
-                    contact.map_or(String::new(), |value| value.phone.clone()),
+                    display.abbr(entry.map_or("", |value| value.unit.as_str())),
+                    entry.map_or(String::new(), |value| value.name.clone()),
+                    entry.map_or(String::new(), |value| value.phone.clone()),
                 ]
             })
             .collect()

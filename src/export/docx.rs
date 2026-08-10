@@ -721,15 +721,14 @@ fn joint_record_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<TableRow>
         RECORD_OTHER_COLUMN_TWIPS,
         RECORD_PHONE_COLUMN_TWIPS,
     ];
-    let responsible = split_units(&input.profile.joint_responsible_units);
-    let contacts = &input.profile.joint_contacts;
-    let row_count = responsible.len().max(contacts.len());
+    let entries = crate::models::joint_responsible_entries(&input.profile);
+    let row_count = entries.len().max(1);
     (0..row_count)
         .map(|index| {
-            let contact = contacts.get(index);
-            let responsible_name = display.abbr(responsible.get(index).map_or("", String::as_str));
+            let entry = entries.get(index);
+            let responsible_name = display.abbr(entry.map_or("", |value| value.unit.as_str()));
             let (contact_text, contact_size) =
-                docx_name(contact.map_or("", |value| value.name.as_str()), FOOTER_SIZE);
+                docx_name(entry.map_or("", |value| value.name.as_str()), FOOTER_SIZE);
             // “承办单位：”5 字 ≈ 1400 twips，“联系人：”4 字 ≈ 1120 twips。
             let unit_left = if index == 0 { 0 } else { 1400 };
             let contact_left = if index == 0 { 0 } else { 1120 };
@@ -760,7 +759,7 @@ fn joint_record_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<TableRow>
                     &format!(
                         "{}{}",
                         if index == 0 { "联系电话：" } else { "" },
-                        contact.map_or("", |value| value.phone.as_str())
+                        entry.map_or("", |value| value.phone.as_str())
                     ),
                     grid[2],
                     AlignmentType::Right,
@@ -1378,22 +1377,30 @@ pub fn write_docx(
         }
     }
 
-    if is_joint_mode_one(input) {
+    if crate::models::is_joint_signature(input) {
         doc = add_joint_signature(doc, input, display);
     } else if matches!(
         input.kind,
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice | TemplateKind::WhitePaper
     ) {
         let raw_signature = if input.profile.signing_unit.trim().is_empty() {
-            input.profile.issuing_unit.trim()
+            if is_joint_mode_one(input) {
+                // 联合发文模式 1 只剩 1 个发文单位：回落右侧落款，单位取该唯一发文单位。
+                split_units(&input.profile.joint_issuing_units)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| input.profile.issuing_unit.trim().to_string())
+            } else {
+                input.profile.issuing_unit.trim().to_string()
+            }
         } else {
-            input.profile.signing_unit.trim()
+            input.profile.signing_unit.trim().to_string()
         };
         // 规格 §3.1：公函落款显示全称；电话通知落款显示简称（少于 5 字逐字加空格）。
         let signature = if input.kind == TemplateKind::PhoneNotice {
-            display.abbr_spaced(raw_signature)
+            display.abbr_spaced(&raw_signature)
         } else {
-            display.full_name_for(raw_signature, input.uses_external_unit_names())
+            display.full_name_for(&raw_signature, input.uses_external_unit_names())
         };
         if !signature.is_empty() {
             // 代章直接跟在落款单位后面同一行（如“星海省教育厅（代章）”），不另起一行。
@@ -1926,10 +1933,12 @@ mod tests {
         input.profile.joint_responsible_units = "甲处室、乙处室".into();
         input.profile.joint_contacts = vec![
             JointContact {
+                unit: "甲处室".into(),
                 name: "张三".into(),
                 phone: "010-11111111".into(),
             },
             JointContact {
+                unit: "乙处室".into(),
                 name: "李四".into(),
                 phone: "010-22222222".into(),
             },
@@ -1988,6 +1997,52 @@ mod tests {
         assert!(xml.contains("李\u{2003}四"));
         assert!(xml.contains("010-11111111"));
         assert!(xml.contains("010-22222222"));
+    }
+
+    #[test]
+    fn joint_mode_one_single_unit_falls_back_to_right_aligned_signature() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("joint-single.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::OfficialLetter;
+        input.profile.joint_issuance_mode = JointIssuanceMode::Mode1;
+        input.profile.joint_issuing_units = "甲单位".into();
+        input.profile.main_issuing_unit = "甲单位".into();
+        input.profile.department_code = "甲函".into();
+        input.profile.document_number = "9".into();
+        input.profile.recipient = "收文单位".into();
+        input.profile.joint_responsible_units = "甲处室".into();
+        input.profile.joint_contacts = vec![JointContact {
+            unit: "甲处室".into(),
+            name: "张三".into(),
+            phone: "010-11111111".into(),
+        }];
+        input.date = "2026年8月5日".into();
+        write_docx_ok(&path, &input, "# 单单位联合函\n\n正文。").unwrap();
+
+        let xml = zip_text(&path, "word/document.xml");
+        // 最后一个“甲单位”出现在落款（红头在前）：应是右对齐的单独段落，
+        // 而不是联合发文的左列居中两列表格。
+        let mut search_from = 0;
+        let mut last_sig = "";
+        while let Some(at) = xml[search_from..].find("甲单位") {
+            let abs = search_from + at;
+            let start = xml[..abs].rfind("<w:p ").unwrap();
+            let end = xml[abs..].find("</w:p>").unwrap() + abs + "</w:p>".len();
+            last_sig = &xml[start..end];
+            search_from = end;
+        }
+        assert!(!last_sig.is_empty(), "落款应出现“甲单位”");
+        assert!(
+            last_sig.contains(r#"w:jc w:val="right""#),
+            "单单位联合发文落款应右对齐：{last_sig}"
+        );
+        assert!(
+            !last_sig.contains("<w:tbl>"),
+            "不应再走联合落款两列表格：{last_sig}"
+        );
+        // 联合落款的两列表格（72mm 列）不再出现。
+        assert!(!xml.contains(r#"w:gridCol w:w="4422""#));
     }
 
     #[test]

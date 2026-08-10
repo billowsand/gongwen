@@ -93,6 +93,15 @@ impl JointIssuanceMode {
     }
 }
 
+/// 联合发文模式 1 是否按“多家单位并列”排版落款：发文单位多于 1 个时才并列。
+/// 只剩 1 个（或 0 个）发文单位时回落单独发文的右侧落款，避免孤零零的单位
+/// 挤在联合落款的左列。红头、版记等其他联合逻辑不受此函数影响。
+pub fn is_joint_signature(input: &DraftInput) -> bool {
+    input.kind == TemplateKind::OfficialLetter
+        && input.profile.joint_issuance_mode == JointIssuanceMode::Mode1
+        && split_units(&input.profile.joint_issuing_units).len() > 1
+}
+
 /// 函稿的行文范围。内部函使用单位正常名称，外部函优先使用单位维护的外部名称。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CorrespondenceScope {
@@ -115,8 +124,65 @@ impl CorrespondenceScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct JointContact {
+    /// 承办单位（成对录入时与联系人一一对应）。旧稿件没有该字段时为空串，
+    /// 渲染端按索引回落 `joint_responsible_units` 的第 N 个。
+    pub unit: String,
     pub name: String,
     pub phone: String,
+}
+
+/// 联合发文承办条目（成对视图）：承办单位 ↔ 联系人 ↔ 电话 一一对应。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JointResponsibleEntry {
+    pub unit: String,
+    pub name: String,
+    pub phone: String,
+}
+
+/// 把联合发文承办单位列表与联系人列表归一化成成对条目。
+/// 旧稿件联系人未绑承办单位（`unit` 为空）时，按索引回落
+/// `joint_responsible_units` 的第 N 个单位，保持版记配对关系。
+/// 行数取两者较大值：旧稿件承办单位可能多于联系人，多出来的单位仍要进版记，
+/// 不能因为没配联系人就被丢掉。
+/// 完全空白（单位与联系人都没填）的占位行会被过滤，避免版记出现空行。
+pub fn joint_responsible_entries(profile: &TemplateProfile) -> Vec<JointResponsibleEntry> {
+    let units = split_units(&profile.joint_responsible_units);
+    let count = units.len().max(profile.joint_contacts.len());
+    (0..count)
+        .map(|index| {
+            let contact = profile.joint_contacts.get(index);
+            let bound = contact.map_or("", |contact| contact.unit.trim());
+            JointResponsibleEntry {
+                unit: if bound.is_empty() {
+                    units.get(index).cloned().unwrap_or_default()
+                } else {
+                    bound.to_string()
+                },
+                name: contact.map_or(String::new(), |contact| contact.name.clone()),
+                phone: contact.map_or(String::new(), |contact| contact.phone.clone()),
+            }
+        })
+        .filter(|entry| !entry.unit.trim().is_empty() || !entry.name.trim().is_empty())
+        .collect()
+}
+
+/// 从成对承办条目同步 `joint_responsible_units` 与 `joint_contacts` 两个字段，
+/// 保证两者数量与顺序一致（成对录入的唯一数据源是条目列表）。
+pub fn sync_joint_responsible(profile: &mut TemplateProfile, entries: &[JointResponsibleEntry]) {
+    profile.joint_responsible_units = entries
+        .iter()
+        .map(|entry| entry.unit.trim().to_string())
+        .filter(|unit| !unit.is_empty())
+        .collect::<Vec<_>>()
+        .join("、");
+    profile.joint_contacts = entries
+        .iter()
+        .map(|entry| JointContact {
+            unit: entry.unit.trim().to_string(),
+            name: entry.name.clone(),
+            phone: entry.phone.clone(),
+        })
+        .collect();
 }
 
 /// 正文排版风格。紧缩风格把正文区 # 号最多（层级最深）的那一级标题与紧随其后的正文段落合并为一行。
@@ -1210,6 +1276,119 @@ mod tests {
             .expect("应有格式规整预置项");
         assert!(format.instruction.is_empty());
         assert!(format.kinds.is_empty());
+    }
+
+    /// 旧稿件联系人未绑承办单位（unit 为空）：按索引回落 joint_responsible_units。
+    #[test]
+    fn joint_responsible_entries_fall_back_to_units_by_index() {
+        let mut profile = TemplateProfile::default();
+        profile.joint_responsible_units = "甲处室、乙处室".into();
+        profile.joint_contacts = vec![
+            JointContact {
+                unit: String::new(),
+                name: "张三".into(),
+                phone: "010-11111111".into(),
+            },
+            JointContact {
+                unit: String::new(),
+                name: "李四".into(),
+                phone: "010-22222222".into(),
+            },
+        ];
+        let entries = joint_responsible_entries(&profile);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].unit, "甲处室");
+        assert_eq!(entries[0].name, "张三");
+        assert_eq!(entries[1].unit, "乙处室");
+        assert_eq!(entries[1].name, "李四");
+    }
+
+    /// 旧稿件承办单位多于联系人：多出来的单位仍要成行进版记，只是联系人、电话为空。
+    #[test]
+    fn joint_responsible_entries_keep_units_without_contacts() {
+        let mut profile = TemplateProfile::default();
+        profile.joint_responsible_units = "甲处室、乙处室、丙处室".into();
+        profile.joint_contacts = vec![JointContact {
+            unit: String::new(),
+            name: "张三".into(),
+            phone: "010-11111111".into(),
+        }];
+        let entries = joint_responsible_entries(&profile);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "张三");
+        assert_eq!(entries[1].unit, "乙处室");
+        assert!(entries[1].name.is_empty());
+        assert_eq!(entries[2].unit, "丙处室");
+    }
+
+    /// 成对录入后联系人自带承办单位：条目直接采用 contact.unit，不再依赖索引。
+    #[test]
+    fn joint_responsible_entries_prefer_contact_unit() {
+        let mut profile = TemplateProfile::default();
+        profile.joint_responsible_units = "甲处室".into();
+        profile.joint_contacts = vec![JointContact {
+            unit: "乙处室".into(),
+            name: "王五".into(),
+            phone: "010-33333333".into(),
+        }];
+        let entries = joint_responsible_entries(&profile);
+        assert_eq!(entries[0].unit, "乙处室");
+        assert_eq!(entries[0].phone, "010-33333333");
+    }
+
+    /// 完全空白的占位行（单位、联系人都没填）不进入成对视图，避免版记空行。
+    #[test]
+    fn joint_responsible_entries_skip_blank_placeholders() {
+        let mut profile = TemplateProfile::default();
+        profile.joint_responsible_units = "甲处室".into();
+        profile.joint_contacts = vec![
+            JointContact {
+                unit: "甲处室".into(),
+                name: "张三".into(),
+                phone: "010-11111111".into(),
+            },
+            JointContact::default(),
+        ];
+        let entries = joint_responsible_entries(&profile);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].unit, "甲处室");
+    }
+
+    /// 成对录入写回：joint_responsible_units 与 joint_contacts 同步且一一对应。
+    #[test]
+    fn sync_joint_responsible_writes_both_fields_in_lockstep() {
+        let mut profile = TemplateProfile::default();
+        sync_joint_responsible(
+            &mut profile,
+            &[
+                JointResponsibleEntry {
+                    unit: "甲处室".into(),
+                    name: "张三".into(),
+                    phone: "010-11111111".into(),
+                },
+                JointResponsibleEntry {
+                    unit: "乙处室".into(),
+                    name: "李四".into(),
+                    phone: "010-22222222".into(),
+                },
+            ],
+        );
+        assert_eq!(profile.joint_responsible_units, "甲处室、乙处室");
+        assert_eq!(profile.joint_contacts.len(), 2);
+        assert_eq!(profile.joint_contacts[0].unit, "甲处室");
+        assert_eq!(profile.joint_contacts[0].name, "张三");
+        assert_eq!(profile.joint_contacts[1].unit, "乙处室");
+        assert_eq!(profile.joint_contacts[1].phone, "010-22222222");
+    }
+
+    /// 旧稿件 JSON 的 JointContact 没有 unit 字段：反序列化自动补空串，后续回落配对。
+    #[test]
+    fn old_joint_contact_json_deserializes_with_default_unit() {
+        let json = r#"{"name":"张三","phone":"010-11111111"}"#;
+        let contact: JointContact = serde_json::from_str(json).unwrap();
+        assert_eq!(contact.unit, "");
+        assert_eq!(contact.name, "张三");
+        assert_eq!(contact.phone, "010-11111111");
     }
 
     /// 旧配置的 `fonts` 没有 `ui_font` 字段：载入后应为空选择（回退内置字体），

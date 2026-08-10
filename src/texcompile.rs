@@ -569,10 +569,12 @@ mod tests {
         input.profile.joint_responsible_units = "甲处室、乙处室".into();
         input.profile.joint_contacts = vec![
             JointContact {
+                unit: "甲处室".into(),
                 name: "张三".into(),
                 phone: "010-11111111".into(),
             },
             JointContact {
+                unit: "乙处室".into(),
                 name: "欧阳翠花".into(),
                 phone: "010-22222222".into(),
             },
@@ -607,6 +609,56 @@ mod tests {
         assert!(!tex.with_extension("aux").exists());
         assert!(!tex.with_extension("log").exists());
         assert!(tex.exists());
+    }
+
+    /// 联合发文模式 1 只剩 1 个发文单位：落款走类默认的右侧单列（jointmodeone 关），
+    /// 版记仍逐行列出承办单位/联系人/电话（jointrecord 开）。这条编译一遍，确保
+    /// cls 里新拆出来的 jointrecord 选项与 \SetJointFooterRecord 能单独生效。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn compiles_single_unit_joint_letter_with_multi_row_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput::default();
+        input.profile.joint_issuance_mode = JointIssuanceMode::Mode1;
+        input.profile.joint_issuing_units = "甲单位".into();
+        input.profile.main_issuing_unit = "甲单位".into();
+        input.profile.joint_responsible_units = "甲处室、乙处室".into();
+        input.profile.joint_contacts = vec![
+            JointContact {
+                unit: "甲处室".into(),
+                name: "张三".into(),
+                phone: "010-11111111".into(),
+            },
+            JointContact {
+                unit: "乙处室".into(),
+                name: "欧阳翠花".into(),
+                phone: "010-22222222".into(),
+            },
+        ];
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "# 测试函\n\n正文。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let _ = std::fs::copy(tex, ".tmp/verify/generated-joint-single.tex");
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
+        assert!(pdf.exists());
     }
 
     /// 指人专办、正文括号楷体四号、附件概要三条新特性走同一套 TeX 链路，

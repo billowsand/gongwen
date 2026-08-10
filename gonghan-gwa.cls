@@ -14,6 +14,7 @@
 \newif\ifgwa@phonenotice
 \newif\ifgwa@plaindocument
 \newif\ifgwa@jointmodeone
+\newif\ifgwa@jointrecord
 \newif\ifgwa@whitepaper
 \newif\ifgwa@meetingagenda
 
@@ -24,7 +25,8 @@
 \gwa@duplexfalse      % 默认单面打印，页码居中
 \gwa@phonenoticefalse % 默认标准函稿，保留函号和底部版记
 \gwa@plaindocumentfalse % 默认非普通公文（普通公文无红头、主送、落款和版记）
-\gwa@jointmodeonefalse
+\gwa@jointmodeonefalse  % 默认落款不按联合发文多单位并列
+\gwa@jointrecordfalse   % 默认版记只有一行承办单位/联系人/电话
 \gwa@whitepaperfalse  % 默认非白头件（白头件无红头、无版记）
 \gwa@meetingagendafalse % 默认非会议议程（会议议程无红头、无落款、无版记）
 
@@ -36,7 +38,10 @@
 \DeclareOption{duplex}{\gwa@duplextrue\PassOptionsToClass{twoside}{article}}
 \DeclareOption{phonenotice}{\gwa@phonenoticetrue}
 \DeclareOption{plaindocument}{\gwa@plaindocumenttrue}
-\DeclareOption{jointmodeone}{\gwa@jointmodeonetrue}
+% 联合发文的落款与版记分开控制：发文单位只剩一个时落款回落右侧单列，
+% 但版记仍要按“承办单位—联系人—电话”逐行列出，故 jointrecord 可单独开启。
+\DeclareOption{jointmodeone}{\gwa@jointmodeonetrue\gwa@jointrecordtrue}
+\DeclareOption{jointrecord}{\gwa@jointrecordtrue}
 \DeclareOption{whitepaper}{\gwa@whitepapertrue}
 \DeclareOption{meetingagenda}{\gwa@meetingagendatrue}
 
@@ -453,7 +458,7 @@
 
 % 版记命令
 \newcommand{\FooterRecord}{%
-    \ifgwa@jointmodeone
+    \ifgwa@jointrecord
         \JointFooterRecord
     \else
     \par
