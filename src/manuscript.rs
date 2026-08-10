@@ -531,18 +531,30 @@ impl ManuscriptStore {
     }
 
     /// 删除稿件（连同附件级联）。归档行拒绝删除。
+    /// 删除后清理仅被该稿件引用的孤儿图片文件（见 `purge_orphan_images`）。
     pub fn delete(&mut self, id: i64) -> Result<()> {
         let current = self.status_of(id)?.context("稿件不存在")?;
         if current == ManuscriptStatus::Archived {
             bail!("归档稿件不可删除");
         }
+        let record = self.get(id)?;
         self.conn
             .execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
+        if let Some(record) = record {
+            self.purge_orphan_images(&[record]);
+        }
         Ok(())
     }
 
     /// 原子批量删除：任一稿件不存在或已归档时整批不落库。
     pub fn delete_many(&mut self, ids: &[i64]) -> Result<()> {
+        // 事务前先收集记录：图片清理在事务提交后进行，事务失败时不会误删文件。
+        let mut deleted = Vec::new();
+        for &id in ids {
+            if let Some(record) = self.get(id)? {
+                deleted.push(record);
+            }
+        }
         let tx = self.conn.transaction()?;
         for &id in ids {
             let status = tx
@@ -558,7 +570,43 @@ impl ManuscriptStore {
             tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
         }
         tx.commit()?;
+        self.purge_orphan_images(&deleted);
         Ok(())
+    }
+
+    /// 清理孤儿图片：删除稿件后，其 markdown 引用的图片若不再被任何剩余稿件
+    /// 引用，则删除对应文件。引用比较前统一规范化（分隔符、`./` 前缀），避免
+    /// 手写别名被误判为不同引用而误删；共享引用与库外引用（未保存草稿或手写
+    /// 引用）无法感知，一律保留。清理尽力而为，失败不阻断稿件删除。
+    fn purge_orphan_images(&mut self, deleted: &[ManuscriptRecord]) {
+        let deleted_refs: HashSet<String> = deleted
+            .iter()
+            .flat_map(|record| crate::images::image_refs(&record.content_markdown))
+            .map(|src| crate::images::normalize_ref(&src))
+            .collect();
+        if deleted_refs.is_empty() {
+            return;
+        }
+        let mut remaining_refs = HashSet::new();
+        let Ok(rows) = self.list(&ManuscriptFilter::default()) else {
+            return;
+        };
+        for row in rows {
+            // 读取失败时中止整个清理：宁可保留不删，避免误删仍被该稿件引用的图片。
+            let Ok(Some(record)) = self.get(row.id) else {
+                return;
+            };
+            remaining_refs.extend(
+                crate::images::image_refs(&record.content_markdown)
+                    .into_iter()
+                    .map(|src| crate::images::normalize_ref(&src)),
+            );
+        }
+        for src in deleted_refs.difference(&remaining_refs) {
+            if let Ok(path) = crate::images::resolve(src) {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 
     /// 完整读取（含 PDF 附件）。
@@ -1221,6 +1269,86 @@ mod tests {
 
     fn mem_store() -> ManuscriptStore {
         ManuscriptStore::open(Path::new(":memory:")).expect("内存库应能打开")
+    }
+
+    /// 在配置目录 images/ 下写一张测试图，返回文件名；调用方负责清理。
+    fn seed_test_image(tag: &str) -> String {
+        let dir = crate::images::image_dir().unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let name = format!("gw_purge_{}_{}.png", std::process::id(), tag);
+        fs::write(dir.join(&name), format!("bytes:{tag}")).unwrap();
+        name
+    }
+
+    #[test]
+    fn delete_purges_orphan_images_but_keeps_shared_ones() {
+        let shared = seed_test_image("shared");
+        let orphan = seed_test_image("orphan");
+        let mut store = mem_store();
+        // A 引用 shared + orphan；B 只引用 shared。
+        let a = store
+            .create(
+                &new_manuscript(
+                    TemplateKind::OfficialLetter,
+                    &format!("# A\n\n![s](images/{shared})\n\n![o](images/{orphan})"),
+                ),
+                None,
+            )
+            .unwrap();
+        let b = store
+            .create(
+                &new_manuscript(
+                    TemplateKind::OfficialLetter,
+                    // 手写别名：反斜杠分隔的同义引用，规范化后应与入库引用匹配。
+                    &format!("# B\n\n![s](images\\{shared})"),
+                ),
+                None,
+            )
+            .unwrap();
+        let dir = crate::images::image_dir().unwrap();
+        // 删除 A：orphan 不再被引用 → 清理；shared 仍被 B（手写别名）引用 → 保留。
+        store.delete(a).unwrap();
+        assert!(!dir.join(&orphan).exists(), "无剩余引用的孤儿图片应被清理");
+        assert!(
+            dir.join(&shared).exists(),
+            "仍被其他稿件（含手写别名）引用的图片应保留"
+        );
+        // 删除 B：shared 不再被引用 → 清理。
+        store.delete(b).unwrap();
+        assert!(!dir.join(&shared).exists());
+        let _ = fs::remove_file(dir.join(&shared));
+        let _ = fs::remove_file(dir.join(&orphan));
+    }
+
+    #[test]
+    fn delete_many_purges_orphan_images_after_commit() {
+        let orphan_a = seed_test_image("batch_a");
+        let orphan_b = seed_test_image("batch_b");
+        let mut store = mem_store();
+        let a = store
+            .create(
+                &new_manuscript(
+                    TemplateKind::OfficialLetter,
+                    &format!("# A\n\n![a](images/{orphan_a})"),
+                ),
+                None,
+            )
+            .unwrap();
+        let b = store
+            .create(
+                &new_manuscript(
+                    TemplateKind::OfficialLetter,
+                    &format!("# B\n\n![b](images/{orphan_b})"),
+                ),
+                None,
+            )
+            .unwrap();
+        let dir = crate::images::image_dir().unwrap();
+        store.delete_many(&[a, b]).unwrap();
+        assert!(!dir.join(&orphan_a).exists());
+        assert!(!dir.join(&orphan_b).exists());
+        let _ = fs::remove_file(dir.join(&orphan_a));
+        let _ = fs::remove_file(dir.join(&orphan_b));
     }
 
     #[test]

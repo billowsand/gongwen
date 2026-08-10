@@ -398,6 +398,74 @@ mod tests {
         );
     }
 
+    /// 一张 100x50 红色 PNG，供带图编译测试写入配置目录的 images/ 下。
+    /// 不用 1x1 的极小图：xdvipdfmx 在极小图与公文版式组合时曾出现
+    /// “driver return code” 失败，标准尺寸图可稳定复现图片链路。
+    fn test_png() -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let image = image::RgbaImage::from_pixel(100, 50, image::Rgba([255, 0, 0, 255]));
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        cursor.into_inner()
+    }
+
+    /// 带图导出 → 内置 Tectonic 编译。同时实测 `--untrusted` 模式能否读取
+    /// tex 同目录 images/ 子目录下的图片（不能读就改为平铺文件名预案）。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn compiles_letter_with_embedded_image_under_untrusted_mode() {
+        // 在配置目录 images/ 下放一张临时图（进程 id 命名，编译后清理）。
+        let dir = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("gw_test_{}.png", std::process::id());
+        let img_path = dir.join(&name);
+        std::fs::write(&img_path, test_png()).unwrap();
+        let outcome = std::panic::catch_unwind(|| {
+            let temp = tempfile::tempdir().unwrap();
+            let mut input = DraftInput {
+                kind: TemplateKind::OfficialLetter,
+                ..Default::default()
+            };
+            input.profile.issuing_unit = "某单位".into();
+            input.profile.recipient = "某部门".into();
+            input.date = "2026年8月7日".into();
+            let markdown = format!("# 关于测试的函\n\n正文。\n\n![示意图](images/{name})");
+            let selection = ExportSelection {
+                markdown: false,
+                docx: false,
+                tex: true,
+                overwrite: true,
+            };
+            let files = crate::export::export_all(
+                temp.path(),
+                &input,
+                &markdown,
+                &selection,
+                &crate::units::UnitDisplay::new(&[]),
+                &FontConfig::default(),
+            )
+            .unwrap();
+            let tex = files
+                .iter()
+                .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+                .unwrap();
+            // 图片已随 tex 复制到输出目录。
+            let img_out = tex.parent().unwrap().join("images").join(&name);
+            assert!(img_out.exists(), "图片应复制到 tex 同目录 images/ 下");
+            let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+                .unwrap()
+                .unwrap();
+            let pdf_stem = pdf.file_stem().map(|s| s.to_string_lossy().into_owned());
+            let tex_stem = tex.file_stem().map(|s| s.to_string_lossy().into_owned());
+            (pdf.exists(), pdf_stem, tex_stem)
+        });
+        let _ = std::fs::remove_file(&img_path);
+        let (pdf_exists, pdf_stem, tex_stem) = outcome.expect("带图编译不应 panic");
+        assert!(pdf_exists, "带图文档应编译出 PDF");
+        assert_eq!(pdf_stem, tex_stem);
+    }
+
     /// 白头件落款要先装箱量高再决定是否另起一页（见 cls 的 `\WhitePaperClosing`）。
     /// 这条只保证这段逻辑能编译通过；换页判断是否准确要看排版结果，不在此断言。
     #[test]

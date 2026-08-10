@@ -152,6 +152,11 @@ fn export_zip_ids(
         exported_at: Local::now().to_rfc3339(),
         records,
     };
+    // 收集全部稿件引用的图片（跨稿件去重），zip 条目平铺为 images/<文件名>。
+    let image_blobs = match crate::storage::config_dir() {
+        Ok(base) => collect_image_entries(&base, &manifest.records),
+        Err(_) => Vec::new(),
+    };
 
     let file = File::create(zip_path)
         .with_context(|| format!("无法创建导出文件 {}", zip_path.display()))?;
@@ -162,10 +167,14 @@ fn export_zip_ids(
             .context("序列化清单失败")?
             .as_bytes(),
     )?;
-    // PDF 本身已压缩，用 Stored 避免二次压缩浪费时间。
-    let pdf_options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    // PDF 本身已压缩，用 Stored 避免二次压缩浪费时间；图片同理。
+    let stored_options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     for (path, bytes) in &pdf_blobs {
-        zip.start_file(path.clone(), pdf_options)?;
+        zip.start_file(path.clone(), stored_options)?;
+        zip.write_all(bytes)?;
+    }
+    for (path, bytes) in &image_blobs {
+        zip.start_file(path.clone(), stored_options)?;
         zip.write_all(bytes)?;
     }
     zip.finish()?;
@@ -173,6 +182,31 @@ fn export_zip_ids(
         records: manifest.records.len(),
         pdfs: total_pdfs,
     })
+}
+
+/// 从清单记录中收集 markdown 引用的图片，返回 zip 条目（`images/<文件名>`）与字节。
+/// 引用缺失或读取失败时跳过，不阻断导出。`base` 是配置目录（图片相对路径的基准）。
+fn collect_image_entries(base: &Path, records: &[ManifestRecord]) -> Vec<(String, Vec<u8>)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for record in records {
+        for src in crate::images::image_refs(&record.content_markdown) {
+            if !seen.insert(src.clone()) {
+                continue;
+            }
+            let Some(file_name) = src.rsplit('/').next() else {
+                continue;
+            };
+            let Ok(source) = crate::images::resolve_from_base(base, &src) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&source) else {
+                continue;
+            };
+            out.push((format!("images/{}", sanitize_entry_name(file_name)), bytes));
+        }
+    }
+    out
 }
 
 /// 只读 zip + 解析清单，不落库（导入预览用）。
@@ -209,6 +243,10 @@ pub fn import_zip(
     let mut summary = ImportSummary::default();
     let file = File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)?;
+    // 恢复图片资源：图片是跨稿件共享目录，全量解压；旧包无 images/ 条目时无操作。
+    if let Ok(image_dir) = crate::images::image_dir() {
+        restore_images(&mut archive, &image_dir)?;
+    }
     let existing = store.source_ids()?;
     for (index, record) in manifest.records.iter().enumerate() {
         if !opts.selected.get(index).copied().unwrap_or(false) {
@@ -266,6 +304,36 @@ fn sanitize_entry_name(name: &str) -> String {
         out = "pdf.pdf".into();
     }
     out
+}
+
+/// 从 zip 恢复 `images/` 条目到目标目录。条目名经过净化，防止篡改的 zip
+/// 用路径穿越覆盖任意文件；返回恢复的文件数。
+fn restore_images(archive: &mut ZipArchive<File>, target: &Path) -> Result<usize> {
+    std::fs::create_dir_all(target)
+        .with_context(|| format!("无法创建图片目录 {}", target.display()))?;
+    let names: Vec<String> = archive
+        .file_names()
+        .filter(|name| name.starts_with("images/"))
+        .map(str::to_string)
+        .collect();
+    let mut count = 0usize;
+    for name in names {
+        let file_name = name.strip_prefix("images/").unwrap_or(&name);
+        let safe = sanitize_entry_name(file_name);
+        let mut entry = archive.by_name(&name)?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        let dest = target.join(&safe);
+        // 目标已存在且内容一致时跳过，避免无谓写入；内容不同则按恢复语义覆盖。
+        if std::fs::read(&dest).ok().as_deref() == Some(bytes.as_slice()) {
+            count += 1;
+            continue;
+        }
+        std::fs::write(&dest, &bytes)
+            .with_context(|| format!("无法恢复图片 {}", dest.display()))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -364,6 +432,84 @@ mod tests {
                 },
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn collect_image_entries_deduplicates_and_skips_missing() {
+        let base = tempfile::tempdir().unwrap();
+        let img_dir = base.path().join("images");
+        std::fs::create_dir_all(&img_dir).unwrap();
+        std::fs::write(img_dir.join("a.png"), b"png-a").unwrap();
+        std::fs::write(img_dir.join("b.pdf"), b"%PDF").unwrap();
+        let record = ManifestRecord {
+            id: 1,
+            title: "标题".into(),
+            kind: TemplateKind::OfficialLetter,
+            status: ManuscriptStatus::Draft,
+            doc_number: String::new(),
+            doc_date: String::new(),
+            notes: String::new(),
+            content_markdown: "![a](images/a.png)\n![b](images/b.pdf)\n![缺](images/missing.png)\n![a](images/a.png)"
+                .into(),
+            snapshot: sample_snapshot(TemplateKind::OfficialLetter),
+            created_at: String::new(),
+            updated_at: String::new(),
+            published_at: None,
+            archived_at: None,
+            pdfs: Vec::new(),
+        };
+        let entries = collect_image_entries(base.path(), &[record]);
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .any(|(p, b)| p == "images/a.png" && b == b"png-a")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(p, b)| p == "images/b.pdf" && b == b"%PDF")
+        );
+    }
+
+    #[test]
+    fn restore_images_extracts_and_sanitizes_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("img.zip");
+        {
+            let file = File::create(&zip_path).unwrap();
+            let mut zip = ZipWriter::new(file);
+            zip.start_file("images/a.png", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"png-a").unwrap();
+            // 恶意条目名带路径穿越，恢复时必须净化，不能写到目标目录之外。
+            zip.start_file("images/../evil.png", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"evil").unwrap();
+            zip.finish().unwrap();
+        }
+        let target = tempfile::tempdir().unwrap();
+        let file = File::open(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let count = restore_images(&mut archive, target.path()).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            std::fs::read(target.path().join("a.png")).unwrap(),
+            b"png-a"
+        );
+        assert_eq!(
+            std::fs::read(target.path().join(".._evil.png")).unwrap(),
+            b"evil"
+        );
+        assert!(!target.path().join("..").join("evil.png").exists());
+        // 再次恢复同一包：内容一致时跳过，不产生新写入，计数不变。
+        let file = File::open(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert_eq!(restore_images(&mut archive, target.path()).unwrap(), 2);
+        assert_eq!(
+            std::fs::read(target.path().join("a.png")).unwrap(),
+            b"png-a"
         );
     }
 

@@ -134,6 +134,8 @@ pub fn export_all(
     if selection.markdown {
         let path = document_dir.join(format!("{export_stem}.md"));
         fs::write(&path, markdown)?;
+        // 图片复制到导出目录（保持 images/ 相对结构），导出的 md 目录自包含。
+        crate::images::copy_refs(markdown, &document_dir)?;
         files.push(path);
     }
     if selection.docx {
@@ -254,6 +256,11 @@ pub(crate) enum MarkdownBlock {
     Table(Vec<Vec<String>>),
     Marker(MarkdownSection),
     Html(String),
+    /// 独占一行的图片引用 `![alt](src)`，`src` 为相对路径（如 `images/xxx.png`）。
+    Image {
+        alt: String,
+        src: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +349,12 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
                 MarkdownBlock::Heading(level, clean_heading_number(text))
             };
             blocks.push(LocatedBlock { block, range: span });
+        } else if let Some((alt, src)) = parse_image(line) {
+            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            blocks.push(LocatedBlock {
+                block: MarkdownBlock::Image { alt, src },
+                range: span,
+            });
         } else if line.starts_with("<div") {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             blocks.push(LocatedBlock {
@@ -424,6 +437,28 @@ fn parse_heading(line: &str) -> Option<(u8, &str)> {
         return None;
     }
     Some((hashes as u8, line[hashes..].trim()))
+}
+
+/// 识别独占一行的图片引用 `![alt](src)`。`src` 不含空白与右括号（与
+/// `images::image_refs` 的正则约束一致），返回 `(alt, src)`。
+fn parse_image(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("![")?;
+    let close = rest.find(']')?;
+    let alt = rest[..close].to_string();
+    let src = rest[close + 1..]
+        .strip_prefix('(')?
+        .strip_suffix(')')?
+        .trim();
+    if src.is_empty() || src.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((alt, src.to_string()))
+}
+
+/// 整行是否恰好是一张图片引用（与解析器的独占行识别一致）。
+/// 实时排版编辑器据此把图片行高亮为占位提示。
+pub(crate) fn is_image_line(line: &str) -> bool {
+    parse_image(line.trim()).is_some()
 }
 
 fn parse_section_marker(line: &str) -> Option<MarkdownSection> {
@@ -902,6 +937,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_image_reference_as_own_block() {
+        let blocks = parse_markdown(
+            "# 标题\n正文段落。\n![扫描件](images/20260809_120000_扫描件.png)\n结尾段落。",
+        );
+        assert!(matches!(
+            &blocks[2],
+            MarkdownBlock::Image { alt, src }
+                if alt.as_str() == "扫描件" && src.as_str() == "images/20260809_120000_扫描件.png"
+        ));
+        // 图片行独立成块，不并入相邻段落。
+        assert!(matches!(&blocks[1], MarkdownBlock::Paragraph(_)));
+        assert!(matches!(&blocks[3], MarkdownBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn image_parsing_ignores_inline_and_malformed() {
+        // 段内出现的 `![..]` 不被当作图片块。
+        let blocks = parse_markdown("文中出现 ![图标](x.png) 引用");
+        assert!(matches!(&blocks[0], MarkdownBlock::Paragraph(_)));
+        // 残缺语法不匹配。
+        let blocks = parse_markdown("![缺括号](images/a.png");
+        assert!(matches!(&blocks[0], MarkdownBlock::Paragraph(_)));
+        // src 含空白的引用不匹配（与 images::image_refs 约束一致）。
+        let blocks = parse_markdown("![图](images/my file.png)");
+        assert!(matches!(&blocks[0], MarkdownBlock::Paragraph(_)));
+    }
+
+    #[test]
     fn exports_all_three_formats() {
         let temp = tempfile::tempdir().unwrap();
         let mut input = DraftInput::default();
@@ -946,6 +1009,34 @@ mod tests {
             .read_to_string(&mut xml)
             .unwrap();
         assert!(xml.contains("关于开展测试工作的函"));
+    }
+
+    #[test]
+    fn markdown_export_survives_missing_image_refs() {
+        // 图片引用指向不存在的文件时，md 导出照常成功（copy_refs 跳过缺失文件）。
+        let temp = tempfile::tempdir().unwrap();
+        let input = DraftInput::default();
+        let selection = ExportSelection {
+            markdown: true,
+            docx: false,
+            tex: false,
+            overwrite: true,
+        };
+        let files = export_all(
+            temp.path(),
+            &input,
+            "# 标题\n\n正文。\n\n![图](images/不存在的.png)",
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].extension().is_some_and(|ext| ext == "md"));
+        assert_eq!(
+            std::fs::read_to_string(&files[0]).unwrap(),
+            "# 标题\n\n正文。\n\n![图](images/不存在的.png)"
+        );
     }
 
     #[test]

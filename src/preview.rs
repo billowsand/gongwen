@@ -14,6 +14,7 @@
 
 use crate::{
     export::{self, LocatedBlock, MarkdownBlock, MarkdownSection},
+    images,
     models::{DraftInput, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind, split_units},
     theme,
     units::UnitDisplay,
@@ -1335,9 +1336,81 @@ fn content_block(
             });
         }
         MarkdownBlock::Table(rows) => table_block(ui, metrics, rows),
+        MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
         MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
         MarkdownBlock::Paragraph(_) => {}
     }
+}
+
+/// 图片块：位图按版心宽度等比渲染，加载失败显示占位卡片；PDF 显示占位卡片
+/// （预览不渲染 PDF 内容，导出时由导出器嵌入）。外层已由 clickable 包装。
+fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str) {
+    let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
+    let path = match images::resolve(src) {
+        Ok(path) => path,
+        Err(error) => return image_placeholder(ui, metrics, alt, &file_name, &error.to_string()),
+    };
+    let is_pdf = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+    if is_pdf {
+        return image_placeholder(
+            ui,
+            metrics,
+            alt,
+            &file_name,
+            "PDF 附件：预览暂不渲染，导出时嵌入",
+        );
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return image_placeholder(ui, metrics, alt, &file_name, &format!("无法读取：{error}"));
+        }
+    };
+    // 每张图片一个固定 uri，egui 的 ImageCache 按 uri 缓存解码结果，避免每帧重读重解码。
+    // src 形如 `images/xxx.png`，直接用其做 uri 后缀保证唯一。
+    let uri = format!("bytes://{src}");
+    // 用 fit_to_original_size 按纹理尺寸布局，再受 max_size 限制（宽=版心、高不设限）。
+    // 不能用默认的 Fraction 适配：滚动区里 available_size.y 是无穷大，会把图片高度
+    // 撑成无穷大，矩形超出可视区域而不绘制。
+    ui.add(
+        egui::Image::from_bytes(uri, bytes)
+            .fit_to_original_size(1.0)
+            .max_size(egui::vec2(metrics.content, f32::INFINITY)),
+    );
+}
+
+/// 图片占位卡片：细边框 + 文件名与说明，宽度=版心。
+fn image_placeholder(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, file_name: &str, note: &str) {
+    let height = (metrics.line * 2.0).max(metrics.pt(24.0));
+    place(ui, metrics, height, |painter, rect| {
+        painter.rect_stroke(
+            rect,
+            egui::CornerRadius::same(2),
+            Stroke::new(1.0_f32.max(metrics.scale), Color32::from_gray(150)),
+            egui::StrokeKind::Inside,
+        );
+        let font = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+        let caption = if alt.is_empty() {
+            file_name.to_string()
+        } else {
+            format!("{file_name}（{alt}）")
+        };
+        let text = format!("【图片】{caption}\n{note}");
+        let galley = painter.layout(
+            text,
+            font,
+            Color32::from_gray(90),
+            rect.width() - metrics.pt(8.0),
+        );
+        let y = rect.top() + ((rect.height() - galley.size().y) / 2.0).max(metrics.pt(4.0));
+        painter.galley(
+            egui::pos2(rect.left() + metrics.pt(4.0), y),
+            galley,
+            Color32::WHITE,
+        );
+    });
 }
 
 #[cfg(test)]
@@ -1543,5 +1616,281 @@ mod tests {
                 "{family} 字体族不应含单独的西文字体 gw-latin：{list:?}"
             );
         }
+    }
+
+    #[test]
+    fn image_block_falls_back_to_placeholder_without_panicking() {
+        // 文件缺失、路径非法、PDF 三种情况都走占位卡片，且不 panic。
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let available = 1000.0;
+        let metrics = Metrics::new(available, Some(1.0));
+        for (alt, src) in [
+            ("缺失图", "images/20260809_120000_不存在的.png"),
+            ("穿越", "../etc/passwd"),
+            ("PDF 附件", "images/20260809_120000_扫描件.pdf"),
+        ] {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(available, 1200.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                let mut counters = [0usize; 4];
+                content_block(
+                    ui,
+                    &metrics,
+                    &MarkdownBlock::Image {
+                        alt: alt.to_string(),
+                        src: src.to_string(),
+                    },
+                    &mut counters,
+                    false,
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn image_block_loads_texture_after_background_decode() {
+        // content_block 的 Image 块：后台线程解码完成后，纹理应可加载（Ready）。
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let dir = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("gw_diag_{}.png", std::process::id());
+        let img_path = dir.join(&name);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            100,
+            50,
+            image::Rgba([255, 0, 0, 255]),
+        ))
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .unwrap();
+        std::fs::write(&img_path, cursor.into_inner()).unwrap();
+        let src = format!("images/{name}");
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw.clone(), |ui| {
+            let mut counters = [0usize; 4];
+            content_block(
+                ui,
+                &metrics,
+                &MarkdownBlock::Image {
+                    alt: "图".into(),
+                    src: src.clone(),
+                },
+                &mut counters,
+                false,
+            );
+        });
+        // 后台线程解码需要时间与后续帧推进；等解码完成后重查。
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let uri = format!("bytes://{src}");
+        let mut result = ctx.try_load_texture(
+            &uri,
+            egui::TextureOptions::default(),
+            egui::load::SizeHint::default(),
+        );
+        if matches!(result, Ok(egui::load::TexturePoll::Pending { .. })) {
+            let _ = ctx.run_ui(raw, |_| {});
+            result = ctx.try_load_texture(
+                &uri,
+                egui::TextureOptions::default(),
+                egui::load::SizeHint::default(),
+            );
+        }
+        let _ = std::fs::remove_file(&img_path);
+        match result {
+            Ok(egui::load::TexturePoll::Ready { texture }) => {
+                assert!(texture.size.x > 0.0 && texture.size.y > 0.0);
+            }
+            Ok(egui::load::TexturePoll::Pending { .. }) => {
+                panic!("图片纹理应在多帧后加载完成，但仍 Pending");
+            }
+            Err(error) => {
+                panic!("图片纹理加载失败：{error:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn official_preview_loads_image_texture() {
+        // 完整走 official_preview：构造含图片的公文，多帧渲染后纹理应可加载。
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let dir = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("gw_diag2_{}.png", std::process::id());
+        let img_path = dir.join(&name);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            200,
+            100,
+            image::Rgba([0, 0, 255, 255]),
+        ))
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .unwrap();
+        std::fs::write(&img_path, cursor.into_inner()).unwrap();
+        let src = format!("images/{name}");
+        let markdown = format!("# 关于测试的函\n\n正文。\n\n![示意图]({src})\n\n特此函告。");
+        let input = draft(TemplateKind::OfficialLetter);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 2000.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let _ = ctx.run_ui(raw.clone(), |ui| {
+                let _ = official_preview(
+                    ui,
+                    &input,
+                    &UnitDisplay::new(&[]),
+                    &markdown,
+                    None,
+                    None,
+                    false,
+                );
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let uri = format!("bytes://{src}");
+        let result = ctx.try_load_texture(
+            &uri,
+            egui::TextureOptions::default(),
+            egui::load::SizeHint::default(),
+        );
+        let _ = std::fs::remove_file(&img_path);
+        match result {
+            Ok(egui::load::TexturePoll::Ready { texture }) => {
+                assert!(texture.size.x > 0.0 && texture.size.y > 0.0);
+            }
+            Ok(egui::load::TexturePoll::Pending { .. }) => {
+                panic!("official_preview 中图片纹理应加载完成，但仍 Pending");
+            }
+            Err(error) => {
+                panic!("official_preview 中图片纹理加载失败：{error:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn official_preview_draws_image_with_finite_size() {
+        // 回归测试：含图片的公文在滚动区内渲染时，图片必须绘制为尺寸有限的
+        // 带纹理矩形（旧实现默认 ImageFit::Fraction 在滚动区把高算成无穷大，
+        // tessellate 后画面损坏，正是用户看不到图片的原因）。
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let dir = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("gw_diag3_{}.png", std::process::id());
+        let img_path = dir.join(&name);
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            200,
+            100,
+            image::Rgba([0, 255, 0, 255]),
+        ))
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .unwrap();
+        std::fs::write(&img_path, cursor.into_inner()).unwrap();
+        let src = format!("images/{name}");
+        let markdown = format!("# 关于测试的函\n\n正文。\n\n![示意图]({src})\n\n特此函告。");
+        let input = draft(TemplateKind::OfficialLetter);
+        let uri = format!("bytes://{src}");
+        let mut states = Vec::new();
+        for frame in 0..4 {
+            let full = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 2000.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    // 与真实 markdown_render 一致：official_preview 在滚动区内渲染，
+                    // 滚动方向的 available_size 是无穷大，正是旧实现的崩溃点。
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        let _ = official_preview(
+                            ui,
+                            &input,
+                            &UnitDisplay::new(&[]),
+                            &markdown,
+                            None,
+                            None,
+                            false,
+                        );
+                    });
+                },
+            );
+            let state = ctx
+                .try_load_texture(
+                    &uri,
+                    egui::TextureOptions::default(),
+                    egui::load::SizeHint::default(),
+                )
+                .map(|poll| match poll {
+                    egui::load::TexturePoll::Ready { .. } => "ready".to_string(),
+                    egui::load::TexturePoll::Pending { .. } => "pending".to_string(),
+                })
+                .unwrap_or_else(|e| format!("err({e:?})"));
+            let textured_rects = full
+                .shapes
+                .iter()
+                .filter(|clipped| {
+                    matches!(
+                        &clipped.shape,
+                        egui::epaint::Shape::Rect(rect)
+                            if rect.fill_texture_id() != egui::TextureId::default()
+                    )
+                })
+                .count();
+            // 图片矩形必须尺寸有限（旧实现把高算成无穷大，tessellate 后画面损坏）。
+            let finite_tex_rects = full
+                .shapes
+                .iter()
+                .filter(|clipped| {
+                    matches!(
+                        &clipped.shape,
+                        egui::epaint::Shape::Rect(rect)
+                            if rect.fill_texture_id() != egui::TextureId::default()
+                                && rect.rect.width().is_finite()
+                                && rect.rect.height().is_finite()
+                                && rect.rect.height() > 0.0
+                                && rect.rect.height() < 10000.0
+                    )
+                })
+                .count();
+            states.push(format!(
+                "frame{frame}:{state}:tex_rects={textured_rects}:finite_tex_rects={finite_tex_rects}"
+            ));
+            if frame == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+        let _ = std::fs::remove_file(&img_path);
+        // 文件存在期间（循环内），图片应真正绘制：出现尺寸有限的带纹理矩形。
+        // （旧实现把图片高度算成无穷大，tessellate 后画面损坏，正是用户看不到图的原因。）
+        assert!(
+            states
+                .iter()
+                .any(|s| s.contains(":finite_tex_rects=") && !s.ends_with("finite_tex_rects=0")),
+            "图片应绘制尺寸有限的带纹理矩形：{states:?}"
+        );
     }
 }

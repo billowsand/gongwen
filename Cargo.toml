@@ -1,6 +1,6 @@
 [package]
 name = "gongwen-assistant"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 description = "基于 egui 与本地 LM Studio 的离线公文写作助手"
 license = "MIT"
@@ -20,6 +20,7 @@ docx-rs = "0.4.22"
 eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"] }
 egui = "0.35.0"
 egui_extras = { version = "0.35.0", features = ["image", "svg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 jieba-rs = "0.8"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

@@ -4,6 +4,7 @@ use super::{
     table::{ColumnAlignment, to_docx_grid},
     title::{self, TitlePlan},
 };
+use crate::images;
 use crate::models::{
     DraftInput, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind, split_period_digits,
     split_units,
@@ -11,6 +12,7 @@ use crate::models::{
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use docx_rs::*;
+use image::GenericImageView;
 use regex::Regex;
 use std::{fs::File, path::Path};
 
@@ -959,9 +961,59 @@ fn add_official_content_block(
             doc = doc.add_paragraph(label_paragraph(text).indent(Some(420), None, None, None));
         }
         MarkdownBlock::Table(rows) => doc = add_smart_table(doc, rows),
+        MarkdownBlock::Image { alt, src } => {
+            if let Some(paragraph) = image_paragraph(alt, src) {
+                doc = doc.add_paragraph(paragraph);
+            }
+        }
         _ => {}
     }
     doc
+}
+
+/// 图片段落：位图嵌入为 Word 图片（宽度=版心 156 mm，等比缩放，小图保持原尺寸）；
+/// PDF 输出附件说明段落——docx-rs 无法把 PDF 作为图片嵌入。
+fn image_paragraph(alt: &str, src: &str) -> Option<Paragraph> {
+    let path = images::resolve(src).ok()?;
+    let bytes = std::fs::read(&path).ok()?;
+    let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
+    let is_pdf = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+    image_paragraph_from_bytes(alt, &file_name, is_pdf, &bytes)
+}
+
+fn image_paragraph_from_bytes(
+    alt: &str,
+    file_name: &str,
+    is_pdf: bool,
+    bytes: &[u8],
+) -> Option<Paragraph> {
+    if is_pdf {
+        let label = if alt.trim().is_empty() {
+            format!("【附件】{file_name}（PDF 附件，请见原文）")
+        } else {
+            format!("【附件】{file_name}（{alt}，PDF 附件，请见原文）")
+        };
+        return Some(Paragraph::new().add_run(body_run(label)));
+    }
+    // 先完整解码一次：既取像素尺寸算缩放，也验证文件可被 docx-rs 的 Pic::new 转 PNG，
+    // 避免 Pic::new 内部的 expect 在坏文件上 panic。
+    let Ok(image) = image::load_from_memory(bytes) else {
+        return None;
+    };
+    let (width_px, height_px) = image.dimensions();
+    if width_px == 0 || height_px == 0 {
+        return None;
+    }
+    // 版心 8844 twips = 156 mm；1 twip = 635 EMU，96 dpi 下 1 px = 9525 EMU。
+    let max_width_emu = (TABLE_CONTENT_WIDTH_TWIPS as u64) * 635;
+    let natural_width_emu = (width_px as u64) * 9525;
+    let natural_height_emu = (height_px as u64) * 9525;
+    let width_emu = natural_width_emu.min(max_width_emu);
+    let height_emu = (natural_height_emu * width_emu / natural_width_emu) as u32;
+    let pic = Pic::new(bytes).size(width_emu as u32, height_emu);
+    Some(Paragraph::new().add_run(Run::new().add_image(pic)))
 }
 
 fn agenda_body_paragraph() -> Paragraph {
@@ -1291,6 +1343,11 @@ pub fn write_docx(
         for block in &blocks {
             match block {
                 MarkdownBlock::Title(_) | MarkdownBlock::Html(_) | MarkdownBlock::Marker(_) => {}
+                MarkdownBlock::Image { alt, src } => {
+                    if let Some(paragraph) = image_paragraph(alt, src) {
+                        doc = doc.add_paragraph(paragraph);
+                    }
+                }
                 MarkdownBlock::Heading(level, text) => {
                     doc = doc.add_paragraph(heading_paragraph(*level, text));
                 }
@@ -1421,6 +1478,73 @@ mod tests {
     /// 测试大多使用无层级的扁平单位，空词库让 `UnitDisplay` 回落为规范名称。
     fn write_docx_ok(path: &Path, input: &DraftInput, markdown: &str) -> Result<()> {
         write_docx(path, input, markdown, &UnitDisplay::new(&[]))
+    }
+
+    /// 动态生成一张 1x1 红色 PNG 的字节。
+    fn tiny_png() -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn image_paragraph_embeds_bitmap_and_docx_contains_media() {
+        let temp = tempfile::tempdir().unwrap();
+        let paragraph = image_paragraph_from_bytes("示意图", "示意图.png", false, &tiny_png())
+            .expect("有效 PNG 应生成图片段落");
+        let mut doc = Docx::new();
+        doc = doc.add_paragraph(paragraph);
+        let docx_path = temp.path().join("with-image.docx");
+        doc.build().pack(File::create(&docx_path).unwrap()).unwrap();
+        let file = File::open(&docx_path).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let media: Vec<String> = archive
+            .file_names()
+            .filter(|name| name.starts_with("word/media/"))
+            .map(str::to_string)
+            .collect();
+        assert!(!media.is_empty(), "docx 应含 word/media/ 图片文件");
+        let xml = zip_text(&docx_path, "word/document.xml");
+        assert!(xml.contains("<w:drawing>"), "图片段落应含 drawing 元素");
+    }
+
+    #[test]
+    fn image_paragraph_renders_pdf_as_attachment_note() {
+        let temp = tempfile::tempdir().unwrap();
+        let paragraph = image_paragraph_from_bytes("", "扫描件.pdf", true, b"%PDF-1.4")
+            .expect("PDF 应生成附件说明段落");
+        let mut doc = Docx::new();
+        doc = doc.add_paragraph(paragraph);
+        let docx_path = temp.path().join("with-pdf.docx");
+        doc.build().pack(File::create(&docx_path).unwrap()).unwrap();
+        let xml = zip_text(&docx_path, "word/document.xml");
+        assert!(xml.contains("【附件】扫描件.pdf"));
+        // PDF 不产生媒体文件。
+        let file = File::open(&docx_path).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        assert!(
+            archive
+                .file_names()
+                .all(|name| !name.starts_with("word/media/")),
+            "PDF 附件说明不应产生媒体文件"
+        );
+    }
+
+    #[test]
+    fn image_paragraph_ignores_undecodable_bytes() {
+        assert!(
+            image_paragraph_from_bytes("", "坏图.png", false, b"not an image").is_none(),
+            "无法解码的字节应跳过而不是 panic"
+        );
+    }
+
+    #[test]
+    fn image_paragraph_skips_unresolvable_src() {
+        // 非法路径（穿越）解析失败时跳过，不 panic。
+        assert!(image_paragraph("", "../etc/passwd").is_none());
     }
 
     #[test]

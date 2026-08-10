@@ -47,6 +47,8 @@ pub struct MdPalette {
     pub anchor_bg: Color32,
     /// 查找条的普通命中；当前命中仍用更醒目的 `anchor_bg`。
     pub search_bg: Color32,
+    /// 实时排版里独占一行的图片引用：TextEdit 无法内嵌图片，用淡底高亮为占位提示。
+    pub image_bg: Color32,
 }
 
 /// 一套完整的明色界面配色。
@@ -139,6 +141,7 @@ impl Theme {
                 quoted: Color32::from_rgb(0x2C, 0x53, 0x6B),
                 anchor_bg: Color32::from_rgb(0xF4, 0xE5, 0xDC),
                 search_bg: Color32::from_rgb(0xF6, 0xE7, 0xA9),
+                image_bg: Color32::from_rgb(0xD8, 0xEA, 0xF5),
             },
         }
     }
@@ -187,6 +190,7 @@ impl Theme {
                 quoted: Color32::from_rgb(0x1F, 0x5B, 0x8A),
                 anchor_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
                 search_bg: Color32::from_rgb(0xFF, 0xF1, 0xB8),
+                image_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
             },
         }
     }
@@ -235,6 +239,7 @@ impl Theme {
                 quoted: Color32::from_rgb(0x5B, 0x4A, 0x9E),
                 anchor_bg: Color32::from_rgb(0xEE, 0xE3, 0xFA),
                 search_bg: Color32::from_rgb(0xFF, 0xF1, 0xB8),
+                image_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
             },
         }
     }
@@ -283,6 +288,7 @@ impl Theme {
                 quoted: Color32::from_rgb(0x2F, 0x6B, 0x4A),
                 anchor_bg: Color32::from_rgb(0xDC, 0xED, 0xDB),
                 search_bg: Color32::from_rgb(0xFF, 0xF1, 0xB8),
+                image_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
             },
         }
     }
@@ -461,6 +467,10 @@ pub mod md {
     /// 查找条的普通命中；当前命中仍用更醒目的 `anchor_bg`。
     pub fn search_bg() -> Color32 {
         current().md.search_bg
+    }
+    /// 实时排版里图片引用行的淡底（TextEdit 无法内嵌图片，作为占位提示）。
+    pub fn image_bg() -> Color32 {
+        current().md.image_bg
     }
 }
 

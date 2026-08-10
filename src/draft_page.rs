@@ -16,7 +16,7 @@ use crate::{
     diff_view::{self, DiffViewAction, DiffViewConfig, DiffViewState},
     doc_import, export,
     highlight::MarkdownHighlighter,
-    lmstudio, manuscript,
+    images, lmstudio, manuscript,
     manuscript::ManuscriptStore,
     models::{
         AppConfig, CorrespondenceScope, DraftInput, GeneratedDraft, JointContact,
@@ -1678,6 +1678,15 @@ impl DraftPage<'_> {
                 {
                     self.import_document(ui);
                 }
+                if theme::icon_button_enabled(ui, editable, theme::Icon::Paperclip, "插入图片")
+                    .on_hover_text(
+                        "选择图片（PNG / JPG / WebP / BMP / GIF）或 PDF 文件，复制入库后\
+                         按 markdown 图片语法插到光标处，预览按页面宽度排版",
+                    )
+                    .clicked()
+                {
+                    self.insert_images(ui);
+                }
                 if theme::icon_button_enabled(ui, has_draft, theme::Icon::Copy, "复制全文")
                     .clicked()
                 {
@@ -2726,6 +2735,40 @@ impl DraftPage<'_> {
         match doc_import::to_markdown(&path) {
             Ok(markdown) => self.insert_imported_markdown(ui, &markdown, &path),
             Err(error) => *self.status = format!("导入失败：{error:#}"),
+        }
+    }
+
+    /// 工具栏“插入图片”：选 png/jpg/pdf 等文件，复制入库后把 markdown 图片引用
+    /// 插到编辑器光标处（无焦点时追加到文末），多文件按行分隔。
+    ///
+    /// 图片宽度不写进 markdown，预览与导出统一按页面（版心）宽度等比缩放。
+    fn insert_images(&mut self, ui: &egui::Ui) {
+        if self.doc.read_only() {
+            return;
+        }
+        let Some(files) = images::pick_files() else {
+            return;
+        };
+        match images::import(&files) {
+            Ok(imported) if imported.is_empty() => {
+                *self.status =
+                    "没有可插入的图片文件（支持 PNG / JPG / WebP / BMP / GIF / PDF）。".to_string();
+            }
+            Ok(imported) => {
+                let markdown = imported
+                    .iter()
+                    .map(|image| image.markdown.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.insert_imported_markdown(ui, &markdown, &files[0]);
+                let first = imported[0].rel_path.rsplit('/').next().unwrap_or_default();
+                *self.status = if imported.len() == 1 {
+                    format!("已插入图片 {first}。")
+                } else {
+                    format!("已插入 {} 张图片，第一张为 {first}。", imported.len())
+                };
+            }
+            Err(error) => *self.status = format!("插入图片失败：{error:#}"),
         }
     }
 

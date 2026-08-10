@@ -49,6 +49,11 @@ pub fn write_tex(
         fs::write(&class_path, packaged_class)
             .with_context(|| format!("无法写入 {}", class_path.display()))?;
     }
+    // 把 markdown 引用的图片复制到 tex 同目录（保持 images/ 相对结构），
+    // 让 \includegraphics 能按相对路径取到文件（tectonic 以 tex 目录为工作目录）。
+    if let Some(dir) = path.parent() {
+        crate::images::copy_refs(markdown, dir)?;
+    }
     Ok(())
 }
 
@@ -598,6 +603,12 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
                     target_tex_section(section, &mut body, &mut attachments).push(rendered);
                 }
             }
+            MarkdownBlock::Image { alt: _, src } => {
+                target_tex_section(section, &mut body, &mut attachments).push(format!(
+                    "\\begin{{center}}\\includegraphics[width=\\textwidth]{{{}}}\\end{{center}}",
+                    tex_escape(src)
+                ));
+            }
             MarkdownBlock::Html(_) => {}
         }
         index += 1;
@@ -966,6 +977,25 @@ mod tests {
     #[test]
     fn escapes_latex_reserved_chars() {
         assert_eq!(tex_escape("A&B_1%"), "A\\&B\\_1\\%");
+    }
+
+    #[test]
+    fn official_letter_tex_embeds_image_references() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::OfficialLetter;
+        let tex = official_letter_tex(
+            &input,
+            "# 关于测试的函\n\n正文。\n\n![示意图](images/20260809_120000_示意图.png)\n\n![扫描件](images/20260809_120100_扫描件.pdf)",
+            &UnitDisplay::new(&[]),
+        );
+        assert!(tex.contains("\\begin{center}"));
+        assert!(tex.contains(
+            "\\includegraphics[width=\\textwidth]{images/20260809\\_120000\\_示意图.png}"
+        ));
+        assert!(tex.contains(
+            "\\includegraphics[width=\\textwidth]{images/20260809\\_120100\\_扫描件.pdf}"
+        ));
+        assert!(tex.contains("\\end{center}"));
     }
 
     #[test]

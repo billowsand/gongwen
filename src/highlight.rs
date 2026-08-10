@@ -323,6 +323,16 @@ fn hybrid_line(
         return;
     }
 
+    // 独占一行的图片引用：实时排版是文本编辑器，无法内嵌图片，整行加淡底
+    // 高亮为占位提示，指引到公文预览查看实际图片。
+    if export::is_image_line(trimmed) {
+        let mut format = body;
+        format.color = theme::md::heading();
+        format.background = theme::md::image_bg();
+        job.append(line, 0.0, format);
+        return;
+    }
+
     let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
     if (1..=6).contains(&hashes)
         && trimmed
@@ -886,6 +896,28 @@ mod tests {
         assert_ne!(marker_sections[1].1.color, Color32::TRANSPARENT);
         assert_ne!(marker_sections[2].1.color, Color32::TRANSPARENT);
         assert_eq!(marker_sections[3].1.color, Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn hybrid_marks_image_lines_with_placeholder_background() {
+        // 独占一行的图片引用在实时排版里以淡底高亮为占位提示（TextEdit 无法内嵌图片）。
+        let text = "# 标题\n\n正文。\n\n![示意图](images/20260809_120000_示意图.png)\n\n结尾。";
+        let sections = hybrid_sections(text, 0);
+        let image_line = sections
+            .iter()
+            .find(|(t, _)| t.contains("![示意图]"))
+            .expect("图片行应有分段");
+        assert_eq!(
+            image_line.1.background,
+            theme::md::image_bg(),
+            "图片行应铺图片占位底色"
+        );
+        // 普通正文行不铺底。
+        let body_line = sections
+            .iter()
+            .find(|(t, _)| t.contains("正文。"))
+            .expect("正文行应有分段");
+        assert_eq!(body_line.1.background, Color32::TRANSPARENT);
     }
 
     #[test]
