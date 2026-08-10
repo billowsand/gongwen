@@ -102,10 +102,10 @@ jobs:
           if-no-files-found: error
 
   build-linux-arm64:
-    name: Build Linux ARM64 / GLIBC 2.31
+    name: Build Linux ARM64 / GLIBC 2.28
     runs-on: ubuntu-24.04-arm
     container:
-      image: debian:bullseye
+      image: debian:buster
     defaults:
       run:
         shell: bash
@@ -113,7 +113,12 @@ jobs:
       - name: Install Debian build dependencies
         run: |
           set -euo pipefail
-          apt-get update
+          sed -i \
+            -e 's|deb.debian.org/debian|archive.debian.org/debian|g' \
+            -e 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' \
+            -e '/buster-updates/d' \
+            /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends \
             ca-certificates \
             curl \
@@ -147,7 +152,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = "aarch64"
-          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -171,7 +176,7 @@ jobs:
               | tail -1
           )"
           echo "Maximum required GLIBC version: $max_glibc"
-          dpkg --compare-versions "${max_glibc#GLIBC_}" le "2.31"
+          dpkg --compare-versions "${max_glibc#GLIBC_}" le "2.28"
 
       - name: Download runtime assets for smoke test
         run: |
@@ -180,7 +185,19 @@ jobs:
           curl --fail --location --retry 3 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
-          unzip -qo "/tmp/${asset}" -d runtime
+          unzip -qo "/tmp/${asset}" -d runtime || {
+            status=$?
+            # Windows Compress-Archive stores backslash separators. Info-ZIP
+            # extracts them correctly but reports warning status 1 on Linux.
+            test "$status" -eq 1
+          }
+          test -f runtime/tectonic/linux-arm64/tectonic
+          test -f runtime/texbundle/gongwen-texlive.ttb
+          test -f runtime/fonts/FangSong.ttf
+          test -f runtime/SHA256SUMS.linux-arm64.txt
+          install -m 755 \
+            runtime/tectonic/linux-arm64/tectonic \
+            runtime/tectonic/tectonic
 
       - name: Smoke test packaged TeX runtime
         run: |
@@ -188,10 +205,10 @@ jobs:
           export GONGWEN_RUNTIME_DIR="$GITHUB_WORKSPACE/runtime"
           cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
 
-      - name: Upload GLIBC 2.31 binary
+      - name: Upload GLIBC 2.28 binary
         uses: actions/upload-artifact@v4
         with:
-          name: linux-arm64-glibc231-binary
+          name: linux-arm64-glibc228-binary
           path: target/release/gongwen-assistant
           if-no-files-found: error
 
@@ -202,10 +219,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download GLIBC 2.31 binary
+      - name: Download GLIBC 2.28 binary
         uses: actions/download-artifact@v4
         with:
-          name: linux-arm64-glibc231-binary
+          name: linux-arm64-glibc228-binary
           path: target/release
 
       - name: Make binary executable
@@ -227,7 +244,7 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $asset = "gongwen-assistant-$version-linux-arm64-glibc231-full.tar.gz"
+          $asset = "gongwen-assistant-$version-linux-arm64-glibc228-full.tar.gz"
           $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-arm64-full"
           ./scripts/package-portable.ps1 -Suffix linux-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat tar.gz -ArchivePath (Join-Path $env:GITHUB_WORKSPACE $asset) -SkipBuild -Force
           Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
@@ -243,7 +260,7 @@ jobs:
           Copy-Item "target/release/gongwen-assistant" $staging
           Copy-Item README.md, THIRD_PARTY_NOTICES.md, LICENSE, config.example.json $staging
           Copy-Item -LiteralPath "font/licenses" -Destination (Join-Path $staging "licenses/fonts") -Recurse
-          $asset = "gongwen-assistant-$version-linux-arm64-glibc231.zip"
+          $asset = "gongwen-assistant-$version-linux-arm64-glibc228.zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $asset
           Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
             "$($_.Hash.ToLowerInvariant())  $asset"
