@@ -180,7 +180,7 @@ jobs:
           curl --fail --location --retry 3 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
-          unzip -q "/tmp/${asset}" -d runtime
+          unzip -qo "/tmp/${asset}" -d runtime
 
       - name: Smoke test packaged TeX runtime
         run: |
