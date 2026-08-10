@@ -769,13 +769,56 @@ fn paint_hybrid_decorations(
     let visuals = editor_line_visuals(output);
     let source_lines = text.split('\n').collect::<Vec<_>>();
     let painter = ui.painter();
-    let mut counters = [0usize; 4];
+    let mut counters = export::HeadingCounters::default();
+    let attachment_count = export::parse_markdown(text)
+        .iter()
+        .filter(|block| {
+            matches!(
+                block,
+                export::MarkdownBlock::Marker(export::MarkdownSection::Attachment)
+            )
+        })
+        .count();
+    let mut attachment_index = 0usize;
 
     for (index, line) in source_lines.iter().enumerate() {
+        // 区段标记与每个附件标题处重置计数器；正文和附件使用同一标题层级。
+        let prefix = counters.next(line);
+        if export::parse_section_marker(line) == Some(export::MarkdownSection::Attachment) {
+            attachment_index += 1;
+            let next_title = source_lines[index + 1..]
+                .iter()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty());
+            let is_legacy = next_title
+                .and_then(|line| line.strip_prefix("# "))
+                .is_some_and(|title| export::legacy_attachment_label(title).is_some());
+            if index != active_line
+                && !is_legacy
+                && let Some(visual) = visuals.get(index)
+            {
+                let label = if attachment_count == 1 {
+                    "附件".to_string()
+                } else {
+                    format!("附件{attachment_index}")
+                };
+                let font = egui::FontId::new(
+                    OFFICIAL_BODY_SIZE,
+                    theme::official_family(theme::FONT_HEITI),
+                );
+                painter.text(
+                    egui::pos2(output.galley_pos.x, (visual.top + visual.bottom) * 0.5),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    font,
+                    egui::Color32::BLACK,
+                );
+            }
+            continue;
+        }
         let Some(level) = markdown_heading_level(line) else {
             continue;
         };
-        let prefix = export::official_heading_prefix(level, &mut counters);
         if index == active_line {
             continue;
         }
@@ -2594,7 +2637,7 @@ impl DraftPage<'_> {
                         (
                             "附件标记",
                             "<!-- [附件] -->",
-                            "在光标处插入“<!-- [附件] -->”，把其后内容切换为附件区段",
+                            "开始一份新附件；可重复插入，程序自动生成“附件”或“附件1、附件2……”标识",
                         ),
                     ] {
                         if ui.button(label).on_hover_text(tip).clicked() {
@@ -2616,16 +2659,17 @@ impl DraftPage<'_> {
 
     /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：编辑框有焦点时插到
     /// 光标所在行行首，否则追加到文末。标记必须独占一行导出器才认，
-    /// 已存在同名标记时不再重复插入。
+    /// 正文标记只允许一个；附件标记可重复插入，每次都代表一份新附件。
     fn insert_section_marker(&mut self, ui: &egui::Ui, marker: &str, label: &str) {
         if self.doc.read_only() {
             return;
         }
-        if self
-            .doc
-            .generated_markdown
-            .lines()
-            .any(|line| line.trim() == marker)
+        if marker != "<!-- [附件] -->"
+            && self
+                .doc
+                .generated_markdown
+                .lines()
+                .any(|line| line.trim() == marker)
         {
             *self.status = format!("{label}已在稿中，不重复插入。");
             return;

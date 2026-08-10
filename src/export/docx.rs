@@ -1301,17 +1301,15 @@ pub fn write_docx(
         while index < blocks.len() {
             let block = &blocks[index];
             match block {
-                MarkdownBlock::Title(_) if !seen_document_title => {
+                MarkdownBlock::Title(_) if !seen_document_title && !in_attachment => {
                     seen_document_title = true;
-                }
-                MarkdownBlock::Title(_) => {
-                    in_attachment = true;
-                    counters = [0; 4];
-                    attachment_blocks.push(block);
                 }
                 MarkdownBlock::Marker(section) => {
                     in_attachment = matches!(section, MarkdownSection::Attachment);
                     counters = [0; 4];
+                    if in_attachment {
+                        attachment_blocks.push(block);
+                    }
                 }
                 _ if in_attachment => attachment_blocks.push(block),
                 _ => {
@@ -1441,28 +1439,31 @@ pub fn write_docx(
     if input.kind.uses_letter_layout() && !attachment_blocks.is_empty() {
         doc = doc.add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)));
         let mut counters = [0usize; 4];
-        let mut attachment_title_count = 0usize;
+        let attachment_count = attachment_blocks
+            .iter()
+            .filter(|block| matches!(block, MarkdownBlock::Marker(MarkdownSection::Attachment)))
+            .count();
+        let mut attachment_index = 0usize;
         for block in attachment_blocks {
             match block {
-                MarkdownBlock::Title(text) => {
-                    if attachment_title_count > 0 {
+                MarkdownBlock::Marker(MarkdownSection::Attachment) => {
+                    if attachment_index > 0 {
                         doc = doc.add_paragraph(
                             Paragraph::new().add_run(Run::new().add_break(BreakType::Page)),
                         );
                     }
-                    attachment_title_count += 1;
+                    attachment_index += 1;
                     counters = [0; 4];
-                    doc = doc.add_paragraph(attachment_label_paragraph(text));
+                    let label = if attachment_count == 1 {
+                        "附件".to_string()
+                    } else {
+                        format!("附件{attachment_index}")
+                    };
+                    doc = doc.add_paragraph(attachment_label_paragraph(&label));
                 }
-                MarkdownBlock::Heading(2, text) => {
-                    counters.fill(0);
+                MarkdownBlock::Title(text) => {
+                    counters = [0; 4];
                     doc = doc.add_paragraph(attachment_document_title_paragraph(text));
-                }
-                MarkdownBlock::Heading(level, text) if *level > 2 => {
-                    let body_level = *level - 1;
-                    if let Some(title) = official_heading_text(body_level, text, &mut counters) {
-                        doc = doc.add_paragraph(heading_paragraph(body_level, &title));
-                    }
                 }
                 _ => doc = add_official_content_block(doc, block, &mut counters),
             }
@@ -1806,7 +1807,7 @@ mod tests {
         write_docx_ok(
             &path,
             &input,
-            "# 关于测试事项的电话通知\n<!-- [正文] -->\n## 工作要求\n正文。\n<!-- [附件] -->\n# 附件1\n## 附件标题\n附件内容。",
+            "# 关于测试事项的电话通知\n<!-- [正文] -->\n## 工作要求\n正文。\n<!-- [附件] -->\n# 附件标题\n附件内容。",
         )
         .unwrap();
 
@@ -1814,7 +1815,7 @@ mod tests {
         assert!(xml.contains("某某省教育厅"));
         assert!(xml.contains("某某市教育局"));
         assert!(xml.contains("一、工作要求"));
-        assert!(xml.contains("附件1"));
+        assert!(xml.contains("附件"));
         assert!(!xml.contains("某教函"));
         assert!(!xml.contains("〔"));
         assert!(!xml.contains("抄送："));

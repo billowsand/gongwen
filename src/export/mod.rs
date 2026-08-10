@@ -401,7 +401,92 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
         index += 1;
     }
     flush(&mut paragraph, &mut paragraph_range, &mut blocks);
-    blocks
+    normalize_legacy_attachments(blocks)
+}
+
+/// 把旧版附件语法转换为统一的内部结构：
+///
+/// ```text
+/// <!-- [附件] -->       <!-- [附件] -->
+/// # 附件1          =>  # 附件正式标题
+/// ## 附件正式标题      ## 附件内一级标题
+/// ### 附件内一级标题
+/// ```
+///
+/// 新版中每个附件标记就是一份附件的起点，附件标题和内容标题使用与正文相同的
+/// Markdown 层级。这里只做读取期兼容，不改写用户原文；预览和导出因此只需维护
+/// 一套规范结构。
+fn normalize_legacy_attachments(blocks: Vec<LocatedBlock>) -> Vec<LocatedBlock> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum LegacyState {
+        None,
+        AwaitTitle,
+        Content,
+    }
+
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut in_attachment = false;
+    let mut at_attachment_start = false;
+    let mut legacy = LegacyState::None;
+
+    for mut located in blocks {
+        match &located.block {
+            MarkdownBlock::Marker(MarkdownSection::Attachment) => {
+                in_attachment = true;
+                at_attachment_start = true;
+                legacy = LegacyState::None;
+                out.push(located);
+            }
+            MarkdownBlock::Marker(MarkdownSection::Body) => {
+                in_attachment = false;
+                at_attachment_start = false;
+                legacy = LegacyState::None;
+                out.push(located);
+            }
+            MarkdownBlock::Title(text)
+                if in_attachment && legacy_attachment_label(text).is_some() =>
+            {
+                // 旧格式只在第一份附件前放一个区段标记，后续 `# 附件N` 同时承担
+                // 分隔作用；规范化时为后续附件补一个仅用于内部处理的标记。
+                if !at_attachment_start {
+                    out.push(LocatedBlock {
+                        block: MarkdownBlock::Marker(MarkdownSection::Attachment),
+                        range: located.range.start..located.range.start,
+                    });
+                }
+                at_attachment_start = false;
+                if let Some(name) = attachment_title_name(text) {
+                    located.block = MarkdownBlock::Title(name);
+                    out.push(located);
+                    legacy = LegacyState::Content;
+                } else {
+                    legacy = LegacyState::AwaitTitle;
+                }
+            }
+            MarkdownBlock::Heading(2, text)
+                if in_attachment && legacy == LegacyState::AwaitTitle =>
+            {
+                located.block = MarkdownBlock::Title(text.clone());
+                out.push(located);
+                legacy = LegacyState::Content;
+                at_attachment_start = false;
+            }
+            MarkdownBlock::Heading(level, text)
+                if in_attachment && legacy == LegacyState::Content && *level > 2 =>
+            {
+                located.block = MarkdownBlock::Heading(*level - 1, text.clone());
+                out.push(located);
+                at_attachment_start = false;
+            }
+            _ => {
+                if in_attachment && !matches!(located.block, MarkdownBlock::Html(_)) {
+                    at_attachment_start = false;
+                }
+                out.push(located);
+            }
+        }
+    }
+    out
 }
 
 fn is_table_row(line: &str) -> bool {
@@ -461,8 +546,11 @@ pub(crate) fn is_image_line(line: &str) -> bool {
     parse_image(line.trim()).is_some()
 }
 
-fn parse_section_marker(line: &str) -> Option<MarkdownSection> {
+/// 识别 `<!-- [正文] -->`、`<!-- [附件] -->`（含【】与英文变体）这类独占一行的区段标记。
+/// 实时排版编辑器（draft_page / highlight）也复用它，以便在区段切换处重置公文标题计数器。
+pub(crate) fn parse_section_marker(line: &str) -> Option<MarkdownSection> {
     let inner = line
+        .trim()
         .strip_prefix("<!--")?
         .strip_suffix("-->")?
         .trim()
@@ -556,6 +644,87 @@ pub(crate) fn official_heading_prefix(level: u8, counters: &mut [usize; 4]) -> O
             Some(format!("({})", counters[3]))
         }
         _ => None,
+    }
+}
+
+/// 逐行推进标题计数器并返回该行叠加的编号前缀，供实时排版编辑器使用。
+/// 规则与导出器（docx/latex）和预览完全一致：
+/// - 区段标记（正文/附件）处切换区段并重置计数器；
+/// - 正文第一个 `#` 与每个附件标记后的 `#` 都是正式标题；
+/// - 正文和附件的 `##` 及以下使用完全相同的编号层级；
+/// - 非标题行返回 None 且不推进计数器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeadingCounters {
+    levels: [usize; 4],
+    expecting_title: bool,
+    in_attachment: bool,
+    legacy_attachment: bool,
+    /// 最近一次 `next` 处理的行是否为正式标题（文档标题或附件正式标题），
+    /// 需要按方正小标宋二号居中渲染，与预览/导出一致。
+    centered_title: bool,
+}
+
+impl Default for HeadingCounters {
+    fn default() -> Self {
+        Self {
+            levels: [0; 4],
+            expecting_title: true,
+            in_attachment: false,
+            legacy_attachment: false,
+            centered_title: false,
+        }
+    }
+}
+
+impl HeadingCounters {
+    pub(crate) fn next(&mut self, line: &str) -> Option<String> {
+        self.centered_title = false;
+        if let Some(section) = parse_section_marker(line) {
+            self.levels = [0; 4];
+            self.expecting_title = true;
+            self.in_attachment = section == MarkdownSection::Attachment;
+            self.legacy_attachment = false;
+            return None;
+        }
+        let trimmed = line.trim_start();
+        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+        let is_heading = (1..=6).contains(&hashes)
+            && trimmed
+                .as_bytes()
+                .get(hashes)
+                .is_some_and(u8::is_ascii_whitespace);
+        if !is_heading {
+            return None;
+        }
+        if hashes == 1 {
+            let text = trimmed[hashes..].trim();
+            if self.in_attachment && legacy_attachment_label(text).is_some() {
+                self.levels = [0; 4];
+                self.expecting_title = true;
+                self.legacy_attachment = true;
+                return None;
+            }
+            self.centered_title = self.expecting_title;
+            self.expecting_title = false;
+            self.legacy_attachment = false;
+            return None;
+        }
+        if self.legacy_attachment && self.expecting_title && hashes == 2 {
+            self.centered_title = true;
+            self.expecting_title = false;
+            return None;
+        }
+        let level = if self.legacy_attachment {
+            hashes - 1
+        } else {
+            hashes
+        };
+        official_heading_prefix(level as u8, &mut self.levels)
+    }
+
+    /// 最近一次 `next` 处理的行是否为正式标题（方正小标宋二号居中渲染）。
+    pub(crate) fn centered_title(&self) -> bool {
+        self.centered_title
     }
 }
 
@@ -759,31 +928,34 @@ fn attachment_title_name(label: &str) -> Option<String> {
     Some(plain_text(name))
 }
 
-/// 提取附件区各附件的名称，按出现顺序返回。附件名称为附件标题 `# 附件N`
-/// 之后的第一个 `##` 标题；附件标题自带“附件N：名称”写法时直接取冒号后的部分。
-/// 没有名称的附件不入列（正文后的附件概要只列出有名称的附件）。
+pub(crate) fn legacy_attachment_label(label: &str) -> Option<()> {
+    let rest = label.strip_prefix("附件")?;
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    let tail = rest[digits..].trim();
+    if tail.is_empty() || tail.starts_with('：') || tail.starts_with(':') || tail.starts_with('、')
+    {
+        Some(())
+    } else {
+        None
+    }
+}
+
+/// 提取各附件正式标题。解析器已把旧格式规范化，因此每个附件标记之后的首个
+/// `#` 标题就是名称；没有正式标题的附件不进入正文附件清单。
 pub(crate) fn attachment_names(blocks: &[MarkdownBlock]) -> Vec<String> {
     let mut names = Vec::new();
-    let mut seen_document_title = false;
     let mut in_attachment = false;
     let mut pending_name = false;
     for block in blocks {
         match block {
-            MarkdownBlock::Title(_) if !seen_document_title => seen_document_title = true,
-            MarkdownBlock::Title(text) => {
-                in_attachment = true;
-                if let Some(name) = attachment_title_name(text) {
-                    names.push(name);
-                    pending_name = false;
-                } else {
-                    pending_name = true;
-                }
-            }
             MarkdownBlock::Marker(section) => {
                 in_attachment = matches!(section, MarkdownSection::Attachment);
-                pending_name = false;
+                pending_name = in_attachment;
             }
-            MarkdownBlock::Heading(2, text) if in_attachment && pending_name => {
+            MarkdownBlock::Title(text) if in_attachment && pending_name => {
                 names.push(plain_text(text));
                 pending_name = false;
             }
@@ -815,6 +987,90 @@ mod tests {
     fn parses_chinese_document_date_parts() {
         assert_eq!(chinese_date_parts("2026年8月5日"), Some(("2026", "8", "5")));
         assert_eq!(chinese_date_parts("待定"), None);
+    }
+
+    /// 实时排版编辑器逐行叠加的标题编号：规则与导出器/预览一致——
+    /// 区段标记与每个附件标题处都重置计数器，附件区整体上移一级编号。
+    #[test]
+    fn heading_prefixes_restart_after_section_markers() {
+        let mut counters = HeadingCounters::default();
+        let lines = [
+            "# 测试函",
+            "<!-- [正文] -->",
+            "## 一、总体要求",
+            "### （一）具体事项",
+            "正文段落。",
+            "<!-- [附件] -->",
+            "# 统计表",
+            "## 一、填报说明",
+            "### 子项",
+            "附件内容。",
+            "<!-- [附件] -->",
+            "# 说明材料",
+            "## 二、其他说明",
+        ];
+        let prefixes = lines
+            .iter()
+            .map(|line| counters.next(line))
+            .collect::<Vec<_>>();
+        assert_eq!(prefixes[0], None, "文档标题不编号");
+        assert_eq!(prefixes[1], None, "区段标记不编号");
+        assert_eq!(prefixes[2].as_deref(), Some("一、"));
+        assert_eq!(prefixes[3].as_deref(), Some("（一）"));
+        assert_eq!(prefixes[4], None, "正文段落不编号");
+        assert_eq!(prefixes[5], None, "附件区段标记不编号");
+        assert_eq!(prefixes[6], None, "附件正式标题（#）不编号");
+        assert_eq!(
+            prefixes[7].as_deref(),
+            Some("一、"),
+            "附件内容标题与正文同级并从一、起"
+        );
+        assert_eq!(prefixes[8].as_deref(), Some("（一）"));
+        assert_eq!(prefixes[9], None);
+        assert_eq!(prefixes[10], None, "第二个附件标记");
+        assert_eq!(prefixes[11], None, "第二个附件正式标题");
+        assert_eq!(
+            prefixes[12].as_deref(),
+            Some("一、"),
+            "每个附件之后的内容都重新编号"
+        );
+
+        // 旧格式仍可用于实时排版，附件内容层级会在显示期上移一级。
+        let mut counters = HeadingCounters::default();
+        counters.next("# 测试函");
+        assert_eq!(counters.next("## 一"), Some("一、".to_string()));
+        counters.next("<!-- [附件] -->");
+        assert_eq!(counters.next("# 附件1"), None);
+        assert_eq!(counters.next("## 统计表"), None);
+        assert_eq!(counters.next("### 填报说明").as_deref(), Some("一、"));
+
+        // 正文标记回到正文区，同样重新起算。
+        let mut counters = HeadingCounters::default();
+        counters.next("# 测试函");
+        counters.next("## 一");
+        counters.next("## 二");
+        assert_eq!(counters.next("<!-- [正文] -->"), None);
+        assert_eq!(counters.next("## 重新起算").as_deref(), Some("一、"));
+    }
+
+    /// 文档标题与附件正式标题需要按方正小标宋二号居中渲染（centered_title 标志），
+    /// 附件标识与内容标题不居中。
+    #[test]
+    fn formal_titles_are_marked_for_centered_rendering() {
+        let mut counters = HeadingCounters::default();
+        assert!(!counters.centered_title());
+        counters.next("# 测试函");
+        assert!(counters.centered_title(), "文档标题需居中");
+        counters.next("正文段落。");
+        assert!(!counters.centered_title());
+        counters.next("<!-- [附件] -->");
+        assert!(!counters.centered_title());
+        counters.next("# 附件1");
+        assert!(!counters.centered_title(), "附件标识不居中");
+        counters.next("## 统计表");
+        assert!(counters.centered_title(), "附件正式标题需居中");
+        counters.next("### 一、填报说明");
+        assert!(!counters.centered_title(), "附件内容标题不居中");
     }
 
     /// 联合发文日期压在主发文单位所在列下方；主单位跨列时整体居中。
@@ -898,7 +1154,7 @@ mod tests {
     #[test]
     fn parses_body_and_attachment_markers_and_all_heading_levels() {
         let blocks = parse_markdown(
-            "# 函件标题\n<!-- [正文] -->\n## 一、正文事项\n### （一）具体要求\n<!-- [附件] -->\n# 附件1：表格\n#### 1. 说明",
+            "# 函件标题\n<!-- [正文] -->\n## 一、正文事项\n### （一）具体要求\n<!-- [附件] -->\n# 表格\n## 一、说明",
         );
         assert!(matches!(
             blocks[1],
@@ -910,8 +1166,13 @@ mod tests {
             blocks[4],
             MarkdownBlock::Marker(MarkdownSection::Attachment)
         ));
-        assert!(matches!(&blocks[5], MarkdownBlock::Title(text) if text == "附件1：表格"));
-        assert!(matches!(&blocks[6], MarkdownBlock::Heading(4, text) if text == "说明"));
+        assert!(matches!(&blocks[5], MarkdownBlock::Title(text) if text == "表格"));
+        assert!(matches!(&blocks[6], MarkdownBlock::Heading(2, text) if text == "说明"));
+
+        // 历史稿读取时规范化为相同结构，不要求用户手工迁移。
+        let legacy = parse_markdown("# 函件标题\n<!-- [附件] -->\n# 附件1：表格\n### 一、说明");
+        assert!(matches!(&legacy[2], MarkdownBlock::Title(text) if text == "表格"));
+        assert!(matches!(&legacy[3], MarkdownBlock::Heading(2, text) if text == "说明"));
     }
 
     #[test]
@@ -1304,17 +1565,17 @@ mod tests {
 
     #[test]
     fn collects_attachment_names_from_heading_and_inline() {
-        // 规范写法：附件名称为 `##` 标题。
+        // 规范写法：每个附件标记后的 `#` 是正式标题。
         let blocks = parse_markdown(
-            "# 测试函\n<!-- [正文] -->\n正文。\n<!-- [附件] -->\n# 附件1\n## 统计表\n内容。\n# 附件2\n## 说明材料\n内容。",
+            "# 测试函\n<!-- [正文] -->\n正文。\n<!-- [附件] -->\n# 统计表\n内容。\n<!-- [附件] -->\n# 说明材料\n内容。",
         );
         assert_eq!(attachment_names(&blocks), ["统计表", "说明材料"]);
-        // 附件标题自带名称：附件N：名称。
+        // 历史格式在读取期规范化，附件清单结果保持不变。
         let blocks = parse_markdown("# 测试函\n<!-- [附件] -->\n# 附件1：汇总表\n内容。");
         assert_eq!(attachment_names(&blocks), ["汇总表"]);
         // 没有名称的附件不入列。
         let blocks = parse_markdown(
-            "# 测试函\n<!-- [附件] -->\n# 附件1\n内容。\n# 附件2\n## 说明材料\n内容。",
+            "# 测试函\n<!-- [附件] -->\n内容。\n<!-- [附件] -->\n# 说明材料\n内容。",
         );
         assert_eq!(attachment_names(&blocks), ["说明材料"]);
     }

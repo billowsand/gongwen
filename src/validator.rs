@@ -1,3 +1,4 @@
+use crate::export::{self, MarkdownBlock, MarkdownSection};
 use crate::last_char_orphan;
 use crate::models::{
     DraftInput, JointIssuanceMode, SecurityLevel, SecurityRules, TemplateKind, VocabularyCategory,
@@ -21,43 +22,48 @@ pub fn validate(
         warnings.push("模型未返回正文".into());
         return warnings;
     }
-    let mut in_attachment = false;
-    let mut body_h1_count = 0;
-    let mut attachment_marker_seen = false;
-    let mut attachment_has_content = false;
-    let mut attachment_label_count = 0usize;
-    let mut attachment_label_is_valid = true;
+    let blocks = export::parse_markdown(text);
+    let mut section = MarkdownSection::Body;
+    let mut body_h1_count = 0usize;
+    let mut attachment_count = 0usize;
     let mut attachment_needs_title = false;
+    let mut attachment_has_content = false;
     let mut attachment_missing_title = false;
-    let attachment_label_pattern = Regex::new(r"^附件\d+$").expect("valid attachment label regex");
-    for line in text.lines().map(str::trim) {
-        if is_attachment_marker(line) {
-            in_attachment = true;
-            attachment_marker_seen = true;
-            continue;
-        }
-        if is_body_marker(line) {
-            attachment_missing_title |= attachment_needs_title;
-            attachment_needs_title = false;
-            in_attachment = false;
-            continue;
-        }
-        if in_attachment && !line.is_empty() && !line.starts_with("<!--") {
-            attachment_has_content = true;
-        }
-        if !in_attachment && line.starts_with("# ") {
-            body_h1_count += 1;
-        }
-        if in_attachment && line.starts_with("# ") {
-            attachment_missing_title |= attachment_needs_title;
-            attachment_needs_title = true;
-            attachment_label_count += 1;
-            attachment_label_is_valid &= attachment_label_pattern.is_match(line[2..].trim());
-        } else if in_attachment && line.starts_with("## ") && attachment_needs_title {
-            attachment_needs_title = false;
+    let mut empty_attachment = false;
+    for block in &blocks {
+        match block {
+            MarkdownBlock::Marker(MarkdownSection::Attachment) => {
+                if attachment_count > 0 {
+                    attachment_missing_title |= attachment_needs_title;
+                    empty_attachment |= !attachment_has_content;
+                }
+                section = MarkdownSection::Attachment;
+                attachment_count += 1;
+                attachment_needs_title = true;
+                attachment_has_content = false;
+            }
+            MarkdownBlock::Marker(MarkdownSection::Body) => {
+                if section == MarkdownSection::Attachment {
+                    attachment_missing_title |= attachment_needs_title;
+                    empty_attachment |= !attachment_has_content;
+                }
+                section = MarkdownSection::Body;
+                attachment_needs_title = false;
+            }
+            MarkdownBlock::Title(_) if section == MarkdownSection::Body => body_h1_count += 1,
+            MarkdownBlock::Title(_) if attachment_needs_title => {
+                attachment_needs_title = false;
+                attachment_has_content = true;
+            }
+            MarkdownBlock::Html(_) => {}
+            _ if section == MarkdownSection::Attachment => attachment_has_content = true,
+            _ => {}
         }
     }
-    attachment_missing_title |= attachment_needs_title;
+    if section == MarkdownSection::Attachment {
+        attachment_missing_title |= attachment_needs_title;
+        empty_attachment |= !attachment_has_content;
+    }
     if body_h1_count == 0 {
         warnings.push("缺少一级标题，请在导出前补充“# 标题”".into());
     }
@@ -66,18 +72,11 @@ pub fn validate(
             "正文区检测到多个一级标题；正式标题只保留一个，附件前请加入“<!-- [附件] -->”".into(),
         );
     }
-    if attachment_marker_seen && !attachment_has_content {
-        warnings.push("检测到附件区段标记，但附件区段没有内容".into());
-    }
-    if attachment_marker_seen && attachment_label_count == 0 {
-        warnings.push("附件区缺少“# 附件1”格式的附件标识".into());
-    }
-    if !attachment_label_is_valid {
-        warnings
-            .push("附件标识格式应为“# 附件1”“# 附件2”，名称应另写在下一行“## 附件正式标题”".into());
+    if empty_attachment {
+        warnings.push("检测到没有内容的附件标记".into());
     }
     if attachment_missing_title {
-        warnings.push("每个附件标识下一行应使用“## 附件正式标题”".into());
+        warnings.push("每个附件标记之后应使用“# 附件正式标题”".into());
     }
     if text.contains("【待核实") {
         warnings.push("正文含“待核实”字段，签发前必须补齐".into());
@@ -192,30 +191,6 @@ pub fn validate(
     warnings.sort();
     warnings.dedup();
     warnings
-}
-
-fn marker_name(line: &str) -> Option<String> {
-    let inner = line
-        .strip_prefix("<!--")?
-        .strip_suffix("-->")?
-        .trim()
-        .trim_start_matches(['[', '【'])
-        .trim_end_matches([']', '】'])
-        .trim();
-    Some(inner.to_ascii_lowercase())
-}
-
-fn is_attachment_marker(line: &str) -> bool {
-    marker_name(line).is_some_and(|name| {
-        matches!(
-            name.as_str(),
-            "附件" | "附录" | "attachment" | "attachments" | "appendix"
-        )
-    })
-}
-
-fn is_body_marker(line: &str) -> bool {
-    marker_name(line).is_some_and(|name| matches!(name.as_str(), "正文" | "body"))
 }
 
 /// 校验表单元数据本身：密级与保密期限的约束、联系人与电话的绑定关系、
@@ -997,7 +972,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|warning| warning.contains("附件区段没有内容")),
+                .any(|warning| warning.contains("没有内容的附件标记")),
             "{warnings:?}"
         );
     }
@@ -1009,33 +984,25 @@ mod tests {
         input.profile.recipient = "某部门".into();
         let valid = validate(
             &input,
-            "# 测试函\n正文。\n<!-- [附件] -->\n# 附件1\n## 情况统计表\n附件内容。",
+            "# 测试函\n正文。\n<!-- [附件] -->\n# 情况统计表\n附件内容。",
             &[],
             &rules(),
         );
         assert!(
-            !valid
-                .iter()
-                .any(|warning| warning.contains("附件标识") || warning.contains("附件正式标题")),
+            !valid.iter().any(|warning| warning.contains("附件正式标题")),
             "{valid:?}"
         );
 
         let invalid = validate(
             &input,
-            "# 测试函\n正文。\n<!-- [附件] -->\n# 附件1：情况统计表\n附件内容。",
+            "# 测试函\n正文。\n<!-- [附件] -->\n## 情况统计表\n附件内容。",
             &[],
             &rules(),
         );
         assert!(
             invalid
                 .iter()
-                .any(|warning| warning.contains("附件标识格式")),
-            "{invalid:?}"
-        );
-        assert!(
-            invalid
-                .iter()
-                .any(|warning| warning.contains("下一行应使用")),
+                .any(|warning| warning.contains("附件正式标题")),
             "{invalid:?}"
         );
     }

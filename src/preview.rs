@@ -1052,16 +1052,15 @@ pub fn official_preview(
     let mut seen_title = false;
     for located in &located {
         match &located.block {
-            MarkdownBlock::Title(_) if !seen_title => {
+            MarkdownBlock::Title(_) if !seen_title && !in_attachment => {
                 seen_title = true;
                 body.push(located);
             }
-            MarkdownBlock::Title(_) => {
-                in_attachment = true;
-                attachments.push(vec![located]);
-            }
             MarkdownBlock::Marker(section) => {
                 in_attachment = matches!(section, MarkdownSection::Attachment);
+                if in_attachment {
+                    attachments.push(Vec::new());
+                }
             }
             _ if in_attachment => match attachments.last_mut() {
                 Some(last) => last.push(located),
@@ -1191,10 +1190,24 @@ pub fn official_preview(
     });
 
     let last_attachment = attachments.len().saturating_sub(1);
+    let attachment_count = attachments.len();
     for (sheet_index, attachment) in attachments.into_iter().enumerate() {
         ui.add_space(14.0);
         sheet(ui, &metrics, |ui| {
             let mut counters = [0usize; 4];
+            let label = if attachment_count == 1 {
+                "附件".to_string()
+            } else {
+                format!("附件{}", sheet_index + 1)
+            };
+            line_block(
+                ui,
+                &metrics,
+                &label,
+                theme::FONT_HEITI,
+                BODY_PT,
+                Align::LEFT,
+            );
             for located in attachment {
                 let range = located.range.clone();
                 clickable(
@@ -1205,17 +1218,8 @@ pub fn official_preview(
                     &mut clicked,
                     |ui| {
                         match &located.block {
-                            // 附件标签：黑体、左对齐、不缩进。
-                            MarkdownBlock::Title(text) => line_block(
-                                ui,
-                                &metrics,
-                                &export::plain_text(text),
-                                theme::FONT_HEITI,
-                                BODY_PT,
-                                Align::LEFT,
-                            ),
-                            // 附件自身的标题：小标宋二号居中。
-                            MarkdownBlock::Heading(2, text) => {
+                            // 附件正式标题与正文标题使用同一层级编码。
+                            MarkdownBlock::Title(text) => {
                                 counters.fill(0);
                                 line_block(
                                     ui,
@@ -1226,17 +1230,6 @@ pub fn official_preview(
                                     Align::Center,
                                 );
                                 ui.add_space(metrics.pt(18.0));
-                            }
-                            // 附件内部的层级整体上移一级。
-                            MarkdownBlock::Heading(level, text) if *level > 2 => {
-                                heading_block(
-                                    ui,
-                                    &metrics,
-                                    level - 1,
-                                    text,
-                                    &mut counters,
-                                    numbered,
-                                );
                             }
                             block => content_block(ui, &metrics, block, &mut counters, numbered),
                         }

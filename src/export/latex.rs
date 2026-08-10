@@ -529,6 +529,10 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
     let mut body = Vec::new();
     let mut attachments = Vec::new();
     let landscape_attachments = attachment_landscape_flags(blocks);
+    let attachment_count = blocks
+        .iter()
+        .filter(|block| matches!(block, MarkdownBlock::Marker(MarkdownSection::Attachment)))
+        .count();
     let mut section = MarkdownSection::Body;
     let mut seen_document_title = false;
     let mut attachment_title_count = 0usize;
@@ -541,10 +545,15 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
     while index < blocks.len() {
         let block = &blocks[index];
         match block {
-            MarkdownBlock::Title(text) if !seen_document_title => {
+            MarkdownBlock::Title(_) if !seen_document_title && section == MarkdownSection::Body => {
                 seen_document_title = true;
             }
-            MarkdownBlock::Title(text) => {
+            MarkdownBlock::Title(text) if section == MarkdownSection::Attachment => {
+                counters = [0; 4];
+                attachments.push(attachment_document_title_to_tex(text));
+            }
+            MarkdownBlock::Title(_) => {}
+            MarkdownBlock::Marker(MarkdownSection::Attachment) => {
                 section = MarkdownSection::Attachment;
                 counters = [0; 4];
                 if attachment_title_count > 0 {
@@ -562,13 +571,18 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
                 if current_attachment_is_landscape {
                     attachments.push("\\begin{landscape}".to_string());
                 }
+                let label = if attachment_count == 1 {
+                    "附件".to_string()
+                } else {
+                    format!("附件{}", attachment_title_count)
+                };
                 attachments.push(format!(
                     "\\noindent{{\\xeCJKsetup{{CJKecglue={{\\hskip0pt}}}}\\heiti\\enheiti\\zihao{{3}} {}}}\\par",
-                    tex_escape(&plain_text(text))
+                    tex_escape(&label)
                 ));
             }
-            MarkdownBlock::Marker(next) => {
-                section = *next;
+            MarkdownBlock::Marker(MarkdownSection::Body) => {
+                section = MarkdownSection::Body;
                 counters = [0; 4];
             }
             MarkdownBlock::Heading(level, text) => {
@@ -609,7 +623,7 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
                             official_heading_to_tex(*level, text, &mut counters)
                         }
                         MarkdownSection::Attachment => {
-                            attachment_heading_to_tex(*level, text, &mut counters)
+                            official_heading_to_tex(*level, text, &mut counters)
                         }
                     };
                     if let Some(rendered) = rendered {
@@ -659,8 +673,10 @@ fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> {
 
     for block in blocks {
         match block {
-            MarkdownBlock::Title(_) if !seen_document_title => seen_document_title = true,
-            MarkdownBlock::Title(_) => {
+            MarkdownBlock::Title(_) if !seen_document_title && current_attachment.is_none() => {
+                seen_document_title = true
+            }
+            MarkdownBlock::Marker(MarkdownSection::Attachment) => {
                 flags.push(false);
                 current_attachment = Some(flags.len() - 1);
             }
@@ -678,19 +694,12 @@ fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> {
     flags
 }
 
-fn attachment_heading_to_tex(level: u8, text: &str, counters: &mut [usize; 4]) -> Option<String> {
-    if level == 2 {
-        counters.fill(0);
-        return Some(format!(
-            // 附件标识位于第一行，正式标题置于第三行；用固定正文行距留出第二行，
-            // 不使用 center 环境自带的可伸缩 topsep。
-            "\\vspace{{\\BodyBaselineSkip}}\n{{\\centering\\bs\\enbt\\zihao{{2}}\\setlength{{\\baselineskip}}{{\\BodyBaselineSkip}} {}\\par}}",
-            tex_escape(&plain_text(text))
-        ));
-    }
-    level
-        .checked_sub(1)
-        .and_then(|body_level| official_heading_to_tex(body_level, text, counters))
+fn attachment_document_title_to_tex(text: &str) -> String {
+    // 附件标识位于第一行，正式标题置于第三行；用固定正文行距留出第二行。
+    format!(
+        "\\vspace{{\\BodyBaselineSkip}}\n{{\\centering\\bs\\enbt\\zihao{{2}}\\setlength{{\\baselineskip}}{{\\BodyBaselineSkip}} {}\\par}}",
+        tex_escape(&plain_text(text))
+    )
 }
 
 fn target_tex_section<'a>(
@@ -1523,18 +1532,17 @@ mod tests {
         input.profile.issuing_unit = "某单位".into();
         input.profile.recipient = "某部门".into();
         // 单附件用“附件：名称”。
-        let single = letter_tex(
-            &input,
-            "# 测试函\n<!-- [附件] -->\n# 附件1\n## 统计表\n内容。",
-        );
+        let single = letter_tex(&input, "# 测试函\n<!-- [附件] -->\n# 统计表\n内容。");
         assert!(
             single.contains("\\noindent\\hspace*{2em}附件：统计表\\par"),
             "{single}"
         );
+        assert!(single.contains("\\heiti\\enheiti\\zihao{3} 附件}"));
+        assert!(!single.contains("\\heiti\\enheiti\\zihao{3} 附件1}"));
         // 多附件逐行“附件N：名称”，第二个起“附件”二字用 \qquad 占位对齐。
         let multi = letter_tex(
             &input,
-            "# 测试函\n<!-- [附件] -->\n# 附件1\n## 统计表\n内容。\n# 附件2\n## 说明材料\n内容。",
+            "# 测试函\n<!-- [附件] -->\n# 统计表\n内容。\n<!-- [附件] -->\n# 说明材料\n内容。",
         );
         assert!(
             multi.contains("\\noindent\\hspace*{2em}附件1：统计表\\par"),
@@ -1544,6 +1552,8 @@ mod tests {
             multi.contains("\\noindent\\hspace*{2em}\\qquad 2：说明材料\\par"),
             "{multi}"
         );
+        assert!(multi.contains("\\heiti\\enheiti\\zihao{3} 附件1}"));
+        assert!(multi.contains("\\heiti\\enheiti\\zihao{3} 附件2}"));
         // 概要前空两行，且位于 MainContent（正文）内、附件区之前。
         assert!(multi.contains("\\vspace{2\\baselineskip}"));
         let main_at = multi.find("\\renewcommand{\\MainContent}{").unwrap();
@@ -1940,14 +1950,14 @@ mod tests {
         let input = DraftInput::default();
         let tex = letter_tex(
             &input,
-            "# 测试函\n<!-- [正文] -->\n## 一、总体要求\n### （一）具体事项\n正文。\n<!-- [附件] -->\n# 附件1\n## 统计表\n### 一、填报说明\n附件内容。",
+            "# 测试函\n<!-- [正文] -->\n## 一、总体要求\n### （一）具体事项\n正文。\n<!-- [附件] -->\n# 统计表\n## 一、填报说明\n附件内容。",
         );
         let main_at = tex.find("\\renewcommand{\\MainContent}").unwrap();
         let attachment_at = tex.find("\\SetAttachmentContent").unwrap();
         assert!(main_at < attachment_at);
         assert!(tex.contains("\\heiti\\enheiti 一、总体要求"));
         assert!(tex.contains("\\kai\\enkai （一）具体事项"));
-        assert!(tex.contains("\\heiti\\enheiti\\zihao{3} 附件1"));
+        assert!(tex.contains("\\heiti\\enheiti\\zihao{3} 附件"));
         assert!(tex.contains(
             "\\vspace{\\BodyBaselineSkip}\n{\\centering\\bs\\enbt\\zihao{2}\\setlength{\\baselineskip}{\\BodyBaselineSkip} 统计表\\par}"
         ));

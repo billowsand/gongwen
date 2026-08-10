@@ -90,7 +90,7 @@ pub fn chunk_markdown(markdown: &str, params: &ChunkParams) -> Vec<Chunk> {
     chunks
 }
 
-/// 扫一遍 markdown，按 `##`（以及附件标记、附件内的 `# 附件N`）切出区段。
+/// 扫一遍 markdown，按 `##`（以及每个附件标记、附件正式标题 `#`）切出区段。
 fn split_sections(markdown: &str) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     let mut cur = Section {
@@ -110,7 +110,7 @@ fn split_sections(markdown: &str) -> Vec<Section> {
             continue;
         }
         match heading_level(line) {
-            // `#`：文档大标题，或附件区里的 `# 附件N`。
+            // `#`：文档大标题，或附件区里的附件正式标题。
             Some(1) => {
                 let title = strip_heading(line);
                 if in_attachment || title.starts_with(ATTACHMENT_SECTION) {

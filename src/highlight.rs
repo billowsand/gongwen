@@ -153,24 +153,33 @@ fn append_with_leading(job: &mut LayoutJob, text: &str, leading: &mut f32, forma
     *leading = 0.0;
 }
 
+/// 把正式标题（文档标题与每个附件的正式标题）的所有视觉行居中。
+/// 布局阶段先按普通段落排版，这里再逐个视觉行居中，长标题换行时第二行
+/// 也不会回到版心左边。
 fn center_document_title_rows(galley: &mut Arc<egui::Galley>, text: &str, width: f32) {
-    let title_line = text
-        .split('\n')
-        .position(|line| !line.trim().is_empty() && line.trim_start().starts_with("# "));
-    let Some(title_line) = title_line else {
+    // 复用实时排版计数器，找出需要居中的逻辑行号：文档标题与附件正式标题。
+    let mut counters = export::HeadingCounters::default();
+    let mut centered_lines = Vec::new();
+    for (logical, line) in text.split('\n').enumerate() {
+        counters.next(line);
+        if counters.centered_title() {
+            centered_lines.push(logical);
+        }
+    }
+    let Some(last_centered) = centered_lines.last().copied() else {
         return;
     };
     let galley = Arc::make_mut(galley);
     let mut logical_line = 0usize;
     let mut centered_max_x = 0.0f32;
     for placed in &mut galley.rows {
-        if logical_line == title_line {
+        if centered_lines.contains(&logical_line) {
             placed.pos.x = ((width - placed.size.x) * 0.5).max(0.0);
             centered_max_x = centered_max_x.max(placed.pos.x + placed.size.x);
         }
         if placed.ends_with_newline {
             logical_line += 1;
-            if logical_line > title_line {
+            if logical_line > last_centered {
                 break;
             }
         }
@@ -258,9 +267,11 @@ pub fn hybrid_highlight(
     };
 
     let source_lines = text.split('\n').collect::<Vec<_>>();
-    let mut counters = [0usize; 4];
+    let mut counters = export::HeadingCounters::default();
     let mut in_table = false;
     for (index, line) in source_lines.iter().copied().enumerate() {
+        let prefix = counters.next(line);
+        let centered = counters.centered_title();
         if index > 0 {
             let previous_is_blank = source_lines[index - 1].trim().is_empty();
             let newline = if previous_is_blank && index - 1 != active_line {
@@ -270,19 +281,6 @@ pub fn hybrid_highlight(
             };
             job.append("\n", 0.0, newline);
         }
-        let trimmed = line.trim_start();
-        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
-        let level = if (1..=6).contains(&hashes)
-            && trimmed
-                .as_bytes()
-                .get(hashes)
-                .is_some_and(u8::is_ascii_whitespace)
-        {
-            hashes as u8
-        } else {
-            0
-        };
-        let prefix = export::official_heading_prefix(level, &mut counters);
         let trimmed_table = line.trim();
         let table_line = trimmed_table.contains('|') && trimmed_table.matches('|').count() >= 2;
         let table_header = table_line && !in_table;
@@ -292,6 +290,7 @@ pub fn hybrid_highlight(
             line,
             index == active_line,
             prefix.as_deref(),
+            centered,
             table_header,
         );
     }
@@ -309,6 +308,7 @@ fn hybrid_line(
     line: &str,
     active: bool,
     heading_prefix: Option<&str>,
+    centered_title: bool,
     table_header: bool,
 ) {
     let body = official_format(
@@ -355,11 +355,16 @@ fn hybrid_line(
             .get(hashes)
             .is_some_and(u8::is_ascii_whitespace)
     {
-        let (family, size) = match hashes {
-            1 => (theme::FONT_BIAOSONG, OFFICIAL_TITLE_PT),
-            2 => (theme::FONT_HEITI, OFFICIAL_BODY_PT),
-            3 => (theme::FONT_KAITI, OFFICIAL_BODY_PT),
-            _ => (theme::FONT_FANGSONG, OFFICIAL_BODY_PT),
+        // 文档标题与附件正式标题（每个附件标记后的 `#`）按方正小标宋二号居中渲染，
+        // 与预览/导出一致；其余标题按公文字号表：正文一级黑体、二级楷体。
+        let (family, size) = if hashes == 1 || centered_title {
+            (theme::FONT_BIAOSONG, OFFICIAL_TITLE_PT)
+        } else {
+            match hashes {
+                2 => (theme::FONT_HEITI, OFFICIAL_BODY_PT),
+                3 => (theme::FONT_KAITI, OFFICIAL_BODY_PT),
+                _ => (theme::FONT_FANGSONG, OFFICIAL_BODY_PT),
+            }
         };
         let text_format = official_format(family, size, OFFICIAL_LINE_PT, Color32::BLACK);
         let marker = if active {
@@ -370,8 +375,8 @@ fn hybrid_line(
             hidden_marker(OFFICIAL_LINE_PT)
         };
         let split = hashes + 1;
-        let mut leading = if hashes == 1 {
-            // 先按正常段落排版，galley 生成后再逐个视觉行居中。
+        let mut leading = if hashes == 1 || centered_title {
+            // 正式标题：先按正常段落排版，galley 生成后再逐个视觉行居中，
             // 这样长标题换成两行时，第二行也不会回到版心左边。
             0.0
         } else if active {
@@ -1000,6 +1005,50 @@ mod tests {
         for row in title_rows {
             assert!((row.pos.x - (600.0 - row.size.x) * 0.5).abs() < 1.0);
         }
+    }
+
+    /// 附件正式标题（附件区 `##`）与文档标题一样按方正小标宋二号居中渲染。
+    #[test]
+    fn attachment_formal_title_uses_biaosong_and_is_centered() {
+        let text = "# 测试函\n<!-- [正文] -->\n## 一、总体要求\n正文。\n<!-- [附件] -->\n# 统计表\n## 一、填报说明\n附件内容。";
+        let sections = hybrid_sections(text, usize::MAX);
+        let title = sections
+            .iter()
+            .find(|(t, _)| t == "统计表")
+            .expect("附件正式标题分段");
+        assert_eq!(
+            title.1.font_id.family,
+            theme::official_family(theme::FONT_BIAOSONG)
+        );
+        assert_eq!(title.1.font_id.size, OFFICIAL_TITLE_PT * PT);
+
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let mut centered = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+            let mut galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
+            center_document_title_rows(&mut galley, text, 600.0);
+            centered = Some(galley);
+        });
+        let galley = centered.expect("已排版");
+        let mut found = false;
+        let mut logical = 0usize;
+        for row in &galley.rows {
+            if logical == 5 {
+                // 第 5 个逻辑行是附件正式标题 "# 统计表"。
+                assert!(
+                    (row.pos.x - (600.0 - row.size.x) * 0.5).abs() < 1.0,
+                    "附件正式标题应居中"
+                );
+                found = true;
+                break;
+            }
+            if row.ends_with_newline {
+                logical += 1;
+            }
+        }
+        assert!(found, "应找到附件正式标题行");
     }
 
     #[test]
