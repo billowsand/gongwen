@@ -10,6 +10,34 @@ use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+// ── 字号体系 ────────────────────────────────────────────────────────────────
+/// 界面字号按 Windows 惯例固化：96 DPI 下 1pt ≈ 1.333px，
+/// 正文 ≈ 10.5pt、菜单/状态栏/次级文字 ≈ 9pt、区块标题 ≈ 13.5pt。
+/// 所有界面文字一律从这里取值，避免各处散落的魔法数字。
+pub mod font_sizes {
+    /// 正文、普通按钮默认字号（≈10.5pt）。
+    pub const BODY: f32 = 14.0;
+    /// 菜单、状态栏、标签栏、次要说明等次级文字（≈9pt）。
+    pub const SMALL: f32 = 12.0;
+    /// 区块标题。
+    pub const HEADING: f32 = 18.0;
+    /// 等宽文字（Markdown 源码、代码等），与正文同档保证可读性。
+    pub const MONO: f32 = 14.0;
+}
+
+// ── 动效时长 ────────────────────────────────────────────────────────────────
+/// 全应用统一的动效节奏（秒），三档递进：
+/// 悬停/按下等瞬时反馈用短档，选中/抽屉/弹窗等过渡用中档，
+/// 大范围入场与位移用长档。各处动画一律从这里取值。
+pub mod anim {
+    /// 瞬时反馈：悬停、按下、行高亮（≈0.1s）。
+    pub const FAST: f32 = 0.10;
+    /// 常规过渡：选中、淡入淡出、抽屉、弹窗（≈0.18s）。
+    pub const MEDIUM: f32 = 0.18;
+    /// 长程动画：大幅位移、整块入场（≈0.25s）。
+    pub const SLOW: f32 = 0.25;
+}
+
 // ── 主题结构 ────────────────────────────────────────────────────────────────
 /// Markdown 审校区的语法高亮取色。整体保持低饱和，只让结构性符号跳出来。
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -490,6 +518,39 @@ pub fn panel(fill: Color32, margin: i8) -> egui::Frame {
         .inner_margin(Margin::symmetric(margin, (margin / 2).max(4)))
 }
 
+/// 浮窗入场动画：淡入 + 从 0.96 缩放到 1.0，时长取中档。每帧在窗口渲染后调用，
+/// 传入 `Window::show` 返回的 response。
+///
+/// 缩放中心取窗口自身的中心而不是屏幕中心：可拖动的浮窗（知识库预览、版本对照、
+/// 配置版本历史）被挪到边上后，按屏幕中心缩放会斜着弹一下。
+/// 动画结束后恢复单位变换，避免每帧重复合成。
+pub fn window_enter_anim(ctx: &egui::Context, id: egui::Id, window: &egui::Response) {
+    // 记下这一窗当前的图层，关闭时 `reset_window_anim` 才知道该把谁的变换清掉。
+    ctx.data_mut(|data| data.insert_temp(id.with("layer"), window.layer_id));
+    let t = ctx.animate_bool_with_time(id, true, anim::MEDIUM);
+    let scale = 0.96 + 0.04 * t;
+    let center = window.rect.center();
+    ctx.set_transform_layer(
+        window.layer_id,
+        if t >= 1.0 {
+            egui::emath::TSTransform::IDENTITY
+        } else {
+            egui::emath::TSTransform::new(center.to_vec2() * (1.0 - scale), scale)
+        },
+    );
+}
+
+/// 复位浮窗入场动画（窗口关闭时调用），下次打开才能从头重播。
+///
+/// 顺带把图层变换恢复成单位阵：`Memory::to_global` 不逐帧清空，浮窗如果在动画
+/// 中途被关掉，那条带缩放的变换会一直挂在 map 里。
+pub fn reset_window_anim(ctx: &egui::Context, id: egui::Id) {
+    ctx.animate_bool_with_time(id, false, 0.0);
+    if let Some(layer) = ctx.data(|data| data.get_temp::<egui::LayerId>(id.with("layer"))) {
+        ctx.set_transform_layer(layer, egui::emath::TSTransform::IDENTITY);
+    }
+}
+
 /// 界面中反复出现的紧凑操作图标。资源来自 Lucide 1.28.0（ISC）与
 /// Tabler Icons 3.46.0（MIT，只取 Lucide 没有的三个文件类型图标），
 /// 两套的画法一致：24×24 画布、2px 圆头描边、`currentColor`。
@@ -529,6 +590,7 @@ pub enum Icon {
     PanelClose,
     PanelOpen,
     Paperclip,
+    Palette,
     PencilLine,
     PlugZap,
     Publish,
@@ -538,11 +600,13 @@ pub enum Icon {
     SearchClear,
     Save,
     Settings,
+    Shield,
     Sparkles,
     Square,
     SquareCheck,
     Tex,
     Trash,
+    Type,
     Undo,
     UserPlus,
     WandSparkles,
@@ -644,6 +708,7 @@ impl Icon {
                 include_bytes!("../assets/icons/panel-left-open.svg"),
             ),
             Self::Paperclip => ("paperclip", include_bytes!("../assets/icons/paperclip.svg")),
+            Self::Palette => ("palette", include_bytes!("../assets/icons/palette.svg")),
             Self::PencilLine => (
                 "pencil-line",
                 include_bytes!("../assets/icons/pencil-line.svg"),
@@ -668,6 +733,7 @@ impl Icon {
                 "settings-2",
                 include_bytes!("../assets/icons/settings-2.svg"),
             ),
+            Self::Shield => ("shield", include_bytes!("../assets/icons/shield.svg")),
             Self::Sparkles => ("sparkles", include_bytes!("../assets/icons/sparkles.svg")),
             Self::Square => ("square", include_bytes!("../assets/icons/square.svg")),
             Self::SquareCheck => (
@@ -676,6 +742,7 @@ impl Icon {
             ),
             Self::Tex => ("tex", include_bytes!("../assets/icons/tex.svg")),
             Self::Trash => ("trash-2", include_bytes!("../assets/icons/trash-2.svg")),
+            Self::Type => ("type", include_bytes!("../assets/icons/type.svg")),
             Self::Undo => ("undo-2", include_bytes!("../assets/icons/undo-2.svg")),
             Self::UserPlus => ("user-plus", include_bytes!("../assets/icons/user-plus.svg")),
             Self::WandSparkles => (
@@ -1084,27 +1151,30 @@ pub fn configure_style(ctx: &egui::Context) {
     style.spacing.indent = 18.0;
     style.spacing.scroll.bar_width = 9.0;
     style.spacing.scroll.floating = false;
+    // egui 内建动画（面板展开、折叠标题等）统一走同一档节奏，
+    // 与本模块 `anim` 里手写的那些动效对齐。
+    style.animation_time = anim::MEDIUM;
 
     style.text_styles = [
         (
             egui::TextStyle::Heading,
-            egui::FontId::new(18.0, egui::FontFamily::Proportional),
+            egui::FontId::new(font_sizes::HEADING, egui::FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Body,
-            egui::FontId::new(14.5, egui::FontFamily::Proportional),
+            egui::FontId::new(font_sizes::BODY, egui::FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Button,
-            egui::FontId::new(14.5, egui::FontFamily::Proportional),
+            egui::FontId::new(font_sizes::BODY, egui::FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Small,
-            egui::FontId::new(14.5, egui::FontFamily::Proportional),
+            egui::FontId::new(font_sizes::SMALL, egui::FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Monospace,
-            egui::FontId::new(14.5, egui::FontFamily::Monospace),
+            egui::FontId::new(font_sizes::MONO, egui::FontFamily::Monospace),
         ),
     ]
     .into();

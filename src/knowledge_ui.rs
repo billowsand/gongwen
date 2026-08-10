@@ -212,19 +212,21 @@ fn search_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("检索 / 问答").strong());
+            ui.label(egui::RichText::new("检索 / 问答").strong())
+                .on_hover_ui(|ui| match app.knowledge_mode {
+                    KnowledgeMode::Search => {
+                        ui.label(
+                            "输入检索要求，查看会从知识库调出哪些片段（与起草时的检索一致）。",
+                        );
+                    }
+                    KnowledgeMode::Qa => {
+                        ui.label("向知识库提问，答案基于库内片段生成并标注出处，可连续追问。");
+                    }
+                });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 mode_switch(app, ui);
             });
         });
-        match app.knowledge_mode {
-            KnowledgeMode::Search => {
-                ui.weak("输入检索要求，查看会从知识库调出哪些片段（与起草时的检索一致）。");
-            }
-            KnowledgeMode::Qa => {
-                ui.weak("向知识库提问，答案基于库内片段生成并标注出处，可连续追问。");
-            }
-        }
         ui.add_space(6.0);
         let (hint, button_label, icon) = match app.knowledge_mode {
             KnowledgeMode::Search => (

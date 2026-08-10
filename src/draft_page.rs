@@ -708,7 +708,7 @@ fn editor_line_visuals(output: &egui::text_edit::TextEditOutput) -> Vec<EditorLi
 fn paint_editor_line_numbers(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput) {
     let x = output.galley_pos.x - 10.0;
     let painter = ui.painter();
-    let font = egui::FontId::new(11.5, egui::FontFamily::Proportional);
+    let font = egui::FontId::new(theme::font_sizes::SMALL, egui::FontFamily::Proportional);
     for (index, line) in editor_line_visuals(output).into_iter().enumerate() {
         painter.text(
             egui::pos2(x, (line.top + line.bottom) * 0.5),
@@ -1441,22 +1441,30 @@ impl DraftPage<'_> {
         egui::Panel::top("draft_toolbar")
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.toolbar(ui));
-        if self.doc.versions_open {
-            egui::Panel::right("draft_versions")
-                .default_size(300.0)
-                .size_range(240.0..=460.0)
-                .frame(theme::panel(theme::canvas(), 12))
-                .show(ui, |ui| self.versions_drawer(ui));
-        }
-        if self.doc.result_drawer_open {
-            // 新 ID：旧 ID 上持久化的是"底部抽屉"的外框矩形，沿用会让右侧抽屉按那条横条的
-            // 位置排版，内容整体左移到中央区底下。换个 ID 直接丢掉那份旧状态。
-            egui::Panel::right("review_result_drawer_right_v1")
-                .default_size(300.0)
-                .size_range(240.0..=460.0)
-                .frame(theme::panel(theme::canvas(), 12))
-                .show(ui, |ui| self.result_drawer_ui(ui));
-        }
+        // 两个右侧抽屉的展开/收起交给 egui 自己的 `show_collapsible`：它把面板整体
+        // 滑出/滑入窗口边缘（内部按完整宽度排版，再平移出界），而不是把宽度压到
+        // 几个像素——后者会让抽屉里的 TextEdit 与 ScrollArea 在动画那十几帧里按
+        // 负的可用宽度重排，滚动位置被打乱。同时保住手动拖拽调宽：动画结束后
+        // 面板恢复 resizable，宽度仍在 240~460 之间持久化。
+        // `is_expanded` 取局部副本再写回：闭包里要 `&mut self` 画抽屉内容，
+        // 没法同时借出 `self.doc` 的字段。
+        const DRAWER_DEFAULT_WIDTH: f32 = 300.0;
+        let mut versions_open = self.doc.versions_open;
+        egui::Panel::right("draft_versions")
+            .default_size(DRAWER_DEFAULT_WIDTH)
+            .size_range(240.0..=460.0)
+            .frame(theme::panel(theme::canvas(), 12))
+            .show_collapsible(ui, &mut versions_open, |ui| self.versions_drawer(ui));
+        self.doc.versions_open = versions_open;
+        // 新 ID：旧 ID 上持久化的是"底部抽屉"的外框矩形，沿用会让右侧抽屉按那条横条的
+        // 位置排版，内容整体左移到中央区底下。换个 ID 直接丢掉那份旧状态。
+        let mut result_open = self.doc.result_drawer_open;
+        egui::Panel::right("review_result_drawer_right_v1")
+            .default_size(DRAWER_DEFAULT_WIDTH)
+            .size_range(240.0..=460.0)
+            .frame(theme::panel(theme::canvas(), 12))
+            .show_collapsible(ui, &mut result_open, |ui| self.result_drawer_ui(ui));
+        self.doc.result_drawer_open = result_open;
         if !self.doc.form_collapsed {
             // 新 ID 用于丢弃旧版本持久化的超宽面板尺寸，让紧凑默认值立即生效。
             egui::Panel::left("create_form_compact_v3")
@@ -2091,6 +2099,7 @@ impl DraftPage<'_> {
         ui.add_space(10.0);
         section_heading_with_info(
             ui,
+            theme::Icon::Edit,
             "2. 行文要素",
             "带下拉框的字段一律从标准词库中选择；确需临时填写时点右侧“手填”切换。",
         );

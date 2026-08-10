@@ -63,13 +63,14 @@ const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12
 const DOC_TAB_TITLE_CHARS: usize = 14;
 /// 标签里除标题以外的固定占位：内边距 + 状态标记 + 关闭按钮。
 const DOC_TAB_CHROME_WIDTH: f32 = 74.0;
-/// 标签条统一动效时长（秒）。悬停/按下短促，指示条滑动稍长，三者构成一套节奏。
-const TAB_HOVER_ANIM: f32 = 0.12;
-const TAB_PRESS_ANIM: f32 = 0.15;
-const TAB_SELECT_ANIM: f32 = 0.16;
-const TAB_INDICATOR_ANIM: f32 = 0.16;
+/// 标签条统一动效时长（秒）。悬停/按下用短档，选中过渡用中档。
+const TAB_HOVER_ANIM: f32 = theme::anim::FAST;
+const TAB_PRESS_ANIM: f32 = theme::anim::FAST;
+const TAB_SELECT_ANIM: f32 = theme::anim::MEDIUM;
 /// 切换标签后内容区整体淡入的时长：这是「场景切换」的主要视觉信号。
-const CONTENT_FADE_ANIM: f32 = 0.18;
+const CONTENT_FADE_ANIM: f32 = theme::anim::MEDIUM;
+/// 内容区切换时从右往左轻滑的位移（px），与淡入同步收尾。
+const CONTENT_SLIDE_PX: f32 = 10.0;
 pub(crate) const FORM_PANEL_MAX_WIDTH: f32 = 620.0;
 /// 表单内容的宽度区间。可调整面板必须拿到确定的宽度：控件一旦请求
 /// `f32::INFINITY`，面板会被内容顶到远超 `size_range` 的宽度。
@@ -824,6 +825,7 @@ impl GongwenApp {
     /// 关闭未保存稿件的二次确认。
     fn close_confirm_window(&mut self, ctx: &egui::Context) {
         let Some(index) = self.close_confirm else {
+            theme::reset_window_anim(ctx, egui::Id::new("close_confirm_anim"));
             return;
         };
         let Some(doc) = self.docs.get(index) else {
@@ -834,7 +836,7 @@ impl GongwenApp {
         let key = doc.key;
         let mut decision: Option<bool> = None;
         let mut cancel = false;
-        egui::Window::new("关闭稿件")
+        let win = egui::Window::new("关闭稿件")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -857,6 +859,9 @@ impl GongwenApp {
                     }
                 });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("close_confirm_anim"), &w.response);
+        }
         if cancel {
             self.close_confirm = None;
             return;
@@ -920,11 +925,12 @@ impl GongwenApp {
     /// 退出汇总框：上区未保存必须处理，下区未提交版本只是提醒。
     fn exit_prompt_window(&mut self, ctx: &egui::Context) {
         let Some(mut prompt) = self.exit_prompt.take() else {
+            theme::reset_window_anim(ctx, egui::Id::new("exit_prompt_anim"));
             return;
         };
         let mut decision: Option<bool> = None;
         let mut cancel = false;
-        egui::Window::new("退出公文助手")
+        let win = egui::Window::new("退出公文助手")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -967,6 +973,9 @@ impl GongwenApp {
                     }
                 });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("exit_prompt_anim"), &w.response);
+        }
         if cancel {
             return;
         }
@@ -2065,11 +2074,12 @@ impl GongwenApp {
     /// 知识库文档预览浮窗：复用起草页的公文版式渲染，按窗口宽度自适应缩放。
     fn knowledge_preview_window(&mut self, ctx: &egui::Context) {
         let Some(preview) = self.knowledge_preview.as_mut() else {
+            theme::reset_window_anim(ctx, egui::Id::new("knowledge_preview_anim"));
             return;
         };
         let mut open = true;
         let mut close_clicked = false;
-        egui::Window::new(format!("预览 · {}", preview.title))
+        let win = egui::Window::new(format!("预览 · {}", preview.title))
             .collapsible(false)
             .resizable(true)
             .default_size([560.0, 720.0])
@@ -2129,6 +2139,9 @@ impl GongwenApp {
                         preview.fit_scale = output.scale;
                     });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("knowledge_preview_anim"), &w.response);
+        }
         if !open || close_clicked {
             self.knowledge_preview = None;
         }
@@ -2359,6 +2372,127 @@ impl GongwenApp {
         }
     }
 
+    /// 无边框窗口的自绘缩放边框。
+    ///
+    /// `with_decorations(false)` 之后，winit 会用自定义 `WM_NCCALCSIZE` 把非客户区
+    /// 吃掉，DefWindowProc 对窗口四周几乎一律返回 `HTCLIENT`，系统那圈缩放边框只
+    /// 剩一两个像素，鼠标基本压不住。这里在最上层铺八个命中区（四边 + 四角）自己
+    /// 接管：悬停换缩放光标，按下就把后续交给系统的 `BeginResize`。
+    ///
+    /// 每个命中区各自是一个窄 `Area`，不能合成一个铺满窗口的大 `Area`：
+    /// `Areas::layer_id_at` 只认最上面那层，一个满屏的可交互层会让底下所有
+    /// `ScrollArea` 收不到滚轮、tooltip 也不再弹出。
+    fn window_resize_borders(&mut self, ctx: &egui::Context) {
+        use egui::ResizeDirection as Dir;
+        /// 四边命中带宽度。
+        const EDGE: f32 = 6.0;
+        /// 四角命中区宽度，比边宽一档，斜向缩放好抓。
+        const CORNER: f32 = 16.0;
+
+        // 最大化时没有可拖的边，也免得白白盖住贴边的控件。
+        if ctx
+            .input(|input| input.viewport().maximized)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // 取整个窗口区域而非 content_rect：缩放边框就是要压在最外那一圈上。
+        let screen = ctx.viewport_rect();
+        if screen.width() < 4.0 * CORNER || screen.height() < 4.0 * CORNER {
+            return;
+        }
+
+        // (名字, 命中矩形, 方向, 光标)。竖边让开上下两角，四角单独铺。
+        let x0 = screen.left();
+        let x1 = screen.right();
+        let y0 = screen.top();
+        let y1 = screen.bottom();
+        let zones: [(&str, egui::Rect, Dir, egui::CursorIcon); 8] = [
+            (
+                "n",
+                egui::Rect::from_min_max(
+                    egui::pos2(x0 + CORNER, y0),
+                    egui::pos2(x1 - CORNER, y0 + EDGE),
+                ),
+                Dir::North,
+                egui::CursorIcon::ResizeNorth,
+            ),
+            (
+                "s",
+                egui::Rect::from_min_max(
+                    egui::pos2(x0 + CORNER, y1 - EDGE),
+                    egui::pos2(x1 - CORNER, y1),
+                ),
+                Dir::South,
+                egui::CursorIcon::ResizeSouth,
+            ),
+            (
+                "w",
+                egui::Rect::from_min_max(
+                    egui::pos2(x0, y0 + CORNER),
+                    egui::pos2(x0 + EDGE, y1 - CORNER),
+                ),
+                Dir::West,
+                egui::CursorIcon::ResizeWest,
+            ),
+            (
+                "e",
+                egui::Rect::from_min_max(
+                    egui::pos2(x1 - EDGE, y0 + CORNER),
+                    egui::pos2(x1, y1 - CORNER),
+                ),
+                Dir::East,
+                egui::CursorIcon::ResizeEast,
+            ),
+            (
+                "nw",
+                egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x0 + CORNER, y0 + CORNER)),
+                Dir::NorthWest,
+                egui::CursorIcon::ResizeNwSe,
+            ),
+            (
+                "ne",
+                egui::Rect::from_min_max(egui::pos2(x1 - CORNER, y0), egui::pos2(x1, y0 + CORNER)),
+                Dir::NorthEast,
+                egui::CursorIcon::ResizeNeSw,
+            ),
+            (
+                "sw",
+                egui::Rect::from_min_max(egui::pos2(x0, y1 - CORNER), egui::pos2(x0 + CORNER, y1)),
+                Dir::SouthWest,
+                egui::CursorIcon::ResizeNeSw,
+            ),
+            (
+                "se",
+                egui::Rect::from_min_max(egui::pos2(x1 - CORNER, y1 - CORNER), egui::pos2(x1, y1)),
+                Dir::SouthEast,
+                egui::CursorIcon::ResizeNwSe,
+            ),
+        ];
+
+        for (name, rect, direction, cursor) in zones {
+            egui::Area::new(egui::Id::new(("window_resize_zone", name)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(rect.min)
+                .constrain(false)
+                .interactable(true)
+                .show(ctx, |ui| {
+                    // 撑开 Area 自身的矩形，`layer_id_at` 才认得这一块。
+                    ui.set_min_size(rect.size());
+                    // 只感知 drag：纯拖拽控件按下当帧就算起拖（见 egui interaction.rs），
+                    // 不必先挪够阈值，手感与系统边框一致。
+                    let response = ui.interact(rect, ui.id().with("hit"), egui::Sense::drag());
+                    if response.hovered() || response.dragged() {
+                        ui.ctx().set_cursor_icon(cursor);
+                    }
+                    if response.drag_started() {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+                    }
+                });
+        }
+    }
+
     /// 顶格一整行：左边是菜单按钮，右边依次排开所有标签。稿件和导航页共用
     /// 这一条，界面纵向只让出一行。
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -2382,6 +2516,16 @@ impl GongwenApp {
         )
         .ui(ui, |ui| {
             ui.set_min_width(148.0);
+            // 菜单项按 Windows 惯例用 9pt（≈12px）的紧凑字号，与状态栏同档。
+            for style in [egui::TextStyle::Button, egui::TextStyle::Small] {
+                ui.style_mut().text_styles.insert(
+                    style,
+                    egui::FontId::new(
+                        theme::font_sizes::SMALL,
+                        egui::FontFamily::Proportional,
+                    ),
+                );
+            }
             for page in [
                 NavPage::Manuscript,
                 NavPage::Vocabulary,
@@ -2456,10 +2600,11 @@ impl GongwenApp {
     /// 应用图标菜单下的"关于"弹窗：版本号、构建信息、依赖致谢。
     fn about_window(&mut self, ctx: &egui::Context) {
         if !self.about_window_open {
+            theme::reset_window_anim(ctx, egui::Id::new("about_win_anim"));
             return;
         }
         let mut close_clicked = false;
-        egui::Window::new("关于公文助手")
+        let win = egui::Window::new("关于公文助手")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -2505,6 +2650,9 @@ impl GongwenApp {
                     }
                 });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("about_win_anim"), &w.response);
+        }
         if close_clicked {
             self.about_window_open = false;
         }
@@ -2542,51 +2690,15 @@ impl GongwenApp {
 
         let mut select: Option<usize> = None;
         let mut close: Option<usize> = None;
-        let mut active_rect: Option<(usize, egui::Rect)> = None;
         ui.spacing_mut().item_spacing.x = 4.0;
         for &tab in &shown {
             let width = (desired[tab] * scale).max(DOC_TAB_MIN_WIDTH);
-            let (clicked, closed, rect) = self.tab_button(ui, tab, width);
+            let (clicked, closed) = self.tab_button(ui, tab, width);
             if clicked {
                 select = Some(tab);
             }
             if closed {
                 close = Some(tab);
-            }
-            if tab == self.active_tab {
-                active_rect = Some((tab, rect));
-            }
-        }
-        // 活动标签底部的主题橙下划线：左右两边各自插值，切换标签时平滑滑过去。
-        if let Some((active_idx, rect)) = active_rect {
-            let ctx = ui.ctx();
-            let left = ctx.animate_value_with_time(
-                egui::Id::new("tab_indicator_left"),
-                rect.left() + 1.0,
-                TAB_INDICATOR_ANIM,
-            );
-            let right = ctx.animate_value_with_time(
-                egui::Id::new("tab_indicator_right"),
-                rect.right() - 1.0,
-                TAB_INDICATOR_ANIM,
-            );
-            if right > left {
-                // 悬停活动标签时指示条增亮，提示「这就是当前场景」。
-                // 与 tab_button 复用同一动画 id，同帧取值一致。
-                let active_hover = ctx.animate_bool_with_time(
-                    egui::Id::new("tab_hover").with(active_idx),
-                    ui.rect_contains_pointer(rect),
-                    TAB_HOVER_ANIM,
-                );
-                let color = theme::accent().lerp_to_gamma(theme::accent_hover(), active_hover);
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(left, rect.bottom() - 2.0),
-                        egui::pos2(right, rect.bottom()),
-                    ),
-                    egui::CornerRadius::same(1),
-                    color,
-                );
             }
         }
         let hidden: Vec<usize> = (0..self.tabs.len())
@@ -2651,23 +2763,17 @@ impl GongwenApp {
         (text + DOC_TAB_CHROME_WIDTH).clamp(DOC_TAB_MIN_WIDTH, DOC_TAB_MAX_WIDTH)
     }
 
-    /// 画一格标签，返回（是否点了标签体, 是否点了关闭, 标签占位矩形）。
+    /// 画一格标签，返回（是否点了标签体, 是否点了关闭）。
     ///
     /// 动效统一在这里，构成一套闭合的交互：
     /// - **悬停**：背景/边框/文字 120ms 变深，关闭按钮从低对比升到实色；
     /// - **移出**：同样时长平滑回到常态；
     /// - **按下**：背景 150ms 再深一档；
-    /// - **选中**：白底橙边深字 160ms 淡入。
+    /// - **选中**：整体填充主题色的胶囊 160ms 淡入，文字同步过渡到白字。
     ///
-    /// 关闭按钮常态低对比常显，悬停它本身时渐变到危险红。下划线指示条由
-    /// 调用方 `tab_strip` 负责（要跨标签共享动画状态）。交互状态来自先
-    /// 占位拿到的 response，颜色才能在画背景之前算好。
-    fn tab_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        tab: usize,
-        width: f32,
-    ) -> (bool, bool, egui::Rect) {
+    /// 关闭按钮常态低对比常显，悬停它本身时渐变到危险红（选中态为白色）。
+    /// 交互状态来自先占位拿到的 response，颜色才能在画背景之前算好。
+    fn tab_button(&mut self, ui: &mut egui::Ui, tab: usize, width: f32) -> (bool, bool) {
         let selected = tab == self.active_tab;
         let (mark, title) = self.tab_label(tab);
         let (icon, hover, busy) = match self.tabs[tab] {
@@ -2696,9 +2802,7 @@ impl GongwenApp {
         // Context 是 Arc，克隆断开与 ui 的借用，new_child 才能拿到可变借用。
         let ctx = ui.ctx().clone();
         // hover/按下用纯几何判断而非 response.hovered()：后者会被更上层的
-        // 标题、关闭按钮抢走交互（指针落在它们上面时标签反而算「未悬停」），
-        // 且必须与指示条 `rect_contains_pointer` 的输入一致，同一动画 id
-        // 才不会一帧内收到两个相反的目标而抖动。
+        // 标题、关闭按钮抢走交互（指针落在它们上面时标签反而算「未悬停」）。
         let hovered = ui.rect_contains_pointer(rect);
         let pressed = hovered && ctx.input(|i| i.pointer.primary_down());
         let hover_t = ctx.animate_bool_with_time(
@@ -2717,18 +2821,21 @@ impl GongwenApp {
             TAB_SELECT_ANIM,
         );
 
-        // 背景：选中淡入白底；未选中从沉色经悬停色到按下的更深色。
-        let mut bg = theme::surface_sunk().lerp_to_gamma(theme::surface(), sel_t);
+        // 背景：选中整体填充主题色加深档（胶囊），保证白字对比度；未选中从沉色经悬停色到按下的更深色。
+        let mut bg = theme::surface_sunk().lerp_to_gamma(theme::accent_active(), sel_t);
         bg = bg.lerp_to_gamma(theme::surface_hover(), hover_t * (1.0 - sel_t));
         bg = bg.lerp_to_gamma(theme::surface_active(), press_t * (1.0 - sel_t));
-        // 边框：悬停加深，选中渐变到主题橙。
+        // 边框：悬停加深；选中与底色同色，视觉上收成无边框的实心胶囊。
         let border = theme::border()
             .lerp_to_gamma(theme::border_strong(), hover_t * (1.0 - sel_t))
-            .lerp_to_gamma(theme::accent(), sel_t);
-        let text_color = theme::text_soft().lerp_to_gamma(theme::text(), sel_t.max(hover_t));
+            .lerp_to_gamma(theme::accent_active(), sel_t);
+        // 文字：未选中深色，悬停加深一档；选中渐变到白字，保证在主题色底上可读。
+        let text_color = theme::text_soft()
+            .lerp_to_gamma(theme::text(), hover_t * (1.0 - sel_t))
+            .lerp_to_gamma(egui::Color32::WHITE, sel_t);
         ui.painter().rect(
             rect,
-            egui::CornerRadius::same(6),
+            egui::CornerRadius::same(TOOLBAR_CONTROL_HEIGHT as u8 / 2),
             bg,
             egui::Stroke::new(1.0, border),
             egui::StrokeKind::Inside,
@@ -2748,7 +2855,11 @@ impl GongwenApp {
         if busy {
             content.spinner();
         } else if !mark.is_empty() {
-            content.colored_label(theme::accent(), mark);
+            // 跟背景/文字同步插值，别用 sel_t > 0.5 那种硬阈值，否则动画中途会跳一下。
+            content.colored_label(
+                theme::accent().lerp_to_gamma(egui::Color32::WHITE, sel_t),
+                mark,
+            );
         } else if let Some(icon) = icon {
             // Lucide 图标用 currentColor 描边，这里跟随文字色渐变。
             content.add(
@@ -2789,8 +2900,13 @@ impl GongwenApp {
             content.rect_contains_pointer(close_rect),
             TAB_HOVER_ANIM,
         );
-        let close_base = theme::text_muted().gamma_multiply(0.55 + 0.45 * hover_t);
-        let close_color = close_base.lerp_to_gamma(theme::danger(), close_hover_t);
+        let close_base = theme::text_muted()
+            .lerp_to_gamma(egui::Color32::WHITE, sel_t)
+            .gamma_multiply(0.55 + 0.45 * hover_t);
+        // 悬停关闭键的目标色：未选中是危险红；选中态在主题色胶囊上改用浅色叉
+        // （红叉压在主题色上看不清）。两者同样按 sel_t 插值，避免中途突变。
+        let close_hover_color = theme::danger().lerp_to_gamma(theme::canvas(), sel_t);
+        let close_color = close_base.lerp_to_gamma(close_hover_color, close_hover_t);
         if content
             .add(
                 egui::Button::new(egui::RichText::new("×").color(close_color))
@@ -2803,7 +2919,7 @@ impl GongwenApp {
             closed = true;
         }
 
-        (clicked, closed, rect)
+        (clicked, closed)
     }
 
     /// 底部状态栏。整条只有一行：左边状态文案，中间模型名，右边仿 Zed 的抽屉入口。
@@ -2820,7 +2936,7 @@ impl GongwenApp {
         const CHIP_HEIGHT: f32 = 20.0;
 
         ui.scope(|ui| {
-            // 字号按 Windows 状态栏的习惯收小一档。
+            // 字号按 Windows 状态栏的习惯收小一档（9pt ≈ 12px）。
             for style in [
                 egui::TextStyle::Body,
                 egui::TextStyle::Button,
@@ -2828,7 +2944,7 @@ impl GongwenApp {
             ] {
                 ui.style_mut().text_styles.insert(
                     style,
-                    egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                    egui::FontId::new(theme::font_sizes::SMALL, egui::FontFamily::Proportional),
                 );
             }
             ui.style_mut().spacing.button_padding = egui::vec2(4.0, 2.0);
@@ -3335,65 +3451,100 @@ impl GongwenApp {
             };
             let orphan = !row.is_unit && entry.unit.trim().is_empty();
 
-            ui.horizontal(|ui| {
-                ui.add_space(row.depth as f32 * 16.0);
-                if row.is_unit && row.has_children {
-                    if theme::icon_button(
-                        ui,
-                        if collapsed {
-                            theme::Icon::ChevronRight
+            // 新行淡入 + 行悬停背景过渡。背景要垫在内容底下，所以先在绘制列表里
+            // 占一个槽位，等这一行排完拿到真实矩形再回填（`Frame` 也是这么做的）。
+            // 不能先 `allocate_exact_size` 一块 30px 高的矩形当悬停区再往里画：
+            // `Ui::scope_dyn` 收尾会 `advance_cursor_after_rect`，同一段高度被推进
+            // 两次，行距直接翻倍。
+            let seen_t = ui.ctx().animate_bool_with_time(
+                egui::Id::new(("vocab_row_seen", id)),
+                true,
+                theme::anim::SLOW,
+            );
+            let row_bg = ui.painter().add(egui::Shape::Noop);
+            let row_rect = ui
+                .scope(|ui| {
+                    ui.set_opacity(seen_t);
+                    ui.horizontal(|ui| {
+                        ui.add_space(row.depth as f32 * 16.0);
+                        if row.is_unit && row.has_children {
+                            if theme::icon_button(
+                                ui,
+                                if collapsed {
+                                    theme::Icon::ChevronRight
+                                } else {
+                                    theme::Icon::ChevronDown
+                                },
+                                if collapsed { "展开" } else { "折叠" },
+                            )
+                            .clicked()
+                            {
+                                if collapsed {
+                                    self.vocabulary_collapsed.remove(&id);
+                                } else {
+                                    self.vocabulary_collapsed.insert(id);
+                                }
+                            }
                         } else {
-                            theme::Icon::ChevronDown
-                        },
-                        if collapsed { "展开" } else { "折叠" },
-                    )
-                    .clicked()
-                    {
-                        if collapsed {
-                            self.vocabulary_collapsed.remove(&id);
-                        } else {
-                            self.vocabulary_collapsed.insert(id);
+                            ui.add_space(28.0);
                         }
-                    }
-                } else {
-                    ui.add_space(28.0);
-                }
 
-                ui.monospace(if code.is_empty() { "--" } else { code.as_str() });
-                let label = if orphan {
-                    egui::RichText::new(&name).color(warn())
-                } else {
-                    egui::RichText::new(&name)
-                };
-                let response = ui.selectable_label(selected, label);
-                let response = if orphan {
-                    response.on_hover_text("该人员没有所属单位，请在右侧指定")
-                } else {
-                    response
-                };
-                if response.clicked() {
-                    self.vocabulary_selected = Some(id);
-                    self.vocabulary_delete_confirm = None;
-                }
-                if !detail.is_empty() {
-                    ui.weak(detail);
-                }
+                        ui.monospace(if code.is_empty() { "--" } else { code.as_str() });
+                        let label = if orphan {
+                            egui::RichText::new(&name).color(warn())
+                        } else {
+                            egui::RichText::new(&name)
+                        };
+                        let response = ui.selectable_label(selected, label);
+                        let response = if orphan {
+                            response.on_hover_text("该人员没有所属单位，请在右侧指定")
+                        } else {
+                            response
+                        };
+                        if response.clicked() {
+                            self.vocabulary_selected = Some(id);
+                            self.vocabulary_delete_confirm = None;
+                        }
+                        if !detail.is_empty() {
+                            ui.weak(detail);
+                        }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, theme::Icon::ArrowDown, "下移")
-                        .on_hover_text("与后一个同级交换")
-                        .clicked()
-                    {
-                        *action = Some(VocabAction::MoveDown(id));
-                    }
-                    if theme::icon_button(ui, theme::Icon::ArrowUp, "上移")
-                        .on_hover_text("与前一个同级交换")
-                        .clicked()
-                    {
-                        *action = Some(VocabAction::MoveUp(id));
-                    }
-                });
-            });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if theme::icon_button(ui, theme::Icon::ArrowDown, "下移")
+                                .on_hover_text("与后一个同级交换")
+                                .clicked()
+                            {
+                                *action = Some(VocabAction::MoveDown(id));
+                            }
+                            if theme::icon_button(ui, theme::Icon::ArrowUp, "上移")
+                                .on_hover_text("与前一个同级交换")
+                                .clicked()
+                            {
+                                *action = Some(VocabAction::MoveUp(id));
+                            }
+                        });
+                    });
+                })
+                .response
+                .rect;
+            // 悬停用几何判断而非 response.hovered()：行里的按钮和标签会把交互抢走，
+            // 指针落在它们上面时整行反而算「未悬停」，背景会一闪一闪。
+            let hover_t = ui.ctx().animate_bool_with_time(
+                egui::Id::new(("vocab_row_hover", id)),
+                ui.rect_contains_pointer(row_rect),
+                theme::anim::FAST,
+            );
+            if hover_t > 0.01 {
+                let bg = theme::canvas().lerp_to_gamma(theme::surface_hover(), hover_t);
+                ui.painter().set(
+                    row_bg,
+                    egui::epaint::RectShape::filled(
+                        row_rect.expand2(egui::vec2(4.0, 2.0)),
+                        egui::CornerRadius::same(6),
+                        bg.gamma_multiply(seen_t),
+                    ),
+                );
+            }
         }
     }
 
@@ -3441,7 +3592,8 @@ impl GongwenApp {
         };
 
         ui.horizontal(|ui| {
-            ui.strong(if is_unit { "单位" } else { "人员" });
+            ui.strong(if is_unit { "单位" } else { "人员" })
+                .on_hover_text("改动会立即反映在起草页；点击右上角“保存更改”写入本机配置。");
             if is_unit {
                 ui.label("层级编码");
                 let prev_code = self.config.vocabulary[index].code.clone();
@@ -3579,7 +3731,6 @@ impl GongwenApp {
             self.vocabulary_delete_confirm = Some(id);
         }
         ui.add_space(4.0);
-        ui.weak("改动会立即反映在起草页；点击右上角“保存更改”写入本机配置。");
         structure_changed
     }
 
@@ -4072,8 +4223,8 @@ impl GongwenApp {
             );
             ui.add_space(8.0);
 
-            ui.label("适用文种");
-            ui.weak("一个都不勾表示所有文种通用；勾选后只在对应文种的选择面板里出现。");
+            ui.label("适用文种")
+                .on_hover_text("一个都不勾表示所有文种通用；勾选后只在对应文种的选择面板里出现。");
             ui.horizontal_wrapped(|ui| {
                 for kind in TemplateKind::ALL {
                     let mut checked = draft.kinds.contains(&kind);
@@ -4088,11 +4239,13 @@ impl GongwenApp {
             });
             ui.add_space(8.0);
 
-            ui.label("优化指令");
-            ui.weak(
-                "只写“这次要模型做什么”。输出的 Markdown 结构、表格写法、\
-不得输出版记落款等要求由内置标准强制，无需也无法在这里改。",
-            );
+            ui.label("优化指令").on_hover_ui(|ui| {
+                ui.label("只写“这次要模型做什么”。");
+                ui.label(
+                    "输出的 Markdown 结构、表格写法、不得输出版记落款等\
+要求由内置标准强制，无需也无法在这里改。",
+                );
+            });
             ui.add(
                 egui::TextEdit::multiline(&mut draft.instruction)
                     .hint_text("留空表示只按内置标准做格式规整")
@@ -4249,13 +4402,9 @@ impl GongwenApp {
     /// 把内置输出标准原样摊开给用户看。它是不可编辑的，但藏着不说会让人
     /// 怀疑自定义提示词到底还受不受约束。
     fn output_contract_preview_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("查看内置输出格式标准（只读）")
+        let contract_header = egui::CollapsingHeader::new("查看内置输出格式标准（只读）")
             .id_salt("output_contract_preview")
             .show(ui, |ui| {
-                ui.weak(
-                    "下面这段会自动拼在每条提示词之后，并声明优先级更高：\
-自定义指令与它冲突时，一律以它为准。",
-                );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label("文种");
@@ -4280,12 +4429,17 @@ impl GongwenApp {
                         .interactive(false),
                 );
             });
+        contract_header.header_response.on_hover_text(
+            "下面这段会自动拼在每条提示词之后，并声明优先级更高：\
+自定义指令与它冲突时，一律以它为准。",
+        );
     }
 
     /// “AI 优化”的提示词选择面板。列出适用当前文种的条目，单击即执行；
     /// 底部可以写一条只用一次的临时指令。
     fn ai_prompt_picker_window(&mut self, ctx: &egui::Context) {
         let Some(mut picker) = self.ai_prompt_picker.take() else {
+            theme::reset_window_anim(ctx, egui::Id::new("ai_prompt_picker_anim"));
             return;
         };
         // 审校稿为空就是从零起草，非空就是改现有稿件：同一个面板，两种口径。
@@ -4295,7 +4449,7 @@ impl GongwenApp {
         let mut chosen: Option<(String, String)> = None;
         let mut close = false;
 
-        egui::Window::new(if drafting {
+        let win = egui::Window::new(if drafting {
             "AI 起草"
         } else {
             "AI 优化"
@@ -4305,10 +4459,8 @@ impl GongwenApp {
             .default_width(460.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.weak(format!(
-                    "当前文种：{}　输出格式标准始终生效，不受下面的指令影响。",
-                    picker.kind.label()
-                ));
+                ui.weak(format!("当前文种：{}", picker.kind.label()))
+                    .on_hover_text("输出格式标准始终生效，不受下面的指令影响。");
                 if drafting {
                     ui.colored_label(
                         accent(),
@@ -4428,6 +4580,9 @@ impl GongwenApp {
                     }
                 });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("ai_prompt_picker_anim"), &w.response);
+        }
 
         if let Some((instruction, label)) = chosen {
             self.draft_page().start_optimize(instruction, label);
@@ -5023,6 +5178,13 @@ impl GongwenApp {
                         ui.strong("操作");
                         ui.end_row();
                         for row in self.manuscript_rows.iter() {
+                            // 新行淡入：新增行首次出现时从不透明 0 平滑升到 1。
+                            let seen_t = ui.ctx().animate_bool_with_time(
+                                egui::Id::new(("manuscript_row_seen", row.id)),
+                                true,
+                                theme::anim::SLOW,
+                            );
+                            ui.set_opacity(seen_t);
                             let mut batch_selected = self.manuscript_selected.contains(&row.id);
                             if ui.checkbox(&mut batch_selected, "").changed() {
                                 if batch_selected {
@@ -5183,6 +5345,7 @@ impl GongwenApp {
                                 }
                             });
                             ui.end_row();
+                            ui.set_opacity(1.0);
                         }
                     });
             });
@@ -5928,6 +6091,8 @@ impl GongwenApp {
                     selected,
                     keyword: String::new(),
                     skip_existing: true,
+                    vocabulary,
+                    merge_vocabulary: true,
                 });
                 self.status = "已读取稿件包，请预览后确认导入。".into();
             }
@@ -6171,6 +6336,7 @@ impl GongwenApp {
     /// 切换版本前的三选确认：提交为新版本后切换 / 丢弃修改并切换 / 取消。
     fn version_switch_window(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.version_switch.take() else {
+            theme::reset_window_anim(ctx, egui::Id::new("version_switch_anim"));
             return;
         };
         let target_label = match prompt.target {
@@ -6180,7 +6346,7 @@ impl GongwenApp {
         let mut commit_first = false;
         let mut discard = false;
         let mut cancel = false;
-        egui::Window::new("切换版本")
+        let win = egui::Window::new("切换版本")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -6210,6 +6376,9 @@ impl GongwenApp {
                     }
                 });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("version_switch_anim"), &w.response);
+        }
         if commit_first {
             self.switch_after_commit = Some(prompt.target);
             self.open_version_commit(VersionScope::Manuscript(prompt.manuscript_id));
@@ -6263,6 +6432,7 @@ impl GongwenApp {
     /// 提交版本对话框（稿件版 / 配置版共用）。
     fn version_commit_window(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.version_commit.take() else {
+            theme::reset_window_anim(ctx, egui::Id::new("version_commit_anim"));
             return;
         };
         // 实时预览：相对上一版本是否有变更（与名称/注释无关，先算出来避免闭包借用冲突）。
@@ -6295,7 +6465,7 @@ impl GongwenApp {
         };
         let mut close = false;
         let mut submit = false;
-        egui::Window::new("提交版本")
+        let win = egui::Window::new("提交版本")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -6312,9 +6482,7 @@ impl GongwenApp {
                         .desired_rows(3)
                         .desired_width(380.0),
                 );
-                if has_changes {
-                    ui.weak("提交后固化为一个新版本，追加在版本链末尾。");
-                } else {
+                if !has_changes {
                     ui.colored_label(warn(), "相对上一版本没有内容变更，不能提交。");
                 }
                 if let Some(error) = &draft.error {
@@ -6323,6 +6491,7 @@ impl GongwenApp {
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(has_changes, egui::Button::new("提交"))
+                        .on_hover_text("提交后固化为一个新版本，追加在版本链末尾")
                         .clicked()
                     {
                         submit = true;
@@ -6332,6 +6501,9 @@ impl GongwenApp {
                     }
                 });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("version_commit_anim"), &w.response);
+        }
         if close {
             // 取消提交时也放弃"提交后切换"，免得下次提交莫名跳版本。
             self.switch_after_commit = None;
@@ -6412,13 +6584,14 @@ impl GongwenApp {
     /// 版本对照窗（稿件版 / 配置版共用）。
     fn version_diff_window(&mut self, ctx: &egui::Context) {
         let Some(mut diff) = self.version_diff.take() else {
+            theme::reset_window_anim(ctx, egui::Id::new("version_diff_anim"));
             return;
         };
         let scope = diff.scope.clone();
         // 关闭按钮交给标题栏：正文对照是个撑满高度的滚动区，放在它下面的页脚
         // 会被顶出可视区，点不到。
         let mut open = true;
-        egui::Window::new("版本对照")
+        let win = egui::Window::new("版本对照")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -6430,6 +6603,9 @@ impl GongwenApp {
                 VersionScope::Manuscript(id) => self.manuscript_diff_ui(ui, id, &mut diff),
                 VersionScope::Config => self.config_diff_ui(ui, &mut diff),
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("version_diff_anim"), &w.response);
+        }
         if !open {
             return;
         }
@@ -6464,7 +6640,8 @@ impl GongwenApp {
         let mut picked_from: Option<Option<i64>> = None;
         let mut picked_to = None;
         ui.horizontal_wrapped(|ui| {
-            ui.label("从");
+            ui.label("从")
+                .on_hover_text("左旧右新：左侧选旧版本，右侧选新版本。");
             let from_label = from.map_or_else(
                 || "（空白，整篇算新增）".to_string(),
                 |number| version_label(&versions, number),
@@ -6511,7 +6688,6 @@ impl GongwenApp {
                         }
                     }
                 });
-            ui.weak("左旧右新");
         });
         if let Some(number) = picked_from {
             diff.from = number;
@@ -6722,6 +6898,7 @@ impl GongwenApp {
     /// 配置版本历史窗：列表 + 应用（二次确认）+ 对照。
     fn config_versions_window(&mut self, ctx: &egui::Context) {
         if !self.config_versions_open {
+            theme::reset_window_anim(ctx, egui::Id::new("config_versions_anim"));
             return;
         }
         let versions = self
@@ -6731,7 +6908,7 @@ impl GongwenApp {
             .unwrap_or_default();
         let mut close = false;
         let mut open_diff: Option<i64> = None;
-        egui::Window::new("配置版本历史")
+        let win = egui::Window::new("配置版本历史")
             .collapsible(false)
             .resizable(true)
             .default_width(700.0)
@@ -6805,6 +6982,9 @@ impl GongwenApp {
                     close = true;
                 }
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("config_versions_anim"), &w.response);
+        }
         if let Some(n) = open_diff {
             self.version_diff = Some(VersionDiffState {
                 scope: VersionScope::Config,
@@ -6901,11 +7081,12 @@ impl GongwenApp {
     /// "回退到该版本"的二次确认：会覆盖活稿行里未提交的内容，值得问一句。
     fn revert_confirm_window(&mut self, ctx: &egui::Context) {
         let Some((manuscript_id, version_number)) = self.revert_confirm else {
+            theme::reset_window_anim(ctx, egui::Id::new("revert_confirm_anim"));
             return;
         };
         let mut confirm = false;
         let mut cancel = false;
-        egui::Window::new("回退到该版本")
+        let win = egui::Window::new("回退到该版本")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -6930,6 +7111,9 @@ impl GongwenApp {
                     }
                 });
             });
+        if let Some(w) = win {
+            theme::window_enter_anim(ctx, egui::Id::new("revert_confirm_anim"), &w.response);
+        }
         if confirm {
             self.revert_to_version(manuscript_id, version_number);
         } else if cancel {
@@ -6983,6 +7167,7 @@ impl GongwenApp {
     fn theme_settings_ui(&mut self, ui: &mut egui::Ui) {
         section_heading_with_info(
             ui,
+            theme::Icon::Palette,
             "界面主题",
             "界面的明色配色预设，点选后立即生效并保存。公文纸面（预览与导出）不受影响，仍按规范为白纸黑字红头。",
         );
@@ -7063,6 +7248,7 @@ impl GongwenApp {
         // 界面字体不受“使用本机字体编译”开关控制，选了就生效，随时可以换回内置。
         section_heading_with_info(
             ui,
+            theme::Icon::Type,
             "界面字体",
             "应用窗口、菜单与列表使用的字体。默认随应用内置霞鹜文楷（LXGW Bright）；所选字体文件缺失或读取失败时自动退回内置。",
         );
@@ -7101,6 +7287,7 @@ impl GongwenApp {
 
         section_heading_with_info(
             ui,
+            theme::Icon::Tex,
             "编译字体",
             "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体。改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
         );
@@ -7143,6 +7330,7 @@ impl GongwenApp {
                 ui.add_space(4.0);
                 section_heading_with_info(
                     ui,
+                    theme::Icon::PlugZap,
                     "本地模型服务设置",
                     "应用调用本机 OpenAI 兼容接口，如 LM Studio（http://127.0.0.1:1234/v1）或 Ollama（http://127.0.0.1:11434/v1）。正文不会主动发送到互联网。",
                 );
@@ -7220,6 +7408,7 @@ impl GongwenApp {
                 ui.separator();
                 section_heading_with_info(
                     ui,
+                    theme::Icon::Library,
                     "知识库（检索增强起草）",
                     "用本地模型服务（LM Studio / Ollama 等 OpenAI 兼容服务）的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。两个模型与上面的对话模型相互独立。",
                 );
@@ -7387,6 +7576,7 @@ impl GongwenApp {
                 ui.separator();
                 section_heading_with_info(
                     ui,
+                    theme::Icon::Folder,
                     "输出与录入",
                     "导出 TeX 时会自动检测 XeLaTeX 或 Tectonic；检测到后编译 PDF 并清理中间文件。",
                 );
@@ -7425,6 +7615,7 @@ impl GongwenApp {
                 ui.separator();
                 section_heading_with_info(
                     ui,
+                    theme::Icon::FileDown,
                     "导出格式",
                     "这里的选择对所有稿件生效；起草页的“导出”按钮按这里勾选的格式产出。",
                 );
@@ -7449,6 +7640,7 @@ impl GongwenApp {
                 ui.separator();
                 section_heading_with_info(
                     ui,
+                    theme::Icon::Save,
                     "保存与现场",
                     "新建的稿件在第一次真正改动时自动入库；下次启动会恢复本次打开的标签。",
                 );
@@ -7462,6 +7654,7 @@ impl GongwenApp {
                 ui.separator();
                 section_heading_with_info(
                     ui,
+                    theme::Icon::Shield,
                     "密级与保密期限规则",
                     "默认取自《保守国家秘密法》第十五条：绝密级不超过三十年、机密级不超过二十年、秘密级不超过十年。本单位口径不同的，直接改下面三个上限。",
                 );
@@ -7506,6 +7699,7 @@ impl GongwenApp {
                 ui.separator();
                 section_heading_with_info(
                     ui,
+                    theme::Icon::Sparkles,
                     "建议流程",
                     "1. 在本地模型服务中加载中文指令模型并启动服务（LM Studio 启动 Local Server；Ollama 执行 ollama serve）。\n2. 刷新模型并选择模型。\n3. 在“标准词库”维护全称、常见错写和联系人电话。\n4. 为每类模板保存默认单位、联系人和呈报领导。\n5. 生成草稿 → 在右侧改稿 → 处理审校提示 → 导出签发稿。",
                 );
@@ -7552,11 +7746,13 @@ impl eframe::App for GongwenApp {
             self.open_page(NavPage::Manuscript);
         }
         let active = self.tabs[self.active_tab.min(self.tabs.len() - 1)];
-        // 场景切换：活动标签变了就重置淡入动画（0 时长直接落位），
-        // 下面的 CentralPanel 再从 0 淡入到 1，让切换有明确的「进入新场景」感。
+        // 场景切换：活动标签变了就重置淡入/滑动动画（0 时长直接落位），
+        // 下面的 CentralPanel 再从 0 淡入到 1、从右往左轻滑回原位，
+        // 让切换有明确的「进入新场景」感。
         if self.last_content_tab != Some(active) {
             self.last_content_tab = Some(active);
             ctx.animate_bool_with_time(egui::Id::new("content_fade"), false, 0.0);
+            ctx.animate_value_with_time(egui::Id::new("content_slide"), CONTENT_SLIDE_PX, 0.0);
         }
         egui::CentralPanel::default().show(ui, |ui| {
             let fade = ui.ctx().animate_bool_with_time(
@@ -7564,14 +7760,41 @@ impl eframe::App for GongwenApp {
                 true,
                 CONTENT_FADE_ANIM,
             );
+            let slide = ui.ctx().animate_value_with_time(
+                egui::Id::new("content_slide"),
+                0.0,
+                CONTENT_FADE_ANIM,
+            );
             ui.set_opacity(fade);
+            // 轻滑入场靠平移子 Ui 的 max_rect 实现，不另开图层。
+            //
+            // 曾经试过 `LayerId::new(Order::Background, ...)` + `set_transform_layer`：
+            // 自己 new 出来的 LayerId 从没经过 `Area`，egui 的 `Memory::areas()` 里
+            // 既没有它的 AreaState 也不在 order 列表里，后果是三重的——
+            // 1. `compare_order` 用 `order_map` 决胜，未注册层取到 None，`None < Some(_)`，
+            //    这一层被排到根 background 层下面；而 CentralPanel 收尾时会在 background
+            //    层登记一个覆盖整个中央区的 hover 矩形，`hit_test` 的 included_layers
+            //    扫到它就 break，正文区所有控件被整体丢弃 → 点击、拖拽、聚焦全废；
+            // 2. `Areas::layer_id_at` 只遍历注册过的层，`rect_contains_pointer` 恒为 false
+            //    → ScrollArea 不再吃滚轮；
+            // 3. 同理 tooltip、`clicked_elsewhere`、菜单命中判定一并失效。
+            // 平移 max_rect 没有这些问题：内容仍在 CentralPanel 自己的层里，
+            // 裁剪也由 CentralPanel 的 clip_rect 负责。
+            let mut content_ui = ui.new_child(
+                egui::UiBuilder::new().max_rect(
+                    ui.available_rect_before_wrap()
+                        .translate(egui::vec2(slide, 0.0)),
+                ),
+            );
             match active {
-                TabRef::Doc(_) => self.draft_page().create_ui(ui),
-                TabRef::Page(NavPage::Vocabulary) => self.vocabulary_ui(ui),
-                TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(ui),
-                TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(ui),
-                TabRef::Page(NavPage::Knowledge) => crate::knowledge_ui::knowledge_ui(self, ui),
-                TabRef::Page(NavPage::Settings) => self.settings_ui(ui),
+                TabRef::Doc(_) => self.draft_page().create_ui(&mut content_ui),
+                TabRef::Page(NavPage::Vocabulary) => self.vocabulary_ui(&mut content_ui),
+                TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(&mut content_ui),
+                TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(&mut content_ui),
+                TabRef::Page(NavPage::Knowledge) => {
+                    crate::knowledge_ui::knowledge_ui(self, &mut content_ui)
+                }
+                TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
             }
         });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。
@@ -7591,6 +7814,8 @@ impl eframe::App for GongwenApp {
         self.config_versions_window(&ctx);
         self.knowledge_preview_window(&ctx);
         self.about_window(&ctx);
+        // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
+        self.window_resize_borders(&ctx);
         if self.any_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -7717,9 +7942,21 @@ pub(crate) fn row_label_with_info(ui: &mut egui::Ui, label: &str, tip: impl Into
     form_row_label(ui, label).on_hover_text(tip.into());
 }
 
-/// 章节说明同样挂在标题文字本身。
-pub(crate) fn section_heading_with_info(ui: &mut egui::Ui, heading: &str, tip: impl Into<String>) {
-    ui.heading(heading).on_hover_text(tip.into());
+/// 章节标题带图标；说明挂在标题文字本身，图标只作视觉锚点不占额外行。
+pub(crate) fn section_heading_with_info(
+    ui: &mut egui::Ui,
+    icon: theme::Icon,
+    heading: &str,
+    tip: impl Into<String>,
+) {
+    ui.horizontal(|ui| {
+        ui.add(
+            icon.image()
+                .tint(theme::text_soft())
+                .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+        );
+        ui.heading(heading).on_hover_text(tip.into());
+    });
 }
 
 pub(crate) fn form_row_label(ui: &mut egui::Ui, label: &str) -> egui::Response {
