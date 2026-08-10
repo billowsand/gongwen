@@ -282,6 +282,10 @@ struct ImportPreview {
     selected: Vec<bool>,
     keyword: String,
     skip_existing: bool,
+    /// 包内随附的标准词库；旧包无此条目时为 None。
+    vocabulary: Option<manuscript_io::VocabularyFile>,
+    /// 是否把包内词库增量合并到本机词库，默认勾选。
+    merge_vocabulary: bool,
 }
 
 /// 提交版本对话框打开的版本链：某篇稿件，或全局配置。
@@ -4905,6 +4909,24 @@ impl GongwenApp {
                     });
                     ui.checkbox(&mut preview.skip_existing, "跳过与本地同源的已有记录")
                         .on_hover_text("按清单里的源 id 去重，重复导入同一份文件不会产生副本");
+                    if let Some(vocabulary) = &preview.vocabulary {
+                        let units = vocabulary
+                            .entries
+                            .iter()
+                            .filter(|entry| entry.category == VocabularyCategory::Unit)
+                            .count();
+                        let people = vocabulary.entries.len() - units;
+                        ui.checkbox(
+                            &mut preview.merge_vocabulary,
+                            format!(
+                                "合并包内标准词库到本机（{} 个单位、{} 名人员）",
+                                units, people
+                            ),
+                        )
+                        .on_hover_text(
+                            "增量合并：补全本机缺失的词条并更新已匹配词条的补充字段，不删除本机已有内容；取消勾选则不导入词库",
+                        );
+                    }
                     let keyword = preview.keyword.trim().to_lowercase();
                     egui::ScrollArea::vertical()
                         .id_salt("import_preview_list")
@@ -5836,7 +5858,7 @@ impl GongwenApp {
         };
         let filter = self.manuscript_filter.clone();
         let result: anyhow::Result<manuscript_io::ExportSummary> =
-            manuscript_io::export_zip(store, &filter, &path);
+            manuscript_io::export_zip(store, &filter, &self.config.vocabulary, &path);
         match result {
             Ok(summary) => {
                 self.status = format!(
@@ -5869,7 +5891,7 @@ impl GongwenApp {
             return;
         };
         let ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
-        match manuscript_io::export_zip_selected(store, &ids, &path) {
+        match manuscript_io::export_zip_selected(store, &ids, &self.config.vocabulary, &path) {
             Ok(summary) => {
                 self.status = format!(
                     "已导出所选 {} 篇稿件、{} 个 PDF 附件到 {}。",
@@ -5891,6 +5913,14 @@ impl GongwenApp {
         };
         match manuscript_io::read_manifest(&path) {
             Ok(manifest) => {
+                // 词库读取失败不阻断稿件导入：损坏或版本不支持的词库按“不带词库”处理。
+                let vocabulary = match manuscript_io::read_vocabulary(&path) {
+                    Ok(vocabulary) => vocabulary,
+                    Err(error) => {
+                        self.status = format!("稿件包词库读取失败（不影响稿件导入）：{error:#}");
+                        None
+                    }
+                };
                 let selected = vec![true; manifest.records.len()];
                 self.manuscript_import_preview = Some(ImportPreview {
                     manifest,
@@ -5938,6 +5968,25 @@ impl GongwenApp {
                         " {} 个附件缺失或过大被跳过。",
                         summary.skipped_pdfs
                     ));
+                }
+                // 勾选合并且包内带词库时，把词库增量合并进本机全局词库。
+                if preview.merge_vocabulary
+                    && let Some(vocabulary) = &preview.vocabulary
+                {
+                    let report = vocabulary_xlsx::merge(
+                        &mut self.config.vocabulary,
+                        vocabulary.entries.clone(),
+                    );
+                    units::normalize(&mut self.config.vocabulary);
+                    match storage::save(&self.config) {
+                        Ok(()) => message.push_str(&format!(
+                            " 词库合并：新增 {}、更新 {}、不变 {} 条。",
+                            report.added, report.updated, report.unchanged
+                        )),
+                        Err(error) => message.push_str(&format!(
+                            " 词库已合并但保存失败：{error:#}（请检查配置目录权限）"
+                        )),
+                    }
                 }
                 self.status = message;
             }

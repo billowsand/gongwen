@@ -5,7 +5,7 @@
 //! 决定写哪些记录，满足“导入也支持过滤筛选”。
 
 use crate::manuscript::{ManuscriptFilter, ManuscriptStore, NewManuscript};
-use crate::models::{DraftInput, ManuscriptStatus, TemplateKind};
+use crate::models::{DraftInput, ManuscriptStatus, TemplateKind, VocabularyEntry};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,11 @@ use zip::{CompressionMethod, ZipWriter};
 
 pub const MANIFEST_SCHEMA: u32 = 1;
 const MANIFEST_NAME: &str = "manifests.json";
+/// 随稿件包导出的标准词库（全局一份，随包带走，导入时增量合并）。
+pub const VOCABULARY_SCHEMA: u32 = 1;
+const VOCABULARY_NAME: &str = "vocabulary.json";
+/// 词库 JSON 体积上限（约 10 MB），远超正常词库规模，防恶意包撑爆内存。
+const VOCABULARY_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// 单个 PDF 附件上限（约 100 MB），超限跳过，避免导入超大文件撑爆库。
 const MAX_PDF_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -55,6 +60,14 @@ pub struct Manifest {
     pub records: Vec<ManifestRecord>,
 }
 
+/// 随稿件包携带的标准词库。可选条目：旧包没有 `vocabulary.json` 时导入端视为无词库。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VocabularyFile {
+    pub schema: u32,
+    pub exported_at: String,
+    pub entries: Vec<VocabularyEntry>,
+}
+
 #[derive(Debug)]
 pub struct ExportSummary {
     pub records: usize,
@@ -77,10 +90,12 @@ pub struct ImportOptions {
     pub selected: Vec<bool>,
 }
 
-/// 按过滤条件导出稿件（含 PDF 附件）为 ZIP。没有符合条件稿件时直接报错。
+/// 按过滤条件导出稿件（含 PDF 附件）为 ZIP。`vocabulary` 为标准词库，非空时随包导出，
+/// 便于把稿件带到另一台电脑后保持要素一致。没有符合条件稿件时直接报错。
 pub fn export_zip(
     store: &mut ManuscriptStore,
     filter: &ManuscriptFilter,
+    vocabulary: &[VocabularyEntry],
     zip_path: &Path,
 ) -> Result<ExportSummary> {
     let rows = store.list(filter)?;
@@ -88,21 +103,23 @@ pub fn export_zip(
         bail!("没有符合过滤条件的稿件");
     }
     let ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
-    export_zip_ids(store, &ids, zip_path)
+    export_zip_ids(store, &ids, vocabulary, zip_path)
 }
 
 /// 只导出稿件管理页明确勾选的记录。
 pub fn export_zip_selected(
     store: &mut ManuscriptStore,
     ids: &[i64],
+    vocabulary: &[VocabularyEntry],
     zip_path: &Path,
 ) -> Result<ExportSummary> {
-    export_zip_ids(store, ids, zip_path)
+    export_zip_ids(store, ids, vocabulary, zip_path)
 }
 
 fn export_zip_ids(
     store: &mut ManuscriptStore,
     ids: &[i64],
+    vocabulary: &[VocabularyEntry],
     zip_path: &Path,
 ) -> Result<ExportSummary> {
     if ids.is_empty() {
@@ -167,6 +184,20 @@ fn export_zip_ids(
             .context("序列化清单失败")?
             .as_bytes(),
     )?;
+    // 词库非空才随包：目标机器导入时可选择增量合并，保证单位、人员、联系方式一致。
+    if !vocabulary.is_empty() {
+        let vocab_file = VocabularyFile {
+            schema: VOCABULARY_SCHEMA,
+            exported_at: Local::now().to_rfc3339(),
+            entries: vocabulary.to_vec(),
+        };
+        zip.start_file(VOCABULARY_NAME, SimpleFileOptions::default())?;
+        zip.write_all(
+            serde_json::to_string_pretty(&vocab_file)
+                .context("序列化词库失败")?
+                .as_bytes(),
+        )?;
+    }
     // PDF 本身已压缩，用 Stored 避免二次压缩浪费时间；图片同理。
     let stored_options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     for (path, bytes) in &pdf_blobs {
@@ -228,6 +259,48 @@ pub fn read_manifest(zip_path: &Path) -> Result<Manifest> {
         );
     }
     Ok(manifest)
+}
+
+/// 只读 zip 中的标准词库。可选条目：旧包或未附带词库的包返回 `Ok(None)`，不阻断稿件导入。
+/// 只有 `vocabulary.json` 缺失时视为无词库；文件损坏或版本不支持则报错。
+pub fn read_vocabulary(zip_path: &Path) -> Result<Option<VocabularyFile>> {
+    let file =
+        File::open(zip_path).with_context(|| format!("无法打开导入文件 {}", zip_path.display()))?;
+    let mut archive = ZipArchive::new(file).context("文件不是有效的 ZIP")?;
+    let mut reader = match archive.by_name(VOCABULARY_NAME) {
+        Ok(reader) => reader,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if reader.size() > VOCABULARY_MAX_BYTES {
+        bail!(
+            "词库文件过大（{} 字节，上限 {} 字节），拒绝导入",
+            reader.size(),
+            VOCABULARY_MAX_BYTES
+        );
+    }
+    // `size()` 读的是 zip 头里声明的解压后大小，是可以伪造的，所以解压时再兜一道：
+    // 多读 1 字节，超了就说明声明的大小不作数，直接拒绝。
+    let mut raw = String::new();
+    let read = reader
+        .by_ref()
+        .take(VOCABULARY_MAX_BYTES + 1)
+        .read_to_string(&mut raw)?;
+    if read as u64 > VOCABULARY_MAX_BYTES {
+        bail!(
+            "词库文件解压后超过上限 {} 字节（包内声明的大小不实），拒绝导入",
+            VOCABULARY_MAX_BYTES
+        );
+    }
+    let vocab: VocabularyFile = serde_json::from_str(&raw).context("vocabulary.json 格式无效")?;
+    if vocab.schema != VOCABULARY_SCHEMA {
+        bail!(
+            "不支持的词库格式版本：v{}（当前支持 v{}）",
+            vocab.schema,
+            VOCABULARY_SCHEMA
+        );
+    }
+    Ok(Some(vocab))
 }
 
 /// 按预览勾选导入。重新读取 zip 以保证与磁盘一致；记录 id 写入 source_id 列去重。
@@ -340,7 +413,7 @@ fn restore_images(archive: &mut ZipArchive<File>, target: &Path) -> Result<usize
 mod tests {
     use super::*;
     use crate::manuscript::{ManuscriptFilter, ManuscriptStore, ManuscriptUpdate};
-    use crate::models::TemplateProfile;
+    use crate::models::{TemplateProfile, VocabularyCategory};
 
     fn sample_snapshot(kind: TemplateKind) -> DraftInput {
         DraftInput {
@@ -359,6 +432,28 @@ mod tests {
 
     fn mem_store() -> ManuscriptStore {
         ManuscriptStore::open(Path::new(":memory:")).unwrap()
+    }
+
+    fn sample_vocabulary() -> Vec<VocabularyEntry> {
+        vec![
+            VocabularyEntry {
+                id: 1,
+                category: VocabularyCategory::Unit,
+                code: "00".into(),
+                canonical: "某省教育厅".into(),
+                department_code: "某教".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 2,
+                category: VocabularyCategory::Person,
+                canonical: "张三".into(),
+                unit: "00".into(),
+                position: "处长".into(),
+                phone: "13800000000".into(),
+                ..Default::default()
+            },
+        ]
     }
 
     fn seed(store: &mut ManuscriptStore) -> i64 {
@@ -388,7 +483,8 @@ mod tests {
 
         let mut source = mem_store();
         let id = seed(&mut source);
-        let summary = export_zip(&mut source, &ManuscriptFilter::default(), &zip_path).unwrap();
+        let summary =
+            export_zip(&mut source, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
         assert_eq!(summary.records, 1);
         assert_eq!(summary.pdfs, 2);
 
@@ -433,6 +529,86 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn vocabulary_export_import_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("稿件.zip");
+        let mut store = mem_store();
+        seed(&mut store);
+        export_zip(
+            &mut store,
+            &ManuscriptFilter::default(),
+            &sample_vocabulary(),
+            &zip_path,
+        )
+        .unwrap();
+
+        let read = read_vocabulary(&zip_path).unwrap().expect("包内应带词库");
+        assert_eq!(read.schema, VOCABULARY_SCHEMA);
+        assert_eq!(read.entries.len(), 2);
+        let unit = read
+            .entries
+            .iter()
+            .find(|entry| entry.category == VocabularyCategory::Unit)
+            .unwrap();
+        assert_eq!(unit.code, "00");
+        assert_eq!(unit.canonical, "某省教育厅");
+        assert_eq!(unit.department_code, "某教");
+        let person = read
+            .entries
+            .iter()
+            .find(|entry| entry.category == VocabularyCategory::Person)
+            .unwrap();
+        assert_eq!(person.unit, "00");
+        assert_eq!(person.phone, "13800000000");
+        assert_eq!(person.position, "处长");
+    }
+
+    #[test]
+    fn vocabulary_omitted_when_empty() {
+        // 空词库不写 vocabulary.json：读取视为无词库，与旧包（只有 manifests.json）行为一致。
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("稿件.zip");
+        let mut store = mem_store();
+        seed(&mut store);
+        export_zip(&mut store, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
+        assert!(read_vocabulary(&zip_path).unwrap().is_none());
+    }
+
+    #[test]
+    fn vocabulary_unsupported_schema_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("旧版词库.zip");
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(VOCABULARY_NAME, SimpleFileOptions::default())
+            .unwrap();
+        let fake = serde_json::json!({
+            "schema": 99,
+            "exported_at": "2026-01-01T00:00:00+08:00",
+            "entries": []
+        });
+        zip.write_all(serde_json::to_string_pretty(&fake).unwrap().as_bytes())
+            .unwrap();
+        zip.finish().unwrap();
+        assert!(read_vocabulary(&zip_path).is_err());
+    }
+
+    #[test]
+    fn vocabulary_oversized_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("超大词库.zip");
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(VOCABULARY_NAME, SimpleFileOptions::default())
+            .unwrap();
+        let blob = vec![b'x'; (VOCABULARY_MAX_BYTES + 1) as usize];
+        zip.write_all(&blob).unwrap();
+        zip.finish().unwrap();
+        let error = read_vocabulary(&zip_path).unwrap_err();
+        assert!(format!("{error:#}").contains("过大"));
     }
 
     #[test]
@@ -519,7 +695,7 @@ mod tests {
         let zip_path = dir.path().join("稿件.zip");
         let mut source = mem_store();
         seed(&mut source);
-        export_zip(&mut source, &ManuscriptFilter::default(), &zip_path).unwrap();
+        export_zip(&mut source, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
 
         let mut dest = mem_store();
         let opts = ImportOptions {
@@ -539,7 +715,7 @@ mod tests {
         let zip_path = dir.path().join("稿件.zip");
         let mut source = mem_store();
         seed(&mut source);
-        export_zip(&mut source, &ManuscriptFilter::default(), &zip_path).unwrap();
+        export_zip(&mut source, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
 
         let mut dest = mem_store();
         let opts = ImportOptions {
@@ -579,7 +755,7 @@ mod tests {
             )
             .unwrap();
 
-        let summary = export_zip_selected(&mut store, &[second], &zip_path).unwrap();
+        let summary = export_zip_selected(&mut store, &[second], &[], &zip_path).unwrap();
         assert_eq!(summary.records, 1);
         let manifest = read_manifest(&zip_path).unwrap();
         assert_eq!(manifest.records.len(), 1);
@@ -609,7 +785,7 @@ mod tests {
             kind: Some(TemplateKind::MeetingAgenda),
             ..Default::default()
         };
-        assert!(export_zip(&mut store, &filter, &zip_path).is_err());
+        assert!(export_zip(&mut store, &filter, &[], &zip_path).is_err());
         assert!(!zip_path.exists());
     }
 
