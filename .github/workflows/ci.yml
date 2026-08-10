@@ -14,31 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: fmt / clippy / test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-24.04-arm]
+  windows:
+    name: fmt / clippy / test (Windows x64)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1-mesa-dev \
-            libgl1-mesa-dev \
-            libgtk-3-dev \
-            libssl-dev \
-            libwayland-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxcb1-dev \
-            libxkbcommon-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,7 +32,67 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
+
+  linux-arm64-glibc231:
+    name: fmt / clippy / test (Linux ARM64 / GLIBC 2.31)
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:bullseye
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The minimal Debian image has no Git, so install build prerequisites
+      # before checkout. All compilation and linking then happens against
+      # Debian 11's ARM64 GLIBC 2.31 userland.
+      - name: Install Debian build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            build-essential \
+            pkg-config \
+            file \
+            binutils \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb1-dev \
+            libxkbcommon-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable \
+              --component rustfmt --component clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify build baseline
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-targets

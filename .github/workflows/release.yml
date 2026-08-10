@@ -16,35 +16,113 @@ concurrency:
 # when the runtime contents actually change.
 env:
   RUNTIME_RELEASE_TAG: v0.3.5
+  RUNTIME_REPO: billowsand/gongwen-runtime
 
 jobs:
-  build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            name: Windows x64
-            suffix: win-x64
-            binary: gongwen-assistant.exe
-            runtime_repo: billowsand/gongwen-runtime
-            archive: zip
-          - os: ubuntu-24.04-arm
-            name: Linux ARM64
-            suffix: linux-arm64
-            binary: gongwen-assistant
-            runtime_repo: billowsand/gongwen-runtime
-            archive: tar.gz
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Download runtime assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          New-Item -ItemType Directory -Force -Path runtime | Out-Null
+          $asset = "runtime-win-x64.zip"
+          gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
+          Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
+          Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
+
+      - name: Package full release
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $asset = "gongwen-assistant-$version-win-x64-full.zip"
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full"
+          ./scripts/package-portable.ps1 -Suffix win-x64 -BinaryName gongwen-assistant.exe -OutputDir $staging -ArchiveFormat zip -ArchivePath (Join-Path $env:GITHUB_WORKSPACE $asset) -SkipBuild -Force
+          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
+            "$($_.Hash.ToLowerInvariant())  $asset"
+          } | Set-Content "${asset}.sha256" -Encoding utf8
+
+      - name: Smoke test packaged TeX runtime
+        shell: pwsh
+        run: |
+          $env:GONGWEN_RUNTIME_DIR = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full/runtime"
+          cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress --accept-license
+
+      - name: Package Windows installer
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full"
+          ./scripts/package-installer.ps1 -Version $version -SourceDir $staging -OutputDir $env:GITHUB_WORKSPACE -Force
+          $asset = "gongwen-assistant-$version-win-x64-setup.exe"
+          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
+            "$($_.Hash.ToLowerInvariant())  $asset"
+          } | Set-Content "${asset}.sha256" -Encoding utf8
+
+      - name: Package minimal release zip
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $staging = Join-Path $env:RUNNER_TEMP 'staging'
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/release/gongwen-assistant.exe" $staging
+          Copy-Item README.md, THIRD_PARTY_NOTICES.md, LICENSE, config.example.json $staging
+          Copy-Item -LiteralPath "font/licenses" -Destination (Join-Path $staging "licenses/fonts") -Recurse
+          $asset = "gongwen-assistant-$version-win-x64.zip"
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $asset
+          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
+            "$($_.Hash.ToLowerInvariant())  $asset"
+          } | Set-Content "$asset.sha256" -Encoding utf8
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-win-x64
+          path: |
+            gongwen-assistant-*.zip*
+            gongwen-assistant-*-setup.exe*
+          if-no-files-found: error
+
+  build-linux-arm64:
+    name: Build Linux ARM64 / GLIBC 2.31
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:bullseye
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install Debian build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            unzip \
+            build-essential \
+            pkg-config \
+            file \
+            binutils \
             libegl1-mesa-dev \
             libgl1-mesa-dev \
             libgtk-3-dev \
@@ -56,108 +134,138 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Debian ARM64 build baseline
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.31"
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --locked
+
+      - name: Verify ARM64 and GLIBC compatibility
+        run: |
+          set -euo pipefail
+          binary=target/release/gongwen-assistant
+          file "$binary"
+          readelf -h "$binary"
+          ldd "$binary"
+          ! ldd "$binary" | grep -F 'not found'
+
+          machine="$(readelf -h "$binary" | awk -F: '/Machine:/ { sub(/^[[:space:]]+/, "", $2); print $2 }')"
+          test "$machine" = "AArch64"
+
+          max_glibc="$(
+            readelf --version-info "$binary" \
+              | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+              | sort -Vu \
+              | tail -1
+          )"
+          echo "Maximum required GLIBC version: $max_glibc"
+          dpkg --compare-versions "${max_glibc#GLIBC_}" le "2.31"
+
+      - name: Download runtime assets for smoke test
+        run: |
+          set -euo pipefail
+          asset=runtime-linux-arm64.zip
+          curl --fail --location --retry 3 \
+            "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
+            --output "/tmp/${asset}"
+          unzip -q "/tmp/${asset}" -d runtime
+
+      - name: Smoke test packaged TeX runtime
+        run: |
+          set -euo pipefail
+          export GONGWEN_RUNTIME_DIR="$GITHUB_WORKSPACE/runtime"
+          cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
+
+      - name: Upload GLIBC 2.31 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-glibc231-binary
+          path: target/release/gongwen-assistant
+          if-no-files-found: error
+
+  package-linux-arm64:
+    name: Package Linux ARM64
+    needs: build-linux-arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download GLIBC 2.31 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64-glibc231-binary
+          path: target/release
+
+      - name: Make binary executable
+        shell: bash
+        run: chmod +x target/release/gongwen-assistant
 
       - name: Download runtime assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUNTIME_REPO: ${{ matrix.runtime_repo }}
-          RUNTIME_SUFFIX: ${{ matrix.suffix }}
         run: |
           New-Item -ItemType Directory -Force -Path runtime | Out-Null
-          $asset = "runtime-$env:RUNTIME_SUFFIX.zip"
+          $asset = "runtime-linux-arm64.zip"
           gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
 
       - name: Package full release
         shell: pwsh
-        env:
-          BINARY_NAME: ${{ matrix.binary }}
-          SUFFIX: ${{ matrix.suffix }}
-          ARCHIVE_FORMAT: ${{ matrix.archive }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $suffix = $env:SUFFIX
-          $ext = if ($env:ARCHIVE_FORMAT -eq "tar.gz") { "tar.gz" } else { "zip" }
-          $asset = "gongwen-assistant-$version-$suffix-full.$ext"
-          $staging = [System.IO.Path]::Combine($env:GITHUB_WORKSPACE, "dist", "${suffix}-full")
-          ./scripts/package-portable.ps1 -Suffix $suffix -BinaryName $env:BINARY_NAME -OutputDir $staging -ArchiveFormat $env:ARCHIVE_FORMAT -ArchivePath (Join-Path $env:GITHUB_WORKSPACE $asset) -SkipBuild -Force
+          $asset = "gongwen-assistant-$version-linux-arm64-glibc231-full.tar.gz"
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-arm64-full"
+          ./scripts/package-portable.ps1 -Suffix linux-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat tar.gz -ArchivePath (Join-Path $env:GITHUB_WORKSPACE $asset) -SkipBuild -Force
           Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
             "$($_.Hash.ToLowerInvariant())  $asset"
           } | Set-Content "${asset}.sha256" -Encoding utf8
 
-      - name: Smoke test packaged TeX runtime
+      - name: Package minimal release zip
         shell: pwsh
-        env:
-          SUFFIX: ${{ matrix.suffix }}
-        run: |
-          $suffix = $env:SUFFIX
-          $staging = [System.IO.Path]::Combine($env:GITHUB_WORKSPACE, "dist", "${suffix}-full")
-          $env:GONGWEN_RUNTIME_DIR = [System.IO.Path]::Combine($staging, "runtime")
-          cargo test --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
-
-      - name: Install Inno Setup
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: choco install innosetup -y --no-progress --accept-license
-
-      - name: Package Windows installer
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $staging = [System.IO.Path]::Combine($env:GITHUB_WORKSPACE, "dist", "win-x64-full")
-          ./scripts/package-installer.ps1 -Version $version -SourceDir $staging -OutputDir $env:GITHUB_WORKSPACE -Force
-          $asset = "gongwen-assistant-$version-win-x64-setup.exe"
-          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
-            "$($_.Hash.ToLowerInvariant())  $asset"
-          } | Set-Content "${asset}.sha256" -Encoding utf8
-
-      - name: Package release zip
-        shell: pwsh
-        env:
-          BINARY_NAME: ${{ matrix.binary }}
-          SUFFIX: ${{ matrix.suffix }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           $staging = Join-Path $env:RUNNER_TEMP 'staging'
           New-Item -ItemType Directory -Path $staging | Out-Null
-          Copy-Item "target/release/$($env:BINARY_NAME)" $staging
+          Copy-Item "target/release/gongwen-assistant" $staging
           Copy-Item README.md, THIRD_PARTY_NOTICES.md, LICENSE, config.example.json $staging
           Copy-Item -LiteralPath "font/licenses" -Destination (Join-Path $staging "licenses/fonts") -Recurse
-          $asset = "gongwen-assistant-$version-$($env:SUFFIX).zip"
+          $asset = "gongwen-assistant-$version-linux-arm64-glibc231.zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $asset
           Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
             "$($_.Hash.ToLowerInvariant())  $asset"
           } | Set-Content "$asset.sha256" -Encoding utf8
-          "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Upload release assets
+      - name: Upload Linux release assets
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.suffix }}
+          name: release-linux-arm64
           path: |
             gongwen-assistant-*.zip*
             gongwen-assistant-*.tar.gz*
-            gongwen-assistant-*-setup.exe*
           if-no-files-found: error
 
   release:
     name: Publish GitHub release
-    needs: build
+    needs: [build-windows, package-linux-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: release-*
           path: release-assets
           merge-multiple: true
 
@@ -168,7 +276,7 @@ jobs:
           set -euo pipefail
           cd release-assets
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" ./*.zip ./*.tar.gz ./*.sha256 ./*-setup.exe --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" ./*.zip ./*.tar.gz ./*.sha256 ./*-setup.exe --repo "$GITHUB_REPOSITORY" --generate-notes
+            gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" --generate-notes
           fi
