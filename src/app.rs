@@ -155,6 +155,11 @@ pub(crate) enum WorkerResult {
     Knowledge(KnowledgeJob),
     /// 扫描本机字体目录的结果。中文字体文件很大，扫描放在后台线程。
     SystemFonts(Vec<system_fonts::SystemFont>),
+    /// 稿件 PDF 批量导出的结果。`path` 是保存的 zip 路径。
+    ManuscriptPdfExport {
+        path: PathBuf,
+        result: Result<manuscript_io::PdfExportSummary, String>,
+    },
 }
 
 /// 知识库后台任务的结果。
@@ -275,6 +280,13 @@ enum PdfAction {
 struct ArchivePending {
     manuscript_id: i64,
     pdf_paths: Vec<PathBuf>,
+}
+
+/// 「导出 PDF」选项弹窗的勾选状态：盖章件取附件、非盖章件编译生成。
+#[derive(Debug, Clone, Copy)]
+struct PdfExportDialog {
+    stamped: bool,
+    compiled: bool,
 }
 
 /// 导入 ZIP 的预览状态：清单、勾选、关键词过滤与是否跳过同源记录。
@@ -432,6 +444,10 @@ pub struct GongwenApp {
     manuscript_count: [i64; 4],
     manuscript_delete_confirm: Option<i64>,
     manuscript_batch_delete_confirm: bool,
+    /// 「导出 PDF」批量导出是否正在后台执行（防重复触发）。
+    manuscript_pdf_export_busy: bool,
+    /// 「导出 PDF」选项弹窗；None 表示未打开。
+    manuscript_pdf_export: Option<PdfExportDialog>,
     manuscript_archive_pending: Option<ArchivePending>,
     manuscript_detail: Option<ManuscriptRecord>,
     manuscript_detail_delete_pdf: Option<i64>,
@@ -641,6 +657,8 @@ impl GongwenApp {
             manuscript_count: [0; 4],
             manuscript_delete_confirm: None,
             manuscript_batch_delete_confirm: false,
+            manuscript_pdf_export_busy: false,
+            manuscript_pdf_export: None,
             manuscript_archive_pending: None,
             manuscript_detail: None,
             manuscript_detail_delete_pdf: None,
@@ -1719,6 +1737,38 @@ impl GongwenApp {
                     });
                     if let Some((_, message)) = &self.rerank_verify_result {
                         self.status = message.clone();
+                    }
+                }
+                WorkerResult::ManuscriptPdfExport { path, result } => {
+                    self.manuscript_pdf_export_busy = false;
+                    match result {
+                        Ok(summary) => {
+                            let mut message = format!(
+                                "已导出 {} 篇稿件的 {} 个 PDF 到 {}。",
+                                summary.records,
+                                summary.pdfs,
+                                path.display()
+                            );
+                            if !summary.failed.is_empty() {
+                                let detail = summary
+                                    .failed
+                                    .iter()
+                                    .take(5)
+                                    .map(|(title, reason)| format!("{title}：{reason}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let more = summary.failed.len().saturating_sub(5);
+                                if more > 0 {
+                                    message.push_str(&format!("\n另有 {more} 篇失败原因略。"));
+                                }
+                                message.push_str(&format!("\n以下稿件未导出：\n{detail}"));
+                            }
+                            self.status = message;
+                        }
+                        Err(error) => {
+                            self.status =
+                                format!("导出 PDF 失败：{error}（未生成 {}）", path.display());
+                        }
                     }
                 }
             }
@@ -4949,6 +4999,21 @@ impl GongwenApp {
                         self.export_selected_manuscripts_zip();
                     }
                     if ui
+                        .add_enabled(
+                            !self.manuscript_pdf_export_busy,
+                            theme::icon_text_button(theme::Icon::FileDown, "导出 PDF"),
+                        )
+                        .on_hover_text(
+                            "把勾选的稿件导出为 PDF 并打包 zip：盖章件直接取附件、非盖章件编译生成",
+                        )
+                        .clicked()
+                    {
+                        self.manuscript_pdf_export = Some(PdfExportDialog {
+                            stamped: true,
+                            compiled: true,
+                        });
+                    }
+                    if ui
                         .add(theme::icon_text_button(
                             theme::Icon::PackageOpen,
                             "导入到知识库",
@@ -5115,6 +5180,45 @@ impl GongwenApp {
             } else if confirm {
                 self.manuscript_batch_delete_confirm = false;
                 *action = Some(ManuscriptAction::DeleteSelected(deletable));
+            }
+            ui.add_space(6.0);
+        }
+
+        if let Some(mut dialog) = self.manuscript_pdf_export {
+            let mut confirm = false;
+            let mut cancel = false;
+            ui.group(|ui| {
+                ui.label(format!(
+                    "已选 {} 篇稿件，导出为 PDF 压缩包：",
+                    self.manuscript_selected.len()
+                ));
+                ui.checkbox(&mut dialog.stamped, "导出盖章件（直接取附件 PDF）");
+                ui.checkbox(&mut dialog.compiled, "导出非盖章件（编译生成 PDF）");
+                ui.weak("文件名按稿件导出命名（不含时间戳）；盖章件名称追加（盖章）。");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            dialog.stamped || dialog.compiled,
+                            theme::icon_text_button(theme::Icon::FileDown, "导出"),
+                        )
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if cancel {
+                self.manuscript_pdf_export = None;
+            } else if confirm {
+                let options = manuscript_io::PdfExportOptions {
+                    stamped: dialog.stamped,
+                    compiled: dialog.compiled,
+                };
+                self.manuscript_pdf_export = None;
+                self.export_selected_manuscript_pdfs(options);
             }
             ui.add_space(6.0);
         }
@@ -6415,6 +6519,56 @@ impl GongwenApp {
             }
             Err(error) => self.status = format!("导出所选稿件失败：{error:#}"),
         }
+    }
+
+    /// 把勾选的稿件按选项导出为 PDF 集合并打包 zip，后台线程执行避免卡界面。
+    /// 盖章件直接取附件；非盖章件编译 TeX 生成，缺引擎或失败时该篇记入汇总。
+    fn export_selected_manuscript_pdfs(&mut self, options: manuscript_io::PdfExportOptions) {
+        if self.manuscript_selected.is_empty() {
+            self.status = "请先勾选要导出的稿件。".into();
+            return;
+        }
+        if self.manuscript_pdf_export_busy {
+            return;
+        }
+        let Some(db_path) = storage::manuscript_db_path().ok() else {
+            self.status = "稿件库路径不可用，无法导出 PDF。".into();
+            return;
+        };
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
+        let default_name = format!("所选公文PDF-{stamp}.zip");
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("ZIP PDF 压缩包", &["zip"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
+        let vocabulary = self.config.vocabulary.clone();
+        let fonts = self.config.fonts.clone();
+        self.manuscript_pdf_export_busy = true;
+        self.status = format!("正在导出 {} 篇稿件的 PDF…", ids.len());
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result: anyhow::Result<manuscript_io::PdfExportSummary> = (|| {
+                let mut store = ManuscriptStore::open(&db_path)
+                    .with_context(|| format!("无法打开稿件库 {}", db_path.display()))?;
+                manuscript_io::export_selected_pdfs(
+                    &mut store,
+                    &ids,
+                    &options,
+                    &vocabulary,
+                    &fonts,
+                    &path,
+                    |_| {},
+                )
+            })();
+            let _ = tx.send(WorkerResult::ManuscriptPdfExport {
+                path,
+                result: result.map_err(|error| format!("{error:#}")),
+            });
+        });
     }
 
     fn start_import_manuscript(&mut self) {

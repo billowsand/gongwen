@@ -4,8 +4,9 @@
 //! 导出按 `ManuscriptFilter` 过滤；导入由预览勾选 + 关键词过滤 + `skip_existing_by_id`
 //! 决定写哪些记录，满足“导入也支持过滤筛选”。
 
-use crate::manuscript::{ManuscriptFilter, ManuscriptStore, NewManuscript};
-use crate::models::{DraftInput, ManuscriptStatus, TemplateKind, VocabularyEntry};
+use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptStore, NewManuscript};
+use crate::models::{DraftInput, FontConfig, ManuscriptStatus, TemplateKind, VocabularyEntry};
+use crate::units::UnitDisplay;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,26 @@ pub struct VocabularyFile {
 pub struct ExportSummary {
     pub records: usize,
     pub pdfs: usize,
+}
+
+/// 稿件 PDF 批量导出的选项：盖章件直接取附件，非盖章件编译 TeX 生成。
+#[derive(Debug, Clone, Copy)]
+pub struct PdfExportOptions {
+    /// 导出盖章件：直接取自稿件附件里的 PDF。
+    pub stamped: bool,
+    /// 导出非盖章件：编译 TeX 生成 PDF。
+    pub compiled: bool,
+}
+
+/// 稿件 PDF 批量导出的汇总：成功数 + 逐篇失败原因（不阻断整批）。
+#[derive(Debug, Default)]
+pub struct PdfExportSummary {
+    /// 处理的稿件数。
+    pub records: usize,
+    /// 成功写入 zip 的 PDF 文件数。
+    pub pdfs: usize,
+    /// 未导出的稿件：`(标题, 原因)`。
+    pub failed: Vec<(String, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -213,6 +234,143 @@ fn export_zip_ids(
         records: manifest.records.len(),
         pdfs: total_pdfs,
     })
+}
+
+/// 把选中的稿件按选项导出为 PDF 集合，压缩进一个 zip。
+///
+/// - 盖章件（`stamped`）：直接取稿件附件里的 PDF；
+/// - 非盖章件（`compiled`）：在临时工作目录写 TeX 并调用本机 TeX 引擎编译。
+///
+/// 文件按稿件导出命名主干（不含分钟级时间戳）命名，盖章件在主干后追加
+/// `（盖章）`（同一稿件多个盖章附件依次 `（盖章2）`、`（盖章3）`…）。逐篇
+/// 失败不阻断整批，结果汇总到 `PdfExportSummary`；`progress` 用于回报进度。
+pub fn export_selected_pdfs(
+    store: &mut ManuscriptStore,
+    ids: &[i64],
+    options: &PdfExportOptions,
+    vocabulary: &[VocabularyEntry],
+    fonts: &FontConfig,
+    zip_path: &Path,
+    mut progress: impl FnMut(&str),
+) -> Result<PdfExportSummary> {
+    if ids.is_empty() {
+        bail!("没有选中要导出的稿件");
+    }
+    if !options.stamped && !options.compiled {
+        bail!("请至少选择盖章件或非盖章件");
+    }
+    // 先写临时文件，成功后再原子改名到目标路径：中途失败（磁盘满、DB 错误等）
+    // 不会留下损坏的 zip，也不会截断用户已有的旧压缩包。
+    let temp_path = zip_path.with_extension("tmp");
+    let result = (|| -> Result<PdfExportSummary> {
+        let file = File::create(&temp_path)
+            .with_context(|| format!("无法创建导出文件 {}", zip_path.display()))?;
+        let mut zip = ZipWriter::new(file);
+        // PDF 本身已压缩，用 Stored 避免二次压缩浪费时间（与整包导出一致）。
+        let stored_options =
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let mut used_names = std::collections::HashSet::new();
+        let mut summary = PdfExportSummary::default();
+        let display = UnitDisplay::new(vocabulary);
+        let (fonts, _warnings) = crate::system_fonts::resolve(fonts);
+        let total = ids.len();
+        for &id in ids {
+            summary.records += 1;
+            let Some(record) = store.get(id)? else {
+                summary
+                    .failed
+                    .push((format!("（稿件 id={id}）"), "记录不存在，已跳过".into()));
+                progress(&format!("已完成 {}/{} 篇", summary.records, total));
+                continue;
+            };
+            let title =
+                crate::export::extract_title(&record.content_markdown, &record.snapshot.title_hint);
+            let stem = crate::export::document_stem_prefix(&record.snapshot, &title);
+            let label = record.title.clone();
+            let missing_stamp = options.stamped && record.pdfs.is_empty();
+            let mut wrote = 0usize;
+            if options.stamped {
+                for (idx, pdf) in record.pdfs.iter().enumerate() {
+                    let name = if idx == 0 {
+                        format!("{stem}（盖章）")
+                    } else {
+                        format!("{stem}（盖章{}）", idx + 1)
+                    };
+                    let entry = unique_zip_name(&mut used_names, &name, "pdf");
+                    zip.start_file(entry, stored_options)?;
+                    zip.write_all(&pdf.bytes)?;
+                    wrote += 1;
+                }
+            }
+            if options.compiled {
+                match compile_record_pdf(&record, &display, &fonts, &stem) {
+                    Ok(pdf_bytes) => {
+                        let entry = unique_zip_name(&mut used_names, &stem, "pdf");
+                        zip.start_file(entry, stored_options)?;
+                        zip.write_all(&pdf_bytes)?;
+                        wrote += 1;
+                    }
+                    Err(error) => summary.failed.push((label.clone(), format!("{error:#}"))),
+                }
+            }
+            // 整篇一个 PDF 都没导出时才报「没有盖章附件」；若编译件成功，
+            // 该篇已部分导出，不误报为整篇失败。
+            if missing_stamp && wrote == 0 {
+                summary
+                    .failed
+                    .push((label, "没有盖章附件，已跳过盖章件".into()));
+            }
+            summary.pdfs += wrote;
+            progress(&format!("已完成 {}/{} 篇", summary.records, total));
+        }
+        let file = zip.finish()?;
+        drop(file);
+        std::fs::rename(&temp_path, zip_path)
+            .with_context(|| format!("无法写入导出文件 {}", zip_path.display()))?;
+        Ok(summary)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+/// 临时工作目录计数器：与进程号组合，避免同一毫秒内并发调用碰撞。
+static PDF_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 在临时工作目录编译单篇稿件，返回生成的 PDF 字节；目录用后即删。
+/// TeX 引擎未检测到时视为该篇失败（原因写入汇总，不阻断整批）。
+fn compile_record_pdf(
+    record: &ManuscriptRecord,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    stem: &str,
+) -> Result<Vec<u8>> {
+    let counter = PDF_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "gongwen_pdf_export_{}_{}_{}",
+        std::process::id(),
+        counter,
+        chrono::Local::now().timestamp_millis()
+    ));
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("无法创建临时工作目录 {}", dir.display()))?;
+    let result = (|| {
+        let tex_path = dir.join(format!("{stem}.tex"));
+        crate::export::write_tex(
+            &tex_path,
+            &record.snapshot,
+            &record.content_markdown,
+            display,
+            fonts,
+        )?;
+        let pdf_path = crate::texcompile::compile_pdf_if_available(&tex_path, fonts)?
+            .context("未检测到 TeX 引擎，无法编译非盖章件 PDF")?;
+        std::fs::read(&pdf_path).with_context(|| format!("无法读取编译产物 {}", pdf_path.display()))
+    })();
+    // 清理临时目录；清理失败不掩盖编译结果。
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// 从清单记录中收集 markdown 引用的图片，返回 zip 条目（`images/<文件名>`）与字节。
@@ -379,6 +537,24 @@ fn sanitize_entry_name(name: &str) -> String {
     out
 }
 
+/// 为 zip 内条目名去重：不同稿件可能生成相同主干（同名同文号），zip 不允许
+/// 重名条目，同名时在扩展名前追加 `(2)`、`(3)`…，与目录导出的 `-2` 编号区分。
+/// `used` 记录已占用的条目名，返回唯一可用的 `{stem}.{ext}`。
+fn unique_zip_name(used: &mut std::collections::HashSet<String>, stem: &str, ext: &str) -> String {
+    let base = format!("{stem}.{ext}");
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut index = 2u64;
+    loop {
+        let candidate = format!("{stem}({index}).{ext}");
+        index += 1;
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+}
+
 /// 从 zip 恢复 `images/` 条目到目标目录。条目名经过净化，防止篡改的 zip
 /// 用路径穿越覆盖任意文件；返回恢复的文件数。
 fn restore_images(archive: &mut ZipArchive<File>, target: &Path) -> Result<usize> {
@@ -474,6 +650,189 @@ mod tests {
         store.set_status(id, ManuscriptStatus::Published).unwrap();
         store.set_status(id, ManuscriptStatus::Archived).unwrap();
         id
+    }
+
+    /// 导出命名主干：与实现同源，但用于断言组装逻辑（盖章后缀、序号、去重、无时间戳）。
+    fn expected_stem(record: &ManuscriptRecord) -> String {
+        crate::export::document_stem_prefix(
+            &record.snapshot,
+            &crate::export::extract_title(&record.content_markdown, &record.snapshot.title_hint),
+        )
+    }
+
+    fn zip_names(zip_path: &Path) -> Vec<String> {
+        let file = File::open(zip_path).unwrap();
+        let mut names = ZipArchive::new(file)
+            .unwrap()
+            .file_names()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn read_zip_entry(zip_path: &Path, name: &str) -> String {
+        let file = File::open(zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name(name).unwrap();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        text
+    }
+
+    #[test]
+    fn export_selected_pdfs_stamped_only_naming() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("pdf.zip");
+        let mut store = mem_store();
+        let id = seed(&mut store);
+        let options = PdfExportOptions {
+            stamped: true,
+            compiled: false,
+        };
+        let summary = export_selected_pdfs(
+            &mut store,
+            &[id],
+            &options,
+            &sample_vocabulary(),
+            &FontConfig::default(),
+            &zip_path,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(summary.records, 1);
+        assert_eq!(summary.pdfs, 2);
+        assert!(summary.failed.is_empty());
+
+        let stem = expected_stem(&store.get(id).unwrap().unwrap());
+        // 盖章件命名：主干 +（盖章）；多个附件依次（盖章2）…；不含分钟级时间戳。
+        let names = zip_names(&zip_path);
+        assert_eq!(names.len(), 2);
+        let first = format!("{stem}（盖章）.pdf");
+        let second = format!("{stem}（盖章2）.pdf");
+        assert!(
+            names.contains(&first) && names.contains(&second),
+            "盖章件命名应为 {first} 与 {second}，实际：{names:?}"
+        );
+        let timestamp = chrono::Local::now().format("%Y%m%d%H%M").to_string();
+        for name in &names {
+            assert!(
+                !name.contains(&format!("-{timestamp}")),
+                "导出文件名不应带时间戳：{name}"
+            );
+        }
+        // 附件字节原样写入，按添加顺序对应。
+        assert_eq!(
+            read_zip_entry(&zip_path, &format!("{stem}（盖章）.pdf")),
+            "%PDF-1.4 first"
+        );
+        assert_eq!(
+            read_zip_entry(&zip_path, &format!("{stem}（盖章2）.pdf")),
+            "%PDF-1.4 second"
+        );
+    }
+
+    #[test]
+    fn export_selected_pdfs_duplicate_stems_are_numbered() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("dup.zip");
+        let mut store = mem_store();
+        let id1 = seed(&mut store);
+        // 第二篇与第一篇同标题、同文号，导出主干相同，条目名必须去重。
+        let id2 = store
+            .create(
+                &NewManuscript {
+                    snapshot: sample_snapshot(TemplateKind::OfficialLetter),
+                    content_markdown: "# 关于报送情况的通知\n\n另一篇正文".into(),
+                    notes: String::new(),
+                    status: ManuscriptStatus::Draft,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        store.add_pdf(id2, "盖章2.pdf", b"%PDF-1.4 dup").unwrap();
+        let options = PdfExportOptions {
+            stamped: true,
+            compiled: false,
+        };
+        let summary = export_selected_pdfs(
+            &mut store,
+            &[id1, id2],
+            &options,
+            &sample_vocabulary(),
+            &FontConfig::default(),
+            &zip_path,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(summary.records, 2);
+        assert_eq!(summary.pdfs, 3);
+
+        let names = zip_names(&zip_path);
+        assert_eq!(names.len(), 3);
+        let unique = names.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 3, "zip 条目名必须互不相同：{names:?}");
+        assert!(
+            names.iter().any(|name| name.contains("(2)")),
+            "重名条目应追加 (2) 编号：{names:?}"
+        );
+    }
+
+    #[test]
+    fn export_selected_pdfs_no_options_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("none.zip");
+        let mut store = mem_store();
+        let id = seed(&mut store);
+        let options = PdfExportOptions {
+            stamped: false,
+            compiled: false,
+        };
+        let error = export_selected_pdfs(
+            &mut store,
+            &[id],
+            &options,
+            &sample_vocabulary(),
+            &FontConfig::default(),
+            &zip_path,
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("至少选择"), "{error:#}");
+    }
+
+    #[test]
+    fn export_selected_pdfs_compiled_without_engine_fails_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("compiled.zip");
+        let mut store = mem_store();
+        let id = seed(&mut store);
+        let options = PdfExportOptions {
+            stamped: false,
+            compiled: true,
+        };
+        let summary = export_selected_pdfs(
+            &mut store,
+            &[id],
+            &options,
+            &sample_vocabulary(),
+            &FontConfig::default(),
+            &zip_path,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(summary.records, 1);
+        // 本机有 TeX 引擎则编译成功；没有则记入失败——两种情况都不应 panic，zip 均可读。
+        assert!(
+            summary.pdfs == 1 || !summary.failed.is_empty(),
+            "有引擎应产出 PDF，无引擎应记入失败：{summary:?}"
+        );
+        if let Some((_, reason)) = summary.failed.first() {
+            assert!(reason.contains("TeX"), "失败原因应说明编译问题：{reason}");
+        }
+        let names = zip_names(&zip_path);
+        assert!(names.len() <= 1);
     }
 
     #[test]

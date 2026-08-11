@@ -2,6 +2,7 @@ mod docx;
 mod latex;
 pub(crate) mod table;
 mod title;
+pub(crate) use latex::write_tex;
 
 use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
 use crate::units::UnitDisplay;
