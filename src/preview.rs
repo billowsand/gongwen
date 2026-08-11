@@ -13,7 +13,7 @@
 //! 点一下就能把编辑器的光标带过去，改稿时不必在两栏之间人工找位置。
 
 use crate::{
-    export::{self, LocatedBlock, MarkdownBlock, MarkdownSection},
+    export::{self, LocatedBlock, MarkdownBlock, MarkdownSection, table::ColumnAlignment},
     images,
     models::{DraftInput, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind, split_units},
     theme,
@@ -293,8 +293,13 @@ fn is_renderable_paragraph(text: &str) -> bool {
 
 /// 表格：四号字、行距 21 磅，表头黑体居中，列宽直接取导出器算好的智能列宽，
 /// 因此预览的列宽与导出的 Word 表格一致。
-fn table_block(ui: &mut egui::Ui, metrics: &Metrics, rows: &[Vec<String>]) {
-    let columns = export::table_columns(rows);
+fn table_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    rows: &[Vec<String>],
+    aligns: &[export::ColumnAlign],
+) {
+    let columns = export::table_columns(rows, aligns);
     if columns.is_empty() {
         return;
     }
@@ -324,11 +329,19 @@ fn table_block(ui: &mut egui::Ui, metrics: &Metrics, rows: &[Vec<String>]) {
                 let text = export::plain_text(row.get(column).map_or("", String::as_str));
                 let mut job = job((width - 2.0 * padding).max(1.0));
                 // 表头一律居中；正文列按导出器判定的对齐方式。
-                let centered = header || columns[column].centered;
-                job.halign = if centered { Align::Center } else { Align::LEFT };
+                let align = if header {
+                    ColumnAlignment::Center
+                } else {
+                    columns[column].alignment
+                };
+                job.halign = match align {
+                    ColumnAlignment::Center => Align::Center,
+                    ColumnAlignment::Right => Align::RIGHT,
+                    ColumnAlignment::Left => Align::LEFT,
+                };
                 job.append(&text, 0.0, text_format(font.clone(), line));
                 let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
-                (galley, padding, centered)
+                (galley, padding, align)
             })
             .collect::<Vec<_>>();
         let height = cells
@@ -341,7 +354,7 @@ fn table_block(ui: &mut egui::Ui, metrics: &Metrics, rows: &[Vec<String>]) {
         let painter = ui.painter();
         painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
         let mut x = rect.left();
-        for (column, (galley, padding, centered)) in cells.iter().enumerate() {
+        for (column, (galley, padding, align)) in cells.iter().enumerate() {
             if column > 0 {
                 painter.line_segment(
                     [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
@@ -349,10 +362,10 @@ fn table_block(ui: &mut egui::Ui, metrics: &Metrics, rows: &[Vec<String>]) {
                 );
             }
             // halign 决定每行相对锚点的位置：居中时锚点取单元格中线，靠左时取内边距。
-            let anchor = if *centered {
-                x + widths[column] / 2.0
-            } else {
-                x + padding
+            let anchor = match align {
+                ColumnAlignment::Center => x + widths[column] / 2.0,
+                ColumnAlignment::Right => x + widths[column] - padding,
+                ColumnAlignment::Left => x + padding,
             };
             let top = rect.top() + (height - galley.size().y) / 2.0;
             painter.galley(egui::pos2(anchor, top), galley.clone(), Color32::BLACK);
@@ -1340,7 +1353,7 @@ fn content_block(
                 });
             });
         }
-        MarkdownBlock::Table(rows) => table_block(ui, metrics, rows),
+        MarkdownBlock::Table { rows, aligns } => table_block(ui, metrics, rows, aligns),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
         MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
         MarkdownBlock::Paragraph(_) => {}

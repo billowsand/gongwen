@@ -15,13 +15,14 @@ use crate::{
     diff,
     diff_view::{self, DiffViewAction, DiffViewConfig, DiffViewState},
     doc_import, export,
+    export::ColumnAlign,
     highlight::MarkdownHighlighter,
     images, lmstudio, manuscript,
     manuscript::ManuscriptStore,
     models::{
-        AppConfig, CorrespondenceScope, DraftInput, GeneratedDraft, JointIssuanceMode,
-        LetterVersion, ManuscriptStatus, SecurityLevel, StyleMode, TemplateKind,
-        VocabularyCategory, split_units,
+        AppConfig, CorrespondenceScope, DraftInput, ExportSelection, GeneratedDraft,
+        JointIssuanceMode, LetterVersion, ManuscriptStatus, RibbonTab, SecurityLevel, StyleMode,
+        TemplateKind, VocabularyCategory, split_units,
     },
     preview, prompt, rag, storage, theme, units,
     units::UnitDisplay,
@@ -37,7 +38,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// 工具栏上仿 WinEdt 的三个成品入口。
+/// 功能区「输出」分区里仿 WinEdt 的三个成品入口。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExportKind {
     Tex,
@@ -74,7 +75,7 @@ impl ExportKind {
     }
 }
 
-/// 导出目录里当前文稿最近一次产出的 tex/pdf/docx，供工具栏那三枚入口点亮与打开。
+/// 导出目录里当前文稿最近一次产出的 tex/pdf/docx，供「输出」分区那三枚入口点亮与打开。
 ///
 /// 导出的落盘结构是 `输出目录/<文件名主干>/<文件名主干>.{md,docx,tex,pdf}`，
 /// 一次导出一个子目录；同一文稿多次导出会按分钟时间戳攒出多个子目录，也会和
@@ -95,7 +96,7 @@ pub(crate) struct ExportLinks {
 
 impl ExportLinks {
     const TTL: Duration = Duration::from_secs(3);
-    /// 导出目录会随时间攒下很多子目录，只翻最近的这些，免得工具栏拖慢整帧。
+    /// 导出目录会随时间攒下很多子目录，只翻最近的这些，免得功能区拖慢整帧。
     const MAX_DIRS: usize = 24;
 
     pub(crate) fn invalidate(&mut self) {
@@ -210,7 +211,7 @@ impl ExportLinks {
     }
 }
 
-/// 工具栏控件统一高度：按钮、下拉框、状态标签共用一个交互高度，
+/// 功能区控件统一高度：按钮、下拉框、状态标签共用一个交互高度，
 /// 免得较高的控件把整行基线撑歪。
 pub(crate) const TOOLBAR_CONTROL_HEIGHT: f32 = 28.0;
 
@@ -225,7 +226,7 @@ const OFFICIAL_BODY_SIZE: f32 = 16.0 * SCREEN_PT;
 /// 实时排版模式固定用这个换行宽度，不随窗口拉宽而改变每行字数。
 const OFFICIAL_EDITOR_CONTENT_WIDTH: f32 = (595.28 - 79.35 - 73.70) * SCREEN_PT;
 
-/// 工具栏分组之间的竖线。
+/// 功能区分组之间的竖线。
 pub(crate) fn toolbar_separator(ui: &mut egui::Ui) {
     ui.add_sized(
         [8.0, TOOLBAR_CONTROL_HEIGHT],
@@ -258,7 +259,7 @@ pub(crate) struct DraftSession {
     pub(crate) form_collapsed: bool,
     /// 审校区当前的显示方式。
     pub(crate) preview_mode: PreviewMode,
-    /// 审校提示的按需右侧抽屉。导出成品不进抽屉，走工具栏的三枚格式入口。
+    /// 审校提示的按需右侧抽屉。导出成品不进抽屉，走「输出」分区的三枚格式入口。
     pub(crate) result_drawer_open: bool,
     /// 公文预览的缩放倍率；None 表示按面板宽度自适应。
     pub(crate) preview_zoom: Option<f32>,
@@ -274,8 +275,8 @@ pub(crate) struct DraftSession {
     pub(crate) pending_render_jump: bool,
     /// 审校区查找/替换条的状态。
     pub(crate) markdown_find: MarkdownFindState,
-    /// 审校区的特殊标记符号栏是否显示（可隐藏，用于快速插入正文/附件等区段标记）。
-    pub(crate) mark_toolbar_visible: bool,
+    /// 「插入 → 表格」里手填的行列数，记住上一次填的值。行数含表头。
+    pub(crate) table_size: (usize, usize),
     /// 审校区的语法高亮缓存。
     pub(crate) highlighter: MarkdownHighlighter,
     /// 本篇正在跑生成/优化/导出。任务按篇计数，切到别的稿件照常编辑。
@@ -396,7 +397,7 @@ impl DraftSession {
             pending_source_selection: None,
             pending_render_jump: false,
             markdown_find: MarkdownFindState::default(),
-            mark_toolbar_visible: true,
+            table_size: (3, 3),
             highlighter: MarkdownHighlighter::default(),
             busy: false,
             job_seq: 0,
@@ -757,6 +758,428 @@ fn table_column_count(line: &str) -> usize {
         .split('|')
         .count()
         .max(1)
+}
+
+// ── 功能区的文本操作 ────────────────────────────────────────────────────────
+// 下面这一组都是纯字符串函数：功能区的按钮只负责取光标位置、调用它们、把结果
+// 写回审校稿。逻辑不碰 egui，所以能单独测。
+
+/// 每一行在源码中的字节范围，不含行尾的换行符。空文本也返回一行，
+/// 免得调用方到处判空。
+fn line_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for piece in text.split_inclusive('\n') {
+        let line = piece.strip_suffix('\n').unwrap_or(piece);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        ranges.push(start..start + line.len());
+        start += piece.len();
+    }
+    // 文本以换行结尾时，`split_inclusive` 不会再给出末尾那个空行；光标停在
+    // 那里同样要有行可落，所以补一行。
+    if text.ends_with('\n') || ranges.is_empty() {
+        ranges.push(text.len()..text.len());
+    }
+    ranges
+}
+
+/// 给定字节位置落在第几行。越界时归到最后一行。
+fn line_at_byte(ranges: &[Range<usize>], byte: usize) -> usize {
+    ranges
+        .iter()
+        .position(|range| byte <= range.end)
+        .unwrap_or(ranges.len() - 1)
+}
+
+/// 单元格在等宽显示下占几格：ASCII 一格，中日韩字符两格。只用于把源码里的
+/// 竖线对齐，不影响导出后的列宽。
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+        .sum()
+}
+
+/// 拆一行表格：去掉首尾竖线后按竖线切开，每格去空白。
+fn split_row(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
+}
+
+/// 光标所在的那张 GFM 表格：解析出的单元格、列对齐，以及它在源码里的位置。
+pub(crate) struct TableEdit {
+    /// 表头也在内，但不含分隔行。
+    rows: Vec<Vec<String>>,
+    aligns: Vec<ColumnAlign>,
+    /// 整张表在源码中的字节范围（表头行首到最后一行数据的行尾）。
+    span: Range<usize>,
+    /// 光标所在的行在 `rows` 中的下标（落在分隔行上时算表头）与列下标。
+    row: usize,
+    column: usize,
+}
+
+impl TableEdit {
+    fn columns(&self) -> usize {
+        self.aligns.len()
+    }
+}
+
+/// 光标落在表格里就把它解析出来；不在表格里、或那几行不是合法的 GFM 表格
+/// （表头之后必须紧跟分隔行）时返回 None。
+fn table_at(text: &str, cursor: usize) -> Option<TableEdit> {
+    let ranges = line_ranges(text);
+    let lines = ranges
+        .iter()
+        .map(|range| &text[range.clone()])
+        .collect::<Vec<_>>();
+    let at = line_at_byte(&ranges, cursor);
+    if !is_table_source_line(lines[at]) {
+        return None;
+    }
+    let mut first = at;
+    while first > 0 && is_table_source_line(lines[first - 1]) {
+        first -= 1;
+    }
+    let mut last = at;
+    while last + 1 < lines.len() && is_table_source_line(lines[last + 1]) {
+        last += 1;
+    }
+    if last <= first || !is_table_separator_line(lines[first + 1]) {
+        return None;
+    }
+    let mut aligns = split_row(lines[first + 1])
+        .iter()
+        .map(|cell| ColumnAlign::parse(cell))
+        .collect::<Vec<_>>();
+    let columns = aligns.len().max(split_row(lines[first]).len()).max(1);
+    aligns.resize(columns, ColumnAlign::Auto);
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    // 每个源码行对应 `rows` 里的哪一行；分隔行算在表头上。
+    let mut row_of_line: Vec<usize> = Vec::new();
+    for (offset, line) in lines[first..=last].iter().enumerate() {
+        if offset == 1 {
+            row_of_line.push(0);
+            continue;
+        }
+        let mut cells = split_row(line);
+        cells.resize(columns, String::new());
+        row_of_line.push(rows.len());
+        rows.push(cells);
+    }
+    // 列：数一数光标之前有几根竖线。行首那根不算一列的开始。
+    let line_start = ranges[at].start;
+    let mut cut = cursor.clamp(line_start, ranges[at].end);
+    while cut > line_start && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let before = &text[line_start..cut];
+    let column = before
+        .matches('|')
+        .count()
+        .saturating_sub(1)
+        .min(columns - 1);
+    Some(TableEdit {
+        rows,
+        aligns,
+        span: ranges[first].start..ranges[last].end,
+        row: row_of_line[at - first],
+        column,
+    })
+}
+
+/// 把单元格重排成对齐好的 Markdown。列宽取该列最宽的一格，最少三格
+/// （分隔行要放得下 `:-:`）。
+fn render_table(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> String {
+    let widths = aligns
+        .iter()
+        .enumerate()
+        .map(|(column, align)| {
+            rows.iter()
+                .map(|row| row.get(column).map_or(0, |cell| display_width(cell)))
+                .max()
+                .unwrap_or(0)
+                // 列宽还要放得下这一列的分隔行：写了冒号的列去掉冒号后仍需三条短横，
+                // 否则整张表在解析时就不成表了。
+                .max(align.min_width())
+        })
+        .collect::<Vec<_>>();
+    let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
+    for (index, row) in rows.iter().enumerate() {
+        let mut line = String::new();
+        for (column, width) in widths.iter().copied().enumerate() {
+            let cell = row.get(column).map_or("", String::as_str);
+            line.push_str("| ");
+            line.push_str(cell);
+            line.push_str(&" ".repeat(width.saturating_sub(display_width(cell))));
+            line.push(' ');
+        }
+        line.push('|');
+        lines.push(line);
+        if index == 0 {
+            let mut separator = String::new();
+            for (column, width) in widths.iter().copied().enumerate() {
+                separator.push_str("| ");
+                separator.push_str(&aligns[column].render(width));
+                separator.push(' ');
+            }
+            separator.push('|');
+            lines.push(separator);
+        }
+    }
+    lines.join("\n")
+}
+
+/// 空白的 `rows` 行 `columns` 列表格，行数含表头。
+///
+/// 最少两列：GFM 的表格判定要求分隔行至少切出两格，一列的「表格」谁都不认，
+/// 导出时会退化成普通段落。
+fn blank_table(rows: usize, columns: usize) -> String {
+    let columns = columns.max(2);
+    let cells = vec![vec![String::new(); columns]; rows.max(1)];
+    render_table(&cells, &vec![ColumnAlign::Auto; columns])
+}
+
+/// 把某一行改成指定层级的标题；`level` 为 0 表示降回正文。
+fn set_heading(line: &str, level: u8) -> String {
+    let body = line.trim_start().trim_start_matches('#').trim_start();
+    if level == 0 {
+        body.to_string()
+    } else {
+        format!("{} {body}", "#".repeat(level as usize))
+    }
+}
+
+/// 项目符号开关：已经是 `- ` / `* ` 开头就去掉，否则加上。
+fn toggle_bullet(line: &str) -> String {
+    let body = line.trim_start();
+    match body.strip_prefix("- ").or_else(|| body.strip_prefix("* ")) {
+        Some(rest) => rest.to_string(),
+        None if body.is_empty() => body.to_string(),
+        None => format!("- {body}"),
+    }
+}
+
+/// 把选区覆盖到的每一行都过一遍 `edit`，返回改过之后的全文与新的选区。
+/// 选区落在行中间也按整行处理——标题层级、项目符号本来就是整行的事。
+fn map_lines(
+    text: &str,
+    range: &Range<usize>,
+    edit: impl Fn(&str) -> String,
+) -> (String, Range<usize>) {
+    let ranges = line_ranges(text);
+    let first = line_at_byte(&ranges, range.start);
+    let last = line_at_byte(&ranges, range.end.max(range.start));
+    let span = ranges[first].start..ranges[last].end;
+    let replaced = text[span.clone()]
+        .split('\n')
+        .map(&edit)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = text.to_string();
+    out.replace_range(span.clone(), &replaced);
+    let end = span.start + replaced.len();
+    (out, span.start..end)
+}
+
+/// 给选区加粗；选区自身或紧挨着的两侧已经带 `**` 就去掉标记。
+/// 返回新正文与新选区。空选区会插入一对空标记，光标落在中间。
+fn toggle_bold(text: &str, range: &Range<usize>) -> (String, Range<usize>) {
+    let selected = &text[range.clone()];
+    let mut out = text.to_string();
+    if selected.len() >= 4 && selected.starts_with("**") && selected.ends_with("**") {
+        let inner = selected[2..selected.len() - 2].to_string();
+        out.replace_range(range.clone(), &inner);
+        let end = range.start + inner.len();
+        return (out, range.start..end);
+    }
+    if range.start >= 2
+        && text.get(range.start - 2..range.start) == Some("**")
+        && text.get(range.end..range.end + 2) == Some("**")
+    {
+        // 先删后面那对，前面的字节位置才不会跟着移动。
+        out.replace_range(range.end..range.end + 2, "");
+        out.replace_range(range.start - 2..range.start, "");
+        return (out, range.start - 2..range.end - 2);
+    }
+    out.replace_range(range.clone(), &format!("**{selected}**"));
+    (out, range.start + 2..range.end + 2)
+}
+
+/// 连续空行压成一行，行尾空格去掉，文末只留一个换行。
+fn tidy_blank_lines(text: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut previous_blank = false;
+    for line in text.split('\n') {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            if previous_blank {
+                continue;
+            }
+            previous_blank = true;
+        } else {
+            previous_blank = false;
+        }
+        lines.push(trimmed.to_string());
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let mut joined = lines.join("\n");
+    if !joined.is_empty() {
+        joined.push('\n');
+    }
+    joined
+}
+
+/// 正文字数与段落数。按导出器的分块统计：Markdown 标记、表格竖线、图片引用
+/// 与区段标记都不计入，所以数出来的是「排到纸上有多少字」。
+fn body_stats(markdown: &str) -> (usize, usize) {
+    let mut characters = 0usize;
+    let mut paragraphs = 0usize;
+    for block in export::parse_markdown(markdown) {
+        let text = match &block {
+            export::MarkdownBlock::Title(text) | export::MarkdownBlock::Heading(_, text) => {
+                text.clone()
+            }
+            export::MarkdownBlock::ListItem(text) => text.trim_start_matches('•').to_string(),
+            export::MarkdownBlock::Paragraph(text) => {
+                paragraphs += 1;
+                text.clone()
+            }
+            export::MarkdownBlock::Table { rows, .. } => rows
+                .iter()
+                .flat_map(|row| row.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(""),
+            export::MarkdownBlock::Image { .. }
+            | export::MarkdownBlock::Marker(_)
+            | export::MarkdownBlock::Html(_) => continue,
+        };
+        characters += export::plain_text(&text)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .count();
+    }
+    (characters, paragraphs)
+}
+
+/// 今天的中文数字日期，即公文成文日期的写法：二〇二五年八月十一日。
+fn chinese_today() -> String {
+    const DIGITS: [char; 10] = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+    let now = chrono::Local::now();
+    let year = now
+        .format("%Y")
+        .to_string()
+        .chars()
+        .filter_map(|ch| ch.to_digit(10))
+        .map(|digit| DIGITS[digit as usize])
+        .collect::<String>();
+    let month = now.format("%m").to_string().parse::<usize>().unwrap_or(1);
+    let day = now.format("%d").to_string().parse::<usize>().unwrap_or(1);
+    format!(
+        "{year}年{}月{}日",
+        export::number_to_chinese(month),
+        export::number_to_chinese(day)
+    )
+}
+
+/// 编辑框记着的光标位置（字节）。这里**不看焦点**：点功能区按钮时焦点已经被
+/// 按钮抢走了，但用户的意思显然是「对我刚才编辑的地方动手」，所以认 TextEdit
+/// 自己存着的那个光标。从没点进过编辑框时返回 None，调用方按文末处理。
+fn editor_cursor(ctx: &egui::Context, text: &str) -> Option<usize> {
+    let range = egui::TextEdit::load_state(ctx, editor_id())?
+        .cursor
+        .char_range()?;
+    Some(byte_at_char(text, range.primary.index.0))
+}
+
+/// 编辑框当前的选区（字节范围）。没有选区时首尾相同。
+fn editor_selection(ctx: &egui::Context, text: &str) -> Option<Range<usize>> {
+    let range = egui::TextEdit::load_state(ctx, editor_id())?
+        .cursor
+        .char_range()?;
+    let primary = byte_at_char(text, range.primary.index.0);
+    let secondary = byte_at_char(text, range.secondary.index.0);
+    Some(primary.min(secondary)..primary.max(secondary))
+}
+
+/// 字符下标换算成字节位置；越界时取文末。
+fn byte_at_char(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(byte, _)| byte)
+}
+
+/// 「插入」分区里对光标所在表格的编辑动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TableOp {
+    InsertRowAbove,
+    InsertRowBelow,
+    DeleteRow,
+    InsertColumnLeft,
+    InsertColumnRight,
+    DeleteColumn,
+    Align(ColumnAlign),
+}
+
+/// 「表格」下拉里的网格选择器：8×8 的小方格，鼠标划到哪就亮到哪，
+/// 点一下插入对应大小的表格。返回 `(行数, 列数)`，行数含表头。
+fn table_grid_picker(ui: &mut egui::Ui) -> Option<(usize, usize)> {
+    const MAX_ROWS: usize = 8;
+    const MAX_COLUMNS: usize = 8;
+    const CELL: f32 = 18.0;
+    const GAP: f32 = 3.0;
+
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(
+            MAX_COLUMNS as f32 * (CELL + GAP),
+            MAX_ROWS as f32 * (CELL + GAP),
+        ),
+        egui::Sense::click(),
+    );
+    let pointer = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos());
+    let picked = pointer.map(|pos| {
+        let column = (((pos.x - rect.left()) / (CELL + GAP)) as usize).min(MAX_COLUMNS - 1);
+        let row = (((pos.y - rect.top()) / (CELL + GAP)) as usize).min(MAX_ROWS - 1);
+        // 一列的表格不成表（见 `blank_table`），所以最少亮两列。
+        (row + 1, (column + 1).max(2))
+    });
+    {
+        let painter = ui.painter();
+        for row in 0..MAX_ROWS {
+            for column in 0..MAX_COLUMNS {
+                let cell = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(column as f32 * (CELL + GAP), row as f32 * (CELL + GAP)),
+                    egui::vec2(CELL, CELL),
+                );
+                let lit = picked.is_some_and(|(rows, columns)| row < rows && column < columns);
+                painter.rect(
+                    cell,
+                    egui::CornerRadius::same(2),
+                    if lit {
+                        theme::accent_soft()
+                    } else {
+                        theme::surface_sunk()
+                    },
+                    egui::Stroke::new(1.0, if lit { accent() } else { theme::border() }),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+    }
+    ui.label(
+        egui::RichText::new(match picked {
+            Some((rows, columns)) => format!("{rows} 行 × {columns} 列（首行为表头）"),
+            None => "在网格上划出表格大小".to_string(),
+        })
+        .color(theme::text_muted()),
+    );
+    response.clicked().then_some(picked).flatten()
 }
 
 /// 实时排版中不写入 Markdown 的视觉层：公文自动编号和表格框线。
@@ -1212,6 +1635,12 @@ impl DraftPage<'_> {
 
     /// 以右侧编辑框的当前内容为准导出，可以反复调用；这是“改稿—导出”的闭环出口。
     pub(crate) fn start_export_current(&mut self) {
+        self.start_export_with(self.config.export.clone());
+    }
+
+    /// 按给定格式导出。「输出」分区里的「仅 Word」等入口用它临时只出一种格式，
+    /// 不动设置页里勾好的常用格式。
+    pub(crate) fn start_export_with(&mut self, selection: ExportSelection) {
         if self.doc.busy {
             return;
         }
@@ -1219,7 +1648,7 @@ impl DraftPage<'_> {
             *self.status = "还没有可导出的内容：请先生成草稿，或直接在右侧粘贴稿件。".into();
             return;
         }
-        if !self.config.export.any() {
+        if !selection.any() {
             *self.status = "请至少勾选一种导出格式。".into();
             return;
         }
@@ -1229,7 +1658,6 @@ impl DraftPage<'_> {
         self.doc.export_error = None;
         let input = self.doc.draft.clone();
         let output_dir = PathBuf::from(&self.config.output_dir);
-        let selection = self.config.export.clone();
         let markdown = self.doc.generated_markdown.clone();
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
@@ -1483,7 +1911,7 @@ impl DraftPage<'_> {
     pub(crate) fn create_ui(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("draft_toolbar")
             .frame(theme::panel(theme::surface(), 10))
-            .show(ui, |ui| self.toolbar(ui));
+            .show(ui, |ui| self.ribbon(ui));
         // 两个右侧抽屉的展开/收起交给 egui 自己的 `show_collapsible`：它把面板整体
         // 滑出/滑入窗口边缘（内部按完整宽度排版，再平移出界），而不是把宽度压到
         // 几个像素——后者会让抽屉里的 TextEdit 与 ScrollArea 在动画那十几帧里按
@@ -1606,7 +2034,7 @@ impl DraftPage<'_> {
         };
         let versions = self.draft_version_rows();
         if versions.is_empty() {
-            ui.weak("还没有提交过版本。点工具栏的“提交版本”固化当前内容。");
+            ui.weak("还没有提交过版本。点标题栏的“提交版本”固化当前内容。");
             return;
         }
         let current = self.current_version_target();
@@ -1669,225 +2097,110 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 标签栏下方的统一工具栏。这一条把原来分散在底部操作栏和审校稿标题栏里的
-    /// 按钮全部收拢：左起是要素开关、视图切换、编辑动作、AI、存稿与版本、导出，
-    /// 末尾是审校结果状态。宽度不够时整体折行——右对齐一挤就重叠，不用。
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        let has_draft = !self.doc.generated_markdown.trim().is_empty();
-        let saved = self.doc.manuscript_id.is_some();
-        // 只读稿件（已发布、已归档）不能改内容，但照常预览、导出、看版本。
-        let editable = !self.doc.read_only();
+    /// 起草页功能区：第一行是分区卡与常驻入口，第二行是当前分区的按钮。
+    ///
+    /// 仿 Word 的分区卡，把过去挤在一条里的二十来个入口按用途分成六区，腾出的
+    /// 位置留给插入表格、标题层级这类更细的操作。分区卡与折叠状态记在配置里，
+    /// 换稿件不重置——切分区是「现在要干哪一类活」，换篇稿子通常还在干同一类。
+    fn ribbon(&mut self, ui: &mut egui::Ui) {
+        self.ribbon_tabs(ui);
+        if self.config.ribbon_collapsed {
+            return;
+        }
+        ui.add_space(4.0);
         ui.scope(|ui| {
             ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.horizontal_wrapped(|ui| {
-                // 一、公文要素填报的开关
-                let tip = if self.doc.form_collapsed {
-                    "展开公文要素填报区"
-                } else {
-                    "收起公文要素填报区"
-                };
-                let icon = if self.doc.form_collapsed {
+            // 窗口窄下来时横向滚动，而不是折行：折行会把编辑区一路挤矮，
+            // 而功能区的高度应当始终是固定的两行。
+            egui::ScrollArea::horizontal()
+                .id_salt("ribbon_items")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| match self.config.ribbon_tab {
+                        RibbonTab::Home => self.ribbon_home(ui),
+                        RibbonTab::Insert => self.ribbon_insert(ui),
+                        RibbonTab::Format => self.ribbon_format(ui),
+                        RibbonTab::Review => self.ribbon_review(ui),
+                        RibbonTab::View => self.ribbon_view(ui),
+                        RibbonTab::Output => self.ribbon_output(ui),
+                    });
+                });
+        });
+    }
+
+    /// 分区卡那一行。左端常驻公文要素填报区的开关，右端常驻五个视图模式和
+    /// 收起功能区的箭头——这三样都不属于任何一个分区，切分区卡时必须一直在。
+    fn ribbon_tabs(&mut self, ui: &mut egui::Ui) {
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = 26.0;
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                let collapsed = self.doc.form_collapsed;
+                let icon = if collapsed {
                     theme::Icon::PanelOpen
                 } else {
                     theme::Icon::PanelClose
                 };
-                if theme::nav_button(ui, !self.doc.form_collapsed, icon, "公文要素")
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    self.doc.form_collapsed = !self.doc.form_collapsed;
-                }
-                toolbar_separator(ui);
-
-                // 二、稿件本身的编辑动作
-                if theme::icon_button(ui, theme::Icon::SearchClear, "查找和替换（Ctrl+F）")
-                    .clicked()
-                {
-                    self.doc.markdown_find.open = true;
-                    self.doc.markdown_find.focus_query = true;
-                }
-                if theme::nav_button(
-                    ui,
-                    self.doc.mark_toolbar_visible,
-                    theme::Icon::BookmarkCheck,
-                    "标记",
-                )
-                .on_hover_text(
-                    "显示/隐藏审校区的特殊标记符号栏（快速插入正文标记、附件标记）",
-                )
-                .clicked()
-                {
-                    self.doc.mark_toolbar_visible = !self.doc.mark_toolbar_visible;
-                }
-                if theme::icon_button_enabled(ui, editable, theme::Icon::FileUp, "导入文档")
-                    .on_hover_text(
-                        "从已有的 Word / Excel / PPT / ODF / RTF / EPUB / CSV 文件提取内容，\
-                         转成 Markdown 插到光标处",
-                    )
-                    .clicked()
-                {
-                    self.import_document(ui);
-                }
-                if theme::icon_button_enabled(ui, editable, theme::Icon::Paperclip, "插入图片")
-                    .on_hover_text(
-                        "选择图片（PNG / JPG / WebP / BMP / GIF）或 PDF 文件，复制入库后\
-                         按 markdown 图片语法插到光标处，预览按页面宽度排版",
-                    )
-                    .clicked()
-                {
-                    self.insert_images(ui);
-                }
-                if theme::icon_button_enabled(ui, has_draft, theme::Icon::Copy, "复制全文")
-                    .clicked()
-                {
-                    ui.ctx().copy_text(self.doc.generated_markdown.clone());
-                    *self.status = "审校稿已复制到剪贴板。".into();
-                }
-                if theme::danger_icon_button_enabled(
-                    ui,
-                    has_draft && editable,
-                    theme::Icon::Trash,
-                    "清空审校稿",
-                )
-                .clicked()
-                {
-                    self.doc.generated_markdown.clear();
-                    self.doc.warnings.clear();
-                    self.doc.output_files.clear();
-                    self.doc.export_error = None;
-                }
-                if theme::icon_button_enabled(ui, has_draft, theme::Icon::Refresh, "重新校验")
-                    .clicked()
-                {
-                    self.revalidate();
-                    if !self.doc.warnings.is_empty() {
-                        self.open_result_drawer();
-                    }
-                    *self.status = "已重新执行规则校验。".into();
-                }
-                toolbar_separator(ui);
-
-                // 四、AI：有稿件是优化，没稿件是从零起草
-                if theme::primary_icon_button_enabled(
-                    ui,
-                    !self.doc.busy && editable,
-                    theme::Icon::Sparkles,
-                    if has_draft { "AI 优化" } else { "AI 起草" },
-                )
-                .on_hover_text(if has_draft {
-                    "选一条提示词改写当前稿件，也可临时写一条；输出格式标准内置生效，不会破坏导出结构"
-                } else {
-                    "审校稿为空：在面板里写明要起草什么，结合左侧公文要素从零生成"
-                })
-                .clicked()
-                {
-                    self.actions.push(DraftAction::OpenAiPromptPicker);
-                }
-                // RAG 开关：仅起草（审校稿为空）有意义。勾选后起草时自动检索知识库
-                // 相似稿件片段注入提示词作参考。
-                //
-                // 全局开关关着时置灰而不是照常可勾——否则勾了也什么都不会发生，
-                // 界面上还没有任何提示，只会让人以为功能坏了。
-                if editable && !has_draft {
-                    let rag_enabled = self.config.rag.enabled;
-                    ui.add_enabled_ui(rag_enabled, |ui| {
-                        ui.checkbox(&mut self.doc.use_knowledge_rag, "参考知识库")
-                            .on_hover_text(if rag_enabled {
-                                "起草时自动检索知识库中的相似稿件片段，注入提示词作写作风格参考"
-                            } else {
-                                "知识库检索增强尚未启用：请到「设置 → 知识库」勾选启用，并配置 embedding 模型"
-                            });
-                    });
-                    if rag_enabled && self.doc.use_knowledge_rag {
-                        egui::ComboBox::from_id_salt("rag_kind_filter")
-                            .selected_text(self.doc.rag_kind_filter.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.doc.rag_kind_filter,
-                                    RagKindFilter::Follow,
-                                    RagKindFilter::Follow.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut self.doc.rag_kind_filter,
-                                    RagKindFilter::All,
-                                    RagKindFilter::All.label(),
-                                );
-                                for kind in TemplateKind::ALL {
-                                    ui.selectable_value(
-                                        &mut self.doc.rag_kind_filter,
-                                        RagKindFilter::Only(kind),
-                                        kind.label(),
-                                    );
-                                }
-                            });
-                    }
-                }
-                toolbar_separator(ui);
-
-                // 五、入库与版本
-                if ui
-                    .add_enabled(
-                        editable,
-                        theme::icon_text_button(theme::Icon::Save, "保存"),
-                    )
-                    .on_hover_text(if saved {
-                        "更新稿件库中已打开的那条记录（Ctrl+S）"
+                if theme::nav_button(ui, !collapsed, icon, "公文要素")
+                    .on_hover_text(if collapsed {
+                        "展开公文要素填报区"
                     } else {
-                        "保存为稿件库中的一条新草稿记录（Ctrl+S）"
+                        "收起公文要素填报区"
                     })
                     .clicked()
                 {
-                    self.actions.push(DraftAction::SaveToLibrary);
+                    self.doc.form_collapsed = !collapsed;
                 }
-                if ui
-                    .add_enabled(
-                        saved && editable,
-                        theme::icon_text_button(theme::Icon::GitCommit, "提交版本"),
-                    )
-                    .on_hover_text(if saved {
-                        "把当前内容固化为一个新版本（需相对上一版本有变更）"
-                    } else {
-                        "先“保存”，再提交版本"
-                    })
-                    .clicked()
-                    && let Some(id) = self.doc.manuscript_id
-                {
-                    self.actions
-                        .push(DraftAction::OpenVersionCommit(VersionScope::Manuscript(id)));
-                }
-                self.version_switch_picker(ui);
                 toolbar_separator(ui);
 
-                // 六、导出。格式与自动导出在设置页统一管理，这里只管出文件。
-                if ui
-                    .add_enabled(
-                        !self.doc.busy && has_draft,
-                        theme::secondary_icon_button(theme::Icon::FileDown, "导出"),
-                    )
-                    .on_hover_text("按设置里勾选的格式导出当前审校稿，可反复导出")
-                    .clicked()
-                {
-                    self.start_export_current();
+                let current = self.config.ribbon_tab;
+                let mut picked = None;
+                let mut toggle_collapse = false;
+                for tab in RibbonTab::ALL {
+                    let response = theme::ribbon_tab_button(ui, current == tab, tab.label())
+                        .on_hover_text(tab.hint());
+                    // 双击当前分区卡收起第二行，与 Word 一致。
+                    if response.double_clicked() && current == tab {
+                        toggle_collapse = true;
+                    } else if response.clicked() {
+                        picked = Some(tab);
+                    }
                 }
-                if theme::icon_button(ui, theme::Icon::Folder, "打开输出目录")
-                    .on_hover_text(self.config.output_dir.clone())
-                    .clicked()
+                if let Some(tab) = picked
+                    && tab != current
                 {
-                    self.open_output_dir();
+                    self.config.ribbon_tab = tab;
+                    self.persist_ribbon();
                 }
-                self.export_open_buttons(ui);
-                // 缩放只作用于版式预览；源码与版本对照按界面字号显示。
-                if matches!(
-                    self.doc.preview_mode,
-                    PreviewMode::Rendered | PreviewMode::Split
-                ) {
-                    toolbar_separator(ui);
-                    self.zoom_controls(ui);
+                if toggle_collapse {
+                    self.config.ribbon_collapsed = !self.config.ribbon_collapsed;
+                    self.persist_ribbon();
                 }
 
-                // 视图入口仿 Zed 收到最右侧，只保留稳定的图标锚点。
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let collapsed = self.config.ribbon_collapsed;
+                    if theme::icon_button(
+                        ui,
+                        if collapsed {
+                            theme::Icon::ChevronDown
+                        } else {
+                            theme::Icon::ChevronUp
+                        },
+                        if collapsed {
+                            "展开功能区"
+                        } else {
+                            "收起功能区"
+                        },
+                    )
+                    .on_hover_text("也可以双击当前分区卡收起或展开")
+                    .clicked()
+                    {
+                        self.config.ribbon_collapsed = !collapsed;
+                        self.persist_ribbon();
+                    }
+                    toolbar_separator(ui);
+                    // 视图入口仿 Zed 收到最右侧，只保留稳定的图标锚点。
                     for (mode, icon, label, tip) in [
                         (
                             PreviewMode::VersionDiff,
@@ -1920,14 +2233,9 @@ impl DraftPage<'_> {
                             "Markdown：带语法高亮的源码，导出以此为准",
                         ),
                     ] {
-                        if theme::view_icon_button(
-                            ui,
-                            self.doc.preview_mode == mode,
-                            icon,
-                            label,
-                        )
-                        .on_hover_text(tip)
-                        .clicked()
+                        if theme::view_icon_button(ui, self.doc.preview_mode == mode, icon, label)
+                            .on_hover_text(tip)
+                            .clicked()
                         {
                             self.doc.preview_mode = mode;
                         }
@@ -1935,6 +2243,836 @@ impl DraftPage<'_> {
                 });
             });
         });
+    }
+
+    /// 分区卡与折叠状态立刻落盘，与设置页里切主题的处理一致。
+    fn persist_ribbon(&mut self) {
+        let _ = storage::save(self.config);
+    }
+
+    /// 开始：日常最常用的那几件事，绝大多数时候不必切分区卡。
+    fn ribbon_home(&mut self, ui: &mut egui::Ui) {
+        let has_draft = !self.doc.generated_markdown.trim().is_empty();
+        let saved = self.doc.manuscript_id.is_some();
+        // 只读稿件（已发布、已归档）不能改内容，但照常预览、导出、看版本。
+        let editable = !self.doc.read_only();
+
+        // 一、入库与版本
+        if ui
+            .add_enabled(editable, theme::icon_text_button(theme::Icon::Save, "保存"))
+            .on_hover_text(if saved {
+                "更新稿件库中已打开的那条记录（Ctrl+S）"
+            } else {
+                "保存为稿件库中的一条新草稿记录（Ctrl+S）"
+            })
+            .clicked()
+        {
+            self.actions.push(DraftAction::SaveToLibrary);
+        }
+        if ui
+            .add_enabled(
+                saved && editable,
+                theme::icon_text_button(theme::Icon::GitCommit, "提交版本"),
+            )
+            .on_hover_text(if saved {
+                "把当前内容固化为一个新版本（需相对上一版本有变更）"
+            } else {
+                "先“保存”，再提交版本"
+            })
+            .clicked()
+            && let Some(id) = self.doc.manuscript_id
+        {
+            self.actions
+                .push(DraftAction::OpenVersionCommit(VersionScope::Manuscript(id)));
+        }
+        self.version_switch_picker(ui);
+        toolbar_separator(ui);
+
+        // 二、稿件本身的编辑动作
+        if ui
+            .add(theme::icon_text_button(
+                theme::Icon::SearchClear,
+                "查找替换",
+            ))
+            .on_hover_text("在审校稿里查找并替换（Ctrl+F）")
+            .clicked()
+        {
+            self.doc.markdown_find.open = true;
+            self.doc.markdown_find.focus_query = true;
+        }
+        if ui
+            .add_enabled(
+                has_draft,
+                theme::icon_text_button(theme::Icon::Copy, "复制全文"),
+            )
+            .clicked()
+        {
+            ui.ctx().copy_text(self.doc.generated_markdown.clone());
+            *self.status = "审校稿已复制到剪贴板。".into();
+        }
+        if theme::danger_icon_button_enabled(
+            ui,
+            has_draft && editable,
+            theme::Icon::Trash,
+            "清空审校稿",
+        )
+        .clicked()
+        {
+            self.doc.generated_markdown.clear();
+            self.doc.warnings.clear();
+            self.doc.output_files.clear();
+            self.doc.export_error = None;
+        }
+        toolbar_separator(ui);
+
+        // 三、AI：有稿件是优化，没稿件是从零起草
+        if theme::primary_icon_button_enabled(
+            ui,
+            !self.doc.busy && editable,
+            theme::Icon::Sparkles,
+            if has_draft { "AI 优化" } else { "AI 起草" },
+        )
+        .on_hover_text(if has_draft {
+            "选一条提示词改写当前稿件，也可临时写一条；输出格式标准内置生效，不会破坏导出结构"
+        } else {
+            "审校稿为空：在面板里写明要起草什么，结合左侧公文要素从零生成"
+        })
+        .clicked()
+        {
+            self.actions.push(DraftAction::OpenAiPromptPicker);
+        }
+        // RAG 开关：仅起草（审校稿为空）有意义。勾选后起草时自动检索知识库
+        // 相似稿件片段注入提示词作参考。
+        //
+        // 全局开关关着时置灰而不是照常可勾——否则勾了也什么都不会发生，
+        // 界面上还没有任何提示，只会让人以为功能坏了。
+        if editable && !has_draft {
+            let rag_enabled = self.config.rag.enabled;
+            ui.add_enabled_ui(rag_enabled, |ui| {
+                ui.checkbox(&mut self.doc.use_knowledge_rag, "参考知识库")
+                    .on_hover_text(if rag_enabled {
+                        "起草时自动检索知识库中的相似稿件片段，注入提示词作写作风格参考"
+                    } else {
+                        "知识库检索增强尚未启用：请到「设置 → 知识库」勾选启用，并配置 embedding 模型"
+                    });
+            });
+            if rag_enabled && self.doc.use_knowledge_rag {
+                egui::ComboBox::from_id_salt("rag_kind_filter")
+                    .selected_text(self.doc.rag_kind_filter.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.doc.rag_kind_filter,
+                            RagKindFilter::Follow,
+                            RagKindFilter::Follow.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.doc.rag_kind_filter,
+                            RagKindFilter::All,
+                            RagKindFilter::All.label(),
+                        );
+                        for kind in TemplateKind::ALL {
+                            ui.selectable_value(
+                                &mut self.doc.rag_kind_filter,
+                                RagKindFilter::Only(kind),
+                                kind.label(),
+                            );
+                        }
+                    });
+            }
+        }
+        toolbar_separator(ui);
+
+        // 四、校验
+        if ui
+            .add_enabled(
+                has_draft,
+                theme::icon_text_button(theme::Icon::Refresh, "重新校验"),
+            )
+            .clicked()
+        {
+            self.revalidate();
+            if !self.doc.warnings.is_empty() {
+                self.open_result_drawer();
+            }
+            *self.status = "已重新执行规则校验。".into();
+        }
+        self.warning_badge(ui);
+    }
+
+    /// 校验提示的计数徽章：有提示才出现，点一下开抽屉。放在“重新校验”旁边，
+    /// 免得校验完还要自己去找结果在哪。
+    fn warning_badge(&mut self, ui: &mut egui::Ui) {
+        let count = self.doc.warnings.len();
+        if count == 0 {
+            return;
+        }
+        if ui
+            .add(
+                egui::Button::image_and_text(
+                    theme::Icon::TriangleAlert.image().tint(warn()),
+                    egui::RichText::new(format!("{count} 条提示")).color(warn()),
+                )
+                .image_tint_follows_text_color(false)
+                .fill(theme::warn_soft())
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(egui::CornerRadius::same(7)),
+            )
+            .on_hover_text("打开审校提示")
+            .clicked()
+        {
+            self.open_result_drawer();
+        }
+    }
+
+    /// 插入：往光标处放东西。功能区扩容之后最主要的受益者。
+    fn ribbon_insert(&mut self, ui: &mut egui::Ui) {
+        let editable = !self.doc.read_only();
+        let in_table = self.table_at_cursor(ui.ctx()).is_some();
+
+        // 一、表格
+        let mut size = self.doc.table_size;
+        let mut insert_table: Option<(usize, usize)> = None;
+        ui.add_enabled_ui(editable, |ui| {
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::Table,
+                "表格",
+            ))
+            .ui(ui, |ui| {
+                ui.set_min_width(206.0);
+                if let Some(picked) = table_grid_picker(ui) {
+                    insert_table = Some(picked);
+                    ui.close();
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut size.0).range(1..=60).speed(0.15));
+                    ui.label("行 ×");
+                    ui.add(egui::DragValue::new(&mut size.1).range(2..=20).speed(0.15));
+                    ui.label("列");
+                    if ui.button("插入").clicked() {
+                        insert_table = Some(size);
+                        ui.close();
+                    }
+                });
+                ui.weak("首行是表头。导出时列宽按内容自动排版。");
+            });
+        });
+        self.doc.table_size = size;
+        if let Some((rows, columns)) = insert_table {
+            self.insert_table(ui.ctx(), rows, columns);
+        }
+
+        // 二、表格的行列增删与列对齐：光标在表格里才亮
+        let mut op: Option<TableOp> = None;
+        ui.add_enabled_ui(editable && in_table, |ui| {
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::Rows,
+                "行",
+            ))
+            .ui(ui, |ui| {
+                for (label, action) in [
+                    ("在上方插入行", TableOp::InsertRowAbove),
+                    ("在下方插入行", TableOp::InsertRowBelow),
+                    ("删除本行", TableOp::DeleteRow),
+                ] {
+                    if ui.button(label).clicked() {
+                        op = Some(action);
+                        ui.close();
+                    }
+                }
+            });
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::Columns,
+                "列",
+            ))
+            .ui(ui, |ui| {
+                for (label, action) in [
+                    ("在左侧插入列", TableOp::InsertColumnLeft),
+                    ("在右侧插入列", TableOp::InsertColumnRight),
+                    ("删除本列", TableOp::DeleteColumn),
+                ] {
+                    if ui.button(label).clicked() {
+                        op = Some(action);
+                        ui.close();
+                    }
+                }
+            });
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::AlignCenter,
+                "列对齐",
+            ))
+            .ui(ui, |ui| {
+                ui.weak("改的是光标所在那一列");
+                for (align, icon) in [
+                    (ColumnAlign::Auto, theme::Icon::WandSparkles),
+                    (ColumnAlign::Left, theme::Icon::AlignLeft),
+                    (ColumnAlign::Center, theme::Icon::AlignCenter),
+                    (ColumnAlign::Right, theme::Icon::AlignRight),
+                ] {
+                    if ui
+                        .add(theme::icon_text_button(icon, align.label()).frame(false))
+                        .clicked()
+                    {
+                        op = Some(TableOp::Align(align));
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(op) = op {
+            self.apply_table_op(ui.ctx(), op);
+        }
+        toolbar_separator(ui);
+
+        // 三、图片与现成文档
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Paperclip, "图片"))
+                .on_hover_text(
+                    "选择图片（PNG / JPG / WebP / BMP / GIF）或 PDF 文件，复制入库后\
+                     按 markdown 图片语法插到光标处，预览按页面宽度排版",
+                )
+                .clicked()
+            {
+                self.insert_images(ui.ctx());
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::FileUp, "导入文档"))
+                .on_hover_text(
+                    "从已有的 Word / Excel / PPT / ODF / RTF / EPUB / CSV 文件提取内容，\
+                     转成 Markdown 插到光标处",
+                )
+                .clicked()
+            {
+                self.import_document(ui.ctx());
+            }
+        });
+        toolbar_separator(ui);
+
+        // 四、公文构件：区段标记与附件标识，导出器按它们切分正文与附件
+        let mut marker: Option<(&'static str, &'static str)> = None;
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::BookmarkCheck,
+                    "正文标记",
+                ))
+                .on_hover_text("插入“<!-- [正文] -->”，声明正式标题之后的正文区段起点")
+                .clicked()
+            {
+                marker = Some(("<!-- [正文] -->", "正文标记"));
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Paperclip, "附件标记"))
+                .on_hover_text("插入“<!-- [附件] -->”，把其后内容切换为附件区段")
+                .clicked()
+            {
+                marker = Some(("<!-- [附件] -->", "附件标记"));
+            }
+        });
+        if let Some((text, label)) = marker {
+            self.insert_section_marker(ui.ctx(), text, label);
+        }
+        toolbar_separator(ui);
+
+        // 五、标准词库：单位、人员、联系方式直接插到光标处
+        ui.add_enabled_ui(editable, |ui| self.vocabulary_menus(ui));
+        toolbar_separator(ui);
+
+        // 六、公文里反复要写的符号与日期
+        let mut snippet: Option<(String, usize, &'static str)> = None;
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Calendar, "中文日期"))
+                .on_hover_text("插入今天的中文数字日期，即成文日期的写法")
+                .clicked()
+            {
+                snippet = Some((chinese_today(), 0, "中文日期"));
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Quote, "引号"))
+                .on_hover_text("插入一对中文双引号，光标落在中间")
+                .clicked()
+            {
+                snippet = Some(("“”".to_string(), "”".len(), "中文引号"));
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Braces, "待核实"))
+                .on_hover_text("插入【待核实】占位，校验会把它挑出来提醒补齐")
+                .clicked()
+            {
+                snippet = Some(("【待核实】".to_string(), 0, "待核实占位"));
+            }
+        });
+        if let Some((text, back, label)) = snippet {
+            self.insert_inline(ui.ctx(), &text, back, label);
+        }
+    }
+
+    /// 标准词库的三个下拉：单位、人员、联系方式。选中就把规范名称插到光标处，
+    /// 免得为了抄一个单位全称在词库页和起草页之间来回切。
+    fn vocabulary_menus(&mut self, ui: &mut egui::Ui) {
+        let units = self.unit_pool(false);
+        let contacts = self.contacts();
+        let mut snippet: Option<(String, &'static str)> = None;
+
+        egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+            theme::Icon::Building,
+            "单位",
+        ))
+        .ui(ui, |ui| {
+            ui.set_min_width(260.0);
+            if units.is_empty() {
+                ui.weak("标准词库里还没有单位。");
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for option in &units {
+                        if ui
+                            .add(egui::Button::new(option.full.as_str()).frame(false))
+                            .clicked()
+                        {
+                            snippet = Some((option.full.clone(), "单位名称"));
+                            ui.close();
+                        }
+                    }
+                });
+        });
+        egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+            theme::Icon::UserPlus,
+            "人员",
+        ))
+        .ui(ui, |ui| {
+            ui.set_min_width(200.0);
+            if contacts.is_empty() {
+                ui.weak("标准词库里还没有人员。");
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for (name, _) in &contacts {
+                        if ui
+                            .add(egui::Button::new(name.as_str()).frame(false))
+                            .clicked()
+                        {
+                            snippet = Some((name.clone(), "人员姓名"));
+                            ui.close();
+                        }
+                    }
+                });
+        });
+        egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+            theme::Icon::Phone,
+            "联系方式",
+        ))
+        .ui(ui, |ui| {
+            ui.set_min_width(220.0);
+            let with_phone = contacts
+                .iter()
+                .filter(|(_, phone)| !phone.is_empty())
+                .collect::<Vec<_>>();
+            if with_phone.is_empty() {
+                ui.weak("词库里的人员都还没填电话。");
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for (name, phone) in with_phone {
+                        if ui
+                            .add(egui::Button::new(format!("{name} {phone}")).frame(false))
+                            .clicked()
+                        {
+                            snippet = Some((phone.clone(), "联系电话"));
+                            ui.close();
+                        }
+                    }
+                });
+        });
+        if let Some((text, label)) = snippet {
+            self.insert_inline(ui.ctx(), &text, 0, label);
+        }
+    }
+
+    /// 格式：改已有文字的 Markdown 标记。这里只放导出器认识的语法——
+    /// 放个斜体按钮插出来的 `*文字*`，预览和 Word 里就是原样带星号。
+    fn ribbon_format(&mut self, ui: &mut egui::Ui) {
+        let editable = !self.doc.read_only();
+        let current = self.heading_level_at_cursor(ui.ctx());
+        let mut heading: Option<(u8, &'static str)> = None;
+        let mut bold = false;
+        let mut bullet = false;
+        let mut tidy = false;
+        let mut quotes = false;
+
+        // 一、标题层级。按钮上写的是公文层级而不是 h2/h3：用的人脑子里想的是
+        // 「这是一级标题」，编号由导出器统一生成。
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .add(
+                    theme::icon_text_button(theme::Icon::Heading, "标题")
+                        .selected(current == Some(1)),
+                )
+                .on_hover_text("公文标题（#）：整篇只应有一个")
+                .clicked()
+            {
+                heading = Some((1, "标题"));
+            }
+            for (label, level, tip) in [
+                ("一、", 2u8, "一级标题（##）：导出时自动编号为「一、」"),
+                ("（一）", 3, "二级标题（###）：自动编号为「（一）」"),
+                ("1.", 4, "三级标题（####）：自动编号为「1.」"),
+                ("（1）", 5, "四级标题（#####）：自动编号为「（1）」"),
+            ] {
+                if ui
+                    .add(
+                        egui::Button::new(label)
+                            .selected(current == Some(level))
+                            .min_size(egui::vec2(40.0, TOOLBAR_CONTROL_HEIGHT)),
+                    )
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    heading = Some((level, label));
+                }
+            }
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::RemoveFormatting,
+                    "降为正文",
+                ))
+                .on_hover_text("去掉行首的 # 标记，变回正文段落")
+                .clicked()
+            {
+                heading = Some((0, "正文"));
+            }
+            toolbar_separator(ui);
+
+            // 二、字符与段落
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Bold, "加粗"))
+                .on_hover_text("给选中的文字加 `**`（Ctrl+B）；已加粗的再点一次去掉")
+                .clicked()
+            {
+                bold = true;
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::List, "项目符号"))
+                .on_hover_text("当前行加上 `- `；已经是列表项的再点一次去掉")
+                .clicked()
+            {
+                bullet = true;
+            }
+            toolbar_separator(ui);
+
+            // 三、清理
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Quote, "规范引号"))
+                .on_hover_text("把全文的直引号、方向错乱的引号统一成配对的中文引号")
+                .clicked()
+            {
+                quotes = true;
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Eraser, "清理空行"))
+                .on_hover_text("连续空行压成一行，去掉行尾空格")
+                .clicked()
+            {
+                tidy = true;
+            }
+        });
+
+        if let Some((level, label)) = heading {
+            self.apply_heading(ui.ctx(), level, label);
+        }
+        if bold {
+            self.toggle_bold(ui.ctx());
+        }
+        if bullet {
+            self.apply_line_edit(ui.ctx(), toggle_bullet, "已切换项目符号。");
+        }
+        if quotes {
+            self.doc.generated_markdown =
+                export::normalize_chinese_quotes(&self.doc.generated_markdown);
+            *self.status = "已把全文引号规范为中文引号。".into();
+        }
+        if tidy {
+            self.doc.generated_markdown = tidy_blank_lines(&self.doc.generated_markdown);
+            *self.status = "已清理多余空行与行尾空格。".into();
+        }
+    }
+
+    /// 审校：校验、版本比对、查找，外加一个字数。
+    fn ribbon_review(&mut self, ui: &mut egui::Ui) {
+        let has_draft = !self.doc.generated_markdown.trim().is_empty();
+        let saved = self.doc.manuscript_id.is_some();
+
+        if ui
+            .add_enabled(
+                has_draft,
+                theme::icon_text_button(theme::Icon::Refresh, "重新校验"),
+            )
+            .on_hover_text("按当前公文要素与规则重新检查一遍审校稿")
+            .clicked()
+        {
+            self.revalidate();
+            if !self.doc.warnings.is_empty() {
+                self.open_result_drawer();
+            }
+            *self.status = "已重新执行规则校验。".into();
+        }
+        let drawer_open = self.doc.result_drawer_open;
+        if ui
+            .add(
+                theme::icon_text_button(theme::Icon::TriangleAlert, "校验结果")
+                    .selected(drawer_open),
+            )
+            .on_hover_text("开关右侧的审校提示抽屉")
+            .clicked()
+        {
+            self.doc.result_drawer_open = !drawer_open;
+        }
+        self.warning_badge(ui);
+        toolbar_separator(ui);
+
+        if ui
+            .add(
+                theme::icon_text_button(theme::Icon::Compare, "版本对照")
+                    .selected(self.doc.preview_mode == PreviewMode::VersionDiff),
+            )
+            .on_hover_text("最新提交版本与当前修订逐字比较")
+            .clicked()
+        {
+            self.doc.preview_mode = PreviewMode::VersionDiff;
+        }
+        let versions_open = self.doc.versions_open;
+        if ui
+            .add_enabled(
+                saved,
+                theme::icon_text_button(theme::Icon::History, "版本历史").selected(versions_open),
+            )
+            .on_hover_text(if saved {
+                "开关右侧的版本历史抽屉"
+            } else {
+                "这篇还没保存到稿件库"
+            })
+            .clicked()
+        {
+            self.doc.versions_open = !versions_open;
+        }
+        toolbar_separator(ui);
+
+        if ui
+            .add(theme::icon_text_button(
+                theme::Icon::SearchClear,
+                "查找替换",
+            ))
+            .on_hover_text("在审校稿里查找并替换（Ctrl+F）")
+            .clicked()
+        {
+            self.doc.markdown_find.open = true;
+            self.doc.markdown_find.focus_query = true;
+        }
+        toolbar_separator(ui);
+
+        // 字数按导出后的正文算：Markdown 标记、表格竖线都不计。
+        let (characters, paragraphs) = body_stats(&self.doc.generated_markdown);
+        ui.add(
+            egui::Button::image_and_text(
+                theme::Icon::Hash.image(),
+                egui::RichText::new(format!("{characters} 字 · {paragraphs} 段"))
+                    .color(theme::text_muted()),
+            )
+            .image_tint_follows_text_color(true)
+            .frame(false),
+        )
+        .on_hover_text("正文字数：不含 Markdown 标记、表格竖线与图片引用");
+    }
+
+    /// 视图：五种显示方式、缩放，以及各个面板的开关。
+    fn ribbon_view(&mut self, ui: &mut egui::Ui) {
+        for (mode, icon, label, tip) in [
+            (
+                PreviewMode::Source,
+                theme::Icon::PencilLine,
+                "Markdown",
+                "带语法高亮的源码，导出以此为准",
+            ),
+            (
+                PreviewMode::Hybrid,
+                theme::Icon::Book,
+                "实时排版",
+                "当前行显示 Markdown 标记，离开后按公文格式渲染",
+            ),
+            (
+                PreviewMode::Rendered,
+                theme::Icon::Eye,
+                "公文预览",
+                "按导出后的字体与行距排版",
+            ),
+            (
+                PreviewMode::Split,
+                theme::Icon::Compare,
+                "对照",
+                "左边改 Markdown，右边看公文版式",
+            ),
+            (
+                PreviewMode::VersionDiff,
+                theme::Icon::GitCommit,
+                "版本对照",
+                "最新提交版本与当前修订逐字比较",
+            ),
+        ] {
+            if ui
+                .add(theme::icon_text_button(icon, label).selected(self.doc.preview_mode == mode))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                self.doc.preview_mode = mode;
+            }
+        }
+        toolbar_separator(ui);
+
+        // 缩放只作用于版式预览；源码与版本对照按界面字号显示。
+        let zoomable = matches!(
+            self.doc.preview_mode,
+            PreviewMode::Rendered | PreviewMode::Split
+        );
+        ui.add_enabled_ui(zoomable, |ui| self.zoom_controls(ui));
+        toolbar_separator(ui);
+
+        let form_collapsed = self.doc.form_collapsed;
+        if ui
+            .add(
+                theme::icon_text_button(theme::Icon::PanelOpen, "公文要素")
+                    .selected(!form_collapsed),
+            )
+            .on_hover_text("开关左侧的公文要素填报区")
+            .clicked()
+        {
+            self.doc.form_collapsed = !form_collapsed;
+        }
+        let drawer_open = self.doc.result_drawer_open;
+        if ui
+            .add(
+                theme::icon_text_button(theme::Icon::TriangleAlert, "校验结果")
+                    .selected(drawer_open),
+            )
+            .on_hover_text("开关右侧的审校提示抽屉")
+            .clicked()
+        {
+            self.doc.result_drawer_open = !drawer_open;
+        }
+        let versions_open = self.doc.versions_open;
+        if ui
+            .add_enabled(
+                self.doc.manuscript_id.is_some(),
+                theme::icon_text_button(theme::Icon::History, "版本历史").selected(versions_open),
+            )
+            .on_hover_text("开关右侧的版本历史抽屉")
+            .clicked()
+        {
+            self.doc.versions_open = !versions_open;
+        }
+        let line_numbers = self.config.show_editor_line_numbers;
+        if ui
+            .add(theme::icon_text_button(theme::Icon::ListOrdered, "行号").selected(line_numbers))
+            .on_hover_text("在源码与实时排版编辑器左侧显示行号")
+            .clicked()
+        {
+            self.config.show_editor_line_numbers = !line_numbers;
+            self.persist_ribbon();
+        }
+    }
+
+    /// 输出：导出与打开成品。格式在设置页统一管理，这里另给三个只出一种
+    /// 格式的快捷入口。
+    fn ribbon_output(&mut self, ui: &mut egui::Ui) {
+        let has_draft = !self.doc.generated_markdown.trim().is_empty();
+        let ready = !self.doc.busy && has_draft;
+        if ui
+            .add_enabled(
+                ready,
+                theme::secondary_icon_button(theme::Icon::FileDown, "导出"),
+            )
+            .on_hover_text("按设置里勾选的格式导出当前审校稿，可反复导出")
+            .clicked()
+        {
+            self.start_export_current();
+        }
+        let overwrite = self.config.export.overwrite;
+        let mut only: Option<(ExportSelection, &'static str)> = None;
+        ui.add_enabled_ui(ready, |ui| {
+            for (icon, label, selection, tip) in [
+                (
+                    theme::Icon::FileTypeDoc,
+                    "仅 Word",
+                    ExportSelection {
+                        markdown: false,
+                        docx: true,
+                        tex: false,
+                        overwrite,
+                    },
+                    "这一次只出 docx，不改设置里勾好的常用格式",
+                ),
+                (
+                    theme::Icon::Tex,
+                    "TeX 与 PDF",
+                    ExportSelection {
+                        markdown: false,
+                        docx: false,
+                        tex: true,
+                        overwrite,
+                    },
+                    "这一次只出 tex，并用本机 Tectonic/XeLaTeX 编译成 PDF",
+                ),
+                (
+                    theme::Icon::PencilLine,
+                    "仅 Markdown",
+                    ExportSelection {
+                        markdown: true,
+                        docx: false,
+                        tex: false,
+                        overwrite,
+                    },
+                    "这一次只出 md 原文，连同稿中引用的图片一起落盘",
+                ),
+            ] {
+                if ui
+                    .add(theme::icon_text_button(icon, label))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    only = Some((selection, label));
+                }
+            }
+        });
+        if let Some((selection, label)) = only {
+            self.start_export_with(selection);
+            *self.status = format!("正在按「{label}」导出…");
+        }
+        toolbar_separator(ui);
+
+        if ui
+            .add(theme::icon_text_button(theme::Icon::Folder, "输出目录"))
+            .on_hover_text(self.config.output_dir.clone())
+            .clicked()
+        {
+            self.open_output_dir();
+        }
+        self.export_open_buttons(ui);
+        toolbar_separator(ui);
+
+        if ui
+            .add(theme::icon_text_button(theme::Icon::Settings, "导出设置"))
+            .on_hover_text("到设置页勾选常用导出格式、输出目录与是否覆盖同名文件")
+            .clicked()
+        {
+            self.actions.push(DraftAction::OpenSettings);
+        }
     }
 
     pub(crate) fn form_ui(&mut self, ui: &mut egui::Ui, available_width: f32) {
@@ -2617,50 +3755,10 @@ impl DraftPage<'_> {
         ui.add_space(8.0);
     }
 
-    /// 审校区的特殊标记符号栏：一排快速插入按钮，把 `<!-- [正文] -->`、
-    /// `<!-- [附件] -->` 这类区段标记按独占一行插到编辑器光标所在行首，
-    /// 没有光标时追加到文末。右侧的收起按钮可整条隐藏，工具栏“标记”按钮再唤出。
-    fn mark_toolbar_ui(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only();
-        ui.scope(|ui| {
-            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.horizontal(|ui| {
-                ui.strong("特殊标记");
-                ui.add_enabled_ui(editable, |ui| {
-                    for (label, marker, tip) in [
-                        (
-                            "正文标记",
-                            "<!-- [正文] -->",
-                            "在光标处插入“<!-- [正文] -->”，声明正式标题之后的正文区段起点",
-                        ),
-                        (
-                            "附件标记",
-                            "<!-- [附件] -->",
-                            "开始一份新附件；可重复插入，程序自动生成“附件”或“附件1、附件2……”标识",
-                        ),
-                    ] {
-                        if ui.button(label).on_hover_text(tip).clicked() {
-                            self.insert_section_marker(ui, marker, label);
-                        }
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, theme::Icon::Collapse, "隐藏特殊标记栏")
-                        .on_hover_text("隐藏特殊标记栏；需要时从工具栏的“标记”按钮再打开")
-                        .clicked()
-                    {
-                        self.doc.mark_toolbar_visible = false;
-                    }
-                });
-            });
-        });
-    }
-
-    /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：编辑框有焦点时插到
-    /// 光标所在行行首，否则追加到文末。标记必须独占一行导出器才认，
+    /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：插到光标所在行的行首，
+    /// 从没点进过编辑框时追加到文末。标记必须独占一行导出器才认，
     /// 正文标记只允许一个；附件标记可重复插入，每次都代表一份新附件。
-    fn insert_section_marker(&mut self, ui: &egui::Ui, marker: &str, label: &str) {
+    fn insert_section_marker(&mut self, ctx: &egui::Context, marker: &str, label: &str) {
         if self.doc.read_only() {
             return;
         }
@@ -2674,25 +3772,13 @@ impl DraftPage<'_> {
             *self.status = format!("{label}已在稿中，不重复插入。");
             return;
         }
-        let cursor_char = if ui.ctx().memory(|memory| memory.has_focus(editor_id())) {
-            egui::TextEdit::load_state(ui.ctx(), editor_id())
-                .and_then(|state| state.cursor.char_range())
-                .map(|range| range.primary.index.0)
-        } else {
-            None
-        };
+        let cursor = editor_cursor(ctx, &self.doc.generated_markdown);
         let text = &mut self.doc.generated_markdown;
-        let pos = match cursor_char {
-            Some(char_index) => text
-                .char_indices()
-                .nth(char_index)
-                .map_or(text.len(), |(byte, _)| byte),
-            None => text.len(),
-        };
-        let line_start = text[..pos].rfind('\n').map_or(0, |i| i + 1);
+        let pos = cursor.unwrap_or(text.len()).min(text.len());
+        let line_start = text[..pos].rfind('\n').map_or(0, |index| index + 1);
         let line_end = text[line_start..]
             .find('\n')
-            .map_or(text.len(), |i| line_start + i);
+            .map_or(text.len(), |index| line_start + index);
         let line_empty = text[line_start..line_end].trim().is_empty();
         let insertion = if line_empty {
             format!("{marker}\n")
@@ -2705,11 +3791,200 @@ impl DraftPage<'_> {
         self.doc.pending_source_jump = Some(line_start + insertion.len());
     }
 
-    /// 工具栏“导入文档”：选一个现成文档，转成 markdown 插到编辑器光标处。
+    /// 把一段块级 Markdown 插进审校稿，返回插入内容自身的起始字节。
+    ///
+    /// 插入点取编辑框记着的光标（没有就用文末），前后按需补空行——插的是标题、
+    /// 表格这类块级内容，紧贴着上一行会被 markdown 当成同一段，表格更是不成表。
+    fn insert_block(&mut self, ctx: &egui::Context, markdown: &str) -> usize {
+        let cursor = editor_cursor(ctx, &self.doc.generated_markdown);
+        let text = &mut self.doc.generated_markdown;
+        let pos = cursor.unwrap_or(text.len()).min(text.len());
+        let lead = blank_line_padding(text[..pos].trim_end_matches(' '), true);
+        let tail = blank_line_padding(text[pos..].trim_start_matches(' '), false);
+        let insertion = format!("{lead}{markdown}{tail}");
+        text.insert_str(pos, &insertion);
+        // 光标落到插入内容的末尾，方便接着往下写。
+        self.doc.pending_source_jump = Some(pos + lead.len() + markdown.len());
+        pos + lead.len()
+    }
+
+    /// 在光标处插入一段行内文字（词库词条、日期、符号）。`back` 是插完之后
+    /// 光标要往回退几个字节，用来把光标放进成对符号的中间。
+    fn insert_inline(&mut self, ctx: &egui::Context, snippet: &str, back: usize, label: &str) {
+        if self.doc.read_only() {
+            return;
+        }
+        let cursor = editor_cursor(ctx, &self.doc.generated_markdown);
+        let text = &mut self.doc.generated_markdown;
+        let pos = cursor.unwrap_or(text.len()).min(text.len());
+        text.insert_str(pos, snippet);
+        self.doc.pending_source_jump = Some(pos + snippet.len() - back);
+        *self.status = format!("已插入{label}。");
+    }
+
+    /// 在光标处插入一张空白表格。
+    fn insert_table(&mut self, ctx: &egui::Context, rows: usize, columns: usize) {
+        if self.doc.read_only() {
+            return;
+        }
+        let markdown = blank_table(rows, columns);
+        let position = self.insert_block(ctx, &markdown);
+        // 光标落进表头第一格，接着就能打字。
+        self.doc.pending_source_jump = Some(position + 2);
+        *self.status = format!("已插入 {rows} 行 {columns} 列表格。");
+    }
+
+    /// 光标所在的那张表格；不在表格里返回 None。
+    fn table_at_cursor(&self, ctx: &egui::Context) -> Option<TableEdit> {
+        let cursor = editor_cursor(ctx, &self.doc.generated_markdown)?;
+        table_at(&self.doc.generated_markdown, cursor)
+    }
+
+    /// 表格的行列增删与列对齐。改完整张表按最宽的单元格重新对齐竖线，
+    /// 让源码保持能读——手工维护的表格几行之后就会歪得没法看。
+    fn apply_table_op(&mut self, ctx: &egui::Context, op: TableOp) {
+        if self.doc.read_only() {
+            return;
+        }
+        let Some(mut table) = self.table_at_cursor(ctx) else {
+            *self.status = "把光标放进表格里再用这几个按钮。".into();
+            return;
+        };
+        let columns = table.columns();
+        let message = match op {
+            TableOp::InsertRowAbove | TableOp::InsertRowBelow => {
+                // 表头之上插不了数据行——第一行就是表头。
+                let at = if op == TableOp::InsertRowAbove {
+                    table.row.max(1)
+                } else {
+                    table.row + 1
+                };
+                table.rows.insert(at, vec![String::new(); columns]);
+                table.row = at;
+                "已插入一行。".to_string()
+            }
+            TableOp::DeleteRow => {
+                if table.row == 0 {
+                    *self.status = "表头删不得；要去掉整张表就把那几行选中删掉。".into();
+                    return;
+                }
+                table.rows.remove(table.row);
+                table.row = table.row.min(table.rows.len() - 1);
+                "已删除一行。".to_string()
+            }
+            TableOp::InsertColumnLeft | TableOp::InsertColumnRight => {
+                let at = if op == TableOp::InsertColumnLeft {
+                    table.column
+                } else {
+                    table.column + 1
+                };
+                for row in &mut table.rows {
+                    row.insert(at, String::new());
+                }
+                table.aligns.insert(at, ColumnAlign::Auto);
+                table.column = at;
+                "已插入一列。".to_string()
+            }
+            TableOp::DeleteColumn => {
+                // 只剩两列时不能再删：一列的表格不成表，导出会退化成普通段落。
+                if columns <= 2 {
+                    *self.status = "表格至少要两列，删不了。".into();
+                    return;
+                }
+                for row in &mut table.rows {
+                    row.remove(table.column);
+                }
+                table.aligns.remove(table.column);
+                table.column = table.column.min(table.aligns.len() - 1);
+                "已删除一列。".to_string()
+            }
+            TableOp::Align(align) => {
+                table.aligns[table.column] = align;
+                format!("第 {} 列已设为{}。", table.column + 1, align.label())
+            }
+        };
+        let rendered = render_table(&table.rows, &table.aligns);
+        // 光标回到原来那一行的第一格里，接着改。分隔行在表头之后占一行。
+        let target_line = if table.row == 0 { 0 } else { table.row + 1 };
+        let offset = rendered
+            .split('\n')
+            .take(target_line)
+            .map(|line| line.len() + 1)
+            .sum::<usize>();
+        let start = table.span.start;
+        self.doc
+            .generated_markdown
+            .replace_range(table.span.clone(), &rendered);
+        self.doc.pending_source_jump = Some(start + offset + 2);
+        *self.status = message;
+    }
+
+    /// 光标所在行的标题层级，用来点亮「格式」分区里对应的那枚按钮。
+    fn heading_level_at_cursor(&self, ctx: &egui::Context) -> Option<u8> {
+        let text = &self.doc.generated_markdown;
+        let cursor = editor_cursor(ctx, text)?;
+        let ranges = line_ranges(text);
+        let line = &text[ranges[line_at_byte(&ranges, cursor)].clone()];
+        markdown_heading_level(line)
+    }
+
+    /// 把选区覆盖到的行设成指定标题层级；`level` 为 0 是降回正文。
+    fn apply_heading(&mut self, ctx: &egui::Context, level: u8, label: &str) {
+        self.apply_line_edit(
+            ctx,
+            |line| set_heading(line, level),
+            &if level == 0 {
+                "已降为正文。".to_string()
+            } else {
+                format!("已设为「{label}」这一级标题。")
+            },
+        );
+    }
+
+    /// 对选区覆盖到的每一行做同一件事（标题层级、项目符号）。
+    /// 改完把光标放到改动范围的末尾，而不是选中整段——选中状态下随手一打字
+    /// 就会把刚改好的几行整个替换掉。
+    fn apply_line_edit(&mut self, ctx: &egui::Context, edit: impl Fn(&str) -> String, done: &str) {
+        if self.doc.read_only() {
+            return;
+        }
+        let text = self.doc.generated_markdown.clone();
+        let range = editor_selection(ctx, &text).unwrap_or(text.len()..text.len());
+        let (updated, span) = map_lines(&text, &range, edit);
+        self.doc.generated_markdown = updated;
+        self.doc.pending_source_jump = Some(span.end);
+        *self.status = done.to_string();
+    }
+
+    /// 给选中的文字加粗；已经加粗的再来一次就是取消。加粗之后保持选中，
+    /// 与各家编辑器的 Ctrl+B 一致。
+    pub(crate) fn toggle_bold(&mut self, ctx: &egui::Context) {
+        if self.doc.read_only() {
+            return;
+        }
+        let text = self.doc.generated_markdown.clone();
+        let Some(range) = editor_selection(ctx, &text) else {
+            *self.status = "先在审校稿里选中要加粗的文字。".into();
+            return;
+        };
+        let (updated, selection) = toggle_bold(&text, &range);
+        let removed = updated.len() < text.len();
+        self.doc.generated_markdown = updated;
+        self.doc.pending_source_selection = Some(selection);
+        *self.status = if range.is_empty() {
+            "已插入一对加粗标记。".into()
+        } else if removed {
+            "已取消加粗。".into()
+        } else {
+            "已加粗。".into()
+        };
+    }
+
+    /// 功能区“导入文档”：选一个现成文档，转成 markdown 插到编辑器光标处。
     ///
     /// 转换本身在主线程同步做——`anydoc` 的量级是毫秒（实测 docx 6ms、xlsx 0.5ms），
     /// 而它前面那个文件选择框本来就要阻塞界面，再为它铺一套后台任务通道不划算。
-    fn import_document(&mut self, ui: &egui::Ui) {
+    fn import_document(&mut self, ctx: &egui::Context) {
         if self.doc.read_only() {
             return;
         }
@@ -2717,16 +3992,16 @@ impl DraftPage<'_> {
             return;
         };
         match doc_import::to_markdown(&path) {
-            Ok(markdown) => self.insert_imported_markdown(ui, &markdown, &path),
+            Ok(markdown) => self.insert_imported_markdown(ctx, &markdown, &path),
             Err(error) => *self.status = format!("导入失败：{error:#}"),
         }
     }
 
-    /// 工具栏“插入图片”：选 png/jpg/pdf 等文件，复制入库后把 markdown 图片引用
-    /// 插到编辑器光标处（无焦点时追加到文末），多文件按行分隔。
+    /// 功能区“插入图片”：选 png/jpg/pdf 等文件，复制入库后把 markdown 图片引用
+    /// 插到编辑器光标处，多文件按行分隔。
     ///
     /// 图片宽度不写进 markdown，预览与导出统一按页面（版心）宽度等比缩放。
-    fn insert_images(&mut self, ui: &egui::Ui) {
+    fn insert_images(&mut self, ctx: &egui::Context) {
         if self.doc.read_only() {
             return;
         }
@@ -2744,7 +4019,7 @@ impl DraftPage<'_> {
                     .map(|image| image.markdown.clone())
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.insert_imported_markdown(ui, &markdown, &files[0]);
+                self.insert_imported_markdown(ctx, &markdown, &files[0]);
                 let first = imported[0].rel_path.rsplit('/').next().unwrap_or_default();
                 *self.status = if imported.len() == 1 {
                     format!("已插入图片 {first}。")
@@ -2756,32 +4031,9 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 把导入的 markdown 插进审校稿：编辑框有焦点时插到光标处，否则追加到文末。
-    ///
-    /// 插入点前后按需补空行——导入的是标题、表格这类块级内容，紧贴着上一行会被
-    /// markdown 当成同一段，表格更是直接不成表。
-    fn insert_imported_markdown(&mut self, ui: &egui::Ui, markdown: &str, path: &Path) {
-        let cursor_char = if ui.ctx().memory(|memory| memory.has_focus(editor_id())) {
-            egui::TextEdit::load_state(ui.ctx(), editor_id())
-                .and_then(|state| state.cursor.char_range())
-                .map(|range| range.primary.index.0)
-        } else {
-            None
-        };
-        let text = &mut self.doc.generated_markdown;
-        let pos = match cursor_char {
-            Some(char_index) => text
-                .char_indices()
-                .nth(char_index)
-                .map_or(text.len(), |(byte, _)| byte),
-            None => text.len(),
-        };
-        let lead = blank_line_padding(text[..pos].trim_end_matches(' '), true);
-        let tail = blank_line_padding(text[pos..].trim_start_matches(' '), false);
-        let insertion = format!("{lead}{markdown}{tail}");
-        text.insert_str(pos, &insertion);
-        // 光标落到导入内容的末尾，方便接着往下写。
-        self.doc.pending_source_jump = Some(pos + lead.len() + markdown.len());
+    /// 把导入的 markdown 插进审校稿，并立即重新校验一遍。
+    fn insert_imported_markdown(&mut self, ctx: &egui::Context, markdown: &str, path: &Path) {
+        self.insert_block(ctx, markdown);
         self.revalidate();
         *self.status = format!(
             "已从 {} 导入 {} 字。",
@@ -2799,19 +4051,6 @@ impl DraftPage<'_> {
                 .frame(theme::panel(theme::surface(), 12))
                 .show(ui, |ui| self.markdown_find_ui(ui));
         }
-        // 特殊标记符号栏：仅在有源码编辑器的视图（源码/实时排版/对照）里
-        // 显示在编辑器上方，可整条隐藏。
-        if self.doc.mark_toolbar_visible
-            && matches!(
-                self.doc.preview_mode,
-                PreviewMode::Source | PreviewMode::Hybrid | PreviewMode::Split
-            )
-        {
-            egui::Panel::top("preview_mark_toolbar")
-                .frame(theme::panel(theme::surface(), 12))
-                .show(ui, |ui| self.mark_toolbar_ui(ui));
-        }
-
         egui::CentralPanel::default()
             .frame(theme::panel(theme::canvas(), 10))
             .show(ui, |ui| match self.doc.preview_mode {
@@ -3148,19 +4387,17 @@ impl DraftPage<'_> {
     }
 
     /// 预览缩放：默认按面板宽度自适应，也可以手动锁定倍率。
-    /// 顶栏是从右往左排的，这里的添加顺序与视觉顺序相反：屏幕上读作
-    /// “适应宽度、缩小、120%、放大”。
     pub(crate) fn zoom_controls(&mut self, ui: &mut egui::Ui) {
         // 自适应时以当前实际倍率为起点加减，避免首次放大反而变小。
         let current = self.doc.preview_zoom.unwrap_or(self.doc.preview_fit_scale);
-        if theme::icon_button(ui, theme::Icon::ZoomIn, "放大").clicked() {
-            self.doc.preview_zoom = Some((current + 0.1).min(2.0));
+        if theme::icon_button(ui, theme::Icon::ZoomOut, "缩小").clicked() {
+            self.doc.preview_zoom = Some((current - 0.1).max(0.4));
         }
         ui.label(
             egui::RichText::new(format!("{:.0}%", current * 100.0)).color(theme::text_muted()),
         );
-        if theme::icon_button(ui, theme::Icon::ZoomOut, "缩小").clicked() {
-            self.doc.preview_zoom = Some((current - 0.1).max(0.4));
+        if theme::icon_button(ui, theme::Icon::ZoomIn, "放大").clicked() {
+            self.doc.preview_zoom = Some((current + 0.1).min(2.0));
         }
         if theme::icon_button_enabled(
             ui,
@@ -3173,7 +4410,6 @@ impl DraftPage<'_> {
         {
             self.doc.preview_zoom = None;
         }
-        ui.separator();
     }
 
     /// Markdown 源码编辑框，带语法高亮。
@@ -3591,7 +4827,7 @@ impl DraftPage<'_> {
         let versions = self.draft_version_rows();
         let enabled = self.doc.manuscript_id.is_some() && !versions.is_empty();
         let current = self.current_version_target();
-        // 工具栏寸土寸金：这里只显示版本号，完整名称交给悬停说明。
+        // 功能区寸土寸金：这里只显示版本号，完整名称交给悬停说明。
         let label = match current {
             VersionTarget::Version(number) => format!("v{number}"),
             VersionTarget::Working => "未提交".to_string(),
@@ -3941,5 +5177,231 @@ mod tests {
             text.replace_range(range, "乙单位");
         }
         assert_eq!(text, "乙单位、乙单位、乙单位");
+    }
+
+    /// 表格解析：光标所在的行列要认得出来，分隔行上的光标算表头。
+    #[test]
+    fn table_at_locates_cursor_row_and_column() {
+        let text = "前言
+
+| 序号 | 名称 |
+| --- | :---: |
+| 1 | 甲 |
+| 2 | 乙 |
+
+后记";
+        let at = |needle: &str| text.find(needle).expect("片段存在");
+
+        let table = table_at(text, at("甲")).expect("光标在表格里");
+        assert_eq!(table.rows.len(), 3, "表头 + 两行数据，分隔行不算");
+        assert_eq!(table.row, 1);
+        assert_eq!(table.column, 1);
+        assert_eq!(table.aligns, vec![ColumnAlign::Auto, ColumnAlign::Center]);
+
+        // 分隔行上的光标归到表头，列仍按竖线数。
+        let table = table_at(text, at(":---:")).expect("分隔行也在表格里");
+        assert_eq!(table.row, 0);
+        assert_eq!(table.column, 1);
+
+        assert!(table_at(text, at("前言")).is_none());
+        assert!(table_at(text, at("后记")).is_none());
+    }
+
+    /// 缺了分隔行的几行竖线不是表格，不能当表格改。
+    #[test]
+    fn table_at_rejects_pipes_without_a_separator_row() {
+        let text = "| 甲 | 乙 |
+| 丙 | 丁 |";
+        assert!(table_at(text, 3).is_none());
+    }
+
+    /// 增删行列之后整表重排：列宽按最宽的一格算，中文按两格宽。
+    #[test]
+    fn render_table_pads_by_display_width() {
+        let rows = vec![
+            vec!["序号".to_string(), "名称".to_string()],
+            vec!["1".to_string(), "甲单位".to_string()],
+        ];
+        let rendered = render_table(&rows, &[ColumnAlign::Auto, ColumnAlign::Center]);
+        assert_eq!(
+            rendered,
+            "| 序号 | 名称   |
+| ---- | :----: |
+| 1    | 甲单位 |"
+        );
+        // 重新解析一遍，行列与对齐都不变。
+        let table = table_at(&rendered, 3).expect("是一张表格");
+        assert_eq!(table.rows, rows);
+        assert_eq!(table.aligns, vec![ColumnAlign::Auto, ColumnAlign::Center]);
+    }
+
+    /// 窄列写上对齐冒号之后，分隔行仍要能被认成分隔行：GFM 要求去掉冒号后
+    /// 还有三条短横，`:-:` 那样写出来的表会整张退化成普通段落。
+    #[test]
+    fn narrow_columns_still_render_a_valid_separator_row() {
+        for align in [
+            ColumnAlign::Auto,
+            ColumnAlign::Left,
+            ColumnAlign::Center,
+            ColumnAlign::Right,
+        ] {
+            let rows = vec![
+                vec!["甲".to_string(), "乙".to_string()],
+                vec!["1".to_string(), "2".to_string()],
+            ];
+            let rendered = render_table(&rows, &[align, ColumnAlign::Auto]);
+            let separator = rendered.lines().nth(1).expect("有分隔行");
+            assert!(
+                is_table_separator_line(separator),
+                "{align:?} 的分隔行不合法：{separator}"
+            );
+            // 导出器与光标定位也要认得它。
+            let table = table_at(&rendered, 0).expect("是一张表格");
+            assert_eq!(table.aligns, vec![align, ColumnAlign::Auto]);
+            assert!(matches!(
+                export::parse_markdown(&rendered).first(),
+                Some(export::MarkdownBlock::Table { .. })
+            ));
+        }
+    }
+
+    /// 一列的「表格」不成表：GFM 要求分隔行至少切出两格，所以插入时兜底到两列。
+    #[test]
+    fn blank_table_never_has_a_single_column() {
+        let table = blank_table(2, 1);
+        assert_eq!(table_column_count(table.lines().next().expect("有表头")), 2);
+        assert!(matches!(
+            export::parse_markdown(&table).first(),
+            Some(export::MarkdownBlock::Table { .. })
+        ));
+    }
+
+    /// 网格选择器插出来的空表：首行是表头，分隔行认得出来。
+    #[test]
+    fn blank_table_has_a_header_and_separator() {
+        let table = blank_table(3, 2);
+        let lines = table.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4, "3 行 + 1 条分隔行");
+        assert!(is_table_separator_line(lines[1]), "{}", lines[1]);
+        assert_eq!(table_column_count(lines[0]), 2);
+        // 导出器也要认得它是一张表。
+        assert!(matches!(
+            export::parse_markdown(&table).first(),
+            Some(export::MarkdownBlock::Table { rows, .. }) if rows.len() == 3
+        ));
+    }
+
+    /// 标题层级：反复点不同层级不会把 `#` 越堆越多，降为正文能清干净。
+    #[test]
+    fn set_heading_replaces_existing_level() {
+        assert_eq!(set_heading("正文一段", 2), "## 正文一段");
+        assert_eq!(set_heading("## 一级标题", 3), "### 一级标题");
+        assert_eq!(set_heading("### 二级标题", 0), "二级标题");
+        assert_eq!(set_heading("  ## 带缩进", 2), "## 带缩进");
+    }
+
+    /// 项目符号是开关：第二次点回到普通段落。
+    #[test]
+    fn toggle_bullet_switches_both_ways() {
+        assert_eq!(toggle_bullet("一条"), "- 一条");
+        assert_eq!(toggle_bullet("- 一条"), "一条");
+        assert_eq!(toggle_bullet("* 一条"), "一条");
+        assert_eq!(toggle_bullet(""), "", "空行不加符号");
+    }
+
+    /// 选区覆盖到的每一行都要改到，选区落在行中间也按整行算。
+    #[test]
+    fn map_lines_covers_every_touched_line() {
+        let text = "第一行
+第二行
+第三行";
+        let start = text.find("一行").expect("命中");
+        let end = text.find("二行").expect("命中");
+        let (updated, span) = map_lines(text, &(start..end), |line| set_heading(line, 2));
+        assert_eq!(
+            updated,
+            "## 第一行
+## 第二行
+第三行"
+        );
+        assert_eq!(
+            &updated[span],
+            "## 第一行
+## 第二行"
+        );
+    }
+
+    /// 加粗是开关：选中已加粗的文字（连标记一起选，或只选中间）都能取消。
+    #[test]
+    fn toggle_bold_wraps_and_unwraps() {
+        let text = "这是重点内容";
+        let range = text.find("重点").expect("命中")..text.find("内容").expect("命中");
+        let (bolded, selection) = toggle_bold(text, &range);
+        assert_eq!(bolded, "这是**重点**内容");
+        assert_eq!(&bolded[selection.clone()], "重点");
+
+        // 只选中间：靠两侧的标记识别出已加粗。
+        let (plain, restored) = toggle_bold(&bolded, &selection);
+        assert_eq!(plain, "这是重点内容");
+        assert_eq!(&plain[restored], "重点");
+
+        // 连标记一起选中同样能取消。
+        let whole = bolded.find("**").expect("命中")..bolded.rfind("**").expect("命中") + 2;
+        assert_eq!(toggle_bold(&bolded, &whole).0, "这是重点内容");
+    }
+
+    /// 清理空行：连续空行压成一行，行尾空格去掉，文末只留一个换行。
+    #[test]
+    fn tidy_blank_lines_collapses_runs() {
+        assert_eq!(
+            tidy_blank_lines(
+                "标题   
+
+
+
+正文
+
+
+"
+            ),
+            "标题
+
+正文
+"
+        );
+        assert_eq!(tidy_blank_lines(""), "");
+    }
+
+    /// 字数按导出后的正文算：标记、竖线、图片引用都不计。
+    #[test]
+    fn body_stats_counts_visible_text_only() {
+        let markdown = "# 测试函
+
+<!-- [正文] -->
+
+## 一、要求
+
+**重点**内容。
+
+| 甲 | 乙 |
+| --- | --- |
+| 1 | 2 |
+
+![图](images/a.png)
+
+又一段。";
+        let (characters, paragraphs) = body_stats(markdown);
+        // 测试函(3) + 要求(2，标题里手写的“一、”由导出器统一编号，不计)
+        // + 重点内容。(5) + 表格四格(4) + 又一段。(4)
+        assert_eq!(characters, 18);
+        assert_eq!(paragraphs, 2, "只有两个真正的段落");
+    }
+
+    /// 中文日期是公文成文日期的写法：年份逐位、月日用中文数字。
+    #[test]
+    fn chinese_today_reads_like_a_document_date() {
+        let today = chinese_today();
+        assert!(export::chinese_date_parts(&today).is_some(), "{today}");
+        assert!(!today.chars().any(|ch| ch.is_ascii_digit()), "{today}");
     }
 }

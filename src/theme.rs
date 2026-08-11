@@ -557,19 +557,28 @@ pub fn reset_window_anim(ctx: &egui::Context, id: egui::Id) {
 /// 以 SVG 原始字节随应用编译，不依赖外部文件或运行时网络。
 #[derive(Debug, Clone, Copy)]
 pub enum Icon {
+    AlignCenter,
+    AlignLeft,
+    AlignRight,
     Archive,
     ArrowDown,
     ArrowUp,
     ArrowUpDown,
+    Bold,
     BookmarkCheck,
     Book,
+    Braces,
     Building,
+    Calendar,
     ChevronDown,
     ChevronRight,
+    ChevronUp,
     Collapse,
+    Columns,
     Compare,
     Copy,
     Edit,
+    Eraser,
     Expand,
     Eye,
     FileDown,
@@ -581,8 +590,12 @@ pub enum Icon {
     Folder,
     FolderPlus,
     GitCommit,
+    Hash,
+    Heading,
     History,
     Library,
+    List,
+    ListOrdered,
     Menu,
     Open,
     Package,
@@ -592,11 +605,15 @@ pub enum Icon {
     Paperclip,
     Palette,
     PencilLine,
+    Phone,
     PlugZap,
     Publish,
+    Quote,
     Refresh,
+    RemoveFormatting,
     Reveal,
     RotateCcw,
+    Rows,
     SearchClear,
     Save,
     Settings,
@@ -604,8 +621,10 @@ pub enum Icon {
     Sparkles,
     Square,
     SquareCheck,
+    Table,
     Tex,
     Trash,
+    TriangleAlert,
     Type,
     Undo,
     UserPlus,
@@ -618,6 +637,18 @@ pub enum Icon {
 impl Icon {
     fn source(self) -> (&'static str, &'static [u8]) {
         match self {
+            Self::AlignCenter => (
+                "align-center",
+                include_bytes!("../assets/icons/align-center.svg"),
+            ),
+            Self::AlignLeft => (
+                "align-left",
+                include_bytes!("../assets/icons/align-left.svg"),
+            ),
+            Self::AlignRight => (
+                "align-right",
+                include_bytes!("../assets/icons/align-right.svg"),
+            ),
             Self::Archive => ("archive", include_bytes!("../assets/icons/archive.svg")),
             Self::ArrowDown => (
                 "arrow-down",
@@ -628,15 +659,18 @@ impl Icon {
                 "arrow-up-down",
                 include_bytes!("../assets/icons/arrow-up-down.svg"),
             ),
+            Self::Bold => ("bold", include_bytes!("../assets/icons/bold.svg")),
             Self::BookmarkCheck => (
                 "bookmark-check",
                 include_bytes!("../assets/icons/bookmark-check.svg"),
             ),
             Self::Book => ("book-open", include_bytes!("../assets/icons/book-open.svg")),
+            Self::Braces => ("braces", include_bytes!("../assets/icons/braces.svg")),
             Self::Building => (
                 "building-2",
                 include_bytes!("../assets/icons/building-2.svg"),
             ),
+            Self::Calendar => ("calendar", include_bytes!("../assets/icons/calendar.svg")),
             Self::ChevronDown => (
                 "chevron-down",
                 include_bytes!("../assets/icons/chevron-down.svg"),
@@ -645,16 +679,22 @@ impl Icon {
                 "chevron-right",
                 include_bytes!("../assets/icons/chevron-right.svg"),
             ),
+            Self::ChevronUp => (
+                "chevron-up",
+                include_bytes!("../assets/icons/chevron-up.svg"),
+            ),
             Self::Collapse => (
                 "minimize-2",
                 include_bytes!("../assets/icons/minimize-2.svg"),
             ),
+            Self::Columns => ("columns-3", include_bytes!("../assets/icons/columns-3.svg")),
             Self::Compare => (
                 "arrow-left-right",
                 include_bytes!("../assets/icons/arrow-left-right.svg"),
             ),
             Self::Copy => ("copy", include_bytes!("../assets/icons/copy.svg")),
             Self::Edit => ("pencil", include_bytes!("../assets/icons/pencil.svg")),
+            Self::Eraser => ("eraser", include_bytes!("../assets/icons/eraser.svg")),
             Self::Expand => (
                 "maximize-2",
                 include_bytes!("../assets/icons/maximize-2.svg"),
@@ -687,8 +727,15 @@ impl Icon {
                 "git-commit-horizontal",
                 include_bytes!("../assets/icons/git-commit-horizontal.svg"),
             ),
+            Self::Hash => ("hash", include_bytes!("../assets/icons/hash.svg")),
+            Self::Heading => ("heading", include_bytes!("../assets/icons/heading.svg")),
             Self::History => ("history", include_bytes!("../assets/icons/history.svg")),
             Self::Library => ("library", include_bytes!("../assets/icons/library.svg")),
+            Self::List => ("list", include_bytes!("../assets/icons/list.svg")),
+            Self::ListOrdered => (
+                "list-ordered",
+                include_bytes!("../assets/icons/list-ordered.svg"),
+            ),
             Self::Menu => ("menu", include_bytes!("../assets/icons/menu.svg")),
             Self::Open => (
                 "external-link",
@@ -713,11 +760,17 @@ impl Icon {
                 "pencil-line",
                 include_bytes!("../assets/icons/pencil-line.svg"),
             ),
+            Self::Phone => ("phone", include_bytes!("../assets/icons/phone.svg")),
             Self::PlugZap => ("plug-zap", include_bytes!("../assets/icons/plug-zap.svg")),
             Self::Publish => ("send", include_bytes!("../assets/icons/send.svg")),
+            Self::Quote => ("quote", include_bytes!("../assets/icons/quote.svg")),
             Self::Refresh => (
                 "refresh-cw",
                 include_bytes!("../assets/icons/refresh-cw.svg"),
+            ),
+            Self::RemoveFormatting => (
+                "remove-formatting",
+                include_bytes!("../assets/icons/remove-formatting.svg"),
             ),
             Self::Reveal => (
                 "folder-search",
@@ -727,6 +780,7 @@ impl Icon {
                 "rotate-ccw",
                 include_bytes!("../assets/icons/rotate-ccw.svg"),
             ),
+            Self::Rows => ("rows-3", include_bytes!("../assets/icons/rows-3.svg")),
             Self::SearchClear => ("search-x", include_bytes!("../assets/icons/search-x.svg")),
             Self::Save => ("save", include_bytes!("../assets/icons/save.svg")),
             Self::Settings => (
@@ -740,8 +794,13 @@ impl Icon {
                 "square-check-big",
                 include_bytes!("../assets/icons/square-check-big.svg"),
             ),
+            Self::Table => ("table", include_bytes!("../assets/icons/table.svg")),
             Self::Tex => ("tex", include_bytes!("../assets/icons/tex.svg")),
             Self::Trash => ("trash-2", include_bytes!("../assets/icons/trash-2.svg")),
+            Self::TriangleAlert => (
+                "triangle-alert",
+                include_bytes!("../assets/icons/triangle-alert.svg"),
+            ),
             Self::Type => ("type", include_bytes!("../assets/icons/type.svg")),
             Self::Undo => ("undo-2", include_bytes!("../assets/icons/undo-2.svg")),
             Self::UserPlus => ("user-plus", include_bytes!("../assets/icons/user-plus.svg")),
@@ -901,6 +960,32 @@ pub fn nav_button(ui: &mut egui::Ui, selected: bool, icon: Icon, label: &str) ->
             .frame_when_inactive(selected)
             .min_size(egui::vec2(74.0, 28.0)),
     )
+}
+
+/// 功能区分区卡：仿 Word 的选项卡，只有文字，选中项用强调色文字加下划线标出。
+/// 不用 `Button::selected` 的整块底色——分区卡一行有六个，六块底色会把第二行
+/// 的按钮压得没有层次。
+pub fn ribbon_tab_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
+    let text = if selected {
+        egui::RichText::new(label).color(accent()).strong()
+    } else {
+        egui::RichText::new(label).color(text_soft())
+    };
+    let response = ui.add(
+        egui::Button::new(text)
+            .frame_when_inactive(false)
+            .corner_radius(CornerRadius::same(6))
+            .min_size(egui::vec2(52.0, 24.0)),
+    );
+    if selected {
+        let rect = response.rect;
+        ui.painter().hline(
+            (rect.left() + 6.0)..=(rect.right() - 6.0),
+            rect.bottom(),
+            Stroke::new(2.0, accent()),
+        );
+    }
+    response
 }
 
 /// 编辑区右上角的视图切换：仿代码编辑器只保留图标，名称放在悬停说明中。

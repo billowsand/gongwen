@@ -1,6 +1,6 @@
 use super::{
-    MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level, chinese_date_parts,
-    inline_segments, official_heading_text, parse_markdown, plain_text,
+    ColumnAlign, MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level,
+    chinese_date_parts, inline_segments, official_heading_text, parse_markdown, plain_text,
     table::{ColumnAlignment, to_docx_grid},
     title::{self, TitlePlan},
 };
@@ -863,11 +863,11 @@ fn table_runs_sized(text: &str, header: bool, size: usize) -> Vec<Run> {
         .collect()
 }
 
-fn add_smart_table(mut doc: Docx, rows: &[Vec<String>]) -> Docx {
+fn add_smart_table(mut doc: Docx, rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Docx {
     if rows.is_empty() {
         return doc;
     }
-    let (grid, alignments) = to_docx_grid(rows, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE * 10);
+    let (grid, alignments) = to_docx_grid(rows, aligns, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE * 10);
     if grid.is_empty() {
         return doc;
     }
@@ -887,12 +887,15 @@ fn add_smart_table(mut doc: Docx, rows: &[Vec<String>]) -> Docx {
                 .enumerate()
                 .map(|(column_index, width)| {
                     let text = row.get(column_index).map_or("", String::as_str);
-                    let alignment = if row_index == 0
-                        || alignments.get(column_index) == Some(&ColumnAlignment::Center)
-                    {
+                    // 表头一律居中；正文单元格按列对齐（分隔行写了冒号就以它为准）。
+                    let alignment = if row_index == 0 {
                         AlignmentType::Center
                     } else {
-                        AlignmentType::Left
+                        match alignments.get(column_index) {
+                            Some(ColumnAlignment::Center) => AlignmentType::Center,
+                            Some(ColumnAlignment::Right) => AlignmentType::Right,
+                            _ => AlignmentType::Left,
+                        }
                     };
                     let runs = if name_column == Some(column_index) && row_index > 0 {
                         let segments = inline_segments(text);
@@ -963,7 +966,7 @@ fn add_official_content_block(
         MarkdownBlock::ListItem(text) => {
             doc = doc.add_paragraph(label_paragraph(text).indent(Some(420), None, None, None));
         }
-        MarkdownBlock::Table(rows) => doc = add_smart_table(doc, rows),
+        MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
         MarkdownBlock::Image { alt, src } => {
             if let Some(paragraph) = image_paragraph(alt, src) {
                 doc = doc.add_paragraph(paragraph);
@@ -1366,7 +1369,7 @@ pub fn write_docx(
                         None,
                     ));
                 }
-                MarkdownBlock::Table(rows) => doc = add_smart_table(doc, rows),
+                MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
             }
         }
     }

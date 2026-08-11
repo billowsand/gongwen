@@ -567,6 +567,8 @@ pub(crate) enum DraftAction {
     },
     /// 把当前版式记进配置并落盘。
     Persist,
+    /// 打开设置页（功能区「输出 → 导出设置」）。
+    OpenSettings,
 }
 
 impl GongwenApp {
@@ -1141,6 +1143,7 @@ impl GongwenApp {
                     version_number,
                 } => self.load_manuscript_version(manuscript_id, version_number),
                 DraftAction::Persist => self.persist(),
+                DraftAction::OpenSettings => self.open_page(NavPage::Settings),
             }
         }
     }
@@ -1311,6 +1314,16 @@ impl GongwenApp {
         let save = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::S);
         if ctx.input_mut(|input| input.consume_shortcut(&save)) && self.showing_doc() {
             self.save_to_manuscript_library();
+        }
+
+        // Ctrl+B 与功能区「格式 → 加粗」是同一件事。这里必须确认焦点确实在审校稿
+        // 编辑框上：焦点在要素表单或查找框里时按 Ctrl+B，改的不该是正文。
+        let bold = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::B);
+        if ctx.memory(|memory| memory.has_focus(editor_id()))
+            && ctx.input_mut(|input| input.consume_shortcut(&bold))
+            && self.showing_doc()
+        {
+            self.draft_page().toggle_bold(ctx);
         }
 
         let new_doc = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::N);
@@ -2260,29 +2273,68 @@ impl GongwenApp {
             egui::Sense::hover(),
         );
 
-        // 左侧标题区：整条可拖拽移动窗口，双击切换最大化。
+        // 左侧标题区：空白处可拖拽移动窗口，双击切换最大化。
         let title_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left() + 14.0, rect.top()),
             egui::pos2(rect.right() - 3.0 * BTN_W, rect.bottom()),
         );
+        let mut text_right = title_rect.left();
         if title_rect.width() > 60.0 {
-            ui.painter().text(
-                title_rect.left_center(),
-                egui::Align2::LEFT_CENTER,
-                version::APP_TITLE,
-                egui::FontId::proportional(13.0),
-                title_color,
-            );
+            text_right = ui
+                .painter()
+                .text(
+                    title_rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    version::APP_TITLE,
+                    egui::FontId::proportional(13.0),
+                    title_color,
+                )
+                .right();
         }
-        let drag = ui.interact(
-            title_rect,
-            ui.id().with("titlebar_drag"),
-            egui::Sense::click_and_drag(),
-        );
-        if drag.double_clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-        } else if drag.drag_started() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        // 快速访问工具栏：仿 Word 挂在标题栏上，与停在哪个分区卡无关。
+        // 只在活动标签是稿件时出现——设置页、词库页上它们没有作用对象。
+        let mut quick_rect: Option<egui::Rect> = None;
+        if self.showing_doc() {
+            let left = text_right + 18.0;
+            let available = egui::Rect::from_min_max(
+                egui::pos2(left, rect.top() + 4.0),
+                egui::pos2(title_rect.right() - 8.0, rect.bottom() - 4.0),
+            );
+            if available.width() > 120.0 {
+                let mut quick = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(available)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                quick.spacing_mut().item_spacing.x = 2.0;
+                self.titlebar_quick_access(&mut quick);
+                quick_rect = Some(quick.min_rect());
+            }
+        }
+        // 拖拽区绕开快速访问那几枚按钮：两侧各留一段，中间让给按钮。
+        let gap = quick_rect.map_or(title_rect.right()..title_rect.right(), |quick| {
+            (quick.left() - 4.0)..(quick.right() + 4.0)
+        });
+        for (index, zone) in [
+            egui::Rect::from_min_max(title_rect.min, egui::pos2(gap.start, title_rect.bottom())),
+            egui::Rect::from_min_max(egui::pos2(gap.end, title_rect.top()), title_rect.max),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if zone.width() < 4.0 {
+                continue;
+            }
+            let drag = ui.interact(
+                zone,
+                ui.id().with(("titlebar_drag", index)),
+                egui::Sense::click_and_drag(),
+            );
+            if drag.double_clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            } else if drag.drag_started() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
         }
 
         // 右侧三个窗口控制按钮：最小化 / 最大化·还原 / 关闭。
@@ -2370,6 +2422,59 @@ impl GongwenApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             None => {}
+        }
+    }
+
+    /// 标题栏上的快速访问：保存、提交版本、导出。这三件事跟当前停在哪个分区卡
+    /// 无关，任何时候都该够得着，所以仿 Word 挂在标题栏上而不是放进功能区。
+    /// 保存键上的小圆点表示有未写回稿件库的改动。
+    fn titlebar_quick_access(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.active_doc_ref() else {
+            return;
+        };
+        let editable = !doc.read_only();
+        let saved = doc.manuscript_id.is_some();
+        let manuscript_id = doc.manuscript_id;
+        let ready_to_export = !doc.busy && !doc.generated_markdown.trim().is_empty();
+        let dirty = doc.is_dirty();
+
+        let save = theme::icon_button_enabled(
+            ui,
+            editable,
+            theme::Icon::Save,
+            if saved {
+                "保存：写回稿件库中这条记录（Ctrl+S）"
+            } else {
+                "保存：在稿件库中新建一条草稿记录（Ctrl+S）"
+            },
+        );
+        if dirty {
+            let center = save.rect.right_top() + egui::vec2(-5.0, 5.0);
+            ui.painter().circle_filled(center, 3.0, theme::accent());
+        }
+        if save.clicked() {
+            self.save_to_manuscript_library();
+        }
+        if theme::icon_button_enabled(
+            ui,
+            saved && editable,
+            theme::Icon::GitCommit,
+            "提交版本：把当前内容固化为一个新版本",
+        )
+        .clicked()
+            && let Some(id) = manuscript_id
+        {
+            self.open_version_commit(VersionScope::Manuscript(id));
+        }
+        if theme::icon_button_enabled(
+            ui,
+            ready_to_export,
+            theme::Icon::FileDown,
+            "导出：按设置里勾选的格式出文件",
+        )
+        .clicked()
+        {
+            self.draft_page().start_export_current();
         }
     }
 

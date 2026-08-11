@@ -849,6 +849,61 @@ impl ThemeName {
     pub const ALL: [ThemeName; 4] = [Self::Claude, Self::Sky, Self::Lilac, Self::Green];
 }
 
+/// 起草页功能区的分区卡。仿 Word：第一行选分区，第二行才是该分区的按钮。
+///
+/// 记在配置里而不是每篇稿件各记各的——切分区是「我现在要干哪一类活」，
+/// 换一篇稿子通常还在干同一类活，每开一篇都要重新切反而累。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RibbonTab {
+    /// 常用：存盘、版本、查找、AI、校验。
+    #[default]
+    Home,
+    /// 往光标处插入表格、图片、公文构件、词库词条与符号。
+    Insert,
+    /// 改已有文字的 Markdown 标记：标题层级、加粗、列表、清理。
+    Format,
+    /// 校验、版本比对、查找、字数。
+    Review,
+    /// 显示方式、缩放与各个面板的开关。
+    View,
+    /// 导出与打开成品。
+    Output,
+}
+
+impl RibbonTab {
+    /// 分区卡顺序即屏幕上从左到右的顺序。
+    pub const ALL: [Self; 6] = [
+        Self::Home,
+        Self::Insert,
+        Self::Format,
+        Self::Review,
+        Self::View,
+        Self::Output,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Home => "开始",
+            Self::Insert => "插入",
+            Self::Format => "格式",
+            Self::Review => "审校",
+            Self::View => "视图",
+            Self::Output => "输出",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Home => "保存、版本、查找替换、AI 起草与优化、规则校验",
+            Self::Insert => "表格、图片、正文与附件标记、词库词条、日期与符号",
+            Self::Format => "标题层级、加粗、项目符号，以及引号与空行的规范化",
+            Self::Review => "重新校验、版本对照、查找替换、字数统计",
+            Self::View => "五种显示方式、预览缩放、各个面板的开关",
+            Self::Output => "按格式导出、打开输出目录与最近一次的成品",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -878,6 +933,10 @@ pub struct AppConfig {
     pub fonts: FontConfig,
     /// 界面明色主题。旧配置没有该字段时回退默认。
     pub theme: ThemeName,
+    /// 起草页功能区上次停在哪个分区卡。
+    pub ribbon_tab: RibbonTab,
+    /// 功能区第二行（当前分区的按钮）是否收起，只留分区卡那一条。
+    pub ribbon_collapsed: bool,
 }
 
 impl Default for AppConfig {
@@ -902,6 +961,8 @@ impl Default for AppConfig {
             rag: RagConfig::default(),
             fonts: FontConfig::default(),
             theme: ThemeName::default(),
+            ribbon_tab: RibbonTab::default(),
+            ribbon_collapsed: false,
         }
     }
 }

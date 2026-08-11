@@ -641,8 +641,8 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
                 target_tex_section(section, &mut body, &mut attachments)
                     .push(format!("\\noindent {}\\par", body_text_to_tex(text)));
             }
-            MarkdownBlock::Table(rows) => {
-                let rendered = to_longtblr(rows);
+            MarkdownBlock::Table { rows, aligns } => {
+                let rendered = to_longtblr(rows, aligns);
                 if !rendered.is_empty() {
                     target_tex_section(section, &mut body, &mut attachments).push(rendered);
                 }
@@ -681,7 +681,7 @@ fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> {
                 current_attachment = Some(flags.len() - 1);
             }
             MarkdownBlock::Marker(MarkdownSection::Body) => current_attachment = None,
-            MarkdownBlock::Table(rows) => {
+            MarkdownBlock::Table { rows, .. } => {
                 if let Some(index) = current_attachment
                     && requires_landscape(rows)
                 {

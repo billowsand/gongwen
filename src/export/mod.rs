@@ -1,6 +1,6 @@
 mod docx;
 mod latex;
-mod table;
+pub(crate) mod table;
 mod title;
 
 use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
@@ -253,7 +253,12 @@ pub(crate) enum MarkdownBlock {
     Heading(u8, String),
     Paragraph(String),
     ListItem(String),
-    Table(Vec<Vec<String>>),
+    /// GFM 表格。`aligns` 是分隔行里写明的列对齐，与列一一对应；
+    /// 没写冒号的列是 `Auto`，交给智能列宽按内容判定。
+    Table {
+        rows: Vec<Vec<String>>,
+        aligns: Vec<ColumnAlign>,
+    },
     Marker(MarkdownSection),
     Html(String),
     /// 独占一行的图片引用 `![alt](src)`，`src` 为相对路径（如 `images/xxx.png`）。
@@ -267,6 +272,61 @@ pub(crate) enum MarkdownBlock {
 pub(crate) enum MarkdownSection {
     Body,
     Attachment,
+}
+
+/// GFM 表格分隔行里写明的列对齐：`---`、`:---`、`:---:`、`---:`。
+/// `Auto` 表示没写冒号，由 `table::analyze_table` 按内容判定（短数字列居中、
+/// 长文本左对齐）；写了冒号就以冒号为准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ColumnAlign {
+    #[default]
+    Auto,
+    Left,
+    Center,
+    Right,
+}
+
+impl ColumnAlign {
+    /// 分隔行里的一格。
+    pub(crate) fn parse(cell: &str) -> Self {
+        let cell = cell.trim();
+        match (cell.starts_with(':'), cell.ends_with(':')) {
+            (true, true) => Self::Center,
+            (true, false) => Self::Left,
+            (false, true) => Self::Right,
+            (false, false) => Self::Auto,
+        }
+    }
+
+    /// 分隔行这一格最少要多宽。GFM 的分隔行判定要求**去掉冒号之后**仍有三条
+    /// 短横，写成 `:-:` 的那一格谁都不认，整张表会退化成普通段落。
+    pub(crate) fn min_width(self) -> usize {
+        match self {
+            Self::Auto => 3,
+            Self::Left | Self::Right => 4,
+            Self::Center => 5,
+        }
+    }
+
+    /// 按给定列宽写出分隔行的一格。
+    pub(crate) fn render(self, width: usize) -> String {
+        let width = width.max(self.min_width());
+        match self {
+            Self::Auto => "-".repeat(width),
+            Self::Left => format!(":{}", "-".repeat(width - 1)),
+            Self::Center => format!(":{}:", "-".repeat(width - 2)),
+            Self::Right => format!("{}:", "-".repeat(width - 1)),
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动（按内容判定）",
+            Self::Left => "左对齐",
+            Self::Center => "居中",
+            Self::Right => "右对齐",
+        }
+    }
 }
 
 /// 一个 Markdown 块，外加它在源码中的字节范围。界面预览据此在点击版式时
@@ -368,6 +428,11 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
         {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             let mut rows = vec![parse_table_row(line)];
+            // 分隔行不进正文，但它的冒号决定各列对齐。
+            let mut aligns = parse_table_row(lines[index + 1].1.trim())
+                .iter()
+                .map(|cell| ColumnAlign::parse(cell))
+                .collect::<Vec<_>>();
             let mut end = lines[index + 1].0 + lines[index + 1].1.len();
             index += 2;
             while index < lines.len() && is_table_row(lines[index].1.trim()) {
@@ -380,8 +445,9 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
                 row.resize(column_count, String::new());
                 row.truncate(column_count);
             }
+            aligns.resize(column_count, ColumnAlign::Auto);
             blocks.push(LocatedBlock {
-                block: MarkdownBlock::Table(rows),
+                block: MarkdownBlock::Table { rows, aligns },
                 range: start..end,
             });
             continue;
@@ -728,23 +794,30 @@ impl HeadingCounters {
     }
 }
 
-/// 表格的一列在版心中所占的比例，以及是否居中。界面预览据此复用导出器的
-/// 智能列宽，保证预览里的列宽与导出的 Word 表格一致。
+/// 表格的一列在版心中所占的比例，以及它的对齐方式。界面预览据此复用导出器的
+/// 智能列宽，保证预览里的列宽、对齐与导出的 Word 表格一致。
 pub(crate) struct TableColumn {
     /// 占版心宽度的比例，各列相加为 1。
     pub(crate) fraction: f32,
-    pub(crate) centered: bool,
+    pub(crate) alignment: table::ColumnAlignment,
 }
 
-pub(crate) fn table_columns(rows: &[Vec<String>]) -> Vec<TableColumn> {
-    let (grid, alignments) =
-        table::to_docx_grid(rows, docx::TABLE_CONTENT_WIDTH_TWIPS, docx::TABLE_SIZE * 10);
+pub(crate) fn table_columns(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Vec<TableColumn> {
+    let (grid, alignments) = table::to_docx_grid(
+        rows,
+        aligns,
+        docx::TABLE_CONTENT_WIDTH_TWIPS,
+        docx::TABLE_SIZE * 10,
+    );
     let total = grid.iter().sum::<usize>().max(1) as f32;
     grid.iter()
         .enumerate()
         .map(|(index, width)| TableColumn {
             fraction: *width as f32 / total,
-            centered: alignments.get(index) == Some(&table::ColumnAlignment::Center),
+            alignment: alignments
+                .get(index)
+                .copied()
+                .unwrap_or(table::ColumnAlignment::Left),
         })
         .collect()
 }
@@ -767,7 +840,9 @@ pub(crate) fn plain_text(text: &str) -> String {
 }
 
 /// 把正文中的直引号、方向错误或风格混杂的引号统一为正确配对的中文引号。
-fn normalize_chinese_quotes(text: &str) -> String {
+/// 导出时本来就会做一遍；起草页「格式 → 规范引号」把它提到源码上，
+/// 好让编辑区看到的和导出结果一致。
+pub(crate) fn normalize_chinese_quotes(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut double_open = true;
     let mut single_open = true;
@@ -1193,8 +1268,37 @@ mod tests {
             "# 附件测试\n| 序号 | 名称 | 说明 |\n| --- | --- | --- |\n| 1 | 甲 | 较长说明 |\n| 2 | 乙 | 另一说明 |",
         );
         assert!(
-            matches!(&blocks[1], MarkdownBlock::Table(rows) if rows.len() == 3 && rows[0].len() == 3)
+            matches!(&blocks[1], MarkdownBlock::Table { rows, .. } if rows.len() == 3 && rows[0].len() == 3)
         );
+    }
+
+    /// 分隔行里的冒号是列对齐，随表格一起带给导出器与预览。
+    #[test]
+    fn table_keeps_column_alignment_from_the_separator_row() {
+        let blocks = parse_markdown(
+            "| 序号 | 名称 | 金额 |
+| :--- | :---: | ---: |
+| 1 | 甲 | 12 |",
+        );
+        let MarkdownBlock::Table { rows, aligns } = &blocks[0] else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert_eq!(rows.len(), 2, "分隔行不进正文");
+        assert_eq!(
+            aligns,
+            &[ColumnAlign::Left, ColumnAlign::Center, ColumnAlign::Right]
+        );
+
+        // 不写冒号就是 Auto，交给智能列宽判定。
+        let blocks = parse_markdown(
+            "| 甲 | 乙 |
+| --- | --- |
+| 1 | 2 |",
+        );
+        let MarkdownBlock::Table { aligns, .. } = &blocks[0] else {
+            panic!("应当解析为表格");
+        };
+        assert_eq!(aligns, &[ColumnAlign::Auto, ColumnAlign::Auto]);
     }
 
     #[test]

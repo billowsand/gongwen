@@ -1,6 +1,6 @@
 //! 与 mdx official/research 共用思路的智能表格列宽分析。
 
-use super::inline_segments;
+use super::{ColumnAlign, inline_segments};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -23,6 +23,7 @@ const MAX_PROSE_COLUMN_EM: f64 = 10.0;
 pub(crate) enum ColumnAlignment {
     Left,
     Center,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -195,7 +196,9 @@ fn has_sentence_punctuation(value: &str) -> bool {
         || (width > SHORT_TEXT_THRESHOLD && value.chars().any(|ch| ['，', '、', ','].contains(&ch)))
 }
 
-fn analyze_table(rows: &[Vec<String>]) -> Vec<ColumnLayout> {
+/// `aligns` 是 Markdown 分隔行里写明的列对齐。写了冒号的列以它为准，
+/// 其余列仍按内容判定——公文表格多数不写冒号，那套启发式还是主力。
+fn analyze_table(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Vec<ColumnLayout> {
     let column_count = rows.first().map_or(0, Vec::len);
     if column_count == 0 {
         return Vec::new();
@@ -244,12 +247,15 @@ fn analyze_table(rows: &[Vec<String>]) -> Vec<ColumnLayout> {
         .map(|(index, column)| {
             let numeric = column.count > 0
                 && column.numeric_count as f64 / column.count as f64 >= NUMERIC_RATIO_THRESHOLD;
-            let alignment = if numeric {
-                ColumnAlignment::Center
-            } else if column.has_punctuation || column.has_long_text {
-                ColumnAlignment::Left
-            } else {
-                ColumnAlignment::Center
+            let alignment = match aligns.get(index).copied().unwrap_or_default() {
+                ColumnAlign::Left => ColumnAlignment::Left,
+                ColumnAlign::Center => ColumnAlignment::Center,
+                ColumnAlign::Right => ColumnAlignment::Right,
+                ColumnAlign::Auto if numeric => ColumnAlignment::Center,
+                ColumnAlign::Auto if column.has_punctuation || column.has_long_text => {
+                    ColumnAlignment::Left
+                }
+                ColumnAlign::Auto => ColumnAlignment::Center,
             };
             let width = if column.count > 0 && column.all_short_digits {
                 ColumnWidth::FixedEm(NARROW_NUMERIC_WIDTH_EM)
@@ -265,10 +271,11 @@ fn analyze_table(rows: &[Vec<String>]) -> Vec<ColumnLayout> {
 
 pub(super) fn to_docx_grid(
     rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
     total_width_twips: usize,
     em_width_twips: usize,
 ) -> (Vec<usize>, Vec<ColumnAlignment>) {
-    let columns = analyze_table(rows);
+    let columns = analyze_table(rows, aligns);
     let fixed = columns
         .iter()
         .map(|column| match column.width {
@@ -306,8 +313,8 @@ pub(super) fn to_docx_grid(
     (grid, alignments)
 }
 
-pub(super) fn to_longtblr(rows: &[Vec<String>]) -> String {
-    let columns = analyze_table(rows);
+pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> String {
+    let columns = analyze_table(rows, aligns);
     if rows.is_empty() || columns.is_empty() {
         return String::new();
     }
@@ -323,6 +330,7 @@ pub(super) fn to_longtblr(rows: &[Vec<String>]) -> String {
             let align = match column.alignment {
                 ColumnAlignment::Left => 'l',
                 ColumnAlignment::Center => 'c',
+                ColumnAlignment::Right => 'r',
             };
             match column.width {
                 ColumnWidth::FixedEm(em) => format!("Q[{align},wd={em:.0}em]"),
@@ -427,15 +435,40 @@ mod tests {
 
     #[test]
     fn narrow_numeric_column_is_fixed_and_docx_fills_width() {
-        let (grid, _) = to_docx_grid(&rows(), 8_844, 280);
+        let (grid, _) = to_docx_grid(&rows(), &[], 8_844, 280);
         assert_eq!(grid[0], 560);
         assert_eq!(grid.iter().sum::<usize>(), 8_844);
         assert!(grid[2] > grid[1]);
     }
 
+    /// 分隔行里写了冒号的列以冒号为准，其余列仍按内容判定。
+    #[test]
+    fn explicit_alignment_overrides_the_heuristic() {
+        // 不写冒号时首列是数字列，智能列宽判它居中。
+        let (_, alignments) = to_docx_grid(&rows(), &[], 8_844, 280);
+        assert_eq!(alignments[0], ColumnAlignment::Center);
+        assert_eq!(alignments[2], ColumnAlignment::Left, "长说明列左对齐");
+
+        let aligns = [ColumnAlign::Left, ColumnAlign::Auto, ColumnAlign::Right];
+        let (_, alignments) = to_docx_grid(&rows(), &aligns, 8_844, 280);
+        assert_eq!(alignments[0], ColumnAlignment::Left);
+        assert_eq!(alignments[2], ColumnAlignment::Right);
+        // 没写冒号的第二列不受影响，仍按内容判定。
+        assert_eq!(alignments[1], ColumnAlignment::Center);
+
+        // TeX 的 colspec 跟着换成 l / r。
+        let tex = to_longtblr(&rows(), &aligns);
+        let colspec = tex
+            .lines()
+            .find(|line| line.contains("colspec"))
+            .expect("有 colspec");
+        assert!(colspec.contains("[l,"), "首列应左对齐：{colspec}");
+        assert!(colspec.contains(",r]"), "末列应右对齐：{colspec}");
+    }
+
     #[test]
     fn tex_uses_longtblr_with_matching_smart_columns() {
-        let tex = to_longtblr(&rows());
+        let tex = to_longtblr(&rows(), &[]);
         assert!(tex.contains("\\begin{longtblr}"));
         assert!(tex.contains("label = none"));
         assert!(tex.contains("entry = none"));
@@ -511,7 +544,7 @@ mod tests {
             vec!["项目".into(), "说明".into()],
             vec!["甲".into(), "\"**重点**\"内容".into()],
         ];
-        let tex = to_longtblr(&table);
+        let tex = to_longtblr(&table, &[]);
         assert!(tex.contains("“\\textbf{重点}”内容"), "{tex}");
         assert!(!tex.contains("**"));
     }
@@ -524,7 +557,7 @@ mod tests {
             vec!["2".into(), "王小明".into()],
             vec!["3".into(), "欧阳翠花".into()],
         ];
-        let tex = to_longtblr(&table);
+        let tex = to_longtblr(&table, &[]);
         // 2 字姓名中间加 1em。
         assert!(tex.contains("张\\hspace{1em}三"));
         // 4 字姓名压缩到 3 字宽。
