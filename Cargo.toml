@@ -1,6 +1,6 @@
 [package]
 name = "gongwen-assistant"
-version = "0.3.14"
+version = "0.3.15"
 edition = "2024"
 description = "基于 egui 与本地 LM Studio 的离线公文写作助手"
 license = "MIT"
@@ -24,7 +24,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 jieba-rs = "0.8"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-rfd = "0.15"
+# Linux 上用 GTK3 后端（自带对话框），不依赖 xdg-desktop-portal / zenity，
+# 麒麟等无 portal 文件服务的国产系统也能正常弹出文件选择框。
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rust_xlsxwriter = "0.79"
 serde = { version = "1.0", features = ["derive"] }

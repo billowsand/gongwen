@@ -77,28 +77,13 @@ jobs:
             "$($_.Hash.ToLowerInvariant())  $asset"
           } | Set-Content "${asset}.sha256" -Encoding utf8
 
-      - name: Package minimal release zip
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $staging = Join-Path $env:RUNNER_TEMP 'staging'
-          New-Item -ItemType Directory -Path $staging | Out-Null
-          Copy-Item "target/release/gongwen-assistant.exe" $staging
-          Copy-Item README.md, THIRD_PARTY_NOTICES.md, LICENSE, config.example.json $staging
-          Copy-Item -LiteralPath "font/licenses" -Destination (Join-Path $staging "licenses/fonts") -Recurse
-          $asset = "gongwen-assistant-$version-win-x64.zip"
-          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $asset
-          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
-            "$($_.Hash.ToLowerInvariant())  $asset"
-          } | Set-Content "$asset.sha256" -Encoding utf8
-
       - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
         with:
           name: release-win-x64
           path: |
-            gongwen-assistant-*.zip*
-            gongwen-assistant-*-setup.exe*
+            gongwen-assistant-*-win-x64-full.zip*
+            gongwen-assistant-*-win-x64-setup.exe*
           if-no-files-found: error
 
   build-linux-arm64:
@@ -260,28 +245,12 @@ jobs:
             "$($_.Hash.ToLowerInvariant())  $asset"
           } | Set-Content "${asset}.sha256" -Encoding utf8
 
-      - name: Package minimal release zip
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $staging = Join-Path $env:RUNNER_TEMP 'staging'
-          New-Item -ItemType Directory -Path $staging | Out-Null
-          Copy-Item "target/release/gongwen-assistant" $staging
-          Copy-Item README.md, THIRD_PARTY_NOTICES.md, LICENSE, config.example.json $staging
-          Copy-Item -LiteralPath "font/licenses" -Destination (Join-Path $staging "licenses/fonts") -Recurse
-          $asset = "gongwen-assistant-$version-linux-arm64-glibc228.zip"
-          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $asset
-          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
-            "$($_.Hash.ToLowerInvariant())  $asset"
-          } | Set-Content "$asset.sha256" -Encoding utf8
-
       - name: Upload Linux release assets
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-arm64
           path: |
-            gongwen-assistant-*.zip*
-            gongwen-assistant-*.tar.gz*
+            gongwen-assistant-*-linux-arm64-*.tar.gz*
           if-no-files-found: error
 
   release:
