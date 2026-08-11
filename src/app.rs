@@ -4712,6 +4712,7 @@ impl GongwenApp {
         }
 
         let mut action: Option<ManuscriptAction> = None;
+        const SINGLE_PAGE_DETAIL_MAX_WIDTH: f32 = 720.0;
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -4735,20 +4736,71 @@ impl GongwenApp {
         });
         ui.add_space(8.0);
 
-        self.manuscript_filter_bar(ui);
-        self.refresh_manuscript_rows();
-        self.manuscript_confirm_groups(ui, &mut action);
+        let single_page_detail = self.manuscript_detail.is_some()
+            && ui.available_width() <= SINGLE_PAGE_DETAIL_MAX_WIDTH;
+        if !single_page_detail {
+            self.manuscript_filter_bar(ui);
+            self.refresh_manuscript_rows();
+            self.manuscript_confirm_groups(ui, &mut action);
+        }
 
-        // 列表是工作台的主视图；单击一行只在右侧更新资料卡，不再把整页替换成
-        // “详情页”。真正查看正文统一进入公文编辑标签，发布/归档稿会自动只读。
-        let pdf_action = egui::Panel::right("manuscript_metadata_panel")
-            .resizable(true)
-            .default_size(320.0)
-            .size_range(280.0..=440.0)
-            .frame(theme::panel(theme::surface(), 10))
-            .show(ui, |ui| self.manuscript_detail_ui(ui, &mut action))
-            .inner;
-        self.manuscript_list_ui(ui, &mut action);
+        // 详情优先取得稳定宽度，列表使用剩余区域。双栏不再依赖 Panel 的隐式
+        // 分配顺序，而是显式切成两个带独立 clip_rect 的子 Ui：表格先画、详情
+        // 后画。即使表格内部列宽超出，也只能在左侧横向滚动，绝不会盖住详情。
+        // 窄屏仍把详情作为独立二级页面，避免两块内容都窄到不可用。
+        const WIDE_DETAIL_MIN_WIDTH: f32 = 1180.0;
+        let body_rect = ui.available_rect_before_wrap();
+        let body_width = body_rect.width();
+        let detail_open = self.manuscript_detail.is_some();
+        let mut pdf_action = None;
+
+        if !detail_open {
+            let compact = body_width <= SINGLE_PAGE_DETAIL_MAX_WIDTH;
+            let horizontal_scroll = !compact && body_width < WIDE_DETAIL_MIN_WIDTH;
+            self.manuscript_list_ui(ui, &mut action, compact, horizontal_scroll);
+        } else if body_width > SINGLE_PAGE_DETAIL_MAX_WIDTH {
+            const COLUMN_GAP: f32 = 8.0;
+            let detail_width = (body_width * 0.30).clamp(320.0, 400.0);
+            let list_right = body_rect.right() - detail_width - COLUMN_GAP;
+            let list_rect =
+                egui::Rect::from_min_max(body_rect.min, egui::pos2(list_right, body_rect.bottom()));
+            let detail_rect = egui::Rect::from_min_max(
+                egui::pos2(list_right + COLUMN_GAP, body_rect.top()),
+                body_rect.max,
+            );
+
+            let mut list_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(list_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            list_ui.set_clip_rect(list_rect);
+            self.manuscript_list_ui(&mut list_ui, &mut action, false, true);
+
+            // 详情在同层最后绘制，并先铺满不透明底色；clip_rect 同时限制绘制
+            // 与命中区域，形成真正互不越界的宽屏双栏。
+            let mut detail_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(detail_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            detail_ui.set_clip_rect(detail_rect);
+            detail_ui
+                .painter()
+                .rect_filled(detail_rect, 0.0, theme::surface());
+            detail_ui.painter().line_segment(
+                [detail_rect.left_top(), detail_rect.left_bottom()],
+                egui::Stroke::new(1.0, theme::border()),
+            );
+            pdf_action = theme::panel(theme::surface(), 10)
+                .show(&mut detail_ui, |ui| {
+                    self.manuscript_detail_ui(ui, &mut action, false)
+                })
+                .inner;
+            ui.advance_cursor_after_rect(body_rect);
+        } else {
+            pdf_action = self.manuscript_detail_ui(ui, &mut action, true);
+        }
 
         if let Some(act) = action {
             self.apply_manuscript_action(act);
@@ -5232,32 +5284,71 @@ impl GongwenApp {
         }
     }
 
-    fn manuscript_list_ui(&mut self, ui: &mut egui::Ui, action: &mut Option<ManuscriptAction>) {
+    fn manuscript_list_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: &mut Option<ManuscriptAction>,
+        compact: bool,
+        horizontal_scroll: bool,
+    ) {
         if self.manuscript_rows.is_empty() {
             ui.add_space(12.0);
             ui.weak("没有符合条件的稿件。在起草页点“保存到稿件库”，或调整过滤条件。");
             return;
         }
+        if horizontal_scroll {
+            egui::ScrollArea::horizontal()
+                .id_salt("manuscript_table_horizontal")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // 完整列的舒适宽度。外层区域不足时只滚动列表，右侧详情面板
+                    // 已提前从父 Ui 划走宽度，因此两者永远不会互相覆盖。
+                    ui.set_min_width(1080.0);
+                    self.manuscript_table_ui(ui, action, false);
+                });
+            return;
+        }
+        self.manuscript_table_ui(ui, action, compact);
+    }
+
+    fn manuscript_table_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: &mut Option<ManuscriptAction>,
+        compact: bool,
+    ) {
         // 表格列宽支持拖拽调整（resizable）：勾选列按内容自适应，操作列吃剩余宽度
         // 且不可拖拽（避免把操作按钮挤出可视区），其余列可拖拽并设最小宽度。
         const ROW_HEIGHT: f32 = 26.0;
         let ctx = ui.ctx().clone();
-        TableBuilder::new(ui)
-            .id_salt("manuscript_table")
+        let mut table = TableBuilder::new(ui)
+            .id_salt(("manuscript_table", compact))
             .striped(true)
             .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::auto().at_least(28.0)) // 勾选
-            .column(Column::initial(52.0).at_least(44.0)) // 状态
-            .column(Column::initial(60.0).at_least(44.0)) // 文种
-            .column(Column::initial(48.0).at_least(40.0)) // 密级
-            .column(Column::initial(240.0).at_least(120.0)) // 标题
-            .column(Column::initial(160.0).at_least(100.0)) // 文号
-            .column(Column::initial(76.0).at_least(56.0)) // 成文日期
-            .column(Column::initial(76.0).at_least(56.0)) // 更新
-            .column(Column::initial(76.0).at_least(56.0)) // 归档
-            .column(Column::initial(56.0).at_least(44.0)) // 知识库
-            .column(Column::remainder().at_least(120.0).resizable(false)) // 操作
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+        table = if compact {
+            table
+                .column(Column::auto().at_least(28.0)) // 勾选
+                .column(Column::initial(52.0).at_least(44.0)) // 状态
+                .column(Column::initial(280.0).at_least(160.0)) // 标题
+                .column(Column::initial(150.0).at_least(100.0)) // 文号
+                .column(Column::initial(76.0).at_least(56.0)) // 成文日期
+                .column(Column::remainder().at_least(44.0).resizable(false)) // 更多操作
+        } else {
+            table
+                .column(Column::auto().at_least(28.0)) // 勾选
+                .column(Column::initial(52.0).at_least(44.0)) // 状态
+                .column(Column::initial(60.0).at_least(44.0)) // 文种
+                .column(Column::initial(48.0).at_least(40.0)) // 密级
+                .column(Column::initial(240.0).at_least(120.0)) // 标题
+                .column(Column::initial(160.0).at_least(100.0)) // 文号
+                .column(Column::initial(76.0).at_least(56.0)) // 成文日期
+                .column(Column::initial(76.0).at_least(56.0)) // 更新
+                .column(Column::initial(76.0).at_least(56.0)) // 归档
+                .column(Column::initial(56.0).at_least(44.0)) // 知识库
+                .column(Column::remainder().at_least(120.0).resizable(false)) // 操作
+        };
+        table
             .header(ROW_HEIGHT, |mut header| {
                 let visible_ids = self
                     .manuscript_rows
@@ -5290,12 +5381,14 @@ impl GongwenApp {
                 header.col(|ui| {
                     ui.strong("状态");
                 });
-                header.col(|ui| {
-                    ui.strong("文种");
-                });
-                header.col(|ui| {
-                    ui.strong("密级");
-                });
+                if !compact {
+                    header.col(|ui| {
+                        ui.strong("文种");
+                    });
+                    header.col(|ui| {
+                        ui.strong("密级");
+                    });
+                }
                 header.col(|ui| {
                     ui.strong("标题");
                 });
@@ -5305,17 +5398,19 @@ impl GongwenApp {
                 header.col(|ui| {
                     ui.strong("成文日期");
                 });
+                if !compact {
+                    header.col(|ui| {
+                        ui.strong("更新");
+                    });
+                    header.col(|ui| {
+                        ui.strong("归档");
+                    });
+                    header.col(|ui| {
+                        ui.strong("知识库");
+                    });
+                }
                 header.col(|ui| {
-                    ui.strong("更新");
-                });
-                header.col(|ui| {
-                    ui.strong("归档");
-                });
-                header.col(|ui| {
-                    ui.strong("知识库");
-                });
-                header.col(|ui| {
-                    ui.strong("操作");
+                    ui.strong(if compact { "更多" } else { "操作" });
                 });
             })
             .body(|body| {
@@ -5357,25 +5452,27 @@ impl GongwenApp {
                         row_double_clicked
                             .set(row_double_clicked.get() | response.double_clicked());
                     });
-                    row.col(|ui| {
-                        ui.set_opacity(seen_t);
-                        let response = ui.selectable_label(row_selected, data.kind.label());
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
-                    });
-                    row.col(|ui| {
-                        ui.set_opacity(seen_t);
-                        let security_level = SecurityLevel::from_marking(&data.security_level);
-                        let response = ui.selectable_label(
-                            row_selected,
-                            egui::RichText::new(security_level_list_label(security_level))
-                                .color(security_level_color(security_level)),
-                        );
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
-                    });
+                    if !compact {
+                        row.col(|ui| {
+                            ui.set_opacity(seen_t);
+                            let response = ui.selectable_label(row_selected, data.kind.label());
+                            row_clicked.set(row_clicked.get() | response.clicked());
+                            row_double_clicked
+                                .set(row_double_clicked.get() | response.double_clicked());
+                        });
+                        row.col(|ui| {
+                            ui.set_opacity(seen_t);
+                            let security_level = SecurityLevel::from_marking(&data.security_level);
+                            let response = ui.selectable_label(
+                                row_selected,
+                                egui::RichText::new(security_level_list_label(security_level))
+                                    .color(security_level_color(security_level)),
+                            );
+                            row_clicked.set(row_clicked.get() | response.clicked());
+                            row_double_clicked
+                                .set(row_double_clicked.get() | response.double_clicked());
+                        });
+                    }
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
                         let response = ui.add_sized(
@@ -5404,48 +5501,50 @@ impl GongwenApp {
                         row_double_clicked
                             .set(row_double_clicked.get() | response.double_clicked());
                     });
-                    row.col(|ui| {
-                        ui.set_opacity(seen_t);
-                        let response =
-                            ui.selectable_label(row_selected, short_date(&data.updated_at));
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
-                    });
-                    row.col(|ui| {
-                        ui.set_opacity(seen_t);
-                        let response = ui.selectable_label(
-                            row_selected,
-                            data.archived_at
-                                .as_deref()
-                                .map(short_date)
-                                .unwrap_or_else(|| "—".to_string()),
-                        );
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
-                    });
-                    // 已入库标记：导入前就看得出哪些进过知识库，免得同一篇
-                    // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
-                    row.col(|ui| {
-                        ui.set_opacity(seen_t);
-                        let indexed = self.knowledge_indexed_manuscripts.contains(&data.id);
-                        let indexed_cell = if indexed {
-                            egui::RichText::new("已入库").color(accent())
-                        } else {
-                            egui::RichText::new("—").color(theme::text_muted())
-                        };
-                        let response = ui
-                            .selectable_label(row_selected, indexed_cell)
-                            .on_hover_text(if indexed {
-                                "这篇稿件已加入知识库，再次导入会覆盖旧的索引"
+                    if !compact {
+                        row.col(|ui| {
+                            ui.set_opacity(seen_t);
+                            let response =
+                                ui.selectable_label(row_selected, short_date(&data.updated_at));
+                            row_clicked.set(row_clicked.get() | response.clicked());
+                            row_double_clicked
+                                .set(row_double_clicked.get() | response.double_clicked());
+                        });
+                        row.col(|ui| {
+                            ui.set_opacity(seen_t);
+                            let response = ui.selectable_label(
+                                row_selected,
+                                data.archived_at
+                                    .as_deref()
+                                    .map(short_date)
+                                    .unwrap_or_else(|| "—".to_string()),
+                            );
+                            row_clicked.set(row_clicked.get() | response.clicked());
+                            row_double_clicked
+                                .set(row_double_clicked.get() | response.double_clicked());
+                        });
+                        // 已入库标记：导入前就看得出哪些进过知识库，免得同一篇
+                        // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
+                        row.col(|ui| {
+                            ui.set_opacity(seen_t);
+                            let indexed = self.knowledge_indexed_manuscripts.contains(&data.id);
+                            let indexed_cell = if indexed {
+                                egui::RichText::new("已入库").color(accent())
                             } else {
-                                "尚未加入知识库，可勾选后用工具栏的「导入到知识库」"
-                            });
-                        row_clicked.set(row_clicked.get() | response.clicked());
-                        row_double_clicked
-                            .set(row_double_clicked.get() | response.double_clicked());
-                    });
+                                egui::RichText::new("—").color(theme::text_muted())
+                            };
+                            let response = ui
+                                .selectable_label(row_selected, indexed_cell)
+                                .on_hover_text(if indexed {
+                                    "这篇稿件已加入知识库，再次导入会覆盖旧的索引"
+                                } else {
+                                    "尚未加入知识库，可勾选后用工具栏的「导入到知识库」"
+                                });
+                            row_clicked.set(row_clicked.get() | response.clicked());
+                            row_double_clicked
+                                .set(row_double_clicked.get() | response.double_clicked());
+                        });
+                    }
                     if row_double_clicked.get() {
                         *action = Some(ManuscriptAction::Edit(data.id));
                     } else if row_clicked.get() {
@@ -5453,6 +5552,68 @@ impl GongwenApp {
                     }
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
+                        if compact {
+                            ui.menu_button("•••", |ui| match data.status {
+                                ManuscriptStatus::Archived => {
+                                    if ui.button("打开只读公文").clicked() {
+                                        *action = Some(ManuscriptAction::Edit(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("基于此公文新建").clicked() {
+                                        *action =
+                                            Some(ManuscriptAction::CreateFromExisting(data.id));
+                                        ui.close();
+                                    }
+                                }
+                                ManuscriptStatus::Published => {
+                                    if ui.button("打开只读公文").clicked() {
+                                        *action = Some(ManuscriptAction::Edit(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("退回草稿").clicked() {
+                                        *action = Some(ManuscriptAction::RevertToDraft(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("基于此公文新建").clicked() {
+                                        *action =
+                                            Some(ManuscriptAction::CreateFromExisting(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("归档").clicked() {
+                                        *action = Some(ManuscriptAction::ArchivePending(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("删除").clicked() {
+                                        *action = Some(ManuscriptAction::DeletePending(data.id));
+                                        ui.close();
+                                    }
+                                }
+                                _ => {
+                                    if ui.button("打开公文").clicked() {
+                                        *action = Some(ManuscriptAction::Edit(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("基于此公文新建").clicked() {
+                                        *action =
+                                            Some(ManuscriptAction::CreateFromExisting(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("发布").clicked() {
+                                        *action = Some(ManuscriptAction::Publish(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("归档").clicked() {
+                                        *action = Some(ManuscriptAction::ArchivePending(data.id));
+                                        ui.close();
+                                    }
+                                    if ui.button("删除").clicked() {
+                                        *action = Some(ManuscriptAction::DeletePending(data.id));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            return;
+                        }
                         ui.horizontal(|ui| match data.status {
                             ManuscriptStatus::Archived => {
                                 if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
@@ -5540,6 +5701,7 @@ impl GongwenApp {
         &mut self,
         ui: &mut egui::Ui,
         action: &mut Option<ManuscriptAction>,
+        single_page: bool,
     ) -> Option<PdfAction> {
         let Some(detail_id) = self.manuscript_detail.as_ref().map(|d| d.id) else {
             ui.heading("稿件资料");
@@ -5559,13 +5721,18 @@ impl GongwenApp {
 
         let detail = self.manuscript_detail.as_ref().unwrap();
         ui.horizontal(|ui| {
+            if single_page && ui.button("← 返回列表").clicked() {
+                clear_selection = true;
+            }
             ui.heading("稿件资料");
             ui.colored_label(status_color(detail.status), detail.status.label());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::icon_button(ui, theme::Icon::X, "清除选择").clicked() {
-                    clear_selection = true;
-                }
-            });
+            if !single_page {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, theme::Icon::X, "清除选择").clicked() {
+                        clear_selection = true;
+                    }
+                });
+            }
         });
         ui.separator();
         let open_label = if matches!(
