@@ -1920,21 +1920,36 @@ impl DraftPage<'_> {
         // `is_expanded` 取局部副本再写回：闭包里要 `&mut self` 画抽屉内容，
         // 没法同时借出 `self.doc` 的字段。
         const DRAWER_DEFAULT_WIDTH: f32 = 300.0;
+        // 抽屉内容函数只返回"是否点了关闭"：`show_collapsible` 的 `is_expanded`
+        // 是进入时读取的目标值，闭包内直接写 `self.doc.*_open` 会被下面这句用
+        // 局部副本覆盖回去，关闭按钮就失效了。所以关闭请求拿到这里落地。
         let mut versions_open = self.doc.versions_open;
+        let mut close_versions = false;
         egui::Panel::right("draft_versions")
             .default_size(DRAWER_DEFAULT_WIDTH)
             .size_range(240.0..=460.0)
             .frame(theme::panel(theme::canvas(), 12))
-            .show_collapsible(ui, &mut versions_open, |ui| self.versions_drawer(ui));
+            .show_collapsible(ui, &mut versions_open, |ui| {
+                close_versions = self.versions_drawer(ui);
+            });
+        if close_versions {
+            versions_open = false;
+        }
         self.doc.versions_open = versions_open;
         // 新 ID：旧 ID 上持久化的是"底部抽屉"的外框矩形，沿用会让右侧抽屉按那条横条的
         // 位置排版，内容整体左移到中央区底下。换个 ID 直接丢掉那份旧状态。
         let mut result_open = self.doc.result_drawer_open;
+        let mut close_result = false;
         egui::Panel::right("review_result_drawer_right_v1")
             .default_size(DRAWER_DEFAULT_WIDTH)
             .size_range(240.0..=460.0)
             .frame(theme::panel(theme::canvas(), 12))
-            .show_collapsible(ui, &mut result_open, |ui| self.result_drawer_ui(ui));
+            .show_collapsible(ui, &mut result_open, |ui| {
+                close_result = self.result_drawer_ui(ui);
+            });
+        if close_result {
+            result_open = false;
+        }
         self.doc.result_drawer_open = result_open;
         if !self.doc.form_collapsed {
             // 新 ID 用于丢弃旧版本持久化的超宽面板尺寸，让紧凑默认值立即生效。
@@ -2018,24 +2033,27 @@ impl DraftPage<'_> {
     }
 
     /// 右侧版本抽屉：本篇的版本链在起草页里就地看完，不再跳去稿件管理。
-    fn versions_drawer(&mut self, ui: &mut egui::Ui) {
+    /// 返回是否点了关闭按钮——关闭请求由 `create_ui` 在面板动画之外落地，
+    /// 闭包内直接改 `self.doc.versions_open` 会被局部副本写回覆盖。
+    fn versions_drawer(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut close_requested = false;
         ui.horizontal(|ui| {
             ui.strong("版本历史");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, theme::Icon::X, "收起版本历史").clicked() {
-                    self.doc.versions_open = false;
+                    close_requested = true;
                 }
             });
         });
         ui.separator();
         let Some(id) = self.doc.manuscript_id else {
             ui.weak("这篇还没保存到稿件库，先点“保存”。");
-            return;
+            return close_requested;
         };
         let versions = self.draft_version_rows();
         if versions.is_empty() {
             ui.weak("还没有提交过版本。点标题栏的“提交版本”固化当前内容。");
-            return;
+            return close_requested;
         }
         let current = self.current_version_target();
         let mut load: Option<i64> = None;
@@ -2095,6 +2113,7 @@ impl DraftPage<'_> {
                 to,
             });
         }
+        close_requested
     }
 
     /// 起草页功能区：第一行是分区卡与常驻入口，第二行是当前分区的按钮。
@@ -4074,7 +4093,10 @@ impl DraftPage<'_> {
             });
     }
 
-    pub(crate) fn result_drawer_ui(&mut self, ui: &mut egui::Ui) {
+    /// 返回是否点了关闭按钮——关闭请求由 `create_ui` 在面板动画之外落地，
+    /// 闭包内直接改 `self.doc.result_drawer_open` 会被局部副本写回覆盖。
+    pub(crate) fn result_drawer_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut close_requested = false;
         // 标题与关闭按钮独占一行——右侧抽屉只有 300 点上下，挤不下一整排。
         ui.horizontal(|ui| {
             ui.strong(if self.doc.warnings.is_empty() {
@@ -4084,7 +4106,7 @@ impl DraftPage<'_> {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, theme::Icon::X, "关闭审校提示（Esc）").clicked() {
-                    self.doc.result_drawer_open = false;
+                    close_requested = true;
                 }
             });
         });
@@ -4119,6 +4141,7 @@ impl DraftPage<'_> {
                 }
                 self.warnings_ui(ui);
             });
+        close_requested
     }
 
     /// 审校区顶栏：显示方式切换、缩放、以及作用于当前稿件的几个动作。
