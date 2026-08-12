@@ -23,21 +23,6 @@ The document fonts in `runtime/fonts` are locally supplied deployment
 assets. Their redistribution authorization must be verified by the package
 distributor. See `runtime/licenses/FONT-LICENSE-REQUIRED.txt`.
 
-## LXGW Bright and LXGW Bright Code
-
-The application embeds LXGW Bright Medium (proportional UI text) and LXGW
-Bright Code (monospace Markdown editor text). Both fonts are distributed under
-the SIL Open Font License 1.1.
-
-- Project: https://github.com/lxgw/LxgwBright
-- Project: https://github.com/lxgw/LxgwBright-Code
-- License: SIL Open Font License 1.1
-
-At build time, `build.rs` downloads the latest release assets from the two
-projects and embeds them into the binary. The license texts are copied into
-packaged builds under `licenses/fonts/` and are kept in the source tree at
-`font/licenses/`.
-
 ## Lucide Icons
 
 The SVG interface icons under `assets/icons/` are from Lucide 1.28.0.

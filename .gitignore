@@ -19,9 +19,8 @@
 /runtime/texbundle/*.ttb
 /runtime/fonts/*.ttf
 
-# UI fonts are downloaded from GitHub releases by build.rs; licenses stay tracked
+# Local development copies of document fonts
 /font/*
-!/font/licenses/
 
 # Local user configuration
 /config.json

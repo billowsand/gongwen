@@ -194,8 +194,6 @@ Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "README.md")) -D
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "THIRD_PARTY_NOTICES.md")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "LICENSE")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "config.example.json")) -Destination $OutputDir
-Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "font", "licenses")) -Destination ([System.IO.Path]::Combine($OutputDir, "licenses", "fonts")) -Recurse
-
 if (-not $isWindowsHost) {
     foreach ($executable in @($BinaryName, [System.IO.Path]::Combine("runtime", "tectonic", "tectonic"))) {
         $executablePath = Join-Path $OutputDir $executable

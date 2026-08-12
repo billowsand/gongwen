@@ -1140,8 +1140,8 @@ impl FontChoice {
 pub struct FontConfig {
     /// 总开关。关掉时下面五项即使填了也不生效，方便临时对照内置版式。
     pub use_system_fonts: bool,
-    /// 应用界面（窗口、菜单、列表）字体。留空用内置霞鹜文楷；不受
-    /// `use_system_fonts` 开关控制，随时可以换回内置。
+    /// 应用界面（窗口、菜单、列表）字体。留空时使用当前平台的系统默认中文字体；
+    /// 不受 `use_system_fonts` 编译开关控制。
     pub ui_font: FontChoice,
     pub title: FontChoice,
     pub heading1: FontChoice,
@@ -1181,7 +1181,7 @@ impl FontConfig {
         choice.is_set().then_some(choice)
     }
 
-    /// 界面字体：不受 `use_system_fonts` 编译开关影响，配了就生效。
+    /// 界面字体不受公文编译字体总开关影响，配置后立即生效。
     pub fn active_ui_font(&self) -> Option<&FontChoice> {
         self.ui_font.is_set().then_some(&self.ui_font)
     }
@@ -1484,10 +1484,9 @@ mod tests {
         assert_eq!(contact.phone, "010-11111111");
     }
 
-    /// 旧配置的 `fonts` 没有 `ui_font` 字段：载入后应为空选择（回退内置字体），
-    /// 且编译字体不受影响。
+    /// 旧配置不含界面字体时应回退系统默认，编译字体仍正常载入。
     #[test]
-    fn old_font_config_without_ui_font_stays_empty() {
+    fn font_config_without_legacy_ui_font_loads() {
         let json = r#"{
             "use_system_fonts": true,
             "title": {"family": "SimSun", "display": "宋体", "path": "C:\\Windows\\Fonts\\simsun.ttc"},
@@ -1497,24 +1496,23 @@ mod tests {
             "pagenumber": {"family": "SimSun", "display": "宋体", "path": "C:\\Windows\\Fonts\\simsun.ttc"}
         }"#;
         let config: FontConfig = serde_json::from_str(json).expect("旧配置应能反序列化");
-        assert!(!config.ui_font.is_set());
         assert!(config.active_ui_font().is_none());
         assert_eq!(config.active(FontRole::Body).unwrap().family, "FangSong");
     }
 
-    /// 带 `ui_font` 的新配置序列化后能原样读回。
+    /// 自定义界面字体应能随配置保存并原样读回。
     #[test]
     fn ui_font_round_trips_through_json() {
         let mut config = FontConfig::default();
         config.ui_font = FontChoice {
-            family: "Microsoft YaHei".into(),
-            display: "微软雅黑".into(),
-            path: "C:\\Windows\\Fonts\\msyh.ttc".into(),
+            family: "Source Han Sans SC".into(),
+            display: "思源黑体".into(),
+            path: "C:\\fonts\\SourceHanSansSC-Regular.otf".into(),
         };
         let json = serde_json::to_string(&config).expect("应能序列化");
         let back: FontConfig = serde_json::from_str(&json).expect("应能反序列化");
         assert_eq!(config, back);
-        assert_eq!(back.active_ui_font().unwrap().family, "Microsoft YaHei");
+        assert_eq!(back.active_ui_font().unwrap().display, "思源黑体");
     }
 
     /// 主题字段序列化后能原样读回；旧配置没有 `theme` 字段时回退默认 Claude。

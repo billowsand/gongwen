@@ -246,6 +246,7 @@
   },
   "fonts": {
     "use_system_fonts": false,
+    "ui_font": { "family": "", "display": "", "path": "" },
     "title": { "family": "", "display": "", "path": "" },
     "heading1": { "family": "", "display": "", "path": "" },
     "heading2": { "family": "", "display": "", "path": "" },

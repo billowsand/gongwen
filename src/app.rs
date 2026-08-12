@@ -7761,31 +7761,30 @@ impl GongwenApp {
         });
     }
 
-    /// 字体设置：界面字体 + 编译字体（五个位置各自可以换成本机字体）。
+    /// 字体设置：界面字体可个性化，五个编译位置也可分别换成本机字体。
     fn font_settings_ui(&mut self, ui: &mut egui::Ui) {
-        // 界面字体与编译字体共用本机字体列表，首次进入设置页就扫盘；结果为空也
-        // 只扫一次，需要时点“重新扫描本机字体”。
+        // 界面字体和编译字体共用本机字体列表；进入字体设置后只扫描一次。
         if !self.system_fonts_scanned && !self.system_fonts_busy {
             self.start_system_font_scan();
         }
         let before = self.config.fonts.clone();
 
-        // 界面字体不受“使用本机字体编译”开关控制，选了就生效，随时可以换回内置。
         section_heading_with_info(
             ui,
             theme::Icon::Type,
             "界面字体",
-            "应用窗口、菜单与列表使用的字体。默认随应用内置霞鹜文楷（LXGW Bright）；所选字体文件缺失或读取失败时自动退回内置。",
+            "应用窗口、菜单与列表使用的字体。Windows 默认使用微软雅黑，Linux 默认使用 Noto Sans SC；可在此选择其他本机字体，字体文件失效时自动回退系统默认。",
         );
         ui.add_space(4.0);
+        let default_ui_label = format!("系统默认（{}）", theme::default_ui_font_label());
         let mut message = {
             let filter = self.font_filter.entry("ui").or_default();
             font_choice_row(
                 ui,
                 "ui",
                 "界面字体",
-                "霞鹜文楷（LXGW Bright）",
-                "应用窗口、菜单与列表使用的字体；不影响公文预览与导出的字体",
+                &default_ui_label,
+                "只影响应用窗口、菜单与列表，不影响公文预览和导出字体",
                 &mut self.config.fonts.ui_font,
                 &self.system_fonts,
                 filter,
@@ -7824,11 +7823,12 @@ impl GongwenApp {
             ui.add_space(4.0);
             for role in FontRole::ALL {
                 let filter = self.font_filter.entry(role.key()).or_default();
+                let default_label = format!("内置（{}）", role.bundled_label());
                 if let Some(text) = font_choice_row(
                     ui,
                     role.key(),
                     role.label(),
-                    role.bundled_label(),
+                    &default_label,
                     role.hint(),
                     self.config.fonts.choice_mut(role),
                     &self.system_fonts,
@@ -8761,14 +8761,14 @@ pub(crate) fn visible_rows(ui: &egui::Ui) -> usize {
 /// 一个位置的字体选择行：下拉选本机字体，或浏览一个字体文件。
 /// 返回需要显示在状态栏的提示（选了不支持的文件时给出）。
 ///
-/// `key` 只用于下拉框的 id，`label` 是行标题，`bundled_label` 是“内置（…）”
-/// 里显示的内置字体名，`hint` 是悬停说明。编译字体的五个位置与界面字体共用。
+/// `key` 只用于下拉框的 id，`label` 是行标题，`default_label` 是未选择时显示的
+/// 完整名称（例如“系统默认（微软雅黑）”或“内置（仿宋）”），`hint` 是悬停说明。
 #[allow(clippy::too_many_arguments)] // Shared form helper; call sites keep these options explicit.
 fn font_choice_row(
     ui: &mut egui::Ui,
     key: &str,
     label: &str,
-    bundled_label: &str,
+    default_label: &str,
     hint: &str,
     choice: &mut crate::models::FontChoice,
     available: &[system_fonts::SystemFont],
@@ -8780,7 +8780,7 @@ fn font_choice_row(
         let selected = if choice.is_set() {
             choice.label().to_string()
         } else {
-            format!("内置（{bundled_label}）")
+            default_label.to_string()
         };
         egui::ComboBox::from_id_salt(format!("font_role_{key}"))
             .selected_text(selected)
@@ -8793,7 +8793,7 @@ fn font_choice_row(
                 );
                 ui.separator();
                 if ui
-                    .selectable_label(!choice.is_set(), format!("内置（{bundled_label}）"))
+                    .selectable_label(!choice.is_set(), default_label)
                     .clicked()
                 {
                     *choice = crate::models::FontChoice::default();
@@ -8842,7 +8842,7 @@ fn font_choice_row(
                 }
             }
         }
-        if choice.is_set() && theme::icon_button(ui, theme::Icon::RotateCcw, "恢复内置字体").clicked()
+        if choice.is_set() && theme::icon_button(ui, theme::Icon::RotateCcw, "恢复默认字体").clicked()
         {
             *choice = crate::models::FontChoice::default();
         }

@@ -1057,10 +1057,136 @@ pub const FONT_HEITI: &str = "gw-heiti";
 pub const FONT_KAITI: &str = "gw-kaiti";
 pub const FONT_BIAOSONG: &str = "gw-biaosong";
 
-/// 应用界面使用的本地字体。通过 `include_bytes!` 编译进可执行文件，运行时不依赖
-/// 字体文件或系统是否安装了该字体。
-const BRIGHT_MEDIUM_FONT_BYTES: &[u8] = include_bytes!("../font/LXGWBright-Medium.ttf");
-const BRIGHT_CODE_FONT_BYTES: &[u8] = include_bytes!("../font/LXGWBrightCode-Regular.ttf");
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UiFontCandidate {
+    path: PathBuf,
+    /// TTC/OTC 中的字面序号；普通 TTF/OTF 为 0。
+    index: u32,
+}
+
+impl UiFontCandidate {
+    fn new(path: impl Into<PathBuf>, index: u32) -> Self {
+        Self {
+            path: path.into(),
+            index,
+        }
+    }
+}
+
+/// Windows 中文界面的系统默认字体。使用 WINDIR 而不是写死 C 盘。
+#[cfg(target_os = "windows")]
+fn platform_ui_font_candidates() -> Vec<UiFontCandidate> {
+    let font_dir = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("Fonts");
+    [
+        ("msyh.ttc", 0),
+        ("msyh.ttf", 0),
+        ("NotoSansSC-VF.ttf", 0),
+        ("SourceHanSansCN-Normal.ttf", 0),
+        ("simsun.ttc", 0),
+    ]
+    .into_iter()
+    .map(|(file, index)| UiFontCandidate::new(font_dir.join(file), index))
+    .collect()
+}
+
+/// 让 fontconfig 返回字体文件和集合字面序号。Noto CJK 在常见 Linux 发行版里
+/// 往往以 TTC 安装，只有同时使用这里返回的 index 才能选中简体中文字面。
+#[cfg(target_os = "linux")]
+fn fontconfig_candidate(pattern: &str) -> Option<UiFontCandidate> {
+    let output = std::process::Command::new("fc-match")
+        .arg("-f")
+        .arg("%{file}\n%{index}\n")
+        .arg(pattern)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut lines = text.lines();
+    let path = lines.next()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let index = lines
+        .next()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0);
+    Some(UiFontCandidate::new(path, index))
+}
+
+/// Linux 优先使用 Noto Sans SC；后面的固定路径兼容没有 fontconfig 命令的精简
+/// 环境，最后的 zh-cn 通用匹配只在 Noto 未安装时负责保证中文仍可显示。
+#[cfg(target_os = "linux")]
+fn platform_ui_font_candidates() -> Vec<UiFontCandidate> {
+    let mut candidates = Vec::new();
+    for pattern in [
+        "Noto Sans SC:style=Regular",
+        "Noto Sans CJK SC:style=Regular",
+        "sans-serif:lang=zh-cn",
+    ] {
+        if let Some(candidate) = fontconfig_candidate(pattern)
+            && !candidates.contains(&candidate)
+        {
+            candidates.push(candidate);
+        }
+    }
+    for candidate in [
+        UiFontCandidate::new("/usr/share/fonts/opentype/noto/NotoSansSC-Regular.otf", 0),
+        UiFontCandidate::new("/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf", 0),
+        UiFontCandidate::new("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
+        UiFontCandidate::new("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2),
+        UiFontCandidate::new(
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            2,
+        ),
+    ] {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn platform_ui_font_candidates() -> Vec<UiFontCandidate> {
+    Vec::new()
+}
+
+/// 设置页展示的当前平台默认界面字体名。
+pub fn default_ui_font_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "微软雅黑"
+    } else if cfg!(target_os = "linux") {
+        "Noto Sans SC"
+    } else {
+        "系统字体"
+    }
+}
+
+/// 加载第一个真正包含常用汉字的系统界面字体。校验字面可避免字体文件存在但
+/// TTC 序号不正确时，egui 接受数据后仍把中文画成方框。
+fn load_system_ui_font(fonts: &mut egui::FontDefinitions, key: &str) -> Option<String> {
+    for candidate in platform_ui_font_candidates() {
+        let Ok(data) = std::fs::read(&candidate.path) else {
+            continue;
+        };
+        let Ok(face) = ttf_parser::Face::parse(&data, candidate.index) else {
+            continue;
+        };
+        if face.glyph_index('中').is_none() {
+            continue;
+        }
+        let mut font_data = egui::FontData::from_owned(data);
+        font_data.index = candidate.index;
+        fonts.font_data.insert(key.to_owned(), font_data.into());
+        return Some(key.to_owned());
+    }
+    None
+}
 
 /// 取公文字体族。字体缺失时 `configure_fonts` 会使用独立的预览后备字体，不会报错。
 pub fn official_family(name: &str) -> egui::FontFamily {
@@ -1098,60 +1224,56 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let mut fonts = egui::FontDefinitions::default();
     let bundled_fonts = crate::portable_runtime::find_font_dir();
 
-    // 界面正文默认使用随应用内置的 LXGW Bright Medium；设置里指定了本机字体就
-    // 优先用它，文件被删或读不出来时照旧回退内置。Markdown/等宽文本仍用
-    // LXGW Bright Code。两个内置字体在编译前由 build.rs 从 GitHub 下载并校验。
-    let bright_font = "gw-bright".to_owned();
-    let bright_code_font = "gw-bright-code".to_owned();
-    let ui_font_loaded = config.active_ui_font().is_some_and(|choice| {
+    // 界面字体不再编进可执行文件：Windows 使用微软雅黑，Linux 使用 Noto Sans
+    // SC。等宽文本保留 egui 自带的拉丁等宽字体，并把系统中文字体放在末尾兜底。
+    let system_ui_font = load_system_ui_font(&mut fonts, "gw-system-ui");
+    if let Some(font) = &system_ui_font {
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, font.clone());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push(font.clone());
+    }
+
+    // 用户在设置里指定的界面字体排在系统默认之前；文件缺失或读取失败时仍由
+    // 上面的系统中文字体兜底，确保界面不会因一项失效配置而出现方框。
+    let custom_ui_font = config.active_ui_font().and_then(|choice| {
         load_font(
             &mut fonts,
-            &bright_font,
+            "gw-custom-ui",
             &[PathBuf::from(choice.path.trim())],
         )
-        .is_some()
     });
-    if !ui_font_loaded {
-        fonts.font_data.insert(
-            bright_font.clone(),
-            egui::FontData::from_static(BRIGHT_MEDIUM_FONT_BYTES).into(),
-        );
+    if let Some(font) = custom_ui_font {
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, font);
     }
-    fonts.font_data.insert(
-        bright_code_font.clone(),
-        egui::FontData::from_static(BRIGHT_CODE_FONT_BYTES).into(),
-    );
-    fonts
-        .families
-        .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .insert(0, bright_font.clone());
-    fonts
-        .families
-        .entry(egui::FontFamily::Monospace)
-        .or_default()
-        .insert(0, bright_code_font.clone());
-    fonts
-        .families
-        .entry(egui::FontFamily::Monospace)
-        .or_default()
-        .insert(1, bright_font);
 
-    // 公文预览专用字体缺失时使用独立的系统后备字体，不影响界面字体选择。
-    let preview_fallback = load_font(
-        &mut fonts,
-        "gw-preview-fallback",
-        &font_candidates(
-            bundled_fonts.as_deref(),
-            "SimSun.ttf",
-            &[
-                r"C:\Windows\Fonts\msyh.ttc",
-                r"C:\Windows\Fonts\SourceHanSansCN-Normal.ttf",
-                r"C:\Windows\Fonts\NotoSansSC-VF.ttf",
-                r"C:\Windows\Fonts\simsun.ttc",
-            ],
-        ),
-    );
+    // 公文预览专用字体缺失时复用系统中文界面字体，避免重复载入同一份大字体。
+    let preview_fallback = system_ui_font.or_else(|| {
+        load_font(
+            &mut fonts,
+            "gw-preview-fallback",
+            &font_candidates(
+                bundled_fonts.as_deref(),
+                "SimSun.ttf",
+                &[
+                    r"C:\Windows\Fonts\msyh.ttc",
+                    r"C:\Windows\Fonts\SourceHanSansCN-Normal.ttf",
+                    r"C:\Windows\Fonts\NotoSansSC-VF.ttf",
+                    r"C:\Windows\Fonts\simsun.ttc",
+                ],
+            ),
+        )
+    });
     // 公文专用字体缺失时也不回退到界面字体，保持预览与界面字体相互隔离。
     let mut fallback = Vec::new();
     if let Some(font) = &preview_fallback {
