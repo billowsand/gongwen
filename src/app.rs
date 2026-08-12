@@ -9030,6 +9030,7 @@ pub(crate) fn joint_responsible_editor(
     manual_fields: &mut BTreeSet<String>,
     allow_free_text: bool,
     width: f32,
+    max_rows: Option<usize>,
 ) -> bool {
     use crate::models::{JointContact, JointResponsibleEntry, sync_joint_responsible};
     let display = crate::units::UnitDisplay::new(vocabulary);
@@ -9168,7 +9169,12 @@ pub(crate) fn joint_responsible_editor(
             entries.remove(index);
             changed = true;
         }
-        if ui.button("＋ 添加一行").clicked() {
+        // 红头呈批件的承办区在首页底部，条目数有硬上限；到顶后停用按钮并说明原因。
+        let full = max_rows.is_some_and(|max| entries.len() >= max);
+        let response = ui.add_enabled(!full, egui::Button::new("＋ 添加一行"));
+        if full && let Some(max) = max_rows {
+            response.on_hover_text(format!("最多 {max} 条承办信息，首页承办区放不下更多"));
+        } else if response.clicked() {
             entries.push(JointContact::default());
             changed = true;
         }

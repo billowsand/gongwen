@@ -423,9 +423,18 @@ fn main_issuing_unit(input: &DraftInput, display: &UnitDisplay) -> String {
     display.full_name_for(&chosen, input.uses_external_unit_names())
 }
 
-/// 白头件落款：多单位自上而下分行、行间空一行（便于分别签字），整体右对齐；
-/// 显示文本少于 5 字时按字间距分散对齐到 5 字宽。单单位保持既有排版不变。
-fn add_white_paper_signature(doc: Docx, input: &DraftInput, display: &UnitDisplay) -> Docx {
+/// 白头件与红头呈批件的落款：多单位自上而下分行、行间空一行（便于分别签字），
+/// 整体右对齐；显示文本少于 5 字时按字间距分散对齐到 5 字宽。
+///
+/// `signing_room_twips` 是落款右侧留给签字的空间：白头件传 0（版式已在别处
+/// 留位），红头呈批件传 4cm——单位名整体左移让出签字位，成文日期则落在
+/// 「落款单位 + 签字空间」这一整段的正中。
+fn add_white_paper_signature(
+    doc: Docx,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    signing_room_twips: usize,
+) -> Docx {
     let units = display
         .white_paper_signature_units(input)
         .into_iter()
@@ -445,37 +454,48 @@ fn add_white_paper_signature(doc: Docx, input: &DraftInput, display: &UnitDispla
                 ),
             );
         }
-        let mut paragraph = Paragraph::new().align(AlignmentType::Right).line_spacing(
-            LineSpacing::new()
-                .before(if index == 0 { 360 } else { 0 })
-                .line(560)
-                .line_rule(LineSpacingType::Exact),
-        );
+        let mut paragraph = Paragraph::new()
+            .align(AlignmentType::Right)
+            // 右缩进就是签字空间：单位名右对齐到“版心右缘减去签字位”。
+            .indent(Some(0), None, Some(signing_room_twips as i32), None)
+            .line_spacing(
+                LineSpacing::new()
+                    .before(if index == 0 { 360 } else { 0 })
+                    .line(560)
+                    .line_rule(LineSpacingType::Exact),
+            );
         for run in spread_runs(unit) {
             paragraph = paragraph.add_run(run);
         }
         doc = doc.add_paragraph(paragraph);
     }
-    if units.len() > 1 {
-        // 最后一个单位与成文日期之间也空一行，与单位间间距一致。
-        doc = doc.add_paragraph(
-            Paragraph::new().add_run(body_run("")).line_spacing(
-                LineSpacing::new()
-                    .line(560)
-                    .line_rule(LineSpacingType::Exact),
-            ),
+    // 最后一个单位与成文日期之间固定空一行（单位只有一个时同样空行），
+    // 与 LaTeX 的 \vspace{\baselineskip} 和预览的空行保持一致。
+    doc = doc.add_paragraph(
+        Paragraph::new().add_run(body_run("")).line_spacing(
+            LineSpacing::new()
+                .line(560)
+                .line_rule(LineSpacingType::Exact),
+        ),
+    );
+    let date = Paragraph::new()
+        .add_run(body_run(official_signature_date(input)))
+        .line_spacing(
+            LineSpacing::new()
+                .line(560)
+                .line_rule(LineSpacingType::Exact),
         );
-    }
-    doc.add_paragraph(
-        Paragraph::new()
-            .add_run(body_run(official_signature_date(input)))
-            .align(AlignmentType::Right)
-            .line_spacing(
-                LineSpacing::new()
-                    .line(560)
-                    .line_rule(LineSpacingType::Exact),
-            ),
-    )
+    let date = if signing_room_twips == 0 {
+        date.align(AlignmentType::Right)
+    } else {
+        // 左缩进到最宽那行单位的左沿，再在剩下的“单位 + 签字空间”里居中，
+        // 段落右缘就是版心右缘，居中位置正好是这一整段的中点。
+        let unit_width = crate::export::red_signature_unit_width_twips(&units);
+        let left = TABLE_CONTENT_WIDTH_TWIPS.saturating_sub(signing_room_twips + unit_width);
+        date.align(AlignmentType::Center)
+            .indent(Some(left as i32), None, Some(0), None)
+    };
+    doc.add_paragraph(date)
 }
 
 /// 落款单位 run 序列：少于 5 字时逐字设置字符间距（单位缇，1/20 磅）分散对齐到
@@ -851,8 +871,8 @@ fn joint_record_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<TableRow>
                     0,
                 ),
             ])
-            .row_height(560.0)
-            .height_rule(HeightRule::Exact)
+            // 行高交给 Word 自动撑开：承办单位没维护简称时会回落较长的规范名称，
+            // 固定行高会把折行后的第二行直接裁掉。
             .cant_split()
         })
         .collect()
@@ -1027,16 +1047,30 @@ fn red_approval_top_rule_table() -> Table {
     )
 }
 
-fn red_record_paragraph(label: &str, value: &str, alignment: AlignmentType) -> Paragraph {
+/// 承办区一格：红色标签 + 黑色取值，整格不许换行。
+///
+/// 标签与取值的自然宽度超出栏宽时，两个 run 一起按同一比例横向压窄字形
+/// （`w:w`，字高不变），与 LaTeX 侧的 `\RedFit` 和标题压缩同一套做法。
+fn red_record_paragraph(
+    label: &str,
+    value: &str,
+    alignment: AlignmentType,
+    usable_twips: usize,
+) -> Paragraph {
+    let scale = crate::export::red_record_scale_percent(&format!("{label}{value}"), usable_twips);
+    let mut label_run = Run::new()
+        .add_text(label)
+        .fonts(chinese_fonts("仿宋_GB2312"))
+        .size(BODY_SIZE)
+        .color("FF0000");
+    let mut value_run = body_run(value);
+    if scale < 100 {
+        label_run = label_run.stretch(scale as i32);
+        value_run = value_run.stretch(scale as i32);
+    }
     Paragraph::new()
-        .add_run(
-            Run::new()
-                .add_text(label)
-                .fonts(chinese_fonts("仿宋_GB2312"))
-                .size(BODY_SIZE)
-                .color("FF0000"),
-        )
-        .add_run(body_run(value))
+        .add_run(label_run)
+        .add_run(value_run)
         .align(alignment)
         .line_spacing(
             LineSpacing::new()
@@ -1053,32 +1087,42 @@ fn red_approval_record_table(input: &DraftInput, display: &UnitDisplay) -> Table
     } else {
         entries.as_slice()
     };
+    // 三栏不再等分：承办单位名最长，把版心余量都给它，联系人和电话按各自
+    // 内容的自然宽度定死（栏宽与 LaTeX/预览同源，见 export::RED_RECORD_*）。
+    let unit_width = crate::export::RED_RECORD_UNIT_TWIPS;
+    let contact_width = crate::export::RED_RECORD_CONTACT_TWIPS;
+    let phone_width = crate::export::RED_RECORD_PHONE_TWIPS;
     let rows = entries
         .iter()
         .map(|entry| {
             TableRow::new(vec![
                 TableCell::new()
-                    .width(RECORD_OTHER_COLUMN_TWIPS, WidthType::Dxa)
+                    .width(unit_width, WidthType::Dxa)
                     .add_paragraph(red_record_paragraph(
                         "承办单位：",
                         &display.abbr(&entry.unit),
                         AlignmentType::Left,
+                        crate::export::RED_RECORD_UNIT_USABLE_TWIPS,
                     )),
                 TableCell::new()
-                    .width(RECORD_OTHER_COLUMN_TWIPS, WidthType::Dxa)
+                    .width(contact_width, WidthType::Dxa)
                     .add_paragraph(red_record_paragraph(
                         "联系人：",
-                        &entry.name,
-                        AlignmentType::Center,
+                        &docx_name(&entry.name, BODY_SIZE).0,
+                        AlignmentType::Left,
+                        crate::export::RED_RECORD_CONTACT_USABLE_TWIPS,
                     )),
                 TableCell::new()
-                    .width(RECORD_PHONE_COLUMN_TWIPS, WidthType::Dxa)
+                    .width(phone_width, WidthType::Dxa)
                     .add_paragraph(red_record_paragraph(
                         "电话：",
                         &entry.phone,
                         AlignmentType::Right,
+                        crate::export::RED_RECORD_PHONE_USABLE_TWIPS,
                     )),
             ])
+            .row_height(560.0)
+            .height_rule(HeightRule::Exact)
             .cant_split()
         })
         .collect::<Vec<_>>();
@@ -1088,11 +1132,7 @@ fn red_approval_record_table(input: &DraftInput, display: &UnitDisplay) -> Table
             .color("FF0000"),
     );
     Table::new(rows)
-        .set_grid(vec![
-            RECORD_OTHER_COLUMN_TWIPS,
-            RECORD_OTHER_COLUMN_TWIPS,
-            RECORD_PHONE_COLUMN_TWIPS,
-        ])
+        .set_grid(vec![unit_width, contact_width, phone_width])
         .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
         .layout(TableLayoutType::Fixed)
         .clear_all_border()
@@ -1578,6 +1618,20 @@ pub fn write_docx(
     } else {
         120
     };
+    // 红头呈批件首页版面：正文可用行数、正文是否跨页、表格图片是否要被赶出首页，
+    // 三端共用 export::red_approval_* 的同一套估算，避免各端判据不一致。
+    let red_wrap_lines = crate::export::red_approval_wrap_lines(
+        match &plan {
+            TitlePlan::Wrapped(lines) => lines.len().max(1),
+            _ => 1,
+        },
+        crate::models::joint_responsible_entries(&input.profile)
+            .len()
+            .max(1),
+    );
+    let red_body = crate::export::red_approval_body_metrics(&blocks);
+    let mut red_float_break_pending = input.kind == TemplateKind::RedHeadApproval
+        && red_body.float_needs_page_break(red_wrap_lines);
     doc = doc.add_paragraph(
         title_paragraph
             .line_spacing(
@@ -1652,6 +1706,23 @@ pub fn write_docx(
                         }
                         index += 1; // 跳过紧随的正文段落
                     } else {
+                        // 红头呈批件首页右侧是批示栏，表格和图片按整幅版心排版会压
+                        // 过去；正文区第一个表格/图片若落在首页就先换页。
+                        if red_float_break_pending
+                            && matches!(
+                                block,
+                                MarkdownBlock::Table { .. } | MarkdownBlock::Image { .. }
+                            )
+                        {
+                            red_float_break_pending = false;
+                            doc = doc.add_paragraph(
+                                Paragraph::new().page_break_before(true).line_spacing(
+                                    LineSpacing::new()
+                                        .line(560)
+                                        .line_rule(LineSpacingType::Exact),
+                                ),
+                            );
+                        }
                         doc = add_official_content_block(doc, block, &mut counters);
                     }
                 }
@@ -1700,20 +1771,11 @@ pub fn write_docx(
     if crate::models::is_joint_signature(input) {
         doc = add_joint_signature(doc, input, display);
     } else if input.kind == TemplateKind::WhitePaper {
-        doc = add_white_paper_signature(doc, input, display);
+        doc = add_white_paper_signature(doc, input, display, 0);
     } else if input.kind == TemplateKind::RedHeadApproval {
-        // 落款最早从第二页开始。正文很短时显式换页；正文已自然延续到后页时
-        // 不再额外制造空白页，落款可以接在第二页或后续正文之后。
-        let estimated_body_chars = blocks
-            .iter()
-            .filter_map(|block| match block {
-                MarkdownBlock::Paragraph(text) | MarkdownBlock::Heading(_, text) => {
-                    Some(plain_text(text).chars().count())
-                }
-                _ => None,
-            })
-            .sum::<usize>();
-        if estimated_body_chars < 360 {
+        // 落款最早从第二页开始。正文只有首页那点内容时另起一页标「（此页无正文）」；
+        // 正文本来就跨页时不再额外制造空白页，落款接在正文之后。
+        if !red_body.reaches_second_page(red_wrap_lines) {
             doc = doc.add_paragraph(
                 Paragraph::new()
                     .add_run(body_run("（此页无正文）"))
@@ -1726,7 +1788,7 @@ pub fn write_docx(
                     ),
             );
         }
-        doc = add_white_paper_signature(doc, input, display);
+        doc = add_white_paper_signature(doc, input, display, crate::export::SIGNATURE_ROOM_TWIPS);
     } else if matches!(
         input.kind,
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice
@@ -2407,6 +2469,15 @@ mod tests {
         assert!(xml.contains("李\u{2003}四"));
         assert!(xml.contains("010-11111111"));
         assert!(xml.contains("010-22222222"));
+        // 版记行高必须交给 Word 自动撑开：承办单位没维护简称时会回落较长的
+        // 规范全称，固定行高会把折行后的第二行直接裁掉。
+        let record_at = xml.find("承办单位：").unwrap();
+        let record_row_start = xml[..record_at].rfind("<w:tr>").unwrap();
+        assert!(
+            !xml[record_row_start..record_at].contains("hRule=\"exact\""),
+            "联合发文版记行不得使用固定行高：{}",
+            &xml[record_row_start..record_at]
+        );
     }
 
     #[test]
@@ -2658,6 +2729,113 @@ mod tests {
         let notice = paragraph_containing(&xml, "（此页无正文）");
         assert!(notice.contains("w:pageBreakBefore"));
         assert!(xml.find("（此页无正文）").unwrap() < xml.rfind("某某委员会").unwrap());
+        // 落款单位右对齐，但右缩进 4cm 让出签字空间。从「此页无正文」之后找起，
+        // 免得匹配到红头里的「某某委员会办公室」。
+        let closing = &xml[xml.find("（此页无正文）").unwrap()..];
+        let signature = paragraph_containing(closing, "某某委员会");
+        assert!(
+            signature.contains(r#"w:val="right""#)
+                && signature.contains(&format!(
+                    r#"w:right="{}""#,
+                    crate::export::SIGNATURE_ROOM_TWIPS
+                )),
+            "落款单位右侧应留出签字空间：{signature}"
+        );
+        // 成文日期居中于“落款单位 + 签字空间”：左缩进到最宽单位的左沿，
+        // 段落右缘仍是版心右缘，居中位置正好是这一整段的中点。
+        let date = paragraph_containing(&xml, "2026年8月12日");
+        let expected_left = TABLE_CONTENT_WIDTH_TWIPS
+            - crate::export::SIGNATURE_ROOM_TWIPS
+            - crate::export::red_signature_unit_width_twips(&["某某委员会".to_string()]);
+        assert!(
+            date.contains(r#"w:val="center""#)
+                && date.contains(&format!(r#"w:left="{expected_left}""#)),
+            "成文日期应居中于单位与签字空间之间：{date}"
+        );
+        // 承办区三栏不再等分：承办单位栏最宽，另两栏按内容定宽。
+        assert!(
+            xml.contains(&format!(
+                "<w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" />",
+                crate::export::RED_RECORD_UNIT_TWIPS,
+                crate::export::RED_RECORD_CONTACT_TWIPS,
+                crate::export::RED_RECORD_PHONE_TWIPS
+            )),
+            "承办区栏宽应与 LaTeX/预览同源：{xml}"
+        );
+    }
+
+    /// 承办单位一律不换行：栏内放不下时整格按同一比例横向压窄（`w:w`），
+    /// 行高固定一行，与 LaTeX 的 \RedFit 和首页承办区高度对齐。
+    #[test]
+    fn red_head_approval_record_compresses_long_units_instead_of_wrapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("red-approval-long-unit.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::RedHeadApproval;
+        input.profile.kind = TemplateKind::RedHeadApproval;
+        input.profile.issuing_unit = "某某委员会办公室".into();
+        input.profile.signing_unit = "某某委员会".into();
+        input.profile.joint_responsible_units = "综合处、教师工作与师资管理处".into();
+        input.profile.joint_contacts = vec![
+            JointContact {
+                unit: "综合处".into(),
+                name: "王五".into(),
+                phone: "010-12345678".into(),
+            },
+            JointContact {
+                unit: "教师工作与师资管理处".into(),
+                name: "赵六".into(),
+                phone: "010-87654321".into(),
+            },
+        ];
+        input.date = "2026年8月12日".into();
+        write_docx_ok(&path, &input, "# 标题\n\n正文。妥否，请指示。").unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        let scale = crate::export::red_record_scale_percent(
+            "承办单位：教师工作与师资管理处",
+            crate::export::RED_RECORD_UNIT_USABLE_TWIPS,
+        );
+        assert!(scale < 100, "长单位名应触发压缩");
+        assert!(
+            xml.contains(&format!("<w:w w:val=\"{scale}\"")),
+            "长单位名应按 {scale}% 横向压窄：{xml}"
+        );
+        // 短单位名不压缩，也不得整行被裁：行高固定为一行 28pt。
+        assert!(
+            xml.contains("<w:trHeight w:val=\"560\" w:hRule=\"exact\" />"),
+            "{xml}"
+        );
+    }
+
+    /// 红头呈批件正文里的表格要被赶出首页，否则会压过右侧批示栏。
+    #[test]
+    fn red_head_approval_body_table_starts_on_a_new_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("red-approval-table.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::RedHeadApproval;
+        input.profile.kind = TemplateKind::RedHeadApproval;
+        input.profile.issuing_unit = "某某委员会办公室".into();
+        input.profile.signing_unit = "某某委员会".into();
+        input.profile.joint_responsible_units = "综合处".into();
+        input.date = "2026年8月12日".into();
+        write_docx_ok(
+            &path,
+            &input,
+            "# 标题\n\n短正文。\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n\n妥否，请指示。",
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        let table = xml.find("甲").expect("正文应含表格");
+        let break_before = xml[..table]
+            .rfind("w:pageBreakBefore")
+            .expect("表格前应有换页");
+        assert!(
+            xml[break_before..table].find("短正文").is_none(),
+            "换页要排在表格之前、短正文之后：{xml}"
+        );
+        // 正文因表格延续到第二页，落款接在正文之后，不再制造“此页无正文”空白页。
+        assert!(!xml.contains("（此页无正文）"), "{xml}");
     }
 
     fn zip_text(path: &Path, entry: &str) -> String {

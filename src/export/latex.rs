@@ -527,6 +527,17 @@ fn joint_mode_one_commands(
 }
 
 fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (String, String) {
+    official_letter_sections_to_tex_with_barrier(blocks, compact, None)
+}
+
+/// 同上，另可在正文区第一个表格/图片之前插入一条屏障命令（红头呈批件用来把
+/// 表格图片赶出首页）。`barrier` 为 `None` 时与原行为逐字节一致。
+fn official_letter_sections_to_tex_with_barrier(
+    blocks: &[MarkdownBlock],
+    compact: bool,
+    barrier: Option<&str>,
+) -> (String, String) {
+    let mut body_float_barrier = barrier;
     let mut body = Vec::new();
     let mut attachments = Vec::new();
     let landscape_attachments = attachment_landscape_flags(blocks);
@@ -645,10 +656,22 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
             MarkdownBlock::Table { rows, aligns } => {
                 let rendered = to_longtblr(rows, aligns);
                 if !rendered.is_empty() {
+                    push_body_float_barrier(
+                        section,
+                        &mut body_float_barrier,
+                        &mut body,
+                        &mut attachments,
+                    );
                     target_tex_section(section, &mut body, &mut attachments).push(rendered);
                 }
             }
             MarkdownBlock::Image { alt: _, src } => {
+                push_body_float_barrier(
+                    section,
+                    &mut body_float_barrier,
+                    &mut body,
+                    &mut attachments,
+                );
                 target_tex_section(section, &mut body, &mut attachments).push(format!(
                     "\\begin{{center}}\\includegraphics[width=\\textwidth]{{{}}}\\end{{center}}",
                     tex_escape(src)
@@ -664,6 +687,22 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
     }
 
     (body.join("\n\n"), attachments.join("\n\n"))
+}
+
+/// 在正文区第一个表格/图片之前插入一次屏障命令，之后把屏障取走不再重复插入。
+/// 附件区不受影响——附件本来就另起一页，没有批示栏要避让。
+fn push_body_float_barrier(
+    section: MarkdownSection,
+    barrier: &mut Option<&str>,
+    body: &mut Vec<String>,
+    attachments: &mut Vec<String>,
+) {
+    if section != MarkdownSection::Body {
+        return;
+    }
+    if let Some(command) = barrier.take() {
+        target_tex_section(section, body, attachments).push(command.to_string());
+    }
 }
 
 /// 每个附件只要有一张表在竖页中横向过密，就将整个附件（而非仅表格）改为横页。
@@ -844,8 +883,12 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
             _ => None,
         })
         .unwrap_or(input.title_hint.as_str());
-    let (mut body, attachments) =
-        official_letter_sections_to_tex(&blocks, input.profile.style_mode == StyleMode::Compact);
+    // 表格与图片不得留在首页：在正文区第一个表格/图片之前插入换页屏障。
+    let (mut body, attachments) = official_letter_sections_to_tex_with_barrier(
+        &blocks,
+        input.profile.style_mode == StyleMode::Compact,
+        Some("\\RedPageOneBarrier"),
+    );
     if let Some(summary) = attachment_summary_tex(&blocks) {
         body.push_str(&summary);
     }
@@ -861,13 +904,20 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
         .trim_end_matches('：')
         .to_string();
     let issuing = display.full_name(&input.profile.issuing_unit);
-    let signature_unit = display
+    let signature_units = display
         .white_paper_signature_units(input)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
+        .collect::<Vec<_>>();
+    // 成文日期要居中于“落款单位 + 签字空间”，TeX 量不出 vbox 的自然宽度，
+    // 这里按字数算好最宽一行的宽度写进类文件。写成毫米而不是 em：这条
+    // \setlength 在导言区执行，那里的字号不是三号。
+    let signature_unit_width_mm = crate::export::red_signature_unit_width_mm(&signature_units);
+    let signature_unit = signature_units
+        .iter()
         .enumerate()
         .map(|(index, unit)| {
-            let line = tex_spread_signature(&unit);
+            let line = tex_spread_signature(unit);
             if index > 0 {
                 format!("\\par\\vspace{{\\baselineskip}}{line}")
             } else {
@@ -898,16 +948,17 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
     let entries = crate::models::joint_responsible_entries(&input.profile);
     let responsible_count = entries.len().max(1);
     let responsible_rows = red_approval_responsible_rows_tex(&entries, display);
-    let title_plan = title::title_plan(title, title::red_approval_chars_per_line());
+    // 标题行数按已清洗的纯文本算，与 \TitleContent 的断行结果同源。
+    let title_plain = plain_text(title);
+    let title_plan = title::title_plan(&title_plain, title::red_approval_chars_per_line());
     let title_lines = match &title_plan {
         TitlePlan::Wrapped(lines) => lines.len().max(1),
         _ => 1,
     };
-    // 首页正文栏基准约 13 行；标题或承办条目每增加一行，正文栏同步向上收缩。
-    let wrap_lines = 13usize
-        .saturating_sub(title_lines.saturating_sub(1))
-        .saturating_sub(responsible_count.saturating_sub(1))
-        .max(6);
+    let wrap_lines = crate::export::red_approval_wrap_lines(title_lines, responsible_count);
+    let body_on_second_page = usize::from(
+        crate::export::red_approval_body_metrics(&blocks).reaches_second_page(wrap_lines),
+    );
 
     format!(
         r#"%!TEX program = xelatex
@@ -923,8 +974,10 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
 {body}
 }}
 {attachment_command}\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
+\setlength{{\RedSignatureUnitWidth}}{{{signature_unit_width:.3}mm}}
 {date_commands}\renewcommand{{\RedResponsibleCount}}{{{responsible_count}}}
 \renewcommand{{\RedWrapLines}}{{{wrap_lines}}}
+\renewcommand{{\RedBodyOnSecondPage}}{{{body_on_second_page}}}
 \SetRedResponsibleContent{{
 {responsible_rows}
 }}
@@ -937,15 +990,17 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
         department = tex_escape(&input.profile.department_code),
         number = document_number,
         security = security,
-        title = tex_escape(title),
+        title = tex_escape(&title_plain),
         title_content = red_approval_title_content_tex(title),
         leaders = tex_escape(&leaders),
         body = body,
         attachment_command = attachment_command,
         signature_unit = signature_unit,
+        signature_unit_width = signature_unit_width_mm,
         date_commands = date_commands,
         responsible_count = responsible_count,
         wrap_lines = wrap_lines,
+        body_on_second_page = body_on_second_page,
         responsible_rows = responsible_rows,
     )
 }
@@ -960,10 +1015,11 @@ fn red_approval_responsible_rows_tex(
     } else {
         entries
     };
+    // 三栏定宽、标签由类文件负责；单位名超出栏宽时由 \RedFit 横向压缩，绝不换行。
     rows.iter()
         .map(|entry| {
             format!(
-                "\\textcolor{{red}}{{承办单位：}}{} & \\textcolor{{red}}{{联系人：}}{} & \\textcolor{{red}}{{电话：}}{} \\\\",
+                "\\RedRecordRow{{{}}}{{{}}}{{{}}}",
                 tex_escape(&display.abbr(&entry.unit)),
                 latex_name(&entry.name),
                 tex_escape(&entry.phone),
@@ -1287,6 +1343,73 @@ mod tests {
         assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
     }
 
+    /// 红头呈批件首页：承办区走定宽三栏、表格图片有换页屏障、落款右对齐，
+    /// 正文是否跨页由三端共用的估算写入 \RedBodyOnSecondPage。
+    #[test]
+    fn red_head_approval_tex_fixes_record_columns_and_pushes_floats_off_page_one() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::RedHeadApproval;
+        input.profile.kind = TemplateKind::RedHeadApproval;
+        input.profile.issuing_unit = "某某委员会办公室".into();
+        input.profile.signing_unit = "某某委员会、第二落款单位".into();
+        input.profile.joint_contacts = vec![
+            crate::models::JointContact {
+                unit: "综合处".into(),
+                name: "王五".into(),
+                phone: "010-12345678".into(),
+            },
+            crate::models::JointContact {
+                unit: "业务处".into(),
+                name: "赵六".into(),
+                phone: "010-87654321".into(),
+            },
+        ];
+        input.profile.joint_responsible_units = "综合处、业务处".into();
+
+        // 短正文 + 表格：屏障排在表格之前，正文因此算作已跨页。
+        let tex = red_head_approval_tex(
+            &input,
+            "# 关于某事的请示\n\n短正文。\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n",
+            &UnitDisplay::new(&[]),
+        );
+        assert!(
+            tex.contains("\\RedRecordRow{综合处}{王\\hspace{1em}五}{010-12345678}")
+                || tex.contains("\\RedRecordRow{综合处}"),
+            "承办区应逐行走 \\RedRecordRow：{tex}"
+        );
+        assert!(!tex.contains("tabularx"), "承办区不再用 tabularx：{tex}");
+        let barrier = tex.find("\\RedPageOneBarrier").expect("应插入换页屏障");
+        let table = tex.find("longtblr").expect("正文应含表格");
+        assert!(barrier < table, "屏障必须排在表格之前：{tex}");
+        assert!(tex.contains("\\renewcommand{\\RedBodyOnSecondPage}{1}"));
+        // 两条承办、单行标题：首页正文额度 14-1-2 = 11 行。
+        assert!(tex.contains("\\renewcommand{\\RedWrapLines}{11}"), "{tex}");
+
+        // 纯短正文：没有表格，正文没跨页，落款页要标“此页无正文”。
+        let tex = red_head_approval_tex(
+            &input,
+            "# 关于某事的请示\n\n短正文。妥否，请指示。",
+            &UnitDisplay::new(&[]),
+        );
+        assert!(
+            !tex.contains("\\RedPageOneBarrier"),
+            "没有表格就不插屏障：{tex}"
+        );
+        assert!(tex.contains("\\renewcommand{\\RedBodyOnSecondPage}{0}"));
+        // 多个落款单位分行，行间空一行。
+        assert!(
+            tex.contains("\\renewcommand{\\SignatureUnit}{某某委员会\\par\\vspace{\\baselineskip}第二落款单位}"),
+            "{tex}"
+        );
+        // 日期要居中于“落款单位 + 签字空间”，单位块宽度由导出器按字数算好写入。
+        // “某某委员会”5 字、“第二落款单位”6 字，取最宽的 6 字 = 6×5.6444mm。
+        // 必须是绝对长度：这条 \setlength 在导言区执行，写 em 会按导言区字号折算。
+        assert!(
+            tex.contains("\\setlength{\\RedSignatureUnitWidth}{33.867mm}"),
+            "落款单位块宽度应取最宽一行、且写成绝对长度：{tex}"
+        );
+    }
+
     #[test]
     fn gonghan_class_defines_special_options_without_unbundled_packages() {
         assert!(GONGHAN_CLASS.contains("\\DeclareOption{whitepaper}"));
@@ -1312,6 +1435,36 @@ mod tests {
             !GONGHAN_CLASS.contains("\\RequirePackage{tikz}")
                 && !GONGHAN_CLASS.contains("\\RequirePackage{wrapfig}"),
             "红头呈批件必须兼容应用内置的精简离线 TeX bundle"
+        );
+        // 承办单位一律不换行：定宽 \makebox + 超宽时只压字宽的 \RedFit。
+        assert!(
+            GONGHAN_CLASS.contains("\\newcommand{\\RedRecordRow}[3]")
+                && GONGHAN_CLASS.contains("\\resizebox{#1}{\\height}"),
+            "承办区应定宽排版，超宽时只横向压缩、字高不变"
+        );
+        // 承办区高度必须有上限，否则条目过多会把首页正文区压成 0 高度。
+        assert!(
+            GONGHAN_CLASS.contains("\\ifdim\\RedRecordHeight>\\dimexpr\\textheight-90mm\\relax"),
+            "承办区高度需要兜底上限"
+        );
+        // 落款右对齐但右侧留签字空间，最后一个单位与成文日期之间固定空一行，
+        // 日期居中于“落款单位 + 签字空间”。
+        assert!(
+            GONGHAN_CLASS.contains("\\newcommand{\\RedApprovalSignature}")
+                && GONGHAN_CLASS.contains("\\RedPageOneBarrier"),
+            "红头呈批件需要独立的落款与首页表格图片屏障"
+        );
+        assert!(
+            GONGHAN_CLASS.contains("\\setlength{\\RedApprovalSignatureRoom}{4cm}")
+                && GONGHAN_CLASS.contains(
+                    "\\makebox[\\dimexpr\\RedSignatureUnitWidth+\\RedApprovalSignatureRoom\\relax][c]"
+                ),
+            "落款右侧要留 4cm 签字位，成文日期居中于“单位 + 签字位”"
+        );
+        assert!(
+            !GONGHAN_CLASS
+                .contains("\\ifnum\\value{page}=1\n        \\clearpage\n        \\NoBodyNotice"),
+            "是否标“此页无正文”应改由 \\RedBodyOnSecondPage 决定"
         );
         assert!(
             GONGHAN_CLASS.contains("\\vspace{10\\baselineskip}"),

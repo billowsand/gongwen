@@ -61,6 +61,15 @@ impl TemplateKind {
     pub fn has_document_number(self) -> bool {
         matches!(self, Self::OfficialLetter | Self::RedHeadApproval)
     }
+
+    /// 承办条目数量上限。红头呈批件的承办区在首页底部、每条占一行，条目过多会
+    /// 把批示框和正文区压没，因此限定 4 条；其他文种的版记不受此限。
+    pub fn max_responsible_entries(self) -> Option<usize> {
+        match self {
+            Self::RedHeadApproval => Some(RED_APPROVAL_MAX_RESPONSIBLE),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for TemplateKind {
@@ -152,6 +161,10 @@ pub struct JointResponsibleEntry {
     pub name: String,
     pub phone: String,
 }
+
+/// 红头呈批件承办条目数量上限：首页底部承办区每条占一行，超过 4 条会把批示框
+/// 和首页正文区挤没，界面按此上限封顶，旧稿件超限时由校验提示。
+pub const RED_APPROVAL_MAX_RESPONSIBLE: usize = 4;
 
 /// 把联合发文承办单位列表与联系人列表归一化成成对条目。
 /// 旧稿件联系人未绑承办单位（`unit` 为空）时，按索引回落

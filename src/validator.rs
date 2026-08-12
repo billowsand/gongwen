@@ -196,8 +196,16 @@ pub fn validate(
             if input.profile.signing_unit.trim().is_empty() {
                 warnings.push("红头呈批件缺少落款单位".into());
             }
-            if crate::models::joint_responsible_entries(&input.profile).is_empty() {
+            let responsible = crate::models::joint_responsible_entries(&input.profile);
+            if responsible.is_empty() {
                 warnings.push("红头呈批件至少需要一条承办单位、联系人和电话".into());
+            }
+            if responsible.len() > crate::models::RED_APPROVAL_MAX_RESPONSIBLE {
+                warnings.push(format!(
+                    "红头呈批件承办信息最多 {} 条，当前 {} 条，首页承办区会挤占批示框和正文",
+                    crate::models::RED_APPROVAL_MAX_RESPONSIBLE,
+                    responsible.len()
+                ));
             }
             if !text.contains("妥否，请指示") {
                 warnings.push("红头呈批件缺少规范请示结语“妥否，请指示。”".into());
@@ -807,6 +815,31 @@ mod tests {
                     || warning.contains("至少需要一条承办")
                     || warning.contains("缺少联系电话")),
             "{valid:?}"
+        );
+
+        // 承办条目有硬上限：界面已封顶，旧稿件超限时要提示（首页承办区放不下）。
+        input.profile.joint_contacts = (0..crate::models::RED_APPROVAL_MAX_RESPONSIBLE + 1)
+            .map(|index| crate::models::JointContact {
+                unit: format!("承办{index}处"),
+                name: "李四".into(),
+                phone: "010-1".into(),
+            })
+            .collect();
+        let pairs = input
+            .profile
+            .joint_contacts
+            .iter()
+            .map(|contact| crate::models::JointResponsibleEntry {
+                unit: contact.unit.clone(),
+                name: contact.name.clone(),
+                phone: contact.phone.clone(),
+            })
+            .collect::<Vec<_>>();
+        crate::models::sync_joint_responsible(&mut input.profile, &pairs);
+        let over = validate(&input, "# 呈批标题\n\n妥否，请指示。", &[], &rules());
+        assert!(
+            over.iter().any(|warning| warning.contains("承办信息最多")),
+            "超过上限应提示：{over:?}"
         );
     }
 

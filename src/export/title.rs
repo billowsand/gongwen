@@ -71,7 +71,7 @@ pub fn title_plan(title: &str, chars_per_line: usize) -> TitlePlan {
 }
 
 /// 标题的显示宽度（半角单位）：1 个全角字符 = 2，1 个半角英数 = 1，空白不计。
-fn display_units(text: &str) -> usize {
+pub(crate) fn display_units(text: &str) -> usize {
     text.chars()
         .filter(|c| !c.is_whitespace())
         .map(|c| if c.is_ascii() { 1 } else { 2 })

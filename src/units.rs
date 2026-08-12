@@ -997,7 +997,10 @@ mod tests {
     fn signature_name_switches_between_full_and_abbr() {
         let v = vocab();
         let display = UnitDisplay::new(&v);
-        assert_eq!(display.signature_name("新闻舆论处", false), "中央网信办新闻舆论处");
+        assert_eq!(
+            display.signature_name("新闻舆论处", false),
+            "中央网信办新闻舆论处"
+        );
         assert_eq!(display.signature_name("新闻舆论处", true), "新舆处");
         // 未维护简称的单位回落规范名称。
         assert_eq!(display.signature_name("信访接待处", true), "信访接待处");
@@ -1018,12 +1021,18 @@ mod tests {
             ["中央宣传部", "中央宣传部网络信息处"]
         );
         input.profile.use_short_name_for_signature = true;
-        assert_eq!(display.white_paper_signature_units(&input), ["中宣部", "网信处"]);
+        assert_eq!(
+            display.white_paper_signature_units(&input),
+            ["中宣部", "网信处"]
+        );
         // 落款单位留空时回落发文单位（简称开关不影响回落单位）。
         input.profile.use_short_name_for_signature = false;
         input.profile.signing_unit.clear();
         input.profile.issuing_unit = "新闻舆论处".into();
-        assert_eq!(display.white_paper_signature_units(&input), ["中央网信办新闻舆论处"]);
+        assert_eq!(
+            display.white_paper_signature_units(&input),
+            ["中央网信办新闻舆论处"]
+        );
     }
 
     #[test]

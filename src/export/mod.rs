@@ -651,6 +651,163 @@ pub(crate) fn body_heading_max_level(blocks: &[MarkdownBlock]) -> u8 {
     max_level
 }
 
+// ========== 红头呈批件首页几何 ==========
+//
+// 首页三块区域的宽度在预览、Word、LaTeX 三端必须一致，因此统一以缇（1/20 磅）
+// 定义，另两端再换算成毫米/像素。基准字号为三号（16 pt），1 em = 320 缇。
+
+/// 承办区「电话」栏宽：`电话：` 3 em + 半角号码约 6.5 em。
+pub(crate) const RED_RECORD_PHONE_TWIPS: usize = 3_040;
+/// 承办区「联系人」栏宽：`联系人：` 4 em + 姓名 3 em（姓名一律归一到 3 字宽）。
+pub(crate) const RED_RECORD_CONTACT_TWIPS: usize = 2_240;
+/// 承办区「承办单位」栏宽：版心减去另两栏，`承办单位：` 5 em 之后还余约 6 em。
+/// 三栏里只有这一栏宽度可变，所以把全部余量都给它，超出时再横向压缩。
+pub(crate) const RED_RECORD_UNIT_TWIPS: usize =
+    RED_RECORD_TOTAL_TWIPS - RED_RECORD_PHONE_TWIPS - RED_RECORD_CONTACT_TWIPS;
+/// 承办区总宽 = 版心 156 mm。
+pub(crate) const RED_RECORD_TOTAL_TWIPS: usize = docx::TABLE_CONTENT_WIDTH_TWIPS;
+/// 三号字一个全角字宽 = 16 pt = 320 缇。
+pub(crate) const RED_RECORD_EM_TWIPS: usize = 320;
+/// 栏间留白：内容压缩后正好铺满整栏时会与下一栏的红色标签贴在一起，
+/// 因此靠左的两栏可用宽度比栏宽少一个字，保证栏与栏之间始终看得出间隔。
+pub(crate) const RED_RECORD_GUTTER_TWIPS: usize = RED_RECORD_EM_TWIPS;
+/// 承办单位栏可用宽度（扣掉栏间留白）。
+pub(crate) const RED_RECORD_UNIT_USABLE_TWIPS: usize =
+    RED_RECORD_UNIT_TWIPS - RED_RECORD_GUTTER_TWIPS;
+/// 联系人栏可用宽度（扣掉栏间留白）。
+pub(crate) const RED_RECORD_CONTACT_USABLE_TWIPS: usize =
+    RED_RECORD_CONTACT_TWIPS - RED_RECORD_GUTTER_TWIPS;
+/// 电话栏靠右贴版心右缘，与左边的间隔由联系人栏的留白提供，自身不再让宽，
+/// 这样 `010-12345678` 这样的常见号码正好排得下、不必压缩。
+pub(crate) const RED_RECORD_PHONE_USABLE_TWIPS: usize = RED_RECORD_PHONE_TWIPS;
+/// 首页正文/标题栏宽 100 mm，三号字每行 17 个全角字（100 / 5.644 = 17.7）。
+pub(crate) const RED_APPROVAL_NARROW_CHARS: usize = 17;
+
+/// 承办区某一栏的横向压缩比（百分数，100 = 原宽）。
+///
+/// 承办单位一律不许换行：先按 `usable_twips` 量出自然宽度，放得下就原样排，
+/// 放不下才按比例压窄字形——字高不变，只收窄字宽，与标题压缩同一套做法。
+pub(crate) fn red_record_scale_percent(text: &str, usable_twips: usize) -> usize {
+    // display_units 以半角为单位，半角字占半个全角字宽。
+    let natural = title::display_units(text) * RED_RECORD_EM_TWIPS / 2;
+    if natural <= usable_twips || natural == 0 || usable_twips == 0 {
+        return 100;
+    }
+    ((usable_twips as f64 / natural as f64) * 100.0)
+        .floor()
+        .clamp(30.0, 100.0) as usize
+}
+
+/// 红头呈批件首页正文栏能排下的行数。
+///
+/// 首页版心 225 mm，扣掉红头预留的 55 mm、标题、呈报领导各占的行，以及底部
+/// 承办区（每条一行，`\enlargethispage` 会从首页扣掉这段高度），余下就是正文
+/// 可用行数。三端（含 `\RedWrapLines`）都用这一个函数，避免各算各的。
+pub(crate) fn red_approval_wrap_lines(title_lines: usize, responsible_rows: usize) -> usize {
+    14usize
+        .saturating_sub(title_lines)
+        .saturating_sub(responsible_rows)
+        .max(4)
+}
+
+/// 落款右侧留给签字的空间：签名写在落款单位名的右边。白头件与红头呈批件同宽，
+/// 对应类文件里的 `\WhitePaperSignatureRoom` / `\RedApprovalSignatureRoom`。
+pub(crate) const SIGNATURE_ROOM_MM: f32 = 40.0;
+/// 同上，换算成缇（Word 用）：40 mm = 2268 缇。两者一致由单测把关。
+pub(crate) const SIGNATURE_ROOM_TWIPS: usize = 2_268;
+
+/// 落款单位块的宽度，以三号字的全角字宽（em）计。
+///
+/// 成文日期要落在「落款单位 + 右侧签字空间」这一整段的正中，所以得先知道
+/// 单位块有多宽。少于 5 字的单位会被分散对齐到 5 字宽（见 `units::spread_gap`），
+/// 按分散后的宽度算；多个单位取最宽的一个。
+pub(crate) fn red_signature_unit_width_em(units: &[String]) -> f32 {
+    units
+        .iter()
+        .map(|unit| {
+            if crate::units::spread_gap(unit).is_some() {
+                5.0
+            } else {
+                title::display_units(unit) as f32 / 2.0
+            }
+        })
+        .fold(0.0f32, f32::max)
+}
+
+/// 同上，换算成缇（Word 用）。1 em = 三号字 16 pt = 320 缇。
+pub(crate) fn red_signature_unit_width_twips(units: &[String]) -> usize {
+    (red_signature_unit_width_em(units) * RED_RECORD_EM_TWIPS as f32).round() as usize
+}
+
+/// 同上，换算成毫米（LaTeX 用）。
+///
+/// 必须写成绝对长度：这条 `\setlength` 在导言区执行，那里的字号不是三号，
+/// 直接写 `em` 会按导言区的字号折算，成文日期就会偏出居中位置。
+pub(crate) fn red_signature_unit_width_mm(units: &[String]) -> f32 {
+    red_signature_unit_width_em(units) * RED_RECORD_EM_TWIPS as f32 / 1440.0 * 25.4
+}
+
+/// 红头呈批件正文的版面估算。三端共用，避免各算各的判据。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RedApprovalBodyMetrics {
+    /// 正文（不含附件）按首页 100 mm 窄栏估算占多少行；表格与图片不计入。
+    pub lines: usize,
+    /// 正文区第一个表格/图片之前累计的行数；正文没有表格图片时为 `None`。
+    pub lines_before_float: Option<usize>,
+}
+
+impl RedApprovalBodyMetrics {
+    /// 正文是否已经延续到第二页。决定落款页要不要标「（此页无正文）」——正文
+    /// 只有首页那点内容时落款另起一页并标注，正文本来就跨页时落款紧随正文。
+    pub fn reaches_second_page(&self, wrap_lines: usize) -> bool {
+        self.lines_before_float.is_some() || self.lines > wrap_lines
+    }
+
+    /// 第一个表格/图片是否需要强制换页。红头呈批件首页右侧是批示栏，
+    /// `\parshape` 只能收窄段落文本、管不到表格与图片，它们会按整幅版心排版
+    /// 并压过批示栏，因此落在首页的就推到第二页。
+    pub fn float_needs_page_break(&self, wrap_lines: usize) -> bool {
+        self.lines_before_float
+            .is_some_and(|before| before <= wrap_lines)
+    }
+}
+
+/// 扫描一遍正文块，按首页窄栏宽度估算行数并记录第一个表格/图片的位置。
+pub(crate) fn red_approval_body_metrics(blocks: &[MarkdownBlock]) -> RedApprovalBodyMetrics {
+    let per_line = RED_APPROVAL_NARROW_CHARS * 2;
+    let mut section = MarkdownSection::Body;
+    let mut metrics = RedApprovalBodyMetrics::default();
+    let mut seen_document_title = false;
+    for block in blocks {
+        if let MarkdownBlock::Marker(next) = block {
+            section = *next;
+            continue;
+        }
+        if section != MarkdownSection::Body {
+            continue;
+        }
+        match block {
+            MarkdownBlock::Title(_) if !seen_document_title => seen_document_title = true,
+            MarkdownBlock::Paragraph(text) => {
+                // 段落首行缩进 2 字，折算成 4 个半角单位。
+                let units = title::display_units(&plain_text(text)) + 4;
+                metrics.lines += units.div_ceil(per_line).max(1);
+            }
+            MarkdownBlock::Heading(_, text) | MarkdownBlock::ListItem(text) => {
+                let units = title::display_units(&plain_text(text));
+                metrics.lines += units.div_ceil(per_line).max(1);
+            }
+            MarkdownBlock::Table { .. } | MarkdownBlock::Image { .. }
+                if metrics.lines_before_float.is_none() =>
+            {
+                metrics.lines_before_float = Some(metrics.lines);
+            }
+            _ => {}
+        }
+    }
+    metrics
+}
+
 /// 与 mdx 公文转换保持一致：标题编号由导出器统一生成，先清掉模型或人工写入的旧编号。
 fn clean_heading_number(text: &str) -> String {
     const PATTERNS: &[&str] = &[
@@ -1058,6 +1215,116 @@ mod tests {
     #[test]
     fn filename_is_windows_safe() {
         assert_eq!(safe_filename("关于A/B:测试?的函"), "关于A_B_测试_的函");
+    }
+
+    /// 承办区三栏宽度必须正好铺满版心，否则三端会各自错位。
+    #[test]
+    fn red_record_columns_fill_the_content_width() {
+        assert_eq!(
+            RED_RECORD_UNIT_TWIPS + RED_RECORD_CONTACT_TWIPS + RED_RECORD_PHONE_TWIPS,
+            RED_RECORD_TOTAL_TWIPS
+        );
+        // 承办单位栏最宽：`承办单位：`5 字之后还要放得下单位简称。
+        const { assert!(RED_RECORD_UNIT_TWIPS > RED_RECORD_PHONE_TWIPS) };
+    }
+
+    /// 承办单位一律不换行：放得下不动、放不下按比例压窄，且始终留出栏间空白。
+    #[test]
+    fn red_record_scale_compresses_only_when_too_wide() {
+        // “承办单位：综合处”8 字 = 2560 缇，可用 3564-320 = 3244 缇，放得下。
+        assert_eq!(
+            red_record_scale_percent("承办单位：综合处", RED_RECORD_UNIT_USABLE_TWIPS),
+            100
+        );
+        // 15 字 = 4800 缇，超出可用宽度，应压到 67%（3244/4800）。
+        let long = red_record_scale_percent(
+            "承办单位：教师工作与师资管理处",
+            RED_RECORD_UNIT_USABLE_TWIPS,
+        );
+        assert!((65..=70).contains(&long), "应按比例压窄：{long}");
+        // 压缩后的宽度不得超过“栏宽减一个字”，保证与下一栏标签之间有间隔。
+        let natural =
+            title::display_units("承办单位：教师工作与师资管理处") * RED_RECORD_EM_TWIPS / 2;
+        assert!(natural * long / 100 <= RED_RECORD_UNIT_USABLE_TWIPS);
+        // 电话栏不让宽：常见 12 位号码原样排下，不做压缩。
+        assert_eq!(
+            red_record_scale_percent("电话：010-12345678", RED_RECORD_PHONE_USABLE_TWIPS),
+            100
+        );
+    }
+
+    /// 签字空间在三端必须同宽：mm（预览/LaTeX）与缇（Word）不能各说各话。
+    #[test]
+    fn signature_room_is_the_same_width_in_every_unit() {
+        assert_eq!(
+            (SIGNATURE_ROOM_MM / 25.4 * 1440.0).round() as usize,
+            SIGNATURE_ROOM_TWIPS
+        );
+    }
+
+    /// 落款单位块宽度：少于 5 字的按分散后的 5 字宽算，多单位取最宽的一个。
+    #[test]
+    fn red_signature_unit_width_takes_the_widest_spread_unit() {
+        // 3 字会被分散到 5 字宽，6 字按自然宽度，取较大者 6。
+        let units = vec!["网信办".to_string(), "星海省教育厅".to_string()];
+        assert_eq!(red_signature_unit_width_em(&units), 6.0);
+        assert_eq!(
+            red_signature_unit_width_twips(&units),
+            6 * RED_RECORD_EM_TWIPS
+        );
+        // 毫米与缇必须指向同一个宽度（LaTeX 用毫米，Word 用缇）。
+        let mm = red_signature_unit_width_mm(&units);
+        assert!((mm - 33.867).abs() < 0.01, "{mm}");
+        assert_eq!(
+            (mm / 25.4 * 1440.0).round() as usize,
+            red_signature_unit_width_twips(&units)
+        );
+        // 全是短单位时统一按分散后的 5 字宽。
+        assert_eq!(red_signature_unit_width_em(&["办公室".to_string()]), 5.0);
+        assert_eq!(red_signature_unit_width_em(&[]), 0.0);
+    }
+
+    /// 首页正文行数随标题行数与承办条目数递减，并保留下限。
+    #[test]
+    fn red_approval_wrap_lines_shrink_with_title_and_records() {
+        assert_eq!(red_approval_wrap_lines(1, 1), 12);
+        assert_eq!(red_approval_wrap_lines(1, 2), 11);
+        assert_eq!(red_approval_wrap_lines(2, 4), 8);
+        // 极端情况下仍留出最少行数，不会归零。
+        assert_eq!(red_approval_wrap_lines(9, 9), 4);
+    }
+
+    /// 三端共用的正文估算：行数、首个表格图片的位置、以及由此得出的两个判断。
+    #[test]
+    fn red_approval_body_metrics_drive_page_break_and_notice() {
+        // 短正文：不到首页额度，落款另起一页并标“此页无正文”。
+        let short = parse_markdown("# 标题\n\n情况如下。妥否，请指示。");
+        let metrics = red_approval_body_metrics(&short);
+        assert_eq!(metrics.lines_before_float, None);
+        assert!(!metrics.reaches_second_page(11));
+        assert!(!metrics.float_needs_page_break(11));
+
+        // 长正文：超出首页额度，落款紧随正文，不再制造空白页。
+        let long = parse_markdown(&format!("# 标题\n\n{}", "填充版面的正文。".repeat(60)));
+        let metrics = red_approval_body_metrics(&long);
+        assert!(metrics.lines > 11);
+        assert!(metrics.reaches_second_page(11));
+
+        // 正文含表格：无论长短都算作跨页，且表格要被赶出首页。
+        let table = parse_markdown("# 标题\n\n短正文。\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n");
+        let metrics = red_approval_body_metrics(&table);
+        assert_eq!(metrics.lines_before_float, Some(1));
+        assert!(metrics.reaches_second_page(11));
+        assert!(metrics.float_needs_page_break(11));
+
+        // 附件区的表格不受影响：附件本来就另起一页，没有批示栏要避让。
+        let attachment = parse_markdown(
+            "# 标题\n\n短正文。\n<!-- [附件] -->\n# 附件\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n",
+        );
+        assert_eq!(
+            red_approval_body_metrics(&attachment).lines_before_float,
+            None
+        );
     }
 
     #[test]

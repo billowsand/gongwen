@@ -279,12 +279,56 @@
 \newcommand{\SetRedResponsibleContent}[1]{\renewcommand{\RedResponsibleContent}{#1}}
 \newcommand{\RedResponsibleCount}{1}
 \newcommand{\RedWrapLines}{13}
+% 正文是否已延续到第二页（0/1）。由导出器按三端共用的估算写入，决定落款页
+% 要不要标「（此页无正文）」；落款不得出现在首页则由 \RedApprovalClosing 兜底。
+\newcommand{\RedBodyOnSecondPage}{0}
 \newlength{\RedRecordHeight}
 \newlength{\RedFrameHeight}
 \newsavebox{\gwa@redrecordbox}
+\newsavebox{\gwa@redfitbox}
 \newcount\gwa@redremaining
 \newcount\gwa@redshapeindex
 \def\gwa@redshapepairs{}
+
+% 承办区三栏宽度。与 Word/预览同源（缇 → 毫米）：承办单位 3564、联系人 2240、
+% 电话 3040 缇，合计 8844 缇 = 156mm 版心。
+\newlength{\RedRecordUnitWidth}
+\newlength{\RedRecordContactWidth}
+\newlength{\RedRecordPhoneWidth}
+\setlength{\RedRecordUnitWidth}{62.86mm}
+\setlength{\RedRecordContactWidth}{39.51mm}
+\setlength{\RedRecordPhoneWidth}{53.62mm}
+% 栏间留白：内容压缩后正好铺满整栏会与下一栏的红色标签贴在一起，
+% 因此可用宽度一律比栏宽少一个三号字（16pt = 5.64mm）。
+\newlength{\RedRecordGutter}
+\setlength{\RedRecordGutter}{5.64mm}
+
+% 装进固定栏宽且绝不换行：放得下原样排，放不下只横向压窄字形（\height 保持
+% 字高不变），与标题的 \scalebox 压缩同一套做法。
+\newcommand{\RedFit}[2]{%
+    \sbox{\gwa@redfitbox}{#2}%
+    \ifdim\wd\gwa@redfitbox>#1\relax
+        \resizebox{#1}{\height}{\usebox{\gwa@redfitbox}}%
+    \else
+        \usebox{\gwa@redfitbox}%
+    \fi
+}
+
+% 承办区一行：承办单位靠左、联系人靠左、电话靠右，三栏定宽且各自不换行。
+\newcommand{\RedRecordRow}[3]{%
+    \noindent
+    \makebox[\RedRecordUnitWidth][l]{%
+        \RedFit{\dimexpr\RedRecordUnitWidth-\RedRecordGutter\relax}{%
+            \textcolor{red}{承办单位：}#1}\hfill}%
+    \makebox[\RedRecordContactWidth][l]{%
+        \RedFit{\dimexpr\RedRecordContactWidth-\RedRecordGutter\relax}{%
+            \textcolor{red}{联系人：}#2}\hfill}%
+    % 电话栏靠右贴版心右缘，与左边的间隔由联系人栏的留白提供，自身不再让宽，
+    % 这样 010-12345678 这样的常见号码正好排得下、不必压缩。
+    \makebox[\RedRecordPhoneWidth][r]{%
+        \hfill\RedFit{\RedRecordPhoneWidth}{\textcolor{red}{电话：}#3}}%
+    \par
+}
 
 % 不依赖 wrapfig：为接下来的若干正文行设置 10cm 行宽，最后一项恢复版心宽度。
 % 每个段落结束后用 \prevgraf 扣除实际行数，使窄栏行数能跨多个自然段累计。
@@ -614,16 +658,17 @@
         \hsize=156mm
         {\color{red}\hrule width 156mm height 0.4mm}%
         \vskip 1mm
-        \noindent\begin{minipage}{156mm}
-            \setlength{\tabcolsep}{0pt}%
-            \renewcommand{\arraystretch}{1.45}%
-            \zihao{3}%
-            \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}X>{\centering\arraybackslash}X>{\raggedleft\arraybackslash}p{11em}@{}}
-                \RedResponsibleContent
-            \end{tabularx}
-        \end{minipage}%
+        \zihao{3}%
+        \gwa@bodyspacing
+        \setlength{\parindent}{0pt}%
+        \RedResponsibleContent
     }%
     \setlength{\RedRecordHeight}{\dimexpr\ht\gwa@redrecordbox+\dp\gwa@redrecordbox\relax}%
+    % 承办条目上限为 4 条且每条只占一行，正常不会顶到这里；旧稿件带进更多条目时
+    % 兜底保住批示框和首页正文区，避免首页被压成 0 高度后整页塌掉。
+    \ifdim\RedRecordHeight>\dimexpr\textheight-90mm\relax
+        \setlength{\RedRecordHeight}{\dimexpr\textheight-90mm\relax}%
+    \fi
     \setlength{\RedFrameHeight}{\dimexpr\textheight-48mm-\RedRecordHeight\relax}%
     % 以首页版心左上角为原点的零宽 picture。只使用 LaTeX 内核命令，确保
     % 应用自带的精简离线 TeX bundle 无需 tikz/eso-pic 也能编译。
@@ -645,16 +690,56 @@
     }%
 }
 
-% 红头呈批件落款不得出现在首页。正文仍在首页结束时，第二页标注“此页无正文”后落款；
-% 正文已延续到第二页及以后时，沿用实测高度分页逻辑，能放下便紧随正文。
+% 红头呈批件落款右侧留给签字的空间，与白头件同宽。
+\newlength{\RedApprovalSignatureRoom}
+\setlength{\RedApprovalSignatureRoom}{4cm}
+% 落款单位块的宽度（最宽的一行）。由导出器按字数算好写入——TeX 量不出 vbox 的
+% 自然宽度，而成文日期要居中于“单位 + 签字空间”，必须知道单位块有多宽。
+\newlength{\RedSignatureUnitWidth}
+\setlength{\RedSignatureUnitWidth}{0pt}
+
+% 红头呈批件落款：多个落款单位自上而下右对齐（单位之间的空行由导出器注入），
+% 但右侧留出签字空间，签名写在单位名右边；最后一个单位与成文日期之间固定空
+% 一行，日期落在“落款单位 + 签字空间”这一整段的正中。
+\newcommand{\RedApprovalSignature}{%
+    \begingroup
+        \gwa@bodyspacing
+        \setlength{\parindent}{0pt}%
+        \noindent\begin{minipage}[t]{\dimexpr\textwidth-\RedApprovalSignatureRoom\relax}%
+            \gwa@bodyspacing
+            \raggedleft
+            \SignatureUnit{}%
+        \end{minipage}%
+        \hspace*{\RedApprovalSignatureRoom}\par
+        \vspace{\baselineskip}%
+        % 先跳到最宽那行单位的左沿，再在“单位 + 签字空间”的整段里居中。
+        \noindent\hspace*{\dimexpr\textwidth-\RedApprovalSignatureRoom-\RedSignatureUnitWidth\relax}%
+        \makebox[\dimexpr\RedSignatureUnitWidth+\RedApprovalSignatureRoom\relax][c]{%
+            \SignatureYear{}年\SignatureMonth{}月\SignatureDay{}日}\par
+    \endgroup
+}
+
+% 红头呈批件落款不得出现在首页。是否标注“此页无正文”由 \RedBodyOnSecondPage
+% 决定（三端共用同一估算）；\value{page} 只作兜底，保证落款确实不落在首页。
 \newcommand{\RedApprovalClosing}{%
-    \ifnum\value{page}=1
+    \ifnum\RedBodyOnSecondPage=0
         \clearpage
         \NoBodyNotice
-        \SignatureContent
+        \RedApprovalSignature
     \else
+        \ifnum\value{page}=1 \clearpage\fi
         \setlength{\gwa@closingneed}{0pt}%
-        \gwa@placeclosing{\SignatureContent}%
+        \gwa@placeclosing{\RedApprovalSignature}%
+    \fi
+}
+
+% 表格与图片不得出现在首页：\parshape 只收窄段落文本，管不到表格和图片，
+% 它们会按整幅版心排版并压过批示栏。首页遇到就换页，并结束窄栏区域。
+\newcommand{\RedPageOneBarrier}{%
+    \ifnum\value{page}=1
+        \gwa@redremaining=0
+        \gwa@setredparshape
+        \clearpage
     \fi
 }
 

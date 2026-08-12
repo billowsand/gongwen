@@ -3521,6 +3521,7 @@ impl DraftPage<'_> {
                             &mut self.doc.manual_fields,
                             free_text,
                             field_width,
+                            TemplateKind::OfficialLetter.max_responsible_entries(),
                         );
                     } else {
                         single_select(
@@ -3772,7 +3773,7 @@ impl DraftPage<'_> {
                     row_label_with_info(
                         ui,
                         "承办信息",
-                        "每行一组承办单位、联系人和电话；增加条目时首页底栏向上扩展。",
+                        "每行一组承办单位、联系人和电话，最多 4 条；条目增加时首页底栏                         向上扩展。单位名放不下时自动横向压缩，不换行。",
                     );
                     joint_responsible_editor(
                         ui,
@@ -3782,6 +3783,7 @@ impl DraftPage<'_> {
                         &mut self.doc.manual_fields,
                         free_text,
                         field_width,
+                        TemplateKind::RedHeadApproval.max_responsible_entries(),
                     );
                     ui.end_row();
 
