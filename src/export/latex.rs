@@ -28,6 +28,7 @@ pub fn write_tex(
         }
         TemplateKind::PlainDocument => plain_document_tex(input, markdown),
         TemplateKind::WhitePaper => white_paper_tex(input, markdown, display),
+        TemplateKind::RedHeadApproval => red_head_approval_tex(input, markdown, display),
         TemplateKind::MeetingAgenda => meeting_agenda_tex(input, markdown),
     };
     // 选了本机字体才注入钩子；没选时产出的 TeX 与从前逐字节一致。
@@ -36,7 +37,7 @@ pub fn write_tex(
         None => content,
     };
     fs::write(path, content).with_context(|| format!("无法写入 TeX 文件：{}", path.display()))?;
-    // 五种模板均使用 gonghan-gwa.cls，随 tex 一并输出类文件。
+    // 六种模板均使用 gonghan-gwa.cls，随 tex 一并输出类文件。
     let class_path = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -833,6 +834,145 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
     )
 }
 
+/// 红头呈批件的独立入口；首页框架在后续专用实现中生成。
+fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
+    let blocks = parse_markdown(markdown);
+    let title = blocks
+        .iter()
+        .find_map(|block| match block {
+            MarkdownBlock::Title(title) => Some(title.as_str()),
+            _ => None,
+        })
+        .unwrap_or(input.title_hint.as_str());
+    let (mut body, attachments) =
+        official_letter_sections_to_tex(&blocks, input.profile.style_mode == StyleMode::Compact);
+    if let Some(summary) = attachment_summary_tex(&blocks) {
+        body.push_str(&summary);
+    }
+    let attachment_command = if attachments.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\\SetAttachmentContent{{\n{attachments}\n}}\n")
+    };
+    let security = security_commands(input);
+    let leaders = display
+        .reporting_leaders(&input.profile.reporting_leaders)
+        .trim()
+        .trim_end_matches('：')
+        .to_string();
+    let issuing = display.full_name(&input.profile.issuing_unit);
+    let signature_unit = display
+        .white_paper_signature_units(input)
+        .into_iter()
+        .filter(|unit| !unit.trim().is_empty())
+        .enumerate()
+        .map(|(index, unit)| {
+            let line = tex_spread_signature(&unit);
+            if index > 0 {
+                format!("\\par\\vspace{{\\baselineskip}}{line}")
+            } else {
+                line
+            }
+        })
+        .collect::<String>();
+    let preview = input.profile.letter_version == LetterVersion::Preview;
+    let placeholder = "\\makebox[1em][c]{}";
+    let document_number = if preview {
+        placeholder.to_string()
+    } else {
+        tex_escape(&input.profile.document_number)
+    };
+    let date_commands = match chinese_date_parts(&input.date) {
+        Some((year, month, day)) => format!(
+            "\\renewcommand{{\\SignatureYear}}{{{}}}\n\\renewcommand{{\\SignatureMonth}}{{{}}}\n\\renewcommand{{\\SignatureDay}}{{{}}}\n",
+            tex_escape(year),
+            tex_escape(month),
+            if preview {
+                placeholder.to_string()
+            } else {
+                tex_escape(day)
+            },
+        ),
+        None => String::new(),
+    };
+    let entries = crate::models::joint_responsible_entries(&input.profile);
+    let responsible_count = entries.len().max(1);
+    let responsible_rows = red_approval_responsible_rows_tex(&entries, display);
+    let title_plan = title::title_plan(title, title::red_approval_chars_per_line());
+    let title_lines = match &title_plan {
+        TitlePlan::Wrapped(lines) => lines.len().max(1),
+        _ => 1,
+    };
+    // 首页正文栏基准约 13 行；标题或承办条目每增加一行，正文栏同步向上收缩。
+    let wrap_lines = 13usize
+        .saturating_sub(title_lines.saturating_sub(1))
+        .saturating_sub(responsible_count.saturating_sub(1))
+        .max(6);
+
+    format!(
+        r#"%!TEX program = xelatex
+\documentclass[noforcenewpage,redapproval]{{gonghan-gwa}}
+\renewcommand{{\IssuingUnit}}{{{issuing}}}
+\renewcommand{{\Year}}{{{document_year}}}
+\renewcommand{{\DepartmentCode}}{{{department}}}
+\renewcommand{{\DocumentNumber}}{{{number}}}
+{security}\renewcommand{{\DocumentTitle}}{{{title}}}
+\renewcommand{{\TitleContent}}{{{title_content}}}
+\renewcommand{{\Recipient}}{{{leaders}}}
+\renewcommand{{\MainContent}}{{
+{body}
+}}
+{attachment_command}\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
+{date_commands}\renewcommand{{\RedResponsibleCount}}{{{responsible_count}}}
+\renewcommand{{\RedWrapLines}}{{{wrap_lines}}}
+\SetRedResponsibleContent{{
+{responsible_rows}
+}}
+\begin{{document}}
+\makeredapproval
+\end{{document}}
+"#,
+        issuing = tex_escape(&issuing),
+        document_year = tex_escape(&input.document_year()),
+        department = tex_escape(&input.profile.department_code),
+        number = document_number,
+        security = security,
+        title = tex_escape(title),
+        title_content = red_approval_title_content_tex(title),
+        leaders = tex_escape(&leaders),
+        body = body,
+        attachment_command = attachment_command,
+        signature_unit = signature_unit,
+        date_commands = date_commands,
+        responsible_count = responsible_count,
+        wrap_lines = wrap_lines,
+        responsible_rows = responsible_rows,
+    )
+}
+
+fn red_approval_responsible_rows_tex(
+    entries: &[crate::models::JointResponsibleEntry],
+    display: &UnitDisplay,
+) -> String {
+    let fallback = crate::models::JointResponsibleEntry::default();
+    let rows = if entries.is_empty() {
+        std::slice::from_ref(&fallback)
+    } else {
+        entries
+    };
+    rows.iter()
+        .map(|entry| {
+            format!(
+                "\\textcolor{{red}}{{承办单位：}}{} & \\textcolor{{red}}{{联系人：}}{} & \\textcolor{{red}}{{电话：}}{} \\\\",
+                tex_escape(&display.abbr(&entry.unit)),
+                latex_name(&entry.name),
+                tex_escape(&entry.phone),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn meeting_agenda_tex(input: &DraftInput, markdown: &str) -> String {
     let blocks = parse_markdown(markdown);
     let title = blocks
@@ -1010,6 +1150,37 @@ fn title_content_tex(title: &str) -> String {
     }
 }
 
+/// 红头呈批件首页标题：小二号、约 10cm 左栏（15 个全角字宽）。
+fn red_approval_title_content_tex(title: &str) -> String {
+    let plain = plain_text(title);
+    match title::title_plan(&plain, title::red_approval_chars_per_line()) {
+        TitlePlan::SingleLine => format!(
+            "{{\\bs\\enbt\\fontsize{{18bp}}{{\\BodyBaselineSkip}}\\selectfont {}}}",
+            tex_escape(&plain)
+        ),
+        TitlePlan::Compressed => {
+            let scale = title::compressed_scale_percent_for(
+                &plain,
+                title::RED_APPROVAL_TITLE_WIDTH_PT,
+                title::RED_APPROVAL_TITLE_SIZE_PT,
+            ) as f64
+                / 100.0;
+            format!(
+                "{{\\bs\\enbt\\fontsize{{18bp}}{{\\BodyBaselineSkip}}\\selectfont\\scalebox{{{scale}}}[1]{{{}}}}}",
+                tex_escape(&plain)
+            )
+        }
+        TitlePlan::Wrapped(lines) => {
+            let body = lines
+                .iter()
+                .map(|line| tex_escape(line))
+                .collect::<Vec<_>>()
+                .join("\\\\");
+            format!("{{\\bs\\enbt\\fontsize{{18bp}}{{\\BodyBaselineSkip}}\\selectfont {body}}}")
+        }
+    }
+}
+
 /// LaTeX 中普通空格会被忽略或压缩，无法表达逐字间距；
 /// 电话通知落款须把半角空格改写为受控空格命令 `\ `（每个空格独立有效）。
 /// 必须在 `tex_escape` 之后替换，否则 `\` 会被转义为 `\textbackslash{}`。
@@ -1117,12 +1288,31 @@ mod tests {
     }
 
     #[test]
-    fn gonghan_class_defines_whitepaper_and_meetingagenda_options() {
+    fn gonghan_class_defines_special_options_without_unbundled_packages() {
         assert!(GONGHAN_CLASS.contains("\\DeclareOption{whitepaper}"));
         assert!(GONGHAN_CLASS.contains("\\DeclareOption{meetingagenda}"));
+        assert!(GONGHAN_CLASS.contains("\\DeclareOption{redapproval}"));
         assert!(GONGHAN_CLASS.contains("\\WhitePaperHeader"));
         assert!(GONGHAN_CLASS.contains("\\WhitePaperSignature"));
         assert!(GONGHAN_CLASS.contains("\\MeetingAgendaHeader"));
+        assert!(GONGHAN_CLASS.contains("\\RedApprovalPageOverlay"));
+        assert!(GONGHAN_CLASS.contains("\\RedShapedContent"));
+        assert!(
+            GONGHAN_CLASS.contains("\\setbox\\gwa@redrecordbox=\\vbox")
+                && GONGHAN_CLASS.contains("\\vskip 1mm")
+                && GONGHAN_CLASS.contains("\\ht\\gwa@redrecordbox+\\dp\\gwa@redrecordbox")
+                && GONGHAN_CLASS.contains("\\textheight-\\dp\\gwa@redrecordbox"),
+            "承办区应按真实表高定位，并保持红线到首行的固定间距"
+        );
+        assert!(
+            !GONGHAN_CLASS.contains("\\RedResponsibleCount\\BodyBaselineSkip"),
+            "承办区高度不得再按条目数乘估算行高"
+        );
+        assert!(
+            !GONGHAN_CLASS.contains("\\RequirePackage{tikz}")
+                && !GONGHAN_CLASS.contains("\\RequirePackage{wrapfig}"),
+            "红头呈批件必须兼容应用内置的精简离线 TeX bundle"
+        );
         assert!(
             GONGHAN_CLASS.contains("\\vspace{10\\baselineskip}"),
             "白头件密级后应空 10 行"

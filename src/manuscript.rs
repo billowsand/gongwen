@@ -764,9 +764,9 @@ impl ManuscriptStore {
         department_code: &str,
         excluding_id: Option<i64>,
     ) -> Result<Option<u64>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, snapshot_json FROM manuscripts WHERE kind='OfficialLetter'")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, snapshot_json FROM manuscripts WHERE kind IN ('OfficialLetter', 'RedHeadApproval')",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -1194,6 +1194,7 @@ pub(crate) fn kind_to_str(kind: TemplateKind) -> &'static str {
         TemplateKind::PlainDocument => "PlainDocument",
         TemplateKind::MeetingAgenda => "MeetingAgenda",
         TemplateKind::WhitePaper => "WhitePaper",
+        TemplateKind::RedHeadApproval => "RedHeadApproval",
     }
 }
 
@@ -1204,6 +1205,7 @@ pub(crate) fn str_to_kind(s: &str) -> Option<TemplateKind> {
         "PlainDocument" => Some(TemplateKind::PlainDocument),
         "MeetingAgenda" => Some(TemplateKind::MeetingAgenda),
         "WhitePaper" => Some(TemplateKind::WhitePaper),
+        "RedHeadApproval" => Some(TemplateKind::RedHeadApproval),
         _ => None,
     }
 }
@@ -1376,6 +1378,16 @@ mod tests {
                 .highest_letter_serial("2026", "某政函", Some(first))
                 .unwrap(),
             Some(18)
+        );
+
+        let mut approval = numbered_letter("2026", "某政函", "21");
+        approval.snapshot.kind = TemplateKind::RedHeadApproval;
+        approval.snapshot.profile.kind = TemplateKind::RedHeadApproval;
+        store.create(&approval, None).unwrap();
+        assert_eq!(
+            store.highest_letter_serial("2026", "某政函", None).unwrap(),
+            Some(21),
+            "公函与红头呈批件应共用机关代字、年度流水号池"
         );
     }
 

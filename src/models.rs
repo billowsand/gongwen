@@ -10,15 +10,17 @@ pub enum TemplateKind {
     PlainDocument,
     MeetingAgenda,
     WhitePaper,
+    RedHeadApproval,
 }
 
 impl TemplateKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::OfficialLetter,
         Self::PhoneNotice,
         Self::PlainDocument,
         Self::MeetingAgenda,
         Self::WhitePaper,
+        Self::RedHeadApproval,
     ];
 
     pub fn label(self) -> &'static str {
@@ -28,6 +30,7 @@ impl TemplateKind {
             Self::PlainDocument => "普通公文",
             Self::MeetingAgenda => "会议议程",
             Self::WhitePaper => "白头件（呈批件）",
+            Self::RedHeadApproval => "红头呈批件",
         }
     }
 
@@ -38,14 +41,25 @@ impl TemplateKind {
             Self::PlainDocument => "无红头、发文单位、主送单位、落款和版记的纯正文公文",
             Self::MeetingAgenda => "适用于会议时间地点、参会人员和议程安排",
             Self::WhitePaper => "适用于内部情况报告、请示和领导呈批",
+            Self::RedHeadApproval => "带发文单位红头、文号和首页批示栏的内部呈批件",
         }
     }
 
     pub fn uses_letter_layout(self) -> bool {
         matches!(
             self,
-            Self::OfficialLetter | Self::PhoneNotice | Self::PlainDocument
+            Self::OfficialLetter | Self::PhoneNotice | Self::PlainDocument | Self::RedHeadApproval
         )
+    }
+
+    /// 使用“呈报领导—请示正文”业务结构的文种。
+    pub fn is_approval(self) -> bool {
+        matches!(self, Self::WhitePaper | Self::RedHeadApproval)
+    }
+
+    /// 使用机关代字、发文年份和发文序号的文种。
+    pub fn has_document_number(self) -> bool {
+        matches!(self, Self::OfficialLetter | Self::RedHeadApproval)
     }
 }
 
@@ -55,7 +69,7 @@ impl fmt::Display for TemplateKind {
     }
 }
 
-/// 函稿输出状态。预览版保留正式文号和日期位置，但不写入流水号及具体日期。
+/// 带落款稿件的输出状态。预览版保留正式文号和日期位置，但不写入流水号及具体日期。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LetterVersion {
     Preview,
@@ -326,6 +340,7 @@ pub fn builtin_ai_prompts() -> Vec<AiPrompt> {
                 TemplateKind::OfficialLetter,
                 TemplateKind::PlainDocument,
                 TemplateKind::WhitePaper,
+                TemplateKind::RedHeadApproval,
             ],
             builtin_key: "expand".into(),
         },
@@ -777,18 +792,18 @@ pub struct TemplateProfile {
     pub reporting_leaders: String,
     pub signing_unit: String,
     /// 白头件落款是否使用简称。勾选后落款单位显示词库简称（未维护简称的
-    /// 单位回落规范名称）；显示文本少于 5 字时分散对齐到 5 字宽。仅白头件生效。
+    /// 单位回落规范名称）；显示文本少于 5 字时分散对齐到 5 字宽。白头件和红头呈批件生效。
     pub use_short_name_for_signature: bool,
     pub security_level: String,
     pub security_period: String,
     /// 指人专办：勾选后在密级后空一个全角空格并以黑体标注“指人专办”。
     pub special_handling: bool,
-    /// 函号中的发文年份。旧稿未保存该字段时由成文日期兼容推导。
+    /// 发文字号中的年份。旧稿未保存该字段时由成文日期兼容推导。
     pub document_year: String,
     pub document_number: String,
     pub meeting_location: String,
     pub letter_version: LetterVersion,
-    /// 正文排版风格：正常 / 紧缩。公函、电话通知、白头件、会议议程均生效。
+    /// 正文排版风格：正常 / 紧缩。公函、电话通知、白头件、红头呈批件、会议议程均生效。
     pub style_mode: StyleMode,
     /// 函稿按双面方式排版页码：奇数页靠右、偶数页靠左。
     pub duplex_printing: bool,
@@ -902,7 +917,7 @@ impl RibbonTab {
             Self::Insert => "表格、图片、正文与附件标记、词库词条、日期与符号",
             Self::Format => "标题层级、加粗、项目符号，以及引号与空行的规范化",
             Self::Review => "重新校验、版本对照、查找替换、字数统计",
-            Self::View => "五种显示方式、预览缩放、各个面板的开关",
+            Self::View => "显示方式、预览缩放、各个面板的开关",
             Self::Output => "按格式导出、打开输出目录与最近一次的成品",
         }
     }
@@ -1262,7 +1277,7 @@ impl DraftInput {
             && self.profile.correspondence_scope == CorrespondenceScope::External
     }
 
-    /// 函号年份优先使用独立元数据；旧稿回退到成文日期开头的四位年份。
+    /// 发文年份优先使用独立元数据；旧稿回退到成文日期开头的四位年份。
     pub fn document_year(&self) -> String {
         let explicit = self.profile.document_year.trim();
         if !explicit.is_empty() {

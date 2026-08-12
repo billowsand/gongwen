@@ -5894,10 +5894,10 @@ impl GongwenApp {
                             .as_str(),
                         );
                         metadata_grid_row(ui, "文号", present_or_dash(&detail.doc_number));
-                        if detail.kind == TemplateKind::OfficialLetter {
+                        if detail.kind.has_document_number() {
                             metadata_grid_row(
                                 ui,
-                                "函号年份",
+                                "发文年份",
                                 present_or_dash(&detail.snapshot.document_year()),
                             );
                         }
@@ -5905,20 +5905,41 @@ impl GongwenApp {
                         metadata_grid_row(ui, "发文单位", present_or_dash(&profile.issuing_unit));
                         metadata_grid_row(ui, "主送", present_or_dash(&profile.recipient));
                         metadata_grid_row(ui, "抄送", present_or_dash(&profile.copies_to));
+                        if detail.kind.is_approval() {
+                            metadata_grid_row(
+                                ui,
+                                "呈报领导",
+                                present_or_dash(&profile.reporting_leaders),
+                            );
+                            metadata_grid_row(
+                                ui,
+                                "落款单位",
+                                present_or_dash(&profile.signing_unit),
+                            );
+                        }
                         metadata_grid_row(
                             ui,
                             "承办单位",
-                            present_or_dash(&profile.responsible_unit),
+                            present_or_dash(if detail.kind == TemplateKind::RedHeadApproval {
+                                &profile.joint_responsible_units
+                            } else {
+                                &profile.responsible_unit
+                            }),
                         );
-                        metadata_grid_row(
-                            ui,
-                            "联系人",
+                        let contacts_metadata = if detail.kind == TemplateKind::RedHeadApproval {
+                            profile
+                                .joint_contacts
+                                .iter()
+                                .map(|contact| format!("{} {}", contact.name, contact.phone))
+                                .collect::<Vec<_>>()
+                                .join("；")
+                        } else {
                             joined_metadata(&[
                                 profile.contact_person.as_str(),
                                 profile.contact_phone.as_str(),
                             ])
-                            .as_str(),
-                        );
+                        };
+                        metadata_grid_row(ui, "联系人", present_or_dash(&contacts_metadata));
                         if !detail.snapshot.meeting_time.trim().is_empty() {
                             metadata_grid_row(ui, "会议时间", &detail.snapshot.meeting_time);
                         }

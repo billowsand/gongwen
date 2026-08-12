@@ -31,6 +31,7 @@ const PT: f32 = 96.0 / 72.0;
 // 与 export::docx 的常量对应（那边是半磅，这里是磅）。
 const BODY_PT: f32 = 16.0; // 三号
 const TITLE_PT: f32 = 22.0; // 二号
+const RED_APPROVAL_TITLE_PT: f32 = 18.0; // 小二号
 const TABLE_PT: f32 = 14.0; // 四号
 const PAREN_PT: f32 = 14.0; // 括号内容，楷体四号
 const LINE_PT: f32 = 28.0; // 固定行距
@@ -266,6 +267,120 @@ fn line_block(
     }
 }
 
+fn red_approval_title_block(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
+    let width = metrics.mm(100.0);
+    let plain = export::plain_text(text);
+    let plan = export::title::title_plan(&plain, export::title::red_approval_chars_per_line());
+    let (rendered, stretch) = match plan {
+        export::title::TitlePlan::SingleLine => (plain, 1.0),
+        export::title::TitlePlan::Compressed => {
+            let scale = export::title::compressed_scale_percent_for(
+                &plain,
+                export::title::RED_APPROVAL_TITLE_WIDTH_PT,
+                export::title::RED_APPROVAL_TITLE_SIZE_PT,
+            ) as f32
+                / 100.0;
+            (plain, scale)
+        }
+        export::title::TitlePlan::Wrapped(lines) => (lines.join("\n"), 1.0),
+    };
+    let mut format = text_format(
+        metrics.font(theme::FONT_BIAOSONG, RED_APPROVAL_TITLE_PT),
+        metrics.line,
+    );
+    // egui 没有独立字符横向 stretch，压缩时用字号近似；正式 DOCX/PDF 仍只压字宽。
+    if stretch < 1.0 {
+        format.font_id = metrics.font(theme::FONT_BIAOSONG, RED_APPROVAL_TITLE_PT * stretch);
+    }
+    let mut layout_job = job(width);
+    layout_job.halign = Align::Center;
+    layout_job.append(&rendered, 0.0, format);
+    let galley = layout(ui, layout_job);
+    place(ui, metrics, galley.size().y, |painter, rect| {
+        painter.galley(
+            egui::pos2(rect.left() + width / 2.0, rect.top()),
+            galley.clone(),
+            Color32::BLACK,
+        );
+    });
+}
+
+fn red_approval_overlay(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    display: &UnitDisplay,
+) {
+    let content_top = ui.cursor().top();
+    let content_left = ui.min_rect().left();
+    let content_bottom = ui.min_rect().top() + metrics.mm(225.0);
+    let divider_x = content_left + metrics.mm(100.0);
+    let entries = crate::models::joint_responsible_entries(&input.profile);
+    let rows = entries.len().max(1) as f32;
+    let record_top = content_bottom - metrics.line * rows;
+    let stroke = Stroke::new(metrics.mm(0.4).max(1.0), OFFICIAL_RED);
+    let painter = ui.painter();
+    painter.line_segment(
+        [
+            egui::pos2(divider_x, content_top),
+            egui::pos2(divider_x, record_top),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(content_left, record_top),
+            egui::pos2(content_left + metrics.content, record_top),
+        ],
+        stroke,
+    );
+    painter.text(
+        egui::pos2(divider_x + metrics.mm(28.0), content_top + metrics.mm(9.0)),
+        egui::Align2::CENTER_TOP,
+        "批　示",
+        metrics.font(theme::FONT_FANGSONG, BODY_PT),
+        OFFICIAL_RED,
+    );
+    let fallback = crate::models::JointResponsibleEntry::default();
+    let rows_ref = if entries.is_empty() {
+        std::slice::from_ref(&fallback)
+    } else {
+        entries.as_slice()
+    };
+    for (index, entry) in rows_ref.iter().enumerate() {
+        let y = record_top + index as f32 * metrics.line + metrics.line / 2.0;
+        let values = [
+            ("承办单位：", display.abbr(&entry.unit), content_left),
+            (
+                "联系人：",
+                entry.name.clone(),
+                content_left + metrics.content * 0.42,
+            ),
+            (
+                "电话：",
+                entry.phone.clone(),
+                content_left + metrics.content * 0.75,
+            ),
+        ];
+        for (label, value, x) in values {
+            painter.text(
+                egui::pos2(x, y),
+                egui::Align2::LEFT_CENTER,
+                label,
+                metrics.font(theme::FONT_FANGSONG, BODY_PT),
+                OFFICIAL_RED,
+            );
+            painter.text(
+                egui::pos2(x + metrics.pt(label.chars().count() as f32 * BODY_PT), y),
+                egui::Align2::LEFT_CENTER,
+                value,
+                metrics.font(theme::FONT_FANGSONG, BODY_PT),
+                Color32::BLACK,
+            );
+        }
+    }
+}
+
 /// 正文段落：仿宋三号、首行缩进 2 字；行内保留加粗与括号楷体。
 ///
 /// 这里不开 `justify`：egui 在两端对齐时会把行首空白排除在对齐范围外，首行缩进
@@ -423,7 +538,7 @@ fn signature_unit(input: &DraftInput, display: &UnitDisplay) -> String {
     };
     match input.kind {
         TemplateKind::PhoneNotice => display.abbr_spaced(raw),
-        TemplateKind::WhitePaper => {
+        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             let first = split_units(raw).into_iter().next().unwrap_or_default();
             display.signature_name(&first, input.profile.use_short_name_for_signature)
         }
@@ -515,7 +630,7 @@ fn document_number(input: &DraftInput) -> String {
 
 /// 红头（发文机关标志）：小标宋 29 磅红色，排得下就只拉开字距（上限 1em）、
 /// 字形不变，排不下才缩小字号；下面是与版心等宽的红色反线。
-fn red_header(ui: &mut egui::Ui, metrics: &Metrics, unit: &str) {
+fn red_header_inner(ui: &mut egui::Ui, metrics: &Metrics, unit: &str, draw_rule: bool) {
     if unit.trim().is_empty() {
         return;
     }
@@ -542,19 +657,25 @@ fn red_header(ui: &mut egui::Ui, metrics: &Metrics, unit: &str) {
         painter.galley(egui::pos2(left, rect.top()), galley.clone(), OFFICIAL_RED);
     });
 
-    let gap = metrics.mm(HEADER_RULE_GAP_MM);
-    let thickness = metrics.mm(HEADER_RULE_MM).max(1.0);
-    place(ui, metrics, gap + thickness, |painter, rect| {
-        let top = rect.top() + gap;
-        painter.rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(rect.left(), top),
-                egui::vec2(metrics.content, thickness),
-            ),
-            0.0,
-            OFFICIAL_RED,
-        );
-    });
+    if draw_rule {
+        let gap = metrics.mm(HEADER_RULE_GAP_MM);
+        let thickness = metrics.mm(HEADER_RULE_MM).max(1.0);
+        place(ui, metrics, gap + thickness, |painter, rect| {
+            let top = rect.top() + gap;
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left(), top),
+                    egui::vec2(metrics.content, thickness),
+                ),
+                0.0,
+                OFFICIAL_RED,
+            );
+        });
+    }
+}
+
+fn red_header(ui: &mut egui::Ui, metrics: &Metrics, unit: &str) {
+    red_header_inner(ui, metrics, unit, true);
 }
 
 /// 份号与发文字号同一行：左端份号（黑体三号），右端“代字〔年〕序号 号”（仿宋三号）。
@@ -604,6 +725,29 @@ fn header_block(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, displa
             security_line(ui, metrics, input);
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
+        TemplateKind::RedHeadApproval => {
+            security_line(ui, metrics, input);
+            red_header_inner(ui, metrics, &header_unit(input, display), false);
+            line_block(
+                ui,
+                metrics,
+                &document_number(input),
+                theme::FONT_FANGSONG,
+                BODY_PT,
+                Align::Center,
+            );
+            let thickness = metrics.mm(HEADER_RULE_MM).max(1.0);
+            place(ui, metrics, thickness, |painter, rect| {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        rect.left_top(),
+                        egui::vec2(metrics.content, thickness),
+                    ),
+                    0.0,
+                    OFFICIAL_RED,
+                );
+            });
+        }
         TemplateKind::MeetingAgenda => {
             security_line(ui, metrics, input);
             ui.add_space(metrics.line);
@@ -628,7 +772,9 @@ fn addressee_block(
             &split_units(&input.profile.recipient),
             input.uses_external_unit_names(),
         ),
-        TemplateKind::WhitePaper => display.reporting_leaders(&input.profile.reporting_leaders),
+        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
+            display.reporting_leaders(&input.profile.reporting_leaders)
+        }
         TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => String::new(),
     };
     let text = text.trim().trim_end_matches('：');
@@ -681,13 +827,31 @@ fn signature_block(
             let mut galleys = Vec::new();
             for (index, unit) in units.iter().enumerate() {
                 if index > 0 {
-                    galleys.push(line_galley(ui, metrics, "", font.clone(), width, Align::Min));
+                    galleys.push(line_galley(
+                        ui,
+                        metrics,
+                        "",
+                        font.clone(),
+                        width,
+                        Align::Min,
+                    ));
                 }
                 galleys.push(signature_unit_galley(
-                    ui, metrics, unit, font.clone(), width,
+                    ui,
+                    metrics,
+                    unit,
+                    font.clone(),
+                    width,
                 ));
             }
-            galleys.push(line_galley(ui, metrics, "", font.clone(), width, Align::Min));
+            galleys.push(line_galley(
+                ui,
+                metrics,
+                "",
+                font.clone(),
+                width,
+                Align::Min,
+            ));
             galleys.push(line_galley(ui, metrics, &date, font, width, Align::Min));
             stacked(ui, metrics, &galleys, left, width, Align::Max);
         }
@@ -1075,6 +1239,7 @@ fn sheet(ui: &mut egui::Ui, metrics: &Metrics, add_contents: impl FnOnce(&mut eg
                         ui.add_space(metrics.margin_left);
                         ui.vertical(|ui| {
                             ui.set_width(metrics.content);
+                            ui.set_min_height((metrics.page - metrics.margin_top * 2.0).max(0.0));
                             ui.style_mut().visuals.override_text_color = Some(Color32::BLACK);
                             // 预览是拿来看版式和点回源码的，不做文字选择，
                             // 否则 Label 会把点击当成拖选吃掉。
@@ -1105,7 +1270,7 @@ pub fn official_preview(
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
     let metrics = Metrics::new(visible.width(), zoom);
-    // 五个文种的正文都走 export::latex::official_letter_sections_to_tex，标题一律
+    // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题一律
     // 自动编号为 一、（一）1.（1）；紧缩风格跟随模板配置。
     let numbered = true;
     let compact = input.profile.style_mode == StyleMode::Compact;
@@ -1140,6 +1305,16 @@ pub fn official_preview(
             _ => body.push(located),
         }
     }
+    let red_body_is_short = body
+        .iter()
+        .filter_map(|located| match &located.block {
+            MarkdownBlock::Paragraph(text)
+            | MarkdownBlock::Heading(_, text)
+            | MarkdownBlock::ListItem(text) => Some(export::plain_text(text).chars().count()),
+            _ => None,
+        })
+        .sum::<usize>()
+        < 360;
 
     // 紧缩风格合并的是正文区 # 号最多的那一级标题；附件区不参与。
     let compact_level = export::body_heading_max_level(&blocks);
@@ -1158,6 +1333,9 @@ pub fn official_preview(
     let (title, title_range) = title;
     sheet(ui, &metrics, |ui| {
         header_block(ui, &metrics, input, display);
+        if input.kind == TemplateKind::RedHeadApproval {
+            red_approval_overlay(ui, &metrics, input, display);
+        }
         if !title.is_empty() {
             clickable(
                 ui,
@@ -1166,20 +1344,27 @@ pub fn official_preview(
                 &mut scroll_to_anchor,
                 &mut clicked,
                 |ui| {
-                    line_block(
-                        ui,
-                        &metrics,
-                        &title,
-                        theme::FONT_BIAOSONG,
-                        TITLE_PT,
-                        Align::Center,
-                    );
+                    if input.kind == TemplateKind::RedHeadApproval {
+                        red_approval_title_block(ui, &metrics, &title);
+                    } else {
+                        line_block(
+                            ui,
+                            &metrics,
+                            &title,
+                            theme::FONT_BIAOSONG,
+                            TITLE_PT,
+                            Align::Center,
+                        );
+                    }
                 },
             );
         }
         // 类里标题与主送（或正文）之间固定空一行。
         ui.add_space(metrics.line);
         addressee_block(ui, &metrics, input, display);
+        if input.kind == TemplateKind::RedHeadApproval {
+            ui.set_width(metrics.mm(100.0));
+        }
 
         let mut counters = [0usize; 4];
         let mut index = 0usize;
@@ -1254,11 +1439,30 @@ pub fn official_preview(
                 body_block(ui, &metrics, &label, true);
             }
         }
-        signature_block(ui, &metrics, input, display);
+        if input.kind != TemplateKind::RedHeadApproval {
+            signature_block(ui, &metrics, input, display);
+        }
         if record_on_body {
             footer_record(ui, &metrics, input, display);
         }
     });
+
+    if input.kind == TemplateKind::RedHeadApproval {
+        ui.add_space(14.0);
+        sheet(ui, &metrics, |ui| {
+            if red_body_is_short {
+                line_block(
+                    ui,
+                    &metrics,
+                    "（此页无正文）",
+                    theme::FONT_FANGSONG,
+                    BODY_PT,
+                    Align::LEFT,
+                );
+            }
+            signature_block(ui, &metrics, input, display);
+        });
+    }
 
     let last_attachment = attachments.len().saturating_sub(1);
     let attachment_count = attachments.len();

@@ -186,6 +186,29 @@ pub fn validate(
                 warnings.push("白头件正文不宜使用项目符号，应改为“一是、二是……”".into());
             }
         }
+        TemplateKind::RedHeadApproval => {
+            if input.profile.issuing_unit.trim().is_empty() {
+                warnings.push("红头呈批件缺少发文单位".into());
+            }
+            if input.profile.reporting_leaders.trim().is_empty() {
+                warnings.push("红头呈批件缺少呈报领导".into());
+            }
+            if input.profile.signing_unit.trim().is_empty() {
+                warnings.push("红头呈批件缺少落款单位".into());
+            }
+            if crate::models::joint_responsible_entries(&input.profile).is_empty() {
+                warnings.push("红头呈批件至少需要一条承办单位、联系人和电话".into());
+            }
+            if !text.contains("妥否，请指示") {
+                warnings.push("红头呈批件缺少规范请示结语“妥否，请指示。”".into());
+            }
+            if text.lines().any(|line| {
+                let s = line.trim_start();
+                s.starts_with("- ") || s.starts_with("* ")
+            }) {
+                warnings.push("红头呈批件正文不宜使用项目符号，应改为“一是、二是……”".into());
+            }
+        }
     }
 
     warnings.sort();
@@ -218,10 +241,10 @@ fn validate_metadata(
             .push("已勾选“指人专办”，但未选择密级；密级为空时指人专办不会出现在成稿中".to_string());
     }
 
-    if input.kind == TemplateKind::OfficialLetter {
+    if input.kind.has_document_number() {
         let year = input.document_year();
         if year.len() != 4 || !year.chars().all(|ch| ch.is_ascii_digit()) {
-            warnings.push("函号发文年份应填写为四位数字，例如“2026”".to_string());
+            warnings.push("文号发文年份应填写为四位数字，例如“2026”".to_string());
         }
         let serial = profile.document_number.trim();
         if profile.letter_version == crate::models::LetterVersion::Formal
@@ -232,8 +255,9 @@ fn validate_metadata(
         }
     }
 
-    if input.kind == TemplateKind::OfficialLetter
-        && input.profile.joint_issuance_mode == JointIssuanceMode::Mode1
+    if (input.kind == TemplateKind::OfficialLetter
+        && input.profile.joint_issuance_mode == JointIssuanceMode::Mode1)
+        || input.kind == TemplateKind::RedHeadApproval
     {
         // 承办单位与联系人成对录入（一一对应），旧稿件按索引回落配对。
         let entries = crate::models::joint_responsible_entries(profile);
@@ -443,6 +467,44 @@ fn validate_metadata(
                 &profile.reporting_leaders,
                 &[VocabularyCategory::Person],
                 "呈报领导",
+                vocabulary,
+                warnings,
+            );
+            check_units(
+                &profile.signing_unit,
+                &[VocabularyCategory::Unit],
+                "落款单位",
+                vocabulary,
+                warnings,
+            );
+        }
+        TemplateKind::RedHeadApproval => {
+            check_units(
+                &profile.issuing_unit,
+                &[VocabularyCategory::Unit],
+                "发文单位",
+                vocabulary,
+                warnings,
+            );
+            check_department_code(&profile.department_code, vocabulary, warnings);
+            check_units(
+                &profile.reporting_leaders,
+                &[VocabularyCategory::Person],
+                "呈报领导",
+                vocabulary,
+                warnings,
+            );
+            check_units(
+                &profile.joint_responsible_units,
+                &[VocabularyCategory::Unit],
+                "承办单位",
+                vocabulary,
+                warnings,
+            );
+            check_units(
+                &joint_contact_names,
+                &[VocabularyCategory::Person],
+                "联系人",
                 vocabulary,
                 warnings,
             );
@@ -693,6 +755,58 @@ mod tests {
             !warnings
                 .iter()
                 .any(|warning| warning.contains("缺少主送单位"))
+        );
+    }
+
+    #[test]
+    fn red_head_approval_requires_independent_parties_and_paired_contacts() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::RedHeadApproval;
+        input.profile.kind = TemplateKind::RedHeadApproval;
+        input.profile.document_year = "2026".into();
+        input.profile.document_number = "12".into();
+        let missing = validate(&input, "# 呈批标题\n\n正文。", &[], &rules());
+        for required in [
+            "缺少发文单位",
+            "缺少呈报领导",
+            "缺少落款单位",
+            "至少需要一条承办",
+        ] {
+            assert!(
+                missing.iter().any(|warning| warning.contains(required)),
+                "缺少校验：{required}，实际为 {missing:?}"
+            );
+        }
+
+        input.profile.issuing_unit = "发文单位".into();
+        input.profile.reporting_leaders = "张三".into();
+        input.profile.signing_unit = "落款单位".into();
+        input.profile.joint_responsible_units = "承办甲、承办乙".into();
+        input.profile.joint_contacts = vec![
+            crate::models::JointContact {
+                unit: "承办甲".into(),
+                name: "李四".into(),
+                phone: "010-1".into(),
+            },
+            crate::models::JointContact {
+                unit: "承办乙".into(),
+                name: "王五".into(),
+                phone: "010-2".into(),
+            },
+        ];
+        let valid = validate(
+            &input,
+            "# 呈批标题\n\n现将有关情况呈报如下。妥否，请指示。",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !valid
+                .iter()
+                .any(|warning| warning.contains("红头呈批件缺少")
+                    || warning.contains("至少需要一条承办")
+                    || warning.contains("缺少联系电话")),
+            "{valid:?}"
         );
     }
 

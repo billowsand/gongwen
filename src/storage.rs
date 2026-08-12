@@ -71,6 +71,12 @@ mod tests {
                 .iter()
                 .any(|profile| profile.kind == TemplateKind::PhoneNotice)
         );
+        assert!(
+            config
+                .profiles
+                .iter()
+                .any(|profile| profile.kind == TemplateKind::RedHeadApproval)
+        );
         let contact = config
             .vocabulary
             .iter()

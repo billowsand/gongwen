@@ -1,7 +1,7 @@
 mod docx;
 mod latex;
 pub(crate) mod table;
-mod title;
+pub(crate) mod title;
 pub(crate) use latex::write_tex;
 
 use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
@@ -170,6 +170,7 @@ pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
             }
         }
         TemplateKind::WhitePaper => format!("白头-{title}"),
+        TemplateKind::RedHeadApproval => format!("红头呈批-{}-{title}", letter_prefix(input)),
         TemplateKind::OfficialLetter => format!("{}-{title}", letter_prefix(input)),
         TemplateKind::PhoneNotice => "电话通知".to_string(),
         TemplateKind::PlainDocument => format!("普通公文-{title}"),

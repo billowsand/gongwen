@@ -185,6 +185,9 @@ pub fn build_draft_prompt(
         TemplateKind::WhitePaper => {
             r#"文种为白头件（内部呈批件）。结构遵循“依据与概述—前期工作情况—下步工作建议—请示结语”；大节使用“一、二、三”，段内枚举使用“一是、二是、三是”，不得使用 Markdown 项目符号。结尾必须为“妥否，请指示。”或包含该句。"#
         }
+        TemplateKind::RedHeadApproval => {
+            r#"文种为红头呈批件。正文业务结构与白头件一致，遵循“依据与概述—前期工作情况—下步工作建议—请示结语”；大节使用“一、二、三”，段内枚举使用“一是、二是、三是”，不得使用 Markdown 项目符号。结尾必须为“妥否，请指示。”或包含该句。用户素材明确要求附带具体附件内容时，每份附件前使用独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部继续使用与正文相同的标题层级，附件编号由程序生成。"#
+        }
     };
 
     // 公函和白头件的版式要素全部由本地导出器按锁定元数据渲染，
@@ -267,6 +270,24 @@ pub fn build_draft_prompt(
 不要输出版记横线、分隔线、页码、附件清单编号之外的任何版式符号，也不要在正文末尾另起一行写单位名称或日期。"#,
             forbidden = "密级和保密期限、发文机关标识（红头）、发文字号、主送单位或呈报领导抬头、落款单位、成文日期、抄送单位、承办单位、联系人、联系电话"
         ),
+        TemplateKind::RedHeadApproval => format!(
+            r#"
+
+【输出范围：标题、正文和可选附件】
+锁定元数据已在界面确定，导出 Word/LaTeX 时由本程序按红头呈批件格式自动排版。请使用以下结构：
+# 正式标题
+<!-- [正文] -->
+正文自然段，以及必要的“## 一级标题”和“### 二级标题”。
+
+只有素材明确给出了需要一并生成的附件内容时，才在正文结语之后继续输出：
+<!-- [附件] -->
+# 附件正式标题
+附件内容；多个附件在每份附件前重复附件标记，程序自动编号并另起一页。
+
+没有附件全文时省略附件标记和附件区段。以下内容一概不得出现在 Markdown 中：{forbidden}。
+不要输出版记横线、批示框、页码或任何版式符号，也不要在正文末尾另写单位名称或日期。"#,
+            forbidden = "密级和保密期限、发文机关标识（红头）、发文字号、呈报领导抬头、批示文字、落款单位、成文日期、承办单位、联系人、联系电话"
+        ),
     };
 
     let glossary = if vocabulary.is_empty() {
@@ -335,7 +356,8 @@ pub fn build_draft_prompt(
         display.join_hierarchical_for(&split_units(&input.profile.recipient), external_names);
     let copies_display =
         display.join_hierarchical_for(&split_units(&input.profile.copies_to), external_names);
-    let responsible_display = if joint_mode {
+    let multiple_responsible = joint_mode || input.kind == TemplateKind::RedHeadApproval;
+    let responsible_display = if multiple_responsible {
         split_units(&input.profile.joint_responsible_units)
             .iter()
             .map(|unit| display.abbr(unit))
@@ -360,6 +382,8 @@ pub fn build_draft_prompt(
 - 主送/函送单位：{recipient}
 - 抄送单位：{copies}
 - 呈报领导：{leaders}
+- 落款单位：{signing}
+- 发文字号：{document_number}
 - 成文日期：{date}
 - 会议时间：{meeting_time}
 - 会议地点：{meeting_location}
@@ -400,12 +424,23 @@ pub fn build_draft_prompt(
         meeting_location = value_or_infer(&input.profile.meeting_location, "会议地点"),
         attendees = value_or_infer(&input.attendees, "参加人员"),
         responsible = value_or_none(&responsible_display),
-        contact = value_or_none(if joint_mode {
+        signing = value_or_none(&input.profile.signing_unit),
+        document_number = value_or_none(&if input.kind.has_document_number() {
+            format!(
+                "{}〔{}〕{}号",
+                input.profile.department_code.trim(),
+                input.document_year(),
+                input.profile.document_number.trim()
+            )
+        } else {
+            String::new()
+        }),
+        contact = value_or_none(if multiple_responsible {
             &joint_contact_names
         } else {
             &input.profile.contact_person
         }),
-        phone = value_or_none(if joint_mode {
+        phone = value_or_none(if multiple_responsible {
             &joint_contact_phones
         } else {
             &input.profile.contact_phone
@@ -461,6 +496,10 @@ fn kind_structure_rules(kind: TemplateKind) -> &'static str {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice | TemplateKind::PlainDocument => {
             r#"正文一级标题使用“## 标题”、二级标题使用“### 标题”，标题文本不要手写编号；
 正文区段用“<!-- [正文] -->”标记；有附件内容时，每份附件前重复独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部标题与正文使用相同层级，附件编号由程序生成，不要手写。"#
+        }
+        TemplateKind::RedHeadApproval => {
+            r#"正文业务结构与白头件一致；大节使用“一、二、三”，段内枚举使用“一是、二是、三是”，不得使用 Markdown 项目符号，结尾必须为“妥否，请指示。”或包含该句。
+正文一级标题使用“## 标题”、二级标题使用“### 标题”，标题文本不要手写编号；正文区段用“<!-- [正文] -->”标记；有附件内容时，每份附件前重复独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部标题与正文使用相同层级，附件编号由程序生成，不要手写。不得输出批示框、发文字号、承办信息或落款。"#
         }
         TemplateKind::MeetingAgenda => {
             r#"严格保持会议议程骨架：第一行一个“# 标题”；“一、时间地点”“二、参加人员”“三、研讨内容”各占一行；议程事项从“1.”连续编号。"#
@@ -1120,6 +1159,11 @@ mod tests {
         let white_paper = output_contract(TemplateKind::WhitePaper);
         assert!(white_paper.contains("妥否，请指示。"));
         assert!(!white_paper.contains("<!-- [附件] -->"));
+
+        let red_approval = output_contract(TemplateKind::RedHeadApproval);
+        assert!(red_approval.contains("妥否，请指示。"));
+        assert!(red_approval.contains("<!-- [附件] -->"));
+        assert!(red_approval.contains("批示框"));
     }
 
     /// 用户指令原样带进提示词，不做截断或转义——模型要看到完整任务描述。

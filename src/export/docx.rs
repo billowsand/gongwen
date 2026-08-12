@@ -18,6 +18,7 @@ use std::{fs::File, path::Path};
 
 const BODY_SIZE: usize = 32; // 16 pt，OOXML 使用半磅
 const TITLE_SIZE: usize = 44; // 22 pt，二号
+const RED_APPROVAL_TITLE_SIZE: usize = 36; // 18 pt，小二号
 pub(super) const TABLE_SIZE: usize = 28; // 14 pt，四号
 const FOOTER_SIZE: usize = 28; // 14 pt，四号；版记字号独立固定，不随正文表格调整
 const PAGE_NUMBER_SIZE: usize = 36; // 18 pt，四号
@@ -437,21 +438,19 @@ fn add_white_paper_signature(doc: Docx, input: &DraftInput, display: &UnitDispla
     for (index, unit) in units.iter().enumerate() {
         if index > 0 {
             doc = doc.add_paragraph(
-                Paragraph::new()
-                    .add_run(body_run(""))
-                    .line_spacing(
-                        LineSpacing::new().line(560).line_rule(LineSpacingType::Exact),
-                    ),
+                Paragraph::new().add_run(body_run("")).line_spacing(
+                    LineSpacing::new()
+                        .line(560)
+                        .line_rule(LineSpacingType::Exact),
+                ),
             );
         }
-        let mut paragraph = Paragraph::new()
-            .align(AlignmentType::Right)
-            .line_spacing(
-                LineSpacing::new()
-                    .before(if index == 0 { 360 } else { 0 })
-                    .line(560)
-                    .line_rule(LineSpacingType::Exact),
-            );
+        let mut paragraph = Paragraph::new().align(AlignmentType::Right).line_spacing(
+            LineSpacing::new()
+                .before(if index == 0 { 360 } else { 0 })
+                .line(560)
+                .line_rule(LineSpacingType::Exact),
+        );
         for run in spread_runs(unit) {
             paragraph = paragraph.add_run(run);
         }
@@ -460,11 +459,11 @@ fn add_white_paper_signature(doc: Docx, input: &DraftInput, display: &UnitDispla
     if units.len() > 1 {
         // 最后一个单位与成文日期之间也空一行，与单位间间距一致。
         doc = doc.add_paragraph(
-            Paragraph::new()
-                .add_run(body_run(""))
-                .line_spacing(
-                    LineSpacing::new().line(560).line_rule(LineSpacingType::Exact),
-                ),
+            Paragraph::new().add_run(body_run("")).line_spacing(
+                LineSpacing::new()
+                    .line(560)
+                    .line_rule(LineSpacingType::Exact),
+            ),
         );
     }
     doc.add_paragraph(
@@ -852,6 +851,8 @@ fn joint_record_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<TableRow>
                     0,
                 ),
             ])
+            .row_height(560.0)
+            .height_rule(HeightRule::Exact)
             .cant_split()
         })
         .collect()
@@ -907,6 +908,204 @@ fn document_title_paragraph(title: &str, plan: &TitlePlan) -> Paragraph {
         }
     }
     paragraph
+}
+
+fn red_approval_title_paragraph(title: &str, plan: &TitlePlan) -> Paragraph {
+    let mut paragraph = Paragraph::new().align(AlignmentType::Center);
+    let run = |text: &str| title_run(text, RED_APPROVAL_TITLE_SIZE);
+    match plan {
+        TitlePlan::SingleLine => paragraph = paragraph.add_run(run(title)),
+        TitlePlan::Compressed => {
+            let scale = title::compressed_scale_percent_for(
+                title,
+                title::RED_APPROVAL_TITLE_WIDTH_PT,
+                title::RED_APPROVAL_TITLE_SIZE_PT,
+            );
+            paragraph = paragraph.add_run(run(title).stretch(scale as i32));
+        }
+        TitlePlan::Wrapped(lines) => {
+            for (index, line) in lines.iter().enumerate() {
+                paragraph = paragraph.add_run(run(line));
+                if index + 1 < lines.len() {
+                    paragraph = paragraph.add_run(Run::new().add_break(BreakType::TextWrapping));
+                }
+            }
+        }
+    }
+    // 首页左栏约 10cm，右侧 5.6cm 留给批示栏。
+    paragraph.indent(Some(0), None, Some(3_175), None)
+}
+
+fn red_approval_frame_table(input: &DraftInput) -> Table {
+    let record_rows = crate::models::joint_responsible_entries(&input.profile)
+        .len()
+        .max(1);
+    // 页面下边距为 35mm，承办表贴下边距上沿；每增加一行（正文字号固定
+    // 28pt 行距），框底就随承办表上移，保持竖线与下横线相接。
+    let frame_height = 10_028usize.saturating_sub(record_rows * 560).max(4_480) as f32;
+    let borders = TableBorders::new()
+        .set(
+            TableBorder::new(TableBorderPosition::Top)
+                .size(12)
+                .color("FF0000"),
+        )
+        .set(
+            TableBorder::new(TableBorderPosition::Left)
+                .size(12)
+                .color("FF0000"),
+        );
+    let paragraph = Paragraph::new()
+        .add_run(
+            Run::new()
+                .add_text("批　示")
+                .fonts(chinese_fonts("仿宋_GB2312"))
+                .size(BODY_SIZE)
+                .color("FF0000"),
+        )
+        .align(AlignmentType::Center)
+        .line_spacing(
+            LineSpacing::new()
+                .before(420)
+                .line(560)
+                .line_rule(LineSpacingType::Exact),
+        );
+    Table::new(vec![
+        TableRow::new(vec![
+            TableCell::new()
+                .width(3_175, WidthType::Dxa)
+                .add_paragraph(paragraph),
+        ])
+        .row_height(frame_height)
+        .height_rule(HeightRule::AtLeast),
+    ])
+    .set_grid(vec![3_175])
+    .width(3_175, WidthType::Dxa)
+    .layout(TableLayoutType::Fixed)
+    .clear_all_border()
+    .set_borders(borders)
+    .position(
+        TablePositionProperty::new()
+            .horizontal_anchor("margin")
+            .vertical_anchor("margin")
+            .position_x_alignment("right")
+            .position_y(2_720)
+            .left_from_text(0)
+            .right_from_text(0),
+    )
+}
+
+/// 首页红色横线要贯穿整个版心。批示栏自身只占右侧 5.6cm，另放一条
+/// 极薄的浮动表格补足左栏横线，避免让 Word 把正文按整页宽度绕排。
+fn red_approval_top_rule_table() -> Table {
+    let borders = TableBorders::new().set(
+        TableBorder::new(TableBorderPosition::Top)
+            .size(12)
+            .color("FF0000"),
+    );
+    Table::new(vec![
+        TableRow::new(vec![
+            TableCell::new()
+                .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+                .add_paragraph(Paragraph::new()),
+        ])
+        .row_height(1.0)
+        .height_rule(HeightRule::Exact),
+    ])
+    .set_grid(vec![TABLE_CONTENT_WIDTH_TWIPS])
+    .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+    .layout(TableLayoutType::Fixed)
+    .clear_all_border()
+    .set_borders(borders)
+    .position(
+        TablePositionProperty::new()
+            .horizontal_anchor("margin")
+            .vertical_anchor("margin")
+            .position_x_alignment("left")
+            .position_y(2_720)
+            .left_from_text(0)
+            .right_from_text(0),
+    )
+}
+
+fn red_record_paragraph(label: &str, value: &str, alignment: AlignmentType) -> Paragraph {
+    Paragraph::new()
+        .add_run(
+            Run::new()
+                .add_text(label)
+                .fonts(chinese_fonts("仿宋_GB2312"))
+                .size(BODY_SIZE)
+                .color("FF0000"),
+        )
+        .add_run(body_run(value))
+        .align(alignment)
+        .line_spacing(
+            LineSpacing::new()
+                .line(560)
+                .line_rule(LineSpacingType::Exact),
+        )
+}
+
+fn red_approval_record_table(input: &DraftInput, display: &UnitDisplay) -> Table {
+    let entries = crate::models::joint_responsible_entries(&input.profile);
+    let fallback = crate::models::JointResponsibleEntry::default();
+    let entries = if entries.is_empty() {
+        std::slice::from_ref(&fallback)
+    } else {
+        entries.as_slice()
+    };
+    let rows = entries
+        .iter()
+        .map(|entry| {
+            TableRow::new(vec![
+                TableCell::new()
+                    .width(RECORD_OTHER_COLUMN_TWIPS, WidthType::Dxa)
+                    .add_paragraph(red_record_paragraph(
+                        "承办单位：",
+                        &display.abbr(&entry.unit),
+                        AlignmentType::Left,
+                    )),
+                TableCell::new()
+                    .width(RECORD_OTHER_COLUMN_TWIPS, WidthType::Dxa)
+                    .add_paragraph(red_record_paragraph(
+                        "联系人：",
+                        &entry.name,
+                        AlignmentType::Center,
+                    )),
+                TableCell::new()
+                    .width(RECORD_PHONE_COLUMN_TWIPS, WidthType::Dxa)
+                    .add_paragraph(red_record_paragraph(
+                        "电话：",
+                        &entry.phone,
+                        AlignmentType::Right,
+                    )),
+            ])
+            .cant_split()
+        })
+        .collect::<Vec<_>>();
+    let borders = TableBorders::new().set(
+        TableBorder::new(TableBorderPosition::Top)
+            .size(12)
+            .color("FF0000"),
+    );
+    Table::new(rows)
+        .set_grid(vec![
+            RECORD_OTHER_COLUMN_TWIPS,
+            RECORD_OTHER_COLUMN_TWIPS,
+            RECORD_PHONE_COLUMN_TWIPS,
+        ])
+        .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+        .layout(TableLayoutType::Fixed)
+        .clear_all_border()
+        .set_borders(borders)
+        .position(
+            TablePositionProperty::new()
+                .horizontal_anchor("margin")
+                .vertical_anchor("margin")
+                .position_x_alignment("left")
+                .position_y_alignment("bottom")
+                .left_from_text(0)
+                .right_from_text(0),
+        )
 }
 
 fn table_run_sized(text: &str, header: bool, size: usize) -> Run {
@@ -1305,7 +1504,18 @@ pub fn write_docx(
 
     if input.kind.uses_letter_layout() {
         doc = add_official_page_footers(doc, input.profile.duplex_printing);
-        if !input.profile.security_level.trim().is_empty() {
+        if input.kind == TemplateKind::RedHeadApproval {
+            // 即使不标密也保留密级行的垂直槽位，使红头稳定落在参考稿约 67mm
+            // 的位置；有密级时就在该槽位显示，不改变后续元素坐标。
+            doc = doc.add_paragraph(
+                letter_security_paragraph(input).line_spacing(
+                    LineSpacing::new()
+                        .line(560)
+                        .line_rule(LineSpacingType::Exact)
+                        .after(560),
+                ),
+            );
+        } else if !input.profile.security_level.trim().is_empty() {
             doc = doc.add_paragraph(letter_security_paragraph(input));
         }
         if input.kind != TemplateKind::PlainDocument {
@@ -1333,7 +1543,7 @@ pub fn write_docx(
                 );
             }
         }
-        if input.kind == TemplateKind::OfficialLetter
+        if input.kind.has_document_number()
             && let Some(number) = official_document_number(input)
         {
             doc = doc.add_paragraph(
@@ -1343,14 +1553,36 @@ pub fn write_docx(
                     .line_spacing(LineSpacing::new().after(240)),
             );
         }
+        if input.kind == TemplateKind::RedHeadApproval {
+            doc = doc
+                .add_table(red_approval_top_rule_table())
+                .add_table(red_approval_frame_table(input))
+                .add_table(red_approval_record_table(input, display));
+        }
     }
 
-    let plan = title::title_plan(&plain_text(title), title::chars_per_line());
-    doc = doc.add_paragraph(
+    let title_plain = plain_text(title);
+    let title_capacity = if input.kind == TemplateKind::RedHeadApproval {
+        title::red_approval_chars_per_line()
+    } else {
+        title::chars_per_line()
+    };
+    let plan = title::title_plan(&title_plain, title_capacity);
+    let title_paragraph = if input.kind == TemplateKind::RedHeadApproval {
+        red_approval_title_paragraph(title, &plan)
+    } else {
         document_title_paragraph(title, &plan)
+    };
+    let title_before = if input.kind == TemplateKind::RedHeadApproval {
+        480
+    } else {
+        120
+    };
+    doc = doc.add_paragraph(
+        title_paragraph
             .line_spacing(
                 LineSpacing::new()
-                    .before(120)
+                    .before(title_before)
                     .after(360)
                     .line(560)
                     .line_rule(LineSpacingType::Exact),
@@ -1363,7 +1595,9 @@ pub fn write_docx(
             &split_units(&input.profile.recipient),
             input.uses_external_unit_names(),
         ),
-        TemplateKind::WhitePaper => display.reporting_leaders(&input.profile.reporting_leaders),
+        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
+            display.reporting_leaders(&input.profile.reporting_leaders)
+        }
         TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => String::new(),
     };
     if !addressee.is_empty() && !markdown.contains(addressee.as_str()) {
@@ -1455,7 +1689,7 @@ pub fn write_docx(
         }
     }
 
-    // 附件概要：正文结束后、落款之前列出附件名称（仅公函/电话通知可带附件）。
+    // 附件概要：正文结束后、落款之前列出附件名称（红头呈批件同样支持）。
     if input.kind.uses_letter_layout() {
         let names = attachment_names(&blocks);
         if !names.is_empty() {
@@ -1466,6 +1700,32 @@ pub fn write_docx(
     if crate::models::is_joint_signature(input) {
         doc = add_joint_signature(doc, input, display);
     } else if input.kind == TemplateKind::WhitePaper {
+        doc = add_white_paper_signature(doc, input, display);
+    } else if input.kind == TemplateKind::RedHeadApproval {
+        // 落款最早从第二页开始。正文很短时显式换页；正文已自然延续到后页时
+        // 不再额外制造空白页，落款可以接在第二页或后续正文之后。
+        let estimated_body_chars = blocks
+            .iter()
+            .filter_map(|block| match block {
+                MarkdownBlock::Paragraph(text) | MarkdownBlock::Heading(_, text) => {
+                    Some(plain_text(text).chars().count())
+                }
+                _ => None,
+            })
+            .sum::<usize>();
+        if estimated_body_chars < 360 {
+            doc = doc.add_paragraph(
+                Paragraph::new()
+                    .add_run(body_run("（此页无正文）"))
+                    .indent(Some(640), None, None, None)
+                    .page_break_before(true)
+                    .line_spacing(
+                        LineSpacing::new()
+                            .line(560)
+                            .line_rule(LineSpacingType::Exact),
+                    ),
+            );
+        }
         doc = add_white_paper_signature(doc, input, display);
     } else if matches!(
         input.kind,
@@ -1972,10 +2232,7 @@ mod tests {
             "3 字简称应有 1em 字符间距：{xml}"
         );
         // 单位与日期段落都右对齐。
-        assert!(
-            xml.contains("w:val=\"right\""),
-            "落款应右对齐：{xml}"
-        );
+        assert!(xml.contains("w:val=\"right\""), "落款应右对齐：{xml}");
         // 不出现未分散的整串简称。
         assert!(!xml.contains("省教育厅"), "简称不应整串出现：{xml}");
     }
@@ -1990,7 +2247,10 @@ mod tests {
         input.date = "2026年8月7日".into();
         write_docx_ok(&path, &input, "# 标题\n\n正文。").unwrap();
         let xml = zip_text(&path, "word/document.xml");
-        assert!(xml.contains("星海省教育厅"), "单单位未选简称应输出全称：{xml}");
+        assert!(
+            xml.contains("星海省教育厅"),
+            "单单位未选简称应输出全称：{xml}"
+        );
     }
 
     #[test]
@@ -2348,6 +2608,56 @@ mod tests {
         assert!(!xml.contains("抄送："), "无抄送单位时不应留下空标签");
         assert!(xml.contains("（共印2份）"));
         assert!(xml.contains("承办单位：办公室"));
+    }
+
+    #[test]
+    fn red_head_approval_docx_has_floating_frame_records_small_title_and_second_page_signature() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("red-approval.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::RedHeadApproval;
+        input.profile.kind = TemplateKind::RedHeadApproval;
+        input.profile.issuing_unit = "某某委员会办公室".into();
+        input.profile.department_code = "某办呈".into();
+        input.profile.document_year = "2026".into();
+        input.profile.document_number = "12".into();
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.signing_unit = "某某委员会".into();
+        input.profile.joint_responsible_units = "综合处、业务处".into();
+        input.profile.joint_contacts = vec![
+            JointContact {
+                unit: "综合处".into(),
+                name: "王五".into(),
+                phone: "010-12345678".into(),
+            },
+            JointContact {
+                unit: "业务处".into(),
+                name: "赵六".into(),
+                phone: "010-87654321".into(),
+            },
+        ];
+        input.date = "2026年8月12日".into();
+        write_docx_ok(
+            &path,
+            &input,
+            "# 关于认真做好网络安全与信息化重点工作的请示\n\n现将有关情况呈报如下。妥否，请指示。",
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        assert!(xml.contains("某办呈〔2026〕12号"));
+        assert!(xml.contains("批　示"));
+        assert!(xml.contains("w:tblpXSpec=\"right\""));
+        assert!(xml.contains("w:tblpY=\"2720\""));
+        assert!(xml.contains("w:tblpYSpec=\"bottom\""));
+        assert!(xml.contains("承办单位："));
+        assert!(xml.contains("综合处"));
+        assert!(xml.contains("业务处"));
+        let title = paragraph_containing(&xml, "关于认真做好网络安全与");
+        assert!(title.contains("w:sz w:val=\"36\""));
+        assert!(title.contains("w:right=\"3175\""));
+        let notice = paragraph_containing(&xml, "（此页无正文）");
+        assert!(notice.contains("w:pageBreakBefore"));
+        assert!(xml.find("（此页无正文）").unwrap() < xml.rfind("某某委员会").unwrap());
     }
 
     fn zip_text(path: &Path, entry: &str) -> String {

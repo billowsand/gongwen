@@ -545,6 +545,61 @@ mod tests {
         assert!(pdf.exists());
     }
 
+    /// 红头呈批件覆盖首页 tikz 定位、wrapfigure 绕排、动态承办区、强制第二页落款和附件。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn compiles_generated_red_head_approval() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::RedHeadApproval,
+            ..Default::default()
+        };
+        input.profile.kind = TemplateKind::RedHeadApproval;
+        input.profile.issuing_unit = "某某委员会办公室".into();
+        input.profile.department_code = "某办呈".into();
+        input.profile.document_year = "2026".into();
+        input.profile.document_number = "12".into();
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.signing_unit = "某某委员会".into();
+        input.profile.joint_responsible_units = "综合处、业务处".into();
+        input.profile.joint_contacts = vec![
+            crate::models::JointContact {
+                unit: "综合处".into(),
+                name: "王五".into(),
+                phone: "010-12345678".into(),
+            },
+            crate::models::JointContact {
+                unit: "业务处".into(),
+                name: "赵六".into(),
+                phone: "010-87654321".into(),
+            },
+        ];
+        input.date = "2026年8月12日".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "# 关于认真做好网络安全与信息化重点工作的请示\n\n现将有关情况呈报如下。妥否，请指示。\n\n<!-- [附件] -->\n# 情况说明\n\n附件内容。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
+        assert!(pdf.exists());
+    }
+
     /// 代章：cls 的 \SignatureSealOnBehalf 条件分支与生成器注入的命令一起编译，
     /// 确认“（代章）”在落款单位下方排成一行。
     #[test]

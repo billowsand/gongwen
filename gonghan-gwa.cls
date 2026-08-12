@@ -17,6 +17,7 @@
 \newif\ifgwa@jointrecord
 \newif\ifgwa@whitepaper
 \newif\ifgwa@meetingagenda
+\newif\ifgwa@redapproval
 
 % 默认值
 \@forcenewpagetrue    % 默认强制新页
@@ -29,6 +30,7 @@
 \gwa@jointrecordfalse   % 默认版记只有一行承办单位/联系人/电话
 \gwa@whitepaperfalse  % 默认非白头件（白头件无红头、无版记）
 \gwa@meetingagendafalse % 默认非会议议程（会议议程无红头、无落款、无版记）
+\gwa@redapprovalfalse % 默认非红头呈批件
 
 % 选项处理
 \DeclareOption{forcenewpage}{\@forcenewpagetrue}
@@ -44,6 +46,7 @@
 \DeclareOption{jointrecord}{\gwa@jointrecordtrue}
 \DeclareOption{whitepaper}{\gwa@whitepapertrue}
 \DeclareOption{meetingagenda}{\gwa@meetingagendatrue}
+\DeclareOption{redapproval}{\gwa@redapprovaltrue}
 
 % 传递未知选项给article类
 \DeclareOption*{\PassOptionsToClass{\CurrentOption}{article}}
@@ -269,6 +272,50 @@
 \newcommand{\ContactPerson}{}                  % 联系人（必须设置）
 \newcommand{\ContactPhone}{}                   % 联系电话（必须设置）
 \newcommand{\PrintCopies}{}                    % 印刷份数（留空则自动计算）
+
+% 红头呈批件首页承办区。内容由导出器逐行注入；类文件量取实际表高，
+% 让承办区向上扩展，并以同一个坐标衔接批示竖线与承办区横线。
+\newcommand{\RedResponsibleContent}{}
+\newcommand{\SetRedResponsibleContent}[1]{\renewcommand{\RedResponsibleContent}{#1}}
+\newcommand{\RedResponsibleCount}{1}
+\newcommand{\RedWrapLines}{13}
+\newlength{\RedRecordHeight}
+\newlength{\RedFrameHeight}
+\newsavebox{\gwa@redrecordbox}
+\newcount\gwa@redremaining
+\newcount\gwa@redshapeindex
+\def\gwa@redshapepairs{}
+
+% 不依赖 wrapfig：为接下来的若干正文行设置 10cm 行宽，最后一项恢复版心宽度。
+% 每个段落结束后用 \prevgraf 扣除实际行数，使窄栏行数能跨多个自然段累计。
+\newcommand{\gwa@setredparshape}{%
+    \ifnum\gwa@redremaining>0
+        \def\gwa@redshapepairs{}%
+        \gwa@redshapeindex=0
+        \loop\ifnum\gwa@redshapeindex<\gwa@redremaining
+            \edef\gwa@redshapepairs{\gwa@redshapepairs\space 0pt 10cm}%
+            \advance\gwa@redshapeindex by 1
+        \repeat
+        \edef\gwa@redshape{\number\numexpr\gwa@redremaining+1\relax
+            \gwa@redshapepairs\space 0pt \the\linewidth}%
+        \expandafter\parshape\gwa@redshape\relax
+    \else
+        \parshape=0
+    \fi
+}
+\newcommand{\RedShapedContent}[1]{%
+    \begingroup
+        \gwa@redremaining=\RedWrapLines\relax
+        \let\gwa@redsavedpar\par
+        \def\par{%
+            \gwa@redsavedpar
+            \advance\gwa@redremaining by -\prevgraf
+            \gwa@setredparshape
+        }%
+        \gwa@setredparshape
+        #1\par
+    \endgroup
+}
 
 % ========== 自动计算印刷份数功能 ==========
 
@@ -554,6 +601,89 @@
         \fi
     \fi
     \gwa@placeclosing{\SignatureContent}%
+}
+
+% ========== 红头呈批件首页与落款 ==========
+
+% 首页全部框线使用页面绝对坐标，避免标题换行或承办条目增减导致批示框漂移。
+% 承办区贴版心底部并按条目数向上增长；正文页目标同步扣除这段高度。
+\newcommand{\RedApprovalPageOverlay}{%
+    % 先排出真实的承办表，再量取其高度。红线与首行之间固定留 1mm；条目增加
+    % 时整个盒子按真实高度向上增长，不再用“行数 × 估算行高”推算红线位置。
+    \setbox\gwa@redrecordbox=\vbox{%
+        \hsize=156mm
+        {\color{red}\hrule width 156mm height 0.4mm}%
+        \vskip 1mm
+        \noindent\begin{minipage}{156mm}
+            \setlength{\tabcolsep}{0pt}%
+            \renewcommand{\arraystretch}{1.45}%
+            \zihao{3}%
+            \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}X>{\centering\arraybackslash}X>{\raggedleft\arraybackslash}p{11em}@{}}
+                \RedResponsibleContent
+            \end{tabularx}
+        \end{minipage}%
+    }%
+    \setlength{\RedRecordHeight}{\dimexpr\ht\gwa@redrecordbox+\dp\gwa@redrecordbox\relax}%
+    \setlength{\RedFrameHeight}{\dimexpr\textheight-48mm-\RedRecordHeight\relax}%
+    % 以首页版心左上角为原点的零宽 picture。只使用 LaTeX 内核命令，确保
+    % 应用自带的精简离线 TeX bundle 无需 tikz/eso-pic 也能编译。
+    \noindent\makebox[0pt][l]{%
+        \setlength{\unitlength}{1mm}%
+        \begin{picture}(0,0)
+            \ifthenelse{\equal{\SecurityLevel}{}}{}{%
+                \put(0,0){\raisebox{-10mm}[0pt][0pt]{{\heiti\enheiti\bfseries\zihao{3}\SecurityLine{}}}}%
+            }%
+            \put(0,0){\raisebox{-30mm}[0pt][0pt]{\makebox[156mm][c]{\color{red}\IssuingUnitHeader}}}%
+            \put(0,0){\raisebox{-43mm}[0pt][0pt]{\makebox[156mm][c]{{\zihao{3}\DepartmentCode{}〔\Year{}〕\DocumentNumber{}号}}}}%
+            \put(0,0){\raisebox{-48mm}[0pt][0pt]{\color{red}\rule{156mm}{0.4mm}}}%
+            \put(100,0){\raisebox{-\dimexpr48mm+\RedFrameHeight\relax}[0pt][0pt]{\color{red}\rule{0.4mm}{\RedFrameHeight}}}%
+            \put(100,0){\raisebox{-61mm}[0pt][0pt]{\makebox[56mm][c]{\color{red}批\quad 示}}}%
+            % vbox 的参考基线不一定在视觉底边；上移其 depth 后再贴版心底，
+            % 盒子顶边就恰好是 textheight-(height+depth)，与竖线终点同一坐标。
+            \put(0,0){\raisebox{-\dimexpr\textheight-\dp\gwa@redrecordbox\relax}[0pt][0pt]{\copy\gwa@redrecordbox}}%
+        \end{picture}%
+    }%
+}
+
+% 红头呈批件落款不得出现在首页。正文仍在首页结束时，第二页标注“此页无正文”后落款；
+% 正文已延续到第二页及以后时，沿用实测高度分页逻辑，能放下便紧随正文。
+\newcommand{\RedApprovalClosing}{%
+    \ifnum\value{page}=1
+        \clearpage
+        \NoBodyNotice
+        \SignatureContent
+    \else
+        \setlength{\gwa@closingneed}{0pt}%
+        \gwa@placeclosing{\SignatureContent}%
+    \fi
+}
+
+\newcommand{\makeredapproval}{%
+    \thispagestyle{firstpage}%
+    \zihao{3}%
+    \gwa@bodyspacing
+    \RedApprovalPageOverlay
+    % 从版心顶端预留到红色上横线以下，标题只占左侧 10cm。
+    \par\vspace*{55mm}%
+    \enlargethispage{-\RedRecordHeight}%
+    \noindent\begin{minipage}{10cm}
+        \centering
+        \ifthenelse{\equal{\TitleContent}{}}%
+            {{\bs\enbt\fontsize{18bp}{\BodyBaselineSkip}\selectfont\DocumentTitle{}}}%
+            {\TitleContent}%
+        \par
+    \end{minipage}\par
+    \vspace{\BodyBaselineSkip}%
+    \noindent\begin{minipage}{10cm}
+        {\zihao{3}\kai\enkai\Recipient{}：}%
+    \end{minipage}\par
+    % 前若干行缩为左侧 10cm，随后恢复版心宽度；行数由标题和承办条目共同决定。
+    {\zihao{3}\gwa@bodyspacing\RedShapedContent{\MainContent}}%
+    \RedApprovalClosing
+    \ifgwa@hasattachments
+        \clearpage
+        \AttachmentContent
+    \fi
 }
 
 % ========== 主文档生成命令 ==========

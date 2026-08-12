@@ -370,9 +370,7 @@ impl DraftSession {
         mut draft: DraftInput,
         generated_markdown: String,
     ) -> Self {
-        if draft.kind == TemplateKind::OfficialLetter
-            && draft.profile.document_year.trim().is_empty()
-        {
+        if draft.kind.has_document_number() && draft.profile.document_year.trim().is_empty() {
             draft.profile.document_year = draft.document_year();
         }
         let mut session = Self {
@@ -1511,7 +1509,7 @@ impl DraftPage<'_> {
             &self.config.vocabulary,
             &self.config.security_rules,
         );
-        if self.doc.draft.kind == TemplateKind::OfficialLetter
+        if self.doc.draft.kind.has_document_number()
             && self.doc.draft.profile.letter_version == LetterVersion::Formal
         {
             let year = self.doc.draft.document_year();
@@ -1536,7 +1534,7 @@ impl DraftPage<'_> {
                 && serial < highest
             {
                 self.doc.warnings.push(format!(
-                    "函号流水号 {serial} 低于机关代字“{code}”{year}年度已有最高函号 {highest}"
+                    "文号流水号 {serial} 低于机关代字“{code}”{year}年度已有最高序号 {highest}"
                 ));
             }
         }
@@ -2915,7 +2913,7 @@ impl DraftPage<'_> {
         .on_hover_text("正文字数：不含 Markdown 标记、表格竖线与图片引用");
     }
 
-    /// 视图：五种显示方式、缩放，以及各个面板的开关。
+    /// 视图：显示方式、缩放，以及各个面板的开关。
     fn ribbon_view(&mut self, ui: &mut egui::Ui) {
         for (mode, icon, label, tip) in [
             (
@@ -3135,12 +3133,13 @@ impl DraftPage<'_> {
             }
             TemplateKind::OfficialLetter => vec![self.doc.draft.profile.responsible_unit.clone()],
             TemplateKind::WhitePaper => split_units(&self.doc.draft.profile.signing_unit),
+            TemplateKind::RedHeadApproval => split_units(&self.doc.draft.profile.signing_unit),
             _ => vec![],
         };
         let (contacts, people_filtered) = self.filtered_contacts(
             &filter_units,
             self.doc.draft.kind == TemplateKind::OfficialLetter,
-            self.doc.draft.kind == TemplateKind::WhitePaper,
+            self.doc.draft.kind.is_approval(),
         );
         let people_filter_note = if people_filtered {
             match self.doc.draft.kind {
@@ -3160,6 +3159,17 @@ impl DraftPage<'_> {
                     } else {
                         Some(format!(
                             "呈报领导已按落款单位“{}”及其上级领导过滤。",
+                            units.join("、")
+                        ))
+                    }
+                }
+                TemplateKind::RedHeadApproval => {
+                    let units = split_units(&self.doc.draft.profile.signing_unit);
+                    if units.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "呈报领导已按落款单位“{}”及其上级领导过滤；承办联系人在各承办条目内按单位过滤。",
                             units.join("、")
                         ))
                     }
@@ -3232,6 +3242,9 @@ impl DraftPage<'_> {
                             }
                             TemplateKind::PhoneNotice | TemplateKind::WhitePaper => {
                                 "预览版自动留空落款成文日期的“日”；正式版使用完整日期。"
+                            }
+                            TemplateKind::RedHeadApproval => {
+                                "预览版自动留空发文序号和落款成文日期的“日”；正式版使用填写值。"
                             }
                             TemplateKind::MeetingAgenda => {
                                 "会议议程无落款日期，稿件版本仅用于与其他文种保持一致。"
@@ -3676,6 +3689,129 @@ impl DraftPage<'_> {
                             ui.weak(format!("落款将显示为：{example}"));
                         }
                     });
+                    ui.end_row();
+                }
+                TemplateKind::RedHeadApproval => {
+                    row_label_with_info(
+                        ui,
+                        "发文单位",
+                        "用于首页红色发文机关标志；与承办单位、落款单位分别维护。",
+                    );
+                    let changed = single_select(
+                        ui,
+                        "red_approval_issuing_unit",
+                        &mut self.doc.draft.profile.issuing_unit,
+                        &units,
+                        &mut self.doc.manual_fields,
+                        free_text,
+                        field_width,
+                        "使用标准全称",
+                    );
+                    if changed && self.doc.draft.profile.department_code.trim().is_empty() {
+                        let code = UnitDisplay::new(&self.config.vocabulary)
+                            .department_code_of(&self.doc.draft.profile.issuing_unit);
+                        if !code.is_empty() {
+                            self.doc.draft.profile.department_code = code;
+                        }
+                    }
+                    ui.end_row();
+
+                    row_label(ui, "机关代字");
+                    single_select(
+                        ui,
+                        "red_approval_department_code",
+                        &mut self.doc.draft.profile.department_code,
+                        &department_codes,
+                        &mut self.doc.manual_fields,
+                        free_text,
+                        field_width,
+                        "例如：X政呈",
+                    );
+                    ui.end_row();
+
+                    row_label_with_info(ui, "发文年份", "文号中的年度标识，与公函一样独立保存。");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.doc.draft.profile.document_year)
+                            .hint_text("例如：2026")
+                            .char_limit(4)
+                            .desired_width(field_width),
+                    );
+                    ui.end_row();
+
+                    row_label(ui, "发文序号");
+                    ui.add_enabled(
+                        self.doc.draft.profile.letter_version == LetterVersion::Formal,
+                        egui::TextEdit::singleline(&mut self.doc.draft.profile.document_number)
+                            .hint_text("仅填序号，例如：12")
+                            .desired_width(field_width),
+                    );
+                    ui.end_row();
+
+                    let leaders_display = UnitDisplay::new(&self.config.vocabulary)
+                        .reporting_leaders(&self.doc.draft.profile.reporting_leaders);
+                    let mut leader_tip = people_filter_note.clone().unwrap_or_else(|| {
+                        "呈报领导从标准词库选择，规则与白头件一致。".to_string()
+                    });
+                    if !leaders_display.is_empty() {
+                        leader_tip.push_str(&format!(" 成文称谓：{leaders_display}"));
+                    }
+                    row_label_with_info(ui, "呈报领导", leader_tip);
+                    multi_select(
+                        ui,
+                        "red_approval_reporting_leaders",
+                        &mut self.doc.draft.profile.reporting_leaders,
+                        &leader_options,
+                        &[],
+                        "",
+                        &mut self.doc.manual_fields,
+                        free_text,
+                        field_width,
+                    );
+                    ui.end_row();
+
+                    row_label_with_info(
+                        ui,
+                        "承办信息",
+                        "每行一组承办单位、联系人和电话；增加条目时首页底栏向上扩展。",
+                    );
+                    joint_responsible_editor(
+                        ui,
+                        &mut self.doc.draft.profile,
+                        &units,
+                        &self.config.vocabulary,
+                        &mut self.doc.manual_fields,
+                        free_text,
+                        field_width,
+                    );
+                    ui.end_row();
+
+                    row_label_with_info(
+                        ui,
+                        "落款单位",
+                        "与发文单位、承办单位相互独立；落款固定从第二页开始。",
+                    );
+                    multi_select(
+                        ui,
+                        "red_approval_signing_unit",
+                        &mut self.doc.draft.profile.signing_unit,
+                        &units,
+                        &[],
+                        "",
+                        &mut self.doc.manual_fields,
+                        free_text,
+                        field_width,
+                    );
+                    ui.end_row();
+
+                    row_label_with_info(
+                        ui,
+                        "落款名称",
+                        "可按白头件规则使用单位简称；未维护简称时回落规范名称。",
+                    );
+                    ui.checkbox(
+                        &mut self.doc.draft.profile.use_short_name_for_signature,
+                        "使用简称",
+                    );
                     ui.end_row();
                 }
             });

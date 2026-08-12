@@ -5,10 +5,14 @@ use std::sync::OnceLock;
 
 /// 标题基准字号：二号（22 pt）。汉字为方形，字宽=字高=字号。
 pub const TITLE_BASE_SIZE_PT: usize = 22;
+/// 红头呈批件首页标题：旧模板使用小二号，标题仅占批示栏左侧约 10cm。
+pub const RED_APPROVAL_TITLE_SIZE_PT: usize = 18;
 /// 版心宽度（约 15.6cm）：以 OOXML 半磅体系的 pt 计，8845 twip = 442.25 pt；
 /// LaTeX 的 156mm 约 443.9 TeX pt，二者对应同一物理宽度，取较小值使压缩结果偏保守，
 /// 两套引擎都放得下。
 pub const TITLE_LINE_WIDTH_PT: f64 = 8_845.0 / 20.0;
+/// 红头呈批件首页左侧正文/标题栏宽度（约 10cm）。
+pub const RED_APPROVAL_TITLE_WIDTH_PT: f64 = 100.0 / 25.4 * 72.0;
 
 static JIEBA: OnceLock<jieba_rs::Jieba> = OnceLock::new();
 
@@ -29,14 +33,26 @@ pub enum TitlePlan {
 
 /// 一行（二号字号）能容纳的汉字数。
 pub fn chars_per_line() -> usize {
-    (TITLE_LINE_WIDTH_PT / TITLE_BASE_SIZE_PT as f64).floor() as usize
+    chars_per_line_for(TITLE_LINE_WIDTH_PT, TITLE_BASE_SIZE_PT)
+}
+
+pub fn chars_per_line_for(width_pt: f64, size_pt: usize) -> usize {
+    (width_pt / size_pt as f64).floor() as usize
+}
+
+pub fn red_approval_chars_per_line() -> usize {
+    chars_per_line_for(RED_APPROVAL_TITLE_WIDTH_PT, RED_APPROVAL_TITLE_SIZE_PT)
 }
 
 /// 压缩单行时的横向缩放百分比：字高不变（仍为二号），仅横向收窄字形。
 /// 100 = 原宽，小于 100 为横向压缩比例；按版心宽度与显示字宽反推并限制在不小于 80%。
 pub fn compressed_scale_percent(title: &str) -> usize {
+    compressed_scale_percent_for(title, TITLE_LINE_WIDTH_PT, TITLE_BASE_SIZE_PT)
+}
+
+pub fn compressed_scale_percent_for(title: &str, width_pt: f64, size_pt: usize) -> usize {
     let count = display_units(title).max(2) as f64 / 2.0;
-    let scale = TITLE_LINE_WIDTH_PT / (count * TITLE_BASE_SIZE_PT as f64);
+    let scale = width_pt / (count * size_pt as f64);
     (scale * 100.0).floor().clamp(80.0, 100.0) as usize
 }
 
@@ -192,6 +208,32 @@ mod tests {
         // 字高不变（字号仍是二号），仅横向收窄字形。
         let scale = compressed_scale_percent(title);
         assert!((80..100).contains(&scale), "横向缩放应小于原宽：{scale}");
+    }
+
+    #[test]
+    fn red_approval_title_uses_small_two_and_fifteen_character_column() {
+        assert_eq!(red_approval_chars_per_line(), 15);
+        assert_eq!(
+            title_plan(
+                "一二三四五六七八九十一二三四五",
+                red_approval_chars_per_line()
+            ),
+            TitlePlan::SingleLine
+        );
+        assert_eq!(
+            title_plan(
+                "一二三四五六七八九十一二三四五六七",
+                red_approval_chars_per_line()
+            ),
+            TitlePlan::Compressed
+        );
+        assert!(matches!(
+            title_plan(
+                "关于认真做好网络安全与信息化重点工作验收的请示",
+                red_approval_chars_per_line()
+            ),
+            TitlePlan::Wrapped(_)
+        ));
     }
 
     #[test]
