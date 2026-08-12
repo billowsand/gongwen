@@ -158,6 +158,7 @@
       "joint_contacts": [],
       "reporting_leaders": "",
       "signing_unit": "办公室",
+      "use_short_name_for_signature": false,
       "security_level": "",
       "security_period": "",
       "document_number": "",

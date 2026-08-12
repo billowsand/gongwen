@@ -776,6 +776,9 @@ pub struct TemplateProfile {
     pub joint_contacts: Vec<JointContact>,
     pub reporting_leaders: String,
     pub signing_unit: String,
+    /// 白头件落款是否使用简称。勾选后落款单位显示词库简称（未维护简称的
+    /// 单位回落规范名称）；显示文本少于 5 字时分散对齐到 5 字宽。仅白头件生效。
+    pub use_short_name_for_signature: bool,
     pub security_level: String,
     pub security_period: String,
     /// 指人专办：勾选后在密级后空一个全角空格并以黑体标注“指人专办”。
@@ -811,6 +814,7 @@ impl Default for TemplateProfile {
             joint_contacts: Vec::new(),
             reporting_leaders: String::new(),
             signing_unit: String::new(),
+            use_short_name_for_signature: false,
             security_level: String::new(),
             security_period: String::new(),
             special_handling: false,

@@ -192,7 +192,20 @@ fn stacked(
         };
         let mut y = rect.top();
         for galley in galleys {
-            painter.galley(egui::pos2(anchor, y), galley.clone(), Color32::BLACK);
+            // 右对齐按字形实际右缘（mesh_bounds.max.x）摆位，精确落在锚点上；
+            // 用 size() 会算入行前 leading，产生 1~4px 错位。空行等无字形时兜底。
+            let pos = match align {
+                Align::Max => {
+                    let right = if galley.mesh_bounds.max.x.is_finite() {
+                        galley.mesh_bounds.max.x
+                    } else {
+                        galley.size().x
+                    };
+                    egui::pos2(anchor - right, y)
+                }
+                _ => egui::pos2(anchor, y),
+            };
+            painter.galley(pos, galley.clone(), Color32::BLACK);
             y += galley.size().y;
         }
     });
@@ -400,7 +413,8 @@ fn header_unit(input: &DraftInput, display: &UnitDisplay) -> String {
     display.full_name_for(&chosen, external)
 }
 
-/// 落款单位：留空时回落发文单位；电话通知用简称并逐字加空格，其余用全称。
+/// 落款单位：留空时回落发文单位；电话通知用简称并逐字加空格；白头件按
+/// “使用简称”选项取简称/全称（多单位时的逐行排布走 `white_paper_signature_units`）。
 fn signature_unit(input: &DraftInput, display: &UnitDisplay) -> String {
     let raw = if input.profile.signing_unit.trim().is_empty() {
         input.profile.issuing_unit.trim()
@@ -409,7 +423,10 @@ fn signature_unit(input: &DraftInput, display: &UnitDisplay) -> String {
     };
     match input.kind {
         TemplateKind::PhoneNotice => display.abbr_spaced(raw),
-        TemplateKind::WhitePaper => display.full_name(raw),
+        TemplateKind::WhitePaper => {
+            let first = split_units(raw).into_iter().next().unwrap_or_default();
+            display.signature_name(&first, input.profile.use_short_name_for_signature)
+        }
         _ => display.full_name_for(raw, input.uses_external_unit_names()),
     }
 }
@@ -629,7 +646,7 @@ fn addressee_block(
 }
 
 /// 落款：单位与成文日期。函稿/电话通知排在版心右侧 11cm 块内居中；白头件右侧
-/// 留 4cm 签字空间、单位与日期之间空一行；联合发文模式 1 排成两列。
+/// 留 4cm 签字空间、单位与日期之间空一行、多单位行间各空一行；联合发文模式 1 排成两列。
 fn signature_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -644,35 +661,50 @@ fn signature_block(
         joint_signature_block(ui, metrics, input, display);
         return;
     }
-    let unit = if is_joint_mode_one(input) {
-        // 联合发文模式 1 只剩 1 个发文单位：回落右侧落款，单位取该唯一发文单位。
-        let raw = split_units(&input.profile.joint_issuing_units)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        display.full_name_for(&raw, input.uses_external_unit_names())
-    } else {
-        signature_unit(input, display)
-    };
-    if unit.trim().is_empty() {
-        return;
-    }
     let date = signature_date(input);
     let font = metrics.font(theme::FONT_FANGSONG, BODY_PT);
     let width = metrics.mm(SIGNATURE_WIDTH_MM).min(metrics.content);
     match input.kind {
         TemplateKind::WhitePaper => {
-            // 靠右但留出签字空间，块内右对齐；单位与日期之间空一行。
+            // 靠右但留出签字空间，块内右对齐；单位与日期之间空一行，
+            // 多个单位自上而下分行、行间各空一行（便于分别签字）。
             let room = metrics.mm(WHITE_PAPER_ROOM_MM);
             let left = (metrics.content - room - width).max(0.0);
-            let galleys = [
-                line_galley(ui, metrics, &unit, font.clone(), width, Align::Max),
-                line_galley(ui, metrics, "", font.clone(), width, Align::Max),
-                line_galley(ui, metrics, &date, font, width, Align::Max),
-            ];
+            let units = display
+                .white_paper_signature_units(input)
+                .into_iter()
+                .filter(|unit| !unit.trim().is_empty())
+                .collect::<Vec<_>>();
+            if units.is_empty() {
+                return;
+            }
+            let mut galleys = Vec::new();
+            for (index, unit) in units.iter().enumerate() {
+                if index > 0 {
+                    galleys.push(line_galley(ui, metrics, "", font.clone(), width, Align::Min));
+                }
+                galleys.push(signature_unit_galley(
+                    ui, metrics, unit, font.clone(), width,
+                ));
+            }
+            galleys.push(line_galley(ui, metrics, "", font.clone(), width, Align::Min));
+            galleys.push(line_galley(ui, metrics, &date, font, width, Align::Min));
             stacked(ui, metrics, &galleys, left, width, Align::Max);
         }
         _ => {
+            let unit = if is_joint_mode_one(input) {
+                // 联合发文模式 1 只剩 1 个发文单位：回落右侧落款，单位取该唯一发文单位。
+                let raw = split_units(&input.profile.joint_issuing_units)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                display.full_name_for(&raw, input.uses_external_unit_names())
+            } else {
+                signature_unit(input, display)
+            };
+            if unit.trim().is_empty() {
+                return;
+            }
             let left = metrics.content - width;
             // 代章直接跟在落款单位后面同一行，不另起一行。
             let unit_line = signature_seal_mark(input, display)
@@ -684,6 +716,32 @@ fn signature_block(
             ];
             stacked(ui, metrics, &galleys, left, width, Align::Center);
         }
+    }
+}
+
+/// 落款单位单行：少于 5 字时分散对齐到 5 字宽（各端一致的“便于签字”宽度），
+/// 5 字及以上按自然宽度排。行以自然宽度产出，右对齐交给 `stacked` 按宽度摆位。
+fn signature_unit_galley(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    font: FontId,
+    width: f32,
+) -> Arc<egui::Galley> {
+    match crate::units::spread_gap(text) {
+        Some(gap) => {
+            let mut job = job(width);
+            let gap_px = gap * metrics.pt(BODY_PT);
+            for (index, ch) in text.chars().enumerate() {
+                job.append(
+                    &ch.to_string(),
+                    if index == 0 { 0.0 } else { gap_px },
+                    text_format(font.clone(), metrics.line),
+                );
+            }
+            layout(ui, job)
+        }
+        None => line_galley(ui, metrics, text, font, width, Align::Min),
     }
 }
 
@@ -1538,6 +1596,108 @@ mod tests {
         assert_eq!(
             signature_seal_mark(&input, &UnitDisplay::new(&vocabulary)),
             Some("（代章）")
+        );
+    }
+
+    /// 把一帧里的文本按行分组，返回每行的包围盒；空行与占位不产生可见文本。
+    fn text_rows(output: &egui::FullOutput) -> Vec<egui::Rect> {
+        let mut rects = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::epaint::Shape::Text(shape) = &clipped.shape {
+                let rect = shape.visual_bounding_rect();
+                if rect.is_positive() {
+                    rects.push(rect);
+                }
+            }
+        }
+        rects.sort_by(|a, b| a.min.y.total_cmp(&b.min.y));
+        let mut rows: Vec<egui::Rect> = Vec::new();
+        for rect in rects {
+            if let Some(last) = rows.last_mut()
+                && (rect.min.y - last.min.y).abs() < 2.0
+            {
+                last.min.x = last.min.x.min(rect.min.x);
+                last.min.y = last.min.y.min(rect.min.y);
+                last.max.x = last.max.x.max(rect.max.x);
+                last.max.y = last.max.y.max(rect.max.y);
+                continue;
+            }
+            rows.push(rect);
+        }
+        rows
+    }
+
+    #[test]
+    fn white_paper_signature_stacks_units_right_aligned_and_spreads_short_abbr() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let available = 1000.0;
+        let metrics = Metrics::new(available, Some(1.0));
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        let mut input = draft(TemplateKind::WhitePaper);
+        // 多单位 + 使用简称：省教育厅（3 字）、教师处（3 字），均应分散到 5 字宽。
+        input.profile.signing_unit = "星海省教育厅、教师工作处".into();
+        input.profile.use_short_name_for_signature = true;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(available, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(raw, |ui| {
+            signature_block(ui, &metrics, &input, &display);
+        });
+        let rows = text_rows(&output);
+        // 单位两行 + 日期一行（单位间与日期前各空一行不产生文本）。
+        assert_eq!(rows.len(), 3, "落款应有两行单位与一行日期：{rows:?}");
+        let right = rows.iter().map(|row| row.max.x).collect::<Vec<_>>();
+        let max_right = right.iter().cloned().fold(f32::MIN, f32::max);
+        for (index, row) in rows.iter().enumerate() {
+            assert!(
+                (row.max.x - max_right).abs() <= 1.0,
+                "第 {index} 行应右对齐：{row:?}，最大右缘 {max_right}"
+            );
+        }
+        // 简称 3 字分散到 5 字宽：行宽应明显大于 3 字自然宽（≈62px）、
+        // 而等于 5 字宽（≈103px，按实际字体度量）。
+        for row in &rows[..2] {
+            let width = row.width();
+            assert!(
+                width > 80.0 && width < 115.0,
+                "3 字简称应分散到 5 字宽：实际 {width:.1}px（{row:?}）"
+            );
+        }
+    }
+
+    #[test]
+    fn white_paper_signature_keeps_full_name_single_unit_layout() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let available = 1000.0;
+        let metrics = Metrics::new(available, Some(1.0));
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        let mut input = draft(TemplateKind::WhitePaper);
+        // 单单位全称 8 字，不分散；仍是 单位、空行、日期 三行。
+        input.profile.signing_unit = "星海省教育厅".into();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(available, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(raw, |ui| {
+            signature_block(ui, &metrics, &input, &display);
+        });
+        let rows = text_rows(&output);
+        assert_eq!(rows.len(), 2, "单单位应为单位与日期两行：{rows:?}");
+        let width = rows[0].width();
+        assert!(
+            width > 100.0,
+            "8 字全称应按自然宽度排：实际 {width:.1}px（{rows:?}）"
         );
     }
 

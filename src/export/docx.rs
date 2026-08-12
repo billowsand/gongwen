@@ -422,6 +422,87 @@ fn main_issuing_unit(input: &DraftInput, display: &UnitDisplay) -> String {
     display.full_name_for(&chosen, input.uses_external_unit_names())
 }
 
+/// 白头件落款：多单位自上而下分行、行间空一行（便于分别签字），整体右对齐；
+/// 显示文本少于 5 字时按字间距分散对齐到 5 字宽。单单位保持既有排版不变。
+fn add_white_paper_signature(doc: Docx, input: &DraftInput, display: &UnitDisplay) -> Docx {
+    let units = display
+        .white_paper_signature_units(input)
+        .into_iter()
+        .filter(|unit| !unit.trim().is_empty())
+        .collect::<Vec<_>>();
+    if units.is_empty() {
+        return doc;
+    }
+    let mut doc = doc;
+    for (index, unit) in units.iter().enumerate() {
+        if index > 0 {
+            doc = doc.add_paragraph(
+                Paragraph::new()
+                    .add_run(body_run(""))
+                    .line_spacing(
+                        LineSpacing::new().line(560).line_rule(LineSpacingType::Exact),
+                    ),
+            );
+        }
+        let mut paragraph = Paragraph::new()
+            .align(AlignmentType::Right)
+            .line_spacing(
+                LineSpacing::new()
+                    .before(if index == 0 { 360 } else { 0 })
+                    .line(560)
+                    .line_rule(LineSpacingType::Exact),
+            );
+        for run in spread_runs(unit) {
+            paragraph = paragraph.add_run(run);
+        }
+        doc = doc.add_paragraph(paragraph);
+    }
+    if units.len() > 1 {
+        // 最后一个单位与成文日期之间也空一行，与单位间间距一致。
+        doc = doc.add_paragraph(
+            Paragraph::new()
+                .add_run(body_run(""))
+                .line_spacing(
+                    LineSpacing::new().line(560).line_rule(LineSpacingType::Exact),
+                ),
+        );
+    }
+    doc.add_paragraph(
+        Paragraph::new()
+            .add_run(body_run(official_signature_date(input)))
+            .align(AlignmentType::Right)
+            .line_spacing(
+                LineSpacing::new()
+                    .line(560)
+                    .line_rule(LineSpacingType::Exact),
+            ),
+    )
+}
+
+/// 落款单位 run 序列：少于 5 字时逐字设置字符间距（单位缇，1/20 磅）分散对齐到
+/// 5 字宽——16pt 字号下 1em=320 缇，总宽恰好为 5 个字；否则整串一个 run。
+fn spread_runs(text: &str) -> Vec<Run> {
+    match crate::units::spread_gap(text) {
+        Some(gap) => {
+            let spacing = (gap * 320.0).round() as i32;
+            let chars = text.chars().collect::<Vec<_>>();
+            chars
+                .iter()
+                .enumerate()
+                .map(|(index, ch)| {
+                    let mut run = body_run(ch.to_string());
+                    // 最后一个字后面没有字符，不再设间距，避免总宽超出 5 字。
+                    if index + 1 < chars.len() {
+                        run = run.character_spacing(spacing);
+                    }
+                    run
+                })
+                .collect()
+        }
+        None => vec![body_run(text)],
+    }
+}
+
 fn add_joint_signature(doc: Docx, input: &DraftInput, display: &UnitDisplay) -> Docx {
     let units = split_units(&input.profile.joint_issuing_units);
     if units.is_empty() {
@@ -1384,9 +1465,11 @@ pub fn write_docx(
 
     if crate::models::is_joint_signature(input) {
         doc = add_joint_signature(doc, input, display);
+    } else if input.kind == TemplateKind::WhitePaper {
+        doc = add_white_paper_signature(doc, input, display);
     } else if matches!(
         input.kind,
-        TemplateKind::OfficialLetter | TemplateKind::PhoneNotice | TemplateKind::WhitePaper
+        TemplateKind::OfficialLetter | TemplateKind::PhoneNotice
     ) {
         let raw_signature = if input.profile.signing_unit.trim().is_empty() {
             if is_joint_mode_one(input) {
@@ -1849,6 +1932,65 @@ mod tests {
         let signature = paragraph_containing(&xml, "中 宣 部");
         assert!(signature.contains("w:val=\"right\""), "落款应右对齐");
         assert!(!xml.contains("中宣部"), "不得输出未加空格的简称");
+    }
+
+    #[test]
+    fn white_paper_signature_stacks_multiple_units_right_aligned_with_spread() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("white-paper-multi.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::WhitePaper;
+        input.profile.signing_unit = "星海省教育厅、教师工作处".into();
+        input.profile.use_short_name_for_signature = true;
+        input.date = "2026年8月7日".into();
+        let vocabulary = vec![
+            VocabularyEntry {
+                canonical: "星海省教育厅".into(),
+                category: VocabularyCategory::Unit,
+                abbr: "省教育厅".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "教师工作处".into(),
+                category: VocabularyCategory::Unit,
+                abbr: "教师处".into(),
+                ..Default::default()
+            },
+        ];
+        let display = UnitDisplay::new(&vocabulary);
+        write_docx(&path, &input, "# 标题\n\n正文。", &display).unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        // 两个单位分行列出；简称逐字成 run，字间距 320 缇（1em，三号 16pt 下分散到 5 字宽）。
+        for ch in ["省", "教", "厅", "教", "师", "处"] {
+            assert!(
+                xml.contains(&format!("<w:t xml:space=\"preserve\">{ch}</w:t>")),
+                "应含“{ch}”：{xml}"
+            );
+        }
+        assert!(
+            xml.contains("w:spacing w:val=\"320\""),
+            "3 字简称应有 1em 字符间距：{xml}"
+        );
+        // 单位与日期段落都右对齐。
+        assert!(
+            xml.contains("w:val=\"right\""),
+            "落款应右对齐：{xml}"
+        );
+        // 不出现未分散的整串简称。
+        assert!(!xml.contains("省教育厅"), "简称不应整串出现：{xml}");
+    }
+
+    #[test]
+    fn white_paper_signature_single_unit_keeps_full_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("white-paper-single.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::WhitePaper;
+        input.profile.signing_unit = "星海省教育厅".into();
+        input.date = "2026年8月7日".into();
+        write_docx_ok(&path, &input, "# 标题\n\n正文。").unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        assert!(xml.contains("星海省教育厅"), "单单位未选简称应输出全称：{xml}");
     }
 
     #[test]

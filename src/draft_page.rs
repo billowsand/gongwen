@@ -1584,11 +1584,13 @@ impl DraftPage<'_> {
     }
 
     /// 规格 §2.3“人随事走”：只保留属于给定单位的人员；单位列表为空时不过滤。
+    /// 公函可带承办上级单位人员；白头件呈报领导取落款单位及其上级单位的领导。
     /// 返回 `(人员, 是否应用了过滤)`，供界面提示。
     pub(crate) fn filtered_contacts(
         &self,
         units: &[String],
         include_parent_unit_handlers: bool,
+        include_leader_superiors: bool,
     ) -> (Vec<(String, String)>, bool) {
         let clean = units
             .iter()
@@ -1604,6 +1606,8 @@ impl DraftPage<'_> {
         for unit in &clean {
             let people = if include_parent_unit_handlers {
                 display.responsible_people_of(unit)
+            } else if include_leader_superiors {
+                display.leaders_of(unit)
             } else {
                 display.people_of(unit)
             };
@@ -3130,12 +3134,13 @@ impl DraftPage<'_> {
                 split_units(&self.doc.draft.profile.joint_responsible_units)
             }
             TemplateKind::OfficialLetter => vec![self.doc.draft.profile.responsible_unit.clone()],
-            TemplateKind::WhitePaper => vec![self.doc.draft.profile.signing_unit.clone()],
+            TemplateKind::WhitePaper => split_units(&self.doc.draft.profile.signing_unit),
             _ => vec![],
         };
         let (contacts, people_filtered) = self.filtered_contacts(
             &filter_units,
             self.doc.draft.kind == TemplateKind::OfficialLetter,
+            self.doc.draft.kind == TemplateKind::WhitePaper,
         );
         let people_filter_note = if people_filtered {
             match self.doc.draft.kind {
@@ -3148,10 +3153,17 @@ impl DraftPage<'_> {
                     "联系人已按承办单位“{}”过滤。",
                     self.doc.draft.profile.responsible_unit.trim()
                 )),
-                TemplateKind::WhitePaper => Some(format!(
-                    "呈报领导已按落款单位“{}”过滤。",
-                    self.doc.draft.profile.signing_unit.trim()
-                )),
+                TemplateKind::WhitePaper => {
+                    let units = split_units(&self.doc.draft.profile.signing_unit);
+                    if units.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "呈报领导已按落款单位“{}”及其上级领导过滤。",
+                            units.join("、")
+                        ))
+                    }
+                }
                 _ => None,
             }
         } else {
@@ -3600,7 +3612,7 @@ impl DraftPage<'_> {
                     let leaders_display = UnitDisplay::new(&self.config.vocabulary)
                         .reporting_leaders(&self.doc.draft.profile.reporting_leaders);
                     let mut leader_tip = people_filter_note.clone().unwrap_or_else(|| {
-                        "呈报领导从标准词库中的人员条目选择。".to_string()
+                        "呈报领导从标准词库中的人员条目选择，可为落款单位的领导或其上级领导。".to_string()
                     });
                     if !leaders_display.is_empty() {
                         leader_tip.push_str(&format!(" 成文称谓：{leaders_display}"));
@@ -3619,17 +3631,51 @@ impl DraftPage<'_> {
                     );
                     ui.end_row();
 
-                    row_label(ui, "落款单位");
-                    single_select(
+                    row_label_with_info(
+                        ui,
+                        "落款单位",
+                        "支持多单位：成文时各单位自上而下分行、行间空一行，便于分别签字。",
+                    );
+                    multi_select(
                         ui,
                         "signing_unit",
                         &mut self.doc.draft.profile.signing_unit,
                         &units,
+                        &[],
+                        "",
                         &mut self.doc.manual_fields,
                         free_text,
                         field_width,
-                        "标准名称",
                     );
+                    ui.end_row();
+
+                    row_label_with_info(
+                        ui,
+                        "落款名称",
+                        "勾选“使用简称”后落款单位显示词库简称（未维护简称的单位回落规范名称）；\
+                         显示文本少于 5 字时分散对齐到 5 字宽，便于签字。",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.checkbox(
+                            &mut self.doc.draft.profile.use_short_name_for_signature,
+                            "使用简称",
+                        );
+                        let display = UnitDisplay::new(&self.config.vocabulary);
+                        let example = split_units(&self.doc.draft.profile.signing_unit)
+                            .into_iter()
+                            .filter(|unit| !unit.trim().is_empty())
+                            .map(|unit| {
+                                display.signature_name(
+                                    &unit,
+                                    self.doc.draft.profile.use_short_name_for_signature,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("、");
+                        if !example.is_empty() {
+                            ui.weak(format!("落款将显示为：{example}"));
+                        }
+                    });
                     ui.end_row();
                 }
             });

@@ -6,7 +6,9 @@
 //! - 选下级单位时自动补全上级单位名称（“中央网信办新闻舆论处”）；
 //! - 同属一个上级的下级单位用顿号连接且后续不重复上级，跨上级单位用逗号分隔；
 //! - 人员绑定所属单位，按承办单位过滤（“人随事走”）；获授权人员也可承办其上级单位；
-//! - 公函落款用全称、承办单位用简称、电话通知落款用简称且少于 5 字时逐字加空格。
+//! - 公函落款用全称、承办单位用简称、电话通知落款用简称且少于 5 字时逐字加空格；
+//! - 白头件落款可选简称（少于 5 字分散对齐到 5 字宽），多单位分行、行间空一行、整体右对齐，
+//!   呈报领导候选取落款单位及其各级上级单位的领导。
 
 use crate::models::{VocabularyCategory, VocabularyEntry};
 use std::collections::HashMap;
@@ -508,6 +510,31 @@ impl<'a> UnitDisplay<'a> {
         }
     }
 
+    /// 落款单位显示文本：使用简称时优先词条 `abbr`（空串回落规范名称），
+    /// 否则用规范名称。白头件“使用简称”选项只改这里，排版由各导出端负责。
+    pub fn signature_name(&self, key: &str, use_abbr: bool) -> String {
+        if use_abbr {
+            self.abbr(key)
+        } else {
+            self.full_name(key)
+        }
+    }
+
+    /// 白头件落款单位显示行：每个单位一行，按需简称/全称；落款单位留空时
+    /// 回落发文单位。多单位时由调用方逐行排布（行间空一行、整体右对齐）。
+    pub fn white_paper_signature_units(&self, input: &crate::models::DraftInput) -> Vec<String> {
+        let raw = crate::models::split_units(&input.profile.signing_unit);
+        let names = if raw.is_empty() {
+            vec![input.profile.issuing_unit.trim().to_string()]
+        } else {
+            raw
+        };
+        names
+            .iter()
+            .map(|unit| self.signature_name(unit, input.profile.use_short_name_for_signature))
+            .collect()
+    }
+
     /// 规格 §2.2 层级展开显示：
     /// - 选择下级单位时补全上级全称；
     /// - 一般并列单位一律用顿号“、”连接；
@@ -711,6 +738,34 @@ impl<'a> UnitDisplay<'a> {
             .collect()
     }
 
+    /// 白头件呈报领导候选：落款单位及其各级上级单位的直属人员（去重）。
+    /// 沿 `parent` 链逐级收集，与 `responsible_people_of` 的“承办上级单位”
+    /// 授权方向不同——这里直接列出上级单位的领导，不受个人勾选影响。
+    pub fn leaders_of(&self, unit: &str) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = unit.trim().to_string();
+        for _ in 0..=MAX_DEPTH {
+            if current.is_empty() {
+                break;
+            }
+            for (name, phone) in self.people_of(&current) {
+                if seen.insert(name.clone()) {
+                    result.push((name, phone));
+                }
+            }
+            let Some(entry) = self.find(&current) else {
+                break;
+            };
+            let parent = entry.parent.trim();
+            if parent.is_empty() || parent == current {
+                break;
+            }
+            current = parent.to_string();
+        }
+        result
+    }
+
     /// 白头件呈报领导称谓：按词库中的人员顺序，把相同职务合并为一组。
     /// 每人只取姓名首字作为姓；同职务用顿号，不同职务用逗号，职务放在本组末尾。
     /// 词库外的手填值或未维护职务的人员保持原样，并以顿号连接。
@@ -810,6 +865,19 @@ fn person_surname(name: &str) -> String {
         .map(|surname| (*surname).to_string())
         .or_else(|| name.chars().next().map(|ch| ch.to_string()))
         .unwrap_or_default()
+}
+
+/// 落款单位分散对齐到 5 字宽的每处字距（单位：em）。
+///
+/// 显示文本少于 5 个字时返回字间距，使总宽正好为 5 个字：
+/// 3 字 → 每处 1em、4 字 → 每处 1/3em、2 字 → 每处 3em。
+/// 5 字及以上、或只有 1 个字无法均匀分散时返回 `None`，按自然宽度排版。
+pub fn spread_gap(text: &str) -> Option<f32> {
+    let count = text.chars().count();
+    if count >= 5 || count <= 1 {
+        return None;
+    }
+    Some((5 - count) as f32 / (count - 1) as f32)
 }
 
 #[cfg(test)]
@@ -912,6 +980,96 @@ mod tests {
         assert_eq!(display.abbr_spaced("中央宣传部"), "中 宣 部");
         // 无简称且满 5 字的单位不插空格。
         assert_eq!(display.abbr_spaced("信访接待处"), "信访接待处");
+    }
+
+    #[test]
+    fn spread_gap_scales_short_texts_to_five_characters() {
+        // 2 字 → 每处 3em、3 字 → 每处 1em、4 字 → 每处 1/3em。
+        assert_eq!(spread_gap("星教"), Some(3.0));
+        assert_eq!(spread_gap("网信办"), Some(1.0));
+        assert_eq!(spread_gap("某某某处"), Some(0.33333334));
+        // 5 字及以上、或单字无法均匀分散，按自然宽度。
+        assert_eq!(spread_gap("处"), None);
+        assert_eq!(spread_gap("星海省教育厅"), None);
+    }
+
+    #[test]
+    fn signature_name_switches_between_full_and_abbr() {
+        let v = vocab();
+        let display = UnitDisplay::new(&v);
+        assert_eq!(display.signature_name("新闻舆论处", false), "中央网信办新闻舆论处");
+        assert_eq!(display.signature_name("新闻舆论处", true), "新舆处");
+        // 未维护简称的单位回落规范名称。
+        assert_eq!(display.signature_name("信访接待处", true), "信访接待处");
+    }
+
+    #[test]
+    fn white_paper_signature_units_apply_abbr_and_fallback() {
+        use crate::models::DraftInput;
+        let v = vocab();
+        let display = UnitDisplay::new(&v);
+        let mut input = DraftInput {
+            kind: crate::models::TemplateKind::WhitePaper,
+            ..Default::default()
+        };
+        input.profile.signing_unit = "中央宣传部、网络信息处".into();
+        assert_eq!(
+            display.white_paper_signature_units(&input),
+            ["中央宣传部", "中央宣传部网络信息处"]
+        );
+        input.profile.use_short_name_for_signature = true;
+        assert_eq!(display.white_paper_signature_units(&input), ["中宣部", "网信处"]);
+        // 落款单位留空时回落发文单位（简称开关不影响回落单位）。
+        input.profile.use_short_name_for_signature = false;
+        input.profile.signing_unit.clear();
+        input.profile.issuing_unit = "新闻舆论处".into();
+        assert_eq!(display.white_paper_signature_units(&input), ["中央网信办新闻舆论处"]);
+    }
+
+    #[test]
+    fn leaders_of_collects_unit_and_all_superiors() {
+        let v = vec![
+            VocabularyEntry {
+                canonical: "省教育厅".into(),
+                code: "00".into(),
+                abbr: "省教厅".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "教师工作处".into(),
+                code: "0001".into(),
+                parent: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "王庭".into(),
+                category: VocabularyCategory::Person,
+                unit: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "李强".into(),
+                category: VocabularyCategory::Person,
+                unit: "0001".into(),
+                ..Default::default()
+            },
+        ];
+        let display = UnitDisplay::new(&v);
+        let names = display
+            .leaders_of("教师工作处")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["李强", "王庭"], "应先列直属、再沿上级链逐级列出");
+        // 顶层单位只有直属人员，不再向上。
+        assert_eq!(
+            display
+                .leaders_of("省教育厅")
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["王庭"]
+        );
     }
 
     #[test]

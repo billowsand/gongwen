@@ -506,6 +506,45 @@ mod tests {
         assert_eq!(pdf.file_stem(), tex.file_stem());
     }
 
+    /// 多单位 + 使用简称 + 少于 5 字分散：三处排版都依赖 `\hspace*` 与
+    /// `\par\vspace{\baselineskip}`，确认生成的白头件能编译成 PDF。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn compiles_generated_white_paper_with_multi_unit_abbr_spread() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::WhitePaper,
+            ..Default::default()
+        };
+        input.profile.kind = TemplateKind::WhitePaper;
+        input.profile.reporting_leaders = "张三".into();
+        input.profile.signing_unit = "省教育厅、教师处".into();
+        input.profile.use_short_name_for_signature = true;
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "# 关于报送某某工作情况的报告\n\n现将有关情况报告如下。\n",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
+        assert!(pdf.exists());
+    }
+
     /// 代章：cls 的 \SignatureSealOnBehalf 条件分支与生成器注入的命令一起编译，
     /// 确认“（代章）”在落款单位下方排成一行。
     #[test]

@@ -617,6 +617,12 @@ pub fn profile_changes(a: &TemplateProfile, b: &TemplateProfile) -> Vec<FieldCha
         &b.reporting_leaders,
     );
     field(&mut out, "落款单位", &a.signing_unit, &b.signing_unit);
+    field(
+        &mut out,
+        "落款使用简称",
+        yes_no(a.use_short_name_for_signature),
+        yes_no(b.use_short_name_for_signature),
+    );
     field(&mut out, "密级", &a.security_level, &b.security_level);
     field(&mut out, "保密期限", &a.security_period, &b.security_period);
     field(

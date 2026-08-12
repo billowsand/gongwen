@@ -772,15 +772,22 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
         .trim()
         .trim_end_matches('：')
         .to_string();
-    // 落款单位：优先落款单位，留空则同呈报单位。
-    let signature_unit = {
-        let raw = if input.profile.signing_unit.trim().is_empty() {
-            &input.profile.issuing_unit
-        } else {
-            &input.profile.signing_unit
-        };
-        display.full_name(raw)
-    };
+    // 落款单位：每个单位一行、行间空一行（便于签字），整体右对齐；显示文本
+    // 少于 5 字时逐字用 `\hspace*` 分散对齐到 5 字宽，与预览/Word 各端一致。
+    let signature_unit = display
+        .white_paper_signature_units(input)
+        .into_iter()
+        .filter(|unit| !unit.trim().is_empty())
+        .enumerate()
+        .map(|(index, unit)| {
+            let line = tex_spread_signature(&unit);
+            if index > 0 {
+                format!("\\par\\vspace{{\\baselineskip}}{line}")
+            } else {
+                line
+            }
+        })
+        .collect::<String>();
     // 规格 §3.3：预览版占位区域统一 1em 宽，成文日期“日”留空，与公函一致。
     let preview = input.profile.letter_version == LetterVersion::Preview;
     let preview_placeholder = "\\makebox[1em][c]{}";
@@ -821,7 +828,7 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
         security = security,
         leaders = tex_escape(&leaders),
         body = body,
-        signature_unit = tex_escape(&signature_unit),
+        signature_unit = &signature_unit,
         date_commands = date_commands,
     )
 }
@@ -1010,6 +1017,26 @@ fn tex_spaced(value: &str) -> String {
     tex_escape(value).replace(' ', "\\ ")
 }
 
+/// 落款单位单行：少于 5 字时逐字用 `\hspace*` 分散对齐到 5 字宽
+/// （字距以 em 计，随落款字号缩放），与预览/Word 各端一致；否则原样转义。
+fn tex_spread_signature(text: &str) -> String {
+    match crate::units::spread_gap(text) {
+        Some(gap) => text
+            .chars()
+            .enumerate()
+            .map(|(index, ch)| {
+                let escaped = tex_escape(&ch.to_string());
+                if index == 0 {
+                    escaped
+                } else {
+                    format!("\\hspace*{{{gap}em}}{escaped}")
+                }
+            })
+            .collect(),
+        None => tex_escape(text),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
@@ -1129,7 +1156,10 @@ mod tests {
         // 呈报领导写入 \Recipient（楷体顶格由类渲染），标题、落款、日期随之写入。
         assert!(tex.contains("\\renewcommand{\\Recipient}{张三、李四}"));
         assert!(tex.contains("\\renewcommand{\\DocumentTitle}{呈批件标题}"));
-        assert!(tex.contains("\\renewcommand{\\SignatureUnit}{办公室}"));
+        assert!(
+            tex.contains("\\renewcommand{\\SignatureUnit}{办\\hspace*{1em}公\\hspace*{1em}室}"),
+            "落款少于 5 字应分散对齐到 5 字宽：{tex}"
+        );
         assert!(tex.contains("\\renewcommand{\\SignatureYear}{2026}"));
         assert!(tex.contains("\\renewcommand{\\SignatureMonth}{8}"));
         assert!(tex.contains("\\renewcommand{\\SignatureDay}{5}"));
@@ -1230,6 +1260,37 @@ mod tests {
     }
 
     #[test]
+    fn white_paper_tex_stacks_multiple_units_with_abbr_and_spread() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::WhitePaper;
+        input.profile.signing_unit = "星海省教育厅、教师工作处".into();
+        input.profile.use_short_name_for_signature = true;
+        let vocabulary = vec![
+            VocabularyEntry {
+                canonical: "星海省教育厅".into(),
+                category: VocabularyCategory::Unit,
+                abbr: "省教育厅".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                canonical: "教师工作处".into(),
+                category: VocabularyCategory::Unit,
+                abbr: "教师处".into(),
+                ..Default::default()
+            },
+        ];
+        let display = UnitDisplay::new(&vocabulary);
+        let tex = white_paper_tex(&input, "# 标题\n\n正文。", &display);
+        // 多单位分行、行间空一行；"省教育厅" 4 字、"教师处" 3 字，均分散对齐到 5 字宽。
+        assert!(
+            tex.contains(
+                "\\renewcommand{\\SignatureUnit}{省\\hspace*{0.33333334em}教\\hspace*{0.33333334em}育\\hspace*{0.33333334em}厅\\par\\vspace{\\baselineskip}教\\hspace*{1em}师\\hspace*{1em}处}"
+            ),
+            "多单位应分行且少于 5 字分散：{tex}"
+        );
+    }
+
+    #[test]
     fn white_paper_tex_falls_back_to_issuing_unit_for_signature_and_skips_attachments() {
         let mut input = DraftInput::default();
         input.kind = TemplateKind::WhitePaper;
@@ -1241,7 +1302,10 @@ mod tests {
             "# 标题\n\n正文。\n<!-- [附件] -->\n# 附件1\n附件内容。",
             &UnitDisplay::new(&[]),
         );
-        assert!(tex.contains("\\renewcommand{\\SignatureUnit}{某某处}"));
+        assert!(
+            tex.contains("\\renewcommand{\\SignatureUnit}{某\\hspace*{1em}某\\hspace*{1em}处}"),
+            "落款少于 5 字应分散对齐到 5 字宽：{tex}"
+        );
         // 白头件一般只有正文：附件区段不落版。
         assert!(!tex.contains("附件内容"), "白头件不应渲染附件：{tex}");
     }
