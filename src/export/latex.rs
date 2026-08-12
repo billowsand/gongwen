@@ -868,7 +868,7 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
         security = security,
         leaders = tex_escape(&leaders),
         body = body,
-        signature_unit = &signature_unit,
+        signature_unit = signature_unit,
         date_commands = date_commands,
     )
 }
