@@ -16,6 +16,9 @@
 # Local runtime binaries: downloaded or supplied by the package distributor
 /runtime/tectonic/win-x64/
 /runtime/tectonic/linux-arm64/
+/runtime/tectonic/darwin-arm64/
+# Flattened tectonic binary used by the dev build's runtime lookup
+/runtime/tectonic/tectonic
 /runtime/texbundle/*.ttb
 /runtime/fonts/*.ttf
 

@@ -1151,7 +1151,49 @@ fn platform_ui_font_candidates() -> Vec<UiFontCandidate> {
     candidates
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+/// macOS 自带中文界面字体。苹方等以 TTC 集合安装，字面序号随系统版本变化，
+/// 因此按字面探测，优先选择真正包含简体字「国」的字面，避免误选繁体/日文字面。
+#[cfg(target_os = "macos")]
+fn platform_ui_font_candidates() -> Vec<UiFontCandidate> {
+    let mut candidates = Vec::new();
+    for path in [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ] {
+        if let Some(candidate) = simplified_face(Path::new(path)) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+/// 在单个字体文件（含 TTC 集合）里定位简体中文字面：优先含「国」的字面，
+/// 找不到再退回任一含「中」的字面，保证界面中文不显示成方框。
+#[cfg(target_os = "macos")]
+fn simplified_face(path: &Path) -> Option<UiFontCandidate> {
+    let data = std::fs::read(path).ok()?;
+    let count = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+    let mut fallback = None;
+    for index in 0..count {
+        let Ok(face) = ttf_parser::Face::parse(&data, index) else {
+            continue;
+        };
+        if face.glyph_index('国').is_some() {
+            return Some(UiFontCandidate::new(path, index));
+        }
+        if fallback.is_none() && face.glyph_index('中').is_some() {
+            fallback = Some(index);
+        }
+    }
+    fallback.map(|index| UiFontCandidate::new(path, index))
+}
+
+/// 其它平台暂不提供系统界面字体候选，退回 egui 默认字体。
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn platform_ui_font_candidates() -> Vec<UiFontCandidate> {
     Vec::new()
 }
@@ -1162,6 +1204,8 @@ pub fn default_ui_font_label() -> &'static str {
         "微软雅黑"
     } else if cfg!(target_os = "linux") {
         "Noto Sans SC"
+    } else if cfg!(target_os = "macos") {
+        "苹方"
     } else {
         "系统字体"
     }
@@ -1225,7 +1269,7 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let bundled_fonts = crate::portable_runtime::find_font_dir();
 
     // 界面字体不再编进可执行文件：Windows 使用微软雅黑，Linux 使用 Noto Sans
-    // SC。等宽文本保留 egui 自带的拉丁等宽字体，并把系统中文字体放在末尾兜底。
+    // SC，macOS 使用苹方。等宽文本保留 egui 自带的拉丁等宽字体，并把系统中文字体放在末尾兜底。
     let system_ui_font = load_system_ui_font(&mut fonts, "gw-system-ui");
     if let Some(font) = &system_ui_font {
         fonts

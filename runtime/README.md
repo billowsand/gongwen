@@ -7,6 +7,7 @@ runtime/
   tectonic/
     win-x64/tectonic.exe      # Windows x64 MSVC
     linux-arm64/tectonic      # Linux ARM64 musl
+    darwin-arm64/tectonic     # macOS ARM64
   texbundle/gongwen-texlive.ttb
   fonts/FangSong.ttf
   fonts/KaiTi.ttf
@@ -15,12 +16,15 @@ runtime/
   fonts/XiaoBiaoSong.ttf
   SHA256SUMS.win-x64.txt
   SHA256SUMS.linux-arm64.txt
+  SHA256SUMS.darwin-arm64.txt
 ```
 
 - `tectonic.exe` under `win-x64` is the official Tectonic 0.17.0 Windows
   x64 MSVC build.
 - `tectonic` under `linux-arm64` is the official Tectonic 0.17.0
   `aarch64-unknown-linux-musl` build.
+- `tectonic` under `darwin-arm64` is the official Tectonic 0.17.0
+  `aarch64-apple-darwin` build.
 - `gongwen-texlive.ttb` is a project-specific TTB v1 bundle built from the
   TeX Live 2026 files actually needed by `gonghan-gwa.cls`. Its Tectonic
   content digest is
