@@ -25,9 +25,9 @@
 
 ### 获取发布版
 
-GitHub Releases 提供 Windows x64 与 Linux ARM64 的源码构建二进制，压缩包内含可执行文件、README、许可与示例配置。这些精简包不包含 Tectonic、TeX bundle 与字体；使用 TeX/PDF 导出时可调用本机 XeLaTeX/Tectonic，Markdown 与 Word 导出不依赖 TeX。
+GitHub Releases 提供两种安装包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）与 Linux ARM64 的 Debian 包（`gongwen-assistant_<版本>_arm64.deb`）。两者都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
 
-完整便携包同样随 Release 发布（文件名带 `-full`），由发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起打包应用、Tectonic、离线 bundle 与字体。Windows x64 输出 zip，Linux ARM64 输出 tar.gz。相关资产受授权和体积限制，不进入源码仓库。
+发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`）。相关资产受授权和体积限制，不进入源码仓库。
 
 ### 从源码构建
 
@@ -87,7 +87,7 @@ cargo check
 GitHub Actions：
 
 - `.github/workflows/ci.yml`：在 Windows、Linux、macOS 上执行格式、静态检查和测试；
-- `.github/workflows/release.yml`：推送 `v*` 标签后构建各平台 Release，生成 ZIP 与 SHA256 校验和并创建 GitHub Release。
+- `.github/workflows/release.yml`：推送 `v*` 标签后构建各平台安装包（Windows setup.exe、Linux deb）与 SHA256 校验和并创建 GitHub Release。
 
 版本号只维护在 `Cargo.toml`，使用 `scripts/bump-version.ps1 -Part major|minor|patch` 同步更新 `Cargo.lock`。
 

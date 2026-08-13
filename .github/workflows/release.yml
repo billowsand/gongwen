@@ -45,16 +45,11 @@ jobs:
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
 
-      - name: Package full release
+      - name: Prepare full staging directory
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $asset = "gongwen-assistant-$version-win-x64-full.zip"
           $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full"
-          ./scripts/package-portable.ps1 -Suffix win-x64 -BinaryName gongwen-assistant.exe -OutputDir $staging -ArchiveFormat zip -ArchivePath (Join-Path $env:GITHUB_WORKSPACE $asset) -SkipBuild -Force
-          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
-            "$($_.Hash.ToLowerInvariant())  $asset"
-          } | Set-Content "${asset}.sha256" -Encoding utf8
+          ./scripts/package-portable.ps1 -Suffix win-x64 -BinaryName gongwen-assistant.exe -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
 
       - name: Smoke test packaged TeX runtime
         shell: pwsh
@@ -82,7 +77,6 @@ jobs:
         with:
           name: release-win-x64
           path: |
-            gongwen-assistant-*-win-x64-full.zip*
             gongwen-assistant-*-win-x64-setup.exe*
           if-no-files-found: error
 
@@ -234,23 +228,28 @@ jobs:
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
 
-      - name: Package full release
+      - name: Prepare full staging directory
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $asset = "gongwen-assistant-$version-linux-arm64-glibc228-full.tar.gz"
           $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-arm64-full"
-          ./scripts/package-portable.ps1 -Suffix linux-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat tar.gz -ArchivePath (Join-Path $env:GITHUB_WORKSPACE $asset) -SkipBuild -Force
-          Get-FileHash -Algorithm SHA256 $asset | ForEach-Object {
-            "$($_.Hash.ToLowerInvariant())  $asset"
-          } | Set-Content "${asset}.sha256" -Encoding utf8
+          ./scripts/package-portable.ps1 -Suffix linux-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
+
+      - name: Package Debian package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          staging="$GITHUB_WORKSPACE/dist/linux-arm64-full"
+          ./scripts/package-deb.sh "$version" "$staging" "$GITHUB_WORKSPACE"
+          asset="gongwen-assistant_${version}_arm64.deb"
+          sha256sum "$asset" | awk '{ printf "%s  %s\n", $1, $2 }' > "${asset}.sha256"
 
       - name: Upload Linux release assets
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-arm64
           path: |
-            gongwen-assistant-*-linux-arm64-*.tar.gz*
+            gongwen-assistant_*_arm64.deb*
           if-no-files-found: error
 
   release:
