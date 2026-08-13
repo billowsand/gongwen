@@ -240,7 +240,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           staging="$GITHUB_WORKSPACE/dist/linux-arm64-full"
-          ./scripts/package-deb.sh "$version" "$staging" "$GITHUB_WORKSPACE"
+          bash ./scripts/package-deb.sh "$version" "$staging" "$GITHUB_WORKSPACE"
           asset="gongwen-assistant_${version}_arm64.deb"
           sha256sum "$asset" | awk '{ printf "%s  %s\n", $1, $2 }' > "${asset}.sha256"
 
