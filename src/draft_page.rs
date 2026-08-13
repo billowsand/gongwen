@@ -2232,20 +2232,14 @@ impl DraftPage<'_> {
                         (
                             PreviewMode::Split,
                             theme::Icon::Compare,
-                            "对照",
-                            "对照：左边改 Markdown，右边看公文版式",
+                            "Markdown 对照",
+                            "Markdown 对照：左边编辑源码，右边同步显示打印分页",
                         ),
                         (
                             PreviewMode::Rendered,
                             theme::Icon::Eye,
                             "公文预览",
                             "公文预览：按导出后的字体与行距排版",
-                        ),
-                        (
-                            PreviewMode::Hybrid,
-                            theme::Icon::Book,
-                            "实时排版",
-                            "实时排版：当前行显示 Markdown 标记，离开后按公文格式渲染",
                         ),
                         (
                             PreviewMode::Source,

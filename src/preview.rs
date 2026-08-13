@@ -6,8 +6,9 @@
 //! 这条真正出文的链路）：红头小标宋 29 磅红色分散、红色反线 0.53mm、密级黑体三号
 //! 顶格、主送/呈报领导楷体三号顶格、落款右侧 11cm 块、版记四号三线表。
 //!
-//! 界面里无法精确分页，因此只按“正文 / 每份附件”分张纸；版记在成文时贴版心底部，
-//! 预览中紧跟落款之后。
+//! 红头呈批件额外使用打印分页器：首页框线按绝对坐标绘制，正文先按 100mm 窄栏
+//! 排到动态承办区上方，跨页后立即以 156mm 标准版心重新换行。其他文种仍按
+//! “正文 / 每份附件”分张纸，版记在预览中紧跟落款之后。
 //!
 //! 来自 Markdown 的每一块都记着自己在源码中的字节范围（`export::LocatedBlock`），
 //! 点一下就能把编辑器的光标带过去，改稿时不必在两栏之间人工找位置。
@@ -64,6 +65,7 @@ const HOVER_TINT: Color32 = Color32::from_rgb(0xF7, 0xF2, 0xEC);
 
 // A4 版心：页宽 210mm，左边距 1587 缇、右边距 1474 缇。
 const PAGE_PT: f32 = 595.28;
+const PAGE_HEIGHT_PT: f32 = 841.89;
 const MARGIN_LEFT_PT: f32 = 79.35;
 const MARGIN_RIGHT_PT: f32 = 73.70;
 const MARGIN_TOP_PT: f32 = 52.0;
@@ -74,6 +76,7 @@ struct Metrics {
     /// 窗格里真正看得见的宽度，用来把纸张居中。
     viewport: f32,
     page: f32,
+    page_height: f32,
     content: f32,
     margin_left: f32,
     margin_top: f32,
@@ -95,6 +98,7 @@ impl Metrics {
             scale,
             viewport: available,
             page: PAGE_PT * PT * scale,
+            page_height: PAGE_HEIGHT_PT * PT * scale,
             content: (PAGE_PT - MARGIN_LEFT_PT - MARGIN_RIGHT_PT) * PT * scale,
             margin_left: MARGIN_LEFT_PT * PT * scale,
             margin_top: MARGIN_TOP_PT * PT * scale,
@@ -610,8 +614,8 @@ fn header_block(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, displa
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
         TemplateKind::RedHeadApproval => {
-            // 编辑预览只展示内容，按普通白头件处理；红头、批示框、承办区等
-            // 绝对定位元素以最终 TeX/DOCX 导出为准，避免近似预览误导分页判断。
+            // official_preview 会在进入普通 sheet 前转到专用打印分页器；这里仅作
+            // 防御性回落，避免未来单独调用 header_block 时完全没有页首留白。
             security_line(ui, metrics, input);
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
@@ -680,8 +684,8 @@ fn signature_block(
     match input.kind {
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             // 块内右对齐；单位与日期之间空一行，多个单位自上而下分行、行间各空
-            // 一行（便于分别签字）。编辑预览中两个文种完全共用白头件样式；
-            // 红头呈批件成品里的特殊签字定位只由 TeX/DOCX 正式导出负责。
+            // 一行（便于分别签字）。红头呈批件的主预览已由打印分页器接管；这里
+            // 保留相同的辅助布局，供独立块测试与防御性回落使用。
             let room = metrics.mm(crate::export::SIGNATURE_ROOM_MM);
             let left = (metrics.content - room - width).max(0.0);
             let units = display
@@ -1121,12 +1125,813 @@ fn sheet(ui: &mut egui::Ui, metrics: &Metrics, add_contents: impl FnOnce(&mut eg
     });
 }
 
-/// 正文区渲染参数。预览统一使用白头件式的完整版心；红头呈批件首页的精确
-/// 内容区边界只在最终 TeX 中按真实盒高计算。
+/// 普通文种正文区渲染参数。红头呈批件走下方独立的打印分页模型。
 struct BodyRun {
     compact: bool,
     compact_level: u8,
     numbered: bool,
+}
+
+/// 红头呈批件打印预览中的一段可见文字。正文段落可以被切成多个 fragment：
+/// 首页片段按 100mm 排，续页片段重新按 156mm 排，而不是沿用首页的换行结果。
+struct RedPrintFragment {
+    range: Option<Range<usize>>,
+    galley: Arc<egui::Galley>,
+    x: f32,
+    y: f32,
+    width: f32,
+    visible_height: f32,
+    align: Align,
+}
+
+#[derive(Default)]
+struct RedPrintPage {
+    fragments: Vec<RedPrintFragment>,
+}
+
+#[derive(Clone, Copy)]
+enum RedTextStyle {
+    Body,
+    Heading(u8),
+    List,
+}
+
+struct RedPrintLayout {
+    pages: Vec<RedPrintPage>,
+    page_index: usize,
+    cursor_y: f32,
+    first_body_bottom: f32,
+}
+
+impl RedPrintLayout {
+    fn new(first_cursor_y: f32, first_body_bottom: f32) -> Self {
+        Self {
+            pages: vec![RedPrintPage::default()],
+            page_index: 0,
+            cursor_y: first_cursor_y,
+            first_body_bottom,
+        }
+    }
+
+    fn body_left(&self, metrics: &Metrics) -> f32 {
+        metrics.mm(28.0)
+    }
+
+    fn body_width(&self, metrics: &Metrics) -> f32 {
+        metrics.mm(if self.page_index == 0 { 100.0 } else { 156.0 })
+    }
+
+    fn body_bottom(&self, metrics: &Metrics) -> f32 {
+        if self.page_index == 0 {
+            self.first_body_bottom
+        } else {
+            metrics.mm(37.0 + 225.0)
+        }
+    }
+
+    fn next_page(&mut self, metrics: &Metrics) {
+        self.pages.push(RedPrintPage::default());
+        self.page_index += 1;
+        self.cursor_y = metrics.mm(37.0);
+    }
+
+    fn push(&mut self, fragment: RedPrintFragment) {
+        self.pages[self.page_index].fragments.push(fragment);
+    }
+}
+
+fn red_inline_job(
+    metrics: &Metrics,
+    width: f32,
+    segments: &[export::InlineSegment],
+    style: RedTextStyle,
+    first_line_indent: bool,
+) -> LayoutJob {
+    let mut job = job(width);
+    let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+    if first_line_indent {
+        job.append(
+            &indent(INDENT_CHARS),
+            0.0,
+            text_format(normal.clone(), metrics.line),
+        );
+    }
+    for segment in segments {
+        let font = match style {
+            RedTextStyle::Heading(level) => metrics.font(heading_family(level), BODY_PT),
+            RedTextStyle::List => normal.clone(),
+            RedTextStyle::Body if segment.parenthesized => {
+                metrics.font(theme::FONT_KAITI, PAREN_PT)
+            }
+            RedTextStyle::Body if segment.bold => metrics.font(theme::FONT_HEITI, BODY_PT),
+            RedTextStyle::Body => normal.clone(),
+        };
+        job.append(&segment.text, 0.0, text_format(font, metrics.line));
+    }
+    job
+}
+
+fn red_drop_chars(segments: &mut Vec<export::InlineSegment>, mut count: usize) {
+    while count > 0 && !segments.is_empty() {
+        let chars = segments[0].text.chars().count();
+        if count >= chars {
+            count -= chars;
+            segments.remove(0);
+        } else {
+            segments[0].text = segments[0].text.chars().skip(count).collect();
+            count = 0;
+        }
+    }
+}
+
+/// 把一个逻辑段落连续排入页面。首页放得下多少行就放多少行；剩余文本进入
+/// 下一页后重新生成 galley，因此第二页第一行立即采用标准 156mm 版心。
+fn red_place_flow_text(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    layout_state: &mut RedPrintLayout,
+    range: Range<usize>,
+    mut segments: Vec<export::InlineSegment>,
+    style: RedTextStyle,
+    first_line_indent: bool,
+) {
+    let mut first_fragment = true;
+    while !segments.is_empty() {
+        let width = layout_state.body_width(metrics);
+        let available = layout_state.body_bottom(metrics) - layout_state.cursor_y;
+        if available < metrics.line * 0.75 {
+            layout_state.next_page(metrics);
+            continue;
+        }
+        let indent_this_fragment = first_fragment && first_line_indent;
+        let galley = layout(
+            ui,
+            red_inline_job(metrics, width, &segments, style, indent_this_fragment),
+        );
+        let fitting = galley
+            .rows
+            .iter()
+            .take_while(|row| row.rect().bottom() <= available + 0.5)
+            .count();
+        if fitting == 0 {
+            layout_state.next_page(metrics);
+            continue;
+        }
+        let visible_height = galley.rows[fitting - 1].rect().bottom();
+        let mut consumed = galley.rows[..fitting]
+            .iter()
+            .map(|row| row.glyphs.len())
+            .sum::<usize>();
+        if indent_this_fragment {
+            consumed = consumed.saturating_sub(INDENT_CHARS as usize);
+        }
+        let all_fit = fitting == galley.rows.len();
+        layout_state.push(RedPrintFragment {
+            range: Some(range.clone()),
+            galley,
+            x: layout_state.body_left(metrics),
+            y: layout_state.cursor_y,
+            width,
+            visible_height,
+            align: Align::LEFT,
+        });
+        layout_state.cursor_y += visible_height;
+        if all_fit {
+            break;
+        }
+        if consumed == 0 {
+            layout_state.next_page(metrics);
+            continue;
+        }
+        red_drop_chars(&mut segments, consumed);
+        first_fragment = false;
+        layout_state.next_page(metrics);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn red_fixed_fragment(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    family: &str,
+    size: f32,
+    width: f32,
+    align: Align,
+    range: Option<Range<usize>>,
+    x: f32,
+    y: f32,
+) -> RedPrintFragment {
+    let mut job = job(width);
+    job.halign = align;
+    job.append(
+        text,
+        0.0,
+        text_format(metrics.font(family, size), metrics.line),
+    );
+    let galley = layout(ui, job);
+    RedPrintFragment {
+        range,
+        visible_height: galley.size().y,
+        galley,
+        x,
+        y,
+        width,
+        align,
+    }
+}
+
+fn red_responsible_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<[String; 3]> {
+    let entries = crate::models::joint_responsible_entries(&input.profile);
+    if entries.is_empty() {
+        return vec![[String::new(), String::new(), String::new()]];
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            [
+                display.abbr(&entry.unit),
+                entry.name.clone(),
+                entry.phone.clone(),
+            ]
+        })
+        .collect()
+}
+
+fn red_build_print_layout(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    body: &[&LocatedBlock],
+    title: &(String, Range<usize>),
+    attachment_names: &[String],
+) -> (RedPrintLayout, Vec<[String; 3]>) {
+    let rows = red_responsible_rows(input, display);
+    // TeX 承办区 = 0.4mm 红线 + 1mm 间距 + 每条固定 28pt 基线。
+    let record_height = metrics.mm(1.4) + metrics.line * rows.len().max(1) as f32;
+    let first_body_bottom = metrics.mm(37.0 + 225.0) - record_height - metrics.mm(2.0);
+    let left = metrics.mm(28.0);
+    let narrow = metrics.mm(100.0);
+    let mut state = RedPrintLayout::new(metrics.mm(37.0 + 55.0), first_body_bottom);
+
+    if !title.0.is_empty() {
+        let fragment = red_fixed_fragment(
+            ui,
+            metrics,
+            &title.0,
+            theme::FONT_BIAOSONG,
+            18.0,
+            narrow,
+            Align::Center,
+            Some(title.1.clone()),
+            left + narrow / 2.0,
+            state.cursor_y,
+        );
+        state.cursor_y += fragment.visible_height;
+        state.push(fragment);
+    }
+    state.cursor_y += metrics.line;
+    let leaders = display.reporting_leaders(&input.profile.reporting_leaders);
+    if !leaders.trim().is_empty() {
+        let fragment = red_fixed_fragment(
+            ui,
+            metrics,
+            &format!("{}：", leaders.trim().trim_end_matches('：')),
+            theme::FONT_KAITI,
+            BODY_PT,
+            narrow,
+            Align::LEFT,
+            None,
+            left,
+            state.cursor_y,
+        );
+        state.cursor_y += fragment.visible_height;
+        state.push(fragment);
+    }
+
+    let mut counters = [0usize; 4];
+    for located in body {
+        match &located.block {
+            MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
+            MarkdownBlock::Heading(level, text) => {
+                let Some(text) = export::official_heading_text(*level, text, &mut counters) else {
+                    continue;
+                };
+                red_place_flow_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    vec![export::InlineSegment {
+                        text: format!("{}{}", indent(INDENT_CHARS), export::plain_text(&text)),
+                        bold: false,
+                        parenthesized: false,
+                    }],
+                    RedTextStyle::Heading(*level),
+                    false,
+                );
+            }
+            MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
+                red_place_flow_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    export::inline_segments(text),
+                    RedTextStyle::Body,
+                    true,
+                );
+            }
+            MarkdownBlock::ListItem(text) => {
+                red_place_flow_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    vec![export::InlineSegment {
+                        text: format!("　•{}", export::plain_text(text)),
+                        bold: false,
+                        parenthesized: false,
+                    }],
+                    RedTextStyle::List,
+                    false,
+                );
+            }
+            MarkdownBlock::Table { rows, .. } => {
+                // 表格和图片与 TeX 一致，不进入首页批示窄栏。
+                if state.page_index == 0 {
+                    state.next_page(metrics);
+                }
+                let text = rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|cell| export::plain_text(cell))
+                            .collect::<Vec<_>>()
+                            .join("　│　")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                red_place_flow_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    vec![export::InlineSegment {
+                        text,
+                        bold: false,
+                        parenthesized: false,
+                    }],
+                    RedTextStyle::Body,
+                    false,
+                );
+            }
+            MarkdownBlock::Image { alt, .. } => {
+                if state.page_index == 0 {
+                    state.next_page(metrics);
+                }
+                red_place_flow_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    vec![export::InlineSegment {
+                        text: format!("〔图片：{}〕", export::plain_text(alt)),
+                        bold: false,
+                        parenthesized: false,
+                    }],
+                    RedTextStyle::Body,
+                    false,
+                );
+            }
+            MarkdownBlock::Paragraph(_) => {}
+        }
+    }
+
+    if !attachment_names.is_empty() {
+        if state.page_index == 0 {
+            state.next_page(metrics);
+        }
+        state.cursor_y += metrics.line * 2.0;
+        for (index, name) in attachment_names.iter().enumerate() {
+            let label = if attachment_names.len() == 1 {
+                format!("附件：{name}")
+            } else if index == 0 {
+                format!("附件{}：{name}", index + 1)
+            } else {
+                format!("　　{}：{name}", index + 1)
+            };
+            red_place_flow_text(
+                ui,
+                metrics,
+                &mut state,
+                0..0,
+                vec![export::InlineSegment {
+                    text: label,
+                    bold: false,
+                    parenthesized: false,
+                }],
+                RedTextStyle::Body,
+                false,
+            );
+        }
+    }
+
+    // 呈批件落款不得在首页；首页正文没有续页时，第二页增加“此页无正文”。
+    let body_ended_on_first = state.page_index == 0;
+    if body_ended_on_first {
+        state.next_page(metrics);
+        state.cursor_y += metrics.pt(58.0);
+        let notice = red_fixed_fragment(
+            ui,
+            metrics,
+            &format!("{}（此页无正文）", indent(INDENT_CHARS)),
+            theme::FONT_FANGSONG,
+            BODY_PT,
+            metrics.mm(156.0),
+            Align::LEFT,
+            None,
+            left,
+            state.cursor_y,
+        );
+        state.cursor_y += notice.visible_height + metrics.mm(50.0);
+        state.push(notice);
+    } else {
+        state.cursor_y += metrics.mm(CLOSING_GAP_MM);
+    }
+
+    let signature_units = display
+        .white_paper_signature_units(input)
+        .into_iter()
+        .filter(|unit| !unit.trim().is_empty())
+        .collect::<Vec<_>>();
+    let signature_height = metrics.line * (signature_units.len().max(1) * 2 + 1) as f32;
+    if state.cursor_y + signature_height > metrics.mm(37.0 + 225.0) {
+        state.next_page(metrics);
+        state.cursor_y += metrics.pt(58.0);
+        let notice = red_fixed_fragment(
+            ui,
+            metrics,
+            &format!("{}（此页无正文）", indent(INDENT_CHARS)),
+            theme::FONT_FANGSONG,
+            BODY_PT,
+            metrics.mm(156.0),
+            Align::LEFT,
+            None,
+            left,
+            state.cursor_y,
+        );
+        state.cursor_y += notice.visible_height + metrics.mm(50.0);
+        state.push(notice);
+    }
+    let signature_right = left + metrics.mm(156.0 - crate::export::SIGNATURE_ROOM_MM);
+    for (index, unit) in signature_units.iter().enumerate() {
+        if index > 0 {
+            state.cursor_y += metrics.line;
+        }
+        let fragment = red_fixed_fragment(
+            ui,
+            metrics,
+            unit,
+            theme::FONT_FANGSONG,
+            BODY_PT,
+            metrics.mm(116.0),
+            Align::Max,
+            None,
+            signature_right,
+            state.cursor_y,
+        );
+        state.cursor_y += fragment.visible_height;
+        state.push(fragment);
+    }
+    state.cursor_y += metrics.line;
+    let date = red_fixed_fragment(
+        ui,
+        metrics,
+        &signature_date(input),
+        theme::FONT_FANGSONG,
+        BODY_PT,
+        metrics.mm(116.0),
+        Align::Center,
+        None,
+        left + metrics.mm(116.0) / 2.0,
+        state.cursor_y,
+    );
+    state.push(date);
+
+    (state, rows)
+}
+
+fn red_overlay_text(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    family: &str,
+    size: f32,
+    color: Color32,
+) -> Arc<egui::Galley> {
+    let mut format = text_format(metrics.font(family, size), metrics.line);
+    format.color = color;
+    layout(ui, single_line(text, format))
+}
+
+fn paint_red_approval_overlay(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    page: egui::Rect,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    rows: &[[String; 3]],
+) {
+    let painter = ui.painter();
+    let at = |x: f32, y: f32| page.min + egui::vec2(metrics.mm(x), metrics.mm(y));
+    let text_left = 28.0;
+    let text_top = 37.0;
+    let text_bottom = text_top + 225.0;
+    let record_height = 1.4 + rows.len().max(1) as f32 * (LINE_PT / MM);
+    let record_top = text_bottom - record_height;
+
+    if !input.profile.security_level.trim().is_empty() {
+        let security = format!(
+            "{}★{}",
+            input.profile.security_level.trim(),
+            input.profile.security_period.trim()
+        );
+        let galley = red_overlay_text(
+            ui,
+            metrics,
+            &security,
+            theme::FONT_HEITI,
+            BODY_PT,
+            Color32::BLACK,
+        );
+        painter.galley(at(text_left, text_top + 10.0), galley, Color32::BLACK);
+    }
+
+    let unit = header_unit(input, display);
+    if !unit.trim().is_empty() {
+        let count = unit.chars().count() as f32;
+        let mut format = text_format(
+            metrics.font(theme::FONT_BIAOSONG, HEADER_PT),
+            metrics.pt(HEADER_PT * 1.2),
+        );
+        format.color = OFFICIAL_RED;
+        let natural = layout(ui, single_line(&unit, format.clone())).size().x;
+        if count > 1.0 && natural < metrics.mm(156.0) {
+            format.extra_letter_spacing =
+                ((metrics.mm(156.0) - natural) / (count - 1.0)).min(metrics.pt(HEADER_PT));
+        }
+        let galley = layout(ui, single_line(&unit, format));
+        let center = at(text_left + 78.0, text_top + 30.0);
+        painter.galley(
+            center - egui::vec2(galley.size().x / 2.0, 0.0),
+            galley,
+            OFFICIAL_RED,
+        );
+    }
+
+    let number = document_number(input);
+    let number_galley = red_overlay_text(
+        ui,
+        metrics,
+        &number,
+        theme::FONT_FANGSONG,
+        BODY_PT,
+        Color32::BLACK,
+    );
+    let number_x =
+        at(text_left + 78.0, text_top + 43.0) - egui::vec2(number_galley.size().x / 2.0, 0.0);
+    painter.galley(number_x, number_galley, Color32::BLACK);
+
+    let red = Stroke::new(metrics.mm(0.4).max(1.0), OFFICIAL_RED);
+    painter.line_segment(
+        [
+            at(text_left, text_top + 48.0),
+            at(text_left + 156.0, text_top + 48.0),
+        ],
+        red,
+    );
+    painter.line_segment(
+        [
+            at(text_left + 100.0, text_top + 48.0),
+            at(text_left + 100.0, record_top),
+        ],
+        red,
+    );
+    let instruction = red_overlay_text(
+        ui,
+        metrics,
+        "批　示",
+        theme::FONT_FANGSONG,
+        BODY_PT,
+        OFFICIAL_RED,
+    );
+    let instruction_center = at(text_left + 128.0, text_top + 61.0);
+    painter.galley(
+        instruction_center - egui::vec2(instruction.size().x / 2.0, 0.0),
+        instruction,
+        OFFICIAL_RED,
+    );
+
+    painter.line_segment(
+        [at(text_left, record_top), at(text_left + 156.0, record_top)],
+        red,
+    );
+    let columns = [62.86_f32, 39.51, 53.62];
+    let labels = ["承办单位：", "联系人：", "电话："];
+    for (row_index, row) in rows.iter().enumerate() {
+        let y = record_top + 1.4 + row_index as f32 * (LINE_PT / MM);
+        let mut x = text_left;
+        for column in 0..3 {
+            let label = red_overlay_text(
+                ui,
+                metrics,
+                labels[column],
+                theme::FONT_FANGSONG,
+                BODY_PT,
+                OFFICIAL_RED,
+            );
+            let label_width = label.size().x;
+            painter.galley(at(x, y), label, OFFICIAL_RED);
+            let value = red_overlay_text(
+                ui,
+                metrics,
+                &row[column],
+                theme::FONT_FANGSONG,
+                BODY_PT,
+                Color32::BLACK,
+            );
+            let value_pos = if column == 2 {
+                at(x + columns[column], y) - egui::vec2(value.size().x, 0.0)
+            } else {
+                at(x, y) + egui::vec2(label_width, 0.0)
+            };
+            painter.galley(value_pos, value, Color32::BLACK);
+            x += columns[column];
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_red_print_pages(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    layout_state: &RedPrintLayout,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    rows: &[[String; 3]],
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+) {
+    for (page_index, page_layout) in layout_state.pages.iter().enumerate() {
+        if page_index > 0 {
+            ui.add_space(14.0);
+        }
+        ui.horizontal(|ui| {
+            let side = ((metrics.viewport - metrics.page) / 2.0).max(0.0);
+            ui.add_space(side);
+            let (page, _) = ui.allocate_exact_size(
+                egui::vec2(metrics.page, metrics.page_height),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect(
+                page,
+                egui::CornerRadius::same(3),
+                Color32::WHITE,
+                Stroke::new(1.0, theme::border()),
+                egui::StrokeKind::Inside,
+            );
+            if page_index == 0 {
+                paint_red_approval_overlay(ui, metrics, page, input, display, rows);
+            } else {
+                let page_number = red_overlay_text(
+                    ui,
+                    metrics,
+                    &format!("— {} —", page_index + 1),
+                    theme::FONT_FANGSONG,
+                    14.0,
+                    Color32::BLACK,
+                );
+                let center = page.min + egui::vec2(metrics.page / 2.0, metrics.mm(282.0));
+                ui.painter().galley(
+                    center - egui::vec2(page_number.size().x / 2.0, 0.0),
+                    page_number,
+                    Color32::BLACK,
+                );
+            }
+
+            for (fragment_index, fragment) in page_layout.fragments.iter().enumerate() {
+                let rect_left = match fragment.align {
+                    Align::Center => fragment.x - fragment.width / 2.0,
+                    Align::Max => fragment.x - fragment.width,
+                    Align::Min => fragment.x,
+                };
+                let top_left = page.min + egui::vec2(rect_left, fragment.y);
+                let rect = egui::Rect::from_min_size(
+                    top_left,
+                    egui::vec2(fragment.width, fragment.visible_height),
+                );
+                if let Some(range) = &fragment.range
+                    && !range.is_empty()
+                {
+                    let response = ui.interact(
+                        rect,
+                        egui::Id::new(("red-print-fragment", page_index, fragment_index)),
+                        egui::Sense::click(),
+                    );
+                    if response.clicked() {
+                        *clicked = Some(range.clone());
+                    }
+                    let anchored = anchor.is_some_and(|anchor| {
+                        !anchor.is_empty() && anchor.start < range.end && range.start < anchor.end
+                    });
+                    if anchored && *scroll_to_anchor {
+                        response.scroll_to_me(Some(egui::Align::Center));
+                        *scroll_to_anchor = false;
+                    }
+                    if anchored || response.hovered() {
+                        ui.painter().rect_filled(
+                            rect.expand2(egui::vec2(3.0, 1.0)),
+                            3.0,
+                            if anchored {
+                                theme::accent_soft()
+                            } else {
+                                HOVER_TINT
+                            },
+                        );
+                    }
+                }
+                let anchor_pos = match fragment.align {
+                    Align::Center | Align::Max | Align::Min => {
+                        page.min + egui::vec2(fragment.x, fragment.y)
+                    }
+                };
+                ui.painter().with_clip_rect(rect).galley(
+                    anchor_pos,
+                    fragment.galley.clone(),
+                    Color32::BLACK,
+                );
+            }
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn red_approval_print_preview(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    body: &[&LocatedBlock],
+    attachments: &[Vec<&LocatedBlock>],
+    title: &(String, Range<usize>),
+    attachment_names: &[String],
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+) {
+    let (layout_state, rows) =
+        red_build_print_layout(ui, metrics, input, display, body, title, attachment_names);
+    paint_red_print_pages(
+        ui,
+        metrics,
+        &layout_state,
+        input,
+        display,
+        &rows,
+        anchor,
+        scroll_to_anchor,
+        clicked,
+    );
+
+    // 附件仍沿用现有的逐份分页渲染；正文和附件概要已经由上面的打印分页器处理。
+    for (index, attachment) in attachments.iter().enumerate() {
+        ui.add_space(14.0);
+        sheet(ui, metrics, |ui| {
+            let mut counters = [0usize; 4];
+            line_block(
+                ui,
+                metrics,
+                if attachments.len() == 1 {
+                    "附件".to_string()
+                } else {
+                    format!("附件{}", index + 1)
+                }
+                .as_str(),
+                theme::FONT_HEITI,
+                BODY_PT,
+                Align::LEFT,
+            );
+            for located in attachment {
+                let range = located.range.clone();
+                clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
+                    content_block(ui, metrics, &located.block, &mut counters, true)
+                });
+            }
+        });
+    }
 }
 
 /// 逐块画正文。
@@ -1206,7 +2011,8 @@ pub fn official_preview(
         .collect::<Vec<_>>();
     let names = export::attachment_names(&blocks);
 
-    // 与导出一致地切分：正文一张纸，之后每份附件另起一张。
+    // 先按正文/附件切分。红头呈批件正文还会在专用分页器里继续拆成真实页；
+    // 每份附件仍从新纸开始。
     let mut body: Vec<&LocatedBlock> = Vec::new();
     let mut attachments: Vec<Vec<&LocatedBlock>> = Vec::new();
     let mut in_attachment = false;
@@ -1230,9 +2036,6 @@ pub fn official_preview(
             _ => body.push(located),
         }
     }
-    // 红头呈批件的编辑预览刻意简化为白头件：不近似模拟绝对定位框架和首页
-    // 分页，只聚焦标题、呈报领导、正文与落款。精确边界由最终 TeX 量盒决定。
-
     // 紧缩风格合并的是正文区 # 号最多的那一级标题；附件区不参与。
     let compact_level = export::body_heading_max_level(&blocks);
     // 标题取正文首个 `# `，缺省回落表单里的标题提示，与导出器一致。
@@ -1249,6 +2052,25 @@ pub fn official_preview(
     let record_on_body = attachments.is_empty();
 
     let (title, title_range) = title;
+    if input.kind == TemplateKind::RedHeadApproval {
+        red_approval_print_preview(
+            ui,
+            &metrics,
+            input,
+            display,
+            &body,
+            &attachments,
+            &(title, title_range),
+            &names,
+            anchor,
+            &mut scroll_to_anchor,
+            &mut clicked,
+        );
+        return PreviewOutput {
+            scale: metrics.scale,
+            clicked,
+        };
+    }
     sheet(ui, &metrics, |ui| {
         header_block(ui, &metrics, input, display);
         if !title.is_empty() {
@@ -1750,10 +2572,9 @@ mod tests {
         );
     }
 
-    /// 红头呈批件的编辑预览采用白头件落款：多个单位与日期全部右对齐，
-    /// 不近似模拟最终 TeX 中供签字使用的特殊日期定位。
+    /// 防御性落款辅助布局仍可独立使用；主预览走上面的红头打印分页器。
     #[test]
-    fn red_head_approval_preview_uses_white_paper_signature() {
+    fn red_head_approval_signature_helper_stays_right_aligned() {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let available = 1000.0;
@@ -1779,7 +2600,7 @@ mod tests {
         for row in &rows {
             assert!(
                 (row.max.x - red_right).abs() <= 1.0,
-                "红头呈批件预览应像白头件一样全部右对齐：{rows:?}"
+                "红头呈批件的辅助落款应保持全部右对齐：{rows:?}"
             );
         }
 
@@ -1804,6 +2625,190 @@ mod tests {
                 "两个文种的简化预览落款应一致：red={rows:?}, white={white_rows:?}"
             );
         }
+    }
+
+    #[test]
+    fn red_print_preview_keeps_heading_and_following_paragraph_narrow_on_first_page() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let available = 1000.0;
+        let metrics = Metrics::new(available, Some(1.0));
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        let mut input = draft(TemplateKind::RedHeadApproval);
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.signing_unit = "星海省教育厅".into();
+        input.profile.joint_responsible_units = "教师工作处".into();
+        input.profile.joint_contacts = vec![crate::models::JointContact {
+            unit: "教师工作处".into(),
+            name: "王五".into(),
+            phone: "010-12345678".into(),
+        }];
+        let first = "为进一步推进服务事项标准化、规范化、便利化，全面掌握各单位年度工作进展，请结合实际报送年度标准化建设情况。报送数据应与服务事项管理系统保持一致。";
+        let second = "各单位应当围绕事项清单维护、服务指南规范、线上线下融合和服务效能提升等方面，全面梳理年度工作完成情况，客观反映工作成效、存在问题及下一步安排。".repeat(3);
+        let markdown =
+            format!("# 关于报送标准化建设情况的函\n\n{first}\n\n## 报送内容\n\n{second}");
+        let located = export::parse_markdown_located(&markdown);
+        let body = located.iter().collect::<Vec<_>>();
+        let title = located
+            .iter()
+            .find_map(|block| match &block.block {
+                MarkdownBlock::Title(text) => Some((export::plain_text(text), block.range.clone())),
+                _ => None,
+            })
+            .unwrap();
+        let heading_range = located
+            .iter()
+            .find_map(|block| match block.block {
+                MarkdownBlock::Heading(_, _) => Some(block.range.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let second_range = located
+            .iter()
+            .rev()
+            .find_map(|block| match block.block {
+                MarkdownBlock::Paragraph(_) => Some(block.range.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(available, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let (layout, _) =
+                red_build_print_layout(ui, &metrics, &input, &display, &body, &title, &[]);
+            let heading = layout.pages[0]
+                .fragments
+                .iter()
+                .find(|fragment| fragment.range.as_ref() == Some(&heading_range))
+                .expect("一级标题应继续排在首页");
+            assert!((heading.width - metrics.mm(100.0)).abs() < 0.5);
+            let first_part = layout.pages[0]
+                .fragments
+                .iter()
+                .find(|fragment| fragment.range.as_ref() == Some(&second_range))
+                .expect("标题后的正文应利用首页剩余空间");
+            assert!((first_part.width - metrics.mm(100.0)).abs() < 0.5);
+            let continuation = layout.pages[1]
+                .fragments
+                .iter()
+                .find(|fragment| fragment.range.as_ref() == Some(&second_range))
+                .expect("同一段的剩余文字应续排到第二页");
+            assert!((continuation.width - metrics.mm(156.0)).abs() < 0.5);
+        });
+    }
+
+    #[test]
+    fn red_print_preview_reflows_one_long_paragraph_at_second_page_width() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        let mut input = draft(TemplateKind::RedHeadApproval);
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.signing_unit = "星海省教育厅".into();
+        let paragraph = "为进一步推进服务事项标准化、规范化、便利化，全面掌握各单位年度工作进展，请结合实际报送年度标准化建设情况。报送数据应与服务事项管理系统保持一致，其中涉及系统接口调用、电子凭证共享和跨部门联办的内容，应当一并核实。".repeat(5);
+        let markdown = format!("# 关于报送标准化建设情况的函\n\n{paragraph}");
+        let located = export::parse_markdown_located(&markdown);
+        let body = located.iter().collect::<Vec<_>>();
+        let title = located
+            .iter()
+            .find_map(|block| match &block.block {
+                MarkdownBlock::Title(text) => Some((export::plain_text(text), block.range.clone())),
+                _ => None,
+            })
+            .unwrap();
+        let paragraph_range = located
+            .iter()
+            .find_map(|block| match block.block {
+                MarkdownBlock::Paragraph(_) => Some(block.range.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let (layout, _) =
+                red_build_print_layout(ui, &metrics, &input, &display, &body, &title, &[]);
+            let first = layout.pages[0]
+                .fragments
+                .iter()
+                .find(|fragment| fragment.range.as_ref() == Some(&paragraph_range))
+                .expect("长段落应从首页开始");
+            let second = layout.pages[1]
+                .fragments
+                .iter()
+                .find(|fragment| fragment.range.as_ref() == Some(&paragraph_range))
+                .expect("长段落应续排到第二页");
+            assert!((first.width - metrics.mm(100.0)).abs() < 0.5);
+            assert!((second.width - metrics.mm(156.0)).abs() < 0.5);
+            assert!(second.galley.rows[0].size.x > first.galley.rows[0].size.x * 1.25);
+        });
+    }
+
+    #[test]
+    fn official_red_preview_draws_multiple_fixed_a4_pages() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let mut input = draft(TemplateKind::RedHeadApproval);
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.signing_unit = "星海省教育厅".into();
+        input.profile.joint_responsible_units = "教师工作处".into();
+        input.profile.joint_contacts = vec![crate::models::JointContact {
+            unit: "教师工作处".into(),
+            name: "王五".into(),
+            phone: "010-12345678".into(),
+        }];
+        let paragraph = "为进一步推进服务事项标准化、规范化、便利化，全面掌握各单位年度工作进展，请结合实际报送年度标准化建设情况。".repeat(8);
+        let markdown = format!("# 关于报送标准化建设情况的函\n\n{paragraph}");
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 2600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = official_preview(
+                    ui,
+                    &input,
+                    &UnitDisplay::new(&vocabulary()),
+                    &markdown,
+                    Some(0.8),
+                    None,
+                    false,
+                );
+            },
+        );
+        let metrics = Metrics::new(1000.0, Some(0.8));
+        let pages = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == Color32::WHITE => Some(rect.rect),
+                _ => None,
+            })
+            .filter(|rect| {
+                (rect.width() - metrics.page).abs() < 1.0
+                    && (rect.height() - metrics.page_height).abs() < 1.0
+            })
+            .count();
+        assert!(
+            pages >= 2,
+            "长正文应绘制为多张固定 A4 页面，实际 {pages} 张"
+        );
     }
 
     #[test]
