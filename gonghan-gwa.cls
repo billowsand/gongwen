@@ -588,9 +588,10 @@
 
 % ========== 落款分页与“此页无正文”自动识别 ==========
 
-% 落款与正文之间的间距；正文末页放不下落款时才另起一页并标注“此页无正文”。
+% 落款与正文（或附件概要）之间通常空 3 行。若 3 行会把落款挤到新页，依次缩为
+% 2 行、1 行；只有 1 行仍放不下时才另起一页并标注“此页无正文”。
 \newlength{\ClosingGap}
-\setlength{\ClosingGap}{2cm}
+\setlength{\ClosingGap}{3\BodyBaselineSkip}
 % 落款与版记之间至少留出的间距。版记本身用 \vspace*{\fill} 顶到版心底部，
 % 页面宽裕时这段留白会自动变大，这里只规定最紧凑时的下限。
 \newlength{\SignatureRecordGap}
@@ -601,11 +602,28 @@
 \newsavebox{\gwa@closingbox}
 \newsavebox{\gwa@recordbox}
 \newlength{\gwa@closingneed}
+\newlength{\gwa@closingbase}
 
 \newcommand{\NoBodyNotice}{%
     \vspace*{58pt}%
     {\noindent\hspace*{2em}\zihao{3}（此页无正文）\par}%
-    \vspace{5cm}%
+}
+
+% 按给定间距量取“间距 + 落款”的实际高度。\gwa@closingbase 保存版记等额外占位，
+% 避免尝试 3/2/1 行时把同一份占位重复累加。
+\newcommand{\gwa@measureclosing}[2]{%
+    \setbox\gwa@closingbox=\vbox{\vspace{#1}#2}%
+    \setlength{\gwa@closingneed}{\gwa@closingbase}%
+    \addtolength{\gwa@closingneed}{%
+        \dimexpr\ht\gwa@closingbox+\dp\gwa@closingbox+\ClosingMeasureSlack\relax}%
+}
+
+% 新落款页上，“此页无正文”与落款之间仍按常规空 3 行。
+\newcommand{\gwa@placeclosingnewpage}[1]{%
+    \newpage
+    \NoBodyNotice
+    \vspace{\ClosingGap}%
+    #1%
 }
 
 % 落款定位的公共实现：先把“间距 + 落款”整体装箱量出真实高度，再决定是否另起一页。
@@ -614,19 +632,24 @@
 % #1 为落款内容命令；调用前把版记等额外占位写进 \gwa@closingneed。
 \newcommand{\gwa@placeclosing}[1]{%
     \par
+    \setlength{\gwa@closingbase}{\gwa@closingneed}%
     % 量高时不改字体与行距，保持与正文末尾同一环境，箱内布局即最终布局。
-    \setbox\gwa@closingbox=\vbox{\vspace{\ClosingGap}#1}%
-    \addtolength{\gwa@closingneed}{%
-        \dimexpr\ht\gwa@closingbox+\dp\gwa@closingbox+\ClosingMeasureSlack\relax}%
+    \gwa@measureclosing{\ClosingGap}{#1}%
     \if@forcenewpage
-        \newpage
-        \NoBodyNotice
-        #1%
+        \gwa@placeclosingnewpage{#1}%
     \else
         \ifdim\dimexpr\pagegoal-\pagetotal\relax<\gwa@closingneed
-            \newpage
-            \NoBodyNotice
-            #1%
+            \gwa@measureclosing{2\BodyBaselineSkip}{#1}%
+            \ifdim\dimexpr\pagegoal-\pagetotal\relax<\gwa@closingneed
+                \gwa@measureclosing{\BodyBaselineSkip}{#1}%
+                \ifdim\dimexpr\pagegoal-\pagetotal\relax<\gwa@closingneed
+                    \gwa@placeclosingnewpage{#1}%
+                \else
+                    \unvbox\gwa@closingbox
+                \fi
+            \else
+                \unvbox\gwa@closingbox
+            \fi
         \else
             % 用 \unvbox 原样放回，落款的位置与行距与量高时完全一致。
             \unvbox\gwa@closingbox
@@ -739,6 +762,7 @@
     \else
         \clearpage
         \NoBodyNotice
+        \vspace{\ClosingGap}%
         \RedApprovalSignature
     \fi
 }

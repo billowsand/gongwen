@@ -22,6 +22,8 @@ const RED_APPROVAL_TITLE_SIZE: usize = 36; // 18 pt，小二号
 pub(super) const TABLE_SIZE: usize = 28; // 14 pt，四号
 const FOOTER_SIZE: usize = 28; // 14 pt，四号；版记字号独立固定，不随正文表格调整
 const PAGE_NUMBER_SIZE: usize = 36; // 18 pt，四号
+/// 正文、附件概要或“此页无正文”与落款之间通常空 3 行（每行固定 560 缇）。
+const CLOSING_GAP_TWIPS: u32 = 3 * 560;
 /// 正文中完整括号（全角/半角）及其中内容的字号：14 pt，四号，比正文小一号。
 const PAREN_SIZE: usize = 28;
 pub(super) const TABLE_CONTENT_WIDTH_TWIPS: usize = 8_844; // 156 mm 版心
@@ -460,7 +462,7 @@ fn add_white_paper_signature(
             .indent(Some(0), None, Some(signing_room_twips as i32), None)
             .line_spacing(
                 LineSpacing::new()
-                    .before(if index == 0 { 360 } else { 0 })
+                    .before(if index == 0 { CLOSING_GAP_TWIPS } else { 0 })
                     .line(560)
                     .line_rule(LineSpacingType::Exact),
             );
@@ -649,7 +651,7 @@ fn joint_signature_cell_paragraph(value: &str, row_index: usize) -> Paragraph {
         .align(AlignmentType::Center)
         .line_spacing(
             LineSpacing::new()
-                .before(if row_index == 0 { 360 } else { 0 })
+                .before(if row_index == 0 { CLOSING_GAP_TWIPS } else { 0 })
                 .line(560)
                 .line_rule(LineSpacingType::Exact),
         )
@@ -1826,7 +1828,7 @@ pub fn write_docx(
                     .align(AlignmentType::Right)
                     .line_spacing(
                         LineSpacing::new()
-                            .before(360)
+                            .before(CLOSING_GAP_TWIPS)
                             .line(560)
                             .line_rule(LineSpacingType::Exact),
                     ),
@@ -2153,6 +2155,12 @@ mod tests {
         let gap = gap_between(&xml, "正文。", "附件1：统计表");
         assert_eq!(gap.matches("<w:p ").count(), 2, "概要前应空两行：{gap}");
         assert!(!gap.contains("<w:t"));
+        let after_summary = &xml[xml.find("附件1：统计表").unwrap()..];
+        let signature = paragraph_containing(after_summary, "某单位");
+        assert!(
+            signature.contains(&format!(r#"w:before="{CLOSING_GAP_TWIPS}""#)),
+            "附件概要与落款之间通常应空 3 行：{signature}"
+        );
         let body_heading = paragraph_containing(&xml, "一、总体要求");
         assert!(body_heading.contains(r#"w:firstLine="640""#));
         // 附件区真正的“附件1”黑体标签与“统计表”小标宋标题均位于概要之后。

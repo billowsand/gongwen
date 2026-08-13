@@ -49,7 +49,7 @@ const HEADER_MAX_GAP_EM: f32 = 1.0; // 红头最大字距 \HeaderMaxGap
 const RECORD_PT: f32 = 14.0; // 版记四号
 /// 联系电话列宽：标签 5em + 11 位半角数字 5.5em + 0.5em 余量。
 const RECORD_PHONE_COLUMN_EM: f32 = 11.0;
-const CLOSING_GAP_MM: f32 = 20.0; // 正文与落款之间 \ClosingGap
+const CLOSING_GAP_LINES: usize = 3; // 正文、附件概要或“此页无正文”与落款之间通常空 3 行
 const RECORD_GAP_MM: f32 = 10.0; // 落款与版记之间 \SignatureRecordGap
 const SIGNATURE_WIDTH_MM: f32 = 110.0; // 落款块宽 11cm
 const JOINT_COLUMN_MM: f32 = 72.0; // 联合发文落款每列宽
@@ -673,7 +673,7 @@ fn signature_block(
     if input.kind == TemplateKind::MeetingAgenda || input.kind == TemplateKind::PlainDocument {
         return;
     }
-    ui.add_space(metrics.mm(CLOSING_GAP_MM));
+    ui.add_space(metrics.line * CLOSING_GAP_LINES as f32);
     if crate::models::is_joint_signature(input) {
         joint_signature_block(ui, metrics, input, display);
         return;
@@ -1200,6 +1200,45 @@ impl RedPrintLayout {
     }
 }
 
+/// 返回当前页能容纳的最大落款间距：优先 3 行，临界时缩为 2 行或 1 行。
+/// 连 1 行都放不下时返回 `None`，由调用方另起“此页无正文”页。
+fn fitting_closing_gap_lines(
+    cursor_y: f32,
+    signature_height: f32,
+    page_bottom: f32,
+    line_height: f32,
+) -> Option<usize> {
+    (1..=CLOSING_GAP_LINES)
+        .rev()
+        .find(|lines| cursor_y + *lines as f32 * line_height + signature_height <= page_bottom)
+}
+
+/// 开启专门的落款页，并保持“此页无正文”与落款之间空 3 行。
+fn red_start_no_body_closing_page(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    state: &mut RedPrintLayout,
+    left: f32,
+) {
+    state.next_page(metrics);
+    state.cursor_y += metrics.pt(58.0);
+    let notice = red_fixed_fragment(
+        ui,
+        metrics,
+        &format!("{}（此页无正文）", indent(INDENT_CHARS)),
+        theme::FONT_FANGSONG,
+        BODY_PT,
+        metrics.mm(156.0),
+        Align::LEFT,
+        None,
+        left,
+        state.cursor_y,
+    );
+    state.cursor_y += notice.visible_height;
+    state.push(notice);
+    state.cursor_y += metrics.line * CLOSING_GAP_LINES as f32;
+}
+
 fn red_inline_job(
     metrics: &Metrics,
     width: f32,
@@ -1538,52 +1577,27 @@ fn red_build_print_layout(
         }
     }
 
-    // 呈批件落款不得在首页；首页正文没有续页时，第二页增加“此页无正文”。
-    let body_ended_on_first = state.page_index == 0;
-    if body_ended_on_first {
-        state.next_page(metrics);
-        state.cursor_y += metrics.pt(58.0);
-        let notice = red_fixed_fragment(
-            ui,
-            metrics,
-            &format!("{}（此页无正文）", indent(INDENT_CHARS)),
-            theme::FONT_FANGSONG,
-            BODY_PT,
-            metrics.mm(156.0),
-            Align::LEFT,
-            None,
-            left,
-            state.cursor_y,
-        );
-        state.cursor_y += notice.visible_height + metrics.mm(50.0);
-        state.push(notice);
-    } else {
-        state.cursor_y += metrics.mm(CLOSING_GAP_MM);
-    }
-
     let signature_units = display
         .white_paper_signature_units(input)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
     let signature_height = metrics.line * (signature_units.len().max(1) * 2 + 1) as f32;
-    if state.cursor_y + signature_height > metrics.mm(37.0 + 225.0) {
-        state.next_page(metrics);
-        state.cursor_y += metrics.pt(58.0);
-        let notice = red_fixed_fragment(
-            ui,
-            metrics,
-            &format!("{}（此页无正文）", indent(INDENT_CHARS)),
-            theme::FONT_FANGSONG,
-            BODY_PT,
-            metrics.mm(156.0),
-            Align::LEFT,
-            None,
-            left,
-            state.cursor_y,
-        );
-        state.cursor_y += notice.visible_height + metrics.mm(50.0);
-        state.push(notice);
+
+    // 呈批件落款不得在首页。正文已经续页时优先空 3 行；若仅因这 3 行放不下，
+    // 依次缩到 2 行、1 行，避免无谓制造“此页无正文”页。
+    let body_ended_on_first = state.page_index == 0;
+    if body_ended_on_first {
+        red_start_no_body_closing_page(ui, metrics, &mut state, left);
+    } else if let Some(gap_lines) = fitting_closing_gap_lines(
+        state.cursor_y,
+        signature_height,
+        metrics.mm(37.0 + 225.0),
+        metrics.line,
+    ) {
+        state.cursor_y += metrics.line * gap_lines as f32;
+    } else {
+        red_start_no_body_closing_page(ui, metrics, &mut state, left);
     }
     let signature_right = left + metrics.mm(156.0 - crate::export::SIGNATURE_ROOM_MM);
     for (index, unit) in signature_units.iter().enumerate() {
@@ -2467,6 +2481,29 @@ mod tests {
         assert_eq!(
             signature_seal_mark(&input, &UnitDisplay::new(&vocabulary)),
             Some("（代章）")
+        );
+    }
+
+    #[test]
+    fn closing_gap_prefers_three_lines_and_compresses_before_paginating() {
+        let line = 28.0;
+        let signature = 84.0;
+        let bottom = 500.0;
+        assert_eq!(
+            fitting_closing_gap_lines(300.0, signature, bottom, line),
+            Some(3)
+        );
+        assert_eq!(
+            fitting_closing_gap_lines(345.0, signature, bottom, line),
+            Some(2)
+        );
+        assert_eq!(
+            fitting_closing_gap_lines(380.0, signature, bottom, line),
+            Some(1)
+        );
+        assert_eq!(
+            fitting_closing_gap_lines(395.0, signature, bottom, line),
+            None
         );
     }
 

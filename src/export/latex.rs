@@ -1828,12 +1828,12 @@ mod tests {
         assert!(GONGHAN_CLASS.contains("\\newcommand{\\SetAttachmentContent}"));
         assert!(GONGHAN_CLASS.contains("（此页无正文）"));
         assert!(GONGHAN_CLASS.contains("\\noindent\\hspace*{2em}\\zihao{3}（此页无正文）"));
-        // 落款是否另起一页按实际高度判断：先把“间距+落款”装箱量高，再 \unvbox 原样放回。
-        // 固定估值会两头出错，见 cls 中 \gwa@placeclosing 的注释。
+        // 落款是否另起一页按实际高度判断：先按 3 行量高，临界时依次尝试 2 行、1 行，
+        // 都放不下才另起“此页无正文”页。
         assert!(GONGHAN_CLASS.contains("\\newcommand{\\gwa@placeclosing}[1]"));
-        assert!(
-            GONGHAN_CLASS.contains("\\setbox\\gwa@closingbox=\\vbox{\\vspace{\\ClosingGap}#1}")
-        );
+        assert!(GONGHAN_CLASS.contains("\\setlength{\\ClosingGap}{3\\BodyBaselineSkip}"));
+        assert!(GONGHAN_CLASS.contains("\\gwa@measureclosing{2\\BodyBaselineSkip}{#1}"));
+        assert!(GONGHAN_CLASS.contains("\\gwa@measureclosing{\\BodyBaselineSkip}{#1}"));
         assert!(GONGHAN_CLASS.contains("\\unvbox\\gwa@closingbox"));
         assert!(
             GONGHAN_CLASS
