@@ -698,11 +698,11 @@ pub(crate) fn red_record_scale_percent(text: &str, usable_twips: usize) -> usize
         .clamp(30.0, 100.0) as usize
 }
 
-/// 红头呈批件首页正文栏能排下的行数。
+/// DOCX 红头呈批件首页正文栏能排下的估算行数。
 ///
 /// 首页版心 225 mm，扣掉红头预留的 55 mm、标题、呈报领导各占的行，以及底部
-/// 承办区（每条一行，`\enlargethispage` 会从首页扣掉这段高度），余下就是正文
-/// 可用行数。三端（含 `\RedWrapLines`）都用这一个函数，避免各算各的。
+/// 承办区（每条一行），余下就是正文可用行数。TeX 端已改为真实盒高判定，
+/// 并按剩余基线连续流排；编辑预览则简化为白头件。这里仅保留给 DOCX 的估算。
 pub(crate) fn red_approval_wrap_lines(title_lines: usize, responsible_rows: usize) -> usize {
     14usize
         .saturating_sub(title_lines)
@@ -747,7 +747,7 @@ pub(crate) fn red_signature_unit_width_mm(units: &[String]) -> f32 {
     red_signature_unit_width_em(units) * RED_RECORD_EM_TWIPS as f32 / 1440.0 * 25.4
 }
 
-/// 红头呈批件正文的版面估算。三端共用，避免各算各的判据。
+/// DOCX 红头呈批件正文的版面估算。TeX 端按动态内容区连续流排，不依赖这里。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RedApprovalBodyMetrics {
     /// 正文（不含附件）按首页 100 mm 窄栏估算占多少行；表格与图片不计入。

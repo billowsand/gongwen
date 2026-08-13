@@ -530,8 +530,8 @@ fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (
     official_letter_sections_to_tex_with_barrier(blocks, compact, None)
 }
 
-/// 同上，另可在正文区第一个表格/图片之前插入一条屏障命令（红头呈批件用来把
-/// 表格图片赶出首页）。`barrier` 为 `None` 时与原行为逐字节一致。
+/// 同上，另可在第一个表格/图片之前插入屏障。红头呈批件的普通文字保持连续
+/// 流排；表格和图片不能进入首页批示栏，因此仍由屏障直接送到第二页。
 fn official_letter_sections_to_tex_with_barrier(
     blocks: &[MarkdownBlock],
     compact: bool,
@@ -890,7 +890,9 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
         Some("\\RedPageOneBarrier"),
     );
     if let Some(summary) = attachment_summary_tex(&blocks) {
-        body.push_str(&summary);
+        // 附件概要自带两行垂直留白，无法仅靠正文行数额度安全判断；红头呈批件
+        // 统一从第二页开始排概要，避免这段固定留白把末行推到承办区红线上。
+        body.push_str(&format!("\n\\RedPageOneBarrier\n{summary}"));
     }
     let attachment_command = if attachments.trim().is_empty() {
         String::new()
@@ -946,19 +948,8 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
         None => String::new(),
     };
     let entries = crate::models::joint_responsible_entries(&input.profile);
-    let responsible_count = entries.len().max(1);
     let responsible_rows = red_approval_responsible_rows_tex(&entries, display);
-    // 标题行数按已清洗的纯文本算，与 \TitleContent 的断行结果同源。
     let title_plain = plain_text(title);
-    let title_plan = title::title_plan(&title_plain, title::red_approval_chars_per_line());
-    let title_lines = match &title_plan {
-        TitlePlan::Wrapped(lines) => lines.len().max(1),
-        _ => 1,
-    };
-    let wrap_lines = crate::export::red_approval_wrap_lines(title_lines, responsible_count);
-    let body_on_second_page = usize::from(
-        crate::export::red_approval_body_metrics(&blocks).reaches_second_page(wrap_lines),
-    );
 
     format!(
         r#"%!TEX program = xelatex
@@ -975,9 +966,7 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
 }}
 {attachment_command}\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
 \setlength{{\RedSignatureUnitWidth}}{{{signature_unit_width:.3}mm}}
-{date_commands}\renewcommand{{\RedResponsibleCount}}{{{responsible_count}}}
-\renewcommand{{\RedWrapLines}}{{{wrap_lines}}}
-\renewcommand{{\RedBodyOnSecondPage}}{{{body_on_second_page}}}
+{date_commands}
 \SetRedResponsibleContent{{
 {responsible_rows}
 }}
@@ -998,9 +987,6 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
         signature_unit = signature_unit,
         signature_unit_width = signature_unit_width_mm,
         date_commands = date_commands,
-        responsible_count = responsible_count,
-        wrap_lines = wrap_lines,
-        body_on_second_page = body_on_second_page,
         responsible_rows = responsible_rows,
     )
 }
@@ -1343,8 +1329,8 @@ mod tests {
         assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
     }
 
-    /// 红头呈批件首页：承办区走定宽三栏、表格图片有换页屏障、落款右对齐，
-    /// 正文是否跨页由三端共用的估算写入 \RedBodyOnSecondPage。
+    /// 红头呈批件首页：承办区走定宽三栏，普通内容保持连续流排，表格图片仍由
+    /// 屏障换页；首页行数由类文件按实际内容区高度计算，落款保持右对齐。
     #[test]
     fn red_head_approval_tex_fixes_record_columns_and_pushes_floats_off_page_one() {
         let mut input = DraftInput::default();
@@ -1366,7 +1352,7 @@ mod tests {
         ];
         input.profile.joint_responsible_units = "综合处、业务处".into();
 
-        // 短正文 + 表格：屏障排在表格之前，正文因此算作已跨页。
+        // 短正文 + 表格：正文保持普通段落，屏障排在表格之前。
         let tex = red_head_approval_tex(
             &input,
             "# 关于某事的请示\n\n短正文。\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n",
@@ -1381,9 +1367,10 @@ mod tests {
         let barrier = tex.find("\\RedPageOneBarrier").expect("应插入换页屏障");
         let table = tex.find("longtblr").expect("正文应含表格");
         assert!(barrier < table, "屏障必须排在表格之前：{tex}");
-        assert!(tex.contains("\\renewcommand{\\RedBodyOnSecondPage}{1}"));
-        // 两条承办、单行标题：首页正文额度 14-1-2 = 11 行。
-        assert!(tex.contains("\\renewcommand{\\RedWrapLines}{11}"), "{tex}");
+        assert!(tex.contains("短正文。\\par"));
+        assert!(!tex.contains("\\RedFirstPageBlock"));
+        assert!(!tex.contains("\\RedBodyOnSecondPage"));
+        assert!(!tex.contains("\\RedWrapLines"));
 
         // 纯短正文：没有表格，正文没跨页，落款页要标“此页无正文”。
         let tex = red_head_approval_tex(
@@ -1395,7 +1382,20 @@ mod tests {
             !tex.contains("\\RedPageOneBarrier"),
             "没有表格就不插屏障：{tex}"
         );
-        assert!(tex.contains("\\renewcommand{\\RedBodyOnSecondPage}{0}"));
+        assert!(tex.contains("短正文。妥否，请指示。\\par"));
+
+        // 一级标题和紧随正文保持两个正常段落，由同一个首页剩余行数连续控制。
+        let headed = red_head_approval_tex(
+            &input,
+            "# 关于某事的请示\n\n## 工作安排\n\n这里是一级标题后的正文。",
+            &UnitDisplay::new(&[]),
+        );
+        assert!(
+            headed.contains(
+                "\\noindent\\hspace*{2em}{\\heiti\\enheiti 一、工作安排}\\par\n\n这里是一级标题后的正文。\\par"
+            ),
+            "一级标题和正文应保持连续段落：{headed}"
+        );
         // 多个落款单位分行，行间空一行。
         assert!(
             tex.contains("\\renewcommand{\\SignatureUnit}{某某委员会\\par\\vspace{\\baselineskip}第二落款单位}"),
@@ -1419,7 +1419,11 @@ mod tests {
         assert!(GONGHAN_CLASS.contains("\\WhitePaperSignature"));
         assert!(GONGHAN_CLASS.contains("\\MeetingAgendaHeader"));
         assert!(GONGHAN_CLASS.contains("\\RedApprovalPageOverlay"));
-        assert!(GONGHAN_CLASS.contains("\\RedShapedContent"));
+        assert!(GONGHAN_CLASS.contains("\\newcommand{\\RedShapedContent}[1]"));
+        assert!(GONGHAN_CLASS.contains("\\RedFirstPageRemaining"));
+        assert!(GONGHAN_CLASS.contains("\\parshape"));
+        assert!(GONGHAN_CLASS.contains("\\everypar{\\gwa@setredparshape}"));
+        assert!(GONGHAN_CLASS.contains("\\textheight-\\pagetotal-\\RedRecordHeight-2mm"));
         assert!(
             GONGHAN_CLASS.contains("\\setbox\\gwa@redrecordbox=\\vbox")
                 && GONGHAN_CLASS.contains("\\vskip 1mm")
@@ -1464,7 +1468,7 @@ mod tests {
         assert!(
             !GONGHAN_CLASS
                 .contains("\\ifnum\\value{page}=1\n        \\clearpage\n        \\NoBodyNotice"),
-            "是否标“此页无正文”应改由 \\RedBodyOnSecondPage 决定"
+            "是否标“此页无正文”应由实际量高后的首页状态决定"
         );
         assert!(
             GONGHAN_CLASS.contains("\\vspace{10\\baselineskip}"),

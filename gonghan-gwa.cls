@@ -277,18 +277,16 @@
 % 让承办区向上扩展，并以同一个坐标衔接批示竖线与承办区横线。
 \newcommand{\RedResponsibleContent}{}
 \newcommand{\SetRedResponsibleContent}[1]{\renewcommand{\RedResponsibleContent}{#1}}
-\newcommand{\RedResponsibleCount}{1}
-\newcommand{\RedWrapLines}{13}
-% 正文是否已延续到第二页（0/1）。由导出器按三端共用的估算写入，决定落款页
-% 要不要标「（此页无正文）」；落款不得出现在首页则由 \RedApprovalClosing 兜底。
-\newcommand{\RedBodyOnSecondPage}{0}
 \newlength{\RedRecordHeight}
 \newlength{\RedFrameHeight}
 \newsavebox{\gwa@redrecordbox}
 \newsavebox{\gwa@redfitbox}
+\newsavebox{\gwa@redblockbox}
+\newlength{\RedFirstPageRemaining}
 \newcount\gwa@redremaining
 \newcount\gwa@redshapeindex
 \def\gwa@redshapepairs{}
+\newif\ifgwa@redbodycontinued
 
 % 承办区三栏宽度。与 Word/预览同源（缇 → 毫米）：承办单位 3564、联系人 2240、
 % 电话 3040 缇，合计 8844 缇 = 156mm 版心。
@@ -330,16 +328,34 @@
     \par
 }
 
-% 不依赖 wrapfig：为接下来的若干正文行设置 10cm 行宽，最后一项恢复版心宽度。
-% 每个段落结束后用 \prevgraf 扣除实际行数，使窄栏行数能跨多个自然段累计。
+% 首页正文连续流排：每个段落真正开始时，根据当前 pagetotal 重新计算到承办区
+% 红线的剩余行数。这样标题前后的垂直间距会自然计入；同一长段落超出额度后，
+% 其余行立即恢复 156mm 版心并由页面构造器送到第二页。
 \newcommand{\gwa@setredparshape}{%
+    \gwa@redremaining=0
+    \ifnum\value{page}=1
+        % enlargethispage 的缩页量不会立即反映到 pagegoal，须显式扣除承办区。
+        \setlength{\RedFirstPageRemaining}{%
+            \dimexpr\textheight-\pagetotal-\RedRecordHeight-2mm\relax}%
+        \ifdim\RedFirstPageRemaining>0pt
+            \loop\ifdim\RedFirstPageRemaining>\BodyBaselineSkip
+                \addtolength{\RedFirstPageRemaining}{-\BodyBaselineSkip}%
+                \advance\gwa@redremaining by 1
+            \repeat
+            % 余数还能容纳一行字形时，允许使用红线上方的最后一个基线。
+            \ifdim\RedFirstPageRemaining>16pt
+                \advance\gwa@redremaining by 1
+            \fi
+        \fi
+    \fi
     \ifnum\gwa@redremaining>0
         \def\gwa@redshapepairs{}%
         \gwa@redshapeindex=0
         \loop\ifnum\gwa@redshapeindex<\gwa@redremaining
-            \edef\gwa@redshapepairs{\gwa@redshapepairs\space 0pt 10cm}%
+            \edef\gwa@redshapepairs{\gwa@redshapepairs\space 0pt 100mm}%
             \advance\gwa@redshapeindex by 1
         \repeat
+        % 最后一项在段落超过首页额度时重复使用，故后续行恢复标准版心。
         \edef\gwa@redshape{\number\numexpr\gwa@redremaining+1\relax
             \gwa@redshapepairs\space 0pt \the\linewidth}%
         \expandafter\parshape\gwa@redshape\relax
@@ -349,14 +365,8 @@
 }
 \newcommand{\RedShapedContent}[1]{%
     \begingroup
-        \gwa@redremaining=\RedWrapLines\relax
-        \let\gwa@redsavedpar\par
-        \def\par{%
-            \gwa@redsavedpar
-            \advance\gwa@redremaining by -\prevgraf
-            \gwa@setredparshape
-        }%
-        \gwa@setredparshape
+        % everypar 在前置垂直间距已进入页面后才执行，正好能取得本段的真实起点。
+        \everypar{\gwa@setredparshape}%
         #1\par
     \endgroup
 }
@@ -719,28 +729,27 @@
     \endgroup
 }
 
-% 红头呈批件落款不得出现在首页。是否标注“此页无正文”由 \RedBodyOnSecondPage
-% 决定（三端共用同一估算）；\value{page} 只作兜底，保证落款确实不落在首页。
+% 红头呈批件落款不得出现在首页。是否标注“此页无正文”由连续流排过程中记录的
+% 实际行数决定：正文没有超过首页额度才标注，已经续排到第二页则紧随正文落款。
 \newcommand{\RedApprovalClosing}{%
-    \ifnum\RedBodyOnSecondPage=0
-        \clearpage
-        \NoBodyNotice
-        \RedApprovalSignature
-    \else
+    \ifgwa@redbodycontinued
         \ifnum\value{page}=1 \clearpage\fi
         \setlength{\gwa@closingneed}{0pt}%
         \gwa@placeclosing{\RedApprovalSignature}%
+    \else
+        \clearpage
+        \NoBodyNotice
+        \RedApprovalSignature
     \fi
 }
 
-% 表格与图片不得出现在首页：\parshape 只收窄段落文本，管不到表格和图片，
-% 它们会按整幅版心排版并压过批示栏。首页遇到就换页，并结束窄栏区域。
+% parshape 只控制段落文字，不能约束表格和图片；首页遇到它们时直接切换到
+% 第二页，后续内容自然按标准 156mm 版心排版。
 \newcommand{\RedPageOneBarrier}{%
-    \ifnum\value{page}=1
-        \gwa@redremaining=0
-        \gwa@setredparshape
-        \clearpage
-    \fi
+    \global\gwa@redbodycontinuedtrue
+    \gwa@redremaining=0
+    \parshape=0
+    \ifnum\value{page}=1 \clearpage\fi
 }
 
 \newcommand{\makeredapproval}{%
@@ -748,22 +757,28 @@
     \zihao{3}%
     \gwa@bodyspacing
     \RedApprovalPageOverlay
-    % 从版心顶端预留到红色上横线以下，标题只占左侧 10cm。
+    % 首页正文区：顶边为版心顶端以下 55mm，底边由真实承办区高度动态决定。
+    % 先把标题和呈报领导装成真实的 100mm 宽盒子，从可用高度中扣除，再把余高
+    % 换算成固定基线数；底部另留 2mm，确保末行字形不碰承办区红线。
+    \global\gwa@redbodycontinuedfalse
     \par\vspace*{55mm}%
     \enlargethispage{-\RedRecordHeight}%
-    \noindent\begin{minipage}{10cm}
-        \centering
-        \ifthenelse{\equal{\TitleContent}{}}%
-            {{\bs\enbt\fontsize{18bp}{\BodyBaselineSkip}\selectfont\DocumentTitle{}}}%
-            {\TitleContent}%
-        \par
-    \end{minipage}\par
-    \vspace{\BodyBaselineSkip}%
-    \noindent\begin{minipage}{10cm}
-        {\zihao{3}\kai\enkai\Recipient{}：}%
-    \end{minipage}\par
-    % 前若干行缩为左侧 10cm，随后恢复版心宽度；行数由标题和承办条目共同决定。
+    \setbox\gwa@redblockbox=\vbox{%
+        \hsize=100mm
+        \linewidth=100mm
+        \columnwidth=100mm
+        {\centering
+            \ifthenelse{\equal{\TitleContent}{}}%
+                {{\bs\enbt\fontsize{18bp}{\BodyBaselineSkip}\selectfont\DocumentTitle{}}}%
+                {\TitleContent}%
+            \par
+        }%
+        \vspace{\BodyBaselineSkip}%
+        \noindent{\zihao{3}\kai\enkai\Recipient{}：}\par
+    }%
+    \unvbox\gwa@redblockbox
     {\zihao{3}\gwa@bodyspacing\RedShapedContent{\MainContent}}%
+    \ifnum\value{page}>1 \global\gwa@redbodycontinuedtrue\fi
     \RedApprovalClosing
     \ifgwa@hasattachments
         \clearpage

@@ -545,11 +545,11 @@ mod tests {
         assert!(pdf.exists());
     }
 
-    /// 红头呈批件覆盖首页 tikz 定位、wrapfigure 绕排、动态承办区、强制第二页落款和附件。
+    /// 红头呈批件以绝对坐标覆盖首页框架，正文按动态剩余基线连续流排；同时
+    /// 覆盖一级标题、跨页长段落、多段正文、动态承办区、第二页落款和附件。
     #[test]
     #[ignore = "需要本机安装 xelatex 才能运行"]
     fn compiles_generated_red_head_approval() {
-        let temp = tempfile::tempdir().unwrap();
         let mut input = DraftInput {
             kind: TemplateKind::RedHeadApproval,
             ..Default::default()
@@ -561,19 +561,12 @@ mod tests {
         input.profile.document_number = "12".into();
         input.profile.reporting_leaders = "张三、李四".into();
         input.profile.signing_unit = "某某委员会".into();
-        input.profile.joint_responsible_units = "综合处、业务处".into();
-        input.profile.joint_contacts = vec![
-            crate::models::JointContact {
-                unit: "综合处".into(),
-                name: "王五".into(),
-                phone: "010-12345678".into(),
-            },
-            crate::models::JointContact {
-                unit: "业务处".into(),
-                name: "赵六".into(),
-                phone: "010-87654321".into(),
-            },
-        ];
+        input.profile.joint_responsible_units = "综合处".into();
+        input.profile.joint_contacts = vec![crate::models::JointContact {
+            unit: "综合处".into(),
+            name: "王五".into(),
+            phone: "010-12345678".into(),
+        }];
         input.date = "2026年8月12日".into();
         let selection = ExportSelection {
             markdown: false,
@@ -581,23 +574,30 @@ mod tests {
             tex: true,
             overwrite: true,
         };
-        let files = crate::export::export_all(
-            temp.path(),
-            &input,
-            "# 关于认真做好网络安全与信息化重点工作的请示\n\n现将有关情况呈报如下。妥否，请指示。\n\n<!-- [附件] -->\n# 情况说明\n\n附件内容。",
-            &selection,
-            &crate::units::UnitDisplay::new(&[]),
-            &FontConfig::default(),
-        )
-        .unwrap();
-        let tex = files
-            .iter()
-            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+        let paragraph = "为进一步推进服务事项标准化、规范化、便利化（以下简称“标准化建设”），全面掌握各单位年度工作进展，请结合实际报送2026年度标准化建设情况。报送数据应与服务事项管理系统保持一致，其中涉及系统接口（API）调用、电子凭证共享和跨部门联办的内容，应当一并核实。现将有关事项函告如下。";
+        for lead in [paragraph.to_string(), paragraph.repeat(2)] {
+            let temp = tempfile::tempdir().unwrap();
+            let markdown = format!(
+                "# 关于报送2026年度服务事项标准化建设情况的函\n\n{lead}\n\n## 报送内容\n\n各单位应当围绕事项清单维护、服务指南规范、线上线下融合和服务效能提升等方面，全面梳理年度工作完成情况，客观反映工作成效、存在问题及下一步安排。"
+            );
+            let files = crate::export::export_all(
+                temp.path(),
+                &input,
+                &markdown,
+                &selection,
+                &crate::units::UnitDisplay::new(&[]),
+                &FontConfig::default(),
+            )
             .unwrap();
-        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
-            .unwrap()
-            .unwrap();
-        assert!(pdf.exists());
+            let tex = files
+                .iter()
+                .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+                .unwrap();
+            let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+                .unwrap()
+                .unwrap();
+            assert!(pdf.exists());
+        }
     }
 
     /// 代章：cls 的 \SignatureSealOnBehalf 条件分支与生成器注入的命令一起编译，

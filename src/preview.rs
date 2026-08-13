@@ -31,7 +31,6 @@ const PT: f32 = 96.0 / 72.0;
 // 与 export::docx 的常量对应（那边是半磅，这里是磅）。
 const BODY_PT: f32 = 16.0; // 三号
 const TITLE_PT: f32 = 22.0; // 二号
-const RED_APPROVAL_TITLE_PT: f32 = 18.0; // 小二号
 const TABLE_PT: f32 = 14.0; // 四号
 const PAREN_PT: f32 = 14.0; // 括号内容，楷体四号
 const LINE_PT: f32 = 28.0; // 固定行距
@@ -263,149 +262,6 @@ fn line_block(
         });
     } else {
         draw(ui, job);
-    }
-}
-
-fn red_approval_title_block(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
-    let width = metrics.mm(100.0);
-    let plain = export::plain_text(text);
-    let plan = export::title::title_plan(&plain, export::title::red_approval_chars_per_line());
-    let (rendered, stretch) = match plan {
-        export::title::TitlePlan::SingleLine => (plain, 1.0),
-        export::title::TitlePlan::Compressed => {
-            let scale = export::title::compressed_scale_percent_for(
-                &plain,
-                export::title::RED_APPROVAL_TITLE_WIDTH_PT,
-                export::title::RED_APPROVAL_TITLE_SIZE_PT,
-            ) as f32
-                / 100.0;
-            (plain, scale)
-        }
-        export::title::TitlePlan::Wrapped(lines) => (lines.join("\n"), 1.0),
-    };
-    let mut format = text_format(
-        metrics.font(theme::FONT_BIAOSONG, RED_APPROVAL_TITLE_PT),
-        metrics.line,
-    );
-    // egui 没有独立字符横向 stretch，压缩时用字号近似；正式 DOCX/PDF 仍只压字宽。
-    if stretch < 1.0 {
-        format.font_id = metrics.font(theme::FONT_BIAOSONG, RED_APPROVAL_TITLE_PT * stretch);
-    }
-    let mut layout_job = job(width);
-    layout_job.halign = Align::Center;
-    layout_job.append(&rendered, 0.0, format);
-    let galley = layout(ui, layout_job);
-    place(ui, metrics, galley.size().y, |painter, rect| {
-        painter.galley(
-            egui::pos2(rect.left() + width / 2.0, rect.top()),
-            galley.clone(),
-            Color32::BLACK,
-        );
-    });
-}
-
-fn red_approval_overlay(
-    ui: &mut egui::Ui,
-    metrics: &Metrics,
-    input: &DraftInput,
-    display: &UnitDisplay,
-) {
-    let content_top = ui.cursor().top();
-    let content_left = ui.min_rect().left();
-    let content_bottom = ui.min_rect().top() + metrics.mm(225.0);
-    let divider_x = content_left + metrics.mm(100.0);
-    let entries = crate::models::joint_responsible_entries(&input.profile);
-    let rows = entries.len().max(1) as f32;
-    let record_top = content_bottom - metrics.line * rows;
-    let stroke = Stroke::new(metrics.mm(0.4).max(1.0), OFFICIAL_RED);
-    let painter = ui.painter();
-    painter.line_segment(
-        [
-            egui::pos2(divider_x, content_top),
-            egui::pos2(divider_x, record_top),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(content_left, record_top),
-            egui::pos2(content_left + metrics.content, record_top),
-        ],
-        stroke,
-    );
-    painter.text(
-        egui::pos2(divider_x + metrics.mm(28.0), content_top + metrics.mm(9.0)),
-        egui::Align2::CENTER_TOP,
-        "批　示",
-        metrics.font(theme::FONT_FANGSONG, BODY_PT),
-        OFFICIAL_RED,
-    );
-    let fallback = crate::models::JointResponsibleEntry::default();
-    let rows_ref = if entries.is_empty() {
-        std::slice::from_ref(&fallback)
-    } else {
-        entries.as_slice()
-    };
-    // 三栏宽度与 Word/LaTeX 同源（缇 → 版心比例）：承办单位吃掉全部余量，
-    // 联系人和电话按内容定宽；电话栏靠右，其余靠左。
-    let total = crate::export::RED_RECORD_TOTAL_TWIPS as f32;
-    let unit_width = metrics.content * crate::export::RED_RECORD_UNIT_TWIPS as f32 / total;
-    for (index, entry) in rows_ref.iter().enumerate() {
-        let y = record_top + index as f32 * metrics.line + metrics.line / 2.0;
-        let columns = [
-            (
-                "承办单位：",
-                display.abbr(&entry.unit),
-                content_left,
-                crate::export::RED_RECORD_UNIT_USABLE_TWIPS,
-                false,
-            ),
-            (
-                "联系人：",
-                entry.name.clone(),
-                content_left + unit_width,
-                crate::export::RED_RECORD_CONTACT_USABLE_TWIPS,
-                false,
-            ),
-            (
-                "电话：",
-                entry.phone.clone(),
-                content_left + metrics.content,
-                crate::export::RED_RECORD_PHONE_USABLE_TWIPS,
-                true,
-            ),
-        ];
-        for (label, value, x, usable_twips, right_aligned) in columns {
-            // 承办区一律不换行：超出栏宽时横向压窄。egui 没有独立的字形横向
-            // 缩放，这里用字号近似，成品 DOCX/PDF 仍然只压字宽、字高不变。
-            let scale =
-                crate::export::red_record_scale_percent(&format!("{label}{value}"), usable_twips)
-                    as f32
-                    / 100.0;
-            let font = metrics.font(theme::FONT_FANGSONG, BODY_PT * scale);
-            let label_width = metrics.pt(label.chars().count() as f32 * BODY_PT * scale);
-            let (anchor, label_x) = if right_aligned {
-                let value_width = metrics
-                    .pt(crate::export::title::display_units(&value) as f32 / 2.0 * BODY_PT * scale);
-                (egui::Align2::LEFT_CENTER, x - label_width - value_width)
-            } else {
-                (egui::Align2::LEFT_CENTER, x)
-            };
-            painter.text(
-                egui::pos2(label_x, y),
-                anchor,
-                label,
-                font.clone(),
-                OFFICIAL_RED,
-            );
-            painter.text(
-                egui::pos2(label_x + label_width, y),
-                egui::Align2::LEFT_CENTER,
-                value,
-                font,
-                Color32::BLACK,
-            );
-        }
     }
 }
 
@@ -754,27 +610,10 @@ fn header_block(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, displa
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
         TemplateKind::RedHeadApproval => {
+            // 编辑预览只展示内容，按普通白头件处理；红头、批示框、承办区等
+            // 绝对定位元素以最终 TeX/DOCX 导出为准，避免近似预览误导分页判断。
             security_line(ui, metrics, input);
-            red_header_inner(ui, metrics, &header_unit(input, display), false);
-            line_block(
-                ui,
-                metrics,
-                &document_number(input),
-                theme::FONT_FANGSONG,
-                BODY_PT,
-                Align::Center,
-            );
-            let thickness = metrics.mm(HEADER_RULE_MM).max(1.0);
-            place(ui, metrics, thickness, |painter, rect| {
-                painter.rect_filled(
-                    egui::Rect::from_min_size(
-                        rect.left_top(),
-                        egui::vec2(metrics.content, thickness),
-                    ),
-                    0.0,
-                    OFFICIAL_RED,
-                );
-            });
+            ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
         TemplateKind::MeetingAgenda => {
             security_line(ui, metrics, input);
@@ -841,9 +680,8 @@ fn signature_block(
     match input.kind {
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             // 块内右对齐；单位与日期之间空一行，多个单位自上而下分行、行间各空
-            // 一行（便于分别签字）。两个文种右侧都留出 4cm 签字空间，签名写在
-            // 单位名右边。白头件日期与单位同样右对齐；红头呈批件的日期落在
-            // “落款单位 + 签字空间”这一整段的正中。
+            // 一行（便于分别签字）。编辑预览中两个文种完全共用白头件样式；
+            // 红头呈批件成品里的特殊签字定位只由 TeX/DOCX 正式导出负责。
             let room = metrics.mm(crate::export::SIGNATURE_ROOM_MM);
             let left = (metrics.content - room - width).max(0.0);
             let units = display
@@ -882,26 +720,8 @@ fn signature_block(
                 width,
                 Align::Min,
             ));
-            if input.kind == TemplateKind::RedHeadApproval {
-                // 单位块先摆完，日期另起一段按“单位 + 签字空间”居中。
-                stacked(ui, metrics, &galleys, left, width, Align::Max);
-                let unit_width =
-                    metrics.pt(crate::export::red_signature_unit_width_em(&units) * BODY_PT);
-                let span = unit_width + room;
-                let date_left = (metrics.content - span).max(0.0);
-                let date_galley = line_galley(ui, metrics, &date, font, span, Align::Center);
-                stacked(
-                    ui,
-                    metrics,
-                    std::slice::from_ref(&date_galley),
-                    date_left,
-                    span,
-                    Align::Center,
-                );
-            } else {
-                galleys.push(line_galley(ui, metrics, &date, font, width, Align::Min));
-                stacked(ui, metrics, &galleys, left, width, Align::Max);
-            }
+            galleys.push(line_galley(ui, metrics, &date, font, width, Align::Min));
+            stacked(ui, metrics, &galleys, left, width, Align::Max);
         }
         _ => {
             let unit = if is_joint_mode_one(input) {
@@ -1301,17 +1121,15 @@ fn sheet(ui: &mut egui::Ui, metrics: &Metrics, add_contents: impl FnOnce(&mut eg
     });
 }
 
-/// 正文区渲染参数。红头呈批件的首页正文只有左侧 100mm（右侧是批示栏），
-/// `narrow_lines` 是这张纸上收窄排版的行数，排满后恢复整幅版心宽度。
+/// 正文区渲染参数。预览统一使用白头件式的完整版心；红头呈批件首页的精确
+/// 内容区边界只在最终 TeX 中按真实盒高计算。
 struct BodyRun {
     compact: bool,
     compact_level: u8,
     numbered: bool,
-    narrow_lines: Option<usize>,
 }
 
-/// 逐块画正文。抽成独立函数是因为红头呈批件的正文可能跨两张纸——首页放不下
-/// 或遇到必须避开批示栏的表格/图片时，剩余部分接着画在落款那张纸上。
+/// 逐块画正文。
 #[allow(clippy::too_many_arguments)]
 fn body_blocks(
     ui: &mut egui::Ui,
@@ -1323,41 +1141,10 @@ fn body_blocks(
     clicked: &mut Option<Range<usize>>,
     counters: &mut [usize; 4],
 ) {
-    // 窄栏只管首页开头那几行：累计到 narrow_lines 就把宽度放回整幅版心，
-    // 与 LaTeX 的 \parshape 前 N 行收窄、其后恢复 \linewidth 对应。
-    // 正文块的折行宽度取自 metrics.content（不是 ui 的可用宽度），所以收窄要
-    // 换一份 content 更小的 Metrics，光调 ui.set_width 对折行没有任何作用。
-    let narrow_metrics = Metrics {
-        content: metrics.mm(100.0),
-        ..*metrics
-    };
-    let mut narrow_left = run.narrow_lines;
-    let per_line = export::RED_APPROVAL_NARROW_CHARS * 2;
     let mut index = 0usize;
     while index < body.len() {
         let located = body[index];
         index += 1;
-        // 窄栏额度用完就恢复版心宽度；按块估行，切换点落在块边界上。
-        if let Some(left) = narrow_left {
-            if left == 0 {
-                narrow_left = None;
-            } else if let Some(units) = match &located.block {
-                MarkdownBlock::Paragraph(text) => {
-                    Some(export::title::display_units(&export::plain_text(text)) + 4)
-                }
-                MarkdownBlock::Heading(_, text) | MarkdownBlock::ListItem(text) => {
-                    Some(export::title::display_units(&export::plain_text(text)))
-                }
-                _ => None,
-            } {
-                narrow_left = Some(left.saturating_sub(units.div_ceil(per_line).max(1)));
-            }
-        }
-        let metrics = if narrow_left.is_some() {
-            &narrow_metrics
-        } else {
-            metrics
-        };
         match &located.block {
             // 文档标题已在上面按版式排过，正文区不再重复。
             MarkdownBlock::Title(_) => {}
@@ -1443,49 +1230,8 @@ pub fn official_preview(
             _ => body.push(located),
         }
     }
-    // 红头呈批件首页版面：正文可用行数、正文是否跨页、表格图片是否要被赶出首页，
-    // 与 Word/LaTeX 共用 export::red_approval_* 的同一套估算。
-    let red_title_lines = match export::title::title_plan(
-        &export::plain_text(
-            &body
-                .iter()
-                .find_map(|located| match &located.block {
-                    MarkdownBlock::Title(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| input.title_hint.trim().to_string()),
-        ),
-        export::title::red_approval_chars_per_line(),
-    ) {
-        export::title::TitlePlan::Wrapped(lines) => lines.len().max(1),
-        _ => 1,
-    };
-    let red_wrap_lines = export::red_approval_wrap_lines(
-        red_title_lines,
-        crate::models::joint_responsible_entries(&input.profile)
-            .len()
-            .max(1),
-    );
-    let red_body = export::red_approval_body_metrics(&blocks);
-    let red_body_is_short = !red_body.reaches_second_page(red_wrap_lines);
-    // 首页正文的截断位置：表格和图片按整幅版心排版会压过批示栏，落在首页的
-    // 就连同其后的正文一起挪到第二张纸；其余情况整篇正文都画在首页。
-    let red_split = if input.kind == TemplateKind::RedHeadApproval
-        && red_body.float_needs_page_break(red_wrap_lines)
-    {
-        body.iter()
-            .position(|located| {
-                matches!(
-                    located.block,
-                    MarkdownBlock::Table { .. } | MarkdownBlock::Image { .. }
-                )
-            })
-            .unwrap_or(body.len())
-    } else {
-        body.len()
-    };
-    let narrow_lines_on_first_sheet =
-        (input.kind == TemplateKind::RedHeadApproval).then_some(red_wrap_lines);
+    // 红头呈批件的编辑预览刻意简化为白头件：不近似模拟绝对定位框架和首页
+    // 分页，只聚焦标题、呈报领导、正文与落款。精确边界由最终 TeX 量盒决定。
 
     // 紧缩风格合并的是正文区 # 号最多的那一级标题；附件区不参与。
     let compact_level = export::body_heading_max_level(&blocks);
@@ -1505,9 +1251,6 @@ pub fn official_preview(
     let (title, title_range) = title;
     sheet(ui, &metrics, |ui| {
         header_block(ui, &metrics, input, display);
-        if input.kind == TemplateKind::RedHeadApproval {
-            red_approval_overlay(ui, &metrics, input, display);
-        }
         if !title.is_empty() {
             clickable(
                 ui,
@@ -1516,18 +1259,14 @@ pub fn official_preview(
                 &mut scroll_to_anchor,
                 &mut clicked,
                 |ui| {
-                    if input.kind == TemplateKind::RedHeadApproval {
-                        red_approval_title_block(ui, &metrics, &title);
-                    } else {
-                        line_block(
-                            ui,
-                            &metrics,
-                            &title,
-                            theme::FONT_BIAOSONG,
-                            TITLE_PT,
-                            Align::Center,
-                        );
-                    }
+                    line_block(
+                        ui,
+                        &metrics,
+                        &title,
+                        theme::FONT_BIAOSONG,
+                        TITLE_PT,
+                        Align::Center,
+                    );
                 },
             );
         }
@@ -1538,12 +1277,11 @@ pub fn official_preview(
         body_blocks(
             ui,
             &metrics,
-            &body[..red_split],
+            &body,
             &BodyRun {
                 compact,
                 compact_level,
                 numbered,
-                narrow_lines: narrow_lines_on_first_sheet,
             },
             anchor,
             &mut scroll_to_anchor,
@@ -1565,46 +1303,11 @@ pub fn official_preview(
                 body_block(ui, &metrics, &label, true);
             }
         }
-        if input.kind != TemplateKind::RedHeadApproval {
-            signature_block(ui, &metrics, input, display);
-        }
+        signature_block(ui, &metrics, input, display);
         if record_on_body {
             footer_record(ui, &metrics, input, display);
         }
     });
-
-    if input.kind == TemplateKind::RedHeadApproval {
-        ui.add_space(14.0);
-        sheet(ui, &metrics, |ui| {
-            if red_body_is_short {
-                line_block(
-                    ui,
-                    &metrics,
-                    "（此页无正文）",
-                    theme::FONT_FANGSONG,
-                    BODY_PT,
-                    Align::LEFT,
-                );
-            }
-            // 被批示栏挤下来的表格/图片及其后的正文接着排在这一页，整幅版心宽度。
-            body_blocks(
-                ui,
-                &metrics,
-                &body[red_split..],
-                &BodyRun {
-                    compact,
-                    compact_level,
-                    numbered,
-                    narrow_lines: None,
-                },
-                anchor,
-                &mut scroll_to_anchor,
-                &mut clicked,
-                &mut counters,
-            );
-            signature_block(ui, &metrics, input, display);
-        });
-    }
 
     let last_attachment = attachments.len().saturating_sub(1);
     let attachment_count = attachments.len();
@@ -2047,10 +1750,10 @@ mod tests {
         );
     }
 
-    /// 红头呈批件落款：多个单位全部列出、右对齐但右侧留 4cm 签字空间，
-    /// 最后一个单位与成文日期之间空一行，日期落在“单位 + 签字空间”的正中。
+    /// 红头呈批件的编辑预览采用白头件落款：多个单位与日期全部右对齐，
+    /// 不近似模拟最终 TeX 中供签字使用的特殊日期定位。
     #[test]
-    fn red_head_approval_signature_lists_every_unit_flush_right() {
+    fn red_head_approval_preview_uses_white_paper_signature() {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let available = 1000.0;
@@ -2072,34 +1775,15 @@ mod tests {
         let rows = text_rows(&output);
         // 两个落款单位各一行 + 日期一行；单位间与日期前的空行不产生文本。
         assert_eq!(rows.len(), 3, "两个落款单位都要列出：{rows:?}");
-        let (units, date) = rows.split_at(2);
-        let date = date[0];
+        let red_right = rows.iter().map(|row| row.max.x).fold(f32::MIN, f32::max);
+        for row in &rows {
+            assert!(
+                (row.max.x - red_right).abs() <= 1.0,
+                "红头呈批件预览应像白头件一样全部右对齐：{rows:?}"
+            );
+        }
 
-        // 单位右对齐到同一条边；这条边往右到版心右缘就是签字空间。
-        let room = metrics.mm(crate::export::SIGNATURE_ROOM_MM);
-        let unit_right = units[0].max.x;
-        assert!(
-            (units[1].max.x - unit_right).abs() <= 1.0,
-            "两个落款单位应右对齐到同一条边：{units:?}"
-        );
-        let unit_left = units.iter().map(|row| row.min.x).fold(f32::MAX, f32::min);
-
-        // 日期居中于“最宽的落款单位 + 签字空间”这一整段。容差取半个字：单位块
-        // 宽度按字数的标称 em 算（三端同源），与字形实际步进有零点几字的出入。
-        let expected_center = (unit_left + unit_right + room) / 2.0;
-        assert!(
-            (date.center().x - expected_center).abs() <= metrics.pt(BODY_PT) * 0.5,
-            "日期应居中于单位与签字空间之间：实际 {:.1}，期望 {expected_center:.1}",
-            date.center().x
-        );
-        // 既不与单位右对齐，也不顶到版心右缘——这两种才是改之前的样子。
-        assert!(
-            date.max.x > unit_right && date.max.x < unit_right + room,
-            "日期应落在签字空间里侧：日期右缘 {:.1}，单位右缘 {unit_right:.1}，签字位宽 {room:.1}",
-            date.max.x
-        );
-
-        // 白头件维持原样：日期与单位一样右对齐，不居中。
+        // 与同内容的白头件逐行位置一致。
         let mut white = input.clone();
         white.kind = TemplateKind::WhitePaper;
         white.profile.kind = TemplateKind::WhitePaper;
@@ -2113,90 +1797,13 @@ mod tests {
             },
             |ui| signature_block(ui, &metrics, &white, &display),
         ));
-        let white_right = white_rows
-            .iter()
-            .map(|row| row.max.x)
-            .fold(f32::MIN, f32::max);
-        for row in &white_rows {
+        assert_eq!(white_rows.len(), rows.len());
+        for (red, white) in rows.iter().zip(&white_rows) {
             assert!(
-                (row.max.x - white_right).abs() <= 1.0,
-                "白头件落款三行都应右对齐：{white_rows:?}"
+                (red.min.x - white.min.x).abs() <= 1.0 && (red.max.x - white.max.x).abs() <= 1.0,
+                "两个文种的简化预览落款应一致：red={rows:?}, white={white_rows:?}"
             );
         }
-        // 两个文种的单位右缘一致——签字空间同宽。
-        assert!(
-            (white_right - unit_right).abs() <= 1.0,
-            "白头件与红头呈批件的落款单位右缘应一致"
-        );
-    }
-
-    /// 红头呈批件首页正文只有开头若干行避让批示栏，额度用完就恢复整幅版心，
-    /// 不能像从前那样把整篇正文都压成 100mm。
-    #[test]
-    fn red_head_approval_narrow_column_ends_after_the_first_page_quota() {
-        let ctx = egui::Context::default();
-        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
-        let available = 1000.0;
-        let metrics = Metrics::new(available, Some(1.0));
-        let markdown = format!("{}\n\n{}", "甲".repeat(80), "乙".repeat(80));
-        let located = export::parse_markdown_located(&markdown);
-        let body = located.iter().collect::<Vec<_>>();
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(available, 2000.0),
-            )),
-            ..Default::default()
-        };
-        let run = |narrow: Option<usize>| {
-            let mut scroll = false;
-            let mut clicked = None;
-            let mut counters = [0usize; 4];
-            let output = ctx.run_ui(raw.clone(), |ui| {
-                ui.set_width(metrics.content);
-                body_blocks(
-                    ui,
-                    &metrics,
-                    &body,
-                    &BodyRun {
-                        compact: false,
-                        compact_level: 0,
-                        numbered: true,
-                        narrow_lines: narrow,
-                    },
-                    None,
-                    &mut scroll,
-                    &mut clicked,
-                    &mut counters,
-                );
-            });
-            text_rows(&output)
-                .iter()
-                .map(|row| row.width())
-                .collect::<Vec<_>>()
-        };
-
-        // text_rows 每段给一个包围盒。第一段 80 字正好用掉 5 行额度，
-        // 第二段起恢复整幅版心，两段的宽度必须一窄一宽。
-        let narrow_limit = metrics.mm(100.0);
-        let rows = run(Some(5));
-        assert_eq!(rows.len(), 2, "应为两段正文：{rows:?}");
-        assert!(
-            rows[0] <= narrow_limit + 1.0,
-            "首段应收窄到 100mm：{:.1}px",
-            rows[0]
-        );
-        assert!(
-            rows[1] > narrow_limit,
-            "额度用完后应恢复版心宽度：{:.1}px",
-            rows[1]
-        );
-        // 不传额度（落款那张纸）时整篇都按版心宽度排。
-        let wide = run(None);
-        assert!(
-            wide.iter().all(|width| *width > narrow_limit),
-            "没有批示栏要避让时就该用整幅版心：{wide:?}"
-        );
     }
 
     #[test]
