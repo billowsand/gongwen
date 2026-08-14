@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "gongwen-assistant"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "anydoc",
  "anyhow",
