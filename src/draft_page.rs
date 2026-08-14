@@ -230,11 +230,18 @@ const OFFICIAL_BODY_SIZE: f32 = 16.0 * SCREEN_PT;
 /// 实时排版模式固定用这个换行宽度，不随窗口拉宽而改变每行字数。
 const OFFICIAL_EDITOR_CONTENT_WIDTH: f32 = (595.28 - 79.35 - 73.70) * SCREEN_PT;
 
-/// 功能区分组之间的竖线。
+/// 功能区分组之间的竖线。自绘 1.5px 的 `border_strong` 竖线并留更宽间距，
+/// 比 egui 默认的浅色细线分隔感强得多——功能区二十来个按钮靠它分组，
+/// 太细了扫一眼看不出边界。
 pub(crate) fn toolbar_separator(ui: &mut egui::Ui) {
-    ui.add_sized(
-        [8.0, TOOLBAR_CONTROL_HEIGHT],
-        egui::Separator::default().vertical().shrink(4.0),
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(12.0, TOOLBAR_CONTROL_HEIGHT),
+        egui::Sense::hover(),
+    );
+    ui.painter().vline(
+        rect.center().x,
+        rect.top() + 6.0..=rect.bottom() - 6.0,
+        egui::Stroke::new(1.5, theme::border_strong()),
     );
 }
 
@@ -269,6 +276,9 @@ pub(crate) struct DraftSession {
     pub(crate) preview_mode: PreviewMode,
     /// 审校提示的按需右侧抽屉。导出成品不进抽屉，走「输出」分区的三枚格式入口。
     pub(crate) result_drawer_open: bool,
+    /// “清空审校稿”的二次确认。清空会同时丢掉审校提示、查找状态和导出结果，
+    /// 必须由模态框拦住，不能在拥挤的功能区里单击即执行。
+    pub(crate) clear_review_confirm: bool,
     /// 公文预览的缩放倍率；None 表示按面板宽度自适应。
     pub(crate) preview_zoom: Option<f32>,
     /// 上一帧自适应算出的倍率，用作手动加减档的起点。
@@ -404,6 +414,7 @@ impl DraftSession {
             form_collapsed: true,
             preview_mode: PreviewMode::Source,
             result_drawer_open: false,
+            clear_review_confirm: false,
             preview_zoom: None,
             preview_fit_scale: 1.0,
             preview_layout_scale: 0.0,
@@ -557,6 +568,7 @@ impl DraftSession {
     pub(crate) fn reset_transient(&mut self) {
         self.output_files.clear();
         self.export_error = None;
+        self.clear_review_confirm = false;
         self.preview_anchor = None;
         self.pending_source_jump = None;
         self.pending_source_selection = None;
@@ -2071,6 +2083,68 @@ impl DraftPage<'_> {
                 }
                 self.preview_ui(ui);
             });
+        self.clear_review_confirm_modal(ui.ctx());
+    }
+
+    /// 清空审校稿的确认框使用真正的 Modal：遮罩会阻止点击穿透到编辑器或功能区，
+    /// Esc、点遮罩和“取消”都只关闭确认，不改稿件。
+    fn clear_review_confirm_modal(&mut self, ctx: &egui::Context) {
+        if !self.doc.clear_review_confirm {
+            return;
+        }
+
+        let mut confirm = false;
+        let response = egui::Modal::new(egui::Id::new(("clear_review_confirm", self.doc.key)))
+            .frame(theme::card())
+            .show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.heading("清空审校稿？");
+                ui.add_space(4.0);
+                ui.label("正文、审校提示、查找状态和本次导出结果都会被清除。");
+                ui.colored_label(
+                    theme::warn(),
+                    "此操作不可恢复，但不会删除稿件库中的已保存版本。",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(theme::warning_icon_button(theme::Icon::Trash, "确认清空"))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        ui.close();
+                    }
+                });
+            });
+
+        if confirm {
+            self.clear_review_output();
+            self.doc.clear_review_confirm = false;
+            *self.status = "已清空审校稿；稿件库中的已保存版本未受影响。".into();
+        } else if response.should_close() {
+            self.doc.clear_review_confirm = false;
+        }
+    }
+
+    /// 清空与审校稿内容绑定的全部瞬时状态，避免正文没了但旧提示、旧导出链接或
+    /// “来自版本 vN”的横幅仍留在界面上。
+    fn clear_review_output(&mut self) {
+        self.doc.generated_markdown.clear();
+        self.doc.warnings.clear();
+        self.doc.proof_warnings.clear();
+        self.doc.proof_markdown.clear();
+        self.doc.output_files.clear();
+        self.doc.export_error = None;
+        self.doc.loaded_version = None;
+        self.doc.draft_diff = DraftDiffState::default();
+        self.doc.result_drawer_open = false;
+        self.doc.preview_anchor = None;
+        self.doc.pending_source_jump = None;
+        self.doc.pending_source_selection = None;
+        self.doc.pending_render_jump = false;
+        self.doc.markdown_find = MarkdownFindState::default();
     }
 
     /// 只读稿件的顶部横幅。发布件可以就地退回草稿继续改，归档件只作说明。
@@ -2245,8 +2319,15 @@ impl DraftPage<'_> {
                 let mut picked = None;
                 let mut toggle_collapse = false;
                 for tab in RibbonTab::ALL {
+                    // 双击当前分区卡收起/展开功能区（与 Word 一致），在悬停提示里
+                    // 写明，不然这个手势几乎不可能被发现。
+                    let tip = if current == tab {
+                        format!("{}（双击收起/展开功能区）", tab.hint())
+                    } else {
+                        tab.hint().to_string()
+                    };
                     let response = theme::ribbon_tab_button(ui, current == tab, tab.label())
-                        .on_hover_text(tab.hint());
+                        .on_hover_text(tip);
                     // 双击当前分区卡收起第二行，与 Word 一致。
                     if response.double_clicked() && current == tab {
                         toggle_collapse = true;
@@ -2395,20 +2476,16 @@ impl DraftPage<'_> {
             ui.ctx().copy_text(self.doc.generated_markdown.clone());
             *self.status = "审校稿已复制到剪贴板。".into();
         }
-        if theme::danger_icon_button_enabled(
-            ui,
-            has_draft && editable,
-            theme::Icon::Trash,
-            "清空审校稿",
-        )
-        .clicked()
+        // 清空是不可逆操作：功能区保留明确文字，点击后再由模态框二次确认。
+        if ui
+            .add_enabled(
+                has_draft && editable,
+                theme::warning_icon_button(theme::Icon::Trash, "清空审校稿"),
+            )
+            .on_hover_text("清空审校稿全文，不可恢复")
+            .clicked()
         {
-            self.doc.generated_markdown.clear();
-            self.doc.warnings.clear();
-            self.doc.proof_warnings.clear();
-            self.doc.proof_markdown.clear();
-            self.doc.output_files.clear();
-            self.doc.export_error = None;
+            self.doc.clear_review_confirm = true;
         }
         toolbar_separator(ui);
 
@@ -2596,10 +2673,7 @@ impl DraftPage<'_> {
                     (ColumnAlign::Center, theme::Icon::AlignCenter),
                     (ColumnAlign::Right, theme::Icon::AlignRight),
                 ] {
-                    if ui
-                        .add(theme::icon_text_button(icon, align.label()).frame(false))
-                        .clicked()
-                    {
+                    if ui.add(theme::menu_item(icon, align.label())).clicked() {
                         op = Some(TableOp::Align(align));
                         ui.close();
                     }
@@ -2718,7 +2792,7 @@ impl DraftPage<'_> {
                 .show(ui, |ui| {
                     for option in &units {
                         if ui
-                            .add(egui::Button::new(option.full.as_str()).frame(false))
+                            .add(theme::menu_text_item(option.full.as_str()))
                             .clicked()
                         {
                             snippet = Some((option.full.clone(), "单位名称"));
@@ -2741,10 +2815,7 @@ impl DraftPage<'_> {
                 .max_height(320.0)
                 .show(ui, |ui| {
                     for (name, _) in &contacts {
-                        if ui
-                            .add(egui::Button::new(name.as_str()).frame(false))
-                            .clicked()
-                        {
+                        if ui.add(theme::menu_text_item(name.as_str())).clicked() {
                             snippet = Some((name.clone(), "人员姓名"));
                             ui.close();
                         }
@@ -2770,7 +2841,7 @@ impl DraftPage<'_> {
                 .show(ui, |ui| {
                     for (name, phone) in with_phone {
                         if ui
-                            .add(egui::Button::new(format!("{name} {phone}")).frame(false))
+                            .add(theme::menu_text_item(format!("{name} {phone}")))
                             .clicked()
                         {
                             snippet = Some((phone.clone(), "联系电话"));
@@ -3284,7 +3355,13 @@ impl DraftPage<'_> {
             .max(FORM_FIELD_MIN_WIDTH);
 
         ui.add_space(4.0);
-        ui.heading("1. 文种与基础信息");
+        // 与「2. 行文要素」保持同款带图标的章节标题，长表单靠图标锚点更好扫读。
+        section_heading_with_info(
+            ui,
+            theme::Icon::FileTypeDoc,
+            "1. 文种与基础信息",
+            "公文模板决定版式与可填字段；稿件版本区分「预览版」（自动留空流水号与日期）与「正式版」。",
+        );
         ui.add_space(4.0);
         let old_kind = self.doc.draft.kind;
         egui::Grid::new("basic_grid")
@@ -3900,11 +3977,20 @@ impl DraftPage<'_> {
             });
 
         ui.add_space(10.0);
-        ui.heading(if self.doc.draft.kind == TemplateKind::PlainDocument {
-            "3. 密级与打印"
-        } else {
-            "3. 密级与成文日期"
-        });
+        section_heading_with_info(
+            ui,
+            theme::Icon::Shield,
+            if self.doc.draft.kind == TemplateKind::PlainDocument {
+                "3. 密级与打印"
+            } else {
+                "3. 密级与成文日期"
+            },
+            if self.doc.draft.kind == TemplateKind::PlainDocument {
+                "密级、保密期限与打印份数；所有文稿类型都要求标注密级。"
+            } else {
+                "密级、保密期限与成文日期；所有文稿类型都要求标注密级。"
+            },
+        );
         ui.add_space(4.0);
         egui::Grid::new("security_grid")
             .num_columns(2)
@@ -5932,6 +6018,57 @@ mod split_resize_tests {
                 });
             }
         }
+    }
+
+    /// 清空审校稿不能只删正文：所有依赖旧正文的提示、定位、查找、导出结果和
+    /// 版本来源标记必须一起复位，否则界面会继续展示已经失效的信息。
+    #[test]
+    fn clearing_review_output_resets_dependent_ui_state() {
+        let mut harness = Harness::new();
+        harness.doc.output_files.push(PathBuf::from("old.pdf"));
+        harness.doc.export_error = Some("旧错误".into());
+        harness.doc.loaded_version = Some(LoadedVersion {
+            manuscript_id: 7,
+            version_number: 3,
+            name: "旧版本".into(),
+        });
+        harness.doc.draft_diff.base = Some(2);
+        harness.doc.result_drawer_open = true;
+        harness.doc.preview_anchor = Some(PreviewAnchor {
+            range: 0..1,
+            text: "#".into(),
+        });
+        harness.doc.pending_source_jump = Some(8);
+        harness.doc.pending_source_selection = Some(1..4);
+        harness.doc.pending_render_jump = true;
+        harness.doc.markdown_find.open = true;
+
+        {
+            let mut page = DraftPage {
+                doc: &mut harness.doc,
+                config: &mut harness.config,
+                store: None,
+                sender: &harness.sender,
+                status: &mut harness.status,
+                version_switch: &mut harness.version_switch,
+                revert_confirm: &mut harness.revert_confirm,
+                actions: &mut harness.actions,
+                export_links: &mut harness.export_links,
+            };
+            page.clear_review_output();
+        }
+
+        assert!(harness.doc.generated_markdown.is_empty());
+        assert!(harness.doc.output_files.is_empty());
+        assert!(harness.doc.export_error.is_none());
+        assert!(harness.doc.loaded_version.is_none());
+        assert!(harness.doc.draft_diff.base.is_none());
+        assert!(!harness.doc.result_drawer_open);
+        assert!(harness.doc.preview_anchor.is_none());
+        assert!(harness.doc.pending_source_jump.is_none());
+        assert!(harness.doc.pending_source_selection.is_none());
+        assert!(!harness.doc.pending_render_jump);
+        assert!(!harness.doc.markdown_find.open);
     }
 
     /// 孤行提示要能点：点中之后切回 Markdown 视图，并选中出问题的那一段。

@@ -2508,7 +2508,8 @@ impl GongwenApp {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 quick.spacing_mut().item_spacing.x = 2.0;
-                self.titlebar_quick_access(&mut quick);
+                let labeled = rect.width() >= 1_100.0;
+                self.titlebar_quick_access(&mut quick, labeled);
                 quick_rect = Some(quick.min_rect());
             }
         }
@@ -2636,7 +2637,8 @@ impl GongwenApp {
         title_color: egui::Color32,
     ) {
         const RIGHT_MARGIN: f32 = 12.0;
-        const QUICK_WIDTH: f32 = 102.0;
+        const QUICK_WIDTH_COMPACT: f32 = 102.0;
+        const QUICK_WIDTH_LABELED: f32 = 284.0;
 
         let content_left = rect.left() + native_controls_width;
         let mut drag_right = rect.right() - RIGHT_MARGIN;
@@ -2644,7 +2646,13 @@ impl GongwenApp {
         // 快速操作是稿件上下文才有的工具，固定收在右边，避免和
         // 左侧红黄绿或中间标题抢位置。
         if self.showing_doc() {
-            let quick_left = (rect.right() - RIGHT_MARGIN - QUICK_WIDTH).max(content_left + 120.0);
+            let labeled = rect.width() >= 1_100.0;
+            let quick_width = if labeled {
+                QUICK_WIDTH_LABELED
+            } else {
+                QUICK_WIDTH_COMPACT
+            };
+            let quick_left = (rect.right() - RIGHT_MARGIN - quick_width).max(content_left + 120.0);
             let available = egui::Rect::from_min_max(
                 egui::pos2(quick_left, rect.top() + 4.0),
                 egui::pos2(rect.right() - RIGHT_MARGIN, rect.bottom() - 4.0),
@@ -2656,7 +2664,7 @@ impl GongwenApp {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 quick.spacing_mut().item_spacing.x = 2.0;
-                self.titlebar_quick_access(&mut quick);
+                self.titlebar_quick_access(&mut quick, labeled);
                 drag_right = available.left() - 8.0;
             }
         }
@@ -2709,8 +2717,9 @@ impl GongwenApp {
 
     /// 标题栏上的快速访问：保存、提交版本、导出。这三件事跟当前停在哪个分区卡
     /// 无关，任何时候都该够得着，所以仿 Word 挂在标题栏上而不是放进功能区。
-    /// 保存键上的小圆点表示有未写回稿件库的改动。
-    fn titlebar_quick_access(&mut self, ui: &mut egui::Ui) {
+    /// 宽窗口显示短文字，窄窗口自动退回纯图标；保存键上的小圆点表示有未写回
+    /// 稿件库的改动。这样高频动作第一眼可见，同时不牺牲窄窗口的标题空间。
+    fn titlebar_quick_access(&mut self, ui: &mut egui::Ui, labeled: bool) {
         let Some(doc) = self.active_doc_ref() else {
             return;
         };
@@ -2726,33 +2735,48 @@ impl GongwenApp {
             format!("保存：在稿件库中新建一条草稿记录（{save_shortcut}）")
         };
 
-        let save = theme::icon_button_enabled(ui, editable, theme::Icon::Save, &save_hint);
+        let save = if labeled {
+            ui.add_enabled(editable, theme::icon_text_button(theme::Icon::Save, "保存"))
+                .on_hover_text(&save_hint)
+        } else {
+            theme::icon_button_enabled(ui, editable, theme::Icon::Save, &save_hint)
+        };
         if dirty {
+            // 脏标记：强调色圆点外套一圈与标题栏同色的环，在浅色底上比
+            // 光秃秃的 3px 圆点醒目得多。
             let center = save.rect.right_top() + egui::vec2(-5.0, 5.0);
+            ui.painter().circle_filled(center, 4.5, theme::surface());
             ui.painter().circle_filled(center, 3.0, theme::accent());
         }
         if save.clicked() {
             self.save_to_manuscript_library();
         }
-        if theme::icon_button_enabled(
-            ui,
-            saved && editable,
-            theme::Icon::GitCommit,
-            "提交版本：把当前内容固化为一个新版本",
-        )
-        .clicked()
+        let commit_hint = "提交版本：把当前内容固化为一个新版本";
+        let commit = if labeled {
+            ui.add_enabled(
+                saved && editable,
+                theme::icon_text_button(theme::Icon::GitCommit, "提交版本"),
+            )
+            .on_hover_text(commit_hint)
+        } else {
+            theme::icon_button_enabled(ui, saved && editable, theme::Icon::GitCommit, commit_hint)
+        };
+        if commit.clicked()
             && let Some(id) = manuscript_id
         {
             self.open_version_commit(VersionScope::Manuscript(id));
         }
-        if theme::icon_button_enabled(
-            ui,
-            ready_to_export,
-            theme::Icon::FileDown,
-            "导出：按设置里勾选的格式出文件",
-        )
-        .clicked()
-        {
+        let export_hint = "导出：按设置里勾选的格式出文件";
+        let export = if labeled {
+            ui.add_enabled(
+                ready_to_export,
+                theme::icon_text_button(theme::Icon::FileDown, "导出"),
+            )
+            .on_hover_text(export_hint)
+        } else {
+            theme::icon_button_enabled(ui, ready_to_export, theme::Icon::FileDown, export_hint)
+        };
+        if export.clicked() {
             self.draft_page().start_export_current();
         }
     }
@@ -2888,14 +2912,17 @@ impl GongwenApp {
         });
     }
 
-    /// 左上角的菜单：应用图标就是入口，点开是四个常驻页面。
+    /// 左上角的菜单：应用图标 + 「菜单」文字，点开是五个常驻页面。
+    /// 入口本身带文字而非纯图标——过去只有一枚汉堡图标，五个常驻页面和
+    /// 新建公文这些高频入口藏在里面几乎不可见。
     fn app_menu_button(&mut self, ui: &mut egui::Ui) {
         let mut open: Option<NavPage> = None;
         egui::containers::menu::MenuButton::from_button(
-            egui::Button::image(
+            egui::Button::image_and_text(
                 theme::Icon::Menu
                     .image()
-                    .fit_to_exact_size(egui::vec2(22.0, 22.0)),
+                    .fit_to_exact_size(egui::vec2(18.0, 18.0)),
+                "菜单",
             )
             .image_tint_follows_text_color(true),
         )
@@ -2918,13 +2945,17 @@ impl GongwenApp {
                 NavPage::Knowledge,
                 NavPage::Settings,
             ] {
-                let opened = self.tabs.contains(&TabRef::Page(page));
+                // 菜单高亮表达“当前所在页”，不是“这个页面曾经开成了标签”。
+                // 后台打开但未激活的页面不应和当前页同时显示为选中。
+                let active = self.tabs.get(self.active_tab) == Some(&TabRef::Page(page));
                 if ui
                     .add(
-                        egui::Button::image_and_text(page.icon().image(), page.label())
-                            .image_tint_follows_text_color(true)
-                            .selected(opened)
-                            .frame(false),
+                        theme::menu_item(page.icon(), page.label())
+                            .selected(active)
+                            // 选中项常显强调色淡底，而不是只改文字颜色：
+                            // `frame(false)` 会让按钮在未悬停时不画任何背景，
+                            // 选中态退化成「文字变色」，条目本身没有反应。
+                            .frame_when_inactive(active),
                     )
                     .clicked()
                 {
@@ -2935,9 +2966,11 @@ impl GongwenApp {
             ui.separator();
             if ui
                 .add(
-                    egui::Button::image_and_text(theme::Icon::FilePlus.image(), "新建空白公文")
-                        .image_tint_follows_text_color(true)
-                        .frame(false),
+                    theme::menu_item(theme::Icon::FilePlus, "新建空白公文").right_text(
+                            egui::RichText::new(theme::primary_shortcut("N"))
+                                .color(theme::text_muted())
+                                .small(),
+                        ),
                 )
                 .clicked()
             {
@@ -2947,9 +2980,7 @@ impl GongwenApp {
             }
             if ui
                 .add(
-                    egui::Button::image_and_text(theme::Icon::FileUp.image(), "从文档新建公文")
-                        .image_tint_follows_text_color(true)
-                        .frame(false),
+                    theme::menu_item(theme::Icon::FileUp, "从文档新建公文"),
                 )
                 .on_hover_text(format!(
                     "把 Word / Excel / PPT / ODF / RTF / EPUB / CSV 转成 Markdown 新开一篇稿件（可导入 {}）",
@@ -2964,9 +2995,7 @@ impl GongwenApp {
             ui.separator();
             if ui
                 .add(
-                    egui::Button::image_and_text(theme::Icon::Book.image(), "关于公文助手")
-                        .image_tint_follows_text_color(true)
-                        .frame(false),
+                    theme::menu_item(theme::Icon::Book, "关于公文助手"),
                 )
                 .clicked()
             {
@@ -2974,6 +3003,32 @@ impl GongwenApp {
                 self.about_window_open = true;
                 ui.close();
             }
+            // 外观主题子菜单：主题切换以前只能在设置页里找，放到菜单底部
+            // 随手可换。主题项用 selectable_label，选中项自动带淡底高亮。
+            ui.separator();
+            egui::containers::menu::SubMenuButton::from_button(
+                theme::menu_item(theme::Icon::Palette, "外观主题")
+                    .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+            )
+            .ui(ui, |ui| {
+                for name in ThemeName::ALL {
+                    let palette = theme::by_name(name);
+                    let selected = name == self.config.theme;
+                    if ui
+                        .add(theme::menu_selectable_item(selected, palette.label))
+                        .on_hover_text(if selected {
+                            "当前主题"
+                        } else {
+                            "切换后立即生效并保存"
+                        })
+                        .clicked()
+                        && !selected
+                    {
+                        self.apply_theme(ui.ctx(), name);
+                        ui.close();
+                    }
+                }
+            });
         })
         .0
         .on_hover_text("稿件管理、标准词库、AI 管理与设置");
@@ -3219,13 +3274,25 @@ impl GongwenApp {
         );
 
         // 背景：选中整体填充主题色加深档（胶囊），保证白字对比度；未选中从沉色经悬停色到按下的更深色。
-        let mut bg = theme::surface_sunk().lerp_to_gamma(theme::accent_active(), sel_t);
+        // 导航页标签（词库、设置等）用更浅的 surface 底 + 实色描边，与文档标签的
+        // 沉色底区分——一眼看出「这是导航页，不是打开的文档」。
+        let is_page = matches!(self.tabs[tab], TabRef::Page(_));
+        let mut bg = (if is_page {
+            theme::surface()
+        } else {
+            theme::surface_sunk()
+        })
+        .lerp_to_gamma(theme::accent_active(), sel_t);
         bg = bg.lerp_to_gamma(theme::surface_hover(), hover_t * (1.0 - sel_t));
         bg = bg.lerp_to_gamma(theme::surface_active(), press_t * (1.0 - sel_t));
         // 边框：悬停加深；选中与底色同色，视觉上收成无边框的实心胶囊。
-        let border = theme::border()
-            .lerp_to_gamma(theme::border_strong(), hover_t * (1.0 - sel_t))
-            .lerp_to_gamma(theme::accent_active(), sel_t);
+        let border = (if is_page {
+            theme::border_strong()
+        } else {
+            theme::border()
+        })
+        .lerp_to_gamma(theme::border_strong(), hover_t * (1.0 - sel_t))
+        .lerp_to_gamma(theme::accent_active(), sel_t);
         // 文字：未选中深色，悬停加深一档；选中渐变到白字，保证在主题色底上可读。
         let text_color = theme::text_soft()
             .lerp_to_gamma(theme::text(), hover_t * (1.0 - sel_t))
@@ -3409,6 +3476,7 @@ impl GongwenApp {
                             theme::Icon::SquareCheck,
                             &review_tip,
                             Some(review_tint),
+                            Some(warnings_count),
                         )
                         .clicked()
                         {
@@ -3425,6 +3493,7 @@ impl GongwenApp {
                             versions_open,
                             theme::Icon::History,
                             &version_tip,
+                            None,
                             None,
                         )
                         .clicked()
@@ -5757,6 +5826,11 @@ impl GongwenApp {
                 header.col(|ui| {
                     ui.strong(if compact { "更多" } else { "操作" });
                 });
+                // 表头悬停提示：列宽其实可拖拽调整，但界面上没有任何暗示，
+                // 用户会以为列宽是写死的。response() 是所有表头单元格的并集。
+                header
+                    .response()
+                    .on_hover_text("拖动列头可调整列宽（操作列除外）");
             })
             .body(|body| {
                 body.rows(ROW_HEIGHT, self.manuscript_rows.len(), |mut row| {
@@ -5776,6 +5850,11 @@ impl GongwenApp {
                     // 行点击/双击跨多个单元格收集，用 Cell 避免多个 col 闭包争夺可变借用。
                     let row_clicked = std::cell::Cell::new(false);
                     let row_double_clicked = std::cell::Cell::new(false);
+                    // 整行选中高亮：set_selected 让 StripLayout 给整行（含单元格
+                    // 间隙和行高上下空隙）统一铺 selection.bg_fill 淡底；单元格里
+                    // 的 selectable_label 一律传 false，避免在行底之上再叠一格一格
+                    // 的小方块。
+                    row.set_selected(row_selected);
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
                         if ui.checkbox(&mut batch_selected, "").changed() {
@@ -5789,7 +5868,7 @@ impl GongwenApp {
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
                         let response = ui.selectable_label(
-                            row_selected,
+                            false,
                             egui::RichText::new(data.status.label())
                                 .color(status_color(data.status)),
                         );
@@ -5800,7 +5879,7 @@ impl GongwenApp {
                     if !compact {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
-                            let response = ui.selectable_label(row_selected, data.kind.label());
+                            let response = ui.selectable_label(false, data.kind.label());
                             row_clicked.set(row_clicked.get() | response.clicked());
                             row_double_clicked
                                 .set(row_double_clicked.get() | response.double_clicked());
@@ -5809,7 +5888,7 @@ impl GongwenApp {
                             ui.set_opacity(seen_t);
                             let security_level = SecurityLevel::from_marking(&data.security_level);
                             let response = ui.selectable_label(
-                                row_selected,
+                                false,
                                 egui::RichText::new(security_level_list_label(security_level))
                                     .color(security_level_color(security_level)),
                             );
@@ -5822,7 +5901,7 @@ impl GongwenApp {
                         ui.set_opacity(seen_t);
                         let response = ui.add_sized(
                             [ui.available_width(), 20.0],
-                            egui::Button::selectable(row_selected, &data.title).truncate(),
+                            egui::Button::selectable(false, &data.title).truncate(),
                         );
                         row_clicked.set(row_clicked.get() | response.clicked());
                         row_double_clicked
@@ -5832,7 +5911,7 @@ impl GongwenApp {
                         ui.set_opacity(seen_t);
                         let response = ui.add_sized(
                             [ui.available_width(), 20.0],
-                            egui::Button::selectable(row_selected, &data.doc_number).truncate(),
+                            egui::Button::selectable(false, &data.doc_number).truncate(),
                         );
                         row_clicked.set(row_clicked.get() | response.clicked());
                         row_double_clicked
@@ -5840,8 +5919,7 @@ impl GongwenApp {
                     });
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
-                        let response =
-                            ui.selectable_label(row_selected, short_date(&data.doc_date));
+                        let response = ui.selectable_label(false, short_date(&data.doc_date));
                         row_clicked.set(row_clicked.get() | response.clicked());
                         row_double_clicked
                             .set(row_double_clicked.get() | response.double_clicked());
@@ -5849,8 +5927,7 @@ impl GongwenApp {
                     if !compact {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
-                            let response =
-                                ui.selectable_label(row_selected, short_date(&data.updated_at));
+                            let response = ui.selectable_label(false, short_date(&data.updated_at));
                             row_clicked.set(row_clicked.get() | response.clicked());
                             row_double_clicked
                                 .set(row_double_clicked.get() | response.double_clicked());
@@ -5858,7 +5935,7 @@ impl GongwenApp {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
                             let response = ui.selectable_label(
-                                row_selected,
+                                false,
                                 data.archived_at
                                     .as_deref()
                                     .map(short_date)
@@ -5870,21 +5947,30 @@ impl GongwenApp {
                         });
                         // 已入库标记：导入前就看得出哪些进过知识库，免得同一篇
                         // 反复导入。跨来源去重虽已兜底，但让用户看见更省事。
+                        // 已入库用成功色圆点 + 文字，比纯文字更易扫读。
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
                             let indexed = self.knowledge_indexed_manuscripts.contains(&data.id);
-                            let indexed_cell = if indexed {
-                                egui::RichText::new("已入库").color(accent())
+                            let response = if indexed {
+                                ui.horizontal(|ui| {
+                                    theme::dot(ui, theme::success());
+                                    ui.selectable_label(
+                                        false,
+                                        egui::RichText::new("已入库").color(accent()),
+                                    )
+                                })
+                                .inner
                             } else {
-                                egui::RichText::new("—").color(theme::text_muted())
+                                ui.selectable_label(
+                                    false,
+                                    egui::RichText::new("—").color(theme::text_muted()),
+                                )
                             };
-                            let response = ui
-                                .selectable_label(row_selected, indexed_cell)
-                                .on_hover_text(if indexed {
-                                    "这篇稿件已加入知识库，再次导入会覆盖旧的索引"
-                                } else {
-                                    "尚未加入知识库，可勾选后用工具栏的「导入到知识库」"
-                                });
+                            let response = response.on_hover_text(if indexed {
+                                "这篇稿件已加入知识库，再次导入会覆盖旧的索引"
+                            } else {
+                                "尚未加入知识库，可勾选后用工具栏的「导入到知识库」"
+                            });
                             row_clicked.set(row_clicked.get() | response.clicked());
                             row_double_clicked
                                 .set(row_double_clicked.get() | response.double_clicked());
@@ -7926,6 +8012,17 @@ impl GongwenApp {
         }
     }
 
+    /// 切换主题并立即生效：写入配置、刷新全局样式与窗口图标、保存。
+    /// 设置页的主题卡片与应用菜单的「外观主题」子菜单共用这一入口。
+    fn apply_theme(&mut self, ctx: &egui::Context, name: ThemeName) {
+        self.config.theme = name;
+        theme::set_current(name);
+        theme::configure_style(ctx);
+        theme::apply_app_icon(ctx, name);
+        self.status = format!("界面主题已切换为「{}」。", theme::by_name(name).label);
+        let _ = storage::save(&self.config);
+    }
+
     /// 界面主题：明色配色预设，点选立即生效并保存。公文纸面（预览、导出）按
     /// 红头文件规范固定为白纸黑字，不随主题变化。
     fn theme_settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -7990,12 +8087,7 @@ impl GongwenApp {
                     }
                 }
                 if response.clicked() && self.config.theme != name {
-                    self.config.theme = name;
-                    theme::set_current(name);
-                    theme::configure_style(ui.ctx());
-                    theme::apply_app_icon(ui.ctx(), name);
-                    self.status = format!("界面主题已切换为「{}」。", palette.label);
-                    let _ = storage::save(&self.config);
+                    self.apply_theme(ui.ctx(), name);
                 }
             }
         });
@@ -8683,20 +8775,44 @@ fn status_icon_button(
     icon: theme::Icon,
     label: &str,
     tint: Option<egui::Color32>,
+    badge: Option<usize>,
 ) -> egui::Response {
     let image = match tint {
         Some(color) => icon.image().tint(color),
         None => icon.image(),
     };
-    ui.add(
+    let response = ui.add(
         egui::Button::image(image)
             .image_tint_follows_text_color(tint.is_none())
             .selected(selected)
             .frame_when_inactive(selected)
             .min_size(egui::vec2(24.0, 20.0))
             .corner_radius(egui::CornerRadius::same(4)),
-    )
-    .on_hover_text(label)
+    );
+    // 计数徽章：按钮右上角的小圆角气泡，提示条数不用悬停也一眼可见。
+    if let Some(count) = badge.filter(|count| *count > 0) {
+        let rect = response.rect;
+        let text = if count > 99 {
+            "99+".to_string()
+        } else {
+            count.to_string()
+        };
+        let width = if text.len() > 1 { 17.0 } else { 12.0 };
+        let center = egui::pos2(rect.right() - 4.0, rect.top() + 3.0);
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(center, egui::vec2(width, 12.0)),
+            egui::CornerRadius::same(6),
+            theme::warn(),
+        );
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            &text,
+            egui::FontId::proportional(9.0),
+            egui::Color32::WHITE,
+        );
+    }
+    response.on_hover_text(label)
 }
 
 pub(crate) fn row_label(ui: &mut egui::Ui, label: &str) {

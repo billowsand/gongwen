@@ -897,6 +897,30 @@ pub fn icon_text_button(icon: Icon, label: &str) -> egui::Button<'static> {
         .corner_radius(CornerRadius::same(7))
 }
 
+/// 菜单中的图文条目。保持按钮 frame 开启，常态仍由 egui 的 menu style 画成
+/// 透明底，但悬停/按下时会铺满整行背景；显式 `.frame(false)` 会连悬停反馈一起
+/// 关掉，菜单看起来像普通文字，也会把可点击范围收窄到内容附近。
+pub fn menu_item(icon: Icon, label: &str) -> egui::Button<'static> {
+    egui::Button::image_and_text(icon.image(), label.to_owned())
+        .image_tint_follows_text_color(true)
+        .corner_radius(CornerRadius::same(5))
+        .min_size(egui::vec2(0.0, 26.0))
+}
+
+/// 菜单中的纯文字条目，与图文条目使用同一高度和悬停反馈。
+pub fn menu_text_item(label: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(label.into())
+        .corner_radius(CornerRadius::same(5))
+        .min_size(egui::vec2(0.0, 26.0))
+}
+
+/// 菜单中的单选条目。选中项常显淡底，未选中项只在悬停/按下时显示背景。
+pub fn menu_selectable_item(selected: bool, label: &str) -> egui::Button<'static> {
+    menu_text_item(label)
+        .selected(selected)
+        .frame_when_inactive(selected)
+}
+
 /// 在子作用域内把按钮三态底色覆盖成橙色系（clone-on-write，退出自动还原），
 /// 让 `egui::Button` 自己按状态切换底色并保留按压动效。供主按钮与需要自定义
 /// 尺寸的橙色按钮共用。
@@ -999,16 +1023,6 @@ pub fn danger_icon_button(ui: &mut egui::Ui, icon: Icon, label: &str) -> egui::R
     icon_button_impl(ui, true, icon, label, true)
 }
 
-/// 可禁用的危险操作图标按钮。
-pub fn danger_icon_button_enabled(
-    ui: &mut egui::Ui,
-    enabled: bool,
-    icon: Icon,
-    label: &str,
-) -> egui::Response {
-    icon_button_impl(ui, enabled, icon, label, true)
-}
-
 /// 顶部导航按钮：保留文字识别效率，同时用图标建立稳定的视觉锚点。
 pub fn nav_button(ui: &mut egui::Ui, selected: bool, icon: Icon, label: &str) -> egui::Response {
     ui.add(
@@ -1020,30 +1034,24 @@ pub fn nav_button(ui: &mut egui::Ui, selected: bool, icon: Icon, label: &str) ->
     )
 }
 
-/// 功能区分区卡：仿 Word 的选项卡，只有文字，选中项用强调色文字加下划线标出。
-/// 不用 `Button::selected` 的整块底色——分区卡一行有六个，六块底色会把第二行
-/// 的按钮压得没有层次。
+/// 功能区分区卡：仿 Word 的选项卡，只有文字。选中项用强调色文字加 `accent_soft`
+/// 淡底圆角标出——淡底比「文字变色 + 细下划线」醒目得多，且与第二行按钮的
+/// `surface_sunk` 底色可区分，不会出现六个分区卡全是底色的层次问题。
 pub fn ribbon_tab_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
     let text = if selected {
         egui::RichText::new(label).color(accent()).strong()
     } else {
         egui::RichText::new(label).color(text_soft())
     };
-    let response = ui.add(
+    ui.add(
         egui::Button::new(text)
-            .frame_when_inactive(false)
+            // `frame_when_inactive(selected)`：选中项未悬停也画强调色淡底；
+            // 未选中时常态无底、悬停才有背景，层次留给第二行的按钮。
+            .selected(selected)
+            .frame_when_inactive(selected)
             .corner_radius(CornerRadius::same(6))
             .min_size(egui::vec2(52.0, 24.0)),
-    );
-    if selected {
-        let rect = response.rect;
-        ui.painter().hline(
-            (rect.left() + 6.0)..=(rect.right() - 6.0),
-            rect.bottom(),
-            Stroke::new(2.0, accent()),
-        );
-    }
-    response
+    )
 }
 
 /// 编辑区右上角的视图切换：仿代码编辑器只保留图标，名称放在悬停说明中。
