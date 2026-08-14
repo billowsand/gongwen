@@ -2285,14 +2285,15 @@ impl DraftPage<'_> {
         let saved = self.doc.manuscript_id.is_some();
         // 只读稿件（已发布、已归档）不能改内容，但照常预览、导出、看版本。
         let editable = !self.doc.read_only();
+        let save_shortcut = theme::primary_shortcut("S");
 
         // 一、入库与版本
         if ui
             .add_enabled(editable, theme::icon_text_button(theme::Icon::Save, "保存"))
             .on_hover_text(if saved {
-                "更新稿件库中已打开的那条记录（Ctrl+S）"
+                format!("更新稿件库中已打开的那条记录（{save_shortcut}）")
             } else {
-                "保存为稿件库中的一条新草稿记录（Ctrl+S）"
+                format!("保存为稿件库中的一条新草稿记录（{save_shortcut}）")
             })
             .clicked()
         {
@@ -2323,7 +2324,10 @@ impl DraftPage<'_> {
                 theme::Icon::SearchClear,
                 "查找替换",
             ))
-            .on_hover_text("在审校稿里查找并替换（Ctrl+F）")
+            .on_hover_text(format!(
+                "在审校稿里查找并替换（{}）",
+                theme::primary_shortcut("F")
+            ))
             .clicked()
         {
             self.doc.markdown_find.open = true;
@@ -2783,7 +2787,10 @@ impl DraftPage<'_> {
             // 二、字符与段落
             if ui
                 .add(theme::icon_text_button(theme::Icon::Bold, "加粗"))
-                .on_hover_text("给选中的文字加 `**`（Ctrl+B）；已加粗的再点一次去掉")
+                .on_hover_text(format!(
+                    "给选中的文字加 `**`（{}）；已加粗的再点一次去掉",
+                    theme::primary_shortcut("B")
+                ))
                 .clicked()
             {
                 bold = true;
@@ -2899,7 +2906,10 @@ impl DraftPage<'_> {
                 theme::Icon::SearchClear,
                 "查找替换",
             ))
-            .on_hover_text("在审校稿里查找并替换（Ctrl+F）")
+            .on_hover_text(format!(
+                "在审校稿里查找并替换（{}）",
+                theme::primary_shortcut("F")
+            ))
             .clicked()
         {
             self.doc.markdown_find.open = true;
@@ -4175,7 +4185,7 @@ impl DraftPage<'_> {
     }
 
     /// 给选中的文字加粗；已经加粗的再来一次就是取消。加粗之后保持选中，
-    /// 与各家编辑器的 Ctrl+B 一致。
+    /// 与各家编辑器的主快捷键+B 一致。
     pub(crate) fn toggle_bold(&mut self, ctx: &egui::Context) {
         if self.doc.read_only() {
             return;

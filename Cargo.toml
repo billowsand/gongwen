@@ -38,8 +38,9 @@ zip = "4.3"
 [target.'cfg(target_os = "macos")'.dependencies]
 # winit 的窗口图标命令在 macOS 上无效；用 AppKit 同步更新 Dock 图标。
 objc2 = "0.5.2"
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSData"] }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSData", "NSGeometry", "NSString", "NSUserDefaults"] }
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 tempfile = "3.20"

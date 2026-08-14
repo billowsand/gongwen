@@ -12,6 +12,7 @@ mod knowledge;
 mod knowledge_ui;
 mod last_char_orphan;
 mod lmstudio;
+mod macos_window;
 mod manuscript;
 mod manuscript_io;
 mod models;
@@ -35,15 +36,26 @@ use app::GongwenApp;
 
 fn main() -> eframe::Result {
     let app_icon = theme::app_icon(storage::load().unwrap_or_default().theme);
+    let viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([980.0, 680.0])
+        .with_title(version::APP_TITLE)
+        .with_icon(app_icon);
+
+    // macOS 保留真正的 AppKit 标题栏和标准红黄绿按钮，仅把标题栏设为透明，
+    // 让 egui 顶栏内容延伸到其下方；Windows/Linux 继续使用无边框自绘方案。
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        .with_decorations(true)
+        .with_fullsize_content_view(true)
+        .with_title_shown(false)
+        .with_titlebar_shown(false)
+        .with_titlebar_buttons_shown(true);
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_decorations(false);
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([980.0, 680.0])
-            .with_title(version::APP_TITLE)
-            // 自绘窗口：去掉系统标题栏，标题与最小化/最大化/关闭按钮由应用自己
-            // 绘制（见 app.rs 的 window_titlebar），三平台外观一致。
-            .with_decorations(false)
-            .with_icon(app_icon),
+        viewport,
         ..Default::default()
     };
 

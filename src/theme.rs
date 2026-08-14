@@ -847,6 +847,15 @@ pub fn app_icon(name: ThemeName) -> egui::IconData {
         .expect("embedded themed app icon must be a valid PNG")
 }
 
+/// 平台的主快捷键文案：macOS 用 Command，其他平台用 Ctrl。
+pub(crate) fn primary_shortcut(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("⌘{key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
 /// 切换主题时同步更新原生图标。
 ///
 /// Windows 与 X11 由 winit 处理；macOS 没有窗口图标，额外通过 AppKit 更新 Dock。

@@ -403,6 +403,8 @@ impl AiPromptDraft {
 
 pub struct GongwenApp {
     config: AppConfig,
+    /// macOS 原生透明标题栏的实测控件尺寸；无值时使用跨平台自绘标题栏。
+    macos_titlebar_metrics: Option<crate::macos_window::NativeTitlebarMetrics>,
     /// 已打开的稿件，每篇一个起草页标签。空表示当前只在导航页里。
     docs: Vec<DraftSession>,
     /// 应用内打开的 PDF，只在本次运行中保留，不写入会话恢复表。
@@ -603,6 +605,7 @@ pub(crate) enum DraftAction {
 impl GongwenApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut config = storage::load().unwrap_or_default();
+        let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
         // 预览字体要按配置装，所以先读配置再装字体。
         theme::set_current(config.theme);
         theme::configure_fonts(&cc.egui_ctx, &config.fonts);
@@ -644,6 +647,7 @@ impl GongwenApp {
         };
         let mut app = Self {
             config,
+            macos_titlebar_metrics,
             docs,
             pdfs: Vec::new(),
             active_doc: 0,
@@ -1403,17 +1407,38 @@ impl GongwenApp {
         }
     }
 
-    /// 应用级快捷键要在各个文本框处理输入前消费，避免 `Ctrl+S` / `Ctrl+F`
+    /// 应用级快捷键要在各个文本框处理输入前消费，避免保存/查找
     /// 被当前聚焦的编辑控件吞掉。
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let save = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::S);
+        #[cfg(target_os = "macos")]
+        {
+            // macOS 标准窗口快捷键：交给 winit/AppKit 执行，状态会通过
+            // ViewportInfo 回流，和绿色按钮、菜单栏触发的结果保持一致。
+            let minimize = egui::KeyboardShortcut::new(egui::Modifiers::MAC_CMD, egui::Key::M);
+            if ctx.input_mut(|input| input.consume_shortcut(&minimize)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+
+            let toggle_fullscreen = egui::KeyboardShortcut::new(
+                egui::Modifiers::MAC_CMD | egui::Modifiers::CTRL,
+                egui::Key::F,
+            );
+            if ctx.input_mut(|input| input.consume_shortcut(&toggle_fullscreen)) {
+                let fullscreen = ctx
+                    .input(|input| input.viewport().fullscreen)
+                    .unwrap_or(false);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+            }
+        }
+
+        let save = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
         if ctx.input_mut(|input| input.consume_shortcut(&save)) && self.showing_doc() {
             self.save_to_manuscript_library();
         }
 
-        // Ctrl+B 与功能区「格式 → 加粗」是同一件事。这里必须确认焦点确实在审校稿
-        // 编辑框上：焦点在要素表单或查找框里时按 Ctrl+B，改的不该是正文。
-        let bold = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::B);
+        // 主快捷键+B 与功能区「格式 → 加粗」是同一件事。这里必须确认焦点
+        // 确实在审校稿编辑框上，避免焦点在要素表单或查找框时改到正文。
+        let bold = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B);
         if ctx.memory(|memory| memory.has_focus(editor_id()))
             && ctx.input_mut(|input| input.consume_shortcut(&bold))
             && self.showing_doc()
@@ -1421,16 +1446,18 @@ impl GongwenApp {
             self.draft_page().toggle_bold(ctx);
         }
 
-        let new_doc = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::N);
+        let new_doc = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
         if ctx.input_mut(|input| input.consume_shortcut(&new_doc)) {
             self.new_blank_manuscript();
         }
 
         if self.showing_doc() && !self.docs.is_empty() {
-            let close = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::W);
+            let close = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
             if ctx.input_mut(|input| input.consume_shortcut(&close)) {
                 self.request_close_tab(self.active_tab);
             }
+            // macOS 的 Command+Tab 由系统用于切换应用，因此稿件前后切换特意
+            // 保留 Control+Tab / Control+Shift+Tab；其他平台沿用原有组合。
             let next = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Tab);
             if ctx.input_mut(|input| input.consume_shortcut(&next)) {
                 self.activate_doc((self.active_doc + 1) % self.docs.len());
@@ -1443,7 +1470,7 @@ impl GongwenApp {
                 self.activate_doc((self.active_doc + self.docs.len() - 1) % self.docs.len());
             }
         }
-        // Ctrl+1..9 直达第 N 个标签，第 9 个固定指最后一篇。
+        // 主快捷键+1..9 直达第 N 个标签，第 9 个固定指最后一篇。
         for (offset, key) in [
             egui::Key::Num1,
             egui::Key::Num2,
@@ -1458,7 +1485,7 @@ impl GongwenApp {
         .into_iter()
         .enumerate()
         {
-            let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, key);
+            let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, key);
             if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) && !self.docs.is_empty() {
                 let index = if offset == 8 {
                     self.docs.len() - 1
@@ -1469,7 +1496,7 @@ impl GongwenApp {
             }
         }
 
-        let find = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::F);
+        let find = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F);
         if ctx.input_mut(|input| input.consume_shortcut(&find)) && self.showing_doc() {
             if !self.doc().markdown_find.open
                 && let Some(state) = egui::TextEdit::load_state(ctx, editor_id())
@@ -2380,10 +2407,10 @@ impl GongwenApp {
         }
     }
 
-    /// 自绘标题栏：无边框窗口的标题与窗口控制按钮。
+    /// 无边框窗口的顶栏。
     ///
-    /// 窗口由系统装饰改为自绘（`main.rs` 的 `with_decorations(false)`）后，
-    /// 这里补上标题、拖拽与最小化/最大化/关闭按钮，三平台外观一致。
+    /// macOS 使用左侧 AppKit 原生红黄绿按钮、居中标题和右侧快速操作；
+    /// Windows/Linux 继续使用右侧自绘窗口按钮。
     fn window_titlebar(&mut self, ui: &mut egui::Ui) {
         const HEIGHT: f32 = 34.0;
         const BTN_W: f32 = 46.0;
@@ -2404,6 +2431,11 @@ impl GongwenApp {
             egui::vec2(ui.available_width(), HEIGHT),
             egui::Sense::hover(),
         );
+
+        if let Some(metrics) = self.macos_titlebar_metrics {
+            self.macos_titlebar(ui, rect, metrics.reserved_width, title_color);
+            return;
+        }
 
         // 左侧标题区：空白处可拖拽移动窗口，双击切换最大化。
         let title_rect = egui::Rect::from_min_max(
@@ -2474,7 +2506,7 @@ impl GongwenApp {
             }
         }
 
-        // 右侧三个窗口控制按钮：最小化 / 最大化·还原 / 关闭。
+        // Windows/Linux 右侧三个窗口控制按钮：最小化 / 最大化·还原 / 关闭。
         let mut action: Option<TitlebarAction> = None;
         for (index, kind) in [
             TitlebarBtn::Minimize,
@@ -2562,6 +2594,87 @@ impl GongwenApp {
         }
     }
 
+    /// macOS 顶栏：左侧红黄绿由 AppKit 原生视图绘制，egui 只负责
+    /// 中间的当前标题、可拖拽区和右侧稿件快速操作。
+    fn macos_titlebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        native_controls_width: f32,
+        title_color: egui::Color32,
+    ) {
+        const RIGHT_MARGIN: f32 = 12.0;
+        const QUICK_WIDTH: f32 = 102.0;
+
+        let content_left = rect.left() + native_controls_width;
+        let mut drag_right = rect.right() - RIGHT_MARGIN;
+
+        // 快速操作是稿件上下文才有的工具，固定收在右边，避免和
+        // 左侧红黄绿或中间标题抢位置。
+        if self.showing_doc() {
+            let quick_left = (rect.right() - RIGHT_MARGIN - QUICK_WIDTH).max(content_left + 120.0);
+            let available = egui::Rect::from_min_max(
+                egui::pos2(quick_left, rect.top() + 4.0),
+                egui::pos2(rect.right() - RIGHT_MARGIN, rect.bottom() - 4.0),
+            );
+            if available.width() >= 76.0 {
+                let mut quick = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(available)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                quick.spacing_mut().item_spacing.x = 2.0;
+                self.titlebar_quick_access(&mut quick);
+                drag_right = available.left() - 8.0;
+            }
+        }
+
+        // 按窗口整体的几何中心摆标题，不因左右控件宽度不对称而偏移。
+        // 剪裁区对称收紧，窄窗口时不会压到原生按钮或快速操作。
+        let center_x = rect.center().x;
+        let half_width = (center_x - content_left)
+            .min(drag_right - center_x)
+            .max(0.0);
+        if half_width > 40.0 {
+            let (mark, active_title) = self.tab_label(self.active_tab);
+            let active_title = if active_title.is_empty() {
+                version::APP_TITLE.to_string()
+            } else if mark.is_empty() {
+                active_title
+            } else {
+                format!("{mark} {active_title}")
+            };
+            let clip = egui::Rect::from_min_max(
+                egui::pos2(center_x - half_width, rect.top()),
+                egui::pos2(center_x + half_width, rect.bottom()),
+            );
+            ui.painter().with_clip_rect(clip).text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                truncate_middle(&active_title, 42),
+                egui::TextStyle::Body.resolve(ui.style()),
+                title_color,
+            );
+        }
+
+        let drag_rect = egui::Rect::from_min_max(
+            egui::pos2(content_left, rect.top()),
+            egui::pos2(drag_right, rect.bottom()),
+        );
+        if drag_rect.width() > 4.0 {
+            let drag = ui.interact(
+                drag_rect,
+                ui.id().with("macos_titlebar_drag"),
+                egui::Sense::click_and_drag(),
+            );
+            if drag.double_clicked() {
+                crate::macos_window::perform_titlebar_double_click();
+            } else if drag.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+        }
+    }
+
     /// 标题栏上的快速访问：保存、提交版本、导出。这三件事跟当前停在哪个分区卡
     /// 无关，任何时候都该够得着，所以仿 Word 挂在标题栏上而不是放进功能区。
     /// 保存键上的小圆点表示有未写回稿件库的改动。
@@ -2574,17 +2687,14 @@ impl GongwenApp {
         let manuscript_id = doc.manuscript_id;
         let ready_to_export = !doc.busy && !doc.generated_markdown.trim().is_empty();
         let dirty = doc.is_dirty();
+        let save_shortcut = theme::primary_shortcut("S");
+        let save_hint = if saved {
+            format!("保存：写回稿件库中这条记录（{save_shortcut}）")
+        } else {
+            format!("保存：在稿件库中新建一条草稿记录（{save_shortcut}）")
+        };
 
-        let save = theme::icon_button_enabled(
-            ui,
-            editable,
-            theme::Icon::Save,
-            if saved {
-                "保存：写回稿件库中这条记录（Ctrl+S）"
-            } else {
-                "保存：在稿件库中新建一条草稿记录（Ctrl+S）"
-            },
-        );
+        let save = theme::icon_button_enabled(ui, editable, theme::Icon::Save, &save_hint);
         if dirty {
             let center = save.rect.right_top() + egui::vec2(-5.0, 5.0);
             ui.painter().circle_filled(center, 3.0, theme::accent());
@@ -2965,8 +3075,8 @@ impl GongwenApp {
                 .response
                 .on_hover_text("切换到其余已打开的标签");
         }
-        if theme::icon_button(ui, theme::Icon::FilePlus, "新建空白公文（Ctrl+N）").clicked()
-        {
+        let new_shortcut = format!("新建空白公文（{}）", theme::primary_shortcut("N"));
+        if theme::icon_button(ui, theme::Icon::FilePlus, &new_shortcut).clicked() {
             self.new_blank_manuscript();
         }
 

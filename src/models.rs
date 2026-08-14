@@ -950,7 +950,7 @@ pub struct AppConfig {
     pub export: ExportSelection,
     /// AI 起草或优化完成后是否立即按勾选格式导出一次。
     pub auto_export: bool,
-    /// 定时与切标签时把改动静默写回稿件库。关掉就只认 Ctrl+S。
+    /// 定时与切标签时把改动静默写回稿件库。关掉就只认主快捷键+S。
     #[serde(default = "auto_save_default")]
     pub auto_save: bool,
     pub security_rules: SecurityRules,
