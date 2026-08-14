@@ -18,6 +18,7 @@
 \newif\ifgwa@whitepaper
 \newif\ifgwa@meetingagenda
 \newif\ifgwa@redapproval
+\newif\ifgwa@proof
 
 % 默认值
 \@forcenewpagetrue    % 默认强制新页
@@ -31,6 +32,7 @@
 \gwa@whitepaperfalse  % 默认非白头件（白头件无红头、无版记）
 \gwa@meetingagendafalse % 默认非会议议程（会议议程无红头、无落款、无版记）
 \gwa@redapprovalfalse % 默认非红头呈批件
+\gwa@prooffalse       % 默认不写孤行审校探针文件
 
 % 选项处理
 \DeclareOption{forcenewpage}{\@forcenewpagetrue}
@@ -44,6 +46,7 @@
 % 但版记仍要按“承办单位—联系人—电话”逐行列出，故 jointrecord 可单独开启。
 \DeclareOption{jointmodeone}{\gwa@jointmodeonetrue\gwa@jointrecordtrue}
 \DeclareOption{jointrecord}{\gwa@jointrecordtrue}
+\DeclareOption{proof}{\gwa@prooftrue}
 \DeclareOption{whitepaper}{\gwa@whitepapertrue}
 \DeclareOption{meetingagenda}{\gwa@meetingagendatrue}
 \DeclareOption{redapproval}{\gwa@redapprovaltrue}
@@ -142,8 +145,48 @@
 % 中英文间距调整
 \xeCJKsetup{
 	CJKglue={\hskip -1pt plus 0.08\baselineskip},
-	CJKecglue={\hskip 2pt plus 0.08\baselineskip}
+	CJKecglue={\hskip 2pt plus 0.08\baselineskip},
+	% 避免单个 CJK 字独占段落最后一行（“孤字”）。xeCJK 在段末几个字之间插入
+	% 不可断的 penalty（WidowPenalty=10000）：段末是纯汉字时末行保底 3 个字，
+	% 段末带句号时保底 2 个字加标点。
+	% 覆盖面很窄，只在段末恰好是“汉字 汉字 <控制序列>”时才触发；公文段落多半
+	% 以句号或 }（\textbf、四号楷体括号）收尾，此时本选项完全不起作用。所以它
+	% 只是顺手兜一手，真正的把关靠 \GwaTail 探针把孤行报到审校面板由人工改字。
+	CheckSingle=true,
 }
+
+% ========== 孤行审校探针 ==========
+% 导出器在每个正文段落末尾发 \GwaTail{<Markdown 行号>} 取代原来的 \par。
+% 默认 \GwaTail 就是 \par，排版结果与不带探针时逐行完全一致。
+% 加了 proof 类选项后，它额外把「末行右缘坐标 + 段落行数 + 当时的版心参数」
+% 写进 \jobname.gwaproof，应用读回后在审校面板里点名哪一段末行只剩一两个字，
+% 交给人工改字——不靠排版器去挤字距，版式一个像素都不动。
+%
+% 两处必须这么写，都是踩过的坑：
+% 1. 探针前必须 \unskip。段末标点后面那段可压缩尾隙本来会在行末被丢弃，而
+%    whatsit 是不可丢弃节点，会把它挡在行内，从而改变末行的断行结果。加了
+%    \unskip 之后，整篇逐行几何与不插探针时零差异。
+% 2. 行数必须先 \edef 捕获再写。\write 的参数要到 shipout 才展开，那时
+%    \prevgraf 已经归零，直接写进去得到的永远是 0。
+% 坐标取自 \pdfsavepos，值到 shipout 才确定，所以 tail 用延迟 \write；
+% 行数在 \par 之后立刻可读，用 \immediate\write。一遍编译即可，无需二次运行。
+\newcommand{\GwaTail}[1]{\par}
+\ifgwa@proof
+    \newwrite\gwa@proofout
+    \immediate\openout\gwa@proofout=\jobname.gwaproof\relax
+    % 每条记录自带当时的字宽、行宽与左边界，附件页换了版心也不会算错；
+    % duplex 时奇偶页左边界不同，两个都写出来由应用按页码挑。
+    \renewcommand{\GwaTail}[1]{%
+        \unskip\pdfsavepos
+        \write\gwa@proofout{tail #1 \thepage\space\the\pdflastxpos\space
+            \number\ccwd\space\number\hsize\space
+            \number\dimexpr1in+\hoffset+\oddsidemargin\relax\space
+            \number\dimexpr1in+\hoffset+\evensidemargin\relax}%
+        \par
+        \edef\gwa@proofn{\the\prevgraf}%
+        \immediate\write\gwa@proofout{lines #1 \gwa@proofn}%
+    }
+\fi
 
 % ========== 页面设置 ==========
 \geometry{

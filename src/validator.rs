@@ -1,11 +1,28 @@
 use crate::export::{self, MarkdownBlock, MarkdownSection};
-use crate::last_char_orphan;
 use crate::models::{
-    DraftInput, JointIssuanceMode, SecurityLevel, SecurityRules, TemplateKind, VocabularyCategory,
-    VocabularyEntry, join_units, split_units,
+    DraftInput, JointIssuanceMode, ReviewNote, SecurityLevel, SecurityRules, TemplateKind,
+    VocabularyCategory, VocabularyEntry, join_units, split_units,
 };
 use chrono::{Datelike, NaiveDate, Weekday};
 use regex::Regex;
+
+/// 排版层面的粗估提示（段末挂单字），与 `validate` 分开。
+///
+/// 它只在**没有实测结果**时使用：编译过一次之后，`orphan_probe` 会给出同一批
+/// 段落的精确行数与末行字数，两者一起显示只会互相打架。调用方（`revalidate`）
+/// 负责二选一。带上段落的字节范围，审校面板据此做成可点击定位。
+pub fn estimate_layout_notes(markdown: &str) -> Vec<ReviewNote> {
+    crate::last_char_orphan::find_orphans(markdown)
+        .iter()
+        .map(|orphan| {
+            let message = crate::last_char_orphan::format_warning(orphan);
+            match export::block_span_for_line(markdown, orphan.start_line) {
+                Some(span) => ReviewNote::located(message, span),
+                None => ReviewNote::from(message),
+            }
+        })
+        .collect()
+}
 
 pub fn validate(
     input: &DraftInput,
@@ -108,10 +125,6 @@ pub fn validate(
     }
 
     validate_date_weekdays(text, &mut warnings);
-
-    for orphan in last_char_orphan::find_orphans(text) {
-        warnings.push(last_char_orphan::format_warning(&orphan));
-    }
 
     let mixed_time = Regex::new(r"(?:上午|下午|晚上)\s*(?:1[3-9]|2[0-3])(?:(?::|：)\d{2}|时)")
         .expect("valid regex");
@@ -705,6 +718,23 @@ fn weekday_cn(weekday: Weekday) -> &'static str {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    /// 孤行提示必须带着段落范围回来，审校面板才点得动。
+    #[test]
+    fn layout_notes_carry_the_paragraph_span() {
+        // 首行缩进 2 字后排 26 字，其后每行 28 字；凑到 26+28+1 个字位末行只剩一个。
+        let filler: String = "工作要点部署要求经研究决定开展检查评估现将有关事项通知如下请各单位遵照执行并及时反馈情况我们将根据反馈意见完善制度"
+            .chars()
+            .take(54)
+            .collect();
+        assert_eq!(filler.chars().count(), 54, "构造的段落长度要精确");
+        let markdown = format!("# 标题\n\n短段落。\n\n{filler}。\n");
+        let notes = estimate_layout_notes(&markdown);
+        assert_eq!(notes.len(), 1, "只有末行挂字的那段该报：{notes:?}");
+        let span = notes[0].span.clone().expect("提示要带上定位范围");
+        assert_eq!(&markdown[span], format!("{filler}。"));
+        assert!(notes[0].message.contains("第 5 行"));
+    }
     use crate::models::{CorrespondenceScope, VocabularyCategory, VocabularyEntry};
 
     fn rules() -> SecurityRules {

@@ -16,9 +16,10 @@ use crate::{
     manuscript_io,
     models::{
         AiPrompt, AppConfig, DraftInput, ExportSelection, FontConfig, FontRole, GeneratedDraft,
-        ManuscriptStatus, RerankMode, SecurityLevel, TemplateKind, ThemeName, VocabularyCategory,
-        VocabularyEntry, builtin_ai_prompts, join_units, split_units,
+        ManuscriptStatus, RerankMode, ReviewNote, SecurityLevel, TemplateKind, ThemeName,
+        VocabularyCategory, VocabularyEntry, builtin_ai_prompts, join_units, split_units,
     },
+    orphan_probe,
     pdf_viewer::{self, PdfAction as PdfViewerAction, PdfKey, PdfSession},
     preview, prompt, qa, rag, storage, system_fonts, texcompile, theme, units,
     units::UnitDisplay,
@@ -207,7 +208,7 @@ pub(crate) enum DocJob {
     Drafted(Result<GeneratedDraft, String>),
     Optimized(Result<GeneratedDraft, String>),
     ExportProgress(String),
-    Exported(Result<(Vec<PathBuf>, Option<String>), String>),
+    Exported(Result<ExportOutcome, String>),
 }
 
 /// 同理，词库树上的增删和排序也要等本帧渲染完再改动 `Vec`。
@@ -2322,8 +2323,15 @@ impl GongwenApp {
 
     /// 生成与优化的收尾一致：换正文、换审校结果，有提示就弹审校抽屉。
     fn take_generated(doc: &mut DraftSession, result: GeneratedDraft) {
+        doc.proof_markdown = if result.proof_measured {
+            result.markdown.clone()
+        } else {
+            String::new()
+        };
+        doc.proof_warnings = result.proof_warnings;
         doc.generated_markdown = result.markdown;
         doc.warnings = result.warnings;
+        doc.warnings.extend(doc.proof_warnings.iter().cloned());
         doc.output_files = result.files;
         doc.export_error = None;
         if !doc.warnings.is_empty() {
@@ -2383,19 +2391,43 @@ impl GongwenApp {
             DocJob::Drafted(Err(error)) => self.status = format!("{prefix}起草失败：{error}"),
             DocJob::Optimized(Err(error)) => self.status = format!("{prefix}优化失败：{error}"),
             DocJob::ExportProgress(message) => self.status = format!("{prefix}{message}"),
-            DocJob::Exported(Ok((files, warning))) => {
-                self.docs[index].output_files = files;
+            DocJob::Exported(Ok(outcome)) => {
+                self.docs[index].output_files = outcome.files;
                 self.docs[index].export_error = None;
-                self.draft_page_at(index).revalidate();
-                if let Some(warning) = warning {
-                    self.docs[index].warnings.push(warning);
+                // 先落孤行实测结果，再 revalidate——它会把这批提示并进审校列表。
+                if outcome.proof_measured {
+                    self.docs[index].proof_markdown = self.docs[index].generated_markdown.clone();
+                    self.docs[index].proof_warnings = outcome.proof_warnings;
                 }
+                self.draft_page_at(index).revalidate();
+                self.docs[index]
+                    .warnings
+                    .extend(outcome.warnings.into_iter().map(ReviewNote::from));
+                self.docs[index]
+                    .warnings
+                    .sort_by(|a, b| a.message.cmp(&b.message));
+                self.docs[index]
+                    .warnings
+                    .dedup_by(|a, b| a.message == b.message);
                 // 成品不再进抽屉：让工具栏那三枚 TEX/PDF/WORD 入口重新扫盘点亮即可。
                 self.export_links.invalidate();
-                self.status = format!(
-                    "{prefix}当前审校稿已导出 {} 个文件。",
-                    self.docs[index].output_files.len()
-                );
+                let orphans = self.docs[index].proof_warnings.len();
+                // 孤行只有排完版才测得到，导出这一下是唯一的报出时机，直接把审校
+                // 抽屉推到用户眼前，别让它躺在折叠面板里。
+                if orphans > 0 {
+                    self.docs[index].result_drawer_open = true;
+                }
+                self.status = if orphans > 0 {
+                    format!(
+                        "{prefix}当前审校稿已导出 {} 个文件；实测发现 {orphans} 处孤行，见审校提示。",
+                        self.docs[index].output_files.len()
+                    )
+                } else {
+                    format!(
+                        "{prefix}当前审校稿已导出 {} 个文件。",
+                        self.docs[index].output_files.len()
+                    )
+                };
             }
             DocJob::Exported(Err(error)) => {
                 self.status = format!("{prefix}导出失败：{error}");
@@ -9677,6 +9709,18 @@ pub(crate) fn reveal_in_os(path: &Path) -> Result<(), String> {
     }
 }
 
+/// 一次导出的结果。孤行提示单独拿出来：它是编译实测的产物，只对当时那份正文
+/// 有效，正文一改就该作废，所以不能和其他审校提示混在一起长期留着。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExportOutcome {
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) proof_warnings: Vec<ReviewNote>,
+    /// 这次是否真的排完版量到了数据。为空的 `proof_warnings` 有两种含义——
+    /// “量过，没有孤行”和“压根没编译”，前者该压住粗估提示，后者不该。
+    pub(crate) proof_measured: bool,
+}
+
 /// 导出全部勾选格式；生成 TeX 后自动检测本机编译器，有可用引擎时把 PDF 一并加入结果。
 /// 编译失败不阻断导出，而是以警告形式返回，保留已写好的 md/docx/tex。
 pub(crate) fn export_and_compile(
@@ -9687,29 +9731,50 @@ pub(crate) fn export_and_compile(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     mut progress: impl FnMut(&str),
-) -> anyhow::Result<(Vec<PathBuf>, Option<String>)> {
+) -> anyhow::Result<ExportOutcome> {
     progress("正在生成导出文件…");
     let display = UnitDisplay::new(vocabulary);
     // 字体文件在写 TeX 之前就要落实：TeX 里写死了按哪个文件加载，等到编译时
     // 才发现文件不在就只能报错，而这里还来得及退回内置字体。
     let (fonts, mut warnings) = system_fonts::resolve(fonts);
+    let mut proof_warnings: Vec<ReviewNote> = Vec::new();
+    let mut proof_measured = false;
     let mut files = export::export_all(output_dir, input, markdown, selection, &display, &fonts)?;
     if let Some(tex) = files
         .iter()
         .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
     {
         progress("正在使用内置 Tectonic 离线编译 PDF…");
-        match texcompile::compile_pdf_if_available(tex, &fonts) {
-            Ok(Some(pdf)) => {
-                files.push(pdf);
-                progress("PDF 编译完成，正在整理导出结果…");
+        match texcompile::compile_pdf_with_proof(tex, &fonts) {
+            Ok(outcome) => {
+                if let Some(pdf) = outcome.pdf {
+                    files.push(pdf);
+                    progress("PDF 编译完成，正在整理导出结果…");
+                }
+                // 孤行只有排完版才知道，这里读的是类文件写出的实测坐标。
+                if let Some(report) = outcome.proof {
+                    proof_measured = true;
+                    proof_warnings.extend(orphan_probe::find_orphans(&report).iter().map(
+                        |metric| {
+                            let message = orphan_probe::format_warning(metric, markdown);
+                            // 带上这一段的字节范围，审校面板里点一下就能选中它。
+                            match export::block_span_for_line(markdown, metric.source_line) {
+                                Some(span) => ReviewNote::located(message, span),
+                                None => ReviewNote::from(message),
+                            }
+                        },
+                    ));
+                }
             }
-            Ok(None) => {}
             Err(error) => warnings.push(format!("{error:#}")),
         }
     }
-    let warning = (!warnings.is_empty()).then(|| warnings.join("\n"));
-    Ok((files, warning))
+    Ok(ExportOutcome {
+        files,
+        warnings,
+        proof_warnings,
+        proof_measured,
+    })
 }
 
 #[cfg(test)]

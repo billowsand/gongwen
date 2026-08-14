@@ -1,7 +1,14 @@
-//! 段落末挂单字检测。
+//! 段落末挂单字的**粗估**，只用于编辑过程中的即时提示。
 //!
-//! 公文正文每行装 28 字（三号仿宋），首行缩进 2 字后剩 26 字宽度当量；
-//! 标点符号在版式上比汉字窄，按 0.5 倍宽度计入。Markdown 修饰符不占宽度。
+//! 精确结论来自 `orphan_probe`：那边读的是 TeX 排完版写出的实测坐标。本模块
+//! 不编译、纯字符宽度模拟，所以只能近似——TeX 是整段最优断行、字间胶有伸缩，
+//! 实测同样 28 字宽的一行能装 27~30 个字符。有实测结果时以实测为准，本模块的
+//! 提示会被让位（见 `DraftPage::revalidate`）。
+//!
+//! 公文正文每行装 28 字（三号仿宋），首行缩进 2 字后剩 26 字宽度当量。
+//! 中文全角标点在版面上占满一个字位（实测一整行 28 个含标点的字符正好排满
+//! 156mm 版心），所以按 1.0 计；ASCII 字母数字才是半宽，按 0.5 计。
+//! Markdown 修饰符不占宽度。
 //!
 //! 输入是 Markdown 文本：换两行才算段内分段，软换行（在编辑器里按住 Shift+Enter
 //! 写下的单个 `\n`）仍属于同一段，必须与段落拼接后再算宽度。本模块不依赖
@@ -14,12 +21,19 @@
 //! - 段总宽度 ≤ 首行 + 满行容量 → 装得下两行但末行很短，仅在末行剩余 < 1.5 字时报。
 //! - 段总宽度 > 首行 + 满行容量 → 至少三行，按 28 - 28 - ... - 末行剩余模拟；末行剩余 < 1.5 字时报。
 //! - 段末不是标点收尾（最后一个有效字符是汉字 / 数字 / 字母）→ 加重提示"段末未用标点收尾"。
+//!   注意：段末有句号**不**豁免孤行。公文里最常见的孤行形态恰恰是"一两个字加一个
+//!   句号"，早先按"有标点收尾就跳过"来放行，等于整条检测在真实公文上从不触发。
 //!   出现"section 区段标记"（`<!-- [附件] -->` 等）会切断前后段，避免把附件名也算进正文宽度。
 
 const CHARS_PER_LINE_DEFAULT: f32 = 28.0;
 const FIRST_LINE_CHARS_DEFAULT: f32 = 26.0;
-const PUNCTUATION_FACTOR: f32 = 0.5;
-const ORPHAN_THRESHOLD: f32 = 1.5;
+/// ASCII 字母数字与拉丁标点是半宽。
+const HALF_WIDTH_FACTOR: f32 = 0.5;
+/// 中文全角标点占满一个字位，与汉字同宽。
+const CJK_PUNCTUATION_FACTOR: f32 = 1.0;
+/// 末行不足这么多字位就提示。粗估有 ±2~3 字位的误差，阈值放到 3 字位一侧，
+/// 宁可多问一句也别把"一两个字加句号"漏掉；精确判定由 `orphan_probe` 收口。
+const ORPHAN_THRESHOLD: f32 = 3.0;
 const MIN_LINES_FOR_CHECK: usize = 2;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,7 +73,7 @@ fn display_width(text: &str) -> f32 {
                     chars.next();
                 } else {
                     // 奇数个修饰符保留字面，按 ASCII 处理。
-                    total += PUNCTUATION_FACTOR;
+                    total += HALF_WIDTH_FACTOR;
                 }
             }
             '\\' => {
@@ -73,17 +87,17 @@ fn display_width(text: &str) -> f32 {
                 // 全角空格不计。
             }
             c if is_chinese_punctuation(c) => {
-                total += PUNCTUATION_FACTOR;
+                total += CJK_PUNCTUATION_FACTOR;
             }
             c if is_chinese_char(c) => {
                 total += 1.0;
             }
             c if c.is_ascii_digit() || c.is_ascii_alphabetic() => {
-                total += PUNCTUATION_FACTOR;
+                total += HALF_WIDTH_FACTOR;
             }
             _ => {
                 // 其他（拉丁标点等）按 0.5 计入。
-                total += PUNCTUATION_FACTOR;
+                total += HALF_WIDTH_FACTOR;
             }
         }
     }
@@ -315,11 +329,8 @@ pub fn find_orphans_with(
             continue;
         }
         let missing_terminator = !ends_with_terminator(&cleaned);
-        // 段末有标点收尾时，末行短不算孤儿，是公文体允许的。
-        if !missing_terminator {
-            continue;
-        }
-        // 末行剩余 < 1.5 字宽度才算"挂单字"。
+        // 末行剩余不足阈值才算"挂单字"。段末有没有句号不影响这条判断——
+        // "……进。"这种一个字加句号的末行正是要报的对象。
         if tail >= ORPHAN_THRESHOLD {
             continue;
         }
@@ -437,8 +448,9 @@ mod tests {
     }
 
     #[test]
-    fn orphan_with_terminator_passes() {
-        // 段末用标点收尾时，即便末行短也不报（公文体允许）。
+    fn orphan_with_terminator_is_still_flagged() {
+        // 公文里最常见的孤行就是“一两个字加一个句号”。早先按“有标点收尾就放行”
+        // 处理，等于整条检测在真实公文上从不触发，这里把那条闸门钉死。
         let mut first_line = String::new();
         for _ in 0..26 {
             first_line.push('的');
@@ -446,7 +458,9 @@ mod tests {
         let second_full = "中".repeat(28);
         let text = format!("{first_line}{second_full}。");
         let warnings = find_orphans(&text);
-        assert!(warnings.is_empty(), "标点收尾时不应报告：{warnings:?}");
+        assert_eq!(warnings.len(), 1, "句号收尾的孤行同样要报：{warnings:?}");
+        assert!(!warnings[0].missing_terminator, "这段是有标点收尾的");
+        assert!(warnings[0].tail_width <= ORPHAN_THRESHOLD);
     }
 
     #[test]
@@ -491,14 +505,17 @@ mod tests {
     fn punctuation_factor_compresses_correctly() {
         // 3 个汉字 = 3.0。
         assert_eq!(display_width("啊啊啊"), 3.0);
-        // 7 个全角标点（含句号）= 7.0 × 0.5 = 3.5。
-        assert_eq!(display_width("。；：？？！！"), 7.0 * PUNCTUATION_FACTOR);
+        // 7 个全角标点（含句号）各占满一个字位 = 7.0。
+        assert_eq!(
+            display_width("。；：？？！！"),
+            7.0 * CJK_PUNCTUATION_FACTOR
+        );
     }
 
     #[test]
     fn ascii_is_half_width() {
-        assert_eq!(display_width("ABCD"), 4.0 * PUNCTUATION_FACTOR);
-        assert_eq!(display_width("1234"), 4.0 * PUNCTUATION_FACTOR);
+        assert_eq!(display_width("ABCD"), 4.0 * HALF_WIDTH_FACTOR);
+        assert_eq!(display_width("1234"), 4.0 * HALF_WIDTH_FACTOR);
     }
 
     #[test]

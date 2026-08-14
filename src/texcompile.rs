@@ -108,11 +108,24 @@ fn common_xelatex_install_paths() -> Vec<PathBuf> {
     out
 }
 
+/// 一次编译的产物：PDF，外加类文件写出的孤行探针报告（`.gwaproof` 的内容）。
+/// 探针报告只在编译成功时可能存在；类文件没开 proof 选项时为 `None`。
+#[derive(Debug, Clone, Default)]
+pub struct CompileOutcome {
+    pub pdf: Option<PathBuf>,
+    pub proof: Option<String>,
+}
+
 /// 检测到 TeX 引擎时编译 `.pdf`；未检测到时返回 `Ok(None)` 并保留 `.tex`。
 /// 编译失败时返回错误，调用方仍可把已经生成的 `.tex` 展示给用户。
 pub fn compile_pdf_if_available(tex_path: &Path, fonts: &FontConfig) -> Result<Option<PathBuf>> {
+    Ok(compile_pdf_with_proof(tex_path, fonts)?.pdf)
+}
+
+/// 同上，另外把孤行探针报告一并带回。需要审校提示的调用方走这个入口。
+pub fn compile_pdf_with_proof(tex_path: &Path, fonts: &FontConfig) -> Result<CompileOutcome> {
     let Some(engine) = find_tex_engine()? else {
-        return Ok(None);
+        return Ok(CompileOutcome::default());
     };
     let dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = tex_path.file_name().context("TeX 文件路径缺少文件名")?;
@@ -163,8 +176,13 @@ pub fn compile_pdf_if_available(tex_path: &Path, fonts: &FontConfig) -> Result<O
     if !pdf.exists() {
         bail!("TeX 编译完成但未生成 PDF 文件：{}", pdf.display());
     }
+    // 探针报告要赶在清理之前读走；它和其余中间文件一样不留在导出目录里。
+    let proof = std::fs::read_to_string(dir.join(format!("{stem}.gwaproof"))).ok();
     cleanup_intermediates(dir, stem);
-    Ok(Some(pdf))
+    Ok(CompileOutcome {
+        pdf: Some(pdf),
+        proof,
+    })
 }
 
 fn compile_with_portable_tectonic(
@@ -227,6 +245,12 @@ fn compile_with_portable_tectonic(
             destination.display()
         )
     })?;
+    // 孤行探针报告跟着临时 jobname 走，改回正式 stem 交给上层读取；读不到就
+    // 当没开探针，导出照常完成。
+    let _ = std::fs::copy(
+        workspace.dir.join(format!("{}.gwaproof", workspace.stem)),
+        dir.join(format!("{stem}.gwaproof")),
+    );
     Ok(())
 }
 
@@ -332,7 +356,7 @@ impl Drop for PortableCompileWorkspace {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.tex_path);
         let _ = std::fs::remove_file(&self.bundle_path);
-        for extension in ["aux", "log", "out", "toc", "xdv", "pdf"] {
+        for extension in ["aux", "log", "out", "toc", "xdv", "pdf", "gwaproof"] {
             let _ = std::fs::remove_file(self.dir.join(format!("{}.{}", self.stem, extension)));
         }
         let _ = std::fs::remove_dir_all(&self.font_dir);
@@ -369,6 +393,7 @@ fn cleanup_intermediates(dir: &Path, stem: &str) {
         "fdb_latexmk",
         "synctex.gz",
         "xdv",
+        "gwaproof",
     ];
     for extension in INTERMEDIATE_EXTS {
         let _ = std::fs::remove_file(dir.join(format!("{stem}.{extension}")));
@@ -468,6 +493,91 @@ mod tests {
 
     /// 白头件落款要先装箱量高再决定是否另起一页（见 cls 的 `\WhitePaperClosing`）。
     /// 这条只保证这段逻辑能编译通过；换页判断是否准确要看排版结果，不在此断言。
+    /// 孤行探针端到端：导出 → 编译 → 读回 `.gwaproof` → 解析出每段的实测行数与
+    /// 末行字数。这条链路是审校面板里“第 N 行段落末行只剩几个字”的唯一数据来源，
+    /// 断的是真实排版结果，不是宽度模拟。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn orphan_probe_reports_measured_tail_widths() {
+        let temp = tempfile::tempdir().unwrap();
+        // 白头件：不带红头和版记，正文区就是干净的 156mm 版心，量出来的字位数
+        // 直接对应“每行 28 字”，断言不受红头首页 parshape 影响。
+        let mut input = DraftInput {
+            kind: TemplateKind::WhitePaper,
+            ..Default::default()
+        };
+        input.profile.kind = TemplateKind::WhitePaper;
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.signing_unit = "中央网信办综合协调办公室".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        // 正文首行缩进 2 字后可排 26 字，其后每行 28 字。凑到 26+28+1 个字位，
+        // 末行就只剩一个字——公文里最典型的孤行。
+        let filler = "工作要点部署要求经研究决定开展检查评估现将有关事项通知如下请各单位遵照执行并及时反馈情况我们将根据反馈意见进一步完善相关制度";
+        let orphan_paragraph: String = filler.chars().take(54).collect();
+        let safe_paragraph: String = filler.chars().take(40).collect();
+        let markdown = format!(
+            "# 关于孤行探针的函\n\n{orphan_paragraph}。\n\n{safe_paragraph}。\n\n特此函告。"
+        );
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            &markdown,
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let tex_source = std::fs::read_to_string(tex).unwrap();
+        assert!(
+            tex_source.contains("\\GwaTail{3}"),
+            "第 3 行那段正文应带上行号探针：{tex_source}"
+        );
+
+        let _ = std::fs::create_dir_all(".tmp/verify");
+        let _ = std::fs::copy(tex, ".tmp/verify/orphan-probe.tex");
+        let outcome = compile_pdf_with_proof(tex, &FontConfig::default()).unwrap();
+        assert!(outcome.pdf.is_some(), "应编译出 PDF");
+        let report = outcome.proof.expect("类文件应写出 .gwaproof");
+        let metrics = crate::orphan_probe::parse(&report);
+        eprintln!("PROBE {metrics:#?}");
+
+        let by_line = |line: usize| {
+            metrics
+                .iter()
+                .find(|metric| metric.source_line == line)
+                .unwrap_or_else(|| panic!("缺少第 {line} 行的实测记录：{metrics:?}"))
+        };
+        // 整行字位应量到 28 上下：这一项对不上说明版心或字宽读错了。
+        assert!(
+            (by_line(3).line_chars - 28.0).abs() < 1.0,
+            "整行应约 28 字位：{:?}",
+            by_line(3)
+        );
+        assert_eq!(by_line(3).lines, 3, "54 字加句号应排成 3 行");
+        assert_eq!(by_line(7).lines, 1, "“特此函告。”是单行段");
+
+        let orphans = crate::orphan_probe::find_orphans(&report);
+        let flagged: Vec<usize> = orphans.iter().map(|item| item.source_line).collect();
+        assert_eq!(
+            flagged,
+            vec![3],
+            "只有末行挂单字的那段该报出来：{metrics:?}"
+        );
+        assert!(
+            crate::orphan_probe::format_warning(&orphans[0], &markdown).contains("第 3 行"),
+            "提示要点名 Markdown 行号"
+        );
+    }
+
     #[test]
     #[ignore = "需要本机安装 xelatex 才能运行"]
     fn compiles_generated_white_paper() {
@@ -749,10 +859,18 @@ mod tests {
             .unwrap();
         assert!(pdf.exists());
         assert_eq!(pdf.file_stem(), tex.file_stem());
-        // 中间文件被清理，.tex 源文件保留。
+        // 中间文件被清理，.tex 源文件保留。孤行探针报告读完即走，同样不留在导出目录。
         assert!(!tex.with_extension("aux").exists());
         assert!(!tex.with_extension("log").exists());
+        assert!(!tex.with_extension("gwaproof").exists());
         assert!(tex.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("__gongwen_tectonic_"))
+            .collect();
+        assert!(leftovers.is_empty(), "临时编译工作区应清空：{leftovers:?}");
     }
 
     /// 联合发文模式 1 只剩 1 个发文单位：落款走类默认的右侧单列（jointmodeone 关），

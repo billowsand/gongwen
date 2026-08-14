@@ -21,8 +21,8 @@ use crate::{
     manuscript::ManuscriptStore,
     models::{
         AppConfig, CorrespondenceScope, DraftInput, ExportSelection, GeneratedDraft,
-        JointIssuanceMode, LetterVersion, ManuscriptStatus, RibbonTab, SecurityLevel, StyleMode,
-        TemplateKind, VocabularyCategory, split_units,
+        JointIssuanceMode, LetterVersion, ManuscriptStatus, ReviewNote, RibbonTab, SecurityLevel,
+        StyleMode, TemplateKind, VocabularyCategory, split_units,
     },
     preview, prompt, rag, storage, theme, units,
     units::UnitDisplay,
@@ -249,7 +249,11 @@ pub(crate) struct DraftSession {
     pub(crate) manuscript_id: Option<i64>,
     pub(crate) draft: DraftInput,
     pub(crate) generated_markdown: String,
-    pub(crate) warnings: Vec<String>,
+    pub(crate) warnings: Vec<ReviewNote>,
+    /// 上一次编译由孤行探针实测出来的提示，以及它对应的正文快照。孤行是排版
+    /// 结果，只对那一份正文成立；正文一改这批提示立即作废，等下次编译再报。
+    pub(crate) proof_warnings: Vec<ReviewNote>,
+    pub(crate) proof_markdown: String,
     pub(crate) output_files: Vec<PathBuf>,
     /// 最近一次导出失败的原因；成功导出或换稿后清空。
     pub(crate) export_error: Option<String>,
@@ -389,6 +393,8 @@ impl DraftSession {
             draft,
             generated_markdown,
             warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_markdown: String::new(),
             output_files: Vec::new(),
             export_error: None,
             loaded_version: None,
@@ -1520,7 +1526,10 @@ impl DraftPage<'_> {
             &self.doc.generated_markdown,
             &self.config.vocabulary,
             &self.config.security_rules,
-        );
+        )
+        .into_iter()
+        .map(ReviewNote::from)
+        .collect();
         if self.doc.draft.kind.has_document_number()
             && self.doc.draft.profile.letter_version == LetterVersion::Formal
         {
@@ -1545,13 +1554,33 @@ impl DraftPage<'_> {
                 })
                 && serial < highest
             {
-                self.doc.warnings.push(format!(
-                    "文号流水号 {serial} 低于机关代字“{code}”{year}年度已有最高序号 {highest}"
-                ));
+                self.doc.warnings.push(
+                    format!(
+                        "文号流水号 {serial} 低于机关代字“{code}”{year}年度已有最高序号 {highest}"
+                    )
+                    .into(),
+                );
             }
         }
-        self.doc.warnings.sort();
-        self.doc.warnings.dedup();
+        // 孤行提示来自上一次编译的实测坐标，正文没动过才还算数；正文改过就退回
+        // 纯字符宽度的粗估，等下次导出编译再拿准数。两者只能取其一，同时显示
+        // 会对同一段落报出两条口径不同的提示。
+        if self.doc.proof_markdown == self.doc.generated_markdown
+            && !self.doc.proof_markdown.is_empty()
+        {
+            self.doc
+                .warnings
+                .extend(self.doc.proof_warnings.iter().cloned());
+        } else {
+            self.doc.proof_warnings.clear();
+            self.doc.proof_markdown.clear();
+            self.doc.warnings.extend(validator::estimate_layout_notes(
+                &self.doc.generated_markdown,
+            ));
+        }
+        // 只按文案排序去重：同一条提示不该因为 span 差一个字节就重复两遍。
+        self.doc.warnings.sort_by(|a, b| a.message.cmp(&b.message));
+        self.doc.warnings.dedup_by(|a, b| a.message == b.message);
     }
 
     pub(crate) fn open_result_drawer(&mut self) {
@@ -1796,14 +1825,20 @@ impl DraftPage<'_> {
                 let normalized = prompt::normalize_generated_markdown(&input, &cleaned);
                 let markdown = export::finalize_markdown(&input, &normalized);
                 let title = export::extract_title(&markdown, &input.title_hint);
-                let mut warnings = validator::validate(
+                let mut warnings: Vec<ReviewNote> = validator::validate(
                     &input,
                     &markdown,
                     &config.vocabulary,
                     &config.security_rules,
-                );
+                )
+                .into_iter()
+                .map(ReviewNote::from)
+                .collect();
+                let mut proof_warnings: Vec<ReviewNote> = Vec::new();
+                let mut proof_measured = false;
+                let estimated = validator::estimate_layout_notes(&markdown);
                 let files = if export_now {
-                    let (files, compile_warning) = export_and_compile(
+                    let outcome = export_and_compile(
                         PathBuf::from(&config.output_dir).as_path(),
                         &input,
                         &markdown,
@@ -1818,17 +1853,22 @@ impl DraftPage<'_> {
                             });
                         },
                     )?;
-                    if let Some(warning) = compile_warning {
-                        warnings.push(warning);
-                    }
-                    files
+                    warnings.extend(outcome.warnings.into_iter().map(ReviewNote::from));
+                    proof_warnings = outcome.proof_warnings;
+                    proof_measured = outcome.proof_measured;
+                    outcome.files
                 } else {
                     vec![]
                 };
+                if !proof_measured {
+                    warnings.extend(estimated);
+                }
                 Ok(GeneratedDraft {
                     markdown,
                     title,
                     warnings,
+                    proof_warnings,
+                    proof_measured,
                     files,
                 })
             })()
@@ -2365,6 +2405,8 @@ impl DraftPage<'_> {
         {
             self.doc.generated_markdown.clear();
             self.doc.warnings.clear();
+            self.doc.proof_warnings.clear();
+            self.doc.proof_markdown.clear();
             self.doc.output_files.clear();
             self.doc.export_error = None;
         }
@@ -3325,12 +3367,21 @@ impl DraftPage<'_> {
                 ui.end_row();
             });
         if self.doc.draft.kind != old_kind {
+            // 换模板等于换版式，上一次量到的孤行结果一律作废，交给下次编译重测。
+            self.doc.proof_warnings.clear();
+            self.doc.proof_markdown.clear();
             self.doc.warnings = switch_template_profile(
                 self.config,
                 &mut self.doc.draft,
                 &self.doc.generated_markdown,
                 old_kind,
-            );
+            )
+            .into_iter()
+            .map(ReviewNote::from)
+            .collect();
+            self.doc.warnings.extend(validator::estimate_layout_notes(
+                &self.doc.generated_markdown,
+            ));
             self.doc.output_files.clear();
             self.doc.export_error = None;
         }
@@ -4905,7 +4956,9 @@ impl DraftPage<'_> {
                 if let Some(transform) = transform {
                     let last = ui.painter().add(egui::Shape::Noop);
                     ui.ctx().graphics_mut(|graphics| {
-                        graphics.entry(layer).transform_range(first, last, transform);
+                        graphics
+                            .entry(layer)
+                            .transform_range(first, last, transform);
                     });
                     ui.set_clip_rect(clip);
                     // 拖动一停，还需要再来一帧才能发现"宽度没变"并按精确缩放重排。
@@ -4942,6 +4995,8 @@ impl DraftPage<'_> {
             });
             return;
         }
+        // 点中的定位目标要等渲染完再处理：循环里借着 &self.doc，跳转要 &mut self。
+        let mut jump = None;
         egui::Frame::new()
             .fill(theme::warn_soft())
             .stroke(egui::Stroke::new(1.0, theme::warn().gamma_multiply(0.35)))
@@ -4952,14 +5007,34 @@ impl DraftPage<'_> {
                 // 条数由抽屉标题写，这里不再重复一遍。
                 for warning in &self.doc.warnings {
                     // 提示往往很长，必须显式换行，否则会把底部面板顶宽。
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("· {warning}")).color(theme::text_soft()),
+                    let text = egui::RichText::new(format!("· {}", warning.message));
+                    let Some(span) = warning.span.clone() else {
+                        ui.add(
+                            egui::Label::new(text.color(theme::text_soft()))
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                        );
+                        continue;
+                    };
+                    // 能定位到正文的提示（孤行等）做成可点的：点一下切回 Markdown
+                    // 视图并选中那一段，省得用户自己按行号数过去。
+                    // sense 显式写出来：egui 默认给 Label 加的是"可选中文本"那套
+                    // 感知，关掉 selectable_labels 就没了，不能指望它。
+                    let response = ui
+                        .add(
+                            egui::Label::new(text.color(theme::accent()))
+                                .wrap_mode(egui::TextWrapMode::Wrap)
+                                .sense(egui::Sense::click()),
                         )
-                        .wrap_mode(egui::TextWrapMode::Wrap),
-                    );
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("点击定位到正文中的这一段");
+                    if response.clicked() {
+                        jump = Some(span);
+                    }
                 }
             });
+        if let Some(span) = jump {
+            self.jump_to_source(span);
+        }
     }
 
     /// 起草页的"版本对照"模式：左侧是已提交的基准版本，右侧是当前未提交内容。
@@ -5820,6 +5895,114 @@ mod split_resize_tests {
                 .expect("本帧应当画出纸张")
         }
 
+        /// 用给定的原始输入画一帧审校提示面板。
+        fn warnings_frame(&mut self, raw: egui::RawInput) {
+            let _ = self.ctx.clone().run_ui(raw, |ui| {
+                let mut page = DraftPage {
+                    doc: &mut self.doc,
+                    config: &mut self.config,
+                    store: None,
+                    sender: &self.sender,
+                    status: &mut self.status,
+                    version_switch: &mut self.version_switch,
+                    revert_confirm: &mut self.revert_confirm,
+                    actions: &mut self.actions,
+                    export_links: &mut self.export_links,
+                };
+                page.warnings_ui(ui);
+            });
+        }
+
+        /// 在审校面板的 `at` 处点一下（按下与抬起分两帧，egui 才认这是一次点击）。
+        fn click_warning_at(&mut self, at: egui::Pos2) {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+            for pressed in [true, false] {
+                self.warnings_frame(egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: vec![
+                        egui::Event::PointerMoved(at),
+                        egui::Event::PointerButton {
+                            pos: at,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    /// 孤行提示要能点：点中之后切回 Markdown 视图，并选中出问题的那一段。
+    ///
+    /// 逐点扫过面板而不是写死坐标——egui 改了边距也不会让这条测试失灵，而提示
+    /// 一旦不可点，扫遍整块面板也不会触发，测试照样红。
+    #[test]
+    fn clicking_a_located_warning_selects_that_paragraph() {
+        let mut harness = Harness::new();
+        let filler: String = "工作要点部署要求经研究决定开展检查评估现将有关事项通知如下请各单位遵照执行并及时反馈情况我们将根据反馈意见完善制度"
+            .chars()
+            .take(54)
+            .collect();
+        harness.doc.generated_markdown = format!("# 标题\n\n短段落。\n\n{filler}。\n");
+        harness.doc.preview_mode = PreviewMode::Rendered;
+
+        {
+            let mut page = DraftPage {
+                doc: &mut harness.doc,
+                config: &mut harness.config,
+                store: None,
+                sender: &harness.sender,
+                status: &mut harness.status,
+                version_switch: &mut harness.version_switch,
+                revert_confirm: &mut harness.revert_confirm,
+                actions: &mut harness.actions,
+                export_links: &mut harness.export_links,
+            };
+            page.revalidate();
+        }
+        let expected = harness
+            .doc
+            .warnings
+            .iter()
+            .find_map(|note| note.span.clone())
+            .expect("孤行提示应带定位范围");
+        assert_eq!(
+            harness.doc.generated_markdown[expected.clone()],
+            format!("{filler}。")
+        );
+
+        // 先画一帧完成布局，之后的点击才有可命中的控件。
+        harness.warnings_frame(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            ..Default::default()
+        });
+        let mut hit = None;
+        'scan: for y in 0..40 {
+            for x in 0..30 {
+                harness.click_warning_at(egui::pos2(4.0 + x as f32 * 30.0, 4.0 + y as f32 * 8.0));
+                if harness.doc.preview_mode == PreviewMode::Source {
+                    hit = Some((x, y));
+                    break 'scan;
+                }
+            }
+        }
+        assert!(
+            hit.is_some(),
+            "整块审校面板都点不动，孤行提示没有做成可点的"
+        );
+        assert_eq!(
+            harness.doc.pending_source_selection,
+            Some(expected),
+            "点击后应选中提示指向的那一段"
+        );
+    }
+
+    impl Harness {
         /// 画一帧，窗格宽度为 `width`。返回 (耗时 ms, 是否整体重建了字体图集)。
         fn frame(&mut self, width: f32) -> (f32, bool) {
             let raw = egui::RawInput {

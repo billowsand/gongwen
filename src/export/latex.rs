@@ -1,6 +1,6 @@
 use super::{
     MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level, chinese_date_parts,
-    inline_segments, joint_main_column, number_to_chinese, parse_markdown, plain_text,
+    inline_segments, joint_main_column, number_to_chinese, parse_markdown_with_lines, plain_text,
     table::{requires_landscape, to_longtblr},
     title::{self, TitlePlan},
 };
@@ -159,7 +159,7 @@ fn font_setup_hook(fonts: &FontConfig) -> Option<String> {
 }
 
 fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
-    let blocks = parse_markdown(markdown);
+    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -167,8 +167,11 @@ fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay
             _ => None,
         })
         .unwrap_or(input.title_hint.as_str());
-    let (mut body, attachments) =
-        official_letter_sections_to_tex(&blocks, input.profile.style_mode == StyleMode::Compact);
+    let (mut body, attachments) = official_letter_sections_to_tex(
+        &blocks,
+        &block_lines,
+        input.profile.style_mode == StyleMode::Compact,
+    );
     // 附件概要：正文结束后、落款之前列出附件名称。
     if let Some(summary) = attachment_summary_tex(&blocks) {
         body.push_str(&summary);
@@ -287,7 +290,7 @@ fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[noforcenewpage,autocalc{duplex_option}{phone_notice_option}{joint_option}]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,autocalc{duplex_option}{phone_notice_option}{joint_option}]{{gonghan-gwa}}
 \renewcommand{{\IssuingUnit}}{{{issuing}}}
 \renewcommand{{\Year}}{{{document_year}}}
 \renewcommand{{\DepartmentCode}}{{{department}}}
@@ -348,7 +351,7 @@ fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay
 
 /// 普通公文只输出密级、标题、正文、附件和页码设置，不把其他模板元数据写入 TeX。
 fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
-    let blocks = parse_markdown(markdown);
+    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks
         .iter()
         .find_map(|block| match block {
@@ -356,8 +359,11 @@ fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
             _ => None,
         })
         .unwrap_or(input.title_hint.as_str());
-    let (mut body, attachments) =
-        official_letter_sections_to_tex(&blocks, input.profile.style_mode == StyleMode::Compact);
+    let (mut body, attachments) = official_letter_sections_to_tex(
+        &blocks,
+        &block_lines,
+        input.profile.style_mode == StyleMode::Compact,
+    );
     if let Some(summary) = attachment_summary_tex(&blocks) {
         body.push_str(&summary);
     }
@@ -374,7 +380,7 @@ fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[noforcenewpage,autocalc{duplex_option},plaindocument]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,autocalc{duplex_option},plaindocument]{{gonghan-gwa}}
 {security}\renewcommand{{\DocumentTitle}}{{{title}}}
 \renewcommand{{\TitleContent}}{{{title_content}}}
 \renewcommand{{\MainContent}}{{
@@ -526,14 +532,31 @@ fn joint_mode_one_commands(
     )
 }
 
-fn official_letter_sections_to_tex(blocks: &[MarkdownBlock], compact: bool) -> (String, String) {
-    official_letter_sections_to_tex_with_barrier(blocks, compact, None)
+/// 段末探针：`lines` 里没有对应行号时退回普通 `\par`，保证任何调用方都能用。
+fn gwa_tail(lines: &[usize], index: usize) -> String {
+    match lines.get(index) {
+        Some(line) => format!("\\GwaTail{{{line}}}"),
+        None => "\\par".to_string(),
+    }
+}
+
+fn official_letter_sections_to_tex(
+    blocks: &[MarkdownBlock],
+    lines: &[usize],
+    compact: bool,
+) -> (String, String) {
+    official_letter_sections_to_tex_with_barrier(blocks, lines, compact, None)
 }
 
 /// 同上，另可在第一个表格/图片之前插入屏障。红头呈批件的普通文字保持连续
 /// 流排；表格和图片不能进入首页批示栏，因此仍由屏障直接送到第二页。
+/// `lines` 与 `blocks` 一一对应，是各块在 Markdown 源码里的 1-based 起始行号。
+/// 每个正文段落末尾据此发 `\GwaTail{行号}` 取代 `\par`：类文件里它默认就是
+/// `\par`，开 proof 选项后额外把末行坐标与行数写进 `.gwaproof`，孤行提示就能
+/// 直接点回 Markdown 的那一行。
 fn official_letter_sections_to_tex_with_barrier(
     blocks: &[MarkdownBlock],
+    lines: &[usize],
     compact: bool,
     barrier: Option<&str>,
 ) -> (String, String) {
@@ -626,7 +649,8 @@ fn official_letter_sections_to_tex_with_barrier(
                         _ => unreachable!(),
                     };
                     target_tex_section(section, &mut body, &mut attachments).push(format!(
-                        "\\noindent\\hspace*{{2em}}{{{title_tex}}}{body_escaped}\\par"
+                        "\\noindent\\hspace*{{2em}}{{{title_tex}}}{body_escaped}{tail}",
+                        tail = gwa_tail(lines, index + 1)
                     ));
                     index += 1; // 跳过紧随的正文段落
                 } else {
@@ -639,19 +663,30 @@ fn official_letter_sections_to_tex_with_barrier(
                         }
                     };
                     if let Some(rendered) = rendered {
+                        // 标题同样可能折行后末行挂字，末尾的 \par 一并换成探针。
+                        let rendered = match rendered.strip_suffix("\\par") {
+                            Some(head) => format!("{head}{}", gwa_tail(lines, index)),
+                            None => rendered,
+                        };
                         target_tex_section(section, &mut body, &mut attachments).push(rendered);
                     }
                 }
             }
             MarkdownBlock::Paragraph(text) => {
                 if !text.contains("<div") && !text.contains("</div") {
-                    target_tex_section(section, &mut body, &mut attachments)
-                        .push(format!("{}\\par", body_text_to_tex(text)));
+                    target_tex_section(section, &mut body, &mut attachments).push(format!(
+                        "{}{}",
+                        body_text_to_tex(text),
+                        gwa_tail(lines, index)
+                    ));
                 }
             }
             MarkdownBlock::ListItem(text) => {
-                target_tex_section(section, &mut body, &mut attachments)
-                    .push(format!("\\noindent {}\\par", body_text_to_tex(text)));
+                target_tex_section(section, &mut body, &mut attachments).push(format!(
+                    "\\noindent {}{}",
+                    body_text_to_tex(text),
+                    gwa_tail(lines, index)
+                ));
             }
             MarkdownBlock::Table { rows, aligns } => {
                 let rendered = to_longtblr(rows, aligns);
@@ -794,7 +829,7 @@ fn official_heading_to_tex(level: u8, text: &str, counters: &mut [usize; 4]) -> 
 }
 
 fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
-    let blocks = parse_markdown(markdown);
+    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -803,8 +838,11 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
         })
         .unwrap_or(input.title_hint.as_str());
     // 正文与函稿一致（含标题编号与紧缩合并）；附件区段保留，与函稿同链路落版。
-    let (mut body, attachments) =
-        official_letter_sections_to_tex(&blocks, input.profile.style_mode == StyleMode::Compact);
+    let (mut body, attachments) = official_letter_sections_to_tex(
+        &blocks,
+        &block_lines,
+        input.profile.style_mode == StyleMode::Compact,
+    );
     // 附件概要：正文结束后、落款之前列出附件名称。
     if let Some(summary) = attachment_summary_tex(&blocks) {
         body.push_str(&summary);
@@ -860,7 +898,7 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[noforcenewpage,whitepaper]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,whitepaper]{{gonghan-gwa}}
 {security}\renewcommand{{\DocumentTitle}}{{{title}}}
 \renewcommand{{\TitleContent}}{{{title_content}}}
 \renewcommand{{\Recipient}}{{{leaders}}}
@@ -885,7 +923,7 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
 
 /// 红头呈批件的独立入口；首页框架在后续专用实现中生成。
 fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
-    let blocks = parse_markdown(markdown);
+    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks
         .iter()
         .find_map(|block| match block {
@@ -896,6 +934,7 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
     // 表格与图片不得留在首页：在正文区第一个表格/图片之前插入换页屏障。
     let (mut body, attachments) = official_letter_sections_to_tex_with_barrier(
         &blocks,
+        &block_lines,
         input.profile.style_mode == StyleMode::Compact,
         Some("\\RedPageOneBarrier"),
     );
@@ -963,7 +1002,7 @@ fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDispl
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[noforcenewpage,redapproval]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,redapproval]{{gonghan-gwa}}
 \renewcommand{{\IssuingUnit}}{{{issuing}}}
 \renewcommand{{\Year}}{{{document_year}}}
 \renewcommand{{\DepartmentCode}}{{{department}}}
@@ -1026,7 +1065,7 @@ fn red_approval_responsible_rows_tex(
 }
 
 fn meeting_agenda_tex(input: &DraftInput, markdown: &str) -> String {
-    let blocks = parse_markdown(markdown);
+    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -1035,13 +1074,16 @@ fn meeting_agenda_tex(input: &DraftInput, markdown: &str) -> String {
         })
         .unwrap_or(input.title_hint.as_str());
     // 正文排版与白头件/函稿一致（含标题编号与紧缩合并）；会议议程无附件、无落款。
-    let (body, _) =
-        official_letter_sections_to_tex(&blocks, input.profile.style_mode == StyleMode::Compact);
+    let (body, _) = official_letter_sections_to_tex(
+        &blocks,
+        &block_lines,
+        input.profile.style_mode == StyleMode::Compact,
+    );
     let security = security_commands(input);
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[noforcenewpage,meetingagenda]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,meetingagenda]{{gonghan-gwa}}
 {security}\renewcommand{{\DocumentTitle}}{{{title}}}
 \renewcommand{{\TitleContent}}{{{title_content}}}
 \renewcommand{{\MainContent}}{{
@@ -1307,7 +1349,7 @@ mod tests {
             "# 重点任务联合研商会议议程\n\n一、时间地点：2026年8月5日（星期三）14:30，3C会议室。\n\n1. 张三同志汇报总体思路；",
         );
         // 与白头件/函稿共用 gonghan-gwa.cls，走 meetingagenda 选项。
-        assert!(tex.contains("\\documentclass[noforcenewpage,meetingagenda]{gonghan-gwa}"));
+        assert!(tex.contains("\\documentclass[proof,noforcenewpage,meetingagenda]{gonghan-gwa}"));
         assert!(tex.contains("\\renewcommand{\\SecurityLevel}{机密}"));
         assert!(tex.contains("\\renewcommand{\\SecurityPeriod}{{\\ttfamily 10}年}"));
         assert!(tex.contains("\\renewcommand{\\DocumentTitle}{重点任务联合研商会议议程}"));
@@ -1321,7 +1363,7 @@ mod tests {
         // 正文沿用函稿/白头件渲染；完整括号及内容改用四号楷体。
         assert!(
             tex.contains(
-                "一、时间地点：2026年8月5日{\\kai\\enkai\\zihao{4} （星期三）}14:30，3C会议室。\\par"
+                "一、时间地点：2026年8月5日{\\kai\\enkai\\zihao{4} （星期三）}14:30，3C会议室。\\GwaTail{"
             ),
             "{tex}"
         );
@@ -1333,10 +1375,10 @@ mod tests {
         input.kind = TemplateKind::MeetingAgenda;
         input.profile.style_mode = StyleMode::Compact;
         let tex = meeting_agenda_tex(&input, "# 标题\n\n## 任务目标\n测试正文。");
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\GwaTail{"));
         input.profile.style_mode = StyleMode::Normal;
         let tex = meeting_agenda_tex(&input, "# 标题\n\n## 任务目标\n测试正文。");
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\GwaTail{"));
     }
 
     /// 红头呈批件首页：承办区走定宽三栏，普通内容保持连续流排，表格图片仍由
@@ -1377,7 +1419,7 @@ mod tests {
         let barrier = tex.find("\\RedPageOneBarrier").expect("应插入换页屏障");
         let table = tex.find("longtblr").expect("正文应含表格");
         assert!(barrier < table, "屏障必须排在表格之前：{tex}");
-        assert!(tex.contains("短正文。\\par"));
+        assert!(tex.contains("短正文。\\GwaTail{"));
         assert!(!tex.contains("\\RedFirstPageBlock"));
         assert!(!tex.contains("\\RedBodyOnSecondPage"));
         assert!(!tex.contains("\\RedWrapLines"));
@@ -1392,7 +1434,7 @@ mod tests {
             !tex.contains("\\RedPageOneBarrier"),
             "没有表格就不插屏障：{tex}"
         );
-        assert!(tex.contains("短正文。妥否，请指示。\\par"));
+        assert!(tex.contains("短正文。妥否，请指示。\\GwaTail{"));
 
         // 一级标题和紧随正文保持两个正常段落，由同一个首页剩余行数连续控制。
         let headed = red_head_approval_tex(
@@ -1402,7 +1444,7 @@ mod tests {
         );
         assert!(
             headed.contains(
-                "\\noindent\\hspace*{2em}{\\heiti\\enheiti 一、工作安排}\\par\n\n这里是一级标题后的正文。\\par"
+                "\\noindent\\hspace*{2em}{\\heiti\\enheiti 一、工作安排}\\GwaTail{3}\n\n这里是一级标题后的正文。\\GwaTail{5}"
             ),
             "一级标题和正文应保持连续段落：{headed}"
         );
@@ -1506,7 +1548,7 @@ mod tests {
             &UnitDisplay::new(&[]),
         );
         // 与函稿共用 gonghan-gwa.cls，走 whitepaper 选项。
-        assert!(tex.contains("\\documentclass[noforcenewpage,whitepaper]{gonghan-gwa}"));
+        assert!(tex.contains("\\documentclass[proof,noforcenewpage,whitepaper]{gonghan-gwa}"));
         // 顶格密级由类渲染；此处注入密级与保密期限。
         assert!(tex.contains("\\renewcommand{\\SecurityLevel}{秘密}"));
         assert!(tex.contains("\\renewcommand{\\SecurityPeriod}{{\\ttfamily 5}年}"));
@@ -1521,7 +1563,7 @@ mod tests {
         assert!(tex.contains("\\renewcommand{\\SignatureMonth}{8}"));
         assert!(tex.contains("\\renewcommand{\\SignatureDay}{5}"));
         // 正文与函稿同格式：标题编号 + 紧缩合并。
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\GwaTail{"));
     }
 
     #[test]
@@ -1574,7 +1616,7 @@ mod tests {
             "# 标题\n\n## 任务目标\n测试正文。",
             &UnitDisplay::new(&[]),
         );
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\GwaTail{"));
         // 正常：标题独立成段。
         input.profile.style_mode = StyleMode::Normal;
         let tex = white_paper_tex(
@@ -1582,7 +1624,7 @@ mod tests {
             "# 标题\n\n## 任务目标\n测试正文。",
             &UnitDisplay::new(&[]),
         );
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\GwaTail{"));
         // 未填成文日期时不再注入日期命令，沿用类默认（年份取当前年、日期留空）。
         input.date = String::new();
         let tex = white_paper_tex(&input, "# 标题\n\n正文。", &UnitDisplay::new(&[]));
@@ -1728,7 +1770,7 @@ mod tests {
         )
         .unwrap();
         let tex = std::fs::read_to_string(&path).unwrap();
-        assert!(tex.contains("\\documentclass[noforcenewpage,whitepaper]{gonghan-gwa}"));
+        assert!(tex.contains("\\documentclass[proof,noforcenewpage,whitepaper]{gonghan-gwa}"));
         let class_path = temp.path().join("gonghan-gwa.cls");
         assert!(
             class_path.exists(),
@@ -1942,11 +1984,13 @@ mod tests {
     fn official_letter_duplex_option_uses_outer_page_numbers() {
         let mut input = DraftInput::default();
         let simplex = letter_tex(&input, "# 测试函\n\n正文。");
-        assert!(simplex.contains("\\documentclass[noforcenewpage,autocalc]{gonghan-gwa}"));
+        assert!(simplex.contains("\\documentclass[proof,noforcenewpage,autocalc]{gonghan-gwa}"));
 
         input.profile.duplex_printing = true;
         let duplex = letter_tex(&input, "# 测试函\n\n正文。");
-        assert!(duplex.contains("\\documentclass[noforcenewpage,autocalc,duplex]{gonghan-gwa}"));
+        assert!(
+            duplex.contains("\\documentclass[proof,noforcenewpage,autocalc,duplex]{gonghan-gwa}")
+        );
         assert!(GONGHAN_CLASS.contains("\\DeclareOption{duplex}"));
         assert!(GONGHAN_CLASS.contains("\\fancyfoot[RO]"));
         assert!(GONGHAN_CLASS.contains("\\fancyfoot[LE]"));
@@ -1971,7 +2015,7 @@ mod tests {
         assert!(tex.contains("他说：“\\textbf{重要事项}”"), "{tex}");
         assert!(
             tex.contains(
-                "现就{\\kai\\enkai\\zihao{4} （有关事项）}及{\\kai\\enkai\\zihao{4} 【特别说明】}函告如下。\\par"
+                "现就{\\kai\\enkai\\zihao{4} （有关事项）}及{\\kai\\enkai\\zihao{4} 【特别说明】}函告如下。\\GwaTail{"
             ),
             "{tex}"
         );
@@ -2067,7 +2111,9 @@ mod tests {
             &input,
             "# 测试电话通知\n正文。\n<!-- [附件] -->\n# 附件1\n## 附件标题\n附件内容。",
         );
-        assert!(tex.contains("\\documentclass[noforcenewpage,autocalc,phonenotice]{gonghan-gwa}"));
+        assert!(
+            tex.contains("\\documentclass[proof,noforcenewpage,autocalc,phonenotice]{gonghan-gwa}")
+        );
         assert!(tex.contains("\\SetAttachmentContent"));
         assert!(GONGHAN_CLASS.contains("\\DeclareOption{phonenotice}"));
         assert!(GONGHAN_CLASS.contains("\\ifgwa@phonenotice"));
@@ -2089,7 +2135,7 @@ mod tests {
         );
 
         assert!(tex.contains(
-            "\\documentclass[noforcenewpage,autocalc,duplex,plaindocument]{gonghan-gwa}"
+            "\\documentclass[proof,noforcenewpage,autocalc,duplex,plaindocument]{gonghan-gwa}"
         ));
         assert!(tex.contains("\\renewcommand{\\SecurityLevel}{秘密}"));
         assert!(tex.contains("\\renewcommand{\\SecurityPeriod}{{\\ttfamily 10}年}"));
@@ -2350,7 +2396,11 @@ mod tests {
         ];
         input.date = "2026年8月5日".into();
         let tex = letter_tex(&input, "# 联合发文测试函\n\n正文。");
-        assert!(tex.contains("\\documentclass[noforcenewpage,autocalc,jointmodeone]{gonghan-gwa}"));
+        assert!(
+            tex.contains(
+                "\\documentclass[proof,noforcenewpage,autocalc,jointmodeone]{gonghan-gwa}"
+            )
+        );
         assert!(tex.contains("\\renewcommand{\\IssuingUnit}{乙单位}"));
         assert!(tex.contains("甲单位 & 乙单位 \\\\[45mm]"));
         // 规格 §2.5：三个单位时最后一个跨两列居中。
@@ -2441,11 +2491,11 @@ mod tests {
         input.profile.style_mode = StyleMode::Compact;
         let tex = letter_tex(&input, "# 测试函\n\n## 任务目标\n测试正文。");
         // 标题部分用黑体并带顿号编号与句号，正文部分沿用正文字体，合并为一行。
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标。}测试正文。\\GwaTail{"));
         // 正常风格不合并。
         input.profile.style_mode = StyleMode::Normal;
         let tex = letter_tex(&input, "# 测试函\n\n## 任务目标\n测试正文。");
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\GwaTail{"));
     }
 
     #[test]
@@ -2454,8 +2504,8 @@ mod tests {
         input.profile.style_mode = StyleMode::Compact;
         // 标题后跟列表时不合并，仍输出独立标题段。
         let tex = letter_tex(&input, "# 测试函\n\n## 任务目标\n- 第一项\n- 第二项");
-        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\par"));
-        assert!(tex.contains("\\noindent • 第一项\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\GwaTail{"));
+        assert!(tex.contains("\\noindent • 第一项\\GwaTail{"));
     }
 
     #[test]
@@ -2468,17 +2518,17 @@ mod tests {
             "# 测试函\n\n## 一、总体要求\n开头段落。\n### （一）任务一\n任务一正文。\n### （二）任务二\n任务二正文。",
         );
         // 2 级标题不合并，仍输出独立标题段，其后的段落单独成段。
-        assert!(tex.contains("{\\heiti\\enheiti 一、总体要求}\\par"));
-        assert!(tex.contains("开头段落。\\par"));
+        assert!(tex.contains("{\\heiti\\enheiti 一、总体要求}\\GwaTail{"));
+        assert!(tex.contains("开头段落。\\GwaTail{"));
         // 3 级标题每个都与紧随正文合并，用楷体与“（一）”“（二）”编号。
         assert_eq!(
-            tex.matches("{\\kai\\enkai （一）任务一。}任务一正文。\\par")
+            tex.matches("{\\kai\\enkai （一）任务一。}任务一正文。\\GwaTail{")
                 .count(),
             1,
             "每个最深层标题都应合并：{tex}"
         );
         assert_eq!(
-            tex.matches("{\\kai\\enkai （二）任务二。}任务二正文。\\par")
+            tex.matches("{\\kai\\enkai （二）任务二。}任务二正文。\\GwaTail{")
                 .count(),
             1
         );
@@ -2487,7 +2537,7 @@ mod tests {
             &input,
             "# 测试函\n\n### 正文事项\n正文内容。\n<!-- [附件] -->\n# 附件1\n## 表一\n内容一。",
         );
-        assert!(tex.contains("正文事项。}正文内容。\\par"));
+        assert!(tex.contains("正文事项。}正文内容。\\GwaTail{"));
         assert!(tex.contains(
             "\\centering\\bs\\enbt\\zihao{2}\\setlength{\\baselineskip}{\\BodyBaselineSkip} 表一\\par"
         ));
@@ -2495,20 +2545,20 @@ mod tests {
 
     #[test]
     fn each_additional_attachment_starts_on_a_new_page() {
-        let blocks = parse_markdown(
+        let (blocks, block_lines) = parse_markdown_with_lines(
             "# 测试函\n正文。\n<!-- [附件] -->\n# 附件1\n## 表一\n内容一。\n# 附件2\n## 表二\n内容二。",
         );
-        let (_, attachments) = official_letter_sections_to_tex(&blocks, false);
+        let (_, attachments) = official_letter_sections_to_tex(&blocks, &block_lines, false);
         assert_eq!(attachments.matches("\\clearpage").count(), 1);
         assert!(attachments.find("附件1").unwrap() < attachments.find("附件2").unwrap());
     }
 
     #[test]
     fn attachment_table_uses_mdx_longtblr_environment() {
-        let blocks = parse_markdown(
+        let (blocks, block_lines) = parse_markdown_with_lines(
             "# 测试函\n<!-- [附件] -->\n# 附件1\n## 统计表\n| 序号 | 说明 |\n| --- | --- |\n| 1 | 较长的说明文字。 |",
         );
-        let (_, attachments) = official_letter_sections_to_tex(&blocks, false);
+        let (_, attachments) = official_letter_sections_to_tex(&blocks, &block_lines, false);
         assert!(attachments.contains("\\begin{longtblr}"));
         assert!(attachments.contains("Q[c,wd=2em]"));
         assert!(attachments.contains("rowhead = 1"));
@@ -2516,10 +2566,10 @@ mod tests {
 
     #[test]
     fn crowded_table_makes_only_its_attachment_landscape() {
-        let blocks = parse_markdown(
+        let (blocks, block_lines) = parse_markdown_with_lines(
             "# 测试函\n<!-- [附件] -->\n# 附件1\n## 宽表\n| 序号 | 事项类别 | 事项名称 | 存在问题 | 整改措施 | 责任部门 | 完成时限 | 当前状态 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | 线上办理 | 行政备案事项 | 移动端部分页面显示不完整，申请人无法正常上传附件。 | 优化移动端页面适配，增加格式和大小提示并开展测试。 | 技术保障部门 | 2026年8月12日 | 已完成 |\n# 附件2\n## 窄表\n| 序号 | 名称 |\n| --- | --- |\n| 1 | 短项 |",
         );
-        let (_, attachments) = official_letter_sections_to_tex(&blocks, false);
+        let (_, attachments) = official_letter_sections_to_tex(&blocks, &block_lines, false);
         let first = attachments.find("附件1").unwrap();
         let landscape_end = attachments.find("\\end{landscape}").unwrap();
         let second = attachments.find("附件2").unwrap();

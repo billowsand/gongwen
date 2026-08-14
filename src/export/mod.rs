@@ -346,6 +346,45 @@ pub(crate) fn parse_markdown(markdown: &str) -> Vec<MarkdownBlock> {
         .collect()
 }
 
+/// 与 `parse_markdown` 同一套块序列，另外给出每个块在源码里的 1-based 起始行号。
+/// 行号会随 `\GwaTail{行号}` 写进 TeX，编译后由孤行探针原样回传，审校提示因此
+/// 能直接点到 Markdown 的哪一段，不必再去猜段落序号。
+pub(crate) fn parse_markdown_with_lines(markdown: &str) -> (Vec<MarkdownBlock>, Vec<usize>) {
+    let located = parse_markdown_located(markdown);
+    let starts: Vec<usize> = source_lines(markdown)
+        .into_iter()
+        .map(|(offset, _)| offset)
+        .collect();
+    let mut blocks = Vec::with_capacity(located.len());
+    let mut lines = Vec::with_capacity(located.len());
+    for item in located {
+        lines.push(line_of(&starts, item.range.start));
+        blocks.push(item.block);
+    }
+    (blocks, lines)
+}
+
+/// 字节偏移落在第几行（1-based）：最后一个不超过它的行首。
+fn line_of(line_starts: &[usize], offset: usize) -> usize {
+    line_starts.partition_point(|start| *start <= offset).max(1)
+}
+
+/// 反查：起始行号是 `line` 的那个块，占用源码的哪一段字节。
+///
+/// 孤行提示带着 `\GwaTail` 里回传的行号，要点击定位就得换回字节范围。这里直接
+/// 复用 `parse_markdown_with_lines` 的切块结果，跟导出时的分段口径完全一致，
+/// 不会出现"提示说第 5 行、选中的却是隔壁那段"。
+pub(crate) fn block_span_for_line(markdown: &str, line: usize) -> Option<std::ops::Range<usize>> {
+    let starts: Vec<usize> = source_lines(markdown)
+        .into_iter()
+        .map(|(offset, _)| offset)
+        .collect();
+    parse_markdown_located(markdown)
+        .into_iter()
+        .find(|located| line_of(&starts, located.range.start) == line)
+        .map(|located| located.range)
+}
+
 /// 逐行切分并记录每行的起始字节；行内容与 `str::lines` 一致（去掉行尾 \r\n）。
 fn source_lines(markdown: &str) -> Vec<(usize, &str)> {
     let mut lines = Vec::new();
@@ -1454,6 +1493,36 @@ mod tests {
     }
 
     /// 每个块记下的字节范围必须正好切出它自己的源码：界面预览点击回跳全靠它。
+    #[test]
+    fn block_lines_and_spans_agree_with_each_other() {
+        let markdown = "# 标题\n\n第一段首行\n第一段次行\n\n- 列表项\n\n第三段。\n";
+        let (blocks, lines) = parse_markdown_with_lines(markdown);
+        assert_eq!(blocks.len(), lines.len());
+        // 行号就是 \GwaTail 写进 TeX 的那个值，必须指向该块自己的第一行。
+        assert_eq!(lines, vec![1, 3, 6, 8]);
+        for line in lines {
+            let span = block_span_for_line(markdown, line).expect("每个块都该能反查回范围");
+            let first_line = markdown[span.clone()].lines().next().unwrap();
+            assert_eq!(
+                markdown.lines().nth(line - 1).unwrap(),
+                first_line,
+                "第 {line} 行反查到的范围应从这一行开始"
+            );
+        }
+    }
+
+    #[test]
+    fn block_span_covers_the_whole_soft_wrapped_paragraph() {
+        // 孤行提示指向整段：点击后要把这段全选中，用户才知道改哪里。
+        let markdown = "# 标题\n\n第一段首行\n第一段次行\n\n第二段。\n";
+        let span = block_span_for_line(markdown, 3).unwrap();
+        assert_eq!(&markdown[span], "第一段首行\n第一段次行");
+        assert!(
+            block_span_for_line(markdown, 4).is_none(),
+            "段内后续行不单独成块"
+        );
+    }
+
     #[test]
     fn located_blocks_point_back_at_their_own_source() {
         let markdown = "# 标题\n\n<!-- [正文] -->\n\n第一段首行\n第一段次行\n\n- 列表项\n\n| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n";

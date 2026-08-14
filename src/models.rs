@@ -1348,11 +1348,43 @@ impl ExportSelection {
     }
 }
 
+/// 一条审校提示。`span` 有值时，它指向正文里出问题的那一段——审校面板据此把
+/// 这条做成可点的，点了就切回 Markdown 视图选中那段。孤行这类排版问题总能定位
+/// 到具体段落；文号、密级之类的元数据提示没有对应正文位置，`span` 为 `None`。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReviewNote {
+    pub message: String,
+    pub span: Option<std::ops::Range<usize>>,
+}
+
+impl ReviewNote {
+    pub fn located(message: String, span: std::ops::Range<usize>) -> Self {
+        Self {
+            message,
+            span: Some(span),
+        }
+    }
+}
+
+impl From<String> for ReviewNote {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            span: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneratedDraft {
     pub markdown: String,
     pub title: String,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ReviewNote>,
+    /// 编译时由孤行探针实测出来的提示，与 `warnings` 分开存，正文一改即作废。
+    pub proof_warnings: Vec<ReviewNote>,
+    /// 这次有没有真的排完版量过。空的 `proof_warnings` 不足以区分“量过没问题”
+    /// 和“没编译”，前者要压住粗估提示，后者不能压。
+    pub proof_measured: bool,
     pub files: Vec<std::path::PathBuf>,
 }
 
