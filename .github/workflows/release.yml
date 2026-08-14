@@ -13,9 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 # Runtime assets are versioned independently of the app; bump this tag only
-# when the runtime contents actually change.
+# when the runtime contents actually change. The tagged release must provide
+# runtime-win-x64.zip, runtime-linux-arm64.zip and runtime-darwin-arm64.zip.
 env:
-  RUNTIME_RELEASE_TAG: v0.3.5
+  RUNTIME_RELEASE_TAG: v0.3.6
   RUNTIME_REPO: billowsand/gongwen-runtime
 
 jobs:
@@ -252,9 +253,63 @@ jobs:
             gongwen-assistant_*_arm64.deb*
           if-no-files-found: error
 
+  build-macos:
+    name: Build macOS ARM64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Download runtime assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          New-Item -ItemType Directory -Force -Path runtime | Out-Null
+          $asset = "runtime-darwin-arm64.zip"
+          gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
+          Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
+          Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
+
+      - name: Prepare full staging directory
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/macos-arm64-full"
+          ./scripts/package-portable.ps1 -Suffix darwin-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
+
+      - name: Smoke test packaged TeX runtime
+        shell: pwsh
+        run: |
+          $env:GONGWEN_RUNTIME_DIR = Join-Path $env:GITHUB_WORKSPACE "dist/macos-arm64-full/runtime"
+          cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
+
+      - name: Package macOS DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          staging="$GITHUB_WORKSPACE/dist/macos-arm64-full"
+          bash ./scripts/package-dmg.sh "$version" "$staging" "$GITHUB_WORKSPACE"
+
+      - name: Upload macOS release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-arm64
+          path: |
+            gongwen-assistant-*-macos-arm64.dmg*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: [build-windows, package-linux-arm64]
+    needs: [build-windows, package-linux-arm64, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

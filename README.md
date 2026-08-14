@@ -25,9 +25,11 @@
 
 ### 获取发布版
 
-GitHub Releases 提供两种安装包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）与 Linux ARM64 的 Debian 包（`gongwen-assistant_<版本>_arm64.deb`）。两者都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
+GitHub Releases 提供三种安装包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）、Linux ARM64 的 Debian 包（`gongwen-assistant_<版本>_arm64.deb`）与 macOS Apple Silicon 的 DMG（`gongwen-assistant-<版本>-macos-arm64.dmg`）。三者都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
 
-发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`）。相关资产受授权和体积限制，不进入源码仓库。
+macOS 安装：打开 DMG，把「公文助手」拖进 Applications。应用未做开发者签名与公证，首次打开需右键点图标选「打开」，并在系统弹窗中确认；要求 macOS 12 及以上、Apple Silicon。
+
+发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`），macOS 用 `scripts/package-dmg.sh` 打成拖拽安装的 DMG。相关资产受授权和体积限制，不进入源码仓库。
 
 ### 从源码构建
 
@@ -87,7 +89,7 @@ cargo check
 GitHub Actions：
 
 - `.github/workflows/ci.yml`：在 Windows、Linux、macOS 上执行格式、静态检查和测试；
-- `.github/workflows/release.yml`：推送 `v*` 标签后构建各平台安装包（Windows setup.exe、Linux deb）与 SHA256 校验和并创建 GitHub Release。
+- `.github/workflows/release.yml`：推送 `v*` 标签后构建各平台安装包（Windows setup.exe、Linux deb、macOS DMG）与 SHA256 校验和并创建 GitHub Release。
 
 版本号只维护在 `Cargo.toml`，使用 `scripts/bump-version.ps1 -Part major|minor|patch` 同步更新 `Cargo.lock`。
 
