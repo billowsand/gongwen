@@ -15,6 +15,7 @@ mod lmstudio;
 mod manuscript;
 mod manuscript_io;
 mod models;
+mod pdf_viewer;
 mod portable_runtime;
 mod preview;
 mod prompt;

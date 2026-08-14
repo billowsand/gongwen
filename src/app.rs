@@ -19,6 +19,7 @@ use crate::{
         ManuscriptStatus, RerankMode, SecurityLevel, TemplateKind, ThemeName, VocabularyCategory,
         VocabularyEntry, builtin_ai_prompts, join_units, split_units,
     },
+    pdf_viewer::{self, PdfAction as PdfViewerAction, PdfKey, PdfSession},
     preview, prompt, qa, rag, storage, system_fonts, texcompile, theme, units,
     units::UnitDisplay,
     validator, version, vocabulary_xlsx,
@@ -93,6 +94,7 @@ enum NavPage {
 enum TabRef {
     Doc(DocKey),
     Page(NavPage),
+    Pdf(PdfKey),
 }
 
 impl NavPage {
@@ -159,6 +161,12 @@ pub(crate) enum WorkerResult {
     ManuscriptPdfExport {
         path: PathBuf,
         result: Result<manuscript_io::PdfExportSummary, String>,
+    },
+    /// PDF 渲染线程的消息：打开完成、某一页光栅化完成或失败。
+    /// 纹理在主线程收到后创建。
+    Pdf {
+        key: PdfKey,
+        message: pdf_viewer::PdfMessage,
     },
 }
 
@@ -397,10 +405,13 @@ pub struct GongwenApp {
     config: AppConfig,
     /// 已打开的稿件，每篇一个起草页标签。空表示当前只在导航页里。
     docs: Vec<DraftSession>,
+    /// 应用内打开的 PDF，只在本次运行中保留，不写入会话恢复表。
+    pdfs: Vec<PdfSession>,
     /// `docs` 中当前显示的那一篇；`view` 不是 `View::Doc` 时无意义。
     active_doc: usize,
     /// 下一篇打开的稿件用的 key，只增不减。
     next_doc_key: DocKey,
+    next_pdf_key: PdfKey,
     /// 起草页回传给外壳执行的动作，帧末统一处理。
     draft_actions: Vec<DraftAction>,
     /// 导出目录里最近的 tex/pdf/docx 索引，工具栏三枚成品入口共用一份。
@@ -585,6 +596,8 @@ pub(crate) enum DraftAction {
     Persist,
     /// 打开设置页（功能区「输出 → 导出设置」）。
     OpenSettings,
+    /// 在应用内打开最近导出的 PDF。
+    OpenPdf(PathBuf),
 }
 
 impl GongwenApp {
@@ -632,8 +645,10 @@ impl GongwenApp {
         let mut app = Self {
             config,
             docs,
+            pdfs: Vec::new(),
             active_doc: 0,
             next_doc_key: 1,
+            next_pdf_key: 1,
             draft_actions: Vec::new(),
             export_links: ExportLinks::default(),
             models: Vec::new(),
@@ -727,6 +742,10 @@ impl GongwenApp {
         self.docs.iter().position(|doc| doc.key == key)
     }
 
+    fn pdf_index_of_key(&self, key: PdfKey) -> Option<usize> {
+        self.pdfs.iter().position(|pdf| pdf.key == key)
+    }
+
     /// 切到某一格标签。稿件标签同时把 `active_doc` 指过去。
     fn activate_tab(&mut self, tab: usize) {
         let Some(&item) = self.tabs.get(tab) else {
@@ -782,6 +801,51 @@ impl GongwenApp {
         }
     }
 
+    /// 在应用内打开 PDF。同一路径已经开着时只切换标签，不重复占用纹理。
+    fn open_pdf(&mut self, path: PathBuf, title: Option<String>) {
+        if let Some(index) = self.pdfs.iter().position(|pdf| pdf.path() == path)
+            && let Some(tab) = self
+                .tabs
+                .iter()
+                .position(|item| *item == TabRef::Pdf(self.pdfs[index].key))
+        {
+            self.activate_tab(tab);
+            return;
+        }
+        let key = self.next_pdf_key;
+        self.next_pdf_key += 1;
+        self.pdfs
+            .push(PdfSession::new(key, path, title, self.sender.clone()));
+        self.tabs.push(TabRef::Pdf(key));
+        self.activate_tab(self.tabs.len() - 1);
+    }
+
+    fn pdf_ui(&mut self, key: PdfKey, ui: &mut egui::Ui) {
+        let Some(index) = self.pdf_index_of_key(key) else {
+            ui.centered_and_justified(|ui| {
+                ui.label("这个 PDF 标签已经关闭。");
+            });
+            return;
+        };
+        let actions = self.pdfs[index].ui(ui);
+        self.apply_pdf_actions(actions);
+    }
+
+    fn apply_pdf_actions(&mut self, actions: Vec<PdfViewerAction>) {
+        for action in actions {
+            match action {
+                PdfViewerAction::OpenExternal(path) => match open_in_os(&path) {
+                    Ok(()) => self.status = format!("已用系统程序打开 {}。", path.display()),
+                    Err(error) => self.status = format!("打开 PDF 失败：{error}"),
+                },
+                PdfViewerAction::Reveal(path) => match reveal_in_os(&path) {
+                    Ok(()) => self.status = format!("已定位 {}。", path.display()),
+                    Err(error) => self.status = format!("定位 PDF 失败：{error}"),
+                },
+            }
+        }
+    }
+
     /// 同一篇稿件不重复打开：已经开着就切过去。
     fn focus_manuscript(&mut self, id: i64) -> bool {
         let found = self
@@ -811,7 +875,7 @@ impl GongwenApp {
                     self.close_tab(tab);
                 }
             }
-            Some(TabRef::Page(_)) => self.close_tab(tab),
+            Some(TabRef::Page(_) | TabRef::Pdf(_)) => self.close_tab(tab),
             None => {}
         }
     }
@@ -828,6 +892,11 @@ impl GongwenApp {
                 self.active_doc -= 1;
             }
             self.active_doc = self.active_doc.min(self.docs.len().saturating_sub(1));
+        }
+        if let TabRef::Pdf(key) = self.tabs[tab]
+            && let Some(index) = self.pdf_index_of_key(key)
+        {
+            self.pdfs.remove(index);
         }
         self.tabs.remove(tab);
         if self.tabs.is_empty() {
@@ -1102,7 +1171,10 @@ impl GongwenApp {
 
     /// 全局任务或任意一篇稿件的任务在跑。
     fn any_busy(&self) -> bool {
-        self.busy || self.knowledge_busy || self.docs.iter().any(|doc| doc.busy)
+        self.busy
+            || self.knowledge_busy
+            || self.docs.iter().any(|doc| doc.busy)
+            || self.pdfs.iter().any(PdfSession::busy)
     }
 
     /// 当前标签是稿件时返回它；停在导航页时为 None。
@@ -1164,6 +1236,7 @@ impl GongwenApp {
                 } => self.load_manuscript_version(manuscript_id, version_number),
                 DraftAction::Persist => self.persist(),
                 DraftAction::OpenSettings => self.open_page(NavPage::Settings),
+                DraftAction::OpenPdf(path) => self.open_pdf(path, None),
             }
         }
     }
@@ -1242,6 +1315,7 @@ impl GongwenApp {
                     Some(manuscript::OpenTab::Manuscript(id))
                 }
                 TabRef::Page(page) => Some(manuscript::OpenTab::Page(page.key().to_string())),
+                TabRef::Pdf(_) => None,
             })
             .collect();
         // 过滤掉未入库的稿件后下标会错位，按身份重新定位当前这一格。
@@ -1258,6 +1332,7 @@ impl GongwenApp {
                 TabRef::Page(page) => tabs
                     .iter()
                     .position(|t| *t == manuscript::OpenTab::Page(page.key().to_string())),
+                TabRef::Pdf(_) => None,
             })
             .unwrap_or(0);
         if let Some(store) = self.manuscript_store.as_mut() {
@@ -1771,6 +1846,11 @@ impl GongwenApp {
                             self.status =
                                 format!("导出 PDF 失败：{error}（未生成 {}）", path.display());
                         }
+                    }
+                }
+                WorkerResult::Pdf { key, message } => {
+                    if let Some(index) = self.pdf_index_of_key(key) {
+                        self.pdfs[index].apply_message(ctx, message);
                     }
                 }
             }
@@ -2906,6 +2986,10 @@ impl GongwenApp {
                 None => ("", "已关闭".to_string()),
             },
             Some(TabRef::Page(page)) => ("", page.label().to_string()),
+            Some(TabRef::Pdf(key)) => match self.pdf_index_of_key(*key) {
+                Some(index) => ("", self.pdfs[index].title().to_string()),
+                None => ("", "已关闭 PDF".to_string()),
+            },
             None => ("", String::new()),
         }
     }
@@ -2954,6 +3038,14 @@ impl GongwenApp {
                 None => (None, title.clone(), false),
             },
             TabRef::Page(page) => (Some(page.icon()), page.label().to_string(), false),
+            TabRef::Pdf(key) => match self.pdf_index_of_key(key) {
+                Some(index) => (
+                    Some(theme::Icon::FileTypePdf),
+                    self.pdfs[index].tab_hover(),
+                    self.pdfs[index].busy(),
+                ),
+                None => (Some(theme::Icon::FileTypePdf), title.clone(), false),
+            },
         };
 
         // 先占位拿到交互状态，才能在同一帧内驱动颜色动画。
@@ -6695,7 +6787,7 @@ impl GongwenApp {
     }
 
     fn open_pdf_attachment(&mut self, id: i64) {
-        let path = {
+        let (path, title) = {
             let detail = self.manuscript_detail.as_ref();
             let Some(detail) = detail else { return };
             let Some(pdf) = detail.pdfs.iter().find(|p| p.id == id) else {
@@ -6709,11 +6801,9 @@ impl GongwenApp {
                 self.status = format!("写入临时 PDF 失败：{error}");
                 return;
             }
-            path
+            (path, pdf.file_name.clone())
         };
-        if let Err(error) = open_in_os(&path) {
-            self.status = format!("打开 PDF 失败：{error}");
-        }
+        self.open_pdf(path, Some(title));
     }
 
     fn save_pdf_attachment(&mut self, id: i64) {
@@ -8328,6 +8418,7 @@ impl eframe::App for GongwenApp {
                     crate::knowledge_ui::knowledge_ui(self, &mut content_ui)
                 }
                 TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
+                TabRef::Pdf(key) => self.pdf_ui(key, &mut content_ui),
             }
         });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。

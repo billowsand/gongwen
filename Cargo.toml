@@ -20,6 +20,7 @@ docx-rs = "0.4.22"
 eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"] }
 egui = "0.35.0"
 egui_extras = { version = "0.35.0", features = ["image", "svg"] }
+hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 jieba-rs = "0.8"
 regex = "1.11"
@@ -49,3 +50,9 @@ winresource = "0.1.31"
 [profile.release]
 lto = "thin"
 strip = true
+
+# PDF 光栅化（hayro / vello_cpu）是纯 CPU 逐像素合成，未优化的依赖会慢两个数量级：
+# 实测同一页 A4 公文 debug 下 445ms、优化后 3.4ms。只给依赖开优化，自己的代码
+# 仍然编译快、可调试。首次会多花一分钟重编依赖，之后不受影响。
+[profile.dev.package."*"]
+opt-level = 3
