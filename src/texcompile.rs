@@ -506,8 +506,58 @@ mod tests {
         assert_eq!(pdf.file_stem(), tex.file_stem());
     }
 
-    /// 多单位 + 使用简称 + 少于 5 字分散：三处排版都依赖 `\hspace*` 与
-    /// `\par\vspace{\baselineskip}`，确认生成的白头件能编译成 PDF。
+    /// 白头件附件与函稿走同一条链路：正文后列附件概要、落款后从新页排附件，
+    /// 验证 cls 的 whitepaper 分支真的把 \AttachmentContent 排出来。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn compiles_generated_white_paper_with_attachments() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::WhitePaper,
+            ..Default::default()
+        };
+        input.profile.kind = TemplateKind::WhitePaper;
+        input.profile.reporting_leaders = "张三".into();
+        input.profile.signing_unit = "办公室".into();
+        input.date = "2026年8月5日".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "# 关于报送某某工作情况的报告\n\n现将有关情况报告如下。\n<!-- [附件] -->\n# 2026年度情况统计表\n\n| 序号 | 事项 | 完成率 |\n| --- | --- | --- |\n| 1 | 标准化建设 | 100% |\n\n<!-- [附件] -->\n# 整改任务清单\n\n清单内容。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let tex_text = std::fs::read_to_string(tex).unwrap();
+        assert!(
+            tex_text.contains("\\SetAttachmentContent{"),
+            "白头件 tex 应带附件内容：{tex_text}"
+        );
+        assert!(
+            tex_text.contains("附件1：2026年度情况统计表"),
+            "白头件正文后应列附件概要：{tex_text}"
+        );
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
+        assert!(pdf.exists());
+        assert_eq!(pdf.file_stem(), tex.file_stem());
+        // 便于排查：把生成的 tex 与 pdf 各保留一份到固定路径。
+        let _ = std::fs::create_dir_all(".tmp/verify");
+        let _ = std::fs::copy(tex, ".tmp/verify/white-paper-attachment.tex");
+        let _ = std::fs::copy(&pdf, ".tmp/verify/white-paper-attachment.pdf");
+    }
     #[test]
     #[ignore = "需要本机安装 xelatex 才能运行"]
     fn compiles_generated_white_paper_with_multi_unit_abbr_spread() {

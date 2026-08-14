@@ -8,7 +8,7 @@
 use crate::models::{FontConfig, FontRole, ThemeName};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 // ── 字号体系 ────────────────────────────────────────────────────────────────
 /// 界面字号按 Windows 惯例固化：96 DPI 下 1pt ≈ 1.333px，
@@ -557,6 +557,7 @@ pub fn reset_window_anim(ctx: &egui::Context, id: egui::Id) {
 /// 以 SVG 原始字节随应用编译，不依赖外部文件或运行时网络。
 #[derive(Debug, Clone, Copy)]
 pub enum Icon {
+    BrandMark,
     AlignCenter,
     AlignLeft,
     AlignRight,
@@ -637,6 +638,10 @@ pub enum Icon {
 impl Icon {
     fn source(self) -> (&'static str, &'static [u8]) {
         match self {
+            Self::BrandMark => (
+                "brand-mark",
+                include_bytes!("../assets/icons/brand-mark.svg"),
+            ),
             Self::AlignCenter => (
                 "align-center",
                 include_bytes!("../assets/icons/align-center.svg"),
@@ -825,6 +830,50 @@ impl Icon {
         egui::Image::from_bytes(format!("bytes://icon/{name}.svg"), bytes)
             .fit_to_exact_size(egui::vec2(size, size))
     }
+}
+
+fn app_icon_png(name: ThemeName) -> &'static [u8] {
+    match name {
+        ThemeName::Claude => include_bytes!("../assets/app-icon/themes/claude/app-icon-256.png"),
+        ThemeName::Sky => include_bytes!("../assets/app-icon/themes/sky/app-icon-256.png"),
+        ThemeName::Lilac => include_bytes!("../assets/app-icon/themes/lilac/app-icon-256.png"),
+        ThemeName::Green => include_bytes!("../assets/app-icon/themes/green/app-icon-256.png"),
+    }
+}
+
+/// 启动时按已保存主题选择窗口图标。
+pub fn app_icon(name: ThemeName) -> egui::IconData {
+    eframe::icon_data::from_png_bytes(app_icon_png(name))
+        .expect("embedded themed app icon must be a valid PNG")
+}
+
+/// 切换主题时同步更新原生图标。
+///
+/// Windows 与 X11 由 winit 处理；macOS 没有窗口图标，额外通过 AppKit 更新 Dock。
+/// Wayland 不允许客户端设置窗口图标，因此仍使用发行包安装的桌面图标。
+pub fn apply_app_icon(ctx: &egui::Context, name: ThemeName) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(app_icon(name)))));
+    #[cfg(target_os = "macos")]
+    apply_macos_dock_icon(name);
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_dock_icon(name: ThemeName) {
+    use objc2::ClassType as _;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData};
+
+    // egui 的 update 在主线程执行；若嵌入到非标准宿主则安全地放弃 Dock 更新。
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(app_icon_png(name));
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
+    let application = NSApplication::sharedApplication(main_thread);
+    // SAFETY: 当前线程持有 MainThreadMarker，image 在调用期间有效。
+    unsafe { application.setApplicationIconImage(Some(&image)) };
 }
 
 /// 安装 egui 的 SVG 解码器。重复调用安全，但应用启动时只需调用一次。
@@ -1496,7 +1545,7 @@ pub fn configure_style(ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::configure_icons;
+    use super::{app_icon, configure_icons};
     use crate::models::ThemeName;
     use crate::theme::{Theme, by_name};
 
@@ -1508,7 +1557,16 @@ mod tests {
         assert!(ctx.is_loader_installed(egui_extras::loaders::image_loader::ImageCrateLoader::ID));
     }
 
-    /// 三套内置主题都必须是明色：纸面底很亮、文字为深色，保证可读性。
+    #[test]
+    fn every_theme_has_a_valid_runtime_app_icon() {
+        for name in ThemeName::ALL {
+            let icon = app_icon(name);
+            assert_eq!((icon.width, icon.height), (256, 256), "{name:?}");
+            assert_eq!(icon.rgba.len(), 256 * 256 * 4, "{name:?}");
+        }
+    }
+
+    /// 四套内置主题都必须是明色：纸面底很亮、文字为深色，保证可读性。
     #[test]
     fn all_presets_are_light_themes() {
         for name in ThemeName::ALL {

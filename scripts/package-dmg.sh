@@ -29,8 +29,8 @@ if [ ! -x "$STAGING/runtime/tectonic/tectonic" ]; then
     echo "error: staging runtime tectonic not found or not executable" >&2
     exit 1
 fi
-if [ ! -f "$PROJECT_ROOT/assets/app-icon/app-icon-512.png" ]; then
-    echo "error: icon source not found: $PROJECT_ROOT/assets/app-icon/app-icon-512.png" >&2
+if [ ! -f "$PROJECT_ROOT/assets/app-icon/app-icon-1024.png" ]; then
+    echo "error: icon source not found: $PROJECT_ROOT/assets/app-icon/app-icon-1024.png" >&2
     exit 1
 fi
 
@@ -63,7 +63,7 @@ render() {
     local size=$1
     local name=$2
     sips -z "$size" "$size" \
-        "$PROJECT_ROOT/assets/app-icon/app-icon-512.png" \
+        "$PROJECT_ROOT/assets/app-icon/app-icon-1024.png" \
         --out "$ICONSET/$name" >/dev/null
 }
 render 16 icon_16x16.png

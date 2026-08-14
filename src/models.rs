@@ -587,7 +587,9 @@ pub struct VocabularyEntry {
     pub(crate) seal_on_behalf_imported: bool,
 }
 
-/// 公文中可以选择的密级。“不标注”用于无需标密的普通公文。
+/// 公文中可以选择的密级。密级是所有文稿类型的必要填报项目，
+/// 新建稿件默认“机密”、保密期限 20 年；`Unmarked` 仅用于兼容
+/// 旧配置与旧稿件里没有密级的快照，新稿一律不允许留空。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SecurityLevel {
     #[default]
@@ -843,8 +845,9 @@ impl Default for TemplateProfile {
             reporting_leaders: String::new(),
             signing_unit: String::new(),
             use_short_name_for_signature: false,
-            security_level: String::new(),
-            security_period: String::new(),
+            // 密级是所有文稿类型的必要填报项目：默认机密、保密期限 20 年。
+            security_level: "机密".into(),
+            security_period: "20年".into(),
             special_handling: false,
             document_year: String::new(),
             document_number: String::new(),
@@ -1242,6 +1245,18 @@ impl AppConfig {
         self.ai_prompts.iter().find(|entry| entry.id == id)
     }
 
+    /// 密级从 v0.4 起是所有文稿类型的必要填报项目，默认机密、保密期限 20 年。
+    /// 旧配置里各模板可能存了空密级（当时允许“不标注密级”），载入时统一回填默认值，
+    /// 保证老用户新建稿件也带默认密级；用户显式保存过的非空密级一律不动。
+    pub fn ensure_security_defaults(&mut self) {
+        for profile in &mut self.profiles {
+            if profile.security_level.trim().is_empty() {
+                profile.security_level = "机密".into();
+                profile.security_period = "20年".into();
+            }
+        }
+    }
+
     /// 分配一个未占用的提示词 id。
     pub fn next_ai_prompt_id(&self) -> u32 {
         self.ai_prompts
@@ -1369,6 +1384,50 @@ mod tests {
             .expect("应有格式规整预置项");
         assert!(format.instruction.is_empty());
         assert!(format.kinds.is_empty());
+    }
+
+    /// 密级是所有文稿类型的必要填报项目：新模板默认“机密、20年”。
+    #[test]
+    fn profile_defaults_to_confidential_20_years() {
+        let profile = TemplateProfile::default();
+        assert_eq!(profile.security_level, "机密");
+        assert_eq!(profile.security_period, "20年");
+        for kind in TemplateKind::ALL {
+            let profile = TemplateProfile::for_kind(kind);
+            assert_eq!(profile.security_level, "机密", "{kind:?}");
+            assert_eq!(profile.security_period, "20年", "{kind:?}");
+        }
+    }
+
+    /// 旧配置里各模板可能存了空密级（当时允许“不标注密级”），载入时统一回填默认值；
+    /// 用户显式保存过的非空密级一律不动。
+    #[test]
+    fn ensure_security_defaults_backfills_empty_levels_only() {
+        let mut config = AppConfig::default();
+        let mut empty = TemplateProfile::for_kind(TemplateKind::OfficialLetter);
+        empty.security_level.clear();
+        empty.security_period.clear();
+        let mut custom = TemplateProfile::for_kind(TemplateKind::PhoneNotice);
+        custom.security_level = "秘密".into();
+        custom.security_period = "10年".into();
+        config.profiles = vec![empty, custom];
+
+        config.ensure_security_defaults();
+
+        let official = config
+            .profiles
+            .iter()
+            .find(|profile| profile.kind == TemplateKind::OfficialLetter)
+            .expect("应有公函模板");
+        assert_eq!(official.security_level, "机密");
+        assert_eq!(official.security_period, "20年");
+        let phone = config
+            .profiles
+            .iter()
+            .find(|profile| profile.kind == TemplateKind::PhoneNotice)
+            .expect("应有电话通知模板");
+        assert_eq!(phone.security_level, "秘密");
+        assert_eq!(phone.security_period, "10年");
     }
 
     /// 旧稿件联系人未绑承办单位（unit 为空）：按索引回落 joint_responsible_units。

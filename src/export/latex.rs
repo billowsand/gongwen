@@ -802,9 +802,18 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
             _ => None,
         })
         .unwrap_or(input.title_hint.as_str());
-    // 正文与函稿一致（含标题编号与紧缩合并）；白头件无附件，附件区段不落版。
-    let (body, _) =
+    // 正文与函稿一致（含标题编号与紧缩合并）；附件区段保留，与函稿同链路落版。
+    let (mut body, attachments) =
         official_letter_sections_to_tex(&blocks, input.profile.style_mode == StyleMode::Compact);
+    // 附件概要：正文结束后、落款之前列出附件名称。
+    if let Some(summary) = attachment_summary_tex(&blocks) {
+        body.push_str(&summary);
+    }
+    let attachment_command = if attachments.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\\SetAttachmentContent{{\n{attachments}\n}}\n")
+    };
     let security = security_commands(input);
     // 呈报领导（楷体顶格）按人员编码排序、相同职务合并后写入 \Recipient。
     let leaders = display
@@ -858,7 +867,7 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
 \renewcommand{{\MainContent}}{{
 {body}
 }}
-\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
+{attachment_command}\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
 {date_commands}\begin{{document}}
 \makeletter
 \end{{document}}
@@ -868,6 +877,7 @@ fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) ->
         security = security,
         leaders = tex_escape(&leaders),
         body = body,
+        attachment_command = attachment_command,
         signature_unit = signature_unit,
         date_commands = date_commands,
     )
@@ -1638,7 +1648,7 @@ mod tests {
     }
 
     #[test]
-    fn white_paper_tex_falls_back_to_issuing_unit_for_signature_and_skips_attachments() {
+    fn white_paper_tex_falls_back_to_issuing_unit_for_signature_and_renders_attachments() {
         let mut input = DraftInput::default();
         input.kind = TemplateKind::WhitePaper;
         input.profile.issuing_unit = "某某处".into();
@@ -1646,15 +1656,58 @@ mod tests {
         input.date = "2026年8月5日".into();
         let tex = white_paper_tex(
             &input,
-            "# 标题\n\n正文。\n<!-- [附件] -->\n# 附件1\n附件内容。",
+            "# 标题\n\n正文。\n<!-- [附件] -->\n# 情况统计表\n附件内容。",
             &UnitDisplay::new(&[]),
         );
         assert!(
             tex.contains("\\renewcommand{\\SignatureUnit}{某\\hspace*{1em}某\\hspace*{1em}处}"),
             "落款少于 5 字应分散对齐到 5 字宽：{tex}"
         );
-        // 白头件一般只有正文：附件区段不落版。
-        assert!(!tex.contains("附件内容"), "白头件不应渲染附件：{tex}");
+        // 白头件同样支持附件：概要落版、正文与附件内容经 \SetAttachmentContent 输出。
+        assert!(
+            tex.contains("\\SetAttachmentContent{") && tex.contains("附件内容。"),
+            "白头件应渲染附件：{tex}"
+        );
+        assert!(
+            tex.contains("附件：情况统计表"),
+            "白头件正文后应列出附件概要：{tex}"
+        );
+    }
+
+    #[test]
+    fn white_paper_tex_appends_attachment_summary_before_closing() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::WhitePaper;
+        input.profile.reporting_leaders = "张三".into();
+        input.profile.signing_unit = "办公室".into();
+        input.date = "2026年8月5日".into();
+        let tex = white_paper_tex(
+            &input,
+            "# 标题\n\n正文。\n<!-- [附件] -->\n# 情况统计表\n表内容。\n<!-- [附件] -->\n# 整改任务清单\n清单内容。",
+            &UnitDisplay::new(&[]),
+        );
+        // 附件概要：多份附件只有第一行保留“附件”二字，其余行用 \qquad 占位。
+        assert!(
+            tex.contains("附件1：情况统计表"),
+            "概要第一行应为“附件1：”：{tex}"
+        );
+        assert!(
+            tex.contains("\\qquad 2：整改任务清单"),
+            "概要其余行用 \\qquad 占位：{tex}"
+        );
+        // 概要位于正文之后、落款之前。
+        let body_start = tex.find("\\MainContent").unwrap();
+        let summary_at = tex.find("附件1：情况统计表").unwrap();
+        let signature_at = tex.find("\\SignatureUnit").unwrap();
+        assert!(
+            body_start < summary_at && summary_at < signature_at,
+            "附件概要应位于正文与落款之间：{tex}"
+        );
+        // 两份附件都进 \SetAttachmentContent，编号由程序生成。
+        assert!(tex.contains("\\SetAttachmentContent{"));
+        assert!(tex.contains("附件1}\\par"));
+        assert!(tex.contains("附件2}\\par"));
+        assert!(tex.contains("清单内容。"));
     }
 
     #[test]

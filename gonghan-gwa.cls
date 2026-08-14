@@ -872,6 +872,12 @@
         \ifgwa@whitepaper
             % 白头件：按落款实际高度判断“此页无正文”；无版记，落款靠左排、右侧留签字空间。
             \WhitePaperClosing
+
+            % 附件与正文分区，始终从新页开始。
+            \ifgwa@hasattachments
+                \clearpage
+                \AttachmentContent
+            \fi
         \else
             % 按落款（无附件时连同版记）的实际高度判断正文末页放不放得下；
             % 另起的落款页自动标注“此页无正文”。

@@ -3825,7 +3825,11 @@ impl DraftPage<'_> {
             .min_row_height(FORM_CONTROL_HEIGHT)
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
-                row_label(ui, "密级");
+                row_label_with_info(
+                    ui,
+                    "密级",
+                    "所有文稿类型必填，默认机密、保密期限20年；不支持“不标注密级”。",
+                );
                 let mut level = SecurityLevel::from_marking(&self.doc.draft.profile.security_level);
                 let previous = level;
                 egui::ComboBox::from_id_salt("security_level")
@@ -3833,6 +3837,9 @@ impl DraftPage<'_> {
                     .width(field_width)
                     .show_ui(ui, |ui| {
                         for option in SecurityLevel::ALL {
+                            if option == SecurityLevel::Unmarked {
+                                continue;
+                            }
                             ui.selectable_value(&mut level, option, option.label());
                         }
                     });
@@ -3859,7 +3866,7 @@ impl DraftPage<'_> {
                 let options = rules.period_options(level);
                 if options.is_empty() {
                     self.doc.draft.profile.security_period.clear();
-                    ui.weak("不标注密级时无需填写保密期限");
+                    ui.weak("旧稿未标注密级：密级为所有文稿类型必填项，请先选择密级");
                 } else {
                     let period = &mut self.doc.draft.profile.security_period;
                     egui::ComboBox::from_id_salt("security_period")

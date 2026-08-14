@@ -600,6 +600,8 @@ impl GongwenApp {
         units::normalize(&mut config.vocabulary);
         // 旧配置没有提示词库，这里补齐预置项并给未编号的条目分配 id。
         config.ensure_ai_prompts();
+        // 密级现在是所有文稿类型的必要填报项目：旧配置里的空密级回填默认“机密、20年”。
+        config.ensure_security_defaults();
         if config.output_dir.trim().is_empty() {
             config.output_dir = std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
@@ -2330,16 +2332,21 @@ impl GongwenApp {
         );
         let mut text_right = title_rect.left();
         if title_rect.width() > 60.0 {
-            text_right = ui
-                .painter()
-                .text(
-                    title_rect.left_center(),
-                    egui::Align2::LEFT_CENTER,
-                    version::APP_TITLE,
-                    egui::FontId::proportional(13.0),
-                    title_color,
-                )
-                .right();
+            let brand_rect = egui::Rect::from_center_size(
+                title_rect.left_center() + egui::vec2(9.0, 0.0),
+                egui::vec2(18.0, 18.0),
+            );
+            let brand_color = if focused {
+                theme::accent()
+            } else {
+                title_color
+            };
+            ui.put(
+                brand_rect,
+                theme::Icon::BrandMark.image_sized(18.0).tint(brand_color),
+            )
+            .on_hover_text(version::APP_TITLE);
+            text_right = brand_rect.right();
         }
         // 快速访问工具栏：仿 Word 挂在标题栏上，与停在哪个分区卡无关。
         // 只在活动标签是稿件时出现——设置页、词库页上它们没有作用对象。
@@ -7754,6 +7761,7 @@ impl GongwenApp {
                     self.config.theme = name;
                     theme::set_current(name);
                     theme::configure_style(ui.ctx());
+                    theme::apply_app_icon(ui.ctx(), name);
                     self.status = format!("界面主题已切换为「{}」。", palette.label);
                     let _ = storage::save(&self.config);
                 }

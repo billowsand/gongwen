@@ -33,9 +33,7 @@ mod vocabulary_xlsx;
 use app::GongwenApp;
 
 fn main() -> eframe::Result {
-    let app_icon =
-        eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon/app-icon-256.png"))
-            .expect("embedded application icon must be a valid PNG");
+    let app_icon = theme::app_icon(storage::load().unwrap_or_default().theme);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])

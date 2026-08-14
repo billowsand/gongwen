@@ -168,9 +168,6 @@ pub fn validate(
             if input.attendees.trim().is_empty() {
                 warnings.push("参加人员未单独填写：请确认生成结果确已从素材中正确归纳".into());
             }
-            if input.profile.security_level.trim().is_empty() {
-                warnings.push("会议议程缺少密级，Word 首行将标记为待核实".into());
-            }
         }
         TemplateKind::WhitePaper => {
             if input.profile.reporting_leaders.trim().is_empty() {
@@ -236,7 +233,9 @@ fn validate_metadata(
     let unit_display = crate::units::UnitDisplay::new(vocabulary);
     let marking = profile.security_level.trim();
     let level = SecurityLevel::from_marking(marking);
-    if !marking.is_empty() && level == SecurityLevel::Unmarked {
+    if marking.is_empty() {
+        warnings.push("缺少密级：密级是所有文稿类型的必要填报项目，默认机密、保密期限20年".into());
+    } else if level == SecurityLevel::Unmarked {
         warnings.push(format!(
             "密级“{marking}”不是规范写法，应为内部、秘密、机密或绝密"
         ));
@@ -899,6 +898,34 @@ mod tests {
             warnings
                 .iter()
                 .any(|warning| warning.contains("不得超过10年")),
+            "{warnings:?}"
+        );
+    }
+
+    /// 密级是所有文稿类型的必要填报项目：任何文种留空都应提示补填。
+    #[test]
+    fn every_kind_requires_security_level() {
+        for kind in TemplateKind::ALL {
+            let mut input = DraftInput::default();
+            input.kind = kind;
+            input.profile.kind = kind;
+            input.profile.security_level.clear();
+            input.profile.security_period.clear();
+            let warnings = validate(&input, "# 标题\n\n正文。", &[], &rules());
+            assert!(
+                warnings.iter().any(|warning| warning.contains("缺少密级")),
+                "{kind:?} 留空密级应提示补填，实际为 {warnings:?}"
+            );
+        }
+    }
+
+    /// 默认稿（未显式清空密级）应自带“机密、20年”，不产生缺少密级提示。
+    #[test]
+    fn default_draft_carries_confidential_20_years() {
+        let input = DraftInput::default();
+        let warnings = validate(&input, "# 标题\n\n正文。", &[], &rules());
+        assert!(
+            !warnings.iter().any(|warning| warning.contains("缺少密级")),
             "{warnings:?}"
         );
     }
