@@ -1893,6 +1893,20 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn run_file_action(&mut self, action: FileAction) {
+        if let FileAction::Open(path) = &action
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+        {
+            self.actions.push(DraftAction::OpenPdf(path.clone()));
+            *self.status = format!(
+                "已在应用内打开 {}。",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("PDF")
+            );
+            return;
+        }
         let (result, path, verb) = match action {
             FileAction::Open(path) => (open_in_os(&path), path, "打开"),
             FileAction::Reveal(path) => (reveal_in_os(&path), path, "定位"),
