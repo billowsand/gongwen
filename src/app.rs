@@ -43,18 +43,20 @@ pub(crate) fn warn() -> egui::Color32 {
 }
 /// 四个汉字约 58 px，另留 18 px 呼吸空间；超长标签显式换行而不扩大此列。
 pub(crate) const LABEL_WIDTH: f32 = 76.0;
-/// 单选/多选下拉右侧“手填/选择”图标文字切换按钮占用的宽度。
-pub(crate) const TOGGLE_WIDTH: f32 = 72.0;
+/// 手填态下“切回词库选择”的窄图标按钮宽度。手填是逃生舱，不再占常驻列，
+/// 只有真的切到手填时才借走这一个图标的位置。
+pub(crate) const MANUAL_BACK_WIDTH: f32 = 32.0;
 /// 左侧表单的输入框、下拉框和切换按钮使用同一最小高度。
 pub(crate) const FORM_CONTROL_HEIGHT: f32 = 30.0;
-/// 最窄状态下输入控件仍需容纳约 8 个汉字及下拉箭头。
-pub(crate) const FORM_FIELD_MIN_WIDTH: f32 = 150.0;
-/// 标签列、字段、切换按钮之间的网格/控件间距预留。
+/// 最窄状态下输入控件仍需容纳约 10 个汉字及下拉箭头。原先这里是 150，
+/// 省下的 72px 常驻切换列直接补给字段本身。
+pub(crate) const FORM_FIELD_MIN_WIDTH: f32 = 190.0;
+/// 标签列、字段之间的网格/控件间距预留。
 pub(crate) const FORM_LAYOUT_GUTTER: f32 = 24.0;
-/// 76 标签 + 150 字段 + 72 切换 + 24 间距 = 322 px。
+/// 76 标签 + 190 字段 + 24 间距 = 290 px。
 pub(crate) const FORM_CONTENT_MIN_WIDTH: f32 =
-    LABEL_WIDTH + FORM_FIELD_MIN_WIDTH + TOGGLE_WIDTH + FORM_LAYOUT_GUTTER;
-/// 内容 322 + 面板左右内边距 24 + 非浮动滚动条及留白 18 = 364 px。
+    LABEL_WIDTH + FORM_FIELD_MIN_WIDTH + FORM_LAYOUT_GUTTER;
+/// 内容 290 + 面板左右内边距 24 + 非浮动滚动条及留白 18 = 332 px。
 pub(crate) const FORM_PANEL_MIN_WIDTH: f32 = FORM_CONTENT_MIN_WIDTH + 42.0;
 pub(crate) const FORM_PANEL_DEFAULT_WIDTH: f32 = 420.0;
 /// 文稿标签的宽度区间：最窄仍能显示约 5 个汉字加关闭按钮。
@@ -9334,13 +9336,23 @@ pub(crate) fn single_select(
                 ui.colored_label(warn(), "标准词库中暂无该类词条，请先到“标准词库”页维护");
                 return;
             }
+            // 手填态才借走图标按钮那一格，其余时候整行宽度都归输入控件。
+            let back = !options.is_empty();
+            let text_width = if back {
+                (width - MANUAL_BACK_WIDTH - 6.0).max(90.0)
+            } else {
+                width
+            };
             changed = ui
                 .add(
                     egui::TextEdit::singleline(value)
                         .hint_text(hint)
-                        .desired_width(width),
+                        .desired_width(text_width),
                 )
                 .changed();
+            if back {
+                back_to_select_button(ui, id, manual_fields);
+            }
         } else {
             egui::ComboBox::from_id_salt(id)
                 .selected_text(selected_text)
@@ -9366,10 +9378,10 @@ pub(crate) fn single_select(
                             changed = true;
                         }
                     }
+                    if allow_free_text {
+                        manual_entry_item(ui, id, manual_fields);
+                    }
                 });
-        }
-        if allow_free_text && !options.is_empty() {
-            toggle_manual_button(ui, id, manual, manual_fields);
         }
     });
     changed
@@ -9418,8 +9430,10 @@ pub(crate) fn joint_responsible_editor(
     // 才会向下堆叠；否则多个承办单位会在同一行向右排开。
     ui.vertical(|ui| {
         let row_count = entries.len();
-        let unit_width = ((width - 60.0) * 0.5).max(120.0);
-        let contact_width = width - unit_width - 40.0;
+        // 去掉常驻手填列后，这一行只剩「承办单位 + 联系人 + 删除」三样，
+        // 省下的宽度全部还给两个下拉。
+        let unit_width = ((width - 40.0) * 0.52).max(120.0);
+        let contact_width = (width - unit_width - 40.0).max(96.0);
         for (index, entry) in entries.iter_mut().enumerate() {
             let unit_key = format!("joint_resp_unit_{index}");
             let unit_manual = manual_fields.contains(&unit_key) || unit_options.is_empty();
@@ -9431,13 +9445,22 @@ pub(crate) fn joint_responsible_editor(
                     if unit_options.is_empty() && !allow_free_text {
                         ui.colored_label(warn(), "标准词库中暂无单位，请先到“标准词库”页维护");
                     } else {
+                        let back = !unit_options.is_empty();
+                        let text_width = if back {
+                            (unit_width - MANUAL_BACK_WIDTH - 6.0).max(80.0)
+                        } else {
+                            unit_width
+                        };
                         changed |= ui
                             .add(
                                 egui::TextEdit::singleline(&mut entry.unit)
                                     .hint_text("承办单位")
-                                    .desired_width(unit_width),
+                                    .desired_width(text_width),
                             )
                             .changed();
+                        if back {
+                            back_to_select_button(ui, &unit_key, manual_fields);
+                        }
                     }
                 } else {
                     let selected_text = if entry.unit.trim().is_empty() {
@@ -9475,10 +9498,10 @@ pub(crate) fn joint_responsible_editor(
                                     changed = true;
                                 }
                             }
+                            if allow_free_text {
+                                manual_entry_item(ui, &unit_key, manual_fields);
+                            }
                         });
-                }
-                if allow_free_text && !unit_options.is_empty() {
-                    toggle_manual_button(ui, &unit_key, unit_manual, manual_fields);
                 }
                 // 联系人：按该行承办单位过滤，选中后自动带出绑定电话。
                 let contact_selected = if entry.name.trim().is_empty() {
@@ -9575,20 +9598,42 @@ pub(crate) fn multi_select(
                     ui.colored_label(warn(), "标准词库中暂无该类词条，请先到“标准词库”页维护");
                     return;
                 }
+                let back = !options.is_empty();
+                let text_width = if back {
+                    (width - MANUAL_BACK_WIDTH - 6.0).max(90.0)
+                } else {
+                    width
+                };
                 changed = ui
                     .add(
                         egui::TextEdit::singleline(value)
                             .hint_text("多个单位用顿号“、”分隔")
-                            .desired_width(width),
+                            .desired_width(text_width),
                     )
                     .changed();
+                if back {
+                    back_to_select_button(ui, id, manual_fields);
+                }
             } else {
                 let mut selected = split_units(value);
                 egui::ComboBox::from_id_salt(id)
-                    .selected_text(if selected.is_empty() {
-                        "（未选择）".to_string()
-                    } else {
-                        format!("已选 {} 个", selected.len())
+                    // 收起态直接报第一个已选项加计数：“已选 3 个”本身没有信息量，
+                    // 而下面的标签行在折叠或滚动出屏时看不见。
+                    .selected_text(match selected.len() {
+                        0 => "（未选择）".to_string(),
+                        1 => options
+                            .iter()
+                            .find(|option| option.value == selected[0])
+                            .map(|option| option.full.clone())
+                            .unwrap_or_else(|| selected[0].clone()),
+                        n => {
+                            let first = options
+                                .iter()
+                                .find(|option| option.value == selected[0])
+                                .map(|option| option.label.clone())
+                                .unwrap_or_else(|| selected[0].clone());
+                            format!("{first} 等 {n} 个")
+                        }
                     })
                     .width(width)
                     // 多选需要连续勾选，点一次就收起会很难用。
@@ -9598,8 +9643,14 @@ pub(crate) fn multi_select(
                             let label = indented_label(option);
                             let mut checked = selected.contains(&option.value);
                             if !checked && excluded.contains(&option.value) {
-                                ui.add_enabled(false, egui::Checkbox::new(&mut false, label))
-                                    .on_disabled_hover_text(excluded_reason);
+                                // 互斥规则是硬约束，原因写在条目右边，不藏在悬停里。
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled(false, egui::Checkbox::new(&mut false, label));
+                                    ui.weak(
+                                        egui::RichText::new(excluded_reason)
+                                            .size(11.0),
+                                    );
+                                });
                                 continue;
                             }
                             let response = ui.checkbox(&mut checked, label);
@@ -9615,6 +9666,9 @@ pub(crate) fn multi_select(
                                 changed = true;
                             }
                         }
+                        if allow_free_text {
+                            manual_entry_item(ui, id, manual_fields);
+                        }
                     });
                 // 无论是刚勾选还是配置里的旧值，一律按词库顺序回写：
                 // 导出内容取决于词库排序，而不是勾选的先后顺序。
@@ -9623,9 +9677,6 @@ pub(crate) fn multi_select(
                     *value = join_units(&ordered);
                     changed = true;
                 }
-            }
-            if allow_free_text && !options.is_empty() {
-                toggle_manual_button(ui, id, manual, manual_fields);
             }
         });
 
@@ -9737,34 +9788,31 @@ pub(crate) fn contact_pair(
     });
 }
 
-pub(crate) fn toggle_manual_button(
-    ui: &mut egui::Ui,
-    id: &str,
-    manual: bool,
-    manual_fields: &mut BTreeSet<String>,
-) {
-    let (icon, label, tip) = if manual {
-        (theme::Icon::Book, "选择", "切换回从标准词库选择")
-    } else {
-        (
-            theme::Icon::PencilLine,
-            "手填",
-            "临时手工输入（不推荐，容易写错名称）",
-        )
-    };
+/// 下拉列表末尾的“临时手填”入口。手填不推荐、也很少用，却曾经在每一行占着
+/// 72px 的常驻按钮——把它收进候选项列表末尾：用户翻开下拉、确认里面没有想要的
+/// 词条，才会看见这一项，位置正好在“我找不到”的那一刻。
+pub(crate) fn manual_entry_item(ui: &mut egui::Ui, id: &str, manual_fields: &mut BTreeSet<String>) {
+    ui.separator();
     if ui
-        .add_sized(
-            [TOGGLE_WIDTH, FORM_CONTROL_HEIGHT],
-            theme::icon_text_button(icon, label),
-        )
-        .on_hover_text(tip)
+        .add(theme::menu_item(
+            theme::Icon::PencilLine,
+            "词库里没有？临时手填…",
+        ))
+        .on_hover_text("临时手工输入（不推荐，容易写错名称；正式用法请到“标准词库”页维护）")
         .clicked()
     {
-        if manual {
-            manual_fields.remove(id);
-        } else {
-            manual_fields.insert(id.to_string());
-        }
+        manual_fields.insert(id.to_string());
+    }
+}
+
+/// 手填态下切回下拉选择的窄按钮：只占一个图标的位置。
+pub(crate) fn back_to_select_button(
+    ui: &mut egui::Ui,
+    id: &str,
+    manual_fields: &mut BTreeSet<String>,
+) {
+    if theme::icon_button(ui, theme::Icon::Book, "改回从标准词库选择").clicked() {
+        manual_fields.remove(id);
     }
 }
 
