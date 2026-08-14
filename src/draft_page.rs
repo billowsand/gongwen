@@ -2264,38 +2264,50 @@ impl DraftPage<'_> {
     /// 位置留给插入表格、标题层级这类更细的操作。分区卡与折叠状态记在配置里，
     /// 换稿件不重置——切分区是「现在要干哪一类活」，换篇稿子通常还在干同一类。
     fn ribbon(&mut self, ui: &mut egui::Ui) {
-        self.ribbon_tabs(ui);
+        // 背景先占绘制位置，等上下两行排版结束、拿到精确矩形后再回填；这样单一
+        // 闭合曲线位于所有按钮后面，不会遮挡文字或点击反馈。
+        let ribbon_background = ui.painter().add(egui::Shape::Noop);
+        let selected_tab_rect = self.ribbon_tabs(ui);
         if self.config.ribbon_collapsed {
             return;
         }
-        ui.add_space(4.0);
-        ui.scope(|ui| {
-            ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
-            ui.spacing_mut().item_spacing.x = 4.0;
-            // 窗口窄下来时横向滚动，而不是折行：折行会把编辑区一路挤矮，
-            // 而功能区的高度应当始终是固定的两行。
-            egui::ScrollArea::horizontal()
-                .id_salt("ribbon_items")
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| match self.config.ribbon_tab {
-                        RibbonTab::Home => self.ribbon_home(ui),
-                        RibbonTab::Insert => self.ribbon_insert(ui),
-                        RibbonTab::Format => self.ribbon_format(ui),
-                        RibbonTab::Review => self.ribbon_review(ui),
-                        RibbonTab::View => self.ribbon_view(ui),
-                        RibbonTab::Output => self.ribbon_output(ui),
+        ui.add_space(1.0);
+        let tray = theme::ribbon_tray_layout().show(ui, |ui| {
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
+                ui.spacing_mut().item_spacing.x = 4.0;
+                // 窗口窄下来时横向滚动，而不是折行：折行会把编辑区一路挤矮，
+                // 而功能区的高度应当始终是固定的两行。
+                egui::ScrollArea::horizontal()
+                    .id_salt("ribbon_items")
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| match self.config.ribbon_tab {
+                            RibbonTab::Home => self.ribbon_home(ui),
+                            RibbonTab::Insert => self.ribbon_insert(ui),
+                            RibbonTab::Format => self.ribbon_format(ui),
+                            RibbonTab::Review => self.ribbon_review(ui),
+                            RibbonTab::View => self.ribbon_view(ui),
+                            RibbonTab::Output => self.ribbon_output(ui),
+                        });
                     });
-                });
+            });
         });
+        if let Some(tab_rect) = selected_tab_rect {
+            ui.painter().set(
+                ribbon_background,
+                theme::connected_ribbon_shape(tab_rect, tray.response.rect),
+            );
+        }
     }
 
     /// 分区卡那一行。左端常驻公文要素填报区的开关，右端常驻五个视图模式和
     /// 收起功能区的箭头——这三样都不属于任何一个分区，切分区卡时必须一直在。
-    fn ribbon_tabs(&mut self, ui: &mut egui::Ui) {
+    fn ribbon_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
         ui.scope(|ui| {
             ui.spacing_mut().interact_size.y = 26.0;
             ui.spacing_mut().item_spacing.x = 2.0;
+            let mut selected_rect = None;
             ui.horizontal(|ui| {
                 let collapsed = self.doc.form_collapsed;
                 let icon = if collapsed {
@@ -2328,6 +2340,9 @@ impl DraftPage<'_> {
                     };
                     let response = theme::ribbon_tab_button(ui, current == tab, tab.label())
                         .on_hover_text(tip);
+                    if current == tab {
+                        selected_rect = Some(response.rect);
+                    }
                     // 双击当前分区卡收起第二行，与 Word 一致。
                     if response.double_clicked() && current == tab {
                         toggle_collapse = true;
@@ -2404,7 +2419,9 @@ impl DraftPage<'_> {
                     }
                 });
             });
-        });
+            selected_rect
+        })
+        .inner
     }
 
     /// 分区卡与折叠状态立刻落盘，与设置页里切主题的处理一致。

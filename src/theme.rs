@@ -518,6 +518,205 @@ pub fn panel(fill: Color32, margin: i8) -> egui::Frame {
         .inner_margin(Margin::symmetric(margin, (margin / 2).max(4)))
 }
 
+/// 功能区第二行只负责留出内容边距；真正的底色和轮廓要等选项卡、菜单都完成
+/// 排版后，由 [`connected_ribbon_shape`] 一次性画成同一个闭合外形。
+pub fn ribbon_tray_layout() -> egui::Frame {
+    egui::Frame::new()
+        .inner_margin(Margin::symmetric(7, 2))
+        .outer_margin(Margin::symmetric(2, 2))
+}
+
+/// 当前分区卡与下方菜单托盘的单一闭合轮廓。两处内凹贝塞尔圆弧把选项卡自然
+/// 接入托盘；最终只保留这一条连续外描边，不会出现两个矩形相叠的接缝。
+pub fn connected_ribbon_shape(tab_rect: egui::Rect, tray_outer_rect: egui::Rect) -> egui::Shape {
+    const TRAY_RADIUS: f32 = 8.0;
+    const TAB_RADIUS: f32 = 6.0;
+    const JOIN_RADIUS: f32 = 7.0;
+
+    // `ribbon_tray_layout` 的 2pt 外边距用于容纳投影，不属于承托面的实体范围。
+    let tray = tray_outer_rect.shrink(2.0);
+    let tab = egui::Rect::from_min_max(
+        tab_rect.min - egui::vec2(2.0, 1.0),
+        egui::pos2(tab_rect.max.x + 2.0, tray.top() + 1.0),
+    );
+    let fill = mix_color(surface(), accent_soft(), 0.18);
+
+    // 任意凹多边形不能由 epaint 直接填充，因此用无描边的同色面片铺底，
+    // 最后再以一条贝塞尔闭合路径统一描边；视觉上仍是完整的单一曲面。
+    let mut shapes = connected_ribbon_fill(tab, tray, Color32::from_black_alpha(5));
+    for shape in &mut shapes {
+        shape.translate(egui::vec2(0.0, 2.0));
+    }
+    let mut lower_shadow = connected_ribbon_fill(tab, tray, Color32::from_black_alpha(4));
+    for shape in &mut lower_shadow {
+        shape.translate(egui::vec2(0.0, 4.0));
+    }
+    shapes.extend(lower_shadow);
+    shapes.extend(connected_ribbon_fill(tab, tray, fill));
+    shapes.push(
+        egui::epaint::PathShape::closed_line(
+            connected_ribbon_outline(tab, tray, TAB_RADIUS, TRAY_RADIUS, JOIN_RADIUS),
+            Stroke::new(1.0, border()),
+        )
+        .into(),
+    );
+    egui::Shape::Vec(shapes)
+}
+
+fn connected_ribbon_fill(tab: egui::Rect, tray: egui::Rect, color: Color32) -> Vec<egui::Shape> {
+    const TAB_RADIUS: f32 = 6.0;
+    const TRAY_RADIUS: f32 = 8.0;
+    const JOIN_RADIUS: f32 = 7.0;
+
+    let mut shapes = vec![
+        egui::Shape::rect_filled(tray, TRAY_RADIUS, color),
+        egui::Shape::rect_filled(tab, TAB_RADIUS, color),
+        egui::Shape::rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(tab.left(), tab.top() + TAB_RADIUS),
+                egui::pos2(tab.right(), tray.top() + 1.0),
+            ),
+            0.0,
+            color,
+        ),
+    ];
+
+    let left_start = egui::pos2(tab.left() - JOIN_RADIUS, tray.top());
+    let left_end = egui::pos2(tab.left(), tray.top() - JOIN_RADIUS);
+    let mut left_join = vec![left_start];
+    push_cubic(
+        &mut left_join,
+        left_start,
+        egui::pos2(tab.left() - JOIN_RADIUS * 0.45, tray.top()),
+        egui::pos2(tab.left(), tray.top() - JOIN_RADIUS * 0.45),
+        left_end,
+    );
+    left_join.push(egui::pos2(tab.left(), tray.top()));
+    shapes.push(egui::Shape::convex_polygon(left_join, color, Stroke::NONE));
+
+    let right_start = egui::pos2(tab.right(), tray.top() - JOIN_RADIUS);
+    let right_end = egui::pos2(tab.right() + JOIN_RADIUS, tray.top());
+    let mut right_join = vec![right_start];
+    push_cubic(
+        &mut right_join,
+        right_start,
+        egui::pos2(tab.right(), tray.top() - JOIN_RADIUS * 0.45),
+        egui::pos2(tab.right() + JOIN_RADIUS * 0.45, tray.top()),
+        right_end,
+    );
+    right_join.push(egui::pos2(tab.right(), tray.top()));
+    shapes.push(egui::Shape::convex_polygon(right_join, color, Stroke::NONE));
+    shapes
+}
+
+fn connected_ribbon_outline(
+    tab: egui::Rect,
+    tray: egui::Rect,
+    tab_radius: f32,
+    tray_radius: f32,
+    join_radius: f32,
+) -> Vec<egui::Pos2> {
+    let mut points = vec![egui::pos2(tray.left() + tray_radius, tray.top())];
+    points.push(egui::pos2(tab.left() - join_radius, tray.top()));
+    push_cubic(
+        &mut points,
+        egui::pos2(tab.left() - join_radius, tray.top()),
+        egui::pos2(tab.left() - join_radius * 0.45, tray.top()),
+        egui::pos2(tab.left(), tray.top() - join_radius * 0.45),
+        egui::pos2(tab.left(), tray.top() - join_radius),
+    );
+    points.push(egui::pos2(tab.left(), tab.top() + tab_radius));
+    push_cubic(
+        &mut points,
+        egui::pos2(tab.left(), tab.top() + tab_radius),
+        egui::pos2(tab.left(), tab.top() + tab_radius * 0.45),
+        egui::pos2(tab.left() + tab_radius * 0.45, tab.top()),
+        egui::pos2(tab.left() + tab_radius, tab.top()),
+    );
+    points.push(egui::pos2(tab.right() - tab_radius, tab.top()));
+    push_cubic(
+        &mut points,
+        egui::pos2(tab.right() - tab_radius, tab.top()),
+        egui::pos2(tab.right() - tab_radius * 0.45, tab.top()),
+        egui::pos2(tab.right(), tab.top() + tab_radius * 0.45),
+        egui::pos2(tab.right(), tab.top() + tab_radius),
+    );
+    points.push(egui::pos2(tab.right(), tray.top() - join_radius));
+    push_cubic(
+        &mut points,
+        egui::pos2(tab.right(), tray.top() - join_radius),
+        egui::pos2(tab.right(), tray.top() - join_radius * 0.45),
+        egui::pos2(tab.right() + join_radius * 0.45, tray.top()),
+        egui::pos2(tab.right() + join_radius, tray.top()),
+    );
+    points.push(egui::pos2(tray.right() - tray_radius, tray.top()));
+    push_cubic(
+        &mut points,
+        egui::pos2(tray.right() - tray_radius, tray.top()),
+        egui::pos2(tray.right() - tray_radius * 0.45, tray.top()),
+        egui::pos2(tray.right(), tray.top() + tray_radius * 0.45),
+        egui::pos2(tray.right(), tray.top() + tray_radius),
+    );
+    points.push(egui::pos2(tray.right(), tray.bottom() - tray_radius));
+    push_cubic(
+        &mut points,
+        egui::pos2(tray.right(), tray.bottom() - tray_radius),
+        egui::pos2(tray.right(), tray.bottom() - tray_radius * 0.45),
+        egui::pos2(tray.right() - tray_radius * 0.45, tray.bottom()),
+        egui::pos2(tray.right() - tray_radius, tray.bottom()),
+    );
+    points.push(egui::pos2(tray.left() + tray_radius, tray.bottom()));
+    push_cubic(
+        &mut points,
+        egui::pos2(tray.left() + tray_radius, tray.bottom()),
+        egui::pos2(tray.left() + tray_radius * 0.45, tray.bottom()),
+        egui::pos2(tray.left(), tray.bottom() - tray_radius * 0.45),
+        egui::pos2(tray.left(), tray.bottom() - tray_radius),
+    );
+    points.push(egui::pos2(tray.left(), tray.top() + tray_radius));
+    push_cubic(
+        &mut points,
+        egui::pos2(tray.left(), tray.top() + tray_radius),
+        egui::pos2(tray.left(), tray.top() + tray_radius * 0.45),
+        egui::pos2(tray.left() + tray_radius * 0.45, tray.top()),
+        egui::pos2(tray.left() + tray_radius, tray.top()),
+    );
+    points
+}
+
+fn push_cubic(
+    points: &mut Vec<egui::Pos2>,
+    start: egui::Pos2,
+    control_1: egui::Pos2,
+    control_2: egui::Pos2,
+    end: egui::Pos2,
+) {
+    const STEPS: usize = 6;
+    for step in 1..=STEPS {
+        let t = step as f32 / STEPS as f32;
+        let one_minus_t = 1.0 - t;
+        points.push(egui::pos2(
+            one_minus_t.powi(3) * start.x
+                + 3.0 * one_minus_t.powi(2) * t * control_1.x
+                + 3.0 * one_minus_t * t.powi(2) * control_2.x
+                + t.powi(3) * end.x,
+            one_minus_t.powi(3) * start.y
+                + 3.0 * one_minus_t.powi(2) * t * control_1.y
+                + 3.0 * one_minus_t * t.powi(2) * control_2.y
+                + t.powi(3) * end.y,
+        ));
+    }
+}
+
+fn mix_color(from: Color32, to: Color32, amount: f32) -> Color32 {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+    Color32::from_rgb(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+    )
+}
+
 /// 浮窗入场动画：淡入 + 从 0.96 缩放到 1.0，时长取中档。每帧在窗口渲染后调用，
 /// 传入 `Window::show` 返回的 response。
 ///
@@ -1034,24 +1233,23 @@ pub fn nav_button(ui: &mut egui::Ui, selected: bool, icon: Icon, label: &str) ->
     )
 }
 
-/// 功能区分区卡：仿 Word 的选项卡，只有文字。选中项用强调色文字加 `accent_soft`
-/// 淡底圆角标出——淡底比「文字变色 + 细下划线」醒目得多，且与第二行按钮的
-/// `surface_sunk` 底色可区分，不会出现六个分区卡全是底色的层次问题。
+/// 功能区分区卡：选中项的底色属于外层闭合 Ribbon 轮廓，这里只负责文字与交互，
+/// 避免按钮自己再画一个矩形，把连接曲线切断。
 pub fn ribbon_tab_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
     let text = if selected {
         egui::RichText::new(label).color(accent()).strong()
     } else {
         egui::RichText::new(label).color(text_soft())
     };
-    ui.add(
-        egui::Button::new(text)
-            // `frame_when_inactive(selected)`：选中项未悬停也画强调色淡底；
-            // 未选中时常态无底、悬停才有背景，层次留给第二行的按钮。
-            .selected(selected)
-            .frame_when_inactive(selected)
-            .corner_radius(CornerRadius::same(6))
-            .min_size(egui::vec2(52.0, 24.0)),
-    )
+    let button = egui::Button::new(text)
+        .corner_radius(CornerRadius::same(6))
+        .min_size(egui::vec2(52.0, 24.0));
+    ui.add(if selected {
+        button.frame(false)
+    } else {
+        // 未选中项常态透明，悬停时仍保留按钮反馈。
+        button.frame_when_inactive(false)
+    })
 }
 
 /// 编辑区右上角的视图切换：仿代码编辑器只保留图标，名称放在悬停说明中。
