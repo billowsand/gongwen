@@ -1,6 +1,6 @@
 [package]
 name = "gongwen-assistant"
-version = "0.3.18"
+version = "0.3.19"
 edition = "2024"
 description = "基于 egui 与本地 LM Studio 的离线公文写作助手"
 license = "MIT"
