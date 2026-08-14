@@ -83,17 +83,47 @@ struct Metrics {
     line: f32,
 }
 
+/// 本帧应该显示的缩放倍率：`zoom` 为 None 时按可用宽度自适应，否则按给定倍率。
+/// `available` 必须是调用方在进入滚动区之前量好的宽度：滚动方向上的
+/// `available_width()` 是无穷大，拿进去算会把整页放大到上限。
+///
+/// 单独抽出来是因为调用方要先算出"该显示多大"，才能决定这一帧是重排版面
+/// 还是沿用上一次的版面再做一次层变换（见 `draft_page::markdown_render`）。
+pub fn fit_scale(available: f32, zoom: Option<f32>) -> f32 {
+    match zoom {
+        Some(zoom) => zoom,
+        // 留出滚动条与外边距，再夹到一个仍然读得清的区间。
+        None => ((available - 24.0) / (PAGE_PT * PT)).clamp(0.3, 1.6),
+    }
+}
+
+/// 本帧的缩放决定。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PreviewScale {
+    /// 排版倍率；None 表示按可视宽度自适应。
+    pub zoom: Option<f32>,
+    /// 用来把纸张横向居中的可视宽度。None 表示自己去量 `ui.clip_rect()`。
+    ///
+    /// 拖动分隔条时调用方会把裁剪矩形按层变换的逆变换预补偿一遍，量出来的宽度
+    /// 不是真实窗格宽度；而纸张的左边沿是从布局游标铺开的，游标并不受裁剪矩形
+    /// 影响。两者口径不一致，纸张就会偏离中线，所以那种情况下必须由调用方把真
+    /// 实宽度递进来。
+    pub viewport: Option<f32>,
+}
+
+impl PreviewScale {
+    /// 常规情形：自己量宽度，按给定倍率（或自适应）排版。
+    pub fn zoom(zoom: Option<f32>) -> Self {
+        Self {
+            zoom,
+            viewport: None,
+        }
+    }
+}
+
 impl Metrics {
-    /// `zoom` 为 None 时按可用宽度自适应，否则按给定倍率。
-    /// `available` 必须是调用方在进入滚动区之前量好的宽度：滚动方向上的
-    /// `available_width()` 是无穷大，拿进去算会把整页放大到上限。
     fn new(available: f32, zoom: Option<f32>) -> Self {
-        let natural = PAGE_PT * PT;
-        let scale = match zoom {
-            Some(zoom) => zoom,
-            // 留出滚动条与外边距，再夹到一个仍然读得清的区间。
-            None => ((available - 24.0) / natural).clamp(0.3, 1.6),
-        };
+        let scale = fit_scale(available, zoom);
         Self {
             scale,
             viewport: available,
@@ -2004,7 +2034,7 @@ pub fn official_preview(
     input: &DraftInput,
     display: &UnitDisplay,
     markdown: &str,
-    zoom: Option<f32>,
+    scale: PreviewScale,
     anchor: Option<&Range<usize>>,
     mut scroll_to_anchor: bool,
 ) -> PreviewOutput {
@@ -2013,7 +2043,8 @@ pub fn official_preview(
     let visible = ui
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
-    let metrics = Metrics::new(visible.width(), zoom);
+    // 居中用的宽度优先取调用方给的真实宽度（见 `PreviewScale::viewport`）。
+    let metrics = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom);
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题一律
     // 自动编号为 一、（一）1.（1）；紧缩风格跟随模板配置。
     let numbered = true;
@@ -2823,7 +2854,7 @@ mod tests {
                     &input,
                     &UnitDisplay::new(&vocabulary()),
                     &markdown,
-                    Some(0.8),
+                    PreviewScale::zoom(Some(0.8)),
                     None,
                     false,
                 );
@@ -3085,7 +3116,7 @@ mod tests {
                     &input,
                     &UnitDisplay::new(&[]),
                     &markdown,
-                    None,
+                    PreviewScale::default(),
                     None,
                     false,
                 );
@@ -3156,7 +3187,7 @@ mod tests {
                             &input,
                             &UnitDisplay::new(&[]),
                             &markdown,
-                            None,
+                            PreviewScale::default(),
                             None,
                             false,
                         );

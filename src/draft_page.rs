@@ -216,6 +216,10 @@ impl ExportLinks {
 pub(crate) const TOOLBAR_CONTROL_HEIGHT: f32 = 28.0;
 
 const SCREEN_PT: f32 = 96.0 / 72.0;
+/// 一帧内宽度变化超过这么多点，就当成跳变而非拖动：拖分隔条一帧只走几个像素，
+/// 而切换显示方式、窗口最大化是一步到位的，没有"连续缩放"可言。
+const DRAG_STEP_MAX: f32 = 64.0;
+
 const OFFICIAL_PAGE_WIDTH: f32 = 595.28 * SCREEN_PT;
 const OFFICIAL_PAGE_HEIGHT: f32 = 841.89 * SCREEN_PT;
 const OFFICIAL_PAGE_MARGIN_LEFT: f32 = 79.35 * SCREEN_PT;
@@ -265,6 +269,12 @@ pub(crate) struct DraftSession {
     pub(crate) preview_zoom: Option<f32>,
     /// 上一帧自适应算出的倍率，用作手动加减档的起点。
     pub(crate) preview_fit_scale: f32,
+    /// 版面上一次"落定"时所用的缩放倍率。拖动分隔条、缩放窗口的过程中它保持
+    /// 不变，让字号恒定、排版缓存全部命中；真正的视觉缩放交给层变换。
+    /// 0 表示还没排过，第一帧直接按目标倍率落定。
+    pub(crate) preview_layout_scale: f32,
+    /// 上一帧量到的预览可视宽度，用来判断宽度是否还在变化。
+    pub(crate) preview_last_width: f32,
     /// 在公文预览里点中的那一块：预览和源码两边都会给它铺底色。
     pub(crate) preview_anchor: Option<PreviewAnchor>,
     /// 待处理的“跳到源码”请求，编辑框下次绘制时把光标挪过去并滚动到位。
@@ -390,6 +400,8 @@ impl DraftSession {
             result_drawer_open: false,
             preview_zoom: None,
             preview_fit_scale: 1.0,
+            preview_layout_scale: 0.0,
+            preview_last_width: 0.0,
             preview_anchor: None,
             pending_source_jump: None,
             pending_source_selection: None,
@@ -4826,17 +4838,83 @@ impl DraftPage<'_> {
                     .preview_anchor
                     .as_ref()
                     .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown));
+
+                // —— 宽度还在变的帧里不重排版面 ——
+                // 自适应缩放是窗格宽度的连续函数，宽度每帧变一点，字号就每帧
+                // 全新：galley 缓存全部落空，上千个汉字要按新字号重新栅格化进
+                // 字体图集；图集一装满，epaint 会把整套字体连同缓存推倒重建、
+                // 重传整张纹理（fonts.rs 的 fill_ratio > 0.8 分支）。这正是拖
+                // 动分隔条时那一下下的顿挫——它是尖峰，不是普遍变慢，所以把字
+                // 号量化成档位只能让它变稀，消不掉。
+                //
+                // 改成：宽度还在变的这些帧，版面沿用上一次落定的缩放（字号恒
+                // 定、缓存全命中、图集一动不动），视觉上的缩放交给一次层变换连
+                // 续完成——变换系数是浮点，要多连续有多连续，一格都不跳。宽度
+                // 一停下来就按精确缩放重排一次，文字随即恢复锐利。
+                let visible = ui
+                    .clip_rect()
+                    .intersect(ui.ctx().input(|input| input.content_rect()));
+                let target = preview::fit_scale(visible.width(), self.doc.preview_zoom);
+                // 只有"拖动幅度"的宽度变化才值得冻结版面：分隔条一帧走几个像素，
+                // 中间那些帧连起来才是一个连续动作。首帧（滚动区还没量准，可视宽
+                // 度是无穷大）、切换显示方式、窗口最大化这类一步到位的跳变没有
+                // 连续过程可言，直接按精确倍率重排，省得白白糊一帧。
+                let step = (visible.width() - self.doc.preview_last_width).abs();
+                let settled =
+                    !(0.5..=DRAG_STEP_MAX).contains(&step) || self.doc.preview_layout_scale <= 0.0;
+                self.doc.preview_last_width = visible.width();
+                if settled {
+                    self.doc.preview_layout_scale = target;
+                }
+                let layout_scale = self.doc.preview_layout_scale;
+                let ratio = target / layout_scale;
+                // 以可视区顶边中点为支点：纸张本来就横向居中于 viewport，绕这个
+                // 点缩放后依旧严丝合缝地居中，顶部那一行也钉在原处不漂。
+                let transform = (!settled && (ratio - 1.0).abs() > 1e-4).then(|| {
+                    let pivot = egui::pos2(visible.center().x, visible.top()).to_vec2();
+                    egui::emath::TSTransform::from_translation(pivot)
+                        * egui::emath::TSTransform::from_scaling(ratio)
+                        * egui::emath::TSTransform::from_translation(-pivot)
+                });
+
+                // 变换会把裁剪矩形一并缩放，先按逆变换预补偿，变换之后正好落回
+                // 真正的可视区，内容不会被切掉或漏出。
+                let clip = ui.clip_rect();
+                if let Some(transform) = transform {
+                    ui.set_clip_rect(transform.inverse().mul_rect(clip));
+                }
+                // 只圈住预览自己发出的这段图形。滚动条是 ScrollArea 在这段范围
+                // 之外画的，因此不会跟着一起缩放。
+                let layer = ui.layer_id();
+                let first = ui.painter().add(egui::Shape::Noop);
+
                 let output = preview::official_preview(
                     ui,
                     &self.doc.draft,
                     &display,
                     &self.doc.generated_markdown,
-                    self.doc.preview_zoom,
+                    preview::PreviewScale {
+                        zoom: Some(layout_scale),
+                        // 裁剪矩形被预补偿过，量出来会偏窄，这里给真实窗格宽度。
+                        viewport: Some(visible.width()),
+                    },
                     anchor.as_ref(),
                     self.doc.pending_render_jump,
                 );
+
+                if let Some(transform) = transform {
+                    let last = ui.painter().add(egui::Shape::Noop);
+                    ui.ctx().graphics_mut(|graphics| {
+                        graphics.entry(layer).transform_range(first, last, transform);
+                    });
+                    ui.set_clip_rect(clip);
+                    // 拖动一停，还需要再来一帧才能发现"宽度没变"并按精确缩放重排。
+                    ui.ctx().request_repaint();
+                }
+
                 self.doc.pending_render_jump = false;
-                self.doc.preview_fit_scale = output.scale;
+                // 加减档以"眼睛看到的倍率"为起点，而不是本帧用来排版的那个。
+                self.doc.preview_fit_scale = target;
                 // 点中版式上的某一块：源码里同步高亮，并把光标带过去。
                 if let Some(range) = output.clicked {
                     self.doc.pending_source_selection = None;
@@ -5635,5 +5713,335 @@ mod tests {
         let today = chinese_today();
         assert!(export::chinese_date_parts(&today).is_some(), "{today}");
         assert!(!today.chars().any(|ch| ch.is_ascii_digit()), "{today}");
+    }
+}
+
+#[cfg(test)]
+mod split_resize_tests {
+    use super::*;
+    use std::sync::mpsc::Receiver;
+
+    /// 把 `markdown_render` 放进一个可控的 egui 上下文里跑若干帧，
+    /// 返回逐帧耗时、字体图集整体重建次数，以及每帧实际排版所用的缩放。
+    struct Harness {
+        ctx: egui::Context,
+        doc: DraftSession,
+        config: AppConfig,
+        sender: Sender<WorkerResult>,
+        status: String,
+        version_switch: Option<VersionSwitchPrompt>,
+        revert_confirm: Option<(i64, i64)>,
+        actions: Vec<DraftAction>,
+        export_links: ExportLinks,
+        _keep: Receiver<WorkerResult>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let ctx = egui::Context::default();
+            theme::configure_icons(&ctx);
+            theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+            ctx.set_pixels_per_point(2.0);
+            let config = AppConfig::default();
+            let mut markdown = String::from("# 关于加强全省中小学教育教学质量管理工作的函\n\n");
+            for i in 1..=40 {
+                markdown.push_str(&format!("## 第{i}节 关于进一步做好相关工作的意见\n\n"));
+                for _ in 0..4 {
+                    markdown.push_str("各地各校要深刻认识本项工作的重要意义，紧紧围绕立德树人根本任务，统筹推进课程建设、师资培养与教学评价改革，确保各项部署落到实处、见到实效。\n\n");
+                }
+            }
+            let doc = DraftSession::with_markdown(1, &config, markdown);
+            let (sender, _keep) = std::sync::mpsc::channel();
+            Self {
+                ctx,
+                doc,
+                config,
+                sender,
+                status: String::new(),
+                version_switch: None,
+                revert_confirm: None,
+                actions: Vec::new(),
+                export_links: ExportLinks::default(),
+                _keep,
+            }
+        }
+
+        /// 画一帧并取回纸张（最大的那块白色矩形）在屏幕上的位置与大小。
+        /// 这是"眼睛看到的版面"，用来验证层变换画出的画面与重排出的一致。
+        fn paper(&mut self, width: f32) -> egui::Rect {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 900.0),
+                )),
+                ..Default::default()
+            };
+            let out = self.ctx.clone().run_ui(raw, |ui| {
+                let mut page = DraftPage {
+                    doc: &mut self.doc,
+                    config: &mut self.config,
+                    store: None,
+                    sender: &self.sender,
+                    status: &mut self.status,
+                    version_switch: &mut self.version_switch,
+                    revert_confirm: &mut self.revert_confirm,
+                    actions: &mut self.actions,
+                    export_links: &mut self.export_links,
+                };
+                page.markdown_render(ui);
+            });
+            // 形状会嵌套（Frame 的底 + 阴影 + 内容都装在 Shape::Vec 里），要递归摊平。
+            fn collect(shape: &egui::epaint::Shape, out: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::epaint::Shape::Rect(rect)
+                        if rect.fill == egui::Color32::WHITE && rect.rect.is_finite() =>
+                    {
+                        out.push(rect.rect);
+                    }
+                    egui::epaint::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut rects = Vec::new();
+            for clipped in &out.shapes {
+                collect(&clipped.shape, &mut rects);
+            }
+            rects
+                .into_iter()
+                .max_by(|a, b| {
+                    (a.width() * a.height())
+                        .partial_cmp(&(b.width() * b.height()))
+                        .unwrap()
+                })
+                .expect("本帧应当画出纸张")
+        }
+
+        /// 画一帧，窗格宽度为 `width`。返回 (耗时 ms, 是否整体重建了字体图集)。
+        fn frame(&mut self, width: f32) -> (f32, bool) {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 900.0),
+                )),
+                ..Default::default()
+            };
+            let started = std::time::Instant::now();
+            let out = self.ctx.clone().run_ui(raw, |ui| {
+                let mut page = DraftPage {
+                    doc: &mut self.doc,
+                    config: &mut self.config,
+                    store: None,
+                    sender: &self.sender,
+                    status: &mut self.status,
+                    version_switch: &mut self.version_switch,
+                    revert_confirm: &mut self.revert_confirm,
+                    actions: &mut self.actions,
+                    export_links: &mut self.export_links,
+                };
+                page.markdown_render(ui);
+            });
+            let elapsed = started.elapsed().as_secs_f32() * 1000.0;
+            let rebuilt = out
+                .textures_delta
+                .set
+                .iter()
+                .any(|(_, delta)| delta.pos.is_none() && delta.image.width() > 1000);
+            (elapsed, rebuilt)
+        }
+    }
+
+    fn percentile(values: &mut [f32], p: f32) -> f32 {
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        values[((values.len() as f32 - 1.0) * p) as usize]
+    }
+
+    /// 拖动分隔条的过程中，版面缩放必须冻结在上一次落定的值上——
+    /// 这是"字号恒定、缓存全命中"的前提，也是不再顿挫的根本原因。
+    #[test]
+    fn layout_scale_is_frozen_while_width_changes() {
+        let mut harness = Harness::new();
+        // egui 要一两帧才量准滚动区，先热一下再取基准。
+        harness.frame(900.0);
+        harness.frame(900.0);
+        let settled = harness.doc.preview_layout_scale;
+        assert!(settled > 0.0, "首帧应当直接落定");
+
+        // 连续改变宽度：排版缩放不许动。
+        for i in 1..=20 {
+            harness.frame(900.0 + i as f32 * 3.7);
+            assert_eq!(
+                harness.doc.preview_layout_scale, settled,
+                "第 {i} 帧宽度仍在变，版面缩放不应重排"
+            );
+        }
+        // 但"眼睛看到的倍率"必须一路跟着宽度连续走，否则就不是丝滑而是冻住。
+        assert!(
+            harness.doc.preview_fit_scale > settled,
+            "显示倍率应随宽度增长，实际 {} vs {settled}",
+            harness.doc.preview_fit_scale
+        );
+    }
+
+    /// 宽度一停下来，下一帧就按精确倍率重排，文字恢复锐利。
+    #[test]
+    fn layout_settles_on_the_frame_after_motion_stops() {
+        let mut harness = Harness::new();
+        harness.frame(900.0);
+        harness.frame(900.0);
+        for i in 1..=10 {
+            harness.frame(900.0 + i as f32 * 3.7);
+        }
+        let frozen = harness.doc.preview_layout_scale;
+        let shown = harness.doc.preview_fit_scale;
+        assert_ne!(frozen, shown, "拖动中两者本就该不同");
+
+        // 松手：宽度不再变化。
+        harness.frame(900.0 + 10.0 * 3.7);
+        assert_eq!(
+            harness.doc.preview_layout_scale, shown,
+            "落定帧必须按精确倍率重排"
+        );
+    }
+
+    /// 显示倍率与宽度之间保持严格连续——没有任何档位/台阶。
+    #[test]
+    fn displayed_scale_is_continuous_in_width() {
+        let mut harness = Harness::new();
+        harness.frame(900.0);
+        harness.frame(900.0);
+        let mut previous = None;
+        // 亚像素步进：每一步都必须带来一个不同的、单调增长的显示倍率。
+        for step in 0..40 {
+            let width = 900.0 + step as f32 * 0.25;
+            harness.frame(width);
+            let shown = harness.doc.preview_fit_scale;
+            if let Some(previous) = previous {
+                assert!(
+                    shown > previous,
+                    "宽度 {width} 处显示倍率没有随宽度增长：{previous} → {shown}（出现了台阶）"
+                );
+            }
+            previous = Some(shown);
+        }
+    }
+
+    /// 最要紧的一条：拖动中间那些帧是用层变换画出来的，画面必须与"老老实实
+    /// 重排一遍"得到的画面重合——纸张一样大、一样居中。否则就是拿糊掉的画面
+    /// 换性能，不是丝滑。
+    #[test]
+    fn transformed_frame_matches_a_real_relayout() {
+        let width = 1000.0;
+
+        // 甲：正常落定（无变换）时纸张的位置与大小。
+        let mut settled = Harness::new();
+        settled.frame(width);
+        settled.frame(width);
+        let expected = settled.paper(width);
+
+        // 乙：从别处拖过来、本帧仍在动，因而走层变换路径。
+        let mut dragging = Harness::new();
+        dragging.frame(width - 40.0);
+        dragging.frame(width - 40.0);
+        let frozen = dragging.doc.preview_layout_scale;
+        let actual = dragging.paper(width);
+        assert_ne!(
+            dragging.doc.preview_layout_scale, 0.0,
+            "应当仍冻结在旧倍率上"
+        );
+        assert_eq!(
+            dragging.doc.preview_layout_scale, frozen,
+            "这一帧宽度在变，不应重排"
+        );
+
+        // 半个像素以内即认为重合。
+        assert!(
+            (actual.width() - expected.width()).abs() < 0.5,
+            "纸张宽度对不上：变换后 {:.2}，重排应为 {:.2}",
+            actual.width(),
+            expected.width()
+        );
+        // 高度不可能逐像素相等：换行是离散的，每行的 ascent/descent 又各自取整，
+        // 所以 k·H(s) 与 H(k·s) 必然差一点点。要紧的是这点误差摊到"一屏"之内
+        // 有多大——变换以可视区顶边为支点，误差随离支点的距离线性累积。
+        let relative = (actual.height() - expected.height()).abs() / expected.height();
+        assert!(
+            relative < 0.005,
+            "纸张高度相对误差 {:.3}% 偏大：变换后 {:.2}，重排应为 {:.2}",
+            relative * 100.0,
+            actual.height(),
+            expected.height()
+        );
+        let drift_in_one_screen = relative * 900.0;
+        assert!(
+            drift_in_one_screen < 3.0,
+            "一屏之内会漂 {drift_in_one_screen:.2} 像素，松手时看得出跳动"
+        );
+        assert!(
+            (actual.center().x - expected.center().x).abs() < 0.5,
+            "纸张没有居中：变换后中心 {:.2}，重排应为 {:.2}",
+            actual.center().x,
+            expected.center().x
+        );
+        assert!(
+            (actual.top() - expected.top()).abs() < 0.5,
+            "纸张顶边漂了：变换后 {:.2}，重排应为 {:.2}",
+            actual.top(),
+            expected.top()
+        );
+    }
+
+    /// 跳变（切换显示方式、窗口最大化）不该走变换路径糊一帧，直接重排。
+    #[test]
+    fn large_jumps_relayout_immediately() {
+        let mut harness = Harness::new();
+        harness.frame(900.0);
+        harness.frame(900.0);
+        harness.frame(1400.0);
+        assert_eq!(
+            harness.doc.preview_layout_scale, harness.doc.preview_fit_scale,
+            "一步到位的跳变应当立即按精确倍率重排"
+        );
+    }
+
+    /// 拖动整段过程中：字体图集一次都不许重建，版面一次都不许重排。
+    ///
+    /// 这两条是确定性的，也正是省下时间的因果本身——不拿墙钟时间做断言：
+    /// 机器负载一高就会误报，而它证明不了任何这两条之外的东西。真实耗时打出来
+    /// 供人看（本机实测：改动前 均值 3.56 / 最差 5.96 ms、重建 55 次；
+    /// 改动后 均值 0.44 / 最差 0.81 ms、重建 0 次）。
+    #[test]
+    fn dragging_neither_rebuilds_the_atlas_nor_relayouts() {
+        let mut harness = Harness::new();
+        for i in 0..40 {
+            harness.frame(700.0 + i as f32);
+        }
+        let frozen = harness.doc.preview_layout_scale;
+
+        let mut times = Vec::new();
+        let mut rebuilds = 0;
+        let mut relayouts = 0;
+        for i in 0..120 {
+            let (elapsed, rebuilt) = harness.frame(700.0 + i as f32 * 3.7);
+            times.push(elapsed);
+            rebuilds += u32::from(rebuilt);
+            if harness.doc.preview_layout_scale != frozen {
+                relayouts += 1;
+            }
+        }
+        let mean = times.iter().sum::<f32>() / times.len() as f32;
+        let p50 = percentile(&mut times, 0.5);
+        let p95 = percentile(&mut times, 0.95);
+        let max = percentile(&mut times, 1.0);
+        println!(
+            "拖动 120 帧：均值 {mean:.2} / 中位 {p50:.2} / p95 {p95:.2} / 最差 {max:.2} ms，\
+             图集重建 {rebuilds} 次，重排 {relayouts} 次"
+        );
+
+        assert_eq!(rebuilds, 0, "拖动期间字号恒定，字体图集不应重建");
+        assert_eq!(relayouts, 0, "拖动期间版面缩放应始终冻结，一次都不该重排");
     }
 }

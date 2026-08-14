@@ -2305,7 +2305,7 @@ impl GongwenApp {
                             &input,
                             &display,
                             &preview.markdown,
-                            preview.zoom,
+                            preview::PreviewScale::zoom(preview.zoom),
                             None,
                             false,
                         );
