@@ -47,7 +47,9 @@ Desktop.ini
 $RECYCLE.BIN/
 
 # Tool-local state
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 .codex-tmp/
 .reasonix
 reasonix.toml
