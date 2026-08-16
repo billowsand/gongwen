@@ -9,7 +9,7 @@ use crate::knowledge;
 use crate::knowledge::KnowledgeStore;
 use crate::manuscript;
 use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptRow, ManuscriptStore};
-use crate::models::{AppConfig, DraftInput, TemplateKind};
+use crate::models::{AppConfig, DraftInput, TemplateKind, VocabularySetupStatus};
 use crate::pdf_viewer::{PdfKey, PdfSession};
 use crate::qa;
 use crate::rag;
@@ -45,6 +45,14 @@ pub(crate) use versioning::{
     VersionCommitDraft, VersionDiffState, VersionScope, VersionSwitchPrompt, VersionTarget,
 };
 pub(crate) use widgets::*;
+
+#[derive(Debug, Clone)]
+pub(crate) struct VocabularyMoveDraft {
+    pub(crate) id: u64,
+    /// 单位条目表示新上级编码；人员条目表示新所属单位编码。
+    pub(crate) destination: String,
+    pub(crate) position: units::SiblingPosition,
+}
 
 pub(crate) fn accent() -> egui::Color32 {
     theme::accent()
@@ -111,6 +119,12 @@ pub struct GongwenApp {
     export_links: ExportLinks,
     models: Vec<String>,
     vocabulary_import_conflicts: Option<Vec<vocabulary_xlsx::Conflict>>,
+    /// 词库有尚未写入本机配置的编辑。
+    vocabulary_dirty: bool,
+    /// 首次建库引导里的顶级单位名称草稿。
+    vocabulary_setup_name: String,
+    /// “精确移动”对话框草稿。
+    vocabulary_move: Option<VocabularyMoveDraft>,
     /// "关于公文助手"弹窗显隐。
     about_window_open: bool,
     vocabulary_filter: String,
@@ -276,6 +290,12 @@ impl GongwenApp {
 
         // 载入即整理：补齐词条 id，按层级重排单位并重新生成层级编码。
         units::normalize(&mut config.vocabulary);
+        // 旧版本没有建库状态：已有词条即视为完成，避免升级后误弹引导。
+        if config.vocabulary_setup == VocabularySetupStatus::Pending
+            && !config.vocabulary.is_empty()
+        {
+            config.vocabulary_setup = VocabularySetupStatus::Completed;
+        }
         // 旧配置没有提示词库，这里补齐预置项并给未编号的条目分配 id。
         config.ensure_ai_prompts();
         // 密级现在是所有文稿类型的必要填报项目：旧配置里的空密级回填默认“机密、20年”。
@@ -319,6 +339,9 @@ impl GongwenApp {
             export_links: ExportLinks::default(),
             models: Vec::new(),
             vocabulary_import_conflicts: None,
+            vocabulary_dirty: false,
+            vocabulary_setup_name: String::new(),
+            vocabulary_move: None,
             about_window_open: false,
             vocabulary_filter: String::new(),
             vocabulary_selected: None,
@@ -398,6 +421,9 @@ impl GongwenApp {
             knowledge_preview: None,
         };
         app.restore_session();
+        if app.config.vocabulary_setup == VocabularySetupStatus::Pending {
+            app.open_page(NavPage::Vocabulary);
+        }
         app
     }
 

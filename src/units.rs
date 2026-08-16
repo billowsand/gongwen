@@ -17,12 +17,38 @@ use std::collections::HashMap;
 /// 因此解析上下级关系一律用“最长前缀匹配”，不要按固定位数切片。
 pub const CODE_WIDTH: usize = 2;
 
+/// 新增或移动词条时在同级列表中的目标位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiblingPosition {
+    First,
+    Last,
+    Before(u64),
+    After(u64),
+}
+
 /// 单位层级的最大深度保护值，防止上级关系成环时无限递归。
 const MAX_DEPTH: usize = 16;
 
 /// 下一个可用的词条 id。
 pub fn next_id(vocab: &[VocabularyEntry]) -> u64 {
     vocab.iter().map(|entry| entry.id).max().unwrap_or(0) + 1
+}
+
+/// 为新单位生成当前父级下不会冲突的层级编码。编码只表达层级关系，实际显示
+/// 顺序由 sort_order 决定，因此在中间插入时无需重写其它单位的编码。
+pub fn next_unit_code(vocab: &[VocabularyEntry], parent: &str) -> String {
+    let parent = parent.trim();
+    let mut number = if parent.is_empty() { 0usize } else { 1usize };
+    loop {
+        let suffix = format!("{number:0width$}", width = CODE_WIDTH);
+        let candidate = format!("{parent}{suffix}");
+        if !vocab.iter().any(|entry| {
+            entry.category == VocabularyCategory::Unit && entry.code.trim() == candidate
+        }) {
+            return candidate;
+        }
+        number += 1;
+    }
 }
 
 /// 给尚未编号（`id == 0`）的词条补号。
@@ -48,12 +74,13 @@ pub fn normalize(vocab: &mut Vec<VocabularyEntry>) {
 /// 把词库整理成与树形界面一致的顺序：**用户填的层级编码原样保留**，
 /// 只有编码为空的单位才在 walk 中按位置生成。
 /// 旧版的 `normalize` 全量重排会导致用户手工维护的编码被覆盖；本函数保留它们的字面值，
-/// 树形顺序仍然由编码字典序给出（用户填的合法编码只要彼此前缀关系正确就直接生效）。
+/// 树形层级仍由编码前缀表达，同级顺序由独立的 `sort_order` 给出。
 ///
 /// 第一步仍把空 code 的单位分配 `@{id}` 占位，是为了在排序与 walk 时把它们聚合在一起；
 /// 占位编码以 `@` 结尾，不会与用户填的合法编码（`^[A-Za-z0-9._\-]+$`）冲突。
 pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
     assign_missing_ids(vocab);
+    ensure_sort_orders(vocab);
     let mut source = std::mem::take(vocab);
 
     // 旧配置可能完全没有编码。先给空 code 单位放入临时占位编码，
@@ -117,6 +144,22 @@ pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
         }
     }
 
+    // 结构关系仍由 parent / unit 决定；显示和输出顺序只看 sort_order。
+    // 下标作为相同 sort_order 时的稳定兜底，确保旧数据迁移不跳动。
+    let by_order = |left: &usize, right: &usize| {
+        source[*left]
+            .sort_order
+            .cmp(&source[*right].sort_order)
+            .then_with(|| left.cmp(right))
+    };
+    roots.sort_by(by_order);
+    for siblings in children.values_mut() {
+        siblings.sort_by(by_order);
+    }
+    for siblings in people.values_mut() {
+        siblings.sort_by(by_order);
+    }
+
     let mut slots: Vec<Option<VocabularyEntry>> = source.into_iter().map(Some).collect();
     let mut output = Vec::with_capacity(slots.len());
     let mut root_order = 0;
@@ -164,6 +207,247 @@ pub fn normalize_preserving_codes(vocab: &mut Vec<VocabularyEntry>) {
     *vocab = output;
     // 整理完后再按编码前缀回填 parent（占位编码已被替换为真实编码，前缀关系可直接读出）。
     rebuild_parents_from_codes(vocab);
+}
+
+/// 给旧配置和导入条目补齐同级排序值。已有非零排序值保持不变；新条目排在
+/// 当前同组末尾。分组使用现有 parent / unit 字面值，载入时名称到编码的迁移
+/// 随后的 normalize 会继续处理，不影响同组内的相对顺序。
+pub fn ensure_sort_orders(vocab: &mut [VocabularyEntry]) {
+    let mut next_by_group: HashMap<(VocabularyCategory, String), u32> = HashMap::new();
+
+    for entry in vocab.iter() {
+        if entry.sort_order == 0 {
+            continue;
+        }
+        let owner = match entry.category {
+            VocabularyCategory::Unit => entry.parent.trim(),
+            VocabularyCategory::Person => entry.unit.trim(),
+        };
+        let next = next_by_group
+            .entry((entry.category, owner.to_string()))
+            .or_insert(10);
+        *next = (*next).max(entry.sort_order.saturating_add(10));
+    }
+
+    for entry in vocab.iter_mut() {
+        if entry.sort_order != 0 {
+            continue;
+        }
+        let owner = match entry.category {
+            VocabularyCategory::Unit => entry.parent.trim(),
+            VocabularyCategory::Person => entry.unit.trim(),
+        };
+        let next = next_by_group
+            .entry((entry.category, owner.to_string()))
+            .or_insert(10);
+        entry.sort_order = *next;
+        *next = next.saturating_add(10);
+    }
+}
+
+/// 把一组同级词条按给定 id 顺序重新编号。调用方负责保证 ids 属于同一组；
+/// 找不到的 id 会被忽略，组外词条完全不动。
+pub fn apply_sibling_order(vocab: &mut [VocabularyEntry], ids: &[u64]) {
+    for (position, id) in ids.iter().enumerate() {
+        if let Some(entry) = vocab.iter_mut().find(|entry| entry.id == *id) {
+            entry.sort_order = ((position + 1) as u32).saturating_mul(10);
+        }
+    }
+}
+
+/// 返回某个词条所属同级组的 id，顺序与当前界面一致。
+pub fn sibling_ids(vocab: &[VocabularyEntry], id: u64) -> Vec<u64> {
+    let Some(entry) = vocab.iter().find(|entry| entry.id == id) else {
+        return Vec::new();
+    };
+    let mut siblings = vocab
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| match entry.category {
+            VocabularyCategory::Unit => {
+                candidate.category == VocabularyCategory::Unit
+                    && candidate.parent.trim() == entry.parent.trim()
+            }
+            VocabularyCategory::Person => {
+                candidate.category == VocabularyCategory::Person
+                    && candidate.unit.trim() == entry.unit.trim()
+            }
+        })
+        .collect::<Vec<_>>();
+    siblings.sort_by(|(left_index, left), (right_index, right)| {
+        left.sort_order
+            .cmp(&right.sort_order)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    siblings.into_iter().map(|(_, entry)| entry.id).collect()
+}
+
+/// 把词条放到同级组中的精确位置。Before / After 的参照项必须与词条同级，
+/// 否则返回错误，避免一次错误拖放悄悄改变组织关系。
+pub fn place_sibling(
+    vocab: &mut Vec<VocabularyEntry>,
+    id: u64,
+    position: SiblingPosition,
+) -> Result<(), String> {
+    ensure_sort_orders(vocab);
+    let mut siblings = sibling_ids(vocab, id);
+    let Some(current) = siblings.iter().position(|candidate| *candidate == id) else {
+        return Err("找不到要移动的词条".into());
+    };
+    siblings.remove(current);
+    let target = match position {
+        SiblingPosition::First => 0,
+        SiblingPosition::Last => siblings.len(),
+        SiblingPosition::Before(anchor) => siblings
+            .iter()
+            .position(|candidate| *candidate == anchor)
+            .ok_or_else(|| "参照词条与当前词条不在同一级".to_string())?,
+        SiblingPosition::After(anchor) => siblings
+            .iter()
+            .position(|candidate| *candidate == anchor)
+            .map(|index| index + 1)
+            .ok_or_else(|| "参照词条与当前词条不在同一级".to_string())?,
+    };
+    siblings.insert(target, id);
+    apply_sibling_order(vocab, &siblings);
+    normalize(vocab);
+    Ok(())
+}
+
+/// 沿用原有上移/下移按钮的语义，但排序落到独立 sort_order，不再依赖 Vec swap。
+pub fn move_sibling_by(vocab: &mut Vec<VocabularyEntry>, id: u64, offset: isize) -> bool {
+    ensure_sort_orders(vocab);
+    let siblings = sibling_ids(vocab, id);
+    let Some(current) = siblings.iter().position(|candidate| *candidate == id) else {
+        return false;
+    };
+    let target = current as isize + offset;
+    if target < 0 || target >= siblings.len() as isize {
+        return false;
+    }
+    let anchor = siblings[target as usize];
+    let position = if offset < 0 {
+        SiblingPosition::Before(anchor)
+    } else {
+        SiblingPosition::After(anchor)
+    };
+    place_sibling(vocab, id, position).is_ok()
+}
+
+/// 把单位移到新的上级下，或把人员改挂到新的所属单位，并可同时指定落点。
+/// 单位跨层级移动时会成组改写整棵子树的编码及人员引用，避免出现界面看似移动、
+/// 下次整理后又回到原处的情况。
+pub fn relocate_entry(
+    vocab: &mut Vec<VocabularyEntry>,
+    id: u64,
+    destination: &str,
+    position: SiblingPosition,
+) -> Result<(), String> {
+    normalize(vocab);
+    let destination = destination.trim().to_string();
+    let index = vocab
+        .iter()
+        .position(|entry| entry.id == id)
+        .ok_or_else(|| "找不到要移动的词条".to_string())?;
+    let category = vocab[index].category;
+
+    if !destination.is_empty()
+        && !vocab.iter().any(|entry| {
+            entry.category == VocabularyCategory::Unit && entry.code.trim() == destination
+        })
+    {
+        return Err("目标单位不存在".into());
+    }
+
+    match category {
+        VocabularyCategory::Person => {
+            vocab[index].unit = destination;
+            vocab[index].sort_order = 0;
+            normalize(vocab);
+            place_sibling(vocab, id, position)
+        }
+        VocabularyCategory::Unit => {
+            let old_parent = vocab[index].parent.trim().to_string();
+            if old_parent == destination {
+                return place_sibling(vocab, id, position);
+            }
+
+            let subtree = subtree_indices(vocab, index);
+            let subtree_unit_codes = subtree
+                .iter()
+                .filter_map(|subtree_index| {
+                    let entry = &vocab[*subtree_index];
+                    (entry.category == VocabularyCategory::Unit)
+                        .then(|| entry.code.trim().to_string())
+                })
+                .collect::<Vec<_>>();
+            if subtree_unit_codes.iter().any(|code| code == &destination) {
+                return Err("不能把单位移动到自身或自己的下级单位中".into());
+            }
+
+            let old_code = vocab[index].code.trim().to_string();
+            if old_code.is_empty() {
+                return Err("当前单位没有有效层级编码，请先整理词库".into());
+            }
+            let new_code = next_unit_code(vocab, &destination);
+            let mut code_map = HashMap::new();
+            code_map.insert(old_code.clone(), new_code.clone());
+
+            let mut descendants = subtree_unit_codes
+                .into_iter()
+                .filter(|code| code != &old_code)
+                .collect::<Vec<_>>();
+            descendants.sort_by_key(|code| code.len());
+            for code in descendants {
+                let replacement = code
+                    .strip_prefix(&old_code)
+                    .map(|suffix| format!("{new_code}{suffix}"))
+                    .ok_or_else(|| "下级单位编码与当前层级不一致，请先整理词库".to_string())?;
+                code_map.insert(code, replacement);
+            }
+            let subtree_ids = subtree
+                .iter()
+                .map(|subtree_index| vocab[*subtree_index].id)
+                .collect::<Vec<_>>();
+            if code_map.values().any(|replacement| {
+                vocab.iter().any(|entry| {
+                    entry.category == VocabularyCategory::Unit
+                        && !subtree_ids.contains(&entry.id)
+                        && entry.code.trim() == replacement
+                })
+            }) {
+                return Err("目标层级已有冲突编码，请先整理目标单位后重试".into());
+            }
+
+            for entry in vocab.iter_mut() {
+                match entry.category {
+                    VocabularyCategory::Unit => {
+                        let old = entry.code.trim().to_string();
+                        if let Some(replacement) = code_map.get(&old) {
+                            entry.code = replacement.clone();
+                        }
+                        if entry.id == id {
+                            entry.parent = destination.clone();
+                            entry.sort_order = 0;
+                        } else {
+                            let parent = entry.parent.trim().to_string();
+                            if let Some(replacement) = code_map.get(&parent) {
+                                entry.parent = replacement.clone();
+                            }
+                        }
+                    }
+                    VocabularyCategory::Person => {
+                        let unit = entry.unit.trim().to_string();
+                        if let Some(replacement) = code_map.get(&unit) {
+                            entry.unit = replacement.clone();
+                        }
+                    }
+                }
+            }
+            normalize(vocab);
+            place_sibling(vocab, id, position)
+        }
+    }
 }
 
 fn walk(
@@ -1400,7 +1684,8 @@ mod tests {
         assert_eq!(display.department_code_of("查无此单位"), "");
     }
 
-    /// 用户填的层级编码即事实：导入或重排后字面值不被覆盖，树形顺序以编码字典序给出。
+    /// 用户填的层级编码即事实：导入或重排后字面值不被覆盖；同级显示顺序
+    /// 由 sort_order 决定，旧数据则沿用原有 Vec 顺序。
     /// 新规则允许编码是任意 `^[A-Za-z0-9._\-]+$` 字符，旧版的两位进制数字只是惯例。
     #[test]
     fn normalize_preserves_user_provided_codes() {
@@ -1475,5 +1760,183 @@ mod tests {
             .collect::<Vec<_>>();
         // 用户填的保留字面；未填的按位置生成。
         assert_eq!(order, ["A1-顶层甲", "A101-自动补的处", "B2-顶层乙"]);
+    }
+
+    #[test]
+    fn legacy_entries_receive_stable_sibling_orders() {
+        let mut list = vec![
+            VocabularyEntry {
+                id: 1,
+                canonical: "根单位".into(),
+                code: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 2,
+                canonical: "甲处".into(),
+                code: "0001".into(),
+                parent: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 3,
+                canonical: "乙处".into(),
+                code: "0002".into(),
+                parent: "00".into(),
+                ..Default::default()
+            },
+        ];
+        normalize(&mut list);
+        let children = child_units(&list, "00")
+            .into_iter()
+            .map(|index| (list[index].canonical.clone(), list[index].sort_order))
+            .collect::<Vec<_>>();
+        assert_eq!(children, [("甲处".into(), 10), ("乙处".into(), 20)]);
+    }
+
+    #[test]
+    fn placing_sibling_changes_order_without_changing_codes() {
+        let mut list = vec![
+            VocabularyEntry {
+                id: 1,
+                canonical: "根单位".into(),
+                code: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 2,
+                canonical: "甲处".into(),
+                code: "0001".into(),
+                parent: "00".into(),
+                sort_order: 10,
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 3,
+                canonical: "乙处".into(),
+                code: "0002".into(),
+                parent: "00".into(),
+                sort_order: 20,
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 4,
+                canonical: "丙处".into(),
+                code: "0003".into(),
+                parent: "00".into(),
+                sort_order: 30,
+                ..Default::default()
+            },
+        ];
+        normalize(&mut list);
+        place_sibling(&mut list, 4, SiblingPosition::Before(3)).unwrap();
+        let children = child_units(&list, "00")
+            .into_iter()
+            .map(|index| (list[index].canonical.clone(), list[index].code.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            children,
+            [
+                ("甲处".into(), "0001".into()),
+                ("丙处".into(), "0003".into()),
+                ("乙处".into(), "0002".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn new_unit_code_is_unique_even_when_inserted_in_the_middle() {
+        let list = vec![
+            VocabularyEntry {
+                category: VocabularyCategory::Unit,
+                code: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                category: VocabularyCategory::Unit,
+                code: "0001".into(),
+                parent: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                category: VocabularyCategory::Unit,
+                code: "0002".into(),
+                parent: "00".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(next_unit_code(&list, "00"), "0003");
+    }
+
+    #[test]
+    fn relocating_unit_rewrites_the_whole_subtree_and_person_references() {
+        let mut list = vec![
+            VocabularyEntry {
+                id: 1,
+                canonical: "甲局".into(),
+                code: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 2,
+                canonical: "乙局".into(),
+                code: "01".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 3,
+                canonical: "办公室".into(),
+                code: "0001".into(),
+                parent: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 4,
+                canonical: "秘书科".into(),
+                code: "000101".into(),
+                parent: "0001".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 5,
+                category: VocabularyCategory::Person,
+                canonical: "王某".into(),
+                unit: "000101".into(),
+                ..Default::default()
+            },
+        ];
+        normalize(&mut list);
+        relocate_entry(&mut list, 3, "01", SiblingPosition::First).unwrap();
+
+        let office = list.iter().find(|entry| entry.id == 3).unwrap();
+        let section = list.iter().find(|entry| entry.id == 4).unwrap();
+        let person = list.iter().find(|entry| entry.id == 5).unwrap();
+        assert_eq!(office.parent, "01");
+        assert_eq!(office.code, "0101");
+        assert_eq!(section.parent, "0101");
+        assert_eq!(section.code, "010101");
+        assert_eq!(person.unit, "010101");
+    }
+
+    #[test]
+    fn relocating_unit_rejects_its_own_descendant() {
+        let mut list = vec![
+            VocabularyEntry {
+                id: 1,
+                canonical: "根".into(),
+                code: "00".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                id: 2,
+                canonical: "下级".into(),
+                code: "0001".into(),
+                parent: "00".into(),
+                ..Default::default()
+            },
+        ];
+        normalize(&mut list);
+        let error = relocate_entry(&mut list, 1, "0001", SiblingPosition::Last).unwrap_err();
+        assert!(error.contains("自身或自己的下级"));
     }
 }

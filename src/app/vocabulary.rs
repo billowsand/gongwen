@@ -4,14 +4,14 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use crate::app::{
-    GongwenApp, VersionScope, unique_name, vocabulary_depths, vocabulary_matches, warn,
-    wrapped_hint,
+    GongwenApp, VersionScope, VocabularyMoveDraft, unique_name, vocabulary_depths,
+    vocabulary_matches, warn, wrapped_hint,
 };
-use crate::models::{VocabularyCategory, VocabularyEntry, split_units};
+use crate::models::{VocabularyCategory, VocabularyEntry, VocabularySetupStatus, split_units};
 use crate::storage;
 use crate::theme;
 use crate::units;
-use crate::units::UnitDisplay;
+use crate::units::{SiblingPosition, UnitDisplay};
 use crate::vocabulary_xlsx;
 use eframe::egui;
 use std::collections::BTreeMap;
@@ -21,16 +21,29 @@ pub(crate) enum VocabAction {
     /// 新增单位。`parent` 为空表示顶层单位。
     AddUnit {
         parent: String,
+        position: SiblingPosition,
     },
     /// 在指定单位下新增人员。
     AddPerson {
         unit: String,
+        position: SiblingPosition,
     },
     /// 删除词条；删除单位时连同其下级单位与人员一并删除。
     Delete(u64),
     /// 在同级之间上移/下移，随后重排层级编码。
     MoveUp(u64),
     MoveDown(u64),
+    /// 把词条精确放到同级列表中的指定位置。
+    Place {
+        id: u64,
+        position: SiblingPosition,
+    },
+    /// 改变所属层级并放到目标同级列表中的精确位置。
+    Relocate {
+        id: u64,
+        destination: String,
+        position: SiblingPosition,
+    },
     /// 清空当前标准词库。
     Clear,
 }
@@ -67,11 +80,15 @@ impl GongwenApp {
             let parsed_count = report.entries.len();
             let merge = vocabulary_xlsx::merge(&mut self.config.vocabulary, report.entries);
             units::normalize(&mut self.config.vocabulary);
+            if !self.config.vocabulary.is_empty() {
+                self.config.vocabulary_setup = VocabularySetupStatus::Completed;
+            }
             storage::save(&self.config).map_err(|error| format!("保存词库失败：{error:#}"))?;
             Ok((parsed_count, merge))
         })();
         match result {
             Ok((parsed, merge)) => {
+                self.vocabulary_dirty = false;
                 self.status = format!(
                     "已从“{}”解析 {} 条：新增 {} 条、更新 {} 条、未变化 {} 条。",
                     path.file_name()
@@ -159,6 +176,12 @@ impl GongwenApp {
     }
 
     pub(crate) fn vocabulary_ui(&mut self, ui: &mut egui::Ui) {
+        if self.config.vocabulary_setup == VocabularySetupStatus::Pending
+            && self.config.vocabulary.is_empty()
+        {
+            self.vocabulary_setup_ui(ui);
+            return;
+        }
         let mut action = None;
         let mut structure_changed = false;
         let unit_count = self
@@ -174,12 +197,20 @@ impl GongwenApp {
             ui.vertical(|ui| {
                 ui.heading("标准词库");
                 ui.weak(format!(
-                    "{unit_count} 个单位 · {person_count} 名人员 · 数据仅保存在本机"
+                    "{unit_count} 个单位 · {person_count} 名人员 · {}",
+                    if self.vocabulary_dirty {
+                        "有未保存更改"
+                    } else {
+                        "已保存到本机"
+                    }
                 ));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::primary_icon_button(ui, theme::Icon::Save, "保存更改").clicked() {
                     self.persist();
+                    if self.status.starts_with("配置已保存") {
+                        self.vocabulary_dirty = false;
+                    }
                 }
                 if theme::icon_button(ui, theme::Icon::History, "版本历史")
                     .on_hover_text("查看全局配置版本（词库、版式、设置），可应用回滚或对照")
@@ -245,6 +276,7 @@ impl GongwenApp {
             {
                 action = Some(VocabAction::AddUnit {
                     parent: String::new(),
+                    position: SiblingPosition::Last,
                 });
             }
             ui.separator();
@@ -383,6 +415,320 @@ impl GongwenApp {
             self.apply_vocab_action(action);
         } else if structure_changed {
             units::normalize(&mut self.config.vocabulary);
+            self.vocabulary_dirty = true;
+        }
+        self.vocabulary_move_window(ui.ctx());
+    }
+
+    /// 首次运行建库引导：先帮助用户完成一个可工作的最小词库，再进入完整编辑器。
+    pub(crate) fn vocabulary_setup_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.heading("建立您的标准词库");
+            ui.weak("先创建一个顶级单位，后续再按组织层级补充下级单位和人员。");
+            ui.add_space(18.0);
+
+            ui.horizontal(|ui| {
+                for (number, label, active) in [
+                    ("1", "创建根单位", true),
+                    ("2", "补充层级与人员", false),
+                    ("3", "检查并保存", false),
+                ] {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(118.0, 70.0), egui::Sense::hover());
+                    let center = egui::pos2(rect.center().x, rect.top() + 22.0);
+                    ui.painter().circle_filled(
+                        center,
+                        18.0,
+                        if active {
+                            theme::accent()
+                        } else {
+                            theme::surface_hover()
+                        },
+                    );
+                    ui.painter().text(
+                        center,
+                        egui::Align2::CENTER_CENTER,
+                        number,
+                        egui::FontId::proportional(15.0),
+                        if active {
+                            egui::Color32::WHITE
+                        } else {
+                            theme::text_soft()
+                        },
+                    );
+                    ui.painter().text(
+                        egui::pos2(rect.center().x, rect.bottom() - 10.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        label,
+                        egui::FontId::proportional(13.0),
+                        if active {
+                            theme::text()
+                        } else {
+                            theme::text_soft()
+                        },
+                    );
+                }
+            });
+            ui.add_space(12.0);
+        });
+
+        let card_width = ui.available_width().min(620.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(card_width, 0.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.group(|ui| {
+                    ui.set_min_width((card_width - 24.0).max(280.0));
+                    ui.strong("第一步：您的顶级单位叫什么？");
+                    ui.weak("只填写本级名称，不必把上级机关重复写入。以后可以随时修改。");
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.vocabulary_setup_name)
+                            .hint_text("例如：中共××市委宣传部")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let valid = !self.vocabulary_setup_name.trim().is_empty();
+                        if ui
+                            .add_enabled(valid, egui::Button::new("创建并进入词库编辑"))
+                            .clicked()
+                        {
+                            let name = self.vocabulary_setup_name.trim().to_string();
+                            self.apply_vocab_action(VocabAction::AddUnit {
+                                parent: String::new(),
+                                position: SiblingPosition::Last,
+                            });
+                            if let Some(id) = self.vocabulary_selected
+                                && let Some(entry) = self
+                                    .config
+                                    .vocabulary
+                                    .iter_mut()
+                                    .find(|entry| entry.id == id)
+                            {
+                                entry.canonical = name;
+                            }
+                            self.config.vocabulary_setup = VocabularySetupStatus::Completed;
+                            self.vocabulary_dirty = true;
+                            self.persist();
+                            if self.status.starts_with("配置已保存") {
+                                self.vocabulary_dirty = false;
+                            }
+                        }
+                        if ui.button("从 Excel 导入").clicked() {
+                            self.import_vocabulary_xlsx();
+                        }
+                        if ui.button("下载空白模板").clicked() {
+                            self.export_blank_vocabulary_template();
+                        }
+                        if ui.button("暂不建立").clicked() {
+                            self.config.vocabulary_setup = VocabularySetupStatus::Skipped;
+                            self.persist();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.weak(
+                        "也可以下载空白 Excel 模板批量填写后再导入；引导不会锁住任何专业字段。",
+                    );
+                });
+            },
+        );
+    }
+
+    pub(crate) fn vocabulary_move_window(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.vocabulary_move.take() else {
+            return;
+        };
+        let Some(entry) = self
+            .config
+            .vocabulary
+            .iter()
+            .find(|entry| entry.id == draft.id)
+            .cloned()
+        else {
+            return;
+        };
+        let is_unit = entry.category == VocabularyCategory::Unit;
+        let blocked = if is_unit {
+            self.config
+                .vocabulary
+                .iter()
+                .position(|candidate| candidate.id == draft.id)
+                .map(|index| {
+                    units::subtree_indices(&self.config.vocabulary, index)
+                        .into_iter()
+                        .filter_map(|index| {
+                            let candidate = &self.config.vocabulary[index];
+                            (candidate.category == VocabularyCategory::Unit)
+                                .then(|| candidate.code.trim().to_string())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let display = UnitDisplay::new(&self.config.vocabulary);
+        let destinations = self
+            .config
+            .vocabulary
+            .iter()
+            .filter(|candidate| candidate.category == VocabularyCategory::Unit)
+            .filter(|candidate| !blocked.contains(&candidate.code.trim().to_string()))
+            .map(|candidate| {
+                (
+                    candidate.code.trim().to_string(),
+                    display.full_name(&candidate.code),
+                )
+            })
+            .collect::<Vec<_>>();
+        let siblings = self
+            .config
+            .vocabulary
+            .iter()
+            .filter(|candidate| candidate.id != draft.id && candidate.category == entry.category)
+            .filter(|candidate| {
+                if is_unit {
+                    candidate.parent.trim() == draft.destination.trim()
+                } else {
+                    candidate.unit.trim() == draft.destination.trim()
+                }
+            })
+            .map(|candidate| (candidate.id, candidate.canonical.trim().to_string()))
+            .collect::<Vec<_>>();
+
+        let destination_label = if draft.destination.is_empty() {
+            if is_unit {
+                "（顶层单位）"
+            } else {
+                "（未归属）"
+            }
+            .to_string()
+        } else {
+            destinations
+                .iter()
+                .find(|(code, _)| code == &draft.destination)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| draft.destination.clone())
+        };
+        let position_label = match draft.position {
+            SiblingPosition::First => "本级最前".to_string(),
+            SiblingPosition::Last => "本级最后".to_string(),
+            SiblingPosition::Before(anchor) => siblings
+                .iter()
+                .find(|(id, _)| *id == anchor)
+                .map(|(_, name)| format!("“{name}”之前"))
+                .unwrap_or_else(|| "本级最后".to_string()),
+            SiblingPosition::After(anchor) => siblings
+                .iter()
+                .find(|(id, _)| *id == anchor)
+                .map(|(_, name)| format!("“{name}”之后"))
+                .unwrap_or_else(|| "本级最后".to_string()),
+        };
+
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("精确移动")
+            .id(egui::Id::new("vocabulary_move_window"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.strong(format!("移动“{}”", entry.canonical.trim()));
+                ui.weak(if is_unit {
+                    "选择新的上级单位和准确落点；下级单位及人员会随本单位一起移动。"
+                } else {
+                    "选择新的所属单位和准确落点。"
+                });
+                ui.add_space(10.0);
+                egui::Grid::new("vocabulary_move_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label(if is_unit { "新上级" } else { "所属单位" });
+                        egui::ComboBox::from_id_salt("vocabulary_move_destination")
+                            .selected_text(destination_label)
+                            .width(320.0)
+                            .show_ui(ui, |ui| {
+                                let empty_label = if is_unit {
+                                    "（顶层单位）"
+                                } else {
+                                    "（未归属）"
+                                };
+                                if ui
+                                    .selectable_label(draft.destination.is_empty(), empty_label)
+                                    .clicked()
+                                {
+                                    draft.destination.clear();
+                                    draft.position = SiblingPosition::Last;
+                                }
+                                for (code, name) in &destinations {
+                                    if ui
+                                        .selectable_label(
+                                            draft.destination == *code,
+                                            format!("{code} · {name}"),
+                                        )
+                                        .clicked()
+                                    {
+                                        draft.destination = code.clone();
+                                        draft.position = SiblingPosition::Last;
+                                    }
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("放置位置");
+                        egui::ComboBox::from_id_salt("vocabulary_move_position")
+                            .selected_text(position_label)
+                            .width(320.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut draft.position,
+                                    SiblingPosition::First,
+                                    "本级最前",
+                                );
+                                ui.selectable_value(
+                                    &mut draft.position,
+                                    SiblingPosition::Last,
+                                    "本级最后",
+                                );
+                                for (anchor, name) in &siblings {
+                                    ui.selectable_value(
+                                        &mut draft.position,
+                                        SiblingPosition::Before(*anchor),
+                                        format!("“{name}”之前"),
+                                    );
+                                    ui.selectable_value(
+                                        &mut draft.position,
+                                        SiblingPosition::After(*anchor),
+                                        format!("“{name}”之后"),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                    });
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("确认移动").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if confirm {
+            self.apply_vocab_action(VocabAction::Relocate {
+                id: draft.id,
+                destination: draft.destination,
+                position: draft.position,
+            });
+        } else if open && !cancel {
+            self.vocabulary_move = Some(draft);
         }
     }
 
@@ -484,10 +830,16 @@ impl GongwenApp {
                         "没有找到匹配的单位或人员"
                     });
                     ui.weak(if filter.is_empty() {
-                        "点击上方“顶级单位”开始建库，或从 Markdown 批量导入。"
+                        "点击上方“顶级单位”开始建库，或从 Excel 批量导入。"
                     } else {
                         "试试缩短关键词，或清除搜索条件。"
                     });
+                    if filter.is_empty()
+                        && self.config.vocabulary_setup == VocabularySetupStatus::Skipped
+                        && ui.button("重新打开建库引导").clicked()
+                    {
+                        self.config.vocabulary_setup = VocabularySetupStatus::Pending;
+                    }
                 });
                 ui.add_space(12.0);
             });
@@ -503,6 +855,8 @@ impl GongwenApp {
                 entry.canonical.trim().to_string()
             };
             let code = entry.code.trim().to_string();
+            let parent_code = entry.parent.trim().to_string();
+            let owner_code = entry.unit.trim().to_string();
             let selected = self.vocabulary_selected == Some(id);
             let collapsed = self.vocabulary_collapsed.contains(&id);
             // 单位层级只显示机关代字；人员显示职务、电话及承办上级单位权限。
@@ -550,6 +904,18 @@ impl GongwenApp {
                     ui.set_opacity(seen_t);
                     ui.horizontal(|ui| {
                         ui.add_space(row.depth as f32 * 16.0);
+                        if filter.is_empty() {
+                            let drag = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("⋮⋮").color(theme::text_muted()),
+                                )
+                                .sense(egui::Sense::drag()),
+                            );
+                            drag.dnd_set_drag_payload(id);
+                            drag.on_hover_text("拖动调整同级顺序");
+                        } else {
+                            ui.add_space(12.0);
+                        }
                         if row.is_unit && row.has_children {
                             if theme::icon_button(
                                 ui,
@@ -593,6 +959,71 @@ impl GongwenApp {
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("＋", |ui| {
+                                if row.is_unit {
+                                    if ui.button("添加下级单位").clicked() {
+                                        *action = Some(VocabAction::AddUnit {
+                                            parent: code.clone(),
+                                            position: SiblingPosition::Last,
+                                        });
+                                        ui.close();
+                                    }
+                                    if ui.button("添加人员").clicked() {
+                                        *action = Some(VocabAction::AddPerson {
+                                            unit: code.clone(),
+                                            position: SiblingPosition::Last,
+                                        });
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button("在本单位上方添加同级单位").clicked() {
+                                        *action = Some(VocabAction::AddUnit {
+                                            parent: parent_code.clone(),
+                                            position: SiblingPosition::Before(id),
+                                        });
+                                        ui.close();
+                                    }
+                                    if ui.button("在本单位下方添加同级单位").clicked() {
+                                        *action = Some(VocabAction::AddUnit {
+                                            parent: parent_code.clone(),
+                                            position: SiblingPosition::After(id),
+                                        });
+                                        ui.close();
+                                    }
+                                } else {
+                                    if ui.button("在本人员上方添加人员").clicked() {
+                                        *action = Some(VocabAction::AddPerson {
+                                            unit: owner_code.clone(),
+                                            position: SiblingPosition::Before(id),
+                                        });
+                                        ui.close();
+                                    }
+                                    if ui.button("在本人员下方添加人员").clicked() {
+                                        *action = Some(VocabAction::AddPerson {
+                                            unit: owner_code.clone(),
+                                            position: SiblingPosition::After(id),
+                                        });
+                                        ui.close();
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("移到本级最前").clicked() {
+                                    *action = Some(VocabAction::Place {
+                                        id,
+                                        position: SiblingPosition::First,
+                                    });
+                                    ui.close();
+                                }
+                                if ui.button("移到本级最后").clicked() {
+                                    *action = Some(VocabAction::Place {
+                                        id,
+                                        position: SiblingPosition::Last,
+                                    });
+                                    ui.close();
+                                }
+                            })
+                            .response
+                            .on_hover_text("在指定位置新增或移动");
                             if theme::icon_button(ui, theme::Icon::ArrowDown, "下移")
                                 .on_hover_text("与后一个同级交换")
                                 .clicked()
@@ -610,6 +1041,48 @@ impl GongwenApp {
                 })
                 .response
                 .rect;
+            // 拖到目标行上半部表示插到它前面，下半部表示插到它后面。
+            // 只接受同级词条，跨层级移动必须走精确移动面板，避免误改组织关系。
+            if filter.is_empty() {
+                let drop_response = ui.interact(
+                    row_rect,
+                    egui::Id::new(("vocab_drop", id)),
+                    egui::Sense::hover(),
+                );
+                let dragged = drop_response.dnd_hover_payload::<u64>();
+                let valid = dragged.as_ref().is_some_and(|dragged| {
+                    **dragged != id
+                        && units::sibling_ids(&self.config.vocabulary, **dragged).contains(&id)
+                });
+                if valid {
+                    let before = ui
+                        .ctx()
+                        .pointer_interact_pos()
+                        .is_none_or(|pointer| pointer.y <= row_rect.center().y);
+                    let y = if before {
+                        row_rect.top()
+                    } else {
+                        row_rect.bottom()
+                    };
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(row_rect.left(), y),
+                            egui::pos2(row_rect.right(), y),
+                        ],
+                        egui::Stroke::new(2.0, theme::accent()),
+                    );
+                    if let Some(dragged) = drop_response.dnd_release_payload::<u64>() {
+                        *action = Some(VocabAction::Place {
+                            id: *dragged,
+                            position: if before {
+                                SiblingPosition::Before(id)
+                            } else {
+                                SiblingPosition::After(id)
+                            },
+                        });
+                    }
+                }
+            }
             // 悬停用几何判断而非 response.hovered()：行里的按钮和标签会把交互抢走，
             // 指针落在它们上面时整行反而算「未悬停」，背景会一闪一闪。
             let hover_t = ui.ctx().animate_bool_with_time(
@@ -654,6 +1127,7 @@ impl GongwenApp {
             self.vocabulary_selected = None;
             return false;
         };
+        let before = self.config.vocabulary[index].clone();
 
         let mut structure_changed = false;
         let width = (ui.available_width() - 96.0).clamp(180.0, 420.0);
@@ -723,11 +1197,24 @@ impl GongwenApp {
         }
         ui.add_space(8.0);
 
-        if is_unit {
-            structure_changed |= self.vocabulary_unit_editor(ui, index, width);
-        } else {
-            structure_changed |= self.vocabulary_person_editor(ui, index, width);
-        }
+        theme::card().show(ui, |ui| {
+            ui.strong(if is_unit {
+                "单位资料"
+            } else {
+                "人员资料"
+            });
+            ui.weak(if is_unit {
+                "名称与层级用于组织结构；简称、外部名称和机关代字用于自动成文。"
+            } else {
+                "姓名、职务与电话分开维护，归属单位决定联系人和领导筛选范围。"
+            });
+            ui.add_space(8.0);
+            if is_unit {
+                structure_changed |= self.vocabulary_unit_editor(ui, index, width);
+            } else {
+                structure_changed |= self.vocabulary_person_editor(ui, index, width);
+            }
+        });
 
         ui.add_space(10.0);
         ui.separator();
@@ -748,6 +1235,7 @@ impl GongwenApp {
                 {
                     *action = Some(VocabAction::AddUnit {
                         parent: unit_code.clone(),
+                        position: SiblingPosition::Last,
                     });
                 }
                 if ui
@@ -757,11 +1245,36 @@ impl GongwenApp {
                 {
                     *action = Some(VocabAction::AddPerson {
                         unit: unit_code.clone(),
+                        position: SiblingPosition::Last,
                     });
                 }
             });
             ui.add_space(6.0);
         }
+
+        if ui
+            .add(theme::icon_text_button(
+                theme::Icon::ArrowUpDown,
+                "精确移动",
+            ))
+            .on_hover_text(if is_unit {
+                "选择新的上级单位，并精确放到某个同级单位之前或之后"
+            } else {
+                "选择新的所属单位，并精确放到某个人员之前或之后"
+            })
+            .clicked()
+        {
+            self.vocabulary_move = Some(VocabularyMoveDraft {
+                id,
+                destination: if is_unit {
+                    self.config.vocabulary[index].parent.clone()
+                } else {
+                    self.config.vocabulary[index].unit.clone()
+                },
+                position: SiblingPosition::Last,
+            });
+        }
+        ui.add_space(6.0);
 
         let doomed = self.vocabulary_delete_confirm == Some(id);
         if doomed {
@@ -814,6 +1327,15 @@ impl GongwenApp {
             self.vocabulary_delete_confirm = Some(id);
         }
         ui.add_space(4.0);
+        if self
+            .config
+            .vocabulary
+            .iter()
+            .find(|entry| entry.id == id)
+            .is_some_and(|entry| entry != &before)
+        {
+            self.vocabulary_dirty = true;
+        }
         structure_changed
     }
 
@@ -855,6 +1377,9 @@ impl GongwenApp {
                     .map(|(_, label)| label.clone())
             })
             .unwrap_or_else(|| self.config.vocabulary[index].parent.clone());
+        let previous_parent = self.config.vocabulary[index].parent.clone();
+        let mut selected_parent = previous_parent.clone();
+        let entry_id = self.config.vocabulary[index].id;
 
         egui::Grid::new(("unit_editor", index))
             .num_columns(2)
@@ -872,28 +1397,25 @@ impl GongwenApp {
                 structure_changed |= renamed;
 
                 ui.label("上级单位");
-                let parent = &mut self.config.vocabulary[index].parent;
-                let previous_parent = parent.clone();
                 egui::ComboBox::from_id_salt(("unit_parent", index))
                     .selected_text(&current_parent_label)
                     .width(width)
                     .show_ui(ui, |ui| {
                         if ui
-                            .selectable_label(parent.trim().is_empty(), "（顶层单位）")
+                            .selectable_label(selected_parent.trim().is_empty(), "（顶层单位）")
                             .clicked()
                         {
-                            parent.clear();
+                            selected_parent.clear();
                         }
                         for (code, label) in &parent_options {
                             if ui
-                                .selectable_label(parent.as_str() == code, label)
+                                .selectable_label(selected_parent.as_str() == code, label)
                                 .clicked()
                             {
-                                *parent = code.clone();
+                                selected_parent = code.clone();
                             }
                         }
                     });
-                structure_changed |= *parent != previous_parent;
                 ui.end_row();
 
                 ui.label("简称");
@@ -953,6 +1475,14 @@ impl GongwenApp {
                 ui.end_row();
             });
 
+        if selected_parent != previous_parent {
+            self.vocabulary_move = Some(VocabularyMoveDraft {
+                id: entry_id,
+                destination: selected_parent,
+                position: SiblingPosition::Last,
+            });
+        }
+
         ui.add_space(4.0);
         let name = self.config.vocabulary[index].canonical.trim().to_string();
         if name.is_empty() {
@@ -970,7 +1500,7 @@ impl GongwenApp {
         index: usize,
         width: f32,
     ) -> bool {
-        let mut structure_changed = false;
+        let structure_changed = false;
         let display = UnitDisplay::new(&self.config.vocabulary);
         let unit_options = self
             .config
@@ -997,6 +1527,9 @@ impl GongwenApp {
                     .map(|(_, label)| label.clone())
             })
             .unwrap_or_else(|| self.config.vocabulary[index].unit.clone());
+        let previous_unit = self.config.vocabulary[index].unit.clone();
+        let mut selected_unit = previous_unit.clone();
+        let entry_id = self.config.vocabulary[index].id;
 
         egui::Grid::new(("person_editor", index))
             .num_columns(2)
@@ -1027,25 +1560,25 @@ impl GongwenApp {
                 ui.end_row();
 
                 ui.label("所属单位");
-                let unit = &mut self.config.vocabulary[index].unit;
-                let previous_unit = unit.clone();
                 egui::ComboBox::from_id_salt(("person_unit", index))
                     .selected_text(&current_unit_label)
                     .width(width)
                     .show_ui(ui, |ui| {
                         if ui
-                            .selectable_label(unit.trim().is_empty(), "（未归属）")
+                            .selectable_label(selected_unit.trim().is_empty(), "（未归属）")
                             .clicked()
                         {
-                            unit.clear();
+                            selected_unit.clear();
                         }
                         for (code, label) in &unit_options {
-                            if ui.selectable_label(unit.as_str() == code, label).clicked() {
-                                *unit = code.clone();
+                            if ui
+                                .selectable_label(selected_unit.as_str() == code, label)
+                                .clicked()
+                            {
+                                selected_unit = code.clone();
                             }
                         }
                     });
-                structure_changed |= *unit != previous_unit;
                 ui.end_row();
 
                 ui.label("承办上级单位");
@@ -1078,6 +1611,14 @@ impl GongwenApp {
                 ui.end_row();
             });
 
+        if selected_unit != previous_unit {
+            self.vocabulary_move = Some(VocabularyMoveDraft {
+                id: entry_id,
+                destination: selected_unit,
+                position: SiblingPosition::Last,
+            });
+        }
+
         ui.add_space(4.0);
         wrapped_hint(
             ui,
@@ -1089,7 +1630,7 @@ impl GongwenApp {
 
     pub(crate) fn apply_vocab_action(&mut self, action: VocabAction) {
         match action {
-            VocabAction::AddUnit { parent } => {
+            VocabAction::AddUnit { parent, position } => {
                 // 挂在折叠的上级下面时先展开，否则新节点看不见。
                 if let Some(entry) = self
                     .config
@@ -1104,9 +1645,11 @@ impl GongwenApp {
                     self.vocabulary_collapsed.remove(&entry);
                 }
                 let id = units::next_id(&self.config.vocabulary);
+                let code = units::next_unit_code(&self.config.vocabulary, &parent);
                 self.config.vocabulary.push(VocabularyEntry {
                     id,
                     category: VocabularyCategory::Unit,
+                    code,
                     canonical: unique_name(
                         &self.config.vocabulary,
                         VocabularyCategory::Unit,
@@ -1115,10 +1658,14 @@ impl GongwenApp {
                     parent,
                     ..Default::default()
                 });
+                if let Err(error) = units::place_sibling(&mut self.config.vocabulary, id, position)
+                {
+                    self.status = format!("新增单位后排序失败：{error}");
+                }
                 self.vocabulary_selected = Some(id);
                 self.vocabulary_delete_confirm = None;
             }
-            VocabAction::AddPerson { unit } => {
+            VocabAction::AddPerson { unit, position } => {
                 if let Some(entry) = self
                     .config
                     .vocabulary
@@ -1143,6 +1690,10 @@ impl GongwenApp {
                     unit,
                     ..Default::default()
                 });
+                if let Err(error) = units::place_sibling(&mut self.config.vocabulary, id, position)
+                {
+                    self.status = format!("新增人员后排序失败：{error}");
+                }
                 self.vocabulary_selected = Some(id);
                 self.vocabulary_delete_confirm = None;
             }
@@ -1168,31 +1719,26 @@ impl GongwenApp {
             }
             VocabAction::MoveUp(id) | VocabAction::MoveDown(id) => {
                 let up = matches!(action, VocabAction::MoveUp(_));
-                let Some(index) = self
-                    .config
-                    .vocabulary
-                    .iter()
-                    .position(|entry| entry.id == id)
-                else {
-                    return;
-                };
-                let entry = &self.config.vocabulary[index];
-                // 同级 = 同一个上级下的单位，或同一个单位下的人员。
-                let siblings = if entry.category == VocabularyCategory::Unit {
-                    units::child_units(&self.config.vocabulary, entry.parent.trim())
-                } else {
-                    units::unit_people(&self.config.vocabulary, entry.unit.trim())
-                };
-                let Some(position) = siblings.iter().position(|value| *value == index) else {
-                    return;
-                };
-                let target = if up {
-                    position.checked_sub(1)
-                } else {
-                    (position + 1 < siblings.len()).then_some(position + 1)
-                };
-                if let Some(target) = target {
-                    self.config.vocabulary.swap(index, siblings[target]);
+                units::move_sibling_by(&mut self.config.vocabulary, id, if up { -1 } else { 1 });
+            }
+            VocabAction::Place { id, position } => {
+                if let Err(error) = units::place_sibling(&mut self.config.vocabulary, id, position)
+                {
+                    self.status = format!("调整顺序失败：{error}");
+                }
+            }
+            VocabAction::Relocate {
+                id,
+                destination,
+                position,
+            } => {
+                match units::relocate_entry(&mut self.config.vocabulary, id, &destination, position)
+                {
+                    Ok(()) => {
+                        self.vocabulary_selected = Some(id);
+                        self.status = "已调整所属层级与位置；点击“保存更改”写入本机配置。".into();
+                    }
+                    Err(error) => self.status = format!("移动失败：{error}"),
                 }
             }
             VocabAction::Clear => {
@@ -1206,5 +1752,6 @@ impl GongwenApp {
             }
         }
         units::normalize(&mut self.config.vocabulary);
+        self.vocabulary_dirty = true;
     }
 }

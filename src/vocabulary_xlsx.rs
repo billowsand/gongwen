@@ -226,6 +226,7 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
         department_code,
         seal_on_behalf,
         seal_on_behalf_imported: !row[5].trim().is_empty(),
+        sort_order: 0,
     })
 }
 
@@ -255,6 +256,7 @@ fn parse_person_row(row: &[String], _row_num: usize) -> Result<VocabularyEntry> 
         department_code: String::new(),
         seal_on_behalf: false,
         seal_on_behalf_imported: false,
+        sort_order: 0,
     })
 }
 

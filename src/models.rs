@@ -532,7 +532,7 @@ impl RagConfig {
 /// 词库只有两种节点：单位是树干，人员是挂在单位下面的末端叶子。
 /// 机关代字、简称、是否代章都是单位自身的属性，不再单列分类；
 /// 会议地点与规范用语已从词库中移除（前者改为直接填写，后者不再影响成稿）。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum VocabularyCategory {
     #[default]
     Unit,
@@ -548,7 +548,7 @@ impl VocabularyCategory {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct VocabularyEntry {
     /// 词条稳定标识。树形界面用它记录展开与选中状态，重排序、改名都不受影响。
@@ -556,7 +556,7 @@ pub struct VocabularyEntry {
     pub id: u64,
     pub category: VocabularyCategory,
     /// 单位专属：层级编码，每级两位，下级以上级编码为前缀（`00` → `0001`）。
-    /// 由树形结构自动生成，也是单位在词库和各下拉框中的排列顺序。
+    /// 由树形结构自动生成；同级显示顺序由 `sort_order` 独立维护。
     pub code: String,
     pub canonical: String,
     /// 单位专属：对外行文时使用的名称；为空时回退正常名称并由审核给出提醒。
@@ -585,6 +585,21 @@ pub struct VocabularyEntry {
     /// 仅供 Markdown 导入合并判断该列是否真实存在；不写入本机配置。
     #[serde(skip)]
     pub(crate) seal_on_behalf_imported: bool,
+    /// 同一上级下的显示顺序。层级编码负责表达上下级关系，排序值只负责界面、
+    /// 下拉框与导出行的先后，二者分离后才能安全地在中间插入或拖拽排序。
+    /// 旧配置没有该字段时为 0，载入整理时按原有顺序自动补齐。
+    pub sort_order: u32,
+}
+
+/// 首次运行时标准词库的建库状态。单独持久化状态，避免用户已经完成建库后
+/// 又清空词库时反复弹出新手引导。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VocabularySetupStatus {
+    #[default]
+    Pending,
+    Completed,
+    Skipped,
 }
 
 /// 公文中可以选择的密级。密级是所有文稿类型的必要填报项目，
@@ -1005,6 +1020,8 @@ pub struct AppConfig {
     pub lm_studio: LmStudioConfig,
     pub output_dir: String,
     pub vocabulary: Vec<VocabularyEntry>,
+    /// 首次建库引导的完成状态；旧配置会根据是否已有词条在启动时自动迁移。
+    pub vocabulary_setup: VocabularySetupStatus,
     pub profiles: Vec<TemplateProfile>,
     pub last_template: TemplateKind,
     pub export: ExportSelection,
@@ -1042,6 +1059,7 @@ impl Default for AppConfig {
             lm_studio: LmStudioConfig::default(),
             output_dir: String::new(),
             vocabulary: vec![],
+            vocabulary_setup: VocabularySetupStatus::Pending,
             profiles: TemplateKind::ALL
                 .into_iter()
                 .map(TemplateProfile::for_kind)
