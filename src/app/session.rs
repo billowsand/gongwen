@@ -3,13 +3,16 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::session`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{
+    AUTOSAVE_INTERVAL, GongwenApp, NavPage, TabRef, VersionCommitDraft, VersionScope,
+    default_version_name, unique_version_name,
+};
+use crate::draft_page::{DraftSession, editor_id};
 use crate::manuscript;
 use crate::storage;
 use crate::theme;
-use crate::draft_page::{DraftSession, editor_id};
-use std::path::{PathBuf};
 use eframe::egui;
-use crate::app::{GongwenApp, AUTOSAVE_INTERVAL, NavPage, TabRef, VersionScope, VersionCommitDraft, default_version_name, unique_version_name};
+use std::path::PathBuf;
 
 /// 退出前的汇总确认。上区必须处理，下区只是提醒。
 pub(crate) struct ExitPrompt {

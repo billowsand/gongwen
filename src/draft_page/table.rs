@@ -3,12 +3,15 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::table`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::theme;
 use crate::app::accent;
-use crate::export::{ColumnAlign};
-use std::ops::{Range};
+use crate::draft_page::{
+    DraftPage, display_width, editor_cursor, is_table_separator_line, is_table_source_line,
+    line_at_byte, line_ranges, split_row,
+};
+use crate::export::ColumnAlign;
+use crate::theme;
 use eframe::egui;
-use crate::draft_page::{DraftPage, display_width, editor_cursor, is_table_separator_line, is_table_source_line, line_at_byte, line_ranges, split_row};
+use std::ops::Range;
 
 /// 光标所在的那张 GFM 表格：解析出的单元格、列对齐，以及它在源码里的位置。
 pub(crate) struct TableEdit {
@@ -23,7 +26,6 @@ pub(crate) struct TableEdit {
 }
 
 impl TableEdit {
-
     pub(crate) fn columns(&self) -> usize {
         self.aligns.len()
     }

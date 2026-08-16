@@ -3,15 +3,18 @@
 //! 各版式部件已拆分到 `export/docx/` 子模块（run/段落构建、页眉、落款、版记、
 //! 红头呈批件、正文与议程），根文件保留版式常量、`write_docx` 入口与测试。
 
-use crate::models::{DraftInput, StyleMode, TemplateKind, split_units};
-use crate::units::{UnitDisplay};
-use std::fs::{File};
-use std::path::{Path};
-use crate::export::{MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level, official_heading_text, parse_markdown, plain_text};
-use crate::export::title::{TitlePlan};
 use crate::export::title;
+use crate::export::title::TitlePlan;
+use crate::export::{
+    MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level,
+    official_heading_text, parse_markdown, plain_text,
+};
+use crate::models::{DraftInput, StyleMode, TemplateKind, split_units};
+use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use docx_rs::*;
+use std::fs::File;
+use std::path::Path;
 
 mod content;
 mod header;
@@ -21,10 +24,10 @@ mod red;
 mod runs;
 mod signature;
 
-pub(crate) use runs::{
-    body_run, body_runs, chinese_fonts, docx_name, heiti_run, record_run, security_runs,
-    spread_runs, table_run_sized, table_runs_sized, title_run,
-};
+pub(crate) use content::{add_official_content_block, add_smart_table, write_meeting_agenda_docx};
+pub(crate) use header::{add_official_page_footers, issuing_unit_header};
+#[cfg(test)]
+pub(crate) use paragraphs::image_paragraph_from_bytes;
 pub(crate) use paragraphs::{
     agenda_blank_line, agenda_body_paragraph, agenda_labeled_paragraph,
     attachment_document_title_paragraph, attachment_label_paragraph, body_paragraph,
@@ -32,18 +35,18 @@ pub(crate) use paragraphs::{
     joint_closing_paragraph, joint_signature_cell_paragraph, label_paragraph,
     letter_security_paragraph, red_approval_title_paragraph, red_record_paragraph,
 };
-pub(crate) use header::{add_official_page_footers, issuing_unit_header};
+pub(crate) use record::add_footer_record;
+pub(crate) use red::{
+    red_approval_frame_table, red_approval_record_table, red_approval_top_rule_table,
+};
+pub(crate) use runs::{
+    body_run, body_runs, chinese_fonts, docx_name, heiti_run, record_run, security_runs,
+    spread_runs, table_run_sized, table_runs_sized, title_run,
+};
 pub(crate) use signature::{
     add_attachment_summary, add_joint_signature, add_white_paper_signature, is_joint_mode_one,
     main_issuing_unit, official_document_number, official_signature_date,
 };
-pub(crate) use record::add_footer_record;
-pub(crate) use red::{red_approval_frame_table, red_approval_record_table, red_approval_top_rule_table};
-pub(crate) use content::{
-    add_official_content_block, add_smart_table, write_meeting_agenda_docx,
-};
-#[cfg(test)]
-pub(crate) use paragraphs::image_paragraph_from_bytes;
 
 const BODY_SIZE: usize = 32; // 16 pt，OOXML 使用半磅
 const TITLE_SIZE: usize = 44; // 22 pt，二号
@@ -73,62 +76,8 @@ const HEADER_SIZE: usize = 48;
 /// 字数过多时允许缩到的最小字号：三号（16 pt），再小就不合公文规范。
 const HEADER_MIN_SIZE: usize = 32;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /// 规格 §3.3：预览版所有占位区域统一 1em 宽，用一个全角空格表示。
 const PREVIEW_PLACEHOLDER: &str = "\u{2003}";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 pub fn write_docx(
     path: &Path,
@@ -518,7 +467,9 @@ pub fn write_docx(
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::models::{JointContact, JointIssuanceMode, LetterVersion, VocabularyCategory, VocabularyEntry};
+    use crate::models::{
+        JointContact, JointIssuanceMode, LetterVersion, VocabularyCategory, VocabularyEntry,
+    };
     use regex::Regex;
     use std::io::Read;
 

@@ -3,10 +3,10 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::markdown`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::draft_page::{DraftPage, blank_line_padding, editor_id};
 use crate::export;
-use std::ops::{Range};
 use eframe::egui;
-use crate::draft_page::{DraftPage, editor_id, blank_line_padding};
+use std::ops::Range;
 
 pub(crate) fn markdown_heading_level(line: &str) -> Option<u8> {
     let trimmed = line.trim_start();
@@ -319,7 +319,13 @@ impl DraftPage<'_> {
 
     /// 在光标处插入一段行内文字（词库词条、日期、符号）。`back` 是插完之后
     /// 光标要往回退几个字节，用来把光标放进成对符号的中间。
-    pub(crate) fn insert_inline(&mut self, ctx: &egui::Context, snippet: &str, back: usize, label: &str) {
+    pub(crate) fn insert_inline(
+        &mut self,
+        ctx: &egui::Context,
+        snippet: &str,
+        back: usize,
+        label: &str,
+    ) {
         if self.doc.read_only() {
             return;
         }
@@ -356,7 +362,12 @@ impl DraftPage<'_> {
     /// 对选区覆盖到的每一行做同一件事（标题层级、项目符号）。
     /// 改完把光标放到改动范围的末尾，而不是选中整段——选中状态下随手一打字
     /// 就会把刚改好的几行整个替换掉。
-    pub(crate) fn apply_line_edit(&mut self, ctx: &egui::Context, edit: impl Fn(&str) -> String, done: &str) {
+    pub(crate) fn apply_line_edit(
+        &mut self,
+        ctx: &egui::Context,
+        edit: impl Fn(&str) -> String,
+        done: &str,
+    ) {
         if self.doc.read_only() {
             return;
         }

@@ -3,16 +3,18 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::versions`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::{
+    DraftAction, VersionSwitchPrompt, VersionTarget, summarize, truncate, version_hover,
+};
 use crate::diff;
-use crate::manuscript;
-use crate::theme;
-use crate::app::{DraftAction, VersionSwitchPrompt, VersionTarget, summarize, truncate, version_hover};
-use crate::diff_view::{DiffViewAction, DiffViewConfig};
 use crate::diff_view;
-use crate::models::{DraftInput};
-use std::ops::{Range};
-use eframe::egui;
+use crate::diff_view::{DiffViewAction, DiffViewConfig};
 use crate::draft_page::{DraftPage, PreviewMode};
+use crate::manuscript;
+use crate::models::DraftInput;
+use crate::theme;
+use eframe::egui;
+use std::ops::Range;
 
 impl DraftPage<'_> {
     /// 右侧版本抽屉：本篇的版本链在起草页里就地看完，不再跳去稿件管理。

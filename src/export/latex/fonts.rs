@@ -5,7 +5,6 @@
 
 use crate::models::{FontConfig, FontRole};
 
-
 /// 字体名里可能出现的、会被 TeX 当成控制字符的符号。字体名本身不该有这些，
 /// 出现了也只可能是配置被手工改坏，直接剔除而不是让编译在别处报错。
 pub(crate) fn sanitize_font_name(name: &str) -> String {

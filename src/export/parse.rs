@@ -3,7 +3,7 @@
 //! 由 src/export/mod.rs 拆分而来：本文件是模块 `export::parse`，与其它子模块共享
 //! `export` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::export::{clean_heading_number, attachment_title_name, legacy_attachment_label};
+use crate::export::{attachment_title_name, clean_heading_number, legacy_attachment_label};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MarkdownBlock {
@@ -45,7 +45,6 @@ pub(crate) enum ColumnAlign {
 }
 
 impl ColumnAlign {
-
     /// 分隔行里的一格。
     pub(crate) fn parse(cell: &str) -> Self {
         let cell = cell.trim();

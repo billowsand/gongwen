@@ -3,14 +3,16 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::tabs`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
-use crate::theme;
-use crate::diff_view::{DiffViewState};
+use crate::app::{
+    DraftAction, GongwenApp, VersionDiffState, VersionScope, open_in_os, reveal_in_os,
+};
+use crate::diff_view::DiffViewState;
 use crate::draft_page::{DocKey, DraftPage, DraftSession};
-use crate::models::{ManuscriptStatus};
+use crate::models::ManuscriptStatus;
 use crate::pdf_viewer::{PdfAction as PdfViewerAction, PdfKey, PdfSession};
-use std::path::{PathBuf};
+use crate::theme;
 use eframe::egui;
-use crate::app::{GongwenApp, DraftAction, VersionScope, VersionDiffState, open_in_os, reveal_in_os};
+use std::path::PathBuf;
 
 /// 导航行上的常驻页面。起草不在其中——它由打开的稿件派生成标签。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +34,6 @@ pub(crate) enum TabRef {
 }
 
 impl NavPage {
-
     /// 写进稿件库的稳定标识，用于会话恢复。改名会让旧记录失配，别改。
     pub(crate) fn key(self) -> &'static str {
         match self {

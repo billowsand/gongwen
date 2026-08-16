@@ -3,9 +3,9 @@
 //! 由 src/export/latex.rs 拆分而来：本文件是模块 `export::latex::attachments`，与其它子模块共享
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::export::latex::tex_escape;
+use crate::export::table::requires_landscape;
 use crate::export::{MarkdownBlock, MarkdownSection, number_to_chinese, plain_text};
-use crate::export::table::{requires_landscape};
-use crate::export::latex::{tex_escape};
 
 /// 每个附件只要有一张表在竖页中横向过密，就将整个附件（而非仅表格）改为横页。
 pub(crate) fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> {
@@ -82,7 +82,11 @@ pub(crate) fn heading_number_prefix(level: u8, counters: &mut [usize; 4]) -> Opt
     }
 }
 
-pub(crate) fn official_heading_to_tex(level: u8, text: &str, counters: &mut [usize; 4]) -> Option<String> {
+pub(crate) fn official_heading_to_tex(
+    level: u8,
+    text: &str,
+    counters: &mut [usize; 4],
+) -> Option<String> {
     let escaped = tex_escape(&plain_text(text));
     let number = heading_number_prefix(level, counters)?;
     let rendered = match level {

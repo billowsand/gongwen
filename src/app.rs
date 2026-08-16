@@ -4,8 +4,13 @@
 //! 窗口外壳、设置、会话、后台任务、标签管理、通用部件），这里保留结构体、
 //! `new`、`eframe::App` 实现与跨模块共享的常量/辅助项。
 
+use crate::draft_page::{DocKey, DraftSession, ExportLinks};
 use crate::knowledge;
+use crate::knowledge::KnowledgeStore;
 use crate::manuscript;
+use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptRow, ManuscriptStore};
+use crate::models::{AppConfig, DraftInput, TemplateKind};
+use crate::pdf_viewer::{PdfKey, PdfSession};
 use crate::qa;
 use crate::rag;
 use crate::storage;
@@ -14,16 +19,11 @@ use crate::theme;
 use crate::units;
 use crate::validator;
 use crate::vocabulary_xlsx;
-use crate::draft_page::{DocKey, DraftSession, ExportLinks};
-use crate::knowledge::{KnowledgeStore};
-use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptRow, ManuscriptStore};
-use crate::models::{AppConfig, DraftInput, TemplateKind};
-use crate::pdf_viewer::{PdfKey, PdfSession};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::mpsc;
 use eframe::egui;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender};
 
 mod ai_prompts;
 mod chrome;
@@ -91,32 +91,6 @@ pub(crate) const FORM_PANEL_MAX_WIDTH: f32 = 620.0;
 /// 表单内容的宽度区间。可调整面板必须拿到确定的宽度：控件一旦请求
 /// `f32::INFINITY`，面板会被内容顶到远超 `size_range` 的宽度。
 pub(crate) const CONTENT_WIDTH: std::ops::RangeInclusive<f32> = FORM_CONTENT_MIN_WIDTH..=700.0;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 pub struct GongwenApp {
     config: AppConfig,
@@ -285,8 +259,6 @@ pub(crate) struct KnowledgeImportDraft {
     pub(crate) kind: TemplateKind,
 }
 
-
-
 impl GongwenApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut config = storage::load().unwrap_or_default();
@@ -423,139 +395,9 @@ impl GongwenApp {
         app
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // ---------- AI 管理（优化提示词库） ----------
 
-
-
-
-
-
-
-
-
-
     // ---------- 稿件管理（SQLite 稿件库） ----------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 /// 切换公文模板时只替换该模板的版式配置，正文仍是同一份可编辑稿件。
@@ -676,52 +518,6 @@ impl eframe::App for GongwenApp {
         theme::canvas().to_normalized_gamma_f32()
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {

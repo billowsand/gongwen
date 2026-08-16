@@ -3,24 +3,30 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::manuscript_ui`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{
+    FORM_CONTROL_HEIGHT, GongwenApp, VersionDiffState, VersionScope, WorkerResult, accent,
+    joined_metadata, metadata_grid_row, present_or_dash, security_level_color,
+    security_level_list_label, short_date, status_color, summarize, truncate, warn,
+};
+use crate::diff_view::DiffViewState;
 use crate::doc_import;
+use crate::draft_page::DraftSession;
 use crate::export;
+use crate::manuscript::{
+    ManuscriptFilter, ManuscriptRecord, ManuscriptStore, ManuscriptUpdate, NewManuscript,
+};
 use crate::manuscript_io;
+use crate::models::{ManuscriptStatus, SecurityLevel, TemplateKind, VocabularyCategory};
 use crate::storage;
 use crate::theme;
 use crate::units;
 use crate::vocabulary_xlsx;
-use crate::diff_view::{DiffViewState};
-use crate::draft_page::{DraftSession};
-use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptStore, ManuscriptUpdate, NewManuscript};
-use crate::models::{ManuscriptStatus, SecurityLevel, TemplateKind, VocabularyCategory};
-use std::{thread};
-use std::collections::{BTreeSet};
-use std::path::{PathBuf};
 use anyhow::Context;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use crate::app::{accent, warn, GongwenApp, FORM_CONTROL_HEIGHT, WorkerResult, VersionScope, VersionDiffState, joined_metadata, metadata_grid_row, present_or_dash, security_level_color, security_level_list_label, short_date, status_color, summarize, truncate};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::thread;
 
 /// 稿件列表上的操作在遍历表格时不能直接改 `self`，先记下来循环结束后再执行。
 pub(crate) enum ManuscriptAction {
@@ -1905,7 +1911,10 @@ impl GongwenApp {
 
     /// 把勾选的稿件按选项导出为 PDF 集合并打包 zip，后台线程执行避免卡界面。
     /// 盖章件直接取附件；非盖章件编译 TeX 生成，缺引擎或失败时该篇记入汇总。
-    pub(crate) fn export_selected_manuscript_pdfs(&mut self, options: manuscript_io::PdfExportOptions) {
+    pub(crate) fn export_selected_manuscript_pdfs(
+        &mut self,
+        options: manuscript_io::PdfExportOptions,
+    ) {
         if self.manuscript_selected.is_empty() {
             self.status = "请先勾选要导出的稿件。".into();
             return;

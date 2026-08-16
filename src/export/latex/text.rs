@@ -3,10 +3,10 @@
 //! 由 src/export/latex.rs 拆分而来：本文件是模块 `export::latex::text`，与其它子模块共享
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::{DraftInput, TemplateKind, split_period_digits};
-use crate::export::{MarkdownBlock, attachment_names, inline_segments, plain_text};
-use crate::export::title::{TitlePlan};
 use crate::export::title;
+use crate::export::title::TitlePlan;
+use crate::export::{MarkdownBlock, attachment_names, inline_segments, plain_text};
+use crate::models::{DraftInput, TemplateKind, split_period_digits};
 
 /// 规格 §3.2/§6 姓名宽度处理：2 字姓名中间加 1em 空格，4 字姓名压缩到 3 字宽，
 /// 保证版记联系人列与表格姓名列在视觉上整齐对齐。

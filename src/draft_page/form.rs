@@ -3,16 +3,24 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::form`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::{
+    CONTENT_WIDTH, DraftAction, FORM_CONTROL_HEIGHT, FORM_FIELD_MIN_WIDTH, FORM_LAYOUT_GUTTER,
+    LABEL_WIDTH, SelectOption, contact_pair, joint_responsible_editor, layout_options,
+    multi_select, plain_options, row_label, row_label_with_info, single_select,
+    switch_template_profile, warn,
+};
+use crate::draft_page::DraftPage;
+use crate::models::{
+    CorrespondenceScope, DraftInput, JointIssuanceMode, LetterVersion, ReviewNote, SecurityLevel,
+    StyleMode, TemplateKind, VocabularyCategory, split_units,
+};
 use crate::prompt;
 use crate::theme;
 use crate::units;
+use crate::units::UnitDisplay;
 use crate::validator;
-use crate::app::{CONTENT_WIDTH, DraftAction, FORM_CONTROL_HEIGHT, FORM_FIELD_MIN_WIDTH, FORM_LAYOUT_GUTTER, LABEL_WIDTH, SelectOption, contact_pair, joint_responsible_editor, layout_options, multi_select, plain_options, row_label, row_label_with_info, single_select, switch_template_profile, warn};
-use crate::models::{CorrespondenceScope, DraftInput, JointIssuanceMode, LetterVersion, ReviewNote, SecurityLevel, StyleMode, TemplateKind, VocabularyCategory, split_units};
-use crate::units::{UnitDisplay};
-use std::collections::{BTreeSet};
 use eframe::egui;
-use crate::draft_page::{DraftPage};
+use std::collections::BTreeSet;
 
 /// 公文要素按纸面部位分成的三段。填表的人脑子里是一张纸：先版头、再主体、
 /// 最后版记。表单顺序与打印出来的纸一致，比按数据类型分组好找得多——
@@ -83,7 +91,6 @@ pub(crate) struct FormSectionState {
 }
 
 impl Default for FormSectionState {
-
     fn default() -> Self {
         Self {
             // 默认全开：要素区本来就默认收起，展开它的人就是来看全貌的。
@@ -101,7 +108,6 @@ pub(crate) struct SectionProgress {
 }
 
 impl SectionProgress {
-
     pub(crate) fn missing(self) -> usize {
         self.total.saturating_sub(self.done)
     }
@@ -118,9 +124,14 @@ pub(crate) struct FormCheck {
 }
 
 impl FormCheck {
-
     /// 记一个必填项。`filled` 为假时把说明挂到字段 id 上，渲染时就地显示。
-    pub(crate) fn require(&mut self, section: FormSection, id: &'static str, filled: bool, message: &str) {
+    pub(crate) fn require(
+        &mut self,
+        section: FormSection,
+        id: &'static str,
+        filled: bool,
+        message: &str,
+    ) {
         let progress = &mut self.progress[section.index()];
         progress.total += 1;
         if filled {
@@ -175,7 +186,9 @@ pub(crate) fn check_form(draft: &DraftInput) -> FormCheck {
                 check.require(
                     FormSection::Header,
                     "main_issuing_unit",
-                    units.iter().any(|unit| unit == profile.main_issuing_unit.trim()),
+                    units
+                        .iter()
+                        .any(|unit| unit == profile.main_issuing_unit.trim()),
                     "须从发文单位中指定一个主发文单位",
                 );
             }
@@ -457,7 +470,11 @@ pub(crate) fn document_number_row(
 /// 版面缩略导航图：把公文画成一张小纸，三块分别是版头、主体和版记，点哪块跳哪段。
 /// 表单再怎么分组也不如直接指着纸说"我要改这儿"——公文的字段本就一一对应纸上
 /// 的固定位置，缩略图是这层对应关系最省事的表达。
-pub(crate) fn layout_thumbnail(ui: &mut egui::Ui, kind: TemplateKind, check: &FormCheck) -> Option<FormSection> {
+pub(crate) fn layout_thumbnail(
+    ui: &mut egui::Ui,
+    kind: TemplateKind,
+    check: &FormCheck,
+) -> Option<FormSection> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(76.0, 106.0), egui::Sense::hover());
     let painter = ui.painter().clone();
     painter.rect_filled(rect, egui::CornerRadius::same(4), theme::surface());
@@ -545,13 +562,7 @@ pub(crate) fn thumbnail_marks(
             // 密级在左上角，红头居中，下面一条红色反线。
             line(zone.top() + 4.0, 5.0, w * 0.24, 2.0, muted);
             if kind.uses_letter_layout() || kind == TemplateKind::RedHeadApproval {
-                line(
-                    zone.top() + 12.0,
-                    w * 0.16,
-                    w * 0.68,
-                    4.5,
-                    theme::danger(),
-                );
+                line(zone.top() + 12.0, w * 0.16, w * 0.68, 4.5, theme::danger());
                 line(zone.bottom() - 9.0, 5.0, w - 10.0, 1.5, theme::danger());
                 line(zone.bottom() - 5.0, w * 0.34, w * 0.32, 2.0, muted);
             } else {
@@ -561,7 +572,13 @@ pub(crate) fn thumbnail_marks(
         FormSection::Body => {
             // 主送顶格，标题居中，正文三行。
             line(zone.top() + 4.0, 5.0, w * 0.4, 2.0, muted);
-            line(zone.top() + 11.0, w * 0.28, w * 0.44, 3.0, theme::text_soft());
+            line(
+                zone.top() + 11.0,
+                w * 0.28,
+                w * 0.44,
+                3.0,
+                theme::text_soft(),
+            );
             for row in 0..3 {
                 line(
                     zone.top() + 20.0 + row as f32 * 5.0,
@@ -867,7 +884,10 @@ impl DraftPage<'_> {
                     let (color, text) = if missing == 0 {
                         (theme::success(), format!("{} 齐了", section.label()))
                     } else {
-                        (theme::danger(), format!("{} 缺 {missing} 项", section.label()))
+                        (
+                            theme::danger(),
+                            format!("{} 缺 {missing} 项", section.label()),
+                        )
                     };
                     ui.colored_label(color, egui::RichText::new(text).size(11.0));
                 }

@@ -3,18 +3,21 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::versioning`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{
+    GongwenApp, accent, default_version_name, short_date, unique_version_name, version_hover,
+    version_label, warn,
+};
 use crate::diff;
+use crate::diff_view;
+use crate::diff_view::{DiffViewConfig, DiffViewState};
+use crate::draft_page::{DraftSession, LoadedVersion};
+use crate::manuscript::{ManuscriptUpdate, VersionRecord};
+use crate::models::DraftInput;
 use crate::storage;
 use crate::theme;
 use crate::units;
-use crate::diff_view::{DiffViewConfig, DiffViewState};
-use crate::diff_view;
-use crate::draft_page::{DraftSession, LoadedVersion};
-use crate::manuscript::{ManuscriptUpdate, VersionRecord};
-use crate::models::{DraftInput};
 use anyhow::Context;
 use eframe::egui;
-use crate::app::{accent, warn, GongwenApp, default_version_name, short_date, unique_version_name, version_hover, version_label};
 
 /// 提交版本对话框打开的版本链：某篇稿件，或全局配置。
 #[derive(Debug, Clone)]
@@ -267,7 +270,10 @@ impl GongwenApp {
     }
 
     /// 执行提交：先同步活稿行 / 配置，再写入版本链。返回状态消息或错误。
-    pub(crate) fn run_version_commit(&mut self, draft: &VersionCommitDraft) -> anyhow::Result<String> {
+    pub(crate) fn run_version_commit(
+        &mut self,
+        draft: &VersionCommitDraft,
+    ) -> anyhow::Result<String> {
         let name = draft.name.trim();
         anyhow::ensure!(!name.is_empty(), "版本名称不能为空");
         let comment = draft.comment.trim();

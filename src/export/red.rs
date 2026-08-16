@@ -3,9 +3,9 @@
 //! 由 src/export/mod.rs 拆分而来：本文件是模块 `export::red`，与其它子模块共享
 //! `export` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::export::{MarkdownBlock, MarkdownSection, plain_text};
 use super::docx;
 use super::title;
+use crate::export::{MarkdownBlock, MarkdownSection, plain_text};
 
 /// 承办区「电话」栏宽：`电话：` 3 em + 半角号码约 6.5 em。
 pub(crate) const RED_RECORD_PHONE_TWIPS: usize = 3_040;
@@ -118,7 +118,6 @@ pub(crate) struct RedApprovalBodyMetrics {
 }
 
 impl RedApprovalBodyMetrics {
-
     /// 正文是否已经延续到第二页。决定落款页要不要标「（此页无正文）」——正文
     /// 只有首页那点内容时落款另起一页并标注，正文本来就跨页时落款紧随正文。
     pub(crate) fn reaches_second_page(&self, wrap_lines: usize) -> bool {

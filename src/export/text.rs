@@ -3,9 +3,9 @@
 //! 由 src/export/mod.rs 拆分而来：本文件是模块 `export::text`，与其它子模块共享
 //! `export` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::export::{MarkdownBlock, MarkdownSection, ColumnAlign};
 use super::docx;
 use super::table;
+use crate::export::{ColumnAlign, MarkdownBlock, MarkdownSection};
 
 /// 表格的一列在版心中所占的比例，以及它的对齐方式。界面预览据此复用导出器的
 /// 智能列宽，保证预览里的列宽、对齐与导出的 Word 表格一致。

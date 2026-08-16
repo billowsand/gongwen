@@ -3,9 +3,12 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::record`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::export::docx::{
+    FOOTER_SIZE, RECORD_OTHER_COLUMN_TWIPS, RECORD_PHONE_COLUMN_TWIPS, TABLE_CONTENT_WIDTH_TWIPS,
+    chinese_fonts, docx_name, is_joint_mode_one, record_run,
+};
 use crate::models::{DraftInput, split_units};
-use crate::units::{UnitDisplay};
-use crate::export::docx::{FOOTER_SIZE, RECORD_PHONE_COLUMN_TWIPS, RECORD_OTHER_COLUMN_TWIPS, TABLE_CONTENT_WIDTH_TWIPS, chinese_fonts, record_run, docx_name, is_joint_mode_one};
+use crate::units::UnitDisplay;
 use docx_rs::*;
 
 pub(crate) fn automatic_print_copies(input: &DraftInput) -> usize {

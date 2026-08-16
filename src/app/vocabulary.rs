@@ -3,15 +3,18 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::vocabulary`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{
+    GongwenApp, VersionScope, unique_name, vocabulary_depths, vocabulary_matches, warn,
+    wrapped_hint,
+};
+use crate::models::{VocabularyCategory, VocabularyEntry, split_units};
 use crate::storage;
 use crate::theme;
 use crate::units;
+use crate::units::UnitDisplay;
 use crate::vocabulary_xlsx;
-use crate::models::{VocabularyCategory, VocabularyEntry, split_units};
-use crate::units::{UnitDisplay};
-use std::collections::{BTreeMap};
 use eframe::egui;
-use crate::app::{warn, GongwenApp, VersionScope, unique_name, vocabulary_depths, vocabulary_matches, wrapped_hint};
+use std::collections::BTreeMap;
 
 /// 同理，词库树上的增删和排序也要等本帧渲染完再改动 `Vec`。
 pub(crate) enum VocabAction {
@@ -814,7 +817,12 @@ impl GongwenApp {
         structure_changed
     }
 
-    pub(crate) fn vocabulary_unit_editor(&mut self, ui: &mut egui::Ui, index: usize, width: f32) -> bool {
+    pub(crate) fn vocabulary_unit_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        width: f32,
+    ) -> bool {
         let mut structure_changed = false;
         // 上级不能选自己或自己的下级，否则会形成环。
         let blocked = units::subtree_indices(&self.config.vocabulary, index)
@@ -956,7 +964,12 @@ impl GongwenApp {
         structure_changed
     }
 
-    pub(crate) fn vocabulary_person_editor(&mut self, ui: &mut egui::Ui, index: usize, width: f32) -> bool {
+    pub(crate) fn vocabulary_person_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        width: f32,
+    ) -> bool {
         let mut structure_changed = false;
         let display = UnitDisplay::new(&self.config.vocabulary);
         let unit_options = self

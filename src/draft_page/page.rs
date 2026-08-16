@@ -3,11 +3,14 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::page`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::{
+    DraftAction, FORM_CONTENT_MIN_WIDTH, FORM_PANEL_DEFAULT_WIDTH, FORM_PANEL_MAX_WIDTH,
+    FORM_PANEL_MIN_WIDTH, accent, warn,
+};
+use crate::draft_page::{DraftDiffState, DraftPage, MarkdownFindState};
+use crate::models::ManuscriptStatus;
 use crate::theme;
-use crate::app::{DraftAction, FORM_CONTENT_MIN_WIDTH, FORM_PANEL_DEFAULT_WIDTH, FORM_PANEL_MAX_WIDTH, FORM_PANEL_MIN_WIDTH, accent, warn};
-use crate::models::{ManuscriptStatus};
 use eframe::egui;
-use crate::draft_page::{DraftPage, DraftDiffState, MarkdownFindState};
 
 impl DraftPage<'_> {
     pub(crate) fn create_ui(&mut self, ui: &mut egui::Ui) {
@@ -78,9 +81,7 @@ impl DraftPage<'_> {
                         (ui.available_width() - 18.0).max(FORM_CONTENT_MIN_WIDTH);
                     let editable = !self.doc.read_only();
                     // 文种、套版和缩略导航图是"去哪儿填"，不跟着"填什么"一起滚。
-                    ui.add_enabled_ui(editable, |ui| {
-                        self.form_header_ui(ui, form_content_width)
-                    });
+                    ui.add_enabled_ui(editable, |ui| self.form_header_ui(ui, form_content_width));
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .id_salt("form_scroll")

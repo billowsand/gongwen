@@ -11,16 +11,17 @@ pub(crate) mod title;
 pub(crate) use latex::write_tex;
 
 use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
-use crate::units::{UnitDisplay};
+use crate::units::UnitDisplay;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result};
 
 mod headings;
 mod parse;
 mod red;
 mod text;
 
+pub(crate) use headings::{HeadingCounters, clean_heading_number, official_heading_text};
 pub(crate) use parse::{
     ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, block_span_for_line,
     body_heading_max_level, is_image_line, parse_markdown, parse_markdown_located,
@@ -34,14 +35,13 @@ pub(crate) use red::{
 };
 #[cfg(test)]
 pub(crate) use red::{RED_RECORD_EM_TWIPS, RED_RECORD_TOTAL_TWIPS, red_signature_unit_width_em};
-pub(crate) use headings::{HeadingCounters, clean_heading_number, official_heading_text};
+#[cfg(test)]
+pub(crate) use text::parenthesized_ranges;
 pub(crate) use text::{
     InlineSegment, attachment_names, attachment_title_name, chinese_date_parts, inline_segments,
     legacy_attachment_label, normalize_chinese_quotes, number_to_chinese, plain_text,
     table_columns,
 };
-#[cfg(test)]
-pub(crate) use text::parenthesized_ranges;
 
 pub(crate) fn joint_main_index(input: &DraftInput) -> Option<usize> {
     let units = split_units(&input.profile.joint_issuing_units);

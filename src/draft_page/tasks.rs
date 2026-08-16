@@ -3,21 +3,23 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::tasks`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::{
+    DocJob, DraftAction, WorkerResult, accent, export_and_compile, open_in_os, reveal_in_os,
+};
 use crate::doc_import;
+use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
 use crate::images;
 use crate::lmstudio;
+use crate::models::{DraftInput, ExportSelection, GeneratedDraft, ReviewNote, TemplateKind};
 use crate::prompt;
 use crate::rag;
 use crate::storage;
 use crate::theme;
 use crate::validator;
-use crate::app::{DocJob, DraftAction, WorkerResult, accent, export_and_compile, open_in_os, reveal_in_os};
-use crate::models::{DraftInput, ExportSelection, GeneratedDraft, ReviewNote, TemplateKind};
-use std::thread;
-use std::path::{Path, PathBuf};
 use eframe::egui;
-use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
+use std::path::{Path, PathBuf};
+use std::thread;
 
 /// 起草时检索知识库并把结果拼成提示词参考节。检索失败降级为空串，不阻塞
 /// 起草——RAG 是增强而非硬依赖；但降级原因会随 `notes` 回给调用方显示，
@@ -431,7 +433,12 @@ impl DraftPage<'_> {
     }
 
     /// 把导入的 markdown 插进审校稿，并立即重新校验一遍。
-    pub(crate) fn insert_imported_markdown(&mut self, ctx: &egui::Context, markdown: &str, path: &Path) {
+    pub(crate) fn insert_imported_markdown(
+        &mut self,
+        ctx: &egui::Context,
+        markdown: &str,
+        path: &Path,
+    ) {
         self.insert_block(ctx, markdown);
         self.revalidate();
         *self.status = format!(

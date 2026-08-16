@@ -3,16 +3,18 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::header`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::export::docx::{PAGE_NUMBER_SIZE, HEADER_WIDTH_TWIPS, HEADER_SIZE, HEADER_MIN_SIZE, chinese_fonts};
+use crate::export::docx::{
+    HEADER_MIN_SIZE, HEADER_SIZE, HEADER_WIDTH_TWIPS, PAGE_NUMBER_SIZE, chinese_fonts,
+};
 use docx_rs::*;
 
 /// 红头的排布方式。
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct HeaderLayout {
     /// 字号，半磅为单位。
-pub(crate)     size: usize,
+    pub(crate) size: usize,
     /// 左右缩进，把拉开后的整块摆到版心中间。
-pub(crate)     side_indent: i32,
+    pub(crate) side_indent: i32,
 }
 
 /// 发文机关标志分两种情形排布：

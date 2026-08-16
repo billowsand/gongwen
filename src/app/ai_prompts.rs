@@ -3,11 +3,11 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::ai_prompts`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{GongwenApp, accent, summarize, warn};
+use crate::models::{AiPrompt, TemplateKind, builtin_ai_prompts};
 use crate::prompt;
 use crate::theme;
-use crate::models::{AiPrompt, TemplateKind, builtin_ai_prompts};
 use eframe::egui;
-use crate::app::{accent, warn, GongwenApp, summarize};
 
 /// 点“AI 优化”后弹出的提示词选择面板。`custom` 是一次性指令，用完即弃，
 /// 不进提示词库。
@@ -31,7 +31,6 @@ pub(crate) struct AiPromptDraft {
 }
 
 impl AiPromptDraft {
-
     pub(crate) fn from_entry(entry: &AiPrompt) -> Self {
         Self {
             id: Some(entry.id),

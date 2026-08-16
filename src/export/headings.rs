@@ -3,9 +3,11 @@
 //! 由 src/export/mod.rs 拆分而来：本文件是模块 `export::headings`，与其它子模块共享
 //! `export` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use std::sync::{OnceLock};
+use crate::export::{
+    MarkdownSection, legacy_attachment_label, number_to_chinese, parse_section_marker,
+};
 use regex::Regex;
-use crate::export::{MarkdownSection, parse_section_marker, number_to_chinese, legacy_attachment_label};
+use std::sync::OnceLock;
 
 /// 与 mdx 公文转换保持一致：标题编号由导出器统一生成，先清掉模型或人工写入的旧编号。
 pub(crate) fn clean_heading_number(text: &str) -> String {
@@ -89,7 +91,6 @@ pub(crate) struct HeadingCounters {
 }
 
 impl Default for HeadingCounters {
-
     fn default() -> Self {
         Self {
             levels: [0; 4],
@@ -102,7 +103,6 @@ impl Default for HeadingCounters {
 }
 
 impl HeadingCounters {
-
     pub(crate) fn next(&mut self, line: &str) -> Option<String> {
         self.centered_title = false;
         if let Some(section) = parse_section_marker(line) {

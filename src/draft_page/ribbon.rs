@@ -3,14 +3,17 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::ribbon`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::{DraftAction, VersionScope, warn};
+use crate::draft_page::{
+    DraftPage, PreviewMode, RagKindFilter, TOOLBAR_CONTROL_HEIGHT, TableOp, body_stats,
+    chinese_today, table_grid_picker, tidy_blank_lines, toggle_bullet, toolbar_separator,
+};
 use crate::export;
+use crate::export::ColumnAlign;
+use crate::models::{ExportSelection, RibbonTab, TemplateKind};
 use crate::storage;
 use crate::theme;
-use crate::app::{DraftAction, VersionScope, warn};
-use crate::export::{ColumnAlign};
-use crate::models::{ExportSelection, RibbonTab, TemplateKind};
 use eframe::egui;
-use crate::draft_page::{DraftPage, PreviewMode, TOOLBAR_CONTROL_HEIGHT, toolbar_separator, RagKindFilter, body_stats, chinese_today, tidy_blank_lines, toggle_bullet, TableOp, table_grid_picker};
 
 impl DraftPage<'_> {
     /// 起草页功能区：第一行是分区卡与常驻入口，第二行是当前分区的按钮。

@@ -3,25 +3,25 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::jobs`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState};
+use crate::draft_page::{DocKey, DraftSession};
 use crate::export;
 use crate::knowledge;
 use crate::lmstudio;
 use crate::manuscript_io;
+use crate::models::{DraftInput, GeneratedDraft, RerankMode, ReviewNote};
+use crate::pdf_viewer;
+use crate::pdf_viewer::PdfKey;
 use crate::preview;
 use crate::qa;
 use crate::rag;
 use crate::storage;
 use crate::system_fonts;
 use crate::theme;
-use crate::draft_page::{DocKey, DraftSession};
-use crate::models::{DraftInput, GeneratedDraft, RerankMode, ReviewNote};
-use crate::pdf_viewer::{PdfKey};
-use crate::pdf_viewer;
-use crate::units::{UnitDisplay};
-use std::{thread};
-use std::path::{PathBuf};
+use crate::units::UnitDisplay;
 use eframe::egui;
-use crate::app::{GongwenApp, KnowledgePreviewState, KnowledgeImportDraft, ExportOutcome};
+use std::path::PathBuf;
+use std::thread;
 
 pub(crate) enum WorkerResult {
     /// 全局任务：探测本地模型服务已加载的模型。
@@ -547,7 +547,11 @@ impl GongwenApp {
 
     /// 在后台线程跑索引流水线：切块 → 分词 → 批量嵌入 → 入库。
     /// `rebuild` 为 true 时先清空（保留元数据重新嵌入）。
-    pub(crate) fn start_knowledge_index(&mut self, items: Vec<knowledge::KnowledgeImportItem>, rebuild: bool) {
+    pub(crate) fn start_knowledge_index(
+        &mut self,
+        items: Vec<knowledge::KnowledgeImportItem>,
+        rebuild: bool,
+    ) {
         if self.knowledge_busy {
             self.status = "知识库任务正在进行中…".into();
             return;

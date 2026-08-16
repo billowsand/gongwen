@@ -3,13 +3,26 @@
 //! 由 src/export/latex.rs 拆分而来：本文件是模块 `export::latex::official`，与其它子模块共享
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::{DraftInput, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind, split_units};
-use crate::units::{UnitDisplay};
-use crate::export::{MarkdownBlock, MarkdownSection, body_heading_max_level, chinese_date_parts, joint_main_column, parse_markdown_with_lines, plain_text};
-use crate::export::table::{to_longtblr};
-use crate::export::latex::{attachment_landscape_flags, attachment_document_title_to_tex, target_tex_section, heading_number_prefix, official_heading_to_tex, latex_name, tex_escape, body_text_to_tex, security_commands, attachment_summary_tex, title_content_tex, tex_spaced};
+use crate::export::latex::{
+    attachment_document_title_to_tex, attachment_landscape_flags, attachment_summary_tex,
+    body_text_to_tex, heading_number_prefix, latex_name, official_heading_to_tex,
+    security_commands, target_tex_section, tex_escape, tex_spaced, title_content_tex,
+};
+use crate::export::table::to_longtblr;
+use crate::export::{
+    MarkdownBlock, MarkdownSection, body_heading_max_level, chinese_date_parts, joint_main_column,
+    parse_markdown_with_lines, plain_text,
+};
+use crate::models::{
+    DraftInput, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind, split_units,
+};
+use crate::units::UnitDisplay;
 
-pub(crate) fn official_letter_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
+pub(crate) fn official_letter_tex(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks
         .iter()

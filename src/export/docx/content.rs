@@ -3,16 +3,23 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::content`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::{DraftInput};
-use std::fs::{File};
-use std::path::{Path};
-use crate::export::{ColumnAlign, MarkdownBlock, inline_segments, official_heading_text, plain_text};
+use crate::export::docx::{
+    AGENDA_NUMBERING_ID, BODY_SIZE, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE, agenda_blank_line,
+    agenda_body_paragraph, agenda_labeled_paragraph, body_paragraph, body_runs, chinese_fonts,
+    document_title_paragraph, docx_name, heading_paragraph, image_paragraph, label_paragraph,
+    security_runs, table_run_sized, table_runs_sized,
+};
 use crate::export::table::{ColumnAlignment, to_docx_grid};
 use crate::export::title;
+use crate::export::{
+    ColumnAlign, MarkdownBlock, inline_segments, official_heading_text, plain_text,
+};
+use crate::models::DraftInput;
 use anyhow::{Context, Result};
-use regex::Regex;
-use crate::export::docx::{BODY_SIZE, AGENDA_NUMBERING_ID, TABLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS, chinese_fonts, body_runs, security_runs, docx_name, table_run_sized, table_runs_sized, body_paragraph, label_paragraph, heading_paragraph, document_title_paragraph, image_paragraph, agenda_body_paragraph, agenda_blank_line, agenda_labeled_paragraph};
 use docx_rs::*;
+use regex::Regex;
+use std::fs::File;
+use std::path::Path;
 
 pub(crate) fn add_smart_table(mut doc: Docx, rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Docx {
     if rows.is_empty() {
@@ -143,7 +150,11 @@ pub(crate) fn agenda_numbering() -> AbstractNumbering {
     )
 }
 
-pub(crate) fn write_meeting_agenda_docx(path: &Path, input: &DraftInput, markdown: &str) -> Result<()> {
+pub(crate) fn write_meeting_agenda_docx(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+) -> Result<()> {
     let title = markdown
         .lines()
         .find_map(|line| line.trim().strip_prefix("# "))

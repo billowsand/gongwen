@@ -3,10 +3,14 @@
 //! 由 src/export/latex.rs 拆分而来：本文件是模块 `export::latex::papers`，与其它子模块共享
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::{DraftInput, LetterVersion, StyleMode};
-use crate::units::{UnitDisplay};
+use crate::export::latex::{
+    attachment_summary_tex, latex_name, official_letter_sections_to_tex,
+    official_letter_sections_to_tex_with_barrier, red_approval_title_content_tex,
+    security_commands, tex_escape, tex_spread_signature, title_content_tex,
+};
 use crate::export::{MarkdownBlock, chinese_date_parts, parse_markdown_with_lines, plain_text};
-use crate::export::latex::{official_letter_sections_to_tex, official_letter_sections_to_tex_with_barrier, latex_name, tex_escape, security_commands, attachment_summary_tex, title_content_tex, red_approval_title_content_tex, tex_spread_signature};
+use crate::models::{DraftInput, LetterVersion, StyleMode};
+use crate::units::UnitDisplay;
 
 pub(crate) fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines(markdown);
@@ -102,7 +106,11 @@ pub(crate) fn white_paper_tex(input: &DraftInput, markdown: &str, display: &Unit
 }
 
 /// 红头呈批件的独立入口；首页框架在后续专用实现中生成。
-pub(crate) fn red_head_approval_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
+pub(crate) fn red_head_approval_tex(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks
         .iter()

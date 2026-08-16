@@ -4,9 +4,9 @@
 //! 标题、文本工具、字体钩子），根文件保留文类常量、`write_tex` 入口与测试。
 
 use crate::models::{DraftInput, FontConfig, TemplateKind};
-use crate::units::{UnitDisplay};
+use crate::units::UnitDisplay;
 use std::fs;
-use std::path::{Path};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -16,16 +16,16 @@ mod official;
 mod papers;
 mod text;
 
+pub(crate) use attachments::{
+    attachment_document_title_to_tex, attachment_landscape_flags, heading_number_prefix,
+    official_heading_to_tex, target_tex_section,
+};
 pub(crate) use fonts::font_setup_hook;
 pub(crate) use official::{
     official_letter_sections_to_tex, official_letter_sections_to_tex_with_barrier,
     official_letter_tex, plain_document_tex,
 };
 pub(crate) use papers::{meeting_agenda_tex, red_head_approval_tex, white_paper_tex};
-pub(crate) use attachments::{
-    attachment_document_title_to_tex, attachment_landscape_flags, heading_number_prefix,
-    official_heading_to_tex, target_tex_section,
-};
 pub(crate) use text::{
     attachment_summary_tex, body_text_to_tex, latex_name, red_approval_title_content_tex,
     security_commands, tex_escape, tex_spaced, tex_spread_signature, title_content_tex,
@@ -82,8 +82,8 @@ pub fn write_tex(
 mod tests {
     use super::*;
     use crate::export::parse_markdown_with_lines;
-    use crate::models::{JointIssuanceMode, LetterVersion, StyleMode};
     use crate::models::{JointContact, VocabularyCategory, VocabularyEntry};
+    use crate::models::{JointIssuanceMode, LetterVersion, StyleMode};
 
     /// 测试大多使用无层级的扁平单位，空词库让 `UnitDisplay` 回落为规范名称。
     fn letter_tex(input: &DraftInput, markdown: &str) -> String {

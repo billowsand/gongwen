@@ -3,10 +3,14 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::signature`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::export::chinese_date_parts;
+use crate::export::docx::{
+    CLOSING_GAP_TWIPS, JOINT_SIGNATURE_SEAL_GAP_TWIPS, PREVIEW_PLACEHOLDER,
+    TABLE_CONTENT_WIDTH_TWIPS, body_run, body_runs, joint_closing_paragraph,
+    joint_signature_cell_paragraph, spread_runs,
+};
 use crate::models::{DraftInput, JointIssuanceMode, LetterVersion, TemplateKind, split_units};
-use crate::units::{UnitDisplay};
-use crate::export::{chinese_date_parts};
-use crate::export::docx::{CLOSING_GAP_TWIPS, JOINT_SIGNATURE_SEAL_GAP_TWIPS, TABLE_CONTENT_WIDTH_TWIPS, PREVIEW_PLACEHOLDER, body_run, body_runs, spread_runs, joint_closing_paragraph, joint_signature_cell_paragraph};
+use crate::units::UnitDisplay;
 use docx_rs::*;
 
 pub(crate) fn official_document_number(input: &DraftInput) -> Option<String> {

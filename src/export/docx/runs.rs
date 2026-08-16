@@ -3,9 +3,9 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::runs`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::{split_period_digits};
-use crate::export::{inline_segments, plain_text};
 use crate::export::docx::{BODY_SIZE, FOOTER_SIZE, PAREN_SIZE};
+use crate::export::{inline_segments, plain_text};
+use crate::models::split_period_digits;
 use docx_rs::*;
 
 pub(crate) fn chinese_fonts(name: &str) -> RunFonts {
@@ -60,7 +60,13 @@ pub(crate) fn heiti_run(text: impl Into<String>) -> Run {
 
 /// 密级行 run 序列：数字年限的保密期限，前导数字用等宽西文字体（对应 LaTeX 的
 /// `\ttfamily`），其余用行内基准字体；指人专办以黑体加粗追加在末尾。
-pub(crate) fn security_runs(level: &str, period: &str, special: &str, base: &str, bold: bool) -> Vec<Run> {
+pub(crate) fn security_runs(
+    level: &str,
+    period: &str,
+    special: &str,
+    base: &str,
+    bold: bool,
+) -> Vec<Run> {
     let base_run = |text: &str| {
         let mut run = Run::new()
             .add_text(text.to_string())

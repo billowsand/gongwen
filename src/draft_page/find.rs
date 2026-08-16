@@ -3,14 +3,14 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::find`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::warn;
 use crate::diff;
-use crate::theme;
-use crate::app::{warn};
-use crate::diff_view::{DiffViewState};
-use std::ops::{Range};
-use std::path::{PathBuf};
-use eframe::egui;
+use crate::diff_view::DiffViewState;
 use crate::draft_page::{DraftPage, PreviewAnchor, editor_id};
+use crate::theme;
+use eframe::egui;
+use std::ops::Range;
+use std::path::PathBuf;
 
 /// 文件按钮不能在借用 `self` 的过程中直接改 `self`，先记下来再执行。
 pub(crate) enum FileAction {

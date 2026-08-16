@@ -3,14 +3,17 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::paragraphs`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::export::docx::{
+    BODY_SIZE, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS, TITLE_SIZE,
+    body_run, body_runs, chinese_fonts, heiti_run, security_runs, title_run,
+};
+use crate::export::plain_text;
+use crate::export::title;
+use crate::export::title::TitlePlan;
 use crate::images;
 use crate::models::{DraftInput, TemplateKind};
-use crate::export::{plain_text};
-use crate::export::title::{TitlePlan};
-use crate::export::title;
-use image::GenericImageView;
-use crate::export::docx::{BODY_SIZE, TITLE_SIZE, RED_APPROVAL_TITLE_SIZE, CLOSING_GAP_TWIPS, TABLE_CONTENT_WIDTH_TWIPS, chinese_fonts, body_run, body_runs, heiti_run, security_runs, title_run};
 use docx_rs::*;
+use image::GenericImageView;
 
 pub(crate) fn body_paragraph(text: &str) -> Paragraph {
     let mut paragraph = Paragraph::new()

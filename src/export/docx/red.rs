@@ -3,9 +3,11 @@
 //! 由 src/export/docx.rs 拆分而来：本文件是模块 `export::docx::red`，与其它子模块共享
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::{DraftInput};
-use crate::units::{UnitDisplay};
-use crate::export::docx::{BODY_SIZE, TABLE_CONTENT_WIDTH_TWIPS, chinese_fonts, docx_name, red_record_paragraph};
+use crate::export::docx::{
+    BODY_SIZE, TABLE_CONTENT_WIDTH_TWIPS, chinese_fonts, docx_name, red_record_paragraph,
+};
+use crate::models::DraftInput;
+use crate::units::UnitDisplay;
 use docx_rs::*;
 
 pub(crate) fn red_approval_frame_table(input: &DraftInput) -> Table {

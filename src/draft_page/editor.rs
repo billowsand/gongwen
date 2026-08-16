@@ -3,24 +3,28 @@
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::editor`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::app::visible_rows;
+use crate::draft_page::{
+    DRAG_STEP_MAX, DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH,
+    OFFICIAL_PAGE_HEIGHT, OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH,
+    PreviewMode, is_table_separator_line, is_table_source_line, jump_to_source,
+    markdown_heading_level, markdown_matches_mode, select_source_range, table_column_count,
+};
 use crate::export;
 use crate::preview;
 use crate::theme;
-use crate::app::visible_rows;
-use crate::units::{UnitDisplay};
-use std::ops::{Range};
+use crate::units::UnitDisplay;
 use eframe::egui;
-use crate::draft_page::{DraftPage, PreviewMode, DRAG_STEP_MAX, OFFICIAL_PAGE_WIDTH, OFFICIAL_PAGE_HEIGHT, OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH, jump_to_source, markdown_matches_mode, select_source_range, is_table_separator_line, is_table_source_line, markdown_heading_level, table_column_count};
+use std::ops::Range;
 
 /// 在公文预览里点中的那一块：记下它在 Markdown 中的字节范围，以及点击当时
 /// 这段范围里的原文。
 pub(crate) struct PreviewAnchor {
-pub(crate)     range: Range<usize>,
-pub(crate)     text: String,
+    pub(crate) range: Range<usize>,
+    pub(crate) text: String,
 }
 
 impl PreviewAnchor {
-
     /// 正文改过之后，旧的字节范围可能越界、落在字符中间，或者已经指向别的内容。
     /// 只有范围内的原文仍与点击时一致，才认为锚点还指着同一段；`str::get`
     /// 顺带挡掉越界和非字符边界，避免把半个汉字切开。
@@ -54,7 +58,9 @@ pub(crate) struct EditorLineVisual {
     baseline: f32,
 }
 
-pub(crate) fn editor_line_visuals(output: &egui::text_edit::TextEditOutput) -> Vec<EditorLineVisual> {
+pub(crate) fn editor_line_visuals(
+    output: &egui::text_edit::TextEditOutput,
+) -> Vec<EditorLineVisual> {
     let mut lines = Vec::new();
     let mut top = None;
     let mut baseline = None;

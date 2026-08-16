@@ -6,18 +6,18 @@
 //! 表格、查找替换、版本、页面外壳、后台任务），这里保留 `DraftSession` /
 //! `DraftPage` 结构体、`ExportLinks` 与共享类型/常量的再导出。
 
-use crate::export;
-use crate::theme;
 use crate::app::{DraftAction, VersionSwitchPrompt, WorkerResult};
-use crate::highlight::{MarkdownHighlighter};
-use crate::manuscript::{ManuscriptStore};
+use crate::export;
+use crate::highlight::MarkdownHighlighter;
+use crate::manuscript::ManuscriptStore;
 use crate::models::{AppConfig, DraftInput, ManuscriptStatus, ReviewNote, TemplateKind};
-use std::collections::{BTreeSet};
-use std::ops::{Range};
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Sender};
-use std::time::{Duration, Instant};
+use crate::theme;
 use eframe::egui;
+use std::collections::BTreeSet;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 mod editor;
 mod find;
@@ -628,143 +628,9 @@ pub(crate) enum PreviewMode {
     VersionDiff,
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ── 功能区的文本操作 ────────────────────────────────────────────────────────
 // 下面这一组都是纯字符串函数：功能区的按钮只负责取光标位置、调用它们、把结果
 // 写回审校稿。逻辑不碰 egui，所以能单独测。
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -854,7 +720,13 @@ mod tests {
                 );
                 for section in FormSection::ALL {
                     let mut open = true;
-                    section_header_ui(ui, section, kind, &mut open, check.progress[section.index()]);
+                    section_header_ui(
+                        ui,
+                        section,
+                        kind,
+                        &mut open,
+                        check.progress[section.index()],
+                    );
                     assert!(open, "没有点击时分段的展开状态不应改变");
                 }
                 egui::Grid::new("smoke_grid").num_columns(2).show(ui, |ui| {

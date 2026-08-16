@@ -3,18 +3,21 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::widgets`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{CONTENT_WIDTH, FORM_CONTROL_HEIGHT, LABEL_WIDTH, MANUAL_BACK_WIDTH, warn};
 use crate::export;
 use crate::manuscript;
+use crate::models::{
+    DraftInput, ExportSelection, FontConfig, ManuscriptStatus, ReviewNote, SecurityLevel,
+    VocabularyCategory, VocabularyEntry, join_units, split_units,
+};
 use crate::orphan_probe;
 use crate::system_fonts;
 use crate::texcompile;
 use crate::theme;
-use crate::models::{DraftInput, ExportSelection, FontConfig, ManuscriptStatus, ReviewNote, SecurityLevel, VocabularyCategory, VocabularyEntry, join_units, split_units};
-use crate::units::{UnitDisplay};
-use std::collections::{BTreeSet};
-use std::path::{Path, PathBuf};
+use crate::units::UnitDisplay;
 use eframe::egui;
-use crate::app::{warn, LABEL_WIDTH, MANUAL_BACK_WIDTH, FORM_CONTROL_HEIGHT, CONTENT_WIDTH};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 pub(crate) fn row_label(ui: &mut egui::Ui, label: &str) {
     form_row_label(ui, label);
@@ -747,10 +750,7 @@ pub(crate) fn multi_select(
                                 // 互斥规则是硬约束，原因写在条目右边，不藏在悬停里。
                                 ui.horizontal(|ui| {
                                     ui.add_enabled(false, egui::Checkbox::new(&mut false, label));
-                                    ui.weak(
-                                        egui::RichText::new(excluded_reason)
-                                            .size(11.0),
-                                    );
+                                    ui.weak(egui::RichText::new(excluded_reason).size(11.0));
                                 });
                                 continue;
                             }
