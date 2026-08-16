@@ -796,7 +796,12 @@ impl DraftPage<'_> {
                             TemplateKind::MeetingAgenda => {
                                 "会议议程无落款日期，稿件版本仅用于与其他文种保持一致。"
                             }
-                            TemplateKind::PlainDocument => unreachable!(),
+                            // 不能是 unreachable：`versioned` 在文种下拉框渲染之前求值，
+                            // 用户点选“普通公文”的那一帧里 kind 已变、versioned 还是旧值 true，
+                            // 版本下拉框会残留渲染这一帧，命中这里直接崩溃（曾因 unreachable 崩过）。
+                            TemplateKind::PlainDocument => {
+                                "普通公文无落款成文日期，稿件版本仅用于与其他文种保持一致。"
+                            }
                         };
                         egui::ComboBox::from_id_salt("letter_version")
                             .selected_text(self.doc.draft.profile.letter_version.label())

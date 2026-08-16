@@ -1165,6 +1165,127 @@ mod tests {
         assert!(export::chinese_date_parts(&today).is_some(), "{today}");
         assert!(!today.chars().any(|ch| ch.is_ascii_digit()), "{today}");
     }
+
+    /// 收集一帧内所有文本及其中心点，用于定位可点击控件。
+    fn text_centers(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Pos2)> {
+        fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    let s = text.galley.text().to_string();
+                    let rect = text.galley.rect.translate(text.pos.to_vec2());
+                    out.push((s, rect.center()));
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            collect(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 回归测试：在文种下拉框里点选“普通公文”不应崩溃。
+    ///
+    /// 曾因时序 bug 崩溃：`form_header_ui` 里的 `versioned` 在文种下拉框渲染之前
+    /// 求值，点选“普通公文”的那一帧 kind 已变、versioned 还是旧值 true，残留渲染
+    /// 的版本下拉框走到 `match` 的 `PlainDocument => unreachable!()`，整个程序退出。
+    /// 测试用真实点击事件走完 展开面板 → 打开文种下拉 → 点选“普通公文” 的路径。
+    #[test]
+    fn switching_kind_combo_to_plain_document_does_not_panic() {
+        let ctx = egui::Context::default();
+        crate::theme::configure_icons(&ctx);
+        crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        ctx.set_pixels_per_point(2.0);
+        let mut config = AppConfig::default();
+        let markdown = "# 测试标题\n\n正文内容。".to_string();
+        let mut doc = DraftSession::with_markdown(1, &config, markdown);
+        assert_eq!(doc.draft.kind, TemplateKind::OfficialLetter);
+        let (sender, _keep) = std::sync::mpsc::channel();
+        let mut status = String::new();
+        let mut version_switch = None;
+        let mut revert_confirm = None;
+        let mut actions = Vec::new();
+        let mut export_links = ExportLinks::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0));
+
+        let mut frame = |ctx: &egui::Context, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.clone().run_ui(raw, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let mut page = DraftPage {
+                        doc: &mut doc,
+                        config: &mut config,
+                        store: None,
+                        sender: &sender,
+                        status: &mut status,
+                        version_switch: &mut version_switch,
+                        revert_confirm: &mut revert_confirm,
+                        actions: &mut actions,
+                        export_links: &mut export_links,
+                    };
+                    page.create_ui(ui);
+                });
+            });
+            output.shapes
+        };
+        // egui 的点击要按下、抬起各一帧才算数。
+        let click = |frame: &mut dyn FnMut(
+            &egui::Context,
+            Vec<egui::Event>,
+        ) -> Vec<egui::epaint::ClippedShape>,
+                     ctx: &egui::Context,
+                     pos: egui::Pos2| {
+            let press = vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            let release = vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }];
+            let _ = frame(ctx, press);
+            frame(ctx, release)
+        };
+
+        // 公文要素区默认收起，先点 ribbon 上的“公文要素”按钮展开它。
+        let shapes = frame(&ctx, vec![]);
+        let expand = text_centers(&shapes)
+            .into_iter()
+            .find(|(s, _)| s == "公文要素")
+            .expect("应能找到 ribbon 上的“公文要素”按钮");
+        let shapes = click(&mut frame, &ctx, expand.1);
+        // 打开文种下拉框：先点当前文种“公函”，再等一帧让选项渲染出来。
+        let combo = text_centers(&shapes)
+            .into_iter()
+            .find(|(s, p)| s == "公函" && p.x < 500.0)
+            .expect("应能找到文种下拉框上的“公函”");
+        let _ = click(&mut frame, &ctx, combo.1);
+        let shapes = frame(&ctx, vec![]);
+        // 点选“普通公文”。切换那一帧内 kind 即变，若时序 bug 复活会在这里 panic。
+        let plain = text_centers(&shapes)
+            .into_iter()
+            .find(|(s, _)| s.contains("普通公文"))
+            .expect("下拉里应有“普通公文”");
+        let _ = click(&mut frame, &ctx, plain.1);
+        assert_eq!(doc.draft.kind, TemplateKind::PlainDocument);
+    }
 }
 
 #[cfg(test)]
