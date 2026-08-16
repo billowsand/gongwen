@@ -24,8 +24,9 @@ mod text;
 pub(crate) use headings::{HeadingCounters, clean_heading_number, official_heading_text};
 pub(crate) use parse::{
     ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, block_span_for_line,
-    body_heading_max_level, is_image_line, parse_markdown, parse_markdown_located,
-    parse_markdown_with_lines, parse_section_marker,
+    body_heading_max_level, circled_number, is_image_line, normalize_ordered_list_punctuation,
+    parse_markdown, parse_markdown_located, parse_markdown_with_lines, parse_ordered_item,
+    parse_section_marker,
 };
 pub(crate) use red::{
     RED_RECORD_CONTACT_TWIPS, RED_RECORD_CONTACT_USABLE_TWIPS, RED_RECORD_PHONE_TWIPS,
@@ -119,7 +120,7 @@ pub fn extract_title(markdown: &str, fallback: &str) -> String {
 /// Markdown 保留“标题 + 正文 + 可选附件”。密级、文号、主送、落款、成文日期、抄送和版记
 /// 都由 DOCX/LaTeX 导出器按锁定元数据渲染，这里不再重复写入。
 pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
-    let mut text = generated.trim().to_string();
+    let mut text = normalize_ordered_list_punctuation(generated.trim());
     if !text.lines().any(|line| line.starts_with("# ")) {
         let title = if input.title_hint.trim().is_empty() {
             "【待核实：标题】"

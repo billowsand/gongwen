@@ -267,6 +267,7 @@ pub fn hybrid_highlight(
     };
 
     let source_lines = text.split('\n').collect::<Vec<_>>();
+    let ordered_lines = ordered_list_lines(text);
     let mut counters = export::HeadingCounters::default();
     let mut in_table = false;
     for (index, line) in source_lines.iter().copied().enumerate() {
@@ -274,7 +275,9 @@ pub fn hybrid_highlight(
         let centered = counters.centered_title();
         if index > 0 {
             let previous_is_blank = source_lines[index - 1].trim().is_empty();
-            let newline = if previous_is_blank && index - 1 != active_line {
+            let inline_ordered =
+                ordered_lines[index].is_some_and(|info| info.inline) && index != active_line;
+            let newline = if inline_ordered || (previous_is_blank && index - 1 != active_line) {
                 collapsed_marker()
             } else {
                 body.clone()
@@ -292,6 +295,7 @@ pub fn hybrid_highlight(
             prefix.as_deref(),
             centered,
             table_header,
+            ordered_lines[index],
         );
     }
     for range in search_matches {
@@ -310,6 +314,7 @@ fn hybrid_line(
     heading_prefix: Option<&str>,
     centered_title: bool,
     table_header: bool,
+    ordered: Option<OrderedLine>,
 ) {
     let body = official_format(
         theme::FONT_FANGSONG,
@@ -480,11 +485,88 @@ fn hybrid_line(
         return;
     }
 
+    if let Some(info) = ordered
+        && let Some((_, rest)) = export::parse_ordered_item(trimmed)
+    {
+        let split = rest.as_ptr() as usize - trimmed.as_ptr() as usize;
+        let marker = if active {
+            let mut format = body.clone();
+            format.color = theme::md::bullet();
+            format
+        } else {
+            collapsed_marker()
+        };
+        let display = if info.inline {
+            export::circled_number(info.number)
+        } else {
+            format!("{}.", info.number)
+        };
+        let display_units = display
+            .chars()
+            .map(|ch| if ch.is_ascii() { 0.55 } else { 1.0 })
+            .sum::<f32>();
+        let mut leading = if info.inline {
+            0.0
+        } else {
+            OFFICIAL_BODY_PT * PT * 2.0
+        };
+        if !active {
+            leading += display_units * OFFICIAL_BODY_PT * PT;
+        }
+        append_with_leading(job, indent, &mut leading, body.clone());
+        append_with_leading(job, &trimmed[..split], &mut leading, marker);
+        append_hybrid_inline(job, rest, &body, active, &mut leading);
+        return;
+    }
+
     // 普通段落按成文规则首行缩进 2 字。leading_space 只是布局信息，
     // 不会向 Markdown 里真正插入全角空格。
     let mut leading = OFFICIAL_BODY_PT * PT * 2.0;
     append_with_leading(job, indent, &mut leading, body.clone());
     append_hybrid_inline(job, trimmed, &body, active, &mut leading);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OrderedLine {
+    pub(crate) number: usize,
+    pub(crate) inline: bool,
+}
+
+/// 每个源码行对应的有序列表显示信息。是否为段内列表直接复用解析器的块范围，
+/// 避免实时编辑器另写一套“有没有空行”的判断后逐渐漂移。
+pub(crate) fn ordered_list_lines(text: &str) -> Vec<Option<OrderedLine>> {
+    let source_lines = text.split('\n').collect::<Vec<_>>();
+    let mut starts = Vec::with_capacity(source_lines.len());
+    let mut start = 0usize;
+    for line in &source_lines {
+        starts.push(start);
+        start += line.len() + 1;
+    }
+    let located = export::parse_markdown_located(text);
+    let mut result = vec![None; source_lines.len()];
+    let mut next_number = None;
+    let mut group_inline = false;
+    for (index, line) in source_lines.iter().enumerate() {
+        if let Some((source_number, _)) = export::parse_ordered_item(line.trim_end()) {
+            if next_number.is_none() {
+                group_inline = located.iter().any(|block| {
+                    matches!(&block.block, export::MarkdownBlock::Paragraph(_))
+                        && block.range.start <= starts[index]
+                        && starts[index] <= block.range.end
+                });
+            }
+            let number = next_number.unwrap_or(source_number);
+            result[index] = Some(OrderedLine {
+                number,
+                inline: group_inline,
+            });
+            next_number = Some(number + 1);
+        } else {
+            next_number = None;
+            group_inline = false;
+        }
+    }
+    result
 }
 
 fn append_hybrid_inline(
@@ -672,6 +754,17 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
     if let Some(rest) = trimmed.strip_prefix("- ").or(trimmed.strip_prefix("* ")) {
         job.append(
             &trimmed[..2],
+            0.0,
+            format(body.clone(), theme::md::bullet()),
+        );
+        append_inline(job, rest, &format(body, theme::md::body()));
+        return;
+    }
+
+    if let Some((_, rest)) = export::parse_ordered_item(trimmed) {
+        let split = rest.as_ptr() as usize - trimmed.as_ptr() as usize;
+        job.append(
+            &trimmed[..split],
             0.0,
             format(body.clone(), theme::md::bullet()),
         );
@@ -1223,5 +1316,39 @@ mod tests {
                 galley.rect,
             );
         }
+    }
+
+    #[test]
+    fn ordered_list_visuals_follow_blank_line_classification_and_auto_numbering() {
+        let lines =
+            ordered_list_lines("正文：\n1. 第一项；\n1. 第二项。\n\n3. 独立甲。\n1. 独立乙。");
+        assert_eq!(
+            lines[1],
+            Some(OrderedLine {
+                number: 1,
+                inline: true,
+            })
+        );
+        assert_eq!(
+            lines[2],
+            Some(OrderedLine {
+                number: 2,
+                inline: true,
+            })
+        );
+        assert_eq!(
+            lines[4],
+            Some(OrderedLine {
+                number: 3,
+                inline: false,
+            })
+        );
+        assert_eq!(
+            lines[5],
+            Some(OrderedLine {
+                number: 4,
+                inline: false,
+            })
+        );
     }
 }

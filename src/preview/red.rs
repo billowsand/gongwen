@@ -391,6 +391,21 @@ pub(crate) fn red_build_print_layout(
                     false,
                 );
             }
+            MarkdownBlock::OrderedListItem { number, text } => {
+                let mut segments = export::inline_segments(&format!("{number}.{text}"));
+                if let Some(first) = segments.first_mut() {
+                    first.text = format!("{}{}", indent(INDENT_CHARS), first.text);
+                }
+                red_place_flow_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    segments,
+                    RedTextStyle::List,
+                    false,
+                );
+            }
             MarkdownBlock::Table { rows, .. } => {
                 // 表格和图片与 TeX 一致，不进入首页批示窄栏。
                 if state.page_index == 0 {

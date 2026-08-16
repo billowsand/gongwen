@@ -248,6 +248,8 @@ impl DraftPage<'_> {
             )
             .clicked()
         {
+            self.doc.generated_markdown =
+                export::normalize_ordered_list_punctuation(&self.doc.generated_markdown);
             ui.ctx().copy_text(self.doc.generated_markdown.clone());
             *self.status = "审校稿已复制到剪贴板。".into();
         }
@@ -638,6 +640,8 @@ impl DraftPage<'_> {
         let mut heading: Option<(u8, &'static str)> = None;
         let mut bold = false;
         let mut bullet = false;
+        let mut inline_ordered = false;
+        let mut ordered = false;
         let mut tidy = false;
         let mut quotes = false;
 
@@ -702,6 +706,26 @@ impl DraftPage<'_> {
             {
                 bullet = true;
             }
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::ListOrdered,
+                    "段内编号",
+                ))
+                .on_hover_text("选中列表行并紧接上方正文；排版为①②③圈号")
+                .clicked()
+            {
+                inline_ordered = true;
+            }
+            if ui
+                .add(theme::icon_text_button(
+                    theme::Icon::ListOrdered,
+                    "有序列表",
+                ))
+                .on_hover_text("选中列表行并在前面保留空行；排版为1.2.3.")
+                .clicked()
+            {
+                ordered = true;
+            }
             toolbar_separator(ui);
 
             // 三、清理
@@ -729,6 +753,12 @@ impl DraftPage<'_> {
         }
         if bullet {
             self.apply_line_edit(ui.ctx(), toggle_bullet, "已切换项目符号。");
+        }
+        if inline_ordered {
+            self.apply_ordered_list(ui.ctx(), true);
+        }
+        if ordered {
+            self.apply_ordered_list(ui.ctx(), false);
         }
         if quotes {
             self.doc.generated_markdown =

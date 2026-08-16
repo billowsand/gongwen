@@ -1289,6 +1289,25 @@ mod tests {
     }
 
     #[test]
+    fn ordered_lists_render_inline_circles_or_independent_decimal_items() {
+        let input = DraftInput::default();
+        let tex = letter_tex(
+            &input,
+            "# 测试函\n\n正文：\n1. 第一项，\n1. 第二项；\n\n1. 独立甲，\n1. 独立乙；",
+        );
+        assert!(tex.contains("正文：①第一项。②第二项。\\GwaTail{"), "{tex}");
+        assert!(
+            tex.contains("\\noindent\\hspace*{2em}1.独立甲。\\GwaTail{"),
+            "{tex}"
+        );
+        assert!(
+            tex.contains("\\noindent\\hspace*{2em}2.独立乙。\\GwaTail{"),
+            "{tex}"
+        );
+        assert!(!tex.contains("1. 独立甲"), "编号与正文之间不得留空格");
+    }
+
+    #[test]
     fn compact_style_merges_every_deepest_heading_paragraph_pair() {
         let mut input = DraftInput::default();
         input.profile.style_mode = StyleMode::Compact;

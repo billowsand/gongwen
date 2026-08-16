@@ -7,10 +7,12 @@ use crate::app::visible_rows;
 use crate::draft_page::{
     DRAG_STEP_MAX, DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH,
     OFFICIAL_PAGE_HEIGHT, OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH,
-    PreviewMode, is_table_separator_line, is_table_source_line, jump_to_source,
-    markdown_heading_level, markdown_matches_mode, select_source_range, table_column_count,
+    PreviewMode, continue_ordered_list, editor_cursor, editor_selection, is_table_separator_line,
+    is_table_source_line, jump_to_source, markdown_heading_level, markdown_matches_mode,
+    select_source_range, table_column_count,
 };
 use crate::export;
+use crate::highlight::ordered_list_lines;
 use crate::preview;
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -123,6 +125,7 @@ pub(crate) fn paint_hybrid_decorations(
 ) {
     let visuals = editor_line_visuals(output);
     let source_lines = text.split('\n').collect::<Vec<_>>();
+    let ordered_lines = ordered_list_lines(text);
     let painter = ui.painter();
     let mut counters = export::HeadingCounters::default();
     let attachment_count = export::parse_markdown(text)
@@ -169,6 +172,39 @@ pub(crate) fn paint_hybrid_decorations(
                     egui::Color32::BLACK,
                 );
             }
+            continue;
+        }
+        if index != active_line
+            && let (Some(info), Some(visual)) = (ordered_lines[index], visuals.get(index))
+        {
+            let label = if info.inline {
+                export::circled_number(info.number)
+            } else {
+                format!("{}.", info.number)
+            };
+            let font = egui::FontId::new(
+                OFFICIAL_BODY_SIZE,
+                theme::official_family(theme::FONT_FANGSONG),
+            );
+            let label_galley = painter.layout_no_wrap(label, font, egui::Color32::BLACK);
+            let label_baseline = label_galley
+                .rows
+                .first()
+                .and_then(|row| row.glyphs.first().map(|glyph| row.pos.y + glyph.pos.y))
+                .unwrap_or(label_galley.size().y);
+            painter.galley(
+                egui::pos2(
+                    output.galley_pos.x
+                        + if info.inline {
+                            0.0
+                        } else {
+                            OFFICIAL_BODY_SIZE * 2.0
+                        },
+                    visual.baseline - label_baseline,
+                ),
+                label_galley,
+                egui::Color32::BLACK,
+            );
             continue;
         }
         let Some(level) = markdown_heading_level(line) else {
@@ -367,6 +403,25 @@ impl DraftPage<'_> {
         // 行数必须在进入 ScrollArea 之前算：滚动方向上的 available_height
         // 是无穷大，拿进去算会得到 usize::MAX 行，整个界面将无法布局。
         let rows = visible_rows(ui);
+        let editable = !self.doc.read_only();
+        // TextEdit 本身只会插入普通换行；在焦点确实位于有序列表、且没有选区时，
+        // 抢在它之前消费 Enter，完成 Markdown 编辑器惯用的续号/空项退出行为。
+        let ordered_enter = if editable
+            && ui.ctx().memory(|memory| memory.has_focus(editor_id()))
+            && editor_selection(ui.ctx(), &self.doc.generated_markdown)
+                .is_some_and(|range| range.is_empty())
+        {
+            editor_cursor(ui.ctx(), &self.doc.generated_markdown)
+                .and_then(|cursor| continue_ordered_list(&self.doc.generated_markdown, cursor))
+        } else {
+            None
+        };
+        if let Some((updated, cursor)) = ordered_enter
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        {
+            self.doc.generated_markdown = updated;
+            self.doc.pending_source_jump = Some(cursor);
+        }
         // 拆开借用：编辑框要可变借文本，布局器要可变借高亮缓存。
         let jump = self.doc.pending_source_jump.take();
         let selection = self.doc.pending_source_selection.take();
@@ -386,7 +441,6 @@ impl DraftPage<'_> {
         } else {
             Vec::new()
         };
-        let editable = !self.doc.read_only();
         let active_line =
             if hybrid && editable && ui.ctx().memory(|memory| memory.has_focus(editor_id())) {
                 active_source_line(ui.ctx(), &self.doc.generated_markdown)
@@ -396,6 +450,7 @@ impl DraftPage<'_> {
         let show_line_numbers = self.config.show_editor_line_numbers;
         let text = &mut self.doc.generated_markdown;
         let highlighter = &mut self.doc.highlighter;
+        let mut editor_lost_focus = false;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
             if hybrid {
                 highlighter.layout_hybrid(
@@ -462,6 +517,7 @@ impl DraftPage<'_> {
                                             "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
                                         )
                                         .show(ui);
+                                        editor_lost_focus |= output.response.lost_focus();
                                         if show_line_numbers {
                                             paint_editor_line_numbers(ui, &output);
                                         }
@@ -509,6 +565,7 @@ impl DraftPage<'_> {
                         } else {
                             show_editor(ui)
                         };
+                        editor_lost_focus |= output.response.lost_focus();
                         if show_line_numbers {
                             paint_editor_line_numbers(ui, &output);
                         }
@@ -519,6 +576,12 @@ impl DraftPage<'_> {
                         }
                     });
             });
+        }
+        if editable && editor_lost_focus {
+            let normalized = export::normalize_ordered_list_punctuation(text);
+            if normalized != *text {
+                *text = normalized;
+            }
         }
     }
 

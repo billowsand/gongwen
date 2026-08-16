@@ -552,6 +552,13 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier(
                     gwa_tail(lines, index)
                 ));
             }
+            MarkdownBlock::OrderedListItem { number, text } => {
+                target_tex_section(section, &mut body, &mut attachments).push(format!(
+                    "\\noindent\\hspace*{{2em}}{number}.{}{}",
+                    body_text_to_tex(text),
+                    gwa_tail(lines, index)
+                ));
+            }
             MarkdownBlock::Table { rows, aligns } => {
                 let rendered = to_longtblr(rows, aligns);
                 if !rendered.is_empty() {

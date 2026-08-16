@@ -112,6 +112,62 @@ pub(crate) fn toggle_bullet(line: &str) -> String {
     }
 }
 
+/// 有序列表开关。源码统一写成 `1. `，实际编号由解析器按连续列表组计算。
+pub(crate) fn toggle_ordered(line: &str) -> String {
+    if let Some((_, text)) = export::parse_ordered_item(line) {
+        text.to_string()
+    } else if line.trim().is_empty() {
+        "1. ".to_string()
+    } else {
+        format!("1. {}", line.trim_start())
+    }
+}
+
+/// 在有序列表项中按回车：非空项续写一个 `1. ` 占位；空项再次回车则移除
+/// 占位并结束列表。返回修改后的正文和新光标字节位置；非列表行返回 None，
+/// 交还给 TextEdit 做普通换行。
+pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String, usize)> {
+    if cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = text[cursor..]
+        .find('\n')
+        .map_or(text.len(), |index| cursor + index);
+    let line = &text[line_start..line_end];
+    let (_, content) = export::parse_ordered_item(line)?;
+    let content_start = content.as_ptr() as usize - line.as_ptr() as usize;
+    if cursor < line_start + content_start {
+        return None;
+    }
+
+    if content.trim().is_empty() {
+        let mut updated = text.to_string();
+        updated.replace_range(line_start..line_end, "");
+        updated = export::normalize_ordered_list_punctuation(&updated);
+        // 标点规范化可能改变前面列表项的字节长度；按行数重新找当前空行。
+        let line_number = text[..line_start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        let new_cursor = if line_number == 0 {
+            0
+        } else {
+            updated
+                .match_indices('\n')
+                .nth(line_number - 1)
+                .map_or(updated.len(), |(index, _)| index + 1)
+        };
+        return Some((updated, new_cursor));
+    }
+
+    let indent_len = line.len() - line.trim_start_matches(' ').len();
+    let marker = format!("\n{}1. ", " ".repeat(indent_len.min(3)));
+    let mut updated = text.to_string();
+    updated.insert_str(cursor, &marker);
+    Some((updated, cursor + marker.len()))
+}
+
 /// 把选区覆盖到的每一行都过一遍 `edit`，返回改过之后的全文与新的选区。
 /// 选区落在行中间也按整行处理——标题层级、项目符号本来就是整行的事。
 pub(crate) fn map_lines(
@@ -195,6 +251,9 @@ pub(crate) fn body_stats(markdown: &str) -> (usize, usize) {
                 text.clone()
             }
             export::MarkdownBlock::ListItem(text) => text.trim_start_matches('•').to_string(),
+            export::MarkdownBlock::OrderedListItem { number, text } => {
+                format!("{number}.{text}")
+            }
             export::MarkdownBlock::Paragraph(text) => {
                 paragraphs += 1;
                 text.clone()
@@ -379,6 +438,53 @@ impl DraftPage<'_> {
         *self.status = done.to_string();
     }
 
+    /// 把选区覆盖的行切换为有序列表，并用列表前是否保留空行确定段内/独立模式。
+    pub(crate) fn apply_ordered_list(&mut self, ctx: &egui::Context, inline: bool) {
+        if self.doc.read_only() {
+            return;
+        }
+        let text = self.doc.generated_markdown.clone();
+        let range = editor_selection(ctx, &text).unwrap_or(text.len()..text.len());
+        let ranges = line_ranges(&text);
+        let first = line_at_byte(&ranges, range.start);
+        let was_ordered = export::parse_ordered_item(&text[ranges[first].clone()]).is_some();
+        let (mut updated, mut span) = map_lines(&text, &range, toggle_ordered);
+
+        if !was_ordered && span.start > 0 {
+            if inline {
+                // 多个空行一律压回一个换行，让列表紧接上面的正文源码行。
+                let mut run_start = span.start;
+                while run_start > 0 && updated.as_bytes()[run_start - 1] == b'\n' {
+                    run_start -= 1;
+                }
+                if span.start - run_start > 1 {
+                    let removed = span.start - run_start - 1;
+                    updated.replace_range(run_start..span.start - 1, "");
+                    span = span.start - removed..span.end - removed;
+                }
+            } else if !updated[..span.start].ends_with("\n\n") {
+                updated.insert(span.start, '\n');
+                span = span.start + 1..span.end + 1;
+            }
+        }
+
+        let affected_line = line_at_byte(&line_ranges(&updated), span.end);
+        self.doc.generated_markdown = export::normalize_ordered_list_punctuation(&updated);
+        let normalized_ranges = line_ranges(&self.doc.generated_markdown);
+        self.doc.pending_source_jump = Some(
+            normalized_ranges
+                .get(affected_line)
+                .map_or(self.doc.generated_markdown.len(), |range| range.end),
+        );
+        *self.status = if was_ordered {
+            "已取消有序列表。".into()
+        } else if inline {
+            "已设为段内有序列表；圈号将在排版视图中自动生成。".into()
+        } else {
+            "已设为独立有序列表。".into()
+        };
+    }
+
     /// 给选中的文字加粗；已经加粗的再来一次就是取消。加粗之后保持选中，
     /// 与各家编辑器的主快捷键+B 一致。
     pub(crate) fn toggle_bold(&mut self, ctx: &egui::Context) {
@@ -401,5 +507,31 @@ impl DraftPage<'_> {
         } else {
             "已加粗。".into()
         };
+    }
+}
+
+#[cfg(test)]
+mod ordered_list_tests {
+    use super::*;
+
+    #[test]
+    fn enter_continues_ordered_item_with_placeholder_marker() {
+        let text = "正文\n1. 第一项";
+        let (updated, cursor) = continue_ordered_list(text, text.len()).unwrap();
+        assert_eq!(updated, "正文\n1. 第一项\n1. ");
+        assert_eq!(cursor, updated.len());
+    }
+
+    #[test]
+    fn enter_on_empty_item_exits_and_normalizes_the_group() {
+        let text = "正文\n1. 第一项；\n1. 第二项，\n1. ";
+        let (updated, cursor) = continue_ordered_list(text, text.len()).unwrap();
+        assert_eq!(updated, "正文\n1. 第一项；\n1. 第二项。\n");
+        assert_eq!(cursor, updated.len());
+    }
+
+    #[test]
+    fn ordinary_lines_are_left_to_text_edit() {
+        assert!(continue_ordered_list("普通正文", "普通正文".len()).is_none());
     }
 }

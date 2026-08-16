@@ -1905,6 +1905,8 @@ impl GongwenApp {
 
     /// 起草页“保存到稿件库”：新建记录或更新当前打开的记录。
     pub(crate) fn save_to_manuscript_library(&mut self) {
+        let normalized = export::normalize_ordered_list_punctuation(&self.doc().generated_markdown);
+        self.doc_mut().generated_markdown = normalized;
         // 表单刚改过而正文未动时也要在保存点重跑函号等元数据规则。
         self.draft_page().revalidate();
         let snapshot = self.doc().draft.clone();

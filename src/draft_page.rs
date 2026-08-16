@@ -36,9 +36,9 @@ pub(crate) use find::{
 };
 pub(crate) use form::FormSectionState;
 pub(crate) use markdown::{
-    body_stats, chinese_today, display_width, editor_cursor, is_table_separator_line,
-    is_table_source_line, line_at_byte, line_ranges, markdown_heading_level, split_row,
-    table_column_count, tidy_blank_lines, toggle_bullet,
+    body_stats, chinese_today, continue_ordered_list, display_width, editor_cursor,
+    editor_selection, is_table_separator_line, is_table_source_line, line_at_byte, line_ranges,
+    markdown_heading_level, split_row, table_column_count, tidy_blank_lines, toggle_bullet,
 };
 pub(crate) use table::{TableOp, table_grid_picker};
 // test-only names: only compiled in test builds (kept for the root test modules)

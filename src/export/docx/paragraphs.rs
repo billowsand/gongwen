@@ -43,6 +43,22 @@ pub(crate) fn label_paragraph(text: &str) -> Paragraph {
     paragraph
 }
 
+/// 独立有序列表：每项单独成段，首行缩进两个汉字；编号与正文之间不留空格。
+pub(crate) fn ordered_list_paragraph(number: usize, text: &str) -> Paragraph {
+    let mut paragraph = Paragraph::new()
+        .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+        .line_spacing(
+            LineSpacing::new()
+                .line(560)
+                .line_rule(LineSpacingType::Exact),
+        )
+        .widow_control(true);
+    for run in body_runs(&format!("{number}.{text}")) {
+        paragraph = paragraph.add_run(run);
+    }
+    paragraph
+}
+
 /// 函稿/电话通知顶格的密级行：密级 + ★ + 保密期限。勾选“指人专办”时，
 /// 在“密级★保密期限”后空一个全角空格，再以黑体标注“指人专办”四个字。
 /// 数字年限的保密期限数字部分用等宽西文字体（`security_runs`）。

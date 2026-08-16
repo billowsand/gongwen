@@ -7,7 +7,7 @@ use crate::export::docx::{
     AGENDA_NUMBERING_ID, BODY_SIZE, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE, agenda_blank_line,
     agenda_body_paragraph, agenda_labeled_paragraph, body_paragraph, body_runs, chinese_fonts,
     document_title_paragraph, docx_name, heading_paragraph, image_paragraph, label_paragraph,
-    security_runs, table_run_sized, table_runs_sized,
+    ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
 };
 use crate::export::table::{ColumnAlignment, to_docx_grid};
 use crate::export::title;
@@ -124,6 +124,9 @@ pub(crate) fn add_official_content_block(
         MarkdownBlock::ListItem(text) => {
             doc = doc.add_paragraph(label_paragraph(text).indent(Some(420), None, None, None));
         }
+        MarkdownBlock::OrderedListItem { number, text } => {
+            doc = doc.add_paragraph(ordered_list_paragraph(*number, text));
+        }
         MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
         MarkdownBlock::Image { alt, src } => {
             if let Some(paragraph) = image_paragraph(alt, src) {
@@ -144,7 +147,7 @@ pub(crate) fn agenda_numbering() -> AbstractNumbering {
             LevelText::new("%1."),
             LevelJc::new("left"),
         )
-        .suffix(LevelSuffixType::Space)
+        .suffix(LevelSuffixType::Nothing)
         .fonts(chinese_fonts("仿宋_GB2312"))
         .size(BODY_SIZE),
     )

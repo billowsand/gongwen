@@ -33,7 +33,8 @@ pub(crate) use paragraphs::{
     attachment_document_title_paragraph, attachment_label_paragraph, body_paragraph,
     compact_heading_paragraph, document_title_paragraph, heading_paragraph, image_paragraph,
     joint_closing_paragraph, joint_signature_cell_paragraph, label_paragraph,
-    letter_security_paragraph, red_approval_title_paragraph, red_record_paragraph,
+    letter_security_paragraph, ordered_list_paragraph, red_approval_title_paragraph,
+    red_record_paragraph,
 };
 pub(crate) use record::add_footer_record;
 pub(crate) use red::{
@@ -329,6 +330,9 @@ pub fn write_docx(
                         None,
                         None,
                     ));
+                }
+                MarkdownBlock::OrderedListItem { number, text } => {
+                    doc = doc.add_paragraph(ordered_list_paragraph(*number, text));
                 }
                 MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
             }
@@ -1439,6 +1443,27 @@ mod tests {
         let start = xml[..needle_at].rfind("<w:p ").unwrap();
         let end = xml[needle_at..].find("</w:p>").unwrap() + needle_at + "</w:p>".len();
         &xml[start..end]
+    }
+
+    #[test]
+    fn ordered_lists_use_circles_inline_and_two_char_first_line_indent_when_independent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ordered-lists.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::PlainDocument;
+        write_docx_ok(
+            &path,
+            &input,
+            "# 测试\n\n正文：\n1. 第一项；\n1. 第二项，\n\n1. 独立甲，\n1. 独立乙；",
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        assert!(xml.contains("正文：①第一项；②第二项。"), "{xml}");
+        let first = paragraph_containing(&xml, "1.独立甲。");
+        assert!(first.contains(r#"w:firstLine="640""#), "{first}");
+        let second = paragraph_containing(&xml, "2.独立乙。");
+        assert!(second.contains(r#"w:firstLine="640""#), "{second}");
+        assert!(!xml.contains("1. 独立甲"), "编号与正文之间不得留空格");
     }
 
     /// 取一段 XML 里所有 `<w:t>` 文本拼接后的纯文本。密级行的数字年限拆成了

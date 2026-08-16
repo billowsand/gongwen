@@ -11,6 +11,12 @@ pub(crate) enum MarkdownBlock {
     Heading(u8, String),
     Paragraph(String),
     ListItem(String),
+    /// 独立有序列表的一项。源码沿用标准 Markdown 的 `1. 内容`，`number`
+    /// 是按同一组连续列表自动计算后的显示序号。
+    OrderedListItem {
+        number: usize,
+        text: String,
+    },
     /// GFM 表格。`aligns` 是分隔行里写明的列对齐，与列一一对应；
     /// 没写冒号的列是 `Auto`，交给智能列宽按内容判定。
     Table {
@@ -248,6 +254,50 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
                 range: start..end,
             });
             continue;
+        } else if let Some((start_number, _)) = parse_ordered_item(line) {
+            // 连续的有序列表行作为一组处理：既要统一末尾标点，也要只认首项
+            // 的起始序号，后续源码可以像常见 Markdown 写法一样全部写 `1.`。
+            let mut group_end = span.end;
+            let mut items = Vec::new();
+            let first_item = index;
+            while index < lines.len() {
+                let (item_start, raw_item) = lines[index];
+                let Some((_, text)) = parse_ordered_item(raw_item.trim()) else {
+                    break;
+                };
+                items.push(text.to_string());
+                group_end = item_start + raw_item.len();
+                index += 1;
+            }
+            let items = normalize_ordered_item_punctuation(&items);
+            if !paragraph.is_empty() {
+                // 正文之后没有空行：源码仍逐项换行，成文时把它们接回同一自然段，
+                // 使用圈号且不额外插入空格。
+                let tail = items
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, text)| {
+                        format!("{}{text}", circled_number(start_number + offset))
+                    })
+                    .collect::<String>();
+                paragraph
+                    .last_mut()
+                    .expect("paragraph is not empty")
+                    .push_str(&tail);
+                paragraph_range.end = group_end;
+            } else {
+                for (offset, text) in items.into_iter().enumerate() {
+                    let (line_start, raw_item) = lines[first_item + offset];
+                    blocks.push(LocatedBlock {
+                        block: MarkdownBlock::OrderedListItem {
+                            number: start_number + offset,
+                            text,
+                        },
+                        range: line_start..line_start + raw_item.len(),
+                    });
+                }
+            }
+            continue;
         } else if let Some(text) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             blocks.push(LocatedBlock {
@@ -265,6 +315,135 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
     }
     flush(&mut paragraph, &mut paragraph_range, &mut blocks);
     normalize_legacy_attachments(blocks)
+}
+
+/// 标准 Markdown 有序列表项：允许行首最多三个空格，点号后必须有空白。
+/// 空内容仍返回，编辑器借此识别按第二次回车退出列表的占位行。
+pub(crate) fn parse_ordered_item(line: &str) -> Option<(usize, &str)> {
+    let leading = line.len() - line.trim_start_matches(' ').len();
+    if leading > 3 {
+        return None;
+    }
+    let line = &line[leading..];
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 || digits > 9 {
+        return None;
+    }
+    let number = line[..digits].parse().ok()?;
+    let rest = line[digits..].strip_prefix('.')?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some((number, rest.trim_start()))
+}
+
+fn terminal_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        ',' | '，'
+            | ';'
+            | '；'
+            | '.'
+            | '．'
+            | '。'
+            | '｡'
+            | '!'
+            | '！'
+            | '?'
+            | '？'
+            | '、'
+            | '､'
+            | ':'
+            | '：'
+            | '…'
+            | '—'
+    )
+}
+
+/// 一组列表只允许两种标点风格：任一非末项以分号收尾时，中间统一分号、
+/// 末项句号；否则所有项统一句号。只观察末尾标点串，不会把正文内部的分号
+/// 当成风格信号。
+pub(crate) fn normalize_ordered_item_punctuation(items: &[String]) -> Vec<String> {
+    let semicolon_style = items
+        .iter()
+        .take(items.len().saturating_sub(1))
+        .any(|item| {
+            item.trim_end()
+                .chars()
+                .rev()
+                .take_while(|ch| terminal_punctuation(*ch))
+                .any(|ch| matches!(ch, ';' | '；'))
+        });
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let trimmed = item.trim_end();
+            if trimmed.is_empty() {
+                return String::new();
+            }
+            let body = trimmed.trim_end_matches(terminal_punctuation);
+            let punctuation = if semicolon_style && index + 1 < items.len() {
+                '；'
+            } else {
+                '。'
+            };
+            format!("{body}{punctuation}")
+        })
+        .collect()
+}
+
+pub(crate) fn circled_number(number: usize) -> String {
+    const CIRCLED: [char; 20] = [
+        '①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩', '⑪', '⑫', '⑬', '⑭', '⑮', '⑯', '⑰', '⑱',
+        '⑲', '⑳',
+    ];
+    CIRCLED
+        .get(number.saturating_sub(1))
+        .map(char::to_string)
+        .unwrap_or_else(|| format!("({number})"))
+}
+
+/// 把 Markdown 源码中的每组连续有序列表就地规范成同一种末尾标点风格。
+/// 仅重写列表项正文，保留用户写下的序号、缩进、空行与换行结尾。
+pub(crate) fn normalize_ordered_list_punctuation(markdown: &str) -> String {
+    let lines = markdown.split('\n').collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(lines.len());
+    let mut index = 0usize;
+    while index < lines.len() {
+        let raw = lines[index].strip_suffix('\r').unwrap_or(lines[index]);
+        if parse_ordered_item(raw.trim_end()).is_none() {
+            output.push(lines[index].to_string());
+            index += 1;
+            continue;
+        }
+
+        let first = index;
+        let mut contents = Vec::new();
+        let mut prefixes = Vec::new();
+        let mut crlf = Vec::new();
+        while index < lines.len() {
+            let raw = lines[index].strip_suffix('\r').unwrap_or(lines[index]);
+            let Some((_, content)) = parse_ordered_item(raw.trim_end()) else {
+                break;
+            };
+            let content_start = content.as_ptr() as usize - raw.as_ptr() as usize;
+            prefixes.push(raw[..content_start].to_string());
+            contents.push(content.to_string());
+            crlf.push(lines[index].ends_with('\r'));
+            index += 1;
+        }
+        let normalized = normalize_ordered_item_punctuation(&contents);
+        for offset in 0..normalized.len() {
+            let suffix = if crlf[offset] { "\r" } else { "" };
+            output.push(format!(
+                "{}{}{suffix}",
+                prefixes[offset], normalized[offset]
+            ));
+        }
+        debug_assert_eq!(output.len(), index, "group beginning at line {first}");
+    }
+    output.join("\n")
 }
 
 /// 把旧版附件语法转换为统一的内部结构：
@@ -444,6 +623,74 @@ pub(crate) fn body_heading_max_level(blocks: &[MarkdownBlock]) -> u8 {
         }
     }
     max_level
+}
+
+#[cfg(test)]
+mod ordered_list_tests {
+    use super::*;
+
+    #[test]
+    fn adjacent_list_becomes_circled_inline_paragraph() {
+        let blocks = parse_markdown(
+            "正文内容：\n1. 第一项，\n1. 第二项。；\n1. 第三项，\n\n1. 独立甲，\n1. 独立乙；",
+        );
+        assert_eq!(
+            blocks[0],
+            MarkdownBlock::Paragraph("正文内容：①第一项；②第二项；③第三项。".into())
+        );
+        assert_eq!(
+            blocks[1],
+            MarkdownBlock::OrderedListItem {
+                number: 1,
+                text: "独立甲。".into(),
+            }
+        );
+        assert_eq!(
+            blocks[2],
+            MarkdownBlock::OrderedListItem {
+                number: 2,
+                text: "独立乙。".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn only_terminal_middle_semicolon_selects_semicolon_style() {
+        let internal = vec!["包括甲；乙，".into(), "最后一项；".into()];
+        assert_eq!(
+            normalize_ordered_item_punctuation(&internal),
+            ["包括甲；乙。", "最后一项。"]
+        );
+
+        let terminal = vec!["第一项。；".into(), "第二项，".into(), "末项；".into()];
+        assert_eq!(
+            normalize_ordered_item_punctuation(&terminal),
+            ["第一项；", "第二项；", "末项。"]
+        );
+    }
+
+    #[test]
+    fn source_normalization_preserves_markers_blank_lines_and_line_ending() {
+        let source =
+            "正文\r\n1. 第一项，\r\n1. 第二项。；\r\n1. 第三项\r\n\r\n3. 另一项,\r\n1. 末项;\r\n";
+        assert_eq!(
+            normalize_ordered_list_punctuation(source),
+            "正文\r\n1. 第一项；\r\n1. 第二项；\r\n1. 第三项。\r\n\r\n3. 另一项。\r\n1. 末项。\r\n"
+        );
+    }
+
+    #[test]
+    fn first_source_number_controls_automatic_numbering() {
+        let blocks = parse_markdown("\n3. 甲。\n1. 乙。");
+        assert!(matches!(
+            &blocks[0],
+            MarkdownBlock::OrderedListItem { number: 3, .. }
+        ));
+        assert!(matches!(
+            &blocks[1],
+            MarkdownBlock::OrderedListItem { number: 4, .. }
+        ));
+    }
 }
 
 // ========== 红头呈批件首页几何 ==========

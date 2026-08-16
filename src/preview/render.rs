@@ -376,6 +376,9 @@ pub(crate) fn content_block(
                 });
             });
         }
+        MarkdownBlock::OrderedListItem { number, text } => {
+            body_block(ui, metrics, &format!("{number}.{text}"), true);
+        }
         MarkdownBlock::Table { rows, aligns } => table_block(ui, metrics, rows, aligns),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
         MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
