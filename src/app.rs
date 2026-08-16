@@ -38,7 +38,7 @@ mod widgets;
 
 pub(crate) use ai_prompts::{AiPromptDraft, AiPromptPicker};
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
-pub(crate) use manuscript_ui::{ArchivePending, ImportPreview, PdfExportDialog};
+pub(crate) use manuscript_ui::{ArchivePending, ImportPreview, PdfExportDialog, ZipPasswordDialog};
 pub(crate) use session::{DraftAction, ExitPrompt};
 pub(crate) use tabs::{NavPage, TabRef};
 pub(crate) use versioning::{
@@ -152,6 +152,10 @@ pub struct GongwenApp {
     manuscript_pdf_export_busy: bool,
     /// 「导出 PDF」选项弹窗；None 表示未打开。
     manuscript_pdf_export: Option<PdfExportDialog>,
+    /// ZIP 导入/导出密码弹窗；所有 ZIP 操作必须先经过这里。
+    manuscript_zip_password: Option<ZipPasswordDialog>,
+    /// 用户明确勾选“记住密码”后加载到内存的密码；不写入 AppConfig。
+    remembered_zip_password: Option<String>,
     manuscript_archive_pending: Option<ArchivePending>,
     manuscript_detail: Option<ManuscriptRecord>,
     manuscript_detail_delete_pdf: Option<i64>,
@@ -338,6 +342,8 @@ impl GongwenApp {
             manuscript_batch_delete_confirm: false,
             manuscript_pdf_export_busy: false,
             manuscript_pdf_export: None,
+            manuscript_zip_password: None,
+            remembered_zip_password: storage::load_remembered_zip_password().ok().flatten(),
             manuscript_archive_pending: None,
             manuscript_detail: None,
             manuscript_detail_delete_pdf: None,

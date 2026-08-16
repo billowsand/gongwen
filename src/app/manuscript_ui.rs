@@ -87,6 +87,45 @@ pub(crate) struct PdfExportDialog {
     compiled: bool,
 }
 
+#[derive(Debug, Clone)]
+enum ZipPasswordPurpose {
+    FilteredExport,
+    SelectedExport,
+    PdfExport(manuscript_io::PdfExportOptions),
+    Import(PathBuf),
+}
+
+impl ZipPasswordPurpose {
+    fn is_import(&self) -> bool {
+        matches!(self, Self::Import(_))
+    }
+}
+
+/// 每次 ZIP 导入/导出都显示的密码弹窗。导出要二次确认并检查强度；导入只验证非空，
+/// 以便兼容由其他工具生成的历史压缩包。
+pub(crate) struct ZipPasswordDialog {
+    purpose: ZipPasswordPurpose,
+    password: String,
+    confirmation: String,
+    remember: bool,
+    show_password: bool,
+    error: Option<String>,
+}
+
+impl ZipPasswordDialog {
+    fn new(purpose: ZipPasswordPurpose, remembered: Option<&str>) -> Self {
+        let password = remembered.unwrap_or_default().to_string();
+        Self {
+            purpose,
+            confirmation: password.clone(),
+            password,
+            remember: remembered.is_some(),
+            show_password: false,
+            error: None,
+        }
+    }
+}
+
 /// 导入 ZIP 的预览状态：清单、勾选、关键词过滤与是否跳过同源记录。
 pub(crate) struct ImportPreview {
     manifest: manuscript_io::Manifest,
@@ -98,6 +137,8 @@ pub(crate) struct ImportPreview {
     vocabulary: Option<manuscript_io::VocabularyFile>,
     /// 是否把包内词库增量合并到本机词库，默认勾选。
     merge_vocabulary: bool,
+    /// 仅在这次预览/确认导入期间驻留内存，不写入稿件或应用配置。
+    password: String,
 }
 
 impl GongwenApp {
@@ -568,7 +609,109 @@ impl GongwenApp {
                     compiled: dialog.compiled,
                 };
                 self.manuscript_pdf_export = None;
-                self.export_selected_manuscript_pdfs(options);
+                self.open_zip_password_dialog(ZipPasswordPurpose::PdfExport(options));
+            }
+            ui.add_space(6.0);
+        }
+
+        if self.manuscript_zip_password.is_some() {
+            let mut submit = false;
+            let mut cancel = false;
+            {
+                let dialog = self.manuscript_zip_password.as_mut().unwrap();
+                ui.group(|ui| {
+                    let importing = dialog.purpose.is_import();
+                    ui.strong(if importing {
+                        "输入 ZIP 密码"
+                    } else {
+                        "设置 ZIP 加密密码"
+                    });
+                    ui.label(if importing {
+                        "必须输入正确密码后才能读取和导入稿件包。"
+                    } else {
+                        "本次导出的 ZIP 将使用 AES-256 加密，所有文件均受密码保护。"
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("密码");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dialog.password)
+                                .password(!dialog.show_password)
+                                .desired_width(260.0),
+                        );
+                    });
+                    if !importing {
+                        ui.horizontal(|ui| {
+                            ui.label("确认");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.confirmation)
+                                    .password(!dialog.show_password)
+                                    .desired_width(260.0),
+                            );
+                        });
+                        ui.weak(
+                            "至少 10 位，并包含大写字母、小写字母、数字、符号或中文中的至少三类；不能使用常见口令、连续或重复字符。",
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut dialog.remember, "记住密码")
+                            .on_hover_text("保存在本机受限权限文件中，下次仍会显示确认窗口");
+                        ui.checkbox(&mut dialog.show_password, "显示密码");
+                    });
+                    if let Some(error) = &dialog.error {
+                        ui.colored_label(warn(), error);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !dialog.password.is_empty(),
+                                theme::icon_text_button(
+                                    if importing {
+                                        theme::Icon::PackageOpen
+                                    } else {
+                                        theme::Icon::Package
+                                    },
+                                    if importing { "解密并预览" } else { "继续导出" },
+                                ),
+                            )
+                            .clicked()
+                        {
+                            submit = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            }
+            if cancel {
+                self.manuscript_zip_password = None;
+            } else if submit {
+                let validation = {
+                    let dialog = self.manuscript_zip_password.as_ref().unwrap();
+                    if dialog.purpose.is_import() {
+                        (!dialog.password.is_empty())
+                            .then_some(())
+                            .ok_or_else(|| anyhow::anyhow!("请输入 ZIP 密码"))
+                    } else if dialog.password != dialog.confirmation {
+                        Err(anyhow::anyhow!("两次输入的密码不一致"))
+                    } else {
+                        manuscript_io::validate_export_password(&dialog.password)
+                    }
+                };
+                match validation {
+                    Ok(()) => {
+                        let dialog = self.manuscript_zip_password.take().unwrap();
+                        self.run_zip_password_action(
+                            dialog.purpose,
+                            dialog.password,
+                            dialog.remember,
+                        );
+                    }
+                    Err(error) => {
+                        self.manuscript_zip_password.as_mut().unwrap().error =
+                            Some(format!("{error:#}"));
+                    }
+                }
             }
             ui.add_space(6.0);
         }
@@ -1847,11 +1990,63 @@ impl GongwenApp {
         }
     }
 
+    fn open_zip_password_dialog(&mut self, purpose: ZipPasswordPurpose) {
+        self.manuscript_zip_password = Some(ZipPasswordDialog::new(
+            purpose,
+            self.remembered_zip_password.as_deref(),
+        ));
+    }
+
+    fn run_zip_password_action(
+        &mut self,
+        purpose: ZipPasswordPurpose,
+        password: String,
+        remember: bool,
+    ) {
+        let retry_import = match &purpose {
+            ZipPasswordPurpose::Import(path) => Some(path.clone()),
+            _ => None,
+        };
+        let completed = match purpose {
+            ZipPasswordPurpose::FilteredExport => self.perform_export_manuscripts_zip(&password),
+            ZipPasswordPurpose::SelectedExport => {
+                self.perform_export_selected_manuscripts_zip(&password)
+            }
+            ZipPasswordPurpose::PdfExport(options) => {
+                self.perform_export_selected_manuscript_pdfs(options, &password)
+            }
+            ZipPasswordPurpose::Import(path) => self.prepare_import_manuscript(path, &password),
+        };
+        if completed {
+            self.update_remembered_zip_password(remember.then_some(password));
+        } else if let Some(path) = retry_import {
+            let mut dialog = ZipPasswordDialog::new(ZipPasswordPurpose::Import(path), None);
+            dialog.password = password;
+            dialog.remember = remember;
+            dialog.error = Some(self.status.clone());
+            self.manuscript_zip_password = Some(dialog);
+        }
+    }
+
+    fn update_remembered_zip_password(&mut self, password: Option<String>) {
+        match storage::save_remembered_zip_password(password.as_deref()) {
+            Ok(()) => self.remembered_zip_password = password,
+            Err(error) => {
+                self.status
+                    .push_str(&format!(" 但未能更新记住的密码：{error:#}"));
+            }
+        }
+    }
+
     pub(crate) fn export_manuscripts_zip(&mut self) {
-        let Some(store) = self.manuscript_store.as_mut() else {
+        if self.manuscript_store.is_none() {
             self.status = "稿件库不可用，无法导出。".into();
             return;
-        };
+        }
+        self.open_zip_password_dialog(ZipPasswordPurpose::FilteredExport);
+    }
+
+    fn perform_export_manuscripts_zip(&mut self, password: &str) -> bool {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("公文稿件-{stamp}.zip");
         let Some(path) = rfd::FileDialog::new()
@@ -1859,11 +2054,18 @@ impl GongwenApp {
             .set_file_name(&default_name)
             .save_file()
         else {
-            return;
+            return false;
         };
         let filter = self.manuscript_filter.clone();
-        let result: anyhow::Result<manuscript_io::ExportSummary> =
-            manuscript_io::export_zip(store, &filter, &self.config.vocabulary, &path);
+        let result: anyhow::Result<manuscript_io::ExportSummary> = match self
+            .manuscript_store
+            .as_mut()
+        {
+            Some(store) => {
+                manuscript_io::export_zip(store, &filter, &self.config.vocabulary, &path, password)
+            }
+            None => Err(anyhow::anyhow!("稿件库不可用")),
+        };
         match result {
             Ok(summary) => {
                 self.status = format!(
@@ -1872,8 +2074,12 @@ impl GongwenApp {
                     summary.pdfs,
                     path.display()
                 );
+                true
             }
-            Err(error) => self.status = format!("导出失败：{error:#}"),
+            Err(error) => {
+                self.status = format!("导出失败：{error:#}");
+                false
+            }
         }
     }
 
@@ -1882,10 +2088,14 @@ impl GongwenApp {
             self.status = "请先勾选要导出的稿件。".into();
             return;
         }
-        let Some(store) = self.manuscript_store.as_mut() else {
+        if self.manuscript_store.is_none() {
             self.status = "稿件库不可用，无法导出。".into();
             return;
-        };
+        }
+        self.open_zip_password_dialog(ZipPasswordPurpose::SelectedExport);
+    }
+
+    fn perform_export_selected_manuscripts_zip(&mut self, password: &str) -> bool {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("所选公文稿件-{stamp}.zip");
         let Some(path) = rfd::FileDialog::new()
@@ -1893,10 +2103,20 @@ impl GongwenApp {
             .set_file_name(&default_name)
             .save_file()
         else {
-            return;
+            return false;
         };
         let ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
-        match manuscript_io::export_zip_selected(store, &ids, &self.config.vocabulary, &path) {
+        let result = match self.manuscript_store.as_mut() {
+            Some(store) => manuscript_io::export_zip_selected(
+                store,
+                &ids,
+                &self.config.vocabulary,
+                &path,
+                password,
+            ),
+            None => Err(anyhow::anyhow!("稿件库不可用")),
+        };
+        match result {
             Ok(summary) => {
                 self.status = format!(
                     "已导出所选 {} 篇稿件、{} 个 PDF 附件到 {}。",
@@ -1904,27 +2124,29 @@ impl GongwenApp {
                     summary.pdfs,
                     path.display()
                 );
+                true
             }
-            Err(error) => self.status = format!("导出所选稿件失败：{error:#}"),
+            Err(error) => {
+                self.status = format!("导出所选稿件失败：{error:#}");
+                false
+            }
         }
     }
 
     /// 把勾选的稿件按选项导出为 PDF 集合并打包 zip，后台线程执行避免卡界面。
     /// 盖章件直接取附件；非盖章件编译 TeX 生成，缺引擎或失败时该篇记入汇总。
-    pub(crate) fn export_selected_manuscript_pdfs(
+    fn perform_export_selected_manuscript_pdfs(
         &mut self,
         options: manuscript_io::PdfExportOptions,
-    ) {
+        password: &str,
+    ) -> bool {
         if self.manuscript_selected.is_empty() {
             self.status = "请先勾选要导出的稿件。".into();
-            return;
-        }
-        if self.manuscript_pdf_export_busy {
-            return;
+            return false;
         }
         let Some(db_path) = storage::manuscript_db_path().ok() else {
             self.status = "稿件库路径不可用，无法导出 PDF。".into();
-            return;
+            return false;
         };
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("所选公文PDF-{stamp}.zip");
@@ -1933,11 +2155,12 @@ impl GongwenApp {
             .set_file_name(&default_name)
             .save_file()
         else {
-            return;
+            return false;
         };
         let ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
+        let password = password.to_string();
         self.manuscript_pdf_export_busy = true;
         self.status = format!("正在导出 {} 篇稿件的 PDF…", ids.len());
         let tx = self.sender.clone();
@@ -1952,6 +2175,7 @@ impl GongwenApp {
                     &vocabulary,
                     &fonts,
                     &path,
+                    &password,
                     |_| {},
                 )
             })();
@@ -1960,6 +2184,7 @@ impl GongwenApp {
                 result: result.map_err(|error| format!("{error:#}")),
             });
         });
+        true
     }
 
     pub(crate) fn start_import_manuscript(&mut self) {
@@ -1969,10 +2194,14 @@ impl GongwenApp {
         else {
             return;
         };
-        match manuscript_io::read_manifest(&path) {
+        self.open_zip_password_dialog(ZipPasswordPurpose::Import(path));
+    }
+
+    fn prepare_import_manuscript(&mut self, path: PathBuf, password: &str) -> bool {
+        match manuscript_io::read_manifest(&path, password) {
             Ok(manifest) => {
                 // 词库读取失败不阻断稿件导入：损坏或版本不支持的词库按“不带词库”处理。
-                let vocabulary = match manuscript_io::read_vocabulary(&path) {
+                let vocabulary = match manuscript_io::read_vocabulary(&path, password) {
                     Ok(vocabulary) => vocabulary,
                     Err(error) => {
                         self.status = format!("稿件包词库读取失败（不影响稿件导入）：{error:#}");
@@ -1988,10 +2217,15 @@ impl GongwenApp {
                     skip_existing: true,
                     vocabulary,
                     merge_vocabulary: true,
+                    password: password.to_string(),
                 });
                 self.status = "已读取稿件包，请预览后确认导入。".into();
+                true
             }
-            Err(error) => self.status = format!("读取稿件包失败：{error:#}"),
+            Err(error) => {
+                self.status = format!("读取稿件包失败：{error:#}");
+                false
+            }
         }
     }
 
@@ -2008,7 +2242,7 @@ impl GongwenApp {
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            manuscript_io::import_zip(store, &preview.zip_path, &opts)
+            manuscript_io::import_zip(store, &preview.zip_path, &opts, &preview.password)
         })();
         match result {
             Ok(summary) => {

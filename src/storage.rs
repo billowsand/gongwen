@@ -3,6 +3,9 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use std::{fs, path::PathBuf};
 
+const ZIP_PASSWORD_FILE: &str = ".zip-password";
+const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
+
 pub fn config_dir() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("cn", "LocalTools", "GongwenAssistant")
         .context("无法确定用户配置目录")?;
@@ -16,6 +19,63 @@ pub fn config_path() -> Result<PathBuf> {
 /// 稿件库 SQLite 文件，与 config.json 同目录，仅保存在本机。
 pub fn manuscript_db_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("manuscripts.db"))
+}
+
+/// 读取用户明确选择“记住”的 ZIP 密码。密码单独存放，避免进入 config.json、
+/// 配置版本历史或稿件导出包。Unix 下写入时把权限限制为仅当前用户可读写。
+pub fn load_remembered_zip_password() -> Result<Option<String>> {
+    let path = config_dir()?.join(ZIP_PASSWORD_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let metadata = fs::metadata(&path)?;
+    if metadata.len() > MAX_REMEMBERED_PASSWORD_BYTES {
+        anyhow::bail!("记住的 ZIP 密码文件异常，已拒绝读取");
+    }
+    let password = fs::read_to_string(&path)
+        .with_context(|| format!("读取记住的 ZIP 密码失败：{}", path.display()))?;
+    Ok((!password.is_empty()).then_some(password))
+}
+
+pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
+    let path = config_dir()?.join(ZIP_PASSWORD_FILE);
+    if let Some(password) = password {
+        let parent = path.parent().context("ZIP 密码路径缺少父目录")?;
+        fs::create_dir_all(parent)?;
+        let temp = path.with_extension("password.tmp");
+        write_private_file(&temp, password.as_bytes())?;
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        fs::rename(&temp, &path)?;
+    } else if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    fs::write(path, bytes)?;
+    Ok(())
 }
 
 pub fn load() -> Result<AppConfig> {

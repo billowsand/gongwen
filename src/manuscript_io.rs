@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use zip::read::ZipArchive;
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipWriter};
+use zip::{AesMode, CompressionMethod, ZipWriter};
 
 pub const MANIFEST_SCHEMA: u32 = 1;
 const MANIFEST_NAME: &str = "manifests.json";
@@ -26,6 +26,78 @@ const VOCABULARY_NAME: &str = "vocabulary.json";
 const VOCABULARY_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// 单个 PDF 附件上限（约 100 MB），超限跳过，避免导入超大文件撑爆库。
 const MAX_PDF_BYTES: u64 = 100 * 1024 * 1024;
+
+/// 导出密码规则：不少于 10 个字符，且至少覆盖三类字符；同时拒绝常见口令、
+/// 连续字符和长重复字符。导入不调用此校验，以兼容外部工具生成的历史弱密码包。
+pub fn validate_export_password(password: &str) -> Result<()> {
+    if password.trim() != password {
+        bail!("密码首尾不能包含空格");
+    }
+    let chars = password.chars().collect::<Vec<_>>();
+    if chars.len() < 10 {
+        bail!("密码至少需要 10 个字符");
+    }
+    if chars.len() > 128 {
+        bail!("密码不能超过 128 个字符");
+    }
+
+    let categories = [
+        chars.iter().any(|ch| ch.is_ascii_lowercase()),
+        chars.iter().any(|ch| ch.is_ascii_uppercase()),
+        chars.iter().any(|ch| ch.is_numeric()),
+        chars.iter().any(|ch| !ch.is_alphanumeric()),
+        chars.iter().any(|ch| ch.is_alphabetic() && !ch.is_ascii()),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if categories < 3 {
+        bail!("密码需包含大写字母、小写字母、数字、符号或中文中的至少三类");
+    }
+
+    let lower = password.to_lowercase();
+    const COMMON: &[&str] = &[
+        "password",
+        "qwerty",
+        "admin",
+        "letmein",
+        "iloveyou",
+        "123456",
+        "111111",
+        "abcdef",
+        "公文助手",
+    ];
+    if COMMON.iter().any(|word| lower.contains(word)) {
+        bail!("密码包含常见口令或简单序列，请换一个更复杂的密码");
+    }
+    if has_ascii_sequence(&lower) {
+        bail!("密码不能包含 4 位及以上连续字母或数字");
+    }
+    if chars
+        .windows(4)
+        .any(|window| window.iter().all(|ch| *ch == window[0]))
+    {
+        bail!("密码不能包含 4 个及以上连续相同字符");
+    }
+    Ok(())
+}
+
+fn has_ascii_sequence(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.windows(4).any(|window| {
+        window.iter().all(u8::is_ascii_alphanumeric)
+            && (window.windows(2).all(|pair| pair[1] == pair[0] + 1)
+                || window.windows(2).all(|pair| pair[0] == pair[1] + 1))
+    })
+}
+
+fn encrypted_options(password: &str) -> zip::write::FileOptions<'_, ()> {
+    SimpleFileOptions::default().with_aes_encryption(AesMode::Aes256, password)
+}
+
+fn encrypted_stored_options(password: &str) -> zip::write::FileOptions<'_, ()> {
+    encrypted_options(password).compression_method(CompressionMethod::Stored)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestPdf {
@@ -118,13 +190,15 @@ pub fn export_zip(
     filter: &ManuscriptFilter,
     vocabulary: &[VocabularyEntry],
     zip_path: &Path,
+    password: &str,
 ) -> Result<ExportSummary> {
+    validate_export_password(password)?;
     let rows = store.list(filter)?;
     if rows.is_empty() {
         bail!("没有符合过滤条件的稿件");
     }
     let ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
-    export_zip_ids(store, &ids, vocabulary, zip_path)
+    export_zip_ids(store, &ids, vocabulary, zip_path, password)
 }
 
 /// 只导出稿件管理页明确勾选的记录。
@@ -133,8 +207,10 @@ pub fn export_zip_selected(
     ids: &[i64],
     vocabulary: &[VocabularyEntry],
     zip_path: &Path,
+    password: &str,
 ) -> Result<ExportSummary> {
-    export_zip_ids(store, ids, vocabulary, zip_path)
+    validate_export_password(password)?;
+    export_zip_ids(store, ids, vocabulary, zip_path, password)
 }
 
 fn export_zip_ids(
@@ -142,6 +218,7 @@ fn export_zip_ids(
     ids: &[i64],
     vocabulary: &[VocabularyEntry],
     zip_path: &Path,
+    password: &str,
 ) -> Result<ExportSummary> {
     if ids.is_empty() {
         bail!("没有选中要导出的稿件");
@@ -199,7 +276,7 @@ fn export_zip_ids(
     let file = File::create(zip_path)
         .with_context(|| format!("无法创建导出文件 {}", zip_path.display()))?;
     let mut zip = ZipWriter::new(file);
-    zip.start_file(MANIFEST_NAME, SimpleFileOptions::default())?;
+    zip.start_file(MANIFEST_NAME, encrypted_options(password))?;
     zip.write_all(
         serde_json::to_string_pretty(&manifest)
             .context("序列化清单失败")?
@@ -212,7 +289,7 @@ fn export_zip_ids(
             exported_at: Local::now().to_rfc3339(),
             entries: vocabulary.to_vec(),
         };
-        zip.start_file(VOCABULARY_NAME, SimpleFileOptions::default())?;
+        zip.start_file(VOCABULARY_NAME, encrypted_options(password))?;
         zip.write_all(
             serde_json::to_string_pretty(&vocab_file)
                 .context("序列化词库失败")?
@@ -220,7 +297,7 @@ fn export_zip_ids(
         )?;
     }
     // PDF 本身已压缩，用 Stored 避免二次压缩浪费时间；图片同理。
-    let stored_options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let stored_options = encrypted_stored_options(password);
     for (path, bytes) in &pdf_blobs {
         zip.start_file(path.clone(), stored_options)?;
         zip.write_all(bytes)?;
@@ -244,6 +321,7 @@ fn export_zip_ids(
 /// 文件按稿件导出命名主干（不含分钟级时间戳）命名，盖章件在主干后追加
 /// `（盖章）`（同一稿件多个盖章附件依次 `（盖章2）`、`（盖章3）`…）。逐篇
 /// 失败不阻断整批，结果汇总到 `PdfExportSummary`；`progress` 用于回报进度。
+#[allow(clippy::too_many_arguments)] // 数据源、导出选项、加密目标和进度回调均是独立职责。
 pub fn export_selected_pdfs(
     store: &mut ManuscriptStore,
     ids: &[i64],
@@ -251,8 +329,10 @@ pub fn export_selected_pdfs(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     zip_path: &Path,
+    password: &str,
     mut progress: impl FnMut(&str),
 ) -> Result<PdfExportSummary> {
+    validate_export_password(password)?;
     if ids.is_empty() {
         bail!("没有选中要导出的稿件");
     }
@@ -267,8 +347,7 @@ pub fn export_selected_pdfs(
             .with_context(|| format!("无法创建导出文件 {}", zip_path.display()))?;
         let mut zip = ZipWriter::new(file);
         // PDF 本身已压缩，用 Stored 避免二次压缩浪费时间（与整包导出一致）。
-        let stored_options =
-            SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let stored_options = encrypted_stored_options(password);
         let mut used_names = std::collections::HashSet::new();
         let mut summary = PdfExportSummary::default();
         let display = UnitDisplay::new(vocabulary);
@@ -399,13 +478,17 @@ fn collect_image_entries(base: &Path, records: &[ManifestRecord]) -> Vec<(String
 }
 
 /// 只读 zip + 解析清单，不落库（导入预览用）。
-pub fn read_manifest(zip_path: &Path) -> Result<Manifest> {
+pub fn read_manifest(zip_path: &Path, password: &str) -> Result<Manifest> {
+    if password.is_empty() {
+        bail!("请输入 ZIP 密码");
+    }
     let file =
         File::open(zip_path).with_context(|| format!("无法打开导入文件 {}", zip_path.display()))?;
     let mut archive = ZipArchive::new(file).context("文件不是有效的 ZIP")?;
     let mut reader = archive
-        .by_name(MANIFEST_NAME)
-        .context("ZIP 中缺少 manifests.json")?;
+        .by_name_decrypt(MANIFEST_NAME, password.as_bytes())
+        .map_err(map_zip_password_error)
+        .context("无法读取 manifests.json")?;
     let mut raw = String::new();
     reader.read_to_string(&mut raw)?;
     let manifest: Manifest = serde_json::from_str(&raw).context("manifests.json 格式无效")?;
@@ -421,14 +504,17 @@ pub fn read_manifest(zip_path: &Path) -> Result<Manifest> {
 
 /// 只读 zip 中的标准词库。可选条目：旧包或未附带词库的包返回 `Ok(None)`，不阻断稿件导入。
 /// 只有 `vocabulary.json` 缺失时视为无词库；文件损坏或版本不支持则报错。
-pub fn read_vocabulary(zip_path: &Path) -> Result<Option<VocabularyFile>> {
+pub fn read_vocabulary(zip_path: &Path, password: &str) -> Result<Option<VocabularyFile>> {
+    if password.is_empty() {
+        bail!("请输入 ZIP 密码");
+    }
     let file =
         File::open(zip_path).with_context(|| format!("无法打开导入文件 {}", zip_path.display()))?;
     let mut archive = ZipArchive::new(file).context("文件不是有效的 ZIP")?;
-    let mut reader = match archive.by_name(VOCABULARY_NAME) {
+    let mut reader = match archive.by_name_decrypt(VOCABULARY_NAME, password.as_bytes()) {
         Ok(reader) => reader,
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(map_zip_password_error(error).into()),
     };
     if reader.size() > VOCABULARY_MAX_BYTES {
         bail!(
@@ -466,8 +552,9 @@ pub fn import_zip(
     store: &mut ManuscriptStore,
     zip_path: &Path,
     opts: &ImportOptions,
+    password: &str,
 ) -> Result<ImportSummary> {
-    let manifest = read_manifest(zip_path)?;
+    let manifest = read_manifest(zip_path, password)?;
     if opts.selected.len() != manifest.records.len() {
         bail!("勾选状态与清单记录数不一致，请重新预览");
     }
@@ -476,7 +563,7 @@ pub fn import_zip(
     let mut archive = ZipArchive::new(file)?;
     // 恢复图片资源：图片是跨稿件共享目录，全量解压；旧包无 images/ 条目时无操作。
     if let Ok(image_dir) = crate::images::image_dir() {
-        restore_images(&mut archive, &image_dir)?;
+        restore_images(&mut archive, &image_dir, password)?;
     }
     let existing = store.source_ids()?;
     for (index, record) in manifest.records.iter().enumerate() {
@@ -502,7 +589,7 @@ pub fn import_zip(
         )?;
         summary.imported += 1;
         for pdf in &record.pdfs {
-            let Ok(mut entry) = archive.by_name(&pdf.path) else {
+            let Ok(mut entry) = archive.by_name_decrypt(&pdf.path, password.as_bytes()) else {
                 summary.skipped_pdfs += 1;
                 continue;
             };
@@ -557,7 +644,7 @@ fn unique_zip_name(used: &mut std::collections::HashSet<String>, stem: &str, ext
 
 /// 从 zip 恢复 `images/` 条目到目标目录。条目名经过净化，防止篡改的 zip
 /// 用路径穿越覆盖任意文件；返回恢复的文件数。
-fn restore_images(archive: &mut ZipArchive<File>, target: &Path) -> Result<usize> {
+fn restore_images(archive: &mut ZipArchive<File>, target: &Path, password: &str) -> Result<usize> {
     std::fs::create_dir_all(target)
         .with_context(|| format!("无法创建图片目录 {}", target.display()))?;
     let names: Vec<String> = archive
@@ -569,7 +656,9 @@ fn restore_images(archive: &mut ZipArchive<File>, target: &Path) -> Result<usize
     for name in names {
         let file_name = name.strip_prefix("images/").unwrap_or(&name);
         let safe = sanitize_entry_name(file_name);
-        let mut entry = archive.by_name(&name)?;
+        let mut entry = archive
+            .by_name_decrypt(&name, password.as_bytes())
+            .map_err(map_zip_password_error)?;
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes)?;
         let dest = target.join(&safe);
@@ -585,11 +674,24 @@ fn restore_images(archive: &mut ZipArchive<File>, target: &Path) -> Result<usize
     Ok(count)
 }
 
+fn map_zip_password_error(error: zip::result::ZipError) -> zip::result::ZipError {
+    use zip::result::ZipError;
+    match error {
+        ZipError::InvalidPassword => ZipError::InvalidArchive("ZIP 密码错误".into()),
+        ZipError::UnsupportedArchive(message) if message == ZipError::PASSWORD_REQUIRED => {
+            ZipError::InvalidArchive("ZIP 密码错误或文件未正确加密".into())
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manuscript::{ManuscriptFilter, ManuscriptStore, ManuscriptUpdate};
     use crate::models::{TemplateProfile, VocabularyCategory};
+
+    const TEST_PASSWORD: &str = "Jade!River7Cloud";
 
     fn sample_snapshot(kind: TemplateKind) -> DraftInput {
         DraftInput {
@@ -674,7 +776,9 @@ mod tests {
     fn read_zip_entry(zip_path: &Path, name: &str) -> String {
         let file = File::open(zip_path).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
-        let mut entry = archive.by_name(name).unwrap();
+        let mut entry = archive
+            .by_name_decrypt(name, TEST_PASSWORD.as_bytes())
+            .unwrap();
         let mut text = String::new();
         entry.read_to_string(&mut text).unwrap();
         text
@@ -697,6 +801,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &zip_path,
+            TEST_PASSWORD,
             |_| {},
         )
         .unwrap();
@@ -763,6 +868,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &zip_path,
+            TEST_PASSWORD,
             |_| {},
         )
         .unwrap();
@@ -796,6 +902,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &zip_path,
+            TEST_PASSWORD,
             |_| {},
         )
         .unwrap_err();
@@ -819,6 +926,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &zip_path,
+            TEST_PASSWORD,
             |_| {},
         )
         .unwrap();
@@ -842,13 +950,19 @@ mod tests {
 
         let mut source = mem_store();
         let id = seed(&mut source);
-        let summary =
-            export_zip(&mut source, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
+        let summary = export_zip(
+            &mut source,
+            &ManuscriptFilter::default(),
+            &[],
+            &zip_path,
+            TEST_PASSWORD,
+        )
+        .unwrap();
         assert_eq!(summary.records, 1);
         assert_eq!(summary.pdfs, 2);
 
         // 导出后源库记录与清单记录 id 一致。
-        let manifest = read_manifest(&zip_path).unwrap();
+        let manifest = read_manifest(&zip_path, TEST_PASSWORD).unwrap();
         assert_eq!(manifest.schema, MANIFEST_SCHEMA);
         assert_eq!(manifest.records.len(), 1);
         assert_eq!(manifest.records[0].id, id);
@@ -861,7 +975,7 @@ mod tests {
             skip_existing_by_id: true,
             selected: vec![true],
         };
-        let result = import_zip(&mut dest, &zip_path, &opts).unwrap();
+        let result = import_zip(&mut dest, &zip_path, &opts, TEST_PASSWORD).unwrap();
         assert_eq!(result.imported, 1);
         assert_eq!(result.pdfs_imported, 2);
         assert_eq!(result.skipped_existing, 0);
@@ -891,6 +1005,54 @@ mod tests {
     }
 
     #[test]
+    fn exported_zip_requires_the_correct_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("加密稿件.zip");
+        let mut store = mem_store();
+        seed(&mut store);
+        export_zip(
+            &mut store,
+            &ManuscriptFilter::default(),
+            &sample_vocabulary(),
+            &zip_path,
+            TEST_PASSWORD,
+        )
+        .unwrap();
+
+        let file = File::open(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        assert!(
+            (0..archive.len()).all(|index| archive.by_index_raw(index).unwrap().encrypted()),
+            "导出的每一个 ZIP 条目都必须加密"
+        );
+        assert!(archive.by_name(MANIFEST_NAME).is_err());
+        drop(archive);
+
+        let error = read_manifest(&zip_path, "Wrong!Key8Stone").unwrap_err();
+        assert!(format!("{error:#}").contains("密码错误"), "{error:#}");
+        assert!(read_manifest(&zip_path, TEST_PASSWORD).is_ok());
+    }
+
+    #[test]
+    fn export_password_strength_is_enforced() {
+        assert!(validate_export_password(TEST_PASSWORD).is_ok());
+        for weak in [
+            "Short!7A",
+            "alllowercase7",
+            "Password!7Cloud",
+            "Safe!1234Cloud",
+            "Safe!7777Cloud",
+            " Safe!River7Cloud",
+        ] {
+            assert!(
+                validate_export_password(weak).is_err(),
+                "弱密码应被拒绝：{weak}"
+            );
+        }
+        assert!(validate_export_password("安全!公文7云端备份").is_ok());
+    }
+
+    #[test]
     fn vocabulary_export_import_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let zip_path = dir.path().join("稿件.zip");
@@ -901,10 +1063,13 @@ mod tests {
             &ManuscriptFilter::default(),
             &sample_vocabulary(),
             &zip_path,
+            TEST_PASSWORD,
         )
         .unwrap();
 
-        let read = read_vocabulary(&zip_path).unwrap().expect("包内应带词库");
+        let read = read_vocabulary(&zip_path, TEST_PASSWORD)
+            .unwrap()
+            .expect("包内应带词库");
         assert_eq!(read.schema, VOCABULARY_SCHEMA);
         assert_eq!(read.entries.len(), 2);
         let unit = read
@@ -932,8 +1097,15 @@ mod tests {
         let zip_path = dir.path().join("稿件.zip");
         let mut store = mem_store();
         seed(&mut store);
-        export_zip(&mut store, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
-        assert!(read_vocabulary(&zip_path).unwrap().is_none());
+        export_zip(
+            &mut store,
+            &ManuscriptFilter::default(),
+            &[],
+            &zip_path,
+            TEST_PASSWORD,
+        )
+        .unwrap();
+        assert!(read_vocabulary(&zip_path, TEST_PASSWORD).unwrap().is_none());
     }
 
     #[test]
@@ -952,7 +1124,7 @@ mod tests {
         zip.write_all(serde_json::to_string_pretty(&fake).unwrap().as_bytes())
             .unwrap();
         zip.finish().unwrap();
-        assert!(read_vocabulary(&zip_path).is_err());
+        assert!(read_vocabulary(&zip_path, TEST_PASSWORD).is_err());
     }
 
     #[test]
@@ -966,7 +1138,7 @@ mod tests {
         let blob = vec![b'x'; (VOCABULARY_MAX_BYTES + 1) as usize];
         zip.write_all(&blob).unwrap();
         zip.finish().unwrap();
-        let error = read_vocabulary(&zip_path).unwrap_err();
+        let error = read_vocabulary(&zip_path, TEST_PASSWORD).unwrap_err();
         assert!(format!("{error:#}").contains("过大"));
     }
 
@@ -1027,7 +1199,7 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let file = File::open(&zip_path).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
-        let count = restore_images(&mut archive, target.path()).unwrap();
+        let count = restore_images(&mut archive, target.path(), TEST_PASSWORD).unwrap();
         assert_eq!(count, 2);
         assert_eq!(
             std::fs::read(target.path().join("a.png")).unwrap(),
@@ -1041,7 +1213,10 @@ mod tests {
         // 再次恢复同一包：内容一致时跳过，不产生新写入，计数不变。
         let file = File::open(&zip_path).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
-        assert_eq!(restore_images(&mut archive, target.path()).unwrap(), 2);
+        assert_eq!(
+            restore_images(&mut archive, target.path(), TEST_PASSWORD).unwrap(),
+            2
+        );
         assert_eq!(
             std::fs::read(target.path().join("a.png")).unwrap(),
             b"png-a"
@@ -1054,15 +1229,22 @@ mod tests {
         let zip_path = dir.path().join("稿件.zip");
         let mut source = mem_store();
         seed(&mut source);
-        export_zip(&mut source, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
+        export_zip(
+            &mut source,
+            &ManuscriptFilter::default(),
+            &[],
+            &zip_path,
+            TEST_PASSWORD,
+        )
+        .unwrap();
 
         let mut dest = mem_store();
         let opts = ImportOptions {
             skip_existing_by_id: true,
             selected: vec![true],
         };
-        import_zip(&mut dest, &zip_path, &opts).unwrap();
-        let second = import_zip(&mut dest, &zip_path, &opts).unwrap();
+        import_zip(&mut dest, &zip_path, &opts, TEST_PASSWORD).unwrap();
+        let second = import_zip(&mut dest, &zip_path, &opts, TEST_PASSWORD).unwrap();
         assert_eq!(second.imported, 0);
         assert_eq!(second.skipped_existing, 1);
         assert_eq!(dest.list(&ManuscriptFilter::default()).unwrap().len(), 1);
@@ -1074,14 +1256,21 @@ mod tests {
         let zip_path = dir.path().join("稿件.zip");
         let mut source = mem_store();
         seed(&mut source);
-        export_zip(&mut source, &ManuscriptFilter::default(), &[], &zip_path).unwrap();
+        export_zip(
+            &mut source,
+            &ManuscriptFilter::default(),
+            &[],
+            &zip_path,
+            TEST_PASSWORD,
+        )
+        .unwrap();
 
         let mut dest = mem_store();
         let opts = ImportOptions {
             skip_existing_by_id: true,
             selected: vec![false],
         };
-        let result = import_zip(&mut dest, &zip_path, &opts).unwrap();
+        let result = import_zip(&mut dest, &zip_path, &opts, TEST_PASSWORD).unwrap();
         assert_eq!(result.imported, 0);
         assert!(dest.list(&ManuscriptFilter::default()).unwrap().is_empty());
     }
@@ -1114,9 +1303,10 @@ mod tests {
             )
             .unwrap();
 
-        let summary = export_zip_selected(&mut store, &[second], &[], &zip_path).unwrap();
+        let summary =
+            export_zip_selected(&mut store, &[second], &[], &zip_path, TEST_PASSWORD).unwrap();
         assert_eq!(summary.records, 1);
-        let manifest = read_manifest(&zip_path).unwrap();
+        let manifest = read_manifest(&zip_path, TEST_PASSWORD).unwrap();
         assert_eq!(manifest.records.len(), 1);
         assert_eq!(manifest.records[0].id, second);
         assert_ne!(manifest.records[0].id, first);
@@ -1144,7 +1334,7 @@ mod tests {
             kind: Some(TemplateKind::MeetingAgenda),
             ..Default::default()
         };
-        assert!(export_zip(&mut store, &filter, &[], &zip_path).is_err());
+        assert!(export_zip(&mut store, &filter, &[], &zip_path, TEST_PASSWORD).is_err());
         assert!(!zip_path.exists());
     }
 
@@ -1164,7 +1354,7 @@ mod tests {
         zip.write_all(serde_json::to_string_pretty(&fake).unwrap().as_bytes())
             .unwrap();
         zip.finish().unwrap();
-        assert!(read_manifest(&zip_path).is_err());
+        assert!(read_manifest(&zip_path, TEST_PASSWORD).is_err());
     }
 
     #[test]
