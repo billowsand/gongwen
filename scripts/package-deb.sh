@@ -30,6 +30,10 @@ libxinerama1, libxext6, libxi6, libxfixes3, libxdamage1, libxcomposite1, \
 libwayland-client0, libwayland-cursor0, libwayland-egl1, libegl1, libgl1, \
 libglx0, libfontconfig1, libfreetype6, libdbus-1-3, zlib1g"
 
+# 打印走 CUPS 的 lp。列为 Recommends 而不是 Depends：apt 默认会装上，但缺了
+# 也只是打印按钮置灰，不该拦住整个应用的安装。
+RECOMMENDS="cups-client"
+
 if [ ! -x "$STAGING/gongwen-assistant" ]; then
     echo "error: staging binary not found or not executable: $STAGING/gongwen-assistant" >&2
     exit 1
@@ -94,6 +98,7 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: billowsand <billowsand@users.noreply.github.com>
 Depends: $DEPENDS
+Recommends: $RECOMMENDS
 Installed-Size: $INSTALLED_SIZE
 Description: 离线公文写作助手 (offline official-document writing assistant)
  公文助手是一个基于 Rust、egui 与本地模型服务（LM Studio / Ollama 等）的

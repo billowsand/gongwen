@@ -27,6 +27,8 @@ pub(crate) type PdfKey = u64;
 const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 4.0;
 const ZOOM_STEP: f32 = 0.25;
+/// 本机有没有打印能力。探测要扫一遍 PATH，不能每帧都做，进程内只算一次。
+static PRINTING_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// 单页光栅化宽度上限。再往上收益全被显存吃掉：2400px 宽的 A4 单页纹理已经
 /// 33MiB，8192px 是 380MiB。超出部分交给 GPU 放大采样更划算。
 const MAX_RENDER_WIDTH: u16 = 2400;
@@ -70,6 +72,8 @@ struct PdfWant {
 pub(crate) enum PdfAction {
     OpenExternal(PathBuf),
     Reveal(PathBuf),
+    /// 送默认打印机打一份。多份带不同份号的成品由导出阶段生成，不走打印机份数。
+    Print(PathBuf),
 }
 
 /// 一页的纹理槽位。
@@ -328,6 +332,22 @@ impl PdfSession {
             }
 
             ui.separator();
+            // 打印能力每帧探测一次代价太高（要扫 PATH），进程内只算一次。
+            let can_print = *PRINTING_AVAILABLE.get_or_init(crate::app::printing_available);
+            let print_button = ui.add_enabled(
+                can_print,
+                theme::icon_text_button(theme::Icon::Print, "打印"),
+            );
+            let print_button = if can_print {
+                print_button.on_hover_text("送默认打印机打印一份")
+            } else {
+                print_button
+                    .on_disabled_hover_text("未检测到打印服务，请用「系统打开」后从阅读器打印")
+            };
+            if print_button.clicked() {
+                actions.push(PdfAction::Print(self.path.clone()));
+            }
+
             if ui
                 .add(theme::icon_text_button(theme::Icon::Open, "系统打开"))
                 .on_hover_text("遇到复杂或加密 PDF 时使用系统程序打开")

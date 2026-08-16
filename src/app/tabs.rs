@@ -4,7 +4,7 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use crate::app::{
-    DraftAction, GongwenApp, VersionDiffState, VersionScope, open_in_os, reveal_in_os,
+    DraftAction, GongwenApp, VersionDiffState, VersionScope, open_in_os, print_in_os, reveal_in_os,
 };
 use crate::diff_view::DiffViewState;
 use crate::draft_page::{DocKey, DraftPage, DraftSession};
@@ -186,6 +186,12 @@ impl GongwenApp {
                 PdfViewerAction::Reveal(path) => match reveal_in_os(&path) {
                     Ok(()) => self.status = format!("已定位 {}。", path.display()),
                     Err(error) => self.status = format!("定位 PDF 失败：{error}"),
+                },
+                PdfViewerAction::Print(path) => match print_in_os(&path) {
+                    Ok(()) => {
+                        self.status = format!("已送打印机：{}。", path.display());
+                    }
+                    Err(error) => self.status = format!("打印失败：{error}"),
                 },
             }
         }

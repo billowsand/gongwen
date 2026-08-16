@@ -974,6 +974,109 @@ pub(crate) fn reveal_in_os(path: &Path) -> Result<(), String> {
     }
 }
 
+/// 本机是否具备打印能力。不具备时界面把「打印」按钮置灰，并引导改用
+/// 「系统打开」后自行打印，而不是让人点了没反应。
+///
+/// Unix（含 macOS 与麒麟等国产系统）统一看 CUPS 的 `lp` 在不在 PATH 里：
+/// macOS 自带，Linux 由 `cups-client` 提供，deb 包已把它列入依赖，但用户
+/// 自行编译或用便携包时仍可能缺。Windows 走 shell 的 print 谓词，是否真能
+/// 打印取决于系统注册的 PDF 处理程序，事前探测不出来，一律按可用处理，
+/// 失败时由错误信息说明。
+pub(crate) fn printing_available() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(unix)]
+    {
+        lp_program().is_some()
+    }
+}
+
+/// 在 PATH 里找 `lp`。找不到就说明没装 CUPS 客户端。
+#[cfg(unix)]
+fn lp_program() -> Option<PathBuf> {
+    lp_in_path(&std::env::var_os("PATH")?)
+}
+
+/// 在给定的 PATH 串里找 `lp`。与环境变量解耦，便于单测。
+#[cfg(unix)]
+fn lp_in_path(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|dir| dir.join("lp"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// 拼 Windows 上触发 print 谓词的 PowerShell 命令。
+///
+/// 单独拿出来是为了能测转义：路径里出现单引号（用户完全可能把稿件放在名字带
+/// 撇号的目录下）时，不转义会让命令截断甚至改变语义。PowerShell 单引号字符串
+/// 里的单引号要写成两个。非 Windows 上也编译，只为跑测试。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn print_verb_script(path: &Path) -> String {
+    format!(
+        "Start-Process -FilePath '{}' -Verb Print",
+        path.display().to_string().replace('\'', "''")
+    )
+}
+
+/// 把 PDF 送到系统默认打印机。
+///
+/// 三个平台的路子不一样：Unix 直接交给 CUPS 的 `lp`——它原生就吃 PDF，成败
+/// 看退出码，`lp` 自己的报错（没有默认打印机之类）比我们编的话准确，所以原样
+/// 转出去。Windows 没有命令行打印，只能借 shell 的 print 谓词，实际由注册的
+/// PDF 处理程序执行；用 PowerShell 触发而不引入 windows-sys，与本文件其余
+/// 几个系统调用保持一致，并用 CREATE_NO_WINDOW 压掉一闪而过的控制台窗口。
+///
+/// 注意份数：这里固定送一份。需要多份时不能靠打印机的份数设置——那样每份的
+/// 份号会完全一样，必须由导出阶段生成含多个份号的 PDF。
+pub(crate) fn print_in_os(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        /// CREATE_NO_WINDOW：不给子进程分配控制台，避免黑框闪一下。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let script = print_verb_script(path);
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command"])
+            .arg(&script)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|error| format!("无法启动打印：{error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        Err(if detail.is_empty() {
+            "系统未能执行打印，请确认已安装可打印 PDF 的程序并设置了默认打印机".to_string()
+        } else {
+            detail.to_string()
+        })
+    }
+    #[cfg(unix)]
+    {
+        let program = lp_program()
+            .ok_or_else(|| "未找到 lp 命令，本机可能没有安装 CUPS 打印服务".to_string())?;
+        // `--` 之后即使文件名以短横线开头也不会被当成选项。
+        let output = std::process::Command::new(program)
+            .arg("--")
+            .arg(path)
+            .output()
+            .map_err(|error| format!("无法启动打印：{error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        Err(if detail.is_empty() {
+            "打印命令执行失败，请检查是否已设置默认打印机".to_string()
+        } else {
+            detail.to_string()
+        })
+    }
+}
+
 /// 一次导出的结果。孤行提示单独拿出来：它是编译实测的产物，只对当时那份正文
 /// 有效，正文一改就该作废，所以不能和其他审校提示混在一起长期留着。
 #[derive(Debug, Clone, Default)]
@@ -1040,4 +1143,48 @@ pub(crate) fn export_and_compile(
         proof_warnings,
         proof_measured,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_script_doubles_single_quotes_in_the_path() {
+        // 目录名带撇号是完全可能的；不转义会截断 PowerShell 的单引号字符串。
+        let script = print_verb_script(Path::new("/tmp/张三's/公文.pdf"));
+        assert_eq!(
+            script,
+            "Start-Process -FilePath '/tmp/张三''s/公文.pdf' -Verb Print"
+        );
+    }
+
+    #[test]
+    fn print_script_keeps_an_ordinary_path_verbatim() {
+        let script = print_verb_script(Path::new("/tmp/公文.pdf"));
+        assert_eq!(
+            script,
+            "Start-Process -FilePath '/tmp/公文.pdf' -Verb Print"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lp_is_found_only_when_it_exists_on_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let empty = tempfile::tempdir().expect("临时目录");
+        let with_lp = tempfile::tempdir().expect("临时目录");
+        let lp = with_lp.path().join("lp");
+        std::fs::write(&lp, "#!/bin/sh\n").expect("写入假 lp");
+        std::fs::set_permissions(&lp, std::fs::Permissions::from_mode(0o755)).expect("置可执行");
+
+        // 只有空目录：找不到。
+        let path = std::env::join_paths([empty.path()]).expect("拼 PATH");
+        assert!(lp_in_path(&path).is_none());
+
+        // 后一个目录里有 lp：找得到，且返回的就是它。
+        let path = std::env::join_paths([empty.path(), with_lp.path()]).expect("拼 PATH");
+        assert_eq!(lp_in_path(&path), Some(lp));
+    }
 }

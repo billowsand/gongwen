@@ -1398,6 +1398,7 @@ pub enum Icon {
     PencilLine,
     Phone,
     PlugZap,
+    Print,
     Publish,
     Quote,
     Refresh,
@@ -1557,6 +1558,7 @@ impl Icon {
             ),
             Self::Phone => ("phone", include_bytes!("../assets/icons/phone.svg")),
             Self::PlugZap => ("plug-zap", include_bytes!("../assets/icons/plug-zap.svg")),
+            Self::Print => ("printer", include_bytes!("../assets/icons/printer.svg")),
             Self::Publish => ("send", include_bytes!("../assets/icons/send.svg")),
             Self::Quote => ("quote", include_bytes!("../assets/icons/quote.svg")),
             Self::Refresh => (
