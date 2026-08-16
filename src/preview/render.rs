@@ -3,16 +3,21 @@
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::render`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::images;
-use crate::theme;
-use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::export;
+use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
+use crate::images;
 use crate::models::{DraftInput, StyleMode, TemplateKind};
-use crate::units::{UnitDisplay};
-use std::ops::{Range};
-use eframe::egui::{Align, Color32, Stroke};
+use crate::preview::{
+    BODY_PT, BodyRun, INDENT_CHARS, LIST_INDENT_PT, Metrics, PreviewScale, TITLE_PT,
+    addressee_block, append_inline, body_block, clickable, draw, footer_record, header_block,
+    heading_family, indent, is_renderable_paragraph, job, line_block, place,
+    red_approval_print_preview, sheet, signature_block, table_block, text_format,
+};
+use crate::theme;
+use crate::units::UnitDisplay;
 use eframe::egui;
-use crate::preview::{Metrics, PreviewScale, BODY_PT, TITLE_PT, INDENT_CHARS, LIST_INDENT_PT, heading_family, text_format, job, draw, place, indent, line_block, body_block, append_inline, is_renderable_paragraph, table_block, clickable, sheet, header_block, addressee_block, signature_block, footer_record, BodyRun, red_approval_print_preview};
+use eframe::egui::{Align, Stroke};
+use std::ops::Range;
 
 /// 预览的一次绘制结果。
 pub struct PreviewOutput {
@@ -418,13 +423,19 @@ pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: 
 }
 
 /// 图片占位卡片：细边框 + 文件名与说明，宽度=版心。
-pub(crate) fn image_placeholder(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, file_name: &str, note: &str) {
+pub(crate) fn image_placeholder(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    alt: &str,
+    file_name: &str,
+    note: &str,
+) {
     let height = (metrics.line * 2.0).max(metrics.pt(24.0));
     place(ui, metrics, height, |painter, rect| {
         painter.rect_stroke(
             rect,
             egui::CornerRadius::same(2),
-            Stroke::new(1.0_f32.max(metrics.scale), Color32::from_gray(150)),
+            Stroke::new(1.0_f32.max(metrics.scale), theme::paper::ink_faint()),
             egui::StrokeKind::Inside,
         );
         let font = metrics.font(theme::FONT_FANGSONG, BODY_PT);
@@ -437,14 +448,14 @@ pub(crate) fn image_placeholder(ui: &mut egui::Ui, metrics: &Metrics, alt: &str,
         let galley = painter.layout(
             text,
             font,
-            Color32::from_gray(90),
+            theme::paper::ink_muted(),
             rect.width() - metrics.pt(8.0),
         );
         let y = rect.top() + ((rect.height() - galley.size().y) / 2.0).max(metrics.pt(4.0));
         painter.galley(
             egui::pos2(rect.left() + metrics.pt(4.0), y),
             galley,
-            Color32::WHITE,
+            theme::paper::bg(),
         );
     });
 }

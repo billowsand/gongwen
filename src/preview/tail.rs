@@ -3,14 +3,19 @@
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::tail`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::theme;
 use crate::export;
 use crate::models::{DraftInput, LetterVersion, TemplateKind, split_units};
-use crate::units::{UnitDisplay};
-use std::sync::{Arc};
-use eframe::egui::{Align, Color32, FontId};
+use crate::preview::{
+    BODY_PT, CLOSING_GAP_LINES, JOINT_COLUMN_MM, JOINT_DATE_GAP_MM, JOINT_ROW_GAP_MM, Metrics,
+    PREVIEW_PLACEHOLDER, RECORD_GAP_MM, RECORD_PHONE_COLUMN_EM, RECORD_PT, SIGNATURE_WIDTH_MM,
+    TABLE_LINE_PT, is_joint_mode_one, job, layout, line_block, line_galley, place, stacked,
+    text_format,
+};
+use crate::theme;
+use crate::units::UnitDisplay;
 use eframe::egui;
-use crate::preview::{Metrics, BODY_PT, TABLE_LINE_PT, RECORD_PT, RECORD_PHONE_COLUMN_EM, CLOSING_GAP_LINES, RECORD_GAP_MM, SIGNATURE_WIDTH_MM, JOINT_COLUMN_MM, JOINT_ROW_GAP_MM, JOINT_DATE_GAP_MM, PREVIEW_PLACEHOLDER, text_format, job, layout, place, stacked, line_galley, line_block, is_joint_mode_one};
+use eframe::egui::{Align, FontId};
+use std::sync::Arc;
 
 /// 落款单位：留空时回落发文单位；电话通知用简称并逐字加空格；白头件按
 /// “使用简称”选项取简称/全称（多单位时的逐行排布走 `white_paper_signature_units`）。
@@ -43,7 +48,10 @@ pub(crate) fn signature_date(input: &DraftInput) -> String {
 }
 
 /// 代章标注：当前落款单位在标准词库中启用代章时返回“（代章）”。
-pub(crate) fn signature_seal_mark(input: &DraftInput, display: &UnitDisplay) -> Option<&'static str> {
+pub(crate) fn signature_seal_mark(
+    input: &DraftInput,
+    display: &UnitDisplay,
+) -> Option<&'static str> {
     if export::seals_on_behalf(input, display) {
         Some("（代章）")
     } else {
@@ -251,7 +259,7 @@ pub(crate) fn joint_signature_block(
                     painter.galley(
                         egui::pos2(center, rect.top()),
                         galley.clone(),
-                        Color32::BLACK,
+                        theme::paper::ink(),
                     );
                 }
             });
@@ -287,7 +295,12 @@ pub(crate) fn joint_signature_block(
 
 /// 版记（仅函稿）：四号三线表。第一行是抄送与共印份数，第二行起是承办单位、
 /// 联系人、联系电话三列。成文时版记贴在版心底部，预览里紧跟落款。
-pub(crate) fn footer_record(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, display: &UnitDisplay) {
+pub(crate) fn footer_record(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    display: &UnitDisplay,
+) {
     if input.kind != TemplateKind::OfficialLetter {
         return;
     }
@@ -409,7 +422,7 @@ pub(crate) fn footer_record(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftI
                     egui::vec2(metrics.content, width),
                 ),
                 0.0,
-                Color32::BLACK,
+                theme::paper::ink(),
             );
         };
         let mut y = rect.top();
@@ -418,12 +431,12 @@ pub(crate) fn footer_record(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftI
         painter.galley(
             egui::pos2(rect.left(), y),
             head_galley.clone(),
-            Color32::BLACK,
+            theme::paper::ink(),
         );
         painter.galley(
             egui::pos2(rect.right(), y),
             copies_galley.clone(),
-            Color32::BLACK,
+            theme::paper::ink(),
         );
         y += head_height;
         rule(y, thin);
@@ -435,7 +448,7 @@ pub(crate) fn footer_record(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftI
                     1 => rect.left() + columns[0] + columns[1] / 2.0,
                     _ => rect.right(),
                 };
-                painter.galley(egui::pos2(x, y), galley.clone(), Color32::BLACK);
+                painter.galley(egui::pos2(x, y), galley.clone(), theme::paper::ink());
             }
             y += height;
         }

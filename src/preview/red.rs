@@ -3,23 +3,27 @@
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::red`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::theme;
-use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::export;
-use crate::models::{DraftInput};
-use crate::units::{UnitDisplay};
-use std::ops::{Range};
-use std::sync::{Arc};
-use eframe::egui::{Align, Color32, Stroke};
+use crate::export::{LocatedBlock, MarkdownBlock};
+use crate::models::DraftInput;
+use crate::preview::{
+    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, clickable,
+    content_block, document_number, header_unit, heading_family, indent, is_renderable_paragraph,
+    job, layout, line_block, sheet, signature_date, single_line, text_format,
+};
+use crate::theme;
+use crate::units::UnitDisplay;
 use eframe::egui;
-use eframe::egui::text::{LayoutJob};
-use crate::preview::{Metrics, BODY_PT, PAREN_PT, LINE_PT, INDENT_CHARS, MM, HEADER_PT, CLOSING_GAP_LINES, OFFICIAL_RED, HOVER_TINT, heading_family, text_format, job, single_line, layout, indent, line_block, is_renderable_paragraph, clickable, sheet, header_unit, document_number, signature_date, content_block};
+use eframe::egui::text::LayoutJob;
+use eframe::egui::{Align, Color32, Stroke};
+use std::ops::Range;
+use std::sync::Arc;
 
 /// 普通文种正文区渲染参数。红头呈批件走下方独立的打印分页模型。
 pub(crate) struct BodyRun {
-pub(crate)     compact: bool,
-pub(crate)     compact_level: u8,
-pub(crate)     numbered: bool,
+    pub(crate) compact: bool,
+    pub(crate) compact_level: u8,
+    pub(crate) numbered: bool,
 }
 
 /// 红头呈批件打印预览中的一段可见文字。正文段落可以被切成多个 fragment：
@@ -54,7 +58,6 @@ pub(crate) struct RedPrintLayout {
 }
 
 impl RedPrintLayout {
-
     pub(crate) fn new(first_cursor_y: f32, first_body_bottom: f32) -> Self {
         Self {
             pages: vec![RedPrintPage::default()],
@@ -569,9 +572,9 @@ pub(crate) fn paint_red_approval_overlay(
             &security,
             theme::FONT_HEITI,
             BODY_PT,
-            Color32::BLACK,
+            theme::paper::ink(),
         );
-        painter.galley(at(text_left, text_top + 10.0), galley, Color32::BLACK);
+        painter.galley(at(text_left, text_top + 10.0), galley, theme::paper::ink());
     }
 
     let unit = header_unit(input, display);
@@ -581,7 +584,7 @@ pub(crate) fn paint_red_approval_overlay(
             metrics.font(theme::FONT_BIAOSONG, HEADER_PT),
             metrics.pt(HEADER_PT * 1.2),
         );
-        format.color = OFFICIAL_RED;
+        format.color = theme::paper::red();
         let natural = layout(ui, single_line(&unit, format.clone())).size().x;
         if count > 1.0 && natural < metrics.mm(156.0) {
             format.extra_letter_spacing =
@@ -592,7 +595,7 @@ pub(crate) fn paint_red_approval_overlay(
         painter.galley(
             center - egui::vec2(galley.size().x / 2.0, 0.0),
             galley,
-            OFFICIAL_RED,
+            theme::paper::red(),
         );
     }
 
@@ -603,13 +606,13 @@ pub(crate) fn paint_red_approval_overlay(
         &number,
         theme::FONT_FANGSONG,
         BODY_PT,
-        Color32::BLACK,
+        theme::paper::ink(),
     );
     let number_x =
         at(text_left + 78.0, text_top + 43.0) - egui::vec2(number_galley.size().x / 2.0, 0.0);
-    painter.galley(number_x, number_galley, Color32::BLACK);
+    painter.galley(number_x, number_galley, theme::paper::ink());
 
-    let red = Stroke::new(metrics.mm(0.4).max(1.0), OFFICIAL_RED);
+    let red = Stroke::new(metrics.mm(0.4).max(1.0), theme::paper::red());
     painter.line_segment(
         [
             at(text_left, text_top + 48.0),
@@ -630,13 +633,13 @@ pub(crate) fn paint_red_approval_overlay(
         "批　示",
         theme::FONT_FANGSONG,
         BODY_PT,
-        OFFICIAL_RED,
+        theme::paper::red(),
     );
     let instruction_center = at(text_left + 128.0, text_top + 61.0);
     painter.galley(
         instruction_center - egui::vec2(instruction.size().x / 2.0, 0.0),
         instruction,
-        OFFICIAL_RED,
+        theme::paper::red(),
     );
 
     painter.line_segment(
@@ -655,24 +658,24 @@ pub(crate) fn paint_red_approval_overlay(
                 labels[column],
                 theme::FONT_FANGSONG,
                 BODY_PT,
-                OFFICIAL_RED,
+                theme::paper::red(),
             );
             let label_width = label.size().x;
-            painter.galley(at(x, y), label, OFFICIAL_RED);
+            painter.galley(at(x, y), label, theme::paper::red());
             let value = red_overlay_text(
                 ui,
                 metrics,
                 &row[column],
                 theme::FONT_FANGSONG,
                 BODY_PT,
-                Color32::BLACK,
+                theme::paper::ink(),
             );
             let value_pos = if column == 2 {
                 at(x + columns[column], y) - egui::vec2(value.size().x, 0.0)
             } else {
                 at(x, y) + egui::vec2(label_width, 0.0)
             };
-            painter.galley(value_pos, value, Color32::BLACK);
+            painter.galley(value_pos, value, theme::paper::ink());
             x += columns[column];
         }
     }
@@ -704,7 +707,7 @@ pub(crate) fn paint_red_print_pages(
             ui.painter().rect(
                 page,
                 egui::CornerRadius::same(3),
-                Color32::WHITE,
+                theme::paper::bg(),
                 Stroke::new(1.0, theme::border()),
                 egui::StrokeKind::Inside,
             );
@@ -717,13 +720,13 @@ pub(crate) fn paint_red_print_pages(
                     &format!("— {} —", page_index + 1),
                     theme::FONT_FANGSONG,
                     14.0,
-                    Color32::BLACK,
+                    theme::paper::ink(),
                 );
                 let center = page.min + egui::vec2(metrics.page / 2.0, metrics.mm(282.0));
                 ui.painter().galley(
                     center - egui::vec2(page_number.size().x / 2.0, 0.0),
                     page_number,
-                    Color32::BLACK,
+                    theme::paper::ink(),
                 );
             }
 
@@ -763,7 +766,7 @@ pub(crate) fn paint_red_print_pages(
                             if anchored {
                                 theme::accent_soft()
                             } else {
-                                HOVER_TINT
+                                theme::paper::hover_tint()
                             },
                         );
                     }
@@ -776,7 +779,7 @@ pub(crate) fn paint_red_print_pages(
                 ui.painter().with_clip_rect(rect).galley(
                     anchor_pos,
                     fragment.galley.clone(),
-                    Color32::BLACK,
+                    theme::paper::ink(),
                 );
             }
         });

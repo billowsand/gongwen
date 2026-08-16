@@ -4,7 +4,7 @@
 //! 正文渲染），根文件保留版式常量、`Metrics` / `PreviewScale` 与测试。
 
 use crate::theme;
-use eframe::egui::{Color32, FontId};
+use eframe::egui::FontId;
 
 mod header;
 mod layout;
@@ -12,15 +12,15 @@ mod red;
 mod render;
 mod tail;
 
+pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
     append_inline, body_block, clickable, draw, heading_family, indent, is_renderable_paragraph,
     job, layout, line_block, line_galley, place, sheet, single_line, stacked, table_block,
     text_format,
 };
-pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
-pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{content_block, official_preview};
+pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 // test-only names（根文件的测试模块使用）
 #[cfg(test)]
 pub(crate) use header::security_text;
@@ -59,12 +59,8 @@ const JOINT_COLUMN_MM: f32 = 72.0; // 联合发文落款每列宽
 const JOINT_ROW_GAP_MM: f32 = 45.0; // 联合发文落款行间公章空档
 const JOINT_DATE_GAP_MM: f32 = 6.0; // 联合发文落款与成文日期之间
 const WHITE_PAPER_BLANK_LINES: f32 = 10.0; // 白头件密级后空 10 行
-/// 红头与红色反线的颜色：类里用的是 LaTeX 的纯红。
-const OFFICIAL_RED: Color32 = Color32::from_rgb(0xFF, 0x00, 0x00);
 /// 预览版留白占位：规格 §3.3 统一 1em 宽。
 const PREVIEW_PLACEHOLDER: &str = "\u{2003}";
-/// 鼠标悬停在可点击块上时的淡底。
-const HOVER_TINT: Color32 = Color32::from_rgb(0xF7, 0xF2, 0xEC);
 
 // A4 版心：页宽 210mm，左边距 1587 缇、右边距 1474 缇。
 const PAGE_PT: f32 = 595.28;
@@ -152,81 +148,19 @@ impl Metrics {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ── 行文要素：抬头、主送、落款、版记 ────────────────────────────────────────
 // 版式对齐 gonghan-gwa.cls：函稿/电话通知走 \DocumentHeader，白头件走
 // \WhitePaperHeader，会议议程走 \MeetingAgendaHeader，普通公文走 \PlainDocumentHeader。
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::export;
     use crate::export::MarkdownBlock;
-    use crate::models::{DraftInput, JointIssuanceMode, LetterVersion, TemplateKind, TemplateProfile, VocabularyEntry};
+    use crate::models::{
+        DraftInput, JointIssuanceMode, LetterVersion, TemplateKind, TemplateProfile,
+        VocabularyEntry,
+    };
     use crate::units::UnitDisplay;
     use eframe::egui;
     use eframe::egui::Align;
@@ -686,7 +620,7 @@ mod tests {
             .shapes
             .iter()
             .filter_map(|shape| match &shape.shape {
-                egui::Shape::Rect(rect) if rect.fill == Color32::WHITE => Some(rect.rect),
+                egui::Shape::Rect(rect) if rect.fill == theme::paper::bg() => Some(rect.rect),
                 _ => None,
             })
             .filter(|rect| {

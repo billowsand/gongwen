@@ -1373,7 +1373,7 @@ mod split_resize_tests {
             fn collect(shape: &egui::epaint::Shape, out: &mut Vec<egui::Rect>) {
                 match shape {
                     egui::epaint::Shape::Rect(rect)
-                        if rect.fill == egui::Color32::WHITE && rect.rect.is_finite() =>
+                        if rect.fill == theme::paper::bg() && rect.rect.is_finite() =>
                     {
                         out.push(rect.rect);
                     }

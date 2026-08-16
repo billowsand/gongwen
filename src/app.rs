@@ -293,6 +293,7 @@ impl GongwenApp {
         let macos_titlebar_metrics = crate::macos_window::configure_native_titlebar(cc);
         // 预览字体要按配置装，所以先读配置再装字体。
         theme::set_current(config.theme);
+        theme::set_current_paper(config.paper);
         theme::configure_fonts(&cc.egui_ctx, &config.fonts);
         theme::configure_icons(&cc.egui_ctx);
         theme::configure_style(&cc.egui_ctx);

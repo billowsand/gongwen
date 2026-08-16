@@ -3,12 +3,16 @@
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::header`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::theme;
 use crate::models::{DraftInput, JointIssuanceMode, LetterVersion, TemplateKind, split_units};
-use crate::units::{UnitDisplay};
-use eframe::egui::{Align, Color32};
+use crate::preview::{
+    BODY_PT, HEADER_MAX_GAP_EM, HEADER_PT, HEADER_RULE_GAP_MM, HEADER_RULE_MM, Metrics,
+    PREVIEW_PLACEHOLDER, WHITE_PAPER_BLANK_LINES, draw, job, layout, line_galley, place,
+    single_line, text_format,
+};
+use crate::theme;
+use crate::units::UnitDisplay;
 use eframe::egui;
-use crate::preview::{Metrics, BODY_PT, HEADER_PT, HEADER_RULE_MM, HEADER_RULE_GAP_MM, HEADER_MAX_GAP_EM, WHITE_PAPER_BLANK_LINES, OFFICIAL_RED, PREVIEW_PLACEHOLDER, text_format, job, single_line, layout, draw, place, line_galley};
+use eframe::egui::Align;
 
 /// 联合发文模式 1：多家单位并列成文，落款与版记都改成多行。
 pub(crate) fn is_joint_mode_one(input: &DraftInput) -> bool {
@@ -102,7 +106,7 @@ pub(crate) fn red_header_inner(ui: &mut egui::Ui, metrics: &Metrics, unit: &str,
     let count = unit.chars().count() as f32;
     let em = metrics.pt(HEADER_PT);
     let mut format = text_format(metrics.font(theme::FONT_BIAOSONG, HEADER_PT), em * 1.2);
-    format.color = OFFICIAL_RED;
+    format.color = theme::paper::red();
 
     let natural = layout(ui, single_line(unit, format.clone())).size().x;
     let mut block = natural;
@@ -119,7 +123,11 @@ pub(crate) fn red_header_inner(ui: &mut egui::Ui, metrics: &Metrics, unit: &str,
     let galley = layout(ui, single_line(unit, format));
     place(ui, metrics, galley.size().y, |painter, rect| {
         let left = rect.left() + (metrics.content - block) / 2.0;
-        painter.galley(egui::pos2(left, rect.top()), galley.clone(), OFFICIAL_RED);
+        painter.galley(
+            egui::pos2(left, rect.top()),
+            galley.clone(),
+            theme::paper::red(),
+        );
     });
 
     if draw_rule {
@@ -133,7 +141,7 @@ pub(crate) fn red_header_inner(ui: &mut egui::Ui, metrics: &Metrics, unit: &str,
                     egui::vec2(metrics.content, thickness),
                 ),
                 0.0,
-                OFFICIAL_RED,
+                theme::paper::red(),
             );
         });
     }
@@ -165,17 +173,22 @@ pub(crate) fn serial_and_number(ui: &mut egui::Ui, metrics: &Metrics, input: &Dr
     );
     let height = left.size().y.max(right.size().y);
     place(ui, metrics, height, |painter, rect| {
-        painter.galley(rect.left_top(), left.clone(), Color32::BLACK);
+        painter.galley(rect.left_top(), left.clone(), theme::paper::ink());
         painter.galley(
             egui::pos2(rect.right(), rect.top()),
             right.clone(),
-            Color32::BLACK,
+            theme::paper::ink(),
         );
     });
 }
 
 /// 抬头：按文种排出密级、红头、份号文号，并留出与标题之间的空行。
-pub(crate) fn header_block(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, display: &UnitDisplay) {
+pub(crate) fn header_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    display: &UnitDisplay,
+) {
     match input.kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
             red_header(ui, metrics, &header_unit(input, display));

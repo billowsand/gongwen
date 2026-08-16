@@ -3,15 +3,15 @@
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::layout`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::theme;
-use crate::export::{table::ColumnAlignment};
 use crate::export;
-use std::ops::{Range};
-use std::sync::{Arc};
-use eframe::egui::{Align, Color32, FontId, Stroke};
+use crate::export::table::ColumnAlignment;
+use crate::preview::{BODY_PT, INDENT_CHARS, Metrics, PAREN_PT, TABLE_LINE_PT, TABLE_PT};
+use crate::theme;
 use eframe::egui;
 use eframe::egui::text::{LayoutJob, TextFormat};
-use crate::preview::{Metrics, BODY_PT, TABLE_PT, PAREN_PT, TABLE_LINE_PT, INDENT_CHARS, HOVER_TINT};
+use eframe::egui::{Align, Color32, FontId, Stroke};
+use std::ops::Range;
+use std::sync::Arc;
 
 /// 正文各级标题的字体：与 `export::docx::heading_paragraph` 保持一致。
 pub(crate) fn heading_family(level: u8) -> &'static str {
@@ -25,7 +25,7 @@ pub(crate) fn heading_family(level: u8) -> &'static str {
 pub(crate) fn text_format(font: FontId, line: f32) -> TextFormat {
     TextFormat {
         font_id: font,
-        color: Color32::BLACK,
+        color: theme::paper::ink(),
         line_height: Some(line),
         ..Default::default()
     }
@@ -102,7 +102,7 @@ pub(crate) fn stacked(
                 }
                 _ => egui::pos2(anchor, y),
             };
-            painter.galley(pos, galley.clone(), Color32::BLACK);
+            painter.galley(pos, galley.clone(), theme::paper::ink());
             y += galley.size().y;
         }
     });
@@ -155,7 +155,7 @@ pub(crate) fn line_block(
             painter.galley(
                 egui::pos2(rect.left() + metrics.content / 2.0, rect.top()),
                 galley,
-                Color32::BLACK,
+                theme::paper::ink(),
             );
         });
     } else {
@@ -168,7 +168,12 @@ pub(crate) fn line_block(
 /// 这里不开 `justify`：egui 在两端对齐时会把行首空白排除在对齐范围外，首行缩进
 /// 的两个全角空格会被直接吃掉。中文正文各字等宽，行末本就基本对齐，取舍下
 /// 保住缩进更要紧。
-pub(crate) fn body_block(ui: &mut egui::Ui, metrics: &Metrics, text: &str, first_line_indent: bool) {
+pub(crate) fn body_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    first_line_indent: bool,
+) {
     let mut job = job(metrics.content);
     let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
     if first_line_indent {
@@ -220,7 +225,7 @@ pub(crate) fn table_block(
 
     // 单元格内边距不能超过列宽的一小部分，否则窄列会算出负的换行宽度。
     let line = metrics.pt(TABLE_LINE_PT);
-    let stroke = Stroke::new(1.0_f32.max(metrics.scale), Color32::BLACK);
+    let stroke = Stroke::new(1.0_f32.max(metrics.scale), theme::paper::ink());
     for (index, row) in rows.iter().enumerate() {
         let header = index == 0;
         let font = metrics.font(
@@ -278,7 +283,7 @@ pub(crate) fn table_block(
                 ColumnAlignment::Left => x + padding,
             };
             let top = rect.top() + (height - galley.size().y) / 2.0;
-            painter.galley(egui::pos2(anchor, top), galley.clone(), Color32::BLACK);
+            painter.galley(egui::pos2(anchor, top), galley.clone(), theme::paper::ink());
             x += widths[column];
         }
     }
@@ -327,7 +332,7 @@ pub(crate) fn clickable(
     let fill = if anchored {
         theme::accent_soft()
     } else if response.hovered() {
-        HOVER_TINT
+        theme::paper::hover_tint()
     } else {
         return;
     };
@@ -338,7 +343,11 @@ pub(crate) fn clickable(
 }
 
 /// 一张“纸”：白底、细边、内含公文版心。
-pub(crate) fn sheet(ui: &mut egui::Ui, metrics: &Metrics, add_contents: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn sheet(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     ui.horizontal(|ui| {
         // 用量好的可见宽度而不是 available_width：滚动区里后者可能是无穷大。
         let side = ((metrics.viewport - metrics.page) / 2.0).max(0.0);
@@ -346,14 +355,14 @@ pub(crate) fn sheet(ui: &mut egui::Ui, metrics: &Metrics, add_contents: impl FnO
         ui.vertical(|ui| {
             ui.set_max_width(metrics.page);
             egui::Frame::new()
-                .fill(Color32::WHITE)
+                .fill(theme::paper::bg())
                 .stroke(Stroke::new(1.0, theme::border()))
                 .corner_radius(egui::CornerRadius::same(3))
                 .shadow(egui::epaint::Shadow {
                     offset: [0, 2],
                     blur: 10,
                     spread: 0,
-                    color: Color32::from_black_alpha(18),
+                    color: Color32::from_black_alpha(theme::paper::shadow_alpha()),
                 })
                 .show(ui, |ui| {
                     // 页边距用 add_space 铺出来：`Margin` 是 i8，放大后会溢出。
@@ -365,7 +374,7 @@ pub(crate) fn sheet(ui: &mut egui::Ui, metrics: &Metrics, add_contents: impl FnO
                         ui.vertical(|ui| {
                             ui.set_width(metrics.content);
                             ui.set_min_height((metrics.page - metrics.margin_top * 2.0).max(0.0));
-                            ui.style_mut().visuals.override_text_color = Some(Color32::BLACK);
+                            ui.style_mut().visuals.override_text_color = Some(theme::paper::ink());
                             // 预览是拿来看版式和点回源码的，不做文字选择，
                             // 否则 Label 会把点击当成拖选吃掉。
                             ui.style_mut().interaction.selectable_labels = false;

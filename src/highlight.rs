@@ -255,7 +255,7 @@ pub fn hybrid_highlight(
         theme::FONT_FANGSONG,
         OFFICIAL_BODY_PT,
         OFFICIAL_LINE_PT,
-        Color32::BLACK,
+        theme::paper::ink(),
     );
     let mut job = LayoutJob {
         wrap: egui::text::TextWrapping {
@@ -315,7 +315,7 @@ fn hybrid_line(
         theme::FONT_FANGSONG,
         OFFICIAL_BODY_PT,
         OFFICIAL_LINE_PT,
-        Color32::BLACK,
+        theme::paper::ink(),
     );
     let trimmed = line.trim_start();
     if trimmed.is_empty() {
@@ -366,7 +366,7 @@ fn hybrid_line(
                 _ => (theme::FONT_FANGSONG, OFFICIAL_BODY_PT),
             }
         };
-        let text_format = official_format(family, size, OFFICIAL_LINE_PT, Color32::BLACK);
+        let text_format = official_format(family, size, OFFICIAL_LINE_PT, theme::paper::ink());
         let marker = if active {
             let mut format = text_format.clone();
             format.color = theme::md::marker();
@@ -409,7 +409,7 @@ fn hybrid_line(
             },
             OFFICIAL_TABLE_PT,
             OFFICIAL_TABLE_LINE_PT,
-            Color32::BLACK,
+            theme::paper::ink(),
         );
         if is_separator_row(trimmed) && !active {
             job.append(line, 0.0, collapsed_marker());
@@ -524,7 +524,7 @@ fn append_hybrid_inline(
                     theme::FONT_HEITI,
                     OFFICIAL_BODY_PT,
                     OFFICIAL_LINE_PT,
-                    Color32::BLACK,
+                    theme::paper::ink(),
                 );
                 append_with_leading(job, &rest[..open_len], leading, marker.clone());
                 append_with_leading(job, &rest[open_len..content_end], leading, strong);
