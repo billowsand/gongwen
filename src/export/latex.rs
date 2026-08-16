@@ -505,18 +505,21 @@ mod tests {
             "# 标题\n\n正文。\n<!-- [附件] -->\n# 情况统计表\n表内容。\n<!-- [附件] -->\n# 整改任务清单\n清单内容。",
             &UnitDisplay::new(&[]),
         );
-        // 附件概要：多份附件只有第一行保留“附件”二字，其余行用 \qquad 占位。
+        // 附件概要：多份附件的每行都用相同盒子确定序号起点，
+        // 第一行再把“附件”二字叠印到占位盒上。
         assert!(
-            tex.contains("附件1：情况统计表"),
-            "概要第一行应为“附件1：”：{tex}"
+            tex.contains("\\rlap{附件}\\phantom{附件}1：情况统计表"),
+            "概要第一行应叠印“附件”并与后续序号共用相同占位盒：{tex}"
         );
         assert!(
-            tex.contains("\\qquad 2：整改任务清单"),
-            "概要其余行用 \\qquad 占位：{tex}"
+            tex.contains("\\phantom{附件}2：整改任务清单"),
+            "概要其余行应按“附件”二字的实际宽度占位：{tex}"
         );
         // 概要位于正文之后、落款之前。
         let body_start = tex.find("\\MainContent").unwrap();
-        let summary_at = tex.find("附件1：情况统计表").unwrap();
+        let summary_at = tex
+            .find("\\rlap{附件}\\phantom{附件}1：情况统计表")
+            .unwrap();
         let signature_at = tex.find("\\SignatureUnit").unwrap();
         assert!(
             body_start < summary_at && summary_at < signature_at,
@@ -824,17 +827,17 @@ mod tests {
         );
         assert!(single.contains("\\heiti\\enheiti\\zihao{3} 附件}"));
         assert!(!single.contains("\\heiti\\enheiti\\zihao{3} 附件1}"));
-        // 多附件逐行“附件N：名称”，第二个起“附件”二字用 \qquad 占位对齐。
+        // 多附件逐行“附件N：名称”，每行数字前使用相同占位盒精确对齐。
         let multi = letter_tex(
             &input,
             "# 测试函\n<!-- [附件] -->\n# 统计表\n内容。\n<!-- [附件] -->\n# 说明材料\n内容。",
         );
         assert!(
-            multi.contains("\\noindent\\hspace*{2em}附件1：统计表\\par"),
+            multi.contains("\\noindent\\hspace*{2em}\\rlap{附件}\\phantom{附件}1：统计表\\par"),
             "{multi}"
         );
         assert!(
-            multi.contains("\\noindent\\hspace*{2em}\\qquad 2：说明材料\\par"),
+            multi.contains("\\noindent\\hspace*{2em}\\phantom{附件}2：说明材料\\par"),
             "{multi}"
         );
         assert!(multi.contains("\\heiti\\enheiti\\zihao{3} 附件1}"));
@@ -842,7 +845,7 @@ mod tests {
         // 概要前空两行，且位于 MainContent（正文）内、附件区之前。
         assert!(multi.contains("\\vspace{2\\baselineskip}"));
         let main_at = multi.find("\\renewcommand{\\MainContent}{").unwrap();
-        let summary_at = multi.find("附件1：统计表").unwrap();
+        let summary_at = multi.find("\\rlap{附件}\\phantom{附件}1：统计表").unwrap();
         let attachment_at = multi.find("\\SetAttachmentContent").unwrap();
         assert!(main_at < summary_at && summary_at < attachment_at);
     }

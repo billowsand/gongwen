@@ -655,7 +655,7 @@ mod tests {
             "白头件 tex 应带附件内容：{tex_text}"
         );
         assert!(
-            tex_text.contains("附件1：2026年度情况统计表"),
+            tex_text.contains("\\rlap{附件}\\phantom{附件}1：2026年度情况统计表"),
             "白头件正文后应列附件概要：{tex_text}"
         );
         let pdf = compile_pdf_if_available(tex, &FontConfig::default())

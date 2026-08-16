@@ -86,7 +86,7 @@ pub(crate) fn security_commands(input: &DraftInput) -> String {
 
 /// 附件概要：正文结束后、落款之前，与正文之间空两行、首行缩进两个汉字，
 /// 按顺序列出附件名称。单个附件写“附件：名称”；多个附件只有第一行写“附件N：名称”，
-/// 其余行的“附件”二字用 `\qquad`（两个汉字宽）占位对齐、不再重复。
+/// 每行都用 `\phantom{附件}` 建立相同的序号起点，首行再叠印“附件”二字。
 pub(crate) fn attachment_summary_tex(blocks: &[MarkdownBlock]) -> Option<String> {
     let names = attachment_names(blocks);
     if names.is_empty() {
@@ -96,11 +96,15 @@ pub(crate) fn attachment_summary_tex(blocks: &[MarkdownBlock]) -> Option<String>
     // 与正文之间空两行。
     out.push_str("\\vspace{2\\baselineskip}\n");
     for (index, name) in names.iter().enumerate() {
-        // 多个附件只有第一行保留“附件”二字，其余行用 \qquad 占位，使序号列对齐。
-        let prefix = if names.len() == 1 || index == 0 {
+        // 多个附件的每一行都经过同一个 phantom 盒子，使盒子到数字之间的字间距
+        // 完全一致；首行用零宽盒叠印“附件”，避免真实中文文本与 phantom 盒子后
+        // 接西文数字时 XeCJK 采用不同的字间距而产生细微错位。
+        let prefix = if names.len() == 1 {
             "附件"
+        } else if index == 0 {
+            "\\rlap{附件}\\phantom{附件}"
         } else {
-            "\\qquad "
+            "\\phantom{附件}"
         };
         let label = if names.len() == 1 {
             format!("：{name}")
