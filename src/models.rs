@@ -868,7 +868,10 @@ impl TemplateProfile {
     }
 }
 
-/// 界面明色主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
+/// 界面主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
+///
+/// 前八项是明色，后五项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
+/// 公文纸面另由 [`PaperMode`] 决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
@@ -877,11 +880,68 @@ pub enum ThemeName {
     Sky,
     Lilac,
     Green,
+    /// Solarized Light：终端配色里的经典浅色。
+    SolarizedLight,
+    /// Catppuccin Latte：冷白底 + 紫色强调。
+    Latte,
+    /// Gruvbox Light：暖米黄纸面 + 砖红强调。
+    GruvboxLight,
+    /// Dracula：紫色强调，对比最强。
+    Dracula,
+    /// Nord：冷灰蓝，饱和度最低。
+    Nord,
+    /// Gruvbox Dark：暖褐底 + 橙强调，默认主题的深色亲戚。
+    GruvboxDark,
+    /// Tokyo Night：近黑底 + 蓝紫强调。
+    TokyoNight,
+    /// Everforest Dark：灰绿底，刺激最小。
+    Everforest,
 }
 
 impl ThemeName {
-    /// 全部可选主题，顺序与设置页展示一致。
-    pub const ALL: [ThemeName; 4] = [Self::Claude, Self::Sky, Self::Lilac, Self::Green];
+    /// 全部可选主题，顺序与设置页展示一致：先明色后深色。
+    pub const ALL: [ThemeName; 12] = [
+        Self::Claude,
+        Self::Sky,
+        Self::Lilac,
+        Self::Green,
+        Self::SolarizedLight,
+        Self::Latte,
+        Self::GruvboxLight,
+        Self::Dracula,
+        Self::Nord,
+        Self::GruvboxDark,
+        Self::TokyoNight,
+        Self::Everforest,
+    ];
+}
+
+/// 屏幕上公文纸面的明暗。**只影响预览显示**，导出的 DOCX/TeX/PDF 一律仍是
+/// 白纸黑字红头，不受这里的选择影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperMode {
+    /// 跟随界面主题：明色主题配白纸，深色主题配深色纸。
+    #[default]
+    Follow,
+    /// 始终白纸黑字，与打印稿一致。
+    Light,
+    /// 始终深色纸，长时间盯屏更省眼。
+    Dark,
+}
+
+impl PaperMode {
+    /// 全部可选项，顺序与设置页展示一致。
+    pub const ALL: [PaperMode; 3] = [Self::Follow, Self::Light, Self::Dark];
+
+    /// 设置页展示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Follow => "跟随主题",
+            Self::Light => "白纸黑字",
+            Self::Dark => "深色纸面",
+        }
+    }
 }
 
 /// 起草页功能区的分区卡。仿 Word：第一行选分区，第二行才是该分区的按钮。
@@ -966,8 +1026,10 @@ pub struct AppConfig {
     pub rag: RagConfig,
     /// 编译公文时使用的字体。默认沿用随应用分发的内置字体。
     pub fonts: FontConfig,
-    /// 界面明色主题。旧配置没有该字段时回退默认。
+    /// 界面主题。旧配置没有该字段时回退默认。
     pub theme: ThemeName,
+    /// 屏幕上公文纸面的明暗。导出结果不受影响。
+    pub paper: PaperMode,
     /// 起草页功能区上次停在哪个分区卡。
     pub ribbon_tab: RibbonTab,
     /// 功能区第二行（当前分区的按钮）是否收起，只留分区卡那一条。
@@ -996,6 +1058,7 @@ impl Default for AppConfig {
             rag: RagConfig::default(),
             fonts: FontConfig::default(),
             theme: ThemeName::default(),
+            paper: PaperMode::default(),
             ribbon_tab: RibbonTab::default(),
             ribbon_collapsed: false,
         }
