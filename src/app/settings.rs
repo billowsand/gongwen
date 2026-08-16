@@ -3,12 +3,14 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::settings`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{
+    GongwenApp, LABEL_WIDTH, field, row_label_with_info, section_heading_with_info, warn,
+};
+use crate::models::{FontRole, PaperMode, RerankMode, ThemeName};
 use crate::storage;
 use crate::system_fonts;
 use crate::theme;
-use crate::models::{FontRole, RerankMode, ThemeName};
 use eframe::egui;
-use crate::app::{warn, GongwenApp, LABEL_WIDTH, field, row_label_with_info, section_heading_with_info};
 
 /// 一个位置的字体选择行：下拉选本机字体，或浏览一个字体文件。
 /// 返回需要显示在状态栏的提示（选了不支持的文件时给出）。
@@ -120,71 +122,126 @@ impl GongwenApp {
         let _ = storage::save(&self.config);
     }
 
-    /// 界面主题：明色配色预设，点选立即生效并保存。公文纸面（预览、导出）按
-    /// 红头文件规范固定为白纸黑字，不随主题变化。
+    /// 切换纸面明暗并立即生效。只影响屏幕预览，导出结果不变。
+    pub(crate) fn apply_paper_mode(&mut self, mode: PaperMode) {
+        self.config.paper = mode;
+        theme::set_current_paper(mode);
+        self.status = format!("公文纸面已切换为「{}」。", mode.label());
+        let _ = storage::save(&self.config);
+    }
+
+    /// 画一张主题预览卡；返回值为卡片的点击响应。
+    fn theme_card(&self, ui: &mut egui::Ui, name: ThemeName) -> egui::Response {
+        let palette = theme::by_name(name);
+        let selected = name == self.config.theme;
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(168.0, 76.0), egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter_at(rect);
+            // 卡片底与描边：选中时用强调色加粗描边。
+            painter.rect_filled(rect, 10.0, palette.surface);
+            let stroke = if selected {
+                egui::Stroke::new(2.0, palette.accent)
+            } else {
+                egui::Stroke::new(1.0, palette.border_strong)
+            };
+            painter.rect_stroke(rect, 10.0, stroke, egui::StrokeKind::Inside);
+
+            // 色板行：画布底、沉底、强调淡底、强调色四枚色块。
+            let swatch = 16.0;
+            let gap = 6.0;
+            let start = egui::pos2(rect.left() + 12.0, rect.top() + 12.0);
+            for (index, color) in [
+                palette.canvas,
+                palette.surface_sunk,
+                palette.accent_soft,
+                palette.accent,
+            ]
+            .iter()
+            .enumerate()
+            {
+                let min = start + egui::vec2(index as f32 * (swatch + gap), 0.0);
+                let max = min + egui::vec2(swatch, swatch);
+                painter.rect_filled(egui::Rect::from_min_max(min, max), 4.0, *color);
+            }
+
+            // 主题名与选中标记。卡片自带配色，文字一律用该主题自己的前景色。
+            painter.text(
+                egui::pos2(rect.left() + 12.0, rect.top() + 42.0),
+                egui::Align2::LEFT_TOP,
+                palette.label,
+                egui::FontId::proportional(14.0),
+                palette.text,
+            );
+            if selected {
+                painter.text(
+                    egui::pos2(rect.right() - 12.0, rect.top() + 10.0),
+                    egui::Align2::RIGHT_TOP,
+                    "✓ 当前",
+                    egui::FontId::proportional(12.0),
+                    palette.accent,
+                );
+            }
+        }
+        response
+    }
+
+    /// 界面主题：配色预设按明暗分两组多行展示，点选立即生效并保存。
+    /// 公文纸面单独一项，且只作用于屏幕——导出永远是白纸黑字红头。
     pub(crate) fn theme_settings_ui(&mut self, ui: &mut egui::Ui) {
         section_heading_with_info(
             ui,
             theme::Icon::Palette,
             "界面主题",
-            "界面的明色配色预设，点选后立即生效并保存。公文纸面（预览与导出）不受影响，仍按规范为白纸黑字红头。",
+            "界面配色预设，点选后立即生效并保存。深色主题借鉴常见终端配色方案。导出的公文不受影响，仍按规范为白纸黑字红头。",
+        );
+
+        let mut pending = None;
+        for (title, dark) in [("浅色", false), ("深色", true)] {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(title)
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::text_muted()),
+            );
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for name in ThemeName::ALL
+                    .into_iter()
+                    .filter(|name| theme::by_name(*name).dark == dark)
+                {
+                    if self.theme_card(ui, name).clicked() && self.config.theme != name {
+                        pending = Some(name);
+                    }
+                }
+            });
+        }
+        if let Some(name) = pending {
+            self.apply_theme(ui.ctx(), name);
+        }
+
+        ui.add_space(14.0);
+        section_heading_with_info(
+            ui,
+            theme::Icon::FileTypeDoc,
+            "公文纸面",
+            "只改屏幕上预览的纸色，方便深色主题下长时间盯屏。导出的 DOCX、TeX 与 PDF 一律仍是白纸黑字红头，不受此项影响。",
         );
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            for name in ThemeName::ALL {
-                let palette = theme::by_name(name);
-                let selected = name == self.config.theme;
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(168.0, 76.0), egui::Sense::click());
-                if ui.is_rect_visible(rect) {
-                    let painter = ui.painter_at(rect);
-                    // 卡片底与描边：选中时用强调色加粗描边。
-                    painter.rect_filled(rect, 10.0, palette.surface);
-                    let stroke = if selected {
-                        egui::Stroke::new(2.0, palette.accent)
-                    } else {
-                        egui::Stroke::new(1.0, palette.border_strong)
-                    };
-                    painter.rect_stroke(rect, 10.0, stroke, egui::StrokeKind::Inside);
-
-                    // 色板行：画布底、沉底、强调淡底、强调色四枚色块。
-                    let swatch = 16.0;
-                    let gap = 6.0;
-                    let start = egui::pos2(rect.left() + 12.0, rect.top() + 12.0);
-                    for (index, color) in [
-                        palette.canvas,
-                        palette.surface_sunk,
-                        palette.accent_soft,
-                        palette.accent,
-                    ]
-                    .iter()
-                    .enumerate()
-                    {
-                        let min = start + egui::vec2(index as f32 * (swatch + gap), 0.0);
-                        let max = min + egui::vec2(swatch, swatch);
-                        painter.rect_filled(egui::Rect::from_min_max(min, max), 4.0, *color);
-                    }
-
-                    // 主题名与选中标记。
-                    painter.text(
-                        egui::pos2(rect.left() + 12.0, rect.top() + 42.0),
-                        egui::Align2::LEFT_TOP,
-                        palette.label,
-                        egui::FontId::proportional(14.0),
-                        palette.text,
-                    );
-                    if selected {
-                        painter.text(
-                            egui::pos2(rect.right() - 12.0, rect.top() + 10.0),
-                            egui::Align2::RIGHT_TOP,
-                            "✓ 当前",
-                            egui::FontId::proportional(12.0),
-                            palette.accent,
-                        );
-                    }
-                }
-                if response.clicked() && self.config.theme != name {
-                    self.apply_theme(ui.ctx(), name);
+            for mode in PaperMode::ALL {
+                let selected = mode == self.config.paper;
+                if ui
+                    .add(theme::menu_selectable_item(selected, mode.label()))
+                    .on_hover_text(match mode {
+                        PaperMode::Follow => "明色主题配白纸，深色主题配深色纸",
+                        PaperMode::Light => "始终白纸黑字，与打印稿一致",
+                        PaperMode::Dark => "始终深色纸，长时间盯屏更省眼",
+                    })
+                    .clicked()
+                    && !selected
+                {
+                    self.apply_paper_mode(mode);
                 }
             }
         });

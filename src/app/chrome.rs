@@ -3,13 +3,17 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::chrome`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::app::{
+    DOC_TAB_CHROME_WIDTH, DOC_TAB_MAX_WIDTH, DOC_TAB_MIN_WIDTH, DOC_TAB_TITLE_CHARS, GongwenApp,
+    NavPage, TAB_HOVER_ANIM, TAB_PRESS_ANIM, TAB_SELECT_ANIM, TabRef, VersionScope,
+    truncate_middle,
+};
 use crate::doc_import;
-use crate::theme;
-use crate::version;
 use crate::draft_page::{TOOLBAR_CONTROL_HEIGHT, toolbar_separator};
 use crate::models::{ManuscriptStatus, ThemeName};
+use crate::theme;
+use crate::version;
 use eframe::egui;
-use crate::app::{GongwenApp, DOC_TAB_MIN_WIDTH, DOC_TAB_MAX_WIDTH, DOC_TAB_TITLE_CHARS, DOC_TAB_CHROME_WIDTH, TAB_HOVER_ANIM, TAB_PRESS_ANIM, TAB_SELECT_ANIM, NavPage, TabRef, VersionScope, truncate_middle};
 
 /// 自绘标题栏右侧窗口控制按钮的点击动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -715,21 +719,30 @@ impl GongwenApp {
                     .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
             )
             .ui(ui, |ui| {
-                for name in ThemeName::ALL {
-                    let palette = theme::by_name(name);
-                    let selected = name == self.config.theme;
-                    if ui
-                        .add(theme::menu_selectable_item(selected, palette.label))
-                        .on_hover_text(if selected {
-                            "当前主题"
-                        } else {
-                            "切换后立即生效并保存"
-                        })
-                        .clicked()
-                        && !selected
+                // 十二套主题按明暗分两段，中间用分隔线断开，菜单才扫得动。
+                for (index, dark) in [false, true].into_iter().enumerate() {
+                    if index > 0 {
+                        ui.separator();
+                    }
+                    for name in ThemeName::ALL
+                        .into_iter()
+                        .filter(|name| theme::by_name(*name).dark == dark)
                     {
-                        self.apply_theme(ui.ctx(), name);
-                        ui.close();
+                        let palette = theme::by_name(name);
+                        let selected = name == self.config.theme;
+                        if ui
+                            .add(theme::menu_selectable_item(selected, palette.label))
+                            .on_hover_text(if selected {
+                                "当前主题"
+                            } else {
+                                "切换后立即生效并保存"
+                            })
+                            .clicked()
+                            && !selected
+                        {
+                            self.apply_theme(ui.ctx(), name);
+                            ui.close();
+                        }
                     }
                 }
             });
