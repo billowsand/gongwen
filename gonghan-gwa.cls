@@ -83,6 +83,44 @@
 \RequirePackage{tabularx}
 \RequirePackage{pdflscape} % 仅对横向过密的附件逐个启用 PDF 横页
 
+% ========== 花脸稿标记 ==========
+% 送审用的花脸稿：删掉的字留在原位画波浪线，新增的字就地套方框。
+%
+% 断行交给 xeCJKfntef 的 \CJKunderwave：中文没有空格，裸 ulem 找不到断点，
+% 长句删除会直接冲出版心。波形则自绘，不用它默认的 lasy6 字形（见下）。
+\RequirePackage{xeCJKfntef}
+% 一个波：升段 + 降段。\leaders 把它无缝平铺成连续的波浪线。
+%
+% 关键在降段必须先抬到升段的终点高度。\rotatebox 一律绕自身左基线旋转，
+% 两段都从基线出发的话，一段在基线上方、一段在下方，根本连不起来——平铺出来
+% 是一堆散落的小撇，不是波浪线。这个坑踩过一次，别再改回去。
+%
+% \GwWaveRise 必须等于 \GwWaveSeg × sin(\GwWaveAngle)。三者是绑死的，
+% 改任意一个都要重算另一个，否则波形又会断开。
+% 当前：0.34em × sin24° = 0.1383em。
+\newcommand{\GwWaveSeg}{0.34em}
+\newcommand{\GwWaveAngle}{24}
+\newcommand{\GwWaveRise}{0.1383em}
+\newcommand{\GwWaveUnit}{\hbox{%
+  \rotatebox{\GwWaveAngle}{\rule{\GwWaveSeg}{0.6pt}}%
+  \raisebox{\GwWaveRise}{\rotatebox{-\GwWaveAngle}{\rule{\GwWaveSeg}{0.6pt}}}}}
+% 删除号的位置：波浪线要**穿过字身中部**，不是压在字底当下划线。
+% 用 em 而不是 ex——ex 是西文 x 高，中文字身比它高得多，按 ex 算出来的线会
+% 落在字的下缘。-0.5em 实测正好过中线，且随字号自动缩放。
+\newcommand{\GwWaveDepth}{-0.5em}
+% 删除：波浪线穿过字身。
+%
+% 关键是 symbol 这个键。xeCJKfntef 的 \CJKunderwave 默认 symbol 是
+% `\sixly\char58`——lasy6 字体里的波浪字形。lasy6 不在随应用分发的离线
+% bundle 里，而 \char58 在中文字体里是**冒号**，于是整行删除会排成一串冒号。
+% 这里把 symbol 换成自绘的波浪单元，既不依赖 lasy6，也不挑用户选的编译字体。
+%
+% 注意：改 ulem 的 \uwave 是没用的，\CJKunderwave 根本不走它——这条弯路走过。
+\newcommand{\GwDel}[1]{\CJKunderwave[symbol=\GwWaveUnit, depth=\GwWaveDepth]{#1}}
+% 新增：方框。\fbox 不能跨行，所以调用方按标点把长插入切成小块，
+% 每块一个框，块与块之间可以断行——读起来仍是"连续文字一个框"。
+\newcommand{\GwAdd}[1]{\fbox{#1}}
+
 % ========== 字体设置 ==========
 % 正文 Markdown 加粗沿用当前字体，通过 xeCJK 自动伪粗实现，不切换为独立黑体。
 % 应用内置 Tectonic 编译时会在 \documentclass 前注入 \GwaFontPath，直接按文件

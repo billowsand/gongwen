@@ -481,6 +481,8 @@ impl GongwenApp {
             new_label: &new_label,
             // 这里看的可能不是起草页正在编辑的那篇稿件，跳源码会落到无关位置。
             allow_jump: false,
+            // 这里还没接花脸稿的后台导出任务，先不显示按钮。
+            allow_export: false,
         };
         diff_view::manuscript_diff_ui(ui, &report, &mut diff.view, &config);
     }

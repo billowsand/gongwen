@@ -90,6 +90,9 @@ pub(crate) enum DocJob {
     Optimized(Result<GeneratedDraft, String>),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
+    /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
+    /// 「打开最近导出」指向的定稿文件。
+    RedlineExported(Result<Vec<std::path::PathBuf>, String>),
 }
 
 impl GongwenApp {
@@ -873,6 +876,26 @@ impl GongwenApp {
                         self.docs[index].output_files.len()
                     )
                 };
+            }
+            DocJob::RedlineExported(Ok(files)) => {
+                let pdf = files
+                    .iter()
+                    .find(|file| file.extension().is_some_and(|ext| ext == "pdf"))
+                    .cloned();
+                self.status = match files.first() {
+                    Some(first) => format!(
+                        "{prefix}花脸稿已导出到 {}。",
+                        first.parent().unwrap_or(first).display()
+                    ),
+                    None => format!("{prefix}花脸稿没有产生任何文件。"),
+                };
+                // 出了 PDF 就直接在应用内打开，省得再去翻目录。
+                if let Some(pdf) = pdf {
+                    self.open_pdf(pdf, Some("花脸稿".to_string()));
+                }
+            }
+            DocJob::RedlineExported(Err(error)) => {
+                self.status = format!("{prefix}花脸稿导出失败：{error}");
             }
             DocJob::Exported(Err(error)) => {
                 self.status = format!("{prefix}导出失败：{error}");

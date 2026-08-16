@@ -435,6 +435,35 @@ fn inline_spans(before: &str, after: &str) -> (Vec<InlineSpan>, Vec<InlineSpan>)
     (before_spans, after_spans)
 }
 
+/// 把两侧片段合成一条流：未改的、删掉的、加上的按原文顺序排在一起。
+///
+/// 屏幕上的版本对照是左右分栏，两侧各看各的；**花脸稿要的是一张纸**——删掉的字
+/// 仍留在原位画波浪线，新增的字就地套方框，两者必须交织在同一个段落里。所以
+/// 这里复用同一趟 `lcs_ops`，只是把结果推进一个 `Vec` 而不是两个。
+///
+/// 注意花脸稿因此比定稿长：删掉的字还占着版面，页数对不上是必然的，不是 bug。
+pub fn merged_spans(before: &str, after: &str) -> Vec<InlineSpan> {
+    let a = tokenize(before);
+    let b = tokenize(after);
+    // 与 `inline_spans` 用同一个上限：超了就退化成"整段删 + 整段加"，
+    // 花脸稿上表现为整段画波浪线、整段套框，仍然读得懂。
+    if a.len().saturating_mul(b.len()) > INLINE_TOKEN_BUDGET {
+        let mut out = Vec::new();
+        push_span(&mut out, SpanKind::Removed, before);
+        push_span(&mut out, SpanKind::Added, after);
+        return out;
+    }
+    let mut out = Vec::new();
+    for op in lcs_ops(&a, &b) {
+        match op {
+            DiffOp::Same(i, _) => push_span(&mut out, SpanKind::Same, a[i]),
+            DiffOp::Delete(i) => push_span(&mut out, SpanKind::Removed, a[i]),
+            DiffOp::Insert(j) => push_span(&mut out, SpanKind::Added, b[j]),
+        }
+    }
+    out
+}
+
 fn tokenize(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -1239,5 +1268,72 @@ mod tests {
         let snapshot: ContentSnapshot = record.into();
         assert_eq!(snapshot.content_markdown, "# 甲");
         assert_eq!(snapshot.notes, "备注");
+    }
+}
+
+#[cfg(test)]
+mod merged_span_tests {
+    use super::*;
+
+    fn rendered(spans: &[InlineSpan]) -> String {
+        // 用记号把三类片段标出来，断言起来比逐个字段比对好读：
+        // 删除 ~文字~、新增 [文字]、未改原样。
+        spans
+            .iter()
+            .map(|span| match span.kind {
+                SpanKind::Same => span.text.clone(),
+                SpanKind::Removed => format!("~{}~", span.text),
+                SpanKind::Added => format!("[{}]", span.text),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn deletions_and_insertions_interleave_in_one_stream() {
+        let spans = merged_spans(
+            "同意你单位关于报送情况的请示",
+            "同意你单位关于开展检查的请示",
+        );
+        // 花脸稿的样子：删掉的字留在原位，新增的紧随其后。
+        assert_eq!(rendered(&spans), "同意你单位关于~报送情况~[开展检查]的请示");
+    }
+
+    #[test]
+    fn a_pure_insertion_produces_one_added_span() {
+        let spans = merged_spans("请于月底前报送", "请于本月底前报送");
+        assert_eq!(rendered(&spans), "请于[本]月底前报送");
+    }
+
+    #[test]
+    fn a_pure_deletion_keeps_the_removed_text_in_place() {
+        let spans = merged_spans("请各单位抓紧办理", "请各单位办理");
+        assert_eq!(rendered(&spans), "请各单位~抓紧~办理");
+    }
+
+    #[test]
+    fn identical_text_yields_a_single_unchanged_span() {
+        let spans = merged_spans("特此函达", "特此函达");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SpanKind::Same);
+    }
+
+    #[test]
+    fn merged_stream_agrees_with_the_two_sided_view() {
+        // 合流不能凭空造字：滤掉新增就该等于旧稿，滤掉删除就该等于新稿。
+        let before = "各单位要高度重视，按期报送材料。";
+        let after = "各有关单位要按期报送有关材料。";
+        let spans = merged_spans(before, after);
+        let old_side: String = spans
+            .iter()
+            .filter(|span| span.kind != SpanKind::Added)
+            .map(|span| span.text.as_str())
+            .collect();
+        let new_side: String = spans
+            .iter()
+            .filter(|span| span.kind != SpanKind::Removed)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert_eq!(old_side, before);
+        assert_eq!(new_side, after);
     }
 }

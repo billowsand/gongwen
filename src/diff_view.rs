@@ -51,6 +51,9 @@ impl DiffViewState {
 pub enum DiffViewAction {
     /// 点了某处改动，要求跳到新版正文的这个位置。
     JumpToSource(Range<usize>),
+    /// 要求把这两版导出成花脸稿。渲染器手上没有稿件要素，只发意向，
+    /// 具体导出由持有快照的调用方执行。
+    ExportRedline(crate::redline::RedlineFormats),
 }
 
 /// 一次渲染的呈现参数。
@@ -62,6 +65,10 @@ pub struct DiffViewConfig<'a> {
     /// 点击改动能否跳到 Markdown 源码。只有起草页的对照能跳——稿件管理看的
     /// 可能是另一篇稿件，跳到起草页的编辑框会落到无关的位置。
     pub allow_jump: bool,
+    /// 能不能导出花脸稿。导出要拿两版正文和公文要素去真编译一遍，只有起草页
+    /// 这一侧接了后台任务；稿件管理的对照窗还没接，那里不显示按钮，免得点了
+    /// 没反应。
+    pub allow_export: bool,
 }
 
 /// 渲染整份对照（要素 + 备注 + 正文）。
@@ -75,6 +82,7 @@ pub fn manuscript_diff_ui(
         old_label,
         new_label,
         allow_jump,
+        allow_export,
     } = *config;
     if diff.is_empty() {
         ui.add_space(24.0);
@@ -85,6 +93,7 @@ pub fn manuscript_diff_ui(
     }
 
     let total_body = diff.body.changed_count;
+    let mut export: Option<crate::redline::RedlineFormats> = None;
     ui.horizontal_wrapped(|ui| {
         theme::chip(
             ui,
@@ -113,7 +122,51 @@ pub fn manuscript_diff_ui(
                 state.scroll_to_focus = true;
             }
         }
+        // 导出花脸稿：删掉的字画波浪线、新增的字套方框，排成一份可以直接送签
+        // 的纸。对照区本身的排布不变，这里只多一个入口。
+        if !allow_export {
+            return;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("导出花脸稿", |ui| {
+                if ui
+                    .add(theme::menu_item(theme::Icon::FileTypePdf, "导出 PDF"))
+                    .on_hover_text("删除画波浪线、新增套方框，版式与定稿一致")
+                    .clicked()
+                {
+                    export = Some(crate::redline::RedlineFormats {
+                        pdf: true,
+                        docx: false,
+                    });
+                    ui.close();
+                }
+                if ui
+                    .add(theme::menu_item(theme::Icon::FileTypeDoc, "导出 Word"))
+                    .on_hover_text("Word 画不出穿字波浪线，删除用直删除线")
+                    .clicked()
+                {
+                    export = Some(crate::redline::RedlineFormats {
+                        pdf: false,
+                        docx: true,
+                    });
+                    ui.close();
+                }
+                if ui
+                    .add(theme::menu_item(theme::Icon::Package, "两者都导"))
+                    .clicked()
+                {
+                    export = Some(crate::redline::RedlineFormats {
+                        pdf: true,
+                        docx: true,
+                    });
+                    ui.close();
+                }
+            });
+        });
     });
+    if let Some(formats) = export {
+        return Some(DiffViewAction::ExportRedline(formats));
+    }
     if total_body > 0 {
         state.focus = state.focus.min(total_body - 1);
     } else {

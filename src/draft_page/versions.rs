@@ -4,7 +4,8 @@
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::app::{
-    DraftAction, VersionSwitchPrompt, VersionTarget, summarize, truncate, version_hover,
+    DocJob, DraftAction, VersionSwitchPrompt, VersionTarget, WorkerResult, summarize, truncate,
+    version_hover,
 };
 use crate::diff;
 use crate::diff_view;
@@ -15,6 +16,8 @@ use crate::models::DraftInput;
 use crate::theme;
 use eframe::egui;
 use std::ops::Range;
+use std::path::PathBuf;
+use std::thread;
 
 impl DraftPage<'_> {
     /// 右侧版本抽屉：本篇的版本链在起草页里就地看完，不再跳去稿件管理。
@@ -196,6 +199,7 @@ impl DraftPage<'_> {
             old_label: &old_label,
             new_label: "当前（未提交）",
             allow_jump: true,
+            allow_export: true,
         };
         // 缓存与视图状态是同一个结构体的两个字段，分别借用互不冲突。
         let Some((_, report)) = &self.doc.draft_diff.cache else {
@@ -203,9 +207,51 @@ impl DraftPage<'_> {
         };
         let action =
             diff_view::manuscript_diff_ui(ui, report, &mut self.doc.draft_diff.view, &config);
-        if let Some(DiffViewAction::JumpToSource(range)) = action {
-            self.jump_to_source(range);
+        match action {
+            Some(DiffViewAction::JumpToSource(range)) => self.jump_to_source(range),
+            Some(DiffViewAction::ExportRedline(formats)) => self.export_redline(id, base, formats),
+            None => {}
         }
+    }
+
+    /// 导出花脸稿：基准版 → 当前修订，删掉的画波浪线、新增的套方框。
+    ///
+    /// 与定稿导出一样放后台线程——PDF 要真编译一遍，同步做会把界面卡住几秒。
+    fn export_redline(&mut self, id: i64, base: i64, formats: crate::redline::RedlineFormats) {
+        let old_markdown = self
+            .store
+            .as_deref_mut()
+            .and_then(|store| store.get_manuscript_version(id, base).ok())
+            .flatten()
+            .map(|record| record.content_markdown)
+            .unwrap_or_default();
+        let doc = crate::redline::build(&old_markdown, &self.doc.generated_markdown);
+        if doc.is_empty() {
+            *self.status = format!("当前修订与 v{base} 一致，没有可出的花脸稿。");
+            return;
+        }
+
+        let (key, seq) = self.begin_job();
+        *self.status = "正在生成花脸稿…".into();
+        let input = self.doc.draft.clone();
+        let output_dir = PathBuf::from(&self.config.output_dir);
+        let vocabulary = self.config.vocabulary.clone();
+        let fonts = self.config.fonts.clone();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let display = crate::units::UnitDisplay::new(&vocabulary);
+            // 与定稿导出同样先落实字体：TeX 里写死按哪个文件加载，等编译时才
+            // 发现缺文件就来不及退回内置字体了。
+            let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
+            let result =
+                crate::redline::export_files(&output_dir, &input, &doc, formats, &display, &fonts)
+                    .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::RedlineExported(result),
+            });
+        });
     }
 
     /// 版本对照模式下的空状态提示。

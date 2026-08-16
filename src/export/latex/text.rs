@@ -5,7 +5,10 @@
 
 use crate::export::title;
 use crate::export::title::TitlePlan;
-use crate::export::{MarkdownBlock, attachment_names, inline_segments, plain_text};
+use crate::export::{
+    MarkdownBlock, RedlineKind, attachment_names, inline_segments, is_redline_sentinel, plain_text,
+    redline_chunks,
+};
 use crate::models::{DraftInput, TemplateKind, split_period_digits};
 
 /// 规格 §3.2/§6 姓名宽度处理：2 字姓名中间加 1em 空格，4 字姓名压缩到 3 字宽，
@@ -22,6 +25,13 @@ pub(crate) fn latex_name(value: &str) -> String {
 pub(crate) fn tex_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
+        // 花脸稿哨兵是私用区码位，字体里没有这些字形，漏到 TeX 里就是纸上一个
+        // 豆腐块。正常路径（`body_text_to_tex`、表格单元格）在调用这里之前就把
+        // 它们切掉了，这一道是兜底：将来谁新写一条渲染路径忘了处理，最坏也只是
+        // 不显示标记，而不会印出乱码。
+        if is_redline_sentinel(ch) {
+            continue;
+        }
         match ch {
             '\\' => out.push_str("\\textbackslash{}"),
             '{' => out.push_str("\\{"),
@@ -45,18 +55,65 @@ pub(crate) fn tex_escape(value: &str) -> String {
 /// 括号部分用花括号限定 `\kai\zihao{4}` 的作用域，闭合后自动回到正文三号仿宋。
 pub(crate) fn body_text_to_tex(text: &str) -> String {
     let mut out = String::new();
-    for segment in inline_segments(text) {
-        let mut content = tex_escape(&segment.text);
-        if segment.bold {
-            content = format!("\\textbf{{{content}}}");
+    // 先按花脸稿哨兵切块，再对每块跑原来的加粗/括号逻辑。没有哨兵时只有一块
+    // `Same`，走的路径与从前完全一样。
+    for chunk in redline_chunks(text) {
+        let mut inner = String::new();
+        for segment in inline_segments(&chunk.text) {
+            let mut content = tex_escape(&segment.text);
+            if segment.bold {
+                content = format!("\\textbf{{{content}}}");
+            }
+            if segment.parenthesized {
+                inner.push_str(&format!("{{\\kai\\enkai\\zihao{{4}} {content}}}"));
+            } else {
+                inner.push_str(&content);
+            }
         }
-        if segment.parenthesized {
-            out.push_str(&format!("{{\\kai\\enkai\\zihao{{4}} {content}}}"));
-        } else {
-            out.push_str(&content);
+        match chunk.kind {
+            RedlineKind::Same => out.push_str(&inner),
+            RedlineKind::Deleted => out.push_str(&format!("\\GwDel{{{inner}}}")),
+            // \fbox 不能跨行，长插入按标点切块后每块一个框，块间才断得开。
+            RedlineKind::Added => {
+                for piece in boxable_pieces(&chunk.text) {
+                    let mut piece_tex = String::new();
+                    for segment in inline_segments(&piece) {
+                        let mut content = tex_escape(&segment.text);
+                        if segment.bold {
+                            content = format!("\\textbf{{{content}}}");
+                        }
+                        piece_tex.push_str(&content);
+                    }
+                    out.push_str(&format!("\\GwAdd{{{piece_tex}}}"));
+                }
+            }
         }
     }
     out
+}
+
+/// 把新增文字按标点切成可以各自套框的小块。
+///
+/// `\fbox` 是不可断行的盒子，一整句塞进去会顶出版心。按句读切开后，块与块之间
+/// 就有了断行机会；视觉上仍是连续文字被框住，只在标点处分节，正好符合读的预期。
+/// 标点跟在前一块尾部，不单独成块。
+fn boxable_pieces(text: &str) -> Vec<String> {
+    const BREAKERS: [char; 6] = ['，', '。', '；', '、', '：', '？'];
+    let mut pieces = Vec::new();
+    let mut buffer = String::new();
+    for ch in text.chars() {
+        buffer.push(ch);
+        if BREAKERS.contains(&ch) {
+            pieces.push(std::mem::take(&mut buffer));
+        }
+    }
+    if !buffer.is_empty() {
+        pieces.push(buffer);
+    }
+    if pieces.is_empty() {
+        pieces.push(String::new());
+    }
+    pieces
 }
 
 /// 生成密级相关命令：密级、保密期限，以及“指人专办”标记（勾选后非空）。

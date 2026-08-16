@@ -4,7 +4,7 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{BODY_SIZE, FOOTER_SIZE, PAREN_SIZE};
-use crate::export::{inline_segments, plain_text};
+use crate::export::{RedlineKind, inline_segments, plain_text, redline_chunks};
 use crate::models::split_period_digits;
 use docx_rs::*;
 
@@ -26,13 +26,15 @@ pub(crate) fn body_run(text: impl Into<String>) -> Run {
 /// 用楷体_GB2312 四号，其余用仿宋三号。
 /// 标题（文档标题、各级标题、附件标签）不经由此处，不受此规则影响。
 pub(crate) fn body_runs(text: &str) -> Vec<Run> {
-    let segments = inline_segments(text);
-    if segments.is_empty() {
-        return vec![body_run("")];
-    }
-    segments
-        .into_iter()
-        .map(|segment| {
+    // 先按花脸稿哨兵切块。没有哨兵时只有一块 `Same`，与从前完全一致。
+    let chunks = redline_chunks(text);
+    let mut runs = Vec::new();
+    for chunk in chunks {
+        let segments = inline_segments(&chunk.text);
+        if segments.is_empty() {
+            continue;
+        }
+        for segment in segments {
             let mut run = if segment.parenthesized {
                 Run::new()
                     .add_text(segment.text)
@@ -45,9 +47,33 @@ pub(crate) fn body_runs(text: &str) -> Vec<Run> {
                 // 不切换为单独粗体字体，只设置加粗属性，由当前字体自动加粗。
                 run = run.bold();
             }
-            run
-        })
-        .collect()
+            run = apply_redline(run, chunk.kind);
+            runs.push(run);
+        }
+    }
+    if runs.is_empty() {
+        return vec![body_run("")];
+    }
+    runs
+}
+
+/// 给一个 run 打上花脸稿标记。
+///
+/// Word 画不出穿过文字的波浪线——OOXML 的波浪只有下划线一种。所以删除用直
+/// 删除线，PDF 版才是波浪线，导出时会给用户一句说明。新增用字符边框：Word 会
+/// 把相邻且边框设置相同的 run 自动并成一个框，"多个字一个框"是天然就有的。
+fn apply_redline(run: Run, kind: RedlineKind) -> Run {
+    match kind {
+        RedlineKind::Same => run,
+        RedlineKind::Deleted => run.strike(),
+        RedlineKind::Added => run.text_border(
+            TextBorder::new()
+                .border_type(BorderType::Single)
+                .size(4)
+                .space(0)
+                .color("auto"),
+        ),
+    }
 }
 
 pub(crate) fn heiti_run(text: impl Into<String>) -> Run {
@@ -171,18 +197,20 @@ pub(crate) fn table_runs_sized(text: &str, header: bool, size: usize) -> Vec<Run
     if header {
         return vec![table_run_sized(text, true, size)];
     }
-    let segments = inline_segments(text);
-    if segments.is_empty() {
-        return vec![table_run_sized("", false, size)];
-    }
-    segments
-        .into_iter()
-        .map(|segment| {
+    // 与正文一样先按花脸稿哨兵切块：表格里改掉的时限、数字，正是最该让人一眼
+    // 看见的地方。没有哨兵时只有一块，与从前完全一致。
+    let mut runs = Vec::new();
+    for chunk in redline_chunks(text) {
+        for segment in inline_segments(&chunk.text) {
             let mut run = table_run_sized(&segment.text, false, size);
             if segment.bold {
                 run = run.bold();
             }
-            run
-        })
-        .collect()
+            runs.push(apply_redline(run, chunk.kind));
+        }
+    }
+    if runs.is_empty() {
+        return vec![table_run_sized("", false, size)];
+    }
+    runs
 }

@@ -27,6 +27,7 @@ mod proofread_xlsx;
 mod qa;
 mod rag;
 mod rag_client;
+mod redline;
 mod storage;
 mod system_fonts;
 mod texcompile;

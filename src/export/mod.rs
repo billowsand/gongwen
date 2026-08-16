@@ -8,6 +8,7 @@ mod docx;
 mod latex;
 pub(crate) mod table;
 pub(crate) mod title;
+pub(crate) use docx::write_docx;
 pub(crate) use latex::write_tex;
 
 use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
@@ -39,10 +40,13 @@ pub(crate) use red::{RED_RECORD_EM_TWIPS, RED_RECORD_TOTAL_TWIPS, red_signature_
 #[cfg(test)]
 pub(crate) use text::parenthesized_ranges;
 pub(crate) use text::{
-    InlineSegment, attachment_names, attachment_title_name, chinese_date_parts, inline_segments,
-    legacy_attachment_label, normalize_chinese_quotes, number_to_chinese, plain_text,
+    InlineSegment, RedlineKind, attachment_names, attachment_title_name, chinese_date_parts,
+    inline_segments, is_redline_sentinel, legacy_attachment_label, mark_added, mark_deleted,
+    normalize_chinese_quotes, number_to_chinese, plain_text, redline_chunks, strip_redline,
     table_columns,
 };
+#[cfg(test)]
+pub(crate) use text::{REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN};
 
 pub(crate) fn joint_main_index(input: &DraftInput) -> Option<usize> {
     let units = split_units(&input.profile.joint_issuing_units);

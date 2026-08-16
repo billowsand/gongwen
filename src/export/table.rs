@@ -1,6 +1,6 @@
 //! 与 mdx official/research 共用思路的智能表格列宽分析。
 
-use super::{ColumnAlign, inline_segments};
+use super::{ColumnAlign, RedlineKind, inline_segments, redline_chunks};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -57,9 +57,12 @@ fn display_width(value: &str) -> f64 {
 }
 
 fn plain_cell_text(value: &str) -> String {
+    // 滤掉花脸稿哨兵：它们不占版面，但字符数会被算进列宽，让一张表凭空变宽
+    // 甚至被误判成需要横排。
     inline_segments(value)
         .iter()
-        .map(|segment| segment.text.as_str())
+        .flat_map(|segment| segment.text.chars())
+        .filter(|ch| !crate::export::is_redline_sentinel(*ch))
         .collect()
 }
 
@@ -350,9 +353,13 @@ pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Strin
             .enumerate()
             .map(|(column_index, cell)| {
                 let segments = inline_segments(cell);
+                // 姓名列要按字数算宽度，哨兵会让 2 字姓名被当成 4 字。这里先滤掉。
                 let cleaned = segments
                     .iter()
                     .map(|segment| segment.text.as_str())
+                    .collect::<String>()
+                    .chars()
+                    .filter(|ch| !crate::export::is_redline_sentinel(*ch))
                     .collect::<String>();
                 let escaped = if name_column == Some(column_index) && row_index > 0 {
                     let name = latex_name(&cleaned);
@@ -364,14 +371,27 @@ pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Strin
                 } else if row_index == 0 {
                     tex_escape(&cleaned)
                 } else {
-                    segments
-                        .iter()
-                        .map(|segment| {
-                            let escaped = tex_escape(&segment.text);
-                            if segment.bold {
-                                format!("\\textbf{{{escaped}}}")
-                            } else {
-                                escaped
+                    // 单元格也要能画花脸稿标记：表格里改了一个数字、一个时限，
+                    // 恰恰是最需要让领导一眼看见的地方。先按哨兵切块，块内再走
+                    // 原来的加粗逻辑；没有哨兵时就是一整块，与从前完全一致。
+                    redline_chunks(cell)
+                        .into_iter()
+                        .map(|chunk| {
+                            let inner = inline_segments(&chunk.text)
+                                .iter()
+                                .map(|segment| {
+                                    let escaped = tex_escape(&segment.text);
+                                    if segment.bold {
+                                        format!("\\textbf{{{escaped}}}")
+                                    } else {
+                                        escaped
+                                    }
+                                })
+                                .collect::<String>();
+                            match chunk.kind {
+                                RedlineKind::Same => inner,
+                                RedlineKind::Deleted => format!("\\GwDel{{{inner}}}"),
+                                RedlineKind::Added => format!("\\GwAdd{{{inner}}}"),
                             }
                         })
                         .collect::<String>()

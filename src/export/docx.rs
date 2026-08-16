@@ -19,7 +19,7 @@ use std::path::Path;
 mod content;
 mod header;
 mod paragraphs;
-mod record;
+pub(crate) mod record;
 mod red;
 mod runs;
 mod signature;

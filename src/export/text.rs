@@ -49,7 +49,14 @@ pub(crate) fn number_to_chinese(number: usize) -> String {
 }
 
 pub(crate) fn plain_text(text: &str) -> String {
-    text.replace("**", "").replace("__", "").replace('`', "")
+    // 一并滤掉花脸稿哨兵：标题、表头这些路径都走这里，它们不画标记，
+    // 但绝不能把私用区码位印到纸上。
+    text.replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .chars()
+        .filter(|ch| !is_redline_sentinel(*ch))
+        .collect()
 }
 
 /// 把正文中的直引号、方向错误或风格混杂的引号统一为正确配对的中文引号。
@@ -123,6 +130,123 @@ pub(crate) struct InlineSegment {
     pub(crate) text: String,
     pub(crate) bold: bool,
     pub(crate) parenthesized: bool,
+}
+
+// ── 花脸稿标记 ──────────────────────────────────────────────────────────────
+//
+// 增删用 Unicode 私用区的哨兵字符包起来，而不是另造一套 Markdown 语法：公文
+// 正文里不可能出现这些码位，也就不会跟 `**`、括号、表格竖线抢解析；更要紧的是
+// 它们在 `inline_segments` 之前就被剥掉，那套加粗/括号状态机一行都不用动。
+//
+// 没有哨兵的正常文档走的是同一条路，切出来就是一整块 `Same`，导出结果与从前
+// 逐字节一致。
+
+/// 删除段起始。
+pub(crate) const REDLINE_DEL_OPEN: char = '\u{E000}';
+/// 删除段结束。
+pub(crate) const REDLINE_DEL_CLOSE: char = '\u{E001}';
+/// 新增段起始。
+pub(crate) const REDLINE_ADD_OPEN: char = '\u{E002}';
+/// 新增段结束。
+pub(crate) const REDLINE_ADD_CLOSE: char = '\u{E003}';
+
+/// 一段文字在花脸稿里的身份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedlineKind {
+    /// 未改动，照常排。
+    Same,
+    /// 旧稿删掉的，画波浪线。
+    Deleted,
+    /// 新稿加上的，套方框。
+    Added,
+}
+
+/// 一块同类文字。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RedlineChunk {
+    pub(crate) kind: RedlineKind,
+    pub(crate) text: String,
+}
+
+/// 用哨兵把一行切成若干块。没有哨兵时返回整行一块 `Same`。
+///
+/// 容错取"就近闭合"：遇到未配对的收尾哨兵就当普通结束，遇到没闭合的起始哨兵
+/// 就一直标到行尾。花脸稿是程序生成的，正常不会出现这种情况，但宁可排得难看
+/// 也不能把哨兵字符原样印到纸上。
+pub(crate) fn redline_chunks(text: &str) -> Vec<RedlineChunk> {
+    if !text.contains([
+        REDLINE_DEL_OPEN,
+        REDLINE_DEL_CLOSE,
+        REDLINE_ADD_OPEN,
+        REDLINE_ADD_CLOSE,
+    ]) {
+        return vec![RedlineChunk {
+            kind: RedlineKind::Same,
+            text: text.to_string(),
+        }];
+    }
+
+    let mut chunks = Vec::new();
+    let mut buffer = String::new();
+    let mut kind = RedlineKind::Same;
+    let flush = |chunks: &mut Vec<RedlineChunk>, buffer: &mut String, kind: RedlineKind| {
+        if !buffer.is_empty() {
+            chunks.push(RedlineChunk {
+                kind,
+                text: std::mem::take(buffer),
+            });
+        }
+    };
+    for ch in text.chars() {
+        match ch {
+            REDLINE_DEL_OPEN => {
+                flush(&mut chunks, &mut buffer, kind);
+                kind = RedlineKind::Deleted;
+            }
+            REDLINE_ADD_OPEN => {
+                flush(&mut chunks, &mut buffer, kind);
+                kind = RedlineKind::Added;
+            }
+            REDLINE_DEL_CLOSE | REDLINE_ADD_CLOSE => {
+                flush(&mut chunks, &mut buffer, kind);
+                kind = RedlineKind::Same;
+            }
+            _ => buffer.push(ch),
+        }
+    }
+    flush(&mut chunks, &mut buffer, kind);
+    chunks
+}
+
+/// 把一段文字包成删除标记。
+pub(crate) fn mark_deleted(text: &str) -> String {
+    format!("{REDLINE_DEL_OPEN}{text}{REDLINE_DEL_CLOSE}")
+}
+
+/// 把一段文字包成新增标记。
+pub(crate) fn mark_added(text: &str) -> String {
+    format!("{REDLINE_ADD_OPEN}{text}{REDLINE_ADD_CLOSE}")
+}
+
+/// 是不是花脸稿哨兵。各渲染路径用它做兜底过滤。
+pub(crate) fn is_redline_sentinel(ch: char) -> bool {
+    matches!(
+        ch,
+        REDLINE_DEL_OPEN | REDLINE_DEL_CLOSE | REDLINE_ADD_OPEN | REDLINE_ADD_CLOSE
+    )
+}
+
+/// 去掉全部哨兵，还原成干净文本。导出 Markdown 或做标题提取时用。
+pub(crate) fn strip_redline(text: &str) -> String {
+    text.replace(
+        [
+            REDLINE_DEL_OPEN,
+            REDLINE_DEL_CLOSE,
+            REDLINE_ADD_OPEN,
+            REDLINE_ADD_CLOSE,
+        ],
+        "",
+    )
 }
 
 /// 解析正文行内 Markdown：保留 `**…**` / `__…__` 的加粗语义，同时叠加括号字体规则。
