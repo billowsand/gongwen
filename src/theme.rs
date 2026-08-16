@@ -772,10 +772,12 @@ pub fn set_current_paper(mode: PaperMode) {
 /// **只作用于屏幕预览**：导出的 DOCX/TeX/PDF 由 `export` 模块另行生成，完全不读
 /// 这里的颜色，因此不论用户把纸面调成什么，落到纸上的永远是白纸黑字红头。
 ///
-/// 明色纸面刻意写死纯白纯黑纯红，与打印稿逐字节一致；深色纸面则从当前主题取色，
-/// 这样纸和界面外壳才是同一套颜色，而不是在深色界面里挖一个突兀的黑洞。
+/// 明色纸面刻意写死纯白纯黑纯红，与打印稿逐字节一致。深色纸面分两种情形：深色
+/// 主题下从主题自身取色，纸与界面外壳因此是同一套颜色，而不是在深色界面里挖一个
+/// 突兀的黑洞；明色主题下被显式选了深色纸时，主题本身没有深色面可借，改用一组
+/// 中性深色——否则 `surface` 恰好就是白的，「深色纸面」会一点效果都没有。
 pub mod paper {
-    use super::{CURRENT_PAPER, Color32, current};
+    use super::{CURRENT_PAPER, Color32, Theme, current};
     use crate::models::PaperMode;
 
     /// 红头与红色反线在明色纸面上的颜色：与 LaTeX 类里一致的纯红。
@@ -784,6 +786,53 @@ pub mod paper {
     const OFFICIAL_RED_ON_DARK: Color32 = Color32::from_rgb(0xFF, 0x6B, 0x6B);
     /// 明色纸面的鼠标悬停淡底。
     const HOVER_TINT: Color32 = Color32::from_rgb(0xF7, 0xF2, 0xEC);
+
+    /// 一套纸面取色。
+    struct Sheet {
+        bg: Color32,
+        ink: Color32,
+        ink_muted: Color32,
+        ink_faint: Color32,
+        hover: Color32,
+    }
+
+    /// 明色主题下被选了深色纸时使用的中性纸：不带色相，配哪套明色主题都不冲突。
+    const NEUTRAL_DARK_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(0x1E, 0x20, 0x24),
+        ink: Color32::from_rgb(0xE6, 0xE4, 0xDE),
+        ink_muted: Color32::from_rgb(0xA8, 0xA6, 0xA0),
+        ink_faint: Color32::from_rgb(0x6E, 0x6C, 0x68),
+        hover: Color32::from_rgb(0x2A, 0x2D, 0x33),
+    };
+
+    /// 给定主题与纸面明暗，算出该用哪套纸色。不读全局，便于直接测试。
+    fn sheet_for(theme: Theme, dark_paper: bool) -> Sheet {
+        if !dark_paper {
+            return Sheet {
+                bg: Color32::WHITE,
+                ink: Color32::BLACK,
+                ink_muted: Color32::from_gray(90),
+                ink_faint: Color32::from_gray(150),
+                hover: HOVER_TINT,
+            };
+        }
+        if theme.dark {
+            Sheet {
+                bg: theme.surface,
+                ink: theme.text,
+                ink_muted: theme.text_soft,
+                ink_faint: theme.text_muted,
+                hover: theme.surface_hover,
+            }
+        } else {
+            NEUTRAL_DARK_SHEET
+        }
+    }
+
+    /// 当前生效的纸面取色。
+    fn sheet() -> Sheet {
+        sheet_for(current(), is_dark())
+    }
 
     /// 当前纸面是否为深色。
     pub fn is_dark() -> bool {
@@ -796,20 +845,12 @@ pub mod paper {
 
     /// 纸底。
     pub fn bg() -> Color32 {
-        if is_dark() {
-            current().surface
-        } else {
-            Color32::WHITE
-        }
+        sheet().bg
     }
 
     /// 正文墨色，也用于表格线等纸面上的黑色笔画。
     pub fn ink() -> Color32 {
-        if is_dark() {
-            current().text
-        } else {
-            Color32::BLACK
-        }
+        sheet().ink
     }
 
     /// 红头、红色反线与份号等规范要求用红的地方。
@@ -823,34 +864,72 @@ pub mod paper {
 
     /// 鼠标悬停在可点击块上时的淡底。
     pub fn hover_tint() -> Color32 {
-        if is_dark() {
-            current().surface_hover
-        } else {
-            HOVER_TINT
-        }
+        sheet().hover
     }
 
     /// 纸面上的次级文字（图片占位卡片的说明等）。明色下与原来的 `gray(90)` 一致。
     pub fn ink_muted() -> Color32 {
-        if is_dark() {
-            current().text_soft
-        } else {
-            Color32::from_gray(90)
-        }
+        sheet().ink_muted
     }
 
     /// 纸面上最弱的笔画（占位卡片的细边框）。明色下与原来的 `gray(150)` 一致。
     pub fn ink_faint() -> Color32 {
-        if is_dark() {
-            current().text_muted
-        } else {
-            Color32::from_gray(150)
-        }
+        sheet().ink_faint
     }
 
     /// 纸张投影。深色纸压在深色底上，投影要更重才托得起来。
     pub fn shadow_alpha() -> u8 {
         if is_dark() { 90 } else { 18 }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{NEUTRAL_DARK_SHEET, sheet_for};
+        use crate::models::ThemeName;
+        use crate::theme::by_name;
+        use eframe::egui::Color32;
+
+        /// 白纸永远是纯白纯黑，与打印稿逐字节一致——不论界面主题是哪套。
+        #[test]
+        fn light_paper_is_pure_black_on_white_under_every_theme() {
+            for name in ThemeName::ALL {
+                let sheet = sheet_for(by_name(name), false);
+                assert_eq!(sheet.bg, Color32::WHITE, "{name:?} 的白纸底不是纯白");
+                assert_eq!(sheet.ink, Color32::BLACK, "{name:?} 的白纸墨色不是纯黑");
+            }
+        }
+
+        /// 深色纸在深色主题下跟随主题，与界面外壳同一套颜色。
+        #[test]
+        fn dark_paper_follows_dark_themes() {
+            for name in ThemeName::ALL.into_iter().filter(|n| by_name(*n).dark) {
+                let theme = by_name(name);
+                let sheet = sheet_for(theme, true);
+                assert_eq!(sheet.bg, theme.surface, "{name:?} 的深色纸底未跟随主题");
+                assert_eq!(sheet.ink, theme.text, "{name:?} 的深色纸墨色未跟随主题");
+            }
+        }
+
+        /// 明色主题被显式选了深色纸时，必须退回中性深色纸。
+        ///
+        /// 直接拿 `theme.surface` 会掉进坑里：明色主题的 surface 往往就是纯白，
+        /// 「深色纸面」会变成白纸配浅墨——既没变深，还把字给洗没了。
+        #[test]
+        fn dark_paper_on_light_theme_falls_back_to_neutral_sheet() {
+            for name in ThemeName::ALL.into_iter().filter(|n| !by_name(*n).dark) {
+                let sheet = sheet_for(by_name(name), true);
+                assert_eq!(
+                    sheet.bg, NEUTRAL_DARK_SHEET.bg,
+                    "{name:?} 选深色纸后纸底没变深"
+                );
+                // 真正的判据：底比墨深，才谈得上「黑底白字」。
+                let brightness = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+                assert!(
+                    brightness(sheet.bg) < brightness(sheet.ink),
+                    "{name:?} 选深色纸后仍是浅底深字"
+                );
+            }
+        }
     }
 }
 
