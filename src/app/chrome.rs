@@ -649,6 +649,7 @@ impl GongwenApp {
             for page in [
                 NavPage::Manuscript,
                 NavPage::Vocabulary,
+                NavPage::Proofread,
                 NavPage::AiPrompts,
                 NavPage::Knowledge,
                 NavPage::Settings,

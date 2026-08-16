@@ -29,6 +29,7 @@ mod ai_prompts;
 mod chrome;
 mod jobs;
 mod manuscript_ui;
+mod proofread_ui;
 mod session;
 mod settings;
 mod tabs;
@@ -39,6 +40,7 @@ mod widgets;
 pub(crate) use ai_prompts::{AiPromptDraft, AiPromptPicker};
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
 pub(crate) use manuscript_ui::{ArchivePending, ImportPreview, PdfExportDialog, ZipPasswordDialog};
+pub(crate) use proofread_ui::ProofreadPageState;
 pub(crate) use session::{DraftAction, ExitPrompt};
 pub(crate) use tabs::{NavPage, TabRef};
 pub(crate) use versioning::{
@@ -139,6 +141,7 @@ pub struct GongwenApp {
     /// “AI 优化”按钮弹出的提示词选择面板；None 表示未打开。
     ai_prompt_picker: Option<AiPromptPicker>,
     /// AI 管理页当前编辑的提示词。
+    proofread_page: ProofreadPageState,
     ai_prompt_editor: Option<AiPromptDraft>,
     /// AI 管理页列表里选中的提示词 id。
     ai_prompt_selected: Option<u32>,
@@ -349,6 +352,7 @@ impl GongwenApp {
             vocabulary_delete_confirm: None,
             vocabulary_clear_confirm: false,
             ai_prompt_picker: None,
+            proofread_page: ProofreadPageState::default(),
             ai_prompt_editor: None,
             ai_prompt_selected: None,
             ai_prompt_delete_confirm: None,
@@ -513,6 +517,7 @@ impl eframe::App for GongwenApp {
             match active {
                 TabRef::Doc(_) => self.draft_page().create_ui(&mut content_ui),
                 TabRef::Page(NavPage::Vocabulary) => self.vocabulary_ui(&mut content_ui),
+                TabRef::Page(NavPage::Proofread) => self.proofread_ui(&mut content_ui),
                 TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(&mut content_ui),
                 TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(&mut content_ui),
                 TabRef::Page(NavPage::Knowledge) => {

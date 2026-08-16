@@ -19,6 +19,7 @@ use std::path::PathBuf;
 pub(crate) enum NavPage {
     Manuscript,
     Vocabulary,
+    Proofread,
     AiPrompts,
     Knowledge,
     Settings,
@@ -39,6 +40,7 @@ impl NavPage {
         match self {
             Self::Manuscript => "manuscript",
             Self::Vocabulary => "vocabulary",
+            Self::Proofread => "proofread",
             Self::AiPrompts => "ai_prompts",
             Self::Knowledge => "knowledge",
             Self::Settings => "settings",
@@ -49,6 +51,7 @@ impl NavPage {
         match key {
             "manuscript" => Some(Self::Manuscript),
             "vocabulary" => Some(Self::Vocabulary),
+            "proofread" => Some(Self::Proofread),
             "ai_prompts" => Some(Self::AiPrompts),
             "knowledge" => Some(Self::Knowledge),
             "settings" => Some(Self::Settings),
@@ -60,6 +63,7 @@ impl NavPage {
         match self {
             Self::Manuscript => "稿件管理",
             Self::Vocabulary => "标准词库",
+            Self::Proofread => "校对词表",
             Self::AiPrompts => "AI 管理",
             Self::Knowledge => "知识库",
             Self::Settings => "设置",
@@ -70,6 +74,7 @@ impl NavPage {
         match self {
             Self::Manuscript => theme::Icon::Library,
             Self::Vocabulary => theme::Icon::Book,
+            Self::Proofread => theme::Icon::SquareCheck,
             Self::AiPrompts => theme::Icon::WandSparkles,
             Self::Knowledge => theme::Icon::PackageOpen,
             Self::Settings => theme::Icon::Settings,

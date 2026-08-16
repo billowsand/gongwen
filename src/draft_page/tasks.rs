@@ -100,6 +100,16 @@ impl DraftPage<'_> {
             *self.status = "请至少勾选一种导出格式。".into();
             return;
         }
+        // 成文日期只在导出这一刻查。编辑期间日期本来就该是旧的，那时候弹提示
+        // 纯属打扰；而稿子做好放了几天才签发、日期还停在上周，是真出过的事。
+        if let Some(message) = crate::proofread_rules::check_doc_date(
+            &self.doc.draft,
+            chrono::Local::now().date_naive(),
+        ) {
+            self.doc.warnings.push(ReviewNote::from(message));
+            self.doc.result_drawer_open = true;
+        }
+
         let (key, seq) = self.begin_job();
         *self.status = "正在导出当前审校稿…".into();
         self.doc.output_files.clear();

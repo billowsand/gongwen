@@ -190,6 +190,45 @@ mod tests {
         );
     }
 
+    /// 校对词表是 v0.4 才有的字段，此前的配置里没有它，载入时必须回落空覆盖层
+    /// ——而不是让整份配置反序列化失败，把用户的词库和模板一起丢掉。
+    #[test]
+    fn configs_written_before_the_proofread_lexicon_still_load() {
+        let legacy = r#"{"output_dir":"C:/out"}"#;
+        let config: AppConfig = serde_json::from_str(legacy).expect("老配置应能反序列化");
+        assert!(config.proofread.overrides.is_empty());
+        assert!(config.proofread.custom.is_empty());
+    }
+
+    /// 词表改动必须能存下来：停用一条内置、自建一条，存盘再读回来要一模一样。
+    #[test]
+    fn proofread_changes_survive_a_save_and_load_round_trip() {
+        use crate::models::ProofreadRule;
+
+        let mut config = AppConfig::default();
+        config.proofread.override_mut("TYP-001").enabled = Some(false);
+        config.proofread.custom.push(ProofreadRule {
+            id: "USR-001".into(),
+            wrong: "我办".into(),
+            suggestion: "本办".into(),
+            level: "疑似".into(),
+            condition: "总是".into(),
+            group: "自定义".into(),
+            note: String::new(),
+            enabled: true,
+        });
+
+        let raw = serde_json::to_string(&config).expect("序列化");
+        let restored: AppConfig = serde_json::from_str(&raw).expect("反序列化");
+        assert_eq!(restored.proofread, config.proofread);
+
+        // 合并后确实生效：被停用的那条不再命中，自建的那条会命中。
+        let lexicon = crate::proofread::Lexicon::resolved(&restored.proofread);
+        let notes = lexicon.check("按上级布署办理，材料报我办。");
+        assert!(notes.iter().all(|note| note.entry_id != "TYP-001"));
+        assert!(notes.iter().any(|note| note.entry_id == "USR-001"));
+    }
+
     /// 手写或精简过的配置里可以只给出必填字段，其余一律取默认值。
     #[test]
     fn sparse_config_still_loads_with_defaults() {

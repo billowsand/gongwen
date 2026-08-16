@@ -15,6 +15,8 @@ use crate::models::{
     StyleMode, TemplateKind, VocabularyCategory, split_units,
 };
 use crate::prompt;
+use crate::proofread;
+use crate::proofread_rules;
 use crate::theme;
 use crate::units;
 use crate::units::UnitDisplay;
@@ -608,6 +610,31 @@ impl DraftPage<'_> {
         .into_iter()
         .map(ReviewNote::from)
         .collect();
+        // 文字校对与要素校验并列：前者管词语用法，后者管必填与互斥。两边的提示
+        // 都带 span，抽屉里点一下就能跳到出问题的那几个字。
+        // 用合并过用户覆盖层的词表，而不是内置种子——否则词表页上改了不生效。
+        let lexicon = proofread::Lexicon::resolved(&self.config.proofread);
+        // 词表自身有问题（列数不对、正则编译不过）时必须说出来。静默少跑几条
+        // 规则，用户只会以为"校对没查出问题"，比报错更糟。
+        self.doc.warnings.extend(
+            lexicon
+                .load_warnings
+                .iter()
+                .map(|warning| ReviewNote::from(format!("校对词表：{warning}"))),
+        );
+        self.doc.warnings.extend(
+            lexicon
+                .check(&self.doc.generated_markdown)
+                .into_iter()
+                .map(ReviewNote::from),
+        );
+        // 文档级规则：标题规范、文种越界、数字用法、层级序号、附件一致性。
+        // 它们依赖公文要素，改不得也删不掉，所以不进词表。
+        self.doc.warnings.extend(
+            proofread_rules::check(&self.doc.draft, &self.doc.generated_markdown)
+                .into_iter()
+                .map(ReviewNote::from),
+        );
         if self.doc.draft.kind.has_document_number()
             && self.doc.draft.profile.letter_version == LetterVersion::Formal
         {
