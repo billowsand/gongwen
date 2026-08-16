@@ -62,6 +62,15 @@ pub(crate) fn official_letter_tex(
     } else {
         tex_escape(signature_day)
     };
+    // 编号时把版记的「共印 N 份」钉到 Rust 算出的同一个数：份号编到几，
+    // 版记就得说几，两处由 TeX 和 Rust 各算一遍迟早会岔开。
+    let numbering = input.profile.number_copies && input.kind.has_copy_numbering();
+    let copies_option = if numbering { "noautocalc" } else { "autocalc" };
+    let print_copies_command = if numbering {
+        format!("\\renewcommand{{\\PrintCopies}}{{{}}}\n", copy_count(input))
+    } else {
+        String::new()
+    };
     let duplex_option = if input.profile.duplex_printing {
         ",duplex"
     } else {
@@ -154,7 +163,8 @@ pub(crate) fn official_letter_tex(
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[proof,noforcenewpage,autocalc{duplex_option}{phone_notice_option}{joint_option}]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,{copies_option}{duplex_option}{phone_notice_option}{joint_option}]{{gonghan-gwa}}
+{print_copies_command}
 \renewcommand{{\IssuingUnit}}{{{issuing}}}
 \renewcommand{{\Year}}{{{document_year}}}
 \renewcommand{{\DepartmentCode}}{{{department}}}
@@ -176,9 +186,12 @@ pub(crate) fn official_letter_tex(
 \renewcommand{{\ContactPhone}}{{{phone}}}
 {joint_commands}
 \begin{{document}}
-\makeletter
+{document_body}
 \end{{document}}
 "#,
+        document_body = copy_body_tex(input),
+        copies_option = copies_option,
+        print_copies_command = print_copies_command,
         issuing = tex_escape(&issuing_unit),
         document_year = tex_escape(&document_year),
         year = tex_escape(signature_year),
@@ -214,6 +227,39 @@ pub(crate) fn official_letter_tex(
 }
 
 /// 普通公文只输出密级、标题、正文、附件和页码设置，不把其他模板元数据写入 TeX。
+/// 这一份文要印几份：就是版记里那个「共印 N 份」（主送＋抄送＋承办）。
+///
+/// 份数不让人另填一遍——两处各填一次，迟早对不上，而对不上的后果是纸上的份号
+/// 与登记簿数不齐。至少一份。
+pub(crate) fn copy_count(input: &DraftInput) -> u32 {
+    crate::export::automatic_print_copies(input).max(1) as u32
+}
+
+/// 文档主体：不编份号时就是一个 `\makeletter`，与从前逐字节一致；
+/// 编份号时按共印份数逐份重排，每份换页并把页码归 1。
+///
+/// 只有公函的版头有份号位（`\DocumentHeader`）。其余文种即使勾了份号也只会
+/// 印出 N 份一模一样的纸，所以这里按文种拦一道。
+fn copy_body_tex(input: &DraftInput) -> String {
+    if !input.profile.number_copies || !input.kind.has_copy_numbering() {
+        return "\\makeletter".to_string();
+    }
+    let count = copy_count(input);
+    let mut out = String::new();
+    for index in 0..count {
+        if index > 0 {
+            out.push_str("\n\\clearpage\\setcounter{page}{1}\n");
+        }
+        // 第一份写孤行探针，其余份静默——否则同一个孤行会被报 N 次。
+        let command = if index == 0 { "GwCopy" } else { "GwCopyQuiet" };
+        out.push_str(&format!(
+            "\\{command}{{{}}}",
+            crate::models::format_copy_number(index + 1)
+        ));
+    }
+    out
+}
+
 pub(crate) fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines(markdown);
     let title = blocks

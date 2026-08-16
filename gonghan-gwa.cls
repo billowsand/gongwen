@@ -892,6 +892,18 @@
 }
 
 % ========== 主文档生成命令 ==========
+% ========== 份号逐份编制 ==========
+% 涉密件必须逐份编号：印 8 份，纸上就该是 01–08，登记簿一一对应。
+% \GwCopy 排一份，份号由参数给定；调用方在两份之间自行 \clearpage 并把页码
+% 归 1——每一份都是独立的一份文件，页码不能接着上一份往下数。
+%
+% 第二份起用 \GwCopyQuiet：孤行探针是给审校面板用的，同一篇正文写 N 遍只会
+% 让同一个孤行被报 N 次。这里把 \GwaTail 在组内还原成纯 \par。
+\newcommand{\GwCopy}[1]{{\renewcommand{\SerialNumber}{#1}\makeletter}}
+\newcommand{\GwCopyQuiet}[1]{{%
+  \renewcommand{\GwaTail}[1]{\par}%
+  \renewcommand{\SerialNumber}{#1}\makeletter}}
+
 \newcommand{\makeletter}{%
     \thispagestyle{firstpage}
     \zihao{3}

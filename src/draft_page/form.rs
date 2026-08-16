@@ -1758,6 +1758,32 @@ impl DraftPage<'_> {
                             );
                         ui.end_row();
                     }
+
+                    // 份号只有公函的版头有位置放，其余文种不显示这一行。
+                    if kind.has_copy_numbering() {
+                        row_label_with_info(
+                            ui,
+                            "份号",
+                            "涉密件须逐份编号：印几份，纸上就是 01、02……与登记簿一一对应。\
+                             不勾选时版头固定排 01，与从前一致。",
+                        );
+                        // 份数不另设：就是版记那个「共印 N 份」。让人再填一遍，
+                        // 两处迟早对不上，而对不上就意味着纸上的份号与登记簿数不齐。
+                        let count = crate::export::copy_count(&self.doc.draft);
+                        ui.checkbox(&mut self.doc.draft.profile.number_copies, "逐份编号")
+                            .on_hover_text("份数取版记的「共印 N 份」，随主送、抄送、承办单位自动变");
+                        ui.end_row();
+                        if self.doc.draft.profile.number_copies {
+                            ui.label("");
+                            ui.weak(format!(
+                                "共印 {count} 份 → 导出的 PDF 含 {count} 份，份号 01 至 {}；\
+                                 打印时份数请设为 1，否则每份的份号会一模一样。\
+                                 Word 版没有份号位，只出一份。",
+                                crate::models::format_copy_number(count),
+                            ));
+                            ui.end_row();
+                        }
+                    }
                 });
         }
 

@@ -62,6 +62,15 @@ impl TemplateKind {
         matches!(self, Self::OfficialLetter | Self::RedHeadApproval)
     }
 
+    /// 版头带份号位的文种。
+    ///
+    /// 只有公函：份号由类文件的 `\DocumentHeader` 排在文号左端。红头呈批件走
+    /// `\makeredapproval`，版式里没有份号位；白头件、会议议程、普通公文的抬头
+    /// 只有密级。给它们加份号位是改版式，风险另计，没有一并做。
+    pub fn has_copy_numbering(self) -> bool {
+        matches!(self, Self::OfficialLetter)
+    }
+
     /// 承办条目数量上限。红头呈批件的承办区在首页底部、每条占一行，条目过多会
     /// 把批示框和正文区压没，因此限定 4 条；其他文种的版记不受此限。
     pub fn max_responsible_entries(self) -> Option<usize> {
@@ -358,6 +367,15 @@ pub fn builtin_ai_prompts() -> Vec<AiPrompt> {
             builtin_key: "expand".into(),
         },
     ]
+}
+
+/// 份号位宽固定两位；超过 99 份才用三位，避免版头忽宽忽窄。
+pub fn format_copy_number(value: u32) -> String {
+    if value < 100 {
+        format!("{value:02}")
+    } else {
+        value.to_string()
+    }
 }
 
 /// 校对词表里的一条完整规则。字段与内置种子表 `proofread-lexicon.tsv` 的列
@@ -934,6 +952,11 @@ pub struct TemplateProfile {
     pub style_mode: StyleMode,
     /// 函稿按双面方式排版页码：奇数页靠右、偶数页靠左。
     pub duplex_printing: bool,
+    /// 逐份编制份号。默认关闭，关闭时版头固定排 01，与从前一致。
+    ///
+    /// 份数不单独设置——就是版记里那个「共印 N 份」（主送＋抄送＋承办），
+    /// 本来就是这份文要印几份，再让人填一遍只会两处对不上。
+    pub number_copies: bool,
 }
 
 impl Default for TemplateProfile {
@@ -967,6 +990,7 @@ impl Default for TemplateProfile {
             letter_version: LetterVersion::Formal,
             style_mode: StyleMode::Normal,
             duplex_printing: false,
+            number_copies: false,
         }
     }
 }
@@ -1747,6 +1771,24 @@ mod tests {
     }
 
     /// 旧稿件 JSON 的 JointContact 没有 unit 字段：反序列化自动补空串，后续回落配对。
+    /// 份号那一行画在「版记」分区、紧挨「打印方式」的下面。两个判定必须同时
+    /// 为真，否则界面上会出现「有打印方式没份号」或反过来的错位。
+    #[test]
+    fn the_copy_number_row_sits_with_the_print_row_for_letters() {
+        assert!(TemplateKind::OfficialLetter.uses_letter_layout());
+        assert!(TemplateKind::OfficialLetter.has_copy_numbering());
+        // 其余文种版头没有份号位，不画这一行。
+        for kind in [
+            TemplateKind::PhoneNotice,
+            TemplateKind::PlainDocument,
+            TemplateKind::MeetingAgenda,
+            TemplateKind::WhitePaper,
+            TemplateKind::RedHeadApproval,
+        ] {
+            assert!(!kind.has_copy_numbering(), "{kind:?} 不该出现份号行");
+        }
+    }
+
     #[test]
     fn old_joint_contact_json_deserializes_with_default_unit() {
         let json = r#"{"name":"张三","phone":"010-11111111"}"#;

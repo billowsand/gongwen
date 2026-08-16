@@ -8,8 +8,9 @@ mod docx;
 mod latex;
 pub(crate) mod table;
 pub(crate) mod title;
+pub(crate) use docx::record::automatic_print_copies;
 pub(crate) use docx::write_docx;
-pub(crate) use latex::write_tex;
+pub(crate) use latex::{copy_count, write_tex};
 
 use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
 use crate::units::UnitDisplay;

@@ -261,6 +261,15 @@ fn validate_metadata(
             .push("已勾选“指人专办”，但未选择密级；密级为空时指人专办不会出现在成稿中".to_string());
     }
 
+    // 份号只有公函的版头有位置放。切换文种后旧配置可能仍带着这个开关，
+    // 那样勾着却不生效，必须说出来，别让人以为印出来是编了号的。
+    if profile.number_copies && !input.kind.has_copy_numbering() {
+        warnings.push(format!(
+            "已勾选“逐份编号”，但{}的版头没有份号位，导出仍只有一份且不编号",
+            input.kind.label()
+        ));
+    }
+
     if input.kind.has_document_number() {
         let year = input.document_year();
         if year.len() != 4 || !year.chars().all(|ch| ch.is_ascii_digit()) {
@@ -916,6 +925,34 @@ mod tests {
                 .any(|warning| warning.contains("明确一个主发文单位"))
         );
         assert!(!valid.iter().any(|warning| warning.contains("缺少联系电话")));
+    }
+
+    #[test]
+    fn warns_when_copy_numbering_is_on_for_a_kind_without_a_serial_slot() {
+        // 切换文种后旧配置可能仍带着这个开关，勾着却不生效，必须说出来。
+        let mut input = DraftInput {
+            kind: TemplateKind::WhitePaper,
+            profile: crate::models::TemplateProfile::for_kind(TemplateKind::WhitePaper),
+            ..Default::default()
+        };
+        input.profile.number_copies = true;
+        let warnings = validate(&input, "# 标题\n\n正文。", &[], &rules());
+        assert!(
+            warnings.iter().any(|w| w.contains("份号位")),
+            "应当提示份号不生效：{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn copy_numbering_on_a_letter_is_silent() {
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            profile: crate::models::TemplateProfile::for_kind(TemplateKind::OfficialLetter),
+            ..Default::default()
+        };
+        input.profile.number_copies = true;
+        let warnings = validate(&input, "# 标题\n\n正文。", &[], &rules());
+        assert!(!warnings.iter().any(|w| w.contains("份号位")));
     }
 
     #[test]

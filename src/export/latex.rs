@@ -22,7 +22,7 @@ pub(crate) use attachments::{
 };
 pub(crate) use fonts::font_setup_hook;
 pub(crate) use official::{
-    official_letter_sections_to_tex, official_letter_sections_to_tex_with_barrier,
+    copy_count, official_letter_sections_to_tex, official_letter_sections_to_tex_with_barrier,
     official_letter_tex, plain_document_tex,
 };
 pub(crate) use papers::{meeting_agenda_tex, red_head_approval_tex, white_paper_tex};
@@ -33,6 +33,16 @@ pub(crate) use text::{
 
 const GONGHAN_CLASS: &str = include_str!("../../gonghan-gwa.cls");
 const GONGHAN_CLASS_NAME: &str = "gonghan-gwa";
+/// 随类文件一起分发的 ulem。
+///
+/// 类文件里的花脸稿标记要用 `xeCJKfntef`，而它 `\RequirePackage{ulem}`——
+/// 但离线 TeX bundle 是裁剪过的最小集，里面没有 ulem，也没有 ulem 画波浪线要
+/// 的 lasy6 字体。所以这份 ulem 是随包的，且改了一行：把加载 lasy6 那句换成
+/// `\let\sixly\relax`。我们不用它的 `\uwave`，波浪由类文件里的 `\GwWaveUnit`
+/// 自绘，反而不挑字体。ulem 的许可证明确允许修改与再分发，只要保留版权声明。
+///
+/// 每次导出都要跟着 `.cls` 一起写出去——少了它，连普通公文都编译不了。
+const ULEM_STY: &str = include_str!("../../ulem.sty");
 
 pub fn write_tex(
     path: &Path,
@@ -68,6 +78,19 @@ pub fn write_tex(
     if needs_update {
         fs::write(&class_path, packaged_class)
             .with_context(|| format!("无法写入 {}", class_path.display()))?;
+    }
+    // ulem 与类文件同进退：类文件 \RequirePackage{xeCJKfntef} 会拉它，
+    // 而离线 bundle 里没有。漏写这一个文件，任何导出都编译不出 PDF。
+    let ulem_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("ulem.sty");
+    let ulem_needs_update = fs::read_to_string(&ulem_path)
+        .map(|existing| existing != ULEM_STY)
+        .unwrap_or(true);
+    if ulem_needs_update {
+        fs::write(&ulem_path, ULEM_STY)
+            .with_context(|| format!("无法写入 {}", ulem_path.display()))?;
     }
     // 把 markdown 引用的图片复制到 tex 同目录（保持 images/ 相对结构），
     // 让 \includegraphics 能按相对路径取到文件（tectonic 以 tex 目录为工作目录）。
@@ -1381,5 +1404,115 @@ mod tests {
     #[test]
     fn official_letter_class_supports_per_attachment_landscape_pages() {
         assert!(GONGHAN_CLASS.contains("\\RequirePackage{pdflscape}"));
+    }
+}
+
+#[cfg(test)]
+mod copy_numbering_tests {
+    use super::*;
+    use crate::models::{TemplateKind, TemplateProfile};
+
+    /// 主送 2 家、抄送 1 家、承办 1 家 → 共印 4 份。
+    fn letter(number_copies: bool) -> DraftInput {
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            profile: TemplateProfile::for_kind(TemplateKind::OfficialLetter),
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某单位".into();
+        input.profile.recipient = "甲单位、乙单位".into();
+        input.profile.copies_to = "丙单位".into();
+        input.profile.responsible_unit = "办公室".into();
+        input.profile.number_copies = number_copies;
+        input
+    }
+
+    fn body_of(tex: &str) -> String {
+        let start = tex.find("\\begin{document}").expect("有 document 环境");
+        let end = tex.find("\\end{document}").expect("有 document 环境");
+        tex[start + "\\begin{document}".len()..end]
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn numbering_off_keeps_the_old_single_makeletter() {
+        // 默认关闭时产出必须与从前逐字节一致，这是不打扰存量用户的底线。
+        let tex = official_letter_tex(&letter(false), "# 标题\n\n正文。", &UnitDisplay::new(&[]));
+        assert_eq!(body_of(&tex), "\\makeletter");
+        assert!(tex.contains("autocalc"), "关闭时版记仍自动算份数");
+        assert!(!tex.contains("noautocalc"));
+        assert!(!tex.contains("\\PrintCopies"));
+    }
+
+    #[test]
+    fn the_copy_count_comes_from_the_printed_total() {
+        // 份数不另设：就是版记的「共印 N 份」= 主送 2 + 抄送 1 + 承办 1。
+        assert_eq!(copy_count(&letter(true)), 4);
+    }
+
+    #[test]
+    fn every_copy_is_numbered_and_paged_independently() {
+        let tex = official_letter_tex(&letter(true), "# 标题\n\n正文。", &UnitDisplay::new(&[]));
+        let body = body_of(&tex);
+        for expected in [
+            "\\GwCopy{01}",
+            "\\GwCopyQuiet{02}",
+            "\\GwCopyQuiet{03}",
+            "\\GwCopyQuiet{04}",
+        ] {
+            assert!(body.contains(expected), "缺少 {expected}：{body}");
+        }
+        // 每一份都是独立一份文件，页码必须归 1。
+        assert_eq!(body.matches("\\setcounter{page}{1}").count(), 3);
+        // 只有第一份写孤行探针，否则同一个孤行会被报四次。
+        assert_eq!(body.matches("\\GwCopy{").count(), 1);
+    }
+
+    #[test]
+    fn the_record_total_is_pinned_to_the_same_number() {
+        // 份号编到 04，版记就必须说「共印 4 份」。两处各算一遍迟早岔开，
+        // 所以编号时把 TeX 的自动计算关掉，用 Rust 算出的同一个数。
+        let tex = official_letter_tex(&letter(true), "# 标题\n\n正文。", &UnitDisplay::new(&[]));
+        assert!(tex.contains("noautocalc"));
+        assert!(tex.contains("\\renewcommand{\\PrintCopies}{4}"));
+    }
+
+    #[test]
+    fn the_count_follows_the_units_so_there_is_nothing_to_keep_in_sync() {
+        let mut input = letter(true);
+        input.profile.copies_to = "丙单位、丁单位、戊单位".into();
+        assert_eq!(copy_count(&input), 6);
+        let body = body_of(&official_letter_tex(
+            &input,
+            "# 标题\n\n正文。",
+            &UnitDisplay::new(&[]),
+        ));
+        assert!(body.contains("\\GwCopyQuiet{06}"));
+        assert!(!body.contains("\\GwCopyQuiet{07}"));
+    }
+
+    #[test]
+    fn a_letter_with_no_units_still_prints_one_copy() {
+        let mut input = letter(true);
+        input.profile.recipient = String::new();
+        input.profile.copies_to = String::new();
+        input.profile.responsible_unit = String::new();
+        assert_eq!(copy_count(&input), 1);
+        assert_eq!(
+            body_of(&official_letter_tex(
+                &input,
+                "# 标题\n\n正文。",
+                &UnitDisplay::new(&[])
+            )),
+            "\\GwCopy{01}"
+        );
+    }
+
+    #[test]
+    fn numbers_beyond_ninety_nine_widen_to_three_digits() {
+        assert_eq!(crate::models::format_copy_number(7), "07");
+        assert_eq!(crate::models::format_copy_number(99), "99");
+        assert_eq!(crate::models::format_copy_number(100), "100");
     }
 }
