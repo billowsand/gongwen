@@ -11,7 +11,7 @@ description: 发布 gongwen 新版本到 GitHub Releases：bump 版本、推送 
 
 - 远程：`git@github.com:billowsand/gongwen.git`，发布分支 `main`。
 - 版本号只维护在 `Cargo.toml`（根包 `version`）+ `Cargo.lock`（根包 `gongwen-assistant` 的 `version`）。
-- 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test 三平台）；`release.yml` 在 push `v*` tag 时触发（构建 Windows setup.exe、Linux ARM64 deb、macOS ARM64 DMG + 各自 `.sha256`，共 6 个资产，最后 `release` job 用 `--generate-notes` 创建占位 release）。
+- 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test 三平台）；`release.yml` 在 push `v*` tag 时触发（构建 Windows setup.exe、Linux ARM64/AMD64 deb、macOS ARM64 DMG + 各自 `.sha256`，共 8 个资产，最后 `release` job 用 `--generate-notes` 创建占位 release）。
 - 本机无 `pwsh`：不能跑 `scripts/bump-version.ps1`，版本号用手动编辑。
 - 历史惯例：tag 为 **annotated tag**（消息为中文概述）；release 标题为「公文助手 vX.Y.Z」；版本号按 **patch** 递增（`v0.3.x` 系列）；发布前有一个 `chore: release vX.Y.Z` 提交。
 - Release workflow 全程约 20–30 分钟（三平台构建 + 打包）。
@@ -80,7 +80,7 @@ gh run watch <run-id> --exit-status   # 可后台运行，两路并行
 gh run view <run-id> --json jobs --jq '.jobs[] | {name, status, conclusion}'
 ```
 
-- 期望终态：CI 三平台 job 全 success；Release 的 5 个 job（Build Windows / Build Linux ARM64 / Build macOS / Package Linux ARM64 / Publish GitHub release）全 success。
+- 期望终态：CI 三平台 job 全 success；Release 的 7 个 job（Build Windows / Build Linux ARM64 / Package Linux ARM64 / Build Linux AMD64 / Package Linux AMD64 / Build macOS / Publish GitHub release）全 success。
 - **CI 失败时**：先 `gh run cancel` 取消所有本次相关 run（CI + Release，避免浪费与旧 release 干扰）→ 本地修复（多数是 fmt）→ 提交 → 移动 tag（步骤 5 的做法）→ 重新 `git push origin main` + `git push origin v0.3.22`。
 
 ### 7. 填写版本更新说明（必须，勿跳过）
@@ -100,11 +100,11 @@ gh release edit v0.3.22 --title "公文助手 v0.3.22" --notes-file /tmp/release
 gh run view <ci-run-id> --json status,conclusion
 gh run view <release-run-id> --json status,conclusion
 gh api repos/billowsand/gongwen/releases/tags/v0.3.22 --jq '{name, tag_name, draft, prerelease, html_url}'
-gh release view v0.3.22 --json assets --jq '.assets[] | .name'   # 应为 6 个资产
+gh release view v0.3.22 --json assets --jq '.assets[] | .name'   # 应为 8 个资产
 git status -sb                # 与 origin/main 同步、工作区干净
 ```
 
-- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明、6 个资产齐全。
+- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明、8 个资产齐全。
 - 清理临时文件：`rm -f /tmp/release-notes-v0.3.22.md`。
 
 ### 9. 收尾汇报
@@ -137,6 +137,7 @@ git status -sb                # 与 origin/main 同步、工作区干净
 
 - Windows x64 安装程序
 - Linux ARM64 Debian 软件包（兼容 GLIBC 2.28）
+- Linux AMD64 Debian 软件包（兼容 GLIBC 2.28）
 - macOS ARM64 DMG
 
 各安装包均附带 SHA-256 校验文件。

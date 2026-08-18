@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package the portable Linux layout (binary + TeX runtime) as a Debian package.
 #
-# Usage: package-deb.sh <version> <staging-dir> <output-dir>
+# Usage: package-deb.sh <version> <staging-dir> <output-dir> [architecture]
 #
 # The staging directory is produced by scripts/package-portable.ps1 with
 # -ArchiveFormat none; it contains `gongwen-assistant`, `runtime/`, and the
@@ -15,9 +15,22 @@ STAGING="${2:?missing staging directory}"
 OUTPUT_DIR="${3:?missing output directory}"
 
 PACKAGE="gongwen-assistant"
-ARCH="arm64"
+ARCH="${4:-arm64}"
 INSTALL_ROOT="/opt/gongwen-assistant"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "$ARCH" in
+    arm64)
+        PLATFORM_DESCRIPTION="Linux ARM64"
+        ;;
+    amd64)
+        PLATFORM_DESCRIPTION="Linux AMD64"
+        ;;
+    *)
+        echo "error: unsupported Debian architecture: $ARCH (expected arm64 or amd64)" >&2
+        exit 1
+        ;;
+esac
 
 # Runtime dependencies for eframe/glow + rfd (GTK3) on X11/Wayland. Kept as a
 # deterministic list instead of dpkg-shlibdeps so the package does not depend
@@ -105,7 +118,7 @@ Description: 离线公文写作助手 (offline official-document writing assista
  离线公文写作桌面应用。内置便携式 TeX 运行时（Tectonic + 离线 bundle + 字体），
  可导出 Markdown、DOCX、TeX 并编译 PDF。
  .
- 此包针对 Linux ARM64（glibc >= 2.28），安装在 /opt/gongwen-assistant。
+ 此包针对 $PLATFORM_DESCRIPTION（glibc >= 2.28），安装在 /opt/gongwen-assistant。
 EOF
 
 mkdir -p "$OUTPUT_DIR"

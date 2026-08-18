@@ -26,7 +26,7 @@
 
 ### 获取发布版
 
-GitHub Releases 提供三种安装包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）、Linux ARM64 的 Debian 包（`gongwen-assistant_<版本>_arm64.deb`）与 macOS Apple Silicon 的 DMG（`gongwen-assistant-<版本>-macos-arm64.dmg`）。三者都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
+GitHub Releases 提供四种安装包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）、Linux ARM64 的 Debian 包（`gongwen-assistant_<版本>_arm64.deb`）、Linux AMD64 的 Debian 包（`gongwen-assistant_<版本>_amd64.deb`）与 macOS Apple Silicon 的 DMG（`gongwen-assistant-<版本>-macos-arm64.dmg`）。四者都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
 
 macOS 安装：打开 DMG，把「公文助手」拖进 Applications。应用未做开发者签名与公证，首次打开需右键点图标选「打开」，并在系统弹窗中确认；要求 macOS 12 及以上、Apple Silicon。
 
