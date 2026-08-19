@@ -18,7 +18,7 @@ jobs:
     name: fmt / clippy / test (macOS ARM64)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,7 +41,7 @@ jobs:
     name: fmt / clippy / test (Windows x64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -100,7 +100,7 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
