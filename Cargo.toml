@@ -10,6 +10,14 @@ ProductName = "公文助手"
 FileDescription = "公文助手"
 OriginalFilename = "gongwen-assistant.exe"
 
+[features]
+# Debian/麒麟等传统桌面继续使用不依赖 portal 的 GTK3 文件选择器；
+# Arch/Omarchy 发布包用 `--no-default-features --features linux-portal-dialogs`
+# 构建，以便文件选择器跟随 Hyprland/Wayland 桌面。
+default = ["linux-gtk-dialogs"]
+linux-gtk-dialogs = ["rfd/gtk3"]
+linux-portal-dialogs = ["rfd/async-std", "rfd/xdg-portal"]
+
 [dependencies]
 anydoc = "0.1.7"
 anyhow = "1.0"
@@ -17,7 +25,7 @@ calamine = "0.30"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 docx-rs = "0.4.22"
-eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"] }
+eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 egui = "0.35.0"
 egui_extras = { version = "0.35.0", features = ["image", "svg"] }
 hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
@@ -25,9 +33,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 jieba-rs = "0.8"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-# Linux 上用 GTK3 后端（自带对话框），不依赖 xdg-desktop-portal / zenity，
-# 麒麟等无 portal 文件服务的国产系统也能正常弹出文件选择框。
-rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+# Linux 文件选择器后端由上面的 crate feature 选择。不能同时把两种后端写在这里，
+# 因为 rfd 在启用 gtk3 时会固定选择 GTK3，而不会在运行时退回 portal。
+rfd = { version = "0.15", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rust_xlsxwriter = "0.79"
 serde = { version = "1.0", features = ["derive"] }

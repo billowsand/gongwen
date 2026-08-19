@@ -11,6 +11,7 @@ mod images;
 mod knowledge;
 mod knowledge_ui;
 mod last_char_orphan;
+mod linux_desktop;
 mod lmstudio;
 mod macos_window;
 mod manuscript;
@@ -43,8 +44,11 @@ fn main() -> eframe::Result {
     let app_icon = theme::app_icon(storage::load().unwrap_or_default().theme);
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
-        .with_min_inner_size([980.0, 680.0])
+        // 760 宽能在常见 1920 屏幕的二等分平铺与高 DPI 逻辑尺寸下正常容纳；
+        // 功能区本身支持横向滚动，左侧表单最窄 332，中央区仍保留约 400。
+        .with_min_inner_size([760.0, 600.0])
         .with_title(version::APP_TITLE)
+        .with_app_id(version::APP_ID)
         .with_icon(app_icon);
 
     // macOS 保留真正的 AppKit 标题栏和标准红黄绿按钮，仅把标题栏设为透明，

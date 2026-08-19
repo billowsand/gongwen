@@ -1,0 +1,52 @@
+# Generated for each GitHub release. The two checksums are filled from the
+# corresponding Omarchy/Wayland portable archives before publication.
+pkgname=gongwen-assistant-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='基于 egui 与本地模型服务的离线公文写作助手'
+arch=('x86_64' 'aarch64')
+url='https://github.com/billowsand/gongwen'
+license=('MIT')
+depends=(
+  'dbus'
+  'fontconfig'
+  'gcc-libs'
+  'glibc'
+  'libglvnd'
+  'libx11'
+  'libxcb'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'noto-fonts-cjk'
+  'wayland'
+  'xdg-desktop-portal-gtk'
+  'xdg-utils'
+  'zlib'
+)
+optdepends=(
+  'cups: 从应用内直接打印 PDF'
+  'ollama: 使用本机 Ollama 模型服务'
+)
+provides=('gongwen-assistant')
+conflicts=('gongwen-assistant')
+options=('!strip')
+
+source_x86_64=("gongwen-assistant-${pkgver}-x86_64.tar.gz::https://github.com/billowsand/gongwen/releases/download/v${pkgver}/gongwen-assistant-${pkgver}-linux-amd64-omarchy.tar.gz")
+source_aarch64=("gongwen-assistant-${pkgver}-aarch64.tar.gz::https://github.com/billowsand/gongwen/releases/download/v${pkgver}/gongwen-assistant-${pkgver}-linux-arm64-omarchy.tar.gz")
+sha256sums_x86_64=('@AMD64_SHA256@')
+sha256sums_aarch64=('@ARM64_SHA256@')
+
+package() {
+  local root="${srcdir}/gongwen-assistant-${pkgver}"
+  local appdir="${pkgdir}/usr/lib/gongwen-assistant"
+
+  install -dm755 "$appdir" "${pkgdir}/usr/bin" "${pkgdir}/usr/share"
+  cp -a "${root}/app/." "$appdir/"
+  cp -a "${root}/share/." "${pkgdir}/usr/share/"
+  chmod 755 "$appdir/gongwen-assistant" "$appdir/runtime/tectonic/tectonic"
+  ln -s /usr/lib/gongwen-assistant/gongwen-assistant \
+    "${pkgdir}/usr/bin/gongwen-assistant"
+
+  install -Dm644 "$appdir/LICENSE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

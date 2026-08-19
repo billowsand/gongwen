@@ -124,3 +124,8 @@ jobs:
 
       - name: Test
         run: cargo test --locked --all-targets
+
+      # The release publishes a second Linux binary without the GTK3 dialog
+      # backend. Keep that feature combination compiled on a real Linux host.
+      - name: Check Omarchy portal build
+        run: cargo check --locked --no-default-features --features linux-portal-dialogs

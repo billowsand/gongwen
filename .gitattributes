@@ -7,6 +7,10 @@
 *.cls text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.sh text eol=lf
+*.desktop text eol=lf
+PKGBUILD* text eol=lf
+Cargo.lock text eol=lf
 *.svg text eol=lf
 *.txt text eol=lf
 *.ps1 text eol=crlf

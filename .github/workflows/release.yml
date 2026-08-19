@@ -136,7 +136,17 @@ jobs:
           test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: |
+          set -euo pipefail
+          # Debian/麒麟包保留 GTK3 文件选择器。
+          cargo build --release --locked
+          cp target/release/gongwen-assistant target/release/gongwen-assistant-gtk
+
+          # Arch/Omarchy 包使用桌面 portal，并以独立文件名上传给打包任务。
+          cargo build --release --locked \
+            --no-default-features --features linux-portal-dialogs
+          mv target/release/gongwen-assistant target/release/gongwen-assistant-portal
+          mv target/release/gongwen-assistant-gtk target/release/gongwen-assistant
 
       - name: Verify ARM64 and GLIBC compatibility
         run: |
@@ -199,7 +209,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-arm64-glibc228-binary
-          path: target/release/gongwen-assistant
+          path: |
+            target/release/gongwen-assistant
+            target/release/gongwen-assistant-portal
           if-no-files-found: error
 
   package-linux-arm64:
@@ -246,12 +258,28 @@ jobs:
           asset="gongwen-assistant_${version}_arm64.deb"
           sha256sum "$asset" | awk '{ printf "%s  %s\n", $1, $2 }' > "${asset}.sha256"
 
+      - name: Prepare Omarchy portable directory
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath target/release/gongwen-assistant-portal -Destination target/release/gongwen-assistant -Force
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-arm64-omarchy"
+          ./scripts/package-portable.ps1 -Suffix linux-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
+
+      - name: Package Omarchy archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          staging="$GITHUB_WORKSPACE/dist/linux-arm64-omarchy"
+          bash ./scripts/package-linux-tar.sh "$version" "$staging" "$GITHUB_WORKSPACE" arm64
+
       - name: Upload Linux release assets
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-arm64
           path: |
             gongwen-assistant_*_arm64.deb*
+            gongwen-assistant-*-linux-arm64-omarchy.tar.gz*
           if-no-files-found: error
 
   build-linux-amd64:
@@ -308,7 +336,14 @@ jobs:
           test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          cp target/release/gongwen-assistant target/release/gongwen-assistant-gtk
+          cargo build --release --locked \
+            --no-default-features --features linux-portal-dialogs
+          mv target/release/gongwen-assistant target/release/gongwen-assistant-portal
+          mv target/release/gongwen-assistant-gtk target/release/gongwen-assistant
 
       - name: Verify AMD64 and GLIBC compatibility
         run: |
@@ -369,7 +404,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-amd64-glibc228-binary
-          path: target/release/gongwen-assistant
+          path: |
+            target/release/gongwen-assistant
+            target/release/gongwen-assistant-portal
           if-no-files-found: error
 
   package-linux-amd64:
@@ -416,12 +453,28 @@ jobs:
           asset="gongwen-assistant_${version}_amd64.deb"
           sha256sum "$asset" | awk '{ printf "%s  %s\n", $1, $2 }' > "${asset}.sha256"
 
+      - name: Prepare Omarchy portable directory
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath target/release/gongwen-assistant-portal -Destination target/release/gongwen-assistant -Force
+          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-amd64-omarchy"
+          ./scripts/package-portable.ps1 -Suffix linux-amd64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
+
+      - name: Package Omarchy archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          staging="$GITHUB_WORKSPACE/dist/linux-amd64-omarchy"
+          bash ./scripts/package-linux-tar.sh "$version" "$staging" "$GITHUB_WORKSPACE" amd64
+
       - name: Upload Linux release assets
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-amd64
           path: |
             gongwen-assistant_*_amd64.deb*
+            gongwen-assistant-*-linux-amd64-omarchy.tar.gz*
           if-no-files-found: error
 
   build-macos:
@@ -483,11 +536,32 @@ jobs:
     needs: [build-windows, package-linux-arm64, package-linux-amd64, build-macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: release-assets
           merge-multiple: true
+
+      - name: Generate Arch PKGBUILD
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          amd64="release-assets/gongwen-assistant-${version}-linux-amd64-omarchy.tar.gz"
+          arm64="release-assets/gongwen-assistant-${version}-linux-arm64-omarchy.tar.gz"
+          amd64_sha="$(sha256sum "$amd64" | cut -d ' ' -f 1)"
+          arm64_sha="$(sha256sum "$arm64" | cut -d ' ' -f 1)"
+          sed \
+            -e "s/@VERSION@/${version}/g" \
+            -e "s/@AMD64_SHA256@/${amd64_sha}/g" \
+            -e "s/@ARM64_SHA256@/${arm64_sha}/g" \
+            packaging/arch/PKGBUILD.template \
+            > release-assets/PKGBUILD
+          sha256sum release-assets/PKGBUILD \
+            | awk '{ printf "%s  PKGBUILD\n", $1 }' \
+            > release-assets/PKGBUILD.sha256
 
       - name: Create or update GitHub release
         env:

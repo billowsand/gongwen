@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=公文助手
+Name[en]=Gongwen Assistant
+Comment=离线公文写作助手
+Comment[en]=Offline official-document writing assistant
+Exec=gongwen-assistant
+TryExec=gongwen-assistant
+Icon=cn.localtools.GongwenAssistant
+Terminal=false
+Categories=Office;WordProcessor;Utility;
+Keywords=公文;写作;审校;Word;PDF;Markdown;
+Keywords[en]=official document;writing;proofreading;Word;PDF;Markdown;
+StartupNotify=true
+StartupWMClass=cn.localtools.GongwenAssistant

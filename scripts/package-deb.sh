@@ -70,20 +70,10 @@ chmod 755 "$APP_DIR/gongwen-assistant" "$APP_DIR/runtime/tectonic/tectonic"
 mkdir -p "$PKG_ROOT/usr/bin"
 ln -s "$INSTALL_ROOT/gongwen-assistant" "$PKG_ROOT/usr/bin/gongwen-assistant"
 
-# Desktop entry.
+# Desktop entry. Its filename must match the Wayland app_id used by eframe.
 mkdir -p "$PKG_ROOT/usr/share/applications"
-cat > "$PKG_ROOT/usr/share/applications/gongwen-assistant.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=公文助手
-Name[en]=Gongwen Assistant
-Comment=离线公文写作助手
-Comment[en]=Offline official-document writing assistant
-Exec=$INSTALL_ROOT/gongwen-assistant
-Icon=gongwen-assistant
-Terminal=false
-Categories=Office;Utility;
-EOF
+cp "$PROJECT_ROOT/assets/linux/cn.localtools.GongwenAssistant.desktop" \
+    "$PKG_ROOT/usr/share/applications/cn.localtools.GongwenAssistant.desktop"
 
 # Icons: install the pre-rendered PNG sizes into the hicolor theme.
 for size in 16 24 32 48 64 128 256 512; do
@@ -91,13 +81,13 @@ for size in 16 24 32 48 64 128 256 512; do
     if [ -f "$src" ]; then
         dest="$PKG_ROOT/usr/share/icons/hicolor/${size}x${size}/apps"
         mkdir -p "$dest"
-        cp "$src" "$dest/gongwen-assistant.png"
+        cp "$src" "$dest/cn.localtools.GongwenAssistant.png"
     fi
 done
 if [ -f "$PROJECT_ROOT/assets/app-icon/app-icon.png" ]; then
     mkdir -p "$PKG_ROOT/usr/share/pixmaps"
     cp "$PROJECT_ROOT/assets/app-icon/app-icon.png" \
-        "$PKG_ROOT/usr/share/pixmaps/gongwen-assistant.png"
+        "$PKG_ROOT/usr/share/pixmaps/cn.localtools.GongwenAssistant.png"
 fi
 
 INSTALLED_SIZE="$(du -sk "$APP_DIR" | cut -f1)"

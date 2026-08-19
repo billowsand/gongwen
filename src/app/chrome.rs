@@ -150,7 +150,8 @@ impl GongwenApp {
     /// 无边框窗口的顶栏。
     ///
     /// macOS 使用左侧 AppKit 原生红黄绿按钮、居中标题和右侧快速操作；
-    /// Windows/Linux 继续使用右侧自绘窗口按钮。
+    /// Windows 与传统 Linux 桌面使用右侧三枚自绘窗口按钮；Hyprland 平铺会话
+    /// 只保留关闭按钮，避免显示 compositor 不采用的最小化/最大化语义。
     pub(crate) fn window_titlebar(&mut self, ui: &mut egui::Ui) {
         const HEIGHT: f32 = 34.0;
         const BTN_W: f32 = 46.0;
@@ -177,10 +178,22 @@ impl GongwenApp {
             return;
         }
 
+        let hyprland = crate::linux_desktop::hyprland_session();
+        let titlebar_buttons: &[TitlebarBtn] = if hyprland {
+            &[TitlebarBtn::Close]
+        } else {
+            &[
+                TitlebarBtn::Minimize,
+                TitlebarBtn::Maximize,
+                TitlebarBtn::Close,
+            ]
+        };
+        let controls_width = titlebar_buttons.len() as f32 * BTN_W;
+
         // 左侧标题区：空白处可拖拽移动窗口，双击切换最大化。
         let title_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left() + 14.0, rect.top()),
-            egui::pos2(rect.right() - 3.0 * BTN_W, rect.bottom()),
+            egui::pos2(rect.right() - controls_width, rect.bottom()),
         );
         let mut text_right = title_rect.left();
         if title_rect.width() > 60.0 {
@@ -240,25 +253,21 @@ impl GongwenApp {
                 ui.id().with(("titlebar_drag", index)),
                 egui::Sense::click_and_drag(),
             );
-            if drag.double_clicked() {
+            if drag.double_clicked() && !hyprland {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
             } else if drag.drag_started() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
         }
 
-        // Windows/Linux 右侧三个窗口控制按钮：最小化 / 最大化·还原 / 关闭。
+        // 传统桌面显示最小化 / 最大化·还原 / 关闭；Hyprland 只显示关闭。
         let mut action: Option<TitlebarAction> = None;
-        for (index, kind) in [
-            TitlebarBtn::Minimize,
-            TitlebarBtn::Maximize,
-            TitlebarBtn::Close,
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (index, kind) in titlebar_buttons.iter().copied().enumerate() {
             let btn_rect = egui::Rect::from_min_size(
-                egui::pos2(rect.right() - (3 - index) as f32 * BTN_W, rect.top()),
+                egui::pos2(
+                    rect.right() - (titlebar_buttons.len() - index) as f32 * BTN_W,
+                    rect.top(),
+                ),
                 egui::vec2(BTN_W, HEIGHT),
             );
             let response = ui
@@ -505,6 +514,11 @@ impl GongwenApp {
         const EDGE: f32 = 6.0;
         /// 四角命中区宽度，比边宽一档，斜向缩放好抓。
         const CORNER: f32 = 16.0;
+
+        // Hyprland 负责平铺窗口的尺寸；自绘边缘只会抢占贴边控件的命中区域。
+        if crate::linux_desktop::hyprland_session() {
+            return;
+        }
 
         // 最大化时没有可拖的边，也免得白白盖住贴边的控件。
         if ctx
