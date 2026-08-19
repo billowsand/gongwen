@@ -841,7 +841,9 @@ impl GongwenApp {
             DocJob::ExportProgress(message) => self.status = format!("{prefix}{message}"),
             DocJob::Exported(Ok(outcome)) => {
                 self.docs[index].output_files = outcome.files;
-                self.docs[index].export_error = None;
+                // 编译失败也走 export_error：审校抽屉顶部的红色框会高亮显示，区别于
+                // 审校提示里的样式警告。md/docx/tex 仍然成功导出，只缺 PDF。
+                self.docs[index].export_error = outcome.compile_error;
                 // 先落孤行实测结果，再 revalidate——它会把这批提示并进审校列表。
                 if outcome.proof_measured {
                     self.docs[index].proof_markdown = self.docs[index].generated_markdown.clone();
@@ -860,12 +862,17 @@ impl GongwenApp {
                 // 成品不再进抽屉：让工具栏那三枚 TEX/PDF/WORD 入口重新扫盘点亮即可。
                 self.export_links.invalidate();
                 let orphans = self.docs[index].proof_warnings.len();
-                // 孤行只有排完版才测得到，导出这一下是唯一的报出时机，直接把审校
-                // 抽屉推到用户眼前，别让它躺在折叠面板里。
-                if orphans > 0 {
+                // 孤行或编译失败都是导出这一下才能看到的，弹抽屉把它们顶到用户眼前，
+                // 别让红色错误提示躺在折叠面板里看不见。
+                if orphans > 0 || self.docs[index].export_error.is_some() {
                     self.docs[index].result_drawer_open = true;
                 }
-                self.status = if orphans > 0 {
+                self.status = if self.docs[index].export_error.is_some() {
+                    format!(
+                        "{prefix}当前审校稿已导出 {} 个文件；PDF 编译失败，请查看审校提示。",
+                        self.docs[index].output_files.len()
+                    )
+                } else if orphans > 0 {
                     format!(
                         "{prefix}当前审校稿已导出 {} 个文件；实测发现 {orphans} 处孤行，见审校提示。",
                         self.docs[index].output_files.len()

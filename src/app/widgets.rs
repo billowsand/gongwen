@@ -1087,10 +1087,14 @@ pub(crate) struct ExportOutcome {
     /// 这次是否真的排完版量到了数据。为空的 `proof_warnings` 有两种含义——
     /// “量过，没有孤行”和“压根没编译”，前者该压住粗估提示，后者不该。
     pub(crate) proof_measured: bool,
+    /// 导出本身成功但内置 Tectonic 编译 PDF 失败时填这个；走审校抽屉顶部的红色框，
+    /// 不与"缺少一级标题"这类样式提示混在一起。
+    pub(crate) compile_error: Option<String>,
 }
 
 /// 导出全部勾选格式；生成 TeX 后自动检测本机编译器，有可用引擎时把 PDF 一并加入结果。
-/// 编译失败不阻断导出，而是以警告形式返回，保留已写好的 md/docx/tex。
+/// 编译失败不阻断导出，PDF 缺失会单独记到 `compile_error` 上走红色提示框，
+/// 已写好的 md/docx/tex 照常保留。
 pub(crate) fn export_and_compile(
     output_dir: &Path,
     input: &DraftInput,
@@ -1104,10 +1108,11 @@ pub(crate) fn export_and_compile(
     let display = UnitDisplay::new(vocabulary);
     // 字体文件在写 TeX 之前就要落实：TeX 里写死了按哪个文件加载，等到编译时
     // 才发现文件不在就只能报错，而这里还来得及退回内置字体。
-    let (fonts, mut warnings) = system_fonts::resolve(fonts);
+    let (fonts, warnings) = system_fonts::resolve(fonts);
     let mut proof_warnings: Vec<ReviewNote> = Vec::new();
     let mut proof_measured = false;
     let mut files = export::export_all(output_dir, input, markdown, selection, &display, &fonts)?;
+    let mut compile_error: Option<String> = None;
     if let Some(tex) = files
         .iter()
         .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
@@ -1134,7 +1139,7 @@ pub(crate) fn export_and_compile(
                     ));
                 }
             }
-            Err(error) => warnings.push(format!("{error:#}")),
+            Err(error) => compile_error = Some(format!("{error:#}")),
         }
     }
     Ok(ExportOutcome {
@@ -1142,6 +1147,7 @@ pub(crate) fn export_and_compile(
         warnings,
         proof_warnings,
         proof_measured,
+        compile_error,
     })
 }
 
