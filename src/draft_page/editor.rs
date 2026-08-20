@@ -13,7 +13,9 @@ use crate::draft_page::{
 };
 use crate::export;
 use crate::highlight::ordered_list_lines;
+use crate::models::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN};
 use crate::preview;
+use crate::storage;
 use crate::theme;
 use crate::units::UnitDisplay;
 use eframe::egui;
@@ -101,10 +103,15 @@ pub(crate) fn editor_line_visuals(
 
 /// 按 galley 的实际行高绘制源码行号。一个 Markdown 段落自动换行时，
 /// 只在第一个视觉行旁显示编号，不把软换行误当成新的源码行。
-pub(crate) fn paint_editor_line_numbers(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput) {
+/// 行号字号跟随编辑器正文字号（略小两档），避免调大正文后行号显得突兀。
+pub(crate) fn paint_editor_line_numbers(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    font_size: f32,
+) {
     let x = output.galley_pos.x - 10.0;
     let painter = ui.painter();
-    let font = egui::FontId::new(theme::font_sizes::SMALL, egui::FontFamily::Proportional);
+    let font = egui::FontId::new(font_size, egui::FontFamily::Proportional);
     for (index, line) in editor_line_visuals(output).into_iter().enumerate() {
         painter.text(
             egui::pos2(x, (line.top + line.bottom) * 0.5),
@@ -448,6 +455,11 @@ impl DraftPage<'_> {
                 usize::MAX
             };
         let show_line_numbers = self.config.show_editor_line_numbers;
+        let editor_font_size = self
+            .config
+            .editor_font_size
+            .clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX);
+        let line_number_size = (editor_font_size - 2.0).max(9.0);
         let text = &mut self.doc.generated_markdown;
         let highlighter = &mut self.doc.highlighter;
         let mut editor_lost_focus = false;
@@ -466,6 +478,7 @@ impl DraftPage<'_> {
                     ui,
                     buffer.as_str(),
                     wrap_width,
+                    editor_font_size,
                     anchor.as_ref(),
                     &search_matches,
                 )
@@ -519,7 +532,11 @@ impl DraftPage<'_> {
                                         .show(ui);
                                         editor_lost_focus |= output.response.lost_focus();
                                         if show_line_numbers {
-                                            paint_editor_line_numbers(ui, &output);
+                                            paint_editor_line_numbers(
+                                                ui,
+                                                &output,
+                                                line_number_size,
+                                            );
                                         }
                                         paint_hybrid_decorations(ui, &output, text, active_line);
                                         if let Some(range) = selection {
@@ -566,8 +583,19 @@ impl DraftPage<'_> {
                             show_editor(ui)
                         };
                         editor_lost_focus |= output.response.lost_focus();
+                        // Ctrl+滚轮调整源码字号：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量
+                        // 报成 zoom_delta，滚动区不会同时滚动，两者天然不冲突。
+                        let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
+                        if zoom_delta != 1.0 && output.response.hovered() {
+                            let size = ((editor_font_size * zoom_delta * 2.0).round() / 2.0)
+                                .clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX);
+                            if size != self.config.editor_font_size {
+                                self.config.editor_font_size = size;
+                                let _ = storage::save(self.config);
+                            }
+                        }
                         if show_line_numbers {
-                            paint_editor_line_numbers(ui, &output);
+                            paint_editor_line_numbers(ui, &output, line_number_size);
                         }
                         if let Some(range) = selection {
                             select_source_range(ui, &output, text, range);

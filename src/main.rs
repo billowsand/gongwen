@@ -8,6 +8,7 @@ mod draft_page;
 mod export;
 mod highlight;
 mod images;
+mod ime;
 mod knowledge;
 mod knowledge_ui;
 mod last_char_orphan;

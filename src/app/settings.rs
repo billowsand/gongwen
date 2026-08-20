@@ -613,6 +613,21 @@ impl GongwenApp {
                     "Markdown 源码与实时排版模式显示行号",
                 )
                 .on_hover_text("行号只用于定位，不会写入稿件或导出文件");
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("编辑器字号"));
+                    ui.add(
+                        egui::DragValue::new(&mut self.config.editor_font_size)
+                            .range(
+                                crate::models::EDITOR_FONT_SIZE_MIN
+                                    ..=crate::models::EDITOR_FONT_SIZE_MAX,
+                            )
+                            .speed(0.1)
+                            .suffix(" px"),
+                    )
+                    .on_hover_text(
+                        "Markdown 源码编辑器的字号；编辑器里也可用 Ctrl+滚轮或 Ctrl± 调整，Ctrl+0 复位",
+                    );
+                });
 
                 ui.add_space(12.0);
                 ui.separator();

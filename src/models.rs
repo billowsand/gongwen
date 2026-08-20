@@ -1135,6 +1135,10 @@ impl RibbonTab {
     }
 }
 
+/// 源码编辑器字号允许的上下限（px）。
+pub const EDITOR_FONT_SIZE_MIN: f32 = 10.0;
+pub const EDITOR_FONT_SIZE_MAX: f32 = 24.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -1156,6 +1160,8 @@ pub struct AppConfig {
     pub allow_free_text: bool,
     /// 在 Markdown 源码与实时排版编辑器左侧显示源码行号。
     pub show_editor_line_numbers: bool,
+    /// Markdown 源码编辑器的字号（px）。可用 Ctrl+滚轮或 Ctrl± 调整。
+    pub editor_font_size: f32,
     /// AI 优化提示词库。首次载入为空时补齐预置项，见 `ensure_ai_prompts`。
     pub ai_prompts: Vec<AiPrompt>,
     /// 上次使用的提示词 id，供选择面板默认高亮。
@@ -1194,6 +1200,7 @@ impl Default for AppConfig {
             security_rules: SecurityRules::default(),
             allow_free_text: true,
             show_editor_line_numbers: true,
+            editor_font_size: 14.0,
             ai_prompts: vec![],
             last_ai_prompt: 0,
             rag: RagConfig::default(),

@@ -311,11 +311,13 @@ impl PdfSession {
 
             ui.separator();
             if theme::icon_button_enabled(ui, self.zoom > MIN_ZOOM, theme::Icon::ZoomOut, "缩小")
+                .on_hover_text("缩小（也可按住 Ctrl 滚动滚轮）")
                 .clicked()
             {
                 self.set_zoom((self.zoom - ZOOM_STEP).max(MIN_ZOOM));
             }
             if theme::icon_button_enabled(ui, self.zoom < MAX_ZOOM, theme::Icon::ZoomIn, "放大")
+                .on_hover_text("放大（也可按住 Ctrl 滚动滚轮）")
                 .clicked()
             {
                 self.set_zoom((self.zoom + ZOOM_STEP).min(MAX_ZOOM));
@@ -387,6 +389,13 @@ impl PdfSession {
                 ui.label("正在打开 PDF…");
             });
             return;
+        }
+
+        // Ctrl+滚轮缩放：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量报成 zoom_delta，
+        // 滚动区不会同时滚动，两者天然不冲突。只在指针位于查看区时响应。
+        let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
+        if zoom_delta != 1.0 && ui.rect_contains_pointer(ui.max_rect()) {
+            self.set_zoom((self.zoom * zoom_delta).clamp(MIN_ZOOM, MAX_ZOOM));
         }
 
         let available = ui.available_width();

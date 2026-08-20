@@ -31,6 +31,7 @@ impl MarkdownHighlighter {
         ui: &egui::Ui,
         text: &str,
         wrap_width: f32,
+        base_size: f32,
         anchor: Option<&Range<usize>>,
         search_matches: &[Range<usize>],
     ) -> Arc<egui::Galley> {
@@ -38,6 +39,7 @@ impl MarkdownHighlighter {
         text.hash(&mut hasher);
         anchor.hash(&mut hasher);
         search_matches.hash(&mut hasher);
+        base_size.to_bits().hash(&mut hasher);
         let key = hasher.finish();
         let width = wrap_width.to_bits();
         if let Some((cached_key, cached_width, galley)) = &self.cache
@@ -46,7 +48,7 @@ impl MarkdownHighlighter {
         {
             return galley.clone();
         }
-        let job = highlight(ui.style(), text, wrap_width, anchor, search_matches);
+        let job = highlight(text, wrap_width, base_size, anchor, search_matches);
         let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
         self.cache = Some((key, width, galley.clone()));
         galley
@@ -200,18 +202,14 @@ fn center_document_title_rows(galley: &mut Arc<egui::Galley>, text: &str, width:
 }
 
 /// 把整篇 Markdown 编译成带颜色的 `LayoutJob`；普通查找命中铺黄色底，当前命中
-/// （`anchor`）再盖一层强调底色。
+/// （`anchor`）再盖一层强调底色。`base_size` 是源码编辑器正文基准字号（px）。
 pub fn highlight(
-    style: &egui::Style,
     text: &str,
     wrap_width: f32,
+    base_size: f32,
     anchor: Option<&Range<usize>>,
     search_matches: &[Range<usize>],
 ) -> LayoutJob {
-    let base_size = style
-        .text_styles
-        .get(&egui::TextStyle::Body)
-        .map_or(14.0, |font| font.size);
     let family = egui::FontFamily::Proportional;
     let body = FontId::new(base_size, family.clone());
 
@@ -889,7 +887,7 @@ mod tests {
     use super::*;
 
     fn sections(text: &str) -> Vec<(String, Color32)> {
-        let job = highlight(&egui::Style::default(), text, 400.0, None, &[]);
+        let job = highlight(text, 400.0, 14.0, None, &[]);
         job.sections
             .iter()
             .map(|section| {
@@ -921,7 +919,7 @@ mod tests {
     }
 
     fn assert_covers_with(text: &str, anchor: Option<&Range<usize>>) {
-        let job = highlight(&egui::Style::default(), text, 400.0, anchor, &[]);
+        let job = highlight(text, 400.0, 14.0, anchor, &[]);
         assert_eq!(job.text, text);
         let mut cursor = 0usize;
         for section in &job.sections {
@@ -942,7 +940,7 @@ mod tests {
         let text = "# 标题\n\n第一段。\n\n第二段。\n";
         let anchor = text.find("第一段。").expect("样例里有第一段")..;
         let anchor = anchor.start..anchor.start + "第一段。".len();
-        let job = highlight(&egui::Style::default(), text, 400.0, Some(&anchor), &[]);
+        let job = highlight(text, 400.0, 14.0, Some(&anchor), &[]);
 
         for section in &job.sections {
             let (start, end) = (section.byte_range.start.0, section.byte_range.end.0);
@@ -973,13 +971,7 @@ mod tests {
         let text = "重点与重点";
         let matches = vec![0.."重点".len(), "重点与".len()..text.len()];
         let current = matches[1].clone();
-        let job = highlight(
-            &egui::Style::default(),
-            text,
-            400.0,
-            Some(&current),
-            &matches,
-        );
+        let job = highlight(text, 400.0, 14.0, Some(&current), &matches);
         assert!(job.sections.iter().any(|section| {
             section.byte_range.start.0 == matches[0].start
                 && section.format.background == theme::md::search_bg()
@@ -1200,7 +1192,7 @@ mod tests {
 
     #[test]
     fn markdown_source_uses_the_ui_font_family() {
-        let job = highlight(&egui::Style::default(), "正文 **重点**", 400.0, None, &[]);
+        let job = highlight("正文 **重点**", 400.0, 14.0, None, &[]);
         assert!(
             job.sections
                 .iter()

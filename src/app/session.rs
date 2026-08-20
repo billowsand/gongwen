@@ -577,6 +577,37 @@ impl GongwenApp {
             self.doc_mut().markdown_find.focus_query = true;
         }
 
+        // 主快捷键 + / - / 0 调整源码编辑器字号，与编辑器里 Ctrl+滚轮等价。
+        // Ctrl+= 与 Ctrl+Shift+=（即 Ctrl++）都算放大。
+        if self.showing_doc() {
+            let zoom_in = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Equals);
+            let zoom_in_shift = egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::Equals,
+            );
+            let zoom_out = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Minus);
+            let zoom_reset = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Num0);
+            let current = self.config.editor_font_size;
+            let next = ctx.input_mut(|input| {
+                if input.consume_shortcut(&zoom_in) || input.consume_shortcut(&zoom_in_shift) {
+                    Some(current + 1.0)
+                } else if input.consume_shortcut(&zoom_out) {
+                    Some(current - 1.0)
+                } else if input.consume_shortcut(&zoom_reset) {
+                    Some(14.0)
+                } else {
+                    None
+                }
+            });
+            if let Some(size) = next {
+                self.config.editor_font_size = size.clamp(
+                    crate::models::EDITOR_FONT_SIZE_MIN,
+                    crate::models::EDITOR_FONT_SIZE_MAX,
+                );
+                let _ = storage::save(&self.config);
+            }
+        }
+
         // 查找条与结果抽屉同时打开时，Esc 先交给查找条；否则收起结果抽屉。
         if self.showing_doc()
             && self.doc().result_drawer_open
