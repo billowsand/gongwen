@@ -5,12 +5,12 @@
 
 use crate::app::{DraftAction, VersionScope, warn};
 use crate::draft_page::{
-    DraftPage, PreviewMode, RagKindFilter, TOOLBAR_CONTROL_HEIGHT, TableOp, body_stats,
-    chinese_today, table_grid_picker, tidy_blank_lines, toggle_bullet, toolbar_separator,
+    DraftPage, PreviewMode, TOOLBAR_CONTROL_HEIGHT, TableOp, body_stats, chinese_today,
+    editor_selection, table_grid_picker, tidy_blank_lines, toggle_bullet, toolbar_separator,
 };
 use crate::export;
 use crate::export::ColumnAlign;
-use crate::models::{ExportSelection, RibbonTab, TemplateKind};
+use crate::models::{ExportSelection, RibbonTab};
 use crate::storage;
 use crate::theme;
 use eframe::egui;
@@ -266,60 +266,27 @@ impl DraftPage<'_> {
         }
         toolbar_separator(ui);
 
-        // 三、AI：有稿件是优化，没稿件是从零起草
+        // 三、AI：统一工作台明确分流仿照、知识、材料与受控润色。
         if theme::primary_icon_button_enabled(
             ui,
             !self.doc.busy && editable,
             theme::Icon::Sparkles,
-            if has_draft { "AI 优化" } else { "AI 起草" },
+            if self.doc.ai_proposal.is_some() {
+                "审阅 AI 提案"
+            } else {
+                "AI 助手"
+            },
         )
-        .on_hover_text(if has_draft {
-            "选一条提示词改写当前稿件，也可临时写一条；输出格式标准内置生效，不会破坏导出结构"
+        .on_hover_text(if self.doc.ai_proposal.is_some() {
+            "返回尚未接受的 AI 修改提案"
         } else {
-            "审校稿为空：在面板里写明要起草什么，结合左侧公文要素从零生成"
+            "仿照已有稿、结合知识库起草、材料成文或在事实锁定下润色"
         })
         .clicked()
         {
-            self.actions.push(DraftAction::OpenAiPromptPicker);
-        }
-        // RAG 开关：仅起草（审校稿为空）有意义。勾选后起草时自动检索知识库
-        // 相似稿件片段注入提示词作参考。
-        //
-        // 全局开关关着时置灰而不是照常可勾——否则勾了也什么都不会发生，
-        // 界面上还没有任何提示，只会让人以为功能坏了。
-        if editable && !has_draft {
-            let rag_enabled = self.config.rag.enabled;
-            ui.add_enabled_ui(rag_enabled, |ui| {
-                ui.checkbox(&mut self.doc.use_knowledge_rag, "参考知识库")
-                    .on_hover_text(if rag_enabled {
-                        "起草时自动检索知识库中的相似稿件片段，注入提示词作写作风格参考"
-                    } else {
-                        "知识库检索增强尚未启用：请到「设置 → 知识库」勾选启用，并配置 embedding 模型"
-                    });
-            });
-            if rag_enabled && self.doc.use_knowledge_rag {
-                egui::ComboBox::from_id_salt("rag_kind_filter")
-                    .selected_text(self.doc.rag_kind_filter.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.doc.rag_kind_filter,
-                            RagKindFilter::Follow,
-                            RagKindFilter::Follow.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.doc.rag_kind_filter,
-                            RagKindFilter::All,
-                            RagKindFilter::All.label(),
-                        );
-                        for kind in TemplateKind::ALL {
-                            ui.selectable_value(
-                                &mut self.doc.rag_kind_filter,
-                                RagKindFilter::Only(kind),
-                                kind.label(),
-                            );
-                        }
-                    });
-            }
+            let selection = editor_selection(ui.ctx(), &self.doc.generated_markdown);
+            self.actions
+                .push(DraftAction::OpenAiWorkbench { selection });
         }
         toolbar_separator(ui);
 

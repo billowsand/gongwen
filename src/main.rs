@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod ai_guard;
 mod app;
 mod diff;
 mod diff_view;

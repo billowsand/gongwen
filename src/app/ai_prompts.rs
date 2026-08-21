@@ -55,21 +55,6 @@ impl AiPromptDraft {
 }
 
 impl GongwenApp {
-    /// 打开提示词选择面板。面板记下打开那一刻的文种，只列适用条目。
-    pub(crate) fn open_ai_prompt_picker(&mut self) {
-        if self.doc().busy {
-            return;
-        }
-        if !self.draft_page().can_optimize() {
-            self.status = "还没有可优化的内容：请先在右侧粘贴稿件，或填写写作素材。".into();
-            return;
-        }
-        self.ai_prompt_picker = Some(AiPromptPicker {
-            kind: self.doc().draft.kind,
-            ..Default::default()
-        });
-    }
-
     /// 提示词管理页：左侧列表，右侧编辑区，底部常驻内置输出标准的只读预览。
     pub(crate) fn ai_prompts_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);

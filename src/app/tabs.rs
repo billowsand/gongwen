@@ -320,7 +320,7 @@ impl GongwenApp {
             match action {
                 DraftAction::SaveToLibrary => self.save_to_manuscript_library(),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
-                DraftAction::OpenAiPromptPicker => self.open_ai_prompt_picker(),
+                DraftAction::OpenAiWorkbench { selection } => self.open_ai_workbench(selection),
                 DraftAction::OpenVersionDiff { manuscript_id, to } => {
                     self.version_diff = Some(VersionDiffState {
                         scope: VersionScope::Manuscript(manuscript_id),

@@ -234,6 +234,29 @@ pub fn validate(
     warnings
 }
 
+/// 正式导出的硬门槛。普通风格建议仍显示在审校抽屉，但不会妨碍用户导出；
+/// 事实缺失、元数据不完整、结构错误和日期冲突必须先处理。
+pub fn blocking_issues(
+    input: &DraftInput,
+    markdown: &str,
+    vocabulary: &[VocabularyEntry],
+    rules: &SecurityRules,
+) -> Vec<String> {
+    validate(input, markdown, vocabulary, rules)
+        .into_iter()
+        .filter(|message| !is_advisory(message))
+        .collect()
+}
+
+fn is_advisory(message: &str) -> bool {
+    if message.starts_with("发现非规范名称") {
+        return false;
+    }
+    ["疑似", "建议", "不宜", "请确认", "未单独填写"]
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
 /// 校验表单元数据本身：密级与保密期限的约束、联系人与电话的绑定关系、
 /// 以及各单位名称是否取自标准词库。这部分与模型输出无关，填表阶段就能查。
 fn validate_metadata(
@@ -1276,5 +1299,47 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("固定 Markdown 骨架"))
         );
+    }
+
+    #[test]
+    fn blocking_issues_stop_missing_facts_but_not_style_advice() {
+        let mut input = DraftInput::default();
+        input.profile.issuing_unit = "某单位".into();
+        input.profile.recipient = "某部门".into();
+        input.profile.security_level = "机密".into();
+        input.profile.security_period = "10年".into();
+        let blockers = blocking_issues(
+            &input,
+            "# 关于测试的函\n\n请于【待核实：具体日期】报送材料。",
+            &[],
+            &rules(),
+        );
+        assert!(blockers.iter().any(|message| message.contains("待核实")));
+
+        let vocabulary = vec![VocabularyEntry {
+            category: VocabularyCategory::Unit,
+            canonical: "某某省教育厅".into(),
+            aliases: vec!["省教育厅".into()],
+            ..Default::default()
+        }];
+        let blockers = blocking_issues(
+            &input,
+            "# 关于测试的函\n\n省教育厅负责办理。",
+            &vocabulary,
+            &rules(),
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|message| message.contains("非规范名称"))
+        );
+
+        let blockers = blocking_issues(
+            &input,
+            "# 关于测试的函\n\n正文使用项目符号也只是风格建议。",
+            &[],
+            &rules(),
+        );
+        assert!(blockers.iter().all(|message| !message.contains("建议")));
     }
 }

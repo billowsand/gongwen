@@ -26,6 +26,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 
 mod ai_prompts;
+mod ai_workbench;
 mod chrome;
 mod jobs;
 mod manuscript_ui;
@@ -38,6 +39,7 @@ mod vocabulary;
 mod widgets;
 
 pub(crate) use ai_prompts::{AiPromptDraft, AiPromptPicker};
+pub(crate) use ai_workbench::AiWorkbench;
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
 pub(crate) use manuscript_ui::{ArchivePending, ImportPreview, PdfExportDialog, ZipPasswordDialog};
 pub(crate) use proofread_ui::ProofreadPageState;
@@ -140,6 +142,8 @@ pub struct GongwenApp {
     vocabulary_clear_confirm: bool,
     /// “AI 优化”按钮弹出的提示词选择面板；None 表示未打开。
     ai_prompt_picker: Option<AiPromptPicker>,
+    /// 起草页统一 AI 工作台：仿照起草、知识起草、材料成文、受控润色。
+    ai_workbench: Option<AiWorkbench>,
     /// AI 管理页当前编辑的提示词。
     proofread_page: ProofreadPageState,
     ai_prompt_editor: Option<AiPromptDraft>,
@@ -352,6 +356,7 @@ impl GongwenApp {
             vocabulary_delete_confirm: None,
             vocabulary_clear_confirm: false,
             ai_prompt_picker: None,
+            ai_workbench: None,
             proofread_page: ProofreadPageState::default(),
             ai_prompt_editor: None,
             ai_prompt_selected: None,
@@ -537,6 +542,8 @@ impl eframe::App for GongwenApp {
         // 版本提交、切换确认、回退确认、版本对照窗与配置版本历史窗都是全局浮窗，
         // 任何标签页都渲染。
         self.ai_prompt_picker_window(&ctx);
+        self.ai_workbench_window(&ctx);
+        self.ai_proposal_window(&ctx);
         self.version_commit_window(&ctx);
         self.version_switch_window(&ctx);
         self.revert_confirm_window(&ctx);

@@ -29,8 +29,10 @@ pub(crate) enum DraftAction {
     SaveToLibrary,
     /// 打开提交版本对话框。
     OpenVersionCommit(VersionScope),
-    /// 打开“AI 优化”的提示词选择面板。
-    OpenAiPromptPicker,
+    /// 打开统一 AI 工作台；若编辑器有选区，一并冻结为受控润色范围。
+    OpenAiWorkbench {
+        selection: Option<std::ops::Range<usize>>,
+    },
     /// 打开版本对照窗：`to` 与它的上一版比。
     OpenVersionDiff { manuscript_id: i64, to: i64 },
     /// 把已发布的稿件退回草稿，好继续编辑。

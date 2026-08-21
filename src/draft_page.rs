@@ -10,7 +10,9 @@ use crate::app::{DraftAction, VersionSwitchPrompt, WorkerResult};
 use crate::export;
 use crate::highlight::MarkdownHighlighter;
 use crate::manuscript::ManuscriptStore;
-use crate::models::{AppConfig, DraftInput, ManuscriptStatus, ReviewNote, TemplateKind};
+use crate::models::{
+    AppConfig, DraftInput, GeneratedDraft, ManuscriptStatus, ReviewNote, TemplateKind,
+};
 use crate::theme;
 use eframe::egui;
 use std::collections::BTreeSet;
@@ -265,6 +267,51 @@ pub(crate) fn toolbar_separator(ui: &mut egui::Ui) {
 /// id，后台任务回投时也需要区分“同一篇稿件的前后两次任务”。
 pub(crate) type DocKey = u64;
 
+/// AI 工作台发给起草后台的任务类型。内容生成与润色分开建模，避免再靠
+/// “当前编辑框是不是空”猜用户意图。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiWorkflowKind {
+    Similar,
+    Knowledge,
+    Material,
+    Polish,
+}
+
+impl AiWorkflowKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Similar => "仿照起草",
+            Self::Knowledge => "知识起草",
+            Self::Material => "材料成文",
+            Self::Polish => "受控润色",
+        }
+    }
+}
+
+/// 经工作台确认后的执行请求。`baseline` 只用于仿照起草；其他起草模式使用
+/// `material`。已有正文或润色任务一律先生成审阅提案，不直接覆盖。
+pub(crate) struct AiTaskRequest {
+    pub(crate) kind: AiWorkflowKind,
+    pub(crate) label: String,
+    pub(crate) instruction: String,
+    pub(crate) material: String,
+    pub(crate) baseline: String,
+    pub(crate) use_rag: bool,
+    pub(crate) review_before_apply: bool,
+}
+
+/// AI 返回但尚未落入正文的修改提案。接受前复用版本对照视图，并对关键事实变化
+/// 另设确认门槛。
+pub(crate) struct AiProposal {
+    pub(crate) before: String,
+    pub(crate) result: GeneratedDraft,
+    pub(crate) label: String,
+    pub(crate) fact_changes: Vec<crate::ai_guard::FactChange>,
+    pub(crate) fact_changes_confirmed: bool,
+    pub(crate) view: crate::diff_view::DiffViewState,
+    pub(crate) open: bool,
+}
+
 /// 一篇打开的稿件：内容、审校结果与这篇稿子自己的视图状态。
 pub(crate) struct DraftSession {
     pub(crate) key: DocKey,
@@ -327,6 +374,10 @@ pub(crate) struct DraftSession {
     pub(crate) job_seq: u64,
     /// 本次优化用的提示词名称，只用于完成后的状态栏文案。
     pub(crate) ai_prompt_last_label: String,
+    /// 后台任务开始时冻结的审校稿；需要审阅的 AI 结果回来后与它做差异对照。
+    pub(crate) ai_review_baseline: Option<String>,
+    /// 尚未接受的 AI 修改提案。提案不参与自动保存，也不能直接导出。
+    pub(crate) ai_proposal: Option<AiProposal>,
     /// 上次写入稿件库时的内容基线：`(要素 JSON, 正文)`。为 None 表示这篇
     /// 还没入过库。脏判定就是拿它和当前内容比。
     pub(crate) saved_baseline: Option<(String, String)>,
@@ -448,6 +499,8 @@ impl DraftSession {
             busy: false,
             job_seq: 0,
             ai_prompt_last_label: String::new(),
+            ai_review_baseline: None,
+            ai_proposal: None,
             saved_baseline: None,
             committed_baseline: None,
             record_status: ManuscriptStatus::Draft,
@@ -588,6 +641,8 @@ impl DraftSession {
         self.output_files.clear();
         self.export_error = None;
         self.clear_review_confirm = false;
+        self.ai_review_baseline = None;
+        self.ai_proposal = None;
         self.preview_anchor = None;
         self.pending_source_jump = None;
         self.pending_source_selection = None;

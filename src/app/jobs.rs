@@ -4,7 +4,7 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState};
-use crate::draft_page::{DocKey, DraftSession};
+use crate::draft_page::{AiProposal, DocKey, DraftSession};
 use crate::export;
 use crate::knowledge;
 use crate::lmstudio;
@@ -93,6 +93,8 @@ pub(crate) enum DocJob {
     /// 从零起草的结果。
     Drafted(Result<GeneratedDraft, String>),
     Optimized(Result<GeneratedDraft, String>),
+    /// 已有正文上的 AI 结果先进入审阅提案，不直接覆盖。
+    Proposed(Result<GeneratedDraft, String>),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
@@ -850,8 +852,41 @@ impl GongwenApp {
                     )
                 };
             }
+            DocJob::Proposed(Ok(result)) => {
+                let before = self.docs[index]
+                    .ai_review_baseline
+                    .take()
+                    .unwrap_or_else(|| self.docs[index].generated_markdown.clone());
+                let fact_changes = crate::ai_guard::compare_key_facts(
+                    &before,
+                    &result.markdown,
+                    &self.config.vocabulary,
+                );
+                let count = fact_changes.len();
+                let label = self.docs[index].ai_prompt_last_label.clone();
+                self.docs[index].ai_proposal = Some(AiProposal {
+                    before,
+                    result,
+                    label: label.clone(),
+                    fact_changes,
+                    fact_changes_confirmed: false,
+                    view: crate::diff_view::DiffViewState::default(),
+                    open: true,
+                });
+                self.status = if count == 0 {
+                    format!("{prefix}“{label}”修改提案已生成，请对照确认后再应用。")
+                } else {
+                    format!(
+                        "{prefix}“{label}”修改提案已生成，检测到 {count} 项关键事实变化，必须逐项核对。"
+                    )
+                };
+            }
             DocJob::Drafted(Err(error)) => self.status = format!("{prefix}起草失败：{error}"),
             DocJob::Optimized(Err(error)) => self.status = format!("{prefix}优化失败：{error}"),
+            DocJob::Proposed(Err(error)) => {
+                self.docs[index].ai_review_baseline = None;
+                self.status = format!("{prefix}生成修改提案失败：{error}");
+            }
             DocJob::ExportProgress(message) => self.status = format!("{prefix}{message}"),
             DocJob::Exported(Ok(outcome)) => {
                 self.docs[index].output_files = outcome.files;

@@ -7,7 +7,7 @@ use crate::app::{
     DocJob, DraftAction, WorkerResult, accent, export_and_compile, open_in_os, reveal_in_os,
 };
 use crate::doc_import;
-use crate::draft_page::{DocKey, DraftPage, ExportKind, FileAction};
+use crate::draft_page::{AiTaskRequest, AiWorkflowKind, DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
 use crate::images;
 use crate::lmstudio;
@@ -100,6 +100,27 @@ impl DraftPage<'_> {
             *self.status = "请至少勾选一种导出格式。".into();
             return;
         }
+        let blockers = validator::blocking_issues(
+            &self.doc.draft,
+            &self.doc.generated_markdown,
+            &self.config.vocabulary,
+            &self.config.security_rules,
+        );
+        if !blockers.is_empty() {
+            self.doc.warnings.extend(
+                blockers
+                    .iter()
+                    .map(|message| ReviewNote::from(format!("阻断导出：{message}"))),
+            );
+            self.doc.warnings.sort_by(|a, b| a.message.cmp(&b.message));
+            self.doc.warnings.dedup_by(|a, b| a.message == b.message);
+            self.doc.result_drawer_open = true;
+            *self.status = format!(
+                "正式导出已暂停：还有 {} 项硬错误，请在审校结果中处理后重试。",
+                blockers.len()
+            );
+            return;
+        }
         // 成文日期只在导出这一刻查。编辑期间日期本来就该是旧的，那时候弹提示
         // 纯属打扰；而稿子做好放了几天才签发、日期还停在上周，是真出过的事。
         if let Some(message) = crate::proofread_rules::check_doc_date(
@@ -145,29 +166,42 @@ impl DraftPage<'_> {
         });
     }
 
-    /// AI 面板随时可开：有稿件就是优化，没稿件就在面板里写明要起草什么。
-    pub(crate) fn can_optimize(&self) -> bool {
-        !self.doc.busy
+    /// 兼容旧提示词选择面板；新入口统一走 [`start_ai_task`]。
+    pub(crate) fn start_optimize(&mut self, instruction: String, label: String) {
+        let current_empty = self.doc.generated_markdown.trim().is_empty();
+        self.start_ai_task(AiTaskRequest {
+            kind: if current_empty {
+                AiWorkflowKind::Material
+            } else {
+                AiWorkflowKind::Polish
+            },
+            label,
+            material: instruction.clone(),
+            instruction,
+            baseline: String::new(),
+            use_rag: current_empty && self.doc.use_knowledge_rag && self.config.rag.enabled,
+            review_before_apply: !current_empty,
+        });
     }
 
-    /// 规格 §7：AI 起草 / 优化。审校稿为空时按 `instruction` 里的素材从零起草，
-    /// 非空时按 `instruction` 改写现有稿件——两种场景共用一个入口。
-    ///
-    /// 无论 `instruction` 写什么，`prompt::output_contract` 都会以更高优先级
-    /// 拼在后面，所以自定义指令再离谱也不会破坏导出所需的 Markdown 结构。
-    /// `label` 只用于状态栏文案。
-    pub(crate) fn start_optimize(&mut self, instruction: String, label: String) {
+    /// 工作台确认后的统一 AI 执行入口。任务类型由用户明确选择，不再根据编辑框
+    /// 是否为空猜测；已有内容上的结果一律进入修改提案。
+    pub(crate) fn start_ai_task(&mut self, request: AiTaskRequest) {
         if self.doc.busy {
             return;
         }
         let current = self.doc.generated_markdown.trim().to_string();
-        let drafting = current.is_empty();
-        if drafting && instruction.trim().is_empty() {
-            *self.status =
-                "还没有可处理的内容：请先粘贴稿件，或在 AI 面板里写明要起草什么。".into();
+        let drafting = request.kind != AiWorkflowKind::Polish;
+        if drafting && request.material.trim().is_empty() && request.baseline.trim().is_empty() {
+            *self.status = "请先提供已确认的材料或选择一篇基准稿。".into();
             return;
         }
-        let export_now = self.config.auto_export;
+        if !drafting && current.is_empty() {
+            *self.status = "当前没有可润色的审校稿。".into();
+            return;
+        }
+        // 需要人工审阅的结果不能在接受前自动导出。
+        let export_now = self.config.auto_export && !request.review_before_apply;
         if export_now && !self.config.export.any() {
             *self.status = "已勾选“完成后自动导出”，请先在设置里选择至少一种导出格式。".into();
             return;
@@ -179,12 +213,16 @@ impl DraftPage<'_> {
         }
         self.config.upsert_profile(self.doc.draft.profile.clone());
         let (key, seq) = self.begin_job();
-        *self.status = if drafting {
-            format!("正在按“{label}”起草…")
+        *self.status = if request.use_rag {
+            format!("正在按“{}”检索并起草…", request.label)
+        } else if drafting {
+            format!("正在按“{}”起草…", request.label)
         } else {
-            format!("正在按“{label}”优化…")
+            format!("正在按“{}”生成受控修改提案…", request.label)
         };
-        self.doc.ai_prompt_last_label = label;
+        self.doc.ai_prompt_last_label = request.label.clone();
+        self.doc.ai_review_baseline = request.review_before_apply.then(|| current.clone());
+        self.doc.ai_proposal = None;
         self.doc.output_files.clear();
         self.doc.export_error = None;
         // 记住这次用的提示词，重启后选择面板仍能标出“上次使用”。
@@ -194,11 +232,15 @@ impl DraftPage<'_> {
         let config = self.config.clone();
         let selection = self.config.export.clone();
         let tx = self.sender.clone();
-        // 仅起草（审校稿为空）时启用知识库检索；优化已有稿件不注入参考。
-        let use_rag = drafting && self.doc.use_knowledge_rag && self.config.rag.enabled;
+        let use_rag = request.use_rag && self.config.rag.enabled;
         // 文种过滤：`RagKindFilter::Follow` 跟随当前文种，`All` 不限文种。
         let rag_kind = self.doc.rag_kind_filter.resolve(self.doc.draft.kind);
         let rag_cfg = self.config.rag.clone();
+        let workflow = request.kind;
+        let instruction = request.instruction;
+        let material = request.material;
+        let baseline = request.baseline;
+        let review_before_apply = request.review_before_apply;
         thread::spawn(move || {
             let result = (|| {
                 let system = prompt::build_system_prompt(&time_context);
@@ -213,7 +255,7 @@ impl DraftPage<'_> {
                             &rag_cfg,
                             &config.lm_studio,
                             &input,
-                            &instruction,
+                            &material,
                             rag_kind,
                         );
                         // 检索的降级说明要让用户看见，不能只留在服务端日志里。
@@ -231,9 +273,30 @@ impl DraftPage<'_> {
                     } else {
                         String::new()
                     };
-                    prompt::build_draft_prompt(&input, &config.vocabulary, &instruction, &reference)
+                    if workflow == AiWorkflowKind::Similar {
+                        prompt::build_similar_prompt(
+                            &input,
+                            &config.vocabulary,
+                            &baseline,
+                            &instruction,
+                            &material,
+                        )
+                    } else {
+                        prompt::build_draft_prompt(
+                            &input,
+                            &config.vocabulary,
+                            &material,
+                            &reference,
+                        )
+                    }
                 } else {
-                    prompt::build_optimize_prompt(&input, &current, &instruction)
+                    let protected =
+                        crate::ai_guard::protected_facts_prompt(&current, &config.vocabulary);
+                    prompt::build_optimize_prompt(
+                        &input,
+                        &current,
+                        &format!("{}{}", instruction.trim(), protected),
+                    )
                 };
                 let raw = lmstudio::generate(&config.lm_studio, &system, &user)?;
                 let cleaned = prompt::sanitize_model_markdown(&raw);
@@ -252,7 +315,13 @@ impl DraftPage<'_> {
                 let mut proof_warnings: Vec<ReviewNote> = Vec::new();
                 let mut proof_measured = false;
                 let estimated = validator::estimate_layout_notes(&markdown);
-                let files = if export_now {
+                let blockers = validator::blocking_issues(
+                    &input,
+                    &markdown,
+                    &config.vocabulary,
+                    &config.security_rules,
+                );
+                let files = if export_now && blockers.is_empty() {
                     let outcome = export_and_compile(
                         PathBuf::from(&config.output_dir).as_path(),
                         &input,
@@ -273,6 +342,13 @@ impl DraftPage<'_> {
                     proof_measured = outcome.proof_measured;
                     outcome.files
                 } else {
+                    if export_now {
+                        warnings.extend(
+                            blockers
+                                .into_iter()
+                                .map(|message| ReviewNote::from(format!("阻断导出：{message}"))),
+                        );
+                    }
                     vec![]
                 };
                 if !proof_measured {
@@ -288,7 +364,9 @@ impl DraftPage<'_> {
                 })
             })()
             .map_err(|error: anyhow::Error| format!("{error:#}"));
-            let job = if drafting {
+            let job = if review_before_apply {
+                DocJob::Proposed(result)
+            } else if drafting {
                 DocJob::Drafted(result)
             } else {
                 DocJob::Optimized(result)
