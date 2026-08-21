@@ -185,7 +185,11 @@ pub(crate) fn red_head_approval_tex(
         None => String::new(),
     };
     let entries = crate::models::joint_responsible_entries(&input.profile);
-    let responsible_rows = red_approval_responsible_rows_tex(&entries, display);
+    let record_rows = red_approval_record_display_rows(&entries, display);
+    // 三栏宽度按各行实际内容一次算定并注入类文件（与 Word/预览同源）：联系人栏
+    // 固定 8 em 永不压缩，电话栏按最长号码定宽，承办单位栏吃版心余量。
+    let record_columns = crate::export::red_record_columns(&record_rows);
+    let responsible_rows = red_approval_responsible_rows_tex(&record_rows);
     let title_plain = plain_text(title);
 
     format!(
@@ -203,6 +207,9 @@ pub(crate) fn red_head_approval_tex(
 }}
 {attachment_command}\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
 \setlength{{\RedSignatureUnitWidth}}{{{signature_unit_width:.3}mm}}
+\setlength{{\RedRecordUnitWidth}}{{{record_unit_width:.3}mm}}
+\setlength{{\RedRecordContactWidth}}{{{record_contact_width:.3}mm}}
+\setlength{{\RedRecordPhoneWidth}}{{{record_phone_width:.3}mm}}
 {date_commands}
 \SetRedResponsibleContent{{
 {responsible_rows}
@@ -223,29 +230,54 @@ pub(crate) fn red_head_approval_tex(
         attachment_command = attachment_command,
         signature_unit = signature_unit,
         signature_unit_width = signature_unit_width_mm,
+        record_unit_width = crate::export::RedRecordColumns::mm(record_columns.unit),
+        record_contact_width = crate::export::RedRecordColumns::mm(record_columns.contact),
+        record_phone_width = crate::export::RedRecordColumns::mm(record_columns.phone),
         date_commands = date_commands,
         responsible_rows = responsible_rows,
     )
 }
 
-pub(crate) fn red_approval_responsible_rows_tex(
+/// 承办区各行的显示文本（单位简称、姓名、电话）：栏宽算法与 TeX 行生成共用
+/// 同一份数据，空稿件回落一行空条目。
+fn red_approval_record_display_rows(
     entries: &[crate::models::JointResponsibleEntry],
     display: &UnitDisplay,
-) -> String {
+) -> Vec<[String; 3]> {
     let fallback = crate::models::JointResponsibleEntry::default();
-    let rows = if entries.is_empty() {
+    let entries = if entries.is_empty() {
         std::slice::from_ref(&fallback)
     } else {
         entries
     };
-    // 三栏定宽、标签由类文件负责；单位名超出栏宽时由 \RedFit 横向压缩，绝不换行。
-    rows.iter()
+    entries
+        .iter()
         .map(|entry| {
+            [
+                display.abbr(&entry.unit),
+                entry.name.clone(),
+                entry.phone.clone(),
+            ]
+        })
+        .collect()
+}
+
+/// 承办区 TeX 行：三栏定宽、标签由类文件负责且只出现在首行，续行走
+/// `\RedRecordRowCont` 保持取值上下对齐；内容超宽时由 `\RedFit` 横向压缩，绝不换行。
+pub(crate) fn red_approval_responsible_rows_tex(rows: &[[String; 3]]) -> String {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let command = if index == 0 {
+                "\\RedRecordRow"
+            } else {
+                "\\RedRecordRowCont"
+            };
             format!(
-                "\\RedRecordRow{{{}}}{{{}}}{{{}}}",
-                tex_escape(&display.abbr(&entry.unit)),
-                latex_name(&entry.name),
-                tex_escape(&entry.phone),
+                "{command}{{{}}}{{{}}}{{{}}}",
+                tex_escape(&row[0]),
+                latex_name(&row[1]),
+                tex_escape(&row[2]),
             )
         })
         .collect::<Vec<_>>()

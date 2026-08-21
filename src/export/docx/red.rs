@@ -109,38 +109,68 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
     } else {
         entries.as_slice()
     };
-    // 三栏不再等分：承办单位名最长，把版心余量都给它，联系人和电话按各自
-    // 内容的自然宽度定死（栏宽与 LaTeX/预览同源，见 export::RED_RECORD_*）。
-    let unit_width = crate::export::RED_RECORD_UNIT_TWIPS;
-    let contact_width = crate::export::RED_RECORD_CONTACT_TWIPS;
-    let phone_width = crate::export::RED_RECORD_PHONE_TWIPS;
+    // 三栏宽度按各行实际内容一次算定（与 LaTeX/预览同源）：联系人栏固定 8 em
+    // 永不压缩，电话栏按最长号码定宽，承办单位栏吃版心余量、超宽才压缩。
+    // 多条承办条目时标签只出现在首行，续行取值缩到首行取值位置保持上下对齐。
     let rows = entries
         .iter()
         .map(|entry| {
+            let (name, name_size) = docx_name(&entry.name, BODY_SIZE);
+            (
+                [display.abbr(&entry.unit), name, entry.phone.clone()],
+                name_size,
+            )
+        })
+        .collect::<Vec<_>>();
+    let display_rows = rows.iter().map(|(row, _)| row.clone()).collect::<Vec<_>>();
+    let columns = crate::export::red_record_columns(&display_rows);
+    let rows = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (row, name_size))| {
+            let first = index == 0;
             TableRow::new(vec![
                 TableCell::new()
-                    .width(unit_width, WidthType::Dxa)
+                    .width(columns.unit, WidthType::Dxa)
                     .add_paragraph(red_record_paragraph(
-                        "承办单位：",
-                        &display.abbr(&entry.unit),
+                        if first { "承办单位：" } else { "" },
+                        &row[0],
+                        BODY_SIZE,
+                        crate::export::red_record_unit_twips(&row[0]),
                         AlignmentType::Left,
-                        crate::export::RED_RECORD_UNIT_USABLE_TWIPS,
+                        columns.unit_usable(),
+                        if first {
+                            0
+                        } else {
+                            crate::export::RED_RECORD_LABEL_UNIT_TWIPS
+                        },
                     )),
                 TableCell::new()
-                    .width(contact_width, WidthType::Dxa)
+                    .width(columns.contact, WidthType::Dxa)
                     .add_paragraph(red_record_paragraph(
-                        "联系人：",
-                        &docx_name(&entry.name, BODY_SIZE).0,
+                        if first { "联系人：" } else { "" },
+                        &row[1],
+                        *name_size,
+                        crate::export::RED_RECORD_LABEL_CONTACT_TWIPS
+                            + crate::export::red_record_name_twips(&entries[index].name),
                         AlignmentType::Left,
-                        crate::export::RED_RECORD_CONTACT_USABLE_TWIPS,
+                        columns.contact_usable(),
+                        if first {
+                            0
+                        } else {
+                            crate::export::RED_RECORD_LABEL_CONTACT_TWIPS
+                        },
                     )),
                 TableCell::new()
-                    .width(phone_width, WidthType::Dxa)
+                    .width(columns.phone, WidthType::Dxa)
                     .add_paragraph(red_record_paragraph(
-                        "电话：",
-                        &entry.phone,
+                        if first { "电话：" } else { "" },
+                        &row[2],
+                        BODY_SIZE,
+                        crate::export::red_record_phone_twips(&row[2], first),
                         AlignmentType::Right,
-                        crate::export::RED_RECORD_PHONE_USABLE_TWIPS,
+                        columns.phone_usable(),
+                        0,
                     )),
             ])
             .row_height(560.0)
@@ -154,7 +184,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
             .color("FF0000"),
     );
     Table::new(rows)
-        .set_grid(vec![unit_width, contact_width, phone_width])
+        .set_grid(vec![columns.unit, columns.contact, columns.phone])
         .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
         .layout(TableLayoutType::Fixed)
         .clear_all_border()

@@ -30,14 +30,17 @@ pub(crate) use parse::{
     parse_markdown, parse_markdown_located, parse_markdown_with_lines, parse_ordered_item,
     parse_section_marker,
 };
-pub(crate) use red::{
-    RED_RECORD_CONTACT_TWIPS, RED_RECORD_CONTACT_USABLE_TWIPS, RED_RECORD_PHONE_TWIPS,
-    RED_RECORD_PHONE_USABLE_TWIPS, RED_RECORD_UNIT_TWIPS, RED_RECORD_UNIT_USABLE_TWIPS,
-    SIGNATURE_ROOM_MM, SIGNATURE_ROOM_TWIPS, red_approval_body_metrics, red_approval_wrap_lines,
-    red_record_scale_percent, red_signature_unit_width_mm, red_signature_unit_width_twips,
-};
 #[cfg(test)]
-pub(crate) use red::{RED_RECORD_EM_TWIPS, RED_RECORD_TOTAL_TWIPS, red_signature_unit_width_em};
+pub(crate) use red::{
+    RED_RECORD_EM_TWIPS, RED_RECORD_LABEL_PHONE_TWIPS, RED_RECORD_MIN_UNIT_TWIPS,
+    RED_RECORD_TOTAL_TWIPS, red_signature_unit_width_em,
+};
+pub(crate) use red::{
+    RED_RECORD_LABEL_CONTACT_TWIPS, RED_RECORD_LABEL_UNIT_TWIPS, RedRecordColumns,
+    SIGNATURE_ROOM_MM, SIGNATURE_ROOM_TWIPS, red_approval_body_metrics, red_approval_wrap_lines,
+    red_record_columns, red_record_name_twips, red_record_phone_twips, red_record_scale_units,
+    red_record_unit_twips, red_signature_unit_width_mm, red_signature_unit_width_twips,
+};
 #[cfg(test)]
 pub(crate) use text::parenthesized_ranges;
 pub(crate) use text::{
@@ -292,38 +295,97 @@ mod tests {
         assert_eq!(safe_filename("关于A/B:测试?的函"), "关于A_B_测试_的函");
     }
 
-    /// 承办区三栏宽度必须正好铺满版心，否则三端会各自错位。
+    /// 承办区栏宽按内容统筹：联系人栏恒 8 em，电话栏按最长号码定宽，余量归承办单位，
+    /// 三栏始终正好铺满版心。
     #[test]
-    fn red_record_columns_fill_the_content_width() {
+    fn red_record_columns_follow_content_and_fill_the_content_width() {
+        // 典型一行：12 位号码 → 电话栏 960+12×160 = 2880，联系人栏 2560，承办单位栏 3404。
+        let columns = red_record_columns(&[[
+            "综合处".to_string(),
+            "张三".to_string(),
+            "010-12345678".to_string(),
+        ]]);
         assert_eq!(
-            RED_RECORD_UNIT_TWIPS + RED_RECORD_CONTACT_TWIPS + RED_RECORD_PHONE_TWIPS,
+            columns,
+            RedRecordColumns {
+                unit: 3_404,
+                contact: 2_560,
+                phone: 2_880,
+            }
+        );
+        assert_eq!(
+            columns.unit + columns.contact + columns.phone,
             RED_RECORD_TOTAL_TWIPS
         );
-        // 承办单位栏最宽：`承办单位：`5 字之后还要放得下单位简称。
-        const { assert!(RED_RECORD_UNIT_TWIPS > RED_RECORD_PHONE_TWIPS) };
+        // 短号码把余量让给承办单位栏：电话栏 960+5×160 = 1760，承办单位栏 4524。
+        let short = red_record_columns(&[[
+            "综合处".to_string(),
+            "张三".to_string(),
+            "010-1".to_string(),
+        ]]);
+        assert_eq!(short.phone, 1_760);
+        assert_eq!(short.unit, RED_RECORD_TOTAL_TWIPS - 2_560 - 1_760);
+        // 多条目时电话栏看所有行：续行没有标签，但号码更长时仍由续行决定栏宽。
+        let multi = red_record_columns(&[
+            [
+                "综合处".to_string(),
+                "张三".to_string(),
+                "010-1".to_string(),
+            ],
+            [
+                "业务处".to_string(),
+                "李四".to_string(),
+                "010-12345678".to_string(),
+            ],
+        ]);
+        assert_eq!(multi.phone, 12 * 160);
+        // 超长号码封顶：承办单位栏至少保住 6 em，号码自己压缩兜底。
+        let long =
+            red_record_columns(&[["综合处".to_string(), "张三".to_string(), "0".repeat(40)]]);
+        assert_eq!(long.unit, RED_RECORD_MIN_UNIT_TWIPS);
+    }
+
+    /// 联系人栏可用宽度正好 = 标签 4 em + 姓名 3 em：2–4 字的姓名一律不压缩。
+    #[test]
+    fn red_record_contact_column_never_compresses_names() {
+        let columns = red_record_columns(&[[
+            "综合处".to_string(),
+            "张三".to_string(),
+            "010-12345678".to_string(),
+        ]]);
+        for name in ["张三", "张三丰", "欧阳司马"] {
+            let natural = RED_RECORD_LABEL_CONTACT_TWIPS + red_record_name_twips(name);
+            assert_eq!(
+                red_record_scale_units(natural, columns.contact_usable()),
+                100,
+                "{name} 不应触发压缩"
+            );
+        }
     }
 
     /// 承办单位一律不换行：放得下不动、放不下按比例压窄，且始终留出栏间空白。
     #[test]
     fn red_record_scale_compresses_only_when_too_wide() {
-        // “承办单位：综合处”8 字 = 2560 缇，可用 3564-320 = 3244 缇，放得下。
+        let columns = red_record_columns(&[[
+            "综合处".to_string(),
+            "张三".to_string(),
+            "010-12345678".to_string(),
+        ]]);
+        // “承办单位：综合处”8 字 = 2560 缇，可用 3404-320 = 3084 缇，放得下。
         assert_eq!(
-            red_record_scale_percent("承办单位：综合处", RED_RECORD_UNIT_USABLE_TWIPS),
+            red_record_scale_units(red_record_unit_twips("综合处"), columns.unit_usable()),
             100
         );
-        // 15 字 = 4800 缇，超出可用宽度，应压到 67%（3244/4800）。
-        let long = red_record_scale_percent(
-            "承办单位：教师工作与师资管理处",
-            RED_RECORD_UNIT_USABLE_TWIPS,
-        );
-        assert!((65..=70).contains(&long), "应按比例压窄：{long}");
+        // 15 字 = 4800 缇，超出可用宽度，应压到 64%（3084/4800）。
+        let natural = red_record_unit_twips("教师工作与师资管理处");
+        let long = red_record_scale_units(natural, columns.unit_usable());
+        assert!((62..=66).contains(&long), "应按比例压窄：{long}");
         // 压缩后的宽度不得超过“栏宽减一个字”，保证与下一栏标签之间有间隔。
-        let natural =
-            title::display_units("承办单位：教师工作与师资管理处") * RED_RECORD_EM_TWIPS / 2;
-        assert!(natural * long / 100 <= RED_RECORD_UNIT_USABLE_TWIPS);
-        // 电话栏不让宽：常见 12 位号码原样排下，不做压缩。
+        assert!(natural * long / 100 <= columns.unit_usable());
+        // 电话栏按内容定宽：常见 12 位号码原样排下，不做压缩。
+        let phone_natural = RED_RECORD_LABEL_PHONE_TWIPS + 12 * RED_RECORD_EM_TWIPS / 2;
         assert_eq!(
-            red_record_scale_percent("电话：010-12345678", RED_RECORD_PHONE_USABLE_TWIPS),
+            red_record_scale_units(phone_natural, columns.phone_usable()),
             100
         );
     }

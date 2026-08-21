@@ -7,17 +7,6 @@ use super::docx;
 use super::title;
 use crate::export::{MarkdownBlock, MarkdownSection, plain_text};
 
-/// 承办区「电话」栏宽：`电话：` 3 em + 半角号码约 6.5 em。
-pub(crate) const RED_RECORD_PHONE_TWIPS: usize = 3_040;
-
-/// 承办区「联系人」栏宽：`联系人：` 4 em + 姓名 3 em（姓名一律归一到 3 字宽）。
-pub(crate) const RED_RECORD_CONTACT_TWIPS: usize = 2_240;
-
-/// 承办区「承办单位」栏宽：版心减去另两栏，`承办单位：` 5 em 之后还余约 6 em。
-/// 三栏里只有这一栏宽度可变，所以把全部余量都给它，超出时再横向压缩。
-pub(crate) const RED_RECORD_UNIT_TWIPS: usize =
-    RED_RECORD_TOTAL_TWIPS - RED_RECORD_PHONE_TWIPS - RED_RECORD_CONTACT_TWIPS;
-
 /// 承办区总宽 = 版心 156 mm。
 pub(crate) const RED_RECORD_TOTAL_TWIPS: usize = docx::TABLE_CONTENT_WIDTH_TWIPS;
 
@@ -28,32 +17,117 @@ pub(crate) const RED_RECORD_EM_TWIPS: usize = 320;
 /// 因此靠左的两栏可用宽度比栏宽少一个字，保证栏与栏之间始终看得出间隔。
 pub(crate) const RED_RECORD_GUTTER_TWIPS: usize = RED_RECORD_EM_TWIPS;
 
-/// 承办单位栏可用宽度（扣掉栏间留白）。
-pub(crate) const RED_RECORD_UNIT_USABLE_TWIPS: usize =
-    RED_RECORD_UNIT_TWIPS - RED_RECORD_GUTTER_TWIPS;
+/// 三个红色标签的宽度：`承办单位：` 5 em、`联系人：` 4 em、`电话：` 3 em。
+pub(crate) const RED_RECORD_LABEL_UNIT_TWIPS: usize = 5 * RED_RECORD_EM_TWIPS;
+pub(crate) const RED_RECORD_LABEL_CONTACT_TWIPS: usize = 4 * RED_RECORD_EM_TWIPS;
+pub(crate) const RED_RECORD_LABEL_PHONE_TWIPS: usize = 3 * RED_RECORD_EM_TWIPS;
 
-/// 联系人栏可用宽度（扣掉栏间留白）。
-pub(crate) const RED_RECORD_CONTACT_USABLE_TWIPS: usize =
-    RED_RECORD_CONTACT_TWIPS - RED_RECORD_GUTTER_TWIPS;
+/// 姓名恒为 3 em：2 字姓名中间加 1em 两端对齐，4 字姓名压到 3 字宽
+/// （`docx_name` / `latex_name`），因此联系人内容宽度与填什么名字无关。
+pub(crate) const RED_RECORD_NAME_TWIPS: usize = 3 * RED_RECORD_EM_TWIPS;
 
-/// 电话栏靠右贴版心右缘，与左边的间隔由联系人栏的留白提供，自身不再让宽，
-/// 这样 `010-12345678` 这样的常见号码正好排得下、不必压缩。
-pub(crate) const RED_RECORD_PHONE_USABLE_TWIPS: usize = RED_RECORD_PHONE_TWIPS;
+/// 联系人栏宽固定为 8 em：标签 4 em + 姓名 3 em + 栏间留白 1 em。
+/// 栏宽按归一后的姓名预留，这一栏任何情况下都不触发压缩。
+pub(crate) const RED_RECORD_CONTACT_COLUMN_TWIPS: usize =
+    RED_RECORD_LABEL_CONTACT_TWIPS + RED_RECORD_NAME_TWIPS + RED_RECORD_GUTTER_TWIPS;
+
+/// 承办单位栏的最小宽度：电话号码再长，也不能把承办单位栏挤到 6 em 以下。
+pub(crate) const RED_RECORD_MIN_UNIT_TWIPS: usize = 6 * RED_RECORD_EM_TWIPS;
+
+/// 承办区三栏的栏宽方案（缇）。按各行实际内容一次算定，Word/LaTeX/预览三端共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RedRecordColumns {
+    /// 承办单位栏：吃掉版心余量，内容仍放不下时才横向压缩。
+    pub unit: usize,
+    /// 联系人栏：固定 8 em，见 [`RED_RECORD_CONTACT_COLUMN_TWIPS`]。
+    pub contact: usize,
+    /// 电话栏：按最长号码的自然宽度定宽，靠右贴版心右缘。
+    pub phone: usize,
+}
+
+impl RedRecordColumns {
+    /// 缇 → 毫米（LaTeX 注入与预览绘制用）。
+    pub(crate) fn mm(twips: usize) -> f32 {
+        twips as f32 / 1440.0 * 25.4
+    }
+
+    /// 承办单位栏可用宽度（扣掉栏间留白）。
+    pub(crate) fn unit_usable(&self) -> usize {
+        self.unit - RED_RECORD_GUTTER_TWIPS
+    }
+
+    /// 联系人栏可用宽度（扣掉栏间留白），正好 = 标签 4 em + 姓名 3 em。
+    pub(crate) fn contact_usable(&self) -> usize {
+        self.contact - RED_RECORD_GUTTER_TWIPS
+    }
+
+    /// 电话栏靠右贴版心右缘，与左边的间隔由联系人栏的留白提供，自身不再让宽。
+    pub(crate) fn phone_usable(&self) -> usize {
+        self.phone
+    }
+}
+
+/// 按承办区各行（单位简称、姓名、电话的显示文本）拟定三栏宽度，综合统筹：
+///
+/// - 联系人栏恒为 8 em：姓名一律归一到 3 em，栏宽按「标签 + 姓名 + 留白」
+///   预留，这一栏永不压缩；
+/// - 电话栏按实际最长号码定宽：首行含「电话：」标签，续行只有号码且靠右；
+///   号码短就把余量让给承办单位栏，号码过长则封顶，自己压缩兜底；
+/// - 承办单位栏拿版心剩余的全部宽度，内容仍超出时才按比例横向压缩。
+pub(crate) fn red_record_columns(rows: &[[String; 3]]) -> RedRecordColumns {
+    let phone_need = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| red_record_phone_twips(&row[2], index == 0))
+        .max()
+        .unwrap_or(RED_RECORD_LABEL_PHONE_TWIPS);
+    let phone_max =
+        RED_RECORD_TOTAL_TWIPS - RED_RECORD_CONTACT_COLUMN_TWIPS - RED_RECORD_MIN_UNIT_TWIPS;
+    let phone = phone_need.clamp(RED_RECORD_LABEL_PHONE_TWIPS, phone_max);
+    RedRecordColumns {
+        unit: RED_RECORD_TOTAL_TWIPS - RED_RECORD_CONTACT_COLUMN_TWIPS - phone,
+        contact: RED_RECORD_CONTACT_COLUMN_TWIPS,
+        phone,
+    }
+}
+
+/// 承办单位格内容（含标签位）的自然宽度：续行缩进到标签右沿与首行取值对齐，
+/// 所以每一行都按「标签 + 单位名」计量。
+pub(crate) fn red_record_unit_twips(unit: &str) -> usize {
+    RED_RECORD_LABEL_UNIT_TWIPS + title::display_units(unit) * RED_RECORD_EM_TWIPS / 2
+}
+
+/// 电话格内容的自然宽度：首行含「电话：」标签，续行只有号码且靠右。
+pub(crate) fn red_record_phone_twips(phone: &str, with_label: bool) -> usize {
+    title::display_units(phone) * RED_RECORD_EM_TWIPS / 2
+        + if with_label {
+            RED_RECORD_LABEL_PHONE_TWIPS
+        } else {
+            0
+        }
+}
+
+/// 姓名在承办区里的自然宽度：2–4 字恒归一到 3 em，更长的名字按实际字数计。
+pub(crate) fn red_record_name_twips(name: &str) -> usize {
+    if (2..=4).contains(&name.chars().count()) {
+        RED_RECORD_NAME_TWIPS
+    } else {
+        title::display_units(name) * RED_RECORD_EM_TWIPS / 2
+    }
+}
 
 /// 首页正文/标题栏宽 100 mm，三号字每行 17 个全角字（100 / 5.644 = 17.7）。
 pub(crate) const RED_APPROVAL_NARROW_CHARS: usize = 17;
 
 /// 承办区某一栏的横向压缩比（百分数，100 = 原宽）。
 ///
-/// 承办单位一律不许换行：先按 `usable_twips` 量出自然宽度，放得下就原样排，
+/// 承办区一律不许换行：先按 `usable_twips` 量出自然宽度，放得下就原样排，
 /// 放不下才按比例压窄字形——字高不变，只收窄字宽，与标题压缩同一套做法。
-pub(crate) fn red_record_scale_percent(text: &str, usable_twips: usize) -> usize {
-    // display_units 以半角为单位，半角字占半个全角字宽。
-    let natural = title::display_units(text) * RED_RECORD_EM_TWIPS / 2;
-    if natural <= usable_twips || natural == 0 || usable_twips == 0 {
+pub(crate) fn red_record_scale_units(natural_twips: usize, usable_twips: usize) -> usize {
+    if natural_twips <= usable_twips || natural_twips == 0 || usable_twips == 0 {
         return 100;
     }
-    ((usable_twips as f64 / natural as f64) * 100.0)
+    ((usable_twips as f64 / natural_twips as f64) * 100.0)
         .floor()
         .clamp(30.0, 100.0) as usize
 }

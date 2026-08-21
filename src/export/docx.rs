@@ -1340,16 +1340,19 @@ mod tests {
                 && date.contains(&format!(r#"w:left="{expected_left}""#)),
             "成文日期应居中于单位与签字空间之间：{date}"
         );
-        // 承办区三栏不再等分：承办单位栏最宽，另两栏按内容定宽。
+        // 承办区栏宽按内容一次算定：联系人栏固定 8 em，电话栏按最长号码定宽，
+        // 承办单位栏吃版心余量。本例两条号码都是 12 位 → 3404/2560/2880。
         assert!(
             xml.contains(&format!(
                 "<w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" />",
-                crate::export::RED_RECORD_UNIT_TWIPS,
-                crate::export::RED_RECORD_CONTACT_TWIPS,
-                crate::export::RED_RECORD_PHONE_TWIPS
+                3_404, 2_560, 2_880
             )),
             "承办区栏宽应与 LaTeX/预览同源：{xml}"
         );
+        // 多条承办条目：标签只在首行出现一次，续行只排取值并保持对齐。
+        assert_eq!(xml.matches("承办单位：").count(), 1, "{xml}");
+        assert_eq!(xml.matches("联系人：").count(), 1, "{xml}");
+        assert_eq!(xml.matches("电话：").count(), 1, "{xml}");
     }
 
     /// 承办单位一律不换行：栏内放不下时整格按同一比例横向压窄（`w:w`），
@@ -1363,15 +1366,15 @@ mod tests {
         input.profile.kind = TemplateKind::RedHeadApproval;
         input.profile.issuing_unit = "某某委员会办公室".into();
         input.profile.signing_unit = "某某委员会".into();
-        input.profile.joint_responsible_units = "综合处、教师工作与师资管理处".into();
+        input.profile.joint_responsible_units = "教师工作与师资管理处、综合处".into();
         input.profile.joint_contacts = vec![
             JointContact {
-                unit: "综合处".into(),
+                unit: "教师工作与师资管理处".into(),
                 name: "王五".into(),
                 phone: "010-12345678".into(),
             },
             JointContact {
-                unit: "教师工作与师资管理处".into(),
+                unit: "综合处".into(),
                 name: "赵六".into(),
                 phone: "010-87654321".into(),
             },
@@ -1379,9 +1382,22 @@ mod tests {
         input.date = "2026年8月12日".into();
         write_docx_ok(&path, &input, "# 标题\n\n正文。妥否，请指示。").unwrap();
         let xml = zip_text(&path, "word/document.xml");
-        let scale = crate::export::red_record_scale_percent(
-            "承办单位：教师工作与师资管理处",
-            crate::export::RED_RECORD_UNIT_USABLE_TWIPS,
+        let columns = crate::export::red_record_columns(&[
+            [
+                "教师工作与师资管理处".to_string(),
+                "王五".to_string(),
+                "010-12345678".to_string(),
+            ],
+            [
+                "综合处".to_string(),
+                "赵六".to_string(),
+                "010-87654321".to_string(),
+            ],
+        ]);
+        // 长单位名在首行：标签与取值一起按同一比例压窄。
+        let scale = crate::export::red_record_scale_units(
+            crate::export::red_record_unit_twips("教师工作与师资管理处"),
+            columns.unit_usable(),
         );
         assert!(scale < 100, "长单位名应触发压缩");
         assert!(

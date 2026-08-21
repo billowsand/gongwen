@@ -254,34 +254,54 @@ pub(crate) fn red_approval_title_paragraph(title: &str, plan: &TitlePlan) -> Par
 
 /// 承办区一格：红色标签 + 黑色取值，整格不许换行。
 ///
-/// 标签与取值的自然宽度超出栏宽时，两个 run 一起按同一比例横向压窄字形
-/// （`w:w`，字高不变），与 LaTeX 侧的 `\RedFit` 和标题压缩同一套做法。
+/// 多条承办条目时标签只出现在首行；续行传空标签，并用 `indent_twips` 把取值
+/// 缩到首行取值的起始位置，保证各行单位名、姓名上下对齐。内容自然宽
+/// （`natural_twips`，含标签与缩进位）超出可用宽度时，整格按同一比例横向
+/// 压窄字形（`w:w`，字高不变），与 LaTeX 侧的 `\RedFit` 和标题压缩同一套做法。
+/// `value_size` 支持姓名 4 字时缩小的字号（`docx_name`），其余情况传 `BODY_SIZE`。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn red_record_paragraph(
     label: &str,
     value: &str,
+    value_size: usize,
+    natural_twips: usize,
     alignment: AlignmentType,
     usable_twips: usize,
+    indent_twips: usize,
 ) -> Paragraph {
-    let scale = crate::export::red_record_scale_percent(&format!("{label}{value}"), usable_twips);
-    let mut label_run = Run::new()
-        .add_text(label)
+    // 缩进位不参与压缩：量宽与可用宽都先扣掉缩进，压缩只作用于文字本身。
+    let scale = crate::export::red_record_scale_units(
+        natural_twips.saturating_sub(indent_twips),
+        usable_twips.saturating_sub(indent_twips),
+    );
+    let mut paragraph = Paragraph::new();
+    if !label.is_empty() {
+        let mut label_run = Run::new()
+            .add_text(label)
+            .fonts(chinese_fonts("仿宋_GB2312"))
+            .size(BODY_SIZE)
+            .color("FF0000");
+        if scale < 100 {
+            label_run = label_run.stretch(scale as i32);
+        }
+        paragraph = paragraph.add_run(label_run);
+    }
+    let mut value_run = Run::new()
+        .add_text(value)
         .fonts(chinese_fonts("仿宋_GB2312"))
-        .size(BODY_SIZE)
-        .color("FF0000");
-    let mut value_run = body_run(value);
+        .size(value_size);
     if scale < 100 {
-        label_run = label_run.stretch(scale as i32);
         value_run = value_run.stretch(scale as i32);
     }
-    Paragraph::new()
-        .add_run(label_run)
-        .add_run(value_run)
-        .align(alignment)
-        .line_spacing(
-            LineSpacing::new()
-                .line(560)
-                .line_rule(LineSpacingType::Exact),
-        )
+    paragraph = paragraph.add_run(value_run).align(alignment).line_spacing(
+        LineSpacing::new()
+            .line(560)
+            .line_rule(LineSpacingType::Exact),
+    );
+    if indent_twips > 0 {
+        paragraph = paragraph.indent(Some(indent_twips as i32), None, None, None);
+    }
+    paragraph
 }
 
 /// 图片段落：位图嵌入为 Word 图片（宽度=版心 156 mm，等比缩放，小图保持原尺寸）；

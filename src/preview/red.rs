@@ -661,28 +661,53 @@ pub(crate) fn paint_red_approval_overlay(
         [at(text_left, record_top), at(text_left + 156.0, record_top)],
         red,
     );
-    let columns = [62.86_f32, 39.51, 53.62];
+    // 栏宽与 Word/LaTeX 同源：按各行实际内容一次算定，联系人栏固定 8 em 不压缩。
+    let record_columns = export::red_record_columns(rows);
+    let columns = [
+        export::RedRecordColumns::mm(record_columns.unit),
+        export::RedRecordColumns::mm(record_columns.contact),
+        export::RedRecordColumns::mm(record_columns.phone),
+    ];
     let labels = ["承办单位：", "联系人：", "电话："];
+    // 标签只在首行绘制；续行取值按标签宽度右移，与首行取值上下对齐。
+    let label_galleys = labels.map(|label| {
+        red_overlay_text(
+            ui,
+            metrics,
+            label,
+            theme::FONT_FANGSONG,
+            BODY_PT,
+            theme::paper::red(),
+        )
+    });
     for (row_index, row) in rows.iter().enumerate() {
         let y = record_top + 1.4 + row_index as f32 * (LINE_PT / MM);
         let mut x = text_left;
         for column in 0..3 {
-            let label = red_overlay_text(
-                ui,
-                metrics,
-                labels[column],
-                theme::FONT_FANGSONG,
-                BODY_PT,
-                theme::paper::red(),
-            );
+            let label = &label_galleys[column];
             let label_width = label.size().x;
-            painter.galley(at(x, y), label, theme::paper::red());
+            if row_index == 0 {
+                painter.galley(at(x, y), label.clone(), theme::paper::red());
+            }
+            // 姓名恒为 3em：2 字加全角空格两端对齐，4 字缩字号近似压缩（同 docx_name）。
+            let chars = row[column].chars().count();
+            let (text, pt) = if column == 1 && chars == 2 {
+                let mut it = row[column].chars();
+                (
+                    format!("{}\u{2003}{}", it.next().unwrap(), it.next().unwrap()),
+                    BODY_PT,
+                )
+            } else if column == 1 && chars == 4 {
+                (row[column].clone(), BODY_PT * 0.75)
+            } else {
+                (row[column].clone(), BODY_PT)
+            };
             let value = red_overlay_text(
                 ui,
                 metrics,
-                &row[column],
+                &text,
                 theme::FONT_FANGSONG,
-                BODY_PT,
+                pt,
                 theme::paper::ink(),
             );
             let value_pos = if column == 2 {

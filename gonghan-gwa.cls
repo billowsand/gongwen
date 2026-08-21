@@ -369,14 +369,17 @@
 \def\gwa@redshapepairs{}
 \newif\ifgwa@redbodycontinued
 
-% 承办区三栏宽度。与 Word/预览同源（缇 → 毫米）：承办单位 3564、联系人 2240、
-% 电话 3040 缇，合计 8844 缇 = 156mm 版心。
+% 承办区三栏宽度的兜底默认值（典型一行：3 字单位 + 3 字姓名 + 12 位号码，
+% 缇 → 毫米：承办单位 3404、联系人 2560、电话 2880 缇，合计 8844 缇 = 156mm 版心）。
+% 实际排版由导出器按各行内容算好后用 \setlength 覆盖：联系人栏固定 8 em
+% （标签 4 + 姓名 3 + 留白 1）永不压缩，电话栏按最长号码定宽，
+% 承办单位栏吃版心余量、超宽时由 \RedFit 压缩。
 \newlength{\RedRecordUnitWidth}
 \newlength{\RedRecordContactWidth}
 \newlength{\RedRecordPhoneWidth}
-\setlength{\RedRecordUnitWidth}{62.86mm}
-\setlength{\RedRecordContactWidth}{39.51mm}
-\setlength{\RedRecordPhoneWidth}{53.62mm}
+\setlength{\RedRecordUnitWidth}{60.04mm}
+\setlength{\RedRecordContactWidth}{45.16mm}
+\setlength{\RedRecordPhoneWidth}{50.80mm}
 % 栏间留白：内容压缩后正好铺满整栏会与下一栏的红色标签贴在一起，
 % 因此可用宽度一律比栏宽少一个三号字（16pt = 5.64mm）。
 \newlength{\RedRecordGutter}
@@ -394,6 +397,7 @@
 }
 
 % 承办区一行：承办单位靠左、联系人靠左、电话靠右，三栏定宽且各自不换行。
+% 红色标签只出现在首行（本宏）；多条承办条目的续行走 \RedRecordRowCont。
 \newcommand{\RedRecordRow}[3]{%
     \noindent
     \makebox[\RedRecordUnitWidth][l]{%
@@ -402,10 +406,24 @@
     \makebox[\RedRecordContactWidth][l]{%
         \RedFit{\dimexpr\RedRecordContactWidth-\RedRecordGutter\relax}{%
             \textcolor{red}{联系人：}#2}\hfill}%
-    % 电话栏靠右贴版心右缘，与左边的间隔由联系人栏的留白提供，自身不再让宽，
-    % 这样 010-12345678 这样的常见号码正好排得下、不必压缩。
+    % 电话栏靠右贴版心右缘，与左边的间隔由联系人栏的留白提供，自身不再让宽。
     \makebox[\RedRecordPhoneWidth][r]{%
         \hfill\RedFit{\RedRecordPhoneWidth}{\textcolor{red}{电话：}#3}}%
+    \par
+}
+
+% 承办区续行：不重复红色标签，取值缩到首行取值的起始位置（5em/4em），
+% 保证各行的单位名、姓名上下对齐；电话靠右，天然对齐。
+\newcommand{\RedRecordRowCont}[3]{%
+    \noindent
+    \makebox[\RedRecordUnitWidth][l]{%
+        \RedFit{\dimexpr\RedRecordUnitWidth-\RedRecordGutter\relax}{%
+            \hspace*{5em}#1}\hfill}%
+    \makebox[\RedRecordContactWidth][l]{%
+        \RedFit{\dimexpr\RedRecordContactWidth-\RedRecordGutter\relax}{%
+            \hspace*{4em}#2}\hfill}%
+    \makebox[\RedRecordPhoneWidth][r]{%
+        \hfill\RedFit{\RedRecordPhoneWidth}{#3}}%
     \par
 }
 

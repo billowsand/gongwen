@@ -211,9 +211,20 @@ mod tests {
             &UnitDisplay::new(&[]),
         );
         assert!(
-            tex.contains("\\RedRecordRow{综合处}{王\\hspace{1em}五}{010-12345678}")
-                || tex.contains("\\RedRecordRow{综合处}"),
-            "承办区应逐行走 \\RedRecordRow：{tex}"
+            tex.contains("\\RedRecordRow{综合处}{王\\hspace{1em}五}{010-12345678}"),
+            "承办区首行走 \\RedRecordRow：{tex}"
+        );
+        assert!(
+            tex.contains("\\RedRecordRowCont{业务处}{赵\\hspace{1em}六}{010-87654321}"),
+            "续行不重复标签、取值缩进对齐：{tex}"
+        );
+        // 栏宽按各行内容一次算定并注入类文件：联系人栏固定 8 em（45.156mm），
+        // 两条 12 位号码 → 电话栏 50.800mm，余量归承办单位栏。
+        assert!(
+            tex.contains("\\setlength{\\RedRecordUnitWidth}{60.043mm}")
+                && tex.contains("\\setlength{\\RedRecordContactWidth}{45.156mm}")
+                && tex.contains("\\setlength{\\RedRecordPhoneWidth}{50.800mm}"),
+            "承办区栏宽应按内容算定并与 Word/预览同源：{tex}"
         );
         assert!(!tex.contains("tabularx"), "承办区不再用 tabularx：{tex}");
         let barrier = tex.find("\\RedPageOneBarrier").expect("应插入换页屏障");
@@ -295,8 +306,9 @@ mod tests {
         // 承办单位一律不换行：定宽 \makebox + 超宽时只压字宽的 \RedFit。
         assert!(
             GONGHAN_CLASS.contains("\\newcommand{\\RedRecordRow}[3]")
+                && GONGHAN_CLASS.contains("\\newcommand{\\RedRecordRowCont}[3]")
                 && GONGHAN_CLASS.contains("\\resizebox{#1}{\\height}"),
-            "承办区应定宽排版，超宽时只横向压缩、字高不变"
+            "承办区应定宽排版，超宽时只横向压缩、字高不变；续行不重复标签"
         );
         // 承办区高度必须有上限，否则条目过多会把首页正文区压成 0 高度。
         assert!(
