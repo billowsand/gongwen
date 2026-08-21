@@ -2154,6 +2154,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ttf-parser",
+ "windows-sys 0.61.2",
  "winresource",
  "zip 4.6.1",
 ]

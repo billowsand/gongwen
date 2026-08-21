@@ -22,6 +22,7 @@ mod orphan_probe;
 mod pdf_viewer;
 mod portable_runtime;
 mod preview;
+mod print_pdf;
 mod prompt;
 mod proofread;
 mod proofread_rules;

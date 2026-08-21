@@ -50,6 +50,11 @@ pub(crate) enum WorkerResult {
         key: PdfKey,
         message: pdf_viewer::PdfMessage,
     },
+    /// PDF 打印任务（后台线程跑系统打印对话框与逐页光栅化）的结果。
+    PdfPrinted {
+        path: PathBuf,
+        result: Result<crate::print_pdf::PrintOutcome, String>,
+    },
 }
 
 /// 知识库后台任务的结果。
@@ -324,6 +329,15 @@ impl GongwenApp {
                     if let Some(index) = self.pdf_index_of_key(key) {
                         self.pdfs[index].apply_message(ctx, message);
                     }
+                }
+                WorkerResult::PdfPrinted { path, result } => {
+                    self.status = match result {
+                        Ok(crate::print_pdf::PrintOutcome::Printed) => {
+                            format!("已送打印机：{}。", path.display())
+                        }
+                        Ok(crate::print_pdf::PrintOutcome::Cancelled) => "已取消打印。".into(),
+                        Err(error) => format!("打印失败：{error}"),
+                    };
                 }
             }
             ctx.request_repaint();

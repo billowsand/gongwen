@@ -4,7 +4,7 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use crate::app::{
-    DraftAction, GongwenApp, VersionDiffState, VersionScope, open_in_os, print_in_os, reveal_in_os,
+    DraftAction, GongwenApp, VersionDiffState, VersionScope, WorkerResult, open_in_os, reveal_in_os,
 };
 use crate::diff_view::DiffViewState;
 use crate::draft_page::{DocKey, DraftPage, DraftSession};
@@ -177,11 +177,12 @@ impl GongwenApp {
             });
             return;
         };
+        let ctx = ui.ctx().clone();
         let actions = self.pdfs[index].ui(ui);
-        self.apply_pdf_actions(actions);
+        self.apply_pdf_actions(actions, &ctx);
     }
 
-    pub(crate) fn apply_pdf_actions(&mut self, actions: Vec<PdfViewerAction>) {
+    pub(crate) fn apply_pdf_actions(&mut self, actions: Vec<PdfViewerAction>, ctx: &egui::Context) {
         for action in actions {
             match action {
                 PdfViewerAction::OpenExternal(path) => match open_in_os(&path) {
@@ -192,12 +193,19 @@ impl GongwenApp {
                     Ok(()) => self.status = format!("已定位 {}。", path.display()),
                     Err(error) => self.status = format!("定位 PDF 失败：{error}"),
                 },
-                PdfViewerAction::Print(path) => match print_in_os(&path) {
-                    Ok(()) => {
-                        self.status = format!("已送打印机：{}。", path.display());
-                    }
-                    Err(error) => self.status = format!("打印失败：{error}"),
-                },
+                // 打印要弹系统对话框并逐页光栅化，可能花几秒，放后台线程，
+                // 主界面照常可用；结果经 WorkerResult 回状态栏。
+                PdfViewerAction::Print(path) => {
+                    self.status = format!("正在准备打印 {}…", path.display());
+                    let tx = self.sender.clone();
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        let result = crate::print_pdf::print_pdf(&path);
+                        let _ = tx.send(WorkerResult::PdfPrinted { path, result });
+                        // 主线程可能正闲着睡着，主动敲醒它。
+                        ctx.request_repaint();
+                    });
+                }
             }
         }
     }

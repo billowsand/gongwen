@@ -48,7 +48,8 @@ makepkg -si
 cargo build --release --locked --no-default-features --features linux-portal-dialogs
 ```
 
-文件选择依赖 `xdg-desktop-portal-gtk`；应用内直接打印还需要可提供 `lp` 命令的 CUPS。
+文件选择依赖 `xdg-desktop-portal-gtk`；应用内直接打印还需要可提供 `lp` 命令的 CUPS
+（Windows 与 macOS 无此依赖：Windows 由应用自行光栅化页面走原生 GDI 打印，macOS 自带 `lp`）。
 
 #### 输入法（fcitx5）候选窗定位
 

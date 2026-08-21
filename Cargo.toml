@@ -43,6 +43,16 @@ serde_json = "1.0"
 ttf-parser = "0.25.1"
 zip = "4.3"
 
+[target.'cfg(windows)'.dependencies]
+# 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。
+# 该 crate 已随 winit 在依赖树中，这里只是声明直接引用。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_UI_Controls_Dialogs",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # winit 的窗口图标命令在 macOS 上无效；用 AppKit 同步更新 Dock 图标。
 objc2 = "0.5.2"
