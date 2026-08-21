@@ -263,7 +263,7 @@ pub(crate) fn inline_segments(text: &str) -> Vec<InlineSegment> {
             .match_indices(marker)
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        for pair in positions.chunks_exact(2) {
+        for pair in positions.as_chunks::<2>().0 {
             paired_markers.insert(pair[0], literal);
             paired_markers.insert(pair[1], literal);
         }

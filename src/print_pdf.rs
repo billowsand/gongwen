@@ -13,6 +13,7 @@
 use std::path::Path;
 
 /// 打印任务的结果。「打完了」和「用户取消」是两回事，状态栏文案要分开。
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrintOutcome {
     /// 打印数据已完整交给系统。
@@ -66,7 +67,7 @@ fn fit_rect(src_w: i32, src_h: i32, area_w: i32, area_h: i32) -> (i32, i32, i32,
 #[cfg_attr(not(windows), allow(dead_code))]
 fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         out.extend_from_slice(&[px[2], px[1], px[0], 255]);
     }
     out
