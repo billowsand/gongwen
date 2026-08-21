@@ -50,6 +50,32 @@ cargo build --release --locked --no-default-features --features linux-portal-dia
 
 文件选择依赖 `xdg-desktop-portal-gtk`；应用内直接打印还需要可提供 `lp` 命令的 CUPS。
 
+#### 输入法（fcitx5）候选窗定位
+
+本应用是原生 Wayland 客户端，候选窗由 compositor 按 `input-method-v2` 协议绘制，
+位置取决于应用上报的"光标区域"。上游 egui-winit 把整个编辑框当成光标区域上报，
+在 Hyprland 下会让候选窗贴在编辑框底部不动；全屏时该区域几乎等于整块屏幕，
+Hyprland 的下沿越界判定会把候选窗翻到光标上方的负坐标处，即屏幕之外——表现为
+「看不见候选框但照样能打字、能选词」（参见 [hyprwm/Hyprland#5399][hypr-5399]、
+[#8773][hypr-8773]）。`src/ime.rs` 把上报区域收窄成真正的光标矩形来规避。
+
+候选窗位置仍然不对时，用调试开关打印实际上报的坐标：
+
+```bash
+GONGWEN_IME_DEBUG=1 gongwen-assistant
+```
+
+每次光标区域变化会向 stderr 打一行 `[ime] cursor=(x,y wxh) window=… ppp=… fullscreen=…`
+（egui 点，原点在窗口左上角）。坐标落在窗口范围内即说明应用侧上报正常，问题在
+compositor 或 fcitx5 一侧。此时可以绕开：把该显示器缩放改成 1 以外的值
+（如 `monitor = ,preferred,auto,1.2`），或临时用 XWayland 启动
+（`env -u WAYLAND_DISPLAY XMODIFIERS=@im=fcitx gongwen-assistant`），走 XIM 路径由
+fcitx5 自己画候选窗。LibreOffice 之类不受影响的程序，是因为它们经 `GTK_IM_MODULE` /
+`QT_IM_MODULE` 直连 fcitx5，绕过了 compositor 的弹窗路径；egui/winit 没有对应的旁路。
+
+[hypr-5399]: https://github.com/hyprwm/Hyprland/issues/5399
+[hypr-8773]: https://github.com/hyprwm/Hyprland/issues/8773
+
 ### 从源码构建
 
 前置条件：

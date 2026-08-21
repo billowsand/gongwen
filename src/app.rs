@@ -204,8 +204,6 @@ pub struct GongwenApp {
     exit_confirmed: bool,
     /// 上次定时自动保存的时刻。
     last_autosave: std::time::Instant,
-    /// 上一帧补发给窗口后端的 IME 状态，见 `crate::ime`。
-    ime: crate::ime::ImeState,
     status: String,
     /// 全局任务（当前只有模型探测）。稿件自己的生成/导出记在各自的会话上。
     busy: bool,
@@ -391,7 +389,6 @@ impl GongwenApp {
             exit_prompt: None,
             exit_confirmed: false,
             last_autosave: std::time::Instant::now(),
-            ime: None,
             status: "就绪。先在“设置”中连接本地模型服务。".into(),
             busy: false,
             sender,
@@ -550,7 +547,7 @@ impl eframe::App for GongwenApp {
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
         // 所有编辑框都画完了，这时 `output.ime` 才是本帧最终的那一个。
-        crate::ime::follow_cursor(&ctx, &mut self.ime);
+        crate::ime::follow_cursor(&ctx);
         if self.any_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
