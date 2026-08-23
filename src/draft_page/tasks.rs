@@ -14,6 +14,7 @@ use crate::lmstudio;
 use crate::models::{DraftInput, ExportSelection, GeneratedDraft, ReviewNote, TemplateKind};
 use crate::prompt;
 use crate::rag;
+use crate::revise_model;
 use crate::storage;
 use crate::theme;
 use crate::validator;
@@ -162,6 +163,70 @@ impl DraftPage<'_> {
                 key,
                 seq,
                 job: DocJob::Exported(result),
+            });
+        });
+    }
+
+    /// 发起一轮小模型逐句文字复核。
+    ///
+    /// 与起草、优化的根本区别：它**不产出正文**，只产出待确认的建议。所以既不
+    /// 需要事实闸门那一套（没有整篇改写可言），也不会触发自动导出——复核结果
+    /// 在用户逐条点过之前，正文一个字都没变。
+    pub(crate) fn start_model_review(&mut self) {
+        if self.doc.busy {
+            return;
+        }
+        if !self.config.revise_model.enabled {
+            *self.status = "文字复核未启用：请先在设置中配置复核用的小模型。".into();
+            return;
+        }
+        let markdown = self.doc.generated_markdown.clone();
+        if markdown.trim().is_empty() {
+            *self.status = "还没有可复核的正文。".into();
+            return;
+        }
+        let cfg = self.config.revise_model.clone();
+        let sentences = revise_model::segment_sentences(&markdown, cfg.max_sentence_chars);
+        if sentences.is_empty() {
+            *self.status = "正文里没有可逐句复核的句子（标题、表格和过短的句子不送检）。".into();
+            return;
+        }
+
+        let (key, seq) = self.begin_job();
+        *self.status = format!(
+            "正在逐句复核，共 {} 句…",
+            sentences.len().min(cfg.max_sentences)
+        );
+        let draft_model = self.config.lm_studio.clone();
+        let lexicon = crate::proofread::Lexicon::resolved(&self.config.proofread);
+        let vocabulary = self.config.vocabulary.clone();
+        let cache = self.doc.revise_cache.clone();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let progress = {
+                let tx = tx.clone();
+                move |done: usize, total: usize| {
+                    let _ = tx.send(WorkerResult::Doc {
+                        key,
+                        seq,
+                        job: DocJob::ExportProgress(format!("正在逐句复核 {done}/{total}…")),
+                    });
+                }
+            };
+            let result = revise_model::review(
+                &cfg,
+                &draft_model,
+                &lexicon,
+                &vocabulary,
+                &markdown,
+                &cache,
+                &progress,
+            )
+            .map_err(|error: anyhow::Error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::Reviewed(result),
             });
         });
     }

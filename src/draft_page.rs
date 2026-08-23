@@ -379,8 +379,11 @@ pub(crate) struct DraftSession {
     pub(crate) ai_review_baseline: Option<String>,
     /// 尚未接受的 AI 修改提案。提案不参与自动保存，也不能直接导出。
     pub(crate) ai_proposal: Option<AiProposal>,
-    /// 本篇待确认的修订建议。词表、文档规则与将来的模型检查器共用这一份。
+    /// 本篇待确认的修订建议。词表、文档规则与模型检查器共用这一份。
     pub(crate) revisions: crate::revision::RevisionSet,
+    /// 逐句复核的结论缓存：句子指纹 → 模型原话。改了别处的句子不必重问一遍，
+    /// 这是「一轮几十次本地推理」能反复跑的前提。
+    pub(crate) revise_cache: std::collections::BTreeMap<u64, Option<String>>,
     /// 上次写入稿件库时的内容基线：`(要素 JSON, 正文)`。为 None 表示这篇
     /// 还没入过库。脏判定就是拿它和当前内容比。
     pub(crate) saved_baseline: Option<(String, String)>,
@@ -505,6 +508,7 @@ impl DraftSession {
             ai_review_baseline: None,
             ai_proposal: None,
             revisions: crate::revision::RevisionSet::default(),
+            revise_cache: std::collections::BTreeMap::new(),
             saved_baseline: None,
             committed_baseline: None,
             record_status: ManuscriptStatus::Draft,
@@ -649,6 +653,7 @@ impl DraftSession {
         self.ai_proposal = None;
         // 建议锚在正文上，换了正文就全部失效；忽略记录也只对这一篇成立。
         self.revisions.clear();
+        self.revise_cache.clear();
         self.preview_anchor = None;
         self.pending_source_jump = None;
         self.pending_source_selection = None;

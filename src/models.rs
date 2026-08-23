@@ -505,6 +505,68 @@ impl Default for LmStudioConfig {
     }
 }
 
+/// 文字复核用的小模型接入。
+///
+/// 与起草模型分开配是这一层的前提：起草要发挥，需要大模型和一点温度；逐句
+/// 复核只要稳，Qwen3 4B/8B 一类的小模型温度 0 反而更好使，而且快得多——一篇
+/// 稿子几十句，用大模型逐句问一遍要等到人失去耐心。
+///
+/// 地址和密钥留空时沿用起草模型的：多数人两者跑在同一个本地服务上，只是加载了
+/// 不同的模型，没必要填两遍。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviseModelConfig {
+    /// 默认关闭。模型没配好就把入口摆出来，只会让人点一次、失败一次。
+    pub enabled: bool,
+    /// 留空表示沿用起草模型的接口地址。
+    pub base_url: String,
+    pub model: String,
+    /// 留空表示沿用起草模型的密钥。
+    pub api_key: String,
+    pub timeout_seconds: u64,
+    /// 单句送检的字数上限。超过多半是整段没断句，交给小模型只会跑飞。
+    pub max_sentence_chars: usize,
+    /// 一轮最多送检多少句，免得一篇长稿把本地服务占死。
+    pub max_sentences: usize,
+}
+
+impl Default for ReviseModelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            model: String::new(),
+            api_key: String::new(),
+            // 小模型单句推理很快，但本地服务冷启动会慢，留足一次的余量即可。
+            timeout_seconds: 60,
+            max_sentence_chars: 120,
+            max_sentences: 200,
+        }
+    }
+}
+
+impl ReviseModelConfig {
+    /// 解析成一次真正可用的接入配置。温度固定为 0：复核要的是可复现，不是发挥。
+    pub fn resolve(&self, draft_model: &LmStudioConfig) -> LmStudioConfig {
+        let pick = |own: &str, fallback: &str| {
+            if own.trim().is_empty() {
+                fallback.to_string()
+            } else {
+                own.trim().to_string()
+            }
+        };
+        LmStudioConfig {
+            base_url: pick(&self.base_url, &draft_model.base_url),
+            model: self.model.trim().to_string(),
+            api_key: pick(&self.api_key, &draft_model.api_key),
+            temperature: 0.0,
+            // 逐句复核的输出上限按句长现算，这里给个不起作用的兜底值。
+            max_tokens: 512,
+            timeout_seconds: self.timeout_seconds.max(5),
+        }
+    }
+}
+
 /// 知识库 embedding 模型接入（OpenAI 兼容 /v1/embeddings）。与 chat 模型相互独立。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1176,6 +1238,8 @@ pub struct AppConfig {
     pub rag: RagConfig,
     /// 校对词表的用户层：对内置条目的改动与自建条目。
     pub proofread: ProofreadConfig,
+    /// 文字复核用的小模型接入。与起草模型相互独立。
+    pub revise_model: ReviseModelConfig,
     /// 编译公文时使用的字体。默认沿用随应用分发的内置字体。
     pub fonts: FontConfig,
     /// 界面主题。旧配置没有该字段时回退默认。
@@ -1211,6 +1275,7 @@ impl Default for AppConfig {
             last_ai_prompt: 0,
             rag: RagConfig::default(),
             proofread: ProofreadConfig::default(),
+            revise_model: ReviseModelConfig::default(),
             fonts: FontConfig::default(),
             theme: ThemeName::default(),
             paper: PaperMode::default(),

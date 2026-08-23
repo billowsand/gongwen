@@ -100,6 +100,8 @@ pub(crate) enum DocJob {
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
     /// 「打开最近导出」指向的定稿文件。
     RedlineExported(Result<Vec<std::path::PathBuf>, String>),
+    /// 小模型逐句文字复核的结果。只产出待确认的建议，不碰正文。
+    Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
 }
 
 impl GongwenApp {
@@ -880,6 +882,44 @@ impl GongwenApp {
                         "{prefix}“{label}”修改提案已生成，检测到 {count} 项关键事实变化，必须逐项核对。"
                     )
                 };
+            }
+            DocJob::Reviewed(Ok(outcome)) => {
+                // 缓存合并而不是覆盖：这一轮跳过的句子，结论还在旧缓存里。
+                self.docs[index].revise_cache.extend(outcome.cache);
+                let markdown = std::mem::take(&mut self.docs[index].generated_markdown);
+                let ignored = std::mem::take(&mut self.config.proofread.ignored);
+                let stale = self.docs[index].revisions.replace_model(
+                    outcome.suggestions,
+                    &markdown,
+                    &ignored,
+                );
+                self.config.proofread.ignored = ignored;
+                self.docs[index].generated_markdown = markdown;
+                let found = self.docs[index].revisions.model_count();
+                // 三个数字都要如实说。拦截数一直居高不下，说明这个检查器或这个
+                // 模型不合用，该让用户知道并关掉它；失效数不为零，说明复核期间
+                // 正文被改过、结果只是部分有效。静默吞掉这两种情况，用户只会
+                // 以为模型什么都没查出来。
+                let mut message = format!("{prefix}文字复核完成");
+                if found == 0 {
+                    message.push_str("，未发现可提交的问题");
+                } else {
+                    message.push_str(&format!("，{found} 条待确认，需人工逐条判断"));
+                }
+                if outcome.rejected > 0 {
+                    message.push_str(&format!("；另有 {} 条未通过复核已丢弃", outcome.rejected));
+                }
+                if stale > 0 {
+                    message.push_str(&format!(
+                        "；{stale} 条因正文在复核期间被改动而失效，请重新复核"
+                    ));
+                }
+                message.push('。');
+                self.status = message;
+                self.docs[index].result_drawer_open = true;
+            }
+            DocJob::Reviewed(Err(error)) => {
+                self.status = format!("{prefix}文字复核失败：{error}");
             }
             DocJob::Drafted(Err(error)) => self.status = format!("{prefix}起草失败：{error}"),
             DocJob::Optimized(Err(error)) => self.status = format!("{prefix}优化失败：{error}"),

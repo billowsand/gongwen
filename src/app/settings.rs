@@ -419,6 +419,82 @@ impl GongwenApp {
                 ui.separator();
                 section_heading_with_info(
                     ui,
+                    theme::Icon::Sparkles,
+                    "AI 文字复核（小模型逐句检查）",
+                    "逐句检查语病，结果进「修订建议」，逐条确认后才改正文。与上面的起草模型分开配：起草要发挥，复核只要稳——Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多。地址和密钥留空表示沿用起草模型的。",
+                );
+                ui.add_space(8.0);
+                ui.checkbox(
+                    &mut self.config.revise_model.enabled,
+                    "启用文字复核（起草页「审校」分区出现入口）",
+                );
+                ui.add_enabled_ui(self.config.revise_model.enabled, |ui| {
+                    field(
+                        ui,
+                        "接口地址",
+                        &mut self.config.revise_model.base_url,
+                        "留空沿用起草模型的地址",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("模型"));
+                        if self.models.is_empty() {
+                            ui.text_edit_singleline(&mut self.config.revise_model.model);
+                        } else {
+                            egui::ComboBox::from_id_salt("revise_model_selector")
+                                .selected_text(if self.config.revise_model.model.is_empty() {
+                                    "请选择模型"
+                                } else {
+                                    &self.config.revise_model.model
+                                })
+                                .width(420.0)
+                                .show_ui(ui, |ui| {
+                                    for model in &self.models {
+                                        ui.selectable_value(
+                                            &mut self.config.revise_model.model,
+                                            model.clone(),
+                                            model,
+                                        );
+                                    }
+                                });
+                        }
+                    });
+                    field(
+                        ui,
+                        "API Key",
+                        &mut self.config.revise_model.api_key,
+                        "留空沿用起草模型的密钥",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("单句字数上限"));
+                        ui.add(
+                            egui::DragValue::new(
+                                &mut self.config.revise_model.max_sentence_chars,
+                            )
+                            .range(40..=400),
+                        )
+                        .on_hover_text("超过这个长度的多半是整段没断句，交给小模型只会跑飞，直接跳过");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("单轮送检句数上限"));
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.revise_model.max_sentences)
+                                .range(10..=1000),
+                        )
+                        .on_hover_text("逐句顺序调用，句数越多等得越久");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("超时（秒）"));
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.revise_model.timeout_seconds)
+                                .range(5..=600),
+                        );
+                    });
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
+                section_heading_with_info(
+                    ui,
                     theme::Icon::Library,
                     "知识库（检索增强起草）",
                     "用本地模型服务（LM Studio / Ollama 等 OpenAI 兼容服务）的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。两个模型与上面的对话模型相互独立。",

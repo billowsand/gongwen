@@ -76,6 +76,26 @@ pub fn generate(config: &LmStudioConfig, system: &str, user: &str) -> Result<Str
     generate_with(config, system, user, config.temperature, config.max_tokens)
 }
 
+/// 失败重试一次的对话补全，供逐句复核这类「一轮几十次调用」的场景使用。
+///
+/// 只重一次，且不做退避：本地服务偶尔一次连接被拒或读超时是常事，重一次基本
+/// 就好；真的挂了就该立刻把错误报上去，让用户去看服务，而不是在这里磨十几秒
+/// 之后再说同一句话。起草那条路径不用它——起草一次就是一次，失败了用户自己会
+/// 再点一次，悄悄重试反而会让人以为模型在慢慢想。
+pub fn generate_retrying(
+    config: &LmStudioConfig,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    max_tokens: u32,
+) -> Result<String> {
+    match generate_with(config, system, user, temperature, max_tokens) {
+        Ok(text) => Ok(text),
+        Err(first) => generate_with(config, system, user, temperature, max_tokens)
+            .with_context(|| format!("重试前的首次失败：{first:#}")),
+    }
+}
+
 /// 用指定的温度与输出上限跑一次对话补全。
 ///
 /// 知识库的 LLM 重排要低温、短输出，不能沿用起草那套采样参数——起草要

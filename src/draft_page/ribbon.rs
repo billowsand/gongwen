@@ -304,6 +304,24 @@ impl DraftPage<'_> {
             }
             *self.status = "已重新执行规则校验。".into();
         }
+        // 复核紧挨着校验：两者产出的都是同一条总线上的建议，只是一个靠词表、
+        // 一个靠小模型，用户不该为了它们跑两个地方。
+        let review_ready = has_draft && self.config.revise_model.enabled && !self.doc.busy;
+        if ui
+            .add_enabled(
+                review_ready,
+                theme::icon_text_button(theme::Icon::Sparkles, "AI 文字复核"),
+            )
+            .on_hover_text("用小模型逐句检查语病，结果进修订建议，逐条确认后才改正文")
+            .on_disabled_hover_text(if self.config.revise_model.enabled {
+                "需要先有正文，且当前没有正在运行的任务"
+            } else {
+                "未启用：请在「设置 → AI 文字复核」中配置复核用的小模型"
+            })
+            .clicked()
+        {
+            self.start_model_review();
+        }
         self.warning_badge(ui);
     }
 

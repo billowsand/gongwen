@@ -39,12 +39,9 @@ pub enum RevisionSource {
     DocRule { rule_id: String },
     /// 模型检查器产出，`task` 是检查类型（语病、称谓……）。
     ///
-    /// 这一档是留给阶段 1 的模型检查器的座位，现在还没有构造方。留着不是摆设：
-    /// [`RevisionSet::begin_rule_pass`] 靠 [`Self::is_rule`] 区分「每轮重算」
-    /// 和「只重定位」两类建议——模型检查器跑一次要几秒到几十秒，不能跟词表
-    /// 一样每次校验都推倒重来。把这个区分留到接模型那天再补，就得回头改
-    /// 集合的重建逻辑，正是立契约时想避免的返工。
-    #[allow(dead_code)]
+    /// 与规则来源分开的实际作用在 [`RevisionSet::begin_rule_pass`]：规则每轮
+    /// 校验都重算，模型建议只重定位——跑一轮要几秒到几十秒，不能跟词表一样
+    /// 每次校验都推倒重来。
     Model { task: String },
 }
 
@@ -216,9 +213,7 @@ pub struct Revision {
     /// 分类标签，直接沿用词表与规则里的分组名（错别字、称谓规范……）。
     pub group: String,
     pub severity: Level,
-    /// 规则来源恒为 1.0；模型来源按闸门结果打折。界面在全部来源都是 1.0 的
-    /// 当下不显示它——同上，接模型时才有真正的取值。
-    #[allow(dead_code)]
+    /// 规则来源恒为 1.0；模型来源低于 1.0，界面据此标出「模型判断，需人工复核」。
     pub confidence: f32,
     pub state: RevisionState,
 }
@@ -239,6 +234,23 @@ impl Revision {
     pub fn ignore_key(&self) -> String {
         format!("{}\u{1}{}", self.source.key(), self.anchor.before)
     }
+}
+
+/// 模型检查器交上来的一条建议。
+///
+/// 形状定在契约这一侧，而不是各检查器自己定：`span` 必须是**检查器算好的**
+/// 全文字节范围——模型只回改后的整句，偏移量由检查器对原句求差得出，这条
+/// 规矩写在这里才拦得住后来者顺手把模型给的位置传进来。
+#[derive(Debug, Clone)]
+pub struct ModelSuggestion {
+    pub span: Range<usize>,
+    pub before: String,
+    pub after: String,
+    pub reason: String,
+    /// 检查器 id。进 [`RevisionSource::Model`]，也是忽略键的前半段。
+    pub task: String,
+    /// 分组名，与词表的分组并列显示。
+    pub group: String,
 }
 
 /// 已采纳的一条建议，供撤销。
@@ -283,6 +295,15 @@ impl RevisionSet {
             .filter(|item| item.is_actionable() && item.severity == severity)
             .map(|item| item.id)
             .collect()
+    }
+
+    /// 模型来源的待确认条数。复核完成后的状态栏只该报这个数，不能报总数——
+    /// 把词表命中也算进「复核发现」会让人以为模型查出了它根本没查的东西。
+    pub fn model_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| !item.source.is_rule() && item.state == RevisionState::Pending)
+            .count()
     }
 
     /// 锚不回正文、只能等重新校验的条数。
@@ -361,6 +382,10 @@ impl RevisionSet {
 
     /// 一轮收集结束：按位置、级别排序，位置相同的去重。
     pub fn end_rule_pass(&mut self) {
+        self.sort_items();
+    }
+
+    fn sort_items(&mut self) {
         self.items.sort_by(|a, b| {
             a.span
                 .start
@@ -370,6 +395,59 @@ impl RevisionSet {
         });
         self.items
             .dedup_by(|a, b| a.span == b.span && a.reason == b.reason);
+    }
+
+    /// 用一轮模型复核的结果整批替换模型来源的建议。
+    ///
+    /// 整批换而不是增量并：一轮复核就是对当前正文的一次完整判断，留着上一轮的
+    /// 残余只会让用户看见早已不成立的建议。规则来源的不受影响。
+    ///
+    /// 模型建议一律记「疑似」档：小模型的判断没有词表那种确定性，给「必错」
+    /// 就意味着它会进「采纳全部必错」的批量口子，那是不该给模型的权限。
+    /// 返回**因正文对不上而丢弃**的条数。复核跑一轮要几秒到几十秒，用户完全
+    /// 可能在这期间改了稿子；改动之前的部分一改，后面所有 span 就都偏了。这种
+    /// 丢弃必须报到界面上——静默吞掉结果比丢结果本身更糟，用户会以为模型什么
+    /// 都没查出来。
+    pub fn replace_model(
+        &mut self,
+        suggestions: Vec<ModelSuggestion>,
+        text: &str,
+        permanent: &[String],
+    ) -> usize {
+        self.items.retain(|item| item.source.is_rule());
+        let mut dropped = 0usize;
+        for item in suggestions {
+            let anchor = Anchor::new(text, &item.span);
+            // 检查器算的 span 必须真能切回这段原文，否则要么是它算错了，要么是
+            // 正文在复核期间被改过。两种情况都不能按这个位置下刀。
+            if anchor.before.is_empty() || anchor.before != item.before {
+                dropped += 1;
+                continue;
+            }
+            let source = RevisionSource::Model {
+                task: item.task.clone(),
+            };
+            let key = format!("{}\u{1}{}", source.key(), anchor.before);
+            if self.ignored.contains(&key) || permanent.contains(&key) {
+                continue;
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            self.items.push(Revision {
+                id,
+                span: item.span,
+                anchor,
+                after: Some(item.after),
+                reason: item.reason,
+                source,
+                group: item.group,
+                severity: Level::Suspect,
+                confidence: 0.7,
+                state: RevisionState::Pending,
+            });
+        }
+        self.sort_items();
+        dropped
     }
 
     /// 正文改动后重新锚定全部建议，锚不上的置灰。

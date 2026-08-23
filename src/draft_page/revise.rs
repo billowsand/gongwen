@@ -267,6 +267,11 @@ fn revision_card(ui: &mut egui::Ui, item: &Revision) -> Option<ReviseAction> {
                 ui.weak(item.group.as_str());
                 ui.weak("·");
                 ui.weak(item.source.label());
+                // 模型来源要一眼看得出来。词表命中是确定的，模型判断不是——
+                // 两者混在一列里而不加区分，用户迟早会把模型的猜测当规则来信。
+                if item.confidence < 1.0 {
+                    theme::chip(ui, "需人工判断", theme::warn(), theme::surface());
+                }
                 if stale {
                     ui.colored_label(theme::text_muted(), "原文已改动");
                 }
