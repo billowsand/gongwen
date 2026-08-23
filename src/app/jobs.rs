@@ -886,6 +886,10 @@ impl GongwenApp {
             DocJob::Reviewed(Ok(outcome)) => {
                 // 缓存合并而不是覆盖：这一轮跳过的句子，结论还在旧缓存里。
                 self.docs[index].revise_cache.extend(outcome.cache);
+                for (task, count) in &outcome.rejected_by_task {
+                    self.metrics.record_gate_rejection(task, *count);
+                }
+                crate::metrics::save(&mut self.metrics);
                 let markdown = std::mem::take(&mut self.docs[index].generated_markdown);
                 let ignored = std::mem::take(&mut self.config.proofread.ignored);
                 let stale = self.docs[index].revisions.replace_model(

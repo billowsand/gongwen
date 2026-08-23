@@ -111,6 +111,82 @@ fn font_choice_row(
 }
 
 impl GongwenApp {
+    /// 文字复核的埋点面板：这个检查器到底在帮忙还是在添乱。
+    ///
+    /// 三个数字要一起看：闸门拦截多说明模型不合用；采纳率低说明这类检查本身
+    /// 不受用；两者都低才说明它真的有价值。只报一个数会误导人。
+    fn revise_metrics_ui(&mut self, ui: &mut egui::Ui) {
+        let mut any = false;
+        let mut clear = false;
+        for task in &crate::revise_model::TASKS {
+            let stat = self.metrics.get(task.id);
+            if stat.decisions() == 0 && stat.gate_rejected == 0 {
+                continue;
+            }
+            any = true;
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(task.label));
+                match stat.adoption() {
+                    Some(rate) if stat.decisions() >= crate::metrics::MIN_SAMPLES => {
+                        ui.colored_label(
+                            if stat.is_underperforming() {
+                                warn()
+                            } else {
+                                theme::text_soft()
+                            },
+                            format!(
+                                "采纳 {:.0}%（采纳 {} / 忽略 {}）",
+                                rate * 100.0,
+                                stat.accepted,
+                                stat.ignored
+                            ),
+                        );
+                    }
+                    _ => {
+                        ui.weak(format!(
+                            "采纳 {} / 忽略 {}（样本不足，暂不计采纳率）",
+                            stat.accepted, stat.ignored
+                        ));
+                    }
+                }
+                if stat.gate_rejected > 0 {
+                    ui.weak(format!("· 闸门拦下 {} 条", stat.gate_rejected));
+                }
+                if stat.undone > 0 {
+                    ui.weak(format!("· 采纳后撤销 {} 次", stat.undone));
+                }
+            });
+            if stat.is_underperforming() {
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+                    ui.colored_label(
+                        warn(),
+                        "这个检查器的建议多数被划掉，建议关掉——留着只会让人习惯性忽略整个建议面板。",
+                    );
+                });
+            }
+        }
+        if !any {
+            ui.weak("还没有复核记录。跑过几轮、逐条处理过之后，这里会显示采纳率。");
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+            if ui
+                .add(theme::icon_text_button(theme::Icon::RotateCcw, "清空统计"))
+                .on_hover_text("换了模型或改了提示词之后，旧统计不再可比，清掉重新攒")
+                .clicked()
+            {
+                clear = true;
+            }
+        });
+        if clear {
+            self.metrics.clear();
+            crate::metrics::save(&mut self.metrics);
+            self.status = "检查器统计已清空。".into();
+        }
+    }
+
     /// 切换主题并立即生效：写入配置、刷新全局样式与窗口图标、保存。
     /// 设置页的主题卡片与应用菜单的「外观主题」子菜单共用这一入口。
     pub(crate) fn apply_theme(&mut self, ctx: &egui::Context, name: ThemeName) {
@@ -489,6 +565,8 @@ impl GongwenApp {
                                 .range(5..=600),
                         );
                     });
+                    ui.add_space(8.0);
+                    self.revise_metrics_ui(ui);
                 });
 
                 ui.add_space(12.0);

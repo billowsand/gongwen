@@ -100,7 +100,10 @@ impl DraftPage<'_> {
         self.doc.generated_markdown = markdown;
         self.doc.revisions = revisions;
         match outcome {
-            Ok(label) => *self.status = format!("已采纳：{label}。"),
+            Ok((label, source)) => {
+                self.metrics.record_accept(&source);
+                *self.status = format!("已采纳：{label}。");
+            }
             Err(error) => *self.status = error,
         }
     }
@@ -132,9 +135,19 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn ignore_revision(&mut self, id: RevisionId, forever: bool) {
+        let source = self
+            .doc
+            .revisions
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.source.clone());
         let Some(key) = self.doc.revisions.ignore(id) else {
             return;
         };
+        if let Some(source) = source {
+            self.metrics.record_ignore(&source);
+        }
         if forever {
             if !self.config.proofread.ignored.contains(&key) {
                 self.config.proofread.ignored.push(key);
@@ -151,7 +164,10 @@ impl DraftPage<'_> {
         let outcome = revisions.undo_last(&mut self.doc.generated_markdown);
         self.doc.revisions = revisions;
         match outcome {
-            Ok(label) => *self.status = format!("已撤销：{label}。"),
+            Ok((label, source)) => {
+                self.metrics.record_undo(&source);
+                *self.status = format!("已撤销：{label}。");
+            }
             Err(error) => *self.status = error,
         }
     }
@@ -242,6 +258,8 @@ impl DraftPage<'_> {
             Some(ReviseAction::IgnoreForever(id)) => self.ignore_revision(id, true),
             None => {}
         }
+        // 埋点每次表态都变，攒到这一帧的动作处理完再写一次盘就够了。
+        crate::metrics::save(self.metrics);
     }
 }
 

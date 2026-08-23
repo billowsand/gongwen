@@ -59,6 +59,8 @@ pub struct ReviewOutcome {
     /// 模型给了改写、但被闸门拦下的句数。这个数字要让用户看见：一直居高不下
     /// 说明这个检查器或这个模型不合用，该关掉而不是继续打扰人。
     pub rejected: usize,
+    /// 按检查器分开的拦截数，进埋点。总数看趋势，分项才知道是谁的问题。
+    pub rejected_by_task: BTreeMap<String, u32>,
     /// 句子指纹 → 模型结论（`None` 表示模型认为没问题）。下一轮跳过没改动的句子。
     pub cache: BTreeMap<u64, Option<String>>,
 }
@@ -356,6 +358,10 @@ pub fn review(
             let Some(rewritten) = reply else { continue };
             if let Err(reason) = gate(lexicon, vocabulary, &sentence.text, &rewritten) {
                 outcome.rejected += 1;
+                *outcome
+                    .rejected_by_task
+                    .entry(task.id.to_string())
+                    .or_insert(0) += 1;
                 // 被拦下的也记进缓存的相反面：下次同一句还是会被同样拦下，
                 // 没必要再问一次模型。缓存存的是模型原话，判定每次重做。
                 let _ = reason;

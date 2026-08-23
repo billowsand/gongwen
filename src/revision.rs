@@ -261,6 +261,8 @@ struct AppliedRevision {
     before: String,
     after: String,
     label: String,
+    /// 来源。撤销要把这一笔从埋点里退回去，得知道退给谁。
+    source: RevisionSource,
 }
 
 /// 一篇稿子的修订建议集合。
@@ -484,7 +486,7 @@ impl RevisionSet {
         id: RevisionId,
         text: &mut String,
         verify: F,
-    ) -> Result<String, String>
+    ) -> Result<(String, RevisionSource), String>
     where
         F: FnOnce(&str, &str) -> Result<(), String>,
     {
@@ -504,6 +506,7 @@ impl RevisionSet {
             .relocate(text, &item.span)
             .ok_or_else(|| "原文已改动，该建议无法定位，请重新校验。".to_string())?;
         let before = item.anchor.before.clone();
+        let source = item.source.clone();
         let label = format!("{before} → {after}");
 
         let mut candidate = String::with_capacity(text.len() + after.len());
@@ -518,15 +521,16 @@ impl RevisionSet {
             before,
             after,
             label: label.clone(),
+            source: source.clone(),
         });
         self.items.remove(index);
         self.relocate_all(text);
-        Ok(label)
+        Ok((label, source))
     }
 
     /// 撤销最近一次采纳。正文在那之后被改过就拒绝撤销——盲目写回会覆盖用户
     /// 自己的修改。
-    pub fn undo_last(&mut self, text: &mut String) -> Result<String, String> {
+    pub fn undo_last(&mut self, text: &mut String) -> Result<(String, RevisionSource), String> {
         let last = self
             .applied
             .last()
@@ -537,7 +541,7 @@ impl RevisionSet {
         let last = self.applied.pop().expect("刚确认过非空");
         text.replace_range(last.span.clone(), &last.before);
         self.relocate_all(text);
-        Ok(last.label)
+        Ok((last.label, last.source))
     }
 }
 
@@ -583,11 +587,13 @@ mod tests {
             )],
         );
         let id = set.items()[0].id;
-        let label = set
+        let (label, source) = set
             .apply(id, &mut text, |_, _| Ok(()))
             .expect("应当采纳成功");
         assert_eq!(text, "按上级部署办理。");
         assert_eq!(label, "布署 → 部署");
+        // 来源要一路带回调用方，否则埋点记不成这一笔。
+        assert_eq!(source.key(), "TYP-001");
         assert!(set.is_empty(), "采纳后该条应离开待确认列表");
     }
 

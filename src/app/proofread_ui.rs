@@ -64,6 +64,20 @@ impl GongwenApp {
                     "共 {} 条，启用 {enabled} 条 · 自建 {custom} 条 · 已改动内置 {changed} 条 · 仅保存在本机",
                     lexicon.entries.len()
                 ));
+                // 采纳率过低的条目要主动报出来。用户不会自己去逐条核对统计，
+                // 而一条天天被划掉的规则，下一步就是整个校对被关掉。
+                let flagged = self.metrics.underperforming().len();
+                if flagged > 0 {
+                    ui.horizontal(|ui| {
+                        theme::chip(
+                            ui,
+                            &format!("{flagged} 条建议常被忽略"),
+                            theme::warn(),
+                            theme::warn_soft(),
+                        );
+                        ui.weak("在下面的列表里查看采纳率，考虑停用");
+                    });
+                }
                 // 审校抽屉里的「不再提示」是个单向操作，点错了没处退。收回的
                 // 入口放在这里：忽略的是词表命中，本来就该跟词表管理在一处。
                 let ignored = self.config.proofread.ignored.len();
@@ -368,6 +382,47 @@ impl GongwenApp {
                         ui.weak(&entry.group);
                     });
                 });
+                // 采纳率：这一条到底在帮忙还是在添乱，只有这个数字说了算。
+                // 表态次数太少时只报次数不报比例——三次里忽略两次算不上证据。
+                let stat = self.metrics.get(&entry.id);
+                if stat.decisions() > 0 {
+                    ui.horizontal(|ui| {
+                        let flagged = stat.is_underperforming();
+                        let text = match stat.adoption() {
+                            Some(rate) if stat.decisions() >= crate::metrics::MIN_SAMPLES => {
+                                format!(
+                                    "采纳 {:.0}%（{} 次采纳 / {} 次忽略）",
+                                    rate * 100.0,
+                                    stat.accepted,
+                                    stat.ignored
+                                )
+                            }
+                            _ => format!(
+                                "{} 次采纳 / {} 次忽略（样本不足，暂不计采纳率）",
+                                stat.accepted, stat.ignored
+                            ),
+                        };
+                        ui.colored_label(
+                            if flagged {
+                                theme::warn()
+                            } else {
+                                theme::text_muted()
+                            },
+                            text,
+                        );
+                        if flagged {
+                            ui.label(
+                                egui::RichText::new("建议停用")
+                                    .color(theme::warn())
+                                    .strong(),
+                            )
+                            .on_hover_text("这条常被划掉。留着它只会让人习惯性忽略整个校对面板");
+                        }
+                        if stat.undone > 0 {
+                            ui.weak(format!("· 采纳后撤销 {} 次", stat.undone));
+                        }
+                    });
+                }
                 if ui
                     .add(theme::icon_text_button(theme::Icon::Edit, "编辑"))
                     .clicked()

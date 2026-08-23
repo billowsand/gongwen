@@ -311,6 +311,7 @@ impl GongwenApp {
             revert_confirm: &mut self.revert_confirm,
             actions: &mut self.draft_actions,
             export_links: &mut self.export_links,
+            metrics: &mut self.metrics,
         }
     }
 

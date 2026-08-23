@@ -18,6 +18,7 @@ mod lmstudio;
 mod macos_window;
 mod manuscript;
 mod manuscript_io;
+mod metrics;
 mod models;
 mod orphan_probe;
 mod pdf_viewer;

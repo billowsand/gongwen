@@ -122,6 +122,8 @@ pub struct GongwenApp {
     /// 导出目录里最近的 tex/pdf/docx 索引，工具栏三枚成品入口共用一份。
     export_links: ExportLinks,
     models: Vec<String>,
+    /// 检查器埋点，只留在本机。单独存文件，不进 config.json。
+    metrics: crate::metrics::Metrics,
     vocabulary_import_conflicts: Option<Vec<vocabulary_xlsx::Conflict>>,
     /// 词库有尚未写入本机配置的编辑。
     vocabulary_dirty: bool,
@@ -336,6 +338,7 @@ impl GongwenApp {
         };
         let mut app = Self {
             config,
+            metrics: crate::metrics::load(),
             macos_titlebar_metrics,
             docs,
             pdfs: Vec::new(),

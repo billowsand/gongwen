@@ -673,6 +673,8 @@ pub(crate) struct DraftPage<'a> {
     pub(crate) version_switch: &'a mut Option<VersionSwitchPrompt>,
     /// 等待二次确认的“回退到该版本”。
     pub(crate) revert_confirm: &'a mut Option<(i64, i64)>,
+    /// 检查器埋点。采纳、忽略、撤销都要记一笔，否则没法判断哪个检查器在帮倒忙。
+    pub(crate) metrics: &'a mut crate::metrics::Metrics,
     /// 需要由应用外壳执行的动作，帧末统一处理。
     pub(crate) actions: &'a mut Vec<DraftAction>,
     /// 导出目录的成品索引，多篇稿件共用一份。
@@ -1278,6 +1280,7 @@ mod tests {
         let mut revert_confirm = None;
         let mut actions = Vec::new();
         let mut export_links = ExportLinks::default();
+        let mut metrics = crate::metrics::Metrics::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0));
 
         let mut frame = |ctx: &egui::Context, events: Vec<egui::Event>| {
@@ -1298,6 +1301,7 @@ mod tests {
                         revert_confirm: &mut revert_confirm,
                         actions: &mut actions,
                         export_links: &mut export_links,
+                        metrics: &mut metrics,
                     };
                     page.create_ui(ui);
                 });
@@ -1371,6 +1375,7 @@ mod split_resize_tests {
         revert_confirm: Option<(i64, i64)>,
         actions: Vec<DraftAction>,
         export_links: ExportLinks,
+        metrics: crate::metrics::Metrics,
         _keep: Receiver<WorkerResult>,
     }
 
@@ -1400,6 +1405,7 @@ mod split_resize_tests {
                 revert_confirm: None,
                 actions: Vec::new(),
                 export_links: ExportLinks::default(),
+                metrics: crate::metrics::Metrics::default(),
                 _keep,
             }
         }
@@ -1425,6 +1431,7 @@ mod split_resize_tests {
                     revert_confirm: &mut self.revert_confirm,
                     actions: &mut self.actions,
                     export_links: &mut self.export_links,
+                    metrics: &mut self.metrics,
                 };
                 page.markdown_render(ui);
             });
@@ -1471,6 +1478,7 @@ mod split_resize_tests {
                     revert_confirm: &mut self.revert_confirm,
                     actions: &mut self.actions,
                     export_links: &mut self.export_links,
+                    metrics: &mut self.metrics,
                 };
                 page.warnings_ui(ui);
             });
@@ -1531,6 +1539,7 @@ mod split_resize_tests {
                 revert_confirm: &mut harness.revert_confirm,
                 actions: &mut harness.actions,
                 export_links: &mut harness.export_links,
+                metrics: &mut harness.metrics,
             };
             page.clear_review_output();
         }
@@ -1568,6 +1577,7 @@ mod split_resize_tests {
             revert_confirm: &mut harness.revert_confirm,
             actions: &mut harness.actions,
             export_links: &mut harness.export_links,
+            metrics: &mut harness.metrics,
         };
         page.revalidate();
 
@@ -1623,6 +1633,7 @@ mod split_resize_tests {
                 revert_confirm: &mut harness.revert_confirm,
                 actions: &mut harness.actions,
                 export_links: &mut harness.export_links,
+                metrics: &mut harness.metrics,
             };
             page.revalidate();
         }
@@ -1688,6 +1699,7 @@ mod split_resize_tests {
                     revert_confirm: &mut self.revert_confirm,
                     actions: &mut self.actions,
                     export_links: &mut self.export_links,
+                    metrics: &mut self.metrics,
                 };
                 page.markdown_render(ui);
             });
