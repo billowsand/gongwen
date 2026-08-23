@@ -433,6 +433,12 @@ pub struct ProofreadConfig {
     pub overrides: Vec<ProofreadOverride>,
     /// 用户自建条目，完整保存——它们没有种子可回落。
     pub custom: Vec<ProofreadRule>,
+    /// 永久忽略的修订建议，键为「来源编号 + \u{1} + 原文」。
+    ///
+    /// 没有忽略机制，误报一次用户就会把整个校对关掉——那比没有这条规则更糟
+    /// （`proofread_rules` 开头的取舍原则同此）。分两档：本篇忽略随稿件走，
+    /// 存在 `RevisionSet` 里；这里是「以后都别再提」的那一档。
+    pub ignored: Vec<String>,
 }
 
 impl ProofreadConfig {

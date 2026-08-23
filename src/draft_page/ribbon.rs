@@ -299,7 +299,7 @@ impl DraftPage<'_> {
             .clicked()
         {
             self.revalidate();
-            if !self.doc.warnings.is_empty() {
+            if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
                 self.open_result_drawer();
             }
             *self.status = "已重新执行规则校验。".into();
@@ -310,7 +310,7 @@ impl DraftPage<'_> {
     /// 校验提示的计数徽章：有提示才出现，点一下开抽屉。放在“重新校验”旁边，
     /// 免得校验完还要自己去找结果在哪。
     pub(crate) fn warning_badge(&mut self, ui: &mut egui::Ui) {
-        let count = self.doc.warnings.len();
+        let count = self.doc.warnings.len() + self.doc.revisions.pending_count();
         if count == 0 {
             return;
         }
@@ -752,7 +752,7 @@ impl DraftPage<'_> {
             .clicked()
         {
             self.revalidate();
-            if !self.doc.warnings.is_empty() {
+            if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
                 self.open_result_drawer();
             }
             *self.status = "已重新执行规则校验。".into();

@@ -1158,7 +1158,7 @@ impl GongwenApp {
                         (
                             doc.versions_open,
                             doc.result_drawer_open,
-                            doc.warnings.len(),
+                            doc.warnings.len() + doc.revisions.pending_count(),
                             doc.manuscript_id.is_some(),
                         )
                     })

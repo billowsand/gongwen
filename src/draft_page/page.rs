@@ -161,6 +161,8 @@ impl DraftPage<'_> {
     pub(crate) fn clear_review_output(&mut self) {
         self.doc.generated_markdown.clear();
         self.doc.warnings.clear();
+        // 建议全都锚在这份正文上，正文没了就一条也不成立；撤销栈同理。
+        self.doc.revisions.clear();
         self.doc.proof_warnings.clear();
         self.doc.proof_markdown.clear();
         self.doc.output_files.clear();

@@ -534,7 +534,7 @@ impl DraftPage<'_> {
             doc_import::file_label(path),
             markdown.chars().count()
         );
-        if !self.doc.warnings.is_empty() {
+        if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
             self.open_result_drawer();
         }
     }

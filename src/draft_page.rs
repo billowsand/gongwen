@@ -26,6 +26,7 @@ mod find;
 mod form;
 mod markdown;
 mod page;
+mod revise;
 mod ribbon;
 mod table;
 mod tasks;
@@ -378,6 +379,8 @@ pub(crate) struct DraftSession {
     pub(crate) ai_review_baseline: Option<String>,
     /// 尚未接受的 AI 修改提案。提案不参与自动保存，也不能直接导出。
     pub(crate) ai_proposal: Option<AiProposal>,
+    /// 本篇待确认的修订建议。词表、文档规则与将来的模型检查器共用这一份。
+    pub(crate) revisions: crate::revision::RevisionSet,
     /// 上次写入稿件库时的内容基线：`(要素 JSON, 正文)`。为 None 表示这篇
     /// 还没入过库。脏判定就是拿它和当前内容比。
     pub(crate) saved_baseline: Option<(String, String)>,
@@ -501,6 +504,7 @@ impl DraftSession {
             ai_prompt_last_label: String::new(),
             ai_review_baseline: None,
             ai_proposal: None,
+            revisions: crate::revision::RevisionSet::default(),
             saved_baseline: None,
             committed_baseline: None,
             record_status: ManuscriptStatus::Draft,
@@ -643,6 +647,8 @@ impl DraftSession {
         self.clear_review_confirm = false;
         self.ai_review_baseline = None;
         self.ai_proposal = None;
+        // 建议锚在正文上，换了正文就全部失效；忽略记录也只对这一篇成立。
+        self.revisions.clear();
         self.preview_anchor = None;
         self.pending_source_jump = None;
         self.pending_source_selection = None;
@@ -1535,6 +1541,56 @@ mod split_resize_tests {
         assert!(harness.doc.pending_source_selection.is_none());
         assert!(!harness.doc.pending_render_jump);
         assert!(!harness.doc.markdown_find.open);
+    }
+
+    /// 词表命中要一路走到「可采纳的修订建议」，而不是停在一条只能看的提示上。
+    ///
+    /// 这条锁的是阶段 0 的接线本身：`replacement` 原先在 `ProofNote → ReviewNote`
+    /// 那一步被丢掉，词表里「必错可一键替换」的能力界面上根本取不到。断了任何
+    /// 一节——校验没投进总线、`after` 没带过来、闸门误拦——这里都会红。
+    #[test]
+    fn a_lexicon_hit_becomes_an_acceptable_revision() {
+        let mut harness = Harness::new();
+        harness.doc.generated_markdown = "# 标题\n\n按上级布署办理。\n".into();
+
+        let mut page = DraftPage {
+            doc: &mut harness.doc,
+            config: &mut harness.config,
+            store: None,
+            sender: &harness.sender,
+            status: &mut harness.status,
+            version_switch: &mut harness.version_switch,
+            revert_confirm: &mut harness.revert_confirm,
+            actions: &mut harness.actions,
+            export_links: &mut harness.export_links,
+        };
+        page.revalidate();
+
+        let hit = page
+            .doc
+            .revisions
+            .items()
+            .iter()
+            .find(|item| item.before() == "布署")
+            .expect("「布署」应当产生一条修订建议");
+        assert_eq!(
+            hit.after.as_deref(),
+            Some("部署"),
+            "必错条目应当带上替换写法"
+        );
+        assert!(hit.is_actionable(), "刚校验出来的必错建议应当可以一键采纳");
+        let id = hit.id;
+
+        page.accept_revision(id);
+        assert_eq!(page.doc.generated_markdown, "# 标题\n\n按上级部署办理。\n");
+        assert_eq!(page.doc.revisions.applied_count(), 1);
+
+        page.undo_revision();
+        assert_eq!(
+            page.doc.generated_markdown, "# 标题\n\n按上级布署办理。\n",
+            "撤销应当把原文一字不差地还回来"
+        );
+        assert_eq!(page.doc.revisions.applied_count(), 0);
     }
 
     /// 孤行提示要能点：点中之后切回 Markdown 视图，并选中出问题的那一段。

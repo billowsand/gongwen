@@ -41,38 +41,42 @@
 
 ### 2.2 数据结构
 
+已实现于 `src/revision.rs`：
+
 ```rust
 /// 一条待确认的修订建议。词表、文档规则、小模型、大模型、智能体统一产出它。
 pub struct Revision {
     pub id: RevisionId,
     /// 正文字节范围。永远由程序计算，绝不采信模型给的偏移量。
     pub span: Range<usize>,
-    /// 抗漂移锚：原文 + 前后各 N 字上下文。正文被编辑后据此重新定位。
+    /// 抗漂移锚：原文 + 前后各 12 字上下文。正文被编辑后据此重新定位。
     pub anchor: Anchor,
-    pub before: String,
     /// None 表示只提示、不给改法（语病、结构问题常见）。
     pub after: Option<String>,
     /// 一句话理由。没有理由的建议不予展示——用户无法判断就等于无法确认。
     pub reason: String,
     pub source: RevisionSource,
-    pub category: RevisionCategory,
+    /// 分类标签，直接沿用词表与规则里的分组名（错别字、称谓规范……）。
+    pub group: String,
     pub severity: Level,          // 复用 proofread::Level：必错 / 疑似 / 提示
     pub confidence: f32,          // 规则恒为 1.0；模型建议按闸门结果打折
-    pub state: RevisionState,     // Pending / Accepted / Rejected / Ignored / Stale
+    pub state: RevisionState,     // Pending / Ignored / Stale
 }
 
 pub enum RevisionSource {
-    Lexicon { entry_id: String },      // 校对词表
-    DocRule { rule_id: String },       // 文档级规则
-    Small { task: SmallTask },         // 小模型检查器
-    Large { prompt_id: u32 },          // 大模型改写
-    Agent { stage: StageId, step: u32 },
-}
-
-pub enum RevisionCategory {
-    Typo, Punctuation, Numeral, Layout, Address, Wording, Structure, Fact,
+    Lexicon { entry_id: String },   // 校对词表
+    DocRule { rule_id: String },    // 文档级规则
+    Model { task: String },         // 模型检查器，task 为检查类型
 }
 ```
+
+两处与初稿的偏差，都是照着现有数据形态改的：
+
+- **分类用 `group: String`，不另立枚举。** 词表和文档规则本来就带分组名，且用户
+  自建条目可以写任意分组；套一层枚举只会多一次有损映射。
+- **状态只有三档。** 初稿里的「拒绝」和「忽略」在界面上是同一个按钮、同一种
+  后果，分开只会让用户猜它们有什么区别；「已采纳」则直接离开待确认列表，进入
+  撤销栈（`RevisionSet::applied`），不占用状态位。
 
 ### 2.3 锚点漂移
 
@@ -202,16 +206,20 @@ pub enum RevisionCategory {
 顺序原则与你的判断一致——**先细节，后流程**；但补一个前置：**先定契约**。
 否则五个小功能各带一套界面，最后拟合智能体时要全部重写。
 
-### 阶段 0：契约与面板（无模型）
+### 阶段 0：契约与面板（无模型）— ✅ 已完成
 
-- 落 `Revision` / `Anchor` / `RevisionState` 与采纳、撤销、忽略、重定位；
-- 做**一个**修订面板，取代当前只能跳转的审校抽屉；
-- 现成的低垂果实：`From<ProofNote> for ReviewNote`（`proofread.rs`）把
-  `replacement` 丢掉了，导致词表里「必错可一键替换」的能力界面上根本没有。
-  接上即得 141 条规则的一键替换。
+- `src/revision.rs`：`Revision` / `Anchor` / `RevisionState` / `RevisionSet`，
+  含采纳、撤销、忽略与三级重定位；
+- `src/draft_page/revise.rs`：修订建议面板与两道闸门（落地前重锚、落地后自检）；
+- `revalidate`（`draft_page/form.rs`）把词表与文档规则的命中改投到这条总线，
+  `warnings` 只留要素校验与版式实测；
+- 接上了那个现成的低垂果实：`From<ProofNote> for ReviewNote` 一路把
+  `replacement` 丢掉，导致词表里「必错可一键替换」的能力界面上根本没有。现在
+  141 条规则里可替换的那部分，用户看到的是「布署 → 部署」加一枚采纳按钮。
 
 **验收**：不接任何模型，词表与文档规则的建议可逐条采纳、撤销、忽略；改稿后
-建议正确重定位或置灰。
+建议正确重定位或置灰。锚点的三级判定、闸门的拦截与回滚、忽略的两档记忆均有
+单测锁住。
 
 ### 阶段 1：第一个小模型检查器
 
@@ -254,16 +262,23 @@ pub enum RevisionCategory {
 
 ## 六、现状缺口对照表
 
-| 缺口 | 位置 | 阶段 |
-|---|---|---|
-| `ProofNote.replacement` 转 `ReviewNote` 时丢失 | `proofread.rs` `From<ProofNote>` | 0 |
-| 审校抽屉只能跳转，没有替换按钮 | `draft_page/editor.rs` `warnings_ui` | 0 |
-| AI 提案只能整体接受 / 放弃 | `app/ai_workbench.rs` `ai_proposal_window` | 0 |
-| 无忽略机制（注释已预留） | `proofread.rs` | 0 |
-| `revalidate` 每帧全量重扫，无防抖与缓存 | `draft_page/form.rs` | 1 |
-| 单一对话模型，无角色路由 | `models.rs` `LmStudioConfig` | 1 |
-| `generate` 无重试、无输出长度约束 | `lmstudio.rs` | 1 |
-| 无编排层 | — | 4 |
+| 缺口 | 位置 | 阶段 | 状态 |
+|---|---|---|---|
+| `ProofNote.replacement` 转 `ReviewNote` 时丢失 | `proofread.rs` `From<ProofNote>` | 0 | ✅ 改走 `revision` 总线 |
+| 审校抽屉只能跳转，没有替换按钮 | `draft_page/editor.rs` `warnings_ui` | 0 | ✅ `draft_page/revise.rs` |
+| 无忽略机制（注释已预留） | `proofread.rs` | 0 | ✅ 本篇 / 永久两档 |
+| 建议无抗漂移锚，改稿后偏移即失效 | — | 0 | ✅ `revision::Anchor` |
+| AI 提案只能整体接受 / 放弃 | `app/ai_workbench.rs` `ai_proposal_window` | 3 | 待办（起草侧改造时一并做） |
+| `revalidate` 全量重扫，无防抖与脏段缓存 | `draft_page/form.rs` | 1 | 待办 |
+| 单一对话模型，无角色路由 | `models.rs` `LmStudioConfig` | 1 | 待办 |
+| `generate` 无重试、无输出长度约束 | `lmstudio.rs` | 1 | 待办 |
+| 无检查器埋点 | — | 1 | 待办 |
+| 无编排层 | — | 4 | 待办 |
+
+「AI 提案只能整体接受」原本列在阶段 0，实际推到阶段 3：整篇提案的拆条依赖
+**分段生成**，而不是拆现在这个 diff 窗口。现在的做法是让两条路并存——整篇改写
+仍走提案窗，逐句修饰走修订面板；等阶段 3 把起草改成分段生成，提案窗自然退化
+成兜底视图。
 
 ---
 

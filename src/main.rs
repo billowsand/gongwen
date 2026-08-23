@@ -32,6 +32,7 @@ mod qa;
 mod rag;
 mod rag_client;
 mod redline;
+mod revision;
 mod storage;
 mod system_fonts;
 mod texcompile;

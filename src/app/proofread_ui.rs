@@ -64,6 +64,22 @@ impl GongwenApp {
                     "共 {} 条，启用 {enabled} 条 · 自建 {custom} 条 · 已改动内置 {changed} 条 · 仅保存在本机",
                     lexicon.entries.len()
                 ));
+                // 审校抽屉里的「不再提示」是个单向操作，点错了没处退。收回的
+                // 入口放在这里：忽略的是词表命中，本来就该跟词表管理在一处。
+                let ignored = self.config.proofread.ignored.len();
+                if ignored > 0 {
+                    ui.horizontal(|ui| {
+                        ui.weak(format!("已设为不再提示 {ignored} 条"));
+                        if ui
+                            .add(theme::icon_text_button(theme::Icon::RotateCcw, "恢复提示"))
+                            .on_hover_text("清空「不再提示」名单，这些写法重新参与校对")
+                            .clicked()
+                        {
+                            self.config.proofread.ignored.clear();
+                            self.persist();
+                        }
+                    });
+                }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::primary_icon_button(ui, theme::Icon::Save, "保存更改").clicked() {

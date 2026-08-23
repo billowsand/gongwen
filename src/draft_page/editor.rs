@@ -325,10 +325,13 @@ impl DraftPage<'_> {
         let mut close_requested = false;
         // 标题与关闭按钮独占一行——右侧抽屉只有 300 点上下，挤不下一整排。
         ui.horizontal(|ui| {
-            ui.strong(if self.doc.warnings.is_empty() {
+            // 抽屉里现在有两类东西：能一键改的修订建议，和只能提请注意的要素
+            // 提示。标题按两者之和数，否则用户看见徽章写 8 条、点进来只数出 3 条。
+            let total = self.doc.warnings.len() + self.doc.revisions.pending_count();
+            ui.strong(if total == 0 {
                 "审校提示".to_string()
             } else {
-                format!("审校提示 {}", self.doc.warnings.len())
+                format!("审校提示 {total}")
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, theme::Icon::X, "关闭审校提示（Esc）").clicked() {
@@ -364,6 +367,23 @@ impl DraftPage<'_> {
                             );
                         });
                     ui.add_space(8.0);
+                }
+                // 修订建议排在最前面：它是这个抽屉里唯一「点一下就能改好」的
+                // 部分，压在一串只能看的提示下面等于没有。
+                let has_revisions = self.doc.revisions.pending_count() > 0
+                    || self.doc.revisions.applied_count() > 0;
+                self.revisions_ui(ui);
+                // 两段都在时才分栏标注，否则空抽屉里会出现「要素与版式提示 0」
+                // 紧跟着「暂无审校提示」这种自相矛盾的两行。
+                if has_revisions {
+                    if self.doc.warnings.is_empty() {
+                        return;
+                    }
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.strong(format!("要素与版式提示 {}", self.doc.warnings.len()));
+                    ui.add_space(4.0);
                 }
                 self.warnings_ui(ui);
             });

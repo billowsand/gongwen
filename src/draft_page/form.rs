@@ -622,19 +622,27 @@ impl DraftPage<'_> {
                 .iter()
                 .map(|warning| ReviewNote::from(format!("校对词表：{warning}"))),
         );
-        self.doc.warnings.extend(
-            lexicon
-                .check(&self.doc.generated_markdown)
-                .into_iter()
-                .map(ReviewNote::from),
+        // 词表与文档级规则的命中不再挤进 `warnings`：它们带 span、有的还带
+        // 替换写法，属于「可以逐条确认的修订建议」，走 `revision` 那条总线。
+        // `warnings` 只留要素校验、版式实测这类没有改法、只能提请注意的提示。
+        //
+        // 文档级规则（标题规范、文种越界、数字用法、层级序号、附件一致性）
+        // 依赖公文要素，改不得也删不掉，所以不进词表，但同样产出建议。
+        let markdown = std::mem::take(&mut self.doc.generated_markdown);
+        let ignored = std::mem::take(&mut self.config.proofread.ignored);
+        self.doc.revisions.begin_rule_pass(&markdown);
+        self.doc
+            .revisions
+            .push_notes(lexicon.check(&markdown), false, &markdown, &ignored);
+        self.doc.revisions.push_notes(
+            proofread_rules::check(&self.doc.draft, &markdown),
+            true,
+            &markdown,
+            &ignored,
         );
-        // 文档级规则：标题规范、文种越界、数字用法、层级序号、附件一致性。
-        // 它们依赖公文要素，改不得也删不掉，所以不进词表。
-        self.doc.warnings.extend(
-            proofread_rules::check(&self.doc.draft, &self.doc.generated_markdown)
-                .into_iter()
-                .map(ReviewNote::from),
-        );
+        self.doc.revisions.end_rule_pass();
+        self.config.proofread.ignored = ignored;
+        self.doc.generated_markdown = markdown;
         if self.doc.draft.kind.has_document_number()
             && self.doc.draft.profile.letter_version == LetterVersion::Formal
         {
