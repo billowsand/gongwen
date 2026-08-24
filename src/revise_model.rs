@@ -270,7 +270,9 @@ pub fn gate(
         return Err(GateReason::Length);
     }
     // 关键事实：单位、人名、日期、数量、文件依据一个都不许动。
-    if !ai_guard::compare_key_facts(before, after, vocabulary).is_empty() {
+    // 用 precise 版：词库外单位的正则兜底是贪婪的，会把半句话当成单位名，
+    // 拿它当硬闸门会把绝大多数正常的语病修改无声丢掉（详见 `ai_guard`）。
+    if !ai_guard::compare_key_facts_precise(before, after, vocabulary).is_empty() {
         return Err(GateReason::Facts);
     }
     // 裸数字不带量词时上面那层看不住，单独比一遍。

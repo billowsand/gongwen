@@ -33,6 +33,10 @@ mod qa;
 mod rag;
 mod rag_client;
 mod redline;
+/// 文字复核回归集。纯测试资产：样例文件与解析器只在测试构建里存在，
+/// 不进发行版二进制。
+#[cfg(test)]
+mod revise_cases;
 mod revise_model;
 mod revision;
 mod storage;

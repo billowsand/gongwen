@@ -59,6 +59,39 @@ pub struct FactChange {
 /// 提取适合锁定的关键事实。标题编号、Markdown 序号等普通小数字不算事实；
 /// 数量只认“数字 + 量词/单位”、百分比和四位年份，降低格式调整产生的误报。
 pub fn extract_key_facts(markdown: &str, vocabulary: &[VocabularyEntry]) -> Vec<FactToken> {
+    extract_facts(markdown, vocabulary, true)
+}
+
+/// 只认得准的那几类：词库里的单位与人名、日期、数量、书名号文件名。
+///
+/// **不含**词库外单位的正则兜底。那条兜底是贪婪的：`[汉字]{2,24}` 后接「科」，
+/// 在「请于本月底前将落实情况书面报送我办综合科」里会把整个前半句吞成一个
+/// 「单位名」——汉字之间没有边界符可以让正则停下，而 Rust 的 regex 不支持
+/// 环视，改不出「必须从词的开头起算」。
+///
+/// 结果是：句首任何改动都会让这个假单位名变样，从而误判成「改动了关键事实」。
+/// 用在整篇提案的事实清单上只是多列几行让人核对，尚可接受；用作**逐句改写的
+/// 硬闸门就是灾难**——公文句子里到处是局、处、科、中心，绝大多数正常的语病
+/// 修改都会被无声丢弃，而且丢得毫无痕迹。
+///
+/// 所以逐句闸门只认这一版。词库外单位的保护由此让位给「用户逐条过目」：
+/// 模型建议本来就是「疑似」档，界面上原文与改法并排显示，人看得见。
+pub fn compare_key_facts_precise(
+    before: &str,
+    after: &str,
+    vocabulary: &[VocabularyEntry],
+) -> Vec<FactChange> {
+    diff_facts(
+        extract_facts(before, vocabulary, false),
+        extract_facts(after, vocabulary, false),
+    )
+}
+
+fn extract_facts(
+    markdown: &str,
+    vocabulary: &[VocabularyEntry],
+    heuristic_units: bool,
+) -> Vec<FactToken> {
     let mut out = BTreeSet::new();
     for entry in vocabulary {
         let canonical = entry.canonical.trim();
@@ -95,12 +128,16 @@ pub fn extract_key_facts(markdown: &str, vocabulary: &[VocabularyEntry]) -> Vec<
     );
 
     // 词库外单位也要尽量看住。只认常见机构后缀，且避开跨标点的长串。
-    collect_matches(
-        markdown,
-        r"[\p{Han}]{2,24}(?:委员会|人民政府|办公室|工作组|领导小组|管理局|分局|厅|局|处|科|中心|公司|集团|学院|学校)",
-        FactKind::Unit,
-        &mut out,
-    );
+    // 贪婪匹配会吞掉前面的普通汉字，见 [`compare_key_facts_precise`] 的说明——
+    // 整篇比对容得下这点噪音，逐句闸门容不下。
+    if heuristic_units {
+        collect_matches(
+            markdown,
+            r"[\p{Han}]{2,24}(?:委员会|人民政府|办公室|工作组|领导小组|管理局|分局|厅|局|处|科|中心|公司|集团|学院|学校)",
+            FactKind::Unit,
+            &mut out,
+        );
+    }
     out.into_iter().collect()
 }
 
@@ -119,8 +156,15 @@ pub fn compare_key_facts(
     after: &str,
     vocabulary: &[VocabularyEntry],
 ) -> Vec<FactChange> {
-    let before: BTreeSet<_> = extract_key_facts(before, vocabulary).into_iter().collect();
-    let after: BTreeSet<_> = extract_key_facts(after, vocabulary).into_iter().collect();
+    diff_facts(
+        extract_key_facts(before, vocabulary),
+        extract_key_facts(after, vocabulary),
+    )
+}
+
+fn diff_facts(before: Vec<FactToken>, after: Vec<FactToken>) -> Vec<FactChange> {
+    let before: BTreeSet<_> = before.into_iter().collect();
+    let after: BTreeSet<_> = after.into_iter().collect();
     let mut changes = Vec::new();
     changes.extend(before.difference(&after).map(|fact| FactChange {
         kind: fact.kind,
