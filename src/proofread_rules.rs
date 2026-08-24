@@ -14,20 +14,6 @@ use crate::proofread::{Level, ProofNote};
 use regex::Regex;
 use std::sync::OnceLock;
 
-// 待办：机关间敬称与自称是否得体（「贵局」「你局」「我局」）。原本交给模型检查器，
-// 三轮实测三种滥用形态：把下行文里规范的「你单位」改成「贵」、把自称「我办」改成
-// 「贵」、给具体单位名逐个加「贵」造出「贵市财政局」。每补一条提示词就冒出一种新
-// 形态，说明模型学不会这条规则。
-//
-// 而它本来就不需要语感：平行文（不相隶属）用「贵」，下行文用「你」，上行文称机关
-// 全称，自称一律「我」——由 `DraftInput.kind` 与主送单位的隶属关系即可判定，
-// 这里两样都拿得到。做的时候注意「贵」只能代指对方机关，不能加在具体单位名前。
-//
-// 待办：正文段落句末缺标点。原本试着交给模型检查器，实测基本不报（0/3、1/3），
-// 想想也对——一行没有句末标点，在公文里更可能是标题、附件名或落款，模型没有
-// 上下文分辨不了。而**哪些行是正文段落，程序比模型清楚**：这里能拿到公文要素，
-// 判得出附件区、落款区和标题行。做的时候要先把这几类排除掉，否则会满屏误报。
-
 /// 跑一遍全部文档级规则。
 pub fn check(input: &DraftInput, markdown: &str) -> Vec<ProofNote> {
     let mut notes = Vec::new();
@@ -38,6 +24,8 @@ pub fn check(input: &DraftInput, markdown: &str) -> Vec<ProofNote> {
     check_numbers(markdown, &mut notes);
     check_heading_numbers(markdown, &mut notes);
     check_attachments(markdown, &mut notes);
+    check_honorifics(markdown, &mut notes);
+    check_sentence_endings(markdown, &mut notes);
     notes.sort_by(|a, b| a.span.start.cmp(&b.span.start).then(a.level.cmp(&b.level)));
     notes
 }
@@ -85,6 +73,22 @@ fn note(
         message,
         span,
         replacement: None,
+    }
+}
+
+/// 带一键改法的规则提示。给得出确定改法时才用——给不出就老实只提示，
+/// 猜一个改法比不给更糟。
+fn note_with_fix(
+    id: &str,
+    group: &str,
+    level: Level,
+    message: String,
+    span: std::ops::Range<usize>,
+    replacement: String,
+) -> ProofNote {
+    ProofNote {
+        replacement: Some(replacement),
+        ..note(id, group, level, message, span)
     }
 }
 
@@ -474,6 +478,167 @@ fn check_attachments(markdown: &str, notes: &mut Vec<ProofNote>) {
     }
 }
 
+// ── 敬称与自称 ──────────────────────────────────────────────────────────────
+
+/// 机关间敬称的两类硬错。
+///
+/// 这一类原本交给模型检查器，三轮实测三种滥用形态，整类撤了回来（见
+/// `revise_model::TASKS` 里称谓那一项的注释）。但撤回来之后要说清楚**能做什么、
+/// 不能做什么**：
+///
+/// 「平行文用『贵』、下行文用『你』」这条判断做不了——它要的是发文单位与主送
+/// 单位之间的**隶属关系**，而这份数据应用里没有。`correspondence_scope` 只有
+/// 内部/外部两档，说的是名称用法，不是上下级。硬猜等于满屏误报。
+///
+/// 能做的是两条不依赖隶属关系、而且恰恰是模型做不好的：
+///
+/// 1. **「贵」不能加在具体单位名前面。** 规范写法是「贵局」「贵委」「贵单位」，
+///    「贵市财政局」不是词。纯字符串判定，零歧义——而这正是模型犯的第三种错。
+/// 2. **同一篇里不能既称「贵局」又称「你局」。** 这是全篇一致性问题：单看一句
+///    两种都对，只有通读全文才发现前后不一。模型逐句看，永远发现不了。
+fn check_honorifics(markdown: &str, notes: &mut Vec<ProofNote>) {
+    static ATTACHED: OnceLock<Regex> = OnceLock::new();
+    // 「贵」与机构后缀之间还夹着两个以上汉字，就说明后面跟的是完整单位名。
+    // 「贵局」「贵委」「贵办」中间没有字，不会命中；「贵单位」的「位」不是
+    // 机构后缀，也不会命中。
+    let attached = ATTACHED.get_or_init(|| {
+        Regex::new(r"贵[\p{Han}]{2,10}(?:委员会|管理局|分局|局|委|办|厅|处|院|校|中心)")
+            .expect("敬称正则必须有效")
+    });
+    for hit in attached.find_iter(markdown) {
+        notes.push(note(
+            "RULE-HONOR-ATTACHED",
+            "称谓规范",
+            Level::MustFix,
+            format!(
+                "「{}」把敬称加在了完整单位名前面。「贵」只能代指对方机关，应写「贵局」「贵委」「贵单位」，或直接写单位名称",
+                hit.as_str()
+            ),
+            hit.range(),
+        ));
+    }
+
+    // 同一个机构后缀上「贵」「你」并用。取第二次出现的位置报，让用户看到冲突。
+    static PAIRED: OnceLock<Regex> = OnceLock::new();
+    let paired = paired_honorific(&PAIRED);
+    let mut seen_polite: Vec<&str> = Vec::new();
+    let mut seen_plain: Vec<(&str, std::ops::Range<usize>)> = Vec::new();
+    for hit in paired.captures_iter(markdown) {
+        let whole = hit.get(0).expect("整体匹配");
+        let suffix = hit.get(2).expect("后缀分组").as_str();
+        let honorific = hit.get(1).expect("敬称分组").as_str();
+        if honorific == "贵" {
+            seen_polite.push(suffix);
+        } else {
+            seen_plain.push((suffix, whole.range()));
+        }
+    }
+    for (suffix, span) in seen_plain {
+        if !seen_polite.contains(&suffix) {
+            continue;
+        }
+        notes.push(note(
+            "RULE-HONOR-MIXED",
+            "称谓规范",
+            Level::Suspect,
+            format!(
+                "全篇对同一对象既称「贵{suffix}」又称「你{suffix}」，请统一（平行文用「贵」，下行文用「你」）"
+            ),
+            span,
+        ));
+    }
+}
+
+fn paired_honorific(cell: &'static OnceLock<Regex>) -> &'static Regex {
+    cell.get_or_init(|| {
+        Regex::new(r"(贵|你)(委员会|管理局|分局|局|委|办|厅|处|院|校|中心|单位|公司)")
+            .expect("敬称配对正则必须有效")
+    })
+}
+
+// ── 句末标点 ────────────────────────────────────────────────────────────────
+
+/// 正文段落末尾可以合法收尾的字符。
+///
+/// 右引号、右括号、右书名号都收进来：「……遵照执行。」这类结尾里句号在内层，
+/// 外面是配对符号，不算缺标点。
+const SENTENCE_ENDERS: [char; 14] = [
+    '。', '！', '？', '；', '：', '…', '—', '」', '』', '”', '’', '）', '》', '】',
+];
+
+/// 正文段落句末缺标点。
+///
+/// 这一条也是从模型检查器撤回来的：实测它基本不报（0/3、1/3），而且有道理——
+/// 一行没有句末标点，在公文里更可能是标题、附件名或落款，模型只看到一句话，
+/// 没有上下文分辨不了。而**哪些行是正文段落，程序比模型清楚**。
+///
+/// 所以这里只查 `Paragraph`，且：跳过附件区（附件名本来就不带句号）、
+/// 跳过短段落（十字以内多半是落款、署名或单独一行的标记）。宁可漏报。
+fn check_sentence_endings(markdown: &str, notes: &mut Vec<ProofNote>) {
+    let mut in_attachment = false;
+    for located in export::parse_markdown_located(markdown) {
+        match &located.block {
+            export::MarkdownBlock::Marker(export::MarkdownSection::Attachment) => {
+                in_attachment = true;
+            }
+            export::MarkdownBlock::Marker(export::MarkdownSection::Body) => {
+                in_attachment = false;
+            }
+            export::MarkdownBlock::Paragraph(text) if !in_attachment => {
+                let trimmed = text.trim_end();
+                if trimmed.chars().count() < 10 {
+                    continue;
+                }
+                let Some(last) = trimmed.chars().next_back() else {
+                    continue;
+                };
+                if SENTENCE_ENDERS.contains(&last) {
+                    continue;
+                }
+                // 位置要锚在**源码**上：`text` 是解析后的内容，与源码不等长
+                // （行内标记、缩进都会差），拿它的长度去加偏移会错位。
+                let Some(span) = last_char_span(markdown, &located.range) else {
+                    continue;
+                };
+                // span 必须罩住最后那个字，不能是插入点那样的空范围——空范围
+                // 锚不住，`RevisionSet` 会把整条建议丢掉，而且不报错
+                // （见 `revision::Anchor`）。所以连着最后一个字一起替换。
+                let last_char = &markdown[span.clone()];
+                notes.push(note_with_fix(
+                    "RULE-SENTENCE-END",
+                    "标点规范",
+                    // 疑似而非必错：粘进来的整篇公文可能带落款、引文，
+                    // 那些结尾不带句号是对的。给改法但不进「采纳全部必错」。
+                    Level::Suspect,
+                    format!("段落末尾缺句末标点：「…{}」", tail(trimmed)),
+                    span,
+                    format!("{last_char}。"),
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 段落在源码里最后一个非空字符的字节范围。
+fn last_char_span(
+    markdown: &str,
+    range: &std::ops::Range<usize>,
+) -> Option<std::ops::Range<usize>> {
+    let slice = markdown.get(range.clone())?;
+    let trimmed = slice.trim_end();
+    let last = trimmed.chars().next_back()?;
+    let end = range.start + trimmed.len();
+    Some(end - last.len_utf8()..end)
+}
+
+/// 提示里只回显段末几个字，够定位就行。
+fn tail(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let start = chars.len().saturating_sub(8);
+    chars[start..].iter().collect()
+}
+
 // ── 成文日期 ────────────────────────────────────────────────────────────────
 
 /// 成文日期是否已经过期。**只在导出时调用**——编辑期间日期本来就该是旧的，
@@ -499,6 +664,125 @@ pub fn check_doc_date(input: &DraftInput, today: chrono::NaiveDate) -> Option<St
 
 #[cfg(test)]
 mod tests {
+    // ── 敬称与句末标点 ──────────────────────────────────────────────────
+
+    #[test]
+    fn honorific_attached_to_a_full_unit_name_is_flagged() {
+        let notes = check_all("请贵市财政局于本月底前反馈意见。");
+        let hit = notes
+            .iter()
+            .find(|note| note.entry_id == "RULE-HONOR-ATTACHED")
+            .expect("「贵市财政局」应当报出来");
+        assert_eq!(hit.level, Level::MustFix);
+    }
+
+    #[test]
+    fn plain_honorifics_are_not_flagged() {
+        // 「贵局」「贵委」「贵单位」都是规范写法，一个都不许报——
+        // 这条规则是从模型手里接过来的，接过来就不能重犯同样的过度适用。
+        for text in [
+            "请贵局于本月底前反馈意见，我办将及时汇总。",
+            "现将有关情况函告贵委，请予支持并及时反馈。",
+            "感谢贵单位长期以来的大力支持与密切配合。",
+            "请贵办公室协助落实本次会议的会务保障工作。",
+        ] {
+            let notes = check_all(text);
+            assert!(
+                !notes
+                    .iter()
+                    .any(|note| note.entry_id == "RULE-HONOR-ATTACHED"),
+                "「{text}」不该被报出敬称问题：{:?}",
+                notes.iter().map(|n| &n.message).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// 全篇一致性是规则的主场：单看每一句「贵局」和「你局」都对，
+    /// 只有通读全文才发现前后不一。逐句看的模型永远发现不了。
+    #[test]
+    fn mixing_polite_and_plain_forms_for_one_office_is_flagged() {
+        let notes = check_all("请贵局尽快反馈。\n\n另请你局同步抄送我办。");
+        assert!(
+            notes.iter().any(|note| note.entry_id == "RULE-HONOR-MIXED"),
+            "同篇「贵局」与「你局」并用应当报出来"
+        );
+    }
+
+    #[test]
+    fn using_only_one_form_throughout_is_fine() {
+        for text in [
+            "请贵局尽快反馈。\n\n另请贵局同步抄送我办。",
+            "请你局尽快反馈。\n\n另请你局同步抄送我办。",
+        ] {
+            let notes = check_all(text);
+            assert!(
+                !notes.iter().any(|note| note.entry_id == "RULE-HONOR-MIXED"),
+                "「{text}」前后一致，不该报"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_paragraph_without_final_punctuation_is_flagged() {
+        let markdown = "# 标题\n\n请各有关单位认真组织落实并确保按期完成\n";
+        let notes = check_all_with(markdown);
+        let hit = notes
+            .iter()
+            .find(|note| note.entry_id == "RULE-SENTENCE-END")
+            .expect("段落缺句号应当报出来");
+        assert_eq!(hit.level, Level::Suspect, "疑似档，不进「采纳全部必错」");
+        // 位置必须罩住最后一个字，不能是空范围——空范围锚不住，
+        // 整条建议会被 `RevisionSet` 无声丢掉。
+        assert!(!hit.span.is_empty(), "改动区间不能为空");
+        assert_eq!(&markdown[hit.span.clone()], "成");
+        let replacement = hit.replacement.as_deref().expect("应当给出改法");
+        assert_eq!(replacement, "成。");
+        // 套用改法后必须正好补上句号，不多不少。
+        let mut applied = markdown.to_string();
+        applied.replace_range(hit.span.clone(), replacement);
+        assert!(applied.contains("确保按期完成。"));
+    }
+
+    #[test]
+    fn paragraphs_that_already_end_properly_are_left_alone() {
+        for text in [
+            "请各有关单位认真组织落实并确保按期完成。",
+            "现将有关事项通知如下：",
+            "会议审议通过了《关于加强财务管理工作的实施意见》",
+            "有关单位应当按照要求执行（详见附件）",
+        ] {
+            let markdown = format!("# 标题\n\n{text}\n");
+            let notes = check_all_with(&markdown);
+            assert!(
+                !notes
+                    .iter()
+                    .any(|note| note.entry_id == "RULE-SENTENCE-END"),
+                "「{text}」结尾合法，不该报"
+            );
+        }
+    }
+
+    #[test]
+    fn short_trailing_lines_are_not_treated_as_paragraphs() {
+        // 落款、署名这类短行本来就不带句号，报了只会满屏误报。
+        let markdown = "# 标题\n\n某某市财政局\n";
+        let notes = check_all_with(markdown);
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.entry_id == "RULE-SENTENCE-END"),
+            "短行不该按正文段落处理"
+        );
+    }
+
+    fn check_all(text: &str) -> Vec<ProofNote> {
+        check_all_with(&format!("# 关于测试有关事项的函\n\n{text}\n"))
+    }
+
+    fn check_all_with(markdown: &str) -> Vec<ProofNote> {
+        check(&DraftInput::default(), markdown)
+    }
+
     use super::*;
     use crate::models::TemplateProfile;
 
