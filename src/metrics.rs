@@ -211,8 +211,14 @@ impl Metrics {
             ));
         } else {
             for (key, stat) in flagged {
+                // 模型检查器打人话，词表条目打编号——后者在词表页里可以直接搜到，
+                // 前者的编号除了我们自己没人认得。
+                let name = crate::revise_model::task_by_id(key).map_or_else(
+                    || key.to_string(),
+                    |task| format!("{}（{key}）", task.label),
+                );
                 out.push_str(&format!(
-                    "\n- {key}：采纳 {} / 忽略 {}，采纳率 {:.0}%\n",
+                    "\n- {name}：采纳 {} / 忽略 {}，采纳率 {:.0}%\n",
                     stat.accepted,
                     stat.ignored,
                     stat.adoption().unwrap_or(0.0) * 100.0

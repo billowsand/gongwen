@@ -111,6 +111,43 @@ fn font_choice_row(
 }
 
 impl GongwenApp {
+    /// 检查器开关。
+    ///
+    /// 逐项可关，是因为**一个爱误报的检查器会把整个功能连坐关掉**：用户不会
+    /// 去分辨是哪一项在捣乱，只会不再打开这个面板。给了开关，坏的那项可以
+    /// 单独摘掉，好的留下。
+    fn revise_tasks_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("启用的检查器"));
+            ui.weak("每多开一项，一轮复核的调用次数就多一倍");
+        });
+        for task in &crate::revise_model::TASKS {
+            let mut on = self.config.revise_model.task_enabled(task.id);
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+                if ui.checkbox(&mut on, task.label).changed() {
+                    self.config.revise_model.set_task_enabled(task.id, on);
+                }
+                // 还没有实测数据的检查器要标出来，别让人以为它和语病那条一样可靠。
+                if crate::revise_model::DEFAULT_DISABLED_TASKS.contains(&task.id) {
+                    theme::chip(ui, "未实测", warn(), theme::surface());
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+                ui.weak(task.criteria);
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+            ui.weak(
+                "标「未实测」的两项还没有召回率与误报率数据，默认关闭。\
+                 开之前建议先跑一遍回归集：cargo test --bin gongwen-assistant \
+                 revise_cases -- --ignored --nocapture",
+            );
+        });
+    }
+
     /// 文字复核的埋点面板：这个检查器到底在帮忙还是在添乱。
     ///
     /// 三个数字要一起看：闸门拦截多说明模型不合用；采纳率低说明这类检查本身
@@ -591,6 +628,8 @@ impl GongwenApp {
                                 .range(5..=600),
                         );
                     });
+                    ui.add_space(8.0);
+                    self.revise_tasks_ui(ui);
                     ui.add_space(8.0);
                     self.revise_metrics_ui(ui);
                 });

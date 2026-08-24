@@ -186,6 +186,11 @@ impl DraftPage<'_> {
             return;
         }
         let cfg = self.config.revise_model.clone();
+        let tasks = cfg.enabled_tasks();
+        if tasks.is_empty() {
+            *self.status = "没有启用任何检查器：请在「设置 → AI 文字复核」中至少开启一项。".into();
+            return;
+        }
         let sentences = revise_model::segment_sentences(&markdown, cfg.max_sentence_chars);
         if sentences.is_empty() {
             *self.status = "正文里没有可逐句复核的句子（标题、表格和过短的句子不送检）。".into();
@@ -193,9 +198,11 @@ impl DraftPage<'_> {
         }
 
         let (key, seq) = self.begin_job();
+        // 调用次数是句数乘检查器数，说清楚才不会让人以为卡住了。
         *self.status = format!(
-            "正在逐句复核，共 {} 句…",
-            sentences.len().min(cfg.max_sentences)
+            "正在逐句复核：{} 句 × {} 个检查器…",
+            sentences.len().min(cfg.max_sentences),
+            tasks.len()
         );
         let draft_model = self.config.lm_studio.clone();
         let lexicon = crate::proofread::Lexicon::resolved(&self.config.proofread);
@@ -214,12 +221,15 @@ impl DraftPage<'_> {
                 }
             };
             let result = revise_model::review(
-                &cfg,
-                &draft_model,
-                &lexicon,
-                &vocabulary,
-                &markdown,
-                &cache,
+                revise_model::ReviewRequest {
+                    cfg: &cfg,
+                    draft_model: &draft_model,
+                    lexicon: &lexicon,
+                    vocabulary: &vocabulary,
+                    markdown: &markdown,
+                    cache: &cache,
+                    tasks: &tasks,
+                },
                 &progress,
             )
             .map_err(|error: anyhow::Error| format!("{error:#}"));

@@ -31,16 +31,55 @@ pub struct ReviseTask {
     pub criteria: &'static str,
 }
 
-/// 阶段 1 只上一个检查器。
+/// 全部模型检查器。
 ///
-/// 先做语病是有取舍的：词表覆盖不到它（错别字能穷举，句式杂糅不能），价值最高；
-/// 而它天然属「疑似」档，误报只是多一条可忽略的建议，不会误改正文。等这一条
-/// 的采纳率站得住，再按同样的形状往下铺称谓、标点、去套话。
-pub const TASKS: [ReviseTask; 1] = [ReviseTask {
-    id: "MDL-GRAMMAR",
-    label: "语病与表达",
-    criteria: "语病：成分残缺（缺主语、缺谓语、缺宾语）、搭配不当、句式杂糅、语序不当、成分赘余",
-}];
+/// 加一个检查器就是往这个数组里加一项——闸门、界面、埋点、回归集全都不用动。
+/// 这是阶段 0 先定契约换来的。
+///
+/// 原计划里的另外两项没有做成模型检查器，理由都是「它不该由模型来做」：
+///
+/// - **数字用法**（成文日期、序数词、量词写法）与闸门直接冲突：闸门明令禁止
+///   模型改动句中的数字，而这个检查器的活恰恰就是改数字。为它开后门等于把
+///   最硬的一道防线撬开，去换一类**本来就能用规则穷举**的问题——
+///   数字用法有国标可依，属于 `proofread_rules` 的地盘。
+/// - **版式复核**（标题、层级序号、附件一致）依赖公文要素而非语感，
+///   同样是确定性规则做得更准、更快、还不要钱。
+///
+/// 结论：模型只做规则穷举不了的活。规则能写清楚的，写进规则。
+pub const TASKS: [ReviseTask; 3] = [
+    ReviseTask {
+        id: "MDL-GRAMMAR",
+        label: "语病与表达",
+        criteria: "语病：成分残缺（缺主语、缺谓语、缺宾语）、搭配不当、句式杂糅、语序不当、成分赘余",
+    },
+    ReviseTask {
+        id: "MDL-ADDRESS",
+        label: "称谓规范",
+        // 刻意不查「自称前后不一致」（我局/本局交替）：那是全篇性问题，
+        // 单句里根本看不出来，问了只会让模型瞎猜。
+        criteria: "称谓不规范：使用「你们」「咱们」「大家」等口语称谓；对不相隶属或上级机关未用「贵」等敬称；提及个人时未加「同志」或职务",
+    },
+    ReviseTask {
+        id: "MDL-PUNCT",
+        label: "标点规范",
+        // 刻意不查「分号与逗号的层级」：切句器把分号当句子边界，
+        // 「一是…；二是…；三是…」到不了检查器手里就已经被拆散了。
+        // 写一条交付不了的能力，比不写更糟——它会让人以为查过了。
+        criteria: "标点不规范：并列词语之间该用顿号却用了逗号；「和」「与」「及」之前误加顿号；冒号后重复使用「即」「就是」；句末缺标点",
+    },
+];
+
+/// 默认不启用的检查器。
+///
+/// 语病那一条实测过（召回 25/25、误报 0/20），敢默认开着。另外两条还没有数据，
+/// 而**一个爱误报的检查器会把整个功能连坐关掉**——不能拿已经站住的那条去赌。
+/// 用户拿回归集量过、觉得够用，再自己打开。
+pub const DEFAULT_DISABLED_TASKS: [&str; 2] = ["MDL-ADDRESS", "MDL-PUNCT"];
+
+/// 按 id 找检查器。
+pub fn task_by_id(id: &str) -> Option<&'static ReviseTask> {
+    TASKS.iter().find(|task| task.id == id)
+}
 
 /// 正文里切出来的一句话。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,15 +424,32 @@ pub fn parse_reply(reply: &str) -> Option<String> {
 ///
 /// 单线程顺序跑：本地推理服务通常单并发吞吐最好，并发只会互相抢显存，还让
 /// 进度没法如实汇报。
+/// 一轮复核要用到的全部输入。
+pub struct ReviewRequest<'a> {
+    pub cfg: &'a ReviseModelConfig,
+    pub draft_model: &'a LmStudioConfig,
+    pub lexicon: &'a Lexicon,
+    pub vocabulary: &'a [VocabularyEntry],
+    pub markdown: &'a str,
+    pub cache: &'a BTreeMap<u64, Option<String>>,
+    /// 跑哪些检查器由调用方定：应用按用户的启用项传，回归评测按要量的那一项传。
+    /// 「能不能查出来」和「要不要开着」是两件事，不该由同一个开关决定。
+    pub tasks: &'a [&'static ReviseTask],
+}
+
 pub fn review(
-    cfg: &ReviseModelConfig,
-    draft_model: &LmStudioConfig,
-    lexicon: &Lexicon,
-    vocabulary: &[VocabularyEntry],
-    markdown: &str,
-    cache: &BTreeMap<u64, Option<String>>,
+    request: ReviewRequest<'_>,
     progress: &dyn Fn(usize, usize),
 ) -> anyhow::Result<ReviewOutcome> {
+    let ReviewRequest {
+        cfg,
+        draft_model,
+        lexicon,
+        vocabulary,
+        markdown,
+        cache,
+        tasks,
+    } = request;
     let model = cfg.resolve(draft_model);
     if model.model.trim().is_empty() {
         anyhow::bail!("请先在设置中为文字复核选择模型");
@@ -403,7 +459,7 @@ pub fn review(
     let mut outcome = ReviewOutcome::default();
     for (index, sentence) in sentences.into_iter().take(total).enumerate() {
         progress(index + 1, total);
-        for task in &TASKS {
+        for task in tasks {
             let key = fingerprint(task.id, &sentence.text);
             let cached = cache.get(&key).cloned();
             let reply = match cached {

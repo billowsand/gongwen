@@ -36,6 +36,8 @@ pub struct Case {
     pub kind: String,
     /// 期望检查器报不报这一句。
     pub should_flag: bool,
+    /// 该由哪个检查器报。负样例留空——它的要求更强：**任何**检查器都不该报。
+    pub task: String,
     pub sentence: String,
     /// 期望的改法；`should_flag` 为假时为空。
     pub expected: String,
@@ -64,8 +66,8 @@ pub fn cases() -> Vec<Case> {
             continue;
         }
         assert!(
-            cols.len() >= 6,
-            "回归集第 {} 行只有 {} 列，需要 6 列",
+            cols.len() >= 7,
+            "回归集第 {} 行只有 {} 列，需要 7 列",
             index + 1,
             cols.len()
         );
@@ -74,13 +76,20 @@ pub fn cases() -> Vec<Case> {
             "不该报" => false,
             other => panic!("回归集第 {} 行的期望「{other}」无法识别", index + 1),
         };
+        let task = cols[3].trim().to_string();
+        assert!(
+            task.is_empty() || revise_model::task_by_id(&task).is_some(),
+            "回归集第 {} 行的检查器「{task}」不存在",
+            index + 1
+        );
         out.push(Case {
             id: cols[0].trim().to_string(),
             kind: cols[1].trim().to_string(),
             should_flag,
-            sentence: cols[3].trim().to_string(),
-            expected: cols[4].trim().to_string(),
-            note: cols[5].trim().to_string(),
+            task,
+            sentence: cols[4].trim().to_string(),
+            expected: cols[5].trim().to_string(),
+            note: cols[6].trim().to_string(),
         });
     }
     out
@@ -128,8 +137,18 @@ mod tests {
                     "{} 的参考改法与原句相同",
                     case.id
                 );
+                assert!(
+                    !case.task.is_empty(),
+                    "{} 标为该报却没写归属哪个检查器",
+                    case.id
+                );
             } else {
                 assert!(case.expected.is_empty(), "{} 标为不该报却给了改法", case.id);
+                assert!(
+                    case.task.is_empty(),
+                    "{} 是负样例，不该限定检查器——任何检查器报了它都算误报",
+                    case.id
+                );
             }
         }
     }
@@ -332,66 +351,80 @@ mod tests {
         let lexicon = lexicon();
         let cases = cases();
 
-        let mut hit = 0usize;
-        let mut miss = 0usize;
-        let mut false_alarm = 0usize;
-        let mut quiet = 0usize;
-        let mut rejected_by = std::collections::BTreeMap::<&str, usize>::new();
+        // 逐个检查器分别量：合在一起报一个总数没法用——某一项误报高，
+        // 摘掉它就行，不该让整个功能陪葬。
+        for task in &revise_model::TASKS {
+            let mut hit = 0usize;
+            let mut miss = 0usize;
+            let mut false_alarm = 0usize;
+            let mut quiet = 0usize;
+            let mut rejected_by = std::collections::BTreeMap::<&str, usize>::new();
 
-        for case in &cases {
-            let outcome = revise_model::review(
-                &cfg,
-                &config.lm_studio,
-                &lexicon,
-                &config.vocabulary,
-                &case.sentence,
-                &Default::default(),
-                &|_, _| {},
-            )
-            .expect("复核调用失败");
-            for ((_, reason), count) in &outcome.rejected_by_reason {
-                *rejected_by.entry(reason.label()).or_default() += *count as usize;
+            for case in &cases {
+                // 正样例只由它归属的检查器负责；负样例每个检查器都要过——
+                // 「不该报」的要求是任何一个都不许报。
+                if case.should_flag && case.task != task.id {
+                    continue;
+                }
+                let outcome = revise_model::review(
+                    revise_model::ReviewRequest {
+                        cfg: &cfg,
+                        draft_model: &config.lm_studio,
+                        lexicon: &lexicon,
+                        vocabulary: &config.vocabulary,
+                        markdown: &case.sentence,
+                        cache: &Default::default(),
+                        tasks: &[task],
+                    },
+                    &|_, _| {},
+                )
+                .expect("复核调用失败");
+                for ((_, reason), count) in &outcome.rejected_by_reason {
+                    *rejected_by.entry(reason.label()).or_default() += *count as usize;
+                }
+                let flagged = !outcome.suggestions.is_empty();
+                match (case.should_flag, flagged) {
+                    (true, true) => hit += 1,
+                    (true, false) => {
+                        miss += 1;
+                        println!("[{}] 漏报 {}：{}", task.id, case.id, case.sentence);
+                    }
+                    (false, true) => {
+                        false_alarm += 1;
+                        let suggestion = &outcome.suggestions[0];
+                        println!(
+                            "[{}] 误报 {}：{} → 建议把「{}」改成「{}」",
+                            task.id, case.id, case.sentence, suggestion.before, suggestion.after
+                        );
+                    }
+                    (false, false) => quiet += 1,
+                }
             }
-            let flagged = !outcome.suggestions.is_empty();
-            match (case.should_flag, flagged) {
-                (true, true) => hit += 1,
-                (true, false) => {
-                    miss += 1;
-                    println!("漏报 {}：{}", case.id, case.sentence);
-                }
-                (false, true) => {
-                    false_alarm += 1;
-                    let suggestion = &outcome.suggestions[0];
-                    println!(
-                        "误报 {}：{} → 建议把「{}」改成「{}」",
-                        case.id, case.sentence, suggestion.before, suggestion.after
-                    );
-                }
-                (false, false) => quiet += 1,
+
+            let flagged_total = hit + miss;
+            let clean_total = false_alarm + quiet;
+            println!("\n== {}（{}）==", task.label, task.id);
+            println!(
+                "召回率：{hit}/{flagged_total} = {:.0}%（该报的报出来多少）",
+                percent(hit, flagged_total)
+            );
+            println!(
+                "误报率：{false_alarm}/{clean_total} = {:.0}%（不该报的报了多少）",
+                percent(false_alarm, clean_total)
+            );
+            if !rejected_by.is_empty() {
+                let parts: Vec<String> = rejected_by
+                    .iter()
+                    .map(|(reason, count)| format!("{reason} {count}"))
+                    .collect();
+                println!("闸门拦截：{}", parts.join("、"));
             }
         }
 
-        let flagged_total = hit + miss;
-        let clean_total = false_alarm + quiet;
-        println!("\n== 回归集结果（{} 条）==", cases.len());
         println!(
-            "召回率：{hit}/{flagged_total} = {:.0}%（该报的报出来多少）",
-            percent(hit, flagged_total)
-        );
-        println!(
-            "误报率：{false_alarm}/{clean_total} = {:.0}%（不该报的报了多少）",
-            percent(false_alarm, clean_total)
-        );
-        if !rejected_by.is_empty() {
-            let parts: Vec<String> = rejected_by
-                .iter()
-                .map(|(reason, count)| format!("{reason} {count}"))
-                .collect();
-            println!("闸门拦截：{}", parts.join("、"));
-        }
-        println!(
-            "\n以上四个数字不含任何稿件内容，可以直接贴出来讨论怎么调阈值。\n\
-             判读：误报率高先收紧提示词或调闸门；召回率低多半是模型偏小，换大一档再看。"
+            "\n以上数字不含任何稿件内容，可以直接贴出来讨论。\n\
+             判读：误报率高就单独关掉那一项或收紧它的提示词；召回率低多半是模型\
+             偏小，换大一档再看。看到漏报先核对标注——标注错了照着调只会越调越坏。"
         );
     }
 

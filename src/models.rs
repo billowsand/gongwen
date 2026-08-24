@@ -528,6 +528,12 @@ pub struct ReviseModelConfig {
     pub max_sentence_chars: usize,
     /// 一轮最多送检多少句，免得一篇长稿把本地服务占死。
     pub max_sentences: usize,
+    /// 停用的检查器 id。
+    ///
+    /// 用「停用清单」而不是「启用清单」：旧配置里没有这个字段时，serde 会填
+    /// [`Default`] 的值，正好让还没量过的新检查器保持关闭；而如果用启用清单，
+    /// 旧配置会解析成空集，把已经站住的语病检查也一并关掉。
+    pub disabled_tasks: Vec<String>,
 }
 
 impl Default for ReviseModelConfig {
@@ -541,11 +547,34 @@ impl Default for ReviseModelConfig {
             timeout_seconds: 60,
             max_sentence_chars: 120,
             max_sentences: 200,
+            disabled_tasks: crate::revise_model::DEFAULT_DISABLED_TASKS
+                .iter()
+                .map(|id| (*id).to_string())
+                .collect(),
         }
     }
 }
 
 impl ReviseModelConfig {
+    pub fn task_enabled(&self, id: &str) -> bool {
+        !self.disabled_tasks.iter().any(|item| item == id)
+    }
+
+    pub fn set_task_enabled(&mut self, id: &str, enabled: bool) {
+        self.disabled_tasks.retain(|item| item != id);
+        if !enabled {
+            self.disabled_tasks.push(id.to_string());
+        }
+    }
+
+    /// 当前启用的检查器。
+    pub fn enabled_tasks(&self) -> Vec<&'static crate::revise_model::ReviseTask> {
+        crate::revise_model::TASKS
+            .iter()
+            .filter(|task| self.task_enabled(task.id))
+            .collect()
+    }
+
     /// 解析成一次真正可用的接入配置。温度固定为 0：复核要的是可复现，不是发挥。
     pub fn resolve(&self, draft_model: &LmStudioConfig) -> LmStudioConfig {
         let pick = |own: &str, fallback: &str| {
