@@ -414,7 +414,18 @@ pub fn review(
                     // 截断的结果闸门也一定拦得下。下限 256 是给短句留的余量——
                     // 按字数算出来的几十 token 连一句正常改写都未必放得下。
                     let max_tokens = ((sentence.text.chars().count() * 2 + 64) as u32).max(256);
-                    let raw = lmstudio::generate_retrying(&model, &system, &user, 0.0, max_tokens)?;
+                    // 复核一律要求关思考：这活要的是稳定和快，不需要推理，
+                    // 而思考会把输出预算吃光、把一轮几十次调用拖成几分钟。
+                    let raw = lmstudio::generate_retrying(
+                        &model,
+                        &system,
+                        &user,
+                        0.0,
+                        max_tokens,
+                        lmstudio::ChatOptions {
+                            disable_thinking: true,
+                        },
+                    )?;
                     outcome.checked += 1;
                     let parsed = parse_reply(&raw);
                     outcome.cache.insert(key, parsed.clone());
