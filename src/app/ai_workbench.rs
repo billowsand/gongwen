@@ -197,6 +197,9 @@ impl GongwenApp {
         let rag_enabled = self.config.rag.enabled;
 
         let win = egui::Window::new("AI 起草工作台")
+            // 换一个显式 id：egui 会把窗口尺寸持久化，旧版本一路涨到屏幕底部的那个高度
+            // 已经存进用户配置里了，沿用按标题算出的默认 id 就等于继续用坏掉的高度。
+            .id(egui::Id::new("ai_workbench_window_v2"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -221,69 +224,79 @@ impl GongwenApp {
                         }
                     }
                 });
-                let body_height = (ui.available_height() - 58.0).max(260.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("ai_workbench_body")
-                    .max_height(body_height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(8.0);
-                        theme::card().show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            workflow_header(ui, state.workflow);
-                            ui.add_space(8.0);
-                            match state.workflow {
-                                AiWorkflowKind::Similar => {
-                                    similar_ui(ui, &mut state, &mut load_baseline)
-                                }
-                                AiWorkflowKind::Knowledge
-                                | AiWorkflowKind::Material
-                                | AiWorkflowKind::Outline => {
-                                    material_ui(ui, &mut state, rag_enabled)
-                                }
-                                AiWorkflowKind::Polish => polish_ui(
-                                    ui,
-                                    &mut state,
-                                    &self.config.ai_prompts,
-                                    self.doc().draft.kind,
-                                    has_current,
-                                ),
-                            }
+                // 底栏用 bottom_up 布局实际占位，正文再吃掉剩下的高度。
+                //
+                // 这里原先写的是 `available_height() - 58.0`：58 是底栏高度的估值，比实际
+                //（间距 + 分隔线 + 主按钮 ≈ 63px）少 5px。正文的 ScrollArea 用
+                // auto_shrink=false 撑满这个偏大的高度，整窗内容就比窗口本身高 5px，而 egui
+                // 的 Resize 每帧都做 `desired_size = desired_size.max(last_content_size)`，
+                // 于是窗口每帧长高 5px，打开后自己一路延展到屏幕底部。按真实布局占位后，
+                // 内容高度恒等于窗口高度，这条正反馈就断了。
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.horizontal(|ui| {
+                        let label = if state.workflow == AiWorkflowKind::Polish || has_current {
+                            "生成修改提案"
+                        } else {
+                            "开始起草"
+                        };
+                        if theme::primary_icon_button(ui, theme::Icon::Sparkles, label).clicked() {
+                            execute = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("AI 结果先经过格式校验；已有正文不会被直接覆盖");
                         });
-
-                        if state.workflow != AiWorkflowKind::Polish && !pending.is_empty() {
-                            ui.add_space(8.0);
-                            theme::card().fill(theme::warn_soft()).show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    theme::chip(ui, "待核实", theme::warn(), theme::warn_soft());
-                                    ui.label(format!(
-                                        "当前公文要素仍缺：{}。可以先起草，但正式导出会被暂停。",
-                                        pending.join("、")
-                                    ));
-                                });
-                            });
-                        }
-                        if let Some(error) = &state.error {
-                            ui.add_space(8.0);
-                            ui.colored_label(theme::danger(), error);
-                        }
                     });
-                ui.add_space(10.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let label = if state.workflow == AiWorkflowKind::Polish || has_current {
-                        "生成修改提案"
-                    } else {
-                        "开始起草"
-                    };
-                    if theme::primary_icon_button(ui, theme::Icon::Sparkles, label).clicked() {
-                        execute = true;
-                    }
-                    if ui.button("取消").clicked() {
-                        cancel = true;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak("AI 结果先经过格式校验；已有正文不会被直接覆盖");
+                    ui.separator();
+                    ui.add_space(3.0);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("ai_workbench_body")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.add_space(8.0);
+                                theme::card().show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    workflow_header(ui, state.workflow);
+                                    ui.add_space(8.0);
+                                    match state.workflow {
+                                        AiWorkflowKind::Similar => {
+                                            similar_ui(ui, &mut state, &mut load_baseline)
+                                        }
+                                        AiWorkflowKind::Knowledge
+                                        | AiWorkflowKind::Material
+                                        | AiWorkflowKind::Outline => {
+                                            material_ui(ui, &mut state, rag_enabled)
+                                        }
+                                        AiWorkflowKind::Polish => polish_ui(
+                                            ui,
+                                            &mut state,
+                                            &self.config.ai_prompts,
+                                            self.doc().draft.kind,
+                                            has_current,
+                                        ),
+                                    }
+                                });
+
+                                if state.workflow != AiWorkflowKind::Polish && !pending.is_empty() {
+                                    ui.add_space(8.0);
+                                    theme::card().fill(theme::warn_soft()).show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            theme::chip(ui, "待核实", theme::warn(), theme::warn_soft());
+                                            ui.label(format!(
+                                                "当前公文要素仍缺：{}。可以先起草，但正式导出会被暂停。",
+                                                pending.join("、")
+                                            ));
+                                        });
+                                    });
+                                }
+                                if let Some(error) = &state.error {
+                                    ui.add_space(8.0);
+                                    ui.colored_label(theme::danger(), error);
+                                }
+                            });
                     });
                 });
             });

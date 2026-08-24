@@ -41,6 +41,8 @@ impl GongwenApp {
         let mut action = None;
 
         let win = egui::Window::new("大纲起草")
+            // 显式换 id，丢掉旧版本被撑到屏幕底部、又被 egui 持久化下来的窗口高度。
+            .id(egui::Id::new("outline_window_v2"))
             .open(&mut keep)
             .collapsible(false)
             .resizable(true)
@@ -88,74 +90,85 @@ impl GongwenApp {
                 });
 
                 ui.add_space(8.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("outline_sections")
-                    .auto_shrink([false; 2])
-                    .max_height(ui.available_height() - 56.0)
-                    .show(ui, |ui| {
-                        let total = draft.outline.sections.len();
-                        for (position, section) in draft.outline.sections.iter_mut().enumerate() {
-                            if let Some(picked) = section_card(ui, position, total, section, busy) {
-                                action = Some(picked);
-                            }
-                            ui.add_space(6.0);
+                // 底栏用 bottom_up 布局实际占位，正文再吃掉剩下的高度。写死的 56px 比底栏
+                // 实际高度小（底栏还会换行），正文用 auto_shrink=false 撑满后整窗内容比窗口
+                // 高出几像素，而 egui 的 Resize 每帧都做
+                // `desired_size = desired_size.max(last_content_size)`，窗口就会自己一路
+                // 长到屏幕底部。按真实布局占位后内容高度恒等于窗口高度。
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let ready = draft.outline.ready_to_assemble();
+                        let pending = draft
+                            .outline
+                            .sections
+                            .iter()
+                            .filter(|item| !item.is_done())
+                            .count();
+                        if theme::primary_icon_button_enabled(
+                            ui,
+                            ready && !busy,
+                            theme::Icon::SquareCheck,
+                            "合稿写入审校稿",
+                        )
+                        .on_disabled_hover_text(if busy {
+                            "有小节正在生成".to_string()
+                        } else {
+                            format!("还有 {pending} 节没有正文")
+                        })
+                        .clicked()
+                        {
+                            action = Some(OutlineAction::Assemble);
                         }
                         if ui
-                            .add(theme::icon_text_button(
-                                theme::Icon::FilePlus,
-                                "在末尾加一节",
-                            ))
+                            .add_enabled(
+                                !busy && pending > 0,
+                                theme::icon_text_button(
+                                    theme::Icon::WandSparkles,
+                                    &format!("逐节生成剩余 {pending} 节"),
+                                ),
+                            )
+                            .on_hover_text("一次跑一节，中途可以停下来改大纲")
                             .clicked()
                         {
-                            action = Some(OutlineAction::Insert(total));
+                            action = Some(OutlineAction::GenerateAll);
+                        }
+                        if ui
+                            .add(theme::icon_text_button(theme::Icon::X, "关闭"))
+                            .on_hover_text("大纲会保留，可以从功能区再打开")
+                            .clicked()
+                        {
+                            action = Some(OutlineAction::Close);
                         }
                     });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    let ready = draft.outline.ready_to_assemble();
-                    let pending = draft
-                        .outline
-                        .sections
-                        .iter()
-                        .filter(|item| !item.is_done())
-                        .count();
-                    if theme::primary_icon_button_enabled(
-                        ui,
-                        ready && !busy,
-                        theme::Icon::SquareCheck,
-                        "合稿写入审校稿",
-                    )
-                    .on_disabled_hover_text(if busy {
-                        "有小节正在生成".to_string()
-                    } else {
-                        format!("还有 {pending} 节没有正文")
-                    })
-                    .clicked()
-                    {
-                        action = Some(OutlineAction::Assemble);
-                    }
-                    if ui
-                        .add_enabled(
-                            !busy && pending > 0,
-                            theme::icon_text_button(
-                                theme::Icon::WandSparkles,
-                                &format!("逐节生成剩余 {pending} 节"),
-                            ),
-                        )
-                        .on_hover_text("一次跑一节，中途可以停下来改大纲")
-                        .clicked()
-                    {
-                        action = Some(OutlineAction::GenerateAll);
-                    }
-                    if ui
-                        .add(theme::icon_text_button(theme::Icon::X, "关闭"))
-                        .on_hover_text("大纲会保留，可以从功能区再打开")
-                        .clicked()
-                    {
-                        action = Some(OutlineAction::Close);
-                    }
+                    ui.separator();
+                    ui.add_space(1.0);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("outline_sections")
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                let total = draft.outline.sections.len();
+                                for (position, section) in
+                                    draft.outline.sections.iter_mut().enumerate()
+                                {
+                                    if let Some(picked) =
+                                        section_card(ui, position, total, section, busy)
+                                    {
+                                        action = Some(picked);
+                                    }
+                                    ui.add_space(6.0);
+                                }
+                                if ui
+                                    .add(theme::icon_text_button(
+                                        theme::Icon::FilePlus,
+                                        "在末尾加一节",
+                                    ))
+                                    .clicked()
+                                {
+                                    action = Some(OutlineAction::Insert(total));
+                                }
+                            });
+                    });
                 });
             });
         if let Some(window) = win {
