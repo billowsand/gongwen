@@ -128,9 +128,9 @@ impl GongwenApp {
                 if ui.checkbox(&mut on, task.label).changed() {
                     self.config.revise_model.set_task_enabled(task.id, on);
                 }
-                // 还没有实测数据的检查器要标出来，别让人以为它和语病那条一样可靠。
+                // 默认关着的那些要标出来，别让人以为它和默认开的几条一样有把握。
                 if crate::revise_model::DEFAULT_DISABLED_TASKS.contains(&task.id) {
-                    theme::chip(ui, "未实测", warn(), theme::surface());
+                    theme::chip(ui, "默认关闭", warn(), theme::surface());
                 }
             });
             ui.horizontal_wrapped(|ui| {
@@ -141,9 +141,8 @@ impl GongwenApp {
         ui.horizontal_wrapped(|ui| {
             ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
             ui.weak(
-                "标「未实测」的两项还没有召回率与误报率数据，默认关闭。\
-                 开之前建议先跑一遍回归集：cargo test --bin gongwen-assistant \
-                 revise_cases -- --ignored --nocapture",
+                "标「默认关闭」的项在回归集上还有误报未复测。开之前先跑一遍：\
+                 cargo test --bin gongwen-assistant revise_cases -- --ignored --nocapture",
             );
         });
     }

@@ -29,6 +29,12 @@ pub struct ReviseTask {
     pub label: &'static str,
     /// 写进提示词的「检查类型」一行。写得越具体，小模型越不容易顺手改别的。
     pub criteria: &'static str,
+    /// 实测出来的**过度适用**：形似该类问题、实则规范的写法。
+    ///
+    /// 单独一栏而不是并进 `criteria`，是因为这两者来源不同：`criteria` 是设计时
+    /// 想查什么，这一栏是量出来它错在哪。检查器用久了后者只会越攒越多，混在
+    /// 一起写会让人分不清哪句是原始意图、哪句是补丁。留空表示还没量出过度适用。
+    pub exclusions: &'static str,
 }
 
 /// 全部模型检查器。
@@ -51,6 +57,7 @@ pub const TASKS: [ReviseTask; 3] = [
         id: "MDL-GRAMMAR",
         label: "语病与表达",
         criteria: "语病：成分残缺（缺主语、缺谓语、缺宾语）、搭配不当、句式杂糅、语序不当、成分赘余",
+        exclusions: "",
     },
     ReviseTask {
         id: "MDL-ADDRESS",
@@ -58,6 +65,7 @@ pub const TASKS: [ReviseTask; 3] = [
         // 刻意不查「自称前后不一致」（我局/本局交替）：那是全篇性问题，
         // 单句里根本看不出来，问了只会让模型瞎猜。
         criteria: "称谓不规范：使用「你们」「咱们」「大家」等口语称谓；对不相隶属或上级机关未用「贵」等敬称；提及个人时未加「同志」或职务",
+        exclusions: "",
     },
     ReviseTask {
         id: "MDL-PUNCT",
@@ -65,16 +73,27 @@ pub const TASKS: [ReviseTask; 3] = [
         // 刻意不查「分号与逗号的层级」：切句器把分号当句子边界，
         // 「一是…；二是…；三是…」到不了检查器手里就已经被拆散了。
         // 写一条交付不了的能力，比不写更糟——它会让人以为查过了。
-        criteria: "标点不规范：并列词语之间该用顿号却用了逗号；「和」「与」「及」之前误加顿号；冒号后重复使用「即」「就是」；句末缺标点",
+        criteria: "标点不规范：并列词语之间误用逗号而非顿号；「和」「与」「及」之前误加顿号；冒号后重复使用「即」「就是」；句末缺标点",
+        // 实测抓到的过度适用：模型学会「并列用顿号」之后，会把最后一项前面
+        // 规范的「和」也改成顿号。「甲、乙和丙」本来就对，改它属于误报。
+        exclusions: "「甲、乙和丙」这种最后一项前用「和」「与」「及」连接的写法是规范的，不得把它改成顿号；顿号与「和」只有同时出现（「甲、乙、和丙」）才是错的",
     },
 ];
 
 /// 默认不启用的检查器。
 ///
-/// 语病那一条实测过（召回 25/25、误报 0/20），敢默认开着。另外两条还没有数据，
-/// 而**一个爱误报的检查器会把整个功能连坐关掉**——不能拿已经站住的那条去赌。
-/// 用户拿回归集量过、觉得够用，再自己打开。
-pub const DEFAULT_DISABLED_TASKS: [&str; 2] = ["MDL-ADDRESS", "MDL-PUNCT"];
+/// 判据只有一个：**在回归集上量过、误报为零**才敢默认开着。一个爱误报的检查器
+/// 不会只让人关掉它自己，会让人不再打开整个建议面板——不能拿已经站住的那几条
+/// 去赌一条没把握的。
+///
+/// 实测（63 条回归集）：
+/// - 语病与表达 召回 25/25、误报 0/28 → 默认开
+/// - 称谓规范　 召回 5/5、 误报 0/28 → 默认开
+/// - 标点规范　 召回 5/5、 误报 1/28 → 暂不默认开
+///
+/// 标点那一条的误报是把规范的「甲、乙和丙」改成了顿号，已写进 `exclusions`
+/// 补掉；但**补丁有没有生效要重新量过才算数**，在那之前不改默认值。
+pub const DEFAULT_DISABLED_TASKS: [&str; 1] = ["MDL-PUNCT"];
 
 /// 按 id 找检查器。
 pub fn task_by_id(id: &str) -> Option<&'static ReviseTask> {
@@ -373,9 +392,15 @@ fn mustfix_ids(lexicon: &Lexicon, text: &str) -> Vec<String> {
 /// 标准排在待检查文本之后并声明更高优先级，与 `prompt::build_optimize_prompt`
 /// 的做法一致：稿件本身是不可信输入，正文里写「忽略以上要求」不能生效。
 pub fn build_prompt(task: &ReviseTask, sentence: &str) -> (String, String) {
+    let exclusions = if task.exclusions.is_empty() {
+        String::new()
+    } else {
+        format!("【下列写法是规范的，不得改动】{}\n", task.exclusions)
+    };
     let system = format!(
         "你是公文文字校对助手，只做一件事：检查并修改指定类型的问题。\n\
          【检查类型】{}\n\
+         {exclusions}\
          【硬性要求】\n\
          1. 只改这一类问题，其他一律不动：不改用词风格、不调整语气、不增删内容。\n\
          2. 不得增加、删除或改写任何事实：单位名称、人名、日期、数字、书名号内的文件名一律逐字保留。\n\
@@ -705,6 +730,26 @@ mod tests {
             parse_reply("修改后：这次整治使形势好转。").as_deref(),
             Some("这次整治使形势好转。")
         );
+    }
+
+    /// 过度适用的补丁必须真的出现在提示词里。
+    ///
+    /// 这条看着像废话，但 `exclusions` 是「量出来一条、补一条」的东西，
+    /// 补了却没拼进去的话，下一轮评测会得到和上一轮一样的误报，
+    /// 而人会以为是提示词写得不够好，继续在错误的方向上加码。
+    #[test]
+    fn measured_exclusions_reach_the_prompt() {
+        let punct = task_by_id("MDL-PUNCT").expect("标点检查器应当存在");
+        assert!(!punct.exclusions.is_empty(), "标点检查器已量出过度适用");
+        let (system, _) = build_prompt(punct, "请甲、乙和丙共同研究。");
+        assert!(
+            system.contains(punct.exclusions),
+            "exclusions 没有拼进系统提示"
+        );
+        // 没量出过度适用的检查器不该凭空多出这一节。
+        let grammar = task_by_id("MDL-GRAMMAR").expect("语病检查器应当存在");
+        let (system, _) = build_prompt(grammar, "通过整治，使形势好转。");
+        assert!(!system.contains("下列写法是规范的"));
     }
 
     #[test]
