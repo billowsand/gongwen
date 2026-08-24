@@ -14,6 +14,11 @@ use crate::proofread::{Level, ProofNote};
 use regex::Regex;
 use std::sync::OnceLock;
 
+// 待办：正文段落句末缺标点。原本试着交给模型检查器，实测基本不报（0/3、1/3），
+// 想想也对——一行没有句末标点，在公文里更可能是标题、附件名或落款，模型没有
+// 上下文分辨不了。而**哪些行是正文段落，程序比模型清楚**：这里能拿到公文要素，
+// 判得出附件区、落款区和标题行。做的时候要先把这几类排除掉，否则会满屏误报。
+
 /// 跑一遍全部文档级规则。
 pub fn check(input: &DraftInput, markdown: &str) -> Vec<ProofNote> {
     let mut notes = Vec::new();
