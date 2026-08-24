@@ -318,11 +318,21 @@ mod tests {
     /// 不进 CI：它要连本机的模型服务，几十次推理，结果也不是稳定的通过/失败，
     /// 而是两个需要人来看的比率。
     ///
-    /// 跑法（先在设置里配好复核模型，或直接改下面的 `base_url` 与 `model`）：
+    /// 跑法（先在设置里配好复核模型）：
     ///
     /// ```text
     /// cargo test --bin gongwen-assistant revise_cases -- --ignored --nocapture
     /// ```
+    ///
+    /// **改提示词之前请先跑多遍**，否则量到的多半是随机性：
+    ///
+    /// ```text
+    /// GONGWEN_EVAL_REPEATS=3 cargo test --bin gongwen-assistant revise_cases \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// 温度 0 不等于确定性——批处理、GPU 归约顺序、KV 缓存都会让同一输入得出
+    /// 不同结果。跑一遍时 0/28 和 1/28 分不开，而这两个数会导向完全相反的决定。
     #[test]
     #[ignore = "需要本机模型服务才能运行"]
     fn measure_recall_and_false_alarms_against_a_live_model() {
@@ -350,14 +360,17 @@ mod tests {
         );
         let lexicon = lexicon();
         let cases = cases();
+        // 同一句跑几遍。温度 0 并不保证确定性（批处理、GPU 归约顺序、KV 缓存都会
+        // 让同一输入得出不同结果），单跑一遍的 1/28 和 0/28 根本分不开。
+        let repeats: usize = std::env::var("GONGWEN_EVAL_REPEATS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(1);
 
-        // 逐个检查器分别量：合在一起报一个总数没法用——某一项误报高，
-        // 摘掉它就行，不该让整个功能陪葬。
         for task in &revise_model::TASKS {
-            let mut hit = 0usize;
-            let mut miss = 0usize;
-            let mut false_alarm = 0usize;
-            let mut quiet = 0usize;
+            // 每条样例记「报了几次 / 跑了几次」。
+            let mut flagged_runs: Vec<(&Case, usize)> = Vec::new();
             let mut rejected_by = std::collections::BTreeMap::<&str, usize>::new();
 
             for case in &cases {
@@ -366,66 +379,123 @@ mod tests {
                 if case.should_flag && case.task != task.id {
                     continue;
                 }
-                let outcome = revise_model::review(
-                    revise_model::ReviewRequest {
-                        cfg: &cfg,
-                        draft_model: &config.lm_studio,
-                        lexicon: &lexicon,
-                        vocabulary: &config.vocabulary,
-                        markdown: &case.sentence,
-                        cache: &Default::default(),
-                        tasks: &[task],
-                    },
-                    &|_, _| {},
-                )
-                .expect("复核调用失败");
-                for ((_, reason), count) in &outcome.rejected_by_reason {
-                    *rejected_by.entry(reason.label()).or_default() += *count as usize;
-                }
-                let flagged = !outcome.suggestions.is_empty();
-                match (case.should_flag, flagged) {
-                    (true, true) => hit += 1,
-                    (true, false) => {
-                        miss += 1;
-                        println!("[{}] 漏报 {}：{}", task.id, case.id, case.sentence);
+                let mut flagged = 0usize;
+                let mut sample = None;
+                for _ in 0..repeats {
+                    let outcome = revise_model::review(
+                        revise_model::ReviewRequest {
+                            cfg: &cfg,
+                            draft_model: &config.lm_studio,
+                            lexicon: &lexicon,
+                            vocabulary: &config.vocabulary,
+                            markdown: &case.sentence,
+                            cache: &Default::default(),
+                            tasks: &[task],
+                        },
+                        &|_, _| {},
+                    )
+                    .expect("复核调用失败");
+                    for ((_, reason), count) in &outcome.rejected_by_reason {
+                        *rejected_by.entry(reason.label()).or_default() += *count as usize;
                     }
-                    (false, true) => {
-                        false_alarm += 1;
-                        let suggestion = &outcome.suggestions[0];
-                        println!(
-                            "[{}] 误报 {}：{} → 建议把「{}」改成「{}」",
-                            task.id, case.id, case.sentence, suggestion.before, suggestion.after
-                        );
+                    if let Some(first) = outcome.suggestions.first() {
+                        flagged += 1;
+                        sample.get_or_insert_with(|| {
+                            format!("把「{}」改成「{}」", first.before, first.after)
+                        });
                     }
-                    (false, false) => quiet += 1,
                 }
+                if case.should_flag && flagged < repeats {
+                    println!(
+                        "[{}] 漏报 {}（{flagged}/{repeats} 次报出）：{}",
+                        task.id, case.id, case.sentence
+                    );
+                }
+                if !case.should_flag && flagged > 0 {
+                    println!(
+                        "[{}] 误报 {}（{flagged}/{repeats} 次报出）：{} → 建议{}",
+                        task.id,
+                        case.id,
+                        case.sentence,
+                        sample.as_deref().unwrap_or("（无）")
+                    );
+                }
+                flagged_runs.push((case, flagged));
             }
 
-            let flagged_total = hit + miss;
-            let clean_total = false_alarm + quiet;
-            println!("\n== {}（{}）==", task.label, task.id);
-            println!(
-                "召回率：{hit}/{flagged_total} = {:.0}%（该报的报出来多少）",
-                percent(hit, flagged_total)
-            );
-            println!(
-                "误报率：{false_alarm}/{clean_total} = {:.0}%（不该报的报了多少）",
-                percent(false_alarm, clean_total)
-            );
-            if !rejected_by.is_empty() {
-                let parts: Vec<String> = rejected_by
-                    .iter()
-                    .map(|(reason, count)| format!("{reason} {count}"))
-                    .collect();
-                println!("闸门拦截：{}", parts.join("、"));
-            }
+            report_task(task, &flagged_runs, repeats, &rejected_by);
         }
 
         println!(
             "\n以上数字不含任何稿件内容，可以直接贴出来讨论。\n\
-             判读：误报率高就单独关掉那一项或收紧它的提示词；召回率低多半是模型\
-             偏小，换大一档再看。看到漏报先核对标注——标注错了照着调只会越调越坏。"
+             判读：**先看区间宽不宽**。区间跨了好几个百分点说明结果被随机性主导，\
+             此时改提示词是在追噪音——加大 GONGWEN_EVAL_REPEATS 重跑，或先扩样例。\n\
+             区间收窄之后：误报高就单独关掉那一项或补 exclusions；召回低多半是模型\
+             偏小。看到漏报先核对标注——标注错了照着调只会越调越坏。"
         );
+    }
+
+    /// 把一个检查器的结果打成「下界 ~ 上界」。
+    ///
+    /// 只报一个数会把随机性当成事实。下界按「每次都报」算，上界按「至少报一次」
+    /// 算：两者相等说明结果稳定，可以据此下判断；两者一拉开就说明这一轮量到的
+    /// 主要是噪音，不该拿去调参。
+    fn report_task(
+        task: &revise_model::ReviseTask,
+        rows: &[(&Case, usize)],
+        repeats: usize,
+        rejected_by: &std::collections::BTreeMap<&str, usize>,
+    ) {
+        let mut always_hit = 0usize;
+        let mut ever_hit = 0usize;
+        let mut positives = 0usize;
+        let mut always_alarm = 0usize;
+        let mut ever_alarm = 0usize;
+        let mut negatives = 0usize;
+        let mut unstable = 0usize;
+        for (case, flagged) in rows {
+            if *flagged > 0 && *flagged < repeats {
+                unstable += 1;
+            }
+            if case.should_flag {
+                positives += 1;
+                if *flagged == repeats {
+                    always_hit += 1;
+                }
+                if *flagged > 0 {
+                    ever_hit += 1;
+                }
+            } else {
+                negatives += 1;
+                if *flagged == repeats {
+                    always_alarm += 1;
+                }
+                if *flagged > 0 {
+                    ever_alarm += 1;
+                }
+            }
+        }
+        println!("\n== {}（{}）· 每句跑 {repeats} 遍 ==", task.label, task.id);
+        println!(
+            "召回率：{always_hit}~{ever_hit} / {positives} = {:.0}%~{:.0}%",
+            percent(always_hit, positives),
+            percent(ever_hit, positives)
+        );
+        println!(
+            "误报率：{always_alarm}~{ever_alarm} / {negatives} = {:.0}%~{:.0}%",
+            percent(always_alarm, negatives),
+            percent(ever_alarm, negatives)
+        );
+        if unstable > 0 {
+            println!("其中 {unstable} 条时报时不报——这些是随机性，不是能力");
+        }
+        if !rejected_by.is_empty() {
+            let parts: Vec<String> = rejected_by
+                .iter()
+                .map(|(reason, count)| format!("{reason} {count}"))
+                .collect();
+            println!("闸门拦截：{}", parts.join("、"));
+        }
     }
 
     fn percent(part: usize, total: usize) -> f64 {
