@@ -61,6 +61,9 @@ pub struct ReviewOutcome {
     pub rejected: usize,
     /// 按检查器分开的拦截数，进埋点。总数看趋势，分项才知道是谁的问题。
     pub rejected_by_task: BTreeMap<String, u32>,
+    /// 按「检查器 + 拦截原因」分开的计数。调阈值全靠它：只知道拦下 22 条没用，
+    /// 要知道其中 14 条栽在长度上，才判断得出是阈值太紧还是提示词让模型话太多。
+    pub rejected_by_reason: BTreeMap<(String, GateReason), u32>,
     /// 句子指纹 → 模型结论（`None` 表示模型认为没问题）。下一轮跳过没改动的句子。
     pub cache: BTreeMap<u64, Option<String>>,
 }
@@ -189,6 +192,61 @@ pub fn minimal_edit(before: &str, after: &str) -> Option<(Range<usize>, String)>
     Some((start..end_before, after[start..end_after].to_string()))
 }
 
+/// 闸门拦下一条改写的原因。
+///
+/// 分类而不是自由文本，是为了能**按类计数**：调阈值时要知道「拦下的 22 条里
+/// 14 条是长度超限」，才判断得出是阈值定紧了还是提示词写偏了。计数不含任何
+/// 稿件内容，可以放心拿出内网讨论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GateReason {
+    /// 空句，或回了多行——多行说明它在解释而不是改写。
+    Shape,
+    /// 长度变化率超限，多半是在重写而非修改。
+    Length,
+    /// 动了单位、人名、日期、数量或文件依据。
+    Facts,
+    /// 动了不带量词的裸数字。
+    Digits,
+    /// 动了行内格式标记，会把加粗、链接改坏。
+    Markup,
+    /// 改完引入了词表里的必错命中。
+    NewTypo,
+}
+
+impl GateReason {
+    /// 埋点的键。定死不随中文文案变——文案改了统计还要能对得上。
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Shape => "shape",
+            Self::Length => "length",
+            Self::Facts => "facts",
+            Self::Digits => "digits",
+            Self::Markup => "markup",
+            Self::NewTypo => "new-typo",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shape => "空句或多行",
+            Self::Length => "长度超限",
+            Self::Facts => "改动关键事实",
+            Self::Digits => "改动裸数字",
+            Self::Markup => "改动行内标记",
+            Self::NewTypo => "引入新错别字",
+        }
+    }
+
+    pub const ALL: [Self; 6] = [
+        Self::Shape,
+        Self::Length,
+        Self::Facts,
+        Self::Digits,
+        Self::Markup,
+        Self::NewTypo,
+    ];
+}
+
 /// 改写结果落地前的闸门。任何一条不过就整条丢弃。
 ///
 /// 这些限制不是凭空定的：小模型跑飞的方式就那么几种——顺手改数字、把日期换个
@@ -199,12 +257,9 @@ pub fn gate(
     vocabulary: &[VocabularyEntry],
     before: &str,
     after: &str,
-) -> Result<(), String> {
-    if after.trim().is_empty() {
-        return Err("模型返回空句".into());
-    }
-    if after.contains('\n') {
-        return Err("模型返回了多行，不是一句话".into());
+) -> Result<(), GateReason> {
+    if after.trim().is_empty() || after.contains('\n') {
+        return Err(GateReason::Shape);
     }
     let before_chars = before.chars().count();
     let after_chars = after.chars().count();
@@ -212,26 +267,25 @@ pub fn gate(
     let low = before_chars * 6 / 10;
     let high = before_chars * 14 / 10 + 2;
     if after_chars < low || after_chars > high {
-        return Err(format!("改后长度 {after_chars} 字超出允许范围"));
+        return Err(GateReason::Length);
     }
     // 关键事实：单位、人名、日期、数量、文件依据一个都不许动。
-    let changes = ai_guard::compare_key_facts(before, after, vocabulary);
-    if !changes.is_empty() {
-        return Err(format!("改动了 {} 项关键事实", changes.len()));
+    if !ai_guard::compare_key_facts(before, after, vocabulary).is_empty() {
+        return Err(GateReason::Facts);
     }
     // 裸数字不带量词时上面那层看不住，单独比一遍。
     if digit_runs(before) != digit_runs(after) {
-        return Err("改动了句中的数字".into());
+        return Err(GateReason::Digits);
     }
     // Markdown 行内标记的个数必须原样保留，否则会把加粗、链接改坏。
     if markup_counts(before) != markup_counts(after) {
-        return Err("改动了行内格式标记".into());
+        return Err(GateReason::Markup);
     }
     // 最后一道：改完不能引入词表里的必错命中。
     let before_hits = mustfix_ids(lexicon, before);
     for id in mustfix_ids(lexicon, after) {
         if !before_hits.contains(&id) {
-            return Err(format!("引入了新的必错命中（{id}）"));
+            return Err(GateReason::NewTypo);
         }
     }
     Ok(())
@@ -362,9 +416,10 @@ pub fn review(
                     .rejected_by_task
                     .entry(task.id.to_string())
                     .or_insert(0) += 1;
-                // 被拦下的也记进缓存的相反面：下次同一句还是会被同样拦下，
-                // 没必要再问一次模型。缓存存的是模型原话，判定每次重做。
-                let _ = reason;
+                *outcome
+                    .rejected_by_reason
+                    .entry((task.id.to_string(), reason))
+                    .or_insert(0) += 1;
                 continue;
             }
             let Some((edit, replacement)) = minimal_edit(&sentence.text, &rewritten) else {
@@ -481,7 +536,7 @@ mod tests {
             "请于2026年8月21日前拨付10万元办理相关事项。",
             "请于2026年8月22日前拨付10万元办理相关事项。",
         );
-        assert!(result.is_err(), "改日期必须拦下");
+        assert_eq!(result, Err(GateReason::Facts), "改日期必须按事实变化拦下");
     }
 
     #[test]
@@ -493,7 +548,11 @@ mod tests {
             "本次抽查覆盖第 3 类事项共计若干。",
             "本次抽查覆盖第 5 类事项共计若干。",
         );
-        assert!(result.is_err(), "改裸数字必须拦下");
+        assert_eq!(
+            result,
+            Err(GateReason::Digits),
+            "改裸数字必须按数字变化拦下"
+        );
     }
 
     #[test]
@@ -504,7 +563,7 @@ mod tests {
             "各单位要认真抓好落实。",
             "各单位要按照会议要求，结合本单位实际，逐项分解任务、明确责任分工并认真抓好落实。",
         );
-        assert!(result.is_err(), "整句重写必须拦下");
+        assert_eq!(result, Err(GateReason::Length), "整句重写必须按长度拦下");
     }
 
     #[test]
@@ -515,7 +574,11 @@ mod tests {
             "各单位要认真抓好落实工作。",
             "各单位要认真抓好布署工作。",
         );
-        assert!(result.is_err(), "引入必错命中的改写必须拦下");
+        assert_eq!(
+            result,
+            Err(GateReason::NewTypo),
+            "引入必错命中必须按错别字拦下"
+        );
     }
 
     #[test]
@@ -526,7 +589,11 @@ mod tests {
             "各单位要**认真**抓好落实工作。",
             "各单位要认真抓好落实工作。",
         );
-        assert!(result.is_err(), "改动行内格式标记必须拦下");
+        assert_eq!(
+            result,
+            Err(GateReason::Markup),
+            "改动行内标记必须按标记拦下"
+        );
     }
 
     #[test]

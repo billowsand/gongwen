@@ -16,6 +16,7 @@
 //! 数据只留在本机，单独存一个文件而不进 `config.json`：埋点每点一次就变，塞进
 //! 配置会让配置版本历史被这类噪音淹没，回看「我上周改过什么设置」时全是计数。
 
+use crate::revise_model::GateReason;
 use crate::revision::RevisionSource;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -66,6 +67,11 @@ impl SourceStat {
 #[serde(default)]
 pub struct Metrics {
     pub sources: BTreeMap<String, SourceStat>,
+    /// 闸门拦截的原因分布，键为「检查器 id / 原因」。
+    ///
+    /// 与 `sources` 分开：它衡量的是模型和阈值合不合用，而 `sources` 衡量的是
+    /// 这条规则本身该不该留。混在一起两个信号都读不出来。
+    pub gate_reasons: BTreeMap<String, u32>,
     /// 有没有未落盘的改动。不进 JSON——它描述的是内存状态。
     #[serde(skip)]
     dirty: bool,
@@ -108,6 +114,25 @@ impl Metrics {
         self.entry(task).gate_rejected += count;
     }
 
+    /// 记一笔按原因分类的拦截。
+    pub fn record_gate_reason(&mut self, task: &str, reason: GateReason, count: u32) {
+        if count == 0 {
+            return;
+        }
+        self.dirty = true;
+        *self
+            .gate_reasons
+            .entry(format!("{task}/{}", reason.key()))
+            .or_insert(0) += count;
+    }
+
+    pub fn gate_reason_count(&self, task: &str, reason: GateReason) -> u32 {
+        self.gate_reasons
+            .get(&format!("{task}/{}", reason.key()))
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// 采纳率过低、值得提请用户停用的来源，按采纳率从低到高排。
     pub fn underperforming(&self) -> Vec<(&str, SourceStat)> {
         let mut rows: Vec<_> = self
@@ -127,7 +152,81 @@ impl Metrics {
 
     pub fn clear(&mut self) {
         self.sources.clear();
+        self.gate_reasons.clear();
         self.dirty = true;
+    }
+
+    /// 一份可以直接拿出内网讨论的统计摘要。
+    ///
+    /// **只有编号和计数，没有一个字来自稿件**——这正是它存在的意义。调阈值需要
+    /// 的是分布，不是原文：知道「拦下的 22 条里 14 条栽在长度上」就够判断阈值
+    /// 定紧了，完全不必看见那 22 句话是什么。
+    pub fn report(&self) -> String {
+        let mut out = String::from("# 检查器统计摘要\n（仅计数，不含任何稿件内容）\n");
+
+        out.push_str("\n## 模型检查器\n");
+        let mut any_model = false;
+        for task in &crate::revise_model::TASKS {
+            let stat = self.get(task.id);
+            let reasons: Vec<_> = GateReason::ALL
+                .into_iter()
+                .map(|reason| (reason, self.gate_reason_count(task.id, reason)))
+                .filter(|(_, count)| *count > 0)
+                .collect();
+            if stat.decisions() == 0 && stat.gate_rejected == 0 {
+                continue;
+            }
+            any_model = true;
+            out.push_str(&format!(
+                "\n- {}（{}）：采纳 {} / 忽略 {}",
+                task.label, task.id, stat.accepted, stat.ignored
+            ));
+            if let Some(rate) = stat.adoption() {
+                out.push_str(&format!("，采纳率 {:.0}%", rate * 100.0));
+            }
+            if stat.undone > 0 {
+                out.push_str(&format!("，采纳后撤销 {}", stat.undone));
+            }
+            out.push('\n');
+            if stat.gate_rejected > 0 {
+                out.push_str(&format!("  闸门拦下 {} 条：", stat.gate_rejected));
+                let parts: Vec<String> = reasons
+                    .iter()
+                    .map(|(reason, count)| format!("{} {count}", reason.label()))
+                    .collect();
+                out.push_str(&parts.join("、"));
+                out.push('\n');
+            }
+        }
+        if !any_model {
+            out.push_str("\n（还没有复核记录）\n");
+        }
+
+        out.push_str("\n## 采纳率偏低的条目\n");
+        let flagged = self.underperforming();
+        if flagged.is_empty() {
+            out.push_str(&format!(
+                "\n（无。判据：表态 ≥ {MIN_SAMPLES} 次且采纳率 < {:.0}%）\n",
+                LOW_ADOPTION * 100.0
+            ));
+        } else {
+            for (key, stat) in flagged {
+                out.push_str(&format!(
+                    "\n- {key}：采纳 {} / 忽略 {}，采纳率 {:.0}%\n",
+                    stat.accepted,
+                    stat.ignored,
+                    stat.adoption().unwrap_or(0.0) * 100.0
+                ));
+            }
+        }
+
+        let decided = self
+            .sources
+            .values()
+            .filter(|stat| stat.decisions() > 0)
+            .count();
+        out.push_str(&format!("\n## 合计\n\n- 有表态记录的来源：{decided} 个\n"));
+        out
     }
 
     pub fn mark_saved(&mut self) {

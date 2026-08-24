@@ -118,6 +118,7 @@ impl GongwenApp {
     fn revise_metrics_ui(&mut self, ui: &mut egui::Ui) {
         let mut any = false;
         let mut clear = false;
+        let mut copied = false;
         for task in &crate::revise_model::TASKS {
             let stat = self.metrics.get(task.id);
             if stat.decisions() == 0 && stat.gate_rejected == 0 {
@@ -156,6 +157,20 @@ impl GongwenApp {
                     ui.weak(format!("· 采纳后撤销 {} 次", stat.undone));
                 }
             });
+            // 拦截原因的分布才是调阈值的依据。只报总数的话，看不出是阈值太紧
+            // 还是提示词让模型话太多。
+            let reasons: Vec<String> = crate::revise_model::GateReason::ALL
+                .into_iter()
+                .map(|reason| (reason, self.metrics.gate_reason_count(task.id, reason)))
+                .filter(|(_, count)| *count > 0)
+                .map(|(reason, count)| format!("{} {count}", reason.label()))
+                .collect();
+            if !reasons.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+                    ui.weak(format!("拦截原因：{}", reasons.join("、")));
+                });
+            }
             if stat.is_underperforming() {
                 ui.horizontal(|ui| {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
@@ -170,8 +185,16 @@ impl GongwenApp {
             ui.weak("还没有复核记录。跑过几轮、逐条处理过之后，这里会显示采纳率。");
             return;
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Copy, "复制统计摘要"))
+                .on_hover_text("只有编号和计数，不含任何稿件内容，可以拿出内网讨论怎么调阈值")
+                .clicked()
+            {
+                ui.ctx().copy_text(self.metrics.report());
+                copied = true;
+            }
             if ui
                 .add(theme::icon_text_button(theme::Icon::RotateCcw, "清空统计"))
                 .on_hover_text("换了模型或改了提示词之后，旧统计不再可比，清掉重新攒")
@@ -180,6 +203,9 @@ impl GongwenApp {
                 clear = true;
             }
         });
+        if copied {
+            self.status = "统计摘要已复制到剪贴板（仅计数，不含稿件内容）。".into();
+        }
         if clear {
             self.metrics.clear();
             crate::metrics::save(&mut self.metrics);

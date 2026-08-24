@@ -889,6 +889,9 @@ impl GongwenApp {
                 for (task, count) in &outcome.rejected_by_task {
                     self.metrics.record_gate_rejection(task, *count);
                 }
+                for ((task, reason), count) in &outcome.rejected_by_reason {
+                    self.metrics.record_gate_reason(task, *reason, *count);
+                }
                 crate::metrics::save(&mut self.metrics);
                 let markdown = std::mem::take(&mut self.docs[index].generated_markdown);
                 let ignored = std::mem::take(&mut self.config.proofread.ignored);
