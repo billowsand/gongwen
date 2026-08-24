@@ -304,9 +304,25 @@ mod tests {
     fn measure_recall_and_false_alarms_against_a_live_model() {
         let config = crate::storage::load().unwrap_or_default();
         let cfg = config.revise_model.clone();
+        let resolved = cfg.resolve(&config.lm_studio);
+        // 报错要说清楚「去哪儿改、改成什么」。只说「请在设置中配置」，用户还得
+        // 自己去找配置文件在哪——尤其配置目录在各平台上并不一样。
         assert!(
-            !cfg.resolve(&config.lm_studio).model.trim().is_empty(),
-            "请先在设置中为文字复核选择模型，或在配置文件里填好 revise_model.model"
+            !resolved.model.trim().is_empty(),
+            "文字复核还没有选模型，无法评测。二选一：\n\
+             （1）打开应用 →「设置 → AI 文字复核」→ 勾选启用 → 选一个模型；\n\
+             （2）直接编辑 {}\n\
+             \u{20}   把 revise_model.model 填成模型名（如 qwen3-8b），\n\
+             \u{20}   base_url 留空则沿用起草模型的 {}。\n\
+             另外请确认本机模型服务已启动并加载了该模型。",
+            crate::storage::config_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|error| format!("（配置文件路径不可用：{error:#}）")),
+            if config.lm_studio.base_url.trim().is_empty() {
+                "（起草模型也没填地址）".to_string()
+            } else {
+                config.lm_studio.base_url.clone()
+            },
         );
         let lexicon = lexicon();
         let cases = cases();
