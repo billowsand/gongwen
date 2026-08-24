@@ -120,6 +120,14 @@ impl GongwenApp {
             proposal.open = true;
             return;
         }
+        // 大纲同理。关闭按钮上写着「可以从功能区再打开」，这里就是那个入口——
+        // 没有它，用户关掉窗口就等于把已经生成的小节全丢了。
+        if let Some(draft) = self.doc_mut().outline.as_mut()
+            && !draft.outline.sections.is_empty()
+        {
+            draft.open = true;
+            return;
+        }
         let baselines = self
             .manuscript_store
             .as_mut()
@@ -203,6 +211,7 @@ impl GongwenApp {
                         (AiWorkflowKind::Similar, theme::Icon::Copy),
                         (AiWorkflowKind::Knowledge, theme::Icon::Book),
                         (AiWorkflowKind::Material, theme::Icon::FilePlus),
+                        (AiWorkflowKind::Outline, theme::Icon::List),
                         (AiWorkflowKind::Polish, theme::Icon::WandSparkles),
                     ] {
                         let selected = state.workflow == kind;
@@ -227,7 +236,9 @@ impl GongwenApp {
                                 AiWorkflowKind::Similar => {
                                     similar_ui(ui, &mut state, &mut load_baseline)
                                 }
-                                AiWorkflowKind::Knowledge | AiWorkflowKind::Material => {
+                                AiWorkflowKind::Knowledge
+                                | AiWorkflowKind::Material
+                                | AiWorkflowKind::Outline => {
                                     material_ui(ui, &mut state, rag_enabled)
                                 }
                                 AiWorkflowKind::Polish => polish_ui(
@@ -363,7 +374,7 @@ impl GongwenApp {
                     review_before_apply: current_has_text,
                 }
             }
-            AiWorkflowKind::Knowledge | AiWorkflowKind::Material => {
+            AiWorkflowKind::Knowledge | AiWorkflowKind::Material | AiWorkflowKind::Outline => {
                 if state.raw_material.trim().is_empty() {
                     state.error = Some("请先填写主题、材料或写作要求。".into());
                     return false;
@@ -394,14 +405,22 @@ impl GongwenApp {
                     .collect::<Vec<_>>()
                     .join("\n");
                 self.doc_mut().rag_kind_filter = state.rag_kind_filter;
+                let material = format!(
+                    "【已确认事实单——优先于原始材料】\n{fact_sheet}\n\n【原始材料与写作要求】\n{}",
+                    state.raw_material.trim()
+                );
+                // 大纲流程走的是另一条链路：先只出骨架，正文等人确认大纲之后
+                // 再逐节生成，所以这里不能落进整篇起草的 `AiTaskRequest`。
+                if state.workflow == AiWorkflowKind::Outline {
+                    let use_rag = self.config.rag.enabled;
+                    self.draft_page().start_outline(material, use_rag);
+                    return true;
+                }
                 AiTaskRequest {
                     kind: state.workflow,
                     label: state.workflow.label().to_string(),
                     instruction: String::new(),
-                    material: format!(
-                        "【已确认事实单——优先于原始材料】\n{fact_sheet}\n\n【原始材料与写作要求】\n{}",
-                        state.raw_material.trim()
-                    ),
+                    material,
                     baseline: String::new(),
                     use_rag: state.workflow == AiWorkflowKind::Knowledge,
                     review_before_apply: current_has_text,
@@ -615,6 +634,10 @@ fn workflow_header(ui: &mut egui::Ui, workflow: AiWorkflowKind) {
         AiWorkflowKind::Material => (
             "把零散材料整理成公文",
             "先从材料形成可编辑事实单，确认后再按当前文种和版式生成 Markdown。",
+        ),
+        AiWorkflowKind::Outline => (
+            "先列大纲，确认后再逐节填",
+            "结构错误是公文里最贵的错误，改起来是重写不是修改。先只出几十个字的骨架让你增删改序，定了再逐节生成；某一节写坏了也只重跑那一节。",
         ),
         AiWorkflowKind::Polish => (
             "在事实锁定下修改现有稿件",

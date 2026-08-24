@@ -30,6 +30,7 @@ mod ai_workbench;
 mod chrome;
 mod jobs;
 mod manuscript_ui;
+mod outline_ui;
 mod proofread_ui;
 mod session;
 mod settings;
@@ -547,6 +548,7 @@ impl eframe::App for GongwenApp {
         self.ai_prompt_picker_window(&ctx);
         self.ai_workbench_window(&ctx);
         self.ai_proposal_window(&ctx);
+        self.outline_window(&ctx);
         self.version_commit_window(&ctx);
         self.version_switch_window(&ctx);
         self.revert_confirm_window(&ctx);

@@ -241,6 +241,103 @@ impl DraftPage<'_> {
         });
     }
 
+    /// 让模型先列一份章节大纲。只出骨架，不写正文。
+    pub(crate) fn start_outline(&mut self, material: String, use_rag: bool) {
+        if self.doc.busy {
+            return;
+        }
+        let (key, seq) = self.begin_job();
+        *self.status = "正在列大纲…".into();
+        self.doc.outline = Some(crate::draft_page::OutlineDraft {
+            outline: crate::outline::Outline::default(),
+            material: material.clone(),
+            running: None,
+            open: true,
+            error: None,
+        });
+
+        let time_context = prompt::TimeContext::now();
+        let input = self.doc.draft.clone();
+        let config = self.config.clone();
+        let rag_kind = self.doc.rag_kind_filter.resolve(self.doc.draft.kind);
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let result = (|| {
+                let reference = if use_rag && config.rag.enabled {
+                    retrieve_reference(&config.rag, &config.lm_studio, &input, &material, rag_kind)
+                        .0
+                } else {
+                    String::new()
+                };
+                let system = prompt::build_system_prompt(&time_context);
+                let user = crate::outline::build_outline_prompt(
+                    &input,
+                    &config.vocabulary,
+                    &material,
+                    &reference,
+                );
+                let raw = lmstudio::generate(&config.lm_studio, &system, &user)?;
+                Ok::<_, anyhow::Error>(crate::outline::parse_outline_reply(&raw))
+            })()
+            .map_err(|error: anyhow::Error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::Outlined(result),
+            });
+        });
+    }
+
+    /// 按已确认的大纲生成其中一节。
+    ///
+    /// 一次只跑一节：这样某一节写坏了只重跑那一节，前面写好的不受影响——
+    /// 这正是拆成大纲流程要换的东西。
+    pub(crate) fn start_section_draft(&mut self, section: usize) {
+        if self.doc.busy {
+            return;
+        }
+        let Some(draft) = self.doc.outline.as_ref() else {
+            return;
+        };
+        let Some(user) = crate::outline::build_section_prompt(
+            &self.doc.draft,
+            &self.config.vocabulary,
+            &draft.outline,
+            section,
+            &draft.material,
+        ) else {
+            return;
+        };
+        let heading = draft.outline.sections[section].heading.clone();
+        let (key, seq) = self.begin_job();
+        *self.status = format!("正在生成第 {} 节「{heading}」…", section + 1);
+        if let Some(draft) = self.doc.outline.as_mut() {
+            draft.running = Some(section);
+            draft.error = None;
+            if let Some(item) = draft.outline.sections.get_mut(section) {
+                item.state = crate::outline::SectionState::Running;
+            }
+        }
+
+        let time_context = prompt::TimeContext::now();
+        let config = self.config.clone();
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let system = prompt::build_system_prompt(&time_context);
+            let result = lmstudio::generate(&config.lm_studio, &system, &user)
+                .map(|raw| prompt::sanitize_model_markdown(&raw))
+                .map_err(|error: anyhow::Error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::SectionDrafted {
+                    index: section,
+                    result,
+                },
+            });
+        });
+    }
+
     /// 兼容旧提示词选择面板；新入口统一走 [`start_ai_task`]。
     pub(crate) fn start_optimize(&mut self, instruction: String, label: String) {
         let current_empty = self.doc.generated_markdown.trim().is_empty();

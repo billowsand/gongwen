@@ -102,6 +102,13 @@ pub(crate) enum DocJob {
     RedlineExported(Result<Vec<std::path::PathBuf>, String>),
     /// 小模型逐句文字复核的结果。只产出待确认的建议，不碰正文。
     Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
+    /// 大纲骨架。只列章节，不写正文。
+    Outlined(Result<crate::outline::Outline, String>),
+    /// 某一小节的正文。逐节回投，写坏了只重跑那一节。
+    SectionDrafted {
+        index: usize,
+        result: Result<String, String>,
+    },
 }
 
 impl GongwenApp {
@@ -924,6 +931,55 @@ impl GongwenApp {
                 message.push('。');
                 self.status = message;
                 self.docs[index].result_drawer_open = true;
+            }
+            DocJob::Outlined(Ok(outline)) => {
+                let count = outline.sections.len();
+                if let Some(draft) = self.docs[index].outline.as_mut() {
+                    draft.outline = outline;
+                    draft.error = None;
+                    draft.open = true;
+                }
+                self.status = if count == 0 {
+                    format!("{prefix}模型没有列出可用的章节，请补充材料后重试。")
+                } else {
+                    format!("{prefix}大纲已列出 {count} 节，请确认后再逐节起草。")
+                };
+            }
+            DocJob::Outlined(Err(error)) => {
+                if let Some(draft) = self.docs[index].outline.as_mut() {
+                    draft.error = Some(error.clone());
+                    draft.open = true;
+                }
+                self.status = format!("{prefix}列大纲失败：{error}");
+            }
+            DocJob::SectionDrafted {
+                index: section,
+                result,
+            } => {
+                let Some(draft) = self.docs[index].outline.as_mut() else {
+                    return;
+                };
+                draft.running = None;
+                let Some(item) = draft.outline.sections.get_mut(section) else {
+                    return;
+                };
+                match result {
+                    Ok(markdown) => {
+                        item.markdown = markdown;
+                        item.state = crate::outline::SectionState::Done;
+                        let heading = item.heading.clone();
+                        let done = draft.outline.done_count();
+                        let total = draft.outline.sections.len();
+                        self.status = format!(
+                            "{prefix}第 {} 节「{heading}」已生成（{done}/{total}）。",
+                            section + 1
+                        );
+                    }
+                    Err(error) => {
+                        item.state = crate::outline::SectionState::Failed(error.clone());
+                        self.status = format!("{prefix}第 {} 节生成失败：{error}", section + 1);
+                    }
+                }
             }
             DocJob::Reviewed(Err(error)) => {
                 self.status = format!("{prefix}文字复核失败：{error}");

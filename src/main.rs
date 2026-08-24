@@ -21,6 +21,7 @@ mod manuscript_io;
 mod metrics;
 mod models;
 mod orphan_probe;
+mod outline;
 mod pdf_viewer;
 mod portable_runtime;
 mod preview;

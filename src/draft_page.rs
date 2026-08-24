@@ -275,6 +275,8 @@ pub(crate) enum AiWorkflowKind {
     Similar,
     Knowledge,
     Material,
+    /// 先列大纲、人确认后再逐节填。见 `crate::outline`。
+    Outline,
     Polish,
 }
 
@@ -284,6 +286,7 @@ impl AiWorkflowKind {
             Self::Similar => "仿照起草",
             Self::Knowledge => "知识起草",
             Self::Material => "材料成文",
+            Self::Outline => "大纲起草",
             Self::Polish => "受控润色",
         }
     }
@@ -299,6 +302,19 @@ pub(crate) struct AiTaskRequest {
     pub(crate) baseline: String,
     pub(crate) use_rag: bool,
     pub(crate) review_before_apply: bool,
+}
+
+/// 大纲流程的会话状态。
+///
+/// `material` 要留着：逐节生成时每一节都得重新看一遍素材，否则模型只能照着
+/// 一句话的「本节要写什么」硬编。
+pub(crate) struct OutlineDraft {
+    pub(crate) outline: crate::outline::Outline,
+    pub(crate) material: String,
+    /// 正在生成的小节序号；`None` 表示当前没有小节在跑。
+    pub(crate) running: Option<usize>,
+    pub(crate) open: bool,
+    pub(crate) error: Option<String>,
 }
 
 /// AI 返回但尚未落入正文的修改提案。接受前复用版本对照视图，并对关键事实变化
@@ -379,6 +395,8 @@ pub(crate) struct DraftSession {
     pub(crate) ai_review_baseline: Option<String>,
     /// 尚未接受的 AI 修改提案。提案不参与自动保存，也不能直接导出。
     pub(crate) ai_proposal: Option<AiProposal>,
+    /// 待确认的大纲与逐节产物。为 None 表示当前没有在走大纲流程。
+    pub(crate) outline: Option<OutlineDraft>,
     /// 本篇待确认的修订建议。词表、文档规则与模型检查器共用这一份。
     pub(crate) revisions: crate::revision::RevisionSet,
     /// 逐句复核的结论缓存：句子指纹 → 模型原话。改了别处的句子不必重问一遍，
@@ -507,6 +525,7 @@ impl DraftSession {
             ai_prompt_last_label: String::new(),
             ai_review_baseline: None,
             ai_proposal: None,
+            outline: None,
             revisions: crate::revision::RevisionSet::default(),
             revise_cache: std::collections::BTreeMap::new(),
             saved_baseline: None,
@@ -651,6 +670,7 @@ impl DraftSession {
         self.clear_review_confirm = false;
         self.ai_review_baseline = None;
         self.ai_proposal = None;
+        self.outline = None;
         // 建议锚在正文上，换了正文就全部失效；忽略记录也只对这一篇成立。
         self.revisions.clear();
         self.revise_cache.clear();
