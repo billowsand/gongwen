@@ -351,6 +351,15 @@ pub fn build_prompt(task: &ReviseTask, sentence: &str) -> (String, String) {
 
 /// 模型回复的清洗与判读。返回 `None` 表示模型认为这句没问题。
 pub fn parse_reply(reply: &str) -> Option<String> {
+    // 思考型模型有两种放法：规矩的放进 reasoning_content（由 lmstudio 那层处理），
+    // 不规矩的直接把 <think>…</think> 塞进正文。后者不剥掉会被整段当成改写结果，
+    // 然后被闸门以「长度超限」拦下——现象是「模型什么都查不出来」，很难查。
+    let reply = match (reply.find("<think>"), reply.rfind("</think>")) {
+        (Some(_), Some(end)) => &reply[end + "</think>".len()..],
+        // 只有闭合标签，说明开头的 <think> 被服务端吃掉了，同样按思考处理。
+        (None, Some(end)) => &reply[end + "</think>".len()..],
+        _ => reply,
+    };
     let mut text = reply.trim();
     // 小模型爱裹代码块，也爱加「修改后：」之类的抬头。
     if let Some(rest) = text.strip_prefix("```") {
@@ -402,8 +411,9 @@ pub fn review(
                 None => {
                     let (system, user) = build_prompt(task, &sentence.text);
                     // 输出上限按输入给：句子改写不该比原句长太多，跑飞的会被截断，
-                    // 截断的结果闸门也一定拦得下。
-                    let max_tokens = (sentence.text.chars().count() * 2 + 64) as u32;
+                    // 截断的结果闸门也一定拦得下。下限 256 是给短句留的余量——
+                    // 按字数算出来的几十 token 连一句正常改写都未必放得下。
+                    let max_tokens = ((sentence.text.chars().count() * 2 + 64) as u32).max(256);
                     let raw = lmstudio::generate_retrying(&model, &system, &user, 0.0, max_tokens)?;
                     outcome.checked += 1;
                     let parsed = parse_reply(&raw);
@@ -603,6 +613,19 @@ mod tests {
         assert!(parse_reply("OK").is_none());
         assert!(parse_reply(" ok \n").is_none());
         assert!(parse_reply("OK。").is_none());
+    }
+
+    #[test]
+    fn reply_parsing_strips_inline_thinking_blocks() {
+        // 思考被塞进正文时不剥掉，整段会被当成改写结果，再被闸门按长度拦下——
+        // 表现出来就是「模型什么都查不出来」，极难定位。
+        assert_eq!(
+            parse_reply("<think>用户想让我检查语病。这句缺主语。</think>\n这次整治使形势好转。")
+                .as_deref(),
+            Some("这次整治使形势好转。")
+        );
+        // 思考完认为没问题的，剥完剩下 OK。
+        assert!(parse_reply("<think>这句没有语病。</think>OK").is_none());
     }
 
     #[test]

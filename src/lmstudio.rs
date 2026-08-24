@@ -13,11 +13,16 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: Message,
+    /// `length` 表示被输出上限截断，`stop` 是正常结束。缺省表示服务端没给。
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Message {
     content: Option<String>,
+    /// 思考型模型（Qwen3 等）把推理过程放在这里，正文可能是空的。
+    /// 有它而没有 `content`，说明预算全花在思考上了。
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,11 +139,31 @@ pub fn generate_with(
     }
     let parsed: ChatResponse =
         serde_json::from_str(&body).context("模型服务响应不是兼容的 Chat Completions 格式")?;
-    parsed
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .filter(|s| !s.trim().is_empty())
-        .context("模型服务未返回正文")
+    let Some(choice) = parsed.choices.into_iter().next() else {
+        bail!("模型服务返回了空的 choices，请检查模型是否已加载");
+    };
+    let truncated = choice.finish_reason.as_deref() == Some("length");
+    let content = choice.message.content.unwrap_or_default();
+    if !content.trim().is_empty() {
+        return Ok(content);
+    }
+
+    // 正文为空有三种成因，给的话要能直接指向下一步怎么办，而不是笼统一句
+    // 「未返回正文」让人去翻服务端日志。
+    let thinking = choice
+        .message
+        .reasoning_content
+        .is_some_and(|text| !text.trim().is_empty());
+    if thinking {
+        bail!(
+            "模型只输出了思考过程，没有正文。多半是思考模式（如 Qwen3 的 thinking）\
+             没关，{max_tokens} 的输出上限被推理占满。请在模型服务里关掉思考模式\
+             （Ollama 加 think=false，vLLM/SGLang 传 enable_thinking=false，\
+             LM Studio 在模型加载参数里关），或换一个非思考模型来做文字复核。"
+        );
+    }
+    if truncated {
+        bail!("模型输出在 {max_tokens} token 处被截断，且截断前没有正文");
+    }
+    bail!("模型服务未返回正文（choices[0].message.content 为空）")
 }
