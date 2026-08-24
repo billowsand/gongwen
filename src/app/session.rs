@@ -29,6 +29,8 @@ pub(crate) enum DraftAction {
     SaveToLibrary,
     /// 打开提交版本对话框。
     OpenVersionCommit(VersionScope),
+    /// 打开办理进度面板。
+    OpenSopPanel,
     /// 打开统一 AI 工作台；若编辑器有选区，一并冻结为受控润色范围。
     OpenAiWorkbench {
         selection: Option<std::ops::Range<usize>>,

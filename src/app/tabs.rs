@@ -320,6 +320,7 @@ impl GongwenApp {
         for action in std::mem::take(&mut self.draft_actions) {
             match action {
                 DraftAction::SaveToLibrary => self.save_to_manuscript_library(),
+                DraftAction::OpenSopPanel => self.sop_open = true,
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
                 DraftAction::OpenAiWorkbench { selection } => self.open_ai_workbench(selection),
                 DraftAction::OpenVersionDiff { manuscript_id, to } => {

@@ -40,6 +40,7 @@ mod redline;
 mod revise_cases;
 mod revise_model;
 mod revision;
+mod sop;
 mod storage;
 mod system_fonts;
 mod texcompile;

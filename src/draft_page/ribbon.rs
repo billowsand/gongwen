@@ -322,6 +322,18 @@ impl DraftPage<'_> {
         {
             self.start_model_review();
         }
+        // 办理进度：把「现在卡在哪」摆出来。放在校验旁边——它读的正是这几步的
+        // 判定结果，跟校验是同一件事的两个视角。
+        if ui
+            .add(theme::icon_text_button(
+                theme::Icon::ListOrdered,
+                "办理进度",
+            ))
+            .on_hover_text("看这份稿子还差哪几步，以及下一步该做什么")
+            .clicked()
+        {
+            self.actions.push(DraftAction::OpenSopPanel);
+        }
         self.warning_badge(ui);
     }
 

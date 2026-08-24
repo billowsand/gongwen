@@ -34,6 +34,7 @@ mod outline_ui;
 mod proofread_ui;
 mod session;
 mod settings;
+mod sop_ui;
 mod tabs;
 mod versioning;
 mod vocabulary;
@@ -125,6 +126,8 @@ pub struct GongwenApp {
     models: Vec<String>,
     /// 检查器埋点，只留在本机。单独存文件，不进 config.json。
     metrics: crate::metrics::Metrics,
+    /// 办理进度面板是否打开。纯当次会话状态，不进配置。
+    sop_open: bool,
     vocabulary_import_conflicts: Option<Vec<vocabulary_xlsx::Conflict>>,
     /// 词库有尚未写入本机配置的编辑。
     vocabulary_dirty: bool,
@@ -340,6 +343,7 @@ impl GongwenApp {
         let mut app = Self {
             config,
             metrics: crate::metrics::load(),
+            sop_open: false,
             macos_titlebar_metrics,
             docs,
             pdfs: Vec::new(),
@@ -549,6 +553,7 @@ impl eframe::App for GongwenApp {
         self.ai_workbench_window(&ctx);
         self.ai_proposal_window(&ctx);
         self.outline_window(&ctx);
+        self.sop_window(&ctx);
         self.version_commit_window(&ctx);
         self.version_switch_window(&ctx);
         self.revert_confirm_window(&ctx);
