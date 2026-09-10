@@ -503,8 +503,16 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let (layout, _) =
-                red_build_print_layout(ui, &metrics, &input, &display, &body, &title, &[]);
+            let (layout, _) = red_build_print_layout(
+                ui,
+                &metrics,
+                &input,
+                &display,
+                &body,
+                &title,
+                &[],
+                &crate::models::NumberingConfig::default(),
+            );
             let heading = layout.pages[0]
                 .fragments
                 .iter()
@@ -562,8 +570,16 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let (layout, _) =
-                red_build_print_layout(ui, &metrics, &input, &display, &body, &title, &[]);
+            let (layout, _) = red_build_print_layout(
+                ui,
+                &metrics,
+                &input,
+                &display,
+                &body,
+                &title,
+                &[],
+                &crate::models::NumberingConfig::default(),
+            );
             let first = layout.pages[0]
                 .fragments
                 .iter()
@@ -612,6 +628,7 @@ mod tests {
                     PreviewScale::zoom(Some(0.8)),
                     None,
                     false,
+                    &crate::models::NumberingConfig::default(),
                 );
             },
         );
@@ -759,6 +776,7 @@ mod tests {
                     },
                     &mut counters,
                     false,
+                    &crate::models::NumberingConfig::default(),
                 );
             });
         }
@@ -803,6 +821,7 @@ mod tests {
                 },
                 &mut counters,
                 false,
+                &crate::models::NumberingConfig::default(),
             );
         });
         // 后台线程解码需要时间与后续帧推进；等解码完成后重查。
@@ -874,6 +893,7 @@ mod tests {
                     PreviewScale::default(),
                     None,
                     false,
+                    &crate::models::NumberingConfig::default(),
                 );
             });
         }
@@ -945,6 +965,7 @@ mod tests {
                             PreviewScale::default(),
                             None,
                             false,
+                            &crate::models::NumberingConfig::default(),
                         );
                     });
                 },

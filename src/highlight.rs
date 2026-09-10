@@ -6,6 +6,7 @@
 //! 看出版式上的哪一段对应源码里的哪一段。
 //! 高亮结果按（文本, 换行宽度, 锚点, 查找命中）缓存，正常编辑时每帧只需一次哈希。
 
+use crate::models::NumberingConfig;
 use crate::{export, theme};
 use eframe::egui::{
     self, Color32, FontId,
@@ -56,6 +57,7 @@ impl MarkdownHighlighter {
 
     /// “实时排版”编辑器的布局：光标所在行保留 Markdown 标记，
     /// 其余行折叠标记并使用公文字体、字号和固定行距。
+    #[allow(clippy::too_many_arguments)]
     pub fn layout_hybrid(
         &mut self,
         ui: &egui::Ui,
@@ -64,11 +66,13 @@ impl MarkdownHighlighter {
         active_line: usize,
         anchor: Option<&Range<usize>>,
         search_matches: &[Range<usize>],
+        numbering: &NumberingConfig,
     ) -> Arc<egui::Galley> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
         anchor.hash(&mut hasher);
         search_matches.hash(&mut hasher);
+        numbering.hash(&mut hasher);
         let key = hasher.finish();
         let width = wrap_width.to_bits();
         if let Some((cached_key, cached_width, cached_line, galley)) = &self.hybrid_cache
@@ -85,6 +89,7 @@ impl MarkdownHighlighter {
             active_line,
             anchor,
             search_matches,
+            numbering,
         );
         let mut galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
         center_document_title_rows(&mut galley, text, wrap_width);
@@ -248,6 +253,7 @@ pub fn hybrid_highlight(
     active_line: usize,
     anchor: Option<&Range<usize>>,
     search_matches: &[Range<usize>],
+    numbering: &NumberingConfig,
 ) -> LayoutJob {
     let body = official_format(
         theme::FONT_FANGSONG,
@@ -266,7 +272,7 @@ pub fn hybrid_highlight(
 
     let source_lines = text.split('\n').collect::<Vec<_>>();
     let ordered_lines = ordered_list_lines(text);
-    let mut counters = export::HeadingCounters::default();
+    let mut counters = export::HeadingCounters::with_numbering(*numbering);
     let mut in_table = false;
     for (index, line) in source_lines.iter().copied().enumerate() {
         let prefix = counters.next(line);
@@ -294,6 +300,7 @@ pub fn hybrid_highlight(
             centered,
             table_header,
             ordered_lines[index],
+            numbering,
         );
     }
     for range in search_matches {
@@ -305,6 +312,7 @@ pub fn hybrid_highlight(
     job
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hybrid_line(
     job: &mut LayoutJob,
     line: &str,
@@ -313,6 +321,7 @@ fn hybrid_line(
     centered_title: bool,
     table_header: bool,
     ordered: Option<OrderedLine>,
+    numbering: &NumberingConfig,
 ) {
     let body = official_format(
         theme::FONT_FANGSONG,
@@ -495,9 +504,9 @@ fn hybrid_line(
             collapsed_marker()
         };
         let display = if info.inline {
-            export::circled_number(info.number)
+            export::render_list_number(numbering.list1, info.number)
         } else {
-            format!("{}.", info.number)
+            export::render_list_number(numbering.list2, info.number)
         };
         let display_units = display
             .chars()
@@ -900,7 +909,15 @@ mod tests {
     }
 
     fn hybrid_sections(text: &str, active_line: usize) -> Vec<(String, TextFormat)> {
-        let job = hybrid_highlight(&egui::Style::default(), text, 600.0, active_line, None, &[]);
+        let job = hybrid_highlight(
+            &egui::Style::default(),
+            text,
+            600.0,
+            active_line,
+            None,
+            &[],
+            &crate::models::NumberingConfig::default(),
+        );
         job.sections
             .iter()
             .map(|section| {
@@ -1052,7 +1069,15 @@ mod tests {
     #[test]
     fn hybrid_reserves_two_char_indent_and_heading_number_space() {
         let text = "# 公文标题\n## 总体要求\n### 具体安排";
-        let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+        let job = hybrid_highlight(
+            &egui::Style::default(),
+            text,
+            600.0,
+            usize::MAX,
+            None,
+            &[],
+            &crate::models::NumberingConfig::default(),
+        );
         let section = |needle: &str| {
             job.sections
                 .iter()
@@ -1073,7 +1098,15 @@ mod tests {
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let mut centered = None;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+            let job = hybrid_highlight(
+                &egui::Style::default(),
+                text,
+                600.0,
+                usize::MAX,
+                None,
+                &[],
+                &crate::models::NumberingConfig::default(),
+            );
             let mut galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
             center_document_title_rows(&mut galley, text, 600.0);
             centered = Some(galley);
@@ -1111,7 +1144,15 @@ mod tests {
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let mut centered = None;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+            let job = hybrid_highlight(
+                &egui::Style::default(),
+                text,
+                600.0,
+                usize::MAX,
+                None,
+                &[],
+                &crate::models::NumberingConfig::default(),
+            );
             let mut galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
             center_document_title_rows(&mut galley, text, 600.0);
             centered = Some(galley);
@@ -1139,7 +1180,15 @@ mod tests {
     #[test]
     fn hybrid_collapses_markdown_only_blank_lines() {
         let text = "第一段\n\n第二段";
-        let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+        let job = hybrid_highlight(
+            &egui::Style::default(),
+            text,
+            600.0,
+            usize::MAX,
+            None,
+            &[],
+            &crate::models::NumberingConfig::default(),
+        );
         assert!(job.sections.iter().any(|section| {
             &job.text[section.byte_range.start.0..section.byte_range.end.0] == "\n"
                 && section.format.line_height == Some(1.0)
@@ -1149,7 +1198,15 @@ mod tests {
     #[test]
     fn hybrid_table_reserves_real_cell_widths_and_hides_pipes() {
         let text = "| 部门 | 负责人 | 时限 |";
-        let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+        let job = hybrid_highlight(
+            &egui::Style::default(),
+            text,
+            600.0,
+            usize::MAX,
+            None,
+            &[],
+            &crate::models::NumberingConfig::default(),
+        );
         let pipes = job
             .sections
             .iter()
@@ -1173,7 +1230,15 @@ mod tests {
     #[test]
     fn hybrid_sections_still_cover_the_exact_markdown_source() {
         let text = "# 标题\n\n正文 **重点**\n| 姓名 | 电话 |\n|---|---|\n<!-- [附件] -->";
-        let job = hybrid_highlight(&egui::Style::default(), text, 600.0, 2, None, &[]);
+        let job = hybrid_highlight(
+            &egui::Style::default(),
+            text,
+            600.0,
+            2,
+            None,
+            &[],
+            &crate::models::NumberingConfig::default(),
+        );
         assert_eq!(job.text, text);
         let mut cursor = 0usize;
         for section in &job.sections {
@@ -1286,7 +1351,15 @@ mod tests {
         }
         let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
         for text in ["# 大标题\n", "# 大标题", "# 大标题\n\n正文。\n"] {
-            let job = hybrid_highlight(&egui::Style::default(), text, 600.0, usize::MAX, None, &[]);
+            let job = hybrid_highlight(
+                &egui::Style::default(),
+                text,
+                600.0,
+                usize::MAX,
+                None,
+                &[],
+                &crate::models::NumberingConfig::default(),
+            );
             let mut galley = ctx.fonts_mut(|fonts| fonts.layout_job(job));
             center_document_title_rows(&mut galley, text, 600.0);
             assert!(

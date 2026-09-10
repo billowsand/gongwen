@@ -9,10 +9,14 @@ mod latex;
 pub(crate) mod table;
 pub(crate) mod title;
 pub(crate) use docx::record::automatic_print_copies;
-pub(crate) use docx::write_docx;
-pub(crate) use latex::{copy_count, write_tex};
+#[allow(unused_imports)]
+pub(crate) use docx::{write_docx, write_docx_with_numbering};
+#[allow(unused_imports)]
+pub(crate) use latex::{copy_count, write_tex, write_tex_with_numbering};
 
-use crate::models::{DraftInput, ExportSelection, FontConfig, TemplateKind, split_units};
+use crate::models::{
+    DraftInput, ExportSelection, FontConfig, NumberingConfig, TemplateKind, split_units,
+};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use std::fs;
@@ -23,12 +27,17 @@ mod parse;
 mod red;
 mod text;
 
-pub(crate) use headings::{HeadingCounters, clean_heading_number, official_heading_text};
+pub(crate) use headings::{
+    HeadingCounters, clean_heading_number, official_heading_prefix, official_heading_text,
+    render_list_number,
+};
+#[allow(unused_imports)]
 pub(crate) use parse::{
     ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, block_span_for_line,
     body_heading_max_level, circled_number, is_image_line, normalize_ordered_list_punctuation,
-    parse_markdown, parse_markdown_located, parse_markdown_with_lines, parse_ordered_item,
-    parse_section_marker,
+    parse_markdown, parse_markdown_located, parse_markdown_located_with_numbering,
+    parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
+    parse_markdown_with_numbering, parse_ordered_item, parse_section_marker,
 };
 #[cfg(test)]
 pub(crate) use red::{
@@ -140,6 +149,7 @@ pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
     format!("{}\n", text.trim())
 }
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试与部分旧调用使用。
 pub fn export_all(
     output_dir: &Path,
     input: &DraftInput,
@@ -147,6 +157,28 @@ pub fn export_all(
     selection: &ExportSelection,
     display: &UnitDisplay,
     fonts: &FontConfig,
+) -> Result<Vec<PathBuf>> {
+    export_all_with_numbering(
+        output_dir,
+        input,
+        markdown,
+        selection,
+        display,
+        fonts,
+        &NumberingConfig::default(),
+    )
+}
+
+/// 与 [`export_all`] 相同，另按设置里的编号样式生成标题与列表编号。
+#[allow(clippy::too_many_arguments)]
+pub fn export_all_with_numbering(
+    output_dir: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    selection: &ExportSelection,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
@@ -177,12 +209,12 @@ pub fn export_all(
     }
     if selection.docx {
         let path = document_dir.join(format!("{export_stem}.docx"));
-        docx::write_docx(&path, input, markdown, display)?;
+        docx::write_docx_with_numbering(&path, input, markdown, display, numbering)?;
         files.push(path);
     }
     if selection.tex {
         let path = document_dir.join(format!("{export_stem}.tex"));
-        latex::write_tex(&path, input, markdown, display, fonts)?;
+        latex::write_tex_with_numbering(&path, input, markdown, display, fonts, numbering)?;
         files.push(path);
     }
     Ok(files)

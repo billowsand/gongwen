@@ -4,8 +4,10 @@
 //! `export` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::{
-    MarkdownSection, legacy_attachment_label, number_to_chinese, parse_section_marker,
+    MarkdownSection, circled_number, legacy_attachment_label, number_to_chinese,
+    parse_section_marker,
 };
+use crate::models::{HeadingNumbering, ListNumbering, NumberingConfig};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -36,38 +38,70 @@ pub(crate) fn clean_heading_number(text: &str) -> String {
     cleaned.trim().to_string()
 }
 
-/// 公文正文各级标题的编号：一、 →（一）→ 1. →（1）。DOCX 导出与界面预览共用，
+/// 按编号样式生成一个标题编号前缀。`第X章`/`第X节`/`第X部分` 类样式在编号后
+/// 补一个全角空格与标题文字分隔，其余样式（如 `一、`、`1.`）直接与标题文字相连。
+pub(crate) fn render_heading_number(style: HeadingNumbering, number: usize) -> String {
+    match style {
+        HeadingNumbering::Chinese => format!("{}、", number_to_chinese(number)),
+        HeadingNumbering::ChineseParen => format!("（{}）", number_to_chinese(number)),
+        HeadingNumbering::FullDigitParen => format!("（{number}）"),
+        HeadingNumbering::HalfDigitParen => format!("({number})"),
+        HeadingNumbering::DecimalDot => format!("{number}."),
+        HeadingNumbering::ChapterDigit => format!("第{number}章　"),
+        HeadingNumbering::ChapterChinese => format!("第{}章　", number_to_chinese(number)),
+        HeadingNumbering::Part => format!("第{}部分　", number_to_chinese(number)),
+        HeadingNumbering::SectionDigit => format!("第{number}节　"),
+    }
+}
+
+/// 按编号样式生成一个列表项编号前缀。
+pub(crate) fn render_list_number(style: ListNumbering, number: usize) -> String {
+    match style {
+        ListNumbering::Circled => circled_number(number),
+        ListNumbering::HalfParen => format!("({number})"),
+        ListNumbering::FullParen => format!("（{number}）"),
+        ListNumbering::DecimalDot => format!("{number}."),
+    }
+}
+
+/// 公文正文各级标题的编号：默认 一、 →（一）→ 1. →（1）。DOCX 导出与界面预览共用，
 /// 保证预览里看到的编号就是导出后的编号。
 pub(crate) fn official_heading_text(
     level: u8,
     text: &str,
     counters: &mut [usize; 4],
+    numbering: &NumberingConfig,
 ) -> Option<String> {
-    official_heading_prefix(level, counters).map(|prefix| format!("{prefix}{text}"))
+    official_heading_prefix(level, counters, numbering).map(|prefix| format!("{prefix}{text}"))
 }
 
 /// 只生成公文标题编号前缀。实时排版编辑器不能把自动编号真正写进
 /// Markdown，因此用这个共用函数在屏幕上叠加，导出时仍由同一套计数器生成。
-pub(crate) fn official_heading_prefix(level: u8, counters: &mut [usize; 4]) -> Option<String> {
+pub(crate) fn official_heading_prefix(
+    level: u8,
+    counters: &mut [usize; 4],
+    numbering: &NumberingConfig,
+) -> Option<String> {
+    let style = numbering.heading(level)?;
     match level {
         2 => {
             counters[0] += 1;
             counters[1..].fill(0);
-            Some(format!("{}、", number_to_chinese(counters[0])))
+            Some(render_heading_number(style, counters[0]))
         }
         3 => {
             counters[1] += 1;
             counters[2..].fill(0);
-            Some(format!("（{}）", number_to_chinese(counters[1])))
+            Some(render_heading_number(style, counters[1]))
         }
         4 => {
             counters[2] += 1;
             counters[3] = 0;
-            Some(format!("{}.", counters[2]))
+            Some(render_heading_number(style, counters[2]))
         }
         5 => {
             counters[3] += 1;
-            Some(format!("({})", counters[3]))
+            Some(render_heading_number(style, counters[3]))
         }
         _ => None,
     }
@@ -82,6 +116,7 @@ pub(crate) fn official_heading_prefix(level: u8, counters: &mut [usize; 4]) -> O
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HeadingCounters {
     levels: [usize; 4],
+    numbering: NumberingConfig,
     expecting_title: bool,
     in_attachment: bool,
     legacy_attachment: bool,
@@ -92,17 +127,22 @@ pub(crate) struct HeadingCounters {
 
 impl Default for HeadingCounters {
     fn default() -> Self {
+        Self::with_numbering(NumberingConfig::default())
+    }
+}
+
+impl HeadingCounters {
+    pub(crate) fn with_numbering(numbering: NumberingConfig) -> Self {
         Self {
             levels: [0; 4],
+            numbering,
             expecting_title: true,
             in_attachment: false,
             legacy_attachment: false,
             centered_title: false,
         }
     }
-}
 
-impl HeadingCounters {
     pub(crate) fn next(&mut self, line: &str) -> Option<String> {
         self.centered_title = false;
         if let Some(section) = parse_section_marker(line) {
@@ -145,11 +185,86 @@ impl HeadingCounters {
         } else {
             hashes
         };
-        official_heading_prefix(level as u8, &mut self.levels)
+        official_heading_prefix(level as u8, &mut self.levels, &self.numbering)
     }
 
     /// 最近一次 `next` 处理的行是否为正式标题（方正小标宋二号居中渲染）。
     pub(crate) fn centered_title(&self) -> bool {
         self.centered_title
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_every_heading_numbering_style() {
+        assert_eq!(render_heading_number(HeadingNumbering::Chinese, 3), "三、");
+        assert_eq!(
+            render_heading_number(HeadingNumbering::ChineseParen, 3),
+            "（三）"
+        );
+        assert_eq!(
+            render_heading_number(HeadingNumbering::FullDigitParen, 3),
+            "（3）"
+        );
+        assert_eq!(
+            render_heading_number(HeadingNumbering::HalfDigitParen, 3),
+            "(3)"
+        );
+        assert_eq!(render_heading_number(HeadingNumbering::DecimalDot, 3), "3.");
+        assert_eq!(
+            render_heading_number(HeadingNumbering::ChapterDigit, 3),
+            "第3章　"
+        );
+        assert_eq!(
+            render_heading_number(HeadingNumbering::ChapterChinese, 3),
+            "第三章　"
+        );
+        assert_eq!(
+            render_heading_number(HeadingNumbering::Part, 3),
+            "第三部分　"
+        );
+        assert_eq!(
+            render_heading_number(HeadingNumbering::SectionDigit, 3),
+            "第3节　"
+        );
+    }
+
+    #[test]
+    fn renders_every_list_numbering_style() {
+        assert_eq!(render_list_number(ListNumbering::Circled, 3), "③");
+        assert_eq!(render_list_number(ListNumbering::HalfParen, 3), "(3)");
+        assert_eq!(render_list_number(ListNumbering::FullParen, 3), "（3）");
+        assert_eq!(render_list_number(ListNumbering::DecimalDot, 3), "3.");
+    }
+
+    #[test]
+    fn official_heading_prefix_follows_custom_config() {
+        let numbering = NumberingConfig {
+            heading1: HeadingNumbering::ChapterDigit,
+            heading2: HeadingNumbering::DecimalDot,
+            heading3: HeadingNumbering::ChineseParen,
+            heading4: HeadingNumbering::FullDigitParen,
+            ..Default::default()
+        };
+        let mut counters = [0usize; 4];
+        assert_eq!(
+            official_heading_prefix(2, &mut counters, &numbering).as_deref(),
+            Some("第1章　")
+        );
+        assert_eq!(
+            official_heading_prefix(3, &mut counters, &numbering).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            official_heading_prefix(4, &mut counters, &numbering).as_deref(),
+            Some("（一）")
+        );
+        assert_eq!(
+            official_heading_prefix(5, &mut counters, &numbering).as_deref(),
+            Some("（1）")
+        );
     }
 }

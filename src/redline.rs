@@ -20,7 +20,7 @@
 
 use crate::diff::{ChangeKind, DiffBlock, InlineSpan, SpanKind, body_diff, merged_spans};
 use crate::export::{self, mark_added, mark_deleted};
-use crate::models::{DraftInput, FontConfig};
+use crate::models::{DraftInput, FontConfig, NumberingConfig};
 use crate::texcompile;
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
@@ -333,6 +333,7 @@ pub fn export_files(
     formats: RedlineFormats,
     display: &UnitDisplay,
     fonts: &FontConfig,
+    numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
     let markdown = doc.markdown_with_notes();
     // 标题取自正文 H1，哨兵已在生成时避开标题，这里再兜一层底：文件名里绝不能
@@ -346,12 +347,12 @@ pub fn export_files(
     let mut files = Vec::new();
     if formats.docx {
         let path = dir.join(format!("{stem}.docx"));
-        export::write_docx(&path, input, &markdown, display)?;
+        export::write_docx_with_numbering(&path, input, &markdown, display, numbering)?;
         files.push(path);
     }
     if formats.pdf {
         let tex = dir.join(format!("{stem}.tex"));
-        export::write_tex(&tex, input, &markdown, display, fonts)?;
+        export::write_tex_with_numbering(&tex, input, &markdown, display, fonts, numbering)?;
         files.push(tex.clone());
         let outcome = texcompile::compile_pdf_with_proof(&tex, fonts)
             .with_context(|| "花脸稿 PDF 编译失败".to_string())?;

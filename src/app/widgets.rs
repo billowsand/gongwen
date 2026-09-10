@@ -7,8 +7,8 @@ use crate::app::{CONTENT_WIDTH, FORM_CONTROL_HEIGHT, LABEL_WIDTH, MANUAL_BACK_WI
 use crate::export;
 use crate::manuscript;
 use crate::models::{
-    DraftInput, ExportSelection, FontConfig, ManuscriptStatus, ReviewNote, SecurityLevel,
-    VocabularyCategory, VocabularyEntry, join_units, split_units,
+    DraftInput, ExportSelection, FontConfig, ManuscriptStatus, NumberingConfig, ReviewNote,
+    SecurityLevel, VocabularyCategory, VocabularyEntry, join_units, split_units,
 };
 use crate::orphan_probe;
 use crate::system_fonts;
@@ -992,6 +992,7 @@ pub(crate) struct ExportOutcome {
 /// 导出全部勾选格式；生成 TeX 后自动检测本机编译器，有可用引擎时把 PDF 一并加入结果。
 /// 编译失败不阻断导出，PDF 缺失会单独记到 `compile_error` 上走红色提示框，
 /// 已写好的 md/docx/tex 照常保留。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn export_and_compile(
     output_dir: &Path,
     input: &DraftInput,
@@ -999,6 +1000,7 @@ pub(crate) fn export_and_compile(
     selection: &ExportSelection,
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
+    numbering: &NumberingConfig,
     mut progress: impl FnMut(&str),
 ) -> anyhow::Result<ExportOutcome> {
     progress("正在生成导出文件…");
@@ -1008,7 +1010,9 @@ pub(crate) fn export_and_compile(
     let (fonts, warnings) = system_fonts::resolve(fonts);
     let mut proof_warnings: Vec<ReviewNote> = Vec::new();
     let mut proof_measured = false;
-    let mut files = export::export_all(output_dir, input, markdown, selection, &display, &fonts)?;
+    let mut files = export::export_all_with_numbering(
+        output_dir, input, markdown, selection, &display, &fonts, numbering,
+    )?;
     let mut compile_error: Option<String> = None;
     if let Some(tex) = files
         .iter()

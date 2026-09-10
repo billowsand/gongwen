@@ -237,15 +237,23 @@ impl DraftPage<'_> {
         let output_dir = PathBuf::from(&self.config.output_dir);
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
+        let numbering = self.config.numbering;
         let tx = self.sender.clone();
         thread::spawn(move || {
             let display = crate::units::UnitDisplay::new(&vocabulary);
             // 与定稿导出同样先落实字体：TeX 里写死按哪个文件加载，等编译时才
             // 发现缺文件就来不及退回内置字体了。
             let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
-            let result =
-                crate::redline::export_files(&output_dir, &input, &doc, formats, &display, &fonts)
-                    .map_err(|error| format!("{error:#}"));
+            let result = crate::redline::export_files(
+                &output_dir,
+                &input,
+                &doc,
+                formats,
+                &display,
+                &fonts,
+                &numbering,
+            )
+            .map_err(|error| format!("{error:#}"));
             let _ = tx.send(WorkerResult::Doc {
                 key,
                 seq,

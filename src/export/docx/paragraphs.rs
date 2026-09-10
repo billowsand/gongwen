@@ -11,7 +11,7 @@ use crate::export::plain_text;
 use crate::export::title;
 use crate::export::title::TitlePlan;
 use crate::images;
-use crate::models::{DraftInput, TemplateKind};
+use crate::models::{DraftInput, ListNumbering, TemplateKind};
 use docx_rs::*;
 use image::GenericImageView;
 
@@ -44,7 +44,8 @@ pub(crate) fn label_paragraph(text: &str) -> Paragraph {
 }
 
 /// 独立有序列表：每项单独成段，首行缩进两个汉字；编号与正文之间不留空格。
-pub(crate) fn ordered_list_paragraph(number: usize, text: &str) -> Paragraph {
+pub(crate) fn ordered_list_paragraph(number: usize, text: &str, style: ListNumbering) -> Paragraph {
+    let prefix = crate::export::render_list_number(style, number);
     let mut paragraph = Paragraph::new()
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
@@ -53,7 +54,7 @@ pub(crate) fn ordered_list_paragraph(number: usize, text: &str) -> Paragraph {
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true);
-    for run in body_runs(&format!("{number}.{text}")) {
+    for run in body_runs(&format!("{prefix}{text}")) {
         paragraph = paragraph.add_run(run);
     }
     paragraph

@@ -6,7 +6,7 @@
 use crate::export;
 use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::images;
-use crate::models::{DraftInput, StyleMode, TemplateKind};
+use crate::models::{DraftInput, NumberingConfig, StyleMode, TemplateKind};
 use crate::preview::{
     BODY_PT, BodyRun, INDENT_CHARS, LIST_INDENT_PT, Metrics, PreviewScale, TITLE_PT,
     addressee_block, append_inline, body_block, clickable, draw, footer_record, header_block,
@@ -38,6 +38,7 @@ pub(crate) fn body_blocks(
     scroll_to_anchor: &mut bool,
     clicked: &mut Option<Range<usize>>,
     counters: &mut [usize; 4],
+    numbering: &NumberingConfig,
 ) {
     let mut index = 0usize;
     while index < body.len() {
@@ -63,13 +64,29 @@ pub(crate) fn body_blocks(
                 // 合并成一段的标题与正文，回跳时一并选中。
                 let range = located.range.start..next.range.end;
                 clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
-                    compact_block(ui, metrics, *level, heading, text, counters, run.numbered);
+                    compact_block(
+                        ui,
+                        metrics,
+                        *level,
+                        heading,
+                        text,
+                        counters,
+                        run.numbered,
+                        numbering,
+                    );
                 });
             }
             _ => {
                 let range = located.range.clone();
                 clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
-                    content_block(ui, metrics, &located.block, counters, run.numbered);
+                    content_block(
+                        ui,
+                        metrics,
+                        &located.block,
+                        counters,
+                        run.numbered,
+                        numbering,
+                    );
                 });
             }
         }
@@ -78,6 +95,7 @@ pub(crate) fn body_blocks(
 
 /// 把 Markdown 连同表单锁定的行文要素按公文版式画在 `ui` 里；调用方负责套滚动区。
 /// 返回本次实际使用的缩放倍率，供“适应宽度”状态下的加减档以它为起点。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn official_preview(
     ui: &mut egui::Ui,
     input: &DraftInput,
@@ -86,6 +104,7 @@ pub(crate) fn official_preview(
     scale: PreviewScale,
     anchor: Option<&Range<usize>>,
     mut scroll_to_anchor: bool,
+    numbering: &NumberingConfig,
 ) -> PreviewOutput {
     // 自适应缩放要按“看得见的宽度”算：滚动方向上的 available_width 是无穷大，
     // 拿它算会把整页放大到上限。裁剪矩形就是滚动区的可视范围，再与窗口取交集兜底。
@@ -94,11 +113,11 @@ pub(crate) fn official_preview(
         .intersect(ui.ctx().input(|input| input.content_rect()));
     // 居中用的宽度优先取调用方给的真实宽度（见 `PreviewScale::viewport`）。
     let metrics = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom);
-    // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题一律
-    // 自动编号为 一、（一）1.（1）；紧缩风格跟随模板配置。
+    // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
+    // 跟随设置里的编号样式；紧缩风格跟随模板配置。
     let numbered = true;
     let compact = input.profile.style_mode == StyleMode::Compact;
-    let located = export::parse_markdown_located(markdown);
+    let located = export::parse_markdown_located_with_numbering(markdown, numbering);
     let blocks = located
         .iter()
         .map(|block| block.block.clone())
@@ -159,6 +178,7 @@ pub(crate) fn official_preview(
             anchor,
             &mut scroll_to_anchor,
             &mut clicked,
+            numbering,
         );
         return PreviewOutput {
             scale: metrics.scale,
@@ -203,6 +223,7 @@ pub(crate) fn official_preview(
             &mut scroll_to_anchor,
             &mut clicked,
             &mut counters,
+            numbering,
         );
         // 正文之后的附件概要：空两行再逐条列出（与导出一致）。
         if !names.is_empty() {
@@ -267,7 +288,14 @@ pub(crate) fn official_preview(
                                 );
                                 ui.add_space(metrics.pt(18.0));
                             }
-                            block => content_block(ui, &metrics, block, &mut counters, numbered),
+                            block => content_block(
+                                ui,
+                                &metrics,
+                                block,
+                                &mut counters,
+                                numbered,
+                                numbering,
+                            ),
                         }
                     },
                 );
@@ -284,6 +312,7 @@ pub(crate) fn official_preview(
 }
 
 /// 紧缩风格的一段：标题（带编号与句号，用该级标题字体）后面直接接正文。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compact_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -292,9 +321,10 @@ pub(crate) fn compact_block(
     body: &str,
     counters: &mut [usize; 4],
     numbered: bool,
+    numbering: &NumberingConfig,
 ) {
     let heading = match numbered {
-        true => match export::official_heading_text(level, heading, counters) {
+        true => match export::official_heading_text(level, heading, counters, numbering) {
             Some(text) => text,
             None => return,
         },
@@ -323,9 +353,10 @@ pub(crate) fn heading_block(
     text: &str,
     counters: &mut [usize; 4],
     numbered: bool,
+    numbering: &NumberingConfig,
 ) {
     let text = if numbered {
-        match export::official_heading_text(level, text, counters) {
+        match export::official_heading_text(level, text, counters, numbering) {
             Some(text) => text,
             None => return,
         }
@@ -353,10 +384,11 @@ pub(crate) fn content_block(
     block: &MarkdownBlock,
     counters: &mut [usize; 4],
     numbered: bool,
+    numbering: &NumberingConfig,
 ) {
     match block {
         MarkdownBlock::Heading(level, text) => {
-            heading_block(ui, metrics, *level, text, counters, numbered);
+            heading_block(ui, metrics, *level, text, counters, numbered, numbering);
         }
         MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
             body_block(ui, metrics, text, true);
@@ -377,7 +409,8 @@ pub(crate) fn content_block(
             });
         }
         MarkdownBlock::OrderedListItem { number, text } => {
-            body_block(ui, metrics, &format!("{number}.{text}"), true);
+            let prefix = export::render_list_number(numbering.list2, *number);
+            body_block(ui, metrics, &format!("{prefix}{text}"), true);
         }
         MarkdownBlock::Table { rows, aligns } => table_block(ui, metrics, rows, aligns),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),

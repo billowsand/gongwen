@@ -4,16 +4,29 @@
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::latex::{
-    attachment_summary_tex, latex_name, official_letter_sections_to_tex,
-    official_letter_sections_to_tex_with_barrier, red_approval_title_content_tex,
+    attachment_summary_tex, latex_name,
+    official_letter_sections_to_tex_with_barrier_with_numbering,
+    official_letter_sections_to_tex_with_numbering, red_approval_title_content_tex,
     security_commands, tex_escape, tex_spread_signature, title_content_tex,
 };
-use crate::export::{MarkdownBlock, chinese_date_parts, parse_markdown_with_lines, plain_text};
-use crate::models::{DraftInput, LetterVersion, StyleMode};
+use crate::export::{
+    MarkdownBlock, chinese_date_parts, parse_markdown_with_lines_with_numbering, plain_text,
+};
+use crate::models::{DraftInput, LetterVersion, ListNumbering, NumberingConfig, StyleMode};
 use crate::units::UnitDisplay;
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
-    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
+    white_paper_tex_with_numbering(input, markdown, display, &NumberingConfig::default())
+}
+
+pub(crate) fn white_paper_tex_with_numbering(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    numbering: &NumberingConfig,
+) -> String {
+    let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -22,10 +35,11 @@ pub(crate) fn white_paper_tex(input: &DraftInput, markdown: &str, display: &Unit
         })
         .unwrap_or(input.title_hint.as_str());
     // 正文与函稿一致（含标题编号与紧缩合并）；附件区段保留，与函稿同链路落版。
-    let (mut body, attachments) = official_letter_sections_to_tex(
+    let (mut body, attachments) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
         input.profile.style_mode == StyleMode::Compact,
+        numbering,
     );
     // 附件概要：正文结束后、落款之前列出附件名称。
     if let Some(summary) = attachment_summary_tex(&blocks) {
@@ -106,12 +120,22 @@ pub(crate) fn white_paper_tex(input: &DraftInput, markdown: &str, display: &Unit
 }
 
 /// 红头呈批件的独立入口；首页框架在后续专用实现中生成。
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn red_head_approval_tex(
     input: &DraftInput,
     markdown: &str,
     display: &UnitDisplay,
 ) -> String {
-    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
+    red_head_approval_tex_with_numbering(input, markdown, display, &NumberingConfig::default())
+}
+
+pub(crate) fn red_head_approval_tex_with_numbering(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    numbering: &NumberingConfig,
+) -> String {
+    let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
         .iter()
         .find_map(|block| match block {
@@ -120,11 +144,12 @@ pub(crate) fn red_head_approval_tex(
         })
         .unwrap_or(input.title_hint.as_str());
     // 表格与图片不得留在首页：在正文区第一个表格/图片之前插入换页屏障。
-    let (mut body, attachments) = official_letter_sections_to_tex_with_barrier(
+    let (mut body, attachments) = official_letter_sections_to_tex_with_barrier_with_numbering(
         &blocks,
         &block_lines,
         input.profile.style_mode == StyleMode::Compact,
         Some("\\RedPageOneBarrier"),
+        numbering,
     );
     if let Some(summary) = attachment_summary_tex(&blocks) {
         // 附件概要自带两行垂直留白，无法仅靠正文行数额度安全判断；红头呈批件
@@ -284,8 +309,23 @@ pub(crate) fn red_approval_responsible_rows_tex(rows: &[[String; 3]]) -> String 
         .join("\n")
 }
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn meeting_agenda_tex(input: &DraftInput, markdown: &str) -> String {
-    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
+    meeting_agenda_tex_with_numbering(input, markdown, &NumberingConfig::default())
+}
+
+pub(crate) fn meeting_agenda_tex_with_numbering(
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> String {
+    // 会议议程事项固定使用「1. 2. 3.」阿拉伯数字编号（见起草提示词与校验规则），
+    // 不随设置里的列表编号样式变化。
+    let mut agenda_numbering = *numbering;
+    agenda_numbering.list1 = ListNumbering::DecimalDot;
+    agenda_numbering.list2 = ListNumbering::DecimalDot;
+    let (blocks, block_lines) =
+        parse_markdown_with_lines_with_numbering(markdown, &agenda_numbering);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -294,10 +334,11 @@ pub(crate) fn meeting_agenda_tex(input: &DraftInput, markdown: &str) -> String {
         })
         .unwrap_or(input.title_hint.as_str());
     // 正文排版与白头件/函稿一致（含标题编号与紧缩合并）；会议议程无附件、无落款。
-    let (body, _) = official_letter_sections_to_tex(
+    let (body, _) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
         input.profile.style_mode == StyleMode::Compact,
+        &agenda_numbering,
     );
     let security = security_commands(input);
 

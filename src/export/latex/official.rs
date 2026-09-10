@@ -5,25 +5,37 @@
 
 use crate::export::latex::{
     attachment_document_title_to_tex, attachment_landscape_flags, attachment_summary_tex,
-    body_text_to_tex, heading_number_prefix, latex_name, official_heading_to_tex,
-    security_commands, target_tex_section, tex_escape, tex_spaced, title_content_tex,
+    body_text_to_tex, latex_name, official_heading_to_tex, security_commands, target_tex_section,
+    tex_escape, tex_spaced, title_content_tex,
 };
 use crate::export::table::to_longtblr;
 use crate::export::{
     MarkdownBlock, MarkdownSection, body_heading_max_level, chinese_date_parts, joint_main_column,
-    parse_markdown_with_lines, plain_text,
+    official_heading_prefix, parse_markdown_with_lines_with_numbering, plain_text,
+    render_list_number,
 };
 use crate::models::{
-    DraftInput, JointIssuanceMode, LetterVersion, StyleMode, TemplateKind, split_units,
+    DraftInput, JointIssuanceMode, LetterVersion, NumberingConfig, StyleMode, TemplateKind,
+    split_units,
 };
 use crate::units::UnitDisplay;
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn official_letter_tex(
     input: &DraftInput,
     markdown: &str,
     display: &UnitDisplay,
 ) -> String {
-    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
+    official_letter_tex_with_numbering(input, markdown, display, &NumberingConfig::default())
+}
+
+pub(crate) fn official_letter_tex_with_numbering(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    numbering: &NumberingConfig,
+) -> String {
+    let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -31,10 +43,11 @@ pub(crate) fn official_letter_tex(
             _ => None,
         })
         .unwrap_or(input.title_hint.as_str());
-    let (mut body, attachments) = official_letter_sections_to_tex(
+    let (mut body, attachments) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
         input.profile.style_mode == StyleMode::Compact,
+        numbering,
     );
     // 附件概要：正文结束后、落款之前列出附件名称。
     if let Some(summary) = attachment_summary_tex(&blocks) {
@@ -64,9 +77,13 @@ pub(crate) fn official_letter_tex(
     };
     // 编号时把版记的「共印 N 份」钉到 Rust 算出的同一个数：份号编到几，
     // 版记就得说几，两处由 TeX 和 Rust 各算一遍迟早会岔开。
-    let numbering = input.profile.number_copies && input.kind.has_copy_numbering();
-    let copies_option = if numbering { "noautocalc" } else { "autocalc" };
-    let print_copies_command = if numbering {
+    let copy_numbering = input.profile.number_copies && input.kind.has_copy_numbering();
+    let copies_option = if copy_numbering {
+        "noautocalc"
+    } else {
+        "autocalc"
+    };
+    let print_copies_command = if copy_numbering {
         format!("\\renewcommand{{\\PrintCopies}}{{{}}}\n", copy_count(input))
     } else {
         String::new()
@@ -260,8 +277,17 @@ fn copy_body_tex(input: &DraftInput) -> String {
     out
 }
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
-    let (blocks, block_lines) = parse_markdown_with_lines(markdown);
+    plain_document_tex_with_numbering(input, markdown, &NumberingConfig::default())
+}
+
+pub(crate) fn plain_document_tex_with_numbering(
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> String {
+    let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
         .iter()
         .find_map(|block| match block {
@@ -269,10 +295,11 @@ pub(crate) fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
             _ => None,
         })
         .unwrap_or(input.title_hint.as_str());
-    let (mut body, attachments) = official_letter_sections_to_tex(
+    let (mut body, attachments) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
         input.profile.style_mode == StyleMode::Compact,
+        numbering,
     );
     if let Some(summary) = attachment_summary_tex(&blocks) {
         body.push_str(&summary);
@@ -450,12 +477,31 @@ pub(crate) fn gwa_tail(lines: &[usize], index: usize) -> String {
     }
 }
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn official_letter_sections_to_tex(
     blocks: &[MarkdownBlock],
     lines: &[usize],
     compact: bool,
 ) -> (String, String) {
-    official_letter_sections_to_tex_with_barrier(blocks, lines, compact, None)
+    official_letter_sections_to_tex_with_barrier_with_numbering(
+        blocks,
+        lines,
+        compact,
+        None,
+        &NumberingConfig::default(),
+    )
+}
+
+/// 与 [`official_letter_sections_to_tex`] 相同，另按设置生成标题与列表编号。
+pub(crate) fn official_letter_sections_to_tex_with_numbering(
+    blocks: &[MarkdownBlock],
+    lines: &[usize],
+    compact: bool,
+    numbering: &NumberingConfig,
+) -> (String, String) {
+    official_letter_sections_to_tex_with_barrier_with_numbering(
+        blocks, lines, compact, None, numbering,
+    )
 }
 
 /// 同上，另可在第一个表格/图片之前插入屏障。红头呈批件的普通文字保持连续
@@ -464,11 +510,29 @@ pub(crate) fn official_letter_sections_to_tex(
 /// 每个正文段落末尾据此发 `\GwaTail{行号}` 取代 `\par`：类文件里它默认就是
 /// `\par`，开 proof 选项后额外把末行坐标与行数写进 `.gwaproof`，孤行提示就能
 /// 直接点回 Markdown 的那一行。
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn official_letter_sections_to_tex_with_barrier(
     blocks: &[MarkdownBlock],
     lines: &[usize],
     compact: bool,
     barrier: Option<&str>,
+) -> (String, String) {
+    official_letter_sections_to_tex_with_barrier_with_numbering(
+        blocks,
+        lines,
+        compact,
+        barrier,
+        &NumberingConfig::default(),
+    )
+}
+
+/// 与 [`official_letter_sections_to_tex_with_barrier`] 相同，另按设置生成标题与列表编号。
+pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
+    blocks: &[MarkdownBlock],
+    lines: &[usize],
+    compact: bool,
+    barrier: Option<&str>,
+    numbering: &NumberingConfig,
 ) -> (String, String) {
     let mut body_float_barrier = barrier;
     let mut body = Vec::new();
@@ -543,7 +607,7 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier(
                     && section == MarkdownSection::Body
                     && *level == compact_heading_level
                     && next_is_paragraph
-                    && let Some(number) = heading_number_prefix(*level, &mut counters)
+                    && let Some(number) = official_heading_prefix(*level, &mut counters, numbering)
                 {
                     let MarkdownBlock::Paragraph(body_text) = &blocks[index + 1] else {
                         unreachable!()
@@ -564,14 +628,7 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier(
                     ));
                     index += 1; // 跳过紧随的正文段落
                 } else {
-                    let rendered = match section {
-                        MarkdownSection::Body => {
-                            official_heading_to_tex(*level, text, &mut counters)
-                        }
-                        MarkdownSection::Attachment => {
-                            official_heading_to_tex(*level, text, &mut counters)
-                        }
-                    };
+                    let rendered = official_heading_to_tex(*level, text, &mut counters, numbering);
                     if let Some(rendered) = rendered {
                         // 标题同样可能折行后末行挂字，末尾的 \par 一并换成探针。
                         let rendered = match rendered.strip_suffix("\\par") {
@@ -599,8 +656,9 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier(
                 ));
             }
             MarkdownBlock::OrderedListItem { number, text } => {
+                let prefix = render_list_number(numbering.list2, *number);
                 target_tex_section(section, &mut body, &mut attachments).push(format!(
-                    "\\noindent\\hspace*{{2em}}{number}.{}{}",
+                    "\\noindent\\hspace*{{2em}}{prefix}{}{}",
                     body_text_to_tex(text),
                     gwa_tail(lines, index)
                 ));

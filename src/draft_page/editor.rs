@@ -13,7 +13,7 @@ use crate::draft_page::{
 };
 use crate::export;
 use crate::highlight::ordered_list_lines;
-use crate::models::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN};
+use crate::models::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, NumberingConfig};
 use crate::preview;
 use crate::storage;
 use crate::theme;
@@ -129,12 +129,13 @@ pub(crate) fn paint_hybrid_decorations(
     output: &egui::text_edit::TextEditOutput,
     text: &str,
     active_line: usize,
+    numbering: &NumberingConfig,
 ) {
     let visuals = editor_line_visuals(output);
     let source_lines = text.split('\n').collect::<Vec<_>>();
     let ordered_lines = ordered_list_lines(text);
     let painter = ui.painter();
-    let mut counters = export::HeadingCounters::default();
+    let mut counters = export::HeadingCounters::with_numbering(*numbering);
     let attachment_count = export::parse_markdown(text)
         .iter()
         .filter(|block| {
@@ -185,9 +186,9 @@ pub(crate) fn paint_hybrid_decorations(
             && let (Some(info), Some(visual)) = (ordered_lines[index], visuals.get(index))
         {
             let label = if info.inline {
-                export::circled_number(info.number)
+                export::render_list_number(numbering.list1, info.number)
             } else {
-                format!("{}.", info.number)
+                export::render_list_number(numbering.list2, info.number)
             };
             let font = egui::FontId::new(
                 OFFICIAL_BODY_SIZE,
@@ -482,6 +483,7 @@ impl DraftPage<'_> {
         let line_number_size = (editor_font_size - 2.0).max(9.0);
         let text = &mut self.doc.generated_markdown;
         let highlighter = &mut self.doc.highlighter;
+        let numbering = self.config.numbering;
         let mut editor_lost_focus = false;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
             if hybrid {
@@ -492,6 +494,7 @@ impl DraftPage<'_> {
                     active_line,
                     anchor.as_ref(),
                     &search_matches,
+                    &numbering,
                 )
             } else {
                 highlighter.layout(
@@ -558,7 +561,13 @@ impl DraftPage<'_> {
                                                 line_number_size,
                                             );
                                         }
-                                        paint_hybrid_decorations(ui, &output, text, active_line);
+                                        paint_hybrid_decorations(
+                                            ui,
+                                            &output,
+                                            text,
+                                            active_line,
+                                            &numbering,
+                                        );
                                         if let Some(range) = selection {
                                             select_source_range(ui, &output, text, range);
                                         } else if let Some(offset) = jump {
@@ -708,6 +717,7 @@ impl DraftPage<'_> {
                     },
                     anchor.as_ref(),
                     self.doc.pending_render_jump,
+                    &self.config.numbering,
                 );
 
                 if let Some(transform) = transform {

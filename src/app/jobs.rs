@@ -782,6 +782,7 @@ impl GongwenApp {
                             preview::PreviewScale::zoom(preview.zoom),
                             None,
                             false,
+                            &self.config.numbering,
                         );
                         preview.fit_scale = output.scale;
                     });

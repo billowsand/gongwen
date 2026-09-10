@@ -3,7 +3,7 @@
 //! 各生成部件已拆分到 `export/latex/` 子模块（公函骨架、各文种生成器、附件/
 //! 标题、文本工具、字体钩子），根文件保留文类常量、`write_tex` 入口与测试。
 
-use crate::models::{DraftInput, FontConfig, TemplateKind};
+use crate::models::{DraftInput, FontConfig, NumberingConfig, TemplateKind};
 use crate::units::UnitDisplay;
 use std::fs;
 use std::path::Path;
@@ -17,15 +17,22 @@ mod papers;
 mod text;
 
 pub(crate) use attachments::{
-    attachment_document_title_to_tex, attachment_landscape_flags, heading_number_prefix,
-    official_heading_to_tex, target_tex_section,
+    attachment_document_title_to_tex, attachment_landscape_flags, official_heading_to_tex,
+    target_tex_section,
 };
 pub(crate) use fonts::font_setup_hook;
+#[allow(unused_imports)]
 pub(crate) use official::{
     copy_count, official_letter_sections_to_tex, official_letter_sections_to_tex_with_barrier,
-    official_letter_tex, plain_document_tex,
+    official_letter_sections_to_tex_with_barrier_with_numbering,
+    official_letter_sections_to_tex_with_numbering, official_letter_tex,
+    official_letter_tex_with_numbering, plain_document_tex, plain_document_tex_with_numbering,
 };
-pub(crate) use papers::{meeting_agenda_tex, red_head_approval_tex, white_paper_tex};
+#[allow(unused_imports)]
+pub(crate) use papers::{
+    meeting_agenda_tex, meeting_agenda_tex_with_numbering, red_head_approval_tex,
+    red_head_approval_tex_with_numbering, white_paper_tex, white_paper_tex_with_numbering,
+};
 pub(crate) use text::{
     attachment_summary_tex, body_text_to_tex, latex_name, red_approval_title_content_tex,
     security_commands, tex_escape, tex_spaced, tex_spread_signature, title_content_tex,
@@ -44,6 +51,7 @@ const GONGHAN_CLASS_NAME: &str = "gonghan-gwa";
 /// 每次导出都要跟着 `.cls` 一起写出去——少了它，连普通公文都编译不了。
 const ULEM_STY: &str = include_str!("../../ulem.sty");
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试与部分旧调用使用。
 pub fn write_tex(
     path: &Path,
     input: &DraftInput,
@@ -51,14 +59,41 @@ pub fn write_tex(
     display: &UnitDisplay,
     fonts: &FontConfig,
 ) -> Result<()> {
+    write_tex_with_numbering(
+        path,
+        input,
+        markdown,
+        display,
+        fonts,
+        &NumberingConfig::default(),
+    )
+}
+
+/// 与 [`write_tex`] 相同，另按设置里的编号样式生成标题与列表编号。
+pub fn write_tex_with_numbering(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+) -> Result<()> {
     let content = match input.kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
-            official_letter_tex(input, markdown, display)
+            official_letter_tex_with_numbering(input, markdown, display, numbering)
         }
-        TemplateKind::PlainDocument => plain_document_tex(input, markdown),
-        TemplateKind::WhitePaper => white_paper_tex(input, markdown, display),
-        TemplateKind::RedHeadApproval => red_head_approval_tex(input, markdown, display),
-        TemplateKind::MeetingAgenda => meeting_agenda_tex(input, markdown),
+        TemplateKind::PlainDocument => {
+            plain_document_tex_with_numbering(input, markdown, numbering)
+        }
+        TemplateKind::WhitePaper => {
+            white_paper_tex_with_numbering(input, markdown, display, numbering)
+        }
+        TemplateKind::RedHeadApproval => {
+            red_head_approval_tex_with_numbering(input, markdown, display, numbering)
+        }
+        TemplateKind::MeetingAgenda => {
+            meeting_agenda_tex_with_numbering(input, markdown, numbering)
+        }
     };
     // 选了本机字体才注入钩子；没选时产出的 TeX 与从前逐字节一致。
     let content = match font_setup_hook(fonts) {

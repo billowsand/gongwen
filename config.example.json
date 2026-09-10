@@ -253,5 +253,13 @@
     "body": { "family": "", "display": "", "path": "" },
     "page_number": { "family": "", "display": "", "path": "" }
   },
+  "numbering": {
+    "heading1": "chinese",
+    "heading2": "chinese_paren",
+    "heading3": "decimal_dot",
+    "heading4": "half_digit_paren",
+    "list1": "circled",
+    "list2": "decimal_dot"
+  },
   "theme": "claude"
 }

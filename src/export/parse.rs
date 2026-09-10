@@ -3,7 +3,10 @@
 //! 由 src/export/mod.rs 拆分而来：本文件是模块 `export::parse`，与其它子模块共享
 //! `export` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::export::{attachment_title_name, clean_heading_number, legacy_attachment_label};
+use crate::export::{
+    attachment_title_name, clean_heading_number, legacy_attachment_label, render_list_number,
+};
+use crate::models::NumberingConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MarkdownBlock {
@@ -102,7 +105,15 @@ pub(crate) struct LocatedBlock {
 }
 
 pub(crate) fn parse_markdown(markdown: &str) -> Vec<MarkdownBlock> {
-    parse_markdown_located(markdown)
+    parse_markdown_with_numbering(markdown, &NumberingConfig::default())
+}
+
+/// 与 [`parse_markdown`] 相同，另按设置生成段内列表（一级列表）的编号样式。
+pub(crate) fn parse_markdown_with_numbering(
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> Vec<MarkdownBlock> {
+    parse_markdown_located_with_numbering(markdown, numbering)
         .into_iter()
         .map(|located| located.block)
         .collect()
@@ -111,8 +122,17 @@ pub(crate) fn parse_markdown(markdown: &str) -> Vec<MarkdownBlock> {
 /// 与 `parse_markdown` 同一套块序列，另外给出每个块在源码里的 1-based 起始行号。
 /// 行号会随 `\GwaTail{行号}` 写进 TeX，编译后由孤行探针原样回传，审校提示因此
 /// 能直接点到 Markdown 的哪一段，不必再去猜段落序号。
+#[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn parse_markdown_with_lines(markdown: &str) -> (Vec<MarkdownBlock>, Vec<usize>) {
-    let located = parse_markdown_located(markdown);
+    parse_markdown_with_lines_with_numbering(markdown, &NumberingConfig::default())
+}
+
+/// 与 [`parse_markdown_with_lines`] 相同，另按设置生成段内列表（一级列表）的编号样式。
+pub(crate) fn parse_markdown_with_lines_with_numbering(
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> (Vec<MarkdownBlock>, Vec<usize>) {
+    let located = parse_markdown_located_with_numbering(markdown, numbering);
     let starts: Vec<usize> = source_lines(markdown)
         .into_iter()
         .map(|(offset, _)| offset)
@@ -163,6 +183,14 @@ pub(crate) fn source_lines(markdown: &str) -> Vec<(usize, &str)> {
 /// 与 `parse_markdown` 同一套规则，另外记录每个块占用的源码字节范围：
 /// 段落是合并的那几行，表格是表头到最后一行数据，其余就是它自己那一行。
 pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
+    parse_markdown_located_with_numbering(markdown, &NumberingConfig::default())
+}
+
+/// 与 [`parse_markdown_located`] 相同，另按设置生成段内列表（一级列表）的编号样式。
+pub(crate) fn parse_markdown_located_with_numbering(
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> Vec<LocatedBlock> {
     let mut blocks: Vec<LocatedBlock> = Vec::new();
     let mut paragraph: Vec<String> = Vec::new();
     let mut paragraph_range = 0..0;
@@ -277,7 +305,10 @@ pub(crate) fn parse_markdown_located(markdown: &str) -> Vec<LocatedBlock> {
                     .iter()
                     .enumerate()
                     .map(|(offset, text)| {
-                        format!("{}{text}", circled_number(start_number + offset))
+                        format!(
+                            "{}{text}",
+                            render_list_number(numbering.list1, start_number + offset)
+                        )
                     })
                     .collect::<String>();
                 paragraph

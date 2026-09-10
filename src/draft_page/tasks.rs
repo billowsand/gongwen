@@ -135,6 +135,7 @@ impl DraftPage<'_> {
         let markdown = self.doc.generated_markdown.clone();
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
+        let numbering = self.config.numbering;
         let tx = self.sender.clone();
         thread::spawn(move || {
             let result = export_and_compile(
@@ -144,6 +145,7 @@ impl DraftPage<'_> {
                 &selection,
                 &vocabulary,
                 &fonts,
+                &numbering,
                 |message| {
                     let _ = tx.send(WorkerResult::Doc {
                         key,
@@ -496,6 +498,7 @@ impl DraftPage<'_> {
                         &selection,
                         &config.vocabulary,
                         &config.fonts,
+                        &config.numbering,
                         |message| {
                             let _ = tx.send(WorkerResult::Doc {
                                 key,

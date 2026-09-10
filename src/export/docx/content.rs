@@ -14,7 +14,7 @@ use crate::export::title;
 use crate::export::{
     ColumnAlign, MarkdownBlock, inline_segments, official_heading_text, plain_text,
 };
-use crate::models::DraftInput;
+use crate::models::{DraftInput, NumberingConfig};
 use anyhow::{Context, Result};
 use docx_rs::*;
 use regex::Regex;
@@ -109,10 +109,11 @@ pub(crate) fn add_official_content_block(
     mut doc: Docx,
     block: &MarkdownBlock,
     counters: &mut [usize; 4],
+    numbering: &NumberingConfig,
 ) -> Docx {
     match block {
         MarkdownBlock::Heading(level, text) => {
-            if let Some(title) = official_heading_text(*level, text, counters) {
+            if let Some(title) = official_heading_text(*level, text, counters, numbering) {
                 doc = doc.add_paragraph(heading_paragraph(*level, &title));
             }
         }
@@ -125,7 +126,7 @@ pub(crate) fn add_official_content_block(
             doc = doc.add_paragraph(label_paragraph(text).indent(Some(420), None, None, None));
         }
         MarkdownBlock::OrderedListItem { number, text } => {
-            doc = doc.add_paragraph(ordered_list_paragraph(*number, text));
+            doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2));
         }
         MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
         MarkdownBlock::Image { alt, src } => {

@@ -5,7 +5,9 @@
 //! 决定写哪些记录，满足“导入也支持过滤筛选”。
 
 use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptStore, NewManuscript};
-use crate::models::{DraftInput, FontConfig, ManuscriptStatus, TemplateKind, VocabularyEntry};
+use crate::models::{
+    DraftInput, FontConfig, ManuscriptStatus, NumberingConfig, TemplateKind, VocabularyEntry,
+};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
@@ -328,6 +330,7 @@ pub fn export_selected_pdfs(
     options: &PdfExportOptions,
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
+    numbering: &NumberingConfig,
     zip_path: &Path,
     password: &str,
     mut progress: impl FnMut(&str),
@@ -382,7 +385,7 @@ pub fn export_selected_pdfs(
                 }
             }
             if options.compiled {
-                match compile_record_pdf(&record, &display, &fonts, &stem) {
+                match compile_record_pdf(&record, &display, &fonts, numbering, &stem) {
                     Ok(pdf_bytes) => {
                         let entry = unique_zip_name(&mut used_names, &stem, "pdf");
                         zip.start_file(entry, stored_options)?;
@@ -423,6 +426,7 @@ fn compile_record_pdf(
     record: &ManuscriptRecord,
     display: &UnitDisplay,
     fonts: &FontConfig,
+    numbering: &NumberingConfig,
     stem: &str,
 ) -> Result<Vec<u8>> {
     let counter = PDF_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -436,12 +440,13 @@ fn compile_record_pdf(
         .with_context(|| format!("无法创建临时工作目录 {}", dir.display()))?;
     let result = (|| {
         let tex_path = dir.join(format!("{stem}.tex"));
-        crate::export::write_tex(
+        crate::export::write_tex_with_numbering(
             &tex_path,
             &record.snapshot,
             &record.content_markdown,
             display,
             fonts,
+            numbering,
         )?;
         let pdf_path = crate::texcompile::compile_pdf_if_available(&tex_path, fonts)?
             .context("未检测到 TeX 引擎，无法编译非盖章件 PDF")?;
@@ -800,6 +805,7 @@ mod tests {
             &options,
             &sample_vocabulary(),
             &FontConfig::default(),
+            &NumberingConfig::default(),
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -867,6 +873,7 @@ mod tests {
             &options,
             &sample_vocabulary(),
             &FontConfig::default(),
+            &NumberingConfig::default(),
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -901,6 +908,7 @@ mod tests {
             &options,
             &sample_vocabulary(),
             &FontConfig::default(),
+            &NumberingConfig::default(),
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -925,6 +933,7 @@ mod tests {
             &options,
             &sample_vocabulary(),
             &FontConfig::default(),
+            &NumberingConfig::default(),
             &zip_path,
             TEST_PASSWORD,
             |_| {},

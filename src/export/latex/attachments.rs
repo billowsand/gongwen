@@ -5,7 +5,8 @@
 
 use crate::export::latex::tex_escape;
 use crate::export::table::requires_landscape;
-use crate::export::{MarkdownBlock, MarkdownSection, number_to_chinese, plain_text};
+use crate::export::{MarkdownBlock, MarkdownSection, official_heading_prefix, plain_text};
+use crate::models::NumberingConfig;
 
 /// 每个附件只要有一张表在竖页中横向过密，就将整个附件（而非仅表格）改为横页。
 pub(crate) fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> {
@@ -55,40 +56,14 @@ pub(crate) fn target_tex_section<'a>(
     }
 }
 
-/// 推进标题计数器并生成该层级的编号前缀（如“一、”“（一）”“1.”“(1)”）。
-/// 返回 None 表示该层级不支持编号，与 `official_heading_to_tex` 一致。
-pub(crate) fn heading_number_prefix(level: u8, counters: &mut [usize; 4]) -> Option<String> {
-    match level {
-        2 => {
-            counters[0] += 1;
-            counters[1..].fill(0);
-            Some(format!("{}、", number_to_chinese(counters[0])))
-        }
-        3 => {
-            counters[1] += 1;
-            counters[2..].fill(0);
-            Some(format!("（{}）", number_to_chinese(counters[1])))
-        }
-        4 => {
-            counters[2] += 1;
-            counters[3] = 0;
-            Some(format!("{}.", counters[2]))
-        }
-        5 => {
-            counters[3] += 1;
-            Some(format!("({})", counters[3]))
-        }
-        _ => None,
-    }
-}
-
 pub(crate) fn official_heading_to_tex(
     level: u8,
     text: &str,
     counters: &mut [usize; 4],
+    numbering: &NumberingConfig,
 ) -> Option<String> {
     let escaped = tex_escape(&plain_text(text));
-    let number = heading_number_prefix(level, counters)?;
+    let number = official_heading_prefix(level, counters, numbering)?;
     let rendered = match level {
         2 => format!("\\noindent\\hspace*{{2em}}{{\\heiti\\enheiti {number}{escaped}}}\\par"),
         3 => format!("\\noindent\\hspace*{{2em}}{{\\kai\\enkai {number}{escaped}}}\\par"),

@@ -7,9 +7,9 @@ use crate::export::title;
 use crate::export::title::TitlePlan;
 use crate::export::{
     MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level,
-    official_heading_text, parse_markdown, plain_text,
+    official_heading_text, parse_markdown_with_numbering, plain_text,
 };
-use crate::models::{DraftInput, StyleMode, TemplateKind, split_units};
+use crate::models::{DraftInput, NumberingConfig, StyleMode, TemplateKind, split_units};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use docx_rs::*;
@@ -80,17 +80,29 @@ const HEADER_MIN_SIZE: usize = 32;
 /// 规格 §3.3：预览版所有占位区域统一 1em 宽，用一个全角空格表示。
 const PREVIEW_PLACEHOLDER: &str = "\u{2003}";
 
+#[allow(dead_code)] // 默认编号的兼容入口，测试与部分旧调用使用。
 pub fn write_docx(
     path: &Path,
     input: &DraftInput,
     markdown: &str,
     display: &UnitDisplay,
 ) -> Result<()> {
+    write_docx_with_numbering(path, input, markdown, display, &NumberingConfig::default())
+}
+
+/// 与 [`write_docx`] 相同，另按设置里的编号样式生成标题与列表编号。
+pub fn write_docx_with_numbering(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    numbering: &NumberingConfig,
+) -> Result<()> {
     if input.kind == TemplateKind::MeetingAgenda {
         return write_meeting_agenda_docx(path, input, markdown);
     }
 
-    let blocks = parse_markdown(markdown);
+    let blocks = parse_markdown_with_numbering(markdown, numbering);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -273,7 +285,9 @@ pub fn write_docx(
                         && *level == compact_heading_level
                         && next_is_paragraph
                     {
-                        if let Some(title) = official_heading_text(*level, heading, &mut counters) {
+                        if let Some(title) =
+                            official_heading_text(*level, heading, &mut counters, numbering)
+                        {
                             let MarkdownBlock::Paragraph(body) = &blocks[index + 1] else {
                                 unreachable!()
                             };
@@ -299,7 +313,7 @@ pub fn write_docx(
                                 ),
                             );
                         }
-                        doc = add_official_content_block(doc, block, &mut counters);
+                        doc = add_official_content_block(doc, block, &mut counters, numbering);
                     }
                 }
             }
@@ -332,7 +346,7 @@ pub fn write_docx(
                     ));
                 }
                 MarkdownBlock::OrderedListItem { number, text } => {
-                    doc = doc.add_paragraph(ordered_list_paragraph(*number, text));
+                    doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2));
                 }
                 MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
             }
@@ -452,7 +466,7 @@ pub fn write_docx(
                     counters = [0; 4];
                     doc = doc.add_paragraph(attachment_document_title_paragraph(text));
                 }
-                _ => doc = add_official_content_block(doc, block, &mut counters),
+                _ => doc = add_official_content_block(doc, block, &mut counters, numbering),
             }
         }
     }

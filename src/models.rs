@@ -1236,6 +1236,140 @@ impl RibbonTab {
 pub const EDITOR_FONT_SIZE_MIN: f32 = 10.0;
 pub const EDITOR_FONT_SIZE_MAX: f32 = 24.0;
 
+/// 公文各级标题的编号样式。默认编号链为「一、→（一）→ 1. →（1）」，与
+/// GB/T 9704 的四级标题层级一致；导出的 TeX/PDF、Word 与界面预览共用同一套选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadingNumbering {
+    /// 一、二、三
+    #[default]
+    Chinese,
+    /// （一）（二）（三）
+    ChineseParen,
+    /// （1）（2）（3）
+    FullDigitParen,
+    /// (1)(2)(3)
+    HalfDigitParen,
+    /// 1. 2. 3.（正文无空格）
+    DecimalDot,
+    /// 第1章 第2章
+    ChapterDigit,
+    /// 第一章 第二章
+    ChapterChinese,
+    /// 第一部分 第二部分
+    Part,
+    /// 第1节 第2节
+    SectionDigit,
+}
+
+impl HeadingNumbering {
+    /// 全部可选样式，顺序与设置页下拉展示一致。
+    pub const ALL: [HeadingNumbering; 9] = [
+        Self::Chinese,
+        Self::ChineseParen,
+        Self::FullDigitParen,
+        Self::HalfDigitParen,
+        Self::DecimalDot,
+        Self::ChapterDigit,
+        Self::ChapterChinese,
+        Self::Part,
+        Self::SectionDigit,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chinese => "一、二、三",
+            Self::ChineseParen => "（一）（二）（三）",
+            Self::FullDigitParen => "（1）（2）（3）",
+            Self::HalfDigitParen => "(1)(2)(3)",
+            Self::DecimalDot => "1. 2. 3.",
+            Self::ChapterDigit => "第1章 第2章",
+            Self::ChapterChinese => "第一章 第二章",
+            Self::Part => "第一部分 第二部分",
+            Self::SectionDigit => "第1节 第2节",
+        }
+    }
+}
+
+/// 列表项的编号样式。一级列表对应「段内有序列表」（圈号），二级列表对应
+/// 「独立有序列表」（数字），二者可分别配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ListNumbering {
+    /// ①②③
+    #[default]
+    Circled,
+    /// (1)(2)(3)
+    HalfParen,
+    /// （1）（2）（3）
+    FullParen,
+    /// 1. 2. 3.
+    DecimalDot,
+}
+
+impl ListNumbering {
+    /// 全部可选样式，顺序与设置页下拉展示一致。
+    pub const ALL: [ListNumbering; 4] = [
+        Self::Circled,
+        Self::HalfParen,
+        Self::FullParen,
+        Self::DecimalDot,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Circled => "①②③",
+            Self::HalfParen => "(1)(2)(3)",
+            Self::FullParen => "（1）（2）（3）",
+            Self::DecimalDot => "1. 2. 3.",
+        }
+    }
+}
+
+/// 标题与列表的编号样式设置。旧配置没有该字段时按默认值补齐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NumberingConfig {
+    /// 一级标题（Markdown `##`）编号样式。
+    pub heading1: HeadingNumbering,
+    /// 二级标题（`###`）。
+    pub heading2: HeadingNumbering,
+    /// 三级标题（`####`）。
+    pub heading3: HeadingNumbering,
+    /// 四级标题（`#####`）。
+    pub heading4: HeadingNumbering,
+    /// 一级列表（段内有序列表）编号样式。
+    pub list1: ListNumbering,
+    /// 二级列表（独立有序列表）编号样式。
+    pub list2: ListNumbering,
+}
+
+impl Default for NumberingConfig {
+    fn default() -> Self {
+        Self {
+            heading1: HeadingNumbering::Chinese,
+            heading2: HeadingNumbering::ChineseParen,
+            heading3: HeadingNumbering::DecimalDot,
+            heading4: HeadingNumbering::HalfDigitParen,
+            list1: ListNumbering::Circled,
+            list2: ListNumbering::DecimalDot,
+        }
+    }
+}
+
+impl NumberingConfig {
+    /// 指定 Markdown 标题层级对应的编号样式；层级 2–5 分别对应一至四级标题。
+    pub fn heading(self, level: u8) -> Option<HeadingNumbering> {
+        match level {
+            2 => Some(self.heading1),
+            3 => Some(self.heading2),
+            4 => Some(self.heading3),
+            5 => Some(self.heading4),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -1271,6 +1405,8 @@ pub struct AppConfig {
     pub revise_model: ReviseModelConfig,
     /// 编译公文时使用的字体。默认沿用随应用分发的内置字体。
     pub fonts: FontConfig,
+    /// 各级标题与列表的编号样式。旧配置没有该字段时按默认值补齐。
+    pub numbering: NumberingConfig,
     /// 界面主题。旧配置没有该字段时回退默认。
     pub theme: ThemeName,
     /// 屏幕上公文纸面的明暗。导出结果不受影响。
@@ -1306,6 +1442,7 @@ impl Default for AppConfig {
             proofread: ProofreadConfig::default(),
             revise_model: ReviseModelConfig::default(),
             fonts: FontConfig::default(),
+            numbering: NumberingConfig::default(),
             theme: ThemeName::default(),
             paper: PaperMode::default(),
             ribbon_tab: RibbonTab::default(),

@@ -914,6 +914,42 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
             font_choice_label(b.fonts.choice(role)),
         );
     }
+    field(
+        &mut out,
+        "标题编号：一级标题",
+        a.numbering.heading1.label(),
+        b.numbering.heading1.label(),
+    );
+    field(
+        &mut out,
+        "标题编号：二级标题",
+        a.numbering.heading2.label(),
+        b.numbering.heading2.label(),
+    );
+    field(
+        &mut out,
+        "标题编号：三级标题",
+        a.numbering.heading3.label(),
+        b.numbering.heading3.label(),
+    );
+    field(
+        &mut out,
+        "标题编号：四级标题",
+        a.numbering.heading4.label(),
+        b.numbering.heading4.label(),
+    );
+    field(
+        &mut out,
+        "列表编号：一级列表",
+        a.numbering.list1.label(),
+        b.numbering.list1.label(),
+    );
+    field(
+        &mut out,
+        "列表编号：二级列表",
+        a.numbering.list2.label(),
+        b.numbering.list2.label(),
+    );
     out
 }
 

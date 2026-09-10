@@ -5,7 +5,7 @@
 
 use crate::export;
 use crate::export::{LocatedBlock, MarkdownBlock};
-use crate::models::DraftInput;
+use crate::models::{DraftInput, NumberingConfig};
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, clickable,
     content_block, document_number, header_unit, heading_family, indent, is_renderable_paragraph,
@@ -291,6 +291,7 @@ pub(crate) fn red_responsible_rows(input: &DraftInput, display: &UnitDisplay) ->
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn red_build_print_layout(
     ui: &egui::Ui,
     metrics: &Metrics,
@@ -299,6 +300,7 @@ pub(crate) fn red_build_print_layout(
     body: &[&LocatedBlock],
     title: &(String, Range<usize>),
     attachment_names: &[String],
+    numbering: &NumberingConfig,
 ) -> (RedPrintLayout, Vec<[String; 3]>) {
     let rows = red_responsible_rows(input, display);
     // TeX 承办区 = 0.4mm 红线 + 1mm 间距 + 每条固定 28pt 基线。
@@ -348,7 +350,9 @@ pub(crate) fn red_build_print_layout(
         match &located.block {
             MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
             MarkdownBlock::Heading(level, text) => {
-                let Some(text) = export::official_heading_text(*level, text, &mut counters) else {
+                let Some(text) =
+                    export::official_heading_text(*level, text, &mut counters, numbering)
+                else {
                     continue;
                 };
                 red_place_flow_text(
@@ -392,7 +396,8 @@ pub(crate) fn red_build_print_layout(
                 );
             }
             MarkdownBlock::OrderedListItem { number, text } => {
-                let mut segments = export::inline_segments(&format!("{number}.{text}"));
+                let prefix = export::render_list_number(numbering.list2, *number);
+                let mut segments = export::inline_segments(&format!("{prefix}{text}"));
                 if let Some(first) = segments.first_mut() {
                     first.text = format!("{}{}", indent(INDENT_CHARS), first.text);
                 }
@@ -839,9 +844,18 @@ pub(crate) fn red_approval_print_preview(
     anchor: Option<&Range<usize>>,
     scroll_to_anchor: &mut bool,
     clicked: &mut Option<Range<usize>>,
+    numbering: &NumberingConfig,
 ) {
-    let (layout_state, rows) =
-        red_build_print_layout(ui, metrics, input, display, body, title, attachment_names);
+    let (layout_state, rows) = red_build_print_layout(
+        ui,
+        metrics,
+        input,
+        display,
+        body,
+        title,
+        attachment_names,
+        numbering,
+    );
     paint_red_print_pages(
         ui,
         metrics,
@@ -875,7 +889,7 @@ pub(crate) fn red_approval_print_preview(
             for located in attachment {
                 let range = located.range.clone();
                 clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
-                    content_block(ui, metrics, &located.block, &mut counters, true)
+                    content_block(ui, metrics, &located.block, &mut counters, true, numbering)
                 });
             }
         });

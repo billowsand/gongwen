@@ -6,7 +6,7 @@
 use crate::app::{
     GongwenApp, LABEL_WIDTH, field, row_label_with_info, section_heading_with_info, warn,
 };
-use crate::models::{FontRole, PaperMode, RerankMode, ThemeName};
+use crate::models::{FontRole, HeadingNumbering, ListNumbering, PaperMode, RerankMode, ThemeName};
 use crate::storage;
 use crate::system_fonts;
 use crate::theme;
@@ -472,6 +472,86 @@ impl GongwenApp {
         }
     }
 
+    /// 标题与列表编号：各级标题与一、二级列表分别选择编号样式。
+    ///
+    /// 选择立即写入配置并在保存时生效；预览、实时排版编辑器与导出的 TeX/PDF、
+    /// Word 共用同一套选择，保证所见即所得。
+    pub(crate) fn numbering_settings_ui(&mut self, ui: &mut egui::Ui) {
+        section_heading_with_info(
+            ui,
+            theme::Icon::ListOrdered,
+            "标题与列表编号",
+            "设置公文各级标题与列表项的编号样式。导出的 TeX/PDF、Word 与界面预览、实时排版编辑器统一使用，保证预览所见即导出所得。",
+        );
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("标题编号").strong());
+        for (key, label, style) in [
+            (
+                "heading1",
+                "一级标题（##）",
+                &mut self.config.numbering.heading1,
+            ),
+            (
+                "heading2",
+                "二级标题（###）",
+                &mut self.config.numbering.heading2,
+            ),
+            (
+                "heading3",
+                "三级标题（####）",
+                &mut self.config.numbering.heading3,
+            ),
+            (
+                "heading4",
+                "四级标题（#####）",
+                &mut self.config.numbering.heading4,
+            ),
+        ] {
+            ui.horizontal(|ui| {
+                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(label));
+                egui::ComboBox::from_id_salt(format!("heading_numbering_{key}"))
+                    .selected_text(style.label())
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        for option in HeadingNumbering::ALL {
+                            ui.selectable_value(style, option, option.label());
+                        }
+                    });
+            });
+        }
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("列表编号").strong());
+        for (key, label, style) in [
+            (
+                "list1",
+                "一级列表（段内）",
+                &mut self.config.numbering.list1,
+            ),
+            (
+                "list2",
+                "二级列表（独立）",
+                &mut self.config.numbering.list2,
+            ),
+        ] {
+            ui.horizontal(|ui| {
+                ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(label));
+                egui::ComboBox::from_id_salt(format!("list_numbering_{key}"))
+                    .selected_text(style.label())
+                    .width(240.0)
+                    .show_ui(ui, |ui| {
+                        for option in ListNumbering::ALL {
+                            ui.selectable_value(style, option, option.label());
+                        }
+                    });
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+            ui.weak("会议议程的事项编号固定为“1. 2. 3.”，不受列表编号设置影响。");
+        });
+    }
+
     pub(crate) fn settings_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("settings_scroll")
@@ -854,6 +934,10 @@ impl GongwenApp {
                 ui.add_space(12.0);
                 ui.separator();
                 self.font_settings_ui(ui);
+
+                ui.add_space(12.0);
+                ui.separator();
+                self.numbering_settings_ui(ui);
 
                 ui.add_space(12.0);
                 ui.separator();
