@@ -30,7 +30,7 @@ impl GongwenApp {
     /// `DraftSession` 拖着一堆 egui 视图状态，测试里造不出来。
     fn sop_snapshot(&self) -> DocSnapshot {
         let doc = &self.docs[self.active_doc];
-        let blocking = crate::validator::blocking_issues(
+        let mustfix_elements = crate::validator::mustfix_issues(
             &doc.draft,
             &doc.generated_markdown,
             &self.config.vocabulary,
@@ -54,7 +54,7 @@ impl GongwenApp {
         }
         DocSnapshot {
             empty: doc.generated_markdown.trim().is_empty(),
-            blocking_issues: blocking,
+            mustfix_issues: mustfix_elements,
             mustfix_pending: mustfix,
             advisory_pending: advisory,
             model_pending: model,

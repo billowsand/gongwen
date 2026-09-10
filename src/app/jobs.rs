@@ -1014,9 +1014,23 @@ impl GongwenApp {
                 // 成品不再进抽屉：让工具栏那三枚 TEX/PDF/WORD 入口重新扫盘点亮即可。
                 self.export_links.invalidate();
                 let orphans = self.docs[index].proof_warnings.len();
-                // 孤行或编译失败都是导出这一下才能看到的，弹抽屉把它们顶到用户眼前，
-                // 别让红色错误提示躺在折叠面板里看不见。
-                if orphans > 0 || self.docs[index].export_error.is_some() {
+                // 要素问题不挡导出，但导出成功不等于这稿子能签发。数出来缀在状态栏
+                // 末尾，免得「已导出 N 个文件」被读成「这份可以发了」。
+                let mustfix = crate::validator::mustfix_issues(
+                    &self.docs[index].draft,
+                    &self.docs[index].generated_markdown,
+                    &self.config.vocabulary,
+                    &self.config.security_rules,
+                )
+                .len();
+                let mustfix_tail = if mustfix > 0 {
+                    format!("；仍有 {mustfix} 项要素问题待补齐，签发前请处理")
+                } else {
+                    String::new()
+                };
+                // 孤行、编译失败、要素未齐都是这一下才摆到眼前的，弹抽屉把它们顶出来，
+                // 别让提示躺在折叠面板里看不见。
+                if orphans > 0 || mustfix > 0 || self.docs[index].export_error.is_some() {
                     self.docs[index].result_drawer_open = true;
                 }
                 self.status = if self.docs[index].export_error.is_some() {
@@ -1026,12 +1040,12 @@ impl GongwenApp {
                     )
                 } else if orphans > 0 {
                     format!(
-                        "{prefix}当前审校稿已导出 {} 个文件；实测发现 {orphans} 处孤行，见审校提示。",
+                        "{prefix}当前审校稿已导出 {} 个文件；实测发现 {orphans} 处孤行，见审校提示{mustfix_tail}。",
                         self.docs[index].output_files.len()
                     )
                 } else {
                     format!(
-                        "{prefix}当前审校稿已导出 {} 个文件。",
+                        "{prefix}当前审校稿已导出 {} 个文件{mustfix_tail}。",
                         self.docs[index].output_files.len()
                     )
                 };

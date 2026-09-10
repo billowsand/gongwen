@@ -286,7 +286,7 @@ impl GongwenApp {
                                         ui.horizontal_wrapped(|ui| {
                                             theme::chip(ui, "待核实", theme::warn(), theme::warn_soft());
                                             ui.label(format!(
-                                                "当前公文要素仍缺：{}。可以先起草，但正式导出会被暂停。",
+                                                "当前公文要素仍缺：{}。不影响起草和导出，但签发前必须补齐。",
                                                 pending.join("、")
                                             ));
                                         });

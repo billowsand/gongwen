@@ -101,26 +101,20 @@ impl DraftPage<'_> {
             *self.status = "请至少勾选一种导出格式。".into();
             return;
         }
-        let blockers = validator::blocking_issues(
+        // 这里没有校验闸门，是想清楚了的：缺主送单位、名称不规范这类问题决定的是
+        // 这份稿子能不能签发，不决定 PDF 能不能排出来——而看版式、请人过目，靠的
+        // 恰恰就是这份 PDF。真正做不出成品的只有「正文为空」，上面那一条已经拦下了。
+        // 要素问题照样要让人看见，所以弹开审校抽屉；具体条目由导出结束后的
+        // revalidate 统一算，不必在这里先塞一份进去。
+        if !validator::mustfix_issues(
             &self.doc.draft,
             &self.doc.generated_markdown,
             &self.config.vocabulary,
             &self.config.security_rules,
-        );
-        if !blockers.is_empty() {
-            self.doc.warnings.extend(
-                blockers
-                    .iter()
-                    .map(|message| ReviewNote::from(format!("阻断导出：{message}"))),
-            );
-            self.doc.warnings.sort_by(|a, b| a.message.cmp(&b.message));
-            self.doc.warnings.dedup_by(|a, b| a.message == b.message);
+        )
+        .is_empty()
+        {
             self.doc.result_drawer_open = true;
-            *self.status = format!(
-                "正式导出已暂停：还有 {} 项硬错误，请在审校结果中处理后重试。",
-                blockers.len()
-            );
-            return;
         }
         // 成文日期只在导出这一刻查。编辑期间日期本来就该是旧的，那时候弹提示
         // 纯属打扰；而稿子做好放了几天才签发、日期还停在上周，是真出过的事。
@@ -487,7 +481,8 @@ impl DraftPage<'_> {
                 let mut proof_warnings: Vec<ReviewNote> = Vec::new();
                 let mut proof_measured = false;
                 let estimated = validator::estimate_layout_notes(&markdown);
-                let blockers = validator::blocking_issues(
+                // 同上：要素没齐也照导，只有做不出成品的情况才跳过导出这一步。
+                let blockers = validator::compile_blocking_issues(
                     &input,
                     &markdown,
                     &config.vocabulary,
@@ -518,7 +513,7 @@ impl DraftPage<'_> {
                         warnings.extend(
                             blockers
                                 .into_iter()
-                                .map(|message| ReviewNote::from(format!("阻断导出：{message}"))),
+                                .map(|message| ReviewNote::from(format!("无法出稿：{message}"))),
                         );
                     }
                     vec![]

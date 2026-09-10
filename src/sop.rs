@@ -54,7 +54,7 @@ impl Stage {
     pub fn purpose(self) -> &'static str {
         match self {
             Self::Draft => "有正文才谈得上后面各步",
-            Self::Elements => "缺必填要素会被正式导出阻断",
+            Self::Elements => "缺必填要素不挡导出，但签发前必须补齐",
             Self::Proofread => "必错级问题必须清零，疑似项由人判断",
             Self::ModelReview => "小模型逐句查语病、称谓与标点",
             Self::OpenQuestions => "正文里的「待核实」占位必须落实后才能送审",
@@ -98,8 +98,8 @@ impl StageStatus {
 pub struct DocSnapshot {
     /// 正文是否为空。
     pub empty: bool,
-    /// 会阻断正式导出的要素问题数。
-    pub blocking_issues: usize,
+    /// 签发前必须处理的要素问题数。只报数——它不挡导出，稿子照样编译得出 PDF。
+    pub mustfix_issues: usize,
     /// 待确认的必错级修订建议数。
     pub mustfix_pending: usize,
     /// 待确认的疑似/提示级建议数。只报数，不作为通过与否的判据——
@@ -163,12 +163,12 @@ fn judge(stage: Stage, snap: &DocSnapshot) -> (StageState, String) {
         // 正文还没有时，后面几步一律「待办」而不是「不适用」：它们迟早都要做，
         // 标成不适用会让人以为可以跳过。
         Stage::Elements => {
-            if snap.blocking_issues == 0 {
+            if snap.mustfix_issues == 0 {
                 (StageState::Passed, "必填要素齐备".into())
             } else {
                 (
                     StageState::Todo,
-                    format!("还有 {} 项会阻断正式导出", snap.blocking_issues),
+                    format!("还有 {} 项要素问题，签发前必须补齐", snap.mustfix_issues),
                 )
             }
         }
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn the_next_todo_follows_process_order() {
         let snapshot = DocSnapshot {
-            blocking_issues: 1,
+            mustfix_issues: 1,
             mustfix_pending: 5,
             open_questions: 3,
             ..clean()
