@@ -50,6 +50,7 @@ pub(crate) fn add_footer_record(doc: Docx, input: &DraftInput, display: &UnitDis
             .add_run(record_run(&format!("抄送：{copies_text}")));
     }
     let copies_paragraph = copies_paragraph
+        .keep_next(true)
         .add_run(Run::new().add_tab())
         .add_run(record_run(&format!(
             "（共印{}份）",
@@ -80,10 +81,20 @@ pub(crate) fn add_footer_record(doc: Docx, input: &DraftInput, display: &UnitDis
     rows.append(&mut record_rows);
 
     let borders = TableBorders::new()
-        .set(TableBorder::new(TableBorderPosition::Top).size(8))
-        .set(TableBorder::new(TableBorderPosition::Bottom).size(8))
-        .set(TableBorder::new(TableBorderPosition::InsideH).size(4));
-    doc.add_table(
+        .clear_all()
+        .set(TableBorder::new(TableBorderPosition::Top).size(14))
+        .set(TableBorder::new(TableBorderPosition::Bottom).size(14))
+        .set(TableBorder::new(TableBorderPosition::InsideH).size(7));
+    doc.add_paragraph(
+        Paragraph::new()
+            .line_spacing(
+                LineSpacing::new()
+                    .line(567)
+                    .line_rule(LineSpacingType::Exact),
+            )
+            .keep_next(true),
+    )
+    .add_table(
         Table::new(rows)
             .set_grid(grid)
             .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)

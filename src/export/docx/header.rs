@@ -4,7 +4,7 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    HEADER_MIN_SIZE, HEADER_SIZE, HEADER_WIDTH_TWIPS, PAGE_NUMBER_SIZE, chinese_fonts,
+    BODY_LINE_TWIPS, HEADER_SIZE, HEADER_WIDTH_TWIPS, PAGE_NUMBER_SIZE, chinese_fonts,
 };
 use docx_rs::*;
 
@@ -15,12 +15,14 @@ pub(crate) struct HeaderLayout {
     pub(crate) size: usize,
     /// 左右缩进，把拉开后的整块摆到版心中间。
     pub(crate) side_indent: i32,
+    /// 长名称按 TeX resizebox 横向压缩，保持红头字高。
+    pub(crate) scale: i32,
 }
 
 /// 发文机关标志分两种情形排布：
 /// 1. 版心排得下——字号不变，用分散对齐把字距均匀撑开，字形不会变形；
 ///    字数很少时把字距限制在一个字宽以内，免得几个字散得满页都是。
-/// 2. 版心排不下——缩小字号让它回到一行，而不是把字压扁。
+/// 2. 版心排不下——与 TeX resizebox 一样压缩宽度，保持红头字高。
 pub(crate) fn issuing_unit_header(unit: &str) -> HeaderLayout {
     // 汉字是等宽的：一个字的宽度 = 字号（半磅）× 10 twip。
     let char_width = |size: usize| size as i32 * 10;
@@ -32,10 +34,10 @@ pub(crate) fn issuing_unit_header(unit: &str) -> HeaderLayout {
     let natural = count * char_width(HEADER_SIZE);
 
     if natural >= HEADER_WIDTH_TWIPS {
-        let fitted = (HEADER_WIDTH_TWIPS / count / 10) as usize;
         return HeaderLayout {
-            size: fitted.clamp(HEADER_MIN_SIZE, HEADER_SIZE),
+            size: HEADER_SIZE,
             side_indent: 0,
+            scale: (HEADER_WIDTH_TWIPS * 100 / natural).max(1),
         };
     }
 
@@ -45,7 +47,76 @@ pub(crate) fn issuing_unit_header(unit: &str) -> HeaderLayout {
     HeaderLayout {
         size: HEADER_SIZE,
         side_indent: (HEADER_WIDTH_TWIPS - block) / 2,
+        scale: 100,
     }
+}
+
+pub(crate) fn issuing_unit_paragraph(unit: &str) -> Paragraph {
+    let layout = issuing_unit_header(unit);
+    Paragraph::new()
+        .add_run(
+            Run::new()
+                .add_text(unit)
+                .fonts(chinese_fonts("方正小标宋简体"))
+                .size(layout.size)
+                .color("FF0000")
+                .stretch(layout.scale),
+        )
+        .align(AlignmentType::Distribute)
+        .indent(
+            Some(layout.side_indent),
+            None,
+            Some(layout.side_indent),
+            None,
+        )
+        // 红头字号大于正文，不能继承正文的固定行高，否则 Word 会裁掉字顶。
+        .line_spacing(
+            LineSpacing::new()
+                .line(1000)
+                .line_rule(LineSpacingType::Exact),
+        )
+        .keep_next(true)
+}
+
+/// 0.53 mm 红色反线，156 mm 宽；用无内边距的一行表格保持可编辑性。
+pub(crate) fn letter_rule() -> Table {
+    Table::new(vec![
+        TableRow::new(vec![
+            TableCell::new().add_paragraph(
+                Paragraph::new()
+                    .add_run(Run::new().size(2))
+                    .line_spacing(LineSpacing::new().line(1).line_rule(LineSpacingType::Exact)),
+            ),
+        ])
+        .row_height(1.0)
+        .height_rule(HeightRule::Exact),
+    ])
+    .set_grid(vec![HEADER_WIDTH_TWIPS as usize])
+    .width(HEADER_WIDTH_TWIPS as usize, WidthType::Dxa)
+    .layout(TableLayoutType::Fixed)
+    .margins(TableCellMargins::new().margin(0, 0, 0, 0))
+    .clear_all_border()
+    .set_borders(
+        TableBorders::new().clear_all().set(
+            TableBorder::new(TableBorderPosition::Top)
+                .size(12)
+                .color("FF0000"),
+        ),
+    )
+}
+
+pub(crate) fn letter_header(unit: &str) -> Header {
+    Header::new()
+        .add_paragraph(issuing_unit_paragraph(unit))
+        .add_table(letter_rule())
+}
+
+pub(crate) fn blank_line() -> Paragraph {
+    Paragraph::new().line_spacing(
+        LineSpacing::new()
+            .line(BODY_LINE_TWIPS as i32)
+            .line_rule(LineSpacingType::Exact),
+    )
 }
 
 pub(crate) fn page_number_footer(alignment: AlignmentType) -> Footer {

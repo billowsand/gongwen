@@ -13,12 +13,17 @@ use crate::models::{DraftInput, JointIssuanceMode, LetterVersion, TemplateKind, 
 use crate::units::UnitDisplay;
 use docx_rs::*;
 
-pub(crate) fn official_document_number(input: &DraftInput) -> Option<String> {
+/// 发文字号：代字〔年〕序号 + `gap` + 号。
+///
+/// `gap` 对齐 TeX 的两种写法：函稿版头是 `\DocumentNumber{}~号`（序号与“号”之间
+/// 有一个西文空格，预览端同样留空格），红头呈批件首页是 `\DocumentNumber{}号`
+/// （紧挨着，不留空）。
+pub(crate) fn official_document_number(input: &DraftInput, gap: &str) -> Option<String> {
     let code = input.profile.department_code.trim();
     let serial = input.profile.document_number.trim();
     if input.profile.letter_version == LetterVersion::Preview {
         let year = input.document_year();
-        return Some(format!("{code}〔{year}〕{PREVIEW_PLACEHOLDER}号"));
+        return Some(format!("{code}〔{year}〕{PREVIEW_PLACEHOLDER}{gap}号"));
     }
     if serial.is_empty() {
         return None;
@@ -27,7 +32,7 @@ pub(crate) fn official_document_number(input: &DraftInput) -> Option<String> {
         Some(serial.to_string())
     } else {
         let year = input.document_year();
-        Some(format!("{code}〔{year}〕{serial}号"))
+        Some(format!("{code}〔{year}〕{serial}{gap}号"))
     }
 }
 
@@ -49,7 +54,7 @@ pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String]) -> Docx {
         doc = doc.add_paragraph(
             Paragraph::new().line_spacing(
                 LineSpacing::new()
-                    .line(560)
+                    .line(super::BODY_LINE_TWIPS as i32)
                     .line_rule(LineSpacingType::Exact),
             ),
         );
@@ -67,7 +72,7 @@ pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String]) -> Docx {
             .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
             .line_spacing(
                 LineSpacing::new()
-                    .line(560)
+                    .line(super::BODY_LINE_TWIPS as i32)
                     .line_rule(LineSpacingType::Exact),
             )
             .keep_next(true);
@@ -127,19 +132,20 @@ pub(crate) fn add_white_paper_signature(
             doc = doc.add_paragraph(
                 Paragraph::new().add_run(body_run("")).line_spacing(
                     LineSpacing::new()
-                        .line(560)
+                        .line(super::BODY_LINE_TWIPS as i32)
                         .line_rule(LineSpacingType::Exact),
                 ),
             );
         }
         let mut paragraph = Paragraph::new()
             .align(AlignmentType::Right)
+            .keep_next(true)
             // 右缩进就是签字空间：单位名右对齐到“版心右缘减去签字位”。
             .indent(Some(0), None, Some(signing_room_twips as i32), None)
             .line_spacing(
                 LineSpacing::new()
                     .before(if index == 0 { CLOSING_GAP_TWIPS } else { 0 })
-                    .line(560)
+                    .line(super::BODY_LINE_TWIPS as i32)
                     .line_rule(LineSpacingType::Exact),
             );
         for run in spread_runs(unit) {
@@ -152,7 +158,7 @@ pub(crate) fn add_white_paper_signature(
     doc = doc.add_paragraph(
         Paragraph::new().add_run(body_run("")).line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         ),
     );
@@ -160,11 +166,16 @@ pub(crate) fn add_white_paper_signature(
         .add_run(body_run(official_signature_date(input)))
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         );
-    let date = if signing_room_twips == 0 {
-        date.align(AlignmentType::Right)
+    let date = if input.kind == TemplateKind::WhitePaper || signing_room_twips == 0 {
+        date.align(AlignmentType::Right).indent(
+            Some(0),
+            None,
+            Some(signing_room_twips as i32),
+            None,
+        )
     } else {
         // 左缩进到最宽那行单位的左沿，再在剩下的“单位 + 签字空间”里居中，
         // 段落右缘就是版心右缘，居中位置正好是这一整段的中点。

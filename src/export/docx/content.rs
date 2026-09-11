@@ -5,19 +5,18 @@
 
 use crate::export::docx::{
     AGENDA_NUMBERING_ID, BODY_SIZE, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE, agenda_blank_line,
-    agenda_body_paragraph, agenda_labeled_paragraph, body_paragraph, body_runs, chinese_fonts,
-    document_title_paragraph, docx_name, heading_paragraph, image_paragraph, label_paragraph,
-    ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
+    agenda_body_paragraph, body_paragraph, body_runs, chinese_fonts, document_title_paragraph,
+    docx_name, heading_paragraph, image_paragraph, label_paragraph, ordered_list_paragraph,
+    security_runs, table_run_sized, table_runs_sized,
 };
 use crate::export::table::{ColumnAlignment, to_docx_grid};
 use crate::export::title;
 use crate::export::{
     ColumnAlign, MarkdownBlock, inline_segments, official_heading_text, plain_text,
 };
-use crate::models::{DraftInput, NumberingConfig};
+use crate::models::{DraftInput, ListNumbering, NumberingConfig};
 use anyhow::{Context, Result};
 use docx_rs::*;
-use regex::Regex;
 use std::fs::File;
 use std::path::Path;
 
@@ -123,7 +122,8 @@ pub(crate) fn add_official_content_block(
             doc = doc.add_paragraph(body_paragraph(text));
         }
         MarkdownBlock::ListItem(text) => {
-            doc = doc.add_paragraph(label_paragraph(text).indent(Some(420), None, None, None));
+            // TeX：\noindent{文本}\par，无序列表项顶格，不额外缩进。
+            doc = doc.add_paragraph(label_paragraph(text));
         }
         MarkdownBlock::OrderedListItem { number, text } => {
             doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2));
@@ -158,6 +158,7 @@ pub(crate) fn write_meeting_agenda_docx(
     path: &Path,
     input: &DraftInput,
     markdown: &str,
+    numbering: &NumberingConfig,
 ) -> Result<()> {
     let title = markdown
         .lines()
@@ -175,7 +176,6 @@ pub(crate) fn write_meeting_agenda_docx(
     } else {
         input.profile.security_period.trim()
     };
-    let item_pattern = Regex::new(r"^\d+[.、．)]\s*(.+)$").expect("valid regex");
 
     let mut doc = Docx::new()
         .page_size(11906, 16838)
@@ -192,14 +192,18 @@ pub(crate) fn write_meeting_agenda_docx(
         .default_size(BODY_SIZE)
         .default_line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .add_abstract_numbering(agenda_numbering())
         .add_numbering(Numbering::new(AGENDA_NUMBERING_ID, AGENDA_NUMBERING_ID));
 
+    // 会议议程同样走 \pagestyle{fancy}：首页无页码，其后按页码样式排。
+    // TeX 的会议议程类选项不带 duplex，页码固定居中。
+    doc = super::add_official_page_footers(doc, false);
+
     // 指人专办：勾选后在“密级★保密期限”后空一个全角空格，再以黑体标注“指人专办”。
-    // 会议议程密级行整体黑体加粗；数字年限的保密期限数字部分用等宽西文字体。
+    // 会议议程密级行整体黑体加粗，西文及保密期限数字也使用黑体。
     let special = if input.profile.special_handling {
         "　指人专办"
     } else {
@@ -214,7 +218,7 @@ pub(crate) fn write_meeting_agenda_docx(
             .align(AlignmentType::Left)
             .line_spacing(
                 LineSpacing::new()
-                    .line(560)
+                    .line(super::SECURITY_FIRST_LINE_TWIPS as i32)
                     .line_rule(LineSpacingType::Exact),
             )
             .keep_next(true),
@@ -225,44 +229,40 @@ pub(crate) fn write_meeting_agenda_docx(
         document_title_paragraph(title, &plan)
             .line_spacing(
                 LineSpacing::new()
-                    .line(560)
+                    .line(super::BODY_LINE_TWIPS as i32)
                     .line_rule(LineSpacingType::Exact),
             )
             .keep_next(true),
     );
     doc = doc.add_paragraph(agenda_blank_line());
 
-    for line in markdown
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        if line.starts_with("# ") {
-            continue;
-        }
-        if line.starts_with("一、时间地点")
-            || line.starts_with("二、参加人员")
-            || line.starts_with("三、研讨内容")
-        {
-            doc = doc.add_paragraph(agenda_labeled_paragraph(line));
-        } else if let Some(captures) = item_pattern.captures(line) {
-            let content = captures.get(1).map(|value| value.as_str()).unwrap_or(line);
-            let mut item = agenda_body_paragraph();
-            for run in body_runs(content) {
-                item = item.add_run(run);
+    // 会议议程事项固定用「1. 2. 3.」阿拉伯数字，不随设置里的列表编号样式变化
+    // （与 latex::meeting_agenda_tex_with_numbering 同一约定）。
+    let mut agenda_numbering_config = *numbering;
+    agenda_numbering_config.list1 = ListNumbering::DecimalDot;
+    agenda_numbering_config.list2 = ListNumbering::DecimalDot;
+
+    let mut counters = [0; 4];
+    for block in crate::export::parse_markdown_with_numbering(markdown, &agenda_numbering_config) {
+        match &block {
+            MarkdownBlock::Title(_) => {}
+            // “一、时间地点”等三节在 TeX/预览里都是普通正文段（仿宋三号、首行缩进
+            // 两字），不另作黑体标签处理。
+            MarkdownBlock::OrderedListItem { text, .. } => {
+                let mut item = agenda_body_paragraph();
+                for run in body_runs(text) {
+                    item = item.add_run(run);
+                }
+                doc = doc.add_paragraph(
+                    item.numbering(NumberingId::new(AGENDA_NUMBERING_ID), IndentLevel::new(0)),
+                );
             }
-            doc = doc.add_paragraph(
-                item.numbering(NumberingId::new(AGENDA_NUMBERING_ID), IndentLevel::new(0)),
-            );
-        } else {
-            let mut item = agenda_body_paragraph();
-            for run in body_runs(line) {
-                item = item.add_run(run);
+            _ => {
+                doc =
+                    add_official_content_block(doc, &block, &mut counters, &agenda_numbering_config)
             }
-            doc = doc.add_paragraph(item);
         }
     }
-
     let file =
         File::create(path).with_context(|| format!("无法创建 Word 文件：{}", path.display()))?;
     doc.build().pack(file).context("写入会议议程 DOCX 包失败")?;

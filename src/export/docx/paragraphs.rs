@@ -5,7 +5,7 @@
 
 use crate::export::docx::{
     BODY_SIZE, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS, TITLE_SIZE,
-    body_run, body_runs, chinese_fonts, heiti_run, security_runs, title_run,
+    body_run, body_runs, chinese_fonts, security_runs, title_run,
 };
 use crate::export::plain_text;
 use crate::export::title;
@@ -21,7 +21,7 @@ pub(crate) fn body_paragraph(text: &str) -> Paragraph {
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true);
@@ -34,13 +34,30 @@ pub(crate) fn body_paragraph(text: &str) -> Paragraph {
 pub(crate) fn label_paragraph(text: &str) -> Paragraph {
     let mut paragraph = Paragraph::new().line_spacing(
         LineSpacing::new()
-            .line(560)
+            .line(super::BODY_LINE_TWIPS as i32)
             .line_rule(LineSpacingType::Exact),
     );
     for run in body_runs(text) {
         paragraph = paragraph.add_run(run);
     }
     paragraph
+}
+
+/// TeX makeletter 的主送 / 呈报领导为三号楷体，中西文字体一致。
+pub(crate) fn addressee_paragraph(text: &str) -> Paragraph {
+    Paragraph::new()
+        .add_run(
+            Run::new()
+                .add_text(text)
+                .fonts(chinese_fonts("楷体_GB2312"))
+                .size(BODY_SIZE),
+        )
+        .line_spacing(
+            LineSpacing::new()
+                .line(super::BODY_LINE_TWIPS as i32)
+                .line_rule(LineSpacingType::Exact),
+        )
+        .keep_next(true)
 }
 
 /// 独立有序列表：每项单独成段，首行缩进两个汉字；编号与正文之间不留空格。
@@ -50,7 +67,7 @@ pub(crate) fn ordered_list_paragraph(number: usize, text: &str, style: ListNumbe
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true);
@@ -62,7 +79,7 @@ pub(crate) fn ordered_list_paragraph(number: usize, text: &str, style: ListNumbe
 
 /// 函稿/电话通知顶格的密级行：密级 + ★ + 保密期限。勾选“指人专办”时，
 /// 在“密级★保密期限”后空一个全角空格，再以黑体标注“指人专办”四个字。
-/// 数字年限的保密期限数字部分用等宽西文字体（`security_runs`）。
+/// 中文、西文及保密期限数字统一使用三号黑体加粗（`security_runs`）。
 pub(crate) fn letter_security_paragraph(input: &DraftInput) -> Paragraph {
     let level = input.profile.security_level.trim();
     let period = input.profile.security_period.trim();
@@ -73,10 +90,10 @@ pub(crate) fn letter_security_paragraph(input: &DraftInput) -> Paragraph {
     };
     let mut paragraph = Paragraph::new().line_spacing(
         LineSpacing::new()
-            .line(560)
+            .line(super::BODY_LINE_TWIPS as i32)
             .line_rule(LineSpacingType::Exact),
     );
-    for run in security_runs(level, period, special, "仿宋_GB2312", false) {
+    for run in security_runs(level, period, special, "黑体", true) {
         paragraph = paragraph.add_run(run);
     }
     paragraph
@@ -92,7 +109,7 @@ pub(crate) fn heading_paragraph(level: u8, text: &str) -> Paragraph {
         .add_text(plain_text(text))
         .fonts(chinese_fonts(font))
         .size(BODY_SIZE);
-    if matches!(level, 2 | 5) {
+    if level == 5 {
         run = run.bold();
     }
     Paragraph::new()
@@ -100,7 +117,7 @@ pub(crate) fn heading_paragraph(level: u8, text: &str) -> Paragraph {
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true)
@@ -119,7 +136,7 @@ pub(crate) fn compact_heading_paragraph(level: u8, title: &str, body: &str) -> P
         .add_text(plain_text(&format!("{title}。")))
         .fonts(chinese_fonts(font))
         .size(BODY_SIZE);
-    if matches!(level, 2 | 5) {
+    if level == 5 {
         run = run.bold();
     }
     let mut paragraph = Paragraph::new()
@@ -127,7 +144,7 @@ pub(crate) fn compact_heading_paragraph(level: u8, title: &str, body: &str) -> P
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true);
@@ -137,23 +154,20 @@ pub(crate) fn compact_heading_paragraph(level: u8, title: &str, body: &str) -> P
     paragraph
 }
 
+/// 附件标识：TeX 用 `{\heiti\enheiti\zihao{3} 附件N}`，黑体三号顶格、不加粗。
 pub(crate) fn attachment_label_paragraph(text: &str) -> Paragraph {
-    let fonts = RunFonts::new()
-        .ascii("SimHei")
-        .hi_ansi("SimHei")
-        .east_asia("黑体");
+    let fonts = chinese_fonts("黑体");
     Paragraph::new()
         .add_run(
             Run::new()
                 .add_text(plain_text(text))
                 .fonts(fonts)
-                .size(BODY_SIZE)
-                .bold(),
+                .size(BODY_SIZE),
         )
         .align(AlignmentType::Left)
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true)
@@ -166,7 +180,7 @@ pub(crate) fn joint_closing_paragraph(text: &str, before: u32) -> Paragraph {
         .line_spacing(
             LineSpacing::new()
                 .before(before)
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
 }
@@ -178,11 +192,13 @@ pub(crate) fn joint_signature_cell_paragraph(value: &str, row_index: usize) -> P
         .line_spacing(
             LineSpacing::new()
                 .before(if row_index == 0 { CLOSING_GAP_TWIPS } else { 0 })
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
 }
 
+/// 附件正式标题：附件标识占第一行，空一行后第三行才是标题（TeX 在标题前发
+/// `\vspace{\BodyBaselineSkip}`，标题后不再另加间距）。
 pub(crate) fn attachment_document_title_paragraph(text: &str) -> Paragraph {
     Paragraph::new()
         .add_run(
@@ -194,8 +210,8 @@ pub(crate) fn attachment_document_title_paragraph(text: &str) -> Paragraph {
         .align(AlignmentType::Center)
         .line_spacing(
             LineSpacing::new()
-                .after(360)
-                .line(560)
+                .before(super::BODY_LINE_TWIPS)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true)
@@ -296,7 +312,7 @@ pub(crate) fn red_record_paragraph(
     }
     paragraph = paragraph.add_run(value_run).align(alignment).line_spacing(
         LineSpacing::new()
-            .line(560)
+            .line(super::BODY_LINE_TWIPS as i32)
             .line_rule(LineSpacingType::Exact),
     );
     if indent_twips > 0 {
@@ -356,7 +372,7 @@ pub(crate) fn agenda_body_paragraph() -> Paragraph {
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true)
@@ -366,22 +382,8 @@ pub(crate) fn agenda_blank_line() -> Paragraph {
     Paragraph::new()
         .line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
         .keep_next(true)
-}
-
-pub(crate) fn agenda_labeled_paragraph(line: &str) -> Paragraph {
-    let (label, value) = line
-        .split_once('：')
-        .or_else(|| line.split_once(':'))
-        .unwrap_or((line, ""));
-    let mut paragraph = agenda_body_paragraph().add_run(heiti_run(format!("{label}：")));
-    if !value.trim().is_empty() {
-        for run in body_runs(value.trim()) {
-            paragraph = paragraph.add_run(run);
-        }
-    }
-    paragraph
 }

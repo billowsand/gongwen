@@ -9,10 +9,7 @@ use crate::models::split_period_digits;
 use docx_rs::*;
 
 pub(crate) fn chinese_fonts(name: &str) -> RunFonts {
-    RunFonts::new()
-        .ascii("Times New Roman")
-        .hi_ansi("Times New Roman")
-        .east_asia(name)
+    RunFonts::new().ascii(name).hi_ansi(name).east_asia(name)
 }
 
 pub(crate) fn body_run(text: impl Into<String>) -> Run {
@@ -84,8 +81,8 @@ pub(crate) fn heiti_run(text: impl Into<String>) -> Run {
         .bold()
 }
 
-/// 密级行 run 序列：数字年限的保密期限，前导数字用等宽西文字体（对应 LaTeX 的
-/// `\ttfamily`），其余用行内基准字体；指人专办以黑体加粗追加在末尾。
+/// 密级行 run 序列：中文、西文及期限数字统一使用行内基准字体；
+/// 指人专办以黑体加粗追加在末尾。
 pub(crate) fn security_runs(
     level: &str,
     period: &str,
@@ -106,19 +103,7 @@ pub(crate) fn security_runs(
     let (digits, rest) = split_period_digits(period);
     let mut runs = vec![base_run(&format!("{level}★"))];
     if !digits.is_empty() {
-        let mut run = Run::new()
-            .add_text(digits)
-            .fonts(
-                RunFonts::new()
-                    .ascii("Courier New")
-                    .hi_ansi("Courier New")
-                    .east_asia(base),
-            )
-            .size(BODY_SIZE);
-        if bold {
-            run = run.bold();
-        }
-        runs.push(run);
+        runs.push(base_run(digits));
     }
     if !rest.is_empty() {
         runs.push(base_run(rest));
@@ -178,19 +163,16 @@ pub(crate) fn title_run(text: &str, size: usize) -> Run {
         .size(size)
 }
 
+/// 表格 run。表头对齐 TeX 的 `row{1}={font=\heiti\enheiti}`：只换黑体，不加粗。
 pub(crate) fn table_run_sized(text: &str, header: bool, size: usize) -> Run {
-    let mut run = Run::new()
+    Run::new()
         .add_text(plain_text(text))
         .fonts(chinese_fonts(if header {
             "黑体"
         } else {
             "仿宋_GB2312"
         }))
-        .size(size);
-    if header {
-        run = run.bold();
-    }
-    run
+        .size(size)
 }
 
 pub(crate) fn table_runs_sized(text: &str, header: bool, size: usize) -> Vec<Run> {

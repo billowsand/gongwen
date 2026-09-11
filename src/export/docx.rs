@@ -24,25 +24,29 @@ mod red;
 mod runs;
 mod signature;
 
+#[cfg(test)]
+mod layout_checks;
+
 pub(crate) use content::{add_official_content_block, add_smart_table, write_meeting_agenda_docx};
-pub(crate) use header::{add_official_page_footers, issuing_unit_header};
+pub(crate) use header::add_official_page_footers;
+#[cfg(test)]
+pub(crate) use header::issuing_unit_header;
 #[cfg(test)]
 pub(crate) use paragraphs::image_paragraph_from_bytes;
 pub(crate) use paragraphs::{
-    agenda_blank_line, agenda_body_paragraph, agenda_labeled_paragraph,
-    attachment_document_title_paragraph, attachment_label_paragraph, body_paragraph,
-    compact_heading_paragraph, document_title_paragraph, heading_paragraph, image_paragraph,
-    joint_closing_paragraph, joint_signature_cell_paragraph, label_paragraph,
-    letter_security_paragraph, ordered_list_paragraph, red_approval_title_paragraph,
-    red_record_paragraph,
+    agenda_blank_line, agenda_body_paragraph, attachment_document_title_paragraph,
+    attachment_label_paragraph, body_paragraph, compact_heading_paragraph,
+    document_title_paragraph, heading_paragraph, image_paragraph, joint_closing_paragraph,
+    joint_signature_cell_paragraph, label_paragraph, letter_security_paragraph,
+    ordered_list_paragraph, red_approval_title_paragraph, red_record_paragraph,
 };
 pub(crate) use record::add_footer_record;
 pub(crate) use red::{
     red_approval_frame_table, red_approval_record_table, red_approval_top_rule_table,
 };
 pub(crate) use runs::{
-    body_run, body_runs, chinese_fonts, docx_name, heiti_run, record_run, security_runs,
-    spread_runs, table_run_sized, table_runs_sized, title_run,
+    body_run, body_runs, chinese_fonts, docx_name, record_run, security_runs, spread_runs,
+    table_run_sized, table_runs_sized, title_run,
 };
 pub(crate) use signature::{
     add_attachment_summary, add_joint_signature, add_white_paper_signature, is_joint_mode_one,
@@ -54,9 +58,17 @@ const TITLE_SIZE: usize = 44; // 22 pt，二号
 const RED_APPROVAL_TITLE_SIZE: usize = 36; // 18 pt，小二号
 pub(super) const TABLE_SIZE: usize = 28; // 14 pt，四号
 const FOOTER_SIZE: usize = 28; // 14 pt，四号；版记字号独立固定，不随正文表格调整
-const PAGE_NUMBER_SIZE: usize = 36; // 18 pt，四号
+const PAGE_NUMBER_SIZE: usize = 28; // 14 pt，四号
+// TeX 的 28.98 pt 换算为 Word 的 1/20 bp，四舍五入到 577 twips。
+const BODY_LINE_TWIPS: u32 = 577;
 /// 正文、附件概要或“此页无正文”与落款之间通常空 3 行（每行固定 560 缇）。
-const CLOSING_GAP_TWIPS: u32 = 3 * 560;
+const CLOSING_GAP_TWIPS: u32 = 3 * BODY_LINE_TWIPS;
+/// 密级行落在版心第一行时的行高。TeX 用 \topskip 把首行基线贴近版心顶端，
+/// 不走 28.98pt 的正文基线距；Word 用一个更矮的固定行高等效（白头件、普通公文、
+/// 会议议程三处一致）。函稿的密级行不是首行，仍用正文行距。
+const SECURITY_FIRST_LINE_TWIPS: u32 = 377;
+/// TeX \NoBodyNotice 在“（此页无正文）”之前固定留 58pt。
+const NO_BODY_NOTICE_GAP_TWIPS: u32 = 1_156;
 /// 正文中完整括号（全角/半角）及其中内容的字号：14 pt，四号，比正文小一号。
 const PAREN_SIZE: usize = 28;
 pub(super) const TABLE_CONTENT_WIDTH_TWIPS: usize = 8_844; // 156 mm 版心
@@ -72,10 +84,8 @@ const JOINT_SIGNATURE_SEAL_GAP_TWIPS: f32 = 2_551.0; // 45 mm 公章安全高度
 
 /// 红头（发文机关标志）可用的版心宽度：A4 页宽减去左右页边距，约 15.6cm。
 const HEADER_WIDTH_TWIPS: i32 = 11906 - 1587 - 1474;
-/// 红头字号：二号（24 pt）。
-const HEADER_SIZE: usize = 48;
-/// 字数过多时允许缩到的最小字号：三号（16 pt），再小就不合公文规范。
-const HEADER_MIN_SIZE: usize = 32;
+/// TeX HeaderFontSize = 29 pt，约 28.89 bp，Word 半磅精度取 58。
+const HEADER_SIZE: usize = 58;
 
 /// 规格 §3.3：预览版所有占位区域统一 1em 宽，用一个全角空格表示。
 const PREVIEW_PLACEHOLDER: &str = "\u{2003}";
@@ -99,7 +109,7 @@ pub fn write_docx_with_numbering(
     numbering: &NumberingConfig,
 ) -> Result<()> {
     if input.kind == TemplateKind::MeetingAgenda {
-        return write_meeting_agenda_docx(path, input, markdown);
+        return write_meeting_agenda_docx(path, input, markdown, numbering);
     }
 
     let blocks = parse_markdown_with_numbering(markdown, numbering);
@@ -118,7 +128,7 @@ pub fn write_docx_with_numbering(
             bottom: 1984,
             left: 1587,
             right: 1474,
-            header: 567,
+            header: 1500,
             footer: 567,
             gutter: 0,
         })
@@ -126,69 +136,122 @@ pub fn write_docx_with_numbering(
         .default_size(BODY_SIZE)
         .default_line_spacing(
             LineSpacing::new()
-                .line(560)
+                .line(BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         );
 
-    if input.kind.uses_letter_layout() {
-        doc = add_official_page_footers(doc, input.profile.duplex_printing);
-        if input.kind == TemplateKind::RedHeadApproval {
-            // 即使不标密也保留密级行的垂直槽位，使红头稳定落在参考稿约 67mm
-            // 的位置；有密级时就在该槽位显示，不改变后续元素坐标。
+    doc = add_official_page_footers(doc, input.profile.duplex_printing);
+    match input.kind {
+        TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
+            // TeX：红头及反线在上方，随后份号/右对齐文号，再下一行密级。
+            let unit = main_issuing_unit(input, display);
+            doc = doc.first_header(header::letter_header(&unit));
+            if input.kind == TemplateKind::OfficialLetter {
+                let mut number = Paragraph::new()
+                    .add_tab(
+                        Tab::new()
+                            .val(TabValueType::Right)
+                            .pos(HEADER_WIDTH_TWIPS as usize),
+                    )
+                    // TeX：{\heiti \zihao{3} \ttfamily \SerialNumber{}}，黑体不加粗。
+                    .add_run(
+                        Run::new()
+                            .add_text("01")
+                            .fonts(chinese_fonts("黑体"))
+                            .size(BODY_SIZE),
+                    )
+                    .add_run(body_run("").add_tab());
+                if let Some(value) = official_document_number(input, " ") {
+                    number = number.add_run(body_run(value));
+                }
+                doc = doc.add_paragraph(
+                    number
+                        .line_spacing(
+                            LineSpacing::new()
+                                .before(247)
+                                .line(BODY_LINE_TWIPS as i32)
+                                .line_rule(LineSpacingType::Exact),
+                        )
+                        .keep_next(true),
+                );
+            } else {
+                doc = doc.add_paragraph(
+                    Paragraph::new().line_spacing(
+                        LineSpacing::new()
+                            .line(247)
+                            .line_rule(LineSpacingType::Exact),
+                    ),
+                );
+            }
+            if !input.profile.security_level.trim().is_empty() {
+                doc = doc.add_paragraph(letter_security_paragraph(input).keep_next(true));
+            }
+        }
+        TemplateKind::WhitePaper | TemplateKind::PlainDocument => {
+            let has_security = !input.profile.security_level.trim().is_empty();
+            if has_security {
+                doc = doc.add_paragraph(
+                    letter_security_paragraph(input)
+                        .line_spacing(
+                            LineSpacing::new()
+                                .line(SECURITY_FIRST_LINE_TWIPS as i32)
+                                .line_rule(LineSpacingType::Exact),
+                        )
+                        .keep_next(true),
+                );
+            }
+            // TeX：白头件密级后固定空 10 行（\vspace{10\baselineskip}，与有无密级无关）；
+            // 普通公文只在写了密级时空 1 行，没有密级就直接排标题。
+            let blank_count = if input.kind == TemplateKind::WhitePaper {
+                10
+            } else if has_security {
+                1
+            } else {
+                0
+            };
+            for _ in 0..blank_count {
+                doc = doc.add_paragraph(header::blank_line().keep_next(true));
+            }
+        }
+        TemplateKind::RedHeadApproval => {
             doc = doc.add_paragraph(
                 letter_security_paragraph(input).line_spacing(
                     LineSpacing::new()
-                        .line(560)
+                        .before(300)
+                        .line(BODY_LINE_TWIPS as i32)
                         .line_rule(LineSpacingType::Exact)
-                        .after(560),
+                        .after(0),
                 ),
             );
-        } else if !input.profile.security_level.trim().is_empty() {
-            doc = doc.add_paragraph(letter_security_paragraph(input));
-        }
-        if input.kind != TemplateKind::PlainDocument {
-            let unit = main_issuing_unit(input, display);
-            if !unit.is_empty() {
-                let layout = issuing_unit_header(&unit);
+            doc = doc.add_paragraph(
+                header::issuing_unit_paragraph(&main_issuing_unit(input, display)).line_spacing(
+                    LineSpacing::new()
+                        .line(700)
+                        .line_rule(LineSpacingType::Exact),
+                ),
+            );
+            // TeX 红头呈批件首页：\DocumentNumber{}号，序号与“号”之间不留空格。
+            if let Some(number) = official_document_number(input, "") {
                 doc = doc.add_paragraph(
                     Paragraph::new()
-                        .add_run(
-                            Run::new()
-                                .add_text(&unit)
-                                .fonts(chinese_fonts("方正小标宋简体"))
-                                .size(layout.size)
-                                .color("C00000"),
-                        )
-                        // 分散对齐让 Word 自己把字距均匀撑开；缩进决定撑开的范围。
-                        .align(AlignmentType::Distribute)
-                        .indent(
-                            Some(layout.side_indent),
-                            None,
-                            Some(layout.side_indent),
-                            None,
-                        )
-                        .line_spacing(LineSpacing::new().after(180)),
+                        .add_run(body_run(number))
+                        .align(AlignmentType::Center)
+                        .line_spacing(LineSpacing::new().after(240)),
                 );
             }
+            doc =
+                doc.first_header(
+                    Header::new()
+                        .add_paragraph(Paragraph::new().line_spacing(
+                            LineSpacing::new().line(1).line_rule(LineSpacingType::Exact),
+                        ))
+                        .add_table(red_approval_top_rule_table())
+                        .add_table(red_approval_frame_table(input))
+                        .add_table(red_approval_record_table(input, display)),
+                );
         }
-        if input.kind.has_document_number()
-            && let Some(number) = official_document_number(input)
-        {
-            doc = doc.add_paragraph(
-                Paragraph::new()
-                    .add_run(body_run(number))
-                    .align(AlignmentType::Center)
-                    .line_spacing(LineSpacing::new().after(240)),
-            );
-        }
-        if input.kind == TemplateKind::RedHeadApproval {
-            doc = doc
-                .add_table(red_approval_top_rule_table())
-                .add_table(red_approval_frame_table(input))
-                .add_table(red_approval_record_table(input, display));
-        }
+        TemplateKind::MeetingAgenda => unreachable!(),
     }
-
     let title_plain = plain_text(title);
     let title_capacity = if input.kind == TemplateKind::RedHeadApproval {
         title::red_approval_chars_per_line()
@@ -202,9 +265,16 @@ pub fn write_docx_with_numbering(
         document_title_paragraph(title, &plan)
     };
     let title_before = if input.kind == TemplateKind::RedHeadApproval {
-        480
+        390
     } else {
-        120
+        if matches!(
+            input.kind,
+            TemplateKind::OfficialLetter | TemplateKind::PhoneNotice
+        ) {
+            BODY_LINE_TWIPS
+        } else {
+            0
+        }
     };
     // 红头呈批件首页版面：正文可用行数、正文是否跨页、表格图片是否要被赶出首页，
     // 三端共用 export::red_approval_* 的同一套估算，避免各端判据不一致。
@@ -225,8 +295,8 @@ pub fn write_docx_with_numbering(
             .line_spacing(
                 LineSpacing::new()
                     .before(title_before)
-                    .after(360)
-                    .line(560)
+                    .after(BODY_LINE_TWIPS)
+                    .line(BODY_LINE_TWIPS as i32)
                     .line_rule(LineSpacingType::Exact),
             )
             .keep_next(true),
@@ -243,14 +313,14 @@ pub fn write_docx_with_numbering(
         TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => String::new(),
     };
     if !addressee.is_empty() && !markdown.contains(addressee.as_str()) {
-        doc = doc.add_paragraph(label_paragraph(&format!(
+        doc = doc.add_paragraph(paragraphs::addressee_paragraph(&format!(
             "{}：",
             addressee.trim_end_matches('：')
         )));
     }
 
     let mut attachment_blocks = Vec::new();
-    if input.kind.uses_letter_layout() {
+    if input.kind.uses_letter_layout() || input.kind == TemplateKind::WhitePaper {
         let mut in_attachment = false;
         let mut seen_document_title = false;
         let mut counters = [0usize; 4];
@@ -308,7 +378,7 @@ pub fn write_docx_with_numbering(
                             doc = doc.add_paragraph(
                                 Paragraph::new().page_break_before(true).line_spacing(
                                     LineSpacing::new()
-                                        .line(560)
+                                        .line(BODY_LINE_TWIPS as i32)
                                         .line_rule(LineSpacingType::Exact),
                                 ),
                             );
@@ -338,12 +408,8 @@ pub fn write_docx_with_numbering(
                     doc = doc.add_paragraph(body_paragraph(text));
                 }
                 MarkdownBlock::ListItem(text) => {
-                    doc = doc.add_paragraph(label_paragraph(text).indent(
-                        Some(420),
-                        None,
-                        None,
-                        None,
-                    ));
+                    // TeX：\noindent{文本}\par，无序列表项顶格，不额外缩进。
+                    doc = doc.add_paragraph(label_paragraph(text));
                 }
                 MarkdownBlock::OrderedListItem { number, text } => {
                     doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2));
@@ -354,7 +420,7 @@ pub fn write_docx_with_numbering(
     }
 
     // 附件概要：正文结束后、落款之前列出附件名称（红头呈批件同样支持）。
-    if input.kind.uses_letter_layout() {
+    if input.kind.uses_letter_layout() || input.kind == TemplateKind::WhitePaper {
         let names = attachment_names(&blocks);
         if !names.is_empty() {
             doc = add_attachment_summary(doc, &names);
@@ -364,7 +430,7 @@ pub fn write_docx_with_numbering(
     if crate::models::is_joint_signature(input) {
         doc = add_joint_signature(doc, input, display);
     } else if input.kind == TemplateKind::WhitePaper {
-        doc = add_white_paper_signature(doc, input, display, 0);
+        doc = add_white_paper_signature(doc, input, display, crate::export::SIGNATURE_ROOM_TWIPS);
     } else if input.kind == TemplateKind::RedHeadApproval {
         // 落款最早从第二页开始。正文只有首页那点内容时另起一页标「（此页无正文）」；
         // 正文本来就跨页时不再额外制造空白页，落款接在正文之后。
@@ -372,11 +438,12 @@ pub fn write_docx_with_numbering(
             doc = doc.add_paragraph(
                 Paragraph::new()
                     .add_run(body_run("（此页无正文）"))
-                    .indent(Some(640), None, None, None)
+                    .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
                     .page_break_before(true)
                     .line_spacing(
                         LineSpacing::new()
-                            .line(560)
+                            .before(NO_BODY_NOTICE_GAP_TWIPS)
+                            .line(BODY_LINE_TWIPS as i32)
                             .line_rule(LineSpacingType::Exact),
                     ),
             );
@@ -416,28 +483,31 @@ pub fn write_docx_with_numbering(
             doc = doc.add_paragraph(
                 Paragraph::new()
                     .add_run(body_run(unit))
-                    .align(AlignmentType::Right)
+                    .align(AlignmentType::Center)
+                    .indent(Some(2_608), None, Some(0), None)
+                    .keep_next(true)
                     .line_spacing(
                         LineSpacing::new()
                             .before(CLOSING_GAP_TWIPS)
-                            .line(560)
+                            .line(BODY_LINE_TWIPS as i32)
                             .line_rule(LineSpacingType::Exact),
                     ),
             );
             doc = doc.add_paragraph(
                 Paragraph::new()
                     .add_run(body_run(official_signature_date(input)))
-                    .align(AlignmentType::Right)
+                    .align(AlignmentType::Center)
+                    .indent(Some(2_608), None, Some(0), None)
                     .line_spacing(
                         LineSpacing::new()
-                            .line(560)
+                            .line(BODY_LINE_TWIPS as i32)
                             .line_rule(LineSpacingType::Exact),
                     ),
             );
         }
     }
 
-    if input.kind.uses_letter_layout() && !attachment_blocks.is_empty() {
+    if !attachment_blocks.is_empty() {
         doc = doc.add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)));
         let mut counters = [0usize; 4];
         let attachment_count = attachment_blocks
@@ -568,7 +638,7 @@ mod tests {
         let layout = issuing_unit_header("国务院");
         assert_eq!(layout.size, HEADER_SIZE, "字数少时不得改变字号");
         // 三个字加两个一字宽的字距，居中摆放。
-        let block = 3 * 480 + 2 * 480;
+        let block = 5 * HEADER_SIZE as i32 * 10;
         assert_eq!(layout.side_indent, (HEADER_WIDTH_TWIPS - block) / 2);
         assert!(layout.side_indent > 0, "短名称应留出左右缩进而不是铺满版心");
     }
@@ -582,30 +652,34 @@ mod tests {
     }
 
     #[test]
-    fn long_issuing_unit_shrinks_instead_of_being_squashed() {
+    fn long_issuing_unit_scales_width_like_tex() {
         let unit = "某某省人民政府政务服务和数字化建设管理局办公室综合处";
         let layout = issuing_unit_header(unit);
-        assert!(layout.size < HEADER_SIZE, "排不下时应缩小字号");
-        assert!(layout.size >= HEADER_MIN_SIZE, "不得小于三号");
+        assert_eq!(layout.size, HEADER_SIZE, "与 TeX 一样保持红头字高");
+        assert!(layout.scale < 100);
         assert_eq!(layout.side_indent, 0);
         let count = unit.chars().count() as i32;
         assert!(
-            count * layout.size as i32 * 10 <= HEADER_WIDTH_TWIPS,
+            count * layout.size as i32 * 10 * layout.scale / 100 <= HEADER_WIDTH_TWIPS,
             "缩小后必须能排进版心"
         );
     }
 
     #[test]
-    fn very_long_issuing_unit_stops_at_the_minimum_size() {
+    fn very_long_issuing_unit_still_fits_the_line() {
         let layout = issuing_unit_header(&"某".repeat(60));
-        assert_eq!(layout.size, HEADER_MIN_SIZE);
+        assert_eq!(layout.size, HEADER_SIZE);
+        assert!(60 * HEADER_SIZE as i32 * 10 * layout.scale / 100 <= HEADER_WIDTH_TWIPS);
     }
 
     #[test]
     fn single_character_issuing_unit_is_centered() {
         let layout = issuing_unit_header("函");
         assert_eq!(layout.size, HEADER_SIZE);
-        assert_eq!(layout.side_indent, (HEADER_WIDTH_TWIPS - 480) / 2);
+        assert_eq!(
+            layout.side_indent,
+            (HEADER_WIDTH_TWIPS - HEADER_SIZE as i32 * 10) / 2
+        );
     }
 
     #[test]
@@ -700,12 +774,13 @@ mod tests {
         input.profile.recipient = "某某市教育局".into();
         write_docx_ok(&path, &input, "# 关于测试红头的函\n\n正文。\n").unwrap();
 
-        let xml = zip_text(&path, "word/document.xml");
+        // 与 TeX 的 \DocumentHeader 一样，红头与红色反线排在首页页眉里。
+        let xml = header_text(&path);
         assert!(
             xml.contains(r#"w:val="distribute""#),
             "红头应使用分散对齐，由 Word 均匀撑开字距"
         );
-        let indent = (HEADER_WIDTH_TWIPS - (3 * 480 + 2 * 480)) / 2;
+        let indent = (HEADER_WIDTH_TWIPS - 5 * HEADER_SIZE as i32 * 10) / 2;
         assert!(
             xml.contains(&format!(r#"w:left="{indent}""#)),
             "短名称应靠左右缩进居中，实际 XML：{xml}"
@@ -714,6 +789,7 @@ mod tests {
             xml.contains(&format!(r#"w:val="{HEADER_SIZE}""#)),
             "字数少时不得缩小字号"
         );
+        assert!(xml.contains(r#"w:color="FF0000""#), "红头应为红色：{xml}");
     }
 
     #[test]
@@ -761,8 +837,8 @@ mod tests {
         let after_summary = &xml[xml.find("附件1：统计表").unwrap() + "附件1：统计表".len()..];
         let attachment_label = paragraph_containing(after_summary, "附件1");
         assert!(attachment_label.contains("w:eastAsia=\"黑体\""));
-        assert!(attachment_label.contains("w:ascii=\"SimHei\""));
-        assert!(attachment_label.contains("w:hAnsi=\"SimHei\""));
+        assert!(attachment_label.contains("w:ascii=\"黑体\""));
+        assert!(attachment_label.contains("w:hAnsi=\"黑体\""));
         assert!(attachment_label.contains("w:val=\"left\""));
         assert!(!attachment_label.contains("w:firstLine"));
         let attachment_title = paragraph_containing(after_summary, "统计表");
@@ -787,16 +863,17 @@ mod tests {
 
         write_docx_ok(&formal_path, &input, "# 测试函\n\n正文。").unwrap();
         let formal = zip_text(&formal_path, "word/document.xml");
-        assert!(formal.contains("某政函〔2026〕12号"));
+        // TeX \DocumentHeader 写的是 \DocumentNumber{}~号：序号与“号”之间留一个空格。
+        assert!(formal.contains("某政函〔2026〕12 号"));
         assert!(formal.contains("2026年8月5日"));
 
         input.profile.letter_version = LetterVersion::Preview;
         write_docx_ok(&preview_path, &input, "# 测试函\n\n正文。").unwrap();
         let preview = zip_text(&preview_path, "word/document.xml");
         // 规格 §3.3：预览版占位统一 1em。
-        assert!(preview.contains("某政函〔2026〕\u{2003}号"));
+        assert!(preview.contains("某政函〔2026〕\u{2003} 号"));
         assert!(preview.contains("2026年8月\u{2003}日"));
-        assert!(!preview.contains("某政函〔2026〕12号"));
+        assert!(!preview.contains("某政函〔2026〕12 号"));
         assert!(!preview.contains("2026年8月5日"));
     }
 
@@ -851,10 +928,12 @@ mod tests {
         let display = UnitDisplay::new(&vocabulary);
         write_docx(&path, &input, "# 电话通知\n\n正文。", &display).unwrap();
         let xml = zip_text(&path, "word/document.xml");
-        // 红头保留全称，落款输出“中 宣 部”（简称逐字加半角空格）。
-        assert!(xml.contains("中央宣传部"), "红头应保留全称");
+        // 红头保留全称（排在首页页眉里），落款输出“中 宣 部”（简称逐字加半角空格）。
+        assert!(header_text(&path).contains("中央宣传部"), "红头应保留全称");
         let signature = paragraph_containing(&xml, "中 宣 部");
-        assert!(signature.contains("w:val=\"right\""), "落款应右对齐");
+        // TeX \SignatureContent：右对齐的 11cm minipage 内居中，即左缩进 2608 后居中。
+        assert!(signature.contains("w:val=\"center\""), "{signature}");
+        assert!(signature.contains(r#"w:left="2608""#), "{signature}");
         assert!(!xml.contains("中宣部"), "不得输出未加空格的简称");
     }
 
@@ -953,7 +1032,9 @@ mod tests {
             "代章应与落款单位同一行：{xml}"
         );
         let seal = paragraph_containing(&xml, "（代章）");
-        assert!(seal.contains("w:val=\"right\""), "代章应与落款同侧对齐");
+        // 落款整体在 TeX 的 11cm 右侧 minipage 内居中，代章与落款单位同段同侧。
+        assert!(seal.contains("w:val=\"center\""), "{seal}");
+        assert!(seal.contains(r#"w:left="2608""#), "{seal}");
     }
 
     #[test]
@@ -1021,9 +1102,10 @@ mod tests {
         write_docx_ok(&path, &input, "# 联合发文测试函\n\n正文。").unwrap();
 
         let xml = zip_text(&path, "word/document.xml");
-        let header = paragraph_containing(&xml, "乙单位");
-        assert!(header.contains("C00000"), "主发文单位应写入红头：{header}");
-        assert!(!paragraph_containing(&xml, "乙单位").contains("甲单位、乙单位、丙单位"));
+        let header_xml = header_text(&path);
+        let header = paragraph_containing(&header_xml, "乙单位");
+        assert!(header.contains("FF0000"), "主发文单位应写入红头：{header}");
+        assert!(!header.contains("甲单位、乙单位、丙单位"));
         assert!(xml.contains("甲单位"));
         assert!(xml.contains("丙单位"));
         assert!(xml.contains(r#"w:trHeight w:val="2551""#));
@@ -1104,8 +1186,8 @@ mod tests {
         write_docx_ok(&path, &input, "# 单单位联合函\n\n正文。").unwrap();
 
         let xml = zip_text(&path, "word/document.xml");
-        // 最后一个“甲单位”出现在落款（红头在前）：应是右对齐的单独段落，
-        // 而不是联合发文的左列居中两列表格。
+        // 只剩一个发文单位时落款回落单独发文那套：TeX \SignatureContent 的
+        // 11cm 右侧 minipage 内居中，而不是联合发文的两列表格。
         let mut search_from = 0;
         let mut last_sig = "";
         while let Some(at) = xml[search_from..].find("甲单位") {
@@ -1117,8 +1199,8 @@ mod tests {
         }
         assert!(!last_sig.is_empty(), "落款应出现“甲单位”");
         assert!(
-            last_sig.contains(r#"w:jc w:val="right""#),
-            "单单位联合发文落款应右对齐：{last_sig}"
+            last_sig.contains(r#"w:jc w:val="center""#) && last_sig.contains(r#"w:left="2608""#),
+            "单单位联合发文落款应回落单独发文的居中落款：{last_sig}"
         );
         assert!(
             !last_sig.contains("<w:tbl>"),
@@ -1317,14 +1399,17 @@ mod tests {
         )
         .unwrap();
         let xml = zip_text(&path, "word/document.xml");
+        // TeX RedApprovalPageOverlay 写 \DocumentNumber{}号，中间不留空格。
         assert!(xml.contains("某办呈〔2026〕12号"));
-        assert!(xml.contains("批　示"));
-        assert!(xml.contains("w:tblpXSpec=\"right\""));
-        assert!(xml.contains("w:tblpY=\"2720\""));
-        assert!(xml.contains("w:tblpYSpec=\"bottom\""));
-        assert!(xml.contains("承办单位："));
-        assert!(xml.contains("综合处"));
-        assert!(xml.contains("业务处"));
+        // 批示框、贯穿红线与承办区排在首页页眉部件里，对应 TeX 的绝对定位 picture。
+        let header = header_text(&path);
+        assert!(header.contains("批　示"));
+        assert!(header.contains("w:tblpXSpec=\"right\""));
+        assert!(header.contains("w:tblpY=\"2720\""));
+        assert!(header.contains("w:tblpYSpec=\"bottom\""));
+        assert!(header.contains("承办单位："));
+        assert!(header.contains("综合处"));
+        assert!(header.contains("业务处"));
         let title = paragraph_containing(&xml, "关于认真做好网络安全与");
         assert!(title.contains("w:sz w:val=\"36\""));
         assert!(title.contains("w:right=\"3175\""));
@@ -1357,16 +1442,16 @@ mod tests {
         // 承办区栏宽按内容一次算定：联系人栏固定 8 em，电话栏按最长号码定宽，
         // 承办单位栏吃版心余量。本例两条号码都是 12 位 → 3404/2560/2880。
         assert!(
-            xml.contains(&format!(
+            header.contains(&format!(
                 "<w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" />",
                 3_404, 2_560, 2_880
             )),
-            "承办区栏宽应与 LaTeX/预览同源：{xml}"
+            "承办区栏宽应与 LaTeX/预览同源：{header}"
         );
         // 多条承办条目：标签只在首行出现一次，续行只排取值并保持对齐。
-        assert_eq!(xml.matches("承办单位：").count(), 1, "{xml}");
-        assert_eq!(xml.matches("联系人：").count(), 1, "{xml}");
-        assert_eq!(xml.matches("电话：").count(), 1, "{xml}");
+        assert_eq!(header.matches("承办单位：").count(), 1, "{header}");
+        assert_eq!(header.matches("联系人：").count(), 1, "{header}");
+        assert_eq!(header.matches("电话：").count(), 1, "{header}");
     }
 
     /// 承办单位一律不换行：栏内放不下时整格按同一比例横向压窄（`w:w`），
@@ -1395,7 +1480,8 @@ mod tests {
         ];
         input.date = "2026年8月12日".into();
         write_docx_ok(&path, &input, "# 标题\n\n正文。妥否，请指示。").unwrap();
-        let xml = zip_text(&path, "word/document.xml");
+        // 承办区排在首页页眉部件里。
+        let xml = header_text(&path);
         let columns = crate::export::red_record_columns(&[
             [
                 "教师工作与师资管理处".to_string(),
@@ -1465,6 +1551,28 @@ mod tests {
             .unwrap()
             .read_to_string(&mut text)
             .unwrap();
+        text
+    }
+
+    /// 红头、红色反线和红头呈批件首页的框线/承办区都排在首页页眉部件里
+    /// （与 TeX 的绝对定位对应），断言这些元素时要连页眉一起看。
+    fn header_text(path: &Path) -> String {
+        let file = File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut names = archive
+            .file_names()
+            .filter(|name| name.starts_with("word/header"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.sort();
+        let mut text = String::new();
+        for name in names {
+            archive
+                .by_name(&name)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+        }
         text
     }
 
@@ -1548,19 +1656,14 @@ mod tests {
         );
         assert!(!title_body_gap.contains("<w:t"));
 
-        let time = paragraph_containing(&document, "一、时间地点：");
-        assert!(time.contains("w:eastAsia=\"黑体\""));
-        assert!(time.contains("w:eastAsia=\"仿宋_GB2312\""));
-        assert!(time.contains("w:firstLine=\"640\""));
-
-        let attendees = paragraph_containing(&document, "二、参加人员：");
-        assert!(attendees.contains("w:eastAsia=\"黑体\""));
-        assert!(attendees.contains("w:eastAsia=\"仿宋_GB2312\""));
-        assert!(attendees.contains("w:firstLine=\"640\""));
-
-        let content = paragraph_containing(&document, "三、研讨内容：");
-        assert!(content.contains("w:eastAsia=\"黑体\""));
-        assert!(content.contains("w:firstLine=\"640\""));
+        // “一、时间地点”等三节在 TeX/预览里都是普通正文段：仿宋三号、首行缩进两字，
+        // 标签不另设黑体。
+        for label in ["一、时间地点：", "二、参加人员：", "三、研讨内容："] {
+            let section = paragraph_containing(&document, label);
+            assert!(section.contains("w:eastAsia=\"仿宋_GB2312\""), "{section}");
+            assert!(!section.contains("w:eastAsia=\"黑体\""), "{section}");
+            assert!(section.contains("w:firstLine=\"640\""), "{section}");
+        }
 
         let first_item = paragraph_containing(&document, "汇报总体思路；");
         let second_item = paragraph_containing(&document, "研究下一步工作。");
@@ -1631,11 +1734,94 @@ mod tests {
             "指人专办应排在保密期限之后：{text}"
         );
         assert!(security.contains("w:eastAsia=\"黑体\""));
-        assert!(security.contains("w:eastAsia=\"仿宋_GB2312\""));
+        assert!(!security.contains("w:eastAsia=\"仿宋_GB2312\""));
     }
 
     #[test]
-    fn numeric_security_period_digits_use_monospace_font() {
+    fn templates_with_security_line_use_heiti() {
+        let temp = tempfile::tempdir().unwrap();
+        for kind in TemplateKind::ALL {
+            // 白头件目前未导出密级行；此处检查已有密级行的字体。
+            if kind == TemplateKind::WhitePaper {
+                continue;
+            }
+            for period in ["10年", "长期"] {
+                let path = temp.path().join("security-font.docx");
+                let mut input = DraftInput::default();
+                input.kind = kind;
+                input.profile.security_level = "秘密".into();
+                input.profile.security_period = period.into();
+                input.profile.special_handling = false;
+                write_docx_ok(&path, &input, "# 测试标题\n\n正文。").unwrap();
+                let xml = zip_text(&path, "word/document.xml");
+                let security = paragraph_containing(&xml, "秘密");
+                assert!(runs_text(security).contains(&format!("秘密★{period}")));
+                for run in security.split("<w:r>").skip(1) {
+                    let run = run.split("</w:r>").next().unwrap();
+                    assert!(run.contains("w:eastAsia=\"黑体\""), "{kind:?}: {run}");
+                    assert!(run.contains("w:ascii=\"黑体\""), "{kind:?}: {run}");
+                    assert!(run.contains("w:hAnsi=\"黑体\""), "{kind:?}: {run}");
+                    assert!(run.contains("<w:b "), "{kind:?}: {run}");
+                    assert!(
+                        run.contains(&format!("w:val=\"{BODY_SIZE}\"")),
+                        "{kind:?}: {run}"
+                    );
+                }
+                assert!(!security.contains("仿宋_GB2312"), "{kind:?}: {security}");
+            }
+        }
+    }
+    #[test]
+    fn western_fonts_follow_chinese_fonts_in_exported_docx() {
+        let temp = tempfile::tempdir().unwrap();
+        let fonts_pattern = regex::Regex::new(r"<w:rFonts\b[^>]*/>").unwrap();
+        let east_asia_pattern = regex::Regex::new(r#"w:eastAsia="([^"]+)""#).unwrap();
+        for kind in TemplateKind::ALL {
+            let path = temp.path().join("mixed-fonts.docx");
+            let mut input = DraftInput::default();
+            input.kind = kind;
+            input.profile.issuing_unit = "某单位ABC".into();
+            write_docx_ok(
+                &path,
+                &input,
+                "# 测试标题ABC123\n\n## 测试小标题DEF456\n\n正文English123，café（说明Note456）。\n\n| 项目Item | 数量Count |\n| --- | --- |\n| 数据Data | 789 |",
+            ).unwrap();
+            let xml = zip_text(&path, "word/document.xml");
+            let body = paragraph_containing(&xml, "正文English123");
+            assert!(body.contains("w:ascii=\"仿宋_GB2312\""), "{kind:?}: {body}");
+            assert!(body.contains("w:hAnsi=\"仿宋_GB2312\""), "{kind:?}: {body}");
+            let mut archive = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+            let mut checked = 0;
+            for index in 0..archive.len() {
+                let mut entry = archive.by_index(index).unwrap();
+                if !entry.name().ends_with(".xml") {
+                    continue;
+                }
+                let mut xml = String::new();
+                entry.read_to_string(&mut xml).unwrap();
+                for fonts in fonts_pattern.find_iter(&xml) {
+                    let fonts = fonts.as_str();
+                    let Some(captures) = east_asia_pattern.captures(fonts) else {
+                        continue;
+                    };
+                    let font = &captures[1];
+                    assert!(
+                        fonts.contains(&format!("w:ascii=\"{font}\"")),
+                        "{kind:?}: {fonts}"
+                    );
+                    assert!(
+                        fonts.contains(&format!("w:hAnsi=\"{font}\"")),
+                        "{kind:?}: {fonts}"
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 0, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn numeric_security_period_digits_use_heiti_font() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("security-mono.docx");
         let mut input = DraftInput::default();
@@ -1648,15 +1834,18 @@ mod tests {
         let xml = zip_text(&path, "word/document.xml");
         let security = paragraph_containing(&xml, "秘密");
         assert!(runs_text(security).contains("秘密★10年"));
-        // 数字“10”单独成 run，用等宽西文字体（对应 LaTeX 的 ttfamily）。
-        let digit_run = paragraph_containing(&xml, ">10<");
+        // 数字“10”单独成 run，中西文字体均为黑体。
+        let digit_run = security
+            .split("<w:r>")
+            .find(|run| run.contains(">10<"))
+            .unwrap();
         assert!(
-            digit_run.contains("Courier New"),
-            "数字应用等宽西文字体：{digit_run}"
+            digit_run.contains("w:ascii=\"黑体\"") && digit_run.contains("w:hAnsi=\"黑体\""),
+            "数字应使用黑体：{digit_run}"
         );
         assert!(
-            security.contains("w:eastAsia=\"仿宋_GB2312\""),
-            "“年”等其余部分仍用行内基准字体"
+            security.contains("w:eastAsia=\"黑体\""),
+            "“年”等其余部分应与 TeX 一致使用黑体"
         );
 
         // 非数字期限（“长期”）不使用等宽字体。

@@ -18,6 +18,7 @@ pub(crate) fn red_approval_frame_table(input: &DraftInput) -> Table {
     // 28pt 行距），框底就随承办表上移，保持竖线与下横线相接。
     let frame_height = 10_028usize.saturating_sub(record_rows * 560).max(4_480) as f32;
     let borders = TableBorders::new()
+        .clear_all()
         .set(
             TableBorder::new(TableBorderPosition::Top)
                 .size(12)
@@ -40,7 +41,7 @@ pub(crate) fn red_approval_frame_table(input: &DraftInput) -> Table {
         .line_spacing(
             LineSpacing::new()
                 .before(420)
-                .line(560)
+                .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         );
     Table::new(vec![
@@ -71,7 +72,7 @@ pub(crate) fn red_approval_frame_table(input: &DraftInput) -> Table {
 /// 首页红色横线要贯穿整个版心。批示栏自身只占右侧 5.6cm，另放一条
 /// 极薄的浮动表格补足左栏横线，避免让 Word 把正文按整页宽度绕排。
 pub(crate) fn red_approval_top_rule_table() -> Table {
-    let borders = TableBorders::new().set(
+    let borders = TableBorders::new().clear_all().set(
         TableBorder::new(TableBorderPosition::Top)
             .size(12)
             .color("FF0000"),
@@ -178,7 +179,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
             .cant_split()
         })
         .collect::<Vec<_>>();
-    let borders = TableBorders::new().set(
+    let borders = TableBorders::new().clear_all().set(
         TableBorder::new(TableBorderPosition::Top)
             .size(12)
             .color("FF0000"),
@@ -187,6 +188,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
         .set_grid(vec![columns.unit, columns.contact, columns.phone])
         .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
         .layout(TableLayoutType::Fixed)
+        .margins(TableCellMargins::new().margin(0, 0, 0, 0))
         .clear_all_border()
         .set_borders(borders)
         .position(
