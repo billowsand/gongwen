@@ -1642,6 +1642,9 @@ pub struct FontConfig {
     /// 应用界面（窗口、菜单、列表）字体。留空时使用当前平台的系统默认中文字体；
     /// 不受 `use_system_fonts` 编译开关控制。
     pub ui_font: FontChoice,
+    /// Markdown 源码编辑器字体。留空时跟随界面字体；
+    /// 与界面字体一样不受 `use_system_fonts` 编译开关控制。
+    pub editor_font: FontChoice,
     pub title: FontChoice,
     pub heading1: FontChoice,
     pub heading2: FontChoice,
@@ -1690,6 +1693,12 @@ impl FontConfig {
     /// 界面字体不受公文编译字体总开关影响，配置后立即生效。
     pub fn active_ui_font(&self) -> Option<&FontChoice> {
         self.ui_font.is_set().then_some(&self.ui_font)
+    }
+
+    /// 编辑器字体同样不受编译字体总开关影响；留空时返回 `None`，
+    /// 由主题层回落到界面字体的回退链。
+    pub fn active_editor_font(&self) -> Option<&FontChoice> {
+        self.editor_font.is_set().then_some(&self.editor_font)
     }
 
     /// 加粗文字是不是换用专门的粗体字面（而不是让排版器就着当前字体合成加粗）。

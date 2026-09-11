@@ -516,6 +516,50 @@ pub(crate) fn normalize_ordered_list_punctuation(markdown: &str) -> String {
     output.join("\n")
 }
 
+/// 把每个连续有序列表组里的序号重排成连续自然数。
+///
+/// 组首的序号原样保留——源码里第一项写几，整组就从几开始编，
+/// 见 `first_source_number_controls_automatic_numbering`。缩进、`. ` 分隔符与
+/// 内容也原样保留，只重写数字那几个字符。
+///
+/// 排版结果本来就会自动编号，源码写成一串 `1.` 也能导出对的文件；但源码是**给人
+/// 看、给人改的**，一列全是 `1.` 时挪动、删除某一项完全看不出位置，所以工具栏
+/// 生成列表时按实际序号写。
+pub(crate) fn renumber_ordered_groups(markdown: &str) -> String {
+    let lines = markdown.split('\n').collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(lines.len());
+    let mut index = 0usize;
+    while index < lines.len() {
+        let raw = lines[index].strip_suffix('\r').unwrap_or(lines[index]);
+        let Some((first_number, _)) = parse_ordered_item(raw.trim_end()) else {
+            output.push(lines[index].to_string());
+            index += 1;
+            continue;
+        };
+        let mut expected = first_number;
+        while index < lines.len() {
+            let line = lines[index];
+            let raw = line.strip_suffix('\r').unwrap_or(line);
+            if parse_ordered_item(raw.trim_end()).is_none() {
+                break;
+            }
+            let indent = raw.len() - raw.trim_start_matches(' ').len();
+            let digits = raw[indent..].bytes().take_while(u8::is_ascii_digit).count();
+            let mut rewritten = String::with_capacity(line.len() + 1);
+            rewritten.push_str(&raw[..indent]);
+            rewritten.push_str(&expected.to_string());
+            rewritten.push_str(&raw[indent + digits..]);
+            if line.ends_with('\r') {
+                rewritten.push('\r');
+            }
+            output.push(rewritten);
+            expected += 1;
+            index += 1;
+        }
+    }
+    output.join("\n")
+}
+
 /// 把旧版附件语法转换为统一的内部结构：
 ///
 /// ```text
@@ -698,6 +742,30 @@ pub(crate) fn body_heading_max_level(blocks: &[MarkdownBlock]) -> u8 {
 #[cfg(test)]
 mod ordered_list_tests {
     use super::*;
+
+    #[test]
+    fn renumbering_makes_each_group_consecutive_from_its_own_first_number() {
+        let text = "正文：\n1. 甲\n1. 乙\n1. 丙\n\n5. 另一组\n5. 又一项\n收尾。";
+        assert_eq!(
+            renumber_ordered_groups(text),
+            "正文：\n1. 甲\n2. 乙\n3. 丙\n\n5. 另一组\n6. 又一项\n收尾。"
+        );
+    }
+
+    #[test]
+    fn renumbering_keeps_indent_separator_and_line_ending() {
+        let text = "  1. 甲\r\n  1.  乙\r\n  1. 丙\r\n";
+        assert_eq!(
+            renumber_ordered_groups(text),
+            "  1. 甲\r\n  2.  乙\r\n  3. 丙\r\n"
+        );
+    }
+
+    #[test]
+    fn renumbering_leaves_non_list_text_untouched() {
+        let text = "# 标题\n\n正文 1.5 米，不是列表。\n- 项目符号";
+        assert_eq!(renumber_ordered_groups(text), text);
+    }
 
     #[test]
     fn adjacent_list_becomes_circled_inline_paragraph() {

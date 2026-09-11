@@ -103,15 +103,18 @@ pub(crate) fn editor_line_visuals(
 
 /// 按 galley 的实际行高绘制源码行号。一个 Markdown 段落自动换行时，
 /// 只在第一个视觉行旁显示编号，不把软换行误当成新的源码行。
-/// 行号字号跟随编辑器正文字号（略小两档），避免调大正文后行号显得突兀。
+/// 行号字号跟随编辑器正文字号（略小两档），避免调大正文后行号显得突兀；
+/// `family` 由调用方按模式给定——源码模式用编辑器字体族，行号和正文的数字
+/// 才是同一副字面，实时排版模式的行号是纸面外的界面元素，仍用界面字体。
 pub(crate) fn paint_editor_line_numbers(
     ui: &egui::Ui,
     output: &egui::text_edit::TextEditOutput,
     font_size: f32,
+    family: egui::FontFamily,
 ) {
     let x = output.galley_pos.x - 10.0;
     let painter = ui.painter();
-    let font = egui::FontId::new(font_size, egui::FontFamily::Proportional);
+    let font = egui::FontId::new(font_size, family);
     for (index, line) in editor_line_visuals(output).into_iter().enumerate() {
         painter.text(
             egui::pos2(x, (line.top + line.bottom) * 0.5),
@@ -559,6 +562,7 @@ impl DraftPage<'_> {
                                                 ui,
                                                 &output,
                                                 line_number_size,
+                                                egui::FontFamily::Proportional,
                                             );
                                         }
                                         paint_hybrid_decorations(
@@ -624,7 +628,12 @@ impl DraftPage<'_> {
                             }
                         }
                         if show_line_numbers {
-                            paint_editor_line_numbers(ui, &output, line_number_size);
+                            paint_editor_line_numbers(
+                                ui,
+                                &output,
+                                line_number_size,
+                                egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into()),
+                            );
                         }
                         if let Some(range) = selection {
                             select_source_range(ui, &output, text, range);

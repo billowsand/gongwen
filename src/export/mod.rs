@@ -38,6 +38,7 @@ pub(crate) use parse::{
     parse_markdown, parse_markdown_located, parse_markdown_located_with_numbering,
     parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
     parse_markdown_with_numbering, parse_ordered_item, parse_section_marker,
+    renumber_ordered_groups,
 };
 #[cfg(test)]
 pub(crate) use red::{

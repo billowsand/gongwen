@@ -28,23 +28,6 @@ pub(crate) fn row_label_with_info(ui: &mut egui::Ui, label: &str, tip: impl Into
     form_row_label(ui, label).on_hover_text(tip.into());
 }
 
-/// 章节标题带图标；说明挂在标题文字本身，图标只作视觉锚点不占额外行。
-pub(crate) fn section_heading_with_info(
-    ui: &mut egui::Ui,
-    icon: theme::Icon,
-    heading: &str,
-    tip: impl Into<String>,
-) {
-    ui.horizontal(|ui| {
-        ui.add(
-            icon.image()
-                .tint(theme::text_soft())
-                .fit_to_exact_size(egui::vec2(16.0, 16.0)),
-        );
-        ui.heading(heading).on_hover_text(tip.into());
-    });
-}
-
 pub(crate) fn form_row_label(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let height = if label.contains('\n') {
         FORM_CONTROL_HEIGHT + 14.0
@@ -317,19 +300,6 @@ pub(crate) fn visible_rows(ui: &egui::Ui) -> usize {
         return 24;
     }
     (((height - 12.0) / row_height).floor() as i64).clamp(8, 200) as usize
-}
-
-pub(crate) fn field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) -> bool {
-    ui.horizontal(|ui| {
-        row_label(ui, label);
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .desired_width(f32::INFINITY),
-        )
-        .changed()
-    })
-    .inner
 }
 
 /// 起草页下拉框中的一个候选项。

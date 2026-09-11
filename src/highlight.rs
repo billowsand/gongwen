@@ -215,7 +215,9 @@ pub fn highlight(
     anchor: Option<&Range<usize>>,
     search_matches: &[Range<usize>],
 ) -> LayoutJob {
-    let family = egui::FontFamily::Proportional;
+    // 源码模式用独立的编辑器字体族：用户在设置里选了编辑器字体就生效，
+    // 没选时族内整份回退到界面字体，行为与之前的 Proportional 一致。
+    let family = egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into());
     let body = FontId::new(base_size, family.clone());
 
     let mut job = LayoutJob {
@@ -1256,12 +1258,14 @@ mod tests {
     }
 
     #[test]
-    fn markdown_source_uses_the_ui_font_family() {
+    fn markdown_source_uses_the_editor_font_family() {
         let job = highlight("正文 **重点**", 400.0, 14.0, None, &[]);
+        // 源码模式走独立的编辑器字体族；族内回退链在 configure_fonts 里拼好。
+        let expected = egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into());
         assert!(
             job.sections
                 .iter()
-                .all(|section| section.format.font_id.family == egui::FontFamily::Proportional)
+                .all(|section| section.format.font_id.family == expected)
         );
     }
 

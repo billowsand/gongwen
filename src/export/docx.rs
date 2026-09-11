@@ -61,6 +61,21 @@ const RED_APPROVAL_TITLE_SIZE: usize = 36; // 18 pt，小二号
 pub(super) const TABLE_SIZE: usize = 28; // 14 pt，四号
 const FOOTER_SIZE: usize = 28; // 14 pt，四号；版记字号独立固定，不随正文表格调整
 const PAGE_NUMBER_SIZE: usize = 28; // 14 pt，四号
+/// 页码行的固定行高（18 pt）。页脚只有这一行，页脚块的高度就等于它。
+const PAGE_NUMBER_LINE_TWIPS: i32 = 360;
+/// 版心下边缘距纸张下边缘的距离，即 `PageMargin::bottom`（35 mm）。
+const BODY_BOTTOM_MARGIN_TWIPS: i32 = 1984;
+/// GB/T 9704—2012 7.3.6：页码编排在版心下边缘之下，一字线上距版心下边缘 7 mm。
+const PAGE_NUMBER_GAP_TWIPS: i32 = 397;
+/// `PageMargin::footer` 量的是**纸张下边缘到页脚块下沿**的距离——这一点是用
+/// Word 自己量出来的，不是照字面猜的：把 FooterDistance 设成 X、页脚段落行高设成
+/// H 且不带段前段后间距时，Word 报出的页脚文字上沿正好落在「页高 − X − H」。
+///
+/// 所以要让页码行的**上沿**落在版心下边缘往下 7 mm 处，页脚距边界得再减去一个
+/// 行高：35 mm − 7 mm − 18 pt。原先直接写 10 mm，页码整整低了 12 mm，
+/// 几乎贴到纸边上。
+const FOOTER_DISTANCE_TWIPS: i32 =
+    BODY_BOTTOM_MARGIN_TWIPS - PAGE_NUMBER_GAP_TWIPS - PAGE_NUMBER_LINE_TWIPS;
 // TeX 的 28.98 pt 换算为 Word 的 1/20 bp，四舍五入到 577 twips。
 const BODY_LINE_TWIPS: u32 = 577;
 /// 正文、附件概要或“此页无正文”与落款之间通常空 3 行（每行固定 560 缇）。
@@ -138,11 +153,13 @@ pub fn write_docx_with_numbering(
         .page_size(11906, 16838)
         .page_margin(PageMargin {
             top: 2098,
-            bottom: 1984,
+            bottom: BODY_BOTTOM_MARGIN_TWIPS,
             left: 1587,
             right: 1474,
-            header: 1500,
-            footer: 567,
+            // 红头改为页眉内的浮动表定位（不参与在流高度），页眉距边界不再影响
+            // 正文起点，与会议议程一致取 10mm。
+            header: 567,
+            footer: FOOTER_DISTANCE_TWIPS,
             gutter: 0,
         })
         .default_fonts(chinese_fonts("仿宋_GB2312"))
@@ -1349,6 +1366,40 @@ mod tests {
         assert!(odd_footer.contains("<w:instrText>PAGE</w:instrText>"));
         assert!(even_footer.contains("<w:instrText>PAGE</w:instrText>"));
         assert!(!first_footer.contains("<w:instrText>PAGE</w:instrText>"));
+    }
+
+    /// 页码高度：GB/T 9704—2012 要求一字线上距版心下边缘 7 mm。
+    /// Word 的 `w:footer` 量到页脚块**下沿**，所以要再扣掉页码那一行的行高；
+    /// 行高和页脚距边界必须一起改，这里把两者绑在同一个断言里。
+    #[test]
+    fn page_number_sits_seven_millimetres_below_the_text_area() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("footer-height.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::OfficialLetter;
+        write_docx_ok(&path, &input, "# 测试函\n\n正文。").unwrap();
+
+        let document = zip_text(&path, "word/document.xml");
+        assert!(
+            document.contains(&format!(r#"w:bottom="{BODY_BOTTOM_MARGIN_TWIPS}""#)),
+            "版心下边距应为 35mm：{document}"
+        );
+        assert!(
+            document.contains(&format!(r#"w:footer="{FOOTER_DISTANCE_TWIPS}""#)),
+            "页脚距边界应为 35mm − 7mm − 页码行高 = {FOOTER_DISTANCE_TWIPS} twip：{document}"
+        );
+        let footer = zip_text(&path, "word/footer1.xml");
+        assert!(
+            footer.contains(&format!(
+                r#"<w:spacing w:line="{PAGE_NUMBER_LINE_TWIPS}" w:lineRule="exact" />"#
+            )),
+            "页码行高变了，页脚距边界的反算就不成立：{footer}"
+        );
+        // 页码行上沿 = 纸底 − 页脚距边界 − 行高，应正好落在版心下边缘往下 7mm。
+        assert_eq!(
+            BODY_BOTTOM_MARGIN_TWIPS - FOOTER_DISTANCE_TWIPS - PAGE_NUMBER_LINE_TWIPS,
+            PAGE_NUMBER_GAP_TWIPS
+        );
     }
 
     #[test]
