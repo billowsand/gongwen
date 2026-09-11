@@ -4,7 +4,8 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BODY_LINE_TWIPS, HEADER_SIZE, HEADER_WIDTH_TWIPS, PAGE_NUMBER_SIZE, chinese_fonts,
+    BODY_LINE_TWIPS, HEADER_SIZE, HEADER_WIDTH_TWIPS, PAGE_NUMBER_LINE_TWIPS, PAGE_NUMBER_SIZE,
+    chinese_fonts,
 };
 use docx_rs::*;
 
@@ -78,37 +79,52 @@ pub(crate) fn issuing_unit_paragraph(unit: &str) -> Paragraph {
         .keep_next(true)
 }
 
-/// 0.53 mm 红色反线，156 mm 宽；用无内边距的一行表格保持可编辑性。
-pub(crate) fn letter_rule() -> Table {
-    Table::new(vec![
-        TableRow::new(vec![
-            TableCell::new().add_paragraph(
-                Paragraph::new()
-                    .add_run(Run::new().size(2))
-                    .line_spacing(LineSpacing::new().line(1).line_rule(LineSpacingType::Exact)),
-            ),
-        ])
-        .row_height(1.0)
-        .height_rule(HeightRule::Exact),
-    ])
+/// 红头（含反线）浮动表：相对纸面顶端 27 mm、版心左边缘对齐，不参与正文流。
+///
+/// TeX 的 \DocumentHeader 用 \vspace*{-10mm} 把红头上提至上白边内（距纸顶
+/// 37mm-10mm=27mm），正文仍从 37mm 的版心顶起排。Word 里若把红头作为页眉的
+/// 普通内容，页眉下沿（约 44mm）会超过上边距（37mm），Word 会把首页正文整体下压；
+/// 改成与红头呈批件（red.rs）相同的浮动表后，页眉自身的在流高度趋近于零，
+/// 正文不再被压低。
+pub(crate) fn letter_head_float_table(unit: &str) -> Table {
+    // TeX：红头距纸顶 27mm = 1531 twips。
+    const LETTER_HEAD_Y_TWIPS: i32 = 1531;
+    Table::new(vec![TableRow::new(vec![
+        TableCell::new().add_paragraph(issuing_unit_paragraph(unit)),
+    ])])
     .set_grid(vec![HEADER_WIDTH_TWIPS as usize])
     .width(HEADER_WIDTH_TWIPS as usize, WidthType::Dxa)
     .layout(TableLayoutType::Fixed)
     .margins(TableCellMargins::new().margin(0, 0, 0, 0))
     .clear_all_border()
+    // 表底边框即 0.53 mm 红色反线，与原先紧跟红头的反线表视觉一致。
     .set_borders(
         TableBorders::new().clear_all().set(
-            TableBorder::new(TableBorderPosition::Top)
+            TableBorder::new(TableBorderPosition::Bottom)
                 .size(12)
                 .color("FF0000"),
         ),
+    )
+    .position(
+        TablePositionProperty::new()
+            .horizontal_anchor("margin")
+            .vertical_anchor("page")
+            .position_x_alignment("left")
+            .position_y(LETTER_HEAD_Y_TWIPS)
+            .left_from_text(0)
+            .right_from_text(0),
     )
 }
 
 pub(crate) fn letter_header(unit: &str) -> Header {
     Header::new()
-        .add_paragraph(issuing_unit_paragraph(unit))
-        .add_table(letter_rule())
+        // 占位段落把页眉的在流高度压到最低，红头完全由浮动表定位。
+        .add_paragraph(
+            Paragraph::new()
+                .add_run(Run::new().size(2))
+                .line_spacing(LineSpacing::new().line(1).line_rule(LineSpacingType::Exact)),
+        )
+        .add_table(letter_head_float_table(unit))
 }
 
 pub(crate) fn blank_line() -> Paragraph {
@@ -134,9 +150,11 @@ pub(crate) fn page_number_footer(alignment: AlignmentType) -> Footer {
         Paragraph::new()
             .add_run(page_number)
             .align(alignment)
+            // 行高固定：页脚距边界是按「纸底 − 页脚距边界 − 这个行高 = 页码行上沿」
+            // 反算出来的，行高一变，页码就不在 7 mm 的位置上了。
             .line_spacing(
                 LineSpacing::new()
-                    .line(360)
+                    .line(PAGE_NUMBER_LINE_TWIPS)
                     .line_rule(LineSpacingType::Exact),
             ),
     )

@@ -49,6 +49,38 @@ pub(crate) fn source_line_at_char(text: &str, char_index: usize) -> usize {
         .count()
 }
 
+/// 编辑光标所在 Markdown 源码行的字节范围，不包含行尾换行符。
+pub(crate) fn source_line_range_at_char(text: &str, char_index: usize) -> Range<usize> {
+    let offset = text
+        .char_indices()
+        .nth(char_index)
+        .map_or(text.len(), |(offset, _)| offset);
+    let start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |index| offset + index);
+    let current = start..end;
+    if text
+        .get(current.clone())
+        .is_some_and(|line| !line.trim().is_empty())
+    {
+        return current;
+    }
+    let lines = export::source_lines(text);
+    lines
+        .iter()
+        .find(|(line_start, line)| *line_start > start && !line.trim().is_empty())
+        .or_else(|| {
+            lines
+                .iter()
+                .rev()
+                .find(|(line_start, line)| *line_start < start && !line.trim().is_empty())
+        })
+        .map_or(current, |(line_start, line)| {
+            *line_start..*line_start + line.len()
+        })
+}
+
 pub(crate) fn active_source_line(ctx: &egui::Context, text: &str) -> usize {
     egui::TextEdit::load_state(ctx, editor_id())
         .and_then(|state| state.cursor.char_range())
@@ -103,15 +135,18 @@ pub(crate) fn editor_line_visuals(
 
 /// 按 galley 的实际行高绘制源码行号。一个 Markdown 段落自动换行时，
 /// 只在第一个视觉行旁显示编号，不把软换行误当成新的源码行。
-/// 行号字号跟随编辑器正文字号（略小两档），避免调大正文后行号显得突兀。
+/// 行号字号跟随编辑器正文字号（略小两档），避免调大正文后行号显得突兀；
+/// `family` 由调用方按模式给定——源码模式用编辑器字体族，行号和正文的数字
+/// 才是同一副字面，实时排版模式的行号是纸面外的界面元素，仍用界面字体。
 pub(crate) fn paint_editor_line_numbers(
     ui: &egui::Ui,
     output: &egui::text_edit::TextEditOutput,
     font_size: f32,
+    family: egui::FontFamily,
 ) {
     let x = output.galley_pos.x - 10.0;
     let painter = ui.painter();
-    let font = egui::FontId::new(font_size, egui::FontFamily::Proportional);
+    let font = egui::FontId::new(font_size, family);
     for (index, line) in editor_line_visuals(output).into_iter().enumerate() {
         painter.text(
             egui::pos2(x, (line.top + line.bottom) * 0.5),
@@ -453,6 +488,7 @@ impl DraftPage<'_> {
         // 拆开借用：编辑框要可变借文本，布局器要可变借高亮缓存。
         let jump = self.doc.pending_source_jump.take();
         let selection = self.doc.pending_source_selection.take();
+        let programmatic_source_move = jump.is_some() || selection.is_some();
         let anchor = self
             .doc
             .preview_anchor
@@ -485,6 +521,7 @@ impl DraftPage<'_> {
         let highlighter = &mut self.doc.highlighter;
         let numbering = self.config.numbering;
         let mut editor_lost_focus = false;
+        let mut cursor_follow = None;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
             if hybrid {
                 highlighter.layout_hybrid(
@@ -559,6 +596,7 @@ impl DraftPage<'_> {
                                                 ui,
                                                 &output,
                                                 line_number_size,
+                                                egui::FontFamily::Proportional,
                                             );
                                         }
                                         paint_hybrid_decorations(
@@ -578,6 +616,17 @@ impl DraftPage<'_> {
                                                 != active_line
                                         }) {
                                             ui.ctx().request_repaint();
+                                        }
+                                        if !programmatic_source_move
+                                            && self.doc.preview_mode == PreviewMode::Split
+                                            && output.response.has_focus()
+                                        {
+                                            cursor_follow = output.cursor_range.map(|range| {
+                                                source_line_range_at_char(
+                                                    text,
+                                                    range.primary.index.0,
+                                                )
+                                            });
                                         }
                                     });
                                 });
@@ -624,12 +673,25 @@ impl DraftPage<'_> {
                             }
                         }
                         if show_line_numbers {
-                            paint_editor_line_numbers(ui, &output, line_number_size);
+                            paint_editor_line_numbers(
+                                ui,
+                                &output,
+                                line_number_size,
+                                egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into()),
+                            );
                         }
                         if let Some(range) = selection {
                             select_source_range(ui, &output, text, range);
                         } else if let Some(offset) = jump {
                             jump_to_source(ui, &output, text, offset);
+                        }
+                        if !programmatic_source_move
+                            && self.doc.preview_mode == PreviewMode::Split
+                            && output.response.has_focus()
+                        {
+                            cursor_follow = output.cursor_range.map(|range| {
+                                source_line_range_at_char(text, range.primary.index.0)
+                            });
                         }
                     });
             });
@@ -638,6 +700,20 @@ impl DraftPage<'_> {
             let normalized = export::normalize_ordered_list_punctuation(text);
             if normalized != *text {
                 *text = normalized;
+            }
+        }
+        if let Some(range) = cursor_follow {
+            let line_changed = self.doc.preview_cursor_line != Some(range.start);
+            self.doc.preview_cursor_line = Some(range.start);
+            if let Some(text) = self.doc.generated_markdown.get(range.clone()) {
+                self.doc.preview_anchor = Some(PreviewAnchor {
+                    range,
+                    text: text.to_owned(),
+                });
+                if line_changed {
+                    self.doc.pending_render_jump = true;
+                    ui.ctx().request_repaint();
+                }
             }
         }
     }
@@ -737,8 +813,9 @@ impl DraftPage<'_> {
                 self.doc.preview_fit_scale = target;
                 // 点中版式上的某一块：源码里同步高亮，并把光标带过去。
                 if let Some(range) = output.clicked {
+                    let line_start = range.start;
                     self.doc.pending_source_selection = None;
-                    self.doc.pending_source_jump = Some(range.start);
+                    self.doc.pending_source_jump = Some(line_start);
                     self.doc.preview_anchor =
                         self.doc
                             .generated_markdown
@@ -747,6 +824,7 @@ impl DraftPage<'_> {
                                 range,
                                 text: text.to_owned(),
                             });
+                    self.doc.preview_cursor_line = Some(line_start);
                     ui.ctx().request_repaint();
                 }
                 ui.add_space(12.0);
@@ -802,5 +880,29 @@ impl DraftPage<'_> {
         if let Some(span) = jump {
             self.jump_to_source(span);
         }
+    }
+}
+
+#[cfg(test)]
+mod source_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_range_tracks_the_exact_markdown_source_line() {
+        let text = "第一行\n第二行\n第三行";
+        assert_eq!(source_line_range_at_char(text, 0), 0.."第一行".len());
+        let second_char = "第一行\n第".chars().count();
+        let second_start = "第一行\n".len();
+        assert_eq!(
+            source_line_range_at_char(text, second_char),
+            second_start..second_start + "第二行".len()
+        );
+        let blank = "第一行\n\n## 下一节";
+        let blank_char = "第一行\n".chars().count();
+        let heading_start = "第一行\n\n".len();
+        assert_eq!(
+            source_line_range_at_char(blank, blank_char),
+            heading_start..blank.len()
+        );
     }
 }

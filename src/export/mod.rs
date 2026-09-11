@@ -34,10 +34,11 @@ pub(crate) use headings::{
 #[allow(unused_imports)]
 pub(crate) use parse::{
     ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, block_span_for_line,
-    body_heading_max_level, circled_number, is_image_line, normalize_ordered_list_punctuation,
-    parse_markdown, parse_markdown_located, parse_markdown_located_with_numbering,
-    parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
-    parse_markdown_with_numbering, parse_ordered_item, parse_section_marker,
+    body_heading_max_level, circled_number, compact_heading_flags, is_image_line,
+    join_soft_wrapped_lines, normalize_ordered_list_punctuation, parse_markdown,
+    parse_markdown_located, parse_markdown_located_with_numbering, parse_markdown_with_lines,
+    parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering, parse_ordered_item,
+    parse_section_marker, renumber_ordered_groups, source_lines,
 };
 #[cfg(test)]
 pub(crate) use red::{
@@ -54,9 +55,9 @@ pub(crate) use red::{
 pub(crate) use text::parenthesized_ranges;
 pub(crate) use text::{
     InlineSegment, RedlineKind, attachment_names, attachment_title_name, chinese_date_parts,
-    inline_segments, is_redline_sentinel, legacy_attachment_label, mark_added, mark_deleted,
-    normalize_chinese_quotes, number_to_chinese, plain_text, redline_chunks, strip_redline,
-    table_columns,
+    inline_segments, inline_visible_char_index, is_redline_sentinel, legacy_attachment_label,
+    mark_added, mark_deleted, normalize_chinese_quotes, number_to_chinese, plain_text,
+    redline_chunks, strip_redline, table_columns,
 };
 #[cfg(test)]
 pub(crate) use text::{REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN};

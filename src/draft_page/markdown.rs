@@ -123,8 +123,9 @@ pub(crate) fn toggle_ordered(line: &str) -> String {
     }
 }
 
-/// 在有序列表项中按回车：非空项续写一个 `1. ` 占位；空项再次回车则移除
-/// 占位并结束列表。返回修改后的正文和新光标字节位置；非列表行返回 None，
+/// 在有序列表项中按回车：非空项按「当前序号+1」续写下一项，光标后方同一连续
+/// 列表组里的已有项序号依次后移，避免与新行重号；空项再次回车则移除占位并
+/// 结束列表。返回修改后的正文和新光标字节位置；非列表行返回 None，
 /// 交还给 TextEdit 做普通换行。
 pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String, usize)> {
     if cursor > text.len() || !text.is_char_boundary(cursor) {
@@ -135,7 +136,7 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
         .find('\n')
         .map_or(text.len(), |index| cursor + index);
     let line = &text[line_start..line_end];
-    let (_, content) = export::parse_ordered_item(line)?;
+    let (number, content) = export::parse_ordered_item(line)?;
     let content_start = content.as_ptr() as usize - line.as_ptr() as usize;
     if cursor < line_start + content_start {
         return None;
@@ -162,9 +163,35 @@ pub(crate) fn continue_ordered_list(text: &str, cursor: usize) -> Option<(String
     }
 
     let indent_len = line.len() - line.trim_start_matches(' ').len();
-    let marker = format!("\n{}1. ", " ".repeat(indent_len.min(3)));
+    let marker = format!("\n{}{}. ", " ".repeat(indent_len.min(3)), number + 1);
     let mut updated = text.to_string();
     updated.insert_str(cursor, &marker);
+    // 光标后方同一连续列表组（相同缩进、紧邻的有序列表行，遇空行或非列表行即止）
+    // 里已有项的序号依次重排为新行序号 +1、+2……，只重写数字部分，
+    // 各行的缩进、分隔符与内容原样保留。
+    let mut expected = number + 2;
+    let mut pos = line_end + marker.len();
+    while pos < updated.len() && updated.as_bytes()[pos] == b'\n' {
+        let item_start = pos + 1;
+        let item_end = updated[item_start..]
+            .find('\n')
+            .map_or(updated.len(), |index| item_start + index);
+        let item = &updated[item_start..item_end];
+        let item_indent = item.len() - item.trim_start_matches(' ').len();
+        if item_indent != indent_len || export::parse_ordered_item(item).is_none() {
+            break;
+        }
+        let digits = item[item_indent..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let item_len = item.len();
+        let number_start = item_start + item_indent;
+        let replacement = expected.to_string();
+        updated.replace_range(number_start..number_start + digits, &replacement);
+        pos = item_start + item_len - digits + replacement.len();
+        expected += 1;
+    }
     Some((updated, cursor + marker.len()))
 }
 
@@ -469,7 +496,10 @@ impl DraftPage<'_> {
         }
 
         let affected_line = line_at_byte(&line_ranges(&updated), span.end);
-        self.doc.generated_markdown = export::normalize_ordered_list_punctuation(&updated);
+        // `toggle_ordered` 逐行加的都是 `1. `；整组一起重排成 1. 2. 3.，
+        // 源码里才看得出第几项，和回车续写出来的编号也是同一套。
+        self.doc.generated_markdown =
+            export::renumber_ordered_groups(&export::normalize_ordered_list_punctuation(&updated));
         let normalized_ranges = line_ranges(&self.doc.generated_markdown);
         self.doc.pending_source_jump = Some(
             normalized_ranges
@@ -515,11 +545,37 @@ mod ordered_list_tests {
     use super::*;
 
     #[test]
-    fn enter_continues_ordered_item_with_placeholder_marker() {
+    fn enter_continues_ordered_item_with_incremented_marker() {
         let text = "正文\n1. 第一项";
         let (updated, cursor) = continue_ordered_list(text, text.len()).unwrap();
-        assert_eq!(updated, "正文\n1. 第一项\n1. ");
+        assert_eq!(updated, "正文\n1. 第一项\n2. ");
         assert_eq!(cursor, updated.len());
+    }
+
+    #[test]
+    fn enter_in_middle_renumbers_following_items() {
+        let text = "1. 第一项\n2. 第二项\n3. 第三项";
+        let cursor = "1. 第一项".len();
+        let (updated, cursor) = continue_ordered_list(text, cursor).unwrap();
+        assert_eq!(updated, "1. 第一项\n2. \n3. 第二项\n4. 第三项");
+        assert_eq!(cursor, "1. 第一项\n2. ".len());
+    }
+
+    #[test]
+    fn enter_at_last_item_only_appends() {
+        // 列表中间被空行断开时，只重排光标后方紧邻的连续组，下一组不动。
+        let text = "1. 第一项\n\n5. 另一组";
+        let cursor = "1. 第一项".len();
+        let (updated, _) = continue_ordered_list(text, cursor).unwrap();
+        assert_eq!(updated, "1. 第一项\n2. \n\n5. 另一组");
+    }
+
+    #[test]
+    fn enter_keeps_separator_and_content_of_renumbered_items() {
+        let text = "2. 甲\n3.  乙\n4. 丙";
+        let cursor = "2. 甲".len();
+        let (updated, _) = continue_ordered_list(text, cursor).unwrap();
+        assert_eq!(updated, "2. 甲\n3. \n4.  乙\n5. 丙");
     }
 
     #[test]

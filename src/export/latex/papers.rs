@@ -12,7 +12,7 @@ use crate::export::latex::{
 use crate::export::{
     MarkdownBlock, chinese_date_parts, parse_markdown_with_lines_with_numbering, plain_text,
 };
-use crate::models::{DraftInput, LetterVersion, ListNumbering, NumberingConfig, StyleMode};
+use crate::models::{DraftInput, LetterVersion, ListNumbering, NumberingConfig};
 use crate::units::UnitDisplay;
 
 #[allow(dead_code)] // 默认编号的兼容入口，测试使用。
@@ -38,7 +38,7 @@ pub(crate) fn white_paper_tex_with_numbering(
     let (mut body, attachments) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
-        input.profile.style_mode == StyleMode::Compact,
+        input.profile.style_mode,
         numbering,
     );
     // 附件概要：正文结束后、落款之前列出附件名称。
@@ -147,7 +147,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
     let (mut body, attachments) = official_letter_sections_to_tex_with_barrier_with_numbering(
         &blocks,
         &block_lines,
-        input.profile.style_mode == StyleMode::Compact,
+        input.profile.style_mode,
         Some("\\RedPageOneBarrier"),
         numbering,
     );
@@ -337,7 +337,7 @@ pub(crate) fn meeting_agenda_tex_with_numbering(
     let (body, _) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
-        input.profile.style_mode == StyleMode::Compact,
+        input.profile.style_mode,
         &agenda_numbering,
     );
     let security = security_commands(input);

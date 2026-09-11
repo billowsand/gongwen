@@ -189,11 +189,11 @@ pub(crate) fn write_meeting_agenda_docx(
         .page_size(11906, 16838)
         .page_margin(PageMargin {
             top: 2098,
-            bottom: 1984,
+            bottom: super::BODY_BOTTOM_MARGIN_TWIPS,
             left: 1587,
             right: 1474,
             header: 567,
-            footer: 567,
+            footer: super::FOOTER_DISTANCE_TWIPS,
             gutter: 0,
         })
         .default_fonts(chinese_fonts("仿宋_GB2312"))

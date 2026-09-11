@@ -6,12 +6,13 @@
 use crate::export;
 use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::images;
-use crate::models::{DraftInput, NumberingConfig, StyleMode, TemplateKind};
+use crate::models::{DraftInput, NumberingConfig, TemplateKind};
 use crate::preview::{
-    BODY_PT, BodyRun, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT, addressee_block,
-    append_inline, body_block, clickable, draw_justified, footer_record, header_block,
-    heading_family, indent, is_renderable_paragraph, job, line_block, place,
-    red_approval_print_preview, sheet, signature_block, table_block, text_format,
+    BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT,
+    addressee_block, append_inline, body_block, clickable, clickable_body_block,
+    clickable_justified_job, draw_justified, footer_record, header_block, heading_family, indent,
+    is_renderable_paragraph, job, line_block, place, red_approval_print_preview, sheet,
+    signature_block, table_block, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -39,6 +40,7 @@ pub(crate) fn body_blocks(
     clicked: &mut Option<Range<usize>>,
     counters: &mut [usize; 4],
     numbering: &NumberingConfig,
+    markdown: &str,
 ) {
     let mut index = 0usize;
     while index < body.len() {
@@ -48,8 +50,7 @@ pub(crate) fn body_blocks(
             // 文档标题已在上面按版式排过，正文区不再重复。
             MarkdownBlock::Title(_) => {}
             MarkdownBlock::Heading(level, heading)
-                if run.compact
-                    && *level == run.compact_level
+                if run.compact_headings[index - 1]
                     && matches!(body.get(index), Some(next)
                         if matches!(&next.block, MarkdownBlock::Paragraph(text)
                             if is_renderable_paragraph(text))) =>
@@ -61,20 +62,35 @@ pub(crate) fn body_blocks(
                     unreachable!("已在守卫里确认过是正文段落")
                 };
                 index += 1;
-                // 合并成一段的标题与正文，回跳时一并选中。
-                let range = located.range.start..next.range.end;
-                clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
-                    compact_block(
-                        ui,
-                        metrics,
-                        *level,
-                        heading,
-                        text,
-                        counters,
-                        run.numbered,
-                        numbering,
-                    );
-                });
+                let body_segments = paragraph_source_segments(markdown, next, text);
+                clickable_compact_block(
+                    ui,
+                    metrics,
+                    *level,
+                    heading,
+                    text,
+                    located.range.clone(),
+                    &body_segments,
+                    counters,
+                    run.numbered,
+                    numbering,
+                    anchor,
+                    scroll_to_anchor,
+                    clicked,
+                );
+            }
+            MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
+                let segments = paragraph_source_segments(markdown, located, text);
+                clickable_body_block(
+                    ui,
+                    metrics,
+                    text,
+                    true,
+                    &segments,
+                    anchor,
+                    scroll_to_anchor,
+                    clicked,
+                );
             }
             _ => {
                 let range = located.range.clone();
@@ -116,7 +132,6 @@ pub(crate) fn official_preview(
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
     // 跟随设置里的编号样式；紧缩风格跟随模板配置。
     let numbered = true;
-    let compact = input.profile.style_mode == StyleMode::Compact;
     let located = export::parse_markdown_located_with_numbering(markdown, numbering);
     let blocks = located
         .iter()
@@ -149,8 +164,11 @@ pub(crate) fn official_preview(
             _ => body.push(located),
         }
     }
-    // 紧缩风格合并的是正文区 # 号最多的那一级标题；附件区不参与。
-    let compact_level = export::body_heading_max_level(&blocks);
+    let body_plain = body
+        .iter()
+        .map(|located| located.block.clone())
+        .collect::<Vec<_>>();
+    let compact_headings = export::compact_heading_flags(&body_plain, input.profile.style_mode);
     // 标题取正文首个 `# `，缺省回落表单里的标题提示，与导出器一致。
     let title = body
         .iter()
@@ -179,6 +197,7 @@ pub(crate) fn official_preview(
             &mut scroll_to_anchor,
             &mut clicked,
             numbering,
+            markdown,
         );
         return PreviewOutput {
             scale: metrics.scale,
@@ -215,8 +234,7 @@ pub(crate) fn official_preview(
             &metrics,
             &body,
             &BodyRun {
-                compact,
-                compact_level,
+                compact_headings,
                 numbered,
             },
             anchor,
@@ -224,6 +242,7 @@ pub(crate) fn official_preview(
             &mut clicked,
             &mut counters,
             numbering,
+            markdown,
         );
         // 正文之后的附件概要：空两行再逐条列出（与导出一致）。
         if !names.is_empty() {
@@ -266,15 +285,29 @@ pub(crate) fn official_preview(
                 Align::LEFT,
             );
             for located in attachment {
-                let range = located.range.clone();
-                clickable(
-                    ui,
-                    &range,
-                    anchor,
-                    &mut scroll_to_anchor,
-                    &mut clicked,
-                    |ui| {
-                        match &located.block {
+                if let MarkdownBlock::Paragraph(text) = &located.block
+                    && is_renderable_paragraph(text)
+                {
+                    let segments = paragraph_source_segments(markdown, located, text);
+                    clickable_body_block(
+                        ui,
+                        &metrics,
+                        text,
+                        true,
+                        &segments,
+                        anchor,
+                        &mut scroll_to_anchor,
+                        &mut clicked,
+                    );
+                } else {
+                    let range = located.range.clone();
+                    clickable(
+                        ui,
+                        &range,
+                        anchor,
+                        &mut scroll_to_anchor,
+                        &mut clicked,
+                        |ui| match &located.block {
                             // 附件正式标题与正文标题使用同一层级编码。
                             MarkdownBlock::Title(text) => {
                                 counters.fill(0);
@@ -296,9 +329,9 @@ pub(crate) fn official_preview(
                                 numbered,
                                 numbering,
                             ),
-                        }
-                    },
-                );
+                        },
+                    );
+                }
             }
             if sheet_index == last_attachment {
                 footer_record(ui, &metrics, input, display);
@@ -311,17 +344,77 @@ pub(crate) fn official_preview(
     }
 }
 
-/// 紧缩风格的一段：标题（带编号与句号，用该级标题字体）后面直接接正文。
+/// 一个自然段可以由多行 Markdown 软换行组成；成文仍连续排版，交互范围按源码行拆开。
+pub(crate) fn paragraph_source_segments(
+    markdown: &str,
+    located: &LocatedBlock,
+    rendered_text: &str,
+) -> Vec<ClickableSourceSegment> {
+    let lines = export::source_lines(markdown)
+        .into_iter()
+        .filter(|(start, raw)| {
+            *start >= located.range.start && *start + raw.len() <= located.range.end
+        })
+        .filter(|(_, raw)| !raw.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return vec![ClickableSourceSegment {
+            source: located.range.clone(),
+            chars: 0..rendered_text.chars().count(),
+        }];
+    }
+    let source_text = lines
+        .iter()
+        .map(|(_, raw)| raw.trim().to_string())
+        .collect::<Vec<_>>();
+    let joined = export::join_soft_wrapped_lines(&source_text);
+    let rendered_chars = export::inline_visible_char_index(rendered_text, rendered_text.len());
+    let mut previous = 0usize;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, (start, raw))| {
+            let end = if joined == rendered_text {
+                let prefix = export::join_soft_wrapped_lines(&source_text[..=index]);
+                export::inline_visible_char_index(rendered_text, prefix.len())
+            } else if index + 1 == lines.len() {
+                rendered_chars
+            } else {
+                let source_chars = source_text
+                    .iter()
+                    .map(|line| line.chars().count())
+                    .sum::<usize>();
+                let prefix_chars = source_text[..=index]
+                    .iter()
+                    .map(|line| line.chars().count())
+                    .sum::<usize>();
+                rendered_chars * prefix_chars / source_chars.max(1)
+            };
+            let segment = ClickableSourceSegment {
+                source: *start..*start + raw.len(),
+                chars: previous..end.max(previous),
+            };
+            previous = end;
+            segment
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compact_block(
+fn clickable_compact_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
     level: u8,
     heading: &str,
     body: &str,
+    heading_source: Range<usize>,
+    body_segments: &[ClickableSourceSegment],
     counters: &mut [usize; 4],
     numbered: bool,
     numbering: &NumberingConfig,
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
 ) {
     let heading = match numbered {
         true => match export::official_heading_text(level, heading, counters, numbering) {
@@ -337,13 +430,31 @@ pub(crate) fn compact_block(
         0.0,
         text_format(normal.clone(), metrics.line),
     );
+    let heading_text = format!("{}。", export::plain_text(&heading));
     job.append(
-        &format!("{}。", export::plain_text(&heading)),
+        &heading_text,
         0.0,
         text_format(metrics.font(heading_family(level), BODY_PT), metrics.line),
     );
+    let body_start = INDENT_CHARS as usize + heading_text.chars().count();
     append_inline(&mut job, metrics, body, &normal);
-    draw_justified(ui, job);
+    let mut segments = vec![ClickableSourceSegment {
+        source: heading_source,
+        chars: 0..body_start,
+    }];
+    segments.extend(body_segments.iter().map(|segment| ClickableSourceSegment {
+        source: segment.source.clone(),
+        chars: body_start + segment.chars.start..body_start + segment.chars.end,
+    }));
+    clickable_justified_job(
+        ui,
+        metrics,
+        job,
+        &segments,
+        anchor,
+        scroll_to_anchor,
+        clicked,
+    );
 }
 
 pub(crate) fn heading_block(
@@ -483,4 +594,25 @@ pub(crate) fn image_placeholder(
             theme::paper::bg(),
         );
     });
+}
+
+#[cfg(test)]
+mod source_segment_tests {
+    use super::*;
+
+    #[test]
+    fn a_soft_wrapped_paragraph_keeps_one_click_target_per_markdown_line() {
+        let markdown = "第一行\n**第二行**";
+        let located = export::parse_markdown_located(markdown).remove(0);
+        let MarkdownBlock::Paragraph(text) = &located.block else {
+            panic!("expected paragraph")
+        };
+        let segments = paragraph_source_segments(markdown, &located, text);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].source, 0.."第一行".len());
+        let second_start = "第一行\n".len();
+        assert_eq!(segments[1].source, second_start..markdown.len());
+        assert_eq!(segments[0].chars, 0..3);
+        assert_eq!(segments[1].chars, 3..6);
+    }
 }

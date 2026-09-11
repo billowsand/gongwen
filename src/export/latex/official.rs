@@ -10,9 +10,8 @@ use crate::export::latex::{
 };
 use crate::export::table::to_longtblr;
 use crate::export::{
-    MarkdownBlock, MarkdownSection, body_heading_max_level, chinese_date_parts, joint_main_column,
-    official_heading_prefix, parse_markdown_with_lines_with_numbering, plain_text,
-    render_list_number,
+    MarkdownBlock, MarkdownSection, chinese_date_parts, joint_main_column, official_heading_prefix,
+    parse_markdown_with_lines_with_numbering, plain_text, render_list_number,
 };
 use crate::models::{
     DraftInput, JointIssuanceMode, LetterVersion, NumberingConfig, StyleMode, TemplateKind,
@@ -46,7 +45,7 @@ pub(crate) fn official_letter_tex_with_numbering(
     let (mut body, attachments) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
-        input.profile.style_mode == StyleMode::Compact,
+        input.profile.style_mode,
         numbering,
     );
     // 附件概要：正文结束后、落款之前列出附件名称。
@@ -298,7 +297,7 @@ pub(crate) fn plain_document_tex_with_numbering(
     let (mut body, attachments) = official_letter_sections_to_tex_with_numbering(
         &blocks,
         &block_lines,
-        input.profile.style_mode == StyleMode::Compact,
+        input.profile.style_mode,
         numbering,
     );
     if let Some(summary) = attachment_summary_tex(&blocks) {
@@ -486,7 +485,11 @@ pub(crate) fn official_letter_sections_to_tex(
     official_letter_sections_to_tex_with_barrier_with_numbering(
         blocks,
         lines,
-        compact,
+        if compact {
+            StyleMode::Compact
+        } else {
+            StyleMode::Normal
+        },
         None,
         &NumberingConfig::default(),
     )
@@ -496,11 +499,11 @@ pub(crate) fn official_letter_sections_to_tex(
 pub(crate) fn official_letter_sections_to_tex_with_numbering(
     blocks: &[MarkdownBlock],
     lines: &[usize],
-    compact: bool,
+    style_mode: StyleMode,
     numbering: &NumberingConfig,
 ) -> (String, String) {
     official_letter_sections_to_tex_with_barrier_with_numbering(
-        blocks, lines, compact, None, numbering,
+        blocks, lines, style_mode, None, numbering,
     )
 }
 
@@ -520,7 +523,11 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier(
     official_letter_sections_to_tex_with_barrier_with_numbering(
         blocks,
         lines,
-        compact,
+        if compact {
+            StyleMode::Compact
+        } else {
+            StyleMode::Normal
+        },
         barrier,
         &NumberingConfig::default(),
     )
@@ -530,7 +537,7 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier(
 pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
     blocks: &[MarkdownBlock],
     lines: &[usize],
-    compact: bool,
+    style_mode: StyleMode,
     barrier: Option<&str>,
     numbering: &NumberingConfig,
 ) -> (String, String) {
@@ -547,8 +554,7 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
     let mut attachment_title_count = 0usize;
     let mut current_attachment_is_landscape = false;
     let mut counters = [0usize; 4];
-    // 紧缩风格合并正文区 # 号最多的那一级标题；附件区标题不计入。
-    let compact_heading_level = body_heading_max_level(blocks);
+    let compact_headings = crate::export::compact_heading_flags(blocks, style_mode);
 
     let mut index = 0usize;
     while index < blocks.len() {
@@ -603,9 +609,8 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                             && !p.contains("<div")
                             && !p.contains("</div"))
                 });
-                if compact
+                if compact_headings[index]
                     && section == MarkdownSection::Body
-                    && *level == compact_heading_level
                     && next_is_paragraph
                     && let Some(number) = official_heading_prefix(*level, &mut counters, numbering)
                 {

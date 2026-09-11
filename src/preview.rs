@@ -14,12 +14,13 @@ mod tail;
 
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
-    append_inline, body_block, clickable, draw, draw_justified, heading_family, indent,
-    is_renderable_paragraph, job, justified_rows, layout, line_block, line_galley, place, sheet,
+    ClickableSourceSegment, append_inline, body_block, clickable, clickable_body_block,
+    clickable_justified_job, draw, draw_justified, heading_family, indent, is_renderable_paragraph,
+    job, justified_rows, layout, line_block, line_galley, place, scroll_preview_to_rect, sheet,
     single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
-pub(crate) use render::{content_block, official_preview};
+pub(crate) use render::{content_block, official_preview, paragraph_source_segments};
 pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 // test-only names（根文件的测试模块使用）
 #[cfg(test)]
@@ -511,6 +512,7 @@ mod tests {
                 &title,
                 &[],
                 &crate::models::NumberingConfig::default(),
+                &markdown,
             );
             let heading = layout.pages[0]
                 .fragments
@@ -578,6 +580,7 @@ mod tests {
                 &title,
                 &[],
                 &crate::models::NumberingConfig::default(),
+                &markdown,
             );
             let first = layout.pages[0]
                 .fragments

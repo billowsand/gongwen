@@ -1458,6 +1458,19 @@ mod tests {
     }
 
     #[test]
+    fn section_compact_merges_each_sections_own_deepest_heading() {
+        let mut input = DraftInput::default();
+        input.profile.style_mode = StyleMode::SectionCompact;
+        let tex = letter_tex(
+            &input,
+            "# 测试函\n\n## 总体要求\n节首正文。\n### 具体任务\n任务正文。\n## 工作安排\n安排正文。",
+        );
+        assert!(tex.contains("{\\kai\\enkai （一）具体任务。}任务正文。\\GwaTail{"));
+        assert!(!tex.contains("{\\heiti\\enheiti 一、总体要求。}节首正文。"));
+        assert!(tex.contains("{\\heiti\\enheiti 二、工作安排。}安排正文。\\GwaTail{"));
+    }
+
+    #[test]
     fn each_additional_attachment_starts_on_a_new_page() {
         let (blocks, block_lines) = parse_markdown_with_lines(
             "# 测试函\n正文。\n<!-- [附件] -->\n# 附件1\n## 表一\n内容一。\n# 附件2\n## 表二\n内容二。",

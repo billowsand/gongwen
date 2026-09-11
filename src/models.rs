@@ -221,21 +221,25 @@ pub fn sync_joint_responsible(profile: &mut TemplateProfile, entries: &[JointRes
         .collect();
 }
 
-/// 正文排版风格。紧缩风格把正文区 # 号最多（层级最深）的那一级标题与紧随其后的正文段落合并为一行。
+/// 正文排版风格。全局紧缩在整个正文区选最深标题；节内紧缩则以
+/// `##` 为边界，分别选出每节最深的标题。被选中的标题与紧随正文合并为一行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StyleMode {
     #[default]
     Normal,
+    /// 与旧版“紧缩”完全相同，只改为更明确的名称。
     Compact,
+    SectionCompact,
 }
 
 impl StyleMode {
-    pub const ALL: [Self; 2] = [Self::Normal, Self::Compact];
+    pub const ALL: [Self; 3] = [Self::Normal, Self::Compact, Self::SectionCompact];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Normal => "正常",
-            Self::Compact => "紧缩",
+            Self::Compact => "全局紧缩",
+            Self::SectionCompact => "节内紧缩",
         }
     }
 }
@@ -1045,7 +1049,8 @@ pub struct TemplateProfile {
     pub document_number: String,
     pub meeting_location: String,
     pub letter_version: LetterVersion,
-    /// 正文排版风格：正常 / 紧缩。公函、电话通知、白头件、红头呈批件、会议议程均生效。
+    /// 正文排版风格：正常 / 全局紧缩 / 节内紧缩。
+    /// 公函、电话通知、白头件、红头呈批件、会议议程均生效。
     pub style_mode: StyleMode,
     /// 函稿按双面方式排版页码：奇数页靠右、偶数页靠左。
     pub duplex_printing: bool,
@@ -1642,6 +1647,9 @@ pub struct FontConfig {
     /// 应用界面（窗口、菜单、列表）字体。留空时使用当前平台的系统默认中文字体；
     /// 不受 `use_system_fonts` 编译开关控制。
     pub ui_font: FontChoice,
+    /// Markdown 源码编辑器字体。留空时跟随界面字体；
+    /// 与界面字体一样不受 `use_system_fonts` 编译开关控制。
+    pub editor_font: FontChoice,
     pub title: FontChoice,
     pub heading1: FontChoice,
     pub heading2: FontChoice,
@@ -1690,6 +1698,12 @@ impl FontConfig {
     /// 界面字体不受公文编译字体总开关影响，配置后立即生效。
     pub fn active_ui_font(&self) -> Option<&FontChoice> {
         self.ui_font.is_set().then_some(&self.ui_font)
+    }
+
+    /// 编辑器字体同样不受编译字体总开关影响；留空时返回 `None`，
+    /// 由主题层回落到界面字体的回退链。
+    pub fn active_editor_font(&self) -> Option<&FontChoice> {
+        self.editor_font.is_set().then_some(&self.editor_font)
     }
 
     /// 加粗文字是不是换用专门的粗体字面（而不是让排版器就着当前字体合成加粗）。

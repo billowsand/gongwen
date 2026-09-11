@@ -325,6 +325,48 @@ pub(crate) fn inline_segments(text: &str) -> Vec<InlineSegment> {
     segments
 }
 
+/// 行内 Markdown 排版后，原文某个字节位置对应到第几个可见字符。
+///
+/// 预览按源码行拆分点击区域时需要这层换算：反引号和成对的加粗标记不占版面，
+/// 中文引号规范化则仍是一进一出。范围按字符计，正好可直接交给 egui 的光标坐标。
+pub(crate) fn inline_visible_char_index(text: &str, byte_offset: usize) -> usize {
+    let mut boundary = byte_offset.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let boundary_chars = text[..boundary].chars().filter(|ch| *ch != '`').count();
+    let normalized = normalize_chinese_quotes(&text.replace('`', ""));
+    let mut paired_markers = std::collections::HashSet::new();
+    for marker in ["**", "__"] {
+        let positions = normalized
+            .match_indices(marker)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for pair in positions.as_chunks::<2>().0 {
+            paired_markers.insert(pair[0]);
+            paired_markers.insert(pair[1]);
+        }
+    }
+    let mut visible = 0usize;
+    let mut source_chars = 0usize;
+    let mut index = 0usize;
+    while index < normalized.len() && source_chars < boundary_chars {
+        if paired_markers.contains(&index) {
+            index += 2;
+            source_chars += 2;
+            continue;
+        }
+        let ch = normalized[index..]
+            .chars()
+            .next()
+            .expect("valid char boundary");
+        index += ch.len_utf8();
+        source_chars += 1;
+        visible += 1;
+    }
+    visible
+}
+
 /// 从附件标题提取内嵌名称：`附件1：统计表` → `统计表`；`附件1` → None。
 pub(crate) fn attachment_title_name(label: &str) -> Option<String> {
     let rest = label.strip_prefix("附件")?;
@@ -383,4 +425,17 @@ pub(crate) fn chinese_date_parts(value: &str) -> Option<(&str, &str, &str)> {
     let (month, day) = remainder.split_once('月')?;
     let day = day.trim().trim_end_matches('日').trim();
     Some((year.trim(), month.trim(), day))
+}
+
+#[cfg(test)]
+mod source_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn visible_index_ignores_inline_markers_before_a_source_boundary() {
+        let text = "**第一行**第二行";
+        let boundary = text.find("第二行").unwrap();
+        assert_eq!(inline_visible_char_index(text, boundary), 3);
+        assert_eq!(inline_visible_char_index(text, text.len()), 6);
+    }
 }

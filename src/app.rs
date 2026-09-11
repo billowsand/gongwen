@@ -46,6 +46,7 @@ pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
 pub(crate) use manuscript_ui::{ArchivePending, ImportPreview, PdfExportDialog, ZipPasswordDialog};
 pub(crate) use proofread_ui::ProofreadPageState;
 pub(crate) use session::{DraftAction, ExitPrompt};
+pub(crate) use settings::SettingsSection;
 pub(crate) use tabs::{NavPage, TabRef};
 pub(crate) use versioning::{
     VersionCommitDraft, VersionDiffState, VersionScope, VersionSwitchPrompt, VersionTarget,
@@ -272,6 +273,8 @@ pub struct GongwenApp {
     pub(crate) font_filter: BTreeMap<&'static str, String>,
     /// 上一帧的活动标签。标签变化时重置内容淡入动画，给场景切换一个明确的信号。
     last_content_tab: Option<TabRef>,
+    /// 设置页左侧主菜单当前选中的分区。纯当次会话状态，不进配置。
+    settings_section: SettingsSection,
 }
 
 /// 知识库文档预览弹窗的状态。
@@ -432,6 +435,7 @@ impl GongwenApp {
             system_fonts_scanned: false,
             font_filter: BTreeMap::new(),
             last_content_tab: None,
+            settings_section: SettingsSection::default(),
             embedding_probe_busy: false,
             rerank_probe_busy: false,
             rerank_verify_result: None,

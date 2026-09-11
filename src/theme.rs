@@ -1935,6 +1935,10 @@ pub const FONT_BIAOSONG: &str = "gw-biaosong";
 /// 加粗」；设置里改选专用粗体字体后，这个族换成选定的字面，与 Word / TeX 同步。
 pub const FONT_BOLD: &str = "gw-bold";
 
+/// Markdown 源码编辑器专用的 egui 字体族名。单独注册一族而不是直接复用
+/// `Proportional`，编辑器换字体就不必给高亮布局函数加参数。
+pub const EDITOR_FONT_FAMILY: &str = "gongwen_editor";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiFontCandidate {
     path: PathBuf,
@@ -2178,6 +2182,32 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
             .or_default()
             .insert(0, font);
     }
+
+    // Markdown 源码编辑器用独立字体族：用户指定的编辑器字体排在最前，
+    // 后面整份接上 Proportional 的回退链——没设编辑器字体时行为与直接用
+    // Proportional 完全一致，CJK 缺字也照常落到系统/界面字体上。
+    let custom_editor_font = config.active_editor_font().and_then(|choice| {
+        load_font(
+            &mut fonts,
+            "gw-custom-editor",
+            &[PathBuf::from(choice.path.trim())],
+        )
+    });
+    let mut editor_family = Vec::new();
+    if let Some(font) = custom_editor_font {
+        editor_family.push(font);
+    }
+    editor_family.extend(
+        fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name(EDITOR_FONT_FAMILY.into()),
+        editor_family,
+    );
 
     // 公文预览专用字体缺失时复用系统中文界面字体，避免重复载入同一份大字体。
     let preview_fallback = system_ui_font.or_else(|| {

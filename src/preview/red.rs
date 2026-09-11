@@ -8,8 +8,9 @@ use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, clickable,
-    content_block, document_number, header_unit, heading_family, indent, is_renderable_paragraph,
-    job, justified_rows, layout, line_block, sheet, signature_date, single_line, text_format,
+    clickable_body_block, content_block, document_number, header_unit, heading_family, indent,
+    is_renderable_paragraph, job, justified_rows, layout, line_block, scroll_preview_to_rect,
+    sheet, signature_date, single_line, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -21,8 +22,7 @@ use std::sync::Arc;
 
 /// 普通文种正文区渲染参数。红头呈批件走下方独立的打印分页模型。
 pub(crate) struct BodyRun {
-    pub(crate) compact: bool,
-    pub(crate) compact_level: u8,
+    pub(crate) compact_headings: Vec<bool>,
     pub(crate) numbered: bool,
 }
 
@@ -30,6 +30,8 @@ pub(crate) struct BodyRun {
 /// 首页片段按 100mm 排，续页片段重新按 156mm 排，而不是沿用首页的换行结果。
 pub(crate) struct RedPrintFragment {
     pub(crate) range: Option<Range<usize>>,
+    /// 正文自然段按 Markdown 源码行拆开的可见字符范围；空表示整块使用 `range`。
+    source_segments: Vec<crate::preview::ClickableSourceSegment>,
     pub(crate) galley: Arc<egui::Galley>,
     /// 两端对齐后的逐行 galley，与 `galley.rows` 一一对应；非空时按行画，
     /// 空表示这一段不参与对齐（标题、落款等自有对齐方式的固定片段）。
@@ -51,6 +53,29 @@ pub(crate) enum RedTextStyle {
     Body,
     Heading(u8),
     List,
+}
+
+#[derive(Clone)]
+struct RedFlowSegment {
+    text: String,
+    bold: bool,
+    parenthesized: bool,
+    style: RedTextStyle,
+}
+
+fn red_flow_segments(
+    segments: Vec<export::InlineSegment>,
+    style: RedTextStyle,
+) -> Vec<RedFlowSegment> {
+    segments
+        .into_iter()
+        .map(|segment| RedFlowSegment {
+            text: segment.text,
+            bold: segment.bold,
+            parenthesized: segment.parenthesized,
+            style,
+        })
+        .collect()
 }
 
 pub(crate) struct RedPrintLayout {
@@ -136,11 +161,10 @@ pub(crate) fn red_start_no_body_closing_page(
     state.cursor_y += metrics.line * CLOSING_GAP_LINES as f32;
 }
 
-pub(crate) fn red_inline_job(
+fn red_inline_job(
     metrics: &Metrics,
     width: f32,
-    segments: &[export::InlineSegment],
-    style: RedTextStyle,
+    segments: &[RedFlowSegment],
     first_line_indent: bool,
 ) -> LayoutJob {
     let mut job = job(width);
@@ -153,7 +177,7 @@ pub(crate) fn red_inline_job(
         );
     }
     for segment in segments {
-        let font = match style {
+        let font = match segment.style {
             RedTextStyle::Heading(level) => metrics.font(heading_family(level), BODY_PT),
             RedTextStyle::List => normal.clone(),
             RedTextStyle::Body if segment.parenthesized => {
@@ -167,7 +191,7 @@ pub(crate) fn red_inline_job(
     job
 }
 
-pub(crate) fn red_drop_chars(segments: &mut Vec<export::InlineSegment>, mut count: usize) {
+fn red_drop_chars(segments: &mut Vec<RedFlowSegment>, mut count: usize) {
     while count > 0 && !segments.is_empty() {
         let chars = segments[0].text.chars().count();
         if count >= chars {
@@ -187,11 +211,41 @@ pub(crate) fn red_place_flow_text(
     metrics: &Metrics,
     layout_state: &mut RedPrintLayout,
     range: Range<usize>,
-    mut segments: Vec<export::InlineSegment>,
+    segments: Vec<export::InlineSegment>,
     style: RedTextStyle,
     first_line_indent: bool,
 ) {
+    let visible_chars = segments
+        .iter()
+        .map(|segment| segment.text.chars().count())
+        .sum();
+    red_place_styled_flow_text(
+        ui,
+        metrics,
+        layout_state,
+        red_flow_segments(segments, style),
+        vec![crate::preview::ClickableSourceSegment {
+            source: range,
+            chars: 0..visible_chars,
+        }],
+        first_line_indent,
+    );
+}
+
+fn red_place_styled_flow_text(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    layout_state: &mut RedPrintLayout,
+    mut segments: Vec<RedFlowSegment>,
+    source_segments: Vec<crate::preview::ClickableSourceSegment>,
+    first_line_indent: bool,
+) {
+    let combined_range = source_segments
+        .first()
+        .zip(source_segments.last())
+        .map(|(first, last)| first.source.start..last.source.end);
     let mut first_fragment = true;
+    let mut consumed_total = 0usize;
     while !segments.is_empty() {
         let width = layout_state.body_width(metrics);
         let available = layout_state.body_bottom(metrics) - layout_state.cursor_y;
@@ -200,7 +254,7 @@ pub(crate) fn red_place_flow_text(
             continue;
         }
         let indent_this_fragment = first_fragment && first_line_indent;
-        let flow_job = red_inline_job(metrics, width, &segments, style, indent_this_fragment);
+        let flow_job = red_inline_job(metrics, width, &segments, indent_this_fragment);
         let galley = layout(ui, flow_job.clone());
         // 正文两端对齐，与 Word 导出和 TeX 一致；末行保持自然宽度。
         let justified = justified_rows(ui, &flow_job, &galley);
@@ -222,8 +276,28 @@ pub(crate) fn red_place_flow_text(
             consumed = consumed.saturating_sub(INDENT_CHARS as usize);
         }
         let all_fit = fitting == galley.rows.len();
+        let indent_chars = usize::from(indent_this_fragment) * INDENT_CHARS as usize;
+        let fragment_segments = source_segments
+            .iter()
+            .filter_map(|segment| {
+                let start = segment.chars.start.max(consumed_total);
+                let end = segment
+                    .chars
+                    .end
+                    .min(consumed_total.saturating_add(consumed));
+                (start < end).then(|| crate::preview::ClickableSourceSegment {
+                    source: segment.source.clone(),
+                    chars: if segment.chars.start == 0 && consumed_total == 0 {
+                        0..end - consumed_total + indent_chars
+                    } else {
+                        start - consumed_total + indent_chars..end - consumed_total + indent_chars
+                    },
+                })
+            })
+            .collect();
         layout_state.push(RedPrintFragment {
-            range: Some(range.clone()),
+            range: combined_range.clone(),
+            source_segments: fragment_segments,
             galley,
             justified,
             x: layout_state.body_left(metrics),
@@ -241,6 +315,7 @@ pub(crate) fn red_place_flow_text(
             continue;
         }
         red_drop_chars(&mut segments, consumed);
+        consumed_total += consumed;
         first_fragment = false;
         layout_state.next_page(metrics);
     }
@@ -269,6 +344,7 @@ pub(crate) fn red_fixed_fragment(
     let galley = layout(ui, job);
     RedPrintFragment {
         range,
+        source_segments: Vec::new(),
         visible_height: galley.size().y,
         galley,
         justified: Vec::new(),
@@ -306,6 +382,7 @@ pub(crate) fn red_build_print_layout(
     title: &(String, Range<usize>),
     attachment_names: &[String],
     numbering: &NumberingConfig,
+    markdown: &str,
 ) -> (RedPrintLayout, Vec<[String; 3]>) {
     let rows = red_responsible_rows(input, display);
     // TeX 承办区 = 0.4mm 红线 + 1mm 间距 + 每条固定 28pt 基线。
@@ -350,38 +427,92 @@ pub(crate) fn red_build_print_layout(
         state.push(fragment);
     }
 
+    let body_plain = body
+        .iter()
+        .map(|located| located.block.clone())
+        .collect::<Vec<_>>();
+    let compact_headings = export::compact_heading_flags(&body_plain, input.profile.style_mode);
     let mut counters = [0usize; 4];
-    for located in body {
+    let mut index = 0usize;
+    while index < body.len() {
+        let located = body[index];
         match &located.block {
             MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
             MarkdownBlock::Heading(level, text) => {
-                let Some(text) =
+                if let Some(text) =
                     export::official_heading_text(*level, text, &mut counters, numbering)
-                else {
-                    continue;
-                };
-                red_place_flow_text(
-                    ui,
-                    metrics,
-                    &mut state,
-                    located.range.clone(),
-                    vec![export::InlineSegment {
-                        text: format!("{}{}", indent(INDENT_CHARS), export::plain_text(&text)),
-                        bold: false,
-                        parenthesized: false,
-                    }],
-                    RedTextStyle::Heading(*level),
-                    false,
-                );
+                {
+                    let next_paragraph = body.get(index + 1).and_then(|next| {
+                        let MarkdownBlock::Paragraph(body) = &next.block else {
+                            return None;
+                        };
+                        is_renderable_paragraph(body).then_some((*next, body.as_str()))
+                    });
+                    if compact_headings[index]
+                        && let Some((next, body_text)) = next_paragraph
+                    {
+                        let heading_text = format!("{}。", export::plain_text(&text));
+                        let heading_chars = heading_text.chars().count();
+                        let mut flow = vec![RedFlowSegment {
+                            text: heading_text,
+                            bold: false,
+                            parenthesized: false,
+                            style: RedTextStyle::Heading(*level),
+                        }];
+                        flow.extend(red_flow_segments(
+                            export::inline_segments(body_text),
+                            RedTextStyle::Body,
+                        ));
+                        let mut source_segments = vec![crate::preview::ClickableSourceSegment {
+                            source: located.range.clone(),
+                            chars: 0..heading_chars,
+                        }];
+                        source_segments.extend(
+                            crate::preview::paragraph_source_segments(markdown, next, body_text)
+                                .into_iter()
+                                .map(|segment| crate::preview::ClickableSourceSegment {
+                                    source: segment.source,
+                                    chars: heading_chars + segment.chars.start
+                                        ..heading_chars + segment.chars.end,
+                                }),
+                        );
+                        red_place_styled_flow_text(
+                            ui,
+                            metrics,
+                            &mut state,
+                            flow,
+                            source_segments,
+                            true,
+                        );
+                        index += 1;
+                    } else {
+                        red_place_flow_text(
+                            ui,
+                            metrics,
+                            &mut state,
+                            located.range.clone(),
+                            vec![export::InlineSegment {
+                                text: format!(
+                                    "{}{}",
+                                    indent(INDENT_CHARS),
+                                    export::plain_text(&text)
+                                ),
+                                bold: false,
+                                parenthesized: false,
+                            }],
+                            RedTextStyle::Heading(*level),
+                            false,
+                        );
+                    }
+                }
             }
             MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
-                red_place_flow_text(
+                red_place_styled_flow_text(
                     ui,
                     metrics,
                     &mut state,
-                    located.range.clone(),
-                    export::inline_segments(text),
-                    RedTextStyle::Body,
+                    red_flow_segments(export::inline_segments(text), RedTextStyle::Body),
+                    crate::preview::paragraph_source_segments(markdown, located, text),
                     true,
                 );
             }
@@ -463,6 +594,7 @@ pub(crate) fn red_build_print_layout(
             }
             MarkdownBlock::Paragraph(_) => {}
         }
+        index += 1;
     }
 
     if !attachment_names.is_empty() {
@@ -789,7 +921,78 @@ pub(crate) fn paint_red_print_pages(
                     top_left,
                     egui::vec2(fragment.width, fragment.visible_height),
                 );
-                if let Some(range) = &fragment.range
+                if !fragment.source_segments.is_empty() {
+                    let mut row_start = 0usize;
+                    for (row_index, (placed, row_galley)) in fragment
+                        .galley
+                        .rows
+                        .iter()
+                        .zip(&fragment.justified)
+                        .enumerate()
+                    {
+                        if placed.rect().top() >= fragment.visible_height {
+                            break;
+                        }
+                        let row_end = row_start + placed.glyphs.len();
+                        for segment in &fragment.source_segments {
+                            let start = segment.chars.start.max(row_start);
+                            let end = segment.chars.end.min(row_end);
+                            if start >= end {
+                                continue;
+                            }
+                            let left = row_galley
+                                .pos_from_cursor(egui::text::CCursor::new(start - row_start))
+                                .left();
+                            let right = row_galley
+                                .pos_from_cursor(egui::text::CCursor::new(end - row_start))
+                                .left()
+                                .max(left + 1.0);
+                            let line_rect = egui::Rect::from_min_max(
+                                top_left + placed.pos.to_vec2() + egui::vec2(left, 0.0),
+                                top_left + placed.pos.to_vec2() + egui::vec2(right, placed.size.y),
+                            )
+                            .expand2(egui::vec2(3.0, 1.0));
+                            let response = ui.interact(
+                                line_rect,
+                                egui::Id::new((
+                                    "red-print-source-line",
+                                    page_index,
+                                    fragment_index,
+                                    row_index,
+                                    segment.source.start,
+                                )),
+                                egui::Sense::click(),
+                            );
+                            if response.clicked() {
+                                *clicked = Some(segment.source.clone());
+                            }
+                            if response.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            let anchored = anchor.is_some_and(|anchor| {
+                                !anchor.is_empty()
+                                    && anchor.start < segment.source.end
+                                    && segment.source.start < anchor.end
+                            });
+                            if anchored && *scroll_to_anchor {
+                                scroll_preview_to_rect(ui, line_rect);
+                                *scroll_to_anchor = false;
+                            }
+                            if anchored || response.hovered() {
+                                ui.painter().rect_filled(
+                                    line_rect,
+                                    3.0,
+                                    if anchored {
+                                        theme::accent_soft()
+                                    } else {
+                                        theme::paper::hover_tint()
+                                    },
+                                );
+                            }
+                        }
+                        row_start = row_end;
+                    }
+                } else if let Some(range) = &fragment.range
                     && !range.is_empty()
                 {
                     let response = ui.interact(
@@ -804,7 +1007,7 @@ pub(crate) fn paint_red_print_pages(
                         !anchor.is_empty() && anchor.start < range.end && range.start < anchor.end
                     });
                     if anchored && *scroll_to_anchor {
-                        response.scroll_to_me(Some(egui::Align::Center));
+                        scroll_preview_to_rect(ui, rect);
                         *scroll_to_anchor = false;
                     }
                     if anchored || response.hovered() {
@@ -857,6 +1060,7 @@ pub(crate) fn red_approval_print_preview(
     scroll_to_anchor: &mut bool,
     clicked: &mut Option<Range<usize>>,
     numbering: &NumberingConfig,
+    markdown: &str,
 ) {
     let (layout_state, rows) = red_build_print_layout(
         ui,
@@ -867,6 +1071,7 @@ pub(crate) fn red_approval_print_preview(
         title,
         attachment_names,
         numbering,
+        markdown,
     );
     paint_red_print_pages(
         ui,
@@ -899,10 +1104,27 @@ pub(crate) fn red_approval_print_preview(
                 Align::LEFT,
             );
             for located in attachment {
-                let range = located.range.clone();
-                clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
-                    content_block(ui, metrics, &located.block, &mut counters, true, numbering)
-                });
+                if let MarkdownBlock::Paragraph(text) = &located.block
+                    && is_renderable_paragraph(text)
+                {
+                    let segments =
+                        crate::preview::paragraph_source_segments(markdown, located, text);
+                    clickable_body_block(
+                        ui,
+                        metrics,
+                        text,
+                        true,
+                        &segments,
+                        anchor,
+                        scroll_to_anchor,
+                        clicked,
+                    );
+                } else {
+                    let range = located.range.clone();
+                    clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
+                        content_block(ui, metrics, &located.block, &mut counters, true, numbering)
+                    });
+                }
             }
         });
     }

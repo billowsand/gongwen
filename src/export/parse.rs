@@ -6,7 +6,7 @@
 use crate::export::{
     attachment_title_name, clean_heading_number, legacy_attachment_label, render_list_number,
 };
-use crate::models::NumberingConfig;
+use crate::models::{NumberingConfig, StyleMode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MarkdownBlock {
@@ -516,6 +516,50 @@ pub(crate) fn normalize_ordered_list_punctuation(markdown: &str) -> String {
     output.join("\n")
 }
 
+/// 把每个连续有序列表组里的序号重排成连续自然数。
+///
+/// 组首的序号原样保留——源码里第一项写几，整组就从几开始编，
+/// 见 `first_source_number_controls_automatic_numbering`。缩进、`. ` 分隔符与
+/// 内容也原样保留，只重写数字那几个字符。
+///
+/// 排版结果本来就会自动编号，源码写成一串 `1.` 也能导出对的文件；但源码是**给人
+/// 看、给人改的**，一列全是 `1.` 时挪动、删除某一项完全看不出位置，所以工具栏
+/// 生成列表时按实际序号写。
+pub(crate) fn renumber_ordered_groups(markdown: &str) -> String {
+    let lines = markdown.split('\n').collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(lines.len());
+    let mut index = 0usize;
+    while index < lines.len() {
+        let raw = lines[index].strip_suffix('\r').unwrap_or(lines[index]);
+        let Some((first_number, _)) = parse_ordered_item(raw.trim_end()) else {
+            output.push(lines[index].to_string());
+            index += 1;
+            continue;
+        };
+        let mut expected = first_number;
+        while index < lines.len() {
+            let line = lines[index];
+            let raw = line.strip_suffix('\r').unwrap_or(line);
+            if parse_ordered_item(raw.trim_end()).is_none() {
+                break;
+            }
+            let indent = raw.len() - raw.trim_start_matches(' ').len();
+            let digits = raw[indent..].bytes().take_while(u8::is_ascii_digit).count();
+            let mut rewritten = String::with_capacity(line.len() + 1);
+            rewritten.push_str(&raw[..indent]);
+            rewritten.push_str(&expected.to_string());
+            rewritten.push_str(&raw[indent + digits..]);
+            if line.ends_with('\r') {
+                rewritten.push('\r');
+            }
+            output.push(rewritten);
+            expected += 1;
+            index += 1;
+        }
+    }
+    output.join("\n")
+}
+
 /// 把旧版附件语法转换为统一的内部结构：
 ///
 /// ```text
@@ -695,9 +739,93 @@ pub(crate) fn body_heading_max_level(blocks: &[MarkdownBlock]) -> u8 {
     max_level
 }
 
+/// 返回正文区中应当与后续段落合并的标题位置。
+pub(crate) fn compact_heading_flags(blocks: &[MarkdownBlock], mode: StyleMode) -> Vec<bool> {
+    let mut flags = vec![false; blocks.len()];
+    match mode {
+        StyleMode::Normal => {}
+        StyleMode::Compact => {
+            let level = body_heading_max_level(blocks);
+            let mut section = MarkdownSection::Body;
+            for (index, block) in blocks.iter().enumerate() {
+                match block {
+                    MarkdownBlock::Marker(next) => section = *next,
+                    MarkdownBlock::Heading(current, _)
+                        if section == MarkdownSection::Body && *current == level =>
+                    {
+                        flags[index] = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        StyleMode::SectionCompact => {
+            let mut section = MarkdownSection::Body;
+            let mut start = None;
+            for index in 0..=blocks.len() {
+                let boundary = index == blocks.len()
+                    || matches!(blocks.get(index), Some(MarkdownBlock::Heading(2, _)))
+                    || matches!(blocks.get(index), Some(MarkdownBlock::Marker(_)));
+                if !boundary {
+                    continue;
+                }
+                if let Some(section_start) = start.take() {
+                    let deepest = blocks[section_start..index]
+                        .iter()
+                        .filter_map(|block| match block {
+                            MarkdownBlock::Heading(level, _) => Some(*level),
+                            _ => None,
+                        })
+                        .max()
+                        .unwrap_or(2);
+                    for (offset, block) in blocks[section_start..index].iter().enumerate() {
+                        if matches!(block, MarkdownBlock::Heading(level, _) if *level == deepest) {
+                            flags[section_start + offset] = true;
+                        }
+                    }
+                }
+                if let Some(block) = blocks.get(index) {
+                    match block {
+                        MarkdownBlock::Marker(next) => section = *next,
+                        MarkdownBlock::Heading(2, _) if section == MarkdownSection::Body => {
+                            start = Some(index);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    flags
+}
+
 #[cfg(test)]
 mod ordered_list_tests {
     use super::*;
+
+    #[test]
+    fn renumbering_makes_each_group_consecutive_from_its_own_first_number() {
+        let text = "正文：\n1. 甲\n1. 乙\n1. 丙\n\n5. 另一组\n5. 又一项\n收尾。";
+        assert_eq!(
+            renumber_ordered_groups(text),
+            "正文：\n1. 甲\n2. 乙\n3. 丙\n\n5. 另一组\n6. 又一项\n收尾。"
+        );
+    }
+
+    #[test]
+    fn renumbering_keeps_indent_separator_and_line_ending() {
+        let text = "  1. 甲\r\n  1.  乙\r\n  1. 丙\r\n";
+        assert_eq!(
+            renumber_ordered_groups(text),
+            "  1. 甲\r\n  2.  乙\r\n  3. 丙\r\n"
+        );
+    }
+
+    #[test]
+    fn renumbering_leaves_non_list_text_untouched() {
+        let text = "# 标题\n\n正文 1.5 米，不是列表。\n- 项目符号";
+        assert_eq!(renumber_ordered_groups(text), text);
+    }
 
     #[test]
     fn adjacent_list_becomes_circled_inline_paragraph() {
@@ -760,6 +888,42 @@ mod ordered_list_tests {
             &blocks[1],
             MarkdownBlock::OrderedListItem { number: 4, .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod compact_style_tests {
+    use super::*;
+
+    #[test]
+    fn section_compact_chooses_each_level_two_sections_own_deepest_heading() {
+        let blocks = parse_markdown(
+            "# 标题\n\n## 总体要求\n节首正文。\n### 子项\n子项正文。\n\n## 工作安排\n第二节正文。",
+        );
+        let flags = compact_heading_flags(&blocks, StyleMode::SectionCompact);
+        let selected = blocks
+            .iter()
+            .zip(flags)
+            .filter_map(|(block, selected)| selected.then_some(block))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            vec![
+                &MarkdownBlock::Heading(3, "子项".into()),
+                &MarkdownBlock::Heading(2, "工作安排".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn global_compact_still_chooses_only_the_documents_deepest_level() {
+        let blocks =
+            parse_markdown("# 标题\n\n## 第一节\n### 子项\n正文。\n\n## 第二节\n第二节正文。");
+        let flags = compact_heading_flags(&blocks, StyleMode::Compact);
+        assert_eq!(flags.iter().filter(|selected| **selected).count(), 1);
+        assert!(blocks.iter().zip(flags).any(|(block, selected)| {
+            selected && matches!(block, MarkdownBlock::Heading(3, text) if text == "子项")
+        }));
     }
 }
 
