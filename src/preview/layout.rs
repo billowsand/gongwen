@@ -13,6 +13,12 @@ use eframe::egui::{Align, Color32, FontId, Stroke};
 use std::ops::Range;
 use std::sync::Arc;
 
+/// 一段预览文字中，与一行 Markdown 源码对应的可见字符范围。
+pub(crate) struct ClickableSourceSegment {
+    pub(crate) source: Range<usize>,
+    pub(crate) chars: Range<usize>,
+}
+
 /// 正文各级标题的字体：与 `export::docx::heading_paragraph` 保持一致。
 pub(crate) fn heading_family(level: u8) -> &'static str {
     match level {
@@ -305,6 +311,141 @@ pub(crate) fn body_block(
     draw_justified(ui, job);
 }
 
+/// 保持一个自然段的连续排版，同时把点击与高亮区域拆到每一行 Markdown 源码。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clickable_body_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    first_line_indent: bool,
+    segments: &[ClickableSourceSegment],
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+) {
+    let mut job = job(metrics.content);
+    let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+    let indent_chars = if first_line_indent {
+        job.append(
+            &indent(INDENT_CHARS),
+            0.0,
+            text_format(normal.clone(), metrics.line),
+        );
+        INDENT_CHARS as usize
+    } else {
+        0
+    };
+    append_inline(&mut job, metrics, text, &normal);
+    let adjusted = segments
+        .iter()
+        .map(|segment| ClickableSourceSegment {
+            source: segment.source.clone(),
+            chars: if segment.chars.start == 0 {
+                0..segment.chars.end + indent_chars
+            } else {
+                segment.chars.start + indent_chars..segment.chars.end + indent_chars
+            },
+        })
+        .collect::<Vec<_>>();
+    clickable_justified_job(
+        ui,
+        metrics,
+        job,
+        &adjusted,
+        anchor,
+        scroll_to_anchor,
+        clicked,
+    );
+}
+
+/// 为已经构造好的连续段落布局添加源码行级交互；紧缩段可借此保留标题/正文字体。
+pub(crate) fn clickable_justified_job(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    job: LayoutJob,
+    segments: &[ClickableSourceSegment],
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+) {
+    let base = layout(ui, job.clone());
+    let rows = justified_rows(ui, &job, &base);
+    let height = base.size().y;
+    let (block_rect, _) =
+        ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
+
+    let mut row_start = 0usize;
+    for (row_index, (placed, row_galley)) in base.rows.iter().zip(&rows).enumerate() {
+        let row_end = row_start + placed.glyphs.len();
+        for segment in segments {
+            let start = segment.chars.start.max(row_start);
+            let end = segment.chars.end.min(row_end);
+            if start >= end {
+                continue;
+            }
+            let local_start = start - row_start;
+            let local_end = end - row_start;
+            let left = row_galley
+                .pos_from_cursor(egui::text::CCursor::new(local_start))
+                .left();
+            let right = row_galley
+                .pos_from_cursor(egui::text::CCursor::new(local_end))
+                .left()
+                .max(left + 1.0);
+            let rect = egui::Rect::from_min_max(
+                block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(left, 0.0),
+                block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(right, placed.size.y),
+            )
+            .expand2(egui::vec2(3.0, 1.0));
+            let response = ui.interact(
+                rect,
+                egui::Id::new((
+                    "gw-preview-source-line",
+                    segment.source.start,
+                    segment.source.end,
+                    row_index,
+                )),
+                egui::Sense::click(),
+            );
+            if response.clicked() {
+                *clicked = Some(segment.source.clone());
+            }
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let anchored = anchor.is_some_and(|anchor| {
+                !anchor.is_empty()
+                    && anchor.start < segment.source.end
+                    && segment.source.start < anchor.end
+            });
+            if anchored && *scroll_to_anchor {
+                scroll_preview_to_rect(ui, rect);
+                *scroll_to_anchor = false;
+            }
+            if anchored || response.hovered() {
+                ui.painter().rect_filled(
+                    rect,
+                    3.0,
+                    if anchored {
+                        theme::accent_soft()
+                    } else {
+                        theme::paper::hover_tint()
+                    },
+                );
+            }
+        }
+        row_start = row_end;
+    }
+
+    for (placed, row) in base.rows.iter().zip(rows) {
+        ui.painter().galley(
+            block_rect.left_top() + placed.pos.to_vec2(),
+            row,
+            theme::paper::ink(),
+        );
+    }
+}
+
 /// 行内片段按导出规则上色：括号内容楷体四号，加粗走 `theme::FONT_BOLD`。
 ///
 /// egui 不做合成加粗，所以「当前字体直接加粗」在预览里仍用黑体近似；设置里改选
@@ -447,7 +588,7 @@ pub(crate) fn clickable(
             && range.start < anchor.end
     });
     if anchored && *scroll_to_anchor {
-        response.scroll_to_me(Some(egui::Align::Center));
+        scroll_preview_to_rect(ui, rect);
         *scroll_to_anchor = false;
     }
     let fill = if anchored {
@@ -460,6 +601,15 @@ pub(crate) fn clickable(
     ui.painter().set(
         backdrop,
         egui::epaint::RectShape::filled(rect, egui::CornerRadius::same(3), fill),
+    );
+}
+
+/// 把目标放在可视区中部略偏上（约 40% 高度），给下方正文留下更多阅读空间。
+pub(crate) fn scroll_preview_to_rect(ui: &mut egui::Ui, rect: egui::Rect) {
+    let offset = ui.clip_rect().height() * 0.1;
+    ui.scroll_to_rect(
+        rect.translate(egui::vec2(0.0, offset)),
+        Some(egui::Align::Center),
     );
 }
 

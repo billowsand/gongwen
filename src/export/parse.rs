@@ -6,7 +6,7 @@
 use crate::export::{
     attachment_title_name, clean_heading_number, legacy_attachment_label, render_list_number,
 };
-use crate::models::NumberingConfig;
+use crate::models::{NumberingConfig, StyleMode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MarkdownBlock {
@@ -739,6 +739,66 @@ pub(crate) fn body_heading_max_level(blocks: &[MarkdownBlock]) -> u8 {
     max_level
 }
 
+/// 返回正文区中应当与后续段落合并的标题位置。
+pub(crate) fn compact_heading_flags(blocks: &[MarkdownBlock], mode: StyleMode) -> Vec<bool> {
+    let mut flags = vec![false; blocks.len()];
+    match mode {
+        StyleMode::Normal => {}
+        StyleMode::Compact => {
+            let level = body_heading_max_level(blocks);
+            let mut section = MarkdownSection::Body;
+            for (index, block) in blocks.iter().enumerate() {
+                match block {
+                    MarkdownBlock::Marker(next) => section = *next,
+                    MarkdownBlock::Heading(current, _)
+                        if section == MarkdownSection::Body && *current == level =>
+                    {
+                        flags[index] = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        StyleMode::SectionCompact => {
+            let mut section = MarkdownSection::Body;
+            let mut start = None;
+            for index in 0..=blocks.len() {
+                let boundary = index == blocks.len()
+                    || matches!(blocks.get(index), Some(MarkdownBlock::Heading(2, _)))
+                    || matches!(blocks.get(index), Some(MarkdownBlock::Marker(_)));
+                if !boundary {
+                    continue;
+                }
+                if let Some(section_start) = start.take() {
+                    let deepest = blocks[section_start..index]
+                        .iter()
+                        .filter_map(|block| match block {
+                            MarkdownBlock::Heading(level, _) => Some(*level),
+                            _ => None,
+                        })
+                        .max()
+                        .unwrap_or(2);
+                    for (offset, block) in blocks[section_start..index].iter().enumerate() {
+                        if matches!(block, MarkdownBlock::Heading(level, _) if *level == deepest) {
+                            flags[section_start + offset] = true;
+                        }
+                    }
+                }
+                if let Some(block) = blocks.get(index) {
+                    match block {
+                        MarkdownBlock::Marker(next) => section = *next,
+                        MarkdownBlock::Heading(2, _) if section == MarkdownSection::Body => {
+                            start = Some(index);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    flags
+}
+
 #[cfg(test)]
 mod ordered_list_tests {
     use super::*;
@@ -828,6 +888,42 @@ mod ordered_list_tests {
             &blocks[1],
             MarkdownBlock::OrderedListItem { number: 4, .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod compact_style_tests {
+    use super::*;
+
+    #[test]
+    fn section_compact_chooses_each_level_two_sections_own_deepest_heading() {
+        let blocks = parse_markdown(
+            "# 标题\n\n## 总体要求\n节首正文。\n### 子项\n子项正文。\n\n## 工作安排\n第二节正文。",
+        );
+        let flags = compact_heading_flags(&blocks, StyleMode::SectionCompact);
+        let selected = blocks
+            .iter()
+            .zip(flags)
+            .filter_map(|(block, selected)| selected.then_some(block))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            vec![
+                &MarkdownBlock::Heading(3, "子项".into()),
+                &MarkdownBlock::Heading(2, "工作安排".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn global_compact_still_chooses_only_the_documents_deepest_level() {
+        let blocks =
+            parse_markdown("# 标题\n\n## 第一节\n### 子项\n正文。\n\n## 第二节\n第二节正文。");
+        let flags = compact_heading_flags(&blocks, StyleMode::Compact);
+        assert_eq!(flags.iter().filter(|selected| **selected).count(), 1);
+        assert!(blocks.iter().zip(flags).any(|(block, selected)| {
+            selected && matches!(block, MarkdownBlock::Heading(3, text) if text == "子项")
+        }));
     }
 }
 

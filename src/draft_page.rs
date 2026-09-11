@@ -379,6 +379,8 @@ pub(crate) struct DraftSession {
     pub(crate) pending_source_selection: Option<Range<usize>>,
     /// 查找导航后，公文预览下一帧滚动到当前命中所在的版式块。
     pub(crate) pending_render_jump: bool,
+    /// 分栏模式中上一次同步到预览的 Markdown 行首；只在跨行时触发滚动。
+    pub(crate) preview_cursor_line: Option<usize>,
     /// 审校区查找/替换条的状态。
     pub(crate) markdown_find: MarkdownFindState,
     /// 「插入 → 表格」里手填的行列数，记住上一次填的值。行数含表头。
@@ -517,6 +519,7 @@ impl DraftSession {
             pending_source_jump: None,
             pending_source_selection: None,
             pending_render_jump: false,
+            preview_cursor_line: None,
             markdown_find: MarkdownFindState::default(),
             table_size: (3, 3),
             highlighter: MarkdownHighlighter::default(),
@@ -678,6 +681,7 @@ impl DraftSession {
         self.pending_source_jump = None;
         self.pending_source_selection = None;
         self.pending_render_jump = false;
+        self.preview_cursor_line = None;
     }
 }
 

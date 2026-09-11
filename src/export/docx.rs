@@ -6,12 +6,12 @@
 use crate::export::title;
 use crate::export::title::TitlePlan;
 use crate::export::{
-    MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level,
-    official_heading_text, parse_markdown_with_numbering, plain_text,
+    MarkdownBlock, MarkdownSection, attachment_names, compact_heading_flags, official_heading_text,
+    parse_markdown_with_numbering, plain_text,
 };
-use crate::models::{
-    DraftInput, FontConfig, NumberingConfig, StyleMode, TemplateKind, split_units,
-};
+#[cfg(test)]
+use crate::models::StyleMode;
+use crate::models::{DraftInput, FontConfig, NumberingConfig, TemplateKind, split_units};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use docx_rs::*;
@@ -354,9 +354,7 @@ pub fn write_docx_with_numbering(
         let mut in_attachment = false;
         let mut seen_document_title = false;
         let mut counters = [0usize; 4];
-        let compact = input.profile.style_mode == StyleMode::Compact;
-        // 紧缩风格合并正文区 # 号最多的那一级标题；附件区标题不计入。
-        let compact_heading_level = body_heading_max_level(&blocks);
+        let compact_headings = compact_heading_flags(&blocks, input.profile.style_mode);
         let mut index = 0usize;
         while index < blocks.len() {
             let block = &blocks[index];
@@ -380,9 +378,8 @@ pub fn write_docx_with_numbering(
                                 && !text.contains("<div")
                                 && !text.contains("</div"))
                     });
-                    if compact
+                    if compact_headings[index]
                         && let MarkdownBlock::Heading(level, heading) = block
-                        && *level == compact_heading_level
                         && next_is_paragraph
                     {
                         if let Some(title) =
@@ -1498,6 +1495,28 @@ mod tests {
                 "3 级标题应使用楷体标题字体：{merged}"
             );
         }
+    }
+
+    #[test]
+    fn section_compact_merges_each_sections_own_deepest_heading() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("section-compact.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::OfficialLetter;
+        input.profile.style_mode = StyleMode::SectionCompact;
+        input.profile.responsible_unit = "办公室".into();
+        input.profile.contact_person = "张三".into();
+        input.profile.contact_phone = "010-1".into();
+        write_docx_ok(
+            &path,
+            &input,
+            "# 测试函\n\n## 总体要求\n节首正文。\n### 具体任务\n任务正文。\n## 工作安排\n安排正文。",
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        assert!(paragraph_containing(&xml, "具体任务").contains("任务正文"));
+        assert!(!paragraph_containing(&xml, "总体要求").contains("节首正文"));
+        assert!(paragraph_containing(&xml, "工作安排").contains("安排正文"));
     }
 
     #[test]
