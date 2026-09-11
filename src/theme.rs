@@ -1931,6 +1931,9 @@ pub const FONT_FANGSONG: &str = "gw-fangsong";
 pub const FONT_HEITI: &str = "gw-heiti";
 pub const FONT_KAITI: &str = "gw-kaiti";
 pub const FONT_BIAOSONG: &str = "gw-biaosong";
+/// 正文加粗用的字体族。egui 没有合成粗体，预览一直用黑体近似「当前字体直接
+/// 加粗」；设置里改选专用粗体字体后，这个族换成选定的字面，与 Word / TeX 同步。
+pub const FONT_BOLD: &str = "gw-bold";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UiFontCandidate {
@@ -2245,13 +2248,28 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
                 r"C:\Windows\Fonts\simhei.ttf",
             ][..],
         ),
+        (
+            FONT_BOLD,
+            FontRole::Bold,
+            "SimHei.ttf",
+            &[
+                r"C:\Windows\Fonts\simhei.ttf",
+                r"C:\Windows\Fonts\msyhbd.ttc",
+            ][..],
+        ),
     ] {
         // 每个字体族只放对应的中文字体：英文、数字也用它自带的全角字形，不把
         // Times New Roman 放在最前作西文优先（与国标一致，预览不单独设英文字体）。
         let mut candidates =
             font_candidates(bundled_fonts.as_deref(), bundled_file, system_candidates);
         // 设置里指定了本机字体就排在最前；读不出来（文件被删）时照旧回退。
-        if let Some(choice) = config.active(role) {
+        // 粗体字面只在「专用粗体字体」模式下生效，否则预览仍按黑体近似，
+        // 免得屏幕上换了字体、导出的 Word / PDF 却没换。
+        let selected = match role {
+            FontRole::Bold if !config.uses_dedicated_bold_font() => None,
+            _ => config.active(role),
+        };
+        if let Some(choice) = selected {
             candidates.insert(0, PathBuf::from(choice.path.trim()));
         }
         let list = match load_font(&mut fonts, family, &candidates) {

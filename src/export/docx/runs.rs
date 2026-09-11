@@ -12,6 +12,19 @@ pub(crate) fn chinese_fonts(name: &str) -> RunFonts {
     RunFonts::new().ascii(name).hi_ansi(name).east_asia(name)
 }
 
+/// 正文加粗怎么排：`None` 让 Word 用当前字体合成粗体（对应 TeX 的
+/// `AutoFakeBold`），`Some(家族名)` 换用设置里选定的专用粗体字体。
+pub(crate) type BoldFont<'a> = Option<&'a str>;
+
+/// 给一个 run 加粗。换字体时不再叠加 `w:b`——真正的粗体字面本身就是粗的，
+/// 再让 Word 合成一层会把笔画糊成一团。
+pub(crate) fn apply_bold(run: Run, bold: BoldFont<'_>) -> Run {
+    match bold {
+        Some(family) => run.fonts(chinese_fonts(family)),
+        None => run.bold(),
+    }
+}
+
 pub(crate) fn body_run(text: impl Into<String>) -> Run {
     Run::new()
         .add_text(text)
@@ -22,7 +35,7 @@ pub(crate) fn body_run(text: impl Into<String>) -> Run {
 /// 正文 run 序列：Markdown 加粗保留为同字体自动加粗；完整圆括号/方头括号及其中内容
 /// 用楷体_GB2312 四号，其余用仿宋三号。
 /// 标题（文档标题、各级标题、附件标签）不经由此处，不受此规则影响。
-pub(crate) fn body_runs(text: &str) -> Vec<Run> {
+pub(crate) fn body_runs(text: &str, bold: BoldFont<'_>) -> Vec<Run> {
     // 先按花脸稿哨兵切块。没有哨兵时只有一块 `Same`，与从前完全一致。
     let chunks = redline_chunks(text);
     let mut runs = Vec::new();
@@ -41,8 +54,7 @@ pub(crate) fn body_runs(text: &str) -> Vec<Run> {
                 body_run(segment.text)
             };
             if segment.bold {
-                // 不切换为单独粗体字体，只设置加粗属性，由当前字体自动加粗。
-                run = run.bold();
+                run = apply_bold(run, bold);
             }
             run = apply_redline(run, chunk.kind);
             runs.push(run);
@@ -175,7 +187,12 @@ pub(crate) fn table_run_sized(text: &str, header: bool, size: usize) -> Run {
         .size(size)
 }
 
-pub(crate) fn table_runs_sized(text: &str, header: bool, size: usize) -> Vec<Run> {
+pub(crate) fn table_runs_sized(
+    text: &str,
+    header: bool,
+    size: usize,
+    bold: BoldFont<'_>,
+) -> Vec<Run> {
     if header {
         return vec![table_run_sized(text, true, size)];
     }
@@ -186,7 +203,7 @@ pub(crate) fn table_runs_sized(text: &str, header: bool, size: usize) -> Vec<Run
         for segment in inline_segments(&chunk.text) {
             let mut run = table_run_sized(&segment.text, false, size);
             if segment.bold {
-                run = run.bold();
+                run = apply_bold(run, bold);
             }
             runs.push(apply_redline(run, chunk.kind));
         }

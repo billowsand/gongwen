@@ -5,6 +5,39 @@
 
 use crate::models::{FontConfig, FontRole};
 
+/// 「专用粗体字体」模式下把 `\GwBold` 换成真正的粗体字面。
+///
+/// 与字体钩子分开发：加粗排法不受「使用本机字体编译」总开关约束，没选任何本机
+/// 字体时也要生效（此时回落内置黑体）。选「当前字体直接加粗」时返回 `None`，
+/// 产出的 TeX 与从前逐字节一致。
+pub(crate) fn bold_setup_hook(fonts: &FontConfig) -> Option<String> {
+    let family = sanitize_font_name(fonts.bold_family()?);
+    if family.is_empty() {
+        return None;
+    }
+    // 中西文一起换：加粗的西文与数字若留在正文字体上，粗细会和汉字对不齐。
+    Some(format!(
+        r"\makeatletter
+\AtBeginDocument{{%
+    \ifx\GwaFontPath\@empty
+        \setCJKfamilyfont{{gwabold}}{{{family}}}%
+        \newfontfamily\engwabold{{{family}}}%
+    \else
+        \setCJKfamilyfont{{gwabold}}[Path={{\GwaFontPath}}]{{{file}}}%
+        \newfontfamily\engwabold[Path={{\GwaFontPath}}]{{{file}}}%
+    \fi
+    \renewcommand{{\GwBold}}[1]{{{{\CJKfamily{{gwabold}}\engwabold ##1}}}}%
+}}
+\makeatother
+",
+        family = family,
+        file = match fonts.active(FontRole::Bold) {
+            Some(choice) => choice.compiled_file_name(FontRole::Bold),
+            None => FontRole::Bold.bundled_file().to_string(),
+        },
+    ))
+}
+
 /// 字体名里可能出现的、会被 TeX 当成控制字符的符号。字体名本身不该有这些，
 /// 出现了也只可能是配置被手工改坏，直接剔除而不是让编译在别处报错。
 pub(crate) fn sanitize_font_name(name: &str) -> String {

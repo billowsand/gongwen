@@ -6,7 +6,9 @@
 use crate::app::{
     GongwenApp, LABEL_WIDTH, field, row_label_with_info, section_heading_with_info, warn,
 };
-use crate::models::{FontRole, HeadingNumbering, ListNumbering, PaperMode, RerankMode, ThemeName};
+use crate::models::{
+    BoldStyle, FontRole, HeadingNumbering, ListNumbering, PaperMode, RerankMode, ThemeName,
+};
 use crate::storage;
 use crate::system_fonts;
 use crate::theme;
@@ -442,6 +444,20 @@ impl GongwenApp {
         ui.add_space(4.0);
         ui.checkbox(&mut self.config.fonts.use_system_fonts, "使用本机字体编译")
             .on_hover_text("不勾选时下面的选择仍然保留，只是不生效，方便和内置版式来回对照");
+
+        // 加粗排法不受上面的本机字体开关约束：它决定的是「怎么加粗」，
+        // 预览、Word 与 TeX 三端同时生效。
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [LABEL_WIDTH, 20.0],
+                egui::Label::new(egui::RichText::new("加粗文字")),
+            );
+            for style in BoldStyle::ALL {
+                ui.selectable_value(&mut self.config.fonts.bold_style, style, style.label())
+                    .on_hover_text(style.hint());
+            }
+        });
 
         if self.config.fonts.use_system_fonts {
             ui.add_space(4.0);

@@ -20,7 +20,7 @@ pub(crate) use attachments::{
     attachment_document_title_to_tex, attachment_landscape_flags, official_heading_to_tex,
     target_tex_section,
 };
-pub(crate) use fonts::font_setup_hook;
+pub(crate) use fonts::{bold_setup_hook, font_setup_hook};
 #[allow(unused_imports)]
 pub(crate) use official::{
     copy_count, official_letter_sections_to_tex, official_letter_sections_to_tex_with_barrier,
@@ -97,6 +97,11 @@ pub fn write_tex_with_numbering(
     };
     // 选了本机字体才注入钩子；没选时产出的 TeX 与从前逐字节一致。
     let content = match font_setup_hook(fonts) {
+        Some(hook) => format!("{hook}{content}"),
+        None => content,
+    };
+    // 加粗排法独立于本机字体总开关：选了专用粗体字体就换 \GwBold 的字面。
+    let content = match bold_setup_hook(fonts) {
         Some(hook) => format!("{hook}{content}"),
         None => content,
     };
@@ -673,6 +678,46 @@ mod tests {
         assert!(font_setup_hook(&fonts).is_none());
     }
 
+    /// 加粗排法：默认沿用 `\textbf` + AutoFakeBold，不注入任何东西；选了专用粗体
+    /// 字体才 `\renewcommand{\GwBold}`，且不受「使用本机字体编译」总开关约束。
+    #[test]
+    fn bold_hook_only_appears_for_the_dedicated_font_style() {
+        use crate::models::BoldStyle;
+
+        assert!(bold_setup_hook(&FontConfig::default()).is_none());
+
+        // 只切换排法、没挑字面：回落内置黑体，仍然生效。
+        let fonts = FontConfig {
+            bold_style: BoldStyle::DedicatedFont,
+            ..FontConfig::default()
+        };
+        let hook = bold_setup_hook(&fonts).expect("选了专用粗体字体就该注入");
+        assert!(hook.contains("\\renewcommand{\\GwBold}[1]"));
+        assert!(hook.contains("{SimHei}"), "{hook}");
+        assert!(hook.contains("{SimHei.ttf}"), "{hook}");
+
+        // 挑了字面且开了本机字体总开关：按名字用家族名，按文件用重命名后的文件。
+        let fonts = FontConfig {
+            use_system_fonts: true,
+            bold_style: BoldStyle::DedicatedFont,
+            bold: system_font("Source Han Sans SC Bold", "C:/Windows/Fonts/SHSansBold.otf"),
+            ..FontConfig::default()
+        };
+        let hook = bold_setup_hook(&fonts).expect("选了专用粗体字体就该注入");
+        assert!(hook.contains("{Source Han Sans SC Bold}"), "{hook}");
+        assert!(hook.contains("{gwa-bold.otf}"), "{hook}");
+    }
+
+    /// 正文加粗一律走 `\GwBold`，不再直接写 `\textbf`——否则换粗体字面时漏网。
+    #[test]
+    fn bold_body_text_goes_through_the_gwbold_macro() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::PlainDocument;
+        let tex = plain_document_tex(&input, "# 测试\n\n请**务必**按时报送。");
+        assert!(tex.contains("\\GwBold{务必}"), "{tex}");
+        assert!(!tex.contains("\\textbf{"), "{tex}");
+    }
+
     /// 钩子的两条分支：按文件加载用拷进临时目录的固定文件名，按名字加载用家族名。
     /// 没配的位置继续用内置字体，两边都要保持原样。
     #[test]
@@ -862,7 +907,7 @@ mod tests {
         assert!(tex.contains("\\renewcommand{\\SecurityLevel}{秘密}"));
         assert!(tex.contains("\\renewcommand{\\SpecialHandling}{指人专办}"));
         // 正文中完整括号及内容改用四号楷体，其余保持正文三号仿宋。
-        assert!(tex.contains("他说：“\\textbf{重要事项}”"), "{tex}");
+        assert!(tex.contains("他说：“\\GwBold{重要事项}”"), "{tex}");
         assert!(
             tex.contains(
                 "现就{\\kai\\enkai\\zihao{4} （有关事项）}及{\\kai\\enkai\\zihao{4} 【特别说明】}函告如下。\\GwaTail{"

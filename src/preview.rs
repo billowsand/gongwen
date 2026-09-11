@@ -14,9 +14,9 @@ mod tail;
 
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
-    append_inline, body_block, clickable, draw, heading_family, indent, is_renderable_paragraph,
-    job, layout, line_block, line_galley, place, sheet, single_line, stacked, table_block,
-    text_format,
+    append_inline, body_block, clickable, draw, draw_justified, heading_family, indent,
+    is_renderable_paragraph, job, justified_rows, layout, line_block, line_galley, place, sheet,
+    single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{content_block, official_preview};
@@ -40,7 +40,6 @@ const PAREN_PT: f32 = 14.0; // 括号内容，楷体四号
 const LINE_PT: f32 = 28.0; // 固定行距
 const TABLE_LINE_PT: f32 = 21.0; // 表格内行距（420 缇）
 const INDENT_CHARS: f32 = 2.0; // 首行缩进 2 字
-const LIST_INDENT_PT: f32 = 21.0; // 列表项左缩进 420 缇
 
 // 抬头与版记的参数取自 gonghan-gwa.cls。
 /// 毫米换算成磅。
@@ -593,6 +592,50 @@ mod tests {
             assert!((first.width - metrics.mm(100.0)).abs() < 0.5);
             assert!((second.width - metrics.mm(156.0)).abs() < 0.5);
             assert!(second.galley.rows[0].size.x > first.galley.rows[0].size.x * 1.25);
+        });
+    }
+
+    /// 正文两端对齐：除末行外每一行都撑满版心，且首行缩进不能被吃掉。
+    ///
+    /// egui 自带的 `LayoutJob::justify` 正是在这两点上失手，所以逐行补字距那套
+    /// 实现要有回归守着——否则哪天换回 `justify`，缩进没了也不会有人发现。
+    #[test]
+    fn justified_body_rows_fill_the_content_width_and_keep_the_first_line_indent() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let text = "为进一步推进服务事项标准化、规范化、便利化，请各单位于2026年9月20日前报送年度标准化建设情况，材料编号ABC123，逾期不再受理。".repeat(2);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut job = job(metrics.content);
+            let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+            job.append(
+                &indent(INDENT_CHARS),
+                0.0,
+                text_format(normal.clone(), metrics.line),
+            );
+            append_inline(&mut job, &metrics, &text, &normal);
+            let base = layout(ui, job.clone());
+            assert!(base.rows.len() >= 3, "样例应折成多行");
+            let rows = justified_rows(ui, &job, &base);
+            assert_eq!(rows.len(), base.rows.len());
+
+            // 首行第一个字形仍是缩进用的全角空格，位置没有被挪到版心之外。
+            let first = rows[0].rows[0].glyphs.first().expect("首行应有字形");
+            assert_eq!(first.chr, '\u{3000}');
+            assert!(first.pos.x >= -0.5, "首行缩进被吃掉了：{}", first.pos.x);
+
+            // 末行之外的每一行都撑到版心宽（留 1px 取整余量）。
+            for (index, row) in rows.iter().enumerate().take(rows.len() - 1) {
+                let width = row.rows[0].rect().width();
+                assert!(
+                    (width - metrics.content).abs() < 1.0,
+                    "第 {index} 行未撑满版心：{width} vs {}",
+                    metrics.content
+                );
+            }
+            // 末行保持自然宽度，不被拉开。
+            let last = rows.last().unwrap().rows[0].rect().width();
+            assert!(last < metrics.content - 1.0, "末行不应撑满：{last}");
         });
     }
 

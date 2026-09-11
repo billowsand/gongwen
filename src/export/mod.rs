@@ -209,7 +209,7 @@ pub fn export_all_with_numbering(
     }
     if selection.docx {
         let path = document_dir.join(format!("{export_stem}.docx"));
-        docx::write_docx_with_numbering(&path, input, markdown, display, numbering)?;
+        docx::write_docx_with_numbering(&path, input, markdown, display, fonts, numbering)?;
         files.push(path);
     }
     if selection.tex {
@@ -325,6 +325,43 @@ mod tests {
     #[test]
     fn filename_is_windows_safe() {
         assert_eq!(safe_filename("关于A/B:测试?的函"), "关于A_B_测试_的函");
+    }
+
+    /// 段内软换行只是编辑器里折了一行，排版时仍是一段：中文接缝不能多出空格，
+    /// 英文接缝必须留空格，否则两个单词会粘成一个。
+    #[test]
+    fn soft_line_breaks_join_chinese_without_a_space_but_keep_one_between_words() {
+        let blocks = parse_markdown("请各单位于9月20日前\n报送有关材料。");
+        assert_eq!(
+            blocks,
+            vec![MarkdownBlock::Paragraph(
+                "请各单位于9月20日前报送有关材料。".to_string()
+            )]
+        );
+
+        let blocks = parse_markdown("the quick brown\nfox jumps");
+        assert_eq!(
+            blocks,
+            vec![MarkdownBlock::Paragraph(
+                "the quick brown fox jumps".to_string()
+            )]
+        );
+
+        // 中西文混排：接缝一侧是汉字就不补空格，字间距交给排版器。
+        let blocks = parse_markdown("文件编号ABC123\n请按此填报。");
+        assert_eq!(
+            blocks,
+            vec![MarkdownBlock::Paragraph(
+                "文件编号ABC123请按此填报。".to_string()
+            )]
+        );
+
+        // 全角标点也算宽体字：句末顿号后换行同样不补空格。
+        let blocks = parse_markdown("甲、\n乙。");
+        assert_eq!(
+            blocks,
+            vec![MarkdownBlock::Paragraph("甲、乙。".to_string())]
+        );
     }
 
     /// 承办区栏宽按内容统筹：联系人栏恒 8 em，电话栏按最长号码定宽，余量归承办单位，

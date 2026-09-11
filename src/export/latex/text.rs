@@ -49,7 +49,8 @@ pub(crate) fn tex_escape(value: &str) -> String {
     out
 }
 
-/// 正文段转 TeX：Markdown 加粗转为 `\textbf`，由字体的 AutoFakeBold 实现；
+/// 正文段转 TeX：Markdown 加粗转为 `\GwBold`——类文件里它默认就是 `\textbf`，
+/// 由字体的 AutoFakeBold 实现；设置里改选专用粗体字体时由导言区换成真正的字面；
 /// 完整圆括号/方头括号及其中内容用四号楷体，其余保持正文三号仿宋。
 /// 标题（文档标题、各级标题、附件标签）不经由此处，不受此规则影响。
 /// 括号部分用花括号限定 `\kai\zihao{4}` 的作用域，闭合后自动回到正文三号仿宋。
@@ -62,7 +63,7 @@ pub(crate) fn body_text_to_tex(text: &str) -> String {
         for segment in inline_segments(&chunk.text) {
             let mut content = tex_escape(&segment.text);
             if segment.bold {
-                content = format!("\\textbf{{{content}}}");
+                content = format!("\\GwBold{{{content}}}");
             }
             if segment.parenthesized {
                 inner.push_str(&format!("{{\\kai\\enkai\\zihao{{4}} {content}}}"));
@@ -80,7 +81,7 @@ pub(crate) fn body_text_to_tex(text: &str) -> String {
                     for segment in inline_segments(&piece) {
                         let mut content = tex_escape(&segment.text);
                         if segment.bold {
-                            content = format!("\\textbf{{{content}}}");
+                            content = format!("\\GwBold{{{content}}}");
                         }
                         piece_tex.push_str(&content);
                     }

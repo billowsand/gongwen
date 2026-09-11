@@ -167,6 +167,45 @@ pub(crate) fn block_span_for_line(markdown: &str, line: usize) -> Option<std::op
         .map(|located| located.range)
 }
 
+/// 段内软换行（作者在一段中间直接回车）的拼接。
+///
+/// 这些换行在排版时并不换行，整段仍是一段。中文不能因此多出一个空格——正文里
+/// 会凭空裂开一个字宽的口子，而作者只是为了在编辑器里写得短一点。英文则必须留
+/// 空格，否则接缝处两个单词会粘成一个。判据与 CommonMark 的 CJK 扩展一致：
+/// 接缝两侧只要有一侧是宽体字（中日韩文字与全角标点）就不补空格。
+pub(crate) fn join_soft_wrapped_lines(lines: &[String]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        if let (Some(prev), Some(next)) = (out.chars().last(), line.chars().next())
+            && !is_wide_script(prev)
+            && !is_wide_script(next)
+        {
+            out.push(' ');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// 宽体字：中日韩文字、假名、谚文与全角标点。这些字之间换行不需要空格。
+fn is_wide_script(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x11FF        // 谚文字母
+        | 0x2E80..=0x303F      // 部首扩展、康熙部首、中日韩符号与标点
+        | 0x3040..=0x33FF      // 假名、注音、谚文兼容、中日韩字母与月份符号
+        | 0x3400..=0x4DBF      // 中日韩扩展 A
+        | 0x4E00..=0x9FFF      // 中日韩基本区
+        | 0xA000..=0xA4CF      // 彝文
+        | 0xAC00..=0xD7FF      // 谚文音节
+        | 0xF900..=0xFAFF      // 兼容表意文字
+        | 0xFE10..=0xFE4F      // 竖排标点、中日韩兼容形式
+        | 0xFF00..=0xFF60      // 全角形式
+        | 0xFFE0..=0xFFE6      // 全角符号
+        | 0x20000..=0x3FFFF    // 中日韩扩展 B 及以后
+    )
+}
+
 /// 逐行切分并记录每行的起始字节；行内容与 `str::lines` 一致（去掉行尾 \r\n）。
 pub(crate) fn source_lines(markdown: &str) -> Vec<(usize, &str)> {
     let mut lines = Vec::new();
@@ -200,7 +239,7 @@ pub(crate) fn parse_markdown_located_with_numbering(
                  blocks: &mut Vec<LocatedBlock>| {
         if !paragraph.is_empty() {
             blocks.push(LocatedBlock {
-                block: MarkdownBlock::Paragraph(paragraph.join(" ")),
+                block: MarkdownBlock::Paragraph(join_soft_wrapped_lines(paragraph)),
                 range: range.clone(),
             });
             paragraph.clear();

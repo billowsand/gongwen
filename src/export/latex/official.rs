@@ -619,7 +619,7 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                         2 => format!("\\heiti\\enheiti {number}{heading_escaped}。"),
                         3 => format!("\\kai\\enkai {number}{heading_escaped}。"),
                         4 => format!("{number}{heading_escaped}。"),
-                        5 => format!("\\textbf{{{number}{heading_escaped}。}}"),
+                        5 => format!("\\GwBold{{{number}{heading_escaped}。}}"),
                         _ => unreachable!(),
                     };
                     target_tex_section(section, &mut body, &mut attachments).push(format!(

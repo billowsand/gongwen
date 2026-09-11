@@ -1467,15 +1467,18 @@ pub enum FontRole {
     Body,
     /// 页脚页码，内置为宋体。
     PageNumber,
+    /// 正文里的加粗文字，仅在「专用粗体字体」模式下生效，内置为黑体。
+    Bold,
 }
 
 impl FontRole {
-    pub const ALL: [FontRole; 5] = [
+    pub const ALL: [FontRole; 6] = [
         Self::Title,
         Self::Heading1,
         Self::Heading2,
         Self::Body,
         Self::PageNumber,
+        Self::Bold,
     ];
 
     pub fn label(self) -> &'static str {
@@ -1485,6 +1488,7 @@ impl FontRole {
             Self::Heading2 => "二级标题字体",
             Self::Body => "正文字体",
             Self::PageNumber => "页码字体",
+            Self::Bold => "加粗字体",
         }
     }
 
@@ -1495,6 +1499,9 @@ impl FontRole {
             Self::Heading2 => "二级标题「（一）」，内置为楷体；同时用作正文的斜体字面",
             Self::Body => "正文、四级标题与表格，内置为仿宋",
             Self::PageNumber => "页脚页码，内置为宋体",
+            Self::Bold => {
+                "加粗文字改用专门的粗体字体时用它，内置为黑体；选「当前字体直接加粗」时不生效"
+            }
         }
     }
 
@@ -1507,6 +1514,7 @@ impl FontRole {
             Self::Heading2 => "KaiTi.ttf",
             Self::Body => "FangSong.ttf",
             Self::PageNumber => "SimSun.ttf",
+            Self::Bold => "SimHei.ttf",
         }
     }
 
@@ -1519,6 +1527,7 @@ impl FontRole {
             Self::Heading2 => "KaiTi_GB2312",
             Self::Body => "FangSong_GB2312",
             Self::PageNumber => "SimSun",
+            Self::Bold => "SimHei",
         }
     }
 
@@ -1530,6 +1539,7 @@ impl FontRole {
             Self::Heading2 => "楷体",
             Self::Body => "仿宋",
             Self::PageNumber => "宋体",
+            Self::Bold => "黑体",
         }
     }
 
@@ -1541,6 +1551,43 @@ impl FontRole {
             Self::Heading2 => "heading2",
             Self::Body => "body",
             Self::PageNumber => "pagenumber",
+            Self::Bold => "bold",
+        }
+    }
+}
+
+/// 正文里 Markdown 加粗（`**文字**`）与五级标题怎么排成粗体。
+///
+/// 中文字体大多没有配套的粗体字面。默认沿用排版器的合成加粗（TeX 的
+/// `AutoFakeBold`、Word 的合成粗体），字形还是当前这套字体，只是加重；
+/// 想要真正的粗体字面时改选专用字体，三端（预览、Word、TeX）一起换。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoldStyle {
+    /// 用当前字体直接加粗。
+    #[default]
+    Synthetic,
+    /// 换用专门的粗体字体（见 [`FontRole::Bold`]）。
+    DedicatedFont,
+}
+
+impl BoldStyle {
+    pub const ALL: [BoldStyle; 2] = [Self::Synthetic, Self::DedicatedFont];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Synthetic => "当前字体直接加粗",
+            Self::DedicatedFont => "使用专门的粗体字体",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Synthetic => {
+                "字体不变（正文仍是仿宋），只加重笔画：Word 里相当于点了加粗按钮，TeX 侧走 AutoFakeBold"
+            }
+            Self::DedicatedFont => {
+                "改用专门的粗体字面；没挑字面、或没开「使用本机字体编译」时用内置黑体"
+            }
         }
     }
 }
@@ -1600,6 +1647,11 @@ pub struct FontConfig {
     pub heading2: FontChoice,
     pub body: FontChoice,
     pub page_number: FontChoice,
+    /// 加粗文字改用专门粗体字体时的字面，仅在 `bold_style` 为
+    /// [`BoldStyle::DedicatedFont`] 时生效。
+    pub bold: FontChoice,
+    /// 加粗文字怎么排：用当前字体直接加粗，还是换用专门的粗体字体。
+    pub bold_style: BoldStyle,
 }
 
 impl FontConfig {
@@ -1610,6 +1662,7 @@ impl FontConfig {
             FontRole::Heading2 => &self.heading2,
             FontRole::Body => &self.body,
             FontRole::PageNumber => &self.page_number,
+            FontRole::Bold => &self.bold,
         }
     }
 
@@ -1620,6 +1673,7 @@ impl FontConfig {
             FontRole::Heading2 => &mut self.heading2,
             FontRole::Body => &mut self.body,
             FontRole::PageNumber => &mut self.page_number,
+            FontRole::Bold => &mut self.bold,
         }
     }
 
@@ -1636,6 +1690,41 @@ impl FontConfig {
     /// 界面字体不受公文编译字体总开关影响，配置后立即生效。
     pub fn active_ui_font(&self) -> Option<&FontChoice> {
         self.ui_font.is_set().then_some(&self.ui_font)
+    }
+
+    /// 加粗文字是不是换用专门的粗体字面（而不是让排版器就着当前字体合成加粗）。
+    pub fn uses_dedicated_bold_font(&self) -> bool {
+        self.bold_style == BoldStyle::DedicatedFont
+    }
+
+    /// 加粗文字要换用的字体家族名，按 fontconfig 口径（TeX 用）。
+    ///
+    /// `None` 表示沿用当前字体直接加粗：Word 写 `w:b` 让它自己合成，TeX 交给
+    /// `AutoFakeBold`。选了「专用粗体字体」但没挑字面（或没开本机字体编译总开关）
+    /// 时回落内置黑体，不会失效。
+    pub fn bold_family(&self) -> Option<&str> {
+        if !self.uses_dedicated_bold_font() {
+            return None;
+        }
+        match self.active(FontRole::Bold) {
+            Some(choice) => Some(choice.family.trim()),
+            None => Some(FontRole::Bold.bundled_family()),
+        }
+    }
+
+    /// 同上，但内置回落写中文字体名。
+    ///
+    /// docx 其余位置写的都是中文名（仿宋_GB2312、黑体、楷体_GB2312），"内置黑体"
+    /// 就该是文档里其它地方用的那个黑体；`SimHei` 是同一款字体在 fontconfig 里的
+    /// 家族名，留给 TeX。用户自己挑了字面时两边都用他选的家族名。
+    pub fn bold_family_docx(&self) -> Option<&str> {
+        if !self.uses_dedicated_bold_font() {
+            return None;
+        }
+        match self.active(FontRole::Bold) {
+            Some(choice) => Some(choice.family.trim()),
+            None => Some(FontRole::Bold.bundled_label()),
+        }
     }
 
     /// 有没有任何一项本机字体生效。全都没有时导出的 `.tex` 与从前完全一致。

@@ -9,7 +9,7 @@ use crate::models::{DraftInput, NumberingConfig};
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, clickable,
     content_block, document_number, header_unit, heading_family, indent, is_renderable_paragraph,
-    job, layout, line_block, sheet, signature_date, single_line, text_format,
+    job, justified_rows, layout, line_block, sheet, signature_date, single_line, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -31,6 +31,9 @@ pub(crate) struct BodyRun {
 pub(crate) struct RedPrintFragment {
     pub(crate) range: Option<Range<usize>>,
     pub(crate) galley: Arc<egui::Galley>,
+    /// 两端对齐后的逐行 galley，与 `galley.rows` 一一对应；非空时按行画，
+    /// 空表示这一段不参与对齐（标题、落款等自有对齐方式的固定片段）。
+    justified: Vec<Arc<egui::Galley>>,
     x: f32,
     y: f32,
     pub(crate) width: f32,
@@ -156,7 +159,7 @@ pub(crate) fn red_inline_job(
             RedTextStyle::Body if segment.parenthesized => {
                 metrics.font(theme::FONT_KAITI, PAREN_PT)
             }
-            RedTextStyle::Body if segment.bold => metrics.font(theme::FONT_HEITI, BODY_PT),
+            RedTextStyle::Body if segment.bold => metrics.font(theme::FONT_BOLD, BODY_PT),
             RedTextStyle::Body => normal.clone(),
         };
         job.append(&segment.text, 0.0, text_format(font, metrics.line));
@@ -197,10 +200,10 @@ pub(crate) fn red_place_flow_text(
             continue;
         }
         let indent_this_fragment = first_fragment && first_line_indent;
-        let galley = layout(
-            ui,
-            red_inline_job(metrics, width, &segments, style, indent_this_fragment),
-        );
+        let flow_job = red_inline_job(metrics, width, &segments, style, indent_this_fragment);
+        let galley = layout(ui, flow_job.clone());
+        // 正文两端对齐，与 Word 导出和 TeX 一致；末行保持自然宽度。
+        let justified = justified_rows(ui, &flow_job, &galley);
         let fitting = galley
             .rows
             .iter()
@@ -222,6 +225,7 @@ pub(crate) fn red_place_flow_text(
         layout_state.push(RedPrintFragment {
             range: Some(range.clone()),
             galley,
+            justified,
             x: layout_state.body_left(metrics),
             y: layout_state.cursor_y,
             width,
@@ -267,6 +271,7 @@ pub(crate) fn red_fixed_fragment(
         range,
         visible_height: galley.size().y,
         galley,
+        justified: Vec::new(),
         x,
         y,
         width,
@@ -381,17 +386,15 @@ pub(crate) fn red_build_print_layout(
                 );
             }
             MarkdownBlock::ListItem(text) => {
+                // 与 TeX 的 \noindent{文本}\par、Word 导出和其余五个文种的预览一致：
+                // 顶格排、不加项目符号，行内加粗与括号楷体照常生效。
                 red_place_flow_text(
                     ui,
                     metrics,
                     &mut state,
                     located.range.clone(),
-                    vec![export::InlineSegment {
-                        text: format!("　•{}", export::plain_text(text)),
-                        bold: false,
-                        parenthesized: false,
-                    }],
-                    RedTextStyle::List,
+                    export::inline_segments(text),
+                    RedTextStyle::Body,
                     false,
                 );
             }
@@ -821,11 +824,20 @@ pub(crate) fn paint_red_print_pages(
                         page.min + egui::vec2(fragment.x, fragment.y)
                     }
                 };
-                ui.painter().with_clip_rect(rect).galley(
-                    anchor_pos,
-                    fragment.galley.clone(),
-                    theme::paper::ink(),
-                );
+                let painter = ui.painter().with_clip_rect(rect);
+                if fragment.justified.is_empty() {
+                    painter.galley(anchor_pos, fragment.galley.clone(), theme::paper::ink());
+                } else {
+                    // 两端对齐的正文按行画：每行是一个单独 galley，落在原 galley
+                    // 算好的行位置上，分页与命中范围因此完全不受影响。
+                    for (placed, row) in fragment.galley.rows.iter().zip(&fragment.justified) {
+                        painter.galley(
+                            anchor_pos + placed.pos.to_vec2(),
+                            row.clone(),
+                            theme::paper::ink(),
+                        );
+                    }
+                }
             }
         });
     }

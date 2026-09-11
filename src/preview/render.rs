@@ -8,8 +8,8 @@ use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::images;
 use crate::models::{DraftInput, NumberingConfig, StyleMode, TemplateKind};
 use crate::preview::{
-    BODY_PT, BodyRun, INDENT_CHARS, LIST_INDENT_PT, Metrics, PreviewScale, TITLE_PT,
-    addressee_block, append_inline, body_block, clickable, draw, footer_record, header_block,
+    BODY_PT, BodyRun, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT, addressee_block,
+    append_inline, body_block, clickable, draw_justified, footer_record, header_block,
     heading_family, indent, is_renderable_paragraph, job, line_block, place,
     red_approval_print_preview, sheet, signature_block, table_block, text_format,
 };
@@ -343,7 +343,7 @@ pub(crate) fn compact_block(
         text_format(metrics.font(heading_family(level), BODY_PT), metrics.line),
     );
     append_inline(&mut job, metrics, body, &normal);
-    draw(ui, job);
+    draw_justified(ui, job);
 }
 
 pub(crate) fn heading_block(
@@ -375,7 +375,7 @@ pub(crate) fn heading_block(
         0.0,
         text_format(font, metrics.line),
     );
-    draw(ui, job);
+    draw_justified(ui, job);
 }
 
 pub(crate) fn content_block(
@@ -394,19 +394,8 @@ pub(crate) fn content_block(
             body_block(ui, metrics, text, true);
         }
         MarkdownBlock::ListItem(text) => {
-            ui.horizontal(|ui| {
-                ui.add_space(metrics.pt(LIST_INDENT_PT));
-                ui.vertical(|ui| {
-                    ui.set_width(metrics.content - metrics.pt(LIST_INDENT_PT));
-                    let mut job = job(metrics.content - metrics.pt(LIST_INDENT_PT));
-                    job.append(
-                        text,
-                        0.0,
-                        text_format(metrics.font(theme::FONT_FANGSONG, BODY_PT), metrics.line),
-                    );
-                    draw(ui, job);
-                });
-            });
+            // 与 TeX 的 `\noindent{文本}\par` 及 Word 导出一致：无序列表项顶格。
+            body_block(ui, metrics, text, false);
         }
         MarkdownBlock::OrderedListItem { number, text } => {
             let prefix = export::render_list_number(numbering.list2, *number);

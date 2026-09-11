@@ -347,7 +347,7 @@ pub fn export_files(
     let mut files = Vec::new();
     if formats.docx {
         let path = dir.join(format!("{stem}.docx"));
-        export::write_docx_with_numbering(&path, input, &markdown, display, numbering)?;
+        export::write_docx_with_numbering(&path, input, &markdown, display, fonts, numbering)?;
         files.push(path);
     }
     if formats.pdf {

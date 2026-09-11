@@ -57,6 +57,128 @@ pub(crate) fn draw(ui: &mut egui::Ui, job: LayoutJob) {
     ui.add(egui::Label::new(galley));
 }
 
+/// 两端对齐地画一段正文，与 Word 的 `w:jc=both`、TeX 的默认对齐一致：
+/// 除末行外每行都撑满版心，末行保持自然宽度。
+///
+/// 不能直接用 egui 的 `LayoutJob::justify`：epaint 的 `halign_and_justify_row`
+/// 会先数掉行首空白（`num_leading_spaces`）再把余下的字撑满整行宽，正文首行缩进
+/// 的那两个全角空格既会被挤出版心，又会让首行多撑开两个字。这里换成自己逐行补
+/// 字距：先按不对齐排一遍拿到断行位置，再逐行用 `extra_letter_spacing` 补足。
+pub(crate) fn draw_justified(ui: &mut egui::Ui, job: LayoutJob) {
+    let width = job.wrap.max_width;
+    let base = layout(ui, job.clone());
+    if !width.is_finite() || base.rows.len() < 2 {
+        // 单行段落本来就是末行，不参与对齐。
+        ui.add(egui::Label::new(base));
+        return;
+    }
+    let rows = justified_rows(ui, &job, &base);
+    let height = base.size().y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter();
+    for (placed, galley) in base.rows.iter().zip(rows) {
+        painter.galley(
+            rect.left_top() + placed.pos.to_vec2(),
+            galley,
+            theme::paper::ink(),
+        );
+    }
+}
+
+/// 按 `base` 已经排好的断行位置，把整段拆成逐行的两端对齐 galley。
+///
+/// 返回的行数与 `base.rows` 一一对应，第 i 行画在 `base.rows[i].pos` 处即可。
+/// 末行不撑开：公文和 Word 一样，段落最后一行保持自然宽度。
+pub(crate) fn justified_rows(
+    ui: &egui::Ui,
+    job: &LayoutJob,
+    base: &egui::Galley,
+) -> Vec<Arc<egui::Galley>> {
+    let width = job.wrap.max_width;
+    let char_offsets = job
+        .text
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    let row_count = base.rows.len();
+    let mut galleys = Vec::with_capacity(row_count);
+    let mut char_start = 0usize;
+    for (index, row) in base.rows.iter().enumerate() {
+        let char_end = char_start + row.glyphs.len();
+        let byte_start = char_offsets
+            .get(char_start)
+            .copied()
+            .unwrap_or(job.text.len());
+        let byte_end = char_offsets
+            .get(char_end)
+            .copied()
+            .unwrap_or(job.text.len())
+            // 兜底：epaint 承诺一个字符一个字形，万一出现多字形簇也不能让切片反转。
+            .max(byte_start);
+        let extra = if index + 1 == row_count || !width.is_finite() {
+            0.0
+        } else {
+            row_extra_spacing(row, width)
+        };
+        galleys.push(layout(ui, row_job(job, byte_start..byte_end, extra)));
+        char_start = char_end;
+    }
+    galleys
+}
+
+/// 这一行要补多少字距才能撑满 `width`。行末空白不算进已用宽度，
+/// 行首缩进算——缩进本来就占版心，只有它后面的字需要摊掉余量。
+fn row_extra_spacing(row: &egui::epaint::text::PlacedRow, width: f32) -> f32 {
+    let glyphs = &row.glyphs;
+    let end = glyphs
+        .iter()
+        .rposition(|glyph| !glyph.chr.is_whitespace())
+        .map_or(0, |index| index + 1);
+    if end < 2 {
+        return 0.0;
+    }
+    let natural = glyphs[end - 1].pos.x + glyphs[end - 1].advance_width - glyphs[0].pos.x;
+    let slack = width - natural;
+    // 补不动（整行已经排满甚至溢出）时就不动，避免负字距把字挤在一起。
+    if slack <= 0.0 {
+        return 0.0;
+    }
+    slack / (end as f32 - 1.0)
+}
+
+/// 从整段的排版任务里切出一行：按字节范围裁剪各 section，并统一设置字距。
+fn row_job(job: &LayoutJob, range: Range<usize>, extra: f32) -> LayoutJob {
+    let mut out = LayoutJob {
+        text: job.text[range.clone()].to_string(),
+        wrap: egui::text::TextWrapping {
+            max_width: f32::INFINITY,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for section in &job.sections {
+        let start = section.byte_range.start.0.max(range.start);
+        let end = section.byte_range.end.0.min(range.end);
+        if start >= end {
+            continue;
+        }
+        let mut format = section.format.clone();
+        format.extra_letter_spacing = extra;
+        out.sections.push(egui::text::LayoutSection {
+            // 被上一行截断的 section 不再重复它的前导空白。
+            leading_space: if section.byte_range.start.0 >= range.start {
+                section.leading_space
+            } else {
+                0.0
+            },
+            byte_range: egui::text::ByteIndex(start - range.start)
+                ..egui::text::ByteIndex(end - range.start),
+            format,
+        });
+    }
+    out
+}
+
 /// 占一块高 `height` 的版心宽区域，把绘制交给回调。抬头、落款、版记这些需要
 /// 自己算横向位置的块都走这里。
 pub(crate) fn place(
@@ -163,11 +285,7 @@ pub(crate) fn line_block(
     }
 }
 
-/// 正文段落：仿宋三号、首行缩进 2 字；行内保留加粗与括号楷体。
-///
-/// 这里不开 `justify`：egui 在两端对齐时会把行首空白排除在对齐范围外，首行缩进
-/// 的两个全角空格会被直接吃掉。中文正文各字等宽，行末本就基本对齐，取舍下
-/// 保住缩进更要紧。
+/// 正文段落：仿宋三号、首行缩进 2 字，两端对齐；行内保留加粗与括号楷体。
 pub(crate) fn body_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -184,16 +302,19 @@ pub(crate) fn body_block(
         );
     }
     append_inline(&mut job, metrics, text, &normal);
-    draw(ui, job);
+    draw_justified(ui, job);
 }
 
-/// 行内片段按导出规则上色：括号内容楷体四号，加粗用黑体近似（egui 不做假粗）。
+/// 行内片段按导出规则上色：括号内容楷体四号，加粗走 `theme::FONT_BOLD`。
+///
+/// egui 不做合成加粗，所以「当前字体直接加粗」在预览里仍用黑体近似；设置里改选
+/// 专用粗体字体后，`FONT_BOLD` 换成选定的字面，与 Word / TeX 同步。
 pub(crate) fn append_inline(job: &mut LayoutJob, metrics: &Metrics, text: &str, normal: &FontId) {
     for segment in export::inline_segments(text) {
         let font = if segment.parenthesized {
             metrics.font(theme::FONT_KAITI, PAREN_PT)
         } else if segment.bold {
-            metrics.font(theme::FONT_HEITI, BODY_PT)
+            metrics.font(theme::FONT_BOLD, BODY_PT)
         } else {
             normal.clone()
         };

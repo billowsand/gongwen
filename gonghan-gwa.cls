@@ -173,6 +173,12 @@
 \else
     \GwaFontSetupHook
 \fi
+% 正文里 Markdown 加粗与五级标题统一走 \GwBold，而不是直接写 \textbf。
+% 默认就是 \textbf：配合正文字体的 AutoFakeBold，字形不变、只加重笔画，与从前
+% 逐字节一致。设置里改选「专用粗体字体」时，生成器在导言区 \renewcommand 它，
+% 换成真正的粗体字面；预览与 Word 导出同步换，三端看到的是同一种加粗。
+\newcommand{\GwBold}[1]{\textbf{#1}}
+
 \newcommand{\bs}{\CJKfamily{xbs}}
 \newcommand{\kai}{\CJKfamily{kaiti}}
 

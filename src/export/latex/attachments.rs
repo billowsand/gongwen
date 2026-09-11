@@ -68,7 +68,7 @@ pub(crate) fn official_heading_to_tex(
         2 => format!("\\noindent\\hspace*{{2em}}{{\\heiti\\enheiti {number}{escaped}}}\\par"),
         3 => format!("\\noindent\\hspace*{{2em}}{{\\kai\\enkai {number}{escaped}}}\\par"),
         4 => format!("\\noindent\\hspace*{{2em}}{number}{escaped}\\par"),
-        5 => format!("\\noindent\\hspace*{{2em}}\\textbf{{{number}{escaped}}}\\par"),
+        5 => format!("\\noindent\\hspace*{{2em}}\\GwBold{{{number}{escaped}}}\\par"),
         _ => return None,
     };
     Some(rendered)

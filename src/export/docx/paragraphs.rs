@@ -4,8 +4,8 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BODY_SIZE, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS, TITLE_SIZE,
-    body_run, body_runs, chinese_fonts, security_runs, title_run,
+    BODY_SIZE, BoldFont, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS,
+    TITLE_SIZE, apply_bold, body_run, body_runs, chinese_fonts, security_runs, title_run,
 };
 use crate::export::plain_text;
 use crate::export::title;
@@ -15,7 +15,7 @@ use crate::models::{DraftInput, ListNumbering, TemplateKind};
 use docx_rs::*;
 use image::GenericImageView;
 
-pub(crate) fn body_paragraph(text: &str) -> Paragraph {
+pub(crate) fn body_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
     let mut paragraph = Paragraph::new()
         .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
@@ -25,19 +25,19 @@ pub(crate) fn body_paragraph(text: &str) -> Paragraph {
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true);
-    for run in body_runs(text) {
+    for run in body_runs(text, bold) {
         paragraph = paragraph.add_run(run);
     }
     paragraph
 }
 
-pub(crate) fn label_paragraph(text: &str) -> Paragraph {
-    let mut paragraph = Paragraph::new().line_spacing(
+pub(crate) fn label_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
+    let mut paragraph = Paragraph::new().align(AlignmentType::Both).line_spacing(
         LineSpacing::new()
             .line(super::BODY_LINE_TWIPS as i32)
             .line_rule(LineSpacingType::Exact),
     );
-    for run in body_runs(text) {
+    for run in body_runs(text, bold) {
         paragraph = paragraph.add_run(run);
     }
     paragraph
@@ -52,6 +52,7 @@ pub(crate) fn addressee_paragraph(text: &str) -> Paragraph {
                 .fonts(chinese_fonts("楷体_GB2312"))
                 .size(BODY_SIZE),
         )
+        .align(AlignmentType::Both)
         .line_spacing(
             LineSpacing::new()
                 .line(super::BODY_LINE_TWIPS as i32)
@@ -61,9 +62,15 @@ pub(crate) fn addressee_paragraph(text: &str) -> Paragraph {
 }
 
 /// 独立有序列表：每项单独成段，首行缩进两个汉字；编号与正文之间不留空格。
-pub(crate) fn ordered_list_paragraph(number: usize, text: &str, style: ListNumbering) -> Paragraph {
+pub(crate) fn ordered_list_paragraph(
+    number: usize,
+    text: &str,
+    style: ListNumbering,
+    bold: BoldFont<'_>,
+) -> Paragraph {
     let prefix = crate::export::render_list_number(style, number);
     let mut paragraph = Paragraph::new()
+        .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
@@ -71,7 +78,7 @@ pub(crate) fn ordered_list_paragraph(number: usize, text: &str, style: ListNumbe
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true);
-    for run in body_runs(&format!("{prefix}{text}")) {
+    for run in body_runs(&format!("{prefix}{text}"), bold) {
         paragraph = paragraph.add_run(run);
     }
     paragraph
@@ -99,7 +106,7 @@ pub(crate) fn letter_security_paragraph(input: &DraftInput) -> Paragraph {
     paragraph
 }
 
-pub(crate) fn heading_paragraph(level: u8, text: &str) -> Paragraph {
+pub(crate) fn heading_paragraph(level: u8, text: &str, bold: BoldFont<'_>) -> Paragraph {
     let font = match level {
         2 => "黑体",
         3 => "楷体_GB2312",
@@ -110,10 +117,11 @@ pub(crate) fn heading_paragraph(level: u8, text: &str) -> Paragraph {
         .fonts(chinese_fonts(font))
         .size(BODY_SIZE);
     if level == 5 {
-        run = run.bold();
+        run = apply_bold(run, bold);
     }
     Paragraph::new()
         .add_run(run)
+        .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
@@ -125,7 +133,12 @@ pub(crate) fn heading_paragraph(level: u8, text: &str) -> Paragraph {
 
 /// 紧缩风格（规格 §4.2）：正文区 # 号最多的那一级标题与紧随其后的正文合并为一行，
 /// 标题部分用该级标题字体并带编号与句号，正文部分用仿宋正文字体。
-pub(crate) fn compact_heading_paragraph(level: u8, title: &str, body: &str) -> Paragraph {
+pub(crate) fn compact_heading_paragraph(
+    level: u8,
+    title: &str,
+    body: &str,
+    bold: BoldFont<'_>,
+) -> Paragraph {
     // 与 `heading_paragraph` 的层级字体保持一致：2 级黑体、3 级楷体、其余仿宋（5 级加粗）。
     let font = match level {
         2 => "黑体",
@@ -137,10 +150,11 @@ pub(crate) fn compact_heading_paragraph(level: u8, title: &str, body: &str) -> P
         .fonts(chinese_fonts(font))
         .size(BODY_SIZE);
     if level == 5 {
-        run = run.bold();
+        run = apply_bold(run, bold);
     }
     let mut paragraph = Paragraph::new()
         .add_run(run)
+        .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
             LineSpacing::new()
@@ -148,7 +162,7 @@ pub(crate) fn compact_heading_paragraph(level: u8, title: &str, body: &str) -> P
                 .line_rule(LineSpacingType::Exact),
         )
         .widow_control(true);
-    for body_run in body_runs(body) {
+    for body_run in body_runs(body, bold) {
         paragraph = paragraph.add_run(body_run);
     }
     paragraph
@@ -345,7 +359,11 @@ pub(crate) fn image_paragraph_from_bytes(
         } else {
             format!("【附件】{file_name}（{alt}，PDF 附件，请见原文）")
         };
-        return Some(Paragraph::new().add_run(body_run(label)));
+        return Some(
+            Paragraph::new()
+                .add_run(body_run(label))
+                .align(AlignmentType::Both),
+        );
     }
     // 先完整解码一次：既取像素尺寸算缩放，也验证文件可被 docx-rs 的 Pic::new 转 PNG，
     // 避免 Pic::new 内部的 expect 在坏文件上 panic。
@@ -363,7 +381,12 @@ pub(crate) fn image_paragraph_from_bytes(
     let width_emu = natural_width_emu.min(max_width_emu);
     let height_emu = (natural_height_emu * width_emu / natural_width_emu) as u32;
     let pic = Pic::new(bytes).size(width_emu as u32, height_emu);
-    Some(Paragraph::new().add_run(Run::new().add_image(pic)))
+    // TeX 用 \begin{center}\includegraphics...\end{center}：图片整幅居中。
+    Some(
+        Paragraph::new()
+            .add_run(Run::new().add_image(pic))
+            .align(AlignmentType::Center),
+    )
 }
 
 pub(crate) fn agenda_body_paragraph() -> Paragraph {

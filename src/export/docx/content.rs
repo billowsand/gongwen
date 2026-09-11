@@ -4,23 +4,28 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    AGENDA_NUMBERING_ID, BODY_SIZE, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE, agenda_blank_line,
-    agenda_body_paragraph, body_paragraph, body_runs, chinese_fonts, document_title_paragraph,
-    docx_name, heading_paragraph, image_paragraph, label_paragraph, ordered_list_paragraph,
-    security_runs, table_run_sized, table_runs_sized,
+    AGENDA_NUMBERING_ID, BODY_SIZE, BoldFont, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE,
+    agenda_blank_line, agenda_body_paragraph, apply_bold, body_paragraph, body_runs, chinese_fonts,
+    document_title_paragraph, docx_name, heading_paragraph, image_paragraph, label_paragraph,
+    ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
 };
 use crate::export::table::{ColumnAlignment, to_docx_grid};
 use crate::export::title;
 use crate::export::{
     ColumnAlign, MarkdownBlock, inline_segments, official_heading_text, plain_text,
 };
-use crate::models::{DraftInput, ListNumbering, NumberingConfig};
+use crate::models::{DraftInput, FontConfig, ListNumbering, NumberingConfig};
 use anyhow::{Context, Result};
 use docx_rs::*;
 use std::fs::File;
 use std::path::Path;
 
-pub(crate) fn add_smart_table(mut doc: Docx, rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Docx {
+pub(crate) fn add_smart_table(
+    mut doc: Docx,
+    rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
+    bold: BoldFont<'_>,
+) -> Docx {
     if rows.is_empty() {
         return doc;
     }
@@ -60,15 +65,15 @@ pub(crate) fn add_smart_table(mut doc: Docx, rows: &[Vec<String>], aligns: &[Col
                             .iter()
                             .map(|segment| segment.text.as_str())
                             .collect::<String>();
-                        let bold = segments.iter().any(|segment| segment.bold);
+                        let cell_bold = segments.iter().any(|segment| segment.bold);
                         let (name_text, size) = docx_name(&cleaned, TABLE_SIZE);
                         let mut run = table_run_sized(&name_text, false, size);
-                        if bold {
-                            run = run.bold();
+                        if cell_bold {
+                            run = apply_bold(run, bold);
                         }
                         vec![run]
                     } else {
-                        table_runs_sized(text, row_index == 0, TABLE_SIZE)
+                        table_runs_sized(text, row_index == 0, TABLE_SIZE, bold)
                     };
                     let mut paragraph = Paragraph::new();
                     for run in runs {
@@ -109,26 +114,27 @@ pub(crate) fn add_official_content_block(
     block: &MarkdownBlock,
     counters: &mut [usize; 4],
     numbering: &NumberingConfig,
+    bold: BoldFont<'_>,
 ) -> Docx {
     match block {
         MarkdownBlock::Heading(level, text) => {
             if let Some(title) = official_heading_text(*level, text, counters, numbering) {
-                doc = doc.add_paragraph(heading_paragraph(*level, &title));
+                doc = doc.add_paragraph(heading_paragraph(*level, &title, bold));
             }
         }
         MarkdownBlock::Paragraph(text)
             if !text.trim().is_empty() && !text.contains("<div") && !text.contains("</div") =>
         {
-            doc = doc.add_paragraph(body_paragraph(text));
+            doc = doc.add_paragraph(body_paragraph(text, bold));
         }
         MarkdownBlock::ListItem(text) => {
             // TeX：\noindent{文本}\par，无序列表项顶格，不额外缩进。
-            doc = doc.add_paragraph(label_paragraph(text));
+            doc = doc.add_paragraph(label_paragraph(text, bold));
         }
         MarkdownBlock::OrderedListItem { number, text } => {
-            doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2));
+            doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2, bold));
         }
-        MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
+        MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns, bold),
         MarkdownBlock::Image { alt, src } => {
             if let Some(paragraph) = image_paragraph(alt, src) {
                 doc = doc.add_paragraph(paragraph);
@@ -158,8 +164,10 @@ pub(crate) fn write_meeting_agenda_docx(
     path: &Path,
     input: &DraftInput,
     markdown: &str,
+    fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<()> {
+    let bold = fonts.bold_family_docx();
     let title = markdown
         .lines()
         .find_map(|line| line.trim().strip_prefix("# "))
@@ -250,7 +258,7 @@ pub(crate) fn write_meeting_agenda_docx(
             // 两字），不另作黑体标签处理。
             MarkdownBlock::OrderedListItem { text, .. } => {
                 let mut item = agenda_body_paragraph();
-                for run in body_runs(text) {
+                for run in body_runs(text, bold) {
                     item = item.add_run(run);
                 }
                 doc = doc.add_paragraph(
@@ -258,8 +266,13 @@ pub(crate) fn write_meeting_agenda_docx(
                 );
             }
             _ => {
-                doc =
-                    add_official_content_block(doc, &block, &mut counters, &agenda_numbering_config)
+                doc = add_official_content_block(
+                    doc,
+                    &block,
+                    &mut counters,
+                    &agenda_numbering_config,
+                    bold,
+                )
             }
         }
     }

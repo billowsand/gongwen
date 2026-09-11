@@ -5,7 +5,7 @@
 
 use crate::export::chinese_date_parts;
 use crate::export::docx::{
-    CLOSING_GAP_TWIPS, JOINT_SIGNATURE_SEAL_GAP_TWIPS, PREVIEW_PLACEHOLDER,
+    BoldFont, CLOSING_GAP_TWIPS, JOINT_SIGNATURE_SEAL_GAP_TWIPS, PREVIEW_PLACEHOLDER,
     TABLE_CONTENT_WIDTH_TWIPS, body_run, body_runs, joint_closing_paragraph,
     joint_signature_cell_paragraph, spread_runs,
 };
@@ -48,7 +48,7 @@ pub(crate) fn official_signature_date(input: &DraftInput) -> String {
 /// 附件概要：正文结束后、落款之前，与正文之间空两行、首行缩进两个汉字，
 /// 按顺序列出附件名称。单个附件写“附件：名称”；多个附件只有第一行写“附件N：名称”，
 /// 其余行的“附件”二字用两个全角空格占位对齐、不再重复。
-pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String]) -> Docx {
+pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String], bold: BoldFont<'_>) -> Docx {
     // 与正文之间空两行。
     for _ in 0..2 {
         doc = doc.add_paragraph(
@@ -69,6 +69,7 @@ pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String]) -> Docx {
             format!("　　{}：{name}", index + 1)
         };
         let mut paragraph = Paragraph::new()
+            .align(AlignmentType::Both)
             .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
             .line_spacing(
                 LineSpacing::new()
@@ -76,7 +77,7 @@ pub(crate) fn add_attachment_summary(mut doc: Docx, names: &[String]) -> Docx {
                     .line_rule(LineSpacingType::Exact),
             )
             .keep_next(true);
-        for run in body_runs(&label) {
+        for run in body_runs(&label, bold) {
             paragraph = paragraph.add_run(run);
         }
         doc = doc.add_paragraph(paragraph);

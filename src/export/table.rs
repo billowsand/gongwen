@@ -364,7 +364,7 @@ pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Strin
                 let escaped = if name_column == Some(column_index) && row_index > 0 {
                     let name = latex_name(&cleaned);
                     if segments.iter().any(|segment| segment.bold) {
-                        format!("\\textbf{{{name}}}")
+                        format!("\\GwBold{{{name}}}")
                     } else {
                         name
                     }
@@ -382,7 +382,7 @@ pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Strin
                                 .map(|segment| {
                                     let escaped = tex_escape(&segment.text);
                                     if segment.bold {
-                                        format!("\\textbf{{{escaped}}}")
+                                        format!("\\GwBold{{{escaped}}}")
                                     } else {
                                         escaped
                                     }
@@ -565,7 +565,7 @@ mod tests {
             vec!["甲".into(), "\"**重点**\"内容".into()],
         ];
         let tex = to_longtblr(&table, &[]);
-        assert!(tex.contains("“\\textbf{重点}”内容"), "{tex}");
+        assert!(tex.contains("“\\GwBold{重点}”内容"), "{tex}");
         assert!(!tex.contains("**"));
     }
 

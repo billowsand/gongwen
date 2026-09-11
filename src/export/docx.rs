@@ -9,7 +9,9 @@ use crate::export::{
     MarkdownBlock, MarkdownSection, attachment_names, body_heading_max_level,
     official_heading_text, parse_markdown_with_numbering, plain_text,
 };
-use crate::models::{DraftInput, NumberingConfig, StyleMode, TemplateKind, split_units};
+use crate::models::{
+    DraftInput, FontConfig, NumberingConfig, StyleMode, TemplateKind, split_units,
+};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use docx_rs::*;
@@ -45,8 +47,8 @@ pub(crate) use red::{
     red_approval_frame_table, red_approval_record_table, red_approval_top_rule_table,
 };
 pub(crate) use runs::{
-    body_run, body_runs, chinese_fonts, docx_name, record_run, security_runs, spread_runs,
-    table_run_sized, table_runs_sized, title_run,
+    BoldFont, apply_bold, body_run, body_runs, chinese_fonts, docx_name, record_run, security_runs,
+    spread_runs, table_run_sized, table_runs_sized, title_run,
 };
 pub(crate) use signature::{
     add_attachment_summary, add_joint_signature, add_white_paper_signature, is_joint_mode_one,
@@ -97,7 +99,14 @@ pub fn write_docx(
     markdown: &str,
     display: &UnitDisplay,
 ) -> Result<()> {
-    write_docx_with_numbering(path, input, markdown, display, &NumberingConfig::default())
+    write_docx_with_numbering(
+        path,
+        input,
+        markdown,
+        display,
+        &FontConfig::default(),
+        &NumberingConfig::default(),
+    )
 }
 
 /// 与 [`write_docx`] 相同，另按设置里的编号样式生成标题与列表编号。
@@ -106,10 +115,14 @@ pub fn write_docx_with_numbering(
     input: &DraftInput,
     markdown: &str,
     display: &UnitDisplay,
+    fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<()> {
+    // 加粗文字的排法：None 交给 Word 合成粗体（字体不变，等同点了加粗按钮），
+    // Some 换用专用粗体字面。
+    let bold = fonts.bold_family_docx();
     if input.kind == TemplateKind::MeetingAgenda {
-        return write_meeting_agenda_docx(path, input, markdown, numbering);
+        return write_meeting_agenda_docx(path, input, markdown, fonts, numbering);
     }
 
     let blocks = parse_markdown_with_numbering(markdown, numbering);
@@ -361,8 +374,9 @@ pub fn write_docx_with_numbering(
                             let MarkdownBlock::Paragraph(body) = &blocks[index + 1] else {
                                 unreachable!()
                             };
-                            doc =
-                                doc.add_paragraph(compact_heading_paragraph(*level, &title, body));
+                            doc = doc.add_paragraph(compact_heading_paragraph(
+                                *level, &title, body, bold,
+                            ));
                         }
                         index += 1; // 跳过紧随的正文段落
                     } else {
@@ -383,7 +397,8 @@ pub fn write_docx_with_numbering(
                                 ),
                             );
                         }
-                        doc = add_official_content_block(doc, block, &mut counters, numbering);
+                        doc =
+                            add_official_content_block(doc, block, &mut counters, numbering, bold);
                     }
                 }
             }
@@ -399,22 +414,29 @@ pub fn write_docx_with_numbering(
                     }
                 }
                 MarkdownBlock::Heading(level, text) => {
-                    doc = doc.add_paragraph(heading_paragraph(*level, text));
+                    doc = doc.add_paragraph(heading_paragraph(*level, text, bold));
                 }
                 MarkdownBlock::Paragraph(text) => {
                     if text.trim().is_empty() || text.contains("<div") || text.contains("</div") {
                         continue;
                     }
-                    doc = doc.add_paragraph(body_paragraph(text));
+                    doc = doc.add_paragraph(body_paragraph(text, bold));
                 }
                 MarkdownBlock::ListItem(text) => {
                     // TeX：\noindent{文本}\par，无序列表项顶格，不额外缩进。
-                    doc = doc.add_paragraph(label_paragraph(text));
+                    doc = doc.add_paragraph(label_paragraph(text, bold));
                 }
                 MarkdownBlock::OrderedListItem { number, text } => {
-                    doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2));
+                    doc = doc.add_paragraph(ordered_list_paragraph(
+                        *number,
+                        text,
+                        numbering.list2,
+                        bold,
+                    ));
                 }
-                MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns),
+                MarkdownBlock::Table { rows, aligns } => {
+                    doc = add_smart_table(doc, rows, aligns, bold)
+                }
             }
         }
     }
@@ -423,7 +445,7 @@ pub fn write_docx_with_numbering(
     if input.kind.uses_letter_layout() || input.kind == TemplateKind::WhitePaper {
         let names = attachment_names(&blocks);
         if !names.is_empty() {
-            doc = add_attachment_summary(doc, &names);
+            doc = add_attachment_summary(doc, &names, bold);
         }
     }
 
@@ -438,6 +460,7 @@ pub fn write_docx_with_numbering(
             doc = doc.add_paragraph(
                 Paragraph::new()
                     .add_run(body_run("（此页无正文）"))
+                    .align(AlignmentType::Both)
                     .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
                     .page_break_before(true)
                     .line_spacing(
@@ -536,7 +559,7 @@ pub fn write_docx_with_numbering(
                     counters = [0; 4];
                     doc = doc.add_paragraph(attachment_document_title_paragraph(text));
                 }
-                _ => doc = add_official_content_block(doc, block, &mut counters, numbering),
+                _ => doc = add_official_content_block(doc, block, &mut counters, numbering, bold),
             }
         }
     }
@@ -574,6 +597,85 @@ mod tests {
             .write_to(&mut cursor, image::ImageFormat::Png)
             .unwrap();
         cursor.into_inner()
+    }
+
+    /// 正文流里的每一段都两端对齐（Word 的 `w:jc=both`），与 TeX 的默认对齐
+    /// 和预览一致；不是靠 Word 的默认左对齐凑合。
+    #[test]
+    fn every_body_paragraph_is_justified() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("justified.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::OfficialLetter;
+        input.profile.issuing_unit = "某单位".into();
+        input.profile.recipient = "某部门".into();
+        write_docx_ok(
+            &path,
+            &input,
+            "# 测试函\n<!-- [正文] -->\n## 工作要求\n正文段落。\n- 无序列表项\n\n1. 有序列表项\n<!-- [附件] -->\n# 附件1\n## 统计表\n附件正文。",
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        for needle in [
+            "正文段落。",
+            "一、工作要求",
+            "无序列表项",
+            "1.有序列表项",
+            "附件：统计表",
+            "附件正文。",
+        ] {
+            let paragraph = paragraph_containing(&xml, needle);
+            assert!(
+                paragraph.contains(r#"<w:jc w:val="both" />"#),
+                "「{needle}」所在段应两端对齐：{paragraph}"
+            );
+        }
+        // 无序列表项顶格，不再额外左缩进（与 TeX 的 \noindent 一致）。
+        let list = paragraph_containing(&xml, "无序列表项");
+        assert!(!list.contains(r#"w:left="420""#), "{list}");
+    }
+
+    /// 加粗排法三端同源：默认让 Word 合成粗体，选了专用粗体字体就换字面。
+    #[test]
+    fn bold_text_follows_the_configured_bold_style() {
+        let temp = tempfile::tempdir().unwrap();
+        let markdown = "# 测试函\n\n请**务必**按时报送。";
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::PlainDocument;
+
+        // 默认：仍是仿宋 + w:b，由 Word 合成粗体。
+        let synthetic = temp.path().join("synthetic.docx");
+        write_docx_ok(&synthetic, &input, markdown).unwrap();
+        let xml = zip_text(&synthetic, "word/document.xml");
+        let run = bold_run(&xml, "务必");
+        assert!(run.contains("<w:b "), "{run}");
+        assert!(run.contains("w:eastAsia=\"仿宋_GB2312\""), "{run}");
+
+        // 选专用粗体字体：换字面，不再叠加 w:b（真粗体再合成一层会糊）。
+        let dedicated = temp.path().join("dedicated.docx");
+        let mut fonts = crate::models::FontConfig::default();
+        fonts.bold_style = crate::models::BoldStyle::DedicatedFont;
+        write_docx_with_numbering(
+            &dedicated,
+            &input,
+            markdown,
+            &UnitDisplay::new(&[]),
+            &fonts,
+            &NumberingConfig::default(),
+        )
+        .unwrap();
+        let xml = zip_text(&dedicated, "word/document.xml");
+        let run = bold_run(&xml, "务必");
+        assert!(run.contains("w:eastAsia=\"黑体\""), "{run}");
+        assert!(!run.contains("<w:b "), "{run}");
+    }
+
+    /// 取含 `needle` 的那个 run 的 XML。
+    fn bold_run<'a>(xml: &'a str, needle: &str) -> &'a str {
+        let at = xml.find(needle).unwrap();
+        let start = xml[..at].rfind("<w:r>").unwrap();
+        let end = xml[at..].find("</w:r>").unwrap() + at + "</w:r>".len();
+        &xml[start..end]
     }
 
     #[test]
