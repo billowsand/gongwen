@@ -25,7 +25,7 @@ calamine = "0.30"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 docx-rs = "0.4.22"
-eframe = { version = "0.35.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 egui = "0.35.0"
 egui_extras = { version = "0.35.0", features = ["image", "svg"] }
 hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
