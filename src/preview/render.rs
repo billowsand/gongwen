@@ -346,58 +346,34 @@ pub(crate) fn official_preview(
 
 /// 一个自然段可以由多行 Markdown 软换行组成；成文仍连续排版，交互范围按源码行拆开。
 pub(crate) fn paragraph_source_segments(
-    markdown: &str,
+    _markdown: &str,
     located: &LocatedBlock,
     rendered_text: &str,
 ) -> Vec<ClickableSourceSegment> {
-    let lines = export::source_lines(markdown)
-        .into_iter()
-        .filter(|(start, raw)| {
-            *start >= located.range.start && *start + raw.len() <= located.range.end
-        })
-        .filter(|(_, raw)| !raw.trim().is_empty())
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        return vec![ClickableSourceSegment {
-            source: located.range.clone(),
-            chars: 0..rendered_text.chars().count(),
-        }];
+    if !located.source_segments.is_empty() {
+        let segments = located
+            .source_segments
+            .iter()
+            .map(|segment| ClickableSourceSegment {
+                source: segment.source.clone(),
+                chars: segment.chars.clone(),
+            })
+            .collect::<Vec<_>>();
+        debug_assert_eq!(
+            segments.last().map(|segment| segment.chars.end),
+            Some(export::inline_visible_char_index(
+                rendered_text,
+                rendered_text.len()
+            )),
+            "解析器来源映射必须覆盖完整的段落可见文本"
+        );
+        return segments;
     }
-    let source_text = lines
-        .iter()
-        .map(|(_, raw)| raw.trim().to_string())
-        .collect::<Vec<_>>();
-    let joined = export::join_soft_wrapped_lines(&source_text);
-    let rendered_chars = export::inline_visible_char_index(rendered_text, rendered_text.len());
-    let mut previous = 0usize;
-    lines
-        .iter()
-        .enumerate()
-        .map(|(index, (start, raw))| {
-            let end = if joined == rendered_text {
-                let prefix = export::join_soft_wrapped_lines(&source_text[..=index]);
-                export::inline_visible_char_index(rendered_text, prefix.len())
-            } else if index + 1 == lines.len() {
-                rendered_chars
-            } else {
-                let source_chars = source_text
-                    .iter()
-                    .map(|line| line.chars().count())
-                    .sum::<usize>();
-                let prefix_chars = source_text[..=index]
-                    .iter()
-                    .map(|line| line.chars().count())
-                    .sum::<usize>();
-                rendered_chars * prefix_chars / source_chars.max(1)
-            };
-            let segment = ClickableSourceSegment {
-                source: *start..*start + raw.len(),
-                chars: previous..end.max(previous),
-            };
-            previous = end;
-            segment
-        })
-        .collect()
+
+    vec![ClickableSourceSegment {
+        source: located.range.clone(),
+        chars: 0..export::inline_visible_char_index(rendered_text, rendered_text.len()),
+    }]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -614,5 +590,56 @@ mod source_segment_tests {
         assert_eq!(segments[1].source, second_start..markdown.len());
         assert_eq!(segments[0].chars, 0..3);
         assert_eq!(segments[1].chars, 3..6);
+    }
+
+    #[test]
+    fn adjacent_ordered_items_keep_exact_source_line_boundaries() {
+        let markdown = "正文内容：\n1. 第一项，\n1. 第二项。；\n1. 第三项，";
+        let located = export::parse_markdown_located(markdown).remove(0);
+        let MarkdownBlock::Paragraph(text) = &located.block else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(text, "正文内容：①第一项；②第二项；③第三项。");
+        let segments = paragraph_source_segments(markdown, &located, text);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.chars.clone())
+                .collect::<Vec<_>>(),
+            [0..5, 5..10, 10..15, 15..20]
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| &markdown[segment.source.clone()])
+                .collect::<Vec<_>>(),
+            ["正文内容：", "1. 第一项，", "1. 第二项。；", "1. 第三项，"]
+        );
+    }
+
+    #[test]
+    fn escaped_characters_and_cross_line_bold_use_visible_boundaries() {
+        let markdown = "字段\\_名**称\n继续**填写";
+        let located = export::parse_markdown_located(markdown).remove(0);
+        let MarkdownBlock::Paragraph(text) = &located.block else {
+            panic!("expected paragraph")
+        };
+        let segments = paragraph_source_segments(markdown, &located, text);
+        assert_eq!(export::plain_text(text), "字段_名称继续填写");
+        assert_eq!(segments[0].chars, 0..5);
+        assert_eq!(segments[1].chars, 5..9);
+    }
+
+    #[test]
+    fn latin_soft_wrap_space_belongs_to_the_following_source_line() {
+        let markdown = "the quick brown\nfox jumps";
+        let located = export::parse_markdown_located(markdown).remove(0);
+        let MarkdownBlock::Paragraph(text) = &located.block else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(text, "the quick brown fox jumps");
+        let segments = paragraph_source_segments(markdown, &located, text);
+        assert_eq!(segments[0].chars, 0..15);
+        assert_eq!(segments[1].chars, 15..25);
     }
 }

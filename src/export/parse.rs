@@ -102,6 +102,29 @@ impl ColumnAlign {
 pub(crate) struct LocatedBlock {
     pub(crate) block: MarkdownBlock,
     pub(crate) range: std::ops::Range<usize>,
+    /// 段落中每一条物理源码行在最终可见文本里占用的字符范围。
+    pub(crate) source_segments: Vec<RenderedSourceSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenderedSourceSegment {
+    pub(crate) source: std::ops::Range<usize>,
+    pub(crate) chars: std::ops::Range<usize>,
+}
+
+#[derive(Debug)]
+struct ParagraphPart {
+    source: std::ops::Range<usize>,
+    text: String,
+    join: ParagraphJoin,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ParagraphJoin {
+    /// Markdown 段内软换行；西文接缝可能需要补一个可见空格。
+    Soft,
+    /// 解析器生成的连续内容，例如正文后紧跟的圈号列表，不补空格。
+    Direct,
 }
 
 pub(crate) fn parse_markdown(markdown: &str) -> Vec<MarkdownBlock> {
@@ -167,24 +190,39 @@ pub(crate) fn block_span_for_line(markdown: &str, line: usize) -> Option<std::op
         .map(|located| located.range)
 }
 
-/// 段内软换行（作者在一段中间直接回车）的拼接。
-///
-/// 这些换行在排版时并不换行，整段仍是一段。中文不能因此多出一个空格——正文里
-/// 会凭空裂开一个字宽的口子，而作者只是为了在编辑器里写得短一点。英文则必须留
-/// 空格，否则接缝处两个单词会粘成一个。判据与 CommonMark 的 CJK 扩展一致：
-/// 接缝两侧只要有一侧是宽体字（中日韩文字与全角标点）就不补空格。
-pub(crate) fn join_soft_wrapped_lines(lines: &[String]) -> String {
-    let mut out = String::new();
-    for line in lines {
-        if let (Some(prev), Some(next)) = (out.chars().last(), line.chars().next())
+/// 用与正文解析完全相同的规则合成段落，同时保留每条源码物理行的可见字符范围。
+fn mapped_paragraph(parts: &[ParagraphPart]) -> (String, Vec<RenderedSourceSegment>) {
+    let mut text = String::new();
+    let mut raw_ranges = Vec::with_capacity(parts.len());
+    for (index, part) in parts.iter().enumerate() {
+        // 接缝处自动补出的空格归到后一条源码行，点击该行时其视觉贡献保持连续。
+        let start = text.len();
+        if index > 0
+            && matches!(part.join, ParagraphJoin::Soft)
+            && let (Some(prev), Some(next)) = (text.chars().last(), part.text.chars().next())
             && !is_wide_script(prev)
             && !is_wide_script(next)
         {
-            out.push(' ');
+            text.push(' ');
         }
-        out.push_str(line);
+        text.push_str(&part.text);
+        raw_ranges.push((part.source.clone(), start..text.len()));
     }
-    out
+
+    let boundaries = raw_ranges
+        .iter()
+        .flat_map(|(_, raw)| [raw.start, raw.end])
+        .collect::<Vec<_>>();
+    let visible = super::inline_visible_char_indices(&text, &boundaries);
+    let source_segments = raw_ranges
+        .into_iter()
+        .zip(visible.as_chunks::<2>().0)
+        .map(|((source, _), chars)| RenderedSourceSegment {
+            source,
+            chars: chars[0]..chars[1],
+        })
+        .collect();
+    (text, source_segments)
 }
 
 /// 宽体字：中日韩文字、假名、谚文与全角标点。这些字之间换行不需要空格。
@@ -231,16 +269,18 @@ pub(crate) fn parse_markdown_located_with_numbering(
     numbering: &NumberingConfig,
 ) -> Vec<LocatedBlock> {
     let mut blocks: Vec<LocatedBlock> = Vec::new();
-    let mut paragraph: Vec<String> = Vec::new();
+    let mut paragraph: Vec<ParagraphPart> = Vec::new();
     let mut paragraph_range = 0..0;
     let mut in_html_block = false;
-    let flush = |paragraph: &mut Vec<String>,
+    let flush = |paragraph: &mut Vec<ParagraphPart>,
                  range: &mut std::ops::Range<usize>,
                  blocks: &mut Vec<LocatedBlock>| {
         if !paragraph.is_empty() {
+            let (text, source_segments) = mapped_paragraph(paragraph);
             blocks.push(LocatedBlock {
-                block: MarkdownBlock::Paragraph(join_soft_wrapped_lines(paragraph)),
+                block: MarkdownBlock::Paragraph(text),
                 range: range.clone(),
+                source_segments,
             });
             paragraph.clear();
         }
@@ -256,6 +296,7 @@ pub(crate) fn parse_markdown_located_with_numbering(
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Html(line.to_string()),
                 range: span,
+                source_segments: Vec::new(),
             });
             if line.starts_with("</div") {
                 in_html_block = false;
@@ -270,6 +311,7 @@ pub(crate) fn parse_markdown_located_with_numbering(
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Marker(section),
                 range: span,
+                source_segments: Vec::new(),
             });
         } else if let Some((level, text)) = parse_heading(line) {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
@@ -278,18 +320,24 @@ pub(crate) fn parse_markdown_located_with_numbering(
             } else {
                 MarkdownBlock::Heading(level, clean_heading_number(text))
             };
-            blocks.push(LocatedBlock { block, range: span });
+            blocks.push(LocatedBlock {
+                block,
+                range: span,
+                source_segments: Vec::new(),
+            });
         } else if let Some((alt, src)) = parse_image(line) {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Image { alt, src },
                 range: span,
+                source_segments: Vec::new(),
             });
         } else if line.starts_with("<div") {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Html(line.to_string()),
                 range: span,
+                source_segments: Vec::new(),
             });
             in_html_block = true;
         } else if index + 1 < lines.len()
@@ -319,6 +367,7 @@ pub(crate) fn parse_markdown_located_with_numbering(
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Table { rows, aligns },
                 range: start..end,
+                source_segments: Vec::new(),
             });
             continue;
         } else if let Some((start_number, _)) = parse_ordered_item(line) {
@@ -326,44 +375,44 @@ pub(crate) fn parse_markdown_located_with_numbering(
             // 的起始序号，后续源码可以像常见 Markdown 写法一样全部写 `1.`。
             let mut group_end = span.end;
             let mut items = Vec::new();
-            let first_item = index;
             while index < lines.len() {
                 let (item_start, raw_item) = lines[index];
                 let Some((_, text)) = parse_ordered_item(raw_item.trim()) else {
                     break;
                 };
-                items.push(text.to_string());
+                items.push((item_start..item_start + raw_item.len(), text.to_string()));
                 group_end = item_start + raw_item.len();
                 index += 1;
             }
-            let items = normalize_ordered_item_punctuation(&items);
+            let normalized = normalize_ordered_item_punctuation(
+                &items
+                    .iter()
+                    .map(|(_, text)| text.clone())
+                    .collect::<Vec<_>>(),
+            );
             if !paragraph.is_empty() {
                 // 正文之后没有空行：源码仍逐项换行，成文时把它们接回同一自然段，
                 // 使用圈号且不额外插入空格。
-                let tail = items
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, text)| {
-                        format!(
+                for (offset, ((source, _), text)) in items.into_iter().zip(normalized).enumerate() {
+                    paragraph.push(ParagraphPart {
+                        source,
+                        text: format!(
                             "{}{text}",
                             render_list_number(numbering.list1, start_number + offset)
-                        )
-                    })
-                    .collect::<String>();
-                paragraph
-                    .last_mut()
-                    .expect("paragraph is not empty")
-                    .push_str(&tail);
+                        ),
+                        join: ParagraphJoin::Direct,
+                    });
+                }
                 paragraph_range.end = group_end;
             } else {
-                for (offset, text) in items.into_iter().enumerate() {
-                    let (line_start, raw_item) = lines[first_item + offset];
+                for (offset, ((source, _), text)) in items.into_iter().zip(normalized).enumerate() {
                     blocks.push(LocatedBlock {
                         block: MarkdownBlock::OrderedListItem {
                             number: start_number + offset,
                             text,
                         },
-                        range: line_start..line_start + raw_item.len(),
+                        range: source,
+                        source_segments: Vec::new(),
                     });
                 }
             }
@@ -373,13 +422,18 @@ pub(crate) fn parse_markdown_located_with_numbering(
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::ListItem(format!("• {}", text.trim())),
                 range: span,
+                source_segments: Vec::new(),
             });
         } else {
             if paragraph.is_empty() {
                 paragraph_range = span.clone();
             }
             paragraph_range.end = span.end;
-            paragraph.push(line.to_string());
+            paragraph.push(ParagraphPart {
+                source: span,
+                text: line.to_string(),
+                join: ParagraphJoin::Soft,
+            });
         }
         index += 1;
     }
@@ -608,6 +662,7 @@ pub(crate) fn normalize_legacy_attachments(blocks: Vec<LocatedBlock>) -> Vec<Loc
                     out.push(LocatedBlock {
                         block: MarkdownBlock::Marker(MarkdownSection::Attachment),
                         range: located.range.start..located.range.start,
+                        source_segments: Vec::new(),
                     });
                 }
                 at_attachment_start = false;

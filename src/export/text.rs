@@ -49,13 +49,9 @@ pub(crate) fn number_to_chinese(number: usize) -> String {
 }
 
 pub(crate) fn plain_text(text: &str) -> String {
-    // 一并滤掉花脸稿哨兵：标题、表头这些路径都走这里，它们不画标记，
-    // 但绝不能把私用区码位印到纸上。
-    text.replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
-        .chars()
-        .filter(|ch| !is_redline_sentinel(*ch))
+    inline_segments(text)
+        .into_iter()
+        .map(|segment| segment.text)
         .collect()
 }
 
@@ -249,78 +245,125 @@ pub(crate) fn strip_redline(text: &str) -> String {
     )
 }
 
-/// 解析正文行内 Markdown：保留 `**…**` / `__…__` 的加粗语义，同时叠加括号字体规则。
-/// 加粗标记跨越括号边界时仍可正确切分为多个字体一致、粗细一致的片段。
-pub(crate) fn inline_segments(text: &str) -> Vec<InlineSegment> {
-    let text = normalize_chinese_quotes(&text.replace('`', ""));
-    let paren_ranges = parenthesized_ranges(&text);
+#[derive(Debug)]
+struct InlineAtom {
+    source: std::ops::Range<usize>,
+    ch: char,
+    bold: bool,
+}
 
-    // 只移除成对出现的 Markdown 加粗标记；孤立的 `**` / `__` 保留原文。
-    let mut paired_markers: std::collections::HashMap<usize, &'static str> =
-        std::collections::HashMap::new();
-    for (marker, literal) in [("**", "**"), ("__", "__")] {
+fn escaped_at(text: &str, index: usize) -> bool {
+    text[..index]
+        .chars()
+        .rev()
+        .take_while(|ch| *ch == '\\')
+        .count()
+        % 2
+        == 1
+}
+
+fn paired_bold_markers(text: &str) -> std::collections::HashMap<usize, &'static str> {
+    let mut paired = std::collections::HashMap::new();
+    for marker in ["**", "__"] {
         let positions = text
             .match_indices(marker)
             .map(|(index, _)| index)
+            .filter(|index| !escaped_at(text, *index))
             .collect::<Vec<_>>();
         for pair in positions.as_chunks::<2>().0 {
-            paired_markers.insert(pair[0], literal);
-            paired_markers.insert(pair[1], literal);
+            paired.insert(pair[0], marker);
+            paired.insert(pair[1], marker);
         }
     }
+    paired
+}
 
-    let mut segments: Vec<InlineSegment> = Vec::new();
-    let mut buffer = String::new();
+/// 把行内 Markdown 转成逐个可见字符；每个字符同时保留输入中的来源字节范围。
+fn inline_atoms(text: &str) -> Vec<InlineAtom> {
+    let paired_markers = paired_bold_markers(text);
+    let mut atoms = Vec::new();
     let mut star_bold = false;
     let mut underscore_bold = false;
-    let mut current_state: Option<(bool, bool)> = None;
     let mut index = 0usize;
     while index < text.len() {
         if let Some(marker) = paired_markers.get(&index) {
-            if !buffer.is_empty()
-                && let Some((bold, parenthesized)) = current_state
-            {
-                segments.push(InlineSegment {
-                    text: std::mem::take(&mut buffer),
-                    bold,
-                    parenthesized,
-                });
-            }
             if *marker == "**" {
                 star_bold = !star_bold;
             } else {
                 underscore_bold = !underscore_bold;
             }
-            current_state = None;
             index += marker.len();
             continue;
         }
 
         let ch = text[index..].chars().next().expect("valid char boundary");
+        if ch == '`' && !escaped_at(text, index) {
+            index += ch.len_utf8();
+            continue;
+        }
+        if is_redline_sentinel(ch) {
+            index += ch.len_utf8();
+            continue;
+        }
+        if ch == '\\'
+            && let Some(next) = text[index + ch.len_utf8()..].chars().next()
+            && next.is_ascii_punctuation()
+        {
+            let end = index + ch.len_utf8() + next.len_utf8();
+            atoms.push(InlineAtom {
+                source: index..end,
+                ch: next,
+                bold: star_bold || underscore_bold,
+            });
+            index = end;
+            continue;
+        }
+
+        let end = index + ch.len_utf8();
+        atoms.push(InlineAtom {
+            source: index..end,
+            ch,
+            bold: star_bold || underscore_bold,
+        });
+        index = end;
+    }
+
+    // 引号规范化是一进一出；处理后仍可沿用每个 atom 的来源范围。
+    let visible = atoms.iter().map(|atom| atom.ch).collect::<String>();
+    for (atom, normalized) in atoms
+        .iter_mut()
+        .zip(normalize_chinese_quotes(&visible).chars())
+    {
+        atom.ch = normalized;
+    }
+    atoms
+}
+
+/// 解析正文行内 Markdown：保留加粗语义、反斜杠转义，同时叠加括号字体规则。
+/// 显示文本与字符来源映射共用 `inline_atoms`，不会各算一遍。
+pub(crate) fn inline_segments(text: &str) -> Vec<InlineSegment> {
+    let atoms = inline_atoms(text);
+    let visible = atoms.iter().map(|atom| atom.ch).collect::<String>();
+    let paren_ranges = parenthesized_ranges(&visible);
+    let mut segments: Vec<InlineSegment> = Vec::new();
+    let mut visible_byte = 0usize;
+    for atom in atoms {
         let parenthesized = paren_ranges
             .iter()
-            .any(|(start, end)| *start <= index && index < *end);
-        let state = (star_bold || underscore_bold, parenthesized);
-        if current_state.is_some_and(|current| current != state) && !buffer.is_empty() {
-            let (bold, parenthesized) = current_state.expect("state exists");
+            .any(|(start, end)| *start <= visible_byte && visible_byte < *end);
+        if let Some(last) = segments.last_mut()
+            && last.bold == atom.bold
+            && last.parenthesized == parenthesized
+        {
+            last.text.push(atom.ch);
+        } else {
             segments.push(InlineSegment {
-                text: std::mem::take(&mut buffer),
-                bold,
+                text: atom.ch.to_string(),
+                bold: atom.bold,
                 parenthesized,
             });
         }
-        current_state = Some(state);
-        buffer.push(ch);
-        index += ch.len_utf8();
-    }
-    if !buffer.is_empty()
-        && let Some((bold, parenthesized)) = current_state
-    {
-        segments.push(InlineSegment {
-            text: buffer,
-            bold,
-            parenthesized,
-        });
+        visible_byte += atom.ch.len_utf8();
     }
     segments
 }
@@ -330,41 +373,22 @@ pub(crate) fn inline_segments(text: &str) -> Vec<InlineSegment> {
 /// 预览按源码行拆分点击区域时需要这层换算：反引号和成对的加粗标记不占版面，
 /// 中文引号规范化则仍是一进一出。范围按字符计，正好可直接交给 egui 的光标坐标。
 pub(crate) fn inline_visible_char_index(text: &str, byte_offset: usize) -> usize {
-    let mut boundary = byte_offset.min(text.len());
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    let boundary_chars = text[..boundary].chars().filter(|ch| *ch != '`').count();
-    let normalized = normalize_chinese_quotes(&text.replace('`', ""));
-    let mut paired_markers = std::collections::HashSet::new();
-    for marker in ["**", "__"] {
-        let positions = normalized
-            .match_indices(marker)
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        for pair in positions.as_chunks::<2>().0 {
-            paired_markers.insert(pair[0]);
-            paired_markers.insert(pair[1]);
-        }
-    }
-    let mut visible = 0usize;
-    let mut source_chars = 0usize;
-    let mut index = 0usize;
-    while index < normalized.len() && source_chars < boundary_chars {
-        if paired_markers.contains(&index) {
-            index += 2;
-            source_chars += 2;
-            continue;
-        }
-        let ch = normalized[index..]
-            .chars()
-            .next()
-            .expect("valid char boundary");
-        index += ch.len_utf8();
-        source_chars += 1;
-        visible += 1;
-    }
-    visible
+    inline_visible_char_indices(text, &[byte_offset])[0]
+}
+
+/// 批量把输入字节边界换成可见字符边界；整段只解析一次，供多行段落建立来源映射。
+pub(crate) fn inline_visible_char_indices(text: &str, byte_offsets: &[usize]) -> Vec<usize> {
+    let atoms = inline_atoms(text);
+    byte_offsets
+        .iter()
+        .map(|byte_offset| {
+            let mut boundary = (*byte_offset).min(text.len());
+            while boundary > 0 && !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            atoms.partition_point(|atom| atom.source.end <= boundary)
+        })
+        .collect()
 }
 
 /// 从附件标题提取内嵌名称：`附件1：统计表` → `统计表`；`附件1` → None。
@@ -437,5 +461,34 @@ mod source_mapping_tests {
         let boundary = text.find("第二行").unwrap();
         assert_eq!(inline_visible_char_index(text, boundary), 3);
         assert_eq!(inline_visible_char_index(text, text.len()), 6);
+    }
+
+    #[test]
+    fn escaped_markdown_punctuation_is_one_visible_character() {
+        let text = r"字段\_名称与\*号";
+        assert_eq!(plain_text(text), "字段_名称与*号");
+        let boundary = text.find("名称").unwrap();
+        assert_eq!(inline_visible_char_index(text, boundary), 3);
+        assert_eq!(inline_visible_char_index(text, text.len()), 8);
+    }
+
+    #[test]
+    fn escaped_bold_markers_stay_literal() {
+        let segments = inline_segments(r"\**不加粗\**，**加粗**");
+        assert_eq!(
+            segments,
+            [
+                InlineSegment {
+                    text: "**不加粗**，".into(),
+                    bold: false,
+                    parenthesized: false,
+                },
+                InlineSegment {
+                    text: "加粗".into(),
+                    bold: true,
+                    parenthesized: false,
+                },
+            ]
+        );
     }
 }
