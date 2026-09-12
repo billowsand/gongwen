@@ -568,9 +568,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # 版本更新说明随源码一起提交，发布时直接取用。
+          # --generate-notes 产出的正文只有一行 changelog 链接，等于什么都没写，
+          # 只在缺说明文件时兜底，并且会在工作流里留一条告警。
+          notes="$GITHUB_WORKSPACE/docs/release-notes/${GITHUB_REF_NAME}.md"
+          title="公文助手 ${GITHUB_REF_NAME}"
+          if [ -f "$notes" ]; then
+            create_args=(--title "$title" --notes-file "$notes")
+          else
+            echo "::warning::缺少 docs/release-notes/${GITHUB_REF_NAME}.md，本次回退到自动生成的说明"
+            create_args=(--title "$title" --generate-notes)
+          fi
           cd release-assets
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" --clobber
+            # 重跑时把标题和说明一并刷新，免得留着上一次的占位正文。
+            if [ -f "$notes" ]; then
+              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --title "$title" --notes-file "$notes"
+            fi
           else
-            gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" --generate-notes
+            gh release create "$GITHUB_REF_NAME" ./* --repo "$GITHUB_REPOSITORY" "${create_args[@]}"
           fi
