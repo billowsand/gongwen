@@ -7,9 +7,9 @@ use crate::app::visible_rows;
 use crate::draft_page::{
     DRAG_STEP_MAX, DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH,
     OFFICIAL_PAGE_HEIGHT, OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH,
-    PreviewMode, continue_ordered_list, editor_cursor, editor_selection, is_table_separator_line,
-    is_table_source_line, jump_to_source, markdown_heading_level, markdown_matches_mode,
-    select_source_range, table_column_count,
+    PreviewMode, PreviewScroll, continue_ordered_list, editor_cursor, editor_selection,
+    is_table_separator_line, is_table_source_line, jump_to_source, markdown_heading_level,
+    markdown_matches_mode, select_source_range, table_column_count,
 };
 use crate::export;
 use crate::highlight::ordered_list_lines;
@@ -337,7 +337,13 @@ impl DraftPage<'_> {
             .show(ui, |ui| match self.doc.preview_mode {
                 PreviewMode::Source => self.markdown_editor(ui),
                 PreviewMode::Hybrid => self.markdown_hybrid_editor(ui),
-                PreviewMode::Rendered => self.markdown_render(ui),
+                PreviewMode::Rendered => {
+                    let region = ui.max_rect();
+                    self.markdown_render(ui);
+                    // 必须排在预览之后：标题的屏幕位置是回查预览本帧注册的
+                    // widget 得来的，先画就只能拿到上一帧的版面。
+                    self.navigator_overlay(ui, region);
+                }
                 PreviewMode::VersionDiff => self.version_diff_mode_ui(ui),
                 PreviewMode::Split => {
                     egui::Panel::left("preview_split")
@@ -350,7 +356,11 @@ impl DraftPage<'_> {
                         .show(ui, |ui| self.markdown_editor(ui));
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
-                        .show(ui, |ui| self.markdown_render(ui));
+                        .show(ui, |ui| {
+                            let region = ui.max_rect();
+                            self.markdown_render(ui);
+                            self.navigator_overlay(ui, region);
+                        });
                 }
             });
     }
@@ -721,7 +731,7 @@ impl DraftPage<'_> {
     /// 公文版式预览。正文为空时也照排——红头、密级、文号、主送、落款这些
     /// 行文要素来自表单，填完就能先看版式。
     pub(crate) fn markdown_render(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::both()
+        let scrolled = egui::ScrollArea::both()
             .id_salt("render_scroll")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
@@ -829,6 +839,13 @@ impl DraftPage<'_> {
                 }
                 ui.add_space(12.0);
             });
+        // 右缘导航刻度要把标题的版面位置换算成刻度条上的位置，量度只有滚动区知道。
+        self.doc.preview_scroll = PreviewScroll {
+            offset_y: scrolled.state.offset.y,
+            content_height: scrolled.content_size.y,
+            viewport_top: scrolled.inner_rect.top(),
+            viewport_height: scrolled.inner_rect.height(),
+        };
     }
 
     pub(crate) fn warnings_ui(&mut self, ui: &mut egui::Ui) {

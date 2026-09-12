@@ -123,6 +123,10 @@ pub(crate) struct HeadingCounters {
     /// 最近一次 `next` 处理的行是否为正式标题（文档标题或附件正式标题），
     /// 需要按方正小标宋二号居中渲染，与预览/导出一致。
     centered_title: bool,
+    /// 最近一次 `next` 处理的行如果是带编号的标题，它折算后的公文层级。
+    /// 旧格式附件里 `#` 的个数比实际层级多一层，导航窗格的缩进按这个值算，
+    /// 才不会把附件里的「一、」画得比正文的「一、」深一层。
+    numbered_level: Option<u8>,
 }
 
 impl Default for HeadingCounters {
@@ -140,11 +144,13 @@ impl HeadingCounters {
             in_attachment: false,
             legacy_attachment: false,
             centered_title: false,
+            numbered_level: None,
         }
     }
 
     pub(crate) fn next(&mut self, line: &str) -> Option<String> {
         self.centered_title = false;
+        self.numbered_level = None;
         if let Some(section) = parse_section_marker(line) {
             self.levels = [0; 4];
             self.expecting_title = true;
@@ -185,7 +191,17 @@ impl HeadingCounters {
         } else {
             hashes
         };
-        official_heading_prefix(level as u8, &mut self.levels, &self.numbering)
+        let prefix = official_heading_prefix(level as u8, &mut self.levels, &self.numbering);
+        if prefix.is_some() {
+            self.numbered_level = Some(level as u8);
+        }
+        prefix
+    }
+
+    /// 最近一次 `next` 处理的行如果排出了编号，它在公文里的实际层级：
+    /// 2 是「一、」，3 是「（一）」，4 是「1.」，5 是「（1）」。没排出编号时为 None。
+    pub(crate) fn numbered_level(&self) -> Option<u8> {
+        self.numbered_level
     }
 
     /// 最近一次 `next` 处理的行是否为正式标题（方正小标宋二号居中渲染）。

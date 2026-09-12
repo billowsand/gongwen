@@ -25,6 +25,7 @@ mod editor;
 mod find;
 mod form;
 mod markdown;
+mod navigator;
 mod page;
 mod revise;
 mod ribbon;
@@ -43,6 +44,7 @@ pub(crate) use markdown::{
     editor_selection, is_table_separator_line, is_table_source_line, line_at_byte, line_ranges,
     markdown_heading_level, split_row, table_column_count, tidy_blank_lines, toggle_bullet,
 };
+pub(crate) use navigator::PreviewScroll;
 pub(crate) use table::{TableOp, table_grid_picker};
 // test-only names: only compiled in test builds (kept for the root test modules)
 #[cfg(test)]
@@ -371,6 +373,9 @@ pub(crate) struct DraftSession {
     pub(crate) preview_layout_scale: f32,
     /// 上一帧量到的预览可视宽度，用来判断宽度是否还在变化。
     pub(crate) preview_last_width: f32,
+    /// 公文预览滚动区上一帧的滚动位置与内容总高。右缘的导航刻度靠它把标题的
+    /// 版面位置换算成刻度条上的位置，也靠它判断当前滚到了哪一节。
+    pub(crate) preview_scroll: PreviewScroll,
     /// 在公文预览里点中的那一块：预览和源码两边都会给它铺底色。
     pub(crate) preview_anchor: Option<PreviewAnchor>,
     /// 待处理的“跳到源码”请求，编辑框下次绘制时把光标挪过去并滚动到位。
@@ -515,6 +520,7 @@ impl DraftSession {
             preview_fit_scale: 1.0,
             preview_layout_scale: 0.0,
             preview_last_width: 0.0,
+            preview_scroll: PreviewScroll::default(),
             preview_anchor: None,
             pending_source_jump: None,
             pending_source_selection: None,
@@ -1740,6 +1746,40 @@ mod split_resize_tests {
     fn percentile(values: &mut [f32], p: f32) -> f32 {
         values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         values[((values.len() as f32 - 1.0) * p) as usize]
+    }
+
+    /// 导航刻度靠回查预览注册的 widget id 拿标题的版面位置：id 在
+    /// `preview::layout` 那边构造，在 `navigator` 这边重建。两边一旦对不上，
+    /// 导航不会报错，只会**静默**退化成按源码字节估位——刻度看着还在，位置却是错的。
+    /// 这条测试把两边钉在一起，同时确认滚动区外的标题也照样注册了矩形
+    /// （否则长稿里大半标题量不到，整篇都会掉进估位分支）。
+    #[test]
+    fn every_heading_is_locatable_through_the_preview_widget_ids() {
+        let mut harness = Harness::new();
+        // egui 要一两帧才量准滚动区。
+        harness.frame(900.0);
+        harness.frame(900.0);
+        let entries =
+            navigator::collect_entries(&harness.doc.generated_markdown, &harness.config.numbering);
+        let headings = entries
+            .iter()
+            .filter(|entry| entry.level >= 2)
+            .collect::<Vec<_>>();
+        assert!(headings.len() >= 20, "样稿应当有足够多的标题用来判断");
+
+        let tops = headings
+            .iter()
+            .map(|entry| {
+                navigator::heading_top(&harness.ctx, &entry.line)
+                    .unwrap_or_else(|| panic!("标题「{}」没能按 id 查回矩形", entry.text))
+            })
+            .collect::<Vec<_>>();
+        // 位置还要顺着正文往下走：第 n 节必须排在第 n+1 节上面，
+        // 否则刻度的疏密就不是各节的真实长短。
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "标题的版面位置应当自上而下单调递增，实测 {tops:?}"
+        );
     }
 
     /// 拖动分隔条的过程中，版面缩放必须冻结在上一次落定的值上——
