@@ -35,7 +35,7 @@ regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # Linux 文件选择器后端由上面的 crate feature 选择。不能同时把两种后端写在这里，
 # 因为 rfd 在启用 gtk3 时会固定选择 GTK3，而不会在运行时退回 portal。
-rfd = { version = "0.15", default-features = false }
+rfd = { version = "0.16", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rust_xlsxwriter = "0.79"
 serde = { version = "1.0", features = ["derive"] }
