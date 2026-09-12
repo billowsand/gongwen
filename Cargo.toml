@@ -21,7 +21,7 @@ linux-portal-dialogs = ["rfd/async-std", "rfd/xdg-portal"]
 [dependencies]
 anydoc = "0.1.7"
 anyhow = "1.0"
-calamine = "0.30"
+calamine = "0.36"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 docx-rs = "0.4.22"
