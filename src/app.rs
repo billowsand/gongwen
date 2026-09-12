@@ -7,6 +7,8 @@
 use crate::draft_page::{DocKey, DraftSession, ExportLinks};
 use crate::knowledge;
 use crate::knowledge::KnowledgeStore;
+use crate::lexicon;
+use crate::lexicon::LexiconStore;
 use crate::manuscript;
 use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptRow, ManuscriptStore};
 use crate::models::{AppConfig, DraftInput, TemplateKind, VocabularySetupStatus};
@@ -29,6 +31,7 @@ mod ai_prompts;
 mod ai_workbench;
 mod chrome;
 mod jobs;
+mod lexicon_jobs;
 mod manuscript_ui;
 mod outline_ui;
 mod proofread_ui;
@@ -43,6 +46,7 @@ mod widgets;
 pub(crate) use ai_prompts::{AiPromptDraft, AiPromptPicker};
 pub(crate) use ai_workbench::AiWorkbench;
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
+pub(crate) use lexicon_jobs::LexiconJob;
 pub(crate) use manuscript_ui::{ArchivePending, ImportPreview, PdfExportDialog, ZipPasswordDialog};
 pub(crate) use proofread_ui::ProofreadPageState;
 pub(crate) use session::{DraftAction, ExitPrompt};
@@ -250,6 +254,29 @@ pub struct GongwenApp {
     pub(crate) knowledge_embed_models: Vec<String>,
     /// 知识库后台任务在跑（索引/检索测试）。
     pub(crate) knowledge_busy: bool,
+    /// 公文词表（与稿件库同一文件，独立连接）。打开失败不阻塞启动。
+    pub(crate) lexicon_store: Option<LexiconStore>,
+    pub(crate) lexicon_error: Option<String>,
+    pub(crate) lexicon_stats: lexicon::LexiconStats,
+    /// 当前过滤条件下的词条；列表页直接渲染它。
+    pub(crate) lexicon_terms: Vec<lexicon::LexiconTerm>,
+    pub(crate) lexicon_filter: lexicon::TermFilter,
+    /// 任何增删改后置 true，强制下次重查。
+    pub(crate) lexicon_dirty: bool,
+    pub(crate) lexicon_busy: bool,
+    pub(crate) lexicon_scan_options: lexicon::scan::ScanOptions,
+    /// 扫描进度：(done, total, 当前标题)。
+    pub(crate) lexicon_scan_progress: Option<(usize, usize, String)>,
+    pub(crate) lexicon_scan_result: Option<String>,
+    pub(crate) lexicon_export: lexicon::export::ExportOptions,
+    /// 导出预览的缓存：算一次要给每个词出码，不能每帧重算。
+    /// 键是算这份预览时用的口径，口径一变就重算。
+    pub(crate) lexicon_preview: Option<(lexicon::export::ExportOptions, LexiconPreview)>,
+    pub(crate) lexicon_export_result: Option<String>,
+    /// 手工加词输入框。
+    pub(crate) lexicon_new_term: String,
+    /// 「清空词表」的二次确认。
+    pub(crate) lexicon_clear_confirm: bool,
     /// 外部 md 导入对话框：待导入的文件路径与所选文种。
     pub(crate) knowledge_import: Option<KnowledgeImportDraft>,
     /// 探测到的 embedding / rerank 端点模型列表；空表示尚未探测，退回手填。
@@ -275,6 +302,20 @@ pub struct GongwenApp {
     last_content_tab: Option<TabRef>,
     /// 设置页左侧主菜单当前选中的分区。纯当次会话状态，不进配置。
     settings_section: SettingsSection,
+}
+
+/// 导出面板要显示的那几个数，连同各词源占比。整份码表正文不留在这里——
+/// 预览只需要统计量，真正导出时再重新生成一次。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LexiconPreview {
+    pub(crate) written: usize,
+    pub(crate) truncated: usize,
+    pub(crate) conflict_codes: usize,
+    pub(crate) conflict_terms: usize,
+    pub(crate) saved_keys: i64,
+    pub(crate) failed: Vec<String>,
+    pub(crate) summary: String,
+    pub(crate) origins: String,
 }
 
 /// 知识库文档预览弹窗的状态。
@@ -342,6 +383,19 @@ impl GongwenApp {
                 Err(error) => (None, Some(format!("知识库打开失败：{error:#}"))),
             },
             Err(error) => (None, Some(format!("知识库路径获取失败：{error:#}"))),
+        };
+        // 公文词表与稿件库、知识库同一文件、独立连接；打开失败同样不阻塞启动。
+        let (lexicon_store, lexicon_error) = match storage::manuscript_db_path() {
+            Ok(path) => match LexiconStore::open(&path) {
+                Ok(store) => {
+                    // 启动就把已接受的词挂成 jieba 用户词典：RAG 关键词召回与
+                    // 标题断行都靠它认识本单位专名，晚挂一步这两处这一轮就切错。
+                    lexicon::segmenter::install_from_store(&store);
+                    (Some(store), None)
+                }
+                Err(error) => (None, Some(format!("公文词表打开失败：{error:#}"))),
+            },
+            Err(error) => (None, Some(format!("公文词表路径获取失败：{error:#}"))),
         };
         let mut app = Self {
             config,
@@ -428,6 +482,21 @@ impl GongwenApp {
             knowledge_embed_models: Vec::new(),
             knowledge_busy: false,
             knowledge_import: None,
+            lexicon_store,
+            lexicon_error,
+            lexicon_stats: lexicon::LexiconStats::default(),
+            lexicon_terms: Vec::new(),
+            lexicon_filter: lexicon::TermFilter::default(),
+            lexicon_dirty: true,
+            lexicon_busy: false,
+            lexicon_scan_options: lexicon::scan::ScanOptions::default(),
+            lexicon_scan_progress: None,
+            lexicon_scan_result: None,
+            lexicon_export: lexicon::export::ExportOptions::default(),
+            lexicon_preview: None,
+            lexicon_export_result: None,
+            lexicon_new_term: String::new(),
+            lexicon_clear_confirm: false,
             embedding_models: Vec::new(),
             rerank_models: Vec::new(),
             system_fonts: Vec::new(),
@@ -535,6 +604,9 @@ impl eframe::App for GongwenApp {
                 TabRef::Doc(_) => self.draft_page().create_ui(&mut content_ui),
                 TabRef::Page(NavPage::Vocabulary) => self.vocabulary_ui(&mut content_ui),
                 TabRef::Page(NavPage::Proofread) => self.proofread_ui(&mut content_ui),
+                TabRef::Page(NavPage::Lexicon) => {
+                    crate::lexicon_ui::lexicon_ui(self, &mut content_ui)
+                }
                 TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(&mut content_ui),
                 TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(&mut content_ui),
                 TabRef::Page(NavPage::Knowledge) => {

@@ -13,6 +13,8 @@ mod ime;
 mod knowledge;
 mod knowledge_ui;
 mod last_char_orphan;
+mod lexicon;
+mod lexicon_ui;
 mod linux_desktop;
 mod lmstudio;
 mod macos_window;

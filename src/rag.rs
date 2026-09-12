@@ -4,19 +4,16 @@
 //! 拆成几百字的块；向量用小端 f32 字节流存进 SQLite；检索时用自研余弦做
 //! 向量召回、用 jieba 预分词配合 FTS5 做关键词召回，两路 RRF 融合。
 
+use crate::lexicon::segmenter;
 use crate::models::{RagConfig, TemplateKind};
-use std::sync::OnceLock;
-
-static JIEBA: OnceLock<jieba_rs::Jieba> = OnceLock::new();
-
-fn jieba() -> &'static jieba_rs::Jieba {
-    JIEBA.get_or_init(jieba_rs::Jieba::new)
-}
 
 /// 用 jieba 把文本切成空格分隔的词串，供 FTS5 索引/查询。
 /// FTS5 默认 unicode61 分词器会把整段中文当作一个词，必须先分词才能按词命中。
+///
+/// 分词器由 `lexicon::segmenter` 统一提供：挂上公文词表当用户词典后，
+/// 「新舆处」这类本单位专名不再被切碎，关键词召回才命得中。
 pub fn tokenize(text: &str) -> String {
-    jieba().cut(text, true).join(" ")
+    segmenter::tokenize(text)
 }
 
 /// 切块参数。

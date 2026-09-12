@@ -89,6 +89,16 @@ POSSIBILITY OF SUCH DAMAGE.
 Hayro also embeds a compact CMYK color profile from Compact ICC Profiles,
 made available under CC0-1.0.
 
+## flype-word (小鹤双拼编码器)
+
+`src/lexicon/flypy.rs` is adapted from the flype-word project by the same
+author, distributed under the MIT License. Only the encoder (the Xiaohe
+double-pinyin key table and the four-code word rules) is copied; the
+segmentation, revision and CLI/GUI layers of that project are not used.
+
+- Project: https://github.com/billowsand/flype-word
+- License: MIT
+
 ## Lucide Icons
 
 The SVG interface icons under `assets/icons/` are from Lucide 1.28.0.
@@ -124,3 +134,12 @@ Setup source repository, maintained by Zhenghan Yang (Kira) and distributed
 with the Inno Setup project.
 
 - Source: https://github.com/jrsoftware/issrc
+
+## pinyin (Rust crate)
+
+The application uses the `pinyin` crate to look up the default reading of a
+Chinese character when encoding lexicon entries for the input method. It is
+distributed under the MIT License.
+
+- Project: https://github.com/mozillazg/rust-pinyin
+- License: MIT

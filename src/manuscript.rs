@@ -371,6 +371,12 @@ impl ManuscriptStore {
         if version < 5 {
             self.conn.execute_batch("PRAGMA user_version = 5")?;
         }
+        // v6：公文词表（词条 / 扫描记账 / 来源级词频明细）。同样幂等建表，
+        // 与知识库一致地交给 ensure_lexicon_schema，不再单开档位。
+        crate::lexicon::ensure_lexicon_schema(&self.conn)?;
+        if version < 6 {
+            self.conn.execute_batch("PRAGMA user_version = 6")?;
+        }
         Ok(())
     }
 
