@@ -54,8 +54,202 @@ pub(crate) fn single_line(text: &str, format: TextFormat) -> LayoutJob {
     job
 }
 
+/// 排版一段文字：先按中文避头尾（禁则）算好断点，再交给 egui 逐行排。
+///
+/// epaint 自带的断行只认它内置的那串「不能出现在行首」的字符
+/// （`is_cjk_break_allowed`）：全角标点（`，` `；` `：` `？` `！` `）` 等）一个都
+/// 不在列，而且那串字符只在前一个字是 CJK 时才被检查——数字、西文后面的标点
+/// 根本不判，于是断行会把标点甩到下一行行首。中文公文的禁则比那串字符宽得多，
+/// 这里先按自然宽度量一遍，用完整的避头尾规则重算断点，插成硬换行后再交给 epaint。
+///
+/// 换行符不产生字形，因此返回的 galley 逐行累积的 `glyphs.len()` 仍等于原文本的
+/// 字符下标——`justified_rows` 与各处点击命中都依赖这个不变量切片。
 pub(crate) fn layout(ui: &egui::Ui, job: LayoutJob) -> Arc<egui::Galley> {
+    let job = kinsoku_wrap(ui, job);
     ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
+}
+
+/// 按避头尾规则把排版任务拆成硬换行；不需要重排时原样返回。
+fn kinsoku_wrap(ui: &egui::Ui, job: LayoutJob) -> LayoutJob {
+    let width = job.wrap.max_width;
+    if !width.is_finite() || job.text.is_empty() || job.sections.is_empty() {
+        return job;
+    }
+    // 不限宽排一遍：每个自然段摊成一行，字形位置就是自然宽度。
+    let mut flat = job.clone();
+    flat.wrap.max_width = f32::INFINITY;
+    let measured = ui.ctx().fonts_mut(|fonts| fonts.layout_job(flat));
+
+    let mut breaks = Vec::new();
+    let mut rows = measured.rows.iter();
+    let mut char_start = 0usize;
+    // 不限宽时 galley 的行与 `\n` 切出的自然段一一对应。
+    for paragraph in job.text.split('\n') {
+        let Some(row) = rows.next() else { break };
+        let count = paragraph.chars().count();
+        if count > 0 {
+            for line in kinsoku_lines(&row.glyphs, width) {
+                if line.end < count {
+                    breaks.push(char_start + line.end);
+                }
+            }
+        }
+        char_start += count + 1;
+    }
+    if breaks.is_empty() {
+        return job;
+    }
+    hard_wrapped_job(&job, &breaks)
+}
+
+/// 取出字形流做断行：`(字符, 行内左缘, 前进宽度)`。
+fn kinsoku_lines(glyphs: &[egui::epaint::text::Glyph], width: f32) -> Vec<Range<usize>> {
+    let shaped = glyphs
+        .iter()
+        .map(|glyph| (glyph.chr, glyph.pos.x, glyph.advance_width))
+        .collect::<Vec<_>>();
+    break_lines(&shaped, width)
+}
+
+/// 避头尾断行的纯逻辑：给定逐字（字符 + 左缘 + 前进宽度）与行宽，返回每行的字符
+/// 区间。贪心填满一行后，从行尾往前找最近的合法断点；避头点会被连同前一个字一起
+/// 挤到下一行（追出），避尾点则自己挪到下一行。
+fn break_lines(shaped: &[(char, f32, f32)], width: f32) -> Vec<Range<usize>> {
+    let count = shaped.len();
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    while start < count {
+        let line_start = shaped[start].1;
+        // `end` 是最后一个还能排进这一行的字的**下一个**下标。
+        let mut end = start;
+        while end < count && shaped[end].1 + shaped[end].2 - line_start <= width {
+            end += 1;
+        }
+        if end == start {
+            // 一个字的宽度就超过整行（畸形输入）：独占一行，保证循环前进。
+            lines.push(start..start + 1);
+            start += 1;
+            continue;
+        }
+        if end >= count {
+            lines.push(start..count);
+            break;
+        }
+        // 从行尾往前找最近的合法断点。
+        let mut break_at = None;
+        let mut candidate = end;
+        while candidate > start {
+            if can_break_between(shaped[candidate - 1].0, shaped[candidate].0) {
+                break_at = Some(candidate);
+                break;
+            }
+            candidate -= 1;
+        }
+        let break_at = match break_at {
+            Some(at) => at,
+            None => {
+                // 整段都找不到断点（长西文串、长数字）：向后让这一行溢出到下一个
+                // 断点，宁可放宽一点也不把单词、数字拦腰切开。
+                let mut at = end + 1;
+                while at < count && !can_break_between(shaped[at - 1].0, shaped[at].0) {
+                    at += 1;
+                }
+                at.min(count)
+            }
+        };
+        lines.push(start..break_at);
+        start = break_at;
+    }
+    lines
+}
+
+/// 行首禁则：这些字符不允许出现在一行的开头（后括号、后引号与句末点号）。
+pub(super) fn is_no_line_start(ch: char) -> bool {
+    const NO_START: &str =
+        r#"、。，．：；？！,.:;?!%)]}）］｝〕〉》」』】〗〙〟｠»”’"'·ー々〻～〜–—―‐…‥%‰℃°"#;
+    NO_START.contains(ch)
+}
+
+/// 行尾禁则：这些字符不允许出现在一行的末尾（前括号与前引号）。
+pub(super) fn is_no_line_end(ch: char) -> bool {
+    const NO_END: &str = "([{（［｛〔〈《「『【〖〘｟«“‘";
+    NO_END.contains(ch)
+}
+
+/// 两个相邻的字之间能不能断行：空白处随便断；避头尾拦住；西文单词与数字串内部不断。
+fn can_break_between(before: char, after: char) -> bool {
+    if before.is_whitespace() || after.is_whitespace() {
+        return true;
+    }
+    if is_no_line_end(before) || is_no_line_start(after) {
+        return false;
+    }
+    !(before.is_ascii_alphanumeric() && after.is_ascii_alphanumeric())
+}
+
+/// 把断点插成硬换行，得到逐行排版的新任务。
+///
+/// 换行符归到它**后面那个字所属的 section**：epaint 在 section 文本里按 `\n`
+/// 分段，段内后续字符沿用该 section 的字型；把 `\n` 塞进前一段，新一行的字型
+/// 就会错成上一行的。
+fn hard_wrapped_job(job: &LayoutJob, breaks: &[usize]) -> LayoutJob {
+    // (字符所属 section 下标, 是否是原 section 的首字符)
+    let mut owners: Vec<(usize, bool)> =
+        Vec::with_capacity(job.text.chars().count() + breaks.len());
+    let mut text = String::with_capacity(job.text.len() + breaks.len());
+    let mut section_index = 0usize;
+    let mut next_break = 0usize;
+    for (char_index, (byte, ch)) in job.text.char_indices().enumerate() {
+        while section_index + 1 < job.sections.len()
+            && job.sections[section_index].byte_range.end.0 <= byte
+        {
+            section_index += 1;
+        }
+        if breaks.get(next_break) == Some(&char_index) {
+            next_break += 1;
+            owners.push((section_index, false));
+            text.push('\n');
+        }
+        let first_of_section = job.sections[section_index].byte_range.start.0 == byte;
+        owners.push((section_index, first_of_section));
+        text.push(ch);
+    }
+    if owners.is_empty() {
+        return job.clone();
+    }
+
+    let mut sections = Vec::with_capacity(job.sections.len() + breaks.len());
+    let mut piece_owner = owners[0];
+    let mut piece_start = 0usize;
+    for (index, (byte, _)) in text.char_indices().enumerate() {
+        if owners[index].0 != piece_owner.0 {
+            sections.push(wrapped_section(job, piece_owner, piece_start..byte));
+            piece_owner = owners[index];
+            piece_start = byte;
+        }
+    }
+    sections.push(wrapped_section(job, piece_owner, piece_start..text.len()));
+
+    let mut wrapped = job.clone();
+    wrapped.text = text;
+    wrapped.sections = sections;
+    // 断点已经全部落成硬换行，宽度限制只会把某行再切碎，必须放开。
+    wrapped.wrap.max_width = f32::INFINITY;
+    wrapped
+}
+
+/// 硬换行后的 section 片段：字型照旧，前导空隙只跟着原 section 的首字符走。
+fn wrapped_section(
+    job: &LayoutJob,
+    owner: (usize, bool),
+    range: Range<usize>,
+) -> egui::text::LayoutSection {
+    let source = &job.sections[owner.0];
+    egui::text::LayoutSection {
+        leading_space: if owner.1 { source.leading_space } else { 0.0 },
+        byte_range: egui::text::ByteIndex(range.start)..egui::text::ByteIndex(range.end),
+        format: source.format.clone(),
+    }
 }
 
 pub(crate) fn draw(ui: &mut egui::Ui, job: LayoutJob) {
@@ -517,7 +711,7 @@ pub(crate) fn table_block(
                     ColumnAlignment::Left => Align::LEFT,
                 };
                 job.append(&text, 0.0, text_format(font.clone(), line));
-                let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
+                let galley = layout(ui, job);
                 (galley, padding, align)
             })
             .collect::<Vec<_>>();
@@ -656,4 +850,115 @@ pub(crate) fn sheet(
                 });
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把 `(字符, 宽度)` 摊成断行器要的 `(字符, 左缘, 宽度)`。
+    fn shaped(chars: &[(char, f32)]) -> Vec<(char, f32, f32)> {
+        let mut x = 0.0f32;
+        chars
+            .iter()
+            .map(|&(ch, width)| {
+                let glyph = (ch, x, width);
+                x += width;
+                glyph
+            })
+            .collect()
+    }
+
+    fn hanzi(text: &str) -> Vec<(char, f32)> {
+        text.chars().map(|ch| (ch, 1.0)).collect()
+    }
+
+    #[test]
+    fn fullwidth_punctuation_is_pushed_off_the_line_start() {
+        // 行宽 4 字。`，` 原本会落到第二行行首，必须连同前一个字一起挤过去。
+        let glyphs = shaped(&hanzi("甲乙丙丁，戊己庚辛"));
+        assert_eq!(break_lines(&glyphs, 4.0), vec![0..3, 3..7, 7..9]);
+    }
+
+    #[test]
+    fn punctuation_after_digits_pushes_the_number_down() {
+        // `，` 前面是数字：数字串不能切开，整串连标点一起下移。
+        let mut chars = hanzi("甲乙丙");
+        chars.push(('1', 0.5));
+        chars.push(('2', 0.5));
+        chars.push(('，', 1.0));
+        chars.extend(hanzi("丁戊己庚"));
+        let glyphs = shaped(&chars);
+        assert_eq!(break_lines(&glyphs, 4.0), vec![0..3, 3..8, 8..10]);
+    }
+
+    #[test]
+    fn opening_bracket_never_ends_a_line() {
+        let glyphs = shaped(&hanzi("甲乙丙（丁戊己"));
+        assert_eq!(break_lines(&glyphs, 4.0), vec![0..3, 3..7]);
+    }
+
+    #[test]
+    fn latin_words_are_not_split() {
+        let chars = [
+            ('a', 0.5),
+            ('b', 0.5),
+            ('c', 0.5),
+            (' ', 0.5),
+            ('d', 0.5),
+            ('e', 0.5),
+            ('f', 0.5),
+        ];
+        let glyphs = shaped(&chars);
+        assert_eq!(break_lines(&glyphs, 1.6).first(), Some(&(0..3)));
+    }
+
+    #[test]
+    fn forbidden_characters_are_classified() {
+        for ch in [
+            '，', '。', '、', '；', '：', '？', '！', '）', '】', '》', '」', '”', '’',
+        ] {
+            assert!(is_no_line_start(ch), "“{ch}”不能起行");
+        }
+        for ch in ['（', '【', '《', '「', '“', '‘'] {
+            assert!(is_no_line_end(ch), "“{ch}”不能收行");
+        }
+        // 开放类标点可以起行，收尾类标点也可以收行。
+        assert!(!is_no_line_start('（'));
+        assert!(!is_no_line_end('，'));
+    }
+
+    #[test]
+    fn every_row_of_a_paragraph_obeys_kinsoku() {
+        let text = "为进一步推进服务事项标准化、规范化、便利化，请各单位于2026年9月20日前报送材料（含附件1、附件2），逾期不再受理；材料编号ABC123，务必核对。";
+        let chars = text
+            .chars()
+            .map(|ch| (ch, if ch.is_ascii_alphanumeric() { 0.5 } else { 1.0 }))
+            .collect::<Vec<_>>();
+        for width in [2.0, 3.0, 4.5, 7.0, 10.0, 13.5] {
+            let glyphs = shaped(&chars);
+            let lines = break_lines(&glyphs, width);
+            assert_eq!(
+                lines.first().map(|line| line.start),
+                Some(0),
+                "行宽 {width}"
+            );
+            assert_eq!(lines.last().map(|line| line.end), Some(glyphs.len()));
+            for pair in lines.windows(2) {
+                assert_eq!(pair[0].end, pair[1].start, "行区间必须首尾相接");
+            }
+            for line in &lines {
+                assert!(
+                    !is_no_line_start(glyphs[line.start].0),
+                    "行宽 {width} 时“{}”被排到了行首：{lines:?}",
+                    glyphs[line.start].0
+                );
+                assert!(
+                    !is_no_line_end(glyphs[line.end - 1].0),
+                    "行宽 {width} 时“{}”被排到了行尾：{lines:?}",
+                    glyphs[line.end - 1].0
+                );
+            }
+        }
+    }
 }

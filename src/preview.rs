@@ -154,6 +154,7 @@ impl Metrics {
 
 #[cfg(test)]
 mod tests {
+    use super::layout::{is_no_line_end, is_no_line_start};
     use super::*;
     use crate::export;
     use crate::export::MarkdownBlock;
@@ -640,6 +641,51 @@ mod tests {
             // 末行保持自然宽度，不被拉开。
             let last = rows.last().unwrap().rows[0].rect().width();
             assert!(last < metrics.content - 1.0, "末行不应撑满：{last}");
+        });
+    }
+
+    /// 真实字体下的避头尾：排出来的每一行都不能以收尾类标点起头、以开放类标点收尾。
+    ///
+    /// epaint 自带的断行认不出全角标点，`，`/`；`/`：`/`）` 会被甩到行首。这里用
+    /// 六种前置字数为标点制造不同的落点，只要破行规则一松就会被抓住。
+    #[test]
+    fn preview_layout_never_puts_punctuation_at_a_row_edge() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let body = "为进一步推进服务事项标准化、规范化、便利化，请各单位于9月20日前报送材料（含附件1、附件2），逾期不再受理；材料编号ABC123，务必核对。";
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+            for pad in 0..6 {
+                let text = format!("{}{body}{body}", "汉".repeat(pad));
+                let mut job = job(metrics.content);
+                job.append(
+                    &indent(INDENT_CHARS),
+                    0.0,
+                    text_format(normal.clone(), metrics.line),
+                );
+                append_inline(&mut job, &metrics, &text, &normal);
+                let base = layout(ui, job);
+                assert!(base.rows.len() >= 4, "样例应折成多行");
+                for (index, row) in base.rows.iter().enumerate() {
+                    let Some(first) = row.glyphs.first() else {
+                        continue;
+                    };
+                    assert!(
+                        !is_no_line_start(first.chr),
+                        "第 {index} 行以“{}”起头（前置 {pad} 字）",
+                        first.chr
+                    );
+                    let Some(last) = row.glyphs.last() else {
+                        continue;
+                    };
+                    assert!(
+                        !is_no_line_end(last.chr),
+                        "第 {index} 行以“{}”收尾（前置 {pad} 字）",
+                        last.chr
+                    );
+                }
+            }
         });
     }
 
