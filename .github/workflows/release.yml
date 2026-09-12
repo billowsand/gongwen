@@ -25,7 +25,7 @@ jobs:
     name: Build Windows x64
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -120,7 +120,7 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
@@ -219,7 +219,7 @@ jobs:
     needs: build-linux-arm64
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download GLIBC 2.28 binary
         uses: actions/download-artifact@v4
@@ -320,7 +320,7 @@ jobs:
             libxcb1-dev \
             libxkbcommon-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
@@ -414,7 +414,7 @@ jobs:
     needs: build-linux-amd64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download GLIBC 2.28 binary
         uses: actions/download-artifact@v4
@@ -481,7 +481,7 @@ jobs:
     name: Build macOS ARM64
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -536,7 +536,7 @@ jobs:
     needs: [build-windows, package-linux-arm64, package-linux-amd64, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v4
         with:
