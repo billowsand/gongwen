@@ -1396,6 +1396,9 @@ pub struct AppConfig {
     pub allow_free_text: bool,
     /// 在 Markdown 源码与实时排版编辑器左侧显示源码行号。
     pub show_editor_line_numbers: bool,
+    /// 在公文预览与对照模式的右缘显示导航刻度（悬停展开成标题列表）。
+    /// 默认开：刻度只占右缘十几个点，且不吃点击。关掉后右缘完全干净。
+    pub show_preview_navigator: bool,
     /// Markdown 源码编辑器的字号（px）。可用 Ctrl+滚轮或 Ctrl± 调整。
     pub editor_font_size: f32,
     /// AI 优化提示词库。首次载入为空时补齐预置项，见 `ensure_ai_prompts`。
@@ -1440,6 +1443,7 @@ impl Default for AppConfig {
             security_rules: SecurityRules::default(),
             allow_free_text: true,
             show_editor_line_numbers: true,
+            show_preview_navigator: true,
             editor_font_size: 14.0,
             ai_prompts: vec![],
             last_ai_prompt: 0,

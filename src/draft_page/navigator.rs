@@ -14,6 +14,10 @@
 //! 编号一律来自 [`export::HeadingCounters`]，与 DOCX/LaTeX 导出和版式预览共用同一套
 //! 计数器。导航里写「三、」而预览里排出「四、」是最难查的那类 bug，共用计数器
 //! 从根上排除它。
+//!
+//! 整块可以关掉：「视图 → 导航」或设置页里那一项，对应
+//! `AppConfig::show_preview_navigator`。默认开——刻度只占右缘十几个点，
+//! 又不吃点击，代价小到不值得让人先去找开关；但右缘要绝对干净时关得掉。
 
 use crate::draft_page::{DraftPage, PreviewAnchor};
 use crate::export;
@@ -207,6 +211,9 @@ impl DraftPage<'_> {
     /// 在 `region` 的右缘画导航刻度。必须在版式预览画完之后调用——
     /// 标题的屏幕位置是回查预览本帧注册的 widget 得来的。
     pub(crate) fn navigator_overlay(&mut self, ui: &mut egui::Ui, region: egui::Rect) {
+        if !self.config.show_preview_navigator {
+            return;
+        }
         let entries = collect_entries(&self.doc.generated_markdown, &self.config.numbering);
         // 只有一个文档标题不值得画刻度：全文就一处，还在最顶上。
         if !entries.iter().any(|entry| entry.level >= 2) {

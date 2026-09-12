@@ -1298,6 +1298,13 @@ impl GongwenApp {
             "Markdown 源码与实时排版模式显示行号",
         )
         .on_hover_text("行号只用于定位，不会写入稿件或导出文件");
+        ui.checkbox(
+            &mut self.config.show_preview_navigator,
+            "公文预览与对照模式显示右缘导航刻度",
+        )
+        .on_hover_text(
+            "刻度一条一个标题，当前所在那条高亮；鼠标靠近右缘展开成标题列表，点一条跳到那一节",
+        );
         ui.add_space(4.0);
         ui.weak("编辑器的字体与字号在「字体」一节设置。");
     }

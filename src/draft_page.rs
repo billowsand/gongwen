@@ -1741,11 +1741,80 @@ mod split_resize_tests {
                 .any(|(_, delta)| delta.pos.is_none() && delta.image.width() > 1000);
             (elapsed, rebuilt)
         }
+
+        /// 跑若干帧完整的审校区（含右缘导航），鼠标一直停在 `pointer`。
+        /// 展开是带动画的，一帧看不出结果，所以要把时间往前推够。
+        fn preview_frames(&mut self, pointer: egui::Pos2, frames: usize) {
+            for index in 0..frames {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 900.0),
+                    )),
+                    time: Some(index as f64 / 60.0),
+                    predicted_dt: 1.0 / 60.0,
+                    events: vec![egui::Event::PointerMoved(pointer)],
+                    ..Default::default()
+                };
+                let _ = self.ctx.clone().run_ui(raw, |ui| {
+                    let mut page = DraftPage {
+                        doc: &mut self.doc,
+                        config: &mut self.config,
+                        store: None,
+                        sender: &self.sender,
+                        status: &mut self.status,
+                        version_switch: &mut self.version_switch,
+                        revert_confirm: &mut self.revert_confirm,
+                        actions: &mut self.actions,
+                        export_links: &mut self.export_links,
+                        metrics: &mut self.metrics,
+                    };
+                    page.preview_ui(ui);
+                });
+            }
+        }
+
+        /// 右缘导航的展开面板这一帧是否登记过。
+        fn navigator_panel_shown(&self) -> bool {
+            self.ctx
+                .memory(|memory| memory.area_rect(egui::Id::new("gw_nav_panel")))
+                .is_some()
+        }
     }
 
     fn percentile(values: &mut [f32], p: f32) -> f32 {
         values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         values[((values.len() as f32 - 1.0) * p) as usize]
+    }
+
+    /// 鼠标靠到公文预览右缘，导航就展开成标题列表。
+    #[test]
+    fn hovering_the_right_edge_opens_the_navigator() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        assert!(
+            harness.config.show_preview_navigator,
+            "导航默认应当是开着的"
+        );
+        harness.preview_frames(egui::pos2(885.0, 400.0), 16);
+        assert!(
+            harness.navigator_panel_shown(),
+            "鼠标停在右缘应当展开导航面板"
+        );
+    }
+
+    /// 「视图 → 导航」关掉之后，右缘就该彻底安静：同样把鼠标停在右缘，
+    /// 面板一次也不能冒出来。关不掉的开关等于没有这个开关。
+    #[test]
+    fn turning_the_navigator_off_keeps_the_right_edge_quiet() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        harness.config.show_preview_navigator = false;
+        harness.preview_frames(egui::pos2(885.0, 400.0), 16);
+        assert!(
+            !harness.navigator_panel_shown(),
+            "导航关掉后，鼠标停在右缘也不该展开面板"
+        );
     }
 
     /// 导航刻度靠回查预览注册的 widget id 拿标题的版面位置：id 在

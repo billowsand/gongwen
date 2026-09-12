@@ -878,6 +878,12 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     );
     field(
         &mut out,
+        "预览显示导航刻度",
+        yes_no(a.show_preview_navigator),
+        yes_no(b.show_preview_navigator),
+    );
+    field(
+        &mut out,
         "秘密级上限（年）",
         a.security_rules.secret_max_years.to_string(),
         b.security_rules.secret_max_years.to_string(),

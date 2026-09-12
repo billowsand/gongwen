@@ -257,6 +257,7 @@ mod tests {
         );
         assert!(config.export.markdown);
         assert!(config.show_editor_line_numbers);
+        assert!(config.show_preview_navigator);
         assert_eq!(config.security_rules.secret_max_years, 10);
         assert!(!config.auto_export);
         assert!(!config.profile(TemplateKind::OfficialLetter).duplex_printing);

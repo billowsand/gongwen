@@ -952,6 +952,24 @@ impl DraftPage<'_> {
             self.config.show_editor_line_numbers = !line_numbers;
             self.persist_ribbon();
         }
+        // 导航刻度只在这两种模式下画得出来，别的模式里按钮灰掉——
+        // 否则点了没反应，用户只能靠猜。
+        let navigable = matches!(
+            self.doc.preview_mode,
+            PreviewMode::Rendered | PreviewMode::Split
+        );
+        let navigator = self.config.show_preview_navigator;
+        if ui
+            .add_enabled(
+                navigable,
+                theme::icon_text_button(theme::Icon::List, "导航").selected(navigator),
+            )
+            .on_hover_text("公文预览与对照模式的右缘显示导航刻度；鼠标靠近右缘展开标题列表")
+            .clicked()
+        {
+            self.config.show_preview_navigator = !navigator;
+            self.persist_ribbon();
+        }
     }
 
     /// 输出：导出与打开成品。格式在设置页统一管理，这里另给三个只出一种
