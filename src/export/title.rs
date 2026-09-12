@@ -1,8 +1,6 @@
 //! 公文标题的排布：超出一行不多于 2 个全角字宽时**横向压缩字形**保持单行（字高不变），
 //! 超出更多时用 jieba 分词在词边界均衡换行，词不被拆到两行。
 
-use std::sync::OnceLock;
-
 /// 标题基准字号：二号（22 pt）。汉字为方形，字宽=字高=字号。
 pub const TITLE_BASE_SIZE_PT: usize = 22;
 /// 红头呈批件首页标题：旧模板使用小二号，标题仅占批示栏左侧约 10cm。
@@ -13,12 +11,6 @@ pub const RED_APPROVAL_TITLE_SIZE_PT: usize = 18;
 pub const TITLE_LINE_WIDTH_PT: f64 = 8_845.0 / 20.0;
 /// 红头呈批件首页左侧正文/标题栏宽度（约 10cm）。
 pub const RED_APPROVAL_TITLE_WIDTH_PT: f64 = 100.0 / 25.4 * 72.0;
-
-static JIEBA: OnceLock<jieba_rs::Jieba> = OnceLock::new();
-
-fn jieba() -> &'static jieba_rs::Jieba {
-    JIEBA.get_or_init(jieba_rs::Jieba::new)
-}
 
 /// 标题的排布方案。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +58,8 @@ pub fn title_plan(title: &str, chars_per_line: usize) -> TitlePlan {
     if width <= line_units + 4 {
         return TitlePlan::Compressed;
     }
-    let words = jieba().cut(title, true);
+    let words = crate::lexicon::segmenter::words(title);
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
     TitlePlan::Wrapped(wrap_words(&words, chars_per_line))
 }
 

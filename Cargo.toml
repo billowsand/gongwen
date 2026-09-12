@@ -30,7 +30,8 @@ egui = "0.35.0"
 egui_extras = { version = "0.35.0", features = ["image", "svg"] }
 hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-jieba-rs = "0.8"
+jieba-rs = "0.10"
+pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # Linux 文件选择器后端由上面的 crate feature 选择。不能同时把两种后端写在这里，

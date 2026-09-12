@@ -37,6 +37,8 @@ pub(crate) enum WorkerResult {
     Doc { key: DocKey, seq: u64, job: DocJob },
     /// 知识库任务：与具体稿件无关的全局任务（索引构建 / 检索测试）。
     Knowledge(KnowledgeJob),
+    /// 公文词表任务：语料扫描的进度与结果。
+    Lexicon(crate::app::LexiconJob),
     /// 扫描本机字体目录的结果。中文字体文件很大，扫描放在后台线程。
     SystemFonts(Vec<system_fonts::SystemFont>),
     /// 稿件 PDF 批量导出的结果。`path` 是保存的 zip 路径。
@@ -237,6 +239,7 @@ impl GongwenApp {
                 }
                 WorkerResult::Doc { key, seq, job } => self.apply_doc_job(key, seq, job),
                 WorkerResult::Knowledge(job) => self.apply_knowledge_job(job),
+                WorkerResult::Lexicon(job) => self.handle_lexicon_job(job),
                 WorkerResult::SystemFonts(fonts) => {
                     self.system_fonts_busy = false;
                     self.system_fonts_scanned = true;
