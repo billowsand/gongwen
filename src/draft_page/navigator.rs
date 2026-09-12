@@ -1,4 +1,5 @@
-//! 公文预览右缘的导航刻度：常驻一列细刻度反映全文结构，悬停某条就地浮出该节标题。
+//! 公文预览右缘的导航刻度：常驻一列细刻度反映全文结构，靠近右缘则在刻度左侧
+//! 铺开一列标题，指针最近的那条隆起放大。
 //!
 //! 为什么不做成侧栏。起草页左右已经排满——左边公文要素、右边版本与审校提示两个
 //! 抽屉，中间的版式预览还要按纸张宽度自适应缩放：中间一窄，纸上的字就跟着变小。
@@ -11,10 +12,13 @@
 //! 还回答了一个公文很在意的问题——各节长短是否均衡，某节明显长出一截通常意味着
 //! 结构没拆开。
 //!
-//! 为什么标题是就地浮出而不是另开一个大纲框。框一展开就盖掉一块版面，视线也得
-//! 离开正文横移过去。标签贴着刻度浮在左侧、与刻度同高，指针沿带子上下扫就能连着
-//! 看过各节标题，眼睛始终没离开纸面。代价是看不到全文目录的全貌，只能一条条扫——
-//! 定位用够了，通览不够。
+//! 为什么标题是就地铺开而不是另开一个大纲框。框一展开就盖掉一块版面，视线也得
+//! 离开正文横移过去。这里让标题直接贴着刻度长出来：指针最近的那条最大最亮，
+//! 往外逐档缩小变淡，像 Dock 被鼠标顶起的那一段。底衬从右往左化开、没有边框，
+//! 所以整列看着是浮在纸上，而不是压在一块板子上。
+//!
+//! 说明白一点：底衬不是真正的毛玻璃。egui 的渲染管线取不到已经画好的画面去做
+//! 高斯模糊，这里用的是渐变的半透明薄色——底下的字透得出来但不会糊。
 //!
 //! 编号一律来自 [`export::HeadingCounters`]，与 DOCX/LaTeX 导出和版式预览共用同一套
 //! 计数器。导航里写「三、」而预览里排出「四、」是最难查的那类 bug，共用计数器
@@ -33,17 +37,24 @@ use std::ops::Range;
 
 /// 刻度带宽度。它浮在纸张右侧的留白上，让开滚动条。
 const RAIL_WIDTH: f32 = 14.0;
-/// 指针离某条刻度多近才算"指着它"。刻度只有一两个点粗，要求精确压线
-/// 等于要求用户绣花，所以就近吸附；但也不能无限远，否则空白处会浮出远处的标题。
-const TICK_SNAP: f32 = 20.0;
-/// 悬停标签的字号、内边距，以及它与刻度带之间的空隙。
-const LABEL_FONT_SIZE: f32 = 12.0;
-const LABEL_PAD_X: f32 = 9.0;
-const LABEL_PAD_Y: f32 = 5.0;
-const LABEL_GAP: f32 = 8.0;
-/// 标签最宽到这里，再长就折行/截断——公文标题动辄二十几字，
-/// 整条铺出去会横穿版面。
-const LABEL_MAX_WIDTH: f32 = 300.0;
+/// 标题列连同刻度带一共占多宽。也是"靠近右缘"的判定宽度——
+/// 热区必须把标题列圈进去，否则指针往左挪到标题上就判成离开，整列当场缩回去。
+const COLUMN_WIDTH: f32 = 300.0;
+/// 标题与刻度带之间的空隙，以及每行文字上下留白。
+const LABEL_GAP: f32 = 10.0;
+const LABEL_PAD_X: f32 = 12.0;
+const LABEL_ROW_PAD: f32 = 7.0;
+/// 焦点往外各铺几条。再多就挤，而且离得远的本来也看不清。
+const FOCUS_RANKS: usize = 4;
+/// 按名次递减的字号与不透明度：正中最大最实，往外逐档化进纸里。
+const RANK_FONT: [f32; FOCUS_RANKS + 1] = [15.5, 13.0, 11.5, 10.5, 10.0];
+const RANK_ALPHA: [f32; FOCUS_RANKS + 1] = [1.0, 0.72, 0.45, 0.26, 0.13];
+/// 整列淡入淡出的时长，以及焦点换条时锚点滑过去的时长。
+const REVEAL_TIME: f32 = 0.14;
+const ANCHOR_GLIDE: f32 = 0.09;
+/// 底衬最实处的不透明度，以及它比文字向外多铺出去的余量。
+const SCRIM_ALPHA: f32 = 0.82;
+const SCRIM_BLEED: f32 = 16.0;
 
 /// 导航里的一条标题。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,29 +250,64 @@ impl DraftPage<'_> {
         // 刻度带留在预览这一层里，不另开前景层。
         //
         // 独立层会把滚轮一起吞掉：egui 的滚动区只在"自己是指针下最上面那一层"时
-        // 才收滚轮，指针一停在刻度带上，预览就滚不动了——而扫完刻度顺手滚页
+        // 才收滚轮，指针一停在刻度带上，预览就滚不动了——而扫完标题顺手滚页
         // 恰恰是最自然的动作。同层则不然：导航画在预览之后，注册得更晚，
         // 点击照样归它，滚轮仍旧落到滚动区。
-        let response = ui.interact(
+        let strip = ui.interact(
             rail,
             egui::Id::new("gw_nav_rail_strip"),
             egui::Sense::click(),
         );
-        // 刻度只有一两个点粗，要求指针精确压在线上等于要求用户绣花。
-        // 改成吸附：指针在刻度带里上下移动，就近认最近的那条。
-        let hovered = response
-            .hover_pos()
-            .and_then(|pos| nearest_tick(&placed, rail, pos.y));
-        if hovered.is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+
+        // 靠近右缘才淡入。热区要把标题列一起圈进去，否则指针一往左挪到标题上
+        // 就判定为"离开"，整列当场缩回去。
+        let anim_id = ui.id().with("nav_reveal");
+        let hot = egui::Rect::from_min_max(
+            egui::pos2(rail.right() - COLUMN_WIDTH, region.top()),
+            egui::pos2(region.right(), region.bottom()),
+        );
+        let pointer = ctx.pointer_latest_pos().filter(|pos| region.contains(*pos));
+        let near = pointer.is_some_and(|pos| hot.contains(pos));
+        let reveal = ctx.animate_bool_with_time(anim_id, near, REVEAL_TIME);
+
+        // 指针最近的那条就是焦点。刻度只有一两个点粗，要求精确压线等于要求绣花，
+        // 所以按纵坐标就近认。
+        let focus = pointer.and_then(|pos| nearest_tick(&placed, rail, pos.y));
+        let rows = (reveal > 0.01)
+            .then(|| focus.map(|focus| label_rows(&ctx, ui, rail, &placed, focus, reveal)))
+            .flatten()
+            .unwrap_or_default();
+
+        if !rows.is_empty() {
+            paint_label_column(ui, region, rail, &rows, reveal);
         }
-        paint_rail(ui, rail, &placed, current, hovered);
+        paint_rail(ui, rail, &placed, current, focus);
+        if focus.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        // 点标题就跳到那一条；点刻度带跳到焦点那一条。
+        // 只有标题文字本身可点，行与行之间的空档仍然穿透到正文——
+        // 整列都吃掉点击的话，纸面右侧那一条就再也选不中字了。
         let mut jump = None;
-        if let Some(index) = hovered {
-            paint_tick_label(ui, region, rail, &placed[index]);
-            if response.clicked() {
-                jump = Some(placed[index].entry.line.clone());
+        for row in &rows {
+            let hit = ui.interact(
+                row.rect,
+                egui::Id::new(("gw_nav_label", row.index)),
+                egui::Sense::click(),
+            );
+            if hit.hovered() {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
             }
+            if hit.clicked() {
+                jump = Some(placed[row.index].entry.line.clone());
+            }
+        }
+        if jump.is_none()
+            && strip.clicked()
+            && let Some(index) = focus
+        {
+            jump = Some(placed[index].entry.line.clone());
         }
 
         if let Some(line) = jump {
@@ -270,7 +316,7 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 点中一条刻度：源码把光标挪过去，版式预览滚到那一块并标亮。
+    /// 点中一条标题：源码把光标挪过去，版式预览滚到那一块并标亮。
     /// 两边都设，五种显示方式里只要开着的那一种就能就位。
     fn jump_to_heading(&mut self, line: Range<usize>) {
         self.doc.pending_source_selection = None;
@@ -300,17 +346,13 @@ pub(crate) fn rail_rect(region: egui::Rect, bar_width: f32) -> egui::Rect {
     )
 }
 
-/// 离指针最近的那条刻度，超出吸附距离就不认。
-///
-/// 不设上限的话，一篇只有两三节的稿子里，指针停在刻度带中段的大片空白上
-/// 也会浮出某个远处的标题，看着像乱跳。
+/// 离指针最近的那条刻度。文档标题不参与——它不在刻度里。
 fn nearest_tick(placed: &[Placed<'_>], rail: egui::Rect, y: f32) -> Option<usize> {
     placed
         .iter()
         .enumerate()
         .filter(|(_, item)| item.entry.level >= 2)
         .map(|(index, item)| (index, (tick_y(rail, item) - y).abs()))
-        .filter(|(_, distance)| *distance <= TICK_SNAP)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(index, _)| index)
 }
@@ -319,13 +361,201 @@ fn tick_y(rail: egui::Rect, item: &Placed<'_>) -> f32 {
     rail.top() + rail.height() * item.fraction
 }
 
+/// 标题列里的一行。
+struct LabelRow {
+    /// 在 `placed` 里的下标。
+    index: usize,
+    /// 文字的包围盒。只有这块可点，行间空档留给正文。
+    rect: egui::Rect,
+    galley: std::sync::Arc<egui::Galley>,
+    color: egui::Color32,
+}
+
+/// 按"名次"铺开焦点附近的标题。
+///
+/// 为什么按名次而不按像素距离：刻度是按版面真实位置排的，长稿里彼此只隔十几个点，
+/// 若让标题各自贴着自己的刻度画，行与行立刻叠在一起，越放大叠得越死。改成以焦点
+/// 为中心、按各行自己的高度依次向上下堆叠——这正是 Dock 放大时把邻居顶开的做法，
+/// 既不会重叠，也自然形成"隆起"的包络。焦点那一行仍然钉在它自己的刻度上，
+/// 所以"标题跟刻度在一起"这件事在看的人真正关心的那一条上是成立的。
+fn label_rows(
+    ctx: &egui::Context,
+    ui: &egui::Ui,
+    rail: egui::Rect,
+    placed: &[Placed<'_>],
+    focus: usize,
+    reveal: f32,
+) -> Vec<LabelRow> {
+    // 只有进了刻度的那些条目参与排名，文档标题不算。
+    let ticks = placed
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.entry.level >= 2)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let Some(focus_rank) = ticks.iter().position(|index| *index == focus) else {
+        return Vec::new();
+    };
+
+    // 焦点在刻度间跳动时，整列跟着硬切会很跳；把锚点插值一下，列就是滑过去的。
+    let target = tick_y(rail, &placed[focus]);
+    let anchor = ctx.animate_value_with_time(egui::Id::new("gw_nav_anchor"), target, ANCHOR_GLIDE);
+
+    let right = rail.left() - LABEL_GAP;
+    let max_width = COLUMN_WIDTH - RAIL_WIDTH - LABEL_GAP - LABEL_PAD_X;
+    let mut rows = Vec::new();
+    // 先焦点，再依次向上、向下堆叠，各自用自己的行高推进。
+    let mut up_edge = anchor;
+    let mut down_edge = anchor;
+    for offset in 0..=FOCUS_RANKS as isize {
+        for direction in [-1isize, 1] {
+            if offset == 0 && direction == 1 {
+                continue;
+            }
+            let rank = focus_rank as isize + offset * direction;
+            if rank < 0 || rank as usize >= ticks.len() {
+                continue;
+            }
+            let index = ticks[rank as usize];
+            let step = offset as usize;
+            let size = RANK_FONT[step];
+            let alpha = RANK_ALPHA[step] * reveal;
+            let Some(galley) = label_galley(ui, placed[index].entry, size, max_width) else {
+                continue;
+            };
+            let height = galley.size().y + LABEL_ROW_PAD;
+            let center = if offset == 0 {
+                up_edge = anchor - height * 0.5;
+                down_edge = anchor + height * 0.5;
+                anchor
+            } else if direction < 0 {
+                up_edge -= height * 0.5;
+                let center = up_edge;
+                up_edge -= height * 0.5;
+                center
+            } else {
+                down_edge += height * 0.5;
+                let center = down_edge;
+                down_edge += height * 0.5;
+                center
+            };
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(right - galley.size().x, center - galley.size().y * 0.5),
+                egui::pos2(right, center + galley.size().y * 0.5),
+            );
+            // 焦点用正文色，外圈越远越淡，融进纸里。
+            let base = if offset == 0 {
+                theme::text()
+            } else {
+                theme::text_soft()
+            };
+            rows.push(LabelRow {
+                index,
+                rect,
+                galley,
+                color: base.gamma_multiply(alpha),
+            });
+        }
+    }
+    rows
+}
+
+fn label_galley(
+    ui: &egui::Ui,
+    entry: &NavEntry,
+    size: f32,
+    max_width: f32,
+) -> Option<std::sync::Arc<egui::Galley>> {
+    let text = match &entry.number {
+        Some(number) => format!("{number}{}", entry.text),
+        None => entry.text.clone(),
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text,
+        egui::FontId::proportional(size),
+        theme::text(),
+    );
+    // 超过一行就截断。公文标题动辄二十几字，整条铺出去会横穿版面。
+    job.wrap.max_width = max_width;
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.halign = egui::Align::LEFT;
+    Some(ui.painter().layout_job(job))
+}
+
+/// 标题列：先铺一层从右往左化开的底衬，再写字。
+fn paint_label_column(
+    ui: &egui::Ui,
+    region: egui::Rect,
+    rail: egui::Rect,
+    rows: &[LabelRow],
+    reveal: f32,
+) {
+    let painter = ui.painter().with_clip_rect(region);
+    let mut bounds = rows[0].rect;
+    for row in &rows[1..] {
+        bounds = bounds.union(row.rect);
+    }
+    let scrim = egui::Rect::from_min_max(
+        egui::pos2(bounds.left() - SCRIM_BLEED, bounds.top() - SCRIM_BLEED),
+        egui::pos2(rail.left() + RAIL_WIDTH, bounds.bottom() + SCRIM_BLEED),
+    )
+    .intersect(region);
+    paint_scrim(&painter, scrim, reveal);
+    for row in rows {
+        painter.galley(row.rect.left_top(), row.galley.clone(), row.color);
+    }
+}
+
+/// 从右往左化开的底衬。没有边框，也没有边界——右侧最实，越往左越透，
+/// 上下两端同样收掉，所以标题看着像浮在纸上，而不是压在一块板子上。
+///
+/// 这不是真正的毛玻璃：egui 的渲染管线取不到已经画好的画面去做高斯模糊，
+/// 硬做要自己加一道离屏渲染。这里用的是渐变的半透明薄色——底下的字透得出来
+/// 但不会糊，在浅色纸面上观感接近，要真模糊得换渲染方案。
+fn paint_scrim(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
+    if !rect.is_positive() {
+        return;
+    }
+    const COLS: usize = 10;
+    const ROWS: usize = 12;
+    let fill = theme::surface();
+    let mut mesh = egui::epaint::Mesh::default();
+    for row in 0..=ROWS {
+        let v = row as f32 / ROWS as f32;
+        let y = rect.top() + rect.height() * v;
+        // 上下两端收掉：0 和 1 处为 0，中段为 1，两头各占约两成做过渡。
+        let vertical = ((v / 0.2).min(1.0)).min(((1.0 - v) / 0.2).min(1.0));
+        for col in 0..=COLS {
+            let u = col as f32 / COLS as f32;
+            let x = rect.left() + rect.width() * u;
+            // 右端最实、左端全透，中间按三次方渐隐，收得比线性更柔和。
+            let horizontal = u * u * u;
+            let alpha = SCRIM_ALPHA * horizontal * vertical * reveal;
+            mesh.colored_vertex(egui::pos2(x, y), fill.gamma_multiply(alpha));
+        }
+    }
+    let stride = (COLS + 1) as u32;
+    for row in 0..ROWS as u32 {
+        for col in 0..COLS as u32 {
+            let top_left = row * stride + col;
+            mesh.add_triangle(top_left, top_left + 1, top_left + stride);
+            mesh.add_triangle(top_left + 1, top_left + stride + 1, top_left + stride);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// 常驻刻度。当前所在那条用主色描粗，指针就近吸附到的那条再加一档。
 fn paint_rail(
     ui: &egui::Ui,
     rail: egui::Rect,
     placed: &[Placed<'_>],
     current: Option<usize>,
-    hovered: Option<usize>,
+    focus: Option<usize>,
 ) {
     let painter = ui.painter().with_clip_rect(rail.expand(4.0));
     let base = theme::text_muted().gamma_multiply(0.55);
@@ -336,15 +566,15 @@ fn paint_rail(
             continue;
         }
         let y = tick_y(rail, item);
-        let is_hovered = hovered == Some(index);
+        let is_focus = focus == Some(index);
         let is_current = current == Some(index);
-        // 悬停那条整条拉满宽度，让"我正指着它"一眼可见，不用去比粗细。
-        let length = if is_hovered {
+        // 焦点那条整条拉满刻度带宽度，"我正指着它"一眼可见，不必去比粗细。
+        let length = if is_focus {
             RAIL_WIDTH
         } else {
             tick_length(item.entry.level)
         };
-        let (width, color) = match (is_hovered, is_current) {
+        let (width, color) = match (is_focus, is_current) {
             (true, _) => (2.5, accent),
             (false, true) => (2.0, accent),
             (false, false) => (1.0, base),
@@ -357,67 +587,6 @@ fn paint_rail(
             egui::Stroke::new(width, color),
         );
     }
-}
-
-/// 悬停那条刻度的标题：半透明浮在刻度左侧、与刻度同高。
-///
-/// 不再单开一个大纲框。标签就地浮出，看的人视线不必离开正文，
-/// 沿刻度带上下扫就能连着看过各节标题。
-fn paint_tick_label(ui: &egui::Ui, region: egui::Rect, rail: egui::Rect, item: &Placed<'_>) {
-    let text = match &item.entry.number {
-        Some(number) => format!("{number}{}", item.entry.text),
-        None => item.entry.text.clone(),
-    };
-    if text.trim().is_empty() {
-        return;
-    }
-    let font = egui::FontId::proportional(LABEL_FONT_SIZE);
-    // 先按上限截断再排版：公文标题动辄二十几字，整条铺出去会横穿版面。
-    let galley = ui.painter().layout(
-        text,
-        font,
-        theme::text(),
-        LABEL_MAX_WIDTH - LABEL_PAD_X * 2.0,
-    );
-
-    let height = galley.size().y + LABEL_PAD_Y * 2.0;
-    let width = galley.size().x + LABEL_PAD_X * 2.0;
-    let right = rail.left() - LABEL_GAP;
-    // 与刻度同高居中；贴到预览上下边时收回来，别让标签被切掉半截。
-    let center_y = tick_y(rail, item).clamp(
-        region.top() + height * 0.5 + 4.0,
-        region.bottom() - height * 0.5 - 4.0,
-    );
-    let rect = egui::Rect::from_min_max(
-        egui::pos2(right - width, center_y - height * 0.5),
-        egui::pos2(right, center_y + height * 0.5),
-    );
-
-    // 标签画在刻度带那一层，但在带子之外——层只在带子上拦截指针，
-    // 所以标签盖住的正文照样点得到。
-    let painter = ui.painter().with_clip_rect(region);
-    painter.add(
-        egui::epaint::Shadow {
-            offset: [0, 2],
-            blur: 10,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(theme::paper::shadow_alpha()),
-        }
-        .as_shape(rect, egui::CornerRadius::same(6)),
-    );
-    // 半透明：底下的正文仍透得出来，标签不会把版面切掉一块。
-    painter.rect(
-        rect,
-        egui::CornerRadius::same(6),
-        theme::surface().gamma_multiply(0.92),
-        egui::Stroke::new(1.0, theme::border()),
-        egui::StrokeKind::Inside,
-    );
-    painter.galley(
-        egui::pos2(rect.left() + LABEL_PAD_X, rect.top() + LABEL_PAD_Y),
-        galley,
-        theme::text(),
-    );
 }
 
 #[cfg(test)]

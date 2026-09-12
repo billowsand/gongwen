@@ -1406,6 +1406,9 @@ mod split_resize_tests {
         actions: Vec<DraftAction>,
         export_links: ExportLinks,
         metrics: crate::metrics::Metrics,
+        /// 已经画过多少帧。egui 的指针历史不容许时间倒流，所以帧时间必须跨
+        /// `preview_frames` 的多次调用单调递增，不能每次都从 0 重新计。
+        clock: usize,
         _keep: Receiver<WorkerResult>,
     }
 
@@ -1436,6 +1439,7 @@ mod split_resize_tests {
                 actions: Vec::new(),
                 export_links: ExportLinks::default(),
                 metrics: crate::metrics::Metrics::default(),
+                clock: 0,
                 _keep,
             }
         }
@@ -1745,13 +1749,14 @@ mod split_resize_tests {
         /// 跑若干帧完整的审校区（含右缘导航），鼠标一直停在 `pointer`。
         /// 展开是带动画的，一帧看不出结果，所以要把时间往前推够。
         fn preview_frames(&mut self, pointer: egui::Pos2, frames: usize) {
-            for index in 0..frames {
+            for _ in 0..frames {
+                self.clock += 1;
                 let raw = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
                         egui::vec2(900.0, 900.0),
                     )),
-                    time: Some(index as f64 / 60.0),
+                    time: Some(self.clock as f64 / 60.0),
                     predicted_dt: 1.0 / 60.0,
                     events: vec![egui::Event::PointerMoved(pointer)],
                     ..Default::default()
@@ -1784,11 +1789,14 @@ mod split_resize_tests {
         /// 在 `at` 处按下再抬起。egui 要跨帧才认这是一次点击。
         fn preview_click(&mut self, at: egui::Pos2) {
             for pressed in [true, false] {
+                self.clock += 1;
                 let raw = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
                         egui::vec2(900.0, 900.0),
                     )),
+                    time: Some(self.clock as f64 / 60.0),
+                    predicted_dt: 1.0 / 60.0,
                     events: vec![
                         egui::Event::PointerMoved(at),
                         egui::Event::PointerButton {
@@ -1855,6 +1863,47 @@ mod split_resize_tests {
             starts.contains(&jumped),
             "跳转目标 {jumped} 应当正好落在某个标题行的行首"
         );
+    }
+
+    /// 靠近右缘时，焦点附近的标题要成列铺开，而不是只浮出一条；
+    /// 条数还必须有上限——长稿四五十节全铺出来会糊满整页，
+    /// 而且离焦点远的本来也看不清。
+    #[test]
+    fn approaching_the_right_edge_lays_out_a_column_of_titles() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+        let rail = harness.navigator_rail().expect("导航开着时应当有刻度带");
+        // 指针停在刻度带上，跑够帧数让淡入动画走完。
+        harness.preview_frames(rail.center(), 20);
+
+        let entries =
+            navigator::collect_entries(&harness.doc.generated_markdown, &harness.config.numbering);
+        let labels = (0..entries.len())
+            .filter_map(|index| {
+                harness
+                    .ctx
+                    .read_response(egui::Id::new(("gw_nav_label", index)))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            labels.len() > 1,
+            "靠近右缘应当成列铺开标题，而不是只浮出一条，实测 {} 条",
+            labels.len()
+        );
+        assert!(
+            labels.len() <= 9,
+            "焦点两侧各四条，最多九条，实测 {} 条",
+            labels.len()
+        );
+        for label in &labels {
+            assert!(
+                label.rect.right() <= rail.left() + 1.0,
+                "标题应当铺在刻度带左侧，实测右边界 {} 对刻度带左边界 {}",
+                label.rect.right(),
+                rail.left()
+            );
+        }
     }
 
     /// 「视图 → 导航」关掉之后，右缘就该彻底安静：刻度带一层都不建，
