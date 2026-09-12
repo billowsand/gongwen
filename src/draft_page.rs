@@ -1774,11 +1774,48 @@ mod split_resize_tests {
             }
         }
 
-        /// 右缘导航的展开面板这一帧是否登记过。
-        fn navigator_panel_shown(&self) -> bool {
+        /// 右缘刻度带这一帧占的位置。导航关掉时它根本不登记，返回 None。
+        fn navigator_rail(&self) -> Option<egui::Rect> {
             self.ctx
-                .memory(|memory| memory.area_rect(egui::Id::new("gw_nav_panel")))
-                .is_some()
+                .read_response(egui::Id::new("gw_nav_rail_strip"))
+                .map(|response| response.rect)
+        }
+
+        /// 在 `at` 处按下再抬起。egui 要跨帧才认这是一次点击。
+        fn preview_click(&mut self, at: egui::Pos2) {
+            for pressed in [true, false] {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 900.0),
+                    )),
+                    events: vec![
+                        egui::Event::PointerMoved(at),
+                        egui::Event::PointerButton {
+                            pos: at,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                };
+                let _ = self.ctx.clone().run_ui(raw, |ui| {
+                    let mut page = DraftPage {
+                        doc: &mut self.doc,
+                        config: &mut self.config,
+                        store: None,
+                        sender: &self.sender,
+                        status: &mut self.status,
+                        version_switch: &mut self.version_switch,
+                        revert_confirm: &mut self.revert_confirm,
+                        actions: &mut self.actions,
+                        export_links: &mut self.export_links,
+                        metrics: &mut self.metrics,
+                    };
+                    page.preview_ui(ui);
+                });
+            }
         }
     }
 
@@ -1787,33 +1824,63 @@ mod split_resize_tests {
         values[((values.len() as f32 - 1.0) * p) as usize]
     }
 
-    /// 鼠标靠到公文预览右缘，导航就展开成标题列表。
+    /// 指着刻度点一下，就该跳到那一节——这是整个导航唯一的核心动作。
+    /// 顺带锁住刻度带确实压在版面之上拿得到指针：它要是被下面的正文块抢了点击，
+    /// 表现就是点了刻度却选中了一段正文。
     #[test]
-    fn hovering_the_right_edge_opens_the_navigator() {
+    fn clicking_a_tick_jumps_to_that_heading() {
         let mut harness = Harness::new();
         harness.doc.preview_mode = PreviewMode::Rendered;
         assert!(
             harness.config.show_preview_navigator,
             "导航默认应当是开着的"
         );
-        harness.preview_frames(egui::pos2(885.0, 400.0), 16);
+        // 先跑几帧把版面和刻度带的位置量准。
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+        let rail = harness.navigator_rail().expect("导航开着时应当有刻度带");
+
+        harness.doc.pending_source_jump = None;
+        harness.preview_click(rail.center());
+
+        let jumped = harness
+            .doc
+            .pending_source_jump
+            .expect("点刻度应当发出跳转请求");
+        let starts =
+            navigator::collect_entries(&harness.doc.generated_markdown, &harness.config.numbering)
+                .into_iter()
+                .map(|entry| entry.line.start)
+                .collect::<Vec<_>>();
         assert!(
-            harness.navigator_panel_shown(),
-            "鼠标停在右缘应当展开导航面板"
+            starts.contains(&jumped),
+            "跳转目标 {jumped} 应当正好落在某个标题行的行首"
         );
     }
 
-    /// 「视图 → 导航」关掉之后，右缘就该彻底安静：同样把鼠标停在右缘，
-    /// 面板一次也不能冒出来。关不掉的开关等于没有这个开关。
+    /// 「视图 → 导航」关掉之后，右缘就该彻底安静：刻度带一层都不建，
+    /// 在同一位置点下去也不许有任何跳转。关不掉的开关等于没有这个开关。
     #[test]
     fn turning_the_navigator_off_keeps_the_right_edge_quiet() {
+        // 先在开着的状态下量出刻度带的位置，再关掉，点同一个地方。
+        let mut located = Harness::new();
+        located.doc.preview_mode = PreviewMode::Rendered;
+        located.preview_frames(egui::pos2(10.0, 10.0), 3);
+        let rail = located.navigator_rail().expect("导航开着时应当有刻度带");
+
         let mut harness = Harness::new();
         harness.doc.preview_mode = PreviewMode::Rendered;
         harness.config.show_preview_navigator = false;
-        harness.preview_frames(egui::pos2(885.0, 400.0), 16);
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
         assert!(
-            !harness.navigator_panel_shown(),
-            "导航关掉后，鼠标停在右缘也不该展开面板"
+            harness.navigator_rail().is_none(),
+            "导航关掉后不该再登记刻度带"
+        );
+
+        harness.doc.pending_source_jump = None;
+        harness.preview_click(rail.center());
+        assert!(
+            harness.doc.pending_source_jump.is_none(),
+            "导航关掉后，点在原本的刻度带位置不该跳转"
         );
     }
 

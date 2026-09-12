@@ -1,4 +1,4 @@
-//! 公文预览右缘的导航刻度：常驻一列细刻度反映全文结构，鼠标靠近展开成标题列表。
+//! 公文预览右缘的导航刻度：常驻一列细刻度反映全文结构，悬停某条就地浮出该节标题。
 //!
 //! 为什么不做成侧栏。起草页左右已经排满——左边公文要素、右边版本与审校提示两个
 //! 抽屉，中间的版式预览还要按纸张宽度自适应缩放：中间一窄，纸上的字就跟着变小。
@@ -10,6 +10,11 @@
 //! 所以常驻一列极淡的刻度：一条一个标题，按层级定长短，当前所在那条高亮。它顺带
 //! 还回答了一个公文很在意的问题——各节长短是否均衡，某节明显长出一截通常意味着
 //! 结构没拆开。
+//!
+//! 为什么标题是就地浮出而不是另开一个大纲框。框一展开就盖掉一块版面，视线也得
+//! 离开正文横移过去。标签贴着刻度浮在左侧、与刻度同高，指针沿带子上下扫就能连着
+//! 看过各节标题，眼睛始终没离开纸面。代价是看不到全文目录的全貌，只能一条条扫——
+//! 定位用够了，通览不够。
 //!
 //! 编号一律来自 [`export::HeadingCounters`]，与 DOCX/LaTeX 导出和版式预览共用同一套
 //! 计数器。导航里写「三、」而预览里排出「四、」是最难查的那类 bug，共用计数器
@@ -26,13 +31,19 @@ use crate::theme;
 use eframe::egui;
 use std::ops::Range;
 
-/// 刻度条宽度。只画刻度，不吃点击——它浮在纸张右侧留白上。
+/// 刻度带宽度。它浮在纸张右侧的留白上，让开滚动条。
 const RAIL_WIDTH: f32 = 14.0;
-/// 展开后的标题面板宽度。
-const PANEL_WIDTH: f32 = 268.0;
-/// 鼠标进入右缘多宽的范围就展开。收起态给得比刻度条宽一些，免得要贴着像素挪。
-const HOT_MARGIN: f32 = 26.0;
-const ANIM_TIME: f32 = 0.12;
+/// 指针离某条刻度多近才算"指着它"。刻度只有一两个点粗，要求精确压线
+/// 等于要求用户绣花，所以就近吸附；但也不能无限远，否则空白处会浮出远处的标题。
+const TICK_SNAP: f32 = 20.0;
+/// 悬停标签的字号、内边距，以及它与刻度带之间的空隙。
+const LABEL_FONT_SIZE: f32 = 12.0;
+const LABEL_PAD_X: f32 = 9.0;
+const LABEL_PAD_Y: f32 = 5.0;
+const LABEL_GAP: f32 = 8.0;
+/// 标签最宽到这里，再长就折行/截断——公文标题动辄二十几字，
+/// 整条铺出去会横穿版面。
+const LABEL_MAX_WIDTH: f32 = 300.0;
 
 /// 导航里的一条标题。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,16 +118,6 @@ pub(crate) fn heading_top(ctx: &egui::Context, line: &Range<usize>) -> Option<f3
     ctx.read_response(block)
         .or_else(|| ctx.read_response(compact))
         .map(|response| response.rect.top())
-}
-
-/// 展开态面板这一帧的显示状态。
-struct PanelState {
-    /// 当前读到的那一条在 `placed` 里的下标。
-    current: Option<usize>,
-    /// 展开动画进度：0 完全收起，1 完全展开。
-    t: f32,
-    /// 是否要把当前节滚到眼前。只在刚展开的那一帧为真。
-    reveal: bool,
 }
 
 /// 一条标题在全文中的纵向位置，0 是文首、1 是文末。
@@ -230,140 +231,38 @@ impl DraftPage<'_> {
             .or(self.doc.preview_cursor_line);
         let current = current_index(&placed, scroll, anchor_line);
 
-        // 刻度条浮在纸张右侧留白上，让开滚动条——鼠标往右去多半是要拖滚动条，
-        // 把可点区压在滚动条上会变成高频误触。
-        let bar = ui.spacing().scroll.bar_width + 4.0;
-        let rail_right = region.right() - bar;
-        let rail = egui::Rect::from_min_max(
-            egui::pos2(rail_right - RAIL_WIDTH, region.top() + 12.0),
-            egui::pos2(rail_right, region.bottom() - 12.0),
-        );
+        let rail = rail_rect(region, ui.spacing().scroll.bar_width);
         if rail.height() < 40.0 {
             return;
         }
 
-        let anim_id = ui.id().with("nav_rail_expand");
-        let pointer = ctx.pointer_latest_pos();
-        // 热区随面板一起变宽：展开后鼠标移到面板上仍算"在右缘"，不会一进面板就收回。
-        // 取上一帧的展开状态而不是当帧的动画值——`animate_bool_with_time` 每调一次
-        // 就把动画朝目标推一步，同一帧按两个目标各取一次会让它自己跟自己打架。
-        let was_expanded = ctx.data(|data| data.get_temp::<bool>(anim_id).unwrap_or(false));
-        let hot_width = if was_expanded {
-            PANEL_WIDTH + bar
-        } else {
-            RAIL_WIDTH + HOT_MARGIN
-        };
-        let hot = egui::Rect::from_min_max(
-            egui::pos2(region.right() - hot_width, region.top()),
-            region.right_bottom(),
+        // 刻度带留在预览这一层里，不另开前景层。
+        //
+        // 独立层会把滚轮一起吞掉：egui 的滚动区只在"自己是指针下最上面那一层"时
+        // 才收滚轮，指针一停在刻度带上，预览就滚不动了——而扫完刻度顺手滚页
+        // 恰恰是最自然的动作。同层则不然：导航画在预览之后，注册得更晚，
+        // 点击照样归它，滚轮仍旧落到滚动区。
+        let response = ui.interact(
+            rail,
+            egui::Id::new("gw_nav_rail_strip"),
+            egui::Sense::click(),
         );
-        let hovered = pointer.is_some_and(|pos| hot.contains(pos) && region.contains(pos));
-        ctx.data_mut(|data| data.insert_temp(anim_id, hovered));
-        let t = ctx.animate_bool_with_time(anim_id, hovered, ANIM_TIME);
-
-        self.paint_rail(&ctx, rail, &placed, current, 1.0 - t * 0.65);
-        if t > 0.01 {
-            // 只在刚展开的那一帧把当前节滚到眼前。长文里列表比面板长得多，
-            // 展开后看到的若是列表顶部，等于还得自己找一遍。之后不再自动滚，
-            // 否则用户手动翻列表会被一直拽回去。
-            let state = PanelState {
-                current,
-                t,
-                reveal: hovered && !was_expanded,
-            };
-            self.navigator_panel(&ctx, region, rail, &placed, &state);
+        // 刻度只有一两个点粗，要求指针精确压在线上等于要求用户绣花。
+        // 改成吸附：指针在刻度带里上下移动，就近认最近的那条。
+        let hovered = response
+            .hover_pos()
+            .and_then(|pos| nearest_tick(&placed, rail, pos.y));
+        if hovered.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-    }
-
-    /// 常驻刻度。纯绘制，不占任何可点区域，因此不干扰滚动、选字和点块跳转。
-    fn paint_rail(
-        &self,
-        ctx: &egui::Context,
-        rail: egui::Rect,
-        placed: &[Placed<'_>],
-        current: Option<usize>,
-        alpha: f32,
-    ) {
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("gw_nav_rail"),
-        ));
-        let painter = painter.with_clip_rect(rail.expand(4.0));
-        let base = theme::text_muted().gamma_multiply(0.55 * alpha);
-        let hot = theme::accent().gamma_multiply(alpha.max(0.35));
-        for (index, item) in placed.iter().enumerate() {
-            // 文档标题不进刻度：全文只有一处，而且就在最顶上，占一条刻度纯属浪费。
-            if item.entry.level < 2 {
-                continue;
-            }
-            let y = rail.top() + rail.height() * item.fraction;
-            let length = tick_length(item.entry.level);
-            let is_current = current == Some(index);
-            painter.line_segment(
-                [
-                    egui::pos2(rail.right() - length, y),
-                    egui::pos2(rail.right(), y),
-                ],
-                egui::Stroke::new(
-                    if is_current { 2.0 } else { 1.0 },
-                    if is_current { hot } else { base },
-                ),
-            );
-        }
-    }
-
-    /// 展开态的标题列表。半透明浮在纸面上，字号压到 11.5，长标题截断。
-    fn navigator_panel(
-        &mut self,
-        ctx: &egui::Context,
-        region: egui::Rect,
-        rail: egui::Rect,
-        placed: &[Placed<'_>],
-        state: &PanelState,
-    ) {
-        let PanelState { current, t, reveal } = *state;
-        let height = (region.height() - 24.0).clamp(120.0, 520.0);
-        // 从右缘滑出一小段，配合淡入；收起时反向滑回，不会"啪"地消失。
-        let left = rail.right() - PANEL_WIDTH + (1.0 - t) * 14.0;
-        let pos = egui::pos2(left, region.top() + 12.0);
+        paint_rail(ui, rail, &placed, current, hovered);
         let mut jump = None;
-
-        egui::Area::new(egui::Id::new("gw_nav_panel"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .constrain_to(region)
-            .show(ctx, |ui| {
-                ui.set_opacity(t);
-                ui.set_width(PANEL_WIDTH - RAIL_WIDTH - 6.0);
-                egui::Frame::new()
-                    // 半透明：底下的正文仍透得出来，浮层不会把版面切掉一块。
-                    .fill(theme::surface().gamma_multiply(0.97))
-                    .stroke(egui::Stroke::new(1.0, theme::border()))
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 2],
-                        blur: 12,
-                        spread: 0,
-                        color: egui::Color32::from_black_alpha(theme::paper::shadow_alpha()),
-                    })
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        egui::ScrollArea::vertical()
-                            .id_salt("gw_nav_list")
-                            .max_height(height)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 1.0;
-                                for (index, item) in placed.iter().enumerate() {
-                                    let is_current = current == Some(index);
-                                    if nav_row(ui, item.entry, is_current, reveal && is_current) {
-                                        jump = Some(item.entry.line.clone());
-                                    }
-                                }
-                            });
-                    });
-            });
+        if let Some(index) = hovered {
+            paint_tick_label(ui, region, rail, &placed[index]);
+            if response.clicked() {
+                jump = Some(placed[index].entry.line.clone());
+            }
+        }
 
         if let Some(line) = jump {
             self.jump_to_heading(line);
@@ -371,7 +270,7 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 点中导航里的一条：源码把光标挪过去，版式预览滚到那一块并标亮。
+    /// 点中一条刻度：源码把光标挪过去，版式预览滚到那一块并标亮。
     /// 两边都设，五种显示方式里只要开着的那一种就能就位。
     fn jump_to_heading(&mut self, line: Range<usize>) {
         self.doc.pending_source_selection = None;
@@ -389,74 +288,136 @@ impl DraftPage<'_> {
     }
 }
 
-/// 一行标题。返回是否被点中。
-fn nav_row(ui: &mut egui::Ui, entry: &NavEntry, current: bool, reveal: bool) -> bool {
-    // 底色要压在文字下面：先占一个空图形位，量出整行范围后再回填，
-    // 与版式预览里标亮块的做法一致。
-    let backdrop = ui.painter().add(egui::Shape::Noop);
-    let indent = match entry.level {
-        0 | 1 => 0.0,
-        level => (level - 2) as f32 * 11.0,
-    };
-    let width = ui.available_width();
-    let number_color = if current {
-        theme::accent()
-    } else {
-        theme::text_muted()
-    };
-    let text_color = if current {
-        theme::accent()
-    } else {
-        theme::text_soft()
-    };
-    let inner = ui
-        .scope(|ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(indent);
-                if let Some(number) = &entry.number {
-                    ui.label(egui::RichText::new(number).size(11.5).color(number_color));
-                }
-                let mut title = egui::RichText::new(&entry.text)
-                    .size(11.5)
-                    .color(text_color);
-                // 正式标题（文档标题、附件标题）加粗当根节点。
-                if entry.level < 2 {
-                    title = title.strong();
-                }
-                ui.add(
-                    // 长标题截断。公文标题动辄二十几字，撑宽面板等于又去抢宽度。
-                    egui::Label::new(title).truncate().selectable(false),
-                );
-            });
-        })
-        .response
-        .rect;
+/// 刻度带的位置：贴着预览右缘，但让开滚动条。
+///
+/// 鼠标往右去多半是要拖滚动条，把刻度压在滚动条上会变成高频误触，
+/// 所以整条带子挪到滚动条内侧，落在纸张右侧的留白上。
+pub(crate) fn rail_rect(region: egui::Rect, bar_width: f32) -> egui::Rect {
+    let right = region.right() - bar_width - 4.0;
+    egui::Rect::from_min_max(
+        egui::pos2(right - RAIL_WIDTH, region.top() + 12.0),
+        egui::pos2(right, region.bottom() - 12.0),
+    )
+}
 
-    let row = egui::Rect::from_min_size(inner.left_top(), egui::vec2(width, inner.height()))
-        .expand2(egui::vec2(3.0, 1.0));
-    let hit = ui.interact(
-        row,
-        ui.id().with(("nav_row", entry.line.start)),
-        egui::Sense::click(),
-    );
-    if hit.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+/// 离指针最近的那条刻度，超出吸附距离就不认。
+///
+/// 不设上限的话，一篇只有两三节的稿子里，指针停在刻度带中段的大片空白上
+/// 也会浮出某个远处的标题，看着像乱跳。
+fn nearest_tick(placed: &[Placed<'_>], rail: egui::Rect, y: f32) -> Option<usize> {
+    placed
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.entry.level >= 2)
+        .map(|(index, item)| (index, (tick_y(rail, item) - y).abs()))
+        .filter(|(_, distance)| *distance <= TICK_SNAP)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
+}
+
+fn tick_y(rail: egui::Rect, item: &Placed<'_>) -> f32 {
+    rail.top() + rail.height() * item.fraction
+}
+
+/// 常驻刻度。当前所在那条用主色描粗，指针就近吸附到的那条再加一档。
+fn paint_rail(
+    ui: &egui::Ui,
+    rail: egui::Rect,
+    placed: &[Placed<'_>],
+    current: Option<usize>,
+    hovered: Option<usize>,
+) {
+    let painter = ui.painter().with_clip_rect(rail.expand(4.0));
+    let base = theme::text_muted().gamma_multiply(0.55);
+    let accent = theme::accent();
+    for (index, item) in placed.iter().enumerate() {
+        // 文档标题不进刻度：全文只有一处，而且就在最顶上，占一条刻度纯属浪费。
+        if item.entry.level < 2 {
+            continue;
+        }
+        let y = tick_y(rail, item);
+        let is_hovered = hovered == Some(index);
+        let is_current = current == Some(index);
+        // 悬停那条整条拉满宽度，让"我正指着它"一眼可见，不用去比粗细。
+        let length = if is_hovered {
+            RAIL_WIDTH
+        } else {
+            tick_length(item.entry.level)
+        };
+        let (width, color) = match (is_hovered, is_current) {
+            (true, _) => (2.5, accent),
+            (false, true) => (2.0, accent),
+            (false, false) => (1.0, base),
+        };
+        painter.line_segment(
+            [
+                egui::pos2(rail.right() - length, y),
+                egui::pos2(rail.right(), y),
+            ],
+            egui::Stroke::new(width, color),
+        );
     }
-    if reveal {
-        ui.scroll_to_rect(row, Some(egui::Align::Center));
-    }
-    let fill = if current {
-        theme::accent_soft()
-    } else if hit.hovered() {
-        theme::surface_hover()
-    } else {
-        return hit.clicked();
+}
+
+/// 悬停那条刻度的标题：半透明浮在刻度左侧、与刻度同高。
+///
+/// 不再单开一个大纲框。标签就地浮出，看的人视线不必离开正文，
+/// 沿刻度带上下扫就能连着看过各节标题。
+fn paint_tick_label(ui: &egui::Ui, region: egui::Rect, rail: egui::Rect, item: &Placed<'_>) {
+    let text = match &item.entry.number {
+        Some(number) => format!("{number}{}", item.entry.text),
+        None => item.entry.text.clone(),
     };
-    ui.painter().set(
-        backdrop,
-        egui::epaint::RectShape::filled(row, egui::CornerRadius::same(4), fill),
+    if text.trim().is_empty() {
+        return;
+    }
+    let font = egui::FontId::proportional(LABEL_FONT_SIZE);
+    // 先按上限截断再排版：公文标题动辄二十几字，整条铺出去会横穿版面。
+    let galley = ui.painter().layout(
+        text,
+        font,
+        theme::text(),
+        LABEL_MAX_WIDTH - LABEL_PAD_X * 2.0,
     );
-    hit.clicked()
+
+    let height = galley.size().y + LABEL_PAD_Y * 2.0;
+    let width = galley.size().x + LABEL_PAD_X * 2.0;
+    let right = rail.left() - LABEL_GAP;
+    // 与刻度同高居中；贴到预览上下边时收回来，别让标签被切掉半截。
+    let center_y = tick_y(rail, item).clamp(
+        region.top() + height * 0.5 + 4.0,
+        region.bottom() - height * 0.5 - 4.0,
+    );
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(right - width, center_y - height * 0.5),
+        egui::pos2(right, center_y + height * 0.5),
+    );
+
+    // 标签画在刻度带那一层，但在带子之外——层只在带子上拦截指针，
+    // 所以标签盖住的正文照样点得到。
+    let painter = ui.painter().with_clip_rect(region);
+    painter.add(
+        egui::epaint::Shadow {
+            offset: [0, 2],
+            blur: 10,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(theme::paper::shadow_alpha()),
+        }
+        .as_shape(rect, egui::CornerRadius::same(6)),
+    );
+    // 半透明：底下的正文仍透得出来，标签不会把版面切掉一块。
+    painter.rect(
+        rect,
+        egui::CornerRadius::same(6),
+        theme::surface().gamma_multiply(0.92),
+        egui::Stroke::new(1.0, theme::border()),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + LABEL_PAD_X, rect.top() + LABEL_PAD_Y),
+        galley,
+        theme::text(),
+    );
 }
 
 #[cfg(test)]
