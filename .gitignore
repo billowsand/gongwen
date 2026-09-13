@@ -54,3 +54,6 @@ $RECYCLE.BIN/
 .codex-tmp/
 .reasonix
 reasonix.toml
+# pi 扩展与包安装目录：.pi/settings.json 入库共享，依赖本身不入库（启动时自动安装）
+.pi/npm/
+.pi/git/

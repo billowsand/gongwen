@@ -1,0 +1,72 @@
+# AGENTS.md — 公文助手（gongwen）
+
+基于 Rust + egui 的离线中文公文写作桌面应用。模型只起草 Markdown 正文，行文要素、
+版式规则与导出结果由本地程序控制。
+
+## 技术栈
+
+- Rust edition 2024（stable），GUI 用 `eframe` / `egui` 0.35，纯 CPU 渲染 PDF 用 `hayro`。
+- 导出链：Markdown → DOCX（`docx-rs`）/ TeX → PDF（本机 Tectonic / XeLaTeX）、
+  XLSX（`rust_xlsxwriter`）、稿件库与词表用 `rusqlite`。
+- 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`。
+- 模型接入：本机 LM Studio / Ollama，走 OpenAI 兼容接口（`src/lmstudio.rs`、
+  `src/rag.rs`、`src/rag_client.rs`）。
+
+## 常用命令
+
+```bash
+cargo run                      # 开发运行
+cargo check --all-targets      # 快速基线
+cargo fmt --all -- --check     # CI 零容忍，改完必跑
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo build --release --locked
+```
+
+- 开发构建给依赖开 `opt-level = 3`（见 `Cargo.toml`），首次编译依赖约需一分钟，属正常。
+- `cargo test` 有**约 5 个与沙箱环境相关的失败，是预期结果**，不要为此改动测试。
+- Linux 变体：Arch/Omarchy 发布包用
+  `cargo build --release --locked --no-default-features --features linux-portal-dialogs`。
+
+## 代码组织
+
+单文件超过约 2000 行就该按功能域拆成模块文件夹。已拆过的：`src/app/`、`src/draft_page/`、
+`src/preview/`、`src/lexicon/`、`src/export/{docx,latex}/`。拆分流程见 skill
+`split-rust-module`（纯代码移动，每拆一个文件单独提交一次，零警告验证）。
+
+顶层模块清单在 `src/main.rs`。注意 `mod` 声明里 `outline`、`proofread_rules` 等
+并非全部集中在文件头部，改动前先 `grep -n "^mod " src/main.rs`。
+
+## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
+
+1. AI 永远不直接写入正文，产物只能是需用户采纳的「修订建议」。
+2. AI 永远不碰公文要素（单位、人员、文号、密级、成文日期），不得回写 `DraftInput`。
+3. 任何 AI 产物落地前必须过确定性闸门：`ai_guard`（事实比对）、`validator`（要素校验）、
+   `proofread` / `proofread_rules`（词表与规则复扫）。闸门不过就丢弃。
+
+推论：确定性规则是 AI 的裁判，不是竞争者，不要为了迁就模型放宽规则。
+
+## 版本与发布
+
+- 版本号只维护在两处：`Cargo.toml` 的根包 `version` 和 `Cargo.lock` 里
+  `name = "gongwen-assistant"` 的 `version`。
+- 本机**没有 `pwsh`**，不要调用 `scripts/bump-version.ps1`，手动编辑上述两处。
+- `ci.yml` 在 push `main` 时触发（macOS / Windows / Linux 三平台跑 fmt / clippy / test）；
+  `release.yml` 在 push `v*` tag 时触发，产出 8 个资产（Windows setup.exe、
+  Linux ARM64/AMD64 deb、macOS ARM64 DMG 及各自 `.sha256`）。
+- Release workflow 全程约 20–30 分钟。
+- 完整发布流程（bump → tag → 监控 → 写中文 release notes → 验证）见 skill `release`。
+  **硬性要求：release 正文必须手写，不能用 `--generate-notes` 的占位说明。**
+
+## 约定
+
+- 提交信息用中文 Conventional Commits：`feat:` / `fix:` / `test:` / `docs:` /
+  `refactor:` / `style:` / `chore: release vX.Y.Z`。
+- 代码注释、文档、README 一律中文。
+- 应用输出的 `dist/`、`output/`、`tmp/`、`target/` 均为生成物，不要提交。
+- `config.json`、`.env*` 是本机配置，不入库；`config.example.json` 是模板。
+
+## 环境
+
+- 远程 `git@github.com:billowsand/gongwen.git`，发布分支 `main`。
+- 使用 `gh` 管理 release（账号 `billowsand`，需 repo scope）。

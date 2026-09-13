@@ -1,0 +1,12 @@
+{
+  "skills": [
+    "../.claude/skills"
+  ],
+  "packages": [
+    "npm:pi-lens",
+    "npm:pi-mutation-test",
+    "npm:@everyx/pi-read-doc",
+    "npm:@juicesharp/rpiv-todo",
+    "npm:@gotgenes/pi-permission-system"
+  ]
+}
