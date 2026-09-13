@@ -6,7 +6,8 @@
 //! 看出版式上的哪一段对应源码里的哪一段。
 //! 高亮结果按（文本, 换行宽度, 锚点, 查找命中, 配色版本）缓存，正常编辑时每帧
 //! 只需一次哈希；配色版本让切主题、换纸面之后的第一帧就重新上色，而不是等到下
-//! 一次改字或挪光标。
+//! 一次改字或挪光标。缓存里存的是 `LayoutJob` 而不是排好的 `Galley`，理由见
+//! [`Cached`]。
 
 use crate::models::{EditorFontScheme, EditorFontSlot, NumberingConfig};
 use crate::{export, theme};
@@ -23,12 +24,78 @@ use std::{
 /// 挂在 `GongwenApp` 上的高亮缓存。
 #[derive(Default)]
 pub struct MarkdownHighlighter {
-    cache: Option<(u64, u32, Arc<egui::Galley>)>,
-    hybrid_cache: Option<(u64, u32, usize, Arc<egui::Galley>)>,
+    cache: Option<Cached>,
+    hybrid_cache: Option<Cached>,
+}
+
+/// 一次排版的缓存。
+///
+/// 这里缓存的是把 Markdown 编译出来的 [`LayoutJob`]——费时的是解析与上色。排好
+/// 的 `Galley` **必须每帧重新向 epaint 要一次**，不能自己攥着跨帧复用：galley 里
+/// 每个字形记的是它在字形图集（font atlas）中的像素坐标，而 epaint 会整份重建
+/// 图集——`Visuals::text_options` 变了，或者图集用满八成就重建，重建后旧坐标全部
+/// 失效，画出来是缺字、糊成一片或串到别的字上。
+///
+/// 明暗主题互换恰好会改 `text_options`：egui 的深色 visuals 用另一条字形灰度曲线
+/// （`FontColorTransferFunction::DARK_MODE_DEFAULT`），浅色用另一条。重建发生在
+/// 切换的**下一帧**开头，所以在切换那一帧里做的任何作废（清缓存、给缓存键加配色
+/// 版本号）都赶不上——下一帧缓存键原封不动地命中，返回的正是那份坐标已经失效的
+/// galley。这就是「切明暗主题后 Markdown 编辑区不显示或显示混乱、鼠标点一下（改
+/// 了光标行，缓存键跟着变）就恢复」的成因。
+///
+/// epaint 自己的 galley 缓存能正确识别重建，重新要一次只是一次哈希查表；拿回来的
+/// `Arc` 指针没变就说明图集没动，后处理的成品可以接着用。
+struct Cached {
+    key: u64,
+    width: u32,
+    job: LayoutJob,
+    /// epaint 上一次给出的 galley，仅用于指针判等。
+    raw: Arc<egui::Galley>,
+    /// 后处理（标题居中）之后真正交给 `TextEdit` 的成品。
+    galley: Arc<egui::Galley>,
+}
+
+/// 缓存键命中就复用 `LayoutJob`，但 galley 每帧都向 epaint 重新要一次。
+fn cached_galley(
+    slot: &mut Option<Cached>,
+    ui: &egui::Ui,
+    key: u64,
+    width: u32,
+    build: impl FnOnce() -> LayoutJob,
+    post: impl FnOnce(&mut Arc<egui::Galley>),
+) -> Arc<egui::Galley> {
+    if let Some(cached) = slot.as_mut()
+        && cached.key == key
+        && cached.width == width
+    {
+        let raw = ui
+            .ctx()
+            .fonts_mut(|fonts| fonts.layout_job(cached.job.clone()));
+        if !Arc::ptr_eq(&raw, &cached.raw) {
+            // epaint 重排过：字形坐标换了一套，后处理也要照着新的那份重做。
+            let mut galley = raw.clone();
+            post(&mut galley);
+            cached.raw = raw;
+            cached.galley = galley;
+        }
+        return cached.galley.clone();
+    }
+    let job = build();
+    let raw = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job.clone()));
+    let mut galley = raw.clone();
+    post(&mut galley);
+    *slot = Some(Cached {
+        key,
+        width,
+        job,
+        raw,
+        galley: galley.clone(),
+    });
+    galley
 }
 
 impl MarkdownHighlighter {
-    /// 供 `TextEdit::layouter` 调用：文本、宽度和锚点都没变时直接复用上一帧的 galley。
+    /// 供 `TextEdit::layouter` 调用：文本、宽度和锚点都没变时直接复用上一帧的排版。
     #[allow(clippy::too_many_arguments)]
     pub fn layout(
         &mut self,
@@ -48,17 +115,14 @@ impl MarkdownHighlighter {
         fonts.hash(&mut hasher);
         theme::revision().hash(&mut hasher);
         let key = hasher.finish();
-        let width = wrap_width.to_bits();
-        if let Some((cached_key, cached_width, galley)) = &self.cache
-            && *cached_key == key
-            && *cached_width == width
-        {
-            return galley.clone();
-        }
-        let job = highlight(text, wrap_width, base_size, anchor, search_matches, fonts);
-        let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
-        self.cache = Some((key, width, galley.clone()));
-        galley
+        cached_galley(
+            &mut self.cache,
+            ui,
+            key,
+            wrap_width.to_bits(),
+            || highlight(text, wrap_width, base_size, anchor, search_matches, fonts),
+            |_| {},
+        )
     }
 
     /// “实时排版”编辑器的布局：光标所在行保留 Markdown 标记，
@@ -79,37 +143,35 @@ impl MarkdownHighlighter {
         anchor.hash(&mut hasher);
         search_matches.hash(&mut hasher);
         numbering.hash(&mut hasher);
+        active_line.hash(&mut hasher);
         theme::revision().hash(&mut hasher);
         let key = hasher.finish();
-        let width = wrap_width.to_bits();
-        if let Some((cached_key, cached_width, cached_line, galley)) = &self.hybrid_cache
-            && *cached_key == key
-            && *cached_width == width
-            && *cached_line == active_line
-        {
-            return galley.clone();
-        }
-        let job = hybrid_highlight(
-            ui.style(),
-            text,
-            wrap_width,
-            active_line,
-            anchor,
-            search_matches,
-            numbering,
-        );
-        let mut galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
-        center_document_title_rows(&mut galley, text, wrap_width);
-        self.hybrid_cache = Some((key, width, active_line, galley.clone()));
-        galley
+        cached_galley(
+            &mut self.hybrid_cache,
+            ui,
+            key,
+            wrap_width.to_bits(),
+            || {
+                hybrid_highlight(
+                    ui.style(),
+                    text,
+                    wrap_width,
+                    active_line,
+                    anchor,
+                    search_matches,
+                    numbering,
+                )
+            },
+            |galley| center_document_title_rows(galley, text, wrap_width),
+        )
     }
 
     /// 两份缓存当前的键，供测试断言「配色一变，键就变」。
     #[cfg(test)]
     fn cache_keys(&self) -> (Option<u64>, Option<u64>) {
         (
-            self.cache.as_ref().map(|(key, ..)| *key),
-            self.hybrid_cache.as_ref().map(|(key, ..)| *key),
+            self.cache.as_ref().map(|cached| cached.key),
+            self.hybrid_cache.as_ref().map(|cached| cached.key),
         )
     }
 }
@@ -1611,6 +1673,65 @@ mod tests {
         let editor = key_with(&EditorFontScheme::default());
         let official = key_with(&crate::models::EditorFontPreset::Official.scheme());
         assert_ne!(editor, official, "换了字面方案就得重新排版");
+    }
+
+    /// 明暗互换会改 `Visuals::text_options`（深浅底的字形灰度曲线不同），epaint
+    /// 因此在下一帧开头整份重建字形图集，之前排好的 galley 里记的图集坐标全部作
+    /// 废——继续画就是缺字或乱码。缓存键这时一个字节都没变（文本、宽度、配色版本
+    /// 号都不受 egui 内部 visuals 影响），所以只有「每帧重新向 epaint 要一次」才
+    /// 能接住这次重建。
+    #[test]
+    fn swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let mut highlighter = MarkdownHighlighter::default();
+        let layout_once = |highlighter: &mut MarkdownHighlighter| {
+            let mut galleys = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                galleys = Some((
+                    highlighter.layout(
+                        ui,
+                        SAMPLE,
+                        400.0,
+                        14.0,
+                        None,
+                        &[],
+                        &EditorFontScheme::default(),
+                    ),
+                    highlighter.layout_hybrid(
+                        ui,
+                        SAMPLE,
+                        600.0,
+                        0,
+                        None,
+                        &[],
+                        &crate::models::NumberingConfig::default(),
+                    ),
+                ));
+            });
+            galleys.expect("run_ui 一定跑过闭包")
+        };
+
+        ctx.set_theme(egui::ThemePreference::Light);
+        let light = layout_once(&mut highlighter);
+        assert!(
+            Arc::ptr_eq(&light.0, &layout_once(&mut highlighter).0),
+            "配色与字形图集都没动就该复用同一份 galley"
+        );
+        let keys = highlighter.cache_keys();
+
+        ctx.set_theme(egui::ThemePreference::Dark);
+        let dark = layout_once(&mut highlighter);
+
+        assert_eq!(keys, highlighter.cache_keys(), "明暗互换不会改变缓存键");
+        assert!(
+            !Arc::ptr_eq(&light.0, &dark.0),
+            "源码模式必须换成按新图集排的 galley"
+        );
+        assert!(
+            !Arc::ptr_eq(&light.1, &dark.1),
+            "实时排版必须换成按新图集排的 galley"
+        );
     }
 
     /// 切主题只改全局配色、不改一个字：缓存键要是只看文本，编辑区就会继续画着

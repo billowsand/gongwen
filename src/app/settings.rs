@@ -522,7 +522,7 @@ impl GongwenApp {
     pub(crate) fn apply_theme(&mut self, ctx: &egui::Context, name: ThemeName) {
         self.config.theme = name;
         theme::set_current(name);
-        theme::configure_style(ctx);
+        theme::reconfigure_style(ctx);
         theme::apply_app_icon(ctx, name);
         self.status = format!("界面主题已切换为「{}」。", theme::by_name(name).label);
         let _ = storage::save(&self.config);

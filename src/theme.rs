@@ -2461,6 +2461,16 @@ pub fn configure_style(ctx: &egui::Context) {
     ctx.set_style_of(base, style);
 }
 
+/// 在 UI 事件处理中切换主题。
+///
+/// 当前帧的根 `Ui` 在菜单点击前已经按旧主题创建；普通重绘不能丢掉这一次混合
+/// 新旧样式的绘制结果。作废当前 pass 后，egui 会在同一帧立即重跑 UI，新的根
+/// `Ui`、Markdown 编辑器与滚动区因而从一开始就使用同一套主题。
+pub fn reconfigure_style(ctx: &egui::Context) {
+    configure_style(ctx);
+    ctx.request_discard("界面主题已切换，按新样式重排当前帧");
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Color32, app_icon, configure_icons};
@@ -2473,6 +2483,23 @@ mod tests {
         configure_icons(&ctx);
 
         assert!(ctx.is_loader_installed(egui_extras::loaders::image_loader::ImageCrateLoader::ID));
+    }
+
+    /// 主题是在一次 UI 帧处理菜单点击时切换的，而这一帧已经创建的 `Ui` 仍持有
+    /// 切换前的样式。必须作废当前 pass 并重跑，避免把新旧主题混绘到窗口中。
+    #[test]
+    fn reconfiguring_style_restarts_the_current_frame() {
+        let ctx = egui::Context::default();
+        let mut passes = 0;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            if passes == 0 {
+                super::reconfigure_style(ui.ctx());
+            }
+            passes += 1;
+        });
+
+        assert_eq!(passes, 2, "主题切换必须作废旧样式所在的第一遍 UI");
+        assert_eq!(output.platform_output.num_completed_passes, 2);
     }
 
     #[test]
