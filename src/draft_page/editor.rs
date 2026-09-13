@@ -530,6 +530,7 @@ impl DraftPage<'_> {
         let text = &mut self.doc.generated_markdown;
         let highlighter = &mut self.doc.highlighter;
         let numbering = self.config.numbering;
+        let editor_fonts = self.config.editor_fonts;
         let mut editor_lost_focus = false;
         let mut cursor_follow = None;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -551,6 +552,7 @@ impl DraftPage<'_> {
                     editor_font_size,
                     anchor.as_ref(),
                     &search_matches,
+                    &editor_fonts,
                 )
             }
         };

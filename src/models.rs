@@ -1182,6 +1182,218 @@ impl PaperMode {
     }
 }
 
+/// Markdown 源码编辑器里某一处可以用的字面。
+///
+/// 「编辑器字体」是设置里那支通用编辑器字体（没单独选就跟随界面字体）；其余四项
+/// 是公文预览与导出用的同一批字面，选了它们，源码里看到的标题、正文就与预览、
+/// 打印稿一个模样——不熟悉 Markdown 的人不必在脑子里做一次「标记→版式」的换算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorFontFace {
+    /// 跟随编辑器字体，即改动此项之前的一贯行为。
+    #[default]
+    Editor,
+    /// 方正小标宋：公文大标题。
+    Biaosong,
+    /// 黑体：一级标题「一、」。
+    Heiti,
+    /// 楷体：二级标题「（一）」。
+    Kaiti,
+    /// 仿宋：正文与三级以下标题。
+    Fangsong,
+}
+
+impl EditorFontFace {
+    /// 全部可选项，顺序与设置页展示一致。
+    pub const ALL: [EditorFontFace; 5] = [
+        Self::Editor,
+        Self::Biaosong,
+        Self::Heiti,
+        Self::Kaiti,
+        Self::Fangsong,
+    ];
+
+    /// 设置页展示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Editor => "编辑器字体",
+            Self::Biaosong => "小标宋",
+            Self::Heiti => "黑体",
+            Self::Kaiti => "楷体",
+            Self::Fangsong => "仿宋",
+        }
+    }
+}
+
+/// 源码编辑器里可以分别指定字面的六处 Markdown 元素。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditorFontSlot {
+    /// `#` 文档标题。
+    Title,
+    /// `##` 一级标题。
+    Heading1,
+    /// `###` 二级标题。
+    Heading2,
+    /// `####` 及更深的标题。
+    Heading3,
+    /// 正文、列表与表格单元。
+    Body,
+    /// `#`、`|`、`**` 等结构标记，以及行内代码与 HTML 注释。
+    Mark,
+}
+
+impl EditorFontSlot {
+    /// 全部元素，顺序与设置页展示一致。
+    pub const ALL: [EditorFontSlot; 6] = [
+        Self::Title,
+        Self::Heading1,
+        Self::Heading2,
+        Self::Heading3,
+        Self::Body,
+        Self::Mark,
+    ];
+
+    /// 设置页展示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Title => "文档标题（#）",
+            Self::Heading1 => "一级标题（##）",
+            Self::Heading2 => "二级标题（###）",
+            Self::Heading3 => "三级及以下标题",
+            Self::Body => "正文、列表与表格",
+            Self::Mark => "标记与行内代码",
+        }
+    }
+
+    /// 设置页的悬停说明。
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Title => "公文大标题，预览里是方正小标宋",
+            Self::Heading1 => "一级标题「一、」，预览里是黑体",
+            Self::Heading2 => "二级标题「（一）」，预览里是楷体",
+            Self::Heading3 => "三级、四级标题，预览里随正文用仿宋",
+            Self::Body => "正文段落、列表项与表格单元，预览里是仿宋",
+            Self::Mark => {
+                "`#`、`|`、`**` 这些只在源码里出现的符号，以及行内代码、HTML 注释。\
+                          它们在成稿里没有对应物，留在编辑器字体上更容易一眼认出"
+            }
+        }
+    }
+}
+
+/// 源码编辑器的 Markdown 字面方案：每处元素各用哪支字体。
+///
+/// 默认六处全是「编辑器字体」，与加入本设置之前的显示完全一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorFontScheme {
+    pub title: EditorFontFace,
+    pub heading1: EditorFontFace,
+    pub heading2: EditorFontFace,
+    pub heading3: EditorFontFace,
+    pub body: EditorFontFace,
+    pub mark: EditorFontFace,
+}
+
+impl EditorFontScheme {
+    /// 取某一处元素当前用的字面。
+    pub fn face(&self, slot: EditorFontSlot) -> EditorFontFace {
+        match slot {
+            EditorFontSlot::Title => self.title,
+            EditorFontSlot::Heading1 => self.heading1,
+            EditorFontSlot::Heading2 => self.heading2,
+            EditorFontSlot::Heading3 => self.heading3,
+            EditorFontSlot::Body => self.body,
+            EditorFontSlot::Mark => self.mark,
+        }
+    }
+
+    /// 可写引用，供设置页逐项改。
+    pub fn face_mut(&mut self, slot: EditorFontSlot) -> &mut EditorFontFace {
+        match slot {
+            EditorFontSlot::Title => &mut self.title,
+            EditorFontSlot::Heading1 => &mut self.heading1,
+            EditorFontSlot::Heading2 => &mut self.heading2,
+            EditorFontSlot::Heading3 => &mut self.heading3,
+            EditorFontSlot::Body => &mut self.body,
+            EditorFontSlot::Mark => &mut self.mark,
+        }
+    }
+
+    /// 标题按公文字面走，正文与标记仍留在编辑器字体上。
+    fn official_headings() -> Self {
+        Self {
+            title: EditorFontFace::Biaosong,
+            heading1: EditorFontFace::Heiti,
+            heading2: EditorFontFace::Kaiti,
+            heading3: EditorFontFace::Fangsong,
+            body: EditorFontFace::Editor,
+            mark: EditorFontFace::Editor,
+        }
+    }
+
+    /// 正文也换成仿宋：源码看起来最接近成稿。
+    fn official() -> Self {
+        Self {
+            body: EditorFontFace::Fangsong,
+            ..Self::official_headings()
+        }
+    }
+}
+
+/// 设置页预置的几套字面方案。挑一套就够用，不想逐项配的人不必逐项配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EditorFontPreset {
+    /// 全部用编辑器字体：一眼能看出哪些是 Markdown 标记，是默认。
+    #[default]
+    Editor,
+    /// 只有标题换成公文字面，正文仍是编辑器字体。
+    OfficialHeadings,
+    /// 标题与正文都用公文字面，最像成稿。
+    Official,
+}
+
+impl EditorFontPreset {
+    /// 全部模板，顺序与设置页展示一致。
+    pub const ALL: [EditorFontPreset; 3] = [Self::Editor, Self::OfficialHeadings, Self::Official];
+
+    /// 设置页展示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Editor => "编辑器字体",
+            Self::OfficialHeadings => "标题随公文",
+            Self::Official => "与公文一致",
+        }
+    }
+
+    /// 设置页的悬停说明。
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Editor => "六处全用编辑器字体，Markdown 标记最醒目（默认）",
+            Self::OfficialHeadings => {
+                "标题用小标宋/黑体/楷体，正文仍用编辑器字体，兼顾像成稿与好编辑"
+            }
+            Self::Official => "标题与正文都按公文字面排，源码看着最接近打印稿",
+        }
+    }
+
+    /// 该模板对应的方案。
+    pub fn scheme(self) -> EditorFontScheme {
+        match self {
+            Self::Editor => EditorFontScheme::default(),
+            Self::OfficialHeadings => EditorFontScheme::official_headings(),
+            Self::Official => EditorFontScheme::official(),
+        }
+    }
+
+    /// 方案正好等于哪个模板；逐项改出来的组合返回 `None`（设置页显示「自定义」）。
+    pub fn matching(scheme: &EditorFontScheme) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|preset| preset.scheme() == *scheme)
+    }
+}
+
 /// 起草页功能区的分区卡。仿 Word：第一行选分区，第二行才是该分区的按钮。
 ///
 /// 记在配置里而不是每篇稿件各记各的——切分区是「我现在要干哪一类活」，
@@ -1419,6 +1631,9 @@ pub struct AppConfig {
     pub theme: ThemeName,
     /// 屏幕上公文纸面的明暗。导出结果不受影响。
     pub paper: PaperMode,
+    /// 源码编辑器里各处 Markdown 元素分别用哪支字面。旧配置缺该字段时按默认值
+    /// 补齐，即六处全用编辑器字体。
+    pub editor_fonts: EditorFontScheme,
     /// 起草页功能区上次停在哪个分区卡。
     pub ribbon_tab: RibbonTab,
     /// 功能区第二行（当前分区的按钮）是否收起，只留分区卡那一条。
@@ -1454,6 +1669,7 @@ impl Default for AppConfig {
             numbering: NumberingConfig::default(),
             theme: ThemeName::default(),
             paper: PaperMode::default(),
+            editor_fonts: EditorFontScheme::default(),
             ribbon_tab: RibbonTab::default(),
             ribbon_collapsed: false,
         }
@@ -2390,5 +2606,44 @@ mod tests {
         assert_eq!(back.profile.document_number, "某教函〔2026〕12号");
         assert!(!back.date_is_auto);
         assert_eq!(back.attendees, "张三、李四");
+    }
+    /// 三套模板都要能被反认出来，否则设置页选完一套立刻显示成「自定义」。
+    #[test]
+    fn every_editor_font_preset_is_recognised_from_its_scheme() {
+        for preset in EditorFontPreset::ALL {
+            assert_eq!(
+                EditorFontPreset::matching(&preset.scheme()),
+                Some(preset),
+                "{} 这套模板认不回来了",
+                preset.label()
+            );
+        }
+    }
+
+    /// 默认方案必须就是「编辑器字体」那套：老配置升级上来显示不能变。
+    #[test]
+    fn the_default_editor_font_scheme_is_the_editor_preset() {
+        assert_eq!(
+            EditorFontScheme::default(),
+            EditorFontPreset::Editor.scheme()
+        );
+        for slot in EditorFontSlot::ALL {
+            assert_eq!(
+                EditorFontScheme::default().face(slot),
+                EditorFontFace::Editor,
+                "{} 默认不该换字面",
+                slot.label()
+            );
+        }
+    }
+
+    /// 旧配置文件里没有这一项，读出来要落到默认值上，而不是报错。
+    #[test]
+    fn a_config_without_editor_fonts_falls_back_to_the_default_scheme() {
+        let config: AppConfig = serde_json::from_str("{}").expect("空配置应能读出默认值");
+        assert_eq!(config.editor_fonts, EditorFontScheme::default());
+        let json = serde_json::to_string(&config).expect("配置应能序列化");
+        let back: AppConfig = serde_json::from_str(&json).expect("配置应能反序列化");
+        assert_eq!(back.editor_fonts, config.editor_fonts);
     }
 }

@@ -9,7 +9,8 @@
 
 use crate::app::{GongwenApp, warn};
 use crate::models::{
-    BoldStyle, FontRole, HeadingNumbering, ListNumbering, PaperMode, RerankMode, ThemeName,
+    BoldStyle, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole, HeadingNumbering,
+    ListNumbering, PaperMode, RerankMode, ThemeName,
 };
 use crate::storage;
 use crate::system_fonts;
@@ -726,6 +727,8 @@ impl GongwenApp {
             }
         });
 
+        self.editor_font_scheme_ui(ui);
+
         sub_heading(
             ui,
             "公文编译字体",
@@ -772,6 +775,57 @@ impl GongwenApp {
         if self.config.fonts != before {
             // 预览也跟着换，否则屏幕上的版式和编译出来的 PDF 对不上。
             theme::configure_fonts(ui.ctx(), &self.config.fonts);
+        }
+    }
+
+    /// 源码编辑器里各处 Markdown 元素分别用哪支字面。
+    ///
+    /// 设这一项是给不熟悉 Markdown 的人用的：`#` 换成小标宋、`##` 换成黑体之后，
+    /// 源码里看到的层级就是成稿上的层级，不必再在脑子里把标记换算成版式。默认
+    /// 仍是六处全用编辑器字体，老用户什么都不会变。
+    fn editor_font_scheme_ui(&mut self, ui: &mut egui::Ui) {
+        sub_heading(
+            ui,
+            "源码编辑器的 Markdown 字面",
+            Some(
+                "只改 Markdown 源码模式里的字面，字号、行距与导出结果都不受影响；\
+                 公文字面与预览、导出同源，选了仿宋就是预览里那支仿宋。",
+            ),
+        );
+        setting_row(
+            ui,
+            "模板",
+            Some("挑一套就够用，也可以在下面逐项改"),
+            |ui| {
+                let current = EditorFontPreset::matching(&self.config.editor_fonts);
+                for preset in EditorFontPreset::ALL {
+                    let selected = current == Some(preset);
+                    if ui
+                        .add(theme::menu_selectable_item(selected, preset.label()))
+                        .on_hover_text(preset.hint())
+                        .clicked()
+                        && !selected
+                    {
+                        self.config.editor_fonts = preset.scheme();
+                    }
+                }
+                if current.is_none() {
+                    ui.weak("自定义");
+                }
+            },
+        );
+        for slot in EditorFontSlot::ALL {
+            setting_row(ui, slot.label(), Some(slot.hint()), |ui| {
+                let face = self.config.editor_fonts.face_mut(slot);
+                egui::ComboBox::from_id_salt(format!("editor_font_slot_{slot:?}"))
+                    .selected_text(face.label())
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        for option in EditorFontFace::ALL {
+                            ui.selectable_value(face, option, option.label());
+                        }
+                    });
+            });
         }
     }
 

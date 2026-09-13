@@ -8,7 +8,7 @@
 //! 只需一次哈希；配色版本让切主题、换纸面之后的第一帧就重新上色，而不是等到下
 //! 一次改字或挪光标。
 
-use crate::models::NumberingConfig;
+use crate::models::{EditorFontScheme, EditorFontSlot, NumberingConfig};
 use crate::{export, theme};
 use eframe::egui::{
     self, Color32, FontId,
@@ -29,6 +29,7 @@ pub struct MarkdownHighlighter {
 
 impl MarkdownHighlighter {
     /// 供 `TextEdit::layouter` 调用：文本、宽度和锚点都没变时直接复用上一帧的 galley。
+    #[allow(clippy::too_many_arguments)]
     pub fn layout(
         &mut self,
         ui: &egui::Ui,
@@ -37,12 +38,14 @@ impl MarkdownHighlighter {
         base_size: f32,
         anchor: Option<&Range<usize>>,
         search_matches: &[Range<usize>],
+        fonts: &EditorFontScheme,
     ) -> Arc<egui::Galley> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
         anchor.hash(&mut hasher);
         search_matches.hash(&mut hasher);
         base_size.to_bits().hash(&mut hasher);
+        fonts.hash(&mut hasher);
         theme::revision().hash(&mut hasher);
         let key = hasher.finish();
         let width = wrap_width.to_bits();
@@ -52,7 +55,7 @@ impl MarkdownHighlighter {
         {
             return galley.clone();
         }
-        let job = highlight(text, wrap_width, base_size, anchor, search_matches);
+        let job = highlight(text, wrap_width, base_size, anchor, search_matches, fonts);
         let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
         self.cache = Some((key, width, galley.clone()));
         galley
@@ -227,11 +230,16 @@ pub fn highlight(
     base_size: f32,
     anchor: Option<&Range<usize>>,
     search_matches: &[Range<usize>],
+    scheme: &EditorFontScheme,
 ) -> LayoutJob {
-    // 源码模式用独立的编辑器字体族：用户在设置里选了编辑器字体就生效，
-    // 没选时族内整份回退到界面字体，行为与之前的 Proportional 一致。
-    let family = egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into());
-    let body = FontId::new(base_size, family.clone());
+    // 源码模式默认用独立的编辑器字体族：用户在设置里选了编辑器字体就生效，
+    // 没选时族内整份回退到界面字体，行为与之前的 Proportional 一致。设置里把
+    // 某一处换成公文字面时，那一处改用与预览、导出同源的那支字体。
+    let fonts = EditorFonts {
+        base_size,
+        scheme: *scheme,
+    };
+    let body = fonts.font(EditorFontSlot::Body, base_size);
 
     let mut job = LayoutJob {
         wrap: egui::text::TextWrapping {
@@ -247,7 +255,7 @@ pub fn highlight(
         if index > 0 {
             job.append("\n", 0.0, format(body.clone(), theme::md::body()));
         }
-        highlight_line(&mut job, line, base_size, &family);
+        highlight_line(&mut job, line, &fonts);
     }
     for range in search_matches {
         paint_range(&mut job, range, theme::md::search_bg());
@@ -699,8 +707,40 @@ fn paint_range(job: &mut LayoutJob, anchor: &Range<usize>, background: Color32) 
     job.sections = sections;
 }
 
-fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui::FontFamily) {
-    let body = FontId::new(base_size, family.clone());
+/// 一次高亮里各处元素该用哪支字面。字号仍按编辑器基准字号走，
+/// 换的只是字面——源码编辑器首先得好编辑，不是第二个预览。
+#[derive(Clone, Copy)]
+struct EditorFonts {
+    base_size: f32,
+    scheme: EditorFontScheme,
+}
+
+impl EditorFonts {
+    /// 某处元素在给定字号下的字体。
+    fn font(&self, slot: EditorFontSlot, size: f32) -> FontId {
+        FontId::new(size, theme::editor_face_family(self.scheme.face(slot)))
+    }
+
+    /// 结构标记的字体。标记跟着它所修饰的那段一起放大，否则标题行的 `#`
+    /// 会比标题矮一截，看着像掉了行。
+    fn mark(&self, size: f32) -> FontId {
+        self.font(EditorFontSlot::Mark, size)
+    }
+
+    /// `#` 的个数对应的标题槽位；六级以内都有归属。
+    fn heading_slot(hashes: usize) -> EditorFontSlot {
+        match hashes {
+            1 => EditorFontSlot::Title,
+            2 => EditorFontSlot::Heading1,
+            3 => EditorFontSlot::Heading2,
+            _ => EditorFontSlot::Heading3,
+        }
+    }
+}
+
+fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts) {
+    let base_size = fonts.base_size;
+    let body = fonts.font(EditorFontSlot::Body, base_size);
     let trimmed = line.trim_start();
     if trimmed.is_empty() {
         job.append(line, 0.0, format(body, theme::md::body()));
@@ -716,7 +756,11 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
         job.append(
             trimmed,
             0.0,
-            filled(body, theme::md::comment(), theme::md::comment_bg()),
+            filled(
+                fonts.mark(base_size),
+                theme::md::comment(),
+                theme::md::comment_bg(),
+            ),
         );
         return;
     }
@@ -735,7 +779,8 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
             3 => 1.07,
             _ => 1.0,
         };
-        let font = FontId::new((base_size * scale).round(), family.clone());
+        let size = (base_size * scale).round();
+        let font = fonts.font(EditorFonts::heading_slot(hashes), size);
         let color = if hashes == 1 {
             theme::md::title()
         } else {
@@ -745,26 +790,30 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
         job.append(
             &trimmed[..split],
             0.0,
-            format(font.clone(), theme::md::marker()),
+            format(fonts.mark(size), theme::md::marker()),
         );
-        append_inline(job, &trimmed[split..], &format(font, color));
+        append_inline(job, &trimmed[split..], &format(font, color), fonts);
         return;
     }
 
     // 表格：竖线压成浅色，分隔行整行弱化，单元格内容用独立的蓝灰色。
     if trimmed.contains('|') && trimmed.matches('|').count() >= 2 {
         if is_separator_row(trimmed) {
-            job.append(trimmed, 0.0, format(body, theme::md::table_rule()));
+            job.append(
+                trimmed,
+                0.0,
+                format(fonts.mark(base_size), theme::md::table_rule()),
+            );
             return;
         }
         let cell = format(body.clone(), theme::md::table_cell());
-        let pipe = format(body, theme::md::table_pipe());
+        let pipe = format(fonts.mark(base_size), theme::md::table_pipe());
         for piece in trimmed.split_inclusive('|') {
             let (content, bar) = match piece.strip_suffix('|') {
                 Some(content) => (content, true),
                 None => (piece, false),
             };
-            append_inline(job, content, &cell);
+            append_inline(job, content, &cell, fonts);
             if bar {
                 job.append("|", 0.0, pipe.clone());
             }
@@ -777,9 +826,9 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
         job.append(
             &trimmed[..2],
             0.0,
-            format(body.clone(), theme::md::bullet()),
+            format(fonts.mark(base_size), theme::md::bullet()),
         );
-        append_inline(job, rest, &format(body, theme::md::body()));
+        append_inline(job, rest, &format(body, theme::md::body()), fonts);
         return;
     }
 
@@ -788,13 +837,13 @@ fn highlight_line(job: &mut LayoutJob, line: &str, base_size: f32, family: &egui
         job.append(
             &trimmed[..split],
             0.0,
-            format(body.clone(), theme::md::bullet()),
+            format(fonts.mark(base_size), theme::md::bullet()),
         );
-        append_inline(job, rest, &format(body, theme::md::body()));
+        append_inline(job, rest, &format(body, theme::md::body()), fonts);
         return;
     }
 
-    append_inline(job, trimmed, &format(body, theme::md::body()));
+    append_inline(job, trimmed, &format(body, theme::md::body()), fonts);
 }
 
 fn is_separator_row(line: &str) -> bool {
@@ -813,8 +862,9 @@ fn is_separator_row(line: &str) -> bool {
 
 /// 行内规则：`**加粗**`、`` `代码` ``、`【待核实：…】`、中文引号。
 /// 未命中的部分按 `base` 输出，因此标题、表格单元都能复用这套扫描。
-fn append_inline(job: &mut LayoutJob, text: &str, base: &TextFormat) {
+fn append_inline(job: &mut LayoutJob, text: &str, base: &TextFormat, fonts: &EditorFonts) {
     let font = base.font_id.clone();
+    let mark_font = fonts.mark(font.size);
     let mut plain_start = 0usize;
     let mut index = 0usize;
     while index < text.len() {
@@ -838,11 +888,17 @@ fn append_inline(job: &mut LayoutJob, text: &str, base: &TextFormat) {
             Inline::Todo => (theme::md::todo(), theme::md::todo_bg(), true),
             Inline::Quoted => (theme::md::quoted(), Color32::TRANSPARENT, true),
         };
-        let content = filled(font.clone(), color, background);
+        // 行内代码是源码里才有的东西，跟着标记走；加粗、待核实、引号内都是
+        // 成稿上的正文，继承所属元素的字面。
+        let content_font = match kind {
+            Inline::Code => mark_font.clone(),
+            _ => font.clone(),
+        };
+        let content = filled(content_font, color, background);
         if keep_marks {
             job.append(&rest[..span_end], 0.0, content);
         } else {
-            let marker = format(font.clone(), theme::md::marker());
+            let marker = format(mark_font.clone(), theme::md::marker());
             job.append(&rest[..open_len], 0.0, marker.clone());
             job.append(&rest[open_len..content_end], 0.0, content);
             job.append(&rest[content_end..span_end], 0.0, marker);
@@ -911,7 +967,7 @@ mod tests {
     use super::*;
 
     fn sections(text: &str) -> Vec<(String, Color32)> {
-        let job = highlight(text, 400.0, 14.0, None, &[]);
+        let job = highlight(text, 400.0, 14.0, None, &[], &EditorFontScheme::default());
         job.sections
             .iter()
             .map(|section| {
@@ -951,7 +1007,7 @@ mod tests {
     }
 
     fn assert_covers_with(text: &str, anchor: Option<&Range<usize>>) {
-        let job = highlight(text, 400.0, 14.0, anchor, &[]);
+        let job = highlight(text, 400.0, 14.0, anchor, &[], &EditorFontScheme::default());
         assert_eq!(job.text, text);
         let mut cursor = 0usize;
         for section in &job.sections {
@@ -972,7 +1028,14 @@ mod tests {
         let text = "# 标题\n\n第一段。\n\n第二段。\n";
         let anchor = text.find("第一段。").expect("样例里有第一段")..;
         let anchor = anchor.start..anchor.start + "第一段。".len();
-        let job = highlight(text, 400.0, 14.0, Some(&anchor), &[]);
+        let job = highlight(
+            text,
+            400.0,
+            14.0,
+            Some(&anchor),
+            &[],
+            &EditorFontScheme::default(),
+        );
 
         for section in &job.sections {
             let (start, end) = (section.byte_range.start.0, section.byte_range.end.0);
@@ -1003,7 +1066,14 @@ mod tests {
         let text = "重点与重点";
         let matches = vec![0.."重点".len(), "重点与".len()..text.len()];
         let current = matches[1].clone();
-        let job = highlight(text, 400.0, 14.0, Some(&current), &matches);
+        let job = highlight(
+            text,
+            400.0,
+            14.0,
+            Some(&current),
+            &matches,
+            &EditorFontScheme::default(),
+        );
         assert!(job.sections.iter().any(|section| {
             section.byte_range.start.0 == matches[0].start
                 && section.format.background == theme::md::search_bg()
@@ -1272,7 +1342,14 @@ mod tests {
 
     #[test]
     fn markdown_source_uses_the_editor_font_family() {
-        let job = highlight("正文 **重点**", 400.0, 14.0, None, &[]);
+        let job = highlight(
+            "正文 **重点**",
+            400.0,
+            14.0,
+            None,
+            &[],
+            &EditorFontScheme::default(),
+        );
         // 源码模式走独立的编辑器字体族；族内回退链在 configure_fonts 里拼好。
         let expected = egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into());
         assert!(
@@ -1434,6 +1511,108 @@ mod tests {
         );
     }
 
+    /// 每段文字用的字体族，供字面方案的用例断言。
+    fn families(text: &str, scheme: &EditorFontScheme) -> Vec<(String, egui::FontFamily)> {
+        let job = highlight(text, 400.0, 14.0, None, &[], scheme);
+        job.sections
+            .iter()
+            .map(|section| {
+                (
+                    job.text[section.byte_range.start.0..section.byte_range.end.0].to_string(),
+                    section.format.font_id.family.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// 某段文字用的字体族；`text` 必须在结果里唯一出现一次。
+    fn family_of(sections: &[(String, egui::FontFamily)], needle: &str) -> egui::FontFamily {
+        // 相邻同格式的分段会被 `LayoutJob` 合并，正文段前的换行因此常常粘在
+        // 正文头上；比对时把它剥掉。
+        let mut hit = sections
+            .iter()
+            .filter(|(piece, _)| piece.trim_start_matches('\n') == needle);
+        let (_, family) = hit.next().unwrap_or_else(|| {
+            panic!("没有找到分段 {needle:?}：{sections:?}");
+        });
+        assert!(hit.next().is_none(), "分段 {needle:?} 出现了不止一次");
+        family.clone()
+    }
+
+    const SAMPLE: &str = "# 关于加强某项工作的通知\n## 一、总体要求\n### （一）指导思想\n#### 1. 基本原则\n各地各校要按期报送。";
+
+    /// 默认方案就是加入这项设置之前的样子：六处全用编辑器字体。
+    #[test]
+    fn the_default_scheme_keeps_everything_on_the_editor_font() {
+        let editor = theme::editor_face_family(crate::models::EditorFontFace::Editor);
+        for (piece, family) in families(SAMPLE, &EditorFontScheme::default()) {
+            assert_eq!(family, editor, "默认方案下 {piece:?} 不该换字面");
+        }
+    }
+
+    /// 「与公文一致」：`#` 小标宋、`##` 黑体、`###` 楷体，其余仿宋，
+    /// 而只在源码里出现的 `#` 标记仍留在编辑器字体上，方便一眼认出。
+    #[test]
+    fn the_official_preset_maps_each_level_to_its_document_face() {
+        use crate::models::{EditorFontFace, EditorFontPreset};
+        let scheme = EditorFontPreset::Official.scheme();
+        let sections = families(SAMPLE, &scheme);
+        for (needle, face) in [
+            ("关于加强某项工作的通知", EditorFontFace::Biaosong),
+            ("一、总体要求", EditorFontFace::Heiti),
+            ("（一）指导思想", EditorFontFace::Kaiti),
+            ("1. 基本原则", EditorFontFace::Fangsong),
+            ("各地各校要按期报送。", EditorFontFace::Fangsong),
+        ] {
+            assert_eq!(
+                family_of(&sections, needle),
+                theme::editor_face_family(face),
+                "{needle:?} 应当排成{}",
+                face.label()
+            );
+        }
+        let editor = theme::editor_face_family(EditorFontFace::Editor);
+        for marker in ["# ", "## ", "### ", "#### "] {
+            assert_eq!(
+                family_of(&sections, marker),
+                editor,
+                "{marker:?} 是源码里才有的标记，应留在编辑器字体上"
+            );
+        }
+    }
+
+    /// 「标题随公文」只换标题：正文仍是编辑器字体，长段落照旧好编辑。
+    #[test]
+    fn the_heading_preset_leaves_the_body_on_the_editor_font() {
+        use crate::models::{EditorFontFace, EditorFontPreset};
+        let sections = families(SAMPLE, &EditorFontPreset::OfficialHeadings.scheme());
+        assert_eq!(
+            family_of(&sections, "关于加强某项工作的通知"),
+            theme::editor_face_family(EditorFontFace::Biaosong)
+        );
+        assert_eq!(
+            family_of(&sections, "各地各校要按期报送。"),
+            theme::editor_face_family(EditorFontFace::Editor)
+        );
+    }
+
+    /// 换字面也要让缓存失效，否则和切主题一样会停在上一套字体上。
+    #[test]
+    fn changing_the_font_scheme_changes_the_cache_key() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let mut highlighter = MarkdownHighlighter::default();
+        let mut key_with = |scheme: &EditorFontScheme| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                highlighter.layout(ui, SAMPLE, 400.0, 14.0, None, &[], scheme);
+            });
+            highlighter.cache_keys().0
+        };
+        let editor = key_with(&EditorFontScheme::default());
+        let official = key_with(&crate::models::EditorFontPreset::Official.scheme());
+        assert_ne!(editor, official, "换了字面方案就得重新排版");
+    }
+
     /// 切主题只改全局配色、不改一个字：缓存键要是只看文本，编辑区就会继续画着
     /// 上一套颜色，直到用户挪一下光标或敲一个字才刷新——这正是「切完主题显示不
     /// 对、点一下才恢复」的成因。这里特意重新选中当前那套主题：配色版本照样 +1，
@@ -1446,7 +1625,15 @@ mod tests {
         let mut highlighter = MarkdownHighlighter::default();
         let layout_once = |highlighter: &mut MarkdownHighlighter| {
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                highlighter.layout(ui, text, 400.0, 14.0, None, &[]);
+                highlighter.layout(
+                    ui,
+                    text,
+                    400.0,
+                    14.0,
+                    None,
+                    &[],
+                    &EditorFontScheme::default(),
+                );
                 highlighter.layout_hybrid(
                     ui,
                     text,

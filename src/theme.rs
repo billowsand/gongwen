@@ -6,7 +6,7 @@
 //! （预览、编辑区）的取色集中在 [`paper`] 模块，按设置里的纸面明暗走，导出的
 //! DOCX/TeX/PDF 一律仍是白纸黑字红头，不受主题影响。
 
-use crate::models::{FontConfig, FontRole, PaperMode, ThemeName};
+use crate::models::{EditorFontFace, FontConfig, FontRole, PaperMode, ThemeName};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2135,6 +2135,18 @@ fn load_system_ui_font(fonts: &mut egui::FontDefinitions, key: &str) -> Option<S
 /// 取公文字体族。字体缺失时 `configure_fonts` 会使用独立的预览后备字体，不会报错。
 pub fn official_family(name: &str) -> egui::FontFamily {
     egui::FontFamily::Name(name.into())
+}
+
+/// 源码编辑器里某一处元素该用的字体族。公文字面与预览、导出同源，
+/// 因此编辑器上选了「仿宋」，看到的就是预览里那支仿宋。
+pub fn editor_face_family(face: EditorFontFace) -> egui::FontFamily {
+    match face {
+        EditorFontFace::Editor => egui::FontFamily::Name(EDITOR_FONT_FAMILY.into()),
+        EditorFontFace::Biaosong => official_family(FONT_BIAOSONG),
+        EditorFontFace::Heiti => official_family(FONT_HEITI),
+        EditorFontFace::Kaiti => official_family(FONT_KAITI),
+        EditorFontFace::Fangsong => official_family(FONT_FANGSONG),
+    }
 }
 
 /// 依次尝试候选路径，把第一个读到的字体以 `key` 存入 `font_data`。
