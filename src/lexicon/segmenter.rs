@@ -87,6 +87,12 @@ pub fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// 测试里当前挂着的是不是用户词典。守卫据此决定要不要装回自带词典——
+/// 载入一次自带词典要几十毫秒，没换过就不必付这个钱。
+#[cfg(test)]
+static USER_DICT_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 测试用的串行锁。
 ///
 /// 共享分词器是进程级的全局状态，而 `cargo test` 默认多线程跑：一个用例刚
@@ -94,12 +100,6 @@ pub fn words(text: &str) -> Vec<String> {
 /// 抢在它断言之前把词典撤掉——表现为「挂上用户词典后应整词切出」这类偶发失败，
 /// 单跑却怎么都复现不出来。凡是换用户词典、或断言依赖某一本词典的用例，都先取
 /// 这把锁；锁一释放才轮到下一个。
-/// 测试里当前挂着的是不是用户词典。守卫据此决定要不要装回自带词典——
-/// 载入一次自带词典要几十毫秒，没换过就不必付这个钱。
-#[cfg(test)]
-static USER_DICT_INSTALLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 #[cfg(test)]
 pub(crate) fn test_lock() -> TestGuard {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
