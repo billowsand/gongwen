@@ -40,6 +40,13 @@ pub fn install_user_dict(dict: &str) {
             return;
         }
     }
+    // 测试里记一笔「现在挂的不是自带词典」，好让串行锁的守卫只在真有必要时
+    // 才花几十毫秒把自带词典装回去。
+    #[cfg(test)]
+    USER_DICT_INSTALLED.store(
+        !dict.trim().is_empty(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     // 启动时这通常是第一次接触分词器：直接把建好的这个装进去，
     // 走 `cell()` 会先装一遍自带词典再扔掉，白花一次载入时间。
     let jieba = Arc::new(jieba);
@@ -80,24 +87,66 @@ pub fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// 测试用的串行锁。
+///
+/// 共享分词器是进程级的全局状态，而 `cargo test` 默认多线程跑：一个用例刚
+/// `install_user_dict` 挂上词典，另一个用例的 `install_user_dict("")` 就可能
+/// 抢在它断言之前把词典撤掉——表现为「挂上用户词典后应整词切出」这类偶发失败，
+/// 单跑却怎么都复现不出来。凡是换用户词典、或断言依赖某一本词典的用例，都先取
+/// 这把锁；锁一释放才轮到下一个。
+/// 测试里当前挂着的是不是用户词典。守卫据此决定要不要装回自带词典——
+/// 载入一次自带词典要几十毫秒，没换过就不必付这个钱。
+#[cfg(test)]
+static USER_DICT_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn test_lock() -> TestGuard {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // 忽略毒化：某个用例失败不该把锁锁死，连累出一片看不懂的 PoisonError。
+    TestGuard(LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
+/// [`test_lock`] 的守卫：持锁期间独占共享分词器，释放前把自带词典装回去。
+#[cfg(test)]
+pub(crate) struct TestGuard(
+    // 只为按住锁而存在，没人会去读它。
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+);
+
+#[cfg(test)]
+impl Drop for TestGuard {
+    fn drop(&mut self) {
+        // 断言失败 panic 掉的用例来不及自己收尾，交给守卫统一装回自带词典：
+        // 下一个用例不必猜上一个留下了什么。这一步仍在锁内——内层的
+        // `MutexGuard` 要等本函数返回后才释放。
+        if USER_DICT_INSTALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            install_user_dict("");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn tokenize_separates_words_with_spaces() {
+        let _guard = test_lock();
         let tokens = tokenize("现将有关事项通知如下");
         assert!(tokens.contains(' '), "jieba 分词应产生空格分隔：{tokens}");
     }
 
     #[test]
     fn user_dict_keeps_a_local_abbreviation_together() {
+        let _guard = test_lock();
         // 自带词典不认识这个简称，会把它切碎；挂上用户词典后应整词切出。
         let coined = "新舆处";
         let before = words(&format!("请{coined}按期报送"));
         install_user_dict(&format!("{coined} 50\n"));
         let after = words(&format!("请{coined}按期报送"));
-        // 换回自带词典，免得影响同进程里的其他测试。
+        // 换回自带词典，免得影响同进程里的其他测试；这一步仍在锁里，
+        // 下一个用例拿到锁时看到的一定是自带词典。
         install_user_dict("");
         assert!(
             after.iter().any(|word| word == coined),
@@ -111,6 +160,7 @@ mod tests {
 
     #[test]
     fn a_broken_user_dict_does_not_destroy_segmentation() {
+        let _guard = test_lock();
         install_user_dict("新舆处 不是数字\n");
         let tokens = tokenize("现将有关事项通知如下");
         install_user_dict("");

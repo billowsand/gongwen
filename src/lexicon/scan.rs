@@ -377,6 +377,9 @@ mod tests {
 
     #[test]
     fn count_terms_honours_blacklist_and_rejections() {
+        // 共享分词器是全局的：这个用例的结论取决于当时挂的是哪本词典，
+        // 与换词典的用例串行跑。
+        let _guard = super::super::segmenter::test_lock();
         let jieba = super::super::segmenter::shared();
         let mut blacklist = HashSet::new();
         blacklist.insert("布署".to_string());
@@ -443,6 +446,9 @@ mod tests {
 
     #[test]
     fn scanning_accumulates_across_manuscripts_and_skips_unchanged_ones() {
+        // 共享分词器是全局的：这个用例的结论取决于当时挂的是哪本词典，
+        // 与换词典的用例串行跑。
+        let _guard = super::super::segmenter::test_lock();
         use crate::models::ManuscriptStatus;
         let dir = seeded_db(&[
             (
@@ -499,6 +505,9 @@ mod tests {
 
     #[test]
     fn narrowing_the_scope_takes_effect_on_a_plain_scan() {
+        // 共享分词器是全局的：这个用例的结论取决于当时挂的是哪本词典，
+        // 与换词典的用例串行跑。
+        let _guard = super::super::segmenter::test_lock();
         use crate::models::ManuscriptStatus;
         let body = "# 通知\n\n现将专项整治有关安排通知如下。";
         let dir = seeded_db(&[
@@ -540,6 +549,9 @@ mod tests {
 
     #[test]
     fn single_characters_and_non_han_never_enter() {
+        // 共享分词器是全局的：这个用例的结论取决于当时挂的是哪本词典，
+        // 与换词典的用例串行跑。
+        let _guard = super::super::segmenter::test_lock();
         let jieba = super::super::segmenter::shared();
         let mut blocked = HashSet::new();
         let counts = count_terms(
