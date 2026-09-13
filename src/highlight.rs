@@ -4,7 +4,9 @@
 //! 把真正要读的内容（标题、表格单元、待核实占位）提亮，让一屏文字有层次。
 //! 另外给“锚点”——即在公文预览里点中的那一块——铺一层淡底，两栏对照时一眼能
 //! 看出版式上的哪一段对应源码里的哪一段。
-//! 高亮结果按（文本, 换行宽度, 锚点, 查找命中）缓存，正常编辑时每帧只需一次哈希。
+//! 高亮结果按（文本, 换行宽度, 锚点, 查找命中, 配色版本）缓存，正常编辑时每帧
+//! 只需一次哈希；配色版本让切主题、换纸面之后的第一帧就重新上色，而不是等到下
+//! 一次改字或挪光标。
 
 use crate::models::NumberingConfig;
 use crate::{export, theme};
@@ -41,6 +43,7 @@ impl MarkdownHighlighter {
         anchor.hash(&mut hasher);
         search_matches.hash(&mut hasher);
         base_size.to_bits().hash(&mut hasher);
+        theme::revision().hash(&mut hasher);
         let key = hasher.finish();
         let width = wrap_width.to_bits();
         if let Some((cached_key, cached_width, galley)) = &self.cache
@@ -73,6 +76,7 @@ impl MarkdownHighlighter {
         anchor.hash(&mut hasher);
         search_matches.hash(&mut hasher);
         numbering.hash(&mut hasher);
+        theme::revision().hash(&mut hasher);
         let key = hasher.finish();
         let width = wrap_width.to_bits();
         if let Some((cached_key, cached_width, cached_line, galley)) = &self.hybrid_cache
@@ -95,6 +99,15 @@ impl MarkdownHighlighter {
         center_document_title_rows(&mut galley, text, wrap_width);
         self.hybrid_cache = Some((key, width, active_line, galley.clone()));
         galley
+    }
+
+    /// 两份缓存当前的键，供测试断言「配色一变，键就变」。
+    #[cfg(test)]
+    fn cache_keys(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.cache.as_ref().map(|(key, ..)| *key),
+            self.hybrid_cache.as_ref().map(|(key, ..)| *key),
+        )
     }
 }
 
@@ -1419,5 +1432,48 @@ mod tests {
                 inline: false,
             })
         );
+    }
+
+    /// 切主题只改全局配色、不改一个字：缓存键要是只看文本，编辑区就会继续画着
+    /// 上一套颜色，直到用户挪一下光标或敲一个字才刷新——这正是「切完主题显示不
+    /// 对、点一下才恢复」的成因。这里特意重新选中当前那套主题：配色版本照样 +1，
+    /// 而全局调色板原地不动，不会干扰并行跑的其它测试。
+    #[test]
+    fn changing_the_theme_changes_both_cache_keys() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let text = "# 关于开展专项检查的通知\n\n各有关单位：";
+        let mut highlighter = MarkdownHighlighter::default();
+        let layout_once = |highlighter: &mut MarkdownHighlighter| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                highlighter.layout(ui, text, 400.0, 14.0, None, &[]);
+                highlighter.layout_hybrid(
+                    ui,
+                    text,
+                    600.0,
+                    0,
+                    None,
+                    &[],
+                    &crate::models::NumberingConfig::default(),
+                );
+            });
+            highlighter.cache_keys()
+        };
+
+        let before = layout_once(&mut highlighter);
+        assert_eq!(
+            before,
+            layout_once(&mut highlighter),
+            "配色没变就该命中缓存"
+        );
+
+        theme::set_current(crate::models::ThemeName::Claude);
+        let after = layout_once(&mut highlighter);
+        assert_ne!(before.0, after.0, "切主题后源码模式必须重新上色");
+        assert_ne!(before.1, after.1, "切主题后实时排版也必须重新上色");
+
+        theme::set_current_paper(crate::models::PaperMode::Follow);
+        let repapered = layout_once(&mut highlighter);
+        assert_ne!(after.1, repapered.1, "换纸面明暗后实时排版必须重新上色");
     }
 }

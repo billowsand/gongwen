@@ -3,11 +3,13 @@
 //! 默认取色思路与 Claude 一致：奶油色纸面打底、黏土橙（clay）作唯一强调色、
 //! 暖灰而非纯黑的文字。除默认外还内置多套明色主题（天青、淡紫等），设置页可
 //! 随时切换。界面上所有颜色都从这里取，避免各处硬编码 RGB；公文「纸面」渲染
-//! （预览、编辑区）仍按红头文件规范固定为白纸黑字，不受主题影响。
+//! （预览、编辑区）的取色集中在 [`paper`] 模块，按设置里的纸面明暗走，导出的
+//! DOCX/TeX/PDF 一律仍是白纸黑字红头，不受主题影响。
 
 use crate::models::{FontConfig, FontRole, PaperMode, ThemeName};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 // ── 字号体系 ────────────────────────────────────────────────────────────────
@@ -128,6 +130,15 @@ static CURRENT: RwLock<Theme> = RwLock::new(Theme::claude());
 
 /// 当前的纸面明暗选择，与 [`CURRENT`] 同样只在切换时写一次。
 static CURRENT_PAPER: RwLock<PaperMode> = RwLock::new(PaperMode::Follow);
+
+/// 配色版本号：主题或纸面每变一次就加一。
+///
+/// 审校区的语法高亮把排好版的 galley 按（文本, 宽度, 锚点…）缓存起来，而
+/// galley 里的颜色是排版当时从 [`CURRENT`]/[`CURRENT_PAPER`] 取的。只看文本的
+/// 缓存键认不出「字没变但颜色该变了」，切主题后编辑区会继续画上一套配色，直到
+/// 用户碰一下光标或改一个字才刷新。把这个版本号也混进缓存键，任何配色变化都会
+/// 让缓存自然失效。
+static REVISION: AtomicU64 = AtomicU64::new(0);
 
 impl Theme {
     /// 默认：Claude 奶油底 + 黏土橙强调。
@@ -755,6 +766,7 @@ pub fn by_name(name: ThemeName) -> Theme {
 /// 切换并立即生效的当前主题。
 pub fn set_current(name: ThemeName) {
     *CURRENT.write().unwrap() = by_name(name);
+    REVISION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 当前主题（字段均为 `Copy`，整体拷出开销可忽略）。
@@ -765,6 +777,12 @@ pub fn current() -> Theme {
 /// 切换并立即生效的纸面明暗。
 pub fn set_current_paper(mode: PaperMode) {
     *CURRENT_PAPER.write().unwrap() = mode;
+    REVISION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 当前配色版本号，供缓存了颜色的地方做缓存键。
+pub fn revision() -> u64 {
+    REVISION.load(Ordering::Relaxed)
 }
 
 /// 屏幕上的公文纸面取色。

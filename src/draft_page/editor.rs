@@ -212,7 +212,7 @@ pub(crate) fn paint_hybrid_decorations(
                     egui::Align2::LEFT_CENTER,
                     label,
                     font,
-                    egui::Color32::BLACK,
+                    theme::paper::ink(),
                 );
             }
             continue;
@@ -229,7 +229,7 @@ pub(crate) fn paint_hybrid_decorations(
                 OFFICIAL_BODY_SIZE,
                 theme::official_family(theme::FONT_FANGSONG),
             );
-            let label_galley = painter.layout_no_wrap(label, font, egui::Color32::BLACK);
+            let label_galley = painter.layout_no_wrap(label, font, theme::paper::ink());
             let label_baseline = label_galley
                 .rows
                 .first()
@@ -246,7 +246,7 @@ pub(crate) fn paint_hybrid_decorations(
                     visual.baseline - label_baseline,
                 ),
                 label_galley,
-                egui::Color32::BLACK,
+                theme::paper::ink(),
             );
             continue;
         }
@@ -265,7 +265,7 @@ pub(crate) fn paint_hybrid_decorations(
             _ => theme::FONT_FANGSONG,
         };
         let font = egui::FontId::new(OFFICIAL_BODY_SIZE, theme::official_family(family));
-        let prefix_galley = painter.layout_no_wrap(prefix, font, egui::Color32::BLACK);
+        let prefix_galley = painter.layout_no_wrap(prefix, font, theme::paper::ink());
         let prefix_baseline = prefix_galley
             .rows
             .first()
@@ -277,11 +277,11 @@ pub(crate) fn paint_hybrid_decorations(
                 visual.baseline - prefix_baseline,
             ),
             prefix_galley,
-            egui::Color32::BLACK,
+            theme::paper::ink(),
         );
     }
 
-    let stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
+    let stroke = egui::Stroke::new(1.0, theme::paper::ink());
     let mut index = 0usize;
     while index < source_lines.len() {
         if !is_table_source_line(source_lines[index]) {
@@ -564,13 +564,17 @@ impl DraftPage<'_> {
                     ui.horizontal_top(|ui| {
                         ui.add_space(side_space);
                         egui::Frame::new()
-                            .fill(egui::Color32::WHITE)
+                            .fill(theme::paper::bg())
                             .stroke(egui::Stroke::new(1.0, theme::border_strong()))
+                            // 编辑区的纸比预览页更贴近眼睛，投影一直比预览重一档：
+                            // 明色纸下 18+24 与改成跟随纸面之前的 42 完全一致。
                             .shadow(egui::epaint::Shadow {
                                 offset: [0, 3],
                                 blur: 14,
                                 spread: 0,
-                                color: egui::Color32::from_black_alpha(42),
+                                color: egui::Color32::from_black_alpha(
+                                    theme::paper::shadow_alpha().saturating_add(24),
+                                ),
                             })
                             .inner_margin(egui::Margin::ZERO)
                             .show(ui, |ui| {
