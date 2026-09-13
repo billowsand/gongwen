@@ -26,6 +26,7 @@ pub fn check(input: &DraftInput, markdown: &str) -> Vec<ProofNote> {
     check_attachments(markdown, &mut notes);
     check_honorifics(markdown, &mut notes);
     check_sentence_endings(markdown, &mut notes);
+    check_language_style(input.kind, markdown, &mut notes);
     notes.sort_by(|a, b| a.span.start.cmp(&b.span.start).then(a.level.cmp(&b.level)));
     notes
 }
@@ -639,6 +640,285 @@ fn tail(text: &str) -> String {
     chars[start..].iter().collect()
 }
 
+// ── 语言层：语感规则 ────────────────────────────────────────────────────────
+//
+// 下面几条来自对上百万字真实公文的全量统计（gongwen-skill 项目），挑的是
+// 模型初稿最常见、又能用程序数出来的偏离：破折号当停顿、冒号当揭晓、强制词
+// 堆砌、「进一步」刷屏、开篇空表态、力度词用错对象。起草提示词的
+// 「行文规范」一节要求模型别这么写，这里是复查——提示词只约束意图，兜不住。
+//
+// 全部只给「提示」或「疑似」，没有一条是「必错」：这些是风格偏离，不是错误。
+// 语料里最有质感的稿子往往多项落在常见区间外，把风格判成错会逼人关掉校对。
+
+/// 正文段落（不含附件、标题、表格）的源码范围。语感规则只看这些：标题和
+/// 表格单元本来就不按句子写，附件多是表单和清单，统计进去全是噪音。
+fn body_paragraph_ranges(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let mut in_attachment = false;
+    let mut ranges = Vec::new();
+    for located in export::parse_markdown_located(markdown) {
+        match &located.block {
+            export::MarkdownBlock::Marker(export::MarkdownSection::Attachment) => {
+                in_attachment = true;
+            }
+            export::MarkdownBlock::Marker(export::MarkdownSection::Body) => {
+                in_attachment = false;
+            }
+            export::MarkdownBlock::Paragraph(_)
+            | export::MarkdownBlock::ListItem(_)
+            | export::MarkdownBlock::OrderedListItem { .. }
+                if !in_attachment =>
+            {
+                ranges.push(located.range.clone());
+            }
+            _ => {}
+        }
+    }
+    ranges
+}
+
+/// 在正文段落里找一个正则的全部命中，位置换算回整篇源码。
+fn find_in_body<'a>(
+    markdown: &'a str,
+    ranges: &[std::ops::Range<usize>],
+    re: &Regex,
+) -> Vec<(std::ops::Range<usize>, &'a str)> {
+    let mut hits = Vec::new();
+    for range in ranges {
+        let Some(slice) = markdown.get(range.clone()) else {
+            continue;
+        };
+        for m in re.find_iter(slice) {
+            hits.push((range.start + m.start()..range.start + m.end(), m.as_str()));
+        }
+    }
+    hits
+}
+
+/// 破折号全篇上限。语料实测：经验材料 22 篇正文共 5 个，党建短材料平均 0.3 个/篇。
+/// 模型初稿偏好用它做停顿（「十件里九件不是大事——一堵墙、一次装修」），
+/// 公文里几乎不出现。副标题里的破折号是合法的，所以只数正文段落。
+const DASH_LIMIT: usize = 1;
+
+/// 「必须／严禁」全篇上限。语料密度 0.10–0.96‰，一篇 3000 字通常 0–4 个；
+/// 给 AI 的执行清单定的是 ≤5。强制词是稀缺资源，用多了就失效。
+///
+/// 只数这两个，不数「应当」「不得」：那两个是条例、办法和报送要求里的中性
+/// 法律语体（「应当一并核实」「不得自行推测」），本仓库的规范样例函件一篇就
+/// 用了三十多处。语料统计的是事务性材料，那边的配额搬到法定公文上会天天误报。
+/// 「必须」「严禁」不一样——它们是加重语气，写多了才真的失效。
+const FORCE_WORD_LIMIT: usize = 5;
+
+/// 「进一步」全篇上限。它可用，但 2.5 次/篇之外就是在凑字。
+const JINYIBU_LIMIT: usize = 3;
+
+/// 开篇判定范围（字）。语料 226 篇里前 45 字含「高度重视」的只有 4 篇，
+/// 且全是历史陈述而非表态。
+const OPENING_CHARS: usize = 45;
+
+fn check_language_style(kind: TemplateKind, markdown: &str, notes: &mut Vec<ProofNote>) {
+    let ranges = body_paragraph_ranges(markdown);
+    if ranges.is_empty() {
+        return;
+    }
+    check_dashes(markdown, &ranges, notes);
+    check_colon_reveal(markdown, &ranges, notes);
+    check_force_words(markdown, &ranges, notes);
+    check_jinyibu(markdown, &ranges, notes);
+    check_opening(markdown, &ranges, notes);
+    check_tone_direction(kind, markdown, &ranges, notes);
+}
+
+fn check_dashes(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut Vec<ProofNote>) {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new("——").expect("valid regex"));
+    let hits = find_in_body(markdown, ranges, re);
+    if hits.len() <= DASH_LIMIT {
+        return;
+    }
+    // 只在第一个超限处报一次，带上总数。逐处报会刷屏，而用户要做的是通读
+    // 一遍把停顿改成逗号、把转折断成句号，报一处就够定位。
+    let (span, _) = &hits[DASH_LIMIT];
+    notes.push(note(
+        "RULE-PUNCT-DASH",
+        "标点规范",
+        Level::Hint,
+        format!(
+            "正文用了 {} 处破折号。公文里破折号不做停顿和修辞，全篇至多一处：停顿改逗号，转折断成句号",
+            hits.len()
+        ),
+        span.clone(),
+    ));
+}
+
+/// 冒号揭晓：「办法是：」「主要有：」「原因即：」。公文的冒号只用于引出引语、
+/// 主送机关和「……如下：」承启句，用它揭晓下文是评论体的写法。
+///
+/// 只认「是/有/即/包括」直接接冒号、冒号后紧跟正文（不是引号、不是换行）
+/// 这一种形态。「如下：」不在其中；行末的冒号后面通常是分条列举，那在
+/// 法定公文里是常规写法，不报。宁可漏报。
+fn check_colon_reveal(
+    markdown: &str,
+    ranges: &[std::ops::Range<usize>],
+    notes: &mut Vec<ProofNote>,
+) {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re =
+        RE.get_or_init(|| Regex::new(r"(?:是|有|即|包括)[：:][^“「\n\r]").expect("valid regex"));
+    for (span, text) in find_in_body(markdown, ranges, re) {
+        // 只圈到冒号本身，后面那个字是判定条件，不是问题所在。
+        let colon_end = span.end - text.chars().next_back().map_or(0, char::len_utf8);
+        notes.push(note(
+            "RULE-PUNCT-COLON",
+            "标点规范",
+            Level::Hint,
+            format!(
+                "「{}」用冒号揭晓下文。公文的冒号只引出引语和「……如下：」承启句；这里改成逗号，或直接写内容",
+                text.trim_end_matches(|ch: char| ch != '：' && ch != ':')
+            ),
+            span.start..colon_end,
+        ));
+    }
+}
+
+/// 强制词计数。引号内二十字以内的内容不计——那多是自造概念（需求分
+/// 「必须改」「可以缓」两类），计入会顶破配额。这是语料统计里踩过的坑。
+fn check_force_words(
+    markdown: &str,
+    ranges: &[std::ops::Range<usize>],
+    notes: &mut Vec<ProofNote>,
+) {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"必须|严禁").expect("valid regex"));
+    static QUOTED: OnceLock<Regex> = OnceLock::new();
+    let quoted = QUOTED.get_or_init(|| Regex::new(r"[“「][^”」]{0,20}[”」]").expect("valid regex"));
+
+    let mut hits: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges {
+        let Some(slice) = markdown.get(range.clone()) else {
+            continue;
+        };
+        let quotes: Vec<std::ops::Range<usize>> =
+            quoted.find_iter(slice).map(|m| m.range()).collect();
+        for m in re.find_iter(slice) {
+            if quotes
+                .iter()
+                .any(|q| q.start <= m.start() && m.end() <= q.end)
+            {
+                continue;
+            }
+            hits.push(range.start + m.start()..range.start + m.end());
+        }
+    }
+    if hits.len() <= FORCE_WORD_LIMIT {
+        return;
+    }
+    notes.push(note(
+        "RULE-FORCE-QUOTA",
+        "力度用词",
+        Level::Hint,
+        format!(
+            "全篇「必须／严禁」共 {} 处，超过 {FORCE_WORD_LIMIT} 处。强制词是稀缺资源，用多了就失效；语气要重时改用「应当」「一律」「不得」",
+            hits.len()
+        ),
+        hits[FORCE_WORD_LIMIT].clone(),
+    ));
+}
+
+fn check_jinyibu(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut Vec<ProofNote>) {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new("进一步").expect("valid regex"));
+    let hits = find_in_body(markdown, ranges, re);
+    if hits.len() <= JINYIBU_LIMIT {
+        return;
+    }
+    let (span, _) = &hits[JINYIBU_LIMIT];
+    notes.push(note(
+        "RULE-WORD-JINYIBU",
+        "套话虚词",
+        Level::Hint,
+        format!(
+            "全篇「进一步」出现 {} 次，超过 {JINYIBU_LIMIT} 次。留下后面跟着具体动作的那几处，其余删去",
+            hits.len()
+        ),
+        span.clone(),
+    ));
+}
+
+/// 开篇空表态。只看第一个正文段落的前 45 字。
+fn check_opening(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut Vec<ProofNote>) {
+    let Some(first) = ranges.first() else {
+        return;
+    };
+    let Some(slice) = markdown.get(first.clone()) else {
+        return;
+    };
+    let head_len: usize = slice.chars().take(OPENING_CHARS).map(char::len_utf8).sum();
+    let head = &slice[..head_len];
+    let Some(pos) = head.find("高度重视") else {
+        return;
+    };
+    let start = first.start + pos;
+    notes.push(note(
+        "RULE-OPEN-CLICHE",
+        "套话虚词",
+        Level::Hint,
+        "开篇就写「高度重视」是空表态。优秀公文第一句直接进入事由；要写重视，落到年份、文件、会议这些具体动作上".into(),
+        start..start + "高度重视".len(),
+    ));
+}
+
+/// 力度词与行文方向。用词由权力关系决定：函是平行文，对方不是下属，
+/// 「要求贵局」就是越权；请示是上行文，「要求市政府」更是。
+///
+/// 只认「命令式动词 + 对方称谓」紧挨着的形态，中间隔了字就不认——
+/// 「要求各县（市、区）……并抄送贵局」不是在要求贵局。
+fn check_tone_direction(
+    kind: TemplateKind,
+    markdown: &str,
+    ranges: &[std::ops::Range<usize>],
+    notes: &mut Vec<ProofNote>,
+) {
+    match kind {
+        TemplateKind::OfficialLetter => {
+            static RE: OnceLock<Regex> = OnceLock::new();
+            let re = RE.get_or_init(|| {
+                Regex::new(
+                    r"(?:要求|责成|责令|督促|务必)(?:贵|你)(?:委员会|管理局|分局|局|委|办|厅|处|院|校|中心|单位|公司|方)",
+                )
+                .expect("valid regex")
+            });
+            for (span, text) in find_in_body(markdown, ranges, re) {
+                notes.push(note(
+                    "RULE-TONE-PARALLEL",
+                    "力度用词",
+                    Level::Suspect,
+                    format!(
+                        "「{text}」对不相隶属的机关用了命令式。函是平行文，宜写「请贵单位」「希望贵单位」「请予支持」"
+                    ),
+                    span,
+                ));
+            }
+        }
+        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
+            static RE: OnceLock<Regex> = OnceLock::new();
+            let re = RE.get_or_init(|| {
+                Regex::new(r"(?:要求|责成|责令)(?:上级|领导|[省市县区州](?:委|政府))")
+                    .expect("valid regex")
+            });
+            for (span, text) in find_in_body(markdown, ranges, re) {
+                notes.push(note(
+                    "RULE-TONE-UPWARD",
+                    "力度用词",
+                    Level::Suspect,
+                    format!("「{text}」对上级用了命令式。上行文提事项用「建议」「请」「恳请」"),
+                    span,
+                ));
+            }
+        }
+        TemplateKind::PhoneNotice | TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => {}
+    }
+}
+
 // ── 成文日期 ────────────────────────────────────────────────────────────────
 
 /// 成文日期是否已经过期。**只在导出时调用**——编辑期间日期本来就该是旧的，
@@ -955,6 +1235,188 @@ mod tests {
             .find(|note| note.entry_id == "RULE-KIND-REQUEST")
             .expect("应当报出");
         assert_eq!(&markdown[hit.span.clone()], "妥否，请批示");
+    }
+
+    // ── 语言层规则 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_single_dash_is_fine_but_two_are_reported_once() {
+        let one = check_all("这项工作——也就是排查，已经完成。");
+        assert!(!ids(&one).contains(&"RULE-PUNCT-DASH"), "一处破折号不该报");
+
+        let markdown = "# 关于测试的函\n\n第一处——停顿。\n\n第二处——又停顿。\n\n第三处——再停。\n";
+        let notes = check_all_with(markdown);
+        let hits: Vec<_> = notes
+            .iter()
+            .filter(|n| n.entry_id == "RULE-PUNCT-DASH")
+            .collect();
+        assert_eq!(hits.len(), 1, "超限只报一次：{:?}", ids(&notes));
+        assert!(hits[0].message.contains("3 处"));
+        assert_eq!(&markdown[hits[0].span.clone()], "——");
+        // 报在第二处，而不是第一处：第一处是允许的。
+        assert!(markdown[..hits[0].span.start].contains("第二处"));
+    }
+
+    #[test]
+    fn dashes_in_headings_and_attachments_do_not_count() {
+        // 副标题里的破折号是合法的，附件多是表单，都不算。
+        let markdown = "# 关于测试的函\n\n## 一、总体要求——统一思想\n\n正文。\n\n<!-- [附件] -->\n# 附件标题\n\n甲——乙——丙——丁。\n";
+        let notes = check_all_with(markdown);
+        assert!(
+            !ids(&notes).contains(&"RULE-PUNCT-DASH"),
+            "{:?}",
+            ids(&notes)
+        );
+    }
+
+    #[test]
+    fn colon_used_to_reveal_is_reported_but_quotes_and_ruqxia_are_not() {
+        let notes = check_all("主要做法是：一手抓排查，一手抓整改。");
+        let hit = notes
+            .iter()
+            .find(|n| n.entry_id == "RULE-PUNCT-COLON")
+            .expect("应当报出");
+        assert!(hit.message.contains("是："), "{}", hit.message);
+
+        for ok in [
+            "现将有关事项通知如下：",
+            "他说：“这个办法好。”",
+            "问题主要有：
+
+一是人手不足。",
+        ] {
+            let notes = check_all(ok);
+            assert!(
+                !ids(&notes).contains(&"RULE-PUNCT-COLON"),
+                "「{ok}」是合法用法，不该报"
+            );
+        }
+    }
+
+    #[test]
+    fn force_words_are_reported_past_the_quota_excluding_quotes_and_legal_modals() {
+        let five = "各单位必须落实。严禁推诿。严禁弄虚作假。必须到位。必须按期。";
+        assert!(
+            !ids(&check_all(five)).contains(&"RULE-FORCE-QUOTA"),
+            "五处以内不报"
+        );
+
+        let six = format!("{five}必须抓紧。");
+        let notes = check_all(&six);
+        let hit = notes
+            .iter()
+            .find(|n| n.entry_id == "RULE-FORCE-QUOTA")
+            .expect("第六处应当报出");
+        assert!(hit.message.contains("6 处"), "{}", hit.message);
+
+        // 引号内的自造概念不计；「应当」「不得」是法律语体的中性用词，也不计。
+        let excluded =
+            format!("{five}需求分“必须改”和“可以缓”两类。应当核实，不得推测，不得填报。");
+        assert!(
+            !ids(&check_all(&excluded)).contains(&"RULE-FORCE-QUOTA"),
+            "排除项不该计入"
+        );
+    }
+
+    #[test]
+    fn jinyibu_is_reported_on_the_fourth_use() {
+        let three = "进一步加强。进一步完善。进一步提升。";
+        assert!(!ids(&check_all(three)).contains(&"RULE-WORD-JINYIBU"));
+        let notes = check_all(&format!("{three}进一步落实。"));
+        assert!(
+            ids(&notes).contains(&"RULE-WORD-JINYIBU"),
+            "{:?}",
+            ids(&notes)
+        );
+    }
+
+    #[test]
+    fn opening_with_gaodu_zhongshi_is_reported_only_in_the_first_paragraph() {
+        let notes = check_all("我局高度重视此项工作，现将情况报告如下。");
+        assert!(
+            ids(&notes).contains(&"RULE-OPEN-CLICHE"),
+            "{:?}",
+            ids(&notes)
+        );
+
+        let later = check_all(
+            "现将情况报告如下。
+
+各单位要高度重视，抓好落实。",
+        );
+        assert!(!ids(&later).contains(&"RULE-OPEN-CLICHE"), "只看开篇");
+    }
+
+    #[test]
+    fn a_letter_must_not_order_its_peer_around() {
+        let input = draft(TemplateKind::OfficialLetter);
+        let markdown = "# 关于协助核查的函
+
+要求贵局于本月底前反馈。
+";
+        let notes = check(&input, markdown);
+        let hit = notes
+            .iter()
+            .find(|n| n.entry_id == "RULE-TONE-PARALLEL")
+            .expect("应当报出");
+        assert_eq!(&markdown[hit.span.clone()], "要求贵局");
+
+        // 隔了字就不认：「要求各县……抄送贵局」不是在要求贵局。
+        let indirect = check(
+            &input,
+            "# 关于协助核查的函
+
+要求各县抓紧办理并抄送贵局。
+",
+        );
+        assert!(!ids(&indirect).contains(&"RULE-TONE-PARALLEL"));
+
+        // 通知是下行文，「要求你局」是正常语气。
+        let notice = check(
+            &draft(TemplateKind::PhoneNotice),
+            "# 关于报送材料的通知
+
+要求你局按期报送。
+",
+        );
+        assert!(!ids(&notice).contains(&"RULE-TONE-PARALLEL"));
+    }
+
+    #[test]
+    fn a_request_must_not_order_its_superior_around() {
+        let input = draft(TemplateKind::RedHeadApproval);
+        let markdown = "# 关于申请经费的请示
+
+要求市政府尽快批复。
+
+妥否，请批示。
+";
+        let notes = check(&input, markdown);
+        let hit = notes
+            .iter()
+            .find(|n| n.entry_id == "RULE-TONE-UPWARD")
+            .expect("应当报出");
+        assert_eq!(&markdown[hit.span.clone()], "要求市政府");
+    }
+
+    #[test]
+    fn style_rules_never_reach_must_fix() {
+        // 风格偏离不是错误，进了「必错」就会被「采纳全部必错」批量处理。
+        let markdown = "# 关于测试的函\n\n我局高度重视——办法是：必须、必须、严禁、必须、严禁、必须进一步、进一步、进一步、进一步。\n\n甲——乙。\n";
+        let input = draft(TemplateKind::OfficialLetter);
+        for note in check(&input, markdown) {
+            if note.group == "标点规范" && note.entry_id == "RULE-SENTENCE-END" {
+                continue;
+            }
+            if note.entry_id.starts_with("RULE-PUNCT-")
+                || note.entry_id.starts_with("RULE-FORCE-")
+                || note.entry_id.starts_with("RULE-WORD-")
+                || note.entry_id.starts_with("RULE-OPEN-")
+                || note.entry_id.starts_with("RULE-TONE-")
+            {
+                assert_ne!(note.level, Level::MustFix, "{} 不该是必错", note.entry_id);
+            }
+        }
     }
 }
 

@@ -136,6 +136,81 @@ fn with_weekday_from_date_text(value: &str) -> String {
         .unwrap_or_else(|_| value.to_string())
 }
 
+/// 行文规范区的小标题。与输出契约一样是拼装顺序的锚点，测试据此定位。
+pub const STYLE_GUIDE_HEADING: &str = "【行文规范——公文语感】";
+
+/// 行文方向。力度词由权力关系决定，不由礼貌决定：对下属用「要」，对非隶属
+/// 单位用「希望」「请予」，对上级用「建议」「请」。同一句话换个对象就是错的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    /// 上行：请示、报告、呈批件。
+    Upward,
+    /// 下行：通知、批复。
+    Downward,
+    /// 平行：函。
+    Parallel,
+    /// 说不准：普通公文由素材决定。
+    Unknown,
+}
+
+fn direction_of(kind: TemplateKind) -> Direction {
+    match kind {
+        TemplateKind::OfficialLetter => Direction::Parallel,
+        TemplateKind::PhoneNotice => Direction::Downward,
+        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => Direction::Upward,
+        TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => Direction::Unknown,
+    }
+}
+
+/// 语言层行文规范。起草、仿写、逐节生成共用；会议议程是固定骨架，不适用。
+///
+/// 这一段解决的是「像不像公文」，与前面的事实、要素、版式规则分工明确。条文
+/// 来自对上百万字真实公文的全量统计（gongwen-skill 项目），挑的都是模型初稿
+/// 最常偏离的地方：句子拆得太短、破折号和冒号当修辞用、力度词用错对象、开头
+/// 空表态、结尾回头行礼、没数据就编数据。每条只给可执行的写法，不讲道理——
+/// 道理模型听不进去，摆一对句子它就懂。
+///
+/// 只约束意图，不能指望它兜底：破折号、强制词配额、力度词与行文方向这几条，
+/// `proofread_rules` 另有确定性规则复查。
+pub fn style_guide(kind: TemplateKind) -> String {
+    if kind == TemplateKind::MeetingAgenda {
+        return String::new();
+    }
+    let tone = match direction_of(kind) {
+        Direction::Upward => {
+            "本文是上行文：向上级提事项用「建议」「请」「恳请」，不用「要求」「务必」；\
+             谦辞（如「供领导参阅」）在开头一次说完，结尾直接收在请示结语上，不再回头行礼。"
+        }
+        Direction::Downward => {
+            "本文是下行文：对下级用「要」「切实」「确保」部署工作；对不隶属于本单位的对象改用\
+             「希望」「请」，不对非下属用命令式。结尾要交代谁来督促落实、有问题向谁反映。"
+        }
+        Direction::Parallel => {
+            "本文是平行文：对方不是下属，一律用「请贵单位」「希望」「请予支持」，不用「要求」\
+             「责成」「务必」「严禁」。"
+        }
+        Direction::Unknown => {
+            "力度词按对象选：对下级用「要」「切实」「确保」，对上级用「建议」「请」，\
+             对不隶属的单位用「希望」「请予」；对象不明时宁可用弱的。"
+        }
+    };
+    format!(
+        r#"
+
+{heading}
+1. 句子靠并列成分撑起来。一句话里把依据、事项、责任、成效挂在一起，用顿号枚举平行成分，不要拆成一连串二十字以内的短句。对照：
+   短句版：任务分到村、组、户。攻坚期间清运陈年垃圾若干吨。
+   公文版：逐村逐巷划片包干，镇干部包村、村干部包组、党员包户，攻坚期间集中清运陈年垃圾【待核实：吨数】吨，确保主干道、背街小巷和河塘沿岸同步过关。
+   反过来，任务分解类段落一句里并列不超过三层，别把工作写成器材清单。
+2. 标点不做修辞。破折号全篇最多一处，停顿用逗号、转折用句号；冒号只用于引出引语和「……如下：」承启句，不用冒号列举或揭晓（「办法是：」写成「办法是，」）。不写「其实是」「说到底」「归根到底」这类元评论，直接说结论。
+3. 「必须」「应当」「不得」「严禁」全篇合计不超过两处，多了就失效；语气要重时改用「一律」「一并」「不能」。{tone}
+4. 开头不以「高度重视」起句，不堆「根据……，为……」式套语，第一句就进入事由。结尾收在最后一条事项或规范结语上，不写「以上」「综上所述」「总之」做总结升华。
+5. 成绩写「在……领导（支持）下」，不自我归功；问题归客观条件，或加「个别」「部分」限定，「根本原因」落在思想认识上。摆问题要带单位、行为和数字，不用无主语的四字排比撑段落。
+6. 不掌握真实数据就不写数据，靠事项和逻辑撑起段落。确需给出参考量级时写「【待核实：示意约××，须核实替换】」，引文和上级文件表述拿不准时写「【待核实：核对原文】」；宁可占位，绝不杜撰。"#,
+        heading = STYLE_GUIDE_HEADING,
+    )
+}
+
 /// 从零起草：`material` 是用户在 AI 面板里写下的素材与写作要求，
 /// 起草页不再单独设写作素材栏，素材随每次起草一次性给出。
 /// `reference` 是 `format_reference_section` 的输出（知识库检索到的参考片段），
@@ -372,7 +447,7 @@ pub fn build_draft_prompt(
         r#"请依据下列信息起草{kind}。
 
 【强制规则】
-{rules}{scope}
+{rules}{scope}{style}
 
 【锁定元数据】
 - 标题提示：{title}
@@ -404,6 +479,7 @@ pub fn build_draft_prompt(
         kind = input.kind.label(),
         rules = rules,
         scope = scope,
+        style = style_guide(input.kind),
         title = value_or_pending(&input.title_hint),
         issuance_mode = if joint_mode {
             "联合发文模式1"
@@ -1429,6 +1505,59 @@ mod tests {
         let mut agenda = DraftInput::default();
         agenda.kind = TemplateKind::MeetingAgenda;
         assert!(!build_draft_prompt(&agenda, &[], "素材", "").contains("<!-- [附件] -->"));
+    }
+
+    #[test]
+    fn draft_prompt_carries_the_style_guide_with_direction_specific_tone() {
+        // 行文规范排在强制规则之后、锁定元数据之前，每个文种都带，只有会议议程例外。
+        let mut letter = DraftInput::default();
+        letter.kind = TemplateKind::OfficialLetter;
+        let prompt = build_draft_prompt(&letter, &[], "素材", "");
+        let style = prompt
+            .find(STYLE_GUIDE_HEADING)
+            .expect("公函提示词应带行文规范");
+        let rules = prompt.find("【强制规则】").expect("强制规则");
+        let metadata = prompt.find("【锁定元数据】").expect("锁定元数据");
+        assert!(rules < style && style < metadata, "行文规范的位置不对");
+        assert!(prompt.contains("平行文"), "公函按平行文给力度词");
+        assert!(prompt.contains("破折号全篇最多一处"));
+        assert!(
+            prompt.contains("【待核实：示意约××，须核实替换】"),
+            "参考量级也走待核实占位"
+        );
+
+        let mut request = DraftInput::default();
+        request.kind = TemplateKind::RedHeadApproval;
+        assert!(build_draft_prompt(&request, &[], "素材", "").contains("上行文"));
+
+        let mut notice = DraftInput::default();
+        notice.kind = TemplateKind::PhoneNotice;
+        assert!(build_draft_prompt(&notice, &[], "素材", "").contains("下行文"));
+
+        let mut agenda = DraftInput::default();
+        agenda.kind = TemplateKind::MeetingAgenda;
+        assert!(
+            !build_draft_prompt(&agenda, &[], "素材", "").contains(STYLE_GUIDE_HEADING),
+            "会议议程是固定骨架，不需要语感规范"
+        );
+    }
+
+    #[test]
+    fn the_style_guide_never_breaks_the_placeholder_convention() {
+        // 校验、SOP 和高亮都靠「【待核实」前缀识别占位；规范里教模型写的占位
+        // 必须全部以它开头，否则新写法会从「存疑清零」那一步漏过去。
+        let guide = style_guide(TemplateKind::PlainDocument);
+        let re = Regex::new(r"【[^】]*】").unwrap();
+        for hit in re.find_iter(&guide) {
+            if hit.as_str() == STYLE_GUIDE_HEADING {
+                continue;
+            }
+            assert!(
+                hit.as_str().starts_with("【待核实："),
+                "占位写法「{}」不是「【待核实：…】」",
+                hit.as_str()
+            );
+        }
     }
 
     #[test]
