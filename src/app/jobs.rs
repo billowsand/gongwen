@@ -786,6 +786,8 @@ impl GongwenApp {
                             None,
                             false,
                             &self.config.numbering,
+                            // 知识库里的文档是拿来查的，不是拿来投屏对稿的：页边不编号。
+                            false,
                         );
                         preview.fit_scale = output.scale;
                     });

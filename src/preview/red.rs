@@ -6,6 +6,7 @@
 use crate::export;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
+use crate::preview::gutter;
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
     clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
@@ -877,6 +878,8 @@ pub(crate) fn paint_red_print_pages(
         if page_index > 0 {
             ui.add_space(14.0);
         }
+        // 呈批件是真分页的：每翻一页，页边的号栏另起一条。
+        metrics.next_page();
         ui.horizontal(|ui| {
             let side = ((metrics.viewport - metrics.page) / 2.0).max(0.0);
             ui.add_space(side);
@@ -934,6 +937,24 @@ pub(crate) fn paint_red_print_pages(
                             break;
                         }
                         let row_end = row_start + placed.glyphs.len();
+                        // 行号认纸面上的行。呈批件是真分页的，正文块在每一页都从
+                        // 左边 28mm 起排，页边那一列因此每页都在同一个位置上；
+                        // 号码本身则一路数下去，不随翻页归零——看稿的人报的是
+                        // 「第几行」，不是「第几页第几行」。
+                        metrics.mark_row(
+                            egui::Rect::from_min_size(
+                                egui::pos2(top_left.x, top_left.y + placed.pos.y),
+                                egui::vec2(fragment.width, placed.size.y),
+                            ),
+                            gutter::row_baseline(placed, top_left.y + placed.pos.y),
+                            fragment
+                                .source_segments
+                                .iter()
+                                .find(|segment| {
+                                    segment.chars.start < row_end && row_start < segment.chars.end
+                                })
+                                .map(|segment| segment.source.clone()),
+                        );
                         for segment in &fragment.source_segments {
                             let start = segment.chars.start.max(row_start);
                             let end = segment.chars.end.min(row_end);
@@ -1005,6 +1026,20 @@ pub(crate) fn paint_red_print_pages(
                 } else if let Some(range) = &fragment.range
                     && !range.is_empty()
                 {
+                    // 整块对应一行源码的片段（标题等）：逐行编号，号都指向那一行。
+                    for placed in fragment.galley.rows.iter() {
+                        if placed.rect().top() >= fragment.visible_height {
+                            break;
+                        }
+                        metrics.mark_row(
+                            egui::Rect::from_min_size(
+                                egui::pos2(top_left.x, top_left.y + placed.pos.y),
+                                egui::vec2(fragment.width, placed.size.y),
+                            ),
+                            gutter::row_baseline(placed, top_left.y + placed.pos.y),
+                            Some(range.clone()),
+                        );
+                    }
                     let response = ui.interact(
                         rect,
                         egui::Id::new(("red-print-fragment", page_index, fragment_index)),

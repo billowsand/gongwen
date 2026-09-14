@@ -1611,6 +1611,10 @@ pub struct AppConfig {
     /// 在公文预览与对照模式的右缘显示导航刻度（悬停展开成标题列表）。
     /// 默认开：刻度只占右缘十几个点，且不吃点击。关掉后右缘完全干净。
     pub show_preview_navigator: bool,
+    /// 在公文预览的左页边给正文逐行标号（`preview::gutter`）。默认关：
+    /// 页边有没有号是投屏对稿才需要的取舍，旧配置缺该字段时按关处理。
+    #[serde(default)]
+    pub show_preview_line_numbers: bool,
     /// Markdown 源码编辑器的字号（px）。可用 Ctrl+滚轮或 Ctrl± 调整。
     pub editor_font_size: f32,
     /// AI 优化提示词库。首次载入为空时补齐预置项，见 `ensure_ai_prompts`。
@@ -1659,6 +1663,7 @@ impl Default for AppConfig {
             allow_free_text: true,
             show_editor_line_numbers: true,
             show_preview_navigator: true,
+            show_preview_line_numbers: false,
             editor_font_size: 14.0,
             ai_prompts: vec![],
             last_ai_prompt: 0,

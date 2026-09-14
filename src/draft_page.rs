@@ -1748,7 +1748,8 @@ mod split_resize_tests {
 
         /// 跑若干帧完整的审校区（含右缘导航），鼠标一直停在 `pointer`。
         /// 展开是带动画的，一帧看不出结果，所以要把时间往前推够。
-        fn preview_frames(&mut self, pointer: egui::Pos2, frames: usize) {
+        fn preview_frames(&mut self, pointer: egui::Pos2, frames: usize) -> egui::FullOutput {
+            let mut output = None;
             for _ in 0..frames {
                 self.clock += 1;
                 let raw = egui::RawInput {
@@ -1761,7 +1762,7 @@ mod split_resize_tests {
                     events: vec![egui::Event::PointerMoved(pointer)],
                     ..Default::default()
                 };
-                let _ = self.ctx.clone().run_ui(raw, |ui| {
+                let frame = self.ctx.clone().run_ui(raw, |ui| {
                     let mut page = DraftPage {
                         doc: &mut self.doc,
                         config: &mut self.config,
@@ -1776,7 +1777,9 @@ mod split_resize_tests {
                     };
                     page.preview_ui(ui);
                 });
+                output = Some(frame);
             }
+            output.expect("至少画一帧")
         }
 
         /// 右缘刻度带这一帧占的位置。导航关掉时它根本不登记，返回 None。
@@ -2017,6 +2020,288 @@ mod split_resize_tests {
         assert!(
             tops.windows(2).all(|pair| pair[0] < pair[1]),
             "标题的版面位置应当自上而下单调递增，实测 {tops:?}"
+        );
+    }
+
+    impl Harness {
+        /// 本帧画在页边的行号：号码连同它在屏幕上的位置，自上而下。
+        /// 滚动区外的行不画也不登记，所以这里拿到的就是"看得见的那些号"。
+        fn paper_line_numbers(&self) -> Vec<(usize, egui::Rect)> {
+            (1..=400usize)
+                .filter_map(|number| {
+                    self.ctx
+                        .read_response(egui::Id::new(("gw-preview-line-number", number)))
+                        .map(|response| (number, response.rect))
+                })
+                .collect()
+        }
+
+        /// 文档标题那一块在版面上的位置。版心左沿与标题所在的行高都取自它。
+        fn title_block(&self) -> egui::Rect {
+            let title = self
+                .doc
+                .generated_markdown
+                .lines()
+                .next()
+                .expect("样稿第一行是文档标题");
+            self.ctx
+                .read_response(egui::Id::new(("gw-preview-block", 0usize, title.len())))
+                .expect("文档标题应当登记成可点的块")
+                .rect
+        }
+    }
+
+    /// 纸面行号是投屏对稿时唯一的坐标系，它必须满足三件事：号码自上而下逐行递增、
+    /// 整列右对齐成一条干净的竖线、全部落在版心之外的页边留白里。三件事错一件，
+    /// 页边那一列就从"刻度"变成"压在正文旁边的一串数字"。
+    #[test]
+    fn paper_line_numbers_stand_in_the_margin_as_one_column() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        harness.config.show_preview_line_numbers = true;
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+
+        let numbers = harness.paper_line_numbers();
+        assert!(
+            numbers.len() >= 10,
+            "一屏纸面至少该标出十来个行号，实测 {}",
+            numbers.len()
+        );
+        assert!(
+            numbers.windows(2).all(|pair| pair[0].0 + 1 == pair[1].0),
+            "号码必须一号不落地连着数：{:?}",
+            numbers
+                .iter()
+                .map(|(number, _)| *number)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            numbers
+                .windows(2)
+                .all(|pair| pair[0].1.top() < pair[1].1.top()),
+            "号码必须自上而下排，不能出现下一号反而更靠上"
+        );
+        let rights = numbers
+            .iter()
+            .map(|(_, rect)| rect.right())
+            .collect::<Vec<_>>();
+        let spread = rights.iter().copied().fold(f32::MIN, f32::max)
+            - rights.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            spread < 1.0,
+            "整列号码要右对齐成一条竖线，右缘却相差 {spread}"
+        );
+
+        let body_left = harness.title_block().left();
+        for (number, rect) in &numbers {
+            assert!(
+                rect.right() < body_left,
+                "第 {number} 号压进了版心：号码右缘 {} ≥ 版心左沿 {body_left}",
+                rect.right()
+            );
+        }
+    }
+
+    /// 号码只给来自 Markdown、改得动的行。红头、密级、文号排在文档标题上面，
+    /// 它们出自表单，报一个号过去也改不动——所以 1 号必须正落在文档标题那一行。
+    #[test]
+    fn the_first_number_lands_on_the_document_title() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        harness.config.show_preview_line_numbers = true;
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+
+        let (number, rect) = harness
+            .paper_line_numbers()
+            .into_iter()
+            .next()
+            .expect("开着行号就该有号");
+        assert_eq!(number, 1, "页边第一个号应当是 1");
+        let title = harness.title_block();
+        assert!(
+            rect.center().y > title.top() && rect.center().y < title.bottom(),
+            "1 号应当与文档标题齐平：号在 {:?}，标题在 {title:?}",
+            rect.center()
+        );
+    }
+
+    /// 点一下号码，光标就该落到那一行的源码上——看稿的人报号、敲字的人点号，
+    /// 中间不必再数。号码要是点不动，它就只是一列装饰。
+    #[test]
+    fn clicking_a_paper_line_number_takes_the_cursor_to_that_line() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        harness.config.show_preview_line_numbers = true;
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+
+        let (_, rect) = harness
+            .paper_line_numbers()
+            .into_iter()
+            .find(|(number, _)| *number == 4)
+            .expect("一屏之内应当画得出第 4 号");
+        harness.doc.pending_source_jump = None;
+        harness.preview_click(rect.center());
+
+        let jumped = harness
+            .doc
+            .pending_source_jump
+            .expect("点行号应当把光标带到那一行");
+        let starts = markdown::line_ranges(&harness.doc.generated_markdown)
+            .into_iter()
+            .map(|range| range.start)
+            .collect::<Vec<_>>();
+        assert!(
+            starts.contains(&jumped),
+            "跳转目标 {jumped} 应当正好落在某一行源码的行首"
+        );
+    }
+
+    /// 页边的号必须与那一行的正文**踩同一条基线**。公文行距 28 磅比字高出一截，
+    /// 字靠在行的上半段，号码若按行框居中就整体偏下，看着像挂在两行中间。
+    #[test]
+    fn every_number_sits_on_the_baseline_of_its_line() {
+        /// 摊平图形，取出每一行文字的 (基线, 左缘, 是不是纯数字)。
+        fn collect(shape: &egui::epaint::Shape, out: &mut Vec<(f32, f32, bool)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    for row in text.galley.rows.iter() {
+                        let Some(glyph) = row.glyphs.first() else {
+                            continue;
+                        };
+                        out.push((
+                            text.pos.y + row.pos.y + glyph.pos.y,
+                            text.pos.x + row.pos.x + glyph.pos.x,
+                            row.glyphs.iter().all(|glyph| glyph.chr.is_ascii_digit()),
+                        ));
+                    }
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        harness.config.show_preview_line_numbers = true;
+        let output = harness.preview_frames(egui::pos2(-50.0, -50.0), 3);
+        let body_left = harness.title_block().left();
+
+        let mut lines = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut lines);
+        }
+        let (numbers, body): (Vec<_>, Vec<_>) = lines
+            .iter()
+            .partition(|(_, left, digits)| *digits && *left < body_left);
+        assert!(numbers.len() >= 10, "一屏纸面至少该标出十来个行号");
+        for (baseline, _, _) in &numbers {
+            assert!(
+                body.iter()
+                    .any(|(other, _, _)| (other - baseline).abs() < 0.51),
+                "基线 {baseline} 上的行号没有与任何一行正文对齐"
+            );
+        }
+    }
+
+    /// 敲字的人光标停在哪一行，页边那个号就该亮起来——这是投屏对稿真正省下的
+    /// 那一轮口舌：不必再念「我现在在第几行」，屏幕自己说了。亮的还必须正好是
+    /// 那一行的号：错一行，两边说的就不是同一处。
+    #[test]
+    fn the_number_of_the_line_under_the_cursor_lights_up() {
+        /// 摊平嵌套的图形，取出主色实心牌子与正文那一行的主色底衬。
+        fn collect(
+            shape: &egui::epaint::Shape,
+            chips: &mut Vec<egui::Rect>,
+            bands: &mut Vec<egui::Rect>,
+        ) {
+            match shape {
+                egui::epaint::Shape::Rect(rect) if rect.fill == theme::accent() => {
+                    chips.push(rect.rect);
+                }
+                egui::epaint::Shape::Rect(rect) if rect.fill == theme::accent_soft() => {
+                    bands.push(rect.rect);
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, chips, bands);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        harness.config.show_preview_line_numbers = true;
+        // 把光标放在正文第一节的标题行上，并让指针远离纸面，免得混进悬停高亮。
+        let line = markdown::line_ranges(&harness.doc.generated_markdown)
+            .into_iter()
+            .find(|range| harness.doc.generated_markdown[range.clone()].starts_with("## "))
+            .expect("样稿里应当有二级标题");
+        harness.doc.preview_anchor = Some(PreviewAnchor {
+            text: harness.doc.generated_markdown[line.clone()].to_string(),
+            range: line,
+        });
+        let output = harness.preview_frames(egui::pos2(-50.0, -50.0), 3);
+
+        let (mut chips, mut bands) = (Vec::new(), Vec::new());
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut chips, &mut bands);
+        }
+        // 右缘导航也用主色，按版心左沿把页边那一侧筛出来。
+        let body_left = harness.title_block().left();
+        chips.retain(|chip| chip.right() < body_left);
+        assert_eq!(
+            chips.len(),
+            1,
+            "光标停在一行上，页边只该亮这一行的牌子，实测亮了 {} 枚",
+            chips.len()
+        );
+        assert!(!bands.is_empty(), "光标所在的那一行正文应当有底衬");
+        let chip = chips[0].center();
+        assert!(
+            bands
+                .iter()
+                .any(|band| chip.y > band.top() && chip.y < band.bottom()),
+            "亮起来的牌子应当与光标所在那一行齐平：牌子在 {chip:?}，底衬在 {bands:?}"
+        );
+    }
+
+    /// 关掉之后页边必须彻底干净：一个号都不登记，点在原来有号的位置也不许跳转。
+    /// 这是"默认关、要时开"的前提——关不掉的开关等于没有这个开关。
+    #[test]
+    fn turning_paper_line_numbers_off_leaves_the_margin_empty() {
+        let mut located = Harness::new();
+        located.doc.preview_mode = PreviewMode::Rendered;
+        located.config.show_preview_line_numbers = true;
+        located.preview_frames(egui::pos2(10.0, 10.0), 3);
+        let (_, rect) = located
+            .paper_line_numbers()
+            .into_iter()
+            .find(|(number, _)| *number == 4)
+            .expect("开着时应当画得出第 4 号");
+
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Rendered;
+        assert!(
+            !harness.config.show_preview_line_numbers,
+            "纸面行号默认应当是关着的"
+        );
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+        assert!(
+            harness.paper_line_numbers().is_empty(),
+            "关掉后页边不该再登记任何号码"
+        );
+
+        harness.doc.pending_source_jump = None;
+        harness.preview_click(rect.center());
+        assert!(
+            harness.doc.pending_source_jump.is_none(),
+            "关掉后，点在原本有号的位置不该跳转"
         );
     }
 

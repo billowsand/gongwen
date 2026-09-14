@@ -1359,6 +1359,14 @@ impl GongwenApp {
         .on_hover_text(
             "刻度一条一个标题，当前所在那条高亮；鼠标靠近右缘展开成标题列表，点一条跳到那一节",
         );
+        ui.checkbox(
+            &mut self.config.show_preview_line_numbers,
+            "公文预览在左页边给正文标行号",
+        )
+        .on_hover_text(
+            "投屏对稿时用：号码只标正文这些改得动的行，红头、主送、落款、版记不编号；\
+             点一下号码把光标带到那一行。行号只在屏幕上，不会写进稿件或导出文件",
+        );
         ui.add_space(4.0);
         ui.weak("编辑器的字体与字号在「字体」一节设置。");
     }

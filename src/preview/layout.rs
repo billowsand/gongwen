@@ -5,6 +5,7 @@
 
 use crate::export;
 use crate::export::table::ColumnAlignment;
+use crate::preview::gutter;
 use crate::preview::{BODY_PT, INDENT_CHARS, Metrics, PAREN_PT, TABLE_LINE_PT, TABLE_PT};
 use crate::theme;
 use eframe::egui;
@@ -473,15 +474,43 @@ pub(crate) fn line_block(
         // 让每一行都相对版心宽居中，与 Word 的居中段落一致。
         let galley = layout(ui, job);
         let height = galley.size().y;
+        let rows = row_spans(&galley);
         place(ui, metrics, height, |painter, rect| {
             painter.galley(
                 egui::pos2(rect.left() + metrics.content / 2.0, rect.top()),
                 galley,
                 theme::paper::ink(),
             );
+            mark_gutter_rows(metrics, rect, &rows);
         });
     } else {
-        draw(ui, job);
+        let galley = layout(ui, job);
+        let rows = row_spans(&galley);
+        let rect = ui.add(egui::Label::new(galley)).rect;
+        mark_gutter_rows(metrics, rect, &rows);
+    }
+}
+
+/// 一段文字里每一行相对段首的上沿、行高与基线。
+fn row_spans(galley: &egui::Galley) -> Vec<(f32, f32, f32)> {
+    galley
+        .rows
+        .iter()
+        .map(|row| (row.pos.y, row.size.y, gutter::row_baseline(row, row.pos.y)))
+        .collect()
+}
+
+/// 把一段已经排好的文字逐行记进行号刻度。`rect` 是这一段占住的版心区域，
+/// 行的横坐标一律取版心左沿：正文怎么缩进、标题怎么居中，页边那一列都不跟着晃。
+fn mark_gutter_rows(metrics: &Metrics, rect: egui::Rect, rows: &[(f32, f32, f32)]) {
+    for &(top, height, baseline) in rows {
+        metrics.mark_sourced_row(
+            egui::Rect::from_min_size(
+                egui::pos2(rect.left(), rect.top() + top),
+                egui::vec2(rect.width(), height),
+            ),
+            rect.top() + baseline,
+        );
     }
 }
 
@@ -588,6 +617,19 @@ pub(crate) fn clickable_justified_job(
     let mut row_start = 0usize;
     for (row_index, (placed, row_galley)) in base.rows.iter().zip(&rows).enumerate() {
         let row_end = row_start + placed.glyphs.len();
+        // 行号认的是纸面上的行：一段排成几行就记几笔，跳转认第一段压在这一行上的
+        // 源码行——一行文字横跨两条源码行时，报的号指向它起头的那一条。
+        metrics.mark_row(
+            egui::Rect::from_min_size(
+                egui::pos2(block_rect.left(), block_rect.top() + placed.pos.y),
+                egui::vec2(metrics.content, placed.size.y),
+            ),
+            gutter::row_baseline(placed, block_rect.top() + placed.pos.y),
+            segments
+                .iter()
+                .find(|segment| segment.chars.start < row_end && row_start < segment.chars.end)
+                .map(|segment| segment.source.clone()),
+        );
         for segment in segments {
             let start = segment.chars.start.max(row_start);
             let end = segment.chars.end.min(row_end);
@@ -745,6 +787,21 @@ pub(crate) fn table_block(
 
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
+        // 表格一行就是纸面上的一行，哪怕某个单元格里的字折了两行：看稿的人指的
+        // 是「表里第几行」，页边的号必须跟着表行走，不能跟着单元格里的折行走。
+        // 基线取第一个单元格首行的基线——单元格在表行里是垂直居中的。
+        let baseline = cells
+            .iter()
+            .find_map(|(galley, _, _)| {
+                // 单元格在表行里垂直居中，与下面画字用的 top 同一算法。
+                let top = rect.top() + (height - galley.size().y) / 2.0;
+                galley
+                    .rows
+                    .first()
+                    .map(|row| gutter::row_baseline(row, top + row.pos.y))
+            })
+            .unwrap_or(rect.center().y);
+        metrics.mark_sourced_row(rect, baseline);
         let painter = ui.painter();
         painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
         let mut x = rect.left();
@@ -772,6 +829,7 @@ pub(crate) fn table_block(
 /// 范围报给调用方；`anchor` 命中的块常亮，与编辑器里的高亮一一对应。
 pub(crate) fn clickable(
     ui: &mut egui::Ui,
+    metrics: &Metrics,
     range: &Range<usize>,
     anchor: Option<&Range<usize>>,
     scroll_to_anchor: &mut bool,
@@ -780,7 +838,11 @@ pub(crate) fn clickable(
 ) {
     // 底色要压在文字下面：先占一个空图形位，量出块的范围后再回填。
     let backdrop = ui.painter().add(egui::Shape::Noop);
+    // 块里画出来的行都算在这段源码名下，行号据此只编能改的行；画完立刻还原，
+    // 否则紧跟其后的落款、版记会顶着这一块的范围被编号。
+    metrics.enter_source(Some(range.clone()));
     let inner = ui.scope(add_contents).response.rect;
+    metrics.enter_source(None);
     if !inner.is_positive() {
         return;
     }
@@ -836,6 +898,8 @@ pub(crate) fn sheet(
     metrics: &Metrics,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
+    // 又一张纸：页边的号栏按纸分段，不跨着纸缝连下去。
+    metrics.next_page();
     ui.horizontal(|ui| {
         // 用量好的可见宽度而不是 available_width：滚动区里后者可能是无穷大。
         let side = ((metrics.viewport - metrics.page) / 2.0).max(0.0);

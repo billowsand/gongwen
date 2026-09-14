@@ -943,13 +943,39 @@ impl DraftPage<'_> {
         {
             self.doc.versions_open = !versions_open;
         }
+        // 两处行号各管一边，标签必须各自说清是哪一边：编辑区的号数的是源码行，
+        // 纸面的号数的是纸上排出来的行，两个数原本就对不上，名字再一样就会
+        // 出现「你说的第几行」这种问题。
         let line_numbers = self.config.show_editor_line_numbers;
         if ui
-            .add(theme::icon_text_button(theme::Icon::ListOrdered, "行号").selected(line_numbers))
-            .on_hover_text("在源码与实时排版编辑器左侧显示行号")
+            .add(
+                theme::icon_text_button(theme::Icon::ListOrdered, "编辑区行号")
+                    .selected(line_numbers),
+            )
+            .on_hover_text("在源码与实时排版编辑器左侧显示源码行号")
             .clicked()
         {
             self.config.show_editor_line_numbers = !line_numbers;
+            self.persist_ribbon();
+        }
+        // 纸面行号只画在公文版式上，别的模式里按钮灰掉，免得点了没反应。
+        let papered = matches!(
+            self.doc.preview_mode,
+            PreviewMode::Rendered | PreviewMode::Split
+        );
+        let paper_lines = self.config.show_preview_line_numbers;
+        if ui
+            .add_enabled(
+                papered,
+                theme::icon_text_button(theme::Icon::Hash, "纸面行号").selected(paper_lines),
+            )
+            .on_hover_text(
+                "投屏对稿用：公文预览的左页边逐行标号，点一下号码把光标带到那一行；\
+                 只标正文这些改得动的行，不写进导出文件",
+            )
+            .clicked()
+        {
+            self.config.show_preview_line_numbers = !paper_lines;
             self.persist_ribbon();
         }
         // 导航刻度只在这两种模式下画得出来，别的模式里按钮灰掉——

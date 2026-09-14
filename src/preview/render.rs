@@ -7,6 +7,7 @@ use crate::export;
 use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::images;
 use crate::models::{DraftInput, NumberingConfig, TemplateKind};
+use crate::preview::gutter;
 use crate::preview::{
     BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT,
     addressee_block, append_inline, body_block, clickable, clickable_body_block,
@@ -171,9 +172,17 @@ pub(crate) fn clickable_content_block(
                 clicked,
             );
         }
-        block => clickable(ui, &source, anchor, scroll_to_anchor, clicked, |ui| {
-            content_block(ui, metrics, block, counters, numbered, numbering);
-        }),
+        block => clickable(
+            ui,
+            metrics,
+            &source,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+            |ui| {
+                content_block(ui, metrics, block, counters, numbered, numbering);
+            },
+        ),
     }
 }
 
@@ -217,6 +226,7 @@ pub(crate) fn official_preview(
     anchor: Option<&Range<usize>>,
     mut scroll_to_anchor: bool,
     numbering: &NumberingConfig,
+    line_numbers: bool,
 ) -> PreviewOutput {
     // 自适应缩放要按“看得见的宽度”算：滚动方向上的 available_width 是无穷大，
     // 拿它算会把整页放大到上限。裁剪矩形就是滚动区的可视范围，再与窗口取交集兜底。
@@ -224,7 +234,8 @@ pub(crate) fn official_preview(
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
     // 居中用的宽度优先取调用方给的真实宽度（见 `PreviewScale::viewport`）。
-    let metrics = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom);
+    let metrics = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom)
+        .with_line_numbers(line_numbers);
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
     // 跟随设置里的编号样式；紧缩风格跟随模板配置。
     let numbered = true;
@@ -295,9 +306,12 @@ pub(crate) fn official_preview(
             numbering,
             markdown,
         );
+        // 行号每帧都要画，不能写成 `clicked.or_else(…)`：那样点中正文的那一帧
+        // 会连带把页边整列号码漏掉，看上去就是闪一下。
+        let numbered = gutter::paint(ui, &metrics, anchor);
         return PreviewOutput {
             scale: metrics.scale,
-            clicked,
+            clicked: clicked.or(numbered),
         };
     }
     sheet(ui, &metrics, |ui| {
@@ -305,6 +319,7 @@ pub(crate) fn official_preview(
         if !title.is_empty() {
             clickable(
                 ui,
+                &metrics,
                 &title_range,
                 anchor,
                 &mut scroll_to_anchor,
@@ -387,6 +402,7 @@ pub(crate) fn official_preview(
                     let range = located.range.clone();
                     clickable(
                         ui,
+                        &metrics,
                         &range,
                         anchor,
                         &mut scroll_to_anchor,
@@ -423,9 +439,12 @@ pub(crate) fn official_preview(
             }
         });
     }
+    // 行号压在纸面留白上，等纸和附件都画完再标：晚画才不会被纸底盖住。
+    // 点中的号与点中的正文块是同一件事——都是「把光标带到这一行」。
+    let numbered = gutter::paint(ui, &metrics, anchor);
     PreviewOutput {
         scale: metrics.scale,
-        clicked,
+        clicked: clicked.or(numbered),
     }
 }
 

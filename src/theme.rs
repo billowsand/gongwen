@@ -1949,6 +1949,9 @@ pub const FONT_FANGSONG: &str = "gw-fangsong";
 pub const FONT_HEITI: &str = "gw-heiti";
 pub const FONT_KAITI: &str = "gw-kaiti";
 pub const FONT_BIAOSONG: &str = "gw-biaosong";
+/// 页码与纸面行号用的字体族，内置为宋体。纸上的非正文数字（页码）在公文里
+/// 本来就有自己的一副字面，页边的行号沿用同一副，与正文仿宋一眼可辨。
+pub const FONT_SONGTI: &str = "gw-songti";
 /// 正文加粗用的字体族。egui 没有合成粗体，预览一直用黑体近似「当前字体直接
 /// 加粗」；设置里改选专用粗体字体后，这个族换成选定的字面，与 Word / TeX 同步。
 pub const FONT_BOLD: &str = "gw-bold";
@@ -2306,6 +2309,15 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
                 r"C:\Windows\Fonts\FZXBSJW.TTF",
                 r"C:\Windows\Fonts\STZHONGS.TTF",
                 r"C:\Windows\Fonts\simhei.ttf",
+            ][..],
+        ),
+        (
+            FONT_SONGTI,
+            FontRole::PageNumber,
+            "SimSun.ttf",
+            &[
+                r"C:\Windows\Fonts\simsun.ttc",
+                r"C:\Windows\Fonts\simfang.ttf",
             ][..],
         ),
         (

@@ -810,6 +810,7 @@ impl DraftPage<'_> {
                     anchor.as_ref(),
                     self.doc.pending_render_jump,
                     &self.config.numbering,
+                    self.config.show_preview_line_numbers,
                 );
 
                 if let Some(transform) = transform {

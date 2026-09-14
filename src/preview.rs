@@ -1,17 +1,22 @@
 //! 公文版式预览：把审校区的 Markdown 连同表单锁定的行文要素，按导出后的样子画出来。
 //!
 //! 各版式部件已拆分到 `preview/` 子模块（排版基础、红头、文尾、红头呈批件、
-//! 正文渲染），根文件保留版式常量、`Metrics` / `PreviewScale` 与测试。
+//! 正文渲染、纸面行号），根文件保留版式常量、`Metrics` / `PreviewScale` 与测试。
 
 use crate::theme;
+use eframe::egui;
 use eframe::egui::FontId;
+use std::cell::RefCell;
+use std::ops::Range;
 
+mod gutter;
 mod header;
 mod layout;
 mod red;
 mod render;
 mod tail;
 
+pub(crate) use gutter::Gutter;
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
     ClickableSourceSegment, append_inline, body_block, clickable, clickable_body_block,
@@ -82,6 +87,10 @@ pub(crate) struct Metrics {
     margin_left: f32,
     margin_top: f32,
     line: f32,
+    /// 本帧纸面上每一条「改得动的行」的位置，画完纸再统一标到页边。
+    /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
+    /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
+    gutter: RefCell<Gutter>,
 }
 
 /// 本帧应该显示的缩放倍率：`zoom` 为 None 时按可用宽度自适应，否则按给定倍率。
@@ -134,7 +143,42 @@ impl Metrics {
             margin_left: MARGIN_LEFT_PT * PT * scale,
             margin_top: MARGIN_TOP_PT * PT * scale,
             line: LINE_PT * PT * scale,
+            gutter: RefCell::default(),
         }
+    }
+
+    /// 开着行号排版：版面照旧，只是每画一条来自源码的行就记一笔。
+    fn with_line_numbers(self, on: bool) -> Self {
+        self.gutter.borrow_mut().enable(on);
+        self
+    }
+
+    /// 进入一个来自源码的块：这期间记下的行都算在这段源码名下。画完要还原成
+    /// `None`，否则紧跟其后的落款、版记会顶着上一块的范围被编号。
+    fn enter_source(&self, source: Option<Range<usize>>) {
+        self.gutter.borrow_mut().set_source(source);
+    }
+
+    /// 记下纸面上的一行。`baseline` 是这一行文字的基线，号码照它对齐；
+    /// `source` 给 `None` 时沿用当前块的源码范围。
+    fn mark_row(&self, rect: egui::Rect, baseline: f32, source: Option<Range<usize>>) {
+        self.gutter.borrow_mut().push(rect, baseline, source);
+    }
+
+    /// 记下纸面上的一行，但只在正在画来自源码的块时才记。抬头、主送、落款
+    /// 共用的那些部件走这条路，表单要素因此不会拿到行号。
+    fn mark_sourced_row(&self, rect: egui::Rect, baseline: f32) {
+        self.gutter.borrow_mut().push_sourced(rect, baseline);
+    }
+
+    /// 又铺开一张纸：号栏按纸分段。
+    fn next_page(&self) {
+        self.gutter.borrow_mut().next_page();
+    }
+
+    /// 取走本帧记下的全部行，交给页边去画。
+    fn take_gutter_rows(&self) -> Vec<gutter::GutterRow> {
+        self.gutter.borrow_mut().take_rows()
     }
 
     fn pt(&self, size: f32) -> f32 {
@@ -768,6 +812,7 @@ mod tests {
                     None,
                     false,
                     &crate::models::NumberingConfig::default(),
+                    false,
                 );
             },
         );
@@ -1033,6 +1078,7 @@ mod tests {
                     None,
                     false,
                     &crate::models::NumberingConfig::default(),
+                    false,
                 );
             });
         }
@@ -1105,6 +1151,7 @@ mod tests {
                             None,
                             false,
                             &crate::models::NumberingConfig::default(),
+                            false,
                         );
                     });
                 },

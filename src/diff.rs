@@ -884,6 +884,12 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     );
     field(
         &mut out,
+        "预览页边标行号",
+        yes_no(a.show_preview_line_numbers),
+        yes_no(b.show_preview_line_numbers),
+    );
+    field(
+        &mut out,
         "秘密级上限（年）",
         a.security_rules.secret_max_years.to_string(),
         b.security_rules.secret_max_years.to_string(),
