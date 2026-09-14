@@ -1865,43 +1865,96 @@ mod split_resize_tests {
         );
     }
 
-    /// 靠近右缘时，焦点附近的标题要成列铺开，而不是只浮出一条；
-    /// 条数还必须有上限——长稿四五十节全铺出来会糊满整页，
-    /// 而且离焦点远的本来也看不清。
+    /// 靠近右缘时，整篇大纲要一次铺开；而且每一条的高度只跟层级走——指针沿
+    /// 刻度带从上划到下，同一条标题不许变高变矮。曾经按指针远近逐档放大的
+    /// 那版就是在这里露馅的：一列字忽大忽小，看着晃眼。
     #[test]
-    fn approaching_the_right_edge_lays_out_a_column_of_titles() {
+    fn approaching_the_right_edge_lays_out_a_steady_outline() {
+        fn bands(harness: &Harness, count: usize) -> Vec<(usize, egui::Rect)> {
+            (0..count)
+                .filter_map(|index| {
+                    harness
+                        .ctx
+                        .read_response(egui::Id::new(("gw_nav_label", index)))
+                        .map(|hit| (index, hit.rect))
+                })
+                .collect()
+        }
+
         let mut harness = Harness::new();
         harness.doc.preview_mode = PreviewMode::Rendered;
         harness.preview_frames(egui::pos2(10.0, 10.0), 3);
         let rail = harness.navigator_rail().expect("导航开着时应当有刻度带");
-        // 指针停在刻度带上，跑够帧数让淡入动画走完。
-        harness.preview_frames(rail.center(), 20);
-
         let entries =
             navigator::collect_entries(&harness.doc.generated_markdown, &harness.config.numbering);
-        let labels = (0..entries.len())
-            .filter_map(|index| {
-                harness
-                    .ctx
-                    .read_response(egui::Id::new(("gw_nav_label", index)))
-            })
-            .collect::<Vec<_>>();
+
+        // 指针停在刻度带偏上处，跑够帧数让淡入与滚动都走完。
+        let x = rail.center().x;
+        harness.preview_frames(egui::pos2(x, rail.top() + rail.height() * 0.15), 30);
+        let high = bands(&harness, entries.len());
+        harness.preview_frames(egui::pos2(x, rail.top() + rail.height() * 0.85), 30);
+        let low = bands(&harness, entries.len());
+
         assert!(
-            labels.len() > 1,
-            "靠近右缘应当成列铺开标题，而不是只浮出一条，实测 {} 条",
-            labels.len()
+            high.len() >= 10,
+            "应当一次铺开整篇大纲，而不是焦点附近那几条，实测 {} 条",
+            high.len()
         );
-        assert!(
-            labels.len() <= 9,
-            "焦点两侧各四条，最多九条，实测 {} 条",
-            labels.len()
-        );
-        for label in &labels {
+        assert!(high.len() <= entries.len());
+
+        // 两次都在板上、且都不在板的头尾那一条（头尾的横带要铺到板沿，本来就
+        // 比中间高）的标题，高度必须分毫不差。
+        let interior = |rows: &[(usize, egui::Rect)]| {
+            rows.iter()
+                .skip(1)
+                .take(rows.len().saturating_sub(2))
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let (high_inner, low_inner) = (interior(&high), interior(&low));
+        let mut compared = 0;
+        for (index, rect) in &high_inner {
+            let Some((_, other)) = low_inner.iter().find(|(at, _)| at == index) else {
+                continue;
+            };
             assert!(
-                label.rect.right() <= rail.left() + 1.0,
-                "标题应当铺在刻度带左侧，实测右边界 {} 对刻度带左边界 {}",
-                label.rect.right(),
+                (rect.height() - other.height()).abs() < 0.01,
+                "第 {index} 条随指针变了高度：{} 对 {}",
+                rect.height(),
+                other.height()
+            );
+            compared += 1;
+        }
+        assert!(compared > 0, "两次没有共同的标题可比，这条测试就没验到东西");
+
+        for (_, rect) in &high {
+            // 可点的是整条横带，但到刻度带左缘为止：刻度那一条仍旧归刻度，
+            // 它答的是"文中什么位置"，与大纲的第几行不是一回事。
+            assert!(
+                rect.right() <= rail.left() + 1.0,
+                "标题带不该盖住刻度带，实测右边界 {} 对刻度带左边界 {}",
+                rect.right(),
                 rail.left()
+            );
+            assert!(
+                rect.left() < rail.left(),
+                "标题带应当铺到刻度带左侧的纸面上，实测左边界 {} 对刻度带左边界 {}",
+                rect.left(),
+                rail.left()
+            );
+            // 板不超出刻度带那一段的上下（两端各留一档板的内边距）。
+            assert!(
+                rect.top() > rail.top() - 12.0 && rect.bottom() < rail.bottom() + 12.0,
+                "标题带越出了刻度带那一段：{rect:?} 对 {rail:?}"
+            );
+        }
+        // 横带首尾相接铺满整块板：板是不透明的，板上不许有哪一处点下去什么都不发生。
+        for pair in high.windows(2) {
+            assert!(
+                (pair[0].1.bottom() - pair[1].1.top()).abs() < 0.01,
+                "横带之间漏了缝：{:?} 与 {:?}",
+                pair[0].1,
+                pair[1].1
             );
         }
     }

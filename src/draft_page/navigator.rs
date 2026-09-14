@@ -1,5 +1,5 @@
-//! 公文预览右缘的导航刻度：常驻一列细刻度反映全文结构，靠近右缘则在刻度左侧
-//! 铺开一列标题，指针最近的那条隆起放大。
+//! 公文预览右缘的导航刻度：常驻一列细刻度反映全文结构，靠近右缘则从右缘推出
+//! 一块亚克力板，把全篇标题排成一份大纲。
 //!
 //! 为什么不做成侧栏。起草页左右已经排满——左边公文要素、右边版本与审校提示两个
 //! 抽屉，中间的版式预览还要按纸张宽度自适应缩放：中间一窄，纸上的字就跟着变小。
@@ -12,14 +12,23 @@
 //! 还回答了一个公文很在意的问题——各节长短是否均衡，某节明显长出一截通常意味着
 //! 结构没拆开。
 //!
-//! 为什么标题是就地铺开而不是另开一个大纲框。框一展开就盖掉一块版面，视线也得
-//! 离开正文横移过去。这里让标题直接贴着刻度长出来：指针最近的那条最大最亮，
-//! 往外逐档缩小变淡，像 Dock 被鼠标顶起的那一段。底衬从右往左化开、没有边框，
-//! 所以整列看着是浮在纸上，而不是压在一块板子上。
+//! 为什么是悬浮的板而不是常驻的大纲栏。栏一开就常驻地吃掉一块宽度，而这里的板
+//! 只在指针靠过来的那一瞬间从右缘滑出，手一挪就收回去，版面不留欠账。
 //!
-//! 说明白一点：底衬不是真正的毛玻璃。egui 的渲染管线取不到已经画好的画面去做
-//! 高斯模糊，所以底下的字是透出来的、不是糊掉的。补偿的办法是把不透明度压在
-//! 每行字的正后方、只在字以外化开，再撒一层颗粒——详见 [`paint_label_column`]。
+//! 板上是一份**固定**的大纲：字号只跟层级走，不跟指针走。曾经做过 Dock 那样按
+//! 指针远近放大的版本——指针沿刻度带划过去，整列的字忽大忽小，看着晃眼，而且
+//! 被放大的那条未必是要找的那条，眼睛还得在变动的字号里重新定位。大纲是用来
+//! 照着往下读的，读的东西不该在读的时候动。指针指到哪一条，由那一条的底衬高亮
+//! 说明，不必动字号。
+//!
+//! 底衬是**一整块**亚克力板，不是每条标题各带一条底衬。分条的底衬每行各有各的
+//! 左缘，长短不一的标题排下来，左边就是一排参差的舌头，越往外越碎；一块定宽的
+//! 板则只有一条干净的左缘，标题落在板上，看着才是一件东西。板宽定死不随最长的
+//! 标题走——宽度跟着内容变，焦点在长短标题之间跳一下，左缘就跟着晃。
+//!
+//! 说明白一点：板不是真正的毛玻璃。egui 的渲染管线取不到已经画好的画面去做
+//! 高斯模糊，所以这里是「不透明底色 + 颗粒 + 投影」，靠挡而不是靠糊——详见
+//! [`paint_panel`]。
 //!
 //! 编号一律来自 [`export::HeadingCounters`]，与 DOCX/LaTeX 导出和版式预览共用同一套
 //! 计数器。导航里写「三、」而预览里排出「四、」是最难查的那类 bug，共用计数器
@@ -32,45 +41,46 @@
 use crate::draft_page::{DraftPage, PreviewAnchor};
 use crate::export;
 use crate::models::NumberingConfig;
+use crate::preview;
 use crate::theme;
 use eframe::egui;
 use std::ops::Range;
 
 /// 刻度带宽度。它浮在纸张右侧的留白上，让开滚动条。
 const RAIL_WIDTH: f32 = 14.0;
-/// 标题列连同刻度带一共占多宽。也是"靠近右缘"的判定宽度——
-/// 热区必须把标题列圈进去，否则指针往左挪到标题上就判成离开，整列当场缩回去。
-const COLUMN_WIDTH: f32 = 300.0;
+/// "靠近右缘"的判定宽度。热区必须把整块板圈进去并且还宽出一截，否则指针
+/// 往左挪到板上就判成离开，板当场缩回去。
+const COLUMN_WIDTH: f32 = 320.0;
+/// 亚克力板的宽度，连刻度带一起算在内。定宽，不随标题长短走。
+const PANEL_WIDTH: f32 = 288.0;
+/// 板内文字四周的留白，以及板的圆角。
+const PANEL_PAD_X: f32 = 14.0;
+const PANEL_PAD_Y: f32 = 9.0;
+const PANEL_RADIUS: u8 = 10;
+/// 板面的不透明度。留一丝透，底下纸面的色调还能渗上来一点——全不透就是一块
+/// 挡板，不是亚克力。
+const PANEL_ALPHA: f32 = 0.94;
 /// 标题与刻度带之间的空隙，以及每行文字上下留白。
 const LABEL_GAP: f32 = 10.0;
-const LABEL_PAD_X: f32 = 12.0;
 const LABEL_ROW_PAD: f32 = 7.0;
-/// 焦点往外各铺几条。再多就挤，而且离得远的本来也看不清。
-const FOCUS_RANKS: usize = 4;
-/// 按名次递减的字号与不透明度：正中最大最实，往外逐档化进纸里。
-const RANK_FONT: [f32; FOCUS_RANKS + 1] = [15.5, 13.0, 11.5, 10.5, 10.0];
-const RANK_ALPHA: [f32; FOCUS_RANKS + 1] = [1.0, 0.78, 0.56, 0.36, 0.20];
-/// 各档能占的宽度比例。只有焦点那条值得为它多盖住一截正文，外圈逐档收窄，
-/// 整列的左缘因此是由中间向外收的轮廓，而不是一堵齐边的墙。
-const RANK_WIDTH: [f32; FOCUS_RANKS + 1] = [1.0, 0.84, 0.70, 0.60, 0.52];
-/// 整列淡入淡出的时长，以及焦点换条时锚点滑过去的时长。
+/// 层级缩进：最浅那层贴着板的左缘，往下每层缩一档，板面读起来才是一份大纲。
+/// 缩到三档为止，再深就把本来就不长的可用宽度吃光了。
+const LEVEL_INDENT: f32 = 13.0;
+const LEVEL_INDENT_MAX: u8 = 3;
+/// 各层级固定的字号：文档标题、二级、三级、更深。只跟层级走，不跟指针走。
+/// 层级之间只差一档——层级本来已经由字体（黑体／楷体／仿宋）和缩进标出来了，
+/// 字号再拉开差距，一份十几行的大纲就会显得七零八落。
+const LEVEL_FONT: [f32; 4] = [14.5, 14.0, 13.0, 12.0];
+/// 整块板淡入淡出的时长，淡入时从右缘滑出来的距离，以及大纲太长要滚动时
+/// 滑过去的时长。滑一小段，板才是"推出来"的，不是凭空浮现的。
 const REVEAL_TIME: f32 = 0.14;
-const ANCHOR_GLIDE: f32 = 0.09;
-/// 底衬分三层堆：整列一层薄雾垫底，每行文字正后方压一块行板，板上再撒一层
-/// 颗粒。为什么要分层、以及为什么不能只有一层，见 [`paint_label_column`]。
-const HAZE_ALPHA: f32 = 0.40;
-const HAZE_BLEED: f32 = 18.0;
-/// 行板在文字正后方的不透明度。压到这个程度，底下的正文基本退掉，
-/// 再长的标题也不会被字缝里透上来的笔画搅乱。
-const PLATE_ALPHA: f32 = 0.93;
-/// 行板向左化开的宽度，四周比文字多铺出去的余量，以及整列上下两端收边的高度。
-const PLATE_FADE: f32 = 32.0;
-const PLATE_PAD_X: f32 = 10.0;
-const PLATE_PAD_Y: f32 = 5.0;
-const PLATE_TAPER: f32 = 8.0;
-/// 颗粒的浓度与贴图边长。
-const GRAIN_ALPHA: f32 = 0.06;
+const REVEAL_SLIDE: f32 = 16.0;
+const SCROLL_GLIDE: f32 = 0.12;
+/// 颗粒的浓度、贴图边长，以及四边收掉的宽度（板是圆角的，方网格不收边会在
+/// 四个角上漏出板外的噪点）。
+const GRAIN_ALPHA: f32 = 0.05;
 const GRAIN_TILE: usize = 64;
+const GRAIN_EDGE: f32 = 6.0;
 
 /// 导航里的一条标题。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,8 +285,8 @@ impl DraftPage<'_> {
             egui::Sense::click(),
         );
 
-        // 靠近右缘才淡入。热区要把标题列一起圈进去，否则指针一往左挪到标题上
-        // 就判定为"离开"，整列当场缩回去。
+        // 靠近右缘才淡入。热区要把整块板圈进去并且宽出一截，否则指针一往左挪到
+        // 板上就判定为"离开"，板当场缩回去。
         let anim_id = ui.id().with("nav_reveal");
         let hot = egui::Rect::from_min_max(
             egui::pos2(rail.right() - COLUMN_WIDTH, region.top()),
@@ -289,36 +299,53 @@ impl DraftPage<'_> {
         // 指针最近的那条就是焦点。刻度只有一两个点粗，要求精确压线等于要求绣花，
         // 所以按纵坐标就近认。
         let focus = pointer.and_then(|pos| nearest_tick(&placed, rail, pos.y));
-        let rows = (reveal > 0.01)
-            .then(|| focus.map(|focus| label_rows(&ctx, ui, rail, &placed, focus, reveal)))
-            .flatten()
-            .unwrap_or_default();
+        // 大纲的内容与指针无关，所以只看淡入的进度：指针移出预览区时 `focus`
+        // 会立刻变回 `None`，若拿它当条件，板就不是淡出而是当场消失。
+        let rows = if reveal > 0.01 {
+            outline_rows(&ctx, ui, rail, &placed, current, focus, reveal)
+        } else {
+            Vec::new()
+        };
 
+        // 点标题就跳到那一条；点刻度带跳到指针就近认到的那一条。
+        //
+        // 可点的是整条横带，不只是文字那几个字：板是不透明的，板上任何一处底下的
+        // 正文本来就已经看不见也选不中，这时候还只让文字可点，只会让人点在两行
+        // 中间却什么都没发生。分条底衬时行与行之间要留给正文穿透，板铺开之后
+        // 这个理由不再成立。
+        //
+        // 横带到刻度带左缘为止，右边那一条仍旧归刻度。两者答的是不同的问题：
+        // 大纲问"第几条"，刻度问"文中什么位置"——长稿里同一个纵坐标上，
+        // 大纲的第 N 行与刻度的第 N 条并不是同一条。让横带盖住刻度，就会出现
+        // 指着这条刻度、跳到另一条标题。
+        let mut jump = None;
         if !rows.is_empty() {
-            paint_label_column(ui, region, rail, &rows, reveal);
+            let spans = rows.iter().map(|row| row.rect).collect::<Vec<_>>();
+            let panel = panel_rect(rail, reveal, &spans);
+            let bands = row_bands(&spans, panel.with_max_x(rail.left()));
+            let mut hovered = None;
+            for (position, (row, band)) in rows.iter().zip(&bands).enumerate() {
+                let hit = ui.interact(
+                    *band,
+                    egui::Id::new(("gw_nav_label", row.index)),
+                    egui::Sense::click(),
+                );
+                if hit.hovered() {
+                    hovered = Some(position);
+                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if hit.clicked() {
+                    jump = Some(placed[row.index].entry.line.clone());
+                }
+            }
+            paint_panel_labels(ui, region, panel, &rows, &bands, hovered, reveal);
         }
+        // 刻度画在板之后：刻度带落在板的右缘上，两者是一件东西，刻度得压在板面上。
         paint_rail(ui, rail, &placed, current, focus);
         if focus.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
         }
 
-        // 点标题就跳到那一条；点刻度带跳到焦点那一条。
-        // 只有标题文字本身可点，行与行之间的空档仍然穿透到正文——
-        // 整列都吃掉点击的话，纸面右侧那一条就再也选不中字了。
-        let mut jump = None;
-        for row in &rows {
-            let hit = ui.interact(
-                row.rect,
-                egui::Id::new(("gw_nav_label", row.index)),
-                egui::Sense::click(),
-            );
-            if hit.hovered() {
-                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if hit.clicked() {
-                jump = Some(placed[row.index].entry.line.clone());
-            }
-        }
         if jump.is_none()
             && strip.clicked()
             && let Some(index) = focus
@@ -377,112 +404,141 @@ fn tick_y(rail: egui::Rect, item: &Placed<'_>) -> f32 {
     rail.top() + rail.height() * item.fraction
 }
 
-/// 标题列里的一行。
+/// 板上的一行。
 struct LabelRow {
     /// 在 `placed` 里的下标。
     index: usize,
-    /// 文字的包围盒。只有这块可点，行间空档留给正文。
+    /// 文字的包围盒。可点的范围由 [`row_bands`] 从它推出来，比它宽。
     rect: egui::Rect,
     galley: std::sync::Arc<egui::Galley>,
     color: egui::Color32,
-    /// 这一行底下那块行板的不透明度系数。跟着名次走，但压得比文字平缓——
-    /// 外圈的字可以淡到快看不见，它底下的板却还得挡住正文，否则那一行就是
-    /// 一团和正文搅在一起的灰影。
-    strength: f32,
 }
 
-/// 按"名次"铺开焦点附近的标题。
+/// 把全篇标题按源码顺序排成一份大纲。
 ///
-/// 为什么按名次而不按像素距离：刻度是按版面真实位置排的，长稿里彼此只隔十几个点，
-/// 若让标题各自贴着自己的刻度画，行与行立刻叠在一起，越放大叠得越死。改成以焦点
-/// 为中心、按各行自己的高度依次向上下堆叠——这正是 Dock 放大时把邻居顶开的做法，
-/// 既不会重叠，也自然形成"隆起"的包络。焦点那一行仍然钉在它自己的刻度上，
-/// 所以"标题跟刻度在一起"这件事在看的人真正关心的那一条上是成立的。
-fn label_rows(
+/// 行距、字号、左缘都只跟层级走，与指针位置无关：这一列是拿来照着读的，
+/// 读的时候不该动。指针指到哪一条由底衬的高亮说明，不动字号。
+///
+/// 标题不各自贴着自己的刻度画——刻度按版面真实位置排，长稿里彼此只隔十几个点，
+/// 贴着画行与行立刻叠成一团。大纲照源码顺序等距往下排，位置的事交给刻度说。
+fn outline_rows(
     ctx: &egui::Context,
     ui: &egui::Ui,
     rail: egui::Rect,
     placed: &[Placed<'_>],
-    focus: usize,
+    current: Option<usize>,
+    focus: Option<usize>,
     reveal: f32,
 ) -> Vec<LabelRow> {
-    // 只有进了刻度的那些条目参与排名，文档标题不算。
-    let ticks = placed
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| item.entry.level >= 2)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let Some(focus_rank) = ticks.iter().position(|index| *index == focus) else {
+    let (text_left, text_right) = text_span(rail, reveal);
+    let mut measured = Vec::with_capacity(placed.len());
+    for (index, item) in placed.iter().enumerate() {
+        let left = text_left + level_indent(item.entry.level);
+        let size = label_size(item.entry.level);
+        let Some(galley) = label_galley(ui, item.entry, size, text_right - left) else {
+            continue;
+        };
+        let height = galley.size().y + LABEL_ROW_PAD;
+        measured.push((index, left, galley, height));
+    }
+    if measured.is_empty() {
         return Vec::new();
-    };
+    }
 
-    // 焦点在刻度间跳动时，整列跟着硬切会很跳；把锚点插值一下，列就是滑过去的。
-    let target = tick_y(rail, &placed[focus]);
-    let anchor = ctx.animate_value_with_time(egui::Id::new("gw_nav_anchor"), target, ANCHOR_GLIDE);
+    let heights = measured
+        .iter()
+        .map(|(index, _, _, height)| (*index, *height))
+        .collect::<Vec<_>>();
+    let top = outline_top(rail, &heights, focus.or(current));
+    // 滚动要插值：大纲一整列瞬移比字号忽大忽小更晃眼。装得下的稿子这里恒等。
+    let top = ctx.animate_value_with_time(egui::Id::new("gw_nav_outline_top"), top, SCROLL_GLIDE);
 
-    let right = rail.left() - LABEL_GAP;
-    let full_width = COLUMN_WIDTH - RAIL_WIDTH - LABEL_GAP - LABEL_PAD_X;
-    let mut rows = Vec::new();
-    // 先焦点，再依次向上、向下堆叠，各自用自己的行高推进。
-    let mut up_edge = anchor;
-    let mut down_edge = anchor;
-    for offset in 0..=FOCUS_RANKS as isize {
-        for direction in [-1isize, 1] {
-            if offset == 0 && direction == 1 {
-                continue;
-            }
-            let rank = focus_rank as isize + offset * direction;
-            if rank < 0 || rank as usize >= ticks.len() {
-                continue;
-            }
-            let index = ticks[rank as usize];
-            let step = offset as usize;
-            let size = RANK_FONT[step];
-            let alpha = RANK_ALPHA[step] * reveal;
-            let max_width = full_width * RANK_WIDTH[step];
-            let Some(galley) = label_galley(ui, placed[index].entry, size, max_width) else {
-                continue;
-            };
-            let height = galley.size().y + LABEL_ROW_PAD;
-            let center = if offset == 0 {
-                up_edge = anchor - height * 0.5;
-                down_edge = anchor + height * 0.5;
-                anchor
-            } else if direction < 0 {
-                up_edge -= height * 0.5;
-                let center = up_edge;
-                up_edge -= height * 0.5;
-                center
-            } else {
-                down_edge += height * 0.5;
-                let center = down_edge;
-                down_edge += height * 0.5;
-                center
-            };
-            let rect = egui::Rect::from_min_max(
-                egui::pos2(right - galley.size().x, center - galley.size().y * 0.5),
-                egui::pos2(right, center + galley.size().y * 0.5),
-            );
-            // 焦点用正文色，外圈越远越淡，融进纸里。
-            let base = if offset == 0 {
-                theme::text()
-            } else {
-                theme::text_soft()
-            };
-            rows.push(LabelRow {
-                index,
-                rect,
-                galley,
-                color: base.gamma_multiply(alpha),
-                // 开方把外圈抬起来：文字 0.20 的那一档，板还有 0.45。
-                strength: RANK_ALPHA[step].sqrt() * reveal,
-            });
+    let mut rows = Vec::with_capacity(measured.len());
+    let mut y = top;
+    for (index, left, galley, height) in measured {
+        let text_top = y + (height - galley.size().y) * 0.5;
+        y += height;
+        // 排不进刻度带那一段的行整条不画：板只有这么高，让半截字切在板沿上，
+        // 比少列一条难看得多。
+        if text_top < rail.top() || text_top + galley.size().y > rail.bottom() {
+            continue;
         }
+        // 左对齐。分条底衬时标题是贴着刻度右对齐的——那时候右边是唯一一条
+        // 直的边。板铺开之后左缘成了那条直边，字再右对齐就是在一块方正的板上
+        // 排出一排参差的左缘，看着像没排齐。
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(left, text_top),
+            egui::pos2(left + galley.size().x, text_top + galley.size().y),
+        );
+        // 正在读的那一条用主色标出来——这是整个导航最该一直在线的一条信息。
+        // 其余的按层级分浓淡：深层多、浅层少，深的淡一点，整列才有层次。
+        let base = match (current == Some(index), placed[index].entry.level) {
+            (true, _) => theme::accent(),
+            (false, 0..=2) => theme::text(),
+            (false, _) => theme::text_soft(),
+        };
+        rows.push(LabelRow {
+            index,
+            rect,
+            galley,
+            color: base.gamma_multiply(reveal),
+        });
     }
     rows
 }
 
+/// 大纲第一行的纵向起点。
+///
+/// 装得下就整列居中，指针怎么动都一帧不动——这是绝大多数公文的情形。
+/// 装不下才滚：把锚点那一条带到刻度带正中，再把整列夹回两端，列到头就停住，
+/// 不会在上下留出一截空板。
+fn outline_top(rail: egui::Rect, heights: &[(usize, f32)], anchor: Option<usize>) -> f32 {
+    let total = heights.iter().map(|(_, height)| *height).sum::<f32>();
+    let available = rail.height();
+    if total <= available {
+        return rail.top() + (available - total) * 0.5;
+    }
+    let Some(anchor) = anchor else {
+        return rail.top();
+    };
+    let mut center = 0.0;
+    for (index, height) in heights {
+        if *index == anchor {
+            center += height * 0.5;
+            break;
+        }
+        center += height;
+    }
+    (rail.center().y - center).clamp(rail.bottom() - total, rail.top())
+}
+
+/// 每一级固定的字号。
+fn label_size(level: u8) -> f32 {
+    LEVEL_FONT[usize::from(level.saturating_sub(1).min(3))]
+}
+
+/// 层级缩进。公文正文层级最浅是二级（「一、」），所以从二级起算。
+fn level_indent(level: u8) -> f32 {
+    f32::from(level.saturating_sub(2).min(LEVEL_INDENT_MAX)) * LEVEL_INDENT
+}
+
+/// 板上某一层级的标题该用哪支字体。直接取版式预览那一套，不另立一份映射：
+/// 两份映射迟早会走岔，而走岔的表现是导航里的「一、」是黑体、纸上却成了楷体。
+fn label_family(level: u8) -> egui::FontFamily {
+    match level {
+        // 文档标题与附件标题在纸上是方正小标宋。预览把它排在独立的标题块里，
+        // 不走 `heading_family`，所以这一级要在这里单独对上。
+        0 | 1 => theme::official_family(theme::FONT_BIAOSONG),
+        _ => theme::official_family(preview::heading_family(level)),
+    }
+}
+
+/// 一条标题在板上的字面。
+///
+/// 字体跟着公文走，不用界面默认的那支无衬线：二级黑体、三级楷体、更深的仿宋，
+/// 与版式预览、DOCX/LaTeX 导出取自同一个 [`preview::heading_family`]。这列的
+/// 是纸上那些标题，字形不一样就等于换了一份东西——而且公文的层级本来就是靠
+/// 字体区分的（黑体一级、楷体二级），字形对上，层级不读字也认得出来。
 fn label_galley(
     ui: &egui::Ui,
     entry: &NavEntry,
@@ -498,7 +554,7 @@ fn label_galley(
     }
     let mut job = egui::text::LayoutJob::simple_singleline(
         text,
-        egui::FontId::proportional(size),
+        egui::FontId::new(size, label_family(entry.level)),
         theme::text(),
     );
     // 超过一行就截断。公文标题动辄二十几字，整条铺出去会横穿版面。
@@ -509,150 +565,151 @@ fn label_galley(
     Some(ui.painter().layout_job(job))
 }
 
-/// 标题列的底衬，连同标题一起画。
+/// 板的横向范围。右缘压住刻度带的外沿——刻度和标题是一件东西，中间断开会显出
+/// 两截；左缘由 [`PANEL_WIDTH`] 定死。
 ///
-/// 为什么要分三层。原先只有一层从右往左化开的薄色，渐变按整列的包围盒归一化：
-/// 一条长标题把包围盒往左撑宽，它自己靠左那几个字就落到渐变最透的一端，
-/// 等于**没有底衬**——正文直接从字缝里透上来，标题越长糊得越厉害。
-/// 底衬不能按整列算，得按每一行自己的长度算。
+/// `reveal` 未满时整块往右挪一截：板是从纸的右缘推出来的，不是凭空浮现的。
+fn panel_span(rail: egui::Rect, reveal: f32) -> (f32, f32) {
+    let right = rail.right() + (1.0 - reveal) * REVEAL_SLIDE;
+    (right - PANEL_WIDTH, right)
+}
+
+/// 板内文字能占的横向范围：左边留出内边距，右边给刻度带让开。
+fn text_span(rail: egui::Rect, reveal: f32) -> (f32, f32) {
+    let (left, right) = panel_span(rail, reveal);
+    (left + PANEL_PAD_X, right - RAIL_WIDTH - LABEL_GAP)
+}
+
+/// 板的位置：横向定宽，纵向把所有行包进去，上下各留一档内边距。
 ///
-/// 于是拆成三层：薄雾给整列一个「这里浮着东西」的底子；行板贴着每行文字自己的
-/// 左端铺，字的正后方接近不透明，只在文字以外才化开，长标题因此和短标题一样清楚；
-/// 颗粒让这层薄色有亚克力的质感，而不是一张塑料贴纸。四边仍旧是化开的，
-/// 所以「没有边框、浮在纸上」这件事没有丢。
+/// `rows` 是各行文字的包围盒，非空且已按纵向排好。
+fn panel_rect(rail: egui::Rect, reveal: f32, rows: &[egui::Rect]) -> egui::Rect {
+    let (left, right) = panel_span(rail, reveal);
+    let top = rows[0].top() - PANEL_PAD_Y;
+    let bottom = rows[rows.len() - 1].bottom() + PANEL_PAD_Y;
+    egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
+}
+
+/// 每一行在板上占的那条横带：以相邻两行的中点为界，首尾相接铺满 `area`。
 ///
-/// 这仍然不是真的毛玻璃：egui 取不到已画好的画面做高斯模糊，硬做要自己加一道
-/// 离屏渲染。但亚克力真正让人看得清的是那层不透明的底色和颗粒，模糊只是锦上添花，
-/// 所以照搬前两样已经很接近。
-fn paint_label_column(
+/// 它既是可点的范围，也是悬停时高亮的范围。按中点切而不是按文字包围盒扩一圈，
+/// 是为了让板面不留死角：指针落在板上任何一处，都明确属于某一条标题。
+///
+/// `area` 是板去掉刻度带那一条之后的部分——刻度自己收点击。
+fn row_bands(rows: &[egui::Rect], area: egui::Rect) -> Vec<egui::Rect> {
+    (0..rows.len())
+        .map(|position| {
+            let top = match position.checked_sub(1) {
+                Some(above) => (rows[above].bottom() + rows[position].top()) * 0.5,
+                None => area.top(),
+            };
+            let bottom = match rows.get(position + 1) {
+                Some(below) => (rows[position].bottom() + below.top()) * 0.5,
+                None => area.bottom(),
+            };
+            egui::Rect::from_min_max(
+                egui::pos2(area.left(), top),
+                egui::pos2(area.right(), bottom),
+            )
+        })
+        .collect()
+}
+
+/// 板、悬停高亮、标题，从下往上依次画。
+fn paint_panel_labels(
     ui: &egui::Ui,
     region: egui::Rect,
-    rail: egui::Rect,
+    panel: egui::Rect,
     rows: &[LabelRow],
+    bands: &[egui::Rect],
+    hovered: Option<usize>,
     reveal: f32,
 ) {
     let painter = ui.painter().with_clip_rect(region);
-    // 底衬一直铺到刻度带的外沿：刻度和标题是一件东西，中间断开会显出两截。
-    let right = rail.right();
-    let mut bounds = rows[0].rect;
-    for row in &rows[1..] {
-        bounds = bounds.union(row.rect);
+    paint_panel(&painter, panel, reveal);
+    if let Some(position) = hovered.filter(|_| reveal > 0.5)
+        && let Some(band) = bands.get(position)
+    {
+        // 高亮往里收一圈，才不会顶到板的圆角上；上下也收一点，免得与相邻两条
+        // 贴成一整片。
+        painter.rect_filled(
+            band.shrink2(egui::vec2(6.0, 1.5)),
+            6,
+            theme::surface_hover().gamma_multiply(0.85 * reveal),
+        );
     }
-    let haze = egui::Rect::from_min_max(
-        egui::pos2(bounds.left() - HAZE_BLEED, bounds.top() - HAZE_BLEED),
-        egui::pos2(right, bounds.bottom() + HAZE_BLEED),
-    );
-    paint_haze(&painter, haze, reveal);
-
-    // 行板按纵向排好再画：相邻两块以中点为界首尾相接，整列才连成一片，
-    // 不会在行与行之间漏出一道道缝。
-    let mut order = rows.iter().collect::<Vec<_>>();
-    order.sort_by(|a, b| a.rect.top().total_cmp(&b.rect.top()));
-    paint_plates(&painter, &order, right);
-
     for row in rows {
         painter.galley(row.rect.left_top(), row.galley.clone(), row.color);
     }
 }
 
-/// 整列的薄雾：右端最实、往左化开，上下两端同样收掉，四边都没有硬边。
-/// 它一个人挡不住正文，职责只是把标题列和纸面分开一层。
-fn paint_haze(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
+/// 亚克力板本身：投影 + 底色 + 颗粒 + 一道极淡的描边。
+///
+/// 这不是真的毛玻璃——egui 取不到已画好的画面做高斯模糊，硬做要自己加一道离屏
+/// 渲染。但亚克力真正让人看得清的是那层不透明的底色，模糊只是锦上添花：
+///
+/// - 底色压到 [`PANEL_ALPHA`]，底下的正文基本退掉，再长的标题也不会被字缝里
+///   透上来的笔画搅乱。留那一丝透，是为了让纸面的色调还能渗上来一点。
+/// - 颗粒补材质。纯色半透明看着像一张塑料贴纸，撒一层极细的噪点才像一块板。
+/// - 投影和描边负责"浮起来"。分条底衬时靠四边化开来回避边界，一块板则相反：
+///   它就该有一条清清楚楚的边，边之外靠投影和纸分开。
+fn paint_panel(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
     if !rect.is_positive() {
         return;
     }
-    const STEPS: usize = 10;
-    let cols = (0..=STEPS)
-        .map(|step| {
-            let u = step as f32 / STEPS as f32;
-            (rect.left() + rect.width() * u, u * u)
-        })
-        .collect::<Vec<_>>();
-    let rows = (0..=STEPS)
-        .map(|step| {
-            let v = step as f32 / STEPS as f32;
-            // 上下两端收掉，两头各占约两成做过渡。
-            let taper = (v / 0.2).min(1.0).min(((1.0 - v) / 0.2).min(1.0));
-            (rect.top() + rect.height() * v, taper * reveal)
-        })
-        .collect::<Vec<_>>();
-    let fill = theme::surface().gamma_multiply(HAZE_ALPHA);
-    painter.add(egui::Shape::mesh(grid_mesh(&cols, &rows, fill, None)));
+    let shadow_alpha = f32::from(theme::paper::shadow_alpha()) * 1.6 * reveal;
+    painter.add(
+        egui::epaint::Shadow {
+            // 往左下偏一点：板是从右边推出来的，光从左上来。
+            offset: [-3, 4],
+            blur: 18,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(shadow_alpha.min(255.0) as u8),
+        }
+        .as_shape(rect, PANEL_RADIUS),
+    );
+    painter.rect_filled(
+        rect,
+        PANEL_RADIUS,
+        theme::surface().gamma_multiply(PANEL_ALPHA * reveal),
+    );
+    paint_grain(painter, rect, reveal);
+    painter.rect_stroke(
+        rect,
+        PANEL_RADIUS,
+        egui::Stroke::new(1.0, theme::border().gamma_multiply(0.7 * reveal)),
+        egui::StrokeKind::Inside,
+    );
 }
 
-/// 每行文字底下那块行板，外加板上的颗粒。
+/// 板面的颗粒：噪声贴图平铺盖满整块板，四边各收掉一小截。
 ///
-/// `rows` 必须已按纵向排好。相邻两块板以各自边界的中点为界，首尾相接铺满整列；
-/// 强度在交界处取两行的平均，所以整列的浓淡是连续变化的——各画各的会在焦点行
-/// 与邻行之间横出一道明暗台阶。
-fn paint_plates(painter: &egui::Painter, rows: &[&LabelRow], right: f32) {
-    let fill = theme::surface().gamma_multiply(PLATE_ALPHA);
+/// 收边是因为板是圆角的而这张网格是方的：不收，四个角上会漏出板外的噪点。
+fn paint_grain(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
     let grain = grain_texture(painter.ctx());
-    let grain_tint = egui::Color32::WHITE.gamma_multiply(GRAIN_ALPHA);
-    for (position, row) in rows.iter().enumerate() {
-        let previous = position.checked_sub(1).map(|index| rows[index]);
-        let next = rows.get(position + 1).copied();
-        let solid_left = row.rect.left() - PLATE_PAD_X;
-        let left = solid_left - PLATE_FADE;
-        if left >= right || row.strength <= 0.0 {
-            continue;
-        }
-
-        let mut bands = Vec::with_capacity(5);
-        match previous {
-            // 与上一行交界：取中点，强度取两行的平均。
-            Some(above) => bands.push((
-                (above.rect.bottom() + row.rect.top()) * 0.5,
-                (above.strength + row.strength) * 0.5,
-            )),
-            // 整列的上沿：先满强度托住第一行的字，再往外收成透明。
-            None => {
-                bands.push((row.rect.top() - PLATE_PAD_Y - PLATE_TAPER, 0.0));
-                bands.push((row.rect.top() - PLATE_PAD_Y, row.strength));
-            }
-        }
-        bands.push((row.rect.center().y, row.strength));
-        match next {
-            Some(below) => bands.push((
-                (row.rect.bottom() + below.rect.top()) * 0.5,
-                (row.strength + below.strength) * 0.5,
-            )),
-            None => {
-                bands.push((row.rect.bottom() + PLATE_PAD_Y, row.strength));
-                bands.push((row.rect.bottom() + PLATE_PAD_Y + PLATE_TAPER, 0.0));
-            }
-        }
-
-        let cols = plate_cols(left, solid_left, right);
-        painter.add(egui::Shape::mesh(grid_mesh(&cols, &bands, fill, None)));
-        painter.add(egui::Shape::mesh(grid_mesh(
-            &cols,
-            &bands,
-            grain_tint,
-            Some((grain.id(), GRAIN_TILE as f32)),
-        )));
-    }
+    let cols = edge_taper(rect.left(), rect.right());
+    let rows = edge_taper(rect.top(), rect.bottom());
+    painter.add(egui::Shape::mesh(grid_mesh(
+        &cols,
+        &rows,
+        egui::Color32::WHITE.gamma_multiply(GRAIN_ALPHA * reveal),
+        Some((grain.id(), GRAIN_TILE as f32)),
+    )));
 }
 
-/// 行板横向的采样柱：从 `solid_left` 到 `right` 是满强度，往左在 `PLATE_FADE`
-/// 的宽度里化掉。
-///
-/// 关键是满强度那一段的起点由**这一行自己**的左端决定。文字有多长，实底就铺多长，
-/// 长标题不会像按整列归一化时那样把自己的头几个字甩到渐变最透的一端去。
-fn plate_cols(left: f32, solid_left: f32, right: f32) -> Vec<(f32, f32)> {
-    const STEPS: usize = 6;
-    let mut cols = (0..=STEPS)
-        .map(|step| {
-            let t = step as f32 / STEPS as f32;
-            // smoothstep：两端都平，化开的起止处看不出接缝。
-            (left + (solid_left - left) * t, t * t * (3.0 - 2.0 * t))
-        })
-        .collect::<Vec<_>>();
-    cols.push((right, 1.0));
-    cols
+/// 一个方向上的采样柱：两端各在 [`GRAIN_EDGE`] 的宽度里收成透明，中间满强度。
+fn edge_taper(start: f32, end: f32) -> Vec<(f32, f32)> {
+    // 板窄到装不下两道收边时按比例缩，采样柱才不会前后颠倒、把网格翻成一块乱片。
+    let inset = GRAIN_EDGE.min((end - start) * 0.25).max(0.0);
+    vec![
+        (start, 0.0),
+        (start + inset, 1.0),
+        (end - inset, 1.0),
+        (end, 0.0),
+    ]
 }
 
-/// 亚克力的颗粒：一张 64×64 的灰噪声，平铺盖在行板上。
+/// 亚克力的颗粒：一张 64×64 的灰噪声，平铺盖在板上。
 ///
 /// 为什么要它：纯色半透明看着像一层塑料贴纸，加一点极细的颗粒才有「材质」感。
 /// 这也是各家毛玻璃材质里唯一一层不依赖背景模糊、能直接照搬过来的东西。
@@ -880,47 +937,152 @@ mod tests {
         assert_eq!(&markdown[entry.line.clone()], "## 总体要求");
     }
 
+    fn rail() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(586.0, 40.0), egui::pos2(600.0, 640.0))
+    }
+
+    /// 板上第 `position` 行文字的包围盒，按该层级的缩进与字号。
+    fn label(position: usize, level: u8, width: f32) -> egui::Rect {
+        let left = text_span(rail(), 1.0).0 + level_indent(level);
+        let top = 200.0 + position as f32 * 26.0;
+        egui::Rect::from_min_max(
+            egui::pos2(left, top),
+            egui::pos2(left + width, top + label_size(level)),
+        )
+    }
+
     #[test]
-    fn every_label_gets_full_backing_under_its_own_first_glyph() {
-        // 这条钉住的是底衬那个 bug：渐变原先按整列的包围盒归一化，一条长标题
-        // 把包围盒撑宽之后，它靠左那几个字正好落在最透的一端，等于没有底衬，
-        // 正文从字缝里透上来。现在渐变按每行自己的左端算——标题不论多长，
-        // 第一个字的正后方都必须是满强度。
-        let right = 500.0;
-        for text_left in [460.0f32, 300.0, 120.0, -40.0] {
-            let solid_left = text_left - PLATE_PAD_X;
-            let cols = plate_cols(solid_left - PLATE_FADE, solid_left, right);
-            let (x, factor) = *cols
-                .iter()
-                .find(|(_, factor)| (*factor - 1.0).abs() < 1e-4)
-                .expect("化开的那一段之后必须还有满强度的采样柱");
+    fn no_label_ever_hangs_off_the_panel() {
+        // 分条底衬的时代，底衬是贴着每行文字长出来的，长标题只会把自己那条撑宽。
+        // 换成一块定宽的板之后，"字不会跑到板外面去"改由排版这一头保证：
+        // 文字的可用范围必须整个落在板里，四边都还留着内边距。
+        for reveal in [0.0f32, 0.35, 0.8, 1.0] {
+            let panel = panel_rect(rail(), reveal, &[label(0, 2, 10.0)]);
+            let (left, right) = text_span(rail(), reveal);
             assert!(
-                x <= text_left + 0.01,
-                "满强度要在第一个字之前就开始：{x} > {text_left}"
+                left > panel.left() && right < panel.right(),
+                "文字越出板外：{left}..{right} 不在 {panel:?} 里"
             );
-            assert!((factor - 1.0).abs() < 1e-4);
-            // 采样柱必须从左到右单调，否则网格会翻面，底衬变成一块乱片。
+            // 最深一层缩进之后仍要装得下十来个字，否则深层标题只剩省略号。
+            let usable = right - left - level_indent(2 + LEVEL_INDENT_MAX);
             assert!(
-                cols.windows(2).all(|pair| pair[0].0 <= pair[1].0),
-                "采样柱不单调：{cols:?}"
+                usable > label_size(2) * 10.0,
+                "最深一层可用宽度只剩 {usable}"
             );
-            // 两端都得平：起点全透、终点满实，中间不许越界。
-            assert!(cols.iter().all(|(_, f)| (0.0..=1.0).contains(f)));
-            assert!(cols[0].1.abs() < 1e-4);
+        }
+        // 热区要比板宽出一截，否则指针挪到板的左缘就判成离开。
+        const { assert!(COLUMN_WIDTH > PANEL_WIDTH + 16.0) };
+    }
+
+    #[test]
+    fn the_bands_tile_the_whole_panel_without_gaps() {
+        // 板是不透明的：板上任何一处都必须明确属于某一条标题，否则会出现
+        // "点在板上却什么都没发生"，而底下的正文又早被板挡住了。
+        let rail = rail();
+        let rows = (0..5).map(|i| label(i, 2, 120.0)).collect::<Vec<_>>();
+        let panel = panel_rect(rail, 1.0, &rows);
+        let area = panel.with_max_x(rail.left());
+        let bands = row_bands(&rows, area);
+        assert_eq!(bands.len(), rows.len());
+        assert_eq!(bands[0].top(), panel.top());
+        assert_eq!(bands[bands.len() - 1].bottom(), panel.bottom());
+        for (band, row) in bands.iter().zip(&rows) {
+            assert!(
+                band.contains_rect(*row),
+                "{band:?} 没盖住它自己那行 {row:?}"
+            );
+            assert_eq!(band.left(), panel.left());
+            // 刻度带那一条不归横带：那里归刻度，答的是"文中什么位置"。
+            assert_eq!(band.right(), rail.left());
+        }
+        // 首尾相接，既不重叠也不留缝。
+        for pair in bands.windows(2) {
+            assert_eq!(pair[0].bottom(), pair[1].top());
         }
     }
 
     #[test]
-    fn the_outer_ranks_stay_backed_even_as_their_text_fades_out() {
-        // 外圈的字可以淡到快看不见，底下那块板却还得挡住正文，否则那一行会
-        // 变成和正文搅在一起的一团灰影——这正是「淡出」和「看不清」的分界。
-        let faintest = RANK_ALPHA[FOCUS_RANKS];
-        assert!(faintest.sqrt() > faintest * 2.0);
-        assert!(faintest.sqrt() > 0.4, "最外一档的板不该淡到挡不住正文");
-        assert!(
-            (RANK_ALPHA[0].sqrt() - 1.0).abs() < 1e-6,
-            "焦点那档的板要满实"
+    fn the_labels_use_the_same_faces_as_the_paper() {
+        // 板上的字体必须与纸上逐级对应：公文的层级本来就是靠字体区分的，
+        // 导航里「一、」是黑体而纸上排成楷体，等于把层级读错。
+        assert_eq!(
+            label_family(1),
+            theme::official_family(theme::FONT_BIAOSONG)
         );
+        assert_eq!(label_family(2), theme::official_family(theme::FONT_HEITI));
+        assert_eq!(label_family(3), theme::official_family(theme::FONT_KAITI));
+        for deeper in [4, 5] {
+            assert_eq!(
+                label_family(deeper),
+                theme::official_family(theme::FONT_FANGSONG)
+            );
+        }
+        // 任何一级都不许退回界面默认的无衬线。
+        for level in 0..=6u8 {
+            assert_ne!(label_family(level), egui::FontFamily::Proportional);
+        }
+    }
+
+    #[test]
+    fn the_type_size_depends_on_the_level_alone() {
+        // 这条钉住的是"不忽大忽小"：字号只是层级的函数，指针、焦点、当前节
+        // 都不得参与。层级之间只差一档，整列才不显得七零八落。
+        for level in 0..=8u8 {
+            assert_eq!(label_size(level), label_size(level));
+        }
+        assert_eq!(label_size(0), label_size(1), "文档标题与附件标题同级");
+        assert!(label_size(1) >= label_size(2) && label_size(2) > label_size(5));
+        assert!(
+            LEVEL_FONT.windows(2).all(|pair| pair[0] - pair[1] <= 1.5),
+            "相邻层级的字号差不该拉开到一眼就看出两种大小"
+        );
+        assert!(
+            LEVEL_FONT.iter().all(|size| *size >= 12.0),
+            "楷体、仿宋再小就看不出字形"
+        );
+    }
+
+    #[test]
+    fn a_short_outline_never_moves_and_a_long_one_scrolls_within_its_ends() {
+        let rail = rail();
+        // 装得下：整列居中，锚点指哪都是同一个起点——一份十来节的公文属于这一档。
+        let short = (0..10).map(|index| (index, 24.0)).collect::<Vec<_>>();
+        let centered = outline_top(rail, &short, None);
+        for anchor in [None, Some(0), Some(4), Some(9)] {
+            assert_eq!(outline_top(rail, &short, anchor), centered);
+        }
+        assert!(centered > rail.top(), "居中之后上面该留出空当");
+
+        // 装不下：按锚点滚，但整列夹在两端之间，不会在板的上下露出空白。
+        let long = (0..60).map(|index| (index, 24.0)).collect::<Vec<_>>();
+        let total = 60.0 * 24.0;
+        let tops = [0usize, 12, 30, 45, 59]
+            .map(|anchor| outline_top(rail, &long, Some(anchor)))
+            .to_vec();
+        for top in &tops {
+            assert!(
+                *top <= rail.top() + 0.01 && *top >= rail.bottom() - total - 0.01,
+                "大纲滚出了两端：{top}"
+            );
+        }
+        // 锚点越往下，列就越往上滚，中间不允许反向。
+        assert!(tops.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(tops[0] > tops[tops.len() - 1], "首尾两端该滚到不同位置");
+    }
+
+    #[test]
+    fn the_grain_stops_short_of_the_rounded_corners() {
+        // 颗粒是方网格，板是圆角：不收边，四个角上会漏出板外的噪点。
+        for span in [(0.0f32, 288.0f32), (10.0, 22.0), (5.0, 5.0)] {
+            let taper = edge_taper(span.0, span.1);
+            assert!(
+                taper.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+                "采样柱不单调，网格会翻面：{taper:?}"
+            );
+            assert!(taper.first().expect("有采样柱").1.abs() < 1e-6);
+            assert!(taper.last().expect("有采样柱").1.abs() < 1e-6);
+            assert!(taper.iter().all(|(_, factor)| (0.0..=1.0).contains(factor)));
+        }
     }
 
     #[test]
