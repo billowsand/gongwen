@@ -18,7 +18,8 @@
 //! 所以整列看着是浮在纸上，而不是压在一块板子上。
 //!
 //! 说明白一点：底衬不是真正的毛玻璃。egui 的渲染管线取不到已经画好的画面去做
-//! 高斯模糊，这里用的是渐变的半透明薄色——底下的字透得出来但不会糊。
+//! 高斯模糊，所以底下的字是透出来的、不是糊掉的。补偿的办法是把不透明度压在
+//! 每行字的正后方、只在字以外化开，再撒一层颗粒——详见 [`paint_label_column`]。
 //!
 //! 编号一律来自 [`export::HeadingCounters`]，与 DOCX/LaTeX 导出和版式预览共用同一套
 //! 计数器。导航里写「三、」而预览里排出「四、」是最难查的那类 bug，共用计数器
@@ -48,13 +49,28 @@ const LABEL_ROW_PAD: f32 = 7.0;
 const FOCUS_RANKS: usize = 4;
 /// 按名次递减的字号与不透明度：正中最大最实，往外逐档化进纸里。
 const RANK_FONT: [f32; FOCUS_RANKS + 1] = [15.5, 13.0, 11.5, 10.5, 10.0];
-const RANK_ALPHA: [f32; FOCUS_RANKS + 1] = [1.0, 0.72, 0.45, 0.26, 0.13];
+const RANK_ALPHA: [f32; FOCUS_RANKS + 1] = [1.0, 0.78, 0.56, 0.36, 0.20];
+/// 各档能占的宽度比例。只有焦点那条值得为它多盖住一截正文，外圈逐档收窄，
+/// 整列的左缘因此是由中间向外收的轮廓，而不是一堵齐边的墙。
+const RANK_WIDTH: [f32; FOCUS_RANKS + 1] = [1.0, 0.84, 0.70, 0.60, 0.52];
 /// 整列淡入淡出的时长，以及焦点换条时锚点滑过去的时长。
 const REVEAL_TIME: f32 = 0.14;
 const ANCHOR_GLIDE: f32 = 0.09;
-/// 底衬最实处的不透明度，以及它比文字向外多铺出去的余量。
-const SCRIM_ALPHA: f32 = 0.82;
-const SCRIM_BLEED: f32 = 16.0;
+/// 底衬分三层堆：整列一层薄雾垫底，每行文字正后方压一块行板，板上再撒一层
+/// 颗粒。为什么要分层、以及为什么不能只有一层，见 [`paint_label_column`]。
+const HAZE_ALPHA: f32 = 0.40;
+const HAZE_BLEED: f32 = 18.0;
+/// 行板在文字正后方的不透明度。压到这个程度，底下的正文基本退掉，
+/// 再长的标题也不会被字缝里透上来的笔画搅乱。
+const PLATE_ALPHA: f32 = 0.93;
+/// 行板向左化开的宽度，四周比文字多铺出去的余量，以及整列上下两端收边的高度。
+const PLATE_FADE: f32 = 32.0;
+const PLATE_PAD_X: f32 = 10.0;
+const PLATE_PAD_Y: f32 = 5.0;
+const PLATE_TAPER: f32 = 8.0;
+/// 颗粒的浓度与贴图边长。
+const GRAIN_ALPHA: f32 = 0.06;
+const GRAIN_TILE: usize = 64;
 
 /// 导航里的一条标题。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +385,10 @@ struct LabelRow {
     rect: egui::Rect,
     galley: std::sync::Arc<egui::Galley>,
     color: egui::Color32,
+    /// 这一行底下那块行板的不透明度系数。跟着名次走，但压得比文字平缓——
+    /// 外圈的字可以淡到快看不见，它底下的板却还得挡住正文，否则那一行就是
+    /// 一团和正文搅在一起的灰影。
+    strength: f32,
 }
 
 /// 按"名次"铺开焦点附近的标题。
@@ -402,7 +422,7 @@ fn label_rows(
     let anchor = ctx.animate_value_with_time(egui::Id::new("gw_nav_anchor"), target, ANCHOR_GLIDE);
 
     let right = rail.left() - LABEL_GAP;
-    let max_width = COLUMN_WIDTH - RAIL_WIDTH - LABEL_GAP - LABEL_PAD_X;
+    let full_width = COLUMN_WIDTH - RAIL_WIDTH - LABEL_GAP - LABEL_PAD_X;
     let mut rows = Vec::new();
     // 先焦点，再依次向上、向下堆叠，各自用自己的行高推进。
     let mut up_edge = anchor;
@@ -420,6 +440,7 @@ fn label_rows(
             let step = offset as usize;
             let size = RANK_FONT[step];
             let alpha = RANK_ALPHA[step] * reveal;
+            let max_width = full_width * RANK_WIDTH[step];
             let Some(galley) = label_galley(ui, placed[index].entry, size, max_width) else {
                 continue;
             };
@@ -454,6 +475,8 @@ fn label_rows(
                 rect,
                 galley,
                 color: base.gamma_multiply(alpha),
+                // 开方把外圈抬起来：文字 0.20 的那一档，板还有 0.45。
+                strength: RANK_ALPHA[step].sqrt() * reveal,
             });
         }
     }
@@ -486,7 +509,21 @@ fn label_galley(
     Some(ui.painter().layout_job(job))
 }
 
-/// 标题列：先铺一层从右往左化开的底衬，再写字。
+/// 标题列的底衬，连同标题一起画。
+///
+/// 为什么要分三层。原先只有一层从右往左化开的薄色，渐变按整列的包围盒归一化：
+/// 一条长标题把包围盒往左撑宽，它自己靠左那几个字就落到渐变最透的一端，
+/// 等于**没有底衬**——正文直接从字缝里透上来，标题越长糊得越厉害。
+/// 底衬不能按整列算，得按每一行自己的长度算。
+///
+/// 于是拆成三层：薄雾给整列一个「这里浮着东西」的底子；行板贴着每行文字自己的
+/// 左端铺，字的正后方接近不透明，只在文字以外才化开，长标题因此和短标题一样清楚；
+/// 颗粒让这层薄色有亚克力的质感，而不是一张塑料贴纸。四边仍旧是化开的，
+/// 所以「没有边框、浮在纸上」这件事没有丢。
+///
+/// 这仍然不是真的毛玻璃：egui 取不到已画好的画面做高斯模糊，硬做要自己加一道
+/// 离屏渲染。但亚克力真正让人看得清的是那层不透明的底色和颗粒，模糊只是锦上添花，
+/// 所以照搬前两样已经很接近。
 fn paint_label_column(
     ui: &egui::Ui,
     region: egui::Rect,
@@ -495,58 +532,202 @@ fn paint_label_column(
     reveal: f32,
 ) {
     let painter = ui.painter().with_clip_rect(region);
+    // 底衬一直铺到刻度带的外沿：刻度和标题是一件东西，中间断开会显出两截。
+    let right = rail.right();
     let mut bounds = rows[0].rect;
     for row in &rows[1..] {
         bounds = bounds.union(row.rect);
     }
-    let scrim = egui::Rect::from_min_max(
-        egui::pos2(bounds.left() - SCRIM_BLEED, bounds.top() - SCRIM_BLEED),
-        egui::pos2(rail.left() + RAIL_WIDTH, bounds.bottom() + SCRIM_BLEED),
-    )
-    .intersect(region);
-    paint_scrim(&painter, scrim, reveal);
+    let haze = egui::Rect::from_min_max(
+        egui::pos2(bounds.left() - HAZE_BLEED, bounds.top() - HAZE_BLEED),
+        egui::pos2(right, bounds.bottom() + HAZE_BLEED),
+    );
+    paint_haze(&painter, haze, reveal);
+
+    // 行板按纵向排好再画：相邻两块以中点为界首尾相接，整列才连成一片，
+    // 不会在行与行之间漏出一道道缝。
+    let mut order = rows.iter().collect::<Vec<_>>();
+    order.sort_by(|a, b| a.rect.top().total_cmp(&b.rect.top()));
+    paint_plates(&painter, &order, right);
+
     for row in rows {
         painter.galley(row.rect.left_top(), row.galley.clone(), row.color);
     }
 }
 
-/// 从右往左化开的底衬。没有边框，也没有边界——右侧最实，越往左越透，
-/// 上下两端同样收掉，所以标题看着像浮在纸上，而不是压在一块板子上。
-///
-/// 这不是真正的毛玻璃：egui 的渲染管线取不到已经画好的画面去做高斯模糊，
-/// 硬做要自己加一道离屏渲染。这里用的是渐变的半透明薄色——底下的字透得出来
-/// 但不会糊，在浅色纸面上观感接近，要真模糊得换渲染方案。
-fn paint_scrim(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
+/// 整列的薄雾：右端最实、往左化开，上下两端同样收掉，四边都没有硬边。
+/// 它一个人挡不住正文，职责只是把标题列和纸面分开一层。
+fn paint_haze(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
     if !rect.is_positive() {
         return;
     }
-    const COLS: usize = 10;
-    const ROWS: usize = 12;
-    let fill = theme::surface();
+    const STEPS: usize = 10;
+    let cols = (0..=STEPS)
+        .map(|step| {
+            let u = step as f32 / STEPS as f32;
+            (rect.left() + rect.width() * u, u * u)
+        })
+        .collect::<Vec<_>>();
+    let rows = (0..=STEPS)
+        .map(|step| {
+            let v = step as f32 / STEPS as f32;
+            // 上下两端收掉，两头各占约两成做过渡。
+            let taper = (v / 0.2).min(1.0).min(((1.0 - v) / 0.2).min(1.0));
+            (rect.top() + rect.height() * v, taper * reveal)
+        })
+        .collect::<Vec<_>>();
+    let fill = theme::surface().gamma_multiply(HAZE_ALPHA);
+    painter.add(egui::Shape::mesh(grid_mesh(&cols, &rows, fill, None)));
+}
+
+/// 每行文字底下那块行板，外加板上的颗粒。
+///
+/// `rows` 必须已按纵向排好。相邻两块板以各自边界的中点为界，首尾相接铺满整列；
+/// 强度在交界处取两行的平均，所以整列的浓淡是连续变化的——各画各的会在焦点行
+/// 与邻行之间横出一道明暗台阶。
+fn paint_plates(painter: &egui::Painter, rows: &[&LabelRow], right: f32) {
+    let fill = theme::surface().gamma_multiply(PLATE_ALPHA);
+    let grain = grain_texture(painter.ctx());
+    let grain_tint = egui::Color32::WHITE.gamma_multiply(GRAIN_ALPHA);
+    for (position, row) in rows.iter().enumerate() {
+        let previous = position.checked_sub(1).map(|index| rows[index]);
+        let next = rows.get(position + 1).copied();
+        let solid_left = row.rect.left() - PLATE_PAD_X;
+        let left = solid_left - PLATE_FADE;
+        if left >= right || row.strength <= 0.0 {
+            continue;
+        }
+
+        let mut bands = Vec::with_capacity(5);
+        match previous {
+            // 与上一行交界：取中点，强度取两行的平均。
+            Some(above) => bands.push((
+                (above.rect.bottom() + row.rect.top()) * 0.5,
+                (above.strength + row.strength) * 0.5,
+            )),
+            // 整列的上沿：先满强度托住第一行的字，再往外收成透明。
+            None => {
+                bands.push((row.rect.top() - PLATE_PAD_Y - PLATE_TAPER, 0.0));
+                bands.push((row.rect.top() - PLATE_PAD_Y, row.strength));
+            }
+        }
+        bands.push((row.rect.center().y, row.strength));
+        match next {
+            Some(below) => bands.push((
+                (row.rect.bottom() + below.rect.top()) * 0.5,
+                (row.strength + below.strength) * 0.5,
+            )),
+            None => {
+                bands.push((row.rect.bottom() + PLATE_PAD_Y, row.strength));
+                bands.push((row.rect.bottom() + PLATE_PAD_Y + PLATE_TAPER, 0.0));
+            }
+        }
+
+        let cols = plate_cols(left, solid_left, right);
+        painter.add(egui::Shape::mesh(grid_mesh(&cols, &bands, fill, None)));
+        painter.add(egui::Shape::mesh(grid_mesh(
+            &cols,
+            &bands,
+            grain_tint,
+            Some((grain.id(), GRAIN_TILE as f32)),
+        )));
+    }
+}
+
+/// 行板横向的采样柱：从 `solid_left` 到 `right` 是满强度，往左在 `PLATE_FADE`
+/// 的宽度里化掉。
+///
+/// 关键是满强度那一段的起点由**这一行自己**的左端决定。文字有多长，实底就铺多长，
+/// 长标题不会像按整列归一化时那样把自己的头几个字甩到渐变最透的一端去。
+fn plate_cols(left: f32, solid_left: f32, right: f32) -> Vec<(f32, f32)> {
+    const STEPS: usize = 6;
+    let mut cols = (0..=STEPS)
+        .map(|step| {
+            let t = step as f32 / STEPS as f32;
+            // smoothstep：两端都平，化开的起止处看不出接缝。
+            (left + (solid_left - left) * t, t * t * (3.0 - 2.0 * t))
+        })
+        .collect::<Vec<_>>();
+    cols.push((right, 1.0));
+    cols
+}
+
+/// 亚克力的颗粒：一张 64×64 的灰噪声，平铺盖在行板上。
+///
+/// 为什么要它：纯色半透明看着像一层塑料贴纸，加一点极细的颗粒才有「材质」感。
+/// 这也是各家毛玻璃材质里唯一一层不依赖背景模糊、能直接照搬过来的东西。
+/// 噪声围着中灰上下摆，浅色纸上压、深色纸上提，两套主题都成立。
+/// 种子写死，颗粒每帧完全一样——否则整片底衬会像电视雪花一样闪。
+fn grain_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("gw_nav_grain");
+    if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return handle;
+    }
+    let mut rgb = Vec::with_capacity(GRAIN_TILE * GRAIN_TILE * 3);
+    let mut state: u32 = 0x9e37_79b9;
+    for _ in 0..GRAIN_TILE * GRAIN_TILE {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let value = 64 + (state >> 25) as u8;
+        rgb.extend_from_slice(&[value, value, value]);
+    }
+    let handle = ctx.load_texture(
+        "gw_nav_grain",
+        egui::ColorImage::from_rgb([GRAIN_TILE, GRAIN_TILE], &rgb),
+        egui::TextureOptions {
+            // 颗粒要的是硬边的细点，插值一平滑就成了糊开的云。
+            magnification: egui::TextureFilter::Nearest,
+            minification: egui::TextureFilter::Nearest,
+            wrap_mode: egui::TextureWrapMode::Repeat,
+            ..Default::default()
+        },
+    );
+    ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
+    handle
+}
+
+/// 把「横向采样柱 × 纵向采样行」织成一片网格，每个顶点的不透明度是两个方向系数
+/// 的乘积。底衬的每一层都是这么画出来的：顶点着色天然就是渐变，不需要边框，
+/// 也就没有边界可言。
+///
+/// `tile` 给定时按屏幕坐标算 uv，贴图平铺；uv 是位置的线性函数，稀疏采样也不失真。
+fn grid_mesh(
+    cols: &[(f32, f32)],
+    rows: &[(f32, f32)],
+    color: egui::Color32,
+    tile: Option<(egui::TextureId, f32)>,
+) -> egui::epaint::Mesh {
     let mut mesh = egui::epaint::Mesh::default();
-    for row in 0..=ROWS {
-        let v = row as f32 / ROWS as f32;
-        let y = rect.top() + rect.height() * v;
-        // 上下两端收掉：0 和 1 处为 0，中段为 1，两头各占约两成做过渡。
-        let vertical = ((v / 0.2).min(1.0)).min(((1.0 - v) / 0.2).min(1.0));
-        for col in 0..=COLS {
-            let u = col as f32 / COLS as f32;
-            let x = rect.left() + rect.width() * u;
-            // 右端最实、左端全透，中间按三次方渐隐，收得比线性更柔和。
-            let horizontal = u * u * u;
-            let alpha = SCRIM_ALPHA * horizontal * vertical * reveal;
-            mesh.colored_vertex(egui::pos2(x, y), fill.gamma_multiply(alpha));
+    if cols.len() < 2 || rows.len() < 2 {
+        return mesh;
+    }
+    if let Some((texture, _)) = tile {
+        mesh.texture_id = texture;
+    }
+    for &(y, vertical) in rows {
+        for &(x, horizontal) in cols {
+            let tint = color.gamma_multiply(horizontal * vertical);
+            match tile {
+                Some((_, size)) => mesh.vertices.push(egui::epaint::Vertex {
+                    pos: egui::pos2(x, y),
+                    uv: egui::pos2(x / size, y / size),
+                    color: tint,
+                }),
+                None => mesh.colored_vertex(egui::pos2(x, y), tint),
+            }
         }
     }
-    let stride = (COLS + 1) as u32;
-    for row in 0..ROWS as u32 {
-        for col in 0..COLS as u32 {
-            let top_left = row * stride + col;
-            mesh.add_triangle(top_left, top_left + 1, top_left + stride);
-            mesh.add_triangle(top_left + 1, top_left + stride + 1, top_left + stride);
+    let stride = cols.len() as u32;
+    for row in 1..rows.len() as u32 {
+        for col in 1..stride {
+            let bottom_right = row * stride + col;
+            let top_right = bottom_right - stride;
+            mesh.add_triangle(top_right - 1, top_right, bottom_right - 1);
+            mesh.add_triangle(top_right, bottom_right, bottom_right - 1);
         }
     }
-    painter.add(egui::Shape::mesh(mesh));
+    mesh
 }
 
 /// 常驻刻度。当前所在那条用主色描粗，指针就近吸附到的那条再加一档。
@@ -697,6 +878,49 @@ mod tests {
         let markdown = "正文段落。\n\n## 总体要求\n\n后续正文。\n";
         let entry = entries(markdown).into_iter().next().expect("有一条标题");
         assert_eq!(&markdown[entry.line.clone()], "## 总体要求");
+    }
+
+    #[test]
+    fn every_label_gets_full_backing_under_its_own_first_glyph() {
+        // 这条钉住的是底衬那个 bug：渐变原先按整列的包围盒归一化，一条长标题
+        // 把包围盒撑宽之后，它靠左那几个字正好落在最透的一端，等于没有底衬，
+        // 正文从字缝里透上来。现在渐变按每行自己的左端算——标题不论多长，
+        // 第一个字的正后方都必须是满强度。
+        let right = 500.0;
+        for text_left in [460.0f32, 300.0, 120.0, -40.0] {
+            let solid_left = text_left - PLATE_PAD_X;
+            let cols = plate_cols(solid_left - PLATE_FADE, solid_left, right);
+            let (x, factor) = *cols
+                .iter()
+                .find(|(_, factor)| (*factor - 1.0).abs() < 1e-4)
+                .expect("化开的那一段之后必须还有满强度的采样柱");
+            assert!(
+                x <= text_left + 0.01,
+                "满强度要在第一个字之前就开始：{x} > {text_left}"
+            );
+            assert!((factor - 1.0).abs() < 1e-4);
+            // 采样柱必须从左到右单调，否则网格会翻面，底衬变成一块乱片。
+            assert!(
+                cols.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+                "采样柱不单调：{cols:?}"
+            );
+            // 两端都得平：起点全透、终点满实，中间不许越界。
+            assert!(cols.iter().all(|(_, f)| (0.0..=1.0).contains(f)));
+            assert!(cols[0].1.abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn the_outer_ranks_stay_backed_even_as_their_text_fades_out() {
+        // 外圈的字可以淡到快看不见，底下那块板却还得挡住正文，否则那一行会
+        // 变成和正文搅在一起的一团灰影——这正是「淡出」和「看不清」的分界。
+        let faintest = RANK_ALPHA[FOCUS_RANKS];
+        assert!(faintest.sqrt() > faintest * 2.0);
+        assert!(faintest.sqrt() > 0.4, "最外一档的板不该淡到挡不住正文");
+        assert!(
+            (RANK_ALPHA[0].sqrt() - 1.0).abs() < 1e-6,
+            "焦点那档的板要满实"
+        );
     }
 
     #[test]
