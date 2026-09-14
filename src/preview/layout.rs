@@ -552,6 +552,23 @@ pub(crate) fn clickable_body_block(
     );
 }
 
+/// 一段命中范围里第一个有墨的字所在的下标；整段都是空白时返回 `None`。
+///
+/// 首行缩进的两个全角空格、编号对齐用的占位空格都排在正文前面，它们只是版式留白，
+/// 高亮底色压上去会在行首拖出一截空框，观感很差。命中/点击范围仍按整段算，
+/// 只有画底色时从第一个实字起笔。
+pub(crate) fn first_ink(
+    glyphs: &[egui::epaint::text::Glyph],
+    range: Range<usize>,
+) -> Option<usize> {
+    let start = range.start;
+    glyphs
+        .get(range)?
+        .iter()
+        .position(|glyph| !glyph.chr.is_whitespace())
+        .map(|offset| start + offset)
+}
+
 /// 为已经构造好的连续段落布局添加源码行级交互；紧缩段可借此保留标题/正文字体。
 pub(crate) fn clickable_justified_job(
     ui: &mut egui::Ui,
@@ -579,18 +596,22 @@ pub(crate) fn clickable_justified_job(
             }
             let local_start = start - row_start;
             let local_end = end - row_start;
-            let left = row_galley
-                .pos_from_cursor(egui::text::CCursor::new(local_start))
-                .left();
-            let right = row_galley
-                .pos_from_cursor(egui::text::CCursor::new(local_end))
-                .left()
-                .max(left + 1.0);
-            let rect = egui::Rect::from_min_max(
-                block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(left, 0.0),
-                block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(right, placed.size.y),
-            )
-            .expand2(egui::vec2(3.0, 1.0));
+            let row_rect = |from: usize, to: usize| {
+                let left = row_galley
+                    .pos_from_cursor(egui::text::CCursor::new(from))
+                    .left();
+                let right = row_galley
+                    .pos_from_cursor(egui::text::CCursor::new(to))
+                    .left()
+                    .max(left + 1.0);
+                egui::Rect::from_min_max(
+                    block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(left, 0.0),
+                    block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(right, placed.size.y),
+                )
+                .expand2(egui::vec2(3.0, 1.0))
+            };
+            let ink_start = first_ink(&placed.glyphs, local_start..local_end);
+            let rect = row_rect(local_start, local_end);
             let response = ui.interact(
                 rect,
                 egui::Id::new((
@@ -616,9 +637,11 @@ pub(crate) fn clickable_justified_job(
                 scroll_preview_to_rect(ui, rect);
                 *scroll_to_anchor = false;
             }
-            if anchored || response.hovered() {
+            if let Some(ink_start) = ink_start
+                && (anchored || response.hovered())
+            {
                 ui.painter().rect_filled(
-                    rect,
+                    row_rect(ink_start, local_end),
                     3.0,
                     if anchored {
                         theme::accent_soft()

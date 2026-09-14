@@ -17,6 +17,7 @@ use crate::preview::{
 use crate::theme;
 use crate::units::UnitDisplay;
 use eframe::egui;
+use eframe::egui::text::LayoutJob;
 use eframe::egui::{Align, Stroke};
 use std::ops::Range;
 
@@ -79,34 +80,129 @@ pub(crate) fn body_blocks(
                     clicked,
                 );
             }
-            MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
-                let segments = paragraph_source_segments(markdown, located, text);
-                clickable_body_block(
-                    ui,
-                    metrics,
-                    text,
-                    true,
-                    &segments,
-                    anchor,
-                    scroll_to_anchor,
-                    clicked,
-                );
-            }
-            _ => {
-                let range = located.range.clone();
-                clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
-                    content_block(
-                        ui,
-                        metrics,
-                        &located.block,
-                        counters,
-                        run.numbered,
-                        numbering,
-                    );
-                });
-            }
+            _ => clickable_content_block(
+                ui,
+                metrics,
+                located,
+                markdown,
+                counters,
+                run.numbered,
+                numbering,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+            ),
         }
     }
+}
+
+/// 一个正文块的可点击渲染：段落、标题、列表这些成行的块按行贴着文字高亮，
+/// 行首缩进的空白不会被底色压住；表格、图片等整块图形仍按块矩形高亮。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clickable_content_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    located: &LocatedBlock,
+    markdown: &str,
+    counters: &mut [usize; 4],
+    numbered: bool,
+    numbering: &NumberingConfig,
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+) {
+    let source = located.range.clone();
+    match &located.block {
+        MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
+            let segments = paragraph_source_segments(markdown, located, text);
+            clickable_body_block(
+                ui,
+                metrics,
+                text,
+                true,
+                &segments,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+            );
+        }
+        MarkdownBlock::Heading(level, text) => {
+            let Some(job) = heading_job(metrics, *level, text, counters, numbered, numbering)
+            else {
+                return;
+            };
+            let segments = [ClickableSourceSegment {
+                source,
+                chars: 0..job.text.chars().count(),
+            }];
+            clickable_justified_job(
+                ui,
+                metrics,
+                job,
+                &segments,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+            );
+        }
+        // 与 TeX 的 `\noindent{文本}\par` 及 Word 导出一致：无序列表项顶格。
+        MarkdownBlock::ListItem(text) => {
+            clickable_text_block(
+                ui,
+                metrics,
+                text,
+                false,
+                source,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+            );
+        }
+        MarkdownBlock::OrderedListItem { number, text } => {
+            let prefix = export::render_list_number(numbering.list2, *number);
+            clickable_text_block(
+                ui,
+                metrics,
+                &format!("{prefix}{text}"),
+                true,
+                source,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+            );
+        }
+        block => clickable(ui, &source, anchor, scroll_to_anchor, clicked, |ui| {
+            content_block(ui, metrics, block, counters, numbered, numbering);
+        }),
+    }
+}
+
+/// 整块对应一行源码的正文块（列表项等）：命中范围就是整段可见文字。
+#[allow(clippy::too_many_arguments)]
+fn clickable_text_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    first_line_indent: bool,
+    source: Range<usize>,
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+) {
+    let segments = [ClickableSourceSegment {
+        source,
+        chars: 0..export::inline_visible_char_index(text, text.len()),
+    }];
+    clickable_body_block(
+        ui,
+        metrics,
+        text,
+        first_line_indent,
+        &segments,
+        anchor,
+        scroll_to_anchor,
+        clicked,
+    );
 }
 
 /// 把 Markdown 连同表单锁定的行文要素按公文版式画在 `ui` 里；调用方负责套滚动区。
@@ -285,21 +381,9 @@ pub(crate) fn official_preview(
                 Align::LEFT,
             );
             for located in attachment {
-                if let MarkdownBlock::Paragraph(text) = &located.block
-                    && is_renderable_paragraph(text)
-                {
-                    let segments = paragraph_source_segments(markdown, located, text);
-                    clickable_body_block(
-                        ui,
-                        &metrics,
-                        text,
-                        true,
-                        &segments,
-                        anchor,
-                        &mut scroll_to_anchor,
-                        &mut clicked,
-                    );
-                } else {
+                // 附件正式标题与正文标题使用同一层级编码。
+                if let MarkdownBlock::Title(text) = &located.block {
+                    counters.fill(0);
                     let range = located.range.clone();
                     clickable(
                         ui,
@@ -307,31 +391,32 @@ pub(crate) fn official_preview(
                         anchor,
                         &mut scroll_to_anchor,
                         &mut clicked,
-                        |ui| match &located.block {
-                            // 附件正式标题与正文标题使用同一层级编码。
-                            MarkdownBlock::Title(text) => {
-                                counters.fill(0);
-                                line_block(
-                                    ui,
-                                    &metrics,
-                                    &export::plain_text(text),
-                                    theme::FONT_BIAOSONG,
-                                    TITLE_PT,
-                                    Align::Center,
-                                );
-                                ui.add_space(metrics.pt(18.0));
-                            }
-                            block => content_block(
+                        |ui| {
+                            line_block(
                                 ui,
                                 &metrics,
-                                block,
-                                &mut counters,
-                                numbered,
-                                numbering,
-                            ),
+                                &export::plain_text(text),
+                                theme::FONT_BIAOSONG,
+                                TITLE_PT,
+                                Align::Center,
+                            );
+                            ui.add_space(metrics.pt(18.0));
                         },
                     );
+                    continue;
                 }
+                clickable_content_block(
+                    ui,
+                    &metrics,
+                    located,
+                    markdown,
+                    &mut counters,
+                    numbered,
+                    numbering,
+                    anchor,
+                    &mut scroll_to_anchor,
+                    &mut clicked,
+                );
             }
             if sheet_index == last_attachment {
                 footer_record(ui, &metrics, input, display);
@@ -442,11 +527,23 @@ pub(crate) fn heading_block(
     numbered: bool,
     numbering: &NumberingConfig,
 ) {
+    if let Some(job) = heading_job(metrics, level, text, counters, numbered, numbering) {
+        draw_justified(ui, job);
+    }
+}
+
+/// 各级标题的排版任务：首行缩进 2 字，字体按层级取。
+/// 编号规则跳过这一级（`official_heading_text` 返回 None）时不成段。
+fn heading_job(
+    metrics: &Metrics,
+    level: u8,
+    text: &str,
+    counters: &mut [usize; 4],
+    numbered: bool,
+    numbering: &NumberingConfig,
+) -> Option<LayoutJob> {
     let text = if numbered {
-        match export::official_heading_text(level, text, counters, numbering) {
-            Some(text) => text,
-            None => return,
-        }
+        export::official_heading_text(level, text, counters, numbering)?
     } else {
         text.to_string()
     };
@@ -462,7 +559,7 @@ pub(crate) fn heading_block(
         0.0,
         text_format(font, metrics.line),
     );
-    draw_justified(ui, job);
+    Some(job)
 }
 
 pub(crate) fn content_block(

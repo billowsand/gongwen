@@ -7,8 +7,8 @@ use crate::export;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
 use crate::preview::{
-    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, clickable,
-    clickable_body_block, content_block, document_number, header_unit, heading_family, indent,
+    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
+    clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
     is_renderable_paragraph, job, justified_rows, layout, line_block, scroll_preview_to_rect,
     sheet, signature_date, single_line, text_format,
 };
@@ -940,18 +940,26 @@ pub(crate) fn paint_red_print_pages(
                             if start >= end {
                                 continue;
                             }
-                            let left = row_galley
-                                .pos_from_cursor(egui::text::CCursor::new(start - row_start))
-                                .left();
-                            let right = row_galley
-                                .pos_from_cursor(egui::text::CCursor::new(end - row_start))
-                                .left()
-                                .max(left + 1.0);
-                            let line_rect = egui::Rect::from_min_max(
-                                top_left + placed.pos.to_vec2() + egui::vec2(left, 0.0),
-                                top_left + placed.pos.to_vec2() + egui::vec2(right, placed.size.y),
-                            )
-                            .expand2(egui::vec2(3.0, 1.0));
+                            let local_start = start - row_start;
+                            let local_end = end - row_start;
+                            let row_rect = |from: usize, to: usize| {
+                                let left = row_galley
+                                    .pos_from_cursor(egui::text::CCursor::new(from))
+                                    .left();
+                                let right = row_galley
+                                    .pos_from_cursor(egui::text::CCursor::new(to))
+                                    .left()
+                                    .max(left + 1.0);
+                                egui::Rect::from_min_max(
+                                    top_left + placed.pos.to_vec2() + egui::vec2(left, 0.0),
+                                    top_left
+                                        + placed.pos.to_vec2()
+                                        + egui::vec2(right, placed.size.y),
+                                )
+                                .expand2(egui::vec2(3.0, 1.0))
+                            };
+                            let ink_start = first_ink(&placed.glyphs, local_start..local_end);
+                            let line_rect = row_rect(local_start, local_end);
                             let response = ui.interact(
                                 line_rect,
                                 egui::Id::new((
@@ -978,9 +986,11 @@ pub(crate) fn paint_red_print_pages(
                                 scroll_preview_to_rect(ui, line_rect);
                                 *scroll_to_anchor = false;
                             }
-                            if anchored || response.hovered() {
+                            if let Some(ink_start) = ink_start
+                                && (anchored || response.hovered())
+                            {
                                 ui.painter().rect_filled(
-                                    line_rect,
+                                    row_rect(ink_start, local_end),
                                     3.0,
                                     if anchored {
                                         theme::accent_soft()
@@ -1104,27 +1114,18 @@ pub(crate) fn red_approval_print_preview(
                 Align::LEFT,
             );
             for located in attachment {
-                if let MarkdownBlock::Paragraph(text) = &located.block
-                    && is_renderable_paragraph(text)
-                {
-                    let segments =
-                        crate::preview::paragraph_source_segments(markdown, located, text);
-                    clickable_body_block(
-                        ui,
-                        metrics,
-                        text,
-                        true,
-                        &segments,
-                        anchor,
-                        scroll_to_anchor,
-                        clicked,
-                    );
-                } else {
-                    let range = located.range.clone();
-                    clickable(ui, &range, anchor, scroll_to_anchor, clicked, |ui| {
-                        content_block(ui, metrics, &located.block, &mut counters, true, numbering)
-                    });
-                }
+                clickable_content_block(
+                    ui,
+                    metrics,
+                    located,
+                    markdown,
+                    &mut counters,
+                    true,
+                    numbering,
+                    anchor,
+                    scroll_to_anchor,
+                    clicked,
+                );
             }
         });
     }

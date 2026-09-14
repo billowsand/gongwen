@@ -15,18 +15,20 @@ mod tail;
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
     ClickableSourceSegment, append_inline, body_block, clickable, clickable_body_block,
-    clickable_justified_job, draw, draw_justified, heading_family, indent, is_renderable_paragraph,
-    job, justified_rows, layout, line_block, line_galley, place, scroll_preview_to_rect, sheet,
-    single_line, stacked, table_block, text_format,
+    clickable_justified_job, draw, draw_justified, first_ink, heading_family, indent,
+    is_renderable_paragraph, job, justified_rows, layout, line_block, line_galley, place,
+    scroll_preview_to_rect, sheet, single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
-pub(crate) use render::{content_block, official_preview, paragraph_source_segments};
+pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
 pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 // test-only names（根文件的测试模块使用）
 #[cfg(test)]
 pub(crate) use header::security_text;
 #[cfg(test)]
 pub(crate) use red::{fitting_closing_gap_lines, red_build_print_layout};
+#[cfg(test)]
+pub(crate) use render::content_block;
 #[cfg(test)]
 pub(crate) use tail::{signature_seal_mark, signature_unit};
 
@@ -641,6 +643,50 @@ mod tests {
             // 末行保持自然宽度，不被拉开。
             let last = rows.last().unwrap().rows[0].rect().width();
             assert!(last < metrics.content - 1.0, "末行不应撑满：{last}");
+        });
+    }
+
+    /// 悬停与命中高亮从第一个实字起笔：行首缩进的两个全角空格不该被底色压住。
+    #[test]
+    fn source_line_highlight_starts_after_the_first_line_indent() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+
+            // 顶格的无序列表项没有留白，仍从第 0 个字起笔。
+            let mut flush = job(metrics.content);
+            append_inline(&mut flush, &metrics, "顶格列表项。", &normal);
+            let flush = layout(ui, flush);
+            let flush_row = &flush.rows[0];
+            assert_eq!(
+                first_ink(&flush_row.glyphs, 0..flush_row.glyphs.len()),
+                Some(0),
+                "顶格段落的高亮不该往右缩"
+            );
+
+            let mut indented = job(metrics.content);
+            indented.append(
+                &indent(INDENT_CHARS),
+                0.0,
+                text_format(normal.clone(), metrics.line),
+            );
+            append_inline(&mut indented, &metrics, "各单位要抓好落实。", &normal);
+            let base = layout(ui, indented.clone());
+            let row = &base.rows[0];
+            let ink = first_ink(&row.glyphs, 0..row.glyphs.len()).expect("这一行应有实字");
+            assert_eq!(ink, INDENT_CHARS as usize, "高亮应从缩进后的第一个字起笔");
+
+            // 起笔位置确实让开了两个字的缩进，而不是贴着版心左沿。
+            let rows = justified_rows(ui, &indented, &base);
+            let left = rows[0]
+                .pos_from_cursor(egui::text::CCursor::new(ink))
+                .left();
+            assert!(
+                left > metrics.pt(BODY_PT) * 1.5,
+                "高亮仍压着行首缩进：{left}"
+            );
         });
     }
 
