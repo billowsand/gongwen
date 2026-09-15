@@ -59,7 +59,7 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 分区卡那一行。左端常驻公文要素填报区的开关，右端常驻五个视图模式和
+    /// 分区卡那一行。左端常驻文档要素填报区的开关，右端常驻五个视图模式和
     /// 收起功能区的箭头——这三样都不属于任何一个分区，切分区卡时必须一直在。
     pub(crate) fn ribbon_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
         ui.scope(|ui| {
@@ -73,11 +73,11 @@ impl DraftPage<'_> {
                 } else {
                     theme::Icon::PanelClose
                 };
-                if theme::nav_button(ui, !collapsed, icon, "公文要素")
+                if theme::nav_button(ui, !collapsed, icon, "文档要素")
                     .on_hover_text(if collapsed {
-                        "展开公文要素填报区"
+                        "展开文档要素填报区"
                     } else {
-                        "收起公文要素填报区"
+                        "收起文档要素填报区"
                     })
                     .clicked()
                 {
@@ -778,7 +778,7 @@ impl DraftPage<'_> {
                 has_draft,
                 theme::icon_text_button(theme::Icon::Refresh, "重新校验"),
             )
-            .on_hover_text("按当前公文要素与规则重新检查一遍审校稿")
+            .on_hover_text("按当前文档要素与规则重新检查一遍审校稿")
             .clicked()
         {
             self.revalidate();
@@ -913,10 +913,10 @@ impl DraftPage<'_> {
         let form_collapsed = self.doc.form_collapsed;
         if ui
             .add(
-                theme::icon_text_button(theme::Icon::PanelOpen, "公文要素")
+                theme::icon_text_button(theme::Icon::PanelOpen, "文档要素")
                     .selected(!form_collapsed),
             )
-            .on_hover_text("开关左侧的公文要素填报区")
+            .on_hover_text("开关左侧的文档要素填报区")
             .clicked()
         {
             self.doc.form_collapsed = !form_collapsed;
@@ -1014,6 +1014,7 @@ impl DraftPage<'_> {
             self.start_export_current();
         }
         let overwrite = self.config.export.overwrite;
+        let research = self.doc.draft.kind.is_research();
         let mut only: Option<(ExportSelection, &'static str)> = None;
         ui.add_enabled_ui(ready, |ui| {
             for (icon, label, selection, tip) in [
@@ -1048,11 +1049,17 @@ impl DraftPage<'_> {
                         tex: false,
                         overwrite,
                     },
-                    "这一次只出 md 原文，连同稿中引用的图片一起落盘",
+                    "这一次只出 Markdown 源码包：md 正文、稿中引用的图片，研究报告另含 references.bib",
                 ),
             ] {
+                let supported = !(research && selection.docx);
+                let tip = if supported {
+                    tip
+                } else {
+                    "研究报告仅支持 TeX/PDF，不支持 Word"
+                };
                 if ui
-                    .add(theme::icon_text_button(icon, label))
+                    .add_enabled(supported, theme::icon_text_button(icon, label))
                     .on_hover_text(tip)
                     .clicked()
                 {

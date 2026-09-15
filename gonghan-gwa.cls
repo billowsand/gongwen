@@ -129,8 +129,10 @@
 % 钩子内部同样按 \GwaFontPath 分按文件、按名字两种加载方式。
 \providecommand{\GwaFontPath}{}
 \providecommand{\GwaFontSetupHook}{}
-\ifx\GwaFontSetupHook\@empty
-\ifx\GwaFontPath\@empty
+% 不用 \ifx 与 \@empty 比较：旧版 LaTeX 的 \newcommand 会把空宏定义成
+% long macro，与 \@empty 的定义属性不同，内容虽为空也会误判为非空。
+\if\relax\detokenize\expandafter{\GwaFontSetupHook}\relax
+\if\relax\detokenize\expandafter{\GwaFontPath}\relax
     \setCJKmainfont[ItalicFont={KaiTi_GB2312}, AutoFakeBold=true]{FangSong_GB2312}
     \IfFontExistsTF{FZXiaoBiaoSong-B05}{%
         \setCJKfamilyfont{xbs}{FZXiaoBiaoSong-B05}%

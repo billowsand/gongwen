@@ -185,6 +185,33 @@ pub fn compile_pdf_with_proof(tex_path: &Path, fonts: &FontConfig) -> Result<Com
     })
 }
 
+/// 研究报告必须使用随应用发布的固定 Tectonic 与离线 bundle，不允许回退到
+/// 用户系统中的 XeLaTeX/Tectonic，否则字体、宏包和参考文献结果不可复现。
+///
+/// 不收 [`FontConfig`]：研究报告的字体由 `md2tex.cls` 按 `\MdxFontPath` 全部
+/// 钉死，设置页里选的本机字体只服务公文文种，对这里没有意义——真收下反而会
+/// 因为一个失效的字体路径让研究报告编译失败。
+pub fn compile_research_pdf(tex_path: &Path) -> Result<CompileOutcome> {
+    let runtime = portable_runtime::find_tex_runtime()?
+        .context("研究报告只能使用内置 Tectonic，但当前 runtime 不完整")?;
+    runtime.validate_research_fonts()?;
+    let dir = tex_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = tex_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("research");
+    compile_with_portable_tectonic(tex_path, dir, stem, &runtime, &FontConfig::default())?;
+    let pdf = dir.join(format!("{stem}.pdf"));
+    if !pdf.is_file() {
+        bail!("研究报告编译完成但未生成 PDF：{}", pdf.display());
+    }
+    cleanup_intermediates(dir, stem);
+    Ok(CompileOutcome {
+        pdf: Some(pdf),
+        proof: None,
+    })
+}
+
 fn compile_with_portable_tectonic(
     tex_path: &Path,
     dir: &Path,
@@ -295,8 +322,14 @@ impl PortableCompileWorkspace {
                     format!("无法准备离线 TeX bundle：{}", runtime_bundle.display())
                 })?;
             }
-            for file in portable_runtime::FONT_FILES {
+            for file in portable_runtime::font_files() {
                 let source = runtime_fonts.join(file);
+                // 老 runtime 目录可能只有公文那五个字体。缺研究报告字体时照常
+                // 编译公文；研究报告那条路已由 validate_research_fonts 提前拦下，
+                // 报错也更具体，不必在这里把公文一起拖垮。
+                if !source.is_file() {
+                    continue;
+                }
                 let destination = font_dir.join(file);
                 if std::fs::hard_link(&source, &destination).is_err() {
                     std::fs::copy(&source, &destination)
@@ -326,7 +359,15 @@ impl PortableCompileWorkspace {
 
             let source = std::fs::read_to_string(source_tex)
                 .with_context(|| format!("无法读取 TeX 源文件：{}", source_tex.display()))?;
-            let wrapped = format!("\\def\\GwaFontPath{{{font_dir_name}/}}\n{source}");
+            // 两个文类的字体路径开关一起注入：公文的 gonghan-gwa.cls 只认
+            // \GwaFontPath，研究报告的 md2tex.cls 只认 \MdxFontPath，各自
+            // 忽略另一个。两边都按文件加载，因此不依赖 fontconfig，也不会在
+            // macOS 上落回 CoreText 查到的系统字体。
+            let wrapped = format!(
+                "\\def\\GwaFontPath{{{font_dir_name}/}}\n\
+                 \\def\\MdxFontPath{{{font_dir_name}/}}\n\
+                 {source}"
+            );
             std::fs::write(&tex_path, wrapped)
                 .with_context(|| format!("无法写入 Tectonic 临时 TeX：{}", tex_path.display()))?;
             Ok(())
@@ -489,6 +530,40 @@ mod tests {
         let (pdf_exists, pdf_stem, tex_stem) = outcome.expect("带图编译不应 panic");
         assert!(pdf_exists, "带图文档应编译出 PDF");
         assert_eq!(pdf_stem, tex_stem);
+    }
+
+    /// mdx research 输出必须能在断网、非信任模式下由随包 Tectonic 完整编译。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime"]
+    fn compiles_research_report_with_portable_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "离线研究报告测试".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "<!-- [摘要] -->\n\n这是摘要。\n\n<!-- [正文] -->\n\n## 研究背景\n\n正文。\n\n### 分析方法\n\n方法说明。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let outcome = compile_research_pdf(tex).unwrap();
+        assert!(outcome.pdf.is_some_and(|path| path.is_file()));
     }
 
     /// 白头件落款要先装箱量高再决定是否另起一页（见 cls 的 `\WhitePaperClosing`）。

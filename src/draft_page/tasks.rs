@@ -89,7 +89,7 @@ impl DraftPage<'_> {
 
     /// 按给定格式导出。「输出」分区里的「仅 Word」等入口用它临时只出一种格式，
     /// 不动设置页里勾好的常用格式。
-    pub(crate) fn start_export_with(&mut self, selection: ExportSelection) {
+    pub(crate) fn start_export_with(&mut self, mut selection: ExportSelection) {
         if self.doc.busy {
             return;
         }
@@ -97,7 +97,14 @@ impl DraftPage<'_> {
             *self.status = "还没有可导出的内容：请先生成草稿，或直接在右侧粘贴稿件。".into();
             return;
         }
+        if self.doc.draft.kind.is_research() {
+            selection.docx = false;
+        }
         if !selection.any() {
+            if self.doc.draft.kind.is_research() {
+                *self.status = "研究报告不支持 Word，请选择 Markdown 或 TeX/PDF。".into();
+                return;
+            }
             *self.status = "请至少勾选一种导出格式。".into();
             return;
         }

@@ -74,7 +74,9 @@ pub(crate) fn addressee_block(
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             display.reporting_leaders(&input.profile.reporting_leaders)
         }
-        TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => String::new(),
+        TemplateKind::PlainDocument
+        | TemplateKind::MeetingAgenda
+        | TemplateKind::ResearchReport => String::new(),
     };
     let text = text.trim().trim_end_matches('：');
     if text.is_empty() {
@@ -98,7 +100,10 @@ pub(crate) fn signature_block(
     input: &DraftInput,
     display: &UnitDisplay,
 ) {
-    if input.kind == TemplateKind::MeetingAgenda || input.kind == TemplateKind::PlainDocument {
+    if matches!(
+        input.kind,
+        TemplateKind::MeetingAgenda | TemplateKind::PlainDocument | TemplateKind::ResearchReport
+    ) {
         return;
     }
     ui.add_space(metrics.line * CLOSING_GAP_LINES as f32);

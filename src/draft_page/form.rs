@@ -1,4 +1,4 @@
-//! 公文要素填报区：分段表单、必填校验与版面缩略图。
+//! 文档要素填报区：公文分段表单、研究报告封面信息、必填校验与版面缩略图。
 //!
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::form`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
@@ -24,7 +24,9 @@ use crate::validator;
 use eframe::egui;
 use std::collections::BTreeSet;
 
-/// 公文要素按纸面部位分成的三段。填表的人脑子里是一张纸：先版头、再主体、
+mod research;
+
+/// 文档要素按纸面部位分成的三段。填表的人脑子里是一张纸：先版头、再主体、
 /// 最后版记。表单顺序与打印出来的纸一致，比按数据类型分组好找得多——
 /// 密级印在纸的最上面，就不该排在表单第三节。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,9 @@ impl FormSection {
     /// 副标题写这一段在纸上对应哪几样东西，让分组名不必自我解释。
     pub(crate) fn hint(self, kind: TemplateKind) -> &'static str {
         match (self, kind) {
+            (Self::Header, TemplateKind::ResearchReport) => "密级 · 类型 · 编号 · 版本",
+            (Self::Body, TemplateKind::ResearchReport) => "名称 · 单位 · 时间",
+            (Self::Record, TemplateKind::ResearchReport) => "参考文献",
             (Self::Header, TemplateKind::PlainDocument) => "密级",
             (Self::Header, TemplateKind::MeetingAgenda) => "密级",
             (Self::Header, _) => "密级 · 红头 · 文号",
@@ -275,6 +280,38 @@ pub(crate) fn check_form(draft: &DraftInput) -> FormCheck {
                 "red_approval_responsible",
                 !crate::models::joint_responsible_entries(profile).is_empty(),
                 "至少需要一条承办单位、联系人和电话",
+            );
+        }
+        TemplateKind::ResearchReport => {
+            check.require(
+                FormSection::Header,
+                "research_security",
+                filled(&draft.research.security),
+                "研究报告必须填写密级",
+            );
+            check.require(
+                FormSection::Header,
+                "research_file_type",
+                filled(&draft.research.file_type),
+                "研究报告必须填写文件类型",
+            );
+            check.require(
+                FormSection::Body,
+                "research_title",
+                filled(&draft.title_hint),
+                "研究报告必须填写文件名称",
+            );
+            check.require(
+                FormSection::Body,
+                "research_institution",
+                filled(&draft.research.institution),
+                "研究报告必须填写撰写单位",
+            );
+            check.require(
+                FormSection::Body,
+                "research_date",
+                filled(&draft.research.date),
+                "研究报告必须填写撰写时间",
             );
         }
     }
@@ -627,7 +664,7 @@ impl DraftPage<'_> {
         // `warnings` 只留要素校验、版式实测这类没有改法、只能提请注意的提示。
         //
         // 文档级规则（标题规范、文种越界、数字用法、层级序号、附件一致性）
-        // 依赖公文要素，改不得也删不掉，所以不进词表，但同样产出建议。
+        // 依赖文档要素，改不得也删不掉，所以不进词表，但同样产出建议。
         let markdown = std::mem::take(&mut self.doc.generated_markdown);
         let ignored = std::mem::take(&mut self.config.proofread.ignored);
         self.doc.revisions.begin_rule_pass(&markdown);
@@ -798,11 +835,14 @@ impl DraftPage<'_> {
             .min_row_height(FORM_CONTROL_HEIGHT)
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
-                row_label_with_info(ui, "文种", self.doc.draft.kind.description());
+                row_label_with_info(ui, "文档类型", self.doc.draft.kind.description());
                 ui.horizontal(|ui| {
                     // 「预览版/正式版」是整篇稿子的状态而不是纸上的某个部位，
                     // 跟文种并排放在导航区，不占下面三段的行。
-                    let versioned = self.doc.draft.kind != TemplateKind::PlainDocument;
+                    let versioned = !matches!(
+                        self.doc.draft.kind,
+                        TemplateKind::PlainDocument | TemplateKind::ResearchReport
+                    );
                     let version_width = if versioned { 92.0 } else { 0.0 };
                     let kind_width = if versioned {
                         (field_width - version_width - 34.0).max(96.0)
@@ -837,6 +877,9 @@ impl DraftPage<'_> {
                             TemplateKind::PlainDocument => {
                                 "普通公文无落款成文日期，稿件版本仅用于与其他文种保持一致。"
                             }
+                            TemplateKind::ResearchReport => {
+                                "研究报告不使用公文预览版、正式版状态。"
+                            }
                         };
                         egui::ComboBox::from_id_salt("letter_version")
                             .selected_text(self.doc.draft.profile.letter_version.label())
@@ -858,24 +901,26 @@ impl DraftPage<'_> {
 
                 // 套版：原先这个按钮埋在表单最底下，要滚到底才看得见。它其实是
                 // 整个填报里最省事的一步——同一个处室发的文，八成字段年年一样。
-                row_label_with_info(
-                    ui,
-                    "套版",
-                    "把当前要素存成本文种的默认值；下次新建同类公文自动带出，只需改文号和主送。",
-                );
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(theme::icon_text_button(
-                            theme::Icon::BookmarkCheck,
-                            "存为本文种默认",
-                        ))
-                        .on_hover_text("下次新建本文种时自动带出当前这些要素")
-                        .clicked()
-                    {
-                        self.actions.push(DraftAction::Persist);
-                    }
-                });
-                ui.end_row();
+                if !self.doc.draft.kind.is_research() {
+                    row_label_with_info(
+                        ui,
+                        "套版",
+                        "把当前要素存成本文种的默认值；下次新建同类公文自动带出，只需改文号和主送。",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(theme::icon_text_button(
+                                theme::Icon::BookmarkCheck,
+                                "存为本文种默认",
+                            ))
+                            .on_hover_text("下次新建本文种时自动带出当前这些要素")
+                            .clicked()
+                        {
+                            self.actions.push(DraftAction::Persist);
+                        }
+                    });
+                    ui.end_row();
+                }
             });
 
         if self.doc.draft.kind != old_kind {
@@ -896,6 +941,16 @@ impl DraftPage<'_> {
             ));
             self.doc.output_files.clear();
             self.doc.export_error = None;
+        }
+
+        if self.doc.draft.kind.is_research() {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("研究报告按内置 mdx research 规范排版，仅生成 TeX 与 PDF。")
+                    .size(11.0)
+                    .color(theme::text_soft()),
+            );
+            return;
         }
 
         ui.add_space(8.0);
@@ -944,6 +999,10 @@ impl DraftPage<'_> {
             style.spacing.interact_size.y = FORM_CONTROL_HEIGHT;
             style.visuals.widgets.inactive.bg_fill = theme::surface();
             style.visuals.widgets.inactive.weak_bg_fill = theme::surface();
+        }
+        if self.doc.draft.kind.is_research() {
+            self.research_form_ui(ui, available_width);
+            return;
         }
         let free_text = self.config.allow_free_text;
         // 单位共用一份名录：发文、主送、抄送、承办、落款都从这里选，一律按层级缩进显示。
@@ -1355,11 +1414,13 @@ impl DraftPage<'_> {
                         }
                         TemplateKind::PlainDocument
                         | TemplateKind::MeetingAgenda
-                        | TemplateKind::WhitePaper => {
+                        | TemplateKind::WhitePaper
+                        | TemplateKind::ResearchReport => {
                             ui.label("");
                             ui.weak(match kind {
                                 TemplateKind::WhitePaper => "白头件不设红头和文号。",
                                 TemplateKind::MeetingAgenda => "会议议程不设红头和文号。",
+                                TemplateKind::ResearchReport => "研究报告使用独立封面。",
                                 _ => "普通公文不设红头、文号和版记。",
                             });
                             ui.end_row();
@@ -1500,7 +1561,7 @@ impl DraftPage<'_> {
                             ui.end_row();
                             field_error(ui, &check, id);
                         }
-                        TemplateKind::PlainDocument => {}
+                        TemplateKind::PlainDocument | TemplateKind::ResearchReport => {}
                     }
 
                     row_label_with_info(
@@ -1739,7 +1800,9 @@ impl DraftPage<'_> {
                             ui.weak("电话通知不设抄送、承办联系版记。");
                             ui.end_row();
                         }
-                        TemplateKind::MeetingAgenda | TemplateKind::PlainDocument => {}
+                        TemplateKind::MeetingAgenda
+                        | TemplateKind::PlainDocument
+                        | TemplateKind::ResearchReport => {}
                     }
 
                     if kind != TemplateKind::PlainDocument {

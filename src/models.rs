@@ -11,16 +11,18 @@ pub enum TemplateKind {
     MeetingAgenda,
     WhitePaper,
     RedHeadApproval,
+    ResearchReport,
 }
 
 impl TemplateKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::OfficialLetter,
         Self::PhoneNotice,
         Self::PlainDocument,
         Self::MeetingAgenda,
         Self::WhitePaper,
         Self::RedHeadApproval,
+        Self::ResearchReport,
     ];
 
     pub fn label(self) -> &'static str {
@@ -31,6 +33,7 @@ impl TemplateKind {
             Self::MeetingAgenda => "会议议程",
             Self::WhitePaper => "白头件（呈批件）",
             Self::RedHeadApproval => "红头呈批件",
+            Self::ResearchReport => "研究报告",
         }
     }
 
@@ -42,6 +45,7 @@ impl TemplateKind {
             Self::MeetingAgenda => "适用于会议时间地点、参会人员和议程安排",
             Self::WhitePaper => "适用于内部情况报告、请示和领导呈批",
             Self::RedHeadApproval => "带发文单位红头、文号和首页批示栏的内部呈批件",
+            Self::ResearchReport => "按内置研究报告规范生成 TeX 和 PDF，不支持 Word",
         }
     }
 
@@ -55,6 +59,16 @@ impl TemplateKind {
     /// 使用“呈报领导—请示正文”业务结构的文种。
     pub fn is_approval(self) -> bool {
         matches!(self, Self::WhitePaper | Self::RedHeadApproval)
+    }
+
+    /// 研究报告使用独立的 Markdown 扩展、封面元数据和 TeX 排版链。
+    pub fn is_research(self) -> bool {
+        self == Self::ResearchReport
+    }
+
+    /// Word 仅服务现有公文文类；研究报告的正式输出固定为 TeX/PDF。
+    pub fn supports_docx(self) -> bool {
+        !self.is_research()
     }
 
     /// 使用机关代字、发文年份和发文序号的文种。
@@ -2060,6 +2074,42 @@ pub struct DraftInput {
     pub meeting_time: String,
     pub attendees: String,
     pub profile: TemplateProfile,
+    pub research: ResearchMetadata,
+}
+
+/// 研究报告封面元数据。模型只接收正文，不得回写这些字段。
+///
+/// 字段名称和默认值与 mdx research frontmatter 保持一致；导出时由程序生成
+/// frontmatter，正文编辑器中不保存这段元数据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResearchMetadata {
+    pub security: String,
+    pub security_years: String,
+    pub file_type: String,
+    pub file_number: String,
+    pub version: String,
+    pub institution: String,
+    pub date: String,
+    /// 原始 BibTeX 文件名，仅供界面显示；正文引用的数据随稿件快照保存。
+    pub bibliography_name: String,
+    pub bibliography_content: String,
+}
+
+impl Default for ResearchMetadata {
+    fn default() -> Self {
+        Self {
+            security: "公开".into(),
+            security_years: String::new(),
+            file_type: "研究报告".into(),
+            file_number: String::new(),
+            version: "V1.0".into(),
+            institution: String::new(),
+            date: Local::now().format("%Y年%-m月").to_string(),
+            bibliography_name: String::new(),
+            bibliography_content: String::new(),
+        }
+    }
 }
 
 impl Default for DraftInput {
@@ -2072,11 +2122,31 @@ impl Default for DraftInput {
             meeting_time: String::new(),
             attendees: String::new(),
             profile: TemplateProfile::default(),
+            research: ResearchMetadata::default(),
         }
     }
 }
 
 impl DraftInput {
+    /// 本篇的密级与保密期限，不分文档类型。
+    ///
+    /// 公文的密级在版式要素里，研究报告的在封面元数据里。稿件库的列表、筛选和
+    /// 详情都要显示密级，各自去猜取哪个字段，研究报告就会永远显示空白——所以
+    /// 统一从这里取。
+    pub fn security_marking(&self) -> (&str, &str) {
+        if self.kind.is_research() {
+            (
+                self.research.security.trim(),
+                self.research.security_years.trim(),
+            )
+        } else {
+            (
+                self.profile.security_level.trim(),
+                self.profile.security_period.trim(),
+            )
+        }
+    }
+
     pub fn uses_external_unit_names(&self) -> bool {
         self.kind == TemplateKind::OfficialLetter
             && self.profile.correspondence_scope == CorrespondenceScope::External
@@ -2603,6 +2673,7 @@ mod tests {
                 document_number: "某教函〔2026〕12号".into(),
                 ..TemplateProfile::for_kind(TemplateKind::MeetingAgenda)
             },
+            research: Default::default(),
         };
         let json = serde_json::to_string(&draft).expect("快照应能序列化");
         let back: DraftInput = serde_json::from_str(&json).expect("快照应能反序列化");

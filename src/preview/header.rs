@@ -218,5 +218,6 @@ pub(crate) fn header_block(
                 ui.add_space(metrics.line);
             }
         }
+        TemplateKind::ResearchReport => {}
     }
 }

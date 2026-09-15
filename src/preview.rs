@@ -14,6 +14,7 @@ mod header;
 mod layout;
 mod red;
 mod render;
+mod research;
 mod tail;
 
 pub(crate) use gutter::Gutter;
@@ -76,6 +77,18 @@ const MARGIN_LEFT_PT: f32 = 79.35;
 const MARGIN_RIGHT_PT: f32 = 73.70;
 const MARGIN_TOP_PT: f32 = 52.0;
 
+// 研究报告版心取自 mdx 的 md2tex.cls：
+// `\geometry{a4paper, left=28mm, top=37mm, width=156mm, height=225mm}`。
+// 正文 `\@setfontsize\normalsize{14bp}{24pt}`，章标题二号居中。
+const RESEARCH_MARGIN_LEFT_MM: f32 = 28.0;
+const RESEARCH_MARGIN_TOP_MM: f32 = 37.0;
+const RESEARCH_CONTENT_MM: f32 = 156.0;
+const RESEARCH_BODY_PT: f32 = 14.0;
+const RESEARCH_LINE_PT: f32 = 24.0;
+const RESEARCH_CHAPTER_PT: f32 = 22.0; // 二号
+const RESEARCH_COVER_TITLE_PT: f32 = 26.0; // 封面题名，一号
+const RESEARCH_COVER_PT: f32 = 16.0; // 封面要素，三号
+
 /// 缩放后的版式尺寸，单位都是 egui 逻辑像素。
 pub(crate) struct Metrics {
     scale: f32,
@@ -87,6 +100,11 @@ pub(crate) struct Metrics {
     margin_left: f32,
     margin_top: f32,
     line: f32,
+    /// 正文字面与字号。公文是仿宋三号，研究报告是宋体（近似方正书宋）14bp。
+    /// 放进 `Metrics` 而不是在每个部件里写死，是为了让段落、表格、列表这些
+    /// 共用的块渲染自动跟着版式走，不必为研究报告各复制一份。
+    body_family: &'static str,
+    body_pt: f32,
     /// 本帧纸面上每一条「改得动的行」的位置，画完纸再统一标到页边。
     /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
     /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
@@ -143,6 +161,29 @@ impl Metrics {
             margin_left: MARGIN_LEFT_PT * PT * scale,
             margin_top: MARGIN_TOP_PT * PT * scale,
             line: LINE_PT * PT * scale,
+            body_family: theme::FONT_FANGSONG,
+            body_pt: BODY_PT,
+            gutter: RefCell::default(),
+        }
+    }
+
+    /// 研究报告的版心与公文完全不同：页边距、版心宽度、字号和行距都取自
+    /// `md2tex.cls`，所以单独构造一份，而不是在公文版心上打补丁。
+    fn research(available: f32, zoom: Option<f32>) -> Self {
+        let scale = fit_scale(available, zoom);
+        Self {
+            scale,
+            viewport: available,
+            page: PAGE_PT * PT * scale,
+            page_height: PAGE_HEIGHT_PT * PT * scale,
+            content: RESEARCH_CONTENT_MM * MM * PT * scale,
+            margin_left: RESEARCH_MARGIN_LEFT_MM * MM * PT * scale,
+            margin_top: RESEARCH_MARGIN_TOP_MM * MM * PT * scale,
+            line: RESEARCH_LINE_PT * PT * scale,
+            // 方正书宋没有随预览分发，用宋体顶替：字号行距是准的，字形以
+            // 编译出的 PDF 为准。
+            body_family: theme::FONT_SONGTI,
+            body_pt: RESEARCH_BODY_PT,
             gutter: RefCell::default(),
         }
     }
@@ -191,6 +232,16 @@ impl Metrics {
 
     fn font(&self, family: &str, size: f32) -> FontId {
         FontId::new(self.pt(size), theme::official_family(family))
+    }
+
+    /// 本版式的正文字面。段落、表格、列表都用它，改版式只需改构造函数。
+    fn body_font(&self) -> FontId {
+        self.font(self.body_family, self.body_pt)
+    }
+
+    /// 正文里的加粗：字号跟随正文，字面换成专用粗体。
+    fn body_bold_font(&self) -> FontId {
+        self.font(theme::FONT_BOLD, self.body_pt)
     }
 }
 
@@ -366,6 +417,81 @@ mod tests {
             rows.push(rect);
         }
         rows
+    }
+
+    /// 一帧里画出来的全部文字，按出现顺序拼起来，供"排了什么/没排什么"的断言用。
+    fn text_of(output: &egui::FullOutput) -> String {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape) => Some(shape.galley.text().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 研究报告走自己的版式：有简化封面和"第 N 章"，没有红头、主送和落款。
+    #[test]
+    fn research_preview_draws_its_own_cover_and_chapters_instead_of_official_parts() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        // 从公函改过来，公文要素都还在：研究报告一个都不该排到纸上。
+        let mut input = draft(TemplateKind::ResearchReport);
+        input.profile.kind = TemplateKind::ResearchReport;
+        input.title_hint = "某某领域发展研究".into();
+        input.research.security = "内部".into();
+        input.research.security_years = "5年".into();
+        input.research.file_type = "研究报告".into();
+        input.research.institution = "星海省教育研究院".into();
+        input.research.date = "2026年9月".into();
+        let markdown = "<!-- [摘要] -->\n\n摘要正文。\n\n<!-- [正文] -->\n\n## 研究背景\n\n背景说明。\n\n### 研究方法\n\n方法说明。";
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 4000.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(raw, |ui| {
+            let _ = official_preview(
+                ui,
+                &input,
+                &display,
+                markdown,
+                PreviewScale::zoom(Some(1.0)),
+                None,
+                false,
+                &crate::models::NumberingConfig::default(),
+                false,
+            );
+        });
+        let text = text_of(&output);
+
+        // 封面要素
+        for expected in [
+            "内部★5年",
+            "研究报告",
+            "某某领域发展研究",
+            "星海省教育研究院",
+            "2026年9月",
+        ] {
+            assert!(text.contains(expected), "封面应排出“{expected}”：{text}");
+        }
+        // 章节编号由程序生成
+        assert!(text.contains("第 1 章"), "章标题应自动编号：{text}");
+        assert!(text.contains("1.1"), "节标题应自动编号：{text}");
+        assert!(text.contains("摘要"), "摘要区段应排出标题：{text}");
+        // 公文要素一个都不该出现
+        for forbidden in ["星海省教育厅", "星教函", "秘密★10年"] {
+            assert!(
+                !text.contains(forbidden),
+                "研究报告不应排出公文要素“{forbidden}”：{text}"
+            );
+        }
     }
 
     #[test]

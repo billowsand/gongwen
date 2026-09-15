@@ -989,7 +989,12 @@ pub(crate) fn export_and_compile(
         .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
     {
         progress("正在使用内置 Tectonic 离线编译 PDF…");
-        match texcompile::compile_pdf_with_proof(tex, &fonts) {
+        let compile = if input.kind.is_research() {
+            texcompile::compile_research_pdf(tex)
+        } else {
+            texcompile::compile_pdf_with_proof(tex, &fonts)
+        };
+        match compile {
             Ok(outcome) => {
                 if let Some(pdf) = outcome.pdf {
                     files.push(pdf);

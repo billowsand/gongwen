@@ -84,19 +84,35 @@ pub fn validate(
         attachment_missing_title |= attachment_needs_title;
         empty_attachment |= !attachment_has_content;
     }
-    if body_h1_count == 0 {
-        warnings.push("缺少一级标题，请在导出前补充“# 标题”".into());
-    }
-    if body_h1_count > 1 {
-        warnings.push(
-            "正文区检测到多个一级标题；正式标题只保留一个，附件前请加入“<!-- [附件] -->”".into(),
-        );
-    }
-    if empty_attachment {
-        warnings.push("检测到没有内容的附件标记".into());
-    }
-    if attachment_missing_title {
-        warnings.push("每个附件标记之后应使用“# 附件正式标题”".into());
+    if input.kind.is_research() {
+        if text.lines().any(|line| line.starts_with("# ")) {
+            warnings.push("研究报告文件名称由“文档要素”维护，正文不应再写“# 主标题”".into());
+        }
+        if !text.lines().any(|line| line.starts_with("## ")) {
+            warnings.push("研究报告正文缺少“## 章标题”".into());
+        }
+        if text.starts_with("---") {
+            warnings.push("研究报告 frontmatter 应填写到左侧“文档要素”，不要放在正文中".into());
+        }
+        if text.contains("[@") && input.research.bibliography_content.trim().is_empty() {
+            warnings.push("正文包含 BibTeX 引用，但尚未导入 .bib 参考文献文件".into());
+        }
+    } else {
+        if body_h1_count == 0 {
+            warnings.push("缺少一级标题，请在导出前补充“# 标题”".into());
+        }
+        if body_h1_count > 1 {
+            warnings.push(
+                "正文区检测到多个一级标题；正式标题只保留一个，附件前请加入“<!-- [附件] -->”"
+                    .into(),
+            );
+        }
+        if empty_attachment {
+            warnings.push("检测到没有内容的附件标记".into());
+        }
+        if attachment_missing_title {
+            warnings.push("每个附件标记之后应使用“# 附件正式标题”".into());
+        }
     }
     if text.contains("【待核实") {
         warnings.push("正文含“待核实”字段，签发前必须补齐".into());
@@ -230,6 +246,7 @@ pub fn validate(
                 warnings.push("红头呈批件正文不宜使用项目符号，应改为“一是、二是……”".into());
             }
         }
+        TemplateKind::ResearchReport => {}
     }
 
     warnings.sort();
@@ -299,6 +316,26 @@ fn validate_metadata(
     rules: &SecurityRules,
     warnings: &mut Vec<String>,
 ) {
+    if input.kind.is_research() {
+        let metadata = &input.research;
+        for (label, value) in [
+            ("文件名称", input.title_hint.as_str()),
+            ("密级", metadata.security.as_str()),
+            ("文件类型", metadata.file_type.as_str()),
+            ("撰写单位", metadata.institution.as_str()),
+            ("撰写时间", metadata.date.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                warnings.push(format!("研究报告缺少{label}"));
+            }
+        }
+        if !metadata.bibliography_name.trim().is_empty()
+            && metadata.bibliography_content.trim().is_empty()
+        {
+            warnings.push("研究报告参考文献文件为空，请重新导入 BibTeX".into());
+        }
+        return;
+    }
     let profile = &input.profile;
     let unit_display = crate::units::UnitDisplay::new(vocabulary);
     let marking = profile.security_level.trim();
@@ -602,6 +639,7 @@ fn validate_metadata(
                 warnings,
             );
         }
+        TemplateKind::ResearchReport => {}
     }
 }
 
@@ -1033,8 +1071,13 @@ mod tests {
             let mut input = DraftInput::default();
             input.kind = kind;
             input.profile.kind = kind;
-            input.profile.security_level.clear();
-            input.profile.security_period.clear();
+            if kind.is_research() {
+                input.research.security.clear();
+                input.research.security_years.clear();
+            } else {
+                input.profile.security_level.clear();
+                input.profile.security_period.clear();
+            }
             let warnings = validate(&input, "# 标题\n\n正文。", &[], &rules());
             assert!(
                 warnings.iter().any(|warning| warning.contains("缺少密级")),

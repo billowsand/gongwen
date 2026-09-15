@@ -94,6 +94,9 @@ pub fn write_tex_with_numbering(
         TemplateKind::MeetingAgenda => {
             meeting_agenda_tex_with_numbering(input, markdown, numbering)
         }
+        TemplateKind::ResearchReport => {
+            unreachable!("研究报告必须走 export::research，不得使用公文 TeX 导出器")
+        }
     };
     // 选了本机字体才注入钩子；没选时产出的 TeX 与从前逐字节一致。
     let content = match font_setup_hook(fonts) {
@@ -653,7 +656,10 @@ mod tests {
     #[test]
     fn class_defers_to_injected_font_hook() {
         assert!(GONGHAN_CLASS.contains("\\providecommand{\\GwaFontSetupHook}{}"));
-        assert!(GONGHAN_CLASS.contains("\\ifx\\GwaFontSetupHook\\@empty"));
+        assert!(
+            GONGHAN_CLASS
+                .contains("\\if\\relax\\detokenize\\expandafter{\\GwaFontSetupHook}\\relax")
+        );
         assert!(GONGHAN_CLASS.contains("\\GwaFontSetupHook\n\\fi"));
     }
 

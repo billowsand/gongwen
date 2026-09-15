@@ -690,7 +690,7 @@ impl GongwenApp {
             ui.separator();
             if ui
                 .add(
-                    theme::menu_item(theme::Icon::FilePlus, "新建空白公文").right_text(
+                    theme::menu_item(theme::Icon::FilePlus, "新建空白文档").right_text(
                             egui::RichText::new(theme::primary_shortcut("N"))
                                 .color(theme::text_muted())
                                 .small(),
@@ -704,7 +704,7 @@ impl GongwenApp {
             }
             if ui
                 .add(
-                    theme::menu_item(theme::Icon::FileUp, "从文档新建公文"),
+                    theme::menu_item(theme::Icon::FileUp, "从文件新建文档"),
                 )
                 .on_hover_text(format!(
                     "把 Word / Excel / PPT / ODF / RTF / EPUB / CSV 转成 Markdown 新开一篇稿件（可导入 {}）",
@@ -714,6 +714,20 @@ impl GongwenApp {
             {
                 open = None;
                 self.new_manuscript_from_document();
+                ui.close();
+            }
+            if ui
+                .add(theme::menu_item(
+                    theme::Icon::Folder,
+                    "从文件夹新建研究报告",
+                ))
+                .on_hover_text(
+                    "按文件名升序合并文件夹第一层的 .md 文件，并导入本地图片与 BibTeX",
+                )
+                .clicked()
+            {
+                open = None;
+                self.new_research_manuscript_from_folder();
                 ui.close();
             }
             ui.separator();

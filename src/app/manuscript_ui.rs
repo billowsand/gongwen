@@ -309,7 +309,7 @@ impl GongwenApp {
                         });
                 });
                 ui.horizontal(|ui| {
-                    ui.label("文种");
+                    ui.label("文档类型");
                     egui::ComboBox::from_id_salt("manuscript_kind")
                         .selected_text(
                             self.manuscript_filter
@@ -980,7 +980,7 @@ impl GongwenApp {
                 });
                 if !compact {
                     header.col(|ui| {
-                        ui.strong("文种");
+                        ui.strong("文档类型");
                     });
                     header.col(|ui| {
                         ui.strong("密级");
@@ -1393,16 +1393,10 @@ impl GongwenApp {
                     .show(ui, |ui| {
                         let profile = &detail.snapshot.profile;
                         metadata_grid_row(ui, "标题", &detail.title);
-                        metadata_grid_row(ui, "文种", detail.kind.label());
-                        metadata_grid_row(
-                            ui,
-                            "密级",
-                            joined_metadata(&[
-                                profile.security_level.as_str(),
-                                profile.security_period.as_str(),
-                            ])
-                            .as_str(),
-                        );
+                        metadata_grid_row(ui, "文档类型", detail.kind.label());
+                        // 密级按文档类型取：研究报告的在封面元数据里，不在版式要素里。
+                        let (level, period) = detail.snapshot.security_marking();
+                        metadata_grid_row(ui, "密级", joined_metadata(&[level, period]).as_str());
                         metadata_grid_row(ui, "文号", present_or_dash(&detail.doc_number));
                         if detail.kind.has_document_number() {
                             metadata_grid_row(
@@ -1984,11 +1978,45 @@ impl GongwenApp {
                 let session = DraftSession::with_markdown(0, &self.config, markdown);
                 self.open_doc(session);
                 self.status = format!(
-                    "已从 {} 新建稿件（{chars} 字）：请核对正文结构并补齐左侧公文要素。",
+                    "已从 {} 新建稿件（{chars} 字）：请核对正文结构并补齐左侧文档要素。",
                     doc_import::file_label(&path)
                 );
             }
             Err(error) => self.status = format!("导入失败：{error:#}"),
+        }
+    }
+
+    /// 按文件名顺序合并目录第一层的 Markdown，新建一篇研究报告。
+    pub(crate) fn new_research_manuscript_from_folder(&mut self) {
+        let Some(folder) = doc_import::pick_folder() else {
+            return;
+        };
+        match doc_import::import_research_folder(&folder) {
+            Ok(imported) => {
+                let chars = imported.markdown.chars().count();
+                let count = imported.file_names.len();
+                let names = imported.file_names.join("、");
+                let session = DraftSession::with_research_markdown(
+                    0,
+                    imported.markdown,
+                    imported.title,
+                    imported.metadata,
+                );
+                let skipped = imported.skipped_images.clone();
+                self.open_doc(session);
+                self.status =
+                    format!("已按文件名顺序合并 {count} 个 Markdown（{chars} 字）：{names}");
+                // 缺图不阻断导入，但必须说出来：正文里这些引用还指着原文件夹，
+                // 不补齐的话编译 PDF 时才会失败。
+                if !skipped.is_empty() {
+                    self.status.push_str(&format!(
+                        "；{} 张图片未能入库，请补齐后重新插入：{}",
+                        skipped.len(),
+                        skipped.join("、")
+                    ));
+                }
+            }
+            Err(error) => self.status = format!("研究报告文件夹导入失败：{error:#}"),
         }
     }
 

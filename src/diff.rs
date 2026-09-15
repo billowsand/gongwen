@@ -1,4 +1,4 @@
-//! 版本对照引擎：正文段落级 diff（含段内字级高亮）与公文要素 / 全局配置的字段级对照。
+//! 版本对照引擎：正文段落级 diff（含段内字级高亮）与文档要素 / 全局配置的字段级对照。
 //!
 //! 全部是纯函数，不触碰存储与 UI，便于单元测试。
 //!
@@ -8,13 +8,13 @@
 //! 改一个字就是整段标红加整段标绿——公文段落长，那种输出等于没有 diff。
 //!
 //! `draft_changes` / `profile_changes` / `config_changes` 按已知字段逐一比较，
-//! 输出带中文标签的 `FieldChange`，让"公文要素对照"是清单式的，而不是原始 JSON 差异。
+//! 输出带中文标签的 `FieldChange`，让“文档要素对照”是清单式的，而不是原始 JSON 差异。
 //! 对外入口 `manuscript_diff(old, new)` 的参数顺序即对照方向，调用方无从颠倒。
 
 use crate::manuscript::VersionRecord;
 use crate::models::{
-    AppConfig, DraftInput, FontChoice, FontRole, JointContact, TemplateKind, TemplateProfile,
-    VocabularyCategory, VocabularyEntry,
+    AppConfig, DraftInput, FontChoice, FontRole, JointContact, ResearchMetadata, TemplateKind,
+    TemplateProfile, VocabularyCategory, VocabularyEntry,
 };
 use std::collections::HashMap;
 use std::ops::Range;
@@ -115,7 +115,7 @@ impl BodyDiff {
 /// 一篇稿件两个版本的完整对照结果。
 #[derive(Debug, Clone, Default)]
 pub struct ManuscriptDiff {
-    /// 公文要素（含版式）的字段变更清单。
+    /// 文档要素（含版式）的字段变更清单。
     pub fields: Vec<FieldChange>,
     pub body: BodyDiff,
     /// 备注变更；未变时为 None。
@@ -574,15 +574,37 @@ fn lcs_ops<T: PartialEq>(a: &[T], b: &[T]) -> Vec<DiffOp> {
     out
 }
 
-/// 两份 `DraftInput` 公文要素的字段变化（含内嵌的版式配置）。
+/// 两份 `DraftInput` 文档要素的字段变化（含内嵌的版式配置）。
 pub fn draft_changes(a: &DraftInput, b: &DraftInput) -> Vec<FieldChange> {
     let mut out = Vec::new();
-    field(&mut out, "文种", a.kind.label(), b.kind.label());
+    field(&mut out, "文档类型", a.kind.label(), b.kind.label());
     field(&mut out, "标题提示", &a.title_hint, &b.title_hint);
     field(&mut out, "成文日期", &a.date, &b.date);
     field(&mut out, "会议时间", &a.meeting_time, &b.meeting_time);
     field(&mut out, "参会人员", &a.attendees, &b.attendees);
+    out.extend(research_changes(&a.research, &b.research));
     out.extend(profile_changes(&a.profile, &b.profile));
+    out
+}
+
+/// 研究报告封面元数据的字段变化。研究报告的密级、单位、版本号都在这里，
+/// 不比较的话版本对照会把一次实打实的封面改动显示成"无变化"。
+fn research_changes(a: &ResearchMetadata, b: &ResearchMetadata) -> Vec<FieldChange> {
+    let mut out = Vec::new();
+    field(&mut out, "密级", &a.security, &b.security);
+    field(&mut out, "保密期限", &a.security_years, &b.security_years);
+    field(&mut out, "文件类型", &a.file_type, &b.file_type);
+    field(&mut out, "文件编号", &a.file_number, &b.file_number);
+    field(&mut out, "版本号", &a.version, &b.version);
+    field(&mut out, "撰写单位", &a.institution, &b.institution);
+    field(&mut out, "撰写时间", &a.date, &b.date);
+    // 文献内容整篇比对没有意义，只报"换没换过文件"。
+    field(
+        &mut out,
+        "参考文献",
+        &a.bibliography_name,
+        &b.bibliography_name,
+    );
     out
 }
 

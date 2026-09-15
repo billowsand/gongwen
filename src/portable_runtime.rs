@@ -13,13 +13,64 @@ pub const BUNDLE_FILE_NAME: &str = "gongwen-texlive.ttb";
 pub const TECTONIC_BINARY: &str = "tectonic.exe";
 #[cfg(not(windows))]
 pub const TECTONIC_BINARY: &str = "tectonic";
-pub const FONT_FILES: &[&str] = &[
+#[cfg(windows)]
+const PLATFORM_SUFFIX: &str = "win-x64";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const PLATFORM_SUFFIX: &str = "linux-arm64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const PLATFORM_SUFFIX: &str = "linux-amd64";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const PLATFORM_SUFFIX: &str = "darwin-arm64";
+#[cfg(not(any(
+    windows,
+    all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64"),
+)))]
+compile_error!(
+    "便携式 runtime 只发布 win-x64 / linux-amd64 / linux-arm64 / darwin-arm64 四个目标；\
+     新增目标时请同时补上 PLATFORM_SUFFIX 和对应的 SHA256SUMS 清单。"
+);
+
+/// 公文文种排版所需的字体，由 `gonghan-gwa.cls` 按文件名加载。
+///
+/// 这一组是**全部** PDF 编译和纸面预览的下限：缺任何一个都排不出公文，因此
+/// `find_tex_runtime` 与 `find_font_dir` 都按它校验。
+pub const OFFICIAL_FONT_FILES: &[&str] = &[
     "FangSong.ttf",
     "KaiTi.ttf",
     "SimHei.ttf",
     "SimSun.ttf",
     "XiaoBiaoSong.ttf",
 ];
+
+/// 研究报告排版所需的字体，由 mdx 的 `md2tex.cls` 在 `\MdxFontPath` 分支下按
+/// 文件名加载——**文件名是与 md2tex.cls 的协议，改名要两边一起改**。
+///
+/// 单独成组是因为它只挡研究报告：老 runtime 目录缺这几个字体时，公文照常
+/// 编译和预览，只有研究报告报错，不至于让整台机器失去出 PDF 的能力。
+pub const RESEARCH_FONT_FILES: &[&str] = &[
+    "FZShuSong.ttf",
+    "FZHei.ttf",
+    "FZKai.ttf",
+    "FZXiaoBiaoSong.ttf",
+    "JetBrainsMono-Regular.ttf",
+    "texgyretermes-regular.otf",
+    "texgyretermes-bold.otf",
+    "texgyretermes-italic.otf",
+    "texgyretermes-bolditalic.otf",
+];
+
+/// 两组字体的并集，发布包必须齐备。编译工作区一次性把它们全部链进临时字体
+/// 目录：链接近乎零成本，省得按文种分两套目录。
+pub fn font_files() -> impl Iterator<Item = &'static str> {
+    OFFICIAL_FONT_FILES
+        .iter()
+        .chain(RESEARCH_FONT_FILES)
+        .copied()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortableTexRuntime {
@@ -31,8 +82,17 @@ pub struct PortableTexRuntime {
 
 impl PortableTexRuntime {
     fn candidate(root: PathBuf) -> Self {
+        let packaged = root.join("tectonic").join(TECTONIC_BINARY);
+        let source_tree = root
+            .join("tectonic")
+            .join(PLATFORM_SUFFIX)
+            .join(TECTONIC_BINARY);
         Self {
-            tectonic: root.join("tectonic").join(TECTONIC_BINARY),
+            tectonic: if source_tree.is_file() {
+                source_tree
+            } else {
+                packaged
+            },
             bundle: root.join("texbundle").join(BUNDLE_FILE_NAME),
             fonts: root.join("fonts"),
             root,
@@ -47,6 +107,21 @@ impl PortableTexRuntime {
             bail!("离线 TeX bundle 不存在：{}", self.bundle.display());
         }
         validate_font_dir(&self.fonts)
+    }
+
+    /// 研究报告额外需要方正、TeX Gyre Termes 和 JetBrains Mono。单独校验，
+    /// 报错才说得清"更新 runtime"而不是笼统的"字体不存在"。
+    pub fn validate_research_fonts(&self) -> Result<()> {
+        for file in RESEARCH_FONT_FILES {
+            let path = self.fonts.join(file);
+            if !path.is_file() {
+                bail!(
+                    "研究报告字体不存在：{}。请更新到随本版发布的 runtime 包。",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -80,7 +155,7 @@ pub fn find_font_dir() -> Option<PathBuf> {
 }
 
 pub fn validate_font_dir(fonts: &Path) -> Result<()> {
-    for file in FONT_FILES {
+    for file in OFFICIAL_FONT_FILES {
         let path = fonts.join(file);
         if !path.is_file() {
             bail!("便携式字体不存在：{}", path.display());
@@ -128,7 +203,10 @@ mod tests {
         assert!(
             runtime
                 .tectonic
-                .ends_with(format!("tectonic/{TECTONIC_BINARY}"))
+                .ends_with(format!("tectonic/{PLATFORM_SUFFIX}/{TECTONIC_BINARY}"))
+                || runtime
+                    .tectonic
+                    .ends_with(format!("tectonic/{TECTONIC_BINARY}"))
         );
         assert!(runtime.bundle.ends_with("texbundle/gongwen-texlive.ttb"));
         assert!(runtime.fonts.ends_with("fonts"));
@@ -140,7 +218,7 @@ mod tests {
     fn every_font_role_maps_to_a_bundled_file() {
         for role in crate::models::FontRole::ALL {
             assert!(
-                FONT_FILES.contains(&role.bundled_file()),
+                font_files().any(|file| file == role.bundled_file()),
                 "{} 的内置字体 {} 不在运行时字体清单里",
                 role.label(),
                 role.bundled_file()
@@ -151,14 +229,45 @@ mod tests {
     #[test]
     fn font_dir_validation_checks_expected_filenames() {
         let dir = tempfile::tempdir().expect("temporary directory must be creatable");
-        for file in FONT_FILES {
+        for file in font_files() {
             std::fs::write(dir.path().join(file), b"font")
                 .expect("font placeholder must be writable");
         }
         validate_font_dir(dir.path()).expect("complete font directory must validate");
 
-        std::fs::remove_file(dir.path().join(FONT_FILES[0]))
+        std::fs::remove_file(dir.path().join(OFFICIAL_FONT_FILES[0]))
             .expect("font placeholder must be removable");
         assert!(validate_font_dir(dir.path()).is_err());
+    }
+
+    /// 研究报告字体缺失只能挡住研究报告：公文的编译与预览要照常可用，否则
+    /// 一个没更新 runtime 的老安装会彻底失去出 PDF 的能力。
+    #[test]
+    fn missing_research_fonts_do_not_block_official_documents() {
+        let dir = tempfile::tempdir().expect("temporary directory must be creatable");
+        for file in OFFICIAL_FONT_FILES {
+            std::fs::write(dir.path().join(file), b"font")
+                .expect("font placeholder must be writable");
+        }
+        validate_font_dir(dir.path()).expect("公文字体齐备就应当通过校验");
+
+        let runtime = PortableTexRuntime {
+            root: dir.path().to_owned(),
+            tectonic: dir.path().join(TECTONIC_BINARY),
+            bundle: dir.path().join(BUNDLE_FILE_NAME),
+            fonts: dir.path().to_owned(),
+        };
+        let error = runtime
+            .validate_research_fonts()
+            .expect_err("缺研究报告字体时必须报错");
+        assert!(format!("{error:#}").contains("研究报告字体不存在"));
+
+        for file in RESEARCH_FONT_FILES {
+            std::fs::write(dir.path().join(file), b"font")
+                .expect("font placeholder must be writable");
+        }
+        runtime
+            .validate_research_fonts()
+            .expect("补齐研究报告字体后应当通过");
     }
 }

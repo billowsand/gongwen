@@ -14,6 +14,9 @@ fn export_layout_comparison() {
     };
     std::fs::create_dir_all(&dir).unwrap();
     for kind in TemplateKind::ALL {
+        if !kind.supports_docx() {
+            continue;
+        }
         let mut input = DraftInput::default();
         input.kind = kind;
         input.date = "2026年9月11日".into();

@@ -720,7 +720,7 @@ impl ManuscriptStore {
             |row| {
                 let snapshot_json: String = row.get(8)?;
                 let security_level = serde_json::from_str::<DraftInput>(&snapshot_json)
-                    .map(|snapshot| snapshot.profile.security_level)
+                    .map(|snapshot| snapshot.security_marking().0.to_string())
                     .unwrap_or_default();
                 Ok(ManuscriptRow {
                     id: row.get(0)?,
@@ -1201,6 +1201,7 @@ pub(crate) fn kind_to_str(kind: TemplateKind) -> &'static str {
         TemplateKind::MeetingAgenda => "MeetingAgenda",
         TemplateKind::WhitePaper => "WhitePaper",
         TemplateKind::RedHeadApproval => "RedHeadApproval",
+        TemplateKind::ResearchReport => "ResearchReport",
     }
 }
 
@@ -1212,6 +1213,7 @@ pub(crate) fn str_to_kind(s: &str) -> Option<TemplateKind> {
         "MeetingAgenda" => Some(TemplateKind::MeetingAgenda),
         "WhitePaper" => Some(TemplateKind::WhitePaper),
         "RedHeadApproval" => Some(TemplateKind::RedHeadApproval),
+        "ResearchReport" => Some(TemplateKind::ResearchReport),
         _ => None,
     }
 }
@@ -1254,6 +1256,7 @@ mod tests {
                 document_number: "某教函〔2026〕12号".into(),
                 ..TemplateProfile::for_kind(kind)
             },
+            research: Default::default(),
         }
     }
 

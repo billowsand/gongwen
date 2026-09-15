@@ -523,7 +523,7 @@ impl GongwenApp {
                 if drafting {
                     ui.colored_label(
                         accent(),
-                        "当前审校稿为空：下面写明要起草什么，将结合左侧公文要素从零生成。",
+                        "当前审校稿为空：下面写明要起草什么，将结合左侧文档要素从零生成。",
                     );
                 }
                 ui.add_space(6.0);

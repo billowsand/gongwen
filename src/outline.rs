@@ -184,6 +184,9 @@ fn kind_skeleton(kind: TemplateKind) -> &'static str {
             "电话通知的常见骨架是「通知事项 — 执行要求 — 时间节点」，一般两到三节。"
         }
         TemplateKind::PlainDocument => "普通公文按素材的内在逻辑分节，一般三到五节。",
+        TemplateKind::ResearchReport => {
+            "研究报告按摘要、研究背景、方法与材料、分析与发现、结论建议组织；章用 ##，节用 ###。"
+        }
         TemplateKind::MeetingAgenda => {
             "会议议程有固定骨架「时间地点 — 参加人员 — 研讨内容」，就这三节，不要增减。"
         }

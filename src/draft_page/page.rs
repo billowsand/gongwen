@@ -64,9 +64,9 @@ impl DraftPage<'_> {
                 .frame(theme::panel(theme::canvas(), 12))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.strong("公文要素");
+                        ui.strong("文档要素");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if theme::icon_button(ui, theme::Icon::PanelClose, "收起公文要素填报区")
+                            if theme::icon_button(ui, theme::Icon::PanelClose, "收起文档要素填报区")
                                 .on_hover_text("收起左侧填报区，扩大审校稿空间")
                                 .clicked()
                             {

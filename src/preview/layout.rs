@@ -6,7 +6,7 @@
 use crate::export;
 use crate::export::table::ColumnAlignment;
 use crate::preview::gutter;
-use crate::preview::{BODY_PT, INDENT_CHARS, Metrics, PAREN_PT, TABLE_LINE_PT, TABLE_PT};
+use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT, TABLE_LINE_PT, TABLE_PT};
 use crate::theme;
 use eframe::egui;
 use eframe::egui::text::{LayoutJob, TextFormat};
@@ -522,7 +522,7 @@ pub(crate) fn body_block(
     first_line_indent: bool,
 ) {
     let mut job = job(metrics.content);
-    let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+    let normal = metrics.body_font();
     if first_line_indent {
         job.append(
             &indent(INDENT_CHARS),
@@ -547,7 +547,7 @@ pub(crate) fn clickable_body_block(
     clicked: &mut Option<Range<usize>>,
 ) {
     let mut job = job(metrics.content);
-    let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+    let normal = metrics.body_font();
     let indent_chars = if first_line_indent {
         job.append(
             &indent(INDENT_CHARS),
@@ -714,7 +714,7 @@ pub(crate) fn append_inline(job: &mut LayoutJob, metrics: &Metrics, text: &str, 
         let font = if segment.parenthesized {
             metrics.font(theme::FONT_KAITI, PAREN_PT)
         } else if segment.bold {
-            metrics.font(theme::FONT_BOLD, BODY_PT)
+            metrics.body_bold_font()
         } else {
             normal.clone()
         };

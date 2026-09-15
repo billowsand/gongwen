@@ -6,13 +6,16 @@
 
 mod docx;
 mod latex;
+mod research;
 pub(crate) mod table;
 pub(crate) mod title;
 pub(crate) use docx::record::automatic_print_copies;
 #[allow(unused_imports)]
 pub(crate) use docx::{write_docx, write_docx_with_numbering};
 #[allow(unused_imports)]
-pub(crate) use latex::{copy_count, write_tex, write_tex_with_numbering};
+pub(crate) use latex::copy_count;
+#[cfg(test)]
+pub(crate) use latex::write_tex;
 
 use crate::models::{
     DraftInput, ExportSelection, FontConfig, NumberingConfig, TemplateKind, split_units,
@@ -20,6 +23,7 @@ use crate::models::{
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 mod headings;
@@ -138,6 +142,12 @@ pub fn extract_title(markdown: &str, fallback: &str) -> String {
 /// Markdown 保留“标题 + 正文 + 可选附件”。密级、文号、主送、落款、成文日期、抄送和版记
 /// 都由 DOCX/LaTeX 导出器按锁定元数据渲染，这里不再重复写入。
 pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
+    // 研究报告先出去：有序列表统一收尾标点（`；`/`。`）是公文的行文规范，
+    // 研报正文里常有以单位、英文缩写或公式结尾的条目，套上去反而是错的。
+    // 标题也不补：文件名称由文档要素维护，正文不写 `# 主标题`。
+    if input.kind.is_research() {
+        return format!("{}\n", generated.trim());
+    }
     let mut text = normalize_ordered_list_punctuation(generated.trim());
     if !text.lines().any(|line| line.starts_with("# ")) {
         let title = if input.title_hint.trim().is_empty() {
@@ -148,6 +158,81 @@ pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
         text = format!("# {title}\n\n{text}");
     }
     format!("{}\n", text.trim())
+}
+
+/// 按文档类型写入 TeX。研究报告必须经固定版本 mdx 的 research 模式转换；
+/// 其余文档继续使用公文 LaTeX 导出器。集中这一入口，避免稿件库批量导出等旁路
+/// 绕过研究报告的格式约束。
+pub(crate) fn write_tex_for_kind(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+) -> Result<()> {
+    if input.kind.is_research() {
+        research::write_tex(path, input, markdown)
+    } else {
+        latex::write_tex_with_numbering(path, input, markdown, display, fonts, numbering)
+    }
+}
+
+/// Markdown 源码包：正文 `.md` 加上它引用的全部资源，压成一个 zip。
+///
+/// 公文和研究报告统一走这里。稿子里插了图，光给一份 `.md` 是发不出去的——收件人
+/// 打开就是一串坏掉的图片引用；分成一堆散文件又不便于传。研究报告还多一份
+/// `references.bib`，正文的 frontmatter 也在这一步补上，解压后可以直接再喂给 mdx。
+fn write_markdown_archive(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    stem: &str,
+) -> Result<()> {
+    let bibliography = input
+        .kind
+        .is_research()
+        .then(|| input.research.bibliography_content.trim())
+        .filter(|content| !content.is_empty());
+    let document = if input.kind.is_research() {
+        research::markdown_source(input, markdown, bibliography.is_some())
+    } else {
+        markdown.to_string()
+    };
+
+    let file = fs::File::create(path)
+        .with_context(|| format!("无法创建 Markdown 源码包：{}", path.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file(format!("{stem}.md"), options)?;
+    zip.write_all(document.as_bytes())?;
+
+    // 图片按 markdown 里写的相对路径入包（通常是 `images/xxx.png`），解压后
+    // 引用不用改就能用。引用缺失时跳过，与从前复制到导出目录的行为一致：
+    // 少一张图不该让整次导出失败。
+    for src in crate::images::image_refs(&document) {
+        let Ok(source) = crate::images::resolve(&src) else {
+            continue;
+        };
+        if !source.is_file() {
+            continue;
+        }
+        let bytes =
+            fs::read(&source).with_context(|| format!("无法读取图片 {}", source.display()))?;
+        zip.start_file(crate::images::normalize_ref(&src), options)?;
+        zip.write_all(&bytes)?;
+    }
+
+    if let Some(content) = bibliography {
+        zip.start_file("references.bib", options)?;
+        zip.write_all(content.as_bytes())?;
+    }
+
+    zip.finish()
+        .with_context(|| format!("无法写完 Markdown 源码包：{}", path.display()))?;
+    Ok(())
 }
 
 #[allow(dead_code)] // 默认编号的兼容入口，测试与部分旧调用使用。
@@ -202,20 +287,18 @@ pub fn export_all_with_numbering(
     let mut files = Vec::new();
 
     if selection.markdown {
-        let path = document_dir.join(format!("{export_stem}.md"));
-        fs::write(&path, markdown)?;
-        // 图片复制到导出目录（保持 images/ 相对结构），导出的 md 目录自包含。
-        crate::images::copy_refs(markdown, &document_dir)?;
+        let path = document_dir.join(format!("{export_stem}-源码包.zip"));
+        write_markdown_archive(&path, input, markdown, export_stem.as_str())?;
         files.push(path);
     }
-    if selection.docx {
+    if selection.docx && input.kind.supports_docx() {
         let path = document_dir.join(format!("{export_stem}.docx"));
         docx::write_docx_with_numbering(&path, input, markdown, display, fonts, numbering)?;
         files.push(path);
     }
     if selection.tex {
         let path = document_dir.join(format!("{export_stem}.tex"));
-        latex::write_tex_with_numbering(&path, input, markdown, display, fonts, numbering)?;
+        write_tex_for_kind(&path, input, markdown, display, fonts, numbering)?;
         files.push(path);
     }
     Ok(files)
@@ -243,6 +326,7 @@ pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
         TemplateKind::OfficialLetter => format!("{}-{title}", letter_prefix(input)),
         TemplateKind::PhoneNotice => "电话通知".to_string(),
         TemplateKind::PlainDocument => format!("普通公文-{title}"),
+        TemplateKind::ResearchReport => format!("研究报告-{title}"),
     }
 }
 
@@ -859,11 +943,15 @@ mod tests {
         assert!(files.iter().all(|path| path.metadata().unwrap().len() > 0));
         let document_dir = files[0].parent().unwrap();
         assert!(files.iter().all(|path| path.parent() == Some(document_dir)));
-        assert!(
-            files
-                .iter()
-                .all(|path| { path.file_stem() == document_dir.file_name() })
-        );
+        // docx / tex 与导出目录同名；md 源码包在同一个主干名后加 `-源码包`。
+        let dir_name = document_dir.file_name().unwrap().to_string_lossy();
+        for path in &files {
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            assert!(
+                stem == dir_name || stem == format!("{dir_name}-源码包"),
+                "产物名应与导出目录同源：{stem}"
+            );
+        }
         assert!(document_dir.join("gonghan-gwa.cls").exists());
 
         let docx_path = files
@@ -882,9 +970,20 @@ mod tests {
         assert!(xml.contains("关于开展测试工作的函"));
     }
 
+    /// 把源码包里某个条目读成字符串；条目不存在返回 None。
+    fn archive_entry(path: &Path, name: &str) -> Option<String> {
+        use std::io::Read as _;
+        let file = std::fs::File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name(name).ok()?;
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        Some(text)
+    }
+
     #[test]
     fn markdown_export_survives_missing_image_refs() {
-        // 图片引用指向不存在的文件时，md 导出照常成功（copy_refs 跳过缺失文件）。
+        // 图片引用指向不存在的文件时，源码包照常出：少一张图不该让整次导出失败。
         let temp = tempfile::tempdir().unwrap();
         let input = DraftInput::default();
         let selection = ExportSelection {
@@ -903,10 +1002,93 @@ mod tests {
         )
         .unwrap();
         assert_eq!(files.len(), 1);
-        assert!(files[0].extension().is_some_and(|ext| ext == "md"));
+        assert!(files[0].extension().is_some_and(|ext| ext == "zip"));
+        let stem = files[0]
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert_eq!(
-            std::fs::read_to_string(&files[0]).unwrap(),
+            archive_entry(&files[0], &format!("{stem}.md")).unwrap(),
             "# 标题\n\n正文。\n\n![图](images/不存在的.png)"
+        );
+    }
+
+    /// 插了图的稿子，源码包里必须连图一起带走——只给一份 md，收件人打开就是
+    /// 一串坏掉的图片引用。公文和研究报告统一这个行为。
+    #[test]
+    fn markdown_archive_carries_referenced_images() {
+        let dir = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("gw_zip_{}.png", std::process::id());
+        std::fs::write(dir.join(&name), b"fake-png").unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let input = DraftInput::default();
+        let selection = ExportSelection {
+            markdown: true,
+            docx: false,
+            tex: false,
+            overwrite: true,
+        };
+        let markdown = format!("# 标题\n\n正文。\n\n![图](images/{name})");
+        let files = export_all(
+            temp.path(),
+            &input,
+            &markdown,
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let entry = archive_entry(&files[0], &format!("images/{name}"));
+        let _ = std::fs::remove_file(dir.join(&name));
+        assert_eq!(entry.as_deref(), Some("fake-png"), "源码包应包含引用的图片");
+    }
+
+    /// 研究报告的源码包额外带 frontmatter 与 references.bib，解压后能直接再
+    /// 交给 mdx 转换一次。
+    #[test]
+    fn research_markdown_archive_carries_frontmatter_and_bibliography() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "测试研究".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        input.research.bibliography_content = "@book{demo, title={示例}}".into();
+        let selection = ExportSelection {
+            markdown: true,
+            docx: false,
+            tex: false,
+            overwrite: true,
+        };
+        let files = export_all(
+            temp.path(),
+            &input,
+            "## 研究背景\n\n正文 [@demo]。",
+            &selection,
+            &UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let stem = files[0]
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let document = archive_entry(&files[0], &format!("{stem}.md")).unwrap();
+        assert!(document.starts_with("---\n密级: 公开\n"), "{document}");
+        assert!(document.contains("文件名称: 测试研究"));
+        assert!(document.contains("bibliography: references.bib"));
+        assert_eq!(
+            archive_entry(&files[0], "references.bib").as_deref(),
+            Some("@book{demo, title={示例}}")
         );
     }
 
@@ -956,14 +1138,12 @@ mod tests {
         .unwrap();
         assert_ne!(first, third);
         let versioned_dir = third[0].parent().unwrap();
-        assert_eq!(third[0].file_stem(), versioned_dir.file_name());
-        assert!(
-            versioned_dir
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .ends_with("-2")
+        let dir_name = versioned_dir.file_name().unwrap().to_string_lossy();
+        assert_eq!(
+            third[0].file_stem().unwrap().to_string_lossy(),
+            format!("{dir_name}-源码包")
         );
+        assert!(dir_name.ends_with("-2"));
     }
 
     #[test]

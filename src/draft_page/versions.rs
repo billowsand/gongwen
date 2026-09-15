@@ -199,7 +199,9 @@ impl DraftPage<'_> {
             old_label: &old_label,
             new_label: "当前（未提交）",
             allow_jump: true,
-            allow_export: true,
+            // 花脸稿依赖公文专用的增删宏；mdx research 样式不识别这些标记，
+            // 在有专用实现前不提供一个看似可用、实际丢失修订语义的导出入口。
+            allow_export: !self.doc.draft.kind.is_research(),
         };
         // 缓存与视图状态是同一个结构体的两个字段，分别借用互不冲突。
         let Some((_, report)) = &self.doc.draft_diff.cache else {

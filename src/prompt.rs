@@ -158,7 +158,9 @@ fn direction_of(kind: TemplateKind) -> Direction {
         TemplateKind::OfficialLetter => Direction::Parallel,
         TemplateKind::PhoneNotice => Direction::Downward,
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => Direction::Upward,
-        TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => Direction::Unknown,
+        TemplateKind::PlainDocument
+        | TemplateKind::MeetingAgenda
+        | TemplateKind::ResearchReport => Direction::Unknown,
     }
 }
 
@@ -263,6 +265,9 @@ pub fn build_draft_prompt(
         TemplateKind::RedHeadApproval => {
             r#"文种为红头呈批件。正文业务结构与白头件一致，遵循“依据与概述—前期工作情况—下步工作建议—请示结语”；大节使用“一、二、三”，段内枚举使用“一是、二是、三是”，不得使用 Markdown 项目符号。结尾必须为“妥否，请指示。”或包含该句。用户素材明确要求附带具体附件内容时，每份附件前使用独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部继续使用与正文相同的标题层级，附件编号由程序生成。"#
         }
+        TemplateKind::ResearchReport => {
+            r#"文档类型为研究报告。只起草报告正文，不输出 YAML/frontmatter、密级、文件编号、版本号、撰写单位、撰写时间或封面。使用 mdx research 层级：## 表示章，### 表示节，#### 表示小节，##### 表示四级小节；标题不得手工编号。可按需使用“<!-- [摘要] -->”“<!-- [正文] -->”“<!-- [附录] -->”“<!-- [版本变更记录] -->”“<!-- [参考文献] -->”区段标记。交叉引用使用 {#id} 与 {@id}；引用只能使用已提供 BibTeX 中确实存在的 [@key]，不得编造引用键。不得输出原始 LaTeX 或 HTML。"#
+        }
     };
 
     // 公函和白头件的版式要素全部由本地导出器按锁定元数据渲染，
@@ -363,6 +368,12 @@ pub fn build_draft_prompt(
 不要输出版记横线、批示框、页码或任何版式符号，也不要在正文末尾另写单位名称或日期。"#,
             forbidden = "密级和保密期限、发文机关标识（红头）、发文字号、呈报领导抬头、批示文字、落款单位、成文日期、承办单位、联系人、联系电话"
         ),
+        TemplateKind::ResearchReport => r#"
+
+【输出范围：只写研究报告正文】
+封面信息由左侧“文档要素”维护并由本地程序写入 TeX。正文不要重复文件名称、密级、文件类型、文件编号、版本号、撰写单位或撰写时间；不要输出 YAML/frontmatter。
+正文从“<!-- [摘要] -->”或“<!-- [正文] -->”区段开始，章标题使用“## 标题”，节标题使用“### 标题”，依次类推，标题文本不要手工编号。参考文献只写正文引用，文献表由 BibTeX 自动生成。"#
+            .to_string(),
     };
 
     let glossary = if vocabulary.is_empty() {
@@ -614,6 +625,9 @@ fn kind_structure_rules(kind: TemplateKind) -> &'static str {
         TemplateKind::WhitePaper => {
             r#"正文使用自然段与“一、二、三”大节；段内枚举用“一是、二是、三是”；结尾保留“妥否，请指示。”"#
         }
+        TemplateKind::ResearchReport => {
+            r#"只保留研究报告正文，不输出 YAML/frontmatter 和封面要素；##、###、####、##### 依次表示章、节、小节和四级小节，标题不要手工编号。保留 mdx research 区段标记、{#id}/{@id} 交叉引用和 [@key] BibTeX 引用语法；不得编造引用键。"#
+        }
     }
 }
 
@@ -622,6 +636,19 @@ fn kind_structure_rules(kind: TemplateKind) -> &'static str {
 /// 这段文本被 `optimize_prompt_always_carries_the_output_contract` 等测试锁住，
 /// 改动务必同步测试。
 pub fn output_contract(kind: TemplateKind) -> String {
+    if kind.is_research() {
+        return format!(
+            r#"{heading}
+1. 只输出研究报告正文 Markdown，不要代码围栏、YAML/frontmatter、封面要素，不要任何解释、修改清单或思考过程。
+2. 文件名称由“文档要素”维护，正文不再输出“# 主标题”；章从“## 标题”开始，节、小节和四级小节依次使用“###”“####”“#####”，标题文本不得手工编号。
+3. 可保留 mdx research 区段标记：“<!-- [摘要] -->”“<!-- [正文] -->”“<!-- [附录] -->”“<!-- [版本变更记录] -->”“<!-- [参考文献] -->”。
+4. 图片使用标准 Markdown 图片语法；表格使用标准 Markdown 表格，各行列数一致。
+5. 交叉引用只使用 {{#id}} 与 {{@id}}；BibTeX 引用只使用资料中已经存在的 [@key]，不得编造引用键。
+6. 不输出原始 LaTeX 或 HTML，不把密级、编号、版本、撰写单位、撰写时间写进正文。
+7. 不得新增、删减或改动任何事实、单位、人名、日期与数据；用户指令与本标准冲突时以本标准为准。"#,
+            heading = OUTPUT_CONTRACT_HEADING,
+        );
+    }
     format!(
         r#"{heading}
 1. 只输出成品正文的 Markdown 本身。不要代码围栏（```）、不要 YAML/front matter、不要任何解释、说明、修改清单或思考过程；开头不要写“好的”“以下是”，结尾不要写“以上”“如有不妥请指正”。
@@ -1231,6 +1258,23 @@ mod tests {
     fn output_contract_covers_every_export_critical_rule() {
         for kind in TemplateKind::ALL {
             let contract = output_contract(kind);
+            if kind.is_research() {
+                for required in [
+                    "不要代码围栏",
+                    "不要任何解释",
+                    "正文不再输出“# 主标题”",
+                    "标准 Markdown 表格",
+                    "各行列数一致",
+                    "不得编造引用键",
+                    "不得新增、删减或改动任何事实、单位、人名、日期与数据",
+                ] {
+                    assert!(
+                        contract.contains(required),
+                        "{kind:?} 的输出标准缺少约束：{required}"
+                    );
+                }
+                continue;
+            }
             for required in [
                 "不要代码围栏",
                 "不要任何解释",

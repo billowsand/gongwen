@@ -286,7 +286,7 @@ impl GongwenApp {
                                         ui.horizontal_wrapped(|ui| {
                                             theme::chip(ui, "待核实", theme::warn(), theme::warn_soft());
                                             ui.label(format!(
-                                                "当前公文要素仍缺：{}。不影响起草和导出，但签发前必须补齐。",
+                                                "当前文档要素仍缺：{}。不影响起草和导出，但签发前必须补齐。",
                                                 pending.join("、")
                                             ));
                                         });
@@ -718,7 +718,7 @@ fn similar_ui(ui: &mut egui::Ui, state: &mut AiWorkbench, load_baseline: &mut Op
         }
     });
     if state.changes.is_empty() {
-        ui.weak("选择基准稿后会自动比较当前公文要素；正文中的业务变化可手动添加。 ");
+        ui.weak("选择基准稿后会自动比较当前文档要素；正文中的业务变化可手动添加。 ");
     }
     let mut remove = None;
     egui::Grid::new("ai_change_sheet")
@@ -947,7 +947,7 @@ fn pending_metadata(input: &DraftInput) -> Vec<&'static str> {
     if input.title_hint.trim().is_empty() {
         pending.push("标题提示");
     }
-    if input.profile.security_level.trim().is_empty() {
+    if !input.kind.is_research() && input.profile.security_level.trim().is_empty() {
         pending.push("密级");
     }
     match input.kind {
@@ -978,6 +978,20 @@ fn pending_metadata(input: &DraftInput) -> Vec<&'static str> {
             }
         }
         TemplateKind::PlainDocument => {}
+        TemplateKind::ResearchReport => {
+            if input.research.security.trim().is_empty() {
+                pending.push("密级");
+            }
+            if input.research.file_type.trim().is_empty() {
+                pending.push("文件类型");
+            }
+            if input.research.institution.trim().is_empty() {
+                pending.push("撰写单位");
+            }
+            if input.research.date.trim().is_empty() {
+                pending.push("撰写时间");
+            }
+        }
     }
     pending
 }

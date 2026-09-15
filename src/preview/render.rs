@@ -228,6 +228,19 @@ pub(crate) fn official_preview(
     numbering: &NumberingConfig,
     line_numbers: bool,
 ) -> PreviewOutput {
+    // 研究报告不是公文：版心、字号、标题层级和封面全都另一套，没有红头、主送、
+    // 落款和版记可言，因此整张纸交给专用版式画，不在下面的公文流程里打补丁。
+    if input.kind.is_research() {
+        return super::research::research_preview(
+            ui,
+            input,
+            markdown,
+            scale,
+            anchor,
+            scroll_to_anchor,
+            line_numbers,
+        );
+    }
     // 自适应缩放要按“看得见的宽度”算：滚动方向上的 available_width 是无穷大，
     // 拿它算会把整页放大到上限。裁剪矩形就是滚动区的可视范围，再与窗口取交集兜底。
     let visible = ui
@@ -503,7 +516,7 @@ fn clickable_compact_block(
         },
         false => heading.to_string(),
     };
-    let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+    let normal = metrics.body_font();
     let mut job = job(metrics.content);
     job.append(
         &indent(INDENT_CHARS),
@@ -666,7 +679,7 @@ pub(crate) fn image_placeholder(
             Stroke::new(1.0_f32.max(metrics.scale), theme::paper::ink_faint()),
             egui::StrokeKind::Inside,
         );
-        let font = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+        let font = metrics.body_font();
         let caption = if alt.is_empty() {
             file_name.to_string()
         } else {

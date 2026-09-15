@@ -11,7 +11,8 @@ use crate::export;
 use crate::highlight::MarkdownHighlighter;
 use crate::manuscript::ManuscriptStore;
 use crate::models::{
-    AppConfig, DraftInput, GeneratedDraft, ManuscriptStatus, ReviewNote, TemplateKind,
+    AppConfig, DraftInput, GeneratedDraft, ManuscriptStatus, ResearchMetadata, ReviewNote,
+    TemplateKind, TemplateProfile,
 };
 use crate::theme;
 use eframe::egui;
@@ -352,7 +353,7 @@ pub(crate) struct DraftSession {
     pub(crate) draft_diff: DraftDiffState,
     /// 已切换为“手工输入”的字段 id；其余字段一律从标准词库选择。
     pub(crate) manual_fields: BTreeSet<String>,
-    /// 左侧的公文要素填报区是否已收起。默认收起。
+    /// 左侧的文档要素填报区是否已收起。默认收起。
     pub(crate) form_collapsed: bool,
     /// 要素区三段（版头/主体/版记）的展开状态与待跳转目标。
     pub(crate) form_sections: FormSectionState,
@@ -488,6 +489,28 @@ impl DraftSession {
         )
     }
 
+    /// 从文件夹导入一篇研究报告。研究报告元数据与正文分别保存，正文资源已在
+    /// 导入阶段复制入应用资源库。
+    pub(crate) fn with_research_markdown(
+        key: DocKey,
+        markdown: String,
+        title: String,
+        research: ResearchMetadata,
+    ) -> Self {
+        Self::from_parts(
+            key,
+            None,
+            DraftInput {
+                kind: TemplateKind::ResearchReport,
+                title_hint: title,
+                profile: TemplateProfile::for_kind(TemplateKind::ResearchReport),
+                research,
+                ..Default::default()
+            },
+            markdown,
+        )
+    }
+
     pub(crate) fn from_parts(
         key: DocKey,
         manuscript_id: Option<i64>,
@@ -549,7 +572,7 @@ impl DraftSession {
         session
     }
 
-    /// 内容指纹：公文要素 + 正文。脏判定与“动过没有”都拿它比。
+    /// 内容指纹：文档要素 + 正文。脏判定与“动过没有”都拿它比。
     fn fingerprint(&self) -> String {
         format!(
             "{}\u{1}{}",
@@ -1364,12 +1387,12 @@ mod tests {
             frame(ctx, release)
         };
 
-        // 公文要素区默认收起，先点 ribbon 上的“公文要素”按钮展开它。
+        // 文档要素区默认收起，先点 ribbon 上的“文档要素”按钮展开它。
         let shapes = frame(&ctx, vec![]);
         let expand = text_centers(&shapes)
             .into_iter()
-            .find(|(s, _)| s == "公文要素")
-            .expect("应能找到 ribbon 上的“公文要素”按钮");
+            .find(|(s, _)| s == "文档要素")
+            .expect("应能找到 ribbon 上的“文档要素”按钮");
         let shapes = click(&mut frame, &ctx, expand.1);
         // 打开文种下拉框：先点当前文种“公函”，再等一帧让选项渲染出来。
         let combo = text_centers(&shapes)

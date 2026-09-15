@@ -16,7 +16,7 @@ use crate::storage;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -92,34 +92,116 @@ pub(crate) fn import(files: &[PathBuf]) -> Result<Vec<ImportedImage>> {
 fn import_into(dir: &Path, files: &[PathBuf]) -> Result<Vec<ImportedImage>> {
     fs::create_dir_all(dir).with_context(|| format!("无法创建图片目录 {}", dir.display()))?;
     let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let mut out = Vec::new();
-    for file in files {
-        let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+    let mut created = Vec::new();
+    let result = (|| {
+        let mut out = Vec::new();
+        for file in files {
+            let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !is_supported(file) {
+                continue;
+            }
+            let bytes =
+                fs::read(file).with_context(|| format!("无法读取图片文件 {}", file.display()))?;
+            let sanitized = sanitize_file_name(name);
+            let mut stored_name = format!("{stamp}_{sanitized}");
+            let mut dest = dir.join(&stored_name);
+            let mut suffix = 2usize;
+            while dest.exists() && fs::read(&dest).ok().as_deref() != Some(bytes.as_slice()) {
+                let source = Path::new(&sanitized);
+                let stem = source
+                    .file_stem()
+                    .map(|value| value.to_string_lossy())
+                    .unwrap_or_default();
+                let extension = source
+                    .extension()
+                    .map(|value| format!(".{}", value.to_string_lossy()))
+                    .unwrap_or_default();
+                stored_name = format!("{stamp}_{stem}_{suffix}{extension}");
+                dest = dir.join(&stored_name);
+                suffix += 1;
+            }
+            let rel_path = format!("{IMAGE_DIR}/{stored_name}");
+            if !dest.exists() {
+                fs::write(&dest, &bytes)
+                    .with_context(|| format!("无法写入图片文件 {}", dest.display()))?;
+                created.push(dest);
+            }
+            let alt = sanitize_alt(
+                Path::new(name)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let markdown = format!("![{alt}]({rel_path})");
+            out.push(ImportedImage { rel_path, markdown });
+        }
+        Ok(out)
+    })();
+    if result.is_err() {
+        for path in created {
+            let _ = fs::remove_file(path);
+        }
+    }
+    result
+}
+
+/// 把外部 Markdown 引用的本地图片复制入应用资源库并改写引用，返回改写后的
+/// 正文和跳过的引用清单。
+///
+/// 路径都相对给定基准目录解析；绝对路径与父目录穿越一律拒绝（恶意 Markdown 不
+/// 能借此读到资源库外的文件），而**缺失的文件、不支持的格式和网络图片只是跳过**
+/// ——引用原样保留，由调用方汇报。一份几十个图的稿子里少一张图，不该让整次导入
+/// 失败后连正文都拿不到。
+pub(crate) fn import_referenced_from(markdown: &str, base: &Path) -> Result<(String, Vec<String>)> {
+    let mut sources = Vec::new();
+    let mut source_refs = Vec::new();
+    let mut skipped = Vec::new();
+    for src in image_refs(markdown) {
+        if src.starts_with("http://") || src.starts_with("https://") {
+            continue;
+        }
+        let Ok(source) = resolve_from(base, &src) else {
+            skipped.push(format!("{src}（路径越出所选文件夹）"));
             continue;
         };
-        if !is_supported(file) {
+        if !source.is_file() {
+            skipped.push(format!("{src}（文件不存在）"));
             continue;
         }
-        let bytes =
-            fs::read(file).with_context(|| format!("无法读取图片文件 {}", file.display()))?;
-        let stored_name = format!("{stamp}_{}", sanitize_file_name(name));
-        let rel_path = format!("{IMAGE_DIR}/{stored_name}");
-        let dest = dir.join(&stored_name);
-        // 同秒重复导入同一文件：内容相同，直接复用避免覆盖窗口。
-        if !dest.exists() {
-            fs::write(&dest, &bytes)
-                .with_context(|| format!("无法写入图片文件 {}", dest.display()))?;
+        if !is_supported(&source) {
+            skipped.push(format!("{src}（格式不支持）"));
+            continue;
         }
-        let alt = sanitize_alt(
-            Path::new(name)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        );
-        let markdown = format!("![{alt}]({rel_path})");
-        out.push(ImportedImage { rel_path, markdown });
+        sources.push(source);
+        source_refs.push(src);
     }
-    Ok(out)
+    if sources.is_empty() {
+        return Ok((markdown.to_string(), skipped));
+    }
+    let imported = import(&sources)?;
+    if imported.len() != source_refs.len() {
+        bail!("部分 Markdown 图片未能导入，请检查文件名和扩展名");
+    }
+    let replacements = source_refs
+        .into_iter()
+        .zip(imported)
+        .map(|(source, image)| (source, image.rel_path))
+        .collect::<HashMap<_, _>>();
+    let rewritten = IMAGE_REF_RE
+        .replace_all(markdown, |captures: &regex::Captures<'_>| {
+            let original = captures.get(0).map(|m| m.as_str()).unwrap_or_default();
+            let Some(source) = captures.get(1).map(|m| m.as_str()) else {
+                return original.to_string();
+            };
+            replacements
+                .get(source)
+                .map(|replacement| original.replacen(source, replacement, 1))
+                .unwrap_or_else(|| original.to_string())
+        })
+        .into_owned();
+    Ok((rewritten, skipped))
 }
 
 /// 净化文件名：剔除路径分隔符、控制字符、Windows 非法字符与 markdown 特殊字符，

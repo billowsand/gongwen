@@ -31,6 +31,7 @@ egui_extras = { version = "0.35.0", features = ["image", "svg"] }
 hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 jieba-rs = "0.10"
+mdx = { git = "https://github.com/billowsand/mdx", rev = "c3b0fc7525a398fbb3779b754448ca7d5ba8806d" }
 pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -41,6 +42,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 rust_xlsxwriter = "0.79"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tempfile = "3.20"
 ttf-parser = "0.25.1"
 zip = "4.3"
 
@@ -60,9 +62,6 @@ objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSImage", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSData", "NSGeometry", "NSString", "NSUserDefaults"] }
 raw-window-handle = "0.6"
-
-[dev-dependencies]
-tempfile = "3.20"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"

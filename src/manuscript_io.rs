@@ -440,7 +440,7 @@ fn compile_record_pdf(
         .with_context(|| format!("无法创建临时工作目录 {}", dir.display()))?;
     let result = (|| {
         let tex_path = dir.join(format!("{stem}.tex"));
-        crate::export::write_tex_with_numbering(
+        crate::export::write_tex_for_kind(
             &tex_path,
             &record.snapshot,
             &record.content_markdown,
@@ -448,8 +448,12 @@ fn compile_record_pdf(
             fonts,
             numbering,
         )?;
-        let pdf_path = crate::texcompile::compile_pdf_if_available(&tex_path, fonts)?
-            .context("未检测到 TeX 引擎，无法编译非盖章件 PDF")?;
+        let pdf_path = if record.snapshot.kind.is_research() {
+            crate::texcompile::compile_research_pdf(&tex_path)?.pdf
+        } else {
+            crate::texcompile::compile_pdf_if_available(&tex_path, fonts)?
+        }
+        .context("未检测到可用的内置 TeX 运行时，无法编译 PDF")?;
         std::fs::read(&pdf_path).with_context(|| format!("无法读取编译产物 {}", pdf_path.display()))
     })();
     // 清理临时目录；清理失败不掩盖编译结果。
@@ -710,6 +714,7 @@ mod tests {
                 document_number: "某教函〔2026〕12号".into(),
                 ..TemplateProfile::for_kind(kind)
             },
+            research: Default::default(),
         }
     }
 

@@ -65,7 +65,7 @@ pub struct DiffViewConfig<'a> {
     /// 点击改动能否跳到 Markdown 源码。只有起草页的对照能跳——稿件管理看的
     /// 可能是另一篇稿件，跳到起草页的编辑框会落到无关的位置。
     pub allow_jump: bool,
-    /// 能不能导出花脸稿。导出要拿两版正文和公文要素去真编译一遍，只有起草页
+    /// 能不能导出花脸稿。导出要拿两版正文和文档要素去真编译一遍，只有起草页
     /// 这一侧接了后台任务；稿件管理的对照窗还没接，那里不显示按钮，免得点了
     /// 没反应。
     pub allow_export: bool,
@@ -188,7 +188,7 @@ pub fn manuscript_diff_ui(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !diff.fields.is_empty() {
-                egui::CollapsingHeader::new(format!("公文要素变化（{} 项）", diff.fields.len()))
+                egui::CollapsingHeader::new(format!("文档要素变化（{} 项）", diff.fields.len()))
                     .default_open(true)
                     .show(ui, |ui| {
                         field_changes_table(ui, &diff.fields, old_label, new_label)

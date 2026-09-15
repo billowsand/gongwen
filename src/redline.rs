@@ -335,6 +335,9 @@ pub fn export_files(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
+    if input.kind.is_research() {
+        anyhow::bail!("研究报告暂不支持花脸稿导出；请使用版本对照查看修订内容");
+    }
     let markdown = doc.markdown_with_notes();
     // 标题取自正文 H1，哨兵已在生成时避开标题，这里再兜一层底：文件名里绝不能
     // 出现私用区字符。
@@ -352,7 +355,7 @@ pub fn export_files(
     }
     if formats.pdf {
         let tex = dir.join(format!("{stem}.tex"));
-        export::write_tex_with_numbering(&tex, input, &markdown, display, fonts, numbering)?;
+        export::write_tex_for_kind(&tex, input, &markdown, display, fonts, numbering)?;
         files.push(tex.clone());
         let outcome = texcompile::compile_pdf_with_proof(&tex, fonts)
             .with_context(|| "花脸稿 PDF 编译失败".to_string())?;

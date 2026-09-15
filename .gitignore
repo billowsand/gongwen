@@ -22,6 +22,7 @@
 /runtime/tectonic/tectonic
 /runtime/texbundle/*.ttb
 /runtime/fonts/*.ttf
+/runtime/fonts/*.otf
 
 # Local development copies of document fonts
 /font/*

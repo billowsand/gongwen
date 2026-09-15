@@ -15,6 +15,15 @@ runtime/
   fonts/SimHei.ttf
   fonts/SimSun.ttf
   fonts/XiaoBiaoSong.ttf
+  fonts/FZShuSong.ttf
+  fonts/FZHei.ttf
+  fonts/FZKai.ttf
+  fonts/FZXiaoBiaoSong.ttf
+  fonts/JetBrainsMono-Regular.ttf
+  fonts/texgyretermes-regular.otf
+  fonts/texgyretermes-bold.otf
+  fonts/texgyretermes-italic.otf
+  fonts/texgyretermes-bolditalic.otf
   SHA256SUMS.win-x64.txt
   SHA256SUMS.linux-arm64.txt
   SHA256SUMS.linux-amd64.txt
@@ -29,13 +38,32 @@ runtime/
   `x86_64-unknown-linux-musl` build.
 - `tectonic` under `darwin-arm64` is the official Tectonic 0.17.0
   `aarch64-apple-darwin` build.
-- `gongwen-texlive.ttb` is a project-specific TTB v1 bundle built from the
-  TeX Live 2026 files actually needed by `gonghan-gwa.cls`. Its Tectonic
-  content digest is
-  `a7a9fdad147d59a8172ae625ea7bdeeee9493ebcaabd4a064928f3db7475de5a`.
+- `gongwen-texlive.ttb` is a project-specific TTB v1 bundle resolved from
+  Tectonic 0.17.0's pinned upstream bundle. It contains the dependencies
+  actually exercised by all `gonghan-gwa.cls` document variants and by mdx's
+  research warm-up document (including `ctexbook`, TikZ, listings and
+  `gbt7714`). Both styles are recompiled with a fresh cache and
+  `--only-cached --untrusted` before publishing. The authoritative checksum is
+  the `texbundle/gongwen-texlive.ttb` line of each `SHA256SUMS.<suffix>.txt`;
+  that is the value `scripts/package-portable.ps1` actually verifies.
+- Fonts come in two groups, both loaded **by file name**, never by family
+  name, so no machine has to have them installed:
+  - `FangSong` / `KaiTi` / `SimHei` / `SimSun` / `XiaoBiaoSong` are required by
+    every official-document layout (`gonghan-gwa.cls`, via `\GwaFontPath`) and
+    by the on-screen paper preview. Missing any of them disables PDF output
+    entirely.
+  - `FZ*` / `JetBrainsMono` / `texgyretermes-*` are required only by the
+    research-report layout (mdx's `md2tex.cls`, via `\MdxFontPath`). Missing
+    any of them disables research reports alone; official documents keep
+    working.
+- `md2tex.cls` is loaded with `fontset=none`, so the research layout never
+  falls back to ctex's per-platform font detection. That is why no Fandol font
+  is shipped here — nothing references it.
 - The font files are deployment assets supplied locally by the application
   distributor. They remain ignored by Git; redistribution authorization must
-  be checked separately.
+  be checked separately. JetBrains Mono is distributed under the OFL and
+  TeX Gyre Termes under the GUST Font License. Keep all license texts in
+  `runtime/licenses`.
 
 All binary assets are ignored by Git intentionally. Run
 `scripts/package-portable.ps1` after the assets have been placed here. The
@@ -50,6 +78,6 @@ directory or archive:
 Use `-RuntimeManifest` to point at another manifest, `-OutputDir` and
 `-ArchivePath` to control destinations, and `-Force` for a non-interactive
 overwrite. The release workflow downloads `runtime-<suffix>.zip` from the
-`billowsand/gongwen-runtime` release with the same tag; that archive must
-contain the files directly under its root, including `tectonic/`,
+`billowsand/gongwen-runtime` release selected by its `RUNTIME_RELEASE_TAG`;
+that archive must contain the files directly under its root, including `tectonic/`,
 `texbundle/`, `fonts/`, and the matching `SHA256SUMS.<suffix>.txt`.

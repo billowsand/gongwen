@@ -1,7 +1,7 @@
 //! 文档级校对规则：标题规范、文种越界、数字用法、附件一致性、成文日期。
 //!
 //! 与 `proofread` 的词表分工：那边是「见到这个词就报」，规则由用户增删；这边
-//! 是「这份稿子作为某个文种，结构上有没有问题」，依赖公文要素，改不得也删不掉。
+//! 是「这份稿子作为某个文种，结构上有没有问题」，依赖文档要素，改不得也删不掉。
 //! 两边都产出带 `span` 的 [`ProofNote`]，在审校抽屉里混排。
 //!
 //! 每条规则的取舍原则一样：**宁可漏报，不可误报**。公文写法各单位有差异，
@@ -107,7 +107,9 @@ fn allowed_suffixes(kind: TemplateKind) -> &'static [&'static str] {
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             &["请示", "报告", "意见", "方案", "建议", "说明"]
         }
-        TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => &[],
+        TemplateKind::PlainDocument
+        | TemplateKind::MeetingAgenda
+        | TemplateKind::ResearchReport => &[],
     }
 }
 
@@ -915,7 +917,10 @@ fn check_tone_direction(
                 ));
             }
         }
-        TemplateKind::PhoneNotice | TemplateKind::PlainDocument | TemplateKind::MeetingAgenda => {}
+        TemplateKind::PhoneNotice
+        | TemplateKind::PlainDocument
+        | TemplateKind::MeetingAgenda
+        | TemplateKind::ResearchReport => {}
     }
 }
 
@@ -926,6 +931,9 @@ fn check_tone_direction(
 ///
 /// `today` 由调用方传入，便于测试。
 pub fn check_doc_date(input: &DraftInput, today: chrono::NaiveDate) -> Option<String> {
+    if input.kind.is_research() {
+        return None;
+    }
     // `chinese_date_parts` 给的是三个字符串片段，年月日都可能是汉字数字。
     let (year, month, day) = export::chinese_date_parts(&input.date)?;
     let year = parse_count(year)? as i32;

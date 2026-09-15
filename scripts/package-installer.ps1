@@ -53,7 +53,16 @@ $requiredFiles = @(
     "runtime\fonts\KaiTi.ttf",
     "runtime\fonts\SimHei.ttf",
     "runtime\fonts\SimSun.ttf",
-    "runtime\fonts\XiaoBiaoSong.ttf"
+    "runtime\fonts\XiaoBiaoSong.ttf",
+    "runtime\fonts\FZShuSong.ttf",
+    "runtime\fonts\FZHei.ttf",
+    "runtime\fonts\FZKai.ttf",
+    "runtime\fonts\FZXiaoBiaoSong.ttf",
+    "runtime\fonts\JetBrainsMono-Regular.ttf",
+    "runtime\fonts\texgyretermes-regular.otf",
+    "runtime\fonts\texgyretermes-bold.otf",
+    "runtime\fonts\texgyretermes-italic.otf",
+    "runtime\fonts\texgyretermes-bolditalic.otf"
 )
 foreach ($relative in $requiredFiles) {
     $requiredPath = Join-Path $SourceDir $relative

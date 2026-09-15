@@ -1,7 +1,14 @@
-The five document fonts under runtime/fonts are deployment assets.
+The document and research fonts under runtime/fonts are deployment assets.
 Their OpenType embedding flags permit the tested PDF embedding modes, but that
 does not itself grant permission to redistribute the original font files.
 
 Before distributing a portable package, the distributor must verify that its
 font licenses permit software redistribution and PDF embedding in the intended
 deployment environment.
+
+JetBrainsMono-Regular.ttf is distributed under the SIL Open Font License; see
+JetBrainsMono-OFL.txt. TeX Gyre Termes is distributed under the GUST Font
+License; see TeX-Gyre-GUST-FONT-LICENSE.txt.
+
+The FZ (Founder) fonts have no redistribution grant of their own; clearing them
+for the intended deployment is part of the check described above.
