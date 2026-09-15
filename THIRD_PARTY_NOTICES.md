@@ -23,6 +23,20 @@ The document fonts in `runtime/fonts` are locally supplied deployment
 assets. Their redistribution authorization must be verified by the package
 distributor. See `runtime/licenses/FONT-LICENSE-REQUIRED.txt`.
 
+The research-report layout additionally uses JetBrains Mono (SIL Open Font
+License) and TeX Gyre Termes (GUST Font License); their notices are copied to
+`runtime/licenses/JetBrainsMono-OFL.txt` and
+`runtime/licenses/TeX-Gyre-GUST-FONT-LICENSE.txt`.
+
+## mdx
+
+Research reports are converted to TeX by mdx, distributed under the MIT
+License. A source copy is vendored in `vendor/mdx` and linked into the
+executable; the upstream notice is preserved at `vendor/mdx/LICENSE`.
+
+- Project: https://github.com/billowsand/mdx
+- Version: `mdx@2.15.4`
+
 ## Hayro and Vello CPU
 
 The application uses Hayro 0.7.1 and Vello CPU to parse and rasterize PDF
