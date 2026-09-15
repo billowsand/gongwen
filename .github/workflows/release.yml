@@ -200,6 +200,9 @@ jobs:
           # 点了导出才报 "字体不存在"。
           test -f runtime/fonts/FZShuSong.ttf
           test -f runtime/SHA256SUMS.linux-arm64.txt
+          # zip 不保存 Unix 权限位，解压出来的二进制没有执行位。两份都补上：
+          # 装一份就绪的 tectonic/tectonic，同时让按平台分目录的原始文件也可执行。
+          chmod +x runtime/tectonic/linux-arm64/tectonic
           install -m 755 \
             runtime/tectonic/linux-arm64/tectonic \
             runtime/tectonic/tectonic
@@ -398,6 +401,9 @@ jobs:
           # 点了导出才报 "字体不存在"。
           test -f runtime/fonts/FZShuSong.ttf
           test -f runtime/SHA256SUMS.linux-amd64.txt
+          # zip 不保存 Unix 权限位，解压出来的二进制没有执行位。两份都补上：
+          # 装一份就绪的 tectonic/tectonic，同时让按平台分目录的原始文件也可执行。
+          chmod +x runtime/tectonic/linux-amd64/tectonic
           install -m 755 \
             runtime/tectonic/linux-amd64/tectonic \
             runtime/tectonic/tectonic

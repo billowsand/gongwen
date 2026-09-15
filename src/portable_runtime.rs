@@ -82,17 +82,27 @@ pub struct PortableTexRuntime {
 
 impl PortableTexRuntime {
     fn candidate(root: PathBuf) -> Self {
+        // 发布包把本平台的二进制装成 `tectonic/tectonic` 并带上执行位；开发仓库
+        // 与刚解压的 runtime 压缩包里则是按平台分目录的 `tectonic/<平台>/tectonic`。
+        //
+        // 两处都在时必须挑**真正可执行**的那一个：zip 不保存 Unix 权限位，解压
+        // 出来的那份往往没有执行位，选中它的结果是编译时一句
+        // `Permission denied (os error 13)`，而错误信息里看不出是权限问题。
         let packaged = root.join("tectonic").join(TECTONIC_BINARY);
         let source_tree = root
             .join("tectonic")
             .join(PLATFORM_SUFFIX)
             .join(TECTONIC_BINARY);
+        let candidates = [source_tree, packaged];
+        let tectonic = candidates
+            .iter()
+            .find(|path| is_executable(path))
+            // 都不可执行时留下一个存在的，好让 validate 报得出"存在但不可执行"。
+            .or_else(|| candidates.iter().find(|path| path.is_file()))
+            .unwrap_or(&candidates[1])
+            .clone();
         Self {
-            tectonic: if source_tree.is_file() {
-                source_tree
-            } else {
-                packaged
-            },
+            tectonic,
             bundle: root.join("texbundle").join(BUNDLE_FILE_NAME),
             fonts: root.join("fonts"),
             root,
@@ -102,6 +112,13 @@ impl PortableTexRuntime {
     fn validate(&self) -> Result<()> {
         if !self.tectonic.is_file() {
             bail!("便携式 Tectonic 不存在：{}", self.tectonic.display());
+        }
+        if !is_executable(&self.tectonic) {
+            bail!(
+                "便携式 Tectonic 没有执行权限：{}。\
+                 从压缩包解压出的 runtime 需要先 chmod +x（zip 不保存 Unix 权限位）。",
+                self.tectonic.display()
+            );
         }
         if !self.bundle.is_file() {
             bail!("离线 TeX bundle 不存在：{}", self.bundle.display());
@@ -123,6 +140,19 @@ impl PortableTexRuntime {
         }
         Ok(())
     }
+}
+
+/// 这个文件能不能直接执行。Windows 没有执行位的概念，存在即可。
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// 找到完整的便携式 TeX 运行时。只要发现了 Tectonic 可执行文件，其余资源缺失就明确
@@ -210,6 +240,46 @@ mod tests {
         );
         assert!(runtime.bundle.ends_with("texbundle/gongwen-texlive.ttb"));
         assert!(runtime.fonts.ends_with("fonts"));
+    }
+
+    /// 两处都有 Tectonic 时选真正可执行的那一个。
+    ///
+    /// 回归测试：runtime 压缩包解压出的 `tectonic/<平台>/tectonic` 没有执行位
+    /// （zip 不保存 Unix 权限位），而发布流程另外装了一份带执行位的
+    /// `tectonic/tectonic`。早先无条件优先前者，结果是所有 PDF 编译都以
+    /// `Permission denied (os error 13)` 失败，错误信息里还看不出是权限问题。
+    #[cfg(unix)]
+    #[test]
+    fn picks_the_executable_tectonic_when_both_paths_exist() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temporary directory must be creatable");
+        let root = dir.path();
+        let platform_dir = root.join("tectonic").join(PLATFORM_SUFFIX);
+        std::fs::create_dir_all(&platform_dir).unwrap();
+
+        // 解压出来的那份：存在，但不可执行。
+        let extracted = platform_dir.join(TECTONIC_BINARY);
+        std::fs::write(&extracted, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&extracted, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // 只有它时就选它，让 validate 报得出"存在但不可执行"。
+        let runtime = PortableTexRuntime::candidate(root.to_owned());
+        assert_eq!(runtime.tectonic, extracted);
+        let error = runtime.validate().expect_err("不可执行时必须报错");
+        assert!(
+            format!("{error:#}").contains("没有执行权限"),
+            "错误信息要说清是权限问题：{error:#}"
+        );
+
+        // 发布流程装好的那份：带执行位，应当被优先选中。
+        let installed = root.join("tectonic").join(TECTONIC_BINARY);
+        std::fs::write(&installed, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            PortableTexRuntime::candidate(root.to_owned()).tectonic,
+            installed
+        );
     }
 
     /// 每个位置的内置字体都必须真的随运行时分发，否则未配置本机字体的位置会
