@@ -17,7 +17,9 @@ concurrency:
 # runtime-win-x64.zip, runtime-linux-arm64.zip, runtime-linux-amd64.zip and
 # runtime-darwin-arm64.zip.
 env:
-  RUNTIME_RELEASE_TAG: v0.3.6
+  # v0.4.0 起额外分发研究报告排版所需的 9 个字体（方正、TeX Gyre Termes、
+  # JetBrains Mono）。研究报告按文件名从 runtime 加载字体，用户机器不必安装。
+  RUNTIME_RELEASE_TAG: v0.4.0
   RUNTIME_REPO: billowsand/gongwen-runtime
 
 jobs:
@@ -194,6 +196,9 @@ jobs:
           test -f runtime/tectonic/linux-arm64/tectonic
           test -f runtime/texbundle/gongwen-texlive.ttb
           test -f runtime/fonts/FangSong.ttf
+          # 研究报告的字体：拿到旧 runtime 时在这里就失败，而不是等用户
+          # 点了导出才报 "字体不存在"。
+          test -f runtime/fonts/FZShuSong.ttf
           test -f runtime/SHA256SUMS.linux-arm64.txt
           install -m 755 \
             runtime/tectonic/linux-arm64/tectonic \
@@ -389,6 +394,9 @@ jobs:
           test -f runtime/tectonic/linux-amd64/tectonic
           test -f runtime/texbundle/gongwen-texlive.ttb
           test -f runtime/fonts/FangSong.ttf
+          # 研究报告的字体：拿到旧 runtime 时在这里就失败，而不是等用户
+          # 点了导出才报 "字体不存在"。
+          test -f runtime/fonts/FZShuSong.ttf
           test -f runtime/SHA256SUMS.linux-amd64.txt
           install -m 755 \
             runtime/tectonic/linux-amd64/tectonic \
