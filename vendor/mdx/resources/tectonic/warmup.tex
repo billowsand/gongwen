@@ -1,0 +1,75 @@
+\documentclass[fontset=fandol]{ctexbook}
+
+% Keep this package list in sync with resources/official/official.cls and
+% resources/research/md2tex.cls. The release workflow compiles this document
+% once against Tectonic's official online bundle, then packages the resolved
+% files as mdx's local, offline directory bundle.
+\usepackage{geometry}
+\usepackage{calc}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{pifont}
+\usepackage{refcount}
+\usepackage{ifthen}
+\usepackage{ragged2e}
+\usepackage{paralist}
+\usepackage{longtable}
+\usepackage{etoolbox}
+\usepackage{pdflscape}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{tabularray}
+\usepackage{tikz}
+\usepackage{titlesec}
+\usepackage{tocloft}
+\usepackage{listings}
+\usepackage{gbt7714}
+\citestyle{numbers}
+\usepackage[unicode,CJKbookmarks=true]{hyperref}
+
+% Some resources are requested lazily by configured listings/list labels or by
+% xdvipdfmx, so package loading alone does not resolve them during prewarming.
+\IfFileExists{color.sty}{}{\PackageError{mdx-warmup}{Missing color.sty}{}}
+\IfFileExists{lcircle1.pfb}{}{\PackageError{mdx-warmup}{Missing lcircle1.pfb}{}}
+
+\begin{document}
+\tableofcontents
+\chapter{离线依赖预热}
+
+中文、English、\ding{72}，参考文献\cite{warmup2026}。
+
+{\fontsize{14.05249pt}{24pt}\selectfont 大字号脚注\footnote{离线脚注资源。}}
+
+\section{标题资源}
+\subsection{次级标题资源}
+
+\begin{longtblr}{colspec={X[l]X[c]},hlines,vlines}
+组件 & 状态 \\
+Tectonic & 可用
+\end{longtblr}
+
+\begin{tikzpicture}
+  \draw (0,0) rectangle (1,1);
+\end{tikzpicture}
+
+\begin{lstlisting}[language=C]
+fn main() { println!("offline"); }
+\end{lstlisting}
+
+\begin{asparaenum}
+  \item 一级列表
+  \begin{inparaenum}
+    \item 二级列表
+  \end{inparaenum}
+\end{asparaenum}
+
+\begin{landscape}
+横向页面。
+\end{landscape}
+
+\bibliography{warmup}
+\end{document}

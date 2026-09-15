@@ -31,7 +31,9 @@ egui_extras = { version = "0.35.0", features = ["image", "svg"] }
 hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 jieba-rs = "0.10"
-mdx = { git = "https://github.com/billowsand/mdx", rev = "b897ce1b9013e9f218fe51e62a64029d36018e46" }
+# 随仓库分发的副本，见 vendor/mdx/README.md：构建不依赖 GitHub 可达，
+# 离线也能从零编译。同步上游的办法写在那份 README 里。
+mdx = { path = "vendor/mdx" }
 pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

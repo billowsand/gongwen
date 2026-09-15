@@ -1,0 +1,29 @@
+[package]
+name = "mdx"
+version = "2.15.4"
+edition = "2021"
+authors = ["marmot"]
+description = "面向中文公文与研究报告的 Markdown 转 DOCX/TeX 库（公文助手随仓库分发的副本）"
+license = "MIT"
+rust-version = "1.85"
+publish = false
+repository = "https://github.com/billowsand/mdx"
+
+# 这份副本只作为库被公文助手调用，因此去掉了上游的两个可执行目标
+# （`mdx` 命令行与 `mdx-gui`）及其专属依赖：clap、eframe、rfd。
+# 少了 clap 一家五个 crate，公文助手的编译也快一些。
+[dependencies]
+anyhow = "1"
+biblatex = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+docx-rs = "0.4"
+image = { version = "0.25.6", default-features = false, features = [
+    "gif",
+    "jpeg",
+    "png",
+    "bmp",
+    "tiff",
+] }
+regex = "1"
+tempfile = "3"
+walkdir = "2"
