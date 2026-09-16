@@ -182,22 +182,30 @@ fn column_requirement(rows: &[Vec<String>], spans: &[TableSpan], column_index: u
         .max(merged)
 }
 
-/// 横向合并格需要的总宽度按跨度摊到每一列；只有锚点列返回非零值。
+/// 横向合并格需要的总宽度按跨度摊到它跨过的**每一列**上，锚点列与覆盖列同价。
+/// 只记在锚点列上的话，一个跨六列的合并表头只会撑宽最左那一列，其余五列还是
+/// 按 2em 的保底算，`requires_landscape` 便会把这张表当成比实际紧凑得多。
+///
+/// 摊分前先扣掉 `shared_padding_em`：合并格只有一份左右留白，按列平摊会让每一列
+/// 都替它多算一份，跨度越大高估越狠。
 fn merged_requirement(rows: &[Vec<String>], spans: &[TableSpan], column_index: usize) -> f64 {
     let mut requirement: f64 = 0.0;
-    for (row_index, row) in rows.iter().enumerate() {
-        let Some(span) = table_span_at(spans, row_index, column_index) else {
-            continue;
-        };
-        if span.column_span <= 1 || span.column != column_index {
+    for span in spans {
+        let covered = span.column..span.column + span.column_span;
+        if span.column_span <= 1 || !covered.contains(&column_index) {
             continue;
         }
-        let value = row.get(column_index).map_or("", String::as_str);
+        let value = rows
+            .get(span.row)
+            .and_then(|row| row.get(span.column))
+            .map_or("", String::as_str);
         if value.trim().is_empty() {
             continue;
         }
-        let per_column =
-            merged_cell_required_width(value, span.column_span) / span.column_span as f64;
+        let per_column = (merged_cell_required_width(value, span.column_span)
+            - shared_padding_em(span.column_span))
+        .max(0.0)
+            / span.column_span as f64;
         requirement = requirement.max(per_column);
     }
     requirement
@@ -243,25 +251,45 @@ fn has_sentence_punctuation(value: &str) -> bool {
         || (width > SHORT_TEXT_THRESHOLD && value.chars().any(|ch| ['，', '、', ','].contains(&ch)))
 }
 
-/// `aligns` 是 Markdown 分隔行里写明的列对齐。写了冒号的列以它为准，
-/// 其余列仍按内容判定——公文表格多数不写冒号，那套启发式还是主力。
+/// 横向合并格排得下所需的宽度，**单位是 em**。
+///
+/// 长短的判定沿用 `display_width` 的口径（与 `analyze_table` 里的 `has_long_text`
+/// 一致），但返回值一律换算成 em：下限 `MIN_READABLE_COLUMN_EM` 与上限
+/// `MAX_PROSE_COLUMN_EM` 都是 em 常量，拿半角单位去跟它们比，跨两列的合并格会在
+/// 20 个半角宽（合 11.1em）上封顶——只比单列 prose 的 10em 多一点，补宽等于白做。
+/// 调用方按物理字宽比较时自己乘回 `CJK_WIDTH_FACTOR`。
 fn merged_cell_required_width(value: &str, column_span: usize) -> f64 {
     // 花脸稿哨兵不占版面，算进宽度会让合并格凭空变宽。
     let plain = plain_cell_text(value);
     let width = display_width(&plain);
+    let em = width / CJK_WIDTH_FACTOR;
     let minimum = MIN_READABLE_COLUMN_EM * column_span as f64;
     if has_sentence_punctuation(&plain) || width > LONG_TEXT_THRESHOLD {
-        (width / 2.0)
+        (em / 2.0)
             .max(minimum)
             .min(MAX_PROSE_COLUMN_EM * column_span as f64)
     } else {
-        width.max(minimum)
+        em.max(minimum)
     }
 }
 
+/// 跨 `column_span` 列的合并格白捡到的横向开销：中间那几道竖线连同两侧留白都归
+/// 它用。摊分需求或估算跨列宽度时都要把这块算进去，否则放得下的合并格会被判成
+/// 放不下，白白撑宽一张本来就紧的表。
+fn shared_padding_em(column_span: usize) -> f64 {
+    column_span.saturating_sub(1) as f64 * COLUMN_PADDING_EM
+}
+
+/// `aligns` 是 Markdown 分隔行里写明的列对齐。写了冒号的列以它为准，
+/// 其余列仍按内容判定——公文表格多数不写冒号，那套启发式还是主力。
+///
 /// 先沿用普通表格的逐列统计，再把横向合并单元格作为“跨列总宽度约束”补进去。
 /// 没有合并单元格时结果与旧算法逐位一致；合并格的需求按跨度换算到物理字宽后
 /// 分摊给跨过的非定宽列，而不是只把左侧锚点列撑宽。
+///
+/// 注意一处刻意的不对称：普通表头再长也不进 `stats`（循环从第 2 行起），但合并
+/// 表头会经 `satisfy_merged_spans` 影响列宽。合并表头是横着占版面的，不撑宽就没
+/// 地方排；普通表头折行即可。这不是漏网，别顺手“修”掉。
 fn analyze_table(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
@@ -378,17 +406,13 @@ fn satisfy_merged_spans(
         return;
     }
 
+    // 版心与定宽列都不随补宽变化，整轮迭代里是常量；比例总和会变，每处理一个
+    // 合并格都要重新算，否则同一个表达式里 deficit 用旧值、current 用新值。
     let available = available_content_units(stats);
     // 每加宽一次都会抬高整表比例总和，合并格实际分到的份额略小于按比例算出的值，
     // 因此多迭代几轮收敛。
     for _ in 0..8 {
         let mut changed = false;
-        let relative_total = stats
-            .iter()
-            .enumerate()
-            .filter(|(index, column)| *index < column_count && !column.is_fixed())
-            .map(|(index, _)| ratios[index])
-            .sum::<f64>();
         for span in &merges {
             let end = (span.column + span.column_span).min(column_count);
             if span.column >= end {
@@ -401,8 +425,11 @@ fn satisfy_merged_spans(
             if value.trim().is_empty() {
                 continue;
             }
-            let required = merged_cell_required_width(value, end - span.column);
-            let current = estimated_span_width(stats, ratios, span.column..end);
+            let relative_total = relative_ratio_total(stats, ratios);
+            // merged_cell_required_width 给的是 em，这里要跟物理字宽比。
+            let required = merged_cell_required_width(value, end - span.column) * CJK_WIDTH_FACTOR;
+            let current =
+                estimated_span_width(stats, ratios, available, relative_total, span.column..end);
             if required <= current + f64::EPSILON {
                 continue;
             }
@@ -449,16 +476,27 @@ fn available_content_units(stats: &[ColumnStats]) -> f64 {
     (text_width - fixed_width_units(stats)).max(1.0)
 }
 
-/// 估算若干列合起来有多宽：定宽列按绝对宽度，其余按比例分摊可用版面。
-fn estimated_span_width(stats: &[ColumnStats], ratios: &[f64], columns: Range<usize>) -> f64 {
-    let available = available_content_units(stats);
-    let relative_total = stats
+/// 参与相对宽度分配的各列比例之和；定宽数字列不在其中。
+fn relative_ratio_total(stats: &[ColumnStats], ratios: &[f64]) -> f64 {
+    ratios
         .iter()
         .enumerate()
-        .filter(|(index, column)| *index < ratios.len() && !column.is_fixed())
-        .map(|(index, _)| ratios[index])
-        .sum::<f64>();
-    columns
+        .filter(|(index, _)| !stats[*index].is_fixed())
+        .map(|(_, ratio)| *ratio)
+        .sum()
+}
+
+/// 估算一个合并格跨过这几列后能用多宽：定宽列按绝对宽度，其余按比例分摊可用
+/// 版面，再加上被它吞掉的那几份列内边距（见 `shared_padding_em`）。
+fn estimated_span_width(
+    stats: &[ColumnStats],
+    ratios: &[f64],
+    available: f64,
+    relative_total: f64,
+    columns: Range<usize>,
+) -> f64 {
+    let column_span = columns.len();
+    let content = columns
         .map(|index| {
             if stats[index].is_fixed() {
                 NARROW_NUMERIC_WIDTH_EM * CJK_WIDTH_FACTOR
@@ -468,7 +506,8 @@ fn estimated_span_width(stats: &[ColumnStats], ratios: &[f64], columns: Range<us
                 0.0
             }
         })
-        .sum()
+        .sum::<f64>();
+    content + shared_padding_em(column_span) * CJK_WIDTH_FACTOR
 }
 
 pub(super) fn to_docx_grid(
@@ -584,10 +623,12 @@ pub(super) fn to_longtblr(
                 ColumnAlignment::Center => 'c',
                 ColumnAlignment::Right => 'r',
             };
+            // 竖向一律居中（`m`），跟 DOCX 的 vertical_align 与预览的画法对齐。
+            // tabularray 的默认值不写在规格里，别赖它——纵向合并一出来就看得见。
             match column.width {
-                ColumnWidth::FixedEm(em) => format!("Q[{align},wd={em:.0}em]"),
-                ColumnWidth::Relative(1.0) => format!("X[{align}]"),
-                ColumnWidth::Relative(ratio) => format!("X[{ratio:.1},{align}]"),
+                ColumnWidth::FixedEm(em) => format!("Q[{align},m,wd={em:.0}em]"),
+                ColumnWidth::Relative(1.0) => format!("X[{align},m]"),
+                ColumnWidth::Relative(ratio) => format!("X[{ratio:.1},{align},m]"),
             }
         })
         .collect::<Vec<_>>()
@@ -677,7 +718,7 @@ pub(super) fn to_longtblr(
                     if span.column_span > 1 {
                         options.push(format!("c={}", span.column_span));
                     }
-                    // 竖向居中在 tabularray 里是默认值，这里只写水平对齐，
+                    // 只写水平对齐；竖向居中由 colspec 里的 `m` 统一管，
                     // 与 `\SetCell[c=2]{c}` 的官方写法一致。
                     format!("\\SetCell[{}]{{{align}}} {content}", options.join(","))
                 } else {
@@ -765,7 +806,7 @@ mod tests {
             .find(|line| line.contains("colspec"))
             .expect("有 colspec");
         assert!(colspec.contains("[l,"), "首列应左对齐：{colspec}");
-        assert!(colspec.contains(",r]"), "末列应右对齐：{colspec}");
+        assert!(colspec.contains(",r,m]"), "末列应右对齐：{colspec}");
     }
 
     #[test]
@@ -775,7 +816,7 @@ mod tests {
         assert!(tex.contains("label = none"));
         assert!(tex.contains("entry = none"));
         assert!(!tex.contains("caption ="));
-        assert!(tex.contains("Q[c,wd=2em]"));
+        assert!(tex.contains("Q[c,m,wd=2em]"));
         assert!(tex.contains("X["));
         assert!(tex.contains("rowhead = 1"));
     }
@@ -990,6 +1031,100 @@ mod tests {
         let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
         assert_eq!(grid[0], 560, "数字列必须保持 2em 定宽：{grid:?}");
         assert!(grid[1] > grid[2], "缺口应落到跨过的非定宽列：{grid:?}");
+    }
+
+    /// 合并格的需求以 em 计，上限随跨度放大。拿 `display_width` 的半角宽去跟
+    /// `MAX_PROSE_COLUMN_EM` 比的话，跨两列会在 20 个半角宽（合 11.1em）上封顶——
+    /// 只比单列 prose 的 10em 多一点，再长的字也换不来更宽的格子。
+    #[test]
+    fn merged_requirement_is_in_em_and_scales_with_span() {
+        let short = merged_cell_required_width(&"说".repeat(20), 2);
+        let long = merged_cell_required_width(&"说".repeat(40), 2);
+        assert!(long > short, "字更多就要更宽：{short} → {long}");
+        assert!(
+            (long - MAX_PROSE_COLUMN_EM * 2.0).abs() < 1e-6,
+            "跨两列的上限是 20em：{long}"
+        );
+        let single = merged_cell_required_width(&"说".repeat(40), 1);
+        assert!(
+            (single - MAX_PROSE_COLUMN_EM).abs() < 1e-6,
+            "同样的字放进单列，上限仍是 10em：{single}"
+        );
+    }
+
+    /// 上一条的版面后果：同一张表里把合并格的字加长，它跨过的两列必须真的变宽。
+    #[test]
+    fn a_longer_merged_cell_really_gets_a_wider_span() {
+        let span_width = |chars: usize| {
+            let table = vec![
+                vec![
+                    "甲".into(),
+                    "乙".into(),
+                    "丙".into(),
+                    "丁".into(),
+                    "戊".into(),
+                    "己".into(),
+                ],
+                vec![
+                    "一".into(),
+                    "二".into(),
+                    "三".into(),
+                    "四".into(),
+                    "五".into(),
+                    "六".into(),
+                ],
+                vec![
+                    "说".repeat(chars),
+                    String::new(),
+                    "末".into(),
+                    "尾".into(),
+                    "甲".into(),
+                    "乙".into(),
+                ],
+            ];
+            let spans = [TableSpan {
+                row: 2,
+                column: 0,
+                row_span: 1,
+                column_span: 2,
+            }];
+            let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+            grid[0] + grid[1]
+        };
+        assert!(
+            span_width(40) > span_width(22) + 500,
+            "{} → {}",
+            span_width(22),
+            span_width(40)
+        );
+    }
+
+    /// 合并表头的需求摊到跨过的每一列上，真放不下时照样判横排。
+    /// 只记在锚点列上的话，这张表会被当成比实际紧凑得多，漏掉横排。
+    #[test]
+    fn a_merged_header_that_cannot_fit_still_forces_landscape() {
+        let mut header = vec!["序号".to_string(), "关于".repeat(30)];
+        header.resize(8, String::new());
+        let table = vec![
+            header,
+            vec![
+                "1".into(),
+                "甲".into(),
+                "乙".into(),
+                "丙".into(),
+                "丁".into(),
+                "戊".into(),
+                "己".into(),
+                "庚".into(),
+            ],
+        ];
+        let spans = [TableSpan {
+            row: 0,
+            column: 1,
+            row_span: 1,
+            column_span: 7,
+        }];
+        assert!(requires_landscape(&table, &spans));
     }
 
     /// 合并表头只算一次：把需求按跨度摊到跨过的列上，紧凑表不会被误判成需要横排。

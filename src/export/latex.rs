@@ -1493,7 +1493,7 @@ mod tests {
         );
         let (_, attachments) = official_letter_sections_to_tex(&blocks, &block_lines, false);
         assert!(attachments.contains("\\begin{longtblr}"));
-        assert!(attachments.contains("Q[c,wd=2em]"));
+        assert!(attachments.contains("Q[c,m,wd=2em]"));
         assert!(attachments.contains("rowhead = 1"));
     }
 

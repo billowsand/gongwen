@@ -784,6 +784,7 @@ pub(crate) fn table_block(
     let stroke = Stroke::new(1.0_f32.max(metrics.scale), theme::paper::ink());
     let mut cells = Vec::new();
     let mut row_heights = vec![line; rows.len()];
+    let bold_font = metrics.font(theme::FONT_BOLD, TABLE_PT);
     for (row_index, row) in rows.iter().enumerate() {
         let header = row_index == 0;
         let font = metrics.font(
@@ -800,10 +801,14 @@ pub(crate) fn table_block(
                 continue;
             }
             let row_span = span.map_or(1, |span| span.row_span);
-            let column_span = span.map_or(1, |span| span.column_span);
+            // 跨度理应落在网格内（`parse_table_cells` 保证矩形），但 `TableSpan`
+            // 是普通结构体，起草页那边也在手改跨度；夹一下，排版错位总好过 panic。
+            let column_span = span
+                .map_or(1, |span| span.column_span)
+                .min(widths.len() - column);
             let width = widths[column..column + column_span].iter().sum::<f32>();
             let padding = metrics.pt(3.0).min(width * 0.12);
-            let text = export::plain_text(row.get(column).map_or("", String::as_str));
+            let text = row.get(column).map_or("", String::as_str);
             let mut cell_job = job((width - 2.0 * padding).max(1.0));
             // 横向合并格跨列统一判定对齐，导出的 Word/TeX 与预览走同一条规则。
             let align = crate::export::table::resolve_cell_alignment(
@@ -818,7 +823,25 @@ pub(crate) fn table_block(
                 ColumnAlignment::Right => Align::RIGHT,
                 ColumnAlignment::Left => Align::LEFT,
             };
-            cell_job.append(&text, 0.0, text_format(font.clone(), line));
+            // 表头整行黑体，不再认单元格里的加粗；正文格按 `**` 换粗体字面，
+            // 与 DOCX 的 table_runs_sized、TeX 的 \GwBold 一致。括号换楷体那条
+            // 规则只管正文，表格三端都不用。
+            if header {
+                cell_job.append(
+                    &export::plain_text(text),
+                    0.0,
+                    text_format(font.clone(), line),
+                );
+            } else {
+                for segment in export::inline_segments(text) {
+                    let segment_font = if segment.bold {
+                        bold_font.clone()
+                    } else {
+                        font.clone()
+                    };
+                    cell_job.append(&segment.text, 0.0, text_format(segment_font, line));
+                }
+            }
             let galley = layout(ui, cell_job);
             if row_span == 1 {
                 row_heights[row_index] =

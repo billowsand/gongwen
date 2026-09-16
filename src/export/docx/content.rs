@@ -60,7 +60,11 @@ pub(crate) fn add_smart_table(
                     column_index += 1;
                     continue;
                 }
-                let column_span = span.map_or(1, |span| span.column_span);
+                // 跨度理应落在网格内（`parse_table_cells` 保证矩形），但 `TableSpan`
+                // 是普通结构体，起草页那边也在手改跨度；夹一下，表格画歪总好过 panic。
+                let column_span = span
+                    .map_or(1, |span| span.column_span)
+                    .min(grid.len() - column_index);
                 let width = grid[column_index..column_index + column_span]
                     .iter()
                     .sum::<usize>();
@@ -104,8 +108,12 @@ pub(crate) fn add_smart_table(
                         .line(420)
                         .line_rule(LineSpacingType::Exact),
                 );
+                // 竖向居中要写死：Word 的默认是顶对齐，而预览和 TeX 都居中。
+                // 纵向合并会把这点差别放大成一眼可见的错位——跨三行的格子在预览里
+                // 居中、在 Word 里贴着顶。
                 let mut cell = TableCell::new()
                     .width(width, WidthType::Dxa)
+                    .vertical_align(VAlignType::Center)
                     .add_paragraph(paragraph);
                 if column_span > 1 {
                     cell = cell.grid_span(column_span);

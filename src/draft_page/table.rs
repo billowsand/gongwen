@@ -139,7 +139,7 @@ pub(crate) fn render_table(
             };
             let column_span = span.map_or(1, |span| span.column_span);
             let combined_width = widths[column..column + column_span].iter().sum::<usize>()
-                + 3 * column_span.saturating_sub(1);
+                + 2 * column_span.saturating_sub(1);
             line.push(' ');
             line.push_str(cell);
             line.push_str(&" ".repeat(combined_width.saturating_sub(display_width(cell))));
