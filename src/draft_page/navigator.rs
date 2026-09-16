@@ -40,7 +40,7 @@
 
 use crate::draft_page::{DraftPage, PreviewAnchor};
 use crate::export;
-use crate::models::NumberingConfig;
+use crate::models::{NumberingConfig, TemplateKind};
 use crate::preview;
 use crate::theme;
 use eframe::egui;
@@ -92,6 +92,9 @@ pub(crate) struct NavEntry {
     /// 去掉 `#` 之后的标题文字。带编号的标题还会清掉人工写入的旧编号，
     /// 正式标题不清——与解析器和版式预览的处理一致。
     pub(crate) text: String,
+    /// 是否为附件区的正式标题。附件内的标题编号会从头开始，因此导航必须把
+    /// 区段边界明确标出来，避免与正文中同号的标题看起来像重复条目。
+    pub(crate) is_attachment_title: bool,
     /// 标题行在源码中的字节范围。跳转、回查版面位置都用它。
     pub(crate) line: Range<usize>,
 }
@@ -109,32 +112,47 @@ pub(crate) struct PreviewScroll {
 ///
 /// 编号由 [`export::HeadingCounters`] 推进，因此区段标记 `<!--附件-->` 处的计数器
 /// 重置、附件区的独立编号、旧格式 `# 附件1` 的降级，全都与导出和预览保持一致。
-pub(crate) fn collect_entries(markdown: &str, numbering: &NumberingConfig) -> Vec<NavEntry> {
+pub(crate) fn collect_entries(
+    markdown: &str,
+    numbering: &NumberingConfig,
+    kind: TemplateKind,
+) -> Vec<NavEntry> {
     let mut counters = export::HeadingCounters::with_numbering(*numbering);
+    let mut section = export::MarkdownSection::Body;
     let mut entries = Vec::new();
     for (offset, line) in export::source_lines(markdown) {
+        if let Some(next_section) = export::parse_section_marker(line) {
+            section = next_section;
+        }
         let number = counters.next(line);
         let line_range = offset..offset + line.len();
+        let centered_title = counters.centered_title();
         // 层级取折算后的值：旧格式附件里 `#` 的个数比实际层级多一层，
         // 直接数井号会把附件里的「一、」画得比正文的「一、」深一层。
         let level = match (&number, counters.numbered_level()) {
             (Some(_), Some(level)) => level,
             // 正式标题（文档标题、附件标题）不排编号，但要作为根节点列出来。
-            _ if counters.centered_title() => 1,
+            _ if centered_title => 1,
             _ => continue,
         };
         let raw = line.trim_start().trim_start_matches('#').trim();
+        let visible = if kind.is_research() {
+            export::crossref::strip_heading_identifiers(raw).into_owned()
+        } else {
+            raw.to_string()
+        };
         // 只有带编号的标题才清洗人工编号——解析器对正式标题（`#`）也不清洗，
         // 导航要和版式预览逐字一致。清洗规则会吃掉「一、」这样的开头，
         // 对标题一视同仁地跑一遍，反而可能把标题本身的字去掉。
         let text = match level {
-            0 | 1 => raw.to_string(),
-            _ => export::clean_heading_number(raw),
+            0 | 1 => visible,
+            _ => export::clean_heading_number(&visible),
         };
         entries.push(NavEntry {
             level,
             number,
             text,
+            is_attachment_title: centered_title && section == export::MarkdownSection::Attachment,
             line: line_range,
         });
     }
@@ -252,7 +270,11 @@ impl DraftPage<'_> {
         if !self.config.show_preview_navigator {
             return;
         }
-        let entries = collect_entries(&self.doc.generated_markdown, &self.config.numbering);
+        let entries = collect_entries(
+            &self.doc.generated_markdown,
+            &self.config.numbering,
+            self.doc.draft.kind,
+        );
         // 只有一个文档标题不值得画刻度：全文就一处，还在最顶上。
         if !entries.iter().any(|entry| entry.level >= 2) {
             return;
@@ -545,10 +567,7 @@ fn label_galley(
     size: f32,
     max_width: f32,
 ) -> Option<std::sync::Arc<egui::Galley>> {
-    let text = match &entry.number {
-        Some(number) => format!("{number}{}", entry.text),
-        None => entry.text.clone(),
-    };
+    let text = label_text(entry);
     if text.trim().is_empty() {
         return None;
     }
@@ -563,6 +582,20 @@ fn label_galley(
     job.wrap.break_anywhere = true;
     job.halign = egui::Align::LEFT;
     Some(ui.painter().layout_job(job))
+}
+
+/// 导航里实际显示的标题文字。附件编号自成一套，正式标题前加区段标识后，
+/// 正文和附件中同时出现的「一、」才不会被误看成重复编号。
+fn label_text(entry: &NavEntry) -> String {
+    let heading = match &entry.number {
+        Some(number) => format!("{number}{}", entry.text),
+        None => entry.text.clone(),
+    };
+    if entry.is_attachment_title {
+        format!("【附件】{heading}")
+    } else {
+        heading
+    }
 }
 
 /// 板的横向范围。右缘压住刻度带的外沿——刻度和标题是一件东西，中间断开会显出
@@ -832,7 +865,11 @@ mod tests {
     use super::*;
 
     fn entries(markdown: &str) -> Vec<NavEntry> {
-        collect_entries(markdown, &NumberingConfig::default())
+        collect_entries(
+            markdown,
+            &NumberingConfig::default(),
+            TemplateKind::OfficialLetter,
+        )
     }
 
     fn shape(markdown: &str) -> Vec<(u8, Option<String>, String)> {
@@ -887,6 +924,22 @@ mod tests {
     }
 
     #[test]
+    fn attachment_title_marks_the_numbering_boundary() {
+        let markdown =
+            "# 正文标题\n\n## 正文一节\n\n<!--附件-->\n\n# 附件正式标题\n\n## 附件一节\n";
+        let labels = entries(markdown).iter().map(label_text).collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "正文标题",
+                "一、正文一节",
+                "【附件】附件正式标题",
+                "一、附件一节",
+            ]
+        );
+    }
+
+    #[test]
     fn legacy_attachment_headings_fold_back_one_level() {
         // 旧格式里附件区的 `#` 比实际层级多一层；导航缩进要按折算后的层级算，
         // 否则附件里的「一、」会画得比正文的「一、」深一层。
@@ -911,6 +964,28 @@ mod tests {
                 (2, Some("一、".into()), "总体要求".to_string()),
                 (3, Some("（一）".into()), "指导思想".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn research_headings_hide_cross_reference_identifiers() {
+        let markdown = concat!(
+            "## 研究背景 {#chap:bg}\n\n",
+            "### 相关工作{@chap:prior} [@wang2020; @li2021]\n",
+        );
+        let labels = collect_entries(
+            markdown,
+            &NumberingConfig::default(),
+            TemplateKind::ResearchReport,
+        )
+        .iter()
+        .map(label_text)
+        .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["一、研究背景", "（一）相关工作"]);
+        assert!(
+            labels
+                .iter()
+                .all(|label| !["{#", "{@", "[@"].iter().any(|mark| label.contains(mark)))
         );
     }
 

@@ -1880,11 +1880,14 @@ mod split_resize_tests {
             .doc
             .pending_source_jump
             .expect("点刻度应当发出跳转请求");
-        let starts =
-            navigator::collect_entries(&harness.doc.generated_markdown, &harness.config.numbering)
-                .into_iter()
-                .map(|entry| entry.line.start)
-                .collect::<Vec<_>>();
+        let starts = navigator::collect_entries(
+            &harness.doc.generated_markdown,
+            &harness.config.numbering,
+            harness.doc.draft.kind,
+        )
+        .into_iter()
+        .map(|entry| entry.line.start)
+        .collect::<Vec<_>>();
         assert!(
             starts.contains(&jumped),
             "跳转目标 {jumped} 应当正好落在某个标题行的行首"
@@ -1911,8 +1914,11 @@ mod split_resize_tests {
         harness.doc.preview_mode = PreviewMode::Rendered;
         harness.preview_frames(egui::pos2(10.0, 10.0), 3);
         let rail = harness.navigator_rail().expect("导航开着时应当有刻度带");
-        let entries =
-            navigator::collect_entries(&harness.doc.generated_markdown, &harness.config.numbering);
+        let entries = navigator::collect_entries(
+            &harness.doc.generated_markdown,
+            &harness.config.numbering,
+            harness.doc.draft.kind,
+        );
 
         // 指针停在刻度带偏上处，跑够帧数让淡入与滚动都走完。
         let x = rail.center().x;
@@ -2023,8 +2029,11 @@ mod split_resize_tests {
         // egui 要一两帧才量准滚动区。
         harness.frame(900.0);
         harness.frame(900.0);
-        let entries =
-            navigator::collect_entries(&harness.doc.generated_markdown, &harness.config.numbering);
+        let entries = navigator::collect_entries(
+            &harness.doc.generated_markdown,
+            &harness.config.numbering,
+            harness.doc.draft.kind,
+        );
         let headings = entries
             .iter()
             .filter(|entry| entry.level >= 2)
