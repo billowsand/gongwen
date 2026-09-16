@@ -1,7 +1,8 @@
 //! 与 mdx official/research 共用思路的智能表格列宽分析。
 
-use super::{ColumnAlign, RedlineKind, inline_segments, redline_chunks};
+use super::{ColumnAlign, RedlineKind, TableSpan, inline_segments, redline_chunks, table_span_at};
 use regex::Regex;
+use std::ops::Range;
 use std::sync::OnceLock;
 
 const SHORT_TEXT_THRESHOLD: f64 = 8.0;
@@ -47,6 +48,14 @@ struct ColumnStats {
     has_long_text: bool,
     has_punctuation: bool,
     all_short_digits: bool,
+}
+
+impl ColumnStats {
+    /// 整列都是短数字的列按固定宽度处理：它既不参与相对宽度分配，
+    /// 也不该被跨过它的合并单元格撑宽。
+    fn is_fixed(&self) -> bool {
+        self.count > 0 && self.all_short_digits
+    }
 }
 
 fn display_width(value: &str) -> f64 {
@@ -100,63 +109,98 @@ fn percentile_75(mut values: Vec<f64>) -> f64 {
 /// 算法估算每列保持可读性所需的最小宽度：短字段按一行、普通字段按两行、
 /// 含句读的长说明按三行容纳；表头最多允许两行，并保护不可断开的西文/数字串。
 /// 所有列的最小宽度加上单元格内边距超过竖向版心时，横页才真正有收益。
-pub(super) fn requires_landscape(rows: &[Vec<String>]) -> bool {
+/// 横向合并单元格的需求按跨度摊到它跨过的各列上，合并标题不会单独撑大一列。
+pub(super) fn requires_landscape(rows: &[Vec<String>], spans: &[TableSpan]) -> bool {
     let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
     if column_count <= 1 {
         return false;
     }
 
-    let mut required_content_width = 0.0;
-    for column_index in 0..column_count {
-        let header = rows
-            .first()
-            .and_then(|row| row.get(column_index))
-            .map_or("", String::as_str);
-        let body = rows
-            .iter()
-            .skip(1)
-            .filter_map(|row| row.get(column_index))
-            .filter(|cell| !cell.trim().is_empty())
-            .collect::<Vec<_>>();
-
-        if !body.is_empty()
-            && body
-                .iter()
-                .all(|cell| is_short_digits(&plain_cell_text(cell)))
-        {
-            required_content_width += NARROW_NUMERIC_WIDTH_EM;
-            continue;
-        }
-
-        let typical_width = percentile_75(body.iter().map(|cell| cjk_em_width(cell)).collect());
-        let prose = body.iter().any(|cell| has_sentence_punctuation(cell))
-            || typical_width > LONG_TEXT_THRESHOLD / CJK_WIDTH_FACTOR;
-        let target_lines = if prose {
-            3.0
-        } else if typical_width > SHORT_TEXT_THRESHOLD / CJK_WIDTH_FACTOR {
-            2.0
-        } else {
-            1.0
-        };
-        let body_width = (typical_width / target_lines).min(MAX_PROSE_COLUMN_EM);
-        let header_width = cjk_em_width(header);
-        let header_minimum = if header_width > 4.0 {
-            header_width / 2.0
-        } else {
-            header_width
-        };
-        let unbreakable_width = std::iter::once(header)
-            .chain(body.iter().map(|cell| cell.as_str()))
-            .map(max_unbreakable_width_em)
-            .fold(0.0, f64::max);
-
-        required_content_width += MIN_READABLE_COLUMN_EM
-            .max(header_minimum)
-            .max(body_width)
-            .max(unbreakable_width);
-    }
+    let required_content_width = (0..column_count)
+        .map(|column_index| column_requirement(rows, spans, column_index))
+        .sum::<f64>();
 
     required_content_width + column_count as f64 * COLUMN_PADDING_EM > PORTRAIT_TABLE_WIDTH_EM
+}
+
+/// 单列保持可读所需的最小字宽；横向合并格的需求摊分到跨度上后与普通内容取较大值。
+fn column_requirement(rows: &[Vec<String>], spans: &[TableSpan], column_index: usize) -> f64 {
+    // 横向合并格的内容不能算到单列头上，否则合并标题会被当成“一列要装下整句”
+    // 而误判成需要横排。锚点格与覆盖格都跳过，需求另由 merged_requirement 给出。
+    let single_column = |row: usize| {
+        table_span_at(spans, row, column_index).is_none_or(|span| span.column_span == 1)
+    };
+    let header = rows
+        .first()
+        .filter(|_| single_column(0))
+        .and_then(|row| row.get(column_index))
+        .map_or("", String::as_str);
+    let body = rows
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(row_index, _)| single_column(*row_index))
+        .filter_map(|(_, row)| row.get(column_index))
+        .filter(|cell| !cell.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    let merged = merged_requirement(rows, spans, column_index);
+    if !body.is_empty()
+        && body
+            .iter()
+            .all(|cell| is_short_digits(&plain_cell_text(cell)))
+    {
+        return merged.max(NARROW_NUMERIC_WIDTH_EM);
+    }
+
+    let typical_width = percentile_75(body.iter().map(|cell| cjk_em_width(cell)).collect());
+    let prose = body.iter().any(|cell| has_sentence_punctuation(cell))
+        || typical_width > LONG_TEXT_THRESHOLD / CJK_WIDTH_FACTOR;
+    let target_lines = if prose {
+        3.0
+    } else if typical_width > SHORT_TEXT_THRESHOLD / CJK_WIDTH_FACTOR {
+        2.0
+    } else {
+        1.0
+    };
+    let body_width = (typical_width / target_lines).min(MAX_PROSE_COLUMN_EM);
+    let header_width = cjk_em_width(header);
+    let header_minimum = if header_width > 4.0 {
+        header_width / 2.0
+    } else {
+        header_width
+    };
+    let unbreakable_width = std::iter::once(header)
+        .chain(body.iter().map(|cell| cell.as_str()))
+        .map(max_unbreakable_width_em)
+        .fold(0.0, f64::max);
+
+    MIN_READABLE_COLUMN_EM
+        .max(header_minimum)
+        .max(body_width)
+        .max(unbreakable_width)
+        .max(merged)
+}
+
+/// 横向合并格需要的总宽度按跨度摊到每一列；只有锚点列返回非零值。
+fn merged_requirement(rows: &[Vec<String>], spans: &[TableSpan], column_index: usize) -> f64 {
+    let mut requirement: f64 = 0.0;
+    for (row_index, row) in rows.iter().enumerate() {
+        let Some(span) = table_span_at(spans, row_index, column_index) else {
+            continue;
+        };
+        if span.column_span <= 1 || span.column != column_index {
+            continue;
+        }
+        let value = row.get(column_index).map_or("", String::as_str);
+        if value.trim().is_empty() {
+            continue;
+        }
+        let per_column =
+            merged_cell_required_width(value, span.column_span) / span.column_span as f64;
+        requirement = requirement.max(per_column);
+    }
+    requirement
 }
 
 fn numeric_patterns() -> &'static [Regex] {
@@ -201,7 +245,28 @@ fn has_sentence_punctuation(value: &str) -> bool {
 
 /// `aligns` 是 Markdown 分隔行里写明的列对齐。写了冒号的列以它为准，
 /// 其余列仍按内容判定——公文表格多数不写冒号，那套启发式还是主力。
-fn analyze_table(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Vec<ColumnLayout> {
+fn merged_cell_required_width(value: &str, column_span: usize) -> f64 {
+    // 花脸稿哨兵不占版面，算进宽度会让合并格凭空变宽。
+    let plain = plain_cell_text(value);
+    let width = display_width(&plain);
+    let minimum = MIN_READABLE_COLUMN_EM * column_span as f64;
+    if has_sentence_punctuation(&plain) || width > LONG_TEXT_THRESHOLD {
+        (width / 2.0)
+            .max(minimum)
+            .min(MAX_PROSE_COLUMN_EM * column_span as f64)
+    } else {
+        width.max(minimum)
+    }
+}
+
+/// 先沿用普通表格的逐列统计，再把横向合并单元格作为“跨列总宽度约束”补进去。
+/// 没有合并单元格时结果与旧算法逐位一致；合并格的需求按跨度换算到物理字宽后
+/// 分摊给跨过的非定宽列，而不是只把左侧锚点列撑宽。
+fn analyze_table(
+    rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
+    spans: &[TableSpan],
+) -> Vec<ColumnLayout> {
     let column_count = rows.first().map_or(0, Vec::len);
     if column_count == 0 {
         return Vec::new();
@@ -214,8 +279,13 @@ fn analyze_table(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Vec<ColumnLayo
         };
         column_count
     ];
-    for row in rows.iter().skip(1) {
+    for (row_index, row) in rows.iter().enumerate().skip(1) {
         for (index, value) in row.iter().take(column_count).enumerate() {
+            // 横向合并格的锚点和覆盖格都不进单列统计，它们的宽度另按跨度整体核算。
+            let span = table_span_at(spans, row_index, index);
+            if span.is_some_and(|span| !span.is_anchor(row_index, index) || span.column_span > 1) {
+                continue;
+            }
             if value.trim().is_empty() {
                 continue;
             }
@@ -243,6 +313,20 @@ fn analyze_table(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Vec<ColumnLayo
         })
         .collect::<Vec<_>>();
     let total_weight = weights.iter().sum::<f64>();
+    // 定宽数字列的"比例"记 0，不参与相对宽度分配。
+    let mut ratios = stats
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            if column.is_fixed() {
+                0.0
+            } else {
+                (weights[index] / total_weight * column_count as f64)
+                    .clamp(MIN_WIDTH_RATIO, MAX_WIDTH_RATIO)
+            }
+        })
+        .collect::<Vec<_>>();
+    satisfy_merged_spans(rows, &stats, spans, &mut ratios);
 
     stats
         .iter()
@@ -260,25 +344,141 @@ fn analyze_table(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Vec<ColumnLayo
                 }
                 ColumnAlign::Auto => ColumnAlignment::Center,
             };
-            let width = if column.count > 0 && column.all_short_digits {
+            let width = if column.is_fixed() {
                 ColumnWidth::FixedEm(NARROW_NUMERIC_WIDTH_EM)
             } else {
-                let ratio = (weights[index] / total_weight * column_count as f64)
-                    .clamp(MIN_WIDTH_RATIO, MAX_WIDTH_RATIO);
-                ColumnWidth::Relative((ratio * 10.0 + 0.5).floor() / 10.0)
+                ColumnWidth::Relative((ratios[index] * 10.0 + 0.5).floor() / 10.0)
             };
             ColumnLayout { alignment, width }
         })
         .collect()
 }
 
+/// 横向合并单元格的内容必须放得进它跨过的各列之和。这里把逐列比例换算成估算
+/// 物理字宽，反复把缺口分摊给跨过的非定宽列，直到所有合并格都放得下。
+/// 没有合并格时循环体一次都不会进入，旧算法结果不变。
+fn satisfy_merged_spans(
+    rows: &[Vec<String>],
+    stats: &[ColumnStats],
+    spans: &[TableSpan],
+    ratios: &mut [f64],
+) {
+    let column_count = ratios.len();
+    if column_count == 0 {
+        return;
+    }
+    let mut merges = spans
+        .iter()
+        .copied()
+        .filter(|span| span.column_span > 1)
+        .collect::<Vec<_>>();
+    // 跨得多的先定：大合并格先占住它需要的宽度，小合并格再按剩余空间补缺口。
+    merges.sort_by_key(|span| (std::cmp::Reverse(span.column_span), span.row, span.column));
+    if merges.is_empty() {
+        return;
+    }
+
+    let available = available_content_units(stats);
+    // 每加宽一次都会抬高整表比例总和，合并格实际分到的份额略小于按比例算出的值，
+    // 因此多迭代几轮收敛。
+    for _ in 0..8 {
+        let mut changed = false;
+        let relative_total = stats
+            .iter()
+            .enumerate()
+            .filter(|(index, column)| *index < column_count && !column.is_fixed())
+            .map(|(index, _)| ratios[index])
+            .sum::<f64>();
+        for span in &merges {
+            let end = (span.column + span.column_span).min(column_count);
+            if span.column >= end {
+                continue;
+            }
+            let value = rows
+                .get(span.row)
+                .and_then(|row| row.get(span.column))
+                .map_or("", String::as_str);
+            if value.trim().is_empty() {
+                continue;
+            }
+            let required = merged_cell_required_width(value, end - span.column);
+            let current = estimated_span_width(stats, ratios, span.column..end);
+            if required <= current + f64::EPSILON {
+                continue;
+            }
+            let flexible = (span.column..end)
+                .filter(|index| !stats[*index].is_fixed())
+                .collect::<Vec<_>>();
+            let span_relative = flexible.iter().map(|index| ratios[*index]).sum::<f64>();
+            // 合并格已经占满所有可分配的相对宽度时，再摊也放不下，只能作罢。
+            if flexible.is_empty()
+                || relative_total <= f64::EPSILON
+                || relative_total - span_relative <= f64::EPSILON
+            {
+                continue;
+            }
+            // 每 1 单位比例约合 available / relative_total 个字宽，缺多少补多少比例。
+            let deficit = (required - current) * relative_total / available;
+            for index in flexible {
+                let share = if span_relative > 0.0 {
+                    ratios[index] / span_relative
+                } else {
+                    1.0 / (end - span.column) as f64
+                };
+                ratios[index] += deficit * share;
+            }
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// 定宽数字列合起来占去的绝对版面，单位与 `display_width` 一致。
+fn fixed_width_units(stats: &[ColumnStats]) -> f64 {
+    stats.iter().filter(|column| column.is_fixed()).count() as f64
+        * NARROW_NUMERIC_WIDTH_EM
+        * CJK_WIDTH_FACTOR
+}
+
+/// 分给相对宽度列的那部分版心：扣掉单元格内边距与定宽数字列，单位同 `display_width`。
+fn available_content_units(stats: &[ColumnStats]) -> f64 {
+    let text_width = (PORTRAIT_TABLE_WIDTH_EM - stats.len() as f64 * COLUMN_PADDING_EM).max(0.0)
+        * CJK_WIDTH_FACTOR;
+    (text_width - fixed_width_units(stats)).max(1.0)
+}
+
+/// 估算若干列合起来有多宽：定宽列按绝对宽度，其余按比例分摊可用版面。
+fn estimated_span_width(stats: &[ColumnStats], ratios: &[f64], columns: Range<usize>) -> f64 {
+    let available = available_content_units(stats);
+    let relative_total = stats
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| *index < ratios.len() && !column.is_fixed())
+        .map(|(index, _)| ratios[index])
+        .sum::<f64>();
+    columns
+        .map(|index| {
+            if stats[index].is_fixed() {
+                NARROW_NUMERIC_WIDTH_EM * CJK_WIDTH_FACTOR
+            } else if relative_total > 0.0 {
+                available * ratios[index] / relative_total
+            } else {
+                0.0
+            }
+        })
+        .sum()
+}
+
 pub(super) fn to_docx_grid(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
+    spans: &[TableSpan],
     total_width_twips: usize,
     em_width_twips: usize,
 ) -> (Vec<usize>, Vec<ColumnAlignment>) {
-    let columns = analyze_table(rows, aligns);
+    let columns = analyze_table(rows, aligns, spans);
     let fixed = columns
         .iter()
         .map(|column| match column.width {
@@ -316,8 +516,57 @@ pub(super) fn to_docx_grid(
     (grid, alignments)
 }
 
-pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> String {
-    let columns = analyze_table(rows, aligns);
+/// 返回单元格最终的水平对齐。普通/纵向合并单元格沿用所在列；横向合并跨过的
+/// 各列对齐一致时继承该值，否则按合并单元格自身内容判定。
+pub(crate) fn resolve_cell_alignment(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    column_alignments: &[ColumnAlignment],
+    row: usize,
+    column: usize,
+) -> ColumnAlignment {
+    if row == 0 {
+        return ColumnAlignment::Center;
+    }
+    let fallback = column_alignments
+        .get(column)
+        .copied()
+        .unwrap_or(ColumnAlignment::Left);
+    let Some(span) = table_span_at(spans, row, column) else {
+        return fallback;
+    };
+    if span.column_span <= 1 {
+        return fallback;
+    }
+    let end = (span.column + span.column_span).min(column_alignments.len());
+    let covered = &column_alignments[span.column.min(end)..end];
+    if covered.is_empty() {
+        return fallback;
+    }
+    if covered.iter().all(|alignment| *alignment == covered[0]) {
+        return covered[0];
+    }
+    // 花脸稿哨兵不占版面，判断内容性质前先滤掉。
+    let plain = plain_cell_text(
+        rows.get(span.row)
+            .and_then(|row| row.get(span.column))
+            .map_or("", String::as_str),
+    );
+    if is_numeric(&plain)
+        || (!has_sentence_punctuation(&plain) && display_width(&plain) <= LONG_TEXT_THRESHOLD)
+    {
+        ColumnAlignment::Center
+    } else {
+        ColumnAlignment::Left
+    }
+}
+
+pub(super) fn to_longtblr(
+    rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
+    spans: &[TableSpan],
+) -> String {
+    let columns = analyze_table(rows, aligns, spans);
     if rows.is_empty() || columns.is_empty() {
         return String::new();
     }
@@ -343,6 +592,10 @@ pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Strin
         })
         .collect::<Vec<_>>()
         .join(" ");
+    let column_alignments = columns
+        .iter()
+        .map(|column| column.alignment)
+        .collect::<Vec<_>>();
 
     let mut output = format!(
         "\\begin{{longtblr}}[\n  label = none,\n  entry = none,\n]{{\n  colspec = {{{colspec}}},\n  rowhead = 1,\n  hlines,\n  vlines,\n  row{{1}} = {{c, font=\\heiti\\enheiti}},\n}}\n"
@@ -352,6 +605,10 @@ pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Strin
             .iter()
             .enumerate()
             .map(|(column_index, cell)| {
+                let span = table_span_at(spans, row_index, column_index);
+                if span.is_some_and(|span| !span.is_anchor(row_index, column_index)) {
+                    return String::new();
+                }
                 let segments = inline_segments(cell);
                 // 姓名列要按字数算宽度，哨兵会让 2 字姓名被当成 4 字。这里先滤掉。
                 let cleaned = segments
@@ -396,10 +653,35 @@ pub(super) fn to_longtblr(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Strin
                         })
                         .collect::<String>()
                 };
-                if row_index == 0 {
+                let content = if row_index == 0 {
                     format!("\\heiti\\enheiti {escaped}")
                 } else {
                     escaped
+                };
+                if let Some(span) = span {
+                    let align = match resolve_cell_alignment(
+                        rows,
+                        spans,
+                        &column_alignments,
+                        row_index,
+                        column_index,
+                    ) {
+                        ColumnAlignment::Left => 'l',
+                        ColumnAlignment::Center => 'c',
+                        ColumnAlignment::Right => 'r',
+                    };
+                    let mut options = Vec::new();
+                    if span.row_span > 1 {
+                        options.push(format!("r={}", span.row_span));
+                    }
+                    if span.column_span > 1 {
+                        options.push(format!("c={}", span.column_span));
+                    }
+                    // 竖向居中在 tabularray 里是默认值，这里只写水平对齐，
+                    // 与 `\SetCell[c=2]{c}` 的官方写法一致。
+                    format!("\\SetCell[{}]{{{align}}} {content}", options.join(","))
+                } else {
+                    content
                 }
             })
             .collect::<Vec<_>>()
@@ -455,7 +737,7 @@ mod tests {
 
     #[test]
     fn narrow_numeric_column_is_fixed_and_docx_fills_width() {
-        let (grid, _) = to_docx_grid(&rows(), &[], 8_844, 280);
+        let (grid, _) = to_docx_grid(&rows(), &[], &[], 8_844, 280);
         assert_eq!(grid[0], 560);
         assert_eq!(grid.iter().sum::<usize>(), 8_844);
         assert!(grid[2] > grid[1]);
@@ -465,19 +747,19 @@ mod tests {
     #[test]
     fn explicit_alignment_overrides_the_heuristic() {
         // 不写冒号时首列是数字列，智能列宽判它居中。
-        let (_, alignments) = to_docx_grid(&rows(), &[], 8_844, 280);
+        let (_, alignments) = to_docx_grid(&rows(), &[], &[], 8_844, 280);
         assert_eq!(alignments[0], ColumnAlignment::Center);
         assert_eq!(alignments[2], ColumnAlignment::Left, "长说明列左对齐");
 
         let aligns = [ColumnAlign::Left, ColumnAlign::Auto, ColumnAlign::Right];
-        let (_, alignments) = to_docx_grid(&rows(), &aligns, 8_844, 280);
+        let (_, alignments) = to_docx_grid(&rows(), &aligns, &[], 8_844, 280);
         assert_eq!(alignments[0], ColumnAlignment::Left);
         assert_eq!(alignments[2], ColumnAlignment::Right);
         // 没写冒号的第二列不受影响，仍按内容判定。
         assert_eq!(alignments[1], ColumnAlignment::Center);
 
         // TeX 的 colspec 跟着换成 l / r。
-        let tex = to_longtblr(&rows(), &aligns);
+        let tex = to_longtblr(&rows(), &aligns, &[]);
         let colspec = tex
             .lines()
             .find(|line| line.contains("colspec"))
@@ -488,7 +770,7 @@ mod tests {
 
     #[test]
     fn tex_uses_longtblr_with_matching_smart_columns() {
-        let tex = to_longtblr(&rows(), &[]);
+        let tex = to_longtblr(&rows(), &[], &[]);
         assert!(tex.contains("\\begin{longtblr}"));
         assert!(tex.contains("label = none"));
         assert!(tex.contains("entry = none"));
@@ -496,6 +778,34 @@ mod tests {
         assert!(tex.contains("Q[c,wd=2em]"));
         assert!(tex.contains("X["));
         assert!(tex.contains("rowhead = 1"));
+    }
+
+    #[test]
+    fn tex_emits_horizontal_and_vertical_spans() {
+        let table = vec![
+            vec!["类别".into(), "项目".into(), "说明".into()],
+            vec!["横向".into(), String::new(), "备注".into()],
+            vec!["纵向".into(), "事项一".into(), "甲".into()],
+            vec![String::new(), "事项二".into(), "乙".into()],
+        ];
+        let spans = [
+            TableSpan {
+                row: 1,
+                column: 0,
+                row_span: 1,
+                column_span: 2,
+            },
+            TableSpan {
+                row: 2,
+                column: 0,
+                row_span: 2,
+                column_span: 1,
+            },
+        ];
+        let tex = to_longtblr(&table, &[], &spans);
+        assert!(tex.contains("\\SetCell[c=2]{c} 横向"), "{tex}");
+        assert!(tex.contains("\\SetCell[r=2]{c} 纵向"), "{tex}");
+        assert!(!tex.contains("横向 & 备注"), "被覆盖格不得重复内容：{tex}");
     }
 
     #[test]
@@ -522,7 +832,7 @@ mod tests {
                 "是".into(),
             ],
         ];
-        assert!(!requires_landscape(&compact));
+        assert!(!requires_landscape(&compact, &[]));
 
         let crowded = vec![
             vec![
@@ -546,7 +856,7 @@ mod tests {
                 "已完成".into(),
             ],
         ];
-        assert!(requires_landscape(&crowded));
+        assert!(requires_landscape(&crowded, &[]));
     }
 
     #[test]
@@ -555,7 +865,7 @@ mod tests {
         for index in 1..=100 {
             table.push(vec![index.to_string(), "短项".into()]);
         }
-        assert!(!requires_landscape(&table));
+        assert!(!requires_landscape(&table, &[]));
     }
 
     #[test]
@@ -564,7 +874,7 @@ mod tests {
             vec!["项目".into(), "说明".into()],
             vec!["甲".into(), "\"**重点**\"内容".into()],
         ];
-        let tex = to_longtblr(&table, &[]);
+        let tex = to_longtblr(&table, &[], &[]);
         assert!(tex.contains("“\\GwBold{重点}”内容"), "{tex}");
         assert!(!tex.contains("**"));
     }
@@ -577,12 +887,183 @@ mod tests {
             vec!["2".into(), "王小明".into()],
             vec!["3".into(), "欧阳翠花".into()],
         ];
-        let tex = to_longtblr(&table, &[]);
+        let tex = to_longtblr(&table, &[], &[]);
         // 2 字姓名中间加 1em。
         assert!(tex.contains("张\\hspace{1em}三"));
         // 4 字姓名压缩到 3 字宽。
         assert!(tex.contains("\\resizebox{3em}{0.9em}{欧阳翠花}"));
         // 3 字姓名原样。
         assert!(tex.contains("王小明"));
+    }
+
+    /// 合并格跨过的列本来就放得下内容时，不得把锚点列撑宽、把别的列挤窄。
+    /// 旧算法直接拿合并格的字符数与列权重相加，会把首列撑到末列的两倍。
+    #[test]
+    fn merged_cell_does_not_widen_columns_that_already_fit() {
+        let table = vec![
+            vec!["甲".into(), "乙".into(), "丙".into(), "丁".into()],
+            vec!["一".into(), "二".into(), "三".into(), "四".into()],
+            vec![
+                "横跨两列的一段较长说明文字。".into(),
+                String::new(),
+                "末".into(),
+                "尾".into(),
+            ],
+        ];
+        let spans = [TableSpan {
+            row: 2,
+            column: 0,
+            row_span: 1,
+            column_span: 2,
+        }];
+        let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+        assert!(
+            grid[0].abs_diff(grid[3]) < 400,
+            "合并格不该把锚点列撑宽：{grid:?}"
+        );
+    }
+
+    /// 合并格确实放不下时才补宽，而且只补到刚好放得下，不是无上限地撑大。
+    #[test]
+    fn merged_span_widens_its_columns_only_as_much_as_needed() {
+        let table = vec![
+            vec![
+                "甲".into(),
+                "乙".into(),
+                "丙".into(),
+                "丁".into(),
+                "戊".into(),
+                "己".into(),
+            ],
+            vec![
+                "一".into(),
+                "二".into(),
+                "三".into(),
+                "四".into(),
+                "五".into(),
+                "六".into(),
+            ],
+            vec![
+                "这是一段需要跨两列才能排得下的合并说明文字。".into(),
+                String::new(),
+                "末".into(),
+                "尾".into(),
+                "甲".into(),
+                "乙".into(),
+            ],
+        ];
+        let spans = [TableSpan {
+            row: 2,
+            column: 0,
+            row_span: 1,
+            column_span: 2,
+        }];
+        let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+        let merged_width = grid[0] + grid[1];
+        // 合并格要放得下约 20 个字宽（约 3100 twips）。
+        assert!(merged_width >= 3_000, "合并格没被补宽：{grid:?}");
+        // 但也不能为了它把其余列挤到没法看。
+        assert!(merged_width < 4_000, "合并格被补得过宽：{grid:?}");
+    }
+
+    /// 定宽数字列不参与合并格的补宽，缺口只落到跨过的非定宽列上。
+    #[test]
+    fn merged_span_pushes_width_into_flexible_columns_not_fixed_numeric_ones() {
+        let prose = "这是一段较长的说明文字用于占满后两列的宽度。";
+        let table = vec![
+            vec!["序号".into(), "项目".into(), "说明".into(), "备注".into()],
+            vec!["1".into(), "甲".into(), prose.into(), prose.into()],
+            vec!["2".into(), "乙".into(), prose.into(), prose.into()],
+            vec![
+                "跨列合并的标题需要写得很长很长以便把两列的宽度都撑开一些。".into(),
+                String::new(),
+                "末".into(),
+                "尾".into(),
+            ],
+        ];
+        let spans = [TableSpan {
+            row: 3,
+            column: 0,
+            row_span: 1,
+            column_span: 2,
+        }];
+        let (grid, _) = to_docx_grid(&table, &[], &spans, 8_844, 280);
+        assert_eq!(grid[0], 560, "数字列必须保持 2em 定宽：{grid:?}");
+        assert!(grid[1] > grid[2], "缺口应落到跨过的非定宽列：{grid:?}");
+    }
+
+    /// 合并表头只算一次：把需求按跨度摊到跨过的列上，紧凑表不会被误判成需要横排。
+    #[test]
+    fn merged_header_does_not_force_a_compact_table_into_landscape() {
+        let table = vec![
+            vec![
+                "序号".into(),
+                "关于重点项目推进情况与存在问题及下一步整改措施的统计表".into(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "备注".into(),
+            ],
+            vec![
+                "1".into(),
+                "甲".into(),
+                "乙".into(),
+                "丙".into(),
+                "丁".into(),
+                "戊".into(),
+                "己".into(),
+                "庚".into(),
+            ],
+        ];
+        let spans = [TableSpan {
+            row: 0,
+            column: 1,
+            row_span: 1,
+            column_span: 6,
+        }];
+        assert!(!requires_landscape(&table, &spans), "合并表头不该触发横排");
+        // 同一张表若按单列硬算，表头会把一列撑到 13em，误判成需要横排。
+        let mut narrow = table.clone();
+        for cell in &mut narrow[0][2..7] {
+            *cell = String::new();
+        }
+        assert!(requires_landscape(&narrow, &[]));
+    }
+
+    /// 横向合并格跨过的各列对齐一致时继承该值，不一致时按内容判定。
+    #[test]
+    fn merged_cell_alignment_follows_covered_columns_or_content() {
+        let table = vec![
+            vec!["甲".into(), "乙".into(), "丙".into()],
+            vec!["合并".into(), String::new(), "丁".into()],
+        ];
+        let spans = [TableSpan {
+            row: 1,
+            column: 0,
+            row_span: 1,
+            column_span: 2,
+        }];
+        let alignments = [
+            ColumnAlignment::Center,
+            ColumnAlignment::Center,
+            ColumnAlignment::Left,
+        ];
+        assert_eq!(
+            resolve_cell_alignment(&table, &spans, &alignments, 1, 0),
+            ColumnAlignment::Center
+        );
+
+        let alignments = [
+            ColumnAlignment::Left,
+            ColumnAlignment::Right,
+            ColumnAlignment::Left,
+        ];
+        // 跨过的列对齐不一致，横向合并格按自身内容判定：短文本居中。
+        assert_eq!(
+            resolve_cell_alignment(&table, &spans, &alignments, 1, 0),
+            ColumnAlignment::Center
+        );
     }
 }

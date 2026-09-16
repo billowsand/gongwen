@@ -618,7 +618,11 @@ pub(crate) fn content_block(
             let prefix = export::render_list_number(numbering.list2, *number);
             body_block(ui, metrics, &format!("{prefix}{text}"), true);
         }
-        MarkdownBlock::Table { rows, aligns } => table_block(ui, metrics, rows, aligns),
+        MarkdownBlock::Table {
+            rows,
+            aligns,
+            spans,
+        } => table_block(ui, metrics, rows, aligns, spans),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
         MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
         MarkdownBlock::Paragraph(_) => {}

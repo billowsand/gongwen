@@ -25,12 +25,7 @@ pub(crate) fn is_table_source_line(line: &str) -> bool {
 }
 
 pub(crate) fn is_table_separator_line(line: &str) -> bool {
-    let cells = line
-        .trim()
-        .trim_start_matches('|')
-        .trim_end_matches('|')
-        .split('|')
-        .collect::<Vec<_>>();
+    let cells = split_row(line);
     cells.len() >= 2
         && cells.iter().all(|cell| {
             let value = cell.trim().trim_matches(':');
@@ -39,12 +34,7 @@ pub(crate) fn is_table_separator_line(line: &str) -> bool {
 }
 
 pub(crate) fn table_column_count(line: &str) -> usize {
-    line.trim()
-        .trim_start_matches('|')
-        .trim_end_matches('|')
-        .split('|')
-        .count()
-        .max(1)
+    split_row(line).len().max(1)
 }
 
 /// 每一行在源码中的字节范围，不含行尾的换行符。空文本也返回一行，
@@ -84,9 +74,14 @@ pub(crate) fn display_width(text: &str) -> usize {
 
 /// 拆一行表格：去掉首尾竖线后按竖线切开，每格去空白。
 pub(crate) fn split_row(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_start_matches('|')
-        .trim_end_matches('|')
+    let mut value = line.trim();
+    if let Some(rest) = value.strip_prefix('|') {
+        value = rest;
+    }
+    if let Some(rest) = value.strip_suffix('|') {
+        value = rest;
+    }
+    value
         .split('|')
         .map(|cell| cell.trim().to_string())
         .collect()

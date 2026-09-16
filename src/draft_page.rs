@@ -1104,7 +1104,7 @@ mod tests {
             vec!["序号".to_string(), "名称".to_string()],
             vec!["1".to_string(), "甲单位".to_string()],
         ];
-        let rendered = render_table(&rows, &[ColumnAlign::Auto, ColumnAlign::Center]);
+        let rendered = render_table(&rows, &[ColumnAlign::Auto, ColumnAlign::Center], &[]);
         assert_eq!(
             rendered,
             "| 序号 | 名称   |
@@ -1115,6 +1115,24 @@ mod tests {
         let table = table_at(&rendered, 3).expect("是一张表格");
         assert_eq!(table.rows, rows);
         assert_eq!(table.aligns, vec![ColumnAlign::Auto, ColumnAlign::Center]);
+    }
+
+    #[test]
+    fn merged_table_round_trips_multimarkdown_markers() {
+        let source = "| 类别 | 项目 | 说明 |
+| --- | --- | --- |
+| 横向合并 || 备注 |
+| 纵向合并 | 事项一 | 甲 |
+| ^^ | 事项二 | 乙 |";
+        let table = table_at(source, source.find("横向合并").unwrap()).unwrap();
+        assert_eq!(table.spans.len(), 2);
+        let rendered = render_table(&table.rows, &table.aligns, &table.spans);
+        assert!(rendered.contains("横向合并"), "{rendered}");
+        assert!(rendered.contains("||"), "{rendered}");
+        assert!(rendered.contains("^^"), "{rendered}");
+        let reparsed = table_at(&rendered, rendered.find("横向合并").unwrap()).unwrap();
+        assert_eq!(reparsed.rows, table.rows);
+        assert_eq!(reparsed.spans, table.spans);
     }
 
     /// 窄列写上对齐冒号之后，分隔行仍要能被认成分隔行：GFM 要求去掉冒号后
@@ -1131,7 +1149,7 @@ mod tests {
                 vec!["甲".to_string(), "乙".to_string()],
                 vec!["1".to_string(), "2".to_string()],
             ];
-            let rendered = render_table(&rows, &[align, ColumnAlign::Auto]);
+            let rendered = render_table(&rows, &[align, ColumnAlign::Auto], &[]);
             let separator = rendered.lines().nth(1).expect("有分隔行");
             assert!(
                 is_table_separator_line(separator),

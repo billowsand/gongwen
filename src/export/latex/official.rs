@@ -668,8 +668,12 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                     gwa_tail(lines, index)
                 ));
             }
-            MarkdownBlock::Table { rows, aligns } => {
-                let rendered = to_longtblr(rows, aligns);
+            MarkdownBlock::Table {
+                rows,
+                aligns,
+                spans,
+            } => {
+                let rendered = to_longtblr(rows, aligns, spans);
                 if !rendered.is_empty() {
                     push_body_float_barrier(
                         section,

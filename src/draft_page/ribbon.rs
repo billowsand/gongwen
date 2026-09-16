@@ -393,6 +393,7 @@ impl DraftPage<'_> {
                     }
                 });
                 ui.weak("首行是表头。导出时列宽按内容自动排版。");
+                ui.weak("源码中连续 || 向右合并，^^ 与上方单元格合并。");
             });
         });
         self.doc.table_size = size;
@@ -428,6 +429,23 @@ impl DraftPage<'_> {
                     ("在左侧插入列", TableOp::InsertColumnLeft),
                     ("在右侧插入列", TableOp::InsertColumnRight),
                     ("删除本列", TableOp::DeleteColumn),
+                ] {
+                    if ui.button(label).clicked() {
+                        op = Some(action);
+                        ui.close();
+                    }
+                }
+            });
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::Table,
+                "合并",
+            ))
+            .ui(ui, |ui| {
+                ui.weak("目标格必须为空；拆分不会恢复已清除的内容");
+                for (label, action) in [
+                    ("向右合并一格", TableOp::MergeRight),
+                    ("向下合并一格", TableOp::MergeDown),
+                    ("拆分当前单元格", TableOp::SplitCell),
                 ] {
                     if ui.button(label).clicked() {
                         op = Some(action);

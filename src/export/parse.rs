@@ -27,6 +27,7 @@ pub(crate) enum MarkdownBlock {
     Table {
         rows: Vec<Vec<String>>,
         aligns: Vec<ColumnAlign>,
+        spans: Vec<TableSpan>,
     },
     Marker(MarkdownSection),
     Html(String),
@@ -35,6 +36,34 @@ pub(crate) enum MarkdownBlock {
         alt: String,
         src: String,
     },
+}
+
+/// 正文表格中的合并单元格。row/column 指向左上角锚点，跨度均至少为 1；
+/// 只有横向或纵向跨度大于 1 的单元格才会出现在表格的 spans 中。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TableSpan {
+    pub(crate) row: usize,
+    pub(crate) column: usize,
+    pub(crate) row_span: usize,
+    pub(crate) column_span: usize,
+}
+
+impl TableSpan {
+    pub(crate) fn covers(self, row: usize, column: usize) -> bool {
+        row >= self.row
+            && row < self.row + self.row_span
+            && column >= self.column
+            && column < self.column + self.column_span
+    }
+
+    pub(crate) fn is_anchor(self, row: usize, column: usize) -> bool {
+        self.row == row && self.column == column
+    }
+}
+
+/// 返回覆盖指定网格位置的合并单元格；普通 1×1 单元格返回 None。
+pub(crate) fn table_span_at(spans: &[TableSpan], row: usize, column: usize) -> Option<TableSpan> {
+    spans.iter().copied().find(|span| span.covers(row, column))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,7 +428,7 @@ fn parse_located(
             && is_table_separator(lines[index + 1].text.trim())
         {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
-            let mut rows = vec![parse_table_row(line)];
+            let mut source_rows = vec![line.to_string()];
             // 分隔行不进正文，但它的冒号决定各列对齐。
             let mut aligns = parse_table_row(lines[index + 1].text.trim())
                 .iter()
@@ -408,18 +437,19 @@ fn parse_located(
             let mut end = lines[index + 1].start + lines[index + 1].len;
             index += 2;
             while index < lines.len() && is_table_row(lines[index].text.trim()) {
-                rows.push(parse_table_row(lines[index].text.trim()));
+                source_rows.push(lines[index].text.trim().to_string());
                 end = lines[index].start + lines[index].len;
                 index += 1;
             }
-            let column_count = rows.first().map_or(0, Vec::len);
-            for row in &mut rows {
-                row.resize(column_count, String::new());
-                row.truncate(column_count);
-            }
+            let column_count = aligns.len();
+            let (rows, spans) = parse_table_cells(&source_rows, column_count);
             aligns.resize(column_count, ColumnAlign::Auto);
             blocks.push(LocatedBlock {
-                block: MarkdownBlock::Table { rows, aligns },
+                block: MarkdownBlock::Table {
+                    rows,
+                    aligns,
+                    spans,
+                },
                 range: start..end,
                 source_segments: Vec::new(),
             });
@@ -768,12 +798,137 @@ pub(crate) fn is_table_separator(line: &str) -> bool {
 }
 
 pub(crate) fn parse_table_row(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_start_matches('|')
-        .trim_end_matches('|')
-        .split('|')
-        .map(|cell| cell.trim().to_string())
+    table_source_cells(line)
+        .into_iter()
+        .map(|cell| cell.text)
         .collect()
+}
+
+#[derive(Debug)]
+struct TableSourceCell {
+    text: String,
+    /// 两个竖线之间完全没有字符时，沿用 MultiMarkdown 语义：本格并入左格。
+    /// 写成竖线、空格、竖线仍是一个普通空白单元格。
+    join_left: bool,
+}
+
+fn table_source_cells(line: &str) -> Vec<TableSourceCell> {
+    let mut value = line.trim();
+    if let Some(rest) = value.strip_prefix('|') {
+        value = rest;
+    }
+    if let Some(rest) = value.strip_suffix('|') {
+        value = rest;
+    }
+    value
+        .split('|')
+        .map(|cell| TableSourceCell {
+            text: cell.trim().to_string(),
+            join_left: cell.is_empty(),
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct WorkingTableCell {
+    row: usize,
+    column: usize,
+    text: String,
+    row_span: usize,
+    column_span: usize,
+    active: bool,
+}
+
+/// 把 MultiMarkdown 风格的横向连续竖线和 ^^ 纵向标记归一化为矩形网格与跨度。
+/// 不合法的 ^^ 保留为普通文字，避免手工编辑时静默吞掉内容。
+pub(crate) fn parse_table_cells(
+    source_rows: &[String],
+    column_count: usize,
+) -> (Vec<Vec<String>>, Vec<TableSpan>) {
+    if source_rows.is_empty() || column_count == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    let row_count = source_rows.len();
+    let mut owners: Vec<Vec<Option<usize>>> = vec![vec![None; column_count]; row_count];
+    let mut cells: Vec<WorkingTableCell> = Vec::new();
+
+    for (row_index, source) in source_rows.iter().enumerate() {
+        let mut slots = table_source_cells(source);
+        slots.resize_with(column_count, || TableSourceCell {
+            text: String::new(),
+            join_left: false,
+        });
+        slots.truncate(column_count);
+
+        for (column_index, slot) in slots.into_iter().enumerate() {
+            if slot.join_left
+                && column_index > 0
+                && let Some(owner) = owners[row_index][column_index - 1]
+                && cells[owner].row == row_index
+            {
+                cells[owner].column_span += 1;
+                owners[row_index][column_index] = Some(owner);
+                continue;
+            }
+            let owner = cells.len();
+            cells.push(WorkingTableCell {
+                row: row_index,
+                column: column_index,
+                text: slot.text,
+                row_span: 1,
+                column_span: 1,
+                active: true,
+            });
+            owners[row_index][column_index] = Some(owner);
+        }
+
+        // ^^ 及其右侧连续竖线必须与上方单元格同宽，才能安全纵向合并。
+        if row_index > 0 {
+            let row_cells = owners[row_index].clone();
+            for owner in row_cells.into_iter().flatten() {
+                if !cells[owner].active
+                    || cells[owner].row != row_index
+                    || cells[owner].text != "^^"
+                {
+                    continue;
+                }
+                let column = cells[owner].column;
+                let column_span = cells[owner].column_span;
+                let Some(above) = owners[row_index - 1][column] else {
+                    continue;
+                };
+                let valid = cells[above].active
+                    && cells[above].row != 0
+                    && cells[above].column == column
+                    && cells[above].column_span == column_span
+                    && cells[above].row + cells[above].row_span == row_index;
+                if !valid {
+                    continue;
+                }
+                cells[above].row_span += 1;
+                cells[owner].active = false;
+                for slot in owners[row_index].iter_mut().skip(column).take(column_span) {
+                    *slot = Some(above);
+                }
+            }
+        }
+    }
+
+    let mut rows = vec![vec![String::new(); column_count]; row_count];
+    let mut spans = Vec::new();
+    for cell in cells.into_iter().filter(|cell| cell.active) {
+        rows[cell.row][cell.column] = cell.text;
+        if cell.row_span > 1 || cell.column_span > 1 {
+            spans.push(TableSpan {
+                row: cell.row,
+                column: cell.column,
+                row_span: cell.row_span,
+                column_span: cell.column_span,
+            });
+        }
+    }
+    (rows, spans)
 }
 
 pub(crate) fn parse_heading(line: &str) -> Option<(u8, &str)> {

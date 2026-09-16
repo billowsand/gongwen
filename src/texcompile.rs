@@ -1082,6 +1082,47 @@ mod tests {
         assert!(pdf.exists());
     }
 
+    /// 合并单元格表格（横向与纵向）要能真编译：`\SetCell` 语法、跨列 colspec
+    /// 与 rowhead 的配合，单靠字符串断言兑不了底。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn compiles_generated_letter_with_merged_table_attachment() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某单位".into();
+        input.profile.recipient = "某部门".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let markdown = "# 关于开展测试工作的函\n正文。\n<!-- [附件] -->\n# 附件1\n## 合并单元格表\n| 类别 | 项目 | 说明 |\n| --- | --- | --- |\n| 横向合并 || 备注 |\n| 纵向合并 | 事项一 | 甲 |\n| ^^ | 事项二 | 乙 |";
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            markdown,
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let content = std::fs::read_to_string(tex).unwrap();
+        assert!(content.contains("\\SetCell[c=2]"), "{content}");
+        assert!(content.contains("\\SetCell[r=2]"), "{content}");
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
+        assert!(pdf.exists());
+    }
+
     /// 最后一个附件为横页时，结束横页后新开的竖页仍须把版记固定在版心底部。
     #[test]
     #[ignore = "需要本机安装 xelatex 才能运行"]

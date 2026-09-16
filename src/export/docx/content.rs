@@ -9,10 +9,11 @@ use crate::export::docx::{
     document_title_paragraph, docx_name, heading_paragraph, image_paragraph, label_paragraph,
     ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
 };
-use crate::export::table::{ColumnAlignment, to_docx_grid};
+use crate::export::table::{ColumnAlignment, resolve_cell_alignment, to_docx_grid};
 use crate::export::title;
 use crate::export::{
-    ColumnAlign, MarkdownBlock, inline_segments, official_heading_text, plain_text,
+    ColumnAlign, MarkdownBlock, TableSpan, inline_segments, official_heading_text, plain_text,
+    table_span_at,
 };
 use crate::models::{DraftInput, FontConfig, ListNumbering, NumberingConfig};
 use anyhow::{Context, Result};
@@ -24,12 +25,19 @@ pub(crate) fn add_smart_table(
     mut doc: Docx,
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
+    spans: &[TableSpan],
     bold: BoldFont<'_>,
 ) -> Docx {
     if rows.is_empty() {
         return doc;
     }
-    let (grid, alignments) = to_docx_grid(rows, aligns, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE * 10);
+    let (grid, alignments) = to_docx_grid(
+        rows,
+        aligns,
+        spans,
+        TABLE_CONTENT_WIDTH_TWIPS,
+        TABLE_SIZE * 10,
+    );
     if grid.is_empty() {
         return doc;
     }
@@ -44,51 +52,74 @@ pub(crate) fn add_smart_table(
         .iter()
         .enumerate()
         .map(|(row_index, row)| {
-            let cells = grid
-                .iter()
-                .enumerate()
-                .map(|(column_index, width)| {
-                    let text = row.get(column_index).map_or("", String::as_str);
-                    // 表头一律居中；正文单元格按列对齐（分隔行写了冒号就以它为准）。
-                    let alignment = if row_index == 0 {
-                        AlignmentType::Center
-                    } else {
-                        match alignments.get(column_index) {
-                            Some(ColumnAlignment::Center) => AlignmentType::Center,
-                            Some(ColumnAlignment::Right) => AlignmentType::Right,
-                            _ => AlignmentType::Left,
-                        }
+            let mut cells = Vec::new();
+            let mut column_index = 0usize;
+            while column_index < grid.len() {
+                let span = table_span_at(spans, row_index, column_index);
+                if span.is_some_and(|span| span.column != column_index) {
+                    column_index += 1;
+                    continue;
+                }
+                let column_span = span.map_or(1, |span| span.column_span);
+                let width = grid[column_index..column_index + column_span]
+                    .iter()
+                    .sum::<usize>();
+                let continuation = span.is_some_and(|span| span.row != row_index);
+                let text = if continuation {
+                    ""
+                } else {
+                    row.get(column_index).map_or("", String::as_str)
+                };
+                // 表头一律居中；正文单元格按列对齐（分隔行写了冒号就以它为准），
+                // 横向合并格则按跨列统一判定，Word 与预览、TeX 保持一致。
+                let alignment =
+                    match resolve_cell_alignment(rows, spans, &alignments, row_index, column_index)
+                    {
+                        ColumnAlignment::Center => AlignmentType::Center,
+                        ColumnAlignment::Right => AlignmentType::Right,
+                        ColumnAlignment::Left => AlignmentType::Left,
                     };
-                    let runs = if name_column == Some(column_index) && row_index > 0 {
-                        let segments = inline_segments(text);
-                        let cleaned = segments
-                            .iter()
-                            .map(|segment| segment.text.as_str())
-                            .collect::<String>();
-                        let cell_bold = segments.iter().any(|segment| segment.bold);
-                        let (name_text, size) = docx_name(&cleaned, TABLE_SIZE);
-                        let mut run = table_run_sized(&name_text, false, size);
-                        if cell_bold {
-                            run = apply_bold(run, bold);
-                        }
-                        vec![run]
-                    } else {
-                        table_runs_sized(text, row_index == 0, TABLE_SIZE, bold)
-                    };
-                    let mut paragraph = Paragraph::new();
-                    for run in runs {
-                        paragraph = paragraph.add_run(run);
+                let runs = if name_column == Some(column_index) && row_index > 0 {
+                    let segments = inline_segments(text);
+                    let cleaned = segments
+                        .iter()
+                        .map(|segment| segment.text.as_str())
+                        .collect::<String>();
+                    let cell_bold = segments.iter().any(|segment| segment.bold);
+                    let (name_text, size) = docx_name(&cleaned, TABLE_SIZE);
+                    let mut run = table_run_sized(&name_text, false, size);
+                    if cell_bold {
+                        run = apply_bold(run, bold);
                     }
-                    let paragraph = paragraph.align(alignment).line_spacing(
-                        LineSpacing::new()
-                            .line(420)
-                            .line_rule(LineSpacingType::Exact),
-                    );
-                    TableCell::new()
-                        .width(*width, WidthType::Dxa)
-                        .add_paragraph(paragraph)
-                })
-                .collect();
+                    vec![run]
+                } else {
+                    table_runs_sized(text, row_index == 0, TABLE_SIZE, bold)
+                };
+                let mut paragraph = Paragraph::new();
+                for run in runs {
+                    paragraph = paragraph.add_run(run);
+                }
+                let paragraph = paragraph.align(alignment).line_spacing(
+                    LineSpacing::new()
+                        .line(420)
+                        .line_rule(LineSpacingType::Exact),
+                );
+                let mut cell = TableCell::new()
+                    .width(width, WidthType::Dxa)
+                    .add_paragraph(paragraph);
+                if column_span > 1 {
+                    cell = cell.grid_span(column_span);
+                }
+                if let Some(span) = span.filter(|span| span.row_span > 1) {
+                    cell = cell.vertical_merge(if span.row == row_index {
+                        VMergeType::Restart
+                    } else {
+                        VMergeType::Continue
+                    });
+                }
+                cells.push(cell);
+                column_index += column_span;
+            }
             TableRow::new(cells)
         })
         .collect::<Vec<_>>();
@@ -134,7 +165,11 @@ pub(crate) fn add_official_content_block(
         MarkdownBlock::OrderedListItem { number, text } => {
             doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2, bold));
         }
-        MarkdownBlock::Table { rows, aligns } => doc = add_smart_table(doc, rows, aligns, bold),
+        MarkdownBlock::Table {
+            rows,
+            aligns,
+            spans,
+        } => doc = add_smart_table(doc, rows, aligns, spans, bold),
         MarkdownBlock::Image { alt, src } => {
             if let Some(paragraph) = image_paragraph(alt, src) {
                 doc = doc.add_paragraph(paragraph);

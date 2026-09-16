@@ -754,21 +754,38 @@ pub(crate) fn table_block(
     metrics: &Metrics,
     rows: &[Vec<String>],
     aligns: &[export::ColumnAlign],
+    spans: &[export::TableSpan],
 ) {
-    let columns = export::table_columns(rows, aligns);
-    if columns.is_empty() {
+    let columns = export::table_columns(rows, aligns, spans);
+    if columns.is_empty() || rows.is_empty() {
         return;
     }
     let widths = columns
         .iter()
         .map(|column| metrics.content * column.fraction)
         .collect::<Vec<_>>();
+    let column_alignments = columns
+        .iter()
+        .map(|column| column.alignment)
+        .collect::<Vec<_>>();
 
-    // 单元格内边距不能超过列宽的一小部分，否则窄列会算出负的换行宽度。
+    struct PreviewCell {
+        row: usize,
+        column: usize,
+        row_span: usize,
+        column_span: usize,
+        galley: Arc<egui::Galley>,
+        padding: f32,
+        align: ColumnAlignment,
+    }
+
+    // 先排出所有锚点单元格，再由跨行单元格反推各物理行所需高度。
     let line = metrics.pt(TABLE_LINE_PT);
     let stroke = Stroke::new(1.0_f32.max(metrics.scale), theme::paper::ink());
-    for (index, row) in rows.iter().enumerate() {
-        let header = index == 0;
+    let mut cells = Vec::new();
+    let mut row_heights = vec![line; rows.len()];
+    for (row_index, row) in rows.iter().enumerate() {
+        let header = row_index == 0;
         let font = metrics.font(
             if header {
                 theme::FONT_HEITI
@@ -777,71 +794,114 @@ pub(crate) fn table_block(
             },
             TABLE_PT,
         );
-        let cells = widths
-            .iter()
-            .enumerate()
-            .map(|(column, width)| {
-                let padding = metrics.pt(3.0).min(width * 0.12);
-                let text = export::plain_text(row.get(column).map_or("", String::as_str));
-                let mut job = job((width - 2.0 * padding).max(1.0));
-                // 表头一律居中；正文列按导出器判定的对齐方式。
-                let align = if header {
-                    ColumnAlignment::Center
-                } else {
-                    columns[column].alignment
-                };
-                job.halign = match align {
-                    ColumnAlignment::Center => Align::Center,
-                    ColumnAlignment::Right => Align::RIGHT,
-                    ColumnAlignment::Left => Align::LEFT,
-                };
-                job.append(&text, 0.0, text_format(font.clone(), line));
-                let galley = layout(ui, job);
-                (galley, padding, align)
-            })
-            .collect::<Vec<_>>();
-        let height = cells
-            .iter()
-            .map(|(galley, padding, _)| galley.size().y + 2.0 * padding)
-            .fold(line, f32::max);
+        for column in 0..widths.len() {
+            let span = export::table_span_at(spans, row_index, column);
+            if span.is_some_and(|span| !span.is_anchor(row_index, column)) {
+                continue;
+            }
+            let row_span = span.map_or(1, |span| span.row_span);
+            let column_span = span.map_or(1, |span| span.column_span);
+            let width = widths[column..column + column_span].iter().sum::<f32>();
+            let padding = metrics.pt(3.0).min(width * 0.12);
+            let text = export::plain_text(row.get(column).map_or("", String::as_str));
+            let mut cell_job = job((width - 2.0 * padding).max(1.0));
+            // 横向合并格跨列统一判定对齐，导出的 Word/TeX 与预览走同一条规则。
+            let align = crate::export::table::resolve_cell_alignment(
+                rows,
+                spans,
+                &column_alignments,
+                row_index,
+                column,
+            );
+            cell_job.halign = match align {
+                ColumnAlignment::Center => Align::Center,
+                ColumnAlignment::Right => Align::RIGHT,
+                ColumnAlignment::Left => Align::LEFT,
+            };
+            cell_job.append(&text, 0.0, text_format(font.clone(), line));
+            let galley = layout(ui, cell_job);
+            if row_span == 1 {
+                row_heights[row_index] =
+                    row_heights[row_index].max(galley.size().y + 2.0 * padding);
+            }
+            cells.push(PreviewCell {
+                row: row_index,
+                column,
+                row_span,
+                column_span,
+                galley,
+                padding,
+                align,
+            });
+        }
+    }
 
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
+    for cell in cells.iter().filter(|cell| cell.row_span > 1) {
+        let current = row_heights[cell.row..cell.row + cell.row_span]
+            .iter()
+            .sum::<f32>();
+        let required = cell.galley.size().y + 2.0 * cell.padding;
+        if required > current {
+            let extra = (required - current) / cell.row_span as f32;
+            for height in &mut row_heights[cell.row..cell.row + cell.row_span] {
+                *height += extra;
+            }
+        }
+    }
+
+    let total_height = row_heights.iter().sum::<f32>();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(metrics.content, total_height),
+        egui::Sense::hover(),
+    );
+    let mut x_offsets = vec![rect.left()];
+    for width in &widths {
+        x_offsets.push(x_offsets.last().copied().unwrap_or(rect.left()) + width);
+    }
+    let mut y_offsets = vec![rect.top()];
+    for height in &row_heights {
+        y_offsets.push(y_offsets.last().copied().unwrap_or(rect.top()) + height);
+    }
+
+    for row_index in 0..rows.len() {
+        let row_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), y_offsets[row_index]),
+            egui::pos2(rect.right(), y_offsets[row_index + 1]),
+        );
         // 表格一行就是纸面上的一行，哪怕某个单元格里的字折了两行：看稿的人指的
         // 是「表里第几行」，页边的号必须跟着表行走，不能跟着单元格里的折行走。
-        // 基线取第一个单元格首行的基线——单元格在表行里是垂直居中的。
         let baseline = cells
             .iter()
-            .find_map(|(galley, _, _)| {
-                // 单元格在表行里垂直居中，与下面画字用的 top 同一算法。
-                let top = rect.top() + (height - galley.size().y) / 2.0;
-                galley
+            .filter(|cell| cell.row == row_index)
+            .find_map(|cell| {
+                let height = y_offsets[cell.row + cell.row_span] - y_offsets[cell.row];
+                let top = y_offsets[cell.row] + (height - cell.galley.size().y) / 2.0;
+                cell.galley
                     .rows
                     .first()
                     .map(|row| gutter::row_baseline(row, top + row.pos.y))
             })
-            .unwrap_or(rect.center().y);
-        metrics.mark_sourced_row(rect, baseline);
-        let painter = ui.painter();
-        painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
-        let mut x = rect.left();
-        for (column, (galley, padding, align)) in cells.iter().enumerate() {
-            if column > 0 {
-                painter.line_segment(
-                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    stroke,
-                );
-            }
-            // halign 决定每行相对锚点的位置：居中时锚点取单元格中线，靠左时取内边距。
-            let anchor = match align {
-                ColumnAlignment::Center => x + widths[column] / 2.0,
-                ColumnAlignment::Right => x + widths[column] - padding,
-                ColumnAlignment::Left => x + padding,
-            };
-            let top = rect.top() + (height - galley.size().y) / 2.0;
-            painter.galley(egui::pos2(anchor, top), galley.clone(), theme::paper::ink());
-            x += widths[column];
-        }
+            .unwrap_or(row_rect.center().y);
+        metrics.mark_sourced_row(row_rect, baseline);
+    }
+
+    let painter = ui.painter();
+    for cell in cells {
+        let cell_rect = egui::Rect::from_min_max(
+            egui::pos2(x_offsets[cell.column], y_offsets[cell.row]),
+            egui::pos2(
+                x_offsets[cell.column + cell.column_span],
+                y_offsets[cell.row + cell.row_span],
+            ),
+        );
+        painter.rect_stroke(cell_rect, 0.0, stroke, egui::StrokeKind::Inside);
+        let anchor = match cell.align {
+            ColumnAlignment::Center => cell_rect.center().x,
+            ColumnAlignment::Right => cell_rect.right() - cell.padding,
+            ColumnAlignment::Left => cell_rect.left() + cell.padding,
+        };
+        let top = cell_rect.top() + (cell_rect.height() - cell.galley.size().y) / 2.0;
+        painter.galley(egui::pos2(anchor, top), cell.galley, theme::paper::ink());
     }
 }
 

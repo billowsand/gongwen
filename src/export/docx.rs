@@ -453,9 +453,11 @@ pub fn write_docx_with_numbering(
                         bold,
                     ));
                 }
-                MarkdownBlock::Table { rows, aligns } => {
-                    doc = add_smart_table(doc, rows, aligns, bold)
-                }
+                MarkdownBlock::Table {
+                    rows,
+                    aligns,
+                    spans,
+                } => doc = add_smart_table(doc, rows, aligns, spans, bold),
             }
         }
     }
@@ -1429,6 +1431,31 @@ mod tests {
             "表格 Markdown 加粗应保留：{bold_cell}"
         );
         assert!(!bold_cell.contains("**"));
+    }
+
+    #[test]
+    fn body_table_writes_grid_span_and_vertical_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("merged-table.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::PlainDocument;
+        write_docx_ok(
+            &path,
+            &input,
+            "# 合并表格
+| 类别 | 项目 | 说明 |
+| --- | --- | --- |
+| 横向合并 || 备注 |
+| 纵向合并 | 事项一 | 甲 |
+| ^^ | 事项二 | 乙 |",
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        assert!(xml.contains(r#"w:gridSpan w:val="2""#), "{xml}");
+        assert!(xml.contains(r#"w:vMerge w:val="restart""#), "{xml}");
+        assert!(xml.contains(r#"w:vMerge w:val="continue""#), "{xml}");
+        assert_eq!(xml.matches("横向合并").count(), 1);
+        assert_eq!(xml.matches("纵向合并").count(), 1);
     }
 
     #[test]

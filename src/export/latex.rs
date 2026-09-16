@@ -1498,6 +1498,30 @@ mod tests {
     }
 
     #[test]
+    fn attachment_table_preserves_markdown_cell_spans() {
+        let (blocks, block_lines) = parse_markdown_with_lines(
+            "# 测试函
+<!-- [附件] -->
+# 附件1
+## 合并表
+| 类别 | 项目 | 说明 |
+| --- | --- | --- |
+| 横向合并 || 备注 |
+| 纵向合并 | 事项一 | 甲 |
+| ^^ | 事项二 | 乙 |",
+        );
+        let (_, attachments) = official_letter_sections_to_tex(&blocks, &block_lines, false);
+        assert!(
+            attachments.contains("\\SetCell[c=2]{c} 横向合并"),
+            "{attachments}"
+        );
+        assert!(
+            attachments.contains("\\SetCell[r=2]{c} 纵向合并"),
+            "{attachments}"
+        );
+    }
+
+    #[test]
     fn crowded_table_makes_only_its_attachment_landscape() {
         let (blocks, block_lines) = parse_markdown_with_lines(
             "# 测试函\n<!-- [附件] -->\n# 附件1\n## 宽表\n| 序号 | 事项类别 | 事项名称 | 存在问题 | 整改措施 | 责任部门 | 完成时限 | 当前状态 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | 线上办理 | 行政备案事项 | 移动端部分页面显示不完整，申请人无法正常上传附件。 | 优化移动端页面适配，增加格式和大小提示并开展测试。 | 技术保障部门 | 2026年8月12日 | 已完成 |\n# 附件2\n## 窄表\n| 序号 | 名称 |\n| --- | --- |\n| 1 | 短项 |",

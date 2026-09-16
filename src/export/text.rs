@@ -5,7 +5,7 @@
 
 use super::docx;
 use super::table;
-use crate::export::{ColumnAlign, MarkdownBlock, MarkdownSection};
+use crate::export::{ColumnAlign, MarkdownBlock, MarkdownSection, TableSpan};
 
 /// 表格的一列在版心中所占的比例，以及它的对齐方式。界面预览据此复用导出器的
 /// 智能列宽，保证预览里的列宽、对齐与导出的 Word 表格一致。
@@ -15,10 +15,15 @@ pub(crate) struct TableColumn {
     pub(crate) alignment: table::ColumnAlignment,
 }
 
-pub(crate) fn table_columns(rows: &[Vec<String>], aligns: &[ColumnAlign]) -> Vec<TableColumn> {
+pub(crate) fn table_columns(
+    rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
+    spans: &[TableSpan],
+) -> Vec<TableColumn> {
     let (grid, alignments) = table::to_docx_grid(
         rows,
         aligns,
+        spans,
         docx::TABLE_CONTENT_WIDTH_TWIPS,
         docx::TABLE_SIZE * 10,
     );

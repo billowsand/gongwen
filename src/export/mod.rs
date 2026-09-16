@@ -38,13 +38,13 @@ pub(crate) use headings::{
 };
 #[allow(unused_imports)]
 pub(crate) use parse::{
-    ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, ResearchSection,
+    ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, ResearchSection, TableSpan,
     block_span_for_line, body_heading_max_level, circled_number, compact_heading_flags,
     is_image_line, normalize_ordered_list_punctuation, parse_markdown, parse_markdown_located,
     parse_markdown_located_research, parse_markdown_located_with_numbering,
     parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
     parse_markdown_with_numbering, parse_ordered_item, parse_research_marker, parse_section_marker,
-    renumber_ordered_groups, source_lines,
+    parse_table_cells, renumber_ordered_groups, source_lines, table_span_at,
 };
 #[cfg(test)]
 pub(crate) use red::{
@@ -864,6 +864,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_horizontal_and_vertical_table_spans() {
+        let blocks = parse_markdown(
+            "| 类别 | 项目 | 说明 |
+| --- | --- | --- |
+| 横向合并 || 备注 |
+| 纵向合并 | 事项一 | 甲 |
+| ^^ | 事项二 | 乙 |",
+        );
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[0] else {
+            panic!("应当解析为合并表格：{blocks:?}");
+        };
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[1], ["横向合并", "", "备注"]);
+        assert_eq!(rows[3][0], "", "^^ 应归一化为被覆盖的空格");
+        assert_eq!(
+            spans,
+            &[
+                TableSpan {
+                    row: 1,
+                    column: 0,
+                    row_span: 1,
+                    column_span: 2,
+                },
+                TableSpan {
+                    row: 2,
+                    column: 0,
+                    row_span: 2,
+                    column_span: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_combined_span_at_the_end_of_a_row() {
+        let blocks = parse_markdown(
+            "| 甲 | 乙 | 丙 |
+| --- | --- | --- |
+| 跨三列 |||
+| ^^ |||",
+        );
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[0] else {
+            panic!("应当解析为合并表格：{blocks:?}");
+        };
+        assert_eq!(rows[1], ["跨三列", "", ""]);
+        assert_eq!(
+            spans,
+            &[TableSpan {
+                row: 1,
+                column: 0,
+                row_span: 2,
+                column_span: 3,
+            }]
+        );
+    }
+
     /// 分隔行里的冒号是列对齐，随表格一起带给导出器与预览。
     #[test]
     fn table_keeps_column_alignment_from_the_separator_row() {
@@ -872,7 +929,7 @@ mod tests {
 | :--- | :---: | ---: |
 | 1 | 甲 | 12 |",
         );
-        let MarkdownBlock::Table { rows, aligns } = &blocks[0] else {
+        let MarkdownBlock::Table { rows, aligns, .. } = &blocks[0] else {
             panic!("应当解析为表格：{blocks:?}");
         };
         assert_eq!(rows.len(), 2, "分隔行不进正文");
@@ -891,6 +948,38 @@ mod tests {
             panic!("应当解析为表格");
         };
         assert_eq!(aligns, &[ColumnAlign::Auto, ColumnAlign::Auto]);
+    }
+
+    /// 预览取的就是导出器算好的列宽，合并表格也要带上跨度，否则预览与 Word 各自一套。
+    #[test]
+    fn preview_table_columns_reuse_the_merged_aware_grid() {
+        let blocks = parse_markdown(
+            "| 甲 | 乙 | 丙 | 丁 |
+| --- | --- | --- | --- |
+| 一 | 二 | 三 | 四 |
+| 横跨两列的一段较长说明文字。 || 末 | 尾 |",
+        );
+        let MarkdownBlock::Table {
+            rows,
+            aligns,
+            spans,
+        } = &blocks[0]
+        else {
+            panic!("应当解析为合并表格：{blocks:?}");
+        };
+        assert_eq!(spans.len(), 1);
+        let fractions = table_columns(rows, aligns, spans)
+            .iter()
+            .map(|column| column.fraction)
+            .collect::<Vec<_>>();
+        // 四列内容相近，合并格本来放得下，列宽应基本均匀；
+        // 不传 spans 的旧路径会把首列算到 0.33、末列压到 0.17。
+        assert!(
+            fractions
+                .iter()
+                .all(|fraction| (fraction - 0.25).abs() < 0.05),
+            "预览列宽应复用合并感知的网格：{fractions:?}"
+        );
     }
 
     #[test]

@@ -24,9 +24,9 @@ pub(crate) fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> 
                 current_attachment = Some(flags.len() - 1);
             }
             MarkdownBlock::Marker(MarkdownSection::Body) => current_attachment = None,
-            MarkdownBlock::Table { rows, .. } => {
+            MarkdownBlock::Table { rows, spans, .. } => {
                 if let Some(index) = current_attachment
-                    && requires_landscape(rows)
+                    && requires_landscape(rows, spans)
                 {
                     flags[index] = true;
                 }
