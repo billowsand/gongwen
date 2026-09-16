@@ -215,4 +215,61 @@ mod tests {
             "md2tex.cls 应钉死 ctex 字库"
         );
     }
+
+    /// 预览把 `{#id}`、`{@id}`、`[@key]` 和表题换成纸面编号，靠的是"mdx 认这
+    /// 几种写法"这个前提（见 `preview::research`）。哪天 mdx 换了写法，预览会
+    /// 一声不响地照旧换、编译却把源码符号原样印进 PDF——所以这里真跑一遍转换，
+    /// 拿生成的 TeX 核对。
+    #[test]
+    fn mdx_turns_the_marks_the_preview_resolves_into_label_ref_cite_and_caption() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.tex");
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "测试报告".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        input.research.bibliography_content = "@article{wang2020,title={甲},author={王}}\n".into();
+        write_tex(
+            &path,
+            &input,
+            concat!(
+                "<!-- [正文] -->\n\n",
+                "## 研究背景 {#chap:bg}\n\n",
+                "见第{@chap:bg}章、表{@tbl:t}与图{@fig:a}[@wang2020]。\n\n",
+                "表：样本分布 {#tbl:t}\n\n",
+                "| 项 | 数 |\n| --- | --- |\n| 甲 | 1 |\n\n",
+                "![总体架构](images/a.png){#fig:a}\n",
+            ),
+        )
+        .expect("研究报告应转换成功");
+
+        let tex = fs::read_to_string(&path).unwrap()
+            + &fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap();
+        for expected in [
+            // 锚点：章、表、图三种挂载点都得认（表锚点是 longtblr 的外层选项）。
+            "\\label{chap:bg}",
+            "label={tbl:t}",
+            "\\label{fig:a}",
+            // 交叉引用与文献引用。
+            "\\ref{chap:bg}",
+            "\\cite{wang2020}",
+            // 表题并进 longtblr 的 caption，图题进 figure 的 \caption。
+            "caption={样本分布}",
+            "\\caption{总体架构}",
+        ] {
+            assert!(
+                tex.contains(expected),
+                "mdx 应把这处标记转成 {expected}；预览的换算规则要跟着改：{tex}"
+            );
+        }
+        // 源码符号一个都不该漏进 TeX——漏了就会原样印进 PDF。
+        for raw in ["{#", "{@", "[@", "表：样本分布"] {
+            assert!(
+                !tex.contains(raw),
+                "源码符号“{raw}”不应残留在 TeX 里：{tex}"
+            );
+        }
+    }
 }

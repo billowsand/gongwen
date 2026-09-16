@@ -12,6 +12,7 @@ use std::ops::Range;
 mod gutter;
 mod header;
 mod layout;
+mod pdf_figure;
 mod red;
 mod render;
 mod research;
@@ -86,6 +87,7 @@ const RESEARCH_CONTENT_MM: f32 = 156.0;
 const RESEARCH_BODY_PT: f32 = 14.0;
 const RESEARCH_LINE_PT: f32 = 24.0;
 const RESEARCH_CHAPTER_PT: f32 = 22.0; // 二号
+const RESEARCH_CAPTION_PT: f32 = 12.0; // 图表题注，小四
 const RESEARCH_COVER_TITLE_PT: f32 = 26.0; // 封面题名，一号
 const RESEARCH_COVER_PT: f32 = 16.0; // 封面要素，三号
 
@@ -485,6 +487,8 @@ mod tests {
         assert!(text.contains("第 1 章"), "章标题应自动编号：{text}");
         assert!(text.contains("1.1"), "节标题应自动编号：{text}");
         assert!(text.contains("摘要"), "摘要区段应排出标题：{text}");
+        // 区段标记是写给解析器看的，一个字符都不该印在纸上。
+        assert!(!text.contains("<!--"), "区段标记不应原样排进版心：{text}");
         // 公文要素一个都不该出现
         for forbidden in ["星海省教育厅", "星教函", "秘密★10年"] {
             assert!(

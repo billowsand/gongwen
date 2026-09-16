@@ -26,6 +26,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod crossref;
 mod headings;
 mod parse;
 mod red;
@@ -37,12 +38,13 @@ pub(crate) use headings::{
 };
 #[allow(unused_imports)]
 pub(crate) use parse::{
-    ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, block_span_for_line,
-    body_heading_max_level, circled_number, compact_heading_flags, is_image_line,
-    normalize_ordered_list_punctuation, parse_markdown, parse_markdown_located,
-    parse_markdown_located_with_numbering, parse_markdown_with_lines,
-    parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering, parse_ordered_item,
-    parse_section_marker, renumber_ordered_groups, source_lines,
+    ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, ResearchSection,
+    block_span_for_line, body_heading_max_level, circled_number, compact_heading_flags,
+    is_image_line, normalize_ordered_list_punctuation, parse_markdown, parse_markdown_located,
+    parse_markdown_located_research, parse_markdown_located_with_numbering,
+    parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
+    parse_markdown_with_numbering, parse_ordered_item, parse_research_marker, parse_section_marker,
+    renumber_ordered_groups, source_lines,
 };
 #[cfg(test)]
 pub(crate) use red::{

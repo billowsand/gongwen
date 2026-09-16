@@ -3,10 +3,12 @@
 //! 由 src/export/mod.rs 拆分而来：本文件是模块 `export::parse`，与其它子模块共享
 //! `export` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::export::crossref::ResearchMarks;
 use crate::export::{
     attachment_title_name, clean_heading_number, legacy_attachment_label, render_list_number,
 };
 use crate::models::{NumberingConfig, StyleMode};
+use std::borrow::Cow;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MarkdownBlock {
@@ -268,6 +270,47 @@ pub(crate) fn parse_markdown_located_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Vec<LocatedBlock> {
+    parse_located(markdown, numbering, None)
+}
+
+/// 研究报告预览专用：切块之前先把每行里的 `{#id}`、`{@id}`、`[@key]` 换成纸面
+/// 上的字面（见 [`ResearchMarks`]）。
+///
+/// 替换发生在切块之前而不是之后，块的源码范围仍按原文的行长算：这样点击版面
+/// 回跳、页边行号这些都还落在没动过的源码上，而排版拿到的已经是纸面文字。
+pub(crate) fn parse_markdown_located_research(
+    markdown: &str,
+    marks: &ResearchMarks,
+) -> Vec<LocatedBlock> {
+    parse_located(markdown, &NumberingConfig::default(), Some(marks))
+}
+
+/// 源码里的一行：`len` 始终是原文的字节数，`text` 才可能被行内标记替换过。
+struct SourceLine<'a> {
+    start: usize,
+    len: usize,
+    text: Cow<'a, str>,
+}
+
+fn prepared_lines<'a>(markdown: &'a str, marks: Option<&ResearchMarks>) -> Vec<SourceLine<'a>> {
+    source_lines(markdown)
+        .into_iter()
+        .map(|(start, raw)| SourceLine {
+            start,
+            len: raw.len(),
+            text: match marks {
+                Some(marks) => marks.apply(raw),
+                None => Cow::Borrowed(raw),
+            },
+        })
+        .collect()
+}
+
+fn parse_located(
+    markdown: &str,
+    numbering: &NumberingConfig,
+    marks: Option<&ResearchMarks>,
+) -> Vec<LocatedBlock> {
     let mut blocks: Vec<LocatedBlock> = Vec::new();
     let mut paragraph: Vec<ParagraphPart> = Vec::new();
     let mut paragraph_range = 0..0;
@@ -286,12 +329,12 @@ pub(crate) fn parse_markdown_located_with_numbering(
         }
     };
 
-    let lines = source_lines(markdown);
+    let lines = prepared_lines(markdown, marks);
     let mut index = 0usize;
     while index < lines.len() {
-        let (start, raw) = lines[index];
-        let line = raw.trim();
-        let span = start..start + raw.len();
+        let start = lines[index].start;
+        let line = lines[index].text.trim();
+        let span = start..start + lines[index].len;
         if in_html_block {
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Html(line.to_string()),
@@ -340,22 +383,33 @@ pub(crate) fn parse_markdown_located_with_numbering(
                 source_segments: Vec::new(),
             });
             in_html_block = true;
+        } else if line.starts_with("<!--") && line.ends_with("-->") {
+            // 不是公文那两种区段标记的 HTML 注释：研究报告的「摘要」「版本变更
+            // 记录」「参考文献」都长这样。注释是写给解析器看的，一律不落到纸上，
+            // 所以归到 Html——各版式和导出器对 Html 的处理正是"跳过"。当成段落
+            // 排的话，`<!-- [版本变更记录] -->` 这一串会原样印在版心里。
+            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            blocks.push(LocatedBlock {
+                block: MarkdownBlock::Html(line.to_string()),
+                range: span,
+                source_segments: Vec::new(),
+            });
         } else if index + 1 < lines.len()
             && is_table_row(line)
-            && is_table_separator(lines[index + 1].1.trim())
+            && is_table_separator(lines[index + 1].text.trim())
         {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             let mut rows = vec![parse_table_row(line)];
             // 分隔行不进正文，但它的冒号决定各列对齐。
-            let mut aligns = parse_table_row(lines[index + 1].1.trim())
+            let mut aligns = parse_table_row(lines[index + 1].text.trim())
                 .iter()
                 .map(|cell| ColumnAlign::parse(cell))
                 .collect::<Vec<_>>();
-            let mut end = lines[index + 1].0 + lines[index + 1].1.len();
+            let mut end = lines[index + 1].start + lines[index + 1].len;
             index += 2;
-            while index < lines.len() && is_table_row(lines[index].1.trim()) {
-                rows.push(parse_table_row(lines[index].1.trim()));
-                end = lines[index].0 + lines[index].1.len();
+            while index < lines.len() && is_table_row(lines[index].text.trim()) {
+                rows.push(parse_table_row(lines[index].text.trim()));
+                end = lines[index].start + lines[index].len;
                 index += 1;
             }
             let column_count = rows.first().map_or(0, Vec::len);
@@ -376,12 +430,12 @@ pub(crate) fn parse_markdown_located_with_numbering(
             let mut group_end = span.end;
             let mut items = Vec::new();
             while index < lines.len() {
-                let (item_start, raw_item) = lines[index];
-                let Some((_, text)) = parse_ordered_item(raw_item.trim()) else {
+                let item = &lines[index];
+                let Some((_, text)) = parse_ordered_item(item.text.trim()) else {
                     break;
                 };
-                items.push((item_start..item_start + raw_item.len(), text.to_string()));
-                group_end = item_start + raw_item.len();
+                items.push((item.start..item.start + item.len, text.to_string()));
+                group_end = item.start + item.len;
                 index += 1;
             }
             let normalized = normalize_ordered_item_punctuation(
@@ -738,6 +792,9 @@ pub(crate) fn parse_heading(line: &str) -> Option<(u8, &str)> {
 /// 识别独占一行的图片引用 `![alt](src)`。`src` 不含空白与右括号（与
 /// `images::image_refs` 的正则约束一致），返回 `(alt, src)`。
 pub(crate) fn parse_image(line: &str) -> Option<(String, String)> {
+    // 行尾可能跟着交叉引用锚点 `{#fig:x}`（mdx 的写法）。锚点不占版面，剥掉
+    // 再认——不剥的话整行都匹配不上，图片会当成一段文字，把源码原样印到纸上。
+    let line = crate::export::crossref::split_label(line).0;
     let rest = line.strip_prefix("![")?;
     let close = rest.find(']')?;
     let alt = rest[..close].to_string();
@@ -773,6 +830,51 @@ pub(crate) fn parse_section_marker(line: &str) -> Option<MarkdownSection> {
         "附件" | "附录" | "attachment" | "attachments" | "appendix" => {
             Some(MarkdownSection::Attachment)
         }
+        _ => None,
+    }
+}
+
+/// 研究报告的区段，与 mdx 的 `MarkerKind` 一一对应。公文只分正文与附件两段
+/// （见 [`MarkdownSection`]），研究报告多出摘要、版本变更记录和参考文献。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResearchSection {
+    Abstract,
+    Body,
+    Appendix,
+    ChangeLog,
+    References,
+}
+
+impl ResearchSection {
+    /// 这个区段在提示语里的叫法。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Abstract => "摘要",
+            Self::Body => "正文",
+            Self::Appendix => "附录",
+            Self::ChangeLog => "版本变更记录",
+            Self::References => "参考文献",
+        }
+    }
+}
+
+/// 识别研究报告的区段标记。写法跟着 mdx 的 `common::markers::detect` 走。
+pub(crate) fn parse_research_marker(line: &str) -> Option<ResearchSection> {
+    let inner = line
+        .trim()
+        .strip_prefix("<!--")?
+        .strip_suffix("-->")?
+        .trim()
+        .trim_start_matches(['[', '【'])
+        .trim_end_matches([']', '】'])
+        .trim()
+        .to_ascii_lowercase();
+    match inner.as_str() {
+        "摘要" | "abstract" => Some(ResearchSection::Abstract),
+        "正文" | "body" => Some(ResearchSection::Body),
+        "附录" | "附件" | "appendix" | "attachment" => Some(ResearchSection::Appendix),
+        "版本变更记录" | "changelog" | "version" => Some(ResearchSection::ChangeLog),
+        "参考文献" | "references" | "bibliography" => Some(ResearchSection::References),
         _ => None,
     }
 }

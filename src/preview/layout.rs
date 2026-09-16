@@ -452,6 +452,13 @@ pub(crate) fn indent(count: f32) -> String {
     "\u{3000}".repeat(count as usize)
 }
 
+/// 一行文字里的一段：字面和字号可以与相邻段不同。
+pub(crate) struct TextRun<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) family: &'a str,
+    pub(crate) size: f32,
+}
+
 /// 一行文字的整段渲染（居中标题、缩进标题等都走这里）。
 pub(crate) fn line_block(
     ui: &mut egui::Ui,
@@ -461,13 +468,26 @@ pub(crate) fn line_block(
     size: f32,
     align: Align,
 ) {
+    line_block_runs(ui, metrics, &[TextRun { text, family, size }], align);
+}
+
+/// 同 [`line_block`]，但一行里可以换字面：研究报告的表题就是黑体的"表 1.1"
+/// 接宋体的题名，两段共用一行、一起居中。
+pub(crate) fn line_block_runs(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    runs: &[TextRun<'_>],
+    align: Align,
+) {
     let mut job = job(metrics.content);
     job.halign = align;
-    job.append(
-        text,
-        0.0,
-        text_format(metrics.font(family, size), metrics.line),
-    );
+    for run in runs {
+        job.append(
+            run.text,
+            0.0,
+            text_format(metrics.font(run.family, run.size), metrics.line),
+        );
+    }
     if align == Align::Center {
         // halign 只让 galley 内部每行相对自身宽度居中，经 Label 摆到光标处后，
         // 单行标题会偏左、多行才看似居中。这里把 galley 直接画在版心正中，

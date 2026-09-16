@@ -8,6 +8,7 @@ use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::images;
 use crate::models::{DraftInput, NumberingConfig, TemplateKind};
 use crate::preview::gutter;
+use crate::preview::pdf_figure;
 use crate::preview::{
     BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT,
     addressee_block, append_inline, body_block, clickable, clickable_body_block,
@@ -624,8 +625,8 @@ pub(crate) fn content_block(
     }
 }
 
-/// 图片块：位图按版心宽度等比渲染，加载失败显示占位卡片；PDF 显示占位卡片
-/// （预览不渲染 PDF 内容，导出时由导出器嵌入）。外层已由 clickable 包装。
+/// 图片块：位图按版心宽度等比渲染，加载失败显示占位卡片；PDF 取第一页光栅化
+/// 后同样按版心宽度画（见 `preview::pdf_figure`）。外层已由 clickable 包装。
 pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str) {
     let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
     let path = match images::resolve(src) {
@@ -636,13 +637,7 @@ pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: 
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
     if is_pdf {
-        return image_placeholder(
-            ui,
-            metrics,
-            alt,
-            &file_name,
-            "PDF 附件：预览暂不渲染，导出时嵌入",
-        );
+        return pdf_block(ui, metrics, alt, src, &path, &file_name);
     }
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -661,6 +656,34 @@ pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: 
             .fit_to_original_size(1.0)
             .max_size(egui::vec2(metrics.content, f32::INFINITY)),
     );
+}
+
+/// PDF 插图：第一页占满版心宽，与导出的 `\includegraphics[width=\textwidth]`
+/// 一致。首帧还在后台渲染，先画占位卡片顶上。
+fn pdf_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    alt: &str,
+    src: &str,
+    path: &std::path::Path,
+    file_name: &str,
+) {
+    match pdf_figure::page(ui.ctx(), src, path) {
+        pdf_figure::PdfPage::Ready(texture) => {
+            let size = texture.size_vec2();
+            let height = metrics.content * size.y / size.x.max(1.0);
+            ui.add(
+                egui::Image::from_texture(egui::load::SizedTexture::from_handle(&texture))
+                    .fit_to_exact_size(egui::vec2(metrics.content, height)),
+            );
+        }
+        pdf_figure::PdfPage::Rendering => {
+            image_placeholder(ui, metrics, alt, file_name, "PDF 附件：正在渲染第一页…");
+        }
+        pdf_figure::PdfPage::Failed(error) => {
+            image_placeholder(ui, metrics, alt, file_name, &error);
+        }
+    }
 }
 
 /// 图片占位卡片：细边框 + 文件名与说明，宽度=版心。

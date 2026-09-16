@@ -27,6 +27,67 @@ pub fn estimate_layout_notes(markdown: &str) -> Vec<ReviewNote> {
 /// 正文为空的提示语。导出闸门要按它认人，所以拎成常量，别让两处文案各写各的。
 const EMPTY_BODY: &str = "模型未返回正文";
 
+/// 研究报告的区段结构：附件标识与附录一一对应，不编号的区段要自带标题。
+///
+/// 附件的写法与公文统一——每加一份附件就写一个附件标识。mdx 那边两种写法都编
+/// 得出来（一个标识后面跟几个章标题，就是几份附录），但两种混着写，附录的字母
+/// 编号从哪儿断开就只有编译完才看得出来。
+///
+/// 摘要之外的不编号区段（版本变更记录、参考文献），标题由区段里的首个标题充
+/// 当：没有标题，编译出来的 PDF 里这一节就是无题的。
+fn research_section_warnings(text: &str, warnings: &mut Vec<String>) {
+    use export::ResearchSection as Section;
+
+    // 每个区段，以及区段里数出来的章标题条数。
+    let mut spans = vec![(Section::Body, 0usize)];
+    // 附录段里写过 `#` 就整体下移一级，`##` 不再是章——与 mdx 的判定一致。
+    let mut saw_h1 = false;
+    for line in text.lines() {
+        if let Some(next) = export::parse_research_marker(line) {
+            spans.push((next, 0));
+            saw_h1 = false;
+            continue;
+        }
+        let level = line.len() - line.trim_start_matches('#').len();
+        if level == 0 || !line[level..].starts_with(' ') {
+            continue;
+        }
+        let (section, chapters) = spans.last_mut().expect("至少有正文一段");
+        match section {
+            Section::Appendix => {
+                saw_h1 |= level == 1;
+                if level == 1 || (level == 2 && !saw_h1) {
+                    *chapters += 1;
+                }
+            }
+            // 摘要的标题由 `\begin{abstract}` 自己排，一个不写也不缺题。
+            Section::Abstract => {}
+            _ if level <= 2 => *chapters += 1,
+            _ => {}
+        }
+    }
+
+    let appendices = spans
+        .iter()
+        .filter(|(section, _)| *section == Section::Appendix);
+    if appendices.clone().any(|(_, chapters)| *chapters > 1) {
+        warnings.push(
+            "一个附件标识下有多份附录；与公文一致，每份附录前各写一个“<!-- [附录] -->”".into(),
+        );
+    }
+    if appendices.clone().any(|(_, chapters)| *chapters == 0) {
+        warnings.push("附件标识之后应写“## 附录标题”".into());
+    }
+    for (section, _) in spans.iter().filter(|(section, chapters)| {
+        matches!(section, Section::ChangeLog | Section::References) && *chapters == 0
+    }) {
+        let label = section.label();
+        warnings.push(format!(
+            "“{label}”区段应以“## {label}”开头，否则编译出的 PDF 里这一节没有标题"
+        ));
+    }
+}
+
 pub fn validate(
     input: &DraftInput,
     markdown: &str,
@@ -97,6 +158,7 @@ pub fn validate(
         if text.contains("[@") && input.research.bibliography_content.trim().is_empty() {
             warnings.push("正文包含 BibTeX 引用，但尚未导入 .bib 参考文献文件".into());
         }
+        research_section_warnings(text, &mut warnings);
     } else {
         if body_h1_count == 0 {
             warnings.push("缺少一级标题，请在导出前补充“# 标题”".into());
@@ -1060,6 +1122,57 @@ mod tests {
             warnings
                 .iter()
                 .any(|warning| warning.contains("不得超过10年")),
+            "{warnings:?}"
+        );
+    }
+
+    /// 研究报告的附件写法与公文统一：每份附录各写一个附件标识。
+    #[test]
+    fn research_appendices_want_one_marker_each() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+        let crowded = validate(
+            &input,
+            "## 研究背景\n\n正文。\n\n<!-- [附录] -->\n\n## 调查问卷\n\n问卷。\n\n## 原始数据\n\n数据。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            crowded
+                .iter()
+                .any(|warning| warning.contains("每份附录前各写一个")),
+            "{crowded:?}"
+        );
+
+        let separated = validate(
+            &input,
+            "## 研究背景\n\n正文。\n\n<!-- [附录] -->\n\n## 调查问卷\n\n问卷。\n\n<!-- [附录] -->\n\n## 原始数据\n\n数据。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !separated.iter().any(|warning| warning.contains("附录")),
+            "每份附录各带标识就不该再提示：{separated:?}"
+        );
+    }
+
+    /// 版本变更记录、参考文献的标题由区段里的首个标题充当，缺了 PDF 里就是无题的。
+    #[test]
+    fn an_unnumbered_research_section_without_a_heading_is_flagged() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+        let warnings = validate(
+            &input,
+            "## 研究背景\n\n正文。\n\n<!-- [版本变更记录] -->\n\n| 版本 | 日期 |\n| --- | --- |\n| V1.0 | 2026年1月 |\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("“版本变更记录”区段应以")),
             "{warnings:?}"
         );
     }
