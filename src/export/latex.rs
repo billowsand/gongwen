@@ -1406,7 +1406,52 @@ mod tests {
         // 标题后跟列表时不合并，仍输出独立标题段。
         let tex = letter_tex(&input, "# 测试函\n\n## 任务目标\n- 第一项\n- 第二项");
         assert!(tex.contains("{\\heiti\\enheiti 一、任务目标}\\GwaTail{"));
-        assert!(tex.contains("\\noindent • 第一项\\GwaTail{"));
+        // `- ` 按有序列表编号，独立成段、首行缩进两字。
+        assert!(
+            tex.contains("\\noindent\\hspace*{2em}1.第一项。\\GwaTail{"),
+            "{tex}"
+        );
+    }
+
+    /// 公文不分有序无序：`- ` 与 `1. ` 一样按设置里的有序列表样式编号，
+    /// 连着写就是同一串号。以前 `- ` 排成顶格的圆点条目，圆点在 TeX 里还丢字。
+    #[test]
+    fn bullet_items_are_numbered_like_ordered_ones() {
+        let input = DraftInput::default();
+        let numbering = crate::models::NumberingConfig {
+            list2: crate::models::ListNumbering::FullParen,
+            ..NumberingConfig::default()
+        };
+        let tex = official_letter_tex_with_numbering(
+            &input,
+            "# 测试函\n\n- 无序甲；\n1. 混排乙，\n- 无序丙，",
+            &UnitDisplay::new(&[]),
+            &numbering,
+        );
+        // 连着写就是同一串号，`- ` 与 `1. ` 混排也只编一串；末尾标点同样照
+        // 有序列表归一：组内出现分号就一路分号，末项收句号。
+        assert!(
+            tex.contains("\\noindent\\hspace*{2em}（1）无序甲；"),
+            "{tex}"
+        );
+        assert!(
+            tex.contains("\\noindent\\hspace*{2em}（2）混排乙；"),
+            "{tex}"
+        );
+        assert!(
+            tex.contains("\\noindent\\hspace*{2em}（3）无序丙。"),
+            "{tex}"
+        );
+        assert!(!tex.contains('•'), "圆点不该再出现在 TeX 里：{tex}");
+    }
+
+    /// 紧跟正文（中间没有空行）的 `- ` 列表也照有序列表办：并进同一自然段，
+    /// 用段内列表样式编号。
+    #[test]
+    fn bullet_items_right_after_body_text_join_the_paragraph() {
+        let input = DraftInput::default();
+        let tex = letter_tex(&input, "# 测试函\n\n正文：\n- 第一项，\n- 第二项；");
+        assert!(tex.contains("正文：①第一项。②第二项。"), "{tex}");
     }
 
     #[test]

@@ -39,8 +39,8 @@ pub(crate) use paragraphs::{
     agenda_blank_line, agenda_body_paragraph, attachment_document_title_paragraph,
     attachment_label_paragraph, body_paragraph, compact_heading_paragraph,
     document_title_paragraph, heading_paragraph, image_paragraph, joint_closing_paragraph,
-    joint_signature_cell_paragraph, label_paragraph, letter_security_paragraph,
-    ordered_list_paragraph, red_approval_title_paragraph, red_record_paragraph,
+    joint_signature_cell_paragraph, letter_security_paragraph, ordered_list_paragraph,
+    red_approval_title_paragraph, red_record_paragraph,
 };
 pub(crate) use record::add_footer_record;
 pub(crate) use red::{
@@ -440,10 +440,6 @@ pub fn write_docx_with_numbering(
                         continue;
                     }
                     doc = doc.add_paragraph(body_paragraph(text, bold));
-                }
-                MarkdownBlock::ListItem(text) => {
-                    // TeX：\noindent{文本}\par，无序列表项顶格，不额外缩进。
-                    doc = doc.add_paragraph(label_paragraph(text, bold));
                 }
                 MarkdownBlock::OrderedListItem { number, text } => {
                     doc = doc.add_paragraph(ordered_list_paragraph(

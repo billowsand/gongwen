@@ -665,9 +665,7 @@ fn body_paragraph_ranges(markdown: &str) -> Vec<std::ops::Range<usize>> {
             export::MarkdownBlock::Marker(export::MarkdownSection::Body) => {
                 in_attachment = false;
             }
-            export::MarkdownBlock::Paragraph(_)
-            | export::MarkdownBlock::ListItem(_)
-            | export::MarkdownBlock::OrderedListItem { .. }
+            export::MarkdownBlock::Paragraph(_) | export::MarkdownBlock::OrderedListItem { .. }
                 if !in_attachment =>
             {
                 ranges.push(located.range.clone());

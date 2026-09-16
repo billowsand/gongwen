@@ -517,19 +517,6 @@ pub(crate) fn red_build_print_layout(
                     true,
                 );
             }
-            MarkdownBlock::ListItem(text) => {
-                // 与 TeX 的 \noindent{文本}\par、Word 导出和其余五个文种的预览一致：
-                // 顶格排、不加项目符号，行内加粗与括号楷体照常生效。
-                red_place_flow_text(
-                    ui,
-                    metrics,
-                    &mut state,
-                    located.range.clone(),
-                    export::inline_segments(text),
-                    RedTextStyle::Body,
-                    false,
-                );
-            }
             MarkdownBlock::OrderedListItem { number, text } => {
                 let prefix = export::render_list_number(numbering.list2, *number);
                 let mut segments = export::inline_segments(&format!("{prefix}{text}"));

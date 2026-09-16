@@ -147,19 +147,6 @@ pub(crate) fn clickable_content_block(
                 clicked,
             );
         }
-        // 与 TeX 的 `\noindent{文本}\par` 及 Word 导出一致：无序列表项顶格。
-        MarkdownBlock::ListItem(text) => {
-            clickable_text_block(
-                ui,
-                metrics,
-                text,
-                false,
-                source,
-                anchor,
-                scroll_to_anchor,
-                clicked,
-            );
-        }
         MarkdownBlock::OrderedListItem { number, text } => {
             let prefix = export::render_list_number(numbering.list2, *number);
             clickable_text_block(
@@ -609,10 +596,6 @@ pub(crate) fn content_block(
         }
         MarkdownBlock::Paragraph(text) if is_renderable_paragraph(text) => {
             body_block(ui, metrics, text, true);
-        }
-        MarkdownBlock::ListItem(text) => {
-            // 与 TeX 的 `\noindent{文本}\par` 及 Word 导出一致：无序列表项顶格。
-            body_block(ui, metrics, text, false);
         }
         MarkdownBlock::OrderedListItem { number, text } => {
             let prefix = export::render_list_number(numbering.list2, *number);

@@ -15,9 +15,9 @@ pub(crate) enum MarkdownBlock {
     Title(String),
     Heading(u8, String),
     Paragraph(String),
-    ListItem(String),
-    /// 独立有序列表的一项。源码沿用标准 Markdown 的 `1. 内容`，`number`
-    /// 是按同一组连续列表自动计算后的显示序号。
+    /// 独立列表的一项。源码写 `1. 内容` 或 `- 内容` 都归到这里——公文不分有序
+    /// 无序（见 `parse_list_item`）。`number` 是按同一组连续列表自动计算后的
+    /// 显示序号，样式取设置里的有序列表编号。
     OrderedListItem {
         number: usize,
         text: String,
@@ -454,14 +454,16 @@ fn parse_located(
                 source_segments: Vec::new(),
             });
             continue;
-        } else if let Some((start_number, _)) = parse_ordered_item(line) {
-            // 连续的有序列表行作为一组处理：既要统一末尾标点，也要只认首项
-            // 的起始序号，后续源码可以像常见 Markdown 写法一样全部写 `1.`。
+        } else if let Some((start_number, _)) = parse_list_item(line) {
+            // 连续的列表行作为一组处理：既要统一末尾标点，也要只认首项的起始
+            // 序号，后续源码可以像常见 Markdown 写法一样全部写 `1.`。
+            // `- ` 与 `1. ` 归在同一组，混着写也只编一串号。
+            let start_number = start_number.unwrap_or(1);
             let mut group_end = span.end;
             let mut items = Vec::new();
             while index < lines.len() {
                 let item = &lines[index];
-                let Some((_, text)) = parse_ordered_item(item.text.trim()) else {
+                let Some((_, text)) = parse_list_item(item.text.trim()) else {
                     break;
                 };
                 items.push((item.start..item.start + item.len, text.to_string()));
@@ -501,13 +503,6 @@ fn parse_located(
                 }
             }
             continue;
-        } else if let Some(text) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
-            blocks.push(LocatedBlock {
-                block: MarkdownBlock::ListItem(format!("• {}", text.trim())),
-                range: span,
-                source_segments: Vec::new(),
-            });
         } else {
             if paragraph.is_empty() {
                 paragraph_range = span.clone();
@@ -525,8 +520,29 @@ fn parse_located(
     normalize_legacy_attachments(blocks)
 }
 
+/// 一行列表项：`1. 内容`（显式序号）或 `- 内容` / `* 内容`（无序号，按它在
+/// 这一组里的位次编）。
+///
+/// 公文不分有序无序，两种写法在这里归一成同一种块，往下三端都按设置里的有序
+/// 列表样式排。圆点本来也排不出来：预览的公文字体没有 U+2022，画出来是个问号；
+/// TeX 那边直接丢字；只有 Word 能显示成一个小圆点，三端各说各话。何况正式行文
+/// 本来就一律用序号，圆点没有存在的理由。
+pub(crate) fn parse_list_item(line: &str) -> Option<(Option<usize>, &str)> {
+    if let Some((number, text)) = parse_ordered_item(line) {
+        return Some((Some(number), text));
+    }
+    let text = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))?;
+    Some((None, text.trim()))
+}
+
 /// 标准 Markdown 有序列表项：允许行首最多三个空格，点号后必须有空白。
 /// 空内容仍返回，编辑器借此识别按第二次回车退出列表的占位行。
+///
+/// 只认 `N. `。源码层面的续写与重排（`continue_ordered_list`、
+/// `renumber_ordered_groups`）都只动显式写了序号的行，不去改写用户敲的 `- `；
+/// 成文时怎么编号是 `parse_list_item` 的事。
 pub(crate) fn parse_ordered_item(line: &str) -> Option<(usize, &str)> {
     let leading = line.len() - line.trim_start_matches(' ').len();
     if leading > 3 {

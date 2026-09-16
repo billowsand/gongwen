@@ -97,7 +97,8 @@ pub(crate) fn set_heading(line: &str, level: u8) -> String {
     }
 }
 
-/// 项目符号开关：已经是 `- ` / `* ` 开头就去掉，否则加上。
+/// 列表项开关：已经是 `- ` / `* ` 开头就去掉，否则加上。公文不分有序无序，
+/// `- ` 与 `1. ` 成文时都按设置里的列表编号样式排（见 `export::parse_list_item`）。
 pub(crate) fn toggle_bullet(line: &str) -> String {
     let body = line.trim_start();
     match body.strip_prefix("- ").or_else(|| body.strip_prefix("* ")) {
@@ -272,7 +273,6 @@ pub(crate) fn body_stats(markdown: &str) -> (usize, usize) {
             export::MarkdownBlock::Title(text) | export::MarkdownBlock::Heading(_, text) => {
                 text.clone()
             }
-            export::MarkdownBlock::ListItem(text) => text.trim_start_matches('•').to_string(),
             export::MarkdownBlock::OrderedListItem { number, text } => {
                 format!("{number}.{text}")
             }

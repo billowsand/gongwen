@@ -653,13 +653,6 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                     ));
                 }
             }
-            MarkdownBlock::ListItem(text) => {
-                target_tex_section(section, &mut body, &mut attachments).push(format!(
-                    "\\noindent {}{}",
-                    body_text_to_tex(text),
-                    gwa_tail(lines, index)
-                ));
-            }
             MarkdownBlock::OrderedListItem { number, text } => {
                 let prefix = render_list_number(numbering.list2, *number);
                 target_tex_section(section, &mut body, &mut attachments).push(format!(

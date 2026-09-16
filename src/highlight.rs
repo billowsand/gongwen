@@ -199,7 +199,6 @@ const OFFICIAL_TITLE_PT: f32 = 22.0;
 const OFFICIAL_TABLE_PT: f32 = 14.0;
 const OFFICIAL_LINE_PT: f32 = 28.0;
 const OFFICIAL_TABLE_LINE_PT: f32 = 21.0;
-const OFFICIAL_LIST_INDENT_PT: f32 = 21.0;
 
 fn official_format(family: &str, size_pt: f32, line_pt: f32, color: Color32) -> TextFormat {
     TextFormat {
@@ -562,23 +561,10 @@ fn hybrid_line(
         return;
     }
 
-    if let Some(rest) = trimmed.strip_prefix("- ").or(trimmed.strip_prefix("* ")) {
-        let marker = if active {
-            let mut format = body.clone();
-            format.color = theme::md::bullet();
-            format
-        } else {
-            hidden_marker(OFFICIAL_LINE_PT)
-        };
-        let mut leading = OFFICIAL_LIST_INDENT_PT * PT;
-        append_with_leading(job, indent, &mut leading, body.clone());
-        append_with_leading(job, &trimmed[..2], &mut leading, marker);
-        append_hybrid_inline(job, rest, &body, active, &mut leading);
-        return;
-    }
-
+    // 列表：`1. ` 与 `- ` 同一条路。公文不分有序无序，实时排版里也要看见
+    // 成文后的序号，不能让编辑区显示圆点、预览显示「（1）」。
     if let Some(info) = ordered
-        && let Some((_, rest)) = export::parse_ordered_item(trimmed)
+        && let Some((_, rest)) = export::parse_list_item(trimmed)
     {
         let split = rest.as_ptr() as usize - trimmed.as_ptr() as usize;
         let marker = if active {
@@ -639,7 +625,7 @@ pub(crate) fn ordered_list_lines(text: &str) -> Vec<Option<OrderedLine>> {
     let mut next_number = None;
     let mut group_inline = false;
     for (index, line) in source_lines.iter().enumerate() {
-        if let Some((source_number, _)) = export::parse_ordered_item(line.trim_end()) {
+        if let Some((source_number, _)) = export::parse_list_item(line.trim_end()) {
             if next_number.is_none() {
                 group_inline = located.iter().any(|block| {
                     matches!(&block.block, export::MarkdownBlock::Paragraph(_))
@@ -647,7 +633,8 @@ pub(crate) fn ordered_list_lines(text: &str) -> Vec<Option<OrderedLine>> {
                         && starts[index] <= block.range.end
                 });
             }
-            let number = next_number.unwrap_or(source_number);
+            // `- ` 不带序号，起组时从 1 编起，与解析器的分组口径一致。
+            let number = next_number.unwrap_or(source_number.unwrap_or(1));
             result[index] = Some(OrderedLine {
                 number,
                 inline: group_inline,
@@ -1570,6 +1557,43 @@ mod tests {
                 number: 4,
                 inline: false,
             })
+        );
+    }
+
+    /// `- ` 与 `1. ` 在实时排版里编同一串号：公文不分有序无序，编辑区看见的
+    /// 序号必须就是成文后的序号，不能编辑区画圆点、预览画「（1）」。
+    #[test]
+    fn bullet_lines_get_the_same_display_numbers_as_ordered_ones() {
+        let lines = ordered_list_lines("- 无序甲\n1. 混排乙\n- 无序丙\n\n- 另起一组");
+        assert_eq!(
+            lines[0],
+            Some(OrderedLine {
+                number: 1,
+                inline: false,
+            })
+        );
+        assert_eq!(
+            lines[1],
+            Some(OrderedLine {
+                number: 2,
+                inline: false,
+            })
+        );
+        assert_eq!(
+            lines[2],
+            Some(OrderedLine {
+                number: 3,
+                inline: false,
+            })
+        );
+        assert_eq!(lines[3], None, "空行断组");
+        assert_eq!(
+            lines[4],
+            Some(OrderedLine {
+                number: 1,
+                inline: false,
+            }),
+            "空行之后重新从 1 编起"
         );
     }
 

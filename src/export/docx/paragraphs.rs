@@ -31,18 +31,6 @@ pub(crate) fn body_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
     paragraph
 }
 
-pub(crate) fn label_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
-    let mut paragraph = Paragraph::new().align(AlignmentType::Both).line_spacing(
-        LineSpacing::new()
-            .line(super::BODY_LINE_TWIPS as i32)
-            .line_rule(LineSpacingType::Exact),
-    );
-    for run in body_runs(text, bold) {
-        paragraph = paragraph.add_run(run);
-    }
-    paragraph
-}
-
 /// TeX makeletter 的主送 / 呈报领导为三号楷体，中西文字体一致。
 pub(crate) fn addressee_paragraph(text: &str) -> Paragraph {
     Paragraph::new()
@@ -69,19 +57,7 @@ pub(crate) fn ordered_list_paragraph(
     bold: BoldFont<'_>,
 ) -> Paragraph {
     let prefix = crate::export::render_list_number(style, number);
-    let mut paragraph = Paragraph::new()
-        .align(AlignmentType::Both)
-        .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
-        .line_spacing(
-            LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
-                .line_rule(LineSpacingType::Exact),
-        )
-        .widow_control(true);
-    for run in body_runs(&format!("{prefix}{text}"), bold) {
-        paragraph = paragraph.add_run(run);
-    }
-    paragraph
+    body_paragraph(&format!("{prefix}{text}"), bold)
 }
 
 /// 函稿/电话通知顶格的密级行：密级 + ★ + 保密期限。勾选“指人专办”时，

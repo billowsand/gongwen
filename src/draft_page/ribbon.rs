@@ -715,8 +715,8 @@ impl DraftPage<'_> {
                 bold = true;
             }
             if ui
-                .add(theme::icon_text_button(theme::Icon::List, "项目符号"))
-                .on_hover_text("当前行加上 `- `；已经是列表项的再点一次去掉")
+                .add(theme::icon_text_button(theme::Icon::List, "列表项"))
+                .on_hover_text("当前行加上 `- `；已经是列表项的再点一次去掉。公文不分有序无序，成文时按设置里的列表编号样式排")
                 .clicked()
             {
                 bullet = true;
@@ -767,7 +767,7 @@ impl DraftPage<'_> {
             self.toggle_bold(ui.ctx());
         }
         if bullet {
-            self.apply_line_edit(ui.ctx(), toggle_bullet, "已切换项目符号。");
+            self.apply_line_edit(ui.ctx(), toggle_bullet, "已切换列表项。");
         }
         if inline_ordered {
             self.apply_ordered_list(ui.ctx(), true);
