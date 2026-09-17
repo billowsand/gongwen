@@ -28,6 +28,7 @@ pub(crate) use layout::{
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
+pub(crate) use research::outline as research_outline;
 pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 // test-only names（根文件的测试模块使用）
 #[cfg(test)]
@@ -86,9 +87,13 @@ const RESEARCH_MARGIN_TOP_MM: f32 = 37.0;
 const RESEARCH_CONTENT_MM: f32 = 156.0;
 const RESEARCH_BODY_PT: f32 = 14.0;
 const RESEARCH_LINE_PT: f32 = 24.0;
-const RESEARCH_CHAPTER_PT: f32 = 22.0; // 二号
+// 章标题是小二，不是二号：`md2tex.cls` 的 `chapter/format` 与摘要的
+// `\chapter*` 都写死 `\zihao{-2}`（18bp）。封面的文件类型才是 `\zihao{2}`，
+// 所以两者各占一个常量，不再共用。
+const RESEARCH_CHAPTER_PT: f32 = 18.0; // 章标题，小二
 const RESEARCH_CAPTION_PT: f32 = 12.0; // 图表题注，小四
 const RESEARCH_COVER_TITLE_PT: f32 = 26.0; // 封面题名，一号
+const RESEARCH_COVER_TYPE_PT: f32 = 22.0; // 封面文件类型，二号
 const RESEARCH_COVER_PT: f32 = 16.0; // 封面要素，三号
 
 /// 缩放后的版式尺寸，单位都是 egui 逻辑像素。
@@ -484,7 +489,7 @@ mod tests {
             assert!(text.contains(expected), "封面应排出“{expected}”：{text}");
         }
         // 章节编号由程序生成
-        assert!(text.contains("第 1 章"), "章标题应自动编号：{text}");
+        assert!(text.contains("第1章"), "章标题应自动编号：{text}");
         assert!(text.contains("1.1"), "节标题应自动编号：{text}");
         assert!(text.contains("摘要"), "摘要区段应排出标题：{text}");
         // 区段标记是写给解析器看的，一个字符都不该印在纸上。

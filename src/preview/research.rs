@@ -5,7 +5,7 @@
 //! 字号、行距、标题层级都对齐 mdx 的 `md2tex.cls`：
 //!
 //! - 版心 `left=28mm, top=37mm, width=156mm`，正文 14bp / 24pt；
-//! - `##` 是章（二号黑体居中，编号"第 N 章"），`###`、`####` 依次是节和小节，
+//! - `##` 是章（小二黑体居中，编号"第N章"），`###`、`####` 依次是节和小节，
 //!   编号 `N.M`、`N.M.K`，由程序生成，正文里不写；
 //! - 摘要、版本变更记录、参考文献这些区段由 `<!-- [...] -->` 标记切换，标题
 //!   不编号；附录切到字母章号"附录A"。
@@ -24,7 +24,8 @@ use super::layout::{TextRun, clickable, line_block, line_block_runs, sheet};
 use super::render::{PreviewOutput, content_block, image_block};
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
-    RESEARCH_CHAPTER_PT, RESEARCH_COVER_PT, RESEARCH_COVER_TITLE_PT, gutter, indent,
+    RESEARCH_CHAPTER_PT, RESEARCH_COVER_PT, RESEARCH_COVER_TITLE_PT, RESEARCH_COVER_TYPE_PT,
+    gutter, indent,
 };
 use crate::export::crossref::{self, ResearchMarks};
 use crate::export::{self, LocatedBlock, MarkdownBlock, ResearchSection, parse_research_marker};
@@ -144,10 +145,12 @@ impl Walk {
         self.figure = 0;
         self.table = 0;
         let number = self.chapter_number();
+        // ctex 的 `name = {第,章}` 是直接和 `\thechapter` 拼起来的，中间不插空格，
+        // 数字两侧一空排出来就比 PDF 宽半个字。
         let heading = if self.appendix_started {
             format!("附录{number}")
         } else {
-            format!("第 {number} 章")
+            format!("第{number}章")
         };
         (heading, number)
     }
@@ -447,7 +450,7 @@ fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
     walk(blocks, markdown, |located, kind, anchor| {
         if let Some(anchor) = anchor {
             let number = match &kind {
-                // 章锚点引的是 `\thechapter`（`1`、`A`），不是"第 1 章"整串。
+                // 章锚点引的是 `\thechapter`（`1`、`A`），不是"第1章"整串。
                 Kind::Chapter { number, .. } | Kind::Section { number, .. } => Some(number.clone()),
                 Kind::Figure { number, .. } => number.clone(),
                 Kind::Table { caption } => caption.as_ref().map(|caption| caption.number.clone()),
@@ -474,6 +477,60 @@ fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
         }
     });
     marks
+}
+
+/// 导航大纲里的一条标题。
+///
+/// 右缘导航原先一律走公文那套计数器，研究报告的 `##` 会被排成「一、」——纸上
+/// 印的是「第1章」，导航里写的是「一、」，同一个标题两个号。这里把编号交回
+/// [`walk`]，与版面用的是同一遍推算。
+pub(crate) struct OutlineEntry {
+    /// 与公文口径对齐的层级：1 留给不进刻度的文档标题（研究报告没有，题名在
+    /// 封面上），2 是章（含摘要、参考文献、附录），3 起是 `1.1`、`1.1.1`。
+    pub(crate) level: u8,
+    /// 纸面上印在标题前的整串编号，连同它与标题之间那个间隔——导航直接把它和
+    /// 标题拼起来，拼出来就该和纸上一模一样。不编号的章（摘要、参考文献、
+    /// 版本变更记录）没有。
+    pub(crate) number: Option<String>,
+    pub(crate) text: String,
+    /// 标题那一块在源码里的字节范围，导航靠它跳转和回查版面位置。
+    pub(crate) line: Range<usize>,
+}
+
+/// 扫一遍源码，按研究报告的规则取出全部标题与编号。
+pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
+    let marks = collect_marks(&export::parse_markdown_located(markdown), markdown);
+    let located = export::parse_markdown_located_research(markdown, &marks);
+    let mut entries = Vec::new();
+    walk(&located, markdown, |located, kind, _| {
+        let (level, number, text) = match kind {
+            // "摘要"那行标题来自 `\begin{abstract}`，不对应任何一行源码，只能挂在
+            // 摘要首块内容上——跳过去落在标题正下方，够用。
+            Kind::AbstractOpen => (2, None, "摘要".to_string()),
+            Kind::Chapter { heading, text, .. } => {
+                (2, Some(format!("{heading}{CHAPTER_GAP}")), text)
+            }
+            Kind::ChapterStar(text) => (2, None, text),
+            // 层级由编号自己说明：`1.1` 是节，`1.1.1` 是小节，附录的 `A.1` 同理。
+            Kind::Section { number, text } => (
+                2 + number.matches('.').count().min(3) as u8,
+                Some(format!("{number}{SECTION_GAP}")),
+                text,
+            ),
+            Kind::SectionStar(text) | Kind::AbstractHeading(text) => (3, None, text),
+            _ => return,
+        };
+        if text.is_empty() && number.is_none() {
+            return;
+        }
+        entries.push(OutlineEntry {
+            level,
+            number,
+            text,
+            line: located.range.clone(),
+        });
+    });
+    entries
 }
 
 pub(crate) fn research_preview(
@@ -561,7 +618,7 @@ fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput) {
                 metrics,
                 doc_type,
                 theme::FONT_HEITI,
-                RESEARCH_CHAPTER_PT,
+                RESEARCH_COVER_TYPE_PT,
                 Align::Center,
             );
             ui.add_space(metrics.line * 2.0);
@@ -635,7 +692,7 @@ fn body_item(
                 anchor,
                 scroll_to_anchor,
                 clicked,
-                |ui| chapter_title(ui, metrics, &format!("{heading}　{text}")),
+                |ui| chapter_title(ui, metrics, &format!("{heading}{CHAPTER_GAP}{text}")),
             );
         }
         Kind::ChapterStar(text) => {
@@ -657,7 +714,7 @@ fn body_item(
                 anchor,
                 scroll_to_anchor,
                 clicked,
-                |ui| section_title(ui, metrics, &format!("{number}　{text}")),
+                |ui| section_title(ui, metrics, &format!("{number}{SECTION_GAP}{text}")),
             );
         }
         Kind::SectionStar(text) => {
@@ -794,7 +851,18 @@ fn plain(
     );
 }
 
-/// 章标题：二号黑体居中，上下各空一行。
+/// 章号与章名之间的间隔：ctex 的 `chapter/aftername` 默认 `\quad`，一个汉字宽，
+/// 用全角空格对得上。
+const CHAPTER_GAP: &str = "\u{3000}";
+
+/// 节号与节名之间的间隔：`\titleformat{\section}{...}{\thesection}{0.5em}{}`
+/// 的第三个参数是 0.5em，只有章标题那档才是一个汉字。预览里的黑体西文是半角
+/// 等宽（`.`、数字、空格都占 0.5em），所以一个 ASCII 空格正好是 0.5em；这里若
+/// 用全角空格就宽出一倍——"1.1" 本身没有夹空格，看着宽是这个间隔撑的。
+/// 不用 U+2002（en space）是因为 SimHei 没有这个码位，会掉进回退字体。
+const SECTION_GAP: &str = " ";
+
+/// 章标题：小二黑体居中，上下各空一行。
 fn chapter_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
     ui.add_space(metrics.line);
     line_block(
@@ -874,7 +942,7 @@ mod tests {
             "![总体架构](images/a.png){#fig:a}\n",
         ));
 
-        assert!(text.contains("第 1 章　研究背景"), "{text}");
+        assert!(text.contains("第1章　研究背景"), "{text}");
         assert!(
             text.contains("见第1章、表1.1与图1.1，另见[1,2]。"),
             "行内标记都应换成纸面编号：{text}"
@@ -915,7 +983,7 @@ mod tests {
         assert!(text.contains("版本变更记录"), "{text}");
         assert!(text.contains("V1.1 修订"), "{text}");
         assert!(
-            !text.contains("第 1 章"),
+            !text.contains("第1章"),
             "不编号区段里的标题不该拿到章号：{text}"
         );
     }
@@ -929,10 +997,10 @@ mod tests {
             "<!-- [附件] -->\n\n## 原始数据\n\n数据。\n",
         ));
 
-        assert!(text.contains("第 1 章　研究背景"), "{text}");
+        assert!(text.contains("第1章　研究背景"), "{text}");
         assert!(text.contains("附录A　调查问卷"), "{text}");
         assert!(text.contains("附录B　原始数据"), "{text}");
-        assert!(!text.contains("第 2 章"), "附录不再占用正文章号：{text}");
+        assert!(!text.contains("第2章"), "附录不再占用正文章号：{text}");
     }
 
     /// 附录里的图表跟着字母章号走，与 LaTeX 的 `\thefigure` 一致。

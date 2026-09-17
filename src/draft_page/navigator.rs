@@ -30,9 +30,11 @@
 //! 高斯模糊，所以这里是「不透明底色 + 颗粒 + 投影」，靠挡而不是靠糊——详见
 //! [`paint_panel`]。
 //!
-//! 编号一律来自 [`export::HeadingCounters`]，与 DOCX/LaTeX 导出和版式预览共用同一套
-//! 计数器。导航里写「三、」而预览里排出「四、」是最难查的那类 bug，共用计数器
-//! 从根上排除它。
+//! 编号一律与版面同源，不另算一遍：公文走 [`export::HeadingCounters`]，研究报告
+//! 走 [`preview::research_outline`]（内部就是排版那一遍）。导航里写「三、」而预览里
+//! 排出「四、」是最难查的那类 bug，共用计数器从根上排除它。两套模板的编号体系
+//! 完全不同——公文是「一、（一）1.」，研究报告是「第1章 / 1.1 / 附录A」，而且后者
+//! 不受设置里的编号样式影响——所以 [`collect_entries`] 在入口处就按模板分流。
 //!
 //! 整块可以关掉：「视图 → 导航」或设置页里那一项，对应
 //! `AppConfig::show_preview_navigator`。默认开——刻度只占右缘十几个点，
@@ -97,6 +99,10 @@ pub(crate) struct NavEntry {
     pub(crate) is_attachment_title: bool,
     /// 标题行在源码中的字节范围。跳转、回查版面位置都用它。
     pub(crate) line: Range<usize>,
+    /// 这条标题在纸上的字面。公文按层级分（黑体一级、楷体二级、更深仿宋），
+    /// 研究报告各级一律黑体——由收集这一条的人说了算，不在画的时候按层级猜：
+    /// 两套模板的层级含义不一样，同一个 `level` 猜不出同一支字体。
+    pub(crate) family: &'static str,
 }
 
 /// 公文预览滚动区上一帧的量度。导航靠它把版面位置换算成刻度条上的位置。
@@ -117,6 +123,11 @@ pub(crate) fn collect_entries(
     numbering: &NumberingConfig,
     kind: TemplateKind,
 ) -> Vec<NavEntry> {
+    // 研究报告的编号自成一套（第1章 / 1.1 / 1.1.1 / 附录A），跟设置里的公文编号
+    // 样式无关，也不该被公文计数器排成「一、」。交给版面那遍走。
+    if kind.is_research() {
+        return research_entries(markdown);
+    }
     let mut counters = export::HeadingCounters::with_numbering(*numbering);
     let mut section = export::MarkdownSection::Body;
     let mut entries = Vec::new();
@@ -135,18 +146,13 @@ pub(crate) fn collect_entries(
             _ if centered_title => 1,
             _ => continue,
         };
-        let raw = line.trim_start().trim_start_matches('#').trim();
-        let visible = if kind.is_research() {
-            export::crossref::strip_heading_identifiers(raw).into_owned()
-        } else {
-            raw.to_string()
-        };
+        let visible = line.trim_start().trim_start_matches('#').trim();
         // 只有带编号的标题才清洗人工编号——解析器对正式标题（`#`）也不清洗，
         // 导航要和版式预览逐字一致。清洗规则会吃掉「一、」这样的开头，
         // 对标题一视同仁地跑一遍，反而可能把标题本身的字去掉。
         let text = match level {
-            0 | 1 => visible,
-            _ => export::clean_heading_number(&visible),
+            0 | 1 => visible.to_string(),
+            _ => export::clean_heading_number(visible),
         };
         entries.push(NavEntry {
             level,
@@ -154,9 +160,36 @@ pub(crate) fn collect_entries(
             text,
             is_attachment_title: centered_title && section == export::MarkdownSection::Attachment,
             line: line_range,
+            // 文档标题与附件标题在纸上是方正小标宋，预览把它排在独立的标题块里，
+            // 不走 `heading_family`，所以这一级单独对上。
+            family: match level {
+                0 | 1 => theme::FONT_BIAOSONG,
+                _ => preview::heading_family(level),
+            },
         });
     }
     entries
+}
+
+/// 研究报告的标题：编号由 [`preview::research_outline`] 推算，与版式预览共用
+/// 同一遍走法，所以刻度上写的号就是纸上印的号。
+///
+/// 研究报告没有"文档标题"这一级——题名在封面上，不在正文里，所以最浅的一层
+/// 就是章，直接从公文口径的第 2 级起算，章一样进刻度。各级标题在纸上都是黑体
+/// （`md2tex.cls` 的 `chapter/format` 与三条 `\titleformat` 全用 `\heiti`），
+/// 不像公文那样按层级换字面。
+fn research_entries(markdown: &str) -> Vec<NavEntry> {
+    preview::research_outline(markdown)
+        .into_iter()
+        .map(|entry| NavEntry {
+            level: entry.level,
+            number: entry.number,
+            text: entry.text,
+            is_attachment_title: false,
+            line: entry.line,
+            family: theme::FONT_HEITI,
+        })
+        .collect()
 }
 
 /// 回查某个标题这一帧被画在屏幕的什么高度。
@@ -546,13 +579,8 @@ fn level_indent(level: u8) -> f32 {
 
 /// 板上某一层级的标题该用哪支字体。直接取版式预览那一套，不另立一份映射：
 /// 两份映射迟早会走岔，而走岔的表现是导航里的「一、」是黑体、纸上却成了楷体。
-fn label_family(level: u8) -> egui::FontFamily {
-    match level {
-        // 文档标题与附件标题在纸上是方正小标宋。预览把它排在独立的标题块里，
-        // 不走 `heading_family`，所以这一级要在这里单独对上。
-        0 | 1 => theme::official_family(theme::FONT_BIAOSONG),
-        _ => theme::official_family(preview::heading_family(level)),
-    }
+fn label_family(entry: &NavEntry) -> egui::FontFamily {
+    theme::official_family(entry.family)
 }
 
 /// 一条标题在板上的字面。
@@ -573,7 +601,7 @@ fn label_galley(
     }
     let mut job = egui::text::LayoutJob::simple_singleline(
         text,
-        egui::FontId::new(size, label_family(entry.level)),
+        egui::FontId::new(size, label_family(entry)),
         theme::text(),
     );
     // 超过一行就截断。公文标题动辄二十几字，整条铺出去会横穿版面。
@@ -967,21 +995,54 @@ mod tests {
         );
     }
 
-    #[test]
-    fn research_headings_hide_cross_reference_identifiers() {
-        let markdown = concat!(
-            "## 研究背景 {#chap:bg}\n\n",
-            "### 相关工作{@chap:prior} [@wang2020; @li2021]\n",
-        );
-        let labels = collect_entries(
+    fn research_labels(markdown: &str) -> Vec<String> {
+        collect_entries(
             markdown,
             &NumberingConfig::default(),
             TemplateKind::ResearchReport,
         )
         .iter()
         .map(label_text)
-        .collect::<Vec<_>>();
-        assert_eq!(labels, vec!["一、研究背景", "（一）相关工作"]);
+        .collect()
+    }
+
+    #[test]
+    fn research_numbering_is_the_reports_own_not_the_official_one() {
+        // 研究报告的号是「第1章 / 1.1 / 1.1.1 / 附录A」，不是公文的「一、（一）」。
+        // 纸上印一套、导航里写另一套，等于全篇标题都对不上号。
+        let markdown = concat!(
+            "<!-- [摘要] -->\n\n# 摘要\n\n摘要正文。\n\n",
+            "<!-- [正文] -->\n\n## 研究背景\n\n### 研究方法\n\n#### 数据来源\n\n## 主要发现\n\n",
+            "<!-- [附录] -->\n\n# 调查问卷\n\n## 问卷说明\n",
+        );
+        assert_eq!(
+            research_labels(markdown),
+            vec![
+                "摘要",
+                "第1章　研究背景",
+                "1.1 研究方法",
+                "1.1.1 数据来源",
+                "第2章　主要发现",
+                "附录A　调查问卷",
+                "A.1 问卷说明",
+            ]
+        );
+    }
+
+    #[test]
+    fn research_headings_resolve_cross_references_the_way_the_paper_does() {
+        // 标题里的锚点不占纸面，交叉引用和文献引用要换成号——换出来什么，
+        // 导航里就写什么。原先这里是把这些标记整段抹掉，抹掉的结果纸上没有。
+        let markdown = concat!(
+            "<!-- [正文] -->\n\n## 研究背景 {#chap:bg}\n\n",
+            "### 相关工作，见第{@chap:bg}章 [@wang2020; @li2021]\n",
+        );
+        let labels = research_labels(markdown);
+        assert_eq!(
+            labels,
+            vec!["第1章　研究背景", "1.1 相关工作，见第1章 [1,2]"]
+        );
+        // 供转换器使用的标识符一个都不许漏到板上。
         assert!(
             labels
                 .iter()
@@ -1080,21 +1141,37 @@ mod tests {
     fn the_labels_use_the_same_faces_as_the_paper() {
         // 板上的字体必须与纸上逐级对应：公文的层级本来就是靠字体区分的，
         // 导航里「一、」是黑体而纸上排成楷体，等于把层级读错。
+        let official = "# 关于加强某项工作的通知\n\n## 总体要求\n\n### 指导思想\n\n#### 基本原则\n\n##### 具体条款\n";
         assert_eq!(
-            label_family(1),
-            theme::official_family(theme::FONT_BIAOSONG)
+            entries(official)
+                .iter()
+                .map(label_family)
+                .collect::<Vec<_>>(),
+            [
+                theme::FONT_BIAOSONG,
+                theme::FONT_HEITI,
+                theme::FONT_KAITI,
+                theme::FONT_FANGSONG,
+                theme::FONT_FANGSONG,
+            ]
+            .map(theme::official_family)
         );
-        assert_eq!(label_family(2), theme::official_family(theme::FONT_HEITI));
-        assert_eq!(label_family(3), theme::official_family(theme::FONT_KAITI));
-        for deeper in [4, 5] {
-            assert_eq!(
-                label_family(deeper),
-                theme::official_family(theme::FONT_FANGSONG)
-            );
+        // 研究报告不按层级换字面：`md2tex.cls` 里章和三级节标题全是 `\heiti`，
+        // 照公文那套排下去，「1.1」在纸上是黑体、在导航里却成了楷体。
+        let research = "<!-- [正文] -->\n\n## 研究背景\n\n### 研究方法\n\n#### 数据来源\n";
+        for face in collect_entries(
+            research,
+            &NumberingConfig::default(),
+            TemplateKind::ResearchReport,
+        )
+        .iter()
+        .map(label_family)
+        {
+            assert_eq!(face, theme::official_family(theme::FONT_HEITI));
         }
-        // 任何一级都不许退回界面默认的无衬线。
-        for level in 0..=6u8 {
-            assert_ne!(label_family(level), egui::FontFamily::Proportional);
+        // 任何一条都不许退回界面默认的无衬线。
+        for entry in entries(official) {
+            assert_ne!(label_family(&entry), egui::FontFamily::Proportional);
         }
     }
 

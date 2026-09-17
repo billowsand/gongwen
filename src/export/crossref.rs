@@ -61,20 +61,6 @@ pub(crate) fn citation_keys(text: &str) -> Vec<&str> {
         .collect()
 }
 
-/// 大纲标题只保留可读文字，不显示研究报告 Markdown 中供转换器使用的标识符。
-///
-/// 行尾锚点本来就不占纸面；标题里的交叉引用和文献引用需要全文编号表才能转换，
-/// 大纲不承担正文引用展示，因此直接省略，避免把内部 id / BibTeX key 暴露给用户。
-pub(crate) fn strip_heading_identifiers(text: &str) -> Cow<'_, str> {
-    let (stripped, label) = split_label(text);
-    if label.is_none() && !stripped.contains("{@") && !stripped.contains("[@") {
-        return Cow::Borrowed(text);
-    }
-    let text = crossref_re().replace_all(stripped, "");
-    let text = citation_re().replace_all(&text, "");
-    Cow::Owned(text.trim().to_string())
-}
-
 fn split_keys(inner: &str) -> impl Iterator<Item = &str> {
     inner
         .split(';')
@@ -188,18 +174,5 @@ mod tests {
             ["b", "a", "c"],
             "文献序号按正文引用先后排"
         );
-    }
-
-    #[test]
-    fn outline_headings_drop_source_identifiers() {
-        assert_eq!(strip_heading_identifiers("研究背景 {#chap:bg}"), "研究背景");
-        assert_eq!(
-            strip_heading_identifiers("相关工作{@chap:prior} [@wang2020; @li2021]"),
-            "相关工作"
-        );
-        assert!(matches!(
-            strip_heading_identifiers("普通标题"),
-            Cow::Borrowed(_)
-        ));
     }
 }
