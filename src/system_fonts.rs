@@ -72,10 +72,12 @@ pub fn read_font(path: &Path) -> Option<SystemFont> {
 pub fn resolve(fonts: &FontConfig) -> (FontConfig, Vec<String>) {
     let mut resolved = fonts.clone();
     let mut warnings = Vec::new();
-    if !fonts.use_system_fonts {
-        return (resolved, warnings);
-    }
     for role in FontRole::ALL {
+        // 兜底字体不受编译总开关约束，关着开关也要检查；其余位置开关一关就不生效，
+        // 文件在不在都无所谓。
+        if fonts.active(role).is_none() {
+            continue;
+        }
         let choice = resolved.choice_mut(role);
         if !choice.is_set() {
             continue;
@@ -290,6 +292,36 @@ mod tests {
         assert!(fonts.iter().all(|font| !font.family.is_empty()));
         assert!(fonts.iter().all(|font| has_supported_extension(&font.path)));
         assert!(elapsed.as_secs() < 20, "扫描耗时 {elapsed:?} 过长");
+    }
+
+    /// 内置兜底字体必须真的补得上正文字体缺的字，否则兜底等于没兜。
+    ///
+    /// 正文的仿宋_GB2312 只有 GB2312 的 6763 个汉字，人名里的「喆」「赟」这类
+    /// GBK 字在它上面没有字形，排出来就是少一个字。这条盯住的是内置宋体的字库
+    /// 范围：换内置字体时若换成一支同样只有 GB2312 的，这里会立刻红。
+    #[test]
+    fn the_bundled_fallback_font_covers_characters_the_body_font_lacks() {
+        let Some(dir) = crate::portable_runtime::find_font_dir() else {
+            return; // 精简检出没有 runtime 字体，跳过。
+        };
+        let rare = "喆赟昇堃玥頔飏犇翀";
+        let read = |file: &str| std::fs::read(dir.join(file)).expect("内置字体应可读");
+
+        let body = read(FontRole::Body.bundled_file());
+        let body = ttf_parser::Face::parse(&body, 0).expect("正文字体应能解析");
+        assert!(
+            rare.chars().any(|ch| body.glyph_index(ch).is_none()),
+            "正文字体已覆盖这些生僻字，请换一组仍然缺字的样本，别让这条失去意义"
+        );
+
+        let fallback = read(FontRole::Fallback.bundled_file());
+        let fallback = ttf_parser::Face::parse(&fallback, 0).expect("兜底字体应能解析");
+        for ch in rare.chars() {
+            assert!(
+                fallback.glyph_index(ch).is_some(),
+                "内置兜底字体排不出「{ch}」"
+            );
+        }
     }
 
     #[test]

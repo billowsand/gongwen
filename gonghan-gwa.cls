@@ -175,6 +175,45 @@
 \else
     \GwaFontSetupHook
 \fi
+
+% ========== 生僻字兜底字体 ==========
+% 仿宋_GB2312 与楷体_GB2312 只有 GB2312 的 6763 个汉字，人名里的「喆」「赟」
+% 这类 GBK 字在它们上面没有字形。xeCJK 默认遇到缺字直接丢字——纸面上少一个字，
+% 日志里只有一行 Missing character 警告，最容易漏。
+%
+% 开 AutoFallBack 后，缺字自动落到后备字体上：内置宋体（SimSun）覆盖 GBK 全部
+% 汉字，不必额外分发字体。应用设置里另选了兜底字体时注入 \GwaFontFallbackHook
+% 顶替，内部同样按 \GwaFontPath 分按文件、按名字两种加载方式。
+%
+% 声明写在 \AtBeginDocument 里：专用粗体字体的 gwabold 族也是那时才建起来的，
+% 早于它声明会漏掉加粗文字里的生僻字。
+\providecommand{\GwaFontFallbackHook}{}
+\xeCJKsetup{AutoFallBack=true}
+% #1 是加载选项（按文件时为 Path=...，按名字时为空），#2 是后备字体（可用逗号
+% 分隔多支，按顺序查找）。所有 CJK 字体族都要声明：兜底是按族生效的，漏一个族，
+% 那个族里的生僻字照样丢。
+\newcommand{\GwaSetFallbackFonts}[2]{%
+    \setCJKfallbackfamilyfont{rm}[#1]{#2}%
+    \setCJKfallbackfamilyfont{tt}[#1]{#2}%
+    \setCJKfallbackfamilyfont{xbs}[#1]{#2}%
+    \setCJKfallbackfamilyfont{kaiti}[#1]{#2}%
+    \setCJKfallbackfamilyfont{songti}[#1]{#2}%
+    \setCJKfallbackfamilyfont{heiti}[#1]{#2}%
+    \setCJKfallbackfamilyfont{fangsong}[#1]{#2}%
+    \setCJKfallbackfamilyfont{gwabold}[#1]{#2}%
+}
+\AtBeginDocument{%
+    \if\relax\detokenize\expandafter{\GwaFontFallbackHook}\relax
+        \if\relax\detokenize\expandafter{\GwaFontPath}\relax
+            \GwaSetFallbackFonts{}{SimSun}%
+        \else
+            \GwaSetFallbackFonts{Path={\GwaFontPath}}{SimSun.ttf}%
+        \fi
+    \else
+        \GwaFontFallbackHook
+    \fi
+}
+
 % 正文里 Markdown 加粗与五级标题统一走 \GwBold，而不是直接写 \textbf。
 % 默认就是 \textbf：配合正文字体的 AutoFakeBold，字形不变、只加重笔画，与从前
 % 逐字节一致。设置里改选「专用粗体字体」时，生成器在导言区 \renewcommand 它，

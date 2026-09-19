@@ -566,6 +566,48 @@ mod tests {
         assert!(outcome.pdf.is_some_and(|path| path.is_file()));
     }
 
+    /// 研究报告同样不许丢字：标题走方正小标宋，那支字体只有 GB2312 字库，
+    /// 「喆」「赟」全靠 `md2tex.cls` 里的后备字体接住。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime"]
+    fn research_report_rare_characters_fall_back_instead_of_being_dropped() {
+        let Some(runtime) = portable_runtime::find_tex_runtime().unwrap() else {
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "王喆李赟研究报告测试".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "<!-- [摘要] -->\n\n王喆、李赟二位同志的摘要。\n\n<!-- [正文] -->\n\n## 堃昇背景\n\n正文里也有王喆与李赟。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let (compiled, log) = compile_capturing_log(tex, &runtime, &FontConfig::default());
+        assert!(compiled, "应编译出 PDF：{log}");
+        assert!(
+            !log.contains("Missing character"),
+            "研究报告有字被丢掉了：{log}"
+        );
+    }
+
     /// 白头件落款要先装箱量高再决定是否另起一页（见 cls 的 `\WhitePaperClosing`）。
     /// 这条只保证这段逻辑能编译通过；换页判断是否准确要看排版结果，不在此断言。
     /// 孤行探针端到端：导出 → 编译 → 读回 `.gwaproof` → 解析出每段的实测行数与
@@ -1248,6 +1290,138 @@ mod tests {
             .unwrap();
         assert!(pdf.exists());
         assert_eq!(pdf.file_stem(), tex.file_stem());
+    }
+
+    /// 导出一份带生僻字的白头件，返回 `.tex` 路径。
+    fn export_tex_with_rare_characters(dir: &Path, fonts: &FontConfig) -> PathBuf {
+        let mut input = DraftInput {
+            kind: TemplateKind::WhitePaper,
+            ..Default::default()
+        };
+        input.profile.kind = TemplateKind::WhitePaper;
+        input.profile.issuing_unit = "某单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        // 标题、一级标题、正文与加粗各带一个 GB2312 以外的字，把几支字体都覆盖到。
+        let files = crate::export::export_all(
+            dir,
+            &input,
+            "# 关于王喆同志任职的通知\n\n## 一、李赟同志的分工\n\n经研究，任命王喆、李赟二位同志，另有**堃昇**二字备查。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            fonts,
+        )
+        .unwrap();
+        files
+            .into_iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .expect("应导出 tex")
+    }
+
+    /// 用内置 Tectonic 编译并把 stdout/stderr 一并带回。
+    ///
+    /// 正常编译入口只在失败时交出日志，而缺字是**编译成功**时的警告，只能这样
+    /// 抓：照搬 `compile_with_portable_tectonic` 的调用方式，参数错一个就测不到。
+    fn compile_capturing_log(
+        tex: &Path,
+        runtime: &PortableTexRuntime,
+        fonts: &FontConfig,
+    ) -> (bool, String) {
+        // 类文件与 tex 同目录，编译必须在那个目录里进行。
+        let dir = tex.parent().unwrap();
+        let _guard = PORTABLE_TECTONIC_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let workspace =
+            PortableCompileWorkspace::create(tex, dir, &runtime.fonts, &runtime.bundle, fonts)
+                .unwrap();
+        let cache_dir = portable_runtime::tectonic_cache_dir().unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let output = tex_command(&runtime.tectonic)
+            .current_dir(dir)
+            .env("TECTONIC_CACHE_DIR", &cache_dir)
+            .env("TECTONIC_UNTRUSTED_MODE", "1")
+            .arg("-X")
+            .arg("compile")
+            .arg("--bundle")
+            .arg(&workspace.bundle_file_name)
+            .arg("--only-cached")
+            .arg("--untrusted")
+            .arg("--print")
+            .arg(&workspace.tex_file_name)
+            .output()
+            .unwrap();
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.success() && workspace.pdf_path.is_file(), log)
+    }
+
+    /// 生僻字必须真的排到纸面上。
+    ///
+    /// 断的是编译日志而不是「有没有出 PDF」：仿宋_GB2312 没有「喆」「赟」的字形，
+    /// 兜底一旦失效，xeCJK 会安静地把字丢掉，PDF 照样生成，只在日志里留一行
+    /// Missing character——这正是最容易漏过去的那种坏法。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime"]
+    fn rare_characters_fall_back_instead_of_being_dropped() {
+        let Some(runtime) = portable_runtime::find_tex_runtime().unwrap() else {
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        // 专用粗体字体：gwabold 这个族要到 \AtBeginDocument 才建起来，兜底声明
+        // 排在它后面才接得住加粗里的生僻字，顺序错了这里就会红。
+        let fonts = FontConfig {
+            bold_style: crate::models::BoldStyle::DedicatedFont,
+            ..FontConfig::default()
+        };
+        let tex = export_tex_with_rare_characters(temp.path(), &fonts);
+        let (compiled, log) = compile_capturing_log(&tex, &runtime, &fonts);
+        assert!(compiled, "应编译出 PDF：{log}");
+        assert!(
+            !log.contains("Missing character"),
+            "有字被丢掉了，内置兜底字体没接上：{log}"
+        );
+    }
+
+    /// 设置里另选兜底字体：不开「使用本机字体编译」也要生效，且字体文件要跟着
+    /// 拷进临时目录——钩子、拷贝、类文件三处缺一，生僻字就又丢了。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime 与本机黑体"]
+    fn a_chosen_fallback_font_works_without_the_system_font_switch() {
+        let Some(runtime) = portable_runtime::find_tex_runtime().unwrap() else {
+            return;
+        };
+        // 黑体是 Windows 自带的单字面 ttf，字库覆盖 GBK 全部汉字。
+        let Some(fallback) =
+            crate::system_fonts::read_font(Path::new(r"C:\Windows\Fonts\simhei.ttf"))
+        else {
+            return;
+        };
+        let fonts = FontConfig {
+            use_system_fonts: false,
+            fallback: fallback.to_choice(),
+            ..FontConfig::default()
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let tex = export_tex_with_rare_characters(temp.path(), &fonts);
+        let content = std::fs::read_to_string(&tex).unwrap();
+        assert!(content.contains("\\def\\GwaFontFallbackHook"), "{content}");
+        assert!(!content.contains("\\def\\GwaFontSetupHook"), "{content}");
+
+        let (compiled, log) = compile_capturing_log(&tex, &runtime, &fonts);
+        assert!(compiled, "应编译出 PDF：{log}");
+        assert!(
+            !log.contains("Missing character"),
+            "有字被丢掉了，所选兜底字体没接上：{log}"
+        );
     }
 
     /// 五个位置全换成本机字体后仍能编译出 PDF。这条最关键：注入的钩子、临时目录里

@@ -20,7 +20,7 @@ pub(crate) use attachments::{
     attachment_document_title_to_tex, attachment_landscape_flags, official_heading_to_tex,
     target_tex_section,
 };
-pub(crate) use fonts::{bold_setup_hook, font_setup_hook};
+pub(crate) use fonts::{bold_setup_hook, fallback_setup_hook, font_setup_hook};
 #[allow(unused_imports)]
 pub(crate) use official::{
     copy_count, official_letter_sections_to_tex, official_letter_sections_to_tex_with_barrier,
@@ -105,6 +105,11 @@ pub fn write_tex_with_numbering(
     };
     // 加粗排法独立于本机字体总开关：选了专用粗体字体就换 \GwBold 的字面。
     let content = match bold_setup_hook(fonts) {
+        Some(hook) => format!("{hook}{content}"),
+        None => content,
+    };
+    // 兜底字体同样独立于总开关；没另选时不注入，由类文件用内置宋体兜底。
+    let content = match fallback_setup_hook(fonts) {
         Some(hook) => format!("{hook}{content}"),
         None => content,
     };
@@ -652,6 +657,90 @@ mod tests {
         assert!(!GONGHAN_CLASS.contains("BoldFont={SimHei}"));
     }
 
+    /// 生僻字兜底：类文件自带一套后备字体，不必配置就能把「喆」「赟」排出来。
+    ///
+    /// 断言到具体的族名上：兜底是按字体族生效的，将来新增字体族时这条会提醒
+    /// 把族一并加进 `\GwaSetFallbackFonts`。
+    #[test]
+    fn class_falls_back_to_a_bundled_font_for_rare_characters() {
+        assert!(GONGHAN_CLASS.contains("\\xeCJKsetup{AutoFallBack=true}"));
+        assert!(GONGHAN_CLASS.contains("\\newcommand{\\GwaSetFallbackFonts}[2]"));
+        for family in [
+            "rm", "tt", "xbs", "kaiti", "songti", "heiti", "fangsong", "gwabold",
+        ] {
+            assert!(
+                GONGHAN_CLASS
+                    .contains(&format!("\\setCJKfallbackfamilyfont{{{family}}}[#1]{{#2}}")),
+                "{family} 族没有声明兜底字体，这个族里的生僻字会被丢掉"
+            );
+        }
+        // 默认的两条分支：按名字用 SimSun，按文件用随应用分发的 SimSun.ttf。
+        assert!(GONGHAN_CLASS.contains("\\GwaSetFallbackFonts{}{SimSun}"));
+        assert!(GONGHAN_CLASS.contains("\\GwaSetFallbackFonts{Path={\\GwaFontPath}}{SimSun.ttf}"));
+        // 留给应用顶替的逃生口。
+        assert!(GONGHAN_CLASS.contains("\\providecommand{\\GwaFontFallbackHook}{}"));
+        assert!(
+            GONGHAN_CLASS
+                .contains("\\if\\relax\\detokenize\\expandafter{\\GwaFontFallbackHook}\\relax")
+        );
+    }
+
+    /// 兜底字体不受「使用本机字体编译」总开关约束，也不把整段字体设置拖进 TeX：
+    /// 没另选时不注入钩子，由类文件用内置宋体兜底。
+    #[test]
+    fn fallback_hook_only_appears_when_another_font_is_chosen() {
+        assert!(fallback_setup_hook(&FontConfig::default()).is_none());
+
+        // 总开关关着也照样生效：兜底决定的是一个字排不排得出来，不是版式。
+        let fonts = FontConfig {
+            use_system_fonts: false,
+            fallback: system_font("Source Han Sans SC", "C:/Windows/Fonts/SHSans.otf"),
+            ..FontConfig::default()
+        };
+        let hook = fallback_setup_hook(&fonts).expect("选了兜底字体就该注入");
+        assert!(hook.starts_with("\\makeatletter\n"));
+        assert!(hook.ends_with("\\makeatother\n"));
+        assert!(hook.contains("\\def\\GwaFontFallbackHook{%"));
+        // 选定的字体排在前面，内置宋体仍留在链尾接它漏掉的字。
+        assert!(
+            hook.contains("\\GwaSetFallbackFonts{}{Source Han Sans SC,SimSun}"),
+            "{hook}"
+        );
+        assert!(
+            hook.contains(
+                "\\GwaSetFallbackFonts{Path={\\GwaFontPath}}{gwa-fallback.otf,SimSun.ttf}"
+            ),
+            "{hook}"
+        );
+        // 只配兜底字体不该牵动版式：那整段字体设置仍然不注入。
+        assert!(font_setup_hook(&fonts).is_none());
+    }
+
+    /// 钩子里判断 `\GwaFontPath` 是否为空只能用 `\detokenize`：类文件用
+    /// `\providecommand` 声明的空宏是 long macro，`\ifx ... \@empty` 会误判成
+    /// 非空，导出的 `.tex` 在别的机器上就会去找并不存在的字体文件。
+    #[test]
+    fn font_hooks_detect_an_empty_font_path_the_same_way_as_the_class() {
+        let fonts = FontConfig {
+            use_system_fonts: true,
+            bold_style: crate::models::BoldStyle::DedicatedFont,
+            body: system_font("FangSong", "C:/Windows/Fonts/simfang.ttf"),
+            fallback: system_font("SimSun", "C:/Windows/Fonts/simsun.ttf"),
+            ..FontConfig::default()
+        };
+        for hook in [
+            font_setup_hook(&fonts).unwrap(),
+            bold_setup_hook(&fonts).unwrap(),
+            fallback_setup_hook(&fonts).unwrap(),
+        ] {
+            assert!(
+                hook.contains("\\if\\relax\\detokenize\\expandafter{\\GwaFontPath}\\relax"),
+                "{hook}"
+            );
+            assert!(!hook.contains("\\ifx\\GwaFontPath\\@empty"), "{hook}");
+        }
+    }
+
     /// 类文件必须留着本机字体的逃生口，否则注入的钩子无人调用。
     #[test]
     fn class_defers_to_injected_font_hook() {
@@ -701,6 +790,14 @@ mod tests {
         assert!(hook.contains("\\renewcommand{\\GwBold}[1]"));
         assert!(hook.contains("{SimHei}"), "{hook}");
         assert!(hook.contains("{SimHei.ttf}"), "{hook}");
+        // 带参数的定义必须先 \def 再由 \AtBeginDocument 调用：LaTeX 2020 起的钩子
+        // 按 token 原样存参数，`##` 不会归并成 `#`，直接塞进去编译会死在裸的 `#` 上。
+        assert!(hook.contains("\\def\\GwaBoldSetup{%"), "{hook}");
+        assert!(hook.contains("\\AtBeginDocument{\\GwaBoldSetup}"), "{hook}");
+        assert!(
+            !hook.contains("\\AtBeginDocument{%"),
+            "带 ## 的定义不能直接写进 \\AtBeginDocument 的参数里：{hook}"
+        );
 
         // 挑了字面且开了本机字体总开关：按名字用家族名，按文件用重命名后的文件。
         let fonts = FontConfig {

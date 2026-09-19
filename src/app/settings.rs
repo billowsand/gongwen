@@ -733,11 +733,14 @@ impl GongwenApp {
             ui,
             "公文编译字体",
             Some(
-                "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体。改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
+                "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体，排不出的生僻字由内置宋体兜底。改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
             ),
         );
         ui.checkbox(&mut self.config.fonts.use_system_fonts, "使用本机字体编译")
-            .on_hover_text("不勾选时下面的选择仍然保留，只是不生效，方便和内置版式来回对照");
+            .on_hover_text(
+                "不勾选时下面的选择仍然保留，只是不生效，方便和内置版式来回对照；\
+                 加粗排法与兜底字体两项例外，它们不受这个开关约束",
+            );
 
         // 加粗排法不受上面的本机字体开关约束：它决定的是「怎么加粗」，
         // 预览、Word 与 TeX 三端同时生效。
@@ -749,9 +752,29 @@ impl GongwenApp {
             }
         });
 
+        // 兜底字体不受上面的本机字体开关约束：它只在别的字体排不出某个字时顶上，
+        // 关掉不会换回另一种版式，只会让生僻字重新从纸面上消失。
+        ui.add_space(4.0);
+        if let Some(text) = {
+            let role = FontRole::Fallback;
+            let filter = self.font_filter.entry(role.key()).or_default();
+            font_choice_row(
+                ui,
+                role.key(),
+                role.label(),
+                &format!("内置（{}）", role.bundled_label()),
+                role.hint(),
+                self.config.fonts.choice_mut(role),
+                &self.system_fonts,
+                filter,
+            )
+        } {
+            message = Some(text);
+        }
+
         if self.config.fonts.use_system_fonts {
             ui.add_space(4.0);
-            for role in FontRole::ALL {
+            for role in FontRole::TYPESETTING {
                 let filter = self.font_filter.entry(role.key()).or_default();
                 let default_label = format!("内置（{}）", role.bundled_label());
                 if let Some(text) = font_choice_row(

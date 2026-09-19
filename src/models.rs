@@ -1695,10 +1695,11 @@ impl Default for AppConfig {
     }
 }
 
-/// 公文排版里可以单独换字体的五个位置。
+/// 公文排版里可以单独换字体的位置。
 ///
 /// 与 `gonghan-gwa.cls` 的字体族一一对应，且互不复用：换其中一项不会牵动另一项，
 /// 唯一的例外是二级标题字体同时充当正文的 `ItalicFont`（类文件历来如此）。
+/// 末一项 [`FontRole::Fallback`] 不对应字体族，而是所有字体族共用的后备字体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontRole {
     /// 公文大标题与附件标题，内置为方正小标宋。
@@ -1713,10 +1714,23 @@ pub enum FontRole {
     PageNumber,
     /// 正文里的加粗文字，仅在「专用粗体字体」模式下生效，内置为黑体。
     Bold,
+    /// 上面各支字体都没有的生僻字改用它，内置为宋体。
+    Fallback,
 }
 
 impl FontRole {
-    pub const ALL: [FontRole; 6] = [
+    pub const ALL: [FontRole; 7] = [
+        Self::Title,
+        Self::Heading1,
+        Self::Heading2,
+        Self::Body,
+        Self::PageNumber,
+        Self::Bold,
+        Self::Fallback,
+    ];
+
+    /// 决定版式的那几支字体，不含只在缺字时顶上的兜底字体。
+    pub const TYPESETTING: [FontRole; 6] = [
         Self::Title,
         Self::Heading1,
         Self::Heading2,
@@ -1733,6 +1747,7 @@ impl FontRole {
             Self::Body => "正文字体",
             Self::PageNumber => "页码字体",
             Self::Bold => "加粗字体",
+            Self::Fallback => "兜底字体",
         }
     }
 
@@ -1745,6 +1760,10 @@ impl FontRole {
             Self::PageNumber => "页脚页码，内置为宋体",
             Self::Bold => {
                 "加粗文字改用专门的粗体字体时用它，内置为黑体；选「当前字体直接加粗」时不生效"
+            }
+            Self::Fallback => {
+                "上面几支字体排不出的生僻字（「喆」「赟」等）改用它，内置为宋体，覆盖 GBK 全部汉字；\
+                 想排 GBK 以外的字（如「𠮟」）才需要另选一支字库更大的本机字体"
             }
         }
     }
@@ -1759,6 +1778,7 @@ impl FontRole {
             Self::Body => "FangSong.ttf",
             Self::PageNumber => "SimSun.ttf",
             Self::Bold => "SimHei.ttf",
+            Self::Fallback => "SimSun.ttf",
         }
     }
 
@@ -1772,6 +1792,7 @@ impl FontRole {
             Self::Body => "FangSong_GB2312",
             Self::PageNumber => "SimSun",
             Self::Bold => "SimHei",
+            Self::Fallback => "SimSun",
         }
     }
 
@@ -1784,6 +1805,7 @@ impl FontRole {
             Self::Body => "仿宋",
             Self::PageNumber => "宋体",
             Self::Bold => "黑体",
+            Self::Fallback => "宋体",
         }
     }
 
@@ -1796,6 +1818,7 @@ impl FontRole {
             Self::Body => "body",
             Self::PageNumber => "pagenumber",
             Self::Bold => "bold",
+            Self::Fallback => "fallback",
         }
     }
 }
@@ -1897,6 +1920,10 @@ pub struct FontConfig {
     /// 加粗文字改用专门粗体字体时的字面，仅在 `bold_style` 为
     /// [`BoldStyle::DedicatedFont`] 时生效。
     pub bold: FontChoice,
+    /// 上面几支字体排不出的生僻字改用它。留空时使用内置宋体（覆盖 GBK 全部汉字）；
+    /// 与界面字体一样不受 `use_system_fonts` 编译开关控制——它只在缺字时顶上，
+    /// 关掉没有「对照内置版式」的意义，只会让字重新丢掉。
+    pub fallback: FontChoice,
     /// 加粗文字怎么排：用当前字体直接加粗，还是换用专门的粗体字体。
     pub bold_style: BoldStyle,
 }
@@ -1910,6 +1937,7 @@ impl FontConfig {
             FontRole::Body => &self.body,
             FontRole::PageNumber => &self.page_number,
             FontRole::Bold => &self.bold,
+            FontRole::Fallback => &self.fallback,
         }
     }
 
@@ -1921,13 +1949,17 @@ impl FontConfig {
             FontRole::Body => &mut self.body,
             FontRole::PageNumber => &mut self.page_number,
             FontRole::Bold => &mut self.bold,
+            FontRole::Fallback => &mut self.fallback,
         }
     }
 
     /// 真正生效的选择：总开关关掉或者这一项没配就返回 `None`，调用方据此
     /// 回退到内置字体。
+    ///
+    /// 兜底字体是唯一不看总开关的位置：它决定的不是版式，而是一个字排不排得
+    /// 出来，关掉只会让生僻字重新从纸面上消失。
     pub fn active(&self, role: FontRole) -> Option<&FontChoice> {
-        if !self.use_system_fonts {
+        if !self.use_system_fonts && role != FontRole::Fallback {
             return None;
         }
         let choice = self.choice(role);
@@ -1980,9 +2012,11 @@ impl FontConfig {
         }
     }
 
-    /// 有没有任何一项本机字体生效。全都没有时导出的 `.tex` 与从前完全一致。
+    /// 有没有任何一项决定版式的本机字体生效。全都没有时导出的 `.tex` 与从前完全一致。
+    ///
+    /// 兜底字体不算：它由单独的钩子注入，不该把整段字体设置一起拖进 `.tex`。
     pub fn any_active(&self) -> bool {
-        FontRole::ALL
+        FontRole::TYPESETTING
             .iter()
             .any(|role| self.active(*role).is_some())
     }

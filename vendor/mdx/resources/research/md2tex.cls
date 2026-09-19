@@ -141,6 +141,31 @@
   \newfontfamily\codefamily[Path=\MdxFontPath]{JetBrainsMono-Regular.ttf}
 \fi
 
+%% ============================================================
+%% 生僻字兜底字体
+%% ============================================================
+%% 方正小标宋只有 GB2312 的 6763 个汉字，标题里出现「喆」「赟」这类 GBK 字时
+%% xeCJK 会直接丢字——纸面上少一个字，日志里只有一行 Missing character 警告。
+%% 开 AutoFallBack 后缺字自动落到书宋上，它覆盖 GBK 全部汉字，两条分支都已有
+%% 这支字体，不必额外分发。
+\xeCJKsetup{AutoFallBack=true}
+%% 兜底是按字体族生效的，漏一个族，那个族里的生僻字照样丢。
+\newcommand{\MdxSetFallbackFonts}[2]{%
+  \setCJKfallbackfamilyfont{rm}[#1]{#2}%
+  \setCJKfallbackfamilyfont{tt}[#1]{#2}%
+  \setCJKfallbackfamilyfont{xbs}[#1]{#2}%
+  \setCJKfallbackfamilyfont{kaiti}[#1]{#2}%
+  \setCJKfallbackfamilyfont{songti}[#1]{#2}%
+  \setCJKfallbackfamilyfont{fangsong}[#1]{#2}%
+  \setCJKfallbackfamilyfont{heiti}[#1]{#2}%
+  \setCJKfallbackfamilyfont{code}[#1]{#2}%
+}
+\if\relax\detokenize\expandafter{\MdxFontPath}\relax
+  \MdxSetFallbackFonts{}{\mainfont}
+\else
+  \MdxSetFallbackFonts{Path=\MdxFontPath}{FZShuSong.ttf}
+\fi
+
 \newcommand{\bs}{\CJKfamily{xbs}}
 \newcommand{\kai}{\CJKfamily{kaiti}}
 \newcommand{\song}{\CJKfamily{songti}}

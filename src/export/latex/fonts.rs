@@ -5,6 +5,15 @@
 
 use crate::models::{FontConfig, FontRole};
 
+/// 判断 `\GwaFontPath` 是否为空的条件式开头，钩子内部据此在按名字、按文件两条
+/// 加载方式之间分流。
+///
+/// 不能写成 `\ifx\GwaFontPath\@empty`：类文件用 `\providecommand` 声明的空宏是
+/// long macro，与 `\@empty` 的定义属性不同，内容虽为空也会被判成非空——导出的
+/// `.tex` 拿到别的机器上编译时会误入按文件那条分支，去找一个并不存在的字体文件。
+/// 与 `gonghan-gwa.cls` 里的判断保持同一种写法。
+const EMPTY_FONT_PATH: &str = r"\if\relax\detokenize\expandafter{\GwaFontPath}\relax";
+
 /// 「专用粗体字体」模式下把 `\GwBold` 换成真正的粗体字面。
 ///
 /// 与字体钩子分开发：加粗排法不受「使用本机字体编译」总开关约束，没选任何本机
@@ -16,10 +25,16 @@ pub(crate) fn bold_setup_hook(fonts: &FontConfig) -> Option<String> {
         return None;
     }
     // 中西文一起换：加粗的西文与数字若留在正文字体上，粗细会和汉字对不齐。
+    //
+    // 先 `\def` 再 `\AtBeginDocument` 调用，不把这段直接塞进 `\AtBeginDocument`
+    // 的参数里：LaTeX 2020 起的钩子按 token 原样存参数，不做 `##` → `#` 的归并，
+    // `\renewcommand{\GwBold}[1]{...##1}` 存进去再执行就变成了一个裸的 `#`，
+    // 编译直接死在「macro parameter character # in horizontal mode」。`\def` 的
+    // 宏体照常归并，两种 LaTeX 上都对。
     Some(format!(
         r"\makeatletter
-\AtBeginDocument{{%
-    \ifx\GwaFontPath\@empty
+\def\GwaBoldSetup{{%
+    {EMPTY_FONT_PATH}
         \setCJKfamilyfont{{gwabold}}{{{family}}}%
         \newfontfamily\engwabold{{{family}}}%
     \else
@@ -28,6 +43,7 @@ pub(crate) fn bold_setup_hook(fonts: &FontConfig) -> Option<String> {
     \fi
     \renewcommand{{\GwBold}}[1]{{{{\CJKfamily{{gwabold}}\engwabold ##1}}}}%
 }}
+\AtBeginDocument{{\GwaBoldSetup}}
 \makeatother
 ",
         family = family,
@@ -35,6 +51,37 @@ pub(crate) fn bold_setup_hook(fonts: &FontConfig) -> Option<String> {
             Some(choice) => choice.compiled_file_name(FontRole::Bold),
             None => FontRole::Bold.bundled_file().to_string(),
         },
+    ))
+}
+
+/// 设置里另选了兜底字体时，顶替类文件默认的内置宋体。
+///
+/// 与字体钩子一样不受「使用本机字体编译」总开关约束：兜底决定的是一个字排不
+/// 排得出来，不是版式。没选时返回 `None`，由类文件用内置宋体兜底，产出的 TeX
+/// 与从前逐字节一致。
+///
+/// 选定的字体排在内置宋体前面，宋体仍留在链尾：用户挑的字库未必比宋体全，
+/// 它漏掉的字还能由宋体接着兜。
+pub(crate) fn fallback_setup_hook(fonts: &FontConfig) -> Option<String> {
+    let choice = fonts.active(FontRole::Fallback)?;
+    let family = sanitize_font_name(&choice.family);
+    if family.is_empty() {
+        return None;
+    }
+    let file = choice.compiled_file_name(FontRole::Fallback);
+    let bundled_name = FontRole::Fallback.bundled_family();
+    let bundled_file = FontRole::Fallback.bundled_file();
+    Some(format!(
+        r"\makeatletter
+\def\GwaFontFallbackHook{{%
+    {EMPTY_FONT_PATH}
+        \GwaSetFallbackFonts{{}}{{{family},{bundled_name}}}%
+    \else
+        \GwaSetFallbackFonts{{Path={{\GwaFontPath}}}}{{{file},{bundled_file}}}%
+    \fi
+}}
+\makeatother
+"
     ))
 }
 
@@ -102,7 +149,7 @@ pub(crate) fn font_setup_hook(fonts: &FontConfig) -> Option<String> {
     Some(format!(
         r"\makeatletter
 \def\GwaFontSetupHook{{%
-    \ifx\GwaFontPath\@empty
+    {EMPTY_FONT_PATH}
         \setCJKmainfont[ItalicFont={{{kai_name}}}, AutoFakeBold=true]{{{body_name}}}%
 {title_by_name}
         \setCJKfamilyfont{{kaiti}}[AutoFakeBold=true]{{{kai_name}}}%

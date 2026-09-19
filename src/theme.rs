@@ -8,6 +8,7 @@
 
 use crate::models::{EditorFontFace, FontConfig, FontRole, PaperMode, ThemeName};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -2153,16 +2154,25 @@ pub fn editor_face_family(face: EditorFontFace) -> egui::FontFamily {
 }
 
 /// 依次尝试候选路径，把第一个读到的字体以 `key` 存入 `font_data`。
+///
+/// `loaded` 记下已经读过的文件，同一份字体只在内存里留一份：加粗字体默认与
+/// 一级标题同是黑体，兜底字体默认与页码同是宋体，中文字体动辄十几兆，重复
+/// 载入纯属白占。命中已有文件时返回的是先前那个 key，字体族照样指得对。
 fn load_font(
     fonts: &mut egui::FontDefinitions,
+    loaded: &mut BTreeMap<PathBuf, String>,
     key: &str,
     candidates: &[PathBuf],
 ) -> Option<String> {
     for path in candidates {
+        if let Some(existing) = loaded.get(path) {
+            return Some(existing.clone());
+        }
         if let Ok(data) = std::fs::read(path) {
             fonts
                 .font_data
                 .insert(key.to_owned(), egui::FontData::from_owned(data).into());
+            loaded.insert(path.clone(), key.to_owned());
             return Some(key.to_owned());
         }
     }
@@ -2180,8 +2190,16 @@ fn font_candidates(bundled: Option<&Path>, file: &str, system: &[&str]) -> Vec<P
 /// 配置界面与公文预览的字体。`config` 里选了本机字体的位置，预览也跟着换，
 /// 否则屏幕上看到的版式和编译出来的 PDF 对不上。
 pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
+    ctx.set_fonts(font_definitions(config));
+}
+
+/// 装好全部字体族的 `FontDefinitions`。与 `configure_fonts` 分开是为了能在
+/// 测试里直接问字体族「这个字排不排得出来」，不必起一个真窗口。
+fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     let bundled_fonts = crate::portable_runtime::find_font_dir();
+    // 同一份字体文件只读一次，见 `load_font`。
+    let mut loaded: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     // 界面字体不再编进可执行文件：Windows 使用微软雅黑，Linux 使用 Noto Sans
     // SC，macOS 使用苹方。等宽文本保留 egui 自带的拉丁等宽字体，并把系统中文字体放在末尾兜底。
@@ -2204,6 +2222,7 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let custom_ui_font = config.active_ui_font().and_then(|choice| {
         load_font(
             &mut fonts,
+            &mut loaded,
             "gw-custom-ui",
             &[PathBuf::from(choice.path.trim())],
         )
@@ -2222,6 +2241,7 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let custom_editor_font = config.active_editor_font().and_then(|choice| {
         load_font(
             &mut fonts,
+            &mut loaded,
             "gw-custom-editor",
             &[PathBuf::from(choice.path.trim())],
         )
@@ -2246,6 +2266,7 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
     let preview_fallback = system_ui_font.or_else(|| {
         load_font(
             &mut fonts,
+            &mut loaded,
             "gw-preview-fallback",
             &font_candidates(
                 bundled_fonts.as_deref(),
@@ -2271,6 +2292,35 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
             .cloned()
             .unwrap_or_default(),
     );
+
+    // 生僻字兜底：仿宋与楷体只有 GB2312 的 6763 个汉字，人名里的「喆」「赟」
+    // 在它们上面没有字形。每个公文字体族后面都挂上兜底字体，egui 逐字回退，
+    // 缺字落到兜底字体上——与 TeX 侧 \GwaSetFallbackFonts 看到的是同一支字体。
+    let mut glyph_fallback = Vec::new();
+    if let Some(key) = config.active(FontRole::Fallback).and_then(|choice| {
+        load_font(
+            &mut fonts,
+            &mut loaded,
+            "gw-glyph-fallback",
+            &[PathBuf::from(choice.path.trim())],
+        )
+    }) {
+        glyph_fallback.push(key);
+    }
+    // 内置宋体覆盖 GBK 全部汉字，始终留在链尾：用户另选的字体未必比它全，
+    // 它漏掉的字还能由宋体接着兜。
+    if let Some(key) = load_font(
+        &mut fonts,
+        &mut loaded,
+        "gw-glyph-fallback-bundled",
+        &font_candidates(
+            bundled_fonts.as_deref(),
+            FontRole::Fallback.bundled_file(),
+            &[r"C:\Windows\Fonts\simsun.ttc"],
+        ),
+    ) {
+        glyph_fallback.push(key);
+    }
 
     for (family, role, bundled_file, system_candidates) in [
         (
@@ -2344,17 +2394,24 @@ pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
         if let Some(choice) = selected {
             candidates.insert(0, PathBuf::from(choice.path.trim()));
         }
-        let list = match load_font(&mut fonts, family, &candidates) {
+        let mut list = match load_font(&mut fonts, &mut loaded, family, &candidates) {
             Some(key) => vec![key],
             // 一个都没装上时退回界面字体：预览的字体不对，但排版仍然成立。
             None => fallback.clone(),
         };
+        // 兜底字体挂在这支字体后面，只接它排不出的字。
+        let tail: Vec<String> = glyph_fallback
+            .iter()
+            .filter(|key| !list.contains(key))
+            .cloned()
+            .collect();
+        list.extend(tail);
         fonts
             .families
             .insert(egui::FontFamily::Name(family.into()), list);
     }
 
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 pub fn configure_style(ctx: &egui::Context) {
@@ -2488,6 +2545,57 @@ mod tests {
     use super::{Color32, app_icon, configure_icons};
     use crate::models::ThemeName;
     use crate::theme::{Theme, by_name};
+
+    /// 预览里的每支公文字体后面都要挂着一支排得出生僻字的字体。
+    ///
+    /// 仿宋与楷体只有 GB2312 字库，「喆」「赟」在它们上面没有字形；字体族末尾
+    /// 没挂兜底字体时，预览里看到的是一个个方框，而 PDF 里那几个字干脆消失。
+    /// 三端要看到同一份稿子，这条和 TeX 侧的缺字断言是一对。
+    ///
+    /// 断的是字体族末尾那支字体的字库，而不是 egui 的 `has_glyph`：后者返回的
+    /// 是「这个字是不是落在拥有替代字形的那支字体上」，主字体自带 `◻` 时会把
+    /// 正常的字也判成排不出来，问不出我们要的答案。
+    #[test]
+    fn every_preview_font_family_ends_with_a_font_that_covers_rare_characters() {
+        use crate::models::FontConfig;
+        use crate::theme::{
+            FONT_BIAOSONG, FONT_BOLD, FONT_FANGSONG, FONT_HEITI, FONT_KAITI, FONT_SONGTI,
+            font_definitions, official_family,
+        };
+
+        let definitions = font_definitions(&FontConfig::default());
+        if definitions.font_data.is_empty() {
+            return; // 精简检出没有字体资产，跳过。
+        }
+        for family in [
+            FONT_FANGSONG,
+            FONT_KAITI,
+            FONT_HEITI,
+            FONT_BIAOSONG,
+            FONT_SONGTI,
+            FONT_BOLD,
+        ] {
+            let chain = definitions
+                .families
+                .get(&official_family(family))
+                .unwrap_or_else(|| panic!("{family} 没有绑定字体"));
+            let last = chain
+                .last()
+                .unwrap_or_else(|| panic!("{family} 的字体族是空的"));
+            let data = definitions
+                .font_data
+                .get(last)
+                .unwrap_or_else(|| panic!("{family} 末尾的 {last} 没有字体数据"));
+            let face = ttf_parser::Face::parse(&data.font, data.index)
+                .unwrap_or_else(|_| panic!("{last} 解析不出字体"));
+            for ch in "喆赟堃昇".chars() {
+                assert!(
+                    face.glyph_index(ch).is_some(),
+                    "{family} 末尾的 {last} 排不出「{ch}」，兜底字体没挂上"
+                );
+            }
+        }
+    }
 
     #[test]
     fn configure_icons_installs_png_loader() {
