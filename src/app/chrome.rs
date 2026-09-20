@@ -146,6 +146,29 @@ fn status_icon_button(
     response.on_hover_text(label)
 }
 
+/// 标签关闭键的圆形热区直径。18 px 在 28 px 高的胶囊里上下各余 5 px，
+/// 悬停底圆不会顶到描边，热区又够一次点准。
+const CLOSE_HIT: f32 = 18.0;
+/// 叉本身的边长。热区四周各留 3 px，悬停时的底圆才像个托盘而不是描边。
+const CLOSE_ICON: f32 = 12.0;
+/// 标题与关闭键之间的留白，免得长标题的省略号贴到叉上。
+const CLOSE_GAP: f32 = 4.0;
+/// 关闭键右侧到胶囊边缘的留白，与内容区左侧内边距取同一个值，左右看齐。
+const CLOSE_MARGIN: f32 = 8.0;
+
+/// 标签关闭键钉死的位置：右端留 `CLOSE_MARGIN`，竖直方向对齐**整条胶囊**的中线。
+///
+/// 单独拎成函数是为了能脱开 egui 上下文测它——历史上这块出过两次错位：
+/// 一次是按内容区（而非胶囊）的中线对齐，上下内边距不等时叉就偏低；
+/// 一次是把按钮丢进横向流里，行带的 `interact_size` 把它顶高、`item_spacing`
+/// 又把它右推，热区与画面各走各的。现在热区、底圆、叉共用这一个 rect。
+fn close_button_rect(tab: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(
+        egui::pos2(tab.right() - CLOSE_MARGIN - CLOSE_HIT / 2.0, tab.center().y),
+        egui::Vec2::splat(CLOSE_HIT),
+    )
+}
+
 impl GongwenApp {
     /// 无边框窗口的顶栏。
     ///
@@ -1079,8 +1102,7 @@ impl GongwenApp {
                     .fit_to_exact_size(egui::vec2(14.0, 14.0)),
             );
         }
-        let close_width = 18.0;
-        let label_width = (content.available_width() - close_width).max(24.0);
+        let label_width = (content.available_width() - CLOSE_HIT - CLOSE_GAP).max(24.0);
         let label_response = content.add_sized(
             [label_width, TOOLBAR_CONTROL_HEIGHT - 8.0],
             egui::Label::new(
@@ -1099,18 +1121,25 @@ impl GongwenApp {
         label_response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(hover);
-        // 关闭按钮：常态低对比**常显**（不悬停也看得见），悬停标签时升到
-        // 实色、悬停它本身时渐变到危险红——三个档位各自明确。按钮钉死在
-        // 内容右端、位置可精确预估，hover 检测才能在画按钮之前拿到。
-        let close_rect = egui::Rect::from_min_size(
-            egui::pos2(inner.right() - close_width, inner.center().y - 8.0),
-            egui::vec2(close_width, 16.0),
-        );
+        let close_rect = close_button_rect(rect);
+        // 自己 interact 再自己画，不走 Button：Button 的高度要跟行带的
+        // interact_size 较劲（见 6bad39e），而这里的位置必须钉死；这样热区、
+        // 悬停圆底、叉三者共用同一个 rect，不可能再错位。
+        let close_response = content
+            .interact(
+                close_rect,
+                egui::Id::new("tab_close").with(tab),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("关闭这个标签");
         let close_hover_t = ctx.animate_bool_with_time(
             egui::Id::new("tab_close_hover").with(tab),
-            content.rect_contains_pointer(close_rect),
+            close_response.hovered(),
             TAB_HOVER_ANIM,
         );
+        // 常态低对比**常显**（不悬停也看得见），悬停标签时升到实色、悬停它
+        // 本身时渐变到危险红——三个档位各自明确。
         let close_base = theme::text_muted()
             .lerp_to_gamma(egui::Color32::WHITE, sel_t)
             .gamma_multiply(0.55 + 0.45 * hover_t);
@@ -1118,26 +1147,30 @@ impl GongwenApp {
         // （红叉压在主题色上看不清）。两者同样按 sel_t 插值，避免中途突变。
         let close_hover_color = theme::danger().lerp_to_gamma(theme::canvas(), sel_t);
         let close_color = close_base.lerp_to_gamma(close_hover_color, close_hover_t);
-        // 按钮放进钉死在 close_rect 的子 Ui，不能走 content 的横向流：
-        // 1. 普通 Button 的 min_size.y 会被 interact_size（CONTROL_HEIGHT=30）
-        //    强制顶高，超出内区后被 egui 按行顶对齐，× 被压到标签右下角；
-        // 2. item_spacing 会把按钮向右再推 4px，与 hover 判定区 close_rect 错位。
-        // .small() 跳过 interact_size 拔高，让 18×16 的钉死位置真正生效。
-        let mut close_ui = content.new_child(
-            egui::UiBuilder::new()
-                .max_rect(close_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        // 悬停时叉底下垫一层同色淡圆，按下再深一档：热区变得看得见，也补上了
+        // 「按下去了」的反馈。半透明叠在已画好的标签底上，选中态的主题色胶囊
+        // 不会被糊成一块死色。
+        let close_press = ctx.animate_bool_with_time(
+            egui::Id::new("tab_close_press").with(tab),
+            close_response.is_pointer_button_down_on(),
+            TAB_PRESS_ANIM,
         );
-        if close_ui
-            .add(
-                egui::Button::new(egui::RichText::new("×").color(close_color))
-                    .frame(false)
-                    .small()
-                    .min_size(egui::vec2(close_width, 16.0)),
-            )
-            .on_hover_text("关闭这个标签")
-            .clicked()
-        {
+        let close_wash = theme::danger()
+            .lerp_to_gamma(egui::Color32::WHITE, sel_t)
+            .gamma_multiply((0.16 + 0.12 * close_press) * close_hover_t);
+        content
+            .painter()
+            .circle_filled(close_rect.center(), CLOSE_HIT / 2.0, close_wash);
+        // 叉用 Lucide 的 x.svg：与工具栏其余图标同一套 2px 圆头描边，收口
+        // 干净、两笔等长，不像系统字体的 × 那样随字体换形、还会被基线拽偏。
+        theme::Icon::X
+            .image_sized(CLOSE_ICON)
+            .tint(close_color)
+            .paint_at(
+                &content,
+                egui::Rect::from_center_size(close_rect.center(), egui::Vec2::splat(CLOSE_ICON)),
+            );
+        if close_response.clicked() {
             closed = true;
         }
 
@@ -1297,5 +1330,54 @@ impl GongwenApp {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tab_close_tests {
+    use super::*;
+
+    /// 一格标签：最窄的那种，右端最容易被挤。
+    fn tab() -> egui::Rect {
+        egui::Rect::from_min_size(
+            egui::pos2(120.0, 6.0),
+            egui::vec2(DOC_TAB_MIN_WIDTH, TOOLBAR_CONTROL_HEIGHT),
+        )
+    }
+
+    #[test]
+    fn the_close_button_sits_on_the_tabs_own_centre_line() {
+        let tab = tab();
+        let close = close_button_rect(tab);
+        // 竖直方向对齐胶囊中线，不是贴着下沿——这正是之前跑偏的那一次。
+        assert!((close.center().y - tab.center().y).abs() < f32::EPSILON);
+        // 上下都留得出余量，底圆不会压到胶囊描边。
+        assert!(close.top() > tab.top() + 2.0);
+        assert!(close.bottom() < tab.bottom() - 2.0);
+    }
+
+    #[test]
+    fn the_close_button_keeps_its_margin_from_the_right_edge() {
+        let close = close_button_rect(tab());
+        assert!((close.right() - (tab().right() - CLOSE_MARGIN)).abs() < f32::EPSILON);
+        assert!((close.width() - CLOSE_HIT).abs() < f32::EPSILON);
+        assert!((close.height() - CLOSE_HIT).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_cross_stays_inside_its_hit_area() {
+        let close = close_button_rect(tab());
+        let icon = egui::Rect::from_center_size(close.center(), egui::Vec2::splat(CLOSE_ICON));
+        assert!(close.contains_rect(icon));
+        // 叉小于热区：热区大一圈才好点，而不是让图标自己撑满。
+        const { assert!(CLOSE_ICON < CLOSE_HIT) };
+    }
+
+    /// 标签宽度里给关闭键预留的位置必须够：热区 + 两侧留白 + 标题前的间隙，
+    /// 否则长标题的省略号会压到叉上。
+    #[test]
+    fn the_tab_width_budget_covers_the_close_button() {
+        let content_padding = CLOSE_MARGIN * 2.0;
+        assert!(DOC_TAB_CHROME_WIDTH >= content_padding + CLOSE_HIT + CLOSE_GAP);
     }
 }

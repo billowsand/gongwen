@@ -96,8 +96,8 @@ const DOC_TAB_MAX_WIDTH: f32 = 250.0;
 const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
 /// 标签标题超过这个字数就中部省略。
 const DOC_TAB_TITLE_CHARS: usize = 14;
-/// 标签里除标题以外的固定占位：内边距 + 状态标记 + 关闭按钮。
-const DOC_TAB_CHROME_WIDTH: f32 = 74.0;
+/// 标签里除标题以外的固定占位：内边距 + 状态标记 + 关闭键热区与它前面的留白。
+const DOC_TAB_CHROME_WIDTH: f32 = 78.0;
 /// 标签条统一动效时长（秒）。悬停/按下用短档，选中过渡用中档。
 const TAB_HOVER_ANIM: f32 = theme::anim::FAST;
 const TAB_PRESS_ANIM: f32 = theme::anim::FAST;
