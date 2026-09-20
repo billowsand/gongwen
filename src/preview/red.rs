@@ -10,8 +10,8 @@ use crate::preview::gutter;
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
     clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
-    is_renderable_paragraph, job, justified_rows, layout, line_block, scroll_preview_to_rect,
-    sheet, signature_date, single_line, text_format,
+    is_renderable_paragraph, job, justified_rows, layout, line_block, row_tint_offset,
+    scroll_preview_to_rect, sheet, signature_date, single_line, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -950,6 +950,7 @@ pub(crate) fn paint_red_print_pages(
                             }
                             let local_start = start - row_start;
                             let local_end = end - row_start;
+                            let tint_top = row_tint_offset(placed);
                             let row_rect = |from: usize, to: usize| {
                                 let left = row_galley
                                     .pos_from_cursor(egui::text::CCursor::new(from))
@@ -959,10 +960,10 @@ pub(crate) fn paint_red_print_pages(
                                     .left()
                                     .max(left + 1.0);
                                 egui::Rect::from_min_max(
-                                    top_left + placed.pos.to_vec2() + egui::vec2(left, 0.0),
+                                    top_left + placed.pos.to_vec2() + egui::vec2(left, tint_top),
                                     top_left
                                         + placed.pos.to_vec2()
-                                        + egui::vec2(right, placed.size.y),
+                                        + egui::vec2(right, tint_top + placed.size.y),
                                 )
                                 .expand2(egui::vec2(3.0, 1.0))
                             };
@@ -1043,8 +1044,15 @@ pub(crate) fn paint_red_print_pages(
                         *scroll_to_anchor = false;
                     }
                     if anchored || response.hovered() {
+                        // 底色照首行的字框取中：整块也是字贴上沿、余量留在下面。
+                        let tint_top = fragment
+                            .galley
+                            .rows
+                            .first()
+                            .map_or(0.0, |row| row_tint_offset(row));
                         ui.painter().rect_filled(
-                            rect.expand2(egui::vec2(3.0, 1.0)),
+                            rect.translate(egui::vec2(0.0, tint_top))
+                                .expand2(egui::vec2(3.0, 1.0)),
                             3.0,
                             if anchored {
                                 theme::accent_soft()

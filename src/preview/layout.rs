@@ -618,6 +618,30 @@ pub(crate) fn first_ink(
         .map(|offset| start + offset)
 }
 
+/// 一行的底色相对行框要挪多少：负值表示往上提。
+///
+/// egui 把基线钉在字体 ascent 上，「行距减字高」的余量整块留在字的下面。底色若照
+/// 行框铺满，字就贴着上沿、下面空出小半行的色带。这里按这一行真正的字框取中，
+/// 把整块底色往上挪半格余量，字便坐在色块的垂直正中；每行挪的量一样，连着几行
+/// 亮起来时上下仍是严丝合缝的。
+pub(crate) fn row_tint_offset(row: &egui::epaint::text::Row) -> f32 {
+    let band = row
+        .glyphs
+        .iter()
+        .fold(None, |band: Option<(f32, f32)>, glyph| {
+            let top = glyph.pos.y - glyph.font_ascent;
+            let bottom = top + glyph.font_height;
+            Some(match band {
+                Some((above, below)) => (above.min(top), below.max(bottom)),
+                None => (top, bottom),
+            })
+        });
+    match band {
+        Some((top, bottom)) => (top + bottom) / 2.0 - row.size.y / 2.0,
+        None => 0.0,
+    }
+}
+
 /// 为已经构造好的连续段落布局添加源码行级交互；紧缩段可借此保留标题/正文字体。
 pub(crate) fn clickable_justified_job(
     ui: &mut egui::Ui,
@@ -658,6 +682,7 @@ pub(crate) fn clickable_justified_job(
             }
             let local_start = start - row_start;
             let local_end = end - row_start;
+            let tint_top = row_tint_offset(placed);
             let row_rect = |from: usize, to: usize| {
                 let left = row_galley
                     .pos_from_cursor(egui::text::CCursor::new(from))
@@ -667,8 +692,10 @@ pub(crate) fn clickable_justified_job(
                     .left()
                     .max(left + 1.0);
                 egui::Rect::from_min_max(
-                    block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(left, 0.0),
-                    block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(right, placed.size.y),
+                    block_rect.left_top() + placed.pos.to_vec2() + egui::vec2(left, tint_top),
+                    block_rect.left_top()
+                        + placed.pos.to_vec2()
+                        + egui::vec2(right, tint_top + placed.size.y),
                 )
                 .expand2(egui::vec2(3.0, 1.0))
             };

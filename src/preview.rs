@@ -24,7 +24,7 @@ pub(crate) use layout::{
     ClickableSourceSegment, append_inline, body_block, clickable, clickable_body_block,
     clickable_justified_job, draw, draw_justified, first_ink, heading_family, indent,
     is_renderable_paragraph, job, justified_rows, layout, line_block, line_galley, place,
-    scroll_preview_to_rect, sheet, single_line, stacked, table_block, text_format,
+    row_tint_offset, scroll_preview_to_rect, sheet, single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
@@ -865,6 +865,34 @@ mod tests {
             assert!(
                 left > metrics.pt(BODY_PT) * 1.5,
                 "高亮仍压着行首缩进：{left}"
+            );
+        });
+    }
+
+    /// 行底色照字框取中：色块上下的留白一样厚，字不再贴着色块上沿。
+    #[test]
+    fn source_line_highlight_centers_on_the_glyph_box() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let normal = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+            let mut job = job(metrics.content);
+            append_inline(&mut job, &metrics, "很多地方我们都需要权衡。", &normal);
+            let base = layout(ui, job);
+            let row = base.rows.first().expect("应排出一行");
+            let glyph = row.glyphs.first().expect("这一行应有字形");
+            let offset = row_tint_offset(row);
+            assert!(
+                offset < 0.0,
+                "行距余量全留在字下面，底色应整块上提：{offset}"
+            );
+            let ink_top = glyph.pos.y - glyph.font_ascent;
+            let above = ink_top - offset;
+            let below = offset + row.size.y - (ink_top + glyph.font_height);
+            assert!(
+                (above - below).abs() < 0.5,
+                "底色上下留白不等：上 {above}、下 {below}"
             );
         });
     }
