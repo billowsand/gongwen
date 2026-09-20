@@ -2722,6 +2722,13 @@ mod tests {
                 .families
                 .get(&official_family(family))
                 .unwrap_or_else(|| panic!("{family} 没有绑定字体"));
+            // 本机既没有随应用分发的字体目录，系统里也没装这支公文字体时，整个
+            // 字体族退回界面字体链（CI 的 macOS / Linux 机器就是这样），链尾是
+            // egui 自带的 emoji 字体。此时没有「公文字体」可谈，兜底挂没挂也无从
+            // 检验，跳过而不是误报。装上了才断。
+            if !chain.iter().any(|key| key == family) {
+                continue;
+            }
             let last = chain
                 .last()
                 .unwrap_or_else(|| panic!("{family} 的字体族是空的"));
