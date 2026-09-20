@@ -16,6 +16,7 @@ concurrency:
 # when the runtime contents actually change. The tagged release must provide
 # runtime-win-x64.zip, runtime-linux-arm64.zip, runtime-linux-amd64.zip and
 # runtime-darwin-arm64.zip.
+# v0.5.0 起四个包都带 ime/（输入法词库与语言模型，平台无关），见下方冒烟步骤。
 env:
   # v0.4.0 起额外分发研究报告排版所需的 9 个字体（方正、TeX Gyre Termes、
   # JetBrains Mono）。研究报告按文件名从 runtime 加载字体，用户机器不必安装。
