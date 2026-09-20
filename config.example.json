@@ -264,6 +264,7 @@
   "ime": {
     "enabled": true,
     "shuangpin": "",
+    "fuma": "",
     "full_width_punctuation": true,
     "page_size": 5,
     "page_keys": "[]"

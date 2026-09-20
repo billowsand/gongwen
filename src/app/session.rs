@@ -486,6 +486,7 @@ impl GongwenApp {
             ime.page_size,
             &ime.page_keys,
         )
+        .with_fuma(&ime.fuma)
     }
 
     /// 应用级快捷键要在各个文本框处理输入前消费，避免保存/查找

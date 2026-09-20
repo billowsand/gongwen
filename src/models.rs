@@ -1918,6 +1918,10 @@ pub struct ImeConfig {
     /// 空字符串（默认）是**全拼**。
     pub shuangpin: String,
 
+    /// 双拼辅助码（形码）方案：`xiaohe`。空字符串（默认）是不用辅码。
+    /// 码表不随包分发（权利归方案作者），要使用者在设置页自己导入。
+    pub fuma: String,
+
     /// 中文模式下的全角标点（`，。：；〉《`……），英文模式始终半角。
     pub full_width_punctuation: bool,
 
@@ -1933,6 +1937,7 @@ impl Default for ImeConfig {
         Self {
             enabled: true,
             shuangpin: String::new(),
+            fuma: String::new(),
             full_width_punctuation: true,
             page_size: 5,
             page_keys: "[]".to_string(),
