@@ -12,6 +12,11 @@
 - 输入法：应用内拼音输入法，引擎、词库与整句模型都在本进程里，不用系统输入法、
   也没有独立进程。代码在 `src/ime/`，内核 vendor 自字在输入法（GPL-3.0-or-later），
   见 `vendor/qingjian/README.md`。
+  - 数据：`runtime/ime/dict.qj`（必需）+ `lm.qj`（可选，44 MB，长句打得少可以不带）。
+  - 学习数据与公文同一个用户目录：`config_dir()/ime/`——词频与用户词、公文词表
+    导出的附加词库（`dicts/`）、辅码表（`fuma/`）。
+  - 辅码（形码）表**不随包**：权利归方案作者、上游未获再分发授权，只能由使用者
+    在设置页自己导入。
 - 模型接入：本机 LM Studio / Ollama，走 OpenAI 兼容接口（`src/lmstudio.rs`、
   `src/rag.rs`、`src/rag_client.rs`）。
 

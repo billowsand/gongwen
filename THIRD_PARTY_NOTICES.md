@@ -180,3 +180,8 @@ core / lm / translate / learning），随源码存放在 `vendor/qingjian/`，�
 
 `lm.qj` 不在时输入法退到词级候选 + 个人 n-gram，仍可正常打字；取舍与重打办法见
 `vendor/qingjian/README.md`。
+
+**双拼辅码（形码）表不随包分发。** 小鹤辅码表复现的是已发表的输入方案，
+权利归方案作者，上游未取得再分发授权（见上游 `assets/fuma/README.md`）。
+因此本发行版不包含任何辅码表，只提供导入入口：使用者在设置页自行导入一份
+`字=两码` 的文本，文件保存在本机用户目录（`config_dir()/ime/fuma/`）。

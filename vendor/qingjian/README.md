@@ -71,3 +71,18 @@ cargo check --all-targets && cargo test
 先用 `qingjian-dict-convert bigram` 的 `--min-count` / `--max-bigrams` 生成小一点的
 `lm-unigram.tsv` / `lm-bigram.tsv`，再用 `pack lm` 打成 `.qj`。裁的是低频二元组，
 高频接续不受影响。
+
+## 辅码表：不随包，由使用者自己导入
+
+小鹤辅码（形码）表**没有**放进 vendor，也**不要**放进随包数据。
+上游 `assets/fuma/README.md` 写明：该表整理自 metasequoiaime/MSIME-Engine，
+复现的是已发表的输入方案，**权利归小鹤方案作者**，上游未取得再分发授权，
+其前端许可（GPL-3.0）不覆盖表内容。
+
+所以应用里做成「设置页选方案 + 导入码表」：使用者在设置页选「小鹤辅码」，
+再点「导入码表…」选一份自己的 `字=两码` 文本（格式与上游 `assets/fuma/xiaohe.txt`
+一致，每行一条）。文件拷到 `config_dir()/ime/fuma/`，引擎的 `FumaTable::from_path`
+直接认；表不在就只是辅码关着，不影响其他输入。
+
+`FumaScheme::asset()` 给出的相对路径（`fuma/xiaohe.txt`）只用来决定落盘文件名，
+不要在打包脚本里按它去找随包文件。
