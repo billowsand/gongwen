@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use qingjian_core::FumaScheme;
+
 /// 词库文件名。
 const DICT_FILE: &str = "dict.qj";
 
@@ -56,6 +58,26 @@ pub(crate) fn learning_dir() -> Option<PathBuf> {
     let dir = crate::storage::config_dir().ok()?.join("ime");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
+}
+
+/// 附加词库目录：公文词表导出的 TSV 落在这里，用户也可以自己往里丢领域词库
+/// （`.qj` 或青简 TSV，见 `vendor/qingjian/dictionary/src/lib.rs`）。
+pub(crate) fn dicts_dir() -> Option<PathBuf> {
+    let dir = learning_dir()?.join("dicts");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// 辅码表的存放路径（用户自己导入的）。
+///
+/// **不随包分发**：小鹤辅码表的权利归方案作者，上游未取得再分发授权，
+/// 所以只能由使用者自己导入一份（格式与上游 `assets/fuma/xiaohe.txt` 一致，
+/// 每行 `字=两码`）。文件不在就当辅码关着。
+pub(crate) fn fuma_path(scheme: FumaScheme) -> Option<PathBuf> {
+    let file = Path::new(scheme.asset()).file_name()?;
+    let dir = learning_dir()?.join("fuma");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(file))
 }
 
 #[cfg(test)]

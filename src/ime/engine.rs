@@ -91,7 +91,7 @@ fn load_learner(dir: &Path) -> FrequencyLearner {
 
 /// 附加词库目录里的 `.qj` / TSV 全部加载。用户往这里放领域词库（公文专名、
 /// 行业术语），坏文件跳过、不挡住启动。
-fn load_extra(dir: &Path) -> Vec<Dictionary> {
+pub(super) fn load_extra(dir: &Path) -> Vec<Dictionary> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

@@ -9,15 +9,19 @@
 //! 卸掉引擎（`RefCell` 可能停在借出状态，再调一定还会 panic），这次按键当没发生。
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use eframe::egui;
-use qingjian_core::{CandidateLayout, Engine};
+use qingjian_core::{CandidateLayout, Engine, FumaTable};
 
 use super::ImeSettings;
 use super::data;
 use super::engine::{self, Assembly};
 use super::keys::{self, Action, Key, Route};
+use super::lexicon;
+use crate::lexicon::LexiconTerm;
 
 /// 学习数据落盘的间隔。被杀进程最多丢这么久的选择记录。
 const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
@@ -103,6 +107,9 @@ pub(crate) struct Ime {
     /// 上一帧候选窗量到的尺寸，用来判断贴光标上方还是下方。
     window_size: Option<egui::Vec2>,
 
+    /// 辅码表加载了几个字；`None` 表示没装表（辅码关着）。
+    fuma_words: Option<usize>,
+
     /// 上一帧有可编辑控件持有焦点（egui 的 `output.ime` 非空）。只有为真才接管键盘：
     /// 否则按键会被我们吃掉却没人在文本框里接收。
     editable_focus: bool,
@@ -127,7 +134,7 @@ impl Ime {
     /// 装配输入法。找不到数据（或缺词库）就返回一个不可用的输入法，键盘留给系统输入法。
     pub(crate) fn new(settings: ImeSettings) -> Self {
         let assembled = if settings.enabled { load() } else { None };
-        Self {
+        let mut ime = Self {
             assembled,
             settings,
             english: false,
@@ -136,13 +143,16 @@ impl Ime {
             preedit: Preedit::default(),
             pending_commit: None,
             window_size: None,
+            fuma_words: None,
             editable_focus: false,
             focus_id: None,
             anchor: None,
             shift_alone: false,
             system_ime_off: false,
             last_flush: Instant::now(),
-        }
+        };
+        ime.apply_fuma();
+        ime
     }
 
     /// 测试用：拿一份现成的引擎当输入法（不依赖随包的 `.qj` 数据）。
@@ -225,6 +235,7 @@ impl Ime {
                 .engine
                 .set_full_width_punctuation(settings.full_width_punctuation);
         }
+        self.apply_fuma();
     }
 
     /// 帧首：接管键盘。要在任何控件跑之前调用。
@@ -286,6 +297,79 @@ impl Ime {
         }
     }
 
+    /// 切中英。状态栏点一下与单击 `Shift` 是同一个开关。
+    pub(crate) fn toggle_english(&mut self) {
+        self.english = !self.english;
+    }
+
+    /// 辅码表加载了几个字；`None` 表示没装表。
+    pub(crate) fn fuma_words(&self) -> Option<usize> {
+        self.fuma_words
+    }
+
+    /// 把公文词表同步成输入法的附加词库，返回写进去的条数。
+    ///
+    /// 落在 `config_dir()/ime/dicts/`（与稿件库同一个用户目录），写完立即重新
+    /// 装配附加词库，不用重启。
+    pub(crate) fn sync_lexicon(&mut self, terms: &[LexiconTerm]) -> anyhow::Result<usize> {
+        let dir = data::dicts_dir().context("无法确定输入法词库目录")?;
+        let (tsv, written) = lexicon::build(terms);
+        let path = dir.join(lexicon::FILE_NAME);
+        std::fs::write(&path, tsv)
+            .with_context(|| format!("写入输入法词库失败：{}", path.display()))?;
+        self.reload_extra_dicts();
+        Ok(written)
+    }
+
+    /// 导入辅码表：把选中的文件拷到用户目录再加载。返回表里的字数。
+    ///
+    /// 码表不随包（权利归方案作者），只能由使用者自己导入一份，格式与上游
+    /// `assets/fuma/xiaohe.txt` 一致：每行 `字=两码`。
+    pub(crate) fn import_fuma_table(&mut self, source: &std::path::Path) -> anyhow::Result<usize> {
+        let scheme = self
+            .settings
+            .fuma
+            .context("先在设置里选一个辅码方案，再导入码表")?;
+        let target = data::fuma_path(scheme).context("无法确定辅码表目录")?;
+        std::fs::copy(source, &target)
+            .with_context(|| format!("拷贝辅码表失败：{}", source.display()))?;
+        self.apply_fuma();
+        self.fuma_words.context("码表里没有认得出的条目")
+    }
+
+    /// 辅码表：方案变了就重新加载。表是使用者自己导入的（不随包，见
+    /// `vendor/qingjian/README.md` 的许可说明），不在就当辅码关着。
+    fn apply_fuma(&mut self) {
+        let table = self.settings.fuma.and_then(|scheme| {
+            let path = data::fuma_path(scheme)?;
+            match FumaTable::from_path(&path) {
+                Ok(table) => Some(table),
+                Err(error) => {
+                    eprintln!(
+                        "[ime] 辅码表读取失败，辅码关着：{}（{error}）",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        });
+        self.fuma_words = table.as_ref().map(FumaTable::len);
+        if let Some(engine) = self.engine_mut() {
+            engine.set_fuma(table.map(Arc::new));
+        }
+    }
+
+    /// 重新装配附加词库目录：公文词表导出的 TSV，加上使用者自己丢进去的领域词库。
+    fn reload_extra_dicts(&mut self) {
+        let Some(dir) = data::dicts_dir() else {
+            return;
+        };
+        let dictionaries = engine::load_extra(&dir);
+        if let Some(assembly) = self.assembled.as_mut() {
+            assembly.engine.set_extra_dictionaries(dictionaries);
+        }
+    }
+
     /// 记下本帧的焦点与光标矩形。
     fn record_focus(&mut self, anchor: Option<egui::Rect>) {
         self.editable_focus = anchor.is_some();
@@ -322,6 +406,8 @@ impl Ime {
             english: self.english,
             // 英文模式下的标点保持半角：公文里的小数点、括号都是半角。
             full_width: !self.english && self.settings.full_width_punctuation,
+            // 辅码表真的装上了才算开着：配了方案但没导入表时，大写字母照旧是临时英文。
+            fuma: self.engine().is_some_and(|engine| engine.fuma_enabled()),
         }
     }
 

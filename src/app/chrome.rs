@@ -100,6 +100,49 @@ fn draw_window_glyph(
 }
 
 /// 底部状态栏的紧凑图标按钮：尺寸、内边距都按 Windows 状态栏风格收小。
+/// 状态栏里的输入法方案标记：双拼取一个字（鹤 / 自 / 微 / 搜），辅码另加一个「辅」。
+/// 两个都没开就返回 `None`（纯全拼，不用额外标记）。
+fn ime_scheme_marker(ime: &crate::models::ImeConfig) -> Option<String> {
+    let mut marker = String::new();
+    match ime.shuangpin.trim() {
+        "xiaohe" => marker.push('鹤'),
+        "ziranma" => marker.push('自'),
+        "microsoft" => marker.push('微'),
+        "sogou" => marker.push('搜'),
+        _ => {}
+    }
+    if !ime.fuma.trim().is_empty() {
+        marker.push('辅');
+    }
+    (!marker.is_empty()).then_some(marker)
+}
+
+/// 状态栏的输入法指示：中 / 英 + 方案标记。整块可点，点了切中英。
+fn ime_chip(ui: &mut egui::Ui, english: bool, scheme: Option<&str>, height: f32) -> egui::Response {
+    let (fg, bg) = if english {
+        (theme::text_muted(), theme::surface_sunk())
+    } else {
+        (theme::accent(), theme::accent_soft())
+    };
+    let mode = if english { "英" } else { "中" };
+    let text = match scheme {
+        Some(scheme) => format!("{mode} {scheme}"),
+        None => mode.to_string(),
+    };
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(text)
+                .color(fg)
+                .size(theme::font_sizes::SMALL),
+        )
+        .fill(bg)
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(egui::CornerRadius::same(3))
+        .min_size(egui::vec2(0.0, height)),
+    )
+    .on_hover_text("输入法：点一下切换中 / 英（与单击 Shift 相同）")
+}
+
 fn status_icon_button(
     ui: &mut egui::Ui,
     selected: bool,
@@ -842,7 +885,7 @@ impl GongwenApp {
                     ui.weak("Rust 工具链");
                     ui.label(format!(
                         "rustc {}（运行时由 env! 决定）",
-                        env!("CARGO_PKG_RUST_VERSION", "未知")
+                        option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("未知")
                     ));
                 });
                 ui.add_space(6.0);
@@ -1209,6 +1252,10 @@ impl GongwenApp {
             let status = self.status.clone();
             let model = self.config.lm_studio.model.trim().to_owned();
             let show_doc_controls = self.showing_doc();
+            // 输入法状态：常显的一小块，点一下切中英。
+            let ime_active = self.ime.active();
+            let ime_english = self.ime.english();
+            let ime_scheme = ime_scheme_marker(&self.config.ime);
             let active_doc = self.active_doc;
             let (versions_open, result_open, warnings_count, saved) = if show_doc_controls {
                 self.docs
@@ -1248,6 +1295,16 @@ impl GongwenApp {
                 // 右：导出、审校、版本三个抽屉入口。只留图标，说明放在悬停里。
                 let right_bound = ui
                     .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 输入法指示放最右：它是「现在在中文还是英文」唯一的常显提示，
+                        // 不该只在打开稿件时才出现。
+                        if ime_active {
+                            if ime_chip(ui, ime_english, ime_scheme.as_deref(), CHIP_HEIGHT)
+                                .clicked()
+                            {
+                                self.ime.toggle_english();
+                            }
+                            ui.add_space(4.0);
+                        }
                         if !show_doc_controls {
                             return ui.max_rect().right();
                         }

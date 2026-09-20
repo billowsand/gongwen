@@ -239,6 +239,15 @@ fn shuangpin_label(key: &str) -> &'static str {
         .unwrap_or("全拼")
 }
 
+/// 辅码方案在界面上显示的名字。空串或认不出的值都算不用辅码。
+fn fuma_label(key: &str) -> &'static str {
+    crate::ime::ImeSettings::fuma_options()
+        .into_iter()
+        .find(|(option, _)| *option == key.trim())
+        .map(|(_, label)| label)
+        .unwrap_or("不用辅码")
+}
+
 /// 一行文本输入设置项。
 fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
     setting_row(ui, label, None, |ui| {
@@ -1467,6 +1476,10 @@ impl GongwenApp {
         let available = self.ime.available();
         let summary = self.ime.data_summary();
         let english = self.ime.english();
+        let fuma_words = self.ime.fuma_words();
+        // 文件对话框与同步都在布局之后做：放在闭包里会阻塞布局、还要跟 `self.config` 抢借用。
+        let mut import_fuma = false;
+        let mut sync_lexicon = false;
 
         setting_row(ui, "引擎", None, |ui| {
             let (text, color) = match available {
@@ -1518,6 +1531,37 @@ impl GongwenApp {
                     });
             },
         );
+        setting_row(
+            ui,
+            "双拼辅码",
+            Some("小鹤形码。码表不随包（权利归方案作者），要自己导入一份。"),
+            |ui| {
+                let current = fuma_label(&self.config.ime.fuma);
+                egui::ComboBox::from_id_salt("ime_fuma")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (key, label) in crate::ime::ImeSettings::fuma_options() {
+                            ui.selectable_value(&mut self.config.ime.fuma, key.to_string(), label);
+                        }
+                    });
+            },
+        );
+        setting_continuation(ui, |ui| {
+            let fuma_on = !self.config.ime.fuma.trim().is_empty();
+            let text = match (fuma_words, fuma_on) {
+                (Some(words), _) => format!("码表已加载：{words} 字。"),
+                (None, false) => "未启用辅码。".to_string(),
+                (None, true) => "还没有码表：导入一份每行「字=两码」的 txt 才能用。".to_string(),
+            };
+            ui.label(
+                egui::RichText::new(text)
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::text_muted()),
+            );
+            if ui.button("导入码表…").clicked() {
+                import_fuma = true;
+            }
+        });
         setting_row(ui, "每页候选", None, |ui| {
             egui::ComboBox::from_id_salt("ime_page_size")
                 .selected_text(self.config.ime.page_size.to_string())
@@ -1544,6 +1588,25 @@ impl GongwenApp {
         )
         .on_hover_text("，。：；这些标点在中文模式下转成全角；英文模式与数字后的小数点始终半角。");
 
+        sub_heading(
+            ui,
+            "公文词表",
+            Some("把词表里的词交给输入法当附加词库，本单位专名与套语就能直接打出来。"),
+        );
+        setting_continuation(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "同步到 config_dir()/ime/dicts/，与学习数据同一个用户目录；\
+                     改完词表回来点一下即可，不用重启。",
+                )
+                .size(theme::font_sizes::SMALL)
+                .color(theme::text_muted()),
+            );
+            if ui.button("把词表同步给输入法").clicked() {
+                sync_lexicon = true;
+            }
+        });
+
         sub_heading(ui, "操作", None);
         setting_continuation(ui, |ui| {
             ui.label(
@@ -1554,6 +1617,44 @@ impl GongwenApp {
                 .color(theme::text_muted()),
             );
         });
+
+        if import_fuma {
+            self.import_fuma_table_dialog();
+        }
+        if sync_lexicon {
+            self.sync_lexicon_to_ime(true);
+        }
+    }
+
+    /// 选一份辅码表导进用户目录。
+    fn import_fuma_table_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("辅码表", &["txt"])
+            .set_title("选择辅码表（每行「字=两码」）")
+            .pick_file()
+        else {
+            return;
+        };
+        match self.ime.import_fuma_table(&path) {
+            Ok(words) => self.status = format!("辅码表已导入：{words} 字。"),
+            Err(error) => self.status = format!("导入辅码表失败：{error:#}"),
+        }
+    }
+
+    /// 把公文词表同步成输入法的附加词库。`announce` 为真时把结果写进状态栏
+    /// （设置页按钮用），启动时静默。
+    pub(crate) fn sync_lexicon_to_ime(&mut self, announce: bool) {
+        let terms = match self.lexicon_store.as_ref() {
+            Some(store) => store.export_candidates().unwrap_or_default(),
+            None => Vec::new(),
+        };
+        match self.ime.sync_lexicon(&terms) {
+            Ok(written) if announce => {
+                self.status = format!("已把 {written} 条词表词交给输入法。");
+            }
+            Ok(_) => {}
+            Err(error) => self.status = format!("同步输入法词库失败：{error:#}"),
+        }
     }
 
     fn persistence_section_ui(&mut self, ui: &mut egui::Ui) {

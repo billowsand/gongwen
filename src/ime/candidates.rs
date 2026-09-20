@@ -68,36 +68,45 @@ impl Ime {
                         color: egui::Color32::from_black_alpha(40),
                     })
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            pinyin_strip(ui, &preedit);
-                            ui.add_space(2.0);
-                            ui.separator();
-                            ui.add_space(2.0);
-                            for (index, text) in &rows {
-                                if candidate_button(ui, *index, text, *index == highlight).clicked()
-                                {
-                                    clicked = Some(*index);
-                                }
-                            }
-                            if pages > 1 {
+                        // 两行：上面拼音串与状态，下面候选。挤在一行时拼音、候选、
+                        // 页码、中英混作一团，读的人分不清哪个是打的、哪个是选的。
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                pinyin_strip(ui, &preedit);
                                 ui.add_space(2.0);
                                 ui.separator();
                                 ui.add_space(2.0);
+                                if pages > 1 {
+                                    ui.label(
+                                        egui::RichText::new(format!("{}/{}", page + 1, pages))
+                                            .color(theme::text_muted()),
+                                    );
+                                    ui.add_space(2.0);
+                                    ui.separator();
+                                    ui.add_space(2.0);
+                                }
                                 ui.label(
-                                    egui::RichText::new(format!("{}/{}", page + 1, pages))
-                                        .color(theme::text_muted()),
+                                    egui::RichText::new(if english { "英" } else { "中" }).color(
+                                        if english {
+                                            theme::text_muted()
+                                        } else {
+                                            theme::accent()
+                                        },
+                                    ),
                                 );
-                            }
-                            ui.add_space(2.0);
-                            ui.label(
-                                egui::RichText::new(if english { "英" } else { "中" }).color(
-                                    if english {
-                                        theme::text_muted()
-                                    } else {
-                                        theme::accent()
-                                    },
-                                ),
-                            );
+                            });
+                            ui.add_space(3.0);
+                            ui.separator();
+                            ui.add_space(3.0);
+                            ui.horizontal(|ui| {
+                                for (index, text) in &rows {
+                                    if candidate_button(ui, *index, text, *index == highlight)
+                                        .clicked()
+                                    {
+                                        clicked = Some(*index);
+                                    }
+                                }
+                            });
                         });
                     });
             });

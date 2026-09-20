@@ -137,6 +137,9 @@ pub(crate) struct Route {
 
     /// 当前模式下的标点要不要转全角。
     pub(crate) full_width: bool,
+
+    /// 开着双拼辅码：组句中的大写字母是辅码键，进缓冲区而不是当临时英文。
+    pub(crate) fuma: bool,
 }
 
 /// 一次按键的分流结果。
@@ -176,6 +179,11 @@ fn route_char(c: char, route: Route, settings: &ImeSettings) -> Action {
         return Action::Push(c);
     }
     if c.is_ascii_uppercase() {
+        // 辅码开着时，组句中的大写字母是辅码键（`栏` 打 `lanM`），进缓冲区参与过滤；
+        // 其余情况是临时英文。
+        if route.composing && route.fuma {
+            return Action::Push(c);
+        }
         return Action::Insert(c);
     }
     if !route.composing {
@@ -229,6 +237,7 @@ mod tests {
             candidates,
             english: false,
             full_width: true,
+            fuma: false,
         }
     }
 
@@ -239,6 +248,7 @@ mod tests {
             candidates: 0,
             english: false,
             full_width: true,
+            fuma: false,
         }
     }
 
@@ -380,6 +390,29 @@ mod tests {
         assert_eq!(route(Key::Enter, english, &settings()), Action::Passthrough);
         // 英文模式下敲的数字不选词，也不会进拼音缓冲。
         assert_eq!(char_route('3', english), Action::Punctuate('3'));
+    }
+
+    /// 开着辅码时，组句中的大写字母是辅码键：进缓冲区，不当临时英文。
+    #[test]
+    fn uppercase_letters_are_fuma_keys_when_fuma_is_on() {
+        let fuma = Route {
+            fuma: true,
+            ..composing(5)
+        };
+        assert_eq!(char_route('M', fuma), Action::Push('M'));
+        // 没在组句时的大写字母仍然是临时英文（辅码只管组句内的过滤）。
+        let idle_fuma = Route {
+            fuma: true,
+            ..idle()
+        };
+        assert_eq!(char_route('M', idle_fuma), Action::Insert('M'));
+        // 英文模式下辅码不参与。
+        let english_fuma = Route {
+            english: true,
+            fuma: true,
+            ..idle()
+        };
+        assert_eq!(char_route('M', english_fuma), Action::Insert('M'));
     }
 
     /// 翻页键可以配置。

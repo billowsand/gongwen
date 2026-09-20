@@ -514,6 +514,8 @@ impl GongwenApp {
             knowledge_preview: None,
         };
         app.restore_session();
+        // 词表里的词同步给应用内输入法（静默：失败只写状态栏）。
+        app.sync_lexicon_to_ime(false);
         if app.config.vocabulary_setup == VocabularySetupStatus::Pending {
             app.open_page(NavPage::Vocabulary);
         }

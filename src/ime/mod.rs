@@ -13,13 +13,14 @@
 //! 词库与语言模型是 `.qj` 数据文件（vendor 自字在输入法，见 `vendor/qingjian/README.md`），
 //! 找得到才启用；找不到就退回系统输入法，不挡用户打字。
 
-use qingjian_core::ShuangpinScheme;
+use qingjian_core::{FumaScheme, ShuangpinScheme};
 
 mod candidates;
 mod cursor;
 mod data;
 mod engine;
 mod keys;
+mod lexicon;
 mod session;
 
 pub(crate) use cursor::follow_cursor;
@@ -33,6 +34,9 @@ pub(crate) struct ImeSettings {
 
     /// 双拼方案；`None` 是全拼。
     pub(crate) shuangpin: Option<ShuangpinScheme>,
+
+    /// 双拼辅助码（形码）方案；`None` 是不用辅码。
+    pub(crate) fuma: Option<FumaScheme>,
 
     /// 中文模式下的全角标点（，。：；）。
     pub(crate) full_width_punctuation: bool,
@@ -49,6 +53,7 @@ impl Default for ImeSettings {
         Self {
             enabled: true,
             shuangpin: None,
+            fuma: None,
             full_width_punctuation: true,
             page_size: 5,
             page_keys: ('[', ']'),
@@ -77,6 +82,8 @@ impl ImeSettings {
         Self {
             enabled,
             shuangpin: shuangpin.trim().parse().ok(),
+            // 辅码由 `with_fuma` 补：它单独从配置里来，不影响其他几项的解析。
+            fuma: None,
             full_width_punctuation,
             page_size: page_size.clamp(1, MAX_PAGE_SIZE),
             page_keys: parse_page_keys(page_keys).unwrap_or(Self::default().page_keys),
@@ -92,6 +99,23 @@ impl ImeSettings {
                 .map(|scheme| (scheme.key(), scheme.label())),
         );
         options
+    }
+
+    /// 界面上列的辅码方案：第一项是不用（配置里写空串），其后是引擎支持的方案。
+    pub(crate) fn fuma_options() -> Vec<(&'static str, &'static str)> {
+        let mut options: Vec<(&'static str, &'static str)> = vec![("", "不用辅码")];
+        options.extend(
+            FumaScheme::ALL
+                .into_iter()
+                .map(|scheme| (scheme.key(), scheme.label())),
+        );
+        options
+    }
+
+    /// 辅码方案从配置里的字符串来。认不出的名字当「不用辅码」。
+    pub(crate) fn with_fuma(mut self, fuma: &str) -> Self {
+        self.fuma = fuma.trim().parse().ok();
+        self
     }
 }
 
@@ -185,5 +209,23 @@ mod tests {
         let options = ImeSettings::shuangpin_options();
         assert_eq!(options.first().copied(), Some(("", "全拼")));
         assert_eq!(options.len(), ShuangpinScheme::ALL.len() + 1);
+    }
+
+    /// 辅码：认得出的方案名照用，空串与错名字都是关着。
+    #[test]
+    fn fuma_comes_from_the_config_string() {
+        let fuma = |text: &str| ImeSettings::default().with_fuma(text).fuma;
+        assert_eq!(fuma("xiaohe"), Some(FumaScheme::Xiaohe));
+        assert_eq!(fuma(""), None);
+        assert_eq!(fuma("  "), None);
+        assert_eq!(fuma("没这个方案"), None);
+    }
+
+    /// 辅码方案列表第一项是不用。
+    #[test]
+    fn fuma_options_start_with_off() {
+        let options = ImeSettings::fuma_options();
+        assert_eq!(options.first().copied(), Some(("", "不用辅码")));
+        assert_eq!(options.len(), FumaScheme::ALL.len() + 1);
     }
 }
