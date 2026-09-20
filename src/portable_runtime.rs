@@ -223,6 +223,15 @@ fn runtime_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// 应用内输入法的数据目录（`dict.qj` / `lm.qj`）：跟着运行时一起发，
+/// 查找规则与 TeX 运行时一致（环境变量 > 可执行文件旁 > 开发仓库）。
+pub(crate) fn ime_data_roots() -> Vec<PathBuf> {
+    runtime_roots()
+        .into_iter()
+        .map(|root| root.join("ime"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

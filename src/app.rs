@@ -113,6 +113,8 @@ pub(crate) const CONTENT_WIDTH: std::ops::RangeInclusive<f32> = FORM_CONTENT_MIN
 
 pub struct GongwenApp {
     config: AppConfig,
+    /// 应用内拼音输入法：引擎在本进程里，接管键盘时系统输入法被关掉。
+    ime: crate::ime::Ime,
     /// macOS 原生透明标题栏的实测控件尺寸；无值时使用跨平台自绘标题栏。
     macos_titlebar_metrics: Option<crate::macos_window::NativeTitlebarMetrics>,
     /// 已打开的稿件，每篇一个起草页标签。空表示当前只在导航页里。
@@ -364,6 +366,7 @@ impl GongwenApp {
                 .to_string();
         }
         let kind = config.last_template;
+        let ime = crate::ime::Ime::new(crate::ime::ImeSettings::default());
         let (sender, receiver) = mpsc::channel();
         // 先摆一篇空白稿兜底；下面会话恢复成功就把它换掉。
         let docs = vec![DraftSession::blank(0, &config)];
@@ -398,6 +401,7 @@ impl GongwenApp {
         };
         let mut app = Self {
             config,
+            ime,
             metrics: crate::metrics::load(),
             sop_open: false,
             macos_titlebar_metrics,
@@ -539,6 +543,10 @@ pub(crate) fn switch_template_profile(
 impl eframe::App for GongwenApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // 输入法要在所有控件之前接管键盘：该吃的按键在这里吃掉、该上屏的塞回事件队列。
+        // 设置从配置里来，每帧对一次（设置没变是空操作）。
+        self.ime.apply_settings(self.ime_settings());
+        self.ime.begin_frame(&ctx);
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
         egui::Panel::top("window_titlebar")
@@ -638,8 +646,10 @@ impl eframe::App for GongwenApp {
         self.about_window(&ctx);
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
+        // 候选窗浮在所有面板之上；这时编辑框已经画完，光标矩形是本帧最终的那一个。
+        self.ime.candidates_ui(&ctx);
         // 所有编辑框都画完了，这时 `output.ime` 才是本帧最终的那一个。
-        crate::ime::follow_cursor(&ctx);
+        self.ime.end_frame(&ctx);
         if self.any_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

@@ -23,6 +23,8 @@
 /runtime/texbundle/*.ttb
 /runtime/fonts/*.ttf
 /runtime/fonts/*.otf
+# 应用内输入法的数据文件（dict.qj / lm.qj）：本地开发副本，随包时进 runtime 压缩包
+/runtime/ime/
 
 # Local development copies of document fonts
 /font/*
