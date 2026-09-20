@@ -1,0 +1,15 @@
+# yamllint 的项目策略。
+#
+# pi-lens 在仓库里没有本文件时用它自带的空基线，于是 yamllint 的默认上限生效：
+# 每行 80 字符。而工作流里的 shell 命令、下载 URL、内联脚本天然很长——
+# `.github/workflows/` 下本来就有几十行超长（发布流程里 `package-portable.ps1`
+# 那一行 148 字符），把它们全部折行只会让 shell 片段更难读。
+#
+# 故意**不写** `extends: default`：那样会把 yamllint 的全套默认规则一起打开，
+# 于是本仓库所有 YAML（几个 workflow 都没有开头的 `---`）会新增一批
+# document-start / truthy 之类的finding，等于用一个新噪音换掉旧噪音。
+# 这里只声明需要放宽的那一条，其余规则维持本文件出现之前的行为。
+rules:
+  line-length:
+    max: 160
+    level: warning
