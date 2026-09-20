@@ -1118,10 +1118,21 @@ impl GongwenApp {
         // （红叉压在主题色上看不清）。两者同样按 sel_t 插值，避免中途突变。
         let close_hover_color = theme::danger().lerp_to_gamma(theme::canvas(), sel_t);
         let close_color = close_base.lerp_to_gamma(close_hover_color, close_hover_t);
-        if content
+        // 按钮放进钉死在 close_rect 的子 Ui，不能走 content 的横向流：
+        // 1. 普通 Button 的 min_size.y 会被 interact_size（CONTROL_HEIGHT=30）
+        //    强制顶高，超出内区后被 egui 按行顶对齐，× 被压到标签右下角；
+        // 2. item_spacing 会把按钮向右再推 4px，与 hover 判定区 close_rect 错位。
+        // .small() 跳过 interact_size 拔高，让 18×16 的钉死位置真正生效。
+        let mut close_ui = content.new_child(
+            egui::UiBuilder::new()
+                .max_rect(close_rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        if close_ui
             .add(
                 egui::Button::new(egui::RichText::new("×").color(close_color))
                     .frame(false)
+                    .small()
                     .min_size(egui::vec2(close_width, 16.0)),
             )
             .on_hover_text("关闭这个标签")
