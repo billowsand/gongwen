@@ -228,4 +228,40 @@ mod tests {
         assert_eq!(options.first().copied(), Some(("", "不用辅码")));
         assert_eq!(options.len(), FumaScheme::ALL.len() + 1);
     }
+
+    /// 随包数据真的能用吗：词库、语言模型、查询全走一遍。
+    ///
+    /// 标 `#[ignore]`：它要求随包的 `runtime/ime/` 真存在，开发机上没有也不该红。
+    /// 发布流水线的冒烟步骤用 `GONGWEN_RUNTIME_DIR` 指向打包出来的 runtime 目录
+    /// 跑它——缺数据、模型加载不了、查不出候选都会当场失败。
+    ///
+    /// 只断言「文件存在」不够：清单忘了写、路径变了、`.qj` 格式不配套，
+    /// 都能让文件在而引擎不可用；装配一次并真查一遍才说明装完能用。
+    #[test]
+    #[ignore = "需要随包的 runtime/ime 数据，发布流水线的冒烟步骤会跑"]
+    fn loads_the_shipped_dictionary_and_model() {
+        let data = super::data::find().expect("找不到随包输入法数据（runtime/ime/dict.qj）");
+        let learning = tempfile::tempdir().expect("临时目录");
+        let assembly =
+            super::engine::assemble(&data, Some(learning.path()), &learning.path().join("dicts"))
+                .expect("装配输入法引擎失败");
+        assert!(
+            assembly.dictionary_entries > 50_000,
+            "词库条数太少，可能读到了空表：{}",
+            assembly.dictionary_entries
+        );
+        assert!(
+            assembly.bigrams.unwrap_or(0) > 1_000_000,
+            "语言模型没加载或太小：{:?}",
+            assembly.bigrams
+        );
+        // 真查一次：拼音进去、候选出来。
+        let mut engine = assembly.engine;
+        engine.set_input("gongwen");
+        let query = engine.query().expect("查询「gongwen」应当成功");
+        assert!(
+            !query.candidates.items.is_empty(),
+            "「gongwen」查不出任何候选"
+        );
+    }
 }
