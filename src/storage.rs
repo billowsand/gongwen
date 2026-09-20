@@ -167,6 +167,12 @@ mod tests {
         assert_eq!(config.rag.min_score_ratio, 0.5);
         // 本地模型服务（LM Studio / Ollama）不提供 rerank 端点，示例配置默认走对话大模型重排。
         assert_eq!(config.rag.rerank.mode, crate::models::RerankMode::Llm);
+        // 输入法：示例配置给的是「启用全拼 + 全角标点 + 一页五个」。
+        assert!(config.ime.enabled);
+        assert!(config.ime.shuangpin.is_empty());
+        assert!(config.ime.full_width_punctuation);
+        assert_eq!(config.ime.page_size, 5);
+        assert_eq!(config.ime.page_keys, "[]");
     }
 
     /// 老配置里没有 `rag.rerank.mode` 字段，必须默认成「专用端点」，

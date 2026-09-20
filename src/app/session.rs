@@ -475,6 +475,19 @@ impl GongwenApp {
         }
     }
 
+    /// 配置里的输入法设置。每帧调一次，设置没变是空操作，
+    /// 而在设置页改一项就能当场生效。
+    pub(crate) fn ime_settings(&self) -> crate::ime::ImeSettings {
+        let ime = &self.config.ime;
+        crate::ime::ImeSettings::from_config(
+            ime.enabled,
+            &ime.shuangpin,
+            ime.full_width_punctuation,
+            ime.page_size,
+            &ime.page_keys,
+        )
+    }
+
     /// 应用级快捷键要在各个文本框处理输入前消费，避免保存/查找
     /// 被当前聚焦的编辑控件吞掉。
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {

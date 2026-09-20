@@ -261,5 +261,12 @@
     "list1": "circled",
     "list2": "decimal_dot"
   },
+  "ime": {
+    "enabled": true,
+    "shuangpin": "",
+    "full_width_punctuation": true,
+    "page_size": 5,
+    "page_keys": "[]"
+  },
   "theme": "claude"
 }

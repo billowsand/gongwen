@@ -1656,6 +1656,9 @@ pub struct AppConfig {
     pub ribbon_tab: RibbonTab,
     /// 功能区第二行（当前分区的按钮）是否收起，只留分区卡那一条。
     pub ribbon_collapsed: bool,
+    /// 应用内拼音输入法。旧配置没有该字段时按默认值补齐（启用全拼、全角标点）。
+    #[serde(default)]
+    pub ime: ImeConfig,
 }
 
 impl Default for AppConfig {
@@ -1691,6 +1694,7 @@ impl Default for AppConfig {
             editor_fonts: EditorFontScheme::default(),
             ribbon_tab: RibbonTab::default(),
             ribbon_collapsed: false,
+            ime: ImeConfig::default(),
         }
     }
 }
@@ -1897,6 +1901,42 @@ impl FontChoice {
             .filter(|ext| ext == "ttf" || ext == "otf")
             .unwrap_or_else(|| "ttf".to_string());
         format!("gwa-{}.{extension}", role.key())
+    }
+}
+
+/// 应用内拼音输入法。引擎、词库与整句模型都在本进程里，不走系统输入法。
+///
+/// 词库与语言模型是随包数据（`runtime/ime/`）。数据缺失时本节的开关无效：
+/// 输入法退回系统输入法，不影响应用其余部分。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImeConfig {
+    /// 启用应用内输入法。关掉就用系统输入法，光标矩形照旧报给后端。
+    pub enabled: bool,
+
+    /// 双拼方案：`xiaohe` / `ziranma` / `microsoft` / `sogou`。
+    /// 空字符串（默认）是**全拼**。
+    pub shuangpin: String,
+
+    /// 中文模式下的全角标点（`，。：；〉《`……），英文模式始终半角。
+    pub full_width_punctuation: bool,
+
+    /// 一页显示几个候选（1–9），超出范围按 9 / 1 处理。
+    pub page_size: usize,
+
+    /// 翻页键：`[]`、`,.`、`-=` 三种，其余按默认 `[]` 处理。
+    pub page_keys: String,
+}
+
+impl Default for ImeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shuangpin: String::new(),
+            full_width_punctuation: true,
+            page_size: 5,
+            page_keys: "[]".to_string(),
+        }
     }
 }
 

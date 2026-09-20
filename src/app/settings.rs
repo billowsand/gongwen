@@ -60,6 +60,8 @@ pub(crate) enum SettingsSection {
     Persistence,
     /// 密级与保密期限规则。
     Security,
+    /// 输入法（应用内拼音引擎）。
+    Input,
     /// 上手指引。
     Guide,
 }
@@ -75,7 +77,14 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
             SettingsSection::Knowledge,
         ],
     ),
-    ("外观", &[SettingsSection::Theme, SettingsSection::Font]),
+    (
+        "外观",
+        &[
+            SettingsSection::Theme,
+            SettingsSection::Font,
+            SettingsSection::Input,
+        ],
+    ),
     (
         "公文排版",
         &[SettingsSection::Numbering, SettingsSection::Security],
@@ -105,6 +114,7 @@ impl SettingsSection {
             SettingsSection::Export => "导出格式",
             SettingsSection::Persistence => "保存与现场",
             SettingsSection::Security => "密级规则",
+            SettingsSection::Input => "输入法",
             SettingsSection::Guide => "上手指引",
         }
     }
@@ -122,6 +132,7 @@ impl SettingsSection {
             SettingsSection::Export => theme::Icon::FileDown,
             SettingsSection::Persistence => theme::Icon::Save,
             SettingsSection::Security => theme::Icon::Shield,
+            SettingsSection::Input => theme::Icon::Edit,
             SettingsSection::Guide => theme::Icon::Book,
         }
     }
@@ -164,6 +175,10 @@ impl SettingsSection {
             SettingsSection::Security => {
                 "默认取自《保守国家秘密法》第十五条：绝密级不超过三十年、机密级不超过二十年、\
                  秘密级不超过十年。本单位口径不同的，直接改下面三个上限。"
+            }
+            SettingsSection::Input => {
+                "公文助手自带拼音输入法：引擎、词库与整句模型都在本程序里，不依赖系统输入法，\
+                 也与别的应用互不干扰。打开就能打中文，单击 Shift 切中英。"
             }
             SettingsSection::Guide => "第一次用这个程序，按下面的顺序走一遍就能出第一份稿子。",
         }
@@ -213,6 +228,15 @@ fn setting_continuation<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) ->
         .inner
     })
     .inner
+}
+
+/// 双拼方案在界面上显示的名字。配置里写空串或认不出的值时都算全拼。
+fn shuangpin_label(key: &str) -> &'static str {
+    crate::ime::ImeSettings::shuangpin_options()
+        .into_iter()
+        .find(|(option, _)| *option == key.trim())
+        .map(|(_, label)| label)
+        .unwrap_or("全拼")
 }
 
 /// 一行文本输入设置项。
@@ -1040,6 +1064,7 @@ impl GongwenApp {
                             SettingsSection::Export => self.export_section_ui(ui),
                             SettingsSection::Persistence => self.persistence_section_ui(ui),
                             SettingsSection::Security => self.security_section_ui(ui),
+                            SettingsSection::Input => self.ime_section_ui(ui),
                             SettingsSection::Guide => guide_section_ui(ui),
                         }
                         ui.add_space(8.0);
@@ -1436,6 +1461,101 @@ impl GongwenApp {
     }
 
     /// 保存与现场分区：自动保存到稿件库的开关。
+    /// 输入法分区：应用内拼音引擎。
+    fn ime_section_ui(&mut self, ui: &mut egui::Ui) {
+        // 先把引擎那边的状态取成自己的值：下面几个闭包都要改 `self.config`。
+        let available = self.ime.available();
+        let summary = self.ime.data_summary();
+        let english = self.ime.english();
+
+        setting_row(ui, "引擎", None, |ui| {
+            let (text, color) = match available {
+                true => ("已就绪", theme::success()),
+                false => ("未就绪，用系统输入法", theme::warn()),
+            };
+            ui.label(egui::RichText::new(text).color(color));
+        });
+        setting_continuation(ui, |ui| {
+            let text = match &summary {
+                Some(summary) => summary.clone(),
+                None => "没有找到随包的词库与语言模型（runtime/ime/dict.qj、runtime/ime/lm.qj）。\
+                         本应用内的中文输入交给系统输入法，其余功能不受影响。"
+                    .to_owned(),
+            };
+            ui.label(
+                egui::RichText::new(text)
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::text_muted()),
+            );
+        });
+        if available {
+            setting_row(ui, "当前模式", None, |ui| {
+                ui.label(if english { "英文" } else { "中文" });
+            });
+        }
+
+        ui.add_space(8.0);
+        ui.checkbox(&mut self.config.ime.enabled, "启用应用内输入法")
+            .on_hover_text("关掉之后本应用内的中文输入交给系统输入法，光标矩形照旧报给后端。");
+
+        sub_heading(ui, "输入方案", None);
+        setting_row(
+            ui,
+            "双拼",
+            Some("默认全拼。改动立即生效。"),
+            |ui| {
+                let current = shuangpin_label(&self.config.ime.shuangpin);
+                egui::ComboBox::from_id_salt("ime_shuangpin")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (key, label) in crate::ime::ImeSettings::shuangpin_options() {
+                            ui.selectable_value(
+                                &mut self.config.ime.shuangpin,
+                                key.to_string(),
+                                label,
+                            );
+                        }
+                    });
+            },
+        );
+        setting_row(ui, "每页候选", None, |ui| {
+            egui::ComboBox::from_id_salt("ime_page_size")
+                .selected_text(self.config.ime.page_size.to_string())
+                .show_ui(ui, |ui| {
+                    for size in 1..=crate::ime::MAX_PAGE_SIZE {
+                        ui.selectable_value(&mut self.config.ime.page_size, size, size.to_string());
+                    }
+                });
+        });
+        setting_row(ui, "翻页键", None, |ui| {
+            egui::ComboBox::from_id_salt("ime_page_keys")
+                .selected_text(self.config.ime.page_keys.clone())
+                .show_ui(ui, |ui| {
+                    for keys in crate::ime::PAGE_KEY_OPTIONS {
+                        ui.selectable_value(&mut self.config.ime.page_keys, keys.to_string(), keys);
+                    }
+                });
+        });
+
+        sub_heading(ui, "标点", None);
+        ui.checkbox(
+            &mut self.config.ime.full_width_punctuation,
+            "中文模式下用全角标点",
+        )
+        .on_hover_text("，。：；这些标点在中文模式下转成全角；英文模式与数字后的小数点始终半角。");
+
+        sub_heading(ui, "操作", None);
+        setting_continuation(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "单击 Shift 切中英·空格上屏·1–9 选词·[ ] 翻页·Esc 取消·退格删一个字母",
+                )
+                .size(theme::font_sizes::SMALL)
+                .color(theme::text_muted()),
+            );
+        });
+    }
+
     fn persistence_section_ui(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.config.auto_save, "自动保存到稿件库")
             .on_hover_text(
