@@ -107,6 +107,9 @@ pub(crate) struct Ime {
     /// 上一帧候选窗量到的尺寸，用来判断贴光标上方还是下方。
     window_size: Option<egui::Vec2>,
 
+    /// 上一帧候选行量到的宽度，用来把页码顶到右边（见 `candidates::header`）。
+    rows_width: Option<f32>,
+
     /// 辅码表加载了几个字；`None` 表示没装表（辅码关着）。
     fuma_words: Option<usize>,
 
@@ -143,6 +146,7 @@ impl Ime {
             preedit: Preedit::default(),
             pending_commit: None,
             window_size: None,
+            rows_width: None,
             fuma_words: None,
             editable_focus: false,
             focus_id: None,
@@ -177,9 +181,20 @@ impl Ime {
         self.window_size = Some(size);
     }
 
-    /// 候选窗不画了：尺寸也没用了。
+    /// 上一帧候选行的宽度。
+    pub(super) fn rows_width(&self) -> Option<f32> {
+        self.rows_width
+    }
+
+    /// 记下候选行的宽度。
+    pub(super) fn remember_rows_width(&mut self, width: f32) {
+        self.rows_width = Some(width);
+    }
+
+    /// 候选窗不画了：量到的尺寸也没用了。
     pub(super) fn forget_window(&mut self) {
         self.window_size = None;
+        self.rows_width = None;
     }
 
     /// 引擎在不在（数据齐、装配成功）。
@@ -423,7 +438,7 @@ impl Ime {
         self.layout = CandidateLayout::default();
         self.preedit = Preedit::default();
         self.pending_commit = None;
-        self.window_size = None;
+        self.forget_window();
         self.highlight = 0;
     }
 
