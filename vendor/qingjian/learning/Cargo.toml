@@ -1,0 +1,20 @@
+# 从字在输入法（青简分支）vendor 而来，见 vendor/qingjian/README.md。
+[package]
+name = "qingjian-learning"
+description = "用户侧落盘：词频、用户词、个人 n-gram、敲错表、输入日志、输入统计"
+version = "0.1.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/qingjian-team/qingjian"
+publish = false
+
+[dependencies]
+foldhash = "0.2"
+jiff = "0.2"
+qingjian-core = { path = "../core" }
+qingjian-dictionary = { path = "../dictionary" }
+qingjian-translate = { path = "../translate" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"

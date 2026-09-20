@@ -1,0 +1,16 @@
+# 从字在输入法（青简分支）vendor 而来，见 vendor/qingjian/README.md。
+[package]
+name = "qingjian-translate"
+description = "候选翻译 annotation：释义表 Glossary 与词汇等级表 LevelTable"
+version = "0.1.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/qingjian-team/qingjian"
+publish = false
+
+[dependencies]
+qingjian-core = { path = "../core" }
+qingjian-format = { path = "../format" }
+thiserror = "2"
+tracing = "0.1"
+zerocopy = { version = "0.8", features = ["derive"] }

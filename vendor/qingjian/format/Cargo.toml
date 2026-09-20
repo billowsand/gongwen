@@ -1,0 +1,18 @@
+# 从字在输入法（青简分支）vendor 而来，见 vendor/qingjian/README.md。
+# 只有这份清单是本地改写的（上游用 workspace 继承），src 下一行未改。
+[package]
+name = "qingjian-format"
+description = ".qj 数据容器：mmap 读取、写入、零拷贝表、文本池与哈希索引"
+version = "0.1.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/qingjian-team/qingjian"
+publish = false
+
+[dependencies]
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "1.1"
+tracing = "0.1"
+zerocopy = { version = "0.8", features = ["derive"] }

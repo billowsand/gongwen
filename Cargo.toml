@@ -35,6 +35,12 @@ jieba-rs = "0.10"
 # 离线也能从零编译。同步上游的办法写在那份 README 里。
 mdx = { path = "vendor/mdx" }
 pinyin = { version = "0.11", default-features = false, features = ["plain"] }
+# 应用内输入法：拼音引擎、词库、bigram 整句与用户学习，全部进程内，没有 server。
+# vendor 自字在输入法（GPL-3.0-or-later），见 vendor/qingjian/README.md。
+qingjian-core = { path = "vendor/qingjian/core" }
+qingjian-dictionary = { path = "vendor/qingjian/dictionary" }
+qingjian-learning = { path = "vendor/qingjian/learning" }
+qingjian-lm = { path = "vendor/qingjian/lm" }
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # Linux 文件选择器后端由上面的 crate feature 选择。不能同时把两种后端写在这里，

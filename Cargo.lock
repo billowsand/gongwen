@@ -2165,6 +2165,10 @@ dependencies = [
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
  "pinyin",
+ "qingjian-core",
+ "qingjian-dictionary",
+ "qingjian-learning",
+ "qingjian-lm",
  "raw-window-handle",
  "regex",
  "reqwest",
@@ -4063,6 +4067,77 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qingjian-core"
+version = "0.1.1"
+dependencies = [
+ "foldhash",
+ "jiff",
+ "qingjian-dictionary",
+ "serde",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "qingjian-dictionary"
+version = "0.1.1"
+dependencies = [
+ "qingjian-format",
+ "thiserror 2.0.19",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
+name = "qingjian-format"
+version = "0.1.1"
+dependencies = [
+ "memmap2",
+ "serde",
+ "thiserror 2.0.19",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
+name = "qingjian-learning"
+version = "0.1.1"
+dependencies = [
+ "foldhash",
+ "jiff",
+ "qingjian-core",
+ "qingjian-dictionary",
+ "qingjian-translate",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "qingjian-lm"
+version = "0.1.1"
+dependencies = [
+ "qingjian-core",
+ "qingjian-format",
+ "thiserror 2.0.19",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
+name = "qingjian-translate"
+version = "0.1.1"
+dependencies = [
+ "qingjian-core",
+ "qingjian-format",
+ "thiserror 2.0.19",
+ "tracing",
+ "zerocopy",
+]
 
 [[package]]
 name = "quick-error"
