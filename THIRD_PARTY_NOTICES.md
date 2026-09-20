@@ -6,7 +6,7 @@ The portable Windows package includes Tectonic 0.17.0, distributed under the
 MIT License. The complete notice is copied to
 `runtime/licenses/TECTONIC-LICENSE.txt`.
 
-- Project: https://github.com/tectonic-typesetting/tectonic
+- Project: <https://github.com/tectonic-typesetting/tectonic>
 - Release: `tectonic@0.17.0`, Windows x64 MSVC
 
 ## TeX Live support files
@@ -34,7 +34,7 @@ Research reports are converted to TeX by mdx, distributed under the MIT
 License. A source copy is vendored in `vendor/mdx` and linked into the
 executable; the upstream notice is preserved at `vendor/mdx/LICENSE`.
 
-- Project: https://github.com/billowsand/mdx
+- Project: <https://github.com/billowsand/mdx>
 - Version: `mdx@2.15.4`
 
 ## Hayro and Vello CPU
@@ -43,8 +43,8 @@ The application uses Hayro 0.7.1 and Vello CPU to parse and rasterize PDF
 pages entirely in Rust. These crates are available under the MIT License or
 the Apache License 2.0; this distribution uses the MIT terms.
 
-- Hayro: https://github.com/LaurenzV/hayro
-- Vello: https://github.com/linebender/vello
+- Hayro: <https://github.com/LaurenzV/hayro>
+- Vello: <https://github.com/linebender/vello>
 
 ```text
 Copyright (c) The Hayro Authors
@@ -110,14 +110,14 @@ author, distributed under the MIT License. Only the encoder (the Xiaohe
 double-pinyin key table and the four-code word rules) is copied; the
 segmentation, revision and CLI/GUI layers of that project are not used.
 
-- Project: https://github.com/billowsand/flype-word
+- Project: <https://github.com/billowsand/flype-word>
 - License: MIT
 
 ## Lucide Icons
 
 The SVG interface icons under `assets/icons/` are from Lucide 1.28.0.
 
-- Source: https://lucide.dev/
+- Source: <https://lucide.dev/>
 - License: ISC
 - Copyright: Lucide Contributors
 
@@ -147,7 +147,7 @@ The Windows installer embeds `scripts/ChineseSimplified.isl` from the Inno
 Setup source repository, maintained by Zhenghan Yang (Kira) and distributed
 with the Inno Setup project.
 
-- Source: https://github.com/jrsoftware/issrc
+- Source: <https://github.com/jrsoftware/issrc>
 
 ## pinyin (Rust crate)
 
@@ -155,7 +155,7 @@ The application uses the `pinyin` crate to look up the default reading of a
 Chinese character when encoding lexicon entries for the input method. It is
 distributed under the MIT License.
 
-- Project: https://github.com/mozillazg/rust-pinyin
+- Project: <https://github.com/mozillazg/rust-pinyin>
 - License: MIT
 
 ## 字在输入法（青简）内核
@@ -166,8 +166,8 @@ core / lm / translate / learning），随源码存放在 `vendor/qingjian/`，�
 `vendor/qingjian/LICENSE`；上游的 Windows 平台壳（TSF DLL、Server 进程、自绘渲染器、
 语音 Worker）一个都没有搬，本项目用 egui 自己当壳。
 
-- 上游（字在）：https://github.com/billowsand/zizai
-- 上游（青简 Qingjian）：https://github.com/qingjian-team/qingjian
+- 上游（字在）：<https://github.com/billowsand/zizai>
+- 上游（青简 Qingjian）：<https://github.com/qingjian-team/qingjian>
 - 取出提交：`9b643e1c8315c30e040e7798a9dadba0519a1807`
 - License: GPL-3.0-or-later
 
