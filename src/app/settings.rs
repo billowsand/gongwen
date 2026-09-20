@@ -32,8 +32,9 @@ const FOOTER_HEIGHT: f32 = 52.0;
 /// 设置页表单行的标签列宽。比起草页的窄标签宽，容得下「单轮送检句数上限」这类
 /// 完整的设置项名称，不再被截断成半截。
 const SETTING_LABEL_WIDTH: f32 = 132.0;
-/// 表单行控件列的高度，和标签一起决定一行的基线。
-const SETTING_ROW_HEIGHT: f32 = 22.0;
+/// 表单行的行高。标签列按这个高度分配，右边的按钮、下拉框也是这个高度，
+/// 标签文字才和控件对在同一条中线上——标签列比控件矮，文字就会贴到行的上沿。
+const SETTING_ROW_HEIGHT: f32 = theme::CONTROL_HEIGHT;
 
 /// 设置页的分区：左侧主菜单的一项对应右侧一屏设置项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -217,11 +218,7 @@ fn setting_continuation<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) ->
 /// 一行文本输入设置项。
 fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
     setting_row(ui, label, None, |ui| {
-        ui.add(
-            egui::TextEdit::singleline(value)
-                .hint_text(hint)
-                .desired_width(f32::INFINITY),
-        );
+        ui.add(theme::field(value, hint, f32::INFINITY));
     });
 }
 
@@ -276,8 +273,11 @@ fn guide_section_ui(ui: &mut egui::Ui) {
     .enumerate()
     {
         ui.horizontal_top(|ui| {
+            // 序号要和正文第一行对齐，所以按一行文字的高度分配，不用表单行高：
+            // 后者是按控件算的，会把序号压到第一行下面去。
+            let line = ui.text_style_height(&egui::TextStyle::Body);
             ui.add_sized(
-                [22.0, SETTING_ROW_HEIGHT],
+                [22.0, line],
                 egui::Label::new(
                     egui::RichText::new(format!("{}.", index + 1)).color(theme::accent()),
                 ),
@@ -315,22 +315,34 @@ fn font_choice_row(
         egui::ComboBox::from_id_salt(format!("font_role_{key}"))
             .selected_text(selected)
             .width(300.0)
+            // 弹层顶上有筛选框，不能用 egui 默认的 `CloseOnClick`：那条规则把
+            // 弹层里的**任何**一次点击都当成"选完了"，点进筛选框的那一下就先把
+            // 弹层关掉，一个字都打不进去。改成只有点在弹层外面才关，选中字体后
+            // 再由 `ui.close()` 主动关。
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show_ui(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(filter)
-                        .hint_text("输入字体名筛选")
-                        .desired_width(280.0),
-                );
+                let search = ui.add(theme::field(filter, "输入字体名筛选", 280.0));
+                // 弹层一打开就把光标放进筛选框：本机常有上百支字体，打开下拉多半
+                // 就是为了搜，没必要再让人多点一下。只在没有别的控件持有焦点时抢，
+                // 否则会跟用户自己点进来的那一下打架。
+                if !search.has_focus() && ui.memory(|memory| memory.focused().is_none()) {
+                    search.request_focus();
+                }
                 ui.separator();
                 if ui
                     .selectable_label(!choice.is_set(), default_label)
                     .clicked()
                 {
                     *choice = crate::models::FontChoice::default();
+                    ui.close();
                 }
-                egui::ScrollArea::vertical()
-                    .max_height(260.0)
-                    .show(ui, |ui| {
+                let mut list = egui::ScrollArea::vertical().max_height(260.0);
+                // 改了筛选词就把列表滚回顶部：上一次停在几百行之下，换词后看到的
+                // 是末尾几条，很容易以为"没搜着"。
+                if search.changed() {
+                    list = list.vertical_scroll_offset(0.0);
+                }
+                list.show(ui, |ui| {
                         let needle = filter.trim().to_lowercase();
                         let mut shown = 0usize;
                         for font in available.iter().filter(|font| {
@@ -348,6 +360,7 @@ fn font_choice_row(
                             let picked = choice.family == font.family;
                             if ui.selectable_label(picked, label).clicked() {
                                 *choice = font.to_choice();
+                                ui.close();
                             }
                         }
                         if shown == 0 {
@@ -1455,6 +1468,174 @@ impl GongwenApp {
         ui.checkbox(
             &mut self.config.security_rules.allow_long_term,
             "期限无法确定时允许标注“长期”",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::FontChoice;
+    use std::path::PathBuf;
+
+    fn font(family: &str, display: &str) -> system_fonts::SystemFont {
+        system_fonts::SystemFont {
+            family: family.to_string(),
+            display: display.to_string(),
+            path: PathBuf::from(format!("C:/Windows/Fonts/{family}.ttf")),
+        }
+    }
+
+    /// 这一帧画在屏幕上的每段文字，连同它的位置——用来找控件、也用来判断
+    /// 弹层还在不在。
+    fn texts(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) => Some((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn position_of(drawn: &[(String, egui::Rect)], needle: &str) -> Option<egui::Pos2> {
+        drawn
+            .iter()
+            .find(|(text, _)| text.contains(needle))
+            .map(|(_, rect)| rect.center())
+    }
+
+    fn click_events(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ]
+    }
+
+    /// 画一帧字体选择行。`events` 是这一帧喂进去的鼠标事件。
+    fn frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        choice: &mut FontChoice,
+        filter: &mut String,
+        fonts: &[system_fonts::SystemFont],
+    ) -> Vec<(String, egui::Rect)> {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(raw, |ui| {
+            font_choice_row(
+                ui,
+                "test",
+                "界面字体",
+                "系统默认",
+                "选一支界面字体",
+                choice,
+                fonts,
+                filter,
+            );
+        });
+        texts(&output)
+    }
+
+    /// 字体下拉里的筛选框要能点得进去。
+    ///
+    /// egui 给 `ComboBox` 的默认关闭策略是 `CloseOnClick`：弹层里**任何**一次
+    /// 点击都算"选完了"，点进筛选框的那一下会先把弹层关掉，一个字也打不进去。
+    #[test]
+    fn clicking_the_font_filter_does_not_close_the_dropdown() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let fonts = [font("Songti", "宋体"), font("Heiti", "黑体")];
+        let mut choice = FontChoice::default();
+        let mut filter = String::new();
+
+        let closed = frame(&ctx, vec![], &mut choice, &mut filter, &fonts);
+        let combo = position_of(&closed, "系统默认").expect("下拉按钮上应当写着当前选择");
+        frame(&ctx, click_events(combo), &mut choice, &mut filter, &fonts);
+        let opened = frame(&ctx, vec![], &mut choice, &mut filter, &fonts);
+        let search = position_of(&opened, "输入字体名筛选").expect("弹层里应当有筛选框");
+
+        // 弹层一开就该能直接打字：光标是自动放进筛选框的。
+        frame(
+            &ctx,
+            vec![egui::Event::Text("Z".into())],
+            &mut choice,
+            &mut filter,
+            &fonts,
+        );
+        assert_eq!(filter, "Z", "弹层打开后光标应当已经在筛选框里");
+        filter.clear();
+
+        frame(&ctx, click_events(search), &mut choice, &mut filter, &fonts);
+        let after = frame(&ctx, vec![], &mut choice, &mut filter, &fonts);
+        assert!(
+            position_of(&after, "输入字体名筛选").is_some(),
+            "点一下筛选框不该把弹层关掉"
+        );
+
+        // 点进去之后还得真能打字，并且打完字列表按词筛选。
+        frame(
+            &ctx,
+            vec![egui::Event::Text("Songti".into())],
+            &mut choice,
+            &mut filter,
+            &fonts,
+        );
+        assert_eq!(filter, "Songti", "筛选框要收得到键盘输入");
+        let filtered = frame(&ctx, vec![], &mut choice, &mut filter, &fonts);
+        assert!(
+            position_of(&filtered, "宋体（Songti）").is_some(),
+            "命中的字体要留在列表里"
+        );
+        assert!(
+            position_of(&filtered, "黑体（Heiti）").is_none(),
+            "没命中的字体要被筛掉"
+        );
+    }
+
+    /// 选中一支字体后，弹层要自己关掉——改成「点外面才关」之后，这一步得由
+    /// `ui.close()` 接管。
+    #[test]
+    fn picking_a_font_closes_the_dropdown() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let fonts = [font("Songti", "宋体"), font("Heiti", "黑体")];
+        let mut choice = FontChoice::default();
+        let mut filter = String::new();
+
+        let closed = frame(&ctx, vec![], &mut choice, &mut filter, &fonts);
+        let combo = position_of(&closed, "系统默认").expect("下拉按钮上应当写着当前选择");
+        frame(&ctx, click_events(combo), &mut choice, &mut filter, &fonts);
+        let opened = frame(&ctx, vec![], &mut choice, &mut filter, &fonts);
+        let entry = position_of(&opened, "宋体（Songti）").expect("弹层里应当列出字体");
+
+        frame(&ctx, click_events(entry), &mut choice, &mut filter, &fonts);
+        let after = frame(&ctx, vec![], &mut choice, &mut filter, &fonts);
+        assert_eq!(choice.family, "Songti", "点中的那支字体要选上");
+        assert!(
+            position_of(&after, "输入字体名筛选").is_none(),
+            "选完字体弹层要关上"
         );
     }
 }

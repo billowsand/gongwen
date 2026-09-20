@@ -28,6 +28,11 @@ pub mod font_sizes {
     pub const MONO: f32 = 14.0;
 }
 
+// ── 尺寸 ────────────────────────────────────────────────────────────────────
+/// 一行控件的统一高度：按钮、下拉框、输入框与它们同行的标签共用这一档。
+/// 起草页表单（`FORM_CONTROL_HEIGHT`）用的就是这个数，全应用保持一致。
+pub const CONTROL_HEIGHT: f32 = 30.0;
+
 // ── 动效时长 ────────────────────────────────────────────────────────────────
 /// 全应用统一的动效节奏（秒），三档递进：
 /// 悬停/按下等瞬时反馈用短档，选中/抽屉/弹窗等过渡用中档，
@@ -1932,14 +1937,145 @@ pub fn dot(ui: &mut egui::Ui, color: Color32) {
 }
 
 /// 一枚淡底圆角标签，用来显示模型名、状态、版本号等元信息。
-pub fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) {
+pub fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) -> egui::Response {
     egui::Frame::new()
         .fill(bg)
         .corner_radius(CornerRadius::same(255))
         .inner_margin(Margin::symmetric(8, 2))
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).color(fg));
-        });
+        })
+        .response
+}
+
+/// 单行输入框。
+///
+/// egui 默认给 `TextEdit` 的竖边距是 2pt，按钮和下拉框却按 `button_padding`
+/// 留 5pt，同一行里输入框因此比旁边的按钮矮 4px，一排控件上下沿全对不齐。
+/// 这里按按钮的内边距配平，凡是与按钮同行的输入框都从这里取。
+pub fn field<'t>(text: &'t mut dyn egui::TextBuffer, hint: &str, width: f32) -> egui::TextEdit<'t> {
+    egui::TextEdit::singleline(text)
+        .hint_text(hint.to_owned())
+        .desired_width(width)
+        .margin(Margin::symmetric(8, 4))
+}
+
+/// 控件前后的小字说明。次级文字统一走这一档字号与颜色，免得同一行里
+/// 说明与正文一样重。
+pub fn caption(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.label(
+        egui::RichText::new(text)
+            .size(font_sizes::SMALL)
+            .color(text_muted()),
+    )
+}
+
+/// 概况条里的一格：上行数值、下行说明。数字比正文大一档，扫一眼就能比出
+/// 多少，不必读完整句话。
+pub fn metric(ui: &mut egui::Ui, value: &str, label: &str, color: Color32) -> egui::Response {
+    // 0 一律不着色：空表里一排红色、绿色的 0 看着像出了状况，其实什么也没发生。
+    let color = if value.trim() == "0" {
+        text_muted()
+    } else {
+        color
+    };
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        ui.label(
+            egui::RichText::new(value)
+                .size(font_sizes::HEADING)
+                .color(color)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(label)
+                .size(font_sizes::SMALL)
+                .color(text_muted()),
+        );
+    })
+    .response
+}
+
+/// 行内竖分隔线，用来把概况条分组。
+///
+/// 不能用 `ui.separator()`：它在横向布局里会撑满整个可视高度，把下面的内容
+/// 一并顶开。
+pub fn divider_v(ui: &mut egui::Ui, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, height), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, border());
+}
+
+/// 卡片内的横向细线，用于分开同一张卡里的两组内容。
+pub fn hairline(ui: &mut egui::Ui) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, border());
+}
+
+/// 说明条：淡底圆角 + 左侧色条 + 图标，用于整段的提醒与注意事项。
+///
+/// 成段的警示文字直接用 `colored_label` 铺出来，几条连排就是一片红字，用户会
+/// 整片跳过。收进带色条的淡底块里，一眼能看出「这是一条提示」而不是正文。
+pub fn notice(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    fg: Color32,
+    bg: Color32,
+    text: impl Into<String>,
+) -> egui::Response {
+    let response = egui::Frame::new()
+        .fill(bg)
+        .corner_radius(CornerRadius::same(7))
+        .inner_margin(Margin {
+            left: 12,
+            right: 10,
+            top: 6,
+            bottom: 6,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 7.0;
+                ui.add(icon.image_sized(14.0).tint(fg));
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(text.into())
+                            .color(fg)
+                            .size(font_sizes::SMALL),
+                    )
+                    .wrap(),
+                );
+            });
+        })
+        .response;
+    // 左侧色条只画左边两角的圆，右边贴着底色接上，看起来是从块里长出来的。
+    let bar = egui::Rect::from_min_size(response.rect.min, egui::vec2(3.0, response.rect.height()));
+    ui.painter().rect_filled(
+        bar,
+        CornerRadius {
+            nw: 7,
+            sw: 7,
+            ne: 0,
+            se: 0,
+        },
+        fg,
+    );
+    response
+}
+
+/// 分段选择器：把一组互斥的选项收进同一枚浅底胶囊，和旁边零散的按钮区分开。
+pub fn segmented<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(surface_sunk())
+        .stroke(Stroke::new(1.0, border()))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(3))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().button_padding = egui::vec2(9.0, 4.0);
+            ui.horizontal(|ui| add_contents(ui)).inner
+        })
+        .inner
 }
 
 // ── 字体 ────────────────────────────────────────────────────────────────────
@@ -2433,6 +2569,13 @@ pub fn configure_style(ctx: &egui::Context) {
 
     style.spacing.item_spacing = egui::vec2(8.0, 7.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    // 一行控件的高度。egui 把 `interact_size.y` 当作横向布局的「行带」高度：
+    // 每个控件先在行带里居中，再往右排。默认的 18px 是按 egui 自带西文字体和
+    // 它那套 1px 按钮内边距算的；我们的中文字体行高更大、按钮内边距也调到了
+    // 5pt，按钮、下拉框都比行带高——行带兜不住，矮的那个（标签、纯文字）就被
+    // 顶到行的上沿，和右边的下拉框差出好几像素。把行带放到与控件同高，一行里
+    // 的标签与控件才真正对在同一条中线上。
+    style.spacing.interact_size.y = CONTROL_HEIGHT;
     style.spacing.menu_margin = Margin::same(6);
     style.spacing.indent = 18.0;
     style.spacing.scroll.bar_width = 9.0;

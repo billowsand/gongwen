@@ -67,7 +67,6 @@ impl GongwenApp {
                 .iter()
                 .map(|dropped| dropped.term.clone())
                 .collect(),
-            summary: built.describe(),
             origins: export::origin_breakdown(&terms, &self.lexicon_export)
                 .into_iter()
                 .map(|(origin, count)| format!("{} {}", origin.label(), count))

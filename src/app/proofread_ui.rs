@@ -55,46 +55,14 @@ impl GongwenApp {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading("校对词表");
-                let enabled = lexicon.entries.iter().filter(|e| e.enabled).count();
-                let custom = self.config.proofread.custom.len();
-                let changed = self.config.proofread.overrides.len();
-                ui.weak(format!(
-                    "共 {} 条，启用 {enabled} 条 · 自建 {custom} 条 · 已改动内置 {changed} 条 · 仅保存在本机",
-                    lexicon.entries.len()
-                ));
-                // 采纳率过低的条目要主动报出来。用户不会自己去逐条核对统计，
-                // 而一条天天被划掉的规则，下一步就是整个校对被关掉。
-                let flagged = self.metrics.underperforming().len();
-                if flagged > 0 {
-                    ui.horizontal(|ui| {
-                        theme::chip(
-                            ui,
-                            &format!("{flagged} 条建议常被忽略"),
-                            theme::warn(),
-                            theme::warn_soft(),
-                        );
-                        ui.weak("在下面的列表里查看采纳率，考虑停用");
-                    });
-                }
-                // 审校抽屉里的「不再提示」是个单向操作，点错了没处退。收回的
-                // 入口放在这里：忽略的是词表命中，本来就该跟词表管理在一处。
-                let ignored = self.config.proofread.ignored.len();
-                if ignored > 0 {
-                    ui.horizontal(|ui| {
-                        ui.weak(format!("已设为不再提示 {ignored} 条"));
-                        if ui
-                            .add(theme::icon_text_button(theme::Icon::RotateCcw, "恢复提示"))
-                            .on_hover_text("清空「不再提示」名单，这些写法重新参与校对")
-                            .clicked()
-                        {
-                            self.config.proofread.ignored.clear();
-                            self.persist();
-                        }
-                    });
-                }
-            });
+            ui.heading("校对词表");
+            ui.add_space(6.0);
+            theme::chip(
+                ui,
+                "仅保存在本机",
+                theme::text_muted(),
+                theme::surface_sunk(),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::primary_icon_button(ui, theme::Icon::Save, "保存更改").clicked() {
                     self.config.proofread.prune();
@@ -133,10 +101,19 @@ impl GongwenApp {
             });
         });
 
+        ui.add_space(8.0);
+        self.proofread_overview_ui(ui, &lexicon);
+
         if !lexicon.load_warnings.is_empty() {
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             for warning in &lexicon.load_warnings {
-                ui.colored_label(theme::danger(), format!("⚠ {warning}"));
+                theme::notice(
+                    ui,
+                    theme::Icon::TriangleAlert,
+                    theme::danger(),
+                    theme::danger_soft(),
+                    warning,
+                );
             }
         }
 
@@ -160,6 +137,72 @@ impl GongwenApp {
                     ui.vertical(|ui| self.proofread_editor_ui(ui, &lexicon));
                 });
             });
+    }
+
+    /// 概况卡：四个数 + 两条需要动手的提醒。
+    ///
+    /// 这些数原先是标题下面一长串顿号连起来的小字，「启用多少、自己改过多少」
+    /// 混在一句话里读不出来；分成四格之后，改动过几条一眼就看得见。
+    fn proofread_overview_ui(&mut self, ui: &mut egui::Ui, lexicon: &proofread::Lexicon) {
+        let enabled = lexicon.entries.iter().filter(|entry| entry.enabled).count();
+        let custom = self.config.proofread.custom.len();
+        let changed = self.config.proofread.overrides.len();
+        // 采纳率过低的条目要主动报出来。用户不会自己去逐条核对统计，
+        // 而一条天天被划掉的规则，下一步就是整个校对被关掉。
+        let flagged = self.metrics.underperforming().len();
+        // 审校抽屉里的「不再提示」是个单向操作，点错了没处退。收回的入口放在
+        // 这里：忽略的是词表命中，本来就该跟词表管理在一处。
+        let ignored = self.config.proofread.ignored.len();
+
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 20.0;
+                theme::metric(
+                    ui,
+                    &lexicon.entries.len().to_string(),
+                    "全部词条",
+                    theme::text(),
+                );
+                theme::divider_v(ui, 34.0);
+                theme::metric(ui, &enabled.to_string(), "启用中", theme::success())
+                    .on_hover_text("停用的条目仍留在表里，只是不参与校对");
+                theme::metric(ui, &custom.to_string(), "自建", theme::info())
+                    .on_hover_text("本单位自己加的条目，可以删");
+                theme::metric(ui, &changed.to_string(), "已改内置", theme::accent())
+                    .on_hover_text("改过的内置条目。可在编辑区恢复默认，但删不掉");
+            });
+            if flagged > 0 || ignored > 0 {
+                ui.add_space(8.0);
+                theme::hairline(ui);
+                ui.add_space(8.0);
+            }
+            if flagged > 0 {
+                theme::notice(
+                    ui,
+                    theme::Icon::TriangleAlert,
+                    theme::warn(),
+                    theme::warn_soft(),
+                    format!("{flagged} 条建议常被忽略。在下面的列表里查看采纳率，考虑停用。"),
+                );
+            }
+            if ignored > 0 {
+                if flagged > 0 {
+                    ui.add_space(6.0);
+                }
+                ui.horizontal(|ui| {
+                    theme::caption(ui, &format!("已设为不再提示 {ignored} 条"));
+                    if ui
+                        .add(theme::icon_text_button(theme::Icon::RotateCcw, "恢复提示"))
+                        .on_hover_text("清空「不再提示」名单，这些写法重新参与校对")
+                        .clicked()
+                    {
+                        self.config.proofread.ignored.clear();
+                        self.persist();
+                    }
+                });
+            }
+        });
     }
 
     fn export_proofread_xlsx(&mut self) {
@@ -214,11 +257,11 @@ impl GongwenApp {
         groups.dedup();
 
         ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.proofread_page.filter)
-                    .hint_text("搜索错误写法、建议写法或说明")
-                    .desired_width(240.0),
-            );
+            ui.add(theme::field(
+                &mut self.proofread_page.filter,
+                "搜索错误写法、建议写法或说明",
+                240.0,
+            ));
 
             egui::ComboBox::from_id_salt("proofread_group")
                 .selected_text(if self.proofread_page.group.is_empty() {

@@ -4,7 +4,7 @@
 //! 所以这里的列表刻意只给「接受 / 拒绝」两个动作和一个读音编辑框——这三件事
 //! 决定词表能不能长期用下去，其余都是效率问题。
 
-use crate::app::GongwenApp;
+use crate::app::{GongwenApp, LexiconPreview};
 use crate::lexicon::{TermOrigin, TermState, scan};
 use crate::theme;
 use eframe::egui;
@@ -24,39 +24,53 @@ pub(crate) fn lexicon_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
     if app.lexicon_dirty {
         app.refresh_lexicon();
     }
-    toolbar(app, ui);
-    ui.add_space(6.0);
-    scan_panel(app, ui);
+    ui.add_space(8.0);
+    header(app, ui);
+    ui.add_space(8.0);
+    overview_card(app, ui);
     ui.add_space(8.0);
     export_panel(app, ui);
-    ui.add_space(8.0);
     if let Some(error) = app.lexicon_error.clone() {
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.colored_label(theme::warn(), error);
-            if ui.small_button("知道了").clicked() {
+            if theme::notice(
+                ui,
+                theme::Icon::TriangleAlert,
+                theme::danger(),
+                theme::danger_soft(),
+                error,
+            )
+            .interact(egui::Sense::click())
+            .on_hover_text("点一下收起这条提示")
+            .clicked()
+            {
                 app.lexicon_error = None;
             }
         });
-        ui.add_space(4.0);
     }
+    ui.add_space(10.0);
     filter_bar(app, ui);
-    ui.add_space(4.0);
+    ui.add_space(6.0);
     term_table(app, ui);
 }
 
-fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
+/// 页头：标题、上次扫描时间与两个扫描入口。
+fn header(app: &mut GongwenApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.heading("公文词表");
-        ui.add_space(8.0);
-        let stats = &app.lexicon_stats;
-        ui.weak(format!(
-            "{} 词 · 已接受 {} · 待确认 {} · 已拒绝 {} · 已扫 {} 篇",
-            stats.total, stats.accepted, stats.candidate, stats.rejected, stats.scanned_sources
-        ));
+        ui.add_space(6.0);
+        let last = date_of(&app.lexicon_stats.last_scan_at).to_string();
+        if !last.is_empty() {
+            theme::chip(
+                ui,
+                &format!("上次扫描 {last}"),
+                theme::text_muted(),
+                theme::surface_sunk(),
+            );
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = app.lexicon_busy;
-            if ui
-                .add_enabled(!busy, theme::icon_text_button(theme::Icon::Refresh, "扫描"))
+            if theme::primary_icon_button_enabled(ui, !busy, theme::Icon::Refresh, "扫描")
                 .on_hover_text(
                     "并入标准词库与校对词表，再扫正文变过的稿件；已扫过且没改动的整篇跳过",
                 )
@@ -65,7 +79,10 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 app.start_lexicon_scan(false);
             }
             if ui
-                .add_enabled(!busy, egui::Button::new("全部重扫"))
+                .add_enabled(
+                    !busy,
+                    theme::icon_text_button(theme::Icon::History, "全部重扫"),
+                )
                 .on_hover_text("忽略扫描记账，把每一篇都重新分词。换过扫描口径后用")
                 .clicked()
             {
@@ -75,9 +92,48 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
     });
 }
 
+/// 概况卡：上半是五个数，下半是语料口径与扫描进度。
+///
+/// 这五个数原先挤在标题后面的一行小字里，词表有两千多条时根本看不出「待确认
+/// 还剩多少」——而那正是这一页唯一要盯的数。
+fn overview_card(app: &mut GongwenApp, ui: &mut egui::Ui) {
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 20.0;
+            let stats = &app.lexicon_stats;
+            theme::metric(ui, &stats.total.to_string(), "总词条", theme::text());
+            theme::divider_v(ui, 34.0);
+            theme::metric(ui, &stats.accepted.to_string(), "已接受", theme::success())
+                .on_hover_text("已确认可以进码表的词");
+            theme::metric(ui, &stats.candidate.to_string(), "待确认", theme::accent())
+                .on_hover_text("扫出来还没过目的词。在下方列表里逐条接受或拒绝");
+            theme::metric(
+                ui,
+                &stats.rejected.to_string(),
+                "已拒绝",
+                theme::text_muted(),
+            )
+            .on_hover_text("拒绝是永久记账，重扫不会再把它翻出来");
+            theme::divider_v(ui, 34.0);
+            theme::metric(
+                ui,
+                &stats.scanned_sources.to_string(),
+                "已扫篇数",
+                theme::text(),
+            );
+        });
+        ui.add_space(8.0);
+        theme::hairline(ui);
+        ui.add_space(8.0);
+        scan_panel(app, ui);
+    });
+}
+
 fn scan_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
-        ui.weak("语料口径：");
+        theme::caption(ui, "语料口径");
+        ui.add_space(2.0);
         let mut options = app.lexicon_scan_options.clone();
         ui.checkbox(&mut options.include_drafts, "含草稿")
             .on_hover_text("草稿是半成品，错字与临时措辞最多，默认不计入语料");
@@ -88,9 +144,11 @@ fn scan_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
         if options != app.lexicon_scan_options {
             app.lexicon_scan_options = options;
         }
-        ui.weak(scan_scope_hint(&app.lexicon_scan_options));
+        ui.add_space(4.0);
+        theme::caption(ui, scan_scope_hint(&app.lexicon_scan_options));
     });
     if let Some((done, total, title)) = &app.lexicon_scan_progress {
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.add(
                 egui::ProgressBar::new(if *total == 0 {
@@ -99,176 +157,239 @@ fn scan_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     *done as f32 / *total as f32
                 })
                 .desired_width(220.0)
+                .corner_radius(egui::CornerRadius::same(6))
                 .text(format!("{done}/{total}")),
             );
             ui.weak(title);
         });
     }
     if let Some(result) = &app.lexicon_scan_result {
-        ui.weak(result);
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(result)
+                .size(theme::font_sizes::SMALL)
+                .color(theme::success()),
+        );
     }
 }
 
+/// 导出卡：上面一条标题栏带主按钮，下面是口径与结果，可整块折起来。
 fn export_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
-    egui::CollapsingHeader::new("导出小鹤双拼用户码表")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let options = &mut app.lexicon_export;
-                ui.label("最少字数");
-                ui.add(egui::DragValue::new(&mut options.min_chars).range(2..=8))
-                    .on_hover_text(
-                        "小鹤词组是四码定长：n 字词正常敲 2n 键，进码表一律 4 键。\
-                         二字词省 0 键，收进去只会多一条重码",
-                    );
-                ui.add_space(8.0);
-                ui.label("最少篇数");
-                ui.add(egui::DragValue::new(&mut options.min_doc_count).range(1..=20))
-                    .on_hover_text("只在一篇里出现过的词多半是一次性的，先别进码表");
-                ui.add_space(8.0);
-                ui.label("条数上限");
-                ui.add(
-                    egui::DragValue::new(&mut options.budget)
-                        .range(50..=20000)
-                        .speed(10.0),
-                )
-                .on_hover_text(
-                    "用户码表和主码表合进同一个编码空间：多收一个词就是多一条重码、\
-                         多一次翻页。超出上限的按「省键数 × 篇数」截断",
-                );
-            });
-            ui.horizontal_wrapped(|ui| {
-                let options = &mut app.lexicon_export;
-                ui.checkbox(&mut options.include_candidates, "含待确认词");
-                ui.checkbox(&mut options.exclude_common, "排除通用词")
-                    .on_hover_text(
-                        "排除 jieba 自带词典里就有的词。注意公文套语多半也在自带词典里，\
-                         而那恰恰是最省键的一类，默认不排除",
-                    );
-                ui.checkbox(&mut options.with_header, "写入小鹤码表头")
-                    .on_hover_text("导入「主码-用户码表」时需要这两行 ---config@ 头");
-            });
-
-            // 预览按口径缓存：条数、省键、重码都要在点导出之前就看得到，
-            // 但给每个词出码不便宜，不能每帧重算。
-            let preview = app.lexicon_preview();
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&preview.summary);
-                if preview.saved_keys > 0 {
-                    ui.weak(format!("· 每轮各打一次可省 {} 键", preview.saved_keys));
-                }
-            });
-            if !preview.origins.is_empty() {
-                ui.weak(format!("词源构成：{}", preview.origins));
-            }
-            if preview.truncated > 0 {
-                ui.colored_label(
-                    theme::warn(),
-                    format!(
-                        "还有 {} 条够格但超出了条数上限，已按「省键数 × 篇数」截掉。\
-                         要全收就调大上限，但重码会跟着变多。",
-                        preview.truncated
-                    ),
-                );
-            }
-            if preview.conflict_codes > 0 {
-                ui.colored_label(
-                    theme::warn(),
-                    format!(
-                        "{} 个编码上有重码（共 {} 词）。重码越多翻页越频繁，\
-                         可以调小条数上限或提高最少篇数。",
-                        preview.conflict_codes, preview.conflict_terms
-                    ),
-                );
-            }
-            if !preview.failed.is_empty() {
-                ui.colored_label(
-                    theme::warn(),
-                    format!(
-                        "{} 条编码失败，多半是多音字标注与字数对不上：{}",
-                        preview.failed.len(),
-                        preview
-                            .failed
-                            .iter()
-                            .take(3)
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    ),
-                );
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
+    // 预览按口径缓存：条数、省键、重码都要在点导出之前就看得到，
+    // 但给每个词出码不便宜，不能每帧重算。
+    let preview = app.lexicon_preview();
+    let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        ui.ctx(),
+        ui.make_persistent_id("lexicon_export"),
+        true,
+    );
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        state
+            .show_header(ui, |ui| {
+                ui.label(egui::RichText::new("导出小鹤双拼用户码表").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::primary_icon_button_enabled(
+                        ui,
                         preview.written > 0,
-                        theme::icon_text_button(theme::Icon::FileDown, "导出码表…"),
+                        theme::Icon::FileDown,
+                        "导出码表…",
                     )
+                    .on_hover_text("导出后在小鹤输入法的码表管理里导入「主码-用户码表」")
                     .clicked()
-                {
-                    app.export_flypy_table();
-                }
-                ui.weak("导出后在小鹤输入法的码表管理里导入「主码-用户码表」。");
-            });
-            // 码表是明文文件，导进输入法目录后就脱离本应用管控了。默认密级是
-            // 「机密」，按密级过滤会把所有稿子都挡掉，所以这里只能靠明确提示。
-            ui.colored_label(
-                theme::warn(),
-                "码表是明文文件，导入输入法后不再受本应用管控。涉密项目代号、\
-                 人名与文号请先在下方列表里拒绝，再导出。",
-            );
-            if let Some(result) = &app.lexicon_export_result {
-                ui.weak(result);
-            }
-        });
+                    {
+                        app.export_flypy_table();
+                    }
+                });
+            })
+            .body_unindented(|ui| export_body(app, ui, &preview));
+    });
 }
 
+fn export_body(app: &mut GongwenApp, ui: &mut egui::Ui, preview: &LexiconPreview) {
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        // 三个数值框按同一宽度起步，1500 与 3 并排时左边沿不会参差。
+        ui.spacing_mut().interact_size.x = 54.0;
+        let options = &mut app.lexicon_export;
+        theme::caption(ui, "最少字数");
+        ui.add(egui::DragValue::new(&mut options.min_chars).range(2..=8))
+            .on_hover_text(
+                "小鹤词组是四码定长：n 字词正常敲 2n 键，进码表一律 4 键。\
+                 二字词省 0 键，收进去只会多一条重码",
+            );
+        ui.add_space(10.0);
+        theme::caption(ui, "最少篇数");
+        ui.add(egui::DragValue::new(&mut options.min_doc_count).range(1..=20))
+            .on_hover_text("只在一篇里出现过的词多半是一次性的，先别进码表");
+        ui.add_space(10.0);
+        theme::caption(ui, "条数上限");
+        ui.add(
+            egui::DragValue::new(&mut options.budget)
+                .range(50..=20000)
+                .speed(10.0),
+        )
+        .on_hover_text(
+            "用户码表和主码表合进同一个编码空间：多收一个词就是多一条重码、\
+             多一次翻页。超出上限的按「省键数 × 篇数」截断",
+        );
+        ui.add_space(12.0);
+        theme::divider_v(ui, 22.0);
+        ui.add_space(4.0);
+        ui.checkbox(&mut options.include_candidates, "含待确认词");
+        ui.checkbox(&mut options.exclude_common, "排除通用词")
+            .on_hover_text(
+                "排除 jieba 自带词典里就有的词。注意公文套语多半也在自带词典里，\
+                 而那恰恰是最省键的一类，默认不排除",
+            );
+        ui.checkbox(&mut options.with_header, "写入小鹤码表头")
+            .on_hover_text("导入「主码-用户码表」时需要这两行 ---config@ 头");
+    });
+
+    ui.add_space(9.0);
+    theme::hairline(ui);
+    ui.add_space(9.0);
+
+    // 截断、重码、编码失败原先各占一整段红字，连排四段谁都不会读。改成结果
+    // 行上的几枚标签：一眼看清这次导出的体量，细节和补救办法留在悬停里。
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new(format!("导出 {} 条", preview.written))
+                .strong()
+                .size(15.0),
+        );
+        ui.add_space(2.0);
+        if preview.saved_keys > 0 {
+            theme::chip(
+                ui,
+                &format!("每轮省 {} 键", preview.saved_keys),
+                theme::success(),
+                theme::success_soft(),
+            )
+            .on_hover_text("码表里的词各打一次，比不用码表少敲的键数");
+        }
+        if preview.conflict_codes > 0 {
+            theme::chip(
+                ui,
+                &format!("重码 {} 词", preview.conflict_terms),
+                theme::warn(),
+                theme::warn_soft(),
+            )
+            .on_hover_text(format!(
+                "{} 个编码上有重码。重码越多翻页越频繁，可以调小条数上限或提高最少篇数。",
+                preview.conflict_codes
+            ));
+        }
+        if preview.truncated > 0 {
+            theme::chip(
+                ui,
+                &format!("截断 {} 条", preview.truncated),
+                theme::warn(),
+                theme::warn_soft(),
+            )
+            .on_hover_text(
+                "这些词够格但超出了条数上限，已按「省键数 × 篇数」截掉。\
+                 要全收就调大上限，但重码会跟着变多。",
+            );
+        }
+        if !preview.failed.is_empty() {
+            theme::chip(
+                ui,
+                &format!("编码失败 {} 条", preview.failed.len()),
+                theme::danger(),
+                theme::danger_soft(),
+            )
+            .on_hover_text(format!(
+                "多半是多音字标注与字数对不上：{}",
+                preview
+                    .failed
+                    .iter()
+                    .take(3)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
+        if !preview.origins.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::caption(ui, &format!("词源构成：{}", preview.origins));
+            });
+        }
+    });
+
+    ui.add_space(9.0);
+    // 码表是明文文件，导进输入法目录后就脱离本应用管控了。默认密级是
+    // 「机密」，按密级过滤会把所有稿子都挡掉，所以这里只能靠明确提示。
+    theme::notice(
+        ui,
+        theme::Icon::Shield,
+        theme::warn(),
+        theme::warn_soft(),
+        "码表是明文文件，导入输入法后不再受本应用管控。涉密项目代号、\
+         人名与文号请先在下方列表里拒绝，再导出。",
+    );
+    if let Some(result) = &app.lexicon_export_result {
+        ui.add_space(6.0);
+        theme::notice(
+            ui,
+            theme::Icon::BookmarkCheck,
+            theme::success(),
+            theme::success_soft(),
+            result,
+        );
+    }
+}
+
+/// 筛选与批量操作两行。
+///
+/// 状态与来源是两组互斥选项，散落的 `selectable_label` 看不出「这几个是一组、
+/// 只能选一个」，收进分段选择器里才成组；搜索框、加词框都走 `theme::field`，
+/// 与同行的按钮严格等高。
 fn filter_bar(app: &mut GongwenApp, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
-        ui.weak("状态：");
+        theme::caption(ui, "状态");
         let mut chosen = app.lexicon_filter.state;
-        if ui.selectable_label(chosen.is_none(), "全部").clicked() {
-            chosen = None;
-        }
-        for state in [
-            TermState::Candidate,
-            TermState::Accepted,
-            TermState::Rejected,
-        ] {
-            if ui
-                .selectable_label(chosen == Some(state), state.label())
-                .clicked()
-            {
-                chosen = Some(state);
+        theme::segmented(ui, |ui| {
+            if ui.selectable_label(chosen.is_none(), "全部").clicked() {
+                chosen = None;
             }
-        }
-        ui.add_space(12.0);
-        ui.weak("来源：");
+            for state in [
+                TermState::Candidate,
+                TermState::Accepted,
+                TermState::Rejected,
+            ] {
+                if ui
+                    .selectable_label(chosen == Some(state), state.label())
+                    .clicked()
+                {
+                    chosen = Some(state);
+                }
+            }
+        });
+        ui.add_space(10.0);
+        theme::caption(ui, "来源");
         let mut origin = app.lexicon_filter.origin;
-        if ui.selectable_label(origin.is_none(), "全部").clicked() {
-            origin = None;
-        }
-        for value in [
-            TermOrigin::Vocabulary,
-            TermOrigin::Proofread,
-            TermOrigin::Corpus,
-            TermOrigin::Manual,
-        ] {
-            if ui
-                .selectable_label(origin == Some(value), value.label())
-                .clicked()
-            {
-                origin = Some(value);
+        theme::segmented(ui, |ui| {
+            if ui.selectable_label(origin.is_none(), "全部").clicked() {
+                origin = None;
             }
-        }
-        ui.add_space(12.0);
+            for value in [
+                TermOrigin::Vocabulary,
+                TermOrigin::Proofread,
+                TermOrigin::Corpus,
+                TermOrigin::Manual,
+            ] {
+                if ui
+                    .selectable_label(origin == Some(value), value.label())
+                    .clicked()
+                {
+                    origin = Some(value);
+                }
+            }
+        });
+        ui.add_space(10.0);
         let mut search = app.lexicon_filter.search.clone();
-        let changed = ui
-            .add(
-                egui::TextEdit::singleline(&mut search)
-                    .hint_text("搜词")
-                    .desired_width(120.0),
-            )
-            .changed();
+        let changed = ui.add(theme::field(&mut search, "搜词", 130.0)).changed();
         if chosen != app.lexicon_filter.state || origin != app.lexicon_filter.origin || changed {
             app.lexicon_filter.state = chosen;
             app.lexicon_filter.origin = origin;
@@ -276,14 +397,11 @@ fn filter_bar(app: &mut GongwenApp, ui: &mut egui::Ui) {
             app.lexicon_dirty = true;
         }
     });
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
         let mut term = app.lexicon_new_term.clone();
         let submitted = ui
-            .add(
-                egui::TextEdit::singleline(&mut term)
-                    .hint_text("手工加词")
-                    .desired_width(140.0),
-            )
+            .add(theme::field(&mut term, "手工加词", 150.0))
             .lost_focus()
             && ui.input(|i| i.key_pressed(egui::Key::Enter));
         app.lexicon_new_term = term;
@@ -292,28 +410,39 @@ fn filter_bar(app: &mut GongwenApp, ui: &mut egui::Ui) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if app.lexicon_clear_confirm {
-                ui.colored_label(
-                    theme::warn(),
-                    "确定清空？词条、拒绝记录与扫描记账都会没有。",
-                );
-                if ui.button("确定清空").clicked() {
+                if ui
+                    .add(theme::warning_icon_button(theme::Icon::Trash, "确定清空"))
+                    .clicked()
+                {
                     app.clear_lexicon();
                     app.lexicon_clear_confirm = false;
                 }
-                if ui.button("取消").clicked() {
+                if ui.button("再想想").clicked() {
                     app.lexicon_clear_confirm = false;
                 }
+                ui.label(
+                    egui::RichText::new("词条、拒绝记录与扫描记账都会没有")
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::warn()),
+                );
             } else {
-                if ui.button("清空词表").clicked() {
+                if ui
+                    .add(theme::icon_text_button(theme::Icon::Eraser, "清空词表"))
+                    .clicked()
+                {
                     app.lexicon_clear_confirm = true;
                 }
                 if ui
-                    .button("接受列出的全部")
+                    .add(theme::icon_text_button(
+                        theme::Icon::SquareCheck,
+                        "接受列出的全部",
+                    ))
                     .on_hover_text("把当前筛选结果里还没接受的词一次接受掉")
                     .clicked()
                 {
                     app.accept_listed_lexicon_terms();
                 }
+                theme::caption(ui, &format!("列出 {} 条", app.lexicon_terms.len()));
             }
         });
     });

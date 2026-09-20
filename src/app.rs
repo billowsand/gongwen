@@ -314,7 +314,6 @@ pub(crate) struct LexiconPreview {
     pub(crate) conflict_terms: usize,
     pub(crate) saved_keys: i64,
     pub(crate) failed: Vec<String>,
-    pub(crate) summary: String,
     pub(crate) origins: String,
 }
 
