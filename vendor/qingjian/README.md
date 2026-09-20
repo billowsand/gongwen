@@ -49,5 +49,25 @@ cargo check --all-targets && cargo test
 ```
 
 注意 `.qj` 数据文件的 `FORMAT_VERSION`（`crates/qingjian-format/src/layout/header.rs`）
-必须与这份代码配套：上游一升版本，`data/ime/` 里的 `dict.qj` / `lm.qj` 就要重新生成，
+必须与这份代码配套：上游一升版本，`runtime/ime/` 里的 `dict.qj` / `lm.qj` 就要重新生成，
 两边一起提交。这也和 `runtime` 资产那套（独立 tag）是一个道理。
+
+## 随包数据：`lm.qj` 可以不要
+
+应用要两份数据，发布时放在可执行文件旁的 `runtime/ime/`（开发时放仓库的同一个目录，
+已被 `.gitignore` 排除）：
+
+| 文件 | 大小 | 必需？ | 说明 |
+| --- | --- | --- | --- |
+| `dict.qj` | 3.5 MB | 必需 | 词库（约 9.3 万条）。认不到它就不启用应用内输入法，退回系统输入法 |
+| `lm.qj` | 44 MB | **可选** | bigram 语言模型（约 486 万组），管整句转换 |
+
+**`lm.qj` 不在时输入法照常能用**，只是退到词级候选 + 个人 n-gram：
+`src/ime/session/tests.rs` 里那条端到端测试（敲拼音 `kaifa` → 空格上屏「开发」）
+跑的就是一份没有语言模型的迷你词库。所以「长句打得少」时直接不带这 44 MB 是可行的，
+代价是「一句话全拼到底再空格」的整句候选会变差，逐个词选还是正常的。
+
+想保留整句能力又嫌大，可以重打一份裁过的模型（需要上游的语料与工具）：
+先用 `qingjian-dict-convert bigram` 的 `--min-count` / `--max-bigrams` 生成小一点的
+`lm-unigram.tsv` / `lm-bigram.tsv`，再用 `pack lm` 打成 `.qj`。裁的是低频二元组，
+高频接续不受影响。

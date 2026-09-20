@@ -3,7 +3,7 @@ name = "gongwen-assistant"
 version = "0.5.2"
 edition = "2024"
 description = "基于 egui 与本地 LM Studio 的离线公文写作助手"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [package.metadata.winresource]
 ProductName = "公文助手"

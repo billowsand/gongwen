@@ -14,7 +14,7 @@
   <a href="https://github.com/billowsand/gongwen/releases"><img src="https://img.shields.io/github/v/release/billowsand/gongwen?label=release" alt="Release" /></a>
   <a href="https://github.com/billowsand/gongwen/actions/workflows/ci.yml"><img src="https://github.com/billowsand/gongwen/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-blue" alt="Platform" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License" /></a>
 </p>
 
 <p align="center">
@@ -247,8 +247,9 @@ AI 能力放在确定性能力之后，因为它的设计前提是「先管住�
 src/                应用代码（约 8.4 万行 Rust，860+ 自动化测试）
 assets/             图标与界面资源
 examples/           示例公文
+vendor/             随仓库分发的第三方源码（mdx、字在输入法内核）
 scripts/            版本号更新与便携包构建脚本
-runtime/            便携 TeX 运行时与字体（不进入 Git）
+runtime/            便携 TeX 运行时、字体与输入法词库（不进入 Git）
 gonghan-gwa.cls     LaTeX 文档类
 config.example.json 示例配置
 ```
@@ -263,4 +264,6 @@ GitHub Actions：CI 在 Windows / Linux / macOS 三平台执行格式、静态�
 
 ## 许可
 
-本项目以 [MIT](LICENSE) 协议开源。第三方组件与随发布包分发的字体许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目以 [GPL-3.0-or-later](LICENSE) 协议开源。改用 GPL 是因为随包集成了字在输入法（青简）
+的拼音引擎与词库，那部分代码是 GPL-3.0-or-later，链接进同一个可执行文件后整个程序都按 GPL 分发。
+第三方组件、随包数据与字体的许可与署名见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -157,3 +157,26 @@ distributed under the MIT License.
 
 - Project: https://github.com/mozillazg/rust-pinyin
 - License: MIT
+
+## 字在输入法（青简）内核
+
+应用内拼音输入法的引擎、词库与整句模型取自**字在**（青简 Qingjian 的 Windows
+分支），以 GPL-3.0-or-later 分发。取的是平台无关的六个 crate（format / dictionary /
+core / lm / translate / learning），随源码存放在 `vendor/qingjian/`，许可证原文保留在
+`vendor/qingjian/LICENSE`；上游的 Windows 平台壳（TSF DLL、Server 进程、自绘渲染器、
+语音 Worker）一个都没有搬，本项目用 egui 自己当壳。
+
+- 上游（字在）：https://github.com/billowsand/zizai
+- 上游（青简 Qingjian）：https://github.com/qingjian-team/qingjian
+- 取出提交：`9b643e1c8315c30e040e7798a9dadba0519a1807`
+- License: GPL-3.0-or-later
+
+随包数据放在 `runtime/ime/`：
+
+| 文件 | 内容 | 许可 |
+| --- | --- | --- |
+| `dict.qj` | 拼音词库（约 9.3 万条） | MIT AND Unicode-3.0（词表来自《通用规范汉字表》《现代汉语常用词表》与 THUOCL，读音取自 Unihan） |
+| `lm.qj` | bigram 语言模型（约 486 万组，可选） | CC-BY-SA-4.0 AND MIT（语料：中文维基百科与 LCCC） |
+
+`lm.qj` 不在时输入法退到词级候选 + 个人 n-gram，仍可正常打字；取舍与重打办法见
+`vendor/qingjian/README.md`。

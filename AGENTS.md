@@ -9,6 +9,9 @@
 - 导出链：Markdown → DOCX（`docx-rs`）/ TeX → PDF（本机 Tectonic / XeLaTeX）、
   XLSX（`rust_xlsxwriter`）、稿件库与词表用 `rusqlite`。
 - 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`。
+- 输入法：应用内拼音输入法，引擎、词库与整句模型都在本进程里，不用系统输入法、
+  也没有独立进程。代码在 `src/ime/`，内核 vendor 自字在输入法（GPL-3.0-or-later），
+  见 `vendor/qingjian/README.md`。
 - 模型接入：本机 LM Studio / Ollama，走 OpenAI 兼容接口（`src/lmstudio.rs`、
   `src/rag.rs`、`src/rag_client.rs`）。
 
@@ -31,7 +34,7 @@ cargo build --release --locked
 ## 代码组织
 
 单文件超过约 2000 行就该按功能域拆成模块文件夹。已拆过的：`src/app/`、`src/draft_page/`、
-`src/preview/`、`src/lexicon/`、`src/export/{docx,latex}/`。拆分流程见 skill
+`src/preview/`、`src/lexicon/`、`src/export/{docx,latex}/`、`src/ime/`。拆分流程见 skill
 `split-rust-module`（纯代码移动，每拆一个文件单独提交一次，零警告验证）。
 
 顶层模块清单在 `src/main.rs`。注意 `mod` 声明里 `outline`、`proofread_rules` 等
@@ -62,6 +65,11 @@ cargo build --release --locked
 
 - 提交信息用中文 Conventional Commits：`feat:` / `fix:` / `test:` / `docs:` /
   `refactor:` / `style:` / `chore: release vX.Y.Z`。
+- 许可证是 **GPL-3.0-or-later**：因为链接了 GPL 的输入法内核（`vendor/qingjian/`），
+  整个程序都按 GPL 分发。改许可证相关的东西要同步 `LICENSE`、`Cargo.toml` 的 `license`、
+  `README.md` 许可节、`THIRD_PARTY_NOTICES.md` 四处。
+- 输入法数据（`runtime/ime/dict.qj`、`lm.qj`）是随包资源，本地开发副本不入库；
+  `lm.qj`（44 MB）可选，缺了只是整句能力退化，输入法照常能用。
 - 代码注释、文档、README 一律中文。
 - 应用输出的 `dist/`、`output/`、`tmp/`、`target/` 均为生成物，不要提交。
 - `config.json`、`.env*` 是本机配置，不入库；`config.example.json` 是模板。
