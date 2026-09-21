@@ -12,6 +12,8 @@ use std::ops::Range;
 mod gutter;
 mod header;
 mod layout;
+mod math_flow;
+mod math_render;
 mod pdf_figure;
 mod red;
 mod render;

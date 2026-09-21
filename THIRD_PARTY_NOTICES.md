@@ -35,7 +35,20 @@ License. A source copy is vendored in `vendor/mdx` and linked into the
 executable; the upstream notice is preserved at `vendor/mdx/LICENSE`.
 
 - Project: <https://github.com/billowsand/mdx>
-- Version: `mdx@2.15.4`
+- Version: `mdx@2.16.2`
+
+## latex-rust and STIX Two Math
+
+Math formulas in research-report previews are rendered in-process by the
+`latex-rust` crate (parser, TeX-faithful box layout, and PNG rasterizer),
+which is dual-licensed under MIT OR Apache-2.0. The crate embeds the
+STIX Two Math font (SIL Open Font License 1.1) used for the preview glyphs;
+exported PDFs do not contain STIX outlines (they use TeX's math fonts via
+the bundled Tectonic runtime).
+
+- Project: <https://github.com/jscarr64/LaTeX-Rust>
+- Version: `latex-rust@1.0.4`
+- STIX Two Math: <https://github.com/stipub/stixfonts> (SIL OFL 1.1)
 
 ## Hayro and Vello CPU
 

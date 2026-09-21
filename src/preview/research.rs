@@ -22,12 +22,14 @@
 //! 黑体顶替。字号、行距、版心是准的，字形要看编译出来的 PDF——表单底部那句
 //! "最终版式以 TeX 编译 PDF 为准"说的就是这件事。
 
-use super::layout::{TextRun, clickable, line_block, line_block_runs, sheet};
+use super::layout::{
+    TextRun, clickable, is_renderable_paragraph, line_block, line_block_runs, sheet,
+};
 use super::render::{PreviewOutput, content_block, image_block};
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
     RESEARCH_CHAPTER_PT, RESEARCH_COVER_PT, RESEARCH_COVER_TITLE_PT, RESEARCH_COVER_TYPE_PT,
-    gutter, indent,
+    gutter, indent, math_flow,
 };
 use crate::export::crossref::{self, ResearchMarks};
 use crate::export::{self, LocatedBlock, MarkdownBlock, ResearchSection, parse_research_marker};
@@ -845,6 +847,9 @@ fn body_item(
 
 /// 段落、表格、列表都按共用部件画：字面与字号已经跟着 Metrics 走，这里拿到的
 /// 就是研究报告的版式。标题在上面单独处理，走不到 content_block 里那套公文编号。
+///
+/// 含 `$` 的段落是例外：`$$...$$` 独占一段居中，`$...$` 与文字混排，都交给
+/// `math_flow`；不含 `$` 的段落保持原路径不动。
 fn plain(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -862,6 +867,18 @@ fn plain(
         scroll_to_anchor,
         clicked,
         |ui| {
+            if let MarkdownBlock::Paragraph(text) = &located.block
+                && is_renderable_paragraph(text)
+            {
+                if let Some(src) = math_flow::block_source(text.trim()) {
+                    math_flow::display_block(ui, metrics, src);
+                    return;
+                }
+                if text.contains('$') {
+                    math_flow::paragraph(ui, metrics, text);
+                    return;
+                }
+            }
             content_block(
                 ui,
                 metrics,
@@ -958,6 +975,150 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// 同 [`drawn`]，但保留全部图形：公式纹理、占位虚线都要从 shape 里找。
+    fn drawn_shapes(markdown: &str) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &FontConfig::default());
+        let input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 6000.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(raw, |ui| {
+            let _ = research_preview(
+                ui,
+                &input,
+                markdown,
+                PreviewScale::zoom(Some(1.0)),
+                None,
+                false,
+                false,
+            );
+        })
+        .shapes
+    }
+
+    /// 递归展开：egui 会把纸面底色等一批 shape 包进 `Shape::Vec`。
+    fn flatten(shapes: &[egui::epaint::ClippedShape]) -> Vec<&egui::epaint::Shape> {
+        fn walk<'a>(shape: &'a egui::epaint::Shape, out: &mut Vec<&'a egui::epaint::Shape>) {
+            match shape {
+                egui::epaint::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                shape => out.push(shape),
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 一帧里画出来的全部文字（含 `Shape::Vec` 里包着的），按出现顺序拼起来。
+    fn flat_text(shapes: &[egui::epaint::ClippedShape]) -> String {
+        flatten(shapes)
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 带纹理且尺寸有限的绘制项（公式贴图的画法：无圆角的贴图在 egui 里
+    /// 直接落成 `Shape::Mesh`，带圆角的才是 `Shape::Rect`，两种都要认）。
+    fn textured_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
+        flatten(shapes)
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::epaint::Shape::Rect(rect)
+                    if rect.fill_texture_id() != egui::TextureId::default() =>
+                {
+                    Some(rect.rect)
+                }
+                egui::epaint::Shape::Mesh(mesh)
+                    if mesh.texture_id != egui::TextureId::default()
+                        && mesh.vertices.len() >= 4 =>
+                {
+                    Some(mesh.calc_bounds())
+                }
+                _ => None,
+            })
+            .filter(|rect| {
+                rect.width().is_finite()
+                    && rect.height().is_finite()
+                    && rect.width() > 0.0
+                    && rect.height() > 0.0
+            })
+            .collect()
+    }
+
+    /// 行内公式：段落里出现带纹理的有限尺寸矩形，两侧文字照常排出。
+    #[test]
+    fn an_inline_formula_is_drawn_as_a_textured_rect_among_the_text() {
+        let shapes = drawn_shapes("## 章\n\n质能方程 $E=mc^2$ 揭示了质量与能量的关系。\n");
+        let rects = textured_rects(&shapes);
+        assert_eq!(rects.len(), 1, "应恰好有一幅公式纹理：{rects:?}");
+
+        let text = flat_text(&shapes);
+        assert!(text.contains("质能方程"), "{text}");
+        assert!(text.contains("揭示了质量与能量的关系。"), "{text}");
+        assert!(!text.contains("$E=mc^2$"), "源码符号不应印在纸上：{text}");
+    }
+
+    /// 独立块公式：独占一段，纹理矩形居中于版心。
+    #[test]
+    fn a_display_formula_is_centered_in_the_content_area() {
+        let shapes = drawn_shapes("## 章\n\n$$E=mc^2$$\n");
+        let rects = textured_rects(&shapes);
+        assert_eq!(rects.len(), 1, "应恰好有一幅公式纹理：{rects:?}");
+
+        // 版心中心：纸宽 595.28pt 居中于 1000px 视口，左页边 28mm，版心 156mm，
+        // 缩放 1.0（与 Metrics::research 同一套常量）。
+        let page = crate::preview::PAGE_PT * crate::preview::PT;
+        let side = (1000.0 - page) / 2.0;
+        let margin_left =
+            crate::preview::RESEARCH_MARGIN_LEFT_MM * crate::preview::MM * crate::preview::PT;
+        let content = crate::preview::RESEARCH_CONTENT_MM * crate::preview::MM * crate::preview::PT;
+        let expected = side + margin_left + content / 2.0;
+        assert!(
+            (rects[0].center().x - expected).abs() <= 2.0,
+            "公式中心 {} 应落在版心中心 {expected} 附近",
+            rects[0].center().x
+        );
+    }
+
+    /// 渲染失败的公式（不支持的命令）降级为占位框：源码以灰色小字写出来，
+    /// 不出纹理、不 panic。
+    #[test]
+    fn an_unsupported_formula_falls_back_to_a_placeholder() {
+        for markdown in [
+            "## 章\n\n$$\\notarealcommand{1}$$\n",
+            "## 章\n\n公式 $\\notarealcommand$ 无效。\n",
+        ] {
+            let shapes = drawn_shapes(markdown);
+            assert!(
+                textured_rects(&shapes).is_empty(),
+                "失败的公式不该出纹理：{markdown}"
+            );
+            let text = flat_text(&shapes);
+            assert!(
+                text.contains("\\notarealcommand"),
+                "占位框应写出公式源码：{text}"
+            );
+        }
     }
 
     /// 交叉引用、文献引用、图表题注在纸上是编号，不是源码符号。

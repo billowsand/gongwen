@@ -31,6 +31,9 @@ egui_extras = { version = "0.35.0", features = ["image", "svg"] }
 hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 jieba-rs = "0.10"
+# 研究报告公式的预览渲染：纯 Rust 排版 + PNG 光栅化（STIX Two Math），不走 tectonic。
+# 只开 png feature；它的 egui feature 钉在 egui 0.28，与本项目的 0.35 不兼容。
+latex-rust = { version = "1.0", features = ["png"] }
 # 随仓库分发的副本，见 vendor/mdx/README.md：构建不依赖 GitHub 可达，
 # 离线也能从零编译。同步上游的办法写在那份 README 里。
 mdx = { path = "vendor/mdx" }
