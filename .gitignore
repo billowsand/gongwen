@@ -1,5 +1,7 @@
 # Rust / Cargo
 /target/
+# vendor/mdx 不是 workspace 成员，在它目录里跑 cargo 会另起一个 target/
+/vendor/mdx/target/
 *.rs.bk
 
 # Generated application output
