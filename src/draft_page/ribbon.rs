@@ -1,4 +1,5 @@
-//! 功能区（Ribbon）各分区：首页/插入/格式/审校/视图/输出。
+//! 功能区（Ribbon）各分区：开始/插入/研报/格式/审校/视图/输出。
+//! 「研报」只在研究报告下出现，其余各分区所有文种都在。
 //!
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::ribbon`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
@@ -15,16 +16,38 @@ use crate::storage;
 use crate::theme;
 use eframe::egui;
 
+/// 「研报」分区里选中的插入动作：区段标记、锚点、交叉引用、文献引用、脚注
+/// 和表题。
+///
+/// 下拉闭包借着 `self.doc` 取候选（锚点清单、BibTeX 键），插入要的却是
+/// `&mut self`，两件事不能同时发生：闭包里只记下选了什么，等闭包结束再动正文。
+enum MarkupInsert {
+    /// 区段标记（`<!-- [正文] -->` 等）与它在提示语里的叫法。
+    Marker(&'static str, &'static str),
+    /// 行尾锚点 ` {#}`。
+    Label,
+    /// 表题 `表：`，独占一行。
+    Caption,
+    /// 插在光标处的行内标记：内容、光标从末尾回退的字节数、叫法。
+    Snippet(String, usize, &'static str),
+}
+
 impl DraftPage<'_> {
     /// 起草页功能区：第一行是分区卡与常驻入口，第二行是当前分区的按钮。
     ///
-    /// 仿 Word 的分区卡，把过去挤在一条里的二十来个入口按用途分成六区，腾出的
-    /// 位置留给插入表格、标题层级这类更细的操作。分区卡与折叠状态记在配置里，
-    /// 换稿件不重置——切分区是「现在要干哪一类活」，换篇稿子通常还在干同一类。
+    /// 仿 Word 的分区卡，把过去挤在一条里的二十来个入口按用途分区，腾出的位置
+    /// 留给插入表格、标题层级这类更细的操作。分区卡与折叠状态记在配置里，换稿
+    /// 件不重置——切分区是「现在要干哪一类活」，换篇稿子通常还在干同一类。
+    /// 只有「研报」跟着文种走：它那组按钮公文一条都用不上。
     pub(crate) fn ribbon(&mut self, ui: &mut egui::Ui) {
         // 背景先占绘制位置，等上下两行排版结束、拿到精确矩形后再回填；这样单一
         // 闭合曲线位于所有按钮后面，不会遮挡文字或点击反馈。
         let ribbon_background = ui.painter().add(egui::Shape::Noop);
+        // 「研报」只在研究报告下出现：配置里存着它、这篇却是公文时，落回「插入」，
+        // 否则第二行会画一组这个文种根本用不上的按钮，分区卡还没有哪个是亮的。
+        if !self.config.ribbon_tab.shown_for(self.doc.draft.kind) {
+            self.config.ribbon_tab = RibbonTab::Insert;
+        }
         let selected_tab_rect = self.ribbon_tabs(ui);
         if self.config.ribbon_collapsed {
             return;
@@ -43,6 +66,7 @@ impl DraftPage<'_> {
                         ui.horizontal(|ui| match self.config.ribbon_tab {
                             RibbonTab::Home => self.ribbon_home(ui),
                             RibbonTab::Insert => self.ribbon_insert(ui),
+                            RibbonTab::Research => self.ribbon_research(ui),
                             RibbonTab::Format => self.ribbon_format(ui),
                             RibbonTab::Review => self.ribbon_review(ui),
                             RibbonTab::View => self.ribbon_view(ui),
@@ -88,7 +112,8 @@ impl DraftPage<'_> {
                 let current = self.config.ribbon_tab;
                 let mut picked = None;
                 let mut toggle_collapse = false;
-                for tab in RibbonTab::ALL {
+                let kind = self.doc.draft.kind;
+                for tab in RibbonTab::ALL.into_iter().filter(|tab| tab.shown_for(kind)) {
                     // 双击当前分区卡收起/展开功能区（与 Word 一致），在悬停提示里
                     // 写明，不然这个手势几乎不可能被发现。
                     let tip = if current == tab {
@@ -502,140 +527,11 @@ impl DraftPage<'_> {
         });
         toolbar_separator(ui);
 
-        // 四、文类构件：公文按正文/附件切区段；研究报告另有一套区段标记，
-        // 以及锚点、交叉引用、文献引用、脚注、表题这些 mdx research 语法。
-        let research = self.doc.draft.kind.is_research();
-        let mut marker: Option<(&'static str, &'static str)> = None;
-        let mut anchor = false;
-        let mut snippet: Option<(String, usize, &'static str)> = None;
-        // 两个下拉的候选在按钮闭包外先取好：闭包里点选只记下要插的串，
-        // 真正动正文等闭包结束再说。
-        let label_ids = if research {
-            export::crossref::label_ids(&self.doc.generated_markdown)
-        } else {
-            Vec::new()
-        };
-        let bibtex_keys = if research {
-            export::crossref::bibtex_keys(&self.doc.draft.research.bibliography_content)
-        } else {
-            Vec::new()
-        };
-        ui.add_enabled_ui(editable, |ui| {
-            if research {
-                for (icon, text, label, tip) in [
-                    (
-                        theme::Icon::BookmarkCheck,
-                        "<!-- [正文] -->",
-                        "正文标记",
-                        "插入“<!-- [正文] -->”，声明摘要之后的正文区段起点",
-                    ),
-                    (
-                        theme::Icon::Paperclip,
-                        "<!-- [附录] -->",
-                        "附录标记",
-                        "插入“<!-- [附录] -->”，把其后内容切换为附录区段，可重复插入",
-                    ),
-                    (
-                        theme::Icon::Book,
-                        "<!-- [摘要] -->",
-                        "摘要标记",
-                        "插入“<!-- [摘要] -->”，把其后内容切换为摘要区段",
-                    ),
-                    (
-                        theme::Icon::GitCommit,
-                        "<!-- [版本变更记录] -->",
-                        "版本变更记录",
-                        "插入“<!-- [版本变更记录] -->”，声明版本变更记录区段",
-                    ),
-                    (
-                        theme::Icon::Library,
-                        "<!-- [参考文献] -->",
-                        "参考文献",
-                        "插入“<!-- [参考文献] -->”，声明参考文献区段",
-                    ),
-                ] {
-                    if ui
-                        .add(theme::icon_text_button(icon, label))
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        marker = Some((text, label));
-                    }
-                }
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::Hash, "锚点"))
-                    .on_hover_text(
-                        "锚点写在标题、表题或图片行的行尾，供交叉引用。\
-                         把“ {#}”追加到光标所在行行尾，在花括号里填 id",
-                    )
-                    .clicked()
-                {
-                    anchor = true;
-                }
-                egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
-                    theme::Icon::Open,
-                    "交叉引用",
-                ))
-                .ui(ui, |ui| {
-                    ui.set_min_width(220.0);
-                    if label_ids.is_empty() {
-                        ui.weak("稿中还没有锚点。先用「锚点」按钮在标题、表题或图片行尾写一个。");
-                        return;
-                    }
-                    egui::ScrollArea::vertical()
-                        .max_height(320.0)
-                        .show(ui, |ui| {
-                            for id in &label_ids {
-                                if ui.add(theme::menu_text_item(*id)).clicked() {
-                                    snippet = Some((format!("{{@{id}}}"), 0, "交叉引用"));
-                                    ui.close();
-                                }
-                            }
-                        });
-                })
-                .0
-                .on_hover_text("插入 {@id} 交叉引用：预览与 PDF 中印成被引对象的编号");
-                egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
-                    theme::Icon::Quote,
-                    "文献引用",
-                ))
-                .ui(ui, |ui| {
-                    ui.set_min_width(220.0);
-                    if bibtex_keys.is_empty() {
-                        ui.weak("先在左侧文档要素导入 .bib 参考文献。");
-                        return;
-                    }
-                    egui::ScrollArea::vertical()
-                        .max_height(320.0)
-                        .show(ui, |ui| {
-                            for key in &bibtex_keys {
-                                if ui.add(theme::menu_text_item(key.as_str())).clicked() {
-                                    snippet = Some((format!("[@{key}]"), 0, "文献引用"));
-                                    ui.close();
-                                }
-                            }
-                        });
-                })
-                .0
-                .on_hover_text("插入 [@key] 文献引用：预览与 PDF 中印成方括号序号");
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::PencilLine, "脚注"))
-                    .on_hover_text(
-                        "插入行内脚注 [^id]:(内容)，光标留在 id 处；\
-                         冒号与括号写成全角“：（）”也认",
-                    )
-                    .clicked()
-                {
-                    snippet = Some(("[^]:(内容)".to_string(), "]:(内容)".len(), "脚注"));
-                }
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::Table, "表题"))
-                    .on_hover_text("表题独占一行，写在表格上一行；行尾可带 {#id} 锚点")
-                    .clicked()
-                {
-                    snippet = Some(("表：题名 ".to_string(), 0, "表题"));
-                }
-            } else {
+        // 四、公文构件：按正文/附件切区段。研究报告的区段标记另有五种，连同
+        // 锚点、交叉引用这些 mdx research 语法一起摆在「研报」分区，不占这里。
+        if !self.doc.draft.kind.is_research() {
+            let mut marker = None;
+            ui.add_enabled_ui(editable, |ui| {
                 if ui
                     .add(theme::icon_text_button(
                         theme::Icon::BookmarkCheck,
@@ -653,18 +549,12 @@ impl DraftPage<'_> {
                 {
                     marker = Some(("<!-- [附件] -->", "附件标记"));
                 }
+            });
+            if let Some((text, label)) = marker {
+                self.insert_section_marker(ui.ctx(), text, label);
             }
-        });
-        if let Some((text, label)) = marker {
-            self.insert_section_marker(ui.ctx(), text, label);
+            toolbar_separator(ui);
         }
-        if anchor {
-            self.insert_label(ui.ctx());
-        }
-        if let Some((text, back, label)) = snippet {
-            self.insert_inline(ui.ctx(), &text, back, label);
-        }
-        toolbar_separator(ui);
 
         // 五、标准词库：单位、人员、联系方式直接插到光标处
         ui.add_enabled_ui(editable, |ui| self.vocabulary_menus(ui));
@@ -697,6 +587,177 @@ impl DraftPage<'_> {
         });
         if let Some((text, back, label)) = snippet {
             self.insert_inline(ui.ctx(), &text, back, label);
+        }
+    }
+
+    /// 「研报」分区：mdx research 独有的区段标记与行内标记。
+    ///
+    /// 这些语法只有研究报告认，摆进「插入」会让公文用户面对一排用不上的按钮，
+    /// 所以自成一个分区卡（见 [`RibbonTab::shown_for`]），按 区段标记 / 行内标记
+    /// / 表题 分三组。
+    ///
+    /// 两份候选清单（交叉引用的锚点、文献引用的 BibTeX 键）都放在下拉展开时
+    /// 才算：功能区每帧重画，把全文逐行跑一遍正则、再把整份 `.bib` 扫一遍，
+    /// 长稿子上就是每帧白烧一次。下拉没展开，这两份清单一次都不算。
+    pub(crate) fn ribbon_research(&mut self, ui: &mut egui::Ui) {
+        let editable = !self.doc.read_only();
+        // 下拉闭包借着 `self.doc` 取候选，插入要的是 `&mut self`：闭包里只记下
+        // 选了什么，等这一组画完再动正文。
+        let mut action: Option<MarkupInsert> = None;
+
+        // 一、区段标记。顺序照纸面：摘要在前，正文居中，附录与两个后置区段收尾。
+        ui.add_enabled_ui(editable, |ui| {
+            for (icon, text, label, tip) in [
+                (
+                    theme::Icon::Book,
+                    "<!-- [摘要] -->",
+                    "摘要",
+                    "插入“<!-- [摘要] -->”，把其后内容切换为摘要区段",
+                ),
+                (
+                    theme::Icon::BookmarkCheck,
+                    "<!-- [正文] -->",
+                    "正文",
+                    "插入“<!-- [正文] -->”，声明摘要之后的正文区段起点",
+                ),
+                (
+                    theme::Icon::Paperclip,
+                    "<!-- [附录] -->",
+                    "附录",
+                    "插入“<!-- [附录] -->”，把其后内容切换为附录区段。\
+                     每份附录各插一个，其后紧跟“## 附录标题”",
+                ),
+                (
+                    theme::Icon::GitCommit,
+                    "<!-- [版本变更记录] -->",
+                    "版本变更记录",
+                    "插入“<!-- [版本变更记录] -->”，声明版本变更记录区段",
+                ),
+                (
+                    theme::Icon::Library,
+                    "<!-- [参考文献] -->",
+                    "参考文献",
+                    "插入“<!-- [参考文献] -->”，声明参考文献区段",
+                ),
+            ] {
+                if ui
+                    .add(theme::icon_text_button(icon, label))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    action = Some(MarkupInsert::Marker(text, label));
+                }
+            }
+        });
+        toolbar_separator(ui);
+
+        // 二、行内标记：锚点定义引用目标，两个下拉从现成的锚点/文献键里挑。
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Hash, "锚点"))
+                .on_hover_text(
+                    "锚点写在标题、表题或图片行的行尾，供交叉引用。\
+                     把“ {#}”追加到光标所在行行尾，在花括号里填 id",
+                )
+                .clicked()
+            {
+                action = Some(MarkupInsert::Label);
+            }
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::Open,
+                "交叉引用",
+            ))
+            .ui(ui, |ui| {
+                ui.set_min_width(220.0);
+                let ids = export::crossref::label_ids(&self.doc.generated_markdown);
+                if ids.is_empty() {
+                    ui.weak("稿中还没有锚点。先用「锚点」在标题、表题或图片行尾写一个。");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for id in ids {
+                            if ui.add(theme::menu_text_item(id)).clicked() {
+                                action = Some(MarkupInsert::Snippet(
+                                    format!("{{@{id}}}"),
+                                    0,
+                                    "交叉引用",
+                                ));
+                                ui.close();
+                            }
+                        }
+                    });
+            })
+            .0
+            .on_hover_text("插入 {@id} 交叉引用：预览与 PDF 中印成被引对象的编号");
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::Quote,
+                "文献引用",
+            ))
+            .ui(ui, |ui| {
+                ui.set_min_width(220.0);
+                let keys =
+                    export::crossref::bibtex_keys(&self.doc.draft.research.bibliography_content);
+                if keys.is_empty() {
+                    ui.weak("先在左侧文档要素导入 .bib 参考文献。");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for key in keys {
+                            if ui.add(theme::menu_text_item(key.as_str())).clicked() {
+                                action =
+                                    Some(MarkupInsert::Snippet(format!("[@{key}]"), 0, "文献引用"));
+                                ui.close();
+                            }
+                        }
+                    });
+            })
+            .0
+            .on_hover_text("插入 [@key] 文献引用：预览与 PDF 中印成方括号序号");
+            if ui
+                .add(theme::icon_text_button(theme::Icon::PencilLine, "脚注"))
+                .on_hover_text(
+                    "插入行内脚注 [^id]:(内容)，光标留在 id 处；\
+                     冒号与括号写成全角“：（）”也认",
+                )
+                .clicked()
+            {
+                action = Some(MarkupInsert::Snippet(
+                    "[^]:(内容)".to_string(),
+                    "]:(内容)".len(),
+                    "脚注",
+                ));
+            }
+        });
+        toolbar_separator(ui);
+
+        // 三、表题。表格与图片本身在「插入」分区，这里只管表题这条 mdx 写法。
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Table, "表题"))
+                .on_hover_text(
+                    "在光标所在行之上插入独占一行的“表：”，写在表格上一行；\
+                     表号由程序生成，行尾可再加 {#id} 锚点",
+                )
+                .clicked()
+            {
+                action = Some(MarkupInsert::Caption);
+            }
+        });
+
+        match action {
+            Some(MarkupInsert::Marker(text, label)) => {
+                self.insert_section_marker(ui.ctx(), text, label);
+            }
+            Some(MarkupInsert::Label) => self.insert_label(ui.ctx()),
+            Some(MarkupInsert::Caption) => self.insert_table_caption(ui.ctx()),
+            Some(MarkupInsert::Snippet(text, back, label)) => {
+                self.insert_inline(ui.ctx(), &text, back, label);
+            }
+            None => {}
         }
     }
 

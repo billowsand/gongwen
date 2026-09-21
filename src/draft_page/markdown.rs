@@ -344,6 +344,34 @@ pub(crate) fn byte_at_char(text: &str, index: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
+/// 把 `line` 插到 `pos` 所在行的行首，把原来那一行整体顶下去；返回插入内容
+/// 本身（不含为独占一行补出来的换行）在新 `text` 里的字节范围。
+///
+/// 区段标记、表题这些「必须独占一行」的东西都走这里。插在行首而不是光标处，
+/// 是为了让光标停在某一行上时，插进来的这行正好落到它上方：表题因此落到表格
+/// 首行之上，正是解析器认表题的位置。所在行本来就空就不再补空行。
+fn splice_own_line(text: &mut String, pos: usize, line: &str) -> Range<usize> {
+    let pos = pos.min(text.len());
+    let line_start = text[..pos].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |index| line_start + index);
+    // 所在行本来就空，或者它上面已经隔着一个空行，就不用再补——补出来是连着
+    // 三个换行，源码上白多一行。
+    let padded = !text[line_start..line_end].trim().is_empty()
+        && line_start > 0
+        && !text[..line_start].ends_with("\n\n");
+    let insertion = if padded {
+        format!("\n{line}\n")
+    } else {
+        format!("{line}\n")
+    };
+    // 补在前面的那个换行（有就一个字节）之后才是内容本身。
+    let start = line_start + insertion.len() - line.len() - 1;
+    text.insert_str(line_start, &insertion);
+    start..start + line.len()
+}
+
 impl DraftPage<'_> {
     /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：插到光标所在行的行首，
     /// 从没点进过编辑框时追加到文末。标记必须独占一行导出器才认，
@@ -363,23 +391,36 @@ impl DraftPage<'_> {
             *self.status = format!("{label}已在稿中，不重复插入。");
             return;
         }
-        let cursor = editor_cursor(ctx, &self.doc.generated_markdown);
-        let text = &mut self.doc.generated_markdown;
-        let pos = cursor.unwrap_or(text.len()).min(text.len());
-        let line_start = text[..pos].rfind('\n').map_or(0, |index| index + 1);
-        let line_end = text[line_start..]
-            .find('\n')
-            .map_or(text.len(), |index| line_start + index);
-        let line_empty = text[line_start..line_end].trim().is_empty();
-        let insertion = if line_empty {
-            format!("{marker}\n")
-        } else {
-            format!("\n{marker}\n")
-        };
-        text.insert_str(line_start, &insertion);
+        let inserted = self.insert_own_line(ctx, marker);
         *self.status = format!("已插入{label}。");
         // 让编辑框下一次绘制时把光标挪到插入内容之后并滚动到位。
-        self.doc.pending_source_jump = Some(line_start + insertion.len());
+        // `+ 1` 跨过行尾那个换行，落到被顶下去的那一行行首。
+        self.doc.pending_source_jump = Some(inserted.end + 1);
+    }
+
+    /// 研究报告的表题 `表：`：插到光标所在行的行首，把原来那一行顶下去，
+    /// 光标停在冒号后面直接写题名。
+    ///
+    /// 表题必须独占一行、紧挨着表格，解析器才把它认成表题而不是正文
+    /// （见 mdx 的 `take_leading_table_caption`）。插在行首而不是光标处，
+    /// 是为了让光标落在表格首行时表题正好落到表格上方那一行。
+    /// 表号由 LaTeX 的表格计数器生成，题名里不写。
+    pub(crate) fn insert_table_caption(&mut self, ctx: &egui::Context) {
+        if self.doc.read_only() {
+            return;
+        }
+        let inserted = self.insert_own_line(ctx, "表：");
+        *self.status = "已插入表题：写在表格上一行，冒号后填题名，不要自己编表号。".into();
+        self.doc.pending_source_jump = Some(inserted.end);
+    }
+
+    /// 把一行内容插到光标所在行的行首；从没点进过编辑框时追加到文末。
+    /// 返回插入内容本身（不含为独占一行补出来的换行）的字节范围。
+    fn insert_own_line(&mut self, ctx: &egui::Context, line: &str) -> Range<usize> {
+        let cursor = editor_cursor(ctx, &self.doc.generated_markdown);
+        let text = &mut self.doc.generated_markdown;
+        let pos = cursor.unwrap_or(text.len());
+        splice_own_line(text, pos, line)
     }
 
     /// 研究报告的锚点 ` {#}`：追加到光标所在行的行尾，光标落进花括号里，
@@ -612,5 +653,62 @@ mod ordered_list_tests {
     #[test]
     fn ordinary_lines_are_left_to_text_edit() {
         assert!(continue_ordered_list("普通正文", "普通正文".len()).is_none());
+    }
+}
+
+/// 独占一行的插入（区段标记、表题）落点。
+#[cfg(test)]
+mod own_line_tests {
+    use super::*;
+
+    /// 表题要落在表格首行之上：光标停在表格里时，插进来的这行顶开它，
+    /// 表题与表格紧邻——正是解析器认表题的位置。
+    #[test]
+    fn an_own_line_goes_above_the_line_the_cursor_sits_on() {
+        let mut text = "前一段。\n\n| 甲 | 乙 |\n| --- | --- |\n".to_string();
+        let cursor = text.find("| 甲").expect("表格首行") + "| 甲".len();
+        let inserted = splice_own_line(&mut text, cursor, "表：");
+        assert_eq!(text, "前一段。\n\n表：\n| 甲 | 乙 |\n| --- | --- |\n");
+        assert_eq!(&text[inserted.clone()], "表：");
+        // 光标停在冒号后面，接着就能写题名。
+        assert_eq!(&text[..inserted.end], "前一段。\n\n表：");
+    }
+
+    /// 所在行本来就空就不再补空行；返回的范围仍精确框住插入的那串。
+    #[test]
+    fn an_own_line_does_not_pad_an_already_empty_line() {
+        let mut text = "前一段。\n\n".to_string();
+        let end = text.len();
+        let inserted = splice_own_line(&mut text, end, "<!-- [正文] -->");
+        assert_eq!(text, "前一段。\n\n<!-- [正文] -->\n");
+        assert_eq!(&text[inserted.clone()], "<!-- [正文] -->");
+        // 区段标记插完把光标送到下一行行首：跨过行尾那个换行就是文末。
+        assert_eq!(inserted.end + 1, text.len());
+    }
+
+    /// 所在行有字、上面又紧挨着别的字时补一个空行，免得连成同一段；上面已经
+    /// 隔着空行就不再补，省得源码里连着三个换行。
+    #[test]
+    fn an_own_line_pads_only_when_the_line_above_has_text() {
+        let mut text = "前一段。\n下一段。".to_string();
+        let cursor = text.find("下一段").expect("第二段");
+        let inserted = splice_own_line(&mut text, cursor, "表：");
+        assert_eq!(text, "前一段。\n\n表：\n下一段。");
+        assert_eq!(&text[inserted], "表：");
+
+        let mut spaced = "前一段。\n\n下一段。".to_string();
+        let cursor = spaced.find("下一段").expect("第二段");
+        splice_own_line(&mut spaced, cursor, "表：");
+        assert_eq!(spaced, "前一段。\n\n表：\n下一段。");
+    }
+
+    /// 光标位置越界（改完正文还没重绘时编辑框记着的旧位置）不能 panic：
+    /// 按文末算，插在末行之上。
+    #[test]
+    fn an_own_line_clamps_a_stale_cursor() {
+        let mut text = "正文".to_string();
+        let inserted = splice_own_line(&mut text, 9_999, "表：");
+        assert_eq!(text, "表：\n正文");
+        assert_eq!(&text[inserted], "表：");
     }
 }

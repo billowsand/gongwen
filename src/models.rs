@@ -1419,6 +1419,8 @@ pub enum RibbonTab {
     Home,
     /// 往光标处插入表格、图片、公文构件、词库词条与符号。
     Insert,
+    /// 研究报告专用：mdx research 的区段标记与行内标记。只在研究报告下出现。
+    Research,
     /// 改已有文字的 Markdown 标记：标题层级、加粗、列表、清理。
     Format,
     /// 校验、版本比对、查找、字数。
@@ -1430,20 +1432,29 @@ pub enum RibbonTab {
 }
 
 impl RibbonTab {
-    /// 分区卡顺序即屏幕上从左到右的顺序。
-    pub const ALL: [Self; 6] = [
+    /// 分区卡顺序即屏幕上从左到右的顺序。「研报」紧挨着「插入」：两者干的是
+    /// 同一类活（往稿子里放构件），只是一个通用、一个只有研究报告用得上。
+    pub const ALL: [Self; 7] = [
         Self::Home,
         Self::Insert,
+        Self::Research,
         Self::Format,
         Self::Review,
         Self::View,
         Self::Output,
     ];
 
+    /// 这个分区卡在该文种下出不出现。研报构件（区段标记、锚点、交叉引用、
+    /// 文献引用、脚注、表题）只有研究报告认，公文下摆出来纯是干扰。
+    pub fn shown_for(self, kind: TemplateKind) -> bool {
+        self != Self::Research || kind.is_research()
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Home => "开始",
             Self::Insert => "插入",
+            Self::Research => "研报",
             Self::Format => "格式",
             Self::Review => "审校",
             Self::View => "视图",
@@ -1455,6 +1466,7 @@ impl RibbonTab {
         match self {
             Self::Home => "保存、版本、查找替换、AI 起草与优化、规则校验",
             Self::Insert => "表格、图片、正文与附件标记、词库词条、日期与符号",
+            Self::Research => "研究报告的区段标记、锚点、交叉引用、文献引用、脚注与表题",
             Self::Format => "标题层级、加粗、项目符号，以及引号与空行的规范化",
             Self::Review => "重新校验、版本对照、查找替换、字数统计",
             Self::View => "显示方式、预览缩放、各个面板的开关",
@@ -2318,6 +2330,25 @@ pub struct GeneratedDraft {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    /// 「研报」分区卡只在研究报告下出现，其余分区卡各文种都在。
+    #[test]
+    fn only_research_reports_get_the_research_ribbon_tab() {
+        for kind in TemplateKind::ALL {
+            let shown: Vec<&str> = RibbonTab::ALL
+                .into_iter()
+                .filter(|tab| tab.shown_for(kind))
+                .map(RibbonTab::label)
+                .collect();
+            if kind.is_research() {
+                assert_eq!(shown.len(), RibbonTab::ALL.len(), "{kind:?}");
+                assert!(shown.contains(&"研报"), "{kind:?}");
+            } else {
+                assert_eq!(shown.len(), RibbonTab::ALL.len() - 1, "{kind:?}");
+                assert!(!shown.contains(&"研报"), "{kind:?}");
+            }
+        }
+    }
 
     /// 旧配置没有 `ai_prompts` 字段，载入后必须补齐全部预置项并编好 id。
     #[test]
