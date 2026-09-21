@@ -141,7 +141,7 @@ impl Ime {
             assembled,
             settings,
             english: false,
-            layout: CandidateLayout::default(),
+            layout: empty_layout(settings.page_size),
             highlight: 0,
             preedit: Preedit::default(),
             pending_commit: None,
@@ -435,7 +435,7 @@ impl Ime {
             // 下一个上屏的词按句首记，别把跑题的上下文带到别处。
             assembly.engine.break_chain();
         }
-        self.layout = CandidateLayout::default();
+        self.layout = empty_layout(self.settings.page_size);
         self.preedit = Preedit::default();
         self.pending_commit = None;
         self.forget_window();
@@ -447,8 +447,9 @@ impl Ime {
         let Some(engine) = self.engine() else {
             return;
         };
+        let empty = empty_layout(self.settings.page_size);
         let (preedit, layout) = if engine.composition().is_empty() {
-            (Preedit::default(), CandidateLayout::default())
+            (Preedit::default(), empty)
         } else {
             match engine.query() {
                 Ok(query) => (
@@ -458,11 +459,14 @@ impl Ime {
                     },
                     CandidateLayout::new(query.candidates.items.clone(), self.settings.page_size),
                 ),
+                // 拼音切不动（`v`、`Ai` 的 `i` 这类不成音节的键）：拼音串照样要画出来，
+                // 候选是空的。这里**不能**用 `CandidateLayout::default()`——它的每页格数
+                // 是 0，候选窗拿它算页数会除零 panic，整个应用当场退出。
                 Err(_) => {
                     let composition = engine.composition();
                     let text = composition.text().to_owned();
                     let caret = text[..composition.cursor()].chars().count();
-                    (Preedit { text, caret }, CandidateLayout::default())
+                    (Preedit { text, caret }, empty)
                 }
             }
         };
@@ -618,11 +622,9 @@ impl Ime {
                 Outcome::commit(text)
             }
             Action::CommitIndex(index) => {
-                let page = self.highlight / self.settings.page_size;
-                let candidate = self
-                    .layout
-                    .candidate(page * self.settings.page_size + index)
-                    .cloned();
+                let page_size = self.settings.page_size.max(1);
+                let page = self.highlight / page_size;
+                let candidate = self.layout.candidate(page * page_size + index).cloned();
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;
                 };
@@ -717,6 +719,13 @@ impl Drop for Ime {
         // 退出前把学习数据落一次盘，别让最后几十次选词白学。
         self.flush();
     }
+}
+
+/// 没有候选时的布局。**不用 `CandidateLayout::default()`**：它的每页格数是 0，
+/// `pages()` 会拿它作除数，候选窗一画就除零 panic（panic 从 winit 的窗口回调里
+/// 穿出去，应用直接闪退）。每页格数与设置一致，空布局与有候选时同一套算法。
+fn empty_layout(page_size: usize) -> CandidateLayout {
+    CandidateLayout::new(Vec::new(), page_size.max(1))
 }
 
 /// 高亮挪 `delta`，夹在 `[0, count-1]` 里；没有候选就归零。

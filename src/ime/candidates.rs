@@ -48,7 +48,9 @@ impl Ime {
         }
         let page_size = self.settings.page_size.max(1);
         let page = self.highlight / page_size;
-        let pages = self.layout.pages().max(1);
+        // 页数按设置里的每页格数算，不走 `layout.pages()`：那是拿布局自己记着的
+        // 每页格数当除数，空布局（`CandidateLayout::default()`）里它是 0。
+        let pages = self.layout.len().div_ceil(page_size).max(1);
         // 先把要画的东西抄成自己的数据：闭包里还要改 `self`（记下点中的候选）。
         let rows: Vec<(usize, String)> = self
             .layout

@@ -59,6 +59,21 @@ fn type_char(ctx: &egui::Context, ime: &mut Ime, c: char) -> Vec<egui::Event> {
     frame(ctx, ime, vec![egui::Event::Text(c.to_string())])
 }
 
+/// 敲一个字符，并把候选窗也画出来（调用顺序与 `App::ui` 一致）。
+fn type_char_with_candidates(ctx: &egui::Context, ime: &mut Ime, c: char) {
+    let input = egui::RawInput {
+        events: vec![egui::Event::Text(c.to_string())],
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(input, |ui| {
+        let ctx = ui.ctx();
+        ctx.output_mut(|output| output.ime = Some(ime_output()));
+        ime.begin_frame(ctx);
+        ime.candidates_ui(ctx);
+        ime.end_frame(ctx);
+    });
+}
+
 /// 事件队列里插进文本框的文本（可能有几段）。
 fn inserted(events: &[egui::Event]) -> String {
     events
@@ -265,6 +280,30 @@ fn letters_start_a_composition_instead_of_being_inserted() {
     let routed = type_char(&ctx, &mut ime, 'z');
     assert!(routed.is_empty(), "拼音不该漏进文本框：{routed:?}");
     assert_eq!(ime.preedit.text, "z");
+}
+
+/// 大写字母上屏之后再敲一个切不出音节的字母（`Ai` 里的 `i`、`v`）：引擎查不出候选，
+/// 拼音串还得画在候选窗里。空候选的布局每页格数不能是 0——候选窗拿它算页数就是除零，
+/// panic 从 winit 的窗口回调里穿出去，应用当场闪退。
+#[test]
+fn unparsable_pinyin_after_an_uppercase_commit_keeps_the_candidate_window_alive() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+
+    let routed = type_char(&ctx, &mut ime, 'A');
+    assert_eq!(inserted(&routed), "A", "大写字母直接上屏");
+
+    type_char_with_candidates(&ctx, &mut ime, 'v');
+    assert_eq!(ime.preedit.text, "v", "切不动的拼音也要显示出来");
+    assert_eq!(ime.layout.len(), 0, "这段拼音没有候选");
+}
+
+/// 没有候选时的布局照样有每页格数：`CandidateLayout::default()` 的 0 会让 `pages()` 除零。
+#[test]
+fn an_empty_layout_keeps_a_non_zero_page_size() {
+    assert_eq!(empty_layout(5).pages(), 0);
+    assert_eq!(empty_layout(0).pages(), 0);
 }
 
 /// 关掉输入法时一个事件都不动，系统输入法照常。
