@@ -23,7 +23,10 @@ enum SectionMode {
 
 /// 研究报告 tex emitter
 ///
-/// 分章输出：普通模式下每个 \chapter（H1/H2）切出一个 `data/chapterNN.tex`
+/// 正文区的 H1 是报告题名：不排进版面，只记下来供 merger 填封面（见
+/// [`Self::report_title`]）。
+///
+/// 分章输出：普通模式下每个 \chapter（H2）切出一个 `data/chapterNN.tex`
 /// 部件，附录模式下每个 \chapter 切出 `appendix/appendixNN.tex` 部件；
 /// 摘要、版本变更记录、参考文献等前置/后置内容留在主文件，主文件按出现
 /// 顺序用 `\input{...}` 引用各部件。`finish()` 返回 (主文件 body, 部件列表)。
@@ -60,6 +63,8 @@ pub struct TexResearchEmitter {
     has_emitted_appendix: bool,
     /// 附录段内是否已用 H1 开章（是则 H2 起整体下移一级：H2→section）
     appendix_saw_h1: bool,
+    /// 正文区第一个 H1 的文字：报告题名。不排进版面，由 merger 填进封面。
+    report_title: Option<String>,
     /// 摘要模式下是否已经跳过第一个标题
     abstract_skipped_heading: bool,
     /// 版本变更记录模式下是否已经输出标题
@@ -102,6 +107,7 @@ impl TexResearchEmitter {
             appendix_idx: 0,
             has_emitted_appendix: false,
             appendix_saw_h1: false,
+            report_title: None,
             abstract_skipped_heading: false,
             changelog_heading_done: false,
             reference_heading_done: false,
@@ -116,6 +122,11 @@ impl TexResearchEmitter {
             list_env: Vec::new(),
             last_item_end: 0,
         }
+    }
+
+    /// 正文区第一个 H1 的文字：报告题名。没写就是 None，封面题名另有来源。
+    pub fn report_title(&self) -> Option<&str> {
+        self.report_title.as_deref()
     }
 
     /// 收尾：把当前缓冲区定稿，返回 (主文件 body, 部件列表)。
@@ -349,8 +360,20 @@ impl TexResearchEmitter {
         }
 
         match level {
-            // level 1/2 → \chapter，每章切出 data/ 部件
-            1 | 2 => {
+            // level 1 → 报告题名：上封面，不排进正文版面。
+            //
+            // 封面已经印过一次题名（模板的 \papertitle），正文再排一遍就是重复；
+            // 而且 openright 的 ctexbook 里任何 \chapter 都会清页，排出来是目录
+            // 后面多一张只有一行标题的纸。题名交给 merger 填进封面，这里只记不印。
+            // 挂在它身上的锚点一并丢掉（上面已 take）：题名没有章号，
+            // `{@id}` 引过来只会印出上一章的号。
+            1 => {
+                if self.report_title.is_none() {
+                    self.report_title = Some(text.trim().to_string());
+                }
+            }
+            // level 2 → \chapter，每章切出 data/ 部件
+            2 => {
                 self.chapter_num += 1;
                 self.section_num = 0;
                 self.subsection_num = 0;
@@ -854,14 +877,61 @@ mod tests {
     }
 
     #[test]
-    fn test_chapter_heading() {
+    fn test_report_title_heading() {
+        // 正文区段的 H1 是报告题名：只记下来供封面用，一个字都不排进版面，
+        // 也不占章号——随后的 H2 仍是第一章。
         let mut e = TexResearchEmitter::new();
         e.emit_block(&Block::Heading {
             level: 1,
+            text: "某某问题研究报告".into(),
+        });
+        e.emit_block(&Block::Heading {
+            level: 2,
+            text: "引言".into(),
+        });
+        assert_eq!(e.report_title(), Some("某某问题研究报告"));
+        let body = test_body(e);
+        assert!(!body.contains("某某问题研究报告"), "got {body}");
+        assert!(body.contains("\\chapter{引言}"), "got {body}");
+        assert_eq!(
+            body.matches("\\chapter").count(),
+            1,
+            "报告题名不应排成任何一种 \\chapter：{body}"
+        );
+    }
+
+    #[test]
+    fn test_report_title_takes_the_first_h1_only() {
+        // 题名只认第一个；多写的 H1 同样不落纸面（gongwen 的校验器会提示删掉）。
+        let mut e = TexResearchEmitter::new();
+        for text in ["第一个题名", "第二个题名"] {
+            e.emit_block(&Block::Heading {
+                level: 1,
+                text: text.into(),
+            });
+        }
+        assert_eq!(e.report_title(), Some("第一个题名"));
+        assert_eq!(test_body(e).trim(), "");
+    }
+
+    #[test]
+    fn test_report_title_drops_its_label() {
+        // 题名没有章号，`\label` 挂上去引出来的是上一章的号。锚点跟着题名
+        // 一起丢掉，让 `{@id}` 在 LaTeX 那边直接报 undefined，与预览印的
+        // `??` 对得上。
+        let mut e = TexResearchEmitter::new();
+        e.emit_block(&Block::Label("chap:title".into()));
+        e.emit_block(&Block::Heading {
+            level: 1,
+            text: "题名".into(),
+        });
+        e.emit_block(&Block::Heading {
+            level: 2,
             text: "引言".into(),
         });
         let body = test_body(e);
-        assert!(body.contains("\\chapter{引言}"));
+        assert!(!body.contains("\\label{chap:title}"), "got {body}");
+        assert!(body.contains("\\chapter{引言}"), "got {body}");
     }
 
     #[test]
@@ -996,14 +1066,14 @@ mod tests {
         let mut e = TexResearchEmitter::new();
         // 先有一些章节
         e.emit_block(&Block::Heading {
-            level: 1,
+            level: 2,
             text: "第一章".into(),
         });
         // 遇到 Body 标记
         e.emit_block(&Block::Marker(MarkerKind::Body));
         // 继续标题应该重新开始计数
         e.emit_block(&Block::Heading {
-            level: 1,
+            level: 2,
             text: "新的第一章".into(),
         });
         let body = test_body(e);
@@ -1268,7 +1338,7 @@ mod tests {
     fn test_appendix_emitted_after_normal_chapter() {
         let mut e = TexResearchEmitter::new();
         e.emit_block(&Block::Heading {
-            level: 1,
+            level: 2,
             text: "正文".into(),
         });
         e.emit_block(&Block::Marker(MarkerKind::Appendix));

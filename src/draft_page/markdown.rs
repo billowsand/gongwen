@@ -347,12 +347,13 @@ pub(crate) fn byte_at_char(text: &str, index: usize) -> usize {
 impl DraftPage<'_> {
     /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：插到光标所在行的行首，
     /// 从没点进过编辑框时追加到文末。标记必须独占一行导出器才认，
-    /// 正文标记只允许一个；附件标记可重复插入，每次都代表一份新附件。
+    /// 正文等区段标记全篇只允许一个；附件与附录标记可重复插入，
+    /// 每次都代表一份新材料。
     pub(crate) fn insert_section_marker(&mut self, ctx: &egui::Context, marker: &str, label: &str) {
         if self.doc.read_only() {
             return;
         }
-        if marker != "<!-- [附件] -->"
+        if !["<!-- [附件] -->", "<!-- [附录] -->"].contains(&marker)
             && self
                 .doc
                 .generated_markdown
@@ -379,6 +380,33 @@ impl DraftPage<'_> {
         *self.status = format!("已插入{label}。");
         // 让编辑框下一次绘制时把光标挪到插入内容之后并滚动到位。
         self.doc.pending_source_jump = Some(line_start + insertion.len());
+    }
+
+    /// 研究报告的锚点 ` {#}`：追加到光标所在行的行尾，光标落进花括号里，
+    /// 紧接着就能敲 id。锚点只在标题、表题或图片行的行尾生效，导出为
+    /// LaTeX 的 `\label`，供 `{@id}` 交叉引用。
+    pub(crate) fn insert_label(&mut self, ctx: &egui::Context) {
+        if self.doc.read_only() {
+            return;
+        }
+        let cursor = editor_cursor(ctx, &self.doc.generated_markdown);
+        let text = &mut self.doc.generated_markdown;
+        let pos = cursor.unwrap_or(text.len()).min(text.len());
+        let line_start = text[..pos].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = text[pos..]
+            .find('\n')
+            .map_or(text.len(), |index| pos + index);
+        if export::crossref::split_label(&text[line_start..line_end])
+            .1
+            .is_some()
+        {
+            *self.status = "本行已有锚点，直接改花括号里的 id 即可。".into();
+            return;
+        }
+        text.insert_str(line_end, " {#}");
+        // 光标落进花括号内，直接敲 id。
+        self.doc.pending_source_jump = Some(line_end + " {#".len());
+        *self.status = "已插入锚点：在花括号里写 id（字母开头，可含数字与 : . - _）。".into();
     }
 
     /// 把一段块级 Markdown 插进审校稿，返回插入内容自身的起始字节。

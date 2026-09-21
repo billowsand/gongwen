@@ -502,29 +502,167 @@ impl DraftPage<'_> {
         });
         toolbar_separator(ui);
 
-        // 四、公文构件：区段标记与附件标识，导出器按它们切分正文与附件
+        // 四、文类构件：公文按正文/附件切区段；研究报告另有一套区段标记，
+        // 以及锚点、交叉引用、文献引用、脚注、表题这些 mdx research 语法。
+        let research = self.doc.draft.kind.is_research();
         let mut marker: Option<(&'static str, &'static str)> = None;
+        let mut anchor = false;
+        let mut snippet: Option<(String, usize, &'static str)> = None;
+        // 两个下拉的候选在按钮闭包外先取好：闭包里点选只记下要插的串，
+        // 真正动正文等闭包结束再说。
+        let label_ids = if research {
+            export::crossref::label_ids(&self.doc.generated_markdown)
+        } else {
+            Vec::new()
+        };
+        let bibtex_keys = if research {
+            export::crossref::bibtex_keys(&self.doc.draft.research.bibliography_content)
+        } else {
+            Vec::new()
+        };
         ui.add_enabled_ui(editable, |ui| {
-            if ui
-                .add(theme::icon_text_button(
-                    theme::Icon::BookmarkCheck,
-                    "正文标记",
+            if research {
+                for (icon, text, label, tip) in [
+                    (
+                        theme::Icon::BookmarkCheck,
+                        "<!-- [正文] -->",
+                        "正文标记",
+                        "插入“<!-- [正文] -->”，声明摘要之后的正文区段起点",
+                    ),
+                    (
+                        theme::Icon::Paperclip,
+                        "<!-- [附录] -->",
+                        "附录标记",
+                        "插入“<!-- [附录] -->”，把其后内容切换为附录区段，可重复插入",
+                    ),
+                    (
+                        theme::Icon::Book,
+                        "<!-- [摘要] -->",
+                        "摘要标记",
+                        "插入“<!-- [摘要] -->”，把其后内容切换为摘要区段",
+                    ),
+                    (
+                        theme::Icon::GitCommit,
+                        "<!-- [版本变更记录] -->",
+                        "版本变更记录",
+                        "插入“<!-- [版本变更记录] -->”，声明版本变更记录区段",
+                    ),
+                    (
+                        theme::Icon::Library,
+                        "<!-- [参考文献] -->",
+                        "参考文献",
+                        "插入“<!-- [参考文献] -->”，声明参考文献区段",
+                    ),
+                ] {
+                    if ui
+                        .add(theme::icon_text_button(icon, label))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        marker = Some((text, label));
+                    }
+                }
+                if ui
+                    .add(theme::icon_text_button(theme::Icon::Hash, "锚点"))
+                    .on_hover_text(
+                        "锚点写在标题、表题或图片行的行尾，供交叉引用。\
+                         把“ {#}”追加到光标所在行行尾，在花括号里填 id",
+                    )
+                    .clicked()
+                {
+                    anchor = true;
+                }
+                egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                    theme::Icon::Open,
+                    "交叉引用",
                 ))
-                .on_hover_text("插入“<!-- [正文] -->”，声明正式标题之后的正文区段起点")
-                .clicked()
-            {
-                marker = Some(("<!-- [正文] -->", "正文标记"));
-            }
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Paperclip, "附件标记"))
-                .on_hover_text("插入“<!-- [附件] -->”，把其后内容切换为附件区段")
-                .clicked()
-            {
-                marker = Some(("<!-- [附件] -->", "附件标记"));
+                .ui(ui, |ui| {
+                    ui.set_min_width(220.0);
+                    if label_ids.is_empty() {
+                        ui.weak("稿中还没有锚点。先用「锚点」按钮在标题、表题或图片行尾写一个。");
+                        return;
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for id in &label_ids {
+                                if ui.add(theme::menu_text_item(*id)).clicked() {
+                                    snippet = Some((format!("{{@{id}}}"), 0, "交叉引用"));
+                                    ui.close();
+                                }
+                            }
+                        });
+                })
+                .0
+                .on_hover_text("插入 {@id} 交叉引用：预览与 PDF 中印成被引对象的编号");
+                egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                    theme::Icon::Quote,
+                    "文献引用",
+                ))
+                .ui(ui, |ui| {
+                    ui.set_min_width(220.0);
+                    if bibtex_keys.is_empty() {
+                        ui.weak("先在左侧文档要素导入 .bib 参考文献。");
+                        return;
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for key in &bibtex_keys {
+                                if ui.add(theme::menu_text_item(key.as_str())).clicked() {
+                                    snippet = Some((format!("[@{key}]"), 0, "文献引用"));
+                                    ui.close();
+                                }
+                            }
+                        });
+                })
+                .0
+                .on_hover_text("插入 [@key] 文献引用：预览与 PDF 中印成方括号序号");
+                if ui
+                    .add(theme::icon_text_button(theme::Icon::PencilLine, "脚注"))
+                    .on_hover_text(
+                        "插入行内脚注 [^id]:(内容)，光标留在 id 处；\
+                         冒号与括号写成全角“：（）”也认",
+                    )
+                    .clicked()
+                {
+                    snippet = Some(("[^]:(内容)".to_string(), "]:(内容)".len(), "脚注"));
+                }
+                if ui
+                    .add(theme::icon_text_button(theme::Icon::Table, "表题"))
+                    .on_hover_text("表题独占一行，写在表格上一行；行尾可带 {#id} 锚点")
+                    .clicked()
+                {
+                    snippet = Some(("表：题名 ".to_string(), 0, "表题"));
+                }
+            } else {
+                if ui
+                    .add(theme::icon_text_button(
+                        theme::Icon::BookmarkCheck,
+                        "正文标记",
+                    ))
+                    .on_hover_text("插入“<!-- [正文] -->”，声明正式标题之后的正文区段起点")
+                    .clicked()
+                {
+                    marker = Some(("<!-- [正文] -->", "正文标记"));
+                }
+                if ui
+                    .add(theme::icon_text_button(theme::Icon::Paperclip, "附件标记"))
+                    .on_hover_text("插入“<!-- [附件] -->”，把其后内容切换为附件区段")
+                    .clicked()
+                {
+                    marker = Some(("<!-- [附件] -->", "附件标记"));
+                }
             }
         });
         if let Some((text, label)) = marker {
             self.insert_section_marker(ui.ctx(), text, label);
+        }
+        if anchor {
+            self.insert_label(ui.ctx());
+        }
+        if let Some((text, back, label)) = snippet {
+            self.insert_inline(ui.ctx(), &text, back, label);
         }
         toolbar_separator(ui);
 
@@ -660,25 +798,42 @@ impl DraftPage<'_> {
         let mut tidy = false;
         let mut quotes = false;
 
-        // 一、标题层级。按钮上写的是公文层级而不是 h2/h3：用的人脑子里想的是
-        // 「这是一级标题」，编号由导出器统一生成。
+        // 一、标题层级。公文按钮上写的是公文层级而不是 h2/h3：用的人脑子里想的是
+        // 「这是一级标题」，编号由导出器统一生成；研究报告则按章/节/小节起名，
+        // 导出时自动编「第N章」「N.M」这类序号。
+        let research = self.doc.draft.kind.is_research();
         ui.add_enabled_ui(editable, |ui| {
+            let title_tip = if research {
+                "报告题名（#）：整篇至多一个，印在封面上，正文版面不排"
+            } else {
+                "公文标题（#）：整篇只应有一个"
+            };
             if ui
                 .add(
                     theme::icon_text_button(theme::Icon::Heading, "标题")
                         .selected(current == Some(1)),
                 )
-                .on_hover_text("公文标题（#）：整篇只应有一个")
+                .on_hover_text(title_tip)
                 .clicked()
             {
                 heading = Some((1, "标题"));
             }
-            for (label, level, tip) in [
-                ("一、", 2u8, "一级标题（##）：导出时自动编号为「一、」"),
-                ("（一）", 3, "二级标题（###）：自动编号为「（一）」"),
-                ("1.", 4, "三级标题（####）：自动编号为「1.」"),
-                ("（1）", 5, "四级标题（#####）：自动编号为「（1）」"),
-            ] {
+            let levels: [(&str, u8, &str); 4] = if research {
+                [
+                    ("章", 2u8, "章标题（##）：导出时自动编号为「第N章」"),
+                    ("节", 3, "节标题（###）：自动编号为「N.M」"),
+                    ("小节", 4, "小节标题（####）：自动编号为「N.M.K」"),
+                    ("四级", 5, "四级标题（#####）：自动编号为「N.M.K.L」"),
+                ]
+            } else {
+                [
+                    ("一、", 2u8, "一级标题（##）：导出时自动编号为「一、」"),
+                    ("（一）", 3, "二级标题（###）：自动编号为「（一）」"),
+                    ("1.", 4, "三级标题（####）：自动编号为「1.」"),
+                    ("（1）", 5, "四级标题（#####）：自动编号为「（1）」"),
+                ]
+            };
+            for (label, level, tip) in levels {
                 if ui
                     .add(
                         egui::Button::new(label)

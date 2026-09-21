@@ -44,7 +44,8 @@ pub(crate) use parse::{
     parse_markdown_located, parse_markdown_located_research, parse_markdown_located_with_numbering,
     parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
     parse_markdown_with_numbering, parse_ordered_item, parse_research_marker, parse_section_marker,
-    parse_table_cells, renumber_ordered_groups, source_lines, table_span_at,
+    parse_table_cells, renumber_ordered_groups, research_report_titles, source_lines,
+    table_span_at,
 };
 #[cfg(test)]
 pub(crate) use red::{
@@ -146,7 +147,8 @@ pub fn extract_title(markdown: &str, fallback: &str) -> String {
 pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
     // 研究报告先出去：有序列表统一收尾标点（`；`/`。`）是公文的行文规范，
     // 研报正文里常有以单位、英文缩写或公式结尾的条目，套上去反而是错的。
-    // 标题也不补：文件名称由文档要素维护，正文不写 `# 主标题`。
+    // 标题也不补：封面题名由文档要素的「文件名称」维护，正文区的 `#` 只是它的
+    // 兜底写法，写不写由作者决定，程序不代填。
     if input.kind.is_research() {
         return format!("{}\n", generated.trim());
     }

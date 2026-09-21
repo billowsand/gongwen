@@ -154,7 +154,7 @@ impl DraftPage<'_> {
         ui.add_space(10.0);
         ui.label(
             egui::RichText::new(
-                "正文层级：## 章、### 节、#### 小节；不要手工编号。最终版式以 TeX 编译 PDF 为准。",
+                "正文层级：# 报告题名（至多一个，只上封面）；## 章、### 节、#### 小节；不要手工编号。最终版式以 TeX 编译 PDF 为准。",
             )
             .size(11.0)
             .color(theme::text_soft()),

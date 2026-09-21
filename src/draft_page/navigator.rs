@@ -174,10 +174,10 @@ pub(crate) fn collect_entries(
 /// 研究报告的标题：编号由 [`preview::research_outline`] 推算，与版式预览共用
 /// 同一遍走法，所以刻度上写的号就是纸上印的号。
 ///
-/// 研究报告没有"文档标题"这一级——题名在封面上，不在正文里，所以最浅的一层
-/// 就是章，直接从公文口径的第 2 级起算，章一样进刻度。各级标题在纸上都是黑体
-/// （`md2tex.cls` 的 `chapter/format` 与三条 `\titleformat` 全用 `\heiti`），
-/// 不像公文那样按层级换字面。
+/// 最浅的 level 1 是正文区段的 `#` 报告题名。它不落在正文纸上——题名印在封面
+/// 上，正文不排第二遍——但进刻度：这是整篇的根，点它能跳回源码首行。章从
+/// level 2 起算。各级标题在纸上都是黑体（`md2tex.cls` 的 `chapter/format` 与
+/// 三条 `\titleformat` 全用 `\heiti`），不像公文那样按层级换字面。
 fn research_entries(markdown: &str) -> Vec<NavEntry> {
     preview::research_outline(markdown)
         .into_iter()
@@ -1027,6 +1027,36 @@ mod tests {
                 "A.1 问卷说明",
             ]
         );
+    }
+
+    #[test]
+    fn research_report_title_is_the_top_level_entry() {
+        // 正文区段的 `#` 是报告题名：level 1 根节点，不编号，纸上是黑体居中大
+        // 标题（`\chapter*` 同款），导航里同样给黑体；随后的 `##` 仍是第1章。
+        let markdown = "<!-- [正文] -->\n\n# 某某问题研究报告\n\n## 研究背景\n\n### 研究方法\n";
+        let entries = collect_entries(
+            markdown,
+            &NumberingConfig::default(),
+            TemplateKind::ResearchReport,
+        );
+        let shape: Vec<(u8, Option<String>, String)> = entries
+            .iter()
+            .map(|entry| (entry.level, entry.number.clone(), entry.text.clone()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (1, None, "某某问题研究报告".to_string()),
+                (2, Some("第1章\u{3000}".into()), "研究背景".to_string()),
+                (3, Some("1.1 ".into()), "研究方法".to_string()),
+            ]
+        );
+        for entry in &entries {
+            assert_eq!(
+                label_family(entry),
+                theme::official_family(theme::FONT_HEITI)
+            );
+        }
     }
 
     #[test]

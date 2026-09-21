@@ -272,4 +272,73 @@ mod tests {
             );
         }
     }
+
+    /// 正文区段的 `#` 是报告题名：mdx 不把它排进正文版面（封面已经印过一次，
+    /// 再排一遍会在目录后多出一张只有一行标题的纸），也不占章号——随后的 `##`
+    /// 仍是第一章。预览与导航都按这个口径排，这里真跑一遍转换核对。
+    #[test]
+    fn mdx_keeps_a_body_h1_off_the_page_and_out_of_the_chapter_count() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.tex");
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "测试报告".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        write_tex(
+            &path,
+            &input,
+            concat!(
+                "<!-- [正文] -->\n\n",
+                "# 某某问题研究报告\n\n",
+                "## 研究背景\n\n",
+                "正文。\n",
+            ),
+        )
+        .expect("研究报告应转换成功");
+
+        let tex = fs::read_to_string(&path).unwrap()
+            + &fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap();
+        // 封面题名来自文档要素的「文件名称」（frontmatter），正文 `#` 不另排
+        // 一份：整篇里题名只作为封面的 \papertitle 出现一次。
+        assert_eq!(
+            tex.matches("某某问题研究报告").count(),
+            0,
+            "报告题名不应排进正文版面：{tex}"
+        );
+        assert!(tex.contains("测试报告"), "封面题名应取文件名称：{tex}");
+        assert_eq!(
+            tex.matches("\\chapter").count(),
+            1,
+            "报告题名不应排成任何一种 \\chapter，编号章应只有“研究背景”一章：{tex}"
+        );
+        assert!(tex.contains("\\chapter{研究背景}"), "{tex}");
+    }
+
+    /// 文档要素的「文件名称」留空时，封面题名回退到正文区的 `#`——与预览的
+    /// `preview::research::report_title` 同一口径，两边不会一个有题名一个空着。
+    #[test]
+    fn mdx_falls_back_to_the_body_h1_for_the_cover_title() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.tex");
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: String::new(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        write_tex(
+            &path,
+            &input,
+            "<!-- [正文] -->\n\n# 某某问题研究报告\n\n## 研究背景\n\n正文。\n",
+        )
+        .expect("研究报告应转换成功");
+
+        let tex = fs::read_to_string(&path).unwrap();
+        assert!(
+            tex.contains("\\newcommand{\\papertitle}{某某问题研究报告}"),
+            "封面题名应回退到正文 `#`：{tex}"
+        );
+    }
 }

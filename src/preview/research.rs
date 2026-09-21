@@ -5,8 +5,10 @@
 //! 字号、行距、标题层级都对齐 mdx 的 `md2tex.cls`：
 //!
 //! - 版心 `left=28mm, top=37mm, width=156mm`，正文 14bp / 24pt；
-//! - `##` 是章（小二黑体居中，编号"第N章"），`###`、`####` 依次是节和小节，
-//!   编号 `N.M`、`N.M.K`，由程序生成，正文里不写；
+//! - `#` 是报告题名（整篇至多一个）：题名归封面，正文纸上不排，`\chapter*`
+//!   那种排法会在目录后多出一张只有一行标题的纸；`##` 是章（小二黑体居中，
+//!   编号"第N章"），`###`、`####` 依次是节和小节，编号 `N.M`、`N.M.K`，
+//!   由程序生成，正文里不写；
 //! - 摘要、版本变更记录、参考文献这些区段由 `<!-- [...] -->` 标记切换，标题
 //!   不编号；附录切到字母章号"附录A"。
 //!
@@ -57,6 +59,10 @@ enum Kind<'a> {
     Section { number: String, text: String },
     /// 不编号的章标题：摘要、版本变更记录、参考文献的首个标题。
     ChapterStar(String),
+    /// 报告题名：正文区段的 `#`。题名印在封面上，正文纸上不再排第二遍，
+    /// 所以它不落版面；只进导航大纲，并在文档要素的「文件名称」留空时
+    /// 顶上封面题名（与 mdx 的 `TexResearchEmitter::report_title` 同一口径）。
+    ReportTitle(String),
     /// 不编号的节标题：上面那些区段里后续的标题。
     SectionStar(String),
     /// 摘要里的标题，mdx 排成一段加粗正文。
@@ -259,12 +265,10 @@ fn walk<'a>(
                 }
                 Kind::Skip
             }
-            // 附录段里的 `#` 是附录自己的章标题，与 mdx 一致；正文里的 `#` 是
-            // 文件名称，由文档要素维护，不排进版面（校验那边已就此提示）。
-            MarkdownBlock::Title(text) if walk.section == ResearchSection::Appendix => {
-                heading(&mut walk, 1, text)
-            }
-            MarkdownBlock::Title(_) => Kind::Skip,
+            // `#` 与 `##` 起走同一套区段规则：正文区段里是报告题名（归封面，
+            // 不落版面），附录段里是附录自己的章标题，摘要等区段里照 mdx
+            // 降级——全在 heading() 里按 level 1 判定，与 `emit_heading` 一致。
+            MarkdownBlock::Title(text) => heading(&mut walk, 1, text),
             MarkdownBlock::Heading(level, text) => heading(&mut walk, *level, text),
             MarkdownBlock::Image { alt, src } => Kind::Figure {
                 number: (!alt.trim().is_empty()).then(|| walk.open_figure()),
@@ -339,7 +343,8 @@ fn heading(walk: &mut Walk, level: u8, text: &str) -> Kind<'static> {
             }
         }
         ResearchSection::Body => match level {
-            1 | 2 => chapter(walk, text),
+            1 => Kind::ReportTitle(text),
+            2 => chapter(walk, text),
             3..=5 => Kind::Section {
                 number: walk.open_section(level),
                 text,
@@ -485,8 +490,9 @@ fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
 /// 印的是「第1章」，导航里写的是「一、」，同一个标题两个号。这里把编号交回
 /// [`walk`]，与版面用的是同一遍推算。
 pub(crate) struct OutlineEntry {
-    /// 与公文口径对齐的层级：1 留给不进刻度的文档标题（研究报告没有，题名在
-    /// 封面上），2 是章（含摘要、参考文献、附录），3 起是 `1.1`、`1.1.1`。
+    /// 与公文口径对齐的层级：1 是文档标题（研究报告里是正文区段的 `#` 报告
+    /// 题名——它不落正文版面，但进大纲当根），2 是章（含摘要、参考文献、
+    /// 附录），3 起是 `1.1`、`1.1.1`。
     pub(crate) level: u8,
     /// 纸面上印在标题前的整串编号，连同它与标题之间那个间隔——导航直接把它和
     /// 标题拼起来，拼出来就该和纸上一模一样。不编号的章（摘要、参考文献、
@@ -511,6 +517,8 @@ pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
                 (2, Some(format!("{heading}{CHAPTER_GAP}")), text)
             }
             Kind::ChapterStar(text) => (2, None, text),
+            // 报告题名是大纲的根，不占章号。
+            Kind::ReportTitle(text) => (1, None, text),
             // 层级由编号自己说明：`1.1` 是节，`1.1.1` 是小节，附录的 `A.1` 同理。
             Kind::Section { number, text } => (
                 2 + number.matches('.').count().min(3) as u8,
@@ -533,6 +541,15 @@ pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
     entries
 }
 
+/// 正文区段的第一个 `#`：报告题名。行尾锚点不算题名的一部分，剥掉。
+pub(crate) fn report_title(markdown: &str) -> Option<String> {
+    export::research_report_titles(markdown)
+        .first()
+        .map(|line| crossref::split_label(line).0.trim())
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+}
+
 pub(crate) fn research_preview(
     ui: &mut egui::Ui,
     input: &DraftInput,
@@ -553,7 +570,7 @@ pub(crate) fn research_preview(
     let located = export::parse_markdown_located_research(markdown, &marks);
     let mut clicked = None;
 
-    cover_sheet(ui, &metrics, input);
+    cover_sheet(ui, &metrics, input, markdown);
 
     ui.add_space(14.0);
     sheet(ui, &metrics, |ui| {
@@ -579,7 +596,7 @@ pub(crate) fn research_preview(
 
 /// 简化封面：只排文字要素，不画 `md2tex.cls` 那圈 TikZ 双线页框——页框是纯
 /// 装饰，编译出的 PDF 才是定稿版式，在预览里复刻它的收益抵不上维护成本。
-fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput) {
+fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, markdown: &str) {
     let meta = &input.research;
     sheet(ui, metrics, |ui| {
         ui.add_space(metrics.line);
@@ -624,10 +641,14 @@ fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput) {
             ui.add_space(metrics.line * 2.0);
         }
 
-        let title = if input.title_hint.trim().is_empty() {
-            "【待核实：文件名称】"
-        } else {
-            input.title_hint.trim()
+        // 题名的正主是文档要素的「文件名称」（导出时写进 frontmatter）；留空
+        // 才回退到正文区的 `#`，与 mdx 的 `cover.title.or(emitter.report_title())`
+        // 一条口径。两处都空才出待核实占位。
+        let title = report_title(markdown);
+        let title = match (input.title_hint.trim(), title.as_deref()) {
+            ("", Some(title)) => title,
+            ("", None) => "【待核实：文件名称】",
+            (hint, _) => hint,
         };
         line_block(
             ui,
@@ -706,6 +727,8 @@ fn body_item(
                 |ui| chapter_title(ui, metrics, &text),
             );
         }
+        // 报告题名不落在正文纸上：它已经印在封面（`cover_sheet`）里了。
+        Kind::ReportTitle(_) => {}
         Kind::Section { number, text } => {
             clickable(
                 ui,
@@ -895,10 +918,17 @@ mod tests {
 
     /// 一帧里画出来的全部文字，按出现顺序拼起来。
     fn drawn(markdown: &str) -> String {
+        drawn_titled("", markdown)
+    }
+
+    /// 同 [`drawn`]，另给文档要素的「文件名称」——封面按它印，用来把封面上的
+    /// 题名和正文纸上的内容区分开。
+    fn drawn_titled(title_hint: &str, markdown: &str) -> String {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &FontConfig::default());
         let input = DraftInput {
             kind: TemplateKind::ResearchReport,
+            title_hint: title_hint.to_string(),
             ..Default::default()
         };
         let raw = egui::RawInput {
@@ -1045,5 +1075,58 @@ mod tests {
             );
         }
         assert_eq!(parse_table_caption("表格已经列出全部样本"), None);
+    }
+
+    /// 正文区段的 `#` 是报告题名：题名归封面，正文纸上一个字都不排，也不占
+    /// 章号——随后的 `##` 仍是第1章。与 mdx 一致
+    /// （`tex_research_emitter::tests::test_report_title_heading`）。
+    #[test]
+    fn a_body_h1_is_the_report_title_and_stays_off_the_page() {
+        // 封面另给一个文件名称，好把封面上那行题名和正文纸上的内容分开看。
+        let text = drawn_titled(
+            "封面题名",
+            concat!(
+                "<!-- [正文] -->\n\n# 某某问题研究报告\n\n",
+                "## 研究背景\n\n正文。\n",
+            ),
+        );
+        assert!(text.contains("封面题名"), "{text}");
+        assert!(!text.contains("某某问题研究报告"), "{text}");
+        assert!(text.contains("第1章　研究背景"), "{text}");
+        assert!(!text.contains("第2章"), "报告题名不应占用章号：{text}");
+    }
+
+    /// 封面题名的兜底：文档要素的「文件名称」留空时取正文区的 `#`，行尾锚点
+    /// 不算题名的一部分。附录里的 `#` 不是题名。
+    #[test]
+    fn the_cover_falls_back_to_the_body_h1() {
+        assert_eq!(
+            report_title("<!-- [正文] -->\n\n# 某某问题研究报告 {#chap:t}\n\n## 研究背景\n"),
+            Some("某某问题研究报告".to_string())
+        );
+        assert_eq!(report_title("## 研究背景\n\n正文。\n"), None);
+        assert_eq!(
+            report_title("<!-- [附录] -->\n\n# 调查问卷\n\n问卷。\n"),
+            None
+        );
+    }
+
+    /// 报告题名进大纲：level 1 的根节点，没有编号；章仍是 level 2。
+    #[test]
+    fn the_report_title_is_the_outline_root() {
+        let entries =
+            outline("<!-- [正文] -->\n\n# 某某问题研究报告\n\n## 研究背景\n\n### 研究方法\n");
+        let shape: Vec<(u8, Option<String>, String)> = entries
+            .iter()
+            .map(|entry| (entry.level, entry.number.clone(), entry.text.clone()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (1, None, "某某问题研究报告".to_string()),
+                (2, Some("第1章\u{3000}".to_string()), "研究背景".to_string()),
+                (3, Some("1.1 ".to_string()), "研究方法".to_string()),
+            ]
+        );
     }
 }

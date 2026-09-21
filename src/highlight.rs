@@ -4,7 +4,7 @@
 //! 把真正要读的内容（标题、表格单元、待核实占位）提亮，让一屏文字有层次。
 //! 另外给“锚点”——即在公文预览里点中的那一块——铺一层淡底，两栏对照时一眼能
 //! 看出版式上的哪一段对应源码里的哪一段。
-//! 高亮结果按（文本, 换行宽度, 锚点, 查找命中, 配色版本）缓存，正常编辑时每帧
+//! 高亮结果按（文本, 换行宽度, 锚点, 查找命中, 文类, 配色版本）缓存，正常编辑时每帧
 //! 只需一次哈希；配色版本让切主题、换纸面之后的第一帧就重新上色，而不是等到下
 //! 一次改字或挪光标。缓存里存的是 `LayoutJob` 而不是排好的 `Galley`，理由见
 //! [`Cached`]。
@@ -106,6 +106,7 @@ impl MarkdownHighlighter {
         anchor: Option<&Range<usize>>,
         search_matches: &[Range<usize>],
         fonts: &EditorFontScheme,
+        research: bool,
     ) -> Arc<egui::Galley> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
@@ -113,6 +114,7 @@ impl MarkdownHighlighter {
         search_matches.hash(&mut hasher);
         base_size.to_bits().hash(&mut hasher);
         fonts.hash(&mut hasher);
+        research.hash(&mut hasher);
         theme::revision().hash(&mut hasher);
         let key = hasher.finish();
         cached_galley(
@@ -120,7 +122,17 @@ impl MarkdownHighlighter {
             ui,
             key,
             wrap_width.to_bits(),
-            || highlight(text, wrap_width, base_size, anchor, search_matches, fonts),
+            || {
+                highlight(
+                    text,
+                    wrap_width,
+                    base_size,
+                    anchor,
+                    search_matches,
+                    fonts,
+                    research,
+                )
+            },
             |_| {},
         )
     }
@@ -285,6 +297,8 @@ fn center_document_title_rows(galley: &mut Arc<egui::Galley>, text: &str, width:
 
 /// 把整篇 Markdown 编译成带颜色的 `LayoutJob`；普通查找命中铺黄色底，当前命中
 /// （`anchor`）再盖一层强调底色。`base_size` 是源码编辑器正文基准字号（px）。
+/// `research` 为真时额外认研究报告的 mdx 扩展标记（`{#id}`、`{@id}`、`[@key]`、
+/// `[^id]:(内容)`）。
 pub fn highlight(
     text: &str,
     wrap_width: f32,
@@ -292,6 +306,7 @@ pub fn highlight(
     anchor: Option<&Range<usize>>,
     search_matches: &[Range<usize>],
     scheme: &EditorFontScheme,
+    research: bool,
 ) -> LayoutJob {
     // 源码模式默认用独立的编辑器字体族：用户在设置里选了编辑器字体就生效，
     // 没选时族内整份回退到界面字体，行为与之前的 Proportional 一致。设置里把
@@ -316,7 +331,7 @@ pub fn highlight(
         if index > 0 {
             job.append("\n", 0.0, format(body.clone(), theme::md::body()));
         }
-        highlight_line(&mut job, line, &fonts);
+        highlight_line(&mut job, line, &fonts, research);
     }
     for range in search_matches {
         paint_range(&mut job, range, theme::md::search_bg());
@@ -664,7 +679,7 @@ fn append_hybrid_inline(
             content_end,
             span_end,
             kind,
-        }) = inline_span(rest)
+        }) = inline_span(rest, false)
         else {
             index += next_char_len(rest);
             continue;
@@ -704,7 +719,14 @@ fn append_hybrid_inline(
                 append_with_leading(job, &rest[content_end..span_end], leading, marker);
             }
             // 待核实占位和中文引号是成文内容，不属于 Markdown 结构标记。
-            Inline::Todo | Inline::Quoted => {
+            // 研究报告的扩展标记只在源码模式上色（实时排版传 research=false，
+            // 扫不到后四种），真出现了也按成文内容原样保留。
+            Inline::Todo
+            | Inline::Quoted
+            | Inline::Label
+            | Inline::Crossref
+            | Inline::Citation
+            | Inline::Footnote => {
                 append_with_leading(job, &rest[..span_end], leading, base.clone());
             }
         }
@@ -787,7 +809,7 @@ impl EditorFonts {
     }
 }
 
-fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts) {
+fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts, research: bool) {
     let base_size = fonts.base_size;
     let body = fonts.font(EditorFontSlot::Body, base_size);
     let trimmed = line.trim_start();
@@ -841,7 +863,13 @@ fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts) {
             0.0,
             format(fonts.mark(size), theme::md::marker()),
         );
-        append_inline(job, &trimmed[split..], &format(font, color), fonts);
+        append_inline(
+            job,
+            &trimmed[split..],
+            &format(font, color),
+            fonts,
+            research,
+        );
         return;
     }
 
@@ -862,7 +890,7 @@ fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts) {
                 Some(content) => (content, true),
                 None => (piece, false),
             };
-            append_inline(job, content, &cell, fonts);
+            append_inline(job, content, &cell, fonts, research);
             if bar {
                 job.append("|", 0.0, pipe.clone());
             }
@@ -877,7 +905,7 @@ fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts) {
             0.0,
             format(fonts.mark(base_size), theme::md::bullet()),
         );
-        append_inline(job, rest, &format(body, theme::md::body()), fonts);
+        append_inline(job, rest, &format(body, theme::md::body()), fonts, research);
         return;
     }
 
@@ -888,11 +916,17 @@ fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts) {
             0.0,
             format(fonts.mark(base_size), theme::md::bullet()),
         );
-        append_inline(job, rest, &format(body, theme::md::body()), fonts);
+        append_inline(job, rest, &format(body, theme::md::body()), fonts, research);
         return;
     }
 
-    append_inline(job, trimmed, &format(body, theme::md::body()), fonts);
+    append_inline(
+        job,
+        trimmed,
+        &format(body, theme::md::body()),
+        fonts,
+        research,
+    );
 }
 
 fn is_separator_row(line: &str) -> bool {
@@ -909,9 +943,16 @@ fn is_separator_row(line: &str) -> bool {
         })
 }
 
-/// 行内规则：`**加粗**`、`` `代码` ``、`【待核实：…】`、中文引号。
+/// 行内规则：`**加粗**`、`` `代码` ``、`【待核实：…】`、中文引号；`research` 为真时
+/// 再认研究报告的扩展标记（`{#id}`、`{@id}`、`[@key]`、`[^id]:(内容)`）。
 /// 未命中的部分按 `base` 输出，因此标题、表格单元都能复用这套扫描。
-fn append_inline(job: &mut LayoutJob, text: &str, base: &TextFormat, fonts: &EditorFonts) {
+fn append_inline(
+    job: &mut LayoutJob,
+    text: &str,
+    base: &TextFormat,
+    fonts: &EditorFonts,
+    research: bool,
+) {
     let font = base.font_id.clone();
     let mark_font = fonts.mark(font.size);
     let mut plain_start = 0usize;
@@ -923,7 +964,7 @@ fn append_inline(job: &mut LayoutJob, text: &str, base: &TextFormat, fonts: &Edi
             content_end,
             span_end,
             kind,
-        }) = inline_span(rest)
+        }) = inline_span(rest, research)
         else {
             index += next_char_len(rest);
             continue;
@@ -936,6 +977,13 @@ fn append_inline(job: &mut LayoutJob, text: &str, base: &TextFormat, fonts: &Edi
             Inline::Code => (theme::md::code(), theme::md::comment_bg(), false),
             Inline::Todo => (theme::md::todo(), theme::md::todo_bg(), true),
             Inline::Quoted => (theme::md::quoted(), Color32::TRANSPARENT, true),
+            // 研究报告的扩展标记整体一个样式：行尾锚点是纯结构符号，压成标记弱色；
+            // 交叉引用印出来是编号、性质接近链接，用强调色；文献引用与行内脚注各
+            // 借一种现有的行内色，与前后正文区分开。
+            Inline::Label => (theme::md::marker(), Color32::TRANSPARENT, true),
+            Inline::Crossref => (theme::accent(), Color32::TRANSPARENT, true),
+            Inline::Citation => (theme::md::quoted(), Color32::TRANSPARENT, true),
+            Inline::Footnote => (theme::md::code(), Color32::TRANSPARENT, true),
         };
         // 行内代码是源码里才有的东西，跟着标记走；加粗、待核实、引号内都是
         // 成稿上的正文，继承所属元素的字面。
@@ -966,6 +1014,14 @@ enum Inline {
     Code,
     Todo,
     Quoted,
+    /// 研究报告的行尾锚点 `{#id}`。
+    Label,
+    /// 研究报告的交叉引用 `{@id}`。
+    Crossref,
+    /// 研究报告的文献引用 `[@key]`、`[@a; @b]`。
+    Citation,
+    /// 研究报告的行内脚注 `[^id]:(内容)`。
+    Footnote,
 }
 
 /// `rest` 开头那段行内标记在 `rest` 中的位置。
@@ -980,7 +1036,8 @@ struct Span {
 }
 
 /// 判断 `rest` 是否以一段成对的行内标记开头；标记必须闭合且内容非空。
-fn inline_span(rest: &str) -> Option<Span> {
+/// `research` 为真时额外认研究报告的 mdx 扩展标记（见 [`research_span`]）。
+fn inline_span(rest: &str, research: bool) -> Option<Span> {
     const PAIRS: [(&str, &str, Inline); 5] = [
         ("**", "**", Inline::Strong),
         ("__", "__", Inline::Strong),
@@ -1004,7 +1061,113 @@ fn inline_span(rest: &str) -> Option<Span> {
             });
         }
     }
+    if research {
+        return research_span(rest);
+    }
     None
+}
+
+/// 研究报告的 mdx 扩展标记：行尾锚点 `{#id}`、交叉引用 `{@id}`、文献引用
+/// `[@key]` 与行内脚注 `[^id]:(内容)`。字符集与 `export::crossref` 的正则逐条
+/// 对齐（那边靠 mdx 的契约测试兜底），这里手写扫描，不引入 regex。四类标记都
+/// 整体一个样式，所以 `open_len` 置 0、`content_end` 指到段尾。
+fn research_span(rest: &str) -> Option<Span> {
+    let whole = |span_end, kind| {
+        Some(Span {
+            open_len: 0,
+            content_end: span_end,
+            span_end,
+            kind,
+        })
+    };
+    if rest.starts_with("{#") {
+        return braced_id_end(rest, "{#", true).and_then(|end| whole(end, Inline::Label));
+    }
+    if rest.starts_with("{@") {
+        return braced_id_end(rest, "{@", false).and_then(|end| whole(end, Inline::Crossref));
+    }
+    if rest.starts_with("[@") {
+        return citation_end(rest).and_then(|end| whole(end, Inline::Citation));
+    }
+    if rest.starts_with("[^") {
+        return footnote_end(rest).and_then(|end| whole(end, Inline::Footnote));
+    }
+    None
+}
+
+/// `{#id}` 与 `{@id}` 共用的骨架：`open` + id + `}`，id 是 `[A-Za-z][\w:.-]*`
+/// （`\w` 按 Unicode 字母数字加下划线理解，与 regex 默认行为一致）。
+/// `line_end` 为真时还要求 `}` 之后只剩空白——锚点只认行尾写法，行中间的
+/// `{#…}` 在解析器眼里只是普通文字，不该上色。返回整段的字节结束位置。
+fn braced_id_end(rest: &str, open: &str, line_end: bool) -> Option<usize> {
+    let body = rest.strip_prefix(open)?;
+    let mut chars = body.char_indices();
+    let (_, first) = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut id_len = first.len_utf8();
+    for (index, ch) in chars {
+        if ch.is_alphanumeric() || matches!(ch, '_' | ':' | '.' | '-') {
+            id_len = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let after = body[id_len..].strip_prefix('}')?;
+    if line_end && !after.trim().is_empty() {
+        return None;
+    }
+    Some(rest.len() - after.len())
+}
+
+/// 文献引用 `[@key]`、`[@a; @b]`：key 是 `[^\s@;,\[\]{}\\]+`，分号分隔多键，
+/// 分号两侧允许空白。返回整段的字节结束位置。
+fn citation_end(rest: &str) -> Option<usize> {
+    let mut body = rest.strip_prefix('[')?;
+    loop {
+        body = body.strip_prefix('@')?;
+        let key_len = body
+            .find(|ch: char| {
+                ch.is_whitespace() || matches!(ch, '@' | ';' | ',' | '[' | ']' | '{' | '}' | '\\')
+            })
+            .unwrap_or(body.len());
+        if key_len == 0 {
+            return None;
+        }
+        let trimmed = body[key_len..].trim_start();
+        body = match trimmed.strip_prefix(';') {
+            Some(next) => next.trim_start(),
+            None => {
+                let after = trimmed.strip_prefix(']')?;
+                return Some(rest.len() - after.len());
+            }
+        };
+    }
+}
+
+/// 行内脚注 `[^id]:(内容)`：id 是 `]` 以外的任意非空串，冒号兼容全角 `：`；
+/// 括号要么一对半角、要么一对全角，内容里不能再出现同种闭括号（不支持嵌套，
+/// 第一个闭括号收尾）。裸 `[^id]` 不带 `:(…)` 不匹配。返回整段的字节结束位置。
+fn footnote_end(rest: &str) -> Option<usize> {
+    let body = rest.strip_prefix("[^")?;
+    let id_len = body.find(']')?;
+    if id_len == 0 {
+        return None;
+    }
+    let after_id = &body[id_len + ']'.len_utf8()..];
+    let after_colon = after_id
+        .strip_prefix(':')
+        .or_else(|| after_id.strip_prefix('：'))?;
+    let (open, close) = match after_colon.chars().next() {
+        Some('(') => ('(', ')'),
+        Some('（') => ('（', '）'),
+        _ => return None,
+    };
+    let content = &after_colon[open.len_utf8()..];
+    let content_len = content.find(close)?;
+    // content 从开括号之后起算，所以差值里已含开括号，只补内容与闭括号。
+    Some(rest.len() - content.len() + content_len + close.len_utf8())
 }
 
 fn next_char_len(rest: &str) -> usize {
@@ -1016,7 +1179,24 @@ mod tests {
     use super::*;
 
     fn sections(text: &str) -> Vec<(String, Color32)> {
-        let job = highlight(text, 400.0, 14.0, None, &[], &EditorFontScheme::default());
+        sections_with(text, false)
+    }
+
+    /// 研究报告文类下的分段：扩展标记（`{#id}`、`{@id}` 等）只在此时上色。
+    fn research_sections(text: &str) -> Vec<(String, Color32)> {
+        sections_with(text, true)
+    }
+
+    fn sections_with(text: &str, research: bool) -> Vec<(String, Color32)> {
+        let job = highlight(
+            text,
+            400.0,
+            14.0,
+            None,
+            &[],
+            &EditorFontScheme::default(),
+            research,
+        );
         job.sections
             .iter()
             .map(|section| {
@@ -1056,7 +1236,15 @@ mod tests {
     }
 
     fn assert_covers_with(text: &str, anchor: Option<&Range<usize>>) {
-        let job = highlight(text, 400.0, 14.0, anchor, &[], &EditorFontScheme::default());
+        let job = highlight(
+            text,
+            400.0,
+            14.0,
+            anchor,
+            &[],
+            &EditorFontScheme::default(),
+            false,
+        );
         assert_eq!(job.text, text);
         let mut cursor = 0usize;
         for section in &job.sections {
@@ -1084,6 +1272,7 @@ mod tests {
             Some(&anchor),
             &[],
             &EditorFontScheme::default(),
+            false,
         );
 
         for section in &job.sections {
@@ -1122,6 +1311,7 @@ mod tests {
             Some(&current),
             &matches,
             &EditorFontScheme::default(),
+            false,
         );
         assert!(job.sections.iter().any(|section| {
             section.byte_range.start.0 == matches[0].start
@@ -1398,6 +1588,7 @@ mod tests {
             None,
             &[],
             &EditorFontScheme::default(),
+            false,
         );
         // 源码模式走独立的编辑器字体族；族内回退链在 configure_fonts 里拼好。
         let expected = egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into());
@@ -1428,6 +1619,120 @@ mod tests {
                 .iter()
                 .any(|(text, color)| text == "“规范”" && *color == theme::md::quoted())
         );
+    }
+
+    /// 研究报告的行尾锚点 `{#id}`：整段压成标记弱色；只认行尾写法，行中间的
+    /// `{#…}` 与解析器一样按普通文字处理。
+    #[test]
+    fn research_label_dims_only_at_line_end() {
+        let at_end = research_sections("## 研究背景 {#chap:bg}");
+        assert_eq!(
+            at_end.last().expect("锚点分段"),
+            &("{#chap:bg}".to_string(), theme::md::marker())
+        );
+
+        let mid_line = research_sections("正文 {#chap:bg} 还有字");
+        let middle = mid_line
+            .iter()
+            .find(|(text, _)| text.contains("{#chap:bg}"))
+            .expect("行中锚点仍在分段里");
+        assert_eq!(middle.1, theme::md::body(), "行中的 {{#…}} 不该上色");
+    }
+
+    /// 交叉引用 `{@id}` 整段用强调色（印出来是编号，性质接近链接）。
+    #[test]
+    fn research_crossref_uses_the_accent_color() {
+        let sections = research_sections("见第{@chap:bg}章、表{@tbl:t}。");
+        for mark in ["{@chap:bg}", "{@tbl:t}"] {
+            assert!(
+                sections
+                    .iter()
+                    .any(|(text, color)| text == mark && *color == theme::accent()),
+                "{mark} 应整段强调色：{sections:?}"
+            );
+        }
+    }
+
+    /// 文献引用 `[@key]` 与分号多键 `[@a; @b]` 各整段一个样式；残缺的 `[@]`、
+    /// `[@a` 不上色。
+    #[test]
+    fn research_citation_colors_single_and_multi_keys() {
+        let colored = research_sections("综述[@wang2020]与[@wang2020; @li2021]。");
+        for mark in ["[@wang2020]", "[@wang2020; @li2021]"] {
+            assert!(
+                colored
+                    .iter()
+                    .any(|(text, color)| text == mark && *color == theme::md::quoted()),
+                "{mark} 应整段上色：{colored:?}"
+            );
+        }
+
+        let broken = research_sections("残缺的 [@] 与 [@a 保持正文色");
+        assert!(
+            broken.iter().all(|(_, color)| *color == theme::md::body()),
+            "残缺的引用键不该上色：{broken:?}"
+        );
+    }
+
+    /// 行内脚注 `[^id]:(内容)`：整个标记（含内容）一个样式，冒号与括号兼容
+    /// 全角；裸 `[^id]` 不带 `:(…)` 不匹配。
+    #[test]
+    fn research_footnote_accepts_fullwidth_colon_and_parens() {
+        let colored = research_sections("脚注[^n1]:(详见附录)与[^n2]：（再注）收尾。");
+        for mark in ["[^n1]:(详见附录)", "[^n2]：（再注）"] {
+            assert!(
+                colored
+                    .iter()
+                    .any(|(text, color)| text == mark && *color == theme::md::code()),
+                "{mark} 应整段上色：{colored:?}"
+            );
+        }
+
+        let bare = research_sections("裸脚注 [^n3] 保持正文色");
+        assert!(
+            bare.iter().all(|(_, color)| *color == theme::md::body()),
+            "裸 [^id] 不该上色：{bare:?}"
+        );
+    }
+
+    /// 非研究报告里这些扩展标记只是普通文字：四种标记一个都不上色。
+    #[test]
+    fn research_marks_stay_plain_outside_research_reports() {
+        let plain = sections("见第{@chap:bg}章 [@wang2020]，脚注[^n]:(详见附录)。");
+        assert!(
+            plain.iter().all(|(_, color)| *color == theme::md::body()),
+            "非研究报告不该给扩展标记上色：{plain:?}"
+        );
+        // 标题行里也一样：锚点不被认出，跟着标题文字一起走标题色。
+        let heading = sections("## 研究背景 {#chap:bg}");
+        assert_eq!(
+            heading.last().expect("标题分段"),
+            &("研究背景 {#chap:bg}".to_string(), theme::md::heading())
+        );
+    }
+
+    /// 扩展标记切开分段后仍要完整覆盖原文，边界不能落在字符中间。
+    #[test]
+    fn research_marks_keep_section_coverage() {
+        let text = "## 研究背景 {#chap:bg}\n\n见第{@chap:bg}章 [@a; @b]，脚注[^n]:(注)\
+            与[^m]：（全角）。孤立的 {#x} 行中与 [@] 与 [^k] 不成形。";
+        let job = highlight(
+            text,
+            400.0,
+            14.0,
+            None,
+            &[],
+            &EditorFontScheme::default(),
+            true,
+        );
+        assert_eq!(job.text, text);
+        let mut cursor = 0usize;
+        for section in &job.sections {
+            assert_eq!(section.byte_range.start.0, cursor);
+            cursor = section.byte_range.end.0;
+            assert!(job.text.is_char_boundary(cursor));
+        }
+        assert_eq!(cursor, job.text.len());
     }
 
     #[test]
@@ -1599,7 +1904,7 @@ mod tests {
 
     /// 每段文字用的字体族，供字面方案的用例断言。
     fn families(text: &str, scheme: &EditorFontScheme) -> Vec<(String, egui::FontFamily)> {
-        let job = highlight(text, 400.0, 14.0, None, &[], scheme);
+        let job = highlight(text, 400.0, 14.0, None, &[], scheme, false);
         job.sections
             .iter()
             .map(|section| {
@@ -1690,7 +1995,7 @@ mod tests {
         let mut highlighter = MarkdownHighlighter::default();
         let mut key_with = |scheme: &EditorFontScheme| {
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                highlighter.layout(ui, SAMPLE, 400.0, 14.0, None, &[], scheme);
+                highlighter.layout(ui, SAMPLE, 400.0, 14.0, None, &[], scheme, false);
             });
             highlighter.cache_keys().0
         };
@@ -1721,6 +2026,7 @@ mod tests {
                         None,
                         &[],
                         &EditorFontScheme::default(),
+                        false,
                     ),
                     highlighter.layout_hybrid(
                         ui,
@@ -1778,6 +2084,7 @@ mod tests {
                     None,
                     &[],
                     &EditorFontScheme::default(),
+                    false,
                 );
                 highlighter.layout_hybrid(
                     ui,

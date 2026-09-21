@@ -531,6 +531,9 @@ impl DraftPage<'_> {
         let highlighter = &mut self.doc.highlighter;
         let numbering = self.config.numbering;
         let editor_fonts = self.config.editor_fonts;
+        // 研究报告的 mdx 扩展标记（{#id}、{@id}、[@key]、[^id]:(…)）只在
+        // 源码高亮里上色；在闭包外先算成 bool，避免闭包再去借 self.doc。
+        let research = self.doc.draft.kind.is_research();
         let mut editor_lost_focus = false;
         let mut cursor_follow = None;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -553,6 +556,7 @@ impl DraftPage<'_> {
                     anchor.as_ref(),
                     &search_matches,
                     &editor_fonts,
+                    research,
                 )
             }
         };

@@ -1050,6 +1050,27 @@ pub(crate) fn parse_research_marker(line: &str) -> Option<ResearchSection> {
     }
 }
 
+/// 研究报告正文区段里的 `#` 标题，按出现顺序，每条是 `# ` 之后的原文
+/// （行尾锚点还在，取用的一方自己按需剥）。
+///
+/// 正文区的 `#` 是报告题名：印在封面上，正文纸上不排第二遍，整篇至多一个。
+/// 附录区的 `#` 是附录自己的章标题，摘要、版本变更记录、参考文献区段里的标题
+/// 另有归属，都不在内——所以这里必须跟着区段标记走一遍，不能只数行首的 `# `。
+pub(crate) fn research_report_titles(text: &str) -> Vec<&str> {
+    let mut section = ResearchSection::Body;
+    let mut titles = Vec::new();
+    for line in text.lines() {
+        if let Some(next) = parse_research_marker(line) {
+            section = next;
+        } else if section == ResearchSection::Body
+            && let Some(title) = line.strip_prefix("# ")
+        {
+            titles.push(title.trim());
+        }
+    }
+    titles
+}
+
 /// 正文区最大标题层级（# 号最多的那一级），紧缩风格（规格 §4.2）据此把该级标题与正文合并。
 /// 文档标题（`#`）与附件区标题不计入；附件区标题使用独立排版与计数器。
 pub(crate) fn body_heading_max_level(blocks: &[MarkdownBlock]) -> u8 {

@@ -27,6 +27,88 @@ pub fn estimate_layout_notes(markdown: &str) -> Vec<ReviewNote> {
 /// 正文为空的提示语。导出闸门要按它认人，所以拎成常量，别让两处文案各写各的。
 const EMPTY_BODY: &str = "模型未返回正文";
 
+/// 报告题名（正文区段的 `#`）的三条检查。
+///
+/// 题名印在封面上，正文纸上不排第二遍——所以它既不编号，也没有 `\ref` 引得到
+/// 的号：锚点挂上去，PDF 里是 undefined，预览里是 `??`。题名的正主是文档要素
+/// 的「文件名称」（导出时写进 frontmatter，封面按它印），正文里那个只是没填
+/// 文件名称时的兜底，两处对不上就得说一声。
+///
+/// 只数正文区：附录里的 `#` 是合法的附录章标题，摘要、版本变更记录、参考文献
+/// 区段里的标题另有归属，都不算。
+fn research_title_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<String>) {
+    let titles = export::research_report_titles(text);
+    if titles.len() >= 2 {
+        warnings.push("研究报告正文里报告题名（#）整篇只应有一个".into());
+    }
+    let Some(first) = titles.first() else {
+        return;
+    };
+    let (title, anchor) = export::crossref::split_label(first);
+    if let Some(id) = anchor {
+        warnings.push(format!(
+            "报告题名不编号，锚点 {{#{id}}} 挂在它上面引不出编号，请改挂到章、表或图上"
+        ));
+    }
+    let hint = input.title_hint.trim();
+    let title = title.trim();
+    if !hint.is_empty() && !title.is_empty() && title != hint {
+        warnings.push(format!(
+            "正文的报告题名“{title}”与文档要素的文件名称“{hint}”不一致，封面按文件名称印"
+        ));
+    }
+}
+
+/// 研究报告行内标记的核对：悬空交叉引用在 PDF 里会印成 `??`，重复锚点的编号
+/// 以先到的为准，缺键的文献引用印出来是 `[?]`——都提前在这里说出来。
+fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<String>) {
+    // 挂在报告题名上的锚点不生效（见 [`research_title_warnings`]），不能算数：
+    // 引到它的 `{@id}` 照样要报悬空，否则预览印 `??`、校验却说没事。
+    let on_title: Vec<&str> = export::research_report_titles(text)
+        .into_iter()
+        .filter_map(|line| export::crossref::split_label(line).1)
+        .collect();
+    // 一趟走完：交叉引用要对照的去重清单，和重复定义的计数，都出自这一张表。
+    let mut labels: Vec<(&str, usize)> = Vec::new();
+    for line in text.lines() {
+        let Some(id) = export::crossref::split_label(line).1 else {
+            continue;
+        };
+        match labels.iter_mut().find(|(known, _)| *known == id) {
+            Some((_, count)) => *count += 1,
+            None => labels.push((id, 1)),
+        }
+    }
+    for id in export::crossref::crossref_ids(text) {
+        let defined = labels
+            .iter()
+            .find(|(known, _)| *known == id)
+            .map_or(0, |(_, count)| *count);
+        let dead = on_title.iter().filter(|known| **known == id).count();
+        if defined == dead {
+            warnings.push(format!("交叉引用 {{@{id}}} 没有对应的锚点 {{#{id}}}"));
+        }
+    }
+    for (id, count) in labels {
+        if count > 1 {
+            warnings.push(format!("锚点 {{#{id}}} 定义了多次，编号以先到的为准"));
+        }
+    }
+    let bib = input.research.bibliography_content.trim();
+    if bib.is_empty() {
+        return;
+    }
+    let known_keys = export::crossref::bibtex_keys(bib);
+    let mut reported: Vec<&str> = Vec::new();
+    for key in export::crossref::citation_keys(text) {
+        if known_keys.iter().any(|known| known == key) || reported.contains(&key) {
+            continue;
+        }
+        reported.push(key);
+        warnings.push(format!("文献引用 [@{key}] 不在已导入的参考文献里"));
+    }
+}
+
 /// 研究报告的区段结构：附件标识与附录一一对应，不编号的区段要自带标题。
 ///
 /// 附件的写法与公文统一——每加一份附件就写一个附件标识。mdx 那边两种写法都编
@@ -146,9 +228,7 @@ pub fn validate(
         empty_attachment |= !attachment_has_content;
     }
     if input.kind.is_research() {
-        if text.lines().any(|line| line.starts_with("# ")) {
-            warnings.push("研究报告文件名称由“文档要素”维护，正文不应再写“# 主标题”".into());
-        }
+        research_title_warnings(input, text, &mut warnings);
         if !text.lines().any(|line| line.starts_with("## ")) {
             warnings.push("研究报告正文缺少“## 章标题”".into());
         }
@@ -158,6 +238,7 @@ pub fn validate(
         if text.contains("[@") && input.research.bibliography_content.trim().is_empty() {
             warnings.push("正文包含 BibTeX 引用，但尚未导入 .bib 参考文献文件".into());
         }
+        research_mark_warnings(input, text, &mut warnings);
         research_section_warnings(text, &mut warnings);
     } else {
         if body_h1_count == 0 {
@@ -1174,6 +1255,265 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("“版本变更记录”区段应以")),
             "{warnings:?}"
+        );
+    }
+
+    /// 报告标题（#）是合法写法，但整篇只应有一个；附录里的 `#` 是附录自己的
+    /// 章标题，不计入。
+    #[test]
+    fn research_body_allows_one_report_title_but_not_two() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+
+        let single = validate(
+            &input,
+            "# 某某问题研究报告\n\n## 研究背景\n\n正文。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !single.iter().any(|warning| warning.contains("报告题名")),
+            "单个报告题名不该提示：{single:?}"
+        );
+
+        let doubled = validate(
+            &input,
+            "# 某某问题研究报告\n\n## 研究背景\n\n正文。\n\n# 又一个标题\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            doubled
+                .iter()
+                .any(|warning| warning.contains("报告题名（#）整篇只应有一个")),
+            "{doubled:?}"
+        );
+
+        let in_appendix = validate(
+            &input,
+            "# 某某问题研究报告\n\n## 研究背景\n\n正文。\n\n<!-- [附录] -->\n\n# 调查问卷\n\n问卷。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !in_appendix
+                .iter()
+                .any(|warning| warning.contains("报告题名")),
+            "附录里的 # 是附录章标题，不该计入：{in_appendix:?}"
+        );
+    }
+
+    /// 封面按文档要素的「文件名称」印，正文 `#` 只是兜底：两处都写了又对不上，
+    /// 作者改的那一份不会出现在纸上，得先说一声。
+    #[test]
+    fn a_report_title_that_differs_from_the_file_name_is_flagged() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+        input.title_hint = "某某问题研究报告".into();
+
+        let matched = validate(&input, "# 某某问题研究报告\n\n## 研究背景\n", &[], &rules());
+        assert!(
+            !matched.iter().any(|warning| warning.contains("不一致")),
+            "题名与文件名称一致就不该提示：{matched:?}"
+        );
+
+        let mismatched = validate(&input, "# 另一个题名\n\n## 研究背景\n", &[], &rules());
+        assert!(
+            mismatched
+                .iter()
+                .any(|warning| warning.contains("与文档要素的文件名称")),
+            "{mismatched:?}"
+        );
+
+        // 正文没写题名是常态（封面自己有），不提示。
+        let no_title = validate(&input, "## 研究背景\n\n正文。\n", &[], &rules());
+        assert!(
+            !no_title.iter().any(|warning| warning.contains("不一致")),
+            "{no_title:?}"
+        );
+    }
+
+    /// 报告题名不落版面也就没有编号，锚点挂上去引不出号：既要提示改挂，
+    /// 引到它的 `{@id}` 也得按悬空报——否则预览印 `??`、校验却说没事。
+    #[test]
+    fn an_anchor_on_the_report_title_is_flagged_and_does_not_resolve() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+
+        let warnings = validate(
+            &input,
+            "# 某某问题研究报告 {#chap:t}\n\n## 研究背景\n\n见{@chap:t}。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("锚点 {#chap:t} 挂在它上面引不出编号")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("交叉引用 {@chap:t} 没有对应的锚点")),
+            "题名上的锚点不算数，引它仍是悬空：{warnings:?}"
+        );
+
+        // 同一个 id 在章上另有一处定义时，引用解析得了，只剩重复定义的提示。
+        let also_on_chapter = validate(
+            &input,
+            "# 报告 {#chap:t}\n\n## 研究背景 {#chap:t}\n\n见{@chap:t}。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !also_on_chapter
+                .iter()
+                .any(|warning| warning.contains("没有对应的锚点")),
+            "{also_on_chapter:?}"
+        );
+        assert!(
+            also_on_chapter
+                .iter()
+                .any(|warning| warning.contains("定义了多次")),
+            "{also_on_chapter:?}"
+        );
+    }
+
+    /// 悬空交叉引用在 PDF 里会印成 `??`，校验要抢在编译前指出来；同一个 id
+    /// 引用多次只报一次。
+    #[test]
+    fn dangling_crossrefs_are_flagged_once_each() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+
+        let dangling = validate(
+            &input,
+            "# 报告\n\n## 研究背景 {#chap:bg}\n\n见{@chap:bg}章与{@chap:nope}节，再引{@chap:nope}。\n",
+            &[],
+            &rules(),
+        );
+        let nope: Vec<_> = dangling
+            .iter()
+            .filter(|warning| warning.contains("{@chap:nope} 没有对应的锚点 {#chap:nope}"))
+            .collect();
+        assert_eq!(nope.len(), 1, "同一悬空引用只报一次：{dangling:?}");
+        assert!(
+            !dangling
+                .iter()
+                .any(|warning| warning.contains("chap:bg} 没有")),
+            "有锚点的引用不该报：{dangling:?}"
+        );
+
+        let resolved = validate(
+            &input,
+            "# 报告\n\n## 研究背景 {#chap:bg}\n\n见{@chap:bg}章。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !resolved
+                .iter()
+                .any(|warning| warning.contains("没有对应的锚点")),
+            "引用都有锚点就不该提示：{resolved:?}"
+        );
+    }
+
+    /// 同一锚点定义多次时编号以先到的为准，要提示用户删掉多余的。
+    #[test]
+    fn duplicate_anchors_are_flagged() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+
+        let duplicated = validate(
+            &input,
+            "# 报告\n\n## 研究背景 {#chap:bg}\n\n正文。\n\n## 研究方法 {#chap:bg}\n\n正文。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            duplicated
+                .iter()
+                .any(|warning| warning.contains("锚点 {#chap:bg} 定义了多次")),
+            "{duplicated:?}"
+        );
+
+        let distinct = validate(
+            &input,
+            "# 报告\n\n## 研究背景 {#chap:bg}\n\n正文。\n\n## 研究方法 {#chap:m}\n\n正文。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !distinct
+                .iter()
+                .any(|warning| warning.contains("定义了多次")),
+            "锚点各不相同就不该提示：{distinct:?}"
+        );
+    }
+
+    /// 已导入 .bib 时逐键核对：正文引用的键不在文献库里要指出来，同一缺键
+    /// 只报一次；没导入 .bib 时走原有的粗粒度提示，不逐键报。
+    #[test]
+    fn citation_keys_are_checked_against_the_imported_bib() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+        input.research.bibliography_content =
+            "@article{wang2020, title={A}}\n@book{li2021, title={B}}\n".into();
+
+        let missing = validate(
+            &input,
+            "# 报告\n\n## 研究背景\n\n综述[@wang2020; @nope]，再引[@nope]。\n",
+            &[],
+            &rules(),
+        );
+        let nope: Vec<_> = missing
+            .iter()
+            .filter(|warning| warning.contains("文献引用 [@nope] 不在已导入的参考文献里"))
+            .collect();
+        assert_eq!(nope.len(), 1, "同一缺键只报一次：{missing:?}");
+        assert!(
+            !missing
+                .iter()
+                .any(|warning| warning.contains("[@wang2020] 不在")),
+            "文献库里有的键不该报：{missing:?}"
+        );
+
+        let all_known = validate(
+            &input,
+            "# 报告\n\n## 研究背景\n\n综述[@wang2020; @li2021]。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !all_known
+                .iter()
+                .any(|warning| warning.contains("不在已导入的参考文献里")),
+            "键都在文献库里就不该提示：{all_known:?}"
+        );
+
+        input.research.bibliography_content.clear();
+        let no_bib = validate(
+            &input,
+            "# 报告\n\n## 研究背景\n\n综述[@nope]。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !no_bib
+                .iter()
+                .any(|warning| warning.contains("不在已导入的参考文献里")),
+            "没导入 .bib 时不逐键报：{no_bib:?}"
+        );
+        assert!(
+            no_bib.iter().any(|warning| warning.contains("尚未导入")),
+            "没导入 .bib 的粗粒度提示应保留：{no_bib:?}"
         );
     }
 
