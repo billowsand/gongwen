@@ -23,7 +23,9 @@ env:
   # v0.5.0 起再带输入法数据（ime/dict.qj + ime/lm.qj）：应用内输入法的词库与整句
   # 模型。它们必须写进各平台的 SHA256SUMS.<suffix>.txt——package-portable.ps1
   # 只按清单复制文件，漏写不会报错，只会让装完的包静默退回系统输入法。
-  RUNTIME_RELEASE_TAG: v0.5.0
+  # v0.6.0 起 texbundle 含 amsmath/mathtools 及研究正文字号的 CM 数学实体字体，
+  # 研究报告可导出数学公式（对应 mdx v2.16.2）。
+  RUNTIME_RELEASE_TAG: v0.6.0
   RUNTIME_REPO: billowsand/gongwen-runtime
   # 输入法数据的冒烟测试名，四个平台都跑这一个（见 src/ime/mod.rs）。
   IME_SMOKE_TEST: ime::tests::loads_the_shipped_dictionary_and_model
