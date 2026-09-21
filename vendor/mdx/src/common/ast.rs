@@ -42,6 +42,11 @@ pub enum Block {
         content: String,
     },
 
+    /// 独立成段的 LaTeX 数学公式块，由独占一行的 `$$` 定界。
+    /// 保存 `$$` 之间的公式源码原文，不做任何转义或改写。
+    /// 仅 research tex 输出 `\[...\]`；official / docx 降级为转义后的源码原文。
+    Math(String),
+
     /// 空行；多数 emitter 直接忽略。
     Empty,
 }
@@ -73,6 +78,9 @@ pub enum Inline {
     Citation(Vec<String>),
     /// 行内脚注。如 `[^1]:(注释内容)`，仅保存注释内容；编号由输出格式自行生成。
     Footnote(String),
+    /// 行内 LaTeX 数学公式。如 `$E=mc^2$`，保存 `$` 之间的公式源码原文。
+    /// 仅 research tex 输出 `\(...\)`；official / docx 降级为转义后的源码原文。
+    Math(String),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

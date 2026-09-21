@@ -41,11 +41,21 @@ runtime/
 - `gongwen-texlive.ttb` is a project-specific TTB v1 bundle resolved from
   Tectonic 0.17.0's pinned upstream bundle. It contains the dependencies
   actually exercised by all `gonghan-gwa.cls` document variants and by mdx's
-  research warm-up document (including `ctexbook`, TikZ, listings and
-  `gbt7714`). Both styles are recompiled with a fresh cache and
+  research warm-up document (including `ctexbook`, TikZ, listings, `gbt7714`
+  and, since runtime v0.6.0, `amsmath`/`mathtools` for research-report math
+  formulas). Both styles are recompiled with a fresh cache and
   `--only-cached --untrusted` before publishing. The authoritative checksum is
   the `texbundle/gongwen-texlive.ttb` line of each `SHA256SUMS.<suffix>.txt`;
   that is the value `scripts/package-portable.ps1` actually verifies.
+- Rebuilding the bundle: bump the package lists in mdx's
+  `resources/tectonic/warmup{,-official}.tex`, tag an mdx release so its
+  workflow regenerates the directory bundle (`tectonic-bundle` artifact), then
+  pack the directory into a TTB v1 with a writer matching
+  `tectonic_bundles` 0.4.2's reader (66-byte header; per-file gzip content;
+  embedded `FILELIST`/`SEARCH`/`SHA256SUM`; files under `resolved/`; index
+  gzipped at the end; digest = SHA-256 of the plain index text). Verify by
+  compiling both warm-up documents against the new `.ttb` with a fresh cache
+  and `--only-cached --untrusted` before updating the checksums.
 - Fonts come in two groups, both loaded **by file name**, never by family
   name, so no machine has to have them installed:
   - `FangSong` / `KaiTi` / `SimHei` / `SimSun` / `XiaoBiaoSong` are required by

@@ -251,6 +251,11 @@ impl TexEmitter {
             Block::CodeBlock { .. } => {
                 // 公文路径暂不支持代码块
             }
+            Block::Math(content) => {
+                // 公文不支持公式：降级为转义后的源码原文（$$...$$ 印成字面文字）
+                self.reset_list();
+                self.emit_paragraph(&[Inline::Text(format!("$${}$$", content))]);
+            }
             Block::Empty => {
                 // 空行：不主动产出多余空行；段落分隔已由其他 emit_* 末尾的 "\n\n" 处理
             }
@@ -591,6 +596,8 @@ fn render_inlines(inlines: &[Inline]) -> String {
                 s.push_str(&escape_latex(t));
                 s.push('}');
             }
+            // 公文不支持公式：输出转义后的源码原文（$...$ 印成字面文字）
+            Inline::Math(t) => s.push_str(&escape_latex(&format!("${t}$"))),
         }
     }
     s
@@ -971,6 +978,23 @@ mod tests {
     fn citation_renders_as_latex_cite() {
         let rendered = render_inlines(&[Inline::Citation(vec!["a".into(), "b".into()])]);
         assert_eq!(rendered, "\\cite{a,b}");
+    }
+
+    #[test]
+    fn math_degrades_to_escaped_source() {
+        // 公文不支持公式：行内 $...$ 与块级 $$...$$ 都输出转义后的源码原文
+        // （$、^ 等 LaTeX 特殊字符照常转义，印成字面文字）
+        let rendered = render_inlines(&[Inline::Math("E=mc^2".into())]);
+        assert_eq!(rendered, "\\$E=mc\\textasciicircum{}2\\$");
+
+        let mut e = TexEmitter::new();
+        e.emit_block(&Block::Math("E=mc^2".into()));
+        let body = test_body(e);
+        assert!(
+            body.contains("\\$\\$E=mc\\textasciicircum{}2\\$\\$"),
+            "got {}",
+            body
+        );
     }
 
     #[test]

@@ -69,6 +69,21 @@ pub fn parse(content: &str) -> Vec<Block> {
             continue;
         }
 
+        // 3.5) 独立公式块 $$...$$（定界符独占一行，或单行 `$$...$$` 写法）
+        if line.starts_with("$$") {
+            list_indents.clear();
+            let (content, new_i) = parse_math_block(&lines, i);
+            if content.is_empty() {
+                // 空公式（如 `$$$$`）没有实际内容，退化当作普通段落
+                blocks.push(Block::Paragraph(inline::parse(line)));
+                i += 1;
+                continue;
+            }
+            blocks.push(Block::Math(content));
+            i = new_i;
+            continue;
+        }
+
         // 4) 表格 (must check for table first to avoid confusing | with text)
         if table::is_table_line(line) {
             list_indents.clear();
@@ -246,9 +261,11 @@ fn strip_caption_number(caption: &str) -> String {
 fn normalize_lines_except_code(content: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut in_code = false;
+    let mut in_math = false;
 
     for line in content.lines() {
-        if line.trim_start().starts_with("```") {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") && !in_math {
             lines.push(line.to_string());
             in_code = !in_code;
             continue;
@@ -256,9 +273,27 @@ fn normalize_lines_except_code(content: &str) -> Vec<String> {
 
         if in_code {
             lines.push(line.to_string());
-        } else {
-            lines.push(quotes::convert_quotes(line));
+            continue;
         }
+
+        // 公式块与代码块一样不做引号正规化，避免公式源码里的 ASCII 引号被改写
+        if in_math {
+            if trimmed.ends_with("$$") {
+                in_math = false;
+            }
+            lines.push(line.to_string());
+            continue;
+        }
+        if trimmed.starts_with("$$") {
+            // 单行 `$$...$$` 不切换状态；`$$` 独占一行或 `$$` 起始未闭合时开启公式块
+            if trimmed == "$$" || !trimmed.ends_with("$$") {
+                in_math = true;
+            }
+            lines.push(line.to_string());
+            continue;
+        }
+
+        lines.push(quotes::convert_quotes(line));
     }
 
     lines
@@ -358,6 +393,54 @@ fn parse_code_block(lines: &[String], start: usize) -> (Option<(Option<String>, 
     }
     // 没有找到结束标记，把剩下的都当作内容
     (Some((lang, content.trim_matches('\n').to_string())), i)
+}
+
+/// 解析以独占一行的 `$$` 定界的独立公式块，兼容单行 `$$...$$` 写法。
+/// 未找到结束标记时把剩余行都当作公式内容（与代码块行为一致）。
+/// 返回 `$$` 之间的公式源码原文和结束行之后的索引。
+fn parse_math_block(lines: &[String], start: usize) -> (String, usize) {
+    let first = lines[start].trim();
+    let rest = first[2..].trim();
+
+    // 单行写法：`$$E=mc^2$$`；`$$$$` 视为空公式，交给调用方退化处理
+    if let Some(inner) = rest.strip_suffix("$$") {
+        let inner = inner.trim();
+        if !inner.is_empty() {
+            return (inner.to_string(), start + 1);
+        }
+        if rest == "$$" {
+            return (String::new(), start + 1);
+        }
+    }
+
+    // 多行写法：开始行 `$$` 之后可带首行内容，直到出现以 `$$` 结尾（或等于 `$$`）的行
+    let mut content = String::new();
+    if !rest.is_empty() {
+        content.push_str(rest);
+    }
+    let mut i = start + 1;
+    while i < lines.len() {
+        let line = &lines[i];
+        let trimmed = line.trim();
+        if trimmed == "$$" {
+            return (content.trim_matches('\n').to_string(), i + 1);
+        }
+        // 结束定界符与末行内容同行：如 `E=mc^2$$`
+        if let Some(inner) = trimmed.strip_suffix("$$") {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(inner.trim_end());
+            return (content.trim_matches('\n').to_string(), i + 1);
+        }
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(line);
+        i += 1;
+    }
+    // 没有找到结束标记，把剩下的都当作内容
+    (content.trim_matches('\n').to_string(), i)
 }
 
 fn numbered_list_regex() -> &'static Regex {
@@ -674,6 +757,61 @@ mod tests {
             })
             .expect("language");
         assert_eq!(lang, "rust");
+    }
+
+    #[test]
+    fn parses_display_math_block() {
+        let md = "前文。\n\n$$\n\\int_0^1 x^2\\,dx = \\frac{1}{3}\n$$\n\n后文。\n";
+        let blocks = parse(md);
+        let math = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Math(c) => Some(c.as_str()),
+                _ => None,
+            })
+            .expect("math block");
+        assert_eq!(math, "\\int_0^1 x^2\\,dx = \\frac{1}{3}");
+    }
+
+    #[test]
+    fn parses_single_line_display_math() {
+        let blocks = parse("$$E=mc^2$$\n");
+        assert!(matches!(&blocks[0], Block::Math(c) if c == "E=mc^2"));
+    }
+
+    #[test]
+    fn math_block_preserves_ascii_quotes() {
+        // 公式源码里的 ASCII 引号不做正规化
+        let blocks = parse("$$\nf(x) = \"x\"\n$$\n");
+        let math = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Math(c) => Some(c.as_str()),
+                _ => None,
+            })
+            .expect("math block");
+        assert_eq!(math, "f(x) = \"x\"");
+    }
+
+    #[test]
+    fn inline_math_inside_paragraph() {
+        let blocks = parse("质能方程 $E=mc^2$ 揭示了……\n");
+        let para = blocks
+            .iter()
+            .find(|b| matches!(b, Block::Paragraph(_)))
+            .expect("paragraph");
+        let inlines = match para {
+            Block::Paragraph(v) => v,
+            _ => unreachable!(),
+        };
+        assert!(matches!(&inlines[1], Inline::Math(t) if t == "E=mc^2"));
+    }
+
+    #[test]
+    fn empty_math_delimiters_fall_back_to_paragraph() {
+        // `$$$$` 没有公式内容，退化为普通段落
+        let blocks = parse("$$$$\n");
+        assert!(matches!(&blocks[0], Block::Paragraph(_)));
     }
 
     #[test]

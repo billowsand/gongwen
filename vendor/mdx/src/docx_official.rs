@@ -263,6 +263,11 @@ impl OfficialEmitter {
                 self.list.reset();
                 self.add_code_block(docx, content)
             }
+            Block::Math(content) => {
+                // 公文 docx 不支持公式：降级为源码原文段落
+                self.list.reset();
+                self.add_body_paragraph(docx, &[Inline::Text(format!("$${}$$", content))])
+            }
             Block::Marker(kind) => {
                 self.list.reset();
                 self.emit_marker(docx, *kind)
@@ -669,6 +674,8 @@ fn add_inlines(
                 false,
             ),
             Inline::Footnote(t) => (format!("（{}）", t), false, false),
+            // docx 不支持公式，降级为源码原文
+            Inline::Math(t) => (format!("${t}$"), false, false),
         };
         let mut run = Run::new().add_text(&text).fonts(font_set(font)).size(size);
         if bold || force_bold {

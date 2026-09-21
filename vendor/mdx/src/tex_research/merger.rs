@@ -34,16 +34,15 @@ impl Merger {
         compile_pdf: bool,
     ) -> Result<()> {
         // 1. 读取并解析 markdown
-        let markdown_content = if is_dir {
+        let (markdown_content, doc_title) = if is_dir {
             self.merge_markdown_files(input)?
         } else {
             self.read_markdown_file(input)?
         };
 
-        // 2.5 剥离 front matter 封面字段。题名优先取 front matter 的「文件名称」，
-        // 没写才回退到正文区的第一个 `#`（报告题名，由 emitter 在走块序列时认出来）。
-        // 两处都只填封面：题名在封面上印过一次，正文里不再排第二遍。
+        // 2.5 剥离 front matter 封面字段（标题可被 front matter 覆盖）
         let (cover, markdown_content) = front_matter::parse(&markdown_content);
+        let doc_title = cover.title.clone().or(doc_title);
 
         println!("正在解析 markdown...");
         let mut blocks = parser::parse(&markdown_content);
@@ -77,10 +76,6 @@ impl Merger {
         // 如果有摘要，完成摘要收集
         emitter.finish_abstract();
 
-        let doc_title = cover
-            .title
-            .clone()
-            .or_else(|| emitter.report_title().map(str::to_string));
         let (body, parts) = emitter.finish();
 
         // 4. 包装成完整文档
@@ -113,7 +108,7 @@ impl Merger {
     }
 
     /// 读取并合并目录中的所有 markdown 文件
-    fn merge_markdown_files(&mut self, input_dir: &Path) -> Result<String> {
+    fn merge_markdown_files(&mut self, input_dir: &Path) -> Result<(String, Option<String>)> {
         let mut md_files: Vec<PathBuf> = WalkDir::new(input_dir)
             .max_depth(1)
             .into_iter()
@@ -148,6 +143,7 @@ impl Merger {
         }
 
         let mut merged = String::new();
+        let mut doc_title = None;
 
         for path in &md_files {
             println!(
@@ -158,28 +154,83 @@ impl Merger {
                 .with_context(|| format!("读取文件 {} 失败", path.display()))?;
             let content = strip_utf8_bom(&content);
 
+            // 提取标题（第一个 # 标题）
+            if doc_title.is_none() {
+                doc_title = extract_title_from_content(content);
+                if doc_title.is_some() {
+                    merged.push_str(&remove_first_h1(content));
+                    merged.push_str("\n\n");
+                    continue;
+                }
+            }
+
             merged.push_str(content);
             merged.push_str("\n\n");
         }
 
-        Ok(merged)
+        Ok((merged, doc_title))
     }
 
     /// 读取单个 markdown 文件
-    fn read_markdown_file(&mut self, input_file: &Path) -> Result<String> {
+    fn read_markdown_file(&mut self, input_file: &Path) -> Result<(String, Option<String>)> {
         println!("处理文件: {}", input_file.display());
 
         let content = fs::read_to_string(input_file)
             .with_context(|| format!("读取文件 {} 失败", input_file.display()))?;
         let content = strip_utf8_bom(&content);
 
-        Ok(content.to_string())
+        let doc_title = extract_title_from_content(content);
+
+        // 移除第一个 # 标题行（因为它已经被提取为 title）
+        let content_without_first_h1 = remove_first_h1(content);
+
+        Ok((content_without_first_h1, doc_title))
     }
 }
 
 /// 移除文件开头的 UTF-8 BOM；正文内部的 U+FEFF 保持不变。
 fn strip_utf8_bom(content: &str) -> &str {
     content.trim_start_matches('\u{feff}')
+}
+
+/// 从 markdown 内容中提取第一个 # 标题
+fn extract_title_from_content(content: &str) -> Option<String> {
+    let heading_regex = regex::Regex::new(r"^#\s+(.+?)(?:\s*\{[^}]*\})?\s*$").ok()?;
+
+    for line in content.lines() {
+        if let Some(caps) = heading_regex.captures(line) {
+            let title = crate::common::heading::clean(caps.get(1)?.as_str().trim());
+            if !title.is_empty() {
+                println!("提取文档标题: {}", title);
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+/// 移除 markdown 内容中的第一个 # 标题行
+fn remove_first_h1(content: &str) -> String {
+    let heading_regex = regex::Regex::new(r"^#\s+.+\s*$").ok();
+
+    if let Some(re) = heading_regex {
+        let mut result = String::new();
+        let mut first_found = false;
+
+        for line in content.lines() {
+            if !first_found && re.is_match(line) {
+                first_found = true;
+                continue; // 跳过第一行
+            }
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+        }
+        result
+    } else {
+        content.to_string()
+    }
 }
 
 /// 渲染 pandoc 风格的简单模板变量。
@@ -473,42 +524,16 @@ mod tests {
     }
 
     #[test]
-    fn directory_merge_leaves_h1_lines_to_the_emitter() {
-        // 合并这一步不再按文本抠掉第一个 `#`——那条正则分不清正文题名和附录
-        // 章标题，抠错了就丢内容。`#` 原样留着，由 emitter 按区段判定：正文区
-        // 的第一个记成报告题名（不排版面），其余照各自区段的规则走。
+    fn directory_merge_removes_first_h1_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("01.md"), "# 一、测试报告\n\n## 背景\n正文").unwrap();
         fs::write(dir.path().join("02.md"), "# 第二章 后续\n内容").unwrap();
 
         let mut merger = Merger::new();
-        let merged = merger.merge_markdown_files(dir.path()).expect("merge");
-        assert!(merged.contains("# 一、测试报告"));
+        let (merged, title) = merger.merge_markdown_files(dir.path()).expect("merge");
+        assert_eq!(title.as_deref(), Some("测试报告"));
+        assert!(!merged.contains("# 一、测试报告"));
         assert!(merged.contains("# 第二章 后续"));
-
-        let mut emitter = TexResearchEmitter::new();
-        emitter.emit_all(&parser::parse(&merged));
-        // 标题里的旧编号由 parser 去掉，题名取第一个 H1。
-        assert_eq!(emitter.report_title(), Some("测试报告"));
-        let (main, parts) = emitter.finish();
-        let body = main + &parts.into_iter().map(|(_, c)| c).collect::<String>();
-        assert!(!body.contains("测试报告"), "{body}");
-        assert!(!body.contains("后续"), "{body}");
-        assert!(body.contains("\\chapter{背景}"), "{body}");
-    }
-
-    #[test]
-    fn front_matter_title_wins_over_the_body_h1() {
-        // 封面题名的正主是 front matter 的「文件名称」（gongwen 的文档要素写进来
-        // 的那一行）；正文 `#` 只是没有 front matter 时的兜底。
-        let (with_fm, _) = front_matter::parse("---\n文件名称: 封面题名\n---\n\n# 正文题名\n");
-        assert_eq!(with_fm.title.as_deref(), Some("封面题名"));
-
-        let (without_fm, body) = front_matter::parse("# 正文题名\n\n## 背景\n");
-        assert!(without_fm.title.is_none());
-        let mut emitter = TexResearchEmitter::new();
-        emitter.emit_all(&parser::parse(&body));
-        assert_eq!(emitter.report_title(), Some("正文题名"));
     }
 
     #[test]
@@ -522,7 +547,7 @@ mod tests {
         .unwrap();
 
         let mut merger = Merger::new();
-        let merged = merger.merge_markdown_files(dir.path()).expect("merge");
+        let (merged, _) = merger.merge_markdown_files(dir.path()).expect("merge");
         let blocks = parser::parse(&merged);
         let mut emitter = TexResearchEmitter::new();
         emitter.emit_all(&blocks);

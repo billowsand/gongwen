@@ -17,9 +17,9 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 ## 来源
 
 - 上游：<https://github.com/billowsand/mdx>
-- 版本：v2.15.4
-- 对应提交：`b897ce1b9013e9f218fe51e62a64029d36018e46`
-  （PR #15，"宿主注入 `\MdxFontPath` 时按文件加载字体"）
+- 版本：v2.16.2
+- 对应提交：`ac0adab7fcb86e7e311f6d989cedc98a04d0fea6`
+  （PR #16 数学公式支持 + PR #17 预热修复）
 
 ## 与上游的差异
 

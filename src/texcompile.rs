@@ -566,6 +566,61 @@ mod tests {
         assert!(outcome.pdf.is_some_and(|path| path.is_file()));
     }
 
+    /// 研究报告的数学公式（mdx v2.16.1 起）：行内 `$...$` 与独立块 `$$...$$`
+    /// 要走 amsmath/mathtools 编进 PDF。texbundle 里缺包时这条会在 release
+    /// 冒烟里先红（CI 按 `texcompile::tests::compiles_` 前缀跑）。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime"]
+    fn compiles_research_report_with_math() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "数学公式研究报告测试".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "<!-- [摘要] -->\n\n这是摘要。\n\n<!-- [正文] -->\n\n## 模型与方法\n\n质能方程 $E=mc^2$ 与求和 $\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$。\n\n$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        // 正文在 data/chapterXX.tex 里（主文件只 \input 它们），全部拼起来再断言：
+        // 公式必须是不转义的数学模式，而不是字面 `\$` 文本。
+        let dir = tex.parent().unwrap();
+        let mut tex_source = std::fs::read_to_string(tex).unwrap();
+        for entry in std::fs::read_dir(dir.join("data")).unwrap() {
+            tex_source.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+        }
+        assert!(
+            tex_source.contains(r"\(E=mc^2\)"),
+            "行内公式应输出为 \\(...\\)：{tex_source}"
+        );
+        assert!(
+            tex_source.contains(r"\[") && tex_source.contains(r"\int_0^1"),
+            "独立公式应输出为 \\[...\\]：{tex_source}"
+        );
+        assert!(
+            !tex_source.contains(r"\$"),
+            "公式的 $ 不应被转义：{tex_source}"
+        );
+        let outcome = compile_research_pdf(tex).unwrap();
+        assert!(outcome.pdf.is_some_and(|path| path.is_file()));
+    }
+
     /// 研究报告同样不许丢字：标题走方正小标宋，那支字体只有 GB2312 字库，
     /// 「喆」「赟」全靠 `md2tex.cls` 里的后备字体接住。
     #[test]

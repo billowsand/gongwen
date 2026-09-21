@@ -96,6 +96,8 @@ fn push_cell_inlines(result: &mut String, inlines: &[Inline]) {
                 result.push_str(&escape_latex(t));
                 result.push('）');
             }
+            // 单元格内公式：本函数 official / research 共用，统一降级为转义后的源码原文
+            Inline::Math(t) => result.push_str(&escape_latex(&format!("${t}$"))),
         }
     }
 }

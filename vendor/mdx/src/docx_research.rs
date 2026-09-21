@@ -7,9 +7,8 @@
 //! - 之后 版本变更记录（不进 TOC，由 `<!-- [版本变更记录] -->` 触发）
 //! - 之后 摘要 / 正文 / 附录，按 `<!-- [...] -->` 标记切换 emitter 模式
 //!
-//! 章节编号：H2 → "第X章　Y"、H3 → "X.Y Z"、H4 → "X.Y.Z W"，附录章节
-//! 切换为 "附录A / 附录B / ..."。章号用阿拉伯数字，与 `md2tex.cls` 的
-//! `number = \arabic{chapter}` 和版式预览一致。
+//! 章节编号：H2 → "第X章 Y"、H3 → "X.Y Z"、H4 → "X.Y.Z W"，附录章节
+//! 切换为 "附录 A / 附录 B / ..."。
 //!
 //! Heading1/2/3 样式在 styles.xml 中显式注册，并设 outline_lvl 0/1/2，让
 //! Word 打开时 `TOC` 字段（`TOC \o "1-3"`）能扫描到全部条目；否则单独给段落
@@ -32,14 +31,6 @@ const FONT_TITLE: &str = "FZXiaoBiaoSong-B05"; // 方正小标宋简体
 const FONT_HEAD: &str = "FZHei-B01"; // 方正黑体
 const FONT_BODY: &str = "FZShuSong-Z01"; // 方正书宋（仿宋类）
 const FONT_KAI: &str = "FZKai-Z03"; // 方正楷体（行内强调用）
-
-/// 章号（"第1章""附录A"）与章名之间的间隔。ctex 的 `chapter/aftername` 是
-/// `\quad`，一个汉字宽，全角空格对得上；节号那档 `\titleformat` 给的是 0.5em，
-/// 黑体的半角空格正好，所以 `X.Y` 那几行仍用普通空格。
-///
-/// 章号跟 LaTeX 的 `number = \arabic{chapter}` 一样用阿拉伯数字：Word 里排
-/// "第一章"、PDF 和版式预览里排"第1章"，同一份稿子三端对不上。
-const CHAPTER_GAP: &str = "\u{3000}";
 
 // ===== 字号（半磅 half-points，1pt = 2hp） =====
 // LaTeX 模板中常用字号：
@@ -638,6 +629,14 @@ impl MainEmitter {
                 self.list.reset();
                 add_code_block(docx, content)
             }
+            Block::Math(content) => {
+                // docx 不支持公式：降级为源码原文段落
+                self.list.reset();
+                let base_dir = &self.image_base_dir;
+                add_body_paragraph(docx, |p| {
+                    add_inlines(p, &[Inline::Text(format!("$${}$$", content))], base_dir)
+                })
+            }
             Block::Empty => docx,
             Block::Label(_) => {
                 // docx 暂不支持交叉引用锚点，忽略
@@ -696,7 +695,7 @@ impl MainEmitter {
                     self.table_counter = 0;
                     self.figure_counter = 0;
                     let letter = (b'A' + (self.appendix_idx - 1) as u8) as char;
-                    let label = format!("附录{letter}{CHAPTER_GAP}{text}");
+                    let label = format!("附录 {} {}", letter, text);
                     docx = page_break(docx);
                     docx.add_paragraph(heading_chapter_paragraph(&label))
                 }
@@ -721,7 +720,7 @@ impl MainEmitter {
                 self.subsection = 0;
                 self.table_counter = 0;
                 self.figure_counter = 0;
-                let label = format!("第{}章{CHAPTER_GAP}{}", self.chapter, text);
+                let label = format!("第{}章 {}", chinese_chapter(self.chapter), text);
                 docx = page_break(docx);
                 docx.add_paragraph(heading_chapter_paragraph(&label))
             }
@@ -871,6 +870,17 @@ impl ChangelogEmitter {
                     docx
                 };
                 add_table(docx, rows)
+            }
+            Block::Math(content) => {
+                // docx 不支持公式：降级为源码原文段落
+                self.list.reset();
+                add_body_paragraph(docx, |p| {
+                    add_inlines(
+                        p,
+                        &[Inline::Text(format!("$${}$$", content))],
+                        &self.image_base_dir,
+                    )
+                })
             }
             Block::Marker(_) | Block::Empty | Block::CodeBlock { .. } | Block::Label(_) => docx,
         }
@@ -1095,6 +1105,8 @@ fn inline_run_style(ip: &Inline) -> (String, bool, bool) {
         ),
         // docx 暂不生成脚注部件，降级为全角括号内联注释
         Inline::Footnote(t) => (format!("（{}）", t), false, false),
+        // docx 不支持公式，降级为源码原文
+        Inline::Math(t) => (format!("${t}$"), false, false),
     }
 }
 
@@ -1267,6 +1279,15 @@ fn add_table(docx: Docx, rows: &[Vec<String>]) -> Docx {
     docx.add_table(table)
 }
 
+// ============================================================
+// 中文章节序号
+// ============================================================
+
+fn chinese_chapter(num: usize) -> String {
+    use crate::common::numbering::number_to_chinese;
+    number_to_chinese(num)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1409,7 +1430,7 @@ mod tests {
 
         assert_eq!(texts.iter().filter(|text| *text == "参考文献").count(), 1);
         assert!(texts.iter().any(|text| text == "[1] 条目"));
-        assert!(texts.iter().any(|text| text == "附录A　数据集"));
+        assert!(texts.iter().any(|text| text == "附录 A 数据集"));
         assert!(texts.iter().any(|text| text == "说明"));
     }
 
@@ -1468,7 +1489,7 @@ mod tests {
         let docx = emitter.emit_all(Docx::new(), &blocks);
         let texts = paragraph_texts(&docx);
 
-        assert!(texts.iter().any(|text| text == "第3章　第三章标题"));
+        assert!(texts.iter().any(|text| text == "第三章 第三章标题"));
         assert!(texts.iter().any(|text| text == "表 3.1 数据表"));
         assert!(texts.iter().any(|text| text == "图 3.1 结构图"));
         assert!(docx.document.children.iter().any(|child| match child {

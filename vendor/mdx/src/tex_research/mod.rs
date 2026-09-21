@@ -2,7 +2,7 @@
 //!
 //! 整体行为：
 //! - 输入可以是单 .md 文件或目录（按文件名升序合并）
-//! - 标题层级：# → 报告题名（只填封面，不排进正文版面），## → chapter，### → section，#### → subsection，##### → subsubsection
+//! - 标题层级：# → 文档标题，## → chapter，### → section，#### → subsection，##### → subsubsection
 //! - 自动去除标题里的旧编号（parser 层面处理）
 //! - 引号正规化为中文双引号（parser 层面处理）
 //! - 内嵌 md2tex.cls
@@ -48,7 +48,7 @@ pub fn run(
     if user_template.is_some() {
         println!("使用外部模板");
     }
-    println!("标题映射: # -> 报告题名(封面), ## -> chapter, ### -> section, #### -> subsection, ##### -> subsubsection");
+    println!("标题映射: # -> title, ## -> chapter, ### -> section, #### -> subsection, ##### -> subsubsection");
 
     let mut merger = Merger::new();
     merger

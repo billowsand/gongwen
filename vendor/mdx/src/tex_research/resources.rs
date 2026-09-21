@@ -100,4 +100,11 @@ mod tests {
         assert!(MD2TEX_CLS.contains("\\setCJKfamilyfont{code}{\\codeCJKfont}"));
         assert!(!MD2TEX_CLS.contains("LXGW Bright Code"));
     }
+
+    #[test]
+    fn research_class_loads_math_packages() {
+        // 行内 \(...\) 与独立 \[...\] 公式依赖 amsmath / mathtools
+        assert!(MD2TEX_CLS.contains("\\RequirePackage{amsmath}"));
+        assert!(MD2TEX_CLS.contains("\\RequirePackage{mathtools}"));
+    }
 }

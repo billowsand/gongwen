@@ -1,7 +1,8 @@
 //! 行内格式拆分：把一行原文切成 Inline 序列（Text / Bold / Italic / Code / Link / Footnote）。
 //!
 //! 识别 markdown 的 `**加粗**`、`*斜体*`、`` `代码` ``、`[文本](链接)`、`![替代文本](图片路径)`
-//! 以及行内脚注 `[^id]:(注释内容)`（冒号、括号兼容全角）；其他符号原样进入 Text。
+//! 以及行内脚注 `[^id]:(注释内容)`（冒号、括号兼容全角）和行内公式 `$...$`；
+//! 其他符号原样进入 Text。`$$` 开头的独立公式由块级解析处理，行内不匹配。
 //! 扩展标记：图片后紧跟 `{#id}` 作为交叉引用锚点；`{@id}` 为交叉引用（tex → \ref{id}）。
 //! 与 md_to_docx_rust::process_text_formatting 的拆分规则一致：
 //! - `**...**` 至少 4 字符长才视作粗体
@@ -14,7 +15,7 @@ use super::ast::Inline;
 
 /// 行内构造统一匹配层：代码、链接/图片、强调、交叉引用、文献引用同处一层。
 ///
-/// 关键在于它们的起始字符互不相同（`` ` `` / `[` / `!` / `*` / `{`），因此
+/// 关键在于它们的起始字符互不相同（`` ` `` / `[` / `!` / `*` / `{` / `$`），因此
 /// `find_iter` 的“最左、非重叠”语义天然给出正确优先级：谁先起始谁整体胜出，
 /// 被包住的内部构造再由强调的递归解析处理。这样：
 /// - `` `a*b*c` `` 整段是代码（`` ` `` 起始最靠左），内部 `*` 不成强调；
@@ -29,7 +30,7 @@ fn inline_matcher() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"`[^`]+`|!?\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|\{@[A-Za-z][\w:.-]*\}|\[(?:@[^\s@;,\[\]{}\\]+)(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*\]",
+            r"`[^`]+`|!?\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|\{@[A-Za-z][\w:.-]*\}|\[(?:@[^\s@;,\[\]{}\\]+)(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*\]|\$[^$\n]+\$",
         )
         .expect("invalid inline regex")
     })
@@ -126,6 +127,8 @@ fn parse_inline(text: &str) -> Vec<Inline> {
             }
             // 交叉引用 `{@id}`：剥掉 `{@` 与 `}`。
             b'{' => out.push(Inline::CrossRef(part[2..part.len() - 1].to_string())),
+            // 行内公式 `$...$`：剥掉 `$` 定界符，公式源码原样保留（不转义、不解析内部）。
+            b'$' => out.push(Inline::Math(part[1..part.len() - 1].to_string())),
             // 图片 `![alt](url)`，并吞掉紧随其后的 `{#id}` 锚点。
             b'!' => {
                 let caps = link_matcher()
@@ -195,6 +198,12 @@ pub fn flatten(inlines: &[Inline]) -> String {
                 s.push('（');
                 s.push_str(t);
                 s.push('）');
+            }
+            // 拼回源码原文（含 `$` 定界符），与 Citation / Footnote 的做法一致
+            Inline::Math(t) => {
+                s.push('$');
+                s.push_str(t);
+                s.push('$');
             }
         }
     }
@@ -470,5 +479,49 @@ mod tests {
             flatten(&[Inline::Citation(vec!["a".into(), "b".into()])]),
             "[@a; @b]"
         );
+    }
+
+    #[test]
+    fn parses_inline_math() {
+        assert_eq!(
+            parse("公式 $E=mc^2$ 结束"),
+            vec![
+                Inline::Text("公式 ".into()),
+                Inline::Math("E=mc^2".into()),
+                Inline::Text(" 结束".into()),
+            ]
+        );
+        // 同一段可出现多个公式
+        assert_eq!(
+            parse("$x_1$ 与 $y^2$"),
+            vec![
+                Inline::Math("x_1".into()),
+                Inline::Text(" 与 ".into()),
+                Inline::Math("y^2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn double_dollar_not_consumed_by_inline() {
+        // `$$` 是块级定界符：行内正则要求 `$` 之间内容非空且不含 `$`，
+        // 因此 `$$` 起始的整段不会被行内匹配吃掉
+        assert_eq!(parse("$$"), vec![Inline::Text("$$".into())]);
+        assert_eq!(parse("$$$$"), vec![Inline::Text("$$$$".into())]);
+    }
+
+    #[test]
+    fn unclosed_dollar_stays_text() {
+        // 未闭合的 `$` 按普通文本处理
+        assert_eq!(
+            parse("价格 $100 左右"),
+            vec![Inline::Text("价格 $100 左右".into())]
+        );
+        assert_eq!(parse("$$ 未闭合"), vec![Inline::Text("$$ 未闭合".into())]);
+    }
+
+    #[test]
+    fn flatten_reconstructs_math_source() {
+        assert_eq!(flatten(&[Inline::Math("E=mc^2".into())]), "$E=mc^2$");
     }
 }
