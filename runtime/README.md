@@ -53,9 +53,20 @@ runtime/
   pack the directory into a TTB v1 with a writer matching
   `tectonic_bundles` 0.4.2's reader (66-byte header; per-file gzip content;
   embedded `FILELIST`/`SEARCH`/`SHA256SUM`; files under `resolved/`; index
-  gzipped at the end; digest = SHA-256 of the plain index text). Verify by
-  compiling both warm-up documents against the new `.ttb` with a fresh cache
-  and `--only-cached --untrusted` before updating the checksums.
+  gzipped at the end; digest = SHA-256 of the plain index text). A ready-made
+  packer lives in the `gongwen-runtime` repo at `scripts/ttb-pack`
+  (`pack` / `unpack` / `dump` subcommands).
+- **Important:** the mdx artifact only contains what its two warm-up documents
+  resolve — the `gonghan-gwa.cls` (official document) chain is NOT covered by
+  them (e.g. `size10.clo`, `ctex.sty`, `tabularx.sty`, `ulem.sty`,
+  `xstring.sty`). Always union-merge the previous bundle's contents before
+  packing: `ttb-pack unpack <old.ttb> old-dir`, copy any missing files into
+  the new directory bundle, then `ttb-pack pack`. The verification gate is the
+  full app-side smoke suite with a fresh cache, not just the warm-ups:
+  `GONGWEN_RUNTIME_DIR=<repo>/runtime cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored`
+  (it exercises every `gonghan-gwa.cls` variant plus research reports, and
+  since v2.16.2 also math formulas). Only after it passes may the checksums be
+  updated and the `gongwen-runtime` release published.
 - Fonts come in two groups, both loaded **by file name**, never by family
   name, so no machine has to have them installed:
   - `FangSong` / `KaiTi` / `SimHei` / `SimSun` / `XiaoBiaoSong` are required by
