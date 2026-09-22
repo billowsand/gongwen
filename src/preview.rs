@@ -783,6 +783,40 @@ mod tests {
         });
     }
 
+    /// 红头呈批件首页的密级、发文机关、文号在类文件里都是按**基线**摆的
+    /// （`\raisebox{-10mm}` / `-30mm` / `-43mm`），预览里得照同一口径放，
+    /// 否则整块红头下沉一个字的上伸高度，文号直接压在 48mm 那条红线上。
+    #[test]
+    fn red_approval_overlay_places_the_document_number_above_the_rule() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = red::red_overlay_text(
+                ui,
+                &metrics,
+                "星教函〔2026〕12号",
+                theme::FONT_FANGSONG,
+                BODY_PT,
+                theme::paper::ink(),
+            );
+            // 与 paint_red_approval_overlay 同一套摆法：基线落在版心顶端下方 43mm。
+            let top = metrics.mm(37.0 + 43.0) - red::overlay_baseline(&galley);
+            let ink_bottom = top + galley.mesh_bounds.max.y;
+            let rule = metrics.mm(37.0 + 48.0);
+            assert!(
+                ink_bottom < rule,
+                "文号压到红线上了：墨迹底 {ink_bottom} ≥ 红线 {rule}"
+            );
+            // 空隙也不该大到把文号推向机关名：不超过一个三号字的高度。
+            assert!(
+                rule - ink_bottom < metrics.pt(BODY_PT),
+                "文号与红线之间空得太多：{}",
+                rule - ink_bottom
+            );
+        });
+    }
+
     /// 红头呈批件首页要排满：末行字形贴到承办区红线上方 2mm 的安全线附近，
     /// 既不许越线压字，也不许白白空出一行。
     ///

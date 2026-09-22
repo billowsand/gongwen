@@ -32,7 +32,7 @@ pub(crate) struct BodyRun {
 }
 
 /// 红头呈批件打印预览中的一段可见文字。正文段落可以被切成多个 fragment：
-/// 首页片段按 100mm 排，续页片段重新按 156mm 排，而不是沿用首页的换行结果。
+/// 首页片段按 96mm 排，续页片段重新按 156mm 排，而不是沿用首页的换行结果。
 pub(crate) struct RedPrintFragment {
     pub(crate) range: Option<Range<usize>>,
     /// 正文自然段按 Markdown 源码行拆开的可见字符范围；空表示整块使用 `range`。
@@ -711,6 +711,18 @@ pub(crate) fn red_overlay_text(
     layout(ui, single_line(text, format))
 }
 
+/// 覆盖层元素的**基线**在自己 galley 里的高度。
+///
+/// 密级、发文机关、文号、批示在类文件里都是 `\raisebox{-Xmm}` 摆的，量的是基线；
+/// egui 的 `painter.galley` 吃的却是左上角。直接把这几个毫米数当左上角用，整块
+/// 红头就整体下沉一个字的上伸高度——文号会压到红线上，与密级之间的空档也被撑大。
+pub(crate) fn overlay_baseline(galley: &egui::Galley) -> f32 {
+    galley
+        .rows
+        .first()
+        .map_or(galley.size().y * 0.75, |row| gutter::row_baseline(row, 0.0))
+}
+
 pub(crate) fn paint_red_approval_overlay(
     ui: &egui::Ui,
     metrics: &Metrics,
@@ -741,7 +753,12 @@ pub(crate) fn paint_red_approval_overlay(
             BODY_PT,
             theme::paper::ink(),
         );
-        painter.galley(at(text_left, text_top + 10.0), galley, theme::paper::ink());
+        let baseline = overlay_baseline(&galley);
+        painter.galley(
+            at(text_left, text_top + 10.0) - egui::vec2(0.0, baseline),
+            galley,
+            theme::paper::ink(),
+        );
     }
 
     let unit = header_unit(input, display);
@@ -759,11 +776,8 @@ pub(crate) fn paint_red_approval_overlay(
         }
         let galley = layout(ui, single_line(&unit, format));
         let center = at(text_left + 78.0, text_top + 30.0);
-        painter.galley(
-            center - egui::vec2(galley.size().x / 2.0, 0.0),
-            galley,
-            theme::paper::red(),
-        );
+        let offset = egui::vec2(galley.size().x / 2.0, overlay_baseline(&galley));
+        painter.galley(center - offset, galley, theme::paper::red());
     }
 
     let number = document_number(input);
@@ -775,8 +789,11 @@ pub(crate) fn paint_red_approval_overlay(
         BODY_PT,
         theme::paper::ink(),
     );
-    let number_x =
-        at(text_left + 78.0, text_top + 43.0) - egui::vec2(number_galley.size().x / 2.0, 0.0);
+    let number_x = at(text_left + 78.0, text_top + 43.0)
+        - egui::vec2(
+            number_galley.size().x / 2.0,
+            overlay_baseline(&number_galley),
+        );
     painter.galley(number_x, number_galley, theme::paper::ink());
 
     let red = Stroke::new(metrics.mm(0.4).max(1.0), theme::paper::red());
@@ -798,8 +815,9 @@ pub(crate) fn paint_red_approval_overlay(
         theme::paper::red(),
     );
     let instruction_center = at((rule_x + text_left + 156.0) / 2.0, text_top + 61.0);
+    let instruction_offset = egui::vec2(instruction.size().x / 2.0, overlay_baseline(&instruction));
     painter.galley(
-        instruction_center - egui::vec2(instruction.size().x / 2.0, 0.0),
+        instruction_center - instruction_offset,
         instruction,
         theme::paper::red(),
     );
