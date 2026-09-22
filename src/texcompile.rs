@@ -1220,6 +1220,49 @@ mod tests {
         assert!(pdf.exists());
     }
 
+    /// 序号表要能真编译：分组行是 `\SetCell[c=N]{l}` 的整行合并，编号由解析器
+    /// 填好，光靠字符串断言兑不了底。
+    #[test]
+    #[ignore = "需要本机安装 xelatex 才能运行"]
+    fn compiles_generated_letter_with_a_numbered_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        input.profile.issuing_unit = "某单位".into();
+        input.profile.recipient = "某部门".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let markdown = "# 关于开展测试工作的函\n现就有关事项函告如下。\n\n<!-- [序号表] -->\n| 序号 | 标题 | 内容 | 备注 |\n| --- | --- | --- | --- |\n| 大标题一 |  |  |  |\n|  | 标题甲 | 内容甲 | 备注甲 |\n|  | 标题乙 | 内容乙 | 备注乙 |\n| 大标题二 |  |  |  |\n|  | 标题丙 | 内容丙 | 备注丙 |";
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            markdown,
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let content = std::fs::read_to_string(tex).unwrap();
+        assert!(
+            content.contains("\\SetCell[c=4]{l} （一）大标题一"),
+            "{content}"
+        );
+        let pdf = compile_pdf_if_available(tex, &FontConfig::default())
+            .unwrap()
+            .unwrap();
+        assert!(pdf.exists());
+    }
+
     /// 最后一个附件为横页时，结束横页后新开的竖页仍须把版记固定在版心底部。
     #[test]
     #[ignore = "需要本机安装 xelatex 才能运行"]

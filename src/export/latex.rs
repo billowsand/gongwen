@@ -1671,6 +1671,24 @@ mod tests {
         );
     }
 
+    /// 序号表在正文里的 TeX 输出：分组行整行合并、按序号表的规矩左对齐，
+    /// 编号由解析器填进单元格（不是渲染端现算的）。
+    #[test]
+    fn numbered_table_group_rows_come_out_left_aligned_in_tex() {
+        let (blocks, block_lines) = parse_markdown_with_lines(
+            "# 测试函
+<!-- [序号表] -->
+| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| 大标题一 |  |  |
+|  | 内容1 |  |
+|  | 内容2 |  |",
+        );
+        let (body, _) = official_letter_sections_to_tex(&blocks, &block_lines, false);
+        assert!(body.contains("\\SetCell[c=3]{l} （一）大标题一"), "{body}");
+        assert!(body.contains("\\begin{longtblr}"), "{body}");
+    }
+
     #[test]
     fn crowded_table_makes_only_its_attachment_landscape() {
         let (blocks, block_lines) = parse_markdown_with_lines(

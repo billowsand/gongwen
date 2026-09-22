@@ -782,6 +782,7 @@ pub(crate) fn table_block(
     rows: &[Vec<String>],
     aligns: &[export::ColumnAlign],
     spans: &[export::TableSpan],
+    numbered: bool,
 ) {
     let columns = export::table_columns(rows, aligns, spans);
     if columns.is_empty() || rows.is_empty() {
@@ -842,6 +843,7 @@ pub(crate) fn table_block(
                 rows,
                 spans,
                 &column_alignments,
+                numbered,
                 row_index,
                 column,
             );

@@ -34,7 +34,7 @@ mod text;
 
 pub(crate) use headings::{
     HeadingCounters, clean_heading_number, official_heading_prefix, official_heading_text,
-    render_list_number,
+    render_heading_number, render_list_number,
 };
 #[allow(unused_imports)]
 pub(crate) use parse::{
@@ -43,9 +43,9 @@ pub(crate) use parse::{
     is_image_line, normalize_ordered_list_punctuation, parse_list_item, parse_markdown,
     parse_markdown_located, parse_markdown_located_research, parse_markdown_located_with_numbering,
     parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
-    parse_markdown_with_numbering, parse_ordered_item, parse_research_marker, parse_section_marker,
-    parse_table_cells, renumber_ordered_groups, research_report_titles, source_lines,
-    table_span_at,
+    parse_markdown_with_numbering, parse_numbered_table_marker, parse_ordered_item,
+    parse_research_marker, parse_section_marker, parse_table_cells, renumber_ordered_groups,
+    research_report_titles, source_lines, table_span_at,
 };
 pub(crate) use red::{
     RED_APPROVAL_GUTTER_TWIPS, RED_APPROVAL_NARROW_MM, RED_APPROVAL_RULE_MM,
@@ -868,6 +868,249 @@ mod tests {
         );
     }
 
+    /// 一份三列表的序号表源码：标记行之后跟表头，正文里另起两处分组。
+    ///
+    /// 首列整个留给编号（数据行的那一格留空），分组行照 GFM 的规矩仍是完整的
+    /// 表格行（首格写标题，其余留空）——只写一格的行会被当成表格结束。
+    const NUMBERED_TABLE: &str = "\
+<!-- [序号表] -->
+| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| 大标题一 |  |  |
+|  | 内容1 |  |
+|  | 内容2 |  |
+| 大标题二 |  |  |
+|  | 内容3 |  |";
+
+    /// 序号表：首列按组自动编号，只有首格有内容的行整行合并。
+    #[test]
+    fn numbered_table_numbers_rows_and_merges_group_rows() {
+        let blocks = parse_markdown(NUMBERED_TABLE);
+        // 标记行本身按 Html 处理，纸面上不落字。
+        assert_eq!(blocks[0], MarkdownBlock::Html("<!-- [序号表] -->".into()));
+        let MarkdownBlock::Table {
+            rows,
+            spans,
+            numbered,
+            ..
+        } = &blocks[1]
+        else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert!(numbered, "带标记的表格要认成序号表");
+        assert_eq!(rows[1], ["（一）大标题一", "", ""]);
+        assert_eq!(rows[2][0], "1");
+        assert_eq!(rows[3][0], "2");
+        assert_eq!(rows[4], ["（二）大标题二", "", ""]);
+        assert_eq!(rows[5][0], "1", "进入下一组后从 1 重新编");
+        assert_eq!(
+            spans,
+            &[
+                TableSpan {
+                    row: 1,
+                    column: 0,
+                    row_span: 1,
+                    column_span: 3,
+                },
+                TableSpan {
+                    row: 4,
+                    column: 0,
+                    row_span: 1,
+                    column_span: 3,
+                },
+            ]
+        );
+    }
+
+    /// 手写的序号和分组编号一律重排：增删行之后不用自己维护。
+    #[test]
+    fn numbered_table_rewrites_hand_written_numbers() {
+        let blocks = parse_markdown(
+            "<!-- [序号表] -->
+| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| （一）大标题 |||
+| 1. 标题一 | 甲 |
+| 9 | 标题二 | 乙 |
+| 二、大标题（手写体） |||",
+        );
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[1] else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert_eq!(rows[1][0], "（一）大标题", "手写的（一）清掉后重新生成");
+        assert_eq!(rows[2][0], "1", "手写的 1. 作废");
+        assert_eq!(rows[3][0], "2", "手写的 9 改成组内位次");
+        assert_eq!(rows[4][0], "（二）大标题（手写体）");
+        // 手写的整行合并换成同一个整行跨度，不叠加。
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert!(spans.iter().all(|span| span.column_span == 3));
+    }
+
+    /// 分组编号的样式跟着设置走，与标题编号同一套选项。
+    #[test]
+    fn numbered_table_group_style_follows_the_setting() {
+        let numbering = NumberingConfig {
+            table_group: crate::models::HeadingNumbering::Chinese,
+            ..NumberingConfig::default()
+        };
+        let blocks = parse_markdown_with_numbering(NUMBERED_TABLE, &numbering);
+        let MarkdownBlock::Table { rows, .. } = &blocks[1] else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert_eq!(rows[1][0], "一、大标题一");
+        assert_eq!(rows[4][0], "二、大标题二");
+    }
+
+    /// 表头首格留空时补「序号」；整行全空的行照常给号，不当分组行。
+    #[test]
+    fn numbered_table_fills_the_header_and_numbers_blank_rows() {
+        let blocks = parse_markdown(
+            "<!-- [序号表] -->
+|  | 标题 | 内容 |
+| --- | --- | --- |
+|  |  |  |
+| 标题1 | 内容1 |  |",
+        );
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[1] else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert_eq!(rows[0][0], "序号");
+        assert_eq!(rows[1][0], "1", "全空行仍是编号行");
+        assert_eq!(rows[2][0], "2");
+        assert!(spans.is_empty(), "全空行不该被当成分组行：{spans:?}");
+    }
+
+    /// 标记行只管紧邻的那张表格：中间隔了别的非空行就不算数。
+    #[test]
+    fn numbered_table_marker_only_applies_to_the_next_table() {
+        let table = "| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| 大标题 |  |  |
+| 标题1 | 内容1 |  |";
+        // 隔空行仍算数。
+        let blocks = parse_markdown(&format!("<!-- [序号表] -->\n\n{table}"));
+        let MarkdownBlock::Table { numbered, .. } = &blocks[1] else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert!(numbered, "空行不该打断标记");
+
+        // 中间插了正文就不算数，表格原样保留。
+        let blocks = parse_markdown(&format!("<!-- [序号表] -->\n正文一句。\n\n{table}"));
+        let MarkdownBlock::Table { rows, numbered, .. } = &blocks[2] else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert!(!numbered, "中间有正文时不该认成序号表");
+        assert_eq!(rows[1][0], "大标题", "不当序号表就不动原文字");
+    }
+
+    /// 用户手上的那种写法也照收：分组行写满竖线、序号列照旧手填数字，
+    /// 加了标记之后编号与合并都由程序接管。
+    #[test]
+    fn numbered_table_accepts_the_hand_written_filler_style() {
+        let blocks = parse_markdown(
+            "<!-- [序号表] -->
+| 序号| 标题 |  内容   |   备注  |
+| --- | --- | --- | --- |
+|  （一） 大标题  ||||
+|  1   |  标题1   |     |     |
+|  2   |  标题2   |     |     |
+|  3   |     |     |     |
+|  4   |     |     |     |
+|  （二） 大标题  ||||
+|  1   |     |     |     |
+|  2   |     |     |     |
+|  3   |     |     |     |",
+        );
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[1] else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert_eq!(rows.len(), 10, "表头 + 九个正文行");
+        assert_eq!(rows[1], ["（一）大标题", "", "", ""]);
+        assert_eq!(rows[2], ["1", "标题1", "", ""]);
+        assert_eq!(rows[3], ["2", "标题2", "", ""]);
+        assert_eq!(rows[4][0], "3", "手填的 3 由程序重排");
+        assert_eq!(rows[5][0], "4");
+        assert_eq!(rows[6], ["（二）大标题", "", "", ""]);
+        assert_eq!(rows[7][0], "1", "新的一组从 1 起");
+        assert_eq!(rows[9][0], "3");
+        // 手写的 |||| 换成同一个整行跨度，不叠加。
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert!(spans.iter().all(|span| span.column_span == 4));
+    }
+
+    /// 研究报告走 mdx，那边不认序号表：预览也不认，免得跟纸面对不上。
+    #[test]
+    fn research_parse_leaves_numbered_tables_alone() {
+        let markdown = "\
+<!-- [序号表] -->
+| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| 大标题一 |  |  |
+|  | 内容1 |  |";
+        let marks = crate::export::crossref::ResearchMarks::default();
+        let blocks = parse_markdown_located_research(markdown, &marks);
+        let MarkdownBlock::Table {
+            rows,
+            spans,
+            numbered,
+            ..
+        } = &blocks[1].block
+        else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert!(!numbered);
+        assert_eq!(rows[1][0], "大标题一", "不生成分组编号");
+        assert!(spans.is_empty(), "不自动合并：{spans:?}");
+    }
+
+    /// 没有标记行的同款表格行为与从前逐字一致。
+    #[test]
+    fn a_table_without_the_marker_is_left_alone() {
+        let plain = NUMBERED_TABLE.replace("<!-- [序号表] -->\n", "");
+        let blocks = parse_markdown(&plain);
+        let MarkdownBlock::Table {
+            rows,
+            spans,
+            numbered,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        assert!(!numbered);
+        assert_eq!(rows[1][0], "大标题一", "不生成分组编号");
+        assert_eq!(rows[2], ["", "内容1", ""], "首列原样保留");
+        assert!(spans.is_empty(), "不自动合并：{spans:?}");
+    }
+
+    /// 与 `^^` 纵向合并有牵扯的行不参与归一化，两者互不打架。
+    #[test]
+    fn numbered_table_leaves_vertical_merges_alone() {
+        let blocks = parse_markdown(
+            "<!-- [序号表] -->
+| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| 标题1 | 甲 | 内容A |
+| 标题2 | 乙 | ^^ |
+| 标题3 | 丙 | ^^ |",
+        );
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[1] else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert_eq!(rows[1][0], "1");
+        assert_eq!(rows[2][0], "2");
+        assert_eq!(rows[3][0], "3");
+        assert_eq!(
+            spans,
+            &[TableSpan {
+                row: 1,
+                column: 2,
+                row_span: 3,
+                column_span: 1,
+            }]
+        );
+    }
+
     #[test]
     fn parses_horizontal_and_vertical_table_spans() {
         let blocks = parse_markdown(
@@ -967,6 +1210,7 @@ mod tests {
             rows,
             aligns,
             spans,
+            ..
         } = &blocks[0]
         else {
             panic!("应当解析为合并表格：{blocks:?}");

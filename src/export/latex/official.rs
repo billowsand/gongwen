@@ -665,8 +665,9 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                 rows,
                 aligns,
                 spans,
+                numbered,
             } => {
-                let rendered = to_longtblr(rows, aligns, spans);
+                let rendered = to_longtblr(rows, aligns, spans, *numbered);
                 if !rendered.is_empty() {
                     push_body_float_barrier(
                         section,

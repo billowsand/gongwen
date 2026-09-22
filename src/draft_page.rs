@@ -58,7 +58,10 @@ pub(crate) use form::{
 #[cfg(test)]
 pub(crate) use markdown::{map_lines, set_heading, toggle_bold};
 #[cfg(test)]
-pub(crate) use table::{blank_table, render_table, table_at};
+pub(crate) use table::{
+    NUMBERED_TABLE_MARKER, blank_table, numbered_table_at, numbered_table_skeleton, render_table,
+    table_at,
+};
 
 /// 功能区「输出」分区里仿 WinEdt 的三个成品入口。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1095,6 +1098,62 @@ mod tests {
         let text = "| 甲 | 乙 |
 | 丙 | 丁 |";
         assert!(table_at(text, 3).is_none());
+    }
+
+    /// 序号表格的骨架：标记行 + 表头 + 一条分组行 + 两条数据行，插完就是序号表。
+    #[test]
+    fn numbered_table_skeleton_parses_back_as_a_numbered_table() {
+        let skeleton = numbered_table_skeleton(3);
+        assert_eq!(skeleton.lines().next(), Some(NUMBERED_TABLE_MARKER));
+        let blocks = crate::export::parse_markdown(&skeleton);
+        let crate::export::MarkdownBlock::Table {
+            rows,
+            spans,
+            numbered,
+            ..
+        } = &blocks[1]
+        else {
+            panic!("骨架应当解析为序号表：{blocks:?}");
+        };
+        assert!(numbered);
+        assert_eq!(rows.len(), 4, "表头 + 一条分组行 + 两条数据行");
+        assert_eq!(rows[0][0], "序号");
+        assert_eq!(rows[1][0], "（一）分组标题");
+        assert_eq!(rows[2][0], "1");
+        assert_eq!(rows[3][0], "2");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].column_span, 3);
+    }
+
+    /// 光标换到别处，序号表格的判定跟着变；普通表格一直是 false。
+    #[test]
+    fn numbered_table_at_follows_the_marker_line() {
+        let numbered = "<!-- [序号表] -->
+| 序号 | 标题 |
+| --- | --- |
+| 标题1 | 甲 |";
+        let inside = numbered.find("标题1").unwrap();
+        assert_eq!(numbered_table_at(numbered, inside), Some(true));
+        let above = numbered.find("<!--").unwrap();
+        assert_eq!(numbered_table_at(numbered, above), None, "光标在表格外");
+
+        let plain = "| 序号 | 标题 |
+| --- | --- |
+| 标题1 | 甲 |";
+        assert_eq!(
+            numbered_table_at(plain, plain.find("标题1").unwrap()),
+            Some(false)
+        );
+
+        // 中间隔了别的非空行，标记不再算数。
+        let separated = "<!-- [序号表] -->
+正文一句。
+
+| 序号 | 标题 |
+| --- | --- |
+| 标题1 | 甲 |";
+        let inside = separated.find("标题1").unwrap();
+        assert_eq!(numbered_table_at(separated, inside), Some(false));
     }
 
     /// 增删行列之后整表重排：列宽按最宽的一格算，中文按两格宽。

@@ -26,6 +26,7 @@ pub(crate) fn add_smart_table(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    numbered: bool,
     bold: BoldFont<'_>,
 ) -> Docx {
     if rows.is_empty() {
@@ -76,13 +77,18 @@ pub(crate) fn add_smart_table(
                 };
                 // 表头一律居中；正文单元格按列对齐（分隔行写了冒号就以它为准），
                 // 横向合并格则按跨列统一判定，Word 与预览、TeX 保持一致。
-                let alignment =
-                    match resolve_cell_alignment(rows, spans, &alignments, row_index, column_index)
-                    {
-                        ColumnAlignment::Center => AlignmentType::Center,
-                        ColumnAlignment::Right => AlignmentType::Right,
-                        ColumnAlignment::Left => AlignmentType::Left,
-                    };
+                let alignment = match resolve_cell_alignment(
+                    rows,
+                    spans,
+                    &alignments,
+                    numbered,
+                    row_index,
+                    column_index,
+                ) {
+                    ColumnAlignment::Center => AlignmentType::Center,
+                    ColumnAlignment::Right => AlignmentType::Right,
+                    ColumnAlignment::Left => AlignmentType::Left,
+                };
                 let runs = if name_column == Some(column_index) && row_index > 0 {
                     let segments = inline_segments(text);
                     let cleaned = segments
@@ -173,7 +179,8 @@ pub(crate) fn add_official_content_block(
             rows,
             aligns,
             spans,
-        } => doc = add_smart_table(doc, rows, aligns, spans, bold),
+            numbered,
+        } => doc = add_smart_table(doc, rows, aligns, spans, *numbered, bold),
         MarkdownBlock::Image { alt, src } => {
             if let Some(paragraph) = image_paragraph(alt, src) {
                 doc = doc.add_paragraph(paragraph);

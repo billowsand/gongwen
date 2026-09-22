@@ -5,7 +5,8 @@
 
 use crate::export::crossref::ResearchMarks;
 use crate::export::{
-    attachment_title_name, clean_heading_number, legacy_attachment_label, render_list_number,
+    attachment_title_name, clean_heading_number, legacy_attachment_label, render_heading_number,
+    render_list_number,
 };
 use crate::models::{NumberingConfig, StyleMode};
 use std::borrow::Cow;
@@ -24,10 +25,15 @@ pub(crate) enum MarkdownBlock {
     },
     /// GFM 表格。`aligns` 是分隔行里写明的列对齐，与列一一对应；
     /// 没写冒号的列是 `Auto`，交给智能列宽按内容判定。
+    ///
+    /// `numbered` 是序号表（表前一行 `<!-- [序号表] -->`）：首列编号与分组行
+    /// 的整行合并都由解析器填好（见 `normalize_numbered_table`），渲染端据此
+    /// 把整行合并的分组行靠左排。
     Table {
         rows: Vec<Vec<String>>,
         aligns: Vec<ColumnAlign>,
         spans: Vec<TableSpan>,
+        numbered: bool,
     },
     Marker(MarkdownSection),
     Html(String),
@@ -299,7 +305,7 @@ pub(crate) fn parse_markdown_located_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Vec<LocatedBlock> {
-    parse_located(markdown, numbering, None)
+    parse_located(markdown, numbering, None, true)
 }
 
 /// 研究报告预览专用：切块之前先把每行里的 `{#id}`、`{@id}`、`[@key]` 换成纸面
@@ -307,11 +313,14 @@ pub(crate) fn parse_markdown_located_with_numbering(
 ///
 /// 替换发生在切块之前而不是之后，块的源码范围仍按原文的行长算：这样点击版面
 /// 回跳、页边行号这些都还落在没动过的源码上，而排版拿到的已经是纸面文字。
+///
+/// 序号表在这里**不生效**：研究报告的成品由 mdx 转换，那边不认整行合并，预览
+/// 认了就会跟纸面对不上。标记行照旧按注释跳过，不影响别的排版。
 pub(crate) fn parse_markdown_located_research(
     markdown: &str,
     marks: &ResearchMarks,
 ) -> Vec<LocatedBlock> {
-    parse_located(markdown, &NumberingConfig::default(), Some(marks))
+    parse_located(markdown, &NumberingConfig::default(), Some(marks), false)
 }
 
 /// 源码里的一行：`len` 始终是原文的字节数，`text` 才可能被行内标记替换过。
@@ -339,11 +348,15 @@ fn parse_located(
     markdown: &str,
     numbering: &NumberingConfig,
     marks: Option<&ResearchMarks>,
+    numbered_tables: bool,
 ) -> Vec<LocatedBlock> {
     let mut blocks: Vec<LocatedBlock> = Vec::new();
     let mut paragraph: Vec<ParagraphPart> = Vec::new();
     let mut paragraph_range = 0..0;
     let mut in_html_block = false;
+    // 最近一个序号表标记所在的行号。留给紧邻的表格用，中间隔了非空行就作废
+    // （判定在表格分支里按行区间做，这里不需要另行清理）。
+    let mut numbered_table_line: Option<usize> = None;
     let flush = |paragraph: &mut Vec<ParagraphPart>,
                  range: &mut std::ops::Range<usize>,
                  blocks: &mut Vec<LocatedBlock>| {
@@ -412,6 +425,16 @@ fn parse_located(
                 source_segments: Vec::new(),
             });
             in_html_block = true;
+        } else if numbered_tables && parse_numbered_table_marker(line) {
+            // 序号表的标记行：记下行号留给紧邻的表格，本身照旧按 Html 处理——
+            // 各版式对 Html 都是跳过，纸面上不会多出一行字。
+            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            numbered_table_line = Some(index);
+            blocks.push(LocatedBlock {
+                block: MarkdownBlock::Html(line.to_string()),
+                range: span,
+                source_segments: Vec::new(),
+            });
         } else if line.starts_with("<!--") && line.ends_with("-->") {
             // 不是公文那两种区段标记的 HTML 注释：研究报告的「摘要」「版本变更
             // 记录」「参考文献」都长这样。注释是写给解析器看的，一律不落到纸上，
@@ -428,6 +451,7 @@ fn parse_located(
             && is_table_separator(lines[index + 1].text.trim())
         {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            let header_line = index;
             let mut source_rows = vec![line.to_string()];
             // 分隔行不进正文，但它的冒号决定各列对齐。
             let mut aligns = parse_table_row(lines[index + 1].text.trim())
@@ -442,13 +466,21 @@ fn parse_located(
                 index += 1;
             }
             let column_count = aligns.len();
-            let (rows, spans) = parse_table_cells(&source_rows, column_count);
+            let (mut rows, mut spans) = parse_table_cells(&source_rows, column_count);
             aligns.resize(column_count, ColumnAlign::Auto);
+            // 标记行与表格之间只允许空行；中间插了别的非空行就不再算序号表。
+            let numbered = numbered_table_line.take().is_some_and(|marker| {
+                (marker + 1..header_line).all(|between| lines[between].text.trim().is_empty())
+            });
+            if numbered {
+                normalize_numbered_table(&mut rows, &mut spans, numbering);
+            }
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Table {
                     rows,
                     aligns,
                     spans,
+                    numbered,
                 },
                 range: start..end,
                 source_segments: Vec::new(),
@@ -947,6 +979,94 @@ pub(crate) fn parse_table_cells(
     (rows, spans)
 }
 
+/// 手写的行号：纯数字，或数字包在 `1.`、`1、`、`（1）` 这类常见序号壳里。
+///
+/// 序号表的首列本来就归编号管，这一格写着的若是这种内容，它就是这一行的序号，
+/// 而不是分组标题——「| 3 |  |  |  |」是一行还没填内容的第 3 行，
+/// 「| （一） 大标题 |  |  |  |」才是分组行。
+fn looks_like_row_number(value: &str) -> bool {
+    let value = value.trim();
+    let value = value
+        .strip_prefix(['（', '('])
+        .and_then(|rest| rest.strip_suffix(['）', ')']))
+        .unwrap_or(value)
+        .trim();
+    let digits = value.trim_end_matches(['.', '．', '、', '，', ',']);
+    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// 序号表的归一化：首列自动编号，只有首格有内容的行当整行合并的分组行。
+///
+/// 只在解析层做一次：DOCX、TeX 与界面预览都只吃 `MarkdownBlock::Table`，三端
+/// 因此自动一致。编号不写回源码，与标题编号同一取舍（见 `headings.rs` 头注释）。
+///
+/// 手写的 `||||` 与这里生成的整行跨度不会打架：分组行上原有的横向合并先撤掉
+/// 再换成整行跨度；与 `^^` 纵向合并有牵扯的行一律不参与分组。
+fn normalize_numbered_table(
+    rows: &mut [Vec<String>],
+    spans: &mut Vec<TableSpan>,
+    numbering: &NumberingConfig,
+) {
+    let Some(column_count) = rows.first().map(Vec::len) else {
+        return;
+    };
+    // 一列的表格不成表（见 `draft_page::blank_table`），也就没有编号的余地。
+    if column_count < 2 {
+        return;
+    }
+    // 表头首格留空时补上「序号」：首列既然是自动编号列，表头不写反倒奇怪。
+    if rows[0][0].trim().is_empty() {
+        rows[0][0] = "序号".to_string();
+    }
+
+    let style = numbering.table_group;
+    let mut group = 0usize;
+    let mut number = 0usize;
+    for (row_index, row) in rows.iter_mut().enumerate().skip(1) {
+        let first_span = table_span_at(spans, row_index, 0);
+        // `^^` 的延续行：首格是被覆盖的占位，既不编号也不当分组行。
+        if first_span.is_some_and(|span| !span.is_anchor(row_index, 0)) {
+            continue;
+        }
+        // 首格纵跨多行（手写的 `^^`）时不动它：既不覆盖原文，也不按分组处理。
+        // 手写的横向合并（`| 大标题 |||`）不算，它是分组行最常见的写法。
+        let vertically_merged = first_span.is_some_and(|span| span.row_span > 1);
+        let covered_from_above = spans
+            .iter()
+            .any(|span| span.row < row_index && span.row + span.row_span > row_index);
+        let (first_cell, rest) = row.split_first_mut().expect("表格行至少有首格");
+        let group_row = !vertically_merged
+            && !covered_from_above
+            && !first_cell.trim().is_empty()
+            && !looks_like_row_number(first_cell)
+            && rest.iter().all(|cell| cell.trim().is_empty());
+        if group_row {
+            group += 1;
+            number = 0;
+            // 手写的 `（一）`/`一、`/`1.` 一律清掉：分组编号由设置统一生成，
+            // 与标题编号「先清旧号再编号」是同一套规矩。
+            let title = clean_heading_number(first_cell.trim());
+            *first_cell = format!("{}{title}", render_heading_number(style, group));
+            // 这一行上手写的横向合并由整行跨度取代。首格既然不在纵向合并里，
+            // 挂在这一行上的跨度就都是横向的。
+            spans.retain(|span| span.row != row_index);
+            spans.push(TableSpan {
+                row: row_index,
+                column: 0,
+                row_span: 1,
+                column_span: column_count,
+            });
+        } else {
+            number += 1;
+            // 首格是手写纵向合并的锚点时要留住原文，编号只在空位里填。
+            if !vertically_merged {
+                *first_cell = number.to_string();
+            }
+        }
+    }
+    spans.sort_by_key(|span| (span.row, span.column));
+}
+
 pub(crate) fn parse_heading(line: &str) -> Option<(u8, &str)> {
     let hashes = line.chars().take_while(|ch| *ch == '#').count();
     if !(1..=6).contains(&hashes)
@@ -1003,6 +1123,29 @@ pub(crate) fn parse_section_marker(line: &str) -> Option<MarkdownSection> {
         }
         _ => None,
     }
+}
+
+/// 识别 `<!-- [序号表] -->` 这类独占一行的序号表标记（含「序号表格」与英文变体）。
+///
+/// 只对紧邻其后的第一张表格生效：中间隔了别的非空行就不算数（见 `parse_located`）。
+pub(crate) fn parse_numbered_table_marker(line: &str) -> bool {
+    let Some(inner) = line
+        .trim()
+        .strip_prefix("<!--")
+        .and_then(|rest| rest.strip_suffix("-->"))
+    else {
+        return false;
+    };
+    matches!(
+        inner
+            .trim()
+            .trim_start_matches(['[', '【'])
+            .trim_end_matches([']', '】'])
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "序号表" | "序号表格" | "numbered-table" | "numbered_table" | "numberedtable"
+    )
 }
 
 /// 研究报告的区段，与 mdx 的 `MarkerKind` 一一对应。公文只分正文与附件两段

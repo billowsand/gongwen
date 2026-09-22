@@ -557,10 +557,14 @@ pub(super) fn to_docx_grid(
 
 /// 返回单元格最终的水平对齐。普通/纵向合并单元格沿用所在列；横向合并跨过的
 /// 各列对齐一致时继承该值，否则按合并单元格自身内容判定。
+///
+/// `numbered` 是序号表：它的分组行（整行跨度）按公文习惯靠左，其余表格的
+/// 整行合并格不受影响，仍按下面的规则判定。
 pub(crate) fn resolve_cell_alignment(
     rows: &[Vec<String>],
     spans: &[TableSpan],
     column_alignments: &[ColumnAlignment],
+    numbered: bool,
     row: usize,
     column: usize,
 ) -> ColumnAlignment {
@@ -576,6 +580,9 @@ pub(crate) fn resolve_cell_alignment(
     };
     if span.column_span <= 1 {
         return fallback;
+    }
+    if numbered && span.column == 0 && span.column_span >= column_alignments.len() {
+        return ColumnAlignment::Left;
     }
     let end = (span.column + span.column_span).min(column_alignments.len());
     let covered = &column_alignments[span.column.min(end)..end];
@@ -604,6 +611,7 @@ pub(super) fn to_longtblr(
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
+    numbered: bool,
 ) -> String {
     let columns = analyze_table(rows, aligns, spans);
     if rows.is_empty() || columns.is_empty() {
@@ -704,6 +712,7 @@ pub(super) fn to_longtblr(
                         rows,
                         spans,
                         &column_alignments,
+                        numbered,
                         row_index,
                         column_index,
                     ) {
@@ -800,7 +809,7 @@ mod tests {
         assert_eq!(alignments[1], ColumnAlignment::Center);
 
         // TeX 的 colspec 跟着换成 l / r。
-        let tex = to_longtblr(&rows(), &aligns, &[]);
+        let tex = to_longtblr(&rows(), &aligns, &[], false);
         let colspec = tex
             .lines()
             .find(|line| line.contains("colspec"))
@@ -811,7 +820,7 @@ mod tests {
 
     #[test]
     fn tex_uses_longtblr_with_matching_smart_columns() {
-        let tex = to_longtblr(&rows(), &[], &[]);
+        let tex = to_longtblr(&rows(), &[], &[], false);
         assert!(tex.contains("\\begin{longtblr}"));
         assert!(tex.contains("label = none"));
         assert!(tex.contains("entry = none"));
@@ -843,7 +852,7 @@ mod tests {
                 column_span: 1,
             },
         ];
-        let tex = to_longtblr(&table, &[], &spans);
+        let tex = to_longtblr(&table, &[], &spans, false);
         assert!(tex.contains("\\SetCell[c=2]{c} 横向"), "{tex}");
         assert!(tex.contains("\\SetCell[r=2]{c} 纵向"), "{tex}");
         assert!(!tex.contains("横向 & 备注"), "被覆盖格不得重复内容：{tex}");
@@ -915,7 +924,7 @@ mod tests {
             vec!["项目".into(), "说明".into()],
             vec!["甲".into(), "\"**重点**\"内容".into()],
         ];
-        let tex = to_longtblr(&table, &[], &[]);
+        let tex = to_longtblr(&table, &[], &[], false);
         assert!(tex.contains("“\\GwBold{重点}”内容"), "{tex}");
         assert!(!tex.contains("**"));
     }
@@ -928,7 +937,7 @@ mod tests {
             vec!["2".into(), "王小明".into()],
             vec!["3".into(), "欧阳翠花".into()],
         ];
-        let tex = to_longtblr(&table, &[], &[]);
+        let tex = to_longtblr(&table, &[], &[], false);
         // 2 字姓名中间加 1em。
         assert!(tex.contains("张\\hspace{1em}三"));
         // 4 字姓名压缩到 3 字宽。
@@ -1186,7 +1195,7 @@ mod tests {
             ColumnAlignment::Left,
         ];
         assert_eq!(
-            resolve_cell_alignment(&table, &spans, &alignments, 1, 0),
+            resolve_cell_alignment(&table, &spans, &alignments, false, 1, 0),
             ColumnAlignment::Center
         );
 
@@ -1197,8 +1206,78 @@ mod tests {
         ];
         // 跨过的列对齐不一致，横向合并格按自身内容判定：短文本居中。
         assert_eq!(
-            resolve_cell_alignment(&table, &spans, &alignments, 1, 0),
+            resolve_cell_alignment(&table, &spans, &alignments, false, 1, 0),
             ColumnAlignment::Center
         );
+    }
+
+    /// 序号表的分组行（整行合并）靠左；同样的整行合并格出现在普通表格里
+    /// 仍按内容判定——「合计」这类行不会被顺手改成左对齐。
+    #[test]
+    fn numbered_group_row_is_left_aligned_but_plain_tables_are_not() {
+        let table = vec![
+            vec!["序号".into(), "标题".into(), "内容".into()],
+            vec!["（一）大标题".into(), String::new(), String::new()],
+            vec!["合计".into(), String::new(), String::new()],
+        ];
+        let spans = [
+            TableSpan {
+                row: 1,
+                column: 0,
+                row_span: 1,
+                column_span: 3,
+            },
+            TableSpan {
+                row: 2,
+                column: 0,
+                row_span: 1,
+                column_span: 3,
+            },
+        ];
+        let alignments = [
+            ColumnAlignment::Center,
+            ColumnAlignment::Left,
+            ColumnAlignment::Left,
+        ];
+        assert_eq!(
+            resolve_cell_alignment(&table, &spans, &alignments, true, 1, 0),
+            ColumnAlignment::Left
+        );
+        assert_eq!(
+            resolve_cell_alignment(&table, &spans, &alignments, false, 1, 0),
+            ColumnAlignment::Center,
+            "普通表格的整行合并格仍按内容判定"
+        );
+        // 非整行跨度的横向合并格不受序号表影响。
+        let narrow = [TableSpan {
+            row: 1,
+            column: 0,
+            row_span: 1,
+            column_span: 2,
+        }];
+        assert_eq!(
+            resolve_cell_alignment(&table, &narrow, &alignments, true, 1, 0),
+            ColumnAlignment::Center
+        );
+    }
+
+    /// TeX 那边同样按序号表的规矩给分组行写左对齐。
+    #[test]
+    fn tex_aligns_numbered_group_rows_to_the_left() {
+        let table = vec![
+            vec!["序号".into(), "标题".into(), "内容".into()],
+            vec!["（一）大标题".into(), String::new(), String::new()],
+            vec!["标题1".into(), "内容1".into(), String::new()],
+        ];
+        let spans = [TableSpan {
+            row: 1,
+            column: 0,
+            row_span: 1,
+            column_span: 3,
+        }];
+        let tex = to_longtblr(&table, &[], &spans, true);
+        assert!(tex.contains("\\SetCell[c=3]{l} （一）大标题"), "{tex}");
+        let plain = to_longtblr(&table, &[], &spans, false);
+        assert!(plain.contains("\\SetCell[c=3]{c} （一）大标题"), "{plain}");
     }
 }

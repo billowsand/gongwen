@@ -986,6 +986,25 @@ impl GongwenApp {
         setting_continuation(ui, |ui| {
             ui.weak("会议议程的事项编号固定为“1. 2. 3.”，不受列表编号设置影响。");
         });
+
+        sub_heading(ui, "表格编号", None);
+        setting_row(ui, "序号表格分组", None, |ui| {
+            egui::ComboBox::from_id_salt("table_group_numbering")
+                .selected_text(self.config.numbering.table_group.label())
+                .width(240.0)
+                .show_ui(ui, |ui| {
+                    for option in HeadingNumbering::ALL {
+                        ui.selectable_value(
+                            &mut self.config.numbering.table_group,
+                            option,
+                            option.label(),
+                        );
+                    }
+                });
+        });
+        setting_continuation(ui, |ui| {
+            ui.weak("只影响序号表格（表前一行 <!-- [序号表] -->）里分组行的（一）（二）。");
+        });
     }
 
     /// 设置页：左侧分区主菜单 + 右侧当前分区内容的平板式两栏布局，

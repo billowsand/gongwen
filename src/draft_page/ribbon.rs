@@ -395,6 +395,9 @@ impl DraftPage<'_> {
         // 一、表格
         let mut size = self.doc.table_size;
         let mut insert_table: Option<(usize, usize)> = None;
+        let mut insert_numbered = false;
+        let mut set_numbered: Option<bool> = None;
+        let numbered = self.numbered_table_at_cursor(ui.ctx());
         ui.add_enabled_ui(editable, |ui| {
             egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
                 theme::Icon::Table,
@@ -417,6 +420,42 @@ impl DraftPage<'_> {
                         ui.close();
                     }
                 });
+                ui.separator();
+                if ui
+                    .add(theme::menu_item(theme::Icon::WandSparkles, "插入序号表格"))
+                    .on_hover_text(
+                        "首列编号与分组行都由程序生成：首格写标题、其余留空的行整行合并并靠左，\
+                         组内序号从 1 重排。列数取上面的「列」",
+                    )
+                    .clicked()
+                {
+                    insert_numbered = true;
+                    ui.close();
+                }
+                ui.add_enabled_ui(in_table, |ui| {
+                    let (icon, label, tip) = if numbered == Some(true) {
+                        (
+                            theme::Icon::Table,
+                            "取消序号表格",
+                            "删掉表格上方的 `<!-- [序号表] -->` 标记行，编号随即停止生成",
+                        )
+                    } else {
+                        (
+                            theme::Icon::WandSparkles,
+                            "设为序号表格",
+                            "在表格上方加一行 `<!-- [序号表] -->`：首列自动编号，\
+                             首格写标题、其余留空的行整行合并并靠左",
+                        )
+                    };
+                    if ui
+                        .add(theme::menu_item(icon, label))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        set_numbered = Some(numbered != Some(true));
+                        ui.close();
+                    }
+                });
                 ui.weak("首行是表头。导出时列宽按内容自动排版。");
                 ui.weak("源码中连续 || 向右合并，^^ 与上方单元格合并。");
             });
@@ -424,6 +463,12 @@ impl DraftPage<'_> {
         self.doc.table_size = size;
         if let Some((rows, columns)) = insert_table {
             self.insert_table(ui.ctx(), rows, columns);
+        }
+        if insert_numbered {
+            self.insert_numbered_table(ui.ctx(), size.1);
+        }
+        if let Some(numbered) = set_numbered {
+            self.set_numbered_table(ui.ctx(), numbered);
         }
 
         // 二、表格的行列增删与列对齐：光标在表格里才亮

@@ -1588,6 +1588,8 @@ pub struct NumberingConfig {
     pub list1: ListNumbering,
     /// 二级列表（独立有序列表）编号样式。
     pub list2: ListNumbering,
+    /// 序号表（表前一行 `<!-- [序号表] -->`）里分组行的编号样式。
+    pub table_group: HeadingNumbering,
 }
 
 impl Default for NumberingConfig {
@@ -1599,6 +1601,7 @@ impl Default for NumberingConfig {
             heading4: HeadingNumbering::HalfDigitParen,
             list1: ListNumbering::Circled,
             list2: ListNumbering::DecimalDot,
+            table_group: HeadingNumbering::ChineseParen,
         }
     }
 }

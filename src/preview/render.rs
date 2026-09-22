@@ -605,7 +605,8 @@ pub(crate) fn content_block(
             rows,
             aligns,
             spans,
-        } => table_block(ui, metrics, rows, aligns, spans),
+            numbered,
+        } => table_block(ui, metrics, rows, aligns, spans, *numbered),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
         MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
         MarkdownBlock::Paragraph(_) => {}

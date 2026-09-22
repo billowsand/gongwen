@@ -8,11 +8,12 @@ use crate::draft_page::{
     DraftPage, display_width, editor_cursor, is_table_separator_line, is_table_source_line,
     line_at_byte, line_ranges, split_row,
 };
-use crate::export::{ColumnAlign, TableSpan, parse_table_cells, table_span_at};
+use crate::export::{
+    ColumnAlign, TableSpan, parse_numbered_table_marker, parse_table_cells, table_span_at,
+};
 use crate::theme;
 use eframe::egui;
 use std::ops::Range;
-
 /// 光标所在的那张 GFM 表格：解析出的单元格、列对齐，以及它在源码里的位置。
 pub(crate) struct TableEdit {
     /// 表头也在内，但不含分隔行。
@@ -168,6 +169,39 @@ pub(crate) fn blank_table(rows: usize, columns: usize) -> String {
     let columns = columns.max(2);
     let cells = vec![vec![String::new(); columns]; rows.max(1)];
     render_table(&cells, &vec![ColumnAlign::Auto; columns], &[])
+}
+
+/// 序号表格的骨架：标记行 + 表头 + 一条分组行 + 两条数据行。
+///
+/// 首列一个数字都不写——编号由解析器按组生成（见
+/// `export::parse::normalize_numbered_table`）。分组行只写标题：前面手写的
+/// `（一）` 会被清掉再重新编，写与不写结果一样。
+pub(crate) fn numbered_table_skeleton(columns: usize) -> String {
+    let columns = columns.max(2);
+    let mut rows = vec![vec![String::new(); columns]; 4];
+    rows[0][0] = "序号".to_string();
+    rows[1][0] = "（一）分组标题".to_string();
+    let table = render_table(&rows, &vec![ColumnAlign::Auto; columns], &[]);
+    format!("{NUMBERED_TABLE_MARKER}\n{table}")
+}
+
+/// 序号表的标记行。
+pub(crate) const NUMBERED_TABLE_MARKER: &str = "<!-- [序号表] -->";
+
+/// 表格上方最近的非空行若是序号表标记，返回它的行号。
+fn numbered_table_marker_line(text: &str, ranges: &[Range<usize>], first: usize) -> Option<usize> {
+    (0..first)
+        .rev()
+        .find(|index| !text[ranges[*index].clone()].trim().is_empty())
+        .filter(|index| parse_numbered_table_marker(&text[ranges[*index].clone()]))
+}
+
+/// 光标所在的表格是不是序号表格。
+pub(crate) fn numbered_table_at(text: &str, cursor: usize) -> Option<bool> {
+    let table = table_at(text, cursor)?;
+    let ranges = line_ranges(text);
+    let first = line_at_byte(&ranges, table.span.start);
+    Some(numbered_table_marker_line(text, &ranges, first).is_some())
 }
 
 /// 「插入」分区里对光标所在表格的编辑动作。
@@ -411,10 +445,80 @@ impl DraftPage<'_> {
         *self.status = format!("已插入 {rows} 行 {columns} 列表格。");
     }
 
+    /// 在光标处插入一张序号表格：标记行 + 表头 + 一条分组行 + 两条数据行。
+    pub(crate) fn insert_numbered_table(&mut self, ctx: &egui::Context, columns: usize) {
+        if self.doc.read_only() {
+            return;
+        }
+        let markdown = numbered_table_skeleton(columns);
+        let position = self.insert_block(ctx, &markdown);
+        // 光标落进表头第一格：先跨过标记行与行首的 "| "。
+        let marker = NUMBERED_TABLE_MARKER.len() + 1;
+        self.doc.pending_source_jump = Some(position + marker + 2);
+        *self.status = "已插入序号表格：首列编号与分组行由程序生成。".into();
+    }
+
+    /// 把光标所在的表格设为（或取消）序号表格——在表格上方插入或删掉标记行。
+    pub(crate) fn set_numbered_table(&mut self, ctx: &egui::Context, numbered: bool) {
+        if self.doc.read_only() {
+            return;
+        }
+        let Some(table) = self.table_at_cursor(ctx) else {
+            *self.status = "把光标放进表格里再用这个按钮。".into();
+            return;
+        };
+        let text = &mut self.doc.generated_markdown;
+        let ranges = line_ranges(text);
+        let first = line_at_byte(&ranges, table.span.start);
+        let marked = numbered_table_marker_line(text, &ranges, first);
+        if marked.is_some() == numbered {
+            *self.status = if numbered {
+                "这张表已经是序号表格。".into()
+            } else {
+                "这张表本来就不是序号表格。".into()
+            };
+            return;
+        }
+        let cursor = editor_cursor(ctx, text).unwrap_or(table.span.start);
+        let (at, removed) = match marked {
+            // 取消：连同行尾换行一起删掉，不留空行。
+            Some(line) => (
+                ranges[line].start,
+                ranges
+                    .get(line + 1)
+                    .map_or(ranges[line].end, |next| next.start)
+                    - ranges[line].start,
+            ),
+            None => (ranges[first].start, 0),
+        };
+        let inserted = if marked.is_none() {
+            text.insert_str(at, &format!("{NUMBERED_TABLE_MARKER}\n"));
+            NUMBERED_TABLE_MARKER.len() + 1
+        } else {
+            text.replace_range(at..at + removed, "");
+            0
+        };
+        // 光标跟着正文一起平移，转换完还停在原来那一行。
+        let shift = inserted as isize - removed as isize;
+        let moved = (cursor as isize + shift).clamp(0, text.len() as isize) as usize;
+        self.doc.pending_source_jump = Some(moved);
+        *self.status = if numbered {
+            "已设为序号表格：首列自动编号，首格写标题、其余留空的行整行合并并靠左。".into()
+        } else {
+            "已取消序号表格。".into()
+        };
+    }
+
     /// 光标所在的那张表格；不在表格里返回 None。
     pub(crate) fn table_at_cursor(&self, ctx: &egui::Context) -> Option<TableEdit> {
         let cursor = editor_cursor(ctx, &self.doc.generated_markdown)?;
         table_at(&self.doc.generated_markdown, cursor)
+    }
+
+    /// 光标所在的表格是不是序号表格；不在表格里返回 None。
+    pub(crate) fn numbered_table_at_cursor(&self, ctx: &egui::Context) -> Option<bool> {
+        let cursor = editor_cursor(ctx, &self.doc.generated_markdown)?;
+        numbered_table_at(&self.doc.generated_markdown, cursor)
     }
 
     /// 表格的行列增删与列对齐。改完整张表按最宽的单元格重新对齐竖线，

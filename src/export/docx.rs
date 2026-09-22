@@ -496,7 +496,8 @@ pub fn write_docx_with_numbering(
                     rows,
                     aligns,
                     spans,
-                } => doc = add_smart_table(doc, rows, aligns, spans, bold),
+                    numbered,
+                } => doc = add_smart_table(doc, rows, aligns, spans, *numbered, bold),
             }
         }
     }
@@ -696,6 +697,55 @@ mod tests {
     }
 
     /// 加粗排法三端同源：默认让 Word 合成粗体，选了专用粗体字体就换字面。
+    /// 序号表导出到 Word：分组行整行合并（`w:gridSpan`）且靠左（`w:jc="left"`），
+    /// 首列是程序编出来的组内序号。
+    #[test]
+    fn numbered_table_exports_merged_left_aligned_group_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("numbered-table.docx");
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::PlainDocument;
+        write_docx_ok(
+            &path,
+            &input,
+            "# 序号表测试\n\
+             <!-- [序号表] -->\n\
+             | 序号 | 标题 | 内容 | 备注 |\n\
+             | --- | --- | --- | --- |\n\
+             | 大标题一 |  |  |  |\n\
+             |  | 标题甲 | 内容甲 | 备注甲 |\n\
+             |  | 标题乙 | 内容乙 | 备注乙 |\n\
+             | 大标题二 |  |  |  |\n\
+             |  | 标题丙 | 内容丙 | 备注丙 |",
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        // 分组行：整行四列合并，内容按设置生成 `（一）`，靠左。括号里的字面走
+        // 楷体那一套，与标题分成两个 run，所以按标题文字定位。
+        let group = table_cell_containing(&xml, "大标题一");
+        assert!(group.contains(r#"<w:gridSpan w:val="4" />"#), "{group}");
+        assert!(
+            paragraph_containing(group, "大标题一").contains(r#"<w:jc w:val="left" />"#),
+            "{group}"
+        );
+        let second = table_cell_containing(&xml, "大标题二");
+        assert!(second.contains(r#"<w:gridSpan w:val="4" />"#), "{second}");
+        // 数据行不合并，序号列是解析器填进去的组内位次。
+        for needle in ["标题甲", "标题乙"] {
+            let cell = table_cell_containing(&xml, needle);
+            assert!(!cell.contains("<w:gridSpan"), "数据行不该合并：{cell}");
+        }
+        assert_eq!(xml.matches(">（一）</w:t>").count(), 1, "{xml}");
+        assert_eq!(xml.matches(">（二）</w:t>").count(), 1);
+        for number in ["1", "2"] {
+            assert!(
+                xml.contains(&format!(">{number}</w:t>")),
+                "缺少自动编号 {number}"
+            );
+        }
+        assert!(xml.contains(">序号</w:t>"), "表头首格应补「序号」");
+    }
+
     #[test]
     fn bold_text_follows_the_configured_bold_style() {
         let temp = tempfile::tempdir().unwrap();
@@ -1830,6 +1880,18 @@ mod tests {
         let needle_at = xml.find(needle).unwrap();
         let start = xml[..needle_at].rfind("<w:p ").unwrap();
         let end = xml[needle_at..].find("</w:p>").unwrap() + needle_at + "</w:p>".len();
+        &xml[start..end]
+    }
+
+    /// 取含 `needle` 的那个表格单元格的 XML：合并跨度 `w:gridSpan` 写在
+    /// `<w:tcPr>` 里，看段落看不到。
+    fn table_cell_containing<'a>(xml: &'a str, needle: &str) -> &'a str {
+        let needle_at = xml.find(needle).unwrap();
+        let start = xml[..needle_at]
+            .rfind("<w:tc>")
+            .or_else(|| xml[..needle_at].rfind("<w:tc "))
+            .unwrap();
+        let end = xml[needle_at..].find("</w:tc>").unwrap() + needle_at + "</w:tc>".len();
         &xml[start..end]
     }
 
