@@ -323,6 +323,11 @@ mod tests {
         input.kind = TemplateKind::PlainDocument;
         assert_eq!(security_text(&input).as_deref(), Some("秘密★10年"));
 
+        // “内部”件没有保密期限，只印密级二字、不出“★”。
+        input.profile.security_level = "内部".into();
+        input.profile.security_period.clear();
+        assert_eq!(security_text(&input).as_deref(), Some("内部"));
+
         input.profile.security_level.clear();
         assert_eq!(security_text(&input), None);
     }

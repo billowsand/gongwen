@@ -113,7 +113,13 @@ pub(crate) fn security_runs(
         run
     };
     let (digits, rest) = split_period_digits(period);
-    let mut runs = vec![base_run(&format!("{level}★"))];
+    // 保密期限为空的（“内部”件）只印密级二字，不出“★”。
+    let heading = if period.trim().is_empty() {
+        level.to_string()
+    } else {
+        format!("{level}★")
+    };
+    let mut runs = vec![base_run(&heading)];
     if !digits.is_empty() {
         runs.push(base_run(digits));
     }

@@ -36,7 +36,8 @@ pub(crate) fn header_unit(input: &DraftInput, display: &UnitDisplay) -> String {
     display.full_name_for(&chosen, external)
 }
 
-/// 密级行的文字：“密级★保密期限”，勾选指人专办时空一个全角空格再标注。
+/// 密级行的文字：“密级★保密期限”；“内部”件没有保密期限，只写“内部”二字。
+/// 勾选指人专办时在后面空一个全角空格再标注。
 /// 未标注密级时返回 None，整行不排。仅用于测试断言：实际渲染在 `security_line`
 /// 里按“黑体 + 数字等宽”分段画，不经过这里。
 #[cfg(test)]
@@ -46,7 +47,11 @@ pub(crate) fn security_text(input: &DraftInput) -> Option<String> {
         return None;
     }
     let period = input.profile.security_period.trim();
-    let mut text = format!("{level}★{period}");
+    let mut text = if period.is_empty() {
+        level.to_string()
+    } else {
+        format!("{level}★{period}")
+    };
     // 普通公文不带“指人专办”，与 export::latex::security_commands 一致。
     if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {
         text.push('\u{2003}');
@@ -71,11 +76,13 @@ pub(crate) fn security_line(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftI
     let mut job = job(metrics.content);
     job.halign = Align::LEFT;
     let heiti = metrics.font(theme::FONT_HEITI, BODY_PT);
-    job.append(
-        &format!("{level}★{period}"),
-        0.0,
-        text_format(heiti.clone(), metrics.line),
-    );
+    // 保密期限为空的（“内部”件）只印密级二字，不出“★”。
+    let text = if period.is_empty() {
+        level.to_string()
+    } else {
+        format!("{level}★{period}")
+    };
+    job.append(&text, 0.0, text_format(heiti.clone(), metrics.line));
     if !special.is_empty() {
         job.append(special, 0.0, text_format(heiti.clone(), metrics.line));
     }

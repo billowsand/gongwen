@@ -926,8 +926,8 @@ impl SecurityRules {
 
     pub fn period_options(&self, level: SecurityLevel) -> Vec<String> {
         match level {
-            SecurityLevel::Unmarked => Vec::new(),
-            SecurityLevel::Internal => vec![LONG_TERM.to_string()],
+            // “内部”不是国家秘密，没有法定保密期限，版心只印“内部”二字。
+            SecurityLevel::Unmarked | SecurityLevel::Internal => Vec::new(),
             _ => {
                 let max = self.max_years(level).unwrap_or(0);
                 let mut options = vec!["6个月".to_string()];
@@ -948,11 +948,10 @@ impl SecurityRules {
         }
     }
 
-    /// 切换密级时给出的默认期限：取该密级的上限。
+    /// 切换密级时给出的默认期限：取该密级的上限；“内部”无期限。
     pub fn default_period(&self, level: SecurityLevel) -> String {
         match level {
-            SecurityLevel::Unmarked => String::new(),
-            SecurityLevel::Internal => LONG_TERM.to_string(),
+            SecurityLevel::Unmarked | SecurityLevel::Internal => String::new(),
             _ => self
                 .max_years(level)
                 .map(|years| format!("{years}年"))
@@ -965,6 +964,10 @@ impl SecurityRules {
         let period = period.trim();
         if level == SecurityLevel::Unmarked {
             return (!period.is_empty()).then(|| "未选择密级时不应填写保密期限".to_string());
+        }
+        // “内部”没有保密期限：旧稿可能还带着“长期”，提示清空即可。
+        if level == SecurityLevel::Internal {
+            return (!period.is_empty()).then(|| "“内部”件不标注保密期限，请清空".to_string());
         }
         if period.is_empty() {
             return Some(format!("{}级公文必须标注保密期限", level.label()));
@@ -2703,6 +2706,10 @@ mod tests {
         let top = rules.period_options(SecurityLevel::TopSecret);
         assert!(top.contains(&"30年".to_string()));
         assert!(!top.contains(&"50年".to_string()));
+
+        // “内部”没有保密期限，下拉为空、默认期限也是空。
+        assert!(rules.period_options(SecurityLevel::Internal).is_empty());
+        assert!(rules.default_period(SecurityLevel::Internal).is_empty());
     }
 
     #[test]
@@ -2718,6 +2725,9 @@ mod tests {
         assert!(rules.check(SecurityLevel::Confidential, "").is_some());
         assert!(rules.check(SecurityLevel::Unmarked, "10年").is_some());
         assert!(rules.check(SecurityLevel::Unmarked, "").is_none());
+        // “内部”不标注保密期限：空为正常，带期限（包括旧稿的“长期”）给出提示。
+        assert!(rules.check(SecurityLevel::Internal, "").is_none());
+        assert!(rules.check(SecurityLevel::Internal, "长期").is_some());
     }
 
     #[test]

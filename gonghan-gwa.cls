@@ -356,9 +356,10 @@
 % 指人专办：勾选后由生成器注入“指人专办”，在密级后空一个全角空格并以黑体标注。
 \newcommand{\SpecialHandling}{}
 % 密级行主体：密级★保密期限 + 可选“指人专办”（前加一个全角空格）。
+% “内部”件没有保密期限（\SecurityPeriod 为空），只印密级二字、不出“★”。
 % 三个抬头（函稿/白头件/会议议程）共用，保证格式一致。
 \newcommand{\SecurityLine}{%
-    \SecurityLevel{}★\SecurityPeriod{}%
+    \SecurityLevel{}\ifthenelse{\equal{\SecurityPeriod}{}}{}{★\SecurityPeriod{}}%
     \ifthenelse{\equal{\SpecialHandling}{}}{}{\hspace{1em}\SpecialHandling}%
 }
 

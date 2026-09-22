@@ -1026,12 +1026,15 @@ fn strip_metadata_echoes(input: &DraftInput, generated: &str) -> String {
         .map(str::to_string)
         .collect::<Vec<_>>();
     signatures.extend(split_units(&profile.joint_issuing_units));
-    let security = format!(
-        "{}★{}",
-        profile.security_level.trim(),
-        profile.security_period.trim()
-    );
-    let has_security = !profile.security_level.trim().is_empty();
+    // 与版心写法一致：保密期限为空的（“内部”件）只有密级二字，没有“★”。
+    let level = profile.security_level.trim();
+    let period = profile.security_period.trim();
+    let security = if period.is_empty() {
+        level.to_string()
+    } else {
+        format!("{level}★{period}")
+    };
+    let has_security = !level.is_empty();
     let document_number = (!profile.document_number.trim().is_empty()
         && !profile.department_code.trim().is_empty())
     .then(|| {

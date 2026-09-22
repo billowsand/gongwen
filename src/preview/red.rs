@@ -740,11 +740,14 @@ pub(crate) fn paint_red_approval_overlay(
     let record_top = text_bottom - record_height;
 
     if !input.profile.security_level.trim().is_empty() {
-        let security = format!(
-            "{}★{}",
-            input.profile.security_level.trim(),
-            input.profile.security_period.trim()
-        );
+        // 保密期限为空的（“内部”件）只印密级二字，不出“★”。
+        let level = input.profile.security_level.trim();
+        let period = input.profile.security_period.trim();
+        let security = if period.is_empty() {
+            level.to_string()
+        } else {
+            format!("{level}★{period}")
+        };
         let galley = red_overlay_text(
             ui,
             metrics,

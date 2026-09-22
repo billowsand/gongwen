@@ -1029,12 +1029,12 @@ mod tests {
         assert!(GONGHAN_CLASS.contains("\\newcommand{\\SpecialHandling}{}"));
         assert!(GONGHAN_CLASS.contains("\\newcommand{\\SecurityLine}{"));
         assert!(GONGHAN_CLASS.contains("\\SecurityLine{}"));
-        // 密级行顺序：密级★保密期限 在前，“指人专办” 在后。
+        // 密级行顺序：密级★保密期限 在前，“指人专办” 在后；保密期限为空的
+        // （“内部”件）不出“★”。
         let line = &GONGHAN_CLASS[GONGHAN_CLASS.find("\\newcommand{\\SecurityLine}{").unwrap()..];
-        assert!(line.contains("\\SecurityLevel{}★\\SecurityPeriod{}"));
+        assert!(line.contains("{}{★\\SecurityPeriod{}}"));
         assert!(
-            line.find("\\SecurityLevel{}★\\SecurityPeriod{}").unwrap()
-                < line.find("\\SpecialHandling").unwrap(),
+            line.find("\\SecurityPeriod").unwrap() < line.find("\\SpecialHandling").unwrap(),
             "指人专办应排在保密期限之后"
         );
     }
