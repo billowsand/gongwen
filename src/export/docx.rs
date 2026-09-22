@@ -86,6 +86,22 @@ const CLOSING_GAP_TWIPS: u32 = 3 * BODY_LINE_TWIPS;
 const SECURITY_FIRST_LINE_TWIPS: u32 = 377;
 /// TeX \NoBodyNotice 在“（此页无正文）”之前固定留 58pt。
 const NO_BODY_NOTICE_GAP_TWIPS: u32 = 1_156;
+/// 红头呈批件首页密级行的段前间距。
+const RED_APPROVAL_SECURITY_BEFORE_TWIPS: u32 = 300;
+/// 红头呈批件首页发文机关标志的行高（TeX 的 \HeaderFontSize 一行）。
+const RED_APPROVAL_UNIT_LINE_TWIPS: u32 = 700;
+/// 同上，文号与红色横线之间的固定段后间距。
+const RED_APPROVAL_NUMBER_AFTER_TWIPS: u32 = 240;
+/// 红头呈批件首页标题行盒的上沿，量的是版心顶端往下的距离。
+///
+/// 红色横线画在版心顶端以下 48 mm 处。TeX 那边标题字面顶沿落在横线下方 7.4 mm
+/// （`\par\vspace*{55mm}` 再加小二字面在行盒里的位置），Word 的行盒把 18 pt 的
+/// 字面压得更低，直接照抄 55 mm 会低出近 4 mm：2902 缇是拿同一份稿件两边各渲
+/// 染一遍、量着 PDF 对齐后取的值。
+///
+/// 抬头三段（密级、发文机关、文号）都用固定行高排，把它们的实际高度从这里
+/// 扣掉就是标题的段前间距；文号缺省时标题也不会跟着上移。
+const RED_APPROVAL_TITLE_TOP_TWIPS: u32 = 2_902;
 /// 正文中完整括号（全角/半角）及其中内容的字号：14 pt，四号，比正文小一号。
 const PAREN_SIZE: usize = 28;
 pub(super) const TABLE_CONTENT_WIDTH_TWIPS: usize = 8_844; // 156 mm 版心
@@ -152,6 +168,9 @@ pub fn write_docx_with_numbering(
         })
         .unwrap_or(input.title_hint.as_str());
 
+    // 红头呈批件首页抬头（密级、发文机关、文号）排下来的总高度，用来反推标题
+    // 的段前间距，见 RED_APPROVAL_TITLE_TOP_TWIPS。
+    let mut red_approval_header_twips = 0u32;
     let mut doc = Docx::new()
         .page_size(11906, 16838)
         .page_margin(PageMargin {
@@ -250,27 +269,37 @@ pub fn write_docx_with_numbering(
             doc = doc.add_paragraph(
                 letter_security_paragraph(input).line_spacing(
                     LineSpacing::new()
-                        .before(300)
+                        .before(RED_APPROVAL_SECURITY_BEFORE_TWIPS)
                         .line(BODY_LINE_TWIPS as i32)
                         .line_rule(LineSpacingType::Exact)
                         .after(0),
                 ),
             );
+            red_approval_header_twips += RED_APPROVAL_SECURITY_BEFORE_TWIPS + BODY_LINE_TWIPS;
             doc = doc.add_paragraph(
                 header::issuing_unit_paragraph(&main_issuing_unit(input, display)).line_spacing(
                     LineSpacing::new()
-                        .line(700)
+                        .line(RED_APPROVAL_UNIT_LINE_TWIPS as i32)
                         .line_rule(LineSpacingType::Exact),
                 ),
             );
+            red_approval_header_twips += RED_APPROVAL_UNIT_LINE_TWIPS;
             // TeX 红头呈批件首页：\DocumentNumber{}号，序号与“号”之间不留空格。
+            // 行高与段后间距都写死：红色横线是按版心绝对坐标画的（48mm），标题
+            // 却是流式排下来的，头部任何一段高度不定，标题与横线的间距就会漂。
             if let Some(number) = official_document_number(input, "") {
                 doc = doc.add_paragraph(
                     Paragraph::new()
                         .add_run(body_run(number))
                         .align(AlignmentType::Center)
-                        .line_spacing(LineSpacing::new().after(240)),
+                        .line_spacing(
+                            LineSpacing::new()
+                                .line(BODY_LINE_TWIPS as i32)
+                                .line_rule(LineSpacingType::Exact)
+                                .after(RED_APPROVAL_NUMBER_AFTER_TWIPS),
+                        ),
                 );
+                red_approval_header_twips += BODY_LINE_TWIPS + RED_APPROVAL_NUMBER_AFTER_TWIPS;
             }
             doc =
                 doc.first_header(
@@ -298,7 +327,8 @@ pub fn write_docx_with_numbering(
         document_title_paragraph(title, &plan)
     };
     let title_before = if input.kind == TemplateKind::RedHeadApproval {
-        390
+        // 标题字面顶沿落在红色横线下方 7.4mm，与 TeX 量出来的一致。
+        RED_APPROVAL_TITLE_TOP_TWIPS.saturating_sub(red_approval_header_twips)
     } else {
         if matches!(
             input.kind,

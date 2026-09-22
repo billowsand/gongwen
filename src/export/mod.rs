@@ -47,16 +47,18 @@ pub(crate) use parse::{
     parse_table_cells, renumber_ordered_groups, research_report_titles, source_lines,
     table_span_at,
 };
+pub(crate) use red::{
+    RED_APPROVAL_GUTTER_TWIPS, RED_APPROVAL_NARROW_MM, RED_APPROVAL_RULE_MM,
+    RED_APPROVAL_RULE_TWIPS, RED_RECORD_LABEL_CONTACT_TWIPS, RED_RECORD_LABEL_UNIT_TWIPS,
+    RedRecordColumns, SIGNATURE_ROOM_MM, SIGNATURE_ROOM_TWIPS, red_approval_body_metrics,
+    red_approval_wrap_lines, red_record_columns, red_record_name_twips, red_record_phone_twips,
+    red_record_scale_units, red_record_unit_twips, red_signature_unit_width_mm,
+    red_signature_unit_width_twips,
+};
 #[cfg(test)]
 pub(crate) use red::{
     RED_RECORD_EM_TWIPS, RED_RECORD_LABEL_PHONE_TWIPS, RED_RECORD_MIN_UNIT_TWIPS,
     RED_RECORD_TOTAL_TWIPS, red_signature_unit_width_em,
-};
-pub(crate) use red::{
-    RED_RECORD_LABEL_CONTACT_TWIPS, RED_RECORD_LABEL_UNIT_TWIPS, RedRecordColumns,
-    SIGNATURE_ROOM_MM, SIGNATURE_ROOM_TWIPS, red_approval_body_metrics, red_approval_wrap_lines,
-    red_record_columns, red_record_name_twips, red_record_phone_twips, red_record_scale_units,
-    red_record_unit_twips, red_signature_unit_width_mm, red_signature_unit_width_twips,
 };
 #[cfg(test)]
 pub(crate) use text::parenthesized_ranges;

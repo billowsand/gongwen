@@ -9,8 +9,9 @@ pub const RED_APPROVAL_TITLE_SIZE_PT: usize = 18;
 /// LaTeX 的 156mm 约 443.9 TeX pt，二者对应同一物理宽度，取较小值使压缩结果偏保守，
 /// 两套引擎都放得下。
 pub const TITLE_LINE_WIDTH_PT: f64 = 8_845.0 / 20.0;
-/// 红头呈批件首页左侧正文/标题栏宽度（约 10cm）。
-pub const RED_APPROVAL_TITLE_WIDTH_PT: f64 = 100.0 / 25.4 * 72.0;
+/// 红头呈批件首页左侧正文/标题栏宽度（96mm）：红色竖线在 100mm 处，
+/// 标题与正文一样要给竖线让出 4mm 留白，见 `export::red::RED_APPROVAL_GUTTER_MM`。
+pub const RED_APPROVAL_TITLE_WIDTH_PT: f64 = super::red::RED_APPROVAL_NARROW_MM / 25.4 * 72.0;
 
 /// 标题的排布方案。
 #[derive(Debug, Clone, PartialEq, Eq)]

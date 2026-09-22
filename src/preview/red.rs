@@ -21,6 +21,10 @@ use eframe::egui::{Align, Color32, Stroke};
 use std::ops::Range;
 use std::sync::Arc;
 
+/// 一行里字形底沿在行盒中的位置比例：基线在行高的 75%（见 `gutter::row_baseline`），
+/// 再加约 7% 的字身下沿。判断首页末行放不放得下时按它量，而不是按整个行盒。
+pub(crate) const RED_INK_RATIO: f32 = 0.82;
+
 /// 普通文种正文区渲染参数。红头呈批件走下方独立的打印分页模型。
 pub(crate) struct BodyRun {
     pub(crate) compact_headings: Vec<bool>,
@@ -42,6 +46,14 @@ pub(crate) struct RedPrintFragment {
     pub(crate) width: f32,
     visible_height: f32,
     align: Align,
+}
+
+impl RedPrintFragment {
+    /// 这一片可见文字的行盒下沿（纸面坐标）。首页排满与否按它量。
+    #[cfg(test)]
+    pub(crate) fn bottom(&self) -> f32 {
+        self.y + self.visible_height
+    }
 }
 
 #[derive(Default)]
@@ -101,7 +113,11 @@ impl RedPrintLayout {
     }
 
     pub(crate) fn body_width(&self, metrics: &Metrics) -> f32 {
-        metrics.mm(if self.page_index == 0 { 100.0 } else { 156.0 })
+        metrics.mm(if self.page_index == 0 {
+            export::RED_APPROVAL_NARROW_MM as f32
+        } else {
+            156.0
+        })
     }
 
     pub(crate) fn body_bottom(&self, metrics: &Metrics) -> f32 {
@@ -259,10 +275,17 @@ fn red_place_styled_flow_text(
         let galley = layout(ui, flow_job.clone());
         // 正文两端对齐，与 Word 导出和 TeX 一致；末行保持自然宽度。
         let justified = justified_rows(ui, &flow_job, &galley);
+        // 行盒是 28pt，字形只占其中约 82%（基线在 75% 处，再加一点字身下沿）。
+        // 按行盒底判定会白白空掉最后一行——TeX 那边只要红线上方还容得下一个
+        // 三号字就照排（cls 里 \RedFirstPageRemaining>16pt 那一支）。这里同样
+        // 按字形底沿判定：末行的行盒可以越过正文区下沿，字形仍在承办区红线
+        // 上方 2mm 的安全距离之内。
+        let ink_bottom =
+            |row: &egui::epaint::text::PlacedRow| row.rect().top() + metrics.line * RED_INK_RATIO;
         let fitting = galley
             .rows
             .iter()
-            .take_while(|row| row.rect().bottom() <= available + 0.5)
+            .take_while(|row| ink_bottom(row) <= available + 0.5)
             .count();
         if fitting == 0 {
             layout_state.next_page(metrics);
@@ -390,7 +413,8 @@ pub(crate) fn red_build_print_layout(
     let record_height = metrics.mm(1.4) + metrics.line * rows.len().max(1) as f32;
     let first_body_bottom = metrics.mm(37.0 + 225.0) - record_height - metrics.mm(2.0);
     let left = metrics.mm(28.0);
-    let narrow = metrics.mm(100.0);
+    // 首页窄栏比红色竖线再窄 4mm，标题与正文同宽（见 export::RED_APPROVAL_NARROW_MM）。
+    let narrow = metrics.mm(export::RED_APPROVAL_NARROW_MM as f32);
     let mut state = RedPrintLayout::new(metrics.mm(37.0 + 55.0), first_body_bottom);
 
     if !title.0.is_empty() {
@@ -763,13 +787,8 @@ pub(crate) fn paint_red_approval_overlay(
         ],
         red,
     );
-    painter.line_segment(
-        [
-            at(text_left + 100.0, text_top + 48.0),
-            at(text_left + 100.0, record_top),
-        ],
-        red,
-    );
+    let rule_x = text_left + export::RED_APPROVAL_RULE_MM as f32;
+    painter.line_segment([at(rule_x, text_top + 48.0), at(rule_x, record_top)], red);
     let instruction = red_overlay_text(
         ui,
         metrics,
@@ -778,7 +797,7 @@ pub(crate) fn paint_red_approval_overlay(
         BODY_PT,
         theme::paper::red(),
     );
-    let instruction_center = at(text_left + 128.0, text_top + 61.0);
+    let instruction_center = at((rule_x + text_left + 156.0) / 2.0, text_top + 61.0);
     painter.galley(
         instruction_center - egui::vec2(instruction.size().x / 2.0, 0.0),
         instruction,

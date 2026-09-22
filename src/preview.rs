@@ -703,13 +703,14 @@ mod tests {
                 .iter()
                 .find(|fragment| fragment.range.as_ref() == Some(&heading_range))
                 .expect("一级标题应继续排在首页");
-            assert!((heading.width - metrics.mm(100.0)).abs() < 0.5);
+            let narrow = metrics.mm(export::RED_APPROVAL_NARROW_MM as f32);
+            assert!((heading.width - narrow).abs() < 0.5);
             let first_part = layout.pages[0]
                 .fragments
                 .iter()
                 .find(|fragment| fragment.range.as_ref() == Some(&second_range))
                 .expect("标题后的正文应利用首页剩余空间");
-            assert!((first_part.width - metrics.mm(100.0)).abs() < 0.5);
+            assert!((first_part.width - narrow).abs() < 0.5);
             let continuation = layout.pages[1]
                 .fragments
                 .iter()
@@ -776,9 +777,78 @@ mod tests {
                 .iter()
                 .find(|fragment| fragment.range.as_ref() == Some(&paragraph_range))
                 .expect("长段落应续排到第二页");
-            assert!((first.width - metrics.mm(100.0)).abs() < 0.5);
+            assert!((first.width - metrics.mm(export::RED_APPROVAL_NARROW_MM as f32)).abs() < 0.5);
             assert!((second.width - metrics.mm(156.0)).abs() < 0.5);
             assert!(second.galley.rows[0].size.x > first.galley.rows[0].size.x * 1.25);
+        });
+    }
+
+    /// 红头呈批件首页要排满：末行字形贴到承办区红线上方 2mm 的安全线附近，
+    /// 既不许越线压字，也不许白白空出一行。
+    ///
+    /// 按整个行盒判定会把最后一行让给下一页——行盒 28pt，字形只占其中 82%，
+    /// 剩下的 5pt 白边本来就在红线上方。TeX 那边同样按字形高度算额度
+    /// （cls 里 `\RedFirstPageRemaining>16pt`），三端的首页容量才对得上。
+    #[test]
+    fn red_print_preview_fills_the_first_page_up_to_the_record_rule() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        let mut input = draft(TemplateKind::RedHeadApproval);
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.signing_unit = "星海省教育厅".into();
+        let markdown = format!(
+            "# 关于报送标准化建设情况的函\n\n{}",
+            "为进一步推进服务事项标准化、规范化、便利化，全面掌握各单位年度工作进展，请结合实际报送年度标准化建设情况。".repeat(6)
+        );
+        let located = export::parse_markdown_located(&markdown);
+        let body = located.iter().collect::<Vec<_>>();
+        let title = located
+            .iter()
+            .find_map(|block| match &block.block {
+                MarkdownBlock::Title(text) => Some((export::plain_text(text), block.range.clone())),
+                _ => None,
+            })
+            .unwrap();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let (layout, rows) = red_build_print_layout(
+                ui,
+                &metrics,
+                &input,
+                &display,
+                &body,
+                &title,
+                &[],
+                &crate::models::NumberingConfig::default(),
+                &markdown,
+            );
+            assert!(layout.pages.len() > 1, "样例正文必须溢出到第二页");
+            // 与 red_build_print_layout 同一套算式：承办区红线上方再留 2mm。
+            let record_height = metrics.mm(1.4) + metrics.line * rows.len().max(1) as f32;
+            let body_bottom = metrics.mm(37.0 + 225.0) - record_height - metrics.mm(2.0);
+            let ink_bottom = layout.pages[0]
+                .fragments
+                .iter()
+                .map(|fragment| fragment.bottom() - metrics.line * (1.0 - red::RED_INK_RATIO))
+                .fold(f32::MIN, f32::max);
+            assert!(
+                ink_bottom <= body_bottom + 0.5,
+                "首页末行字形越过了承办区安全线：{ink_bottom} > {body_bottom}"
+            );
+            assert!(
+                body_bottom - ink_bottom < metrics.line,
+                "首页还空得下一整行却提前换页了：剩 {}",
+                body_bottom - ink_bottom
+            );
         });
     }
 

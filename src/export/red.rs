@@ -116,7 +116,28 @@ pub(crate) fn red_record_name_twips(name: &str) -> usize {
     }
 }
 
-/// 首页正文/标题栏宽 100 mm，三号字每行 17 个全角字（100 / 5.644 = 17.7）。
+/// 首页红色竖线距版心左缘 100 mm，右侧 56 mm 是批示栏。
+pub(crate) const RED_APPROVAL_RULE_MM: f64 = 100.0;
+
+/// 首页正文与红色竖线之间的留白：4 mm。
+///
+/// 原先正文栏宽一路取到竖线上，两端对齐后每行末字都贴着红线，预览里甚至压到
+/// 线上。留出这 4 mm（约 0.7 个三号字）后，一行仍排得下 17 个三号字
+/// （17 × 5.644 = 95.95 mm），字数不减而版面透气。
+pub(crate) const RED_APPROVAL_GUTTER_MM: f64 = 4.0;
+
+/// 首页正文/标题栏可用宽度 = 96 mm。三端共用：TeX 的 `\RedApprovalNarrowWidth`、
+/// Word 浮动批示框的 `leftFromText`、预览的窄栏宽度都按它算。
+pub(crate) const RED_APPROVAL_NARROW_MM: f64 = RED_APPROVAL_RULE_MM - RED_APPROVAL_GUTTER_MM;
+
+/// 红色竖线的横坐标（缇），Word 顶线表按它定宽，正好与浮动批示框左沿相接。
+pub(crate) const RED_APPROVAL_RULE_TWIPS: usize = (RED_APPROVAL_RULE_MM * 1440.0 / 25.4) as usize;
+
+/// 留白换算成缇（Word 用），写进浮动批示框的 `leftFromText`。
+pub(crate) const RED_APPROVAL_GUTTER_TWIPS: usize =
+    (RED_APPROVAL_GUTTER_MM * 1440.0 / 25.4) as usize;
+
+/// 首页正文/标题栏三号字每行 17 个全角字（96 / 5.644 = 17.0）。
 pub(crate) const RED_APPROVAL_NARROW_CHARS: usize = 17;
 
 /// 承办区某一栏的横向压缩比（百分数，100 = 原宽）。

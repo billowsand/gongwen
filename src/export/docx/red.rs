@@ -64,30 +64,37 @@ pub(crate) fn red_approval_frame_table(input: &DraftInput) -> Table {
             .vertical_anchor("margin")
             .position_x_alignment("right")
             .position_y(2_720)
-            .left_from_text(0)
+            // 正文绕排时与批示框左沿保持 4mm，否则每行末字都贴着红色竖线。
+            // 与 TeX 的 \RedApprovalNarrowWidth、预览的窄栏同源。
+            .left_from_text(crate::export::RED_APPROVAL_GUTTER_TWIPS as i32)
             .right_from_text(0),
     )
 }
 
 /// 首页红色横线要贯穿整个版心。批示栏自身只占右侧 5.6cm，另放一条
 /// 极薄的浮动表格补足左栏横线，避免让 Word 把正文按整页宽度绕排。
+///
+/// 宽度只取到红色竖线（版心左缘往右 100mm），**不能**铺满整个版心：铺满时它与
+/// 批示框在同一坐标上重叠，Word 为避免两个浮动表相压会把其中一个另挪位置，
+/// 横线就跑到文号上方去了。两张表左右相接、互不重叠，才会都停在 48mm 处。
 pub(crate) fn red_approval_top_rule_table() -> Table {
     let borders = TableBorders::new().clear_all().set(
         TableBorder::new(TableBorderPosition::Top)
             .size(12)
             .color("FF0000"),
     );
+    let width = crate::export::RED_APPROVAL_RULE_TWIPS;
     Table::new(vec![
         TableRow::new(vec![
             TableCell::new()
-                .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+                .width(width, WidthType::Dxa)
                 .add_paragraph(Paragraph::new()),
         ])
         .row_height(1.0)
         .height_rule(HeightRule::Exact),
     ])
-    .set_grid(vec![TABLE_CONTENT_WIDTH_TWIPS])
-    .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+    .set_grid(vec![width])
+    .width(width, WidthType::Dxa)
     .layout(TableLayoutType::Fixed)
     .clear_all_border()
     .set_borders(borders)

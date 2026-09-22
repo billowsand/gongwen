@@ -474,6 +474,13 @@
     \par
 }
 
+% 首页正文/标题栏宽度。红色竖线固定在版心左缘往右 100mm 处，正文栏比它再窄
+% 4mm：栏宽直接顶到竖线时，两端对齐会让每行末字贴着红线。96mm 仍放得下 17 个
+% 三号字（17 × 5.644 = 95.95mm），字数不减。与 Word、预览同源，
+% 见 src/export/red.rs 的 RED_APPROVAL_NARROW_MM。
+\newlength{\RedApprovalNarrowWidth}
+\setlength{\RedApprovalNarrowWidth}{96mm}
+
 % 首页正文连续流排：每个段落真正开始时，根据当前 pagetotal 重新计算到承办区
 % 红线的剩余行数。这样标题前后的垂直间距会自然计入；同一长段落超出额度后，
 % 其余行立即恢复 156mm 版心并由页面构造器送到第二页。
@@ -498,7 +505,8 @@
         \def\gwa@redshapepairs{}%
         \gwa@redshapeindex=0
         \loop\ifnum\gwa@redshapeindex<\gwa@redremaining
-            \edef\gwa@redshapepairs{\gwa@redshapepairs\space 0pt 100mm}%
+            \edef\gwa@redshapepairs{%
+                \gwa@redshapepairs\space 0pt \the\RedApprovalNarrowWidth}%
             \advance\gwa@redshapeindex by 1
         \repeat
         % 最后一项在段落超过首页额度时重复使用，故后续行恢复标准版心。
@@ -928,15 +936,15 @@
     \gwa@bodyspacing
     \RedApprovalPageOverlay
     % 首页正文区：顶边为版心顶端以下 55mm，底边由真实承办区高度动态决定。
-    % 先把标题和呈报领导装成真实的 100mm 宽盒子，从可用高度中扣除，再把余高
+    % 先把标题和呈报领导装成真实的 96mm 宽盒子，从可用高度中扣除，再把余高
     % 换算成固定基线数；底部另留 2mm，确保末行字形不碰承办区红线。
     \global\gwa@redbodycontinuedfalse
     \par\vspace*{55mm}%
     \enlargethispage{-\RedRecordHeight}%
     \setbox\gwa@redblockbox=\vbox{%
-        \hsize=100mm
-        \linewidth=100mm
-        \columnwidth=100mm
+        \hsize=\RedApprovalNarrowWidth
+        \linewidth=\RedApprovalNarrowWidth
+        \columnwidth=\RedApprovalNarrowWidth
         {\centering
             \ifthenelse{\equal{\TitleContent}{}}%
                 {{\bs\enbt\fontsize{18bp}{\BodyBaselineSkip}\selectfont\DocumentTitle{}}}%
