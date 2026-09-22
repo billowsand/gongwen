@@ -595,7 +595,7 @@ impl GongwenApp {
         let _ = storage::save(&self.config);
     }
 
-    /// 切换纸面明暗并立即生效。只影响屏幕预览，导出结果不变。
+    /// 切换纸面显示模式并立即生效。只影响屏幕预览，导出结果不变。
     pub(crate) fn apply_paper_mode(&mut self, mode: PaperMode) {
         self.config.paper = mode;
         theme::set_current_paper(mode);
@@ -705,7 +705,7 @@ impl GongwenApp {
                 if ui
                     .add(theme::menu_selectable_item(selected, mode.label()))
                     .on_hover_text(match mode {
-                        PaperMode::Follow => "明色主题配白纸，深色主题配深色纸",
+                        PaperMode::Follow => "按主题冷暖与明暗匹配克制的公文纸色",
                         PaperMode::Light => "始终白纸黑字，与打印稿一致",
                         PaperMode::Dark => "始终深色纸，长时间盯屏更省眼",
                     })

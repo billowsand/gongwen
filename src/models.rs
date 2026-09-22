@@ -1125,7 +1125,7 @@ impl TemplateProfile {
 
 /// 界面主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
 ///
-/// 前八项是明色，后五项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
+/// 前七项是明色，后五项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
 /// 公文纸面另由 [`PaperMode`] 决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1171,12 +1171,12 @@ impl ThemeName {
     ];
 }
 
-/// 屏幕上公文纸面的明暗。**只影响预览显示**，导出的 DOCX/TeX/PDF 一律仍是
+/// 屏幕上公文纸面的显示模式。**只影响预览显示**，导出的 DOCX/TeX/PDF 一律仍是
 /// 白纸黑字红头，不受这里的选择影响。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaperMode {
-    /// 跟随界面主题：明色主题配白纸，深色主题配深色纸。
+    /// 跟随界面主题：按主题冷暖与明暗选用本色、宣纸白、雨青灰、夜墨蓝或檀黑棕。
     #[default]
     Follow,
     /// 始终白纸黑字，与打印稿一致。

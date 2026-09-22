@@ -3,7 +3,7 @@
 //! 默认取色思路与 Claude 一致：奶油色纸面打底、黏土橙（clay）作唯一强调色、
 //! 暖灰而非纯黑的文字。除默认外还内置多套明色主题（天青、淡紫等），设置页可
 //! 随时切换。界面上所有颜色都从这里取，避免各处硬编码 RGB；公文「纸面」渲染
-//! （预览、编辑区）的取色集中在 [`paper`] 模块，按设置里的纸面明暗走，导出的
+//! （预览、编辑区）的取色集中在 [`paper`] 模块，按设置里的纸面模式走，导出的
 //! DOCX/TeX/PDF 一律仍是白纸黑字红头，不受主题影响。
 
 use crate::models::{EditorFontFace, FontConfig, FontRole, PaperMode, ThemeName};
@@ -87,13 +87,41 @@ pub struct MdPalette {
     pub image_bg: Color32,
 }
 
+/// 屏幕上的公文纸面家族。
+///
+/// 纸面只承接界面主题的明暗与冷暖，不直接复制主题的强调色，避免公文看起来
+/// 像普通换肤界面。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PaperFamily {
+    /// 本色：纯白纸、纯黑字。
+    Original,
+    /// 宣纸白：低饱和暖白。
+    Parchment,
+    /// 雨青灰：低饱和冷灰。
+    RainGray,
+    /// 夜墨蓝：冷深色纸面。
+    NightBlue,
+    /// 檀黑棕：暖深色纸面。
+    Sandalwood,
+}
+
+impl PaperFamily {
+    const fn is_dark(self) -> bool {
+        matches!(self, Self::NightBlue | Self::Sandalwood)
+    }
+}
+
 /// 一套完整的界面配色。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Theme {
     /// 设置页展示的主题名。
     pub label: &'static str,
-    /// 是否深色主题。决定 egui 走哪套内建 visuals，也决定「跟随主题」时纸面的明暗。
+    /// 是否深色主题。决定 egui 走哪套内建 visuals。
     pub dark: bool,
+    /// 「跟随主题」时使用的纸面家族。
+    paper_family: PaperFamily,
+    /// 用户显式选择「深色纸面」时使用的冷或暖深色家族。
+    dark_paper_family: PaperFamily,
     /// 窗口与面板的底色。
     pub canvas: Color32,
     /// 卡片、编辑区等前景纸面。
@@ -134,7 +162,7 @@ pub struct Theme {
 /// 当前生效的主题。egui 的 UI 循环单线程读取，切换主题时短暂写锁一次。
 static CURRENT: RwLock<Theme> = RwLock::new(Theme::claude());
 
-/// 当前的纸面明暗选择，与 [`CURRENT`] 同样只在切换时写一次。
+/// 当前的纸面显示模式，与 [`CURRENT`] 同样只在切换时写一次。
 static CURRENT_PAPER: RwLock<PaperMode> = RwLock::new(PaperMode::Follow);
 
 /// 配色版本号：主题或纸面每变一次就加一。
@@ -152,6 +180,8 @@ impl Theme {
         Self {
             label: "Claude 奶油",
             dark: false,
+            paper_family: PaperFamily::Original,
+            dark_paper_family: PaperFamily::Sandalwood,
             canvas: Color32::from_rgb(0xF5, 0xF4, 0xEE),
             surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             surface_sunk: Color32::from_rgb(0xF0, 0xEE, 0xE6),
@@ -202,6 +232,8 @@ impl Theme {
         Self {
             label: "天青",
             dark: false,
+            paper_family: PaperFamily::RainGray,
+            dark_paper_family: PaperFamily::NightBlue,
             canvas: Color32::from_rgb(0xEF, 0xF5, 0xFB),
             surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             surface_sunk: Color32::from_rgb(0xE4, 0xEE, 0xF6),
@@ -252,6 +284,8 @@ impl Theme {
         Self {
             label: "淡紫",
             dark: false,
+            paper_family: PaperFamily::RainGray,
+            dark_paper_family: PaperFamily::NightBlue,
             canvas: Color32::from_rgb(0xF7, 0xF4, 0xFB),
             surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             surface_sunk: Color32::from_rgb(0xF0, 0xEA, 0xF8),
@@ -302,6 +336,8 @@ impl Theme {
         Self {
             label: "浅绿",
             dark: false,
+            paper_family: PaperFamily::RainGray,
+            dark_paper_family: PaperFamily::NightBlue,
             canvas: Color32::from_rgb(0xEF, 0xF5, 0xEE),
             surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             surface_sunk: Color32::from_rgb(0xE3, 0xEE, 0xE1),
@@ -355,6 +391,8 @@ impl Theme {
         Self {
             label: "曝光浅",
             dark: false,
+            paper_family: PaperFamily::Parchment,
+            dark_paper_family: PaperFamily::Sandalwood,
             canvas: Color32::from_rgb(0xEE, 0xE8, 0xD5),
             surface: Color32::from_rgb(0xFD, 0xF6, 0xE3),
             surface_sunk: Color32::from_rgb(0xE7, 0xE0, 0xCB),
@@ -405,6 +443,8 @@ impl Theme {
         Self {
             label: "拿铁",
             dark: false,
+            paper_family: PaperFamily::Original,
+            dark_paper_family: PaperFamily::NightBlue,
             canvas: Color32::from_rgb(0xEF, 0xF1, 0xF5),
             surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             surface_sunk: Color32::from_rgb(0xE6, 0xE9, 0xEF),
@@ -455,6 +495,8 @@ impl Theme {
         Self {
             label: "复古浅",
             dark: false,
+            paper_family: PaperFamily::Parchment,
+            dark_paper_family: PaperFamily::Sandalwood,
             canvas: Color32::from_rgb(0xF4, 0xE8, 0xC1),
             surface: Color32::from_rgb(0xFB, 0xF1, 0xC7),
             surface_sunk: Color32::from_rgb(0xEB, 0xDB, 0xB2),
@@ -505,6 +547,8 @@ impl Theme {
         Self {
             label: "德古拉",
             dark: true,
+            paper_family: PaperFamily::NightBlue,
+            dark_paper_family: PaperFamily::NightBlue,
             canvas: Color32::from_rgb(0x21, 0x22, 0x2C),
             surface: Color32::from_rgb(0x28, 0x2A, 0x36),
             surface_sunk: Color32::from_rgb(0x1E, 0x1F, 0x29),
@@ -555,6 +599,8 @@ impl Theme {
         Self {
             label: "北欧",
             dark: true,
+            paper_family: PaperFamily::NightBlue,
+            dark_paper_family: PaperFamily::NightBlue,
             canvas: Color32::from_rgb(0x2E, 0x34, 0x40),
             surface: Color32::from_rgb(0x3B, 0x42, 0x52),
             surface_sunk: Color32::from_rgb(0x29, 0x2E, 0x39),
@@ -605,6 +651,8 @@ impl Theme {
         Self {
             label: "复古暗",
             dark: true,
+            paper_family: PaperFamily::Sandalwood,
+            dark_paper_family: PaperFamily::Sandalwood,
             canvas: Color32::from_rgb(0x1D, 0x20, 0x21),
             surface: Color32::from_rgb(0x28, 0x28, 0x28),
             surface_sunk: Color32::from_rgb(0x32, 0x30, 0x2F),
@@ -655,6 +703,8 @@ impl Theme {
         Self {
             label: "东京夜",
             dark: true,
+            paper_family: PaperFamily::NightBlue,
+            dark_paper_family: PaperFamily::NightBlue,
             canvas: Color32::from_rgb(0x16, 0x16, 0x1E),
             surface: Color32::from_rgb(0x1A, 0x1B, 0x26),
             surface_sunk: Color32::from_rgb(0x1F, 0x23, 0x35),
@@ -705,6 +755,8 @@ impl Theme {
         Self {
             label: "森野",
             dark: true,
+            paper_family: PaperFamily::Sandalwood,
+            dark_paper_family: PaperFamily::Sandalwood,
             canvas: Color32::from_rgb(0x27, 0x2E, 0x33),
             surface: Color32::from_rgb(0x2D, 0x35, 0x3B),
             surface_sunk: Color32::from_rgb(0x23, 0x2A, 0x2E),
@@ -780,7 +832,7 @@ pub fn current() -> Theme {
     *CURRENT.read().unwrap()
 }
 
-/// 切换并立即生效的纸面明暗。
+/// 切换并立即生效的纸面显示模式。
 pub fn set_current_paper(mode: PaperMode) {
     *CURRENT_PAPER.write().unwrap() = mode;
     REVISION.fetch_add(1, Ordering::Relaxed);
@@ -796,22 +848,18 @@ pub fn revision() -> u64 {
 /// **只作用于屏幕预览**：导出的 DOCX/TeX/PDF 由 `export` 模块另行生成，完全不读
 /// 这里的颜色，因此不论用户把纸面调成什么，落到纸上的永远是白纸黑字红头。
 ///
-/// 明色纸面刻意写死纯白纯黑纯红，与打印稿逐字节一致。深色纸面分两种情形：深色
-/// 主题下从主题自身取色，纸与界面外壳因此是同一套颜色，而不是在深色界面里挖一个
-/// 突兀的黑洞；明色主题下被显式选了深色纸时，主题本身没有深色面可借，改用一组
-/// 中性深色——否则 `surface` 恰好就是白的，「深色纸面」会一点效果都没有。
+/// 「跟随主题」把十二套外观主题收束为五种克制的纸面：本色、宣纸白、雨青灰、
+/// 夜墨蓝与檀黑棕。纸面只跟随冷暖和明暗，不复制主题强调色；正文只用黑或白，
+/// 红头、红色反线与份号始终使用同一个规范红。
 pub mod paper {
-    use super::{CURRENT_PAPER, Color32, Theme, current};
+    use super::{CURRENT_PAPER, Color32, PaperFamily, Theme, current};
     use crate::models::PaperMode;
 
-    /// 红头与红色反线在明色纸面上的颜色：与 LaTeX 类里一致的纯红。
+    /// 红头与红色反线的颜色：与 LaTeX 类里一致的纯红，所有纸面一律不变。
     const OFFICIAL_RED: Color32 = Color32::from_rgb(0xFF, 0x00, 0x00);
-    /// 深色纸面上的红头。纯红在深底上会「振」得厉害且偏暗，提亮后仍是一眼可辨的红。
-    const OFFICIAL_RED_ON_DARK: Color32 = Color32::from_rgb(0xFF, 0x6B, 0x6B);
-    /// 明色纸面的鼠标悬停淡底。
-    const HOVER_TINT: Color32 = Color32::from_rgb(0xF7, 0xF2, 0xEC);
 
     /// 一套纸面取色。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     struct Sheet {
         bg: Color32,
         ink: Color32,
@@ -820,51 +868,84 @@ pub mod paper {
         hover: Color32,
     }
 
-    /// 明色主题下被选了深色纸时使用的中性纸：不带色相，配哪套明色主题都不冲突。
-    const NEUTRAL_DARK_SHEET: Sheet = Sheet {
-        bg: Color32::from_rgb(0x1E, 0x20, 0x24),
-        ink: Color32::from_rgb(0xE6, 0xE4, 0xDE),
-        ink_muted: Color32::from_rgb(0xA8, 0xA6, 0xA0),
-        ink_faint: Color32::from_rgb(0x6E, 0x6C, 0x68),
-        hover: Color32::from_rgb(0x2A, 0x2D, 0x33),
+    /// 本色：标准白纸黑字，既是默认纸面，也是「白纸黑字」的强制结果。
+    const ORIGINAL_SHEET: Sheet = Sheet {
+        bg: Color32::WHITE,
+        ink: Color32::BLACK,
+        ink_muted: Color32::from_gray(90),
+        ink_faint: Color32::from_gray(150),
+        hover: Color32::from_rgb(0xF3, 0xF3, 0xF3),
     };
 
-    /// 给定主题与纸面明暗，算出该用哪套纸色。不读全局，便于直接测试。
-    fn sheet_for(theme: Theme, dark_paper: bool) -> Sheet {
-        if !dark_paper {
-            return Sheet {
-                bg: Color32::WHITE,
-                ink: Color32::BLACK,
-                ink_muted: Color32::from_gray(90),
-                ink_faint: Color32::from_gray(150),
-                hover: HOVER_TINT,
-            };
+    /// 宣纸白：暖而不黄，仍使用纯黑正文。
+    const PARCHMENT_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(0xFB, 0xF8, 0xF0),
+        ink: Color32::BLACK,
+        ink_muted: Color32::from_rgb(0x5A, 0x58, 0x53),
+        ink_faint: Color32::from_rgb(0x96, 0x92, 0x8A),
+        hover: Color32::from_rgb(0xF3, 0xED, 0xE1),
+    };
+
+    /// 雨青灰：只留极淡的冷灰倾向，不按主题分别染成蓝、紫或绿。
+    const RAIN_GRAY_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(0xF1, 0xF4, 0xF0),
+        ink: Color32::BLACK,
+        ink_muted: Color32::from_rgb(0x55, 0x5D, 0x58),
+        ink_faint: Color32::from_rgb(0x91, 0x99, 0x94),
+        hover: Color32::from_rgb(0xE5, 0xEB, 0xE6),
+    };
+
+    /// 夜墨蓝：冷深色纸，正文严格用白色。
+    const NIGHT_BLUE_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(0x22, 0x2A, 0x33),
+        ink: Color32::WHITE,
+        ink_muted: Color32::from_rgb(0xC6, 0xCD, 0xD4),
+        ink_faint: Color32::from_rgb(0x7F, 0x89, 0x94),
+        hover: Color32::from_rgb(0x2D, 0x37, 0x42),
+    };
+
+    /// 檀黑棕：暖深色纸，正文严格用白色。
+    const SANDALWOOD_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(0x2B, 0x28, 0x25),
+        ink: Color32::WHITE,
+        ink_muted: Color32::from_rgb(0xD0, 0xC8, 0xBF),
+        ink_faint: Color32::from_rgb(0x8A, 0x81, 0x78),
+        hover: Color32::from_rgb(0x39, 0x33, 0x2E),
+    };
+
+    /// 给定主题与用户选择，决定纸面家族。不读全局，便于直接测试。
+    fn family_for(theme: Theme, mode: PaperMode) -> PaperFamily {
+        match mode {
+            PaperMode::Follow => theme.paper_family,
+            PaperMode::Light => PaperFamily::Original,
+            PaperMode::Dark => theme.dark_paper_family,
         }
-        if theme.dark {
-            Sheet {
-                bg: theme.surface,
-                ink: theme.text,
-                ink_muted: theme.text_soft,
-                ink_faint: theme.text_muted,
-                hover: theme.surface_hover,
-            }
-        } else {
-            NEUTRAL_DARK_SHEET
+    }
+
+    /// 纸面家族对应的固定取色。这里不读取界面强调色，避免主题色渗进公文正文。
+    const fn sheet_for_family(family: PaperFamily) -> Sheet {
+        match family {
+            PaperFamily::Original => ORIGINAL_SHEET,
+            PaperFamily::Parchment => PARCHMENT_SHEET,
+            PaperFamily::RainGray => RAIN_GRAY_SHEET,
+            PaperFamily::NightBlue => NIGHT_BLUE_SHEET,
+            PaperFamily::Sandalwood => SANDALWOOD_SHEET,
         }
+    }
+
+    /// 给定主题与用户选择，算出完整纸面取色。
+    fn sheet_for(theme: Theme, mode: PaperMode) -> Sheet {
+        sheet_for_family(family_for(theme, mode))
     }
 
     /// 当前生效的纸面取色。
     fn sheet() -> Sheet {
-        sheet_for(current(), is_dark())
+        sheet_for(current(), *CURRENT_PAPER.read().unwrap())
     }
 
     /// 当前纸面是否为深色。
     pub fn is_dark() -> bool {
-        match *CURRENT_PAPER.read().unwrap() {
-            PaperMode::Follow => current().dark,
-            PaperMode::Light => false,
-            PaperMode::Dark => true,
-        }
+        family_for(current(), *CURRENT_PAPER.read().unwrap()).is_dark()
     }
 
     /// 纸底。
@@ -879,11 +960,7 @@ pub mod paper {
 
     /// 红头、红色反线与份号等规范要求用红的地方。
     pub fn red() -> Color32 {
-        if is_dark() {
-            OFFICIAL_RED_ON_DARK
-        } else {
-            OFFICIAL_RED
-        }
+        OFFICIAL_RED
     }
 
     /// 鼠标悬停在可点击块上时的淡底。
@@ -908,50 +985,102 @@ pub mod paper {
 
     #[cfg(test)]
     mod tests {
-        use super::{NEUTRAL_DARK_SHEET, sheet_for};
-        use crate::models::ThemeName;
+        use super::{
+            NIGHT_BLUE_SHEET, ORIGINAL_SHEET, PARCHMENT_SHEET, RAIN_GRAY_SHEET, SANDALWOOD_SHEET,
+            Sheet, sheet_for,
+        };
+        use crate::models::{PaperMode, ThemeName};
         use crate::theme::by_name;
         use eframe::egui::Color32;
 
-        /// 白纸永远是纯白纯黑，与打印稿逐字节一致——不论界面主题是哪套。
+        fn assert_follow(names: &[ThemeName], expected: Sheet) {
+            for &name in names {
+                assert_eq!(
+                    sheet_for(by_name(name), PaperMode::Follow),
+                    expected,
+                    "{name:?} 的跟随主题纸面映射错误"
+                );
+            }
+        }
+
+        /// 跟随主题时，十二套外观主题稳定收束为确认过的五种纸面。
+        #[test]
+        fn follow_mode_maps_themes_to_five_paper_families() {
+            assert_follow(&[ThemeName::Claude, ThemeName::Latte], ORIGINAL_SHEET);
+            assert_follow(
+                &[ThemeName::SolarizedLight, ThemeName::GruvboxLight],
+                PARCHMENT_SHEET,
+            );
+            assert_follow(
+                &[ThemeName::Sky, ThemeName::Lilac, ThemeName::Green],
+                RAIN_GRAY_SHEET,
+            );
+            assert_follow(
+                &[ThemeName::Dracula, ThemeName::Nord, ThemeName::TokyoNight],
+                NIGHT_BLUE_SHEET,
+            );
+            assert_follow(
+                &[ThemeName::GruvboxDark, ThemeName::Everforest],
+                SANDALWOOD_SHEET,
+            );
+        }
+
+        /// 「白纸黑字」永远回到本色，与打印稿逐字节一致。
         #[test]
         fn light_paper_is_pure_black_on_white_under_every_theme() {
             for name in ThemeName::ALL {
-                let sheet = sheet_for(by_name(name), false);
+                let sheet = sheet_for(by_name(name), PaperMode::Light);
                 assert_eq!(sheet.bg, Color32::WHITE, "{name:?} 的白纸底不是纯白");
                 assert_eq!(sheet.ink, Color32::BLACK, "{name:?} 的白纸墨色不是纯黑");
             }
         }
 
-        /// 深色纸在深色主题下跟随主题，与界面外壳同一套颜色。
+        /// 显式深色纸面仍按主题冷暖分组，不退回一套无差别的中性黑纸。
         #[test]
-        fn dark_paper_follows_dark_themes() {
-            for name in ThemeName::ALL.into_iter().filter(|n| by_name(*n).dark) {
-                let theme = by_name(name);
-                let sheet = sheet_for(theme, true);
-                assert_eq!(sheet.bg, theme.surface, "{name:?} 的深色纸底未跟随主题");
-                assert_eq!(sheet.ink, theme.text, "{name:?} 的深色纸墨色未跟随主题");
+        fn forced_dark_paper_keeps_themes_cool_or_warm() {
+            let cool = [
+                ThemeName::Sky,
+                ThemeName::Lilac,
+                ThemeName::Green,
+                ThemeName::Latte,
+                ThemeName::Dracula,
+                ThemeName::Nord,
+                ThemeName::TokyoNight,
+            ];
+            let warm = [
+                ThemeName::Claude,
+                ThemeName::SolarizedLight,
+                ThemeName::GruvboxLight,
+                ThemeName::GruvboxDark,
+                ThemeName::Everforest,
+            ];
+            for name in cool {
+                assert_eq!(
+                    sheet_for(by_name(name), PaperMode::Dark),
+                    NIGHT_BLUE_SHEET,
+                    "{name:?} 没有使用夜墨蓝"
+                );
+            }
+            for name in warm {
+                assert_eq!(
+                    sheet_for(by_name(name), PaperMode::Dark),
+                    SANDALWOOD_SHEET,
+                    "{name:?} 没有使用檀黑棕"
+                );
             }
         }
 
-        /// 明色主题被显式选了深色纸时，必须退回中性深色纸。
-        ///
-        /// 直接拿 `theme.surface` 会掉进坑里：明色主题的 surface 往往就是纯白，
-        /// 「深色纸面」会变成白纸配浅墨——既没变深，还把字给洗没了。
+        /// 正文只允许纯黑或纯白，不能被外观主题的文字色带偏。
         #[test]
-        fn dark_paper_on_light_theme_falls_back_to_neutral_sheet() {
-            for name in ThemeName::ALL.into_iter().filter(|n| !by_name(*n).dark) {
-                let sheet = sheet_for(by_name(name), true);
-                assert_eq!(
-                    sheet.bg, NEUTRAL_DARK_SHEET.bg,
-                    "{name:?} 选深色纸后纸底没变深"
-                );
-                // 真正的判据：底比墨深，才谈得上「黑底白字」。
-                let brightness = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
-                assert!(
-                    brightness(sheet.bg) < brightness(sheet.ink),
-                    "{name:?} 选深色纸后仍是浅底深字"
-                );
+        fn body_ink_is_only_black_or_white() {
+            for name in ThemeName::ALL {
+                for mode in PaperMode::ALL {
+                    let ink = sheet_for(by_name(name), mode).ink;
+                    assert!(
+                        ink == Color32::BLACK || ink == Color32::WHITE,
+                        "{name:?} / {mode:?} 的正文不是纯黑或纯白"
+                    );
+                }
             }
         }
     }
