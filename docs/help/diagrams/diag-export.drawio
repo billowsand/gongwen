@@ -1,0 +1,64 @@
+<mxfile host="gongwen-help">
+  <diagram name="导出链路" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="导出链路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="350" y="20" width="240" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="src" value="Markdown 审校稿" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5DC;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="168" width="240" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="md" value="xxx.md" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="320" y="92" width="220" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="docx" value="xxx.docx" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="320" y="176" width="220" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="tex" value="xxx.tex" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="320" y="260" width="220" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="zip" value="xxx-源码包.zip&lt;br&gt;.tex + 字体 + 图片附件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="600" y="92" width="300" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="pdf" value="xxx.pdf&lt;br&gt;Tectonic 离线编译" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="600" y="192" width="300" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="orphan" value="孤行探针&lt;br&gt;实测坐标 → 可点击提示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="600" y="292" width="300" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="src" target="md">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="src" target="docx">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="src" target="tex">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" value="自动" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#3B82A0;strokeWidth=1.8;endArrow=blockThin;endFill=1;labelBackgroundColor=#FFFFFF;fontSize=14;fontFamily=Aa顺風顺水顺财神;fontColor=#2A2927;" edge="1" parent="1" source="tex" target="pdf">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="tex" target="zip">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;dashed=1;" edge="1" parent="1" source="tex" target="orphan">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="gate" value="唯一导出闸门是「正文为空」。缺要素 / 必错未清 / 待核实未落实 → 只进审校面板，不挡导出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="404" width="860" height="54" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="每次导出建同名子目录：输出目录 / &amp;lt;主干名&amp;gt; /　主干名 = 文种前缀 + 名称 + 分钟级时间戳（会议议程无时间戳）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="464" width="860" height="52" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="覆盖策略：覆盖同名，或生成 -2、-3 副本（默认生成副本）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="522" width="860" height="52" as="geometry"/>
+        </mxCell>
+        <mxCell id="n3" value="编译失败不阻断导出：.md / .docx / .tex 照常生成，PDF 缺失的报错进审校抽屉" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="580" width="860" height="52" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,43 @@
+<mxfile host="gongwen-help">
+  <diagram name="研究报告结构" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="研究报告结构与标记" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="300" y="20" width="340" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="cover" value="封面元数据&lt;br&gt;密级 · 文件号 · 版本&lt;br&gt;编制单位 · 日期 · 文献名" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5DC;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="92" width="270" height="104" as="geometry"/>
+        </mxCell>
+        <mxCell id="abs" value="摘要&lt;br&gt;&amp;lt;!-- [摘要] --&amp;gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="216" width="270" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="body" value="正文（分章）&lt;br&gt;&amp;lt;!-- [正文] --&amp;gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="306" width="270" height="74" as="geometry"/>
+        </mxCell>
+        <mxCell id="app" value="附录&lt;br&gt;&amp;lt;!-- [附录] --&amp;gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="400" width="270" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="chg" value="版本变更记录&lt;br&gt;&amp;lt;!-- [版本变更记录] --&amp;gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3E8E4E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="335" y="216" width="270" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="bib" value="参考文献&lt;br&gt;&amp;lt;!-- [参考文献] --&amp;gt;&lt;br&gt;+ references.bib" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3E8E4E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="335" y="306" width="270" height="74" as="geometry"/>
+        </mxCell>
+        <mxCell id="mk" value="行内标记&lt;br&gt;{@id}　锚点&lt;br&gt;[@key]　文献引用&lt;br&gt;[^id]　行内脚注&lt;br&gt;「表：」　表题" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="630" y="92" width="270" height="160" as="geometry"/>
+        </mxCell>
+        <mxCell id="fm" value="数学公式&lt;br&gt;行内：单个 $ 包起来&lt;br&gt;独立：两个 $ 单独成行&lt;br&gt;&lt;br&gt;公文文种不支持公式，&lt;br&gt;$ 始终是普通字符" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="630" y="272" width="270" height="160" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="研究报告只出 TeX / PDF，不支持导出 Word" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="496" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="预览字形是 STIX Two Math，导出用 TeX CM 字体——字形不同属正常，版式以导出为准" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="552" width="860" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

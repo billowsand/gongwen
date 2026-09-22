@@ -1,0 +1,40 @@
+<mxfile host="gongwen-help">
+  <diagram name="界面五区" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="主窗口五区" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="330" y="20" width="280" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="b1" value="标题栏　菜单 · 标题 · 保存 / 提交版本 / 导出 · 窗口控制" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5DC;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="92" width="860" height="56" as="geometry"/>
+        </mxCell>
+        <mxCell id="b2" value="标签栏　稿件 · 导航页 · PDF 混排在同一条标签栏上" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="158" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="b3" value="功能区　开始 · 插入 · 研报 · 格式 · 审校 · 视图 · 输出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="218" width="860" height="56" as="geometry"/>
+        </mxCell>
+        <mxCell id="b4a" value="左栏&lt;br&gt;文档要素填报&lt;br&gt;版头 / 主体 / 版记" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4EFE4;strokeColor=#3E8E4E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="284" width="240" height="210" as="geometry"/>
+        </mxCell>
+        <mxCell id="b4b" value="中央&lt;br&gt;审校稿编辑与版式预览" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="300" y="284" width="340" height="210" as="geometry"/>
+        </mxCell>
+        <mxCell id="b4c" value="右抽屉&lt;br&gt;版本历史&lt;br&gt;审校提示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="660" y="284" width="240" height="210" as="geometry"/>
+        </mxCell>
+        <mxCell id="b5" value="状态栏　状态文案 · 审校提示计数 · 版本历史 · 输入法" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="504" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="要素表单默认收起：打开稿件第一眼是满屏稿子，要填要素再展开" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="584" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="刻度条导航在预览右缘，靠近它会推出大纲板" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="640" width="860" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

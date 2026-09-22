@@ -1,0 +1,43 @@
+<mxfile host="gongwen-help">
+  <diagram name="数据目录" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="数据存放：用户配置目录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="290" y="20" width="360" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="root" value="LocalTools / GongwenAssistant / config /" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5DC;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="220" y="92" width="500" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="d1" value="config.json&lt;br&gt;词库 · 提示词 · 设置 · 模板默认要素" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="196" width="420" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="d2" value="manuscripts.db&lt;br&gt;稿件 + 知识库 + 公文词表（同一个 SQLite）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="480" y="196" width="420" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="d3" value="images/&lt;br&gt;插入的图片与 PDF 附件（文档只存相对路径）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="306" width="420" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="d4" value="ime/&lt;br&gt;词频 · 用户词 · dicts/　辅码表在 fuma/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="480" y="306" width="420" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="d5" value=".zip-password&lt;br&gt;稿件 ZIP 密码，权限 0600" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="416" width="420" height="76" as="geometry"/>
+        </mxCell>
+        <mxCell id="n4" value="卸载重装不丢数据：数据在用户配置目录，不在安装目录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="480" y="416" width="420" height="76" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="Windows　%APPDATA%\LocalTools\GongwenAssistant\config\&lt;br&gt;Linux　　~/.config/LocalTools/GongwenAssistant/config/&lt;br&gt;macOS　　~/Library/Application Support/LocalTools/GongwenAssistant/config/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="516" width="860" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="最小备份三样：config.json + manuscripts.db + images/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4EFE4;strokeColor=#3E8E4E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="624" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n3" value="换机器：导出稿件 ZIP（随附 vocabulary.json）→ 目标机导入并勾选「合并词库」" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="680" width="860" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

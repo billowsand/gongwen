@@ -1,0 +1,52 @@
+<mxfile host="gongwen-help">
+  <diagram name="事实单流程" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="事实单三步：确定性拆分 → 人确认 → 才起草" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="190" y="20" width="560" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="mat" value="材料原文&lt;br&gt;会议纪要 / 来函 / 要点" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5DC;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="96" width="250" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext" value="提取事实单&lt;br&gt;程序确定性拆分&lt;br&gt;★ 全程不调用模型" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="345" y="96" width="250" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="fact" value="事实单（可编辑）&lt;br&gt;事项 · 时间 · 地点&lt;br&gt;单位 · 人员 · 数字 · 依据" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="650" y="96" width="250" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="human" value="人逐项确认&lt;br&gt;改文字 · 删条目 · 加条目&lt;br&gt;唯一能定事实的地方" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4EFE4;strokeColor=#3E8E4E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="650" y="250" width="250" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="gen" value="按确认后的事实起草&lt;br&gt;此刻才调模型" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="345" y="250" width="250" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="out" value="修订建议提案&lt;br&gt;左当前稿 / 右提案&lt;br&gt;事实变化逐项确认" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="250" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="mat" target="ext">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="ext" target="fact">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="fact" target="human">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" value="确认后" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#3E8E4E;strokeWidth=1.8;endArrow=blockThin;endFill=1;labelBackgroundColor=#FFFFFF;fontSize=14;fontFamily=Aa顺風顺水顺财神;fontColor=#2A2927;" edge="1" parent="1" source="human" target="gen">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#8A8279;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="gen" target="out">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="模型从头到尾没机会自己定事实——这就是红线二在起草这一侧的落地方式" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="384" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="材料成文 / 知识起草 / 大纲起草三条工作流共用这套流程" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="440" width="860" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

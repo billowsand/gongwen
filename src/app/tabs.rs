@@ -24,6 +24,7 @@ pub(crate) enum NavPage {
     AiPrompts,
     Knowledge,
     Settings,
+    Help,
 }
 
 /// 标签栏上的一格：一篇打开的稿件，或一个导航页。稿件和导航页共用同一条
@@ -46,6 +47,7 @@ impl NavPage {
             Self::AiPrompts => "ai_prompts",
             Self::Knowledge => "knowledge",
             Self::Settings => "settings",
+            Self::Help => "help",
         }
     }
 
@@ -58,6 +60,7 @@ impl NavPage {
             "ai_prompts" => Some(Self::AiPrompts),
             "knowledge" => Some(Self::Knowledge),
             "settings" => Some(Self::Settings),
+            "help" => Some(Self::Help),
             _ => None,
         }
     }
@@ -71,6 +74,7 @@ impl NavPage {
             Self::AiPrompts => "AI 管理",
             Self::Knowledge => "知识库",
             Self::Settings => "设置",
+            Self::Help => "使用帮助",
         }
     }
 
@@ -83,6 +87,7 @@ impl NavPage {
             Self::AiPrompts => theme::Icon::WandSparkles,
             Self::Knowledge => theme::Icon::PackageOpen,
             Self::Settings => theme::Icon::Settings,
+            Self::Help => theme::Icon::HelpCircle,
         }
     }
 }
@@ -349,6 +354,35 @@ impl GongwenApp {
                 DraftAction::OpenSettings => self.open_page(NavPage::Settings),
                 DraftAction::OpenPdf(path) => self.open_pdf(path, None),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 会话恢复靠 `key` ↔ `from_key` 对上号。漏登记一个页面，关掉重开时
+    /// 那格标签就静默消失了——不会报错，只是没了。
+    #[test]
+    fn 每个导航页的键都能往返() {
+        for page in [
+            NavPage::Manuscript,
+            NavPage::Vocabulary,
+            NavPage::Proofread,
+            NavPage::Lexicon,
+            NavPage::AiPrompts,
+            NavPage::Knowledge,
+            NavPage::Settings,
+            NavPage::Help,
+        ] {
+            assert_eq!(
+                NavPage::from_key(page.key()),
+                Some(page),
+                "{} 的键没登记全",
+                page.label()
+            );
+            assert!(!page.label().is_empty());
         }
     }
 }

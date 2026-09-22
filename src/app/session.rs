@@ -533,6 +533,20 @@ impl GongwenApp {
             self.new_blank_manuscript();
         }
 
+        // F1 全局切到帮助标签。用 consume_key 而非 consume_shortcut：F1 不是
+        // 组合键，consume_shortcut 对裸键的行为在各平台上不一致。
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            self.open_page(NavPage::Help);
+        }
+        // 配图放大层盖在所有内容之上，开着的时候 Esc 先归它——这里消费掉，
+        // 下面的审校抽屉才不会跟着一起关。没开放大层就不碰这一下。
+        if self.tabs.get(self.active_tab) == Some(&TabRef::Page(NavPage::Help))
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+            && self.help.close_zoom()
+        {
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        }
+
         if self.showing_doc() && !self.docs.is_empty() {
             let close = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
             if ctx.input_mut(|input| input.consume_shortcut(&close)) {

@@ -1407,6 +1407,7 @@ pub enum Icon {
     GitCommit,
     Hash,
     Heading,
+    HelpCircle,
     History,
     Library,
     List,
@@ -1549,6 +1550,10 @@ impl Icon {
             ),
             Self::Hash => ("hash", include_bytes!("../assets/icons/hash.svg")),
             Self::Heading => ("heading", include_bytes!("../assets/icons/heading.svg")),
+            Self::HelpCircle => (
+                "circle-help",
+                include_bytes!("../assets/icons/circle-help.svg"),
+            ),
             Self::History => ("history", include_bytes!("../assets/icons/history.svg")),
             Self::Library => ("library", include_bytes!("../assets/icons/library.svg")),
             Self::List => ("list", include_bytes!("../assets/icons/list.svg")),

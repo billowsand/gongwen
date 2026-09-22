@@ -8,6 +8,7 @@
 /dist/
 /output/
 /.tmp/
+/tmp/
 *.aux
 *.log
 *.synctex.gz

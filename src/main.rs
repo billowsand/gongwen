@@ -7,6 +7,7 @@ mod diff_view;
 mod doc_import;
 mod draft_page;
 mod export;
+mod help;
 mod highlight;
 mod images;
 mod ime;

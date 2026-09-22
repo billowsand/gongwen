@@ -294,7 +294,7 @@ fn settings_menu_item(
 
 /// 上手指引分区。原先这段话跟着「保存设置」钉在每一屏的底部，无论在配模型还是
 /// 调字号都要滚过一遍；它只在头一次用的时候有用，所以单独成一项。
-fn guide_section_ui(ui: &mut egui::Ui) {
+fn guide_section_ui(help: &mut crate::help::HelpState, ui: &mut egui::Ui) {
     for (index, step) in [
         "在「本地模型服务」里填好接口地址——LM Studio 先启动 Local Server，Ollama 先执行 ollama serve。",
         "点「测试连接 / 刷新模型」，从下拉里选一个中文指令模型。",
@@ -319,6 +319,27 @@ fn guide_section_ui(ui: &mut egui::Ui) {
         });
         ui.add_space(4.0);
     }
+    ui.add_space(10.0);
+    // 直接给一枚按钮，而不是一句「请到菜单里找使用帮助」：这五步不够用的时候
+    // 用户要的是把手册打开，不是再被指路一次。
+    ui.horizontal(|ui| {
+        if ui
+            .add(theme::secondary_icon_button(
+                theme::Icon::HelpCircle,
+                "打开完整图文手册",
+            ))
+            .on_hover_text("在新标签里打开；含截图、流程图与常见问题，按 F1 也能随时回去")
+            .clicked()
+        {
+            // 只置位，开标签由 app 层在本帧末尾接手——这里够不着标签栏。
+            help.open_chapter(crate::help::QUICKSTART_CHAPTER);
+        }
+        ui.label(
+            egui::RichText::new("F1")
+                .color(theme::text_muted())
+                .size(theme::font_sizes::SMALL),
+        );
+    });
 }
 
 /// 一个位置的字体选择行：下拉选本机字体，或浏览一个字体文件。
@@ -1074,7 +1095,7 @@ impl GongwenApp {
                             SettingsSection::Persistence => self.persistence_section_ui(ui),
                             SettingsSection::Security => self.security_section_ui(ui),
                             SettingsSection::Input => self.ime_section_ui(ui),
-                            SettingsSection::Guide => guide_section_ui(ui),
+                            SettingsSection::Guide => guide_section_ui(&mut self.help, ui),
                         }
                         ui.add_space(8.0);
                     });

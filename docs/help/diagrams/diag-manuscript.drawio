@@ -1,0 +1,51 @@
+<mxfile host="gongwen-help">
+  <diagram name="稿件状态机" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="稿件生命周期状态机" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="300" y="20" width="340" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="draft" value="草稿&lt;br&gt;可编辑" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=19;" vertex="1" parent="1">
+          <mxGeometry x="40" y="120" width="250" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="pub" value="发布&lt;br&gt;送审 / 印发后" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4EFE4;strokeColor=#3E8E4E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=19;" vertex="1" parent="1">
+          <mxGeometry x="345" y="120" width="250" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="arc" value="归档&lt;br&gt;唯一终态 · 冻结" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=19;" vertex="1" parent="1">
+          <mxGeometry x="650" y="120" width="250" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="e1" value="发布" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#3E8E4E;strokeWidth=1.8;endArrow=blockThin;endFill=1;exitX=1;exitY=0.32;exitDx=0;exitDy=0;entryX=0;entryY=0.32;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;fontSize=14;fontFamily=Aa顺風顺水顺财神;fontColor=#2A2927;" edge="1" parent="1" source="draft" target="pub">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" value="退回" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#3B82A0;strokeWidth=1.8;endArrow=blockThin;endFill=1;exitX=0;exitY=0.72;exitDx=0;exitDy=0;entryX=1;entryY=0.72;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;fontSize=14;fontFamily=Aa顺風顺水顺财神;fontColor=#2A2927;" edge="1" parent="1" source="pub" target="draft">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" value="归档" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#C98A2B;strokeWidth=1.8;endArrow=blockThin;endFill=1;labelBackgroundColor=#FFFFFF;fontSize=14;fontFamily=Aa顺風顺水顺财神;fontColor=#2A2927;" edge="1" parent="1" source="pub" target="arc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" value="直接归档" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#C98A2B;strokeWidth=1.8;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;fontSize=14;fontFamily=Aa顺風顺水顺财神;fontColor=#2A2927;" edge="1" parent="1" source="draft" target="arc">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="160" y="272"/>
+              <mxPoint x="780" y="272"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n1" value="归档没有出边：正文与要素全部冻结，这是唯一的终态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="306" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="归档后唯一还能改的是盖章扫描 PDF 附件的增删" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="362" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n3" value="想改内容 → 用「基于此公文新建」另起一篇，原件保持冻结" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="418" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n4" value="状态色：草稿蓝 · 发布绿 · 归档橙，稿件表与标签上通用" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="474" width="860" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

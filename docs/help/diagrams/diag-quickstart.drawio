@@ -1,0 +1,49 @@
+<mxfile host="gongwen-help">
+  <diagram name="上手五步" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="五分钟出第一份稿子" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="290" y="20" width="360" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1" value="1　接上本地模型&lt;br&gt;LM Studio / Ollama" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="96" width="273" height="108" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2" value="2　测试连接&lt;br&gt;选一个中文指令模型" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="333" y="96" width="273" height="108" as="geometry"/>
+        </mxCell>
+        <mxCell id="s3" value="3　建标准词库&lt;br&gt;单位 · 错写 · 联系人" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="626" y="96" width="273" height="108" as="geometry"/>
+        </mxCell>
+        <mxCell id="s4" value="4　存模板默认要素&lt;br&gt;发文单位 · 联系人 · 呈报领导" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="187" y="268" width="273" height="108" as="geometry"/>
+        </mxCell>
+        <mxCell id="s5" value="5　出稿 → 改稿&lt;br&gt;→ 审校 → 导出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="480" y="268" width="273" height="108" as="geometry"/>
+        </mxCell>
+        <mxCell id="se0" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#C96442;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="s1" target="s2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#C96442;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="s2" target="s3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#C96442;strokeWidth=1.8;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="s3" target="s4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="se3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#C96442;strokeWidth=1.8;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="s4" target="s5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="首次运行 → 设置 → 上手指引，有同样的五步，可以对着做" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="420" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="第 3 步先录三五个单位、两三个联系人就够出稿，后面边用边补" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="476" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n3" value="第 4 步存一次，下次新建同文种稿子自动带出这些要素" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="532" width="860" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -734,21 +734,21 @@ impl GongwenApp {
                 NavPage::AiPrompts,
                 NavPage::Knowledge,
                 NavPage::Settings,
+                NavPage::Help,
             ] {
                 // 菜单高亮表达“当前所在页”，不是“这个页面曾经开成了标签”。
                 // 后台打开但未激活的页面不应和当前页同时显示为选中。
                 let active = self.tabs.get(self.active_tab) == Some(&TabRef::Page(page));
-                if ui
-                    .add(
-                        theme::menu_item(page.icon(), page.label())
-                            .selected(active)
-                            // 选中项常显强调色淡底，而不是只改文字颜色：
-                            // `frame(false)` 会让按钮在未悬停时不画任何背景，
-                            // 选中态退化成「文字变色」，条目本身没有反应。
-                            .frame_when_inactive(active),
-                    )
-                    .clicked()
-                {
+                let mut item = theme::menu_item(page.icon(), page.label())
+                    .selected(active)
+                    // 选中项常显强调色淡底，而不是只改文字颜色：
+                    // `frame(false)` 会让按钮在未悬停时不画任何背景，
+                    // 选中态退化成「文字变色」，条目本身没有反应。
+                    .frame_when_inactive(active);
+                if page == NavPage::Help {
+                    item = item.right_text("F1");
+                }
+                if ui.add(item).clicked() {
                     open = Some(page);
                     ui.close();
                 }

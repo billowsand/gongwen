@@ -1,0 +1,46 @@
+<mxfile host="gongwen-help">
+  <diagram name="版头主体版记" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="公文纸面三段与要素表单对应" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="250" y="20" width="440" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ph" value="版头" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5DC;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="92" width="150" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ph2" value="密级 · 保密期限 · 红头发文单位 · 机关代字〔年〕序号号&lt;br&gt;特殊处理 · 函稿版本 · 逐份编号" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="206" y="92" width="694" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="ln" value="反　线" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#C96442;strokeColor=#C96442;fontColor=#FFFFFF;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="40" y="192" width="860" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="pb" value="主体" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="232" width="150" height="86" as="geometry"/>
+        </mxCell>
+        <mxCell id="pb2" value="主送单位 · 标题（带标题提示） · 正文体例&lt;br&gt;标题与列表编号 · 紧缩样式" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="206" y="232" width="694" height="86" as="geometry"/>
+        </mxCell>
+        <mxCell id="pr" value="版记" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4EFE4;strokeColor=#3E8E4E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="328" width="150" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="pr2" value="抄送 · 承办单位 · 联合承办（单位 → 人 → 电话）&lt;br&gt;联系人 / 电话 · 呈报领导 · 落款 · 成文日期 · 双面页码 · 份数" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="206" y="328" width="694" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="nav" value="版面缩略导航图&lt;br&gt;点色块跳到对应段&lt;br&gt;缺必填项在图上标红点" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="452" width="300" height="104" as="geometry"/>
+        </mxCell>
+        <mxCell id="n0" value="密级规则：秘密 ≤ 10 年 · 机密 ≤ 20 年 · 绝密 ≤ 30 年（绝密可长期）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="360" y="452" width="540" height="104" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="表单按纸面部位分三段，顺序与打印出来的纸从上到下一致；按文种保存默认要素，下次新建同文种自动带出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="584" width="860" height="54" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="联合发文：主办单位 + 联合单位 + 各自承办联系人成对；行文方式分内部 / 外部、单独发文 / 联合发文" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="644" width="860" height="54" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,40 @@
+<mxfile host="gongwen-help">
+  <diagram name="五种视图" id="page1">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="t" value="起草页五种视图" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=21;" vertex="1" parent="1">
+          <mxGeometry x="320" y="20" width="300" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="v1" value="源码&lt;br&gt;带语法高亮的 Markdown&lt;br&gt;（默认）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="40" y="96" width="273" height="128" as="geometry"/>
+        </mxCell>
+        <mxCell id="v2" value="实时排版&lt;br&gt;非活动行按公文版式排&lt;br&gt;只在光标行显示标记" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="333" y="96" width="273" height="128" as="geometry"/>
+        </mxCell>
+        <mxCell id="v3" value="版式预览&lt;br&gt;公文字体与行距&lt;br&gt;看纸面效果" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="626" y="96" width="273" height="128" as="geometry"/>
+        </mxCell>
+        <mxCell id="v4" value="分栏&lt;br&gt;左源码 / 右版式&lt;br&gt;对照着改" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="187" y="252" width="273" height="128" as="geometry"/>
+        </mxCell>
+        <mxCell id="v5" value="版本对照&lt;br&gt;左最新提交 / 右当前&lt;br&gt;看改了什么" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="480" y="252" width="273" height="128" as="geometry"/>
+        </mxCell>
+        <mxCell id="n1" value="不熟 Markdown → 先用「实时排版」：只在光标那一行看得到标记" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="420" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n2" value="对版、看成品 → 用「版式预览」；预览右缘有刻度条，靠近推出大纲板" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="476" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n3" value="源码字面三套模板：编辑器字体 / 标题随公文 / 与公文一致（设置 → 字体）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="532" width="860" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="n4" value="字号：Ctrl + 加减号 / 0 复位，或 Ctrl + 滚轮——只改屏幕字号，不影响导出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="588" width="860" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

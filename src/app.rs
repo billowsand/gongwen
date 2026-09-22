@@ -144,6 +144,8 @@ pub struct GongwenApp {
     vocabulary_move: Option<VocabularyMoveDraft>,
     /// "关于公文助手"弹窗显隐。
     about_window_open: bool,
+    /// 应用内帮助页（[`NavPage::Help`] 标签）的状态。
+    help: crate::help::HelpState,
     vocabulary_filter: String,
     /// 词库树上当前选中的词条 id，右侧编辑区显示它的详情。
     vocabulary_selected: Option<u64>,
@@ -418,6 +420,7 @@ impl GongwenApp {
             vocabulary_setup_name: String::new(),
             vocabulary_move: None,
             about_window_open: false,
+            help: crate::help::HelpState::default(),
             vocabulary_filter: String::new(),
             vocabulary_selected: None,
             vocabulary_collapsed: BTreeSet::new(),
@@ -622,11 +625,18 @@ impl eframe::App for GongwenApp {
                     crate::knowledge_ui::knowledge_ui(self, &mut content_ui)
                 }
                 TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
+                TabRef::Page(NavPage::Help) => {
+                    crate::help::help_page(&mut content_ui, &mut self.help)
+                }
                 TabRef::Pdf(key) => self.pdf_ui(key, &mut content_ui),
             }
         });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。
         self.apply_draft_actions();
+        // 设置页的「打开完整图文手册」只置了个位——它拿不到标签栏，开标签在这儿。
+        if std::mem::take(&mut self.help.request_open) {
+            self.open_page(NavPage::Help);
+        }
         self.auto_create_touched_doc();
         self.autosave_tick();
         self.close_confirm_window(&ctx);
