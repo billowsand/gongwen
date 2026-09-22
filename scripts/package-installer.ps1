@@ -76,16 +76,18 @@ if ([string]::IsNullOrWhiteSpace($CompilerPath)) {
         Select-Object -ExpandProperty Source
 }
 if ([string]::IsNullOrWhiteSpace($CompilerPath)) {
-    $candidates = @()
+$candidates = @()
     if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
         $candidates += Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+        $candidates += Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\app\ISCC.exe"
     }
     if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
         $candidates += Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"
+        $candidates += Join-Path $env:ProgramFiles "Inno Setup 6\app\ISCC.exe"
     }
     if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        $candidates += Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\app\ISCC.exe"
         $candidates += Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+        $candidates += Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\app\ISCC.exe"
     }
     foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {

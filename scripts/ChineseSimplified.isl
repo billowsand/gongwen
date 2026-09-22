@@ -1,4 +1,4 @@
-; *** Inno Setup version 6.5.0+ Chinese Simplified messages ***
+﻿; *** Inno Setup version 6.5.0+ Chinese Simplified messages ***
 ;
 ; To download user-contributed translations of this file, go to:
 ;   https://jrsoftware.org/files/istrans/
@@ -20,19 +20,18 @@
 ; understand the '[LangOptions] section' topic in the help file.
 LanguageName=简体中文
 ; About LanguageID, to reference link:
-; https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/a9eac961-e77d-41a6-90a5-ce1a8b0cdb9c
+; https://docs.microsoft.com/en/openspecs/windows_protocols/ms-lcid/a9eac961-e77d-41a6-90a5-ce1a8b0cdb9c
 LanguageID=$0804
-; LanguageCodePage should always be set if possible, even if this file is Unicode
-; For English it's set to zero anyway because English only uses ASCII characters
-LanguageCodePage=936
-; If the language you are translating to requires special font faces or
-; sizes, uncomment any of the following entries and change them accordingly.
-;DialogFontName=
-;DialogFontSize=9
-;DialogFontBaseScaleWidth=7
-;DialogFontBaseScaleHeight=15
-;WelcomeFontName=Segoe UI
-;WelcomeFontSize=14
+; LanguageCodePage 应尽量填写，但当向导字体设为 YaHei UI 时由 Setup 自己按
+; Unicode 渲染，把 CodePage 写 0 反而最稳（旧版 Inno 在非 Unicode 模式下把不带
+; BOM 的 ISL 按 ANSI 解码，936+中文字节会被解释成乱码，所以下面再加 UTF-8 BOM）。
+LanguageCodePage=0
+; 向导字体固定为 Windows 自带的中文 UI 字体，避免少数机器上落到 Tahoma /
+; Segoe UI 之类不带中文 CJK 字形的字体上、把中文字符渲染成方块。
+DialogFontName=Microsoft YaHei UI
+DialogFontSize=9
+WelcomeFontName=Microsoft YaHei UI
+WelcomeFontSize=10
 
 [Messages]
 
@@ -335,11 +334,13 @@ ExistingFileReadOnly2=无法替换已存在的文件，它是只读的。
 ExistingFileReadOnlyRetry=移除只读属性并重试(&R)
 ExistingFileReadOnlyKeepExisting=保留已存在的文件(&K)
 ErrorReadingExistingDest=尝试读取已存在的文件时出错：
+FileExists=目标文件已存在。是否要覆盖它？
 FileExistsSelectAction=选择操作
 FileExists2=文件已经存在。
 FileExistsOverwriteExisting=覆盖已存在的文件(&O)
 FileExistsKeepExisting=保留已存在的文件(&K)
 FileExistsOverwriteOrKeepAll=为接下来的冲突文件执行此操作(&D)
+ExistingFileNewer=已存在的文件比安装程序将要安装的文件还要新。是否要覆盖它？
 ExistingFileNewerSelectAction=选择操作
 ExistingFileNewer2=已存在的文件比安装程序将要安装的文件还要新。
 ExistingFileNewerOverwriteExisting=覆盖已存在的文件(&O)
