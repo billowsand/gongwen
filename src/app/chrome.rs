@@ -1130,7 +1130,11 @@ impl GongwenApp {
         );
         content.spacing_mut().item_spacing.x = 4.0;
         if busy {
-            content.spinner();
+            // 尺寸咬死 14px，与下面的图标一样大：忙碌时转圈只是顶替图标的位置，
+            // 不会把这行撑高（egui 自带 spinner 按 interact_size 取 30px，会把
+            // 圆圈顶出胶囊、同时把标题挤得往下掉）。颜色跟着文字走，选中态的
+            // 主题色胶囊上自动变白。
+            theme::spinner(&mut content, 14.0, text_color);
         } else if !mark.is_empty() {
             // 跟背景/文字同步插值，别用 sel_t > 0.5 那种硬阈值，否则动画中途会跳一下。
             content.colored_label(
@@ -1280,7 +1284,9 @@ impl GongwenApp {
 
                 // 左：忙碌指示灯与状态文案。文案过长直接截断，不许把中间的模型名挤走。
                 if self.any_busy() {
-                    ui.spinner();
+                    // 与右边的常态圆点同样吃 8px：忙/闲切换时后面的状态文案
+                    // 不会横向跳一下。
+                    theme::spinner(ui, 8.0, theme::accent());
                 } else {
                     theme::dot(ui, theme::success());
                 }

@@ -118,7 +118,7 @@ fn kind_filter_bar(app: &mut GongwenApp, ui: &mut egui::Ui) {
 fn index_status(app: &mut GongwenApp, ui: &mut egui::Ui) {
     if let Some((done, total, title)) = &app.knowledge_index_progress {
         ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new());
+            theme::spinner(ui, 14.0, theme::accent());
             let text = if title.is_empty() {
                 format!("正在建立索引… {done}/{total}")
             } else {
@@ -298,7 +298,7 @@ fn search_results(app: &mut GongwenApp, ui: &mut egui::Ui) {
     // 索引任务也在占用 busy，此时不显示检索 spinner。
     if app.knowledge_busy && app.knowledge_index_progress.is_none() {
         ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new());
+            theme::spinner(ui, 14.0, theme::accent());
             ui.weak("正在检索…");
         });
         return;
@@ -353,7 +353,7 @@ fn qa_chat(app: &mut GongwenApp, ui: &mut egui::Ui) {
     if let Some(question) = app.knowledge_qa_pending.clone() {
         qa_question_row(ui, &question);
         ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new());
+            theme::spinner(ui, 14.0, theme::accent());
             ui.weak("正在生成答案…");
         });
         ui.add_space(6.0);

@@ -1936,6 +1936,54 @@ pub fn dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
+/// 行内忙碌指示：一段匀速旋转、尾部渐隐的圆弧，尺寸自己说了算。
+///
+/// 不用 egui 自带的 `Spinner`：它的尺寸取 `spacing.interact_size.y`（本主题是
+/// 30px），塞进标签页内容行（28-8=20px）这类窄行会把行撑高——圆圈溢出胶囊、
+/// 同一行的标题被重新居中而往下掉。这里显式吃 `size × size`，调用处按邻座图标
+/// 的尺寸给值，忙与不忙之间布局纹丝不动。
+///
+/// 画法也比自带的稳：自带 spinner 的扫过角是 `sin(t)`，会一伸一缩地抽搐；这里
+/// 扫过角固定 280°，匀速转，尾巴用逐段降透明度渐隐，头尾各补一枚圆点当圆头。
+pub fn spinner(ui: &mut egui::Ui, size: f32, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    // 线宽随直径走，小到 14px 也保持 1.5px 的可见度。
+    let width = (size / 8.0).clamp(1.5, 3.0);
+    let radius = (size - width) / 2.0;
+    /// 转一圈的秒数。
+    const PERIOD: f64 = 0.9;
+    /// 圆弧扫过的角度：留一道明显缺口，一眼看出在转。
+    const SWEEP: f64 = std::f64::consts::TAU * 280.0 / 360.0;
+    /// 分段数：段越多尾巴的渐隐越顺，14px 上 24 段已看不出折线。
+    const SEGMENTS: usize = 24;
+    let head = ui.input(|i| i.time) % PERIOD / PERIOD * std::f64::consts::TAU;
+    let at = |t: f64| {
+        // t=0 是尾、t=1 是头，弧沿顺时针铺开。
+        let (sin, cos) = (head - SWEEP * (1.0 - t)).sin_cos();
+        rect.center() + radius * egui::vec2(cos as f32, sin as f32)
+    };
+    let painter = ui.painter();
+    for i in 0..SEGMENTS {
+        let t0 = i as f64 / SEGMENTS as f64;
+        let t1 = (i + 1) as f64 / SEGMENTS as f64;
+        // 尾端压到 0.15，头端实色：旋转方向不靠缺口猜，看浓淡就知道。
+        let alpha = 0.15 + 0.85 * t1 as f32;
+        painter.line_segment(
+            [at(t0), at(t1)],
+            Stroke::new(width, color.gamma_multiply(alpha)),
+        );
+    }
+    // 线段是平头的，头尾各补一枚同宽圆点收口，弧线才不像被剪断。
+    painter.circle_filled(at(1.0), width / 2.0, color);
+    painter.circle_filled(at(0.0), width / 2.0, color.gamma_multiply(0.15));
+    // 动画得自己驱动重绘，否则界面静止时它就停在那儿。
+    ui.ctx().request_repaint();
+    response
+}
+
 /// 一枚淡底圆角标签，用来显示模型名、状态、版本号等元信息。
 pub fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) -> egui::Response {
     egui::Frame::new()

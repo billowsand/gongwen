@@ -77,6 +77,10 @@ pub(crate) fn red_approval_frame_table(input: &DraftInput) -> Table {
 /// 宽度只取到红色竖线（版心左缘往右 100mm），**不能**铺满整个版心：铺满时它与
 /// 批示框在同一坐标上重叠，Word 为避免两个浮动表相压会把其中一个另挪位置，
 /// 横线就跑到文号上方去了。两张表左右相接、互不重叠，才会都停在 48mm 处。
+///
+/// 行高取 20 缇而非理论上的 1 缇：Word 会把 1 缇高的浮动表当作不可见对象
+/// 丢弃（左段横线整段消失，只剩批示框的右段），20 缇（0.35mm）即可稳定渲染，
+/// 且远低于标题顶沿，不参与绕排、不影响版面。
 pub(crate) fn red_approval_top_rule_table() -> Table {
     let borders = TableBorders::new().clear_all().set(
         TableBorder::new(TableBorderPosition::Top)
@@ -90,7 +94,7 @@ pub(crate) fn red_approval_top_rule_table() -> Table {
                 .width(width, WidthType::Dxa)
                 .add_paragraph(Paragraph::new()),
         ])
-        .row_height(1.0)
+        .row_height(20.0)
         .height_rule(HeightRule::Exact),
     ])
     .set_grid(vec![width])

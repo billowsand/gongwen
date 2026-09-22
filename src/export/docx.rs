@@ -266,6 +266,15 @@ pub fn write_docx_with_numbering(
             }
         }
         TemplateKind::RedHeadApproval => {
+            // 红线、批示框、承办区三张浮动表排在正文流最前面（锚定随后的密级段，
+            // 不占在流高度），不要放进首页页眉：WPS 对页眉内的浮动表支持有缺陷，
+            // 高表会被整体丢弃并连带丢弃其它浮动表，且不触发文字绕排，首页版式
+            // 全崩；挪到正文流后 Word 与 WPS 都能正确定位并绕排（首页页码由
+            // add_official_page_footers 的 first_footer 保证，不依赖页眉）。
+            doc = doc
+                .add_table(red_approval_top_rule_table())
+                .add_table(red_approval_frame_table(input))
+                .add_table(red_approval_record_table(input, display));
             doc = doc.add_paragraph(
                 letter_security_paragraph(input).line_spacing(
                     LineSpacing::new()
@@ -301,16 +310,6 @@ pub fn write_docx_with_numbering(
                 );
                 red_approval_header_twips += BODY_LINE_TWIPS + RED_APPROVAL_NUMBER_AFTER_TWIPS;
             }
-            doc =
-                doc.first_header(
-                    Header::new()
-                        .add_paragraph(Paragraph::new().line_spacing(
-                            LineSpacing::new().line(1).line_rule(LineSpacingType::Exact),
-                        ))
-                        .add_table(red_approval_top_rule_table())
-                        .add_table(red_approval_frame_table(input))
-                        .add_table(red_approval_record_table(input, display)),
-                );
         }
         TemplateKind::MeetingAgenda | TemplateKind::ResearchReport => unreachable!(),
     }
@@ -1631,15 +1630,21 @@ mod tests {
         let xml = zip_text(&path, "word/document.xml");
         // TeX RedApprovalPageOverlay 写 \DocumentNumber{}号，中间不留空格。
         assert!(xml.contains("某办呈〔2026〕12号"));
-        // 批示框、贯穿红线与承办区排在首页页眉部件里，对应 TeX 的绝对定位 picture。
-        let header = header_text(&path);
-        assert!(header.contains("批　示"));
-        assert!(header.contains("w:tblpXSpec=\"right\""));
-        assert!(header.contains("w:tblpY=\"2720\""));
-        assert!(header.contains("w:tblpYSpec=\"bottom\""));
-        assert!(header.contains("承办单位："));
-        assert!(header.contains("综合处"));
-        assert!(header.contains("业务处"));
+        // 批示框、贯穿红线与承办区排在正文流最前面（对应 TeX 的绝对定位 picture）。
+        // 不能放页眉：WPS 会丢弃页眉内的高浮动表且不绕排。
+        let body_start = xml.find("<w:body>").unwrap() + "<w:body>".len();
+        assert!(
+            xml[body_start..].starts_with("<w:tbl>"),
+            "三张浮动表应排在正文流最前面：{}",
+            &xml[body_start..body_start + 200]
+        );
+        assert!(xml.contains("批　示"));
+        assert!(xml.contains("w:tblpXSpec=\"right\""));
+        assert!(xml.contains("w:tblpY=\"2720\""));
+        assert!(xml.contains("w:tblpYSpec=\"bottom\""));
+        assert!(xml.contains("承办单位："));
+        assert!(xml.contains("综合处"));
+        assert!(xml.contains("业务处"));
         let title = paragraph_containing(&xml, "关于认真做好网络安全与");
         assert!(title.contains("w:sz w:val=\"36\""));
         assert!(title.contains("w:right=\"3175\""));
@@ -1672,16 +1677,16 @@ mod tests {
         // 承办区栏宽按内容一次算定：联系人栏固定 8 em，电话栏按最长号码定宽，
         // 承办单位栏吃版心余量。本例两条号码都是 12 位 → 3404/2560/2880。
         assert!(
-            header.contains(&format!(
+            xml.contains(&format!(
                 "<w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" />",
                 3_404, 2_560, 2_880
             )),
-            "承办区栏宽应与 LaTeX/预览同源：{header}"
+            "承办区栏宽应与 LaTeX/预览同源：{xml}"
         );
         // 多条承办条目：标签只在首行出现一次，续行只排取值并保持对齐。
-        assert_eq!(header.matches("承办单位：").count(), 1, "{header}");
-        assert_eq!(header.matches("联系人：").count(), 1, "{header}");
-        assert_eq!(header.matches("电话：").count(), 1, "{header}");
+        assert_eq!(xml.matches("承办单位：").count(), 1, "{xml}");
+        assert_eq!(xml.matches("联系人：").count(), 1, "{xml}");
+        assert_eq!(xml.matches("电话：").count(), 1, "{xml}");
     }
 
     /// 承办单位一律不换行：栏内放不下时整格按同一比例横向压窄（`w:w`），
@@ -1710,8 +1715,8 @@ mod tests {
         ];
         input.date = "2026年8月12日".into();
         write_docx_ok(&path, &input, "# 标题\n\n正文。妥否，请指示。").unwrap();
-        // 承办区排在首页页眉部件里。
-        let xml = header_text(&path);
+        // 承办区排在正文流最前面（随三张浮动表一起）。
+        let xml = zip_text(&path, "word/document.xml");
         let columns = crate::export::red_record_columns(&[
             [
                 "教师工作与师资管理处".to_string(),
@@ -1784,8 +1789,9 @@ mod tests {
         text
     }
 
-    /// 红头、红色反线和红头呈批件首页的框线/承办区都排在首页页眉部件里
-    /// （与 TeX 的绝对定位对应），断言这些元素时要连页眉一起看。
+    /// 红头与红色反线排在首页页眉部件的浮动表里（与 TeX 的绝对定位对应），
+    /// 断言这些元素时要连页眉一起看。红头呈批件的框线/承办区不在此列：
+    /// 它们排在正文流最前面（见 write_docx_with_numbering 的注释）。
     fn header_text(path: &Path) -> String {
         let file = File::open(path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
