@@ -68,6 +68,11 @@ cargo build --release --locked
 - Release workflow 全程约 20–30 分钟。
 - 完整发布流程（bump → tag → 监控 → 写中文 release notes → 验证）见 skill `release`。
   **硬性要求：release 正文必须手写，不能用 `--generate-notes` 的占位说明。**
+- 打包一个**供本机安装测试的开发版**（不走发布）：跑
+  `scripts/package-dev.ps1`（`powershell -ExecutionPolicy Bypass -NoProfile -File`），
+  它构建 release → 组装 `dist\win-x64-full` → 用 Inno Setup 打出
+  `dist\gongwen-assistant-<下一补丁号>-dev-win-x64-setup.exe`；只重打包不重编译加
+  `-SkipBuild`。脚本含中文，文件头必须有 UTF-8 BOM，否则 PowerShell 5.1 按 GBK 读会解析失败。
 
 ## 约定
 
