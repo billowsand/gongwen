@@ -512,9 +512,14 @@
         % 最后一项在段落超过首页额度时重复使用，故后续行恢复标准版心。
         \edef\gwa@redshape{\number\numexpr\gwa@redremaining+1\relax
             \gwa@redshapepairs\space 0pt \the\linewidth}%
-        \expandafter\parshape\gwa@redshape\relax
+        % 必须 \global：\parshape 是局部量，而分行是在 \par 那一刻才做的。
+        % 段首是一组花括号时——正文里以 【…】、（…） 开头的段落就是这样，导出成
+        % `{\kai\enkai\zihao{4} 【事项背景】}…`——TeX 在组**内**才进入水平模式，
+        % everypar 也在组内执行；组一闭合 parshape 就被还原成 0，等 \par 来分行
+        % 时窄栏设置早没了，整段照 156mm 版心排，一路压过批示栏。
+        \expandafter\global\expandafter\parshape\gwa@redshape\relax
     \else
-        \parshape=0
+        \global\parshape=0
     \fi
 }
 \newcommand{\RedShapedContent}[1]{%
@@ -523,6 +528,8 @@
         \everypar{\gwa@setredparshape}%
         #1\par
     \endgroup
+    % 窄栏是全局设的，正文一结束就得全局清掉，免得落款、附件跟着缩进 96mm。
+    \global\parshape=0
 }
 
 % ========== 自动计算印刷份数功能 ==========
@@ -926,7 +933,7 @@
 \newcommand{\RedPageOneBarrier}{%
     \global\gwa@redbodycontinuedtrue
     \gwa@redremaining=0
-    \parshape=0
+    \global\parshape=0
     \ifnum\value{page}=1 \clearpage\fi
 }
 

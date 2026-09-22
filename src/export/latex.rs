@@ -334,6 +334,14 @@ mod tests {
         assert!(GONGHAN_CLASS.contains("\\RedFirstPageRemaining"));
         assert!(GONGHAN_CLASS.contains("\\parshape"));
         assert!(GONGHAN_CLASS.contains("\\everypar{\\gwa@setredparshape}"));
+        // 窄栏必须全局设：段首是一组花括号时（正文里以 【…】、（…） 开头的段落
+        // 就会导出成 `{\kai\enkai\zihao{4} …}…`），everypar 在组内执行，局部的
+        // parshape 随组一起还原，等 \par 分行时窄栏早没了，整段照 156mm 排。
+        assert!(
+            GONGHAN_CLASS.contains("\\expandafter\\global\\expandafter\\parshape")
+                && GONGHAN_CLASS.contains("\\global\\parshape=0"),
+            "首页窄栏的 parshape 必须全局赋值，否则以【…】开头的段落会冲出批示栏"
+        );
         assert!(GONGHAN_CLASS.contains("\\textheight-\\pagetotal-\\RedRecordHeight-2mm"));
         assert!(
             GONGHAN_CLASS.contains("\\setbox\\gwa@redrecordbox=\\vbox")
