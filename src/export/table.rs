@@ -645,6 +645,7 @@ pub(super) fn to_longtblr(
         .iter()
         .map(|column| column.alignment)
         .collect::<Vec<_>>();
+    let column_count = columns.len();
 
     let mut output = format!(
         "\\begin{{longtblr}}[\n  label = none,\n  entry = none,\n]{{\n  colspec = {{{colspec}}},\n  rowhead = 1,\n  hlines,\n  vlines,\n  row{{1}} = {{c, font=\\heiti\\enheiti}},\n}}\n"
@@ -727,6 +728,17 @@ pub(super) fn to_longtblr(
                     if span.column_span > 1 {
                         options.push(format!("c={}", span.column_span));
                     }
+                    // 整行合并格在 tabularray 2022A（内置 bundle 钉死的版本）下拿不到
+                    // 最终列宽：文字框被算成第一遍的窄宽度，短标题会中途折行。套一个
+                    // 按版心算好宽度的 \parbox，让内容按整行宽度排；2023A 起 tabularray
+                    // 自己就对，这个盒子是无害的冗余。
+                    let content = if span.column_span == column_count {
+                        format!(
+                            "\\parbox[c]{{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}}{{{content}}}"
+                        )
+                    } else {
+                        content
+                    };
                     // 只写水平对齐；竖向居中由 colspec 里的 `m` 统一管，
                     // 与 `\SetCell[c=2]{c}` 的官方写法一致。
                     format!("\\SetCell[{}]{{{align}}} {content}", options.join(","))
@@ -1261,7 +1273,8 @@ mod tests {
         );
     }
 
-    /// TeX 那边同样按序号表的规矩给分组行写左对齐。
+    /// TeX 那边同样按序号表的规矩给分组行写左对齐。整行合并格要套 `\parbox`
+    /// 撑到整行宽度（tabularray 2022A 的整行合并宽度是坏的）。
     #[test]
     fn tex_aligns_numbered_group_rows_to_the_left() {
         let table = vec![
@@ -1276,8 +1289,44 @@ mod tests {
             column_span: 3,
         }];
         let tex = to_longtblr(&table, &[], &spans, true);
-        assert!(tex.contains("\\SetCell[c=3]{l} （一）大标题"), "{tex}");
+        assert!(
+            tex.contains("\\SetCell[c=3]{l} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{（一）大标题}"),
+            "{tex}"
+        );
         let plain = to_longtblr(&table, &[], &spans, false);
-        assert!(plain.contains("\\SetCell[c=3]{c} （一）大标题"), "{plain}");
+        assert!(
+            plain.contains("\\SetCell[c=3]{c} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{（一）大标题}"),
+            "{plain}"
+        );
+    }
+
+    /// `\parbox` 只补整行合并：部分横向合并（`横向合并` 跨两列）不套，行为与从前一致。
+    #[test]
+    fn full_row_span_gets_a_parbox_but_a_partial_span_does_not() {
+        let table = vec![
+            vec!["甲".into(), "乙".into(), "丙".into()],
+            vec!["整行合并".into(), String::new(), String::new()],
+            vec!["部分合并".into(), String::new(), "末".into()],
+        ];
+        let spans = [
+            TableSpan {
+                row: 1,
+                column: 0,
+                row_span: 1,
+                column_span: 3,
+            },
+            TableSpan {
+                row: 2,
+                column: 0,
+                row_span: 1,
+                column_span: 2,
+            },
+        ];
+        let tex = to_longtblr(&table, &[], &spans, false);
+        assert!(tex.contains("\\SetCell[c=3]{c} \\parbox[c]"), "{tex}");
+        assert!(
+            tex.contains("\\SetCell[c=2]{c} 部分合并"),
+            "部分合并不该套 parbox：{tex}"
+        );
     }
 }

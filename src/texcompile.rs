@@ -1253,8 +1253,9 @@ mod tests {
             .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
             .unwrap();
         let content = std::fs::read_to_string(tex).unwrap();
+        let _ = std::fs::copy(tex, ".tmp/verify/generated-numbered-table.tex");
         assert!(
-            content.contains("\\SetCell[c=4]{l} （一）大标题一"),
+            content.contains("\\SetCell[c=4]{l} \\parbox[c]"),
             "{content}"
         );
         let pdf = compile_pdf_if_available(tex, &FontConfig::default())
