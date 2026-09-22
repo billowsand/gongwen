@@ -986,13 +986,15 @@ pub(crate) fn parse_table_cells(
 /// 「| （一） 大标题 |  |  |  |」才是分组行。
 fn looks_like_row_number(value: &str) -> bool {
     let value = value.trim();
-    let value = value
-        .strip_prefix(['（', '('])
-        .and_then(|rest| rest.strip_suffix(['）', ')']))
-        .unwrap_or(value)
+    let digits = value
+        .trim_start_matches(['（', '('])
+        .trim_end_matches(['）', ')', '.', '．', '、', '，', ','])
         .trim();
-    let digits = value.trim_end_matches(['.', '．', '、', '，', ',']);
-    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+    // 全角数字（`１`、`２`）在中文稿里也常见，一并当行号。
+    !digits.is_empty()
+        && digits
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ('０'..='９').contains(&ch))
 }
 
 /// 序号表的归一化：首列自动编号，只有首格有内容的行当整行合并的分组行。
@@ -1034,8 +1036,13 @@ fn normalize_numbered_table(
         let covered_from_above = spans
             .iter()
             .any(|span| span.row < row_index && span.row + span.row_span > row_index);
+        // 别的列在这一行起头往下 `^^` 合并的，也不能当分组行：整行跨度会把那个
+        // 纵向合并顶掉，下面被合并的格子就静默丢了。
+        let anchors_vertical = spans
+            .iter()
+            .any(|span| span.row == row_index && span.row_span > 1);
         let (first_cell, rest) = row.split_first_mut().expect("表格行至少有首格");
-        let group_row = !vertically_merged
+        let group_row = !anchors_vertical
             && !covered_from_above
             && !first_cell.trim().is_empty()
             && !looks_like_row_number(first_cell)
@@ -1047,7 +1054,7 @@ fn normalize_numbered_table(
             // 与标题编号「先清旧号再编号」是同一套规矩。
             let title = clean_heading_number(first_cell.trim());
             *first_cell = format!("{}{title}", render_heading_number(style, group));
-            // 这一行上手写的横向合并由整行跨度取代。首格既然不在纵向合并里，
+            // 这一行上手写的横向合并由整行跨度取代。起头的纵向合并已在上面排除，
             // 挂在这一行上的跨度就都是横向的。
             spans.retain(|span| span.row != row_index);
             spans.push(TableSpan {

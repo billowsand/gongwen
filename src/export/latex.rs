@@ -1686,7 +1686,7 @@ mod tests {
         );
         let (body, _) = official_letter_sections_to_tex(&blocks, &block_lines, false);
         assert!(
-            body.contains("\\SetCell[c=3]{l} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{（一）大标题一}"),
+            body.contains("\\SetCell[c=3]{l} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{\\raggedright （一）大标题一}"),
             "{body}"
         );
         assert!(body.contains("\\begin{longtblr}"), "{body}");

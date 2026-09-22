@@ -646,6 +646,11 @@ pub(super) fn to_longtblr(
         .map(|column| column.alignment)
         .collect::<Vec<_>>();
     let column_count = columns.len();
+    // 有 X 列时表格撑满版心，整行合并格才能按 \linewidth 算宽；全是定宽列的窄表
+    // 套了反而会把盒子撑出表外。
+    let full_width = columns
+        .iter()
+        .any(|column| matches!(column.width, ColumnWidth::Relative(_)));
 
     let mut output = format!(
         "\\begin{{longtblr}}[\n  label = none,\n  entry = none,\n]{{\n  colspec = {{{colspec}}},\n  rowhead = 1,\n  hlines,\n  vlines,\n  row{{1}} = {{c, font=\\heiti\\enheiti}},\n}}\n"
@@ -731,10 +736,16 @@ pub(super) fn to_longtblr(
                     // 整行合并格在 tabularray 2022A（内置 bundle 钉死的版本）下拿不到
                     // 最终列宽：文字框被算成第一遍的窄宽度，短标题会中途折行。套一个
                     // 按版心算好宽度的 \parbox，让内容按整行宽度排；2023A 起 tabularray
-                    // 自己就对，这个盒子是无害的冗余。
-                    let content = if span.column_span == column_count {
+                    // 自己就对，这个盒子是无害的冗余。盒子占满整格，`\SetCell` 的
+                    // 对齐管不到盒内文字，得在盒里再写一遍。
+                    let content = if full_width && span.column_span == column_count {
+                        let inner_align = match align {
+                            'l' => "\\raggedright",
+                            'r' => "\\raggedleft",
+                            _ => "\\centering",
+                        };
                         format!(
-                            "\\parbox[c]{{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}}{{{content}}}"
+                            "\\parbox[c]{{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}}{{{inner_align} {content}}}"
                         )
                     } else {
                         content
@@ -1290,12 +1301,12 @@ mod tests {
         }];
         let tex = to_longtblr(&table, &[], &spans, true);
         assert!(
-            tex.contains("\\SetCell[c=3]{l} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{（一）大标题}"),
+            tex.contains("\\SetCell[c=3]{l} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{\\raggedright （一）大标题}"),
             "{tex}"
         );
         let plain = to_longtblr(&table, &[], &spans, false);
         assert!(
-            plain.contains("\\SetCell[c=3]{c} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{（一）大标题}"),
+            plain.contains("\\SetCell[c=3]{c} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{\\centering （一）大标题}"),
             "{plain}"
         );
     }
@@ -1328,5 +1339,25 @@ mod tests {
             tex.contains("\\SetCell[c=2]{c} 部分合并"),
             "部分合并不该套 parbox：{tex}"
         );
+    }
+
+    /// 全是定宽数字列的窄表不撑满版心，整行合并格不能按 \linewidth 套盒子。
+    #[test]
+    fn narrow_fixed_width_table_gets_no_parbox() {
+        let table = vec![
+            vec!["1".into(), "2".into()],
+            vec!["3".into(), "4".into()],
+            vec!["合计".into(), String::new()],
+        ];
+        let spans = [TableSpan {
+            row: 2,
+            column: 0,
+            row_span: 1,
+            column_span: 2,
+        }];
+        let tex = to_longtblr(&table, &[], &spans, false);
+        assert!(tex.contains("Q["), "应当是定宽列：{tex}");
+        assert!(!tex.contains("X["), "{tex}");
+        assert!(!tex.contains("\\parbox"), "{tex}");
     }
 }

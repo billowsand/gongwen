@@ -1111,6 +1111,51 @@ mod tests {
         );
     }
 
+    /// 别的列在这一行起头往下 `^^` 合并时，这一行不当分组行：否则整行跨度会把
+    /// 纵向合并顶掉，下面那一格的合并就静默丢了。
+    #[test]
+    fn numbered_table_keeps_vertical_merges_anchored_on_a_title_like_row() {
+        let blocks = parse_markdown(
+            "<!-- [序号表] -->
+| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| 大标题 |  |  |
+|  | 甲 | ^^ |",
+        );
+        let MarkdownBlock::Table { spans, .. } = &blocks[1] else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert_eq!(
+            spans,
+            &[TableSpan {
+                row: 1,
+                column: 2,
+                row_span: 2,
+                column_span: 1,
+            }]
+        );
+    }
+
+    /// 全角数字与 `1)`、`1）` 这类写法也是手写行号，不是分组标题。
+    #[test]
+    fn numbered_table_treats_full_width_and_paren_numbers_as_row_numbers() {
+        let blocks = parse_markdown(
+            "<!-- [序号表] -->
+| 序号 | 标题 | 内容 |
+| --- | --- | --- |
+| １ |  |  |
+| 2) |  |  |
+| 3） |  |  |",
+        );
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[1] else {
+            panic!("应当解析为序号表：{blocks:?}");
+        };
+        assert!(spans.is_empty(), "{spans:?}");
+        assert_eq!(rows[1][0], "1");
+        assert_eq!(rows[2][0], "2");
+        assert_eq!(rows[3][0], "3");
+    }
+
     #[test]
     fn parses_horizontal_and_vertical_table_spans() {
         let blocks = parse_markdown(
