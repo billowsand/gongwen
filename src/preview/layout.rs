@@ -774,6 +774,30 @@ pub(crate) fn is_renderable_paragraph(text: &str) -> bool {
     !text.trim().is_empty() && !text.contains("<div") && !text.contains("</div")
 }
 
+/// 一格字形的视觉中线在 galley 内的纵向位置：把每个字形按
+/// (行顶 + 基线 − ascent) 取顶、按同式加 font_height 取底，再在所有字形里取最小
+/// 顶、最大底求均值。
+///
+/// egui 把基线钉在字体 ascent 上，行距减字高的余量整块留在字下方；按 galley 几
+/// 何居中字会贴着上沿。这里按字形真实框取中，让字坐在色块的正中（与
+/// `row_tint_offset` 同思路，后者只对单行做这件事）。
+fn galley_visual_midline(galley: &egui::Galley) -> f32 {
+    let mut min_top: Option<f32> = None;
+    let mut max_bottom: Option<f32> = None;
+    for row in &galley.rows {
+        for glyph in &row.glyphs {
+            let top = row.pos.y + glyph.pos.y - glyph.font_ascent;
+            let bottom = top + glyph.font_height;
+            min_top = Some(min_top.map_or(top, |v| v.min(top)));
+            max_bottom = Some(max_bottom.map_or(bottom, |v| v.max(bottom)));
+        }
+    }
+    match (min_top, max_bottom) {
+        (Some(top), Some(bottom)) => (top + bottom) / 2.0,
+        _ => 0.0,
+    }
+}
+
 /// 表格：四号字、行距 21 磅，表头黑体居中，列宽直接取导出器算好的智能列宽，
 /// 因此预览的列宽与导出的 Word 表格一致。
 pub(crate) fn table_block(
@@ -922,12 +946,19 @@ pub(crate) fn table_block(
         );
         // 表格一行就是纸面上的一行，哪怕某个单元格里的字折了两行：看稿的人指的
         // 是「表里第几行」，页边的号必须跟着表行走，不能跟着单元格里的折行走。
+        // 与下方 `painter.galley` 的 top 同算法，按字形框取中，号才贴字。
         let baseline = cells
             .iter()
             .filter(|cell| cell.row == row_index)
             .find_map(|cell| {
-                let height = y_offsets[cell.row + cell.row_span] - y_offsets[cell.row];
-                let top = y_offsets[cell.row] + (height - cell.galley.size().y) / 2.0;
+                let cell_rect = egui::Rect::from_min_max(
+                    egui::pos2(x_offsets[cell.column], y_offsets[cell.row]),
+                    egui::pos2(
+                        x_offsets[cell.column + cell.column_span],
+                        y_offsets[cell.row + cell.row_span],
+                    ),
+                );
+                let top = cell_rect.center().y - galley_visual_midline(&cell.galley);
                 cell.galley
                     .rows
                     .first()
@@ -952,7 +983,9 @@ pub(crate) fn table_block(
             ColumnAlignment::Right => cell_rect.right() - cell.padding,
             ColumnAlignment::Left => cell_rect.left() + cell.padding,
         };
-        let top = cell_rect.top() + (cell_rect.height() - cell.galley.size().y) / 2.0;
+        // 按字形框居中，不用 galley 几何居中：行距 21 磅比字高多出来的余量整块
+        // 留在字下方，几何居中字会贴着上沿偏上半格。
+        let top = cell_rect.center().y - galley_visual_midline(&cell.galley);
         painter.galley(egui::pos2(anchor, top), cell.galley, theme::paper::ink());
     }
 }
