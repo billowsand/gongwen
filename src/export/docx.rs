@@ -86,10 +86,19 @@ const CLOSING_GAP_TWIPS: u32 = 3 * BODY_LINE_TWIPS;
 const SECURITY_FIRST_LINE_TWIPS: u32 = 377;
 /// TeX \NoBodyNotice 在“（此页无正文）”之前固定留 58pt。
 const NO_BODY_NOTICE_GAP_TWIPS: u32 = 1_156;
-/// 红头呈批件首页密级行的段前间距。
+/// 红头呈批件首页密级行的段前间距。注意：密级段是正文流第一段（前面的三张
+/// 浮动表不占在流高度），Word 与 WPS 都会丢弃页首段落的段前间距，这 300 缇
+/// 实际不生效，排版推算不要把它算进去。
 const RED_APPROVAL_SECURITY_BEFORE_TWIPS: u32 = 300;
+/// 红头呈批件首页发文机关标志的段前间距：密级与红头之间空一行 29pt
+/// （TeX 中密级基线在版心下 10mm、红头基线在 30mm，中间正好隔一行）。
+const RED_APPROVAL_UNIT_BEFORE_TWIPS: u32 = 580;
 /// 红头呈批件首页发文机关标志的行高（TeX 的 \HeaderFontSize 一行）。
 const RED_APPROVAL_UNIT_LINE_TWIPS: u32 = 700;
+/// 同上，文号行的段前间距。文号直接接红头、不空行（TeX：红头基线 30mm、
+/// 文号基线 43mm，是相邻的两行）；Word 的固定行高行盒把字面抬高约 1.6mm，
+/// 留 220 缇微调，使文号字面底与红线（48mm）之间保持约 3mm。
+const RED_APPROVAL_NUMBER_BEFORE_TWIPS: u32 = 220;
 /// 同上，文号与红色横线之间的固定段后间距。
 const RED_APPROVAL_NUMBER_AFTER_TWIPS: u32 = 240;
 /// 红头呈批件首页标题行盒的上沿，量的是版心顶端往下的距离。
@@ -288,11 +297,13 @@ pub fn write_docx_with_numbering(
             doc = doc.add_paragraph(
                 header::issuing_unit_paragraph(&main_issuing_unit(input, display)).line_spacing(
                     LineSpacing::new()
+                        .before(RED_APPROVAL_UNIT_BEFORE_TWIPS)
                         .line(RED_APPROVAL_UNIT_LINE_TWIPS as i32)
                         .line_rule(LineSpacingType::Exact),
                 ),
             );
-            red_approval_header_twips += RED_APPROVAL_UNIT_LINE_TWIPS;
+            red_approval_header_twips +=
+                RED_APPROVAL_UNIT_BEFORE_TWIPS + RED_APPROVAL_UNIT_LINE_TWIPS;
             // TeX 红头呈批件首页：\DocumentNumber{}号，序号与“号”之间不留空格。
             // 行高与段后间距都写死：红色横线是按版心绝对坐标画的（48mm），标题
             // 却是流式排下来的，头部任何一段高度不定，标题与横线的间距就会漂。
@@ -303,12 +314,15 @@ pub fn write_docx_with_numbering(
                         .align(AlignmentType::Center)
                         .line_spacing(
                             LineSpacing::new()
+                                .before(RED_APPROVAL_NUMBER_BEFORE_TWIPS)
                                 .line(BODY_LINE_TWIPS as i32)
                                 .line_rule(LineSpacingType::Exact)
                                 .after(RED_APPROVAL_NUMBER_AFTER_TWIPS),
                         ),
                 );
-                red_approval_header_twips += BODY_LINE_TWIPS + RED_APPROVAL_NUMBER_AFTER_TWIPS;
+                red_approval_header_twips += RED_APPROVAL_NUMBER_BEFORE_TWIPS
+                    + BODY_LINE_TWIPS
+                    + RED_APPROVAL_NUMBER_AFTER_TWIPS;
             }
         }
         TemplateKind::MeetingAgenda | TemplateKind::ResearchReport => unreachable!(),
