@@ -138,6 +138,9 @@ pub fn check(blocks: &[Block], support: Support) -> Report {
 }
 
 /// 检查并按要求停止：警告照常打印，存在硬错误时逐条列出并中止转换。
+///
+/// 明细同时进错误消息：库的使用方（如公文助手）是 GUI 程序，stderr 上的
+/// `eprintln!` 用户看不到，只有 anyhow 错误链会呈现在界面上。
 pub fn check_or_bail(blocks: &[Block], support: Support) -> anyhow::Result<()> {
     let report = check(blocks, support);
     for w in &report.warnings {
@@ -148,8 +151,14 @@ pub fn check_or_bail(blocks: &[Block], support: Support) -> anyhow::Result<()> {
             eprintln!("  交叉引用错误: {e}");
         }
         anyhow::bail!(
-            "交叉引用检查未通过（{} 个错误），已停止转换",
-            report.errors.len()
+            "交叉引用检查未通过（{} 个错误），已停止转换：\n{}",
+            report.errors.len(),
+            report
+                .errors
+                .iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
     Ok(())
@@ -301,5 +310,20 @@ mod tests {
         let report = check(&blocks, Support::Full);
         assert!(report.is_ok());
         assert!(report.warnings.iter().any(|w| w.contains("chap:a")));
+    }
+
+    /// GUI 宿主看不到 stderr，中止消息本身必须带上每条明细。
+    #[test]
+    fn bail_message_carries_every_error_detail() {
+        let blocks = parser::parse("见{@chap:missing}。\n\n## 甲 {#chap:x}\n\n## 乙 {#chap:x}\n");
+        let message = check_or_bail(&blocks, Support::Full)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("2 个错误"), "{message}");
+        assert!(message.contains("chap:missing"), "{message}");
+        assert!(
+            message.contains("重复定义") && message.contains("chap:x"),
+            "{message}"
+        );
     }
 }

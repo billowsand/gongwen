@@ -35,7 +35,7 @@ License. A source copy is vendored in `vendor/mdx` and linked into the
 executable; the upstream notice is preserved at `vendor/mdx/LICENSE`.
 
 - Project: <https://github.com/billowsand/mdx>
-- Version: `mdx@2.16.2`
+- Version: `mdx@2.16.3`
 
 ## latex-rust and STIX Two Math
 
