@@ -268,8 +268,9 @@ impl Engine {
             })
             .collect();
         // 中文优先：整句先进去占第一，英文词紧跟其后（第二）；关掉时英文词先进、整句排在开头的英文后面。
-        // 辅码激活时不出英文候选与 emoji：敲辅码就是在选字
-        if self.chinese_first {
+        // 辅码两码那档不出 emoji 与英文补全：敲辅码就是在选字。但整串正好是个英文词时（`rust` 被读成
+        // ru + 辅码 st）英文词照出，排在辅码筛出的字后面（筛空了就是第一），不然空格 / 回车只剩 ru
+        if self.chinese_first || fuma_filters {
             self.insert_sentence(
                 &mut items,
                 &segmentations,
@@ -277,13 +278,9 @@ impl Engine {
                 english_tail.as_ref().filter(|_| correction.is_none()),
                 head_wins,
             );
-            if !fuma_filters {
-                self.insert_english(&mut items, unlikely);
-            }
+            self.insert_english(&mut items, unlikely && !fuma_filters);
         } else {
-            if !fuma_filters {
-                self.insert_english(&mut items, unlikely);
-            }
+            self.insert_english(&mut items, unlikely);
             self.insert_sentence(
                 &mut items,
                 &segmentations,

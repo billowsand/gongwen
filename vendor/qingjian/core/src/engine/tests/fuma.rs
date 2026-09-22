@@ -233,15 +233,32 @@ fn fuma_shows_up_in_the_pinyin_line() {
 }
 
 #[test]
-fn fuma_raw_commit_drops_the_codes() {
+fn fuma_raw_commit_keeps_every_key() {
     let mut engine = fuma_engine();
     engine.set_input("kdfafY");
     assert!(engine.query().unwrap().candidates.items.is_empty());
-    // 回车上屏字母本身：辅码段不是要打的内容
-    assert_eq!(engine.take_raw(), "kdfa");
+    // 回车上屏敲的键本身，辅码段也在：没候选时回车多半是要打英文
+    assert_eq!(engine.take_raw(), "kdfafY");
+    // `rust` 被读成 ru + 辅码 st，筛空了；回车要上屏整个 rust，不是 ru
+    engine.set_input("rust");
+    assert_eq!(engine.take_raw(), "rust");
     // 全小写时（未激活）原样上屏
     engine.set_input("kdfafa");
     assert_eq!(engine.take_raw(), "kdfafa");
+}
+
+#[test]
+fn fuma_codes_leave_a_whole_english_word_in_the_candidates() {
+    let words = WordList::parse("rust\trust\t3740\n").unwrap();
+    let mut engine = fuma_engine().with_english(words);
+    // `st` 解不成音节，被当成 ru 的辅码筛光了中文候选；整串是英文词，照出
+    engine.set_input("rust");
+    let items = &engine.query().unwrap().candidates.items;
+    assert_eq!(items[0].text, "rust");
+    assert_eq!(items[0].kind, CandidateKind::English);
+    // 辅码筛出了字时，筛出的字仍在第一
+    engine.set_input("kdfafX");
+    assert_eq!(engine.query().unwrap().candidates.items[0].text, "开发");
 }
 
 #[test]

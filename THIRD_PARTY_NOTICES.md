@@ -181,7 +181,7 @@ core / lm / translate / learning），随源码存放在 `vendor/qingjian/`，�
 
 - 上游（字在）：<https://github.com/billowsand/zizai>
 - 上游（青简 Qingjian）：<https://github.com/qingjian-team/qingjian>
-- 取出提交：`9b643e1c8315c30e040e7798a9dadba0519a1807`
+- 取出提交：`fbf709585bf107c653454e5c9da1fbbe464a360d`
 - License: GPL-3.0-or-later
 
 随包数据放在 `runtime/ime/`：

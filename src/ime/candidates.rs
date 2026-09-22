@@ -10,6 +10,7 @@
 //! 只能把文本排到下一帧的事件队列最前面（见 `session::Ime::begin_frame`）。
 
 use eframe::egui;
+use qingjian_core::CandidateKind;
 
 use super::keys::Action;
 use super::session::{Ime, Preedit};
@@ -33,6 +34,22 @@ const ROW_GAP: f32 = 2.0;
 /// 拼音串与页码之间至少留这么宽：候选行很窄时两者不至于挤到一块。
 const HEADER_GAP: f32 = 10.0;
 
+/// 整句星标边长。
+const SPARKLE_SIZE: f32 = 7.0;
+
+/// 整句星标与前面候选词的间距。
+const SPARKLE_GAP: f32 = 1.5;
+
+/// 星标腰身收进去的程度：控制点离中心的距离相对半径的比例，越小尖越细。
+const SPARKLE_WAIST: f32 = 0.18;
+
+/// 候选窗里的一个候选：页内下标、文本、是不是本地整句。
+struct Row {
+    index: usize,
+    text: String,
+    sentence: bool,
+}
+
 impl Ime {
     /// 画候选窗。要在正文编辑框画完之后调用。
     pub(crate) fn candidates_ui(&mut self, ctx: &egui::Context) {
@@ -52,14 +69,17 @@ impl Ime {
         // 每页格数当除数，空布局（`CandidateLayout::default()`）里它是 0。
         let pages = self.layout.len().div_ceil(page_size).max(1);
         // 先把要画的东西抄成自己的数据：闭包里还要改 `self`（记下点中的候选）。
-        let rows: Vec<(usize, String)> = self
+        let rows: Vec<Row> = self
             .layout
             .page(page)
             .into_iter()
             .enumerate()
             .filter_map(|(offset, cell)| {
-                cell.candidate()
-                    .map(|candidate| (offset, candidate.text.clone()))
+                cell.candidate().map(|candidate| Row {
+                    index: offset,
+                    text: candidate.text.clone(),
+                    sentence: candidate.kind == CandidateKind::Sentence,
+                })
             })
             .collect();
         let preedit = self.preedit.clone();
@@ -164,7 +184,7 @@ fn header(ui: &mut egui::Ui, preedit: &Preedit, page: usize, pages: usize, rows_
 /// 候选行。返回量到的宽度，下一帧的表头拿它摆页码。
 fn candidates_row(
     ui: &mut egui::Ui,
-    rows: &[(usize, String)],
+    rows: &[Row],
     highlight: usize,
     clicked: &mut Option<usize>,
 ) -> f32 {
@@ -181,9 +201,9 @@ fn candidates_row(
         // 悬停时不让候选块胀大：一胀整行就跟着抖。
         widgets.hovered.expansion = 0.0;
         widgets.active.expansion = 0.0;
-        for (index, text) in rows {
-            if candidate_button(ui, *index, text, *index == highlight).clicked() {
-                *clicked = Some(*index);
+        for row in rows {
+            if candidate_button(ui, row, row.index == highlight).clicked() {
+                *clicked = Some(row.index);
             }
         }
     })
@@ -209,8 +229,9 @@ fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit) {
     ui.label(small(after, theme::text_muted()));
 }
 
-/// 一个候选：弱化的小号序号 + 正文字号的候选文本。
-fn candidate_button(ui: &mut egui::Ui, index: usize, text: &str, selected: bool) -> egui::Response {
+/// 一个候选：弱化的小号序号 + 正文字号的候选文本；本地整句拼出的候选词后右上角带星标，
+/// 和词库里现成的词区分。
+fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Response {
     let format = |size: f32, color: egui::Color32| egui::TextFormat {
         font_id: egui::FontId::proportional(size),
         color,
@@ -218,7 +239,7 @@ fn candidate_button(ui: &mut egui::Ui, index: usize, text: &str, selected: bool)
     };
     let mut job = egui::text::LayoutJob::default();
     job.append(
-        &(index + 1).to_string(),
+        &(row.index + 1).to_string(),
         0.0,
         format(
             theme::font_sizes::SMALL,
@@ -231,7 +252,7 @@ fn candidate_button(ui: &mut egui::Ui, index: usize, text: &str, selected: bool)
         ),
     );
     job.append(
-        text,
+        &row.text,
         3.0,
         format(
             theme::font_sizes::BODY,
@@ -242,12 +263,76 @@ fn candidate_button(ui: &mut egui::Ui, index: usize, text: &str, selected: bool)
             },
         ),
     );
+    if row.sentence {
+        // 给星标让出位置：一个几乎没宽度的空格，靠前导空白撑开
+        job.append(
+            " ",
+            SPARKLE_GAP + SPARKLE_SIZE,
+            format(1.0, egui::Color32::TRANSPARENT),
+        );
+    }
     let button = egui::Button::new(job)
         .stroke(egui::Stroke::NONE)
         .corner_radius(4);
-    ui.add(if selected {
+    let response = ui.add(if selected {
         button.fill(theme::accent_soft())
     } else {
         button
-    })
+    });
+    if row.sentence {
+        // 贴着候选词右上角：右边收进内边距，顶上与字形顶部大致齐平
+        let content = response.rect.shrink2(CELL_PADDING);
+        let min = egui::pos2(
+            content.right() - SPARKLE_SIZE,
+            content.top() + content.height() * 0.15,
+        );
+        let color = if selected {
+            theme::accent_active()
+        } else {
+            theme::accent()
+        };
+        ui.painter().add(sparkle(
+            egui::Rect::from_min_size(min, egui::Vec2::splat(SPARKLE_SIZE)),
+            color,
+        ));
+    }
+    response
+}
+
+/// 四角星：四个尖在方块各边中点，相邻两尖之间是一条向中心弯的二次曲线。
+/// 星形对中心是「星形域」，从中心扇形三角化就能实心填满（epaint 的多边形填充只认凸形）。
+fn sparkle(rect: egui::Rect, color: egui::Color32) -> egui::Shape {
+    /// 每段曲线切成几截。
+    const STEPS: usize = 4;
+    let c = rect.center();
+    let r = rect.width() / 2.0;
+    let w = r * SPARKLE_WAIST;
+    let tips = [
+        egui::vec2(0.0, -r),
+        egui::vec2(r, 0.0),
+        egui::vec2(0.0, r),
+        egui::vec2(-r, 0.0),
+    ];
+    let controls = [
+        egui::vec2(w, -w),
+        egui::vec2(w, w),
+        egui::vec2(-w, w),
+        egui::vec2(-w, -w),
+    ];
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(c, color);
+    for (i, (&from, &control)) in tips.iter().zip(&controls).enumerate() {
+        let to = tips[(i + 1) % tips.len()];
+        for step in 0..STEPS {
+            let t = step as f32 / STEPS as f32;
+            let u = 1.0 - t;
+            let point = from * (u * u) + control * (2.0 * u * t) + to * (t * t);
+            mesh.colored_vertex(c + point, color);
+        }
+    }
+    let outline = (tips.len() * STEPS) as u32;
+    for i in 0..outline {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % outline);
+    }
+    egui::Shape::mesh(mesh)
 }

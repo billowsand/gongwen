@@ -242,10 +242,9 @@ impl Engine {
             // 缓存里还是「要纠」，清掉让下次重算
             *self.correction_cache.borrow_mut() = None;
         }
-        // 辅码激活时上屏的字母不含辅码段：它不是要打的内容
-        let text = self.composition.text();
-        let fuma_len = self.fuma_bytes(text);
-        let raw = text[..text.len() - fuma_len].to_owned();
+        // 敲的键原样全部上屏，辅码段也不剥：没候选时按回车 / 空格多半是要打英文（`rust` 被读成 ru + 辅码 st），
+        // 剥了就只剩 ru
+        let raw = self.composition.text().to_owned();
         if raw.is_empty() {
             // 壳在回车 / 失焦时不管有没有在组句都会来一趟：空的不记日志、不计统计
             self.clear();
@@ -254,9 +253,13 @@ impl Engine {
         }
         self.log_commit(&raw, &raw, InputSource::Raw);
         // 原样上屏的是个英文词（`gist`）：记进个人英文词表，下次直接出候选。
-        // 双拼下全部键都能解成完整音节的（`nihc`）不是英文，是用户要原样打出双拼键
+        // 双拼下全部键都能解成完整音节的（`nihc`）不是英文，是用户要原样打出双拼键。
+        // 按整串解，不走辅码剥离：`rust` 剥掉 st 后 ru 是完整的，但整串解不完整，它就是英文
         let english_word = looks_like_english_word(&raw, self.english_mode)
-            && (self.english_mode || self.decode(&raw).is_none_or(|d| !d.is_complete()));
+            && (self.english_mode
+                || self
+                    .shuangpin
+                    .is_none_or(|scheme| !scheme.decode(&raw.to_ascii_lowercase()).is_complete()));
         if english_word {
             self.learner.learn_english(&raw);
         }
