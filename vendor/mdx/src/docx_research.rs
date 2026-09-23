@@ -6,7 +6,13 @@
 //! - 之后 版本变更记录（不进 TOC，由 `<!-- [版本变更记录] -->` 触发）
 //! - 之后 摘要 / 正文 / 附录，按 `<!-- [...] -->` 标记切换 emitter 模式
 //! - 目录：只在出现 `<!-- [目录] -->` 时排，排在标记所在的位置：居中二号黑体
-//!   "目录" + `TableOfContents`(dirty) + 翻页；整篇只排一次
+//!   "目录" + TOC 域（dirty，打开时更新）；整篇只排一次
+//!
+//! 页码对齐 `md2tex.cls`：页脚居中"— N —"，封面不编页码。全文按目录切成
+//! 几个分节（见 [`paginate`]），各节自带页脚与起始页码：
+//! - 目录单用大写罗马页码 I、II、III；
+//! - 目录插在摘要与正文之间时，摘要单用小写罗马页码 i、ii、iii，正文从 1 起；
+//! - 其余情况正文用阿拉伯页码，目录前后接着数，目录页不占正文页号。
 //!
 //! 章节编号：H2 → "第X章 Y"、H3 → "X.Y Z"、H4 → "X.Y.Z W"，附录章节
 //! 切换为 "附录 A / 附录 B / ..."。
@@ -63,6 +69,8 @@ const PAGE_TOP: i32 = 2098; // 37 mm
 const PAGE_BOTTOM: i32 = 1984; // 35 mm
 const PAGE_LEFT: i32 = 1587; // 28 mm
 const PAGE_RIGHT: i32 = 1474; // 26 mm
+const PAGE_FOOTER: i32 = 1588; // 页脚距页面下沿 28 mm，与公文 docx 一致
+const SIZE_FOOTER: usize = 28; // 页码四号，对齐 md2tex.cls
 const MAX_IMAGE_WIDTH_EMU: u32 = 5_600_000; // 约 156 mm，限制在版心内
 const MAX_INLINE_IMAGE_WIDTH_EMU: u32 = 1_800_000;
 const TABLE_CONTENT_WIDTH_TWIPS: usize = 8_844; // 156 mm
@@ -102,20 +110,7 @@ pub fn run(input: &Path, output: Option<&Path>) -> Result<()> {
         crate::input::InputKind::File => input.parent().unwrap_or(Path::new(".")).to_path_buf(),
     };
 
-    let blocks = parser::parse(&content);
-    let split = split_blocks(&blocks);
-    let cover_title = metadata.title.as_deref().or(split.title.as_deref());
-
-    let mut docx = base_docx();
-    docx = register_styles(docx);
-    docx = add_cover(docx, cover_title, &metadata);
-
-    if !split.changelog.is_empty() {
-        docx = add_changelog(docx, &split.changelog, &image_base_dir);
-    }
-
-    let mut emitter = MainEmitter::with_image_base(image_base_dir);
-    docx = emitter.emit_all(docx, &split.main);
+    let docx = build_docx(&parser::parse(&content), &metadata, image_base_dir);
 
     if let Some(dir) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
@@ -129,6 +124,26 @@ pub fn run(input: &Path, output: Option<&Path>) -> Result<()> {
 
     println!("[完成] 转换完成: {}", output_path.display());
     Ok(())
+}
+
+/// 封面 → 版本变更记录 → 主体，最后按目录分节、配页码。
+fn build_docx(blocks: &[Block], metadata: &Metadata, image_base_dir: PathBuf) -> Docx {
+    let split = split_blocks(blocks);
+    let cover_title = metadata.title.as_deref().or(split.title.as_deref());
+
+    let mut docx = base_docx();
+    docx = register_styles(docx);
+    docx = add_cover(docx, cover_title, metadata);
+    let cover_end = docx.document.children.len();
+
+    if !split.changelog.is_empty() {
+        docx = add_changelog(docx, &split.changelog, &image_base_dir);
+    }
+
+    let mut emitter = MainEmitter::with_image_base(image_base_dir);
+    docx = emitter.emit_all(docx, &split.main);
+    let front = crate::common::ast::toc_follows_abstract(blocks);
+    paginate(docx, cover_end, emitter.toc_range, front)
 }
 
 // ============================================================
@@ -189,13 +204,7 @@ fn split_blocks(blocks: &[Block]) -> SplitBlocks {
 
 fn base_docx() -> Docx {
     Docx::new()
-        .page_margin(
-            PageMargin::new()
-                .top(PAGE_TOP)
-                .bottom(PAGE_BOTTOM)
-                .left(PAGE_LEFT)
-                .right(PAGE_RIGHT),
-        )
+        .page_margin(page_margin())
         .default_fonts(font_set(FONT_BODY))
         .default_size(SIZE_BODY)
         .default_line_spacing(
@@ -469,9 +478,9 @@ fn add_cover(mut docx: Docx, title: Option<&str>, metadata: &Metadata) -> Docx {
         .line_spacing(exact_line(l::DATE_PT * 1.3).before(mm_to_twips(l::DATE_GAP) as u32));
     docx = docx.add_paragraph(date_line);
 
-    // 封面后强制翻页。图文框不占版面流，封面上没有别的在流段落，这时
-    // 「段前分页」会被当成文档开头而忽略，所以用一个带分页符的段落。
-    docx.add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)))
+    // 封面自成一节，翻页靠分节符（见 [`paginate`]），这里不再另加分页符，
+    // 否则封面后会多出一张白页。
+    docx
 }
 
 fn mm_to_twips(mm: f32) -> i32 {
@@ -526,7 +535,11 @@ fn rule(y: f32, size: usize, color: &str, width: f32, x: f32) -> Paragraph {
 // 目录
 // ============================================================
 
-/// 目录页：标题 + TOC 域 + 翻页。由 `<!-- [目录] -->` 触发，排在标记所在位置。
+/// 目录页：标题 + TOC 域。由 `<!-- [目录] -->` 触发，排在标记所在位置；
+/// 前后翻页交给分节符（见 [`paginate`]）。
+///
+/// TOC 域直接写成段落里的域代码，不用 `TableOfContents`：后者是文档级
+/// 元素，放不进 `Section`，目录又必须单独成节才能单用罗马页码。
 fn add_toc(mut docx: Docx) -> Docx {
     // "目录"标题（不带 Heading 样式，避免自引用）
     docx = docx.add_paragraph(
@@ -548,10 +561,198 @@ fn add_toc(mut docx: Docx) -> Docx {
             ),
     );
 
-    docx = docx.add_table_of_contents(TableOfContents::new().heading_styles_range(1, 3).dirty());
+    // 域标成 dirty：Word 打开时提示更新，条目与页码由 Word 按分节后的页码生成
+    docx.add_paragraph(
+        Paragraph::new()
+            .add_run(Run::new().add_field_char(FieldCharType::Begin, true))
+            .add_run(Run::new().add_instr_text(InstrText::Unsupported(
+                r#"TOC \o "1-3" \h \z \u"#.to_string(),
+            )))
+            .add_run(Run::new().add_field_char(FieldCharType::Separate, false))
+            .add_run(
+                Run::new()
+                    .add_text("（打开文档时更新域即生成目录）")
+                    .fonts(font_set(FONT_BODY))
+                    .size(SIZE_BODY),
+            )
+            .add_run(Run::new().add_field_char(FieldCharType::End, false)),
+    )
+}
 
-    // 目录后翻页
-    docx.add_paragraph(Paragraph::new().page_break_before(true))
+// ============================================================
+// 分节与页码
+// ============================================================
+
+/// 目录前最后一段上的书签：目录在正文中间时，目录后的页码 = 本节页号 +
+/// 该书签所在页的页号（见 [`page_footer`]）。
+const BOOKMARK_BEFORE_TOC: &str = "_MdxBeforeToc";
+
+/// 页脚里的页码写法。
+enum PageField {
+    /// 阿拉伯数字
+    Arabic,
+    /// 小写罗马数字 i、ii、iii（与目录分开编号的摘要）
+    LowerRoman,
+    /// 大写罗马数字 I、II、III（目录）
+    UpperRoman,
+    /// 目录在正文中间时，目录之后的正文：本节从 1 起，加上目录前最后一页的页号
+    AfterToc,
+}
+
+/// 按目录把全文切成几节，各节配页脚与起始页码。
+///
+/// `cover_end`：封面在 `children` 里的终点；`toc`：目录的区间；`front`：
+/// 目录插在摘要与正文之间（摘要单用小写罗马页码，正文从 1 起）。
+///
+/// 节与节之间靠分节符（下一页）翻页，所以各节首尾那种只为翻页而设的
+/// 空段（段前分页的空段落）要去掉，否则会在节的开头或结尾多出一张白页。
+fn paginate(mut docx: Docx, cover_end: usize, toc: Option<(usize, usize)>, front: bool) -> Docx {
+    let mut children = std::mem::take(&mut docx.document.children);
+    let mut rest = children.split_off(cover_end);
+    let cover = children;
+
+    // (内容, 页码写法)；最后一节用文档级的 sectPr，不进 Section
+    let mut parts: Vec<(Vec<DocumentChild>, PageField)> = Vec::new();
+    match toc {
+        Some((start, end)) => {
+            let after = rest.split_off(end - cover_end);
+            let toc_part = rest.split_off(start - cover_end);
+            let mut before = trim_page_breaks(rest);
+            let before_is_empty = before.is_empty();
+            if !before_is_empty {
+                if !front {
+                    mark_last_paragraph(&mut before, BOOKMARK_BEFORE_TOC);
+                }
+                let field = if front {
+                    PageField::LowerRoman
+                } else {
+                    PageField::Arabic
+                };
+                parts.push((before, field));
+            }
+            parts.push((trim_page_breaks(toc_part), PageField::UpperRoman));
+            let after_field = if front || before_is_empty {
+                PageField::Arabic
+            } else {
+                PageField::AfterToc
+            };
+            parts.push((trim_page_breaks(after), after_field));
+        }
+        None => parts.push((trim_page_breaks(rest), PageField::Arabic)),
+    }
+
+    // 封面：自成一节，不带页脚
+    docx = docx.add_section(section_of(cover, None));
+    let (last, last_field) = parts.pop().expect("至少有正文一节");
+    for (part, field) in parts {
+        docx = docx.add_section(section_of(part, Some(field)));
+    }
+    docx.document.children.extend(last);
+    docx.footer(page_footer(&last_field))
+        .page_num_type(PageNumType::new().start(1))
+}
+
+/// 把一段顶层元素装进一个分节；`field` 为 `None` 时不带页脚（封面）。
+fn section_of(children: Vec<DocumentChild>, field: Option<PageField>) -> Section {
+    let mut section = Section::new().page_margin(page_margin());
+    for child in children {
+        section = match child {
+            DocumentChild::Paragraph(p) => section.add_paragraph(*p),
+            DocumentChild::Table(t) => section.add_table(*t),
+            // 研究报告只产出段落与表格两种顶层元素
+            other => unreachable!("研究报告 docx 不产出这种顶层元素：{other:?}"),
+        };
+    }
+    match field {
+        Some(field) => section
+            .footer(page_footer(&field))
+            .page_num_type(PageNumType::new().start(1)),
+        None => section,
+    }
+}
+
+/// 只为翻页而设的空段：段前分页、没有文字。
+fn is_page_break_filler(child: &DocumentChild) -> bool {
+    matches!(child, DocumentChild::Paragraph(p)
+        if p.property.page_break_before == Some(true) && p.raw_text().trim().is_empty())
+}
+
+/// 去掉一节首尾的翻页空段：分节符本身就换页。
+fn trim_page_breaks(mut children: Vec<DocumentChild>) -> Vec<DocumentChild> {
+    while children.last().is_some_and(is_page_break_filler) {
+        children.pop();
+    }
+    let lead = children
+        .iter()
+        .take_while(|c| is_page_break_filler(c))
+        .count();
+    children.drain(..lead);
+    children
+}
+
+/// 在一节最后一个段落上打书签。
+fn mark_last_paragraph(children: &mut [DocumentChild], name: &str) {
+    if let Some(DocumentChild::Paragraph(p)) = children
+        .iter_mut()
+        .rev()
+        .find(|c| matches!(c, DocumentChild::Paragraph(_)))
+    {
+        let marked = (**p)
+            .clone()
+            .add_bookmark_start(1, name)
+            .add_bookmark_end(1);
+        **p = marked;
+    }
+}
+
+fn page_margin() -> PageMargin {
+    PageMargin::new()
+        .top(PAGE_TOP)
+        .bottom(PAGE_BOTTOM)
+        .left(PAGE_LEFT)
+        .right(PAGE_RIGHT)
+        .footer(PAGE_FOOTER)
+}
+
+/// 页脚：居中"— N —"，四号，对齐 md2tex.cls 的 `\cfoot`。
+fn page_footer(field: &PageField) -> Footer {
+    let run = || Run::new().fonts(font_set(FONT_BODY)).size(SIZE_FOOTER);
+    let simple = |code: &str| {
+        vec![
+            run().add_field_char(FieldCharType::Begin, false),
+            run().add_instr_text(InstrText::Unsupported(code.to_string())),
+            run().add_field_char(FieldCharType::Separate, false),
+            run().add_text("1"),
+            run().add_field_char(FieldCharType::End, false),
+        ]
+    };
+    let number = match field {
+        PageField::Arabic => simple(" PAGE "),
+        PageField::LowerRoman => simple(r" PAGE \* roman "),
+        PageField::UpperRoman => simple(r" PAGE \* ROMAN "),
+        // { = { PAGE } + { PAGEREF _MdxBeforeToc } }
+        PageField::AfterToc => {
+            let mut runs = vec![
+                run().add_field_char(FieldCharType::Begin, false),
+                run().add_instr_text(InstrText::Unsupported(" = ".into())),
+            ];
+            runs.extend(simple(" PAGE "));
+            runs.push(run().add_instr_text(InstrText::Unsupported(" + ".into())));
+            runs.extend(simple(&format!(" PAGEREF {BOOKMARK_BEFORE_TOC} ")));
+            runs.push(run().add_field_char(FieldCharType::Separate, false));
+            runs.push(run().add_text("1"));
+            runs.push(run().add_field_char(FieldCharType::End, false));
+            runs
+        }
+    };
+    let mut p = Paragraph::new()
+        .align(AlignmentType::Center)
+        .line_spacing(LineSpacing::new().before(0).after(0))
+        .add_run(run().add_text("\u{2014} "));
+    for r in number {
+        p = p.add_run(r);
+    }
+    Footer::new().add_paragraph(p.add_run(run().add_text(" \u{2014}")))
 }
 
 // ============================================================
@@ -619,8 +820,8 @@ struct MainEmitter {
     image_base_dir: PathBuf,
     /// 目录已经排过：`<!-- [目录] -->` 写了多处时只认第一处
     toc_done: bool,
-    /// 主体里已经排出过内容：目录不在开头时要先翻页，另起一页排
-    has_content: bool,
+    /// 目录在 `docx.document.children` 里占的区间，[`paginate`] 据此分节
+    toc_range: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -656,24 +857,13 @@ impl MainEmitter {
             figure_counter: 0,
             image_base_dir,
             toc_done: false,
-            has_content: false,
+            toc_range: None,
         }
     }
 
     fn emit_all(&mut self, mut docx: Docx, blocks: &[Block]) -> Docx {
         for b in blocks {
             docx = self.emit(docx, b);
-            if !matches!(
-                b,
-                Block::Toc
-                    | Block::Empty
-                    | Block::Label(_)
-                    | Block::Marker(
-                        MarkerKind::Body | MarkerKind::Appendix | MarkerKind::Changelog
-                    )
-            ) {
-                self.has_content = true;
-            }
         }
         docx
     }
@@ -686,12 +876,11 @@ impl MainEmitter {
                     return docx;
                 }
                 self.toc_done = true;
-                let docx = if self.has_content {
-                    page_break(docx)
-                } else {
-                    docx
-                };
-                add_toc(docx)
+                // 目录自成一节：前后翻页都靠分节符，这里不加分页
+                let start = docx.document.children.len();
+                let docx = add_toc(docx);
+                self.toc_range = Some((start, docx.document.children.len()));
+                docx
             }
             Block::Marker(kind) => {
                 self.list.reset();
@@ -1483,11 +1672,102 @@ mod tests {
     }
 
     fn toc_count(docx: &Docx) -> usize {
-        docx.document
-            .children
+        paragraph_texts(docx)
             .iter()
-            .filter(|child| matches!(child, DocumentChild::TableOfContents(_)))
+            .filter(|t| t.as_str() == "目  录")
             .count()
+    }
+
+    /// 按文档顺序列出各分节的页码：(页脚里的域代码, 是否从 1 起)。
+    /// 封面那一节没有页脚，域代码为空串。
+    fn section_page_numbers(markdown: &str) -> Vec<(String, bool)> {
+        let blocks = parser::parse(markdown);
+        let xml = build_docx(&blocks, &Metadata::default(), PathBuf::from(".")).build();
+        let document = String::from_utf8(xml.document).unwrap();
+        let footers: Vec<String> = xml
+            .footers
+            .iter()
+            .map(|f| String::from_utf8(f.clone()).unwrap())
+            .collect();
+        let instr = regex::Regex::new(r"<w:instrText[^>]*>([^<]*)</w:instrText>").unwrap();
+        let footer_ref = regex::Regex::new(r#"footerReference[^>]*r:id="rIdFooter(\d+)""#).unwrap();
+        document
+            .split("<w:sectPr")
+            .skip(1)
+            .map(|sect| {
+                let sect = &sect[..sect.find("</w:sectPr>").unwrap()];
+                let code = footer_ref
+                    .captures(sect)
+                    .map(|c| {
+                        let n: usize = c[1].parse().unwrap();
+                        instr
+                            .captures_iter(&footers[n - 1])
+                            .map(|m| m[1].trim().to_string())
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .unwrap_or_default();
+                (code, sect.contains(r#"w:pgNumType w:start="1""#))
+            })
+            .collect()
+    }
+
+    /// 没有目录：封面不编页码，正文阿拉伯页码从 1 起。
+    #[test]
+    fn pages_without_toc() {
+        assert_eq!(
+            section_page_numbers(
+                "<!-- [摘要] -->\n\n摘要。\n\n<!-- [正文] -->\n\n## 引言\n\n正文。\n"
+            ),
+            vec![(String::new(), false), ("PAGE".into(), true)]
+        );
+    }
+
+    /// 目录在最前：目录大写罗马，其后正文从 1 起。
+    #[test]
+    fn pages_with_toc_first() {
+        assert_eq!(
+            section_page_numbers(
+                "<!-- [目录] -->\n\n<!-- [摘要] -->\n\n摘要。\n\n## 引言\n\n正文。\n"
+            ),
+            vec![
+                (String::new(), false),
+                (r"PAGE \* ROMAN".into(), true),
+                ("PAGE".into(), true),
+            ]
+        );
+    }
+
+    /// 目录插在摘要与正文之间：摘要小写罗马，目录大写罗马，正文从 1 起。
+    #[test]
+    fn pages_with_toc_between_abstract_and_body() {
+        assert_eq!(
+            section_page_numbers("<!-- [摘要] -->\n\n摘要。\n\n<!-- [目录] -->\n\n<!-- [正文] -->\n\n## 引言\n\n正文。\n"),
+            vec![
+                (String::new(), false),
+                (r"PAGE \* roman".into(), true),
+                (r"PAGE \* ROMAN".into(), true),
+                ("PAGE".into(), true),
+            ]
+        );
+    }
+
+    /// 目录在正文中间：目录后的页码接着目录前的页号数（加上书签所在页的页号）。
+    #[test]
+    fn pages_with_toc_inside_body() {
+        let md = "## 引言\n\n正文。\n\n<!-- [目录] -->\n\n## 结论\n\n正文。\n";
+        assert_eq!(
+            section_page_numbers(md),
+            vec![
+                (String::new(), false),
+                ("PAGE".into(), true),
+                (r"PAGE \* ROMAN".into(), true),
+                (format!("=|PAGE|+|PAGEREF {BOOKMARK_BEFORE_TOC}"), true),
+            ]
+        );
+        let xml = build_docx(&parser::parse(md), &Metadata::default(), PathBuf::from(".")).build();
+        let document = String::from_utf8(xml.document).unwrap();
+        assert!(document.contains(&format!(r#"w:name="{BOOKMARK_BEFORE_TOC}""#)));
     }
 
     /// 没写 `<!-- [目录] -->` 就不排目录；写了多处只排一次。
@@ -1498,7 +1778,7 @@ mod tests {
             text: "引言".into(),
         };
         let mut e = MainEmitter::new();
-        let docx = e.emit_all(Docx::new(), &[heading.clone()]);
+        let docx = e.emit_all(Docx::new(), std::slice::from_ref(&heading));
         assert_eq!(toc_count(&docx), 0);
 
         let mut e = MainEmitter::new();

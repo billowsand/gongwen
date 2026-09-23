@@ -65,7 +65,11 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   页码并接着目录之前的页号数；`tex_research_emitter.rs` 在标记处输出它，只排一次；
   目录插在摘要与正文之间时，摘要前先输出 `\mdxfrontmatter`：摘要单用小写罗马
   页码（i、ii、iii），目录之后正文从 1 起；
-- `docx_research.rs` 不再在封面后固定插目录，改为在标记处插入，只插一次。
+- `docx_research.rs` 不再在封面后固定插目录，改为在标记处插入，只插一次；
+  目录改写成段落里的 TOC 域（`TableOfContents` 放不进 `Section`）。全文按目录
+  切成分节（`paginate`），各节配页脚“— N —”与起始页码，页码规矩与 PDF 相同；
+  判定“目录插在摘要与正文之间”的 `toc_follows_abstract` 挪到 `common/ast.rs`，
+  TeX 与 docx 共用。
 
 ## 改动规则
 

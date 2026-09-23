@@ -108,3 +108,28 @@ pub enum MarkerKind {
     /// 参考文献段：`<!-- [参考文献] -->`
     Reference,
 }
+
+/// 目录是否插在摘要与正文之间：第一个目录标记之前有摘要，且摘要之外只有
+/// 报告题名（`#`，不排进正文）、`<!-- [正文] -->`、锚点与空行——摘要到目录
+/// 之间没有排出任何正文。这时摘要单用一套小写罗马页码。
+///
+/// research 的 TeX 与 docx 两条路共用这一个判定，两边页码才对得上。
+pub fn toc_follows_abstract(blocks: &[Block]) -> bool {
+    let mut seen_abstract = false;
+    let mut in_abstract = false;
+    for b in blocks {
+        match b {
+            Block::Toc => return seen_abstract,
+            Block::Marker(MarkerKind::Abstract) => {
+                seen_abstract = true;
+                in_abstract = true;
+            }
+            Block::Marker(MarkerKind::Body) => in_abstract = false,
+            Block::Marker(_) => return false,
+            _ if in_abstract => {}
+            Block::Empty | Block::Label(_) | Block::Heading { level: 1, .. } => {}
+            _ => return false,
+        }
+    }
+    false
+}
