@@ -28,7 +28,8 @@ const MENU_PANEL_MARGIN: i8 = 6;
 /// 标签和控件隔着半个屏幕，反而更难读。
 const DETAIL_MAX_WIDTH: f32 = 760.0;
 /// 底部操作条的高度。两栏先把这块高度让出来，「保存设置」才不会被内容顶出视区。
-const FOOTER_HEIGHT: f32 = 52.0;
+/// 操作条紧接在两栏之后画，这里多留的高度落在按钮下方，把它和状态栏隔开。
+const FOOTER_HEIGHT: f32 = 62.0;
 /// 设置页表单行的标签列宽。比起草页的窄标签宽，容得下「单轮送检句数上限」这类
 /// 完整的设置项名称，不再被截断成半截。
 const SETTING_LABEL_WIDTH: f32 = 132.0;
