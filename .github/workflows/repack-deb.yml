@@ -10,11 +10,6 @@ on:
       tag:
         description: 要修复的 Release tag（如 v0.6.3）
         required: true
-  push:
-    branches:
-      - claude/deb-build-package-deps-ahjlxo
-    paths:
-      - .github/workflows/repack-deb.yml
 
 permissions:
   contents: write
@@ -24,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TAG: ${{ inputs.tag || 'v0.6.3' }}
+  TAG: ${{ inputs.tag }}
 
 jobs:
   repack:
@@ -96,7 +91,7 @@ jobs:
         run: bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_${{ matrix.arch }}.deb
 
   publish:
-    name: Replace deb assets on ${{ inputs.tag || 'v0.6.3' }}
+    name: Replace deb assets on ${{ inputs.tag }}
     needs: verify
     runs-on: ubuntu-latest
     steps:
