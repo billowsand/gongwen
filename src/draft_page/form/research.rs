@@ -36,11 +36,33 @@ impl DraftPage<'_> {
                 );
                 ui.end_row();
 
-                row_label(ui, "文件类型");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.doc.draft.research.file_type)
-                        .desired_width(field_width),
+                row_label_with_info(
+                    ui,
+                    "文件类型",
+                    "决定封面样式：立项论证、建设实施、技术实现、项目总结为项目类，封面印阶段条；其余为研究类，封面印署名行。可从右侧下拉选，也可手填。",
                 );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.doc.draft.research.file_type)
+                            .desired_width((field_width - 32.0).max(80.0)),
+                    );
+                    egui::ComboBox::from_id_salt("research_file_type_presets")
+                        .selected_text("")
+                        .width(20.0)
+                        .show_ui(ui, |ui| {
+                            for (index, preset) in mdx::cover::DOC_TYPE_PRESETS.iter().enumerate() {
+                                if index == 4 {
+                                    ui.separator();
+                                }
+                                ui.selectable_value(
+                                    &mut self.doc.draft.research.file_type,
+                                    preset.to_string(),
+                                    *preset,
+                                );
+                            }
+                        });
+                });
                 ui.end_row();
 
                 row_label(ui, "文件编号");
@@ -51,13 +73,52 @@ impl DraftPage<'_> {
                 );
                 ui.end_row();
 
-                row_label(ui, "版本号");
+                row_label(ui, "版本稿次");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.doc.draft.research.version)
-                        .hint_text("例如：V1.0")
+                        .hint_text("例如：V1.0、送审稿；封面上加括号印在题名下方")
                         .desired_width(field_width),
                 );
                 ui.end_row();
+
+                let family = mdx::cover::Family::of(&self.doc.draft.research.file_type);
+                let hints = cover_hints(family);
+                row_label_with_info(
+                    ui,
+                    "标识行",
+                    "印在封面文种下方，按原样排。可留空。",
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.doc.draft.research.ident)
+                        .hint_text(hints.ident)
+                        .desired_width(field_width),
+                );
+                ui.end_row();
+
+                if !family.is_project() {
+                    row_label_with_info(
+                        ui,
+                        "署名行",
+                        "研究类封面印在落款上方，按原样排。项目类封面这里是阶段条，不印署名行。",
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.doc.draft.research.byline)
+                            .hint_text(hints.byline)
+                            .desired_width(field_width),
+                    );
+                    ui.end_row();
+                }
+
+                if family == mdx::cover::Family::Research(mdx::cover::ResearchKind::Translation)
+                {
+                    row_label_with_info(ui, "外文原题", "以西文斜体印在中文题名下方。");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.doc.draft.research.original_title)
+                            .hint_text("例如：Artificial Intelligence Risk Management Framework")
+                            .desired_width(field_width),
+                    );
+                    ui.end_row();
+                }
             });
 
         ui.add_space(12.0);
@@ -84,7 +145,11 @@ impl DraftPage<'_> {
                 );
                 ui.end_row();
 
-                required_row_label(ui, "撰写时间", Some("研究报告封面按年月显示。"));
+                required_row_label(
+                    ui,
+                    "撰写时间",
+                    Some("封面按年月排，自动写成汉字数字，如二〇二六年九月。"),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.doc.draft.research.date)
                         .hint_text("例如：2026年9月")
@@ -159,5 +224,37 @@ impl DraftPage<'_> {
             .size(11.0)
             .color(theme::text_soft()),
         );
+    }
+}
+
+/// 封面可选行的输入提示，按文件类型给出本文种的写法示例。
+struct CoverHints {
+    ident: &'static str,
+    byline: &'static str,
+}
+
+fn cover_hints(family: mdx::cover::Family) -> CoverHints {
+    use mdx::cover::{Family, ResearchKind};
+    match family {
+        Family::Project { .. } => CoverHints {
+            ident: "例如：项目编号：XM-2026-014",
+            byline: "",
+        },
+        Family::Research(ResearchKind::Consulting) => CoverHints {
+            ident: "例如：二〇二六年第3期（总第27期）",
+            byline: "例如：供领导决策参考",
+        },
+        Family::Research(ResearchKind::Topic) => CoverHints {
+            ident: "例如：课题编号：ZT-2026-07",
+            byline: "例如：政务智能化专题课题组",
+        },
+        Family::Research(ResearchKind::Translation) => CoverHints {
+            ident: "例如：原文：美国国家标准与技术研究院，2023年1月",
+            byline: "例如：编译：信息资源处　审校：研究室",
+        },
+        Family::Research(ResearchKind::Other) => CoverHints {
+            ident: "可留空",
+            byline: "可留空",
+        },
     }
 }

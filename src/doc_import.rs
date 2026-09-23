@@ -304,6 +304,11 @@ fn parse_research_frontmatter(
             "文件版本号" | "版本" | "version" => metadata.version = value.into(),
             "撰写单位" | "单位" | "institution" => metadata.institution = value.into(),
             "撰写时间" | "时间" | "日期" | "date" => metadata.date = value.into(),
+            "标识行" | "期号" | "项目编号" | "课题编号" | "原文出处" | "ident" => {
+                metadata.ident = value.into()
+            }
+            "署名" | "署名行" | "课题组" | "byline" => metadata.byline = value.into(),
+            "外文原题" | "原文题名" | "original" => metadata.original_title = value.into(),
             "文件名称" | "标题" | "title" => title = Some(value.to_string()),
             "bibliography" => bibliography = Some(value.to_string()),
             _ => {}

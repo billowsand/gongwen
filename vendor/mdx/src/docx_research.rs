@@ -1,8 +1,8 @@
 //! 研究报告 → docx pipeline。
 //!
 //! 视觉布局对齐 `resources/research/md2tex.cls` 与 `template.tex`：
-//! - 第 1 页 封面：左上"公开"（黑体4号）+ vfill + 居中一号小标宋标题 + vfill +
-//!   居中三号黑体单位 + 16pt 间距 + 居中四号粗体日期；末尾翻页
+//! - 第 1 页 封面：各块用锚定页面的图文框按 `cover::layout` 的毫米数定位，
+//!   与 `template.tex` 的 TikZ 封面同一张网格；末尾翻页
 //! - 第 2 页 目录：居中二号黑体"目录" + `TableOfContents`(dirty) + 翻页
 //! - 之后 版本变更记录（不进 TOC，由 `<!-- [版本变更记录] -->` 触发）
 //! - 之后 摘要 / 正文 / 附录，按 `<!-- [...] -->` 标记切换 emitter 模式
@@ -40,13 +40,10 @@ const FONT_KAI: &str = "FZKai-Z03"; // 方正楷体（行内强调用）
 //   四号 = 14pt = 28hp（子节标题 / 日期 / "公开"）
 //   小四 ≈ 12pt = 24hp
 //   normalsize 14bp ≈ 14pt = 28hp（正文）
-const SIZE_COVER_TITLE: usize = 52;
 const SIZE_HEAD1: usize = 44; // chapter / 摘要 / 附录 / 目录 / 版本变更记录
 const SIZE_HEAD2: usize = 32; // section
 const SIZE_HEAD3: usize = 28; // subsection / 日期 / 公开
 const SIZE_BODY: usize = 28; // 正文，对齐 LaTeX 14bp
-const SIZE_COVER_INSTITUTION: usize = 32;
-const SIZE_COVER_DATE: usize = 28;
 
 // ===== 行距 / 间距 (单位 twips，1pt = 20twips) =====
 // LaTeX 正文 24pt 行距 → 480twips；line_rule=AtLeast 保大字符不溢出
@@ -278,153 +275,239 @@ fn register_styles(docx: Docx) -> Docx {
 // ============================================================
 
 fn add_cover(mut docx: Docx, title: Option<&str>, metadata: &Metadata) -> Docx {
+    use crate::cover::{self, layout as l, Family};
+
     let title_text = title.unwrap_or("研究报告");
-    let security = match (
-        metadata.security.as_deref().unwrap_or("公开"),
-        metadata.security_years.as_deref(),
-    ) {
-        (security, Some(years)) => format!("{}★{}", security, years),
-        (security, None) => security.to_string(),
-    };
     let doc_type = metadata.doc_type.as_deref().unwrap_or("研究报告");
-    let version = metadata.version.as_deref().unwrap_or("V1.0");
+    let family = Family::of(doc_type);
+    let security = cover::security_label(metadata.security.as_deref().unwrap_or("公开"));
+    let security = match metadata.security_years.as_deref() {
+        Some(years) if !security.is_empty() => format!("{security}★{years}"),
+        _ => security.to_string(),
+    };
+    let version = metadata.version.as_deref().and_then(cover::version_mark);
     let institution = metadata.institution.as_deref().unwrap_or("某某单位");
     let date = metadata
         .date
         .as_deref()
-        .map(front_matter::normalize_date)
+        .map(cover::chinese_date)
         .unwrap_or_else(|| {
             let now = Local::now();
-            format!("{} 年 {} 月", now.year(), now.month())
+            cover::chinese_date(&format!("{}年{}月", now.year(), now.month()))
         });
 
-    // 顶部信息栏：密级/年限在左，编号在右。
-    let mut top = Paragraph::new()
-        .align(AlignmentType::Left)
-        .add_tab(Tab::new().val(TabValueType::Right).pos(8800))
-        .line_spacing(
-            LineSpacing::new()
-                .line(LINE_BODY)
-                .line_rule(LineSpacingType::AtLeast),
+    // 封面各块都是锚定页面的图文框（framePr），按距页顶的毫米数定位，与 TeX
+    // 模板的 TikZ 坐标同一组数；题名换几行都不会把落款往下推。
+    let text_run = |text: &str, font: &str, pt: f32| {
+        Run::new()
+            .add_text(text)
+            .fonts(font_set(font))
+            .size(half_points(pt))
+    };
+    let centered = |run: Run, y: f32, pt: f32| {
+        framed(
+            Paragraph::new()
+                .align(AlignmentType::Center)
+                .line_spacing(exact_line(pt * 1.3))
+                .add_run(run),
+            l::SIDE,
+            y,
+            l::TEXT_WIDTH,
         )
-        .add_run(
-            Run::new()
-                .add_text(format!("密级：{}", security))
-                .fonts(font_set(FONT_HEAD))
-                .size(SIZE_BODY)
-                .bold(),
+    };
+
+    // 密级（左）与编号（右）：同一框内用右对齐制表位分开。
+    let mut meta_line = Paragraph::new()
+        .align(AlignmentType::Left)
+        .line_spacing(exact_line(l::META_PT * 1.3))
+        .add_tab(
+            Tab::new()
+                .val(TabValueType::Right)
+                .pos(mm_to_twips(l::TEXT_WIDTH) as usize),
         );
-    if let Some(number) = metadata.doc_number.as_deref() {
-        top = top.add_run(Run::new().add_tab()).add_run(
-            Run::new()
-                .add_text(format!("编号：{}", number))
-                .fonts(font_set(FONT_HEAD))
-                .size(SIZE_BODY)
-                .bold(),
-        );
+    if !security.is_empty() {
+        meta_line = meta_line.add_run(text_run(&security, FONT_HEAD, l::META_PT));
     }
-    docx = docx.add_paragraph(top);
+    if let Some(number) = metadata.doc_number.as_deref() {
+        meta_line = meta_line.add_run(Run::new().add_tab()).add_run(text_run(
+            &format!("编号：{number}"),
+            FONT_HEAD,
+            l::META_PT,
+        ));
+    }
+    docx = docx.add_paragraph(framed(meta_line, l::SIDE, l::META_TOP, l::TEXT_WIDTH));
 
-    // 版本行下方用细线收束顶部信息栏。
-    let mut version_line = Paragraph::new()
-        .align(AlignmentType::Left)
-        .line_spacing(
-            LineSpacing::new()
-                .after(80)
-                .line(LINE_BODY)
-                .line_rule(LineSpacingType::AtLeast),
-        )
-        .add_run(
-            Run::new()
-                .add_text(format!("版本：{}", version))
-                .fonts(font_set(FONT_HEAD))
-                .size(SIZE_BODY)
-                .bold(),
-        );
-    version_line.property = version_line.property.clone().set_borders(
-        ParagraphBorders::with_empty()
-            .set(ParagraphBorder::new(ParagraphBorderPosition::Bottom).size(6)),
-    );
-    docx = docx.add_paragraph(version_line);
+    // 文种：黑体小二，字距半字。
+    docx = docx.add_paragraph(centered(
+        text_run(doc_type, FONT_HEAD, l::TYPE_PT)
+            .character_spacing((l::TYPE_PT * l::TYPE_TRACKING_EM * 20.0).round() as i32),
+        l::TYPE_TOP,
+        l::TYPE_PT,
+    ));
 
-    // 文件类型：标题上方的封面角色标识。
-    docx = docx.add_paragraph(
+    if let Some(ident) = metadata.ident.as_deref() {
+        docx = docx.add_paragraph(centered(
+            text_run(ident, FONT_BODY, l::IDENT_PT),
+            l::IDENT_TOP,
+            l::IDENT_PT,
+        ));
+    }
+
+    // 反线：项目类单线，研究类一粗一细。
+    docx = docx.add_paragraph(rule(l::RULE_TOP, 12, "000000", l::TEXT_WIDTH, l::SIDE));
+    if !family.is_project() {
+        docx = docx.add_paragraph(rule(
+            l::RULE_TOP + l::RULE_THICK + l::RULE_GAP,
+            4,
+            "000000",
+            l::TEXT_WIDTH,
+            l::SIDE,
+        ));
+    }
+
+    // 题名、稿次、外文原题落在同一个框里，顺序排下，间距同 TeX。
+    let title_frame = |p: Paragraph| framed(p, l::SIDE + 5.0, l::TITLE_TOP, l::TEXT_WIDTH - 10.0);
+    docx = docx.add_paragraph(title_frame(
         Paragraph::new()
             .align(AlignmentType::Center)
-            .line_spacing(
-                LineSpacing::new()
-                    .before(1200)
-                    .line(LINE_HEAD)
-                    .line_rule(LineSpacingType::AtLeast),
-            )
-            .add_run(
-                Run::new()
-                    .add_text(doc_type)
-                    .fonts(font_set(FONT_HEAD))
-                    .size(SIZE_HEAD1)
-                    .bold(),
-            ),
-    );
+            .line_spacing(exact_line(l::TITLE_PT * l::TITLE_LEADING))
+            .add_run(text_run(title_text, FONT_TITLE, l::TITLE_PT)),
+    ));
+    let gap = mm_to_twips(l::TITLE_GAP) as u32;
+    if let Some(version) = version.as_deref() {
+        docx = docx.add_paragraph(title_frame(
+            Paragraph::new()
+                .align(AlignmentType::Center)
+                .line_spacing(exact_line(l::VERSION_PT * 1.3).before(gap))
+                .add_run(text_run(version, FONT_BODY, l::VERSION_PT)),
+        ));
+    }
+    if let Some(original) = metadata.original_title.as_deref() {
+        docx = docx.add_paragraph(title_frame(
+            Paragraph::new()
+                .align(AlignmentType::Center)
+                .line_spacing(exact_line(l::ORIGINAL_PT * 1.35).before(gap))
+                .add_run(
+                    Run::new()
+                        .add_text(original)
+                        .fonts(font_set("Times New Roman"))
+                        .size(half_points(l::ORIGINAL_PT))
+                        .italic(),
+                ),
+        ));
+    }
 
-    // 标题（一号小标宋居中）
-    docx = docx.add_paragraph(
-        Paragraph::new()
-            .align(AlignmentType::Center)
-            .line_spacing(
-                LineSpacing::new()
-                    .before(560)
-                    .after(640)
-                    .line(800)
-                    .line_rule(LineSpacingType::AtLeast),
-            )
-            .add_run(
-                Run::new()
-                    .add_text(title_text)
-                    .fonts(font_set(FONT_TITLE))
-                    .size(SIZE_COVER_TITLE)
-                    .bold(),
-            ),
-    );
+    match family.stage() {
+        // 项目类：四格阶段条，每格一个框，顶边框当横线。
+        Some(stage) => {
+            let cell = (l::TEXT_WIDTH - 3.0 * l::STAGE_GAP) / 4.0;
+            for (index, name) in cover::PROJECT_STAGES.iter().enumerate() {
+                let on = index == stage;
+                let x = l::SIDE + index as f32 * (cell + l::STAGE_GAP);
+                let (size, color) = if on { (18, "000000") } else { (4, "A6A6A6") };
+                let mut run = text_run(name, FONT_HEAD, l::STAGE_PT).character_spacing(25);
+                if !on {
+                    run = run.color("8C8C8C");
+                }
+                let mut p = Paragraph::new()
+                    .align(AlignmentType::Center)
+                    .line_spacing(exact_line(l::STAGE_PT * 1.3))
+                    .add_run(run);
+                p.property = p.property.clone().set_borders(
+                    ParagraphBorders::with_empty().set(
+                        ParagraphBorder::new(ParagraphBorderPosition::Top)
+                            .val(BorderType::Single)
+                            .size(size)
+                            .space(4)
+                            .color(color),
+                    ),
+                );
+                docx = docx.add_paragraph(framed(p, x, l::STAGE_TOP, cell));
+            }
+        }
+        // 研究类：署名行。
+        None => {
+            if let Some(byline) = metadata.byline.as_deref() {
+                // 编译、审校之间的空格统一成一字空（全角空格）。
+                let byline = byline
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join("\u{3000}");
+                docx = docx.add_paragraph(centered(
+                    text_run(&byline, FONT_BODY, l::BYLINE_PT),
+                    l::BYLINE_TOP,
+                    l::BYLINE_PT,
+                ));
+            }
+        }
+    }
 
-    // 落款单位（黑体三号居中）。
-    docx = docx.add_paragraph(
-        Paragraph::new()
-            .align(AlignmentType::Center)
-            .line_spacing(
-                LineSpacing::new()
-                    .before(4200)
-                    .after(320)
-                    .line(LINE_BODY)
-                    .line_rule(LineSpacingType::AtLeast),
-            )
-            .add_run(
-                Run::new()
-                    .add_text(institution)
-                    .fonts(font_set(FONT_HEAD))
-                    .size(SIZE_COVER_INSTITUTION)
-                    .bold(),
-            ),
+    // 落款：单位黑体三号，日期宋体小三，同框上下排。
+    docx = docx.add_paragraph(centered(
+        text_run(institution, FONT_HEAD, l::ORG_PT).character_spacing(40),
+        l::ORG_TOP,
+        l::ORG_PT,
+    ));
+    let mut date_line = centered(
+        text_run(&date, FONT_BODY, l::DATE_PT),
+        l::ORG_TOP,
+        l::DATE_PT,
     );
+    date_line = date_line
+        .line_spacing(exact_line(l::DATE_PT * 1.3).before(mm_to_twips(l::DATE_GAP) as u32));
+    docx = docx.add_paragraph(date_line);
 
-    // 日期（四号书宋，统一到年月）。
-    docx = docx.add_paragraph(
-        Paragraph::new()
-            .align(AlignmentType::Center)
-            .line_spacing(
-                LineSpacing::new()
-                    .line(LINE_BODY)
-                    .line_rule(LineSpacingType::AtLeast),
-            )
-            .add_run(
-                Run::new()
-                    .add_text(&date)
-                    .fonts(font_set(FONT_BODY))
-                    .size(SIZE_COVER_DATE),
-            ),
+    // 封面后强制翻页。图文框不占版面流，封面上没有别的在流段落，这时
+    // 「段前分页」会被当成文档开头而忽略，所以用一个带分页符的段落。
+    docx.add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)))
+}
+
+fn mm_to_twips(mm: f32) -> i32 {
+    (mm * 1440.0 / 25.4).round() as i32
+}
+
+fn half_points(pt: f32) -> usize {
+    (pt * 2.0).round() as usize
+}
+
+fn exact_line(pt: f32) -> LineSpacing {
+    LineSpacing::new()
+        .before(0)
+        .after(0)
+        .line((pt * 20.0).round() as i32)
+        .line_rule(LineSpacingType::Exact)
+}
+
+/// 把段落放进锚定页面的图文框：左上角距页面左、上边 `x`、`y` 毫米，宽 `w` 毫米。
+/// 相邻段落的框属性完全相同时 Word 把它们并进同一个框，题名块就靠这一点顺排。
+fn framed(mut p: Paragraph, x: f32, y: f32, w: f32) -> Paragraph {
+    p.property = p.property.clone().frame_property(
+        FrameProperty::new()
+            .h_anchor("page")
+            .v_anchor("page")
+            .x(mm_to_twips(x))
+            .y(mm_to_twips(y))
+            .width(mm_to_twips(w) as u32)
+            .wrap("around"),
     );
+    p
+}
 
-    // 封面后强制翻页
-    docx.add_paragraph(Paragraph::new().page_break_before(true))
+/// 通栏横线：空段落的顶边框，行高压到 1 pt。`size` 以 1/8 pt 计。
+fn rule(y: f32, size: usize, color: &str, width: f32, x: f32) -> Paragraph {
+    let mut p = Paragraph::new()
+        .line_spacing(exact_line(1.0))
+        .add_run(Run::new().add_text("").size(2));
+    p.property = p.property.clone().set_borders(
+        ParagraphBorders::with_empty().set(
+            ParagraphBorder::new(ParagraphBorderPosition::Top)
+                .val(BorderType::Single)
+                .size(size)
+                .space(0)
+                .color(color),
+        ),
+    );
+    framed(p, x, y, width)
 }
 
 // ============================================================
@@ -1395,28 +1478,49 @@ mod tests {
         let metadata = Metadata {
             security: Some("机密".into()),
             security_years: Some("5年".into()),
-            doc_type: Some("技术报告".into()),
+            doc_type: Some("技术实现方案".into()),
             doc_number: Some("XX-2026-001".into()),
             version: Some("V2.1".into()),
             institution: Some("某研究所".into()),
             date: Some("2026-07".into()),
             title: Some("系统报告".into()),
-            bibliography: None,
+            ident: Some("项目编号：XM-2026-014".into()),
+            ..Metadata::default()
         };
         let docx = add_cover(Docx::new(), metadata.title.as_deref(), &metadata);
         let text = paragraph_texts(&docx).join("\n");
 
         for expected in [
-            "密级：机密★5年",
+            "机密★5年",
             "编号：XX-2026-001",
-            "版本：V2.1",
-            "技术报告",
+            "（V2.1）",
+            "技术实现方案",
+            "项目编号：XM-2026-014",
             "系统报告",
+            "立项论证",
+            "技术实现",
             "某研究所",
-            "2026 年 7 月",
+            "二〇二六年七月",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
+    }
+
+    #[test]
+    fn research_cover_prints_byline_and_original_title_but_no_stage_strip() {
+        let metadata = Metadata {
+            security: Some("公开".into()),
+            doc_type: Some("外文翻译".into()),
+            byline: Some("编译：信息资源处".into()),
+            original_title: Some("AI Risk Management Framework".into()),
+            ..Metadata::default()
+        };
+        let docx = add_cover(Docx::new(), Some("人工智能风险管理框架"), &metadata);
+        let text = paragraph_texts(&docx).join("\n");
+        assert!(text.contains("编译：信息资源处"), "{text}");
+        assert!(text.contains("AI Risk Management Framework"), "{text}");
+        assert!(!text.contains("立项论证"), "研究类不印阶段条：{text}");
+        assert!(!text.contains("公开"), "公开件不标密级：{text}");
     }
 
     #[test]

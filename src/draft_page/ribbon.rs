@@ -1293,7 +1293,6 @@ impl DraftPage<'_> {
             self.start_export_current();
         }
         let overwrite = self.config.export.overwrite;
-        let research = self.doc.draft.kind.is_research();
         let mut only: Option<(ExportSelection, &'static str)> = None;
         ui.add_enabled_ui(ready, |ui| {
             for (icon, label, selection, tip) in [
@@ -1331,14 +1330,8 @@ impl DraftPage<'_> {
                     "这一次只出 Markdown 源码包：md 正文、稿中引用的图片，研究报告另含 references.bib",
                 ),
             ] {
-                let supported = !(research && selection.docx);
-                let tip = if supported {
-                    tip
-                } else {
-                    "研究报告仅支持 TeX/PDF，不支持 Word"
-                };
                 if ui
-                    .add_enabled(supported, theme::icon_text_button(icon, label))
+                    .add(theme::icon_text_button(icon, label))
                     .on_hover_text(tip)
                     .clicked()
                 {

@@ -24,59 +24,88 @@ $endif$
 \newcommand{\docversion}{$docversion$}
 \newcommand{\institution}{$institution$}
 \newcommand{\dateofsubmit}{$submitdate$}
+% 封面专用：公开件不标密级；稿次已带全角括号；阶段 0–3 为项目类，-1 为研究类
+\newcommand{\coversecurity}{$coversecurity$}
+\newcommand{\coverversion}{$versionmark$}
+\newcommand{\coverident}{$ident$}
+\newcommand{\coverbyline}{$byline$}
+\newcommand{\coveroriginal}{$originaltitle$}
+\newcommand{\coverstage}{$coverstage$}
+\newcommand{\coverdoctype}{$doctypespaced$}
 
 \begin{document}
 
-% 封面
+% 封面：位置与字号见 mdx `cover::layout`，Word 与宿主预览按同一组数排。
+% 整页用 TikZ 按距页顶的毫米数定位，不随题名行数上下漂移。
+% 文种的字距由程序逐字插入 \hspace，不用 \ziju：它会漏到后面的题名节点里。
 \begin{titlepage}
   \thispagestyle{empty}
-  % 双线页框（外粗内细）
-  \begin{tikzpicture}[remember picture, overlay]
-    \draw[line width=1.5pt]
-      ([shift={(11mm,-11mm)}]current page.north west)
-      rectangle ([shift={(-11mm,11mm)}]current page.south east);
-    \draw[line width=0.4pt]
-      ([shift={(13.5mm,-13.5mm)}]current page.north west)
-      rectangle ([shift={(-13.5mm,13.5mm)}]current page.south east);
+  \null
+  \begin{tikzpicture}[remember picture, overlay,
+      every node/.style={inner sep=0pt, outer sep=0pt}]
+    \coordinate (P) at (current page.north west);
+    % 密级（左）与编号（右）
+    \ifdefempty{\coversecurity}{}{%
+      \node[anchor=north west, font=\heiti\enhei\zihao{-4}]
+        at ([shift={(25mm,-20mm)}]P)
+        {\coversecurity\ifdefempty{\securityyears}{}{\ding{72}\securityyears}};}
+    \ifdefempty{\docnumber}{}{%
+      \node[anchor=north east, font=\heiti\enhei\zihao{-4}]
+        at ([shift={(185mm,-20mm)}]P) {编号：\docnumber};}
+    % 文种：黑体小二，字距半字，黑色
+    \node[anchor=north, font=\heiti\enhei\zihao{-2}]
+      at ([shift={(105mm,-68mm)}]P) {\coverdoctype};
+    % 标识行
+    \ifdefempty{\coverident}{}{%
+      \node[anchor=north, font=\song\zihao{4}]
+        at ([shift={(105mm,-83mm)}]P) {\coverident};}
+    % 反线：项目类单线，研究类一粗一细
+    \fill ([shift={(25mm,-94mm)}]P) rectangle ([shift={(185mm,-94.5mm)}]P);
+    \ifnum\coverstage<0
+      \fill ([shift={(25mm,-95.3mm)}]P) rectangle ([shift={(185mm,-95.5mm)}]P);
+    \fi
+    % 题名：小标宋一号，行距 1.45 倍
+    \node[anchor=north, text width=150mm, align=flush center]
+      (T) at ([shift={(105mm,-114mm)}]P)
+      {\bs\fontsize{26bp}{37.7bp}\selectfont\papertitle\par};
+    \coordinate (L) at (T.south);
+    \ifdefempty{\coverversion}{}{%
+      \node[anchor=north, font=\song\zihao{-3}]
+        (V) at ([yshift=-6mm]L) {\coverversion};
+      \coordinate (L) at (V.south);}
+    \ifdefempty{\coveroriginal}{}{%
+      \node[anchor=north, text width=150mm, align=flush center]
+        at ([yshift=-6mm]L)
+        {\itshape\fontsize{15bp}{20bp}\selectfont\coveroriginal\par};}
+    % 项目类：四格阶段条，当前阶段黑色粗线，其余灰色细线
+    \ifnum\coverstage>-1
+      \foreach \i/\name in {0/立项论证,1/建设实施,2/技术实现,3/项目总结} {
+        \pgfmathsetmacro{\xl}{25+\i*40.5}
+        \pgfmathsetmacro{\xr}{\xl+38.5}
+        \pgfmathsetmacro{\xc}{\xl+19.25}
+        \ifnum\i=\coverstage
+          \fill ([shift={(\xl mm,-218mm)}]P) rectangle ([shift={(\xr mm,-218.8mm)}]P);
+          \node[anchor=north, font=\heiti\enhei\zihao{5}]
+            at ([shift={(\xc mm,-221.2mm)}]P) {\name};
+        \else
+          \fill[black!35] ([shift={(\xl mm,-218mm)}]P) rectangle ([shift={(\xr mm,-218.2mm)}]P);
+          \node[anchor=north, font=\heiti\enhei\zihao{5}, text=black!45]
+            at ([shift={(\xc mm,-221.2mm)}]P) {\name};
+        \fi
+      }
+    \fi
+    % 研究类：署名行
+    \ifnum\coverstage<0
+      \ifdefempty{\coverbyline}{}{%
+        \node[anchor=north, font=\song\zihao{4}]
+          at ([shift={(105mm,-224mm)}]P) {\coverbyline};}
+    \fi
+    % 落款：单位黑体三号，日期宋体小三
+    \node[anchor=north, font=\heiti\enhei\zihao{3}]
+      (O) at ([shift={(105mm,-245mm)}]P) {\institution};
+    \node[anchor=north, font=\song\zihao{-3}]
+      at ([yshift=-5mm]O.south) {\dateofsubmit};
   \end{tikzpicture}
-
-  % 顶部信息栏：密级 / 编号居首行，版本次之，通栏细线收束
-  {\noindent\heiti\enhei\zihao{-4}%
-    密级：\securitymark\hfill \ifdefempty{\docnumber}{}{编号：\docnumber}\par}
-  \vspace{4pt}
-  {\noindent\heiti\enhei\zihao{-4}版本：\docversion\par}
-  \vspace{4pt}
-  {\noindent\rule{\textwidth}{0.8pt}\par}
-
-  % 文件类型：居中、加宽字距，作题前引子
-  \vspace{28mm}
-  \begin{center}
-    {\heiti\enhei\ziju{1.2}\zihao{2}\doctype\par}
-  \end{center}
-
-  % 题名
-  \vspace{14mm}
-  \begin{center}
-    {\bs\zihao{1}\papertitle\par}
-  \end{center}
-
-  % 题名下装饰线（上粗下细双线）
-  \vspace{16mm}
-  \begin{center}
-    {\rule{0.42\textwidth}{1.2pt}\par}
-    \vspace{3pt}
-    {\rule{0.42\textwidth}{0.4pt}\par}
-  \end{center}
-
-  \vfill
-
-  % 落款：单位三号黑体、日期四号宋体
-  \begin{center}
-    {\heiti\enhei\zihao{3}\institution\par}
-    \vspace{8mm}
-    {\song\zihao{4}\dateofsubmit\par}
-  \end{center}
-  \vspace{22mm}
 \end{titlepage}
 \clearemptydoublepage
 

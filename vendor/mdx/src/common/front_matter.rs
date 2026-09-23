@@ -10,6 +10,12 @@ pub struct Metadata {
     pub institution: Option<String>,
     pub date: Option<String>,
     pub title: Option<String>,
+    /// 封面标识行：项目编号、期号、课题编号或原文出处，印在文种下方。
+    pub ident: Option<String>,
+    /// 封面署名行：课题组、编译审校等，印在落款上方（仅研究类）。
+    pub byline: Option<String>,
+    /// 外文翻译的原文题名，印在中文题名下方。
+    pub original_title: Option<String>,
     pub bibliography: Option<String>,
 }
 
@@ -55,6 +61,13 @@ pub fn parse(content: &str) -> (Metadata, String) {
             "撰写单位" | "单位" | "institution" => metadata.institution = Some(value.into()),
             "撰写时间" | "时间" | "日期" | "date" => metadata.date = Some(value.into()),
             "文件名称" | "标题" | "title" => metadata.title = Some(value.into()),
+            "标识行" | "期号" | "项目编号" | "课题编号" | "原文出处" | "ident" => {
+                metadata.ident = Some(value.into())
+            }
+            "署名" | "署名行" | "课题组" | "byline" => metadata.byline = Some(value.into()),
+            "外文原题" | "原文题名" | "original" => {
+                metadata.original_title = Some(value.into())
+            }
             "bibliography" => metadata.bibliography = Some(value.into()),
             _ => {}
         }
@@ -94,6 +107,15 @@ mod tests {
         assert_eq!(meta.bibliography.as_deref(), Some("refs/library.bib"));
         assert_eq!(meta.security.as_deref(), Some("内部"));
         assert_eq!(body, "# 标题");
+    }
+
+    #[test]
+    fn parses_cover_ident_byline_and_original_title() {
+        let md = "---\n标识行: 二〇二六年第3期\n署名: 某课题组\n外文原题: AI RMF 1.0\n---\n正文\n";
+        let (meta, _body) = parse(md);
+        assert_eq!(meta.ident.as_deref(), Some("二〇二六年第3期"));
+        assert_eq!(meta.byline.as_deref(), Some("某课题组"));
+        assert_eq!(meta.original_title.as_deref(), Some("AI RMF 1.0"));
     }
 
     #[test]

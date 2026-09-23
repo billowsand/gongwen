@@ -32,6 +32,17 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   （`.aux`、`.log`、`.pdf`、`.synctex.gz` 等）。
 - 不保留上游的 `tests/`、`docs/`、`examples/`、`font/`、`scripts/`。
 
+### 待同步回上游的改动
+
+研究报告封面重设计先在这里落地，尚未提交到上游，下次同步前须先把这些改动
+合进 mdx，否则整目录替换会把它们冲掉：
+
+- 新增 `src/cover.rs`（封面分类、汉字日期、稿次括号、版式坐标）并在 `lib.rs` 导出；
+- `common/front_matter.rs` 新增 `标识行` / `署名` / `外文原题` 三个键；
+- `resources/research/template.tex` 封面改为 TikZ 按毫米定位；
+- `tex_research/merger.rs` 渲染新增的封面变量；
+- `docx_research.rs` 封面改为锚定页面的图文框。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持

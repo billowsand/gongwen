@@ -14,7 +14,7 @@ fn export_layout_comparison() {
     };
     std::fs::create_dir_all(&dir).unwrap();
     for kind in TemplateKind::ALL {
-        if !kind.supports_docx() {
+        if !kind.uses_official_docx() {
             continue;
         }
         let mut input = DraftInput::default();

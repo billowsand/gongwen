@@ -598,6 +598,9 @@ fn research_changes(a: &ResearchMetadata, b: &ResearchMetadata) -> Vec<FieldChan
     field(&mut out, "版本号", &a.version, &b.version);
     field(&mut out, "撰写单位", &a.institution, &b.institution);
     field(&mut out, "撰写时间", &a.date, &b.date);
+    field(&mut out, "封面标识行", &a.ident, &b.ident);
+    field(&mut out, "封面署名行", &a.byline, &b.byline);
+    field(&mut out, "外文原题", &a.original_title, &b.original_title);
     // 文献内容整篇比对没有意义，只报"换没换过文件"。
     field(
         &mut out,

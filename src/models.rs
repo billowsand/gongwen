@@ -45,7 +45,9 @@ impl TemplateKind {
             Self::MeetingAgenda => "适用于会议时间地点、参会人员和议程安排",
             Self::WhitePaper => "适用于内部情况报告、请示和领导呈批",
             Self::RedHeadApproval => "带发文单位红头、文号和首页批示栏的内部呈批件",
-            Self::ResearchReport => "按内置研究报告规范生成 TeX 和 PDF，不支持 Word",
+            Self::ResearchReport => {
+                "按内置研究报告规范生成 TeX/PDF 与 Word，封面按文件类型分项目类、研究类"
+            }
         }
     }
 
@@ -66,8 +68,9 @@ impl TemplateKind {
         self == Self::ResearchReport
     }
 
-    /// Word 仅服务现有公文文类；研究报告的正式输出固定为 TeX/PDF。
-    pub fn supports_docx(self) -> bool {
+    /// 走公文 Word 排版链（`export::docx`）的文种；研究报告的 Word 另由 mdx
+    /// 的 research 转换器生成，封面与 TeX 同一张网格。
+    pub fn uses_official_docx(self) -> bool {
         !self.is_research()
     }
 
@@ -2188,6 +2191,12 @@ pub struct ResearchMetadata {
     pub version: String,
     pub institution: String,
     pub date: String,
+    /// 封面标识行，印在文种下方：项目编号、期号、课题编号或原文出处，按文件类型填写。
+    pub ident: String,
+    /// 封面署名行，印在落款上方：课题组、编译审校等。项目类封面不印（那里是阶段条）。
+    pub byline: String,
+    /// 外文翻译的原文题名，印在中文题名下方。
+    pub original_title: String,
     /// 原始 BibTeX 文件名，仅供界面显示；正文引用的数据随稿件快照保存。
     pub bibliography_name: String,
     pub bibliography_content: String,
@@ -2203,6 +2212,9 @@ impl Default for ResearchMetadata {
             version: "V1.0".into(),
             institution: String::new(),
             date: Local::now().format("%Y年%-m月").to_string(),
+            ident: String::new(),
+            byline: String::new(),
+            original_title: String::new(),
             bibliography_name: String::new(),
             bibliography_content: String::new(),
         }

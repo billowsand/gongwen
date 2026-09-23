@@ -284,8 +284,13 @@ fn render_template(
     let date = cover
         .date
         .as_ref()
-        .map(|d| escape_latex(&front_matter::normalize_date(d)))
+        .map(|d| escape_latex(&crate::cover::chinese_date(d)))
         .unwrap_or_else(|| r"\the\year 年 \the\month 月".to_string());
+    let doc_type = cover.doc_type.as_deref().unwrap_or("研究报告");
+    let stage = crate::cover::Family::of(doc_type)
+        .stage()
+        .map_or(-1, |stage| stage as i32);
+    let opt = |value: Option<&String>| value.map(|v| escape_latex(v)).unwrap_or_default();
 
     rendered = rendered.replace("$body$", body);
     rendered = rendered.replace("$title$", escaped_title.as_deref().unwrap_or(""));
@@ -300,6 +305,35 @@ fn render_template(
         &field(cover.institution.as_ref(), "某某单位"),
     );
     rendered = rendered.replace("$submitdate$", &date);
+    rendered = rendered.replace(
+        "$coversecurity$",
+        &escape_latex(crate::cover::security_label(
+            cover.security.as_deref().unwrap_or("公开"),
+        )),
+    );
+    rendered = rendered.replace(
+        "$versionmark$",
+        &escape_latex(
+            &crate::cover::version_mark(cover.version.as_deref().unwrap_or("")).unwrap_or_default(),
+        ),
+    );
+    rendered = rendered.replace("$ident$", &opt(cover.ident.as_ref()));
+    // 署名行常用空格隔开编译、审校两项；TeX 会吞掉汉字间的空格，这里换成一字空。
+    let byline = opt(cover.byline.as_ref())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(r"\quad ");
+    rendered = rendered.replace("$byline$", &byline);
+    rendered = rendered.replace("$originaltitle$", &opt(cover.original_title.as_ref()));
+    rendered = rendered.replace("$coverstage$", &stage.to_string());
+    // 文种字距半字：逐字插入 \hspace，首尾不加，字面保持居中。
+    let spaced = doc_type
+        .trim()
+        .chars()
+        .map(|ch| escape_latex(&ch.to_string()))
+        .collect::<Vec<_>>()
+        .join(r"\hspace{0.5em}");
+    rendered = rendered.replace("$doctypespaced$", &spaced);
     rendered
 }
 
@@ -436,11 +470,12 @@ mod tests {
             date: Some("2026-07".into()),
             title: None,
             bibliography: None,
+            ..CoverInfo::default()
         };
         let rendered = render_template(template, "", None, &cover, false);
         assert_eq!(
             rendered,
-            "内部|技术报告|XX-2026-001|V2.1|某研究所|2026 年 7 月"
+            "内部|技术报告|XX-2026-001|V2.1|某研究所|二〇二六年七月"
         );
     }
 

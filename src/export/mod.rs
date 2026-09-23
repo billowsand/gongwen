@@ -297,9 +297,13 @@ pub fn export_all_with_numbering(
         write_markdown_archive(&path, input, markdown, export_stem.as_str())?;
         files.push(path);
     }
-    if selection.docx && input.kind.supports_docx() {
+    if selection.docx {
         let path = document_dir.join(format!("{export_stem}.docx"));
-        docx::write_docx_with_numbering(&path, input, markdown, display, fonts, numbering)?;
+        if input.kind.is_research() {
+            research::write_docx(&path, input, markdown)?;
+        } else {
+            docx::write_docx_with_numbering(&path, input, markdown, display, fonts, numbering)?;
+        }
         files.push(path);
     }
     if selection.tex {

@@ -28,6 +28,16 @@ pub(crate) fn markdown_with_frontmatter(
     if !meta.security_years.trim().is_empty() {
         lines.insert(2, format!("保密年限: {}", one_line(&meta.security_years)));
     }
+    // 封面的可选行：留空就不写，mdx 据此不排那一行。
+    for (key, value) in [
+        ("标识行", &meta.ident),
+        ("署名", &meta.byline),
+        ("外文原题", &meta.original_title),
+    ] {
+        if !value.trim().is_empty() {
+            lines.push(format!("{key}: {}", one_line(value)));
+        }
+    }
     if let Some(path) = bibliography.filter(|path| !path.trim().is_empty()) {
         lines.push(format!("bibliography: {}", one_line(path)));
     }
@@ -52,6 +62,22 @@ pub(crate) fn write_tex(path: &Path, input: &DraftInput, markdown: &str) -> Resu
         compile_pdf: false,
     })
     .with_context(|| format!("研究报告 TeX 转换失败：{}", path.display()))?;
+    Ok(())
+}
+
+/// 生成研究报告的 Word：mdx research 转换器排封面、目录与正文，封面与 TeX
+/// 模板同一张网格（见 `mdx::cover`）。
+pub(crate) fn write_docx(path: &Path, input: &DraftInput, markdown: &str) -> Result<()> {
+    let source = ResearchSourceBundle::create(input, markdown)?;
+    mdx::convert(ConvertRequest {
+        input: source.markdown.clone(),
+        output: Some(path.to_path_buf()),
+        format: OutputFormat::Docx,
+        style: DocumentStyle::Research,
+        template: None,
+        compile_pdf: false,
+    })
+    .with_context(|| format!("研究报告 Word 转换失败：{}", path.display()))?;
     Ok(())
 }
 
@@ -154,6 +180,64 @@ mod tests {
         assert!(text.contains("文件名称: 测试报告"));
         assert!(text.contains("bibliography: references.bib"));
         assert!(text.ends_with("## 第一章\n\n正文\n"));
+    }
+
+    #[test]
+    fn frontmatter_carries_the_optional_cover_lines_only_when_filled() {
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "测试报告".into(),
+            ..Default::default()
+        };
+        let text = markdown_with_frontmatter(&input, "正文", None);
+        for key in ["标识行", "署名", "外文原题"] {
+            assert!(!text.contains(key), "留空不写 {key}：{text}");
+        }
+        input.research.ident = "课题编号：ZT-2026-07".into();
+        input.research.byline = "政务智能化专题课题组".into();
+        input.research.original_title = "AI RMF 1.0".into();
+        let text = markdown_with_frontmatter(&input, "正文", None);
+        assert!(text.contains("标识行: 课题编号：ZT-2026-07"), "{text}");
+        assert!(text.contains("署名: 政务智能化专题课题组"), "{text}");
+        assert!(text.contains("外文原题: AI RMF 1.0"), "{text}");
+    }
+
+    /// 研究报告的 Word 由 mdx research 转换器生成，封面要素一个不少。
+    #[test]
+    fn research_word_export_prints_the_cover() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.docx");
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "全市政务数据共享平台建设项目".into(),
+            ..Default::default()
+        };
+        input.research.file_type = "建设实施方案".into();
+        input.research.ident = "项目编号：XM-2026-014".into();
+        input.research.institution = "市大数据管理局".into();
+        input.research.date = "2026年9月".into();
+        write_docx(&path, &input, "<!-- [正文] -->\n\n## 研究背景\n\n正文。")
+            .expect("研究报告 Word 应转换成功");
+        let file = fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        for expected in [
+            "建设实施方案",
+            "项目编号：XM-2026-014",
+            "全市政务数据共享平台建设项目",
+            "建设实施",
+            "市大数据管理局",
+            "二〇二六年九月",
+            "w:framePr",
+        ] {
+            assert!(xml.contains(expected), "Word 封面缺少 {expected}");
+        }
     }
 
     #[test]

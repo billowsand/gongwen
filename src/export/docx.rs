@@ -158,8 +158,8 @@ pub fn write_docx_with_numbering(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<()> {
-    if !input.kind.supports_docx() {
-        bail!("研究报告不支持 Word 导出，请改用 TeX/PDF");
+    if !input.kind.uses_official_docx() {
+        bail!("研究报告的 Word 由 mdx research 转换器生成，不走公文 Word 排版");
     }
     // 加粗文字的排法：None 交给 Word 合成粗体（字体不变，等同点了加粗按钮），
     // Some 换用专用粗体字面。
@@ -2054,7 +2054,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         for kind in TemplateKind::ALL {
             // 白头件目前未导出密级行；此处检查已有密级行的字体。
-            if kind == TemplateKind::WhitePaper || !kind.supports_docx() {
+            if kind == TemplateKind::WhitePaper || !kind.uses_official_docx() {
                 continue;
             }
             for period in ["10年", "长期"] {
@@ -2089,7 +2089,7 @@ mod tests {
         let fonts_pattern = regex::Regex::new(r"<w:rFonts\b[^>]*/>").unwrap();
         let east_asia_pattern = regex::Regex::new(r#"w:eastAsia="([^"]+)""#).unwrap();
         for kind in TemplateKind::ALL {
-            if !kind.supports_docx() {
+            if !kind.uses_official_docx() {
                 continue;
             }
             let path = temp.path().join("mixed-fonts.docx");

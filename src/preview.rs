@@ -95,9 +95,6 @@ const RESEARCH_LINE_PT: f32 = 24.0;
 // 所以两者各占一个常量，不再共用。
 const RESEARCH_CHAPTER_PT: f32 = 18.0; // 章标题，小二
 const RESEARCH_CAPTION_PT: f32 = 12.0; // 图表题注，小四
-const RESEARCH_COVER_TITLE_PT: f32 = 26.0; // 封面题名，一号
-const RESEARCH_COVER_TYPE_PT: f32 = 22.0; // 封面文件类型，二号
-const RESEARCH_COVER_PT: f32 = 16.0; // 封面要素，三号
 
 /// 缩放后的版式尺寸，单位都是 egui 逻辑像素。
 pub(crate) struct Metrics {
@@ -517,7 +514,7 @@ mod tests {
             "研究报告",
             "某某领域发展研究",
             "星海省教育研究院",
-            "2026年9月",
+            "二〇二六年九月",
         ] {
             assert!(text.contains(expected), "封面应排出“{expected}”：{text}");
         }

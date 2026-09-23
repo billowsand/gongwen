@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 mod common;
+pub mod cover;
 mod docx_official;
 mod docx_research;
 mod input;
