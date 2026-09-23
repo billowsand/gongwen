@@ -5,9 +5,9 @@
 
 use crate::models::{DraftInput, JointIssuanceMode, LetterVersion, TemplateKind, split_units};
 use crate::preview::{
-    BODY_PT, HEADER_MAX_GAP_EM, HEADER_PT, HEADER_RULE_GAP_MM, HEADER_RULE_MM, Metrics,
-    PREVIEW_PLACEHOLDER, WHITE_PAPER_BLANK_LINES, draw, job, layout, line_galley, place,
-    single_line, text_format,
+    BODY_PT, HEADER_MAX_GAP_EM, HEADER_NUMBER_GAP_MM, HEADER_PT, HEADER_RULE_GAP_MM,
+    HEADER_RULE_MM, Metrics, PREVIEW_PLACEHOLDER, WHITE_PAPER_BLANK_LINES, draw, job, layout,
+    line_galley, place, single_line, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -179,6 +179,9 @@ pub(crate) fn serial_and_number(ui: &mut egui::Ui, metrics: &Metrics, input: &Dr
         Align::Max,
     );
     let height = left.size().y.max(right.size().y);
+    // egui 把字顶贴在行顶、行距余量留在字下方，紧跟反线排会让字顶着红线；
+    // 与导出一样空出一段，让字顶离反线 3mm。
+    ui.add_space(metrics.mm(HEADER_NUMBER_GAP_MM));
     place(ui, metrics, height, |painter, rect| {
         painter.galley(rect.left_top(), left.clone(), theme::paper::ink());
         painter.galley(

@@ -60,6 +60,7 @@ const MM: f32 = 72.0 / 25.4;
 const HEADER_PT: f32 = 29.0; // 红头字号 \HeaderFontSize
 const HEADER_RULE_MM: f32 = 0.53; // 红色反线粗细
 const HEADER_RULE_GAP_MM: f32 = 4.0; // 红头与反线之间
+const HEADER_NUMBER_GAP_MM: f32 = 3.0; // 反线与份号/文号字顶之间
 const HEADER_MAX_GAP_EM: f32 = 1.0; // 红头最大字距 \HeaderMaxGap
 const RECORD_PT: f32 = 14.0; // 版记四号
 /// 联系电话列宽：标签 5em + 11 位半角数字 5.5em + 0.5em 余量。
