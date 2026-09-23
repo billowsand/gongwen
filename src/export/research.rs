@@ -1,7 +1,8 @@
 //! 研究报告导出：复用固定版本 mdx 的 research 转换器，PDF 统一交给本应用
 //! 的内置 Tectonic 编译。
 
-use crate::models::{DraftInput, ResearchMetadata};
+use crate::export::parse::{MarkdownBlock, TableSpan, table_span_at};
+use crate::models::{DraftInput, NumberingConfig, ResearchMetadata};
 use anyhow::{Context, Result};
 use mdx::{ConvertRequest, DocumentStyle, OutputFormat};
 use std::fs;
@@ -13,6 +14,7 @@ pub(crate) fn markdown_with_frontmatter(
     input: &DraftInput,
     markdown: &str,
     bibliography: Option<&str>,
+    numbering: &NumberingConfig,
 ) -> String {
     let meta = &input.research;
     let mut lines = vec![
@@ -51,21 +53,67 @@ pub(crate) fn markdown_with_frontmatter(
     }
     lines.push("---".to_string());
     lines.push(String::new());
-    let body = strip_numbered_table_markers(markdown.trim_start_matches('\u{feff}').trim());
+    let body = write_numbered_tables(markdown.trim_start_matches('\u{feff}').trim(), numbering);
     lines.push(body.trim().to_string());
     lines.push(String::new());
     lines.join("\n")
 }
 
-/// 序号表是公文版式，研究报告走 mdx 转换、不认这个标记。交给 mdx 前把
-/// `<!-- [序号表] -->` 这类独占一行的标记剥掉，免得原样印到纸上；表格本身
-/// 按 mdx 的普通表格排，不分组、不整行合并（mdx 不支持合并单元格）。
-fn strip_numbered_table_markers(markdown: &str) -> String {
-    markdown
-        .lines()
-        .filter(|line| !super::parse_numbered_table_marker(line.trim()))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// 把序号表的编号写进交给 mdx 的源码。
+///
+/// 首列编号与分组行由 `parse::normalize_numbered_table` 按设置生成——公文导出、
+/// 研究报告预览走的都是它。这里把它的结果原样写回 Markdown：编号写成文字，
+/// 分组行写成 `| （一）标题 |||` 这样的整行合并，手写的 `^^` 纵向合并照旧保留。
+/// mdx 按合并单元格排，只需认得标记行（分组行靠左），不必再懂编号规矩，
+/// 纸面与预览因此出自同一份编号结果。标记行本身留着，mdx 读到后不落版面。
+fn write_numbered_tables(markdown: &str, numbering: &NumberingConfig) -> String {
+    let mut output = String::with_capacity(markdown.len());
+    let mut copied = 0;
+    for located in super::parse_markdown_located_with_numbering(markdown, numbering) {
+        let MarkdownBlock::Table {
+            rows,
+            spans,
+            numbered: true,
+            ..
+        } = &located.block
+        else {
+            continue;
+        };
+        // 分隔行照抄源码：列对齐的冒号写在那里。
+        let Some(separator) = markdown[located.range.clone()].lines().nth(1) else {
+            continue;
+        };
+        output.push_str(&markdown[copied..located.range.start]);
+        output.push_str(&table_markdown(rows, spans, separator.trim()));
+        copied = located.range.end;
+    }
+    output.push_str(&markdown[copied..]);
+    output
+}
+
+/// 把网格与合并单元格写回 MultiMarkdown 表格：被横向合并的格子写成紧挨的
+/// `|`，纵向合并的续行在锚点列写 `^^`。与 `parse::parse_table_cells` 互逆。
+fn table_markdown(rows: &[Vec<String>], spans: &[TableSpan], separator: &str) -> String {
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    for (row_index, row) in rows.iter().enumerate() {
+        let mut line = String::from("|");
+        for (column, cell) in row.iter().enumerate() {
+            match table_span_at(spans, row_index, column) {
+                Some(span) if span.column != column => line.push('|'),
+                Some(span) if span.row != row_index => line.push_str(" ^^ |"),
+                _ => {
+                    line.push(' ');
+                    line.push_str(cell);
+                    line.push_str(" |");
+                }
+            }
+        }
+        lines.push(line);
+        if row_index == 0 {
+            lines.push(separator.to_string());
+        }
+    }
+    lines.join("\n")
 }
 
 /// 封面实际印的题名：文档要素的「文件名称」优先，留空才取正文区段的 `#`，
@@ -82,8 +130,13 @@ pub(crate) fn cover_title(input: &DraftInput, markdown: &str) -> Option<String> 
 }
 
 /// 生成 mdx research 模式规定的主 TeX、类文件、分章、图片与参考文献文件。
-pub(crate) fn write_tex(path: &Path, input: &DraftInput, markdown: &str) -> Result<()> {
-    let source = ResearchSourceBundle::create(input, markdown)?;
+pub(crate) fn write_tex(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> Result<()> {
+    let source = ResearchSourceBundle::create(input, markdown, numbering)?;
     clear_generated_parts(path.parent().unwrap_or_else(|| Path::new(".")))?;
     mdx::convert(ConvertRequest {
         input: source.markdown.clone(),
@@ -100,8 +153,13 @@ pub(crate) fn write_tex(path: &Path, input: &DraftInput, markdown: &str) -> Resu
 
 /// 生成研究报告的 Word：mdx research 转换器排封面、目录与正文，封面与 TeX
 /// 模板同一张网格（见 `mdx::cover`）。
-pub(crate) fn write_docx(path: &Path, input: &DraftInput, markdown: &str) -> Result<()> {
-    let source = ResearchSourceBundle::create(input, markdown)?;
+pub(crate) fn write_docx(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> Result<()> {
+    let source = ResearchSourceBundle::create(input, markdown, numbering)?;
     mdx::convert(ConvertRequest {
         input: source.markdown.clone(),
         output: Some(path.to_path_buf()),
@@ -120,11 +178,13 @@ pub(crate) fn markdown_source(
     input: &DraftInput,
     markdown: &str,
     has_bibliography: bool,
+    numbering: &NumberingConfig,
 ) -> String {
     markdown_with_frontmatter(
         input,
         markdown,
         has_bibliography.then_some("references.bib"),
+        numbering,
     )
 }
 
@@ -153,7 +213,7 @@ struct ResearchSourceBundle {
 }
 
 impl ResearchSourceBundle {
-    fn create(input: &DraftInput, markdown: &str) -> Result<Self> {
+    fn create(input: &DraftInput, markdown: &str, numbering: &NumberingConfig) -> Result<Self> {
         let root = tempfile::Builder::new()
             .prefix("gongwen-research-")
             .tempdir()
@@ -164,6 +224,7 @@ impl ResearchSourceBundle {
             input,
             markdown,
             bibliography.as_deref().map(|_| "references.bib"),
+            numbering,
         );
         let path = root.path().join("research.md");
         fs::write(&path, document)
@@ -208,28 +269,98 @@ mod tests {
         };
         input.research.security = "秘密".into();
         input.research.security_years = "5年".into();
-        let text = markdown_with_frontmatter(&input, "## 第一章\n\n正文", Some("references.bib"));
+        let text = markdown_with_frontmatter(
+            &input,
+            "## 第一章\n\n正文",
+            Some("references.bib"),
+            &NumberingConfig::default(),
+        );
         assert!(text.starts_with("---\n密级: 秘密\n保密年限: 5年\n"));
         assert!(text.contains("文件名称: 测试报告"));
         assert!(text.contains("bibliography: references.bib"));
         assert!(text.ends_with("## 第一章\n\n正文\n"));
     }
 
-    /// 序号表是公文版式，mdx 不认它的标记：交给 mdx 前必须剥掉标记行，
-    /// 否则 `<!-- [序号表] -->` 会原样印到研究报告的纸上。表格按普通表格排。
+    /// 序号表交给 mdx 前把编号写进源码：首列编号、分组行写成整行合并，分组
+    /// 编号跟设置走；标记行留给 mdx（它认得、不落版面），别的表格一字不动。
     #[test]
-    fn numbered_table_markers_are_stripped_before_mdx() {
+    fn numbered_tables_are_written_out_before_mdx() {
         let input = DraftInput {
             kind: TemplateKind::ResearchReport,
             title_hint: "测试报告".into(),
             ..Default::default()
         };
-        let markdown =
-            "<!-- [序号表] -->\n| 序号 | 事项 |\n| --- | --- |\n| 分组 |  |\n|  | 去了 |";
-        let text = markdown_with_frontmatter(&input, markdown, None);
-        assert!(!text.contains("序号表"), "标记不得进 mdx：{text}");
-        assert!(text.contains("| 序号 | 事项 |"), "表格本身要保留：{text}");
-        assert!(text.contains("| 分组 |  |"), "{text}");
+        let markdown = "\
+表：任务分工
+<!-- [序号表] -->
+| 序号 | 事项 | 单位 |
+| :---: | --- | --- |
+| 重点工作 |  |  |
+| 7 | 编制计划 | 办公室 |
+|  | ^^ | 财务处 |
+
+| A | B |
+| --- | --- |
+| 大标题 |  |";
+        let numbering = NumberingConfig {
+            table_group: crate::models::HeadingNumbering::Chinese,
+            ..NumberingConfig::default()
+        };
+        let text = markdown_with_frontmatter(&input, markdown, None, &numbering);
+        assert!(
+            text.contains(
+                "\
+表：任务分工
+<!-- [序号表] -->
+| 序号 | 事项 | 单位 |
+| :---: | --- | --- |
+| 一、重点工作 |||
+| 1 | 编制计划 | 办公室 |
+| 2 | ^^ | 财务处 |
+
+| A | B |
+| --- | --- |
+| 大标题 |  |"
+            ),
+            "{text}"
+        );
+    }
+
+    /// 写回去的表格再交给 mdx 解析，网格与合并单元格要与公文助手的解析一致。
+    #[test]
+    fn written_numbered_table_parses_the_same_in_mdx() {
+        let markdown = "\
+<!-- [序号表] -->
+| 序号 | 事项 | 单位 |
+| --- | --- | --- |
+| （一）重点工作 |||
+| 1 | 编制计划 | 办公室 |
+|  | ^^ | 财务处 |";
+        let numbering = NumberingConfig::default();
+        let written = write_numbered_tables(markdown, &numbering);
+        let blocks = crate::export::parse_markdown_with_numbering(markdown, &numbering);
+        let MarkdownBlock::Table { rows, spans, .. } = &blocks[1] else {
+            panic!("应当解析为表格：{blocks:?}");
+        };
+        let lines = written.lines().skip(1).collect::<Vec<_>>();
+        let source_rows = lines
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != 1)
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>();
+        let parsed = mdx::table::parse_cells(&source_rows);
+        assert_eq!(&parsed.rows, rows);
+        let mdx_spans = parsed
+            .spans
+            .iter()
+            .map(|span| (span.row, span.column, span.row_span, span.column_span))
+            .collect::<Vec<_>>();
+        let ours = spans
+            .iter()
+            .map(|span| (span.row, span.column, span.row_span, span.column_span))
+            .collect::<Vec<_>>();
+        assert_eq!(mdx_spans, ours);
     }
 
     #[test]
@@ -239,21 +370,21 @@ mod tests {
             title_hint: "测试报告".into(),
             ..Default::default()
         };
-        let text = markdown_with_frontmatter(&input, "正文", None);
+        let text = markdown_with_frontmatter(&input, "正文", None, &NumberingConfig::default());
         for key in ["标识行", "署名", "外文原题"] {
             assert!(!text.contains(key), "留空不写 {key}：{text}");
         }
         input.research.ident = "课题编号：ZT-2026-07".into();
         input.research.byline = "政务智能化专题课题组".into();
         input.research.original_title = "AI RMF 1.0".into();
-        let text = markdown_with_frontmatter(&input, "正文", None);
+        let text = markdown_with_frontmatter(&input, "正文", None, &NumberingConfig::default());
         assert!(text.contains("标识行: 课题编号：ZT-2026-07"), "{text}");
         assert!(text.contains("署名: 政务智能化专题课题组"), "{text}");
         assert!(text.contains("外文原题: AI RMF 1.0"), "{text}");
         assert!(!text.contains("题名分行"), "一行放得下就不写分行：{text}");
 
         input.title_hint = "全市一体化政务数据共享平台（二期）建设项目".into();
-        let text = markdown_with_frontmatter(&input, "正文", None);
+        let text = markdown_with_frontmatter(&input, "正文", None, &NumberingConfig::default());
         let line = text
             .lines()
             .find(|line| line.starts_with("题名分行: "))
@@ -264,6 +395,48 @@ mod tests {
     }
 
     /// 研究报告的 Word 由 mdx research 转换器生成，封面要素一个不少。
+    /// 研究报告 Word 里的序号表：分组行整行合并（gridSpan）且靠左，`^^` 写成
+    /// vMerge，编号写在首列，标记行不落到纸上。
+    #[test]
+    fn research_word_export_merges_numbered_table_cells() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.docx");
+        let input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "序号表测试".into(),
+            ..Default::default()
+        };
+        write_docx(
+            &path,
+            &input,
+            "<!-- [正文] -->\n\n## 任务分工\n\n<!-- [序号表] -->\n| 序号 | 事项 | 单位 |\n| --- | --- | --- |\n| 重点工作 |  |  |\n|  | 编制计划 | 办公室 |\n|  | ^^ | 财务处 |",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告 Word 应转换成功");
+        let file = fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(!xml.contains("[序号表]"), "标记行不许落到纸上");
+        let group = xml.find("（一）重点工作").expect("分组行要带分组编号");
+        let group_cell = &xml[xml[..group].rfind("<w:tc>").unwrap()..group];
+        assert!(
+            group_cell.contains(r#"<w:gridSpan w:val="3" />"#),
+            "{group_cell}"
+        );
+        assert!(
+            group_cell.contains(r#"<w:jc w:val="left" />"#),
+            "{group_cell}"
+        );
+        assert!(xml.contains(r#"<w:vMerge w:val="restart" />"#), "{xml}");
+        assert!(xml.contains(r#"<w:vMerge w:val="continue" />"#), "{xml}");
+    }
+
     #[test]
     fn research_word_export_prints_the_cover() {
         use std::io::Read as _;
@@ -278,8 +451,13 @@ mod tests {
         input.research.ident = "项目编号：XM-2026-014".into();
         input.research.institution = "市大数据管理局".into();
         input.research.date = "2026年9月".into();
-        write_docx(&path, &input, "<!-- [正文] -->\n\n## 研究背景\n\n正文。")
-            .expect("研究报告 Word 应转换成功");
+        write_docx(
+            &path,
+            &input,
+            "<!-- [正文] -->\n\n## 研究背景\n\n正文。",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告 Word 应转换成功");
         let file = fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut xml = String::new();
@@ -314,7 +492,7 @@ mod tests {
         write_tex(
             &path,
             &input,
-            "<!-- [正文] -->\n\n## 研究背景\n\n正文。\n\n<!-- [附录] -->\n\n## 数据表\n\n附录内容。",
+            "<!-- [正文] -->\n\n## 研究背景\n\n正文。\n\n<!-- [附录] -->\n\n## 数据表\n\n附录内容。", &NumberingConfig::default(),
         )
         .expect("研究报告应转换成功");
         assert!(path.is_file());
@@ -339,7 +517,13 @@ mod tests {
             ..Default::default()
         };
         input.research.institution = "测试单位".into();
-        write_tex(&path, &input, "## 研究背景\n\n正文。").expect("研究报告应转换成功");
+        write_tex(
+            &path,
+            &input,
+            "## 研究背景\n\n正文。",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告应转换成功");
 
         let class = fs::read_to_string(dir.path().join("md2tex.cls")).unwrap();
         assert!(
@@ -387,6 +571,7 @@ mod tests {
                 "| 项 | 数 |\n| --- | --- |\n| 甲 | 1 |\n\n",
                 "![总体架构](images/a.png){#fig:a}\n",
             ),
+            &NumberingConfig::default(),
         )
         .expect("研究报告应转换成功");
 
@@ -440,6 +625,7 @@ mod tests {
                 "## 研究背景\n\n",
                 "正文。\n",
             ),
+            &NumberingConfig::default(),
         )
         .expect("研究报告应转换成功");
 
@@ -477,6 +663,7 @@ mod tests {
             &path,
             &input,
             "<!-- [正文] -->\n\n# 某某问题研究报告\n\n## 研究背景\n\n正文。\n",
+            &NumberingConfig::default(),
         )
         .expect("研究报告应转换成功");
 

@@ -380,8 +380,15 @@ fn table_captions(blocks: &[LocatedBlock]) -> HashMap<usize, usize> {
         if !matches!(located.block, MarkdownBlock::Table { .. }) {
             continue;
         }
-        let leading = index
-            .checked_sub(1)
+        // 表题与表格之间可以夹一行序号表标记：它不落版面，mdx 也不把它当块。
+        let mut before = index.checked_sub(1);
+        while let Some(marker) = before.filter(|marker| {
+            matches!(&blocks[*marker].block, MarkdownBlock::Html(line)
+                if export::parse_numbered_table_marker(line))
+        }) {
+            before = marker.checked_sub(1);
+        }
+        let leading = before
             .filter(|before| !used.contains(before))
             .filter(|before| caption_text(&blocks[*before]).is_some());
         let trailing = (index + 1 < blocks.len())
@@ -507,7 +514,9 @@ pub(crate) struct OutlineEntry {
 /// 扫一遍源码，按研究报告的规则取出全部标题与编号。
 pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
     let marks = collect_marks(&export::parse_markdown_located(markdown), markdown);
-    let located = export::parse_markdown_located_research(markdown, &marks);
+    // 大纲只看标题，序号表的分组编号样式无关紧要。
+    let located =
+        export::parse_markdown_located_research(markdown, &marks, &NumberingConfig::default());
     let mut entries = Vec::new();
     walk(&located, markdown, |located, kind, _| {
         let (level, number, text) = match kind {
@@ -551,6 +560,7 @@ pub(crate) fn report_title(markdown: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn research_preview(
     ui: &mut egui::Ui,
     input: &DraftInput,
@@ -558,6 +568,7 @@ pub(crate) fn research_preview(
     scale: PreviewScale,
     anchor: Option<&Range<usize>>,
     mut scroll_to_anchor: bool,
+    numbering: &NumberingConfig,
     line_numbers: bool,
 ) -> PreviewOutput {
     let visible = ui
@@ -566,9 +577,9 @@ pub(crate) fn research_preview(
     let metrics = Metrics::research(scale.viewport.unwrap_or(visible.width()), scale.zoom)
         .with_line_numbers(line_numbers);
     // 两遍：先给锚点和文献定号，再按纸面字面重新切块。研究报告的标题编号不跟
-    // 设置里的公文编号样式走，用默认值解析即可。
+    // 设置里的公文编号样式走；序号表的分组编号跟设置，与导出一致。
     let marks = collect_marks(&export::parse_markdown_located(markdown), markdown);
-    let located = export::parse_markdown_located_research(markdown, &marks);
+    let located = export::parse_markdown_located_research(markdown, &marks, numbering);
     let mut clicked = None;
 
     cover_sheet(ui, &metrics, input, markdown);
@@ -1150,6 +1161,7 @@ mod tests {
                 PreviewScale::zoom(Some(1.0)),
                 None,
                 false,
+                &NumberingConfig::default(),
                 false,
             );
         });
@@ -1187,6 +1199,7 @@ mod tests {
                 PreviewScale::zoom(Some(1.0)),
                 None,
                 false,
+                &NumberingConfig::default(),
                 false,
             );
         })

@@ -825,42 +825,53 @@ pub(crate) fn galley_visual_midline(galley: &egui::Galley) -> f32 {
     }
 }
 
+/// 表格里排好的一格：锚点所在的行列、跨度与排好的字。
+pub(crate) struct TableCellLayout {
+    row: usize,
+    column: usize,
+    row_span: usize,
+    column_span: usize,
+    galley: Arc<egui::Galley>,
+    padding: f32,
+    align: ColumnAlignment,
+}
+
+/// 量好尺寸、还没落到纸上的表格：各列宽、各行高与每个锚点单元格。
+///
+/// 连续版式（公文预览）整张画在一处；红头呈批件要真分页，按行切成几段分别
+/// 落在不同的页上（见 `red::red_place_table`），两处共用同一份量法与画法。
+pub(crate) struct MeasuredTable {
+    pub(crate) widths: Vec<f32>,
+    pub(crate) row_heights: Vec<f32>,
+    cells: Vec<TableCellLayout>,
+}
+
 /// 表格：四号字、行距 21 磅，表头黑体居中，列宽直接取导出器算好的智能列宽，
-/// 因此预览的列宽与导出的 Word 表格一致。
-pub(crate) fn table_block(
-    ui: &mut egui::Ui,
+/// 因此预览的列宽与导出的 Word 表格一致。`content_width` 是表格占的版心宽度。
+pub(crate) fn measure_table(
+    ui: &egui::Ui,
     metrics: &Metrics,
     rows: &[Vec<String>],
     aligns: &[export::ColumnAlign],
     spans: &[export::TableSpan],
     numbered: bool,
-) {
+    content_width: f32,
+) -> Option<MeasuredTable> {
     let columns = export::table_columns(rows, aligns, spans);
     if columns.is_empty() || rows.is_empty() {
-        return;
+        return None;
     }
     let widths = columns
         .iter()
-        .map(|column| metrics.content * column.fraction)
+        .map(|column| content_width * column.fraction)
         .collect::<Vec<_>>();
     let column_alignments = columns
         .iter()
         .map(|column| column.alignment)
         .collect::<Vec<_>>();
 
-    struct PreviewCell {
-        row: usize,
-        column: usize,
-        row_span: usize,
-        column_span: usize,
-        galley: Arc<egui::Galley>,
-        padding: f32,
-        align: ColumnAlignment,
-    }
-
     // 先排出所有锚点单元格，再由跨行单元格反推各物理行所需高度。
     let line = metrics.pt(TABLE_LINE_PT);
-    let stroke = Stroke::new(1.0_f32.max(metrics.scale), theme::paper::ink());
     let mut cells = Vec::new();
     let mut row_heights = vec![line; rows.len()];
     let bold_font = metrics.font(theme::FONT_BOLD, TABLE_PT);
@@ -879,9 +890,11 @@ pub(crate) fn table_block(
             if span.is_some_and(|span| !span.is_anchor(row_index, column)) {
                 continue;
             }
-            let row_span = span.map_or(1, |span| span.row_span);
             // 跨度理应落在网格内（`parse_table_cells` 保证矩形），但 `TableSpan`
             // 是普通结构体，起草页那边也在手改跨度；夹一下，排版错位总好过 panic。
+            let row_span = span
+                .map_or(1, |span| span.row_span)
+                .min(rows.len() - row_index);
             let column_span = span
                 .map_or(1, |span| span.column_span)
                 .min(widths.len() - column);
@@ -927,7 +940,7 @@ pub(crate) fn table_block(
                 row_heights[row_index] =
                     row_heights[row_index].max(galley.size().y + 2.0 * padding);
             }
-            cells.push(PreviewCell {
+            cells.push(TableCellLayout {
                 row: row_index,
                 column,
                 row_span,
@@ -952,68 +965,141 @@ pub(crate) fn table_block(
         }
     }
 
-    let total_height = row_heights.iter().sum::<f32>();
+    Some(MeasuredTable {
+        widths,
+        row_heights,
+        cells,
+    })
+}
+
+impl MeasuredTable {
+    pub(crate) fn width(&self) -> f32 {
+        self.widths.iter().sum()
+    }
+
+    /// 第 `row` 行起、不能在中间断开的一段行：纵向合并格跨到哪一行，这一段
+    /// 就至少到哪一行。返回这一段的结束行（不含）。
+    pub(crate) fn unbreakable_end(&self, row: usize) -> usize {
+        let mut end = row + 1;
+        let mut index = row;
+        while index < end {
+            for cell in self.cells.iter().filter(|cell| cell.row == index) {
+                end = end.max(cell.row + cell.row_span);
+            }
+            index += 1;
+        }
+        end.min(self.row_heights.len())
+    }
+
+    /// 把 `rows` 这几行自上而下紧挨着画在 `origin` 处，返回每行的
+    /// `(行号, 行框, 基线)`，供页边行号与点击回跳用。
+    ///
+    /// `rows` 里每个锚点格跨到的行必须也在其中且紧挨着——按
+    /// [`Self::unbreakable_end`] 切段就能保证；表头（第 0 行）不参与纵向合并，
+    /// 续页时可以单独拼在前面重复一遍。
+    pub(crate) fn paint_rows(
+        &self,
+        painter: &egui::Painter,
+        metrics: &Metrics,
+        origin: egui::Pos2,
+        rows: &[usize],
+    ) -> Vec<(usize, egui::Rect, f32)> {
+        let stroke = Stroke::new(1.0_f32.max(metrics.scale), theme::paper::ink());
+        let mut x_offsets = vec![origin.x];
+        for width in &self.widths {
+            x_offsets.push(x_offsets.last().copied().unwrap_or(origin.x) + width);
+        }
+        // 各行在这一段里的上沿；不在这一段里的行没有位置。
+        let mut tops = vec![None; self.row_heights.len()];
+        let mut y = origin.y;
+        for &row in rows {
+            tops[row] = Some(y);
+            y += self.row_heights[row];
+        }
+        let cell_rect = |cell: &TableCellLayout| {
+            let top = tops[cell.row]?;
+            let bottom = top
+                + self.row_heights[cell.row..cell.row + cell.row_span]
+                    .iter()
+                    .sum::<f32>();
+            Some(egui::Rect::from_min_max(
+                egui::pos2(x_offsets[cell.column], top),
+                egui::pos2(x_offsets[cell.column + cell.column_span], bottom),
+            ))
+        };
+
+        let mut marked = Vec::with_capacity(rows.len());
+        for &row in rows {
+            let Some(top) = tops[row] else {
+                continue;
+            };
+            let row_rect = egui::Rect::from_min_max(
+                egui::pos2(origin.x, top),
+                egui::pos2(origin.x + self.width(), top + self.row_heights[row]),
+            );
+            // 表格一行就是纸面上的一行，哪怕某个单元格里的字折了两行：看稿的人指的
+            // 是「表里第几行」，页边的号必须跟着表行走，不能跟着单元格里的折行走。
+            // 与下方 `painter.galley` 的 top 同算法，按字形框取中，号才贴字。
+            let baseline = self
+                .cells
+                .iter()
+                .filter(|cell| cell.row == row)
+                .find_map(|cell| {
+                    let rect = cell_rect(cell)?;
+                    let top = rect.center().y - galley_visual_midline(&cell.galley);
+                    cell.galley
+                        .rows
+                        .first()
+                        .map(|placed| gutter::row_baseline(placed, top + placed.pos.y))
+                })
+                .unwrap_or(row_rect.center().y);
+            marked.push((row, row_rect, baseline));
+        }
+
+        for cell in &self.cells {
+            let Some(rect) = cell_rect(cell) else {
+                continue;
+            };
+            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+            let anchor = match cell.align {
+                ColumnAlignment::Center => rect.center().x,
+                ColumnAlignment::Right => rect.right() - cell.padding,
+                ColumnAlignment::Left => rect.left() + cell.padding,
+            };
+            // 按字形框居中，不用 galley 几何居中：行距 21 磅比字高多出来的余量整块
+            // 留在字下方，几何居中字会贴着上沿偏上半格。
+            let top = rect.center().y - galley_visual_midline(&cell.galley);
+            painter.galley(
+                egui::pos2(anchor, top),
+                cell.galley.clone(),
+                theme::paper::ink(),
+            );
+        }
+        marked
+    }
+}
+
+/// 连续版式里的表格：整张占满版心宽度，一次画完。
+pub(crate) fn table_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    rows: &[Vec<String>],
+    aligns: &[export::ColumnAlign],
+    spans: &[export::TableSpan],
+    numbered: bool,
+) {
+    let Some(table) = measure_table(ui, metrics, rows, aligns, spans, numbered, metrics.content)
+    else {
+        return;
+    };
+    let total_height = table.row_heights.iter().sum::<f32>();
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(metrics.content, total_height),
         egui::Sense::hover(),
     );
-    let mut x_offsets = vec![rect.left()];
-    for width in &widths {
-        x_offsets.push(x_offsets.last().copied().unwrap_or(rect.left()) + width);
-    }
-    let mut y_offsets = vec![rect.top()];
-    for height in &row_heights {
-        y_offsets.push(y_offsets.last().copied().unwrap_or(rect.top()) + height);
-    }
-
-    for row_index in 0..rows.len() {
-        let row_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), y_offsets[row_index]),
-            egui::pos2(rect.right(), y_offsets[row_index + 1]),
-        );
-        // 表格一行就是纸面上的一行，哪怕某个单元格里的字折了两行：看稿的人指的
-        // 是「表里第几行」，页边的号必须跟着表行走，不能跟着单元格里的折行走。
-        // 与下方 `painter.galley` 的 top 同算法，按字形框取中，号才贴字。
-        let baseline = cells
-            .iter()
-            .filter(|cell| cell.row == row_index)
-            .find_map(|cell| {
-                let cell_rect = egui::Rect::from_min_max(
-                    egui::pos2(x_offsets[cell.column], y_offsets[cell.row]),
-                    egui::pos2(
-                        x_offsets[cell.column + cell.column_span],
-                        y_offsets[cell.row + cell.row_span],
-                    ),
-                );
-                let top = cell_rect.center().y - galley_visual_midline(&cell.galley);
-                cell.galley
-                    .rows
-                    .first()
-                    .map(|row| gutter::row_baseline(row, top + row.pos.y))
-            })
-            .unwrap_or(row_rect.center().y);
+    let all_rows = (0..table.row_heights.len()).collect::<Vec<_>>();
+    for (_, row_rect, baseline) in table.paint_rows(ui.painter(), metrics, rect.min, &all_rows) {
         metrics.mark_sourced_row(row_rect, baseline);
-    }
-
-    let painter = ui.painter();
-    for cell in cells {
-        let cell_rect = egui::Rect::from_min_max(
-            egui::pos2(x_offsets[cell.column], y_offsets[cell.row]),
-            egui::pos2(
-                x_offsets[cell.column + cell.column_span],
-                y_offsets[cell.row + cell.row_span],
-            ),
-        );
-        painter.rect_stroke(cell_rect, 0.0, stroke, egui::StrokeKind::Inside);
-        let anchor = match cell.align {
-            ColumnAlignment::Center => cell_rect.center().x,
-            ColumnAlignment::Right => cell_rect.right() - cell.padding,
-            ColumnAlignment::Left => cell_rect.left() + cell.padding,
-        };
-        // 按字形框居中，不用 galley 几何居中：行距 21 磅比字高多出来的余量整块
-        // 留在字下方，几何居中字会贴着上沿偏上半格。
-        let top = cell_rect.center().y - galley_visual_midline(&cell.galley);
-        painter.galley(egui::pos2(anchor, top), cell.galley, theme::paper::ink());
     }
 }
 

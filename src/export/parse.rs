@@ -305,7 +305,7 @@ pub(crate) fn parse_markdown_located_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Vec<LocatedBlock> {
-    parse_located(markdown, numbering, None, true)
+    parse_located(markdown, numbering, None)
 }
 
 /// 研究报告预览专用：切块之前先把每行里的 `{#id}`、`{@id}`、`[@key]` 换成纸面
@@ -314,13 +314,14 @@ pub(crate) fn parse_markdown_located_with_numbering(
 /// 替换发生在切块之前而不是之后，块的源码范围仍按原文的行长算：这样点击版面
 /// 回跳、页边行号这些都还落在没动过的源码上，而排版拿到的已经是纸面文字。
 ///
-/// 序号表在这里**不生效**：研究报告的成品由 mdx 转换，那边不认整行合并，预览
-/// 认了就会跟纸面对不上。标记行照旧按注释跳过，不影响别的排版。
+/// 序号表照常生效，分组编号跟设置走：导出前 `research::markdown_with_frontmatter`
+/// 用同一套解析把编号写进交给 mdx 的源码，mdx 再按合并单元格排，预览与纸面一致。
 pub(crate) fn parse_markdown_located_research(
     markdown: &str,
     marks: &ResearchMarks,
+    numbering: &NumberingConfig,
 ) -> Vec<LocatedBlock> {
-    parse_located(markdown, &NumberingConfig::default(), Some(marks), false)
+    parse_located(markdown, numbering, Some(marks))
 }
 
 /// 源码里的一行：`len` 始终是原文的字节数，`text` 才可能被行内标记替换过。
@@ -348,7 +349,6 @@ fn parse_located(
     markdown: &str,
     numbering: &NumberingConfig,
     marks: Option<&ResearchMarks>,
-    numbered_tables: bool,
 ) -> Vec<LocatedBlock> {
     let mut blocks: Vec<LocatedBlock> = Vec::new();
     let mut paragraph: Vec<ParagraphPart> = Vec::new();
@@ -425,7 +425,7 @@ fn parse_located(
                 source_segments: Vec::new(),
             });
             in_html_block = true;
-        } else if numbered_tables && parse_numbered_table_marker(line) {
+        } else if parse_numbered_table_marker(line) {
             // 序号表的标记行：记下行号留给紧邻的表格，本身照旧按 Html 处理——
             // 各版式对 Html 都是跳过，纸面上不会多出一行字。
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);

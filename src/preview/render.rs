@@ -226,6 +226,7 @@ pub(crate) fn official_preview(
             scale,
             anchor,
             scroll_to_anchor,
+            numbering,
             line_numbers,
         );
     }

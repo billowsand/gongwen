@@ -914,6 +914,75 @@ mod tests {
         });
     }
 
+    /// 红头呈批件里的序号表按真表格排：不进首页窄栏，编号与分组行的整行合并
+    /// 都在；一页放不下就在行间断开，续页先重复表头，每段都不越过版心下沿。
+    #[test]
+    fn red_print_preview_lays_out_numbered_tables_as_tables_across_pages() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        let input = draft(TemplateKind::RedHeadApproval);
+        let mut markdown = String::from(
+            "# 关于报送工作情况的请示\n\n正文一段。\n\n<!-- [序号表] -->\n| 序号 | 事项 | 责任单位 |\n| --- | --- | --- |\n| 重点工作 |  |  |\n",
+        );
+        for index in 0..40 {
+            markdown.push_str(&format!("|  | 第{index}项工作任务 | 办公室 |\n"));
+        }
+        let numbering = crate::models::NumberingConfig::default();
+        let located = export::parse_markdown_located_with_numbering(&markdown, &numbering);
+        let body = located.iter().collect::<Vec<_>>();
+        let title = ("关于报送工作情况的请示".to_string(), 0..0);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let (layout, _) = red_build_print_layout(
+                ui,
+                &metrics,
+                &input,
+                &display,
+                &body,
+                &title,
+                &[],
+                &numbering,
+                &markdown,
+            );
+            assert!(layout.pages[0].tables.is_empty(), "表格不进首页批示窄栏");
+            assert!(
+                layout.pages[0].fragments.iter().all(|fragment| {
+                    !fragment.galley.text().contains('│')
+                        && !fragment.galley.text().contains("序号")
+                }),
+                "表格不能再压成一行文字"
+            );
+            let slices = layout
+                .pages
+                .iter()
+                .flat_map(|page| &page.tables)
+                .collect::<Vec<_>>();
+            assert!(slices.len() >= 2, "42 行的表一页放不下，要跨页");
+            assert!(
+                slices.iter().all(|slice| slice.rows[0] == 0),
+                "每段都以表头打头"
+            );
+            let body_rows = slices
+                .iter()
+                .flat_map(|slice| slice.rows[1..].iter().copied())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                body_rows,
+                (1..=41).collect::<Vec<_>>(),
+                "表体每行恰好出现一次"
+            );
+            let page_bottom = metrics.mm(37.0 + 225.0);
+            assert!(
+                slices
+                    .iter()
+                    .all(|slice| slice.bottom() <= page_bottom + 0.5),
+                "表格越过了版心下沿"
+            );
+        });
+    }
+
     /// 正文两端对齐：除末行外每一行都撑满版心，且首行缩进不能被吃掉。
     ///
     /// egui 自带的 `LayoutJob::justify` 正是在这两点上失手，所以逐行补字距那套

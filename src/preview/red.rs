@@ -7,6 +7,7 @@ use crate::export;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
 use crate::preview::gutter;
+use crate::preview::layout::{MeasuredTable, measure_table};
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
     clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
@@ -59,6 +60,31 @@ impl RedPrintFragment {
 #[derive(Default)]
 pub(crate) struct RedPrintPage {
     pub(crate) fragments: Vec<RedPrintFragment>,
+    pub(crate) tables: Vec<RedTableSlice>,
+}
+
+/// 落在某一页上的一段表格：同一张表可以跨页，续页上表头重复一遍，与 TeX 的
+/// longtblr（`rowhead = 1`）一致。
+pub(crate) struct RedTableSlice {
+    table: Arc<MeasuredTable>,
+    /// 这一段画哪几行（续页以表头 0 打头），自上而下紧挨着排。
+    pub(crate) rows: Vec<usize>,
+    /// 每一行对应的那一行 Markdown 源码，点击回跳与页边行号都认它。
+    sources: Arc<Vec<Range<usize>>>,
+    x: f32,
+    pub(crate) y: f32,
+}
+
+impl RedTableSlice {
+    #[cfg(test)]
+    pub(crate) fn bottom(&self) -> f32 {
+        self.y
+            + self
+                .rows
+                .iter()
+                .map(|row| self.table.row_heights[*row])
+                .sum::<f32>()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -345,6 +371,102 @@ fn red_place_styled_flow_text(
     }
 }
 
+/// 表格按真表格排进呈批件的续页：与 TeX 一致不进首页批示窄栏，占 156mm 版心。
+/// 一页放不下就在行与行之间断开，续页先重复表头；纵向合并的几行不拆开，
+/// 表头也不单独留在页底。
+#[allow(clippy::too_many_arguments)]
+fn red_place_table(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    state: &mut RedPrintLayout,
+    markdown: &str,
+    range: Range<usize>,
+    rows: &[Vec<String>],
+    aligns: &[export::ColumnAlign],
+    spans: &[export::TableSpan],
+    numbered: bool,
+) {
+    if state.page_index == 0 {
+        state.next_page(metrics);
+    }
+    let Some(table) = measure_table(
+        ui,
+        metrics,
+        rows,
+        aligns,
+        spans,
+        numbered,
+        state.body_width(metrics),
+    ) else {
+        return;
+    };
+    let table = Arc::new(table);
+    let sources = Arc::new(table_row_sources(markdown, &range, rows.len()));
+    let heights = &table.row_heights;
+    let height_of = |from: usize, to: usize| heights[from..to].iter().sum::<f32>();
+    let page_top = metrics.mm(37.0);
+
+    let mut next = 1usize;
+    loop {
+        // 表头连同紧跟的第一段放不下、这一页又不是从头排的，整张挪到下一页。
+        let first_end = if next < heights.len() {
+            table.unbreakable_end(next)
+        } else {
+            next
+        };
+        if state.cursor_y + heights[0] + height_of(next, first_end) > state.body_bottom(metrics)
+            && state.cursor_y > page_top + 0.5
+        {
+            state.next_page(metrics);
+        }
+        let mut slice_rows = vec![0];
+        let mut height = heights[0];
+        while next < heights.len() {
+            let end = table.unbreakable_end(next);
+            let group = height_of(next, end);
+            // 每页至少放一段，哪怕它比整页还高，免得死循环。
+            if slice_rows.len() > 1 && state.cursor_y + height + group > state.body_bottom(metrics)
+            {
+                break;
+            }
+            slice_rows.extend(next..end);
+            height += group;
+            next = end;
+        }
+        let slice = RedTableSlice {
+            table: table.clone(),
+            rows: slice_rows,
+            sources: sources.clone(),
+            x: state.body_left(metrics),
+            y: state.cursor_y,
+        };
+        let page = state.page_index;
+        state.pages[page].tables.push(slice);
+        state.cursor_y += height;
+        if next >= heights.len() {
+            break;
+        }
+        state.next_page(metrics);
+    }
+}
+
+/// 表格第 `row` 行对应的那一行源码：表头是第 0 行，分隔行不算，其后一行一行对应。
+fn table_row_sources(markdown: &str, range: &Range<usize>, row_count: usize) -> Vec<Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start = range.start;
+    for line in markdown[range.clone()].split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        lines.push(start..start + content.len());
+        start += line.len();
+    }
+    (0..row_count)
+        .map(|row| {
+            let line = if row == 0 { 0 } else { row + 1 };
+            lines.get(line).cloned().unwrap_or_else(|| range.clone())
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn red_fixed_fragment(
     ui: &egui::Ui,
@@ -557,33 +679,22 @@ pub(crate) fn red_build_print_layout(
                     false,
                 );
             }
-            MarkdownBlock::Table { rows, .. } => {
-                // 表格和图片与 TeX 一致，不进入首页批示窄栏。
-                if state.page_index == 0 {
-                    state.next_page(metrics);
-                }
-                let text = rows
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|cell| export::plain_text(cell))
-                            .collect::<Vec<_>>()
-                            .join("　│　")
-                    })
-                    .collect::<Vec<_>>()
-                    .join("；");
-                red_place_flow_text(
+            MarkdownBlock::Table {
+                rows,
+                aligns,
+                spans,
+                numbered,
+            } => {
+                red_place_table(
                     ui,
                     metrics,
                     &mut state,
+                    markdown,
                     located.range.clone(),
-                    vec![export::InlineSegment {
-                        text,
-                        bold: false,
-                        parenthesized: false,
-                    }],
-                    RedTextStyle::Body,
-                    false,
+                    rows,
+                    aligns,
+                    spans,
+                    *numbered,
                 );
             }
             MarkdownBlock::Image { alt, .. } => {
@@ -1118,6 +1229,55 @@ pub(crate) fn paint_red_print_pages(
                             anchor_pos + placed.pos.to_vec2(),
                             row.clone(),
                             theme::paper::ink(),
+                        );
+                    }
+                }
+            }
+
+            for (slice_index, slice) in page_layout.tables.iter().enumerate() {
+                // 底色压在表格线和字下面：先占位，量出各行的框再回填。
+                let backdrops = slice
+                    .rows
+                    .iter()
+                    .map(|_| ui.painter().add(egui::Shape::Noop))
+                    .collect::<Vec<_>>();
+                let origin = page.min + egui::vec2(slice.x, slice.y);
+                let placed = slice
+                    .table
+                    .paint_rows(ui.painter(), metrics, origin, &slice.rows);
+                for ((row, row_rect, baseline), backdrop) in placed.into_iter().zip(backdrops) {
+                    let source = slice.sources[row].clone();
+                    metrics.mark_row(row_rect, baseline, Some(source.clone()));
+                    let response = ui.interact(
+                        row_rect,
+                        egui::Id::new(("red-print-table-row", page_index, slice_index, row)),
+                        egui::Sense::click(),
+                    );
+                    if response.clicked() {
+                        *clicked = Some(source.clone());
+                    }
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let anchored = anchor.is_some_and(|anchor| {
+                        !anchor.is_empty() && anchor.start < source.end && source.start < anchor.end
+                    });
+                    if anchored && *scroll_to_anchor {
+                        scroll_preview_to_rect(ui, row_rect);
+                        *scroll_to_anchor = false;
+                    }
+                    if anchored || response.hovered() {
+                        ui.painter().set(
+                            backdrop,
+                            egui::epaint::RectShape::filled(
+                                row_rect,
+                                egui::CornerRadius::ZERO,
+                                if anchored {
+                                    theme::accent_soft()
+                                } else {
+                                    theme::paper::hover_tint()
+                                },
+                            ),
                         );
                     }
                 }

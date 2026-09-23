@@ -621,6 +621,59 @@ mod tests {
         assert!(outcome.pdf.is_some_and(|path| path.is_file()));
     }
 
+    /// 研究报告的序号表与合并单元格：编号写进交给 mdx 的源码，分组行整行合并、
+    /// `^^` 纵向合并都要落成 `\SetCell`，并由随包 Tectonic（tabularray 2022A）
+    /// 编译通过；标记行不许原样印出来。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime"]
+    fn compiles_research_report_with_numbered_and_merged_tables() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "序号表研究报告测试".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "<!-- [正文] -->\n\n## 任务分工\n\n表：年度任务分工\n<!-- [序号表] -->\n| 序号 | 事项 | 责任单位 |\n| --- | --- | --- |\n| 重点工作 |  |  |\n|  | 完成年度计划编制 | 办公室 |\n|  | 推进标准化建设 | 财务处 |\n|  | ^^ | 审计处 |\n| 保障措施 |  |  |\n|  | 加强督查考核 | 督查室 |\n\n表：区域指标\n| 地区 | 指标 | 数值 |\n| --- | --- | --- |\n| 华东 | 产量 | 12 |\n| ^^ | 销量 | 10 |\n| 合计 || 22 |",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let dir = tex.parent().unwrap();
+        let mut tex_source = std::fs::read_to_string(tex).unwrap();
+        for entry in std::fs::read_dir(dir.join("data")).unwrap() {
+            tex_source.push_str(&std::fs::read_to_string(entry.unwrap().path()).unwrap());
+        }
+        assert!(
+            !tex_source.contains("序号表]"),
+            "标记行不许印出来：{tex_source}"
+        );
+        assert!(
+            tex_source.contains(r"\SetCell[c=3]{l}") && tex_source.contains("（一）重点工作"),
+            "分组行要整行合并、靠左、带分组编号：{tex_source}"
+        );
+        assert!(
+            tex_source.contains(r"\SetCell[r=2]{") && tex_source.contains(r"\SetCell[c=2]{"),
+            "手写的纵横合并都要落成 \\SetCell：{tex_source}"
+        );
+        let outcome = compile_research_pdf(tex).unwrap();
+        assert!(outcome.pdf.is_some_and(|path| path.is_file()));
+    }
+
     /// 研究报告同样不许丢字：标题走方正小标宋，那支字体只有 GB2312 字库，
     /// 「喆」「赟」全靠 `md2tex.cls` 里的后备字体接住。
     #[test]

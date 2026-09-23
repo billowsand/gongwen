@@ -178,7 +178,7 @@ pub(crate) fn write_tex_for_kind(
     numbering: &NumberingConfig,
 ) -> Result<()> {
     if input.kind.is_research() {
-        research::write_tex(path, input, markdown)
+        research::write_tex(path, input, markdown, numbering)
     } else {
         latex::write_tex_with_numbering(path, input, markdown, display, fonts, numbering)
     }
@@ -194,6 +194,7 @@ fn write_markdown_archive(
     input: &DraftInput,
     markdown: &str,
     stem: &str,
+    numbering: &NumberingConfig,
 ) -> Result<()> {
     let bibliography = input
         .kind
@@ -201,7 +202,7 @@ fn write_markdown_archive(
         .then(|| input.research.bibliography_content.trim())
         .filter(|content| !content.is_empty());
     let document = if input.kind.is_research() {
-        research::markdown_source(input, markdown, bibliography.is_some())
+        research::markdown_source(input, markdown, bibliography.is_some(), numbering)
     } else {
         markdown.to_string()
     };
@@ -294,13 +295,13 @@ pub fn export_all_with_numbering(
 
     if selection.markdown {
         let path = document_dir.join(format!("{export_stem}-源码包.zip"));
-        write_markdown_archive(&path, input, markdown, export_stem.as_str())?;
+        write_markdown_archive(&path, input, markdown, export_stem.as_str(), numbering)?;
         files.push(path);
     }
     if selection.docx {
         let path = document_dir.join(format!("{export_stem}.docx"));
         if input.kind.is_research() {
-            research::write_docx(&path, input, markdown)?;
+            research::write_docx(&path, input, markdown, numbering)?;
         } else {
             docx::write_docx_with_numbering(&path, input, markdown, display, fonts, numbering)?;
         }
@@ -1042,17 +1043,22 @@ mod tests {
         assert!(spans.iter().all(|span| span.column_span == 4));
     }
 
-    /// 研究报告走 mdx，那边不认序号表：预览也不认，免得跟纸面对不上。
+    /// 研究报告的序号表与公文同一套规矩：首列编号、分组行整行合并，分组编号
+    /// 跟设置走。mdx 那边拿到的是 `research::markdown_with_frontmatter` 按这份
+    /// 结果写好的源码，预览因此与纸面一致。
     #[test]
-    fn research_parse_leaves_numbered_tables_alone() {
-        let markdown = "\
-<!-- [序号表] -->
+    fn research_parse_numbers_numbered_tables_like_official_ones() {
+        let markdown = "<!-- [序号表] -->
 | 序号 | 标题 | 内容 |
 | --- | --- | --- |
 | 大标题一 |  |  |
 |  | 内容1 |  |";
         let marks = crate::export::crossref::ResearchMarks::default();
-        let blocks = parse_markdown_located_research(markdown, &marks);
+        let numbering = NumberingConfig {
+            table_group: crate::models::HeadingNumbering::Chinese,
+            ..NumberingConfig::default()
+        };
+        let blocks = parse_markdown_located_research(markdown, &marks, &numbering);
         let MarkdownBlock::Table {
             rows,
             spans,
@@ -1062,9 +1068,11 @@ mod tests {
         else {
             panic!("应当解析为表格：{blocks:?}");
         };
-        assert!(!numbered);
-        assert_eq!(rows[1][0], "大标题一", "不生成分组编号");
-        assert!(spans.is_empty(), "不自动合并：{spans:?}");
+        assert!(numbered);
+        assert_eq!(rows[1][0], "一、大标题一", "分组编号跟设置走");
+        assert_eq!(rows[2][0], "1");
+        assert_eq!(spans.len(), 1, "分组行整行合并：{spans:?}");
+        assert_eq!(spans[0].column_span, 3);
     }
 
     /// 没有标记行的同款表格行为与从前逐字一致。
