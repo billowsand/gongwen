@@ -85,6 +85,11 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 
 - 提交信息用中文 Conventional Commits：`feat:` / `fix:` / `test:` / `docs:` /
   `refactor:` / `style:` / `chore: release vX.Y.Z`。
+- **本地 post-commit 钩子**（`scripts/git-hooks/post-commit`，首次使用跑
+  `scripts/install-git-hooks.sh`）每次 commit 后自动跑
+  `cargo build --release --locked`，保证 `target/release/` 始终是最新二进制；
+  Linux 主机自动加 `--no-default-features --features linux-portal-dialogs`。
+  失败仅打印告警、不阻塞提交。
 - 许可证是 **GPL-3.0-or-later**：因为链接了 GPL 的输入法内核（`vendor/qingjian/`），
   整个程序都按 GPL 分发。改许可证相关的东西要同步 `LICENSE`、`Cargo.toml` 的 `license`、
   `README.md` 许可节、`THIRD_PARTY_NOTICES.md` 四处。

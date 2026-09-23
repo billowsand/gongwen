@@ -15,6 +15,9 @@ Cargo.lock text eol=lf
 *.txt text eol=lf
 *.py text eol=lf
 *.ps1 text eol=crlf
+.git-hooks/* text eol=lf
+git-hooks/* text eol=lf
+scripts/git-hooks/* text eol=lf
 
 *.png binary
 *.ico binary

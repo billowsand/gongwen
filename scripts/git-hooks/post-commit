@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# 每次 git commit 之后跑一次 cargo build --release --locked，保证本机
+# target/release/ 里始终有最新可运行的二进制。失败只打印告警——
+# post-commit 时 commit 已经落地，无法回滚，也不要让钩子错误干扰后续
+# 终端命令链（例如编辑器内自动 push）。
+#
+# 启用方法：scripts/install-git-hooks.sh，会把 core.hooksPath 指向本目录。
+
+set -u
+
+# 仓库根：git 会在 commit 时把 GIT_DIR 设为 .git/，所以回溯到上一级。
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT" || exit 0
+
+# 没装 cargo 的机器直接跳过——这是开发体验钩子，不是闸门。
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "post-commit: cargo 未在 PATH 中，跳过 release 构建。" >&2
+    exit 0
+fi
+
+# Linux 变体（Arch/Omarchy）会带 --no-default-features --features linux-portal-dialogs，
+# 与 package-portable.ps1 在非 Windows 主机的做法保持一致（参见 AGENTS.md）。
+CARGO_FEATURES=()
+if [[ "$(uname -s 2>/dev/null)" == "Linux" ]]; then
+    CARGO_FEATURES+=(--no-default-features --features linux-portal-dialogs)
+fi
+
+echo "post-commit: cargo build --release --locked ..."
+if cargo build --release --locked "${CARGO_FEATURES[@]}"; then
+    echo "post-commit: release 构建完成（target/release/gongwen-assistant[.exe]）。"
+    exit 0
+fi
+
+cat >&2 <<'EOF'
+post-commit: release 构建失败。
+  commit 已经保留。常见原因：
+    - 新依赖尚未写入 Cargo.lock：跑一次 cargo check --all-targets 让 lock 文件收敛；
+    - fmt / clippy 未过：cargo fmt --all 后 cargo clippy --locked --all-targets -- -D warnings。
+EOF
+exit 0
