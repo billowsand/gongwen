@@ -23,9 +23,9 @@
 //! "最终版式以 TeX 编译 PDF 为准"说的就是这件事。
 
 use super::layout::{
-    TextRun, clickable, is_renderable_paragraph, line_block, line_block_runs, sheet,
+    TextRun, clickable, clickable_rows, is_renderable_paragraph, line_block, line_block_runs, sheet,
 };
-use super::render::{PreviewOutput, content_block, image_block};
+use super::render::{PreviewOutput, clickable_content_block, image_block};
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
     RESEARCH_CHAPTER_PT, RESEARCH_COVER_PT, RESEARCH_COVER_TITLE_PT, RESEARCH_COVER_TYPE_PT,
@@ -580,6 +580,7 @@ pub(crate) fn research_preview(
             body_item(
                 ui,
                 &metrics,
+                markdown,
                 located,
                 kind,
                 anchor,
@@ -695,6 +696,7 @@ fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, markdow
 fn body_item(
     ui: &mut egui::Ui,
     metrics: &Metrics,
+    markdown: &str,
     located: &LocatedBlock,
     kind: Kind<'_>,
     anchor: Option<&Range<usize>>,
@@ -708,7 +710,7 @@ fn body_item(
         // 可点击块——点它没有可回跳的地方。
         Kind::AbstractOpen => chapter_title(ui, metrics, "摘要"),
         Kind::Chapter { heading, text, .. } => {
-            clickable(
+            clickable_rows(
                 ui,
                 metrics,
                 &source,
@@ -719,7 +721,7 @@ fn body_item(
             );
         }
         Kind::ChapterStar(text) => {
-            clickable(
+            clickable_rows(
                 ui,
                 metrics,
                 &source,
@@ -732,7 +734,7 @@ fn body_item(
         // 报告题名不落在正文纸上：它已经印在封面（`cover_sheet`）里了。
         Kind::ReportTitle(_) => {}
         Kind::Section { number, text } => {
-            clickable(
+            clickable_rows(
                 ui,
                 metrics,
                 &source,
@@ -743,7 +745,7 @@ fn body_item(
             );
         }
         Kind::SectionStar(text) => {
-            clickable(
+            clickable_rows(
                 ui,
                 metrics,
                 &source,
@@ -755,7 +757,7 @@ fn body_item(
         }
         // mdx 把摘要里的标题排成一段加粗正文，不成标题。
         Kind::AbstractHeading(text) => {
-            clickable(
+            clickable_rows(
                 ui,
                 metrics,
                 &source,
@@ -811,7 +813,7 @@ fn body_item(
             // 表题排在表上方：longtblr 的 caption 就在表头之前，标签黑体小四、
             // 题名宋体小四（md2tex.cls 的 caption-tag / caption-text）。
             if let Some(caption) = &caption {
-                clickable(
+                clickable_rows(
                     ui,
                     metrics,
                     &caption.source,
@@ -839,55 +841,75 @@ fn body_item(
                     },
                 );
             }
-            plain(ui, metrics, located, anchor, scroll_to_anchor, clicked);
+            plain(
+                ui,
+                metrics,
+                markdown,
+                located,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+            );
         }
-        Kind::Plain => plain(ui, metrics, located, anchor, scroll_to_anchor, clicked),
+        Kind::Plain => plain(
+            ui,
+            metrics,
+            markdown,
+            located,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+        ),
     }
 }
 
 /// 段落、表格、列表都按共用部件画：字面与字号已经跟着 Metrics 走，这里拿到的
 /// 就是研究报告的版式。标题在上面单独处理，走不到 content_block 里那套公文编号。
 ///
+/// 高亮与公文一致：段落、列表按行贴着文字亮（`clickable_content_block`），
+/// 表格等整块图形按块矩形亮。
+///
 /// 含 `$` 的段落是例外：`$$...$$` 独占一段居中，`$...$` 与文字混排，都交给
-/// `math_flow`；不含 `$` 的段落保持原路径不动。
+/// `math_flow`，同样按行高亮（`clickable_rows`）；不含 `$` 的段落保持原路径不动。
 fn plain(
     ui: &mut egui::Ui,
     metrics: &Metrics,
+    markdown: &str,
     located: &LocatedBlock,
     anchor: Option<&Range<usize>>,
     scroll_to_anchor: &mut bool,
     clicked: &mut Option<Range<usize>>,
 ) {
+    if let MarkdownBlock::Paragraph(text) = &located.block
+        && is_renderable_paragraph(text)
+        && text.contains('$')
+    {
+        clickable_rows(
+            ui,
+            metrics,
+            &located.range,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+            |ui| match math_flow::block_source(text.trim()) {
+                Some(src) => math_flow::display_block(ui, metrics, src),
+                None => math_flow::paragraph(ui, metrics, text),
+            },
+        );
+        return;
+    }
     let mut counters = [0usize; 4];
-    clickable(
+    clickable_content_block(
         ui,
         metrics,
-        &located.range,
+        located,
+        markdown,
+        &mut counters,
+        false,
+        &NumberingConfig::default(),
         anchor,
         scroll_to_anchor,
         clicked,
-        |ui| {
-            if let MarkdownBlock::Paragraph(text) = &located.block
-                && is_renderable_paragraph(text)
-            {
-                if let Some(src) = math_flow::block_source(text.trim()) {
-                    math_flow::display_block(ui, metrics, src);
-                    return;
-                }
-                if text.contains('$') {
-                    math_flow::paragraph(ui, metrics, text);
-                    return;
-                }
-            }
-            content_block(
-                ui,
-                metrics,
-                &located.block,
-                &mut counters,
-                false,
-                &NumberingConfig::default(),
-            );
-        },
     );
 }
 

@@ -496,19 +496,46 @@ pub(crate) fn line_block_runs(
         let height = galley.size().y;
         let rows = row_spans(&galley);
         place(ui, metrics, height, |painter, rect| {
-            painter.galley(
-                egui::pos2(rect.left() + metrics.content / 2.0, rect.top()),
-                galley,
-                theme::paper::ink(),
-            );
+            let origin = egui::pos2(rect.left() + metrics.content / 2.0, rect.top());
+            push_galley_tints(metrics, &galley, origin);
+            painter.galley(origin, galley, theme::paper::ink());
             mark_gutter_rows(metrics, rect, &rows);
         });
     } else {
         let galley = layout(ui, job);
         let rows = row_spans(&galley);
+        let tints = galley.clone();
         let rect = ui.add(egui::Label::new(galley)).rect;
+        push_galley_tints(metrics, &tints, rect.left_top());
         mark_gutter_rows(metrics, rect, &rows);
     }
+}
+
+/// 把一段 galley 每一行的底色矩形交给 [`Metrics::push_tint`]：横向从第一个有墨的字
+/// 起到行尾最后一个字止（行首缩进的空白不压底色），纵向按 [`row_tint_offset`]
+/// 让字坐在色块正中——与公文正文 `clickable_justified_job` 同一口径。
+pub(crate) fn push_galley_tints(metrics: &Metrics, galley: &egui::Galley, origin: egui::Pos2) {
+    for row in &galley.rows {
+        let Some(ink) = first_ink(&row.glyphs, 0..row.glyphs.len()) else {
+            continue;
+        };
+        let Some(last) = row.glyphs.last() else {
+            continue;
+        };
+        let left = origin.x + row.pos.x + row.glyphs[ink].pos.x;
+        let right = origin.x + row.pos.x + last.max_x();
+        let top = origin.y + row.pos.y + row_tint_offset(row);
+        metrics.push_tint(tint_rect(left, right, top, row.size.y));
+    }
+}
+
+/// 一行底色的矩形：左右各外扩 3、上下各 1，与公文正文的行底色一致。
+pub(crate) fn tint_rect(left: f32, right: f32, top: f32, height: f32) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(left, top),
+        egui::pos2(right.max(left + 1.0), top + height),
+    )
+    .expand2(egui::vec2(3.0, 1.0))
 }
 
 /// 一段文字里每一行相对段首的上沿、行高与基线。
@@ -1048,6 +1075,76 @@ pub(crate) fn clickable(
     );
 }
 
+/// 同 [`clickable`]，但底色按行贴着文字画：块里的部件画字时经
+/// [`Metrics::push_tint`] 交上每一行的底色矩形，悬停只亮鼠标下那一行，
+/// 命中时整块逐行亮起，行首缩进不压底色——与公文正文的高亮观感一致。
+/// 块里一行都没交（图片之类）时退回整块矩形。
+pub(crate) fn clickable_rows(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    range: &Range<usize>,
+    anchor: Option<&Range<usize>>,
+    scroll_to_anchor: &mut bool,
+    clicked: &mut Option<Range<usize>>,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let backdrop = ui.painter().add(egui::Shape::Noop);
+    metrics.enter_source(Some(range.clone()));
+    metrics.begin_tints();
+    let inner = ui.scope(add_contents).response.rect;
+    let tints = metrics.take_tints();
+    metrics.enter_source(None);
+    if !inner.is_positive() {
+        return;
+    }
+    let tints = if tints.is_empty() {
+        vec![inner.expand2(egui::vec2(4.0, 1.0))]
+    } else {
+        tints
+    };
+    let anchored = anchor.is_some_and(|anchor| {
+        !anchor.is_empty()
+            && !range.is_empty()
+            && anchor.start < range.end
+            && range.start < anchor.end
+    });
+    if anchored && *scroll_to_anchor {
+        let whole = tints
+            .iter()
+            .skip(1)
+            .fold(tints[0], |whole, rect| whole.union(*rect));
+        scroll_preview_to_rect(ui, whole);
+        *scroll_to_anchor = false;
+    }
+    let mut shapes = Vec::new();
+    for (index, rect) in tints.iter().enumerate() {
+        let response = ui.interact(
+            *rect,
+            egui::Id::new(("gw-preview-row", range.start, range.end, index)),
+            egui::Sense::click(),
+        );
+        if response.clicked() {
+            *clicked = Some(range.clone());
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let fill = if anchored {
+            theme::accent_soft()
+        } else if response.hovered() {
+            theme::paper::hover_tint()
+        } else {
+            continue;
+        };
+        shapes.push(egui::Shape::from(egui::epaint::RectShape::filled(
+            *rect,
+            egui::CornerRadius::same(3),
+            fill,
+        )));
+    }
+    ui.painter().set(backdrop, egui::Shape::Vec(shapes));
+}
+
 /// 把目标放在可视区中部略偏上（约 40% 高度），给下方正文留下更多阅读空间。
 pub(crate) fn scroll_preview_to_rect(ui: &mut egui::Ui, rect: egui::Rect) {
     let offset = ui.clip_rect().height() * 0.1;
@@ -1107,6 +1204,49 @@ pub(crate) fn sheet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 研究报告按行高亮：带首行缩进的单行，底色从第一个实字起笔、不压缩进，
+    /// 且字形框在底色里垂直居中（上下余量相差不过 1px）。
+    #[test]
+    fn row_tints_skip_indent_and_center_the_glyphs() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let metrics = Metrics::research(1000.0, Some(1.0));
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let text = format!(
+                "{}现在的任务就是很好的达到了所需要的效果",
+                indent(INDENT_CHARS)
+            );
+            let mut probe = job(metrics.content);
+            probe.append(&text, 0.0, text_format(metrics.body_font(), metrics.line));
+            let galley = layout(ui, probe);
+            let row = &galley.rows[0];
+            let glyph = row.glyphs.iter().find(|g| !g.chr.is_whitespace()).unwrap();
+            let origin = egui::pos2(10.0, 20.0);
+
+            metrics.begin_tints();
+            push_galley_tints(&metrics, &galley, origin);
+            let tints = metrics.take_tints();
+            assert_eq!(tints.len(), 1);
+            let tint = tints[0];
+
+            let ink_left = origin.x + row.pos.x + glyph.pos.x;
+            assert!(
+                (tint.left() - (ink_left - 3.0)).abs() < 0.5,
+                "底色应从第一个实字起笔：{} vs {}",
+                tint.left(),
+                ink_left
+            );
+            let glyph_top = origin.y + row.pos.y + glyph.pos.y - glyph.font_ascent;
+            let glyph_bottom = glyph_top + glyph.font_height;
+            let above = glyph_top - tint.top();
+            let below = tint.bottom() - glyph_bottom;
+            assert!(
+                (above - below).abs() < 1.0,
+                "字形应在底色里垂直居中：上 {above} 下 {below}"
+            );
+        });
+    }
 
     /// 把 `(字符, 宽度)` 摊成断行器要的 `(字符, 左缘, 宽度)`。
     fn shaped(chars: &[(char, f32)]) -> Vec<(char, f32, f32)> {

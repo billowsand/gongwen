@@ -119,6 +119,9 @@ pub(crate) struct Metrics {
     /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
     /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
     gutter: RefCell<Gutter>,
+    /// 按行高亮的块（`layout::clickable_rows`）画字时顺手记下的每行底色矩形；
+    /// 不在这种块里时为 `None`，各部件的记录调用直接落空。
+    tints: RefCell<Option<Vec<egui::Rect>>>,
 }
 
 /// 本帧应该显示的缩放倍率：`zoom` 为 None 时按可用宽度自适应，否则按给定倍率。
@@ -174,6 +177,7 @@ impl Metrics {
             body_family: theme::FONT_FANGSONG,
             body_pt: BODY_PT,
             gutter: RefCell::default(),
+            tints: RefCell::default(),
         }
     }
 
@@ -195,6 +199,7 @@ impl Metrics {
             body_family: theme::FONT_SONGTI,
             body_pt: RESEARCH_BODY_PT,
             gutter: RefCell::default(),
+            tints: RefCell::default(),
         }
     }
 
@@ -208,6 +213,26 @@ impl Metrics {
     /// `None`，否则紧跟其后的落款、版记会顶着上一块的范围被编号。
     fn enter_source(&self, source: Option<Range<usize>>) {
         self.gutter.borrow_mut().set_source(source);
+    }
+
+    /// 开始收集行底色：之后画出的每一行文字都把自己的底色矩形交上来。
+    fn begin_tints(&self) {
+        *self.tints.borrow_mut() = Some(Vec::new());
+    }
+
+    /// 结束收集，取走这期间记下的行底色。
+    fn take_tints(&self) -> Vec<egui::Rect> {
+        self.tints.borrow_mut().take().unwrap_or_default()
+    }
+
+    /// 记下一行文字的底色矩形；没在收集时什么也不做。
+    fn push_tint(&self, rect: egui::Rect) {
+        if let Some(tints) = self.tints.borrow_mut().as_mut()
+            && rect.is_finite()
+            && rect.is_positive()
+        {
+            tints.push(rect);
+        }
     }
 
     /// 记下纸面上的一行。`baseline` 是这一行文字的基线，号码照它对齐；

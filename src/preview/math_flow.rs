@@ -6,7 +6,10 @@
 //! 渲染失败（不支持的命令、`\text{中文}` 缺字形等）降级为虚线框占位，
 //! 框内用灰色小字写出公式源码，不 panic、不阻塞预览。
 
-use super::layout::{indent, is_no_line_end, is_no_line_start, job, layout, place, text_format};
+use super::layout::{
+    indent, is_no_line_end, is_no_line_start, job, layout, place, row_tint_offset, text_format,
+    tint_rect,
+};
 use super::math_render;
 use super::{INDENT_CHARS, Metrics, RESEARCH_CAPTION_PT};
 use crate::export;
@@ -76,16 +79,21 @@ pub(crate) fn display_block(ui: &mut egui::Ui, metrics: &Metrics, src: &str) {
         Cached::Ready {
             texture,
             mut size,
-            baseline: _,
+            mut baseline,
         } => {
             // 比版心还宽的公式按比例压进版心，与图片块的口径一致。
             if size.x > metrics.content {
-                size *= metrics.content / size.x;
+                let fit = metrics.content / size.x;
+                size *= fit;
+                baseline *= fit;
             }
             place(ui, metrics, size.y, |painter, rect| {
+                let image = egui::Rect::from_center_size(rect.center(), size);
+                metrics.push_tint(image.expand2(egui::vec2(3.0, 1.0)));
+                metrics.mark_sourced_row(rect, rect.top() + baseline);
                 painter.image(
                     texture.id(),
-                    egui::Rect::from_center_size(rect.center(), size),
+                    image,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
@@ -559,16 +567,22 @@ fn draw_line(ui: &mut egui::Ui, metrics: &Metrics, atoms: &[Atom], first_line: b
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
     let painter = ui.painter();
-    painter.galley(
-        rect.left_top() + egui::vec2(0.0, baseline - text_baseline),
-        galley.clone(),
-        theme::paper::ink(),
-    );
+    let text_origin = rect.left_top() + egui::vec2(0.0, baseline - text_baseline);
+    painter.galley(text_origin, galley.clone(), theme::paper::ink());
+    let math_rects: Vec<egui::Rect> = slots
+        .iter()
+        .map(|&(char_index, pad, math)| {
+            let x = rect.left() + galley.pos_from_cursor(CCursor::new(char_index)).left() - pad;
+            let top = rect.top() + baseline - math.baseline;
+            egui::Rect::from_min_size(egui::pos2(x, top), math.size)
+        })
+        .collect();
+    if let Some(row) = galley.rows.first() {
+        metrics.mark_sourced_row(rect, text_origin.y + row.pos.y + text_baseline);
+        push_line_tint(metrics, row, text_origin, &math_rects);
+    }
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    for (char_index, pad, math) in slots {
-        let x = rect.left() + galley.pos_from_cursor(CCursor::new(char_index)).left() - pad;
-        let top = rect.top() + baseline - math.baseline;
-        let math_rect = egui::Rect::from_min_size(egui::pos2(x, top), math.size);
+    for ((_, _, math), math_rect) in slots.into_iter().zip(math_rects) {
         match &math.texture {
             Some(texture) => {
                 painter.image(texture.id(), math_rect, uv, egui::Color32::WHITE);
@@ -586,6 +600,44 @@ fn draw_line(ui: &mut egui::Ui, metrics: &Metrics, atoms: &[Atom], first_line: b
             }
         }
     }
+}
+
+/// 一行混排的底色：横向从第一个有墨的字（或公式）到最后一个字（或公式），
+/// 行首缩进不压底色；纵向以文字行按 `row_tint_offset` 居中，再兜住比行高的公式。
+/// 公式在 galley 里只是全角空格占位，所以文字的墨迹与公式盒子分开取再合并。
+fn push_line_tint(
+    metrics: &Metrics,
+    row: &egui::epaint::text::PlacedRow,
+    origin: egui::Pos2,
+    math_rects: &[egui::Rect],
+) {
+    let text_top = origin.y + row.pos.y + row_tint_offset(row);
+    let mut span: Option<(f32, f32)> = None;
+    let mut widen = |left: f32, right: f32| {
+        span = Some(match span {
+            Some((l, r)) => (l.min(left), r.max(right)),
+            None => (left, right),
+        });
+    };
+    let inked = row.glyphs.iter().filter(|glyph| !glyph.chr.is_whitespace());
+    for glyph in inked {
+        let left = origin.x + row.pos.x + glyph.pos.x;
+        widen(left, origin.x + row.pos.x + glyph.max_x());
+    }
+    for math in math_rects {
+        widen(math.left(), math.right());
+    }
+    let Some((left, right)) = span else {
+        return;
+    };
+    let mut tint = tint_rect(left, right, text_top, row.size.y);
+    for math in math_rects {
+        tint = tint.union(egui::Rect::from_x_y_ranges(
+            tint.x_range(),
+            math.expand2(egui::vec2(0.0, 1.0)).y_range(),
+        ));
+    }
+    metrics.push_tint(tint);
 }
 
 #[cfg(test)]
