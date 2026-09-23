@@ -16,8 +16,11 @@ use crate::models::{
     AppConfig, DraftInput, FontChoice, FontRole, JointContact, ResearchMetadata, TemplateKind,
     TemplateProfile, VocabularyCategory, VocabularyEntry,
 };
+use similar::{Algorithm, DiffTag};
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 /// 段内字级片段的类型：未变 / 旧版删掉的 / 新版加上的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,9 +203,10 @@ impl From<VersionRecord> for ContentSnapshot {
 /// 逐字标差异只会得到一片红绿交错，不如整段对着看。
 const REPLACE_SIMILARITY: f32 = 0.4;
 
-/// 段内字级 LCS 的规模上限（两侧 token 数之积）。超了就退化为整段替换：
-/// 公文段落一般 100~400 字，触不到这个上限；真触到了也只是精度降级，不卡帧。
-const INLINE_TOKEN_BUDGET: usize = 400_000;
+/// 单次 diff 的时间上限。`similar` 的 Myers 实现只占线性内存，平常的段落和全文
+/// 都在毫秒内算完；真遇上病态输入，到点后对剩余部分给出较粗但仍正确的结果，
+/// 不会卡住界面。
+const DIFF_DEADLINE: Duration = Duration::from_millis(200);
 
 /// 一篇稿件两个版本的对照。参数顺序就是对照方向：`old` 在左，`new` 在右。
 pub fn manuscript_diff(old: &ContentSnapshot, new: &ContentSnapshot) -> ManuscriptDiff {
@@ -227,7 +231,7 @@ pub fn body_diff(old: &str, new: &str) -> BodyDiff {
     // 连续的删除 / 新增块先攒起来，等这一组结束再按相似度两两配对。
     let mut removed: Vec<usize> = Vec::new();
     let mut added: Vec<usize> = Vec::new();
-    for op in lcs_ops(&a, &b) {
+    for op in diff_ops(&a, &b) {
         match op {
             DiffOp::Same(_, j) => {
                 flush_group(
@@ -408,21 +412,9 @@ fn inserted_block(block: &Block) -> DiffBlock {
 fn inline_spans(before: &str, after: &str) -> (Vec<InlineSpan>, Vec<InlineSpan>) {
     let a = tokenize(before);
     let b = tokenize(after);
-    if a.len().saturating_mul(b.len()) > INLINE_TOKEN_BUDGET {
-        return (
-            vec![InlineSpan {
-                kind: SpanKind::Removed,
-                text: before.to_string(),
-            }],
-            vec![InlineSpan {
-                kind: SpanKind::Added,
-                text: after.to_string(),
-            }],
-        );
-    }
     let mut before_spans = Vec::new();
     let mut after_spans = Vec::new();
-    for op in lcs_ops(&a, &b) {
+    for op in diff_ops(&a, &b) {
         match op {
             DiffOp::Same(i, j) => {
                 push_span(&mut before_spans, SpanKind::Same, a[i]);
@@ -439,22 +431,14 @@ fn inline_spans(before: &str, after: &str) -> (Vec<InlineSpan>, Vec<InlineSpan>)
 ///
 /// 屏幕上的版本对照是左右分栏，两侧各看各的；**花脸稿要的是一张纸**——删掉的字
 /// 仍留在原位画波浪线，新增的字就地套方框，两者必须交织在同一个段落里。所以
-/// 这里复用同一趟 `lcs_ops`，只是把结果推进一个 `Vec` 而不是两个。
+/// 这里复用同一趟 `diff_ops`，只是把结果推进一个 `Vec` 而不是两个。
 ///
 /// 注意花脸稿因此比定稿长：删掉的字还占着版面，页数对不上是必然的，不是 bug。
 pub fn merged_spans(before: &str, after: &str) -> Vec<InlineSpan> {
     let a = tokenize(before);
     let b = tokenize(after);
-    // 与 `inline_spans` 用同一个上限：超了就退化成"整段删 + 整段加"，
-    // 花脸稿上表现为整段画波浪线、整段套框，仍然读得懂。
-    if a.len().saturating_mul(b.len()) > INLINE_TOKEN_BUDGET {
-        let mut out = Vec::new();
-        push_span(&mut out, SpanKind::Removed, before);
-        push_span(&mut out, SpanKind::Added, after);
-        return out;
-    }
     let mut out = Vec::new();
-    for op in lcs_ops(&a, &b) {
+    for op in diff_ops(&a, &b) {
         match op {
             DiffOp::Same(i, _) => push_span(&mut out, SpanKind::Same, a[i]),
             DiffOp::Delete(i) => push_span(&mut out, SpanKind::Removed, a[i]),
@@ -520,56 +504,28 @@ fn similarity(a: &str, b: &str) -> f32 {
     common as f32 / longer as f32
 }
 
-/// LCS 的一步操作，索引分别指向各自的数组。
+/// diff 的一步操作，索引分别指向各自的数组。
 enum DiffOp {
     Same(usize, usize),
     Delete(usize),
     Insert(usize),
 }
 
-/// 逐元素 LCS，回溯还原操作序列。块级与字级两处共用。
-fn lcs_ops<T: PartialEq>(a: &[T], b: &[T]) -> Vec<DiffOp> {
-    let n = a.len();
-    let m = b.len();
-    if n == 0 {
-        return (0..m).map(DiffOp::Insert).collect();
-    }
-    if m == 0 {
-        return (0..n).map(DiffOp::Delete).collect();
-    }
-    // LCS 长度表，回溯还原每一步。
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if a[i] == b[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-    let mut out = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if a[i] == b[j] {
-            out.push(DiffOp::Same(i, j));
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            out.push(DiffOp::Delete(i));
-            i += 1;
+/// 逐元素 diff（`similar` 的 Myers 算法），展开成单元素操作。块级与字级两处共用。
+///
+/// 同一处既有删又有增时先出删、后出增：花脸稿上被删的字排在新字前面，
+/// 块级分组也按这个顺序攒。
+fn diff_ops<T: Eq + Hash>(a: &[T], b: &[T]) -> Vec<DiffOp> {
+    let deadline = Instant::now() + DIFF_DEADLINE;
+    let mut out = Vec::with_capacity(a.len().max(b.len()));
+    for op in similar::capture_diff_slices_deadline(Algorithm::Myers, a, b, Some(deadline)) {
+        let (tag, old, new) = op.as_tag_tuple();
+        if tag == DiffTag::Equal {
+            out.extend(old.zip(new).map(|(i, j)| DiffOp::Same(i, j)));
         } else {
-            out.push(DiffOp::Insert(j));
-            j += 1;
+            out.extend(old.map(DiffOp::Delete));
+            out.extend(new.map(DiffOp::Insert));
         }
-    }
-    while i < n {
-        out.push(DiffOp::Delete(i));
-        i += 1;
-    }
-    while j < m {
-        out.push(DiffOp::Insert(j));
-        j += 1;
     }
     out
 }
@@ -1190,17 +1146,37 @@ mod tests {
     }
 
     #[test]
-    fn inline_diff_degrades_gracefully_on_huge_paragraphs() {
-        // 超出 token 预算时退化为整段替换：只求不卡帧、不 panic。
+    fn inline_diff_stays_precise_on_huge_paragraphs() {
+        // 以前超过 token 预算就退化成整段替换；换成线性内存的 Myers 后，
+        // 长段落也只标真正改了的那个字。
         let old = "甲".repeat(700);
         let new = format!("{}乙", "甲".repeat(699));
         let diff = body_diff(&old, &new);
         let changes = changes(&diff);
         assert_eq!(changes[0].kind, ChangeKind::Replace);
-        assert_eq!(changes[0].before_spans.len(), 1);
-        assert_eq!(changes[0].before_spans[0].kind, SpanKind::Removed);
-        assert_eq!(changes[0].after_spans.len(), 1);
-        assert_eq!(changes[0].after_spans[0].kind, SpanKind::Added);
+        assert_eq!(marked(&changes[0].before_spans, SpanKind::Removed), "甲");
+        assert_eq!(marked(&changes[0].after_spans, SpanKind::Added), "乙");
+    }
+
+    #[test]
+    fn inline_diff_handles_very_long_text_quickly() {
+        // 两万字、改动分散：旧的 O(n·m) 表要四亿个格子，这里必须秒出且标得准。
+        let base: String = (0..20_000)
+            .map(|i| char::from_u32(0x4E00 + (i * 7919 % 20_000) as u32).unwrap())
+            .collect();
+        let mut edited: Vec<char> = base.chars().collect();
+        for index in [10, 5_000, 12_345, 19_990] {
+            edited[index] = '〇';
+        }
+        let edited: String = edited.into_iter().collect();
+        let started = std::time::Instant::now();
+        let (before, after) = inline_spans(&base, &edited);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "长文 diff 不该卡住"
+        );
+        assert_eq!(marked(&after, SpanKind::Added), "〇〇〇〇");
+        assert_eq!(marked(&before, SpanKind::Removed).chars().count(), 4);
     }
 
     #[test]
