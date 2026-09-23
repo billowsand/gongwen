@@ -572,7 +572,7 @@ impl DraftPage<'_> {
         });
         toolbar_separator(ui);
 
-        // 四、公文构件：按正文/附件切区段。研究报告的区段标记另有五种，连同
+        // 四、公文构件：按正文/附件切区段。研究报告的区段标记另有五种（外加目录标记），连同
         // 锚点、交叉引用这些 mdx research 语法一起摆在「研报」分区，不占这里。
         if !self.doc.draft.kind.is_research() {
             let mut marker = None;
@@ -650,9 +650,16 @@ impl DraftPage<'_> {
         // 选了什么，等这一组画完再动正文。
         let mut action: Option<MarkupInsert> = None;
 
-        // 一、区段标记。顺序照纸面：摘要在前，正文居中，附录与两个后置区段收尾。
+        // 一、区段标记。顺序照纸面：目录与摘要在前，正文居中，附录与两个后置区段收尾。
         ui.add_enabled_ui(editable, |ui| {
             for (icon, text, label, tip) in [
+                (
+                    theme::Icon::List,
+                    "<!-- [目录] -->",
+                    "目录",
+                    "插入“<!-- [目录] -->”：有这个标记才排目录，目录排在标记所在处，\
+                     单用大写罗马页码（I、II、III），不占正文页号",
+                ),
                 (
                     theme::Icon::Book,
                     "<!-- [摘要] -->",

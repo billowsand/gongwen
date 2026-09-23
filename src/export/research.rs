@@ -603,6 +603,56 @@ mod tests {
         }
     }
 
+    /// 目录只在写了 `<!-- [目录] -->` 时排，排在标记处；模板本身不再无条件排目录。
+    /// 页码切换（大写罗马 → 阿拉伯接续）由 md2tex.cls 的 `\mdxtableofcontents` 负责。
+    #[test]
+    fn mdx_places_the_toc_only_where_the_marker_is() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "测试报告".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+
+        let without = dir.path().join("无目录.tex");
+        write_tex(
+            &without,
+            &input,
+            "<!-- [摘要] -->\n\n摘要。\n\n<!-- [正文] -->\n\n## 研究背景\n\n正文。\n",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告应转换成功");
+        let tex = fs::read_to_string(&without).unwrap();
+        assert!(!tex.contains("\\tableofcontents"), "{tex}");
+        assert!(!tex.contains("\\mdxtableofcontents"), "{tex}");
+
+        let with = dir.path().join("有目录.tex");
+        write_tex(
+            &with,
+            &input,
+            "<!-- [目录] -->\n\n<!-- [摘要] -->\n\n摘要。\n\n<!-- [正文] -->\n\n## 研究背景\n\n正文。\n",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告应转换成功");
+        let tex = fs::read_to_string(&with).unwrap();
+        assert_eq!(tex.matches("\\mdxtableofcontents\n").count(), 1, "{tex}");
+        let toc_at = tex.find("\\mdxtableofcontents\n").unwrap();
+        let abstract_at = tex.find("\\begin{abstract}").unwrap();
+        assert!(toc_at < abstract_at, "目录应排在标记处，即摘要之前：{tex}");
+        let body = tex
+            .split("\\mainmatter")
+            .nth(1)
+            .expect("模板应有 \\mainmatter");
+        assert!(!body.contains("[目录]"), "目录标记不应原样印出：{tex}");
+
+        let class = fs::read_to_string(dir.path().join("md2tex.cls")).unwrap();
+        assert!(
+            class.contains("\\pagenumbering{Roman}"),
+            "目录应单用大写罗马页码"
+        );
+    }
+
     /// 正文区段的 `#` 是报告题名：mdx 不把它排进正文版面（封面已经印过一次，
     /// 再排一遍会在目录后多出一张只有一行标题的纸），也不占章号——随后的 `##`
     /// 仍是第一章。预览与导航都按这个口径排，这里真跑一遍转换核对。

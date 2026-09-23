@@ -566,6 +566,47 @@ mod tests {
         assert!(outcome.pdf.is_some_and(|path| path.is_file()));
     }
 
+    /// 研究报告的目录：`<!-- [目录] -->` 处排目录，目录单用大写罗马页码、之后
+    /// 恢复阿拉伯页码（md2tex.cls 的 `\mdxtableofcontents`）。要编两遍目录才有
+    /// 条目，这里只管随包 Tectonic 能把切换页码的这一套编过去。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime"]
+    fn compiles_research_report_with_toc() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "目录研究报告测试".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            "<!-- [摘要] -->\n\n这是摘要。\n\n<!-- [目录] -->\n\n<!-- [正文] -->\n\n## 研究背景\n\n正文。\n\n### 分析方法\n\n方法说明。",
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(tex)
+                .unwrap()
+                .contains("\\mdxtableofcontents")
+        );
+        let outcome = compile_research_pdf(tex).unwrap();
+        assert!(outcome.pdf.is_some_and(|path| path.is_file()));
+    }
+
     /// 研究报告的数学公式（mdx v2.16.1 起）：行内 `$...$` 与独立块 `$$...$$`
     /// 要走 amsmath/mathtools 编进 PDF。texbundle 里缺包时这条会在 release
     /// 冒烟里先红（CI 按 `texcompile::tests::compiles_` 前缀跑）。
