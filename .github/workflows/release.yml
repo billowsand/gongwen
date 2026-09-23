@@ -511,6 +511,43 @@ jobs:
             gongwen-assistant-*-linux-amd64-omarchy.tar.gz*
           if-no-files-found: error
 
+  # 在干净的目标发行版里真装一次 deb：包名写错（如 libgdk-pixbuf-2.0-0 在
+  # Ubuntu 20.04 / 麒麟 V10 上叫 libgdk-pixbuf2.0-0）会在这里失败，而不是等
+  # 用户在离线机器上 dpkg -i 才发现。buster 是 glibc 2.28 构建基线，20.04 是
+  # 麒麟 V10 的底子，24.04 覆盖 t64 改名之后的新系统。
+  verify-deb:
+    name: Verify deb install / ${{ matrix.arch }} / ${{ matrix.image }}
+    needs: [package-linux-arm64, package-linux-amd64]
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+        image: ['debian:buster', 'ubuntu:20.04', 'ubuntu:24.04']
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist
+
+      - name: Install deb and check shared libraries
+        run: |
+          set -euo pipefail
+          bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_${{ matrix.arch }}.deb
+
   build-macos:
     name: Build macOS ARM64
     runs-on: macos-15
@@ -569,7 +606,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [build-windows, package-linux-arm64, package-linux-amd64, build-macos]
+    needs: [build-windows, package-linux-arm64, package-linux-amd64, verify-deb, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
