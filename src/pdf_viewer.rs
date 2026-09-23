@@ -1,12 +1,15 @@
-//! 纯 Rust PDF 查看器：连续滚动，视口内的页才光栅化。
+//! 纯 Rust PDF 查看器：连续滚动或单页翻页，视口内的页才光栅化。
 //!
-//! 每个打开的 PDF 配一条常驻渲染线程。线程持有 `Pdf` 与 `RenderCache`，这两样
-//! 都搬不动：`RenderCache` 内部是 `Rc`，`Pages<'a>` 又借用 `Pdf`。所以文件读一
-//! 次、解析一次、字体与图像缓存一次，之后只在这条线程上光栅化；主线程只负责上
-//! 传纹理和处理交互。
+//! 每个打开的 PDF 配一小组常驻渲染线程。每条线程各持一份 `Pdf` 与 `RenderCache`，
+//! 这两样都搬不动：`RenderCache` 内部是 `Rc`，`Pages<'a>` 又借用 `Pdf`。文件只读
+//! 一次，字节在线程间共享；解析是惰性的，多开几份几乎不花时间。主线程只负责上传
+//! 纹理和处理交互。多条线程是为了扫描封面这类一页要一两秒的重页不堵住后面的轻页。
 //!
-//! 打开时先取全部页面的点尺寸——`hayro` 是惰性解析，20MB / 138 页的文件也只要
-//! 0.14ms——滚动条因此一开始就是准的，不会边渲染边跳。
+//! 主线程每帧把「现在需要的页」按优先级整批交给渲染队列，队列整批替换，不追加。
+//! 这样滚走之后没渲完的页自然作废，滚回来时又会出现在新的一批里，不会漏页。
+//!
+//! 打开时先取全部页面的点尺寸——`hayro` 是惰性解析，300 页的文件也只要几毫秒——
+//! 滚动条因此一开始就是准的，不会边渲染边跳。
 //!
 //! 系统程序仍作为加密或复杂外来 PDF 的兼容性兜底。
 
@@ -18,13 +21,15 @@ use hayro::{
     hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf},
     vello_cpu::color::palette::css::WHITE,
 };
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 pub(crate) type PdfKey = u64;
 
-const MIN_ZOOM: f32 = 0.5;
+const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
 const ZOOM_STEP: f32 = 0.25;
 /// 本机有没有打印能力。探测要扫一遍 PATH，不能每帧都做，进程内只算一次。
@@ -44,6 +49,14 @@ const TEXTURE_BUDGET: usize = 256 * 1024 * 1024;
 const PAGE_GAP: f32 = 18.0;
 /// 页面两侧留给投影的空间。
 const SIDE_MARGIN: f32 = 21.0;
+/// 渲染线程数上限。每条线程各有一份字体与图像缓存，多了只是占内存。
+const MAX_RENDER_THREADS: usize = 3;
+/// 单页模式下触控板滑过这么多点算「一格」。鼠标滚轮按格上报，不走这个换算。
+const TOUCHPAD_POINTS_PER_STEP: f32 = 80.0;
+/// 滚轮停这么久（秒），没攒够一格的零头就清掉。
+const WHEEL_IDLE: f64 = 0.3;
+/// 翻页后这么久（秒）内屏蔽残余的平滑滚动，免得新页一出来就被余量带着往下走。
+const FLIP_QUIET: f64 = 0.2;
 
 /// 渲染线程回传主线程的消息。
 pub(crate) enum PdfMessage {
@@ -60,20 +73,36 @@ pub(crate) enum PdfMessage {
     Failed(String),
 }
 
-/// 主线程发给渲染线程的指令：「现在要这些页」。
-/// 只有最新一条有意义，线程会把积压的旧指令直接丢掉。
-struct PdfWant {
-    generation: u64,
-    /// 逐页的目标像素宽度。横页竖页混排时每页并不相同，不能共用一个宽度。
-    pages: Vec<(usize, u16)>,
-}
-
-/// PDF 标签要交给应用外壳执行的动作。渲染请求不走这里——会话自己有指令通道。
+/// PDF 标签要交给应用外壳执行的动作。渲染请求不走这里——会话自己有渲染队列。
 pub(crate) enum PdfAction {
     OpenExternal(PathBuf),
     Reveal(PathBuf),
     /// 打印这份 PDF。份号不同的多份成品必须由导出阶段生成，不能靠打印机份数。
     Print(PathBuf),
+}
+
+/// 浏览方式。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    /// 所有页上下相连，自由滚动。
+    Continuous,
+    /// 一次只看一页，滚轮一格翻一页（同 SumatraPDF 的「单页」）。
+    SinglePage,
+}
+
+/// 缩放方式。适合宽度 / 适合页面随窗口大小变化，固定比例不随。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    Zoom,
+    Width,
+    Page,
+}
+
+/// 单页模式翻页后滚到页首还是页尾。往回翻停在页尾，读起来才是接着的。
+#[derive(Clone, Copy)]
+enum Edge {
+    Top,
+    Bottom,
 }
 
 /// 一页的纹理槽位。
@@ -82,11 +111,79 @@ struct PageSlot {
     texture: Option<egui::TextureHandle>,
     /// `texture` 的光栅化宽度，用来判断要不要按新宽度重渲染。
     width: u16,
-    /// 已提交给渲染线程、还没回来。
-    requested: bool,
-    /// 最近一次出现在视口里的帧号，淘汰时按它排序。
+    /// 最近一次出现在视口或预取区的帧号，淘汰时按它排序。
     last_used: u64,
     bytes: usize,
+}
+
+/// 渲染队列。主线程整批替换，渲染线程从队首取。
+#[derive(Default)]
+struct RenderQueue {
+    state: Mutex<QueueState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct QueueState {
+    generation: u64,
+    jobs: VecDeque<(usize, u16)>,
+    /// 正在某条线程上光栅化的页。新一批里有同代同宽的同一页就跳过，不重复干活。
+    in_flight: Vec<(u64, usize, u16)>,
+    closed: bool,
+}
+
+impl RenderQueue {
+    fn lock(&self) -> MutexGuard<'_, QueueState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 用新的一批整体替换队列。上一批没轮到的页直接作废。
+    fn replace(&self, generation: u64, pages: Vec<(usize, u16)>) {
+        let mut state = self.lock();
+        state.generation = generation;
+        state.jobs = pages.into();
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    fn close(&self) {
+        self.lock().closed = true;
+        self.ready.notify_all();
+    }
+
+    /// 取下一页，没有就睡着等。队列关了返回 `None`，线程据此退出。
+    fn next(&self) -> Option<(u64, usize, u16)> {
+        let mut state = self.lock();
+        loop {
+            if state.closed {
+                return None;
+            }
+            while let Some((index, width)) = state.jobs.pop_front() {
+                let job = (state.generation, index, width);
+                if !state.in_flight.contains(&job) {
+                    state.in_flight.push(job);
+                    return Some(job);
+                }
+            }
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn finish(&self, job: (u64, usize, u16)) {
+        self.lock().in_flight.retain(|&other| other != job);
+    }
+}
+
+/// 会话持有的渲染队列句柄。标签关闭时随会话析构，关掉队列，线程跟着退出。
+struct RenderHandle(Arc<RenderQueue>);
+
+impl Drop for RenderHandle {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 /// 一份打开的 PDF 的视图状态。
@@ -96,13 +193,16 @@ pub(crate) struct PdfSession {
     title: String,
     /// 结果通道，交给渲染线程用。
     results: Sender<WorkerResult>,
-    /// 渲染线程的指令口。首帧才启动线程，那时才拿得到 `egui::Context`。
-    commands: Option<Sender<PdfWant>>,
+    /// 渲染队列。首帧才启动线程，那时才拿得到 `egui::Context`。
+    renderer: Option<RenderHandle>,
     /// 每页的点尺寸。空表示还没打开完。
     page_sizes: Vec<(f32, f32)>,
     slots: Vec<PageSlot>,
+    mode: ViewMode,
+    fit: Fit,
     zoom: f32,
-    fit_width: bool,
+    /// 当前页实际显示的缩放比例。从「适合宽度 / 页面」切回按钮缩放时以它为起点。
+    shown_scale: f32,
     /// 换宽度时 +1，迟到的旧宽度结果靠它作废。
     generation: u64,
     /// 已经提交给渲染线程的基准宽度。
@@ -110,9 +210,21 @@ pub(crate) struct PdfSession {
     /// 防抖：正在等待稳定的新宽度，以及它出现的时刻。
     pending_width: u16,
     width_changed_at: Option<f64>,
-    /// 工具栏显示用，由滚动位置推出。
+    /// 最近一次交给队列的那一批，按优先级排好。结果回来一页划掉一页；
+    /// 这一帧算出的需求和它不同才重发。
+    sent: Vec<(usize, u16)>,
+    /// 连续模式由滚动位置推出；单页模式就是正在看的那页。
     current_page: usize,
     scroll_to: Option<usize>,
+    /// 单页模式：下一帧把页内滚动条放到页首或页尾。
+    single_jump: Option<Edge>,
+    /// 单页模式：上一帧页内滚动是否已到顶 / 到底，到头了滚轮才翻页。
+    at_top: bool,
+    at_bottom: bool,
+    /// 单页模式：攒着的滚轮格数、最后一次滚轮时刻、残余平滑滚动屏蔽到何时。
+    wheel_steps: f32,
+    wheel_at: f64,
+    quiet_until: f64,
     frame: u64,
     error: Option<String>,
 }
@@ -136,18 +248,27 @@ impl PdfSession {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(fallback),
             results,
-            commands: None,
+            renderer: None,
             page_sizes: Vec::new(),
             slots: Vec::new(),
-            zoom: 1.0,
+            mode: ViewMode::Continuous,
             // 默认按 100% 原尺寸显示，和纸面一比一；适合宽度留给用户按需切换。
-            fit_width: false,
+            fit: Fit::Zoom,
+            zoom: 1.0,
+            shown_scale: 1.0,
             generation: 0,
             render_width: 0,
             pending_width: 0,
             width_changed_at: None,
+            sent: Vec::new(),
             current_page: 0,
             scroll_to: None,
+            single_jump: None,
+            at_top: true,
+            at_bottom: true,
+            wheel_steps: 0.0,
+            wheel_at: f64::NEG_INFINITY,
+            quiet_until: f64::NEG_INFINITY,
             frame: 0,
             error: None,
         }
@@ -171,9 +292,9 @@ impl PdfSession {
             return false;
         }
         if self.page_sizes.is_empty() {
-            return self.commands.is_some();
+            return self.renderer.is_some();
         }
-        self.slots.iter().any(|slot| slot.requested)
+        !self.sent.is_empty()
     }
 
     /// 收到渲染线程的消息。
@@ -197,7 +318,7 @@ impl PdfSession {
                 let Some(slot) = self.slots.get_mut(index) else {
                     return;
                 };
-                slot.requested = false;
+                self.sent.retain(|&job| job != (index, width));
                 slot.bytes = image.width() * image.height() * 4;
                 slot.width = width;
                 // 旧句柄在这里析构，显存随之释放。
@@ -209,7 +330,8 @@ impl PdfSession {
             }
             PdfMessage::Failed(error) => {
                 self.error = Some(error);
-                self.commands = None;
+                self.renderer = None;
+                self.sent.clear();
                 self.slots.clear();
                 self.page_sizes.clear();
             }
@@ -234,16 +356,16 @@ impl PdfSession {
 
     /// 首帧启动渲染线程。放在这里是因为要等 `egui::Context` 才能让线程主动唤醒 UI。
     fn ensure_worker(&mut self, ctx: &egui::Context) {
-        if self.commands.is_some() || self.error.is_some() {
+        if self.renderer.is_some() || self.error.is_some() {
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        self.commands = Some(tx);
+        let queue = Arc::new(RenderQueue::default());
+        self.renderer = Some(RenderHandle(Arc::clone(&queue)));
         let key = self.key;
         let path = self.path.clone();
         let results = self.results.clone();
         let ctx = ctx.clone();
-        thread::spawn(move || worker(key, path, rx, results, ctx));
+        thread::spawn(move || worker(key, path, queue, results, ctx));
     }
 
     fn page_count(&self) -> usize {
@@ -251,23 +373,28 @@ impl PdfSession {
     }
 
     /// 某一页在当前缩放下的显示尺寸（点）。按页取真实宽高，横页和竖页混排也对。
-    fn page_display_size(&self, index: usize, available: f32) -> egui::Vec2 {
+    fn page_display_size(&self, index: usize, viewport: egui::Vec2) -> egui::Vec2 {
         let (width, height) = self.page_sizes[index];
-        let display = if self.fit_width {
-            (available - SIDE_MARGIN * 2.0).max(120.0)
-        } else {
-            width * self.zoom
+        let width = width.max(1.0);
+        let fit_width = (viewport.x - SIDE_MARGIN * 2.0).max(120.0);
+        let display = match self.fit {
+            Fit::Zoom => width * self.zoom,
+            Fit::Width => fit_width,
+            Fit::Page => {
+                let fit_height = (viewport.y - PAGE_GAP * 2.0).max(120.0);
+                fit_width.min(fit_height * width / height.max(1.0))
+            }
         };
-        egui::vec2(display, display * height / width.max(1.0))
+        egui::vec2(display, display * height / width)
     }
 
     /// 全部页面的显示尺寸、顶部偏移与内容总高。
-    fn layout(&self, available: f32) -> (Vec<egui::Vec2>, Vec<f32>, f32) {
+    fn layout(&self, viewport: egui::Vec2) -> (Vec<egui::Vec2>, Vec<f32>, f32) {
         let mut sizes = Vec::with_capacity(self.page_count());
         let mut tops = Vec::with_capacity(self.page_count());
         let mut y = PAGE_GAP;
         for index in 0..self.page_count() {
-            let size = self.page_display_size(index, available);
+            let size = self.page_display_size(index, viewport);
             tops.push(y);
             y += size.y + PAGE_GAP;
             sizes.push(size);
@@ -310,26 +437,63 @@ impl PdfSession {
             }
 
             ui.separator();
-            if theme::icon_button_enabled(ui, self.zoom > MIN_ZOOM, theme::Icon::ZoomOut, "缩小")
+            if ui
+                .selectable_label(self.mode == ViewMode::Continuous, "连续")
+                .on_hover_text("所有页上下相连，自由滚动")
+                .clicked()
+                && self.mode != ViewMode::Continuous
+            {
+                self.mode = ViewMode::Continuous;
+                self.scroll_to = Some(self.current_page);
+            }
+            if ui
+                .selectable_label(self.mode == ViewMode::SinglePage, "单页")
+                .on_hover_text("一次看一页，滚轮一格翻一页；也可用 PageUp / PageDown、方向键翻页")
+                .clicked()
+                && self.mode != ViewMode::SinglePage
+            {
+                self.mode = ViewMode::SinglePage;
+                // 单页翻着看，整页落在窗口里最顺手，同 SumatraPDF 的默认。
+                self.fit = Fit::Page;
+                self.scroll_to = Some(self.current_page);
+            }
+
+            ui.separator();
+            let scale = self.shown_scale;
+            if theme::icon_button_enabled(ui, scale > MIN_ZOOM, theme::Icon::ZoomOut, "缩小")
                 .on_hover_text("缩小（也可按住 Ctrl 滚动滚轮）")
                 .clicked()
             {
-                self.set_zoom((self.zoom - ZOOM_STEP).max(MIN_ZOOM));
+                self.set_zoom(zoom_step_down(scale));
             }
-            if theme::icon_button_enabled(ui, self.zoom < MAX_ZOOM, theme::Icon::ZoomIn, "放大")
+            if theme::icon_button_enabled(ui, scale < MAX_ZOOM, theme::Icon::ZoomIn, "放大")
                 .on_hover_text("放大（也可按住 Ctrl 滚动滚轮）")
                 .clicked()
             {
-                self.set_zoom((self.zoom + ZOOM_STEP).min(MAX_ZOOM));
+                self.set_zoom(zoom_step_up(scale));
             }
-            ui.label(if self.fit_width {
-                "适合宽度".to_string()
-            } else {
-                format!("{:.0}%", self.zoom * 100.0)
-            });
-            if ui.selectable_label(self.fit_width, "适合宽度").clicked() && !self.fit_width {
-                self.fit_width = true;
+            ui.label(format!("{:.0}%", scale * 100.0));
+            if ui
+                .selectable_label(self.fit == Fit::Zoom && self.zoom == 1.0, "100%")
+                .clicked()
+            {
+                self.set_zoom(1.0);
+            }
+            if ui
+                .selectable_label(self.fit == Fit::Width, "适合宽度")
+                .clicked()
+                && self.fit != Fit::Width
+            {
+                self.fit = Fit::Width;
                 // 缩放变了版式跟着变，把当前页重新拉回视野，不然会滚到别处。
+                self.scroll_to = Some(self.current_page);
+            }
+            if ui
+                .selectable_label(self.fit == Fit::Page, "适合页面")
+                .clicked()
+                && self.fit != Fit::Page
+            {
+                self.fit = Fit::Page;
                 self.scroll_to = Some(self.current_page);
             }
 
@@ -365,8 +529,8 @@ impl PdfSession {
     }
 
     fn set_zoom(&mut self, zoom: f32) {
-        self.fit_width = false;
-        self.zoom = zoom;
+        self.fit = Fit::Zoom;
+        self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.scroll_to = Some(self.current_page);
     }
 
@@ -395,19 +559,79 @@ impl PdfSession {
         // 滚动区不会同时滚动，两者天然不冲突。只在指针位于查看区时响应。
         let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
         if zoom_delta != 1.0 && ui.rect_contains_pointer(ui.max_rect()) {
-            self.set_zoom((self.zoom * zoom_delta).clamp(MIN_ZOOM, MAX_ZOOM));
+            self.set_zoom(self.shown_scale * zoom_delta);
         }
+        self.keyboard(ui.ctx());
 
-        let available = ui.available_width();
+        let viewport = ui.available_size();
         let pixels_per_point = ui.ctx().pixels_per_point().max(1.0);
-        self.settle_width(ui.ctx(), available, pixels_per_point);
+        self.settle_width(ui.ctx(), viewport, pixels_per_point);
+        // 拖窗口或连续缩放的过程中，已有纹理先缩放顶着，只补还没有纹理的页。
+        let settling = self.width_changed_at.is_some();
 
-        let (sizes, tops, total) = self.layout(available);
-        // 100% 或放大时页面可能比窗口宽，内容区得按最宽的那页撑开，横向才滚得动。
+        let mut wanted = match self.mode {
+            ViewMode::Continuous => self.continuous(ui, viewport, pixels_per_point, settling),
+            ViewMode::SinglePage => self.single_page(ui, viewport, pixels_per_point, settling),
+        };
+        let (width, _) = self.page_sizes[self.current_page];
+        self.shown_scale = self.page_display_size(self.current_page, viewport).x / width.max(1.0);
+
+        // 离视口越近越先渲；同样近的按页序。
+        wanted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let wanted = wanted
+            .into_iter()
+            .map(|(_, index, width)| (index, width))
+            .collect();
+        self.evict();
+        self.request(wanted);
+    }
+
+    /// 翻页快捷键。有输入框拿着焦点时不抢键。
+    fn keyboard(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|memory| memory.focused().is_some()) {
+            return;
+        }
+        let none = egui::Modifiers::NONE;
+        let (next, previous, first, last) = ctx.input_mut(|input| {
+            // 用 `|` 而不是 `||`：两个键都要消费掉，不能短路。
+            (
+                input.consume_key(none, egui::Key::PageDown)
+                    | input.consume_key(none, egui::Key::ArrowRight),
+                input.consume_key(none, egui::Key::PageUp)
+                    | input.consume_key(none, egui::Key::ArrowLeft),
+                input.consume_key(none, egui::Key::Home),
+                input.consume_key(none, egui::Key::End),
+            )
+        });
+        let last_page = self.page_count().saturating_sub(1);
+        if next && self.current_page < last_page {
+            self.scroll_to = Some(self.current_page + 1);
+        }
+        if previous && self.current_page > 0 {
+            self.scroll_to = Some(self.current_page - 1);
+        }
+        if first {
+            self.scroll_to = Some(0);
+        }
+        if last {
+            self.scroll_to = Some(last_page);
+        }
+    }
+
+    /// 连续模式：所有页上下相连。返回这一帧需要（重新）渲染的页及其优先级。
+    fn continuous(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: egui::Vec2,
+        pixels_per_point: f32,
+        settling: bool,
+    ) -> Vec<(f32, usize, u16)> {
+        let (sizes, tops, total) = self.layout(viewport);
+        // 放大时页面可能比窗口宽，内容区得按最宽的那页撑开，横向才滚得动。
         let content_width = sizes
             .iter()
             .map(|size| size.x + SIDE_MARGIN * 2.0)
-            .fold(available, f32::max);
+            .fold(viewport.x, f32::max);
         let mut scroll = egui::ScrollArea::both()
             .id_salt(("pdf_scroll", self.key))
             .auto_shrink([false, false]);
@@ -419,9 +643,8 @@ impl PdfSession {
 
         // 闭包里要可变借用 slots，先把别的字段读出来。
         let frame = self.frame;
-        let generation = self.generation;
         let slots = &mut self.slots;
-        let (wanted, visible_top) = scroll
+        let (wanted, current) = scroll
             .show(ui, |ui| {
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(content_width, total), egui::Sense::hover());
@@ -430,49 +653,191 @@ impl PdfSession {
                 let prefetch = clip.expand2(egui::vec2(0.0, clip.height()));
                 let painter = ui.painter();
                 let mut wanted = Vec::new();
-                let mut visible_top = None;
+                // 当前页取占视口高度最多的那页，而不是露了一条边的上一页。
+                let mut current = None;
+                let mut best_visible = 0.0;
 
-                for (index, (size, top)) in sizes.iter().zip(&tops).enumerate() {
+                // 只看预取区附近的页：先二分找到第一页，300 页也不用逐页判断。
+                let first = tops.partition_point(|top| rect.top() + top < prefetch.top());
+                for index in first.saturating_sub(1)..sizes.len() {
+                    let size = sizes[index];
                     let left = rect.left() + ((content_width - size.x) / 2.0).max(0.0);
                     let page_rect =
-                        egui::Rect::from_min_size(egui::pos2(left, rect.top() + top), *size);
+                        egui::Rect::from_min_size(egui::pos2(left, rect.top() + tops[index]), size);
+                    if page_rect.top() > prefetch.bottom() {
+                        break;
+                    }
                     if !page_rect.intersects(prefetch) {
                         continue;
                     }
                     let slot = &mut slots[index];
                     slot.last_used = frame;
-
-                    // 这一页该有多少像素宽。分辨率不够就排队重渲染。
-                    let target = render_width(size.x, pixels_per_point);
-                    let stale = slot.texture.is_none()
-                        || slot.width.abs_diff(target) >= RERENDER_WIDTH_DELTA;
-                    if stale && !slot.requested {
-                        slot.requested = true;
-                        wanted.push((index, target));
+                    let distance = vertical_distance(page_rect, clip);
+                    if let Some(target) = wants_render(slot, size.x, pixels_per_point, settling) {
+                        wanted.push((distance, index, target));
                     }
-
-                    if !page_rect.intersects(clip) {
+                    if distance > 0.0 {
                         continue;
                     }
-                    if visible_top.is_none() {
-                        visible_top = Some(index);
+                    let visible = page_rect.intersect(clip).height();
+                    if visible > best_visible {
+                        best_visible = visible;
+                        current = Some(index);
                     }
                     paint_page(painter, page_rect, index, slot);
                 }
-                (wanted, visible_top)
+                (wanted, current)
             })
             .inner;
 
-        if let Some(index) = visible_top {
+        if let Some(index) = current {
             self.current_page = index;
         }
-        self.evict();
-        self.request(generation, wanted);
+        wanted
+    }
+
+    /// 单页模式：只画当前页，滚轮一格翻一页。页面比窗口高时先在页内滚，滚到头再翻。
+    fn single_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: egui::Vec2,
+        pixels_per_point: f32,
+        settling: bool,
+    ) -> Vec<(f32, usize, u16)> {
+        let count = self.page_count();
+        if let Some(index) = self.scroll_to.take() {
+            self.current_page = index.min(count - 1);
+            self.single_jump = Some(Edge::Top);
+        }
+        self.current_page = self.current_page.min(count - 1);
+        let overflows = self.page_display_size(self.current_page, viewport).y + PAGE_GAP * 2.0
+            > viewport.y + 0.5;
+        self.wheel_flip(ui, overflows);
+
+        let now = ui.ctx().input(|input| input.time);
+        if now < self.quiet_until {
+            ui.ctx()
+                .input_mut(|input| input.smooth_scroll_delta.y = 0.0);
+        }
+
+        let index = self.current_page;
+        let size = self.page_display_size(index, viewport);
+        let content = egui::vec2(
+            (size.x + SIDE_MARGIN * 2.0).max(viewport.x),
+            (size.y + PAGE_GAP * 2.0).max(viewport.y),
+        );
+        let mut scroll = egui::ScrollArea::both()
+            .id_salt(("pdf_single", self.key))
+            .auto_shrink([false, false]);
+        if let Some(edge) = self.single_jump.take() {
+            scroll = scroll.vertical_scroll_offset(match edge {
+                Edge::Top => 0.0,
+                // 超出部分由滚动区自己夹回，不必精确算。
+                Edge::Bottom => content.y,
+            });
+        }
+
+        let slot = &mut self.slots[index];
+        slot.last_used = self.frame;
+        let output = scroll.show(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(content, egui::Sense::hover());
+            let page_rect = egui::Rect::from_center_size(rect.center(), size);
+            paint_page(ui.painter(), page_rect, index, slot);
+        });
+        let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
+        self.at_top = output.state.offset.y <= 1.0;
+        self.at_bottom = output.state.offset.y >= max_offset - 1.0;
+
+        let mut wanted = Vec::new();
+        if let Some(target) = wants_render(&self.slots[index], size.x, pixels_per_point, settling) {
+            wanted.push((0.0, index, target));
+        }
+        // 前后各备一两页，翻过去就是现成的。往后翻的多，后页排在前页前面。
+        let neighbours = [
+            (1.0, index + 1),
+            (2.0, index.wrapping_sub(1)),
+            (3.0, index + 2),
+        ];
+        for (priority, neighbour) in neighbours {
+            if neighbour >= count {
+                continue;
+            }
+            let width = self.page_display_size(neighbour, viewport).x;
+            let slot = &mut self.slots[neighbour];
+            slot.last_used = self.frame;
+            if let Some(target) = wants_render(slot, width, pixels_per_point, settling) {
+                wanted.push((priority, neighbour, target));
+            }
+        }
+        wanted
+    }
+
+    /// 单页模式的滚轮：攒够一格翻一页。鼠标滚轮按「行」上报，一格正好一行；
+    /// 触控板按点上报，按 `TOUCHPAD_POINTS_PER_STEP` 折算。
+    fn wheel_flip(&mut self, ui: &egui::Ui, overflows: bool) {
+        if !ui.rect_contains_pointer(ui.max_rect()) {
+            self.wheel_steps = 0.0;
+            return;
+        }
+        let (now, steps) = ui.ctx().input(|input| {
+            let mut steps = 0.0;
+            for event in &input.events {
+                if let egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                    ..
+                } = event
+                {
+                    // Ctrl+滚轮是缩放，不翻页。
+                    if modifiers.ctrl || modifiers.command {
+                        continue;
+                    }
+                    steps += match unit {
+                        egui::MouseWheelUnit::Point => delta.y / TOUCHPAD_POINTS_PER_STEP,
+                        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => delta.y,
+                    };
+                }
+            }
+            (input.time, steps)
+        });
+        if steps == 0.0 {
+            if now - self.wheel_at > WHEEL_IDLE {
+                self.wheel_steps = 0.0;
+            }
+            return;
+        }
+        self.wheel_at = now;
+        // egui 的滚动量是内容移动方向：负值是往下滚，看后面的页。
+        let forward = steps < 0.0;
+        // 页内还能往这个方向滚，就交给滚动区，不算翻页。
+        if overflows && !(if forward { self.at_bottom } else { self.at_top }) {
+            self.wheel_steps = 0.0;
+            return;
+        }
+        // 换了方向，之前攒的零头作废。
+        if self.wheel_steps != 0.0 && (self.wheel_steps < 0.0) != forward {
+            self.wheel_steps = 0.0;
+        }
+        self.wheel_steps += steps;
+        if self.wheel_steps.abs() < 0.999 {
+            return;
+        }
+        self.wheel_steps = 0.0;
+        if forward && self.current_page + 1 < self.page_count() {
+            self.current_page += 1;
+            self.single_jump = Some(Edge::Top);
+            self.quiet_until = now + FLIP_QUIET;
+        } else if !forward && self.current_page > 0 {
+            self.current_page -= 1;
+            self.single_jump = Some(Edge::Bottom);
+            self.quiet_until = now + FLIP_QUIET;
+        }
     }
 
     /// 宽度防抖。拖窗口的过程中先用已有纹理缩放顶着，稳定下来才换一代重渲染。
-    fn settle_width(&mut self, ctx: &egui::Context, available: f32, pixels_per_point: f32) {
-        let base = self.page_display_size(0, available).x;
+    fn settle_width(&mut self, ctx: &egui::Context, viewport: egui::Vec2, pixels_per_point: f32) {
+        let base = self.page_display_size(0, viewport).x;
         let target = render_width(base, pixels_per_point);
         if target.abs_diff(self.render_width) < RERENDER_WIDTH_DELTA {
             self.width_changed_at = None;
@@ -491,32 +856,22 @@ impl PdfSession {
         self.width_changed_at = None;
         // 换代作废在途结果；旧纹理留着继续缩放显示，直到新的回来。
         self.generation += 1;
-        for slot in &mut self.slots {
-            slot.requested = false;
+        self.sent.clear();
+        if let Some(renderer) = &self.renderer {
+            renderer.0.replace(self.generation, Vec::new());
         }
     }
 
-    /// 把这一帧要的页发给渲染线程。线程只认最新一条，不必在这里排队。
-    fn request(&mut self, generation: u64, wanted: Vec<(usize, u16)>) {
-        if wanted.is_empty() {
+    /// 把这一帧要的页整批交给渲染队列。和上一批一样就不动，免得每帧抢锁。
+    fn request(&mut self, wanted: Vec<(usize, u16)>) {
+        if wanted == self.sent {
             return;
         }
-        let Some(commands) = &self.commands else {
+        let Some(renderer) = &self.renderer else {
             return;
         };
-        if commands
-            .send(PdfWant {
-                generation,
-                pages: wanted,
-            })
-            .is_err()
-        {
-            // 线程没了（多半是打开阶段就失败），别再标记等待，否则会一直转圈。
-            self.commands = None;
-            for slot in &mut self.slots {
-                slot.requested = false;
-            }
-        }
+        renderer.0.replace(self.generation, wanted.clone());
+        self.sent = wanted;
     }
 
     /// 纹理超预算就按最近使用时间淘汰。这一帧用到的页不动。
@@ -544,6 +899,38 @@ impl PdfSession {
             slot.width = 0;
         }
     }
+}
+
+/// 这一页要不要（重新）光栅化；要的话返回目标像素宽度。
+/// 已在队列里的页照样返回——每帧交出去的是完整的需求，不是增量。
+fn wants_render(
+    slot: &PageSlot,
+    display_width: f32,
+    pixels_per_point: f32,
+    settling: bool,
+) -> Option<u16> {
+    let target = render_width(display_width, pixels_per_point);
+    let stale = match slot.texture {
+        None => true,
+        Some(_) => !settling && slot.width.abs_diff(target) >= RERENDER_WIDTH_DELTA,
+    };
+    stale.then_some(target)
+}
+
+/// 两个矩形在竖直方向上的间距，相交为 0。
+fn vertical_distance(page: egui::Rect, clip: egui::Rect) -> f32 {
+    (page.top() - clip.bottom())
+        .max(clip.top() - page.bottom())
+        .max(0.0)
+}
+
+/// 按钮缩放：落到 `ZOOM_STEP` 的整数倍上，从「适合宽度」切过来也是整齐的百分比。
+fn zoom_step_up(scale: f32) -> f32 {
+    ((scale / ZOOM_STEP + 0.01).floor() + 1.0) * ZOOM_STEP
+}
+
+fn zoom_step_down(scale: f32) -> f32 {
+    ((scale / ZOOM_STEP - 0.01).ceil() - 1.0) * ZOOM_STEP
 }
 
 /// 页面显示宽度（点）换算成光栅化宽度（设备像素）。
@@ -589,11 +976,18 @@ fn paint_page(painter: &egui::Painter, rect: egui::Rect, index: usize, slot: &Pa
     );
 }
 
-/// 渲染线程主体：解析一次、缓存一次，之后按主线程给的页列表光栅化。
+/// 渲染线程数：CPU 的一半，至少 1 条，至多 `MAX_RENDER_THREADS` 条。
+fn render_threads() -> usize {
+    thread::available_parallelism()
+        .map(|cores| (cores.get() / 2).clamp(1, MAX_RENDER_THREADS))
+        .unwrap_or(1)
+}
+
+/// 首条渲染线程：读文件、报页面尺寸，再拉起其余渲染线程，自己也加入渲染。
 fn worker(
     key: PdfKey,
     path: PathBuf,
-    commands: Receiver<PdfWant>,
+    queue: Arc<RenderQueue>,
     results: Sender<WorkerResult>,
     ctx: egui::Context,
 ) {
@@ -605,7 +999,7 @@ fn worker(
     };
 
     let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
+        Ok(bytes) => Arc::new(bytes),
         Err(error) => {
             send(PdfMessage::Failed(format!(
                 "无法读取 {}：{error}",
@@ -614,7 +1008,7 @@ fn worker(
             return;
         }
     };
-    let pdf = match Pdf::new(bytes) {
+    let pdf = match Pdf::new(Arc::clone(&bytes)) {
         Ok(pdf) => pdf,
         Err(error) => {
             send(PdfMessage::Failed(format!(
@@ -640,33 +1034,36 @@ fn worker(
         return;
     }
 
+    for _ in 1..render_threads() {
+        let bytes = Arc::clone(&bytes);
+        let queue = Arc::clone(&queue);
+        let results = results.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            // 同一份字节首条线程已经解析成功，这里失败只可能是极端情况，少一条线程而已。
+            if let Ok(pdf) = Pdf::new(bytes) {
+                render_loop(key, &pdf, &queue, &results, &ctx);
+            }
+        });
+    }
+    render_loop(key, &pdf, &queue, &results, &ctx);
+}
+
+/// 渲染线程主循环：从队列取页、光栅化、回传，队列关闭即退出。
+fn render_loop(
+    key: PdfKey,
+    pdf: &Pdf,
+    queue: &RenderQueue,
+    results: &Sender<WorkerResult>,
+    ctx: &egui::Context,
+) {
+    let pages = pdf.pages();
     // 字体与图像的解码结果都落在这里。hayro 的建议就是每份 PDF 建一个、全程复用；
     // 每页新建一个等于每翻一页重新解码一遍嵌入的中文字体。
     let cache = RenderCache::new();
-    let mut next: Option<PdfWant> = None;
-    loop {
-        let mut want = match next.take() {
-            Some(want) => want,
-            None => match commands.recv() {
-                Ok(want) => want,
-                // 发送端随会话一起析构，标签关了就退出。
-                Err(_) => return,
-            },
-        };
-        // 积压的指令里只有最后一条还算数。
-        while let Ok(newer) = commands.try_recv() {
-            want = newer;
-        }
-
-        for &(index, width) in &want.pages {
-            // 每页之间回头看一眼：用户已经滚走了就立刻改道，不把整批渲染完。
-            if let Ok(newer) = commands.try_recv() {
-                next = Some(newer);
-                break;
-            }
-            let Some(page) = pages.get(index) else {
-                continue;
-            };
+    while let Some(job) = queue.next() {
+        let (generation, index, width) = job;
+        let image = pages.get(index).map(|page| {
             let (page_width, _) = page.render_dimensions();
             let scale = f32::from(width) / page_width;
             let pixmap = hayro::render(
@@ -682,18 +1079,29 @@ fn worker(
                 },
             );
             // hayro 出的是预乘 alpha，直接按预乘读；顺带把逐像素转换留在这条线程上。
-            let image = egui::ColorImage::from_rgba_premultiplied(
+            egui::ColorImage::from_rgba_premultiplied(
                 [usize::from(pixmap.width()), usize::from(pixmap.height())],
                 pixmap.data_as_u8_slice(),
-            );
-            if !send(PdfMessage::Page {
-                generation: want.generation,
-                index,
-                width,
-                image,
-            }) {
-                return;
-            }
+            )
+        });
+        queue.finish(job);
+        let Some(image) = image else {
+            continue;
+        };
+        let delivered = results
+            .send(WorkerResult::Pdf {
+                key,
+                message: PdfMessage::Page {
+                    generation,
+                    index,
+                    width,
+                    image,
+                },
+            })
+            .is_ok();
+        ctx.request_repaint();
+        if !delivered {
+            return;
         }
     }
 }
@@ -701,6 +1109,16 @@ fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::{self, Receiver};
+
+    /// 起一组渲染线程；返回的句柄析构时关队列，测试结束线程随之退出。
+    fn spawn_worker(path: PathBuf) -> (RenderHandle, Receiver<WorkerResult>) {
+        let (tx, rx) = mpsc::channel();
+        let queue = Arc::new(RenderQueue::default());
+        let handle = RenderHandle(Arc::clone(&queue));
+        thread::spawn(move || worker(1, path, queue, tx, egui::Context::default()));
+        (handle, rx)
+    }
 
     /// 生成一页最小 PDF，避免单元测试依赖系统 PDF 程序或原生动态库。
     fn minimal_pdf() -> Vec<u8> {
@@ -760,11 +1178,7 @@ mod tests {
         let path = dir.path().join("one-page.pdf");
         std::fs::write(&path, minimal_pdf()).unwrap();
 
-        let (tx, rx) = mpsc::channel();
-        let (_commands, command_rx) = mpsc::channel();
-        thread::spawn(move || {
-            worker(1, path, command_rx, tx, egui::Context::default());
-        });
+        let (_commands, rx) = spawn_worker(path);
 
         let mut sizes = Vec::new();
         assert!(drain(&rx, |message| match message {
@@ -784,17 +1198,8 @@ mod tests {
         let path = dir.path().join("one-page.pdf");
         std::fs::write(&path, minimal_pdf()).unwrap();
 
-        let (tx, rx) = mpsc::channel();
-        let (commands, command_rx) = mpsc::channel();
-        thread::spawn(move || {
-            worker(1, path, command_rx, tx, egui::Context::default());
-        });
-        commands
-            .send(PdfWant {
-                generation: 7,
-                pages: vec![(0, 400)],
-            })
-            .unwrap();
+        let (commands, rx) = spawn_worker(path);
+        commands.0.replace(7, vec![(0, 400)]);
 
         let mut got = None;
         assert!(drain(&rx, |message| match message {
@@ -816,20 +1221,43 @@ mod tests {
         assert!(image.pixels.iter().all(|pixel| pixel.a() == 255));
     }
 
+    /// 整批替换：上一批没轮到的页作废，新一批按顺序取；正在渲的同一页不重复派发。
+    /// 旧实现在这里丢页——被新指令顶掉的页在主线程上永远挂着「已请求」，中间页一直空白。
+    #[test]
+    fn queue_replaces_batch_and_skips_in_flight() {
+        let queue = RenderQueue::default();
+        queue.replace(1, vec![(0, 400), (1, 400), (2, 400)]);
+        let first = queue.next().unwrap();
+        assert_eq!(first, (1, 0, 400));
+
+        // 用户滚走了：新一批里仍有正在渲的 0 页，外加 5、6 页。
+        queue.replace(1, vec![(0, 400), (5, 400), (6, 400)]);
+        assert_eq!(queue.next(), Some((1, 5, 400)));
+        queue.finish(first);
+        assert_eq!(queue.next(), Some((1, 6, 400)));
+
+        // 1、2 页没在新一批里，再滚回来时重新交上去照样会渲。
+        queue.replace(1, vec![(1, 400), (2, 400)]);
+        assert_eq!(queue.next(), Some((1, 1, 400)));
+        assert_eq!(queue.next(), Some((1, 2, 400)));
+
+        queue.close();
+        assert_eq!(queue.next(), None);
+    }
+
+    #[test]
+    fn zoom_steps_land_on_quarter_marks() {
+        assert_eq!(zoom_step_up(1.0), 1.25);
+        assert_eq!(zoom_step_down(1.0), 0.75);
+        // 「适合宽度」下的 1.37 倍，放大落到 1.5，缩小落到 1.25。
+        assert_eq!(zoom_step_up(1.37), 1.5);
+        assert_eq!(zoom_step_down(1.37), 1.25);
+    }
+
     /// 读不到文件要给出中文提示，而不是让标签一直转圈。
     #[test]
     fn missing_pdf_reports_readable_error() {
-        let (tx, rx) = mpsc::channel();
-        let (_commands, command_rx) = mpsc::channel();
-        thread::spawn(move || {
-            worker(
-                1,
-                PathBuf::from("definitely-missing.pdf"),
-                command_rx,
-                tx,
-                egui::Context::default(),
-            );
-        });
+        let (_commands, rx) = spawn_worker(PathBuf::from("definitely-missing.pdf"));
 
         let mut error = String::new();
         assert!(drain(&rx, |message| match message {
@@ -849,11 +1277,7 @@ mod tests {
         let path = std::env::var_os("GONGWEN_PDF_TEST")
             .map(PathBuf::from)
             .expect("请设置 GONGWEN_PDF_TEST");
-        let (tx, rx) = mpsc::channel();
-        let (commands, command_rx) = mpsc::channel();
-        thread::spawn(move || {
-            worker(1, path, command_rx, tx, egui::Context::default());
-        });
+        let (commands, rx) = spawn_worker(path);
 
         let mut count = 0;
         assert!(drain(&rx, |message| match message {
@@ -866,11 +1290,8 @@ mod tests {
         assert!(count >= 1);
 
         commands
-            .send(PdfWant {
-                generation: 1,
-                pages: (0..count).map(|index| (index, 900)).collect(),
-            })
-            .unwrap();
+            .0
+            .replace(1, (0..count).map(|index| (index, 900)).collect());
         let mut rendered = 0;
         drain(&rx, |message| {
             if let PdfMessage::Page { image, .. } = message {
