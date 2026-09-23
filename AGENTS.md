@@ -62,7 +62,8 @@ cargo build --release --locked
 - 版本号只维护在两处：`Cargo.toml` 的根包 `version` 和 `Cargo.lock` 里
   `name = "gongwen-assistant"` 的 `version`。
 - 本机**没有 `pwsh`**，不要调用 `scripts/bump-version.ps1`，手动编辑上述两处。
-- `ci.yml` 在 push `main` 时触发（macOS / Windows / Linux 三平台跑 fmt / clippy / test）；
+- `ci.yml` 在 push `main` 时触发（macOS / Windows / Linux 三平台跑 fmt / clippy / test；
+  另在干净的 Ubuntu 20.04 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`）；
   `release.yml` 在 push `v*` tag 时触发，产出 8 个资产（Windows setup.exe、
   Linux ARM64/AMD64 deb、macOS ARM64 DMG 及各自 `.sha256`）。
 - Release workflow 全程约 20–30 分钟。

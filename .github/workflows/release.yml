@@ -548,6 +548,26 @@ jobs:
           set -euo pipefail
           bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_${{ matrix.arch }}.deb
 
+      # 装得上不等于打得开：dlopen 的库、GL 上下文、首帧 panic 只有真起窗口
+      # 才暴露。见 scripts/smoke-launch-linux.sh。
+      - name: Launch app under Xvfb
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends \
+            xvfb x11-utils x11-apps imagemagick
+          bash ./scripts/smoke-launch-linux.sh gongwen-assistant 20 launch-smoke
+
+      - name: Upload launch logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-smoke-${{ matrix.arch }}-${{ strategy.job-index }}
+          path: launch-smoke
+          if-no-files-found: ignore
+          retention-days: 14
+
   build-macos:
     name: Build macOS ARM64
     runs-on: macos-15

@@ -129,3 +129,159 @@ jobs:
       # backend. Keep that feature combination compiled on a real Linux host.
       - name: Check Omarchy portal build
         run: cargo check --locked --no-default-features --features linux-portal-dialogs
+
+  # 按发布方式（Debian buster / GLIBC 2.28 容器 + release profile）构建 Linux
+  # 二进制，交给下面的 ubuntu-2004-launch 在干净的 Ubuntu 20.04 里装包并真正启动。
+  linux-glibc228-release:
+    name: Build release binary (Linux ${{ matrix.arch }} / GLIBC 2.28)
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: debian:buster
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install Debian build dependencies
+        run: |
+          set -euo pipefail
+          sed -i \
+            -e 's|deb.debian.org/debian|archive.debian.org/debian|g' \
+            -e 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' \
+            -e '/buster-updates/d' \
+            /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            build-essential \
+            pkg-config \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb1-dev \
+            libxkbcommon-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-linux-${{ matrix.arch }}-binary
+          path: target/release/gongwen-assistant
+          if-no-files-found: error
+          retention-days: 3
+
+  # Ubuntu 20.04 是麒麟 V10 的底子，也是这批用户机器的实际系统。这里不只看
+  # deb 能不能装上（release.yml 的 verify-deb 已经做了），而是在干净的 20.04
+  # 里用真实 runtime 打包、只装 Depends，再在 Xvfb 里真正打开一次窗口：
+  # dlopen 的库缺失、GL 上下文建不起来、首帧 panic 这类"一打开就闪退"的问题，
+  # ldd 看不出来，只有真起窗口才会暴露。
+  ubuntu-2004-launch:
+    name: Launch smoke test (Ubuntu 20.04 / ${{ matrix.arch }})
+    needs: linux-glibc228-release
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      # 与 release.yml 的 RUNTIME_RELEASE_TAG 保持一致。
+      RUNTIME_RELEASE_TAG: v0.6.0
+      RUNTIME_REPO: billowsand/gongwen-runtime
+      DEBIAN_FRONTEND: noninteractive
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl unzip
+
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-linux-${{ matrix.arch }}-binary
+          path: dist/staging
+
+      - name: Assemble staging directory with runtime
+        run: |
+          set -euo pipefail
+          staging=dist/staging
+          chmod 755 "$staging/gongwen-assistant"
+          asset="runtime-linux-${{ matrix.arch }}.zip"
+          curl --fail --location --retry 3 \
+            "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
+            --output "/tmp/${asset}"
+          unzip -qo "/tmp/${asset}" -d "$staging/runtime" || {
+            status=$?
+            test "$status" -eq 1
+          }
+          # 与 package-portable.ps1 的布局一致：平台子目录里的 tectonic 放到
+          # runtime/tectonic/tectonic；zip 不保存执行位，这里补上。
+          install -m 755 \
+            "$staging/runtime/tectonic/linux-${{ matrix.arch }}/tectonic" \
+            "$staging/runtime/tectonic/tectonic"
+          rm -rf "$staging/runtime/tectonic/linux-${{ matrix.arch }}"
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md "$staging/"
+
+      - name: Package deb
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          bash ./scripts/package-deb.sh "$version" dist/staging dist ${{ matrix.arch }}
+
+      # 先只装 deb 的 Depends，确认依赖声明本身够用；再装 Xvfb 等测试工具。
+      - name: Install deb and check shared libraries
+        run: bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_${{ matrix.arch }}.deb
+
+      - name: Install virtual display
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends \
+            xvfb x11-utils x11-apps imagemagick
+
+      - name: Launch app under Xvfb
+        run: bash ./scripts/smoke-launch-linux.sh gongwen-assistant 20 launch-smoke
+
+      - name: Upload launch logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-smoke-ubuntu2004-${{ matrix.arch }}
+          path: launch-smoke
+          if-no-files-found: ignore
+          retention-days: 14
