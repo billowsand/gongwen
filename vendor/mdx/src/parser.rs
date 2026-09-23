@@ -91,7 +91,11 @@ pub fn parse(content: &str) -> Vec<Block> {
             if let Some(id) = label {
                 blocks.push(Block::Label(id));
             }
-            blocks.push(Block::Heading { level, text: body });
+            // 标题不走行内解析，反斜杠转义在这里单独去掉，与正文一致。
+            blocks.push(Block::Heading {
+                level,
+                text: inline::unescape(&body),
+            });
             i += 1;
             continue;
         }
@@ -229,8 +233,9 @@ fn parse_trailing_table_caption(
     }
 
     if i < lines.len() {
-        if let Some(caption) = parse_table_caption_marker(lines[i].trim()) {
-            return (Some(caption), i + 1);
+        // 表前表题取自已解析段落的 `flatten`，转义已去；表后表题是原始行，这里补去。
+        if let Some((caption, label)) = parse_table_caption_marker(lines[i].trim()) {
+            return (Some((inline::unescape(&caption), label)), i + 1);
         }
     }
 
@@ -748,6 +753,31 @@ mod tests {
             })
             .expect("caption");
         assert_eq!(caption, "测试表格");
+    }
+
+    #[test]
+    fn headings_and_captions_drop_backslash_escapes() {
+        let blocks = parse("## 第\\*1\\*号文件\n");
+        assert!(matches!(&blocks[0], Block::Heading { text, .. } if text == "第*1*号文件"));
+
+        let captions = |md: &str| -> Vec<String> {
+            parse(md)
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Table { caption, .. } => caption.clone(),
+                    _ => None,
+                })
+                .collect()
+        };
+        let table = "| 列A | 列B |\n|---|---|\n| 1 | 2 |\n";
+        assert_eq!(
+            captions(&format!("Table: 单价\\$与\\*号\n\n{table}")),
+            ["单价$与*号"]
+        );
+        assert_eq!(
+            captions(&format!("{table}\n: 单价\\$与\\*号\n")),
+            ["单价$与*号"]
+        );
     }
 
     #[test]

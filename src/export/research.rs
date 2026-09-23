@@ -761,4 +761,42 @@ mod tests {
             "封面题名应回退到正文 `#`：{tex}"
         );
     }
+
+    /// 反斜杠转义要与预览一致：`\$`、`\*` 印成字面符号，不能漏出反斜杠。
+    /// anydoc 0.2 导入的 Word 正文就会带这些转义。
+    ///
+    /// 注意 `\$价格$` 收尾那个 `$` 没转义，同一段后面再有 `$` 就会和它结对——
+    /// 预览（`math_flow::split_pieces`）同样如此，所以公式放在另一段。
+    #[test]
+    fn mdx_honours_backslash_escapes_like_the_preview() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.tex");
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "测试报告".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        write_tex(
+            &path,
+            &input,
+            concat!(
+                "<!-- [正文] -->\n\n",
+                "## 研究背景\n\n",
+                "单价 \\$20 与 \\$价格$ 不是公式，a \\*b 2 \\* 3。\n\n",
+                "公式 $x^{2}$ 照常。\n",
+            ),
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告应转换成功");
+
+        let tex = fs::read_to_string(&path).unwrap()
+            + &fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap_or_default();
+        assert!(!tex.contains("textbackslash"), "不应漏出反斜杠：{tex}");
+        assert!(
+            tex.contains("单价 \\$20 与 \\$价格\\$ 不是公式，a *b 2 * 3。"),
+            "{tex}"
+        );
+        assert!(tex.contains("公式 \\(x^{2}\\) 照常。"), "{tex}");
+    }
 }

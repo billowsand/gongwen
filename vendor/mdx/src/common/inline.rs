@@ -30,7 +30,7 @@ fn inline_matcher() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"`[^`]+`|!?\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|\{@[A-Za-z][\w:.-]*\}|\[(?:@[^\s@;,\[\]{}\\]+)(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*\]|\$[^$\n]+\$",
+            r"`[^`]+`|!?\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|\{@[A-Za-z][\w:.-]*\}|\[(?:@[^\s@;,\[\]{}\\]+)(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*\]|\$(?:\\\$|[^$\n])+\$",
         )
         .expect("invalid inline regex")
     })
@@ -99,6 +99,11 @@ pub fn parse(text: &str) -> Vec<Inline> {
 /// 统一行内层：代码 / 链接 / 图片 / 强调 / 交叉引用 / 文献引用同处一层，靠
 /// [`inline_matcher`] 的最左非重叠匹配定优先级。用 `find_at` 从游标推进，以便
 /// 图片可以额外吞掉紧随其后的 `{#id}` 锚点。强调命中后对内部递归调用 [`parse`]。
+///
+/// 反斜杠转义（CommonMark）：被 `\` 转义的定界符只是字面字符，不开启、也不闭合
+/// 任何构造；Text 里的 `\` + ASCII 标点去掉反斜杠。行内公式另与公文助手预览
+/// 对齐：公式内容可含 `\$`，紧跟在另一个 `$` 后面的 `$` 不开启公式（行内 `$$`
+/// 不结对）。
 fn parse_inline(text: &str) -> Vec<Inline> {
     if text.is_empty() {
         return Vec::new();
@@ -109,10 +114,15 @@ fn parse_inline(text: &str) -> Vec<Inline> {
     let mut pos = 0;
 
     while let Some(m) = re.find_at(text, pos) {
-        if m.start() > pos {
-            out.push(Inline::Text(text[pos..m.start()].to_string()));
-        }
         let part = m.as_str();
+        if !delimiters_are_live(text, m.start(), m.end()) {
+            // 起始定界符是字面字符：连同前面的文字一起收成文本，从下一个字符起重找。
+            let next = m.start() + part.chars().next().map_or(1, char::len_utf8);
+            push_text(&mut out, &text[pos..next]);
+            pos = next;
+            continue;
+        }
+        push_text(&mut out, &text[pos..m.start()]);
         pos = m.end();
         match part.as_bytes()[0] {
             // 行内代码：内容原样。
@@ -158,15 +168,81 @@ fn parse_inline(text: &str) -> Vec<Inline> {
                     out.push(Inline::Citation(keys));
                 }
             }
-            _ => out.push(Inline::Text(part.to_string())),
+            _ => push_text(&mut out, part),
         }
     }
 
-    if pos < text.len() {
-        out.push(Inline::Text(text[pos..].to_string()));
-    }
+    push_text(&mut out, &text[pos..]);
 
     out
+}
+
+/// `index` 处的字符前面是否紧跟奇数个反斜杠——是的话它被转义成了字面字符。
+/// 反斜杠是 ASCII，按字节往回数不会切进 UTF-8 序列内部。
+fn escaped_at(text: &str, index: usize) -> bool {
+    text.as_bytes()[..index]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+/// 一次正则命中的定界符是否真的生效。
+///
+/// - 起始定界符被转义：不生效（`\*不是斜体*`、`\$5`、`\[不是链接](u)`）；
+/// - 强调与公式的收尾定界符被转义：不生效（`*a\*`、`$a\$`）；
+/// - 公式的 `$` 紧跟在另一个未转义的 `$` 后面：不生效，行内 `$$x$$` 整体是文本。
+///
+/// 代码的收尾反引号不查：代码里的反斜杠本来就是字面的。
+fn delimiters_are_live(text: &str, start: usize, end: usize) -> bool {
+    if escaped_at(text, start) {
+        return false;
+    }
+    let part = &text[start..end];
+    let closer = match part.as_bytes()[0] {
+        b'*' if part.starts_with("**") => 2,
+        b'*' | b'$' => 1,
+        _ => return true,
+    };
+    if escaped_at(text, end - closer) {
+        return false;
+    }
+    !(part.starts_with('$')
+        && start > 0
+        && text.as_bytes()[start - 1] == b'$'
+        && !escaped_at(text, start - 1))
+}
+
+/// CommonMark 的反斜杠转义：`\` 后跟 ASCII 标点时去掉反斜杠、只留标点；
+/// 其余反斜杠（`C:\Users` 这类）原样保留。
+pub fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next_if(char::is_ascii_punctuation) {
+                out.push(next);
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 收一段文本：先去转义，再与前一个 Text 合并——跳过被转义的定界符时文本会
+/// 分几次收进来，合并后与未转义时的切分形状一致。
+fn push_text(out: &mut Vec<Inline>, raw: &str) {
+    if raw.is_empty() {
+        return;
+    }
+    let text = unescape(raw);
+    match out.last_mut() {
+        Some(Inline::Text(last)) => last.push_str(&text),
+        _ => out.push(Inline::Text(text)),
+    }
 }
 
 /// 把 Inline 序列拼回纯字符串（emitter 在不需要格式时使用，比如表格 cell 简化）。
@@ -523,5 +599,64 @@ mod tests {
     #[test]
     fn flatten_reconstructs_math_source() {
         assert_eq!(flatten(&[Inline::Math("E=mc^2".into())]), "$E=mc^2$");
+    }
+
+    fn text(s: &str) -> Vec<Inline> {
+        vec![Inline::Text(s.into())]
+    }
+
+    #[test]
+    fn backslash_escapes_become_literal_punctuation() {
+        assert_eq!(parse(r"字段\_名称与\*号"), text("字段_名称与*号"));
+        // 非标点前的反斜杠原样保留，路径不被吃掉。
+        assert_eq!(parse(r"C:\Users\文件"), text(r"C:\Users\文件"));
+        // 偶数个反斜杠：前一对是字面 `\`，后面的定界符照常生效。
+        assert_eq!(
+            parse(r"\\*斜*"),
+            vec![
+                Inline::Text(r"\".into()),
+                Inline::Italic(vec![Inline::Text("斜".into())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn escaped_delimiters_do_not_open_or_close() {
+        assert_eq!(parse(r"\*不是斜体*"), text("*不是斜体*"));
+        assert_eq!(parse(r"*不是斜体\*"), text("*不是斜体*"));
+        assert_eq!(parse(r"**不加粗\**"), text("**不加粗**"));
+        assert_eq!(parse(r"\`不是代码`"), text("`不是代码`"));
+        // `\!` 只转义感叹号，后面的链接照常成立。
+        assert_eq!(
+            parse(r"\![图](a.png)"),
+            vec![
+                Inline::Text("!".into()),
+                Inline::Link {
+                    text: "图".into(),
+                    url: "a.png".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn code_keeps_its_backslashes() {
+        assert_eq!(parse(r"`a\*b`"), vec![Inline::Code(r"a\*b".into())]);
+    }
+
+    /// 与公文助手的研究报告预览（`preview::math_flow::split_pieces`）同一套规则。
+    #[test]
+    fn inline_math_follows_the_preview_rules() {
+        // anydoc 0.2 导入的文字会把可能成公式的 `$` 写成 `\$`。
+        assert_eq!(parse(r"含\$价格$ 与"), text("含$价格$ 与"));
+        assert_eq!(
+            parse(r"价格 \$5 与 $x$"),
+            vec![Inline::Text("价格 $5 与 ".into()), Inline::Math("x".into())]
+        );
+        // 公式内容可以含 `\$`，原样交给 LaTeX。
+        assert_eq!(parse(r"$a\$b$"), vec![Inline::Math(r"a\$b".into())]);
+        assert_eq!(parse(r"$a\$"), text("$a$"));
+        // 行内 `$$` 不结对。
+        assert_eq!(parse("见 $$x$$ 所示"), text("见 $$x$$ 所示"));
     }
 }

@@ -80,6 +80,16 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   `{\noindent\centering ...\par}` / `{\noindent\raggedleft ...\par}`；
   `docx_research.rs` / `docx_official.rs` 输出居中 / 右对齐、无首行缩进的段落。
 
+反斜杠转义同样先在这里落地（anydoc 0.2 导入的 Word 正文会带 `\$`、`\*` 等转义，
+原先全部印成 `\textbackslash{}`）：
+
+- `common/inline.rs`：被 `\` 转义的定界符不开启、也不闭合任何构造（强调与公式
+  另查收尾定界符）；Text 里 `\` + ASCII 标点去掉反斜杠，新增 `pub fn unescape`；
+  代码内容不动。行内公式与公文助手预览（`preview::math_flow::split_pieces`）
+  对齐：公式内容可含 `\$`（正则 `\$(?:\\\$|[^$\n])+\$`），紧跟在另一个未转义
+  `$` 之后的 `$` 不开启公式，行内 `$$x$$` 整体是文本；
+- `parser.rs`：标题文字与表后表题（`: 标题`）不走行内解析，单独过 `unescape`。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持
