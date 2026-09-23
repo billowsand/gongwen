@@ -87,7 +87,7 @@ jobs:
           } | Set-Content "${asset}.sha256" -Encoding utf8
 
       - name: Upload Windows release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-win-x64
           path: |
@@ -229,7 +229,7 @@ jobs:
           cargo test --locked --release --bin gongwen-assistant "$IME_SMOKE_TEST" -- --ignored
 
       - name: Upload GLIBC 2.28 binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-arm64-glibc228-binary
           path: |
@@ -297,7 +297,7 @@ jobs:
           bash ./scripts/package-linux-tar.sh "$version" "$staging" "$GITHUB_WORKSPACE" arm64
 
       - name: Upload Linux release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux-arm64
           path: |
@@ -435,7 +435,7 @@ jobs:
           cargo test --locked --release --bin gongwen-assistant "$IME_SMOKE_TEST" -- --ignored
 
       - name: Upload GLIBC 2.28 binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-amd64-glibc228-binary
           path: |
@@ -503,7 +503,7 @@ jobs:
           bash ./scripts/package-linux-tar.sh "$version" "$staging" "$GITHUB_WORKSPACE" amd64
 
       - name: Upload Linux release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux-amd64
           path: |
@@ -597,7 +597,7 @@ jobs:
           bash ./scripts/package-dmg.sh "$version" "$staging" "$GITHUB_WORKSPACE"
 
       - name: Upload macOS release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-macos-arm64
           path: |
