@@ -22,10 +22,22 @@ pub fn parse(content: &str) -> Vec<Block> {
 
     let mut blocks: Vec<Block> = Vec::new();
     let mut list_indents: Vec<(usize, u8)> = Vec::new();
+    // 刚读到序号表标记、还在等它的表格。标记只管紧邻的下一张表，中间只许隔空行。
+    let mut numbered_pending = false;
     let mut i = 0;
     while i < lines.len() {
         let raw = &lines[i];
         let line = raw.trim();
+
+        // 0) 序号表标记 `<!-- [序号表] -->`：本身不落版面，记下来交给紧随的表格。
+        if markers::is_numbered_table(line) {
+            numbered_pending = true;
+            i += 1;
+            continue;
+        }
+        if !line.is_empty() && !table::is_table_line(line) {
+            numbered_pending = false;
+        }
 
         // 1) 区段标记 `<!-- [...] -->`
         if let Some(kind) = markers::detect(line) {
@@ -89,9 +101,14 @@ pub fn parse(content: &str) -> Vec<Block> {
             list_indents.clear();
             let leading_caption = take_leading_table_caption(&mut blocks);
             let (parsed, new_i) = table::parse_table(&lines, i);
-            if let Some(rows) = parsed {
-                let (trailing_caption, final_i) = parse_trailing_table_caption(&lines, new_i);
-                let (caption, label) = match leading_caption.or(trailing_caption) {
+            if let Some(table::ParsedTable { rows, spans }) = parsed {
+                // 表前已有表题时不再往后找：表后那一行多半是下一张表的表前表题，
+                // 顺手吞掉的话下一张表就没了题目。
+                let (caption, final_i) = match leading_caption {
+                    Some(caption) => (Some(caption), new_i),
+                    None => parse_trailing_table_caption(&lines, new_i),
+                };
+                let (caption, label) = match caption {
                     Some((c, l)) => (Some(c), l),
                     None => (None, None),
                 };
@@ -99,7 +116,12 @@ pub fn parse(content: &str) -> Vec<Block> {
                 if let Some(id) = label {
                     blocks.push(Block::Label(id));
                 }
-                blocks.push(Block::Table { rows, caption });
+                blocks.push(Block::Table {
+                    rows,
+                    caption,
+                    spans,
+                    numbered: std::mem::take(&mut numbered_pending),
+                });
                 i = final_i;
                 continue;
             }
@@ -524,6 +546,81 @@ mod tests {
         );
     }
 
+    /// 序号表标记：本身不成块（不会印到纸上），紧随的表格认成序号表，
+    /// 表格里的 `||` 与 `^^` 解析成合并单元格。
+    #[test]
+    fn numbered_table_marker_flags_the_next_table() {
+        let md = "表：任务分工\n<!-- [序号表] -->\n\n| 序号 | 事项 | 单位 |\n|---|---|---|\n| （一）重点工作 |||\n| 1 | 编制计划 | 办公室 |\n| 2 | ^^ | 财务处 |\n";
+        let blocks = parse(md);
+        assert!(
+            !blocks.iter().any(|block| matches!(
+                block,
+                Block::Paragraph(inlines) if inline::flatten(inlines).contains("序号表")
+            )),
+            "标记不得落成段落：{blocks:?}"
+        );
+        let Some(Block::Table {
+            caption,
+            spans,
+            numbered,
+            rows,
+        }) = blocks.iter().find(|b| matches!(b, Block::Table { .. }))
+        else {
+            panic!("应当解析出表格：{blocks:?}");
+        };
+        assert!(numbered);
+        assert_eq!(caption.as_deref(), Some("任务分工"), "标记不挡表题");
+        assert_eq!(rows[1][0], "（一）重点工作");
+        assert_eq!(
+            spans,
+            &vec![
+                table::TableSpan {
+                    row: 1,
+                    column: 0,
+                    row_span: 1,
+                    column_span: 3,
+                },
+                table::TableSpan {
+                    row: 2,
+                    column: 1,
+                    row_span: 2,
+                    column_span: 1,
+                },
+            ]
+        );
+    }
+
+    /// 两张表各带表前表题：前一张不能把后一张的表题当成自己的表后表题吞掉。
+    #[test]
+    fn leading_caption_of_the_next_table_is_not_swallowed() {
+        let md =
+            "表：甲\n| A | B |\n|---|---|\n| 1 | 2 |\n\n表：乙\n| C | D |\n|---|---|\n| 3 | 4 |\n";
+        let captions = parse(md)
+            .into_iter()
+            .filter_map(|block| match block {
+                Block::Table { caption, .. } => Some(caption),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            captions,
+            vec![Some("甲".to_string()), Some("乙".to_string())]
+        );
+    }
+
+    #[test]
+    fn numbered_table_marker_is_void_after_other_text() {
+        let md = "<!-- [序号表] -->\n正文一句。\n\n| A | B |\n|---|---|\n| 1 | 2 |\n";
+        let blocks = parse(md);
+        assert!(blocks.iter().any(|b| matches!(
+            b,
+            Block::Table {
+                numbered: false,
+                ..
+            }
+        )));
+    }
+
     #[test]
     fn parses_table_block() {
         let md = "| 列A | 列B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
@@ -532,7 +629,7 @@ mod tests {
             .iter()
             .find(|b| matches!(b, Block::Table { .. }))
             .expect("table");
-        if let Block::Table { rows, caption } = table {
+        if let Block::Table { rows, caption, .. } = table {
             assert_eq!(rows.len(), 3);
             assert_eq!(rows[0], vec!["列A".to_string(), "列B".to_string()]);
             assert_eq!(rows[2], vec!["3".to_string(), "4".to_string()]);

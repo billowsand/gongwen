@@ -12,6 +12,10 @@ mod tex_official;
 mod tex_research;
 mod tex_research_emitter;
 
+/// 表格解析（含 `||` / `^^` 合并单元格）。公开出来供调用方核对：交给 mdx 的
+/// 表格源码与自己预览用的网格是否一致。
+pub use common::table;
+
 /// 转换后的目标格式。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OutputFormat {

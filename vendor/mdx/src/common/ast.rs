@@ -3,6 +3,8 @@
 //! 设计原则：尽量贴近 markdown 语义，不附加风格信息。具体编号、字体、章节
 //! 形态由 emitter 自行决定，common 不预设公文 / 研报。
 
+pub use super::table::TableSpan;
+
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum Block {
@@ -23,9 +25,15 @@ pub enum Block {
 
     /// 表格。`rows[0]` 视为表头；分隔行 `|---|` 已被剥离。
     /// `caption` 对应 pandoc table caption（如 `Table: 标题` 或表后 `: 标题`）。
+    /// `rows` 是矩形网格；`spans` 是其中的合并单元格（见 `table::parse_cells`），
+    /// 被合并掉的格子在 `rows` 里是空串。
+    /// `numbered` 是序号表（表前一行 `<!-- [序号表] -->`）：整行合并的分组行
+    /// 靠左排，其余与普通表格相同。
     Table {
         rows: Vec<Vec<String>>,
         caption: Option<String>,
+        spans: Vec<TableSpan>,
+        numbered: bool,
     },
 
     /// 区段切换标记，由 `<!-- [...] -->` 注释触发。emitter 据此切模式。

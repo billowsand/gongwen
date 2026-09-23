@@ -16,6 +16,30 @@ use super::ast::MarkerKind;
 /// - `<!-- [参考文献] -->`
 /// - `<!-- abstract -->`
 pub fn detect(line: &str) -> Option<MarkerKind> {
+    let inner = comment_label(line)?;
+    match inner.to_ascii_lowercase().as_str() {
+        "摘要" | "abstract" => Some(MarkerKind::Abstract),
+        "附录" | "附件" | "appendix" => Some(MarkerKind::Appendix),
+        "版本变更记录" | "changelog" => Some(MarkerKind::Changelog),
+        "正文" => Some(MarkerKind::Body),
+        "参考文献" | "reference" | "references" => Some(MarkerKind::Reference),
+        _ => None,
+    }
+}
+
+/// 序号表标记 `<!-- [序号表] -->`（含「序号表格」与英文变体），只对紧随其后的
+/// 第一张表格生效，中间只许隔空行。与公文助手 `parse_numbered_table_marker` 同一套写法。
+pub fn is_numbered_table(line: &str) -> bool {
+    comment_label(line).is_some_and(|inner| {
+        matches!(
+            inner.to_ascii_lowercase().as_str(),
+            "序号表" | "序号表格" | "numbered-table" | "numbered_table" | "numberedtable"
+        )
+    })
+}
+
+/// 独占一行的 HTML 注释里写的标签：去掉 `<!-- -->` 和两侧的 `[]`/`【】`。
+fn comment_label(line: &str) -> Option<&str> {
     let trimmed = line.trim();
     if !trimmed.starts_with("<!--") || !trimmed.ends_with("-->") {
         return None;
@@ -31,13 +55,5 @@ pub fn detect(line: &str) -> Option<MarkerKind> {
         .or_else(|| inner.strip_suffix('】'))
         .unwrap_or(inner)
         .trim();
-
-    match inner.to_ascii_lowercase().as_str() {
-        "摘要" | "abstract" => Some(MarkerKind::Abstract),
-        "附录" | "附件" | "appendix" => Some(MarkerKind::Appendix),
-        "版本变更记录" | "changelog" => Some(MarkerKind::Changelog),
-        "正文" => Some(MarkerKind::Body),
-        "参考文献" | "reference" | "references" => Some(MarkerKind::Reference),
-        _ => None,
-    }
+    Some(inner)
 }

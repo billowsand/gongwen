@@ -43,6 +43,19 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 - `tex_research/merger.rs` 渲染新增的封面变量；
 - `docx_research.rs` 封面改为锚定页面的图文框。
 
+表格的合并单元格与序号表同样先在这里落地：
+
+- `common/table.rs` 新增 `TableSpan` / `ParsedTable` / `parse_cells`，按
+  MultiMarkdown 写法解析 `||` 横向合并、`^^` 纵向合并；`Block::Table` 多了
+  `spans` 与 `numbered` 两个字段；`lib.rs` 导出 `mdx::table`；
+- `common/markers.rs` 新增 `is_numbered_table`：`<!-- [序号表] -->` 不再原样
+  印出，紧随的表格标成序号表（整行合并的分组行靠左）；编号本身由调用方写进
+  源码（公文助手见 `export::research::write_numbered_tables`）；
+- `common/table_layout.rs`：`analyze_table` 跳过横向合并格，新增 `cell_alignment`；
+- `common/table_to_longtblr.rs` 输出 `\SetCell[r=..,c=..]`，整行合并格套
+  `\parbox[t]`；`docx_research.rs` / `docx_official.rs` 输出 `gridSpan` / `vMerge`；
+- `parser.rs`：表前已有表题时不再吞掉表后那一行（那是下一张表的表题）。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持

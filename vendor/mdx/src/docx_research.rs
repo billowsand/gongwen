@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use crate::common::ast::{Block, Inline, MarkerKind};
 use crate::common::front_matter::{self, Metadata};
 use crate::common::numbering::{int_to_roman, number_to_uppercase_letter};
-use crate::common::table_layout::{analyze_table, to_docx_grid};
+use crate::common::table::{span_at, TableSpan};
+use crate::common::table_layout::{analyze_table, cell_alignment, to_docx_grid, ColumnAlignment};
 use crate::parser;
 
 // ===== 字体（与 LaTeX md2tex.cls 一致；用户须装相应字体，否则 Word 端字体回退） =====
@@ -705,7 +706,12 @@ impl MainEmitter {
                 };
                 add_list_paragraph(docx, *level, &prefix, content, &self.image_base_dir)
             }
-            Block::Table { rows, caption } => {
+            Block::Table {
+                rows,
+                caption,
+                spans,
+                numbered,
+            } => {
                 self.list.reset();
                 let docx = if let Some(caption) = caption {
                     self.table_counter += 1;
@@ -715,7 +721,7 @@ impl MainEmitter {
                 } else {
                     docx
                 };
-                add_table(docx, rows)
+                add_table(docx, rows, spans, *numbered)
             }
             Block::CodeBlock { content, .. } => {
                 self.list.reset();
@@ -953,7 +959,12 @@ impl ChangelogEmitter {
                 let prefix = self.list.next_prefix(*level);
                 add_list_paragraph(docx, *level, &prefix, content, &self.image_base_dir)
             }
-            Block::Table { rows, caption } => {
+            Block::Table {
+                rows,
+                caption,
+                spans,
+                numbered,
+            } => {
                 self.list.reset();
                 let docx = if let Some(caption) = caption {
                     self.table_counter += 1;
@@ -961,7 +972,7 @@ impl ChangelogEmitter {
                 } else {
                     docx
                 };
-                add_table(docx, rows)
+                add_table(docx, rows, spans, *numbered)
             }
             Block::Math(content) => {
                 // docx 不支持公式：降级为源码原文段落
@@ -1309,11 +1320,11 @@ fn add_code_block(mut docx: Docx, content: &str) -> Docx {
     docx
 }
 
-fn add_table(docx: Docx, rows: &[Vec<String>]) -> Docx {
+fn add_table(docx: Docx, rows: &[Vec<String>], spans: &[TableSpan], numbered: bool) -> Docx {
     if rows.is_empty() {
         return docx;
     }
-    let column_layout = analyze_table(rows);
+    let column_layout = analyze_table(rows, spans);
     let max_cols = column_layout.len();
     if max_cols == 0 {
         return docx;
@@ -1323,9 +1334,35 @@ fn add_table(docx: Docx, rows: &[Vec<String>]) -> Docx {
     let mut table_rows = Vec::new();
     for (row_idx, row) in rows.iter().enumerate() {
         let mut cells = Vec::new();
-        for (col_idx, &column_width) in grid.iter().enumerate() {
-            let cell_data = row.get(col_idx).map(String::as_str).unwrap_or("");
-            let align = AlignmentType::Center;
+        let mut col_idx = 0;
+        while col_idx < grid.len() {
+            let span = span_at(spans, row_idx, col_idx);
+            // 横向合并格只在锚点列写一格（gridSpan），同行被它盖住的列跳过；
+            // 纵向合并的续行照样要写一格 vMerge=continue 占位。
+            if span.is_some_and(|span| span.column != col_idx) {
+                col_idx += 1;
+                continue;
+            }
+            let column_span = span
+                .map_or(1, |span| span.column_span)
+                .min(grid.len() - col_idx);
+            let width = grid[col_idx..col_idx + column_span].iter().sum::<usize>();
+            let continuation = span.is_some_and(|span| span.row != row_idx);
+            let cell_data = if continuation {
+                ""
+            } else {
+                row.get(col_idx).map(String::as_str).unwrap_or("")
+            };
+            // 表格一律居中；序号表整行合并的分组行靠左，与 TeX 一致。
+            let group_row = numbered
+                && column_span == grid.len()
+                && cell_alignment(rows, spans, &column_layout, numbered, row_idx, col_idx)
+                    == ColumnAlignment::Left;
+            let align = if group_row {
+                AlignmentType::Left
+            } else {
+                AlignmentType::Center
+            };
             // 表头整行黑体加粗；表体解析 cell 内的 **加粗**/*斜体* 行内格式。
             let is_header = row_idx == 0;
             let mut p = Paragraph::new().align(align);
@@ -1345,11 +1382,23 @@ fn add_table(docx: Docx, rows: &[Vec<String>]) -> Docx {
                 }
                 p = p.add_run(run);
             }
-            cells.push(
-                TableCell::new()
-                    .width(column_width, WidthType::Dxa)
-                    .add_paragraph(p),
-            );
+            // 竖向居中与 TeX 一致；纵向合并格尤其看得出来。
+            let mut cell = TableCell::new()
+                .width(width, WidthType::Dxa)
+                .vertical_align(VAlignType::Center)
+                .add_paragraph(p);
+            if column_span > 1 {
+                cell = cell.grid_span(column_span);
+            }
+            if span.is_some_and(|span| span.row_span > 1) {
+                cell = cell.vertical_merge(if continuation {
+                    VMergeType::Continue
+                } else {
+                    VMergeType::Restart
+                });
+            }
+            cells.push(cell);
+            col_idx += column_span;
         }
         table_rows.push(TableRow::new(cells));
     }
@@ -1640,7 +1689,7 @@ mod tests {
             vec!["1".into(), "短项".into(), "这是一段很长的说明文字。".into()],
             vec!["2".into(), "另一项".into(), "另一段较长的说明文字。".into()],
         ];
-        let docx = add_table(Docx::new(), &rows);
+        let docx = add_table(Docx::new(), &rows, &[], false);
         let table = match docx.document.children.last() {
             Some(DocumentChild::Table(table)) => table,
             other => panic!("expected table, got {other:?}"),

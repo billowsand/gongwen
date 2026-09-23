@@ -3,7 +3,8 @@
 //! 智能表格处理：自动分析内容决定对齐方式和列宽分配。
 
 use crate::common::ast::{Block, Inline};
-use crate::common::table_layout::{analyze_table, ColumnLayout, ColumnWidth};
+use crate::common::table::{span_at, TableSpan};
+use crate::common::table_layout::{analyze_table, cell_alignment, ColumnLayout, ColumnWidth};
 
 /// 生成智能列规格
 fn generate_smart_colspec(columns: &[ColumnLayout]) -> String {
@@ -102,17 +103,71 @@ fn push_cell_inlines(result: &mut String, inlines: &[Inline]) {
     }
 }
 
-/// 处理表格行
-fn process_row(cells: &[String], is_header: bool) -> String {
-    let rendered: Vec<String> = cells
+/// 处理表格行。被合并掉的格子留空（tabularray 要求它们照样占位）；合并格
+/// 的锚点写 `\SetCell[r=..,c=..]{对齐}`。
+fn process_row(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    columns: &[ColumnLayout],
+    numbered: bool,
+    row_index: usize,
+) -> String {
+    let is_header = row_index == 0;
+    // 有 X 列时表格撑满版心，整行合并格才能按 \linewidth 算宽；全是定宽列的窄表
+    // 套了反而会把盒子撑出表外。
+    let full_width = columns
         .iter()
-        .map(|cell| {
+        .any(|column| matches!(column.width, ColumnWidth::Relative(_)));
+    let rendered: Vec<String> = rows[row_index]
+        .iter()
+        .enumerate()
+        .map(|(column_index, cell)| {
+            let span = span_at(spans, row_index, column_index);
+            if span.is_some_and(|span| !span.is_anchor(row_index, column_index)) {
+                return String::new();
+            }
             let content = cell_to_latex(cell);
-            if is_header {
+            let content = if is_header {
                 format!("\\heiti {}", content)
             } else {
                 content
+            };
+            let Some(span) = span else {
+                return content;
+            };
+            let align = cell_alignment(rows, spans, columns, numbered, row_index, column_index);
+            let mut options = Vec::new();
+            if span.row_span > 1 {
+                options.push(format!("r={}", span.row_span));
             }
+            if span.column_span > 1 {
+                options.push(format!("c={}", span.column_span));
+            }
+            // 整行合并格在 tabularray 2022A（内置 bundle 钉死的版本）下拿不到最终
+            // 列宽：文字框按第一遍的窄宽度排，短标题会中途折行。套一个按版心算好
+            // 宽度的 \parbox 让内容按整行宽度排；盒子占满整格，`\SetCell` 的对齐
+            // 管不到盒内文字，得在盒里再写一遍。
+            //
+            // 盒子按首行基线对齐（`[t]`），不能用 `[c]`：`[c]` 要按数学轴居中，
+            // 会去加载当前字号的数学字体，而研究报告的内置 bundle 里没有这一号
+            // 的 cmmi，编译直接中断。
+            let content = if full_width && span.column_span == columns.len() {
+                let inner_align = match align.latex() {
+                    'l' => "\\raggedright",
+                    _ => "\\centering",
+                };
+                format!(
+                    "\\parbox[t]{{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}}{{{inner_align} {content}}}"
+                )
+            } else {
+                content
+            };
+            format!(
+                "\\SetCell[{}]{{{}}} {}",
+                options.join(","),
+                align.latex(),
+                content
+            )
         })
         .collect();
 
@@ -120,14 +175,21 @@ fn process_row(cells: &[String], is_header: bool) -> String {
 }
 
 /// 生成 longtblr 环境的完整代码
-/// 输入：表格行数据 Vec<Vec<String>>，第一行是表头
+/// 输入：矩形表格网格（第一行是表头）与其中的合并单元格；`numbered` 为序号表，
+/// 整行合并的分组行靠左。
 /// `label` 为交叉引用锚点（tabularray 外层 `label=` 选项）；引用表格需同时提供 caption。
-pub fn emit_longtblr(rows: &[Vec<String>], caption: Option<&str>, label: Option<&str>) -> String {
+pub fn emit_longtblr(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    numbered: bool,
+    caption: Option<&str>,
+    label: Option<&str>,
+) -> String {
     if rows.is_empty() {
         return String::new();
     }
 
-    let columns = analyze_table(rows);
+    let columns = analyze_table(rows, spans);
     if columns.is_empty() {
         return String::new();
     }
@@ -183,12 +245,8 @@ pub fn emit_longtblr(rows: &[Vec<String>], caption: Option<&str>, label: Option<
 
     let mut content_lines = vec![longtblr_begin];
 
-    // 处理表头
-    content_lines.push(process_row(&rows[0], true));
-
-    // 处理表体
-    for row in rows.iter().skip(1) {
-        content_lines.push(process_row(row, false));
+    for row_index in 0..rows.len() {
+        content_lines.push(process_row(rows, spans, &columns, numbered, row_index));
     }
 
     // 添加结束标记
@@ -203,7 +261,15 @@ pub fn table_block_to_longtblr(block: &Block, caption: Option<&str>) -> String {
         Block::Table {
             rows,
             caption: block_caption,
-        } => emit_longtblr(rows, caption.or(block_caption.as_deref()), None),
+            spans,
+            numbered,
+        } => emit_longtblr(
+            rows,
+            spans,
+            *numbered,
+            caption.or(block_caption.as_deref()),
+            None,
+        ),
         _ => String::new(),
     }
 }
@@ -220,7 +286,7 @@ mod tests {
             vec!["1".to_string(), "第一条说明文字，较长。".to_string()],
             vec!["12".to_string(), "第二条说明文字，同样较长。".to_string()],
         ];
-        let result = emit_longtblr(&rows, None, None);
+        let result = emit_longtblr(&rows, &[], false, None, None);
         assert!(result.contains("Q[c,wd=2em]"), "{result}");
         assert!(result.contains(" X["), "第二列应仍为 X 列: {result}");
     }
@@ -233,7 +299,7 @@ mod tests {
             vec!["1".to_string(), "文字".to_string()],
             vec!["123".to_string(), "文字".to_string()],
         ];
-        let result = emit_longtblr(&rows, None, None);
+        let result = emit_longtblr(&rows, &[], false, None, None);
         assert!(!result.contains("wd=2em"), "{result}");
     }
 
@@ -245,7 +311,7 @@ mod tests {
             vec!["5%".to_string(), "文字".to_string()],
             vec!["1.5".to_string(), "文字".to_string()],
         ];
-        let result = emit_longtblr(&rows, None, None);
+        let result = emit_longtblr(&rows, &[], false, None, None);
         assert!(!result.contains("wd=2em"), "{result}");
     }
 
@@ -258,7 +324,7 @@ mod tests {
             vec!["".to_string(), "文字".to_string()],
             vec!["99".to_string(), "文字".to_string()],
         ];
-        let result = emit_longtblr(&rows, None, None);
+        let result = emit_longtblr(&rows, &[], false, None, None);
         assert!(result.contains("Q[c,wd=2em]"), "{result}");
     }
 
@@ -269,7 +335,7 @@ mod tests {
             vec!["1".to_string(), "2".to_string(), "文本内容".to_string()],
             vec!["3".to_string(), "4".to_string(), "更多文本".to_string()],
         ];
-        let result = emit_longtblr(&rows, Some("测试表格"), None);
+        let result = emit_longtblr(&rows, &[], false, Some("测试表格"), None);
         assert!(result.contains("\\begin{longtblr}"));
         assert!(result.contains("\\end{longtblr}"));
         assert!(result.contains("caption={测试表格}"));
@@ -279,7 +345,7 @@ mod tests {
     #[test]
     fn test_longtblr_with_label() {
         let rows = vec![vec!["列A".to_string()], vec!["1".to_string()]];
-        let result = emit_longtblr(&rows, Some("测试表格"), Some("tbl:products"));
+        let result = emit_longtblr(&rows, &[], false, Some("测试表格"), Some("tbl:products"));
         assert!(
             result.contains("caption={测试表格}, label={tbl:products}"),
             "{result}"
@@ -288,7 +354,76 @@ mod tests {
 
     #[test]
     fn table_cell_renders_citation() {
-        let tex = emit_longtblr(&[vec!["文献".into()], vec!["[@a; @b]".into()]], None, None);
+        let tex = emit_longtblr(
+            &[vec!["文献".into()], vec!["[@a; @b]".into()]],
+            &[],
+            false,
+            None,
+            None,
+        );
         assert!(tex.contains("\\cite{a,b}"), "{tex}");
+    }
+
+    fn cells(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn merged_cells_emit_setcell_and_keep_placeholders() {
+        let rows = cells(&[
+            &["地区", "指标", "数值"],
+            &["华东", "产量", "12"],
+            &["", "销量", "10"],
+            &["合计", "", "22"],
+        ]);
+        let spans = [
+            TableSpan {
+                row: 1,
+                column: 0,
+                row_span: 2,
+                column_span: 1,
+            },
+            TableSpan {
+                row: 3,
+                column: 0,
+                row_span: 1,
+                column_span: 2,
+            },
+        ];
+        let tex = emit_longtblr(&rows, &spans, false, None, None);
+        assert!(
+            tex.contains("\\SetCell[r=2]{c} 华东 & 产量 & 12 \\\\"),
+            "{tex}"
+        );
+        assert!(
+            tex.contains("\n & 销量 & 10 \\\\"),
+            "被纵向合并的格子要留空位：{tex}"
+        );
+        assert!(tex.contains("\\SetCell[c=2]{c} 合计 &  & 22 \\\\"), "{tex}");
+    }
+
+    #[test]
+    fn numbered_group_rows_span_the_row_and_align_left() {
+        let rows = cells(&[
+            &["序号", "事项", "责任单位"],
+            &["（一）重点工作", "", ""],
+            &["1", "完成年度计划编制", "办公室"],
+        ]);
+        let spans = [TableSpan {
+            row: 1,
+            column: 0,
+            row_span: 1,
+            column_span: 3,
+        }];
+        let tex = emit_longtblr(&rows, &spans, true, None, None);
+        assert!(tex.contains("\\SetCell[c=3]{l} \\parbox"), "{tex}");
+        assert!(
+            tex.contains("{\\raggedright （一）重点工作} &  &  \\\\"),
+            "{tex}"
+        );
+        // 分组标题不参与列宽统计：序号列仍是窄数字列。
+        assert!(tex.contains("Q[c,wd=2em]"), "{tex}");
     }
 }

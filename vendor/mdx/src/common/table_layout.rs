@@ -3,6 +3,8 @@
 //! This is the canonical implementation originally used by the research TeX
 //! emitter. All TeX and DOCX emitters consume the same analysis result.
 
+use crate::common::table::{span_at, TableSpan};
+
 /// Analysis thresholds inherited from the research TeX table algorithm.
 const SHORT_TEXT_THRESHOLD: f64 = 8.0;
 const LONG_TEXT_THRESHOLD: f64 = 20.0;
@@ -192,15 +194,21 @@ fn calculate_width_ratios(columns_stats: &[ColumnStats]) -> Vec<f64> {
 
 /// Analyze table body cells (the first row is the header) using the canonical
 /// research TeX algorithm.
-pub fn analyze_table(rows: &[Vec<String>]) -> Vec<ColumnLayout> {
+///
+/// 横向合并的格子横跨好几列，它的字数说明不了其中任何一列，统计时跳过——
+/// 否则序号表的分组标题会把只放一两位数字的序号列撑宽。
+pub fn analyze_table(rows: &[Vec<String>], spans: &[TableSpan]) -> Vec<ColumnLayout> {
     let num_cols = rows.first().map_or(0, Vec::len);
     if num_cols == 0 {
         return Vec::new();
     }
 
     let mut columns = vec![Vec::new(); num_cols];
-    for row in rows.iter().skip(1) {
+    for (row_idx, row) in rows.iter().enumerate().skip(1) {
         for (col_idx, cell) in row.iter().take(num_cols).enumerate() {
+            if span_at(spans, row_idx, col_idx).is_some_and(|span| span.column_span > 1) {
+                continue;
+            }
             columns[col_idx].push(cell.clone());
         }
     }
@@ -224,6 +232,59 @@ pub fn analyze_table(rows: &[Vec<String>]) -> Vec<ColumnLayout> {
             has_punctuation: stats.has_punctuation,
         })
         .collect()
+}
+
+/// 单元格的水平对齐。表头一律居中；普通格随列；横向合并格跨列统一判定：
+/// 序号表里整行合并的分组行靠左，所跨各列对齐一致就随列，不一致再按格内
+/// 文字判定（数字、无句读的短语居中，句子靠左）。
+///
+/// 与公文助手 `export::table::resolve_cell_alignment` 同一套规则。
+pub fn cell_alignment(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    columns: &[ColumnLayout],
+    numbered: bool,
+    row: usize,
+    column: usize,
+) -> ColumnAlignment {
+    if row == 0 {
+        return ColumnAlignment::Center;
+    }
+    let fallback = columns
+        .get(column)
+        .map_or(ColumnAlignment::Left, |layout| layout.alignment);
+    let Some(span) = span_at(spans, row, column) else {
+        return fallback;
+    };
+    if span.column_span <= 1 {
+        return fallback;
+    }
+    if numbered && span.column == 0 && span.column_span >= columns.len() {
+        return ColumnAlignment::Left;
+    }
+    let end = (span.column + span.column_span).min(columns.len());
+    let covered = &columns[span.column.min(end)..end];
+    let Some(first) = covered.first() else {
+        return fallback;
+    };
+    if covered
+        .iter()
+        .all(|layout| layout.alignment == first.alignment)
+    {
+        return first.alignment;
+    }
+    let text = rows
+        .get(span.row)
+        .and_then(|cells| cells.get(span.column))
+        .map_or("", String::as_str)
+        .trim();
+    if is_numeric_content(text)
+        || (!has_sentence_punctuation(text) && calc_display_width(text) <= LONG_TEXT_THRESHOLD)
+    {
+        ColumnAlignment::Center
+    } else {
+        ColumnAlignment::Left
+    }
 }
 
 /// Convert the shared column layout to fixed widths for DOCX.
@@ -299,7 +360,7 @@ mod tests {
             vec!["1".into(), "第一条说明文字，较长。".into()],
             vec!["12".into(), "第二条说明文字，同样较长。".into()],
         ];
-        let layout = analyze_table(&rows);
+        let layout = analyze_table(&rows, &[]);
         assert_eq!(layout[0].width, ColumnWidth::FixedEm(2.0));
         assert!(matches!(layout[1].width, ColumnWidth::Relative(_)));
     }
@@ -315,7 +376,7 @@ mod tests {
             ],
             vec!["2".into(), "另一项".into(), "另一段较长的说明文字。".into()],
         ];
-        let layout = analyze_table(&rows);
+        let layout = analyze_table(&rows, &[]);
         let grid = to_docx_grid(&layout, 8_844, 280);
 
         assert_eq!(grid[0], 560);

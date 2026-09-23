@@ -188,9 +188,14 @@ impl TexResearchEmitter {
             } => {
                 self.emit_list_item(*level, content);
             }
-            Block::Table { rows, caption } => {
+            Block::Table {
+                rows,
+                caption,
+                spans,
+                numbered,
+            } => {
                 self.reset_list();
-                self.emit_table(rows, caption.as_deref());
+                self.emit_table(rows, spans, *numbered, caption.as_deref());
             }
             Block::Marker(kind) => {
                 self.handle_marker(kind);
@@ -438,7 +443,13 @@ impl TexResearchEmitter {
         self.out.push_str("\n\n");
     }
 
-    fn emit_table(&mut self, rows: &[Vec<String>], caption: Option<&str>) {
+    fn emit_table(
+        &mut self,
+        rows: &[Vec<String>],
+        spans: &[crate::common::table::TableSpan],
+        numbered: bool,
+        caption: Option<&str>,
+    ) {
         if rows.is_empty() {
             return;
         }
@@ -447,12 +458,12 @@ impl TexResearchEmitter {
 
         if self.in_abstract {
             // 摘要模式：收集表格
-            let table_latex = emit_longtblr(rows, caption, label.as_deref());
+            let table_latex = emit_longtblr(rows, spans, numbered, caption, label.as_deref());
             self.abstract_content.push(table_latex);
             return;
         }
 
-        let table_latex = emit_longtblr(rows, caption, label.as_deref());
+        let table_latex = emit_longtblr(rows, spans, numbered, caption, label.as_deref());
         self.out.push_str(&table_latex);
         self.out.push_str(
             "
@@ -1078,6 +1089,8 @@ mod tests {
                 vec!["1".into(), "2".into()],
             ],
             caption: None,
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("\\begin{longtblr}"));
@@ -1093,6 +1106,8 @@ mod tests {
                 vec!["**重点**".into(), "*斜体*".into()],
             ],
             caption: None,
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("\\textbf{重点}"));
@@ -1110,6 +1125,8 @@ mod tests {
                 vec!["1".into(), "2".into()],
             ],
             caption: Some("测试表格".into()),
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("\\begin{longtblr}[caption={测试表格}]"));
@@ -1299,6 +1316,8 @@ mod tests {
                 vec!["1".into(), "2".into()],
             ],
             caption: Some("产品清单".into()),
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(

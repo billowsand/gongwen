@@ -23,7 +23,8 @@ use crate::common::ast::{Block, Inline, MarkerKind};
 use crate::common::front_matter;
 use crate::common::inline;
 use crate::common::numbering::{int_to_roman, number_to_chinese, number_to_uppercase_letter};
-use crate::common::table_layout::{analyze_table, to_docx_grid};
+use crate::common::table::{span_at, TableSpan};
+use crate::common::table_layout::{analyze_table, cell_alignment, to_docx_grid, ColumnAlignment};
 use crate::parser;
 
 // ===== 圆圈数字（列表前缀用） =====
@@ -249,7 +250,12 @@ impl OfficialEmitter {
                 };
                 self.add_list_paragraph(docx, &prefix, content)
             }
-            Block::Table { rows, caption } => {
+            Block::Table {
+                rows,
+                caption,
+                spans,
+                numbered,
+            } => {
                 self.list.reset();
                 let docx = if let Some(caption) = caption {
                     self.table_counter += 1;
@@ -257,7 +263,7 @@ impl OfficialEmitter {
                 } else {
                     docx
                 };
-                self.add_table(docx, rows)
+                self.add_table(docx, rows, spans, *numbered)
             }
             Block::CodeBlock { content, .. } => {
                 self.list.reset();
@@ -426,11 +432,17 @@ impl OfficialEmitter {
         docx
     }
 
-    fn add_table(&self, docx: Docx, rows: &[Vec<String>]) -> Docx {
+    fn add_table(
+        &self,
+        docx: Docx,
+        rows: &[Vec<String>],
+        spans: &[TableSpan],
+        numbered: bool,
+    ) -> Docx {
         if rows.is_empty() {
             return docx;
         }
-        let column_layout = analyze_table(rows);
+        let column_layout = analyze_table(rows, spans);
         let max_cols = column_layout.len();
         if max_cols == 0 {
             return docx;
@@ -440,10 +452,33 @@ impl OfficialEmitter {
         let mut table_rows = Vec::new();
         for (row_idx, row_data) in rows.iter().enumerate() {
             let mut cells = Vec::new();
-            for (col_idx, &column_width) in grid.iter().enumerate() {
-                let cell_data = row_data.get(col_idx).map(|s| s.as_str()).unwrap_or("");
+            let mut col_idx = 0;
+            while col_idx < grid.len() {
+                let span = span_at(spans, row_idx, col_idx);
+                // 横向合并格只在锚点列写一格（gridSpan）；纵向合并的续行写
+                // vMerge=continue 占位。
+                if span.is_some_and(|span| span.column != col_idx) {
+                    col_idx += 1;
+                    continue;
+                }
+                let column_span = span
+                    .map_or(1, |span| span.column_span)
+                    .min(grid.len() - col_idx);
+                let width = grid[col_idx..col_idx + column_span].iter().sum::<usize>();
+                let continuation = span.is_some_and(|span| span.row != row_idx);
+                let cell_data = if continuation {
+                    ""
+                } else {
+                    row_data.get(col_idx).map(|s| s.as_str()).unwrap_or("")
+                };
+                // 表头居中、表体靠左；横向合并格按跨列统一判定（见 cell_alignment）。
                 let align = if row_idx == 0 {
                     AlignmentType::Center
+                } else if column_span > 1 {
+                    match cell_alignment(rows, spans, &column_layout, numbered, row_idx, col_idx) {
+                        ColumnAlignment::Center => AlignmentType::Center,
+                        ColumnAlignment::Left => AlignmentType::Left,
+                    }
                 } else {
                     AlignmentType::Left
                 };
@@ -452,11 +487,22 @@ impl OfficialEmitter {
                 let font = if row_idx == 0 { FONT_HEAD } else { FONT_BODY };
                 let p = Paragraph::new().align(align);
                 let p = add_inlines(p, &inline::parse(cell_data), font, SIZE_TABLE, false, None);
-                cells.push(
-                    TableCell::new()
-                        .width(column_width, WidthType::Dxa)
-                        .add_paragraph(p),
-                );
+                let mut cell = TableCell::new()
+                    .width(width, WidthType::Dxa)
+                    .vertical_align(VAlignType::Center)
+                    .add_paragraph(p);
+                if column_span > 1 {
+                    cell = cell.grid_span(column_span);
+                }
+                if span.is_some_and(|span| span.row_span > 1) {
+                    cell = cell.vertical_merge(if continuation {
+                        VMergeType::Continue
+                    } else {
+                        VMergeType::Restart
+                    });
+                }
+                cells.push(cell);
+                col_idx += column_span;
             }
             table_rows.push(TableRow::new(cells));
         }
@@ -802,7 +848,7 @@ mod tests {
             vec!["1".into(), "短项".into(), "这是一段很长的说明文字。".into()],
             vec!["2".into(), "另一项".into(), "另一段较长的说明文字。".into()],
         ];
-        let docx = OfficialEmitter::new().add_table(Docx::new(), &rows);
+        let docx = OfficialEmitter::new().add_table(Docx::new(), &rows, &[], false);
         let table = match docx.document.children.last() {
             Some(DocumentChild::Table(table)) => table,
             other => panic!("expected table, got {other:?}"),

@@ -236,9 +236,14 @@ impl TexEmitter {
             } => {
                 self.emit_list_item(*level, content);
             }
-            Block::Table { rows, caption } => {
+            Block::Table {
+                rows,
+                caption,
+                spans,
+                numbered,
+            } => {
                 self.reset_list();
-                self.emit_table(rows, caption.as_deref());
+                self.emit_table(rows, spans, *numbered, caption.as_deref());
             }
             Block::Marker(_) => {
                 // 公文路径不响应区段标记，原样忽略
@@ -403,7 +408,13 @@ impl TexEmitter {
         self.list_level = level;
     }
 
-    fn emit_table(&mut self, rows: &[Vec<String>], caption: Option<&str>) {
+    fn emit_table(
+        &mut self,
+        rows: &[Vec<String>],
+        spans: &[crate::common::table::TableSpan],
+        numbered: bool,
+        caption: Option<&str>,
+    ) {
         if rows.is_empty() {
             return;
         }
@@ -413,8 +424,13 @@ impl TexEmitter {
         // 与 research 同一套智能表格：longtblr 全边框、按内容自动分配
         // X 列宽比例、窄数字列固定 2em、表头黑体居中并续页重复；
         // 单元格内 \footnote 降级为全角括号内联注释（由 emit_longtblr 处理）
-        let table_latex =
-            crate::common::table_to_longtblr::emit_longtblr(rows, caption, label.as_deref());
+        let table_latex = crate::common::table_to_longtblr::emit_longtblr(
+            rows,
+            spans,
+            numbered,
+            caption,
+            label.as_deref(),
+        );
         if table_latex.is_empty() {
             return;
         }
@@ -821,6 +837,8 @@ mod tests {
                 vec!["1".into(), "2".into()],
             ],
             caption: None,
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("\\begin{longtblr}"), "got {}", body);
@@ -842,6 +860,8 @@ mod tests {
                 vec!["1".into(), "2".into()],
             ],
             caption: Some("产品清单".into()),
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("caption={产品清单}"), "got {}", body);
@@ -857,6 +877,8 @@ mod tests {
                 vec!["1".into(), "2".into()],
             ],
             caption: Some("产品清单".into()),
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("label={tbl:products}"), "got {}", body);
@@ -877,6 +899,8 @@ mod tests {
                 vec!["1".into(), "2".into()],
             ],
             caption: Some("产品清单".into()),
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(!body.contains("label="), "got {}", body);
@@ -893,6 +917,8 @@ mod tests {
                 vec!["12".into(), "第二条说明文字，同样较长。".into()],
             ],
             caption: None,
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("Q[c,wd=2em]"), "got {}", body);
@@ -908,6 +934,8 @@ mod tests {
                 vec!["**重点**".into(), "*斜体*".into()],
             ],
             caption: None,
+            spans: vec![],
+            numbered: false,
         });
         let body = test_body(e);
         assert!(body.contains("\\textbf{重点}"));
