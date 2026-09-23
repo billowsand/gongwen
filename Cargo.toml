@@ -56,7 +56,7 @@ qingjian-dictionary = { path = "vendor/qingjian/dictionary" }
 qingjian-learning = { path = "vendor/qingjian/learning" }
 qingjian-lm = { path = "vendor/qingjian/lm" }
 regex = "1.11"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"] }
 # Linux 文件选择器后端由上面的 crate feature 选择。不能同时把两种后端写在这里，
 # 因为 rfd 在启用 gtk3 时会固定选择 GTK3，而不会在运行时退回 portal。
 rfd = { version = "0.15", default-features = false }

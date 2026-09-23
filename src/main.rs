@@ -24,6 +24,7 @@ mod manuscript;
 mod manuscript_io;
 mod metrics;
 mod models;
+mod net;
 mod orphan_probe;
 mod outline;
 mod pdf_viewer;

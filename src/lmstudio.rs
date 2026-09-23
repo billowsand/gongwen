@@ -3,7 +3,6 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
@@ -36,10 +35,7 @@ struct ModelInfo {
 }
 
 fn client(config: &LmStudioConfig) -> Result<Client> {
-    Client::builder()
-        .timeout(Duration::from_secs(config.timeout_seconds.max(5)))
-        .build()
-        .context("创建 HTTP 客户端失败")
+    crate::net::client(&config.base_url, config.timeout_seconds)
 }
 
 fn endpoint(config: &LmStudioConfig, path: &str) -> String {
@@ -53,10 +49,7 @@ pub fn list_models(config: &LmStudioConfig) -> Result<Vec<String>> {
 /// 列出任意 OpenAI 兼容端点已加载的模型。知识库的 embedding / rerank 配置
 /// 与对话模型相互独立，探测时各用各的地址。
 pub fn list_models_at(base_url: &str, api_key: &str, timeout_seconds: u64) -> Result<Vec<String>> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(timeout_seconds.max(5)))
-        .build()
-        .context("创建 HTTP 客户端失败")?;
+    let client = crate::net::client(base_url, timeout_seconds)?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut request = client.get(url);
     if !api_key.trim().is_empty() {

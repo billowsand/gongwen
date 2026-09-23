@@ -814,6 +814,19 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
         a.lm_studio.timeout_seconds.to_string(),
         b.lm_studio.timeout_seconds.to_string(),
     );
+    field(
+        &mut out,
+        "网络代理",
+        a.proxy.mode.label(),
+        b.proxy.mode.label(),
+    );
+    field(
+        &mut out,
+        "代理地址",
+        masked_proxy_url(&a.proxy.url),
+        masked_proxy_url(&b.proxy.url),
+    );
+    field(&mut out, "不走代理", &a.proxy.bypass, &b.proxy.bypass);
     field(&mut out, "输出目录", &a.output_dir, &b.output_dir);
     field(
         &mut out,
@@ -979,6 +992,17 @@ fn masked(value: &str) -> String {
     }
 }
 
+/// 代理地址里可能带着 `用户名:密码@`，密码打码，其余照原样显示。
+fn masked_proxy_url(value: &str) -> String {
+    match reqwest::Url::parse(value.trim()) {
+        Ok(mut url) if url.password().is_some() => {
+            let _ = url.set_password(Some("******"));
+            url.to_string()
+        }
+        _ => value.to_string(),
+    }
+}
+
 fn field(
     out: &mut Vec<FieldChange>,
     label: &'static str,
@@ -1000,6 +1024,15 @@ fn field(
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_url_password_is_masked() {
+        assert_eq!(
+            masked_proxy_url("socks5://user:secret@10.0.0.2:1080"),
+            "socks5://user:******@10.0.0.2:1080"
+        );
+        assert_eq!(masked_proxy_url("127.0.0.1:7890"), "127.0.0.1:7890");
+    }
 
     /// 各处改动，按出现顺序。
     fn changes(diff: &BodyDiff) -> Vec<&BlockChange> {

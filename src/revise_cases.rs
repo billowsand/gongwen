@@ -337,6 +337,7 @@ mod tests {
     #[ignore = "需要本机模型服务才能运行"]
     fn measure_recall_and_false_alarms_against_a_live_model() {
         let config = crate::storage::load().unwrap_or_default();
+        crate::net::set_proxy(&config.proxy);
         let cfg = config.revise_model.clone();
         let resolved = cfg.resolve(&config.lm_studio);
         // 报错要说清楚「去哪儿改、改成什么」。只说「请在设置中配置」，用户还得

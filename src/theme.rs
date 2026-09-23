@@ -1534,6 +1534,7 @@ pub enum Icon {
     Folder,
     FolderPlus,
     GitCommit,
+    Globe,
     Hash,
     Heading,
     HelpCircle,
@@ -1677,6 +1678,7 @@ impl Icon {
                 "git-commit-horizontal",
                 include_bytes!("../assets/icons/git-commit-horizontal.svg"),
             ),
+            Self::Globe => ("globe", include_bytes!("../assets/icons/globe.svg")),
             Self::Hash => ("hash", include_bytes!("../assets/icons/hash.svg")),
             Self::Heading => ("heading", include_bytes!("../assets/icons/heading.svg")),
             Self::HelpCircle => (

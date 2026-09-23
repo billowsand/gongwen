@@ -10,7 +10,6 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 struct EmbeddingResponse {
@@ -23,11 +22,8 @@ struct EmbeddingItem {
     index: usize,
 }
 
-fn client(timeout_seconds: u64) -> Result<Client> {
-    Client::builder()
-        .timeout(Duration::from_secs(timeout_seconds.max(5)))
-        .build()
-        .context("创建 HTTP 客户端失败")
+fn client(base_url: &str, timeout_seconds: u64) -> Result<Client> {
+    crate::net::client(base_url, timeout_seconds)
 }
 
 fn endpoint(base_url: &str, path: &str) -> String {
@@ -46,7 +42,7 @@ pub fn embed(config: &EmbeddingConfig, texts: &[String]) -> Result<Vec<Vec<f32>>
         "model": config.model,
         "input": texts,
     });
-    let mut request = client(config.timeout_seconds)?
+    let mut request = client(&config.base_url, config.timeout_seconds)?
         .post(endpoint(&config.base_url, "embeddings"))
         .json(&payload);
     if !config.api_key.trim().is_empty() {
@@ -94,7 +90,7 @@ pub fn rerank(
     if !config.top_n_field.trim().is_empty() {
         payload[config.top_n_field.trim()] = json!(top_n.max(1));
     }
-    let mut request = client(config.timeout_seconds)?
+    let mut request = client(&config.base_url, config.timeout_seconds)?
         .post(endpoint(&config.base_url, config.path.trim()))
         .json(&payload);
     if !config.api_key.trim().is_empty() {

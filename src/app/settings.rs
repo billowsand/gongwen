@@ -10,7 +10,7 @@
 use crate::app::{GongwenApp, warn};
 use crate::models::{
     BoldStyle, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole, HeadingNumbering,
-    ListNumbering, PaperMode, RerankMode, ThemeName,
+    ListNumbering, PaperMode, ProxyMode, RerankMode, ThemeName,
 };
 use crate::storage;
 use crate::system_fonts;
@@ -46,6 +46,8 @@ pub(crate) enum SettingsSection {
     ReviseModel,
     /// 知识库（检索增强起草）。
     Knowledge,
+    /// 网络代理（访问模型服务走的通道）。
+    Network,
     /// 输出与录入（输出目录、编辑器选项）。
     Output,
     /// 界面主题与公文纸面。
@@ -75,6 +77,7 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
             SettingsSection::ModelService,
             SettingsSection::ReviseModel,
             SettingsSection::Knowledge,
+            SettingsSection::Network,
         ],
     ),
     (
@@ -107,6 +110,7 @@ impl SettingsSection {
             SettingsSection::ModelService => "本地模型服务",
             SettingsSection::ReviseModel => "AI 文字复核",
             SettingsSection::Knowledge => "知识库",
+            SettingsSection::Network => "网络代理",
             SettingsSection::Output => "输出与录入",
             SettingsSection::Theme => "界面主题",
             SettingsSection::Font => "字体",
@@ -125,6 +129,7 @@ impl SettingsSection {
             SettingsSection::ModelService => theme::Icon::PlugZap,
             SettingsSection::ReviseModel => theme::Icon::Sparkles,
             SettingsSection::Knowledge => theme::Icon::Library,
+            SettingsSection::Network => theme::Icon::Globe,
             SettingsSection::Output => theme::Icon::Folder,
             SettingsSection::Theme => theme::Icon::Palette,
             SettingsSection::Font => theme::Icon::Type,
@@ -153,6 +158,9 @@ impl SettingsSection {
             SettingsSection::Knowledge => {
                 "用本地模型服务的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。\
                  两个模型与起草对话模型相互独立。"
+            }
+            SettingsSection::Network => {
+                "起草、文字复核、知识库访问模型服务时走的通道，支持 HTTP / HTTPS / SOCKS 代理。本机地址（localhost、127.0.0.1）始终直连，本地模型服务不受影响。"
             }
             SettingsSection::Output => {
                 "导出 TeX 时会自动检测 XeLaTeX 或 Tectonic；检测到后编译 PDF 并清理中间文件。"
@@ -1106,6 +1114,7 @@ impl GongwenApp {
                             SettingsSection::ModelService => self.model_service_section_ui(ui),
                             SettingsSection::ReviseModel => self.revise_model_section_ui(ui),
                             SettingsSection::Knowledge => self.knowledge_section_ui(ui),
+                            SettingsSection::Network => self.network_section_ui(ui),
                             SettingsSection::Output => self.output_section_ui(ui),
                             SettingsSection::Theme => self.theme_settings_ui(ui),
                             SettingsSection::Font => self.font_settings_ui(ui),
@@ -1277,6 +1286,77 @@ impl GongwenApp {
 
             sub_heading(ui, "采纳统计", None);
             self.revise_metrics_ui(ui);
+        });
+    }
+
+    /// 网络代理分区：直连 / 跟随系统 / 自定义代理。
+    ///
+    /// 改动每帧同步给 [`crate::net`]，不必保存就能点「测试连接」验证。
+    fn network_section_ui(&mut self, ui: &mut egui::Ui) {
+        let proxy = &mut self.config.proxy;
+        sub_heading(ui, "通道", None);
+        setting_row(ui, "连接方式", None, |ui| {
+            for mode in ProxyMode::ALL {
+                let tip = match mode {
+                    ProxyMode::Direct => "不走任何代理，连环境变量里设的也不认",
+                    ProxyMode::System => {
+                        "先看 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 环境变量，没设再读 Windows「设置 → 网络和 Internet → 代理」里的手动代理。不支持 PAC 自动配置脚本"
+                    }
+                    ProxyMode::Custom => "用下面填的代理地址",
+                };
+                ui.radio_value(&mut proxy.mode, mode, mode.label())
+                    .on_hover_text(tip);
+            }
+        });
+        if proxy.mode == ProxyMode::Custom {
+            setting_field(
+                ui,
+                "代理地址",
+                &mut proxy.url,
+                "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",
+            );
+            setting_continuation(ui, |ui| {
+                match crate::net::parse_proxy_url(&proxy.url) {
+                Ok(_) => ui.label(
+                    egui::RichText::new(
+                        "协议可用 http、https、socks4、socks4a、socks5、socks5h；没写协议按 http。需要认证时写成 socks5://用户名:密码@主机:端口。socks5h 由代理端解析域名，本机 DNS 不可靠时用它。",
+                    )
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::text_muted()),
+                ),
+                Err(error) => ui.label(
+                    egui::RichText::new(format!("{error:#}"))
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::danger()),
+                ),
+            }
+            });
+            setting_row(
+                ui,
+                "不走代理",
+                Some("逗号分隔。域名含其子域，也可以写 IP 或网段，如 intranet.gov.cn, 10.0.0.0/8"),
+                |ui| {
+                    ui.add(theme::field(
+                        &mut proxy.bypass,
+                        "如 intranet.gov.cn, 10.0.0.0/8",
+                        f32::INFINITY,
+                    ));
+                },
+            );
+        }
+
+        sub_heading(ui, "验证", None);
+        setting_row(ui, "起草模型", None, |ui| {
+            if ui
+                .add_enabled(
+                    !self.busy,
+                    theme::icon_text_button(theme::Icon::PlugZap, "测试连接"),
+                )
+                .on_hover_text("按当前的代理设置访问「本地模型服务」里填的接口地址，读取模型列表")
+                .clicked()
+            {
+                self.start_model_probe();
+            }
         });
     }
 
