@@ -1114,7 +1114,10 @@ impl GongwenApp {
                             SettingsSection::Persistence => self.persistence_section_ui(ui),
                             SettingsSection::Security => self.security_section_ui(ui),
                             SettingsSection::Input => self.ime_section_ui(ui),
-                            SettingsSection::Guide => guide_section_ui(&mut self.help, ui),
+                            SettingsSection::Guide => {
+                                guide_section_ui(&mut self.help, ui);
+                                self.skill_pack_section_ui(ui);
+                            }
                         }
                         ui.add_space(8.0);
                     });
@@ -1482,6 +1485,88 @@ impl GongwenApp {
     }
 
     /// 导出格式分区：勾选起草页「导出」按钮产出的格式。
+    /// 上手指引里的「AI 技能包」：把公文 Markdown 规范导出成 Agent Skill，给
+    /// Claude、Codex、OpenCode、DeerFlow、pi 这些外部工具用。内容见 [`crate::skill_pack`]。
+    fn skill_pack_section_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("AI 技能包")
+                .color(theme::text())
+                .strong(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "把本程序的 Markdown 标记与七种文种的格式要求打包成技能（Skill），\
+                 装进 Claude、Codex、OpenCode、DeerFlow、pi 等工具后，它们写出的 .md \
+                 可直接粘贴到起草页排版导出。",
+            )
+            .color(theme::text_soft()),
+        );
+        ui.add_space(8.0);
+        // 对话框放到布局之后再开：在闭包里开会阻塞这一帧的布局。
+        let mut export_archive = false;
+        let mut export_folder = false;
+        ui.horizontal(|ui| {
+            export_archive = ui
+                .add(theme::secondary_icon_button(
+                    theme::Icon::Package,
+                    "导出 .skill 技能包",
+                ))
+                .on_hover_text(
+                    "单个文件（zip 格式）：Claude 桌面版 / 网页版在「技能」里上传；\
+                     其他工具解压后放进各自的 skills 目录",
+                )
+                .clicked();
+            export_folder = ui
+                .add(theme::secondary_icon_button(
+                    theme::Icon::Folder,
+                    "导出为技能文件夹",
+                ))
+                .on_hover_text(
+                    "选一个 skills 目录，在里面生成 gongwen-markdown 文件夹：\
+                     如 ~/.claude/skills、~/.agents/skills、~/.config/opencode/skills",
+                )
+                .clicked();
+        });
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("各工具的安装位置见使用帮助「设置全解 → 上手指引」。")
+                .size(theme::font_sizes::SMALL)
+                .color(theme::text_muted()),
+        );
+
+        if export_archive
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("技能包", &["skill", "zip"])
+                .set_file_name(crate::skill_pack::ARCHIVE_FILE_NAME)
+                .save_file()
+        {
+            self.status = match crate::skill_pack::write_archive(&path) {
+                Ok(()) => {
+                    let _ = super::reveal_in_os(&path);
+                    format!("已导出 AI 技能包：{}", path.display())
+                }
+                Err(error) => format!("导出技能包失败：{error:#}"),
+            };
+        }
+        if export_folder
+            && let Some(parent) = rfd::FileDialog::new()
+                .set_title("选择要放技能的 skills 目录")
+                .pick_folder()
+        {
+            self.status = match crate::skill_pack::write_directory(&parent) {
+                Ok(root) => {
+                    let _ = super::reveal_in_os(&root);
+                    format!("已导出技能文件夹：{}", root.display())
+                }
+                Err(error) => format!("导出技能文件夹失败：{error:#}"),
+            };
+        }
+    }
+
     fn export_section_ui(&mut self, ui: &mut egui::Ui) {
         // Word 导出尚未达到当前 LaTeX 链路的成熟度，入口保留但暂不允许启用。
         self.config.export.docx = false;

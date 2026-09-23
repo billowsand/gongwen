@@ -54,6 +54,10 @@ for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
         cp "$STAGING/$doc" "$RESOURCES_DIR/$doc"
     fi
 done
+# AI skill pack (skills/gongwen-markdown.skill, built by package-portable.ps1).
+if [ -d "$STAGING/skills" ]; then
+    cp -a "$STAGING/skills" "$RESOURCES_DIR/skills"
+fi
 
 # Generate the .icns from the pre-rendered PNGs. iconutil requires the full
 # fixed-size iconset; sips guarantees exact pixel dimensions.

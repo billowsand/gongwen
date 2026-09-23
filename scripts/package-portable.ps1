@@ -204,6 +204,34 @@ Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "README.md")) -D
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "THIRD_PARTY_NOTICES.md")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "LICENSE")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "config.example.json")) -Destination $OutputDir
+# AI 技能包：把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill 随包分发。
+# .skill 就是 zip，顶层一个 gongwen-markdown/ 文件夹。条目名手工拼成正斜杠——
+# Compress-Archive 在 PowerShell 5.1 上会写反斜杠，别的工具解压会得到一个怪文件名。
+# 程序里的「导出 AI 技能包」按钮用的是编进二进制的同一套文件（src/skill_pack.rs）。
+$skillName = "gongwen-markdown"
+$skillSource = [System.IO.Path]::Combine($projectRoot, "skills", $skillName)
+if (-not (Test-Path -LiteralPath (Join-Path $skillSource "SKILL.md") -PathType Leaf)) {
+    throw "Skill source not found: $skillSource"
+}
+$skillOutputDir = Join-Path $OutputDir "skills"
+New-Item -ItemType Directory -Force -Path $skillOutputDir | Out-Null
+$skillArchive = Join-Path $skillOutputDir "$skillName.skill"
+if (Test-Path -LiteralPath $skillArchive) {
+    Remove-Item -LiteralPath $skillArchive -Force
+}
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$skillZip = [System.IO.Compression.ZipFile]::Open($skillArchive, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+    $skillPrefix = $skillSource.TrimEnd("\", "/").Length + 1
+    foreach ($file in Get-ChildItem -LiteralPath $skillSource -Recurse -File | Where-Object { $_.FullName -notmatch "__pycache__" } | Sort-Object FullName) {
+        $entryName = "$skillName/" + $file.FullName.Substring($skillPrefix).Replace("\", "/")
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($skillZip, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+}
+finally {
+    $skillZip.Dispose()
+}
 if (-not $isWindowsHost) {
     foreach ($executable in @($BinaryName, [System.IO.Path]::Combine("runtime", "tectonic", "tectonic"))) {
         $executablePath = Join-Path $OutputDir $executable

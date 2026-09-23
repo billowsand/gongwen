@@ -159,3 +159,35 @@ PDF 不是独立选项——有 `.tex` 就编。
 ## 上手指引
 
 五步速成 + 指向完整手册。见 [五分钟出第一份稿子](chapter:03-quickstart)。
+
+### AI 技能包
+
+「上手指引」底部可以导出 **AI 技能包**（Agent Skill，名为 `gongwen-markdown`）。它把本程序的 Markdown 公文子集、七种文种的正文规则、行文规范、各文种模板和一个自检脚本打成一套说明书，装进外部 AI 工具后，它们写出的 `.md` 可以**直接粘贴到起草页**，预览、导出与手写稿件完全一样。
+
+| 按钮 | 产物 | 适合 |
+|---|---|---|
+| 导出 .skill 技能包 | 单个 `gongwen-markdown.skill` 文件（zip 格式） | 需要上传技能包的工具；也可自己解压 |
+| 导出为技能文件夹 | 在选定目录下生成 `gongwen-markdown/` 文件夹 | 直接读技能目录的命令行工具 |
+
+安装包里也带了一份现成的技能包：安装目录下的 `skills/gongwen-markdown.skill`（macOS 在应用包的 `Contents/Resources/skills/`）。
+
+常见工具的放置位置（以各工具当前文档为准）：
+
+| 工具 | 放在哪里 |
+|---|---|
+| Claude Code | `~/.claude/skills/`（个人）或项目里的 `.claude/skills/` |
+| Claude 桌面版 / 网页版 | 设置 → 技能（Skills）里上传 `.skill` 文件 |
+| Codex | `~/.agents/skills/`（个人）或项目里的 `.agents/skills/`；老版本用 `~/.codex/skills/` |
+| OpenCode | `~/.config/opencode/skills/` 或项目里的 `.opencode/skills/`，也认 `~/.claude/skills/` |
+| pi | `~/.pi/agent/skills/` 或 `~/.agents/skills/` |
+| DeerFlow | 在应用的技能面板安装 `.skill`，或把文件夹放进 `skills/custom/` |
+
+「导出为技能文件夹」时选的是**上面这一级 skills 目录**，程序在里面建 `gongwen-markdown/`；再导一次会覆盖成新版本，目录里别的技能不动。
+
+用法：在工具里说「用公文助手格式写一份关于××的函」，或直接点名 `gongwen-markdown` 技能。拿到结果后：
+
+1. 新建对应文种的稿子，先在「文档要素」里填好单位、文号、主送、落款等——技能包刻意让模型**不写**这些，写了会印两遍；
+2. 把 Markdown 粘进起草页（或用「从文件导入」打开 `.md`），切到版式预览验收；
+3. 研究报告分章写成多个 `.md` 时，连同 `images/` 与 `references.bib` 放进一个文件夹，用「从文件夹新建研究报告」一次合成。
+
+> **提示** 技能包里的 `scripts/check_gongwen_md.py` 可以让工具在交付前自检（手写编号、要素混入正文、附件标记、表格列数等）。它只是提前拦错，最终仍以本程序的审校面板为准。升级程序后建议重新导出一次，规则与新版保持一致。

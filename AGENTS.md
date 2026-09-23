@@ -45,6 +45,12 @@ cargo build --release --locked
 `src/preview/`、`src/lexicon/`、`src/export/{docx,latex}/`、`src/ime/`。拆分流程见 skill
 `split-rust-module`（纯代码移动，每拆一个文件单独提交一次，零警告验证）。
 
+`skills/gongwen-markdown/` 是给外部 AI 工具用的技能包（Agent Skill），讲的是起草页
+Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进制、设置页「上手指引」导出，
+`scripts/package-portable.ps1` 另打一份 `.skill` 随安装包分发。改了解析器语法、标题编号、
+附件或文种规则（`src/export/parse.rs`、`src/prompt.rs`）要同步这里的文档；新增文件要登记进
+`skill_pack::FILES`，测试会检查两边一致。
+
 顶层模块清单在 `src/main.rs`。注意 `mod` 声明里 `outline`、`proofread_rules` 等
 并非全部集中在文件头部，改动前先 `grep -n "^mod " src/main.rs`。
 

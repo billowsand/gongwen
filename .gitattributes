@@ -13,6 +13,7 @@ PKGBUILD* text eol=lf
 Cargo.lock text eol=lf
 *.svg text eol=lf
 *.txt text eol=lf
+*.py text eol=lf
 *.ps1 text eol=crlf
 
 *.png binary
@@ -22,3 +23,4 @@ Cargo.lock text eol=lf
 *.ttb binary
 *.pdf binary
 *.zip binary
+*.skill binary
