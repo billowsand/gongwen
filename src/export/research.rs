@@ -51,9 +51,21 @@ pub(crate) fn markdown_with_frontmatter(
     }
     lines.push("---".to_string());
     lines.push(String::new());
-    lines.push(markdown.trim_start_matches('\u{feff}').trim().to_string());
+    let body = strip_numbered_table_markers(markdown.trim_start_matches('\u{feff}').trim());
+    lines.push(body.trim().to_string());
     lines.push(String::new());
     lines.join("\n")
+}
+
+/// 序号表是公文版式，研究报告走 mdx 转换、不认这个标记。交给 mdx 前把
+/// `<!-- [序号表] -->` 这类独占一行的标记剥掉，免得原样印到纸上；表格本身
+/// 按 mdx 的普通表格排，不分组、不整行合并（mdx 不支持合并单元格）。
+fn strip_numbered_table_markers(markdown: &str) -> String {
+    markdown
+        .lines()
+        .filter(|line| !super::parse_numbered_table_marker(line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 封面实际印的题名：文档要素的「文件名称」优先，留空才取正文区段的 `#`，
@@ -201,6 +213,23 @@ mod tests {
         assert!(text.contains("文件名称: 测试报告"));
         assert!(text.contains("bibliography: references.bib"));
         assert!(text.ends_with("## 第一章\n\n正文\n"));
+    }
+
+    /// 序号表是公文版式，mdx 不认它的标记：交给 mdx 前必须剥掉标记行，
+    /// 否则 `<!-- [序号表] -->` 会原样印到研究报告的纸上。表格按普通表格排。
+    #[test]
+    fn numbered_table_markers_are_stripped_before_mdx() {
+        let input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "测试报告".into(),
+            ..Default::default()
+        };
+        let markdown =
+            "<!-- [序号表] -->\n| 序号 | 事项 |\n| --- | --- |\n| 分组 |  |\n|  | 去了 |";
+        let text = markdown_with_frontmatter(&input, markdown, None);
+        assert!(!text.contains("序号表"), "标记不得进 mdx：{text}");
+        assert!(text.contains("| 序号 | 事项 |"), "表格本身要保留：{text}");
+        assert!(text.contains("| 分组 |  |"), "{text}");
     }
 
     #[test]
