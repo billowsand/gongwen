@@ -781,7 +781,7 @@ pub(crate) fn is_renderable_paragraph(text: &str) -> bool {
 /// egui 把基线钉在字体 ascent 上，行距减字高的余量整块留在字下方；按 galley 几
 /// 何居中字会贴着上沿。这里按字形真实框取中，让字坐在色块的正中（与
 /// `row_tint_offset` 同思路，后者只对单行做这件事）。
-fn galley_visual_midline(galley: &egui::Galley) -> f32 {
+pub(crate) fn galley_visual_midline(galley: &egui::Galley) -> f32 {
     let mut min_top: Option<f32> = None;
     let mut max_bottom: Option<f32> = None;
     for row in &galley.rows {

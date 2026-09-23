@@ -5,6 +5,7 @@
 
 use crate::export;
 use crate::models::{DraftInput, LetterVersion, TemplateKind, split_units};
+use crate::preview::layout::galley_visual_midline;
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, JOINT_COLUMN_MM, JOINT_DATE_GAP_MM, JOINT_ROW_GAP_MM, Metrics,
     PREVIEW_PLACEHOLDER, RECORD_GAP_MM, RECORD_PHONE_COLUMN_EM, RECORD_PT, SIGNATURE_WIDTH_MM,
@@ -393,7 +394,9 @@ pub(crate) fn footer_record(
                 }
             };
             let labels = ["承办单位：", "联系人：", "联系电话："];
-            let aligns = [Align::LEFT, Align::Center, Align::Max];
+            // 联系人列不能用 Center：egui 居中时不计行首空白，续行的全角空格占位会失效。
+            // 这里一律左对齐排版，绘制时按首行宽度统一居中定位。
+            let aligns = [Align::LEFT, Align::LEFT, Align::Max];
             let pads = [5usize, 4, 0];
             std::array::from_fn(|index_column| {
                 let label = if index == 0 { labels[index_column] } else { "" };
@@ -433,27 +436,37 @@ pub(crate) fn footer_record(
         let mut y = rect.top();
         rule(y, thick);
         y += thick;
+        // egui 把行距余量整块留在字下方，按 galley 顶摆位字会贴着上线；
+        // 这里按字形真实框取中，让每行字坐在两条线正中。
+        let centered =
+            |galley: &egui::Galley, height: f32| height / 2.0 - galley_visual_midline(galley);
         painter.galley(
-            egui::pos2(rect.left(), y),
+            egui::pos2(rect.left(), y + centered(&head_galley, head_height)),
             head_galley.clone(),
             theme::paper::ink(),
         );
         painter.galley(
-            egui::pos2(rect.right(), y),
+            egui::pos2(rect.right(), y + centered(&copies_galley, head_height)),
             copies_galley.clone(),
             theme::paper::ink(),
         );
         y += head_height;
         rule(y, thin);
         y += thin;
+        let contact_width = cells.first().map_or(0.0, |row| row[1].size().x);
+        let contact_left = rect.left() + columns[0] + (columns[1] - contact_width) / 2.0;
         for (row, height) in cells.iter().zip(&row_heights) {
             for (index_column, galley) in row.iter().enumerate() {
                 let x = match index_column {
                     0 => rect.left(),
-                    1 => rect.left() + columns[0] + columns[1] / 2.0,
+                    1 => contact_left,
                     _ => rect.right(),
                 };
-                painter.galley(egui::pos2(x, y), galley.clone(), theme::paper::ink());
+                painter.galley(
+                    egui::pos2(x, y + centered(galley, *height)),
+                    galley.clone(),
+                    theme::paper::ink(),
+                );
             }
             y += height;
         }
