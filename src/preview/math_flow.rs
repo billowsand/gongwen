@@ -275,11 +275,12 @@ pub(crate) fn paragraph(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
         .ctx()
         .fonts_mut(|fonts| fonts.glyph_width(&normal, '\u{3000}'))
         * INDENT_CHARS;
+    let band = line_band(ui, metrics);
     let mut atoms = Vec::new();
     for piece in pieces {
         match piece {
             Piece::Text(text) => text_atoms(ui.ctx(), metrics, text, &mut atoms),
-            Piece::Math(src) => atoms.push(Atom::Math(math_atom(ui.ctx(), metrics, src))),
+            Piece::Math(src) => atoms.push(Atom::Math(math_atom(ui.ctx(), metrics, src, band))),
         }
     }
     if atoms.is_empty() {
@@ -344,20 +345,56 @@ fn text_atoms(ctx: &egui::Context, metrics: &Metrics, text: &str, out: &mut Vec<
     });
 }
 
+/// 正文一行的垂直空间：`(基线以上, 基线以下)`，行高就是两者之和。
+/// 基线位置按正文字体在固定行距下排一个全角空格量出来，与 `draw_line` 的口径一致。
+fn line_band(ui: &egui::Ui, metrics: &Metrics) -> (f32, f32) {
+    let mut probe = job(f32::INFINITY);
+    probe.append(
+        "\u{3000}",
+        0.0,
+        text_format(metrics.body_font(), metrics.line),
+    );
+    let above = layout(ui, probe)
+        .rows
+        .first()
+        .and_then(|row| row.glyphs.first())
+        .map_or(metrics.line * 0.75, |glyph| glyph.pos.y);
+    (above, metrics.line - above)
+}
+
+/// 行内公式要压进多少倍才能按基线对齐塞进一行（不超过 1，不放大）。
+/// 上下两侧分别看：分式、求和上下限这类竖向高的公式整体等比缩小，
+/// 行距因此保持均匀，也不会顶出行外被相邻行盖住。
+fn fit_to_band(size: egui::Vec2, baseline: f32, (above, below): (f32, f32)) -> f32 {
+    let ascent = baseline.max(0.0);
+    let descent = (size.y - baseline).max(0.0);
+    let mut fit = 1.0f32;
+    if ascent > above {
+        fit = fit.min(above / ascent);
+    }
+    if descent > below {
+        fit = fit.min(below / descent);
+    }
+    fit
+}
+
 /// 一个行内公式原子：渲染成功是纹理盒子，失败是虚线占位框盒子。
-fn math_atom(ctx: &egui::Context, metrics: &Metrics, src: &str) -> MathAtom {
+/// `band` 是正文一行在基线上下的空间，公式按它等比压缩，见 [`fit_to_band`]。
+fn math_atom(ctx: &egui::Context, metrics: &Metrics, src: &str, band: (f32, f32)) -> MathAtom {
     match cached(ctx, src, false, metrics.body_pt * metrics.scale) {
         Cached::Ready {
             texture,
             mut size,
             mut baseline,
         } => {
-            // 比版心还宽的公式按比例压进版心，免得行内盒子直接溢出纸面。
-            if size.x > metrics.content {
-                let fit = metrics.content / size.x;
-                size *= fit;
-                baseline *= fit;
+            // 先压进一行的高度，再看宽度：比版心还宽的公式按比例压进版心，
+            // 免得行内盒子直接溢出纸面。
+            let mut fit = fit_to_band(size, baseline, band);
+            if size.x * fit > metrics.content {
+                fit = metrics.content / size.x;
             }
+            size *= fit;
+            baseline *= fit;
             MathAtom {
                 texture: Some(texture),
                 label: String::new(),
@@ -703,6 +740,20 @@ mod tests {
                 "{prefix:?}: {after} - {before}"
             );
         }
+    }
+
+    /// 行内公式按基线上下两侧分别压进一行：矮的不动，高的等比缩小，不放大。
+    #[test]
+    fn inline_math_shrinks_into_the_line_band() {
+        let band = (20.0, 8.0);
+        // 普通 x^2：上 15 下 3，放得下，不缩。
+        assert_eq!(fit_to_band(egui::vec2(10.0, 18.0), 15.0, band), 1.0);
+        // \frac12：上 22 下 12，下侧更紧，按 8/12 缩。
+        let fit = fit_to_band(egui::vec2(8.0, 34.0), 22.0, band);
+        assert!((fit - 8.0 / 12.0).abs() < 1e-6, "{fit}");
+        // 只有上侧超：按 20/30 缩。
+        let fit = fit_to_band(egui::vec2(8.0, 32.0), 30.0, band);
+        assert!((fit - 20.0 / 30.0).abs() < 1e-6, "{fit}");
     }
 
     #[test]
