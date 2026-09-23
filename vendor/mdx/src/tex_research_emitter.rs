@@ -67,6 +67,8 @@ pub struct TexResearchEmitter {
     changelog_heading_done: bool,
     /// 是否已经排过目录（`<!-- [目录] -->` 写了多处时只认第一处）
     toc_done: bool,
+    /// 目录插在摘要与正文之间：摘要单用小写罗马页码（i、ii、iii），正文从 1 起
+    abstract_numbered_apart: bool,
     /// 参考文献模式下是否已经输出标题
     reference_heading_done: bool,
     /// 列表状态
@@ -108,6 +110,7 @@ impl TexResearchEmitter {
             abstract_skipped_heading: false,
             changelog_heading_done: false,
             toc_done: false,
+            abstract_numbered_apart: false,
             reference_heading_done: false,
             l1: 0,
             l2: 0,
@@ -170,6 +173,7 @@ impl TexResearchEmitter {
     }
 
     pub fn emit_all(&mut self, blocks: &[Block]) {
+        self.abstract_numbered_apart = toc_follows_abstract(blocks);
         for b in blocks {
             self.emit_block(b);
         }
@@ -703,6 +707,10 @@ impl TexResearchEmitter {
     /// 完成摘要收集，输出摘要环境
     pub fn finish_abstract(&mut self) {
         if !self.abstract_content.is_empty() {
+            if self.abstract_numbered_apart {
+                // 摘要单独编页：小写罗马页码，目录之后正文从 1 起（见 md2tex.cls）
+                self.out.push_str("\\mdxfrontmatter\n");
+            }
             self.out.push_str("\\begin{abstract}\n");
             for item in &self.abstract_content {
                 self.out.push_str(item);
@@ -722,6 +730,29 @@ impl TexResearchEmitter {
         self.in_abstract = false;
         self.mode = SectionMode::Normal;
     }
+}
+
+/// 目录是否插在摘要与正文之间：第一个目录标记之前有摘要，且摘要之外只有
+/// 报告题名（`#`，不排进正文）、`<!-- [正文] -->`、锚点与空行——摘要到目录
+/// 之间没有排出任何正文。这时摘要单用一套小写罗马页码。
+fn toc_follows_abstract(blocks: &[Block]) -> bool {
+    let mut seen_abstract = false;
+    let mut in_abstract = false;
+    for b in blocks {
+        match b {
+            Block::Toc => return seen_abstract,
+            Block::Marker(MarkerKind::Abstract) => {
+                seen_abstract = true;
+                in_abstract = true;
+            }
+            Block::Marker(MarkerKind::Body) => in_abstract = false,
+            Block::Marker(_) => return false,
+            _ if in_abstract => {}
+            Block::Empty | Block::Label(_) | Block::Heading { level: 1, .. } => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 impl Default for TexResearchEmitter {
@@ -981,6 +1012,68 @@ mod tests {
             parts.iter().all(|(_, c)| !c.contains("mdxtableofcontents")),
             "目录不应落进分章部件"
         );
+    }
+
+    fn emit_all_body(blocks: &[Block]) -> String {
+        let mut e = TexResearchEmitter::new();
+        e.emit_all(blocks);
+        test_body(e)
+    }
+
+    /// 目录插在摘要与正文之间（`[正文]` 标记写在目录前后都算），摘要单独编页。
+    #[test]
+    fn test_abstract_numbered_apart_when_toc_sits_between_abstract_and_body() {
+        let abs = || Block::Paragraph(vec![Inline::Text("摘要".into())]);
+        let chapter = || Block::Heading {
+            level: 2,
+            text: "引言".into(),
+        };
+        for blocks in [
+            vec![
+                Block::Marker(MarkerKind::Abstract),
+                abs(),
+                Block::Toc,
+                Block::Marker(MarkerKind::Body),
+                chapter(),
+            ],
+            vec![
+                Block::Marker(MarkerKind::Abstract),
+                abs(),
+                Block::Marker(MarkerKind::Body),
+                Block::Empty,
+                Block::Toc,
+                chapter(),
+            ],
+        ] {
+            let body = emit_all_body(&blocks);
+            let front = body.find("\\mdxfrontmatter\n\\begin{abstract}");
+            let toc = body.find("\\mdxtableofcontents").unwrap();
+            assert!(front.is_some_and(|f| f < toc), "{body}");
+        }
+    }
+
+    /// 目录在摘要之前，或摘要与目录之间已有正文，摘要照常用阿拉伯页码。
+    #[test]
+    fn test_abstract_keeps_arabic_otherwise() {
+        let abs = || Block::Paragraph(vec![Inline::Text("摘要".into())]);
+        let chapter = || Block::Heading {
+            level: 2,
+            text: "引言".into(),
+        };
+        for blocks in [
+            vec![Block::Toc, Block::Marker(MarkerKind::Abstract), abs()],
+            vec![
+                Block::Marker(MarkerKind::Abstract),
+                abs(),
+                Block::Marker(MarkerKind::Body),
+                chapter(),
+                Block::Toc,
+            ],
+            vec![Block::Marker(MarkerKind::Abstract), abs(), chapter()],
+        ] {
+            let body = emit_all_body(&blocks);
+            assert!(!body.contains("mdxfrontmatter"), "{body}");
+        }
     }
 
     #[test]

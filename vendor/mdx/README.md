@@ -63,6 +63,8 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 - `resources/research/template.tex` 不再无条件排目录；`md2tex.cls` 新增
   `\mdxtableofcontents`：目录单用大写罗马页码（I、II、III），排完恢复阿拉伯
   页码并接着目录之前的页号数；`tex_research_emitter.rs` 在标记处输出它，只排一次；
+  目录插在摘要与正文之间时，摘要前先输出 `\mdxfrontmatter`：摘要单用小写罗马
+  页码（i、ii、iii），目录之后正文从 1 起；
 - `docx_research.rs` 不再在封面后固定插目录，改为在标记处插入，只插一次。
 
 ## 改动规则

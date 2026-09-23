@@ -440,10 +440,22 @@
 %% 目录：由正文里的 `<!-- [目录] -->` 标记在标记所在处排出，没有标记就不排。
 %% 目录单用一套大写罗马页码（I、II、III）；排完恢复阿拉伯页码，并接着目录
 %% 之前的页号往下数——目录页不占正文页号。
+%% 目录插在摘要与正文之间时，摘要前先调 \mdxfrontmatter：摘要单用小写罗马
+%% 页码（i、ii、iii），目录之后正文从 1 起。
 %% ============================================================
+\newif\ifmdx@front
+\newcommand{\mdxfrontmatter}{%
+  \clearemptydoublepage
+  \pagenumbering{roman}%
+  \mdx@fronttrue
+}
 \newcommand{\mdxtableofcontents}{%
   \clearemptydoublepage
-  \edef\mdx@pagebeforetoc{\number\c@page}%
+  \ifmdx@front
+    \edef\mdx@pagebeforetoc{1}%
+  \else
+    \edef\mdx@pagebeforetoc{\number\c@page}%
+  \fi
   \pagenumbering{Roman}%
   \setcounter{tocdepth}{1}%
   \ctexset{contentsname={\makebox[\textwidth][c]{\heiti\enhei\zihao{-2}目录}}}%
