@@ -422,8 +422,8 @@ mod tests {
         assert!(markdown.contains("| 1 | 材料报送 |"), "{markdown}");
     }
 
-    /// 转换器自带的 calamine 与本软件词库导入用的是两个大版本，同时链进来会不会
-    /// 出岔子只有真跑一遍才知道——这里现造一个 xlsx 再转回 markdown。
+    /// anydoc 自 0.2 起用自带的表格解析器，与本软件词库导入用的 calamine 各走各的；
+    /// 两套同时链进来是否相安无事，只有真跑一遍才知道——这里现造一个 xlsx 再转回 markdown。
     #[test]
     fn xlsx_round_trips_through_the_converter() {
         let dir = tempfile::tempdir().expect("临时目录");
@@ -440,6 +440,56 @@ mod tests {
         workbook.save(&path).expect("保存 xlsx");
         let markdown = to_markdown(&path).unwrap();
         assert!(markdown.contains("材料报送"), "{markdown}");
+    }
+
+    /// Word 公式（OMML）要转成研究报告认得的 `$...$` / `$$` 块。anydoc 0.1 会把
+    /// 公式整个丢掉、正文只剩一个空位且不报错，这条测试防止倒退。
+    #[test]
+    fn word_equations_become_latex_math() {
+        use std::io::Write as _;
+
+        const MATH_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+        let inline = "<m:oMath><m:f><m:num><m:r><m:t>a</m:t></m:r></m:num>\
+                      <m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath>";
+        let display = "<m:oMathPara><m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e>\
+                       <m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath></m:oMathPara>";
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="{MATH_NS}"><w:body>
+<w:p><w:r><w:t xml:space="preserve">比值为 </w:t></w:r>{inline}<w:r><w:t>，平方如下：</w:t></w:r></w:p>
+<w:p>{display}</w:p>
+</w:body></w:document>"#
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/document.xml", document.as_str()),
+        ];
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("含公式.docx");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).expect("创建 docx"));
+        for (name, content) in parts {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("写入 docx 部件");
+            zip.write_all(content.as_bytes()).expect("写入 docx 部件");
+        }
+        zip.finish().expect("收尾 docx");
+
+        let markdown = to_markdown(&path).unwrap();
+        assert!(
+            markdown.contains(r"比值为 $\frac{a}{b}$，平方如下："),
+            "{markdown}"
+        );
+        assert!(markdown.contains("$$\nx^{2}\n$$"), "{markdown}");
     }
 
     #[test]
