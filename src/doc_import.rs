@@ -107,12 +107,8 @@ pub(crate) fn import_research_folder(folder: &Path) -> Result<ResearchFolderImpo
 
     let mut chunks = Vec::with_capacity(files.len());
     for (index, path) in files.iter().enumerate() {
-        let content = std::fs::read_to_string(path).with_context(|| {
-            format!(
-                "读取 {} 失败（研究报告 Markdown 必须使用 UTF-8 编码）",
-                file_label(path)
-            )
-        })?;
+        let content = crate::text_file::read_to_string(path)
+            .with_context(|| format!("读取 {} 失败", file_label(path)))?;
         let content = content.trim_start_matches('﻿').to_string();
         if index > 0 && starts_with_frontmatter(&content) {
             bail!(
@@ -146,7 +142,7 @@ pub(crate) fn import_research_folder(folder: &Path) -> Result<ResearchFolderImpo
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "references.bib".to_string());
-        metadata.bibliography_content = std::fs::read_to_string(&path)
+        metadata.bibliography_content = crate::text_file::read_to_string(&path)
             .with_context(|| format!("无法读取 BibTeX 文件 {}", path.display()))?;
     }
 
@@ -188,12 +184,8 @@ pub(crate) fn to_markdown(path: &Path) -> Result<String> {
         );
     }
     let markdown = if PLAIN.contains(&extension.as_str()) {
-        std::fs::read_to_string(path).with_context(|| {
-            format!(
-                "读取 {} 失败（若文件是 GBK 编码，请先另存为 UTF-8）",
-                file_label(path)
-            )
-        })?
+        crate::text_file::read_to_string(path)
+            .with_context(|| format!("读取 {} 失败", file_label(path)))?
     } else if CONVERTED.contains(&extension.as_str()) {
         anydoc::to_markdown(path)
             .map_err(|error| anyhow::anyhow!("{error}"))

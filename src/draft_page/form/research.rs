@@ -201,7 +201,7 @@ impl DraftPage<'_> {
                 .add_filter("BibTeX", &["bib"])
                 .pick_file()
         {
-            match std::fs::read_to_string(&path) {
+            match crate::text_file::read_to_string(&path) {
                 Ok(content) => {
                     self.doc.draft.research.bibliography_name = path
                         .file_name()

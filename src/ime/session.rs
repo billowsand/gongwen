@@ -346,8 +346,11 @@ impl Ime {
             .fuma
             .context("先在设置里选一个辅码方案，再导入码表")?;
         let target = data::fuma_path(scheme).context("无法确定辅码表目录")?;
-        std::fs::copy(source, &target)
-            .with_context(|| format!("拷贝辅码表失败：{}", source.display()))?;
+        // 网上流传的码表不少是 GBK，这里统一转成 UTF-8 再落盘，加载端只认 UTF-8。
+        let content = crate::text_file::read_to_string(source)
+            .with_context(|| format!("读取辅码表失败：{}", source.display()))?;
+        std::fs::write(&target, content)
+            .with_context(|| format!("写入辅码表失败：{}", target.display()))?;
         self.apply_fuma();
         self.fuma_words.context("码表里没有认得出的条目")
     }

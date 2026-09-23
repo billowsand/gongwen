@@ -49,6 +49,7 @@ mod sop;
 mod storage;
 mod system_fonts;
 mod texcompile;
+mod text_file;
 mod theme;
 mod units;
 mod validator;

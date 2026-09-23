@@ -477,14 +477,15 @@ impl GongwenApp {
         };
         let mut items = Vec::new();
         // 逐个收集读取失败，别让后一条把前一条的错误覆盖掉——选十个文件失败九个
-        // 时，只看得到最后一条错误是没法排查的（GBK 编码的 .md 就会走到这里）。
+        // 时，只看得到最后一条错误是没法排查的。GBK 等非 UTF-8 编码由
+        // `text_file` 自动识别，走到这里的是真正读不动的文件。
         let mut failures: Vec<String> = Vec::new();
         for path in &draft.paths {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            match std::fs::read_to_string(path) {
+            match crate::text_file::read_to_string(path) {
                 Ok(content) => {
                     let title = export::extract_title(&content, "");
                     items.push(knowledge::KnowledgeImportItem {
