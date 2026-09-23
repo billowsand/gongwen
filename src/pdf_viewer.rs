@@ -57,6 +57,8 @@ const TOUCHPAD_POINTS_PER_STEP: f32 = 80.0;
 const WHEEL_IDLE: f64 = 0.3;
 /// 翻页后这么久（秒）内屏蔽残余的平滑滚动，免得新页一出来就被余量带着往下走。
 const FLIP_QUIET: f64 = 0.2;
+/// 单页模式一屏最多并排几页。再多每页都小得没法读，渲染也白费。
+const MAX_PAGES_PER_VIEW: usize = 6;
 
 /// 渲染线程回传主线程的消息。
 pub(crate) enum PdfMessage {
@@ -216,6 +218,8 @@ pub(crate) struct PdfSession {
     /// 连续模式由滚动位置推出；单页模式就是正在看的那页。
     current_page: usize,
     scroll_to: Option<usize>,
+    /// 单页模式：窗口够宽时一屏并排几页。按上一帧的版式算，翻页步长也用它。
+    per_view: usize,
     /// 单页模式：下一帧把页内滚动条放到页首或页尾。
     single_jump: Option<Edge>,
     /// 单页模式：上一帧页内滚动是否已到顶 / 到底，到头了滚轮才翻页。
@@ -263,6 +267,7 @@ impl PdfSession {
             sent: Vec::new(),
             current_page: 0,
             scroll_to: None,
+            per_view: 1,
             single_jump: None,
             at_top: true,
             at_bottom: true,
@@ -405,18 +410,23 @@ impl PdfSession {
     fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<PdfAction>) {
         ui.horizontal(|ui| {
             let count = self.page_count();
-            let has_previous = count > 0 && self.current_page > 0;
-            if theme::icon_button_enabled(ui, has_previous, theme::Icon::ChevronUp, "上一页")
-                .clicked()
+            let previous = self.step_target(false);
+            if theme::icon_button_enabled(
+                ui,
+                previous.is_some(),
+                theme::Icon::ChevronUp,
+                "上一页",
+            )
+            .clicked()
             {
-                self.scroll_to = Some(self.current_page.saturating_sub(1));
+                self.scroll_to = previous;
             }
 
-            let has_next = count > 0 && self.current_page + 1 < count;
-            if theme::icon_button_enabled(ui, has_next, theme::Icon::ChevronDown, "下一页")
+            let next = self.step_target(true);
+            if theme::icon_button_enabled(ui, next.is_some(), theme::Icon::ChevronDown, "下一页")
                 .clicked()
             {
-                self.scroll_to = Some(self.current_page + 1);
+                self.scroll_to = next;
             }
 
             let mut page_number = self.current_page + 1;
@@ -448,7 +458,7 @@ impl PdfSession {
             }
             if ui
                 .selectable_label(self.mode == ViewMode::SinglePage, "单页")
-                .on_hover_text("一次看一页，滚轮一格翻一页；也可用 PageUp / PageDown、方向键翻页")
+                .on_hover_text("按页翻看，滚轮一格翻一屏；窗口够宽时从左到右并排多页。也可用 PageUp / PageDown、方向键翻页")
                 .clicked()
                 && self.mode != ViewMode::SinglePage
             {
@@ -604,11 +614,11 @@ impl PdfSession {
             )
         });
         let last_page = self.page_count().saturating_sub(1);
-        if next && self.current_page < last_page {
-            self.scroll_to = Some(self.current_page + 1);
+        if next && let Some(target) = self.step_target(true) {
+            self.scroll_to = Some(target);
         }
-        if previous && self.current_page > 0 {
-            self.scroll_to = Some(self.current_page - 1);
+        if previous && let Some(target) = self.step_target(false) {
+            self.scroll_to = Some(target);
         }
         if first {
             self.scroll_to = Some(0);
@@ -616,6 +626,35 @@ impl PdfSession {
         if last {
             self.scroll_to = Some(last_page);
         }
+    }
+
+    /// 上一屏 / 下一屏从哪页开始。连续模式一次一页；单页模式一次一整屏，
+    /// 并排几页就跳几页。到头了返回 `None`，按钮随之置灰。
+    fn step_target(&self, forward: bool) -> Option<usize> {
+        let count = self.page_count();
+        if count == 0 {
+            return None;
+        }
+        let (base, step) = match self.mode {
+            ViewMode::Continuous => (self.current_page, 1),
+            ViewMode::SinglePage => (
+                spread_start(self.current_page, self.per_view),
+                self.per_view,
+            ),
+        };
+        if forward {
+            (base + step < count).then_some(base + step)
+        } else {
+            (base > 0).then(|| base.saturating_sub(step))
+        }
+    }
+
+    /// 单页模式一屏能并排几页：按当前页的显示宽度算，放不下两页就是一页。
+    /// 「适合宽度」本来就是一页占满，自然只有一页。
+    fn pages_per_view(&self, viewport: egui::Vec2) -> usize {
+        let width = self.page_display_size(self.current_page, viewport).x;
+        let room = viewport.x - SIDE_MARGIN * 2.0 + PAGE_GAP;
+        ((room / (width + PAGE_GAP)).floor() as usize).clamp(1, MAX_PAGES_PER_VIEW)
     }
 
     /// 连续模式：所有页上下相连。返回这一帧需要（重新）渲染的页及其优先级。
@@ -696,7 +735,8 @@ impl PdfSession {
         wanted
     }
 
-    /// 单页模式：只画当前页，滚轮一格翻一页。页面比窗口高时先在页内滚，滚到头再翻。
+    /// 单页模式：一次一屏。窗口够宽时从左到右并排多页，滚轮一格翻一屏。
+    /// 页面比窗口高时先在页内滚，滚到头再翻。
     fn single_page(
         &mut self,
         ui: &mut egui::Ui,
@@ -710,9 +750,9 @@ impl PdfSession {
             self.single_jump = Some(Edge::Top);
         }
         self.current_page = self.current_page.min(count - 1);
-        let overflows = self.page_display_size(self.current_page, viewport).y + PAGE_GAP * 2.0
-            > viewport.y + 0.5;
-        self.wheel_flip(ui, overflows);
+        self.per_view = self.pages_per_view(viewport);
+        let (_, content) = self.spread_layout(viewport);
+        self.wheel_flip(ui, content.y > viewport.y + 0.5);
 
         let now = ui.ctx().input(|input| input.time);
         if now < self.quiet_until {
@@ -720,12 +760,8 @@ impl PdfSession {
                 .input_mut(|input| input.smooth_scroll_delta.y = 0.0);
         }
 
-        let index = self.current_page;
-        let size = self.page_display_size(index, viewport);
-        let content = egui::vec2(
-            (size.x + SIDE_MARGIN * 2.0).max(viewport.x),
-            (size.y + PAGE_GAP * 2.0).max(viewport.y),
-        );
+        // 翻过页的话版式要按新的一屏重算。
+        let (pages, content) = self.spread_layout(viewport);
         let mut scroll = egui::ScrollArea::both()
             .id_salt(("pdf_single", self.key))
             .auto_shrink([false, false]);
@@ -737,42 +773,67 @@ impl PdfSession {
             });
         }
 
-        let slot = &mut self.slots[index];
-        slot.last_used = self.frame;
+        let frame = self.frame;
+        let slots = &mut self.slots;
         let output = scroll.show(ui, |ui| {
             let (rect, _) = ui.allocate_exact_size(content, egui::Sense::hover());
-            let page_rect = egui::Rect::from_center_size(rect.center(), size);
-            paint_page(ui.painter(), page_rect, index, slot);
+            let row_width: f32 = pages.iter().map(|(_, size)| size.x).sum::<f32>()
+                + PAGE_GAP * (pages.len() - 1) as f32;
+            let mut left = rect.center().x - row_width / 2.0;
+            for &(index, size) in &pages {
+                let page_rect = egui::Rect::from_min_size(
+                    egui::pos2(left, rect.center().y - size.y / 2.0),
+                    size,
+                );
+                let slot = &mut slots[index];
+                slot.last_used = frame;
+                paint_page(ui.painter(), page_rect, index, slot);
+                left += size.x + PAGE_GAP;
+            }
         });
         let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
         self.at_top = output.state.offset.y <= 1.0;
         self.at_bottom = output.state.offset.y >= max_offset - 1.0;
 
+        // 当前一屏先渲，从左到右；再备下一屏、上一屏，翻过去就是现成的。
+        let start = spread_start(self.current_page, self.per_view);
+        let end = (start + self.per_view).min(count);
+        let next = end..(end + self.per_view).min(count);
+        let previous = start.saturating_sub(self.per_view)..start;
         let mut wanted = Vec::new();
-        if let Some(target) = wants_render(&self.slots[index], size.x, pixels_per_point, settling) {
-            wanted.push((0.0, index, target));
-        }
-        // 前后各备一两页，翻过去就是现成的。往后翻的多，后页排在前页前面。
-        let neighbours = [
-            (1.0, index + 1),
-            (2.0, index.wrapping_sub(1)),
-            (3.0, index + 2),
-        ];
-        for (priority, neighbour) in neighbours {
-            if neighbour >= count {
-                continue;
-            }
-            let width = self.page_display_size(neighbour, viewport).x;
-            let slot = &mut self.slots[neighbour];
+        let ahead = (start..end)
+            .map(|index| (0.0, index))
+            .chain(next.map(|index| (1.0, index)))
+            .chain(previous.map(|index| (2.0, index)));
+        for (priority, index) in ahead {
+            let width = self.page_display_size(index, viewport).x;
+            let slot = &mut self.slots[index];
             slot.last_used = self.frame;
             if let Some(target) = wants_render(slot, width, pixels_per_point, settling) {
-                wanted.push((priority, neighbour, target));
+                wanted.push((priority, index, target));
             }
         }
         wanted
     }
 
-    /// 单页模式的滚轮：攒够一格翻一页。鼠标滚轮按「行」上报，一格正好一行；
+    /// 当前这一屏的各页及其显示尺寸，和整屏内容区的大小。
+    fn spread_layout(&self, viewport: egui::Vec2) -> (Vec<(usize, egui::Vec2)>, egui::Vec2) {
+        let start = spread_start(self.current_page, self.per_view);
+        let end = (start + self.per_view).min(self.page_count());
+        let pages: Vec<(usize, egui::Vec2)> = (start..end)
+            .map(|index| (index, self.page_display_size(index, viewport)))
+            .collect();
+        let width =
+            pages.iter().map(|(_, size)| size.x).sum::<f32>() + PAGE_GAP * (pages.len() - 1) as f32;
+        let height = pages.iter().map(|(_, size)| size.y).fold(0.0, f32::max);
+        let content = egui::vec2(
+            (width + SIDE_MARGIN * 2.0).max(viewport.x),
+            (height + PAGE_GAP * 2.0).max(viewport.y),
+        );
+        (pages, content)
+    }
+
+    /// 单页模式的滚轮：攒够一格翻一屏。鼠标滚轮按「行」上报，一格正好一行；
     /// 触控板按点上报，按 `TOUCHPAD_POINTS_PER_STEP` 折算。
     fn wheel_flip(&mut self, ui: &egui::Ui, overflows: bool) {
         if !ui.rect_contains_pointer(ui.max_rect()) {
@@ -824,13 +885,9 @@ impl PdfSession {
             return;
         }
         self.wheel_steps = 0.0;
-        if forward && self.current_page + 1 < self.page_count() {
-            self.current_page += 1;
-            self.single_jump = Some(Edge::Top);
-            self.quiet_until = now + FLIP_QUIET;
-        } else if !forward && self.current_page > 0 {
-            self.current_page -= 1;
-            self.single_jump = Some(Edge::Bottom);
+        if let Some(target) = self.step_target(forward) {
+            self.current_page = target;
+            self.single_jump = Some(if forward { Edge::Top } else { Edge::Bottom });
             self.quiet_until = now + FLIP_QUIET;
         }
     }
@@ -915,6 +972,12 @@ fn wants_render(
         Some(_) => !settling && slot.width.abs_diff(target) >= RERENDER_WIDTH_DELTA,
     };
     stale.then_some(target)
+}
+
+/// 并排 `per_view` 页时，第 `page` 页所在那一屏的首页。按页序对齐，
+/// 1–2、3–4 这样分屏，来回翻页每屏的组合不变。
+fn spread_start(page: usize, per_view: usize) -> usize {
+    page / per_view.max(1) * per_view.max(1)
 }
 
 /// 两个矩形在竖直方向上的间距，相交为 0。
@@ -1243,6 +1306,29 @@ mod tests {
 
         queue.close();
         assert_eq!(queue.next(), None);
+    }
+
+    /// 单页模式：宽屏下 A4 竖页适合页面能并排两页，窄屏一页，适合宽度永远一页；
+    /// 分屏按页序对齐，翻页一次跳一整屏。
+    #[test]
+    fn single_page_mode_spreads_pages_across_wide_windows() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut session = PdfSession::new(1, PathBuf::from("a.pdf"), None, tx);
+        session.page_sizes = vec![(595.0, 842.0); 7];
+        session.mode = ViewMode::SinglePage;
+        session.fit = Fit::Page;
+        assert_eq!(session.pages_per_view(egui::vec2(1600.0, 900.0)), 2);
+        assert_eq!(session.pages_per_view(egui::vec2(1000.0, 900.0)), 1);
+        session.fit = Fit::Width;
+        assert_eq!(session.pages_per_view(egui::vec2(1600.0, 900.0)), 1);
+
+        session.per_view = 2;
+        session.current_page = 3; // 第 4 页，落在 3–4 页那一屏
+        assert_eq!(session.step_target(true), Some(4));
+        assert_eq!(session.step_target(false), Some(0));
+        session.current_page = 6; // 最后单出的第 7 页
+        assert_eq!(session.step_target(true), None);
+        assert_eq!(session.step_target(false), Some(4));
     }
 
     #[test]
