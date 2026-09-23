@@ -465,7 +465,11 @@ impl GongwenApp {
             exit_prompt: None,
             exit_confirmed: false,
             last_autosave: std::time::Instant::now(),
-            status: "就绪。先在“设置”中连接本地模型服务。".into(),
+            // 上次闪退留下了日志就先告诉用户在哪，方便发给维护者排查。
+            status: match crate::crash_log::take_unseen_report() {
+                Some(path) => format!("上次运行异常退出，崩溃日志：{}", path.display()),
+                None => "就绪。先在“设置”中连接本地模型服务。".into(),
+            },
             busy: false,
             sender,
             receiver,

@@ -2,6 +2,7 @@
 
 mod ai_guard;
 mod app;
+mod crash_log;
 mod diff;
 mod diff_view;
 mod doc_import;
@@ -56,6 +57,8 @@ mod vocabulary_xlsx;
 use app::GongwenApp;
 
 fn main() -> eframe::Result {
+    // 最先装：之后读配置、装字体、建窗口任何一步 panic 都要留下日志。
+    crash_log::install();
     let app_icon = theme::app_icon(storage::load().unwrap_or_default().theme);
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
@@ -83,9 +86,13 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         version::APP_TITLE,
         options,
         Box::new(|cc| Ok(Box::new(GongwenApp::new(cc)))),
-    )
+    );
+    if let Err(error) = &result {
+        crash_log::record_startup_error(error);
+    }
+    result
 }

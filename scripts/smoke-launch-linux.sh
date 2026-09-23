@@ -117,6 +117,16 @@ run_scenario() {
         failed=1
     fi
 
+    # 4) 程序自己的崩溃日志（src/crash_log.rs）：有就说明出过错，内容一并打出来。
+    local report
+    for report in "$home"/.config/gongwenassistant/logs/crash-*.log; do
+        [ -f "$report" ] || continue
+        echo "error: [$name] 生成了崩溃日志 $(basename "$report")" >&2
+        cp "$report" "$OUT_DIR/$name.$(basename "$report")"
+        sed 's/^/   /' "$report" >&2
+        failed=1
+    done
+
     echo "-- $name.log:"
     sed 's/^/   /' "$log"
     cleanup
