@@ -111,12 +111,8 @@ $endif$
 \end{titlepage}
 \clearemptydoublepage
 
-% 目录
-\frontmatter
-\setcounter{tocdepth}{1}
-\ctexset{contentsname={\makebox[\textwidth][c]{\heiti\enhei\zihao{-2}目录}}}
-\tableofcontents
-\cleardoublepage
+% 正文从阿拉伯页码 1 起。目录不在这里排：正文写了 `<!-- [目录] -->` 才在
+% 标记所在处排（见 md2tex.cls 的目录命令，单用大写罗马页码）
 \mainmatter
 
 \vspace{28pt}

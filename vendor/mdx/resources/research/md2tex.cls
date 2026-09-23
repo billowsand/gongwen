@@ -437,6 +437,23 @@
 }{}
 
 %% ============================================================
+%% 目录：由正文里的 `<!-- [目录] -->` 标记在标记所在处排出，没有标记就不排。
+%% 目录单用一套大写罗马页码（I、II、III）；排完恢复阿拉伯页码，并接着目录
+%% 之前的页号往下数——目录页不占正文页号。
+%% ============================================================
+\newcommand{\mdxtableofcontents}{%
+  \clearemptydoublepage
+  \edef\mdx@pagebeforetoc{\number\c@page}%
+  \pagenumbering{Roman}%
+  \setcounter{tocdepth}{1}%
+  \ctexset{contentsname={\makebox[\textwidth][c]{\heiti\enhei\zihao{-2}目录}}}%
+  \tableofcontents
+  \clearemptydoublepage
+  \pagenumbering{arabic}%
+  \setcounter{page}{\mdx@pagebeforetoc}%
+}
+
+%% ============================================================
 %% 空白偶数页无页码
 %% ============================================================
 \newcommand{\clearemptydoublepage}{%

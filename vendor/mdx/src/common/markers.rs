@@ -38,6 +38,17 @@ pub fn is_numbered_table(line: &str) -> bool {
     })
 }
 
+/// 目录标记 `<!-- [目录] -->`（含英文变体）：研究报告只在出现这个标记时才排目录，
+/// 目录排在标记所在的位置，单独一套大写罗马页码（I、II、III）。
+pub fn is_toc(line: &str) -> bool {
+    comment_label(line).is_some_and(|inner| {
+        matches!(
+            inner.to_ascii_lowercase().as_str(),
+            "目录" | "toc" | "contents" | "tableofcontents"
+        )
+    })
+}
+
 /// 独占一行的 HTML 注释里写的标签：去掉 `<!-- -->` 和两侧的 `[]`/`【】`。
 fn comment_label(line: &str) -> Option<&str> {
     let trimmed = line.trim();

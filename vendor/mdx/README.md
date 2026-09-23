@@ -56,6 +56,15 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   `\parbox[t]`；`docx_research.rs` / `docx_official.rs` 输出 `gridSpan` / `vMerge`；
 - `parser.rs`：表前已有表题时不再吞掉表后那一行（那是下一张表的表题）。
 
+研究报告的目录标记同样先在这里落地：
+
+- `common/markers.rs` 新增 `is_toc`，`common/ast.rs` 新增 `Block::Toc`：
+  `<!-- [目录] -->` 不再原样丢弃，解析成原位的目录块（不是区段切换）；
+- `resources/research/template.tex` 不再无条件排目录；`md2tex.cls` 新增
+  `\mdxtableofcontents`：目录单用大写罗马页码（I、II、III），排完恢复阿拉伯
+  页码并接着目录之前的页号数；`tex_research_emitter.rs` 在标记处输出它，只排一次；
+- `docx_research.rs` 不再在封面后固定插目录，改为在标记处插入，只插一次。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持

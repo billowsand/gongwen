@@ -278,8 +278,8 @@ impl OfficialEmitter {
                 self.list.reset();
                 self.emit_marker(docx, *kind)
             }
-            // 公文不使用区段标记和交叉引用锚点；空行沿用旧行为，不截断列表。
-            Block::Empty | Block::Label(_) => docx,
+            // 公文不使用区段标记、目录和交叉引用锚点；空行沿用旧行为，不截断列表。
+            Block::Empty | Block::Label(_) | Block::Toc => docx,
         }
     }
 

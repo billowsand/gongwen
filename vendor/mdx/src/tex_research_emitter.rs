@@ -6,6 +6,7 @@
 //! - 列表前缀：1. 2. 3. / (1) (2) / a. b. / I. II. / (A) (B) / 1) 2)
 //! - 表格：使用 longtblr 环境
 //! - 支持特殊章节标记：Abstract / Appendix / Changelog / Body
+//! - 目录只在 `<!-- [目录] -->` 处排（`\mdxtableofcontents`，单独一套大写罗马页码）
 //! - 分章输出：每章切为 data/ 部件，附录切为 appendix/ 部件，主文件 \input 引用
 
 use crate::common::ast::{Block, Inline, MarkerKind};
@@ -64,6 +65,8 @@ pub struct TexResearchEmitter {
     abstract_skipped_heading: bool,
     /// 版本变更记录模式下是否已经输出标题
     changelog_heading_done: bool,
+    /// 是否已经排过目录（`<!-- [目录] -->` 写了多处时只认第一处）
+    toc_done: bool,
     /// 参考文献模式下是否已经输出标题
     reference_heading_done: bool,
     /// 列表状态
@@ -104,6 +107,7 @@ impl TexResearchEmitter {
             appendix_saw_h1: false,
             abstract_skipped_heading: false,
             changelog_heading_done: false,
+            toc_done: false,
             reference_heading_done: false,
             l1: 0,
             l2: 0,
@@ -211,10 +215,32 @@ impl TexResearchEmitter {
                 self.reset_list();
                 self.emit_math_block(content);
             }
+            Block::Toc => {
+                self.emit_toc();
+            }
             Block::Empty => {
                 // 忽略空行
             }
         }
+    }
+
+    /// 目录：排在 `<!-- [目录] -->` 所在的位置，没有这个标记就不排目录。
+    /// 页码由 md2tex.cls 的 `\mdxtableofcontents` 处理：目录单用大写罗马页码
+    /// （I、II、III），目录之后恢复阿拉伯页码并接着目录之前的页号往下数。
+    fn emit_toc(&mut self) {
+        // 目录与区段标记一样落在主文件，不进分章部件
+        self.start_main();
+        self.reset_list();
+        if self.toc_done {
+            return;
+        }
+        self.toc_done = true;
+        // 摘要内容是攒到区段结束才整体输出的；目录前先把摘要落下，
+        // 否则摘要会被挪到目录后面
+        if self.in_abstract {
+            self.finish_abstract();
+        }
+        self.out.push_str("\\mdxtableofcontents\n\n");
     }
 
     fn handle_marker(&mut self, kind: &MarkerKind) {
@@ -919,6 +945,42 @@ mod tests {
         let body = test_body(e);
         assert!(body.contains("\\begin{abstract}"));
         assert!(body.contains("\\end{abstract}"));
+    }
+
+    /// 没写 `<!-- [目录] -->` 就不排目录。
+    #[test]
+    fn test_no_toc_without_marker() {
+        let mut e = TexResearchEmitter::new();
+        e.emit_block(&Block::Heading {
+            level: 2,
+            text: "引言".into(),
+        });
+        let body = test_body(e);
+        assert!(!body.contains("mdxtableofcontents"), "{body}");
+    }
+
+    /// 目录排在标记所在处、落在主文件里；摘要先落下，写多处只排一次。
+    #[test]
+    fn test_toc_marker_places_toc_once_after_abstract() {
+        let mut e = TexResearchEmitter::new();
+        e.emit_block(&Block::Marker(MarkerKind::Abstract));
+        e.emit_block(&Block::Paragraph(vec![Inline::Text("这是摘要内容".into())]));
+        e.emit_block(&Block::Toc);
+        e.emit_block(&Block::Heading {
+            level: 2,
+            text: "引言".into(),
+        });
+        e.emit_block(&Block::Toc);
+        let (main, parts) = e.finish();
+        assert_eq!(main.matches("\\mdxtableofcontents").count(), 1, "{main}");
+        let abstract_at = main.find("\\end{abstract}").expect("摘要应先落下");
+        let toc_at = main.find("\\mdxtableofcontents").unwrap();
+        let chapter_at = main.find("\\input{data/chapter01.tex}").unwrap();
+        assert!(abstract_at < toc_at && toc_at < chapter_at, "{main}");
+        assert!(
+            parts.iter().all(|(_, c)| !c.contains("mdxtableofcontents")),
+            "目录不应落进分章部件"
+        );
     }
 
     #[test]

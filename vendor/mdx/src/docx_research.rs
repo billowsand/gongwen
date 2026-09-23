@@ -3,9 +3,10 @@
 //! 视觉布局对齐 `resources/research/md2tex.cls` 与 `template.tex`：
 //! - 第 1 页 封面：各块用锚定页面的图文框按 `cover::layout` 的毫米数定位，
 //!   与 `template.tex` 的 TikZ 封面同一张网格；末尾翻页
-//! - 第 2 页 目录：居中二号黑体"目录" + `TableOfContents`(dirty) + 翻页
 //! - 之后 版本变更记录（不进 TOC，由 `<!-- [版本变更记录] -->` 触发）
 //! - 之后 摘要 / 正文 / 附录，按 `<!-- [...] -->` 标记切换 emitter 模式
+//! - 目录：只在出现 `<!-- [目录] -->` 时排，排在标记所在的位置：居中二号黑体
+//!   "目录" + `TableOfContents`(dirty) + 翻页；整篇只排一次
 //!
 //! 章节编号：H2 → "第X章 Y"、H3 → "X.Y Z"、H4 → "X.Y.Z W"，附录章节
 //! 切换为 "附录 A / 附录 B / ..."。
@@ -108,7 +109,6 @@ pub fn run(input: &Path, output: Option<&Path>) -> Result<()> {
     let mut docx = base_docx();
     docx = register_styles(docx);
     docx = add_cover(docx, cover_title, &metadata);
-    docx = add_toc(docx);
 
     if !split.changelog.is_empty() {
         docx = add_changelog(docx, &split.changelog, &image_base_dir);
@@ -161,6 +161,8 @@ fn split_blocks(blocks: &[Block]) -> SplitBlocks {
             Block::Marker(MarkerKind::Changelog) => {
                 bucket = Bucket::Changelog;
             }
+            // 目录不属于任何区段，总在主体里按原位置排
+            Block::Toc => main.push(b.clone()),
             Block::Marker(MarkerKind::Body)
             | Block::Marker(MarkerKind::Abstract)
             | Block::Marker(MarkerKind::Appendix)
@@ -524,6 +526,7 @@ fn rule(y: f32, size: usize, color: &str, width: f32, x: f32) -> Paragraph {
 // 目录
 // ============================================================
 
+/// 目录页：标题 + TOC 域 + 翻页。由 `<!-- [目录] -->` 触发，排在标记所在位置。
 fn add_toc(mut docx: Docx) -> Docx {
     // "目录"标题（不带 Heading 样式，避免自引用）
     docx = docx.add_paragraph(
@@ -614,6 +617,10 @@ struct MainEmitter {
     table_counter: usize,
     figure_counter: usize,
     image_base_dir: PathBuf,
+    /// 目录已经排过：`<!-- [目录] -->` 写了多处时只认第一处
+    toc_done: bool,
+    /// 主体里已经排出过内容：目录不在开头时要先翻页，另起一页排
+    has_content: bool,
 }
 
 #[derive(Default)]
@@ -648,18 +655,44 @@ impl MainEmitter {
             table_counter: 0,
             figure_counter: 0,
             image_base_dir,
+            toc_done: false,
+            has_content: false,
         }
     }
 
     fn emit_all(&mut self, mut docx: Docx, blocks: &[Block]) -> Docx {
         for b in blocks {
             docx = self.emit(docx, b);
+            if !matches!(
+                b,
+                Block::Toc
+                    | Block::Empty
+                    | Block::Label(_)
+                    | Block::Marker(
+                        MarkerKind::Body | MarkerKind::Appendix | MarkerKind::Changelog
+                    )
+            ) {
+                self.has_content = true;
+            }
         }
         docx
     }
 
     fn emit(&mut self, docx: Docx, b: &Block) -> Docx {
         match b {
+            Block::Toc => {
+                self.list.reset();
+                if self.toc_done {
+                    return docx;
+                }
+                self.toc_done = true;
+                let docx = if self.has_content {
+                    page_break(docx)
+                } else {
+                    docx
+                };
+                add_toc(docx)
+            }
             Block::Marker(kind) => {
                 self.list.reset();
                 self.handle_marker(*kind);
@@ -985,7 +1018,11 @@ impl ChangelogEmitter {
                     )
                 })
             }
-            Block::Marker(_) | Block::Empty | Block::CodeBlock { .. } | Block::Label(_) => docx,
+            Block::Marker(_)
+            | Block::Toc
+            | Block::Empty
+            | Block::CodeBlock { .. }
+            | Block::Label(_) => docx,
         }
     }
 }
@@ -1443,6 +1480,60 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn toc_count(docx: &Docx) -> usize {
+        docx.document
+            .children
+            .iter()
+            .filter(|child| matches!(child, DocumentChild::TableOfContents(_)))
+            .count()
+    }
+
+    /// 没写 `<!-- [目录] -->` 就不排目录；写了多处只排一次。
+    #[test]
+    fn toc_only_where_marked_and_only_once() {
+        let heading = Block::Heading {
+            level: 2,
+            text: "引言".into(),
+        };
+        let mut e = MainEmitter::new();
+        let docx = e.emit_all(Docx::new(), &[heading.clone()]);
+        assert_eq!(toc_count(&docx), 0);
+
+        let mut e = MainEmitter::new();
+        let docx = e.emit_all(
+            Docx::new(),
+            &[
+                Block::Marker(MarkerKind::Abstract),
+                Block::Paragraph(vec![Inline::Text("摘要".into())]),
+                Block::Toc,
+                heading,
+                Block::Toc,
+            ],
+        );
+        assert_eq!(toc_count(&docx), 1);
+        let texts = paragraph_texts(&docx);
+        let abstract_at = texts.iter().position(|t| t == "摘要").unwrap();
+        let toc_title_at = texts.iter().position(|t| t == "目  录").unwrap();
+        let chapter_at = texts.iter().position(|t| t.contains("引言")).unwrap();
+        assert!(
+            abstract_at < toc_title_at && toc_title_at < chapter_at,
+            "{texts:?}"
+        );
+    }
+
+    /// 目录标记写在版本变更记录区段里，也留在主体按原位置排。
+    #[test]
+    fn split_keeps_toc_in_main() {
+        let blocks = vec![
+            Block::Marker(MarkerKind::Changelog),
+            Block::Toc,
+            Block::Paragraph(vec![Inline::Text("v1.0 初版".into())]),
+        ];
+        let split = split_blocks(&blocks);
+        assert!(split.main.iter().any(|b| matches!(b, Block::Toc)));
+        assert!(!split.changelog.iter().any(|b| matches!(b, Block::Toc)));
     }
 
     #[test]

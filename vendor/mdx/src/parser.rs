@@ -39,6 +39,14 @@ pub fn parse(content: &str) -> Vec<Block> {
             numbered_pending = false;
         }
 
+        // 0.5) 目录标记 `<!-- [目录] -->`
+        if markers::is_toc(line) {
+            list_indents.clear();
+            blocks.push(Block::Toc);
+            i += 1;
+            continue;
+        }
+
         // 1) 区段标记 `<!-- [...] -->`
         if let Some(kind) = markers::detect(line) {
             list_indents.clear();
@@ -543,6 +551,31 @@ mod tests {
                 MarkerKind::Body,
                 MarkerKind::Reference,
             ]
+        );
+    }
+
+    /// 目录标记不是区段标记：解析成独立的 `Block::Toc`，原位保留，不改变区段。
+    #[test]
+    fn detects_toc_marker_in_place() {
+        let blocks =
+            parse("<!-- [摘要] -->\n\n摘要。\n\n<!-- [目录] -->\n\n<!-- 【TOC】 -->\n\n## 引言\n");
+        let toc_at: Vec<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| matches!(b, Block::Toc))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(toc_at.len(), 2, "{blocks:?}");
+        let para_at = blocks
+            .iter()
+            .position(|b| matches!(b, Block::Paragraph(_)))
+            .unwrap();
+        assert!(para_at < toc_at[0], "目录应排在摘要段落之后：{blocks:?}");
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, Block::Paragraph(i) if inline::flatten(i).contains("目录"))),
+            "目录标记不应原样印成段落：{blocks:?}"
         );
     }
 
