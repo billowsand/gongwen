@@ -276,7 +276,8 @@ pub(crate) fn body_stats(markdown: &str) -> (usize, usize) {
             export::MarkdownBlock::OrderedListItem { number, text } => {
                 format!("{number}.{text}")
             }
-            export::MarkdownBlock::Paragraph(text) => {
+            export::MarkdownBlock::Paragraph(text)
+            | export::MarkdownBlock::Aligned { text, .. } => {
                 paragraphs += 1;
                 text.clone()
             }
@@ -372,7 +373,129 @@ fn splice_own_line(text: &mut String, pos: usize, line: &str) -> Range<usize> {
     start..start + line.len()
 }
 
+/// 居中 / 居右标记的源码写法。
+pub(crate) fn align_marker(align: export::LineAlign) -> &'static str {
+    match align {
+        export::LineAlign::Center => "<!-- [居中] -->",
+        export::LineAlign::Right => "<!-- [居右] -->",
+    }
+}
+
+/// 管着第 `line` 行的那个对齐标记：从这一行往上找，空行之前遇到的第一个
+/// 对齐标记（可以就是这一行本身）。返回标记所在行号与对齐方式。
+pub(crate) fn governing_align_marker(
+    text: &str,
+    ranges: &[Range<usize>],
+    line: usize,
+) -> Option<(usize, export::LineAlign)> {
+    (0..=line.min(ranges.len().saturating_sub(1)))
+        .rev()
+        .map(|index| (index, text[ranges[index].clone()].trim()))
+        .take_while(|(_, source)| !source.is_empty())
+        .find_map(|(index, source)| export::parse_align_marker(source).map(|align| (index, align)))
+}
+
+/// 对齐动作做了什么，状态栏据此报告。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AlignEdit {
+    Added,
+    Switched,
+    Removed,
+}
+
+/// 把选区覆盖的几行设成居中 / 居右，返回改后的全文、光标该落的位置与做了什么。
+///
+/// - 这几行已在同一种对齐区里：删掉那个标记，恢复正常排版（再点一次即取消）；
+/// - 在另一种对齐区里：就地把标记换掉；
+/// - 不在对齐区里：在第一行上方插一行标记；最后一行下面紧跟着非空行时补一个
+///   空行，免得对齐区一路吞到后面的正文。
+pub(crate) fn toggle_align_region(
+    text: &str,
+    selection: &Range<usize>,
+    align: export::LineAlign,
+) -> (String, usize, AlignEdit) {
+    let ranges = line_ranges(text);
+    let first = line_at_byte(&ranges, selection.start);
+    let last = line_at_byte(&ranges, selection.end.max(selection.start));
+    let marker = align_marker(align);
+    let mut out = text.to_string();
+    if let Some((line, current)) = governing_align_marker(text, &ranges, first) {
+        let range = ranges[line].clone();
+        if current == align {
+            // 连同行尾换行一起删；标记在末行时删掉前面那个换行。
+            let removal = if range.end < text.len() {
+                range.start..range.end + text[range.end..].find('\n').map_or(0, |at| at + 1)
+            } else {
+                range.start.saturating_sub(1)..range.end
+            };
+            let removed = removal.len();
+            out.replace_range(removal.clone(), "");
+            let caret = ranges[last]
+                .end
+                .saturating_sub(removed)
+                .max(removal.start)
+                .min(out.len());
+            return (out, caret, AlignEdit::Removed);
+        }
+        out.replace_range(range.clone(), marker);
+        let caret = ranges[last].end + marker.len() - range.len();
+        return (out, caret, AlignEdit::Switched);
+    }
+    // 先补后面的空行，再插前面的标记：前面的插入会把后面的偏移整体后移。
+    let region_end = ranges[last].end;
+    let next_is_text = ranges
+        .get(last + 1)
+        .is_some_and(|next| !text[next.clone()].trim().is_empty());
+    if next_is_text {
+        out.insert(region_end, '\n');
+    }
+    let start = ranges[first].start;
+    out.insert_str(start, &format!("{marker}\n"));
+    (out, region_end + marker.len() + 1, AlignEdit::Added)
+}
+
 impl DraftPage<'_> {
+    /// 光标所在行受哪种对齐标记管，用来点亮「格式」分区里对应的按钮。
+    pub(crate) fn align_at_cursor(&self, ctx: &egui::Context) -> Option<export::LineAlign> {
+        let text = &self.doc.generated_markdown;
+        let cursor = editor_cursor(ctx, text)?;
+        let ranges = line_ranges(text);
+        governing_align_marker(text, &ranges, line_at_byte(&ranges, cursor)).map(|(_, align)| align)
+    }
+
+    /// 把选区覆盖的几行设成居中 / 居右；已经是同一种对齐的再点一次取消。
+    pub(crate) fn toggle_align(&mut self, ctx: &egui::Context, align: export::LineAlign) {
+        if self.doc.read_only() {
+            return;
+        }
+        let text = self.doc.generated_markdown.clone();
+        let Some(range) = editor_selection(ctx, &text) else {
+            *self.status = "先在审校稿里把光标放到要对齐的行上，或选中这几行。".into();
+            return;
+        };
+        let ranges = line_ranges(&text);
+        let lines = line_at_byte(&ranges, range.start)..=line_at_byte(&ranges, range.end);
+        if lines
+            .clone()
+            .all(|line| text[ranges[line].clone()].trim().is_empty())
+        {
+            *self.status = "光标所在是空行：把光标放到要对齐的文字行上，或选中这几行。".into();
+            return;
+        }
+        let (updated, caret, edit) = toggle_align_region(&text, &range, align);
+        self.doc.generated_markdown = updated;
+        self.doc.pending_source_jump = Some(caret);
+        let label = match align {
+            export::LineAlign::Center => "居中",
+            export::LineAlign::Right => "居右",
+        };
+        *self.status = match edit {
+            AlignEdit::Added => format!("已设为{label}：标记下方直到空行的各行都{label}排。"),
+            AlignEdit::Switched => format!("已改为{label}。"),
+            AlignEdit::Removed => format!("已取消{label}，恢复正常排版。"),
+        };
+    }
+
     /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：插到光标所在行的行首，
     /// 从没点进过编辑框时追加到文末。标记必须独占一行导出器才认，
     /// 正文等区段标记全篇只允许一个；附件与附录标记可重复插入，
@@ -601,6 +724,58 @@ impl DraftPage<'_> {
         } else {
             "已加粗。".into()
         };
+    }
+}
+
+#[cfg(test)]
+mod align_tests {
+    use super::*;
+    use export::LineAlign::{Center, Right};
+
+    #[test]
+    fn marks_the_selected_lines_and_closes_the_region_before_following_text() {
+        let text = "前文。\n居中甲\n居中乙\n后文。";
+        let start = "前文。\n".len();
+        let end = "前文。\n居中甲\n居中".len();
+        let (updated, caret, edit) = toggle_align_region(text, &(start..end), Center);
+        assert_eq!(edit, AlignEdit::Added);
+        assert_eq!(updated, "前文。\n<!-- [居中] -->\n居中甲\n居中乙\n\n后文。");
+        assert_eq!(caret, "前文。\n<!-- [居中] -->\n居中甲\n居中乙".len());
+        // 解析出来正好是这两行，后文恢复正常段落。
+        let blocks = export::parse_markdown(&updated);
+        assert!(
+            matches!(blocks.last(), Some(export::MarkdownBlock::Paragraph(p)) if p == "后文。")
+        );
+    }
+
+    #[test]
+    fn no_extra_blank_line_when_the_region_already_ends() {
+        let text = "居右一行\n\n后文。";
+        let (updated, _, _) = toggle_align_region(text, &(0..0), Right);
+        assert_eq!(updated, "<!-- [居右] -->\n居右一行\n\n后文。");
+        let (updated, _, _) = toggle_align_region("末行", &(0..0), Right);
+        assert_eq!(updated, "<!-- [居右] -->\n末行");
+    }
+
+    #[test]
+    fn same_alignment_again_removes_the_marker_and_other_one_switches_it() {
+        let text = "前文。\n\n<!-- [居中] -->\n甲\n乙\n\n后文。";
+        let on_second = "前文。\n\n<!-- [居中] -->\n甲\n".len();
+        let (switched, _, edit) = toggle_align_region(text, &(on_second..on_second), Right);
+        assert_eq!(edit, AlignEdit::Switched);
+        assert_eq!(switched, "前文。\n\n<!-- [居右] -->\n甲\n乙\n\n后文。");
+        let (removed, caret, edit) = toggle_align_region(&switched, &(on_second..on_second), Right);
+        assert_eq!(edit, AlignEdit::Removed);
+        assert_eq!(removed, "前文。\n\n甲\n乙\n\n后文。");
+        assert_eq!(caret, "前文。\n\n甲\n乙".len());
+    }
+
+    #[test]
+    fn governing_marker_stops_at_a_blank_line() {
+        let text = "<!-- [居中] -->\n甲\n\n乙";
+        let ranges = line_ranges(text);
+        assert_eq!(governing_align_marker(text, &ranges, 1), Some((0, Center)));
+        assert_eq!(governing_align_marker(text, &ranges, 3), None);
     }
 }
 

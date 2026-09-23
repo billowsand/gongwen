@@ -1627,6 +1627,27 @@ mod tests {
     }
 
     #[test]
+    fn aligned_lines_are_centered_or_flushed_right_without_indent() {
+        let (blocks, block_lines) = parse_markdown_with_lines(
+            "# 测试函\n<!-- [居中] -->\n居中**一行**\n<!-- [居右] -->\n居右一行\n\n正文。",
+        );
+        let (body, _) = official_letter_sections_to_tex(&blocks, &block_lines, false);
+        assert!(
+            body.contains("{\\noindent\\centering 居中\\GwBold{一行}\\par}"),
+            "{body}"
+        );
+        assert!(
+            body.contains("{\\noindent\\raggedleft 居右一行\\par}"),
+            "{body}"
+        );
+        assert!(!body.contains("居中]"), "标记行不该印出来：{body}");
+        assert!(
+            body.contains("正文。\\GwaTail{"),
+            "空行之后恢复正文：{body}"
+        );
+    }
+
+    #[test]
     fn each_additional_attachment_starts_on_a_new_page() {
         let (blocks, block_lines) = parse_markdown_with_lines(
             "# 测试函\n正文。\n<!-- [附件] -->\n# 附件1\n## 表一\n内容一。\n# 附件2\n## 表二\n内容二。",

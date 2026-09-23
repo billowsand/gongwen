@@ -39,6 +39,28 @@ pub fn parse(content: &str) -> Vec<Block> {
             numbered_pending = false;
         }
 
+        // 0.25) 居中 / 居右标记：标记行不落版面，其下每条非空行各成一个对齐行，
+        // 遇到空行结束；区内再写一个对齐标记就从那一行起换成新的对齐方式。
+        if let Some(mut align) = markers::align(line) {
+            list_indents.clear();
+            i += 1;
+            while i < lines.len() {
+                let text = lines[i].trim();
+                if text.is_empty() {
+                    break;
+                }
+                match markers::align(text) {
+                    Some(next) => align = next,
+                    None => blocks.push(Block::Aligned {
+                        align,
+                        content: inline::parse(text),
+                    }),
+                }
+                i += 1;
+            }
+            continue;
+        }
+
         // 0.5) 目录标记 `<!-- [目录] -->`
         if markers::is_toc(line) {
             list_indents.clear();
@@ -581,6 +603,32 @@ mod tests {
 
     /// 序号表标记：本身不成块（不会印到纸上），紧随的表格认成序号表，
     /// 表格里的 `||` 与 `^^` 解析成合并单元格。
+    /// 居中 / 居右标记：其下各行成对齐行，区内不认标题、列表，空行结束。
+    #[test]
+    fn align_marker_covers_lines_until_blank() {
+        use crate::common::ast::LineAlign;
+        let blocks = parse("<!-- [居中] -->\n第一行\n# 不是标题\n<!-- [居右] -->\n1. 右边\n\n正文");
+        let aligned: Vec<(LineAlign, String)> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Aligned { align, content } => Some((*align, inline::flatten(content))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            aligned,
+            vec![
+                (LineAlign::Center, "第一行".to_string()),
+                (LineAlign::Center, "# 不是标题".to_string()),
+                (LineAlign::Right, "1. 右边".to_string()),
+            ]
+        );
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, Block::Paragraph(i) if inline::flatten(i) == "正文")));
+        assert!(!blocks.iter().any(|b| matches!(b, Block::Heading { .. })));
+    }
+
     #[test]
     fn numbered_table_marker_flags_the_next_table() {
         let md = "表：任务分工\n<!-- [序号表] -->\n\n| 序号 | 事项 | 单位 |\n|---|---|---|\n| （一）重点工作 |||\n| 1 | 编制计划 | 办公室 |\n| 2 | ^^ | 财务处 |\n";

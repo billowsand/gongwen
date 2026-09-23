@@ -36,11 +36,11 @@ pub(crate) use header::issuing_unit_header;
 #[cfg(test)]
 pub(crate) use paragraphs::image_paragraph_from_bytes;
 pub(crate) use paragraphs::{
-    agenda_blank_line, agenda_body_paragraph, attachment_document_title_paragraph,
-    attachment_label_paragraph, body_paragraph, compact_heading_paragraph,
-    document_title_paragraph, heading_paragraph, image_paragraph, joint_closing_paragraph,
-    joint_signature_cell_paragraph, letter_security_paragraph, ordered_list_paragraph,
-    red_approval_title_paragraph, red_record_paragraph,
+    agenda_blank_line, agenda_body_paragraph, aligned_paragraph,
+    attachment_document_title_paragraph, attachment_label_paragraph, body_paragraph,
+    compact_heading_paragraph, document_title_paragraph, heading_paragraph, image_paragraph,
+    joint_closing_paragraph, joint_signature_cell_paragraph, letter_security_paragraph,
+    ordered_list_paragraph, red_approval_title_paragraph, red_record_paragraph,
 };
 pub(crate) use record::add_footer_record;
 pub(crate) use red::{
@@ -484,6 +484,9 @@ pub fn write_docx_with_numbering(
                     }
                     doc = doc.add_paragraph(body_paragraph(text, bold));
                 }
+                MarkdownBlock::Aligned { align, text } => {
+                    doc = doc.add_paragraph(aligned_paragraph(*align, text, bold));
+                }
                 MarkdownBlock::OrderedListItem { number, text } => {
                     doc = doc.add_paragraph(ordered_list_paragraph(
                         *number,
@@ -744,6 +747,39 @@ mod tests {
             );
         }
         assert!(xml.contains(">序号</w:t>"), "表头首格应补「序号」");
+    }
+
+    /// 居中 / 居右区：两条导出路径（普通文档与函稿版式）都按标记排成居中、
+    /// 右对齐段落，不带首行缩进；空行之后的正文恢复两端对齐。
+    #[test]
+    fn aligned_lines_export_as_centered_and_right_paragraphs() {
+        let temp = tempfile::tempdir().unwrap();
+        for kind in [TemplateKind::PlainDocument, TemplateKind::WhitePaper] {
+            let path = temp.path().join(format!("aligned-{kind:?}.docx"));
+            let mut input = DraftInput::default();
+            input.kind = kind;
+            write_docx_ok(
+                &path,
+                &input,
+                "# 对齐测试\n\
+                 <!-- [居中] -->\n\
+                 居中一行\n\
+                 <!-- [居右] -->\n\
+                 居右一行\n\
+                 \n\
+                 恢复正文。",
+            )
+            .unwrap();
+            let xml = zip_text(&path, "word/document.xml");
+            let center = paragraph_containing(&xml, "居中一行");
+            assert!(center.contains(r#"<w:jc w:val="center" />"#), "{center}");
+            assert!(!center.contains("w:firstLine"), "{center}");
+            let right = paragraph_containing(&xml, "居右一行");
+            assert!(right.contains(r#"<w:jc w:val="right" />"#), "{right}");
+            let body = paragraph_containing(&xml, "恢复正文");
+            assert!(body.contains(r#"<w:jc w:val="both" />"#), "{body}");
+            assert!(!xml.contains("居中]"), "标记行不该印出来");
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! docx_research / tex_official / tex_research 等 emitter 用标记切换模式；
 //! docx_official 直接忽略标记块（公文不使用区段分段）。
 
-use super::ast::MarkerKind;
+use super::ast::{LineAlign, MarkerKind};
 
 /// 把一行尝试解析成 [`MarkerKind`]。
 ///
@@ -47,6 +47,17 @@ pub fn is_toc(line: &str) -> bool {
             "目录" | "toc" | "contents" | "tableofcontents"
         )
     })
+}
+
+/// 居中 / 居右标记 `<!-- [居中] -->`、`<!-- [居右] -->`（含「右对齐」与英文变体）：
+/// 其下方直到空行的各行整行居中或靠右。与公文助手 `parse_align_marker` 同一套写法。
+pub fn align(line: &str) -> Option<LineAlign> {
+    let inner = comment_label(line)?;
+    match inner.to_ascii_lowercase().as_str() {
+        "居中" | "center" => Some(LineAlign::Center),
+        "居右" | "右对齐" | "right" => Some(LineAlign::Right),
+        _ => None,
+    }
 }
 
 /// 独占一行的 HTML 注释里写的标签：去掉 `<!-- -->` 和两侧的 `[]`/`【】`。

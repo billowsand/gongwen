@@ -581,6 +581,38 @@ pub(crate) fn body_block(
     draw_justified(ui, job);
 }
 
+/// 居中 / 居右区的一行：正文字体、不缩进，整行相对版心居中或靠右，与 Word 的
+/// 居中 / 右对齐段落、TeX 的 `\centering` / `\raggedleft` 一致。行内加粗与括号
+/// 楷体照正文；一行太长折行时，每一行各自居中或靠右。
+pub(crate) fn aligned_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    align: export::LineAlign,
+) {
+    let mut job = job(metrics.content);
+    job.halign = match align {
+        export::LineAlign::Center => Align::Center,
+        export::LineAlign::Right => Align::Max,
+    };
+    append_inline(&mut job, metrics, text, &metrics.body_font());
+    // halign 让每行相对 galley 原点对齐，所以原点要放在版心中线或右沿上，
+    // 道理同 `line_block_runs` 的居中分支。
+    let galley = layout(ui, job);
+    let height = galley.size().y;
+    let rows = row_spans(&galley);
+    place(ui, metrics, height, |painter, rect| {
+        let x = match align {
+            export::LineAlign::Center => rect.left() + metrics.content / 2.0,
+            export::LineAlign::Right => rect.left() + metrics.content,
+        };
+        let origin = egui::pos2(x, rect.top());
+        push_galley_tints(metrics, &galley, origin);
+        painter.galley(origin, galley, theme::paper::ink());
+        mark_gutter_rows(metrics, rect, &rows);
+    });
+}
+
 /// 保持一个自然段的连续排版，同时把点击与高亮区域拆到每一行 Markdown 源码。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn clickable_body_block(

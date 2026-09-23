@@ -7,9 +7,9 @@ use crate::export::docx::{
     BODY_SIZE, BoldFont, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS,
     TITLE_SIZE, apply_bold, body_run, body_runs, chinese_fonts, security_runs, title_run,
 };
-use crate::export::plain_text;
 use crate::export::title;
 use crate::export::title::TitlePlan;
+use crate::export::{LineAlign, plain_text};
 use crate::images;
 use crate::models::{DraftInput, ListNumbering, TemplateKind};
 use docx_rs::*;
@@ -19,6 +19,25 @@ pub(crate) fn body_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
     let mut paragraph = Paragraph::new()
         .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
+        .line_spacing(
+            LineSpacing::new()
+                .line(super::BODY_LINE_TWIPS as i32)
+                .line_rule(LineSpacingType::Exact),
+        )
+        .widow_control(true);
+    for run in body_runs(text, bold) {
+        paragraph = paragraph.add_run(run);
+    }
+    paragraph
+}
+
+/// 居中 / 居右区的一行：字体行距同正文，不缩进，整行按标记居中或靠右。
+pub(crate) fn aligned_paragraph(align: LineAlign, text: &str, bold: BoldFont<'_>) -> Paragraph {
+    let mut paragraph = Paragraph::new()
+        .align(match align {
+            LineAlign::Center => AlignmentType::Center,
+            LineAlign::Right => AlignmentType::Right,
+        })
         .line_spacing(
             LineSpacing::new()
                 .line(super::BODY_LINE_TWIPS as i32)

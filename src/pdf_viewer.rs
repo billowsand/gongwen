@@ -573,7 +573,14 @@ impl PdfSession {
         }
         self.keyboard(ui.ctx());
 
-        let viewport = ui.available_size();
+        let mut viewport = ui.available_size();
+        // 竖向滚动条要从内容区里让出宽度。内容区若按整块面板宽度铺，就正好比可视区宽出
+        // 一条滚动条，底部便总挂着一条滚不动的横向滚动条。连续模式页一多必然竖向溢出，
+        // 直接让出；单页模式要看这一屏是否溢出，在 `single_page` 里再定。
+        let bar = ui.spacing().scroll.allocated_width();
+        if self.mode == ViewMode::Continuous {
+            viewport.x -= bar;
+        }
         let pixels_per_point = ui.ctx().pixels_per_point().max(1.0);
         self.settle_width(ui.ctx(), viewport, pixels_per_point);
         // 拖窗口或连续缩放的过程中，已有纹理先缩放顶着，只补还没有纹理的页。
@@ -581,7 +588,12 @@ impl PdfSession {
 
         let mut wanted = match self.mode {
             ViewMode::Continuous => self.continuous(ui, viewport, pixels_per_point, settling),
-            ViewMode::SinglePage => self.single_page(ui, viewport, pixels_per_point, settling),
+            ViewMode::SinglePage => {
+                let (wanted, inner) =
+                    self.single_page(ui, viewport, bar, pixels_per_point, settling);
+                viewport = inner;
+                wanted
+            }
         };
         let (width, _) = self.page_sizes[self.current_page];
         self.shown_scale = self.page_display_size(self.current_page, viewport).x / width.max(1.0);
@@ -737,20 +749,22 @@ impl PdfSession {
 
     /// 单页模式：一次一屏。窗口够宽时从左到右并排多页，滚轮一格翻一屏。
     /// 页面比窗口高时先在页内滚，滚到头再翻。
+    /// 返回这一帧需要渲染的页，以及让出滚动条之后实际排版用的视口。
     fn single_page(
         &mut self,
         ui: &mut egui::Ui,
-        viewport: egui::Vec2,
+        full: egui::Vec2,
+        bar: f32,
         pixels_per_point: f32,
         settling: bool,
-    ) -> Vec<(f32, usize, u16)> {
+    ) -> (Vec<(f32, usize, u16)>, egui::Vec2) {
         let count = self.page_count();
         if let Some(index) = self.scroll_to.take() {
             self.current_page = index.min(count - 1);
             self.single_jump = Some(Edge::Top);
         }
         self.current_page = self.current_page.min(count - 1);
-        self.per_view = self.pages_per_view(viewport);
+        let viewport = self.single_viewport(full, bar);
         let (_, content) = self.spread_layout(viewport);
         self.wheel_flip(ui, content.y > viewport.y + 0.5);
 
@@ -813,7 +827,22 @@ impl PdfSession {
                 wanted.push((priority, index, target));
             }
         }
-        wanted
+        (wanted, viewport)
+    }
+
+    /// 单页模式的排版视口：这一屏竖向溢出就让出竖向滚动条的宽度，横向溢出就让出
+    /// 横向滚动条的高度。顺带定下一屏并排几页——让出宽度后可能少排一页。
+    fn single_viewport(&mut self, full: egui::Vec2, bar: f32) -> egui::Vec2 {
+        let mut viewport = full;
+        self.per_view = self.pages_per_view(viewport);
+        if self.spread_layout(viewport).1.y > viewport.y + 0.5 {
+            viewport.x -= bar;
+            self.per_view = self.pages_per_view(viewport);
+        }
+        if self.spread_layout(viewport).1.x > viewport.x + 0.5 {
+            viewport.y -= bar;
+        }
+        viewport
     }
 
     /// 当前这一屏的各页及其显示尺寸，和整屏内容区的大小。

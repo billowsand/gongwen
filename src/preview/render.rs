@@ -11,7 +11,7 @@ use crate::preview::gutter;
 use crate::preview::pdf_figure;
 use crate::preview::{
     BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT,
-    addressee_block, append_inline, body_block, clickable, clickable_body_block,
+    addressee_block, aligned_block, append_inline, body_block, clickable, clickable_body_block,
     clickable_justified_job, draw_justified, footer_record, header_block, heading_family, indent,
     is_renderable_paragraph, job, line_block, place, red_approval_print_preview, sheet,
     signature_block, table_block, text_format,
@@ -609,6 +609,7 @@ pub(crate) fn content_block(
             numbered,
         } => table_block(ui, metrics, rows, aligns, spans, *numbered),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
+        MarkdownBlock::Aligned { align, text } => aligned_block(ui, metrics, text, *align),
         MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
         MarkdownBlock::Paragraph(_) => {}
     }

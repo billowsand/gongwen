@@ -249,7 +249,7 @@ pub(crate) fn red_approval_body_metrics(blocks: &[MarkdownBlock]) -> RedApproval
                 let units = title::display_units(&plain_text(text)) + 4;
                 metrics.lines += units.div_ceil(per_line).max(1);
             }
-            MarkdownBlock::Heading(_, text) => {
+            MarkdownBlock::Heading(_, text) | MarkdownBlock::Aligned { text, .. } => {
                 let units = title::display_units(&plain_text(text));
                 metrics.lines += units.div_ceil(per_line).max(1);
             }

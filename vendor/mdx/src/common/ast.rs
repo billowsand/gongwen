@@ -59,8 +59,23 @@ pub enum Block {
     /// 仅 research tex 输出 `\[...\]`；official / docx 降级为转义后的源码原文。
     Math(String),
 
+    /// 居中 / 居右区里的一行，由独占一行的 `<!-- [居中] -->` / `<!-- [居右] -->`
+    /// 触发：标记下方直到空行为止，每行各成一段，整行居中或靠右、不缩进。
+    /// 区内的行不再认标题、列表、表格语法，只做行内解析。
+    Aligned {
+        align: LineAlign,
+        content: Vec<Inline>,
+    },
+
     /// 空行；多数 emitter 直接忽略。
     Empty,
+}
+
+/// 居中 / 居右标记指定的整行对齐方式。
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LineAlign {
+    Center,
+    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

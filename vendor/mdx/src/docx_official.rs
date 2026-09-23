@@ -19,7 +19,7 @@ use docx_rs::*;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::common::ast::{Block, Inline, MarkerKind};
+use crate::common::ast::{Block, Inline, LineAlign, MarkerKind};
 use crate::common::front_matter;
 use crate::common::inline;
 use crate::common::numbering::{int_to_roman, number_to_chinese, number_to_uppercase_letter};
@@ -240,6 +240,24 @@ impl OfficialEmitter {
                 } else {
                     self.add_body_paragraph(docx, inlines)
                 }
+            }
+            Block::Aligned { align, content } => {
+                self.list.reset();
+                let p = body_base()
+                    .align(match align {
+                        LineAlign::Center => AlignmentType::Center,
+                        LineAlign::Right => AlignmentType::Right,
+                    })
+                    .indent(None, None, None, None);
+                let p = add_inlines(
+                    p,
+                    content,
+                    FONT_BODY,
+                    SIZE_BODY,
+                    false,
+                    Some(&self.image_base_dir),
+                );
+                docx.add_paragraph(p)
             }
             Block::List { level, content, .. } => {
                 let prefix = if self.reference_mode && *level == 1 {

@@ -71,6 +71,15 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   判定“目录插在摘要与正文之间”的 `toc_follows_abstract` 挪到 `common/ast.rs`，
   TeX 与 docx 共用。
 
+居中 / 居右标记同样先在这里落地：
+
+- `common/ast.rs` 新增 `Block::Aligned` 与 `LineAlign`；`common/markers.rs`
+  新增 `align`：`<!-- [居中] -->` / `<!-- [居右] -->` 下方直到空行的各行
+  逐行成段、整行居中或靠右，区内不认标题、列表、表格语法；
+- `parser.rs` 识别该区；`tex_research_emitter.rs` / `tex_official.rs` 输出
+  `{\noindent\centering ...\par}` / `{\noindent\raggedleft ...\par}`；
+  `docx_research.rs` / `docx_official.rs` 输出居中 / 右对齐、无首行缩进的段落。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持

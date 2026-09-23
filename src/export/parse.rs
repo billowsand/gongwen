@@ -42,6 +42,19 @@ pub(crate) enum MarkdownBlock {
         alt: String,
         src: String,
     },
+    /// 居中 / 居右区里的一行（见 [`parse_align_marker`]）：标记行下方直到空行为止，
+    /// 每条源码行各成一行，不缩进、不两端对齐，也不再认标题、列表、表格语法。
+    Aligned {
+        align: LineAlign,
+        text: String,
+    },
+}
+
+/// 居中 / 居右标记指定的整行对齐方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineAlign {
+    Center,
+    Right,
 }
 
 /// 正文表格中的合并单元格。row/column 指向左上角锚点，跨度均至少为 1；
@@ -391,6 +404,41 @@ fn parse_located(
         }
         if line.is_empty() {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+        } else if let Some(mut align) = parse_align_marker(line) {
+            // 居中 / 居右区：标记行本身按 Html 跳过，不落纸面；其下每条非空行
+            // 原样成一行，遇到空行结束，恢复正常排版。区内再写一个对齐标记
+            // 就从那一行起换成新的对齐方式。
+            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            blocks.push(LocatedBlock {
+                block: MarkdownBlock::Html(line.to_string()),
+                range: span,
+                source_segments: Vec::new(),
+            });
+            index += 1;
+            while index < lines.len() {
+                let text = lines[index].text.trim();
+                if text.is_empty() {
+                    break;
+                }
+                let span = lines[index].start..lines[index].start + lines[index].len;
+                let block = match parse_align_marker(text) {
+                    Some(next) => {
+                        align = next;
+                        MarkdownBlock::Html(text.to_string())
+                    }
+                    None => MarkdownBlock::Aligned {
+                        align,
+                        text: text.to_string(),
+                    },
+                };
+                blocks.push(LocatedBlock {
+                    block,
+                    range: span,
+                    source_segments: Vec::new(),
+                });
+                index += 1;
+            }
+            continue;
         } else if let Some(section) = parse_section_marker(line) {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
             blocks.push(LocatedBlock {
@@ -1128,6 +1176,24 @@ pub(crate) fn parse_section_marker(line: &str) -> Option<MarkdownSection> {
         "附件" | "附录" | "attachment" | "attachments" | "appendix" => {
             Some(MarkdownSection::Attachment)
         }
+        _ => None,
+    }
+}
+
+/// 识别居中 / 居右标记：独占一行的 `<!-- [居中] -->`、`<!-- [居右] -->`
+/// （含「右对齐」与英文变体）。写法与序号表标记同一套。
+pub(crate) fn parse_align_marker(line: &str) -> Option<LineAlign> {
+    let inner = line
+        .trim()
+        .strip_prefix("<!--")?
+        .strip_suffix("-->")?
+        .trim()
+        .trim_start_matches(['[', '【'])
+        .trim_end_matches([']', '】'])
+        .trim();
+    match inner.to_ascii_lowercase().as_str() {
+        "居中" | "center" => Some(LineAlign::Center),
+        "居右" | "右对齐" | "right" => Some(LineAlign::Right),
         _ => None,
     }
 }

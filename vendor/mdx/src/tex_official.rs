@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
-use crate::common::ast::{Block, Inline};
+use crate::common::ast::{Block, Inline, LineAlign};
 use crate::common::numbering::{int_to_roman, number_to_chinese, number_to_uppercase_letter};
 use crate::parser;
 
@@ -229,6 +229,10 @@ impl TexEmitter {
                 self.reset_list();
                 self.emit_paragraph(inlines);
             }
+            Block::Aligned { align, content } => {
+                self.reset_list();
+                self.emit_aligned(*align, content);
+            }
             Block::List {
                 ordered: _,
                 level,
@@ -330,6 +334,20 @@ impl TexEmitter {
         }
         self.out.push_str(&body);
         self.out.push_str("\\par\n\n");
+    }
+
+    /// 居中 / 居右区的一行：分组把 `\centering` / `\raggedleft` 限在这一段里。
+    fn emit_aligned(&mut self, align: LineAlign, inlines: &[Inline]) {
+        let body = render_inlines(inlines);
+        if body.trim().is_empty() {
+            return;
+        }
+        let command = match align {
+            LineAlign::Center => "\\centering",
+            LineAlign::Right => "\\raggedleft",
+        };
+        self.out
+            .push_str(&format!("{{\\noindent{command} {body}\\par}}\n\n"));
     }
 
     fn emit_figure(&mut self, alt: &str, url: &str, label: Option<&str>) {

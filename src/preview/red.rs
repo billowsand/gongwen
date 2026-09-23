@@ -371,6 +371,58 @@ fn red_place_styled_flow_text(
     }
 }
 
+/// 居中 / 居右区的一行：与正文同字体，不缩进、不两端对齐，整行相对当前页的
+/// 版心（首页是批示栏左边的窄栏）居中或靠右。一行里放不下就整体推到下一页，
+/// 不在行内拆页——这类行本来就短。
+fn red_place_aligned_text(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    layout_state: &mut RedPrintLayout,
+    range: Range<usize>,
+    text: &str,
+    align: export::LineAlign,
+) {
+    let halign = match align {
+        export::LineAlign::Center => Align::Center,
+        export::LineAlign::Right => Align::Max,
+    };
+    let segments = red_flow_segments(export::inline_segments(text), RedTextStyle::Body);
+    loop {
+        let width = layout_state.body_width(metrics);
+        let available = layout_state.body_bottom(metrics) - layout_state.cursor_y;
+        let mut job = red_inline_job(metrics, width, &segments, false);
+        job.halign = halign;
+        let galley = layout(ui, job);
+        let ink_bottom = galley
+            .rows
+            .last()
+            .map_or(0.0, |row| row.rect().top() + metrics.line * RED_INK_RATIO);
+        if ink_bottom > available + 0.5 && layout_state.cursor_y > metrics.mm(37.0) + 0.5 {
+            layout_state.next_page(metrics);
+            continue;
+        }
+        let left = layout_state.body_left(metrics);
+        let x = match align {
+            export::LineAlign::Center => left + width / 2.0,
+            export::LineAlign::Right => left + width,
+        };
+        let visible_height = galley.size().y;
+        layout_state.push(RedPrintFragment {
+            range: Some(range),
+            source_segments: Vec::new(),
+            galley,
+            justified: Vec::new(),
+            x,
+            y: layout_state.cursor_y,
+            width,
+            visible_height,
+            align: halign,
+        });
+        layout_state.cursor_y += visible_height;
+        return;
+    }
+}
+
 /// 表格按真表格排进呈批件的续页：与 TeX 一致不进首页批示窄栏，占 156mm 版心。
 /// 一页放不下就在行与行之间断开，续页先重复表头；纵向合并的几行不拆开，
 /// 表头也不单独留在页底。
@@ -661,6 +713,16 @@ pub(crate) fn red_build_print_layout(
                     red_flow_segments(export::inline_segments(text), RedTextStyle::Body),
                     crate::preview::paragraph_source_segments(markdown, located, text),
                     true,
+                );
+            }
+            MarkdownBlock::Aligned { align, text } => {
+                red_place_aligned_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    text,
+                    *align,
                 );
             }
             MarkdownBlock::OrderedListItem { number, text } => {

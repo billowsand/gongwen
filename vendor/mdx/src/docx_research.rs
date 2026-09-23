@@ -27,7 +27,7 @@ use docx_rs::*;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::common::ast::{Block, Inline, MarkerKind};
+use crate::common::ast::{Block, Inline, LineAlign, MarkerKind};
 use crate::common::front_matter::{self, Metadata};
 use crate::common::numbering::{int_to_roman, number_to_uppercase_letter};
 use crate::common::table::{span_at, TableSpan};
@@ -915,6 +915,13 @@ impl MainEmitter {
                     add_body_paragraph(docx, |p| add_inlines(p, inlines, base_dir))
                 }
             }
+            Block::Aligned { align, content } => {
+                self.list.reset();
+                let base_dir = &self.image_base_dir;
+                add_body_paragraph(docx, |p| {
+                    add_inlines(aligned_paragraph(p, *align), content, base_dir)
+                })
+            }
             Block::List {
                 ordered: _,
                 level,
@@ -1173,6 +1180,12 @@ impl ChangelogEmitter {
                 self.list.reset();
                 add_body_paragraph(docx, |p| add_inlines(p, inlines, &self.image_base_dir))
             }
+            Block::Aligned { align, content } => {
+                self.list.reset();
+                add_body_paragraph(docx, |p| {
+                    add_inlines(aligned_paragraph(p, *align), content, &self.image_base_dir)
+                })
+            }
             Block::List {
                 ordered: _,
                 level,
@@ -1372,6 +1385,15 @@ where
                 .line_rule(LineSpacingType::AtLeast),
         );
     docx.add_paragraph(build(p))
+}
+
+/// 居中 / 居右行：正文段落去掉首行缩进，整行居中或靠右。
+fn aligned_paragraph(p: Paragraph, align: LineAlign) -> Paragraph {
+    p.align(match align {
+        LineAlign::Center => AlignmentType::Center,
+        LineAlign::Right => AlignmentType::Right,
+    })
+    .indent(Some(0), None, None, None)
 }
 
 /// 列表段落：左侧缩进为 0，特殊格式为首行缩进两个汉字。

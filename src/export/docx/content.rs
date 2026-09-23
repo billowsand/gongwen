@@ -5,9 +5,9 @@
 
 use crate::export::docx::{
     AGENDA_NUMBERING_ID, BODY_SIZE, BoldFont, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE,
-    agenda_blank_line, agenda_body_paragraph, apply_bold, body_paragraph, body_runs, chinese_fonts,
-    document_title_paragraph, docx_name, heading_paragraph, image_paragraph,
-    ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
+    agenda_blank_line, agenda_body_paragraph, aligned_paragraph, apply_bold, body_paragraph,
+    body_runs, chinese_fonts, document_title_paragraph, docx_name, heading_paragraph,
+    image_paragraph, ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
 };
 use crate::export::table::{ColumnAlignment, resolve_cell_alignment, to_docx_grid};
 use crate::export::title;
@@ -171,6 +171,9 @@ pub(crate) fn add_official_content_block(
             if !text.trim().is_empty() && !text.contains("<div") && !text.contains("</div") =>
         {
             doc = doc.add_paragraph(body_paragraph(text, bold));
+        }
+        MarkdownBlock::Aligned { align, text } => {
+            doc = doc.add_paragraph(aligned_paragraph(*align, text, bold));
         }
         MarkdownBlock::OrderedListItem { number, text } => {
             doc = doc.add_paragraph(ordered_list_paragraph(*number, text, numbering.list2, bold));

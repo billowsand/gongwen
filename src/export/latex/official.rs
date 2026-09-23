@@ -10,8 +10,9 @@ use crate::export::latex::{
 };
 use crate::export::table::to_longtblr;
 use crate::export::{
-    MarkdownBlock, MarkdownSection, chinese_date_parts, joint_main_column, official_heading_prefix,
-    parse_markdown_with_lines_with_numbering, plain_text, render_list_number,
+    LineAlign, MarkdownBlock, MarkdownSection, chinese_date_parts, joint_main_column,
+    official_heading_prefix, parse_markdown_with_lines_with_numbering, plain_text,
+    render_list_number,
 };
 use crate::models::{
     DraftInput, JointIssuanceMode, LetterVersion, NumberingConfig, StyleMode, TemplateKind,
@@ -652,6 +653,18 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                         gwa_tail(lines, index)
                     ));
                 }
+            }
+            MarkdownBlock::Aligned { align, text } => {
+                // 分组把 \centering / \raggedleft 限在这一行里；结尾用 \par 而非
+                // \GwaTail：整行居中或靠右不存在末行挂单字的问题，不必探测。
+                let command = match align {
+                    LineAlign::Center => "\\centering",
+                    LineAlign::Right => "\\raggedleft",
+                };
+                target_tex_section(section, &mut body, &mut attachments).push(format!(
+                    "{{\\noindent{command} {}\\par}}",
+                    body_text_to_tex(text)
+                ));
             }
             MarkdownBlock::OrderedListItem { number, text } => {
                 let prefix = render_list_number(numbering.list2, *number);

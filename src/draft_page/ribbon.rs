@@ -908,6 +908,8 @@ impl DraftPage<'_> {
         let mut bullet = false;
         let mut inline_ordered = false;
         let mut ordered = false;
+        let mut align: Option<export::LineAlign> = None;
+        let current_align = self.align_at_cursor(ui.ctx());
         let mut tidy = false;
         let mut quotes = false;
 
@@ -1011,7 +1013,27 @@ impl DraftPage<'_> {
             }
             toolbar_separator(ui);
 
-            // 三、清理
+            // 三、整行对齐：插一行 `<!-- [居中] -->` / `<!-- [居右] -->`，管到空行为止。
+            for (icon, label, which) in [
+                (theme::Icon::AlignCenter, "居中", export::LineAlign::Center),
+                (theme::Icon::AlignRight, "居右", export::LineAlign::Right),
+            ] {
+                if ui
+                    .add(theme::icon_text_button(icon, label).selected(current_align == Some(which)))
+                    .on_hover_text(format!(
+                        "在选中的几行（或光标所在行）上方插一行“{}”：直到空行为止，\
+                         每行单独成行、不缩进，整行{label}排，预览、Word、PDF 一致；\
+                         已经{label}的再点一次取消",
+                        crate::draft_page::markdown::align_marker(which)
+                    ))
+                    .clicked()
+                {
+                    align = Some(which);
+                }
+            }
+            toolbar_separator(ui);
+
+            // 四、清理
             if ui
                 .add(theme::icon_text_button(theme::Icon::Quote, "规范引号"))
                 .on_hover_text("把全文的直引号、方向错乱的引号统一成配对的中文引号")
@@ -1042,6 +1064,9 @@ impl DraftPage<'_> {
         }
         if ordered {
             self.apply_ordered_list(ui.ctx(), false);
+        }
+        if let Some(which) = align {
+            self.toggle_align(ui.ctx(), which);
         }
         if quotes {
             self.doc.generated_markdown =

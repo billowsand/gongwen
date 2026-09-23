@@ -23,9 +23,9 @@ mod tail;
 pub(crate) use gutter::Gutter;
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
-    ClickableSourceSegment, append_inline, body_block, clickable, clickable_body_block,
-    clickable_justified_job, draw, draw_justified, first_ink, heading_family, indent,
-    is_renderable_paragraph, job, justified_rows, layout, line_block, line_galley, place,
+    ClickableSourceSegment, aligned_block, append_inline, body_block, clickable,
+    clickable_body_block, clickable_justified_job, draw, draw_justified, first_ink, heading_family,
+    indent, is_renderable_paragraph, job, justified_rows, layout, line_block, line_galley, place,
     row_tint_offset, scroll_preview_to_rect, sheet, single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
@@ -1268,6 +1268,46 @@ mod tests {
                 (center - expected).abs() <= 1.0,
                 "标题“{title}”应相对版心居中：实际中心 {center:.1}，期望 {expected:.1}（{bounds:?}）"
             );
+        }
+    }
+
+    #[test]
+    fn aligned_lines_sit_at_the_center_or_right_edge_of_the_content_width() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let available = 1000.0;
+        let metrics = Metrics::new(available, Some(1.0));
+        for align in [export::LineAlign::Center, export::LineAlign::Right] {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(available, 1200.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                aligned_block(ui, &metrics, "特此**通知**", align);
+            });
+            let bounds = text_bounds(&output);
+            assert!(bounds.is_positive(), "{align:?} 应有可见文字：{bounds:?}");
+            match align {
+                export::LineAlign::Center => {
+                    let center = bounds.min.x + bounds.width() / 2.0;
+                    let expected = metrics.content / 2.0;
+                    assert!(
+                        (center - expected).abs() <= 1.0,
+                        "应相对版心居中：实际中心 {center:.1}，期望 {expected:.1}"
+                    );
+                }
+                export::LineAlign::Right => {
+                    assert!(
+                        (bounds.max.x - metrics.content).abs() <= 2.0,
+                        "应贴版心右沿：实际右沿 {:.1}，期望 {:.1}",
+                        bounds.max.x,
+                        metrics.content
+                    );
+                }
+            }
         }
     }
 

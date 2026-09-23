@@ -38,14 +38,15 @@ pub(crate) use headings::{
 };
 #[allow(unused_imports)]
 pub(crate) use parse::{
-    ColumnAlign, LocatedBlock, MarkdownBlock, MarkdownSection, ResearchSection, TableSpan,
-    block_span_for_line, body_heading_max_level, circled_number, compact_heading_flags,
-    is_image_line, normalize_ordered_list_punctuation, parse_list_item, parse_markdown,
-    parse_markdown_located, parse_markdown_located_research, parse_markdown_located_with_numbering,
-    parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
-    parse_markdown_with_numbering, parse_numbered_table_marker, parse_ordered_item,
-    parse_research_marker, parse_section_marker, parse_table_cells, renumber_ordered_groups,
-    research_report_titles, source_lines, table_span_at,
+    ColumnAlign, LineAlign, LocatedBlock, MarkdownBlock, MarkdownSection, ResearchSection,
+    TableSpan, block_span_for_line, body_heading_max_level, circled_number, compact_heading_flags,
+    is_image_line, normalize_ordered_list_punctuation, parse_align_marker, parse_list_item,
+    parse_markdown, parse_markdown_located, parse_markdown_located_research,
+    parse_markdown_located_with_numbering, parse_markdown_with_lines,
+    parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering,
+    parse_numbered_table_marker, parse_ordered_item, parse_research_marker, parse_section_marker,
+    parse_table_cells, renumber_ordered_groups, research_report_titles, source_lines,
+    table_span_at,
 };
 pub(crate) use red::{
     RED_APPROVAL_GUTTER_TWIPS, RED_APPROVAL_NARROW_MM, RED_APPROVAL_RULE_MM,
@@ -1006,6 +1007,43 @@ mod tests {
         };
         assert!(!numbered, "中间有正文时不该认成序号表");
         assert_eq!(rows[1][0], "大标题", "不当序号表就不动原文字");
+    }
+
+    /// 居中 / 居右标记：标记行不落纸面，其下每行各成一个对齐行，遇到空行恢复
+    /// 正常排版；区内的 `#`、`1.` 不再当标题、列表认，区内换标记就换对齐方式。
+    #[test]
+    fn align_markers_cover_the_lines_up_to_the_next_blank_line() {
+        let blocks = parse_markdown(
+            "正文一段。\n<!-- [居中] -->\n第一行\n# 不是标题\n<!-- [居右] -->\n**右边**一行\n\n之后恢复正文。",
+        );
+        assert_eq!(
+            blocks,
+            vec![
+                MarkdownBlock::Paragraph("正文一段。".into()),
+                MarkdownBlock::Html("<!-- [居中] -->".into()),
+                MarkdownBlock::Aligned {
+                    align: LineAlign::Center,
+                    text: "第一行".into(),
+                },
+                MarkdownBlock::Aligned {
+                    align: LineAlign::Center,
+                    text: "# 不是标题".into(),
+                },
+                MarkdownBlock::Html("<!-- [居右] -->".into()),
+                MarkdownBlock::Aligned {
+                    align: LineAlign::Right,
+                    text: "**右边**一行".into(),
+                },
+                MarkdownBlock::Paragraph("之后恢复正文。".into()),
+            ]
+        );
+        for marker in ["<!--[居中]-->", "<!-- 【居中】 -->", "<!-- [center] -->"] {
+            assert_eq!(parse_align_marker(marker), Some(LineAlign::Center));
+        }
+        for marker in ["<!-- [居右] -->", "<!-- [右对齐] -->", "<!-- [RIGHT] -->"] {
+            assert_eq!(parse_align_marker(marker), Some(LineAlign::Right));
+        }
+        assert_eq!(parse_align_marker("[居中]"), None, "只认 HTML 注释写法");
     }
 
     /// 用户手上的那种写法也照收：分组行写满竖线、序号列照旧手填数字，

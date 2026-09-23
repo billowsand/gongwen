@@ -437,6 +437,44 @@ mod tests {
         assert!(xml.contains(r#"<w:vMerge w:val="continue" />"#), "{xml}");
     }
 
+    /// 研究报告 Word 里的居中 / 居右区：整行居中、右对齐，不带首行缩进。
+    #[test]
+    fn research_word_export_aligns_marked_lines() {
+        use std::io::Read as _;
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("报告.docx");
+        let input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "对齐测试".into(),
+            ..Default::default()
+        };
+        write_docx(
+            &path,
+            &input,
+            "<!-- [正文] -->\n\n## 结语\n\n<!-- [居中] -->\n居中一行\n<!-- [居右] -->\n居右一行\n\n正文恢复。",
+            &NumberingConfig::default(),
+        )
+        .expect("研究报告 Word 应转换成功");
+        let file = fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(!xml.contains("居中]"), "标记行不许落到纸上");
+        let paragraph = |needle: &str| {
+            let at = xml.find(needle).expect(needle);
+            xml[xml[..at].rfind("<w:p ").unwrap()..at].to_string()
+        };
+        let center = paragraph("居中一行");
+        assert!(center.contains(r#"<w:jc w:val="center" />"#), "{center}");
+        assert!(!center.contains("w:firstLine"), "{center}");
+        let right = paragraph("居右一行");
+        assert!(right.contains(r#"<w:jc w:val="right" />"#), "{right}");
+    }
+
     #[test]
     fn research_word_export_prints_the_cover() {
         use std::io::Read as _;
