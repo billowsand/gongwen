@@ -43,8 +43,13 @@ failed=0
 for bin in /opt/gongwen-assistant/gongwen-assistant \
            /opt/gongwen-assistant/runtime/tectonic/tectonic; do
     echo "== ldd $bin"
-    out="$(ldd "$bin")"
+    # 静态链接的（如 tectonic）ldd 返回非零并打印 "not a dynamic executable"，
+    # 没有要找的库，放行。
+    out="$(ldd "$bin" 2>&1)" || true
     echo "$out"
+    if echo "$out" | grep -qF 'not a dynamic executable'; then
+        continue
+    fi
     if echo "$out" | grep -F 'not found'; then
         echo "error: $bin has unresolved shared libraries on ${PRETTY_NAME:-this system}" >&2
         failed=1

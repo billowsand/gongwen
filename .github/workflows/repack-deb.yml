@@ -1,0 +1,116 @@
+name: Repack deb
+
+# 修复已发布版本 deb 的依赖声明：从 Release 取下现有的 arm64 / amd64 deb，
+# 按 packaging/debian/depends.sh 重写 Depends 后重新打包（包内文件不变、不重新编译），
+# 在 buster / Ubuntu 20.04 / 24.04 里实装验证通过后，覆盖上传回同一个 tag 的 Release。
+# 不新建 tag，其他资产不动。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要修复的 Release tag（如 v0.6.3）
+        required: true
+  push:
+    branches:
+      - claude/deb-build-package-deps-ahjlxo
+    paths:
+      - .github/workflows/repack-deb.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repack-deb
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || 'v0.6.3' }}
+
+jobs:
+  repack:
+    name: Repack ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm64, amd64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download published deb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          mkdir -p orig
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "gongwen-assistant_${version}_${{ matrix.arch }}.deb" --dir orig
+          # 与 Release 上的 .sha256 核对，确认拿到的是发布的原件。
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "gongwen-assistant_${version}_${{ matrix.arch }}.deb.sha256" --dir orig
+          (cd orig && sha256sum -c "gongwen-assistant_${version}_${{ matrix.arch }}.deb.sha256")
+
+      - name: Rewrite Depends and repack
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          name="gongwen-assistant_${version}_${{ matrix.arch }}.deb"
+          bash ./scripts/repack-deb-depends.sh "orig/$name" "dist/$name"
+          (cd dist && sha256sum "$name" | awk '{ printf "%s  %s\n", $1, $2 }' > "$name.sha256")
+          cat "dist/$name.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repacked-deb-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  verify:
+    name: Verify ${{ matrix.arch }} / ${{ matrix.image }}
+    needs: repack
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+        image: ['debian:buster', 'ubuntu:20.04', 'ubuntu:24.04']
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: repacked-deb-${{ matrix.arch }}
+          path: dist
+
+      - name: Install deb and check shared libraries
+        run: bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_${{ matrix.arch }}.deb
+
+  publish:
+    name: Replace deb assets on ${{ inputs.tag || 'v0.6.3' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: repacked-deb-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload with --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          (cd dist && sha256sum -c ./*.sha256)
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
