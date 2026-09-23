@@ -80,6 +80,31 @@ pub(crate) fn fuma_path(scheme: FumaScheme) -> Option<PathBuf> {
     Some(dir.join(file))
 }
 
+/// 当前构建是否打包了「内置示例小鹤辅码」内容。
+///
+/// 见 `Cargo.toml` 的 `ime-builtin-xiaohe` feature：默认关闭（发布构建必关），
+/// 关闭时本函数返回 `false`，且二进制里**不含**这份码表的内容——避免无意中
+/// 把权利受限的第三方表随包分发出去。开发者本地 `cargo run` 可以加
+/// `--features ime-builtin-xiaohe` 打开。
+pub(crate) const fn has_builtin_xiaohe() -> bool {
+    cfg!(feature = "ime-builtin-xiaohe")
+}
+
+/// 内置示例小鹤辅码表的内容（仅 feature 开启时才有）。
+///
+/// 返回值是编译期常量字符串，二进制里**没有**这份内容则返回 `None`。
+/// 详见 [`has_builtin_xiaohe`] 的说明。
+pub(crate) fn builtin_xiaohe() -> Option<&'static str> {
+    #[cfg(feature = "ime-builtin-xiaohe")]
+    {
+        Some(include_str!("../../assets/fuma/xiaohe.txt"))
+    }
+    #[cfg(not(feature = "ime-builtin-xiaohe"))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,6 +17,14 @@ OriginalFilename = "gongwen-assistant.exe"
 default = ["linux-gtk-dialogs"]
 linux-gtk-dialogs = ["rfd/gtk3"]
 linux-portal-dialogs = ["rfd/async-std", "rfd/xdg-portal"]
+# 开发期自带的「内置示例小鹤辅码表」：**默认关闭**。
+# 这份码表权利归方案作者、上游未取得再分发授权（见 `assets/fuma/README.md` 与
+# `vendor/qingjian/README.md`），因此**正式发布构建永远不要带这个 feature**——
+# 一旦开启，`include_str!("../../assets/fuma/xiaohe.txt")` 的内容会嵌入二进制，
+# 性质等同于随包分发。仅在 `cargo run` 或带此 feature 的内部构建里，设置页才会
+# 出现「使用内置示例小鹤辅码」按钮，按下后**当场复制到用户目录**并要求使用者
+# 已从方案作者处取得使用授权的二次确认。
+ime-builtin-xiaohe = []
 
 [dependencies]
 anydoc = "0.1.7"

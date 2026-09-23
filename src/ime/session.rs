@@ -352,6 +352,35 @@ impl Ime {
         self.fuma_words.context("码表里没有认得出的条目")
     }
 
+    /// 把构建内置的示例小鹤辅码表写进用户目录，并立刻加载。
+    ///
+    /// 仅在 `ime-builtin-xiaohe` feature 开启时**真的有内容可写**：发布构建里
+    /// `data::builtin_xiaohe()` 返回 `None`，本方法直接报错；调用方应在调用
+    /// 前用 [`Self::has_builtin_xiaohe`] 判断。这条路径**绝不**自动触发——
+    /// 调用来自设置页里「使用内置示例小鹤辅码」按钮的二次确认结果。
+    pub(crate) fn install_builtin_xiaohe(&mut self) -> anyhow::Result<usize> {
+        let content = data::builtin_xiaohe().context(
+            "当前构建没有内置示例小鹤辅码表。请检查是否使用 --features ime-builtin-xiaohe 构建，\
+             或改用「导入码表…」按钮从本地 txt 导入。",
+        )?;
+        let scheme = qingjian_core::FumaScheme::Xiaohe;
+        let target = data::fuma_path(scheme).context("无法确定辅码表目录")?;
+        std::fs::write(&target, content)
+            .with_context(|| format!("写入内置辅码表失败：{}", target.display()))?;
+        // 没选方案也把设置改成小鹤，让这次写入立即生效；同样不静默——
+        // 调用方应当在按钮按下时已经看到「码表方案：未选」的提示，并因此触发本方法。
+        if self.settings.fuma.is_none() {
+            self.settings.fuma = Some(scheme);
+        }
+        self.apply_fuma();
+        self.fuma_words.context("内置码表里没有认得出的条目")
+    }
+
+    /// 当前构建是否打包了内置示例小鹤辅码表。
+    pub(crate) fn has_builtin_xiaohe() -> bool {
+        data::has_builtin_xiaohe()
+    }
+
     /// 辅码表：方案变了就重新加载。表是使用者自己导入的（不随包，见
     /// `vendor/qingjian/README.md` 的许可说明），不在就当辅码关着。
     fn apply_fuma(&mut self) {

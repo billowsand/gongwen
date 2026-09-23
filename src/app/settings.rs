@@ -1517,8 +1517,10 @@ impl GongwenApp {
         let summary = self.ime.data_summary();
         let english = self.ime.english();
         let fuma_words = self.ime.fuma_words();
+        let has_builtin_xiaohe = crate::ime::Ime::has_builtin_xiaohe();
         // 文件对话框与同步都在布局之后做：放在闭包里会阻塞布局、还要跟 `self.config` 抢借用。
         let mut import_fuma = false;
+        let mut request_builtin_xiaohe = false;
         let mut sync_lexicon = false;
 
         setting_row(ui, "引擎", None, |ui| {
@@ -1601,6 +1603,21 @@ impl GongwenApp {
             if ui.button("导入码表…").clicked() {
                 import_fuma = true;
             }
+            // 「使用内置示例小鹤辅码」按钮：仅 `ime-builtin-xiaohe` feature
+            // 开启的构建里才编译出现——发布构建里二进制不含这份码表内容。
+            if has_builtin_xiaohe
+                && fuma_words.is_none()
+                && ui
+                    .button("使用内置示例小鹤辅码")
+                    .on_hover_text(
+                        "把构建内置的小鹤辅码示例表复制到本机用户目录并加载。\n\
+                         这份表权利归小鹤方案作者；按下后会再确认一次你已从方案作者\n\
+                         处取得使用授权，才会真正写入。",
+                    )
+                    .clicked()
+            {
+                request_builtin_xiaohe = true;
+            }
         });
         setting_row(ui, "每页候选", None, |ui| {
             egui::ComboBox::from_id_salt("ime_page_size")
@@ -1661,8 +1678,70 @@ impl GongwenApp {
         if import_fuma {
             self.import_fuma_table_dialog();
         }
+        if request_builtin_xiaohe {
+            self.install_builtin_xiaohe_confirm_window(ui.ctx());
+        }
         if sync_lexicon {
             self.sync_lexicon_to_ime(true);
+        }
+    }
+
+    /// 「使用内置示例小鹤辅码」的二次确认窗：明确告知版权约束，要求使用者
+    /// 主动声明已取得使用授权后才真正写文件。这条路径**绝不**自动触发——
+    /// 调用方来自设置页按钮的当场点击。
+    fn install_builtin_xiaohe_confirm_window(&mut self, ctx: &egui::Context) {
+        let id = egui::Id::new("install_builtin_xiaohe_confirm");
+        if !ctx.memory(|memory| memory.data.get_temp::<bool>(id).unwrap_or(false)) {
+            ctx.memory_mut(|memory| memory.data.insert_temp(id, true));
+        }
+        let mut confirm = false;
+        let mut cancel = false;
+        let win = egui::Window::new("使用内置示例小鹤辅码")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("这份码表复现的是已发表的小鹤形码方案，权利归方案作者；")
+                    .on_hover_text(
+                        "本应用未取得方案作者的再分发授权，发布构建里完全没有这份码表。\n\
+                         你现在看到的按钮只出现在开发者构建或带 ime-builtin-xiaohe feature 的内部构建里。",
+                    );
+                ui.colored_label(
+                    theme::warn(),
+                    "继续即表示你已从方案作者处取得使用授权；\n\
+                     未取得授权请改用「导入码表…」按钮导入你自己拿到的文件。",
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(theme::warning_icon_button(theme::Icon::FilePlus, "已获授权，安装"))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if let Some(w) = win {
+            theme::window_enter_anim(
+                ctx,
+                egui::Id::new("install_builtin_xiaohe_anim"),
+                &w.response,
+            );
+        }
+        if confirm {
+            ctx.memory_mut(|memory| memory.data.remove::<bool>(id));
+            match self.ime.install_builtin_xiaohe() {
+                Ok(words) => {
+                    self.config.ime.fuma = "xiaohe".to_string();
+                    self.status = format!("内置示例小鹤辅码表已写入本机：{words} 字。");
+                }
+                Err(error) => self.status = format!("写入内置辅码表失败：{error:#}"),
+            }
+        } else if cancel {
+            ctx.memory_mut(|memory| memory.data.remove::<bool>(id));
         }
     }
 
