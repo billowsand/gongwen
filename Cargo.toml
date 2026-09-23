@@ -27,6 +27,7 @@ linux-portal-dialogs = ["rfd/async-std", "rfd/xdg-portal"]
 ime-builtin-xiaohe = []
 
 [dependencies]
+aho-corasick = "1.1.5"
 anydoc = "0.1.7"
 anyhow = "1.0"
 calamine = "0.30"

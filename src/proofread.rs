@@ -14,7 +14,9 @@
 //! 目录的覆盖层里，按 `id` 挂靠。这里只负责"给我一张词表，我来扫"。
 
 use crate::models::{ProofreadConfig, ProofreadOverride, ProofreadRule, ReviewNote};
+use aho_corasick::AhoCorasick;
 use regex::Regex;
+use std::collections::HashMap;
 
 /// 内置种子词表。只在首次初始化和「恢复默认」时读，运行时生效的是它与用户
 /// 覆盖层合并后的结果。
@@ -344,61 +346,119 @@ impl Lexicon {
     }
 
     /// 扫一遍正文。只跑启用的条目，结果按出现位置排序。
+    ///
+    /// 字面条目不再逐条 `match_indices`（词条数 × 正文长度），而是按写法去重后
+    /// 编成一台 Aho-Corasick 自动机，正文只走一遍。每种写法的命中仍按
+    /// `match_indices` 的语义取"从左到右、互不重叠"，所以结果与逐条扫描一致。
     pub fn check(&self, text: &str) -> Vec<ProofNote> {
-        let mut notes = Vec::new();
-        for entry in self.entries.iter().filter(|entry| entry.enabled) {
+        // 带上条目下标：位置、级别、编号都相同时按词表顺序排，与逐条扫描时一致。
+        let mut notes: Vec<(usize, ProofNote)> = Vec::new();
+        let mut patterns: Vec<&str> = Vec::new();
+        // 第 i 种写法挂着哪些条目（同一写法可以配不同的前后文条件）。
+        let mut owners: Vec<Vec<usize>> = Vec::new();
+        let mut slots: HashMap<&str, usize> = HashMap::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if !entry.enabled {
+                continue;
+            }
             match &entry.condition {
                 Condition::Pattern(pattern) => {
                     for found in pattern.find_iter(text) {
-                        notes.push(ProofNote {
-                            entry_id: entry.id.clone(),
-                            group: entry.group.clone(),
-                            level: entry.level,
-                            message: format!(
-                                "「{}」{}",
-                                found.as_str(),
-                                describe(&entry.suggestion, &entry.note)
-                            ),
-                            span: found.range(),
-                            replacement: None,
-                        });
+                        notes.push((
+                            index,
+                            ProofNote {
+                                entry_id: entry.id.clone(),
+                                group: entry.group.clone(),
+                                level: entry.level,
+                                message: format!(
+                                    "「{}」{}",
+                                    found.as_str(),
+                                    describe(&entry.suggestion, &entry.note)
+                                ),
+                                span: found.range(),
+                                replacement: None,
+                            },
+                        ));
                     }
                 }
-                condition => {
+                _ => {
                     if entry.wrong.is_empty() {
                         continue;
                     }
-                    for (start, matched) in text.match_indices(entry.wrong.as_str()) {
-                        let end = start + matched.len();
-                        if !context_allows(condition, text, start, end) {
+                    let slot = *slots.entry(entry.wrong.as_str()).or_insert_with(|| {
+                        patterns.push(entry.wrong.as_str());
+                        owners.push(Vec::new());
+                        patterns.len() - 1
+                    });
+                    owners[slot].push(index);
+                }
+            }
+        }
+
+        let mut literal_hit = |slot: usize, start: usize, end: usize| {
+            for &index in &owners[slot] {
+                let entry = &self.entries[index];
+                if let Some(note) = literal_note(entry, text, start, end) {
+                    notes.push((index, note));
+                }
+            }
+        };
+        if !patterns.is_empty() {
+            match AhoCorasick::new(&patterns) {
+                Ok(automaton) => {
+                    // 重叠模式下同一写法的命中按结束位置递增给出；跳过与上一次
+                    // 命中重叠的，还原 `match_indices` 的互不重叠语义。
+                    let mut next_start = vec![0usize; patterns.len()];
+                    for found in automaton.find_overlapping_iter(text) {
+                        let slot = found.pattern().as_usize();
+                        if found.start() < next_start[slot] {
                             continue;
                         }
-                        notes.push(ProofNote {
-                            entry_id: entry.id.clone(),
-                            group: entry.group.clone(),
-                            level: entry.level,
-                            message: format!(
-                                "「{}」{}",
-                                entry.wrong,
-                                describe(&entry.suggestion, &entry.note)
-                            ),
-                            span: start..end,
-                            replacement: entry.is_replaceable().then(|| entry.suggestion.clone()),
-                        });
+                        next_start[slot] = found.end();
+                        literal_hit(slot, found.start(), found.end());
+                    }
+                }
+                // 只有模式总量超出自动机的内部上限才会走到这里，退回逐条扫描。
+                Err(_) => {
+                    for (slot, pattern) in patterns.iter().enumerate() {
+                        for (start, matched) in text.match_indices(pattern) {
+                            literal_hit(slot, start, start + matched.len());
+                        }
                     }
                 }
             }
         }
+
         // 先按位置、同位置再按级别，让"必错"排在"提示"前面。
-        notes.sort_by(|a, b| {
+        notes.sort_by(|(a_index, a), (b_index, b)| {
             a.span
                 .start
                 .cmp(&b.span.start)
                 .then(a.level.cmp(&b.level))
                 .then(a.entry_id.cmp(&b.entry_id))
+                .then(a_index.cmp(b_index))
         });
-        notes
+        notes.into_iter().map(|(_, note)| note).collect()
     }
+}
+
+/// 字面条目在 `start..end` 命中后，按前后文条件决定是否成立并生成提示。
+fn literal_note(entry: &Entry, text: &str, start: usize, end: usize) -> Option<ProofNote> {
+    if !context_allows(&entry.condition, text, start, end) {
+        return None;
+    }
+    Some(ProofNote {
+        entry_id: entry.id.clone(),
+        group: entry.group.clone(),
+        level: entry.level,
+        message: format!(
+            "「{}」{}",
+            entry.wrong,
+            describe(&entry.suggestion, &entry.note)
+        ),
+        span: start..end,
+        replacement: entry.is_replaceable().then(|| entry.suggestion.clone()),
+    })
 }
 
 /// 把一条用户改动套到种子条目上。改坏的字段（级别写错、正则编译不过）不静默
@@ -790,5 +850,112 @@ mod overlay_tests {
             ..Default::default()
         });
         assert_eq!(config.next_custom_id(), "USR-008");
+    }
+}
+
+/// 自动机扫描与逐条扫描的对照。
+#[cfg(test)]
+mod matcher_tests {
+    use super::*;
+
+    fn lexicon(rows: &str) -> Lexicon {
+        let mut text =
+            String::from("条目编号\t错误写法\t建议写法\t级别\t命中条件\t分组\t说明\t启用\n");
+        text.push_str(rows);
+        Lexicon::parse(&text)
+    }
+
+    /// 旧实现：逐条 `match_indices`。留在测试里当自动机版本的对照标准。
+    fn check_per_entry(lexicon: &Lexicon, text: &str) -> Vec<ProofNote> {
+        let mut notes = Vec::new();
+        for entry in lexicon.entries.iter().filter(|entry| entry.enabled) {
+            match &entry.condition {
+                Condition::Pattern(pattern) => {
+                    for found in pattern.find_iter(text) {
+                        notes.push(ProofNote {
+                            entry_id: entry.id.clone(),
+                            group: entry.group.clone(),
+                            level: entry.level,
+                            message: format!(
+                                "「{}」{}",
+                                found.as_str(),
+                                describe(&entry.suggestion, &entry.note)
+                            ),
+                            span: found.range(),
+                            replacement: None,
+                        });
+                    }
+                }
+                _ if entry.wrong.is_empty() => {}
+                _ => {
+                    for (start, matched) in text.match_indices(entry.wrong.as_str()) {
+                        notes.extend(literal_note(entry, text, start, start + matched.len()));
+                    }
+                }
+            }
+        }
+        notes.sort_by(|a, b| {
+            a.span
+                .start
+                .cmp(&b.span.start)
+                .then(a.level.cmp(&b.level))
+                .then(a.entry_id.cmp(&b.entry_id))
+        });
+        notes
+    }
+
+    fn ids(notes: Vec<ProofNote>) -> Vec<String> {
+        notes.into_iter().map(|note| note.entry_id).collect()
+    }
+
+    #[test]
+    fn automaton_agrees_with_per_entry_scan_on_builtin_lexicon() {
+        let lexicon = Lexicon::builtin();
+        // 每条错误写法前后拼上常见前后文、再紧挨着重复一次，让各种条件分支
+        // 与"同一写法相邻出现"都走到。
+        let mut text = String::new();
+        for entry in &lexicon.entries {
+            text.push_str("我单位");
+            text.push_str(&entry.wrong);
+            text.push_str("目前，");
+            text.push_str(&entry.wrong);
+            text.push_str(&entry.wrong);
+            text.push_str("机关。\n");
+        }
+        let expected = check_per_entry(&lexicon, &text);
+        assert!(expected.len() > lexicon.entries.len(), "对照样本应大量命中");
+        assert_eq!(lexicon.check(&text), expected);
+    }
+
+    #[test]
+    fn same_wording_does_not_overlap_itself() {
+        let lexicon = lexicon("HNT-900\t哈哈\t\t提示\t总是\t套话\t\t是\n");
+        let spans: Vec<_> = lexicon
+            .check("哈哈哈哈哈")
+            .into_iter()
+            .map(|note| note.span)
+            .collect();
+        assert_eq!(spans, vec![0..6, 6..12], "与 match_indices 一样互不重叠");
+    }
+
+    #[test]
+    fn overlapping_wordings_from_different_entries_both_hit() {
+        let lexicon = lexicon(concat!(
+            "SYN-900\t截止\t截至\t疑似\t后接:目前\t近义混淆\t\t是\n",
+            "SYN-901\t截止目前\t截至目前\t必错\t总是\t近义混淆\t\t是\n",
+            "HNT-901\t止目\t\t提示\t总是\t套话\t\t是\n",
+        ));
+        let text = "截止目前，工作进展顺利。";
+        assert_eq!(lexicon.check(text), check_per_entry(&lexicon, text));
+        assert_eq!(ids(lexicon.check(text)), ["SYN-901", "SYN-900", "HNT-901"]);
+    }
+
+    #[test]
+    fn shared_wording_keeps_each_entry_condition() {
+        let lexicon = lexicon(concat!(
+            "SYN-910\t检察\t检查\t疑似\t不后接:院\t近义混淆\t\t是\n",
+            "SYN-911\t检察\t\t提示\t后接:院\t称谓\t\t是\n",
+        ));
+        assert_eq!(ids(lexicon.check("检察院检察工作")), ["SYN-911", "SYN-910"]);
     }
 }

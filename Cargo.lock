@@ -2171,6 +2171,7 @@ dependencies = [
 name = "gongwen-assistant"
 version = "0.6.4"
 dependencies = [
+ "aho-corasick",
  "anydoc",
  "anyhow",
  "calamine 0.30.1",
