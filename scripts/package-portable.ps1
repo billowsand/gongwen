@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Suffix = "",
     [string]$BinaryName = "",
     [string]$RuntimeManifest = "",
@@ -14,6 +14,16 @@ $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $runtimeRoot = [System.IO.Path]::Combine($projectRoot, "runtime")
 $isWindowsHost = $env:OS -eq "Windows_NT"
+
+# Get-FileHash 是 PowerShell 4.0+ 的内置 cmdlet（位于 Microsoft.PowerShell.Utility）。
+# 极少数精简过的 Windows 镜像（特别是 LTSC 去掉 PSReadLine + 删了一些内置 cmdlet 的
+# 镜像）会缺它；用 .NET 的 SHA256 兜底，输出格式与 `Get-FileHash -Algorithm SHA256`
+# 完全一致（小写 64 位十六进制）。PowerShell 5.1 不允许在 `if` 块内用 `function`
+# 关键字定义 advanced function（语法解析报错），所以 polyfill 放到独立 .ps1 文件，
+# dot-source 进来一次性声明完整函数。
+if (-not (Get-Command -Name "Get-FileHash" -CommandType Cmdlet -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "package-portable.hash-polyfill.ps1")
+}
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $Suffix = if ($isWindowsHost) { "win-x64" } else { "linux-arm64" }
