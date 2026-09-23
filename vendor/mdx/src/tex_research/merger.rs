@@ -334,6 +334,16 @@ fn render_template(
         .collect::<Vec<_>>()
         .join(r"\hspace{0.5em}");
     rendered = rendered.replace("$doctypespaced$", &spaced);
+    let cover_title = title
+        .map(|title| {
+            crate::cover::title_lines(title, cover.title_lines.as_deref())
+                .iter()
+                .map(|line| escape_latex(line))
+                .collect::<Vec<_>>()
+                .join(r"\\")
+        })
+        .unwrap_or_else(|| "文档标题".to_string());
+    rendered = rendered.replace("$covertitle$", &cover_title);
     rendered
 }
 
@@ -487,6 +497,25 @@ mod tests {
             rendered,
             r"公开|研究报告||V1.0|某某单位|\the\year 年 \the\month 月"
         );
+    }
+
+    #[test]
+    fn cover_title_breaks_where_the_host_split_it() {
+        let cover = CoverInfo {
+            title_lines: Some(vec!["全市一体化政务数据共享".into(), "平台建设项目".into()]),
+            ..CoverInfo::default()
+        };
+        let rendered = render_template(
+            "$covertitle$",
+            "",
+            Some("全市一体化政务数据共享平台建设项目"),
+            &cover,
+            false,
+        );
+        assert_eq!(rendered, r"全市一体化政务数据共享\\平台建设项目");
+        // 题名改过而分行没重算：不用旧分行。
+        let rendered = render_template("$covertitle$", "", Some("新题名"), &cover, false);
+        assert_eq!(rendered, "新题名");
     }
 
     #[test]

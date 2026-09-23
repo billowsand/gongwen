@@ -16,6 +16,8 @@ pub struct Metadata {
     pub byline: Option<String>,
     /// 外文翻译的原文题名，印在中文题名下方。
     pub original_title: Option<String>,
+    /// 封面题名的分行（宿主按词边界算好），见 `cover::title_lines`。
+    pub title_lines: Option<Vec<String>>,
     pub bibliography: Option<String>,
 }
 
@@ -68,6 +70,9 @@ pub fn parse(content: &str) -> (Metadata, String) {
             "外文原题" | "原文题名" | "original" => {
                 metadata.original_title = Some(value.into())
             }
+            "题名分行" | "title_lines" => {
+                metadata.title_lines = Some(value.split('｜').map(str::to_string).collect())
+            }
             "bibliography" => metadata.bibliography = Some(value.into()),
             _ => {}
         }
@@ -116,6 +121,8 @@ mod tests {
         assert_eq!(meta.ident.as_deref(), Some("二〇二六年第3期"));
         assert_eq!(meta.byline.as_deref(), Some("某课题组"));
         assert_eq!(meta.original_title.as_deref(), Some("AI RMF 1.0"));
+        let (meta, _body) = parse("---\n题名分行: 上行｜下行\n---\n");
+        assert_eq!(meta.title_lines, Some(vec!["上行".into(), "下行".into()]));
     }
 
     #[test]

@@ -367,12 +367,21 @@ fn add_cover(mut docx: Docx, title: Option<&str>, metadata: &Metadata) -> Docx {
 
     // 题名、稿次、外文原题落在同一个框里，顺序排下，间距同 TeX。
     let title_frame = |p: Paragraph| framed(p, l::SIDE + 5.0, l::TITLE_TOP, l::TEXT_WIDTH - 10.0);
-    docx = docx.add_paragraph(title_frame(
-        Paragraph::new()
-            .align(AlignmentType::Center)
-            .line_spacing(exact_line(l::TITLE_PT * l::TITLE_LEADING))
-            .add_run(text_run(title_text, FONT_TITLE, l::TITLE_PT)),
-    ));
+    // 题名按宿主算好的分行排，行间用行内换行，整段仍在同一个图文框里。
+    let mut title_paragraph = Paragraph::new()
+        .align(AlignmentType::Center)
+        .line_spacing(exact_line(l::TITLE_PT * l::TITLE_LEADING));
+    for (index, line) in cover::title_lines(title_text, metadata.title_lines.as_deref())
+        .iter()
+        .enumerate()
+    {
+        if index > 0 {
+            title_paragraph =
+                title_paragraph.add_run(Run::new().add_break(BreakType::TextWrapping));
+        }
+        title_paragraph = title_paragraph.add_run(text_run(line, FONT_TITLE, l::TITLE_PT));
+    }
+    docx = docx.add_paragraph(title_frame(title_paragraph));
     let gap = mm_to_twips(l::TITLE_GAP) as u32;
     if let Some(version) = version.as_deref() {
         docx = docx.add_paragraph(title_frame(
@@ -1521,6 +1530,26 @@ mod tests {
         assert!(text.contains("AI Risk Management Framework"), "{text}");
         assert!(!text.contains("立项论证"), "研究类不印阶段条：{text}");
         assert!(!text.contains("公开"), "公开件不标密级：{text}");
+    }
+
+    #[test]
+    fn cover_title_uses_the_host_line_breaks() {
+        let metadata = Metadata {
+            title_lines: Some(vec!["全市一体化政务数据共享".into(), "平台建设项目".into()]),
+            ..Metadata::default()
+        };
+        let docx = add_cover(
+            Docx::new(),
+            Some("全市一体化政务数据共享平台建设项目"),
+            &metadata,
+        );
+        let xml = String::from_utf8(docx.build().document).unwrap();
+        let title = xml
+            .split("<w:p>")
+            .find(|p| p.contains("全市一体化政务数据共享"))
+            .unwrap();
+        assert!(title.contains("<w:br w:type=\"textWrapping\""), "{title}");
+        assert!(title.contains("平台建设项目"), "{title}");
     }
 
     #[test]

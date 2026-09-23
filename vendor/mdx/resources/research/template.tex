@@ -32,6 +32,8 @@ $endif$
 \newcommand{\coveroriginal}{$originaltitle$}
 \newcommand{\coverstage}{$coverstage$}
 \newcommand{\coverdoctype}{$doctypespaced$}
+% 封面题名：程序按词边界算好分行，行间以 \\ 断开
+\newcommand{\covertitle}{$covertitle$}
 
 \begin{document}
 
@@ -67,7 +69,7 @@ $endif$
     % 题名：小标宋一号，行距 1.45 倍
     \node[anchor=north, text width=150mm, align=flush center]
       (T) at ([shift={(105mm,-114mm)}]P)
-      {\bs\fontsize{26bp}{37.7bp}\selectfont\papertitle\par};
+      {\bs\fontsize{26bp}{37.7bp}\selectfont\covertitle\par};
     \coordinate (L) at (T.south);
     \ifdefempty{\coverversion}{}{%
       \node[anchor=north, font=\song\zihao{-3}]

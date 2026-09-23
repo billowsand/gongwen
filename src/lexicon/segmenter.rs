@@ -78,12 +78,14 @@ pub fn tokenize(text: &str) -> String {
         .join(" ")
 }
 
-/// 切出词列表，供标题断行这类需要逐词处理的场合使用。
-pub fn words(text: &str) -> Vec<String> {
-    shared()
-        .cut(text, true)
+/// 切出词列表并带上词性（jieba 的 `n` `v` `uj` `c` `p` 等），供标题断行这类
+/// 需要逐词处理、还要判断断点强弱的场合使用。
+pub fn tagged(text: &str) -> Vec<(String, String)> {
+    let jieba = shared();
+    jieba
+        .tag(text, true)
         .into_iter()
-        .map(|token| token.word.to_string())
+        .map(|tag| (tag.word.to_string(), tag.tag.to_string()))
         .collect()
 }
 
@@ -142,6 +144,10 @@ mod tests {
         let _guard = test_lock();
         // 自带词典不认识这个简称，会把它切碎；挂上用户词典后应整词切出。
         let coined = "新舆处";
+        // 标题断行走的是带词性的这一路，用户词典要在这里生效。
+        let words = |text: &str| -> Vec<String> {
+            tagged(text).into_iter().map(|(word, _)| word).collect()
+        };
         let before = words(&format!("请{coined}按期报送"));
         install_user_dict(&format!("{coined} 50\n"));
         let after = words(&format!("请{coined}按期报送"));

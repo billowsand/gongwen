@@ -28,6 +28,14 @@ pub(crate) fn markdown_with_frontmatter(
     if !meta.security_years.trim().is_empty() {
         lines.insert(2, format!("保密年限: {}", one_line(&meta.security_years)));
     }
+    // 封面题名的分行由这里按公文标题的断行规矩算好（jieba 分词 + 本单位词表），
+    // PDF、Word、预览三处断在同一个地方。一行放得下就不写。
+    if let Some(title) = cover_title(input, markdown) {
+        let title_lines = super::title::cover_title_lines(&title);
+        if title_lines.len() > 1 {
+            lines.push(format!("题名分行: {}", title_lines.join("｜")));
+        }
+    }
     // 封面的可选行：留空就不写，mdx 据此不排那一行。
     for (key, value) in [
         ("标识行", &meta.ident),
@@ -46,6 +54,19 @@ pub(crate) fn markdown_with_frontmatter(
     lines.push(markdown.trim_start_matches('\u{feff}').trim().to_string());
     lines.push(String::new());
     lines.join("\n")
+}
+
+/// 封面实际印的题名：文档要素的「文件名称」优先，留空才取正文区段的 `#`，
+/// 与 mdx 的 `cover.title.or(report_title)`、预览的封面同一口径。
+pub(crate) fn cover_title(input: &DraftInput, markdown: &str) -> Option<String> {
+    let hint = input.title_hint.trim();
+    if !hint.is_empty() {
+        return Some(one_line(hint));
+    }
+    super::research_report_titles(markdown)
+        .first()
+        .map(|line| super::crossref::split_label(line).0.trim().to_string())
+        .filter(|title| !title.is_empty())
 }
 
 /// 生成 mdx research 模式规定的主 TeX、类文件、分章、图片与参考文献文件。
@@ -200,6 +221,17 @@ mod tests {
         assert!(text.contains("标识行: 课题编号：ZT-2026-07"), "{text}");
         assert!(text.contains("署名: 政务智能化专题课题组"), "{text}");
         assert!(text.contains("外文原题: AI RMF 1.0"), "{text}");
+        assert!(!text.contains("题名分行"), "一行放得下就不写分行：{text}");
+
+        input.title_hint = "全市一体化政务数据共享平台（二期）建设项目".into();
+        let text = markdown_with_frontmatter(&input, "正文", None);
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("题名分行: "))
+            .expect("长题名应写出分行");
+        let parts: Vec<&str> = line["题名分行: ".len()..].split('｜').collect();
+        assert_eq!(parts.len(), 2, "{line}");
+        assert_eq!(parts.concat(), input.title_hint);
     }
 
     /// 研究报告的 Word 由 mdx research 转换器生成，封面要素一个不少。

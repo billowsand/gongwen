@@ -38,7 +38,7 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 合进 mdx，否则整目录替换会把它们冲掉：
 
 - 新增 `src/cover.rs`（封面分类、汉字日期、稿次括号、版式坐标）并在 `lib.rs` 导出；
-- `common/front_matter.rs` 新增 `标识行` / `署名` / `外文原题` 三个键；
+- `common/front_matter.rs` 新增 `标识行` / `署名` / `外文原题` / `题名分行` 四个键；
 - `resources/research/template.tex` 封面改为 TikZ 按毫米定位；
 - `tex_research/merger.rs` 渲染新增的封面变量；
 - `docx_research.rs` 封面改为锚定页面的图文框。

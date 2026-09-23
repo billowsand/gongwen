@@ -1,5 +1,9 @@
 //! 公文标题的排布：超出一行不多于 2 个全角字宽时**横向压缩字形**保持单行（字高不变），
 //! 超出更多时用 jieba 分词在词边界均衡换行，词不被拆到两行。
+//!
+//! 断行点在词边界之外还要守几条排版规矩（见 [`title_words`]）：标点不落行首、
+//! 开括号不落行尾、短括注整体不拆、“的”不起行、“第”与数字、数字与量词不分家。
+//! 研究报告封面题名（[`cover_title_lines`]）用同一套算法，只是换了字号与框宽。
 
 /// 标题基准字号：二号（22 pt）。汉字为方形，字宽=字高=字号。
 pub const TITLE_BASE_SIZE_PT: usize = 22;
@@ -12,6 +16,11 @@ pub const TITLE_LINE_WIDTH_PT: f64 = 8_845.0 / 20.0;
 /// 红头呈批件首页左侧正文/标题栏宽度（96mm）：红色竖线在 100mm 处，
 /// 标题与正文一样要给竖线让出 4mm 留白，见 `export::red::RED_APPROVAL_GUTTER_MM`。
 pub const RED_APPROVAL_TITLE_WIDTH_PT: f64 = super::red::RED_APPROVAL_NARROW_MM / 25.4 * 72.0;
+
+/// 研究报告封面题名：小标宋一号（26 pt），题名框宽 150 mm（版心 160 mm 两侧各让
+/// 5 mm），与 mdx `cover::layout` 一致。一行放 16 个字。
+pub const COVER_TITLE_SIZE_PT: usize = 26;
+pub const COVER_TITLE_WIDTH_PT: f64 = 150.0 / 25.4 * 72.0;
 
 /// 标题的排布方案。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,9 +68,135 @@ pub fn title_plan(title: &str, chars_per_line: usize) -> TitlePlan {
     if width <= line_units + 4 {
         return TitlePlan::Compressed;
     }
-    let words = crate::lexicon::segmenter::words(title);
-    let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    TitlePlan::Wrapped(wrap_words(&words, chars_per_line))
+    TitlePlan::Wrapped(wrap_units(&title_units(title), chars_per_line))
+}
+
+/// 研究报告封面题名的分行：一行放得下就一行，否则按公文标题的规矩在词边界
+/// 均衡换行（首行不短于末行）。封面题名不做横向压缩——封面留白足，分两行
+/// 比把字压扁更庄重。
+pub fn cover_title_lines(title: &str) -> Vec<String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Vec::new();
+    }
+    let per_line = chars_per_line_for(COVER_TITLE_WIDTH_PT, COVER_TITLE_SIZE_PT);
+    if display_units(title) <= per_line * 2 {
+        return vec![title.to_string()];
+    }
+    wrap_units(&title_units(title), per_line)
+}
+
+/// 行首不能出现的字符：句读、点号与各种闭括号、闭引号。
+const NO_LINE_START: &str = "）》〉」』】〕〗”’、，。：；！？…·%％)]},.:;!?";
+/// 行尾不能出现的字符：各种开括号、开引号。
+const NO_LINE_END: &str = "（《〈「『【〔〖“‘([{";
+/// 括注整体不拆的上限（全角字宽，含括号）：短括注如“（二期）”“（试行）”
+/// “（2026—2030年）”拆开很难看；太长的括注拆不拆由词边界决定。
+const KEEP_BRACKET_UNITS: usize = 24;
+/// 不起行的虚词：拆到下一行行首读起来断了气，归到上一行行尾。
+const NO_LINE_START_WORDS: [&str; 4] = ["的", "之", "等", "了"];
+/// 紧跟数字的量词、单位：数字与它们不分家（“2026年”“第3期”）。
+const NUMBER_SUFFIX: &str = "年月日号期届次版章条款项批个位名家";
+
+/// 标题的一个断行单元：一个或几个并在一起、中间不许换行的词。
+/// 首尾两个词的词性与字数留着，用来给单元之间的断点打分。
+#[derive(Debug, Clone)]
+struct Unit {
+    text: String,
+    head_tag: String,
+    head_chars: usize,
+    tail_tag: String,
+    tail_chars: usize,
+}
+
+impl Unit {
+    fn new(word: &str, tag: &str) -> Self {
+        let chars = word.chars().count();
+        Self {
+            text: word.to_string(),
+            head_tag: tag.to_string(),
+            head_chars: chars,
+            tail_tag: tag.to_string(),
+            tail_chars: chars,
+        }
+    }
+
+    fn absorb(&mut self, next: &Unit) {
+        self.text.push_str(&next.text);
+        self.tail_tag.clone_from(&next.tail_tag);
+        self.tail_chars = next.tail_chars;
+    }
+}
+
+/// 标题的断行单元：jieba 分词并标词性（带本单位词表，专名不拆），再把排版上
+/// 不许断开的相邻词并起来。
+fn title_units(title: &str) -> Vec<Unit> {
+    let words: Vec<Unit> = crate::lexicon::segmenter::tagged(title)
+        .iter()
+        .map(|(word, tag)| Unit::new(word, tag))
+        .collect();
+    glue_units(words)
+}
+
+fn glue_units(words: Vec<Unit>) -> Vec<Unit> {
+    let text: String = words.iter().map(|unit| unit.text.as_str()).collect();
+    let keep = short_bracket_spans(&text);
+    let mut out: Vec<Unit> = Vec::new();
+    let mut offset = 0usize;
+    for word in words {
+        let start = offset;
+        offset += word.text.len();
+        let Some(last) = out.last_mut() else {
+            out.push(word);
+            continue;
+        };
+        let before = last.text.chars().last();
+        let after = word.text.chars().next();
+        let forbidden = before.is_some_and(|ch| NO_LINE_END.contains(ch))
+            || after.is_some_and(|ch| NO_LINE_START.contains(ch))
+            || NO_LINE_START_WORDS.contains(&word.text.as_str())
+            || last.text.ends_with('第')
+            || (before.is_some_and(|ch| ch.is_ascii_digit())
+                && after.is_some_and(|ch| ch.is_ascii_digit() || NUMBER_SUFFIX.contains(ch)))
+            || keep
+                .iter()
+                .any(|span| span.start < start && start < span.end);
+        if forbidden {
+            last.absorb(&word);
+        } else {
+            out.push(word);
+        }
+    }
+    out
+}
+
+/// 找出较短的成对括注（字节区间，含两侧括号），换行不得落在其中。
+fn short_bracket_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    const PAIRS: [(char, char); 6] = [
+        ('（', '）'),
+        ('(', ')'),
+        ('《', '》'),
+        ('〔', '〕'),
+        ('【', '】'),
+        ('“', '”'),
+    ];
+    let mut spans = Vec::new();
+    for (open, close) in PAIRS {
+        let mut stack = Vec::new();
+        for (index, ch) in text.char_indices() {
+            if ch == open {
+                stack.push(index);
+            } else if ch == close
+                && let Some(start) = stack.pop()
+            {
+                let end = index + ch.len_utf8();
+                if display_units(&text[start..end]) <= KEEP_BRACKET_UNITS {
+                    spans.push(start..end);
+                }
+            }
+        }
+    }
+    spans
 }
 
 /// 标题的显示宽度（半角单位）：1 个全角字符 = 2，1 个半角英数 = 1，空白不计。
@@ -72,111 +207,166 @@ pub(crate) fn display_units(text: &str) -> usize {
         .sum()
 }
 
-/// 在词边界、每行不超过 `chars_per_line` 个全角字宽的约束下，把词均衡地装入各行。
-/// 两行标题直接枚举断点，取“首行不短于末行”且长短最接近的断法（头不轻脚不重）；
-/// 三行及以上逐行贪心：每行填到“不小于余下均长”为止。
-fn wrap_words(words: &[&str], chars_per_line: usize) -> Vec<String> {
+/// 在两个单元之间换行的代价（越小越好）。依据公文标题回行“词意完整”的要求：
+/// - 最好断在“的”之后、连词介词（与、和、及、关于、对……）之前，意群在这里自然分开；
+/// - 断在名词与名词之间多半是拆开了一个复合词（“数字|政府”“数据共享|平台”）；
+/// - 单字词多是词缀或没切准的半个词（“大|模型”“数据|局”），挨着它断最难看；
+/// - 西文词之间的空格是天然断点。
+fn break_cost(left: &Unit, right: &Unit) -> f32 {
+    let nominal = |tag: &str| tag.starts_with('n') || matches!(tag, "vn" | "an" | "j");
+    let function = |tag: &str| matches!(tag, "c" | "p" | "uj" | "u" | "ul");
+    if left.text.ends_with(['的', '之']) || function(&right.head_tag) {
+        return 0.0;
+    }
+    if left.text.ends_with([' ', '\u{3000}']) || right.text.starts_with([' ', '\u{3000}']) {
+        return 0.5;
+    }
+    // 括注、引号收尾处：后面紧跟名词时多是“（二期）建设项目”“‘十五五’时期”
+    // 这样的定中结构，按普通词边界算；否则是个不错的断点。
+    if left.text.ends_with(['）', '》', '”', '〕', '】', ')']) {
+        return if nominal(&right.head_tag) { 3.0 } else { 1.0 };
+    }
+    let single = |chars: usize, tag: &str, text_is_cjk: bool| {
+        chars == 1 && text_is_cjk && !function(tag) && tag != "x" && tag != "m"
+    };
+    let left_cjk = left.text.chars().last().is_some_and(|ch| !ch.is_ascii());
+    let right_cjk = right.text.chars().next().is_some_and(|ch| !ch.is_ascii());
+    if single(left.tail_chars, &left.tail_tag, left_cjk)
+        || single(right.head_chars, &right.head_tag, right_cjk)
+    {
+        return 8.0;
+    }
+    if right.text.starts_with(|ch: char| NO_LINE_END.contains(ch)) {
+        return 4.0;
+    }
+    if nominal(&left.tail_tag) && nominal(&right.head_tag) {
+        return 6.0;
+    }
+    3.0
+}
+
+/// 在单元边界、每行不超过 `chars_per_line` 个全角字宽的约束下分行，全局取代价最小的
+/// 断法。代价 = 各断点的 [`break_cost`] + 各行字数偏离平均的总量 + 多用一行的罚分。
+/// “头不轻脚不重”（首行不短于末行）是硬要求：只要有断法满足，就只在这些断法里挑。
+/// 行数只在“最少行数”与“多一行”之间比较——多一行能换来词意完整时才值得。
+fn wrap_units(units: &[Unit], chars_per_line: usize) -> Vec<String> {
     let line_units = chars_per_line * 2;
-    let total: usize = words.iter().map(|word| display_units(word)).sum();
+    let widths: Vec<usize> = units.iter().map(|unit| display_units(&unit.text)).collect();
+    let total: usize = widths.iter().sum();
     if total == 0 {
         return Vec::new();
     }
-    let n_lines = lines_needed(words, line_units);
-    if n_lines <= 1 {
-        return vec![words.concat()];
+    let min_lines = lines_needed(&widths, line_units);
+    if min_lines <= 1 {
+        return vec![units.iter().map(|unit| unit.text.as_str()).collect()];
     }
-    if n_lines == 2 {
-        return wrap_two_lines(words, line_units);
+    // 断点下标 i 表示在 units[i-1] 与 units[i] 之间换行。
+    let costs: Vec<f32> = (1..units.len())
+        .map(|i| break_cost(&units[i - 1], &units[i]))
+        .collect();
+    // 每种行数各取一个最优：同一行数里“头不轻脚不重”的断法优先。
+    let mut per_count: Vec<(bool, f32, Vec<usize>)> = Vec::new();
+    for lines in min_lines..=min_lines + 1 {
+        if lines > units.len() {
+            break;
+        }
+        let mean = total as f32 / lines as f32;
+        let mut best: Option<(bool, f32, Vec<usize>)> = None; // (头轻脚重, 代价, 断点)
+        let mut splits = Vec::new();
+        search_splits(&widths, 0, lines, line_units, &mut splits, &mut |splits| {
+            let bounds: Vec<usize> = std::iter::once(0)
+                .chain(splits.iter().copied())
+                .chain(std::iter::once(units.len()))
+                .collect();
+            let lens: Vec<usize> = bounds
+                .windows(2)
+                .map(|w| widths[w[0]..w[1]].iter().sum())
+                .collect();
+            let light_head = lens[0] < lens[lens.len() - 1];
+            let ragged: f32 = lens
+                .iter()
+                .map(|&len| (len as f32 - mean).abs() / 2.0)
+                .sum();
+            let breaks: f32 = splits.iter().map(|&i| costs[i - 1]).sum();
+            let cost = breaks + ragged + (lines - min_lines) as f32 * 6.0;
+            if best.as_ref().is_none_or(|(best_light, best_cost, _)| {
+                (light_head, cost) < (*best_light, *best_cost)
+            }) {
+                best = Some((light_head, cost, splits.to_vec()));
+            }
+        });
+        per_count.extend(best);
     }
-    wrap_greedy_balanced(words, n_lines, line_units)
+    // 跨行数比较时，头轻脚重只记罚分，不一票否决：多拆一行换来的往往更难看。
+    let Some((_, _, splits)) = per_count.into_iter().min_by(|a, b| {
+        let score =
+            |(light, cost, _): &(bool, f32, Vec<usize>)| cost + if *light { 4.0 } else { 0.0 };
+        score(a).total_cmp(&score(b))
+    }) else {
+        return vec![units.iter().map(|unit| unit.text.as_str()).collect()];
+    };
+    let bounds: Vec<usize> = std::iter::once(0)
+        .chain(splits)
+        .chain(std::iter::once(units.len()))
+        .collect();
+    bounds
+        .windows(2)
+        .map(|w| {
+            units[w[0]..w[1]]
+                .iter()
+                .map(|unit| unit.text.as_str())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .collect()
 }
 
-/// 每行不超过 `limit_units` 个半角单位（词不拆开）时，贪心能分成的最少行数。
-fn lines_needed(words: &[&str], limit_units: usize) -> usize {
+/// 枚举把 `widths[start..]` 分成 `lines` 行、每行不超过 `limit` 的全部断法。
+/// 标题不过几十个字，穷举足够快，而且比贪心可靠：贪心在长括注前后会把自己逼进死角。
+fn search_splits(
+    widths: &[usize],
+    start: usize,
+    lines: usize,
+    limit: usize,
+    splits: &mut Vec<usize>,
+    visit: &mut dyn FnMut(&[usize]),
+) {
+    let rest: usize = widths[start..].iter().sum();
+    if lines == 1 {
+        if rest <= limit {
+            visit(splits);
+        }
+        return;
+    }
+    if rest > limit * lines {
+        return;
+    }
+    let mut width = 0usize;
+    for end in start + 1..widths.len() {
+        width += widths[end - 1];
+        if width > limit {
+            break;
+        }
+        splits.push(end);
+        search_splits(widths, end, lines - 1, limit, splits, visit);
+        splits.pop();
+    }
+}
+
+/// 每行不超过 `limit_units` 个半角单位（单元不拆开）时，贪心能分成的最少行数。
+fn lines_needed(widths: &[usize], limit_units: usize) -> usize {
     let mut lines = 0usize;
     let mut current = 0usize;
-    for word in words {
-        let word_len = display_units(word);
-        if current != 0 && current + word_len > limit_units {
+    for &width in widths {
+        if current != 0 && current + width > limit_units {
             lines += 1;
             current = 0;
         }
-        current += word_len;
+        current += width;
     }
     if current > 0 {
         lines += 1;
-    }
-    lines
-}
-
-/// 两行标题：枚举词边界断点，优先选“第一行不短于第二行”且长短差最小的断法；
-/// 全部断点都“头轻脚重”时，退回选长短差最小者。
-fn wrap_two_lines(words: &[&str], line_units: usize) -> Vec<String> {
-    let mut head_len = 0usize;
-    let mut best_heavy: Option<(usize, usize)> = None; // (长短差, 断点)
-    let mut best_any: Option<(usize, usize)> = None;
-    for split in 1..words.len() {
-        head_len += display_units(words[split - 1]);
-        let tail_len = words[split..]
-            .iter()
-            .map(|word| display_units(word))
-            .sum::<usize>();
-        if head_len > line_units || tail_len > line_units {
-            continue;
-        }
-        let imbalance = head_len.abs_diff(tail_len);
-        if head_len >= tail_len && best_heavy.is_none_or(|(best, _)| imbalance < best) {
-            best_heavy = Some((imbalance, split));
-        }
-        if best_any.is_none_or(|(best, _)| imbalance < best) {
-            best_any = Some((imbalance, split));
-        }
-    }
-    let split = best_heavy
-        .or(best_any)
-        .map(|(_, split)| split)
-        .unwrap_or(words.len() / 2);
-    vec![words[..split].concat(), words[split..].concat()]
-}
-
-/// 三行及以上：逐行贪心，每行填到“不小于余下均长”为止（头不轻脚不重），
-/// 同时确保余下内容仍能装进剩余行数。
-fn wrap_greedy_balanced(words: &[&str], n_lines: usize, line_units: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut index = 0usize;
-    for line_index in 0..n_lines {
-        let remaining_lines = n_lines - line_index;
-        let mut current = 0usize;
-        let mut end = index;
-        loop {
-            if end >= words.len() {
-                break;
-            }
-            let word_len = display_units(words[end]);
-            if current != 0 && current + word_len > line_units {
-                break;
-            }
-            if remaining_lines == 1 {
-                end = words.len();
-                break;
-            }
-            let rest: usize = words[end + 1..]
-                .iter()
-                .map(|word| display_units(word))
-                .sum();
-            // 余下必须仍能装进剩余行数-1 行。
-            if lines_needed(&words[end + 1..], line_units) > remaining_lines - 1 {
-                break;
-            }
-            // 本行已不短于余下均长即停，避免头轻脚重。
-            if current >= rest.div_ceil(remaining_lines - 1) {
-                break;
-            }
-            current += word_len;
-            end += 1;
-        }
-        lines.push(words[index..end].concat());
-        index = end;
     }
     lines
 }
@@ -286,6 +476,84 @@ mod tests {
             for line in &lines {
                 assert!(display_units(line) <= 40, "单行超上限：{line}");
             }
+        }
+    }
+
+    fn glued(words: &[&str]) -> Vec<String> {
+        let units = words.iter().map(|word| Unit::new(word, "n")).collect();
+        glue_units(units)
+            .into_iter()
+            .map(|unit| unit.text)
+            .collect()
+    }
+
+    #[test]
+    fn short_brackets_and_punctuation_are_never_split() {
+        assert_eq!(
+            glued(&["全市", "平台", "（", "二期", "）", "建设"]),
+            ["全市", "平台", "（二期）", "建设"]
+        );
+        // 开括号不落行尾、闭括号与顿号不起行，即使括注很长。
+        let long = [
+            "关于",
+            "（",
+            "一二三四五六七八九十一二三",
+            "四五",
+            "）",
+            "、",
+            "通知",
+        ];
+        assert_eq!(
+            glued(&long),
+            ["关于", "（一二三四五六七八九十一二三", "四五）、", "通知"]
+        );
+    }
+
+    #[test]
+    fn particles_numbers_and_ordinals_stay_with_their_neighbours() {
+        assert_eq!(
+            glued(&["算力", "网络", "的", "若干", "建议"]),
+            ["算力", "网络的", "若干", "建议"]
+        );
+        assert_eq!(glued(&["第", "3", "期", "简报"]), ["第3期", "简报"]);
+        assert_eq!(glued(&["2026", "年度", "工作"]), ["2026年度", "工作"]);
+    }
+
+    #[test]
+    fn cover_titles_wrap_at_sixteen_characters_and_balance() {
+        assert_eq!(
+            chars_per_line_for(COVER_TITLE_WIDTH_PT, COVER_TITLE_SIZE_PT),
+            16
+        );
+        assert_eq!(
+            cover_title_lines("人工智能风险管理框架（1.0版）"),
+            ["人工智能风险管理框架（1.0版）"]
+        );
+        let title = "全市一体化政务数据共享平台（二期）建设项目";
+        let lines = cover_title_lines(title);
+        assert_eq!(lines.join(""), title);
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains('（') || line.contains('）')),
+            "括注不得拆开：{lines:?}"
+        );
+        assert!(
+            display_units(&lines[0]) >= display_units(&lines[1]),
+            "{lines:?}"
+        );
+        for title in [
+            "关于加快构建全市一体化算力网络的若干建议",
+            "大模型在政务服务中的应用风险与治理对策研究",
+        ] {
+            let lines = cover_title_lines(title);
+            assert_eq!(lines.join(""), title);
+            assert!(
+                lines.iter().all(|line| display_units(line) <= 32),
+                "{lines:?}"
+            );
+            assert!(!lines[1].starts_with('的'), "{lines:?}");
         }
     }
 

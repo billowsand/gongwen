@@ -716,9 +716,11 @@ fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, markdow
             );
         }
 
-        // 题名、稿次、外文原题顺排。
+        // 题名、稿次、外文原题顺排。题名按公文标题的断行规矩分行，与导出的
+        // PDF、Word 用同一个函数，断在同一处。
+        let title = export::title::cover_title_lines(title).join("\n");
         let mut bottom = text(
-            CoverText::new(title, theme::FONT_BIAOSONG, l::TITLE_PT).leading(l::TITLE_LEADING),
+            CoverText::new(&title, theme::FONT_BIAOSONG, l::TITLE_PT).leading(l::TITLE_LEADING),
             center_x,
             l::TITLE_TOP,
         );

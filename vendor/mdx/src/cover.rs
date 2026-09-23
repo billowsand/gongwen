@@ -126,6 +126,23 @@ pub fn version_mark(version: &str) -> Option<String> {
     Some(format!("（{version}）"))
 }
 
+/// 题名的分行：宿主程序按公文标题的断行规矩算好，经 frontmatter 的「题名分行」
+/// 传进来（行间用全角竖线 `｜` 隔开）。拼回去与题名不一致（改了题名没重算）
+/// 时不用，退回整段交给排版引擎自己折行。
+pub fn title_lines(title: &str, lines: Option<&[String]>) -> Vec<String> {
+    let squash = |text: &str| {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    match lines {
+        Some(lines) if lines.len() > 1 && squash(&lines.concat()) == squash(title) => {
+            lines.iter().map(|line| line.trim().to_string()).collect()
+        }
+        _ => vec![title.trim().to_string()],
+    }
+}
+
 /// 各元素的位置（距页顶，mm）与字号（pt）。TeX 模板里写的是同一组数，
 /// 改这里必须同步 `resources/research/template.tex`。
 pub mod layout {
@@ -215,6 +232,20 @@ mod tests {
         assert_eq!(chinese_date("2027/12"), "二〇二七年十二月");
         assert_eq!(chinese_date("二〇二六年九月"), "二〇二六年九月");
         assert_eq!(chinese_date("2026年9月1日"), "2026年9月1日");
+    }
+
+    #[test]
+    fn title_lines_are_used_only_when_they_match_the_title() {
+        let lines = vec![
+            "全市一体化政务数据共享".to_string(),
+            "平台建设项目".to_string(),
+        ];
+        assert_eq!(
+            title_lines("全市一体化政务数据共享平台建设项目", Some(&lines)),
+            lines
+        );
+        assert_eq!(title_lines("改过的题名", Some(&lines)), ["改过的题名"]);
+        assert_eq!(title_lines("题名", None), ["题名"]);
     }
 
     #[test]
