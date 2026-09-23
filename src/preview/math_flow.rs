@@ -461,9 +461,12 @@ fn break_lines(atoms: &[Atom], first_width: f32, width: f32) -> Vec<Range<usize>
 }
 
 /// 画一行混排：文本原子拼成该行的一个 LayoutJob（逐原子带字体 section），
-/// 公式按基线对齐贴入。公式在 LayoutJob 里占一个全角空格位，用
-/// `extra_letter_spacing` 把前进宽度补成盒宽——空格无墨迹，但它后面的文本
-/// 因此让出公式位置，公式的横坐标也能用 `pos_from_cursor` 精确取回。
+/// 公式按基线对齐贴入。公式在 LayoutJob 里占一个全角空格位，用 section 的
+/// `leading_space` 把前进宽度补成盒宽——空格无墨迹，但它后面的文本因此让出
+/// 公式位置；公式左缘 = 空格字形位置 − 补宽，用 `pos_from_cursor` 精确取回。
+///
+/// 不能用 `extra_letter_spacing`：epaint 把它加在字形「之前」且段落首字形不加，
+/// 公式会被画到空位右侧、压住后文，行首公式则干脆没有空位。
 fn draw_line(ui: &mut egui::Ui, metrics: &Metrics, atoms: &[Atom], first_line: bool) {
     let normal = metrics.body_font();
     let em = ui
@@ -477,17 +480,16 @@ fn draw_line(ui: &mut egui::Ui, metrics: &Metrics, atoms: &[Atom], first_line: b
             text_format(normal.clone(), metrics.line),
         );
     }
-    let mut slots: Vec<(usize, &MathAtom)> = Vec::new();
+    let mut slots: Vec<(usize, f32, &MathAtom)> = Vec::new();
     for atom in atoms {
         match atom {
             Atom::Text { text, font, .. } => {
                 job.append(text, 0.0, text_format(font.clone(), metrics.line));
             }
             Atom::Math(math) => {
-                slots.push((job.text.chars().count(), math));
-                let mut format = text_format(normal.clone(), metrics.line);
-                format.extra_letter_spacing = math.size.x - em;
-                job.append("\u{3000}", 0.0, format);
+                let pad = math.size.x - em;
+                slots.push((job.text.chars().count(), pad, math));
+                job.append("\u{3000}", pad, text_format(normal.clone(), metrics.line));
             }
         }
     }
@@ -526,8 +528,8 @@ fn draw_line(ui: &mut egui::Ui, metrics: &Metrics, atoms: &[Atom], first_line: b
         theme::paper::ink(),
     );
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    for (char_index, math) in slots {
-        let x = rect.left() + galley.pos_from_cursor(CCursor::new(char_index)).left();
+    for (char_index, pad, math) in slots {
+        let x = rect.left() + galley.pos_from_cursor(CCursor::new(char_index)).left() - pad;
         let top = rect.top() + baseline - math.baseline;
         let math_rect = egui::Rect::from_min_size(egui::pos2(x, top), math.size);
         match &math.texture {
@@ -664,6 +666,43 @@ mod tests {
             text_atom("丁", 1.0),
         ];
         assert_eq!(break_lines(&atoms, 2.0, 3.5), vec![0..2, 2..4]);
+    }
+
+    /// 公式占位的几何：左缘 = 空格字形位置 − 补宽，恰好接在前文之后；
+    /// 后文从左缘 + 盒宽起排。段首（行首公式）同样成立。
+    #[test]
+    fn math_slot_reserves_exactly_its_box_width() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let font = egui::FontId::proportional(16.0);
+        let box_width = 50.0;
+        for prefix in ["ab", ""] {
+            // 测试环境的默认字体没有全角空格，换个有字形的字符验证同一套几何。
+            let em = ctx.fonts_mut(|fonts| fonts.glyph_width(&font, 'x'));
+            let pad = box_width - em;
+            let mut job = egui::text::LayoutJob::default();
+            let format = egui::TextFormat::simple(font.clone(), egui::Color32::BLACK);
+            job.append(prefix, 0.0, format.clone());
+            let slot = job.text.chars().count();
+            job.append("x", pad, format.clone());
+            job.append("c", 0.0, format);
+            let galley = ctx.fonts_mut(|fonts| fonts.layout_job(job));
+            let before = galley.pos_from_cursor(CCursor::new(slot)).left() - pad;
+            let prefix_end = if prefix.is_empty() {
+                0.0
+            } else {
+                galley.rows[0].glyphs[slot - 1].max_x()
+            };
+            let after = galley.pos_from_cursor(CCursor::new(slot + 1)).left();
+            assert!(
+                (before - prefix_end).abs() < 1.0,
+                "{prefix:?}: {before} vs {prefix_end}"
+            );
+            assert!(
+                (after - before - box_width).abs() < 1.0,
+                "{prefix:?}: {after} - {before}"
+            );
+        }
     }
 
     #[test]
