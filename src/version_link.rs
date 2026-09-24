@@ -45,7 +45,7 @@ fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
 }
 
 /// 文本第 `line` 行（1 基）的字节范围，不含行尾换行（与 `diff` 切块口径一致）。
-fn line_range(starts: &[usize], text: &str, line: usize) -> Option<Range<usize>> {
+pub(crate) fn line_range(starts: &[usize], text: &str, line: usize) -> Option<Range<usize>> {
     let start = *starts.get(line.checked_sub(1)?)?;
     let raw_end = starts.get(line).map_or(text.len(), |next| next - 1);
     let end = if text[start..raw_end].ends_with('\r') {
@@ -56,7 +56,7 @@ fn line_range(starts: &[usize], text: &str, line: usize) -> Option<Range<usize>>
     Some(start..end)
 }
 
-fn line_starts(text: &str) -> Vec<usize> {
+pub(crate) fn line_starts(text: &str) -> Vec<usize> {
     std::iter::once(0)
         .chain(text.match_indices('\n').map(|(index, _)| index + 1))
         .collect()

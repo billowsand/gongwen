@@ -35,6 +35,13 @@ pub(crate) enum WorkerResult {
     /// 某一篇稿件的任务结果。`key` 认稿件、`seq` 认这一次任务：稿件关了或者
     /// 同一篇又发起了新任务，回来的结果就已作废。
     Doc { key: DocKey, seq: u64, job: DocJob },
+    /// 版本对照右栏的花脸稿在后台算好了。不走 `Doc` 的任务序号：它不占用
+    /// 「忙」状态，也不该被同一篇稿件的其他任务作废；是否过期按正文哈希判断。
+    Redline {
+        key: DocKey,
+        hash: u64,
+        doc: crate::redline::RedlineDoc,
+    },
     /// 知识库任务：与具体稿件无关的全局任务（索引构建 / 检索测试）。
     Knowledge(KnowledgeJob),
     /// 公文词表任务：语料扫描的进度与结果。
@@ -240,6 +247,11 @@ impl GongwenApp {
                     self.status = format!("连接失败：{error}");
                 }
                 WorkerResult::Doc { key, seq, job } => self.apply_doc_job(key, seq, job),
+                WorkerResult::Redline { key, hash, doc } => {
+                    if let Some(session) = self.docs.iter_mut().find(|session| session.key == key) {
+                        session.draft_diff.accept_redline(hash, doc);
+                    }
+                }
                 WorkerResult::Knowledge(job) => self.apply_knowledge_job(job),
                 WorkerResult::Lexicon(job) => self.handle_lexicon_job(job),
                 WorkerResult::SystemFonts(fonts) => {

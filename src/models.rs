@@ -1078,7 +1078,7 @@ pub fn join_units(units: &[String]) -> String {
     units.join("、")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TemplateProfile {
     pub kind: TemplateKind,
@@ -2209,7 +2209,7 @@ fn auto_save_default() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DraftInput {
     pub kind: TemplateKind,

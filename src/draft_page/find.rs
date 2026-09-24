@@ -42,6 +42,23 @@ pub(crate) struct DraftDiffState {
     pub(crate) preview_target: Option<Range<usize>>,
     /// 上一帧右栏预览里悬停的变更，左栏据此描边。
     pub(crate) preview_hover: Option<usize>,
+    /// 对照基准（换稿件 / 换基准版时读一次库）。
+    pub(crate) baseline: Option<super::version_diff::Baseline>,
+    /// 当前正文聚成的变更块（可编辑统一 diff 的数据）。
+    pub(crate) hunks: Vec<super::diff_hunks::Hunk>,
+    /// `cache` 对应的正文哈希。
+    pub(crate) text_hash: u64,
+    /// `cache` 对应的文档要素：要素没变就不重算字段对照。
+    pub(crate) last_draft: Option<crate::models::DraftInput>,
+    /// 花脸稿防抖：`(正文哈希, 开始等待的时刻)`。
+    pub(crate) redline_wait: Option<(u64, f64)>,
+    /// 正在后台算的花脸稿对应的正文哈希。
+    pub(crate) redline_in_flight: Option<u64>,
+    /// 下一帧把编辑器光标移到这个字节位置并滚过去（F7、点右栏、还原之后）。
+    pub(crate) editor_jump: Option<usize>,
+    /// 上一帧编辑器光标所在的源码行。光标真的换了行才让焦点跟过去——
+    /// F7 刚发出跳转的那一帧，光标还停在旧行，不能把焦点拉回去。
+    pub(crate) editor_cursor_line: Option<usize>,
 }
 
 /// 审校区的查找/替换条。匹配范围每帧按当前正文重新计算，避免编辑或替换后保存

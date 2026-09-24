@@ -9,9 +9,7 @@
 //!
 //! 第 ③ 期技术验证（spike）的结论见本文件测试与 `docs/version-diff-handoff.md`。
 
-// spike 阶段只有测试在用；接进版本对照编辑器后去掉这一行。
-#![cfg_attr(not(test), allow(dead_code))]
-
+#[cfg(test)]
 use eframe::egui;
 use eframe::egui::epaint::text::Galley;
 
@@ -101,6 +99,7 @@ pub(crate) fn gap_spans(shifted: &Galley, gaps: &[Gap]) -> Vec<(f32, f32)> {
 }
 
 /// 空隙的屏幕矩形：`galley_pos` 取自 `TextEditOutput::galley_pos`。
+#[cfg(test)]
 pub(crate) fn gap_rects(
     shifted: &Galley,
     galley_pos: egui::Pos2,
