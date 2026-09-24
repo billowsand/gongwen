@@ -58,8 +58,9 @@ pub(crate) fn diff_documents(old: &DocumentModel, new: &DocumentModel) -> Redlin
     diff_elements(old, new, &mut overlay);
     let old_sections = split_sections(old);
     let new_sections = split_sections(new);
-    for (old_section, new_section) in align_sections(old, new, &old_sections, &new_sections) {
-        diff_section(old, new, old_section, new_section, &mut overlay);
+    let pairs = align_sections(old, new, &old_sections, &new_sections);
+    for group in merge_orphan_sections(old, new, pairs) {
+        diff_section(old, new, &group, &mut overlay);
     }
     overlay
 }
@@ -252,20 +253,71 @@ fn flush<'a>(
     new_pending.clear();
 }
 
+/// 一组要放在一起比较的章节内容：配上对的两章，或者单边的一章。
+struct SectionGroup {
+    old_heading: Option<usize>,
+    new_heading: Option<usize>,
+    old_blocks: Vec<usize>,
+    new_blocks: Vec<usize>,
+}
+
+/// 只有一边有的章（加 / 删了一个标题）并进前一组，标题本身作为一个内容块。
+///
+/// 单独比较时，这一章的正文对着「空」比，全部标成删除（或新增）；而同样的
+/// 段落在另一边归在前一章里，又被标成新增（或删除）——只删一个标题，下面
+/// 没动的正文整段删一遍、再整段加一遍。并进前一组后正文照常锚定，只剩标题
+/// 本身的增删（第 ③ 期测试 F9）。
+///
+/// 只并普通标题：文档标题、区段标记（正文 / 附件）切的是版面结构，照旧
+/// 单独成组。
+fn merge_orphan_sections(
+    old: &DocumentModel,
+    new: &DocumentModel,
+    pairs: Vec<(Option<&Section>, Option<&Section>)>,
+) -> Vec<SectionGroup> {
+    let is_heading = |model: &DocumentModel, section: &Section| {
+        section.heading.is_some_and(|index| {
+            matches!(
+                model.blocks[index],
+                VisualBlock::Parsed {
+                    block: MarkdownBlock::Heading(..),
+                    ..
+                }
+            )
+        })
+    };
+    let mut groups: Vec<SectionGroup> = Vec::new();
+    for pair in pairs {
+        match (pair, groups.last_mut()) {
+            ((Some(section), None), Some(last)) if is_heading(old, section) => {
+                last.old_blocks.extend(section.heading);
+                last.old_blocks.extend(&section.blocks);
+            }
+            ((None, Some(section)), Some(last)) if is_heading(new, section) => {
+                last.new_blocks.extend(section.heading);
+                last.new_blocks.extend(&section.blocks);
+            }
+            ((old_section, new_section), _) => groups.push(SectionGroup {
+                old_heading: old_section.and_then(|section| section.heading),
+                new_heading: new_section.and_then(|section| section.heading),
+                old_blocks: old_section.map_or_else(Vec::new, |section| section.blocks.clone()),
+                new_blocks: new_section.map_or_else(Vec::new, |section| section.blocks.clone()),
+            }),
+        }
+    }
+    groups
+}
+
 // ── 章节内比较 ────────────────────────────────────────────────────────────────
 
 fn diff_section(
     old: &DocumentModel,
     new: &DocumentModel,
-    old_section: Option<&Section>,
-    new_section: Option<&Section>,
+    group: &SectionGroup,
     overlay: &mut RedlineOverlay,
 ) {
     // 标题本身的增删改（文字级；编号不在模型里，天然不参与比较）。
-    match (
-        old_section.and_then(|section| section.heading),
-        new_section.and_then(|section| section.heading),
-    ) {
+    match (group.old_heading, group.new_heading) {
         (Some(old_head), Some(new_head)) => {
             let old_text = old.blocks[old_head].text().unwrap_or_default();
             let new_text = new.blocks[new_head].text().unwrap_or_default();
@@ -289,15 +341,12 @@ fn diff_section(
         }
         (None, None) => {}
     }
-    let old_blocks: &[usize] = old_section
-        .map(|section| section.blocks.as_slice())
-        .unwrap_or(&[]);
-    let new_blocks: &[usize] = new_section
-        .map(|section| section.blocks.as_slice())
-        .unwrap_or(&[]);
-    overlay
-        .items
-        .extend(align_content(old, new, old_blocks, new_blocks));
+    overlay.items.extend(align_content(
+        old,
+        new,
+        &group.old_blocks,
+        &group.new_blocks,
+    ));
 }
 
 // ── 正文块对齐 ────────────────────────────────────────────────────────────────

@@ -353,6 +353,53 @@ mod review_probes {
         }
     }
 
+    #[test]
+    fn p14_adding_or_removing_a_heading_leaves_its_paragraphs_alone() {
+        // 第 ③ 期测试 F9：只删一个标题（正文不动），或者在没动的段前插一个标题，
+        // 下面的正文曾整段删一遍、再整段加一遍。期望：只标标题本身。
+        let tail = "，各地各校要深刻认识本项工作的重要意义，确保各项部署落到实处。";
+        let para = |name: &str| format!("{name}{tail}");
+        let old = format!(
+            "## 报送内容\n\n{}\n\n### 数据校验\n\n{}\n\n{}\n\n## 报送要求\n\n{}\n\n妥否，请指示。",
+            para("甲段"),
+            para("乙段"),
+            para("丙段"),
+            para("丁段"),
+        );
+        // 删掉三级标题「数据校验」，乙、丙两段并进上一章。
+        let new = old.replace("### 数据校验\n\n", "");
+        let out = run(&old, &new);
+        assert!(out.contains("~数据校验~"), "删掉的标题画删除线：{out}");
+        for name in ["甲段", "乙段", "丙段", "丁段"] {
+            assert_eq!(
+                out.matches(name).count(),
+                1,
+                "{name} 只出现一次、不标：{out}"
+            );
+        }
+        assert_eq!(out.matches('~').count(), 2, "只有标题一处删除：{out}");
+        assert!(!out.contains('['), "没有新增：{out}");
+        // 在「妥否，请指示。」前插一个新标题 + 一段。
+        let new = old.replace(
+            "妥否，请指示。",
+            "## 需要协调的事项\n\n请办公室协调会场保障。\n\n妥否，请指示。",
+        );
+        let out = run(&old, &new);
+        assert!(
+            out.contains("[需要协调的事项]") && out.contains("[请办公室协调会场保障。]"),
+            "新标题与新段加框：{out}"
+        );
+        assert!(
+            out.ends_with("妥否，请指示。") && !out.contains('~'),
+            "没动的结尾段原样、没有删除：{out}"
+        );
+        // 删掉二级标题「报送要求」：它下面的丁段并进前一章。
+        let new = old.replace("## 报送要求\n\n", "");
+        let out = run(&old, &new);
+        assert!(out.contains("~报送要求~"), "{out}");
+        assert_eq!(out.matches("丁段").count(), 1, "丁段不标：{out}");
+    }
+
     /// 带哨兵的 Markdown 还原两侧的可见文字：去新增得旧版、去删除得新版；
     /// 行内标记（`**`、转义）与空白不计。
     fn both_sides(marked: &str) -> (String, String) {
