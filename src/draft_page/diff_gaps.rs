@@ -478,11 +478,16 @@ mod tests {
     #[test]
     fn find_highlight_backgrounds_move_with_their_rows() {
         // 查找高亮是 section 背景，画在行网格里：tessellate 之后找高亮色的顶点，
-        // 必须落在挪过之后的那一行里。
+        // 挪行前后各画一份，高亮必须随那一行挪同样的距离。
+        //
+        // 比的是「挪之前的高亮」而不是行顶：底色框按字体的上下伸量画，可能高出
+        // 行顶——CI 的 Linux ARM64 容器没有中文字体，退回 egui 自带字体时高出 2px。
         let ctx = egui::Context::default();
         crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let highlight = egui::Color32::from_rgb(255, 200, 0);
-        let mut shifted_row_top = 0.0;
+        // 挪过的那份画在右边，按横坐标把两份的顶点分开。
+        const SHIFTED_X: f32 = 2000.0;
+        let mut row_shift = 0.0;
         let output = ctx.run_ui(Default::default(), |ui| {
             let mut job = egui::text::LayoutJob::default();
             for (index, line) in TEXT.split('\n').enumerate() {
@@ -499,26 +504,35 @@ mod tests {
             }
             let base = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
             let shifted = Arc::new(open_gaps(&base, &gaps()));
-            shifted_row_top = shifted.rows[3].pos.y;
+            row_shift = shifted.rows[3].pos.y - base.rows[3].pos.y;
             ui.painter()
-                .galley(egui::pos2(0.0, 0.0), shifted, egui::Color32::BLACK);
+                .galley(egui::pos2(0.0, 0.0), base, egui::Color32::BLACK);
+            ui.painter()
+                .galley(egui::pos2(SHIFTED_X, 0.0), shifted, egui::Color32::BLACK);
         });
+        assert!(row_shift > 0.0, "第四行在空隙后面，应被挪下去");
         let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
-        let ys: Vec<f32> = primitives
-            .iter()
-            .filter_map(|primitive| match &primitive.primitive {
-                egui::epaint::Primitive::Mesh(mesh) => Some(mesh),
-                _ => None,
-            })
-            .flat_map(|mesh| mesh.vertices.iter())
-            .filter(|vertex| vertex.color == highlight)
-            .map(|vertex| vertex.pos.y)
-            .collect();
-        assert!(!ys.is_empty(), "画出了高亮底色");
-        let top = ys.iter().copied().fold(f32::MAX, f32::min);
+        let top_of = |shifted: bool| {
+            primitives
+                .iter()
+                .filter_map(|primitive| match &primitive.primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => Some(mesh),
+                    _ => None,
+                })
+                .flat_map(|mesh| mesh.vertices.iter())
+                .filter(|vertex| vertex.color == highlight)
+                .filter(|vertex| (vertex.pos.x >= SHIFTED_X) == shifted)
+                .map(|vertex| vertex.pos.y)
+                .fold(f32::MAX, f32::min)
+        };
+        let (before, after) = (top_of(false), top_of(true));
         assert!(
-            top >= shifted_row_top - 1.0,
-            "高亮底色 {top} 应在挪过之后的第四行（{shifted_row_top} 起）"
+            before < f32::MAX && after < f32::MAX,
+            "两份都画出了高亮底色"
+        );
+        assert!(
+            (after - before - row_shift).abs() <= 0.5,
+            "高亮底色应随第四行挪 {row_shift}：挪前 {before}，挪后 {after}"
         );
     }
 
