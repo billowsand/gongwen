@@ -1233,6 +1233,17 @@ mod tests {
         bounds
     }
 
+    /// 画出的文字的排版框（按字宽算，与字体墨迹无关）。
+    fn layout_bounds(output: &egui::FullOutput) -> egui::Rect {
+        let mut bounds = egui::Rect::NOTHING;
+        for clipped in &output.shapes {
+            if let egui::epaint::Shape::Text(shape) = &clipped.shape {
+                bounds = bounds.union(shape.galley.rect.translate(shape.pos.to_vec2()));
+            }
+        }
+        bounds
+    }
+
     #[test]
     fn centered_heading_is_centered_within_the_content_width() {
         // 单行与多行的小标宋标题都要以版心宽居中，单行不能贴左缘。
@@ -1290,7 +1301,10 @@ mod tests {
             let output = ctx.run_ui(raw, |ui| {
                 aligned_block(ui, &metrics, "特此**通知**", align);
             });
-            let bounds = text_bounds(&output);
+            // 量排版框（按字宽），不量墨迹：对齐是排版位置的事。没有中文字体的环境
+            // （CI 的 Linux ARM64 容器）里汉字排成缺字方框，方框的墨迹比字宽窄，
+            // 量墨迹右沿会差 4px。
+            let bounds = layout_bounds(&output);
             assert!(bounds.is_positive(), "{align:?} 应有可见文字：{bounds:?}");
             match align {
                 export::LineAlign::Center => {
