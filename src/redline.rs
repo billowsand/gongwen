@@ -409,6 +409,18 @@ mod tex_tests {
             "新增色必须定义为 GwaAddColor"
         );
         assert!(class.contains("1F4E9E"), "新增必须是蓝 #1F4E9E");
+        // 删掉的字也是红色：xeCJKfntef 装盒放字，颜色 special 到不了汉字上
+        // （第 ③ 期测试 F2 实测汉字是黑的），只能走字体的 Color 属性。
+        for (name, source) in [
+            ("gonghan-gwa.cls", class),
+            ("研究报告导言区", crate::visual_diff::REDLINE_PREAMBLE_TEX),
+        ] {
+            assert!(
+                source
+                    .contains("\\addfontfeatures{Color=C00000}\\addCJKfontfeatures{Color=C00000}"),
+                "{name} 的 \\GwDel 要用字体颜色染红删掉的字"
+            );
+        }
     }
 
     /// 反向保证：没有花脸稿标记的普通稿件，产出的 TeX 里不该出现这两个宏。

@@ -36,7 +36,10 @@ pub(crate) const REDLINE_PREAMBLE_TEX: &str = concat!(
     "\\providecolor{GwaAddColor}{HTML}{1F4E9E}\n",
     "\\providecommand{\\GwWaveDepth}{-0.5em}\n",
     "\\providecommand{\\GwStrikeUnit}{\\hbox{\\color{GwaDelColor}\\rule{0.34em}{0.6pt}}}\n",
-    "\\providecommand{\\GwDel}[1]{\\textcolor{GwaDelColor}{\\CJKunderwave[symbol=\\GwStrikeUnit, depth=\\GwWaveDepth]{#1}}}\n",
+    // 删掉的字走字体颜色：xeCJKfntef 装盒放字，颜色 special 到不了字上
+    // （见 gonghan-gwa.cls 同名宏的注释）。
+    "\\providecommand{\\GwDel}[1]{{\\addfontfeatures{Color=C00000}\\addCJKfontfeatures{Color=C00000}",
+    "\\textcolor{GwaDelColor}{\\CJKunderwave[symbol=\\GwStrikeUnit, depth=\\GwWaveDepth]{#1}}}}\n",
     "\\providecommand{\\GwBoxTop}{0.96em}\n",
     "\\providecommand{\\GwBoxBottom}{0.24em}\n",
     "\\providecommand{\\GwBoxBar}{\\textcolor{GwaAddColor}{\\rule[-\\GwBoxBottom]{0.5pt}{\\dimexpr\\GwBoxTop+\\GwBoxBottom\\relax}}}\n",

@@ -102,8 +102,13 @@
 % 用 em 而不是 ex——ex 是西文 x 高，中文字身比它高得多，按 ex 算出来的线会
 % 落在字的下缘。-0.5em 实测正好过中线，且随字号自动缩放。
 \newcommand{\GwWaveDepth}{-0.5em}
-% 删除：红色（#C00000）直删除线穿过字身。
-\newcommand{\GwDel}[1]{\textcolor{GwaDelColor}{\CJKunderwave[symbol=\GwStrikeUnit, depth=\GwWaveDepth]{#1}}}
+% 删除：红色（#C00000）直删除线穿过字身，删掉的字也是红色。
+% xeCJKfntef（底下是 ulem）把字逐个装盒再放，颜色 special 到不了字上：外层
+% \textcolor、textformat=\color 都只染到它跳过的标点，汉字照样是黑的。所以
+% 字的颜色走字体属性（fontspec 的 Color），在宏外面切——与加粗同一条规则。
+% 外层 \textcolor 保留，给不经字体的东西（如公式）上色。
+\newcommand{\GwDel}[1]{{\addfontfeatures{Color=C00000}\addCJKfontfeatures{Color=C00000}%
+  \textcolor{GwaDelColor}{\CJKunderwave[symbol=\GwStrikeUnit, depth=\GwWaveDepth]{#1}}}}
 % 新增：蓝色（#1F4E9E）方框，线宽 0.5pt，框内文字保持正文色。
 %
 % 框必须能随正文断行：\fbox 是不可断的整块，长插入会直接冲出版心。所以上下
