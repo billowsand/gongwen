@@ -90,6 +90,8 @@ pub struct BlockChange {
 /// 未改动的一段；折叠区展开时按原样显示。
 #[derive(Debug, Clone)]
 pub struct ContextBlock {
+    /// 旧版行号（1 基）。统一视图的行号槽左右两列要各写各的。
+    pub old_line: usize,
     pub new_line: usize,
     pub text: String,
     pub new_range: Range<usize>,
@@ -233,7 +235,7 @@ pub fn body_diff(old: &str, new: &str) -> BodyDiff {
     let mut added: Vec<usize> = Vec::new();
     for op in diff_ops(&a, &b) {
         match op {
-            DiffOp::Same(_, j) => {
+            DiffOp::Same(i, j) => {
                 flush_group(
                     &mut blocks,
                     &mut removed,
@@ -243,6 +245,7 @@ pub fn body_diff(old: &str, new: &str) -> BodyDiff {
                 );
                 let block = &new_blocks[j];
                 context.push(ContextBlock {
+                    old_line: old_blocks[i].line,
                     new_line: block.line,
                     text: block.text.clone(),
                     new_range: block.range.clone(),

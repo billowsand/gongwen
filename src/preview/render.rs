@@ -4,10 +4,12 @@
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export;
+use crate::export::RedlineKind;
 use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::images;
 use crate::models::{DraftInput, NumberingConfig, TemplateKind};
 use crate::preview::gutter;
+use crate::preview::marks;
 use crate::preview::pdf_figure;
 use crate::preview::{
     BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT,
@@ -216,6 +218,7 @@ pub(crate) fn official_preview(
     numbering: &NumberingConfig,
     line_numbers: bool,
 ) -> PreviewOutput {
+    super::layout::clear_hovered(ui.ctx());
     // 研究报告不是公文：版心、字号、标题层级和封面全都另一套，没有红头、主送、
     // 落款和版记可言，因此整张纸交给专用版式画，不在下面的公文流程里打补丁。
     if input.kind.is_research() {
@@ -282,7 +285,9 @@ pub(crate) fn official_preview(
     let title = body
         .iter()
         .find_map(|located| match &located.block {
-            MarkdownBlock::Title(text) => Some((export::plain_text(text), located.range.clone())),
+            MarkdownBlock::Title(text) => {
+                Some((marks::plain_keep_marks(text), located.range.clone()))
+            }
             _ => None,
         })
         .unwrap_or_else(|| (export::plain_text(input.title_hint.trim()), 0..0));
@@ -413,7 +418,7 @@ pub(crate) fn official_preview(
                             line_block(
                                 ui,
                                 &metrics,
-                                &export::plain_text(text),
+                                &marks::plain_keep_marks(text),
                                 theme::FONT_BIAOSONG,
                                 TITLE_PT,
                                 Align::Center,
@@ -512,13 +517,15 @@ fn clickable_compact_block(
         0.0,
         text_format(normal.clone(), metrics.line),
     );
-    let heading_text = format!("{}。", export::plain_text(&heading));
-    job.append(
+    // 与 DOCX 的 `compact_heading_paragraph` 一样，标题连同句号按花脸稿块标注。
+    let heading_text = marks::plain_keep_marks(&format!("{heading}。"));
+    marks::append_marked_text(
+        &mut job,
+        metrics,
         &heading_text,
-        0.0,
         text_format(metrics.font(heading_family(level), BODY_PT), metrics.line),
     );
-    let body_start = INDENT_CHARS as usize + heading_text.chars().count();
+    let body_start = INDENT_CHARS as usize + export::strip_redline(&heading_text).chars().count();
     append_inline(&mut job, metrics, body, &normal);
     let mut segments = vec![ClickableSourceSegment {
         source: heading_source,
@@ -549,13 +556,13 @@ pub(crate) fn heading_block(
     numbering: &NumberingConfig,
 ) {
     if let Some(job) = heading_job(metrics, level, text, counters, numbered, numbering) {
-        draw_justified(ui, job);
+        draw_justified(ui, metrics, job);
     }
 }
 
 /// 各级标题的排版任务：首行缩进 2 字，字体按层级取。
 /// 编号规则跳过这一级（`official_heading_text` 返回 None）时不成段。
-fn heading_job(
+pub(super) fn heading_job(
     metrics: &Metrics,
     level: u8,
     text: &str,
@@ -563,10 +570,10 @@ fn heading_job(
     numbered: bool,
     numbering: &NumberingConfig,
 ) -> Option<LayoutJob> {
-    let text = if numbered {
-        export::official_heading_text(level, text, counters, numbering)?
+    let number = if numbered {
+        Some(export::official_heading_prefix(level, counters, numbering)?)
     } else {
-        text.to_string()
+        None
     };
     let mut job = job(metrics.content);
     let font = metrics.font(heading_family(level), BODY_PT);
@@ -575,11 +582,18 @@ fn heading_job(
         0.0,
         text_format(font.clone(), metrics.line),
     );
-    job.append(
-        &export::plain_text(&text),
-        0.0,
-        text_format(font, metrics.line),
-    );
+    // 花脸稿：新增的标题连编号一起加框（方案规则 8），与 DOCX 的
+    // `heading_paragraph_with_number`、TeX 的 `marked_heading_tex` 一致；
+    // 其余情况编号照常排，只标文字。
+    let text = marks::plain_keep_marks(text);
+    let text = match number {
+        Some(number) if export::whole_chunk_kind(&text) == Some(RedlineKind::Added) => {
+            export::mark_added(&format!("{number}{}", export::strip_redline(&text)))
+        }
+        Some(number) => format!("{number}{text}"),
+        None => text,
+    };
+    marks::append_marked_text(&mut job, metrics, &text, text_format(font, metrics.line));
     Some(job)
 }
 

@@ -80,7 +80,6 @@ pub(crate) struct BlockOverlay {
 
 impl BlockOverlay {
     /// 整块均未改动（片段全是 `Same`、无表格标注、无注记）。
-    #[allow(dead_code)]
     pub(crate) fn is_unchanged(&self) -> bool {
         if self.note.is_some() || self.table.is_some() {
             return false;

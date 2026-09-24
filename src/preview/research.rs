@@ -1067,9 +1067,18 @@ fn plain(
             anchor,
             scroll_to_anchor,
             clicked,
-            |ui| match math_flow::block_source(text.trim()) {
-                Some(src) => math_flow::display_block(ui, metrics, src),
-                None => math_flow::paragraph(ui, metrics, text),
+            |ui| {
+                // 花脸稿里的独立公式整块包在一对哨兵里：剥掉再认 `$$`，标记整块画。
+                let bare = export::strip_redline(text);
+                match math_flow::block_source(bare.trim()) {
+                    Some(src) => math_flow::display_block(
+                        ui,
+                        metrics,
+                        src,
+                        export::whole_chunk_kind(text).unwrap_or(export::RedlineKind::Same),
+                    ),
+                    None => math_flow::paragraph(ui, metrics, text),
+                }
             },
         );
         return;

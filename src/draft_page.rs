@@ -32,6 +32,7 @@ mod revise;
 mod ribbon;
 mod table;
 mod tasks;
+mod version_diff;
 mod versions;
 
 pub(crate) use editor::{PreviewAnchor, editor_id};

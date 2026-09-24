@@ -55,6 +55,7 @@ mod theme;
 mod units;
 mod validator;
 mod version;
+mod version_link;
 mod visual_diff;
 mod vocabulary_xlsx;
 

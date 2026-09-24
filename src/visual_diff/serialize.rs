@@ -19,6 +19,7 @@ use crate::export::{
     REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN, RedlineKind, TableSpan, inline_char_spans, mark_added,
     mark_deleted, parse_align_marker, parse_numbered_table_marker, table_span_at,
 };
+use std::ops::Range;
 
 /// 一个待拼接的块：行内用 `\n`；`tight_after` 为 true 时与下一个块之间也
 /// 用 `\n`（列表项之间，保持是一组），否则用 `\n\n`（相邻两张表也空行
@@ -26,11 +27,43 @@ use crate::export::{
 struct Chunk {
     lines: Vec<String>,
     tight_after: bool,
+    /// 这一块由哪些标注条目写成：通常一条；删除的列表项折进前一项时会多一条。
+    sources: Vec<(SourceSide, Range<usize>, bool)>,
+}
+
+/// 标注稿里一个块的来历：它在花脸稿 Markdown 里的字节范围、来自哪一版的
+/// 哪段源码，以及这一块有没有标注。
+///
+/// 花脸稿 Markdown 是重新生成的，字节位置与用户源码对不上；版本对照要在
+/// 「预览里点中的块」与「代码 diff 里的变更块」之间互跳，就靠这张表转换
+/// （方案第一节：两层 diff 只通过源码字节范围互相定位）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MarkedSpan {
+    /// 在花脸稿 Markdown 里的字节范围。
+    pub(crate) marked: Range<usize>,
+    pub(crate) side: SourceSide,
+    /// 在 `side` 那一版正文源码里的字节范围。
+    pub(crate) source: Range<usize>,
+    /// 这一块带不带增删标注（或移动注记）。
+    pub(crate) changed: bool,
+}
+
+/// 标注稿里的块来自哪一版：新版的块，或插在块间的整删旧块。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceSide {
+    New,
+    Old,
 }
 
 /// 把标注层序列化成带花脸稿哨兵的 Markdown，直接交给现有导出链。
 /// 移动注记作为普通括注排在移动段前面（版式小注，不带增删含义）。
+#[cfg(test)]
 pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
+    to_marked_markdown_with_spans(overlay).0
+}
+
+/// 同 [`to_marked_markdown`]，另外返回每个块的来历表（见 [`MarkedSpan`]）。
+pub(crate) fn to_marked_markdown_with_spans(overlay: &RedlineOverlay) -> (String, Vec<MarkedSpan>) {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut align_group: Option<LineAlign> = None;
     for item in &overlay.items {
@@ -60,6 +93,18 @@ pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
         if lines.is_empty() {
             continue;
         }
+        let source = match &overlay_block.block {
+            VisualBlock::Parsed { range, .. } => Some((
+                if deleted {
+                    SourceSide::Old
+                } else {
+                    SourceSide::New
+                },
+                range.clone(),
+                deleted || overlay_block.note.is_some() || !overlay_block.is_unchanged(),
+            )),
+            VisualBlock::Element { .. } => None,
+        };
         // 连续同向的对齐行合并进同一个居中 / 居右区。
         if is_aligned
             && let VisualBlock::Parsed {
@@ -83,6 +128,7 @@ pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
                 && last.tight_after
             {
                 last.lines.last_mut().expect("列表块有行").push_str(&marked);
+                last.sources.extend(source);
                 continue;
             }
         }
@@ -94,9 +140,14 @@ pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
             // 上一块是列表项、这一块不是：先关掉它的 tight 标记。
             last.tight_after = false;
         }
-        chunks.push(Chunk { lines, tight_after });
+        chunks.push(Chunk {
+            lines,
+            tight_after,
+            sources: source.into_iter().collect(),
+        });
     }
     let mut out = String::new();
+    let mut spans = Vec::new();
     for (index, chunk) in chunks.iter().enumerate() {
         if index > 0 {
             out.push_str(if chunks[index - 1].tight_after {
@@ -105,9 +156,18 @@ pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
                 "\n\n"
             });
         }
+        let start = out.len();
         out.push_str(&chunk.lines.join("\n"));
+        for (side, source, changed) in &chunk.sources {
+            spans.push(MarkedSpan {
+                marked: start..out.len(),
+                side: *side,
+                source: source.clone(),
+                changed: *changed,
+            });
+        }
     }
-    out
+    (out, spans)
 }
 
 fn align_marker(align: LineAlign) -> &'static str {

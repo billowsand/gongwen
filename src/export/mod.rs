@@ -68,10 +68,12 @@ pub(crate) use red::{
     RED_RECORD_TOTAL_TWIPS, red_signature_unit_width_em,
 };
 #[cfg(test)]
+pub(crate) use text::InlineSegment;
+#[cfg(test)]
 pub(crate) use text::parenthesized_ranges;
 pub(crate) use text::{
-    InlineSegment, REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN,
-    RedlineKind, attachment_names, attachment_title_name, chinese_date_parts, inline_char_spans,
+    REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN, RedlineKind,
+    attachment_names, attachment_title_name, chinese_date_parts, inline_char_spans,
     inline_segments, inline_visible_char_index, inline_visible_char_indices, is_redline_sentinel,
     legacy_attachment_label, mark_added, mark_deleted, normalize_chinese_quotes, number_to_chinese,
     plain_text, redline_chunks, redline_slice_lines, strip_redline, table_columns,

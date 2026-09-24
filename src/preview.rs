@@ -12,6 +12,7 @@ use std::ops::Range;
 mod gutter;
 mod header;
 mod layout;
+pub(crate) mod marks;
 mod math_flow;
 mod math_render;
 mod pdf_figure;
@@ -25,8 +26,9 @@ pub(crate) use header::{document_number, header_block, header_unit, is_joint_mod
 pub(crate) use layout::{
     ClickableSourceSegment, aligned_block, append_inline, body_block, clickable,
     clickable_body_block, clickable_justified_job, draw, draw_justified, first_ink, heading_family,
-    indent, is_renderable_paragraph, job, justified_rows, layout, line_block, line_galley, place,
-    row_tint_offset, scroll_preview_to_rect, sheet, single_line, stacked, table_block, text_format,
+    hovered_source, indent, is_renderable_paragraph, job, justified_rows, layout, line_block,
+    line_galley, place, row_tint_offset, scroll_preview_to_rect, sheet, single_line, stacked,
+    table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};

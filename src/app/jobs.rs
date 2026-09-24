@@ -102,6 +102,8 @@ pub(crate) enum DocJob {
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
     /// 「打开最近导出」指向的定稿文件。
     RedlineExported(Result<Vec<std::path::PathBuf>, String>),
+    /// 花脸稿打印预览：只出 PDF、落在临时目录，编完在内置查看器里打开。
+    RedlinePrintPreview(Result<Vec<std::path::PathBuf>, String>),
     /// 小模型逐句文字复核的结果。只产出待确认的建议，不碰正文。
     Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
     /// 大纲骨架。只列章节，不写正文。
@@ -1076,6 +1078,21 @@ impl GongwenApp {
             }
             DocJob::RedlineExported(Err(error)) => {
                 self.status = format!("{prefix}花脸稿导出失败：{error}");
+            }
+            DocJob::RedlinePrintPreview(Ok(files)) => {
+                match files
+                    .into_iter()
+                    .find(|file| file.extension().is_some_and(|ext| ext == "pdf"))
+                {
+                    Some(pdf) => {
+                        self.status = format!("{prefix}花脸稿打印预览已生成。");
+                        self.open_pdf(pdf, Some("花脸稿打印预览".to_string()));
+                    }
+                    None => self.status = format!("{prefix}花脸稿打印预览没有编出 PDF。"),
+                }
+            }
+            DocJob::RedlinePrintPreview(Err(error)) => {
+                self.status = format!("{prefix}花脸稿打印预览编译失败：{error}");
             }
             DocJob::Exported(Err(error)) => {
                 self.status = format!("{prefix}导出失败：{error}");

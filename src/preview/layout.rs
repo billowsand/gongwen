@@ -6,6 +6,7 @@
 use crate::export;
 use crate::export::table::ColumnAlignment;
 use crate::preview::gutter;
+use crate::preview::marks::{self, AddedBoxes};
 use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT, TABLE_LINE_PT, TABLE_PT};
 use crate::theme;
 use eframe::egui;
@@ -265,24 +266,49 @@ pub(crate) fn draw(ui: &mut egui::Ui, job: LayoutJob) {
 /// 会先数掉行首空白（`num_leading_spaces`）再把余下的字撑满整行宽，正文首行缩进
 /// 的那两个全角空格既会被挤出版心，又会让首行多撑开两个字。这里换成自己逐行补
 /// 字距：先按不对齐排一遍拿到断行位置，再逐行用 `extra_letter_spacing` 补足。
-pub(crate) fn draw_justified(ui: &mut egui::Ui, job: LayoutJob) {
+pub(crate) fn draw_justified(ui: &mut egui::Ui, metrics: &Metrics, job: LayoutJob) {
     let width = job.wrap.max_width;
     let base = layout(ui, job.clone());
     if !width.is_finite() || base.rows.len() < 2 {
         // 单行段落本来就是末行，不参与对齐。
-        ui.add(egui::Label::new(base));
+        let galley = base.clone();
+        let rect = ui.add(egui::Label::new(base)).rect;
+        marks::paint_galley_boxes(ui.painter(), metrics, rect.left_top(), &galley);
         return;
     }
     let rows = justified_rows(ui, &job, &base);
     let height = base.size().y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let painter = ui.painter();
+    paint_justified_rows(ui.painter(), metrics, rect.left_top(), &job, &base, rows);
+}
+
+/// 把 [`justified_rows`] 切好的逐行 galley 画到 `origin` 处，再补上花脸稿的新增框。
+/// 框按整段逐字判断首尾：跨行接续的新增块在行尾开口、下一行不画左竖边。
+pub(crate) fn paint_justified_rows(
+    painter: &egui::Painter,
+    metrics: &Metrics,
+    origin: egui::Pos2,
+    job: &LayoutJob,
+    base: &egui::Galley,
+    rows: Vec<Arc<egui::Galley>>,
+) {
+    let boxes = AddedBoxes::of(job);
+    let mut first_char = 0usize;
     for (placed, galley) in base.rows.iter().zip(rows) {
-        painter.galley(
-            rect.left_top() + placed.pos.to_vec2(),
-            galley,
-            theme::paper::ink(),
-        );
+        let at = origin + placed.pos.to_vec2();
+        if let Some(boxes) = &boxes
+            && let Some(row) = galley.rows.first()
+        {
+            boxes.paint_row(
+                painter,
+                metrics,
+                first_char,
+                at + row.pos.to_vec2(),
+                &row.row,
+            );
+        }
+        painter.galley(at, galley, theme::paper::ink());
+        first_char += placed.glyphs.len();
     }
 }
 
@@ -482,9 +508,12 @@ pub(crate) fn line_block_runs(
     let mut job = job(metrics.content);
     job.halign = align;
     for run in runs {
-        job.append(
+        // 标题、附件名这类整行文字已是纯文本，只可能还带着花脸稿哨兵：
+        // 按块打标记，没有哨兵时就是原样一段。
+        marks::append_marked_text(
+            &mut job,
+            metrics,
             run.text,
-            0.0,
             text_format(metrics.font(run.family, run.size), metrics.line),
         );
     }
@@ -498,6 +527,7 @@ pub(crate) fn line_block_runs(
         place(ui, metrics, height, |painter, rect| {
             let origin = egui::pos2(rect.left() + metrics.content / 2.0, rect.top());
             push_galley_tints(metrics, &galley, origin);
+            marks::paint_galley_boxes(painter, metrics, origin, &galley);
             painter.galley(origin, galley, theme::paper::ink());
             mark_gutter_rows(metrics, rect, &rows);
         });
@@ -507,6 +537,7 @@ pub(crate) fn line_block_runs(
         let tints = galley.clone();
         let rect = ui.add(egui::Label::new(galley)).rect;
         push_galley_tints(metrics, &tints, rect.left_top());
+        marks::paint_galley_boxes(ui.painter(), metrics, rect.left_top(), &tints);
         mark_gutter_rows(metrics, rect, &rows);
     }
 }
@@ -578,7 +609,7 @@ pub(crate) fn body_block(
         );
     }
     append_inline(&mut job, metrics, text, &normal);
-    draw_justified(ui, job);
+    draw_justified(ui, metrics, job);
 }
 
 /// 居中 / 居右区的一行：正文字体、不缩进，整行相对版心居中或靠右，与 Word 的
@@ -608,6 +639,7 @@ pub(crate) fn aligned_block(
         };
         let origin = egui::pos2(x, rect.top());
         push_galley_tints(metrics, &galley, origin);
+        marks::paint_galley_boxes(painter, metrics, origin, &galley);
         painter.galley(origin, galley, theme::paper::ink());
         mark_gutter_rows(metrics, rect, &rows);
     });
@@ -775,6 +807,7 @@ pub(crate) fn clickable_justified_job(
             }
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                note_hovered(ui, &segment.source);
             }
             let anchored = anchor.is_some_and(|anchor| {
                 !anchor.is_empty()
@@ -802,29 +835,42 @@ pub(crate) fn clickable_justified_job(
         row_start = row_end;
     }
 
-    for (placed, row) in base.rows.iter().zip(rows) {
-        ui.painter().galley(
-            block_rect.left_top() + placed.pos.to_vec2(),
-            row,
-            theme::paper::ink(),
-        );
-    }
+    paint_justified_rows(
+        ui.painter(),
+        metrics,
+        block_rect.left_top(),
+        &job,
+        &base,
+        rows,
+    );
 }
 
 /// 行内片段按导出规则上色：括号内容楷体四号，加粗走 `theme::FONT_BOLD`。
 ///
 /// egui 不做合成加粗，所以「当前字体直接加粗」在预览里仍用黑体近似；设置里改选
 /// 专用粗体字体后，`FONT_BOLD` 换成选定的字面，与 Word / TeX 同步。
+///
+/// 与 DOCX 的 `body_runs` 同一个切法：先按花脸稿哨兵切块，再在块内解析行内样式；
+/// 没有哨兵时只有一块 `Same`，与从前逐字一致。
 pub(crate) fn append_inline(job: &mut LayoutJob, metrics: &Metrics, text: &str, normal: &FontId) {
-    for segment in export::inline_segments(text) {
-        let font = if segment.parenthesized {
-            metrics.font(theme::FONT_KAITI, PAREN_PT)
-        } else if segment.bold {
-            metrics.body_bold_font()
-        } else {
-            normal.clone()
-        };
-        job.append(&segment.text, 0.0, text_format(font, metrics.line));
+    let mut previous = export::RedlineKind::Same;
+    for chunk in export::redline_chunks(text) {
+        let mut gap = marks::chunk_gap(metrics, previous, chunk.kind);
+        for segment in export::inline_segments(&chunk.text) {
+            let font = if segment.parenthesized {
+                metrics.font(theme::FONT_KAITI, PAREN_PT)
+            } else if segment.bold {
+                metrics.body_bold_font()
+            } else {
+                normal.clone()
+            };
+            job.append(
+                &segment.text,
+                std::mem::take(&mut gap),
+                marks::mark_format(text_format(font, metrics.line), chunk.kind, metrics),
+            );
+            previous = chunk.kind;
+        }
     }
 }
 
@@ -958,13 +1004,27 @@ pub(crate) fn measure_table(
                     text_format(font.clone(), line),
                 );
             } else {
-                for segment in export::inline_segments(text) {
-                    let segment_font = if segment.bold {
-                        bold_font.clone()
-                    } else {
-                        font.clone()
-                    };
-                    cell_job.append(&segment.text, 0.0, text_format(segment_font, line));
+                // 与 DOCX 的 `table_runs_sized` 一样先按花脸稿哨兵切块。
+                let mut previous = export::RedlineKind::Same;
+                for chunk in export::redline_chunks(text) {
+                    let mut gap = marks::chunk_gap(metrics, previous, chunk.kind);
+                    for segment in export::inline_segments(&chunk.text) {
+                        let segment_font = if segment.bold {
+                            bold_font.clone()
+                        } else {
+                            font.clone()
+                        };
+                        cell_job.append(
+                            &segment.text,
+                            std::mem::take(&mut gap),
+                            marks::mark_format(
+                                text_format(segment_font, line),
+                                chunk.kind,
+                                metrics,
+                            ),
+                        );
+                        previous = chunk.kind;
+                    }
                 }
             }
             let galley = layout(ui, cell_job);
@@ -1101,6 +1161,7 @@ impl MeasuredTable {
             // 按字形框居中，不用 galley 几何居中：行距 21 磅比字高多出来的余量整块
             // 留在字下方，几何居中字会贴着上沿偏上半格。
             let top = rect.center().y - galley_visual_midline(&cell.galley);
+            marks::paint_galley_boxes(painter, metrics, egui::pos2(anchor, top), &cell.galley);
             painter.galley(
                 egui::pos2(anchor, top),
                 cell.galley.clone(),
@@ -1167,6 +1228,7 @@ pub(crate) fn clickable(
     }
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        note_hovered(ui, range);
     }
     // 查找命中通常只是块内的一小段文字；与块范围相交也要标亮，这样在“公文预览”
     // 模式中仍能看出当前命中位于哪一段。
@@ -1246,6 +1308,7 @@ pub(crate) fn clickable_rows(
         }
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            note_hovered(ui, range);
         }
         let fill = if anchored {
             theme::accent_soft()
@@ -1261,6 +1324,27 @@ pub(crate) fn clickable_rows(
         )));
     }
     ui.painter().set(backdrop, egui::Shape::Vec(shapes));
+}
+
+/// 本帧鼠标悬停在哪个源码块上。版本对照要拿它去另一侧同步高亮，但悬停发生在
+/// 版面深处的各个部件里，为一个只读的悬停结果给整条绘制链路都加一个出参不值得，
+/// 所以记在 egui 的临时数据里：每帧开画前由 [`clear_hovered`] 清掉，画完读一次。
+const HOVERED_SOURCE: &str = "gw-preview-hovered-source";
+
+fn note_hovered(ui: &egui::Ui, range: &Range<usize>) {
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(egui::Id::new(HOVERED_SOURCE), range.clone());
+    });
+}
+
+/// 开画前清掉上一帧的悬停结果。
+pub(crate) fn clear_hovered(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<Range<usize>>(egui::Id::new(HOVERED_SOURCE)));
+}
+
+/// 本帧悬停的源码块（预览所画 Markdown 里的字节范围）。
+pub(crate) fn hovered_source(ctx: &egui::Context) -> Option<Range<usize>> {
+    ctx.data(|data| data.get_temp::<Range<usize>>(egui::Id::new(HOVERED_SOURCE)))
 }
 
 /// 把目标放在可视区中部略偏上（约 40% 高度），给下方正文留下更多阅读空间。

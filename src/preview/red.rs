@@ -4,10 +4,12 @@
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export;
+use crate::export::RedlineKind;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
 use crate::preview::gutter;
 use crate::preview::layout::{MeasuredTable, measure_table};
+use crate::preview::marks;
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
     clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
@@ -100,19 +102,39 @@ struct RedFlowSegment {
     bold: bool,
     parenthesized: bool,
     style: RedTextStyle,
+    /// 花脸稿标记：跨页切开时跟着字走，续页上的删除线与框不会丢。
+    mark: RedlineKind,
 }
 
-fn red_flow_segments(
-    segments: Vec<export::InlineSegment>,
-    style: RedTextStyle,
-) -> Vec<RedFlowSegment> {
-    segments
+/// 行内 Markdown → 排版片段：与 DOCX 的 `body_runs` 同一个切法，先按花脸稿
+/// 哨兵切块，再在块内解析加粗与括号。没有哨兵时只有一块 `Same`。
+fn red_flow_segments(text: &str, style: RedTextStyle) -> Vec<RedFlowSegment> {
+    export::redline_chunks(text)
         .into_iter()
-        .map(|segment| RedFlowSegment {
-            text: segment.text,
-            bold: segment.bold,
-            parenthesized: segment.parenthesized,
+        .flat_map(|chunk| {
+            export::inline_segments(&chunk.text)
+                .into_iter()
+                .map(move |segment| RedFlowSegment {
+                    text: segment.text,
+                    bold: segment.bold,
+                    parenthesized: segment.parenthesized,
+                    style,
+                    mark: chunk.kind,
+                })
+        })
+        .collect()
+}
+
+/// 已是纯文本、只可能带着哨兵的整行文字（标题）→ 排版片段。
+fn red_plain_segments(text: &str, style: RedTextStyle) -> Vec<RedFlowSegment> {
+    export::redline_chunks(text)
+        .into_iter()
+        .map(|chunk| RedFlowSegment {
+            text: chunk.text,
+            bold: false,
+            parenthesized: false,
             style,
+            mark: chunk.kind,
         })
         .collect()
 }
@@ -219,6 +241,7 @@ fn red_inline_job(
             text_format(normal.clone(), metrics.line),
         );
     }
+    let mut previous = RedlineKind::Same;
     for segment in segments {
         let font = match segment.style {
             RedTextStyle::Heading(level) => metrics.font(heading_family(level), BODY_PT),
@@ -229,7 +252,12 @@ fn red_inline_job(
             RedTextStyle::Body if segment.bold => metrics.font(theme::FONT_BOLD, BODY_PT),
             RedTextStyle::Body => normal.clone(),
         };
-        job.append(&segment.text, 0.0, text_format(font, metrics.line));
+        job.append(
+            &segment.text,
+            marks::chunk_gap(metrics, previous, segment.mark),
+            marks::mark_format(text_format(font, metrics.line), segment.mark, metrics),
+        );
+        previous = segment.mark;
     }
     job
 }
@@ -249,13 +277,12 @@ fn red_drop_chars(segments: &mut Vec<RedFlowSegment>, mut count: usize) {
 
 /// 把一个逻辑段落连续排入页面。首页放得下多少行就放多少行；剩余文本进入
 /// 下一页后重新生成 galley，因此第二页第一行立即采用标准 156mm 版心。
-pub(crate) fn red_place_flow_text(
+fn red_place_flow_text(
     ui: &egui::Ui,
     metrics: &Metrics,
     layout_state: &mut RedPrintLayout,
     range: Range<usize>,
-    segments: Vec<export::InlineSegment>,
-    style: RedTextStyle,
+    segments: Vec<RedFlowSegment>,
     first_line_indent: bool,
 ) {
     let visible_chars = segments
@@ -266,7 +293,7 @@ pub(crate) fn red_place_flow_text(
         ui,
         metrics,
         layout_state,
-        red_flow_segments(segments, style),
+        segments,
         vec![crate::preview::ClickableSourceSegment {
             source: range,
             chars: 0..visible_chars,
@@ -386,7 +413,7 @@ fn red_place_aligned_text(
         export::LineAlign::Center => Align::Center,
         export::LineAlign::Right => Align::Max,
     };
-    let segments = red_flow_segments(export::inline_segments(text), RedTextStyle::Body);
+    let segments = red_flow_segments(text, RedTextStyle::Body);
     loop {
         let width = layout_state.body_width(metrics);
         let available = layout_state.body_bottom(metrics) - layout_state.cursor_y;
@@ -534,9 +561,10 @@ pub(crate) fn red_fixed_fragment(
 ) -> RedPrintFragment {
     let mut job = job(width);
     job.halign = align;
-    job.append(
+    marks::append_marked_text(
+        &mut job,
+        metrics,
         text,
-        0.0,
         text_format(metrics.font(family, size), metrics.line),
     );
     let galley = layout(ui, job);
@@ -638,9 +666,16 @@ pub(crate) fn red_build_print_layout(
         match &located.block {
             MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
             MarkdownBlock::Heading(level, text) => {
-                if let Some(text) =
-                    export::official_heading_text(*level, text, &mut counters, numbering)
+                if let Some(number) =
+                    export::official_heading_prefix(*level, &mut counters, numbering)
                 {
+                    // 新增标题连编号一起加框（方案规则 8），其余只标文字。
+                    let marked = marks::plain_keep_marks(text);
+                    let text = if export::whole_chunk_kind(&marked) == Some(RedlineKind::Added) {
+                        export::mark_added(&format!("{number}{}", export::strip_redline(&marked)))
+                    } else {
+                        format!("{number}{marked}")
+                    };
                     let next_paragraph = body.get(index + 1).and_then(|next| {
                         let MarkdownBlock::Paragraph(body) = &next.block else {
                             return None;
@@ -650,18 +685,11 @@ pub(crate) fn red_build_print_layout(
                     if compact_headings[index]
                         && let Some((next, body_text)) = next_paragraph
                     {
-                        let heading_text = format!("{}。", export::plain_text(&text));
-                        let heading_chars = heading_text.chars().count();
-                        let mut flow = vec![RedFlowSegment {
-                            text: heading_text,
-                            bold: false,
-                            parenthesized: false,
-                            style: RedTextStyle::Heading(*level),
-                        }];
-                        flow.extend(red_flow_segments(
-                            export::inline_segments(body_text),
-                            RedTextStyle::Body,
-                        ));
+                        let heading_text = format!("{text}。");
+                        let heading_chars = export::strip_redline(&heading_text).chars().count();
+                        let mut flow =
+                            red_plain_segments(&heading_text, RedTextStyle::Heading(*level));
+                        flow.extend(red_flow_segments(body_text, RedTextStyle::Body));
                         let mut source_segments = vec![crate::preview::ClickableSourceSegment {
                             source: located.range.clone(),
                             chars: 0..heading_chars,
@@ -685,21 +713,23 @@ pub(crate) fn red_build_print_layout(
                         );
                         index += 1;
                     } else {
+                        let mut segments = red_plain_segments(&text, RedTextStyle::Heading(*level));
+                        segments.insert(
+                            0,
+                            RedFlowSegment {
+                                text: indent(INDENT_CHARS),
+                                bold: false,
+                                parenthesized: false,
+                                style: RedTextStyle::Heading(*level),
+                                mark: RedlineKind::Same,
+                            },
+                        );
                         red_place_flow_text(
                             ui,
                             metrics,
                             &mut state,
                             located.range.clone(),
-                            vec![export::InlineSegment {
-                                text: format!(
-                                    "{}{}",
-                                    indent(INDENT_CHARS),
-                                    export::plain_text(&text)
-                                ),
-                                bold: false,
-                                parenthesized: false,
-                            }],
-                            RedTextStyle::Heading(*level),
+                            segments,
                             false,
                         );
                     }
@@ -710,7 +740,7 @@ pub(crate) fn red_build_print_layout(
                     ui,
                     metrics,
                     &mut state,
-                    red_flow_segments(export::inline_segments(text), RedTextStyle::Body),
+                    red_flow_segments(text, RedTextStyle::Body),
                     crate::preview::paragraph_source_segments(markdown, located, text),
                     true,
                 );
@@ -727,7 +757,8 @@ pub(crate) fn red_build_print_layout(
             }
             MarkdownBlock::OrderedListItem { number, text } => {
                 let prefix = export::render_list_number(numbering.list2, *number);
-                let mut segments = export::inline_segments(&format!("{prefix}{text}"));
+                let mut segments =
+                    red_flow_segments(&format!("{prefix}{text}"), RedTextStyle::List);
                 if let Some(first) = segments.first_mut() {
                     first.text = format!("{}{}", indent(INDENT_CHARS), first.text);
                 }
@@ -737,7 +768,6 @@ pub(crate) fn red_build_print_layout(
                     &mut state,
                     located.range.clone(),
                     segments,
-                    RedTextStyle::List,
                     false,
                 );
             }
@@ -768,12 +798,13 @@ pub(crate) fn red_build_print_layout(
                     metrics,
                     &mut state,
                     located.range.clone(),
-                    vec![export::InlineSegment {
+                    vec![RedFlowSegment {
                         text: format!("〔图片：{}〕", export::plain_text(alt)),
                         bold: false,
                         parenthesized: false,
+                        style: RedTextStyle::Body,
+                        mark: RedlineKind::Same,
                     }],
-                    RedTextStyle::Body,
                     false,
                 );
             }
@@ -800,12 +831,13 @@ pub(crate) fn red_build_print_layout(
                 metrics,
                 &mut state,
                 0..0,
-                vec![export::InlineSegment {
+                vec![RedFlowSegment {
                     text: label,
                     bold: false,
                     parenthesized: false,
+                    style: RedTextStyle::Body,
+                    mark: RedlineKind::Same,
                 }],
-                RedTextStyle::Body,
                 false,
             );
         }
@@ -1282,16 +1314,28 @@ pub(crate) fn paint_red_print_pages(
                 };
                 let painter = ui.painter().with_clip_rect(rect);
                 if fragment.justified.is_empty() {
+                    marks::paint_galley_boxes(&painter, metrics, anchor_pos, &fragment.galley);
                     painter.galley(anchor_pos, fragment.galley.clone(), theme::paper::ink());
                 } else {
                     // 两端对齐的正文按行画：每行是一个单独 galley，落在原 galley
                     // 算好的行位置上，分页与命中范围因此完全不受影响。
+                    let boxes = marks::AddedBoxes::of(&fragment.galley.job);
+                    let mut first_char = 0usize;
                     for (placed, row) in fragment.galley.rows.iter().zip(&fragment.justified) {
-                        painter.galley(
-                            anchor_pos + placed.pos.to_vec2(),
-                            row.clone(),
-                            theme::paper::ink(),
-                        );
+                        let at = anchor_pos + placed.pos.to_vec2();
+                        if let Some(boxes) = &boxes
+                            && let Some(line) = row.rows.first()
+                        {
+                            boxes.paint_row(
+                                &painter,
+                                metrics,
+                                first_char,
+                                at + line.pos.to_vec2(),
+                                &line.row,
+                            );
+                        }
+                        painter.galley(at, row.clone(), theme::paper::ink());
+                        first_char += placed.glyphs.len();
                     }
                 }
             }

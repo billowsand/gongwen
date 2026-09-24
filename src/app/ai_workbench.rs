@@ -602,15 +602,13 @@ impl GongwenApp {
                     }
                 });
                 ui.separator();
-                let _ = manuscript_diff_ui(
+                manuscript_diff_ui(
                     ui,
                     &report,
                     &mut proposal.view,
                     &DiffViewConfig {
                         old_label: "当前审校稿",
                         new_label: "AI 修改提案",
-                        allow_jump: false,
-                        allow_export: false,
                     },
                 );
             });

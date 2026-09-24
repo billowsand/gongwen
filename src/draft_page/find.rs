@@ -34,6 +34,14 @@ pub(crate) struct DraftDiffState {
     /// 上一次算出的 diff 及其输入指纹。这个模式每帧都要渲染，
     /// 内容没动就直接复用，长稿才不会边打字边重算。
     pub(crate) cache: Option<(u64, diff::ManuscriptDiff)>,
+    /// 与 `cache` 同一次重算的花脸稿与联动表（右栏预览用）。
+    pub(crate) redline: Option<super::version_diff::RedlineView>,
+    /// 下一帧把右栏预览的锚点滚进视野（导航、点左栏之后置位，画完清掉）。
+    pub(crate) preview_scroll: bool,
+    /// 右栏预览临时标亮的块（点了未改动的块时）；为 None 时标亮当前焦点变更。
+    pub(crate) preview_target: Option<Range<usize>>,
+    /// 上一帧右栏预览里悬停的变更，左栏据此描边。
+    pub(crate) preview_hover: Option<usize>,
 }
 
 /// 审校区的查找/替换条。匹配范围每帧按当前正文重新计算，避免编辑或替换后保存

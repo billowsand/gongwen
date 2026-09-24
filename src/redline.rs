@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 pub struct RedlineDoc {
     /// 带哨兵的 Markdown，直接交给 `export` 的导出器。
     pub markdown: String,
+    /// 标注稿里每个块的来历，版本对照据此在预览与代码 diff 之间互跳。
+    pub(crate) spans: Vec<visual_diff::MarkedSpan>,
 }
 
 impl RedlineDoc {
@@ -46,9 +48,8 @@ pub fn build(old: &str, new: &str) -> RedlineDoc {
         &visual_diff::DocumentModel::from_markdown(old),
         &visual_diff::DocumentModel::from_markdown(new),
     );
-    RedlineDoc {
-        markdown: visual_diff::to_marked_markdown(&overlay),
-    }
+    let (markdown, spans) = visual_diff::to_marked_markdown_with_spans(&overlay);
+    RedlineDoc { markdown, spans }
 }
 
 /// 要导出哪些格式。至少选一个，调用方保证。
@@ -625,6 +626,9 @@ mod consistency_tests {
             "DOCX run 序列与 TeX 片段序列必须一致\nmarkdown:\n{}\ndocx: {docx:?}\ntex:  {tex:?}",
             crate::export::strip_redline(&doc.markdown),
         );
+        // 第三方：预览的排版任务（方案 4.3「预览 = PDF = Word」）。
+        let preview = crate::preview::marks::body_sequence(&doc.markdown);
+        assert_eq!(docx, preview, "预览片段序列必须与 DOCX 一致：{preview:?}");
         // 序列里确实带着标注（不是两边都退化成全 Same 的假一致）。
         assert!(
             docx.iter().any(|(_, kind)| *kind == RedlineKind::Deleted)
@@ -648,6 +652,8 @@ mod consistency_tests {
         let docx = docx_sequence(&doc.markdown);
         let tex = tex_sequence(&doc.markdown);
         assert_eq!(docx, tex, "对齐行的双端序列一致：{docx:?}");
+        let preview = crate::preview::marks::body_sequence(&doc.markdown);
+        assert_eq!(docx, preview, "对齐行的预览序列一致：{preview:?}");
     }
 }
 

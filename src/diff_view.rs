@@ -1,9 +1,9 @@
 //! 版本对照的共享渲染器：起草页的"版本对照"模式与稿件管理的对照窗共用这一套观感，
 //! 两处的增删配色、折叠规则、行号一致，看一眼就知道是同一个东西。
 //!
-//! 渲染器只负责画和收集点击，不读库、不改状态：调用方给它一个 `ManuscriptDiff`
-//! 和一份视图状态，它返回用户点中的那处改动在**新版正文**中的字节范围，
-//! 由调用方决定是跳源码还是别的动作。
+//! 渲染器只负责画和收集交互，不读库、不改状态：调用方给它一份 diff 和一份视图
+//! 状态。起草页的统一视图（[`unified_body_ui`]）把点击、悬停交回调用方，由它去
+//! 与右栏花脸稿预览联动；稿件管理的分栏视图（[`manuscript_diff_ui`]）只读。
 
 use crate::diff::{
     BlockChange, BodyDiff, ChangeKind, ContextBlock, DiffBlock, FieldChange, InlineSpan,
@@ -46,54 +46,38 @@ impl DiffViewState {
     }
 }
 
-/// 一次渲染里用户触发的动作。
-#[derive(Debug, Clone)]
-pub enum DiffViewAction {
-    /// 点了某处改动，要求跳到新版正文的这个位置。
-    JumpToSource(Range<usize>),
-    /// 要求把这两版导出成花脸稿。渲染器手上没有稿件要素，只发意向，
-    /// 具体导出由持有快照的调用方执行。
-    ExportRedline(crate::redline::RedlineFormats),
-}
-
 /// 一次渲染的呈现参数。
 pub struct DiffViewConfig<'a> {
     /// 左栏表头，如 `v3（已提交）`。
     pub old_label: &'a str,
     /// 右栏表头，如 `当前（未提交）`。
     pub new_label: &'a str,
-    /// 点击改动能否跳到 Markdown 源码。只有起草页的对照能跳——稿件管理看的
-    /// 可能是另一篇稿件，跳到起草页的编辑框会落到无关的位置。
-    pub allow_jump: bool,
-    /// 能不能导出花脸稿。导出要拿两版正文和文档要素去真编译一遍，只有起草页
-    /// 这一侧接了后台任务；稿件管理的对照窗还没接，那里不显示按钮，免得点了
-    /// 没反应。
-    pub allow_export: bool,
 }
 
 /// 渲染整份对照（要素 + 备注 + 正文）。
+///
+/// 这是稿件管理对照窗与 AI 工作台用的只读分栏视图；起草页的版本对照已改用
+/// [`unified_body_ui`] + 花脸稿预览（见 `draft_page::version_diff`），第 ④ 期
+/// 稿件管理也会切过去，届时这套分栏下线。
 pub fn manuscript_diff_ui(
     ui: &mut egui::Ui,
     diff: &ManuscriptDiff,
     state: &mut DiffViewState,
     config: &DiffViewConfig<'_>,
-) -> Option<DiffViewAction> {
+) {
     let DiffViewConfig {
         old_label,
         new_label,
-        allow_jump,
-        allow_export,
     } = *config;
     if diff.is_empty() {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| {
             ui.weak(format!("{new_label} 与 {old_label} 一致，没有差异。"));
         });
-        return None;
+        return;
     }
 
     let total_body = diff.body.changed_count;
-    let mut export: Option<crate::redline::RedlineFormats> = None;
     ui.horizontal_wrapped(|ui| {
         theme::chip(
             ui,
@@ -122,51 +106,7 @@ pub fn manuscript_diff_ui(
                 state.scroll_to_focus = true;
             }
         }
-        // 导出花脸稿：删掉的字画波浪线、新增的字套方框，排成一份可以直接送签
-        // 的纸。对照区本身的排布不变，这里只多一个入口。
-        if !allow_export {
-            return;
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("导出花脸稿", |ui| {
-                if ui
-                    .add(theme::menu_item(theme::Icon::FileTypePdf, "导出 PDF"))
-                    .on_hover_text("删除画波浪线、新增套方框，版式与定稿一致")
-                    .clicked()
-                {
-                    export = Some(crate::redline::RedlineFormats {
-                        pdf: true,
-                        docx: false,
-                    });
-                    ui.close();
-                }
-                if ui
-                    .add(theme::menu_item(theme::Icon::FileTypeDoc, "导出 Word"))
-                    .on_hover_text("Word 画不出穿字波浪线，删除用直删除线")
-                    .clicked()
-                {
-                    export = Some(crate::redline::RedlineFormats {
-                        pdf: false,
-                        docx: true,
-                    });
-                    ui.close();
-                }
-                if ui
-                    .add(theme::menu_item(theme::Icon::Package, "两者都导"))
-                    .clicked()
-                {
-                    export = Some(crate::redline::RedlineFormats {
-                        pdf: true,
-                        docx: true,
-                    });
-                    ui.close();
-                }
-            });
-        });
     });
-    if let Some(formats) = export {
-        return Some(DiffViewAction::ExportRedline(formats));
-    }
     if total_body > 0 {
         state.focus = state.focus.min(total_body - 1);
     } else {
@@ -182,7 +122,6 @@ pub fn manuscript_diff_ui(
         320.0
     };
 
-    let mut action = None;
     egui::ScrollArea::vertical()
         .id_salt("version_diff_scroll")
         .auto_shrink([false, false])
@@ -208,11 +147,8 @@ pub fn manuscript_diff_ui(
                 return;
             }
             ui.add_space(2.0);
-            action = body_ui(
-                ui, &diff.body, state, old_label, new_label, allow_jump, column,
-            );
+            body_ui(ui, &diff.body, state, old_label, new_label, column);
         });
-    action
 }
 
 /// 字段变更表：方向由列头写死，旧版永远在左。配置版本对照也用它。
@@ -254,10 +190,8 @@ fn body_ui(
     state: &mut DiffViewState,
     old_label: &str,
     new_label: &str,
-    allow_jump: bool,
     column: f32,
-) -> Option<DiffViewAction> {
-    let mut action = None;
+) {
     let mut change_index = 0usize;
     // 不用 Grid：Grid 会把一行两栏压到同一个行高，内容较多的一侧最后几行直接被裁掉
     // ——而改动往往正好让新版多出一行，一裁就把改动本身裁没了。这里自己排两栏：
@@ -273,19 +207,10 @@ fn body_ui(
                 if expanded {
                     for line in context {
                         // 未改动的段两侧一模一样，左右各画一次。
-                        let mut clicked = false;
                         ui.horizontal_top(|ui| {
-                            let left = column_ui(ui, column, |ui| {
-                                context_cell(ui, line, column, allow_jump)
-                            });
-                            let right = column_ui(ui, column, |ui| {
-                                context_cell(ui, line, column, allow_jump)
-                            });
-                            clicked = left.clicked() || right.clicked();
+                            column_ui(ui, column, |ui| context_cell(ui, line, column));
+                            column_ui(ui, column, |ui| context_cell(ui, line, column));
                         });
-                        if allow_jump && clicked {
-                            action = Some(DiffViewAction::JumpToSource(line.new_range.clone()));
-                        }
                     }
                 } else {
                     // 省略号用 U+2026：随应用打包的中文字体没有 U+22EF（⋯），
@@ -309,10 +234,10 @@ fn body_ui(
                 let mut left_response = None;
                 ui.horizontal_top(|ui| {
                     let left = column_ui(ui, column, |ui| {
-                        change_cell(ui, change, Side::Old, column, focused, allow_jump)
+                        change_cell(ui, change, Side::Old, column, focused)
                     });
                     let right = column_ui(ui, column, |ui| {
-                        change_cell(ui, change, Side::New, column, focused, allow_jump)
+                        change_cell(ui, change, Side::New, column, focused)
                     });
                     clicked = left.clicked() || right.clicked();
                     left_response = Some(left);
@@ -324,20 +249,15 @@ fn body_ui(
                     left.scroll_to_me(Some(egui::Align::Center));
                     state.scroll_to_focus = false;
                 }
-                // 点任一侧都跳到新版正文的对应位置；纯删除段在新版里没有位置，
-                // 这时只把它设为当前聚焦项。
+                // 点任一侧都把它设为当前聚焦项。
                 if clicked {
                     state.focus = change_index;
-                    if let Some(range) = change.new_range.clone().filter(|_| allow_jump) {
-                        action = Some(DiffViewAction::JumpToSource(range));
-                    }
                 }
                 ui.add_space(4.0);
                 change_index += 1;
             }
         }
     }
-    action
 }
 
 /// 一栏：固定宽度、内容自顶向下排。两栏都走这里，同一行左右才对得齐。
@@ -356,12 +276,7 @@ fn column_ui<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -
 }
 
 /// 未改动的一段：灰字、带行号，与改动行的行号列对齐。
-fn context_cell(
-    ui: &mut egui::Ui,
-    line: &ContextBlock,
-    width: f32,
-    allow_jump: bool,
-) -> egui::Response {
+fn context_cell(ui: &mut egui::Ui, line: &ContextBlock, width: f32) -> egui::Response {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!("{:>3}", line.new_line))
@@ -380,13 +295,7 @@ fn context_cell(
             },
         );
         let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
-        let label = egui::Label::new(galley);
-        if allow_jump {
-            ui.add(label.sense(egui::Sense::click()))
-                .on_hover_text("点击跳到 Markdown 源码对应位置")
-        } else {
-            ui.add(label)
-        }
+        ui.add(egui::Label::new(galley))
     })
     .inner
 }
@@ -404,7 +313,6 @@ fn change_cell(
     side: Side,
     width: f32,
     focused: bool,
-    allow_jump: bool,
 ) -> egui::Response {
     let (spans, line, absent) = match side {
         Side::Old => (
@@ -466,18 +374,10 @@ fn change_cell(
             ui.add(egui::Label::new(galley));
         });
     });
-    let hover = match (allow_jump, &change.new_range) {
-        (true, Some(_)) => format!("{}：点击跳到 Markdown 源码对应位置", change.role.label()),
-        (true, None) => format!(
-            "{}：该段在新版里已删除，没有可跳的位置",
-            change.role.label()
-        ),
-        (false, _) => change.role.label().to_string(),
-    };
     inner
         .response
         .interact(egui::Sense::click())
-        .on_hover_text(hover)
+        .on_hover_text(change.role.label())
 }
 
 /// 把字级片段拼成一个排版任务：同一段文字里，改掉的字才有底色和删除线。
@@ -548,4 +448,322 @@ fn cell_hover(text: &str) -> String {
         out.push('…');
     }
     out
+}
+
+// ── 统一视图（起草页版本对照的左栏）──────────────────────────────────────────
+//
+// 方案需求结论第 1 条：删除行红底叠在新增行绿底上方，行号槽左右两列分别是
+// 旧版 / 新版行号，另有一条增删色条；未改动区折叠，只在变更块上下各留一行
+// 上下文（Zed 的做法）。本期只读，第 ③ 期改成可编辑。
+
+/// 折叠未改动区时，变更块上下各保留几行上下文。
+const UNIFIED_CONTEXT: usize = 1;
+
+impl DiffViewState {
+    /// 当前聚焦第几处变更（0 基）。
+    pub fn focus(&self) -> usize {
+        self.focus
+    }
+
+    /// 聚焦到第 `index` 处变更；`scroll` 为 true 时下一帧把它滚进视野。
+    pub fn set_focus(&mut self, index: usize, scroll: bool) {
+        self.focus = index;
+        self.scroll_to_focus |= scroll;
+    }
+
+    /// 上一处 / 下一处，首尾循环（F7 / Shift+F7）。
+    pub fn step(&mut self, forward: bool, total: usize) {
+        if total == 0 {
+            return;
+        }
+        let current = self.focus.min(total - 1);
+        self.focus = if forward {
+            (current + 1) % total
+        } else {
+            (current + total - 1) % total
+        };
+        self.scroll_to_focus = true;
+    }
+}
+
+/// 统一视图一帧里的交互结果。
+#[derive(Debug, Default)]
+pub struct UnifiedOutput {
+    /// 点中的变更序号。
+    pub clicked_change: Option<usize>,
+    /// 鼠标悬停的变更序号。
+    pub hovered_change: Option<usize>,
+    /// 点中的未改动上下文行在新版源码里的范围（右侧据此滚到同一处）。
+    pub clicked_context: Option<Range<usize>>,
+    /// 双击未改动的上下文行，要求切回 Markdown 源码编辑这一行。
+    pub edit_source: Option<Range<usize>>,
+    /// 双击某处变更，要求切回 Markdown 源码编辑它（纯删除的落点由调用方换算）。
+    pub edit_change: Option<usize>,
+}
+
+/// 一行的类型：决定底色、色条与行号列。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    Context,
+    Removed,
+    Added,
+}
+
+/// 统一视图：正文 diff 逐行画，变更块可点、可悬停。`highlight` 是另一侧（预览）
+/// 悬停所对应的变更，淡色描出来。调用方负责套滚动区。
+pub fn unified_body_ui(
+    ui: &mut egui::Ui,
+    diff: &BodyDiff,
+    state: &mut DiffViewState,
+    highlight: Option<usize>,
+) -> UnifiedOutput {
+    let mut output = UnifiedOutput::default();
+    if diff.changed_count == 0 {
+        ui.weak("正文没有变化。");
+        return output;
+    }
+    state.focus = state.focus.min(diff.changed_count - 1);
+    let width = ui.available_width().max(200.0);
+    let mut change_index = 0usize;
+    for (index, block) in diff.blocks.iter().enumerate() {
+        match block {
+            DiffBlock::Unchanged(context) => {
+                let has_before = index > 0;
+                let has_after = index + 1 < diff.blocks.len();
+                let expanded = !state.only_changes || state.expanded.contains(&index);
+                // 折叠时只留贴着变更块的那几行；剩得不多就干脆全显示。
+                let head = if has_before { UNIFIED_CONTEXT } else { 0 };
+                let tail = if has_after { UNIFIED_CONTEXT } else { 0 };
+                let fold = !expanded && context.len() > head + tail + 1;
+                for (line_index, line) in context.iter().enumerate() {
+                    if fold && line_index >= head && line_index < context.len() - tail {
+                        if line_index == head {
+                            let hidden = context.len() - head - tail;
+                            if fold_row(ui, width, hidden).clicked() {
+                                state.expanded.insert(index);
+                            }
+                        }
+                        continue;
+                    }
+                    let job = plain_job(ui, &line.text, theme::text_muted(), width);
+                    let response = diff_row(
+                        ui,
+                        width,
+                        (Some(line.old_line), Some(line.new_line)),
+                        RowKind::Context,
+                        job,
+                    );
+                    let response = response
+                        .interact(egui::Sense::click())
+                        .on_hover_text("单击：右侧预览滚到这里；双击：到 Markdown 源码里改");
+                    if response.double_clicked() {
+                        output.edit_source = Some(line.new_range.clone());
+                    } else if response.clicked() {
+                        output.clicked_context = Some(line.new_range.clone());
+                    }
+                }
+            }
+            DiffBlock::Changed(change) => {
+                let focused = change_index == state.focus;
+                let top = ui.cursor().top();
+                let left = ui.cursor().left();
+                if change.kind != ChangeKind::Insert {
+                    let job = unified_spans_job(ui, &change.before_spans, Side::Old, width);
+                    diff_row(
+                        ui,
+                        width,
+                        (Some(change.old_line), None),
+                        RowKind::Removed,
+                        job,
+                    );
+                }
+                if change.kind != ChangeKind::Delete {
+                    let job = unified_spans_job(ui, &change.after_spans, Side::New, width);
+                    diff_row(
+                        ui,
+                        width,
+                        (None, Some(change.new_line)),
+                        RowKind::Added,
+                        job,
+                    );
+                }
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(left, top),
+                    egui::pos2(left + width, ui.cursor().top()),
+                );
+                let response = ui
+                    .interact(
+                        rect,
+                        egui::Id::new(("unified-diff-change", change_index)),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_text(format!(
+                        "{}：单击在右侧预览里定位；双击到 Markdown 源码里改",
+                        change.role.label()
+                    ));
+                if response.hovered() {
+                    output.hovered_change = Some(change_index);
+                }
+                if response.double_clicked() {
+                    output.edit_change = Some(change_index);
+                    output.clicked_change = Some(change_index);
+                } else if response.clicked() {
+                    output.clicked_change = Some(change_index);
+                }
+                let outline = if focused {
+                    Some(egui::Stroke::new(1.5, theme::accent()))
+                } else if highlight == Some(change_index) || response.hovered() {
+                    Some(egui::Stroke::new(1.0, theme::accent().gamma_multiply(0.5)))
+                } else {
+                    None
+                };
+                if let Some(stroke) = outline {
+                    ui.painter()
+                        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+                }
+                if focused && state.scroll_to_focus {
+                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    state.scroll_to_focus = false;
+                }
+                change_index += 1;
+            }
+        }
+    }
+    output
+}
+
+/// 行号槽：两列行号 + 色条 + 增删符号。
+const GUTTER_NUMBER: f32 = 34.0;
+const GUTTER_BAR: f32 = 3.0;
+const GUTTER_SIGN: f32 = 16.0;
+
+fn gutter_width() -> f32 {
+    GUTTER_NUMBER * 2.0 + GUTTER_BAR + GUTTER_SIGN + 4.0
+}
+
+/// 画一行：行号槽 + 底色 + 已排好版的文字。返回整行的响应（只感知悬停）。
+fn diff_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    (old_line, new_line): (Option<usize>, Option<usize>),
+    kind: RowKind,
+    job: egui::text::LayoutJob,
+) -> egui::Response {
+    let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
+    let height = galley.size().y + 4.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter();
+    let (fill, bar, sign) = match kind {
+        RowKind::Context => (None, None, ""),
+        RowKind::Removed => (Some(theme::danger_soft()), Some(theme::danger()), "−"),
+        RowKind::Added => (Some(theme::success_soft()), Some(theme::success()), "+"),
+    };
+    if let Some(fill) = fill {
+        painter.rect_filled(rect, 0.0, fill);
+    }
+    let number_font = egui::TextStyle::Monospace.resolve(ui.style());
+    let muted = theme::text_muted();
+    let mut x = rect.left();
+    for number in [old_line, new_line] {
+        if let Some(number) = number.filter(|number| *number > 0) {
+            painter.text(
+                egui::pos2(x + GUTTER_NUMBER - 6.0, rect.top() + 2.0),
+                egui::Align2::RIGHT_TOP,
+                number.to_string(),
+                number_font.clone(),
+                muted,
+            );
+        }
+        x += GUTTER_NUMBER;
+    }
+    if let Some(bar) = bar {
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(GUTTER_BAR, height)),
+            0.0,
+            bar,
+        );
+    }
+    x += GUTTER_BAR;
+    if !sign.is_empty() {
+        painter.text(
+            egui::pos2(x + GUTTER_SIGN / 2.0, rect.top() + 2.0),
+            egui::Align2::CENTER_TOP,
+            sign,
+            number_font,
+            bar.unwrap_or(muted),
+        );
+    }
+    x += GUTTER_SIGN + 4.0;
+    painter.galley(egui::pos2(x, rect.top() + 2.0), galley, theme::text());
+    response
+}
+
+/// 折叠行：「…… 展开 N 行未改动 ……」，点一下展开这一段。
+fn fold_row(ui: &mut egui::Ui, width: f32, hidden: usize) -> egui::Response {
+    let height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let painter = ui.painter();
+    let fill = if response.hovered() {
+        theme::surface_hover()
+    } else {
+        theme::surface_sunk()
+    };
+    painter.rect_filled(rect, 0.0, fill);
+    // 省略号用 U+2026：随应用打包的中文字体没有 U+22EF。
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("…… 展开 {hidden} 行未改动 ……"),
+        egui::TextStyle::Body.resolve(ui.style()),
+        theme::text_muted(),
+    );
+    response.on_hover_text("点击展开这段未改动的内容")
+}
+
+/// 未改动行的排版任务：灰字，按正文区宽度折行。
+fn plain_job(ui: &egui::Ui, text: &str, color: egui::Color32, width: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = (width - gutter_width() - 6.0).max(60.0);
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::TextStyle::Body.resolve(ui.style()),
+            color,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// 变更行的排版任务：整行已有红 / 绿底，真正改掉的字再加深一档底色，
+/// 删除行的字另画删除线——与 Zed 的词级高亮同一观感。
+fn unified_spans_job(
+    ui: &egui::Ui,
+    spans: &[InlineSpan],
+    side: Side,
+    width: f32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = (width - gutter_width() - 6.0).max(60.0);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    for span in spans {
+        let mut format = egui::TextFormat {
+            font_id: font.clone(),
+            color: theme::text(),
+            ..Default::default()
+        };
+        match (side, span.kind) {
+            (Side::Old, SpanKind::Removed) => {
+                format.background = theme::danger().gamma_multiply(0.28);
+                format.strikethrough = egui::Stroke::new(1.0, theme::danger());
+            }
+            (Side::New, SpanKind::Added) => {
+                format.background = theme::success().gamma_multiply(0.28);
+            }
+            _ => {}
+        }
+        job.append(&span.text, 0.0, format);
+    }
+    job
 }
