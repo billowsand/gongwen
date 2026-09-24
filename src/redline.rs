@@ -751,7 +751,17 @@ mod research_tests {
             std::fs::read_to_string(tex_path.parent().unwrap().join("data/chapter01.tex"))
                 .expect("读分章 TeX");
         assert!(chapter.contains("\\GwDel{"), "分章应有删除宏：{chapter}");
-        assert!(chapter.contains("\\GwAdd{"), "分章应有新增宏：{chapter}");
+        // 新增的一句里带公式：公式不能进 xeCJKfntef 的宏（编译失败），整体装盒
+        // 画框（`\GwAddAtom`），文字部分走 `\GwAddLines`，首尾各一条竖边。
+        assert!(
+            chapter.contains("\\GwDelAtom{\\(x^{2}\\)}"),
+            "删掉的公式整体标注：{chapter}"
+        );
+        assert!(
+            chapter.contains("\\GwAddAtom{\\hspace{1.5pt}\\(x^{3}\\)}")
+                && chapter.contains("\\GwAddLines{可知，另见附件\\hspace{1.5pt}}\\GwBoxBar{}"),
+            "分章应有新增宏：{chapter}"
+        );
         for ch in ['\u{E000}', '\u{E001}', '\u{E002}', '\u{E003}'] {
             assert!(!chapter.contains(ch), "哨兵不得残留：{chapter}");
         }

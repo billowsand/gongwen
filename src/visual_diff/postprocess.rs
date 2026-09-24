@@ -19,6 +19,14 @@ pub(crate) const DEL_COLOR: &str = "C00000";
 pub(crate) const ADD_COLOR: &str = "1F4E9E";
 
 /// 注入主 TeX 导言区的花脸稿宏定义（mdx 的 md2tex.cls 不认公文类的宏）。
+///
+/// 除了与公文类文件同一套 `\GwDel` / `\GwAdd`，研究报告还有公式、交叉引用、
+/// 文献引用这类不能放进 xeCJKfntef 宏里的「原子」（`\(…\)` 进了逐字处理的宏
+/// 直接编译失败），它们整体装盒后另画标记：
+/// - `\GwDelAtom`：红色，盒子竖直中线画一道删除线；
+/// - `\GwAddAtom`：只画上下边，与两侧文字的新增框接成一个框（竖边由首尾的
+///   `\GwBoxBar` 画）；内容比框高时上下边让开；
+/// - `\GwAddDisplay`：独立公式整块套框。
 pub(crate) const REDLINE_PREAMBLE_TEX: &str = concat!(
     "% gongwen 花脸稿标记（视觉 diff 引擎注入）\n",
     "\\makeatletter\n",
@@ -34,16 +42,39 @@ pub(crate) const REDLINE_PREAMBLE_TEX: &str = concat!(
     "\\providecommand{\\GwBoxBar}{\\textcolor{GwaAddColor}{\\rule[-\\GwBoxBottom]{0.5pt}{\\dimexpr\\GwBoxTop+\\GwBoxBottom\\relax}}}\n",
     "\\providecommand{\\GwAddLines}[1]{\\CJKunderdblline[depth=-\\GwBoxTop, gap=\\dimexpr\\GwBoxTop+\\GwBoxBottom-0.5pt\\relax, thickness=0.5pt, skip=false, format=\\color{GwaAddColor}]{#1}}\n",
     "\\providecommand{\\GwAdd}[1]{\\GwBoxBar\\GwAddLines{\\hspace{1.5pt}#1\\hspace{1.5pt}}\\GwBoxBar}\n",
+    "\\ifdefined\\GwAtomBox\\else\\newsavebox{\\GwAtomBox}\\fi\n",
+    "\\ifdefined\\GwAtomTop\\else\\newdimen\\GwAtomTop\\fi\n",
+    "\\ifdefined\\GwAtomBottom\\else\\newdimen\\GwAtomBottom\\fi\n",
+    "\\providecommand{\\GwDelAtom}[1]{\\sbox\\GwAtomBox{\\textcolor{GwaDelColor}{#1}}",
+    "\\rlap{\\textcolor{GwaDelColor}{\\rule[\\dimexpr(\\ht\\GwAtomBox-\\dp\\GwAtomBox)/2-0.3pt\\relax]{\\wd\\GwAtomBox}{0.6pt}}}",
+    "\\usebox\\GwAtomBox}\n",
+    "\\providecommand{\\GwAddAtom}[1]{\\sbox\\GwAtomBox{#1}",
+    "\\GwAtomTop=\\dimexpr\\GwBoxTop\\relax",
+    "\\ifdim\\dimexpr\\ht\\GwAtomBox+1pt\\relax>\\GwAtomTop\\GwAtomTop=\\dimexpr\\ht\\GwAtomBox+1pt\\relax\\fi",
+    "\\GwAtomBottom=\\dimexpr\\GwBoxBottom\\relax",
+    "\\ifdim\\dimexpr\\dp\\GwAtomBox+1pt\\relax>\\GwAtomBottom\\GwAtomBottom=\\dimexpr\\dp\\GwAtomBox+1pt\\relax\\fi",
+    "\\rlap{\\textcolor{GwaAddColor}{\\rule[-\\GwAtomBottom]{\\wd\\GwAtomBox}{0.5pt}}}",
+    "\\rlap{\\textcolor{GwaAddColor}{\\rule[\\dimexpr\\GwAtomTop-0.5pt\\relax]{\\wd\\GwAtomBox}{0.5pt}}}",
+    "\\usebox\\GwAtomBox}\n",
+    "\\providecommand{\\GwAddDisplay}[1]{{\\color{GwaAddColor}\\fboxrule=0.5pt\\fboxsep=3pt",
+    "\\fbox{\\normalcolor$\\displaystyle #1$}}}\n",
 );
 
-/// 把一段 TeX 源码里的哨兵对换成 `\GwDel{...}` / `\GwAdd{...}`。
+/// 把一段 TeX 源码里的哨兵对换成花脸稿宏。
+///
+/// 标记里的内容先按顶层切段（[`segments`]）：加粗 / 斜体这类样式命令包在宏
+/// **外面**（xeCJKfntef 的宏里字体切换只作用到第一个字，与公文类文件同一条
+/// 规则），公式、引用等原子整体另画；只有纯文字时仍是一个 `\GwDel{…}` /
+/// `\GwAdd{…}`。独立公式（`\[…\]`）里的哨兵换成整块标注。
 /// 未配对的哨兵直接剥掉（防御：宁可丢标记也不把私用区码位漏进纸面），
 /// 哨兵里的文字始终原样保留。
 pub(crate) fn inject_tex_redline(tex: &str) -> String {
     let mut out = String::with_capacity(tex.len());
     let mut buffer = String::new();
     let mut state = RedlineKind::Same;
-    for ch in tex.chars() {
+    let mut in_display = false;
+    let mut chars = tex.chars();
+    while let Some(ch) = chars.next() {
         match ch {
             REDLINE_DEL_OPEN | REDLINE_ADD_OPEN => {
                 if state != RedlineKind::Same {
@@ -61,20 +92,239 @@ pub(crate) fn inject_tex_redline(tex: &str) -> String {
                 if state == RedlineKind::Same {
                     continue; // 孤立的收尾哨兵：丢弃
                 }
-                if state == RedlineKind::Deleted {
-                    out.push_str(&wrap_tex_macro("GwDel", &buffer));
+                if in_display {
+                    out.push_str(&mark_display_math(state, &buffer));
                 } else {
-                    // 新增框能随正文断行（与公文侧同一个 \GwAdd 定义），整段一个框。
-                    out.push_str(&wrap_tex_macro("GwAdd", &buffer));
+                    out.push_str(&mark_tex_span(state, &buffer));
                 }
                 buffer.clear();
                 state = RedlineKind::Same;
+            }
+            '\\' => {
+                // 控制序列整个吃掉：`\\[2pt]` 这类换行不能误认成 `\[`。
+                buffer.push('\\');
+                if let Some(next) = chars.next() {
+                    buffer.push(next);
+                    if state == RedlineKind::Same {
+                        match next {
+                            '[' => in_display = true,
+                            ']' => in_display = false,
+                            _ => {}
+                        }
+                    }
+                }
             }
             other => buffer.push(other),
         }
     }
     out.push_str(&buffer);
     out
+}
+
+/// 独立公式里的标注：整块。删除 = 红色 + 中线；新增 = 套框。
+fn mark_display_math(kind: RedlineKind, content: &str) -> String {
+    let content = content.trim();
+    match kind {
+        RedlineKind::Deleted => format!("\\GwDelAtom{{$\\displaystyle {content}$}}"),
+        RedlineKind::Added => format!("\\GwAddDisplay{{{content}}}"),
+        RedlineKind::Same => content.to_string(),
+    }
+}
+
+/// 标记内容的一段（顶层切分）。
+#[derive(Debug, PartialEq)]
+enum Segment<'a> {
+    /// 普通文字（含 `\%`、`\textasciicircum{}` 这类转义）。
+    Text(&'a str),
+    /// 样式命令：`open` 是 `\textbf{` 这样的开头，`inner` 是组内再切的段。
+    Styled {
+        open: &'a str,
+        inner: Vec<Segment<'a>>,
+    },
+    /// 不能进 xeCJKfntef 宏的整体：公式、交叉引用、文献引用、链接。
+    Atom(&'a str),
+    /// 脚注：装进盒子里会丢，原样放在标记外面。
+    Raw(&'a str),
+}
+
+/// 包在宏外面的样式命令。
+const STYLE_COMMANDS: [&str; 4] = ["\\textbf{", "\\textit{", "\\texttt{", "\\emph{"];
+/// 原子命令与其参数组个数。
+const ATOM_COMMANDS: [(&str, usize); 5] = [
+    ("\\ref{", 1),
+    ("\\eqref{", 1),
+    ("\\cite{", 1),
+    ("\\url{", 1),
+    ("\\href{", 2),
+];
+
+/// 按顶层切段。花括号不平衡（哨兵跨过了命令的括号）或公式没闭合时返回 None，
+/// 调用方退回整段一个宏的老办法。
+fn segments<'a>(text: &'a str) -> Option<Vec<Segment<'a>>> {
+    let mut out = Vec::new();
+    let mut text_start = 0usize;
+    let mut index = 0usize;
+    let flush = |out: &mut Vec<Segment<'a>>, from: usize, to: usize| {
+        if from < to {
+            out.push(Segment::Text(&text[from..to]));
+        }
+    };
+    while index < text.len() {
+        let rest = &text[index..];
+        if let Some(inner) = rest.strip_prefix("\\(") {
+            let end = index + 2 + inner.find("\\)")? + 2;
+            flush(&mut out, text_start, index);
+            out.push(Segment::Atom(&text[index..end]));
+            index = end;
+            text_start = end;
+        } else if let Some(open) = STYLE_COMMANDS.iter().find(|open| rest.starts_with(**open)) {
+            let body = index + open.len();
+            let close = group_end(text, body - 1)?;
+            flush(&mut out, text_start, index);
+            out.push(Segment::Styled {
+                open: &text[index..body],
+                inner: segments(&text[body..close])?,
+            });
+            index = close + 1;
+            text_start = index;
+        } else if let Some((command, groups)) = ATOM_COMMANDS
+            .iter()
+            .find(|(command, _)| rest.starts_with(*command))
+        {
+            let mut end = index + command.len() - 1;
+            for group in 0..*groups {
+                if group > 0 && !text[end..].starts_with('{') {
+                    return None;
+                }
+                end = group_end(text, end)? + 1;
+            }
+            flush(&mut out, text_start, index);
+            out.push(Segment::Atom(&text[index..end]));
+            index = end;
+            text_start = end;
+        } else if rest.starts_with("\\footnote{") {
+            let end = group_end(text, index + "\\footnote".len())? + 1;
+            flush(&mut out, text_start, index);
+            out.push(Segment::Raw(&text[index..end]));
+            index = end;
+            text_start = end;
+        } else if let Some(after) = rest.strip_prefix('\\') {
+            // 其余控制序列（转义、无参命令）算普通文字：连同后一个字符一起跳过。
+            index += 1 + after.chars().next().map_or(0, char::len_utf8);
+        } else if rest.starts_with('{') {
+            // 普通分组（如 `\textasciicircum{}` 的 `{}`）整体算文字。
+            index = group_end(text, index)? + 1;
+        } else if rest.starts_with('}') {
+            return None;
+        } else {
+            index += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    flush(&mut out, text_start, text.len());
+    Some(out)
+}
+
+/// `open` 处的 `{` 对应的 `}` 的位置（跳过 `\{` `\}`）。
+fn group_end(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 1,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// 一段带标记的 TeX：纯文字时一个宏；否则按段各自标注，样式在宏外。
+fn mark_tex_span(kind: RedlineKind, content: &str) -> String {
+    let macro_name = if kind == RedlineKind::Deleted {
+        "GwDel"
+    } else {
+        "GwAdd"
+    };
+    let Some(parts) = segments(content) else {
+        return wrap_tex_macro(macro_name, content);
+    };
+    if parts.iter().all(|part| matches!(part, Segment::Text(_))) {
+        return wrap_tex_macro(macro_name, content);
+    }
+    let leaves = count_leaves(&parts);
+    let mut out = String::new();
+    let mut seen = 0usize;
+    if kind == RedlineKind::Added {
+        out.push_str("\\GwBoxBar");
+    }
+    render_segments(&parts, kind, leaves, &mut seen, &mut out);
+    if kind == RedlineKind::Added {
+        // 收尾的 `{}` 不能省：XeTeX 里汉字是字母，`\GwBoxBar为` 会被读成
+        // 一个叫「GwBoxBar为」的控制序列。
+        out.push_str("\\GwBoxBar{}");
+    }
+    out
+}
+
+fn count_leaves(parts: &[Segment<'_>]) -> usize {
+    parts
+        .iter()
+        .map(|part| match part {
+            Segment::Text(_) | Segment::Atom(_) => 1,
+            Segment::Styled { inner, .. } => count_leaves(inner),
+            Segment::Raw(_) => 0,
+        })
+        .sum()
+}
+
+/// 逐段写宏。新增框的左右留白只加在第一段 / 最后一段里（与 `\GwAdd` 一致）。
+fn render_segments(
+    parts: &[Segment<'_>],
+    kind: RedlineKind,
+    leaves: usize,
+    seen: &mut usize,
+    out: &mut String,
+) {
+    for part in parts {
+        match part {
+            Segment::Styled { open, inner } => {
+                out.push_str(open);
+                render_segments(inner, kind, leaves, seen, out);
+                out.push('}');
+            }
+            Segment::Raw(raw) => out.push_str(raw),
+            Segment::Text(content) | Segment::Atom(content) => {
+                let first = *seen == 0;
+                *seen += 1;
+                let last = *seen == leaves;
+                let atom = matches!(part, Segment::Atom(_));
+                if kind == RedlineKind::Deleted {
+                    let name = if atom { "GwDelAtom" } else { "GwDel" };
+                    out.push_str(&format!("\\{name}{{{content}}}"));
+                    continue;
+                }
+                let pad = "\\hspace{1.5pt}";
+                let body = format!(
+                    "{}{content}{}",
+                    if first { pad } else { "" },
+                    if last { pad } else { "" }
+                );
+                let name = if atom { "GwAddAtom" } else { "GwAddLines" };
+                out.push_str(&format!("\\{name}{{{body}}}"));
+            }
+        }
+    }
 }
 
 /// 把内容包进花脸稿宏。内容里 `{` `}` 若不平衡（哨兵跨过 `\textbf{` 这类
@@ -396,6 +646,65 @@ mod tests {
         let input = format!("{REDLINE_ADD_OPEN}{long}{REDLINE_ADD_CLOSE}");
         let out = inject_tex_redline(&input);
         assert_eq!(out, format!("\\GwAdd{{{long}}}"));
+    }
+
+    /// 第 ③ 期测试 F5：新增里的加粗包在宏里，只有第一个字是粗体。
+    /// 样式命令要包在宏外面，一段新增按样式切开、仍拼成一个框。
+    #[test]
+    fn tex_styles_wrap_outside_the_mark_macros() {
+        let input = format!(
+            "确定{REDLINE_ADD_OPEN}，\\textbf{{重点报送}}（含说明），\\textbf{{并按季度校准}}{REDLINE_ADD_CLOSE}。"
+        );
+        let out = inject_tex_redline(&input);
+        assert_eq!(
+            out,
+            "确定\\GwBoxBar\\GwAddLines{\\hspace{1.5pt}，}\\textbf{\\GwAddLines{重点报送}}\
+             \\GwAddLines{（含说明），}\\textbf{\\GwAddLines{并按季度校准\\hspace{1.5pt}}}\\GwBoxBar{}。"
+        );
+        let input = format!("前{REDLINE_DEL_OPEN}\\textbf{{权重}}由专家{REDLINE_DEL_CLOSE}后");
+        assert_eq!(
+            inject_tex_redline(&input),
+            "前\\textbf{\\GwDel{权重}}\\GwDel{由专家}后"
+        );
+    }
+
+    /// 第 ③ 期测试 F4：新增里带行内公式，公式进了 xeCJKfntef 的宏，编译失败。
+    /// 公式、引用是原子，整体装盒另画标记。
+    #[test]
+    fn tex_formulas_and_references_are_marked_as_atoms() {
+        let input =
+            format!("取{REDLINE_ADD_OPEN}\\(p \\ge 0.8\\)的样本\\cite{{a,b}}{REDLINE_ADD_CLOSE}。");
+        assert_eq!(
+            inject_tex_redline(&input),
+            "取\\GwBoxBar\\GwAddAtom{\\hspace{1.5pt}\\(p \\ge 0.8\\)}\\GwAddLines{的样本}\
+             \\GwAddAtom{\\cite{a,b}\\hspace{1.5pt}}\\GwBoxBar{}。"
+        );
+        let input = format!("其中{REDLINE_DEL_OPEN}\\(w_i\\){REDLINE_DEL_CLOSE}为权重");
+        assert_eq!(
+            inject_tex_redline(&input),
+            "其中\\GwDelAtom{\\(w_i\\)}为权重"
+        );
+        // 脚注装进盒子会丢：原样留在标记外面。
+        let input = format!("{REDLINE_ADD_OPEN}正文\\footnote{{注释}}{REDLINE_ADD_CLOSE}");
+        assert_eq!(
+            inject_tex_redline(&input),
+            "\\GwBoxBar\\GwAddLines{\\hspace{1.5pt}正文\\hspace{1.5pt}}\\footnote{注释}\\GwBoxBar{}"
+        );
+    }
+
+    /// 第 ③ 期测试 F6：独立公式里的哨兵换成整块标注，不能把 `\GwDel` 塞进数学模式。
+    #[test]
+    fn tex_display_math_is_marked_as_a_whole_block() {
+        let input = format!(
+            "\\[\n{REDLINE_DEL_OPEN}E = mc^{{2}}{REDLINE_DEL_CLOSE}\n\\]\n\n\\[\n{REDLINE_ADD_OPEN}E = mc^{{3}}{REDLINE_ADD_CLOSE}\n\\]\n"
+        );
+        assert_eq!(
+            inject_tex_redline(&input),
+            "\\[\n\\GwDelAtom{$\\displaystyle E = mc^{2}$}\n\\]\n\n\\[\n\\GwAddDisplay{E = mc^{3}}\n\\]\n"
+        );
+        // 表格里的 `\\[2pt]` 换行不是独立公式。
+        let input = format!("甲\\\\[2pt]{REDLINE_DEL_OPEN}乙{REDLINE_DEL_CLOSE}");
+        assert_eq!(inject_tex_redline(&input), "甲\\\\[2pt]\\GwDel{乙}");
     }
 
     #[test]
