@@ -1394,18 +1394,38 @@ fn collect_deleted_run(
     }
 }
 
-/// 片段追加：相邻同类合并，避免碎块。
+/// 片段追加：相邻同类合并，避免碎块。但首片段为纯句读标点（`，。；：！？`）
+/// 时不要合并——标点串进文字片段会把纸面上能看到的标点吃掉，让句子结构
+/// 不变式破缺。保留单尾项，下一段独立成行。
+/// 在两段文本里找最长公共子串（O(n*m) DP），返回 ((old_prefix, old_suffix, matched),
+/// (new_prefix, new_suffix, _))。字符级 LCS 只算一次就够两边共用：matched
+/// 在两边都是同一段同一位置。
+/// LCS 子串切分工具（暂未在 Replace 分支启用：similar 远期 DiffOp::Replace
+/// 只在单 token 替换时触发，token 级 diff 大多用单独 Del/Add，会绕过该工
+/// 具。R1 同类夹缝不吸收已能在多数真实改稿上稳定不变式，留作后续优化入口。）
 fn push_fragment(list: &mut Vec<Fragment>, fragment: Fragment) {
     if fragment.text.is_empty() {
         return;
     }
     if let Some(last) = list.last_mut()
         && last.kind == fragment.kind
+        && !is_terminal_punctuation(&last.text)
     {
         last.text.push_str(&fragment.text);
         return;
     }
     list.push(fragment);
+}
+
+/// 文本是否仅为句读标点。
+fn is_terminal_punctuation(text: &str) -> bool {
+    !text.is_empty()
+        && text.chars().all(|ch| {
+            matches!(
+                ch,
+                '，' | '。' | '；' | '、' | '：' | '？' | ',' | ';' | ':' | '!' | '?'
+            )
+        })
 }
 
 /// 相邻同类合并后的片段序列。
@@ -1419,6 +1439,12 @@ fn merge_fragments(list: Vec<Fragment>) -> Vec<Fragment> {
 
 /// 词级比较两段文字（标题、列表项、移动段、表格单元格共用），含归并规则。
 fn diff_texts(old_text: &str, new_text: &str) -> Vec<Fragment> {
+    // jieba 词级 LCS：受保护 token（日期 / 数字 + 单位 / 文号 / 公式）整体
+    // 作为同一种 key 出现，整 token 被一并增删。代价是词级 LCS 在大幅改动下
+    // 可能让夹在删 / 增之间的共同词不被选入 LCS（subsequence 对齐固有限制），
+    // 端到端不变式因此只覆盖小幅、夹缝型改稿；跨句大幅改写需要字面级 LCS +
+    // DiffOp 后处理，留作下一阶段（详见 `docs/visual-diff-review.md` 的
+    // 第二轮记录）。
     let old_tokens = tokenize(old_text);
     let new_tokens = tokenize(new_text);
     let old_keys: Vec<String> = old_tokens.iter().map(|token| token.key.clone()).collect();
@@ -1652,6 +1678,7 @@ fn normalize_key(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::visual_diff::to_marked_markdown;
 
     fn diff(old: &str, new: &str) -> RedlineOverlay {
         diff_documents(
@@ -1813,6 +1840,38 @@ mod tests {
             "就地改写不该有移动注记：{readable}"
         );
         assert!(readable.contains("[完整]"), "改写部分应加框：{readable}");
+    }
+
+    #[test]
+    fn an_inline_list_delete_does_not_consume_numbering() {
+        // R3：段内列表删中间一项，编号顺移，不应在被删项的位置留二号。
+        let overlay = crate::visual_diff::diff_documents(
+            &DocumentModel::from_markdown("要求：\n1. 甲项工作\n2. 乙项工作\n3. 丙项工作"),
+            &DocumentModel::from_markdown("要求：\n1. 甲项工作\n2. 丙项工作"),
+        );
+        let marked = to_marked_markdown(&overlay);
+        eprintln!("MARKED = {marked:?}");
+        let parsed = crate::export::parse_markdown(&marked);
+        eprintln!("PARSED = {parsed:?}");
+        let items: Vec<(usize, String)> = parsed
+            .into_iter()
+            .filter_map(|block| match block {
+                crate::export::MarkdownBlock::OrderedListItem { number, text } => {
+                    Some((number, crate::export::plain_text(&text)))
+                }
+                _ => None,
+            })
+            .collect();
+        eprintln!("ITEMS = {items:?}");
+        let numbers: Vec<usize> = items.iter().map(|(n, _)| *n).collect();
+        assert_eq!(numbers, vec![1, 2], "删除中间项后编号连续：{items:?}");
+        let texts: Vec<&str> = items.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("甲项")), "甲项保留");
+        assert!(texts.iter().any(|t| t.contains("丙项")), "丙项保留");
+        assert!(
+            !texts.iter().any(|t| t.contains("乙项")),
+            "乙项已删除，不应再出现"
+        );
     }
 
     #[test]

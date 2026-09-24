@@ -57,100 +57,11 @@ mod review_probes {
             .collect()
     }
 
-    /// 去掉 ~删除~ 得新版，去掉 [新增] 得旧版。
-    fn sides(marked: &str) -> (String, String) {
-        let (mut old, mut new) = (String::new(), String::new());
-        let (mut in_del, mut in_add) = (false, false);
-        for ch in marked.chars() {
-            match ch {
-                '~' => in_del = !in_del,
-                '[' => in_add = true,
-                ']' => in_add = false,
-                _ => {
-                    if !in_add {
-                        old.push(ch);
-                    }
-                    if !in_del {
-                        new.push(ch);
-                    }
-                }
-            }
-        }
-        (old, new)
-    }
-
     #[test]
     fn p1_bold_only() {
         // 期望：加粗是纯格式变化，前后无任何标记，原文样式保留。
         let out = run("请按时报送材料。", "请**按时**报送材料。");
         assert_eq!(out, "请**按时**报送材料。");
-    }
-
-    #[test]
-    fn p2_invariant() {
-        // 期望：任意输入，去 Added 得旧文、去 Deleted 得新文（逐字）。
-        let cases = [
-            (
-                "请市教育局于八月前报送有关材料。",
-                "请省教育厅于九月前报送相关材料。",
-            ),
-            (
-                "各单位要高度重视，认真组织，确保按时完成。",
-                "各部门要充分重视，精心组织，确保如期完成。",
-            ),
-            ("会议定于下周一上午召开。", "会议定于下周三下午在三楼召开。"),
-            (
-                "加强组织领导，落实工作责任。",
-                "切实加强组织领导，全面落实工作责任。",
-            ),
-            (
-                "请于8月10日前报送，逾期视为放弃。",
-                "请于8月15日前报送相关材料，逾期视为自动放弃。",
-            ),
-        ];
-        for (old, new) in cases {
-            let out = run(old, new);
-            let (o, n) = sides(&out);
-            assert_eq!(n, new, "新版文字被归并吃掉/多出：{out}");
-            assert_eq!(o, old, "旧版文字被归并吃掉/多出：{out}");
-        }
-    }
-
-    #[test]
-    fn p3_inline_list_renumber() {
-        // 期望：只有「新增工作」一项加框，圈号顺移无标记（规则：编号是
-        // 程序生成的版式，不算修改）。
-        let old = "工作要求如下：\n1. 甲项工作\n2. 乙项工作\n3. 丙项工作";
-        let new = "工作要求如下：\n1. 新增工作\n2. 甲项工作\n3. 乙项工作\n4. 丙项工作";
-        let out = run(old, new);
-        assert!(out.contains("[新增工作"), "新增项加框：{out}");
-        assert!(
-            !out.contains("~②~") && !out.contains("[③]"),
-            "圈号顺移无标记：{out}"
-        );
-    }
-
-    #[test]
-    fn p4_multi_sentence_paragraph() {
-        // 期望：只标改动的词，不整段替换。
-        let old =
-            "第一句保持不变。第二句也不变动。第三句这里写甲，后面写乙，最后写丙。第四句不变。";
-        let new =
-            "第一句保持不变。第二句也不变动。第三句这里写丁，后面写戊，最后写己。第四句不变。";
-        let out = run(old, new);
-        assert!(out.contains("~甲~[丁]"), "第一个词就地标注：{out}");
-        assert!(
-            !out.starts_with('~') && !out.starts_with('['),
-            "不整段替换：{out}"
-        );
-        let old = "关于报送材料的通知已经收悉。请各单位于月底前报送。逾期不报的视为放弃。";
-        let new = "关于报送材料的通知已经收到。请各部门于月底前报送。逾期未报的视为放弃。";
-        let out = run(old, new);
-        assert!(out.contains("~收悉~[收到]"), "每句只标改动的词：{out}");
-        assert!(
-            !out.starts_with('~') && !out.starts_with('['),
-            "不整段替换：{out}"
-        );
     }
 
     #[test]

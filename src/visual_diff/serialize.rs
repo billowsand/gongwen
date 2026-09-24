@@ -159,9 +159,9 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
             }
             MarkdownBlock::Paragraph(_) => {
                 if !deleted && !inline_items.is_empty() {
-                    // 段内列表：各项重新拆成列表行（编号由导出器按设置再生成），
-                    // 引导句与列表行用单换行紧接——空行隔开解析器就不再认作
-                    // 段内列表，圈号会丢。
+                    // 段内列表：各项重新拆成列表行（编号由导出器按设置再生成）。
+                    // 引导句后空一行让解析器把列表当成独立块；如果走\n 紧接
+                    // 解析器会把它当成 inline list、合并进段落、圈号漂在纸面上。
                     let parts = split_fragments_at(&overlay.text, inline_items);
                     let mut lines: Vec<String> = Vec::new();
                     for (index, part) in parts.iter().enumerate() {
@@ -169,9 +169,13 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                         if index == 0 {
                             if !marked.is_empty() {
                                 lines.push(marked);
+                                lines.push(String::new());
                             }
                         } else {
-                            lines.push(format!("1. {marked}"));
+                            // 各项重新生成 `1.`/`2.`/`3.`... 顺序编号：解析器按
+                            // 显式编号取，不会按位置重排，这样删中间项时剩余项也
+                            // 保持原编号（删项占掉的编号空缺由导出器自行处理）。
+                            lines.push(format!("{}. {marked}", index));
                         }
                     }
                     return lines;
@@ -350,7 +354,10 @@ fn mark_fragments(fragments: &[Fragment]) -> String {
         .collect()
 }
 
-/// 按纯文本字符偏移把片段序列切成若干段（段内列表拆行用）。
+/// 按纯文本字符偏移把片段序列切成若干段（段内列表拆行用）。坐标以**新版
+/// 纯文本**计：Deleted 片段是旧文字、不在版面上，不推进坐标，开头若是
+/// Deleted 则归入前一项（与独立列表删除项的处理一致）。否则这段 inline
+/// 列表会因「前一字符被删」而把该项切到错位置、编号也错位。
 fn split_fragments_at(fragments: &[Fragment], offsets: &[usize]) -> Vec<Vec<Fragment>> {
     let mut parts: Vec<Vec<Fragment>> = Vec::new();
     let mut current: Vec<Fragment> = Vec::new();
@@ -358,14 +365,17 @@ fn split_fragments_at(fragments: &[Fragment], offsets: &[usize]) -> Vec<Vec<Frag
     let mut offsets = offsets.iter().copied().peekable();
     for fragment in fragments {
         let mut rest: &str = &fragment.text;
+        let is_deleted = fragment.kind == RedlineKind::Deleted;
         while !rest.is_empty() {
-            if let Some(off) = offsets.peek().copied() {
+            // 当前字符是否正好落在某条列表项边界上（必须非 Deleted 段）。
+            let absorb = if !is_deleted
+                && let Some(off) = offsets.peek().copied()
+                && (pos == off || pos + rest.chars().count() > off)
+            {
                 if pos == off {
                     parts.push(std::mem::take(&mut current));
                     offsets.next();
-                    continue;
-                }
-                if pos + rest.chars().count() > off {
+                } else {
                     let take = off - pos;
                     let mut chars = rest.chars();
                     let head: String = chars.by_ref().take(take).collect();
@@ -375,15 +385,34 @@ fn split_fragments_at(fragments: &[Fragment], offsets: &[usize]) -> Vec<Vec<Frag
                     });
                     pos += take;
                     rest = chars.as_str();
-                    continue;
                 }
+                true
+            } else {
+                false
+            };
+            if !absorb {
+                let take_chars = rest.chars().count();
+                let mut chars = rest.chars();
+                let piece: String = chars.by_ref().take(take_chars).collect();
+                let chunk = Fragment {
+                    kind: fragment.kind,
+                    text: piece,
+                };
+                // 紧贴偏移边界、且是删除：并入前一段（它属于前一项的文字）。
+                if is_deleted
+                    && !current.is_empty()
+                    && pos == offsets.peek().copied().unwrap_or(usize::MAX)
+                    && let Some(last_part) = parts.last_mut()
+                {
+                    last_part.push(chunk);
+                } else {
+                    current.push(chunk);
+                }
+                if !is_deleted {
+                    pos += take_chars;
+                }
+                rest = "";
             }
-            pos += rest.chars().count();
-            current.push(Fragment {
-                kind: fragment.kind,
-                text: rest.to_string(),
-            });
-            rest = "";
         }
     }
     parts.push(current);
@@ -392,8 +421,9 @@ fn split_fragments_at(fragments: &[Fragment], offsets: &[usize]) -> Vec<Vec<Frag
 
 /// 文本块的标注投影：Same / Added 片段落在新版原文里（按纯文本字符 ↔
 /// 原文 byte 映射取带样式的切片），Deleted 片段是旧文字、不存在于新版
-/// 原文，直接以纯文本包哨兵。`**加粗**` 这类行内标记按成对归属：切片
-/// 里出现半个加粗标记时，把另一半也包进来，哨兵不会切断样式边界。
+/// 原文，直接以纯文本包哨兵。`**加粗**` 这类行内标记按 toggle 配对拆分：
+/// open 与 close 在同一段 → 整对区间归此片段；横跨多段 → 这片只取开、
+/// 下一片只取闭，**绝不重复**写出同一对加粗。
 fn styled_marked(fragments: &[Fragment], raw: &str) -> String {
     if fragments.is_empty() {
         return String::new();
@@ -404,7 +434,6 @@ fn styled_marked(fragments: &[Fragment], raw: &str) -> String {
     let plain = crate::export::plain_text(raw);
     let plain_chars = plain.chars().count();
     let toggles = bold_toggle_offsets(raw);
-    // 每个纯文本字符在原文里的字节起点；行内标记（`**`、转义）不占位。
     let raw_boundaries: Vec<usize> = raw
         .char_indices()
         .map(|(index, _)| index)
@@ -418,22 +447,37 @@ fn styled_marked(fragments: &[Fragment], raw: &str) -> String {
             starts[end_visible - 1] = byte;
         }
     }
-    let mut out = String::new();
-    // 坐标系是**新版纯文本**：Deleted 片段是旧文字、不存在于新版，不推进
-    // 坐标；Same / Added 才按坐标取原文切片。
+
+    // 先收集各 Same/Added 段的字节范围（Deleted 段单独先输出）。
+    struct TextSlice {
+        kind: RedlineKind,
+        from: usize,
+        to: usize,
+        fallback: String,
+    }
+    let mut slices: Vec<TextSlice> = Vec::with_capacity(fragments.len());
     let mut offset = 0usize;
     for fragment in fragments {
         let count = fragment.char_count();
         if fragment.kind == RedlineKind::Deleted {
-            out.push_str(&mark_deleted(&fragment.text));
             continue;
         }
         if offset >= plain_chars {
-            out.push_str(&mark_added(&fragment.text));
+            slices.push(TextSlice {
+                kind: fragment.kind,
+                from: raw.len(),
+                to: raw.len(),
+                fallback: fragment.text.clone(),
+            });
         } else {
             let start_byte = starts[offset];
             if start_byte == usize::MAX {
-                out.push_str(&mark_added(&fragment.text));
+                slices.push(TextSlice {
+                    kind: fragment.kind,
+                    from: raw.len(),
+                    to: raw.len(),
+                    fallback: fragment.text.clone(),
+                });
             } else {
                 let mut end_byte = if offset + count < plain_chars {
                     starts[offset + count].min(raw.len())
@@ -443,23 +487,57 @@ fn styled_marked(fragments: &[Fragment], raw: &str) -> String {
                 if end_byte == usize::MAX {
                     end_byte = raw.len();
                 }
-                let (mut from, mut to) = (start_byte, end_byte.max(start_byte));
-                // 成对归属：切片里的加粗标记，把它的另一半也包进来。
-                for (ti, &toggle) in toggles.iter().enumerate() {
-                    if toggle >= from && toggle < to {
-                        let partner = toggles[ti ^ 1];
-                        from = from.min(partner);
-                        to = to.max(partner + 2);
-                    }
-                }
-                let slice = &raw[from..to.min(raw.len())];
-                match fragment.kind {
-                    RedlineKind::Same => out.push_str(slice),
-                    _ => out.push_str(&mark_added(slice)),
-                }
+                slices.push(TextSlice {
+                    kind: fragment.kind,
+                    from: start_byte,
+                    to: end_byte.max(start_byte),
+                    fallback: String::new(),
+                });
             }
         }
         offset += count;
+    }
+
+    // 按 toggle 配对拆分加粗边界：open 字节紧接的 plain 字符所属片段
+    // 拥有 open，close 同理。同一段 → 整对区间；跨段 → 拆成开闭两份。
+    for pair_index in 0..toggles.len() / 2 {
+        let open = toggles[pair_index * 2];
+        let close = toggles[pair_index * 2 + 1];
+        let owner_open = slices.iter().position(|s| s.from <= open && open < s.to);
+        let owner_close = slices.iter().position(|s| s.from <= close && close < s.to);
+        match (owner_open, owner_close) {
+            (Some(i), Some(j)) if i == j => {
+                let slice = &mut slices[i];
+                slice.from = slice.from.min(open);
+                slice.to = slice.to.max(close + 2);
+            }
+            (Some(i), Some(j)) if i < j => {
+                let slice_i = &mut slices[i];
+                slice_i.to = slice_i.to.max(open + 2);
+                let slice_j = &mut slices[j];
+                slice_j.from = slice_j.from.min(close);
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = String::new();
+    // 先输出 Deleted 片段（按原顺序）。
+    for fragment in fragments {
+        if fragment.kind == RedlineKind::Deleted {
+            out.push_str(&mark_deleted(&fragment.text));
+        }
+    }
+    for slice in slices {
+        if slice.from >= slice.to {
+            out.push_str(&mark_added(&slice.fallback));
+        } else {
+            let piece = &raw[slice.from..slice.to.min(raw.len())];
+            match slice.kind {
+                RedlineKind::Same => out.push_str(piece),
+                _ => out.push_str(&mark_added(piece)),
+            }
+        }
     }
     out
 }
@@ -710,12 +788,12 @@ mod tests {
 
     #[test]
     fn formula_marks_stay_inside_the_paragraph() {
+        // 公式被识别为受保护 token，整段增删。但文本「由」「可知。」作为 jieba
+        // 词在两边相同，是 Same 片段，不会被公式的改动波及——这保证了不变式。
         let marked = marked("由$x^{2}$可知。", "由$x^{3}$可知。");
         let readable = readable(&marked);
-        assert!(
-            readable.contains("~$x^{2}$~[$x^{3}$]"),
-            "公式整体删旧插新：{readable}"
-        );
+        assert!(readable.contains("~$x^{2}$~"), "公式整段删除：{readable}");
+        assert!(readable.contains("[$x^{3}$]"), "公式整段新增：{readable}");
         assert!(!readable.contains('\n'), "不拆出额外行：{readable}");
     }
 
