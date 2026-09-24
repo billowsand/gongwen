@@ -594,7 +594,7 @@ pub fn rebuild_parents_from_codes(vocab: &mut [VocabularyEntry]) {
     }
 }
 
-/// 词库中出现过的机关代字，按单位的层级顺序去重。
+/// 词库中出现过的发函代字，按单位的层级顺序去重。
 pub fn department_codes(vocab: &[VocabularyEntry]) -> Vec<String> {
     let mut codes: Vec<String> = Vec::new();
     for entry in vocab
@@ -602,6 +602,21 @@ pub fn department_codes(vocab: &[VocabularyEntry]) -> Vec<String> {
         .filter(|entry| entry.category == VocabularyCategory::Unit)
     {
         let code = entry.department_code.trim();
+        if !code.is_empty() && !codes.iter().any(|existing| existing == code) {
+            codes.push(code.to_string());
+        }
+    }
+    codes
+}
+
+/// 词库中出现过的呈批代字，按单位的层级顺序去重。
+pub fn approval_department_codes(vocab: &[VocabularyEntry]) -> Vec<String> {
+    let mut codes = Vec::new();
+    for entry in vocab
+        .iter()
+        .filter(|entry| entry.category == VocabularyCategory::Unit)
+    {
+        let code = entry.approval_department_code.trim();
         if !code.is_empty() && !codes.iter().any(|existing| existing == code) {
             codes.push(code.to_string());
         }
@@ -1108,15 +1123,28 @@ impl<'a> UnitDisplay<'a> {
             .join("，")
     }
 
-    /// 单位绑定的机关代字。处室通常不自编代字，用的是所在机关的代字，
+    /// 单位绑定的发函代字。处室通常不自编代字，用的是所在机关的代字，
     /// 因此本级没有绑定时逐级向上找；整棵链都没有绑定才返回空串。
     pub fn department_code_of(&self, key: &str) -> String {
+        self.department_code_of_kind(key, false)
+    }
+
+    /// 红头呈批件使用的代字，沿单位层级继承，与发函代字分别维护。
+    pub fn approval_department_code_of(&self, key: &str) -> String {
+        self.department_code_of_kind(key, true)
+    }
+
+    fn department_code_of_kind(&self, key: &str, approval: bool) -> String {
         let mut current = key.trim().to_string();
         for _ in 0..MAX_DEPTH {
             let Some(entry) = self.find(&current) else {
                 return String::new();
             };
-            let code = entry.department_code.trim();
+            let code = if approval {
+                entry.approval_department_code.trim()
+            } else {
+                entry.department_code.trim()
+            };
             if !code.is_empty() {
                 return code.to_string();
             }
@@ -1665,6 +1693,20 @@ mod tests {
         list[0].department_code = "网信函".into();
         list[3].department_code = "宣函".into();
         assert_eq!(department_codes(&list), ["网信函", "宣函"]);
+    }
+
+    #[test]
+    fn approval_and_letter_codes_are_independent() {
+        let mut list = vocab();
+        list[0].department_code = "网信函".into();
+        list[0].approval_department_code = "网信呈".into();
+        list[1].approval_department_code = "新舆呈".into();
+        assert_eq!(department_codes(&list), ["网信函"]);
+        assert_eq!(approval_department_codes(&list), ["网信呈", "新舆呈"]);
+        let display = UnitDisplay::new(&list);
+        assert_eq!(display.department_code_of("新闻舆论处"), "网信函");
+        assert_eq!(display.approval_department_code_of("新闻舆论处"), "新舆呈");
+        assert_eq!(display.approval_department_code_of("中央网信办"), "网信呈");
     }
 
     #[test]

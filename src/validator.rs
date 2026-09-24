@@ -634,7 +634,7 @@ fn validate_metadata(
                 vocabulary,
                 warnings,
             );
-            check_department_code(&profile.department_code, vocabulary, warnings);
+            check_department_code(&profile.department_code, vocabulary, warnings, false);
             check_units(
                 &profile.recipient,
                 &[VocabularyCategory::Unit],
@@ -752,7 +752,7 @@ fn validate_metadata(
                 vocabulary,
                 warnings,
             );
-            check_department_code(&profile.department_code, vocabulary, warnings);
+            check_department_code(&profile.department_code, vocabulary, warnings, true);
             check_units(
                 &profile.reporting_leaders,
                 &[VocabularyCategory::Person],
@@ -814,17 +814,31 @@ fn check_units(
 }
 
 /// 机关代字绑定在单位上。词库里已经有单位绑定了代字时，才提示表单中出现的陌生代字。
-fn check_department_code(value: &str, vocabulary: &[VocabularyEntry], warnings: &mut Vec<String>) {
+fn check_department_code(
+    value: &str,
+    vocabulary: &[VocabularyEntry],
+    warnings: &mut Vec<String>,
+    approval: bool,
+) {
     let value = value.trim();
     if value.is_empty() {
         return;
     }
-    let known = crate::units::department_codes(vocabulary);
+    let known = if approval {
+        crate::units::approval_department_codes(vocabulary)
+    } else {
+        crate::units::department_codes(vocabulary)
+    };
     if known.is_empty() || known.iter().any(|code| code == value) {
         return;
     }
+    let kind = if approval {
+        "呈批代字"
+    } else {
+        "发函代字"
+    };
     warnings.push(format!(
-        "机关代字“{value}”没有绑定到任何单位，请核对或在标准词库中补入"
+        "{kind}“{value}”没有绑定到任何单位，请核对或在标准词库中补入"
     ));
 }
 

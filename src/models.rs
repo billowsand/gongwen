@@ -852,8 +852,10 @@ pub struct VocabularyEntry {
     pub unit: String,
     /// 人员专属：允许该人员在公函版记中担任所属单位各级上级单位的承办联系人。
     pub can_handle_parent_unit: bool,
-    /// 单位专属：绑定的机关代字，选中该单位作发文单位时自动带出。
+    /// 单位专属：发函代字。保留旧字段名以兼容已有词库，公函选中发文单位时自动带出。
     pub department_code: String,
+    /// 单位专属：呈批代字，红头呈批件选中发文单位时自动带出。
+    pub approval_department_code: String,
     /// 单位专属：以该单位作为公函落款（联合发文时为主发文单位）时是否自动标注“（代章）”。
     /// 仅公函盖章；电话通知等其他文种不适用，一律不标注。
     pub seal_on_behalf: bool,

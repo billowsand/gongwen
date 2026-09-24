@@ -282,7 +282,7 @@ impl GongwenApp {
             ui.separator();
             ui.add(
                 egui::TextEdit::singleline(&mut self.vocabulary_filter)
-                    .hint_text("搜索单位、简称、机关代字、姓名或电话")
+                    .hint_text("搜索单位、简称、呈批或发函代字、姓名或电话")
                     .desired_width(280.0),
             );
             if !self.vocabulary_filter.is_empty()
@@ -859,11 +859,14 @@ impl GongwenApp {
             let owner_code = entry.unit.trim().to_string();
             let selected = self.vocabulary_selected == Some(id);
             let collapsed = self.vocabulary_collapsed.contains(&id);
-            // 单位层级只显示机关代字；人员显示职务、电话及承办上级单位权限。
+            // 单位层级并列显示两类代字；人员显示职务、电话及承办权限。
             let detail = if row.is_unit {
                 let mut parts = Vec::new();
                 if !entry.department_code.trim().is_empty() {
-                    parts.push(format!("代字 {}", entry.department_code.trim()));
+                    parts.push(format!("函 {}", entry.department_code.trim()));
+                }
+                if !entry.approval_department_code.trim().is_empty() {
+                    parts.push(format!("呈 {}", entry.approval_department_code.trim()));
                 }
                 if entry.seal_on_behalf {
                     parts.push("代章".to_string());
@@ -1131,203 +1134,232 @@ impl GongwenApp {
         let before = self.config.vocabulary[index].clone();
 
         let mut structure_changed = false;
-        let width = (ui.available_width() - 96.0).clamp(180.0, 420.0);
+        let width = (ui.available_width() - 170.0).clamp(180.0, 520.0);
         let is_unit = self.config.vocabulary[index].category == VocabularyCategory::Unit;
         let display = UnitDisplay::new(&self.config.vocabulary);
         let heading = if is_unit {
             display.full_name(&self.config.vocabulary[index].code)
         } else {
-            let unit = self.config.vocabulary[index].unit.trim().to_string();
-            if unit.is_empty() {
-                self.config.vocabulary[index].canonical.trim().to_string()
+            self.config.vocabulary[index].canonical.trim().to_string()
+        };
+        let subtitle = if is_unit {
+            "以上是本单位在公文中展开后的全称。".to_string()
+        } else {
+            let entry = &self.config.vocabulary[index];
+            let unit = if entry.unit.trim().is_empty() {
+                "未归属单位".to_string()
             } else {
-                format!(
-                    "{} · {}",
-                    self.config.vocabulary[index].canonical.trim(),
-                    display.full_name(&unit)
-                )
+                display.full_name(&entry.unit)
+            };
+            if entry.position.trim().is_empty() {
+                unit
+            } else {
+                format!("{} · {unit}", entry.position.trim())
             }
         };
 
-        ui.horizontal(|ui| {
-            ui.strong(if is_unit { "单位" } else { "人员" })
-                .on_hover_text("改动会立即反映在起草页；点击右上角“保存更改”写入本机配置。");
-            if is_unit {
-                ui.label("层级编码");
-                let prev_code = self.config.vocabulary[index].code.clone();
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.config.vocabulary[index].code)
-                        .hint_text("留空由系统按位置自动补；前缀即上级编码")
-                        .desired_width(160.0),
-                );
-                if resp.changed() {
-                    self.config.vocabulary[index].code =
-                        self.config.vocabulary[index].code.trim().to_string();
-                    structure_changed = true;
-                }
-                if resp.lost_focus() && self.config.vocabulary[index].code != prev_code {
-                    self.renormalize_vocabulary();
-                }
-                if ui
-                    .button("整理")
-                    .on_hover_text("按编码重新建上下级并排序")
-                    .clicked()
-                {
-                    self.renormalize_vocabulary();
-                    structure_changed = true;
-                }
-                // 编码重复红字提示。
-                let code = self.config.vocabulary[index].code.trim();
-                if !code.is_empty() {
-                    let dup = self.config.vocabulary.iter().enumerate().any(|(i, e)| {
-                        i != index
-                            && e.category == VocabularyCategory::Unit
-                            && e.code.trim() == code
-                    });
-                    if dup {
-                        ui.colored_label(warn(), "编码重复");
-                    }
-                }
-            } else {
-                ui.weak(format!("单位内编码 {}", self.config.vocabulary[index].code));
-            }
-        });
-        ui.add(egui::Label::new(egui::RichText::new(&heading).heading()).wrap());
-        if is_unit {
-            ui.weak("以上是本单位在公文中展开后的全称。");
-        }
-        ui.add_space(8.0);
-
-        theme::card().show(ui, |ui| {
-            ui.strong(if is_unit {
-                "单位资料"
-            } else {
-                "人员资料"
-            });
-            ui.weak(if is_unit {
-                "名称与层级用于组织结构；简称、外部名称和机关代字用于自动成文。"
-            } else {
-                "姓名、职务与电话分开维护，归属单位决定联系人和领导筛选范围。"
-            });
-            ui.add_space(8.0);
-            if is_unit {
-                structure_changed |= self.vocabulary_unit_editor(ui, index, width);
-            } else {
-                structure_changed |= self.vocabulary_person_editor(ui, index, width);
-            }
-        });
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
-
-        let canonical = self.config.vocabulary[index].canonical.trim().to_string();
-        let unit_code = self.config.vocabulary[index].code.trim().to_string();
-        if is_unit {
-            let children = units::child_units(&self.config.vocabulary, &unit_code).len();
-            let people = units::unit_people(&self.config.vocabulary, &unit_code).len();
-            ui.weak(format!("下属 {children} 个单位 · {people} 名人员"));
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::FolderPlus, "下级单位"))
-                    .on_hover_text("新单位的上级自动设为本单位")
-                    .clicked()
-                {
-                    *action = Some(VocabAction::AddUnit {
-                        parent: unit_code.clone(),
-                        position: SiblingPosition::Last,
-                    });
-                }
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::UserPlus, "人员"))
-                    .on_hover_text("新人员自动归属本单位")
-                    .clicked()
-                {
-                    *action = Some(VocabAction::AddPerson {
-                        unit: unit_code.clone(),
-                        position: SiblingPosition::Last,
-                    });
-                }
-            });
-            ui.add_space(6.0);
-        }
-
-        if ui
-            .add(theme::icon_text_button(
-                theme::Icon::ArrowUpDown,
-                "精确移动",
-            ))
-            .on_hover_text(if is_unit {
-                "选择新的上级单位，并精确放到某个同级单位之前或之后"
-            } else {
-                "选择新的所属单位，并精确放到某个人员之前或之后"
-            })
-            .clicked()
-        {
-            self.vocabulary_move = Some(VocabularyMoveDraft {
-                id,
-                destination: if is_unit {
-                    self.config.vocabulary[index].parent.clone()
-                } else {
-                    self.config.vocabulary[index].unit.clone()
-                },
-                position: SiblingPosition::Last,
-            });
-        }
-        ui.add_space(6.0);
-
-        let doomed = self.vocabulary_delete_confirm == Some(id);
-        if doomed {
-            let (units_count, people_count) = if is_unit {
-                let indices = units::subtree_indices(&self.config.vocabulary, index);
-                let units_count = indices
-                    .iter()
-                    .filter(|i| self.config.vocabulary[**i].category == VocabularyCategory::Unit)
-                    .count();
-                (units_count, indices.len() - units_count)
-            } else {
-                (0, 1)
-            };
-            ui.group(|ui| {
-                ui.colored_label(
-                    warn(),
-                    if is_unit {
-                        format!(
-                            "将删除本单位及其下级：共 {units_count} 个单位、{people_count} 名人员"
-                        )
-                    } else {
-                        format!("将删除人员“{canonical}”")
-                    },
-                );
+        theme::card()
+            .inner_margin(egui::Margin::same(16))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.visuals_mut().striped = false;
                 ui.horizontal(|ui| {
+                    egui::Frame::new()
+                        .fill(theme::accent_soft())
+                        .corner_radius(egui::CornerRadius::same(22))
+                        .inner_margin(egui::Margin::symmetric(12, 7))
+                        .show(ui, |ui| {
+                            let mark = if is_unit {
+                                "单".to_string()
+                            } else {
+                                self.config.vocabulary[index]
+                                    .canonical
+                                    .chars()
+                                    .next()
+                                    .unwrap_or('人')
+                                    .to_string()
+                            };
+                            ui.label(
+                                egui::RichText::new(mark)
+                                    .size(24.0)
+                                    .strong()
+                                    .color(theme::accent()),
+                            );
+                        });
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(if is_unit { "单位" } else { "人员" })
+                                .on_hover_text("改动会立即反映在起草页；点击右上角“保存更改”写入本机配置。");
+                            if is_unit {
+                                ui.label("层级编码");
+                                let prev_code = self.config.vocabulary[index].code.clone();
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut self.config.vocabulary[index].code)
+                                        .hint_text("留空由系统按位置自动补；前缀即上级编码")
+                                        .desired_width(160.0),
+                                );
+                                if resp.changed() {
+                                    self.config.vocabulary[index].code =
+                                        self.config.vocabulary[index].code.trim().to_string();
+                                    structure_changed = true;
+                                }
+                                if resp.lost_focus() && self.config.vocabulary[index].code != prev_code {
+                                    self.renormalize_vocabulary();
+                                }
+                                if ui
+                                    .button("整理")
+                                    .on_hover_text("按编码重新建上下级并排序")
+                                    .clicked()
+                                {
+                                    self.renormalize_vocabulary();
+                                    structure_changed = true;
+                                }
+                                // 编码重复红字提示。
+                                let code = self.config.vocabulary[index].code.trim();
+                                if !code.is_empty() {
+                                    let dup = self.config.vocabulary.iter().enumerate().any(|(i, e)| {
+                                        i != index
+                                            && e.category == VocabularyCategory::Unit
+                                            && e.code.trim() == code
+                                    });
+                                    if dup {
+                                        ui.colored_label(warn(), "编码重复");
+                                    }
+                                }
+                            } else {
+                                ui.weak(format!("单位内编码 {}", self.config.vocabulary[index].code));
+                            }
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&heading).size(22.0).strong(),
+                            )
+                            .wrap(),
+                        );
+                        ui.weak(&subtitle);
+                    });
+                });
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(10.0);
+                if is_unit {
+                    structure_changed |= self.vocabulary_unit_editor(ui, index, width);
+                } else {
+                    structure_changed |= self.vocabulary_person_editor(ui, index, width);
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                let canonical = self.config.vocabulary[index].canonical.trim().to_string();
+                let unit_code = self.config.vocabulary[index].code.trim().to_string();
+                if is_unit {
+                    let children = units::child_units(&self.config.vocabulary, &unit_code).len();
+                    let people = units::unit_people(&self.config.vocabulary, &unit_code).len();
+                    ui.weak(format!("下属 {children} 个单位 · {people} 名人员"));
+                    ui.add_space(8.0);
+                }
+
+                ui.horizontal_wrapped(|ui| {
+                    if is_unit {
+                        if ui
+                            .add(theme::icon_text_button(theme::Icon::FolderPlus, "下级单位"))
+                            .on_hover_text("新单位的上级自动设为本单位")
+                            .clicked()
+                        {
+                            *action = Some(VocabAction::AddUnit {
+                                parent: unit_code.clone(),
+                                position: SiblingPosition::Last,
+                            });
+                        }
+                        if ui
+                            .add(theme::icon_text_button(theme::Icon::UserPlus, "人员"))
+                            .on_hover_text("新人员自动归属本单位")
+                            .clicked()
+                        {
+                            *action = Some(VocabAction::AddPerson {
+                                unit: unit_code.clone(),
+                                position: SiblingPosition::Last,
+                            });
+                        }
+                    }
                     if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("确认删除").color(warn()),
+                        .add(theme::icon_text_button(
+                            theme::Icon::ArrowUpDown,
+                            "精确移动",
                         ))
+                        .on_hover_text(if is_unit {
+                            "选择新的上级单位，并精确放到某个同级单位之前或之后"
+                        } else {
+                            "选择新的所属单位，并精确放到某个人员之前或之后"
+                        })
                         .clicked()
                     {
-                        *action = Some(VocabAction::Delete(id));
+                        self.vocabulary_move = Some(VocabularyMoveDraft {
+                            id,
+                            destination: if is_unit {
+                                self.config.vocabulary[index].parent.clone()
+                            } else {
+                                self.config.vocabulary[index].unit.clone()
+                            },
+                            position: SiblingPosition::Last,
+                        });
                     }
-                    if ui.button("取消").clicked() {
-                        self.vocabulary_delete_confirm = None;
+                    ui.add_space(12.0);
+                    if self.vocabulary_delete_confirm != Some(id)
+                        && ui
+                            .add(theme::warning_icon_button(
+                                theme::Icon::Trash,
+                                if is_unit { "删除单位" } else { "删除人员" },
+                            ))
+                            .clicked()
+                    {
+                        self.vocabulary_delete_confirm = Some(id);
                     }
                 });
+
+                if self.vocabulary_delete_confirm == Some(id) {
+                    ui.add_space(8.0);
+                    let (units_count, people_count) = if is_unit {
+                        let indices = units::subtree_indices(&self.config.vocabulary, index);
+                        let units_count = indices
+                            .iter()
+                            .filter(|i| {
+                                self.config.vocabulary[**i].category == VocabularyCategory::Unit
+                            })
+                            .count();
+                        (units_count, indices.len() - units_count)
+                    } else {
+                        (0, 1)
+                    };
+                    ui.group(|ui| {
+                        ui.colored_label(
+                            warn(),
+                            if is_unit {
+                                format!(
+                                    "将删除本单位及其下级：共 {units_count} 个单位、{people_count} 名人员"
+                                )
+                            } else {
+                                format!("将删除人员“{canonical}”")
+                            },
+                        );
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(
+                                    egui::RichText::new("确认删除").color(warn()),
+                                ))
+                                .clicked()
+                            {
+                                *action = Some(VocabAction::Delete(id));
+                            }
+                            if ui.button("取消").clicked() {
+                                self.vocabulary_delete_confirm = None;
+                            }
+                        });
+                    });
+                }
             });
-        } else if ui
-            .add(theme::warning_icon_button(
-                theme::Icon::Trash,
-                if is_unit {
-                    "删除单位"
-                } else {
-                    "删除人员"
-                },
-            ))
-            .clicked()
-        {
-            self.vocabulary_delete_confirm = Some(id);
-        }
-        ui.add_space(4.0);
         if self
             .config
             .vocabulary
@@ -1382,7 +1414,10 @@ impl GongwenApp {
         let mut selected_parent = previous_parent.clone();
         let entry_id = self.config.vocabulary[index].id;
 
+        ui.strong("组织关系");
+        ui.add_space(8.0);
         egui::Grid::new(("unit_editor", index))
+            .striped(false)
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
@@ -1418,7 +1453,17 @@ impl GongwenApp {
                         }
                     });
                 ui.end_row();
-
+            });
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
+        ui.strong("公文用名");
+        ui.add_space(8.0);
+        egui::Grid::new(("unit_document_editor", index))
+            .striped(false)
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
                 ui.label("简称");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.config.vocabulary[index].abbr)
@@ -1435,11 +1480,21 @@ impl GongwenApp {
                 );
                 ui.end_row();
 
-                ui.label("机关代字");
+                ui.label("发函代字");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.config.vocabulary[index].department_code)
-                        .hint_text("如“某教函”；选中本单位发文时自动带出")
+                        .hint_text("如“某教函”；用于公函文号")
                         .desired_width(width),
+                );
+                ui.end_row();
+
+                ui.label("呈批代字");
+                ui.add(
+                    egui::TextEdit::singleline(
+                        &mut self.config.vocabulary[index].approval_department_code,
+                    )
+                    .hint_text("如“某教呈”；用于红头呈批件文号")
+                    .desired_width(width),
                 );
                 ui.end_row();
 
@@ -1453,6 +1508,17 @@ impl GongwenApp {
                 );
                 ui.end_row();
 
+            });
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
+        ui.strong("检索与备注");
+        ui.add_space(8.0);
+        egui::Grid::new(("unit_search_editor", index))
+            .striped(false)
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
                 ui.label("别名 / 常见错写");
                 let mut aliases = self.config.vocabulary[index].aliases.join("、");
                 if ui
@@ -1532,7 +1598,10 @@ impl GongwenApp {
         let mut selected_unit = previous_unit.clone();
         let entry_id = self.config.vocabulary[index].id;
 
+        ui.strong("任职与联系");
+        ui.add_space(8.0);
         egui::Grid::new(("person_editor", index))
+            .striped(false)
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
@@ -1581,14 +1650,34 @@ impl GongwenApp {
                         }
                     });
                 ui.end_row();
-
+            });
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
+        ui.strong("公文联系人");
+        ui.add_space(8.0);
+        egui::Grid::new(("person_contact_editor", index))
+            .striped(false)
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
                 ui.label("承办上级单位");
                 ui.checkbox(
                     &mut self.config.vocabulary[index].can_handle_parent_unit,
                     "可在上级单位的公函版记中作为联系人",
                 );
                 ui.end_row();
-
+            });
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
+        ui.strong("检索与备注");
+        ui.add_space(8.0);
+        egui::Grid::new(("person_search_editor", index))
+            .striped(false)
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
                 ui.label("别名 / 常见错写");
                 let mut aliases = self.config.vocabulary[index].aliases.join("、");
                 if ui

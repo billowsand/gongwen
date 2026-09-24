@@ -467,6 +467,7 @@ impl LexiconStore {
             names.extend(entry.aliases.iter().cloned());
             if entry.category == VocabularyCategory::Unit {
                 names.push(entry.department_code.clone());
+                names.push(entry.approval_department_code.clone());
             }
             for name in names {
                 let name = name.trim().to_string();

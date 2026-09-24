@@ -1010,8 +1010,11 @@ impl DraftPage<'_> {
             && self.doc.draft.profile.correspondence_scope == CorrespondenceScope::External;
         let unit_pool = self.unit_pool(external_names);
         let units = layout_options(&unit_pool, None);
-        // 机关代字是单位的属性，候选项就是词库里各单位绑定过的代字。
-        let department_codes = plain_options(&units::department_codes(&self.config.vocabulary));
+        // 公函与红头呈批件分别使用各自的代字，不混用候选项。
+        let letter_department_codes =
+            plain_options(&units::department_codes(&self.config.vocabulary));
+        let approval_department_codes =
+            plain_options(&units::approval_department_codes(&self.config.vocabulary));
         // 规格 §2.4：一个单位只能占发文、主送、抄送三者之一，勾选时互相禁用。
         let picked_as_recipient = split_units(&self.doc.draft.profile.recipient);
         let picked_as_copy = split_units(&self.doc.draft.profile.copies_to);
@@ -1294,7 +1297,7 @@ impl DraftPage<'_> {
                                     field_width,
                                     "使用标准全称",
                                 );
-                                // 规格 §2.1：单位绑定机关代字时自动带出。
+                                // 规格 §2.1：单位绑定发函代字时自动带出。
                                 if changed
                                     && self.doc.draft.profile.department_code.trim().is_empty()
                                 {
@@ -1348,7 +1351,7 @@ impl DraftPage<'_> {
                             document_number_row(
                                 ui,
                                 &mut self.doc.draft.profile,
-                                &department_codes,
+                                &letter_department_codes,
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
@@ -1393,7 +1396,7 @@ impl DraftPage<'_> {
                             );
                             if changed && self.doc.draft.profile.department_code.trim().is_empty() {
                                 let code = UnitDisplay::new(&self.config.vocabulary)
-                                    .department_code_of(&self.doc.draft.profile.issuing_unit);
+                                    .approval_department_code_of(&self.doc.draft.profile.issuing_unit);
                                 if !code.is_empty() {
                                     self.doc.draft.profile.department_code = code;
                                 }
@@ -1404,7 +1407,7 @@ impl DraftPage<'_> {
                             document_number_row(
                                 ui,
                                 &mut self.doc.draft.profile,
-                                &department_codes,
+                                &approval_department_codes,
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,

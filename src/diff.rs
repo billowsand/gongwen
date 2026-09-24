@@ -652,7 +652,16 @@ pub fn profile_changes(a: &TemplateProfile, b: &TemplateProfile) -> Vec<FieldCha
         &a.main_issuing_unit,
         &b.main_issuing_unit,
     );
-    field(&mut out, "机关代字", &a.department_code, &b.department_code);
+    field(
+        &mut out,
+        if a.kind == TemplateKind::RedHeadApproval {
+            "呈批代字"
+        } else {
+            "发函代字"
+        },
+        &a.department_code,
+        &b.department_code,
+    );
     field(&mut out, "发文年份", &a.document_year, &b.document_year);
     field(&mut out, "主送", &a.recipient, &b.recipient);
     field(&mut out, "抄送", &a.copies_to, &b.copies_to);
@@ -792,7 +801,13 @@ fn vocab_field_changes(a: &VocabularyEntry, b: &VocabularyEntry) -> Vec<FieldCha
     field(&mut out, "全称", &a.canonical, &b.canonical);
     field(&mut out, "简称", &a.abbr, &b.abbr);
     field(&mut out, "外部名称", &a.external_name, &b.external_name);
-    field(&mut out, "机关代字", &a.department_code, &b.department_code);
+    field(&mut out, "发函代字", &a.department_code, &b.department_code);
+    field(
+        &mut out,
+        "呈批代字",
+        &a.approval_department_code,
+        &b.approval_department_code,
+    );
     field(
         &mut out,
         "是否代章",

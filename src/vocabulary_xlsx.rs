@@ -1,7 +1,7 @@
 //! 标准词库的 xlsx 交换格式。
 //!
 //! 两个 Sheet：`单位` / `人员`。模板内置冻结首行、表头加粗、表头行高、数据验证下拉、
-//! 工作表保护（解锁 A–H 单元格，禁列行增删）。导入做硬拒绝：任何冲突整次失败，不写入。
+//! 工作表保护（禁列行增删）。导入做硬拒绝：任何冲突整次失败，不写入。
 //!
 //! 编码权威：用户填的 `code` 字面值原样保留，按编码前缀还原上下级；空 `code` 才由软件补。
 //! 与 `units::normalize_preserving_codes` 行为一致。
@@ -36,10 +36,11 @@ const UNIT_HEADERS: &[&str] = &[
     "单位名称",
     "外部名称",
     "简称",
-    "机关代字",
+    "发函代字",
     "是否代章",
     "别名/常见错写",
     "备注",
+    "呈批代字",
 ];
 
 const PERSON_HEADERS: &[&str] = &[
@@ -53,7 +54,7 @@ const PERSON_HEADERS: &[&str] = &[
     "备注",
 ];
 
-const UNIT_COLUMN_WIDTHS: &[f64] = &[14.0, 28.0, 28.0, 16.0, 12.0, 10.0, 28.0, 28.0];
+const UNIT_COLUMN_WIDTHS: &[f64] = &[14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0];
 const PERSON_COLUMN_WIDTHS: &[f64] = &[14.0, 10.0, 18.0, 14.0, 16.0, 12.0, 28.0, 28.0];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +121,7 @@ fn parse_only(path: &Path) -> Result<ImportReport> {
 
     let mut entries = Vec::new();
 
-    let unit_rows = read_sheet(&mut workbook, UNIT_SHEET)?;
+    let unit_rows = read_sheet(&mut workbook, UNIT_SHEET, UNIT_HEADERS.len())?;
     for (offset, row) in unit_rows.iter().enumerate() {
         if row.iter().all(|cell| cell.trim().is_empty()) {
             continue;
@@ -128,7 +129,7 @@ fn parse_only(path: &Path) -> Result<ImportReport> {
         entries.push(parse_unit_row(row, offset + 2)?);
     }
 
-    let person_rows = read_sheet(&mut workbook, PERSON_SHEET)?;
+    let person_rows = read_sheet(&mut workbook, PERSON_SHEET, PERSON_HEADERS.len())?;
     for (offset, row) in person_rows.iter().enumerate() {
         if row.iter().all(|cell| cell.trim().is_empty()) {
             continue;
@@ -150,17 +151,21 @@ fn parse_only(path: &Path) -> Result<ImportReport> {
     })
 }
 
-fn read_sheet(workbook: &mut Xlsx<BufReader<File>>, sheet_name: &str) -> Result<Vec<Vec<String>>> {
+fn read_sheet(
+    workbook: &mut Xlsx<BufReader<File>>,
+    sheet_name: &str,
+    width: usize,
+) -> Result<Vec<Vec<String>>> {
     let range = workbook
         .worksheet_range(sheet_name)
         .map_err(|error| anyhow::anyhow!("读取 Sheet「{sheet_name}」失败：{error}"))?;
     let mut rows = Vec::new();
     for row in range.rows() {
-        let mut cells = Vec::with_capacity(8);
-        for cell in row.iter().take(8) {
+        let mut cells = Vec::with_capacity(width);
+        for cell in row.iter().take(width) {
             cells.push(cell_to_string(cell));
         }
-        while cells.len() < 8 {
+        while cells.len() < width {
             cells.push(String::new());
         }
         rows.push(cells);
@@ -205,6 +210,7 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
     let external_name = row[2].trim().to_string();
     let abbr = row[3].trim().to_string();
     let department_code = row[4].trim().to_string();
+    let approval_department_code = row[8].trim().to_string();
     let seal_on_behalf = parse_bool_marker(&row[5]);
     let aliases = parse_aliases(&row[6]);
     let note = row[7].trim().to_string();
@@ -224,6 +230,7 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
         unit: String::new(),
         can_handle_parent_unit: false,
         department_code,
+        approval_department_code,
         seal_on_behalf,
         seal_on_behalf_imported: !row[5].trim().is_empty(),
         sort_order: 0,
@@ -254,6 +261,7 @@ fn parse_person_row(row: &[String], _row_num: usize) -> Result<VocabularyEntry> 
         unit,
         can_handle_parent_unit,
         department_code: String::new(),
+        approval_department_code: String::new(),
         seal_on_behalf: false,
         seal_on_behalf_imported: false,
         sort_order: 0,
@@ -395,21 +403,34 @@ pub fn validate(entries: &[VocabularyEntry], existing_unit_codes: &[String]) -> 
         // 应该被允许；因此这里不再按长度拒绝。
     }
 
-    // 6. 机关代字重复。
-    let mut seen_codes: HashMap<String, usize> = HashMap::new();
-    for (row, entry) in &unit_rows {
-        let dc = entry.department_code.trim();
-        if dc.is_empty() {
-            continue;
-        }
-        if let Some(prev_row) = seen_codes.insert(dc.to_string(), *row) {
-            conflicts.push(Conflict {
-                sheet: UNIT_SHEET,
-                row: *row,
-                field: "机关代字",
-                current_value: dc.to_string(),
-                message: format!("与第 {prev_row} 行重复"),
-            });
+    // 6. 两类代字各自查重；跨类型相同不构成冲突。
+    for (field, code_of) in [
+        (
+            "发函代字",
+            (|entry: &VocabularyEntry| entry.department_code.trim())
+                as fn(&VocabularyEntry) -> &str,
+        ),
+        (
+            "呈批代字",
+            (|entry: &VocabularyEntry| entry.approval_department_code.trim())
+                as fn(&VocabularyEntry) -> &str,
+        ),
+    ] {
+        let mut seen_codes: HashMap<String, usize> = HashMap::new();
+        for (row, entry) in &unit_rows {
+            let code = code_of(entry);
+            if code.is_empty() {
+                continue;
+            }
+            if let Some(prev_row) = seen_codes.insert(code.to_string(), *row) {
+                conflicts.push(Conflict {
+                    sheet: UNIT_SHEET,
+                    row: *row,
+                    field,
+                    current_value: code.to_string(),
+                    message: format!("与第 {prev_row} 行重复"),
+                });
+            }
         }
     }
 
@@ -514,6 +535,10 @@ pub fn merge(target: &mut Vec<VocabularyEntry>, incoming: Vec<VocabularyEntry>) 
                 (&entry.external_name, &mut existing.external_name),
                 (&entry.abbr, &mut existing.abbr),
                 (&entry.department_code, &mut existing.department_code),
+                (
+                    &entry.approval_department_code,
+                    &mut existing.approval_department_code,
+                ),
             ] {
                 if !incoming.is_empty() && *slot != *incoming {
                     *slot = incoming.clone();
@@ -575,13 +600,13 @@ pub fn to_xlsx(
         ) {
             write_unit_row(sheet, row_index, entry)?;
         }
-        // 单位编码写到 J 列（隐藏），供人员表"所属单位编码"下拉引用。
-        sheet.set_column_hidden(9)?;
+        // 单位编码写到 K 列（隐藏），供人员表"所属单位编码"下拉引用。
+        sheet.set_column_hidden(10)?;
         for (i, code) in existing_unit_codes.iter().enumerate() {
             if code.trim().is_empty() {
                 continue;
             }
-            sheet.write_string(1 + i as u32, 9, code.trim())?;
+            sheet.write_string(1 + i as u32, 10, code.trim())?;
         }
         // 是否代章下拉：是 / 否 / -
         let daizhang_dv = DataValidation::new()
@@ -695,6 +720,7 @@ fn write_unit_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) -> R
     sheet.write_string(row, 5, daizhang)?;
     sheet.write_string(row, 6, entry.aliases.join("、"))?;
     sheet.write_string(row, 7, entry.note.trim())?;
+    sheet.write_string(row, 8, entry.approval_department_code.trim())?;
     Ok(())
 }
 
@@ -806,6 +832,39 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_preserves_both_agency_codes() {
+        let dir = tmp_dir();
+        let path = dir.join("agency-codes.xlsx");
+        let mut unit = some_unit("00", "甲单位");
+        unit.department_code = "甲函".into();
+        unit.approval_department_code = "甲呈".into();
+        to_xlsx(&[unit], &path, &codes(&["00"])).unwrap();
+        let report = parse(&path, &codes(&["00"])).unwrap();
+        assert_eq!(report.entries[0].department_code, "甲函");
+        assert_eq!(report.entries[0].approval_department_code, "甲呈");
+    }
+
+    #[test]
+    fn imports_legacy_eight_column_sheet_as_letter_code() {
+        let dir = tmp_dir();
+        let path = dir.join("legacy.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name(UNIT_SHEET).unwrap();
+        for (column, header) in UNIT_HEADERS.iter().take(8).enumerate() {
+            sheet.write_string(0, column as u16, *header).unwrap();
+        }
+        sheet.write_string(1, 0, "00").unwrap();
+        sheet.write_string(1, 1, "甲单位").unwrap();
+        sheet.write_string(1, 4, "甲函").unwrap();
+        workbook.add_worksheet().set_name(PERSON_SHEET).unwrap();
+        workbook.save(&path).unwrap();
+        let report = parse(&path, &codes(&["00"])).unwrap();
+        assert_eq!(report.entries[0].department_code, "甲函");
+        assert!(report.entries[0].approval_department_code.is_empty());
+    }
+
+    #[test]
     fn round_trip_with_people() {
         let dir = tmp_dir();
         let path = dir.join("vocab.xlsx");
@@ -886,7 +945,17 @@ mod tests {
         let mut b = some_unit("01", "乙");
         b.department_code = "X政函".into();
         let report = validate(&[a, b], &[]);
-        assert!(report.conflicts.iter().any(|c| c.field == "机关代字"));
+        assert!(report.conflicts.iter().any(|c| c.field == "发函代字"));
+    }
+
+    #[test]
+    fn rejects_duplicate_approval_code() {
+        let mut a = some_unit("00", "甲");
+        a.approval_department_code = "X政呈".into();
+        let mut b = some_unit("01", "乙");
+        b.approval_department_code = "X政呈".into();
+        let report = validate(&[a, b], &[]);
+        assert!(report.conflicts.iter().any(|c| c.field == "呈批代字"));
     }
 
     #[test]

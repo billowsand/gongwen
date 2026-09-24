@@ -26,6 +26,7 @@
       "unit": "",
       "can_handle_parent_unit": false,
       "department_code": "某函",
+      "approval_department_code": "某呈",
       "seal_on_behalf": false
     },
     {
