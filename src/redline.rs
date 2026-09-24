@@ -183,9 +183,9 @@ mod tests {
     fn markdown_prefixes_stay_outside_the_marks() {
         // 标记跑到 `- ` 前面，这一行就不再是列表项了。
         let doc = build("- 原来的条目", "- 改过的条目");
-        assert!(doc.markdown.starts_with("- "), "前缀必须留在标记外面");
+        assert!(doc.markdown.starts_with("1. "), "编号前缀必须留在标记外面");
         // 列表项末尾标点由解析器统一规范化（补句号），标注在规范化后的文字上。
-        assert_eq!(readable(&doc.markdown), "- ~原来~[改过]的条目。");
+        assert_eq!(readable(&doc.markdown), "1. ~原来~[改过]的条目。");
     }
 
     #[test]

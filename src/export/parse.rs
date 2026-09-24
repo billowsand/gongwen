@@ -154,6 +154,10 @@ pub(crate) struct LocatedBlock {
     pub(crate) range: std::ops::Range<usize>,
     /// 段落中每一条物理源码行在最终可见文本里占用的字符范围。
     pub(crate) source_segments: Vec<RenderedSourceSegment>,
+    /// 段内列表（一级列表）自动编号在可见文本里占用的字符范围。编号是程序
+    /// 生成的版式，不是正文：视觉 diff 比较与序列化时都要剥掉，由导出器按
+    /// 设置重新生成（见 `visual_diff`）。
+    pub(crate) generated_prefixes: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +171,10 @@ struct ParagraphPart {
     source: std::ops::Range<usize>,
     text: String,
     join: ParagraphJoin,
+    /// 这一段开头由解析器生成的段内列表编号（原文为空串）。拼接成段落
+    /// 可见文本后，它占前 `prefix_chars` 个字符，见
+    /// [`LocatedBlock::generated_prefixes`]。
+    prefix_chars: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -240,10 +248,19 @@ pub(crate) fn block_span_for_line(markdown: &str, line: usize) -> Option<std::op
         .map(|located| located.range)
 }
 
-/// 用与正文解析完全相同的规则合成段落，同时保留每条源码物理行的可见字符范围。
-fn mapped_paragraph(parts: &[ParagraphPart]) -> (String, Vec<RenderedSourceSegment>) {
+/// 用与正文解析完全相同的规则合成段落，同时保留每条源码物理行的可见字符
+/// 范围与段内列表生成编号的字符范围。
+fn mapped_paragraph(
+    parts: &[ParagraphPart],
+) -> (
+    String,
+    Vec<RenderedSourceSegment>,
+    Vec<std::ops::Range<usize>>,
+) {
     let mut text = String::new();
     let mut raw_ranges = Vec::with_capacity(parts.len());
+    // (编号起始字节, 编号结束字节)：编号在拼接后文本里的字节范围。
+    let mut prefix_bytes: Vec<std::ops::Range<usize>> = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         // 接缝处自动补出的空格归到后一条源码行，点击该行时其视觉贡献保持连续。
         let start = text.len();
@@ -255,24 +272,47 @@ fn mapped_paragraph(parts: &[ParagraphPart]) -> (String, Vec<RenderedSourceSegme
         {
             text.push(' ');
         }
+        if part.prefix_chars > 0 {
+            let prefix_len = part
+                .text
+                .chars()
+                .take(part.prefix_chars)
+                .map(char::len_utf8)
+                .sum::<usize>();
+            prefix_bytes.push(text.len()..text.len() + prefix_len);
+        }
         text.push_str(&part.text);
         raw_ranges.push((part.source.clone(), start..text.len()));
     }
 
-    let boundaries = raw_ranges
+    let mut boundaries: Vec<usize> = raw_ranges
         .iter()
         .flat_map(|(_, raw)| [raw.start, raw.end])
-        .collect::<Vec<_>>();
+        .collect();
+    boundaries.extend(
+        prefix_bytes
+            .iter()
+            .flat_map(|range| [range.start, range.end]),
+    );
+    boundaries.sort_unstable();
+    boundaries.dedup();
     let visible = super::inline_visible_char_indices(&text, &boundaries);
+    let visible_at = |byte: usize| {
+        let index = boundaries.partition_point(|boundary| *boundary < byte);
+        visible[index]
+    };
     let source_segments = raw_ranges
         .into_iter()
-        .zip(visible.as_chunks::<2>().0)
-        .map(|((source, _), chars)| RenderedSourceSegment {
+        .map(|(source, raw)| RenderedSourceSegment {
+            chars: visible_at(raw.start)..visible_at(raw.end),
             source,
-            chars: chars[0]..chars[1],
         })
         .collect();
-    (text, source_segments)
+    let generated_prefixes = prefix_bytes
+        .into_iter()
+        .map(|range| visible_at(range.start)..visible_at(range.end))
+        .collect();
+    (text, source_segments, generated_prefixes)
 }
 
 /// 宽体字：中日韩文字、假名、谚文与全角标点。这些字之间换行不需要空格。
@@ -374,11 +414,12 @@ fn parse_located(
                  range: &mut std::ops::Range<usize>,
                  blocks: &mut Vec<LocatedBlock>| {
         if !paragraph.is_empty() {
-            let (text, source_segments) = mapped_paragraph(paragraph);
+            let (text, source_segments, generated_prefixes) = mapped_paragraph(paragraph);
             blocks.push(LocatedBlock {
                 block: MarkdownBlock::Paragraph(text),
                 range: range.clone(),
                 source_segments,
+                generated_prefixes,
             });
             paragraph.clear();
         }
@@ -395,6 +436,7 @@ fn parse_located(
                 block: MarkdownBlock::Html(line.to_string()),
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
             if line.starts_with("</div") {
                 in_html_block = false;
@@ -413,6 +455,7 @@ fn parse_located(
                 block: MarkdownBlock::Html(line.to_string()),
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
             index += 1;
             while index < lines.len() {
@@ -435,6 +478,7 @@ fn parse_located(
                     block,
                     range: span,
                     source_segments: Vec::new(),
+                    generated_prefixes: Vec::new(),
                 });
                 index += 1;
             }
@@ -445,6 +489,7 @@ fn parse_located(
                 block: MarkdownBlock::Marker(section),
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
         } else if let Some((level, text)) = parse_heading(line) {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
@@ -457,6 +502,7 @@ fn parse_located(
                 block,
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
         } else if let Some((alt, src)) = parse_image(line) {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
@@ -464,6 +510,7 @@ fn parse_located(
                 block: MarkdownBlock::Image { alt, src },
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
         } else if line.starts_with("<div") {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
@@ -471,6 +518,7 @@ fn parse_located(
                 block: MarkdownBlock::Html(line.to_string()),
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
             in_html_block = true;
         } else if parse_numbered_table_marker(line) {
@@ -482,6 +530,7 @@ fn parse_located(
                 block: MarkdownBlock::Html(line.to_string()),
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
         } else if line.starts_with("<!--") && line.ends_with("-->") {
             // 不是公文那两种区段标记的 HTML 注释：研究报告的「摘要」「版本变更
@@ -493,6 +542,7 @@ fn parse_located(
                 block: MarkdownBlock::Html(line.to_string()),
                 range: span,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
         } else if index + 1 < lines.len()
             && is_table_row(line)
@@ -532,6 +582,7 @@ fn parse_located(
                 },
                 range: start..end,
                 source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
             });
             continue;
         } else if let Some((start_number, _)) = parse_list_item(line) {
@@ -560,12 +611,11 @@ fn parse_located(
                 // 正文之后没有空行：源码仍逐项换行，成文时把它们接回同一自然段，
                 // 使用圈号且不额外插入空格。
                 for (offset, ((source, _), text)) in items.into_iter().zip(normalized).enumerate() {
+                    let number = render_list_number(numbering.list1, start_number + offset);
                     paragraph.push(ParagraphPart {
+                        prefix_chars: number.chars().count(),
                         source,
-                        text: format!(
-                            "{}{text}",
-                            render_list_number(numbering.list1, start_number + offset)
-                        ),
+                        text: format!("{number}{text}"),
                         join: ParagraphJoin::Direct,
                     });
                 }
@@ -579,6 +629,7 @@ fn parse_located(
                         },
                         range: source,
                         source_segments: Vec::new(),
+                        generated_prefixes: Vec::new(),
                     });
                 }
             }
@@ -592,6 +643,7 @@ fn parse_located(
                 source: span,
                 text: line.to_string(),
                 join: ParagraphJoin::Soft,
+                prefix_chars: 0,
             });
         }
         index += 1;
@@ -843,6 +895,7 @@ pub(crate) fn normalize_legacy_attachments(blocks: Vec<LocatedBlock>) -> Vec<Loc
                         block: MarkdownBlock::Marker(MarkdownSection::Attachment),
                         range: located.range.start..located.range.start,
                         source_segments: Vec::new(),
+                        generated_prefixes: Vec::new(),
                     });
                 }
                 at_attachment_start = false;

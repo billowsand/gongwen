@@ -38,9 +38,10 @@ pub(crate) use paragraphs::image_paragraph_from_bytes;
 pub(crate) use paragraphs::{
     agenda_blank_line, agenda_body_paragraph, aligned_paragraph,
     attachment_document_title_paragraph, attachment_label_paragraph, body_paragraph,
-    compact_heading_paragraph, document_title_paragraph, heading_paragraph, image_paragraph,
-    joint_closing_paragraph, joint_signature_cell_paragraph, letter_security_paragraph,
-    ordered_list_paragraph, red_approval_title_paragraph, red_record_paragraph,
+    compact_heading_paragraph, document_title_paragraph, heading_paragraph,
+    heading_paragraph_with_number, image_paragraph, joint_closing_paragraph,
+    joint_signature_cell_paragraph, letter_security_paragraph, ordered_list_paragraph,
+    red_approval_title_paragraph, red_record_paragraph,
 };
 pub(crate) use record::add_footer_record;
 pub(crate) use red::{

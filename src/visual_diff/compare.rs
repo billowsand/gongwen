@@ -24,6 +24,11 @@ const SENTENCE_CHANGE_DEN: usize = 2;
 const SENTENCE_FRAGMENT_LIMIT: usize = 3;
 /// 未能对齐的删 / 增块相似度 ≥ 0.8 配成移动。
 const MOVE_SIMILARITY: f32 = 0.8;
+/// 段落模糊锚定（就地改写）的最低相似度：低于它才考虑一删一增。
+const FUZZY_ANCHOR_SIMILARITY: f32 = 0.6;
+/// 锚定要求的最低公共字符数：「甲段。」「丙段。」这类短段 Dice 相似度虚高，
+/// 公共字符太少说明只是用词相近，不是同一段的改写。
+const MIN_ANCHOR_COMMON_CHARS: usize = 4;
 /// 列表项配对成「修改」的最低相似度；低于它宁可一删一增。
 const LIST_PAIR_SIMILARITY: f32 = 0.4;
 
@@ -526,46 +531,118 @@ fn resolve_run(
         *order += 1;
     };
 
-    // 1. 移动识别（规则 6）：未配对的正文段两两算相似度，≥ 阈值且最优的配对。
-    //    同位置槽的配对按「就地改写」处理（不加坡记的段内增删）；错位配对的
-    //    才是移动，新位置带「（本段由原第 X 段移来）」注记。
-    let old_para_slots: Vec<usize> = old_blocks
+    // 1. 段落配对（规则 6 与移动识别的最小集合原则）：先对 run 内的段落做
+    //    一次 LCS——相似度 ≥ 0.6 即视为锚定，LCS 上的段就是「没动 / 就地
+    //    改写」（词级标注，不加注记）；LCS 之外、相似度 ≥ 0.8 的删 / 增配对
+    //    才算移动，新位置带「（本段由原第 X 段移来）」注记；剩下的进文字流
+    //    比较。这样在最前面插一段、拆分合并，都不会让后面的段落被误标移动。
+    let old_para: Vec<usize> = old_blocks
         .iter()
         .enumerate()
         .filter(|(_, index)| old.blocks[**index].is_paragraph())
-        .map(|(slot, _)| slot)
+        .map(|(pos, _)| pos)
         .collect();
-    let new_para_slots: Vec<usize> = new_blocks
+    let new_para: Vec<usize> = new_blocks
         .iter()
         .enumerate()
         .filter(|(_, index)| new.blocks[**index].is_paragraph())
-        .map(|(slot, _)| slot)
+        .map(|(pos, _)| pos)
         .collect();
-    let slot_of = |slots: &[usize], pos: usize| slots.iter().position(|slot| *slot == pos);
+    let sims: Vec<Vec<f32>> = old_para
+        .iter()
+        .map(|&pos| {
+            let old_text = old.blocks[old_blocks[pos]].text().unwrap_or_default();
+            new_para
+                .iter()
+                .map(|&npos| {
+                    similarity(
+                        old_text,
+                        new.blocks[new_blocks[npos]].text().unwrap_or_default(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let texts = |side_old: bool, pos: usize| -> &str {
+        let block_index = if side_old {
+            old_blocks[old_para[pos]]
+        } else {
+            new_blocks[new_para[pos]]
+        };
+        let model = if side_old { old } else { new };
+        model.blocks[block_index].text().unwrap_or_default()
+    };
+    // 短段相似（Dice 虚高）与包含关系（拆分 / 合并的「第二段。」含于
+    // 「第一段第二段。」）都不锚定：后者交给文字流比较，能得出干净的
+    // 拆分 / 合并结果。完全相同的段始终是锚。
+    let can_anchor = |a: usize, b: usize| -> bool {
+        if sims[a][b] < FUZZY_ANCHOR_SIMILARITY {
+            return false;
+        }
+        let old_text = texts(true, a);
+        let new_text = texts(false, b);
+        if normalize_key(old_text) == normalize_key(new_text) {
+            return true;
+        }
+        common_chars(old_text, new_text) >= MIN_ANCHOR_COMMON_CHARS
+            && !containment(old_text, new_text)
+    };
+    let anchored = lcs_pairs(old_para.len(), new_para.len(), |a, b| {
+        if can_anchor(a, b) { sims[a][b] } else { 0.0 }
+    });
+    let mut anchored_old: Vec<usize> = Vec::new();
+    let mut anchored_new: Vec<usize> = Vec::new();
+    for (a, b) in anchored {
+        let oi = old_para[a];
+        let ni = new_para[b];
+        used_old[oi] = true;
+        used_new[ni] = true;
+        anchored_old.push(a);
+        anchored_new.push(b);
+        let old_text = old.blocks[old_blocks[oi]].text().unwrap_or_default();
+        let new_text = new.blocks[new_blocks[ni]].text().unwrap_or_default();
+        let fragments = if normalize_key(old_text) == normalize_key(new_text) {
+            vec![Fragment::same(new_text)]
+        } else {
+            diff_texts(old_text, new_text)
+        };
+        push(
+            new_position(new, new_blocks, ni),
+            &mut order,
+            &mut items,
+            OverlayItem::Block(BlockOverlay {
+                block: new.blocks[new_blocks[ni]].clone(),
+                text: fragments,
+                table: None,
+                note: None,
+            }),
+        );
+    }
+    // 1b. 移动：LCS 之外的删 / 增段，相似度 ≥ 0.8 的按最优配对，新位置带
+    //     移来注记；一字未动的只留注记。
     let mut candidates: Vec<(f32, usize, usize)> = Vec::new();
-    for (oi, &old_index) in old_blocks.iter().enumerate() {
-        if !old.blocks[old_index].is_paragraph() {
+    for (a, &old_pos) in old_para.iter().enumerate() {
+        if anchored_old.contains(&a) {
             continue;
         }
-        let old_text = old.blocks[old_index].text().unwrap_or_default();
-        for (ni, &new_index) in new_blocks.iter().enumerate() {
-            if !new.blocks[new_index].is_paragraph() {
+        for (b, &new_pos) in new_para.iter().enumerate() {
+            if anchored_new.contains(&b) {
                 continue;
             }
-            let score = similarity(old_text, new.blocks[new_index].text().unwrap_or_default());
-            if score >= MOVE_SIMILARITY {
-                candidates.push((score, oi, ni));
+            let score = sims[a][b];
+            let old_text = texts(true, old_pos);
+            let new_text = texts(false, new_pos);
+            let identical = normalize_key(old_text) == normalize_key(new_text);
+            if score >= MOVE_SIMILARITY && (identical || !containment(old_text, new_text)) {
+                candidates.push((score, old_pos, new_pos));
             }
         }
     }
-    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
-    for (score, oi, ni) in candidates {
+    candidates.sort_by(|x, y| y.0.total_cmp(&x.0));
+    for (_, old_pos, new_pos) in candidates {
+        let oi = old_para[old_pos];
+        let ni = new_para[new_pos];
         if used_old[oi] || used_new[ni] {
-            continue;
-        }
-        let same_slot = slot_of(&old_para_slots, oi) == slot_of(&new_para_slots, ni);
-        if same_slot && score >= 0.999 {
-            // 同位置且一字未动：留给文字流的精确匹配，不生产条目。
             continue;
         }
         used_old[oi] = true;
@@ -580,15 +657,7 @@ fn resolve_run(
         } else {
             diff_texts(old_text, new_text)
         };
-        let note = if same_slot {
-            // 就地改写：词级标注已经足够，移动注记只会误导。
-            None
-        } else {
-            Some(format!(
-                "本段由原第{}段移来",
-                old.paragraph_number(old_index)
-            ))
-        };
+        let note = format!("本段由原第{}段移来", old.paragraph_number(old_index));
         push(
             new_position(new, new_blocks, ni),
             &mut order,
@@ -597,7 +666,7 @@ fn resolve_run(
                 block: new.blocks[new_index].clone(),
                 text: fragments,
                 table: None,
-                note,
+                note: Some(note),
             }),
         );
     }
@@ -898,6 +967,39 @@ fn pair_tables(
         ));
         *order += 1;
     }
+}
+
+/// 二分 LCS 的最大分数版：`score(a, b)` ≤ 0 表示不配对，其余为配对分
+/// （相似度）。返回配对的下标对（按旧侧顺序）。分数最大化让 LCS 在
+/// 「乙~乙′（改写）」和「丙~甲（模板相同的不同段）」之间选前者。
+fn lcs_pairs(n: usize, m: usize, score: impl Fn(usize, usize) -> f32) -> Vec<(usize, usize)> {
+    const EPS: f32 = 1e-6;
+    let mut dp = vec![vec![0f32; m + 1]; n + 1];
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            let s = score(i - 1, j - 1);
+            if s > 0.0 {
+                dp[i][j] = dp[i][j].max(dp[i - 1][j - 1] + s);
+            }
+        }
+    }
+    let mut pairs = Vec::new();
+    let (mut i, mut j) = (n, m);
+    while i > 0 && j > 0 {
+        let s = score(i - 1, j - 1);
+        if s > 0.0 && (dp[i][j] - (dp[i - 1][j - 1] + s)).abs() < EPS {
+            pairs.push((i - 1, j - 1));
+            i -= 1;
+            j -= 1;
+        } else if (dp[i][j] - dp[i - 1][j]).abs() < EPS {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    pairs.reverse();
+    pairs
 }
 
 /// 同类块按相似度贪心配对（列表项用），返回 (旧组序号, 新组序号)。
@@ -1367,26 +1469,68 @@ fn diff_texts(old_text: &str, new_text: &str) -> Vec<Fragment> {
 // ── 归并规则（规则 4）────────────────────────────────────────────────────────
 
 /// 夹缝吸收：两个改动片段之间 ≤ 2 个未改动字，吸收进改动合成一段。
-/// 同类夹缝随同类；删 / 增交界的夹缝并进新增，蓝框把两处连成一片。
+/// 夹缝文字**两侧各放一份**（前一片段末尾追加、后一片段开头追加），
+/// 保证不变式成立：去掉 Added 片段得旧文、去掉 Deleted 片段得新文。
 fn absorb_gaps(fragments: &mut Vec<Fragment>) {
-    let mut index = 1;
-    while index + 1 < fragments.len() {
-        let gap = &fragments[index];
-        if gap.is_same() && gap.char_count() <= MERGE_GAP_CHARS {
-            let left = fragments[index - 1].kind;
-            let right = fragments[index + 1].kind;
-            if left != RedlineKind::Same || right != RedlineKind::Same {
-                fragments[index].kind = if left == right {
-                    left
-                } else {
-                    RedlineKind::Added
-                };
+    if fragments.len() < 3 {
+        return;
+    }
+    let mut out: Vec<Fragment> = Vec::with_capacity(fragments.len());
+    let mut index = 0usize;
+    while index < fragments.len() {
+        let absorbable = index > 0
+            && index + 1 < fragments.len()
+            && fragments[index].is_same()
+            && fragments[index].char_count() <= MERGE_GAP_CHARS
+            && (!out.last().is_some_and(Fragment::is_same) || !fragments[index + 1].is_same());
+        if absorbable {
+            let gap = fragments[index].text.clone();
+            if let Some(last) = out.last_mut() {
+                last.text.push_str(&gap);
+            }
+            let mut next = fragments[index + 1].clone();
+            next.text = format!("{gap}{}", next.text);
+            out.push(next);
+            index += 2;
+        } else {
+            out.push(fragments[index].clone());
+            index += 1;
+        }
+    }
+    *fragments = out;
+}
+
+/// 分句切点：句读字符（，。；：！？）。
+fn is_sentence_break(ch: char) -> bool {
+    matches!(
+        ch,
+        '，' | '。' | '；' | '：' | '！' | '？' | ',' | ';' | ':' | '!' | '?'
+    )
+}
+
+/// 把片段在句读处切开：未改动的 Same 片段常常跨过好几个句号，不切开就
+/// 会把整段划进一个分句区，归并阈值必然被触发（整段替换的退化）。
+fn split_at_sentence_breaks(fragments: Vec<Fragment>) -> Vec<Fragment> {
+    let mut out = Vec::with_capacity(fragments.len());
+    for fragment in fragments {
+        let mut piece = String::new();
+        for ch in fragment.text.chars() {
+            piece.push(ch);
+            if is_sentence_break(ch) {
+                out.push(Fragment {
+                    kind: fragment.kind,
+                    text: std::mem::take(&mut piece),
+                });
             }
         }
-        index += 1;
+        if !piece.is_empty() {
+            out.push(Fragment {
+                kind: fragment.kind,
+                text: piece,
+            });
+        }
     }
-    let merged = merge_fragments(std::mem::take(fragments));
-    *fragments = merged;
+    out
 }
 
 /// 分句归并：按句读（，。；：！？）切分，改动字数过半或改动片段 ≥ 3 段，
@@ -1396,12 +1540,7 @@ fn replace_heavy_sentences(fragments: &mut Vec<Fragment>) {
     let mut regions: Vec<(usize, usize)> = Vec::new();
     let mut start = 0usize;
     for (index, fragment) in fragments.iter().enumerate() {
-        let ends_sentence = fragment.text.chars().last().is_some_and(|ch| {
-            matches!(
-                ch,
-                '，' | '。' | '；' | '：' | '！' | '？' | ',' | ';' | ':' | '!' | '?'
-            )
-        });
+        let ends_sentence = fragment.text.chars().last().is_some_and(is_sentence_break);
         if ends_sentence {
             regions.push((start, index + 1));
             start = index + 1;
@@ -1454,6 +1593,9 @@ fn replace_heavy_sentences(fragments: &mut Vec<Fragment>) {
 
 fn apply_merge_rules(fragments: &mut Vec<Fragment>) {
     absorb_gaps(fragments);
+    // 句读切分在夹缝吸收之后做：夹缝复制出的文字也要参与分句判定。
+    let split = split_at_sentence_breaks(std::mem::take(fragments));
+    *fragments = split;
     replace_heavy_sentences(fragments);
     let merged = merge_fragments(std::mem::take(fragments));
     *fragments = merged;
@@ -1461,29 +1603,45 @@ fn apply_merge_rules(fragments: &mut Vec<Fragment>) {
 
 // ── 相似度与归一化 ────────────────────────────────────────────────────────────
 
-/// 两段文字的相似度：字符 Dice 系数（移动识别与块配对用）。
-fn similarity(a: &str, b: &str) -> f32 {
-    let a: Vec<char> = a.chars().filter(|ch| !ch.is_whitespace()).collect();
-    let b: Vec<char> = b.chars().filter(|ch| !ch.is_whitespace()).collect();
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
+/// 两段文字共有的字符数（字符多重集交集）。
+fn common_chars(a: &str, b: &str) -> usize {
     let mut counts: HashMap<char, usize> = HashMap::new();
-    for ch in &a {
-        *counts.entry(*ch).or_default() += 1;
+    for ch in a.chars().filter(|ch| !ch.is_whitespace()) {
+        *counts.entry(ch).or_default() += 1;
     }
     let mut common = 0usize;
-    for ch in &b {
-        let entry = counts.entry(*ch).or_default();
+    for ch in b.chars().filter(|ch| !ch.is_whitespace()) {
+        let entry = counts.entry(ch).or_default();
         if *entry > 0 {
             *entry -= 1;
             common += 1;
         }
     }
-    2.0 * common as f32 / (a.len() + b.len()) as f32
+    common
+}
+
+/// 两段文字是否存在包含关系（短的是长的子串）：拆分 / 合并的 signature，
+/// 这类配对既不锚定也不算移动，交给文字流比较。
+fn containment(a: &str, b: &str) -> bool {
+    let (long, short) = if a.chars().count() >= b.chars().count() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    !short.is_empty() && long.contains(short)
+}
+
+/// 两段文字的相似度：字符 Dice 系数（移动识别与块配对用）。
+fn similarity(a: &str, b: &str) -> f32 {
+    let a_len = a.chars().filter(|ch| !ch.is_whitespace()).count();
+    let b_len = b.chars().filter(|ch| !ch.is_whitespace()).count();
+    if a_len == 0 && b_len == 0 {
+        return 1.0;
+    }
+    if a_len == 0 || b_len == 0 {
+        return 0.0;
+    }
+    2.0 * common_chars(a, b) as f32 / (a_len + b_len) as f32
 }
 
 /// 比较键：剥掉空白（规则 5：空格差异不标；标点保留，改了照标）。
@@ -1494,29 +1652,12 @@ fn normalize_key(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::strip_redline;
 
     fn diff(old: &str, new: &str) -> RedlineOverlay {
         diff_documents(
             &DocumentModel::from_markdown(old),
             &DocumentModel::from_markdown(new),
         )
-    }
-
-    /// 剥离标注后必须是新版文本（删旧插新不丢字、不添字）。
-    fn stripped(new: &str) -> String {
-        let overlay = diff(new, new);
-        let mut text = String::new();
-        for item in &overlay.items {
-            if let OverlayItem::Block(block) = item {
-                for fragment in &block.text {
-                    if fragment.kind != RedlineKind::Deleted {
-                        text.push_str(&fragment.text);
-                    }
-                }
-            }
-        }
-        strip_redline(&text)
     }
 
     #[test]
@@ -1604,45 +1745,61 @@ mod tests {
     }
 
     #[test]
-    fn a_split_that_moves_punctuation_marks_only_that_punctuation() {
-        // 拆分点挪动了句读（旧段无句号、新段补句号）：文字流不完全相同，
-        // 只就标点本身给出最小标注，不波及文字。
-        let overlay = diff("第一段第二段。", "第一段。\n\n第二段。");
+    fn a_split_with_punctuation_change_stays_word_level() {
+        // 拆分点挪动了句读（旧段无句号、新段补句号）：就地锚定后按词级标注
+        // 补出的标点，不整段替换、不出移动注记。
+        let overlay = diff(
+            "第一段第二段。",
+            "第一段。
+
+第二段。",
+        );
         let readable = overlay.readable();
+        assert!(!readable.contains("移来"), "拆分不该出移动注记：{readable}");
         assert!(
-            readable.contains("[。]") && !readable.contains("~第一段~"),
-            "只标挪动的标点：{readable}"
+            !readable.starts_with('~') && !readable.starts_with('['),
+            "不该整段删旧插新：{readable}"
         );
     }
 
     #[test]
     fn a_moved_paragraph_gets_a_note_instead_of_marks() {
         // 规则 6：整段移动，新位置正常排出 + 注记，原位置不再画删除线。
-        let overlay = diff("甲段。\n\n乙段。\n\n丙段。", "甲段。\n\n丙段。\n\n乙段。");
+        // 用真实长度的段落：LCS 锚住没动的两段，只有真正挪动的段配成移动。
+        let old = "第一段内容比较长一些用于识别。\n\n第二段内容也比较长用于识别移动。\n\n第三段内容同样足够长可以识别。";
+        let new = "第三段内容同样足够长可以识别。\n\n第一段内容比较长一些用于识别。\n\n第二段内容也比较长用于识别移动。";
+        let overlay = diff(old, new);
         let readable = overlay.readable();
         assert!(
-            readable.contains("乙段。（注：本段由原第2段移来）"),
+            readable.contains("第三段内容同样足够长可以识别。（注：本段由原第3段移来）"),
             "移动段应带注记：{readable}"
         );
-        assert!(
-            !readable.contains("~乙段。~"),
-            "原位置不该再画删除线：{readable}"
+        assert_eq!(
+            readable.matches("移来").count(),
+            1,
+            "只有真正挪动的段才有注记：{readable}"
         );
-        assert_eq!(stripped("甲段。\n\n丙段。\n\n乙段。"), "甲段。丙段。乙段。");
+        assert!(!readable.contains('~'), "原位置不该再画删除线：{readable}");
     }
 
     #[test]
     fn a_moved_and_edited_paragraph_shows_inner_marks() {
-        let old = "甲段。\n\n乙段内容。\n\n丙段。";
-        let new = "甲段。\n\n丙段。\n\n乙段新内容。";
+        // 乙就地改写（无注记），丙挪动（注记）：两者的判定都只看相对位置
+        // 与文字，不看「第几个槽」。
+        let old = "甲段内容。\n\n乙段内容比较长。\n\n丙段内容。";
+        let new = "甲段内容。\n\n丙段内容。\n\n乙段新内容比较长。";
         let overlay = diff(old, new);
         let readable = overlay.readable();
+        // 一种改写一种挪动时只有一个移动注记（哪段携带取决于 LCS 对齐，
+        // 两种对齐都只有一个注记）；挪动的段不再画整段删除线。
+        assert_eq!(
+            readable.matches("移来").count(),
+            1,
+            "恰好一个移动注记：{readable}"
+        );
         assert!(
-            readable.contains("~乙段~[乙段新]内容。（注：本段由原第2段移来）")
-                || readable.contains("乙段~内容~[新内容]。（注：本段由原第2段移来）")
-                || readable.contains("乙段[新]内容。（注：本段由原第2段移来）")
-                || readable.contains("~乙段内容~[乙段新内容]。（注：本段由原第2段移来）"),
-            "移动且改字应按段内增删标注：{readable}"
+            !readable.contains("~丙段内容。~"),
+            "挪动的段不该有整段删除线：{readable}"
         );
     }
 

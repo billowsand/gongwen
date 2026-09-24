@@ -208,6 +208,26 @@ pub(crate) fn marked_tex_escape(text: &str) -> String {
     out
 }
 
+/// 公文标题整行（编号前缀 + 文字）。新增标题整体加框时（方案规则 8：
+/// 含编号），编号并进第一个 `\GwAdd` 框；其余情况编号照常排在标注之外。
+pub(crate) fn marked_heading_tex(number: &str, text: &str) -> String {
+    use crate::export::whole_chunk_kind;
+    if whole_chunk_kind(text) != Some(RedlineKind::Added) {
+        return format!("{number}{}", marked_tex_escape(text));
+    }
+    let plain = plain_text(text);
+    let mut pieces = boxable_pieces(&plain);
+    if pieces.is_empty() {
+        pieces.push(String::new());
+    }
+    pieces[0] = format!("{number}{}", pieces[0]);
+    pieces
+        .iter()
+        .map(|piece| format!("\\GwAdd{{{}}}", tex_escape(piece)))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// 标题内容 TeX：按标题字数与 jieba 排布。
 /// 单行保持二号；超出一行不超过 2 字用 `\scalebox` 只缩横向、字高不变；
 /// 超出更多在词边界均衡换行（`\\` 分段）。带花脸稿标记时排布仍在纯文本上

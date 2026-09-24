@@ -6,13 +6,13 @@
 use crate::export::docx::{
     AGENDA_NUMBERING_ID, BODY_SIZE, BoldFont, TABLE_CONTENT_WIDTH_TWIPS, TABLE_SIZE,
     agenda_blank_line, agenda_body_paragraph, aligned_paragraph, apply_bold, body_paragraph,
-    body_runs, chinese_fonts, document_title_paragraph, docx_name, heading_paragraph,
+    body_runs, chinese_fonts, document_title_paragraph, docx_name, heading_paragraph_with_number,
     image_paragraph, ordered_list_paragraph, security_runs, table_run_sized, table_runs_sized,
 };
 use crate::export::table::{ColumnAlignment, resolve_cell_alignment, to_docx_grid};
 use crate::export::title;
 use crate::export::{
-    ColumnAlign, MarkdownBlock, TableSpan, inline_segments, official_heading_text, plain_text,
+    ColumnAlign, MarkdownBlock, TableSpan, inline_segments, official_heading_prefix, plain_text,
     table_span_at,
 };
 use crate::models::{DraftInput, FontConfig, ListNumbering, NumberingConfig};
@@ -163,8 +163,16 @@ pub(crate) fn add_official_content_block(
 ) -> Docx {
     match block {
         MarkdownBlock::Heading(level, text) => {
-            if let Some(title) = official_heading_text(*level, text, counters, numbering) {
-                doc = doc.add_paragraph(heading_paragraph(*level, &title, bold));
+            // 编号前缀与标题文字分开进 run：新增标题整体加框时编号也进框
+            // （方案规则 8），需要知道前缀边界。
+            let number = official_heading_prefix(*level, counters, numbering);
+            if let Some(number) = number {
+                doc = doc.add_paragraph(heading_paragraph_with_number(
+                    *level,
+                    Some(&number),
+                    text,
+                    bold,
+                ));
             }
         }
         MarkdownBlock::Paragraph(text)

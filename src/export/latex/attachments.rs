@@ -3,7 +3,7 @@
 //! 由 src/export/latex.rs 拆分而来：本文件是模块 `export::latex::attachments`，与其它子模块共享
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::export::latex::marked_tex_escape;
+use crate::export::latex::{marked_heading_tex, marked_tex_escape};
 use crate::export::table::requires_landscape;
 use crate::export::{MarkdownBlock, MarkdownSection, official_heading_prefix};
 use crate::models::NumberingConfig;
@@ -63,15 +63,15 @@ pub(crate) fn official_heading_to_tex(
     counters: &mut [usize; 4],
     numbering: &NumberingConfig,
 ) -> Option<String> {
-    // 标题文字走标注感知的转义：花脸稿里删除 / 新增按块注宏，编号前缀
-    // 在 marked_tex_escape 之外生成，不参与标注（规则 8）。
-    let escaped = marked_tex_escape(text);
+    // 标题文字走标注感知的转义：花脸稿里删除 / 新增按块注宏；编号前缀
+    // 经 marked_heading_tex——新增标题整体加框时编号并进框（规则 8）。
     let number = official_heading_prefix(level, counters, numbering)?;
+    let escaped = marked_heading_tex(&number, text);
     let rendered = match level {
-        2 => format!("\\noindent\\hspace*{{2em}}{{\\heiti\\enheiti {number}{escaped}}}\\par"),
-        3 => format!("\\noindent\\hspace*{{2em}}{{\\kai\\enkai {number}{escaped}}}\\par"),
-        4 => format!("\\noindent\\hspace*{{2em}}{number}{escaped}\\par"),
-        5 => format!("\\noindent\\hspace*{{2em}}\\GwBold{{{number}{escaped}}}\\par"),
+        2 => format!("\\noindent\\hspace*{{2em}}{{\\heiti\\enheiti {escaped}}}\\par"),
+        3 => format!("\\noindent\\hspace*{{2em}}{{\\kai\\enkai {escaped}}}\\par"),
+        4 => format!("\\noindent\\hspace*{{2em}}{escaped}\\par"),
+        5 => format!("\\noindent\\hspace*{{2em}}\\GwBold{{{escaped}}}\\par"),
         _ => return None,
     };
     Some(rendered)

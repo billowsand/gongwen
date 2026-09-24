@@ -29,18 +29,6 @@ pub(crate) enum ElementField {
 }
 
 impl ElementField {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::IssuingUnit => "发文单位",
-            Self::Recipient => "主送机关",
-            Self::CopiesTo => "抄送机关",
-            Self::DocumentNumber => "发文字号",
-            Self::Date => "成文日期",
-            Self::SigningUnit => "落款单位",
-            Self::Security => "密级",
-        }
-    }
-
     /// 全部要素的固定顺序；两版模型按同一顺序取出后按下标配对。
     pub(crate) fn all() -> [Self; 7] {
         [
@@ -62,6 +50,12 @@ pub(crate) enum VisualBlock {
     Parsed {
         block: MarkdownBlock,
         range: Range<usize>,
+        /// 文本类块的 Markdown 原文（带 `**` 等行内样式），序列化时把标注
+        /// 投影回样式边界内用；非文本块为 None。
+        raw: Option<String>,
+        /// 段内列表（一级列表）各项在纯文本里的字符起点。比较时编号已剥
+        /// 掉；序列化据此把各项重新拆成列表行，导出器按设置再生成圈号。
+        inline_items: Vec<usize>,
     },
     Element {
         field: ElementField,
@@ -70,7 +64,9 @@ pub(crate) enum VisualBlock {
 }
 
 impl VisualBlock {
-    /// 文本类块（标题 / 正文 / 列表项 / 对齐行 / 要素）的纯文本。
+    /// 参与比较的纯文本：块里的文字已经是行内标记剥离后的可见文字
+    /// （规则 5：纯格式变化不标注），段内列表的生成编号也在模型构建时
+    /// 剥掉（编号顺移不产生标注）。原文（带样式）见 [`raw_text`]。
     pub(crate) fn text(&self) -> Option<&str> {
         match self {
             Self::Parsed { block, .. } => match block {
@@ -78,10 +74,19 @@ impl VisualBlock {
                 | MarkdownBlock::Heading(_, text)
                 | MarkdownBlock::Paragraph(text)
                 | MarkdownBlock::OrderedListItem { text, .. }
-                | MarkdownBlock::Aligned { text, .. } => Some(text),
+                | MarkdownBlock::Aligned { text, .. } => Some(text.as_str()),
                 _ => None,
             },
-            Self::Element { text, .. } => Some(text),
+            Self::Element { text, .. } => Some(text.as_str()),
+        }
+    }
+
+    /// 块的 Markdown 原文（带行内样式标记），序列化时用来把标注投影回
+    /// `**加粗**` 这类样式边界内；没有样式的块与纯文本一致。
+    pub(crate) fn raw_text(&self) -> Option<&str> {
+        match self {
+            Self::Parsed { raw, .. } => raw.as_deref(),
+            Self::Element { text, .. } => Some(text.as_str()),
         }
     }
 
@@ -117,9 +122,49 @@ impl DocumentModel {
     ) -> Self {
         let blocks = parse_markdown_located_with_numbering(markdown, numbering)
             .into_iter()
-            .map(|located| VisualBlock::Parsed {
-                block: located.block,
-                range: located.range,
+            .map(|located| {
+                let raw = raw_text_of(&located.block).map(|text| {
+                    // 段内列表的生成编号是版式不是正文：原文与纯文本都剥掉，
+                    // 序列化后由导出器按设置重新生成（编号顺移因此不标注）。
+                    if located.generated_prefixes.is_empty() {
+                        text.to_string()
+                    } else {
+                        strip_char_ranges(text, &located.generated_prefixes)
+                    }
+                });
+                // 各项起点换算成纯文本（行内标记剥离后）的字符偏移，序列化
+                // 拆行用。generated_prefixes 是可见文本的字符范围。
+                let inline_items = match (&located.block, &raw) {
+                    (text_bearing, Some(raw)) if raw_text_of(text_bearing).is_some() => {
+                        let mut items = Vec::new();
+                        let mut visible_before = 0usize;
+                        for range in &located.generated_prefixes {
+                            let byte = raw
+                                .char_indices()
+                                .nth(range.start - visible_before)
+                                .map(|(byte, _)| byte)
+                                .unwrap_or(raw.len());
+                            items.push(crate::export::inline_visible_char_index(raw, byte));
+                            visible_before += range.end - range.start;
+                        }
+                        items
+                    }
+                    _ => Vec::new(),
+                };
+                // 比较一律在行内标记剥离后的可见文字上进行（`**` 加粗这类
+                // 格式改动因此不产生标注）。
+                let block = match (&located.block, &raw) {
+                    (text_bearing, Some(raw)) if raw_text_of(text_bearing).is_some() => {
+                        replace_text(text_bearing, crate::export::plain_text(raw))
+                    }
+                    _ => located.block,
+                };
+                VisualBlock::Parsed {
+                    block,
+                    range: located.range,
+                    raw,
+                    inline_items,
+                }
             })
             .collect();
         Self { blocks }
@@ -193,4 +238,43 @@ impl DocumentModel {
             _ => None,
         }
     }
+}
+
+/// 文本类块的原文（非文本块返回 None）。
+fn raw_text_of(block: &MarkdownBlock) -> Option<&str> {
+    match block {
+        MarkdownBlock::Title(text)
+        | MarkdownBlock::Heading(_, text)
+        | MarkdownBlock::Paragraph(text)
+        | MarkdownBlock::OrderedListItem { text, .. }
+        | MarkdownBlock::Aligned { text, .. } => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+/// 把文本类块的文字替换为给定纯文本（其余变体原样返回）。
+fn replace_text(block: &MarkdownBlock, plain: String) -> MarkdownBlock {
+    match block {
+        MarkdownBlock::Title(_) => MarkdownBlock::Title(plain),
+        MarkdownBlock::Heading(level, _) => MarkdownBlock::Heading(*level, plain),
+        MarkdownBlock::Paragraph(_) => MarkdownBlock::Paragraph(plain),
+        MarkdownBlock::OrderedListItem { number, .. } => MarkdownBlock::OrderedListItem {
+            number: *number,
+            text: plain,
+        },
+        MarkdownBlock::Aligned { align, .. } => MarkdownBlock::Aligned {
+            align: *align,
+            text: plain,
+        },
+        other => other.clone(),
+    }
+}
+
+/// 按字符范围从文本里剥掉若干段（剥段内列表的生成编号用）。
+fn strip_char_ranges(text: &str, ranges: &[Range<usize>]) -> String {
+    text.chars()
+        .enumerate()
+        .filter(|(index, _)| !ranges.iter().any(|range| range.contains(index)))
+        .map(|(_, ch)| ch)
+        .collect()
 }

@@ -57,12 +57,15 @@ pub(crate) fn inject_tex_redline(tex: &str) -> String {
                 if state == RedlineKind::Same {
                     continue; // 孤立的收尾哨兵：丢弃
                 }
-                let macro_name = if state == RedlineKind::Deleted {
-                    "GwDel"
+                if state == RedlineKind::Deleted {
+                    out.push_str(&wrap_tex_macro("GwDel", &buffer));
                 } else {
-                    "GwAdd"
-                };
-                out.push_str(&format!("\\{macro_name}{{{buffer}}}"));
+                    // \GwAdd 不能跨行：长插入按标点切块，每块一个框，
+                    // 块与块之间才断得开（与公文侧 body_text_to_tex 同一规矩）。
+                    for piece in boxable_pieces(&buffer) {
+                        out.push_str(&wrap_tex_macro("GwAdd", &piece));
+                    }
+                }
                 buffer.clear();
                 state = RedlineKind::Same;
             }
@@ -71,6 +74,46 @@ pub(crate) fn inject_tex_redline(tex: &str) -> String {
     }
     out.push_str(&buffer);
     out
+}
+
+/// 把内容包进花脸稿宏。内容里 `{` `}` 若不平衡（哨兵跨过 `\textbf{` 这类
+/// 命令的花括号时会发生），在宏内补齐到平衡、宏外补回对应的另一半——
+/// 宁可标记范围不准也不让 TeX 编译挂在不配对的括号上。
+fn wrap_tex_macro(macro_name: &str, content: &str) -> String {
+    let opens = content.chars().filter(|ch| *ch == '{').count();
+    let closes = content.chars().filter(|ch| *ch == '}').count();
+    if opens == closes {
+        return format!("\\{macro_name}{{{content}}}");
+    }
+    if opens > closes {
+        let pad = opens - closes;
+        format!(
+            "\\{macro_name}{{{content}{}}}{}",
+            "}".repeat(pad),
+            "{".repeat(pad)
+        )
+    } else {
+        let pad = closes - opens;
+        let wrapped = format!("\\{macro_name}{{{content}}}");
+        format!("{}{wrapped}{}", "{".repeat(pad), "}".repeat(pad))
+    }
+}
+
+/// 把新增文字按标点切成可以各自套框的小块（与公文侧同一组断点）。
+fn boxable_pieces(text: &str) -> Vec<String> {
+    const BREAKERS: [char; 6] = ['，', '。', '；', '、', '：', '？'];
+    let mut pieces = Vec::new();
+    let mut buffer = String::new();
+    for ch in text.chars() {
+        buffer.push(ch);
+        if BREAKERS.contains(&ch) {
+            pieces.push(std::mem::take(&mut buffer));
+        }
+    }
+    if !buffer.is_empty() {
+        pieces.push(buffer);
+    }
+    pieces
 }
 
 /// 研究报告导出目录里所有 TeX（主文件 + 分章 + 附录）的哨兵换宏，
@@ -347,6 +390,29 @@ mod tests {
             !out.contains(REDLINE_ADD_OPEN) && !out.contains(REDLINE_ADD_CLOSE),
             "哨兵不得残留：{out}"
         );
+    }
+
+    #[test]
+    fn tex_marks_across_textbf_stay_brace_balanced() {
+        // 哨兵跨过 	extbf{ 这类命令的花括号：宏内补齐到平衡、宏外补回，
+        // 编译不会被不配对的括号卡住。
+        let input = format!("前 {REDLINE_DEL_OPEN}\textbf{{重点}}文字{REDLINE_DEL_CLOSE} 后");
+        let out = inject_tex_redline(&input);
+        let opens = out.chars().filter(|ch| *ch == '{').count();
+        let closes = out.chars().filter(|ch| *ch == '}').count();
+        assert_eq!(opens, closes, "花括号必须平衡：{out}");
+        assert!(out.contains("\\GwDel{"), "删除宏在：{out}");
+        assert!(!out.contains(REDLINE_DEL_OPEN), "哨兵不得残留：{out}");
+    }
+
+    #[test]
+    fn tex_long_addition_is_split_at_punctuation() {
+        // \GwAdd 的 \fbox 不能跨行：长插入按标点切块，每块一个框。
+        let long = "这是第一句，这是第二句，这是第三句";
+        let input = format!("{REDLINE_ADD_OPEN}{long}{REDLINE_ADD_CLOSE}");
+        let out = inject_tex_redline(&input);
+        assert_eq!(out.matches("\\GwAdd{").count(), 3, "按标点切成三块：{out}");
+        assert!(out.contains("\\GwAdd{这是第一句，}"), "第一块带标点：{out}");
     }
 
     #[test]

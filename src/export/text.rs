@@ -229,6 +229,17 @@ pub(crate) fn mark_added(text: &str) -> String {
     format!("{REDLINE_ADD_OPEN}{text}{REDLINE_ADD_CLOSE}")
 }
 
+/// 整段文字是否恰好是一种花脸稿块（删除或新增）：标题等整块增删时，
+/// 导出侧据此把自动编号也包进同一标记（方案规则 8：新增标题含编号加框）。
+pub(crate) fn whole_chunk_kind(text: &str) -> Option<RedlineKind> {
+    let chunks = redline_chunks(text);
+    let kind = chunks.first()?.kind;
+    chunks
+        .iter()
+        .all(|chunk| chunk.kind == kind)
+        .then_some(kind)
+}
+
 /// 是不是花脸稿哨兵。各渲染路径用它做兜底过滤。
 pub(crate) fn is_redline_sentinel(ch: char) -> bool {
     matches!(
@@ -281,7 +292,37 @@ pub(crate) fn redline_slice_lines(text: &str, lines: &[String]) -> Vec<String> {
         out[line_index].push(ch);
         plain_seen += 1;
     }
+    balance_line_marks(&mut out);
     out
+}
+
+/// 标题的 `\\` 换行不能落在 `\GwDel` / `\GwAdd` 内部：跨行的标注在行尾
+/// 补闭合哨兵、下一行行首补对应的开启哨兵，每行各自成对。
+fn balance_line_marks(lines: &mut [String]) {
+    let close_of = |open: char| -> char {
+        match open {
+            REDLINE_DEL_OPEN => REDLINE_DEL_CLOSE,
+            _ => REDLINE_ADD_CLOSE,
+        }
+    };
+    let mut carry: Option<char> = None;
+    for line in lines.iter_mut() {
+        if let Some(open) = carry.take() {
+            line.insert(0, open);
+        }
+        let mut open: Option<char> = None;
+        for ch in line.chars() {
+            match ch {
+                REDLINE_DEL_OPEN | REDLINE_ADD_OPEN => open = Some(ch),
+                REDLINE_DEL_CLOSE | REDLINE_ADD_CLOSE => open = None,
+                _ => {}
+            }
+        }
+        if let Some(open) = open {
+            line.push(close_of(open));
+            carry = Some(open);
+        }
+    }
 }
 
 #[derive(Debug)]

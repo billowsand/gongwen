@@ -5,24 +5,31 @@
 //! 序列化要点：
 //! - 删除的标题 / 列表项不排成标题 / 列表行（避免消耗自动编号，排出来
 //!   还会在编号序列里冒重复号），作为普通文字行留在原位置画删除线；
+//! - 独立列表项用单换行拼接、按原起始号写 `N.`，保持是一组；删除的列表
+//!   项折进前一项的同一行，不打断组；
 //! - 表格按 GFM 逐行写回，标记只在单元格文字里；跨格合并按来源表还原；
-//! - 对齐行保留居中 / 居右标记。
+//! - 对齐行保留居中 / 居右标记；研究报告的区段标记（摘要、参考文献等）
+//!   原样写回，mdx 靠它们分区；
+//! - 文本块的标注投影回带样式的原文：加粗边界不被哨兵切断。
 
 use super::model::VisualBlock;
 use super::overlay::{BlockOverlay, Fragment, OverlayItem, RedlineOverlay, TableOverlay};
 use crate::export::{
-    ColumnAlign, LineAlign, MarkdownBlock, MarkdownSection, RedlineKind, TableSpan, mark_added,
-    mark_deleted, table_span_at,
+    ColumnAlign, LineAlign, MarkdownBlock, MarkdownSection, RedlineKind, TableSpan,
+    inline_visible_char_indices, mark_added, mark_deleted, parse_align_marker,
+    parse_numbered_table_marker, table_span_at,
 };
 
-/// 一个待拼接的块：行内用 `\n`，块与块之间用 `\n\n`（相邻两张表也空行分隔，
-/// 否则 GFM 会把它们并成一张）。
+/// 一个待拼接的块：行内用 `\n`；`tight_after` 为 true 时与下一个块之间也
+/// 用 `\n`（列表项之间，保持是一组），否则用 `\n\n`（相邻两张表也空行
+/// 分隔，否则 GFM 会把它们并成一张）。
 struct Chunk {
     lines: Vec<String>,
+    tight_after: bool,
 }
 
 /// 把标注层序列化成带花脸稿哨兵的 Markdown，直接交给现有导出链。
-/// 移动注记作为一段加框的小注排在移动段前面（方案规则 6：段首加注）。
+/// 移动注记作为普通括注排在移动段前面（版式小注，不带增删含义）。
 pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut align_group: Option<LineAlign> = None;
@@ -31,6 +38,13 @@ pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
             OverlayItem::Block(block) => (block, false),
             OverlayItem::Deleted(block) => (block, true),
         };
+        let is_list_item = matches!(
+            overlay_block.block,
+            VisualBlock::Parsed {
+                block: MarkdownBlock::OrderedListItem { .. },
+                ..
+            }
+        );
         let is_aligned = !deleted
             && matches!(
                 overlay_block.block,
@@ -57,17 +71,43 @@ pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
             lines.insert(0, align_marker(*align).to_string());
             align_group = Some(*align);
         }
-        // 移动注记：加框小注排在移动段前面。
+        // 移动注记：普通括注行排在移动段前面。
         if !deleted && let Some(note) = &overlay_block.note {
-            lines.insert(0, mark_added(&format!("（{note}）")));
+            lines.insert(0, format!("（{note}）"));
         }
-        chunks.push(Chunk { lines });
+        // 删除的列表项折进前一项的同一行：插在两项中间会把组打断，重编
+        // 号全乱。前一项不是列表项时只能自成一行（罕见：组首被删）。
+        if deleted && is_list_item {
+            let marked = lines.join("\n");
+            if let Some(last) = chunks.last_mut()
+                && last.tight_after
+            {
+                last.lines.last_mut().expect("列表块有行").push_str(&marked);
+                continue;
+            }
+        }
+        // 列表项之间单换行：空行隔开会被解析器当成新的一组，编号全变 1。
+        let tight_after = !deleted && is_list_item;
+        if let Some(last) = chunks.last_mut()
+            && last.tight_after
+        {
+            // 上一块是列表项、这一块不是：先关掉它的 tight 标记。
+            last.tight_after = false;
+        }
+        chunks.push(Chunk { lines, tight_after });
     }
-    chunks
-        .iter()
-        .map(|chunk| chunk.lines.join("\n"))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let mut out = String::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        if index > 0 {
+            out.push_str(if chunks[index - 1].tight_after {
+                "\n"
+            } else {
+                "\n\n"
+            });
+        }
+        out.push_str(&chunk.lines.join("\n"));
+    }
+    out
 }
 
 fn align_marker(align: LineAlign) -> &'static str {
@@ -77,19 +117,23 @@ fn align_marker(align: LineAlign) -> &'static str {
     }
 }
 
-/// 一个块产出的源码行；空返回表示这一块不落任何行（未改的 Html 等）。
+/// 一个块产出的源码行；空返回表示这一块不落任何行（未改的 Html 标记行、
+/// 已删除的 Html 等）。
 fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
+    let raw = overlay.block.raw_text().unwrap_or_default();
+    let inline_items: &[usize] = match &overlay.block {
+        VisualBlock::Parsed { inline_items, .. } => inline_items,
+        _ => &[],
+    };
     match &overlay.block {
-        VisualBlock::Element { field, .. } => {
-            let marked = mark_fragments(&overlay.text);
-            if marked.is_empty() {
-                return Vec::new();
-            }
-            vec![format!("【{}】{}", field.label(), marked)]
+        VisualBlock::Element { .. } => {
+            // 要素标注落在版头 / 版记的原位（方案规则 7），那是第 ② 期
+            // 预览与导出绘制的事；本期不进正文，避免误接成正文行。
+            Vec::new()
         }
         VisualBlock::Parsed { block, .. } => match block {
             MarkdownBlock::Title(_) => {
-                let marked = mark_fragments(&overlay.text);
+                let marked = styled_marked(&overlay.text, raw);
                 if marked.is_empty() {
                     return Vec::new();
                 }
@@ -101,43 +145,60 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                 }
             }
             MarkdownBlock::Heading(level, _) => {
-                let marked = mark_fragments(&overlay.text);
+                let marked = styled_marked(&overlay.text, raw);
                 if marked.is_empty() {
                     return Vec::new();
                 }
                 if deleted {
-                    // 删除的标题不带编号：不排成标题（编号会重复），作为普通
-                    // 文字行留在原位置画删除线。
+                    // 删除的标题不带编号：不排成标题（编号会重复），作为
+                    // 普通文字行留在原位置画删除线。
                     vec![marked]
                 } else {
                     vec![format!("{} {marked}", "#".repeat(*level as usize))]
                 }
             }
             MarkdownBlock::Paragraph(_) => {
-                let marked = mark_fragments(&overlay.text);
+                if !deleted && !inline_items.is_empty() {
+                    // 段内列表：各项重新拆成列表行（编号由导出器按设置再生成），
+                    // 引导句与列表行用单换行紧接——空行隔开解析器就不再认作
+                    // 段内列表，圈号会丢。
+                    let parts = split_fragments_at(&overlay.text, inline_items);
+                    let mut lines: Vec<String> = Vec::new();
+                    for (index, part) in parts.iter().enumerate() {
+                        let marked = mark_fragments(part);
+                        if index == 0 {
+                            if !marked.is_empty() {
+                                lines.push(marked);
+                            }
+                        } else {
+                            lines.push(format!("1. {marked}"));
+                        }
+                    }
+                    return lines;
+                }
+                let marked = styled_marked(&overlay.text, raw);
                 if marked.is_empty() {
                     return Vec::new();
                 }
                 vec![marked]
             }
-            MarkdownBlock::OrderedListItem { .. } => {
-                let marked = mark_fragments(&overlay.text);
+            MarkdownBlock::OrderedListItem { number, .. } => {
+                let marked = styled_marked(&overlay.text, raw);
                 if marked.is_empty() {
                     return Vec::new();
                 }
                 if deleted {
-                    // 删除的列表项不排成列表行，避免消耗自动编号。
+                    // 删除的列表项不排成列表行，避免消耗自动编号；调用方
+                    // 会把它折进前一项的同一行。
                     vec![marked]
                 } else {
-                    vec![format!("- {marked}")]
+                    // 按原起始号写显式序号：解析器只认组首的序号，后续
+                    // 项的编号按位次顺延，与模型里的 number 一致。
+                    vec![format!("{number}. {marked}")]
                 }
             }
-            MarkdownBlock::Aligned { text, .. } => {
-                let marked = if overlay.text.is_empty() {
-                    mark_str(text, deleted)
-                } else {
-                    mark_fragments(&overlay.text)
-                };
+            MarkdownBlock::Aligned { .. } => {
+                let marked = styled_marked(&overlay.text, raw);
                 if marked.is_empty() {
                     return Vec::new();
                 }
@@ -197,8 +258,19 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                 };
                 vec![line.to_string()]
             }
-            // Html（含序号表等标记行）不落到纸上。
-            _ => Vec::new(),
+            // Html 原样写回：研究报告的区段标记（摘要 / 参考文献 / 目录）、
+            // <div> 块都靠它们分区。两类标记行除外——序号表 / 居中居右的
+            // 标记由表格、对齐行的序列化负责，写两遍会乱。删除的 Html 不写。
+            MarkdownBlock::Html(line) => {
+                if deleted
+                    || parse_numbered_table_marker(line)
+                    || parse_align_marker(line).is_some()
+                {
+                    Vec::new()
+                } else {
+                    vec![line.clone()]
+                }
+            }
         },
     }
 }
@@ -266,7 +338,7 @@ fn cell_markdown(
     format!(" {marked} ")
 }
 
-/// 片段序列 → 带哨兵文字。
+/// 片段序列 → 带哨兵文字（无样式投影的格子 / 图片标签用）。
 fn mark_fragments(fragments: &[Fragment]) -> String {
     fragments
         .iter()
@@ -278,15 +350,146 @@ fn mark_fragments(fragments: &[Fragment]) -> String {
         .collect()
 }
 
-fn mark_str(text: &str, deleted: bool) -> String {
-    if text.is_empty() {
+/// 按纯文本字符偏移把片段序列切成若干段（段内列表拆行用）。
+fn split_fragments_at(fragments: &[Fragment], offsets: &[usize]) -> Vec<Vec<Fragment>> {
+    let mut parts: Vec<Vec<Fragment>> = Vec::new();
+    let mut current: Vec<Fragment> = Vec::new();
+    let mut pos = 0usize;
+    let mut offsets = offsets.iter().copied().peekable();
+    for fragment in fragments {
+        let mut rest: &str = &fragment.text;
+        while !rest.is_empty() {
+            if let Some(off) = offsets.peek().copied() {
+                if pos == off {
+                    parts.push(std::mem::take(&mut current));
+                    offsets.next();
+                    continue;
+                }
+                if pos + rest.chars().count() > off {
+                    let take = off - pos;
+                    let mut chars = rest.chars();
+                    let head: String = chars.by_ref().take(take).collect();
+                    current.push(Fragment {
+                        kind: fragment.kind,
+                        text: head,
+                    });
+                    pos += take;
+                    rest = chars.as_str();
+                    continue;
+                }
+            }
+            pos += rest.chars().count();
+            current.push(Fragment {
+                kind: fragment.kind,
+                text: rest.to_string(),
+            });
+            rest = "";
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+/// 文本块的标注投影：Same / Added 片段落在新版原文里（按纯文本字符 ↔
+/// 原文 byte 映射取带样式的切片），Deleted 片段是旧文字、不存在于新版
+/// 原文，直接以纯文本包哨兵。`**加粗**` 这类行内标记按成对归属：切片
+/// 里出现半个加粗标记时，把另一半也包进来，哨兵不会切断样式边界。
+fn styled_marked(fragments: &[Fragment], raw: &str) -> String {
+    if fragments.is_empty() {
         return String::new();
     }
-    if deleted {
-        mark_deleted(text)
-    } else {
-        mark_added(text)
+    if fragments.iter().all(|f| f.is_same()) {
+        return raw.to_string();
     }
+    let plain = crate::export::plain_text(raw);
+    let plain_chars = plain.chars().count();
+    let toggles = bold_toggle_offsets(raw);
+    // 每个纯文本字符在原文里的字节起点；行内标记（`**`、转义）不占位。
+    let raw_boundaries: Vec<usize> = raw
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(raw.len()))
+        .collect();
+    let visible = inline_visible_char_indices(raw, &raw_boundaries);
+    let mut starts: Vec<usize> = vec![usize::MAX; plain_chars];
+    for (char_index, (byte, _)) in raw.char_indices().enumerate() {
+        let end_visible = visible[char_index + 1];
+        if end_visible > visible[char_index] && end_visible <= plain_chars {
+            starts[end_visible - 1] = byte;
+        }
+    }
+    let mut out = String::new();
+    // 坐标系是**新版纯文本**：Deleted 片段是旧文字、不存在于新版，不推进
+    // 坐标；Same / Added 才按坐标取原文切片。
+    let mut offset = 0usize;
+    for fragment in fragments {
+        let count = fragment.char_count();
+        if fragment.kind == RedlineKind::Deleted {
+            out.push_str(&mark_deleted(&fragment.text));
+            continue;
+        }
+        if offset >= plain_chars {
+            out.push_str(&mark_added(&fragment.text));
+        } else {
+            let start_byte = starts[offset];
+            if start_byte == usize::MAX {
+                out.push_str(&mark_added(&fragment.text));
+            } else {
+                let mut end_byte = if offset + count < plain_chars {
+                    starts[offset + count].min(raw.len())
+                } else {
+                    raw.len()
+                };
+                if end_byte == usize::MAX {
+                    end_byte = raw.len();
+                }
+                let (mut from, mut to) = (start_byte, end_byte.max(start_byte));
+                // 成对归属：切片里的加粗标记，把它的另一半也包进来。
+                for (ti, &toggle) in toggles.iter().enumerate() {
+                    if toggle >= from && toggle < to {
+                        let partner = toggles[ti ^ 1];
+                        from = from.min(partner);
+                        to = to.max(partner + 2);
+                    }
+                }
+                let slice = &raw[from..to.min(raw.len())];
+                match fragment.kind {
+                    RedlineKind::Same => out.push_str(slice),
+                    _ => out.push_str(&mark_added(slice)),
+                }
+            }
+        }
+        offset += count;
+    }
+    out
+}
+
+/// 原文里未成对转义的 `**` / `__` 标记的字节位置（出现顺序即配对方：
+/// 第 1、2 个一对，第 3、4 个一对，与 `inline_atoms` 同一口径）。
+fn bold_toggle_offsets(raw: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    while index + 1 < bytes.len() {
+        let is_marker = (bytes[index] == b'*' && bytes[index + 1] == b'*')
+            || (bytes[index] == b'_' && bytes[index + 1] == b'_');
+        let marker = is_marker.then_some(2usize);
+        if let Some(width) = marker {
+            // 转义（`\**`）与三个以上连续星号里的不计：与 inline_atoms
+            // 的 escaped_at / 成对口径保持一致即可，花脸稿由程序生成，
+            // 正常只会出现成对的 `**`。
+            let escaped = index > 0 && bytes[index - 1] == b'\\';
+            let triple_star =
+                width == 2 && bytes[index] == b'*' && bytes.get(index + 2) == Some(&b'*');
+            if !escaped && !triple_star {
+                offsets.push(index);
+            }
+            index += width;
+        } else {
+            index += 1;
+        }
+    }
+    offsets
 }
 
 #[cfg(test)]
@@ -470,14 +673,23 @@ mod tests {
 
     #[test]
     fn a_move_note_is_emitted_beside_the_paragraph() {
-        let marked = marked("甲段。\n\n乙段。\n\n丙段。", "甲段。\n\n丙段。\n\n乙段。");
+        let old = "第一段内容比较长一些用于识别。\n\n第二段内容也比较长用于识别移动。\n\n第三段内容同样足够长可以识别。";
+        let new = "第三段内容同样足够长可以识别。\n\n第一段内容比较长一些用于识别。\n\n第二段内容也比较长用于识别移动。";
+        let marked = marked(old, new);
         let readable = readable(&marked);
         assert!(
-            readable.contains("[（本段由原第2段移来）]"),
-            "移动注记作为加框小注落在纸上：{readable}"
+            readable.contains("（本段由原第3段移来）"),
+            "移动注记作为括注落在纸上：{readable}"
         );
-        assert!(readable.contains("乙段。"), "移动段正常排出：{readable}");
-        assert!(!readable.contains("~乙段。~"), "原位置无删除线：{readable}");
+        assert!(
+            !readable.contains("[（本段"),
+            "移动注记不带新增框：{readable}"
+        );
+        assert!(
+            readable.contains("第三段内容"),
+            "移动段正常排出：{readable}"
+        );
+        assert!(!readable.contains('~'), "原位置无删除线：{readable}");
     }
 
     #[test]

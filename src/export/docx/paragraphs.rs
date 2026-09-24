@@ -10,7 +10,7 @@ use crate::export::docx::{
 };
 use crate::export::title;
 use crate::export::title::TitlePlan;
-use crate::export::{LineAlign, redline_slice_lines};
+use crate::export::{LineAlign, RedlineKind, redline_slice_lines};
 use crate::images;
 use crate::models::{DraftInput, ListNumbering, TemplateKind};
 use docx_rs::*;
@@ -111,12 +111,66 @@ pub(crate) fn letter_security_paragraph(input: &DraftInput) -> Paragraph {
 }
 
 pub(crate) fn heading_paragraph(level: u8, text: &str, bold: BoldFont<'_>) -> Paragraph {
+    heading_paragraph_with_number(level, None, text, bold)
+}
+
+/// 与 [`heading_paragraph`] 相同，另带自动编号前缀。新增标题整体加框时
+/// （方案规则 8：含编号），编号 run 也套同一个蓝色字符边框。
+pub(crate) fn heading_paragraph_with_number(
+    level: u8,
+    number: Option<&str>,
+    text: &str,
+    bold: BoldFont<'_>,
+) -> Paragraph {
     let font = match level {
         2 => "黑体",
         3 => "楷体_GB2312",
         _ => "仿宋_GB2312",
     };
+    let mut paragraph = Paragraph::new();
     // 花脸稿：标题改动也就地标注（哨兵在解析后注入，marked_runs 按块注格式）。
+    let whole_added =
+        number.is_some() && crate::export::whole_chunk_kind(text) == Some(RedlineKind::Added);
+    if let Some(number) = number
+        && !matches!(
+            crate::export::whole_chunk_kind(text),
+            Some(RedlineKind::Deleted | RedlineKind::Added)
+        )
+    {
+        // 无标记的普通标题：编号与文字同一个 run，保持 XML 文字连续
+        // （检索与复制都不被打断）。
+        let joined = format!("{number}{text}");
+        let runs = marked_runs(&joined, |piece| {
+            let mut run = Run::new()
+                .add_text(piece)
+                .fonts(chinese_fonts(font))
+                .size(BODY_SIZE);
+            if level == 5 {
+                run = apply_bold(run, bold);
+            }
+            run
+        });
+        return finish_heading(add_runs(paragraph, runs));
+    }
+    if let Some(number) = number {
+        let mut run = Run::new()
+            .add_text(number)
+            .fonts(chinese_fonts(font))
+            .size(BODY_SIZE);
+        if level == 5 {
+            run = apply_bold(run, bold);
+        }
+        if whole_added {
+            run = run.text_border(
+                TextBorder::new()
+                    .border_type(BorderType::Single)
+                    .size(4)
+                    .space(1)
+                    .color("1F4E9E"),
+            );
+        }
+        paragraph = paragraph.add_run(run);
+    }
     let runs = marked_runs(text, |piece| {
         let mut run = Run::new()
             .add_text(piece)
@@ -127,7 +181,12 @@ pub(crate) fn heading_paragraph(level: u8, text: &str, bold: BoldFont<'_>) -> Pa
         }
         run
     });
-    add_runs(Paragraph::new(), runs)
+    finish_heading(add_runs(paragraph, runs))
+}
+
+/// 标题段的共有版式：两端对齐、首行缩进两汉字、固定行距、与下段同页。
+fn finish_heading(paragraph: Paragraph) -> Paragraph {
+    paragraph
         .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(

@@ -34,7 +34,7 @@ pub(crate) use papers::{
     red_head_approval_tex_with_numbering, white_paper_tex, white_paper_tex_with_numbering,
 };
 pub(crate) use text::{
-    attachment_summary_tex, body_text_to_tex, latex_name, marked_tex_escape,
+    attachment_summary_tex, body_text_to_tex, latex_name, marked_heading_tex, marked_tex_escape,
     red_approval_title_content_tex, security_commands, tex_escape, tex_spaced,
     tex_spread_signature, title_content_tex,
 };

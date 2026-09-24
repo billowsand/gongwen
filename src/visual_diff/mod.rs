@@ -30,3 +30,248 @@ pub(crate) use compare::diff_documents;
 pub(crate) use model::DocumentModel;
 pub(crate) use postprocess::{redline_research_docx, redline_research_tex_files};
 pub(crate) use serialize::to_marked_markdown;
+
+#[cfg(test)]
+mod review_probes {
+    //! 审查探针（docs/version-diff-redesign.md 第 ① 期验收）：每条对应一个
+    //! 曾实际复现的行为回归，期望值写在注释里。
+
+    use super::*;
+    use crate::export::{
+        REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN, RedlineKind,
+    };
+
+    fn run(old: &str, new: &str) -> String {
+        let overlay = diff_documents(
+            &DocumentModel::from_markdown(old),
+            &DocumentModel::from_markdown(new),
+        );
+        to_marked_markdown(&overlay)
+            .chars()
+            .map(|ch| match ch {
+                REDLINE_DEL_OPEN | REDLINE_DEL_CLOSE => "~".to_string(),
+                REDLINE_ADD_OPEN => "[".to_string(),
+                REDLINE_ADD_CLOSE => "]".to_string(),
+                other => other.to_string(),
+            })
+            .collect()
+    }
+
+    /// 去掉 ~删除~ 得新版，去掉 [新增] 得旧版。
+    fn sides(marked: &str) -> (String, String) {
+        let (mut old, mut new) = (String::new(), String::new());
+        let (mut in_del, mut in_add) = (false, false);
+        for ch in marked.chars() {
+            match ch {
+                '~' => in_del = !in_del,
+                '[' => in_add = true,
+                ']' => in_add = false,
+                _ => {
+                    if !in_add {
+                        old.push(ch);
+                    }
+                    if !in_del {
+                        new.push(ch);
+                    }
+                }
+            }
+        }
+        (old, new)
+    }
+
+    #[test]
+    fn p1_bold_only() {
+        // 期望：加粗是纯格式变化，前后无任何标记，原文样式保留。
+        let out = run("请按时报送材料。", "请**按时**报送材料。");
+        assert_eq!(out, "请**按时**报送材料。");
+    }
+
+    #[test]
+    fn p2_invariant() {
+        // 期望：任意输入，去 Added 得旧文、去 Deleted 得新文（逐字）。
+        let cases = [
+            (
+                "请市教育局于八月前报送有关材料。",
+                "请省教育厅于九月前报送相关材料。",
+            ),
+            (
+                "各单位要高度重视，认真组织，确保按时完成。",
+                "各部门要充分重视，精心组织，确保如期完成。",
+            ),
+            ("会议定于下周一上午召开。", "会议定于下周三下午在三楼召开。"),
+            (
+                "加强组织领导，落实工作责任。",
+                "切实加强组织领导，全面落实工作责任。",
+            ),
+            (
+                "请于8月10日前报送，逾期视为放弃。",
+                "请于8月15日前报送相关材料，逾期视为自动放弃。",
+            ),
+        ];
+        for (old, new) in cases {
+            let out = run(old, new);
+            let (o, n) = sides(&out);
+            assert_eq!(n, new, "新版文字被归并吃掉/多出：{out}");
+            assert_eq!(o, old, "旧版文字被归并吃掉/多出：{out}");
+        }
+    }
+
+    #[test]
+    fn p3_inline_list_renumber() {
+        // 期望：只有「新增工作」一项加框，圈号顺移无标记（规则：编号是
+        // 程序生成的版式，不算修改）。
+        let old = "工作要求如下：\n1. 甲项工作\n2. 乙项工作\n3. 丙项工作";
+        let new = "工作要求如下：\n1. 新增工作\n2. 甲项工作\n3. 乙项工作\n4. 丙项工作";
+        let out = run(old, new);
+        assert!(out.contains("[新增工作"), "新增项加框：{out}");
+        assert!(
+            !out.contains("~②~") && !out.contains("[③]"),
+            "圈号顺移无标记：{out}"
+        );
+    }
+
+    #[test]
+    fn p4_multi_sentence_paragraph() {
+        // 期望：只标改动的词，不整段替换。
+        let old =
+            "第一句保持不变。第二句也不变动。第三句这里写甲，后面写乙，最后写丙。第四句不变。";
+        let new =
+            "第一句保持不变。第二句也不变动。第三句这里写丁，后面写戊，最后写己。第四句不变。";
+        let out = run(old, new);
+        assert!(out.contains("~甲~[丁]"), "第一个词就地标注：{out}");
+        assert!(
+            !out.starts_with('~') && !out.starts_with('['),
+            "不整段替换：{out}"
+        );
+        let old = "关于报送材料的通知已经收悉。请各单位于月底前报送。逾期不报的视为放弃。";
+        let new = "关于报送材料的通知已经收到。请各部门于月底前报送。逾期未报的视为放弃。";
+        let out = run(old, new);
+        assert!(out.contains("~收悉~[收到]"), "每句只标改动的词：{out}");
+        assert!(
+            !out.starts_with('~') && !out.starts_with('['),
+            "不整段替换：{out}"
+        );
+    }
+
+    #[test]
+    fn p5_heading_insert() {
+        // 期望：插入 / 删除标题，其余标题无标记；删除的标题不显示编号。
+        let old = "## 工作目标\n\n目标段。\n\n## 保障措施\n\n保障段。";
+        let new = "## 工作目标\n\n目标段。\n\n## 职责分工\n\n分工段。\n\n## 保障措施\n\n保障段。";
+        let out = run(old, new);
+        assert!(out.contains("[职责分工]"), "新增标题整项加框：{out}");
+        assert!(
+            !out.contains("~工作目标~") && !out.contains("~保障措施~"),
+            "其余标题无标记：{out}"
+        );
+        let out = run(new, old);
+        assert!(out.contains("~职责分工~"), "删除的标题文字画删除线：{out}");
+        assert!(
+            !out.lines().any(|line| line.starts_with("## ~")),
+            "删除的标题不排成标题行（不带编号）：{out}"
+        );
+    }
+
+    #[test]
+    fn p6_research_markers() {
+        // 期望：摘要 / 参考文献等区段标记原样保留，mdx 靠它们分区。
+        let text = "<!-- [摘要] -->\n\n摘要内容。\n\n## 引言\n\n正文。\n\n<!-- [参考文献] -->\n\n[1] 文献。";
+        let changed = text.replace("正文。", "正文改。");
+        let out = run(text, &changed);
+        assert!(out.contains("<!-- [摘要] -->"), "摘要标记保留：{out}");
+        assert!(
+            out.contains("<!-- [参考文献] -->"),
+            "参考文献标记保留：{out}"
+        );
+    }
+
+    #[test]
+    fn p7_split_plus_edit() {
+        // 期望：拆分 + 别处改一个字，只标改的那个字，无移动注记。
+        let old = "A 第一句。A 第二句。\n\nB 段落。";
+        let new = "A 第一句。\n\nA 第二句。\n\nB 段落改。";
+        let out = run(old, new);
+        assert!(out.contains("[改]"), "只标改动的字：{out}");
+        assert!(!out.contains("移来"), "拆分不触发移动注记：{out}");
+    }
+
+    #[test]
+    fn p8_move() {
+        // 期望：只有真正挪动的第三段带移动注记。
+        let old = "第一段内容比较长一些用于识别。\n\n第二段内容也比较长用于识别移动。\n\n第三段内容同样足够长可以识别。";
+        let new = "第三段内容同样足够长可以识别。\n\n第一段内容比较长一些用于识别。\n\n第二段内容也比较长用于识别移动。";
+        let out = run(old, new);
+        assert_eq!(out.matches("移来").count(), 1, "恰好一个移动注记：{out}");
+        assert!(
+            out.contains("（本段由原第3段移来）"),
+            "注记在挪动的段上：{out}"
+        );
+    }
+
+    #[test]
+    fn p9_title_wrap_marks() {
+        // 期望：标题折行后，两行的标注各自成对（行尾补闭合、行首补开启），
+        // 第二行里的新增部分仍然是 Added。
+        use crate::export::{mark_added, redline_slice_lines};
+        let title = format!(
+            "关于进一步{}的通知",
+            mark_added("加强和改进全省教育系统安全生产工作")
+        );
+        let plain = crate::export::strip_redline(&title);
+        let mid = plain.chars().count() / 2;
+        let l1: String = plain.chars().take(mid).collect();
+        let l2: String = plain.chars().skip(mid).collect();
+        let lines = redline_slice_lines(&title, &[l1, l2]);
+        assert_eq!(lines.len(), 2, "切成两行：{lines:?}");
+        for line in &lines {
+            let chunks = crate::export::redline_chunks(line);
+            assert_eq!(
+                chunks
+                    .iter()
+                    .filter(|chunk| chunk.kind == RedlineKind::Added)
+                    .count(),
+                1,
+                "每行各有一个成对的新增块：{chunks:?}"
+            );
+            let opens = line
+                .chars()
+                .filter(|ch| matches!(*ch, REDLINE_DEL_OPEN | REDLINE_ADD_OPEN))
+                .count();
+            let closes = line
+                .chars()
+                .filter(|ch| matches!(*ch, REDLINE_DEL_CLOSE | REDLINE_ADD_CLOSE))
+                .count();
+            assert_eq!(opens, closes, "哨兵成对出现：{line:?}");
+        }
+    }
+
+    #[test]
+    fn p10_standalone_list_numbering() {
+        // 期望：独立列表三项编号是 1、2、3（重新解析后仍是一组）。
+        let old = "要求如下。\n\n1. 甲项工作\n2. 乙项工作\n3. 丙项工作";
+        let new = "要求如下。\n\n1. 甲项工作\n2. 乙项工作改\n3. 丙项工作";
+        let overlay = diff_documents(
+            &DocumentModel::from_markdown(old),
+            &DocumentModel::from_markdown(new),
+        );
+        let md = to_marked_markdown(&overlay);
+        let numbers: Vec<usize> = crate::export::parse_markdown(&md)
+            .into_iter()
+            .filter_map(|block| match block {
+                crate::export::MarkdownBlock::OrderedListItem { number, .. } => Some(number),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(numbers, vec![1, 2, 3], "重新解析后编号连续：{md}");
+    }
+
+    #[test]
+    fn p11_insert_paragraph_first() {
+        // 期望：只在最前面插一段时，只有新段加框，后面的段落无移动注记。
+        let old = "第一段内容比较长一些用于识别。\n\n第二段内容也比较长用于识别移动。\n\n第三段内容同样足够长可以识别。";
+        let new = format!("新写的一段开头。\n\n{old}");
+        let out = run(old, &new);
+        assert!(out.contains("[新写的一段开头。]"), "新段加框：{out}");
+        assert!(!out.contains("移来"), "后面的段落不误标移动：{out}");
+    }
+}
