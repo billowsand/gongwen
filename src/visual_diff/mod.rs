@@ -308,6 +308,49 @@ mod review_probes {
         assert_eq!(out.trim_end(), expected);
     }
 
+    #[test]
+    fn p13_moves_next_to_a_changed_table_or_list() {
+        // 第 ③ 期测试 F1：同一节里有锚不上的表格 / 列表项时，段落下标与组内块
+        // 序号不再相等。移动识别曾把两套下标混用：越界 panic（界面线程上就是
+        // 闪退），或者比错段落、把移动标成整段删 + 整段增。
+        // 期望：不 panic；挪到最前的那段带移来注记、正文不加框。
+        let paragraphs = |order: [usize; 3]| {
+            let texts = [
+                "第一段说明经费来源和预算科目。",
+                "第二段说明经费用途和开支范围。",
+                "第三段说明经费管理要求和报销流程。",
+            ];
+            order.map(|index| texts[index]).join("\n\n")
+        };
+        let rotated = paragraphs([2, 0, 1]);
+        let original = paragraphs([0, 1, 2]);
+        for (old_head, new_head) in [
+            (
+                "| 项目 | 金额 |\n| --- | ---: |\n| 会场 | 12000元 |",
+                "| 项目 | 金额 |\n| --- | ---: |\n| 会场 | 15000元 |",
+            ),
+            (
+                "- 甲项工作。\n\n- 乙项工作。",
+                "- 甲项工作。\n\n- 乙项工作要细化。",
+            ),
+        ] {
+            for tail in ["", "\n\n妥否，请指示。"] {
+                let old = format!("{old_head}\n\n{original}{tail}");
+                let new = format!("{new_head}\n\n{rotated}{tail}");
+                let out = run(&old, &new);
+                assert!(out.contains("本段由原第"), "应识别为移动：{out}");
+                assert!(
+                    !out.contains("[第三段说明经费管理要求和报销流程。]")
+                        && !out.contains("~第三段说明经费管理要求和报销流程。~"),
+                    "挪动的段不该整段删 + 整段增：{out}"
+                );
+                // 同组里改过的表格格 / 列表项照常就地标注（移动不做两侧还原
+                // 检查：挪走的段只在新位置出现一次，带注记）。
+                assert!(out.contains('['), "同组改动照常标注：{out}");
+            }
+        }
+    }
+
     /// 带哨兵的 Markdown 还原两侧的可见文字：去新增得旧版、去删除得新版；
     /// 行内标记（`**`、转义）与空白不计。
     fn both_sides(marked: &str) -> (String, String) {

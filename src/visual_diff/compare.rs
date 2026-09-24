@@ -671,27 +671,32 @@ fn resolve_run(
     for &b in &anchored_new {
         is_anchored_new[b] = true;
     }
-    for (a, &old_pos) in old_para.iter().enumerate() {
-        if is_anchored_old[a] {
-            continue;
-        }
-        for (b, &new_pos) in new_para.iter().enumerate() {
-            if is_anchored_new[b] {
-                continue;
-            }
+    // 下标一律是 `old_para` / `new_para` 里的序号（与 `sim`、`texts` 同一套），
+    // 换成组内块序号只在取块时做一次：组里夹着表格、列表项时两者不相等，
+    // 混用会比错段落甚至越界。
+    for (a, _) in is_anchored_old
+        .iter()
+        .enumerate()
+        .filter(|(_, anchored)| !**anchored)
+    {
+        for (b, _) in is_anchored_new
+            .iter()
+            .enumerate()
+            .filter(|(_, anchored)| !**anchored)
+        {
             let score = sim(a, b);
-            let old_text = texts(true, old_pos);
-            let new_text = texts(false, new_pos);
+            let old_text = texts(true, a);
+            let new_text = texts(false, b);
             let identical = normalize_key(old_text) == normalize_key(new_text);
             if score >= MOVE_SIMILARITY && (identical || !containment(old_text, new_text)) {
-                candidates.push((score, old_pos, new_pos));
+                candidates.push((score, a, b));
             }
         }
     }
     candidates.sort_by(|x, y| y.0.total_cmp(&x.0));
-    for (_, old_pos, new_pos) in candidates {
-        let oi = old_para[old_pos];
-        let ni = new_para[new_pos];
+    for (_, a, b) in candidates {
+        let oi = old_para[a];
+        let ni = new_para[b];
         if used_old[oi] || used_new[ni] {
             continue;
         }
