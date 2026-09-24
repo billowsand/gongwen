@@ -34,7 +34,7 @@ cargo build --release --locked --no-default-features --features linux-portal-dia
 在 Hyprland 下会让候选窗贴在编辑框底部不动；全屏时该区域几乎等于整块屏幕，
 Hyprland 的下沿越界判定会把候选窗翻到光标上方的负坐标处，即屏幕之外——表现为
 「看不见候选框但照样能打字、能选词」（参见 [hyprwm/Hyprland#5399][hypr-5399]、
-[#8773][hypr-8773]）。`src/ime.rs` 把上报区域收窄成真正的光标矩形来规避。
+[#8773][hypr-8773]）。`src/ime/cursor.rs` 把上报区域收窄成真正的光标矩形来规避。
 
 候选窗位置仍然不对时，用调试开关打印实际上报的坐标：
 
