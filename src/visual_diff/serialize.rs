@@ -500,13 +500,25 @@ impl MarkWriter {
     }
 
     /// 纯文本（旧文字、兜底字符）：关掉加粗，行内标记字符转义。
+    ///
+    /// 公式（`$…$` / `$$…$$`）原样写：公式源码不是 Markdown，转义了下标 `_`、
+    /// 命令 `\` 就变成字面字符，纸上印出「w_i」。
     fn push_plain(&mut self, text: &str) {
         self.set_bold(false);
-        for ch in text.chars() {
-            if matches!(ch, '*' | '_' | '`' | '\\') {
-                self.out.push('\\');
+        let mut rest = text;
+        while !rest.is_empty() {
+            let (plain, formula) = match super::tokenize::find_formula(rest) {
+                Some(range) => (&rest[..range.start], &rest[range.clone()]),
+                None => (rest, ""),
+            };
+            for ch in plain.chars() {
+                if matches!(ch, '*' | '_' | '`' | '\\') {
+                    self.out.push('\\');
+                }
+                self.out.push(ch);
             }
-            self.out.push(ch);
+            self.out.push_str(formula);
+            rest = &rest[plain.len() + formula.len()..];
         }
     }
 
@@ -747,6 +759,29 @@ mod tests {
             "公式整体删旧插新：{readable}"
         );
         assert!(!readable.contains('\n'), "不拆出额外行：{readable}");
+    }
+
+    #[test]
+    fn a_deleted_formula_is_written_verbatim() {
+        // 第 ③ 期测试 F7：删除侧按纯文本转义，公式里的下标 `_`、命令 `\`
+        // 被转义成字面字符，纸上印出「w_i」。公式要原样写，公式外照常转义。
+        let marked = marked(
+            r"其中$w_i$为权重，a_b 与 $\sum_{i} x_i$。",
+            r"其中$\omega_i$为权重。",
+        );
+        let readable = readable(&marked);
+        assert!(
+            readable.contains("$w_i$") && !readable.contains(r"w\_i"),
+            "删除侧公式原样：{readable}"
+        );
+        assert!(
+            readable.contains(r"$\sum_{i} x_i$"),
+            "删除侧公式里的命令与下标原样：{readable}"
+        );
+        assert!(
+            readable.contains(r"a\_b"),
+            "公式外的下划线照常转义：{readable}"
+        );
     }
 
     #[test]

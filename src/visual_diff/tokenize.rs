@@ -29,6 +29,12 @@ fn formula_re() -> &'static Regex {
     FORMULA_RE.get_or_init(|| Regex::new(r"\$\$.+?\$\$|\$[^$]+?\$").expect("公式正则"))
 }
 
+/// 文本里第一个公式（`$$…$$` / `$…$`）的字节范围。与分词用同一条正则：
+/// 分词认作一个整体 token 的，序列化时也按公式原样写。
+pub(crate) fn find_formula(text: &str) -> Option<std::ops::Range<usize>> {
+    formula_re().find(text).map(|found| found.range())
+}
+
 fn date_re() -> &'static Regex {
     DATE_RE.get_or_init(|| {
         Regex::new(concat!(
