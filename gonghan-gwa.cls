@@ -117,18 +117,30 @@
 % 框在行尾开口、下一行接着画，读起来仍是一个框。
 \newcommand{\GwBoxTop}{0.96em}% 上边在基线之上的高度
 \newcommand{\GwBoxBottom}{0.24em}% 下边在基线之下的深度
-\newcommand{\GwBoxBar}{\textcolor{GwaAddColor}{\rule[-\GwBoxBottom]{0.5pt}{\dimexpr\GwBoxTop+\GwBoxBottom\relax}}}
+% 上下两条边的实际位置（\CJKunderdblline 按 depth / gap 排出来的）：上边占
+% [Top-0.5pt, Top]，下边占 [-Bottom-0.5pt, -Bottom]。竖边要把两条边的线宽都
+% 盖住：比 Top+Bottom 长 0.5pt，往下多伸 0.5pt。
+\newcommand{\GwBoxBar}{\textcolor{GwaAddColor}{\rule[-\dimexpr\GwBoxBottom+0.5pt\relax]{0.5pt}{\dimexpr\GwBoxTop+\GwBoxBottom+0.5pt\relax}}}
+% 竖边自带两截 2pt 的上下边：\CJKunderdblline 画不满框内 1.5pt 的留白，只靠它
+% 画上下边，角上差 0.7pt 左右合不上。左竖边的短边向右伸，右竖边的向左伸。
+\newcommand{\GwBoxStubs}{\textcolor{GwaAddColor}{\rlap{\rule[-\dimexpr\GwBoxBottom+0.5pt\relax]{2pt}{0.5pt}}\rule[\dimexpr\GwBoxTop-0.5pt\relax]{2pt}{0.5pt}}}
+% 断行：竖边与框里的字之间绝不能断（\nobreak，留白用 \kern 而不是 \hspace——
+% \hspace 是胶，胶是断点，左竖边会落在上一行行尾）。框**前面**留一个很贵的断点
+% （\penalty5000）：正文里字与字之间到处能断，几乎用不上它；表格窄列这种再没
+% 别处可断的地方，宁可在框前换行，也不冲出格子。
+\newcommand{\GwBoxBarL}{\penalty5000\GwBoxBar\rlap{\GwBoxStubs}\nobreak}
+\newcommand{\GwBoxBarR}{\nobreak\llap{\GwBoxStubs}\GwBoxBar}
 % 括号内的补充说明排小一号楷体：框的上下边按 em 算会跟着缩，与前后正文
 % 的框错开。换字号之前先把框高按当前（正文）字号定死。
 \newcommand{\GwBoxFreeze}{\edef\GwBoxTop{\the\dimexpr0.96em\relax}\edef\GwBoxBottom{\the\dimexpr0.24em\relax}}
 \newcommand{\GwAddLines}[1]{\CJKunderdblline[depth=-\GwBoxTop, gap=\dimexpr\GwBoxTop+\GwBoxBottom-0.5pt\relax, thickness=0.5pt, skip=false, format=\color{GwaAddColor}]{#1}}
-\newcommand{\GwAdd}[1]{\GwBoxBar\GwAddLines{\hspace{1.5pt}#1\hspace{1.5pt}}\GwBoxBar}
+\newcommand{\GwAdd}[1]{\GwBoxBarL\GwAddLines{\kern1.5pt#1\kern1.5pt}\GwBoxBarR}
 % 宏内的字体切换只作用到第一个字（xeCJKfntef 逐字处理），所以加粗、括号楷体
 % 要包在宏外面；一段新增因此按样式切成几截，首截画左边、末截画右边、中间
 % 只画上下边，拼起来仍是一个框。
-\newcommand{\GwAddOpen}[1]{\GwBoxBar\GwAddLines{\hspace{1.5pt}#1}}
+\newcommand{\GwAddOpen}[1]{\GwBoxBarL\GwAddLines{\kern1.5pt#1}}
 \newcommand{\GwAddMid}[1]{\GwAddLines{#1}}
-\newcommand{\GwAddClose}[1]{\GwAddLines{#1\hspace{1.5pt}}\GwBoxBar}
+\newcommand{\GwAddClose}[1]{\GwAddLines{#1\kern1.5pt}\GwBoxBarR}
 
 % ========== 字体设置 ==========
 % 正文 Markdown 加粗沿用当前字体，通过 xeCJK 自动伪粗实现，不切换为独立黑体。

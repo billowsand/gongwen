@@ -420,6 +420,28 @@ mod tex_tests {
                     .contains("\\addfontfeatures{Color=C00000}\\addCJKfontfeatures{Color=C00000}"),
                 "{name} 的 \\GwDel 要用字体颜色染红删掉的字"
             );
+            // 新增框的竖边不能与框里的字断开到两行（第 ③ 期测试 F3：表格窄列里
+            // 左竖边落在上一行行尾）：留白用 \kern（\hspace 是胶、是断点），竖边
+            // 与字之间 \nobreak，断点只留在框前面。
+            assert!(
+                source
+                    .contains("\\GwBoxBarL}{\\penalty5000\\GwBoxBar\\rlap{\\GwBoxStubs}\\nobreak}")
+                    && source.contains("\\GwBoxBarR}{\\nobreak\\llap{\\GwBoxStubs}\\GwBoxBar}"),
+                "{name} 的竖边要粘住框里的字、框前留断点"
+            );
+            assert!(
+                source.contains("\\GwAddLines{\\kern1.5pt#1\\kern1.5pt}"),
+                "{name} 的 \\GwAdd 留白要用 \\kern"
+            );
+            let add_macros = source
+                .lines()
+                .filter(|line| line.contains("command{\\GwAdd"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !add_macros.contains("\\hspace"),
+                "{name} 的新增框宏里不能再有 \\hspace：{add_macros}"
+            );
         }
     }
 
@@ -770,8 +792,8 @@ mod research_tests {
             "删掉的公式整体标注：{chapter}"
         );
         assert!(
-            chapter.contains("\\GwAddAtom{\\hspace{1.5pt}\\(x^{3}\\)}")
-                && chapter.contains("\\GwAddLines{可知，另见附件\\hspace{1.5pt}}\\GwBoxBar{}"),
+            chapter.contains("\\GwBoxBarL\\GwAddAtom{\\kern1.5pt\\(x^{3}\\)}")
+                && chapter.contains("\\GwAddLines{可知，另见附件\\kern1.5pt}\\GwBoxBarR{}"),
             "分章应有新增宏：{chapter}"
         );
         for ch in ['\u{E000}', '\u{E001}', '\u{E002}', '\u{E003}'] {

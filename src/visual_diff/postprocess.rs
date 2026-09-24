@@ -25,7 +25,7 @@ pub(crate) const ADD_COLOR: &str = "1F4E9E";
 /// 直接编译失败），它们整体装盒后另画标记：
 /// - `\GwDelAtom`：红色，盒子竖直中线画一道删除线；
 /// - `\GwAddAtom`：只画上下边，与两侧文字的新增框接成一个框（竖边由首尾的
-///   `\GwBoxBar` 画）；内容比框高时上下边让开；
+///   `\GwBoxBarL` / `\GwBoxBarR` 画）；内容比框高时上下边让开；
 /// - `\GwAddDisplay`：独立公式整块套框。
 pub(crate) const REDLINE_PREAMBLE_TEX: &str = concat!(
     "% gongwen 花脸稿标记（视觉 diff 引擎注入）\n",
@@ -42,9 +42,13 @@ pub(crate) const REDLINE_PREAMBLE_TEX: &str = concat!(
     "\\textcolor{GwaDelColor}{\\CJKunderwave[symbol=\\GwStrikeUnit, depth=\\GwWaveDepth]{#1}}}}\n",
     "\\providecommand{\\GwBoxTop}{0.96em}\n",
     "\\providecommand{\\GwBoxBottom}{0.24em}\n",
-    "\\providecommand{\\GwBoxBar}{\\textcolor{GwaAddColor}{\\rule[-\\GwBoxBottom]{0.5pt}{\\dimexpr\\GwBoxTop+\\GwBoxBottom\\relax}}}\n",
+    // 竖边、角上的短边、断行规则与 gonghan-gwa.cls 同名宏一致（见那里的注释）。
+    "\\providecommand{\\GwBoxBar}{\\textcolor{GwaAddColor}{\\rule[-\\dimexpr\\GwBoxBottom+0.5pt\\relax]{0.5pt}{\\dimexpr\\GwBoxTop+\\GwBoxBottom+0.5pt\\relax}}}\n",
+    "\\providecommand{\\GwBoxStubs}{\\textcolor{GwaAddColor}{\\rlap{\\rule[-\\dimexpr\\GwBoxBottom+0.5pt\\relax]{2pt}{0.5pt}}\\rule[\\dimexpr\\GwBoxTop-0.5pt\\relax]{2pt}{0.5pt}}}\n",
+    "\\providecommand{\\GwBoxBarL}{\\penalty5000\\GwBoxBar\\rlap{\\GwBoxStubs}\\nobreak}\n",
+    "\\providecommand{\\GwBoxBarR}{\\nobreak\\llap{\\GwBoxStubs}\\GwBoxBar}\n",
     "\\providecommand{\\GwAddLines}[1]{\\CJKunderdblline[depth=-\\GwBoxTop, gap=\\dimexpr\\GwBoxTop+\\GwBoxBottom-0.5pt\\relax, thickness=0.5pt, skip=false, format=\\color{GwaAddColor}]{#1}}\n",
-    "\\providecommand{\\GwAdd}[1]{\\GwBoxBar\\GwAddLines{\\hspace{1.5pt}#1\\hspace{1.5pt}}\\GwBoxBar}\n",
+    "\\providecommand{\\GwAdd}[1]{\\GwBoxBarL\\GwAddLines{\\kern1.5pt#1\\kern1.5pt}\\GwBoxBarR}\n",
     "\\ifdefined\\GwAtomBox\\else\\newsavebox{\\GwAtomBox}\\fi\n",
     "\\ifdefined\\GwAtomTop\\else\\newdimen\\GwAtomTop\\fi\n",
     "\\ifdefined\\GwAtomBottom\\else\\newdimen\\GwAtomBottom\\fi\n",
@@ -56,7 +60,7 @@ pub(crate) const REDLINE_PREAMBLE_TEX: &str = concat!(
     "\\ifdim\\dimexpr\\ht\\GwAtomBox+1pt\\relax>\\GwAtomTop\\GwAtomTop=\\dimexpr\\ht\\GwAtomBox+1pt\\relax\\fi",
     "\\GwAtomBottom=\\dimexpr\\GwBoxBottom\\relax",
     "\\ifdim\\dimexpr\\dp\\GwAtomBox+1pt\\relax>\\GwAtomBottom\\GwAtomBottom=\\dimexpr\\dp\\GwAtomBox+1pt\\relax\\fi",
-    "\\rlap{\\textcolor{GwaAddColor}{\\rule[-\\GwAtomBottom]{\\wd\\GwAtomBox}{0.5pt}}}",
+    "\\rlap{\\textcolor{GwaAddColor}{\\rule[-\\dimexpr\\GwAtomBottom+0.5pt\\relax]{\\wd\\GwAtomBox}{0.5pt}}}",
     "\\rlap{\\textcolor{GwaAddColor}{\\rule[\\dimexpr\\GwAtomTop-0.5pt\\relax]{\\wd\\GwAtomBox}{0.5pt}}}",
     "\\usebox\\GwAtomBox}\n",
     "\\providecommand{\\GwAddDisplay}[1]{{\\color{GwaAddColor}\\fboxrule=0.5pt\\fboxsep=3pt",
@@ -269,13 +273,13 @@ fn mark_tex_span(kind: RedlineKind, content: &str) -> String {
     let mut out = String::new();
     let mut seen = 0usize;
     if kind == RedlineKind::Added {
-        out.push_str("\\GwBoxBar");
+        out.push_str("\\GwBoxBarL");
     }
     render_segments(&parts, kind, leaves, &mut seen, &mut out);
     if kind == RedlineKind::Added {
-        // 收尾的 `{}` 不能省：XeTeX 里汉字是字母，`\GwBoxBar为` 会被读成
-        // 一个叫「GwBoxBar为」的控制序列。
-        out.push_str("\\GwBoxBar{}");
+        // 收尾的 `{}` 不能省：XeTeX 里汉字是字母，`\GwBoxBarR为` 会被读成
+        // 一个叫「GwBoxBarR为」的控制序列。
+        out.push_str("\\GwBoxBarR{}");
     }
     out
 }
@@ -317,7 +321,8 @@ fn render_segments(
                     out.push_str(&format!("\\{name}{{{content}}}"));
                     continue;
                 }
-                let pad = "\\hspace{1.5pt}";
+                // `\kern` 不是断点（`\hspace` 是胶，会让竖边与字断开到两行）。
+                let pad = "\\kern1.5pt";
                 let body = format!(
                     "{}{content}{}",
                     if first { pad } else { "" },
@@ -687,8 +692,8 @@ mod tests {
         let out = inject_tex_redline(&input);
         assert_eq!(
             out,
-            "确定\\GwBoxBar\\GwAddLines{\\hspace{1.5pt}，}\\textbf{\\GwAddLines{重点报送}}\
-             \\GwAddLines{（含说明），}\\textbf{\\GwAddLines{并按季度校准\\hspace{1.5pt}}}\\GwBoxBar{}。"
+            "确定\\GwBoxBarL\\GwAddLines{\\kern1.5pt，}\\textbf{\\GwAddLines{重点报送}}\
+             \\GwAddLines{（含说明），}\\textbf{\\GwAddLines{并按季度校准\\kern1.5pt}}\\GwBoxBarR{}。"
         );
         let input = format!("前{REDLINE_DEL_OPEN}\\textbf{{权重}}由专家{REDLINE_DEL_CLOSE}后");
         assert_eq!(
@@ -705,8 +710,8 @@ mod tests {
             format!("取{REDLINE_ADD_OPEN}\\(p \\ge 0.8\\)的样本\\cite{{a,b}}{REDLINE_ADD_CLOSE}。");
         assert_eq!(
             inject_tex_redline(&input),
-            "取\\GwBoxBar\\GwAddAtom{\\hspace{1.5pt}\\(p \\ge 0.8\\)}\\GwAddLines{的样本}\
-             \\GwAddAtom{\\cite{a,b}\\hspace{1.5pt}}\\GwBoxBar{}。"
+            "取\\GwBoxBarL\\GwAddAtom{\\kern1.5pt\\(p \\ge 0.8\\)}\\GwAddLines{的样本}\
+             \\GwAddAtom{\\cite{a,b}\\kern1.5pt}\\GwBoxBarR{}。"
         );
         let input = format!("其中{REDLINE_DEL_OPEN}\\(w_i\\){REDLINE_DEL_CLOSE}为权重");
         assert_eq!(
@@ -717,7 +722,7 @@ mod tests {
         let input = format!("{REDLINE_ADD_OPEN}正文\\footnote{{注释}}{REDLINE_ADD_CLOSE}");
         assert_eq!(
             inject_tex_redline(&input),
-            "\\GwBoxBar\\GwAddLines{\\hspace{1.5pt}正文\\hspace{1.5pt}}\\footnote{注释}\\GwBoxBar{}"
+            "\\GwBoxBarL\\GwAddLines{\\kern1.5pt正文\\kern1.5pt}\\footnote{注释}\\GwBoxBarR{}"
         );
     }
 
