@@ -123,34 +123,20 @@ impl DocumentModel {
         let blocks = parse_markdown_located_with_numbering(markdown, numbering)
             .into_iter()
             .map(|located| {
-                let raw = raw_text_of(&located.block).map(|text| {
-                    // 段内列表的生成编号是版式不是正文：原文与纯文本都剥掉，
-                    // 序列化后由导出器按设置重新生成（编号顺移因此不标注）。
-                    if located.generated_prefixes.is_empty() {
-                        text.to_string()
-                    } else {
-                        strip_char_ranges(text, &located.generated_prefixes)
-                    }
-                });
-                // 各项起点换算成纯文本（行内标记剥离后）的字符偏移，序列化
-                // 拆行用。generated_prefixes 是可见文本的字符范围。
-                let inline_items = match (&located.block, &raw) {
-                    (text_bearing, Some(raw)) if raw_text_of(text_bearing).is_some() => {
-                        let mut items = Vec::new();
-                        let mut visible_before = 0usize;
-                        for range in &located.generated_prefixes {
-                            let byte = raw
-                                .char_indices()
-                                .nth(range.start - visible_before)
-                                .map(|(byte, _)| byte)
-                                .unwrap_or(raw.len());
-                            items.push(crate::export::inline_visible_char_index(raw, byte));
-                            visible_before += range.end - range.start;
-                        }
-                        items
-                    }
-                    _ => Vec::new(),
-                };
+                // 段内列表的生成编号是版式不是正文：原文与纯文本都剥掉，
+                // 序列化后由导出器按设置重新生成（编号顺移因此不标注）。
+                // generated_prefixes 是**可见字符**范围，原文里还夹着 `**`
+                // 等行内标记，所以要经逐字映射换算成原文字节范围再剥。
+                let raw = raw_text_of(&located.block)
+                    .map(|text| strip_visible_ranges(text, &located.generated_prefixes));
+                // 各项起点：剥掉编号后的纯文本字符偏移（序列化拆行用）。
+                // 编号本身不含行内标记，逐个扣掉前面各编号的长度即可。
+                let mut inline_items = Vec::new();
+                let mut stripped_before = 0usize;
+                for range in &located.generated_prefixes {
+                    inline_items.push(range.start - stripped_before);
+                    stripped_before += range.end - range.start;
+                }
                 // 比较一律在行内标记剥离后的可见文字上进行（`**` 加粗这类
                 // 格式改动因此不产生标注）。
                 let block = match (&located.block, &raw) {
@@ -271,10 +257,26 @@ fn replace_text(block: &MarkdownBlock, plain: String) -> MarkdownBlock {
 }
 
 /// 按字符范围从文本里剥掉若干段（剥段内列表的生成编号用）。
-fn strip_char_ranges(text: &str, ranges: &[Range<usize>]) -> String {
-    text.chars()
-        .enumerate()
-        .filter(|(index, _)| !ranges.iter().any(|range| range.contains(index)))
-        .map(|(_, ch)| ch)
-        .collect()
+fn strip_visible_ranges(text: &str, ranges: &[Range<usize>]) -> String {
+    if ranges.is_empty() {
+        return text.to_string();
+    }
+    let spans = crate::export::inline_char_spans(text);
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for range in ranges {
+        let (Some(first), Some(last)) = (
+            spans.get(range.start),
+            spans.get(range.end.saturating_sub(1)),
+        ) else {
+            continue;
+        };
+        if range.is_empty() || first.0.start < cursor {
+            continue;
+        }
+        out.push_str(&text[cursor..first.0.start]);
+        cursor = last.0.end;
+    }
+    out.push_str(&text[cursor..]);
+    out
 }

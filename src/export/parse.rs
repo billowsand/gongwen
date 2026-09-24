@@ -738,6 +738,19 @@ pub(crate) fn normalize_ordered_item_punctuation(items: &[String]) -> Vec<String
             if trimmed.is_empty() {
                 return String::new();
             }
+            if trimmed.contains(super::is_redline_sentinel) {
+                // 花脸稿：项尾可能是一段删除（被删的下一项折进来）。标点看
+                // 删除之外的新版文字——它已有句末标点就原样保留，否则在最后
+                // 补一个；不能把标点补在删除线后面，那会凭空多出一个句号。
+                let visible: String = super::redline_chunks(trimmed)
+                    .into_iter()
+                    .filter(|chunk| chunk.kind != super::RedlineKind::Deleted)
+                    .map(|chunk| chunk.text)
+                    .collect();
+                if visible.trim_end().ends_with(terminal_punctuation) {
+                    return trimmed.to_string();
+                }
+            }
             let body = trimmed.trim_end_matches(terminal_punctuation);
             let punctuation = if semicolon_style && index + 1 < items.len() {
                 '；'

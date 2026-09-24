@@ -15,9 +15,9 @@
 use super::model::VisualBlock;
 use super::overlay::{BlockOverlay, Fragment, OverlayItem, RedlineOverlay, TableOverlay};
 use crate::export::{
-    ColumnAlign, LineAlign, MarkdownBlock, MarkdownSection, RedlineKind, TableSpan,
-    inline_visible_char_indices, mark_added, mark_deleted, parse_align_marker,
-    parse_numbered_table_marker, table_span_at,
+    ColumnAlign, LineAlign, MarkdownBlock, MarkdownSection, REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN,
+    REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN, RedlineKind, TableSpan, inline_char_spans, mark_added,
+    mark_deleted, parse_align_marker, parse_numbered_table_marker, table_span_at,
 };
 
 /// 一个待拼接的块：行内用 `\n`；`tight_after` 为 true 时与下一个块之间也
@@ -162,10 +162,9 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                     // 段内列表：各项重新拆成列表行（编号由导出器按设置再生成），
                     // 引导句与列表行用单换行紧接——空行隔开解析器就不再认作
                     // 段内列表，圈号会丢。
-                    let parts = split_fragments_at(&overlay.text, inline_items);
+                    let parts = project(&overlay.text, raw, inline_items);
                     let mut lines: Vec<String> = Vec::new();
-                    for (index, part) in parts.iter().enumerate() {
-                        let marked = mark_fragments(part);
+                    for (index, marked) in parts.into_iter().enumerate() {
                         if index == 0 {
                             if !marked.is_empty() {
                                 lines.push(marked);
@@ -350,146 +349,117 @@ fn mark_fragments(fragments: &[Fragment]) -> String {
         .collect()
 }
 
-/// 按纯文本字符偏移把片段序列切成若干段（段内列表拆行用）。
-fn split_fragments_at(fragments: &[Fragment], offsets: &[usize]) -> Vec<Vec<Fragment>> {
-    let mut parts: Vec<Vec<Fragment>> = Vec::new();
-    let mut current: Vec<Fragment> = Vec::new();
+/// 文本块的标注投影：把纯文本上算出的片段投影回带样式的原文。
+///
+/// 坐标系是**新版纯文本**：Same / Added 片段逐字对到原文里的可见字符，
+/// 取它带转义的原文切片（[`inline_char_spans`]），加粗不照搬原文里的
+/// `**`，而是按每个字的加粗状态重新开合；Deleted 片段是旧文字，不在新版
+/// 原文里，按纯文本转义后包哨兵，不推进坐标。
+///
+/// 哨兵只在「加粗已闭合」时开合，所以 `**` 永远不会跨过哨兵——导出器先按
+/// 哨兵切块、再在块内配对加粗，跨块的 `**` 会配错。
+///
+/// `splits` 是新版纯文本里的切点（段内列表各项的起点），在切点处另起一段
+/// 输出；位于切点上的 Deleted 片段归前一段（被删的项折进前一项末尾，不占
+/// 编号）。没有切点时恒返回一段。
+fn project(fragments: &[Fragment], raw: &str, splits: &[usize]) -> Vec<String> {
+    if fragments.is_empty() {
+        return vec![String::new()];
+    }
+    if splits.is_empty() && fragments.iter().all(Fragment::is_same) {
+        return vec![raw.to_string()];
+    }
+    let spans = inline_char_spans(raw);
+    let mut writer = MarkWriter::default();
+    let mut parts: Vec<String> = Vec::new();
+    let mut splits = splits.iter().copied().peekable();
     let mut pos = 0usize;
-    let mut offsets = offsets.iter().copied().peekable();
     for fragment in fragments {
-        let mut rest: &str = &fragment.text;
-        while !rest.is_empty() {
-            if let Some(off) = offsets.peek().copied() {
-                if pos == off {
-                    parts.push(std::mem::take(&mut current));
-                    offsets.next();
-                    continue;
-                }
-                if pos + rest.chars().count() > off {
-                    let take = off - pos;
-                    let mut chars = rest.chars();
-                    let head: String = chars.by_ref().take(take).collect();
-                    current.push(Fragment {
-                        kind: fragment.kind,
-                        text: head,
-                    });
-                    pos += take;
-                    rest = chars.as_str();
-                    continue;
-                }
+        if fragment.kind == RedlineKind::Deleted {
+            writer.set_kind(RedlineKind::Deleted);
+            writer.push_plain(&fragment.text);
+            continue;
+        }
+        for ch in fragment.text.chars() {
+            while splits.next_if(|split| *split <= pos).is_some() {
+                parts.push(writer.finish());
             }
-            pos += rest.chars().count();
-            current.push(Fragment {
-                kind: fragment.kind,
-                text: rest.to_string(),
-            });
-            rest = "";
+            writer.set_kind(fragment.kind);
+            match spans.get(pos) {
+                Some((source, visible, bold)) if *visible == ch => {
+                    writer.set_bold(*bold);
+                    writer.out.push_str(&raw[source.clone()]);
+                }
+                // 对不上号（不该发生）：退回纯文本，宁可丢样式也不丢字。
+                _ => writer.push_plain(&ch.to_string()),
+            }
+            pos += 1;
         }
     }
-    parts.push(current);
+    parts.push(writer.finish());
     parts
 }
 
-/// 文本块的标注投影：Same / Added 片段落在新版原文里（按纯文本字符 ↔
-/// 原文 byte 映射取带样式的切片），Deleted 片段是旧文字、不存在于新版
-/// 原文，直接以纯文本包哨兵。`**加粗**` 这类行内标记按成对归属：切片
-/// 里出现半个加粗标记时，把另一半也包进来，哨兵不会切断样式边界。
-fn styled_marked(fragments: &[Fragment], raw: &str) -> String {
-    if fragments.is_empty() {
-        return String::new();
-    }
-    if fragments.iter().all(|f| f.is_same()) {
-        return raw.to_string();
-    }
-    let plain = crate::export::plain_text(raw);
-    let plain_chars = plain.chars().count();
-    let toggles = bold_toggle_offsets(raw);
-    // 每个纯文本字符在原文里的字节起点；行内标记（`**`、转义）不占位。
-    let raw_boundaries: Vec<usize> = raw
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(raw.len()))
-        .collect();
-    let visible = inline_visible_char_indices(raw, &raw_boundaries);
-    let mut starts: Vec<usize> = vec![usize::MAX; plain_chars];
-    for (char_index, (byte, _)) in raw.char_indices().enumerate() {
-        let end_visible = visible[char_index + 1];
-        if end_visible > visible[char_index] && end_visible <= plain_chars {
-            starts[end_visible - 1] = byte;
-        }
-    }
-    let mut out = String::new();
-    // 坐标系是**新版纯文本**：Deleted 片段是旧文字、不存在于新版，不推进
-    // 坐标；Same / Added 才按坐标取原文切片。
-    let mut offset = 0usize;
-    for fragment in fragments {
-        let count = fragment.char_count();
-        if fragment.kind == RedlineKind::Deleted {
-            out.push_str(&mark_deleted(&fragment.text));
-            continue;
-        }
-        if offset >= plain_chars {
-            out.push_str(&mark_added(&fragment.text));
-        } else {
-            let start_byte = starts[offset];
-            if start_byte == usize::MAX {
-                out.push_str(&mark_added(&fragment.text));
-            } else {
-                let mut end_byte = if offset + count < plain_chars {
-                    starts[offset + count].min(raw.len())
-                } else {
-                    raw.len()
-                };
-                if end_byte == usize::MAX {
-                    end_byte = raw.len();
-                }
-                let (mut from, mut to) = (start_byte, end_byte.max(start_byte));
-                // 成对归属：切片里的加粗标记，把它的另一半也包进来。
-                for (ti, &toggle) in toggles.iter().enumerate() {
-                    if toggle >= from && toggle < to {
-                        let partner = toggles[ti ^ 1];
-                        from = from.min(partner);
-                        to = to.max(partner + 2);
-                    }
-                }
-                let slice = &raw[from..to.min(raw.len())];
-                match fragment.kind {
-                    RedlineKind::Same => out.push_str(slice),
-                    _ => out.push_str(&mark_added(slice)),
-                }
-            }
-        }
-        offset += count;
-    }
-    out
+/// 逐字写出带哨兵、带加粗的 Markdown；维护当前哨兵类型与加粗开合。
+#[derive(Default)]
+struct MarkWriter {
+    out: String,
+    kind: Option<RedlineKind>,
+    bold: bool,
 }
 
-/// 原文里未成对转义的 `**` / `__` 标记的字节位置（出现顺序即配对方：
-/// 第 1、2 个一对，第 3、4 个一对，与 `inline_atoms` 同一口径）。
-fn bold_toggle_offsets(raw: &str) -> Vec<usize> {
-    let mut offsets = Vec::new();
-    let bytes = raw.as_bytes();
-    let mut index = 0usize;
-    while index + 1 < bytes.len() {
-        let is_marker = (bytes[index] == b'*' && bytes[index + 1] == b'*')
-            || (bytes[index] == b'_' && bytes[index + 1] == b'_');
-        let marker = is_marker.then_some(2usize);
-        if let Some(width) = marker {
-            // 转义（`\**`）与三个以上连续星号里的不计：与 inline_atoms
-            // 的 escaped_at / 成对口径保持一致即可，花脸稿由程序生成，
-            // 正常只会出现成对的 `**`。
-            let escaped = index > 0 && bytes[index - 1] == b'\\';
-            let triple_star =
-                width == 2 && bytes[index] == b'*' && bytes.get(index + 2) == Some(&b'*');
-            if !escaped && !triple_star {
-                offsets.push(index);
-            }
-            index += width;
-        } else {
-            index += 1;
+impl MarkWriter {
+    fn set_bold(&mut self, bold: bool) {
+        if self.bold != bold {
+            self.out.push_str("**");
+            self.bold = bold;
         }
     }
-    offsets
+
+    fn set_kind(&mut self, kind: RedlineKind) {
+        let current = self.kind.unwrap_or(RedlineKind::Same);
+        if current == kind {
+            return;
+        }
+        self.set_bold(false);
+        self.close_mark();
+        match kind {
+            RedlineKind::Same => {}
+            RedlineKind::Deleted => self.out.push(REDLINE_DEL_OPEN),
+            RedlineKind::Added => self.out.push(REDLINE_ADD_OPEN),
+        }
+        self.kind = Some(kind);
+    }
+
+    fn close_mark(&mut self) {
+        match self.kind.take() {
+            Some(RedlineKind::Deleted) => self.out.push(REDLINE_DEL_CLOSE),
+            Some(RedlineKind::Added) => self.out.push(REDLINE_ADD_CLOSE),
+            _ => {}
+        }
+    }
+
+    /// 纯文本（旧文字、兜底字符）：关掉加粗，行内标记字符转义。
+    fn push_plain(&mut self, text: &str) {
+        self.set_bold(false);
+        for ch in text.chars() {
+            if matches!(ch, '*' | '_' | '`' | '\\') {
+                self.out.push('\\');
+            }
+            self.out.push(ch);
+        }
+    }
+
+    fn finish(&mut self) -> String {
+        self.set_bold(false);
+        self.close_mark();
+        std::mem::take(&mut self.out)
+    }
+}
+
+/// 单段投影（标题、正文、列表项、对齐行）。
+fn styled_marked(fragments: &[Fragment], raw: &str) -> String {
+    project(fragments, raw, &[]).concat()
 }
 
 #[cfg(test)]

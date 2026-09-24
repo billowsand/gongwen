@@ -1469,33 +1469,110 @@ fn diff_texts(old_text: &str, new_text: &str) -> Vec<Fragment> {
 // ── 归并规则（规则 4）────────────────────────────────────────────────────────
 
 /// 夹缝吸收：两个改动片段之间 ≤ 2 个未改动字，吸收进改动合成一段。
-/// 夹缝文字**两侧各放一份**（前一片段末尾追加、后一片段开头追加），
-/// 保证不变式成立：去掉 Added 片段得旧文、去掉 Deleted 片段得新文。
+///
+/// 做法是把「改动 + 短夹缝 + 改动 …」连成一个区域，整体改写成「删旧
+/// 文字、插新文字」：旧文字 = 区域里去掉 Added 的部分，新文字 = 去掉
+/// Deleted 的部分。这样不论夹缝两侧是删 / 增、删 / 删还是增 / 增，不变式
+/// （去 Added 得旧文、去 Deleted 得新文）都按构造成立。
+///
+/// 只有同时含删和增的区域才吸收：纯删（「请各~有关~单位~认真~组织」）或
+/// 纯增本来就清楚，硬并成「删一整串、再加回夹缝」反而难读。改写后再按
+/// 词剥掉两侧相同的首尾，免得夹缝在删、增两边各印一遍。
 fn absorb_gaps(fragments: &mut Vec<Fragment>) {
-    if fragments.len() < 3 {
-        return;
-    }
     let mut out: Vec<Fragment> = Vec::with_capacity(fragments.len());
     let mut index = 0usize;
     while index < fragments.len() {
-        let absorbable = index > 0
-            && index + 1 < fragments.len()
-            && fragments[index].is_same()
-            && fragments[index].char_count() <= MERGE_GAP_CHARS
-            && (!out.last().is_some_and(Fragment::is_same) || !fragments[index + 1].is_same());
-        if absorbable {
-            let gap = fragments[index].text.clone();
-            if let Some(last) = out.last_mut() {
-                last.text.push_str(&gap);
-            }
-            let mut next = fragments[index + 1].clone();
-            next.text = format!("{gap}{}", next.text);
-            out.push(next);
-            index += 2;
-        } else {
-            out.push(fragments[index].clone());
+        if fragments[index].is_same() {
+            push_fragment(&mut out, fragments[index].clone());
             index += 1;
+            continue;
         }
+        // 区域：从这个改动起，吞掉后面「短夹缝 + 改动」的组合。
+        let mut end = index;
+        loop {
+            while end < fragments.len() && !fragments[end].is_same() {
+                end += 1;
+            }
+            let gap_then_change = end + 1 < fragments.len()
+                && fragments[end].char_count() <= MERGE_GAP_CHARS
+                && !fragments[end + 1].is_same();
+            if !gap_then_change {
+                break;
+            }
+            end += 1;
+        }
+        let region = &fragments[index..end];
+        let has_gap = region.iter().any(Fragment::is_same);
+        let mixed = region.iter().any(|f| f.kind == RedlineKind::Deleted)
+            && region.iter().any(|f| f.kind == RedlineKind::Added);
+        if has_gap && mixed {
+            let old_text: String = region
+                .iter()
+                .filter(|f| f.kind != RedlineKind::Added)
+                .map(|f| f.text.as_str())
+                .collect();
+            let new_text: String = region
+                .iter()
+                .filter(|f| f.kind != RedlineKind::Deleted)
+                .map(|f| f.text.as_str())
+                .collect();
+            for fragment in replacement(&old_text, &new_text) {
+                push_fragment(&mut out, fragment);
+            }
+        } else {
+            for fragment in region {
+                push_fragment(&mut out, fragment.clone());
+            }
+        }
+        index = end;
+    }
+    *fragments = out;
+}
+
+/// 「删 old、插 new」，按词剥掉两边相同的首尾（剥下来的是未改动文字）。
+fn replacement(old_text: &str, new_text: &str) -> Vec<Fragment> {
+    let old_tokens = tokenize(old_text);
+    let new_tokens = tokenize(new_text);
+    let prefix = old_tokens
+        .iter()
+        .zip(&new_tokens)
+        .take_while(|(a, b)| a.text == b.text)
+        .count();
+    let max_suffix = old_tokens.len().min(new_tokens.len()) - prefix;
+    let suffix = old_tokens
+        .iter()
+        .rev()
+        .zip(new_tokens.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a.text == b.text)
+        .count();
+    let join = |tokens: &[Token]| -> String { tokens.iter().map(|t| t.text.as_str()).collect() };
+    [
+        Fragment::same(join(&new_tokens[..prefix])),
+        Fragment::deleted(join(&old_tokens[prefix..old_tokens.len() - suffix])),
+        Fragment::added(join(&new_tokens[prefix..new_tokens.len() - suffix])),
+        Fragment::same(join(&new_tokens[new_tokens.len() - suffix..])),
+    ]
+    .into_iter()
+    .filter(|fragment| !fragment.text.is_empty())
+    .collect()
+}
+
+/// 删、增文字完全相同的相邻片段（「~要~[要]」）抵消成未改动。
+fn cancel_identical_pairs(fragments: &mut Vec<Fragment>) {
+    let mut out: Vec<Fragment> = Vec::with_capacity(fragments.len());
+    for fragment in fragments.drain(..) {
+        if let Some(last) = out.last()
+            && !last.is_same()
+            && !fragment.is_same()
+            && last.kind != fragment.kind
+            && last.text == fragment.text
+        {
+            let same = Fragment::same(out.pop().expect("刚取过").text);
+            push_fragment(&mut out, same);
+            continue;
+        }
+        push_fragment(&mut out, fragment);
     }
     *fragments = out;
 }
@@ -1592,6 +1669,7 @@ fn replace_heavy_sentences(fragments: &mut Vec<Fragment>) {
 }
 
 fn apply_merge_rules(fragments: &mut Vec<Fragment>) {
+    cancel_identical_pairs(fragments);
     absorb_gaps(fragments);
     // 句读切分在夹缝吸收之后做：夹缝复制出的文字也要参与分句判定。
     let split = split_at_sentence_breaks(std::mem::take(fragments));
@@ -1599,6 +1677,7 @@ fn apply_merge_rules(fragments: &mut Vec<Fragment>) {
     replace_heavy_sentences(fragments);
     let merged = merge_fragments(std::mem::take(fragments));
     *fragments = merged;
+    cancel_identical_pairs(fragments);
 }
 
 // ── 相似度与归一化 ────────────────────────────────────────────────────────────

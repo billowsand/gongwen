@@ -448,6 +448,17 @@ pub(crate) fn inline_segments(text: &str) -> Vec<InlineSegment> {
     segments
 }
 
+/// 行内 Markdown 的逐个可见字符：来源字节范围、显示字符与是否加粗。
+///
+/// 与 [`plain_text`] 一一对应（第 i 项就是纯文本的第 i 个字符）。花脸稿把
+/// 纯文本上算出的标注投影回原文时用它取带转义的原文切片与加粗状态。
+pub(crate) fn inline_char_spans(text: &str) -> Vec<(std::ops::Range<usize>, char, bool)> {
+    inline_atoms(text)
+        .into_iter()
+        .map(|atom| (atom.source, atom.ch, atom.bold))
+        .collect()
+}
+
 /// 行内 Markdown 排版后，原文某个字节位置对应到第几个可见字符。
 ///
 /// 预览按源码行拆分点击区域时需要这层换算：反引号和成对的加粗标记不占版面，
