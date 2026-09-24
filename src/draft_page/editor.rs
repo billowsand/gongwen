@@ -89,8 +89,8 @@ pub(crate) fn active_source_line(ctx: &egui::Context, text: &str) -> usize {
 
 #[derive(Clone, Copy)]
 pub(crate) struct EditorLineVisual {
-    top: f32,
-    bottom: f32,
+    pub(crate) top: f32,
+    pub(crate) bottom: f32,
     baseline: f32,
 }
 
