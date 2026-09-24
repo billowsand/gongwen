@@ -1085,6 +1085,30 @@ mod tests {
         assert_eq!(harness.doc.generated_markdown, before, "Ctrl+Z 撤回还原");
     }
 
+    /// 新增的空行也标「（空行）」：从前只有删掉的空行（画在空隙里）有，新增的
+    /// 空行只是一行绿底，看不出加了什么（第 ③ 期测试 F10）。
+    #[test]
+    fn an_added_blank_line_shows_a_placeholder() {
+        let mut harness = Harness::new();
+        let before = texts(&harness.frame(Vec::new()))
+            .matches("（空行）")
+            .count();
+        harness.doc.generated_markdown = harness
+            .doc
+            .generated_markdown
+            .replace("\n\n各单位要高度重视。", "\n\n\n各单位要高度重视。");
+        harness.frame(Vec::new());
+        let output = harness.frame(Vec::new());
+        let text = texts(&output);
+        assert_eq!(
+            text.matches("（空行）").count(),
+            before + 1,
+            "新增的空行补一个「（空行）」：{text}"
+        );
+        // 它只是画上去的标签，不进正文。
+        assert!(!harness.doc.generated_markdown.contains("（空行）"));
+    }
+
     /// 改字之后花脸稿在后台防抖重算：停手之前不发任务；回来的结果若已过期就丢掉。
     #[test]
     fn the_redline_catches_up_in_the_background() {

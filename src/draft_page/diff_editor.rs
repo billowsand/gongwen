@@ -220,10 +220,30 @@ pub(crate) fn diff_editor(
             theme::text_muted(),
         );
     }
+    let source_lines: Vec<&str> = text.split('\n').collect();
     for hunk in hunks {
         for row in &hunk.added {
             if let Some((top, bottom)) = line_span(row.line) {
                 paint_bar(&painter, origin.x, top, bottom, origin.y, theme::success());
+            }
+            // 新增的是空行：绿底空行看不出加了什么，与删除的空行一样补一个淡色
+            // 「（空行）」。它不是文本，只画在行尾，不占光标位置；一打字就消失。
+            let blank = source_lines
+                .get(row.line)
+                .is_some_and(|line| crate::diff::is_blank_line(line));
+            if blank && let Some(first) = firsts.get(row.line) {
+                let placed = &galley.rows[*first];
+                let mut job = egui::text::LayoutJob::default();
+                crate::diff_view::blank_placeholder(
+                    &mut job,
+                    egui::FontId::proportional(font_size),
+                );
+                let label = painter.layout_job(job);
+                painter.galley(
+                    egui::pos2(origin.x + placed.rect().right(), origin.y + placed.min_y()),
+                    label,
+                    theme::text_muted(),
+                );
             }
         }
     }
