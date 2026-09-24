@@ -1,16 +1,17 @@
 //! 花脸稿标记在预览里的画法（方案需求结论第 10 条，与 PDF / Word 一致）：
 //!
-//! - 删除：红色 `#C00000` 文字 + 同色直删除线穿过字身。直接用 egui 的
-//!   `TextFormat::strikethrough`，断行、两端对齐都由排版自己带着走。
+//! - 删除：红色 `#C00000` 文字 + 同色直删除线穿过字身。线要排完版之后按字形
+//!   位置自己画：egui 自带的 `strikethrough` 画在行盒中线上，固定行距下会落到
+//!   字脚（见 [`LineMarks::paint_strike`]）。
 //! - 新增：蓝色 `#1F4E9E` 细框，框内文字保持正文色。egui 没有「字符边框」，
-//!   框要排完版之后按字形位置自己画。框**随正文断行**：跨行时在行尾开口、
+//!   同样排完版之后按字形位置自己画。框**随正文断行**：跨行时在行尾开口、
 //!   下一行接着画，左右竖边只在整段新增的首尾各一笔——与 `gonghan-gwa.cls`
 //!   的 `\GwAddOpen` / `\GwAddMid` / `\GwAddClose` 同一规则。
 //!
-//! 新增块在排版任务里靠一个不画出来的记号认出：`underline` 设成线宽 0、颜色为
-//! 新增蓝。epaint 对线宽 0 的描边一律跳过（`Stroke::is_empty`），所以它不产生
-//! 任何图形；而记号跟着 section 的格式走，避头尾硬换行、两端对齐逐行切片都会
-//! 原样复制它，画框时从 galley 自带的排版任务里就能逐字取回。
+//! 标记在排版任务里靠一个不画出来的记号认出：`underline` 设成线宽 0、颜色为
+//! 删除红或新增蓝。epaint 对线宽 0 的描边一律跳过（`Stroke::is_empty`），所以它
+//! 不产生任何图形；而记号跟着 section 的格式走，避头尾硬换行、两端对齐逐行切片
+//! 都会原样复制它，画线画框时从 galley 自带的排版任务里就能逐字取回。
 
 use crate::export::{self, RedlineKind};
 use crate::preview::Metrics;
@@ -28,6 +29,22 @@ const ADDED_MARKER: Stroke = Stroke {
     width: 0.0,
     color: ADD_COLOR,
 };
+/// 删除块的记号，同上。
+const DELETED_MARKER: Stroke = Stroke {
+    width: 0.0,
+    color: DEL_COLOR,
+};
+
+/// 格式上的标记记号。
+fn marker_kind(format: &TextFormat) -> RedlineKind {
+    if format.underline == ADDED_MARKER {
+        RedlineKind::Added
+    } else if format.underline == DELETED_MARKER {
+        RedlineKind::Deleted
+    } else {
+        RedlineKind::Same
+    }
+}
 
 /// 框的上边在基线之上的高度、下边在基线之下的深度（`\GwBoxTop` / `\GwBoxBottom`）。
 const BOX_TOP_EM: f32 = 0.96;
@@ -35,20 +52,18 @@ const BOX_BOTTOM_EM: f32 = 0.24;
 /// 框线宽 0.5pt，删除线 0.6pt（`\GwStrikeUnit`）。
 const BOX_LINE_PT: f32 = 0.5;
 const STRIKE_PT: f32 = 0.6;
+/// 一段删除里没有汉字可量时，删除线在基线之上的高度。
+const STRIKE_FALLBACK_EM: f32 = 0.38;
 /// 框的左右竖边离字的距离（`\GwAdd` 里的 `\hspace{1.5pt}`）。
 const BOX_PAD_PT: f32 = 1.5;
 
 /// 给一段文字的格式打上花脸稿标记。`Same` 原样返回。
-pub(crate) fn mark_format(
-    mut format: TextFormat,
-    kind: RedlineKind,
-    metrics: &Metrics,
-) -> TextFormat {
+pub(crate) fn mark_format(mut format: TextFormat, kind: RedlineKind) -> TextFormat {
     match kind {
         RedlineKind::Same => {}
         RedlineKind::Deleted => {
             format.color = DEL_COLOR;
-            format.strikethrough = Stroke::new(metrics.pt(STRIKE_PT).max(1.0), DEL_COLOR);
+            format.underline = DELETED_MARKER;
         }
         RedlineKind::Added => format.underline = ADDED_MARKER,
     }
@@ -58,13 +73,7 @@ pub(crate) fn mark_format(
 /// 从格式反推花脸稿标记。一致性测试据此把预览的排版任务还原成 `(文字, 类型)` 序列。
 #[cfg(test)]
 pub(crate) fn format_kind(format: &TextFormat) -> RedlineKind {
-    if format.underline == ADDED_MARKER {
-        RedlineKind::Added
-    } else if format.strikethrough.color == DEL_COLOR && format.strikethrough.width > 0.0 {
-        RedlineKind::Deleted
-    } else {
-        RedlineKind::Same
-    }
+    marker_kind(format)
 }
 
 /// 新增块前后留的空隙：框的竖边画在这道缝里，不压到相邻的字。
@@ -87,11 +96,7 @@ pub(crate) fn append_marked_text(
             continue;
         }
         let gap = chunk_gap(metrics, previous, chunk.kind);
-        job.append(
-            &chunk.text,
-            gap,
-            mark_format(format.clone(), chunk.kind, metrics),
-        );
+        job.append(&chunk.text, gap, mark_format(format.clone(), chunk.kind));
         previous = chunk.kind;
     }
 }
@@ -123,24 +128,24 @@ pub(crate) fn chunk_gap(metrics: &Metrics, previous: RedlineKind, current: Redli
     }
 }
 
-/// 一个排版任务里逐字（不含换行符）的新增状态：`Some(字号)` 表示这个字在新增块里。
-/// 整段没有新增时返回 `None`，调用方据此跳过画框。
-pub(crate) struct AddedBoxes {
-    chars: Vec<Option<f32>>,
+/// 一个排版任务里逐字（不含换行符）的花脸稿标记：`Some((类型, 字号))`。
+/// 整段没有标记时 [`LineMarks::of`] 返回 `None`，调用方据此跳过。
+pub(crate) struct LineMarks {
+    chars: Vec<Option<(RedlineKind, f32)>>,
     /// 这段文字之前 / 之后紧邻的字是否也在新增块里。整段排版时都是 false；
     /// 逐行各自排版的路径（含公式的混排行）靠它知道框是否跨行接续。
     before: bool,
     after: bool,
 }
 
-impl AddedBoxes {
-    /// 按排版任务的 section 格式逐字取回新增记号。换行符不产生字形，这里也跳过，
+impl LineMarks {
+    /// 按排版任务的 section 格式逐字取回标记。换行符不产生字形，这里也跳过，
     /// 因此下标与 galley 逐行累计的字形下标一一对应。
     pub(crate) fn of(job: &LayoutJob) -> Option<Self> {
         if !job
             .sections
             .iter()
-            .any(|section| section.format.underline == ADDED_MARKER)
+            .any(|section| marker_kind(&section.format) != RedlineKind::Same)
         {
             return None;
         }
@@ -155,7 +160,8 @@ impl AddedBoxes {
                 continue;
             }
             let format = &job.sections[section].format;
-            chars.push((format.underline == ADDED_MARKER).then_some(format.font_id.size));
+            let kind = marker_kind(format);
+            chars.push((kind != RedlineKind::Same).then_some((kind, format.font_id.size)));
         }
         Some(Self {
             chars,
@@ -171,15 +177,23 @@ impl AddedBoxes {
         self
     }
 
+    fn kind(&self, index: usize) -> RedlineKind {
+        self.chars
+            .get(index)
+            .copied()
+            .flatten()
+            .map_or(RedlineKind::Same, |(kind, _)| kind)
+    }
+
     fn added(&self, index: usize) -> bool {
         match self.chars.get(index) {
-            Some(size) => size.is_some(),
+            Some(mark) => matches!(mark, Some((RedlineKind::Added, _))),
             None => self.after,
         }
     }
 
-    /// 画一行里的新增框。`first_char` 是这一行首字在整段里的下标，`origin` 是
-    /// 这一行 `row` 的左上角（字形坐标都相对它）。
+    /// 画一行里的标记：新增框与删除线。`first_char` 是这一行首字在整段里的下标，
+    /// `origin` 是这一行 `row` 的左上角（字形坐标都相对它）。
     pub(crate) fn paint_row(
         &self,
         painter: &egui::Painter,
@@ -188,57 +202,123 @@ impl AddedBoxes {
         origin: egui::Pos2,
         row: &egui::epaint::text::Row,
     ) {
-        let stroke = Stroke::new(metrics.pt(BOX_LINE_PT).max(1.0), ADD_COLOR);
-        let pad = metrics.pt(BOX_PAD_PT);
         let glyphs = &row.glyphs;
-        // 整行统一用本行最大的字号定框高，括号里的小一号字不把框压矮
-        // （TeX 侧的 `\GwBoxFreeze`）。
-        let em = glyphs
-            .iter()
-            .enumerate()
-            .filter_map(|(offset, _)| self.chars.get(first_char + offset).copied().flatten())
-            .fold(0.0_f32, f32::max);
         let baseline = glyphs
             .iter()
             .map(|glyph| glyph.pos.y)
             .fold(f32::MIN, f32::max);
-        let top = origin.y + baseline - em * BOX_TOP_EM;
-        let bottom = origin.y + baseline + em * BOX_BOTTOM_EM;
         let mut index = 0usize;
         while index < glyphs.len() {
-            if !self.added(first_char + index) {
+            let kind = self.kind(first_char + index);
+            if kind == RedlineKind::Same {
                 index += 1;
                 continue;
             }
             let start = index;
-            while index < glyphs.len() && self.added(first_char + index) {
+            while index < glyphs.len() && self.kind(first_char + index) == kind {
                 index += 1;
             }
-            // 首尾竖边只画在整段新增真正的起止处；跨行接续的那一头开口。
-            let global = first_char + start;
-            let opens = if global == 0 {
-                !self.before
-            } else {
-                !self.added(global - 1)
-            };
-            let closes = !self.added(first_char + index);
-            let left = origin.x + glyphs[start].pos.x - if opens { pad } else { 0.0 };
-            let right = origin.x + glyphs[index - 1].max_x() + if closes { pad } else { 0.0 };
-            painter.line_segment([egui::pos2(left, top), egui::pos2(right, top)], stroke);
-            painter.line_segment(
-                [egui::pos2(left, bottom), egui::pos2(right, bottom)],
-                stroke,
-            );
-            if opens {
-                painter.line_segment([egui::pos2(left, top), egui::pos2(left, bottom)], stroke);
-            }
-            if closes {
-                painter.line_segment([egui::pos2(right, top), egui::pos2(right, bottom)], stroke);
+            let run = start..index;
+            match kind {
+                RedlineKind::Added => {
+                    self.paint_box(painter, metrics, first_char, origin, glyphs, run, baseline)
+                }
+                RedlineKind::Deleted => {
+                    self.paint_strike(painter, metrics, first_char, origin, glyphs, run, baseline)
+                }
+                RedlineKind::Same => {}
             }
         }
     }
 
-    /// 画一整个 galley 的新增框：`origin` 是 galley 的左上角。
+    /// 一行里一段连续新增的框。框高按本行最大的新增字号定死，括号里的小一号字
+    /// 不把框压矮（TeX 侧的 `\GwBoxFreeze`）。
+    #[allow(clippy::too_many_arguments)]
+    fn paint_box(
+        &self,
+        painter: &egui::Painter,
+        metrics: &Metrics,
+        first_char: usize,
+        origin: egui::Pos2,
+        glyphs: &[egui::epaint::text::Glyph],
+        run: std::ops::Range<usize>,
+        baseline: f32,
+    ) {
+        let stroke = Stroke::new(metrics.pt(BOX_LINE_PT).max(1.0), ADD_COLOR);
+        let pad = metrics.pt(BOX_PAD_PT);
+        let em = (0..glyphs.len())
+            .filter_map(|offset| match self.chars.get(first_char + offset) {
+                Some(Some((RedlineKind::Added, size))) => Some(*size),
+                _ => None,
+            })
+            .fold(0.0_f32, f32::max);
+        let top = origin.y + baseline - em * BOX_TOP_EM;
+        let bottom = origin.y + baseline + em * BOX_BOTTOM_EM;
+        // 首尾竖边只画在整段新增真正的起止处；跨行接续的那一头开口。
+        let global = first_char + run.start;
+        let opens = if global == 0 {
+            !self.before
+        } else {
+            !self.added(global - 1)
+        };
+        let closes = !self.added(first_char + run.end);
+        let left = origin.x + glyphs[run.start].pos.x - if opens { pad } else { 0.0 };
+        let right = origin.x + glyphs[run.end - 1].max_x() + if closes { pad } else { 0.0 };
+        painter.line_segment([egui::pos2(left, top), egui::pos2(right, top)], stroke);
+        painter.line_segment(
+            [egui::pos2(left, bottom), egui::pos2(right, bottom)],
+            stroke,
+        );
+        if opens {
+            painter.line_segment([egui::pos2(left, top), egui::pos2(left, bottom)], stroke);
+        }
+        if closes {
+            painter.line_segment([egui::pos2(right, top), egui::pos2(right, bottom)], stroke);
+        }
+    }
+
+    /// 一行里一段连续删除的删除线：穿过字身中部。
+    ///
+    /// 不用 egui 自带的 `strikethrough`：它画在字形逻辑框（按行距撑高的整个行盒）
+    /// 的中线上，公文是 28 磅固定行距、字挤在行盒上部，那条线就落到了字脚，
+    /// 看上去是下划线。这里按汉字墨迹的实际上下沿取中；整段没有汉字（纯数字、
+    /// 标点）时按字号的 0.38em 估（中文字身大约占基线上 0.88em、下 0.12em）。
+    #[allow(clippy::too_many_arguments)]
+    fn paint_strike(
+        &self,
+        painter: &egui::Painter,
+        metrics: &Metrics,
+        first_char: usize,
+        origin: egui::Pos2,
+        glyphs: &[egui::epaint::text::Glyph],
+        run: std::ops::Range<usize>,
+        baseline: f32,
+    ) {
+        let stroke = Stroke::new(metrics.pt(STRIKE_PT).max(1.0), DEL_COLOR);
+        let em = run
+            .clone()
+            .filter_map(|offset| match self.chars.get(first_char + offset) {
+                Some(Some((_, size))) => Some(*size),
+                _ => None,
+            })
+            .fold(0.0_f32, f32::max);
+        let (sum, count) = glyphs[run.clone()]
+            .iter()
+            .filter(|glyph| is_ideograph(glyph.chr) && !glyph.uv_rect.is_nothing())
+            .map(|glyph| glyph.pos.y + glyph.uv_rect.offset.y + glyph.uv_rect.size.y / 2.0)
+            .fold((0.0_f32, 0usize), |(sum, count), y| (sum + y, count + 1));
+        let middle = if count > 0 {
+            sum / count as f32
+        } else {
+            baseline - em * STRIKE_FALLBACK_EM
+        };
+        let y = origin.y + middle;
+        let left = origin.x + glyphs[run.start].pos.x;
+        let right = origin.x + glyphs[run.end - 1].max_x();
+        painter.line_segment([egui::pos2(left, y), egui::pos2(right, y)], stroke);
+    }
+
+    /// 画一整个 galley 的标记：`origin` 是 galley 的左上角。
     pub(crate) fn paint_galley(
         &self,
         painter: &egui::Painter,
@@ -258,6 +338,11 @@ impl AddedBoxes {
             first_char += placed.glyphs.len();
         }
     }
+}
+
+/// 汉字（含扩展 A 与兼容区）：删除线按它们的墨迹定高度，标点、数字不参与。
+fn is_ideograph(ch: char) -> bool {
+    matches!(ch, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}')
 }
 
 /// 整块图形（公式、图片）的花脸稿标记：删除在正中画一道红线，新增套一个完整的框。
@@ -285,15 +370,16 @@ pub(crate) fn paint_block_mark(
     }
 }
 
-/// 画一个 galley 上的新增框；没有新增时什么也不做。各处 `painter.galley` 之后顺手调一次。
-pub(crate) fn paint_galley_boxes(
+/// 画一个 galley 上的新增框与删除线；没有标记时什么也不做。各处 `painter.galley`
+/// 之后顺手调一次。
+pub(crate) fn paint_galley_marks(
     painter: &egui::Painter,
     metrics: &Metrics,
     origin: egui::Pos2,
     galley: &egui::Galley,
 ) {
-    if let Some(boxes) = AddedBoxes::of(&galley.job) {
-        boxes.paint_galley(painter, metrics, origin, galley);
+    if let Some(marks) = LineMarks::of(&galley.job) {
+        marks.paint_galley(painter, metrics, origin, galley);
     }
 }
 
@@ -446,7 +532,9 @@ mod tests {
             .find(|section| format_kind(&section.format) == RedlineKind::Deleted)
             .expect("有删除片段");
         assert_eq!(deleted.format.color, DEL_COLOR);
-        assert!(deleted.format.strikethrough.width > 0.0);
+        // 删除线自己画（见 `paint_strike`），不能再借 egui 的 strikethrough：
+        // 那条线落在行盒中线上，固定行距下会跑到字脚。
+        assert_eq!(deleted.format.strikethrough, Stroke::NONE);
         let added = job
             .sections
             .iter()
@@ -461,6 +549,59 @@ mod tests {
                 ("开展检查".to_string(), RedlineKind::Added),
                 ("的请示。".to_string(), RedlineKind::Same),
             ]
+        );
+    }
+
+    /// 删除线要穿过字身中部，而不是压在字脚当下划线（公文 28 磅固定行距下，
+    /// egui 自带的 strikethrough 就是这个毛病）。取被删的那个字的墨迹上下沿，
+    /// 线必须落在中间三分之一里。
+    #[test]
+    fn the_strike_crosses_the_middle_of_the_characters() {
+        let doc = crate::redline::build(
+            "同意你单位关于报送情况的请示。",
+            "同意你单位关于开展检查的请示。",
+        );
+        let output = render(&doc.markdown);
+        let strikes: Vec<f32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::LineSegment { points, stroke }
+                    if stroke.color == DEL_COLOR && (points[0].y - points[1].y).abs() < 0.01 =>
+                {
+                    Some(points[0].y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strikes.len(), 1, "一段删除一条线：{strikes:?}");
+        // 找到「报」字的墨迹框。
+        let ink = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape) => shape.galley.rows.iter().find_map(|placed| {
+                    placed
+                        .glyphs
+                        .iter()
+                        .find(|glyph| glyph.chr == '报')
+                        .map(|glyph| {
+                            let top =
+                                shape.pos.y + placed.pos.y + glyph.pos.y + glyph.uv_rect.offset.y;
+                            (top, top + glyph.uv_rect.size.y)
+                        })
+                }),
+                _ => None,
+            })
+            .expect("画出了被删的字");
+        let (top, bottom) = ink;
+        let third = (bottom - top) / 3.0;
+        assert!(
+            strikes[0] > top + third && strikes[0] < bottom - third,
+            "删除线 y={} 应落在字身中部 {}..{}",
+            strikes[0],
+            top + third,
+            bottom - third
         );
     }
 

@@ -58,7 +58,9 @@
 
 ### 代码地图
 - `src/preview/marks.rs`：预览里的花脸稿标记。
-  - 删除：`TextFormat` 的红字 + `strikethrough`（0.6pt），断行、两端对齐由排版自带。
+  - 删除：红字 + 自己画的 0.6pt 删除线（`LineMarks::paint_strike`），高度取被删汉字墨迹的
+    上下沿中点。**不能用 egui 的 `strikethrough`**：它画在行盒中线上，28 磅固定行距下
+    字挤在行盒上部，线会落到字脚、看着像下划线（用户实测报过）。
   - 新增：排版任务里打一个**不画出来的记号**（`underline` = 线宽 0 的新增蓝），画完字后
     `AddedBoxes` 按字形位置逐行画框：上下边每行都画，左右竖边只在整段新增的首尾各一笔，
     跨行处开口；框高按行内最大字号 0.96em / 0.24em 定死（对应 `\GwBoxFreeze`）。
@@ -154,8 +156,8 @@
   预览侧对应 `preview/marks.rs` 的 `BOX_TOP_EM` / `BOX_BOTTOM_EM`，三处一起改。
 - （第 ② 期）预览里的新增框是**用单测验证的几何**（竖边条数、每行上下边），界面上的
   实际观感还没有人眼核对过：进对照模式看一眼框和删除线的位置，与「打印预览」的 PDF 对照。
-- （第 ② 期）新增块的记号借用了 `TextFormat::underline`（线宽 0）。以后谁要给预览正文加
-  真下划线，得换一个记号，否则会被当成新增画框。
+- （第 ② 期）增删块的记号借用了 `TextFormat::underline`（线宽 0，颜色为新增蓝 / 删除红）。
+  以后谁要给预览正文加真下划线，得换一个记号，否则会被当成增删去画框、画线。
 - `highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas`
   在全量并行跑时偶发失败、单独跑通过，与本改造无关（共享字体图集状态），别为它改测试。
 - 可以不用内置 Tectonic 验证 TeX：

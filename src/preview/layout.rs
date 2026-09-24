@@ -6,7 +6,7 @@
 use crate::export;
 use crate::export::table::ColumnAlignment;
 use crate::preview::gutter;
-use crate::preview::marks::{self, AddedBoxes};
+use crate::preview::marks::{self, LineMarks};
 use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT, TABLE_LINE_PT, TABLE_PT};
 use crate::theme;
 use eframe::egui;
@@ -273,7 +273,7 @@ pub(crate) fn draw_justified(ui: &mut egui::Ui, metrics: &Metrics, job: LayoutJo
         // 单行段落本来就是末行，不参与对齐。
         let galley = base.clone();
         let rect = ui.add(egui::Label::new(base)).rect;
-        marks::paint_galley_boxes(ui.painter(), metrics, rect.left_top(), &galley);
+        marks::paint_galley_marks(ui.painter(), metrics, rect.left_top(), &galley);
         return;
     }
     let rows = justified_rows(ui, &job, &base);
@@ -292,7 +292,7 @@ pub(crate) fn paint_justified_rows(
     base: &egui::Galley,
     rows: Vec<Arc<egui::Galley>>,
 ) {
-    let boxes = AddedBoxes::of(job);
+    let boxes = LineMarks::of(job);
     let mut first_char = 0usize;
     for (placed, galley) in base.rows.iter().zip(rows) {
         let at = origin + placed.pos.to_vec2();
@@ -527,7 +527,7 @@ pub(crate) fn line_block_runs(
         place(ui, metrics, height, |painter, rect| {
             let origin = egui::pos2(rect.left() + metrics.content / 2.0, rect.top());
             push_galley_tints(metrics, &galley, origin);
-            marks::paint_galley_boxes(painter, metrics, origin, &galley);
+            marks::paint_galley_marks(painter, metrics, origin, &galley);
             painter.galley(origin, galley, theme::paper::ink());
             mark_gutter_rows(metrics, rect, &rows);
         });
@@ -537,7 +537,7 @@ pub(crate) fn line_block_runs(
         let tints = galley.clone();
         let rect = ui.add(egui::Label::new(galley)).rect;
         push_galley_tints(metrics, &tints, rect.left_top());
-        marks::paint_galley_boxes(ui.painter(), metrics, rect.left_top(), &tints);
+        marks::paint_galley_marks(ui.painter(), metrics, rect.left_top(), &tints);
         mark_gutter_rows(metrics, rect, &rows);
     }
 }
@@ -639,7 +639,7 @@ pub(crate) fn aligned_block(
         };
         let origin = egui::pos2(x, rect.top());
         push_galley_tints(metrics, &galley, origin);
-        marks::paint_galley_boxes(painter, metrics, origin, &galley);
+        marks::paint_galley_marks(painter, metrics, origin, &galley);
         painter.galley(origin, galley, theme::paper::ink());
         mark_gutter_rows(metrics, rect, &rows);
     });
@@ -867,7 +867,7 @@ pub(crate) fn append_inline(job: &mut LayoutJob, metrics: &Metrics, text: &str, 
             job.append(
                 &segment.text,
                 std::mem::take(&mut gap),
-                marks::mark_format(text_format(font, metrics.line), chunk.kind, metrics),
+                marks::mark_format(text_format(font, metrics.line), chunk.kind),
             );
             previous = chunk.kind;
         }
@@ -1017,11 +1017,7 @@ pub(crate) fn measure_table(
                         cell_job.append(
                             &segment.text,
                             std::mem::take(&mut gap),
-                            marks::mark_format(
-                                text_format(segment_font, line),
-                                chunk.kind,
-                                metrics,
-                            ),
+                            marks::mark_format(text_format(segment_font, line), chunk.kind),
                         );
                         previous = chunk.kind;
                     }
@@ -1161,7 +1157,7 @@ impl MeasuredTable {
             // 按字形框居中，不用 galley 几何居中：行距 21 磅比字高多出来的余量整块
             // 留在字下方，几何居中字会贴着上沿偏上半格。
             let top = rect.center().y - galley_visual_midline(&cell.galley);
-            marks::paint_galley_boxes(painter, metrics, egui::pos2(anchor, top), &cell.galley);
+            marks::paint_galley_marks(painter, metrics, egui::pos2(anchor, top), &cell.galley);
             painter.galley(
                 egui::pos2(anchor, top),
                 cell.galley.clone(),

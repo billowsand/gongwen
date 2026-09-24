@@ -607,7 +607,7 @@ fn draw_line(
                 job.append(
                     text,
                     0.0,
-                    marks::mark_format(text_format(font.clone(), metrics.line), *mark, metrics),
+                    marks::mark_format(text_format(font.clone(), metrics.line), *mark),
                 );
             }
             Atom::Math(math) => {
@@ -647,7 +647,7 @@ fn draw_line(
         ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
     let painter = ui.painter();
     let text_origin = rect.left_top() + egui::vec2(0.0, baseline - text_baseline);
-    if let Some(boxes) = marks::AddedBoxes::of(&galley.job) {
+    if let Some(boxes) = marks::LineMarks::of(&galley.job) {
         boxes.continuing(continues.0, continues.1).paint_galley(
             painter,
             metrics,

@@ -255,7 +255,7 @@ fn red_inline_job(
         job.append(
             &segment.text,
             marks::chunk_gap(metrics, previous, segment.mark),
-            marks::mark_format(text_format(font, metrics.line), segment.mark, metrics),
+            marks::mark_format(text_format(font, metrics.line), segment.mark),
         );
         previous = segment.mark;
     }
@@ -1314,12 +1314,12 @@ pub(crate) fn paint_red_print_pages(
                 };
                 let painter = ui.painter().with_clip_rect(rect);
                 if fragment.justified.is_empty() {
-                    marks::paint_galley_boxes(&painter, metrics, anchor_pos, &fragment.galley);
+                    marks::paint_galley_marks(&painter, metrics, anchor_pos, &fragment.galley);
                     painter.galley(anchor_pos, fragment.galley.clone(), theme::paper::ink());
                 } else {
                     // 两端对齐的正文按行画：每行是一个单独 galley，落在原 galley
                     // 算好的行位置上，分页与命中范围因此完全不受影响。
-                    let boxes = marks::AddedBoxes::of(&fragment.galley.job);
+                    let boxes = marks::LineMarks::of(&fragment.galley.job);
                     let mut first_char = 0usize;
                     for (placed, row) in fragment.galley.rows.iter().zip(&fragment.justified) {
                         let at = anchor_pos + placed.pos.to_vec2();
