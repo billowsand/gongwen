@@ -277,6 +277,37 @@ mod review_probes {
         assert!(!out.contains("移来"), "后面的段落不误标移动：{out}");
     }
 
+    #[test]
+    fn p12_far_apart_delete_and_insert_stay_in_place() {
+        // 期望：远处「删一段」与「增一段」互不相干——新段整段加框落在甲段后，
+        // 丁段整段删除线留在丙、戊两段之间，不拼成一处整句替换。
+        let tail = "，各地各校要深刻认识本项工作的重要意义。";
+        let paragraph = |name: &str| format!("{name}{tail}");
+        let old = ["甲段", "乙段", "丙段", "丁段", "戊段"]
+            .map(paragraph)
+            .join("\n\n");
+        let added = "这是新增的一段话，专门用来说明新的工作要求。";
+        let new = [
+            paragraph("甲段"),
+            added.to_string(),
+            paragraph("乙段"),
+            paragraph("丙段"),
+            paragraph("戊段"),
+        ]
+        .join("\n\n");
+        let out = run(&old, &new);
+        let expected = [
+            paragraph("甲段"),
+            format!("[{added}]"),
+            paragraph("乙段"),
+            paragraph("丙段"),
+            format!("~{}~", paragraph("丁段")),
+            paragraph("戊段"),
+        ]
+        .join("\n\n");
+        assert_eq!(out.trim_end(), expected);
+    }
+
     /// 带哨兵的 Markdown 还原两侧的可见文字：去新增得旧版、去删除得新版；
     /// 行内标记（`**`、转义）与空白不计。
     fn both_sides(marked: &str) -> (String, String) {
@@ -592,9 +623,25 @@ mod review_probes {
             "改写就地词级标注"
         );
         assert!(gapped.contains("本段由原第52段移来"), "移动段带注记");
-        // 新增段的落点不在这里断言：远处「删一段、增一段」会被文字流比较拼成同一处
-        // 整句替换（第 ① 期引擎的既有行为，小稿同样如此，已单独报告），与锚定路径无关。
-        assert!(gapped.contains("这是新增的一段话，专门用来说明新的工作要求"));
+        // 远处「删一段、增一段」各留原位：新段整段加框落在第 100、101 段之间，
+        // 第 201 段整段删除线落在第 200、202 段之间。
+        assert!(
+            gapped.contains(&format!(
+                "{}\n\n[这是新增的一段话，专门用来说明新的工作要求。]\n\n{}",
+                paragraph(100),
+                paragraph(101)
+            )),
+            "新增段整段加框、落在原位"
+        );
+        assert!(
+            gapped.contains(&format!(
+                "{}\n\n~{}~\n\n{}",
+                paragraph(200),
+                paragraph(201),
+                paragraph(202)
+            )),
+            "删除段整段删除线、落在原位"
+        );
         for index in [1usize, 250, 399] {
             let text = paragraph(index);
             assert!(

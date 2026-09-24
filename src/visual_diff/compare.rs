@@ -531,8 +531,9 @@ fn whole_table_overlay(
 // ── 变更组：移动识别 + 文字流 + 配对块 ────────────────────────────────────────
 
 /// 处理一对锚不上的段组（旧组 vs 新组）：移动识别先拿走相似段，剩余正文段
-/// 拼文字流比较，列表项 / 表格各自配对，最后剩下的旧块成整删、新块成整增；
-/// 输出按「新组位置优先、旧组按比例插空」排定先后。
+/// 按锚段切成夹缝、同一夹缝内拼文字流比较，列表项 / 表格各自配对，最后剩下
+/// 的旧块成整删、新块成整增；输出按「新组位置优先、旧组在所在夹缝里按比例
+/// 插空」排定先后。
 fn resolve_run(
     old: &DocumentModel,
     new: &DocumentModel,
@@ -628,6 +629,9 @@ fn resolve_run(
     };
     let mut anchored_old: Vec<usize> = Vec::new();
     let mut anchored_new: Vec<usize> = Vec::new();
+    // 锚段在组内的块序号（旧, 新），两侧都单调递增：第 4 步按它切夹缝，
+    // 整删块也按它定位。
+    let mut anchors: Vec<(usize, usize)> = Vec::new();
     for (a, b) in anchored {
         let oi = old_para[a];
         let ni = new_para[b];
@@ -635,6 +639,7 @@ fn resolve_run(
         used_new[ni] = true;
         anchored_old.push(a);
         anchored_new.push(b);
+        anchors.push((oi, ni));
         let old_text = old.blocks[old_blocks[oi]].text().unwrap_or_default();
         let new_text = new.blocks[new_blocks[ni]].text().unwrap_or_default();
         let fragments = if normalize_key(old_text) == normalize_key(new_text) {
@@ -803,7 +808,10 @@ fn resolve_run(
         );
     }
 
-    // 4. 剩余正文段拼文字流比较（规则 2：段落边界是软分隔）。
+    // 4. 剩余正文段拼文字流比较（规则 2：段落边界是软分隔）。只在同一个
+    //    夹缝（相邻两个锚段之间）里拼：远处删一段、别处增一段互不相干，
+    //    各自整删 / 整增留在原位，不拼成一处整句替换。
+    let placer = OldPlacer::new(old, new, old_blocks, new_blocks, anchors);
     let old_pool: Vec<(usize, usize)> = old_blocks
         .iter()
         .enumerate()
@@ -816,43 +824,68 @@ fn resolve_run(
         .filter(|(i, index)| !used_new[*i] && new.blocks[**index].is_paragraph())
         .map(|(i, index)| (i, *index))
         .collect();
-    let stream = stream_diff(old, new, &old_pool, &new_pool);
-    // 旧池的正文段全部参与了文字流比较：整删的由 stream 报回，部分删除的
-    // 已经画进新段片段，不论哪种都不再走第 5 步的整删块。
-    for (oi, _) in &old_pool {
-        used_old[*oi] = true;
-    }
-    for (pool_index, fragments) in stream.new_fragments {
-        let (ni, block_index) = new_pool[pool_index];
-        used_new[ni] = true;
-        push(
-            new_position(new, new_blocks, ni),
-            &mut order,
-            &mut items,
-            OverlayItem::Block(BlockOverlay {
-                block: new.blocks[block_index].clone(),
-                text: fragments,
-                table: None,
-                note: None,
-            }),
-        );
-    }
-    for pool_index in stream.deleted {
-        let (oi, block_index) = old_pool[pool_index];
-        used_old[oi] = true;
-        let block = old.blocks[block_index].clone();
-        let (text, table) = deleted_block_overlay(&block);
-        push(
-            scaled_position(old, new, old_blocks, new_blocks, oi),
-            &mut order,
-            &mut items,
-            OverlayItem::Deleted(BlockOverlay {
-                block,
-                text,
-                table,
-                note: None,
-            }),
-        );
+    let (mut old_from, mut new_from) = (0usize, 0usize);
+    while old_from < old_pool.len() || new_from < new_pool.len() {
+        // 两池都按组内序号递增，夹缝号也随之递增：取两侧最小的夹缝号，
+        // 把落在这个夹缝里的段各切一截。
+        let gap = old_pool
+            .get(old_from)
+            .map(|&(oi, _)| placer.old_gap(oi))
+            .into_iter()
+            .chain(new_pool.get(new_from).map(|&(ni, _)| placer.new_gap(ni)))
+            .min()
+            .unwrap_or_default();
+        let old_to = old_from
+            + old_pool[old_from..]
+                .iter()
+                .take_while(|&&(oi, _)| placer.old_gap(oi) == gap)
+                .count();
+        let new_to = new_from
+            + new_pool[new_from..]
+                .iter()
+                .take_while(|&&(ni, _)| placer.new_gap(ni) == gap)
+                .count();
+        let old_slice = &old_pool[old_from..old_to];
+        let new_slice = &new_pool[new_from..new_to];
+        old_from = old_to;
+        new_from = new_to;
+        let stream = stream_diff(old, new, old_slice, new_slice);
+        // 旧池的正文段全部参与了文字流比较：整删的由 stream 报回，部分删除的
+        // 已经画进新段片段，不论哪种都不再走第 5 步的整删块。
+        for (oi, _) in old_slice {
+            used_old[*oi] = true;
+        }
+        for (pool_index, fragments) in stream.new_fragments {
+            let (ni, block_index) = new_slice[pool_index];
+            used_new[ni] = true;
+            push(
+                new_position(new, new_blocks, ni),
+                &mut order,
+                &mut items,
+                OverlayItem::Block(BlockOverlay {
+                    block: new.blocks[block_index].clone(),
+                    text: fragments,
+                    table: None,
+                    note: None,
+                }),
+            );
+        }
+        for pool_index in stream.deleted {
+            let (oi, block_index) = old_slice[pool_index];
+            let block = old.blocks[block_index].clone();
+            let (text, table) = deleted_block_overlay(&block);
+            push(
+                placer.position(oi),
+                &mut order,
+                &mut items,
+                OverlayItem::Deleted(BlockOverlay {
+                    block,
+                    text,
+                    table,
+                    note: None,
+                }),
+            );
+        }
     }
 
     // 5. 其余未配对的块（图片、对齐行等）：旧的整体删除、新的整体新增。
@@ -864,7 +897,7 @@ fn resolve_run(
         let block = old.blocks[old_index].clone();
         let (text, table) = deleted_block_overlay(&block);
         push(
-            scaled_position(old, new, old_blocks, new_blocks, oi),
+            placer.position(oi),
             &mut order,
             &mut items,
             OverlayItem::Deleted(BlockOverlay {
@@ -921,30 +954,77 @@ fn new_position(new: &DocumentModel, new_blocks: &[usize], ni: usize) -> f64 {
         .sum::<usize>() as f64
 }
 
-/// 组内第 oi 个旧块的位置，按新旧组总重的比例换算到新组坐标插空。
-fn scaled_position(
-    old: &DocumentModel,
-    new: &DocumentModel,
-    old_blocks: &[usize],
-    new_blocks: &[usize],
-    oi: usize,
-) -> f64 {
-    let old_total: usize = old_blocks
-        .iter()
-        .map(|&index| block_weight(&old.blocks[index]))
-        .sum();
-    let new_total: usize = new_blocks
-        .iter()
-        .map(|&index| block_weight(&new.blocks[index]))
-        .sum();
-    if old_total == 0 || new_total == 0 {
-        return oi as f64;
+/// 旧块在新组坐标里的定位器。锚段把两侧切成一一对应的夹缝（第 k 个夹缝在
+/// 第 k 个锚段之前），旧块只在自己所在夹缝的新侧范围里按字数比例插空：
+/// 整删块落在原来的两个邻段之间，不会被远处的增删带偏。
+struct OldPlacer {
+    /// 旧组块的流坐标前缀和（长度 = 块数 + 1）。
+    old_prefix: Vec<usize>,
+    /// 新组块的流坐标前缀和（长度 = 块数 + 1）。
+    new_prefix: Vec<usize>,
+    /// 锚段的组内块序号（旧, 新），两侧都单调递增。
+    anchors: Vec<(usize, usize)>,
+}
+
+impl OldPlacer {
+    fn new(
+        old: &DocumentModel,
+        new: &DocumentModel,
+        old_blocks: &[usize],
+        new_blocks: &[usize],
+        anchors: Vec<(usize, usize)>,
+    ) -> Self {
+        let prefix = |model: &DocumentModel, blocks: &[usize]| {
+            let mut sums = vec![0usize];
+            for &index in blocks {
+                sums.push(
+                    sums.last().copied().unwrap_or_default() + block_weight(&model.blocks[index]),
+                );
+            }
+            sums
+        };
+        Self {
+            old_prefix: prefix(old, old_blocks),
+            new_prefix: prefix(new, new_blocks),
+            anchors,
+        }
     }
-    let old_position: usize = old_blocks[..oi]
-        .iter()
-        .map(|&index| block_weight(&old.blocks[index]))
-        .sum();
-    old_position as f64 * new_total as f64 / old_total as f64
+
+    /// 组内第 oi 个旧块所在的夹缝号（它前面有几个锚段）。
+    fn old_gap(&self, oi: usize) -> usize {
+        self.anchors.partition_point(|&(a, _)| a < oi)
+    }
+
+    /// 组内第 ni 个新块所在的夹缝号。
+    fn new_gap(&self, ni: usize) -> usize {
+        self.anchors.partition_point(|&(_, b)| b < ni)
+    }
+
+    /// 组内第 oi 个旧块的位置：夹缝两侧的旧 / 新流坐标范围按比例换算。
+    /// 夹缝的新侧为空时排在后一个锚段之前（前一个锚段至少占 1）。
+    fn position(&self, oi: usize) -> f64 {
+        let gap = self.old_gap(oi);
+        let previous = gap.checked_sub(1).map(|k| self.anchors[k]);
+        let next = self.anchors.get(gap).copied();
+        let old_lo = previous.map_or(0, |(a, _)| self.old_prefix[a + 1]);
+        let new_lo = previous.map_or(0, |(_, b)| self.new_prefix[b + 1]);
+        let old_hi = next.map_or(*self.old_prefix.last().unwrap_or(&0), |(a, _)| {
+            self.old_prefix[a]
+        });
+        let new_hi = next.map_or(*self.new_prefix.last().unwrap_or(&0), |(_, b)| {
+            self.new_prefix[b]
+        });
+        let fraction = if old_hi > old_lo {
+            (self.old_prefix[oi] - old_lo) as f64 / (old_hi - old_lo) as f64
+        } else {
+            0.0
+        };
+        if new_hi > new_lo {
+            new_lo as f64 + fraction * (new_hi - new_lo) as f64
+        } else {
+            new_lo as f64 - 0.5 + fraction * 0.5
+        }
+    }
 }
 
 /// 块的「流坐标权重」：文本类取字数，表格取全部格文字数，其余取 1。
