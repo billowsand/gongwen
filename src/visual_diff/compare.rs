@@ -1661,11 +1661,40 @@ fn replace_heavy_sentences(fragments: &mut Vec<Fragment>) {
             .filter(|fragment| fragment.kind != RedlineKind::Deleted)
             .map(|fragment| fragment.text.as_str())
             .collect();
-        fragments.splice(
-            begin..end,
-            [Fragment::deleted(old_text), Fragment::added(new_text)],
-        );
+        fragments.splice(begin..end, sentence_replacement(&old_text, &new_text));
     }
+}
+
+/// 整句「删旧句、插新句」，但两句共有的句首 / 句尾标点留作未改动：旧句
+/// 「基于本地模型的。」换成「。」时，只删前面的字，句号不该删了再加一遍
+/// ——那样排出来是一个单独套框的「。」，还可能被挤到下一行行首。
+fn sentence_replacement(old_text: &str, new_text: &str) -> Vec<Fragment> {
+    let is_mark = |ch: char| is_sentence_break(ch) || ch.is_whitespace();
+    let old_chars: Vec<char> = old_text.chars().collect();
+    let new_chars: Vec<char> = new_text.chars().collect();
+    let prefix = old_chars
+        .iter()
+        .zip(&new_chars)
+        .take_while(|(a, b)| a == b && is_mark(**a))
+        .count();
+    let max_suffix = old_chars.len().min(new_chars.len()) - prefix;
+    let suffix = old_chars
+        .iter()
+        .rev()
+        .zip(new_chars.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b && is_mark(**a))
+        .count();
+    let text = |chars: &[char]| chars.iter().collect::<String>();
+    [
+        Fragment::same(text(&new_chars[..prefix])),
+        Fragment::deleted(text(&old_chars[prefix..old_chars.len() - suffix])),
+        Fragment::added(text(&new_chars[prefix..new_chars.len() - suffix])),
+        Fragment::same(text(&new_chars[new_chars.len() - suffix..])),
+    ]
+    .into_iter()
+    .filter(|fragment| !fragment.text.is_empty())
+    .collect()
 }
 
 fn apply_merge_rules(fragments: &mut Vec<Fragment>) {
@@ -1777,18 +1806,20 @@ mod tests {
 
     #[test]
     fn a_sentence_with_many_fragments_is_replaced_whole() {
-        // 规则 4：一个分句里改动片段 ≥ 3 段，整句删旧插新（避免红绿交错）。
+        // 规则 4：一个分句里改动片段 ≥ 3 段，整句删旧插新（避免红绿交错）；
+        // 两句共有的句尾标点不删了再加。
         let overlay = diff("甲、乙、丙工作。", "A、乙、B工作。");
-        assert_eq!(overlay.readable(), "~甲、乙、丙工作。~[A、乙、B工作。]");
+        assert_eq!(overlay.readable(), "~甲、乙、丙工作~[A、乙、B工作]。");
     }
 
     #[test]
     fn a_heavily_rewritten_sentence_is_replaced_whole() {
-        // 规则 4：分句改动过半（按删 / 增两侧较大值计），整句删旧插新。
+        // 规则 4：分句改动过半（按删 / 增两侧较大值计），整句删旧插新；
+        // 共有的句尾标点留作未改动。
         let overlay = diff("要认真履行职责。", "务必严格履行自身职责。");
         assert_eq!(
             overlay.readable(),
-            "~要认真履行职责。~[务必严格履行自身职责。]"
+            "~要认真履行职责~[务必严格履行自身职责]。"
         );
     }
 

@@ -526,4 +526,19 @@ mod review_probes {
             assert_eq!(n, visible(&new), "第 {round} 组去删除应得新版：{shown}");
         }
     }
+
+    #[test]
+    fn q4_whole_sentence_replacement_keeps_shared_punctuation() {
+        // 整句替换时，两句共有的句尾标点不删了再加：否则排出一个单独套框的
+        // 「。」，还可能被挤到下一行行首。
+        let out = run(
+            "首先，这是一个语音输入法，还挺好用的，基于本地模型的。",
+            "首先，这是一个语音输入法。",
+        );
+        assert!(!out.contains("[。]"), "句号不该删了再加：{out}");
+        assert_sides(
+            "首先，这是一个语音输入法，还挺好用的，基于本地模型的。",
+            "首先，这是一个语音输入法。",
+        );
+    }
 }

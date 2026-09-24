@@ -92,21 +92,38 @@
 % 长句删除会直接冲出版心。这里只把它的「波浪符号」换成平直规则（\GwStrikeUnit），
 % 机制与线宽沿用原实现，线随字号缩放。
 \RequirePackage{xeCJKfntef}
+\providecolor{GwaDelColor}{HTML}{C00000}
+\providecolor{GwaAddColor}{HTML}{1F4E9E}
 % 一个直删除线单元：与旧波浪单元同尺寸（0.34em 长、0.6pt 粗），\leaders 把它
-% 无缝平铺成一条穿字身的直线。
-\newcommand{\GwStrikeUnit}{\hbox{\rule{0.34em}{0.6pt}}}
+% 无缝平铺成一条穿字身的直线。颜色必须写在单元里：外层 \textcolor 只染文字，
+% 平铺的线条按单元自身的颜色画，不写就是黑线。
+\newcommand{\GwStrikeUnit}{\hbox{\color{GwaDelColor}\rule{0.34em}{0.6pt}}}
 % 删除号的位置：线要**穿过字身中部**，不是压在字底当下划线。
 % 用 em 而不是 ex——ex 是西文 x 高，中文字身比它高得多，按 ex 算出来的线会
 % 落在字的下缘。-0.5em 实测正好过中线，且随字号自动缩放。
 \newcommand{\GwWaveDepth}{-0.5em}
 % 删除：红色（#C00000）直删除线穿过字身。
 \newcommand{\GwDel}[1]{\textcolor{GwaDelColor}{\CJKunderwave[symbol=\GwStrikeUnit, depth=\GwWaveDepth]{#1}}}
-% 新增：蓝色（#1F4E9E）方框，线宽 0.5pt，框内文字恢复正文色。
-% \fbox 不能跨行，所以调用方按标点把长插入切成小块，每块一个框，块与块之间
-% 可以断行——读起来仍是"连续文字一个框"。
-\providecolor{GwaDelColor}{HTML}{C00000}
-\providecolor{GwaAddColor}{HTML}{1F4E9E}
-\newcommand{\GwAdd}[1]{{\color{GwaAddColor}\setlength{\fboxrule}{0.5pt}\fbox{\normalcolor #1}}}
+% 新增：蓝色（#1F4E9E）方框，线宽 0.5pt，框内文字保持正文色。
+%
+% 框必须能随正文断行：\fbox 是不可断的整块，长插入会直接冲出版心。所以上下
+% 两条边借 \CJKunderdblline 画——与删除线同一套 xeCJKfntef 断行机制，只是
+% 把两条线的间距撑开到字身上下；左右竖边只在这段新增的首尾各画一笔。跨行时
+% 框在行尾开口、下一行接着画，读起来仍是一个框。
+\newcommand{\GwBoxTop}{0.96em}% 上边在基线之上的高度
+\newcommand{\GwBoxBottom}{0.24em}% 下边在基线之下的深度
+\newcommand{\GwBoxBar}{\textcolor{GwaAddColor}{\rule[-\GwBoxBottom]{0.5pt}{\dimexpr\GwBoxTop+\GwBoxBottom\relax}}}
+% 括号内的补充说明排小一号楷体：框的上下边按 em 算会跟着缩，与前后正文
+% 的框错开。换字号之前先把框高按当前（正文）字号定死。
+\newcommand{\GwBoxFreeze}{\edef\GwBoxTop{\the\dimexpr0.96em\relax}\edef\GwBoxBottom{\the\dimexpr0.24em\relax}}
+\newcommand{\GwAddLines}[1]{\CJKunderdblline[depth=-\GwBoxTop, gap=\dimexpr\GwBoxTop+\GwBoxBottom-0.5pt\relax, thickness=0.5pt, skip=false, format=\color{GwaAddColor}]{#1}}
+\newcommand{\GwAdd}[1]{\GwBoxBar\GwAddLines{\hspace{1.5pt}#1\hspace{1.5pt}}\GwBoxBar}
+% 宏内的字体切换只作用到第一个字（xeCJKfntef 逐字处理），所以加粗、括号楷体
+% 要包在宏外面；一段新增因此按样式切成几截，首截画左边、末截画右边、中间
+% 只画上下边，拼起来仍是一个框。
+\newcommand{\GwAddOpen}[1]{\GwBoxBar\GwAddLines{\hspace{1.5pt}#1}}
+\newcommand{\GwAddMid}[1]{\GwAddLines{#1}}
+\newcommand{\GwAddClose}[1]{\GwAddLines{#1\hspace{1.5pt}}\GwBoxBar}
 
 % ========== 字体设置 ==========
 % 正文 Markdown 加粗沿用当前字体，通过 xeCJK 自动伪粗实现，不切换为独立黑体。

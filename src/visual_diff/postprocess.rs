@@ -27,9 +27,13 @@ pub(crate) const REDLINE_PREAMBLE_TEX: &str = concat!(
     "\\providecolor{GwaDelColor}{HTML}{C00000}\n",
     "\\providecolor{GwaAddColor}{HTML}{1F4E9E}\n",
     "\\providecommand{\\GwWaveDepth}{-0.5em}\n",
-    "\\providecommand{\\GwStrikeUnit}{\\hbox{\\rule{0.34em}{0.6pt}}}\n",
+    "\\providecommand{\\GwStrikeUnit}{\\hbox{\\color{GwaDelColor}\\rule{0.34em}{0.6pt}}}\n",
     "\\providecommand{\\GwDel}[1]{\\textcolor{GwaDelColor}{\\CJKunderwave[symbol=\\GwStrikeUnit, depth=\\GwWaveDepth]{#1}}}\n",
-    "\\providecommand{\\GwAdd}[1]{{\\color{GwaAddColor}\\setlength{\\fboxrule}{0.5pt}\\fbox{\\normalcolor #1}}}\n",
+    "\\providecommand{\\GwBoxTop}{0.96em}\n",
+    "\\providecommand{\\GwBoxBottom}{0.24em}\n",
+    "\\providecommand{\\GwBoxBar}{\\textcolor{GwaAddColor}{\\rule[-\\GwBoxBottom]{0.5pt}{\\dimexpr\\GwBoxTop+\\GwBoxBottom\\relax}}}\n",
+    "\\providecommand{\\GwAddLines}[1]{\\CJKunderdblline[depth=-\\GwBoxTop, gap=\\dimexpr\\GwBoxTop+\\GwBoxBottom-0.5pt\\relax, thickness=0.5pt, skip=false, format=\\color{GwaAddColor}]{#1}}\n",
+    "\\providecommand{\\GwAdd}[1]{\\GwBoxBar\\GwAddLines{\\hspace{1.5pt}#1\\hspace{1.5pt}}\\GwBoxBar}\n",
 );
 
 /// 把一段 TeX 源码里的哨兵对换成 `\GwDel{...}` / `\GwAdd{...}`。
@@ -60,11 +64,8 @@ pub(crate) fn inject_tex_redline(tex: &str) -> String {
                 if state == RedlineKind::Deleted {
                     out.push_str(&wrap_tex_macro("GwDel", &buffer));
                 } else {
-                    // \GwAdd 不能跨行：长插入按标点切块，每块一个框，
-                    // 块与块之间才断得开（与公文侧 body_text_to_tex 同一规矩）。
-                    for piece in boxable_pieces(&buffer) {
-                        out.push_str(&wrap_tex_macro("GwAdd", &piece));
-                    }
+                    // 新增框能随正文断行（与公文侧同一个 \GwAdd 定义），整段一个框。
+                    out.push_str(&wrap_tex_macro("GwAdd", &buffer));
                 }
                 buffer.clear();
                 state = RedlineKind::Same;
@@ -97,23 +98,6 @@ fn wrap_tex_macro(macro_name: &str, content: &str) -> String {
         let wrapped = format!("\\{macro_name}{{{content}}}");
         format!("{}{wrapped}{}", "{".repeat(pad), "}".repeat(pad))
     }
-}
-
-/// 把新增文字按标点切成可以各自套框的小块（与公文侧同一组断点）。
-fn boxable_pieces(text: &str) -> Vec<String> {
-    const BREAKERS: [char; 6] = ['，', '。', '；', '、', '：', '？'];
-    let mut pieces = Vec::new();
-    let mut buffer = String::new();
-    for ch in text.chars() {
-        buffer.push(ch);
-        if BREAKERS.contains(&ch) {
-            pieces.push(std::mem::take(&mut buffer));
-        }
-    }
-    if !buffer.is_empty() {
-        pieces.push(buffer);
-    }
-    pieces
 }
 
 /// 研究报告导出目录里所有 TeX（主文件 + 分章 + 附录）的哨兵换宏，
@@ -394,9 +378,9 @@ mod tests {
 
     #[test]
     fn tex_marks_across_textbf_stay_brace_balanced() {
-        // 哨兵跨过 	extbf{ 这类命令的花括号：宏内补齐到平衡、宏外补回，
+        // 哨兵跨过 \textbf{ 这类命令的花括号：宏内补齐到平衡、宏外补回，
         // 编译不会被不配对的括号卡住。
-        let input = format!("前 {REDLINE_DEL_OPEN}\textbf{{重点}}文字{REDLINE_DEL_CLOSE} 后");
+        let input = format!("前 {REDLINE_DEL_OPEN}\\textbf{{重点}}文字{REDLINE_DEL_CLOSE} 后");
         let out = inject_tex_redline(&input);
         let opens = out.chars().filter(|ch| *ch == '{').count();
         let closes = out.chars().filter(|ch| *ch == '}').count();
@@ -406,13 +390,12 @@ mod tests {
     }
 
     #[test]
-    fn tex_long_addition_is_split_at_punctuation() {
-        // \GwAdd 的 \fbox 不能跨行：长插入按标点切块，每块一个框。
+    fn tex_long_addition_stays_one_breakable_box() {
+        // \GwAdd 能随正文断行，长插入整段一个框，不再按标点切成多个框。
         let long = "这是第一句，这是第二句，这是第三句";
         let input = format!("{REDLINE_ADD_OPEN}{long}{REDLINE_ADD_CLOSE}");
         let out = inject_tex_redline(&input);
-        assert_eq!(out.matches("\\GwAdd{").count(), 3, "按标点切成三块：{out}");
-        assert!(out.contains("\\GwAdd{这是第一句，}"), "第一块带标点：{out}");
+        assert_eq!(out, format!("\\GwAdd{{{long}}}"));
     }
 
     #[test]

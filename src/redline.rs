@@ -522,6 +522,7 @@ mod consistency_tests {
     /// 其余包装（`\GwBold`、括号楷体组、普通分组）透明穿过，转义还原。
     fn extract_tex_fragments(tex: &str) -> Vec<(String, RedlineKind)> {
         const KAI_GROUP: &str = "{\\kai\\enkai\\zihao{4} ";
+        const KAI_GROUP_FROZEN: &str = "{\\GwBoxFreeze\\kai\\enkai\\zihao{4} ";
         let chars: Vec<char> = tex.chars().collect();
         let mut stack: Vec<RedlineKind> = vec![RedlineKind::Same];
         let mut buf = String::new();
@@ -538,16 +539,22 @@ mod consistency_tests {
                 flush(&mut out, &stack, &mut buf);
                 stack.push(RedlineKind::Deleted);
                 index += "\\GwDel{".len();
-            } else if rest.starts_with("\\GwAdd{") {
+            } else if let Some(name) = ["\\GwAdd{", "\\GwAddOpen{", "\\GwAddMid{", "\\GwAddClose{"]
+                .into_iter()
+                .find(|name| rest.starts_with(name))
+            {
                 flush(&mut out, &stack, &mut buf);
                 stack.push(RedlineKind::Added);
-                index += "\\GwAdd{".len();
+                index += name.len();
             } else if rest.starts_with("\\GwBold{") {
                 stack.push(*stack.last().expect("栈非空"));
                 index += "\\GwBold{".len();
-            } else if rest.starts_with(KAI_GROUP) {
+            } else if let Some(group) = [KAI_GROUP, KAI_GROUP_FROZEN]
+                .into_iter()
+                .find(|group| rest.starts_with(group))
+            {
                 stack.push(*stack.last().expect("栈非空"));
-                index += KAI_GROUP.len();
+                index += group.len();
             } else if let Some((ch, width)) = tex_unescape(&rest) {
                 buf.push(ch);
                 index += width;

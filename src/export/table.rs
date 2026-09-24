@@ -1,6 +1,7 @@
 //! 与 mdx official/research 共用思路的智能表格列宽分析。
 
-use super::{ColumnAlign, RedlineKind, TableSpan, inline_segments, redline_chunks, table_span_at};
+use super::latex::redline_macro;
+use super::{ColumnAlign, TableSpan, inline_segments, redline_chunks, table_span_at};
 use regex::Regex;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -689,22 +690,26 @@ pub(super) fn to_longtblr(
                     redline_chunks(cell)
                         .into_iter()
                         .map(|chunk| {
-                            let inner = inline_segments(&chunk.text)
+                            // 加粗包在标注宏外面（见 `redline_macro`）。
+                            let segments = inline_segments(&chunk.text);
+                            let count = segments.len();
+                            segments
                                 .iter()
-                                .map(|segment| {
-                                    let escaped = tex_escape(&segment.text);
+                                .enumerate()
+                                .map(|(index, segment)| {
+                                    let marked = redline_macro(
+                                        chunk.kind,
+                                        index,
+                                        count,
+                                        &tex_escape(&segment.text),
+                                    );
                                     if segment.bold {
-                                        format!("\\GwBold{{{escaped}}}")
+                                        format!("\\GwBold{{{marked}}}")
                                     } else {
-                                        escaped
+                                        marked
                                     }
                                 })
-                                .collect::<String>();
-                            match chunk.kind {
-                                RedlineKind::Same => inner,
-                                RedlineKind::Deleted => format!("\\GwDel{{{inner}}}"),
-                                RedlineKind::Added => format!("\\GwAdd{{{inner}}}"),
-                            }
+                                .collect::<String>()
                         })
                         .collect::<String>()
                 };

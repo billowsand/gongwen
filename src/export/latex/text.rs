@@ -59,62 +59,54 @@ pub(crate) fn body_text_to_tex(text: &str) -> String {
     // 先按花脸稿哨兵切块，再对每块跑原来的加粗/括号逻辑。没有哨兵时只有一块
     // `Same`，走的路径与从前完全一样。
     for chunk in redline_chunks(text) {
-        let mut inner = String::new();
-        for segment in inline_segments(&chunk.text) {
-            let mut content = tex_escape(&segment.text);
+        let segments = inline_segments(&chunk.text);
+        let count = segments.len();
+        for (index, segment) in segments.iter().enumerate() {
+            // 样式包在标注宏**外面**：xeCJKfntef 逐字处理宏内文字，宏内的
+            // 字体切换（加粗、括号楷体）只作用到第一个字。
+            let mut content = redline_macro(chunk.kind, index, count, &tex_escape(&segment.text));
             if segment.bold {
                 content = format!("\\GwBold{{{content}}}");
             }
             if segment.parenthesized {
-                inner.push_str(&format!("{{\\kai\\enkai\\zihao{{4}} {content}}}"));
+                // 新增框的高度要在换小一号字之前定死，否则这一截框比前后矮。
+                let freeze = if chunk.kind == RedlineKind::Added {
+                    "\\GwBoxFreeze"
+                } else {
+                    ""
+                };
+                out.push_str(&format!("{{{freeze}\\kai\\enkai\\zihao{{4}} {content}}}"));
             } else {
-                inner.push_str(&content);
-            }
-        }
-        match chunk.kind {
-            RedlineKind::Same => out.push_str(&inner),
-            RedlineKind::Deleted => out.push_str(&format!("\\GwDel{{{inner}}}")),
-            // \fbox 不能跨行，长插入按标点切块后每块一个框，块间才断得开。
-            RedlineKind::Added => {
-                for piece in boxable_pieces(&chunk.text) {
-                    let mut piece_tex = String::new();
-                    for segment in inline_segments(&piece) {
-                        let mut content = tex_escape(&segment.text);
-                        if segment.bold {
-                            content = format!("\\GwBold{{{content}}}");
-                        }
-                        piece_tex.push_str(&content);
-                    }
-                    out.push_str(&format!("\\GwAdd{{{piece_tex}}}"));
-                }
+                out.push_str(&content);
             }
         }
     }
     out
 }
 
-/// 把新增文字按标点切成可以各自套框的小块。
-///
-/// `\fbox` 是不可断行的盒子，一整句塞进去会顶出版心。按句读切开后，块与块之间
-/// 就有了断行机会；视觉上仍是连续文字被框住，只在标点处分节，正好符合读的预期。
-/// 标点跟在前一块尾部，不单独成块。
-fn boxable_pieces(text: &str) -> Vec<String> {
-    const BREAKERS: [char; 6] = ['，', '。', '；', '、', '：', '？'];
-    let mut pieces = Vec::new();
-    let mut buffer = String::new();
-    for ch in text.chars() {
-        buffer.push(ch);
-        if BREAKERS.contains(&ch) {
-            pieces.push(std::mem::take(&mut buffer));
+/// 给一段已转义的文字套花脸稿宏。样式（加粗、括号楷体）要包在宏外面，
+/// 所以一块标注会按样式切成 `count` 段：删除线逐段画，接起来仍是一条；
+/// 新增框只在首段画左边、末段画右边（`\GwAddOpen` / `\GwAddMid` /
+/// `\GwAddClose`），中间不断框，读起来还是一个框。
+pub(crate) fn redline_macro(
+    kind: RedlineKind,
+    index: usize,
+    count: usize,
+    content: &str,
+) -> String {
+    match kind {
+        RedlineKind::Same => content.to_string(),
+        RedlineKind::Deleted => format!("\\GwDel{{{content}}}"),
+        RedlineKind::Added => {
+            let name = match (index == 0, index + 1 == count) {
+                (true, true) => "GwAdd",
+                (true, false) => "GwAddOpen",
+                (false, true) => "GwAddClose",
+                (false, false) => "GwAddMid",
+            };
+            format!("\\{name}{{{content}}}")
         }
     }
-    if !buffer.is_empty() {
-        pieces.push(buffer);
-    }
-    if pieces.is_empty() {
-        pieces.push(String::new());
-    }
-    pieces
 }
 
 /// 生成密级相关命令：密级、保密期限，以及“指人专办”标记（勾选后非空）。
@@ -179,8 +171,8 @@ pub(crate) fn attachment_summary_tex(blocks: &[MarkdownBlock]) -> Option<String>
 }
 
 /// 标题路径的标注支持：与 `tex_escape(&plain_text(text))` 完全同口径，只是
-/// 带花脸稿哨兵时删除块包 `\GwDel`、新增块按标点切块包 `\GwAdd`（新增框
-/// 不能跨行，长插入按标点切开，块间可断行——与正文同一套规矩）。
+/// 带花脸稿哨兵时删除块包 `\GwDel`、新增块包 `\GwAdd`（两者都能随文字
+/// 断行，与正文同一套规矩）。
 /// 视觉 diff 引擎在解析后注入哨兵，标题改动因此也就地标注（方案需求结论
 /// 第 12 条），不再需要单独的说明页。
 pub(crate) fn marked_tex_escape(text: &str) -> String {
@@ -198,34 +190,23 @@ pub(crate) fn marked_tex_escape(text: &str) -> String {
         match chunk.kind {
             RedlineKind::Same => out.push_str(&inner),
             RedlineKind::Deleted => out.push_str(&format!("\\GwDel{{{inner}}}")),
-            RedlineKind::Added => {
-                for piece in boxable_pieces(&chunk.text) {
-                    out.push_str(&format!("\\GwAdd{{{}}}", tex_escape(&plain_text(&piece))));
-                }
-            }
+            RedlineKind::Added => out.push_str(&format!("\\GwAdd{{{inner}}}")),
         }
     }
     out
 }
 
 /// 公文标题整行（编号前缀 + 文字）。新增标题整体加框时（方案规则 8：
-/// 含编号），编号并进第一个 `\GwAdd` 框；其余情况编号照常排在标注之外。
+/// 含编号），编号与文字进同一个 `\GwAdd` 框；其余情况编号照常排在标注之外。
 pub(crate) fn marked_heading_tex(number: &str, text: &str) -> String {
     use crate::export::whole_chunk_kind;
     if whole_chunk_kind(text) != Some(RedlineKind::Added) {
         return format!("{number}{}", marked_tex_escape(text));
     }
-    let plain = plain_text(text);
-    let mut pieces = boxable_pieces(&plain);
-    if pieces.is_empty() {
-        pieces.push(String::new());
-    }
-    pieces[0] = format!("{number}{}", pieces[0]);
-    pieces
-        .iter()
-        .map(|piece| format!("\\GwAdd{{{}}}", tex_escape(piece)))
-        .collect::<Vec<_>>()
-        .join("")
+    format!(
+        "\\GwAdd{{{}}}",
+        tex_escape(&format!("{number}{}", plain_text(text)))
+    )
 }
 
 /// 标题内容 TeX：按标题字数与 jieba 排布。

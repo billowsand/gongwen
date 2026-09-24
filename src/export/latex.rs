@@ -35,7 +35,7 @@ pub(crate) use papers::{
 };
 pub(crate) use text::{
     attachment_summary_tex, body_text_to_tex, latex_name, marked_heading_tex, marked_tex_escape,
-    red_approval_title_content_tex, security_commands, tex_escape, tex_spaced,
+    red_approval_title_content_tex, redline_macro, security_commands, tex_escape, tex_spaced,
     tex_spread_signature, title_content_tex,
 };
 
@@ -1842,5 +1842,28 @@ mod copy_numbering_tests {
         assert_eq!(crate::models::format_copy_number(7), "07");
         assert_eq!(crate::models::format_copy_number(99), "99");
         assert_eq!(crate::models::format_copy_number(100), "100");
+    }
+
+    #[test]
+    fn redline_styles_wrap_outside_the_mark_macros() {
+        // xeCJKfntef 逐字处理宏内文字，宏内的字体切换只作用到第一个字：
+        // 加粗、括号楷体必须包在 \GwAdd / \GwDel 外面；一段新增按样式切开后
+        // 首截 \GwAddOpen、中间 \GwAddMid、末截 \GwAddClose，仍是一个框。
+        use crate::export::{mark_added, mark_deleted};
+        let text = format!(
+            "请{}{}材料。",
+            mark_deleted("**按时**"),
+            mark_added("按**期**报送（书面）")
+        );
+        let tex = body_text_to_tex(&text);
+        assert!(tex.contains("\\GwBold{\\GwDel{按时}}"), "{tex}");
+        assert!(tex.contains("\\GwAddOpen{按}"), "{tex}");
+        assert!(tex.contains("\\GwBold{\\GwAddMid{期}}"), "{tex}");
+        assert!(tex.contains("\\GwAddMid{报送}"), "{tex}");
+        assert!(
+            tex.contains("{\\GwBoxFreeze\\kai\\enkai\\zihao{4} \\GwAddClose{（书面）}}"),
+            "{tex}"
+        );
+        assert!(!tex.contains("\\GwAdd{\\GwBold"), "样式不能在宏里：{tex}");
     }
 }
