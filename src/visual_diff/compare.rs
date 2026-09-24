@@ -31,6 +31,26 @@ const FUZZY_ANCHOR_SIMILARITY: f32 = 0.6;
 const MIN_ANCHOR_COMMON_CHARS: usize = 4;
 /// 列表项配对成「修改」的最低相似度；低于它宁可一删一增。
 const LIST_PAIR_SIMILARITY: f32 = 0.4;
+/// 段落锚定做全局加权 LCS 的规模上限（旧段数 × 新段数）。超过它——典型是没有
+/// 标题、整篇几千段落在同一个 run 里——先把一字不差的段按 Myers 锚住，只在
+/// 锚点之间的夹缝里做加权 LCS；否则 2000 段就要算 400 万次相似度，十几秒。
+/// 上限以内走原来的全局算法，结果逐字节不变。
+const GLOBAL_ANCHOR_LIMIT: usize = 250_000;
+
+#[cfg(test)]
+thread_local! {
+    /// 测试用：临时改写 [`GLOBAL_ANCHOR_LIMIT`]，让同一份输入分别走两条路径比对。
+    pub(crate) static ANCHOR_LIMIT_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn anchor_limit() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = ANCHOR_LIMIT_OVERRIDE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    GLOBAL_ANCHOR_LIMIT
+}
 
 /// 比较两个版本，产出附着在新版上的标注层。方向：old 是基准版，new 是目标版。
 pub(crate) fn diff_documents(old: &DocumentModel, new: &DocumentModel) -> RedlineOverlay {
@@ -548,21 +568,6 @@ fn resolve_run(
         .filter(|(_, index)| new.blocks[**index].is_paragraph())
         .map(|(pos, _)| pos)
         .collect();
-    let sims: Vec<Vec<f32>> = old_para
-        .iter()
-        .map(|&pos| {
-            let old_text = old.blocks[old_blocks[pos]].text().unwrap_or_default();
-            new_para
-                .iter()
-                .map(|&npos| {
-                    similarity(
-                        old_text,
-                        new.blocks[new_blocks[npos]].text().unwrap_or_default(),
-                    )
-                })
-                .collect()
-        })
-        .collect();
     let texts = |side_old: bool, pos: usize| -> &str {
         let block_index = if side_old {
             old_blocks[old_para[pos]]
@@ -572,11 +577,32 @@ fn resolve_run(
         let model = if side_old { old } else { new };
         model.blocks[block_index].text().unwrap_or_default()
     };
+    // 相似度：规模小时一次算满矩阵（原算法）；规模大时按需算、记住算过的。
+    let global = old_para.len() * new_para.len() <= anchor_limit();
+    let matrix: Option<Vec<Vec<f32>>> = global.then(|| {
+        (0..old_para.len())
+            .map(|a| {
+                (0..new_para.len())
+                    .map(|b| similarity(texts(true, a), texts(false, b)))
+                    .collect()
+            })
+            .collect()
+    });
+    let cache: std::cell::RefCell<HashMap<(usize, usize), f32>> = Default::default();
+    let sim = |a: usize, b: usize| -> f32 {
+        if let Some(matrix) = &matrix {
+            return matrix[a][b];
+        }
+        *cache
+            .borrow_mut()
+            .entry((a, b))
+            .or_insert_with(|| similarity(texts(true, a), texts(false, b)))
+    };
     // 短段相似（Dice 虚高）与包含关系（拆分 / 合并的「第二段。」含于
     // 「第一段第二段。」）都不锚定：后者交给文字流比较，能得出干净的
     // 拆分 / 合并结果。完全相同的段始终是锚。
     let can_anchor = |a: usize, b: usize| -> bool {
-        if sims[a][b] < FUZZY_ANCHOR_SIMILARITY {
+        if sim(a, b) < FUZZY_ANCHOR_SIMILARITY {
             return false;
         }
         let old_text = texts(true, a);
@@ -587,9 +613,19 @@ fn resolve_run(
         common_chars(old_text, new_text) >= MIN_ANCHOR_COMMON_CHARS
             && !containment(old_text, new_text)
     };
-    let anchored = lcs_pairs(old_para.len(), new_para.len(), |a, b| {
-        if can_anchor(a, b) { sims[a][b] } else { 0.0 }
-    });
+    let anchor_score =
+        |a: usize, b: usize| -> f32 { if can_anchor(a, b) { sim(a, b) } else { 0.0 } };
+    let anchored = if global {
+        lcs_pairs(old_para.len(), new_para.len(), anchor_score)
+    } else {
+        let old_keys: Vec<String> = (0..old_para.len())
+            .map(|a| normalize_key(texts(true, a)))
+            .collect();
+        let new_keys: Vec<String> = (0..new_para.len())
+            .map(|b| normalize_key(texts(false, b)))
+            .collect();
+        gapped_lcs_pairs(&old_keys, &new_keys, &anchor_score)
+    };
     let mut anchored_old: Vec<usize> = Vec::new();
     let mut anchored_new: Vec<usize> = Vec::new();
     for (a, b) in anchored {
@@ -621,15 +657,24 @@ fn resolve_run(
     // 1b. 移动：LCS 之外的删 / 增段，相似度 ≥ 0.8 的按最优配对，新位置带
     //     移来注记；一字未动的只留注记。
     let mut candidates: Vec<(f32, usize, usize)> = Vec::new();
+    // 标记表代替 `contains`：长稿里锚点成千上万，线性查找会让这一步变成立方。
+    let mut is_anchored_old = vec![false; old_para.len()];
+    let mut is_anchored_new = vec![false; new_para.len()];
+    for &a in &anchored_old {
+        is_anchored_old[a] = true;
+    }
+    for &b in &anchored_new {
+        is_anchored_new[b] = true;
+    }
     for (a, &old_pos) in old_para.iter().enumerate() {
-        if anchored_old.contains(&a) {
+        if is_anchored_old[a] {
             continue;
         }
         for (b, &new_pos) in new_para.iter().enumerate() {
-            if anchored_new.contains(&b) {
+            if is_anchored_new[b] {
                 continue;
             }
-            let score = sims[a][b];
+            let score = sim(a, b);
             let old_text = texts(true, old_pos);
             let new_text = texts(false, new_pos);
             let identical = normalize_key(old_text) == normalize_key(new_text);
@@ -999,6 +1044,44 @@ fn lcs_pairs(n: usize, m: usize, score: impl Fn(usize, usize) -> f32) -> Vec<(us
         }
     }
     pairs.reverse();
+    pairs
+}
+
+/// 大规模的段落锚定：先用 Myers 把规范化后一字不差、且允许锚定的段对齐，再在
+/// 相邻两个锚点之间的夹缝里跑加权 LCS（[`lcs_pairs`]）。完全相同的段是加权 LCS
+/// 里分数最高的配对，绝大多数情况下与全局算法得出同一组锚点，只是不再对全篇
+/// 两两算相似度。
+fn gapped_lcs_pairs(
+    old_keys: &[String],
+    new_keys: &[String],
+    score: &impl Fn(usize, usize) -> f32,
+) -> Vec<(usize, usize)> {
+    // 夹缝 `old_start..old_end` × `new_start..new_end` 里的加权 LCS。
+    let gap = |old_start: usize, old_end: usize, new_start: usize, new_end: usize| {
+        lcs_pairs(old_end - old_start, new_end - new_start, |a, b| {
+            score(old_start + a, new_start + b)
+        })
+        .into_iter()
+        .map(move |(a, b)| (old_start + a, new_start + b))
+    };
+    let mut pairs = Vec::new();
+    let (mut gap_old, mut gap_new) = (0usize, 0usize);
+    for op in diff_ops(old_keys, new_keys) {
+        if op.tag() != DiffTag::Equal {
+            continue;
+        }
+        for (a, b) in op.old_range().zip(op.new_range()) {
+            // 相同却不许锚定的段（如空段）留在夹缝里，交给加权 LCS 处理。
+            if score(a, b) <= 0.0 {
+                continue;
+            }
+            pairs.extend(gap(gap_old, a, gap_new, b));
+            pairs.push((a, b));
+            gap_old = a + 1;
+            gap_new = b + 1;
+        }
+    }
+    pairs.extend(gap(gap_old, old_keys.len(), gap_new, new_keys.len()));
     pairs
 }
 

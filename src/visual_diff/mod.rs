@@ -543,4 +543,64 @@ mod review_probes {
             "首先，这是一个语音输入法。",
         );
     }
+
+    /// 长稿：没有标题、几百段落在同一个 run 里，段落锚定改走「先锚一字不差的段、
+    /// 夹缝里再做加权 LCS」（`compare::GLOBAL_ANCHOR_LIMIT`）。同一份输入分别强制走
+    /// 全局算法与夹缝算法，产出的花脸稿必须逐字节相同；夹缝算法还要快。
+    #[test]
+    fn a_long_headingless_draft_gives_the_same_redline_on_both_anchor_paths() {
+        use super::compare::ANCHOR_LIMIT_OVERRIDE;
+        let paragraph = |index: usize| {
+            format!("第{index}段，各地各校要深刻认识本项工作的重要意义，确保各项部署落到实处。")
+        };
+        let old_paragraphs: Vec<String> = (1..=400).map(paragraph).collect();
+        let mut new_paragraphs = old_paragraphs.clone();
+        // 改写几段、删一段、插一段、把第 51 段挪到第 300 段后面。
+        for index in [10usize, 150, 277, 390] {
+            new_paragraphs[index] = new_paragraphs[index]
+                .replace("深刻认识", "充分认识")
+                .replace("落到实处", "落到实处、见到实效");
+        }
+        new_paragraphs.remove(200);
+        new_paragraphs.insert(
+            100,
+            "这是新增的一段话，专门用来说明新的工作要求。".to_string(),
+        );
+        let moved = new_paragraphs.remove(51);
+        new_paragraphs.insert(300, moved);
+        let old = old_paragraphs.join("\n\n");
+        let new = new_paragraphs.join("\n\n");
+
+        let run_with = |limit: usize| {
+            ANCHOR_LIMIT_OVERRIDE.with(|cell| cell.set(Some(limit)));
+            let started = std::time::Instant::now();
+            let marked = run(&old, &new);
+            ANCHOR_LIMIT_OVERRIDE.with(|cell| cell.set(None));
+            (marked, started.elapsed())
+        };
+        let (global, global_time) = run_with(usize::MAX);
+        let (gapped, gapped_time) = run_with(0);
+        assert_eq!(gapped, global, "两条锚定路径的花脸稿必须相同");
+        assert!(
+            gapped_time < global_time,
+            "夹缝算法应比全局快：{gapped_time:?} vs {global_time:?}"
+        );
+        // 结果本身也对：改写就地标注、移动带注记、新增整段加框、没改的段原样。
+        // jieba 把「深刻认识」切成一个词，词级标注按整词删旧插新。
+        assert!(
+            gapped.contains("第11段，各地各校要~深刻认识~[充分认识]本项工作的重要意义，确保各项部署落到实处[、见到实效]。"),
+            "改写就地词级标注"
+        );
+        assert!(gapped.contains("本段由原第52段移来"), "移动段带注记");
+        // 新增段的落点不在这里断言：远处「删一段、增一段」会被文字流比较拼成同一处
+        // 整句替换（第 ① 期引擎的既有行为，小稿同样如此，已单独报告），与锚定路径无关。
+        assert!(gapped.contains("这是新增的一段话，专门用来说明新的工作要求"));
+        for index in [1usize, 250, 399] {
+            let text = paragraph(index);
+            assert!(
+                gapped.lines().any(|line| line == text),
+                "第 {index} 段应原样"
+            );
+        }
+    }
 }
