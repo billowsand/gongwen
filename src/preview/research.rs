@@ -1068,15 +1068,12 @@ fn plain(
             scroll_to_anchor,
             clicked,
             |ui| {
-                // 花脸稿里的独立公式整块包在一对哨兵里：剥掉再认 `$$`，标记整块画。
+                // 花脸稿里的独立公式：哨兵写在 `$$` 里面（`$$〔删:…〕$$`，见
+                // visual_diff::serialize），旧稿里也可能整段包在外面。剥掉再认
+                // `$$`，标记整块画。
                 let bare = export::strip_redline(text);
                 match math_flow::block_source(bare.trim()) {
-                    Some(src) => math_flow::display_block(
-                        ui,
-                        metrics,
-                        src,
-                        export::whole_chunk_kind(text).unwrap_or(export::RedlineKind::Same),
-                    ),
+                    Some(src) => math_flow::display_block(ui, metrics, src, display_mark(text)),
                     None => math_flow::paragraph(ui, metrics, text),
                 }
             },
@@ -1096,6 +1093,15 @@ fn plain(
         scroll_to_anchor,
         clicked,
     );
+}
+
+/// 独立公式段的整块标注：段里第一处增删标记的类型，没有就是未改动。
+fn display_mark(text: &str) -> export::RedlineKind {
+    export::redline_chunks(text)
+        .iter()
+        .map(|chunk| chunk.kind)
+        .find(|kind| *kind != export::RedlineKind::Same)
+        .unwrap_or(export::RedlineKind::Same)
 }
 
 /// 章号与章名之间的间隔：ctex 的 `chapter/aftername` 默认 `\quad`，一个汉字宽，
@@ -1307,6 +1313,29 @@ mod tests {
             "公式中心 {} 应落在版心中心 {expected} 附近",
             rects[0].center().x
         );
+    }
+
+    /// 花脸稿里改过的独立公式：旧、新各成一块，旧的画删除线、新的套框。
+    /// 第 ③ 期测试 F6：从前新旧两个公式挤在同一行，预览认不出整块。
+    #[test]
+    fn a_replaced_display_formula_draws_both_blocks_with_marks() {
+        let doc = crate::redline::build("## 章\n\n$$E=mc^2$$\n", "## 章\n\n$$E=mc^3$$\n");
+        let shapes = drawn_shapes(&doc.markdown);
+        assert_eq!(
+            textured_rects(&shapes).len(),
+            2,
+            "新旧两幅公式：{}",
+            doc.markdown
+        );
+        let stroked = |color: egui::Color32| {
+            shapes.iter().any(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { stroke, .. } => stroke.color == color,
+                egui::Shape::Rect(rect) => rect.stroke.color == color,
+                _ => false,
+            })
+        };
+        assert!(stroked(crate::preview::marks::DEL_COLOR), "旧公式画删除线");
+        assert!(stroked(crate::preview::marks::ADD_COLOR), "新公式套框");
     }
 
     /// 渲染失败的公式（不支持的命令）降级为占位框：源码以灰色小字写出来，

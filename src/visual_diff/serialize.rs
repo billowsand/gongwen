@@ -235,6 +235,9 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                     }
                     return lines;
                 }
+                if let Some(lines) = display_formula_lines(&overlay.text) {
+                    return lines;
+                }
                 let marked = styled_marked(&overlay.text, raw);
                 if marked.is_empty() {
                     return Vec::new();
@@ -332,6 +335,46 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
             }
         },
     }
+}
+
+/// 带标注的独立公式段（`$$…$$` 独占一段）：每个公式单独成段，哨兵写在
+/// `$$` **里面**——`$$〔删:E=mc^2〕$$`。
+///
+/// mdx 只认行首的 `$$` 为独立公式，哨兵挡在前面就退化成普通段落，公式源码
+/// 转义后原样印在纸上；新旧两个公式挤在同一行，预览也认不出整块。研究报告
+/// 后处理把 `\[…\]` 里的哨兵换成整块标注（`postprocess`），预览按整块画。
+/// 段里只要有一处不是单纯的独立公式（或者根本没改），返回 None 走普通路径。
+fn display_formula_lines(fragments: &[Fragment]) -> Option<Vec<String>> {
+    if fragments.iter().all(Fragment::is_same) {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for fragment in fragments {
+        let text = fragment.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let inner = text.strip_prefix("$$")?.strip_suffix("$$")?;
+        if inner.trim().is_empty() || inner.contains("$$") {
+            return None;
+        }
+        let (open, close) = match fragment.kind {
+            RedlineKind::Same => (None, None),
+            RedlineKind::Deleted => (Some(REDLINE_DEL_OPEN), Some(REDLINE_DEL_CLOSE)),
+            RedlineKind::Added => (Some(REDLINE_ADD_OPEN), Some(REDLINE_ADD_CLOSE)),
+        };
+        if !lines.is_empty() {
+            // 空行隔开：两个公式各成一段，预览与 mdx 都按块认。
+            lines.push(String::new());
+        }
+        let mut line = String::from("$$");
+        line.extend(open);
+        line.push_str(inner);
+        line.extend(close);
+        line.push_str("$$");
+        lines.push(line);
+    }
+    (!lines.is_empty()).then_some(lines)
 }
 
 /// 表格行序列：表头 + 分隔行 + 数据行（含整删行），行内逐格标注。
@@ -759,6 +802,35 @@ mod tests {
             "公式整体删旧插新：{readable}"
         );
         assert!(!readable.contains('\n'), "不拆出额外行：{readable}");
+    }
+
+    #[test]
+    fn a_changed_display_formula_keeps_its_dollars_at_line_start() {
+        // 第 ③ 期测试 F6：`~$$E=mc^{2}$$~[$$E=mc^{3}$$]` 挤在一行、哨兵挡在 `$$`
+        // 前面，mdx 不再认作独立公式，公式源码印在纸上。每个公式单独成段、
+        // 哨兵写在 `$$` 里面，解析出来仍是两个独立公式段。
+        let out = marked(
+            "前文。\n\n$$E = mc^{2}$$\n\n后文。",
+            "前文。\n\n$$E = mc^{3}$$\n\n后文。",
+        );
+        assert!(
+            readable(&out).contains("$$~E = mc^{2}~$$\n\n$$[E = mc^{3}]$$"),
+            "{}",
+            readable(&out)
+        );
+        // 整段删掉 / 整段新增的独立公式同理。
+        let out = marked("前文。\n\n$$E = mc^{2}$$", "前文。");
+        assert!(
+            readable(&out).ends_with("$$~E = mc^{2}~$$"),
+            "{}",
+            readable(&out)
+        );
+        let out = marked("前文。", "前文。\n\n$$E = mc^{3}$$");
+        assert!(
+            readable(&out).ends_with("$$[E = mc^{3}]$$"),
+            "{}",
+            readable(&out)
+        );
     }
 
     #[test]
