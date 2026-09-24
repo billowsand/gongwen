@@ -47,8 +47,8 @@ pub(crate) use red::{
     red_approval_frame_table, red_approval_record_table, red_approval_top_rule_table,
 };
 pub(crate) use runs::{
-    BoldFont, apply_bold, body_run, body_runs, chinese_fonts, docx_name, record_run, security_runs,
-    spread_runs, table_run_sized, table_runs_sized, title_run,
+    BoldFont, apply_bold, body_run, body_runs, chinese_fonts, docx_name, marked_runs, record_run,
+    security_runs, spread_runs, table_run_sized, table_runs_sized, title_run,
 };
 pub(crate) use signature::{
     add_attachment_summary, add_joint_signature, add_white_paper_signature, is_joint_mode_one,

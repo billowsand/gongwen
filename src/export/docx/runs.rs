@@ -66,23 +66,39 @@ pub(crate) fn body_runs(text: &str, bold: BoldFont<'_>) -> Vec<Run> {
     runs
 }
 
-/// 给一个 run 打上花脸稿标记。
+/// 给一个 run 打上花脸稿标记（方案需求结论第 10 条：删除 = 红色直删除线，
+/// 新增 = 蓝色方框，PDF / Word / 预览三处一致）。
 ///
-/// Word 画不出穿过文字的波浪线——OOXML 的波浪只有下划线一种。所以删除用直
-/// 删除线，PDF 版才是波浪线，导出时会给用户一句说明。新增用字符边框：Word 会
-/// 把相邻且边框设置相同的 run 自动并成一个框，"多个字一个框"是天然就有的。
+/// Word 画不出穿过文字的波浪线——OOXML 的波浪只有下划线一种。删除用红色
+/// 直删除线；新增用字符边框：Word 会把相邻且边框设置相同的 run 自动并成
+/// 一个框，"多个字一个框"是天然就有的。
 fn apply_redline(run: Run, kind: RedlineKind) -> Run {
     match kind {
         RedlineKind::Same => run,
-        RedlineKind::Deleted => run.strike(),
+        RedlineKind::Deleted => run.strike().color("C00000"),
         RedlineKind::Added => run.text_border(
             TextBorder::new()
                 .border_type(BorderType::Single)
                 .size(4)
-                .space(0)
-                .color("auto"),
+                .space(1)
+                .color("1F4E9E"),
         ),
     }
+}
+
+/// 标题 / 版记类块的 run 序列：按花脸稿哨兵切块，删除块加红色删除线、
+/// 新增块加蓝色字符边框，其余与 `base` 构造的 run 完全一致（字体、字号、
+/// 加粗都在 `base` 里）。没有哨兵时输出与从前单个 run 相同。视觉 diff
+/// 引擎在解析后注入哨兵，标题、附件标题的改动因此也就地标注。
+pub(crate) fn marked_runs(text: &str, base: impl Fn(&str) -> Run) -> Vec<Run> {
+    let chunks = redline_chunks(text);
+    if chunks.len() == 1 && chunks[0].kind == RedlineKind::Same {
+        return vec![base(&plain_text(&chunks[0].text))];
+    }
+    chunks
+        .iter()
+        .map(|chunk| apply_redline(base(&plain_text(&chunk.text)), chunk.kind))
+        .collect()
 }
 
 pub(crate) fn heiti_run(text: impl Into<String>) -> Run {

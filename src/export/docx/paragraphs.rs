@@ -5,15 +5,24 @@
 
 use crate::export::docx::{
     BODY_SIZE, BoldFont, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS,
-    TITLE_SIZE, apply_bold, body_run, body_runs, chinese_fonts, security_runs, title_run,
+    TITLE_SIZE, apply_bold, body_run, body_runs, chinese_fonts, marked_runs, security_runs,
+    title_run,
 };
 use crate::export::title;
 use crate::export::title::TitlePlan;
-use crate::export::{LineAlign, plain_text};
+use crate::export::{LineAlign, redline_slice_lines};
 use crate::images;
 use crate::models::{DraftInput, ListNumbering, TemplateKind};
 use docx_rs::*;
 use image::GenericImageView;
+
+/// docx-rs 的 Paragraph 只有 `add_run`，批量追加。
+fn add_runs(mut paragraph: Paragraph, runs: Vec<Run>) -> Paragraph {
+    for run in runs {
+        paragraph = paragraph.add_run(run);
+    }
+    paragraph
+}
 
 pub(crate) fn body_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
     let mut paragraph = Paragraph::new()
@@ -107,15 +116,18 @@ pub(crate) fn heading_paragraph(level: u8, text: &str, bold: BoldFont<'_>) -> Pa
         3 => "楷体_GB2312",
         _ => "仿宋_GB2312",
     };
-    let mut run = Run::new()
-        .add_text(plain_text(text))
-        .fonts(chinese_fonts(font))
-        .size(BODY_SIZE);
-    if level == 5 {
-        run = apply_bold(run, bold);
-    }
-    Paragraph::new()
-        .add_run(run)
+    // 花脸稿：标题改动也就地标注（哨兵在解析后注入，marked_runs 按块注格式）。
+    let runs = marked_runs(text, |piece| {
+        let mut run = Run::new()
+            .add_text(piece)
+            .fonts(chinese_fonts(font))
+            .size(BODY_SIZE);
+        if level == 5 {
+            run = apply_bold(run, bold);
+        }
+        run
+    });
+    add_runs(Paragraph::new(), runs)
         .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
@@ -140,15 +152,17 @@ pub(crate) fn compact_heading_paragraph(
         3 => "楷体_GB2312",
         _ => "仿宋_GB2312",
     };
-    let mut run = Run::new()
-        .add_text(plain_text(&format!("{title}。")))
-        .fonts(chinese_fonts(font))
-        .size(BODY_SIZE);
-    if level == 5 {
-        run = apply_bold(run, bold);
-    }
-    let mut paragraph = Paragraph::new()
-        .add_run(run)
+    let title_runs = marked_runs(&format!("{title}。"), |piece| {
+        let mut run = Run::new()
+            .add_text(piece)
+            .fonts(chinese_fonts(font))
+            .size(BODY_SIZE);
+        if level == 5 {
+            run = apply_bold(run, bold);
+        }
+        run
+    });
+    let mut paragraph = add_runs(Paragraph::new(), title_runs)
         .align(AlignmentType::Both)
         .indent(None, Some(SpecialIndentType::FirstLine(640)), None, None)
         .line_spacing(
@@ -166,20 +180,22 @@ pub(crate) fn compact_heading_paragraph(
 /// 附件标识：TeX 用 `{\heiti\enheiti\zihao{3} 附件N}`，黑体三号顶格、不加粗。
 pub(crate) fn attachment_label_paragraph(text: &str) -> Paragraph {
     let fonts = chinese_fonts("黑体");
-    Paragraph::new()
-        .add_run(
+    add_runs(
+        Paragraph::new(),
+        marked_runs(text, |piece| {
             Run::new()
-                .add_text(plain_text(text))
-                .fonts(fonts)
-                .size(BODY_SIZE),
-        )
-        .align(AlignmentType::Left)
-        .line_spacing(
-            LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
-                .line_rule(LineSpacingType::Exact),
-        )
-        .keep_next(true)
+                .add_text(piece)
+                .fonts(fonts.clone())
+                .size(BODY_SIZE)
+        }),
+    )
+    .align(AlignmentType::Left)
+    .line_spacing(
+        LineSpacing::new()
+            .line(super::BODY_LINE_TWIPS as i32)
+            .line_rule(LineSpacingType::Exact),
+    )
+    .keep_next(true)
 }
 
 pub(crate) fn joint_closing_paragraph(text: &str, before: u32) -> Paragraph {
@@ -209,21 +225,23 @@ pub(crate) fn joint_signature_cell_paragraph(value: &str, row_index: usize) -> P
 /// 附件正式标题：附件标识占第一行，空一行后第三行才是标题（TeX 在标题前发
 /// `\vspace{\BodyBaselineSkip}`，标题后不再另加间距）。
 pub(crate) fn attachment_document_title_paragraph(text: &str) -> Paragraph {
-    Paragraph::new()
-        .add_run(
+    add_runs(
+        Paragraph::new(),
+        marked_runs(text, |piece| {
             Run::new()
-                .add_text(plain_text(text))
+                .add_text(piece)
                 .fonts(chinese_fonts("方正小标宋简体"))
-                .size(TITLE_SIZE),
-        )
-        .align(AlignmentType::Center)
-        .line_spacing(
-            LineSpacing::new()
-                .before(super::BODY_LINE_TWIPS)
-                .line(super::BODY_LINE_TWIPS as i32)
-                .line_rule(LineSpacingType::Exact),
-        )
-        .keep_next(true)
+                .size(TITLE_SIZE)
+        }),
+    )
+    .align(AlignmentType::Center)
+    .line_spacing(
+        LineSpacing::new()
+            .before(super::BODY_LINE_TWIPS)
+            .line(super::BODY_LINE_TWIPS as i32)
+            .line_rule(LineSpacingType::Exact),
+    )
+    .keep_next(true)
 }
 
 /// 公文主标题段，按排布方案渲染：
@@ -231,18 +249,30 @@ pub(crate) fn attachment_document_title_paragraph(text: &str) -> Paragraph {
 /// 换行（词不拆开、行长短均衡），各行仍用二号。调用方自行叠加行距与 keep_next。
 pub(crate) fn document_title_paragraph(title: &str, plan: &TitlePlan) -> Paragraph {
     let mut paragraph = Paragraph::new().align(AlignmentType::Center);
+    // 花脸稿：排布方案在纯文本上算好，带哨兵的标题按行切开逐行注格式，
+    // 换行 break 不会落进标记内部。
+    let add_marked = |paragraph: Paragraph, text: &str, stretch: Option<i32>| -> Paragraph {
+        let runs: Vec<Run> = marked_runs(text, |piece| {
+            let run = title_run(piece, TITLE_SIZE);
+            match stretch {
+                Some(scale) => run.stretch(scale),
+                None => run,
+            }
+        });
+        add_runs(paragraph, runs)
+    };
     match plan {
         TitlePlan::SingleLine => {
-            paragraph = paragraph.add_run(title_run(title, TITLE_SIZE));
+            paragraph = add_marked(paragraph, title, None);
         }
         TitlePlan::Compressed => {
             // 只横向缩放（w:w 字符缩放），字号保持二号、字高不变。
-            let scale = title::compressed_scale_percent(title);
-            paragraph = paragraph.add_run(title_run(title, TITLE_SIZE).stretch(scale as i32));
+            let scale = title::compressed_scale_percent(title) as i32;
+            paragraph = add_marked(paragraph, title, Some(scale));
         }
         TitlePlan::Wrapped(lines) => {
-            for (index, line) in lines.iter().enumerate() {
-                paragraph = paragraph.add_run(title_run(line, TITLE_SIZE));
+            for (index, line) in redline_slice_lines(title, lines).iter().enumerate() {
+                paragraph = add_marked(paragraph, line, None);
                 if index + 1 < lines.len() {
                     paragraph = paragraph.add_run(Run::new().add_break(BreakType::TextWrapping));
                 }
@@ -254,20 +284,29 @@ pub(crate) fn document_title_paragraph(title: &str, plan: &TitlePlan) -> Paragra
 
 pub(crate) fn red_approval_title_paragraph(title: &str, plan: &TitlePlan) -> Paragraph {
     let mut paragraph = Paragraph::new().align(AlignmentType::Center);
-    let run = |text: &str| title_run(text, RED_APPROVAL_TITLE_SIZE);
+    let add_marked = |paragraph: Paragraph, text: &str, stretch: Option<i32>| -> Paragraph {
+        let runs: Vec<Run> = marked_runs(text, |piece| {
+            let run = title_run(piece, RED_APPROVAL_TITLE_SIZE);
+            match stretch {
+                Some(scale) => run.stretch(scale),
+                None => run,
+            }
+        });
+        add_runs(paragraph, runs)
+    };
     match plan {
-        TitlePlan::SingleLine => paragraph = paragraph.add_run(run(title)),
+        TitlePlan::SingleLine => paragraph = add_marked(paragraph, title, None),
         TitlePlan::Compressed => {
             let scale = title::compressed_scale_percent_for(
                 title,
                 title::RED_APPROVAL_TITLE_WIDTH_PT,
                 title::RED_APPROVAL_TITLE_SIZE_PT,
-            );
-            paragraph = paragraph.add_run(run(title).stretch(scale as i32));
+            ) as i32;
+            paragraph = add_marked(paragraph, title, Some(scale));
         }
         TitlePlan::Wrapped(lines) => {
-            for (index, line) in lines.iter().enumerate() {
-                paragraph = paragraph.add_run(run(line));
+            for (index, line) in redline_slice_lines(title, lines).iter().enumerate() {
+                paragraph = add_marked(paragraph, line, None);
                 if index + 1 < lines.len() {
                     paragraph = paragraph.add_run(Run::new().add_break(BreakType::TextWrapping));
                 }

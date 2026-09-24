@@ -12,10 +12,16 @@ pub(crate) mod title;
 pub(crate) use docx::record::automatic_print_copies;
 #[allow(unused_imports)]
 pub(crate) use docx::{write_docx, write_docx_with_numbering};
+// 花脸稿一致性测试直接驱动两个导出器的正文入口比对 (文字, 类型) 序列。
+#[cfg(test)]
+pub(crate) use docx::body_runs;
+#[cfg(test)]
+pub(crate) use latex::body_text_to_tex;
 #[allow(unused_imports)]
 pub(crate) use latex::copy_count;
 #[cfg(test)]
 pub(crate) use latex::write_tex;
+pub(crate) use research::write_docx as write_docx_research;
 
 use crate::models::{
     DraftInput, ExportSelection, FontConfig, NumberingConfig, TemplateKind, split_units,
@@ -64,13 +70,12 @@ pub(crate) use red::{
 #[cfg(test)]
 pub(crate) use text::parenthesized_ranges;
 pub(crate) use text::{
-    InlineSegment, RedlineKind, attachment_names, attachment_title_name, chinese_date_parts,
-    inline_segments, inline_visible_char_index, inline_visible_char_indices, is_redline_sentinel,
+    InlineSegment, REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN,
+    RedlineKind, attachment_names, attachment_title_name, chinese_date_parts, inline_segments,
+    inline_visible_char_index, inline_visible_char_indices, is_redline_sentinel,
     legacy_attachment_label, mark_added, mark_deleted, normalize_chinese_quotes, number_to_chinese,
-    plain_text, redline_chunks, strip_redline, table_columns,
+    plain_text, redline_chunks, redline_slice_lines, strip_redline, table_columns,
 };
-#[cfg(test)]
-pub(crate) use text::{REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN};
 
 pub(crate) fn joint_main_index(input: &DraftInput) -> Option<usize> {
     let units = split_units(&input.profile.joint_issuing_units);

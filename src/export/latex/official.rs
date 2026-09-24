@@ -5,14 +5,13 @@
 
 use crate::export::latex::{
     attachment_document_title_to_tex, attachment_landscape_flags, attachment_summary_tex,
-    body_text_to_tex, latex_name, official_heading_to_tex, security_commands, target_tex_section,
-    tex_escape, tex_spaced, title_content_tex,
+    body_text_to_tex, latex_name, marked_tex_escape, official_heading_to_tex, security_commands,
+    target_tex_section, tex_escape, tex_spaced, title_content_tex,
 };
 use crate::export::table::to_longtblr;
 use crate::export::{
     LineAlign, MarkdownBlock, MarkdownSection, chinese_date_parts, joint_main_column,
-    official_heading_prefix, parse_markdown_with_lines_with_numbering, plain_text,
-    render_list_number,
+    official_heading_prefix, parse_markdown_with_lines_with_numbering, render_list_number,
 };
 use crate::models::{
     DraftInput, JointIssuanceMode, LetterVersion, NumberingConfig, StyleMode, TemplateKind,
@@ -618,7 +617,7 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                     let MarkdownBlock::Paragraph(body_text) = &blocks[index + 1] else {
                         unreachable!()
                     };
-                    let heading_escaped = tex_escape(&plain_text(text));
+                    let heading_escaped = marked_tex_escape(text);
                     let body_escaped = body_text_to_tex(body_text);
                     // 标题段采用与独立标题一致的层级字体：2 级黑体、3 级楷体、4 级仿宋、5 级黑体加粗。
                     let title_tex = match *level {

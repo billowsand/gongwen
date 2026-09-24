@@ -7,7 +7,7 @@ use crate::export::title;
 use crate::export::title::TitlePlan;
 use crate::export::{
     MarkdownBlock, RedlineKind, attachment_names, inline_segments, is_redline_sentinel, plain_text,
-    redline_chunks,
+    redline_chunks, redline_slice_lines,
 };
 use crate::models::{DraftInput, TemplateKind, split_period_digits};
 
@@ -178,16 +178,47 @@ pub(crate) fn attachment_summary_tex(blocks: &[MarkdownBlock]) -> Option<String>
     Some(out)
 }
 
+/// 标题路径的标注支持：与 `tex_escape(&plain_text(text))` 完全同口径，只是
+/// 带花脸稿哨兵时删除块包 `\GwDel`、新增块按标点切块包 `\GwAdd`（新增框
+/// 不能跨行，长插入按标点切开，块间可断行——与正文同一套规矩）。
+/// 视觉 diff 引擎在解析后注入哨兵，标题改动因此也就地标注（方案需求结论
+/// 第 12 条），不再需要单独的说明页。
+pub(crate) fn marked_tex_escape(text: &str) -> String {
+    if !text.contains([
+        crate::export::REDLINE_DEL_OPEN,
+        crate::export::REDLINE_DEL_CLOSE,
+        crate::export::REDLINE_ADD_OPEN,
+        crate::export::REDLINE_ADD_CLOSE,
+    ]) {
+        return tex_escape(&plain_text(text));
+    }
+    let mut out = String::new();
+    for chunk in redline_chunks(text) {
+        let inner = tex_escape(&plain_text(&chunk.text));
+        match chunk.kind {
+            RedlineKind::Same => out.push_str(&inner),
+            RedlineKind::Deleted => out.push_str(&format!("\\GwDel{{{inner}}}")),
+            RedlineKind::Added => {
+                for piece in boxable_pieces(&chunk.text) {
+                    out.push_str(&format!("\\GwAdd{{{}}}", tex_escape(&plain_text(&piece))));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 标题内容 TeX：按标题字数与 jieba 排布。
 /// 单行保持二号；超出一行不超过 2 字用 `\scalebox` 只缩横向、字高不变；
-/// 超出更多在词边界均衡换行（`\\` 分段）。
+/// 超出更多在词边界均衡换行（`\\` 分段）。带花脸稿标记时排布仍在纯文本上
+/// 计算，再按行切开逐行注宏（`\\` 不能落在 `\GwDel` / `\GwAdd` 内部）。
 pub(crate) fn title_content_tex(title: &str) -> String {
     let plain = plain_text(title);
     match title::title_plan(&plain, title::chars_per_line()) {
         TitlePlan::SingleLine => {
             format!(
                 "{{\\bs\\enbt\\zihao{{2}}\\setlength{{\\baselineskip}}{{\\BodyBaselineSkip}} {}}}",
-                tex_escape(&plain)
+                marked_tex_escape(title)
             )
         }
         TitlePlan::Compressed => {
@@ -196,17 +227,15 @@ pub(crate) fn title_content_tex(title: &str) -> String {
             let scale_f = scale as f64 / 100.0;
             format!(
                 "{{\\bs\\enbt\\zihao{{2}}\\setlength{{\\baselineskip}}{{\\BodyBaselineSkip}}\\scalebox{{{scale_f}}}[1]{{{}}}}}",
-                tex_escape(&plain)
+                marked_tex_escape(title)
             )
         }
         TitlePlan::Wrapped(lines) => {
-            let mut body = String::new();
-            for (index, line) in lines.iter().enumerate() {
-                if index > 0 {
-                    body.push_str("\\\\");
-                }
-                body.push_str(&tex_escape(line));
-            }
+            let body = redline_slice_lines(title, &lines)
+                .iter()
+                .map(|line| marked_tex_escape(line))
+                .collect::<Vec<_>>()
+                .join("\\\\");
             format!(
                 "{{\\bs\\enbt\\zihao{{2}}\\setlength{{\\baselineskip}}{{\\BodyBaselineSkip}} {body}}}"
             )
@@ -215,12 +244,13 @@ pub(crate) fn title_content_tex(title: &str) -> String {
 }
 
 /// 红头呈批件首页标题：小二号、约 10cm 左栏（15 个全角字宽）。
+/// 带花脸稿标记时与正文标题同一套处理（按行切开逐行注宏）。
 pub(crate) fn red_approval_title_content_tex(title: &str) -> String {
     let plain = plain_text(title);
     match title::title_plan(&plain, title::red_approval_chars_per_line()) {
         TitlePlan::SingleLine => format!(
             "{{\\bs\\enbt\\fontsize{{18bp}}{{\\BodyBaselineSkip}}\\selectfont {}}}",
-            tex_escape(&plain)
+            marked_tex_escape(title)
         ),
         TitlePlan::Compressed => {
             let scale = title::compressed_scale_percent_for(
@@ -231,13 +261,13 @@ pub(crate) fn red_approval_title_content_tex(title: &str) -> String {
                 / 100.0;
             format!(
                 "{{\\bs\\enbt\\fontsize{{18bp}}{{\\BodyBaselineSkip}}\\selectfont\\scalebox{{{scale}}}[1]{{{}}}}}",
-                tex_escape(&plain)
+                marked_tex_escape(title)
             )
         }
         TitlePlan::Wrapped(lines) => {
-            let body = lines
+            let body = redline_slice_lines(title, &lines)
                 .iter()
-                .map(|line| tex_escape(line))
+                .map(|line| marked_tex_escape(line))
                 .collect::<Vec<_>>()
                 .join("\\\\");
             format!("{{\\bs\\enbt\\fontsize{{18bp}}{{\\BodyBaselineSkip}}\\selectfont {body}}}")

@@ -55,6 +55,7 @@ mod theme;
 mod units;
 mod validator;
 mod version;
+mod visual_diff;
 mod vocabulary_xlsx;
 
 use app::GongwenApp;

@@ -250,6 +250,40 @@ pub(crate) fn strip_redline(text: &str) -> String {
     )
 }
 
+/// 把带哨兵的文本按「纯文本行」切片：返回的每行仍带哨兵，各行的纯文本拼接
+/// 等于输入的纯文本。`lines` 是调用方按纯文本算好的行（如标题排布方案），
+/// 哨兵附着在紧随其后的那一行上（行边界处的哨兵归下一行）。
+///
+/// 标题排布（如按 jieba 断行）在纯文本上计算，标记却可能跨过断行点；标题
+/// 的 `\\` 换行不能落在 `\GwDel` / `\GwAdd` 内部，所以先按行切开再逐行注宏。
+pub(crate) fn redline_slice_lines(text: &str, lines: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = lines.iter().map(|_| String::new()).collect();
+    let mut plain_seen = 0usize; // 已消费的纯文本字符数
+    let mut line_index = 0usize;
+    for ch in text.chars() {
+        if is_redline_sentinel(ch) {
+            // 边界处的哨兵归下一行。
+            let current_len = lines.get(line_index).map_or(0, |line| line.chars().count());
+            let at_boundary = plain_seen == current_len && line_index + 1 < lines.len();
+            let target = if at_boundary {
+                line_index + 1
+            } else {
+                line_index.min(lines.len().saturating_sub(1))
+            };
+            out[target].push(ch);
+            continue;
+        }
+        // 推进到包含这个纯文本字符的行。
+        while line_index + 1 < lines.len() && plain_seen >= lines[line_index].chars().count() {
+            line_index += 1;
+            plain_seen = 0;
+        }
+        out[line_index].push(ch);
+        plain_seen += 1;
+    }
+    out
+}
+
 #[derive(Debug)]
 struct InlineAtom {
     source: std::ops::Range<usize>,

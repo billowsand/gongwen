@@ -84,42 +84,29 @@
 \RequirePackage{pdflscape} % 仅对横向过密的附件逐个启用 PDF 横页
 
 % ========== 花脸稿标记 ==========
-% 送审用的花脸稿：删掉的字留在原位画波浪线，新增的字就地套方框。
+% 送审用的花脸稿：删掉的字留在原位画**红色直删除线**，新增的字就地套**蓝色方框**
+% （方案需求结论第 10 条；预览 / PDF / Word 三处一致，Word 侧用删除线 + 字符
+% 边框 + 同色实现）。
 %
 % 断行交给 xeCJKfntef 的 \CJKunderwave：中文没有空格，裸 ulem 找不到断点，
-% 长句删除会直接冲出版心。波形则自绘，不用它默认的 lasy6 字形（见下）。
+% 长句删除会直接冲出版心。这里只把它的「波浪符号」换成平直规则（\GwStrikeUnit），
+% 机制与线宽沿用原实现，线随字号缩放。
 \RequirePackage{xeCJKfntef}
-% 一个波：升段 + 降段。\leaders 把它无缝平铺成连续的波浪线。
-%
-% 关键在降段必须先抬到升段的终点高度。\rotatebox 一律绕自身左基线旋转，
-% 两段都从基线出发的话，一段在基线上方、一段在下方，根本连不起来——平铺出来
-% 是一堆散落的小撇，不是波浪线。这个坑踩过一次，别再改回去。
-%
-% \GwWaveRise 必须等于 \GwWaveSeg × sin(\GwWaveAngle)。三者是绑死的，
-% 改任意一个都要重算另一个，否则波形又会断开。
-% 当前：0.34em × sin24° = 0.1383em。
-\newcommand{\GwWaveSeg}{0.34em}
-\newcommand{\GwWaveAngle}{24}
-\newcommand{\GwWaveRise}{0.1383em}
-\newcommand{\GwWaveUnit}{\hbox{%
-  \rotatebox{\GwWaveAngle}{\rule{\GwWaveSeg}{0.6pt}}%
-  \raisebox{\GwWaveRise}{\rotatebox{-\GwWaveAngle}{\rule{\GwWaveSeg}{0.6pt}}}}}
-% 删除号的位置：波浪线要**穿过字身中部**，不是压在字底当下划线。
+% 一个直删除线单元：与旧波浪单元同尺寸（0.34em 长、0.6pt 粗），\leaders 把它
+% 无缝平铺成一条穿字身的直线。
+\newcommand{\GwStrikeUnit}{\hbox{\rule{0.34em}{0.6pt}}}
+% 删除号的位置：线要**穿过字身中部**，不是压在字底当下划线。
 % 用 em 而不是 ex——ex 是西文 x 高，中文字身比它高得多，按 ex 算出来的线会
 % 落在字的下缘。-0.5em 实测正好过中线，且随字号自动缩放。
 \newcommand{\GwWaveDepth}{-0.5em}
-% 删除：波浪线穿过字身。
-%
-% 关键是 symbol 这个键。xeCJKfntef 的 \CJKunderwave 默认 symbol 是
-% `\sixly\char58`——lasy6 字体里的波浪字形。lasy6 不在随应用分发的离线
-% bundle 里，而 \char58 在中文字体里是**冒号**，于是整行删除会排成一串冒号。
-% 这里把 symbol 换成自绘的波浪单元，既不依赖 lasy6，也不挑用户选的编译字体。
-%
-% 注意：改 ulem 的 \uwave 是没用的，\CJKunderwave 根本不走它——这条弯路走过。
-\newcommand{\GwDel}[1]{\CJKunderwave[symbol=\GwWaveUnit, depth=\GwWaveDepth]{#1}}
-% 新增：方框。\fbox 不能跨行，所以调用方按标点把长插入切成小块，
-% 每块一个框，块与块之间可以断行——读起来仍是"连续文字一个框"。
-\newcommand{\GwAdd}[1]{\fbox{#1}}
+% 删除：红色（#C00000）直删除线穿过字身。
+\newcommand{\GwDel}[1]{\textcolor{GwaDelColor}{\CJKunderwave[symbol=\GwStrikeUnit, depth=\GwWaveDepth]{#1}}}
+% 新增：蓝色（#1F4E9E）方框，线宽 0.5pt，框内文字恢复正文色。
+% \fbox 不能跨行，所以调用方按标点把长插入切成小块，每块一个框，块与块之间
+% 可以断行——读起来仍是"连续文字一个框"。
+\providecolor{GwaDelColor}{HTML}{C00000}
+\providecolor{GwaAddColor}{HTML}{1F4E9E}
+\newcommand{\GwAdd}[1]{{\color{GwaAddColor}\setlength{\fboxrule}{0.5pt}\fbox{\normalcolor #1}}}
 
 % ========== 字体设置 ==========
 % 正文 Markdown 加粗沿用当前字体，通过 xeCJK 自动伪粗实现，不切换为独立黑体。

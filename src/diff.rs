@@ -434,6 +434,10 @@ fn inline_spans(before: &str, after: &str) -> (Vec<InlineSpan>, Vec<InlineSpan>)
 /// 这里复用同一趟 `diff_ops`，只是把结果推进一个 `Vec` 而不是两个。
 ///
 /// 注意花脸稿因此比定稿长：删掉的字还占着版面，页数对不上是必然的，不是 bug。
+///
+/// 花脸稿改用视觉 diff 引擎（`visual_diff`）后暂无生产调用方，仅单测使用；
+/// 保留作代码层 diff 的段内工具函数。
+#[allow(dead_code)]
 pub fn merged_spans(before: &str, after: &str) -> Vec<InlineSpan> {
     let a = tokenize(before);
     let b = tokenize(after);
