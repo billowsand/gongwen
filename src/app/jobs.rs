@@ -36,9 +36,12 @@ pub(crate) enum WorkerResult {
     /// 同一篇又发起了新任务，回来的结果就已作废。
     Doc { key: DocKey, seq: u64, job: DocJob },
     /// 版本对照右栏的花脸稿在后台算好了。不走 `Doc` 的任务序号：它不占用
-    /// 「忙」状态，也不该被同一篇稿件的其他任务作废；是否过期按正文哈希判断。
+    /// 「忙」状态，也不该被同一篇稿件的其他任务作废；是否过期按稿件、基准版与
+    /// 正文哈希三者判断——只看正文哈希的话，任务在途时换了基准版，晚到的旧基准
+    /// 结果会被当成新的收下。
     Redline {
         key: DocKey,
+        base: (i64, i64),
         hash: u64,
         doc: crate::redline::RedlineDoc,
     },
@@ -247,9 +250,14 @@ impl GongwenApp {
                     self.status = format!("连接失败：{error}");
                 }
                 WorkerResult::Doc { key, seq, job } => self.apply_doc_job(key, seq, job),
-                WorkerResult::Redline { key, hash, doc } => {
+                WorkerResult::Redline {
+                    key,
+                    base,
+                    hash,
+                    doc,
+                } => {
                     if let Some(session) = self.docs.iter_mut().find(|session| session.key == key) {
-                        session.draft_diff.accept_redline(hash, doc);
+                        session.draft_diff.accept_redline(base, hash, doc);
                     }
                 }
                 WorkerResult::Knowledge(job) => self.apply_knowledge_job(job),

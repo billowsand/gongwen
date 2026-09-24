@@ -52,6 +52,13 @@ pub(crate) struct Baseline {
     notes: String,
 }
 
+impl Baseline {
+    /// `(稿件, 基准版)`：后台花脸稿据此判断是不是对着当前基准算的。
+    fn key(&self) -> (i64, i64) {
+        (self.id, self.number)
+    }
+}
+
 /// 一帧里两栏交互收集下来、等借用结束后再落地的动作。
 #[derive(Default)]
 struct Actions {
@@ -76,12 +83,15 @@ fn line_offset(text: &str, line: usize) -> usize {
 }
 
 impl super::DraftDiffState {
-    /// 后台算好的花脸稿回来了：只收与当前正文对得上的那一份，过期的直接丢。
-    pub(crate) fn accept_redline(&mut self, hash: u64, doc: redline::RedlineDoc) {
-        if self.redline_in_flight == Some(hash) {
+    /// 后台算好的花脸稿回来了：只收与当前稿件、基准版和正文都对得上的那一份，
+    /// 过期的直接丢。任务在途时换了基准版而正文没动，正文哈希照样对得上，
+    /// 不核对基准版就会把旧基准的花脸稿收下，而且之后哈希一致、再不重算。
+    pub(crate) fn accept_redline(&mut self, base: (i64, i64), hash: u64, doc: redline::RedlineDoc) {
+        if self.redline_in_flight == Some((base, hash)) {
             self.redline_in_flight = None;
         }
-        if hash != self.text_hash {
+        let current = self.baseline.as_ref().map(Baseline::key);
+        if current != Some(base) || hash != self.text_hash {
             return;
         }
         let (Some((_, report)), Some(baseline)) = (&self.cache, &self.baseline) else {
@@ -710,15 +720,21 @@ impl DraftPage<'_> {
                 let waited = now - since;
                 if waited < REDLINE_DEBOUNCE {
                     ctx.request_repaint_after(Duration::from_secs_f64(REDLINE_DEBOUNCE - waited));
-                } else if state.redline_in_flight != Some(hash) {
-                    state.redline_in_flight = Some(hash);
+                } else if state.redline_in_flight != Some((baseline.key(), hash)) {
+                    let base = baseline.key();
+                    state.redline_in_flight = Some((base, hash));
                     let old = old.clone();
                     let new = self.doc.generated_markdown.clone();
                     let key = self.doc.key;
                     let tx = self.sender.clone();
                     thread::spawn(move || {
                         let doc = redline::build(&old, &new);
-                        let _ = tx.send(WorkerResult::Redline { key, hash, doc });
+                        let _ = tx.send(WorkerResult::Redline {
+                            key,
+                            base,
+                            hash,
+                            doc,
+                        });
                     });
                 }
             }
@@ -1084,27 +1100,103 @@ mod tests {
         for _ in 0..5 {
             harness.frame(Vec::new());
         }
-        assert_eq!(harness.doc.draft_diff.redline_in_flight, Some(hash));
+        let base = (harness.doc.manuscript_id.unwrap(), 1);
+        assert_eq!(harness.doc.draft_diff.redline_in_flight, Some((base, hash)));
         let result = harness
             .receiver
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("后台花脸稿");
         let WorkerResult::Redline {
-            hash: done, doc, ..
+            base: done_base,
+            hash: done,
+            doc,
+            ..
         } = result
         else {
             panic!("应是花脸稿结果");
         };
+        assert_eq!(done_base, base);
         // 过期的结果（哈希对不上）丢掉。
-        harness.doc.draft_diff.accept_redline(done ^ 1, doc.clone());
+        harness
+            .doc
+            .draft_diff
+            .accept_redline(base, done ^ 1, doc.clone());
         assert_eq!(
             harness.doc.draft_diff.redline.as_ref().unwrap().hash,
             first_hash
         );
-        harness.doc.draft_diff.accept_redline(done, doc);
+        harness.doc.draft_diff.accept_redline(base, done, doc);
         let view = harness.doc.draft_diff.redline.as_ref().unwrap();
         assert_eq!(view.hash, hash);
         assert!(crate::export::strip_redline(&view.doc.markdown).contains("再加一段"));
+    }
+
+    /// 后台花脸稿在途时换了基准版、正文没动：晚到的旧基准结果正文哈希照样对得上，
+    /// 必须按基准版丢掉，右栏保持对着新基准算的那一份。
+    #[test]
+    fn a_late_redline_for_the_previous_baseline_is_dropped() {
+        let mut harness = Harness::new();
+        let id = harness.doc.manuscript_id.unwrap();
+        // 再提交一版：基准默认跟最新版走（v2），v1 是更早的一版。
+        let v2 = "# 关于报送材料的函\n\n## 工作目标\n\n请于八月二十日前报送材料。";
+        harness
+            .store
+            .commit_manuscript_version(id, "二稿", "", &DraftInput::default(), v2, "")
+            .unwrap();
+        harness.frame(Vec::new());
+        harness.doc.generated_markdown.push_str("\n\n再加一段。");
+        for _ in 0..6 {
+            harness.frame(Vec::new());
+        }
+        let hash = harness.doc.draft_diff.text_hash;
+        assert_eq!(
+            harness.doc.draft_diff.redline_in_flight,
+            Some(((id, 2), hash)),
+            "对着 v2 发出后台任务"
+        );
+        let WorkerResult::Redline {
+            base,
+            hash: done,
+            doc,
+            ..
+        } = harness
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("后台花脸稿")
+        else {
+            panic!("应是花脸稿结果");
+        };
+        assert_eq!((base, done), ((id, 2), hash));
+        // 结果回来之前，用户把基准换成 v1（正文不动）。
+        harness.doc.draft_diff.base = Some(1);
+        harness.frame(Vec::new());
+        let expected = redline::build(OLD, &harness.doc.generated_markdown).markdown;
+        assert_eq!(
+            harness
+                .doc
+                .draft_diff
+                .redline
+                .as_ref()
+                .unwrap()
+                .doc
+                .markdown,
+            expected,
+            "换基准后右栏对着 v1 重算"
+        );
+        // 晚到的 v2 结果：正文哈希对得上，但基准不对，丢掉。
+        harness.doc.draft_diff.accept_redline(base, done, doc);
+        assert_eq!(
+            harness
+                .doc
+                .draft_diff
+                .redline
+                .as_ref()
+                .unwrap()
+                .doc
+                .markdown,
+            expected,
+            "旧基准的结果不得覆盖右栏"
+        );
     }
 
     /// 长稿打字的帧耗时探针（人工运行：`cargo test --release --bin gongwen-assistant

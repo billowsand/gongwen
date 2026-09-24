@@ -52,8 +52,8 @@ pub(crate) struct DraftDiffState {
     pub(crate) last_draft: Option<crate::models::DraftInput>,
     /// 花脸稿防抖：`(正文哈希, 开始等待的时刻)`。
     pub(crate) redline_wait: Option<(u64, f64)>,
-    /// 正在后台算的花脸稿对应的正文哈希。
-    pub(crate) redline_in_flight: Option<u64>,
+    /// 正在后台算的花脸稿：`((稿件, 基准版), 正文哈希)`。
+    pub(crate) redline_in_flight: Option<((i64, i64), u64)>,
     /// 下一帧把编辑器光标移到这个字节位置并滚过去（F7、点右栏、还原之后）。
     pub(crate) editor_jump: Option<usize>,
     /// 上一帧编辑器光标所在的源码行。光标真的换了行才让焦点跟过去——
