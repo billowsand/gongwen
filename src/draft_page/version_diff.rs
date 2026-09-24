@@ -926,8 +926,16 @@ mod tests {
         let state = &harness.doc.draft_diff;
         let view = state.redline.as_ref().expect("花脸稿已算好");
         let (_, report) = state.cache.as_ref().unwrap();
-        // 每处代码变更都能在花脸稿里找到位置，每个变更块也是。
-        for change in 0..report.body.changed_count {
+        // 每处正文变更都能在花脸稿里找到位置，每个变更块也是。空行变更除外：
+        // 视觉层不标空行，它们只在左栏的代码 diff 里出现。
+        let changes = report.body.blocks.iter().filter_map(|block| match block {
+            diff::DiffBlock::Changed(change) => Some(change),
+            diff::DiffBlock::Unchanged(_) => None,
+        });
+        for (change, block) in changes.enumerate() {
+            if block.role == diff::BlockRole::Blank {
+                continue;
+            }
             assert!(
                 view.links.marked_range(change).is_some(),
                 "第 {change} 处变更在预览里没有落点"

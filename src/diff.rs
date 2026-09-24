@@ -2,10 +2,15 @@
 //!
 //! 全部是纯函数，不触碰存储与 UI，便于单元测试。
 //!
-//! 正文 diff 分三步：① 按非空行切块——公文一个自然段就是一行，空行只是分隔，不参与
-//! 比较，免得多敲一个空行整篇位移；② 块序列做 LCS，再把相邻的删除块与新增块按相似度
-//! 配成"修改"；③ 只对配上对的块跑 token 级 LCS，标出真正改掉的那几个字。少了第三步，
-//! 改一个字就是整段标红加整段标绿——公文段落长，那种输出等于没有 diff。
+//! 正文 diff 分三步：① 按行切块，**空行与行首尾空白也参与比较**——这是代码层，要求
+//! 严谨：Markdown 里空行有语义（一个换行是同段软换行，两个换行才分段；表格行、列表项
+//! 之间多一个空行就拆成两组），只改空行的变更也必须看得见、能逐块还原。LCS 按行对齐，
+//! 多敲一个空行只多出一条「空行」变更，不会整篇位移；② 块序列做 LCS，再把相邻的删除
+//! 块与新增块按相似度配成"修改"（空行不参与配对，各自成删 / 增）；③ 只对配上对的块
+//! 跑 token 级 LCS，标出真正改掉的那几个字。少了第三步，改一个字就是整段标红加整段
+//! 标绿——公文段落长，那种输出等于没有 diff。
+//!
+//! 「看上去像那么回事」是视觉层（`visual_diff`，花脸稿）的事：那里空行、空格一律不标。
 //!
 //! `draft_changes` / `profile_changes` / `config_changes` 按已知字段逐一比较，
 //! 输出带中文标签的 `FieldChange`，让“文档要素对照”是清单式的，而不是原始 JSON 差异。
@@ -56,6 +61,8 @@ pub enum BlockRole {
     TableRow,
     ListItem,
     Paragraph,
+    /// 空行（含只有空白的行）：只在代码层出现，花脸稿不标。
+    Blank,
 }
 
 impl BlockRole {
@@ -65,6 +72,7 @@ impl BlockRole {
             BlockRole::TableRow => "表格行",
             BlockRole::ListItem => "列表项",
             BlockRole::Paragraph => "正文段",
+            BlockRole::Blank => "空行",
         }
     }
 }
@@ -221,19 +229,19 @@ pub fn manuscript_diff(old: &ContentSnapshot, new: &ContentSnapshot) -> Manuscri
     }
 }
 
-/// 正文段落级 diff：`old` 为旧版，`new` 为新版。空行不参与比较。
+/// 正文逐行 diff：`old` 为旧版，`new` 为新版。空行、行首尾空白都参与比较。
 pub fn body_diff(old: &str, new: &str) -> BodyDiff {
     let old_blocks = split_blocks(old);
     let new_blocks = split_blocks(new);
-    let a: Vec<&str> = old_blocks.iter().map(|block| block.text.trim()).collect();
-    let b: Vec<&str> = new_blocks.iter().map(|block| block.text.trim()).collect();
+    let a: Vec<&str> = old_blocks.iter().map(|block| block.text.as_str()).collect();
+    let b: Vec<&str> = new_blocks.iter().map(|block| block.text.as_str()).collect();
 
     let mut blocks: Vec<DiffBlock> = Vec::new();
     let mut context: Vec<ContextBlock> = Vec::new();
     // 连续的删除 / 新增块先攒起来，等这一组结束再按相似度两两配对。
     let mut removed: Vec<usize> = Vec::new();
     let mut added: Vec<usize> = Vec::new();
-    for op in diff_ops(&a, &b) {
+    for op in line_ops(&a, &b) {
         match op {
             DiffOp::Same(i, j) => {
                 flush_group(
@@ -280,8 +288,8 @@ pub fn body_diff(old: &str, new: &str) -> BodyDiff {
     }
 }
 
-/// 正文里的一个比较单元：一个非空行。公文一个自然段就是一行，所以"行"与"段"等价；
-/// 表格行、列表项、标题各自独立成块，改一格只标那一格。
+/// 正文里的一个比较单元：一行（含空行）。公文一个自然段就是一行，所以"行"与"段"
+/// 等价；表格行、列表项、标题各自独立成块，改一格只标那一格。
 struct Block {
     text: String,
     /// 1 基行号，展示用。
@@ -291,26 +299,35 @@ struct Block {
 }
 
 fn split_blocks(text: &str) -> Vec<Block> {
+    // 空文本是「零行」，不是「一个空行」：新建稿件对空基准不该多出一条空行变更。
+    if text.is_empty() {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let mut start = 0usize;
     for (index, raw) in text.split('\n').enumerate() {
         // 统一按 \n 切分后再摘掉 \r，CRLF 文本的块内容才不会带尾巴。
         let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if !line.trim().is_empty() {
-            out.push(Block {
-                text: line.to_string(),
-                line: index + 1,
-                range: start..start + line.len(),
-            });
-        }
+        out.push(Block {
+            text: line.to_string(),
+            line: index + 1,
+            range: start..start + line.len(),
+        });
         start += raw.len() + 1;
     }
     out
 }
 
+/// 空行（或只有空白的行）。
+pub fn is_blank_line(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
 fn block_role(text: &str) -> BlockRole {
     let trimmed = text.trim_start();
-    if trimmed.starts_with('#') {
+    if trimmed.is_empty() {
+        BlockRole::Blank
+    } else if trimmed.starts_with('#') {
         BlockRole::Heading
     } else if trimmed.starts_with('|') {
         BlockRole::TableRow
@@ -340,9 +357,20 @@ fn flush_group(
     old_blocks: &[Block],
     new_blocks: &[Block],
 ) {
-    let count = removed.len().max(added.len());
+    // 空行不参与配对：拿空行去配正文段只会得到一删一增，还会把后面真正该配成
+    // 「修改」的两段错开。空行各自成删 / 增，排在这一组的配对之后。
+    let (removed_blank, removed_text): (Vec<usize>, Vec<usize>) = removed
+        .iter()
+        .partition(|index| is_blank_line(&old_blocks[**index].text));
+    let (added_blank, added_text): (Vec<usize>, Vec<usize>) = added
+        .iter()
+        .partition(|index| is_blank_line(&new_blocks[**index].text));
+    let count = removed_text.len().max(added_text.len());
     for index in 0..count {
-        match (removed.get(index).copied(), added.get(index).copied()) {
+        match (
+            removed_text.get(index).copied(),
+            added_text.get(index).copied(),
+        ) {
             (Some(i), Some(j)) => {
                 let before = &old_blocks[i];
                 let after = &new_blocks[j];
@@ -369,6 +397,12 @@ fn flush_group(
             (None, Some(j)) => blocks.push(inserted_block(&new_blocks[j])),
             (None, None) => {}
         }
+    }
+    for i in removed_blank {
+        blocks.push(deleted_block(&old_blocks[i]));
+    }
+    for j in added_blank {
+        blocks.push(inserted_block(&new_blocks[j]));
     }
     removed.clear();
     added.clear();
@@ -491,6 +525,46 @@ enum DiffOp {
     Same(usize, usize),
     Delete(usize),
     Insert(usize),
+}
+
+/// 逐行 diff，两级对齐：先只拿**非空行**做 LCS 定锚，再在相邻两个锚点之间的夹缝里
+/// 连同空行逐行比较。
+///
+/// 直接把空行也丢进 LCS 会出事：空行彼此都相等，最长公共子序列常常宁可对齐一串
+/// 空行，也不对齐一段没动过的正文——删掉中间一段时，后面那段「第五段。」会被算成
+/// 删了又加回来。先锚正文，空行就只能在夹缝里配对，抢不走正文的对齐。
+fn line_ops(a: &[&str], b: &[&str]) -> Vec<DiffOp> {
+    let content = |lines: &[&str]| -> Vec<usize> {
+        (0..lines.len())
+            .filter(|index| !is_blank_line(lines[*index]))
+            .collect()
+    };
+    let (content_a, content_b) = (content(a), content(b));
+    let keys_a: Vec<&str> = content_a.iter().map(|index| a[*index]).collect();
+    let keys_b: Vec<&str> = content_b.iter().map(|index| b[*index]).collect();
+    let anchors = diff_ops(&keys_a, &keys_b)
+        .into_iter()
+        .filter_map(|op| match op {
+            DiffOp::Same(i, j) => Some((content_a[i], content_b[j])),
+            _ => None,
+        })
+        .chain(std::iter::once((a.len(), b.len())));
+    let mut out = Vec::with_capacity(a.len().max(b.len()));
+    let (mut from_a, mut from_b) = (0usize, 0usize);
+    for (anchor_a, anchor_b) in anchors {
+        for op in diff_ops(&a[from_a..anchor_a], &b[from_b..anchor_b]) {
+            out.push(match op {
+                DiffOp::Same(i, j) => DiffOp::Same(from_a + i, from_b + j),
+                DiffOp::Delete(i) => DiffOp::Delete(from_a + i),
+                DiffOp::Insert(j) => DiffOp::Insert(from_b + j),
+            });
+        }
+        if anchor_a < a.len() {
+            out.push(DiffOp::Same(anchor_a, anchor_b));
+        }
+        (from_a, from_b) = (anchor_a + 1, anchor_b + 1);
+    }
+    out
 }
 
 /// 逐元素 diff（`similar` 的 Myers 算法），展开成单元素操作。块级与字级两处共用。
@@ -1027,6 +1101,22 @@ mod tests {
             .collect()
     }
 
+    /// 正文行的改动（不含空行变更）。
+    fn content_changes(diff: &BodyDiff) -> Vec<&BlockChange> {
+        changes(diff)
+            .into_iter()
+            .filter(|change| change.role != BlockRole::Blank)
+            .collect()
+    }
+
+    /// 空行的改动。
+    fn blank_changes(diff: &BodyDiff) -> Vec<&BlockChange> {
+        changes(diff)
+            .into_iter()
+            .filter(|change| change.role == BlockRole::Blank)
+            .collect()
+    }
+
     /// 某一侧字级片段里被标出来的文字（拼在一起），用于断言"只标了这几个字"。
     fn marked(spans: &[InlineSpan], kind: SpanKind) -> String {
         spans
@@ -1074,7 +1164,11 @@ mod tests {
         let old = "第一段\n\n第三段";
         let new = "第一段\n\n第二段\n\n第三段";
         let diff = body_diff(old, new);
-        let changes = changes(&diff);
+        // 空行也是代码层变更：新增一段连带新增一个分隔空行。
+        let blank = blank_changes(&diff);
+        assert_eq!(blank.len(), 1);
+        assert_eq!(blank[0].kind, ChangeKind::Insert);
+        let changes = content_changes(&diff);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, ChangeKind::Insert);
         assert_eq!(side_text(&changes[0].after_spans), "第二段");
@@ -1087,7 +1181,9 @@ mod tests {
     #[test]
     fn body_diff_reports_pure_delete_without_source_anchor() {
         let diff = body_diff("第一段\n\n第二段", "第一段");
-        let changes = changes(&diff);
+        // 删掉一段连带删掉它前面的分隔空行。
+        assert_eq!(blank_changes(&diff).len(), 1);
+        let changes = content_changes(&diff);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, ChangeKind::Delete);
         assert_eq!(side_text(&changes[0].before_spans), "第二段");
@@ -1125,13 +1221,42 @@ mod tests {
     }
 
     #[test]
-    fn body_diff_ignores_blank_line_noise() {
-        // 段间多敲空行不是内容变更，不该让整篇看起来全变了。
+    fn body_diff_reports_blank_line_changes_as_blank_rows() {
+        // 代码层要求严谨：段间多敲的空行也是变更（Markdown 里空行有语义），但只多出
+        // 两条「空行」变更，前后两段仍按原样对齐，不会整篇看起来全变了。（从前这里
+        // 断言空行不算变更；按方案「代码层逐字节记录」改为如实报告。）
         let diff = body_diff("第一段\n\n第二段", "第一段\n\n\n\n第二段");
-        assert_eq!(diff.changed_count, 0);
-        assert!(diff.is_empty());
-        // 相同文本同理。
+        assert_eq!(diff.changed_count, 2);
+        assert!(content_changes(&diff).is_empty(), "正文段没有变");
+        assert!(
+            blank_changes(&diff)
+                .iter()
+                .all(|change| change.kind == ChangeKind::Insert)
+        );
+        // 一个换行（同段软换行）改成空行（分段）同样看得见。
+        let merged = body_diff("甲\n乙", "甲\n\n乙");
+        assert_eq!(merged.changed_count, 1);
+        assert_eq!(blank_changes(&merged).len(), 1);
+        // 相同文本没有变更。
         assert!(body_diff("甲\n\n乙", "甲\n\n乙").is_empty());
+        // 行首尾空白也算。
+        assert_eq!(body_diff("甲", "甲 ").changed_count, 1);
+    }
+
+    #[test]
+    fn blank_lines_never_steal_the_alignment_of_real_paragraphs() {
+        // 空行彼此都相等：直接连空行一起做 LCS，删掉中间一段时会宁可对齐一串空行、
+        // 把后面没动过的「第五段」算成删了又加。先锚正文再比空行就不会。
+        let old = "# 标题\n\n请于八月十日前报送。\n\n多余的一段。\n\n第五段。";
+        let new = "# 标题\n\n请于八月十五日前报送。\n\n第五段。\n\n新增的结尾段。";
+        let diff = body_diff(old, new);
+        assert!(
+            content_changes(&diff)
+                .iter()
+                .all(|change| !side_text(&change.before_spans).contains("第五段")
+                    && !side_text(&change.after_spans).contains("第五段")),
+            "第五段没动，不能出现在变更里"
+        );
     }
 
     #[test]
@@ -1141,7 +1266,8 @@ mod tests {
         assert_eq!(added.changed_count, 1);
         assert_eq!(changes(&added)[0].kind, ChangeKind::Insert);
         let removed = body_diff("原有一段\n\n再一段", "");
-        assert_eq!(removed.changed_count, 2);
+        // 两段加中间的空行，逐行都是删除。
+        assert_eq!(removed.changed_count, 3);
         assert!(
             changes(&removed)
                 .iter()
@@ -1298,13 +1424,14 @@ mod tests {
         // 正文不再混进字段清单，各归各位。
         assert!(diff.fields.iter().all(|change| change.label != "正文"));
         assert!(diff.fields.iter().any(|change| change.label == "标题提示"));
-        assert_eq!(diff.body.changed_count, 1);
+        // 新增「正文」一行，连带它前面的分隔空行。
+        assert_eq!(diff.body.changed_count, 2);
         let notes = diff.notes.as_ref().expect("备注变了应有一项");
         assert_eq!(
             (notes.before.as_str(), notes.after.as_str()),
             ("备注a", "备注b")
         );
-        assert_eq!(diff.total(), 3);
+        assert_eq!(diff.total(), 4);
         assert!(!diff.is_empty());
     }
 

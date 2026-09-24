@@ -336,6 +336,8 @@ fn deleted_galley(
     let mut job = highlight::highlight(&text, wrap, font_size, None, &[], fonts, research);
     let ranges = span_byte_ranges(&row.spans, SpanKind::Removed);
     apply_background(&mut job, &ranges, theme::danger().gamma_multiply(0.28));
+    // 删掉的是空行：红底空行看不出删了什么，补一个淡色「（空行）」。
+    crate::diff_view::blank_placeholder(&mut job, egui::FontId::proportional(font_size));
     ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
 }
 

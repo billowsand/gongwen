@@ -223,7 +223,10 @@ mod tests {
         let old = "第一段。\n\n多余的第二段。\n\n第三段。";
         let new = "第一段。\n\n第三段。";
         let (links, doc) = links(old, new);
-        assert_eq!(links.len(), 1);
+        // 整删一段连带删掉一个分隔空行：两处代码变更，空行那处在花脸稿里没有落点
+        // （视觉层不标空行）。
+        assert_eq!(links.len(), 2);
+        assert_eq!(links.marked_range(1), None, "空行变更没有落点");
         let range = links.marked_range(0).expect("整删的块留在花脸稿里");
         assert_eq!(marked_text(&doc, range.clone()), "多余的第二段。");
         assert_eq!(links.change_at(&range), Some(0));
@@ -237,7 +240,8 @@ mod tests {
         let old = "## 工作目标\n\n甲。\n\n乙。";
         let new = "## 工作目标\n\n甲改。\n\n## 保障措施\n\n乙。";
         let (links, doc) = links(old, new);
-        assert_eq!(links.len(), 2);
+        // 改写、新增标题、新增标题后的分隔空行：三处代码变更。
+        assert_eq!(links.len(), 3);
         let first = marked_text(&doc, links.marked_range(0).unwrap());
         let second = marked_text(&doc, links.marked_range(1).unwrap());
         assert!(first.contains('甲'), "{first}");

@@ -1,7 +1,7 @@
 //! 可编辑统一 diff 的数据层：把代码 diff 的逐行变更聚成「变更块」（hunk），
 //! 算出每块的已删除旧行放在哪条新行之前、哪些新行要画绿底，以及逐块还原。
 //!
-//! 全是纯函数，不碰界面。`diff::body_diff` 按非空行比较，行号是按 `\n` 切出的
+//! 全是纯函数，不碰界面。`diff::body_diff` 逐行比较（空行也算），行号是按 `\n` 切出的
 //! 1 基源码行号，与 `TextEdit` galley 的源码行一一对应（见 `diff_gaps`）。
 
 use crate::diff::{BlockChange, BodyDiff, ChangeKind, DiffBlock, InlineSpan};
@@ -80,8 +80,16 @@ pub(crate) fn hunks(body: &BodyDiff, new_text: &str) -> Vec<Hunk> {
     let mut change_index = 0usize;
     let mut prev_context: Option<(usize, usize)> = None;
     let mut open: Option<Hunk> = None;
-    for block in &body.blocks {
+    for (index, block) in body.blocks.iter().enumerate() {
         match block {
+            // 两处变更之间只隔着没动过的空行：仍算同一块。空行只是分隔，拿它把
+            // 「改一段 + 删下一段」切成两块，还原要点两次，也不像 Zed 那样成块。
+            DiffBlock::Unchanged(context)
+                if open.is_some()
+                    && context
+                        .iter()
+                        .all(|line| crate::diff::is_blank_line(&line.text))
+                    && matches!(body.blocks.get(index + 1), Some(DiffBlock::Changed(_))) => {}
             DiffBlock::Unchanged(context) => {
                 if let Some(mut hunk) = open.take() {
                     hunk.next_context = context.first().map(|line| (line.old_line, line.new_line));
@@ -154,74 +162,50 @@ fn finish(mut hunk: Hunk, total_lines: usize) -> Hunk {
 
 /// 逐块还原：把本块在新文本里的内容换回基准版那一块。返回还原后的全文，以及
 /// 光标应落的字节位置（被还原块的起点）。
+///
+/// 一块就是「上一段未改动内容」与「下一段未改动内容」之间的整个区域——两侧各取
+/// 这段区域，原样对换。不按块内各条变更的行号拼：块可能跨过没动过的空行（见
+/// [`hunks`]），逐条变更的首末行在新旧两侧对不齐，拼出来会把空行挪位。
+///
+/// 区域边界：后面还有未改动内容时，区域是「上一段的下一行行首」到「下一段行首」，
+/// 连同行尾换行一起换；后面没有了（改的是文末），区域从上一段的**行尾**起算，
+/// 把两者之间的换行也算进来，文末多一个或少一个换行都能换回去。
 pub(crate) fn revert(hunk: &Hunk, old: &str, new: &str) -> (String, usize) {
-    let old_starts = line_starts(old);
-    let new_starts = line_starts(new);
-    let old_span = |first: usize, last: usize| -> Option<Range<usize>> {
-        let start = line_range(&old_starts, old, first)?.start;
-        let end = line_range(&old_starts, old, last)?.end;
-        Some(start..end)
-    };
-    let new_line = |line: usize| line_range(&new_starts, new, line);
-    let old_line = |line: usize| line_range(&old_starts, old, line);
-    let splice = |range: Range<usize>, insert: &str| -> (String, usize) {
-        let mut text = String::with_capacity(new.len() + insert.len());
-        text.push_str(&new[..range.start]);
-        text.push_str(insert);
-        text.push_str(&new[range.end..]);
-        (text, range.start)
-    };
-    match (hunk.old_lines, hunk.new_lines) {
-        // 改写（可能夹着增删）：新文本里这一块整段换回旧文本那一块。
-        (Some((old_first, old_last)), Some((new_first, new_last))) => {
-            let (Some(old_range), Some(first), Some(last)) = (
-                old_span(old_first, old_last),
-                new_line(new_first),
-                new_line(new_last),
-            ) else {
-                return (new.to_string(), 0);
-            };
-            splice(first.start..last.end, &old[old_range])
-        }
-        // 纯新增：删掉这几行，连同把它们和后文隔开的空行。
-        (None, Some((new_first, new_last))) => {
-            let (Some(first), Some(last)) = (new_line(new_first), new_line(new_last)) else {
-                return (new.to_string(), 0);
-            };
-            let range = match (hunk.next_context, hunk.prev_context) {
-                (Some((_, next)), _) => {
-                    first.start..new_line(next).map_or(new.len(), |line| line.start)
-                }
-                (None, Some((_, prev))) => new_line(prev).map_or(0, |line| line.end)..last.end,
-                (None, None) => 0..new.len(),
-            };
-            splice(range, "")
-        }
-        // 纯删除：在原位置插回旧行，分隔空行照旧版原样补上。
-        (Some((old_first, old_last)), None) => {
-            let Some(old_range) = old_span(old_first, old_last) else {
-                return (new.to_string(), 0);
-            };
-            let chunk = &old[old_range.clone()];
-            match (hunk.next_context, hunk.prev_context) {
-                (Some((next_old, next_new)), _) => {
-                    let separator_end = old_line(next_old).map_or(old.len(), |line| line.start);
-                    let separator = &old[old_range.end..separator_end];
-                    let at = new_line(next_new).map_or(new.len(), |line| line.start);
-                    splice(at..at, &format!("{chunk}{separator}"))
-                }
-                (None, Some((prev_old, prev_new))) => {
-                    let separator_start = old_line(prev_old).map_or(0, |line| line.end);
-                    let separator = &old[separator_start..old_range.start];
-                    let at = new_line(prev_new).map_or(new.len(), |line| line.end);
-                    let (text, _) = splice(at..at, &format!("{separator}{chunk}"));
-                    (text, at + separator.len())
-                }
-                (None, None) => (chunk.to_string(), 0),
+    let region = |text: &str, prev: Option<usize>, next: Option<usize>| -> Range<usize> {
+        let starts = line_starts(text);
+        let line_start = |line: usize| starts.get(line - 1).copied().unwrap_or(text.len());
+        match (prev, next) {
+            (prev, Some(next)) => prev.map_or(0, |prev| line_start(prev + 1))..line_start(next),
+            (Some(prev), None) => {
+                line_range(&starts, text, prev).map_or(text.len(), |line| line.end)..text.len()
             }
+            (None, None) => 0..text.len(),
         }
-        (None, None) => (new.to_string(), 0),
-    }
+    };
+    let old_region = region(
+        old,
+        hunk.prev_context.map(|(old_line, _)| old_line),
+        hunk.next_context.map(|(old_line, _)| old_line),
+    );
+    let new_region = region(
+        new,
+        hunk.prev_context.map(|(_, new_line)| new_line),
+        hunk.next_context.map(|(_, new_line)| new_line),
+    );
+    let mut text = String::with_capacity(new.len() + old_region.len());
+    text.push_str(&new[..new_region.start]);
+    text.push_str(&old[old_region.clone()]);
+    text.push_str(&new[new_region.end..]);
+    // 光标落在被还原内容的第一个字上：文末那种区域以换行开头，跳过它。
+    let skipped =
+        old[old_region.clone()].len() - old[old_region].trim_start_matches(['\r', '\n']).len();
+    let cursor = if hunk.next_context.is_none() && hunk.prev_context.is_some() {
+        new_region.start + skipped
+    } else {
+        new_region.start
+    };
+    let cursor = cursor.min(text.len());
+    (text, cursor)
 }
 
 #[cfg(test)]
@@ -242,17 +226,23 @@ mod tests {
         // 「改写 + 整删」连在一起是一块；结尾新增是另一块。
         assert_eq!(hunks.len(), 2, "{hunks:#?}");
         let first = &hunks[0];
-        assert_eq!(first.deleted.len(), 2);
-        assert_eq!(first.deleted[0].text(), "请于八月十日前报送。");
-        assert_eq!(first.deleted[1].text(), "多余的一段。");
+        // 整删「多余的一段」连带删掉它后面的分隔空行：空行也是一条删除行。
+        // 两段之间原有两个空行、现在只剩一个，删的是哪一个都对，这里不认位置。
+        let texts: Vec<String> = first.deleted.iter().map(DeletedRow::text).collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert_eq!(texts[0], "请于八月十日前报送。");
+        assert!(texts.contains(&"多余的一段。".to_string()), "{texts:?}");
+        assert_eq!(texts.iter().filter(|text| text.is_empty()).count(), 1);
         assert_eq!(first.added.len(), 1);
         assert_eq!(first.added[0].line, 4, "改写后的行是新文本第 5 行");
         assert_eq!(first.gap_line, 4, "旧行叠在改写行上方");
         assert!(first.touches_line(4));
         let second = &hunks[1];
         assert!(second.deleted.is_empty());
-        assert_eq!(second.added[0].line, 8);
-        assert!(second.added[0].spans.is_empty(), "整行新增不做字级高亮");
+        // 结尾新增一段：先是分隔空行（第 8 行），再是正文（第 9 行）。
+        let lines: Vec<usize> = second.added.iter().map(|row| row.line).collect();
+        assert_eq!(lines, [7, 8]);
+        assert!(second.added[1].spans.is_empty(), "整行新增不做字级高亮");
     }
 
     #[test]
@@ -328,5 +318,79 @@ mod tests {
             "{}",
             &text[cursor..]
         );
+    }
+
+    /// 线性同余发生器：测试可复现，不引入随机数依赖。
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as usize) % n.max(1)
+        }
+    }
+
+    /// 随机改稿（增删改正文行、增删空行、改行尾空白、末尾换行），再按**随机顺序**
+    /// 逐块还原到底：每一步都要有进展，最后与基准**逐字节**相等。代码层 diff 要是
+    /// 漏看了空行或空白，这里就还原不回去。
+    #[test]
+    fn random_edits_revert_back_to_the_exact_base_text() {
+        const POOL: [&str; 8] = [
+            "## 工作目标",
+            "请于八月十日前报送材料。",
+            "| 项目 | 时限 |",
+            "- 甲项工作",
+            "**一是**加强领导。",
+            "各单位要高度重视。",
+            "联系人：张三。",
+            "附件：1. 名单",
+        ];
+        let mut rng = Lcg(20_260_924);
+        for round in 0..2000 {
+            let mut lines: Vec<String> = Vec::new();
+            for index in 0..1 + rng.below(8) {
+                if index > 0 && rng.below(4) != 0 {
+                    lines.push(String::new());
+                }
+                lines.push(format!("{}{index}", POOL[rng.below(POOL.len())]));
+            }
+            let old = lines.join("\n");
+            for _ in 0..1 + rng.below(4) {
+                let at = rng.below(lines.len() + 1);
+                match rng.below(6) {
+                    0 if at < lines.len() && lines.len() > 1 => {
+                        lines.remove(at);
+                    }
+                    1 => lines.insert(at, format!("插入{}", rng.below(99))),
+                    2 => lines.insert(at, String::new()),
+                    3 if at < lines.len() => lines[at].push('改'),
+                    4 if at < lines.len() => lines[at].push(' '),
+                    _ => {}
+                }
+            }
+            let mut new = lines.join("\n");
+            if rng.below(4) == 0 {
+                new.push('\n');
+            }
+            let mut text = new.clone();
+            for _ in 0..100 {
+                let hunks = plan(&old, &text);
+                if hunks.is_empty() {
+                    break;
+                }
+                let pick = rng.below(hunks.len());
+                let (reverted, cursor) = revert(&hunks[pick], &old, &text);
+                assert!(cursor <= reverted.len());
+                assert!(
+                    plan(&old, &reverted).len() < hunks.len(),
+                    "第 {round} 组还原没有进展：{old:?} / {text:?} → {reverted:?}"
+                );
+                text = reverted;
+            }
+            assert_eq!(text, old, "第 {round} 组：{new:?} 逐块还原回 {old:?}");
+        }
     }
 }

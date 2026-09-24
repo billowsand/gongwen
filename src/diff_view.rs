@@ -421,7 +421,26 @@ fn spans_job(
         }
         job.append(&span.text, 0.0, format);
     }
+    blank_placeholder(&mut job, font);
     job
+}
+
+/// 空行（或只有空白的行）的变更排出来什么都看不见：补一个淡色「（空行）」，
+/// 让只改了空行的那一处也有东西可看、可点。
+pub(crate) fn blank_placeholder(job: &mut egui::text::LayoutJob, font: egui::FontId) {
+    if !crate::diff::is_blank_line(&job.text) {
+        return;
+    }
+    job.append(
+        "（空行）",
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color: theme::text_muted(),
+            italics: true,
+            ..Default::default()
+        },
+    );
 }
 
 /// 表格单元格里的摘要：换行折成空格、超长截断。多行值会把表格行撑得很高，
@@ -765,5 +784,6 @@ fn unified_spans_job(
         }
         job.append(&span.text, 0.0, format);
     }
+    blank_placeholder(&mut job, font);
     job
 }
