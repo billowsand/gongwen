@@ -906,15 +906,16 @@ impl GongwenApp {
                         ui.add_space(row.depth as f32 * 16.0);
                         if filter.is_empty() {
                             let drag = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("⋮⋮").color(theme::text_muted()),
-                                )
-                                .sense(egui::Sense::drag()),
+                                theme::Icon::Grip
+                                    .image()
+                                    .tint(theme::text_muted())
+                                    .sense(egui::Sense::drag()),
                             );
                             drag.dnd_set_drag_payload(id);
-                            drag.on_hover_text("拖动调整同级顺序");
+                            drag.on_hover_cursor(egui::CursorIcon::Grab)
+                                .on_hover_text("拖动调整同级顺序");
                         } else {
-                            ui.add_space(12.0);
+                            ui.add_space(16.0);
                         }
                         if row.is_unit && row.has_children {
                             if theme::icon_button(
