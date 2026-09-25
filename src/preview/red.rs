@@ -28,6 +28,16 @@ use std::sync::Arc;
 /// 再加约 7% 的字身下沿。判断首页末行放不放得下时按它量，而不是按整个行盒。
 pub(crate) const RED_INK_RATIO: f32 = 0.82;
 
+/// 片段内第 `index` 行的行盒上沿（相对片段顶）。
+///
+/// 呈批件是真分页的，行位置必须按固定行距 `metrics.line` 累加，不能取 galley
+/// 自己的行盒：epaint 会把每一行的行高取整到物理像素（1.2 倍缩放时 44.8px 的
+/// 行排成 45px），整页十几行攒下来差出将近一行，首页末行就在某些缩放 / DPI 下
+/// 被判放不下、挪到下一页，红线上方白白空出一行。排版与绘制都按这里的位置走。
+pub(crate) fn red_row_top(metrics: &Metrics, index: usize) -> f32 {
+    index as f32 * metrics.line
+}
+
 /// 普通文种正文区渲染参数。红头呈批件走下方独立的打印分页模型。
 pub(crate) struct BodyRun {
     pub(crate) compact_headings: Vec<bool>,
@@ -332,19 +342,17 @@ fn red_place_styled_flow_text(
         // 按行盒底判定会白白空掉最后一行——TeX 那边只要红线上方还容得下一个
         // 三号字就照排（cls 里 \RedFirstPageRemaining>16pt 那一支）。这里同样
         // 按字形底沿判定：末行的行盒可以越过正文区下沿，字形仍在承办区红线
-        // 上方 2mm 的安全距离之内。
-        let ink_bottom =
-            |row: &egui::epaint::text::PlacedRow| row.rect().top() + metrics.line * RED_INK_RATIO;
-        let fitting = galley
-            .rows
-            .iter()
-            .take_while(|row| ink_bottom(row) <= available + 0.5)
+        // 上方 2mm 的安全距离之内。行位置按固定行距算（见 `red_row_top`），
+        // 不取 galley 里取整过的行盒。
+        let ink_bottom = |index: usize| red_row_top(metrics, index) + metrics.line * RED_INK_RATIO;
+        let fitting = (0..galley.rows.len())
+            .take_while(|index| ink_bottom(*index) <= available + 0.5)
             .count();
         if fitting == 0 {
             layout_state.next_page(metrics);
             continue;
         }
-        let visible_height = galley.rows[fitting - 1].rect().bottom();
+        let visible_height = red_row_top(metrics, fitting);
         let mut consumed = galley.rows[..fitting]
             .iter()
             .map(|row| row.glyphs.len())
@@ -420,10 +428,8 @@ fn red_place_aligned_text(
         let mut job = red_inline_job(metrics, width, &segments, false);
         job.halign = halign;
         let galley = layout(ui, job);
-        let ink_bottom = galley
-            .rows
-            .last()
-            .map_or(0.0, |row| row.rect().top() + metrics.line * RED_INK_RATIO);
+        let row_count = galley.rows.len().max(1);
+        let ink_bottom = red_row_top(metrics, row_count - 1) + metrics.line * RED_INK_RATIO;
         if ink_bottom > available + 0.5 && layout_state.cursor_y > metrics.mm(37.0) + 0.5 {
             layout_state.next_page(metrics);
             continue;
@@ -433,7 +439,7 @@ fn red_place_aligned_text(
             export::LineAlign::Center => left + width / 2.0,
             export::LineAlign::Right => left + width,
         };
-        let visible_height = galley.size().y;
+        let visible_height = red_row_top(metrics, row_count);
         layout_state.push(RedPrintFragment {
             range: Some(range),
             source_segments: Vec::new(),
@@ -571,7 +577,7 @@ pub(crate) fn red_fixed_fragment(
     RedPrintFragment {
         range,
         source_segments: Vec::new(),
-        visible_height: galley.size().y,
+        visible_height: red_row_top(metrics, galley.rows.len().max(1)),
         galley,
         justified: Vec::new(),
         x,
@@ -838,7 +844,8 @@ pub(crate) fn red_build_print_layout(
                     style: RedTextStyle::Body,
                     mark: RedlineKind::Same,
                 }],
-                false,
+                // 与 Word / TeX 一致：附件概要首行缩进两个汉字。
+                true,
             );
         }
     }
@@ -1165,7 +1172,8 @@ pub(crate) fn paint_red_print_pages(
                         .zip(&fragment.justified)
                         .enumerate()
                     {
-                        if placed.rect().top() >= fragment.visible_height {
+                        let row_y = red_row_top(metrics, row_index);
+                        if row_y >= fragment.visible_height - 0.5 {
                             break;
                         }
                         let row_end = row_start + placed.glyphs.len();
@@ -1175,10 +1183,10 @@ pub(crate) fn paint_red_print_pages(
                         // 「第几行」，不是「第几页第几行」。
                         metrics.mark_row(
                             egui::Rect::from_min_size(
-                                egui::pos2(top_left.x, top_left.y + placed.pos.y),
+                                egui::pos2(top_left.x, top_left.y + row_y),
                                 egui::vec2(fragment.width, placed.size.y),
                             ),
-                            gutter::row_baseline(placed, top_left.y + placed.pos.y),
+                            gutter::row_baseline(placed, top_left.y + row_y),
                             fragment
                                 .source_segments
                                 .iter()
@@ -1204,11 +1212,10 @@ pub(crate) fn paint_red_print_pages(
                                     .pos_from_cursor(egui::text::CCursor::new(to))
                                     .left()
                                     .max(left + 1.0);
+                                let origin = top_left + egui::vec2(placed.pos.x, row_y);
                                 egui::Rect::from_min_max(
-                                    top_left + placed.pos.to_vec2() + egui::vec2(left, tint_top),
-                                    top_left
-                                        + placed.pos.to_vec2()
-                                        + egui::vec2(right, tint_top + placed.size.y),
+                                    origin + egui::vec2(left, tint_top),
+                                    origin + egui::vec2(right, tint_top + placed.size.y),
                                 )
                                 .expand2(egui::vec2(3.0, 1.0))
                             };
@@ -1260,16 +1267,17 @@ pub(crate) fn paint_red_print_pages(
                     && !range.is_empty()
                 {
                     // 整块对应一行源码的片段（标题等）：逐行编号，号都指向那一行。
-                    for placed in fragment.galley.rows.iter() {
-                        if placed.rect().top() >= fragment.visible_height {
+                    for (row_index, placed) in fragment.galley.rows.iter().enumerate() {
+                        let row_y = red_row_top(metrics, row_index);
+                        if row_y >= fragment.visible_height - 0.5 {
                             break;
                         }
                         metrics.mark_row(
                             egui::Rect::from_min_size(
-                                egui::pos2(top_left.x, top_left.y + placed.pos.y),
+                                egui::pos2(top_left.x, top_left.y + row_y),
                                 egui::vec2(fragment.width, placed.size.y),
                             ),
-                            gutter::row_baseline(placed, top_left.y + placed.pos.y),
+                            gutter::row_baseline(placed, top_left.y + row_y),
                             Some(range.clone()),
                         );
                     }
@@ -1317,12 +1325,19 @@ pub(crate) fn paint_red_print_pages(
                     marks::paint_galley_marks(&painter, metrics, anchor_pos, &fragment.galley);
                     painter.galley(anchor_pos, fragment.galley.clone(), theme::paper::ink());
                 } else {
-                    // 两端对齐的正文按行画：每行是一个单独 galley，落在原 galley
-                    // 算好的行位置上，分页与命中范围因此完全不受影响。
+                    // 两端对齐的正文按行画：每行是一个单独 galley，横向取原 galley
+                    // 的行位置，纵向按固定行距（`red_row_top`），与分页、命中一致。
                     let boxes = marks::LineMarks::of(&fragment.galley.job);
                     let mut first_char = 0usize;
-                    for (placed, row) in fragment.galley.rows.iter().zip(&fragment.justified) {
-                        let at = anchor_pos + placed.pos.to_vec2();
+                    for (row_index, (placed, row)) in fragment
+                        .galley
+                        .rows
+                        .iter()
+                        .zip(&fragment.justified)
+                        .enumerate()
+                    {
+                        let at =
+                            anchor_pos + egui::vec2(placed.pos.x, red_row_top(metrics, row_index));
                         if let Some(boxes) = &boxes
                             && let Some(line) = row.rows.first()
                         {

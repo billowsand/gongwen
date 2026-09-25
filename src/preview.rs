@@ -916,6 +916,71 @@ mod tests {
         });
     }
 
+    /// 首页容量不能随缩放和屏幕 DPI 漂移。epaint 把每行行高取整到物理像素，
+    /// 分页器若按 galley 的行盒累加，十几行下来会差出将近一整行：有的缩放下
+    /// 首页末行被挤到下一页，红线上方空出一行。
+    #[test]
+    fn red_print_first_page_capacity_is_stable_across_zoom_and_dpi() {
+        let vocabulary = vocabulary();
+        let display = UnitDisplay::new(&vocabulary);
+        let mut input = draft(TemplateKind::RedHeadApproval);
+        input.profile.reporting_leaders = "张三、李四".into();
+        input.profile.joint_responsible_units = "甲处室、乙处室".into();
+        let markdown = format!(
+            "# 关于开展办公楼消防演练的请示\n\n{}",
+            "为提升应急处置能力，拟开展办公楼消防演练。\n\n".repeat(20)
+        );
+        let located = export::parse_markdown_located(&markdown);
+        let body = located.iter().collect::<Vec<_>>();
+        let title = ("关于开展办公楼消防演练的请示".to_string(), 0..0);
+        for pixels_per_point in [1.0f32, 1.25, 1.5, 2.0] {
+            for zoom in [0.8f32, 1.0, 1.2, 1.3, 1.4, 1.49, 1.6] {
+                let ctx = egui::Context::default();
+                theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+                ctx.set_pixels_per_point(pixels_per_point);
+                let metrics = Metrics::new(1000.0, Some(zoom));
+                let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    let (layout, rows) = red_build_print_layout(
+                        ui,
+                        &metrics,
+                        &input,
+                        &display,
+                        &body,
+                        &title,
+                        &["消防演练实施方案".to_string()],
+                        &crate::models::NumberingConfig::default(),
+                        &markdown,
+                    );
+                    let record_height = metrics.mm(1.4) + metrics.line * rows.len() as f32;
+                    let body_bottom = metrics.mm(37.0 + 225.0) - record_height - metrics.mm(2.0);
+                    let ink_bottom = layout.pages[0]
+                        .fragments
+                        .iter()
+                        .map(|fragment| {
+                            fragment.bottom() - metrics.line * (1.0 - red::RED_INK_RATIO)
+                        })
+                        .fold(f32::MIN, f32::max);
+                    let slack = body_bottom - ink_bottom;
+                    assert!(
+                        (-0.5..metrics.line).contains(&slack),
+                        "缩放 {zoom}、DPI {pixels_per_point} 下首页末行位置不对：剩 {slack}"
+                    );
+                    // 附件概要与 Word / TeX 一样首行缩进两个汉字。
+                    let attachment = layout
+                        .pages
+                        .iter()
+                        .flat_map(|page| &page.fragments)
+                        .find(|fragment| fragment.galley.text().contains("附件："))
+                        .expect("附件概要应当排出");
+                    assert!(
+                        attachment.galley.text().starts_with(&indent(INDENT_CHARS)),
+                        "附件概要缺首行缩进"
+                    );
+                });
+            }
+        }
+    }
+
     /// 红头呈批件里的序号表按真表格排：不进首页窄栏，编号与分组行的整行合并
     /// 都在；一页放不下就在行间断开，续页先重复表头，每段都不越过版心下沿。
     #[test]
