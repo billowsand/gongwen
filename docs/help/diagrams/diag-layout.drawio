@@ -22,7 +22,7 @@
         <mxCell id="b4b" value="中央&lt;br&gt;审校稿编辑与版式预览" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
           <mxGeometry x="300" y="284" width="340" height="210" as="geometry"/>
         </mxCell>
-        <mxCell id="b4c" value="右抽屉&lt;br&gt;版本历史&lt;br&gt;审校提示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+        <mxCell id="b4c" value="右抽屉&lt;br&gt;审校提示&lt;br&gt;（版本历史在&lt;br&gt;版本对照的时间轴）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
           <mxGeometry x="660" y="284" width="240" height="210" as="geometry"/>
         </mxCell>
         <mxCell id="b5" value="状态栏　状态文案 · 审校提示计数 · 版本历史 · 输入法" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=17;" vertex="1" parent="1">

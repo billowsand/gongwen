@@ -19,7 +19,7 @@
         <mxCell id="v4" value="分栏&lt;br&gt;左源码 / 右版式&lt;br&gt;对照着改" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
           <mxGeometry x="187" y="252" width="273" height="128" as="geometry"/>
         </mxCell>
-        <mxCell id="v5" value="版本对照&lt;br&gt;左最新提交 / 右当前&lt;br&gt;看改了什么" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+        <mxCell id="v5" value="版本对照&lt;br&gt;左侧时间轴选版本&lt;br&gt;左 diff 右花脸稿" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
           <mxGeometry x="480" y="252" width="273" height="128" as="geometry"/>
         </mxCell>
         <mxCell id="n1" value="不熟 Markdown → 先用「实时排版」：只在光标那一行看得到标记" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE8EE;strokeColor=#3B82A0;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">

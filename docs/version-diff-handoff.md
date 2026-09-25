@@ -11,7 +11,7 @@
 | ① | 视觉 diff 引擎 + PDF / Word 花脸稿导出 | **已完成**，已合入 `main` |
 | ② | 左 Markdown diff / 右花脸稿预览的界面、标记绘制、联动、打印预览 | **已完成**，已合入 `main`（含「公文要素就地标注」，见下文） |
 | ③ | 可编辑 diff + 逐块还原 | **已完成**（见「第 ③ 期交付了什么」）；已做一轮实测并修正（见「第 ③ 期测试后的修正」），人眼验收待做 |
-| ④ | 版本时间轴合并浏览界面；稿件管理对照窗改用同一视图；花脸稿自动归档 | 未开始 |
+| ④ | 版本时间轴合并浏览界面；稿件管理对照窗改用同一视图 | **已完成**（见「第 ④ 期交付了什么」）；需求第 17 条「花脸稿自动归档」经用户决定取消 |
 | ⑤ | AI 修订建议并入为待采纳块 | 未开始 |
 
 ## 第 ① 期交付了什么
@@ -227,6 +227,62 @@
   预览每帧整篇重排，是 `official_preview` 的既有行为（普通「公文预览」模式同样如此），
   不是本期引入的；长稿要再快得按可视页裁剪，见「下一步」。
 
+## 第 ④ 期交付了什么
+
+分支 `feat/version-timeline`，三个提交：抽出只读版本对组件（`40de94f`）、
+版本时间轴取代右侧抽屉（`fdc32c0`）、稿件管理对照窗改用同一组件（`df8af42`）。
+
+### 代码地图
+- `src/version_pair_view.rs`：共享只读「版本对照视图」组件。输入新旧两份
+  `diff::ContentSnapshot`（含 `DraftInput`）+ `UnitDisplay` / `NumberingConfig`，
+  画出「左只读统一 diff（`diff_view::unified_body_ui`）+ 要素变化卡片；
+  右花脸稿预览（`official_preview`，带要素标注）」，自带联动（点击互跳、
+  悬停高亮、F7 / Shift+F7、折叠未改动）。按 `(稿件 id, 旧版本号, 新版本号)`
+  缓存全部计算结果；历史版本不可变，算一次就够，同步算、无防抖。
+  缓存键里旧版本号是 `Option`：v1 的旧侧为空白稿。
+- `src/draft_page/timeline.rs`：时间轴的纯数据投影，不读库不碰 egui。
+  `timeline_rows(versions, selected, comparison, fixed_baseline)` 返回每行的
+  `target / selected / latest / 旧新版本号`，规则：工作区行永远在最上；
+  历史按版本号倒序；`Previous` 模式每行对直接上一版（v1 旧侧 None）；
+  `FixedBaseline` 模式对固定基准，**固定基准晚于或不存在的行退回上一版，
+  并用 `fixed_baseline_adjusted` 明示**，绝不把未来版本当旧版；
+  选中的版本已不存在时整体回落到工作区。纯函数，全部有单测。
+- `src/draft_page/version_diff.rs`：
+  - `version_diff_mode_ui` 先画可收起的 `Panel::left("version_diff_timeline")`
+    （`show_collapsible`，展开态在 `DraftDiffState.timeline.expanded`），
+    再按选中分流：工作区 → 原有可编辑 / 只读路径不变；历史版本 →
+    `history_version_pair_mode_ui`。
+  - `timeline_ui`：对比方式开关（上一版 / 固定基准 + 基准选择器）、
+    每行（版本号·名称可点选中、「最新」标记、提交时间、注释摘要、
+    「载入编辑」走 `request_version_switch`，有未提交修改照旧弹三选）。
+  - `history_version_pair_mode_ui`：从库取旧 / 新快照喂共享组件，
+    顶部有「历史版本对照」标头、固定基准回退提示与导出花脸稿 / 打印预览
+    （要素取新版快照的 `DraftInput`）。
+- 旧的右侧版本抽屉 `versions_drawer` 已删除（`versions.rs` 只剩版本切换 /
+  行数据 / 回退），`DraftAction::OpenVersionDiff` 是它唯一调用方，一并删除；
+  功能区「审校」「视图」分区和状态栏的「版本历史」按钮统一改为
+  「进版本对照模式并展开时间轴」（不是开关）。
+- `src/app/versioning.rs`：`manuscript_diff_ui` 改用共享组件，逻辑抽成自由函数
+  `manuscript_diff_ui_impl`（吃 `Option<&mut ManuscriptStore>` 即可单测）；
+  `VersionDiffState.view(DiffViewState)` 换成 `pair(VersionPairViewState)`。
+  「从 vA 到 vB」选择器保留，方向仍固定旧→新。配置版对照不动；
+  AI 工作台的 `diff_view::manuscript_diff_ui` 本期不动（第 ⑤ 期）。
+
+### 测试（不许删，只许加）
+- `version_pair_view::tests::historical_pair_view_draws_both_read_only_panes_and_links_every_change`：
+  真 egui 画一对历史版本，两栏出字、每处正文变更有预览落点、F7 首尾循环、
+  敲字不改两侧快照。
+- `draft_page::timeline::tests`：行数据纯函数（倒序、最新标记、工作区在首、
+  上一版 / 固定基准两模式的对比对、v1 旧侧为空、固定基准晚于目标时回退并明示）。
+- `draft_page::version_diff::tests` 新增三条：
+  `timeline_selection_switches_between_readonly_pair_and_editable_view`
+  （点时间轴历史版本进只读视图、点「当前未提交」回可编辑视图、只读视图的
+  键盘输入不进正文）、`timeline_first_version_compares_against_a_blank_base`
+  （v1 对空白稿）、`timeline_load_button_prompts_before_discarding_unsaved_edits`
+  （有未提交修改时「载入编辑」弹三选确认）。
+- `app::versioning::tests::manuscript_diff_window_draws_the_shared_readonly_pair_view`：
+  内存库 + 真 egui 一帧冒烟，两栏出字、哨兵不漏、敲字不改库。
+
 ## 与方案的出入（有意为之，接手时别当 bug 改回去）
 1. **方案 4.3 说三个消费方直接读 `RedlineOverlay`，实际导出走的是「overlay → 带哨兵的 Markdown
    → 原有导出器」**。好处是花脸稿与定稿走同一条排版链路，版式天然一致。
@@ -264,6 +320,19 @@
     `reporting_leaders`，与函稿主送同属一个版位，标注一并覆盖。
 12. （第 ② 期要素标注）**联合发文落款的发文单位表、红头呈批件承办区不在本期**（见「遗留」）。
     联合发文的成文日期（压在主单位列下的那一行）照常标注。
+13. （第 ④ 期）**需求第 17 条「花脸稿自动留档」取消**（用户决定，2026-09）：
+    不新增数据库表、不改导出流程；方案文档第 17 条与分期表已标注。
+14. （第 ④ 期）**时间轴选中靠标题行的显式 `Sense::click` 标签，不是「点卡片任意处」**：
+    egui 的 `Frame` / `Ui` 背景响应只感应悬停，`response.clicked()` 永远 false；
+    子级 label 默认也会吃掉点击。所以每行是「点标题（vN · 名称）选中，
+    点按钮载入」，卡片空白处无响应。
+15. （第 ④ 期）**历史版本对照忽略组件返回的双击定位**（`edit_source`）：
+    历史内容与工作区正文不对应，跳源码会落到无关位置。只读稿件的工作区
+    对照仍保留双击跳源码。
+16. （第 ④ 期）**「固定基准」只作用于历史版本行的对比**；工作区行的基准仍是
+    工具栏「基准」选择器（`DraftDiffState.base`，默认最新版），两者不混用。
+    固定基准晚于所选历史版本时，该行退回与上一版比较并在界面明示，不偷偷
+    把未来版本当旧版。
 
 ## 已知的坑
 - **xeCJKfntef 的标注宏（`\GwDel` / `\GwAdd`）里面，字体切换只作用到第一个字。**
@@ -326,6 +395,15 @@
   2. 写个临时测试，调 `redline::build` + `export::write_tex_for_kind` 把 `.tex` 写到临时目录；
   3. 把 `.cls` 里的字体名替换成本机有的字体后执行 `xelatex`。
   - 空 `DraftInput` 会让 `\makeletter` 报 “There's no line here to end”，这是版记要素为空导致的，与花脸稿无关。
+- （第 ④ 期）**egui 的 `Frame::show` / `Ui` 背景 `response.clicked()` 永远为 false**
+  （背景只感应悬停），「点整块卡片选中」必须用显式 `ui.add(Label::sense(click))`
+  或 `ui.interact`。`ui.interact` 后画的内容在它下面、会被它抢走点击，
+  想保留卡片内按钮就别用覆盖层方案。
+- （第 ④ 期）`Option<&mut ManuscriptStore>` 在自由函数里多次取记录：
+  参数要写 `mut store`，且用 `store.as_mut()`（`as_ref()` 借成 `&&mut`，
+  调不了 `&mut self` 的方法）。
+- （第 ④ 期）`tabs.rs` 等旧文件是 CRLF；用脚本批量改它们时留意行尾，
+  别整文件刷成 LF（`git diff` 会炸）。
 
 ## 第 ③ 期审查后的修正
 
@@ -391,21 +469,27 @@
 
 ## 下一步
 
-1. **第 ③ 期人眼验收**：长稿边打字边看（右栏不卡、左栏不跳），空隙里的旧行、绿底、
-   还原按钮、新增空行「（空行）」标签的观感，打印预览的 PDF 与右栏一致；删除线高度与跳过
-   标点、新增框在样式切换处约 0.4–1.6pt 的断缝（见「已知的坑」）。
-2. **人眼验收第 ② 期要素标注**：进对照模式看版头 / 版记要素处的红删除线与蓝框，
+1. **第 ⑤ 期**：AI 修订建议并入为待采纳块（审校建议在 diff 中采纳 / 拒绝，
+   三条红线不变：`ai_guard` / `validator` / `proofread` 闸门照过）。
+   AI 工作台的 `diff_view::manuscript_diff_ui` 届时一并评估去留。
+2. **第 ④ 期人眼验收**：时间轴的收起 / 展开动画与拖拽宽度；点历史版本时
+   两栏滚回顶部；固定基准回退提示的观感；稿件管理对照窗与起草页时间轴
+   的联动观感是否一致；长稿在时间轴间来回切换的流畅度（每对版本只算一次）。
+3. **第 ③ 期人眼验收**：长稿边打字边看（右栏不卡、左栏不跳），空隙里的旧行、
+   绿底、还原按钮、新增空行「（空行）」标签的观感，打印预览的 PDF 与右栏一致；
+   删除线高度与跳过标点、新增框在样式切换处约 0.4–1.6pt 的断缝（见「已知的坑」）。
+4. **人眼验收第 ② 期要素标注**：进对照模式看版头 / 版记要素处的红删除线与蓝框，
    与「打印预览」PDF 对照，包含「旧值存在、新值清空」时保留下来的删除线；
    重点看框线贴字、红头字距、红头呈批件落款与日期的相对位置（见「已知的坑」）。
-3. **要素标注的遗留项**：
+5. **要素标注的遗留项**：
    - 发文单位（红头机关标志）不做（本期指定范围之外）；改了发文单位只在左栏「要素变化」卡片可见。
    - 联合发文模式 1 落款表里的发文单位（按列排的多单位）不标；承办区（承办单位 / 联系人 / 电话）不标。
-4. 长稿右栏预览按可视页裁剪（2000 段每帧约 15ms）。
-5. 人眼核对预览里的标记位置（见「已知的坑」），必要时微调 `marks.rs` 常量。
-6. `highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas` 全量并行跑时
+6. 长稿右栏预览按可视页裁剪（2000 段每帧约 15ms）。
+7. 人眼核对预览里的标记位置（见「已知的坑」），必要时微调 `marks.rs` 常量。
+8. `highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas` 全量并行跑时
    偶发失败（本机约三次一次），单独跑必过；值得单独查一下共享字体图集的问题。
-7. 第 ④ 期：版本时间轴合并浏览界面；稿件管理对照窗改用同一视图（只读路径已有
-   `unified_body_ui`）；花脸稿自动归档。
+9. 帮助手册截图 `docs/help/images/ui-versions.png` 需要重拍（时间轴未入镜），
+   示意图 `diag-layout.png` / `diag-editor-views.png` 已随第 ④ 期重渲。
 
 ## 第 ③ 期实施指南：可编辑 diff + 逐块还原
 
