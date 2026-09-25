@@ -760,6 +760,216 @@ mod consistency_tests {
         let preview = crate::preview::marks::body_sequence(&doc.markdown);
         assert_eq!(docx, preview, "对齐行的预览序列一致：{preview:?}");
     }
+
+    // ── 公文要素就地标注（方案需求第 9 条、规则 7）────────────────────────
+
+    use crate::export::{is_redline_sentinel, marked_runs, marked_tex_escape};
+    use crate::models::{DraftInput, TemplateKind, TemplateProfile};
+    use crate::units::UnitDisplay;
+    use crate::visual_diff::{ElementMarks, element_marks};
+    use std::io::Read;
+
+    /// 一份六要素齐全的公函。
+    fn element_input() -> DraftInput {
+        let mut input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            date: "2026年8月7日".into(),
+            ..Default::default()
+        };
+        input.profile = TemplateProfile::for_kind(input.kind);
+        input.profile.issuing_unit = "星海省教育厅".into();
+        input.profile.recipient = "甲市教育局".into();
+        input.profile.copies_to = "乙市教育局".into();
+        input.profile.department_code = "星教函".into();
+        input.profile.document_year = "2026".into();
+        input.profile.document_number = "12".into();
+        input.profile.signing_unit = "星海省教育厅".into();
+        input.profile.security_level = "秘密".into();
+        input.profile.security_period = "10年".into();
+        input
+    }
+
+    /// 预览侧：把一段带哨兵文本喂给真实的 `append_marked_text`，取回序列。
+    fn preview_element_sequence(text: &str) -> Vec<(String, RedlineKind)> {
+        crate::preview::marks::element_sequence(text)
+    }
+
+    /// DOCX 侧：把一段带哨兵文本喂给真实的 `marked_runs`，按 run 属性取回序列。
+    fn docx_element_sequence(text: &str) -> Vec<(String, RedlineKind)> {
+        let mut seq = Vec::new();
+        for run in &marked_runs(text, |text| docx_rs::Run::new().add_text(text)) {
+            let text: String = run
+                .children
+                .iter()
+                .filter_map(|child| match child {
+                    docx_rs::RunChild::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if text.is_empty() {
+                continue;
+            }
+            let kind = if run.run_property.strike.is_some() {
+                RedlineKind::Deleted
+            } else if run.run_property.text_border.is_some() {
+                RedlineKind::Added
+            } else {
+                RedlineKind::Same
+            };
+            push_merged(&mut seq, text, kind);
+        }
+        seq
+    }
+
+    /// 三方一致性：同一组要素变化，每个「标注单元」的带哨兵文本分别过预览 /
+    /// DOCX / TeX 三边的**真实**管线（`append_marked_text` / `marked_runs` /
+    /// `marked_tex_escape`），取出的 `(文字, 类型)` 序列必须完全相同。
+    ///
+    /// 粒度是标注单元：主送、抄送、密级、落款每行、成文日期与发文字号的每个
+    /// 部件（TeX 里日期与文号各是三条命令、中间夹着类文件写死的年月日与〔〕号，
+    /// 整串塞不进任一命令参数，所以按部件标）。
+    #[test]
+    fn element_marks_agree_across_preview_docx_and_tex() {
+        let old = element_input();
+        let mut new = old.clone();
+        new.profile.recipient = "甲市教育局、乙市教育局".into();
+        new.profile.copies_to = "丙市教育局".into();
+        new.profile.security_level = "机密".into();
+        new.profile.security_period = "5年".into();
+        new.profile.signing_unit = "星海省人民政府".into();
+        new.profile.document_number = "15".into();
+        new.date = "2026年9月7日".into();
+
+        let display = UnitDisplay::new(&[]);
+        let marks = element_marks(&old, &new, &display);
+        let mut checked = 0usize;
+        for unit in marks.marked_units() {
+            if !unit.chars().any(is_redline_sentinel) {
+                continue;
+            }
+            checked += 1;
+            let preview = preview_element_sequence(&unit);
+            let docx = docx_element_sequence(&unit);
+            let tex = extract_tex_fragments(&marked_tex_escape(&unit));
+            assert_eq!(docx, preview, "DOCX 与预览的要素标注序列不一致：{unit:?}");
+            assert_eq!(tex, preview, "TeX 与预览的要素标注序列不一致：{unit:?}");
+            assert!(
+                preview
+                    .iter()
+                    .any(|(_, kind)| *kind == RedlineKind::Deleted)
+                    && preview.iter().any(|(_, kind)| *kind == RedlineKind::Added),
+                "单元里删、增都该出现：{unit:?} → {preview:?}"
+            );
+        }
+        assert!(
+            checked >= 6,
+            "六个要素都改了，标注单元不该只有 {checked} 个"
+        );
+    }
+
+    /// 要素没变时，三处输出与改动前逐字节相同：空标注与不带标注的同一调用
+    /// 产出一致的 TeX / Word 部件，且不出现任何花脸稿宏。
+    ///
+    /// 现有测试（`export::latex::tests`、`export::docx::tests` 里那一批精确
+    /// 断言）继续锁着旧格式，是「定稿导出不受影响」的主要证据；这里再补一个
+    /// 空标注与原生渲染的直接对照。
+    #[test]
+    fn unchanged_elements_keep_the_plain_output_byte_for_byte() {
+        let input = element_input();
+        let display = UnitDisplay::new(&[]);
+        let marks = element_marks(&input, &input, &display);
+        assert!(marks.is_empty(), "两侧同一个 DraftInput 就该是空标注");
+
+        // 预览：没变时「带哨兵文本」就是原始显示值本身，过管线全是 Same。
+        let security = crate::export::element_display::security_display(&input).expect("标了密级");
+        assert_eq!(marks.security().marked(), security);
+        let recipient = crate::export::element_display::addressee_display(&input, &display);
+        assert_eq!(marks.recipient().marked(), recipient);
+        for (text, kind) in preview_element_sequence(&marks.security().marked()) {
+            assert_eq!(kind, RedlineKind::Same, "没变就不该有标记：{text:?}");
+        }
+
+        let markdown = "# 测试函\n\n正文一段。\n";
+        let fonts = crate::models::FontConfig::default();
+        let numbering = crate::models::NumberingConfig::default();
+        let dir = tempfile::tempdir().expect("临时目录");
+
+        let with_marks = dir.path().join("有标注.tex");
+        let without = dir.path().join("无标注.tex");
+        crate::export::write_tex_for_kind(
+            &with_marks,
+            &input,
+            markdown,
+            &display,
+            &fonts,
+            &numbering,
+            &marks,
+        )
+        .expect("写 TeX");
+        crate::export::write_tex_for_kind(
+            &without,
+            &input,
+            markdown,
+            &display,
+            &fonts,
+            &numbering,
+            &ElementMarks::default(),
+        )
+        .expect("写 TeX");
+        let a = std::fs::read_to_string(&with_marks).expect("读 TeX");
+        let b = std::fs::read_to_string(&without).expect("读 TeX");
+        assert_eq!(a, b, "空标注必须与定稿导出逐字节相同");
+        assert!(
+            !a.contains("\\GwDel") && !a.contains("\\GwAdd"),
+            "没变就不该有花脸稿宏：{a}"
+        );
+        // 锁住旧格式：要素命令仍是原生取值。
+        for expected in [
+            "\\renewcommand{\\SignatureYear}{2026}",
+            "\\renewcommand{\\SignatureMonth}{8}",
+            "\\renewcommand{\\SignatureDay}{7}",
+            "\\renewcommand{\\SecurityLevel}{秘密}",
+            "\\renewcommand{\\SecurityPeriod}{{\\ttfamily 10}年}",
+            "\\renewcommand{\\DepartmentCode}{星教函}",
+            "\\renewcommand{\\DocumentNumber}{12}",
+        ] {
+            assert!(a.contains(expected), "TeX 里应保留 {expected}：{a}");
+        }
+
+        let docx_with = dir.path().join("有标注.docx");
+        let docx_without = dir.path().join("无标注.docx");
+        crate::export::write_docx_with_numbering(
+            &docx_with, &input, markdown, &display, &fonts, &numbering, &marks,
+        )
+        .expect("写 Word");
+        crate::export::write_docx_with_numbering(
+            &docx_without,
+            &input,
+            markdown,
+            &display,
+            &fonts,
+            &numbering,
+            &ElementMarks::default(),
+        )
+        .expect("写 Word");
+        assert_eq!(
+            zip_text(&docx_with, "word/document.xml"),
+            zip_text(&docx_without, "word/document.xml"),
+            "空标注的 Word 正文部件必须与定稿导出逐字节相同"
+        );
+    }
+
+    fn zip_text(path: &std::path::Path, entry: &str) -> String {
+        let file = std::fs::File::open(path).expect("打开 docx");
+        let mut archive = zip::ZipArchive::new(file).expect("读 zip");
+        let mut text = String::new();
+        archive
+            .by_name(entry)
+            .expect("找部件")
+            .read_to_string(&mut text)
+            .expect("读部件");
+        text
+    }
 }
 
 #[cfg(test)]

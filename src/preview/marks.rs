@@ -421,6 +421,21 @@ pub(crate) fn job_fragments(job: &LayoutJob) -> Vec<(String, RedlineKind)> {
 
 /// 预览正文的 `(文字, 类型)` 序列：与 `redline.rs` 一致性测试里的 DOCX / TeX
 /// 序列同口径（段落、列表项、对齐行各自过 `append_inline`，相邻同类合并）。
+/// 预览侧的要素标注序列：把一段带哨兵的要素文本过真实的 `append_marked_text`，
+/// 取回 `(文字, 类型)` 序列，供三方一致性测试用。
+#[cfg(test)]
+pub(crate) fn element_sequence(text: &str) -> Vec<(String, RedlineKind)> {
+    let metrics = Metrics::new(1000.0, Some(1.0));
+    let mut job = LayoutJob::default();
+    append_marked_text(
+        &mut job,
+        &metrics,
+        text,
+        super::layout::text_format(metrics.body_font(), metrics.line),
+    );
+    job_fragments(&job)
+}
+
 #[cfg(test)]
 pub(crate) fn body_sequence(markdown: &str) -> Vec<(String, RedlineKind)> {
     use crate::export::MarkdownBlock;

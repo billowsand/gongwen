@@ -17,9 +17,13 @@ pub(crate) use docx::{write_docx, write_docx_with_numbering};
 #[cfg(test)]
 pub(crate) use docx::body_runs;
 #[cfg(test)]
+pub(crate) use docx::marked_runs;
+#[cfg(test)]
 pub(crate) use latex::body_text_to_tex;
 #[allow(unused_imports)]
 pub(crate) use latex::copy_count;
+#[cfg(test)]
+pub(crate) use latex::marked_tex_escape;
 #[cfg(test)]
 pub(crate) use latex::write_tex;
 pub(crate) use research::write_docx as write_docx_research;
