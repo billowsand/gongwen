@@ -23,6 +23,10 @@ pub struct DiffViewState {
     focus: usize,
     /// 下一帧把聚焦项滚进可视区。
     scroll_to_focus: bool,
+    /// 另一侧（预览）点中的未改动段落在新版源码里的范围：对应的上下文行描边标出。
+    context_target: Option<Range<usize>>,
+    /// 下一帧把 `context_target` 那一行滚进可视区（藏在折叠里就先展开）。
+    scroll_to_context: bool,
 }
 
 impl Default for DiffViewState {
@@ -33,6 +37,8 @@ impl Default for DiffViewState {
             expanded: BTreeSet::new(),
             focus: 0,
             scroll_to_focus: false,
+            context_target: None,
+            scroll_to_context: false,
         }
     }
 }
@@ -43,6 +49,8 @@ impl DiffViewState {
         self.expanded.clear();
         self.focus = 0;
         self.scroll_to_focus = false;
+        self.context_target = None;
+        self.scroll_to_context = false;
     }
 }
 
@@ -488,6 +496,14 @@ impl DiffViewState {
     pub fn set_focus(&mut self, index: usize, scroll: bool) {
         self.focus = index;
         self.scroll_to_focus |= scroll;
+        self.context_target = None;
+    }
+
+    /// 标出新版源码 `source` 所在的未改动上下文行；`scroll` 为 true 时下一帧
+    /// 把它滚进视野（藏在折叠里就先展开）。
+    pub fn locate_context(&mut self, source: Range<usize>, scroll: bool) {
+        self.context_target = Some(source);
+        self.scroll_to_context = scroll;
     }
 
     /// 上一处 / 下一处，首尾循环（F7 / Shift+F7）。
@@ -502,6 +518,7 @@ impl DiffViewState {
             (current + total - 1) % total
         };
         self.scroll_to_focus = true;
+        self.context_target = None;
     }
 }
 
@@ -549,6 +566,18 @@ pub fn unified_body_ui(
             DiffBlock::Unchanged(context) => {
                 let has_before = index > 0;
                 let has_after = index + 1 < diff.blocks.len();
+                let target = state.context_target.clone();
+                let hits_target = |range: &Range<usize>| {
+                    target
+                        .as_ref()
+                        .is_some_and(|target| target.start < range.end && range.start < target.end)
+                };
+                // 要滚过去的那一行藏在折叠里：先把这一块展开。
+                if state.scroll_to_context
+                    && context.iter().any(|line| hits_target(&line.new_range))
+                {
+                    state.expanded.insert(index);
+                }
                 let expanded = !state.only_changes || state.expanded.contains(&index);
                 // 折叠时只留贴着变更块的那几行；剩得不多就干脆全显示。
                 let head = if has_before { UNIFIED_CONTEXT } else { 0 };
@@ -579,6 +608,18 @@ pub fn unified_body_ui(
                         output.edit_source = Some(line.new_range.clone());
                     } else if response.clicked() {
                         output.clicked_context = Some(line.new_range.clone());
+                    }
+                    if hits_target(&line.new_range) {
+                        ui.painter().rect_stroke(
+                            response.rect,
+                            2.0,
+                            egui::Stroke::new(1.0, theme::accent().gamma_multiply(0.5)),
+                            egui::StrokeKind::Inside,
+                        );
+                        if state.scroll_to_context {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                            state.scroll_to_context = false;
+                        }
                     }
                 }
             }
@@ -786,4 +827,34 @@ fn unified_spans_job(
     }
     blank_placeholder(&mut job, font);
     job
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::body_diff;
+
+    /// 预览点中一段藏在折叠里的未改动文字：左栏展开那一块、滚过去，只滚一次。
+    #[test]
+    fn locating_a_folded_context_line_expands_and_scrolls_once() {
+        let paragraphs: Vec<String> = (1..=12).map(|n| format!("第{n}段。")).collect();
+        let old = paragraphs.join("\n\n");
+        let new = format!("{old}\n\n新增一段。");
+        let diff = body_diff(&old, &new);
+        let target = new.find("第3段。").unwrap();
+        let mut state = DiffViewState::default();
+        state.locate_context(target..target + "第3段。".len(), true);
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = unified_body_ui(ui, &diff, &mut state, None);
+        });
+        assert!(state.expanded.contains(&0), "目标行所在的折叠块要展开");
+        assert!(!state.scroll_to_context, "滚过一次就停，不能每帧拽着视图");
+        assert!(state.context_target.is_some(), "描边留着，直到点了别处");
+
+        // 聚焦到某处变更时，未改动行的描边让位。
+        state.set_focus(0, true);
+        assert!(state.context_target.is_none());
+    }
 }

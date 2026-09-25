@@ -20,7 +20,7 @@ use crate::preview;
 use crate::redline::{self, RedlineFormats};
 use crate::theme;
 use crate::units::UnitDisplay;
-use crate::version_link::{ChangeLinks, line_starts};
+use crate::version_link::{ChangeLinks, line_range, line_starts};
 use eframe::egui;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -430,15 +430,39 @@ impl DraftPage<'_> {
         if editor.cursor_line.is_some() {
             state.editor_cursor_line = editor.cursor_line;
         }
-        if cursor_moved
-            && let Some(line) = editor.cursor_line
-            && let Some(hunk) = state.hunks.iter().position(|hunk| hunk.touches_line(line))
-            && focus != Some(hunk)
-        {
-            // 编辑器里光标所在的变更块就是当前焦点，右栏跟着滚过去。
-            state.view.set_focus(hunk, false);
-            state.preview_scroll = true;
-            state.preview_target = None;
+        if cursor_moved && let Some(line) = editor.cursor_line {
+            match state.hunks.iter().position(|hunk| hunk.touches_line(line)) {
+                // 编辑器里光标所在的变更块就是当前焦点，右栏跟着滚过去。
+                Some(hunk) if focus != Some(hunk) => {
+                    state.view.set_focus(hunk, false);
+                    state.preview_scroll = true;
+                    state.preview_target = None;
+                }
+                Some(_) => {}
+                // 光标落在没改动的行：右栏滚到同一段。花脸稿还没按当前正文重算好时
+                // 源码偏移对不上，宁可不动。
+                None if !editor.changed => {
+                    let text = &self.doc.generated_markdown;
+                    let target = state
+                        .redline
+                        .as_ref()
+                        .filter(|view| view.hash == state.text_hash)
+                        .zip(line_range(&line_starts(text), text, line + 1))
+                        .and_then(|(view, source)| view.links.marked_for_new_source(&source));
+                    // 刚在预览里点过这一段、光标是被带过来的：已经在视野里，不再滚。
+                    let same = target
+                        .as_ref()
+                        .zip(state.preview_target.as_ref())
+                        .is_some_and(|(target, current)| {
+                            target.start < current.end && current.start < target.end
+                        });
+                    if target.is_some() && !same {
+                        state.preview_target = target;
+                        state.preview_scroll = true;
+                    }
+                }
+                None => {}
+            }
         }
         actions.revert_hunk = editor.revert;
 
@@ -503,8 +527,15 @@ impl DraftPage<'_> {
                             Some(line_offset(&self.doc.generated_markdown, hunk.first_line()));
                     }
                 }
-                // 点在没改动的块上：只在预览里标亮它，左栏不动。
-                None => state.preview_target = Some(clicked),
+                // 点在没改动的块上：预览里标亮它，左栏光标跳到同一段。
+                None => {
+                    if view.hash == state.text_hash
+                        && let Some(source) = view.links.new_source_for_marked(&clicked)
+                    {
+                        state.editor_jump = Some(source.start);
+                    }
+                    state.preview_target = Some(clicked);
+                }
             }
             ui.ctx().request_repaint();
         }
@@ -1574,6 +1605,71 @@ mod tests {
             })
             .unwrap();
         assert_eq!(harness.doc.draft_diff.view.focus(), hunk, "焦点跟着光标走");
+    }
+
+    /// 画在右栏（预览）里的某段文字：左栏编辑器占了左半边，按横坐标排除掉它。
+    fn find_preview_text(
+        output: &egui::FullOutput,
+        needle: &str,
+    ) -> Option<(egui::Pos2, std::sync::Arc<egui::Galley>)> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape)
+                    if shape.pos.x > 800.0 && shape.galley.text().contains(needle) =>
+                {
+                    Some((shape.pos, shape.galley.clone()))
+                }
+                _ => None,
+            })
+    }
+
+    /// 编辑器里点一行没改动的文字：右栏标亮并滚到同一段，焦点不动。
+    #[test]
+    fn clicking_an_unchanged_line_moves_the_preview_there() {
+        let mut harness = Harness::new();
+        let output = harness.frame(Vec::new());
+        let focus = harness.doc.draft_diff.view.focus();
+        let (pos, editor) = find_text(&output, "各单位要高度重视").unwrap();
+        let byte = editor.text().find("各单位").unwrap();
+        let index = editor.text()[..byte].chars().count();
+        let rect = editor
+            .pos_from_cursor(egui::text::CCursor::new(index + 2))
+            .translate(pos.to_vec2());
+        harness.click(rect.center());
+        harness.frame(Vec::new());
+        let state = &harness.doc.draft_diff;
+        let target = state.preview_target.clone().expect("右栏有标亮的段");
+        let view = state.redline.as_ref().unwrap();
+        let marked = crate::export::strip_redline(&view.doc.markdown[target]);
+        assert!(marked.contains("各单位要高度重视"), "{marked}");
+        assert_eq!(state.view.focus(), focus, "未改动的行不抢变更焦点");
+    }
+
+    /// 预览里点一段没改动的文字：左栏光标跳到那一段。
+    #[test]
+    fn clicking_an_unchanged_preview_block_moves_the_cursor_there() {
+        let mut harness = Harness::new();
+        let output = harness.frame(Vec::new());
+        let (pos, galley) = find_preview_text(&output, "各单位要高度重视").expect("预览里画出这段");
+        let byte = galley.text().find("各单位").unwrap();
+        let index = galley.text()[..byte].chars().count();
+        let rect = galley
+            .pos_from_cursor(egui::text::CCursor::new(index + 2))
+            .translate(pos.to_vec2());
+        harness.click(rect.center());
+        harness.frame(Vec::new());
+        harness.frame(Vec::new());
+        let cursor = harness.cursor().expect("跳转后有光标");
+        let text = &harness.doc.generated_markdown;
+        let line = text.find("各单位要高度重视").unwrap();
+        let line = text[..line].chars().count();
+        assert_eq!(cursor, line, "光标落在这一段的段首");
+        assert!(
+            harness.doc.draft_diff.preview_target.is_some(),
+            "预览里的标亮留着"
+        );
     }
 
     /// 逐块还原：文本换回基准版那一块，该块从 diff 里消失；Ctrl+Z 一次回到还原前。

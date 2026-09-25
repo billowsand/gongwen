@@ -287,6 +287,8 @@ impl VersionPairViewState {
         if let Some(source) = &left_context {
             *preview_target = links.marked_for_new_source(source);
             *preview_scroll = preview_target.is_some();
+            // 左栏点中的这一行本身也描出来，与预览里标亮的那段对应。
+            view.locate_context(source.clone(), false);
         }
         if let Some(clicked) = clicked_preview {
             match links.change_at(&clicked) {
@@ -295,7 +297,11 @@ impl VersionPairViewState {
                     *preview_target = None;
                     *preview_scroll = true;
                 }
+                // 点在没改动的段落上：预览里标亮它，左栏滚到同一段并描出来。
                 None => {
+                    if let Some(source) = links.new_source_for_marked(&clicked) {
+                        view.locate_context(source, true);
+                    }
                     *preview_target = Some(clicked);
                     *preview_scroll = true;
                 }

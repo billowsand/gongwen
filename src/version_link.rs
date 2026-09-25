@@ -160,6 +160,15 @@ impl ChangeLinks {
             .map(|span| span.marked.clone())
     }
 
+    /// 花脸稿范围对应的新版源码范围（`marked_for_new_source` 的反方向）：
+    /// 预览点中一段未改动的文字时，左侧据此跳到同一处。只删不增的旧块没有新版位置，返回 None。
+    pub(crate) fn new_source_for_marked(&self, marked: &Range<usize>) -> Option<Range<usize>> {
+        self.spans
+            .iter()
+            .find(|span| span.side == SourceSide::New && overlaps(marked, &span.marked))
+            .map(|span| span.source.clone())
+    }
+
     /// 第 `change` 处变更在新版源码里的落点：有新版范围就用它，纯删除用插入点。
     /// 「在源码中编辑」据此把光标带过去。
     pub(crate) fn new_source(&self, change: usize) -> Option<Range<usize>> {
@@ -215,7 +224,18 @@ mod tests {
         let marked = links
             .marked_for_new_source(&(0..4))
             .expect("首段在花脸稿里");
-        assert!(marked_text(&doc, marked).contains("第一段"));
+        assert!(marked_text(&doc, marked.clone()).contains("第一段"));
+        // 反过来：预览点中这一段，左侧回到它的源码位置。
+        let source = links
+            .new_source_for_marked(&marked)
+            .expect("首段有新版位置");
+        assert_eq!(&new[source], "第一段。");
+        // 改过的段后面那段也要对得上：偏移不能被前面的改动带歪。
+        let third = doc.markdown.find("第三段").unwrap();
+        let source = links
+            .new_source_for_marked(&(third..third + 3))
+            .expect("末段有新版位置");
+        assert_eq!(&new[source], "第三段。");
     }
 
     #[test]
