@@ -35,8 +35,6 @@ pub(crate) enum DraftAction {
     OpenAiWorkbench {
         selection: Option<std::ops::Range<usize>>,
     },
-    /// 打开版本对照窗：`to` 与它的上一版比。
-    OpenVersionDiff { manuscript_id: i64, to: i64 },
     /// 把已发布的稿件退回草稿，好继续编辑。
     RevertToDraft(i64),
     /// 把某个已提交版本载入当前起草页。

@@ -12,37 +12,15 @@ use crate::models::ManuscriptStatus;
 use crate::theme;
 use eframe::egui;
 
+/// 右侧抽屉（审校结果）的默认宽度。
+const DRAWER_DEFAULT_WIDTH: f32 = 300.0;
+
 impl DraftPage<'_> {
     pub(crate) fn create_ui(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("draft_toolbar")
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.ribbon(ui));
-        // 两个右侧抽屉的展开/收起交给 egui 自己的 `show_collapsible`：它把面板整体
-        // 滑出/滑入窗口边缘（内部按完整宽度排版，再平移出界），而不是把宽度压到
-        // 几个像素——后者会让抽屉里的 TextEdit 与 ScrollArea 在动画那十几帧里按
-        // 负的可用宽度重排，滚动位置被打乱。同时保住手动拖拽调宽：动画结束后
-        // 面板恢复 resizable，宽度仍在 240~460 之间持久化。
-        // `is_expanded` 取局部副本再写回：闭包里要 `&mut self` 画抽屉内容，
-        // 没法同时借出 `self.doc` 的字段。
-        const DRAWER_DEFAULT_WIDTH: f32 = 300.0;
-        // 抽屉内容函数只返回"是否点了关闭"：`show_collapsible` 的 `is_expanded`
-        // 是进入时读取的目标值，闭包内直接写 `self.doc.*_open` 会被下面这句用
-        // 局部副本覆盖回去，关闭按钮就失效了。所以关闭请求拿到这里落地。
-        let mut versions_open = self.doc.versions_open;
-        let mut close_versions = false;
-        egui::Panel::right("draft_versions")
-            .default_size(DRAWER_DEFAULT_WIDTH)
-            .size_range(240.0..=460.0)
-            .frame(theme::panel(theme::canvas(), 12))
-            .show_collapsible(ui, &mut versions_open, |ui| {
-                close_versions = self.versions_drawer(ui);
-            });
-        if close_versions {
-            versions_open = false;
-        }
-        self.doc.versions_open = versions_open;
-        // 新 ID：旧 ID 上持久化的是"底部抽屉"的外框矩形，沿用会让右侧抽屉按那条横条的
-        // 位置排版，内容整体左移到中央区底下。换个 ID 直接丢掉那份旧状态。
+        // 历史版本时间轴：第 ④ 期并入左侧时间轴列，旧右侧抽屉下线。
         let mut result_open = self.doc.result_drawer_open;
         let mut close_result = false;
         egui::Panel::right("review_result_drawer_right_v1")

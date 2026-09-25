@@ -3,10 +3,7 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::tabs`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
-use crate::app::{
-    DraftAction, GongwenApp, VersionDiffState, VersionScope, WorkerResult, open_in_os, reveal_in_os,
-};
-use crate::diff_view::DiffViewState;
+use crate::app::{DraftAction, GongwenApp, WorkerResult, open_in_os, reveal_in_os};
 use crate::draft_page::{DocKey, DraftPage, DraftSession};
 use crate::models::ManuscriptStatus;
 use crate::pdf_viewer::{PdfAction as PdfViewerAction, PdfKey, PdfSession};
@@ -333,15 +330,6 @@ impl GongwenApp {
                 DraftAction::OpenSopPanel => self.sop_open = true,
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
                 DraftAction::OpenAiWorkbench { selection } => self.open_ai_workbench(selection),
-                DraftAction::OpenVersionDiff { manuscript_id, to } => {
-                    self.version_diff = Some(VersionDiffState {
-                        scope: VersionScope::Manuscript(manuscript_id),
-                        from: (to > 1).then_some(to - 1),
-                        to: Some(to),
-                        to_is_current_config: false,
-                        view: DiffViewState::default(),
-                    });
-                }
                 DraftAction::RevertToDraft(id) => {
                     self.transition_status(id, ManuscriptStatus::Draft);
                     self.sync_record_status(id);

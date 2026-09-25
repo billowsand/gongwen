@@ -81,6 +81,11 @@ impl VersionPairViewState {
         self.cache.as_ref().map(|cache| &cache.redline)
     }
 
+    /// 新版快照：导出这对版本的花脸稿时，版式要素取它的 `DraftInput`。
+    pub(crate) fn new_snapshot(&self) -> Option<&ContentSnapshot> {
+        self.cache.as_ref().map(|cache| &cache.new)
+    }
+
     pub(crate) fn step(&mut self, forward: bool) {
         let total = self
             .cache

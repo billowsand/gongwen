@@ -9,7 +9,7 @@ use crate::app::{
     truncate_middle,
 };
 use crate::doc_import;
-use crate::draft_page::{TOOLBAR_CONTROL_HEIGHT, toolbar_separator};
+use crate::draft_page::{PreviewMode, TOOLBAR_CONTROL_HEIGHT, toolbar_separator};
 use crate::models::{ManuscriptStatus, ThemeName};
 use crate::theme;
 use crate::version;
@@ -1260,12 +1260,13 @@ impl GongwenApp {
             let ime_english = self.ime.english();
             let ime_scheme = ime_scheme_marker(&self.config.ime);
             let active_doc = self.active_doc;
-            let (versions_open, result_open, warnings_count, saved) = if show_doc_controls {
+            let (timeline_active, result_open, warnings_count, saved) = if show_doc_controls {
                 self.docs
                     .get(active_doc)
                     .map(|doc| {
                         (
-                            doc.versions_open,
+                            doc.preview_mode == PreviewMode::VersionDiff
+                                && doc.draft_diff.timeline.expanded,
                             doc.result_drawer_open,
                             doc.warnings.len() + doc.revisions.pending_count(),
                             doc.manuscript_id.is_some(),
@@ -1343,7 +1344,7 @@ impl GongwenApp {
                         };
                         if status_icon_button(
                             ui,
-                            versions_open,
+                            timeline_active,
                             theme::Icon::History,
                             &version_tip,
                             None,
@@ -1351,8 +1352,10 @@ impl GongwenApp {
                         )
                         .clicked()
                         {
-                            self.docs[active_doc].versions_open =
-                                !self.docs[active_doc].versions_open;
+                            // 第 ④ 期：不再开右侧抽屉，改为进入版本对照模式并展开左侧时间轴。
+                            let doc = &mut self.docs[active_doc];
+                            doc.preview_mode = PreviewMode::VersionDiff;
+                            doc.draft_diff.timeline.expanded = true;
                         }
                         ui.min_rect().left()
                     })

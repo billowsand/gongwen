@@ -1,102 +1,17 @@
-//! 版本抽屉、版本对照、版本切换与回退。
+//! 版本切换、版本行数据与回退。
 //!
 //! 由 src/draft_page.rs 拆分而来：本文件是模块 `draft_page::versions`，与其它子模块共享
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
+//! 第 ④ 期起旧的右侧版本抽屉下线，版本浏览并入版本对照模式左侧的时间轴
+//! （`draft_page::timeline` + `version_diff` 的 `timeline_ui`）。
 
-use crate::app::{
-    DraftAction, VersionSwitchPrompt, VersionTarget, summarize, truncate, version_hover,
-};
+use crate::app::{DraftAction, VersionSwitchPrompt, VersionTarget, version_hover};
 use crate::draft_page::{DraftPage, PreviewMode};
 use crate::manuscript;
-use crate::theme;
 use eframe::egui;
 use std::ops::Range;
 
 impl DraftPage<'_> {
-    /// 右侧版本抽屉：本篇的版本链在起草页里就地看完，不再跳去稿件管理。
-    /// 返回是否点了关闭按钮——关闭请求由 `create_ui` 在面板动画之外落地，
-    /// 闭包内直接改 `self.doc.versions_open` 会被局部副本写回覆盖。
-    pub(crate) fn versions_drawer(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut close_requested = false;
-        ui.horizontal(|ui| {
-            ui.strong("版本历史");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::icon_button(ui, theme::Icon::X, "收起版本历史").clicked() {
-                    close_requested = true;
-                }
-            });
-        });
-        ui.separator();
-        let Some(id) = self.doc.manuscript_id else {
-            ui.weak("这篇还没保存到稿件库，先点“保存”。");
-            return close_requested;
-        };
-        let versions = self.draft_version_rows();
-        if versions.is_empty() {
-            ui.weak("还没有提交过版本。点标题栏的“提交版本”固化当前内容。");
-            return close_requested;
-        }
-        let current = self.current_version_target();
-        let mut load: Option<i64> = None;
-        let mut diff: Option<i64> = None;
-        egui::ScrollArea::vertical()
-            .id_salt("draft_versions_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // 最新版在最上：回看历史通常从近往远找。
-                for row in versions.iter().rev() {
-                    let active = current == VersionTarget::Version(row.version_number);
-                    let frame = if active {
-                        theme::card().fill(theme::accent_soft())
-                    } else {
-                        theme::card()
-                    };
-                    frame.show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("v{}", row.version_number)).strong(),
-                            );
-                            ui.label(truncate(&row.name, 14));
-                            if row.is_latest {
-                                theme::chip(ui, "最新", theme::success(), theme::success_soft());
-                            }
-                        });
-                        if !row.comment.trim().is_empty() {
-                            ui.weak(summarize(&row.comment, 40));
-                        }
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_enabled(!active, egui::Button::new("载入编辑").small())
-                                .on_hover_text("把这一版内容载入起草页继续改；提交会追加为新版本")
-                                .clicked()
-                            {
-                                load = Some(row.version_number);
-                            }
-                            if ui
-                                .add(egui::Button::new("与上一版对照").small())
-                                .on_hover_text(version_hover(row))
-                                .clicked()
-                            {
-                                diff = Some(row.version_number);
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-                }
-            });
-        if let Some(version_number) = load {
-            self.request_version_switch(VersionTarget::Version(version_number));
-        }
-        if let Some(to) = diff {
-            self.actions.push(DraftAction::OpenVersionDiff {
-                manuscript_id: id,
-                to,
-            });
-        }
-        close_requested
-    }
-
     /// 切回 Markdown 源码并把光标 / 选区定位到给定范围。
     pub(crate) fn jump_to_source(&mut self, range: Range<usize>) {
         self.doc.preview_mode = PreviewMode::Source;

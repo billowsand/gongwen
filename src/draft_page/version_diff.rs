@@ -11,7 +11,7 @@
 
 use super::diff_editor::{self, DiffEditorInput};
 use super::diff_hunks;
-use crate::app::{DocJob, WorkerResult, version_hover};
+use crate::app::{DocJob, VersionTarget, WorkerResult, summarize, truncate, version_hover};
 use crate::diff;
 use crate::diff_view;
 use crate::draft_page::DraftPage;
@@ -144,6 +144,49 @@ impl DraftPage<'_> {
             .base
             .filter(|number| versions.iter().any(|row| row.version_number == *number))
             .unwrap_or(latest);
+
+        // —— 版本时间轴（可收起）：取代旧的右侧版本抽屉 ——
+        // 行数据是纯函数算出来的（draft_page::timeline::timeline_rows），
+        // 选择落在工作区时走原有路径，选历史版本走只读版本对组件。
+        let rows = super::timeline::timeline_rows(
+            &versions,
+            self.doc.draft_diff.timeline.selected,
+            self.doc.draft_diff.timeline.comparison,
+            self.doc.draft_diff.timeline.fixed_baseline,
+        );
+        let mut expanded = self.doc.draft_diff.timeline.expanded;
+        let mut picked = None;
+        let mut loaded = None;
+        let mut close_timeline = false;
+        egui::Panel::left("version_diff_timeline")
+            .default_size(210.0)
+            .size_range(170.0..=340.0)
+            .frame(egui::Frame::new().inner_margin(egui::Margin {
+                right: 10,
+                ..egui::Margin::ZERO
+            }))
+            .show_collapsible(ui, &mut expanded, |ui| {
+                let outcome = self.timeline_ui(ui, base, &versions, &rows);
+                picked = outcome.0;
+                loaded = outcome.1;
+                close_timeline = outcome.2;
+            });
+        if close_timeline {
+            expanded = false;
+        }
+        self.doc.draft_diff.timeline.expanded = expanded;
+        if let Some(target) = picked {
+            self.doc.draft_diff.timeline.selected = target;
+            ui.ctx().request_repaint();
+        }
+        if let Some(target) = loaded {
+            self.request_version_switch(target);
+        }
+        // 选中的历史版本被删掉后，行数据会把它回落到工作区。
+        if let super::timeline::TimelineTarget::Version(number) = rows.selected {
+            self.history_version_pair_mode_ui(ui, id, number, &rows);
+            return;
+        }
         if self.doc.read_only() {
             self.read_only_version_pair_mode_ui(ui, id, base, latest, &versions);
             return;
@@ -479,6 +522,317 @@ impl DraftPage<'_> {
                 },
                 true,
             );
+        }
+    }
+
+    /// 版本时间轴列：「当前未提交」+ 按版本号倒序的历史版本。
+    /// 返回 `(选中的目标, 请求载入的版本目标, 是否点了收起)`；
+    /// 「载入编辑」沿用 `request_version_switch`，有未提交修改时照旧弹三选确认。
+    fn timeline_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        base: i64,
+        versions: &[crate::manuscript::VersionRow],
+        rows: &super::timeline::TimelineRows,
+    ) -> (
+        Option<super::timeline::TimelineTarget>,
+        Option<VersionTarget>,
+        bool,
+    ) {
+        let mut select = None;
+        let mut load = None;
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.strong("版本");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(ui, theme::Icon::PanelClose, "收起版本时间轴")
+                    .on_hover_text("收起左侧时间轴，扩大对照区")
+                    .clicked()
+                {
+                    close = true;
+                }
+            });
+        });
+        ui.separator();
+        // 对比方式：历史版本默认对着它的上一版（v1 旧侧为空、整篇算新增），
+        // 也可以固定到同一个基准版累计看。
+        {
+            let timeline = &mut self.doc.draft_diff.timeline;
+            let comparison = timeline.comparison;
+            let label = match comparison {
+                super::timeline::TimelineComparison::Previous => "对比：上一版",
+                super::timeline::TimelineComparison::FixedBaseline => "对比：固定基准",
+            };
+            egui::ComboBox::from_id_salt("version_diff_timeline_comparison")
+                .selected_text(label)
+                .width(130.0)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            comparison == super::timeline::TimelineComparison::Previous,
+                            "上一版",
+                        )
+                        .on_hover_text("每个历史版本与它直接的前一版比较")
+                        .clicked()
+                    {
+                        timeline.comparison = super::timeline::TimelineComparison::Previous;
+                    }
+                    if ui
+                        .selectable_label(
+                            comparison == super::timeline::TimelineComparison::FixedBaseline,
+                            "固定基准",
+                        )
+                        .on_hover_text("所有历史版本都与同一个基准版比较（累计改动）")
+                        .clicked()
+                    {
+                        timeline.comparison = super::timeline::TimelineComparison::FixedBaseline;
+                    }
+                });
+            if comparison == super::timeline::TimelineComparison::FixedBaseline {
+                let latest = versions.last().map_or(1, |row| row.version_number);
+                let fixed = timeline
+                    .fixed_baseline
+                    .filter(|number| versions.iter().any(|row| row.version_number == *number))
+                    .unwrap_or(latest);
+                let fixed_label = versions
+                    .iter()
+                    .find(|row| row.version_number == fixed)
+                    .map_or_else(
+                        || format!("v{fixed}"),
+                        |row| format!("v{} · {}", row.version_number, row.name),
+                    );
+                egui::ComboBox::from_id_salt("version_diff_timeline_fixed_base")
+                    .selected_text(fixed_label)
+                    .width(130.0)
+                    .show_ui(ui, |ui| {
+                        for row in versions.iter().rev() {
+                            let text = format!(
+                                "v{} · {}{}",
+                                row.version_number,
+                                row.name,
+                                if row.version_number == latest {
+                                    " · 最新"
+                                } else {
+                                    ""
+                                }
+                            );
+                            if ui
+                                .selectable_label(row.version_number == fixed, text)
+                                .on_hover_text(version_hover(row))
+                                .clicked()
+                            {
+                                timeline.fixed_baseline = Some(row.version_number);
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("固定基准；晚于所选历史版本时该行退回与上一版比较");
+            }
+        }
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("version_diff_timeline_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for row in &rows.rows {
+                    let frame = if row.selected {
+                        theme::card().fill(theme::accent_soft())
+                    } else {
+                        theme::card()
+                    };
+                    frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        // 卡片背景不感应点击（egui 的 Ui 背景只感应悬停），
+                        // 选中靠标题行这个显式可点标签。
+                        match row.target {
+                            super::timeline::TimelineTarget::Working => {
+                                let header = ui.add(
+                                    egui::Label::new(egui::RichText::new("当前未提交").strong())
+                                        .sense(egui::Sense::click()),
+                                );
+                                if header.clicked() {
+                                    select = Some(row.target);
+                                }
+                                ui.weak(format!("基准 v{base} → 当前内容"));
+                                if ui
+                                    .add(egui::Button::new("载入编辑").small())
+                                    .on_hover_text(
+                                        "载回稿件库中的当前内容；有未提交修改时会先问你怎么处置",
+                                    )
+                                    .clicked()
+                                {
+                                    load = Some(VersionTarget::Working);
+                                }
+                            }
+                            super::timeline::TimelineTarget::Version(number) => {
+                                if let Some(version) =
+                                    versions.iter().find(|row| row.version_number == number)
+                                {
+                                    ui.horizontal(|ui| {
+                                        let header = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(format!(
+                                                    "v{} · {}",
+                                                    version.version_number,
+                                                    truncate(&version.name, 12)
+                                                ))
+                                                .strong(),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        );
+                                        if header.clicked() {
+                                            select = Some(row.target);
+                                        }
+                                        if version.is_latest {
+                                            theme::chip(
+                                                ui,
+                                                "最新",
+                                                theme::success(),
+                                                theme::success_soft(),
+                                            );
+                                        }
+                                    });
+                                    ui.weak(&version.created_at);
+                                    if !version.comment.trim().is_empty() {
+                                        ui.weak(summarize(&version.comment, 40));
+                                    }
+                                    let active = self.current_version_target()
+                                        == VersionTarget::Version(number);
+                                    if ui
+                                        .add_enabled(!active, egui::Button::new("载入编辑").small())
+                                        .on_hover_text(
+                                            "把这一版内容载入起草页继续改；\
+                                             提交会追加为新版本；有未提交修改时会先问你怎么处置",
+                                        )
+                                        .clicked()
+                                    {
+                                        load = Some(VersionTarget::Version(number));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        (select, load, close)
+    }
+
+    /// 时间轴选中的历史版本：只读对照「上一版（或固定基准）→ vN」。
+    /// v1 没有上一版，旧侧是空白稿，整篇按新增标注。
+    fn history_version_pair_mode_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        manuscript_id: i64,
+        number: i64,
+        rows: &super::timeline::TimelineRows,
+    ) {
+        let Some(row) = rows
+            .rows
+            .iter()
+            .find(|row| row.target == super::timeline::TimelineTarget::Version(number))
+        else {
+            return;
+        };
+        let old_version = row.old_version;
+        let key = crate::version_pair_view::VersionPairKey {
+            manuscript_id,
+            old_version_number: old_version,
+            new_version_number: number,
+        };
+        if !self.doc.draft_diff.version_pair.matches(key) {
+            let empty =
+                || diff::ContentSnapshot::new(DraftInput::default(), String::new(), String::new());
+            let old = match old_version {
+                Some(old) => self
+                    .store
+                    .as_deref_mut()
+                    .and_then(|store| store.get_manuscript_version(manuscript_id, old).ok())
+                    .flatten()
+                    .map(diff::ContentSnapshot::from)
+                    .unwrap_or_else(empty),
+                None => empty(),
+            };
+            let new = self
+                .store
+                .as_deref_mut()
+                .and_then(|store| store.get_manuscript_version(manuscript_id, number).ok())
+                .flatten()
+                .map(diff::ContentSnapshot::from)
+                .unwrap_or_else(empty);
+            let display = UnitDisplay::new(&self.config.vocabulary);
+            self.doc
+                .draft_diff
+                .version_pair
+                .set_pair(key, &old, &new, &display);
+        }
+
+        let old_label = old_version.map_or_else(|| "空白稿".to_string(), |old| format!("v{old}"));
+        let new_label = format!("v{number}");
+        let busy = self.doc.busy;
+        let has_marks = self
+            .doc
+            .draft_diff
+            .version_pair
+            .redline()
+            .is_some_and(|doc| !doc.is_empty());
+        let mut export = None;
+        let mut print_preview = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("历史版本对照");
+            if row.fixed_baseline_adjusted {
+                ui.weak("固定基准不早于这一版，已退回与上一版比较");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(has_marks && !busy, |ui| {
+                    ui.menu_button("导出花脸稿", |ui| {
+                        for (icon, label, formats) in [
+                            (theme::Icon::FileTypePdf, "导出 PDF", (true, false)),
+                            (theme::Icon::FileTypeDoc, "导出 Word", (false, true)),
+                            (theme::Icon::Package, "两者都导", (true, true)),
+                        ] {
+                            if ui.add(theme::menu_item(icon, label)).clicked() {
+                                export = Some(RedlineFormats {
+                                    pdf: formats.0,
+                                    docx: formats.1,
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui
+                        .add(theme::icon_text_button(theme::Icon::Print, "打印预览"))
+                        .clicked()
+                    {
+                        print_preview = true;
+                    }
+                });
+            });
+        });
+
+        let display = UnitDisplay::new(&self.config.vocabulary);
+        // 历史版本的内容与当前正文不对应，双击定位源码没有意义，忽略返回值。
+        let _jump = self.doc.draft_diff.version_pair.show(
+            ui,
+            egui::Id::new(("version_diff_history_pair", key)),
+            &old_label,
+            &new_label,
+            &display,
+            &self.config.numbering,
+        );
+        if (export.is_some() || print_preview)
+            && let (Some(doc), Some(new)) = (
+                self.doc.draft_diff.version_pair.redline().cloned(),
+                self.doc.draft_diff.version_pair.new_snapshot(),
+            )
+        {
+            let formats = export.unwrap_or(RedlineFormats {
+                pdf: true,
+                docx: false,
+            });
+            // 先克隆出要素，再结束借用调用导出。
+            let input = new.snapshot.clone();
+            self.export_redline_document(doc, input, formats, print_preview);
         }
     }
 
@@ -1397,6 +1751,124 @@ mod tests {
             expected,
             "旧基准的结果不得覆盖右栏"
         );
+    }
+
+    /// 时间轴：点历史版本进入只读版本对视图，点「当前未提交」回到可编辑视图；
+    /// 只读视图里敲字不会改动任何一侧。
+    #[test]
+    fn timeline_selection_switches_between_readonly_pair_and_editable_view() {
+        let mut harness = Harness::new();
+        let id = harness.doc.manuscript_id.unwrap();
+        harness
+            .store
+            .commit_manuscript_version(id, "二稿", "", &DraftInput::default(), NEW, "")
+            .unwrap();
+
+        // 默认选中「当前未提交」：可编辑路径在跑。
+        harness.frame(Vec::new());
+        assert!(harness.doc.draft_diff.cache.is_some(), "可编辑 diff 已建立");
+
+        // 点 v2 那一行：下一帧起只读对照 v1 → v2。
+        let output = harness.frame(Vec::new());
+        let (pos, _) = find_text(&output, "二稿").expect("时间轴行");
+        harness.click(pos + egui::vec2(4.0, 4.0));
+        harness.frame(Vec::new());
+        let output = harness.frame(Vec::new());
+        assert!(
+            harness
+                .doc
+                .draft_diff
+                .version_pair
+                .matches(crate::version_pair_view::VersionPairKey {
+                    manuscript_id: id,
+                    old_version_number: Some(1),
+                    new_version_number: 2,
+                }),
+            "选中历史版本后走只读版本对组件"
+        );
+        let text = texts(&output);
+        assert!(text.contains("历史版本对照"), "{text}");
+        assert!(text.contains("请于八月十日前报送材料。"), "{text}");
+        assert!(text.contains("请于八月十五日前报送材料。"), "{text}");
+        // 左栏只读：敲字不进正文。
+        let before = harness.doc.generated_markdown.clone();
+        harness.frame(vec![egui::Event::Text("不得编辑".into())]);
+        assert_eq!(harness.doc.generated_markdown, before);
+
+        // 点回「当前未提交」：回到可编辑视图（基准固定到 v1，与当前内容确有差异）。
+        let output = harness.frame(Vec::new());
+        let (pos, _) = find_text(&output, "当前未提交").expect("工作区行");
+        harness.click(pos + egui::vec2(4.0, 4.0));
+        harness.doc.draft_diff.base = Some(1);
+        harness.frame(Vec::new());
+        harness.frame(Vec::new());
+        assert!(
+            harness.doc.draft_diff.cache.is_some(),
+            "回到工作区后重建可编辑 diff"
+        );
+        assert!(!harness.doc.draft_diff.hunks.is_empty());
+    }
+
+    /// v1 没有上一版：旧侧是空白稿，整篇按新增标注。
+    #[test]
+    fn timeline_first_version_compares_against_a_blank_base() {
+        let mut harness = Harness::new();
+        let id = harness.doc.manuscript_id.unwrap();
+        let output = harness.frame(Vec::new());
+        let (pos, _) = find_text(&output, "送审稿").expect("v1 行");
+        harness.click(pos + egui::vec2(4.0, 4.0));
+        harness.frame(Vec::new());
+        let output = harness.frame(Vec::new());
+        assert!(
+            harness
+                .doc
+                .draft_diff
+                .version_pair
+                .matches(crate::version_pair_view::VersionPairKey {
+                    manuscript_id: id,
+                    old_version_number: None,
+                    new_version_number: 1,
+                }),
+            "v1 的旧侧应为空白稿"
+        );
+        let text = texts(&output);
+        assert!(text.contains("空白稿 → v1"), "{text}");
+        assert!(text.contains("请于八月十日前报送材料。"), "{text}");
+    }
+
+    /// 时间轴上的「载入编辑」：内存里的内容相对来源有改动时，照旧弹三选确认，
+    /// 由用户在确认框里决定丢弃、覆盖还是另存。
+    #[test]
+    fn timeline_load_button_prompts_before_discarding_unsaved_edits() {
+        let mut harness = Harness::new();
+        let output = harness.frame(Vec::new());
+        // v1 卡片里的「载入编辑」（工作区行也有一个同名按钮，取 v1 标签下面那个）。
+        let (name_pos, _) = find_text(&output, "送审稿").expect("v1 行");
+        let button = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape) if shape.galley.text() == "载入编辑" => {
+                    Some(shape.pos)
+                }
+                _ => None,
+            })
+            .filter(|pos| pos.y > name_pos.y)
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .expect("v1 行的载入编辑按钮");
+        harness.click(button + egui::vec2(10.0, 6.0));
+        let prompt = harness
+            .version_switch
+            .as_ref()
+            .expect("有未提交修改时应弹确认");
+        assert_eq!(prompt.manuscript_id, harness.doc.manuscript_id.unwrap());
+        assert!(
+            matches!(prompt.target, crate::app::VersionTarget::Version(1)),
+            "确认框的目标是 v1：{:?}",
+            prompt.target
+        );
+        // 弹了确认就不会直接切走。
+        assert_eq!(harness.doc.generated_markdown, NEW);
     }
 
     /// 长稿打字的帧耗时探针（人工运行：`cargo test --release --bin gongwen-assistant

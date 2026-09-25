@@ -1082,7 +1082,6 @@ impl DraftPage<'_> {
     /// 审校：校验、版本比对、查找，外加一个字数。
     pub(crate) fn ribbon_review(&mut self, ui: &mut egui::Ui) {
         let has_draft = !self.doc.generated_markdown.trim().is_empty();
-        let saved = self.doc.manuscript_id.is_some();
 
         if ui
             .add_enabled(
@@ -1122,22 +1121,6 @@ impl DraftPage<'_> {
         {
             self.doc.preview_mode = PreviewMode::VersionDiff;
         }
-        let versions_open = self.doc.versions_open;
-        if ui
-            .add_enabled(
-                saved,
-                theme::icon_text_button(theme::Icon::History, "版本历史").selected(versions_open),
-            )
-            .on_hover_text(if saved {
-                "开关右侧的版本历史抽屉"
-            } else {
-                "这篇还没保存到稿件库"
-            })
-            .clicked()
-        {
-            self.doc.versions_open = !versions_open;
-        }
-        toolbar_separator(ui);
 
         if ui
             .add(theme::icon_text_button(
@@ -1243,16 +1226,18 @@ impl DraftPage<'_> {
         {
             self.doc.result_drawer_open = !drawer_open;
         }
-        let versions_open = self.doc.versions_open;
+        let timeline_active = self.doc.preview_mode == PreviewMode::VersionDiff
+            && self.doc.draft_diff.timeline.expanded;
         if ui
             .add_enabled(
                 self.doc.manuscript_id.is_some(),
-                theme::icon_text_button(theme::Icon::History, "版本历史").selected(versions_open),
+                theme::icon_text_button(theme::Icon::History, "版本历史").selected(timeline_active),
             )
-            .on_hover_text("开关右侧的版本历史抽屉")
+            .on_hover_text("进入版本对照模式并展开左侧的版本时间轴")
             .clicked()
         {
-            self.doc.versions_open = !versions_open;
+            self.doc.preview_mode = PreviewMode::VersionDiff;
+            self.doc.draft_diff.timeline.expanded = true;
         }
         // 两处行号各管一边，标签必须各自说清是哪一边：编辑区的号数的是源码行，
         // 纸面的号数的是纸上排出来的行，两个数原本就对不上，名字再一样就会

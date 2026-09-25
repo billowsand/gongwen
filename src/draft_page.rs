@@ -35,6 +35,7 @@ mod revise;
 mod ribbon;
 mod table;
 mod tasks;
+mod timeline;
 mod version_diff;
 mod versions;
 
@@ -51,6 +52,7 @@ pub(crate) use markdown::{
 };
 pub(crate) use navigator::PreviewScroll;
 pub(crate) use table::{TableOp, table_grid_picker};
+pub(crate) use timeline::VersionTimelineState;
 // test-only names: only compiled in test builds (kept for the root test modules)
 #[cfg(test)]
 pub(crate) use find::{expanded_replacement, markdown_matches};
@@ -425,8 +427,6 @@ pub(crate) struct DraftSession {
     pub(crate) committed_baseline: Option<(String, String)>,
     /// 稿件库里这条记录的生命周期状态。发布与归档的稿件开成只读标签。
     pub(crate) record_status: ManuscriptStatus,
-    /// 版本抽屉是否展开。
-    pub(crate) versions_open: bool,
     /// 标签刚打开时的内容指纹。“第一次改动才自动入库”靠它区分
     /// “刚复制过来还没动” 和 “真的改了”。
     opened_fingerprint: String,
@@ -570,7 +570,6 @@ impl DraftSession {
             saved_baseline: None,
             committed_baseline: None,
             record_status: ManuscriptStatus::Draft,
-            versions_open: false,
             opened_fingerprint: String::new(),
             use_knowledge_rag: false,
             rag_kind_filter: RagKindFilter::default(),
