@@ -20,6 +20,9 @@
 //! 10. 公式：整体比较，变了就整体删旧插新。
 
 mod compare;
+// 接线在下一步（RedlineDoc.elements + redline::build_with_inputs）完成后去掉。
+#[allow(dead_code)]
+pub(crate) mod elements;
 mod model;
 mod overlay;
 mod postprocess;
