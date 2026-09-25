@@ -9,7 +9,7 @@
 | 期 | 内容 | 状态 |
 |---|---|---|
 | ① | 视觉 diff 引擎 + PDF / Word 花脸稿导出 | **已完成**，已合入 `main` |
-| ② | 左 Markdown diff / 右花脸稿预览的界面、标记绘制、联动、打印预览 | **大部分完成**，已合入 `main`；剩「公文要素就地标注」（见下文，可与第 ③ 期并行） |
+| ② | 左 Markdown diff / 右花脸稿预览的界面、标记绘制、联动、打印预览 | **已完成**，已合入 `main`（含「公文要素就地标注」，见下文） |
 | ③ | 可编辑 diff + 逐块还原 | **已完成**（见「第 ③ 期交付了什么」）；已做一轮实测并修正（见「第 ③ 期测试后的修正」），人眼验收待做 |
 | ④ | 版本时间轴合并浏览界面；稿件管理对照窗改用同一视图；花脸稿自动归档 | 未开始 |
 | ⑤ | AI 修订建议并入为待采纳块 | 未开始 |
@@ -102,28 +102,71 @@
 - `draft_page::version_diff::tests`：内存库 + 真 egui 上下文画整页，两栏都出字、
   每处变更在预览里都有落点、F7 首尾循环。
 
-## 第 ② 期还没做的：公文要素就地标注（下一步）
+## 第 ② 期「公文要素就地标注」交付了什么（2026-09-25）
 
-方案需求第 9 条：版头、版记里的主送、抄送、成文日期、签发人、文号等改动，在版面原位
-画删除线 + 方框。现在左栏顶部有「要素变化」卡片（字段级，沿用 `draft_changes`），
-但右栏预览与导出的纸面上**还没有**要素标注。
+方案需求第 9 条、规则 7：版头 / 版记要素改了，就在纸面原位画「旧值删除线 + 新值蓝框」，
+**整字段替换、不做词级**；三处渲染与标注同源。本期范围：主送机关、抄送机关、成文日期、
+发文字号、落款单位、密级（含保密期限）。**发文单位（红头）不做**，见「遗留」。
 
-没做的原因：纸面上印的不是原始字段值。主送 / 抄送要经 `UnitDisplay` 换全称或简称、
-按顿号拆开，联合发文的机关标志与落款按列排，成文日期换成汉字，密级拼保密期限……
-往 `DraftInput` 字段里塞哨兵会被这些显示变换打碎。必须在**每个字段的绘制处**各自接：
+### 代码地图
+- `src/export/element_display.rs`（新）：每个字段的**纸面显示值**函数——三处渲染与
+  要素标注都调它（`addressee_display`（主送位，白头件 / 呈批件是呈报领导）、
+  `copies_to_display`、`date_display_parts` / `date_display_line`、
+  `number_display_parts`、`signing_unit_display`、`security_display` / `security_parts`）。
+  预览版留白 `PREVIEW_PLACEHOLDER` 也归到这里（原先 preview / docx 各一份）。
+- `src/visual_diff/elements.rs`（新，纯函数）：`element_marks(old, new, display)
+  -> ElementMarks`；每个字段 / 部件给出「没变」或（旧显示值，新显示值）
+  （`FieldMark::change()`），`FieldMark::marked()` 取带哨兵文本（没变返回新值原文，
+  变了 `mark_deleted(旧) + mark_added(新)`，一侧为空只剩另一侧）。
+  按部件标：成文日期（年/月/日）、发文字号（代字/年份/序号）——TeX 里它们各是三条
+  命令、中间夹着类文件写死的年月日与〔〕号；落款单位每行一个部件。日期切不开
+  （自由文本）整串一个部件。预览版留白（文号序号、日期「日」位）两侧都换占位后再比，
+  纸面没变的不出标注。
+- `src/redline.rs`：`RedlineDoc` 增加 `elements: ElementMarks`（`is_empty` 把要素改动
+  算进去——正文一字未动只改密级也能出花脸稿）；新增
+  `build_with_inputs(old, new, old_input, new_input, display)`，`build` 保持原签名。
+  `export_files` 把 `doc.elements` 传给导出器。
+- 版本对照页 `sync_draft_diff` 三处（首帧同步 / 150ms 防抖后台 / 导出兜底）都走新入口，
+  旧值取 `Baseline.snapshot` 的 `DraftInput`，后台线程随任务带走词库。
+- TeX：`official.rs` / `papers.rs` 的要素命令参数走 `element_arg`（变了
+  `marked_tex_escape`，没变原生取值）；密级整段进 `\SecurityLevel`、`\SecurityPeriod`
+  留空（类里的 ★ 是条件输出）；日期 / 文号按部件。**类文件新增打印接缝**
+  `\RecipientMarked` / `\CopiesToMarked`（默认等于原命令）——`\Recipient` / `\CopiesTo`
+  始终写未标注的新值，供类里的统计 / 判空用（见「已知的坑」）。
+- Word：`docx/runs.rs` 的 `marked_runs` / `security_runs(…, mark)`；版头 / 版记各段落
+  按「变了走标记 run、没变走原生单 run」。文号 `number_runs`、日期 `signature_date_runs`、
+  落款 `add_white_paper_signature(…, elements)`（按行）、抄送 `add_footer_record(…, elements)`。
+- 预览：`official_preview` 增加 `elements` 参数（定稿 / 无花脸稿传空）；
+  `preview/marks.rs` 新增 `marked_line_galley`（自行摆位的行用），`layout.rs` 的
+  `stacked` 补 `paint_galley_marks`；`header.rs`（密级、文号）、`tail.rs`（主送、落款、
+  日期、版记抄送）、`red.rs`（呈批件密级 / 文号 / 呈报领导 / 落款 / 日期）都按字段接。
+- 红头呈批件：`papers.rs` 的 redapproval 与 `preview/red.rs` 全部覆盖；联合发文落款的
+  单位表（发文单位）与呈批件承办区不在本期。
 
-1. 算出旧版要素：`store.get_manuscript_version(id, base).snapshot`（`sync_draft_diff`
-   里已经取了旧快照，放进 `RedlineView` 即可）。
-2. 定义一个「要素标注」结构，按字段给出 `(旧显示值, 新显示值)`；显示值要用与绘制处
-   **同一个**函数算（`UnitDisplay` 的各个方法、`chinese_date` 等），不能用
-   `DocumentModel::from_inputs` 里那套原始拼接——那只适合做比较。
-3. 预览：`preview/header.rs`（红头、文号、密级）、`preview/tail.rs`（主送、落款、日期、
-   版记）、`preview/red.rs`（红头呈批件的承办区等）按字段查标注，有就排
-   「删旧（红删除线）+ 插新（蓝框）」，可以复用 `marks::append_marked_text`。
-4. 导出：DOCX 版头 / 版记段落用 `marked_runs`；TeX 侧 `official.rs` 的要素命令参数
-   用 `marked_tex_escape`。注意 `.cls` 里有些要素是按宽度算版式的（红头字距、落款
-   右对齐），标注后宽度变了，要实测。
-5. 加一致性测试：同一组要素变化，预览 / DOCX / TeX 三边的 `(文字, 类型)` 一致。
+### 测试（只加不删）
+- `visual_diff::elements::tests`：字段改了 / 没改 / 一侧为空、去删除段等于新显示值、
+  删除侧等于旧显示值、预览版留白不标、要素全没变时没有任何哨兵。
+- `redline::consistency_tests::element_marks_agree_across_preview_docx_and_tex`：
+  同一组要素变化，每个标注单元分别过预览 `append_marked_text` / DOCX `marked_runs` /
+  TeX `marked_tex_escape` 三条真实管线，`(文字, 类型)` 序列必须相同。
+- `redline::consistency_tests::unchanged_elements_keep_the_plain_output_byte_for_byte`：
+  空标注与定稿导出逐字节相同（TeX 文件、DOCX 的 `word/document.xml`）。
+- `redline::tests::element_only_changes_still_produce_a_redline`：正文没动只改密级。
+- `redline::consistency_tests::manual_element_pdf_full_probe`（`#[ignore]`）：真编译 +
+  栅格化探针，见下。
+
+### 实测（内置 Tectonic，2026-09-25）
+`cargo test --locked manual_element_pdf_full_probe -- --ignored` 真编译两份花脸稿 PDF
+（公函 1 页、红头呈批件 2 页），`hayro` 栅格化首页 / 末页到 `tmp/element-marks-full/`。
+逐字二分定位到一个**真编译才暴露的问题**：主送 / 抄送带标注时
+`\CalculateTotalCopies` 的 `\CountUnits`（`\ifthenelse` / `\StrCount`）展开
+`\Recipient` / `\CopiesTo` → `! Argument of \@imakebox has an extra }`，编译失败。
+已按上述接缝宏做法修掉。看栅格图：六要素处「旧值红删除线 + 新值蓝框」都在位、未越界；
+红头（不标）字距不动；落款按既定版式（呈批件右侧留 4cm 签字位，日期居中于单位块 +
+签字位）——**新增框线本就贴着字身（0.5pt 框线 + 1.5pt 留白）**，视觉上是否算「压字」
+仍建议人眼确认；红头呈批件落款带标注时 `\RedSignatureUnitWidth` 已按标注文本
+（旧 + 新）重算，否则定宽摆位与日期居中会偏。
+
 
 ## 第 ③ 期交付了什么
 
@@ -177,9 +220,10 @@
 1. **方案 4.3 说三个消费方直接读 `RedlineOverlay`，实际导出走的是「overlay → 带哨兵的 Markdown
    → 原有导出器」**。好处是花脸稿与定稿走同一条排版链路，版式天然一致。
    第 ② 期的预览**建议也吃同一份带哨兵的 Markdown**（见下文），这样「预览 = 导出」由构造保证。
-2. **公文要素（主送、抄送、成文日期等）的就地标注没有接上**。`DocumentModel::from_inputs` 已写好，
-   但标了 `#[allow(dead_code)]`；序列化对 `VisualBlock::Element` 返回空。
-   要素标注要在版头 / 版记的绘制处做（预览和导出都要），归在第 ② 期。
+2. **公文要素（主送、抄送、成文日期等）的就地标注，第 ② 期后半段已补上**：
+   显示值统一走 `export::element_display`，标注走 `visual_diff::elements` + `RedlineDoc.elements`，
+   三处渲染各自接标注（见「第 ② 期『公文要素就地标注』交付了什么」）。`DocumentModel::from_inputs`
+   仍标着 `#[allow(dead_code)]`（它那套原始拼接只适合做比较，没接进渲染）。
 3. 研究报告的花脸稿是在 mdx 产物上后处理（`visual_diff::postprocess`），不是像公文那样在
    导出器里接标记。TeX 侧（第 ③ 期测试后重写）：标记内容按顶层切段，样式命令包在宏外、
    公式 / 引用整体装盒另画、独立公式整块标注，见「第 ③ 期测试后的修正」第 2 条；只有
@@ -201,6 +245,14 @@
    的段、夹缝里再做加权 LCS」。上限以内结果逐字节不变；上限以外理论上可能与全局最优锚定
    不同（例如一个完全相同的段与一串高相似段交叉时），测试里的长稿两条路径结果相同。
 9. （第 ③ 期）逐块还原的单位是「变更块」而不是逐行变更；F7 在可编辑时也按变更块跳。
+10. （第 ② 期要素标注）**发文字号按部件标（代字 / 年份 / 序号），不是整串**。类文件把文号
+    拆成 `\DepartmentCode` / `\Year` / `\DocumentNumber` 三条命令、中间夹着写死的〔〕号，
+    整串塞不进任一参数；与成文日期（年/月/日）同一规则。典型的「只改序号」因此比整串替换
+    更干净（`某教函〔2026〕~~12~~[15] 号`）。
+11. （第 ② 期要素标注）**呈报领导算在主送位**：白头件 / 红头呈批件的主送位印的是
+    `reporting_leaders`，与函稿主送同属一个版位，标注一并覆盖。
+12. （第 ② 期要素标注）**联合发文落款的发文单位表、红头呈批件承办区不在本期**（见「遗留」）。
+    联合发文的成文日期（压在主单位列下的那一行）照常标注。
 
 ## 已知的坑
 - **xeCJKfntef 的标注宏（`\GwDel` / `\GwAdd`）里面，字体切换只作用到第一个字。**
@@ -248,6 +300,16 @@
   用户挪了光标再按 Ctrl+Z，第一下只回到还原后的光标位置，这是 egui 撤销器的既有行为。
 - `highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas`
   在全量并行跑时偶发失败、单独跑通过，与本改造无关（共享字体图集状态），别为它改测试。
+- （第 ② 期要素标注）**类里的 `\Recipient` / `\CopiesTo` 会被 `\ifthenelse`、`\StrCount`
+  展开**（`\CalculateTotalCopies` 判空、数单位算共印份数）。带标注时它们装着
+  `\GwDel` / `\GwAdd`，一展开就 `! Argument of \@imakebox has an extra }`。所以：
+  `\Recipient` / `\CopiesTo` 永远写**未标注的新值**，纸面另印接缝宏
+  `\RecipientMarked` / `\CopiesToMarked`（默认等于原命令）。以后往版头 / 版记要素里加
+  任何宏，先确认它不会被这两个命令的展开碰到。
+- （第 ② 期要素标注）**按宽度算版式的要素，标注后宽度变了**。红头呈批件落款是定宽摆位
+  （`\RedSignatureUnitWidth`），带标注时必须按「旧值 + 新值」重算（`papers.rs` 已做），
+  否则落款与日期居中会偏；Word / 预览的落款是右对齐、向左生长，不受影响。
+  「新增框线本就贴着字身」（0.5pt 框线 + 1.5pt 留白），视觉上像轻微压字，属设计。
 - 可以不用内置 Tectonic 验证 TeX：
   1. 装 XeLaTeX（Debian 系：`texlive-xetex texlive-lang-chinese texlive-latex-extra texlive-plain-generic fonts-noto-cjk`）；
   2. 写个临时测试，调 `redline::build` + `export::write_tex_for_kind` 把 `.tex` 写到临时目录；
@@ -321,12 +383,17 @@
 1. **第 ③ 期人眼验收**：长稿边打字边看（右栏不卡、左栏不跳），空隙里的旧行、绿底、
    还原按钮、新增空行「（空行）」标签的观感，打印预览的 PDF 与右栏一致；删除线高度与跳过
    标点、新增框在样式切换处约 0.4–1.6pt 的断缝（见「已知的坑」）。
-2. 公文要素就地标注（第 ② 期遗留，做法见上文），要在第 ④ 期之前补上。
-3. 长稿右栏预览按可视页裁剪（2000 段每帧约 15ms）。
-4. 人眼核对预览里的标记位置（见「已知的坑」），必要时微调 `marks.rs` 常量。
-5. `highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas` 全量并行跑时
+2. **人眼验收第 ② 期要素标注**：进对照模式看版头 / 版记要素处的红删除线与蓝框，
+   与「打印预览」PDF 对照（`manual_element_pdf_full_probe` 可出图到 `tmp/element-marks-full/`）；
+   重点看框线贴字、红头字距、红头呈批件落款与日期的相对位置（见「已知的坑」）。
+3. **要素标注的遗留项**：
+   - 发文单位（红头机关标志）不做（本期指定范围之外）；改了发文单位只在左栏「要素变化」卡片可见。
+   - 联合发文模式 1 落款表里的发文单位（按列排的多单位）不标；承办区（承办单位 / 联系人 / 电话）不标。
+4. 长稿右栏预览按可视页裁剪（2000 段每帧约 15ms）。
+5. 人眼核对预览里的标记位置（见「已知的坑」），必要时微调 `marks.rs` 常量。
+6. `highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas` 全量并行跑时
    偶发失败（本机约三次一次），单独跑必过；值得单独查一下共享字体图集的问题。
-6. 第 ④ 期：版本时间轴合并浏览界面；稿件管理对照窗改用同一视图（只读路径已有
+7. 第 ④ 期：版本时间轴合并浏览界面；稿件管理对照窗改用同一视图（只读路径已有
    `unified_body_ui`）；花脸稿自动归档。
 
 ## 第 ③ 期实施指南：可编辑 diff + 逐块还原
