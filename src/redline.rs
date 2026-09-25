@@ -970,6 +970,119 @@ mod consistency_tests {
             .expect("读部件");
         text
     }
+
+    /// 人工实测探针（`cargo test -- --ignored`）：用内置 Tectonic 真编译公函与
+    /// 红头呈批件的花脸稿 PDF，再把首页 / 末页栅格化成 PNG 供人眼核对要素处的
+    /// 删除线与新增框（压字、红头字距、落款右对齐）。产物落在
+    /// `tmp/element-marks-full/`。第 ② 期实测已跑通（公函 1 页、呈批件 2 页）。
+    #[test]
+    #[ignore = "人工实测：真编译 PDF 并栅格化"]
+    fn manual_element_pdf_full_probe() {
+        use crate::models::FontConfig;
+        let out = std::path::PathBuf::from("tmp/element-marks-full");
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let display = UnitDisplay::new(&[]);
+        let fonts = FontConfig::default();
+
+        let mut letter = element_input();
+        letter.profile.reporting_leaders.clear();
+        let mut letter_new = letter.clone();
+        letter_new.profile.recipient = "甲市教育局、乙市教育局".into();
+        letter_new.profile.copies_to = "丙市教育局".into();
+        letter_new.profile.security_level = "机密".into();
+        letter_new.profile.security_period = "5年".into();
+        letter_new.profile.signing_unit = "星海省人民政府".into();
+        letter_new.profile.document_number = "15".into();
+        letter_new.date = "2026年9月7日".into();
+
+        let mut red = DraftInput {
+            kind: TemplateKind::RedHeadApproval,
+            date: "2026年8月7日".into(),
+            ..Default::default()
+        };
+        red.profile = TemplateProfile::for_kind(red.kind);
+        red.profile.issuing_unit = "星海省教育厅".into();
+        red.profile.reporting_leaders = "张三".into();
+        red.profile.department_code = "星教呈".into();
+        red.profile.document_year = "2026".into();
+        red.profile.document_number = "12".into();
+        red.profile.signing_unit = "星海省教育厅".into();
+        red.profile.security_level = "秘密".into();
+        red.profile.security_period = "10年".into();
+        red.profile.responsible_unit = "办公室".into();
+        red.profile.contact_person = "李四".into();
+        red.profile.contact_phone = "12345678".into();
+        let mut red_new = red.clone();
+        red_new.profile.reporting_leaders = "李四".into();
+        red_new.profile.security_level = "机密".into();
+        red_new.profile.security_period = "5年".into();
+        red_new.profile.signing_unit = "星海省人民政府".into();
+        red_new.profile.document_number = "15".into();
+        red_new.date = "2026年9月7日".into();
+
+        for (name, old, new) in [
+            ("letter", &letter, &letter_new),
+            ("redapproval", &red, &red_new),
+        ] {
+            let md_old = "# 关于开展专项检查的函\n\n现将有关事项函告如下。\n";
+            let md_new = "# 关于开展专项检查的函\n\n现将有关事项进一步函告如下。\n";
+            let doc = super::build_with_inputs(md_old, md_new, old, new, &display);
+            let files = super::export_files(
+                &out,
+                new,
+                &doc,
+                super::RedlineFormats {
+                    pdf: true,
+                    docx: false,
+                },
+                &display,
+                &fonts,
+                &crate::models::NumberingConfig::default(),
+            )
+            .unwrap_or_else(|error| panic!("{name} 花脸稿导出失败：{error:#}"));
+            let pdf = files
+                .iter()
+                .find(|path| path.extension().is_some_and(|ext| ext == "pdf"))
+                .unwrap_or_else(|| panic!("{name} 没编出 PDF：{files:?}"));
+            println!("{name}: {}", pdf.display());
+            rasterize_first_and_last(pdf, &out, name);
+        }
+    }
+
+    /// 把 PDF 的首页与末页按 1000px 宽栅格化成 PNG，白底。
+    fn rasterize_first_and_last(pdf: &std::path::Path, out: &std::path::Path, name: &str) {
+        let bytes = std::sync::Arc::new(std::fs::read(pdf).unwrap());
+        let doc = hayro::hayro_interpret::hayro_syntax::Pdf::new(bytes).unwrap();
+        let cache = hayro::RenderCache::new();
+        let pages = doc.pages();
+        let count = pages.len();
+        for index in [0usize, count.saturating_sub(1)] {
+            let page = pages.get(index).expect("页存在");
+            let (page_width, _) = page.render_dimensions();
+            let width = 1000u16;
+            let scale = f32::from(width) / page_width;
+            let pixmap = hayro::render(
+                page,
+                &cache,
+                &hayro::hayro_interpret::InterpreterSettings::default(),
+                &hayro::RenderSettings {
+                    x_scale: scale,
+                    y_scale: scale,
+                    width: Some(width),
+                    bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+                    ..Default::default()
+                },
+            );
+            let (w, h) = (usize::from(pixmap.width()), usize::from(pixmap.height()));
+            let image =
+                image::RgbaImage::from_raw(w as u32, h as u32, pixmap.data_as_u8_slice().to_vec())
+                    .expect("RGBA");
+            let path = out.join(format!("{name}-p{}.png", index + 1));
+            image.save(&path).expect("存 PNG");
+            println!("  page {} -> {}", index + 1, path.display());
+        }
+    }
 }
 
 #[cfg(test)]

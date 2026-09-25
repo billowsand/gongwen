@@ -97,6 +97,28 @@ pub(crate) fn official_letter_tex_with_numbering(
     let department_arg = element_arg(code_mark, || tex_escape(&department_code));
     let document_year_arg = element_arg(number_year_mark, || tex_escape(&document_year));
     let number_arg = element_arg(serial_mark, || document_number.clone());
+    // 主送 / 抄送：类要用 \Recipient / \CopiesTo 判空、数单位算共印份数，
+    // 标记宏进不去这两个命令（\ifthenelse / \StrCount 会展开它们）。所以
+    // \Recipient / \CopiesTo 始终写未标注的新值，纸面另印 \RecipientMarked /
+    // \CopiesToMarked（默认等于原命令，未标注时逐字节不变）。
+    let recipient_arg = tex_escape(&addressee_display(input, display));
+    let recipient_marked_arg = if elements.recipient().changed() {
+        format!(
+            "\\renewcommand{{\\RecipientMarked}}{{{}}}\n",
+            marked_tex_escape(&elements.recipient().marked())
+        )
+    } else {
+        String::new()
+    };
+    let copies_arg = tex_escape(&copies_to_display(input, display));
+    let copies_marked_arg = if elements.copies_to().changed() {
+        format!(
+            "\\renewcommand{{\\CopiesToMarked}}{{{}}}\n",
+            marked_tex_escape(&elements.copies_to().marked())
+        )
+    } else {
+        String::new()
+    };
     let (year_arg, month_arg, day_arg) = if elements.date().changed() {
         match elements.date().parts() {
             Some([year_mark, month_mark, day_mark]) => (
@@ -190,8 +212,6 @@ pub(crate) fn official_letter_tex_with_numbering(
 
     // 规格 §2.2/3.1：红头、主送、抄送用层级展开全称；版记承办单位用简称；
     // 落款：公函用全称、电话通知用简称（少于 5 字逐字加空格）。
-    let recipient_display = addressee_display(input, display);
-    let copies_display = copies_to_display(input, display);
     let responsible_display = if joint_mode_one {
         split_units(&input.profile.joint_responsible_units)
             .iter()
@@ -216,7 +236,7 @@ pub(crate) fn official_letter_tex_with_numbering(
 \renewcommand{{\DocumentNumber}}{{{number}}}
 {security}\renewcommand{{\DocumentTitle}}{{{title}}}
 \renewcommand{{\TitleContent}}{{{title_content}}}
-\renewcommand{{\Recipient}}{{{recipient}}}
+{recipient_marked}\renewcommand{{\Recipient}}{{{recipient}}}
 \renewcommand{{\MainContent}}{{
 {body}
 }}
@@ -225,7 +245,7 @@ pub(crate) fn official_letter_tex_with_numbering(
 \renewcommand{{\SignatureYear}}{{{year}}}
 \renewcommand{{\SignatureMonth}}{{{month}}}
 \renewcommand{{\SignatureDay}}{{{day}}}
-\renewcommand{{\CopiesTo}}{{{copies}}}
+{copies_marked}\renewcommand{{\CopiesTo}}{{{copies}}}
 \renewcommand{{\ResponsibleUnit}}{{{responsible}}}
 \renewcommand{{\ContactPerson}}{{{contact}}}
 \renewcommand{{\ContactPhone}}{{{phone}}}
@@ -246,7 +266,8 @@ pub(crate) fn official_letter_tex_with_numbering(
         security = security,
         title = tex_escape(title),
         title_content = title_content_tex(title),
-        recipient = element_arg(elements.recipient(), || tex_escape(&recipient_display)),
+        recipient = recipient_arg,
+        recipient_marked = recipient_marked_arg,
         body = body,
         attachment_command = attachment_command,
         signature_unit = match elements.signing_units().first() {
@@ -273,7 +294,8 @@ pub(crate) fn official_letter_tex_with_numbering(
             String::new()
         },
         day = day_arg,
-        copies = element_arg(elements.copies_to(), || tex_escape(&copies_display)),
+        copies = copies_arg,
+        copies_marked = copies_marked_arg,
         responsible = tex_escape(&responsible_display),
         contact = latex_name(&input.profile.contact_person),
         phone = tex_escape(&input.profile.contact_phone),

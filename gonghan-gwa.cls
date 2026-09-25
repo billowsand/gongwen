@@ -390,6 +390,11 @@
 % 为空时 \makeletter 回退为默认的 \zihao{2} 单行标题。
 \newcommand{\TitleContent}{}
 \newcommand{\Recipient}{}
+% 要素就地标注（花脸稿）：\Recipient / \CopiesTo 要被 \ifthenelse、\StrCount 展开
+% （判空、数单位算共印份数），标记宏进不去。于是统计与判空一律看未标注的新值，
+% 纸面印的是 \RecipientMarked / \CopiesToMarked——默认等于原命令，没标注时
+% 输出与从前逐字节一致。
+\newcommand{\RecipientMarked}{\Recipient}
 
 % 正文内容（必须由用户设置）
 \newcommand{\MainContent}{}
@@ -418,6 +423,7 @@
 
 % 版记信息
 \newcommand{\CopiesTo}{}                        % 抄送单位（默认无）
+\newcommand{\CopiesToMarked}{\CopiesTo}
 \newcommand{\ResponsibleUnit}{}                % 承办单位（必须设置）
 \newcommand{\ContactPerson}{}                  % 联系人（必须设置）
 \newcommand{\ContactPhone}{}                   % 联系电话（必须设置）
@@ -608,7 +614,7 @@
         \PrintCopiesAtLineEnd{}%
     }{%
         \hangindent=3em\hangafter=1\relax
-        \makebox[3em][l]{抄送：}\CopiesTo{}\PrintCopiesAtLineEnd{}%
+        \makebox[3em][l]{抄送：}\CopiesToMarked{}\PrintCopiesAtLineEnd{}%
     }%
 }
 
@@ -981,7 +987,7 @@
             \par
         }%
         \vspace{\BodyBaselineSkip}%
-        \noindent{\zihao{3}\kai\enkai\Recipient{}：}\par
+        \noindent{\zihao{3}\kai\enkai\RecipientMarked{}：}\par
     }%
     \unvbox\gwa@redblockbox
     {\zihao{3}\gwa@bodyspacing\RedShapedContent{\MainContent}}%
@@ -1056,7 +1062,7 @@
     \else
         % 呈报领导（白头件）／主送机关（函稿、电话通知）
         \vspace{\BodyBaselineSkip}
-        {\noindent \zihao{3}\kai\enkai\Recipient{}：}
+        {\noindent \zihao{3}\kai\enkai\RecipientMarked{}：}
 
         % 正文
         {\zihao{3}

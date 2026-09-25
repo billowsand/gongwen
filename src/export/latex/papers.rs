@@ -237,7 +237,18 @@ pub(crate) fn red_head_approval_tex_with_numbering(
     // 成文日期要居中于“落款单位 + 签字空间”，TeX 量不出 vbox 的自然宽度，
     // 这里按字数算好最宽一行的宽度写进类文件。写成毫米而不是 em：这条
     // \setlength 在导言区执行，那里的字号不是三号。
-    let signature_unit_width_mm = crate::export::red_signature_unit_width_mm(&signature_units);
+    // 带要素标注时每行是「旧值 + 新值」并排，宽度得按标注后的文本算，
+    // 否则定宽摆位的落款与日期居中会对不上（Word / 预览右对齐，不涉及）。
+    let width_units = if elements.signing_units().iter().any(|mark| mark.changed()) {
+        elements
+            .signing_units()
+            .iter()
+            .map(|mark| crate::export::strip_redline(&mark.marked()))
+            .collect()
+    } else {
+        signature_units.clone()
+    };
+    let signature_unit_width_mm = crate::export::red_signature_unit_width_mm(&width_units);
     let signature_unit = signature_units_tex(&signature_units, elements.signing_units());
     let preview = input.profile.letter_version == LetterVersion::Preview;
     let placeholder = "\\makebox[1em][c]{}";
