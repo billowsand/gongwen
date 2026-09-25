@@ -52,8 +52,11 @@ impl GongwenApp {
     pub(crate) fn proofread_ui(&mut self, ui: &mut egui::Ui) {
         // 每帧重算生效词表。141 条的合并是纯内存操作，比维护缓存失效简单可靠。
         let lexicon = proofread::Lexicon::resolved(&self.config.proofread);
+        if self.proofread_page.selected.is_none() {
+            self.proofread_page.selected = lexicon.entries.first().map(|entry| entry.id.clone());
+        }
 
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.heading("校对词表");
             ui.add_space(6.0);
@@ -101,106 +104,80 @@ impl GongwenApp {
             });
         });
 
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         self.proofread_overview_ui(ui, &lexicon);
 
-        if !lexicon.load_warnings.is_empty() {
-            ui.add_space(6.0);
-            for warning in &lexicon.load_warnings {
-                theme::notice(
-                    ui,
-                    theme::Icon::TriangleAlert,
-                    theme::danger(),
-                    theme::danger_soft(),
-                    warning,
-                );
-            }
+        for warning in &lexicon.load_warnings {
+            theme::notice(
+                ui,
+                theme::Icon::TriangleAlert,
+                theme::danger(),
+                theme::danger_soft(),
+                warning,
+            );
         }
 
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         self.proofread_filters_ui(ui, &lexicon);
-        ui.add_space(8.0);
+        ui.add_space(4.0);
 
-        egui::ScrollArea::vertical()
-            .id_salt("proofread_page")
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                let available = ui.available_width();
-                let list_width = (available * 0.46).clamp(260.0, 520.0);
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(list_width, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.proofread_list_ui(ui, &lexicon),
-                    );
-                    ui.add_space(12.0);
-                    ui.vertical(|ui| self.proofread_editor_ui(ui, &lexicon));
-                });
-            });
+        // 两栏各自滚动，编辑长规则时不丢失左侧当前词条的位置。
+        let available = ui.available_width();
+        let height = ui.available_height();
+        let list_width = (available * 0.40).clamp(320.0, 560.0);
+        let editor_width = (available - list_width - 8.0).max(240.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(list_width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("proofread_list")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| self.proofread_list_ui(ui, &lexicon));
+                },
+            );
+            ui.add_space(8.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(editor_width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("proofread_editor")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| self.proofread_editor_ui(ui, &lexicon));
+                },
+            );
+        });
     }
 
-    /// 概况卡：四个数 + 两条需要动手的提醒。
-    ///
-    /// 这些数原先是标题下面一长串顿号连起来的小字，「启用多少、自己改过多少」
-    /// 混在一句话里读不出来；分成四格之后，改动过几条一眼就看得见。
+    /// 概况压成一行，让列表在首屏显示更多词条。
     fn proofread_overview_ui(&mut self, ui: &mut egui::Ui, lexicon: &proofread::Lexicon) {
         let enabled = lexicon.entries.iter().filter(|entry| entry.enabled).count();
         let custom = self.config.proofread.custom.len();
         let changed = self.config.proofread.overrides.len();
-        // 采纳率过低的条目要主动报出来。用户不会自己去逐条核对统计，
-        // 而一条天天被划掉的规则，下一步就是整个校对被关掉。
         let flagged = self.metrics.underperforming().len();
-        // 审校抽屉里的「不再提示」是个单向操作，点错了没处退。收回的入口放在
-        // 这里：忽略的是词表命中，本来就该跟词表管理在一处。
         let ignored = self.config.proofread.ignored.len();
 
-        theme::card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 20.0;
-                theme::metric(
-                    ui,
-                    &lexicon.entries.len().to_string(),
-                    "全部词条",
-                    theme::text(),
-                );
-                theme::divider_v(ui, 34.0);
-                theme::metric(ui, &enabled.to_string(), "启用中", theme::success())
-                    .on_hover_text("停用的条目仍留在表里，只是不参与校对");
-                theme::metric(ui, &custom.to_string(), "自建", theme::info())
-                    .on_hover_text("本单位自己加的条目，可以删");
-                theme::metric(ui, &changed.to_string(), "已改内置", theme::accent())
-                    .on_hover_text("改过的内置条目。可在编辑区恢复默认，但删不掉");
-            });
-            if flagged > 0 || ignored > 0 {
-                ui.add_space(8.0);
-                theme::hairline(ui);
-                ui.add_space(8.0);
-            }
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("全部 {}", lexicon.entries.len()));
+            ui.separator();
+            ui.label(format!("启用 {enabled}"));
+            ui.label(format!("自建 {custom}"));
+            ui.label(format!("已改内置 {changed}"));
             if flagged > 0 {
-                theme::notice(
-                    ui,
-                    theme::Icon::TriangleAlert,
-                    theme::warn(),
-                    theme::warn_soft(),
-                    format!("{flagged} 条建议常被忽略。在下面的列表里查看采纳率，考虑停用。"),
-                );
+                ui.colored_label(theme::warn(), format!("建议检查 {flagged} 条"));
             }
             if ignored > 0 {
-                if flagged > 0 {
-                    ui.add_space(6.0);
+                ui.label(format!("不再提示 {ignored} 条"));
+                if ui
+                    .add(theme::icon_text_button(theme::Icon::RotateCcw, "恢复提示"))
+                    .on_hover_text("清空「不再提示」名单，这些写法重新参与校对")
+                    .clicked()
+                {
+                    self.config.proofread.ignored.clear();
+                    self.persist();
                 }
-                ui.horizontal(|ui| {
-                    theme::caption(ui, &format!("已设为不再提示 {ignored} 条"));
-                    if ui
-                        .add(theme::icon_text_button(theme::Icon::RotateCcw, "恢复提示"))
-                        .on_hover_text("清空「不再提示」名单，这些写法重新参与校对")
-                        .clicked()
-                    {
-                        self.config.proofread.ignored.clear();
-                        self.persist();
-                    }
-                });
             }
         });
     }
@@ -259,7 +236,7 @@ impl GongwenApp {
         ui.horizontal_wrapped(|ui| {
             ui.add(theme::field(
                 &mut self.proofread_page.filter,
-                "搜索错误写法、建议写法或说明",
+                "搜索写法、编号或说明",
                 240.0,
             ));
 
@@ -379,11 +356,13 @@ impl GongwenApp {
             shown += 1;
 
             let selected = self.proofread_page.selected.as_deref() == Some(entry.id.as_str());
-            let frame = if selected {
-                theme::card().fill(theme::accent_soft())
-            } else {
-                theme::card()
-            };
+            let frame = theme::card()
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .fill(if selected {
+                    theme::accent_soft()
+                } else {
+                    theme::surface_sunk()
+                });
             frame.show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -391,89 +370,56 @@ impl GongwenApp {
                     if ui.checkbox(&mut enabled, "").changed() {
                         toggle = Some((entry.id.clone(), enabled));
                     }
-                    ui.label(
-                        egui::RichText::new(if entry.wrong.is_empty() {
+
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        let wrong = if entry.wrong.is_empty() {
                             "（未填写错误写法）"
                         } else {
                             entry.wrong.as_str()
-                        })
-                        .strong()
-                        .color(if entry.enabled {
+                        };
+                        let title = format!("{wrong} → {}", entry.suggestion);
+                        let label = egui::RichText::new(title).strong().color(if entry.enabled {
                             theme::text()
                         } else {
                             theme::text_muted()
-                        }),
-                    );
-                    theme::chip(
-                        ui,
-                        entry.level.label(),
-                        level_color(entry.level),
-                        theme::surface_sunk(),
-                    );
-                    if !entry.is_builtin() {
-                        theme::chip(ui, "自建", theme::success(), theme::surface_sunk());
-                    } else if self.config.proofread.override_for(&entry.id).is_some() {
-                        theme::chip(ui, "已改", theme::info(), theme::surface_sunk());
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(&entry.id);
-                    });
-                });
-                ui.horizontal(|ui| {
-                    ui.weak(format!("→ {}", entry.suggestion));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(&entry.group);
-                    });
-                });
-                // 采纳率：这一条到底在帮忙还是在添乱，只有这个数字说了算。
-                // 表态次数太少时只报次数不报比例——三次里忽略两次算不上证据。
-                let stat = self.metrics.get(&entry.id);
-                if stat.decisions() > 0 {
-                    ui.horizontal(|ui| {
-                        let flagged = stat.is_underperforming();
-                        let text = match stat.adoption() {
-                            Some(rate) if stat.decisions() >= crate::metrics::MIN_SAMPLES => {
-                                format!(
-                                    "采纳 {:.0}%（{} 次采纳 / {} 次忽略）",
-                                    rate * 100.0,
-                                    stat.accepted,
-                                    stat.ignored
-                                )
-                            }
-                            _ => format!(
-                                "{} 次采纳 / {} 次忽略（样本不足，暂不计采纳率）",
-                                stat.accepted, stat.ignored
-                            ),
-                        };
-                        ui.colored_label(
-                            if flagged {
-                                theme::warn()
-                            } else {
-                                theme::text_muted()
-                            },
-                            text,
-                        );
-                        if flagged {
-                            ui.label(
-                                egui::RichText::new("建议停用")
-                                    .color(theme::warn())
-                                    .strong(),
+                        });
+                        let stat = self.metrics.get(&entry.id);
+                        let detail = if stat.decisions() > 0 {
+                            format!(
+                                "{} · {} · {} 次采纳 / {} 次忽略",
+                                entry.group,
+                                entry.level.label(),
+                                stat.accepted,
+                                stat.ignored
                             )
-                            .on_hover_text("这条常被划掉。留着它只会让人习惯性忽略整个校对面板");
+                        } else {
+                            format!("{} · {}", entry.group, entry.level.label())
+                        };
+                        if ui
+                            .selectable_label(selected, label)
+                            .on_hover_text(&detail)
+                            .clicked()
+                        {
+                            select = Some(entry.id.clone());
                         }
-                        if stat.undone > 0 {
-                            ui.weak(format!("· 采纳后撤销 {} 次", stat.undone));
-                        }
+                        ui.horizontal(|ui| {
+                            ui.weak(&entry.id);
+                            ui.colored_label(level_color(entry.level), entry.level.label());
+                            if !entry.is_builtin() {
+                                ui.weak("自建");
+                            } else if self.config.proofread.override_for(&entry.id).is_some() {
+                                ui.weak("已改");
+                            }
+                            if stat.is_underperforming() {
+                                ui.colored_label(theme::warn(), "建议停用")
+                                    .on_hover_text("这条建议常被忽略，请检查是否需要停用");
+                            }
+                        });
                     });
-                }
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::Edit, "编辑"))
-                    .clicked()
-                {
-                    select = Some(entry.id.clone());
-                }
+                });
             });
-            ui.add_space(4.0);
+            ui.add_space(2.0);
         }
 
         if shown == 0 {
@@ -501,7 +447,8 @@ impl GongwenApp {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.heading(&id);
+                ui.heading(format!("{} → {}", entry.wrong, entry.suggestion));
+                ui.weak(&id);
                 if builtin {
                     theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
                 }
@@ -535,7 +482,7 @@ impl GongwenApp {
             }
         });
 
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         self.proofread_sample_ui(ui, entry);
     }
 
@@ -543,57 +490,63 @@ impl GongwenApp {
     /// 规则，那该新建而不是改内置。可改的是级别、建议写法、命中条件和说明。
     fn proofread_builtin_fields_ui(&mut self, ui: &mut egui::Ui, entry: &Entry) {
         let id = entry.id.clone();
-        ui.horizontal(|ui| {
-            ui.label("错误写法");
-            ui.weak(&entry.wrong);
-            ui.label("·");
-            ui.label("分组");
-            ui.weak(&entry.group);
-        });
-
         let default = proofread::builtin_entry(&id);
 
-        // 级别
-        ui.horizontal(|ui| {
-            ui.label("级别");
-            let mut level = entry.level;
-            egui::ComboBox::from_id_salt(("proofread_level_edit", &id))
-                .selected_text(level.label())
-                .show_ui(ui, |ui| {
-                    for (label, hint) in LEVELS {
-                        let value = match label {
-                            "必错" => Level::MustFix,
-                            "疑似" => Level::Suspect,
-                            _ => Level::Hint,
-                        };
-                        ui.selectable_value(&mut level, value, label)
-                            .on_hover_text(hint);
-                    }
-                });
-            if level != entry.level {
-                let same_as_default = default.is_some_and(|entry| entry.level == level);
-                let patch = self.config.proofread.override_mut(&id);
-                patch.level = (!same_as_default).then(|| level.label().to_string());
-                self.config.proofread.prune();
-            }
+        ui.columns(2, |columns| {
+            columns[0].horizontal(|ui| {
+                ui.label("错误写法");
+                ui.weak(&entry.wrong);
+            });
+            columns[1].horizontal(|ui| {
+                ui.label("分组");
+                ui.weak(&entry.group);
+            });
         });
 
-        // 建议写法
-        let mut suggestion = entry.suggestion.clone();
-        ui.horizontal(|ui| {
-            ui.label("建议写法");
-            if ui
-                .add(egui::TextEdit::singleline(&mut suggestion).desired_width(280.0))
-                .changed()
-            {
-                let same = default.is_some_and(|entry| entry.suggestion == suggestion);
-                let patch = self.config.proofread.override_mut(&id);
-                patch.suggestion = (!same).then(|| suggestion.clone());
-                self.config.proofread.prune();
-            }
+        ui.columns(2, |columns| {
+            columns[0].horizontal(|ui| {
+                ui.label("级别");
+                let mut level = entry.level;
+                egui::ComboBox::from_id_salt(("proofread_level_edit", &id))
+                    .selected_text(level.label())
+                    .show_ui(ui, |ui| {
+                        for (label, hint) in LEVELS {
+                            let value = match label {
+                                "必错" => Level::MustFix,
+                                "疑似" => Level::Suspect,
+                                _ => Level::Hint,
+                            };
+                            ui.selectable_value(&mut level, value, label)
+                                .on_hover_text(hint);
+                        }
+                    });
+                if level != entry.level {
+                    let same_as_default = default.is_some_and(|entry| entry.level == level);
+                    let patch = self.config.proofread.override_mut(&id);
+                    patch.level = (!same_as_default).then(|| level.label().to_string());
+                    self.config.proofread.prune();
+                }
+            });
+
+            columns[1].horizontal(|ui| {
+                ui.label("建议写法");
+                let mut suggestion = entry.suggestion.clone();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut suggestion)
+                            .desired_width(ui.available_width()),
+                    )
+                    .changed()
+                {
+                    let same = default.is_some_and(|entry| entry.suggestion == suggestion);
+                    let patch = self.config.proofread.override_mut(&id);
+                    patch.suggestion = (!same).then(|| suggestion.clone());
+                    self.config.proofread.prune();
+                }
+            });
         });
 
-        // 命中条件。`entry` 已经是合并过覆盖层的结果，它的原文就是当前生效值。
+        // 命中条件仍占整行，长正则和前后文词组需要足够的输入宽度。
         let current = entry.condition_text.clone();
         if let Some(next) = condition_editor_ui(ui, &id, &current) {
             let same = proofread::builtin_condition_text(&id).is_some_and(|text| text == next);
@@ -602,12 +555,11 @@ impl GongwenApp {
             self.config.proofread.prune();
         }
 
-        // 说明
         let mut note = entry.note.clone();
         ui.horizontal(|ui| {
             ui.label("说明");
             if ui
-                .add(egui::TextEdit::singleline(&mut note).desired_width(320.0))
+                .add(egui::TextEdit::singleline(&mut note).desired_width(ui.available_width()))
                 .changed()
             {
                 let same = default.is_some_and(|entry| entry.note == note);
@@ -637,39 +589,52 @@ impl GongwenApp {
         // 命中条件要单独取出来编辑，避免同时可变借用 rule 和 self。
         let current = self.config.proofread.custom[index].condition.clone();
         let rule = &mut self.config.proofread.custom[index];
-        ui.horizontal(|ui| {
-            ui.label("错误写法");
-            ui.add(
-                egui::TextEdit::singleline(&mut rule.wrong)
-                    .hint_text("要挑出来的写法")
-                    .desired_width(200.0),
-            );
+        ui.columns(2, |columns| {
+            columns[0].horizontal(|ui| {
+                ui.label("错误写法");
+                ui.add(
+                    egui::TextEdit::singleline(&mut rule.wrong)
+                        .hint_text("要挑出来的写法")
+                        .desired_width(ui.available_width()),
+                );
+            });
+            columns[1].horizontal(|ui| {
+                ui.label("建议写法");
+                ui.add(
+                    egui::TextEdit::singleline(&mut rule.suggestion)
+                        .desired_width(ui.available_width()),
+                );
+            });
         });
-        ui.horizontal(|ui| {
-            ui.label("建议写法");
-            ui.add(egui::TextEdit::singleline(&mut rule.suggestion).desired_width(280.0));
+        ui.columns(2, |columns| {
+            columns[0].horizontal(|ui| {
+                ui.label("级别");
+                egui::ComboBox::from_id_salt(("proofread_custom_level", id))
+                    .selected_text(rule.level.clone())
+                    .show_ui(ui, |ui| {
+                        for (label, hint) in LEVELS {
+                            ui.selectable_value(&mut rule.level, label.to_string(), label)
+                                .on_hover_text(hint);
+                        }
+                    });
+            });
+            columns[1].horizontal(|ui| {
+                ui.label("分组");
+                ui.add(
+                    egui::TextEdit::singleline(&mut rule.group).desired_width(ui.available_width()),
+                );
+            });
         });
-        ui.horizontal(|ui| {
-            ui.label("级别");
-            egui::ComboBox::from_id_salt(("proofread_custom_level", id))
-                .selected_text(rule.level.clone())
-                .show_ui(ui, |ui| {
-                    for (label, hint) in LEVELS {
-                        ui.selectable_value(&mut rule.level, label.to_string(), label)
-                            .on_hover_text(hint);
-                    }
-                });
-            ui.label("分组");
-            ui.add(egui::TextEdit::singleline(&mut rule.group).desired_width(120.0));
-        });
-        ui.horizontal(|ui| {
-            ui.label("说明");
-            ui.add(egui::TextEdit::singleline(&mut rule.note).desired_width(320.0));
-        });
-
         if let Some(next) = condition_editor_ui(ui, id, &current) {
             self.config.proofread.custom[index].condition = next;
         }
+        ui.horizontal(|ui| {
+            ui.label("说明");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.config.proofread.custom[index].note)
+                    .desired_width(ui.available_width()),
+            );
+        });
     }
 
     /// 规则试验区：粘一段话，立刻看这条规则命中在哪儿。
@@ -686,13 +651,12 @@ impl GongwenApp {
             ui.add(
                 egui::TextEdit::multiline(&mut self.proofread_page.sample)
                     .hint_text("在这里粘贴或输入一段公文正文")
-                    .desired_rows(3)
+                    .desired_rows(2)
                     .desired_width(f32::INFINITY),
             );
 
             let sample = self.proofread_page.sample.clone();
             if sample.trim().is_empty() {
-                ui.weak("——");
                 return;
             }
             // 只用当前这一条规则去扫，结果才对得上号。
@@ -757,7 +721,7 @@ fn condition_editor_ui(ui: &mut egui::Ui, id: &str, current: &str) -> Option<Str
                 .add(
                     egui::TextEdit::singleline(&mut rest)
                         .hint_text(hint)
-                        .desired_width(300.0),
+                        .desired_width(ui.available_width().min(300.0)),
                 )
                 .changed()
             {
