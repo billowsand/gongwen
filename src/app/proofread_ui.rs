@@ -44,18 +44,18 @@ pub(crate) struct ProofreadPageState {
     pub(crate) level: Option<Level>,
     /// 当前选中的条目编号。
     pub(crate) selected: Option<String>,
+    /// 新建或筛选后把列表带回顶部。
+    pub(crate) scroll_to_top: bool,
+    /// 切换词条时让编辑区回到顶部。
+    pub(crate) editor_scroll_to_top: bool,
+    /// 新建后聚焦错误写法输入框。
+    pub(crate) focus_new_rule: Option<String>,
     /// 试验区的文本，跨条目保留——试完一条接着试下一条不用重贴。
     pub(crate) sample: String,
 }
 
 impl GongwenApp {
     pub(crate) fn proofread_ui(&mut self, ui: &mut egui::Ui) {
-        // 每帧重算生效词表。141 条的合并是纯内存操作，比维护缓存失效简单可靠。
-        let lexicon = proofread::Lexicon::resolved(&self.config.proofread);
-        if self.proofread_page.selected.is_none() {
-            self.proofread_page.selected = lexicon.entries.first().map(|entry| entry.id.clone());
-        }
-
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.heading("校对词表");
@@ -85,7 +85,13 @@ impl GongwenApp {
                         enabled: true,
                         ..Default::default()
                     });
-                    self.proofread_page.selected = Some(id);
+                    self.proofread_page.selected = Some(id.clone());
+                    self.proofread_page.filter.clear();
+                    self.proofread_page.group.clear();
+                    self.proofread_page.level = None;
+                    self.proofread_page.scroll_to_top = true;
+                    self.proofread_page.editor_scroll_to_top = true;
+                    self.proofread_page.focus_new_rule = Some(id);
                 }
                 if ui
                     .add(theme::icon_text_button(theme::Icon::FileUp, "导入 Excel"))
@@ -104,6 +110,8 @@ impl GongwenApp {
             });
         });
 
+        // 按钮可能刚新建或导入词条，必须在操作后重建本帧的生效词表。
+        let lexicon = proofread::Lexicon::resolved(&self.config.proofread);
         ui.add_space(4.0);
         self.proofread_overview_ui(ui, &lexicon);
 
@@ -118,8 +126,36 @@ impl GongwenApp {
         }
 
         ui.add_space(4.0);
+        let previous_filters = (
+            self.proofread_page.filter.clone(),
+            self.proofread_page.group.clone(),
+            self.proofread_page.level,
+        );
         self.proofread_filters_ui(ui, &lexicon);
+        if previous_filters
+            != (
+                self.proofread_page.filter.clone(),
+                self.proofread_page.group.clone(),
+                self.proofread_page.level,
+            )
+        {
+            self.proofread_page.scroll_to_top = true;
+        }
         ui.add_space(4.0);
+
+        let visible_entries = proofread_visible_entries(&lexicon, &self.proofread_page);
+        if !visible_entries
+            .iter()
+            .any(|entry| self.proofread_page.selected.as_deref() == Some(entry.id.as_str()))
+        {
+            let next = visible_entries.first().map(|entry| entry.id.clone());
+            if self.proofread_page.selected != next {
+                self.proofread_page.selected = next;
+                self.proofread_page.scroll_to_top = true;
+                self.proofread_page.editor_scroll_to_top = true;
+            }
+        }
+        let scroll_to_top = std::mem::take(&mut self.proofread_page.scroll_to_top);
 
         // 两栏各自滚动，编辑长规则时不丢失左侧当前词条的位置。
         let available = ui.available_width();
@@ -131,11 +167,16 @@ impl GongwenApp {
                 egui::vec2(list_width, height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    egui::ScrollArea::vertical()
+                    let mut scroll = egui::ScrollArea::vertical()
                         .id_salt("proofread_list")
                         .max_width(list_width)
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| self.proofread_list_ui(ui, &lexicon, list_width));
+                        .auto_shrink([false; 2]);
+                    if scroll_to_top {
+                        scroll = scroll.vertical_scroll_offset(0.0);
+                    }
+                    scroll.show(ui, |ui| {
+                        self.proofread_list_ui(ui, &visible_entries, list_width)
+                    });
                 },
             );
             ui.add_space(8.0);
@@ -143,10 +184,15 @@ impl GongwenApp {
                 egui::vec2(editor_width, height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    egui::ScrollArea::vertical()
+                    let mut scroll = egui::ScrollArea::vertical()
                         .id_salt("proofread_editor")
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| self.proofread_editor_ui(ui, &lexicon));
+                        .auto_shrink([false; 2]);
+                    if std::mem::take(&mut self.proofread_page.editor_scroll_to_top) {
+                        scroll = scroll.vertical_scroll_offset(0.0);
+                    }
+                    scroll.show(ui, |ui| {
+                        self.proofread_editor_ui(ui, &lexicon, &visible_entries)
+                    });
                 },
             );
         });
@@ -275,6 +321,18 @@ impl GongwenApp {
                     }
                 });
 
+            if (!self.proofread_page.filter.is_empty()
+                || !self.proofread_page.group.is_empty()
+                || self.proofread_page.level.is_some())
+                && ui
+                    .add(theme::icon_text_button(theme::Icon::RotateCcw, "清除筛选"))
+                    .clicked()
+            {
+                self.proofread_page.filter.clear();
+                self.proofread_page.group.clear();
+                self.proofread_page.level = None;
+            }
+
             // 整组启停：套话虚词这类整片开关的需求，逐条点太折磨人。
             if !self.proofread_page.group.is_empty() {
                 let group = self.proofread_page.group.clone();
@@ -331,13 +389,9 @@ impl GongwenApp {
     fn proofread_list_ui(
         &mut self,
         ui: &mut egui::Ui,
-        lexicon: &proofread::Lexicon,
+        visible_entries: &[&Entry],
         list_width: f32,
     ) {
-        let filter = self.proofread_page.filter.trim().to_lowercase();
-        let group = self.proofread_page.group.clone();
-        let level = self.proofread_page.level;
-
         // 宽度只取自外层分栏，并预留滚动条和边距；不能由行内容反推宽度。
         let row_width = (list_width - 44.0).max(240.0);
         let show_group = list_width >= 430.0;
@@ -347,23 +401,7 @@ impl GongwenApp {
         let mut select: Option<String> = None;
         let mut shown = 0usize;
 
-        for entry in &lexicon.entries {
-            if !group.is_empty() && entry.group != group {
-                continue;
-            }
-            if level.is_some_and(|level| entry.level != level) {
-                continue;
-            }
-            if !filter.is_empty() {
-                let haystack = format!(
-                    "{} {} {} {}",
-                    entry.id, entry.wrong, entry.suggestion, entry.note
-                )
-                .to_lowercase();
-                if !haystack.contains(&filter) {
-                    continue;
-                }
-            }
+        for &entry in visible_entries {
             shown += 1;
 
             let selected = self.proofread_page.selected.as_deref() == Some(entry.id.as_str());
@@ -451,12 +489,22 @@ impl GongwenApp {
         }
         if let Some(id) = select {
             self.proofread_page.selected = Some(id);
+            self.proofread_page.editor_scroll_to_top = true;
         }
     }
 
-    fn proofread_editor_ui(&mut self, ui: &mut egui::Ui, lexicon: &proofread::Lexicon) {
+    fn proofread_editor_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        lexicon: &proofread::Lexicon,
+        visible_entries: &[&Entry],
+    ) {
         let Some(id) = self.proofread_page.selected.clone() else {
-            ui.weak("在左侧选一条词条进行编辑，或点右上角「新建词条」。");
+            ui.weak(if visible_entries.is_empty() {
+                "没有符合筛选条件的词条。请调整筛选，或新建词条。"
+            } else {
+                "在左侧选一条词条进行编辑，或点右上角「新建词条」。"
+            });
             return;
         };
         let Some(entry) = lexicon.entries.iter().find(|entry| entry.id == id) else {
@@ -464,11 +512,27 @@ impl GongwenApp {
             return;
         };
         let builtin = entry.is_builtin();
+        let next_after_delete = visible_entries
+            .iter()
+            .position(|item| item.id == id)
+            .and_then(|index| {
+                visible_entries.get(index + 1).or_else(|| {
+                    index
+                        .checked_sub(1)
+                        .and_then(|previous| visible_entries.get(previous))
+                })
+            })
+            .map(|entry| entry.id.clone());
+        let mut deleted = false;
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.heading(format!("{} → {}", entry.wrong, entry.suggestion));
+                ui.heading(if entry.wrong.is_empty() {
+                    "新建词条".to_string()
+                } else {
+                    format!("{} → {}", entry.wrong, entry.suggestion)
+                });
                 ui.weak(&id);
                 if builtin {
                     theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
@@ -490,19 +554,25 @@ impl GongwenApp {
                         .clicked()
                     {
                         self.config.proofread.custom.retain(|rule| rule.id != id);
-                        self.proofread_page.selected = None;
+                        self.proofread_page.selected = next_after_delete.clone();
+                        self.proofread_page.editor_scroll_to_top = true;
+                        deleted = true;
                     }
                 });
             });
-            ui.separator();
-
-            if builtin {
-                self.proofread_builtin_fields_ui(ui, entry);
-            } else {
-                self.proofread_custom_fields_ui(ui, &id);
+            if !deleted {
+                ui.separator();
+                if builtin {
+                    self.proofread_builtin_fields_ui(ui, entry);
+                } else {
+                    self.proofread_custom_fields_ui(ui, &id);
+                }
             }
         });
 
+        if deleted {
+            return;
+        }
         ui.add_space(4.0);
         self.proofread_sample_ui(ui, entry);
     }
@@ -609,15 +679,19 @@ impl GongwenApp {
 
         // 命中条件要单独取出来编辑，避免同时可变借用 rule 和 self。
         let current = self.config.proofread.custom[index].condition.clone();
+        let focus_new = self.proofread_page.focus_new_rule.take().as_deref() == Some(id);
         let rule = &mut self.config.proofread.custom[index];
         ui.columns(2, |columns| {
             columns[0].horizontal(|ui| {
                 ui.label("错误写法");
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut rule.wrong)
                         .hint_text("要挑出来的写法")
                         .desired_width(ui.available_width()),
                 );
+                if focus_new {
+                    response.request_focus();
+                }
             });
             columns[1].horizontal(|ui| {
                 ui.label("建议写法");
@@ -707,6 +781,38 @@ impl GongwenApp {
     }
 }
 
+/// 仅调整管理页的显示顺序：最近自建的词条在最上方，内置词条保持原顺序。
+fn proofread_visible_entries<'a>(
+    lexicon: &'a proofread::Lexicon,
+    page: &ProofreadPageState,
+) -> Vec<&'a Entry> {
+    let filter = page.filter.trim().to_lowercase();
+    let matches = |entry: &Entry| {
+        (page.group.is_empty() || entry.group == page.group)
+            && page.level.is_none_or(|level| entry.level == level)
+            && (filter.is_empty()
+                || format!(
+                    "{} {} {} {}",
+                    entry.id, entry.wrong, entry.suggestion, entry.note
+                )
+                .to_lowercase()
+                .contains(&filter))
+    };
+    let mut visible: Vec<&Entry> = lexicon
+        .entries
+        .iter()
+        .rev()
+        .filter(|entry| !entry.is_builtin() && matches(entry))
+        .collect();
+    visible.extend(
+        lexicon
+            .entries
+            .iter()
+            .filter(|entry| entry.is_builtin() && matches(entry)),
+    );
+    visible
+}
+
 /// 命中条件编辑器：下拉选形态 + 文本框填参数。返回 `Some` 表示这一帧被改过。
 ///
 /// 正则当场试编译，错了立刻红字——不能等到校对时才发现规则从来没生效过。
@@ -789,5 +895,30 @@ fn level_color(level: Level) -> egui::Color32 {
         Level::MustFix => theme::danger(),
         Level::Suspect => theme::warn(),
         Level::Hint => theme::text_muted(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ProofreadConfig;
+
+    #[test]
+    fn newest_custom_rule_is_first_in_management_list() {
+        let mut config = ProofreadConfig::default();
+        for id in ["USR-001", "USR-002"] {
+            config.custom.push(ProofreadRule {
+                id: id.into(),
+                level: "疑似".into(),
+                condition: "总是".into(),
+                ..Default::default()
+            });
+        }
+        let lexicon = proofread::Lexicon::resolved(&config);
+        let page = ProofreadPageState::default();
+        let visible = proofread_visible_entries(&lexicon, &page);
+        assert_eq!(visible[0].id, "USR-002");
+        assert_eq!(visible[1].id, "USR-001");
+        assert!(visible[2].is_builtin());
     }
 }
