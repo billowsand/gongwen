@@ -207,6 +207,18 @@ impl ElementMarks {
         &self.number
     }
 
+    /// 发文字号整行的带哨兵文本：代字〔年份〕序号 + `gap` + 号，三个部件各自标注。
+    /// 与 TeX 类文件的拼法一致（函稿 `gap` 是一个西文空格，红头呈批件紧挨）。
+    pub(crate) fn number_marked_line(&self, gap: &str) -> String {
+        let [code, year, serial] = &self.number;
+        format!(
+            "{}〔{}〕{}{gap}号",
+            code.marked(),
+            year.marked(),
+            serial.marked()
+        )
+    }
+
     /// 落款单位的每行部件。
     pub(crate) fn signing_units(&self) -> &[FieldMark] {
         &self.signing_units

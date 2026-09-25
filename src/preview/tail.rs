@@ -9,10 +9,11 @@ use crate::preview::layout::galley_visual_midline;
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, JOINT_COLUMN_MM, JOINT_DATE_GAP_MM, JOINT_ROW_GAP_MM, Metrics,
     RECORD_GAP_MM, RECORD_PHONE_COLUMN_EM, RECORD_PT, SIGNATURE_WIDTH_MM, TABLE_LINE_PT,
-    is_joint_mode_one, job, layout, line_block, line_galley, place, stacked, text_format,
+    is_joint_mode_one, job, layout, line_block, line_galley, marks, place, stacked, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
 use eframe::egui;
 use eframe::egui::{Align, FontId};
 use std::sync::Arc;
@@ -49,11 +50,18 @@ pub(crate) fn addressee_block(
     metrics: &Metrics,
     input: &DraftInput,
     display: &UnitDisplay,
+    elements: &ElementMarks,
 ) {
     let text = crate::export::element_display::addressee_display(input, display);
     if text.is_empty() {
         return;
     }
+    // 主送位变了整字段替换（旧值删除线、新值加框），冒号不进标注。
+    let text = if elements.recipient().changed() {
+        elements.recipient().marked()
+    } else {
+        text
+    };
     line_block(
         ui,
         metrics,
@@ -71,6 +79,7 @@ pub(crate) fn signature_block(
     metrics: &Metrics,
     input: &DraftInput,
     display: &UnitDisplay,
+    elements: &ElementMarks,
 ) {
     if matches!(
         input.kind,
@@ -80,7 +89,7 @@ pub(crate) fn signature_block(
     }
     ui.add_space(metrics.line * CLOSING_GAP_LINES as f32);
     if crate::models::is_joint_signature(input) {
-        joint_signature_block(ui, metrics, input, display);
+        joint_signature_block(ui, metrics, input, display, elements);
         return;
     }
     let date = signature_date(input);
@@ -98,12 +107,16 @@ pub(crate) fn signature_block(
                 .into_iter()
                 .filter(|unit| !unit.trim().is_empty())
                 .collect::<Vec<_>>();
-            if units.is_empty() {
+            let line_marks = elements.signing_units();
+            if units.is_empty() && !line_marks.iter().any(|mark| mark.changed()) {
                 return;
             }
+            // 要素标注：落款单位按行替换——旧值删除线、新值加框；旧版多出来的行
+            // 整行画删除线留在纸面。没变的行保持少于 5 字的分散对齐。
             let mut galleys = Vec::new();
+            let mut first = true;
             for (index, unit) in units.iter().enumerate() {
-                if index > 0 {
+                if !first {
                     galleys.push(line_galley(
                         ui,
                         metrics,
@@ -113,13 +126,42 @@ pub(crate) fn signature_block(
                         Align::Min,
                     ));
                 }
-                galleys.push(signature_unit_galley(
-                    ui,
-                    metrics,
-                    unit,
-                    font.clone(),
-                    width,
-                ));
+                let galley = match line_marks.get(index) {
+                    Some(mark) if mark.changed() => marks::marked_line_galley(
+                        ui,
+                        metrics,
+                        &mark.marked(),
+                        width,
+                        Align::Min,
+                        text_format(font.clone(), metrics.line),
+                    ),
+                    _ => signature_unit_galley(ui, metrics, unit, font.clone(), width),
+                };
+                galleys.push(galley);
+                first = false;
+            }
+            for mark in line_marks.iter().skip(units.len()) {
+                if mark.changed() {
+                    if !first {
+                        galleys.push(line_galley(
+                            ui,
+                            metrics,
+                            "",
+                            font.clone(),
+                            width,
+                            Align::Min,
+                        ));
+                    }
+                    galleys.push(marks::marked_line_galley(
+                        ui,
+                        metrics,
+                        &mark.marked(),
+                        width,
+                        Align::Min,
+                        text_format(font.clone(), metrics.line),
+                    ));
+                    first = false;
+                }
             }
             galleys.push(line_galley(
                 ui,
@@ -129,7 +171,18 @@ pub(crate) fn signature_block(
                 width,
                 Align::Min,
             ));
-            galleys.push(line_galley(ui, metrics, &date, font, width, Align::Min));
+            if elements.date().changed() {
+                galleys.push(marks::marked_line_galley(
+                    ui,
+                    metrics,
+                    &elements.date().marked_line(),
+                    width,
+                    Align::Min,
+                    text_format(font, metrics.line),
+                ));
+            } else {
+                galleys.push(line_galley(ui, metrics, &date, font, width, Align::Min));
+            }
             stacked(ui, metrics, &galleys, left, width, Align::Max);
         }
         _ => {
@@ -151,10 +204,36 @@ pub(crate) fn signature_block(
             let unit_line = signature_seal_mark(input, display)
                 .map(|mark| format!("{unit}{mark}"))
                 .unwrap_or_else(|| unit.clone());
-            let galleys = [
-                line_galley(ui, metrics, &unit_line, font.clone(), width, Align::Center),
-                line_galley(ui, metrics, &date, font, width, Align::Center),
-            ];
+            let unit_galley = match elements.signing_units().first() {
+                Some(mark) if mark.changed() => {
+                    // 标注版本：代章跟在新增值后面，不进标注。
+                    let text = signature_seal_mark(input, display)
+                        .map(|seal| format!("{}{seal}", mark.marked()))
+                        .unwrap_or_else(|| mark.marked());
+                    marks::marked_line_galley(
+                        ui,
+                        metrics,
+                        &text,
+                        width,
+                        Align::Center,
+                        text_format(font.clone(), metrics.line),
+                    )
+                }
+                _ => line_galley(ui, metrics, &unit_line, font.clone(), width, Align::Center),
+            };
+            let date_galley = if elements.date().changed() {
+                marks::marked_line_galley(
+                    ui,
+                    metrics,
+                    &elements.date().marked_line(),
+                    width,
+                    Align::Center,
+                    text_format(font, metrics.line),
+                )
+            } else {
+                line_galley(ui, metrics, &date, font, width, Align::Center)
+            };
+            let galleys = [unit_galley, date_galley];
             stacked(ui, metrics, &galleys, left, width, Align::Center);
         }
     }
@@ -194,6 +273,7 @@ pub(crate) fn joint_signature_block(
     metrics: &Metrics,
     input: &DraftInput,
     display: &UnitDisplay,
+    elements: &ElementMarks,
 ) {
     let external = input.uses_external_unit_names();
     let mut units = split_units(&input.profile.joint_issuing_units)
@@ -252,14 +332,26 @@ pub(crate) fn joint_signature_block(
         Some(col) => (left + column * col as f32, column),
         None => (left, table),
     };
-    let date = line_galley(
-        ui,
-        metrics,
-        &signature_date(input),
-        font,
-        closing_width,
-        Align::Center,
-    );
+    // 成文日期按部件标注；联合发文的落款单位（发文单位）本期不标（见交接说明）。
+    let date = if elements.date().changed() {
+        marks::marked_line_galley(
+            ui,
+            metrics,
+            &elements.date().marked_line(),
+            closing_width,
+            Align::Center,
+            text_format(font, metrics.line),
+        )
+    } else {
+        line_galley(
+            ui,
+            metrics,
+            &signature_date(input),
+            font,
+            closing_width,
+            Align::Center,
+        )
+    };
     stacked(
         ui,
         metrics,
@@ -277,6 +369,7 @@ pub(crate) fn footer_record(
     metrics: &Metrics,
     input: &DraftInput,
     display: &UnitDisplay,
+    elements: &ElementMarks,
 ) {
     if input.kind != TemplateKind::OfficialLetter {
         return;
@@ -331,15 +424,27 @@ pub(crate) fn footer_record(
     let thick = metrics.mm(0.6).max(1.0);
     let thin = metrics.mm(0.3).max(1.0);
 
-    // 抄送行：三字符悬挂缩进，共印份数固定在行末。
-    let head_galley = line_galley(
-        ui,
-        metrics,
-        &head,
-        font.clone(),
-        metrics.content,
-        Align::LEFT,
-    );
+    // 抄送行：三字符悬挂缩进，共印份数固定在行末。抄送变了就把值画成
+    // 旧值删除线、新值加框（「抄送：」标签不进标注）。
+    let head_galley = if elements.copies_to().changed() {
+        marks::marked_line_galley(
+            ui,
+            metrics,
+            &format!("抄送：{}", elements.copies_to().marked()),
+            metrics.content,
+            Align::LEFT,
+            text_format(font.clone(), metrics.line),
+        )
+    } else {
+        line_galley(
+            ui,
+            metrics,
+            &head,
+            font.clone(),
+            metrics.content,
+            Align::LEFT,
+        )
+    };
     let copies_galley = line_galley(
         ui,
         metrics,
@@ -410,11 +515,9 @@ pub(crate) fn footer_record(
         // 这里按字形真实框取中，让每行字坐在两条线正中。
         let centered =
             |galley: &egui::Galley, height: f32| height / 2.0 - galley_visual_midline(galley);
-        painter.galley(
-            egui::pos2(rect.left(), y + centered(&head_galley, head_height)),
-            head_galley.clone(),
-            theme::paper::ink(),
-        );
+        let head_pos = egui::pos2(rect.left(), y + centered(&head_galley, head_height));
+        painter.galley(head_pos, head_galley.clone(), theme::paper::ink());
+        marks::paint_galley_marks(painter, metrics, head_pos, &head_galley);
         painter.galley(
             egui::pos2(rect.right(), y + centered(&copies_galley, head_height)),
             copies_galley.clone(),

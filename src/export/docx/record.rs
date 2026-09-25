@@ -5,10 +5,11 @@
 
 use crate::export::docx::{
     FOOTER_SIZE, RECORD_OTHER_COLUMN_TWIPS, RECORD_PHONE_COLUMN_TWIPS, TABLE_CONTENT_WIDTH_TWIPS,
-    chinese_fonts, docx_name, is_joint_mode_one, record_run,
+    chinese_fonts, docx_name, is_joint_mode_one, marked_runs, record_run,
 };
 use crate::models::{DraftInput, split_units};
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
 use docx_rs::*;
 
 pub(crate) fn automatic_print_copies(input: &DraftInput) -> usize {
@@ -24,7 +25,12 @@ pub(crate) fn automatic_print_copies(input: &DraftInput) -> usize {
 
 /// 规格 §3.2：版记是一个带横线的表格——上、下横线粗（1pt），行间横线细（0.5pt），
 /// 上下正好是中间的两倍宽。首行抄送跨三列并右对齐印数，其后每行是“承办单位/联系人/联系电话”。
-pub(crate) fn add_footer_record(doc: Docx, input: &DraftInput, display: &UnitDisplay) -> Docx {
+pub(crate) fn add_footer_record(
+    doc: Docx,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    elements: &ElementMarks,
+) -> Docx {
     let grid = vec![
         RECORD_OTHER_COLUMN_TWIPS,
         RECORD_OTHER_COLUMN_TWIPS,
@@ -41,10 +47,21 @@ pub(crate) fn add_footer_record(doc: Docx, input: &DraftInput, display: &UnitDis
             .pos(TABLE_CONTENT_WIDTH_TWIPS),
     );
     if !copies_text.is_empty() {
-        // “抄送：”占 3 字宽，回行时正文与首行的单位名称对齐。
-        copies_paragraph = copies_paragraph
-            .indent(Some(840), Some(SpecialIndentType::Hanging(840)), None, None)
-            .add_run(record_run(&format!("抄送：{copies_text}")));
+        // 抄送变了：旧值删除线、新值加框，「抄送：」标签不进标注；没变原样单 run。
+        copies_paragraph =
+            copies_paragraph.indent(Some(840), Some(SpecialIndentType::Hanging(840)), None, None);
+        match elements.copies_to().change() {
+            Some(_) => {
+                copies_paragraph = copies_paragraph.add_run(record_run("抄送："));
+                for run in marked_runs(&elements.copies_to().marked(), record_run) {
+                    copies_paragraph = copies_paragraph.add_run(run);
+                }
+            }
+            None => {
+                copies_paragraph =
+                    copies_paragraph.add_run(record_run(&format!("抄送：{copies_text}")));
+            }
+        }
     }
     let copies_paragraph = copies_paragraph
         .keep_next(true)

@@ -18,6 +18,7 @@ use crate::preview::{
 };
 use crate::theme;
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
 use eframe::egui;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::{Align, Color32, Stroke};
@@ -615,6 +616,7 @@ pub(crate) fn red_build_print_layout(
     attachment_names: &[String],
     numbering: &NumberingConfig,
     markdown: &str,
+    elements: &ElementMarks,
 ) -> (RedPrintLayout, Vec<[String; 3]>) {
     let rows = red_responsible_rows(input, display);
     // TeX 承办区 = 0.4mm 红线 + 1mm 间距 + 每条固定 28pt 基线。
@@ -644,10 +646,16 @@ pub(crate) fn red_build_print_layout(
     state.cursor_y += metrics.line;
     let leaders = crate::export::element_display::addressee_display(input, display);
     if !leaders.is_empty() {
+        // 呈报领导（主送位）变了整字段替换，冒号不进标注。
+        let leaders_text = if elements.recipient().changed() {
+            format!("{}：", elements.recipient().marked())
+        } else {
+            format!("{leaders}：")
+        };
         let fragment = red_fixed_fragment(
             ui,
             metrics,
-            &format!("{leaders}："),
+            &leaders_text,
             theme::FONT_KAITI,
             BODY_PT,
             narrow,
@@ -854,7 +862,22 @@ pub(crate) fn red_build_print_layout(
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
-    let signature_height = metrics.line * (signature_units.len().max(1) * 2 + 1) as f32;
+    // 落款单位按行标注：变了的行整行删旧插新，旧版多出来的行整行画删除线。
+    let line_marks = elements.signing_units();
+    let mut signature_lines: Vec<String> = signature_units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| match line_marks.get(index) {
+            Some(mark) if mark.changed() => mark.marked(),
+            _ => unit.clone(),
+        })
+        .collect();
+    for mark in line_marks.iter().skip(signature_units.len()) {
+        if mark.changed() {
+            signature_lines.push(mark.marked());
+        }
+    }
+    let signature_height = metrics.line * (signature_lines.len().max(1) * 2 + 1) as f32;
 
     // 呈批件落款不得在首页。正文已经续页时优先空 3 行；若仅因这 3 行放不下，
     // 依次缩到 2 行、1 行，避免无谓制造“此页无正文”页。
@@ -872,7 +895,7 @@ pub(crate) fn red_build_print_layout(
         red_start_no_body_closing_page(ui, metrics, &mut state, left);
     }
     let signature_right = left + metrics.mm(156.0 - crate::export::SIGNATURE_ROOM_MM);
-    for (index, unit) in signature_units.iter().enumerate() {
+    for (index, unit) in signature_lines.iter().enumerate() {
         if index > 0 {
             state.cursor_y += metrics.line;
         }
@@ -892,10 +915,15 @@ pub(crate) fn red_build_print_layout(
         state.push(fragment);
     }
     state.cursor_y += metrics.line;
+    let date_text = if elements.date().changed() {
+        elements.date().marked_line()
+    } else {
+        signature_date(input)
+    };
     let date = red_fixed_fragment(
         ui,
         metrics,
-        &signature_date(input),
+        &date_text,
         theme::FONT_FANGSONG,
         BODY_PT,
         metrics.mm(116.0),
@@ -922,6 +950,23 @@ pub(crate) fn red_overlay_text(
     layout(ui, single_line(text, format))
 }
 
+/// 同 [`red_overlay_text`]，但认花脸稿哨兵：带标注的要素（密级、文号）就地画
+/// 删除线与新增框；绘制后要调 [`marks::paint_galley_marks`]。
+pub(crate) fn red_overlay_marked_text(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    family: &str,
+    size: f32,
+    color: Color32,
+) -> Arc<egui::Galley> {
+    let mut format = text_format(metrics.font(family, size), metrics.line);
+    format.color = color;
+    let mut job = single_line("", format.clone());
+    marks::append_marked_text(&mut job, metrics, text, format);
+    layout(ui, job)
+}
+
 /// 覆盖层元素的**基线**在自己 galley 里的高度。
 ///
 /// 密级、发文机关、文号、批示在类文件里都是 `\raisebox{-Xmm}` 摆的，量的是基线；
@@ -941,6 +986,7 @@ pub(crate) fn paint_red_approval_overlay(
     input: &DraftInput,
     display: &UnitDisplay,
     rows: &[[String; 3]],
+    elements: &ElementMarks,
 ) {
     let painter = ui.painter();
     let at = |x: f32, y: f32| page.min + egui::vec2(metrics.mm(x), metrics.mm(y));
@@ -951,20 +997,37 @@ pub(crate) fn paint_red_approval_overlay(
     let record_top = text_bottom - record_height;
 
     if let Some(security) = crate::export::element_display::security_display(input) {
-        let galley = red_overlay_text(
-            ui,
-            metrics,
-            &security,
-            theme::FONT_HEITI,
-            BODY_PT,
-            theme::paper::ink(),
-        );
+        let security_changed = elements.security().changed();
+        let security_text = if security_changed {
+            elements.security().marked()
+        } else {
+            security
+        };
+        let galley = if security_changed {
+            red_overlay_marked_text(
+                ui,
+                metrics,
+                &security_text,
+                theme::FONT_HEITI,
+                BODY_PT,
+                theme::paper::ink(),
+            )
+        } else {
+            red_overlay_text(
+                ui,
+                metrics,
+                &security_text,
+                theme::FONT_HEITI,
+                BODY_PT,
+                theme::paper::ink(),
+            )
+        };
         let baseline = overlay_baseline(&galley);
-        painter.galley(
-            at(text_left, text_top + 10.0) - egui::vec2(0.0, baseline),
-            galley,
-            theme::paper::ink(),
-        );
+        let pos = at(text_left, text_top + 10.0) - egui::vec2(0.0, baseline);
+        painter.galley(pos, galley.clone(), theme::paper::ink());
+        if security_changed {
+            marks::paint_galley_marks(painter, metrics, pos, &galley);
+        }
     }
 
     let unit = header_unit(input, display);
@@ -986,21 +1049,40 @@ pub(crate) fn paint_red_approval_overlay(
         painter.galley(center - offset, galley, theme::paper::red());
     }
 
-    let number = document_number(input);
-    let number_galley = red_overlay_text(
-        ui,
-        metrics,
-        &number,
-        theme::FONT_FANGSONG,
-        BODY_PT,
-        theme::paper::ink(),
-    );
+    let number_changed = elements.number().iter().any(|part| part.changed());
+    let number = if number_changed {
+        elements.number_marked_line(" ")
+    } else {
+        document_number(input)
+    };
+    let number_galley = if number_changed {
+        red_overlay_marked_text(
+            ui,
+            metrics,
+            &number,
+            theme::FONT_FANGSONG,
+            BODY_PT,
+            theme::paper::ink(),
+        )
+    } else {
+        red_overlay_text(
+            ui,
+            metrics,
+            &number,
+            theme::FONT_FANGSONG,
+            BODY_PT,
+            theme::paper::ink(),
+        )
+    };
     let number_x = at(text_left + 78.0, text_top + 43.0)
         - egui::vec2(
             number_galley.size().x / 2.0,
             overlay_baseline(&number_galley),
         );
-    painter.galley(number_x, number_galley, theme::paper::ink());
+    painter.galley(number_x, number_galley.clone(), theme::paper::ink());
+    if number_changed {
+        marks::paint_galley_marks(painter, metrics, number_x, &number_galley);
+    }
 
     let red = Stroke::new(metrics.mm(0.4).max(1.0), theme::paper::red());
     painter.line_segment(
@@ -1103,6 +1185,7 @@ pub(crate) fn paint_red_print_pages(
     anchor: Option<&Range<usize>>,
     scroll_to_anchor: &mut bool,
     clicked: &mut Option<Range<usize>>,
+    elements: &ElementMarks,
 ) {
     for (page_index, page_layout) in layout_state.pages.iter().enumerate() {
         if page_index > 0 {
@@ -1125,7 +1208,7 @@ pub(crate) fn paint_red_print_pages(
                 egui::StrokeKind::Inside,
             );
             if page_index == 0 {
-                paint_red_approval_overlay(ui, metrics, page, input, display, rows);
+                paint_red_approval_overlay(ui, metrics, page, input, display, rows, elements);
             } else {
                 let page_number = red_overlay_text(
                     ui,
@@ -1413,6 +1496,7 @@ pub(crate) fn red_approval_print_preview(
     clicked: &mut Option<Range<usize>>,
     numbering: &NumberingConfig,
     markdown: &str,
+    elements: &ElementMarks,
 ) {
     let (layout_state, rows) = red_build_print_layout(
         ui,
@@ -1424,6 +1508,7 @@ pub(crate) fn red_approval_print_preview(
         attachment_names,
         numbering,
         markdown,
+        elements,
     );
     paint_red_print_pages(
         ui,
@@ -1435,6 +1520,7 @@ pub(crate) fn red_approval_print_preview(
         anchor,
         scroll_to_anchor,
         clicked,
+        elements,
     );
 
     // 附件仍沿用现有的逐份分页渲染；正文和附件概要已经由上面的打印分页器处理。

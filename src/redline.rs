@@ -119,13 +119,29 @@ pub fn export_files(
             export::write_docx_research(&path, input, markdown, numbering)?;
             visual_diff::redline_research_docx(&path)?;
         } else {
-            export::write_docx_with_numbering(&path, input, markdown, display, fonts, numbering)?;
+            export::write_docx_with_numbering(
+                &path,
+                input,
+                markdown,
+                display,
+                fonts,
+                numbering,
+                &doc.elements,
+            )?;
         }
         files.push(path);
     }
     if formats.pdf {
         let tex = dir.join(format!("{stem}.tex"));
-        export::write_tex_for_kind(&tex, input, markdown, display, fonts, numbering)?;
+        export::write_tex_for_kind(
+            &tex,
+            input,
+            markdown,
+            display,
+            fonts,
+            numbering,
+            &doc.elements,
+        )?;
         files.push(tex.clone());
         if input.kind.is_research() {
             // mdx 转换出的分章 TeX 也要换宏、主文件注入导言区定义。
@@ -827,6 +843,7 @@ mod research_tests {
             &UnitDisplay::new(&[]),
             &FontConfig::default(),
             &crate::models::NumberingConfig::default(),
+            &doc.elements,
         )
         .expect("研究报告花脸稿 TeX 应生成成功");
         crate::visual_diff::redline_research_tex_files(dir.path()).expect("换宏");

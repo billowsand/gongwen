@@ -6,7 +6,7 @@
 use crate::export::docx::{
     BoldFont, CLOSING_GAP_TWIPS, JOINT_SIGNATURE_SEAL_GAP_TWIPS, PREVIEW_PLACEHOLDER,
     TABLE_CONTENT_WIDTH_TWIPS, body_run, body_runs, joint_closing_paragraph,
-    joint_signature_cell_paragraph, spread_runs,
+    joint_signature_cell_paragraph, marked_runs, spread_runs,
 };
 use crate::export::element_display::{
     date_display_line, date_display_parts, is_preview_version, number_display_parts,
@@ -14,6 +14,7 @@ use crate::export::element_display::{
 };
 use crate::models::{DraftInput, JointIssuanceMode, TemplateKind, split_units};
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
 use docx_rs::*;
 
 /// 发文字号：代字〔年〕序号 + `gap` + 号。
@@ -41,6 +42,31 @@ pub(crate) fn official_signature_date(input: &DraftInput) -> String {
         return date_display_line(input);
     }
     input.date.trim().to_string()
+}
+
+/// 发文字号的 run 序列：代字 / 年份 / 序号任一部件变了就整部件删旧插新
+/// （TeX 里文号是三个命令、中间夹类里写死的〔〕号，与成文日期同一规则按部件标）；
+/// 没变走原生拼法（预览版序号留白、序号为空不出这一行）。
+pub(crate) fn number_runs(
+    input: &DraftInput,
+    gap: &str,
+    elements: &ElementMarks,
+) -> Option<Vec<Run>> {
+    if elements.number().iter().any(|part| part.changed()) {
+        return Some(marked_runs(&elements.number_marked_line(gap), |text| {
+            body_run(text)
+        }));
+    }
+    official_document_number(input, gap).map(|value| vec![body_run(value)])
+}
+
+/// 成文日期的 run 序列：年 / 月 / 日按部件删旧插新，没变走原生日期文本。
+pub(crate) fn signature_date_runs(input: &DraftInput, elements: &ElementMarks) -> Vec<Run> {
+    if elements.date().changed() {
+        marked_runs(&elements.date().marked_line(), |text| body_run(text))
+    } else {
+        vec![body_run(official_signature_date(input))]
+    }
 }
 
 /// 附件概要：正文结束后、落款之前，与正文之间空两行、首行缩进两个汉字，
@@ -116,25 +142,19 @@ pub(crate) fn add_white_paper_signature(
     input: &DraftInput,
     display: &UnitDisplay,
     signing_room_twips: usize,
+    elements: &ElementMarks,
 ) -> Docx {
     let units = signing_unit_display(input, display)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
-    if units.is_empty() {
+    let marks = elements.signing_units();
+    if units.is_empty() && !marks.iter().any(|mark| mark.changed()) {
         return doc;
     }
-    let mut doc = doc;
-    for (index, unit) in units.iter().enumerate() {
-        if index > 0 {
-            doc = doc.add_paragraph(
-                Paragraph::new().add_run(body_run("")).line_spacing(
-                    LineSpacing::new()
-                        .line(super::BODY_LINE_TWIPS as i32)
-                        .line_rule(LineSpacingType::Exact),
-                ),
-            );
-        }
+    // 要素标注：落款单位按行替换——旧值删除线、新值加框，整行删旧插新；旧版
+    // 多出来的行整行画删除线留在纸面。没变的行走原生分散对齐（少于 5 字）。
+    let line_paragraph = |runs: Vec<Run>, first: bool| {
         let mut paragraph = Paragraph::new()
             .align(AlignmentType::Right)
             .keep_next(true)
@@ -142,31 +162,59 @@ pub(crate) fn add_white_paper_signature(
             .indent(Some(0), None, Some(signing_room_twips as i32), None)
             .line_spacing(
                 LineSpacing::new()
-                    .before(if index == 0 { CLOSING_GAP_TWIPS } else { 0 })
+                    .before(if first { CLOSING_GAP_TWIPS } else { 0 })
                     .line(super::BODY_LINE_TWIPS as i32)
                     .line_rule(LineSpacingType::Exact),
             );
-        for run in spread_runs(unit) {
+        for run in runs {
             paragraph = paragraph.add_run(run);
         }
-        doc = doc.add_paragraph(paragraph);
-    }
-    // 最后一个单位与成文日期之间固定空一行（单位只有一个时同样空行），
-    // 与 LaTeX 的 \vspace{\baselineskip} 和预览的空行保持一致。
-    doc = doc.add_paragraph(
+        paragraph
+    };
+    let blank_line = || {
         Paragraph::new().add_run(body_run("")).line_spacing(
             LineSpacing::new()
                 .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
-        ),
+        )
+    };
+    let mut doc = doc;
+    let mut first = true;
+    for (index, unit) in units.iter().enumerate() {
+        if !first {
+            doc = doc.add_paragraph(blank_line());
+        }
+        let runs = match marks.get(index) {
+            Some(mark) if mark.changed() => marked_runs(&mark.marked(), |text| body_run(text)),
+            _ => spread_runs(unit),
+        };
+        doc = doc.add_paragraph(line_paragraph(runs, first));
+        first = false;
+    }
+    for mark in marks.iter().skip(units.len()) {
+        if mark.changed() {
+            if !first {
+                doc = doc.add_paragraph(blank_line());
+            }
+            doc = doc.add_paragraph(line_paragraph(
+                marked_runs(&mark.marked(), |text| body_run(text)),
+                first,
+            ));
+            first = false;
+        }
+    }
+    // 最后一个单位与成文日期之间固定空一行（单位只有一个时同样空行），
+    // 与 LaTeX 的 \vspace{\baselineskip} 和预览的空行保持一致。
+    doc = doc.add_paragraph(blank_line());
+    let date = Paragraph::new().line_spacing(
+        LineSpacing::new()
+            .line(super::BODY_LINE_TWIPS as i32)
+            .line_rule(LineSpacingType::Exact),
     );
-    let date = Paragraph::new()
-        .add_run(body_run(official_signature_date(input)))
-        .line_spacing(
-            LineSpacing::new()
-                .line(super::BODY_LINE_TWIPS as i32)
-                .line_rule(LineSpacingType::Exact),
-        );
+    let mut date = date;
+    for run in signature_date_runs(input, elements) {
+        date = date.add_run(run);
+    }
     let date = if input.kind == TemplateKind::WhitePaper || signing_room_twips == 0 {
         date.align(AlignmentType::Right).indent(
             Some(0),
@@ -185,7 +233,12 @@ pub(crate) fn add_white_paper_signature(
     doc.add_paragraph(date)
 }
 
-pub(crate) fn add_joint_signature(doc: Docx, input: &DraftInput, display: &UnitDisplay) -> Docx {
+pub(crate) fn add_joint_signature(
+    doc: Docx,
+    input: &DraftInput,
+    display: &UnitDisplay,
+    elements: &ElementMarks,
+) -> Docx {
     let units = split_units(&input.profile.joint_issuing_units);
     if units.is_empty() {
         return doc;
@@ -241,7 +294,7 @@ pub(crate) fn add_joint_signature(doc: Docx, input: &DraftInput, display: &UnitD
         })
         .collect();
     // 日期压在主发文单位所在列下方，而不是整块居中；主单位跨列时整行居中。
-    rows.push(joint_closing_row(input));
+    rows.push(joint_closing_row(input, elements));
     doc.add_table(
         Table::without_borders(rows)
             .set_grid(vec![4_422, 4_422])
@@ -268,18 +321,18 @@ pub(crate) fn joint_unit_name(
 
 /// 联合发文落款的收尾行：把成文日期放进主发文单位所在列的单元格，
 /// 让日期压在主单位下方而不是整块居中；主单位跨两列时整行居中。
-pub(crate) fn joint_closing_row(input: &DraftInput) -> TableRow {
-    let date = official_signature_date(input);
+pub(crate) fn joint_closing_row(input: &DraftInput, elements: &ElementMarks) -> TableRow {
+    let date_runs = signature_date_runs(input, elements);
     let main_cell = TableCell::new()
         .width(4_422, WidthType::Dxa)
-        .add_paragraph(joint_closing_paragraph(&date, 360));
+        .add_paragraph(joint_closing_paragraph(date_runs, 360));
     match crate::export::joint_main_column(input) {
         Some(col) => {
             let mut cells: Vec<TableCell> = (0..2)
                 .map(|_| {
                     TableCell::new()
                         .width(4_422, WidthType::Dxa)
-                        .add_paragraph(joint_closing_paragraph("", 0))
+                        .add_paragraph(joint_closing_paragraph(vec![body_run("")], 0))
                 })
                 .collect();
             cells[col] = main_cell;

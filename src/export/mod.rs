@@ -186,11 +186,12 @@ pub(crate) fn write_tex_for_kind(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
     if input.kind.is_research() {
         research::write_tex(path, input, markdown, numbering)
     } else {
-        latex::write_tex_with_numbering(path, input, markdown, display, fonts, numbering)
+        latex::write_tex_with_numbering(path, input, markdown, display, fonts, numbering, elements)
     }
 }
 
@@ -313,13 +314,29 @@ pub fn export_all_with_numbering(
         if input.kind.is_research() {
             research::write_docx(&path, input, markdown, numbering)?;
         } else {
-            docx::write_docx_with_numbering(&path, input, markdown, display, fonts, numbering)?;
+            docx::write_docx_with_numbering(
+                &path,
+                input,
+                markdown,
+                display,
+                fonts,
+                numbering,
+                &crate::visual_diff::ElementMarks::default(),
+            )?;
         }
         files.push(path);
     }
     if selection.tex {
         let path = document_dir.join(format!("{export_stem}.tex"));
-        write_tex_for_kind(&path, input, markdown, display, fonts, numbering)?;
+        write_tex_for_kind(
+            &path,
+            input,
+            markdown,
+            display,
+            fonts,
+            numbering,
+            &crate::visual_diff::ElementMarks::default(),
+        )?;
         files.push(path);
     }
     Ok(files)

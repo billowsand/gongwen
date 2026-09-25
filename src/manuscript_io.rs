@@ -447,6 +447,7 @@ fn compile_record_pdf(
             display,
             fonts,
             numbering,
+            &crate::visual_diff::ElementMarks::default(),
         )?;
         let pdf_path = if record.snapshot.kind.is_research() {
             crate::texcompile::compile_research_pdf(&tex_path)?.pdf

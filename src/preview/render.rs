@@ -1,4 +1,4 @@
-//! 正文渲染：分页入口 official_preview、正文各块与图片。
+﻿//! 正文渲染：分页入口 official_preview、正文各块与图片。
 //!
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::render`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
@@ -20,6 +20,7 @@ use crate::preview::{
 };
 use crate::theme;
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
 use eframe::egui;
 use eframe::egui::text::LayoutJob;
 use eframe::egui::{Align, Stroke};
@@ -217,6 +218,7 @@ pub(crate) fn official_preview(
     mut scroll_to_anchor: bool,
     numbering: &NumberingConfig,
     line_numbers: bool,
+    elements: &ElementMarks,
 ) -> PreviewOutput {
     super::layout::clear_hovered(ui.ctx());
     // 研究报告不是公文：版心、字号、标题层级和封面全都另一套，没有红头、主送、
@@ -312,6 +314,7 @@ pub(crate) fn official_preview(
             &mut clicked,
             numbering,
             markdown,
+            elements,
         );
         // 行号每帧都要画，不能写成 `clicked.or_else(…)`：那样点中正文的那一帧
         // 会连带把页边整列号码漏掉，看上去就是闪一下。
@@ -322,7 +325,7 @@ pub(crate) fn official_preview(
         };
     }
     sheet(ui, &metrics, |ui| {
-        header_block(ui, &metrics, input, display);
+        header_block(ui, &metrics, input, display, elements);
         if !title.is_empty() {
             clickable(
                 ui,
@@ -345,7 +348,7 @@ pub(crate) fn official_preview(
         }
         // 类里标题与主送（或正文）之间固定空一行。
         ui.add_space(metrics.line);
-        addressee_block(ui, &metrics, input, display);
+        addressee_block(ui, &metrics, input, display, elements);
 
         body_blocks(
             ui,
@@ -377,9 +380,9 @@ pub(crate) fn official_preview(
                 body_block(ui, &metrics, &label, true);
             }
         }
-        signature_block(ui, &metrics, input, display);
+        signature_block(ui, &metrics, input, display, elements);
         if record_on_body {
-            footer_record(ui, &metrics, input, display);
+            footer_record(ui, &metrics, input, display, elements);
         }
     });
 
@@ -442,7 +445,7 @@ pub(crate) fn official_preview(
                 );
             }
             if sheet_index == last_attachment {
-                footer_record(ui, &metrics, input, display);
+                footer_record(ui, &metrics, input, display, elements);
             }
         });
     }

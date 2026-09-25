@@ -53,7 +53,7 @@ pub(crate) use runs::{
 };
 pub(crate) use signature::{
     add_attachment_summary, add_joint_signature, add_white_paper_signature, is_joint_mode_one,
-    main_issuing_unit, official_document_number, official_signature_date,
+    main_issuing_unit, number_runs, signature_date_runs,
 };
 
 const BODY_SIZE: usize = 32; // 16 pt，OOXML 使用半磅
@@ -147,6 +147,7 @@ pub fn write_docx(
         display,
         &FontConfig::default(),
         &NumberingConfig::default(),
+        &crate::visual_diff::ElementMarks::default(),
     )
 }
 
@@ -158,6 +159,7 @@ pub fn write_docx_with_numbering(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
     if !input.kind.uses_official_docx() {
         bail!("研究报告的 Word 由 mdx research 转换器生成，不走公文 Word 排版");
@@ -166,7 +168,7 @@ pub fn write_docx_with_numbering(
     // Some 换用专用粗体字面。
     let bold = fonts.bold_family_docx();
     if input.kind == TemplateKind::MeetingAgenda {
-        return write_meeting_agenda_docx(path, input, markdown, fonts, numbering);
+        return write_meeting_agenda_docx(path, input, markdown, fonts, numbering, elements);
     }
 
     let blocks = parse_markdown_with_numbering(markdown, numbering);
@@ -223,8 +225,10 @@ pub fn write_docx_with_numbering(
                             .size(BODY_SIZE),
                     )
                     .add_run(body_run("").add_tab());
-                if let Some(value) = official_document_number(input, " ") {
-                    number = number.add_run(body_run(value));
+                if let Some(value_runs) = number_runs(input, " ", elements) {
+                    for run in value_runs {
+                        number = number.add_run(run);
+                    }
                 }
                 doc = doc.add_paragraph(
                     number
@@ -246,14 +250,16 @@ pub fn write_docx_with_numbering(
                 );
             }
             if !input.profile.security_level.trim().is_empty() {
-                doc = doc.add_paragraph(letter_security_paragraph(input).keep_next(true));
+                doc = doc.add_paragraph(
+                    letter_security_paragraph(input, elements.security()).keep_next(true),
+                );
             }
         }
         TemplateKind::WhitePaper | TemplateKind::PlainDocument => {
             let has_security = !input.profile.security_level.trim().is_empty();
             if has_security {
                 doc = doc.add_paragraph(
-                    letter_security_paragraph(input)
+                    letter_security_paragraph(input, elements.security())
                         .line_spacing(
                             LineSpacing::new()
                                 .line(SECURITY_FIRST_LINE_TWIPS as i32)
@@ -286,7 +292,7 @@ pub fn write_docx_with_numbering(
                 .add_table(red_approval_frame_table(input))
                 .add_table(red_approval_record_table(input, display));
             doc = doc.add_paragraph(
-                letter_security_paragraph(input).line_spacing(
+                letter_security_paragraph(input, elements.security()).line_spacing(
                     LineSpacing::new()
                         .before(RED_APPROVAL_SECURITY_BEFORE_TWIPS)
                         .line(BODY_LINE_TWIPS as i32)
@@ -308,19 +314,18 @@ pub fn write_docx_with_numbering(
             // TeX 红头呈批件首页：\DocumentNumber{}号，序号与“号”之间不留空格。
             // 行高与段后间距都写死：红色横线是按版心绝对坐标画的（48mm），标题
             // 却是流式排下来的，头部任何一段高度不定，标题与横线的间距就会漂。
-            if let Some(number) = official_document_number(input, "") {
-                doc = doc.add_paragraph(
-                    Paragraph::new()
-                        .add_run(body_run(number))
-                        .align(AlignmentType::Center)
-                        .line_spacing(
-                            LineSpacing::new()
-                                .before(RED_APPROVAL_NUMBER_BEFORE_TWIPS)
-                                .line(BODY_LINE_TWIPS as i32)
-                                .line_rule(LineSpacingType::Exact)
-                                .after(RED_APPROVAL_NUMBER_AFTER_TWIPS),
-                        ),
+            if let Some(value_runs) = number_runs(input, "", elements) {
+                let mut paragraph = Paragraph::new().align(AlignmentType::Center).line_spacing(
+                    LineSpacing::new()
+                        .before(RED_APPROVAL_NUMBER_BEFORE_TWIPS)
+                        .line(BODY_LINE_TWIPS as i32)
+                        .line_rule(LineSpacingType::Exact)
+                        .after(RED_APPROVAL_NUMBER_AFTER_TWIPS),
                 );
+                for run in value_runs {
+                    paragraph = paragraph.add_run(run);
+                }
+                doc = doc.add_paragraph(paragraph);
                 red_approval_header_twips += RED_APPROVAL_NUMBER_BEFORE_TWIPS
                     + BODY_LINE_TWIPS
                     + RED_APPROVAL_NUMBER_AFTER_TWIPS;
@@ -382,10 +387,10 @@ pub fn write_docx_with_numbering(
     // 主送机关位的显示值（函稿主送 / 白头件呈报领导）与预览、TeX 同源。
     let addressee = crate::export::element_display::addressee_display(input, display);
     if !addressee.is_empty() && !markdown.contains(addressee.as_str()) {
-        doc = doc.add_paragraph(paragraphs::addressee_paragraph(&format!(
-            "{}：",
-            addressee.trim_end_matches('：')
-        )));
+        doc = doc.add_paragraph(paragraphs::addressee_paragraph(
+            &addressee,
+            elements.recipient(),
+        ));
     }
 
     let mut attachment_blocks = Vec::new();
@@ -505,9 +510,15 @@ pub fn write_docx_with_numbering(
     }
 
     if crate::models::is_joint_signature(input) {
-        doc = add_joint_signature(doc, input, display);
+        doc = add_joint_signature(doc, input, display, elements);
     } else if input.kind == TemplateKind::WhitePaper {
-        doc = add_white_paper_signature(doc, input, display, crate::export::SIGNATURE_ROOM_TWIPS);
+        doc = add_white_paper_signature(
+            doc,
+            input,
+            display,
+            crate::export::SIGNATURE_ROOM_TWIPS,
+            elements,
+        );
     } else if input.kind == TemplateKind::RedHeadApproval {
         // 落款最早从第二页开始。正文只有首页那点内容时另起一页标「（此页无正文）」；
         // 正文本来就跨页时不再额外制造空白页，落款接在正文之后。
@@ -526,7 +537,13 @@ pub fn write_docx_with_numbering(
                     ),
             );
         }
-        doc = add_white_paper_signature(doc, input, display, crate::export::SIGNATURE_ROOM_TWIPS);
+        doc = add_white_paper_signature(
+            doc,
+            input,
+            display,
+            crate::export::SIGNATURE_ROOM_TWIPS,
+            elements,
+        );
     } else if matches!(
         input.kind,
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice
@@ -540,35 +557,50 @@ pub fn write_docx_with_numbering(
         if !signature.is_empty() {
             // 代章直接跟在落款单位后面同一行（如“星海省教育厅（代章）”），不另起一行。
             // 是否标注只由 seals_on_behalf 决定（仅公函；电话通知等其他文种不盖章）。
-            let unit = if crate::export::seals_on_behalf(input, display) {
-                format!("{signature}（代章）")
-            } else {
-                signature
+            // 落款单位变了按整字段替换（旧值删除线、新值加框）；代章不进标注。
+            let unit_runs = match elements.signing_units().first() {
+                Some(mark) if mark.changed() => {
+                    let mut runs = marked_runs(&mark.marked(), |text| body_run(text));
+                    if crate::export::seals_on_behalf(input, display) {
+                        runs.push(body_run("（代章）"));
+                    }
+                    runs
+                }
+                _ => {
+                    let unit = if crate::export::seals_on_behalf(input, display) {
+                        format!("{signature}（代章）")
+                    } else {
+                        signature.clone()
+                    };
+                    vec![body_run(unit)]
+                }
             };
-            doc = doc.add_paragraph(
-                Paragraph::new()
-                    .add_run(body_run(unit))
-                    .align(AlignmentType::Center)
-                    .indent(Some(2_608), None, Some(0), None)
-                    .keep_next(true)
-                    .line_spacing(
-                        LineSpacing::new()
-                            .before(CLOSING_GAP_TWIPS)
-                            .line(BODY_LINE_TWIPS as i32)
-                            .line_rule(LineSpacingType::Exact),
-                    ),
-            );
-            doc = doc.add_paragraph(
-                Paragraph::new()
-                    .add_run(body_run(official_signature_date(input)))
-                    .align(AlignmentType::Center)
-                    .indent(Some(2_608), None, Some(0), None)
-                    .line_spacing(
-                        LineSpacing::new()
-                            .line(BODY_LINE_TWIPS as i32)
-                            .line_rule(LineSpacingType::Exact),
-                    ),
-            );
+            let mut unit_paragraph = Paragraph::new()
+                .align(AlignmentType::Center)
+                .indent(Some(2_608), None, Some(0), None)
+                .keep_next(true)
+                .line_spacing(
+                    LineSpacing::new()
+                        .before(CLOSING_GAP_TWIPS)
+                        .line(BODY_LINE_TWIPS as i32)
+                        .line_rule(LineSpacingType::Exact),
+                );
+            for run in unit_runs {
+                unit_paragraph = unit_paragraph.add_run(run);
+            }
+            doc = doc.add_paragraph(unit_paragraph);
+            let mut date_paragraph = Paragraph::new()
+                .align(AlignmentType::Center)
+                .indent(Some(2_608), None, Some(0), None)
+                .line_spacing(
+                    LineSpacing::new()
+                        .line(BODY_LINE_TWIPS as i32)
+                        .line_rule(LineSpacingType::Exact),
+                );
+            for run in signature_date_runs(input, elements) {
+                date_paragraph = date_paragraph.add_run(run);
+            }
+            doc = doc.add_paragraph(date_paragraph);
         }
     }
 
@@ -607,7 +639,7 @@ pub fn write_docx_with_numbering(
     }
 
     if input.kind == TemplateKind::OfficialLetter {
-        doc = add_footer_record(doc, input, display);
+        doc = add_footer_record(doc, input, display, elements);
     }
 
     let file =
@@ -786,6 +818,7 @@ mod tests {
             &UnitDisplay::new(&[]),
             &fonts,
             &NumberingConfig::default(),
+            &crate::visual_diff::ElementMarks::default(),
         )
         .unwrap();
         let xml = zip_text(&dedicated, "word/document.xml");

@@ -9,8 +9,8 @@ use crate::export::element_display::{
 };
 use crate::export::latex::{
     attachment_document_title_to_tex, attachment_landscape_flags, attachment_summary_tex,
-    body_text_to_tex, latex_name, marked_tex_escape, official_heading_to_tex, security_commands,
-    target_tex_section, tex_escape, tex_spaced, title_content_tex,
+    body_text_to_tex, element_arg, latex_name, marked_tex_escape, official_heading_to_tex,
+    security_commands, target_tex_section, tex_escape, tex_spaced, title_content_tex,
 };
 use crate::export::table::to_longtblr;
 use crate::export::{
@@ -22,6 +22,7 @@ use crate::models::{
     split_units,
 };
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
 
 #[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn official_letter_tex(
@@ -29,7 +30,13 @@ pub(crate) fn official_letter_tex(
     markdown: &str,
     display: &UnitDisplay,
 ) -> String {
-    official_letter_tex_with_numbering(input, markdown, display, &NumberingConfig::default())
+    official_letter_tex_with_numbering(
+        input,
+        markdown,
+        display,
+        &NumberingConfig::default(),
+        &ElementMarks::default(),
+    )
 }
 
 pub(crate) fn official_letter_tex_with_numbering(
@@ -37,6 +44,7 @@ pub(crate) fn official_letter_tex_with_numbering(
     markdown: &str,
     display: &UnitDisplay,
     numbering: &NumberingConfig,
+    elements: &ElementMarks,
 ) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
@@ -61,7 +69,7 @@ pub(crate) fn official_letter_tex_with_numbering(
     } else {
         format!("\\SetAttachmentContent{{\n{attachments}\n}}\n")
     };
-    let security = security_commands(input);
+    let security = security_commands(input, elements.security());
     // 成文日期在类里拼成「○年○月○日」，年 / 月 / 日各是一个命令，显示值也按部件给。
     let date_parts = date_display_parts(input);
     let (signature_year, signature_month, signature_day) = match date_parts.as_slice() {
@@ -82,6 +90,38 @@ pub(crate) fn official_letter_tex_with_numbering(
         preview_placeholder.to_string()
     } else {
         tex_escape(signature_day)
+    };
+    // 要素标注：每个要素命令的参数——变了整字段（或部件）删旧插新，没变走原生
+    // 取值（含各自的转义与预览占位），保证定稿导出逐字节不变。
+    let [code_mark, number_year_mark, serial_mark] = elements.number();
+    let department_arg = element_arg(code_mark, || tex_escape(&department_code));
+    let document_year_arg = element_arg(number_year_mark, || tex_escape(&document_year));
+    let number_arg = element_arg(serial_mark, || document_number.clone());
+    let (year_arg, month_arg, day_arg) = if elements.date().changed() {
+        match elements.date().parts() {
+            Some([year_mark, month_mark, day_mark]) => (
+                element_arg(year_mark, || tex_escape(signature_year)),
+                element_arg(month_mark, || tex_escape(signature_month)),
+                element_arg(day_mark, || signature_day.clone()),
+            ),
+            None => {
+                // 自由文本日期整串一个部件：整串删旧插新写进 \SignatureYear
+                // （年月日三字仍由类补）。
+                let whole = elements.date().whole().expect("切不开就是整串部件");
+                (
+                    marked_tex_escape(&whole.marked()),
+                    String::new(),
+                    String::new(),
+                )
+            }
+        }
+    } else {
+        // 要素没变（含定稿导出）：原生三个命令，与从前逐字节一致。
+        (
+            tex_escape(signature_year),
+            tex_escape(signature_month),
+            signature_day.clone(),
+        )
     };
     // 编号时把版记的「共印 N 份」钉到 Rust 算出的同一个数：份号编到几，
     // 版记就得说几，两处由 TeX 和 Rust 各算一遍迟早会岔开。
@@ -119,15 +159,16 @@ pub(crate) fn official_letter_tex_with_numbering(
     } else {
         ""
     };
+    // 联合发文模式 1 的成文日期压在主发文单位列下，整行拼好传入：带要素标注时
+    // 各部件已经是 `\GwDel` / `\GwAdd` 包好的 TeX 片段。
+    let date_changed = elements.date().changed();
+    let joint_date_line = if date_changed {
+        format!("{year_arg}年{month_arg}月{day_arg}日")
+    } else {
+        format!("{signature_year}年{signature_month}月{signature_day}日")
+    };
     let joint_commands = if joint_mode_one {
-        joint_mode_one_commands(
-            input,
-            signature_year,
-            signature_month,
-            &signature_day,
-            display,
-            joint_signature,
-        )
+        joint_mode_one_commands(input, &joint_date_line, display, joint_signature)
     } else {
         String::new()
     };
@@ -197,29 +238,42 @@ pub(crate) fn official_letter_tex_with_numbering(
         copies_option = copies_option,
         print_copies_command = print_copies_command,
         issuing = tex_escape(&issuing_unit),
-        document_year = tex_escape(&document_year),
-        year = tex_escape(signature_year),
-        month = tex_escape(signature_month),
-        department = tex_escape(&department_code),
-        number = document_number,
+        document_year = document_year_arg,
+        year = year_arg,
+        month = month_arg,
+        department = department_arg,
+        number = number_arg,
         security = security,
         title = tex_escape(title),
         title_content = title_content_tex(title),
-        recipient = tex_escape(&recipient_display),
+        recipient = element_arg(elements.recipient(), || tex_escape(&recipient_display)),
         body = body,
         attachment_command = attachment_command,
-        signature_unit = if input.kind == TemplateKind::PhoneNotice {
-            tex_spaced(&signature_display)
-        } else {
-            tex_escape(&signature_display)
+        signature_unit = match elements.signing_units().first() {
+            Some(mark) if mark.changed() => {
+                let marked = marked_tex_escape(&mark.marked());
+                if input.kind == TemplateKind::PhoneNotice {
+                    // 电话通知的简称逐字隔开，空格在 TeX 里要写成 `\ `。
+                    marked.replace(' ', "\\ ")
+                } else {
+                    marked
+                }
+            }
+            _ => {
+                if input.kind == TemplateKind::PhoneNotice {
+                    tex_spaced(&signature_display)
+                } else {
+                    tex_escape(&signature_display)
+                }
+            }
         },
         seal_on_behalf = if crate::export::seals_on_behalf(input, display) {
             tex_escape("（代章）")
         } else {
             String::new()
         },
-        day = signature_day,
-        copies = tex_escape(&copies_display),
+        day = day_arg,
+        copies = element_arg(elements.copies_to(), || tex_escape(&copies_display)),
         responsible = tex_escape(&responsible_display),
         contact = latex_name(&input.profile.contact_person),
         phone = tex_escape(&input.profile.contact_phone),
@@ -266,13 +320,19 @@ fn copy_body_tex(input: &DraftInput) -> String {
 
 #[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn plain_document_tex(input: &DraftInput, markdown: &str) -> String {
-    plain_document_tex_with_numbering(input, markdown, &NumberingConfig::default())
+    plain_document_tex_with_numbering(
+        input,
+        markdown,
+        &NumberingConfig::default(),
+        &ElementMarks::default(),
+    )
 }
 
 pub(crate) fn plain_document_tex_with_numbering(
     input: &DraftInput,
     markdown: &str,
     numbering: &NumberingConfig,
+    elements: &ElementMarks,
 ) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
@@ -314,7 +374,7 @@ pub(crate) fn plain_document_tex_with_numbering(
 \makeletter
 \end{{document}}
 "#,
-        security = security_commands(input),
+        security = security_commands(input, elements.security()),
         title = tex_escape(title),
         title_content = title_content_tex(title),
     )
@@ -324,9 +384,7 @@ pub(crate) fn plain_document_tex_with_numbering(
 /// （发文单位只剩 1 个，落款交给类默认的右侧单列，不需要并列落款内容）。
 pub(crate) fn joint_mode_one_commands(
     input: &DraftInput,
-    year: &str,
-    month: &str,
-    day: &str,
+    date_line: &str,
     display: &UnitDisplay,
     with_signature: bool,
 ) -> String {
@@ -400,7 +458,7 @@ pub(crate) fn joint_mode_one_commands(
     // 日期压在主发文单位所在列下方，而不是整块居中；主单位跨列时整行居中。
     // 列内排法用第二个 72mm 双列表格；跨列时直接排一行（\multicolumn 里再放 \\ 会被
     // 外层 tabular 当作行结束符，故跨列情形不套表格）。
-    let closing_content = format!("{year}年{month}月{day}日");
+    let closing_content = date_line;
     let closing = match joint_main_column(input) {
         Some(0) => format!(
             r"\begin{{tabular}}{{@{{}}>{{\centering\arraybackslash}}p{{72mm}}>{{\centering\arraybackslash}}p{{72mm}}@{{}}}}
@@ -412,7 +470,7 @@ pub(crate) fn joint_mode_one_commands(
 & {closing_content} \\
 \end{{tabular}}"
         ),
-        _ => closing_content,
+        _ => closing_content.to_string(),
     };
     let signature_command = if with_signature {
         format!(

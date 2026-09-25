@@ -810,8 +810,9 @@ impl GongwenApp {
                             None,
                             false,
                             &self.config.numbering,
-                            // 知识库里的文档是拿来查的，不是拿来投屏对稿的：页边不编号。
+                            // 知识库里的文档没有版本对照，不画要素标注。
                             false,
+                            &crate::visual_diff::ElementMarks::default(),
                         );
                         preview.fit_scale = output.scale;
                     });

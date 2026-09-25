@@ -254,11 +254,6 @@ fn wrapped_section(
     }
 }
 
-pub(crate) fn draw(ui: &mut egui::Ui, job: LayoutJob) {
-    let galley = layout(ui, job);
-    ui.add(egui::Label::new(galley));
-}
-
 /// 两端对齐地画一段正文，与 Word 的 `w:jc=both`、TeX 的默认对齐一致：
 /// 除末行外每行都撑满版心，末行保持自然宽度。
 ///
@@ -452,6 +447,8 @@ pub(crate) fn stacked(
                 _ => egui::pos2(anchor, y),
             };
             painter.galley(pos, galley.clone(), theme::paper::ink());
+            // 落款、联合落款这些逐行摆位的地方也要能画要素标注（无标记时是空操作）。
+            marks::paint_galley_marks(painter, metrics, pos, galley);
             y += galley.size().y;
         }
     });

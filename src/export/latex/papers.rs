@@ -4,10 +4,11 @@
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::element_display::{
-    addressee_display, date_display_parts, number_display_parts, signing_unit_display,
+    addressee_display, date_display_parts, is_preview_version, number_display_parts,
+    signing_unit_display,
 };
 use crate::export::latex::{
-    attachment_summary_tex, latex_name,
+    attachment_summary_tex, element_arg, latex_name, marked_tex_escape,
     official_letter_sections_to_tex_with_barrier_with_numbering,
     official_letter_sections_to_tex_with_numbering, red_approval_title_content_tex,
     security_commands, tex_escape, tex_spread_signature, title_content_tex,
@@ -15,10 +16,96 @@ use crate::export::latex::{
 use crate::export::{MarkdownBlock, parse_markdown_with_lines_with_numbering, plain_text};
 use crate::models::{DraftInput, LetterVersion, ListNumbering, NumberingConfig};
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
+use crate::visual_diff::elements::{DateMarks, FieldMark};
+
+/// 落款单位的多行命令参数：每个单位一行、行间空一行（`\par\vspace{\baselineskip}`）。
+/// 带要素标注时按行替换——旧值删除线、新值加框，整行删旧插新；旧版多出来的行
+/// 整行画删除线留在纸面。没变的行走原生分散对齐，与从前逐字节一致。
+fn signature_units_tex(units: &[String], marks: &[FieldMark]) -> String {
+    let mut lines: Vec<String> = units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| match marks.get(index) {
+            Some(mark) if mark.changed() => marked_tex_escape(&mark.marked()),
+            _ => tex_spread_signature(unit),
+        })
+        .collect();
+    for mark in marks.iter().skip(units.len()) {
+        if mark.changed() {
+            lines.push(marked_tex_escape(&mark.marked()));
+        }
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index > 0 {
+                format!("\\par\\vspace{{\\baselineskip}}{line}")
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// 成文日期三条命令（带要素标注：变了的部件整体删旧插新）。日期未填时不写
+/// 命令，沿用类默认；自由文本日期切不开——原样时不写，变了把整串删旧插新写进
+/// `\SignatureYear`（年月日三字仍由类补）。
+fn date_commands_tex(input: &DraftInput, elements: &ElementMarks) -> String {
+    let preview = is_preview_version(input);
+    let placeholder = "\\makebox[1em][c]{}";
+    let date_parts = date_display_parts(input);
+    if !elements.date().changed() {
+        // 要素没变（含定稿导出）：原生三个命令，日期未填 / 切不开时照旧不写。
+        let [year, month, day] = date_parts.as_slice() else {
+            return String::new();
+        };
+        let day_native = if preview {
+            placeholder.to_string()
+        } else {
+            tex_escape(day)
+        };
+        return format!(
+            "\\renewcommand{{\\SignatureYear}}{{{}}}\n\\renewcommand{{\\SignatureMonth}}{{{}}}\n\\renewcommand{{\\SignatureDay}}{{{}}}\n",
+            tex_escape(year),
+            tex_escape(month),
+            day_native
+        );
+    }
+    match elements.date() {
+        DateMarks::Parts(marks) => {
+            let [year, month, day] = date_parts.as_slice() else {
+                return String::new();
+            };
+            let day_native = if preview {
+                placeholder.to_string()
+            } else {
+                tex_escape(day)
+            };
+            format!(
+                "\\renewcommand{{\\SignatureYear}}{{{}}}\n\\renewcommand{{\\SignatureMonth}}{{{}}}\n\\renewcommand{{\\SignatureDay}}{{{}}}\n",
+                element_arg(&marks[0], || tex_escape(year)),
+                element_arg(&marks[1], || tex_escape(month)),
+                element_arg(&marks[2], || day_native),
+            )
+        }
+        DateMarks::Whole(whole) => format!(
+            "\\renewcommand{{\\SignatureYear}}{{{}}}\n\\renewcommand{{\\SignatureMonth}}{{}}\n\\renewcommand{{\\SignatureDay}}{{}}\n",
+            marked_tex_escape(&whole.marked())
+        ),
+    }
+}
 
 #[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn white_paper_tex(input: &DraftInput, markdown: &str, display: &UnitDisplay) -> String {
-    white_paper_tex_with_numbering(input, markdown, display, &NumberingConfig::default())
+    white_paper_tex_with_numbering(
+        input,
+        markdown,
+        display,
+        &NumberingConfig::default(),
+        &ElementMarks::default(),
+    )
 }
 
 pub(crate) fn white_paper_tex_with_numbering(
@@ -26,6 +113,7 @@ pub(crate) fn white_paper_tex_with_numbering(
     markdown: &str,
     display: &UnitDisplay,
     numbering: &NumberingConfig,
+    elements: &ElementMarks,
 ) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
@@ -51,45 +139,19 @@ pub(crate) fn white_paper_tex_with_numbering(
     } else {
         format!("\\SetAttachmentContent{{\n{attachments}\n}}\n")
     };
-    let security = security_commands(input);
+    let security = security_commands(input, elements.security());
     // 呈报领导（楷体顶格）按人员编码排序、相同职务合并后写入 \Recipient。
     let leaders = addressee_display(input, display);
     // 落款单位：每个单位一行、行间空一行（便于签字），整体右对齐；显示文本
     // 少于 5 字时逐字用 `\hspace*` 分散对齐到 5 字宽，与预览/Word 各端一致。
-    let signature_unit = signing_unit_display(input, display)
+    let units = signing_unit_display(input, display)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
-        .enumerate()
-        .map(|(index, unit)| {
-            let line = tex_spread_signature(&unit);
-            if index > 0 {
-                format!("\\par\\vspace{{\\baselineskip}}{line}")
-            } else {
-                line
-            }
-        })
-        .collect::<String>();
+        .collect::<Vec<_>>();
+    let signature_unit = signature_units_tex(&units, elements.signing_units());
     // 规格 §3.3：预览版占位区域统一 1em 宽，成文日期“日”留空，与公函一致。
-    let preview = input.profile.letter_version == LetterVersion::Preview;
-    let preview_placeholder = "\\makebox[1em][c]{}";
     // 成文日期未填时沿用类默认：年份取当前年、日期留空待填。
-    let date_parts = date_display_parts(input);
-    let date_commands = match date_parts.as_slice() {
-        [year, month, day] => {
-            let day = if preview {
-                preview_placeholder.to_string()
-            } else {
-                tex_escape(day)
-            };
-            format!(
-                "\\renewcommand{{\\SignatureYear}}{{{}}}\n\\renewcommand{{\\SignatureMonth}}{{{}}}\n\\renewcommand{{\\SignatureDay}}{{{}}}\n",
-                tex_escape(year),
-                tex_escape(month),
-                day
-            )
-        }
-        _ => String::new(),
-    };
+    let date_commands = date_commands_tex(input, elements);
 
     format!(
         r#"%!TEX program = xelatex
@@ -108,7 +170,7 @@ pub(crate) fn white_paper_tex_with_numbering(
         title = tex_escape(title),
         title_content = title_content_tex(title),
         security = security,
-        leaders = tex_escape(&leaders),
+        leaders = element_arg(elements.recipient(), || tex_escape(&leaders)),
         body = body,
         attachment_command = attachment_command,
         signature_unit = signature_unit,
@@ -123,7 +185,13 @@ pub(crate) fn red_head_approval_tex(
     markdown: &str,
     display: &UnitDisplay,
 ) -> String {
-    red_head_approval_tex_with_numbering(input, markdown, display, &NumberingConfig::default())
+    red_head_approval_tex_with_numbering(
+        input,
+        markdown,
+        display,
+        &NumberingConfig::default(),
+        &ElementMarks::default(),
+    )
 }
 
 pub(crate) fn red_head_approval_tex_with_numbering(
@@ -131,6 +199,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
     markdown: &str,
     display: &UnitDisplay,
     numbering: &NumberingConfig,
+    elements: &ElementMarks,
 ) -> String {
     let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
@@ -158,7 +227,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
     } else {
         format!("\\SetAttachmentContent{{\n{attachments}\n}}\n")
     };
-    let security = security_commands(input);
+    let security = security_commands(input, elements.security());
     let leaders = addressee_display(input, display);
     let issuing = display.full_name(&input.profile.issuing_unit);
     let signature_units = signing_unit_display(input, display)
@@ -169,18 +238,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
     // 这里按字数算好最宽一行的宽度写进类文件。写成毫米而不是 em：这条
     // \setlength 在导言区执行，那里的字号不是三号。
     let signature_unit_width_mm = crate::export::red_signature_unit_width_mm(&signature_units);
-    let signature_unit = signature_units
-        .iter()
-        .enumerate()
-        .map(|(index, unit)| {
-            let line = tex_spread_signature(unit);
-            if index > 0 {
-                format!("\\par\\vspace{{\\baselineskip}}{line}")
-            } else {
-                line
-            }
-        })
-        .collect::<String>();
+    let signature_unit = signature_units_tex(&signature_units, elements.signing_units());
     let preview = input.profile.letter_version == LetterVersion::Preview;
     let placeholder = "\\makebox[1em][c]{}";
     let (department_code, document_year, document_serial) = number_display_parts(input);
@@ -189,20 +247,12 @@ pub(crate) fn red_head_approval_tex_with_numbering(
     } else {
         tex_escape(&document_serial)
     };
-    let date_parts = date_display_parts(input);
-    let date_commands = match date_parts.as_slice() {
-        [year, month, day] => format!(
-            "\\renewcommand{{\\SignatureYear}}{{{}}}\n\\renewcommand{{\\SignatureMonth}}{{{}}}\n\\renewcommand{{\\SignatureDay}}{{{}}}\n",
-            tex_escape(year),
-            tex_escape(month),
-            if preview {
-                placeholder.to_string()
-            } else {
-                tex_escape(day)
-            },
-        ),
-        _ => String::new(),
-    };
+    // 发文字号三个部件各自标注（TeX 里是三个命令，中间夹类里写死的〔〕号）。
+    let [code_mark, number_year_mark, serial_mark] = elements.number();
+    let department_arg = element_arg(code_mark, || tex_escape(&department_code));
+    let document_year_arg = element_arg(number_year_mark, || tex_escape(&document_year));
+    let number_arg = element_arg(serial_mark, || document_number.clone());
+    let date_commands = date_commands_tex(input, elements);
     let entries = crate::models::joint_responsible_entries(&input.profile);
     let record_rows = red_approval_record_display_rows(&entries, display);
     // 三栏宽度按各行实际内容一次算定并注入类文件（与 Word/预览同源）：联系人栏
@@ -238,13 +288,13 @@ pub(crate) fn red_head_approval_tex_with_numbering(
 \end{{document}}
 "#,
         issuing = tex_escape(&issuing),
-        document_year = tex_escape(&document_year),
-        department = tex_escape(&department_code),
-        number = document_number,
+        document_year = document_year_arg,
+        department = department_arg,
+        number = number_arg,
         security = security,
         title = tex_escape(&title_plain),
         title_content = red_approval_title_content_tex(title),
-        leaders = tex_escape(&leaders),
+        leaders = element_arg(elements.recipient(), || tex_escape(&leaders)),
         body = body,
         attachment_command = attachment_command,
         signature_unit = signature_unit,
@@ -305,13 +355,19 @@ pub(crate) fn red_approval_responsible_rows_tex(rows: &[[String; 3]]) -> String 
 
 #[allow(dead_code)] // 默认编号的兼容入口，测试使用。
 pub(crate) fn meeting_agenda_tex(input: &DraftInput, markdown: &str) -> String {
-    meeting_agenda_tex_with_numbering(input, markdown, &NumberingConfig::default())
+    meeting_agenda_tex_with_numbering(
+        input,
+        markdown,
+        &NumberingConfig::default(),
+        &ElementMarks::default(),
+    )
 }
 
 pub(crate) fn meeting_agenda_tex_with_numbering(
     input: &DraftInput,
     markdown: &str,
     numbering: &NumberingConfig,
+    elements: &ElementMarks,
 ) -> String {
     // 会议议程事项固定使用「1. 2. 3.」阿拉伯数字编号（见起草提示词与校验规则），
     // 不随设置里的列表编号样式变化。
@@ -334,7 +390,7 @@ pub(crate) fn meeting_agenda_tex_with_numbering(
         input.profile.style_mode,
         &agenda_numbering,
     );
-    let security = security_commands(input);
+    let security = security_commands(input, elements.security());
 
     format!(
         r#"%!TEX program = xelatex

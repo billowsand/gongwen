@@ -10,6 +10,7 @@ use crate::export::{
     redline_chunks, redline_slice_lines,
 };
 use crate::models::{DraftInput, TemplateKind, split_period_digits};
+use crate::visual_diff::elements::FieldMark;
 
 /// 规格 §3.2/§6 姓名宽度处理：2 字姓名中间加 1em 空格，4 字姓名压缩到 3 字宽，
 /// 保证版记联系人列与表格姓名列在视觉上整齐对齐。
@@ -111,7 +112,11 @@ pub(crate) fn redline_macro(
 
 /// 生成密级相关命令：密级、保密期限，以及“指人专办”标记（勾选后非空）。
 /// 数字年限的保密期限把前导数字用 `\ttfamily` 排成等宽，如 `{\ttfamily 10}年`。
-pub(crate) fn security_commands(input: &DraftInput) -> String {
+///
+/// 要素标注（`mark`）：密级（含保密期限）整字段替换——变了就把「旧值删除线、
+/// 新值加框」整段写进 `\SecurityLevel`、`\SecurityPeriod` 留空，类里的
+/// 「★保密期限」是条件输出、跟着消失（★由显示值自带）；指人专办照旧。
+pub(crate) fn security_commands(input: &DraftInput, mark: &FieldMark) -> String {
     let (level, period) = crate::export::element_display::security_parts(input);
     if level.is_empty() {
         return String::new();
@@ -121,6 +126,13 @@ pub(crate) fn security_commands(input: &DraftInput) -> String {
     } else {
         ""
     };
+    if mark.changed() {
+        return format!(
+            "\\renewcommand{{\\SecurityLevel}}{{{}}}\n\\renewcommand{{\\SecurityPeriod}}{{}}\n\\renewcommand{{\\SpecialHandling}}{{{}}}\n",
+            marked_tex_escape(&mark.marked()),
+            tex_escape(special)
+        );
+    }
     let (digits, rest) = split_period_digits(period);
     let period = if digits.is_empty() {
         tex_escape(period)
@@ -133,6 +145,16 @@ pub(crate) fn security_commands(input: &DraftInput) -> String {
         period,
         tex_escape(special)
     )
+}
+
+/// 要素命令的参数：变了整字段替换（旧值删除线 + 新值加框），没变走 `native`
+/// 原生构造（各处自己的转义与预览占位），保证定稿导出逐字节不变。
+pub(crate) fn element_arg(mark: &FieldMark, native: impl FnOnce() -> String) -> String {
+    if mark.changed() {
+        marked_tex_escape(&mark.marked())
+    } else {
+        native()
+    }
 }
 
 /// 附件概要：正文结束后、落款之前，与正文之间空两行、首行缩进两个汉字，

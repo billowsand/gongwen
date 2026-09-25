@@ -6,11 +6,13 @@
 use crate::models::{DraftInput, JointIssuanceMode, TemplateKind, split_units};
 use crate::preview::{
     BODY_PT, HEADER_MAX_GAP_EM, HEADER_NUMBER_GAP_MM, HEADER_PT, HEADER_RULE_GAP_MM,
-    HEADER_RULE_MM, Metrics, PREVIEW_PLACEHOLDER, WHITE_PAPER_BLANK_LINES, draw, job, layout,
-    line_galley, place, single_line, text_format,
+    HEADER_RULE_MM, Metrics, PREVIEW_PLACEHOLDER, WHITE_PAPER_BLANK_LINES, job, layout,
+    line_galley, marks, place, single_line, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
+use crate::visual_diff::ElementMarks;
+use crate::visual_diff::elements::FieldMark;
 use eframe::egui;
 use eframe::egui::Align;
 
@@ -53,7 +55,15 @@ pub(crate) fn security_text(input: &DraftInput) -> Option<String> {
 
 /// 密级行：黑体三号顶格。返回是否真的画了东西，供调用方决定要不要留后续空行。
 /// 保密期限的数字随整行用黑体，不另设等宽西文字体。
-pub(crate) fn security_line(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput) -> bool {
+///
+/// 要素标注（`mark`）：密级（含保密期限）变了整字段替换，就地画删除线与新增框；
+/// 指人专办照旧追加、不进标注。
+pub(crate) fn security_line(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    mark: &FieldMark,
+) -> bool {
     let Some(text) = crate::export::element_display::security_display(input) else {
         return false;
     };
@@ -65,11 +75,22 @@ pub(crate) fn security_line(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftI
     let mut job = job(metrics.content);
     job.halign = Align::LEFT;
     let heiti = metrics.font(theme::FONT_HEITI, BODY_PT);
-    job.append(&text, 0.0, text_format(heiti.clone(), metrics.line));
+    if mark.changed() {
+        marks::append_marked_text(
+            &mut job,
+            metrics,
+            &mark.marked(),
+            text_format(heiti.clone(), metrics.line),
+        );
+    } else {
+        job.append(&text, 0.0, text_format(heiti.clone(), metrics.line));
+    }
     if !special.is_empty() {
         job.append(special, 0.0, text_format(heiti.clone(), metrics.line));
     }
-    draw(ui, job);
+    let galley = layout(ui, job);
+    let rect = ui.add(egui::Label::new(galley.clone())).rect;
+    marks::paint_galley_marks(ui.painter(), metrics, rect.left_top(), &galley);
     true
 }
 
@@ -140,8 +161,20 @@ pub(crate) fn red_header(ui: &mut egui::Ui, metrics: &Metrics, unit: &str) {
 
 /// 份号与发文字号同一行：左端份号（黑体三号），右端“代字〔年〕序号 号”（仿宋三号）。
 /// 份号类里固定为 01，导出器不覆盖，这里照排。
-pub(crate) fn serial_and_number(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput) {
-    let number = document_number(input);
+///
+/// 发文字号的代字 / 年份 / 序号按部件标注（TeX 里文号是三个命令，同一规则）。
+pub(crate) fn serial_and_number(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    input: &DraftInput,
+    elements: &ElementMarks,
+) {
+    let number_changed = elements.number().iter().any(|part| part.changed());
+    let number = if number_changed {
+        elements.number_marked_line(" ")
+    } else {
+        document_number(input)
+    };
     let left = line_galley(
         ui,
         metrics,
@@ -150,25 +183,35 @@ pub(crate) fn serial_and_number(ui: &mut egui::Ui, metrics: &Metrics, input: &Dr
         metrics.content,
         Align::LEFT,
     );
-    let right = line_galley(
-        ui,
-        metrics,
-        &number,
-        metrics.font(theme::FONT_FANGSONG, BODY_PT),
-        metrics.content,
-        Align::Max,
-    );
+    let number_font = metrics.font(theme::FONT_FANGSONG, BODY_PT);
+    let right = if number_changed {
+        marks::marked_line_galley(
+            ui,
+            metrics,
+            &number,
+            metrics.content,
+            Align::Max,
+            text_format(number_font, metrics.line),
+        )
+    } else {
+        line_galley(
+            ui,
+            metrics,
+            &number,
+            number_font,
+            metrics.content,
+            Align::Max,
+        )
+    };
     let height = left.size().y.max(right.size().y);
     // egui 把字顶贴在行顶、行距余量留在字下方，紧跟反线排会让字顶着红线；
     // 与导出一样空出一段，让字顶离反线 3mm。
     ui.add_space(metrics.mm(HEADER_NUMBER_GAP_MM));
     place(ui, metrics, height, |painter, rect| {
         painter.galley(rect.left_top(), left.clone(), theme::paper::ink());
-        painter.galley(
-            egui::pos2(rect.right(), rect.top()),
-            right.clone(),
-            theme::paper::ink(),
-        );
+        let right_pos = egui::pos2(rect.right(), rect.top());
+        painter.galley(right_pos, right.clone(), theme::paper::ink());
+        marks::paint_galley_marks(painter, metrics, right_pos, &right);
     });
 }
 
@@ -178,33 +221,34 @@ pub(crate) fn header_block(
     metrics: &Metrics,
     input: &DraftInput,
     display: &UnitDisplay,
+    elements: &ElementMarks,
 ) {
     match input.kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
             red_header(ui, metrics, &header_unit(input, display));
             // 电话通知不编发文字号，只有函稿排份号那一行。
             if input.kind == TemplateKind::OfficialLetter {
-                serial_and_number(ui, metrics, input);
+                serial_and_number(ui, metrics, input, elements);
             }
-            security_line(ui, metrics, input);
+            security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line);
         }
         TemplateKind::WhitePaper => {
-            security_line(ui, metrics, input);
+            security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
         TemplateKind::RedHeadApproval => {
             // official_preview 会在进入普通 sheet 前转到专用打印分页器；这里仅作
             // 防御性回落，避免未来单独调用 header_block 时完全没有页首留白。
-            security_line(ui, metrics, input);
+            security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line * WHITE_PAPER_BLANK_LINES);
         }
         TemplateKind::MeetingAgenda => {
-            security_line(ui, metrics, input);
+            security_line(ui, metrics, input, elements.security());
             ui.add_space(metrics.line);
         }
         TemplateKind::PlainDocument => {
-            if security_line(ui, metrics, input) {
+            if security_line(ui, metrics, input, elements.security()) {
                 ui.add_space(metrics.line);
             }
         }

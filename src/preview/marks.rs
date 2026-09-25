@@ -18,6 +18,7 @@ use crate::preview::Metrics;
 use eframe::egui;
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Color32, Stroke};
+use std::sync::Arc;
 
 /// 删除红。
 pub(crate) const DEL_COLOR: Color32 = Color32::from_rgb(0xC0, 0x00, 0x00);
@@ -383,6 +384,23 @@ pub(crate) fn paint_galley_marks(
     }
 }
 
+/// 一行带哨兵的文字排成 galley：与 [`append_marked_text`] 同一口径，供需要
+/// 自行摆位（落款、文号、红头呈批件密级）的要素使用；绘制时记得调
+/// [`paint_galley_marks`]。没有哨兵时与普通一行排版完全一致。
+pub(crate) fn marked_line_galley(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    width: f32,
+    align: egui::Align,
+    format: TextFormat,
+) -> Arc<egui::Galley> {
+    let mut job = super::layout::job(width);
+    job.halign = align;
+    append_marked_text(&mut job, metrics, text, format);
+    super::layout::layout(ui, job)
+}
+
 /// 把排版任务还原成 `(文字, 类型)` 序列，相邻同类合并。一致性测试用。
 #[cfg(test)]
 pub(crate) fn job_fragments(job: &LayoutJob) -> Vec<(String, RedlineKind)> {
@@ -460,6 +478,7 @@ mod tests {
                 false,
                 &NumberingConfig::default(),
                 false,
+                &crate::visual_diff::ElementMarks::default(),
             );
         })
     }

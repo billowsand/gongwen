@@ -1,4 +1,4 @@
-//! 公文版式预览：把审校区的 Markdown 连同表单锁定的行文要素，按导出后的样子画出来。
+﻿//! 公文版式预览：把审校区的 Markdown 连同表单锁定的行文要素，按导出后的样子画出来。
 //!
 //! 各版式部件已拆分到 `preview/` 子模块（排版基础、红头、文尾、红头呈批件、
 //! 正文渲染、纸面行号），根文件保留版式常量、`Metrics` / `PreviewScale` 与测试。
@@ -25,7 +25,7 @@ pub(crate) use gutter::Gutter;
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
     ClickableSourceSegment, aligned_block, append_inline, body_block, clickable,
-    clickable_body_block, clickable_justified_job, draw, draw_justified, first_ink, heading_family,
+    clickable_body_block, clickable_justified_job, draw_justified, first_ink, heading_family,
     hovered_source, indent, is_renderable_paragraph, job, justified_rows, layout, line_block,
     line_galley, place, row_tint_offset, scroll_preview_to_rect, sheet, single_line, stacked,
     table_block, text_format,
@@ -506,6 +506,7 @@ mod tests {
                 false,
                 &crate::models::NumberingConfig::default(),
                 false,
+                &crate::visual_diff::ElementMarks::default(),
             );
         });
         let text = text_of(&output);
@@ -555,7 +556,13 @@ mod tests {
             ..Default::default()
         };
         let output = ctx.run_ui(raw, |ui| {
-            signature_block(ui, &metrics, &input, &display);
+            signature_block(
+                ui,
+                &metrics,
+                &input,
+                &display,
+                &crate::visual_diff::ElementMarks::default(),
+            );
         });
         let rows = text_rows(&output);
         // 单位两行 + 日期一行（单位间与日期前各空一行不产生文本）。
@@ -598,7 +605,13 @@ mod tests {
             ..Default::default()
         };
         let output = ctx.run_ui(raw, |ui| {
-            signature_block(ui, &metrics, &input, &display);
+            signature_block(
+                ui,
+                &metrics,
+                &input,
+                &display,
+                &crate::visual_diff::ElementMarks::default(),
+            );
         });
         let rows = text_rows(&output);
         assert_eq!(rows.len(), 2, "单单位应为单位与日期两行：{rows:?}");
@@ -628,7 +641,13 @@ mod tests {
             ..Default::default()
         };
         let output = ctx.run_ui(raw, |ui| {
-            signature_block(ui, &metrics, &input, &display);
+            signature_block(
+                ui,
+                &metrics,
+                &input,
+                &display,
+                &crate::visual_diff::ElementMarks::default(),
+            );
         });
         let rows = text_rows(&output);
         // 两个落款单位各一行 + 日期一行；单位间与日期前的空行不产生文本。
@@ -653,7 +672,15 @@ mod tests {
                 )),
                 ..Default::default()
             },
-            |ui| signature_block(ui, &metrics, &white, &display),
+            |ui| {
+                signature_block(
+                    ui,
+                    &metrics,
+                    &white,
+                    &display,
+                    &crate::visual_diff::ElementMarks::default(),
+                )
+            },
         ));
         assert_eq!(white_rows.len(), rows.len());
         for (red, white) in rows.iter().zip(&white_rows) {
@@ -727,6 +754,7 @@ mod tests {
                 &[],
                 &crate::models::NumberingConfig::default(),
                 &markdown,
+                &crate::visual_diff::ElementMarks::default(),
             );
             let heading = layout.pages[0]
                 .fragments
@@ -796,6 +824,7 @@ mod tests {
                 &[],
                 &crate::models::NumberingConfig::default(),
                 &markdown,
+                &crate::visual_diff::ElementMarks::default(),
             );
             let first = layout.pages[0]
                 .fragments
@@ -894,6 +923,7 @@ mod tests {
                 &[],
                 &crate::models::NumberingConfig::default(),
                 &markdown,
+                &crate::visual_diff::ElementMarks::default(),
             );
             assert!(layout.pages.len() > 1, "样例正文必须溢出到第二页");
             // 与 red_build_print_layout 同一套算式：承办区红线上方再留 2mm。
@@ -950,6 +980,7 @@ mod tests {
                         &["消防演练实施方案".to_string()],
                         &crate::models::NumberingConfig::default(),
                         &markdown,
+                        &crate::visual_diff::ElementMarks::default(),
                     );
                     let record_height = metrics.mm(1.4) + metrics.line * rows.len() as f32;
                     let body_bottom = metrics.mm(37.0 + 225.0) - record_height - metrics.mm(2.0);
@@ -1012,6 +1043,7 @@ mod tests {
                 &[],
                 &numbering,
                 &markdown,
+                &crate::visual_diff::ElementMarks::default(),
             );
             assert!(layout.pages[0].tables.is_empty(), "表格不进首页批示窄栏");
             assert!(
@@ -1246,6 +1278,7 @@ mod tests {
                     false,
                     &crate::models::NumberingConfig::default(),
                     false,
+                    &crate::visual_diff::ElementMarks::default(),
                 );
             },
         );
@@ -1566,6 +1599,7 @@ mod tests {
                     false,
                     &crate::models::NumberingConfig::default(),
                     false,
+                    &crate::visual_diff::ElementMarks::default(),
                 );
             });
         }
@@ -1639,6 +1673,7 @@ mod tests {
                             false,
                             &crate::models::NumberingConfig::default(),
                             false,
+                            &crate::visual_diff::ElementMarks::default(),
                         );
                     });
                 },

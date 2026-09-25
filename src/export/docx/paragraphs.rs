@@ -13,6 +13,7 @@ use crate::export::title::TitlePlan;
 use crate::export::{LineAlign, RedlineKind, redline_slice_lines};
 use crate::images;
 use crate::models::{DraftInput, ListNumbering, TemplateKind};
+use crate::visual_diff::elements::FieldMark;
 use docx_rs::*;
 use image::GenericImageView;
 
@@ -60,21 +61,34 @@ pub(crate) fn aligned_paragraph(align: LineAlign, text: &str, bold: BoldFont<'_>
 }
 
 /// TeX makeletter 的主送 / 呈报领导为三号楷体，中西文字体一致。
-pub(crate) fn addressee_paragraph(text: &str) -> Paragraph {
-    Paragraph::new()
-        .add_run(
-            Run::new()
-                .add_text(text)
-                .fonts(chinese_fonts("楷体_GB2312"))
-                .size(BODY_SIZE),
-        )
+pub(crate) fn addressee_paragraph(value: &str, mark: &FieldMark) -> Paragraph {
+    // 要素标注：主送位整字段替换（旧值删除线、新值加框），冒号不进标注。
+    let mut paragraph = Paragraph::new()
         .align(AlignmentType::Both)
         .line_spacing(
             LineSpacing::new()
                 .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
-        .keep_next(true)
+        .keep_next(true);
+    if mark.changed() {
+        for run in marked_runs(&format!("{}：", mark.marked()), |text| {
+            Run::new()
+                .add_text(text)
+                .fonts(chinese_fonts("楷体_GB2312"))
+                .size(BODY_SIZE)
+        }) {
+            paragraph = paragraph.add_run(run);
+        }
+    } else {
+        paragraph = paragraph.add_run(
+            Run::new()
+                .add_text(format!("{value}："))
+                .fonts(chinese_fonts("楷体_GB2312"))
+                .size(BODY_SIZE),
+        );
+    }
+    paragraph
 }
 
 /// 独立有序列表：每项单独成段，首行缩进两个汉字；编号与正文之间不留空格。
@@ -91,7 +105,7 @@ pub(crate) fn ordered_list_paragraph(
 /// 函稿/电话通知顶格的密级行：密级 + ★ + 保密期限。勾选“指人专办”时，
 /// 在“密级★保密期限”后空一个全角空格，再以黑体标注“指人专办”四个字。
 /// 中文、西文及保密期限数字统一使用三号黑体加粗（`security_runs`）。
-pub(crate) fn letter_security_paragraph(input: &DraftInput) -> Paragraph {
+pub(crate) fn letter_security_paragraph(input: &DraftInput, mark: &FieldMark) -> Paragraph {
     let (level, period) = crate::export::element_display::security_parts(input);
     let special = if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {
         "　指人专办"
@@ -103,7 +117,7 @@ pub(crate) fn letter_security_paragraph(input: &DraftInput) -> Paragraph {
             .line(super::BODY_LINE_TWIPS as i32)
             .line_rule(LineSpacingType::Exact),
     );
-    for run in security_runs(level, period, special, "黑体", true) {
+    for run in security_runs(level, period, special, "黑体", true, mark) {
         paragraph = paragraph.add_run(run);
     }
     paragraph
@@ -256,16 +270,17 @@ pub(crate) fn attachment_label_paragraph(text: &str) -> Paragraph {
     .keep_next(true)
 }
 
-pub(crate) fn joint_closing_paragraph(text: &str, before: u32) -> Paragraph {
-    Paragraph::new()
-        .add_run(body_run(text))
-        .align(AlignmentType::Center)
-        .line_spacing(
-            LineSpacing::new()
-                .before(before)
-                .line(super::BODY_LINE_TWIPS as i32)
-                .line_rule(LineSpacingType::Exact),
-        )
+pub(crate) fn joint_closing_paragraph(runs: Vec<Run>, before: u32) -> Paragraph {
+    let mut paragraph = Paragraph::new().align(AlignmentType::Center).line_spacing(
+        LineSpacing::new()
+            .before(before)
+            .line(super::BODY_LINE_TWIPS as i32)
+            .line_rule(LineSpacingType::Exact),
+    );
+    for run in runs {
+        paragraph = paragraph.add_run(run);
+    }
+    paragraph
 }
 
 pub(crate) fn joint_signature_cell_paragraph(value: &str, row_index: usize) -> Paragraph {

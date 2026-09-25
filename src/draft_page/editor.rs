@@ -815,6 +815,7 @@ impl DraftPage<'_> {
                     self.doc.pending_render_jump,
                     &self.config.numbering,
                     self.config.show_preview_line_numbers,
+                    &crate::visual_diff::ElementMarks::default(),
                 );
 
                 if let Some(transform) = transform {

@@ -475,6 +475,7 @@ impl DraftPage<'_> {
                             scroll,
                             &self.config.numbering,
                             false,
+                            &view.doc.elements,
                         ));
                         hovered = preview::hovered_source(ui.ctx());
                         ui.add_space(12.0);

@@ -6,6 +6,7 @@
 use crate::export::docx::{BODY_SIZE, FOOTER_SIZE, PAREN_SIZE};
 use crate::export::{RedlineKind, inline_segments, plain_text, redline_chunks};
 use crate::models::split_period_digits;
+use crate::visual_diff::elements::FieldMark;
 use docx_rs::*;
 
 pub(crate) fn chinese_fonts(name: &str) -> RunFonts {
@@ -111,23 +112,25 @@ pub(crate) fn heiti_run(text: impl Into<String>) -> Run {
 
 /// 密级行 run 序列：中文、西文及期限数字统一使用行内基准字体；
 /// 指人专办以黑体加粗追加在末尾。
+///
+/// 要素标注（`mark`）：密级（含保密期限）整字段替换——变了就把「旧值删除线、
+/// 新值加框」整段排成标注 run（期限数字不再单独分 run，整段样式一致），
+/// 指人专办照旧追加。
 pub(crate) fn security_runs(
     level: &str,
     period: &str,
     special: &str,
     base: &str,
     bold: bool,
+    mark: &FieldMark,
 ) -> Vec<Run> {
-    let base_run = |text: &str| {
-        let mut run = Run::new()
-            .add_text(text.to_string())
-            .fonts(chinese_fonts(base))
-            .size(BODY_SIZE);
-        if bold {
-            run = run.bold();
+    if mark.changed() {
+        let mut runs = marked_runs(&mark.marked(), |text| security_base_run(text, base, bold));
+        if !special.is_empty() {
+            runs.push(heiti_run(special));
         }
-        run
-    };
+        return runs;
+    }
     let (digits, rest) = split_period_digits(period);
     // 保密期限为空的（“内部”件）只印密级二字，不出“★”。
     let heading = if period.trim().is_empty() {
@@ -135,17 +138,29 @@ pub(crate) fn security_runs(
     } else {
         format!("{level}★")
     };
-    let mut runs = vec![base_run(&heading)];
+    let mut runs = vec![security_base_run(&heading, base, bold)];
     if !digits.is_empty() {
-        runs.push(base_run(digits));
+        runs.push(security_base_run(digits, base, bold));
     }
     if !rest.is_empty() {
-        runs.push(base_run(rest));
+        runs.push(security_base_run(rest, base, bold));
     }
     if !special.is_empty() {
         runs.push(heiti_run(special));
     }
     runs
+}
+
+/// 密级行的基准 run：行内基准字体，可加粗。
+pub(crate) fn security_base_run(text: &str, base: &str, bold: bool) -> Run {
+    let mut run = Run::new()
+        .add_text(text.to_string())
+        .fonts(chinese_fonts(base))
+        .size(BODY_SIZE);
+    if bold {
+        run = run.bold();
+    }
+    run
 }
 
 /// 落款单位 run 序列：少于 5 字时逐字设置字符间距（单位缇，1/20 磅）分散对齐到

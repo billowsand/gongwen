@@ -223,6 +223,7 @@ pub(crate) fn write_meeting_agenda_docx(
     markdown: &str,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
     let bold = fonts.bold_family_docx();
     let title = markdown
@@ -275,7 +276,14 @@ pub(crate) fn write_meeting_agenda_docx(
         ""
     };
     let mut security = Paragraph::new();
-    for run in security_runs(security_level, security_period, special, "黑体", true) {
+    for run in security_runs(
+        security_level,
+        security_period,
+        special,
+        "黑体",
+        true,
+        elements.security(),
+    ) {
         security = security.add_run(run);
     }
     doc = doc.add_paragraph(

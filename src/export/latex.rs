@@ -34,9 +34,9 @@ pub(crate) use papers::{
     red_head_approval_tex_with_numbering, white_paper_tex, white_paper_tex_with_numbering,
 };
 pub(crate) use text::{
-    attachment_summary_tex, body_text_to_tex, latex_name, marked_heading_tex, marked_tex_escape,
-    red_approval_title_content_tex, redline_macro, security_commands, tex_escape, tex_spaced,
-    tex_spread_signature, title_content_tex,
+    attachment_summary_tex, body_text_to_tex, element_arg, latex_name, marked_heading_tex,
+    marked_tex_escape, red_approval_title_content_tex, redline_macro, security_commands,
+    tex_escape, tex_spaced, tex_spread_signature, title_content_tex,
 };
 
 const GONGHAN_CLASS: &str = include_str!("../../gonghan-gwa.cls");
@@ -67,10 +67,11 @@ pub fn write_tex(
         display,
         fonts,
         &NumberingConfig::default(),
+        &crate::visual_diff::ElementMarks::default(),
     )
 }
 
-/// 与 [`write_tex`] 相同，另按设置里的编号样式生成标题与列表编号。
+/// 与 [`write_tex`] 相同，正文按样式与编号配置生成并可编号。
 pub fn write_tex_with_numbering(
     path: &Path,
     input: &DraftInput,
@@ -78,25 +79,26 @@ pub fn write_tex_with_numbering(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
     let content = match input.kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
-            official_letter_tex_with_numbering(input, markdown, display, numbering)
+            official_letter_tex_with_numbering(input, markdown, display, numbering, elements)
         }
         TemplateKind::PlainDocument => {
-            plain_document_tex_with_numbering(input, markdown, numbering)
+            plain_document_tex_with_numbering(input, markdown, numbering, elements)
         }
         TemplateKind::WhitePaper => {
-            white_paper_tex_with_numbering(input, markdown, display, numbering)
+            white_paper_tex_with_numbering(input, markdown, display, numbering, elements)
         }
         TemplateKind::RedHeadApproval => {
-            red_head_approval_tex_with_numbering(input, markdown, display, numbering)
+            red_head_approval_tex_with_numbering(input, markdown, display, numbering, elements)
         }
         TemplateKind::MeetingAgenda => {
-            meeting_agenda_tex_with_numbering(input, markdown, numbering)
+            meeting_agenda_tex_with_numbering(input, markdown, numbering, elements)
         }
         TemplateKind::ResearchReport => {
-            unreachable!("研究报告必须走 export::research，不得使用公文 TeX 导出器")
+            unreachable!("研究报告走 export::research，不使用通用 TeX 导出")
         }
     };
     // 选了本机字体才注入钩子；没选时产出的 TeX 与从前逐字节一致。
@@ -1533,6 +1535,7 @@ mod tests {
             "# 测试函\n\n- 无序甲；\n1. 混排乙，\n- 无序丙，",
             &UnitDisplay::new(&[]),
             &numbering,
+            &crate::visual_diff::ElementMarks::default(),
         );
         // 连着写就是同一串号，`- ` 与 `1. ` 混排也只编一串；末尾标点同样照
         // 有序列表归一：组内出现分号就一路分号，末项收句号。
