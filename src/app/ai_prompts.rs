@@ -19,15 +19,15 @@ pub(crate) struct AiPromptPicker {
     kind: TemplateKind,
 }
 
-/// AI 管理页右侧的编辑区。改动先落在这里，点“保存更改”才写回配置。
+/// AI 管理页右侧的编辑区。先应用到提示词库，保存更改时写回配置。
 pub(crate) struct AiPromptDraft {
     /// 新建时为 None，保存时才分配 id。
     id: Option<u32>,
     name: String,
     instruction: String,
     kinds: Vec<TemplateKind>,
-    builtin_key: String,
     error: Option<String>,
+    focus_name: bool,
 }
 
 impl AiPromptDraft {
@@ -37,8 +37,8 @@ impl AiPromptDraft {
             name: entry.name.clone(),
             instruction: entry.instruction.clone(),
             kinds: entry.kinds.clone(),
-            builtin_key: entry.builtin_key.clone(),
             error: None,
+            focus_name: false,
         }
     }
 
@@ -48,170 +48,235 @@ impl AiPromptDraft {
             name: String::new(),
             instruction: String::new(),
             kinds: vec![],
-            builtin_key: String::new(),
             error: None,
+            focus_name: true,
+        }
+    }
+
+    fn has_pending_changes(&self, entry: Option<&AiPrompt>) -> bool {
+        match entry {
+            Some(entry) => {
+                self.name != entry.name
+                    || self.instruction != entry.instruction
+                    || self.kinds != entry.kinds
+            }
+            None => {
+                !self.name.trim().is_empty()
+                    || !self.instruction.trim().is_empty()
+                    || !self.kinds.is_empty()
+            }
         }
     }
 }
 
 impl GongwenApp {
-    /// 提示词管理页：左侧列表，右侧编辑区，底部常驻内置输出标准的只读预览。
-    pub(crate) fn ai_prompts_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading("AI 管理");
-                let builtin = self
-                    .config
-                    .ai_prompts
-                    .iter()
-                    .filter(|entry| entry.is_builtin())
-                    .count();
-                ui.weak(format!(
-                    "{} 条优化提示词（内置 {builtin} 条）· 输出格式标准内置生效，不可关闭 · 仅保存在本机",
-                    self.config.ai_prompts.len()
-                ));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::primary_icon_button(ui, theme::Icon::Save, "保存更改").clicked() {
-                    self.persist();
-                }
-                if ui
-                    .add(theme::icon_text_button(theme::Icon::FilePlus, "新建提示词"))
-                    .on_hover_text("新增一条自定义优化提示词")
-                    .clicked()
-                {
-                    self.ai_prompt_selected = None;
-                    self.ai_prompt_editor = Some(AiPromptDraft::blank());
-                }
-            });
+    /// 提示词管理页：限定内容阅读宽度，左侧紧凑列表，右侧集中编辑与操作。
+    fn can_switch_ai_prompt(&mut self) -> bool {
+        let pending = self.ai_prompt_editor.as_ref().is_some_and(|draft| {
+            draft.has_pending_changes(draft.id.and_then(|id| self.config.ai_prompt(id)))
         });
-        ui.add_space(8.0);
+        if pending && let Some(draft) = self.ai_prompt_editor.as_mut() {
+            draft.error = Some("请先应用或取消当前编辑，再切换提示词。".into());
+        }
+        !pending
+    }
 
-        egui::ScrollArea::vertical()
-            .id_salt("ai_prompts")
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                let available = ui.available_width();
-                // 列表和编辑区各占一半；窄窗口下让列表优先，编辑区自然收窄。
-                let list_width = (available * 0.42).clamp(240.0, 460.0);
-                ui.horizontal_top(|ui| {
-                    // 高度给 0 让它按内容撑开：这里已经在滚动区里，若按
-                    // available_height 预留，列表会独占整屏，把下面的标准预览挤出可视区。
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(list_width, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.ai_prompt_list_ui(ui),
-                    );
-                    // 这里不用 ui.separator()：横向布局里的分隔线会撑满可视高度，
-                    // 把下面的标准预览顶出滚动区。
-                    ui.add_space(12.0);
-                    ui.vertical(|ui| self.ai_prompt_editor_ui(ui));
-                });
-                ui.add_space(12.0);
-                self.output_contract_preview_ui(ui);
-            });
+    pub(crate) fn ai_prompts_ui(&mut self, ui: &mut egui::Ui) {
+        if self.ai_prompt_editor.is_none() {
+            let entry = self
+                .ai_prompt_selected
+                .and_then(|id| self.config.ai_prompt(id))
+                .or_else(|| self.config.ai_prompts.first());
+            if let Some(entry) = entry {
+                self.ai_prompt_selected = Some(entry.id);
+                self.ai_prompt_editor = Some(AiPromptDraft::from_entry(entry));
+            }
+        }
+
+        let available = ui.available_width();
+        let item_gap = ui.spacing().item_spacing.x;
+        let content_width = (available - item_gap).clamp(0.0, 1520.0);
+        let left_margin = ((available - item_gap - content_width) / 2.0).max(0.0);
+        ui.horizontal_top(|ui| {
+            ui.add_space(left_margin);
+            ui.allocate_ui_with_layout(
+                egui::vec2(content_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(content_width);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.heading("AI 管理");
+                            let builtin = self
+                                .config
+                                .ai_prompts
+                                .iter()
+                                .filter(|entry| entry.is_builtin())
+                                .count();
+                            ui.weak(format!(
+                                "{} 条优化提示词（内置 {builtin} 条）· 仅保存在本机",
+                                self.config.ai_prompts.len()
+                            ));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if theme::primary_icon_button(ui, theme::Icon::Save, "保存更改")
+                                .on_hover_text("先应用编辑区内容，再写入本机配置")
+                                .clicked()
+                            {
+                                let mut valid = true;
+                                if let Some(mut draft) = self.ai_prompt_editor.take() {
+                                    match self.apply_ai_prompt_draft(&draft) {
+                                        Ok(id) => {
+                                            self.ai_prompt_selected = Some(id);
+                                            self.ai_prompt_editor = self
+                                                .config
+                                                .ai_prompt(id)
+                                                .map(AiPromptDraft::from_entry);
+                                        }
+                                        Err(message) => {
+                                            draft.error = Some(message);
+                                            self.ai_prompt_editor = Some(draft);
+                                            valid = false;
+                                        }
+                                    }
+                                }
+                                if valid {
+                                    self.persist();
+                                }
+                            }
+                            if ui
+                                .add(theme::icon_text_button(theme::Icon::FilePlus, "新建提示词"))
+                                .on_hover_text("新建条目保存后排在列表最上方")
+                                .clicked()
+                                && self.can_switch_ai_prompt()
+                            {
+                                self.ai_prompt_selected = None;
+                                self.ai_prompt_editor = Some(AiPromptDraft::blank());
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+
+                    egui::ScrollArea::vertical()
+                        .id_salt("ai_prompts")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            if content_width < 760.0 {
+                                self.ai_prompt_list_ui(ui);
+                                ui.add_space(8.0);
+                                self.ai_prompt_editor_ui(ui);
+                                ui.add_space(8.0);
+                                self.ai_prompt_contract_card_ui(ui);
+                            } else {
+                                let list_width = (content_width * 0.36).clamp(300.0, 460.0);
+                                let editor_width =
+                                    content_width - list_width - 12.0 - 2.0 * item_gap;
+                                ui.horizontal_top(|ui| {
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(list_width, 0.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.set_width(list_width);
+                                            self.ai_prompt_list_ui(ui);
+                                        },
+                                    );
+                                    ui.add_space(12.0);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(editor_width, 0.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.set_width(editor_width);
+                                            self.ai_prompt_editor_ui(ui);
+                                            self.ai_prompt_contract_card_ui(ui);
+                                        },
+                                    );
+                                });
+                            }
+                        });
+                },
+            );
+        });
     }
 
     pub(crate) fn ai_prompt_list_ui(&mut self, ui: &mut egui::Ui) {
-        let mut edit: Option<u32> = None;
-        let mut duplicate: Option<u32> = None;
-        let mut restore: Option<u32> = None;
-        let mut move_up: Option<usize> = None;
-        let mut move_down: Option<usize> = None;
-        let mut delete: Option<u32> = None;
-        let last = self.config.ai_prompts.len().saturating_sub(1);
-
-        for (index, entry) in self.config.ai_prompts.iter().enumerate() {
-            let selected = self.ai_prompt_selected == Some(entry.id);
-            let frame = if selected {
-                theme::card().fill(theme::accent_soft())
-            } else {
-                theme::card()
-            };
-            frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&entry.name).strong());
-                    if entry.is_builtin() {
-                        theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut edit = None;
+        theme::card().show(ui, |ui| {
+            let row_width = (ui.available_width() - 20.0).max(220.0);
+            ui.set_width(row_width);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("提示词库").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak("按顺序显示");
+                });
+            });
+            for (index, entry) in self.config.ai_prompts.iter().enumerate() {
+                let selected = self.ai_prompt_selected == Some(entry.id);
+                let frame = if selected {
+                    theme::card()
+                        .fill(theme::accent_soft())
+                        .inner_margin(egui::Margin::symmetric(10, 5))
+                } else {
+                    theme::card().inner_margin(egui::Margin::symmetric(10, 5))
+                };
+                let row = frame.show(ui, |ui| {
+                    ui.set_width((row_width - 20.0).max(180.0));
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [24.0, 22.0],
+                            egui::Label::new(
+                                egui::RichText::new(format!("{:02}", index + 1))
+                                    .color(theme::text_muted()),
+                            ),
+                        );
+                        ui.add_space(3.0);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&entry.name).strong()).truncate(),
+                        );
                         if entry.is_builtin() {
-                            if theme::icon_button(ui, theme::Icon::RotateCcw, "恢复默认")
-                                .on_hover_text("把这条内置提示词还原为出厂内容")
-                                .clicked()
-                            {
-                                restore = Some(entry.id);
-                            }
-                        } else if theme::icon_button(ui, theme::Icon::Trash, "删除").clicked() {
-                            delete = Some(entry.id);
-                        }
-                        if theme::icon_button(ui, theme::Icon::Copy, "复制一份")
-                            .on_hover_text("以这条为底稿新建一条可自由修改的提示词")
-                            .clicked()
-                        {
-                            duplicate = Some(entry.id);
-                        }
-                        if theme::icon_button_enabled(
-                            ui,
-                            index < last,
-                            theme::Icon::ArrowDown,
-                            "下移",
-                        )
-                        .clicked()
-                        {
-                            move_down = Some(index);
-                        }
-                        if theme::icon_button_enabled(ui, index > 0, theme::Icon::ArrowUp, "上移")
-                            .on_hover_text("列表顺序就是选择面板里的顺序")
-                            .clicked()
-                        {
-                            move_up = Some(index);
+                            ui.add_space(2.0);
+                            theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
                         }
                     });
+                    let preview = if entry.instruction.trim().is_empty() {
+                        "只按内置标准做格式规整".to_string()
+                    } else {
+                        summarize(&entry.instruction, 36)
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{} · {preview}", entry.kinds_label()))
+                                .color(theme::text_soft()),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(&entry.instruction);
                 });
-                ui.weak(entry.kinds_label());
-                let preview = if entry.instruction.trim().is_empty() {
-                    "（无附加指令：只按内置标准做格式规整）".to_string()
-                } else {
-                    summarize(&entry.instruction, 60)
-                };
-                ui.label(egui::RichText::new(preview).color(theme::text_soft()));
                 if ui
-                    .add(theme::icon_text_button(theme::Icon::Edit, "编辑"))
+                    .interact(
+                        row.response.rect,
+                        ui.id().with(("ai_prompt_row", entry.id)),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_text("点击编辑")
                     .clicked()
                 {
                     edit = Some(entry.id);
                 }
-            });
-            ui.add_space(6.0);
-        }
+            }
 
-        if self.config.ai_prompts.is_empty() {
-            ui.weak("提示词库为空。点右上角“新建提示词”添加一条。");
-        }
+            if self.config.ai_prompts.is_empty() {
+                ui.weak("提示词库为空。点右上角“新建提示词”添加一条。");
+            }
+        });
 
-        if let Some(index) = move_up {
-            self.config.ai_prompts.swap(index, index - 1);
-        }
-        if let Some(index) = move_down {
-            self.config.ai_prompts.swap(index, index + 1);
-        }
         if let Some(id) = edit
+            && self.ai_prompt_selected != Some(id)
+            && self.can_switch_ai_prompt()
             && let Some(entry) = self.config.ai_prompt(id)
         {
-            self.ai_prompt_editor = Some(AiPromptDraft::from_entry(entry));
             self.ai_prompt_selected = Some(id);
-        }
-        if let Some(id) = duplicate {
-            self.duplicate_ai_prompt(id);
-        }
-        if let Some(id) = restore {
-            self.restore_builtin_ai_prompt(id);
-        }
-        if let Some(id) = delete {
-            self.ai_prompt_delete_confirm = Some(id);
+            self.ai_prompt_editor = Some(AiPromptDraft::from_entry(entry));
         }
         self.ai_prompt_delete_confirm_ui(ui);
     }
@@ -226,7 +291,7 @@ impl GongwenApp {
             return;
         };
         theme::card().fill(theme::danger_soft()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.set_width((ui.available_width() - 20.0).max(220.0));
             ui.colored_label(theme::danger(), format!("删除提示词“{name}”？"));
             ui.horizontal(|ui| {
                 if ui
@@ -250,15 +315,19 @@ impl GongwenApp {
 
     pub(crate) fn ai_prompt_editor_ui(&mut self, ui: &mut egui::Ui) {
         let Some(mut draft) = self.ai_prompt_editor.take() else {
-            ui.add_space(16.0);
             ui.weak("在左侧选一条提示词编辑，或新建一条。");
             return;
         };
         let mut close = false;
         let mut submit = false;
+        let mut move_up = false;
+        let mut move_down = false;
+        let mut duplicate = false;
+        let mut restore = false;
+        let mut delete = false;
 
         theme::card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.set_width((ui.available_width() - 20.0).max(240.0));
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(if draft.id.is_some() {
@@ -268,24 +337,77 @@ impl GongwenApp {
                     })
                     .strong(),
                 );
-                if !draft.builtin_key.is_empty() {
-                    theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
+                if let Some(id) = draft.id
+                    && let Some(entry) = self.config.ai_prompt(id)
+                {
+                    if ui.available_width() > 620.0 {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("· {}", entry.name))
+                                    .color(theme::text_soft()),
+                            )
+                            .truncate(),
+                        );
+                    }
+                    if entry.is_builtin() {
+                        ui.add_space(2.0);
+                        theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
+                    }
+                }
+                if let Some(id) = draft.id
+                    && let Some(index) = self
+                        .config
+                        .ai_prompts
+                        .iter()
+                        .position(|entry| entry.id == id)
+                {
+                    let last = self.config.ai_prompts.len().saturating_sub(1);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.config.ai_prompts[index].is_builtin() {
+                            restore = theme::icon_button(ui, theme::Icon::RotateCcw, "恢复默认")
+                                .on_hover_text("把这条内置提示词还原为出厂内容")
+                                .clicked();
+                        } else {
+                            delete =
+                                theme::danger_icon_button(ui, theme::Icon::Trash, "删除").clicked();
+                        }
+                        duplicate = theme::icon_button(ui, theme::Icon::Copy, "复制一份")
+                            .on_hover_text("以这条为底稿新建可修改的提示词")
+                            .clicked();
+                        move_down = theme::icon_button_enabled(
+                            ui,
+                            index < last,
+                            theme::Icon::ArrowDown,
+                            "下移",
+                        )
+                        .on_hover_text("顺序与 AI 优化选择面板一致")
+                        .clicked();
+                        move_up =
+                            theme::icon_button_enabled(ui, index > 0, theme::Icon::ArrowUp, "上移")
+                                .on_hover_text("顺序与 AI 优化选择面板一致")
+                                .clicked();
+                    });
                 }
             });
-            ui.add_space(6.0);
+            ui.separator();
 
             ui.label("名称");
-            ui.add(
+            let name_response = ui.add(
                 egui::TextEdit::singleline(&mut draft.name)
                     .hint_text("例如：精简篇幅")
                     .desired_width(ui.available_width()),
             );
-            ui.add_space(8.0);
-
+            if draft.focus_name {
+                name_response.request_focus();
+                draft.focus_name = false;
+            }
             ui.label("适用文种")
                 .on_hover_text("一个都不勾表示所有文种通用；勾选后只在对应文种的选择面板里出现。");
             ui.horizontal_wrapped(|ui| {
-                for kind in TemplateKind::ALL {
+                for (index, kind) in TemplateKind::ALL.into_iter().enumerate() {
+                    if index > 0 {
+                        ui.add_space(3.0);
+                    }
                     let mut checked = draft.kinds.contains(&kind);
                     if ui.checkbox(&mut checked, kind.label()).changed() {
                         if checked {
@@ -296,8 +418,6 @@ impl GongwenApp {
                     }
                 }
             });
-            ui.add_space(8.0);
-
             ui.label("优化指令").on_hover_ui(|ui| {
                 ui.label("只写“这次要模型做什么”。");
                 ui.label(
@@ -309,14 +429,14 @@ impl GongwenApp {
                 egui::TextEdit::multiline(&mut draft.instruction)
                     .hint_text("留空表示只按内置标准做格式规整")
                     .desired_width(ui.available_width())
-                    .desired_rows(10),
+                    .desired_rows(6),
             );
 
             if let Some(error) = &draft.error {
                 ui.add_space(4.0);
                 ui.colored_label(warn(), error);
             }
-            ui.add_space(8.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if theme::primary_icon_button(ui, theme::Icon::Save, "应用到提示词库")
                     .on_hover_text("写回提示词库；仍需点右上角“保存更改”落盘")
@@ -330,17 +450,50 @@ impl GongwenApp {
             });
         });
 
+        if let Some(id) = draft.id {
+            if (move_up || move_down)
+                && let Some(index) = self
+                    .config
+                    .ai_prompts
+                    .iter()
+                    .position(|entry| entry.id == id)
+            {
+                let other = if move_up { index - 1 } else { index + 1 };
+                self.config.ai_prompts.swap(index, other);
+            }
+            if duplicate {
+                self.duplicate_ai_prompt(id);
+                return;
+            }
+            if restore {
+                self.restore_builtin_ai_prompt(id);
+                return;
+            }
+            if delete {
+                self.ai_prompt_delete_confirm = Some(id);
+            }
+        }
+
         if submit {
             match self.apply_ai_prompt_draft(&draft) {
                 Ok(id) => {
                     self.ai_prompt_selected = Some(id);
+                    self.ai_prompt_editor =
+                        self.config.ai_prompt(id).map(AiPromptDraft::from_entry);
                     self.status = "提示词已更新。点右上角“保存更改”写入本机配置。".into();
                     return;
                 }
                 Err(message) => draft.error = Some(message),
             }
         }
-        if !close {
+        if close {
+            let entry = draft
+                .id
+                .and_then(|id| self.config.ai_prompt(id))
+                .or_else(|| self.config.ai_prompts.first());
+            self.ai_prompt_selected = entry.map(|entry| entry.id);
+            self.ai_prompt_editor = entry.map(AiPromptDraft::from_entry);
+        } else {
             self.ai_prompt_editor = Some(draft);
         }
     }
@@ -381,13 +534,16 @@ impl GongwenApp {
             }
             None => {
                 let id = self.config.next_ai_prompt_id();
-                self.config.ai_prompts.push(AiPrompt {
-                    id,
-                    name: name.to_string(),
-                    instruction: draft.instruction.trim().to_string(),
-                    kinds,
-                    builtin_key: String::new(),
-                });
+                self.config.ai_prompts.insert(
+                    0,
+                    AiPrompt {
+                        id,
+                        name: name.to_string(),
+                        instruction: draft.instruction.trim().to_string(),
+                        kinds,
+                        builtin_key: String::new(),
+                    },
+                );
                 Ok(id)
             }
         }
@@ -410,13 +566,16 @@ impl GongwenApp {
             suffix += 1;
         }
         let new_id = self.config.next_ai_prompt_id();
-        self.config.ai_prompts.push(AiPrompt {
-            id: new_id,
-            name,
-            instruction: source.instruction,
-            kinds: source.kinds,
-            builtin_key: String::new(),
-        });
+        self.config.ai_prompts.insert(
+            0,
+            AiPrompt {
+                id: new_id,
+                name,
+                instruction: source.instruction,
+                kinds: source.kinds,
+                builtin_key: String::new(),
+            },
+        );
         self.ai_prompt_selected = Some(new_id);
         if let Some(entry) = self.config.ai_prompt(new_id) {
             self.ai_prompt_editor = Some(AiPromptDraft::from_entry(entry));
@@ -456,6 +615,13 @@ impl GongwenApp {
             self.ai_prompt_editor = Some(AiPromptDraft::from_entry(entry));
         }
         self.status = "已恢复该内置提示词的出厂内容。".into();
+    }
+
+    fn ai_prompt_contract_card_ui(&mut self, ui: &mut egui::Ui) {
+        theme::card().show(ui, |ui| {
+            ui.set_width((ui.available_width() - 20.0).max(240.0));
+            self.output_contract_preview_ui(ui);
+        });
     }
 
     /// 把内置输出标准原样摊开给用户看。它是不可编辑的，但藏着不说会让人
