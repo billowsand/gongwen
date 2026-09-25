@@ -867,6 +867,456 @@ mod consistency_tests {
         );
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum ElementField {
+        Recipient,
+        CopiesTo,
+        Security,
+        Number,
+        Date,
+        SigningUnit,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ElementChange {
+        Cleared,
+        Added,
+        Modified,
+    }
+
+    fn populated_element_input(kind: TemplateKind) -> DraftInput {
+        let mut input = DraftInput {
+            kind,
+            date: "2024年6月8日".into(),
+            ..Default::default()
+        };
+        input.profile = TemplateProfile::for_kind(kind);
+        input.profile.issuing_unit = "星海省教育厅".into();
+        input.profile.recipient = "甲市教育局".into();
+        input.profile.reporting_leaders = "张三".into();
+        input.profile.copies_to = "丙市教育局".into();
+        input.profile.department_code = "星教函".into();
+        input.profile.document_year = "2025".into();
+        input.profile.document_number = "7".into();
+        input.profile.signing_unit = "星海省教育厅".into();
+        input.profile.security_level = "秘密".into();
+        input.profile.security_period = "10年".into();
+        input
+    }
+
+    fn clear_element_input(input: &mut DraftInput) {
+        input.date.clear();
+        input.profile.issuing_unit.clear();
+        input.profile.recipient.clear();
+        input.profile.reporting_leaders.clear();
+        input.profile.copies_to.clear();
+        input.profile.department_code.clear();
+        input.profile.document_year.clear();
+        input.profile.document_number.clear();
+        input.profile.signing_unit.clear();
+        input.profile.security_level.clear();
+        input.profile.security_period.clear();
+    }
+
+    fn element_pair(kind: TemplateKind, change: ElementChange) -> (DraftInput, DraftInput) {
+        let mut old = populated_element_input(kind);
+        let mut new = populated_element_input(kind);
+        match change {
+            ElementChange::Cleared => clear_element_input(&mut new),
+            ElementChange::Added => clear_element_input(&mut old),
+            ElementChange::Modified => {
+                new.date = "2026年7月9日".into();
+                new.profile.issuing_unit = "星海省人民政府".into();
+                new.profile.recipient = "乙市教育局".into();
+                new.profile.reporting_leaders = "李四".into();
+                new.profile.copies_to = "丁市教育局".into();
+                new.profile.department_code = "星教办".into();
+                new.profile.document_year = "2027".into();
+                new.profile.document_number = "9".into();
+                new.profile.signing_unit = "星海省人民政府".into();
+                new.profile.security_level = "机密".into();
+                new.profile.security_period = "5年".into();
+            }
+        }
+        (old, new)
+    }
+
+    fn field_supported(kind: TemplateKind, field: ElementField) -> bool {
+        match field {
+            ElementField::Recipient => matches!(
+                kind,
+                TemplateKind::OfficialLetter
+                    | TemplateKind::PhoneNotice
+                    | TemplateKind::WhitePaper
+                    | TemplateKind::RedHeadApproval
+            ),
+            ElementField::CopiesTo => kind == TemplateKind::OfficialLetter,
+            ElementField::Security => kind != TemplateKind::ResearchReport,
+            ElementField::Number => {
+                matches!(
+                    kind,
+                    TemplateKind::OfficialLetter | TemplateKind::RedHeadApproval
+                )
+            }
+            ElementField::Date | ElementField::SigningUnit => matches!(
+                kind,
+                TemplateKind::OfficialLetter
+                    | TemplateKind::PhoneNotice
+                    | TemplateKind::WhitePaper
+                    | TemplateKind::RedHeadApproval
+            ),
+        }
+    }
+
+    fn field_marks_for(
+        marks: &ElementMarks,
+        field: ElementField,
+    ) -> Vec<&crate::visual_diff::elements::FieldMark> {
+        match field {
+            ElementField::Recipient => vec![marks.recipient()],
+            ElementField::CopiesTo => vec![marks.copies_to()],
+            ElementField::Security => vec![marks.security()],
+            ElementField::Number => marks.number().iter().collect(),
+            ElementField::Date => match marks.date().parts() {
+                Some(parts) => parts.into_iter().collect(),
+                None => vec![marks.date().whole().expect("整串日期部件")],
+            },
+            ElementField::SigningUnit => marks.signing_units().iter().collect(),
+        }
+    }
+
+    fn preview_element_output(
+        input: &DraftInput,
+        display: &UnitDisplay,
+        marks: &ElementMarks,
+    ) -> String {
+        let ctx = eframe::egui::Context::default();
+        crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let raw = eframe::egui::RawInput {
+            screen_rect: Some(eframe::egui::Rect::from_min_size(
+                eframe::egui::Pos2::ZERO,
+                eframe::egui::vec2(1000.0, 4000.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(raw, |ui| {
+            crate::preview::official_preview(
+                ui,
+                input,
+                display,
+                "# 测试公文\n\n正文内容。\n",
+                crate::preview::PreviewScale::zoom(Some(1.0)),
+                None,
+                false,
+                &crate::models::NumberingConfig::default(),
+                false,
+                marks,
+            );
+        });
+        fn collect_text(shape: &eframe::egui::epaint::Shape, out: &mut Vec<String>) {
+            match shape {
+                eframe::egui::epaint::Shape::Text(text) => {
+                    out.push(text.galley.text().to_string());
+                }
+                eframe::egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut text = Vec::new();
+        for clipped in &output.shapes {
+            collect_text(&clipped.shape, &mut text);
+        }
+        text.join("\n")
+    }
+
+    fn all_word_xml(path: &std::path::Path) -> String {
+        let file = std::fs::File::open(path).expect("打开 DOCX");
+        let mut archive = zip::ZipArchive::new(file).expect("读取 DOCX zip");
+        let mut xml = String::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).expect("读取 DOCX 部件");
+            if entry.name().starts_with("word/") && entry.name().ends_with(".xml") {
+                entry.read_to_string(&mut xml).expect("读取 Word XML");
+            }
+        }
+        xml
+    }
+
+    fn xml_run_has(xml: &str, text: &str, property: &str) -> bool {
+        let mut offset = 0;
+        while let Some(relative) = xml[offset..].find(text) {
+            let index = offset + relative;
+            let start = [xml[..index].rfind("<w:r>"), xml[..index].rfind("<w:r ")]
+                .into_iter()
+                .flatten()
+                .max();
+            let end = xml[index..].find("</w:r>").map(|end| index + end + 6);
+            if let (Some(start), Some(end)) = (start, end)
+                && xml[start..end].contains(property)
+            {
+                return true;
+            }
+            offset = index + text.len();
+            if offset >= xml.len() {
+                break;
+            }
+        }
+        false
+    }
+
+    /// 人工实测：用内置 Tectonic 编译清空要素的公函 / 红头呈批件，并用 pdftotext
+    /// 确认删除侧确实进入 PDF 文本层；运行环境需提供 pdftotext。
+    #[test]
+    #[ignore = "人工实测：编译 PDF 并抽取文字"]
+    fn manual_cleared_element_pdf_text_probe() {
+        use std::process::Command;
+
+        let display = UnitDisplay::new(&[]);
+        let fonts = crate::models::FontConfig::default();
+        let numbering = crate::models::NumberingConfig::default();
+        let dir = tempfile::tempdir().expect("临时目录");
+        for (index, kind) in [TemplateKind::OfficialLetter, TemplateKind::RedHeadApproval]
+            .into_iter()
+            .enumerate()
+        {
+            let (old, new) = element_pair(kind, ElementChange::Cleared);
+            let marks = element_marks(&old, &new, &display);
+            let tex = dir.path().join(format!("清空要素-{index}.tex"));
+            crate::export::write_tex_for_kind(
+                &tex,
+                &new,
+                "# 测试公文\n\n正文内容。\n",
+                &display,
+                &fonts,
+                &numbering,
+                &marks,
+            )
+            .expect("写 TeX");
+            let pdf = crate::texcompile::compile_pdf_with_proof(&tex, &fonts)
+                .expect("内置 Tectonic 编译")
+                .pdf
+                .expect("应生成 PDF");
+            let extracted = Command::new("pdftotext")
+                .arg(&pdf)
+                .arg("-")
+                .output()
+                .expect("运行 pdftotext");
+            assert!(extracted.status.success(), "pdftotext 应成功");
+            let text = String::from_utf8_lossy(&extracted.stdout);
+            let compact = text
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+
+            for field in [
+                ElementField::Recipient,
+                ElementField::CopiesTo,
+                ElementField::Security,
+                ElementField::Number,
+                ElementField::Date,
+                ElementField::SigningUnit,
+            ] {
+                if !field_supported(kind, field) {
+                    continue;
+                }
+                for mark in field_marks_for(&marks, field) {
+                    let Some((old, _)) = mark.change() else {
+                        continue;
+                    };
+                    let old = old
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .collect::<String>();
+                    assert!(
+                        compact.contains(&old),
+                        "{kind:?} / {field:?}: PDF 文本层缺少删除值 {old:?}：{text}"
+                    );
+                }
+            }
+        }
+    }
+    /// 六要素 × 清空/新增/修改 × 所有含该版位的文种：校验实际导出的 TeX、Word XML
+    /// 与 egui 全页绘制。红头呈批件没有抄送版位；电话通知、白头件等只校验其现有版位。
+    #[test]
+    fn element_change_matrix_keeps_marks_in_tex_word_and_preview() {
+        let kinds = [
+            TemplateKind::OfficialLetter,
+            TemplateKind::RedHeadApproval,
+            TemplateKind::PhoneNotice,
+            TemplateKind::WhitePaper,
+            TemplateKind::PlainDocument,
+            TemplateKind::MeetingAgenda,
+        ];
+        let fields = [
+            ElementField::Recipient,
+            ElementField::CopiesTo,
+            ElementField::Security,
+            ElementField::Number,
+            ElementField::Date,
+            ElementField::SigningUnit,
+        ];
+        let changes = [
+            ElementChange::Cleared,
+            ElementChange::Added,
+            ElementChange::Modified,
+        ];
+        let display = UnitDisplay::new(&[]);
+        let fonts = crate::models::FontConfig::default();
+        let numbering = crate::models::NumberingConfig::default();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let mut output_index = 0;
+
+        for kind in kinds {
+            for change in changes {
+                let (old, new) = element_pair(kind, change);
+                let marks = element_marks(&old, &new, &display);
+                let tex_path = dir.path().join(format!("要素-{output_index}.tex"));
+                let docx_path = dir.path().join(format!("要素-{output_index}.docx"));
+                output_index += 1;
+                crate::export::write_tex_for_kind(
+                    &tex_path,
+                    &new,
+                    "# 测试公文\n\n正文内容。\n",
+                    &display,
+                    &fonts,
+                    &numbering,
+                    &marks,
+                )
+                .expect("生成 TeX");
+                crate::export::write_docx_with_numbering(
+                    &docx_path,
+                    &new,
+                    "# 测试公文\n\n正文内容。\n",
+                    &display,
+                    &fonts,
+                    &numbering,
+                    &marks,
+                )
+                .expect("生成 Word");
+                let tex = std::fs::read_to_string(&tex_path).expect("读取 TeX");
+                let word_xml = all_word_xml(&docx_path);
+                let preview_text = preview_element_output(&new, &display, &marks);
+                let mut checked_fields = 0;
+
+                for field in fields {
+                    if !field_supported(kind, field) {
+                        continue;
+                    }
+                    let changed_units = field_marks_for(&marks, field)
+                        .into_iter()
+                        .filter_map(|mark| {
+                            mark.change()
+                                .map(|(old, new)| (mark.marked(), old.to_string(), new.to_string()))
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !changed_units.is_empty(),
+                        "{kind:?} / {field:?} / {change:?} 应生成标注部件"
+                    );
+                    checked_fields += 1;
+
+                    for (unit, old_value, new_value) in changed_units {
+                        let preview = preview_element_sequence(&unit);
+                        let docx = docx_element_sequence(&unit);
+                        let tex_fragments = extract_tex_fragments(&marked_tex_escape(&unit));
+                        assert_eq!(
+                            docx, preview,
+                            "{kind:?} / {field:?} / {change:?}: Word run 序列"
+                        );
+                        assert_eq!(
+                            tex_fragments, preview,
+                            "{kind:?} / {field:?} / {change:?}: TeX 片段序列"
+                        );
+                        assert!(
+                            preview
+                                .iter()
+                                .any(|(_, kind)| *kind == RedlineKind::Deleted)
+                                == matches!(
+                                    change,
+                                    ElementChange::Cleared | ElementChange::Modified
+                                ),
+                            "{kind:?} / {field:?} / {change:?}: 删除片段应符合变化类型：{preview:?}"
+                        );
+                        assert!(
+                            preview.iter().any(|(_, kind)| *kind == RedlineKind::Added)
+                                == matches!(change, ElementChange::Added | ElementChange::Modified),
+                            "{kind:?} / {field:?} / {change:?}: 新增片段应符合变化类型：{preview:?}"
+                        );
+                        let deleted = preview
+                            .iter()
+                            .filter(|(_, kind)| *kind == RedlineKind::Deleted)
+                            .map(|(text, _)| text.as_str())
+                            .collect::<String>();
+                        let added = preview
+                            .iter()
+                            .filter(|(_, kind)| *kind == RedlineKind::Added)
+                            .map(|(text, _)| text.as_str())
+                            .collect::<String>();
+                        assert_eq!(
+                            deleted, old_value,
+                            "{kind:?} / {field:?}: TeX/Word/预览删除值"
+                        );
+                        assert_eq!(
+                            added, new_value,
+                            "{kind:?} / {field:?}: TeX/Word/预览新增值"
+                        );
+
+                        for (text, mark_kind) in &preview {
+                            assert!(
+                                preview_text.contains(text),
+                                "{kind:?} / {field:?} / {change:?}: 预览绘制结果缺少 {text:?}"
+                            );
+                            let expected_macro = match mark_kind {
+                                RedlineKind::Deleted => format!("\\GwDel{{{text}}}"),
+                                RedlineKind::Added => format!("\\GwAdd{{{text}}}"),
+                                RedlineKind::Same => unreachable!("标注部件不应有 Same"),
+                            };
+                            assert!(
+                                tex.contains(&expected_macro),
+                                "{kind:?} / {field:?} / {change:?}: TeX 没有输出 {expected_macro:?}"
+                            );
+                            let property = match mark_kind {
+                                RedlineKind::Deleted => "<w:strike",
+                                RedlineKind::Added => "<w:bdr",
+                                RedlineKind::Same => unreachable!("标注部件不应有 Same"),
+                            };
+                            assert!(
+                                xml_run_has(&word_xml, text, property),
+                                "{kind:?} / {field:?} / {change:?}: Word XML 中 {text:?} 缺少 {property}"
+                            );
+                        }
+                    }
+                }
+                assert!(checked_fields > 0, "{kind:?} 至少应覆盖一个要素字段");
+                if kind == TemplateKind::OfficialLetter {
+                    assert!(
+                        tex.contains(r"\CopiesToMarkedRow}{true}"),
+                        "抄送行应由类文件保留：{tex}"
+                    );
+                }
+            }
+        }
+        let class = include_str!("../gonghan-gwa.cls");
+        for expected in [
+            r"\newcommand{\CopiesToMarkedRow}{false}",
+            r"\equal{\CopiesToMarkedRow}{true}",
+            r"\CopiesToMarked{}\PrintCopiesAtLineEnd{}",
+            r"\SecurityLine{}",
+            r"\RecipientMarked{}：",
+            r"\DocumentNumber{}",
+            r"\SignatureYear{}年\SignatureMonth{}月\SignatureDay{}日",
+            r"\SignatureUnit{}",
+        ] {
+            assert!(
+                class.contains(expected),
+                "TeX 类文件缺少版位输出 {expected}"
+            );
+        }
+    }
     /// 要素没变时，三处输出与改动前逐字节相同：空标注与不带标注的同一调用
     /// 产出一致的 TeX / Word 部件，且不出现任何花脸稿宏。
     ///

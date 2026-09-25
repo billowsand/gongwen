@@ -149,7 +149,7 @@ pub(crate) fn add_white_paper_signature(
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
     let marks = elements.signing_units();
-    if units.is_empty() && !marks.iter().any(|mark| mark.changed()) {
+    if units.is_empty() && !marks.iter().any(|mark| mark.changed()) && !elements.date().changed() {
         return doc;
     }
     // 要素标注：落款单位按行替换——旧值删除线、新值加框，整行删旧插新；旧版

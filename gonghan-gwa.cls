@@ -424,6 +424,7 @@
 % 版记信息
 \newcommand{\CopiesTo}{}                        % 抄送单位（默认无）
 \newcommand{\CopiesToMarked}{\CopiesTo}
+\newcommand{\CopiesToMarkedRow}{false}        % 抄送有标注时设为 true，清空仍保留行
 \newcommand{\ResponsibleUnit}{}                % 承办单位（必须设置）
 \newcommand{\ContactPerson}{}                  % 联系人（必须设置）
 \newcommand{\ContactPhone}{}                   % 联系电话（必须设置）
@@ -611,7 +612,12 @@
 % 抄送使用三字符悬挂缩进，续行与首个抄送单位对齐，不落到“抄送：”下方。
 \newcommand{\FooterCopiesLine}{%
     \ifthenelse{\equal{\CopiesTo}{}}{%
-        \PrintCopiesAtLineEnd{}%
+        \ifthenelse{\equal{\CopiesToMarkedRow}{true}}{%
+            \hangindent=3em\hangafter=1\relax
+            \makebox[3em][l]{抄送：}\CopiesToMarked{}\PrintCopiesAtLineEnd{}%
+        }{%
+            \PrintCopiesAtLineEnd{}%
+        }%
     }{%
         \hangindent=3em\hangafter=1\relax
         \makebox[3em][l]{抄送：}\CopiesToMarked{}\PrintCopiesAtLineEnd{}%

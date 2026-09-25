@@ -39,14 +39,14 @@ pub(crate) fn add_footer_record(
     let mut rows = Vec::new();
 
     // 首行：抄送 + 右对齐印数，跨三列，其上边框即版记上横线。
-    // 没有抄送单位时整行只留印数，不写空的“抄送：”标签（与 gonghan-gwa.cls 的 \FooterCopiesLine 一致）。
+    // 没有抄送单位时整行只留印数；仅在抄送字段有删除标注时保留“抄送：”行。
     let copies_text = crate::export::element_display::copies_to_display(input, display);
     let mut copies_paragraph = Paragraph::new().add_tab(
         Tab::new()
             .val(TabValueType::Right)
             .pos(TABLE_CONTENT_WIDTH_TWIPS),
     );
-    if !copies_text.is_empty() {
+    if !copies_text.is_empty() || elements.copies_to().changed() {
         // 抄送变了：旧值删除线、新值加框，「抄送：」标签不进标注；没变原样单 run。
         copies_paragraph =
             copies_paragraph.indent(Some(840), Some(SpecialIndentType::Hanging(840)), None, None);

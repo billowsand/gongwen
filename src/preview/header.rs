@@ -64,9 +64,11 @@ pub(crate) fn security_line(
     input: &DraftInput,
     mark: &FieldMark,
 ) -> bool {
-    let Some(text) = crate::export::element_display::security_display(input) else {
+    let text = crate::export::element_display::security_display(input);
+    if text.is_none() && !mark.changed() {
         return false;
-    };
+    }
+    let text = text.unwrap_or_default();
     let special = if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {
         "\u{2003}指人专办"
     } else {

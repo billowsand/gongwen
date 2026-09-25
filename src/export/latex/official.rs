@@ -119,6 +119,11 @@ pub(crate) fn official_letter_tex_with_numbering(
     } else {
         String::new()
     };
+    let copies_marked_row = if elements.copies_to().changed() {
+        "\\renewcommand{\\CopiesToMarkedRow}{true}\n"
+    } else {
+        ""
+    };
     let (year_arg, month_arg, day_arg) = if elements.date().changed() {
         match elements.date().parts() {
             Some([year_mark, month_mark, day_mark]) => (
@@ -245,7 +250,7 @@ pub(crate) fn official_letter_tex_with_numbering(
 \renewcommand{{\SignatureYear}}{{{year}}}
 \renewcommand{{\SignatureMonth}}{{{month}}}
 \renewcommand{{\SignatureDay}}{{{day}}}
-{copies_marked}\renewcommand{{\CopiesTo}}{{{copies}}}
+{copies_marked_row}{copies_marked}\renewcommand{{\CopiesTo}}{{{copies}}}
 \renewcommand{{\ResponsibleUnit}}{{{responsible}}}
 \renewcommand{{\ContactPerson}}{{{contact}}}
 \renewcommand{{\ContactPhone}}{{{phone}}}
@@ -296,6 +301,7 @@ pub(crate) fn official_letter_tex_with_numbering(
         day = day_arg,
         copies = copies_arg,
         copies_marked = copies_marked_arg,
+        copies_marked_row = copies_marked_row,
         responsible = tex_escape(&responsible_display),
         contact = latex_name(&input.profile.contact_person),
         phone = tex_escape(&input.profile.contact_phone),

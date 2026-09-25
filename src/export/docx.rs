@@ -249,14 +249,15 @@ pub fn write_docx_with_numbering(
                     ),
                 );
             }
-            if !input.profile.security_level.trim().is_empty() {
+            if !input.profile.security_level.trim().is_empty() || elements.security().changed() {
                 doc = doc.add_paragraph(
                     letter_security_paragraph(input, elements.security()).keep_next(true),
                 );
             }
         }
         TemplateKind::WhitePaper | TemplateKind::PlainDocument => {
-            let has_security = !input.profile.security_level.trim().is_empty();
+            let has_security =
+                !input.profile.security_level.trim().is_empty() || elements.security().changed();
             if has_security {
                 doc = doc.add_paragraph(
                     letter_security_paragraph(input, elements.security())
@@ -386,7 +387,9 @@ pub fn write_docx_with_numbering(
 
     // 主送机关位的显示值（函稿主送 / 白头件呈报领导）与预览、TeX 同源。
     let addressee = crate::export::element_display::addressee_display(input, display);
-    if !addressee.is_empty() && !markdown.contains(addressee.as_str()) {
+    if (!addressee.is_empty() && !markdown.contains(addressee.as_str()))
+        || (addressee.is_empty() && elements.recipient().changed())
+    {
         doc = doc.add_paragraph(paragraphs::addressee_paragraph(
             &addressee,
             elements.recipient(),
@@ -554,7 +557,10 @@ pub fn write_docx_with_numbering(
             .into_iter()
             .next()
             .unwrap_or_default();
-        if !signature.is_empty() {
+        if !signature.is_empty()
+            || elements.signing_units().iter().any(|mark| mark.changed())
+            || elements.date().changed()
+        {
             // 代章直接跟在落款单位后面同一行（如“星海省教育厅（代章）”），不另起一行。
             // 是否标注只由 seals_on_behalf 决定（仅公函；电话通知等其他文种不盖章）。
             // 落款单位变了按整字段替换（旧值删除线、新值加框）；代章不进标注。

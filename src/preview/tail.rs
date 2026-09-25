@@ -53,7 +53,7 @@ pub(crate) fn addressee_block(
     elements: &ElementMarks,
 ) {
     let text = crate::export::element_display::addressee_display(input, display);
-    if text.is_empty() {
+    if text.is_empty() && !elements.recipient().changed() {
         return;
     }
     // 主送位变了整字段替换（旧值删除线、新值加框），冒号不进标注。
@@ -108,7 +108,10 @@ pub(crate) fn signature_block(
                 .filter(|unit| !unit.trim().is_empty())
                 .collect::<Vec<_>>();
             let line_marks = elements.signing_units();
-            if units.is_empty() && !line_marks.iter().any(|mark| mark.changed()) {
+            if units.is_empty()
+                && !line_marks.iter().any(|mark| mark.changed())
+                && !elements.date().changed()
+            {
                 return;
             }
             // 要素标注：落款单位按行替换——旧值删除线、新值加框；旧版多出来的行
@@ -196,7 +199,10 @@ pub(crate) fn signature_block(
             } else {
                 signature_unit(input, display)
             };
-            if unit.trim().is_empty() {
+            if unit.trim().is_empty()
+                && !elements.signing_units().iter().any(|mark| mark.changed())
+                && !elements.date().changed()
+            {
                 return;
             }
             let left = metrics.content - width;

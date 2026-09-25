@@ -152,6 +152,8 @@
 - `redline::consistency_tests::unchanged_elements_keep_the_plain_output_byte_for_byte`：
   空标注与定稿导出逐字节相同（TeX 文件、DOCX 的 `word/document.xml`）。
 - `redline::tests::element_only_changes_still_produce_a_redline`：正文没动只改密级。
+- `redline::consistency_tests::element_change_matrix_keeps_marks_in_tex_word_and_preview`：六要素 × 清空 / 新增 / 修改，覆盖公函、红头呈批件及电话通知、白头件、普通公文、会议议程各自现有的版位；逐项核对真实 TeX 宏、所有 `word/*.xml` 的删除线 / 边框 run、全页预览文字与删增片段序列。
+- `redline::consistency_tests::manual_cleared_element_pdf_text_probe`（`#[ignore]`）：内置 Tectonic 编译清空要素的公函 / 红头呈批件，用 `pdftotext` 检查删除侧确实进入 PDF 文本层。
 - `redline::consistency_tests::manual_element_pdf_full_probe`（`#[ignore]`）：真编译 +
   栅格化探针，见下。
 
@@ -167,6 +169,15 @@
 仍建议人眼确认；红头呈批件落款带标注时 `\RedSignatureUnitWidth` 已按标注文本
 （旧 + 新）重算，否则定宽摆位与日期居中会偏。
 
+
+## 第 ② 期要素清空标注修复（2026-09-25）
+
+- 根因：主送、抄送、密级、落款等绘制路径先按新版空值跳过版位，导致只含旧值删除段的标注未进入输出。
+- TeX：密级命令仅在「新版密级为空且密级未变」时省略。类文件新增 `\CopiesToMarkedRow`（默认 `false`）；抄送字段有标注时导出设置为 `true`，新版抄送为空仍排“抄送：”与旧值删除线。份数统计继续只读未标注的新值；没有标注时定稿 TeX 与空标注输出逐字节测试保持一致。
+- 预览：密级、主送与红头呈批件的密级 / 呈报领导都在有标注时保留版位；抄送沿用原有字段片段绘制。落款只有新版单位行为空、且没有单位或日期标注时才跳过。
+- Word：清空密级、主送、抄送仍生成标注段；新版落款单位为空时仍生成旧单位删除 run，日期有标注时也不被空单位门控吞掉。矩阵从 `word/` 下所有 XML 部件检查 run 属性，覆盖页眉 / 页脚部件。
+- 红头呈批件无抄送版位，矩阵不为它虚构抄送输出；其余适用字段逐项覆盖。
+- 验证：`cargo fmt --all -- --check` 与 `cargo clippy --locked --all-targets -- -D warnings` 通过；`cargo test --locked --all-targets` 为 1204 passed、0 failed、33 ignored。`manual_cleared_element_pdf_text_probe` 另以 `cargo test --locked manual_cleared_element_pdf_text_probe -- --ignored --nocapture` 通过，内置 Tectonic 编译两种文种并由 `pdftotext` 抽取删除值。
 
 ## 第 ③ 期交付了什么
 
@@ -384,7 +395,7 @@
    还原按钮、新增空行「（空行）」标签的观感，打印预览的 PDF 与右栏一致；删除线高度与跳过
    标点、新增框在样式切换处约 0.4–1.6pt 的断缝（见「已知的坑」）。
 2. **人眼验收第 ② 期要素标注**：进对照模式看版头 / 版记要素处的红删除线与蓝框，
-   与「打印预览」PDF 对照（`manual_element_pdf_full_probe` 可出图到 `tmp/element-marks-full/`）；
+   与「打印预览」PDF 对照，包含「旧值存在、新值清空」时保留下来的删除线；
    重点看框线贴字、红头字距、红头呈批件落款与日期的相对位置（见「已知的坑」）。
 3. **要素标注的遗留项**：
    - 发文单位（红头机关标志）不做（本期指定范围之外）；改了发文单位只在左栏「要素变化」卡片可见。

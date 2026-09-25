@@ -118,7 +118,7 @@ pub(crate) fn redline_macro(
 /// 「★保密期限」是条件输出、跟着消失（★由显示值自带）；指人专办照旧。
 pub(crate) fn security_commands(input: &DraftInput, mark: &FieldMark) -> String {
     let (level, period) = crate::export::element_display::security_parts(input);
-    if level.is_empty() {
+    if level.is_empty() && !mark.changed() {
         return String::new();
     }
     let special = if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {

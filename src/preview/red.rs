@@ -645,7 +645,7 @@ pub(crate) fn red_build_print_layout(
     }
     state.cursor_y += metrics.line;
     let leaders = crate::export::element_display::addressee_display(input, display);
-    if !leaders.is_empty() {
+    if !leaders.is_empty() || elements.recipient().changed() {
         // 呈报领导（主送位）变了整字段替换，冒号不进标注。
         let leaders_text = if elements.recipient().changed() {
             format!("{}：", elements.recipient().marked())
@@ -996,7 +996,9 @@ pub(crate) fn paint_red_approval_overlay(
     let record_height = 1.4 + rows.len().max(1) as f32 * (LINE_PT / MM);
     let record_top = text_bottom - record_height;
 
-    if let Some(security) = crate::export::element_display::security_display(input) {
+    let security = crate::export::element_display::security_display(input);
+    if security.is_some() || elements.security().changed() {
+        let security = security.unwrap_or_default();
         let security_changed = elements.security().changed();
         let security_text = if security_changed {
             elements.security().marked()
