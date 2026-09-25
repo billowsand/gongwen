@@ -283,7 +283,7 @@ impl GongwenApp {
         // 只在活动标签是稿件时出现——设置页、词库页上它们没有作用对象。
         let mut quick_rect: Option<egui::Rect> = None;
         if self.showing_doc() {
-            let left = text_right + 18.0;
+            let left = text_right + 8.0;
             let available = egui::Rect::from_min_max(
                 egui::pos2(left, rect.top() + 4.0),
                 egui::pos2(title_rect.right() - 8.0, rect.bottom() - 4.0),
@@ -295,11 +295,17 @@ impl GongwenApp {
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 quick.spacing_mut().item_spacing.x = 2.0;
-                let labeled = rect.width() >= 1_100.0;
-                self.titlebar_quick_access(&mut quick, labeled);
+                // 品牌标与按钮组之间一道细竖线，看得出后面是一组工具而不是标题。
+                theme::divider_v(&mut quick, 16.0);
+                quick.add_space(6.0);
+                self.titlebar_quick_access(&mut quick);
                 quick_rect = Some(quick.min_rect());
             }
         }
+        // 当前稿件标题按整窗几何中心摆放，左右让开快速访问与窗口按钮。
+        let title_left = quick_rect.map_or(text_right, |quick| quick.right()) + 16.0;
+        let title_right = rect.right() - controls_width - 16.0;
+        self.paint_centered_title(ui, rect, title_left, title_right, title_color);
         // 拖拽区绕开快速访问那几枚按钮：两侧各留一段，中间让给按钮。
         let gap = quick_rect.map_or(title_rect.right()..title_rect.right(), |quick| {
             (quick.left() - 4.0)..(quick.right() + 4.0)
@@ -420,8 +426,8 @@ impl GongwenApp {
         title_color: egui::Color32,
     ) {
         const RIGHT_MARGIN: f32 = 12.0;
-        const QUICK_WIDTH_COMPACT: f32 = 102.0;
-        const QUICK_WIDTH_LABELED: f32 = 284.0;
+        /// 三枚 26 px 图标按钮加两道 2 px 间距。
+        const QUICK_WIDTH: f32 = 82.0;
 
         let content_left = rect.left() + native_controls_width;
         let mut drag_right = rect.right() - RIGHT_MARGIN;
@@ -429,56 +435,24 @@ impl GongwenApp {
         // 快速操作是稿件上下文才有的工具，固定收在右边，避免和
         // 左侧红黄绿或中间标题抢位置。
         if self.showing_doc() {
-            let labeled = rect.width() >= 1_100.0;
-            let quick_width = if labeled {
-                QUICK_WIDTH_LABELED
-            } else {
-                QUICK_WIDTH_COMPACT
-            };
-            let quick_left = (rect.right() - RIGHT_MARGIN - quick_width).max(content_left + 120.0);
+            let quick_left = (rect.right() - RIGHT_MARGIN - QUICK_WIDTH).max(content_left + 120.0);
             let available = egui::Rect::from_min_max(
                 egui::pos2(quick_left, rect.top() + 4.0),
                 egui::pos2(rect.right() - RIGHT_MARGIN, rect.bottom() - 4.0),
             );
-            if available.width() >= 76.0 {
+            if available.width() >= QUICK_WIDTH {
                 let mut quick = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(available)
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 quick.spacing_mut().item_spacing.x = 2.0;
-                self.titlebar_quick_access(&mut quick, labeled);
+                self.titlebar_quick_access(&mut quick);
                 drag_right = available.left() - 8.0;
             }
         }
 
-        // 按窗口整体的几何中心摆标题，不因左右控件宽度不对称而偏移。
-        // 剪裁区对称收紧，窄窗口时不会压到原生按钮或快速操作。
-        let center_x = rect.center().x;
-        let half_width = (center_x - content_left)
-            .min(drag_right - center_x)
-            .max(0.0);
-        if half_width > 40.0 {
-            let (mark, active_title) = self.tab_label(self.active_tab);
-            let active_title = if active_title.is_empty() {
-                version::APP_TITLE.to_string()
-            } else if mark.is_empty() {
-                active_title
-            } else {
-                format!("{mark} {active_title}")
-            };
-            let clip = egui::Rect::from_min_max(
-                egui::pos2(center_x - half_width, rect.top()),
-                egui::pos2(center_x + half_width, rect.bottom()),
-            );
-            ui.painter().with_clip_rect(clip).text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                truncate_middle(&active_title, 42),
-                egui::TextStyle::Body.resolve(ui.style()),
-                title_color,
-            );
-        }
+        self.paint_centered_title(ui, rect, content_left, drag_right, title_color);
 
         let drag_rect = egui::Rect::from_min_max(
             egui::pos2(content_left, rect.top()),
@@ -498,11 +472,49 @@ impl GongwenApp {
         }
     }
 
+    /// 在标题栏正中写当前标签的标题（带状态标记）。
+    ///
+    /// 按窗口整体的几何中心摆，不因左右控件宽度不对称而偏移；剪裁区以中心
+    /// 对称收进 `[left, right]`，窄窗口时不会压到窗口按钮或快速访问。
+    fn paint_centered_title(
+        &self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        left: f32,
+        right: f32,
+        color: egui::Color32,
+    ) {
+        let center_x = rect.center().x;
+        let half_width = (center_x - left).min(right - center_x).max(0.0);
+        if half_width <= 40.0 {
+            return;
+        }
+        let (mark, active_title) = self.tab_label(self.active_tab);
+        let active_title = if active_title.is_empty() {
+            version::APP_TITLE.to_string()
+        } else if mark.is_empty() {
+            active_title
+        } else {
+            format!("{mark} {active_title}")
+        };
+        let clip = egui::Rect::from_min_max(
+            egui::pos2(center_x - half_width, rect.top()),
+            egui::pos2(center_x + half_width, rect.bottom()),
+        );
+        ui.painter().with_clip_rect(clip).text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            truncate_middle(&active_title, 42),
+            egui::TextStyle::Body.resolve(ui.style()),
+            color,
+        );
+    }
+
     /// 标题栏上的快速访问：保存、提交版本、导出。这三件事跟当前停在哪个分区卡
-    /// 无关，任何时候都该够得着，所以仿 Word 挂在标题栏上而不是放进功能区。
-    /// 宽窗口显示短文字，窄窗口自动退回纯图标；保存键上的小圆点表示有未写回
-    /// 稿件库的改动。这样高频动作第一眼可见，同时不牺牲窄窗口的标题空间。
-    pub(crate) fn titlebar_quick_access(&mut self, ui: &mut egui::Ui, labeled: bool) {
+    /// 无关，任何时候都该够得着，所以仿 Word 快速访问工具栏挂在标题栏上。
+    /// 只放图标、常态无底色，分量压到比功能区和标签行都轻；含义靠悬停说明，
+    /// 保存键上的小圆点表示有未写回稿件库的改动。
+    pub(crate) fn titlebar_quick_access(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = self.active_doc_ref() else {
             return;
         };
@@ -518,47 +530,34 @@ impl GongwenApp {
             format!("保存：在稿件库中新建一条草稿记录（{save_shortcut}）")
         };
 
-        let save = if labeled {
-            ui.add_enabled(editable, theme::icon_text_button(theme::Icon::Save, "保存"))
-                .on_hover_text(&save_hint)
-        } else {
-            theme::icon_button_enabled(ui, editable, theme::Icon::Save, &save_hint)
-        };
+        let save = theme::titlebar_icon_button(ui, editable, theme::Icon::Save, &save_hint);
         if dirty {
-            // 脏标记：强调色圆点外套一圈与标题栏同色的环，在浅色底上比
-            // 光秃秃的 3px 圆点醒目得多。
+            // 脏标记：强调色圆点外套一圈与标题栏同色的环，压在图标右上角也分得清。
             let center = save.rect.right_top() + egui::vec2(-5.0, 5.0);
-            ui.painter().circle_filled(center, 4.5, theme::surface());
-            ui.painter().circle_filled(center, 3.0, theme::accent());
+            ui.painter().circle_filled(center, 4.0, theme::surface());
+            ui.painter().circle_filled(center, 2.5, theme::accent());
         }
         if save.clicked() {
             self.save_to_manuscript_library();
         }
-        let commit_hint = "提交版本：把当前内容固化为一个新版本";
-        let commit = if labeled {
-            ui.add_enabled(
-                saved && editable,
-                theme::icon_text_button(theme::Icon::GitCommit, "提交版本"),
-            )
-            .on_hover_text(commit_hint)
+        let commit_hint = if saved {
+            "提交版本：把当前内容固化为一个新版本"
         } else {
-            theme::icon_button_enabled(ui, saved && editable, theme::Icon::GitCommit, commit_hint)
+            "提交版本：先保存，再提交版本"
         };
+        let commit =
+            theme::titlebar_icon_button(ui, saved && editable, theme::Icon::GitCommit, commit_hint);
         if commit.clicked()
             && let Some(id) = manuscript_id
         {
             self.open_version_commit(VersionScope::Manuscript(id));
         }
-        let export_hint = "导出：按设置里勾选的格式出文件";
-        let export = if labeled {
-            ui.add_enabled(
-                ready_to_export,
-                theme::icon_text_button(theme::Icon::FileDown, "导出"),
-            )
-            .on_hover_text(export_hint)
-        } else {
-            theme::icon_button_enabled(ui, ready_to_export, theme::Icon::FileDown, export_hint)
-        };
+        let export = theme::titlebar_icon_button(
+            ui,
+            ready_to_export,
+            theme::Icon::FileDown,
+            "导出：按设置里勾选的格式出文件",
+        );
         if export.clicked() {
             self.draft_page().start_export_current();
         }

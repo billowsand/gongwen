@@ -2070,6 +2070,51 @@ fn icon_button_impl(
     response.on_hover_text(label)
 }
 
+/// 标题栏快速访问的图标按钮：常态无底色、悬停才铺浅底，仿 Word 快速访问工具栏。
+///
+/// 自己分配固定的 26×24 而不走 `egui::Button`：后者的高度下限是全局
+/// `interact_size.y`（30 px），塞进 34 px 高的标题栏会上下各溢出、压到下沿分隔线。
+pub fn titlebar_icon_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: Icon,
+    label: &str,
+) -> egui::Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), sense);
+    if ui.is_rect_visible(rect) {
+        let fill = if !enabled {
+            Color32::TRANSPARENT
+        } else if response.is_pointer_button_down_on() {
+            surface_active()
+        } else if response.hovered() {
+            surface_hover()
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, CornerRadius::same(5), fill);
+        }
+        let tint = if !enabled {
+            text_muted()
+        } else if response.hovered() {
+            text()
+        } else {
+            text_soft()
+        };
+        icon.image().tint(tint).paint_at(
+            ui,
+            egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)),
+        );
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    response.on_hover_text(label)
+}
+
 /// 状态小圆点，用于状态栏与列表行。
 pub fn dot(ui: &mut egui::Ui, color: Color32) {
     let size = egui::vec2(8.0, 8.0);
