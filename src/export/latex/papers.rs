@@ -3,15 +3,16 @@
 //! 由 src/export/latex.rs 拆分而来：本文件是模块 `export::latex::papers`，与其它子模块共享
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::export::element_display::{
+    addressee_display, date_display_parts, number_display_parts, signing_unit_display,
+};
 use crate::export::latex::{
     attachment_summary_tex, latex_name,
     official_letter_sections_to_tex_with_barrier_with_numbering,
     official_letter_sections_to_tex_with_numbering, red_approval_title_content_tex,
     security_commands, tex_escape, tex_spread_signature, title_content_tex,
 };
-use crate::export::{
-    MarkdownBlock, chinese_date_parts, parse_markdown_with_lines_with_numbering, plain_text,
-};
+use crate::export::{MarkdownBlock, parse_markdown_with_lines_with_numbering, plain_text};
 use crate::models::{DraftInput, LetterVersion, ListNumbering, NumberingConfig};
 use crate::units::UnitDisplay;
 
@@ -52,15 +53,10 @@ pub(crate) fn white_paper_tex_with_numbering(
     };
     let security = security_commands(input);
     // 呈报领导（楷体顶格）按人员编码排序、相同职务合并后写入 \Recipient。
-    let leaders = display
-        .reporting_leaders(&input.profile.reporting_leaders)
-        .trim()
-        .trim_end_matches('：')
-        .to_string();
+    let leaders = addressee_display(input, display);
     // 落款单位：每个单位一行、行间空一行（便于签字），整体右对齐；显示文本
     // 少于 5 字时逐字用 `\hspace*` 分散对齐到 5 字宽，与预览/Word 各端一致。
-    let signature_unit = display
-        .white_paper_signature_units(input)
+    let signature_unit = signing_unit_display(input, display)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .enumerate()
@@ -77,8 +73,9 @@ pub(crate) fn white_paper_tex_with_numbering(
     let preview = input.profile.letter_version == LetterVersion::Preview;
     let preview_placeholder = "\\makebox[1em][c]{}";
     // 成文日期未填时沿用类默认：年份取当前年、日期留空待填。
-    let date_commands = match chinese_date_parts(&input.date) {
-        Some((year, month, day)) => {
+    let date_parts = date_display_parts(input);
+    let date_commands = match date_parts.as_slice() {
+        [year, month, day] => {
             let day = if preview {
                 preview_placeholder.to_string()
             } else {
@@ -91,7 +88,7 @@ pub(crate) fn white_paper_tex_with_numbering(
                 day
             )
         }
-        None => String::new(),
+        _ => String::new(),
     };
 
     format!(
@@ -162,14 +159,9 @@ pub(crate) fn red_head_approval_tex_with_numbering(
         format!("\\SetAttachmentContent{{\n{attachments}\n}}\n")
     };
     let security = security_commands(input);
-    let leaders = display
-        .reporting_leaders(&input.profile.reporting_leaders)
-        .trim()
-        .trim_end_matches('：')
-        .to_string();
+    let leaders = addressee_display(input, display);
     let issuing = display.full_name(&input.profile.issuing_unit);
-    let signature_units = display
-        .white_paper_signature_units(input)
+    let signature_units = signing_unit_display(input, display)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
@@ -191,13 +183,15 @@ pub(crate) fn red_head_approval_tex_with_numbering(
         .collect::<String>();
     let preview = input.profile.letter_version == LetterVersion::Preview;
     let placeholder = "\\makebox[1em][c]{}";
+    let (department_code, document_year, document_serial) = number_display_parts(input);
     let document_number = if preview {
         placeholder.to_string()
     } else {
-        tex_escape(&input.profile.document_number)
+        tex_escape(&document_serial)
     };
-    let date_commands = match chinese_date_parts(&input.date) {
-        Some((year, month, day)) => format!(
+    let date_parts = date_display_parts(input);
+    let date_commands = match date_parts.as_slice() {
+        [year, month, day] => format!(
             "\\renewcommand{{\\SignatureYear}}{{{}}}\n\\renewcommand{{\\SignatureMonth}}{{{}}}\n\\renewcommand{{\\SignatureDay}}{{{}}}\n",
             tex_escape(year),
             tex_escape(month),
@@ -207,7 +201,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
                 tex_escape(day)
             },
         ),
-        None => String::new(),
+        _ => String::new(),
     };
     let entries = crate::models::joint_responsible_entries(&input.profile);
     let record_rows = red_approval_record_display_rows(&entries, display);
@@ -244,8 +238,8 @@ pub(crate) fn red_head_approval_tex_with_numbering(
 \end{{document}}
 "#,
         issuing = tex_escape(&issuing),
-        document_year = tex_escape(&input.document_year()),
-        department = tex_escape(&input.profile.department_code),
+        document_year = tex_escape(&document_year),
+        department = tex_escape(&department_code),
         number = document_number,
         security = security,
         title = tex_escape(&title_plain),

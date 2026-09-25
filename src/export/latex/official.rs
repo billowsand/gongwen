@@ -3,6 +3,10 @@
 //! 由 src/export/latex.rs 拆分而来：本文件是模块 `export::latex::official`，与其它子模块共享
 //! `export::latex` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
+use crate::export::element_display::{
+    addressee_display, copies_to_display, date_display_parts, number_display_parts,
+    signing_unit_display,
+};
 use crate::export::latex::{
     attachment_document_title_to_tex, attachment_landscape_flags, attachment_summary_tex,
     body_text_to_tex, latex_name, marked_tex_escape, official_heading_to_tex, security_commands,
@@ -10,8 +14,8 @@ use crate::export::latex::{
 };
 use crate::export::table::to_longtblr;
 use crate::export::{
-    LineAlign, MarkdownBlock, MarkdownSection, chinese_date_parts, joint_main_column,
-    official_heading_prefix, parse_markdown_with_lines_with_numbering, render_list_number,
+    LineAlign, MarkdownBlock, MarkdownSection, joint_main_column, official_heading_prefix,
+    parse_markdown_with_lines_with_numbering, render_list_number,
 };
 use crate::models::{
     DraftInput, JointIssuanceMode, LetterVersion, NumberingConfig, StyleMode, TemplateKind,
@@ -58,16 +62,21 @@ pub(crate) fn official_letter_tex_with_numbering(
         format!("\\SetAttachmentContent{{\n{attachments}\n}}\n")
     };
     let security = security_commands(input);
-    let (signature_year, signature_month, signature_day) =
-        chinese_date_parts(&input.date).unwrap_or(("", "", ""));
-    let document_year = input.document_year();
+    // 成文日期在类里拼成「○年○月○日」，年 / 月 / 日各是一个命令，显示值也按部件给。
+    let date_parts = date_display_parts(input);
+    let (signature_year, signature_month, signature_day) = match date_parts.as_slice() {
+        [year, month, day] => (year.as_str(), month.as_str(), day.as_str()),
+        // 自由文本日期切不开：类里的年月日照旧留空（与从前一致）。
+        _ => ("", "", ""),
+    };
+    let (department_code, document_year, document_serial) = number_display_parts(input);
     let preview = input.profile.letter_version == LetterVersion::Preview;
     // 规格 §3.3：预览版所有占位区域统一 1em 宽。
     let preview_placeholder = "\\makebox[1em][c]{}";
     let document_number = if preview {
         preview_placeholder.to_string()
     } else {
-        tex_escape(&input.profile.document_number)
+        tex_escape(&document_serial)
     };
     let signature_day = if preview {
         preview_placeholder.to_string()
@@ -140,14 +149,8 @@ pub(crate) fn official_letter_tex_with_numbering(
 
     // 规格 §2.2/3.1：红头、主送、抄送用层级展开全称；版记承办单位用简称；
     // 落款：公函用全称、电话通知用简称（少于 5 字逐字加空格）。
-    let recipient_display = display.join_hierarchical_for(
-        &split_units(&input.profile.recipient),
-        input.uses_external_unit_names(),
-    );
-    let copies_display = display.join_hierarchical_for(
-        &split_units(&input.profile.copies_to),
-        input.uses_external_unit_names(),
-    );
+    let recipient_display = addressee_display(input, display);
+    let copies_display = copies_to_display(input, display);
     let responsible_display = if joint_mode_one {
         split_units(&input.profile.joint_responsible_units)
             .iter()
@@ -157,25 +160,10 @@ pub(crate) fn official_letter_tex_with_numbering(
     } else {
         display.abbr(&input.profile.responsible_unit)
     };
-    let signature_display = {
-        let raw = if !input.profile.signing_unit.trim().is_empty() {
-            input.profile.signing_unit.trim().to_string()
-        } else if joint_mode_one {
-            // 联合发文模式 1 只剩 1 个发文单位：落款回落右侧单列，单位取该唯一发文
-            // 单位（联合发文的单位存在 joint_issuing_units，issuing_unit 是空的）。
-            split_units(&input.profile.joint_issuing_units)
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| input.profile.issuing_unit.trim().to_string())
-        } else {
-            input.profile.issuing_unit.trim().to_string()
-        };
-        if input.kind == TemplateKind::PhoneNotice {
-            display.abbr_spaced(&raw)
-        } else {
-            display.full_name_for(&raw, input.uses_external_unit_names())
-        }
-    };
+    let signature_display = signing_unit_display(input, display)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
 
     format!(
         r#"%!TEX program = xelatex
@@ -212,7 +200,7 @@ pub(crate) fn official_letter_tex_with_numbering(
         document_year = tex_escape(&document_year),
         year = tex_escape(signature_year),
         month = tex_escape(signature_month),
-        department = tex_escape(&input.profile.department_code),
+        department = tex_escape(&department_code),
         number = document_number,
         security = security,
         title = tex_escape(title),

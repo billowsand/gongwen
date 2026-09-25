@@ -75,7 +75,7 @@ const JOINT_ROW_GAP_MM: f32 = 45.0; // 联合发文落款行间公章空档
 const JOINT_DATE_GAP_MM: f32 = 6.0; // 联合发文落款与成文日期之间
 const WHITE_PAPER_BLANK_LINES: f32 = 10.0; // 白头件密级后空 10 行
 /// 预览版留白占位：规格 §3.3 统一 1em 宽。
-const PREVIEW_PLACEHOLDER: &str = "\u{2003}";
+pub(crate) use crate::export::element_display::PREVIEW_PLACEHOLDER;
 
 // A4 版心：页宽 210mm，左边距 1587 缇、右边距 1474 缇。
 const PAGE_PT: f32 = 595.28;

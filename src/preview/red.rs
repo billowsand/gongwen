@@ -642,12 +642,12 @@ pub(crate) fn red_build_print_layout(
         state.push(fragment);
     }
     state.cursor_y += metrics.line;
-    let leaders = display.reporting_leaders(&input.profile.reporting_leaders);
-    if !leaders.trim().is_empty() {
+    let leaders = crate::export::element_display::addressee_display(input, display);
+    if !leaders.is_empty() {
         let fragment = red_fixed_fragment(
             ui,
             metrics,
-            &format!("{}：", leaders.trim().trim_end_matches('：')),
+            &format!("{leaders}："),
             theme::FONT_KAITI,
             BODY_PT,
             narrow,
@@ -850,8 +850,7 @@ pub(crate) fn red_build_print_layout(
         }
     }
 
-    let signature_units = display
-        .white_paper_signature_units(input)
+    let signature_units = crate::export::element_display::signing_unit_display(input, display)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
@@ -951,15 +950,7 @@ pub(crate) fn paint_red_approval_overlay(
     let record_height = 1.4 + rows.len().max(1) as f32 * (LINE_PT / MM);
     let record_top = text_bottom - record_height;
 
-    if !input.profile.security_level.trim().is_empty() {
-        // 保密期限为空的（“内部”件）只印密级二字，不出“★”。
-        let level = input.profile.security_level.trim();
-        let period = input.profile.security_period.trim();
-        let security = if period.is_empty() {
-            level.to_string()
-        } else {
-            format!("{level}★{period}")
-        };
+    if let Some(security) = crate::export::element_display::security_display(input) {
         let galley = red_overlay_text(
             ui,
             metrics,

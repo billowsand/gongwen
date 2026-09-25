@@ -3,7 +3,7 @@
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::header`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
-use crate::models::{DraftInput, JointIssuanceMode, LetterVersion, TemplateKind, split_units};
+use crate::models::{DraftInput, JointIssuanceMode, TemplateKind, split_units};
 use crate::preview::{
     BODY_PT, HEADER_MAX_GAP_EM, HEADER_NUMBER_GAP_MM, HEADER_PT, HEADER_RULE_GAP_MM,
     HEADER_RULE_MM, Metrics, PREVIEW_PLACEHOLDER, WHITE_PAPER_BLANK_LINES, draw, job, layout,
@@ -42,16 +42,7 @@ pub(crate) fn header_unit(input: &DraftInput, display: &UnitDisplay) -> String {
 /// 里按“黑体 + 数字等宽”分段画，不经过这里。
 #[cfg(test)]
 pub(crate) fn security_text(input: &DraftInput) -> Option<String> {
-    let level = input.profile.security_level.trim();
-    if level.is_empty() {
-        return None;
-    }
-    let period = input.profile.security_period.trim();
-    let mut text = if period.is_empty() {
-        level.to_string()
-    } else {
-        format!("{level}★{period}")
-    };
+    let mut text = crate::export::element_display::security_display(input)?;
     // 普通公文不带“指人专办”，与 export::latex::security_commands 一致。
     if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {
         text.push('\u{2003}');
@@ -63,11 +54,9 @@ pub(crate) fn security_text(input: &DraftInput) -> Option<String> {
 /// 密级行：黑体三号顶格。返回是否真的画了东西，供调用方决定要不要留后续空行。
 /// 保密期限的数字随整行用黑体，不另设等宽西文字体。
 pub(crate) fn security_line(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput) -> bool {
-    let level = input.profile.security_level.trim();
-    if level.is_empty() {
+    let Some(text) = crate::export::element_display::security_display(input) else {
         return false;
-    }
-    let period = input.profile.security_period.trim();
+    };
     let special = if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {
         "\u{2003}指人专办"
     } else {
@@ -76,12 +65,6 @@ pub(crate) fn security_line(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftI
     let mut job = job(metrics.content);
     job.halign = Align::LEFT;
     let heiti = metrics.font(theme::FONT_HEITI, BODY_PT);
-    // 保密期限为空的（“内部”件）只印密级二字，不出“★”。
-    let text = if period.is_empty() {
-        level.to_string()
-    } else {
-        format!("{level}★{period}")
-    };
     job.append(&text, 0.0, text_format(heiti.clone(), metrics.line));
     if !special.is_empty() {
         job.append(special, 0.0, text_format(heiti.clone(), metrics.line));
@@ -92,16 +75,13 @@ pub(crate) fn security_line(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftI
 
 /// 发文字号：代字〔年〕序号 号。预览版把流水号留成 1em 空位，与导出一致。
 pub(crate) fn document_number(input: &DraftInput) -> String {
-    let year = input.document_year();
-    let serial = if input.profile.letter_version == LetterVersion::Preview {
+    let (code, year, serial) = crate::export::element_display::number_display_parts(input);
+    let serial = if crate::export::element_display::is_preview_version(input) {
         PREVIEW_PLACEHOLDER
     } else {
-        input.profile.document_number.trim()
+        serial.as_str()
     };
-    format!(
-        "{}〔{year}〕{serial} 号",
-        input.profile.department_code.trim()
-    )
+    format!("{code}〔{year}〕{serial} 号")
 }
 
 /// 红头（发文机关标志）：小标宋 29 磅红色，排得下就只拉开字距（上限 1em）、

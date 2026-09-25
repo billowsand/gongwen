@@ -5,6 +5,7 @@
 //! 文本工具），根文件保留导出入口与文件名工具。
 
 mod docx;
+pub(crate) mod element_display;
 mod latex;
 mod research;
 pub(crate) mod table;

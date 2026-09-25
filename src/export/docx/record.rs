@@ -34,10 +34,7 @@ pub(crate) fn add_footer_record(doc: Docx, input: &DraftInput, display: &UnitDis
 
     // 首行：抄送 + 右对齐印数，跨三列，其上边框即版记上横线。
     // 没有抄送单位时整行只留印数，不写空的“抄送：”标签（与 gonghan-gwa.cls 的 \FooterCopiesLine 一致）。
-    let copies_text = display.join_hierarchical_for(
-        &split_units(&input.profile.copies_to),
-        input.uses_external_unit_names(),
-    );
+    let copies_text = crate::export::element_display::copies_to_display(input, display);
     let mut copies_paragraph = Paragraph::new().add_tab(
         Tab::new()
             .val(TabValueType::Right)

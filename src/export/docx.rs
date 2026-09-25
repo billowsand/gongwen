@@ -11,7 +11,7 @@ use crate::export::{
 };
 #[cfg(test)]
 use crate::models::StyleMode;
-use crate::models::{DraftInput, FontConfig, NumberingConfig, TemplateKind, split_units};
+use crate::models::{DraftInput, FontConfig, NumberingConfig, TemplateKind};
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result, bail};
 use docx_rs::*;
@@ -131,7 +131,7 @@ const HEADER_WIDTH_TWIPS: i32 = 11906 - 1587 - 1474;
 const HEADER_SIZE: usize = 58;
 
 /// 规格 §3.3：预览版所有占位区域统一 1em 宽，用一个全角空格表示。
-const PREVIEW_PLACEHOLDER: &str = "\u{2003}";
+pub(crate) use crate::export::element_display::PREVIEW_PLACEHOLDER;
 
 #[allow(dead_code)] // 默认编号的兼容入口，测试与部分旧调用使用。
 pub fn write_docx(
@@ -379,18 +379,8 @@ pub fn write_docx_with_numbering(
             .keep_next(true),
     );
 
-    let addressee = match input.kind {
-        TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => display.join_hierarchical_for(
-            &split_units(&input.profile.recipient),
-            input.uses_external_unit_names(),
-        ),
-        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
-            display.reporting_leaders(&input.profile.reporting_leaders)
-        }
-        TemplateKind::PlainDocument
-        | TemplateKind::MeetingAgenda
-        | TemplateKind::ResearchReport => String::new(),
-    };
+    // 主送机关位的显示值（函稿主送 / 白头件呈报领导）与预览、TeX 同源。
+    let addressee = crate::export::element_display::addressee_display(input, display);
     if !addressee.is_empty() && !markdown.contains(addressee.as_str()) {
         doc = doc.add_paragraph(paragraphs::addressee_paragraph(&format!(
             "{}：",
@@ -541,25 +531,12 @@ pub fn write_docx_with_numbering(
         input.kind,
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice
     ) {
-        let raw_signature = if input.profile.signing_unit.trim().is_empty() {
-            if is_joint_mode_one(input) {
-                // 联合发文模式 1 只剩 1 个发文单位：回落右侧落款，单位取该唯一发文单位。
-                split_units(&input.profile.joint_issuing_units)
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| input.profile.issuing_unit.trim().to_string())
-            } else {
-                input.profile.issuing_unit.trim().to_string()
-            }
-        } else {
-            input.profile.signing_unit.trim().to_string()
-        };
-        // 规格 §3.1：公函落款显示全称；电话通知落款显示简称（少于 5 字逐字加空格）。
-        let signature = if input.kind == TemplateKind::PhoneNotice {
-            display.abbr_spaced(&raw_signature)
-        } else {
-            display.full_name_for(&raw_signature, input.uses_external_unit_names())
-        };
+        // 落款单位的显示值与预览、TeX 同源：公函全称、电话通知简称（少于 5 字
+        // 逐字加空格），联合发文模式 1 只剩 1 个发文单位时回落右侧单列。
+        let signature = crate::export::element_display::signing_unit_display(input, display)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         if !signature.is_empty() {
             // 代章直接跟在落款单位后面同一行（如“星海省教育厅（代章）”），不另起一行。
             // 是否标注只由 seals_on_behalf 决定（仅公函；电话通知等其他文种不盖章）。

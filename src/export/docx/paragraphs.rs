@@ -92,8 +92,7 @@ pub(crate) fn ordered_list_paragraph(
 /// 在“密级★保密期限”后空一个全角空格，再以黑体标注“指人专办”四个字。
 /// 中文、西文及保密期限数字统一使用三号黑体加粗（`security_runs`）。
 pub(crate) fn letter_security_paragraph(input: &DraftInput) -> Paragraph {
-    let level = input.profile.security_level.trim();
-    let period = input.profile.security_period.trim();
+    let (level, period) = crate::export::element_display::security_parts(input);
     let special = if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {
         "　指人专办"
     } else {

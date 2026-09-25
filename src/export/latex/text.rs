@@ -112,7 +112,8 @@ pub(crate) fn redline_macro(
 /// 生成密级相关命令：密级、保密期限，以及“指人专办”标记（勾选后非空）。
 /// 数字年限的保密期限把前导数字用 `\ttfamily` 排成等宽，如 `{\ttfamily 10}年`。
 pub(crate) fn security_commands(input: &DraftInput) -> String {
-    if input.profile.security_level.trim().is_empty() {
+    let (level, period) = crate::export::element_display::security_parts(input);
+    if level.is_empty() {
         return String::new();
     }
     let special = if input.kind != TemplateKind::PlainDocument && input.profile.special_handling {
@@ -120,15 +121,15 @@ pub(crate) fn security_commands(input: &DraftInput) -> String {
     } else {
         ""
     };
-    let (digits, rest) = split_period_digits(&input.profile.security_period);
+    let (digits, rest) = split_period_digits(period);
     let period = if digits.is_empty() {
-        tex_escape(&input.profile.security_period)
+        tex_escape(period)
     } else {
         format!("{{\\ttfamily {digits}}}{}", tex_escape(rest))
     };
     format!(
         "\\renewcommand{{\\SecurityLevel}}{{{}}}\n\\renewcommand{{\\SecurityPeriod}}{{{}}}\n\\renewcommand{{\\SpecialHandling}}{{{}}}\n",
-        tex_escape(&input.profile.security_level),
+        tex_escape(level),
         period,
         tex_escape(special)
     )

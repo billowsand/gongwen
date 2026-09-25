@@ -4,13 +4,12 @@
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export;
-use crate::models::{DraftInput, LetterVersion, TemplateKind, split_units};
+use crate::models::{DraftInput, TemplateKind, split_units};
 use crate::preview::layout::galley_visual_midline;
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, JOINT_COLUMN_MM, JOINT_DATE_GAP_MM, JOINT_ROW_GAP_MM, Metrics,
-    PREVIEW_PLACEHOLDER, RECORD_GAP_MM, RECORD_PHONE_COLUMN_EM, RECORD_PT, SIGNATURE_WIDTH_MM,
-    TABLE_LINE_PT, is_joint_mode_one, job, layout, line_block, line_galley, place, stacked,
-    text_format,
+    RECORD_GAP_MM, RECORD_PHONE_COLUMN_EM, RECORD_PT, SIGNATURE_WIDTH_MM, TABLE_LINE_PT,
+    is_joint_mode_one, job, layout, line_block, line_galley, place, stacked, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -21,31 +20,15 @@ use std::sync::Arc;
 /// 落款单位：留空时回落发文单位；电话通知用简称并逐字加空格；白头件按
 /// “使用简称”选项取简称/全称（多单位时的逐行排布走 `white_paper_signature_units`）。
 pub(crate) fn signature_unit(input: &DraftInput, display: &UnitDisplay) -> String {
-    let raw = if input.profile.signing_unit.trim().is_empty() {
-        input.profile.issuing_unit.trim()
-    } else {
-        input.profile.signing_unit.trim()
-    };
-    match input.kind {
-        TemplateKind::PhoneNotice => display.abbr_spaced(raw),
-        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
-            let first = split_units(raw).into_iter().next().unwrap_or_default();
-            display.signature_name(&first, input.profile.use_short_name_for_signature)
-        }
-        _ => display.full_name_for(raw, input.uses_external_unit_names()),
-    }
+    crate::export::element_display::signing_unit_display(input, display)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 /// 成文日期。预览版把“日”留成 1em 空位，与导出一致。
 pub(crate) fn signature_date(input: &DraftInput) -> String {
-    let preview = input.profile.letter_version == LetterVersion::Preview;
-    match export::chinese_date_parts(&input.date) {
-        Some((year, month, day)) => {
-            let day = if preview { PREVIEW_PLACEHOLDER } else { day };
-            format!("{year}年{month}月{day}日")
-        }
-        None => input.date.trim().to_string(),
-    }
+    crate::export::element_display::date_display_line(input)
 }
 
 /// 代章标注：当前落款单位在标准词库中启用代章时返回“（代章）”。
@@ -67,19 +50,7 @@ pub(crate) fn addressee_block(
     input: &DraftInput,
     display: &UnitDisplay,
 ) {
-    let text = match input.kind {
-        TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => display.join_hierarchical_for(
-            &split_units(&input.profile.recipient),
-            input.uses_external_unit_names(),
-        ),
-        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
-            display.reporting_leaders(&input.profile.reporting_leaders)
-        }
-        TemplateKind::PlainDocument
-        | TemplateKind::MeetingAgenda
-        | TemplateKind::ResearchReport => String::new(),
-    };
-    let text = text.trim().trim_end_matches('：');
+    let text = crate::export::element_display::addressee_display(input, display);
     if text.is_empty() {
         return;
     }
@@ -314,7 +285,6 @@ pub(crate) fn footer_record(
     let font = metrics.font(theme::FONT_FANGSONG, RECORD_PT);
     let line = metrics.pt(TABLE_LINE_PT);
     let joint = is_joint_mode_one(input);
-    let external = input.uses_external_unit_names();
 
     // 共印份数 = 主送 + 抄送 + 承办单位数（类中的 autocalc）。
     let responsible_field = if joint {
@@ -325,7 +295,7 @@ pub(crate) fn footer_record(
     let copies = split_units(&input.profile.recipient).len()
         + split_units(&input.profile.copies_to).len()
         + split_units(responsible_field).len();
-    let copies_to = display.join_hierarchical_for(&split_units(&input.profile.copies_to), external);
+    let copies_to = crate::export::element_display::copies_to_display(input, display);
     let head = if copies_to.trim().is_empty() {
         String::new()
     } else {
