@@ -8,7 +8,6 @@ use crate::app::{
     joined_metadata, metadata_grid_row, present_or_dash, security_level_color,
     security_level_list_label, short_date, status_color, summarize, truncate, warn,
 };
-use crate::diff_view::DiffViewState;
 use crate::doc_import;
 use crate::draft_page::DraftSession;
 use crate::export;
@@ -1721,7 +1720,7 @@ impl GongwenApp {
                     from: (version_number > 1).then_some(version_number - 1),
                     to: Some(version_number),
                     to_is_current_config: false,
-                    view: DiffViewState::default(),
+                    pair: crate::version_pair_view::VersionPairViewState::default(),
                 });
             }
             ManuscriptAction::OpenVersionDiff { manuscript_id } => {
@@ -1731,7 +1730,7 @@ impl GongwenApp {
                     from: latest.and_then(|n| (n > 1).then_some(n - 1)),
                     to: latest,
                     to_is_current_config: false,
-                    view: DiffViewState::default(),
+                    pair: crate::version_pair_view::VersionPairViewState::default(),
                 });
             }
             ManuscriptAction::LoadVersion {

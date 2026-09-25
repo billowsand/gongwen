@@ -9,9 +9,8 @@ use crate::app::{
 };
 use crate::diff;
 use crate::diff_view;
-use crate::diff_view::{DiffViewConfig, DiffViewState};
 use crate::draft_page::{DraftSession, LoadedVersion};
-use crate::manuscript::{ManuscriptUpdate, VersionRecord};
+use crate::manuscript::{ManuscriptStore, ManuscriptUpdate, VersionRecord};
 use crate::models::DraftInput;
 use crate::storage;
 use crate::theme;
@@ -45,7 +44,8 @@ pub(crate) struct VersionDiffState {
     /// 仅配置版用：新侧取"当前配置"而不是某个已提交版本。稿件版没有这个选项
     /// ——详情页看的稿件未必是起草页正在编辑的那篇，拿起草页内容当新侧会串稿。
     pub(crate) to_is_current_config: bool,
-    pub(crate) view: DiffViewState,
+    /// 稿件版的对照视图：共享只读版本对组件，按 (稿件, 旧版, 新版) 缓存。
+    pub(crate) pair: crate::version_pair_view::VersionPairViewState,
 }
 
 /// 版本切换的目标。
@@ -354,134 +354,16 @@ impl GongwenApp {
         manuscript_id: i64,
         diff: &mut VersionDiffState,
     ) {
-        let versions = self
-            .manuscript_store
-            .as_mut()
-            .and_then(|store| store.list_manuscript_versions(manuscript_id).ok())
-            .unwrap_or_default();
-        if versions.is_empty() {
-            ui.weak("该稿件还没有版本。到起草页点“提交版本”开始记录历史。");
-            return;
-        }
-        let numbers: Vec<i64> = versions.iter().map(|row| row.version_number).collect();
-        let latest = numbers.last().copied().unwrap_or(1);
-        // 新侧兜底到最新版；旧侧兜底到它的上一版（v1 没有上一版，此时旧侧为空）。
-        let to = diff
-            .to
-            .filter(|number| numbers.contains(number))
-            .unwrap_or(latest);
-        let from = diff
-            .from
-            .filter(|number| numbers.contains(number) && *number < to);
-        let mut picked_from: Option<Option<i64>> = None;
-        let mut picked_to = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("从")
-                .on_hover_text("左旧右新：左侧选旧版本，右侧选新版本。");
-            let from_label = from.map_or_else(
-                || "（空白，整篇算新增）".to_string(),
-                |number| version_label(&versions, number),
-            );
-            egui::ComboBox::from_id_salt(("vdiff_from", manuscript_id))
-                .selected_text(from_label)
-                .width(230.0)
-                .show_ui(ui, |ui| {
-                    // 只能选比新侧更早的版本：方向永远是旧→新，选不出颠倒的组合。
-                    if ui
-                        .selectable_label(from.is_none(), "（空白，整篇算新增）")
-                        .clicked()
-                    {
-                        picked_from = Some(None);
-                    }
-                    for row in versions.iter().rev().filter(|row| row.version_number < to) {
-                        if ui
-                            .selectable_label(
-                                from == Some(row.version_number),
-                                version_label(&versions, row.version_number),
-                            )
-                            .on_hover_text(version_hover(row))
-                            .clicked()
-                        {
-                            picked_from = Some(Some(row.version_number));
-                        }
-                    }
-                });
-            ui.label("到");
-            egui::ComboBox::from_id_salt(("vdiff_to", manuscript_id))
-                .selected_text(version_label(&versions, to))
-                .width(230.0)
-                .show_ui(ui, |ui| {
-                    for row in versions.iter().rev() {
-                        if ui
-                            .selectable_label(
-                                to == row.version_number,
-                                version_label(&versions, row.version_number),
-                            )
-                            .on_hover_text(version_hover(row))
-                            .clicked()
-                        {
-                            picked_to = Some(row.version_number);
-                        }
-                    }
-                });
-        });
-        if let Some(number) = picked_from {
-            diff.from = number;
-            diff.view.reset();
-        }
-        if let Some(number) = picked_to {
-            diff.to = Some(number);
-            // 新侧往前挪时旧侧可能变得不再更早，顺手把它退回上一版。
-            if diff.from.is_some_and(|old| old >= number) {
-                diff.from = (number > 1).then_some(number - 1);
-            }
-            diff.view.reset();
-        }
-        if picked_from.is_some() || picked_to.is_some() {
-            return; // 选择变了：下一帧按新选择重画，免得这一帧算旧的。
-        }
-
-        let old = from
-            .and_then(|number| {
-                self.manuscript_store
-                    .as_mut()
-                    .and_then(|store| store.get_manuscript_version(manuscript_id, number).ok())
-                    .flatten()
-            })
-            .map(diff::ContentSnapshot::from)
-            .unwrap_or_else(|| {
-                diff::ContentSnapshot::new(DraftInput::default(), String::new(), String::new())
-            });
-        let Some(new_record) = self
-            .manuscript_store
-            .as_mut()
-            .and_then(|store| store.get_manuscript_version(manuscript_id, to).ok())
-            .flatten()
-        else {
-            ui.weak("版本不存在或已被删除。");
-            return;
-        };
-        ui.weak(format!(
-            "v{}《{}》{}（{}）",
-            new_record.version_number,
-            new_record.name,
-            if new_record.comment.is_empty() {
-                ""
-            } else {
-                new_record.comment.as_str()
-            },
-            short_date(&new_record.created_at),
-        ));
-        ui.separator();
-        let old_label = from.map_or_else(|| "（空白）".to_string(), |number| format!("v{number}"));
-        let new_label = format!("v{to}");
-        let report = diff::manuscript_diff(&old, &new_record.into());
-        let config = DiffViewConfig {
-            old_label: &old_label,
-            new_label: &new_label,
-            // 这里看的可能不是起草页正在编辑的那篇稿件，跳源码会落到无关位置。
-        };
-        diff_view::manuscript_diff_ui(ui, &report, &mut diff.view, &config);
+        let store = self.manuscript_store.as_mut();
+        let display = units::UnitDisplay::new(&self.config.vocabulary);
+        manuscript_diff_ui_impl(
+            ui,
+            store,
+            &display,
+            &self.config.numbering,
+            manuscript_id,
+            diff,
+        );
     }
 
     pub(crate) fn config_diff_ui(&mut self, ui: &mut egui::Ui, diff: &mut VersionDiffState) {
@@ -727,7 +609,7 @@ impl GongwenApp {
                 from: (n > 1).then_some(n - 1).or(Some(n)),
                 to: Some(n),
                 to_is_current_config: n <= 1,
-                view: DiffViewState::default(),
+                pair: crate::version_pair_view::VersionPairViewState::default(),
             });
         }
         if close {
@@ -895,5 +777,280 @@ impl GongwenApp {
             Ok(None) => self.status = "版本不存在或已被删除。".into(),
             Err(error) => self.status = format!("载入版本失败：{error:#}"),
         }
+    }
+}
+
+/// 稿件版本对照窗本体（抽成自由函数便于单测）：保留「从 vA 到 vB」两个选择器，
+/// 对照区改用与起草页时间轴相同的只读版本对组件（左统一 diff + 右花脸稿预览）。
+/// 这里看的未必是起草页正在编辑的那篇稿件，组件双击定位源码的返回值一律忽略。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn manuscript_diff_ui_impl(
+    ui: &mut egui::Ui,
+    mut store: Option<&mut ManuscriptStore>,
+    display: &units::UnitDisplay<'_>,
+    numbering: &crate::models::NumberingConfig,
+    manuscript_id: i64,
+    diff: &mut VersionDiffState,
+) {
+    let versions = store
+        .as_mut()
+        .and_then(|store| store.list_manuscript_versions(manuscript_id).ok())
+        .unwrap_or_default();
+    if versions.is_empty() {
+        ui.weak("该稿件还没有版本。到起草页点“提交版本”开始记录历史。");
+        return;
+    }
+    let numbers: Vec<i64> = versions.iter().map(|row| row.version_number).collect();
+    let latest = numbers.last().copied().unwrap_or(1);
+    // 新侧兜底到最新版；旧侧兜底到它的上一版（v1 没有上一版，此时旧侧为空）。
+    let to = diff
+        .to
+        .filter(|number| numbers.contains(number))
+        .unwrap_or(latest);
+    let from = diff
+        .from
+        .filter(|number| numbers.contains(number) && *number < to);
+    let mut picked_from: Option<Option<i64>> = None;
+    let mut picked_to = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("从")
+            .on_hover_text("左旧右新：左侧选旧版本，右侧选新版本。");
+        let from_label = from.map_or_else(
+            || "（空白，整篇算新增）".to_string(),
+            |number| version_label(&versions, number),
+        );
+        egui::ComboBox::from_id_salt(("vdiff_from", manuscript_id))
+            .selected_text(from_label)
+            .width(230.0)
+            .show_ui(ui, |ui| {
+                // 只能选比新侧更早的版本：方向永远是旧→新，选不出颠倒的组合。
+                if ui
+                    .selectable_label(from.is_none(), "（空白，整篇算新增）")
+                    .clicked()
+                {
+                    picked_from = Some(None);
+                }
+                for row in versions.iter().rev().filter(|row| row.version_number < to) {
+                    if ui
+                        .selectable_label(
+                            from == Some(row.version_number),
+                            version_label(&versions, row.version_number),
+                        )
+                        .on_hover_text(version_hover(row))
+                        .clicked()
+                    {
+                        picked_from = Some(Some(row.version_number));
+                    }
+                }
+            });
+        ui.label("到");
+        egui::ComboBox::from_id_salt(("vdiff_to", manuscript_id))
+            .selected_text(version_label(&versions, to))
+            .width(230.0)
+            .show_ui(ui, |ui| {
+                for row in versions.iter().rev() {
+                    if ui
+                        .selectable_label(
+                            to == row.version_number,
+                            version_label(&versions, row.version_number),
+                        )
+                        .on_hover_text(version_hover(row))
+                        .clicked()
+                    {
+                        picked_to = Some(row.version_number);
+                    }
+                }
+            });
+    });
+    if let Some(number) = picked_from {
+        diff.from = number;
+    }
+    if let Some(number) = picked_to {
+        diff.to = Some(number);
+        // 新侧往前挪时旧侧可能变得不再更早，顺手把它退回上一版。
+        if diff.from.is_some_and(|old| old >= number) {
+            diff.from = (number > 1).then_some(number - 1);
+        }
+    }
+    if picked_from.is_some() || picked_to.is_some() {
+        return; // 选择变了：下一帧按新选择重画，免得这一帧算旧的。
+    }
+
+    let old = from
+        .and_then(|number| {
+            store
+                .as_mut()
+                .and_then(|store| store.get_manuscript_version(manuscript_id, number).ok())
+                .flatten()
+        })
+        .map(diff::ContentSnapshot::from)
+        .unwrap_or_else(|| {
+            diff::ContentSnapshot::new(DraftInput::default(), String::new(), String::new())
+        });
+    let Some(new_record) = store
+        .as_mut()
+        .and_then(|store| store.get_manuscript_version(manuscript_id, to).ok())
+        .flatten()
+    else {
+        ui.weak("版本不存在或已被删除。");
+        return;
+    };
+    ui.weak(format!(
+        "v{}《{}》{}（{}）",
+        new_record.version_number,
+        new_record.name,
+        if new_record.comment.is_empty() {
+            ""
+        } else {
+            new_record.comment.as_str()
+        },
+        short_date(&new_record.created_at),
+    ));
+    ui.separator();
+    let key = crate::version_pair_view::VersionPairKey {
+        manuscript_id,
+        old_version_number: from,
+        new_version_number: to,
+    };
+    if !diff.pair.matches(key) {
+        let new = diff::ContentSnapshot::from(new_record);
+        diff.pair.set_pair(key, &old, &new, display);
+    }
+    let old_label = from.map_or_else(|| "（空白）".to_string(), |number| format!("v{number}"));
+    let new_label = format!("v{to}");
+    let _edit_source = diff.pair.show(
+        ui,
+        egui::Id::new(("manuscript_pair", key)),
+        &old_label,
+        &new_label,
+        display,
+        numbering,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    //! 稿件管理版本对照窗：内存库 + 真 egui 上下文画一帧的冒烟检查。
+
+    use super::*;
+    use crate::manuscript::NewManuscript;
+    use crate::models::{FontConfig, ManuscriptStatus, NumberingConfig};
+    use std::path::Path;
+
+    const OLD: &str = "# 关于报送材料的函\n\n请于八月十日前报送材料。\n\n保留段落。";
+    const NEW: &str =
+        "# 关于报送材料的函\n\n请于八月十五日前报送材料。\n\n保留段落。\n\n新增段落。";
+
+    fn texts(output: &egui::FullOutput) -> String {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape) => Some(shape.galley.text().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 对照窗改用共享只读版本对组件后：两个选择器还在，左统一 diff、右花脸稿
+    /// 两栏都出字，哨兵不漏到纸上，敲字不改库里的版本内容。
+    #[test]
+    fn manuscript_diff_window_draws_the_shared_readonly_pair_view() {
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        theme::configure_fonts(&ctx, &FontConfig::default());
+        let mut store = ManuscriptStore::open(Path::new(":memory:")).unwrap();
+        let snapshot = DraftInput::default();
+        let id = store
+            .create(
+                &NewManuscript {
+                    snapshot: snapshot.clone(),
+                    content_markdown: OLD.into(),
+                    notes: String::new(),
+                    status: ManuscriptStatus::Draft,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        store
+            .commit_manuscript_version(id, "送审稿", "", &snapshot, OLD, "")
+            .unwrap();
+        store
+            .commit_manuscript_version(id, "定稿", "按反馈修改", &snapshot, NEW, "")
+            .unwrap();
+
+        let mut diff = VersionDiffState {
+            scope: VersionScope::Manuscript(id),
+            from: Some(1),
+            to: Some(2),
+            to_is_current_config: false,
+            pair: crate::version_pair_view::VersionPairViewState::default(),
+        };
+        let mut clock = 0.0;
+        let mut frame = |store: &mut ManuscriptStore,
+                         diff: &mut VersionDiffState,
+                         events: Vec<egui::Event>|
+         -> egui::FullOutput {
+            clock += 0.05;
+            ctx.clone().run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1600.0, 1000.0),
+                    )),
+                    time: Some(clock),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let display = units::UnitDisplay::new(&[]);
+                    manuscript_diff_ui_impl(
+                        ui,
+                        Some(store),
+                        &display,
+                        &NumberingConfig::default(),
+                        id,
+                        diff,
+                    );
+                },
+            )
+        };
+
+        let output = frame(&mut store, &mut diff, Vec::new());
+        let text = texts(&output);
+        assert!(text.contains('从'), "从 / 到选择器：{text}");
+        assert!(text.contains('到'), "{text}");
+        assert!(text.contains("v2《定稿》按反馈修改"), "{text}");
+        // 共享组件的头部与两侧内容。
+        assert!(text.contains("v1 → v2"), "{text}");
+        assert!(text.contains("请于八月十日前报送材料。"), "{text}");
+        assert!(text.contains("请于八月十五日前报送材料。"), "{text}");
+        assert!(text.contains("新增段落。"), "{text}");
+        assert!(
+            !text.chars().any(crate::export::is_redline_sentinel),
+            "哨兵不能漏到纸上：{text}"
+        );
+
+        // 只读：对照窗里敲字不会写进库里的版本。
+        let stored = store
+            .get_manuscript_version(id, 2)
+            .unwrap()
+            .unwrap()
+            .content_markdown;
+        frame(
+            &mut store,
+            &mut diff,
+            vec![egui::Event::Text("不得编辑".into())],
+        );
+        assert_eq!(
+            store
+                .get_manuscript_version(id, 2)
+                .unwrap()
+                .unwrap()
+                .content_markdown,
+            stored
+        );
     }
 }
