@@ -20,7 +20,7 @@
 //! 10. 公式：整体比较，变了就整体删旧插新。
 
 mod compare;
-// 接线在下一步（RedlineDoc.elements + redline::build_with_inputs）完成后去掉。
+// 部分访问器（部件级标注、整行拼接）由三处渲染与测试按需取用。
 #[allow(dead_code)]
 pub(crate) mod elements;
 mod model;
@@ -30,6 +30,7 @@ mod serialize;
 mod tokenize;
 
 pub(crate) use compare::diff_documents;
+pub(crate) use elements::{ElementMarks, element_marks};
 pub(crate) use model::DocumentModel;
 #[cfg(test)]
 pub(crate) use postprocess::REDLINE_PREAMBLE_TEX;

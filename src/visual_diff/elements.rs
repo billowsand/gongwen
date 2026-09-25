@@ -178,7 +178,7 @@ impl ElementMarks {
     pub(crate) fn is_empty(&self) -> bool {
         self.recipient.change().is_none()
             && self.copies_to.change().is_none()
-            && !self.date.changed()
+            && self.date.change().is_none()
             && self.number.iter().all(|part| part.change().is_none())
             && self
                 .signing_units
@@ -219,6 +219,7 @@ impl ElementMarks {
 
     /// 全部「标注单元」的带哨兵文本：单字段一个单元，日期与文号按部件、
     /// 落款单位按行各成单元。三方一致性测试逐单元比对预览 / DOCX / TeX。
+    #[cfg(test)]
     pub(crate) fn marked_units(&self) -> Vec<String> {
         let mut units = vec![self.recipient.marked(), self.copies_to.marked()];
         match &self.date {

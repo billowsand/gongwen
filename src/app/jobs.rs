@@ -43,7 +43,8 @@ pub(crate) enum WorkerResult {
         key: DocKey,
         base: (i64, i64),
         hash: u64,
-        doc: crate::redline::RedlineDoc,
+        // 装箱：RedlineDoc 带要素标注后比其他变体大不少，枚举就地传递不划算。
+        doc: Box<crate::redline::RedlineDoc>,
     },
     /// 知识库任务：与具体稿件无关的全局任务（索引构建 / 检索测试）。
     Knowledge(KnowledgeJob),
@@ -257,7 +258,7 @@ impl GongwenApp {
                     doc,
                 } => {
                     if let Some(session) = self.docs.iter_mut().find(|session| session.key == key) {
-                        session.draft_diff.accept_redline(base, hash, doc);
+                        session.draft_diff.accept_redline(base, hash, *doc);
                     }
                 }
                 WorkerResult::Knowledge(job) => self.apply_knowledge_job(job),

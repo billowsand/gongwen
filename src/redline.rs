@@ -27,29 +27,58 @@ pub struct RedlineDoc {
     pub markdown: String,
     /// 标注稿里每个块的来历，版本对照据此在预览与代码 diff 之间互跳。
     pub(crate) spans: Vec<visual_diff::MarkedSpan>,
+    /// 公文要素的就地标注（版头 / 版记）：旧值删除线、新值加框，整字段替换。
+    /// 正文没动、只改要素时 `markdown` 不带哨兵，标注全在这里。
+    pub(crate) elements: visual_diff::ElementMarks,
 }
 
 impl RedlineDoc {
     /// 有没有任何改动。两版完全一致时花脸稿没有意义，调用方据此提示用户。
+    /// 要素改动也算——正文一字未动、只改密级或日期的稿子同样要能出花脸稿。
     pub fn is_empty(&self) -> bool {
         !self
             .markdown
             .chars()
             .any(crate::export::is_redline_sentinel)
+            && self.elements.is_empty()
     }
 }
 
 /// 生成花脸稿。`old` 是旧版正文，`new` 是新版正文，方向与版本对照一致。
 ///
 /// 标注层附着在新版视觉块上：词级比较 + 归并、段落移动、编号顺移不标、
-/// 表格逐格、公式整体（见 `visual_diff` 模块头注释的规则清单）。
+/// 表格逐格、公式整体（见 `visual_diff` 模块头注释的规则清单）。公文要素
+/// 不在正文里，这个入口不带要素对照（要素标注见 [`build_with_inputs`]）。
+#[allow(dead_code)] // 不带要素对照的兼容入口，测试使用。
 pub fn build(old: &str, new: &str) -> RedlineDoc {
+    build_with_elements(old, new, visual_diff::ElementMarks::default())
+}
+
+/// 生成花脸稿：正文走视觉 diff，公文要素按新旧两版 `DraftInput` 就地标注
+/// （方案需求第 9 条）。要素的显示值与三处渲染同源（`export::element_display`），
+/// 预览版留白两侧一致时不产生标注。
+pub fn build_with_inputs(
+    old: &str,
+    new: &str,
+    old_input: &DraftInput,
+    new_input: &DraftInput,
+    display: &UnitDisplay,
+) -> RedlineDoc {
+    let elements = visual_diff::element_marks(old_input, new_input, display);
+    build_with_elements(old, new, elements)
+}
+
+fn build_with_elements(old: &str, new: &str, elements: visual_diff::ElementMarks) -> RedlineDoc {
     let overlay = visual_diff::diff_documents(
         &visual_diff::DocumentModel::from_markdown(old),
         &visual_diff::DocumentModel::from_markdown(new),
     );
     let (markdown, spans) = visual_diff::to_marked_markdown_with_spans(&overlay);
-    RedlineDoc { markdown, spans }
+    RedlineDoc {
+        markdown,
+        spans,
+        elements,
+    }
 }
 
 /// 要导出哪些格式。至少选一个，调用方保证。
@@ -141,6 +170,32 @@ mod tests {
         let doc = build(text, text);
         assert!(doc.is_empty());
         assert_eq!(doc.markdown, text);
+    }
+
+    #[test]
+    fn element_only_changes_still_produce_a_redline() {
+        // 正文一字未动、只改密级：花脸稿要有——要素标注在 RedlineDoc.elements，
+        // 正文的 markdown 仍不带哨兵（要素不进正文，就地标注在版头）。
+        use crate::models::TemplateKind;
+        let text = "第一段。";
+        let mut old = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..DraftInput::default()
+        };
+        old.profile.security_level.clear();
+        old.profile.security_period.clear();
+        let mut new = old.clone();
+        new.profile.security_level = "秘密".into();
+        new.profile.security_period = "10年".into();
+        let display = UnitDisplay::new(&[]);
+        let doc = build_with_inputs(text, text, &old, &new, &display);
+        assert!(!doc.is_empty(), "要素改动也算改动");
+        assert_eq!(doc.markdown, text, "正文没动，markdown 原样");
+        assert_eq!(
+            doc.elements.security().change(),
+            Some(("", "秘密★10年")),
+            "密级整字段替换"
+        );
     }
 
     #[test]

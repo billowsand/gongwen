@@ -569,14 +569,25 @@ impl DraftPage<'_> {
             return;
         };
         // 右栏的花脸稿可能比正文晚一拍（后台防抖中）；导出必须用最新的正文。
+        // 就地重算的一份同样带上新旧 DraftInput，要素标注跟着进导出。
         let doc = if view.hash == state.text_hash {
             view.doc.clone()
         } else {
-            let old = state
-                .baseline
-                .as_ref()
-                .map_or("", |baseline| baseline.snapshot.content_markdown.as_str());
-            redline::build(old, &self.doc.generated_markdown)
+            let fallback = DraftInput::default();
+            let (old, old_input) = state.baseline.as_ref().map_or(("", &fallback), |baseline| {
+                (
+                    baseline.snapshot.content_markdown.as_str(),
+                    &baseline.snapshot.snapshot,
+                )
+            });
+            let display = UnitDisplay::new(&self.config.vocabulary);
+            redline::build_with_inputs(
+                old,
+                &self.doc.generated_markdown,
+                old_input,
+                &self.doc.draft,
+                &display,
+            )
         };
         if doc.is_empty() {
             *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
@@ -696,8 +707,16 @@ impl DraftPage<'_> {
         let old = &baseline.snapshot.content_markdown;
         match &state.redline {
             None => {
-                // 第一次进对照模式：同步算一次，右栏不空着等。
-                let doc = redline::build(old, &self.doc.generated_markdown);
+                // 第一次进对照模式：同步算一次，右栏不空着等。要素标注按新旧
+                // DraftInput 就地对照（旧快照在 Baseline.snapshot 里）。
+                let display = UnitDisplay::new(&self.config.vocabulary);
+                let doc = redline::build_with_inputs(
+                    old,
+                    &self.doc.generated_markdown,
+                    &baseline.snapshot.snapshot,
+                    &self.doc.draft,
+                    &display,
+                );
                 let Some((_, report)) = &state.cache else {
                     return;
                 };
@@ -725,15 +744,23 @@ impl DraftPage<'_> {
                     state.redline_in_flight = Some((base, hash));
                     let old = old.clone();
                     let new = self.doc.generated_markdown.clone();
+                    // 要素标注要在后台线程里对照新旧 DraftInput：旧值取基准快照，
+                    // 新值取当前表单；词库随任务带走，UnitDisplay 就地重建。
+                    let old_input = baseline.snapshot.snapshot.clone();
+                    let new_input = self.doc.draft.clone();
+                    let vocabulary = self.config.vocabulary.clone();
                     let key = self.doc.key;
                     let tx = self.sender.clone();
                     thread::spawn(move || {
-                        let doc = redline::build(&old, &new);
+                        let display = UnitDisplay::new(&vocabulary);
+                        let doc = redline::build_with_inputs(
+                            &old, &new, &old_input, &new_input, &display,
+                        );
                         let _ = tx.send(WorkerResult::Redline {
                             key,
                             base,
                             hash,
-                            doc,
+                            doc: Box::new(doc),
                         });
                     });
                 }
@@ -1152,12 +1179,12 @@ mod tests {
         harness
             .doc
             .draft_diff
-            .accept_redline(base, done ^ 1, doc.clone());
+            .accept_redline(base, done ^ 1, (*doc).clone());
         assert_eq!(
             harness.doc.draft_diff.redline.as_ref().unwrap().hash,
             first_hash
         );
-        harness.doc.draft_diff.accept_redline(base, done, doc);
+        harness.doc.draft_diff.accept_redline(base, done, *doc);
         let view = harness.doc.draft_diff.redline.as_ref().unwrap();
         assert_eq!(view.hash, hash);
         assert!(crate::export::strip_redline(&view.doc.markdown).contains("再加一段"));
@@ -1216,7 +1243,7 @@ mod tests {
             "换基准后右栏对着 v1 重算"
         );
         // 晚到的 v2 结果：正文哈希对得上，但基准不对，丢掉。
-        harness.doc.draft_diff.accept_redline(base, done, doc);
+        harness.doc.draft_diff.accept_redline(base, done, *doc);
         assert_eq!(
             harness
                 .doc
