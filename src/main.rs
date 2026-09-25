@@ -56,6 +56,7 @@ mod units;
 mod validator;
 mod version;
 mod version_link;
+mod version_pair_view;
 mod visual_diff;
 mod vocabulary_xlsx;
 

@@ -1,14 +1,10 @@
-//! 起草页的「版本对照」模式：左栏可编辑的统一 diff + 右栏花脸稿预览。
+//! 起草页的「版本对照」模式：可编辑稿件走可还原 diff；已发布 / 归档稿件委托给
+//! `version_pair_view`，与稿件管理共用只读历史版本对照。
 //!
-//! 方案见 `docs/version-diff-redesign.md` 第三、五节。两层 diff 各算各的：
-//! - 左栏是 Markdown 源码的代码 diff（`diff::manuscript_diff`）。第 ③ 期起左栏**就是
-//!   编辑器**（`diff_editor`）：直接改字，删除的旧行以红底只读行显示在原位，新增 /
-//!   改写行绿底，每个变更块可以一键还原（可撤销）。已发布 / 归档的稿件只读，
-//!   仍用只读的统一视图（`diff_view::unified_body_ui`）；
-//! - 右栏是花脸稿预览：视觉 diff 引擎产出的带哨兵 Markdown 直接交给公文预览
-//!   （`preview::official_preview`），与导出 PDF / Word 吃的是同一份数据，
-//!   「预览 = 导出」由构造保证。花脸稿要跑 jieba，改在后台线程算、150ms 防抖，
-//!   右栏允许比输入晚一拍。
+//! 可编辑路径沿用两层 diff：左栏是 Markdown 源码代码 diff（`diff::manuscript_diff`）与
+//! `diff_editor`，右栏把视觉 diff 引擎产出的带哨兵 Markdown 交给 `preview::official_preview`。
+//! 花脸稿要跑 jieba，可编辑路径首帧同步计算，后续后台线程防抖；历史版本不可变，
+//! 由共享组件按版本对同步计算并缓存。
 //!
 //! 两栏只通过源码字节范围互相定位（`version_link::ChangeLinks`）：点击互跳、
 //! 悬停高亮、统一的上一处 / 下一处（F7 / Shift+F7）。
@@ -67,7 +63,6 @@ struct Actions {
     revert_hunk: Option<usize>,
     export: Option<RedlineFormats>,
     print_preview: bool,
-    edit_source: Option<Range<usize>>,
 }
 
 /// 正文哈希：代码 diff 与花脸稿都按它判断是否过期。
@@ -105,32 +100,16 @@ impl super::DraftDiffState {
         self.redline = Some(RedlineView { doc, links, hash });
     }
 
-    /// 导航单位：可编辑时是变更块（hunk），只读时是逐行变更。
-    fn unit_total(&self, editing: bool) -> usize {
-        match (editing, &self.cache) {
-            (true, _) => self.hunks.len(),
-            (false, Some((_, report))) => report.body.changed_count,
-            (false, None) => 0,
-        }
+    /// 第 `change` 处逐行变更属于哪个可编辑变更块。
+    fn unit_of_change(&self, change: usize) -> Option<usize> {
+        self.hunks
+            .iter()
+            .position(|hunk| hunk.changes.contains(&change))
     }
 
-    /// 第 `change` 处逐行变更属于哪个导航单位。
-    fn unit_of_change(&self, editing: bool, change: usize) -> Option<usize> {
-        if editing {
-            self.hunks
-                .iter()
-                .position(|hunk| hunk.changes.contains(&change))
-        } else {
-            Some(change)
-        }
-    }
-
-    /// 导航单位在花脸稿里的范围（右栏锚点）。
-    fn marked_of_unit(&self, editing: bool, unit: usize) -> Option<Range<usize>> {
+    /// 可编辑变更块在花脸稿里的范围（右栏锚点）。
+    fn marked_of_unit(&self, unit: usize) -> Option<Range<usize>> {
         let view = self.redline.as_ref()?;
-        if !editing {
-            return view.links.marked_range(unit);
-        }
         let hunk = self.hunks.get(unit)?;
         hunk.changes
             .clone()
@@ -165,12 +144,15 @@ impl DraftPage<'_> {
             .base
             .filter(|number| versions.iter().any(|row| row.version_number == *number))
             .unwrap_or(latest);
+        if self.doc.read_only() {
+            self.read_only_version_pair_mode_ui(ui, id, base, latest, &versions);
+            return;
+        }
         self.sync_draft_diff(ui.ctx(), id, base);
 
         let busy = self.doc.busy;
-        let editing = !self.doc.read_only();
         let mut actions = Actions::default();
-        let total = self.doc.draft_diff.unit_total(editing);
+        let total = self.doc.draft_diff.hunks.len();
 
         // —— 统一导航：F7 下一处、Shift+F7 上一处，两栏一起跳 ——
         // 先认 Shift+F7：egui 的 `consume_key` 按「逻辑上匹配」比修饰键，不带 Shift
@@ -232,9 +214,8 @@ impl DraftPage<'_> {
             if total > 0 {
                 ui.label(
                     egui::RichText::new(format!(
-                        "第 {} / {total} {}",
-                        state.view.focus().min(total - 1) + 1,
-                        if editing { "块" } else { "处" }
+                        "第 {} / {total} 块",
+                        state.view.focus().min(total - 1) + 1
                     ))
                     .color(theme::text_muted()),
                 );
@@ -246,16 +227,12 @@ impl DraftPage<'_> {
                     step = Some(true);
                 }
             }
-            if !editing {
-                ui.checkbox(&mut state.view.only_changes, "折叠未改动")
-                    .on_hover_text("关掉后左栏未改动的段落也全量显示；右栏预览始终是全文");
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_enabled(
-                        editing,
-                        theme::icon_text_button(theme::Icon::RotateCcw, "回退到基准版"),
-                    )
+                    .add(theme::icon_text_button(
+                        theme::Icon::RotateCcw,
+                        "回退到基准版",
+                    ))
                     .on_hover_text("用基准版内容覆盖当前稿件内容（需二次确认）")
                     .clicked()
                 {
@@ -299,7 +276,7 @@ impl DraftPage<'_> {
             state.view.step(forward, total);
             state.preview_scroll = true;
             state.preview_target = None;
-            if editing && let Some(hunk) = state.hunks.get(state.view.focus()) {
+            if let Some(hunk) = state.hunks.get(state.view.focus()) {
                 state.editor_jump =
                     Some(line_offset(&self.doc.generated_markdown, hunk.first_line()));
             }
@@ -311,9 +288,6 @@ impl DraftPage<'_> {
         let hover_from_preview = state.preview_hover;
         let jump = state.editor_jump.take();
         let mut left_hover: Option<usize> = None;
-        let mut left_click: Option<usize> = None;
-        let mut left_context: Option<Range<usize>> = None;
-        let mut left_edit: Option<Range<usize>> = None;
         let mut editor = diff_editor::DiffEditorOutput::default();
         let editor_font_size = self.config.editor_font_size.clamp(
             crate::models::EDITOR_FONT_SIZE_MIN,
@@ -372,42 +346,25 @@ impl DraftPage<'_> {
                                 });
                             ui.add_space(4.0);
                         }
-                        if editing {
-                            editor = diff_editor::diff_editor(
-                                ui,
-                                text,
-                                highlighter,
-                                DiffEditorInput {
-                                    hunks: &state.hunks,
-                                    focus,
-                                    highlight: hover_from_preview,
-                                    editable: true,
-                                    font_size: editor_font_size,
-                                    fonts: &editor_fonts,
-                                    research,
-                                },
-                            );
-                            // 光标跳转必须在滚动区里做：它要把目标行滚进这块滚动区。
-                            if let (Some(offset), Some(output)) = (jump, &editor.output) {
-                                crate::draft_page::jump_to_source(ui, output, text, offset);
-                            }
-                            left_hover = editor.hovered;
-                        } else {
-                            let unified = diff_view::unified_body_ui(
-                                ui,
-                                &report.body,
-                                &mut state.view,
-                                hover_from_preview,
-                            );
-                            left_hover = unified.hovered_change;
-                            left_click = unified.clicked_change;
-                            left_context = unified.clicked_context;
-                            // 只读时双击仍可切回 Markdown 源码定位（源码模式也是只读的）。
-                            left_edit = unified.edit_source.or_else(|| {
-                                let view = state.redline.as_ref()?;
-                                view.links.new_source(unified.edit_change?)
-                            });
+                        editor = diff_editor::diff_editor(
+                            ui,
+                            text,
+                            highlighter,
+                            DiffEditorInput {
+                                hunks: &state.hunks,
+                                focus,
+                                highlight: hover_from_preview,
+                                editable: true,
+                                font_size: editor_font_size,
+                                fonts: &editor_fonts,
+                                research,
+                            },
+                        );
+                        // 光标跳转必须在滚动区里做：它要把目标行滚进这块滚动区。
+                        if let (Some(offset), Some(output)) = (jump, &editor.output) {
+                            crate::draft_page::jump_to_source(ui, output, text, offset);
                         }
+                        left_hover = editor.hovered;
                     });
             });
 
@@ -431,26 +388,14 @@ impl DraftPage<'_> {
             state.preview_target = None;
         }
         actions.revert_hunk = editor.revert;
-        actions.edit_source = left_edit;
-        if let Some(unit) = left_click {
-            state.view.set_focus(unit, false);
-            state.preview_scroll = true;
-            state.preview_target = None;
-        }
-        if let Some(source) = &left_context
-            && let Some(view) = state.redline.as_ref()
-        {
-            state.preview_target = view.links.marked_for_new_source(source);
-            state.preview_scroll = state.preview_target.is_some();
-        }
 
         // —— 右栏：花脸稿预览 ——
         let focus = (total > 0).then(|| state.view.focus().min(total - 1));
         // 锚点优先级：左栏悬停 > 点过的未改动块 > 当前焦点。
         let anchor = left_hover
-            .and_then(|unit| state.marked_of_unit(editing, unit))
+            .and_then(|unit| state.marked_of_unit(unit))
             .or_else(|| state.preview_target.clone())
-            .or_else(|| focus.and_then(|unit| state.marked_of_unit(editing, unit)));
+            .or_else(|| focus.and_then(|unit| state.marked_of_unit(unit)));
         let scroll = std::mem::take(&mut state.preview_scroll) && left_hover.is_none();
         let Some(view) = state.redline.as_ref() else {
             return;
@@ -486,7 +431,7 @@ impl DraftPage<'_> {
         let hover_unit = hovered
             .as_ref()
             .and_then(|range| view.links.change_at(range))
-            .and_then(|change| state.unit_of_change(editing, change));
+            .and_then(|change| state.unit_of_change(change));
         if hover_unit != state.preview_hover {
             state.preview_hover = hover_unit;
             ui.ctx().request_repaint();
@@ -495,12 +440,12 @@ impl DraftPage<'_> {
             let unit = view
                 .links
                 .change_at(&clicked)
-                .and_then(|change| state.unit_of_change(editing, change));
+                .and_then(|change| state.unit_of_change(change));
             match unit {
                 Some(unit) => {
                     state.view.set_focus(unit, true);
                     state.preview_target = None;
-                    if editing && let Some(hunk) = state.hunks.get(unit) {
+                    if let Some(hunk) = state.hunks.get(unit) {
                         state.editor_jump =
                             Some(line_offset(&self.doc.generated_markdown, hunk.first_line()));
                     }
@@ -535,11 +480,154 @@ impl DraftPage<'_> {
                 true,
             );
         }
-        if let Some(range) = actions.edit_source {
-            self.jump_to_source(range);
-        }
     }
 
+    /// 已发布 / 归档稿件只读：用共享历史版本组件代替起草页专用渲染分支。
+    fn read_only_version_pair_mode_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        manuscript_id: i64,
+        base: i64,
+        latest: i64,
+        versions: &[crate::manuscript::VersionRow],
+    ) {
+        let new_version = self
+            .doc
+            .loaded_version
+            .as_ref()
+            .filter(|loaded| loaded.manuscript_id == manuscript_id)
+            .map_or(latest, |loaded| loaded.version_number);
+        let key = crate::version_pair_view::VersionPairKey {
+            manuscript_id,
+            old_version_number: Some(base),
+            new_version_number: new_version,
+        };
+        if !self.doc.draft_diff.version_pair.matches(key) {
+            let old = self
+                .store
+                .as_deref_mut()
+                .and_then(|store| store.get_manuscript_version(manuscript_id, base).ok())
+                .flatten()
+                .map(diff::ContentSnapshot::from)
+                .unwrap_or_else(|| {
+                    diff::ContentSnapshot::new(DraftInput::default(), String::new(), String::new())
+                });
+            let notes = self
+                .store
+                .as_deref()
+                .and_then(|store| store.notes_of(manuscript_id).ok())
+                .flatten()
+                .unwrap_or_default();
+            let new = diff::ContentSnapshot::new(
+                self.doc.draft.clone(),
+                self.doc.generated_markdown.clone(),
+                notes,
+            );
+            let display = UnitDisplay::new(&self.config.vocabulary);
+            self.doc
+                .draft_diff
+                .version_pair
+                .set_pair(key, &old, &new, &display);
+        }
+
+        let old_label = format!("v{base}");
+        let new_label = "当前";
+        let state = &mut self.doc.draft_diff.version_pair;
+        let busy = self.doc.busy;
+        let has_marks = state.redline().is_some_and(|doc| !doc.is_empty());
+        let mut picked_base = None;
+        let mut export = None;
+        let mut print_preview = false;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("基准");
+            let label = |row: &crate::manuscript::VersionRow| {
+                format!(
+                    "v{} · {}{}",
+                    row.version_number,
+                    row.name,
+                    if row.is_latest { " · 最新" } else { "" }
+                )
+            };
+            let base_label = versions
+                .iter()
+                .find(|row| row.version_number == base)
+                .map_or_else(|| format!("v{base}"), label);
+            egui::ComboBox::from_id_salt("draft_diff_base")
+                .selected_text(base_label)
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for row in versions.iter().rev() {
+                        if ui
+                            .selectable_label(row.version_number == base, label(row))
+                            .on_hover_text(version_hover(row))
+                            .clicked()
+                        {
+                            picked_base = Some(row.version_number);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("选择累计对照的旧版");
+            ui.label("→");
+            ui.strong("当前未提交");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled(
+                    false,
+                    theme::icon_text_button(theme::Icon::RotateCcw, "回退到基准版"),
+                );
+                ui.add_enabled_ui(has_marks && !busy, |ui| {
+                    ui.menu_button("导出花脸稿", |ui| {
+                        for (icon, label, formats) in [
+                            (theme::Icon::FileTypePdf, "导出 PDF", (true, false)),
+                            (theme::Icon::FileTypeDoc, "导出 Word", (false, true)),
+                            (theme::Icon::Package, "两者都导", (true, true)),
+                        ] {
+                            if ui.add(theme::menu_item(icon, label)).clicked() {
+                                export = Some(RedlineFormats {
+                                    pdf: formats.0,
+                                    docx: formats.1,
+                                });
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui
+                        .add(theme::icon_text_button(theme::Icon::Print, "打印预览"))
+                        .clicked()
+                    {
+                        print_preview = true;
+                    }
+                });
+            });
+        });
+
+        let display = UnitDisplay::new(&self.config.vocabulary);
+        let jump = state.show(
+            ui,
+            egui::Id::new("version_diff_code"),
+            &old_label,
+            new_label,
+            &display,
+            &self.config.numbering,
+        );
+        if let Some(range) = jump {
+            self.jump_to_source(range);
+        }
+        if let Some(number) = picked_base {
+            self.doc.draft_diff.base = Some(number);
+            ui.ctx().request_repaint();
+        }
+        if (export.is_some() || print_preview)
+            && let Some(doc) = self.doc.draft_diff.version_pair.redline().cloned()
+        {
+            let formats = export.unwrap_or(RedlineFormats {
+                pdf: true,
+                docx: false,
+            });
+            self.export_redline_document(doc, self.doc.draft.clone(), formats, print_preview);
+        }
+    }
     /// 逐块还原：把第 `index` 个变更块换回基准版的内容。前后各记一个撤销点，
     /// Ctrl+Z 一次就回到还原前；光标落在被还原块的起点。
     fn revert_hunk(&mut self, ctx: &egui::Context, index: usize) {
@@ -590,6 +678,17 @@ impl DraftPage<'_> {
                 &display,
             )
         };
+        let input = self.doc.draft.clone();
+        self.export_redline_document(doc, input, formats, print_preview);
+    }
+
+    fn export_redline_document(
+        &mut self,
+        doc: redline::RedlineDoc,
+        input: DraftInput,
+        formats: RedlineFormats,
+        print_preview: bool,
+    ) {
         if doc.is_empty() {
             *self.status = "当前修订与基准版一致，没有可出的花脸稿。".into();
             return;
@@ -600,7 +699,6 @@ impl DraftPage<'_> {
         } else {
             "正在生成花脸稿…".into()
         };
-        let input = self.doc.draft.clone();
         let output_dir = if print_preview {
             std::env::temp_dir().join("gongwen-redline-preview")
         } else {
@@ -777,7 +875,7 @@ mod tests {
 
     use super::*;
     use crate::app::{VersionSwitchPrompt, WorkerResult};
-    use crate::draft_page::{DraftAction, DraftSession, ExportLinks};
+    use crate::draft_page::{DraftAction, DraftSession, ExportLinks, LoadedVersion};
     use crate::manuscript::{ManuscriptStore, NewManuscript};
     use crate::models::{AppConfig, ManuscriptStatus};
     use std::path::Path;
@@ -933,6 +1031,48 @@ mod tests {
     }
 
     #[test]
+    fn published_and_archived_drafts_use_the_cached_readonly_pair_view() {
+        for record_status in [ManuscriptStatus::Published, ManuscriptStatus::Archived] {
+            let mut harness = Harness::new();
+            let id = harness.doc.manuscript_id.expect("稿件库 id");
+            let snapshot = harness.doc.draft.clone();
+            harness
+                .store
+                .commit_manuscript_version(id, "最新稿", "", &snapshot, NEW, "")
+                .unwrap();
+            harness.doc.record_status = record_status;
+            harness.doc.loaded_version = Some(LoadedVersion {
+                manuscript_id: id,
+                version_number: 2,
+                name: "最新稿".into(),
+            });
+            harness.doc.draft_diff.base = Some(1);
+
+            let output = harness.frame(Vec::new());
+            let text = texts(&output);
+            assert!(text.contains("请于八月十日前报送材料。"), "{text}");
+            assert!(text.contains("请于八月十五日前报送材料。"), "{text}");
+            assert!(
+                harness.doc.draft_diff.version_pair.matches(
+                    crate::version_pair_view::VersionPairKey {
+                        manuscript_id: id,
+                        old_version_number: Some(1),
+                        new_version_number: 2,
+                    }
+                ),
+                "{record_status:?} 稿件应走共享只读版本对组件"
+            );
+            assert!(
+                harness.doc.draft_diff.cache.is_none(),
+                "只读路径不再使用起草页 diff 缓存"
+            );
+
+            let before = harness.doc.generated_markdown.clone();
+            harness.frame(vec![egui::Event::Text("不得编辑".into())]);
+            assert_eq!(harness.doc.generated_markdown, before);
+        }
+    }
+    #[test]
     fn both_panes_render_and_share_one_change_list() {
         let mut harness = Harness::new();
         let output = harness.frame(Vec::new());
@@ -970,7 +1110,7 @@ mod tests {
             );
         }
         for unit in 0..state.hunks.len() {
-            assert!(state.marked_of_unit(true, unit).is_some(), "第 {unit} 块");
+            assert!(state.marked_of_unit(unit).is_some(), "第 {unit} 块");
         }
     }
 

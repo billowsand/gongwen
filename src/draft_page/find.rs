@@ -31,6 +31,8 @@ pub(crate) struct DraftDiffState {
     /// 左侧基准版本号；None 表示跟最新版比（每次提交后自动跟上）。
     pub(crate) base: Option<i64>,
     pub(crate) view: DiffViewState,
+    /// 历史版本只读对照组件：按稿件与版本对缓存。
+    pub(crate) version_pair: crate::version_pair_view::VersionPairViewState,
     /// 上一次算出的 diff 及其输入指纹。这个模式每帧都要渲染，
     /// 内容没动就直接复用，长稿才不会边打字边重算。
     pub(crate) cache: Option<(u64, diff::ManuscriptDiff)>,
