@@ -59,6 +59,9 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 - **版本变更与花脸稿改造**（Zed 式 diff + 花脸稿预览，分五期）：方案见
   `docs/version-diff-redesign.md`，进度、与方案的出入、下一步和已知坑见
   `docs/version-diff-handoff.md`。接手这项工作前先读这两份；每完成一期更新交接说明。
+- **离线稿件身份识别与版本合并**（加密 ZIP 多机往返同步）：方案、实施进度、
+  出入与已知坑见 `docs/offline-sync-redesign.md`（单文件）。核心是稿件 UUID +
+  不可变版本图（UUID、双父、SHA-256），旧 ZIP 仍可读；改同步/导入逻辑前先读它。
 
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 

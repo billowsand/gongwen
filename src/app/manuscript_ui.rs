@@ -131,13 +131,212 @@ pub(crate) struct ImportPreview {
     zip_path: PathBuf,
     selected: Vec<bool>,
     keyword: String,
-    skip_existing: bool,
+    relations: Vec<manuscript_io::sync::RecordPreview>,
+    actions: Vec<manuscript_io::sync::ImportAction>,
+    manifest_hash: String,
+    focused: Option<usize>,
     /// 包内随附的标准词库；旧包无此条目时为 None。
     vocabulary: Option<manuscript_io::VocabularyFile>,
     /// 是否把包内词库增量合并到本机词库，默认勾选。
     merge_vocabulary: bool,
     /// 仅在这次预览/确认导入期间驻留内存，不写入稿件或应用配置。
     password: String,
+}
+
+pub(crate) struct PendingMergeDialog {
+    manuscript_id: i64,
+    preview: manuscript_io::sync::PendingPreview,
+    choices: Vec<bool>,
+    markdown_override: Option<String>,
+    take_status: bool,
+}
+
+fn import_action_label(action: &manuscript_io::sync::ImportAction) -> &'static str {
+    use manuscript_io::sync::ImportAction;
+    match action {
+        ImportAction::Skip => "跳过",
+        ImportAction::New => "作为新稿件导入",
+        ImportAction::UseIncoming { .. } => "采用导入版",
+        ImportAction::Merge { .. } => "合并为新版本",
+        ImportAction::Pending => "暂存待处理分支",
+        ImportAction::LinkPending { .. } => "关联并暂存分支",
+        ImportAction::Copy => "另存可编辑副本",
+    }
+}
+
+fn import_preview_details(ui: &mut egui::Ui, preview: &mut ImportPreview, index: usize) {
+    use manuscript_io::sync::{ImportAction, Relationship};
+    let record = &preview.manifest.records[index];
+    let relation = &preview.relations[index];
+    ui.separator();
+    ui.strong(format!(
+        "《{}》：{}",
+        record.title,
+        relation.relationship.label()
+    ));
+    ui.label(format!(
+        "拟执行：{}",
+        import_action_label(&preview.actions[index])
+    ));
+    if let Some(local_hash) = &relation.local_hash {
+        ui.weak(format!(
+            "本机内容：{}；导入内容：{}",
+            &local_hash[..12],
+            &relation.incoming_hash[..12]
+        ));
+    }
+    if let Some(base) = &relation.base {
+        ui.weak(format!(
+            "共同基线：{} · {}",
+            base.created_at,
+            &base.revision_uuid[..8]
+        ));
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("跳过").clicked() {
+            preview.actions[index] = ImportAction::Skip;
+        }
+        if matches!(
+            relation.relationship,
+            Relationship::New | Relationship::Legacy
+        ) && ui.button("作为新稿导入").clicked()
+        {
+            preview.actions[index] = ImportAction::New;
+        }
+        if matches!(
+            relation.relationship,
+            Relationship::IncomingAhead | Relationship::Equivalent | Relationship::Same
+        ) && ui.button("采用导入版及新增附件").clicked()
+        {
+            preview.actions[index] = ImportAction::UseIncoming { take_status: false };
+        }
+        if relation.relationship == Relationship::Diverged
+            && let Some(proposal) = &relation.proposal
+            && ui.button("生成合并版本").clicked()
+        {
+            preview.actions[index] = ImportAction::Merge {
+                choices: vec![false; proposal.conflict_count()],
+                markdown_override: None,
+                take_status: false,
+            };
+        }
+        if relation.local_id.is_some()
+            && !matches!(relation.relationship, Relationship::Archived)
+            && ui.button("暂存分支").clicked()
+        {
+            preview.actions[index] = ImportAction::Pending;
+        }
+        if matches!(
+            relation.relationship,
+            Relationship::Archived | Relationship::NoBase
+        ) && ui.button("另存副本").clicked()
+        {
+            preview.actions[index] = ImportAction::Copy;
+        }
+    });
+    if matches!(
+        relation.relationship,
+        Relationship::New | Relationship::Legacy
+    ) && !relation.candidates.is_empty()
+    {
+        ui.weak("标题或文号相近，仅供人工判断，不会自动关联：");
+        for &candidate in &relation.candidates {
+            if ui
+                .button(format!("关联本机稿件 #{candidate} 并暂存"))
+                .clicked()
+            {
+                preview.actions[index] = ImportAction::LinkPending {
+                    local_id: candidate,
+                };
+            }
+        }
+    }
+    if let ImportAction::UseIncoming { take_status } | ImportAction::Merge { take_status, .. } =
+        &mut preview.actions[index]
+        && let Some(local_id) = relation.local_id
+    {
+        ui.checkbox(
+            take_status,
+            format!(
+                "同时采用导入侧生命周期状态（本机稿件 #{local_id} → {}）",
+                record.status.label()
+            ),
+        );
+    }
+    if let (
+        Some(proposal),
+        ImportAction::Merge {
+            choices,
+            markdown_override,
+            ..
+        },
+    ) = (&relation.proposal, &mut preview.actions[index])
+    {
+        ui.label(format!(
+            "技术冲突 {} 处；每处默认保留本机内容。",
+            proposal.conflict_count()
+        ));
+        let mut choice_index = 0;
+        for conflict in &proposal.field_conflicts {
+            ui.group(|ui| {
+                ui.strong(format!("要素：{}", conflict.path.join(" / ")));
+                ui.label(format!("本机：{}", conflict.local));
+                ui.label(format!("导入：{}", conflict.incoming));
+                ui.checkbox(&mut choices[choice_index], "采用导入侧");
+            });
+            choice_index += 1;
+        }
+        if let Some((local, incoming)) = &proposal.notes_conflict {
+            ui.group(|ui| {
+                ui.strong("备注冲突");
+                ui.label(format!("本机：{}", truncate(local, 150)));
+                ui.label(format!("导入：{}", truncate(incoming, 150)));
+                ui.checkbox(&mut choices[choice_index], "采用导入侧");
+            });
+            choice_index += 1;
+        }
+        for chunk in &proposal.markdown {
+            if let crate::manuscript::merge::MarkdownChunk::Conflict {
+                base,
+                local,
+                incoming,
+            } = chunk
+            {
+                ui.group(|ui| {
+                    ui.strong("正文冲突");
+                    ui.weak(format!("共同基线：{}", truncate(base, 200)));
+                    ui.label(format!("本机：{}", truncate(local, 200)));
+                    ui.label(format!("导入：{}", truncate(incoming, 200)));
+                    ui.checkbox(&mut choices[choice_index], "采用导入侧");
+                });
+                choice_index += 1;
+            }
+        }
+        if let Ok((_, merged, _)) = proposal.resolve(choices) {
+            ui.strong("合并后正文");
+            if let Some(edited) = markdown_override {
+                ui.add(
+                    egui::TextEdit::multiline(edited)
+                        .desired_rows(12)
+                        .desired_width(f32::INFINITY),
+                );
+                if ui.button("重置为逐项选择的结果").clicked() {
+                    *edited = merged;
+                }
+            } else {
+                let mut display = merged.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut display)
+                        .interactive(false)
+                        .desired_rows(12)
+                        .desired_width(f32::INFINITY),
+                );
+                if ui.button("手工调整正文").clicked() {
+                    *markdown_override = Some(merged);
+                }
+            }
+        }
+    }
 }
 
 impl GongwenApp {
@@ -782,16 +981,14 @@ impl GongwenApp {
                 let mut cancel = false;
                 ui.group(|ui| {
                     let total = preview.manifest.records.len();
-                    let selected = preview.selected.iter().filter(|b| **b).count();
-                    let archived = preview
-                        .manifest
-                        .records
+                    let selected = preview
+                        .selected
                         .iter()
-                        .filter(|r| r.status == ManuscriptStatus::Archived)
+                        .filter(|selected| **selected)
                         .count();
                     ui.strong("导入预览");
                     ui.label(format!(
-                        "共 {total} 篇（归档 {archived} 篇），已勾选 {selected} 篇。"
+                        "共 {total} 篇，已勾选 {selected} 篇。逐篇选择处理方式后才会写入。"
                     ));
                     ui.horizontal(|ui| {
                         ui.add(
@@ -799,25 +996,13 @@ impl GongwenApp {
                                 .hint_text("按标题/文号过滤")
                                 .desired_width(220.0),
                         );
-                        if ui
-                            .add(theme::icon_text_button(theme::Icon::SquareCheck, "全选"))
-                            .clicked()
-                        {
-                            for b in preview.selected.iter_mut() {
-                                *b = true;
-                            }
+                        if ui.button("全选").clicked() {
+                            preview.selected.fill(true);
                         }
-                        if ui
-                            .add(theme::icon_text_button(theme::Icon::Square, "全不选"))
-                            .clicked()
-                        {
-                            for b in preview.selected.iter_mut() {
-                                *b = false;
-                            }
+                        if ui.button("全不选").clicked() {
+                            preview.selected.fill(false);
                         }
                     });
-                    ui.checkbox(&mut preview.skip_existing, "跳过与本地同源的已有记录")
-                        .on_hover_text("按清单里的源 id 去重，重复导入同一份文件不会产生副本");
                     if let Some(vocabulary) = &preview.vocabulary {
                         let units = vocabulary
                             .entries
@@ -827,19 +1012,13 @@ impl GongwenApp {
                         let people = vocabulary.entries.len() - units;
                         ui.checkbox(
                             &mut preview.merge_vocabulary,
-                            format!(
-                                "合并包内标准词库到本机（{} 个单位、{} 名人员）",
-                                units, people
-                            ),
-                        )
-                        .on_hover_text(
-                            "增量合并：补全本机缺失的词条并更新已匹配词条的补充字段，不删除本机已有内容；取消勾选则不导入词库",
+                            format!("合并包内标准词库到本机（{units} 个单位、{people} 名人员）"),
                         );
                     }
                     let keyword = preview.keyword.trim().to_lowercase();
                     egui::ScrollArea::vertical()
                         .id_salt("import_preview_list")
-                        .max_height(220.0)
+                        .max_height(250.0)
                         .show(ui, |ui| {
                             for (index, record) in preview.manifest.records.iter().enumerate() {
                                 if !keyword.is_empty()
@@ -848,20 +1027,27 @@ impl GongwenApp {
                                 {
                                     continue;
                                 }
-                                ui.checkbox(
-                                    &mut preview.selected[index],
-                                    format!(
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.checkbox(&mut preview.selected[index], "");
+                                    ui.label(format!(
                                         "{} · {} · {}（{}）",
                                         record.doc_date,
                                         record.kind.label(),
-                                        truncate(&record.title, 40),
-                                        record.status.label(),
-                                    ),
-                                );
+                                        truncate(&record.title, 32),
+                                        record.status.label()
+                                    ));
+                                    ui.weak(preview.relations[index].relationship.label());
+                                    if ui.button("查看与处理").clicked() {
+                                        preview.focused = Some(index);
+                                    }
+                                });
                             }
                         });
+                    if let Some(index) = preview.focused {
+                        import_preview_details(ui, preview, index);
+                    }
                     ui.horizontal(|ui| {
-                        if ui.button("确认导入").clicked() {
+                        if ui.button("确认所选处理").clicked() {
                             confirm = true;
                         }
                         if ui.button("取消").clicked() {
@@ -875,6 +1061,118 @@ impl GongwenApp {
                 self.manuscript_import_preview = None;
             } else if confirm {
                 self.confirm_import();
+            }
+            ui.add_space(6.0);
+        }
+
+        if self.pending_merge.is_some() {
+            let (confirm, cancel) = {
+                let dialog = self.pending_merge.as_mut().unwrap();
+                let mut confirm = false;
+                let mut cancel = false;
+                ui.group(|ui| {
+                    ui.strong("继续合并待处理分支");
+                    ui.label(format!(
+                        "导入分支 {}，{}",
+                        &dialog.preview.head[..8.min(dialog.preview.head.len())],
+                        if dialog.preview.base.is_some() {
+                            "已找到共同基线"
+                        } else {
+                            "无可信共同基线，请人工选择"
+                        }
+                    ));
+                    ui.weak(format!(
+                        "导入版本保存于 {}",
+                        dialog.preview.incoming.created_at
+                    ));
+                    if let Some(status) = dialog.preview.imported_status {
+                        ui.checkbox(
+                            &mut dialog.take_status,
+                            format!("同时采用导入侧生命周期状态：{}", status.label()),
+                        );
+                    }
+                    let proposal = &dialog.preview.proposal;
+                    let mut index = 0;
+                    for conflict in &proposal.field_conflicts {
+                        ui.group(|ui| {
+                            ui.strong(if conflict.path.is_empty() {
+                                "全部行文要素".to_string()
+                            } else {
+                                format!("要素：{}", conflict.path.join(" / "))
+                            });
+                            ui.label(format!("本机：{}", conflict.local));
+                            ui.label(format!("导入：{}", conflict.incoming));
+                            ui.checkbox(&mut dialog.choices[index], "采用导入侧");
+                        });
+                        index += 1;
+                    }
+                    if let Some((local, incoming)) = &proposal.notes_conflict {
+                        ui.group(|ui| {
+                            ui.strong("备注冲突");
+                            ui.label(format!("本机：{}", truncate(local, 150)));
+                            ui.label(format!("导入：{}", truncate(incoming, 150)));
+                            ui.checkbox(&mut dialog.choices[index], "采用导入侧");
+                        });
+                        index += 1;
+                    }
+                    for chunk in &proposal.markdown {
+                        if let crate::manuscript::merge::MarkdownChunk::Conflict {
+                            base,
+                            local,
+                            incoming,
+                        } = chunk
+                        {
+                            ui.group(|ui| {
+                                ui.strong("正文冲突");
+                                if !base.is_empty() {
+                                    ui.weak(format!("共同基线：{}", truncate(base, 200)));
+                                }
+                                ui.label(format!("本机：{}", truncate(local, 200)));
+                                ui.label(format!("导入：{}", truncate(incoming, 200)));
+                                ui.checkbox(&mut dialog.choices[index], "采用导入侧");
+                            });
+                            index += 1;
+                        }
+                    }
+                    if let Ok((_, merged, _)) = proposal.resolve(&dialog.choices) {
+                        ui.strong("合并后正文");
+                        if let Some(edited) = &mut dialog.markdown_override {
+                            ui.add(
+                                egui::TextEdit::multiline(edited)
+                                    .desired_rows(12)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if ui.button("重置为逐项选择的结果").clicked() {
+                                *edited = merged;
+                            }
+                        } else {
+                            let mut display = merged.clone();
+                            ui.add(
+                                egui::TextEdit::multiline(&mut display)
+                                    .interactive(false)
+                                    .desired_rows(12)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if ui.button("手工调整正文").clicked() {
+                                dialog.markdown_override = Some(merged);
+                            }
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("确认生成合并版本").clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("稍后处理").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+                (confirm, cancel)
+            };
+            if cancel {
+                self.pending_merge = None;
+            } else if confirm {
+                self.confirm_pending_merge();
             }
             ui.add_space(6.0);
         }
@@ -1331,6 +1629,12 @@ impl GongwenApp {
         let mut pdf_action: Option<PdfAction> = None;
         let mut delete_pdf: Option<i64> = None;
         let mut add_pdfs: Vec<PathBuf> = Vec::new();
+        let pending_heads = self
+            .manuscript_store
+            .as_ref()
+            .and_then(|store| store.pending_sync_heads(detail_id).ok())
+            .unwrap_or_default();
+        let mut pending_to_open: Option<String> = None;
 
         let detail = self.manuscript_detail.as_ref().unwrap();
         ui.horizontal(|ui| {
@@ -1530,6 +1834,22 @@ impl GongwenApp {
                     }
                 }
 
+                if !pending_heads.is_empty() {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.strong(format!("待处理导入分支（{}）", pending_heads.len()));
+                    for head in &pending_heads {
+                        ui.horizontal(|ui| {
+                            ui.weak(format!("版本 {}", &head[..8.min(head.len())]));
+                            if detail.status != ManuscriptStatus::Archived
+                                && ui.small_button("继续合并").clicked()
+                            {
+                                pending_to_open = Some(head.clone());
+                            }
+                        });
+                    }
+                }
+
                 ui.add_space(6.0);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
@@ -1576,6 +1896,9 @@ impl GongwenApp {
                 }
             });
 
+        if let Some(head) = pending_to_open {
+            self.open_pending_merge(detail_id, &head);
+        }
         if clear_selection {
             self.manuscript_detail = None;
             self.manuscript_detail_delete_pdf = None;
@@ -2067,6 +2390,43 @@ impl GongwenApp {
         }
     }
 
+    /// ZIP 必须包含打开标签里的最新编辑内容，不能等两分钟自动保存。
+    fn save_open_manuscripts_for_zip(&mut self, selected: Option<&[i64]>) -> anyhow::Result<()> {
+        let updates = self
+            .docs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, doc)| {
+                let id = doc.manuscript_id?;
+                (doc.is_dirty() && selected.is_none_or(|ids| ids.contains(&id)))
+                    .then(|| (index, id, doc.draft.clone(), doc.generated_markdown.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (index, id, snapshot, content_markdown) in updates {
+            let store = self
+                .manuscript_store
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+            let record = store
+                .get(id)?
+                .ok_or_else(|| anyhow::anyhow!("正在编辑的稿件不存在"))?;
+            if record.status != ManuscriptStatus::Draft {
+                anyhow::bail!("稿件《{}》不是草稿，不能同步未保存修改", record.title);
+            }
+            store.update(
+                id,
+                &ManuscriptUpdate {
+                    snapshot,
+                    content_markdown,
+                    notes: record.notes,
+                },
+            )?;
+            self.docs[index].mark_saved();
+            self.manuscript_dirty = true;
+        }
+        Ok(())
+    }
+
     pub(crate) fn export_manuscripts_zip(&mut self) {
         if self.manuscript_store.is_none() {
             self.status = "稿件库不可用，无法导出。".into();
@@ -2085,6 +2445,10 @@ impl GongwenApp {
         else {
             return false;
         };
+        if let Err(error) = self.save_open_manuscripts_for_zip(None) {
+            self.status = format!("导出前保存当前工作稿失败：{error:#}");
+            return false;
+        }
         let filter = self.manuscript_filter.clone();
         let result: anyhow::Result<manuscript_io::ExportSummary> = match self
             .manuscript_store
@@ -2135,6 +2499,10 @@ impl GongwenApp {
             return false;
         };
         let ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
+        if let Err(error) = self.save_open_manuscripts_for_zip(Some(&ids)) {
+            self.status = format!("导出前保存所选工作稿失败：{error:#}");
+            return false;
+        }
         let result = match self.manuscript_store.as_mut() {
             Some(store) => manuscript_io::export_zip_selected(
                 store,
@@ -2229,28 +2597,83 @@ impl GongwenApp {
     }
 
     fn prepare_import_manuscript(&mut self, path: PathBuf, password: &str) -> bool {
-        match manuscript_io::read_manifest(&path, password) {
-            Ok(manifest) => {
-                // 词库读取失败不阻断稿件导入：损坏或版本不支持的词库按“不带词库”处理。
-                let vocabulary = match manuscript_io::read_vocabulary(&path, password) {
-                    Ok(vocabulary) => vocabulary,
-                    Err(error) => {
-                        self.status = format!("稿件包词库读取失败（不影响稿件导入）：{error:#}");
-                        None
+        let result: anyhow::Result<ImportPreview> = (|| {
+            let manifest = manuscript_io::read_manifest(&path, password)?;
+            let vocabulary = match manuscript_io::read_vocabulary(&path, password) {
+                Ok(vocabulary) => vocabulary,
+                Err(error) => {
+                    self.status = format!("稿件包词库读取失败（不影响稿件导入）：{error:#}");
+                    None
+                }
+            };
+            let store = self
+                .manuscript_store
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+            let relations = manuscript_io::sync::inspect(store, &manifest)?;
+            use manuscript_io::sync::{ImportAction, Relationship};
+            let actions = relations
+                .iter()
+                .enumerate()
+                .map(|(index, relation)| match relation.relationship {
+                    Relationship::New | Relationship::Legacy if relation.candidates.is_empty() => {
+                        ImportAction::New
                     }
-                };
-                let selected = vec![true; manifest.records.len()];
-                self.manuscript_import_preview = Some(ImportPreview {
-                    manifest,
-                    zip_path: path,
-                    selected,
-                    keyword: String::new(),
-                    skip_existing: true,
-                    vocabulary,
-                    merge_vocabulary: true,
-                    password: password.to_string(),
-                });
-                self.status = "已读取稿件包，请预览后确认导入。".into();
+                    Relationship::New | Relationship::Legacy => ImportAction::Skip,
+                    Relationship::IncomingAhead | Relationship::Equivalent => {
+                        ImportAction::UseIncoming { take_status: false }
+                    }
+                    Relationship::Same
+                        if relation.attachments_changed
+                            || relation
+                                .local_status
+                                .is_some_and(|status| status != manifest.records[index].status) =>
+                    {
+                        ImportAction::UseIncoming {
+                            take_status: relation
+                                .local_status
+                                .is_some_and(|status| status != manifest.records[index].status),
+                        }
+                    }
+                    Relationship::Diverged
+                        if relation
+                            .proposal
+                            .as_ref()
+                            .is_some_and(|proposal| proposal.conflict_count() == 0) =>
+                    {
+                        ImportAction::Merge {
+                            choices: Vec::new(),
+                            markdown_override: None,
+                            take_status: false,
+                        }
+                    }
+                    Relationship::Diverged | Relationship::NoBase => ImportAction::Pending,
+                    Relationship::Archived | Relationship::Same | Relationship::LocalAhead => {
+                        ImportAction::Skip
+                    }
+                })
+                .collect();
+            let manifest_hash =
+                crate::manuscript::sync::bytes_hash(&serde_json::to_vec(&manifest)?);
+            let selected = vec![true; manifest.records.len()];
+            Ok(ImportPreview {
+                manifest,
+                zip_path: path,
+                selected,
+                keyword: String::new(),
+                relations,
+                actions,
+                manifest_hash,
+                focused: None,
+                vocabulary,
+                merge_vocabulary: true,
+                password: password.to_string(),
+            })
+        })();
+        match result {
+            Ok(preview) => {
+                self.manuscript_import_preview = Some(preview);
+                self.status = "已读取稿件包，请逐篇核对处理方式后确认。".into();
                 true
             }
             Err(error) => {
@@ -2261,40 +2684,72 @@ impl GongwenApp {
     }
 
     pub(crate) fn confirm_import(&mut self) {
+        use manuscript_io::sync::ImportAction;
         let Some(preview) = self.manuscript_import_preview.take() else {
             return;
         };
-        let opts = manuscript_io::ImportOptions {
-            skip_existing_by_id: preview.skip_existing,
-            selected: preview.selected.clone(),
-        };
-        let result: anyhow::Result<manuscript_io::ImportSummary> = (|| {
+        let actions = preview
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                if preview.selected[index] {
+                    action.clone()
+                } else {
+                    ImportAction::Skip
+                }
+            })
+            .collect::<Vec<_>>();
+        for (action, relation) in actions.iter().zip(&preview.relations) {
+            if matches!(
+                action,
+                ImportAction::UseIncoming { .. } | ImportAction::Merge { .. }
+            ) && let Some(id) = relation.local_id
+                && self
+                    .docs
+                    .iter()
+                    .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty())
+            {
+                self.manuscript_import_preview = Some(preview);
+                self.status = "这篇稿件在起草页有未保存修改，请先保存后再导入。".into();
+                return;
+            }
+        }
+        let result = (|| {
             let store = self
                 .manuscript_store
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-            manuscript_io::import_zip(store, &preview.zip_path, &opts, &preview.password)
+            manuscript_io::sync::import_with_actions(
+                store,
+                &preview.zip_path,
+                &preview.password,
+                &preview.manifest_hash,
+                &actions,
+            )
         })();
         match result {
             Ok(summary) => {
                 self.manuscript_dirty = true;
+                for id in &summary.changed_ids {
+                    self.refresh_open_manuscript_after_sync(*id);
+                    if self
+                        .manuscript_detail
+                        .as_ref()
+                        .is_some_and(|detail| detail.id == *id)
+                    {
+                        self.refresh_detail(*id);
+                    }
+                }
                 let mut message = format!(
-                    "已导入 {} 篇稿件、{} 个 PDF 附件。",
-                    summary.imported, summary.pdfs_imported
+                    "已新建 {} 篇、更新 {} 篇、合并 {} 篇；暂存 {} 条分支，跳过 {} 篇，新增 {} 个 PDF 附件。",
+                    summary.created,
+                    summary.updated,
+                    summary.merged,
+                    summary.pending,
+                    summary.skipped,
+                    summary.pdfs_added
                 );
-                if summary.skipped_existing > 0 {
-                    message.push_str(&format!(
-                        " 跳过与本地同源的 {} 篇。",
-                        summary.skipped_existing
-                    ));
-                }
-                if summary.skipped_pdfs > 0 {
-                    message.push_str(&format!(
-                        " {} 个附件缺失或过大被跳过。",
-                        summary.skipped_pdfs
-                    ));
-                }
-                // 勾选合并且包内带词库时，把词库增量合并进本机全局词库。
                 if preview.merge_vocabulary
                     && let Some(vocabulary) = &preview.vocabulary
                 {
@@ -2318,6 +2773,100 @@ impl GongwenApp {
             Err(error) => {
                 self.manuscript_import_preview = Some(preview);
                 self.status = format!("导入失败：{error:#}");
+            }
+        }
+    }
+
+    fn open_pending_merge(&mut self, id: i64, head: &str) {
+        let result = self
+            .manuscript_store
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))
+            .and_then(|store| manuscript_io::sync::inspect_pending(store, id, head));
+        match result {
+            Ok(preview) => {
+                let choices = vec![false; preview.proposal.conflict_count()];
+                self.pending_merge = Some(PendingMergeDialog {
+                    manuscript_id: id,
+                    preview,
+                    choices,
+                    markdown_override: None,
+                    take_status: false,
+                });
+                self.status = "已打开待处理分支的合并预览。".into();
+            }
+            Err(error) => self.status = format!("无法打开待处理分支：{error:#}"),
+        }
+    }
+
+    fn confirm_pending_merge(&mut self) {
+        let Some(dialog) = self.pending_merge.take() else {
+            return;
+        };
+        let id = dialog.manuscript_id;
+        if self
+            .docs
+            .iter()
+            .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty())
+        {
+            self.pending_merge = Some(dialog);
+            self.status = "稿件在起草页有未保存修改，请先保存后再合并。".into();
+            return;
+        }
+        let result = self
+            .manuscript_store
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))
+            .and_then(|store| {
+                manuscript_io::sync::merge_pending(
+                    store,
+                    id,
+                    &dialog.preview.head,
+                    &dialog.choices,
+                    dialog.markdown_override.as_deref(),
+                    dialog.take_status,
+                )
+            });
+        match result {
+            Ok(()) => {
+                self.manuscript_dirty = true;
+                self.refresh_open_manuscript_after_sync(id);
+                if self
+                    .manuscript_detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.id == id)
+                {
+                    self.refresh_detail(id);
+                }
+                self.status = "待处理分支已合并为新的可见版本。".into();
+            }
+            Err(error) => {
+                self.pending_merge = Some(dialog);
+                self.status = format!("合并待处理分支失败：{error:#}");
+            }
+        }
+    }
+
+    fn refresh_open_manuscript_after_sync(&mut self, id: i64) {
+        let record = self
+            .manuscript_store
+            .as_mut()
+            .and_then(|store| store.get(id).ok().flatten());
+        let Some(record) = record else {
+            return;
+        };
+        for doc in &mut self.docs {
+            if doc.manuscript_id == Some(id) {
+                let key = doc.key;
+                let mut session = DraftSession::from_parts(
+                    key,
+                    Some(id),
+                    record.snapshot.clone(),
+                    record.content_markdown.clone(),
+                );
+                session.record_status = record.status;
+                session.mark_saved();
+                *doc = session;
             }
         }
     }

@@ -4,7 +4,10 @@
 //! 导出按 `ManuscriptFilter` 过滤；导入由预览勾选 + 关键词过滤 + `skip_existing_by_id`
 //! 决定写哪些记录，满足“导入也支持过滤筛选”。
 
-use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptStore, NewManuscript};
+#[cfg(test)]
+use crate::manuscript::NewManuscript;
+use crate::manuscript::sync::{SyncRevision, bytes_hash};
+use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptStore};
 use crate::models::{
     DraftInput, FontConfig, ManuscriptStatus, NumberingConfig, TemplateKind, VocabularyEntry,
 };
@@ -19,7 +22,9 @@ use zip::read::ZipArchive;
 use zip::write::SimpleFileOptions;
 use zip::{AesMode, CompressionMethod, ZipWriter};
 
-pub const MANIFEST_SCHEMA: u32 = 1;
+pub mod sync;
+
+pub const MANIFEST_SCHEMA: u32 = 2;
 const MANIFEST_NAME: &str = "manifests.json";
 /// 随稿件包导出的标准词库（全局一份，随包带走，导入时增量合并）。
 pub const VOCABULARY_SCHEMA: u32 = 1;
@@ -28,6 +33,7 @@ const VOCABULARY_NAME: &str = "vocabulary.json";
 const VOCABULARY_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// 单个 PDF 附件上限（约 100 MB），超限跳过，避免导入超大文件撑爆库。
 const MAX_PDF_BYTES: u64 = 100 * 1024 * 1024;
+const MANIFEST_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 /// 导出密码规则：不少于 10 个字符，且至少覆盖三类字符；同时拒绝常见口令、
 /// 连续字符和长重复字符。导入不调用此校验，以兼容外部工具生成的历史弱密码包。
@@ -107,6 +113,8 @@ pub struct ManifestPdf {
     pub file_name: String,
     /// zip 内相对路径，如 `pdf/3_0_扫描件.pdf`。
     pub path: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,13 +134,32 @@ pub struct ManifestRecord {
     pub published_at: Option<String>,
     pub archived_at: Option<String>,
     pub pdfs: Vec<ManifestPdf>,
+    #[serde(default)]
+    pub document_uuid: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub head_revision_uuid: Option<String>,
+    #[serde(default)]
+    pub revisions: Vec<SyncRevision>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestAsset {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// zip 内相对路径 + 文件字节。
+type Blob = (String, Vec<u8>);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub schema: u32,
     pub exported_at: String,
     pub records: Vec<ManifestRecord>,
+    #[serde(default)]
+    pub assets: Vec<ManifestAsset>,
 }
 
 /// 随稿件包携带的标准词库。可选条目：旧包没有 `vocabulary.json` 时导入端视为无词库。
@@ -169,6 +196,7 @@ pub struct PdfExportSummary {
     pub failed: Vec<(String, String)>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct ImportSummary {
     pub imported: usize,
@@ -178,6 +206,7 @@ pub struct ImportSummary {
     pub skipped_pdfs: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub struct ImportOptions {
     pub skip_existing_by_id: bool,
@@ -229,9 +258,13 @@ fn export_zip_ids(
     let mut pdf_blobs: Vec<(String, Vec<u8>)> = Vec::new();
     let mut total_pdfs = 0usize;
     for &id in ids {
+        let head = store.sync_checkpoint(id)?;
         let Some(record) = store.get(id)? else {
             continue;
         };
+        let (document_uuid, _) = store.document_identity(id)?;
+        let revisions = store.sync_revisions(id)?;
+        let aliases = store.document_aliases(id)?;
         let export_id = record.source_id.unwrap_or(record.id);
         let mut pdfs = Vec::new();
         for (idx, pdf) in record.pdfs.iter().enumerate() {
@@ -244,6 +277,7 @@ fn export_zip_ids(
                 id: pdf.id,
                 file_name: pdf.file_name.clone(),
                 path: entry,
+                sha256: Some(bytes_hash(&pdf.bytes)),
             });
             total_pdfs += 1;
         }
@@ -262,22 +296,28 @@ fn export_zip_ids(
             published_at: record.published_at,
             archived_at: record.archived_at,
             pdfs,
+            document_uuid: Some(document_uuid),
+            aliases,
+            head_revision_uuid: Some(head.revision_uuid),
+            revisions,
         });
     }
+    // 全部历史版本引用的图片也必须随包保存，不能只收活稿。
+    let (assets, image_blobs) = collect_sync_images(&records)?;
     let manifest = Manifest {
         schema: MANIFEST_SCHEMA,
         exported_at: Local::now().to_rfc3339(),
         records,
-    };
-    // 收集全部稿件引用的图片（跨稿件去重），zip 条目平铺为 images/<文件名>。
-    let image_blobs = match crate::storage::config_dir() {
-        Ok(base) => collect_image_entries(&base, &manifest.records),
-        Err(_) => Vec::new(),
+        assets,
     };
 
-    let file = File::create(zip_path)
-        .with_context(|| format!("无法创建导出文件 {}", zip_path.display()))?;
-    let mut zip = ZipWriter::new(file);
+    let parent = zip_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("无法在目标目录创建临时 ZIP：{}", parent.display()))?;
+    let mut zip = ZipWriter::new(temporary.reopen()?);
     zip.start_file(MANIFEST_NAME, encrypted_options(password))?;
     zip.write_all(
         serde_json::to_string_pretty(&manifest)
@@ -308,7 +348,13 @@ fn export_zip_ids(
         zip.start_file(path.clone(), stored_options)?;
         zip.write_all(bytes)?;
     }
-    zip.finish()?;
+    let finished = zip.finish()?;
+    finished.sync_all()?;
+    drop(finished);
+    temporary
+        .persist(zip_path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("无法完成稿件 ZIP：{}", zip_path.display()))?;
     Ok(ExportSummary {
         records: manifest.records.len(),
         pdfs: total_pdfs,
@@ -462,8 +508,140 @@ fn compile_record_pdf(
     result
 }
 
+/// 新格式必须完整携带活稿和历史版本引用的资源，缺一张图就拒绝导出。
+fn collect_sync_images(records: &[ManifestRecord]) -> Result<(Vec<ManifestAsset>, Vec<Blob>)> {
+    let base = crate::storage::config_dir()?;
+    let mut paths = std::collections::BTreeSet::new();
+    for record in records {
+        for markdown in std::iter::once(&record.content_markdown).chain(
+            record
+                .revisions
+                .iter()
+                .map(|revision| &revision.content_markdown),
+        ) {
+            for src in crate::images::image_refs(markdown) {
+                if src.starts_with("images/") {
+                    paths.insert(src);
+                }
+            }
+        }
+    }
+    let mut assets = Vec::new();
+    let mut blobs = Vec::new();
+    for path in paths {
+        let source = crate::images::resolve_from_base(&base, &path)?;
+        let bytes = std::fs::read(&source)
+            .with_context(|| format!("稿件图片缺失：{}", source.display()))?;
+        if bytes.len() as u64 > MAX_PDF_BYTES {
+            bail!("稿件图片过大：{path}");
+        }
+        assets.push(ManifestAsset {
+            path: path.clone(),
+            sha256: bytes_hash(&bytes),
+        });
+        blobs.push((path, bytes));
+    }
+    Ok((assets, blobs))
+}
+
+fn validate_manifest(manifest: &Manifest) -> Result<()> {
+    if manifest.schema == 1 {
+        return Ok(());
+    }
+    let mut documents = std::collections::HashSet::new();
+    let mut revisions = std::collections::HashSet::new();
+    let assets = manifest
+        .assets
+        .iter()
+        .map(|asset| (&asset.path, &asset.sha256))
+        .collect::<std::collections::HashMap<_, _>>();
+    if assets.len() != manifest.assets.len() {
+        bail!("稿件包图片路径重复");
+    }
+    for asset in &manifest.assets {
+        if !asset.path.starts_with("images/")
+            || asset.path.contains('\\')
+            || asset.path.split('/').count() != 2
+            || asset
+                .path
+                .split('/')
+                .any(|part| part == ".." || part == "." || part.is_empty())
+            || asset.sha256.len() != 64
+            || !asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            bail!("稿件包图片清单无效：{}", asset.path);
+        }
+    }
+    for record in &manifest.records {
+        let document_uuid = record
+            .document_uuid
+            .as_deref()
+            .context("稿件包缺少稿件身份")?;
+        let head = record
+            .head_revision_uuid
+            .as_deref()
+            .context("稿件包缺少当前版本")?;
+        if uuid::Uuid::parse_str(document_uuid).is_err() || !documents.insert(document_uuid) {
+            bail!("稿件身份无效或重复：{document_uuid}");
+        }
+        let mut identity_set = std::collections::HashSet::new();
+        identity_set.insert(document_uuid);
+        for alias in &record.aliases {
+            if uuid::Uuid::parse_str(alias).is_err()
+                || !identity_set.insert(alias.as_str())
+                || !documents.insert(alias.as_str())
+            {
+                bail!("稿件别名身份无效或重复：{alias}");
+            }
+        }
+        let mut known = std::collections::HashSet::new();
+        for revision in &record.revisions {
+            revision.verify()?;
+            if !revisions.insert(&revision.revision_uuid)
+                || revision
+                    .parents
+                    .iter()
+                    .any(|parent| !known.contains(parent.as_str()))
+            {
+                bail!("稿件版本重复、成环或祖先缺失：{}", revision.revision_uuid);
+            }
+            known.insert(revision.revision_uuid.as_str());
+        }
+        let head_revision = record
+            .revisions
+            .iter()
+            .find(|revision| revision.revision_uuid == head)
+            .context("稿件包缺少当前版本快照")?;
+        if head_revision.snapshot != record.snapshot
+            || head_revision.content_markdown != record.content_markdown
+            || head_revision.notes != record.notes
+        {
+            bail!("稿件活稿与当前版本快照不一致：{}", record.title);
+        }
+        for markdown in std::iter::once(&record.content_markdown).chain(
+            record
+                .revisions
+                .iter()
+                .map(|revision| &revision.content_markdown),
+        ) {
+            for src in crate::images::image_refs(markdown) {
+                if src.starts_with("images/") && !assets.contains_key(&src) {
+                    bail!("稿件包缺少图片资源：{src}");
+                }
+            }
+        }
+        for pdf in &record.pdfs {
+            if pdf.sha256.as_deref().is_none_or(|hash| hash.len() != 64) {
+                bail!("稿件包 PDF 校验值缺失：{}", pdf.file_name);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 从清单记录中收集 markdown 引用的图片，返回 zip 条目（`images/<文件名>`）与字节。
 /// 引用缺失或读取失败时跳过，不阻断导出。`base` 是配置目录（图片相对路径的基准）。
+#[cfg(test)]
 fn collect_image_entries(base: &Path, records: &[ManifestRecord]) -> Vec<(String, Vec<u8>)> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -500,15 +678,25 @@ pub fn read_manifest(zip_path: &Path, password: &str) -> Result<Manifest> {
         .map_err(map_zip_password_error)
         .context("无法读取 manifests.json")?;
     let mut raw = String::new();
-    reader.read_to_string(&mut raw)?;
+    if reader.size() > MANIFEST_MAX_BYTES {
+        bail!("稿件包清单超过大小上限");
+    }
+    reader
+        .by_ref()
+        .take(MANIFEST_MAX_BYTES + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() as u64 > MANIFEST_MAX_BYTES {
+        bail!("稿件包清单解压后超过大小上限");
+    }
     let manifest: Manifest = serde_json::from_str(&raw).context("manifests.json 格式无效")?;
-    if manifest.schema != MANIFEST_SCHEMA {
+    if manifest.schema != 1 && manifest.schema != MANIFEST_SCHEMA {
         bail!(
-            "不支持的文件格式版本：v{}（当前支持 v{}）",
+            "不支持的文件格式版本：v{}（当前支持 v1 / v{}）",
             manifest.schema,
             MANIFEST_SCHEMA
         );
     }
+    validate_manifest(&manifest)?;
     Ok(manifest)
 }
 
@@ -558,6 +746,7 @@ pub fn read_vocabulary(zip_path: &Path, password: &str) -> Result<Option<Vocabul
 }
 
 /// 按预览勾选导入。重新读取 zip 以保证与磁盘一致；记录 id 写入 source_id 列去重。
+#[cfg(test)]
 pub fn import_zip(
     store: &mut ManuscriptStore,
     zip_path: &Path,
@@ -654,6 +843,7 @@ fn unique_zip_name(used: &mut std::collections::HashSet<String>, stem: &str, ext
 
 /// 从 zip 恢复 `images/` 条目到目标目录。条目名经过净化，防止篡改的 zip
 /// 用路径穿越覆盖任意文件；返回恢复的文件数。
+#[cfg(test)]
 fn restore_images(archive: &mut ZipArchive<File>, target: &Path, password: &str) -> Result<usize> {
     std::fs::create_dir_all(target)
         .with_context(|| format!("无法创建图片目录 {}", target.display()))?;
@@ -1180,6 +1370,10 @@ mod tests {
             published_at: None,
             archived_at: None,
             pdfs: Vec::new(),
+            document_uuid: None,
+            aliases: Vec::new(),
+            head_revision_uuid: None,
+            revisions: Vec::new(),
         };
         let entries = collect_image_entries(base.path(), &[record]);
         assert_eq!(entries.len(), 2);

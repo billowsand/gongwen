@@ -64,9 +64,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 rust_xlsxwriter = "0.79"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-similar = { version = "3.2.0", default-features = false, features = ["std"] }
+sha2 = "0.11"
+similar = { version = "3.2.0", default-features = false, features = ["std", "text"] }
 tempfile = "3.20"
 ttf-parser = "0.25.1"
+uuid = { version = "1.24", features = ["v4"] }
 zip = "4.3"
 
 [target.'cfg(windows)'.dependencies]

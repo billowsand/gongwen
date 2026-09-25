@@ -47,7 +47,9 @@ pub(crate) use ai_prompts::{AiPromptDraft, AiPromptPicker};
 pub(crate) use ai_workbench::AiWorkbench;
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
 pub(crate) use lexicon_jobs::LexiconJob;
-pub(crate) use manuscript_ui::{ArchivePending, ImportPreview, PdfExportDialog, ZipPasswordDialog};
+pub(crate) use manuscript_ui::{
+    ArchivePending, ImportPreview, PdfExportDialog, PendingMergeDialog, ZipPasswordDialog,
+};
 pub(crate) use proofread_ui::ProofreadPageState;
 pub(crate) use session::{DraftAction, ExitPrompt};
 pub(crate) use settings::SettingsSection;
@@ -196,6 +198,7 @@ pub struct GongwenApp {
     manuscript_detail: Option<ManuscriptRecord>,
     manuscript_detail_delete_pdf: Option<i64>,
     manuscript_import_preview: Option<ImportPreview>,
+    pending_merge: Option<PendingMergeDialog>,
     /// 提交版本对话框（稿件版或配置版）。
     version_commit: Option<VersionCommitDraft>,
     /// 版本对照窗。
@@ -451,6 +454,7 @@ impl GongwenApp {
             manuscript_detail: None,
             manuscript_detail_delete_pdf: None,
             manuscript_import_preview: None,
+            pending_merge: None,
             version_commit: None,
             version_diff: None,
             version_switch: None,

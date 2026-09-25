@@ -18,6 +18,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+pub(crate) mod merge;
+pub(crate) mod sync;
+
 /// schema 版本 1：稿件表 + PDF 附件表。
 const DDL_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS manuscripts (
@@ -377,6 +380,7 @@ impl ManuscriptStore {
         if version < 6 {
             self.conn.execute_batch("PRAGMA user_version = 6")?;
         }
+        sync::migrate(&mut self.conn)?;
         Ok(())
     }
 
@@ -458,9 +462,10 @@ impl ManuscriptStore {
             .archived_at
             .clone()
             .or_else(|| (status == ManuscriptStatus::Archived).then(|| now.clone()));
+        let document_uuid = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO manuscripts (snapshot_json, content_markdown, notes, title, kind, status, doc_number, doc_date, doc_date_iso, source_id, created_at, updated_at, published_at, archived_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO manuscripts (snapshot_json, content_markdown, notes, title, kind, status, doc_number, doc_date, doc_date_iso, source_id, created_at, updated_at, published_at, archived_at, document_uuid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 snapshot_json,
                 new.content_markdown,
@@ -476,6 +481,7 @@ impl ManuscriptStore {
                 updated_at,
                 published_at,
                 archived_at,
+                document_uuid,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -799,6 +805,7 @@ impl ManuscriptStore {
     }
 
     /// 已用过的 `source_id` 集合，供导入预览判断“与本地同源”。
+    #[cfg(test)]
     pub fn source_ids(&mut self) -> Result<HashSet<i64>> {
         let mut stmt = self
             .conn
@@ -902,6 +909,17 @@ impl ManuscriptStore {
                 doc_date,
                 now,
             ],
+        )?;
+        self.append_visible_sync_revision(
+            manuscript_id,
+            &sync::VisibleRevision {
+                number,
+                name: name.trim(),
+                comment: comment.trim(),
+                snapshot,
+                markdown: content_markdown,
+                notes,
+            },
         )?;
         Ok(VersionRow {
             version_number: number,
