@@ -12,12 +12,25 @@ use crate::version_link::ChangeLinks;
 use eframe::egui;
 use std::ops::Range;
 
+/// 版本对的新侧。历史版本用版本号；工作区内容用「正文 + 文档要素 + 备注」的
+/// 内容哈希——内容一变（改字、换要素、改备注）哈希就变，缓存自然失效，
+/// 不会与历史版本撞键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PairSide {
+    /// 某个已提交的历史版本。
+    Version(i64),
+    /// 当前工作区内容，带内容哈希。
+    Working(u64),
+}
+
 /// 历史快照的稳定身份。旧版本号为空表示 v1 左侧为空白稿。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct VersionPairKey {
     pub(crate) manuscript_id: i64,
+    /// 旧侧版本号；None 表示 v1 左侧为空白稿。旧侧永远是已提交版本
+    /// （工作区只可能出现在新侧）。
     pub(crate) old_version_number: Option<i64>,
-    pub(crate) new_version_number: i64,
+    pub(crate) new_side: PairSide,
 }
 
 struct PairCache {
@@ -336,7 +349,7 @@ mod tests {
                 key: VersionPairKey {
                     manuscript_id: 1,
                     old_version_number: Some(1),
-                    new_version_number: 2,
+                    new_side: PairSide::Version(2),
                 },
                 clock: 0.0,
             }

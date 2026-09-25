@@ -239,7 +239,11 @@
   右花脸稿预览（`official_preview`，带要素标注）」，自带联动（点击互跳、
   悬停高亮、F7 / Shift+F7、折叠未改动）。按 `(稿件 id, 旧版本号, 新版本号)`
   缓存全部计算结果；历史版本不可变，算一次就够，同步算、无防抖。
-  缓存键里旧版本号是 `Option`：v1 的旧侧为空白稿。
+  缓存键里旧版本号是 `Option`：v1 的旧侧为空白稿；新侧是 `PairSide` 枚举——
+  历史版本用 `Version(n)`，**只读路径的工作区新侧用 `Working(内容哈希)`
+  （正文 + 文档要素 + 备注）**，两类键永不撞车：工作区内容一变哈希就变，
+  缓存自然失效（审查修掉的串用 bug：工作区新侧曾拿「最新版本号」当键，
+  与时间轴历史视图互相污染显示与导出）。
 - `src/draft_page/timeline.rs`：时间轴的纯数据投影，不读库不碰 egui。
   `timeline_rows(versions, selected, comparison, fixed_baseline)` 返回每行的
   `target / selected / latest / 旧新版本号`，规则：工作区行永远在最上；

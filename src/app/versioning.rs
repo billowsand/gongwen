@@ -910,7 +910,7 @@ pub(crate) fn manuscript_diff_ui_impl(
     let key = crate::version_pair_view::VersionPairKey {
         manuscript_id,
         old_version_number: from,
-        new_version_number: to,
+        new_side: crate::version_pair_view::PairSide::Version(to),
     };
     if !diff.pair.matches(key) {
         let new = diff::ContentSnapshot::from(new_record);

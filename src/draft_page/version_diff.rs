@@ -72,6 +72,16 @@ fn text_hash(text: &str) -> u64 {
     hasher.finish()
 }
 
+/// 版本对缓存键里「工作区新侧」的内容哈希：正文 + 文档要素 + 备注，
+/// 任一变了哈希就变，缓存自然失效。
+fn pair_content_hash(input: &DraftInput, markdown: &str, notes: &str) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    markdown.hash(&mut hasher);
+    serde_json::to_string(input).ok().hash(&mut hasher);
+    notes.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// 新文本第 `line` 行（0 基）行首的字节位置。
 fn line_offset(text: &str, line: usize) -> usize {
     line_starts(text).get(line).copied().unwrap_or(text.len())
@@ -188,7 +198,7 @@ impl DraftPage<'_> {
             return;
         }
         if self.doc.read_only() {
-            self.read_only_version_pair_mode_ui(ui, id, base, latest, &versions);
+            self.read_only_version_pair_mode_ui(ui, id, base, &versions);
             return;
         }
         self.sync_draft_diff(ui.ctx(), id, base);
@@ -738,7 +748,7 @@ impl DraftPage<'_> {
         let key = crate::version_pair_view::VersionPairKey {
             manuscript_id,
             old_version_number: old_version,
-            new_version_number: number,
+            new_side: crate::version_pair_view::PairSide::Version(number),
         };
         if !self.doc.draft_diff.version_pair.matches(key) {
             let empty =
@@ -842,19 +852,32 @@ impl DraftPage<'_> {
         ui: &mut egui::Ui,
         manuscript_id: i64,
         base: i64,
-        latest: i64,
         versions: &[crate::manuscript::VersionRow],
     ) {
-        let new_version = self
-            .doc
-            .loaded_version
-            .as_ref()
-            .filter(|loaded| loaded.manuscript_id == manuscript_id)
-            .map_or(latest, |loaded| loaded.version_number);
+        // 新侧是工作区内容，不是某个历史版本：键用内容哈希（正文 + 要素 + 备注），
+        // 内容与任意历史版本都不会撞——工作区改过，哈希变，缓存自然失效。
+        let (notes, new) = {
+            let notes = self
+                .store
+                .as_deref()
+                .and_then(|store| store.notes_of(manuscript_id).ok())
+                .flatten()
+                .unwrap_or_default();
+            let new = diff::ContentSnapshot::new(
+                self.doc.draft.clone(),
+                self.doc.generated_markdown.clone(),
+                notes.clone(),
+            );
+            (notes, new)
+        };
         let key = crate::version_pair_view::VersionPairKey {
             manuscript_id,
             old_version_number: Some(base),
-            new_version_number: new_version,
+            new_side: crate::version_pair_view::PairSide::Working(pair_content_hash(
+                &new.snapshot,
+                &new.content_markdown,
+                &notes,
+            )),
         };
         if !self.doc.draft_diff.version_pair.matches(key) {
             let old = self
@@ -866,17 +889,6 @@ impl DraftPage<'_> {
                 .unwrap_or_else(|| {
                     diff::ContentSnapshot::new(DraftInput::default(), String::new(), String::new())
                 });
-            let notes = self
-                .store
-                .as_deref()
-                .and_then(|store| store.notes_of(manuscript_id).ok())
-                .flatten()
-                .unwrap_or_default();
-            let new = diff::ContentSnapshot::new(
-                self.doc.draft.clone(),
-                self.doc.generated_markdown.clone(),
-                notes,
-            );
             let display = UnitDisplay::new(&self.config.vocabulary);
             self.doc
                 .draft_diff
@@ -1411,7 +1423,13 @@ mod tests {
                     crate::version_pair_view::VersionPairKey {
                         manuscript_id: id,
                         old_version_number: Some(1),
-                        new_version_number: 2,
+                        // 只读路径的新侧是工作区内容，键为内容哈希，
+                        // 不是任何历史版本号。
+                        new_side: crate::version_pair_view::PairSide::Working(pair_content_hash(
+                            &harness.doc.draft,
+                            &harness.doc.generated_markdown,
+                            "",
+                        )),
                     }
                 ),
                 "{record_status:?} 稿件应走共享只读版本对组件"
@@ -1782,7 +1800,7 @@ mod tests {
                 .matches(crate::version_pair_view::VersionPairKey {
                     manuscript_id: id,
                     old_version_number: Some(1),
-                    new_version_number: 2,
+                    new_side: crate::version_pair_view::PairSide::Version(2),
                 }),
             "选中历史版本后走只读版本对组件"
         );
@@ -1827,7 +1845,7 @@ mod tests {
                 .matches(crate::version_pair_view::VersionPairKey {
                     manuscript_id: id,
                     old_version_number: None,
-                    new_version_number: 1,
+                    new_side: crate::version_pair_view::PairSide::Version(1),
                 }),
             "v1 的旧侧应为空白稿"
         );
@@ -1869,6 +1887,142 @@ mod tests {
         );
         // 弹了确认就不会直接切走。
         assert_eq!(harness.doc.generated_markdown, NEW);
+    }
+
+    /// 回归（审查发现）：只读路径的新侧是工作区内容，却拿「最新版本号」当缓存键，
+    /// 与时间轴历史视图撞键——先画只读视图再点 v2，v2 的对照里会冒出工作区
+    /// 独有的内容（缓存串用）。修复后新侧按内容哈希做键，两边互不污染；
+    /// 导出花脸稿吃的就是这份缓存，markdown 必须对应各自的正确内容。
+    #[test]
+    fn readonly_working_pair_never_bleeds_into_a_history_version_pair() {
+        let mut harness = Harness::new();
+        let id = harness.doc.manuscript_id.unwrap();
+        harness
+            .store
+            .commit_manuscript_version(id, "二稿", "", &DraftInput::default(), NEW, "")
+            .unwrap();
+        harness.doc.record_status = ManuscriptStatus::Published;
+        harness.doc.draft_diff.base = Some(1);
+        let working = format!("{NEW}\n\n工作区独有的一段。");
+        harness.doc.generated_markdown = working.clone();
+        let vocabulary = harness.config.vocabulary.clone();
+        let display = UnitDisplay::new(&vocabulary);
+
+        // 顺序一：先画只读视图，工作区独有内容上屏。
+        let output = harness.frame(Vec::new());
+        let text = texts(&output);
+        assert!(text.contains("工作区独有的一段。"), "{text}");
+        let expected_working = redline::build_with_inputs(
+            OLD,
+            &working,
+            &DraftInput::default(),
+            &DraftInput::default(),
+            &display,
+        );
+        let cached = harness.doc.draft_diff.version_pair.redline().unwrap();
+        assert_eq!(
+            cached.markdown, expected_working.markdown,
+            "只读视图对工作区内容"
+        );
+
+        // 再点时间轴 v2：键换成 Version(2)，重算 v1 → v2。
+        harness.doc.draft_diff.timeline.selected =
+            super::super::timeline::TimelineTarget::Version(2);
+        let output = harness.frame(Vec::new());
+        let text = texts(&output);
+        assert!(
+            !text.contains("工作区独有的一段。"),
+            "v2 对照里不得出现工作区独有内容：{text}"
+        );
+        assert!(
+            harness
+                .doc
+                .draft_diff
+                .version_pair
+                .matches(crate::version_pair_view::VersionPairKey {
+                    manuscript_id: id,
+                    old_version_number: Some(1),
+                    new_side: crate::version_pair_view::PairSide::Version(2),
+                }),
+            "历史视图用版本号做键"
+        );
+        let expected_v2 = redline::build_with_inputs(
+            OLD,
+            NEW,
+            &DraftInput::default(),
+            &DraftInput::default(),
+            &display,
+        );
+        let cached = harness.doc.draft_diff.version_pair.redline().unwrap();
+        assert_eq!(
+            cached.markdown, expected_v2.markdown,
+            "导出花脸稿必须是 v1→v2"
+        );
+        assert!(!cached.markdown.contains("工作区独有的一段。"));
+    }
+
+    /// 反向回归：先点 v2 再回只读视图，只读视图显示的必须是工作区内容，
+    /// 不是 v2 的缓存。
+    #[test]
+    fn history_version_pair_never_bleeds_into_the_readonly_working_pair() {
+        let mut harness = Harness::new();
+        let id = harness.doc.manuscript_id.unwrap();
+        harness
+            .store
+            .commit_manuscript_version(id, "二稿", "", &DraftInput::default(), NEW, "")
+            .unwrap();
+        harness.doc.record_status = ManuscriptStatus::Published;
+        harness.doc.draft_diff.base = Some(1);
+        let working = format!("{NEW}\n\n工作区独有的一段。");
+        harness.doc.generated_markdown = working.clone();
+        let vocabulary = harness.config.vocabulary.clone();
+        let display = UnitDisplay::new(&vocabulary);
+
+        // 先点时间轴 v2。
+        harness.doc.draft_diff.timeline.selected =
+            super::super::timeline::TimelineTarget::Version(2);
+        let output = harness.frame(Vec::new());
+        let text = texts(&output);
+        assert!(!text.contains("工作区独有的一段。"), "{text}");
+        let expected_v2 = redline::build_with_inputs(
+            OLD,
+            NEW,
+            &DraftInput::default(),
+            &DraftInput::default(),
+            &display,
+        );
+        assert_eq!(
+            harness
+                .doc
+                .draft_diff
+                .version_pair
+                .redline()
+                .unwrap()
+                .markdown,
+            expected_v2.markdown
+        );
+
+        // 再回「当前未提交」：只读视图按工作区内容哈希重算。
+        harness.doc.draft_diff.timeline.selected = super::super::timeline::TimelineTarget::Working;
+        let output = harness.frame(Vec::new());
+        let text = texts(&output);
+        assert!(
+            text.contains("工作区独有的一段。"),
+            "只读视图必须显示工作区独有内容：{text}"
+        );
+        let expected_working = redline::build_with_inputs(
+            OLD,
+            &working,
+            &DraftInput::default(),
+            &DraftInput::default(),
+            &display,
+        );
+        let cached = harness.doc.draft_diff.version_pair.redline().unwrap();
+        assert_eq!(
+            cached.markdown, expected_working.markdown,
+            "导出花脸稿必须是 v1→工作区内容"
+        );
+        assert!(cached.markdown.contains("工作区独有的一段。"));
     }
 
     /// 长稿打字的帧耗时探针（人工运行：`cargo test --release --bin gongwen-assistant
