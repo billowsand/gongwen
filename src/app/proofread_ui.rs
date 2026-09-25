@@ -133,8 +133,9 @@ impl GongwenApp {
                 |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("proofread_list")
+                        .max_width(list_width)
                         .auto_shrink([false; 2])
-                        .show(ui, |ui| self.proofread_list_ui(ui, &lexicon));
+                        .show(ui, |ui| self.proofread_list_ui(ui, &lexicon, list_width));
                 },
             );
             ui.add_space(8.0);
@@ -327,11 +328,21 @@ impl GongwenApp {
         self.config.proofread.prune();
     }
 
-    fn proofread_list_ui(&mut self, ui: &mut egui::Ui, lexicon: &proofread::Lexicon) {
+    fn proofread_list_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        lexicon: &proofread::Lexicon,
+        list_width: f32,
+    ) {
         let filter = self.proofread_page.filter.trim().to_lowercase();
         let group = self.proofread_page.group.clone();
         let level = self.proofread_page.level;
 
+        // 宽度只取自外层分栏，并预留滚动条和边距；不能由行内容反推宽度。
+        let row_width = (list_width - 44.0).max(240.0);
+        let show_group = list_width >= 430.0;
+        let fixed_width = if show_group { 220.0 } else { 152.0 };
+        let title_width = row_width - fixed_width;
         let mut toggle: Option<(String, bool)> = None;
         let mut select: Option<String> = None;
         let mut shown = 0usize;
@@ -356,69 +367,79 @@ impl GongwenApp {
             shown += 1;
 
             let selected = self.proofread_page.selected.as_deref() == Some(entry.id.as_str());
-            let frame = theme::card()
-                .inner_margin(egui::Margin::symmetric(8, 4))
+            egui::Frame::new()
                 .fill(if selected {
                     theme::accent_soft()
                 } else {
-                    theme::surface_sunk()
-                });
-            frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    let mut enabled = entry.enabled;
-                    if ui.checkbox(&mut enabled, "").changed() {
-                        toggle = Some((entry.id.clone(), enabled));
-                    }
+                    theme::surface()
+                })
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.set_width(row_width);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let mut enabled = entry.enabled;
+                        if ui.checkbox(&mut enabled, "").changed() {
+                            toggle = Some((entry.id.clone(), enabled));
+                        }
 
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
                         let wrong = if entry.wrong.is_empty() {
                             "（未填写错误写法）"
                         } else {
                             entry.wrong.as_str()
                         };
                         let title = format!("{wrong} → {}", entry.suggestion);
-                        let label = egui::RichText::new(title).strong().color(if entry.enabled {
-                            theme::text()
-                        } else {
-                            theme::text_muted()
-                        });
                         let stat = self.metrics.get(&entry.id);
-                        let detail = if stat.decisions() > 0 {
-                            format!(
-                                "{} · {} · {} 次采纳 / {} 次忽略",
-                                entry.group,
-                                entry.level.label(),
-                                stat.accepted,
-                                stat.ignored
-                            )
-                        } else {
-                            format!("{} · {}", entry.group, entry.level.label())
-                        };
+                        let mut detail =
+                            format!("{} · {} · {}", entry.id, entry.group, entry.level.label());
+                        if stat.decisions() > 0 {
+                            detail.push_str(&format!(
+                                " · {} 次采纳 / {} 次忽略",
+                                stat.accepted, stat.ignored
+                            ));
+                        }
+                        if stat.is_underperforming() {
+                            detail.push_str(" · 建议停用");
+                        }
+                        let label = egui::RichText::new(&title)
+                            .strong()
+                            .color(if entry.enabled {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            });
                         if ui
-                            .selectable_label(selected, label)
-                            .on_hover_text(&detail)
+                            .add_sized(
+                                [title_width, 26.0],
+                                egui::Label::new(label)
+                                    .sense(egui::Sense::click())
+                                    .truncate(),
+                            )
+                            .on_hover_text(format!("{title}\n{detail}"))
                             .clicked()
                         {
                             select = Some(entry.id.clone());
                         }
-                        ui.horizontal(|ui| {
-                            ui.weak(&entry.id);
-                            ui.colored_label(level_color(entry.level), entry.level.label());
-                            if !entry.is_builtin() {
-                                ui.weak("自建");
-                            } else if self.config.proofread.override_for(&entry.id).is_some() {
-                                ui.weak("已改");
-                            }
-                            if stat.is_underperforming() {
-                                ui.colored_label(theme::warn(), "建议停用")
-                                    .on_hover_text("这条建议常被忽略，请检查是否需要停用");
-                            }
-                        });
+
+                        if show_group {
+                            ui.add_sized([64.0, 26.0], egui::Label::new(&entry.group).truncate())
+                                .on_hover_text(&entry.group);
+                        }
+                        ui.add_sized(
+                            [42.0, 26.0],
+                            egui::Label::new(
+                                egui::RichText::new(entry.level.label())
+                                    .color(level_color(entry.level)),
+                            ),
+                        );
+                        ui.add_sized(
+                            [72.0, 26.0],
+                            egui::Label::new(
+                                egui::RichText::new(&entry.id).color(theme::text_muted()),
+                            ),
+                        );
                     });
                 });
-            });
             ui.add_space(2.0);
         }
 
