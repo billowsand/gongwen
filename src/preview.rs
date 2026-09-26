@@ -1,4 +1,4 @@
-﻿//! 公文版式预览：把审校区的 Markdown 连同表单锁定的行文要素，按导出后的样子画出来。
+//! 公文版式预览：把审校区的 Markdown 连同表单锁定的行文要素，按导出后的样子画出来。
 //!
 //! 各版式部件已拆分到 `preview/` 子模块（排版基础、红头、文尾、红头呈批件、
 //! 正文渲染、纸面行号），根文件保留版式常量、`Metrics` / `PreviewScale` 与测试。
@@ -16,6 +16,7 @@ mod layout;
 pub(crate) mod marks;
 mod math_flow;
 mod math_render;
+mod memo;
 mod pdf_figure;
 mod red;
 mod render;

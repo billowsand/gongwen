@@ -696,8 +696,16 @@ pub(crate) fn research_preview(
         .with_line_numbers(line_numbers);
     // 两遍：先给锚点和文献定号，再按纸面字面重新切块。研究报告的标题编号不跟
     // 设置里的公文编号样式走；序号表的分组编号跟设置，与导出一致。
-    let marks = collect_marks(&export::parse_markdown_located(markdown), markdown);
-    let located = export::parse_markdown_located_research(markdown, &marks, numbering);
+    // 两遍解析只取决于正文与编号样式，正文没动就复用上一次的结果（`preview::memo`）。
+    let located = super::memo::memo(
+        ui.ctx(),
+        "research-parse",
+        super::memo::key((markdown, numbering)),
+        || {
+            let marks = collect_marks(&export::parse_markdown_located(markdown), markdown);
+            export::parse_markdown_located_research(markdown, &marks, numbering)
+        },
+    );
     let mut clicked = None;
 
     cover_sheet(ui, &metrics, input, markdown);

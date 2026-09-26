@@ -205,6 +205,81 @@ fn clickable_text_block(
     );
 }
 
+/// 公文预览每帧都要的解析与切块结果，按正文内容缓存（见 `preview::memo`）。
+struct OfficialParse {
+    located: Vec<LocatedBlock>,
+    /// 正文区的块（`located` 下标）：首个标题加上附件标记之前的内容。
+    body: Vec<usize>,
+    /// 各份附件的块，每份附件从新纸开始。
+    attachments: Vec<Vec<usize>>,
+    /// 附件概要里列出的附件名。
+    names: Vec<String>,
+    /// 正文区每个块是否与后文合成紧缩标题，下标与 `body` 对应。
+    compact_headings: Vec<bool>,
+    /// 正文首个 `# ` 的文字（保留花脸稿标记）与源码范围。
+    title: Option<(String, Range<usize>)>,
+}
+
+impl OfficialParse {
+    fn new(
+        markdown: &str,
+        numbering: &NumberingConfig,
+        style_mode: crate::models::StyleMode,
+    ) -> Self {
+        let located = export::parse_markdown_located_with_numbering(markdown, numbering);
+        let blocks = located
+            .iter()
+            .map(|block| block.block.clone())
+            .collect::<Vec<_>>();
+        let names = export::attachment_names(&blocks);
+
+        // 先按正文/附件切分。红头呈批件正文还会在专用分页器里继续拆成真实页；
+        // 每份附件仍从新纸开始。
+        let mut body = Vec::new();
+        let mut attachments: Vec<Vec<usize>> = Vec::new();
+        let mut in_attachment = false;
+        let mut seen_title = false;
+        for (index, located) in located.iter().enumerate() {
+            match &located.block {
+                MarkdownBlock::Title(_) if !seen_title && !in_attachment => {
+                    seen_title = true;
+                    body.push(index);
+                }
+                MarkdownBlock::Marker(section) => {
+                    in_attachment = matches!(section, MarkdownSection::Attachment);
+                    if in_attachment {
+                        attachments.push(Vec::new());
+                    }
+                }
+                _ if in_attachment => match attachments.last_mut() {
+                    Some(last) => last.push(index),
+                    None => attachments.push(vec![index]),
+                },
+                _ => body.push(index),
+            }
+        }
+        let body_plain = body
+            .iter()
+            .map(|&index| blocks[index].clone())
+            .collect::<Vec<_>>();
+        let compact_headings = export::compact_heading_flags(&body_plain, style_mode);
+        let title = body.iter().find_map(|&index| match &located[index].block {
+            MarkdownBlock::Title(text) => {
+                Some((marks::plain_keep_marks(text), located[index].range.clone()))
+            }
+            _ => None,
+        });
+        Self {
+            located,
+            body,
+            attachments,
+            names,
+            compact_headings,
+            title,
+        }
+    }
+}
+
 /// 把 Markdown 连同表单锁定的行文要素按公文版式画在 `ui` 里；调用方负责套滚动区。
 /// 返回本次实际使用的缩放倍率，供“适应宽度”状态下的加减档以它为起点。
 #[allow(clippy::too_many_arguments)]
@@ -246,52 +321,38 @@ pub(crate) fn official_preview(
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
     // 跟随设置里的编号样式；紧缩风格跟随模板配置。
     let numbered = true;
-    let located = export::parse_markdown_located_with_numbering(markdown, numbering);
-    let blocks = located
+    // 解析与切块只取决于正文、编号样式和紧缩风格，正文没动就复用上一次的结果。
+    let parsed = super::memo::memo(
+        ui.ctx(),
+        "official-parse",
+        super::memo::key((
+            markdown,
+            numbering,
+            std::mem::discriminant(&input.profile.style_mode),
+        )),
+        || OfficialParse::new(markdown, numbering, input.profile.style_mode),
+    );
+    let body = parsed
+        .body
         .iter()
-        .map(|block| block.block.clone())
+        .map(|&index| &parsed.located[index])
         .collect::<Vec<_>>();
-    let names = export::attachment_names(&blocks);
-
-    // 先按正文/附件切分。红头呈批件正文还会在专用分页器里继续拆成真实页；
-    // 每份附件仍从新纸开始。
-    let mut body: Vec<&LocatedBlock> = Vec::new();
-    let mut attachments: Vec<Vec<&LocatedBlock>> = Vec::new();
-    let mut in_attachment = false;
-    let mut seen_title = false;
-    for located in &located {
-        match &located.block {
-            MarkdownBlock::Title(_) if !seen_title && !in_attachment => {
-                seen_title = true;
-                body.push(located);
-            }
-            MarkdownBlock::Marker(section) => {
-                in_attachment = matches!(section, MarkdownSection::Attachment);
-                if in_attachment {
-                    attachments.push(Vec::new());
-                }
-            }
-            _ if in_attachment => match attachments.last_mut() {
-                Some(last) => last.push(located),
-                None => attachments.push(vec![located]),
-            },
-            _ => body.push(located),
-        }
-    }
-    let body_plain = body
+    let attachments = parsed
+        .attachments
         .iter()
-        .map(|located| located.block.clone())
-        .collect::<Vec<_>>();
-    let compact_headings = export::compact_heading_flags(&body_plain, input.profile.style_mode);
-    // 标题取正文首个 `# `，缺省回落表单里的标题提示，与导出器一致。
-    let title = body
-        .iter()
-        .find_map(|located| match &located.block {
-            MarkdownBlock::Title(text) => {
-                Some((marks::plain_keep_marks(text), located.range.clone()))
-            }
-            _ => None,
+        .map(|sheet| {
+            sheet
+                .iter()
+                .map(|&index| &parsed.located[index])
+                .collect::<Vec<_>>()
         })
+        .collect::<Vec<_>>();
+    let names = &parsed.names;
+    let compact_headings = parsed.compact_headings.clone();
+    // 标题取正文首个 `# `，缺省回落表单里的标题提示，与导出器一致。
+    let title = parsed
+        .title
+        .clone()
         .unwrap_or_else(|| (export::plain_text(input.title_hint.trim()), 0..0));
     let mut clicked = None;
     let mut counters = [0usize; 4];
@@ -308,7 +369,7 @@ pub(crate) fn official_preview(
             &body,
             &attachments,
             &(title, title_range),
-            &names,
+            names,
             anchor,
             &mut scroll_to_anchor,
             &mut clicked,
