@@ -109,6 +109,8 @@ impl DraftPage<'_> {
                 }
                 toolbar_separator(ui);
 
+                // 分区卡的悬停底色要与相邻的选中轮廓留出清晰间隔。
+                ui.spacing_mut().item_spacing.x = 10.0;
                 let current = self.config.ribbon_tab;
                 let mut picked = None;
                 let mut toggle_collapse = false;
@@ -144,6 +146,7 @@ impl DraftPage<'_> {
                     self.persist_ribbon();
                 }
 
+                ui.spacing_mut().item_spacing.x = 2.0;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let collapsed = self.config.ribbon_collapsed;
                     if theme::icon_button(
