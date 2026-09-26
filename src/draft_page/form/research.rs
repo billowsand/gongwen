@@ -41,28 +41,52 @@ impl DraftPage<'_> {
                     "文件类型",
                     "决定封面样式：立项论证、建设实施、技术实现、项目总结为项目类，封面印阶段条；其余为研究类，封面印署名行。可从右侧下拉选，也可手填。",
                 );
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.doc.draft.research.file_type)
-                            .desired_width((field_width - 32.0).max(80.0)),
-                    );
-                    egui::ComboBox::from_id_salt("research_file_type_presets")
-                        .selected_text("")
-                        .width(20.0)
-                        .show_ui(ui, |ui| {
-                            for (index, preset) in mdx::cover::DOC_TYPE_PRESETS.iter().enumerate() {
-                                if index == 4 {
-                                    ui.separator();
-                                }
-                                ui.selectable_value(
-                                    &mut self.doc.draft.research.file_type,
-                                    preset.to_string(),
-                                    *preset,
-                                );
+                // 可手填也可选预置：下拉箭头画在输入框右端、跟输入框是同一个控件，
+                // 不另挂一个 ComboBox——那样高度、圆角都和上下各行对不齐。
+                let arrow_width = 22.0;
+                let text = ui.add(
+                    egui::TextEdit::singleline(&mut self.doc.draft.research.file_type)
+                        .margin(egui::Margin {
+                            left: 4,
+                            right: arrow_width as i8,
+                            top: 2,
+                            bottom: 2,
+                        })
+                        .desired_width(field_width),
+                );
+                let arrow_rect = egui::Rect::from_min_max(
+                    egui::pos2(text.rect.right() - arrow_width, text.rect.top()),
+                    text.rect.right_bottom(),
+                );
+                let arrow = ui
+                    .interact(
+                        arrow_rect,
+                        ui.id().with("research_file_type_presets"),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                let icon = egui::Rect::from_center_size(arrow_rect.center(), egui::vec2(9.0, 6.0));
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![icon.left_top(), icon.right_top(), icon.center_bottom()],
+                    ui.style().interact(&arrow).fg_stroke.color,
+                    egui::Stroke::NONE,
+                ));
+                egui::Popup::menu(&arrow)
+                    .anchor(text.rect)
+                    .align(egui::RectAlign::BOTTOM_START)
+                    .width(field_width)
+                    .show(|ui| {
+                        for (index, preset) in mdx::cover::DOC_TYPE_PRESETS.iter().enumerate() {
+                            if index == 4 {
+                                ui.separator();
                             }
-                        });
-                });
+                            ui.selectable_value(
+                                &mut self.doc.draft.research.file_type,
+                                preset.to_string(),
+                                *preset,
+                            );
+                        }
+                    });
                 ui.end_row();
 
                 row_label(ui, "文件编号");
