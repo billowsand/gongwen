@@ -48,6 +48,7 @@ const FONT_KAI: &str = "FZKai-Z03"; // 方正楷体（行内强调用）
 //   四号 = 14pt = 28hp（子节标题 / 日期 / "公开"）
 //   小四 ≈ 12pt = 24hp
 //   normalsize 14bp ≈ 14pt = 28hp（正文）
+const SIZE_PART: usize = 48; // part：小一，对齐 md2tex.cls 的 \ctexset{part}
 const SIZE_HEAD1: usize = 44; // chapter / 摘要 / 附录 / 目录 / 版本变更记录
 const SIZE_HEAD2: usize = 32; // section
 const SIZE_HEAD3: usize = 28; // subsection / 日期 / 公开
@@ -59,6 +60,8 @@ const LINE_BODY: i32 = 480;
 const LINE_HEAD: i32 = 600; // 30pt，章标题留白
                             // 段前/段后 (twips)
 const SPACING_BEFORE_CHAPTER: u32 = 480;
+/// 部分标题排在页面上部三分之一处（LaTeX 的 \part 页是竖向居中的，Word 近似处理）
+const SPACING_BEFORE_PART: u32 = 4800;
 const SPACING_AFTER_CHAPTER: u32 = 480;
 const SPACING_BEFORE_SECTION: u32 = 240;
 const SPACING_AFTER_SECTION: u32 = 120;
@@ -167,10 +170,16 @@ fn split_blocks(blocks: &[Block]) -> SplitBlocks {
     let mut changelog = Vec::new();
     let mut main = Vec::new();
     let mut bucket = Bucket::Main;
+    // 报告题名只认正文区段里的 `#`（与 tex 的 merger 同一口径）：
+    // 摘要、附录、部分等区段里的 `#` 各有归属
+    let mut in_body = true;
 
     for b in blocks {
+        if let Block::Marker(kind) = b {
+            in_body = *kind == MarkerKind::Body;
+        }
         match b {
-            Block::Heading { level: 1, text } if title.is_none() => {
+            Block::Heading { level: 1, text } if title.is_none() && in_body => {
                 title = Some(text.clone());
             }
             Block::Marker(MarkerKind::Changelog) => {
@@ -181,7 +190,8 @@ fn split_blocks(blocks: &[Block]) -> SplitBlocks {
             Block::Marker(MarkerKind::Body)
             | Block::Marker(MarkerKind::Abstract)
             | Block::Marker(MarkerKind::Appendix)
-            | Block::Marker(MarkerKind::Reference) => {
+            | Block::Marker(MarkerKind::Reference)
+            | Block::Marker(MarkerKind::Part) => {
                 bucket = Bucket::Main;
                 main.push(b.clone());
             }
@@ -817,6 +827,17 @@ struct MainEmitter {
     suppress_next_heading: Option<&'static str>,
     table_counter: usize,
     figure_counter: usize,
+    /// 部分段（`<!-- [部分] -->`）：H1 排成"第一部分"，其余同正文
+    part_mode: bool,
+    /// 部分序号（跨区段不清零，与 LaTeX 的 part 计数器一致）
+    part: usize,
+    /// 下一个标题不编号（`Block::Unnumbered` 设置，标题消费）
+    pending_unnumbered: bool,
+    /// 当前在不编号章里：图表题注用不带章号的流水号
+    free_numbers: bool,
+    /// 不编号章的图、表流水号，全篇共用
+    free_table: usize,
+    free_figure: usize,
     image_base_dir: PathBuf,
     /// 目录已经排过：`<!-- [目录] -->` 写了多处时只认第一处
     toc_done: bool,
@@ -855,6 +876,12 @@ impl MainEmitter {
             suppress_next_heading: None,
             table_counter: 0,
             figure_counter: 0,
+            part_mode: false,
+            part: 0,
+            pending_unnumbered: false,
+            free_numbers: false,
+            free_table: 0,
+            free_figure: 0,
             image_base_dir,
             toc_done: false,
             toc_range: None,
@@ -943,9 +970,7 @@ impl MainEmitter {
             } => {
                 self.list.reset();
                 let docx = if let Some(caption) = caption {
-                    self.table_counter += 1;
-                    let caption =
-                        format!("表 {} {}", self.object_number(self.table_counter), caption);
+                    let caption = format!("表 {} {}", self.next_table_number(), caption);
                     add_table_caption(docx, &caption)
                 } else {
                     docx
@@ -969,10 +994,16 @@ impl MainEmitter {
                 // docx 暂不支持交叉引用锚点，忽略
                 docx
             }
+            Block::Unnumbered => {
+                self.pending_unnumbered = true;
+                docx
+            }
         }
     }
 
     fn handle_marker(&mut self, kind: MarkerKind) {
+        self.part_mode = matches!(kind, MarkerKind::Part);
+        self.free_numbers = false;
         match kind {
             MarkerKind::Abstract => self.mode = Mode::Abstract,
             MarkerKind::Appendix => {
@@ -998,6 +1029,10 @@ impl MainEmitter {
             MarkerKind::Changelog => {
                 self.mode = Mode::Body;
             }
+            // 章号跨部分连续，不清计数器
+            MarkerKind::Part => {
+                self.mode = Mode::Body;
+            }
         }
     }
 
@@ -1012,12 +1047,18 @@ impl MainEmitter {
     }
 
     fn emit_heading(&mut self, mut docx: Docx, level: u8, text: &str) -> Docx {
+        let unnumbered = std::mem::take(&mut self.pending_unnumbered)
+            && matches!(self.mode, Mode::Body | Mode::Appendix);
+        if unnumbered {
+            return self.emit_unnumbered_heading(docx, level, text);
+        }
         if self.mode == Mode::Appendix {
             if level == 1 {
                 self.appendix_saw_h1 = true;
             }
             return match (level, self.appendix_saw_h1) {
                 (1, _) | (2, false) => {
+                    self.free_numbers = false;
                     self.appendix_idx += 1;
                     self.table_counter = 0;
                     self.figure_counter = 0;
@@ -1041,7 +1082,16 @@ impl MainEmitter {
         }
 
         match (level, self.mode) {
+            (1, Mode::Body) if self.part_mode => {
+                self.part += 1;
+                docx = page_break(docx);
+                docx.add_paragraph(heading_part_paragraph(
+                    &format!("第{}部分", chinese_chapter(self.part)),
+                    text,
+                ))
+            }
             (2, Mode::Body) => {
+                self.free_numbers = false;
                 self.chapter += 1;
                 self.section = 0;
                 self.subsection = 0;
@@ -1095,6 +1145,52 @@ impl MainEmitter {
         }
     }
 
+    /// 不编号子树里的标题：不占章节号，按原层级排版（照样进目录）。
+    /// 章级标题另起一页，其中的图表题注改用不带章号的流水号。
+    fn emit_unnumbered_heading(&mut self, mut docx: Docx, level: u8, text: &str) -> Docx {
+        if self.mode == Mode::Appendix && level == 1 {
+            self.appendix_saw_h1 = true;
+        }
+        // 换算成正文口径的层级：1 = 部分，2 = 章，3 = 节，4 及以下 = 小节。
+        // 附录段以 H1 开章时整体下移了一级，这里加回来。
+        let level = if self.mode == Mode::Appendix && self.appendix_saw_h1 {
+            level + 1
+        } else {
+            level
+        };
+        match level {
+            1 if self.part_mode => {
+                docx = page_break(docx);
+                docx.add_paragraph(heading_part_paragraph("", text))
+            }
+            1 | 2 => {
+                self.free_numbers = true;
+                docx = page_break(docx);
+                docx.add_paragraph(heading_chapter_paragraph(text))
+            }
+            3 => docx.add_paragraph(heading_section_paragraph(text)),
+            _ => docx.add_paragraph(heading_subsection_paragraph(text)),
+        }
+    }
+
+    fn next_table_number(&mut self) -> String {
+        if self.free_numbers {
+            self.free_table += 1;
+            return self.free_table.to_string();
+        }
+        self.table_counter += 1;
+        self.object_number(self.table_counter)
+    }
+
+    fn next_figure_number(&mut self) -> String {
+        if self.free_numbers {
+            self.free_figure += 1;
+            return self.free_figure.to_string();
+        }
+        self.figure_counter += 1;
+        self.object_number(self.figure_counter)
+    }
+
     fn object_number(&self, counter: usize) -> String {
         match self.mode {
             Mode::Appendix if self.appendix_idx > 0 => {
@@ -1119,12 +1215,7 @@ impl MainEmitter {
                     .add_run(Run::new().add_image(pic));
                 let docx = docx.add_paragraph(figure);
                 if has_caption {
-                    self.figure_counter += 1;
-                    let caption = format!(
-                        "图 {} {}",
-                        self.object_number(self.figure_counter),
-                        alt.trim()
-                    );
+                    let caption = format!("图 {} {}", self.next_figure_number(), alt.trim());
                     add_figure_caption(docx, &caption)
                 } else {
                     docx
@@ -1222,6 +1313,7 @@ impl ChangelogEmitter {
             }
             Block::Marker(_)
             | Block::Toc
+            | Block::Unnumbered
             | Block::Empty
             | Block::CodeBlock { .. }
             | Block::Label(_) => docx,
@@ -1338,6 +1430,22 @@ fn heading_chapter_paragraph(text: &str) -> Paragraph {
                 .size(SIZE_HEAD1)
                 .bold(),
         )
+}
+
+/// 部分标题：用 Heading1 样式（与章同进目录），居中、比章大一号；
+/// "第一部分"一行、题目一行。`name` 为空（不编号的部分）时只排题目。
+fn heading_part_paragraph(name: &str, text: &str) -> Paragraph {
+    let run = || Run::new().fonts(font_set(FONT_HEAD)).size(SIZE_PART).bold();
+    let mut p = Paragraph::new()
+        .style("Heading1")
+        .align(AlignmentType::Center)
+        .line_spacing(LineSpacing::new().before(SPACING_BEFORE_PART));
+    if !name.is_empty() {
+        p = p
+            .add_run(run().add_text(name))
+            .add_run(Run::new().add_break(BreakType::TextWrapping));
+    }
+    p.add_run(run().add_text(text))
 }
 
 /// 节标题：用 Heading2 样式，左缩进 2 字符、三号黑体。
@@ -2091,5 +2199,74 @@ mod tests {
         assert_eq!(table.grid[0], 560); // 2em at the 14pt body font size
         assert_eq!(table.grid.iter().sum::<usize>(), TABLE_CONTENT_WIDTH_TWIPS);
         assert!(table.grid[2] > table.grid[1]);
+    }
+
+    fn main_texts(markdown: &str) -> Vec<String> {
+        let mut e = MainEmitter::new();
+        let docx = e.emit_all(Docx::new(), &parser::parse(markdown));
+        paragraph_texts(&docx)
+    }
+
+    /// 部分段的 `#` 排成"第一部分"+题目，章号跨部分连续。
+    #[test]
+    fn part_marker_numbers_parts_and_keeps_chapters_running() {
+        let texts = main_texts(concat!(
+            "<!-- [部分] -->\n\n",
+            "# 第一部分 现状分析\n\n",
+            "## 研究背景\n\n",
+            "# 对策建议\n\n",
+            "## 总体思路\n",
+        ));
+        assert!(texts.iter().any(|t| t == "第一部分\n现状分析"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "第二部分\n对策建议"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "第一章 研究背景"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "第二章 总体思路"), "{texts:?}");
+    }
+
+    /// 不编号子树不占章节号；不编号章的表题用不带章号的流水号。
+    #[test]
+    fn unnumbered_subtree_skips_numbers_and_uses_free_captions() {
+        let texts = main_texts(concat!(
+            "<!-- [不编号] -->\n",
+            "## 前言\n\n",
+            "| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n\n: 前言表\n\n",
+            "### 编写说明\n\n",
+            "## 研究背景\n\n",
+            "| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n\n: 背景表\n\n",
+            "### 基本情况\n\n",
+            "<!-- [不编号] -->\n",
+            "## 结束语\n\n",
+            "| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n\n: 结束表\n",
+        ));
+        for expected in [
+            "前言",
+            "表 1 前言表",
+            "编写说明",
+            "第一章 研究背景",
+            "表 1.1 背景表",
+            "1.1 基本情况",
+            "结束语",
+            "表 2 结束表",
+        ] {
+            assert!(
+                texts.iter().any(|t| t == expected),
+                "缺 {expected}：{texts:?}"
+            );
+        }
+    }
+
+    /// 报告题名只认正文区段的 `#`：部分段、摘要段里的 `#` 不能被拿去当题名。
+    #[test]
+    fn split_takes_the_title_only_from_the_body_section() {
+        let blocks = parser::parse("<!-- [部分] -->\n\n# 现状分析\n\n## 研究背景\n");
+        let split = split_blocks(&blocks);
+        assert_eq!(split.title, None);
+        assert!(split
+            .main
+            .iter()
+            .any(|b| matches!(b, Block::Heading { level: 1, text } if text == "现状分析")));
+
+        let blocks = parser::parse("<!-- [摘要] -->\n\n# 摘要\n\n<!-- [正文] -->\n\n# 某报告\n");
+        assert_eq!(split_blocks(&blocks).title.as_deref(), Some("某报告"));
     }
 }

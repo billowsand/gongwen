@@ -12,8 +12,9 @@ const HEADING_PATTERNS: &[&str] = &[
     r"^附录\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s*",
     // 0b. Appendix 编号（Appendix A / Appendix A.1）
     r"^(?i:appendix)\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s*",
-    // 1. 第X章/节/条/部分（中文数字或阿拉伯数字）
-    r"^第[一二三四五六七八九十百零\d]+[章节条部分]\s*[、.．]?\s*",
+    // 1. 第X章/节/条/部分（中文数字或阿拉伯数字）。"部分"是一个词，不能写进字符类，
+    // 否则"第一部分"只剥掉"第一部"，剩下一个"分"。
+    r"^第[一二三四五六七八九十百零\d]+(?:[章节条]|部分)\s*[、.．]?\s*",
     // 2. 全角括号中文数字 （一）（二）
     r"^[（(][一二三四五六七八九十百零]+[）)]\s*[、.．]?\s*",
     // 3. 中文数字+顿号/点号
@@ -90,6 +91,12 @@ mod tests {
     fn strips_single_arabic_without_eating_title() {
         assert_eq!(clean("3 第三章标题"), "第三章标题");
         assert_eq!(clean("12 战略目标"), "战略目标");
+    }
+
+    #[test]
+    fn strips_chinese_part() {
+        assert_eq!(clean("第一部分 现状分析"), "现状分析");
+        assert_eq!(clean("第十二部分、对策"), "对策");
     }
 
     #[test]

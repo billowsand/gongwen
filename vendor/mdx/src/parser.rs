@@ -24,6 +24,11 @@ pub fn parse(content: &str) -> Vec<Block> {
     let mut list_indents: Vec<(usize, u8)> = Vec::new();
     // 刚读到序号表标记、还在等它的表格。标记只管紧邻的下一张表，中间只许隔空行。
     let mut numbered_pending = false;
+    // 刚读到不编号标记、还在等它的标题。标记只管紧邻的下一个标题，中间只许隔空行。
+    let mut unnumbered_pending = false;
+    // 不编号子树的根标题层级：层级更深的标题都在子树里，遇到同级或更高一级的
+    // 标题（或区段标记）子树结束。
+    let mut unnumbered_root: Option<u8> = None;
     let mut i = 0;
     while i < lines.len() {
         let raw = &lines[i];
@@ -37,6 +42,16 @@ pub fn parse(content: &str) -> Vec<Block> {
         }
         if !line.is_empty() && !table::is_table_line(line) {
             numbered_pending = false;
+        }
+
+        // 0.1) 不编号标记 `<!-- [不编号] -->`：本身不落版面，记下来交给紧随的标题。
+        if markers::is_unnumbered(line) {
+            unnumbered_pending = true;
+            i += 1;
+            continue;
+        }
+        if !line.is_empty() && !line.starts_with('#') {
+            unnumbered_pending = false;
         }
 
         // 0.25) 居中 / 居右标记：标记行不落版面，其下每条非空行各成一个对齐行，
@@ -72,6 +87,7 @@ pub fn parse(content: &str) -> Vec<Block> {
         // 1) 区段标记 `<!-- [...] -->`
         if let Some(kind) = markers::detect(line) {
             list_indents.clear();
+            unnumbered_root = None;
             blocks.push(Block::Marker(kind));
             i += 1;
             continue;
@@ -88,6 +104,16 @@ pub fn parse(content: &str) -> Vec<Block> {
             }
             let body = heading::clean(rest.trim());
             let (body, label) = strip_label_attr(&body);
+            if std::mem::take(&mut unnumbered_pending) {
+                unnumbered_root = Some(level);
+                blocks.push(Block::Unnumbered);
+            } else if let Some(root) = unnumbered_root {
+                if level > root {
+                    blocks.push(Block::Unnumbered);
+                } else {
+                    unnumbered_root = None;
+                }
+            }
             if let Some(id) = label {
                 blocks.push(Block::Label(id));
             }
@@ -560,7 +586,7 @@ mod tests {
     #[test]
     fn detects_markers() {
         let blocks = parse(
-            "<!-- [摘要] -->\n<!-- [附录] -->\n<!-- [版本变更记录] -->\n<!-- [正文] -->\n<!-- [参考文献] -->\n",
+            "<!-- [摘要] -->\n<!-- [附录] -->\n<!-- [版本变更记录] -->\n<!-- [正文] -->\n<!-- [参考文献] -->\n<!-- 【部分】 -->\n",
         );
         let kinds: Vec<MarkerKind> = blocks
             .iter()
@@ -577,7 +603,89 @@ mod tests {
                 MarkerKind::Changelog,
                 MarkerKind::Body,
                 MarkerKind::Reference,
+                MarkerKind::Part,
             ]
+        );
+    }
+
+    /// 标题前是否挂了 `Block::Unnumbered`，按标题出现顺序列出 (文字, 不编号)。
+    fn heading_numbering(blocks: &[Block]) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        let mut unnumbered = false;
+        for b in blocks {
+            match b {
+                Block::Unnumbered => unnumbered = true,
+                Block::Heading { text, .. } => {
+                    out.push((text.clone(), std::mem::take(&mut unnumbered)));
+                }
+                Block::Label(_) => {}
+                _ => unnumbered = false,
+            }
+        }
+        out
+    }
+
+    /// 不编号标记管紧随标题的整棵子树：同级或更高一级的标题恢复编号。
+    #[test]
+    fn unnumbered_marker_covers_the_heading_subtree() {
+        let blocks = parse(concat!(
+            "<!-- [不编号] -->\n\n",
+            "## 前言 {#chap:qy}\n\n正文。\n\n",
+            "### 编写说明\n\n",
+            "#### 细则\n\n",
+            "## 研究背景\n\n",
+            "### 基本情况\n\n",
+            "<!-- [不编号] -->\n",
+            "### 附带说明\n\n",
+            "#### 其一\n\n",
+            "### 主要问题\n",
+        ));
+        assert_eq!(
+            heading_numbering(&blocks),
+            vec![
+                ("前言".to_string(), true),
+                ("编写说明".to_string(), true),
+                ("细则".to_string(), true),
+                ("研究背景".to_string(), false),
+                ("基本情况".to_string(), false),
+                ("附带说明".to_string(), true),
+                ("其一".to_string(), true),
+                ("主要问题".to_string(), false),
+            ]
+        );
+        // 锚点仍紧挨着标题，不编号块在它前面
+        let at = blocks
+            .iter()
+            .position(|b| matches!(b, Block::Unnumbered))
+            .unwrap();
+        assert!(matches!(&blocks[at + 1], Block::Label(id) if id == "chap:qy"));
+    }
+
+    /// 标记后面紧跟的不是标题就不生效；区段标记结束不编号子树。
+    #[test]
+    fn unnumbered_marker_needs_a_heading_and_stops_at_section_markers() {
+        let blocks = parse(concat!(
+            "<!-- [不编号] -->\n",
+            "一段正文。\n\n",
+            "## 研究背景\n\n",
+            "<!-- [不编号] -->\n",
+            "## 结束语\n\n",
+            "<!-- [附录] -->\n\n",
+            "## 附录甲\n",
+        ));
+        assert_eq!(
+            heading_numbering(&blocks),
+            vec![
+                ("研究背景".to_string(), false),
+                ("结束语".to_string(), true),
+                ("附录甲".to_string(), false),
+            ]
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, Block::Paragraph(p) if format!("{p:?}").contains("不编号"))),
+            "标记本身不落版面：{blocks:?}"
         );
     }
 

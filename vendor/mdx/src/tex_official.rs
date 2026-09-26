@@ -249,8 +249,8 @@ impl TexEmitter {
                 self.reset_list();
                 self.emit_table(rows, spans, *numbered, caption.as_deref());
             }
-            Block::Marker(_) | Block::Toc => {
-                // 公文路径不响应区段标记与目录标记，原样忽略
+            Block::Marker(_) | Block::Toc | Block::Unnumbered => {
+                // 公文路径不响应区段标记、目录标记与不编号标记，原样忽略
             }
             Block::Label(id) => {
                 // 锚点作用于紧随其后的表格（公文表格经 longtblr caption 获得

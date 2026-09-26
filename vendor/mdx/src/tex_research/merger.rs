@@ -193,44 +193,49 @@ fn strip_utf8_bom(content: &str) -> &str {
     content.trim_start_matches('\u{feff}')
 }
 
-/// 从 markdown 内容中提取第一个 # 标题
-fn extract_title_from_content(content: &str) -> Option<String> {
+/// 报告题名所在的行号：正文区段里的第一个 `#` 标题。
+///
+/// 只认正文区段（开头的默认区段或 `<!-- [正文] -->` 之后）：摘要、附录、
+/// 部分等区段里的 `#` 各有归属（摘要标题、附录章、`\part`），拿去当题名
+/// 就会从正文里丢掉一行。与公文助手的 `research_report_titles` 同一口径。
+fn report_title_line(content: &str) -> Option<(usize, String)> {
     let heading_regex = regex::Regex::new(r"^#\s+(.+?)(?:\s*\{[^}]*\})?\s*$").ok()?;
-
-    for line in content.lines() {
+    let mut in_body = true;
+    for (index, line) in content.lines().enumerate() {
+        if let Some(kind) = crate::common::markers::detect(line) {
+            in_body = kind == crate::common::ast::MarkerKind::Body;
+            continue;
+        }
+        if !in_body {
+            continue;
+        }
         if let Some(caps) = heading_regex.captures(line) {
             let title = crate::common::heading::clean(caps.get(1)?.as_str().trim());
             if !title.is_empty() {
-                println!("提取文档标题: {}", title);
-                return Some(title);
+                return Some((index, title));
             }
         }
     }
     None
 }
 
-/// 移除 markdown 内容中的第一个 # 标题行
+/// 从 markdown 内容中提取报告题名（正文区段的第一个 # 标题）
+fn extract_title_from_content(content: &str) -> Option<String> {
+    let (_, title) = report_title_line(content)?;
+    println!("提取文档标题: {}", title);
+    Some(title)
+}
+
+/// 移除报告题名那一行（与 [`extract_title_from_content`] 取的是同一行）
 fn remove_first_h1(content: &str) -> String {
-    let heading_regex = regex::Regex::new(r"^#\s+.+\s*$").ok();
-
-    if let Some(re) = heading_regex {
-        let mut result = String::new();
-        let mut first_found = false;
-
-        for line in content.lines() {
-            if !first_found && re.is_match(line) {
-                first_found = true;
-                continue; // 跳过第一行
-            }
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(line);
-        }
-        result
-    } else {
-        content.to_string()
-    }
+    let skip = report_title_line(content).map(|(index, _)| index);
+    content
+        .lines()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != skip)
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 渲染 pandoc 风格的简单模板变量。
@@ -620,5 +625,23 @@ mod tests {
 
         assert!(body.contains("\\chapter{感知类研制任务}"), "{body}");
         assert!(!body.contains("\\#\\# 第三章"), "{body}");
+    }
+
+    /// 报告题名只认正文区段的 `#`：部分段里的 `#` 是 \part，不能被当成题名删掉。
+    #[test]
+    fn report_title_comes_only_from_the_body_section() {
+        let content = "<!-- [部分] -->\n\n# 现状分析\n\n## 研究背景\n";
+        assert_eq!(extract_title_from_content(content), None);
+        assert_eq!(remove_first_h1(content), content.trim_end());
+
+        let content = "<!-- [摘要] -->\n# 摘要\n\n<!-- [正文] -->\n# 某报告\n## 背景\n";
+        assert_eq!(
+            extract_title_from_content(content).as_deref(),
+            Some("某报告")
+        );
+        assert_eq!(
+            remove_first_h1(content),
+            "<!-- [摘要] -->\n# 摘要\n\n<!-- [正文] -->\n## 背景"
+        );
     }
 }

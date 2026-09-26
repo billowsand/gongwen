@@ -172,7 +172,17 @@
 \titlespacing{\subsubsection}{2em}{0pt}{0pt}
 
 %% 章节样式：二号、居中、黑体；编号"第1章"
+%% 部分（`<!-- [部分] -->` 下的 `#`）：独占一页、小一黑体居中，编号"第一部分"；
+%% book 的 \part 不清零章号，章号跨部分连续。
 \ctexset{
+  part = {
+    format = \centering\heiti\enhei,
+    nameformat = \zihao{-1}\heiti\enhei,
+    numberformat = \heiti\enhei,
+    titleformat = \zihao{-1}\heiti\enhei,
+    name = {第,部分},
+    number = \chinese{part}
+  },
   chapter = {
     format = \centering\zihao{-2}\heiti\enhei,
     nameformat = \heiti\enhei,
@@ -190,6 +200,8 @@
 %% 目录格式
 %% ============================================================
 \renewcommand{\cftchapfont}{\heiti\enhei}
+\renewcommand{\cftpartfont}{\heiti\enhei}
+\renewcommand{\cftpartpagefont}{\heiti\enhei}
 \setlength{\cftbeforechapskip}{\cftbeforesecskip}
 
 %% ============================================================
@@ -464,6 +476,57 @@
   \pagenumbering{arabic}%
   \setcounter{page}{\mdx@pagebeforetoc}%
 }
+
+%% ============================================================
+%% 不编号标题：`<!-- [不编号] -->` 下的标题子树。不占章节号，照样进目录。
+%% \phantomsection 给目录条目一个落点，否则 hyperref 会把链接指到上一个编号标题。
+%% ============================================================
+\newcommand{\mdxunnumberedpart}[1]{%
+  \if@openright\cleardoublepage\else\clearpage\fi
+  \phantomsection\addcontentsline{toc}{part}{#1}%
+  \part*{#1}}
+\newcommand{\mdxunnumberedchapter}[1]{%
+  \chapter*{#1}%
+  \phantomsection\addcontentsline{toc}{chapter}{#1}%
+  \mdxfreenumbers}
+\newcommand{\mdxunnumberedsection}[1]{%
+  \section*{#1}\phantomsection\addcontentsline{toc}{section}{#1}}
+\newcommand{\mdxunnumberedsubsection}[1]{%
+  \subsection*{#1}\phantomsection\addcontentsline{toc}{subsection}{#1}}
+\newcommand{\mdxunnumberedsubsubsection}[1]{%
+  \subsubsection*{#1}\phantomsection\addcontentsline{toc}{subsubsection}{#1}}
+
+%% 不编号章里的图表题注：不带章号，全篇的不编号章共用一套流水号（图1、表2）。
+%% \chapter* 不动 figure/table 计数器，这里先存下编号章里的值换成流水号；
+%% 下一个编号章前 \mdxchapternumbers 把流水号存回去、恢复"章号.序号"。
+%% \theH... 一并换掉，免得 hyperref 的锚点与编号章里的撞名。
+\newcounter{mdxfreefigure}
+\newcounter{mdxfreetable}
+\newif\ifmdx@free
+\newcommand{\mdxfreenumbers}{%
+  \ifmdx@free\else
+    \mdx@freetrue
+    \let\mdx@thefigure\thefigure
+    \let\mdx@thetable\thetable
+    \let\mdx@theHfigure\theHfigure
+    \let\mdx@theHtable\theHtable
+    \setcounter{figure}{\value{mdxfreefigure}}%
+    \setcounter{table}{\value{mdxfreetable}}%
+    \renewcommand{\thefigure}{\arabic{figure}}%
+    \renewcommand{\thetable}{\arabic{table}}%
+    \renewcommand{\theHfigure}{mdxfree.\arabic{figure}}%
+    \renewcommand{\theHtable}{mdxfree.\arabic{table}}%
+  \fi}
+\newcommand{\mdxchapternumbers}{%
+  \ifmdx@free
+    \mdx@freefalse
+    \setcounter{mdxfreefigure}{\value{figure}}%
+    \setcounter{mdxfreetable}{\value{table}}%
+    \let\thefigure\mdx@thefigure
+    \let\thetable\mdx@thetable
+    \let\theHfigure\mdx@theHfigure
+    \let\theHtable\mdx@theHtable
+  \fi}
 
 %% ============================================================
 %% 空白偶数页无页码

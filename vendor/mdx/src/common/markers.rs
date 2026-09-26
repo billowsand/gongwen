@@ -14,6 +14,7 @@ use super::ast::{LineAlign, MarkerKind};
 /// - `<!-- [版本变更记录] -->`
 /// - `<!-- [正文] -->`
 /// - `<!-- [参考文献] -->`
+/// - `<!-- [部分] -->`
 /// - `<!-- abstract -->`
 pub fn detect(line: &str) -> Option<MarkerKind> {
     let inner = comment_label(line)?;
@@ -23,6 +24,7 @@ pub fn detect(line: &str) -> Option<MarkerKind> {
         "版本变更记录" | "changelog" => Some(MarkerKind::Changelog),
         "正文" => Some(MarkerKind::Body),
         "参考文献" | "reference" | "references" => Some(MarkerKind::Reference),
+        "部分" | "part" => Some(MarkerKind::Part),
         _ => None,
     }
 }
@@ -45,6 +47,18 @@ pub fn is_toc(line: &str) -> bool {
         matches!(
             inner.to_ascii_lowercase().as_str(),
             "目录" | "toc" | "contents" | "tableofcontents"
+        )
+    })
+}
+
+/// 不编号标记 `<!-- [不编号] -->`（含英文变体）：紧随其后的标题连同它的整棵
+/// 子树都不编号，遇到同级或更高一级的标题恢复编号。与公文助手
+/// `parse_unnumbered_marker` 同一套写法。
+pub fn is_unnumbered(line: &str) -> bool {
+    comment_label(line).is_some_and(|inner| {
+        matches!(
+            inner.to_ascii_lowercase().as_str(),
+            "不编号" | "unnumbered" | "nonumber" | "no-number" | "no_number"
         )
     })
 }

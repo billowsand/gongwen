@@ -90,6 +90,25 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   `$` 之后的 `$` 不开启公式，行内 `$$x$$` 整体是文本；
 - `parser.rs`：标题文字与表后表题（`: 标题`）不走行内解析，单独过 `unescape`。
 
+部分标记与不编号标记同样先在这里落地：
+
+- `common/ast.rs` 新增 `MarkerKind::Part` 与 `Block::Unnumbered`；`common/markers.rs`
+  的 `detect` 认 `<!-- [部分] -->`，新增 `is_unnumbered`（`<!-- [不编号] -->`）；
+- `parser.rs` 算好不编号的作用范围：标记管紧随标题的整棵子树（同级或更高一级
+  的标题、区段标记结束），子树里每个标题前补一个 `Block::Unnumbered`；
+- `common/heading.rs` 去编号规则 1 把"部分"当成一个词（原先字符类
+  `[章节条部分]` 会把"第一部分"剥成"分"）；
+- `tex_research_emitter.rs`：部分段的 `#` 输出 `\part`（落在主文件，章号跨部分
+  连续），不编号标题输出 `\mdxunnumbered{part,chapter,section,...}`，不编号章前后
+  切换 `\mdxfreenumbers` / `\mdxchapternumbers`；
+- `resources/research/md2tex.cls`：`\ctexset{part=...}`（小一黑体、"第一部分"）、
+  目录的部分字体，新增上述不编号命令（`\phantomsection` + `\addcontentsline`
+  进目录；不编号章的图表题注用全篇共用的不带章号流水号）；
+- `docx_research.rs`：部分标题（Heading1、"第一部分"一行题目一行）、不编号标题
+  与流水号题注；
+- `tex_research/merger.rs` 与 `docx_research.rs::split_blocks`：报告题名只认正文
+  区段里的第一个 `#`，部分、摘要、附录段里的 `#` 不再被拿去当题名删掉。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持

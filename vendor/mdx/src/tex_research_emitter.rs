@@ -3,6 +3,8 @@
 //! 与 tex_official 的主要差异：
 //! - 文档类：ctexbook + md2tex.cls
 //! - 标题格式：H2 → 第X章，H3 → X.Y，H4 → X.Y.Z，H5 → subsubsection
+//! - 部分段（`<!-- [部分] -->`）里 H1 → `\part`（第一部分），其余同正文
+//! - 不编号标记（`<!-- [不编号] -->`）下的标题子树排成不编号标题，照样进目录
 //! - 列表前缀：1. 2. 3. / (1) (2) / a. b. / I. II. / (A) (B) / 1) 2)
 //! - 表格：使用 longtblr 环境
 //! - 支持特殊章节标记：Abstract / Appendix / Changelog / Body
@@ -20,6 +22,7 @@ enum SectionMode {
     Appendix,  // 附录模式
     Changelog, // 版本变更记录：不编号
     Reference, // 参考文献：不编号
+    Part,      // 部分模式：H1 → \part，其余同普通正文
 }
 
 /// 研究报告 tex emitter
@@ -71,6 +74,11 @@ pub struct TexResearchEmitter {
     abstract_numbered_apart: bool,
     /// 参考文献模式下是否已经输出标题
     reference_heading_done: bool,
+    /// 下一个标题不编号（`Block::Unnumbered` 设置，标题消费）
+    pending_unnumbered: bool,
+    /// 当前在不编号章里：图表题注已切到不带章号的流水号（`\mdxfreenumbers`），
+    /// 下一个编号章或区段标记前要切回来（`\mdxchapternumbers`）
+    free_numbers: bool,
     /// 列表状态
     l1: usize,
     l2: usize,
@@ -112,6 +120,8 @@ impl TexResearchEmitter {
             toc_done: false,
             abstract_numbered_apart: false,
             reference_heading_done: false,
+            pending_unnumbered: false,
+            free_numbers: false,
             l1: 0,
             l2: 0,
             l3: 0,
@@ -226,6 +236,10 @@ impl TexResearchEmitter {
             Block::Toc => {
                 self.emit_toc();
             }
+            Block::Unnumbered => {
+                // 作用于紧随其后的标题（中间可能隔一个锚点）
+                self.pending_unnumbered = true;
+            }
             Block::Empty => {
                 // 忽略空行
             }
@@ -257,6 +271,8 @@ impl TexResearchEmitter {
         // 区段切换必然打断列表——关闭当前未闭合的列表环境，
         // 否则 \appendix / \chapter* 等会出现在 \begin{asparaenum} 内部
         self.reset_list();
+        // 离开不编号章：图表题注切回"章号.序号"
+        self.leave_free_numbers();
         match kind {
             MarkerKind::Abstract => {
                 self.mode = SectionMode::Abstract;
@@ -307,6 +323,50 @@ impl TexResearchEmitter {
                 self.mode = SectionMode::Normal;
                 self.reset_counters();
             }
+            MarkerKind::Part => {
+                // 如果之前在摘要模式，先完成摘要
+                if self.in_abstract {
+                    self.finish_abstract();
+                }
+                // 章号跨部分连续（LaTeX book 的 \part 不清零章号），这里不清计数器
+                self.mode = SectionMode::Part;
+            }
+        }
+    }
+
+    /// 不编号章结束：图表题注切回"章号.序号"。没切过就什么也不输出。
+    fn leave_free_numbers(&mut self) {
+        if std::mem::take(&mut self.free_numbers) {
+            self.out.push_str("\\mdxchapternumbers\n\n");
+        }
+    }
+
+    /// 章级标题（`\chapter`），编号与不编号两种。不编号章进目录，图表题注
+    /// 切到不带章号的流水号；编号章先把流水号切回来。
+    fn chapter_heading(&mut self, escaped: &str, label_cmd: &str, unnumbered: bool) {
+        if unnumbered {
+            self.out
+                .push_str(&format!("\\mdxunnumberedchapter{{{}}}\\par\n\n", escaped));
+            self.free_numbers = true;
+        } else {
+            self.out
+                .push_str(&format!("\\chapter{{{}}}{}\\par\n\n", escaped, label_cmd));
+        }
+    }
+
+    /// 节级标题：`command` 是 `section` / `subsection` / `subsubsection`。
+    /// 不编号的走 md2tex.cls 的 `\mdxunnumbered<command>`（带目录条目）。
+    fn section_heading(&mut self, command: &str, escaped: &str, label_cmd: &str, unnumbered: bool) {
+        if unnumbered {
+            self.out.push_str(&format!(
+                "\\mdxunnumbered{}{{{}}}\\par\n\n",
+                command, escaped
+            ));
+        } else {
+            self.out.push_str(&format!(
+                "\\{}{{{}}}{}\\par\n\n",
+                command, escaped, label_cmd
+            ));
         }
     }
 
@@ -318,10 +378,12 @@ impl TexResearchEmitter {
 
     fn emit_heading(&mut self, level: u8, text: &str) {
         let escaped = escape_latex(text);
+        let unnumbered = std::mem::take(&mut self.pending_unnumbered);
         // 待挂接的锚点；摘要/变更记录/参考文献等不编号标题直接丢弃
         let label_cmd = self
             .pending_label
             .take()
+            .filter(|_| !unnumbered)
             .map(|l| format!("\\label{{{}}}", l))
             .unwrap_or_default();
 
@@ -366,27 +428,35 @@ impl TexResearchEmitter {
             let shifted = self.appendix_saw_h1;
             match (level, shifted) {
                 (1, _) | (2, false) => {
-                    self.appendix_idx += 1;
+                    if !unnumbered {
+                        self.appendix_idx += 1;
+                        self.leave_free_numbers();
+                    }
                     self.start_appendix_part();
-                    self.out
-                        .push_str(&format!("\\chapter{{{}}}{}\\par\n\n", escaped, label_cmd));
+                    self.chapter_heading(&escaped, &label_cmd, unnumbered);
                 }
                 (2, true) | (3, false) => {
-                    self.out
-                        .push_str(&format!("\\section{{{}}}{}\\par\n\n", escaped, label_cmd));
+                    self.section_heading("section", &escaped, &label_cmd, unnumbered);
                 }
                 (3, true) | (4, false) => {
-                    self.out.push_str(&format!(
-                        "\\subsection{{{}}}{}\\par\n\n",
-                        escaped, label_cmd
-                    ));
+                    self.section_heading("subsection", &escaped, &label_cmd, unnumbered);
                 }
                 _ => {
-                    self.out.push_str(&format!(
-                        "\\subsubsection{{{}}}{}\\par\n\n",
-                        escaped, label_cmd
-                    ));
+                    self.section_heading("subsubsection", &escaped, &label_cmd, unnumbered);
                 }
+            }
+            return;
+        }
+
+        // 部分模式的 H1 → \part：落在主文件，编号"第一部分"由 ctex 生成
+        if self.mode == SectionMode::Part && level == 1 {
+            self.start_main();
+            if unnumbered {
+                self.out
+                    .push_str(&format!("\\mdxunnumberedpart{{{}}}\n\n", escaped));
+            } else {
+                self.out
+                    .push_str(&format!("\\part{{{}}}{}\n\n", escaped, label_cmd));
             }
             return;
         }
@@ -394,34 +464,33 @@ impl TexResearchEmitter {
         match level {
             // level 1/2 → \chapter，每章切出 data/ 部件
             1 | 2 => {
-                self.chapter_num += 1;
-                self.section_num = 0;
-                self.subsection_num = 0;
+                if !unnumbered {
+                    self.chapter_num += 1;
+                    self.section_num = 0;
+                    self.subsection_num = 0;
+                    self.leave_free_numbers();
+                }
                 self.start_data_part();
-                self.out
-                    .push_str(&format!("\\chapter{{{}}}{}\\par\n\n", escaped, label_cmd));
+                self.chapter_heading(&escaped, &label_cmd, unnumbered);
             }
             // level 3 → \section
             3 => {
-                self.section_num += 1;
-                self.subsection_num = 0;
-                self.out
-                    .push_str(&format!("\\section{{{}}}{}\\par\n\n", escaped, label_cmd));
+                if !unnumbered {
+                    self.section_num += 1;
+                    self.subsection_num = 0;
+                }
+                self.section_heading("section", &escaped, &label_cmd, unnumbered);
             }
             // level 4 → \subsection
             4 => {
-                self.subsection_num += 1;
-                self.out.push_str(&format!(
-                    "\\subsection{{{}}}{}\\par\n\n",
-                    escaped, label_cmd
-                ));
+                if !unnumbered {
+                    self.subsection_num += 1;
+                }
+                self.section_heading("subsection", &escaped, &label_cmd, unnumbered);
             }
             // level 5 → \subsubsection
             5 => {
-                self.out.push_str(&format!(
-                    "\\subsubsection{{{}}}{}\\par\n\n",
-                    escaped, label_cmd
-                ));
+                self.section_heading("subsubsection", &escaped, &label_cmd, unnumbered);
             }
             // level 6+ → 忽略
             _ => {}
@@ -1624,5 +1693,88 @@ mod tests {
             "列表环境与后续正文之间缺少空行：\n{}",
             body
         );
+    }
+
+    /// 部分段里的 `#` 排成 \part，落在主文件；章号跨部分连续，章仍各自切部件。
+    #[test]
+    fn part_marker_turns_h1_into_parts_in_the_main_file() {
+        let mut e = TexResearchEmitter::new();
+        e.emit_all(&crate::parser::parse(concat!(
+            "<!-- [部分] -->\n\n",
+            "# 第一部分 现状分析 {#part:xz}\n\n",
+            "## 研究背景\n\n正文。\n\n",
+            "# 对策建议\n\n",
+            "## 总体思路\n\n正文。\n\n",
+            "<!-- [附录] -->\n\n",
+            "# 术语表\n",
+        )));
+        let (main, parts) = e.finish();
+        assert!(
+            main.contains("\\part{现状分析}\\label{part:xz}"),
+            "部分标题落在主文件、剥掉手写编号：{main}"
+        );
+        assert!(main.contains("\\part{对策建议}"), "{main}");
+        let first = main.find("\\part{现状分析}").unwrap();
+        let second = main.find("\\part{对策建议}").unwrap();
+        let ch1 = main.find("\\input{data/chapter01.tex}").unwrap();
+        let ch2 = main.find("\\input{data/chapter02.tex}").unwrap();
+        assert!(first < ch1 && ch1 < second && second < ch2, "{main}");
+        assert!(main.contains("\\appendix"), "{main}");
+        let all: String = parts.iter().map(|(_, c)| c.as_str()).collect();
+        assert!(all.contains("\\chapter{研究背景}"), "{all}");
+        assert!(all.contains("\\chapter{总体思路}"), "{all}");
+        assert!(all.contains("\\chapter{术语表}"), "附录照旧：{all}");
+        assert!(!all.contains("\\part"), "{all}");
+    }
+
+    /// 不编号子树：标题走 \mdxunnumbered...，不带锚点；不编号章切到图表流水号，
+    /// 下一个编号章前切回来。
+    #[test]
+    fn unnumbered_subtree_uses_star_headings_and_free_object_numbers() {
+        let mut e = TexResearchEmitter::new();
+        e.emit_all(&crate::parser::parse(concat!(
+            "<!-- [不编号] -->\n",
+            "## 前言 {#chap:qy}\n\n正文。\n\n",
+            "### 编写说明\n\n",
+            "## 研究背景\n\n",
+            "<!-- [不编号] -->\n",
+            "### 附带说明\n\n",
+            "### 主要问题\n\n",
+            "<!-- [不编号] -->\n",
+            "## 结束语\n\n",
+            "<!-- [参考文献] -->\n\n",
+            "# 参考文献\n",
+        )));
+        let body = test_body(e);
+        assert!(body.contains("\\mdxunnumberedchapter{前言}\\par"), "{body}");
+        assert!(!body.contains("chap:qy"), "不编号标题的锚点丢弃：{body}");
+        assert!(body.contains("\\mdxunnumberedsection{编写说明}"), "{body}");
+        assert!(body.contains("\\chapter{研究背景}"), "{body}");
+        assert!(body.contains("\\mdxunnumberedsection{附带说明}"), "{body}");
+        assert!(body.contains("\\section{主要问题}"), "{body}");
+        assert!(body.contains("\\mdxunnumberedchapter{结束语}"), "{body}");
+        // 前言之后、研究背景之前切回章号；结束语之后、参考文献之前再切回一次
+        assert_eq!(body.matches("\\mdxchapternumbers").count(), 2, "{body}");
+        let back = body.find("\\mdxchapternumbers").unwrap();
+        assert!(back < body.find("\\chapter{研究背景}").unwrap(), "{body}");
+    }
+
+    /// 部分段里的不编号 `#` 排成 \mdxunnumberedpart，其下的章跟着不编号。
+    #[test]
+    fn unnumbered_part_covers_its_chapters() {
+        let mut e = TexResearchEmitter::new();
+        e.emit_all(&crate::parser::parse(concat!(
+            "<!-- [部分] -->\n",
+            "<!-- [不编号] -->\n",
+            "# 总论\n\n",
+            "## 说明\n\n",
+            "# 分论\n\n",
+            "## 研究背景\n",
+        )));
+        let body = test_body(e);
+        assert!(body.contains("\\mdxunnumberedpart{总论}"), "{body}");
+        assert!(body.contains("\\mdxunnumberedchapter{说明}"), "{body}");
+        assert!(body.contains("\\part{分论}"), "{body}");
+        assert!(body.contains("\\chapter{研究背景}"), "{body}");
     }
 }
