@@ -25,10 +25,11 @@
 //! 黑体顶替。字号、行距、版心是准的，字形要看编译出来的 PDF——表单底部那句
 //! "最终版式以 TeX 编译 PDF 为准"说的就是这件事。
 
+use super::cull::Cull;
 use super::layout::{
     TextRun, clickable, clickable_rows, is_renderable_paragraph, line_block, line_block_runs, sheet,
 };
-use super::render::{PreviewOutput, clickable_content_block, image_block};
+use super::render::{BlockShape, PreviewOutput, anchored, clickable_content_block, image_block};
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
     RESEARCH_CHAPTER_PT, RESEARCH_PART_PT, gutter, indent, math_flow,
@@ -49,6 +50,8 @@ use std::ops::Range;
 use std::sync::OnceLock;
 
 /// 一块内容在纸面上的身份。编号在这里一次算好：印它要用，锚点表也要用。
+/// 可哈希：它是块排版指纹的一部分（`preview::cull`）。
+#[derive(Hash)]
 enum Kind<'a> {
     /// 不落在纸上：文件名称、区段标记、已经并进表格的表题。
     Skip,
@@ -100,6 +103,7 @@ enum Kind<'a> {
 }
 
 /// 一条并进表格的表题：编号、题名，以及它自己那一行源码的位置。
+#[derive(Hash)]
 struct Caption {
     number: String,
     text: String,
@@ -711,18 +715,40 @@ pub(crate) fn research_preview(
     cover_sheet(ui, &metrics, input, markdown);
 
     ui.add_space(14.0);
+    // 远离视野的块只占位、不排版（见 `preview::cull`）。编号都在 `walk` 里算好、
+    // 放进 `Kind`，跳过哪一块都不影响后面的编号。
+    let cull = Cull::new(ui, &metrics, "research");
     sheet(ui, &metrics, |ui| {
         walk(&located, markdown, |located, kind, _| {
-            body_item(
-                ui,
-                &metrics,
-                markdown,
-                located,
+            if matches!(kind, Kind::Skip | Kind::ReportTitle(_)) {
+                return;
+            }
+            let heading = matches!(
                 kind,
-                anchor,
-                &mut scroll_to_anchor,
-                &mut clicked,
-            );
+                Kind::Chapter { .. }
+                    | Kind::ChapterStar(_)
+                    | Kind::Part { .. }
+                    | Kind::PartStar(_)
+                    | Kind::Section { .. }
+                    | Kind::SectionStar(_)
+            )
+            .then_some(&located.range);
+            let keep = anchored(anchor, &located.range)
+                || matches!(&kind, Kind::Table { caption: Some(caption) }
+                    if anchored(anchor, &caption.source));
+            let key = super::memo::key((BlockShape(located), &kind));
+            cull.block(ui, &metrics, key, &located.range, keep, heading, |ui| {
+                body_item(
+                    ui,
+                    &metrics,
+                    markdown,
+                    located,
+                    kind,
+                    anchor,
+                    &mut scroll_to_anchor,
+                    &mut clicked,
+                );
+            });
         });
     });
 

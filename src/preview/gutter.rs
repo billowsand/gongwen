@@ -154,6 +154,73 @@ impl Gutter {
     }
 }
 
+/// 一块画过之后记下的行，坐标相对块的左上角、源码相对块的起点。块滚出视野、
+/// 这一帧没有排版时（`preview::cull`），照它把行原样补回号栏：号码是整篇一路
+/// 数下来的，少记一块，后面的号就全错了。
+#[derive(Clone, Debug)]
+pub(crate) struct CachedRow {
+    left: f32,
+    top: f32,
+    bottom: f32,
+    right: f32,
+    baseline: f32,
+    source: Option<Range<usize>>,
+}
+
+impl Gutter {
+    /// 当前已记下的行数，配合 [`Gutter::capture`] 圈出一块的行。
+    pub(crate) fn mark(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// 取出第 `from` 行之后记下的行，换算成相对 `origin`（块左上角）与
+    /// `base`（块在源码中的起点）的坐标。
+    pub(crate) fn capture(&self, from: usize, origin: egui::Pos2, base: usize) -> Vec<CachedRow> {
+        self.rows
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .map(|row| CachedRow {
+                left: row.left - origin.x,
+                top: row.top - origin.y,
+                bottom: row.bottom - origin.y,
+                right: row.right - origin.x,
+                baseline: row.baseline - origin.y,
+                source: row.source.as_ref().map(|source| {
+                    source.start.saturating_sub(base)..source.end.saturating_sub(base)
+                }),
+            })
+            .collect()
+    }
+
+    /// 把 [`Gutter::capture`] 取出的行按新的块位置补回来，记在当前这张纸上。
+    pub(crate) fn replay(&mut self, rows: &[CachedRow], origin: egui::Pos2, base: usize) {
+        if !self.on {
+            return;
+        }
+        let page = self.page;
+        self.rows.extend(rows.iter().map(|row| {
+            GutterRow {
+                left: row.left + origin.x,
+                top: row.top + origin.y,
+                bottom: row.bottom + origin.y,
+                right: row.right + origin.x,
+                baseline: row.baseline + origin.y,
+                page,
+                source: row
+                    .source
+                    .as_ref()
+                    .map(|source| source.start + base..source.end + base),
+            }
+        }));
+    }
+
+    /// 号栏开着没有。开关一变，缓存里记下的行就对不上了，要进缓存键。
+    pub(crate) fn is_on(&self) -> bool {
+        self.on
+    }
+}
+
 /// 一行文字的基线：取行内第一个字形的基线（`Glyph::pos.y` 相对行顶就是基线），
 /// 空行没有字形，退回按行高估一个。`top` 是这一行在屏幕上的上沿。
 pub(crate) fn row_baseline(row: &egui::epaint::text::Row, top: f32) -> f32 {

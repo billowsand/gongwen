@@ -1,4 +1,4 @@
-﻿//! 正文渲染：分页入口 official_preview、正文各块与图片。
+//! 正文渲染：分页入口 official_preview、正文各块与图片。
 //!
 //! 由 src/preview.rs 拆分而来：本文件是模块 `preview::render`，与其它子模块共享
 //! `preview` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
@@ -8,6 +8,7 @@ use crate::export::RedlineKind;
 use crate::export::{LocatedBlock, MarkdownBlock, MarkdownSection};
 use crate::images;
 use crate::models::{DraftInput, NumberingConfig, TemplateKind};
+use crate::preview::cull::Cull;
 use crate::preview::gutter;
 use crate::preview::marks;
 use crate::preview::pdf_figure;
@@ -34,11 +35,48 @@ pub struct PreviewOutput {
     pub clicked: Option<Range<usize>>,
 }
 
-/// 逐块画正文。
+/// 块的排版指纹：块内容、源码长度与段内各源码行的相对位置。不含块在源码中的
+/// 绝对位置——前面增删几个字，后面的块整体挪位，排版结果照样能复用。
+pub(crate) struct BlockShape<'a>(pub(crate) &'a LocatedBlock);
+
+impl std::hash::Hash for BlockShape<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let located = self.0;
+        let base = located.range.start;
+        located.block.hash(state);
+        located.range.len().hash(state);
+        for segment in &located.source_segments {
+            (segment.source.start.saturating_sub(base)).hash(state);
+            (segment.source.end.saturating_sub(base)).hash(state);
+            segment.chars.hash(state);
+        }
+        located.generated_prefixes.hash(state);
+    }
+}
+
+/// 单块（非紧缩标题）的缓存键。只有标题的排版取决于编号计数器——编号字数
+/// 不同，折行就可能不同；段落、表格不带计数器，前面加一个标题不连累它们重排。
+fn block_key(
+    located: &LocatedBlock,
+    counters: &[usize; 4],
+    numbered: bool,
+    numbering: &NumberingConfig,
+) -> u64 {
+    let counters = matches!(located.block, MarkdownBlock::Heading(..)).then_some(*counters);
+    super::memo::key(("block", BlockShape(located), counters, numbered, numbering))
+}
+
+/// 锚点是否落在 `range` 里：落在里面的块必须现排（要铺底色、要滚过去）。
+pub(crate) fn anchored(anchor: Option<&Range<usize>>, range: &Range<usize>) -> bool {
+    anchor.is_some_and(|anchor| anchor.start <= range.end && range.start <= anchor.end)
+}
+
+/// 逐块画正文。远离视野的块交给 `cull` 只占位（见 `preview::cull`）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn body_blocks(
     ui: &mut egui::Ui,
     metrics: &Metrics,
+    cull: &Cull,
     body: &[&LocatedBlock],
     run: &BodyRun,
     anchor: Option<&Range<usize>>,
@@ -68,35 +106,79 @@ pub(crate) fn body_blocks(
                     unreachable!("已在守卫里确认过是正文段落")
                 };
                 index += 1;
-                let body_segments = paragraph_source_segments(markdown, next, text);
-                clickable_compact_block(
-                    ui,
-                    metrics,
-                    *level,
-                    heading,
-                    text,
-                    located.range.clone(),
-                    &body_segments,
-                    counters,
+                let range = located.range.start..next.range.end;
+                let key = (
+                    "compact",
+                    BlockShape(located),
+                    BlockShape(next),
+                    next.range.start - located.range.start,
+                    *counters,
                     run.numbered,
                     numbering,
-                    anchor,
-                    scroll_to_anchor,
-                    clicked,
                 );
+                let drawn = cull.block(
+                    ui,
+                    metrics,
+                    key,
+                    &located.range,
+                    anchored(anchor, &range),
+                    Some(&located.range),
+                    |ui| {
+                        let body_segments = paragraph_source_segments(markdown, next, text);
+                        clickable_compact_block(
+                            ui,
+                            metrics,
+                            *level,
+                            heading,
+                            text,
+                            located.range.clone(),
+                            &body_segments,
+                            counters,
+                            run.numbered,
+                            numbering,
+                            anchor,
+                            scroll_to_anchor,
+                            clicked,
+                        );
+                    },
+                );
+                // 跳过排版的标题照样占号，后面的编号才接得上。
+                if !drawn && run.numbered {
+                    let _ = export::official_heading_text(*level, heading, counters, numbering);
+                }
             }
-            _ => clickable_content_block(
-                ui,
-                metrics,
-                located,
-                markdown,
-                counters,
-                run.numbered,
-                numbering,
-                anchor,
-                scroll_to_anchor,
-                clicked,
-            ),
+            block => {
+                let key = block_key(located, counters, run.numbered, numbering);
+                let heading = matches!(block, MarkdownBlock::Heading(..)).then_some(&located.range);
+                let drawn = cull.block(
+                    ui,
+                    metrics,
+                    key,
+                    &located.range,
+                    anchored(anchor, &located.range),
+                    heading,
+                    |ui| {
+                        clickable_content_block(
+                            ui,
+                            metrics,
+                            located,
+                            markdown,
+                            counters,
+                            run.numbered,
+                            numbering,
+                            anchor,
+                            scroll_to_anchor,
+                            clicked,
+                        )
+                    },
+                );
+                if !drawn
+                    && run.numbered
+                    && let MarkdownBlock::Heading(level, _) = block
+                {
+                    let _ = export::official_heading_prefix(*level, counters, numbering);
+                }
+            }
         }
     }
 }
@@ -385,6 +467,7 @@ pub(crate) fn official_preview(
             clicked: clicked.or(numbered),
         };
     }
+    let cull = Cull::new(ui, &metrics, "official");
     sheet(ui, &metrics, |ui| {
         header_block(ui, &metrics, input, display, elements);
         if !title.is_empty() {
@@ -414,6 +497,7 @@ pub(crate) fn official_preview(
         body_blocks(
             ui,
             &metrics,
+            &cull,
             &body,
             &BodyRun {
                 compact_headings,
@@ -492,18 +576,35 @@ pub(crate) fn official_preview(
                     );
                     continue;
                 }
-                clickable_content_block(
+                let key = block_key(located, &counters, numbered, numbering);
+                let heading =
+                    matches!(located.block, MarkdownBlock::Heading(..)).then_some(&located.range);
+                let drawn = cull.block(
                     ui,
                     &metrics,
-                    located,
-                    markdown,
-                    &mut counters,
-                    numbered,
-                    numbering,
-                    anchor,
-                    &mut scroll_to_anchor,
-                    &mut clicked,
+                    key,
+                    &located.range,
+                    anchored(anchor, &located.range),
+                    heading,
+                    |ui| {
+                        clickable_content_block(
+                            ui,
+                            &metrics,
+                            located,
+                            markdown,
+                            &mut counters,
+                            numbered,
+                            numbering,
+                            anchor,
+                            &mut scroll_to_anchor,
+                            &mut clicked,
+                        )
+                    },
                 );
+                // 跳过排版的标题照样占号，后面的编号才接得上。
+                if !drawn && let MarkdownBlock::Heading(level, _) = &located.block {
+                    let _ = export::official_heading_prefix(*level, &mut counters, numbering);
+                }
             }
             if sheet_index == last_attachment {
                 footer_record(ui, &metrics, input, display, elements);

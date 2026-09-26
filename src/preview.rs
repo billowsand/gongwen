@@ -9,6 +9,7 @@ use eframe::egui::FontId;
 use std::cell::RefCell;
 use std::ops::Range;
 
+mod cull;
 mod freeze;
 mod gutter;
 mod header;
@@ -253,6 +254,30 @@ impl Metrics {
     /// 又铺开一张纸：号栏按纸分段。
     fn next_page(&self) {
         self.gutter.borrow_mut().next_page();
+    }
+
+    /// 号栏里已记下的行数（见 [`gutter::Gutter::capture`]）。
+    fn gutter_mark(&self) -> usize {
+        self.gutter.borrow().mark()
+    }
+
+    /// 取出第 `from` 行之后记下的行，换算成相对块位置的坐标。
+    fn gutter_capture(
+        &self,
+        from: usize,
+        origin: egui::Pos2,
+        base: usize,
+    ) -> Vec<gutter::CachedRow> {
+        self.gutter.borrow().capture(from, origin, base)
+    }
+
+    /// 把跳过排版的块记下的行补回号栏。
+    fn gutter_replay(&self, rows: &[gutter::CachedRow], origin: egui::Pos2, base: usize) {
+        self.gutter.borrow_mut().replay(rows, origin, base);
+    }
+
+    fn line_numbers_on(&self) -> bool {
+        self.gutter.borrow().is_on()
     }
 
     /// 取走本帧记下的全部行，交给页边去画。

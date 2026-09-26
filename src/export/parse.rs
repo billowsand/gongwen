@@ -11,7 +11,7 @@ use crate::export::{
 use crate::models::{NumberingConfig, StyleMode};
 use std::borrow::Cow;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum MarkdownBlock {
     Title(String),
     Heading(u8, String),
@@ -51,7 +51,7 @@ pub(crate) enum MarkdownBlock {
 }
 
 /// 居中 / 居右标记指定的整行对齐方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LineAlign {
     Center,
     Right,
@@ -59,7 +59,7 @@ pub(crate) enum LineAlign {
 
 /// 正文表格中的合并单元格。row/column 指向左上角锚点，跨度均至少为 1；
 /// 只有横向或纵向跨度大于 1 的单元格才会出现在表格的 spans 中。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TableSpan {
     pub(crate) row: usize,
     pub(crate) column: usize,
@@ -85,7 +85,7 @@ pub(crate) fn table_span_at(spans: &[TableSpan], row: usize, column: usize) -> O
     spans.iter().copied().find(|span| span.covers(row, column))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MarkdownSection {
     Body,
     Attachment,
@@ -94,7 +94,7 @@ pub(crate) enum MarkdownSection {
 /// GFM 表格分隔行里写明的列对齐：`---`、`:---`、`:---:`、`---:`。
 /// `Auto` 表示没写冒号，由 `table::analyze_table` 按内容判定（短数字列居中、
 /// 长文本左对齐）；写了冒号就以冒号为准。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub(crate) enum ColumnAlign {
     #[default]
     Auto,
