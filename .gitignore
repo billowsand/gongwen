@@ -60,6 +60,10 @@ $RECYCLE.BIN/
 .codex-tmp/
 .reasonix
 reasonix.toml
+
+# code-review-graph: 本地图数据库（MCP 配置 .mcp.json / opencode.jsonc 入库共享）
+.code-review-graph/
+
 # pi 扩展与包安装目录：.pi/settings.json 入库共享，依赖本身不入库（启动时自动安装）
 .pi/npm/
 .pi/git/

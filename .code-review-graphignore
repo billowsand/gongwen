@@ -1,0 +1,55 @@
+# code-review-graph 索引排除规则
+# 参考 .gitignore 语法;匹配的文件/目录不进入本地图数据库。
+# 守护进程 watch 默认监控 src/、tests/、scripts/、skills/、docs/ 等
+
+# --- 构建产物(Cargo) ---
+target/
+/target/
+
+# --- 应用打包与运行时输出 ---
+dist/
+/dist/
+output/
+/output/
+.tmp/
+/.tmp/
+tmp/
+/tmp/
+
+# --- vendor 第三方代码 ---
+# qingjian 是 vendor 自带的输入法内核(GPL-3.0),无 review 价值
+vendor/qingjian/
+# mdx 单独的工作区,不在主 graph 内
+vendor/mdx/
+
+# --- 用户数据 / 配置 / 缓存 ---
+config.json
+.env
+.env.*
+/config.json
+/font/
+
+# --- 第三方运行资源(字体 / TeX / 输入法数据) ---
+/runtime/fonts/
+/runtime/tectonic/
+/runtime/texbundle/
+/runtime/ime/
+
+# --- 外部 AI 工具技能包(只用于分发,不归本仓库代码) ---
+skills/
+
+# --- 图数据库自身(避免自我索引) ---
+.code-review-graph/
+
+# --- 编辑器 / IDE ---
+.vscode/
+.idea/
+*.code-workspace
+
+# --- 大体积自动生成文件 ---
+*.aux
+*.log
+*.synctex.gz
+*.d
+*.pdb
+*.rs.bk
