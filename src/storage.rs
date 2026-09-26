@@ -6,7 +6,20 @@ use std::{fs, path::PathBuf};
 const ZIP_PASSWORD_FILE: &str = ".zip-password";
 const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
 
+/// 测试覆盖的用户目录：只让稿件包同步测试把图片写进临时目录，不影响真实配置目录。
+#[cfg(test)]
+static TEST_CONFIG_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub fn set_test_config_dir(dir: Option<std::path::PathBuf>) {
+    *TEST_CONFIG_DIR.lock().unwrap() = dir;
+}
+
 pub fn config_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_CONFIG_DIR.lock().unwrap().clone() {
+        return Ok(dir);
+    }
     let dirs = ProjectDirs::from("cn", "LocalTools", "GongwenAssistant")
         .context("无法确定用户配置目录")?;
     Ok(dirs.config_dir().to_path_buf())
