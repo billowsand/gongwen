@@ -581,7 +581,7 @@ impl DraftPage<'_> {
             let tint = if lit { accent() } else { theme::text_muted() };
             let response = ui.add_enabled(
                 lit,
-                egui::Button::image(kind.icon().image_sized(20.0).tint(tint))
+                egui::Button::image(kind.icon().image_sized(16.0).tint(tint))
                     .image_tint_follows_text_color(false)
                     .min_size(egui::vec2(34.0, 26.0))
                     .corner_radius(egui::CornerRadius::same(6)),
