@@ -683,9 +683,9 @@ impl DraftSession {
         )
     }
 
-    /// 标签与状态栏用的短标题。正文里的标题优先，其次是要素里的标题提示。
+    /// 标签与状态栏用的短标题，口径见 [`export::document_title`]。
     pub(crate) fn title(&self) -> String {
-        let title = export::extract_title(&self.generated_markdown, &self.draft.title_hint);
+        let title = export::document_title(&self.draft, &self.generated_markdown);
         if title.trim().is_empty() {
             "未命名公文".to_string()
         } else {

@@ -8,7 +8,7 @@
 //! `New`（新建）是历史遗留状态：旧版首次保存落为“新建”，现已在创建与 v2 迁移时
 //! 统一升为“草稿”，不再产生新的“新建”记录（枚举保留仅为解析旧库与旧 ZIP 包）。
 
-use crate::export::extract_title;
+use crate::export::document_title;
 use crate::models::{AppConfig, DraftInput, ManuscriptStatus, TemplateKind};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
@@ -440,7 +440,7 @@ impl ManuscriptStore {
     /// 由 snapshot + 正文派生标题/文种/文号/成文日期。新建记录，返回新 id。
     pub fn create(&mut self, new: &NewManuscript, source_id: Option<i64>) -> Result<i64> {
         let snapshot_json = serde_json::to_string(&new.snapshot).context("序列化稿件快照失败")?;
-        let title = extract_title(&new.content_markdown, &new.snapshot.title_hint);
+        let title = document_title(&new.snapshot, &new.content_markdown);
         let doc_number = new.snapshot.profile.document_number.trim().to_string();
         let doc_date = new.snapshot.date.trim().to_string();
         let doc_date_iso = parse_doc_date_iso(&doc_date);
@@ -499,7 +499,7 @@ impl ManuscriptStore {
             current
         };
         let snapshot_json = serde_json::to_string(&upd.snapshot).context("序列化稿件快照失败")?;
-        let title = extract_title(&upd.content_markdown, &upd.snapshot.title_hint);
+        let title = document_title(&upd.snapshot, &upd.content_markdown);
         let doc_number = upd.snapshot.profile.document_number.trim().to_string();
         let doc_date = upd.snapshot.date.trim().to_string();
         let doc_date_iso = parse_doc_date_iso(&doc_date);
@@ -886,7 +886,7 @@ impl ManuscriptStore {
             bail!("相对上一版本没有内容变更，不能提交");
         }
         let snapshot_json = serde_json::to_string(snapshot).context("序列化稿件快照失败")?;
-        let title = extract_title(content_markdown, &snapshot.title_hint);
+        let title = document_title(snapshot, content_markdown);
         let doc_number = snapshot.profile.document_number.trim().to_string();
         let doc_date = snapshot.date.trim().to_string();
         let number = self

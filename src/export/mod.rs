@@ -142,6 +142,19 @@ pub(crate) fn joint_main_column(input: &DraftInput) -> Option<usize> {
     Some(index % 2)
 }
 
+/// 一篇稿件对外的标题：标签、状态栏、稿件库记录、导出文件名都用它。
+///
+/// 研究报告与封面同一口径（[`research::cover_title`]）：文档要素的「文件名称」
+/// 优先，留空才取正文区段的 `#`，部分、附录区的 `#` 不算；其余文种正文的 `#`
+/// 优先，其次是要素里的标题提示。
+pub(crate) fn document_title(input: &DraftInput, markdown: &str) -> String {
+    if input.kind.is_research() {
+        return research::cover_title(input, markdown)
+            .unwrap_or_else(|| "未命名研究报告".to_string());
+    }
+    extract_title(markdown, &input.title_hint)
+}
+
 pub fn extract_title(markdown: &str, fallback: &str) -> String {
     markdown
         .lines()
@@ -290,7 +303,7 @@ pub fn export_all_with_numbering(
 ) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
-    let title = extract_title(markdown, &input.title_hint);
+    let title = document_title(input, markdown);
     // 按文稿类型生成统一主干名，三格式及编译出的 PDF 共用，方便归档对应：
     // 会议议程“名称+会议时间”，白头件“白头+名称+时间戳”，公函“函号+名称+时间戳”，
     // 电话通知“电话通知+时间戳”，普通公文“普通公文+名称+时间戳”。
@@ -448,6 +461,28 @@ fn unique_directory_stem(dir: &Path, stem: &str) -> String {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    /// 研究报告的标题与封面同一口径：「文件名称」优先，留空才取正文区的 `#`，
+    /// 部分区的 `#` 不算；其余文种仍是正文 `#` 优先。
+    #[test]
+    fn document_title_follows_the_cover_for_research_reports() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.title_hint = "封面题名".to_string();
+        let markdown = "# 正文题名\n\n## 背景\n";
+        assert_eq!(document_title(&input, markdown), "封面题名");
+
+        input.title_hint.clear();
+        assert_eq!(document_title(&input, markdown), "正文题名");
+        assert_eq!(
+            document_title(&input, "<!-- [部分] -->\n\n# 现状分析\n\n## 背景\n"),
+            "未命名研究报告"
+        );
+
+        input.kind = TemplateKind::PlainDocument;
+        input.title_hint = "封面题名".to_string();
+        assert_eq!(document_title(&input, markdown), "正文题名");
+    }
 
     #[test]
     fn filename_is_windows_safe() {

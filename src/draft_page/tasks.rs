@@ -470,7 +470,7 @@ impl DraftPage<'_> {
                 let cleaned = prompt::sanitize_model_markdown(&raw);
                 let normalized = prompt::normalize_generated_markdown(&input, &cleaned);
                 let markdown = export::finalize_markdown(&input, &normalized);
-                let title = export::extract_title(&markdown, &input.title_hint);
+                let title = export::document_title(&input, &markdown);
                 let mut warnings: Vec<ReviewNote> = validator::validate(
                     &input,
                     &markdown,
@@ -569,7 +569,7 @@ impl DraftPage<'_> {
         // 用它过滤出属于当前文稿的目录，避免打开别的文稿的成品。
         let stem = export::document_stem_prefix(
             &self.doc.draft,
-            &export::extract_title(&self.doc.generated_markdown, &self.doc.draft.title_hint),
+            &export::document_title(&self.doc.draft, &self.doc.generated_markdown),
         );
         self.export_links
             .refresh(&self.config.output_dir, Some(&stem));

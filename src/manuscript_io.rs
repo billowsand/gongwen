@@ -410,8 +410,7 @@ pub fn export_selected_pdfs(
                 progress(&format!("已完成 {}/{} 篇", summary.records, total));
                 continue;
             };
-            let title =
-                crate::export::extract_title(&record.content_markdown, &record.snapshot.title_hint);
+            let title = crate::export::document_title(&record.snapshot, &record.content_markdown);
             let stem = crate::export::document_stem_prefix(&record.snapshot, &title);
             let label = record.title.clone();
             let missing_stamp = options.stamped && record.pdfs.is_empty();
@@ -958,7 +957,7 @@ mod tests {
     fn expected_stem(record: &ManuscriptRecord) -> String {
         crate::export::document_stem_prefix(
             &record.snapshot,
-            &crate::export::extract_title(&record.content_markdown, &record.snapshot.title_hint),
+            &crate::export::document_title(&record.snapshot, &record.content_markdown),
         )
     }
 

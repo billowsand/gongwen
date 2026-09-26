@@ -607,10 +607,8 @@ impl ManuscriptStore {
                 [id], |row| row.get(0)
             )?;
             let json = serde_json::to_string(&revision.snapshot)?;
-            let title = crate::export::extract_title(
-                &revision.content_markdown,
-                &revision.snapshot.title_hint,
-            );
+            let title =
+                crate::export::document_title(&revision.snapshot, &revision.content_markdown);
             self.conn.execute(
                 "INSERT INTO manuscript_versions
                  (manuscript_id, version_number, name, comment, snapshot_json,
@@ -657,7 +655,7 @@ impl ManuscriptStore {
             Some(number),
         )?;
         let json = serde_json::to_string(snapshot)?;
-        let title = crate::export::extract_title(markdown, &snapshot.title_hint);
+        let title = crate::export::document_title(snapshot, markdown);
         self.conn.execute(
             "INSERT INTO manuscript_versions
              (manuscript_id, version_number, name, comment, snapshot_json,

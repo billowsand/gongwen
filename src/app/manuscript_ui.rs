@@ -2330,7 +2330,7 @@ impl GongwenApp {
         self.draft_page().revalidate();
         let snapshot = self.doc().draft.clone();
         let content = self.doc().generated_markdown.clone();
-        let title = export::extract_title(&content, &snapshot.title_hint);
+        let title = export::document_title(&snapshot, &content);
         let current_id = self.doc().manuscript_id;
         let result: anyhow::Result<String> = (|| {
             let store = self

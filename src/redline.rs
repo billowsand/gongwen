@@ -106,7 +106,7 @@ pub fn export_files(
     let markdown = &doc.markdown;
     // 标题取自正文 H1，哨兵已在生成时避开标题语法位置，这里再兜一层底：
     // 文件名里绝不能出现私用区字符。
-    let title = export::strip_redline(&export::extract_title(markdown, &input.title_hint));
+    let title = export::strip_redline(&export::document_title(input, markdown));
     let stem = format!("{}-花脸稿", export::safe_filename(&title));
     let dir = output_dir.join(&stem);
     std::fs::create_dir_all(&dir)
