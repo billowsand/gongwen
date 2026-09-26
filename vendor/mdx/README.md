@@ -102,7 +102,8 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   连续），不编号标题输出 `\mdxunnumbered{part,chapter,section,...}`，不编号章前后
   切换 `\mdxfreenumbers` / `\mdxchapternumbers`；
 - `resources/research/md2tex.cls`：`\ctexset{part=...}`（小一黑体、"第一部分"）、
-  目录的部分字体，新增上述不编号命令（`\phantomsection` + `\addcontentsline`
+  目录的部分字体与引导线（tocloft 默认的 `\large` 引导线要 8pt 的 cmmi8，随包
+  texbundle 里没有，目录一出现部分条目就编译失败），新增上述不编号命令（`\phantomsection` + `\addcontentsline`
   进目录；不编号章的图表题注用全篇共用的不带章号流水号）；
 - `docx_research.rs`：部分标题（Heading1、"第一部分"一行题目一行）、不编号标题
   与流水号题注；

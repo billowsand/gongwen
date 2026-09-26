@@ -200,8 +200,12 @@
 %% 目录格式
 %% ============================================================
 \renewcommand{\cftchapfont}{\heiti\enhei}
+%% 部分条目与章同字号、页码同样加粗。tocloft 默认的部分字体与引导线都带 \large，引导线
+%% 又是在数学模式里排的：12pt 下要装 8pt 的 cmmi8，随包 texbundle 里没有，
+%% 整篇编译就停在目录上。
 \renewcommand{\cftpartfont}{\heiti\enhei}
-\renewcommand{\cftpartpagefont}{\heiti\enhei}
+\renewcommand{\cftpartpagefont}{\bfseries}
+\renewcommand{\cftpartleader}{\cftdotfill{\cftpartdotsep}}
 \setlength{\cftbeforechapskip}{\cftbeforesecskip}
 
 %% ============================================================

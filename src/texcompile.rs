@@ -607,6 +607,52 @@ mod tests {
         assert!(outcome.pdf.is_some_and(|path| path.is_file()));
     }
 
+    /// 部分与不编号标题：`\part`、`\mdxunnumbered...` 带目录条目，不编号章里的
+    /// 表格切到流水号再切回章号——这些宏都要随包 Tectonic 编得过去。
+    #[test]
+    #[ignore = "需要完整的内置 Tectonic runtime"]
+    fn compiles_research_report_with_parts_and_unnumbered_headings() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            title_hint: "部分研究报告测试".into(),
+            ..Default::default()
+        };
+        input.research.institution = "测试单位".into();
+        let selection = ExportSelection {
+            markdown: false,
+            docx: false,
+            tex: true,
+            overwrite: true,
+        };
+        let table = "| 甲 | 乙 |\n|---|---|\n| 1 | 2 |\n";
+        let markdown = format!(
+            "<!-- [目录] -->\n\n<!-- [不编号] -->\n## 前言\n\n前言正文。\n\n{table}\n: 前言表 {{#tab:qy}}\n\n\
+             <!-- [部分] -->\n\n# 现状分析 {{#part:xz}}\n\n## 研究背景\n\n见第{{@part:xz}}部分与表{{@tab:qy}}。\n\n\
+             {table}\n: 背景表\n\n<!-- [不编号] -->\n### 附带说明\n\n说明。\n\n\
+             <!-- [不编号] -->\n# 总论\n\n## 说明\n\n正文。\n\n# 对策建议\n\n## 总体思路\n\n正文。\n\n\
+             <!-- [不编号] -->\n## 结束语\n\n{table}\n: 结束表\n\n<!-- [附录] -->\n\n# 术语表\n\n正文。\n"
+        );
+        let files = crate::export::export_all(
+            temp.path(),
+            &input,
+            &markdown,
+            &selection,
+            &crate::units::UnitDisplay::new(&[]),
+            &FontConfig::default(),
+        )
+        .unwrap();
+        let tex = files
+            .iter()
+            .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
+            .unwrap();
+        let main = std::fs::read_to_string(tex).unwrap();
+        assert!(main.contains("\\part{现状分析}"), "{main}");
+        assert!(main.contains("\\mdxunnumberedpart{总论}"), "{main}");
+        let outcome = compile_research_pdf(tex).unwrap();
+        assert!(outcome.pdf.is_some_and(|path| path.is_file()));
+    }
+
     /// 研究报告的数学公式（mdx v2.16.1 起）：行内 `$...$` 与独立块 `$$...$$`
     /// 要走 amsmath/mathtools 编进 PDF。texbundle 里缺包时这条会在 release
     /// 冒烟里先红（CI 按 `texcompile::tests::compiles_` 前缀跑）。
