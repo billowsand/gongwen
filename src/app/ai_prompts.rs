@@ -230,12 +230,22 @@ impl GongwenApp {
                             ),
                         );
                         ui.add_space(3.0);
-                        ui.add(
+                        // 标题占满左侧剩余空间，状态标签固定在行尾；长标题截断。
+                        let badge_width = if entry.is_builtin() { 64.0 } else { 0.0 };
+                        let title_width =
+                            (ui.available_width() - badge_width - ui.spacing().item_spacing.x)
+                                .max(80.0);
+                        ui.add_sized(
+                            [title_width, 22.0],
                             egui::Label::new(egui::RichText::new(&entry.name).strong()).truncate(),
                         );
                         if entry.is_builtin() {
-                            ui.add_space(2.0);
-                            theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
+                                },
+                            );
                         }
                     });
                     let preview = if entry.instruction.trim().is_empty() {
