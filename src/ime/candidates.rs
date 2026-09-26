@@ -43,11 +43,15 @@ const SPARKLE_GAP: f32 = 1.5;
 /// 星标腰身收进去的程度：控制点离中心的距离相对半径的比例，越小尖越细。
 const SPARKLE_WAIST: f32 = 0.18;
 
-/// 候选窗里的一个候选：页内下标、文本、是不是本地整句。
+/// 词后右上角小字（辅码）与前面候选词 / 星标的间距。
+const CORNER_GAP: f32 = 1.0;
+
+/// 候选窗里的一个候选：页内下标、文本、是不是本地整句、右上角要标的辅码。
 struct Row {
     index: usize,
     text: String,
     sentence: bool,
+    corner: Option<String>,
 }
 
 impl Ime {
@@ -79,6 +83,8 @@ impl Ime {
                     index: offset,
                     text: candidate.text.clone(),
                     sentence: candidate.kind == CandidateKind::Sentence,
+                    // 还要敲的辅码，标哪几码由引擎按档位定（`Engine::fuma_mark`）
+                    corner: candidate.fuma.clone(),
                 })
             })
             .collect();
@@ -230,7 +236,9 @@ fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit) {
 }
 
 /// 一个候选：弱化的小号序号 + 正文字号的候选文本；本地整句拼出的候选词后右上角带星标，
-/// 和词库里现成的词区分。
+/// 和词库里现成的词区分；辅码小字再跟在后面，同样顶在右上角。
+///
+/// 辅码跟在词后同一行、顶格对齐，不另起一行：另起一行的话它一出现 / 消失，候选窗高度就跟着跳。
 fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Response {
     let format = |size: f32, color: egui::Color32| egui::TextFormat {
         font_id: egui::FontId::proportional(size),
@@ -271,6 +279,23 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
             format(1.0, egui::Color32::TRANSPARENT),
         );
     }
+    // 辅码小字：序号那档字号、弱化色，顶到行首当上标
+    let corner_format = egui::TextFormat {
+        valign: egui::Align::TOP,
+        ..format(theme::font_sizes::SMALL, theme::text_muted())
+    };
+    let corner_width = row.corner.as_ref().map_or(0.0, |corner| {
+        job.append(corner, CORNER_GAP, corner_format.clone());
+        CORNER_GAP
+            + ui.painter()
+                .layout_no_wrap(
+                    corner.clone(),
+                    corner_format.font_id.clone(),
+                    corner_format.color,
+                )
+                .size()
+                .x
+    });
     let button = egui::Button::new(job)
         .stroke(egui::Stroke::NONE)
         .corner_radius(4);
@@ -283,7 +308,7 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
         // 贴着候选词右上角：右边收进内边距，顶上与字形顶部大致齐平
         let content = response.rect.shrink2(CELL_PADDING);
         let min = egui::pos2(
-            content.right() - SPARKLE_SIZE,
+            content.right() - corner_width - SPARKLE_SIZE,
             content.top() + content.height() * 0.15,
         );
         let color = if selected {

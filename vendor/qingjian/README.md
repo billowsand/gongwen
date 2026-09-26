@@ -4,7 +4,7 @@
 整块搬过来的：应用内输入法的拼音引擎、词库、bigram 整句与用户学习。
 
 - 上游：`https://github.com/billowsand/zizai`（青简上游 `https://github.com/qingjian-team/qingjian`）
-- 取自提交：`fbf709585bf107c653454e5c9da1fbbe464a360d`（"feat(render): 本地整句候选右上角加星标"，2026-09）
+- 取自提交：`ff1480c490bc19efaa16ce25b035c9b7a113d72e`（"feat(windows): 候选右上角标辅码，新增学码档"，2026-09）
 - 许可证：GPL-3.0-or-later（见同目录 `LICENSE`）。**本仓库因此也以 GPL-3.0-or-later 分发。**
 - 名字与 logo 不在 GPL 授权范围内，已全部剔除，仓库里不出现"字在""青简"的品牌资源。
 

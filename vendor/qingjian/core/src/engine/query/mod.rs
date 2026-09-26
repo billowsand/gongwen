@@ -294,13 +294,13 @@ impl Engine {
         if !fuma_filters {
             self.insert_emoji(&mut items);
         }
-        // 敲了辅码就给候选标上各自的辅码：用户看着 蓝 cm、缆 cf 才知道下次该敲哪个码。
-        // 没敲辅码时不标，候选窗照旧（标注那一栏要留给译文）
-        if fuma_codes.is_some() {
+        // 候选右上角标还要敲的辅码（只敲了首码时 栏ˢ；学码档下没敲时 栏ᵐˢ），下一键敲什么一眼看到。
+        // 只标词库词与整句：快捷候选（日期）、英文、emoji 的「首末字」不是用户在打的字
+        if self.fuma_enabled() {
             for item in &mut items {
-                item.fuma = self
-                    .fuma_expected(&item.text)
-                    .map(|codes| codes.iter().collect());
+                if matches!(item.kind, CandidateKind::Chinese | CandidateKind::Sentence) {
+                    item.fuma = self.fuma_mark(fuma_codes, &item.text);
+                }
             }
         }
         let rank = start.elapsed();

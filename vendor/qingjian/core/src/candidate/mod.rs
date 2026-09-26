@@ -46,7 +46,8 @@ pub struct Candidate {
     /// 学习语言下的译文；查不到或尚未就绪时为 `None`。
     pub translation: Option<Translation>,
 
-    /// 这个候选的辅码（`栏` → `ms`），只在敲了辅码时填：候选窗标出来，用户才知道下次该敲什么。
-    /// 表里查不到首末字时为 `None`。
+    /// 候选右上角要标的辅码，即还要敲的码：只敲了首码时是第二码（`栏` → `s`），
+    /// 学码档（`[general] fuma_hint = "always"`）下没敲辅码时是完整两码（`ms`）。
+    /// 两码敲满、首码对不上、表里查不到首末字时为 `None`。
     pub fuma: Option<String>,
 }

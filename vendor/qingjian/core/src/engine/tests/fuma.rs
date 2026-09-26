@@ -5,7 +5,7 @@
 
 use super::*;
 
-use crate::FumaTable;
+use crate::{FumaHint, FumaTable};
 
 fn fuma_table() -> Arc<FumaTable> {
     Arc::new(FumaTable::parse("开=fk\n发=xa\n").unwrap())
@@ -143,28 +143,70 @@ fn both_codes_filter_even_in_lower_case() {
     assert_eq!(engine.query().unwrap().marked_text(), "kai'fa");
 }
 
-/// 敲了辅码就给每条候选标上它自己的辅码，让人知道下次该敲哪个码。
+/// 只敲了首码：首码对得上的候选右上角标还要敲的第二码，对不上的不标。
 #[test]
-fn candidates_carry_their_own_codes() {
+fn first_code_marks_the_remaining_code() {
     let mut engine = fuma_engine();
     engine.set_input("kdf");
     let items = &engine.query().unwrap().candidates.items;
     let kai = items.iter().find(|c| c.text == "开").unwrap();
+    assert_eq!(kai.fuma.as_deref(), Some("k"));
+    // 词组取首字第 1 码 + 末字第 1 码：开发 = fx，首码 f 对上，还要敲 x
+    let kaifa = items.iter().find(|c| c.text == "开发").unwrap();
+    assert_eq!(kaifa.fuma.as_deref(), Some("x"));
+    // 首码对不上的一律不标（开 = fk、开发 = fx，首码都是 f）
+    engine.set_input("kdx");
+    let items = &engine.query().unwrap().candidates.items;
+    assert!(items.iter().all(|c| c.fuma.is_none()));
+    // 两码敲满：已严格过滤，辅码段在拼音行里，不再标
+    engine.set_input("kdfK");
+    let items = &engine.query().unwrap().candidates.items;
+    assert!(!items.is_empty());
+    assert!(items.iter().all(|c| c.fuma.is_none()));
+    // 缺省档没敲辅码时不标
+    engine.set_input("kd");
+    let items = &engine.query().unwrap().candidates.items;
+    assert!(items.iter().all(|c| c.fuma.is_none()));
+}
+
+/// 学码档：没敲辅码时标完整两码；敲了首码仍只标第二码；关掉就什么都不标。
+#[test]
+fn fuma_hint_levels() {
+    let mut engine = fuma_engine();
+    engine.set_fuma_hint(FumaHint::Always);
+    engine.set_input("kd");
+    let items = &engine.query().unwrap().candidates.items;
+    let kai = items.iter().find(|c| c.text == "开").unwrap();
     assert_eq!(kai.fuma.as_deref(), Some("fk"));
-    // 词组取首字第 1 码 + 末字第 1 码
+    engine.set_input("kdfa");
+    let items = &engine.query().unwrap().candidates.items;
     let kaifa = items.iter().find(|c| c.text == "开发").unwrap();
     assert_eq!(kaifa.fuma.as_deref(), Some("fx"));
-    // 没敲辅码时不标，标注那一栏留给译文
-    engine.set_input("kd");
-    assert!(
-        engine
-            .query()
-            .unwrap()
-            .candidates
-            .items
+    engine.set_input("kdf");
+    let items = &engine.query().unwrap().candidates.items;
+    assert_eq!(
+        items
             .iter()
-            .all(|c| c.fuma.is_none())
+            .find(|c| c.text == "开")
+            .unwrap()
+            .fuma
+            .as_deref(),
+        Some("k")
     );
+
+    engine.set_fuma_hint(FumaHint::Off);
+    for input in ["kd", "kdf"] {
+        engine.set_input(input);
+        let items = &engine.query().unwrap().candidates.items;
+        assert!(items.iter().all(|c| c.fuma.is_none()), "{input}");
+    }
+
+    // 没开辅码表时学码档也不标
+    let mut plain = xiaohe();
+    plain.set_fuma_hint(FumaHint::Always);
+    plain.set_input("kd");
+    let items = &plain.query().unwrap().candidates.items;
+    assert!(items.iter().all(|c| c.fuma.is_none()));
 }
 
 /// 首码那档选中辅码候选时，那一键跟着一起吃掉；选普通前缀候选时它留着当下一个字的声母。

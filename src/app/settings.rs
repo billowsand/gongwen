@@ -257,6 +257,14 @@ fn fuma_label(key: &str) -> &'static str {
         .unwrap_or("不用辅码")
 }
 
+/// 辅码显示档位在界面上显示的名字。认不出的值按默认档（敲了辅码时）。
+fn fuma_hint_label(key: &str) -> &'static str {
+    crate::ime::ImeSettings::default()
+        .with_fuma_hint(key)
+        .fuma_hint
+        .label()
+}
+
 /// 一行文本输入设置项。
 fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
     setting_row(ui, label, None, |ui| {
@@ -1785,6 +1793,30 @@ impl GongwenApp {
                 request_builtin_xiaohe = true;
             }
         });
+        setting_row(
+            ui,
+            "候选显示辅码",
+            Some(
+                "在候选右上角用淡色小字标辅码：敲了第一码后标出还要敲的第二码；\
+                 「始终」在没敲辅码时也标出完整两码，适合还在记码的时候。",
+            ),
+            |ui| {
+                ui.add_enabled_ui(fuma_words.is_some(), |ui| {
+                    let current = fuma_hint_label(&self.config.ime.fuma_hint);
+                    egui::ComboBox::from_id_salt("ime_fuma_hint")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for (key, label) in crate::ime::ImeSettings::fuma_hint_options() {
+                                ui.selectable_value(
+                                    &mut self.config.ime.fuma_hint,
+                                    key.to_string(),
+                                    label,
+                                );
+                            }
+                        });
+                });
+            },
+        );
         setting_row(ui, "每页候选", None, |ui| {
             egui::ComboBox::from_id_salt("ime_page_size")
                 .selected_text(self.config.ime.page_size.to_string())

@@ -13,7 +13,7 @@
 //! 词库与语言模型是 `.qj` 数据文件（vendor 自字在输入法，见 `vendor/qingjian/README.md`），
 //! 找得到才启用；找不到就退回系统输入法，不挡用户打字。
 
-use qingjian_core::{FumaScheme, ShuangpinScheme};
+use qingjian_core::{FumaHint, FumaScheme, ShuangpinScheme};
 
 mod candidates;
 mod cursor;
@@ -38,6 +38,9 @@ pub(crate) struct ImeSettings {
     /// 双拼辅助码（形码）方案；`None` 是不用辅码。
     pub(crate) fuma: Option<FumaScheme>,
 
+    /// 候选右上角标辅码的档位：默认只在敲了首码时标第二码。没装码表时不起作用。
+    pub(crate) fuma_hint: FumaHint,
+
     /// 中文模式下的全角标点（，。：；）。
     pub(crate) full_width_punctuation: bool,
 
@@ -54,6 +57,7 @@ impl Default for ImeSettings {
             enabled: true,
             shuangpin: None,
             fuma: None,
+            fuma_hint: FumaHint::default(),
             full_width_punctuation: true,
             page_size: 5,
             page_keys: ('[', ']'),
@@ -84,6 +88,7 @@ impl ImeSettings {
             shuangpin: shuangpin.trim().parse().ok(),
             // 辅码由 `with_fuma` 补：它单独从配置里来，不影响其他几项的解析。
             fuma: None,
+            fuma_hint: FumaHint::default(),
             full_width_punctuation,
             page_size: page_size.clamp(1, MAX_PAGE_SIZE),
             page_keys: parse_page_keys(page_keys).unwrap_or(Self::default().page_keys),
@@ -115,6 +120,20 @@ impl ImeSettings {
     /// 辅码方案从配置里的字符串来。认不出的名字当「不用辅码」。
     pub(crate) fn with_fuma(mut self, fuma: &str) -> Self {
         self.fuma = fuma.trim().parse().ok();
+        self
+    }
+
+    /// 界面上列的辅码显示档位（配置写法，界面名），顺序与引擎的 `FumaHint::ALL` 一致。
+    pub(crate) fn fuma_hint_options() -> Vec<(&'static str, &'static str)> {
+        FumaHint::ALL
+            .into_iter()
+            .map(|hint| (hint.key(), hint.label()))
+            .collect()
+    }
+
+    /// 辅码显示档位从配置里的字符串来。认不出的写法按默认档。
+    pub(crate) fn with_fuma_hint(mut self, hint: &str) -> Self {
+        self.fuma_hint = hint.parse().unwrap_or_default();
         self
     }
 }
@@ -219,6 +238,17 @@ mod tests {
         assert_eq!(fuma(""), None);
         assert_eq!(fuma("  "), None);
         assert_eq!(fuma("没这个方案"), None);
+    }
+
+    /// 辅码显示档位：认得出的照用，错写法回默认（敲了辅码时）。
+    #[test]
+    fn fuma_hint_comes_from_the_config_string() {
+        let hint = |text: &str| ImeSettings::default().with_fuma_hint(text).fuma_hint;
+        assert_eq!(hint("always"), FumaHint::Always);
+        assert_eq!(hint(" OFF "), FumaHint::Off);
+        assert_eq!(hint(""), FumaHint::Typed);
+        assert_eq!(hint("有时"), FumaHint::Typed);
+        assert_eq!(ImeSettings::fuma_hint_options().len(), FumaHint::ALL.len());
     }
 
     /// 辅码方案列表第一项是不用。

@@ -31,6 +31,11 @@ impl Engine {
         self.fuma = table;
     }
 
+    /// 设候选右上角标辅码的档位；下一键查询生效。
+    pub fn set_fuma_hint(&mut self, hint: crate::FumaHint) {
+        self.fuma_hint = hint;
+    }
+
     pub fn shuangpin(&self) -> Option<Scheme> {
         self.shuangpin
     }

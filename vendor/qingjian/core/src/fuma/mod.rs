@@ -6,8 +6,10 @@
 //! 汉字（含扩展区）之外的字符一律跳过，首末取的是汉字；
 //! 首末字查不到表即视为不匹配（严格过滤，不出候选）。
 
+mod hint;
 mod table;
 
+pub use hint::Hint;
 pub use table::FumaTable;
 
 use std::fmt;

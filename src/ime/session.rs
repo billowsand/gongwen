@@ -401,8 +401,10 @@ impl Ime {
             }
         });
         self.fuma_words = table.as_ref().map(FumaTable::len);
+        let hint = self.settings.fuma_hint;
         if let Some(engine) = self.engine_mut() {
             engine.set_fuma(table.map(Arc::new));
+            engine.set_fuma_hint(hint);
         }
     }
 

@@ -38,6 +38,7 @@ pub use engine::{
     UsageMeter, UsageSummary, VocabularySummary, VocabularyTracker, book_scale,
 };
 pub use fuma::FumaTable;
+pub use fuma::Hint as FumaHint;
 pub use fuma::Scheme as FumaScheme;
 pub use history::InputHistory;
 pub use parser::{ParseError, Segmentation};

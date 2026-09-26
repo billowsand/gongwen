@@ -266,6 +266,7 @@
     "enabled": true,
     "shuangpin": "",
     "fuma": "",
+    "fuma_hint": "typed",
     "full_width_punctuation": true,
     "page_size": 5,
     "page_keys": "[]"

@@ -1990,6 +1990,10 @@ pub struct ImeConfig {
     /// 码表不随包分发（权利归方案作者），要使用者在设置页自己导入。
     pub fuma: String,
 
+    /// 候选右上角标辅码的档位：`typed`（默认，只敲了首码时标还要敲的第二码）/
+    /// `always`（学码：没敲辅码时也标完整两码）/ `off`。认不出的值按默认。
+    pub fuma_hint: String,
+
     /// 中文模式下的全角标点（`，。：；〉《`……），英文模式始终半角。
     pub full_width_punctuation: bool,
 
@@ -2006,6 +2010,7 @@ impl Default for ImeConfig {
             enabled: true,
             shuangpin: String::new(),
             fuma: String::new(),
+            fuma_hint: "typed".to_string(),
             full_width_punctuation: true,
             page_size: 5,
             page_keys: "[]".to_string(),

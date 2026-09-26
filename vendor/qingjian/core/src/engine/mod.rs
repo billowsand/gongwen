@@ -202,6 +202,9 @@ pub struct Engine {
     /// 表有几千条且只读，与壳共用同一份。
     fuma: Option<Arc<crate::FumaTable>>,
 
+    /// 候选右上角标辅码的档位（`[general] fuma_hint`），缺省只在敲了首码时标第二码。
+    fuma_hint: crate::FumaHint,
+
     /// emoji 表，没有就不出 emoji 候选。
     emoji: Option<EmojiTable>,
 }
@@ -317,6 +320,7 @@ impl Engine {
             chain: CommitChain::default(),
             shuangpin: None,
             fuma: None,
+            fuma_hint: crate::FumaHint::default(),
             emoji: None,
         }
     }

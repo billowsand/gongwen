@@ -14,6 +14,7 @@
 
 use std::borrow::Cow;
 
+use crate::FumaHint;
 use crate::shuangpin::Scheme;
 
 use super::Engine;
@@ -122,6 +123,23 @@ impl Engine {
     /// `text` 的期望辅码（词组按「首字第 1 码 + 末字第 1 码」现算）；首末字不在表里为 `None`。
     pub(super) fn fuma_expected(&self, text: &str) -> Option<[char; 2]> {
         self.fuma.as_ref()?.expected_codes(text)
+    }
+
+    /// 候选右上角要标的辅码（[`crate::FumaHint`]）：只敲了首码时，首码对得上的候选标第二码；
+    /// 学码档下没敲辅码时标完整两码。两码敲满（已严格过滤、辅码段在拼音行里）、首码对不上
+    /// （`ljm` 的 蓝莓，`m` 是下一个字的声母）、表里查不到时都不标。
+    pub(super) fn fuma_mark(&self, codes: Option<FumaCodes>, text: &str) -> Option<String> {
+        let expected = || self.fuma_expected(text);
+        match (self.fuma_hint, codes) {
+            (FumaHint::Off, _) | (_, Some(FumaCodes::Both(_))) => None,
+            (_, Some(codes @ FumaCodes::First(_))) => expected()
+                .filter(|&expected| codes.admits(expected))
+                .map(|expected| expected[1].to_string()),
+            (FumaHint::Always, None) if self.fuma_enabled() => {
+                expected().map(|expected| expected.iter().collect())
+            }
+            (_, None) => None,
+        }
     }
 
     /// 辅码两码都敲了时 `text` 能不能出候选（严格过滤）；没敲或只敲了首码一律放行
