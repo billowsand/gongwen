@@ -1,6 +1,7 @@
 name: Repack deb
 
-# 修复已发布版本 deb 的依赖声明：从 Release 取下现有的 arm64 / amd64 deb，
+# 修复已发布版本 deb 的依赖声明：从 Release 取下现有的 arm64 deb（v0.6.6 及以前的
+# 旧版还有 amd64 deb，如需修复可临时把 matrix.arch 加回 amd64），
 # 按 packaging/debian/depends.sh 重写 Depends 后重新打包（包内文件不变、不重新编译），
 # 在 buster / Ubuntu 20.04 / 24.04 里实装验证通过后，覆盖上传回同一个 tag 的 Release。
 # 不新建 tag，其他资产不动。
@@ -27,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: [arm64, amd64]
+        arch: [arm64]
     steps:
       - uses: actions/checkout@v4
 
@@ -69,13 +70,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, amd64]
+        arch: [arm64]
         image: ['debian:buster', 'ubuntu:20.04', 'ubuntu:24.04']
         include:
           - arch: arm64
             runner: ubuntu-24.04-arm
-          - arch: amd64
-            runner: ubuntu-latest
     defaults:
       run:
         shell: bash

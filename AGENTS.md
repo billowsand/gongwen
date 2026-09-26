@@ -36,7 +36,7 @@ cargo build --release --locked
 
 - 开发构建给依赖开 `opt-level = 3`（见 `Cargo.toml`），首次编译依赖约需一分钟，属正常。
 - `cargo test` 有**约 5 个与沙箱环境相关的失败，是预期结果**，不要为此改动测试。
-- Linux 变体：Arch/Omarchy 发布包用
+- Linux 变体：Arch/Omarchy 包（已不随 Release 发布，需自行构建）用
   `cargo build --release --locked --no-default-features --features linux-portal-dialogs`。
 
 ## 代码组织
@@ -77,10 +77,11 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 - 版本号只维护在两处：`Cargo.toml` 的根包 `version` 和 `Cargo.lock` 里
   `name = "gongwen-assistant"` 的 `version`。
 - 本机**没有 `pwsh`**，不要调用 `scripts/bump-version.ps1`，手动编辑上述两处。
-- `ci.yml` 在 push `main` 时触发（macOS / Windows / Linux 三平台跑 fmt / clippy / test；
-  另在干净的 Ubuntu 20.04 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`）；
-  `release.yml` 在 push `v*` tag 时触发，产出 8 个资产（Windows setup.exe、
-  Linux ARM64/AMD64 deb、macOS ARM64 DMG 及各自 `.sha256`）。
+- `ci.yml` 在 push `main` 时触发（Windows x64 / Linux ARM64（GLIBC 2.28）两平台跑 fmt / clippy / test；
+  另在干净的 Ubuntu 20.04 ARM64 里装 deb 并用 Xvfb 真正启动一次，见 `scripts/smoke-launch-linux.sh`）；
+  `release.yml` 在 push `v*` tag 时触发，只产出 4 个资产：Windows x64 setup.exe、
+  Linux ARM64 deb（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）
+  及各自 `.sha256`。macOS、Linux AMD64、Arch/Omarchy 包不再发布。
 - Release workflow 全程约 20–30 分钟。
 - 完整发布流程（bump → tag → 监控 → 写中文 release notes → 验证）见 skill `release`。
   **硬性要求：release 正文必须手写，不能用 `--generate-notes` 的占位说明。**

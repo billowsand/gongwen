@@ -2,21 +2,13 @@
 
 ## 获取发布版
 
-GitHub Releases 提供 Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）、Linux ARM64/AMD64 Debian 包、面向 Arch/Omarchy 的 ARM64/AMD64 Wayland 运行包与 `PKGBUILD`，以及 macOS Apple Silicon 的 DMG。各平台发布包都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
+GitHub Releases 只提供两种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）与 Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）。macOS、Linux AMD64 与 Arch/Omarchy 不再提供发布包，需要时请按下文从源码构建。两种发布包都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
 
-macOS 安装：打开 DMG，把「公文助手」拖进 Applications。应用未做开发者签名与公证，首次打开需右键点图标选「打开」，并在系统弹窗中确认；要求 macOS 12 及以上、Apple Silicon。
-
-发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Debian Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`），Arch/Omarchy 用 Portal 文件选择器重新构建并生成运行包与带校验和的 `PKGBUILD`，macOS 用 `scripts/package-dmg.sh` 打成拖拽安装的 DMG。相关资产受授权和体积限制，不进入源码仓库。
+发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Debian Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`）。相关资产受授权和体积限制，不进入源码仓库。
 
 ## 在 Omarchy / Arch Linux 安装
 
-从同一 GitHub Release 下载生成的 `PKGBUILD`，在它所在的空目录中运行：
-
-```bash
-makepkg -si
-```
-
-`makepkg` 会按当前架构下载 `linux-amd64-omarchy` 或 `linux-arm64-omarchy` 运行包，并由 Pacman 安装依赖、桌面入口和图标。此版本显式使用原生 Wayland、XDG Desktop Portal 与稳定的 `cn.localtools.GongwenAssistant` app id；在 Hyprland 平铺会话中会自动使用紧凑窗口控件。
+Release 不再提供 Omarchy 运行包与 `PKGBUILD`，需从源码构建。该变体显式使用原生 Wayland、XDG Desktop Portal 与稳定的 `cn.localtools.GongwenAssistant` app id；在 Hyprland 平铺会话中会自动使用紧凑窗口控件。
 
 从源码构建相同变体时使用：
 

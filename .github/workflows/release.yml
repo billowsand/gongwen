@@ -12,11 +12,14 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# 只发布两个平台：Windows x64 安装程序，以及 Linux ARM64 deb（在 Debian buster
+# 容器里构建、锁死 GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）。macOS、Linux AMD64
+# 与 Arch/Omarchy 包不再发布。
+#
 # Runtime assets are versioned independently of the app; bump this tag only
 # when the runtime contents actually change. The tagged release must provide
-# runtime-win-x64.zip, runtime-linux-arm64.zip, runtime-linux-amd64.zip and
-# runtime-darwin-arm64.zip.
-# v0.5.0 起四个包都带 ime/（输入法词库与语言模型，平台无关），见下方冒烟步骤。
+# runtime-win-x64.zip and runtime-linux-arm64.zip.
+# v0.5.0 起 runtime 包都带 ime/（输入法词库与语言模型，平台无关），见下方冒烟步骤。
 env:
   # v0.4.0 起额外分发研究报告排版所需的 9 个字体（方正、TeX Gyre Termes、
   # JetBrains Mono）。研究报告按文件名从 runtime 加载字体，用户机器不必安装。
@@ -27,7 +30,7 @@ env:
   # 研究报告可导出数学公式（对应 mdx v2.16.2）。
   RUNTIME_RELEASE_TAG: v0.6.0
   RUNTIME_REPO: billowsand/gongwen-runtime
-  # 输入法数据的冒烟测试名，四个平台都跑这一个（见 src/ime/mod.rs）。
+  # 输入法数据的冒烟测试名，各平台都跑这一个（见 src/ime/mod.rs）。
   IME_SMOKE_TEST: ime::tests::loads_the_shipped_dictionary_and_model
 
 jobs:
@@ -150,15 +153,8 @@ jobs:
       - name: Build release binary
         run: |
           set -euo pipefail
-          # Debian/麒麟包保留 GTK3 文件选择器。
+          # Debian/麒麟包使用 GTK3 文件选择器（默认 feature）。
           cargo build --release --locked
-          cp target/release/gongwen-assistant target/release/gongwen-assistant-gtk
-
-          # Arch/Omarchy 包使用桌面 portal，并以独立文件名上传给打包任务。
-          cargo build --release --locked \
-            --no-default-features --features linux-portal-dialogs
-          mv target/release/gongwen-assistant target/release/gongwen-assistant-portal
-          mv target/release/gongwen-assistant-gtk target/release/gongwen-assistant
 
       - name: Verify ARM64 and GLIBC compatibility
         run: |
@@ -232,9 +228,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-arm64-glibc228-binary
-          path: |
-            target/release/gongwen-assistant
-            target/release/gongwen-assistant-portal
+          path: target/release/gongwen-assistant
           if-no-files-found: error
 
   package-linux-arm64:
@@ -281,256 +275,23 @@ jobs:
           asset="gongwen-assistant_${version}_arm64.deb"
           sha256sum "$asset" | awk '{ printf "%s  %s\n", $1, $2 }' > "${asset}.sha256"
 
-      - name: Prepare Omarchy portable directory
-        shell: pwsh
-        run: |
-          Copy-Item -LiteralPath target/release/gongwen-assistant-portal -Destination target/release/gongwen-assistant -Force
-          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-arm64-omarchy"
-          ./scripts/package-portable.ps1 -Suffix linux-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
-
-      - name: Package Omarchy archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          staging="$GITHUB_WORKSPACE/dist/linux-arm64-omarchy"
-          bash ./scripts/package-linux-tar.sh "$version" "$staging" "$GITHUB_WORKSPACE" arm64
-
       - name: Upload Linux release assets
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-arm64
           path: |
             gongwen-assistant_*_arm64.deb*
-            gongwen-assistant-*-linux-arm64-omarchy.tar.gz*
           if-no-files-found: error
 
-  build-linux-amd64:
-    name: Build Linux AMD64 / GLIBC 2.28
-    runs-on: ubuntu-latest
-    container:
-      image: debian:buster
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Install Debian build dependencies
-        run: |
-          set -euo pipefail
-          sed -i \
-            -e 's|deb.debian.org/debian|archive.debian.org/debian|g' \
-            -e 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' \
-            -e '/buster-updates/d' \
-            /etc/apt/sources.list
-          apt-get -o Acquire::Check-Valid-Until=false update
-          apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            git \
-            unzip \
-            build-essential \
-            pkg-config \
-            file \
-            binutils \
-            libegl1-mesa-dev \
-            libgl1-mesa-dev \
-            libgtk-3-dev \
-            libssl-dev \
-            libwayland-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxcb1-dev \
-            libxkbcommon-dev
-
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: |
-          set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Verify Debian AMD64 build baseline
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = "x86_64"
-          test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
-
-      - name: Build release binary
-        run: |
-          set -euo pipefail
-          cargo build --release --locked
-          cp target/release/gongwen-assistant target/release/gongwen-assistant-gtk
-          cargo build --release --locked \
-            --no-default-features --features linux-portal-dialogs
-          mv target/release/gongwen-assistant target/release/gongwen-assistant-portal
-          mv target/release/gongwen-assistant-gtk target/release/gongwen-assistant
-
-      - name: Verify AMD64 and GLIBC compatibility
-        run: |
-          set -euo pipefail
-          binary=target/release/gongwen-assistant
-          file "$binary"
-          readelf -h "$binary"
-          ldd "$binary"
-          ! ldd "$binary" | grep -F 'not found'
-
-          machine="$(
-            readelf -h "$binary" \
-              | awk -F: '/Machine:/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2 }'
-          )"
-          echo "ELF machine: [$machine]"
-          case "$machine" in
-            *X86-64*) ;;
-            *) echo "Expected X86-64, got: $machine" >&2; exit 1 ;;
-          esac
-
-          max_glibc="$(
-            readelf --version-info "$binary" \
-              | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
-              | sort -Vu \
-              | tail -1 \
-              || true
-          )"
-          echo "Maximum required GLIBC version: $max_glibc"
-          test -n "$max_glibc"
-          dpkg --compare-versions "${max_glibc#GLIBC_}" le "2.28"
-
-      - name: Download runtime assets for smoke test
-        run: |
-          set -euo pipefail
-          asset=runtime-linux-amd64.zip
-          curl --fail --location --retry 3 \
-            "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
-            --output "/tmp/${asset}"
-          unzip -qo "/tmp/${asset}" -d runtime || {
-            status=$?
-            test "$status" -eq 1
-          }
-          test -f runtime/tectonic/linux-amd64/tectonic
-          test -f runtime/texbundle/gongwen-texlive.ttb
-          test -f runtime/fonts/FangSong.ttf
-          # 研究报告的字体：拿到旧 runtime 时在这里就失败，而不是等用户
-          # 点了导出才报 "字体不存在"。
-          test -f runtime/fonts/FZShuSong.ttf
-          test -f runtime/SHA256SUMS.linux-amd64.txt
-          # 输入法数据：清单里漏了这两项，装完就会静默退回系统输入法。
-          test -f runtime/ime/dict.qj
-          test -f runtime/ime/lm.qj
-          # zip 不保存 Unix 权限位，解压出来的二进制没有执行位。两份都补上：
-          # 装一份就绪的 tectonic/tectonic，同时让按平台分目录的原始文件也可执行。
-          chmod +x runtime/tectonic/linux-amd64/tectonic
-          install -m 755 \
-            runtime/tectonic/linux-amd64/tectonic \
-            runtime/tectonic/tectonic
-
-      - name: Smoke test packaged runtime（TeX 与输入法数据）
-        run: |
-          set -euo pipefail
-          export GONGWEN_RUNTIME_DIR="$GITHUB_WORKSPACE/runtime"
-          cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
-          # 输入法数据：真的装配一次引擎并查一个词，不只是看文件在不在。
-          cargo test --locked --release --bin gongwen-assistant "$IME_SMOKE_TEST" -- --ignored
-
-      - name: Upload GLIBC 2.28 binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-amd64-glibc228-binary
-          path: |
-            target/release/gongwen-assistant
-            target/release/gongwen-assistant-portal
-          if-no-files-found: error
-
-  package-linux-amd64:
-    name: Package Linux AMD64
-    needs: build-linux-amd64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download GLIBC 2.28 binary
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-amd64-glibc228-binary
-          path: target/release
-
-      - name: Make binary executable
-        shell: bash
-        run: chmod +x target/release/gongwen-assistant
-
-      - name: Download runtime assets
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          New-Item -ItemType Directory -Force -Path runtime | Out-Null
-          $asset = "runtime-linux-amd64.zip"
-          gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
-          Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
-          Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
-
-      - name: Prepare full staging directory
-        shell: pwsh
-        run: |
-          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-amd64-full"
-          ./scripts/package-portable.ps1 -Suffix linux-amd64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
-
-      - name: Package Debian package
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          staging="$GITHUB_WORKSPACE/dist/linux-amd64-full"
-          bash ./scripts/package-deb.sh "$version" "$staging" "$GITHUB_WORKSPACE" amd64
-          asset="gongwen-assistant_${version}_amd64.deb"
-          sha256sum "$asset" | awk '{ printf "%s  %s\n", $1, $2 }' > "${asset}.sha256"
-
-      - name: Prepare Omarchy portable directory
-        shell: pwsh
-        run: |
-          Copy-Item -LiteralPath target/release/gongwen-assistant-portal -Destination target/release/gongwen-assistant -Force
-          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/linux-amd64-omarchy"
-          ./scripts/package-portable.ps1 -Suffix linux-amd64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
-
-      - name: Package Omarchy archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          staging="$GITHUB_WORKSPACE/dist/linux-amd64-omarchy"
-          bash ./scripts/package-linux-tar.sh "$version" "$staging" "$GITHUB_WORKSPACE" amd64
-
-      - name: Upload Linux release assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-linux-amd64
-          path: |
-            gongwen-assistant_*_amd64.deb*
-            gongwen-assistant-*-linux-amd64-omarchy.tar.gz*
-          if-no-files-found: error
-
-  # 在干净的目标发行版里真装一次 deb：包名写错（如 libgdk-pixbuf-2.0-0 在
-  # Ubuntu 20.04 / 麒麟 V10 上叫 libgdk-pixbuf2.0-0）会在这里失败，而不是等
-  # 用户在离线机器上 dpkg -i 才发现。buster 是 glibc 2.28 构建基线，20.04 是
-  # 麒麟 V10 的底子，24.04 覆盖 t64 改名之后的新系统。
+  # 在干净的 Ubuntu 20.04（麒麟 V10 的底子，也是发布包的目标系统）里真装一次
+  # deb：包名写错（如 libgdk-pixbuf-2.0-0 在 20.04 上叫 libgdk-pixbuf2.0-0）
+  # 会在这里失败，而不是等用户在离线机器上 dpkg -i 才发现。
   verify-deb:
-    name: Verify deb install / ${{ matrix.arch }} / ${{ matrix.image }}
-    needs: [package-linux-arm64, package-linux-amd64]
-    runs-on: ${{ matrix.runner }}
+    name: Verify deb install / arm64 / ubuntu:20.04
+    needs: package-linux-arm64
+    runs-on: ubuntu-24.04-arm
     container:
-      image: ${{ matrix.image }}
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64, amd64]
-        image: ['debian:buster', 'ubuntu:20.04', 'ubuntu:24.04']
-        include:
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-          - arch: amd64
-            runner: ubuntu-latest
+      image: ubuntu:20.04
     defaults:
       run:
         shell: bash
@@ -540,13 +301,13 @@ jobs:
       - name: Download Linux release assets
         uses: actions/download-artifact@v4
         with:
-          name: release-linux-${{ matrix.arch }}
+          name: release-linux-arm64
           path: dist
 
       - name: Install deb and check shared libraries
         run: |
           set -euo pipefail
-          bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_${{ matrix.arch }}.deb
+          bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_arm64.deb
 
       # 装得上不等于打得开：dlopen 的库、GL 上下文、首帧 panic 只有真起窗口
       # 才暴露。见 scripts/smoke-launch-linux.sh。
@@ -563,70 +324,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: launch-smoke-${{ matrix.arch }}-${{ strategy.job-index }}
+          name: launch-smoke-arm64-ubuntu2004
           path: launch-smoke
           if-no-files-found: ignore
           retention-days: 14
 
-  build-macos:
-    name: Build macOS ARM64
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-
-      - name: Build release binary
-        run: cargo build --release --locked
-
-      - name: Download runtime assets
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          New-Item -ItemType Directory -Force -Path runtime | Out-Null
-          $asset = "runtime-darwin-arm64.zip"
-          gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
-          Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
-          Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
-
-      - name: Prepare full staging directory
-        shell: pwsh
-        run: |
-          $staging = Join-Path $env:GITHUB_WORKSPACE "dist/macos-arm64-full"
-          ./scripts/package-portable.ps1 -Suffix darwin-arm64 -BinaryName gongwen-assistant -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
-
-      - name: Smoke test packaged runtime（TeX 与输入法数据）
-        shell: pwsh
-        run: |
-          $env:GONGWEN_RUNTIME_DIR = Join-Path $env:GITHUB_WORKSPACE "dist/macos-arm64-full/runtime"
-          cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
-          # 输入法数据：真的装配一次引擎并查一个词，不只是看文件在不在。
-          cargo test --locked --release --bin gongwen-assistant "$env:IME_SMOKE_TEST" -- --ignored
-
-      - name: Package macOS DMG
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          staging="$GITHUB_WORKSPACE/dist/macos-arm64-full"
-          bash ./scripts/package-dmg.sh "$version" "$staging" "$GITHUB_WORKSPACE"
-
-      - name: Upload macOS release assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-macos-arm64
-          path: |
-            gongwen-assistant-*-macos-arm64.dmg*
-          if-no-files-found: error
-
   release:
     name: Publish GitHub release
-    needs: [build-windows, package-linux-arm64, package-linux-amd64, verify-deb, build-macos]
+    needs: [build-windows, package-linux-arm64, verify-deb]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -636,25 +341,6 @@ jobs:
           pattern: release-*
           path: release-assets
           merge-multiple: true
-
-      - name: Generate Arch PKGBUILD
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          amd64="release-assets/gongwen-assistant-${version}-linux-amd64-omarchy.tar.gz"
-          arm64="release-assets/gongwen-assistant-${version}-linux-arm64-omarchy.tar.gz"
-          amd64_sha="$(sha256sum "$amd64" | cut -d ' ' -f 1)"
-          arm64_sha="$(sha256sum "$arm64" | cut -d ' ' -f 1)"
-          sed \
-            -e "s/@VERSION@/${version}/g" \
-            -e "s/@AMD64_SHA256@/${amd64_sha}/g" \
-            -e "s/@ARM64_SHA256@/${arm64_sha}/g" \
-            packaging/arch/PKGBUILD.template \
-            > release-assets/PKGBUILD
-          sha256sum release-assets/PKGBUILD \
-            | awk '{ printf "%s  PKGBUILD\n", $1 }' \
-            > release-assets/PKGBUILD.sha256
 
       - name: Create or update GitHub release
         env:

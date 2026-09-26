@@ -13,21 +13,18 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
 
 - 远程：`git@github.com:billowsand/gongwen.git`，发布分支 `main`。
 - 版本号只维护在 `Cargo.toml`（根包 `version`）+ `Cargo.lock`（根包 `gongwen-assistant` 的 `version`）。**注意 `Cargo.lock` 里另有若干同名版本的依赖**（`block2`、`type-map`、`windows-strings`、`zune-core` 等），只改 `name = "gongwen-assistant"` 那一条。
-- 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test 三平台）；`release.yml` 在 push `v*` tag 时触发，共 7 个 job。
+- 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test：Windows x64 + Linux ARM64 两平台）；`release.yml` 在 push `v*` tag 时触发，共 5 个 job（build-windows、build-linux-arm64、package-linux-arm64、verify-deb、release）。
 - **版本更新说明由工作流取仓库文件**：`release.yml` 的 `release` job 读 `docs/release-notes/${GITHUB_REF_NAME}.md`，有则 `gh release create --title "公文助手 vX.Y.Z" --notes-file <该文件>`；**缺文件才回退 `--generate-notes` 并打一条 `::warning::`**。所以说明必须在打 tag 前提交进仓库，不是发完再补。
 - **用户文档有三份，发版时都可能过期**（发版前必查，见步骤 3）：
   - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 23 种格式、校对词表 155 条、文档级规则 25 条、约 9.4 万行 Rust、1000+ 测试——每版都要重新数，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
   - 使用帮助：应用内嵌正文 `assets/help/*.md`（`include_str!` 打进二进制）＋ 手工副本 `docs/help/*.md`；章节元数据在 `src/help/content.rs` 的 `CHAPTERS`（24 条 = 正文 21 章 + 附录 3 篇）。**改章节要三处同步**，`docs/help/diagrams/` 是可编辑图源，只在 docs 侧。
   - `docs/install.md`（安装指南）与 `docs/manual.md`（手册目录页，分部表格列出全部章号章名）。
-- **Release 资产是 14 个**（`v0.5.1` 起实测口径，不是 8 个）：
+- **Release 资产是 4 个**（v0.6.6 之后的口径；macOS、Linux AMD64、Arch/Omarchy 与 PKGBUILD 不再发布）：
   - `gongwen-assistant-X.Y.Z-win-x64-setup.exe` + `.sha256`
-  - `gongwen-assistant_X.Y.Z_arm64.deb` + `.sha256`、`gongwen-assistant_X.Y.Z_amd64.deb` + `.sha256`
-  - `gongwen-assistant-X.Y.Z-macos-arm64.dmg` + `.sha256`
-  - `gongwen-assistant-X.Y.Z-linux-{arm64,amd64}-omarchy.tar.gz` + 各自 `.sha256`（Arch/Omarchy 便携包）
-  - `PKGBUILD` + `PKGBUILD.sha256`（由 `packaging/arch/PKGBUILD.template` 现场生成）
+  - `gongwen-assistant_X.Y.Z_arm64.deb` + `.sha256`（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）
 - 本机无 `pwsh`：不能跑 `scripts/bump-version.ps1`，版本号用手动编辑。
 - 历史惯例：tag 为 **annotated tag**（消息为中文概述）；release 标题为「公文助手 vX.Y.Z」；版本号按 **patch** 递增（`v0.5.x` 系列）；发布前有一个 `chore: release vX.Y.Z` 提交（可同时带上说明文件）。
-- Release workflow 全程约 20–30 分钟（三平台构建 + 打包），`gh run watch` 一轮就能等完。
+- Release workflow 全程约 20–30 分钟（Windows + Linux ARM64 构建 + 打包），`gh run watch` 一轮就能等完。
 
 ## 工作流
 
@@ -103,7 +100,7 @@ git commit -m "docs: 同步 README 与使用帮助至 vX.Y.Z"
 
 ### 4. 本地质量门禁（关键，勿跳过）
 
-CI 有三道门，历史上因未跑 `cargo fmt` 导致发布返工，也出现过**测试在 CI 的 macOS / Linux 上失败而本地 Windows 通过**（环境假设类断言）。**发布前必须跑**：
+CI 有三道门，历史上因未跑 `cargo fmt` 导致发布返工，也出现过**测试在 CI 的 Linux 上失败而本地 Windows 通过**（环境假设类断言）。**发布前必须跑**：
 
 ```bash
 cargo fmt --all -- --check                                    # 必须无输出（exit 0）
@@ -115,7 +112,7 @@ cargo test --locked --all-targets --no-fail-fast               # 看失败名单
 - 测试失败要**分清是环境抖动还是真失败**：
   - 已知沙箱抖动：`highlight::tests::swapping_light_and_dark_relayouts_against_the_rebuilt_font_atlas`（字体图集重建，首跑偶发失败、重跑即过），以及 AGENTS.md 记录的约 5 个沙箱相关失败。**不要为环境相关失败改测试。**
   - 若断言依赖「本机装了什么」（字体、代理、路径），要问的是「CI 上成不成立」，多为 CI 独有失败，按下面处理。
-- 三平台差异的排查入口：
+- 平台差异的排查入口：
 
 ```bash
 gh run view <run-id> --log-failed | awk -F'\t' '{print $3}' | grep -E "panicked|test result:|##\[error\]"
@@ -157,9 +154,9 @@ gh run watch <run-id> --interval 60 --exit-status   # 可后台运行，两路�
 gh run view <run-id> --json status,conclusion,jobs --jq '"\(.status)/\(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
 ```
 
-- 期望终态：CI 三平台 job 全 success；Release 的 7 个 job（Build Windows x64 / Build Linux ARM64 / Package Linux ARM64 / Build Linux AMD64 / Package Linux AMD64 / Build macOS ARM64 / Publish GitHub release）全 success。
+- 期望终态：CI 全部 job success；Release 的 5 个 job（Build Windows x64 / Build Linux ARM64 / Package Linux ARM64 / Verify deb install / Publish GitHub release）全 success。
 - `gh run view --json jobs` 里 `Build …` 的 job 名带平台后缀（如 `Build Linux ARM64 / GLIBC 2.28`），按包含关键字筛选：
-  `gh run view <id> --json jobs --jq '.jobs[] | select(.name | test("macOS")) | .databaseId'`。
+  `gh run view <id> --json jobs --jq '.jobs[] | select(.name | test("ARM64")) | .databaseId'`。
 - **CI 失败时**：先 `gh run cancel` 取消所有本次相关 run（CI + Release，避免浪费与旧 release 干扰）→ 本地修复（多数是 fmt 或环境假设类断言）→ 提交 → 移动 tag（步骤 6 的做法）→ 重新 `git push origin main` + `git push origin vX.Y.Z`。
 
 ### 8. 校验版本更新说明是否被工作流取用（必须，勿跳过）
@@ -192,17 +189,17 @@ gh run view <release-run-id> --json status,conclusion
 gh api repos/billowsand/gongwen/releases/tags/vX.Y.Z \
   --jq '{name, tag_name, draft, prerelease, html_url}'
 gh release list --limit 3                                            # 本版应为 Latest
-gh release view vX.Y.Z --json assets --jq '.assets[] | .name'         # 应为 14 个资产
+gh release view vX.Y.Z --json assets --jq '.assets[] | .name'         # 应为 4 个资产
 git rev-parse vX.Y.Z^{commit}; git rev-parse HEAD                     # 两者相等
 git status -sb                                                       # 与 origin/main 同步、工作区干净
 ```
 
-- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明（与仓库文件一致）、**14 个资产齐全**且各安装包都有对应 `.sha256`。
-- 抽查一个校验和文件真的对得上（资产从同一轮 run 上传，抽查即可，不必下载 100MB 的安装包）：
+- release 必须：`draft=false`、`prerelease=false`、标题「公文助手 vX.Y.Z」、正文为手写说明（与仓库文件一致）、**4 个资产齐全**且各安装包都有对应 `.sha256`。
+- 抽查一个校验和文件真的对得上（资产从同一轮 run 上传，抽查 deb 一个即可）：
 
 ```bash
-cd /tmp && mkdir -p kw && cd kw && gh release download vX.Y.Z --pattern 'PKGBUILD*' --dir . --clobber
-cat PKGBUILD.sha256 && sha256sum PKGBUILD     # 两个哈希必须一致
+cd /tmp && mkdir -p kw && cd kw && gh release download vX.Y.Z --pattern '*_arm64.deb*' --dir . --clobber
+sha256sum -c gongwen-assistant_X.Y.Z_arm64.deb.sha256     # 必须 OK
 cd - && rm -rf /tmp/kw
 ```
 
@@ -234,16 +231,13 @@ cd - && rm -rf /tmp/kw
 
 ### 质量检查
 
-- 三平台 CI 门禁（格式、clippy、<N> 余项自动化测试）全部通过。
+- 两平台 CI 门禁（格式、clippy、<N> 余项自动化测试）全部通过。
 - <本版新增的关键测试与它为什么这么断>
 
 ### 下载
 
 - Windows x64 安装程序
-- Linux ARM64 Debian 软件包（兼容 GLIBC 2.28）
-- Linux AMD64 Debian 软件包（兼容 GLIBC 2.28）
-- macOS ARM64 DMG
-- Linux ARM64 / AMD64 Omarchy 便携包与 PKGBUILD
+- Linux ARM64 Debian 软件包（兼容 GLIBC 2.28 / Ubuntu 20.04）
 
 各安装包均附带 SHA-256 校验文件。
 ```
@@ -253,11 +247,11 @@ cd - && rm -rf /tmp/kw
 | 故障 | 处理 |
 | --- | --- |
 | CI `Check formatting` 失败 | `cargo fmt --all` 修复 → 独立提交 → 移动 tag 重新发布（步骤 4/6/7） |
-| CI 在 macOS / Linux 上测试失败、Windows 通过 | 多为「本机装了什么」的环境假设（如字体、系统路径）。用 `--log-failed` 取 `panicked` 那一行确认，把断言收窄到条件成立时才断（而不是删断言或改产品行为），修好随本版提交 |
+| CI 在 Linux 上测试失败、Windows 通过 | 多为「本机装了什么」的环境假设（如字体、系统路径）。用 `--log-failed` 取 `panicked` 那一行确认，把断言收窄到条件成立时才断（而不是删断言或改产品行为），修好随本版提交 |
 | main 上 CI 本来就是红的 | 先修红再发：本版 bump 提交会再触发一次 CI，红着发出去的版本「CI 全绿」这句话就不成立 |
 | Release run 需重启 | `gh run cancel` 旧 run → 重新 push tag（若 tag 未变，删 tag 重推比 `gh workflow run release.yml` 省事） |
 | 发布后又加了提交 | tag 移到新提交：`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z && git tag -a vX.Y.Z -m "..." <new-commit> && git push origin vX.Y.Z` |
 | release 正文是 generate-notes 占位 | 缺 `docs/release-notes/vX.Y.Z.md`。先记下文件内容，`gh release edit vX.Y.Z --title "公文助手 vX.Y.Z" --notes-file …` 补正；同时把文件补提交，下次同 tag 重跑就不会再回退 |
 | release 标题/正文不对 | `gh release edit vX.Y.Z --title "..." --notes-file ...`（幂等，可重复执行） |
-| 发版后才发现 README / 使用帮助没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是三平台构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
-| 资产数不是 14 | `gh release view vX.Y.Z --json assets --jq '.assets[].name'` 对比上面清单；少 `PKGBUILD*` 看 release job 的「Generate Arch PKGBUILD」步骤，少平台包看对应 build/package job 的日志 |
+| 发版后才发现 README / 使用帮助没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是两平台构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
+| 资产数不是 4 | `gh release view vX.Y.Z --json assets --jq '.assets[].name'` 对比上面清单；少平台包看对应 build/package job 的日志 |

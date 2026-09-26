@@ -14,29 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  macos:
-    name: fmt / clippy / test (macOS ARM64)
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --locked --all-targets
-
   windows:
     name: fmt / clippy / test (Windows x64)
     runs-on: windows-latest
@@ -125,26 +102,14 @@ jobs:
       - name: Test
         run: cargo test --locked --all-targets
 
-      # The release publishes a second Linux binary without the GTK3 dialog
-      # backend. Keep that feature combination compiled on a real Linux host.
-      - name: Check Omarchy portal build
-        run: cargo check --locked --no-default-features --features linux-portal-dialogs
-
   # 按发布方式（Debian buster / GLIBC 2.28 容器 + release profile）构建 Linux
-  # 二进制，交给下面的 ubuntu-2004-launch 在干净的 Ubuntu 20.04 里装包并真正启动。
+  # ARM64 二进制（发布只出这一个 Linux 架构），交给下面的 ubuntu-2004-launch
+  # 在干净的 Ubuntu 20.04 里装包并真正启动。
   linux-glibc228-release:
-    name: Build release binary (Linux ${{ matrix.arch }} / GLIBC 2.28)
-    runs-on: ${{ matrix.runner }}
+    name: Build release binary (Linux ARM64 / GLIBC 2.28)
+    runs-on: ubuntu-24.04-arm
     container:
       image: debian:buster
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
     defaults:
       run:
         shell: bash
@@ -190,7 +155,7 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: ci-linux-${{ matrix.arch }}-binary
+          name: ci-linux-arm64-binary
           path: target/release/gongwen-assistant
           if-no-files-found: error
           retention-days: 3
@@ -201,19 +166,11 @@ jobs:
   # dlopen 的库缺失、GL 上下文建不起来、首帧 panic 这类"一打开就闪退"的问题，
   # ldd 看不出来，只有真起窗口才会暴露。
   ubuntu-2004-launch:
-    name: Launch smoke test (Ubuntu 20.04 / ${{ matrix.arch }})
+    name: Launch smoke test (Ubuntu 20.04 / ARM64)
     needs: linux-glibc228-release
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04-arm
     container:
       image: ubuntu:20.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
     env:
       # 与 release.yml 的 RUNTIME_RELEASE_TAG 保持一致。
       RUNTIME_RELEASE_TAG: v0.6.0
@@ -234,7 +191,7 @@ jobs:
       - name: Download binary
         uses: actions/download-artifact@v4
         with:
-          name: ci-linux-${{ matrix.arch }}-binary
+          name: ci-linux-arm64-binary
           path: dist/staging
 
       - name: Assemble staging directory with runtime
@@ -242,7 +199,7 @@ jobs:
           set -euo pipefail
           staging=dist/staging
           chmod 755 "$staging/gongwen-assistant"
-          asset="runtime-linux-${{ matrix.arch }}.zip"
+          asset="runtime-linux-arm64.zip"
           curl --fail --location --retry 3 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
@@ -253,20 +210,20 @@ jobs:
           # 与 package-portable.ps1 的布局一致：平台子目录里的 tectonic 放到
           # runtime/tectonic/tectonic；zip 不保存执行位，这里补上。
           install -m 755 \
-            "$staging/runtime/tectonic/linux-${{ matrix.arch }}/tectonic" \
+            "$staging/runtime/tectonic/linux-arm64/tectonic" \
             "$staging/runtime/tectonic/tectonic"
-          rm -rf "$staging/runtime/tectonic/linux-${{ matrix.arch }}"
+          rm -rf "$staging/runtime/tectonic/linux-arm64"
           cp README.md LICENSE THIRD_PARTY_NOTICES.md "$staging/"
 
       - name: Package deb
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          bash ./scripts/package-deb.sh "$version" dist/staging dist ${{ matrix.arch }}
+          bash ./scripts/package-deb.sh "$version" dist/staging dist arm64
 
       # 先只装 deb 的 Depends，确认依赖声明本身够用；再装 Xvfb 等测试工具。
       - name: Install deb and check shared libraries
-        run: bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_${{ matrix.arch }}.deb
+        run: bash ./scripts/verify-deb-install.sh dist/gongwen-assistant_*_arm64.deb
 
       - name: Install virtual display
         run: |
@@ -281,7 +238,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: launch-smoke-ubuntu2004-${{ matrix.arch }}
+          name: launch-smoke-ubuntu2004-arm64
           path: launch-smoke
           if-no-files-found: ignore
           retention-days: 14

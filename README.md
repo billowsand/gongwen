@@ -222,7 +222,7 @@ AI 能力放在确定性能力之后，因为它的设计前提是「先管住�
 | 导出 | Markdown、DOCX（Word）、TeX、PDF（内置 Tectonic，兼容本机 XeLaTeX）、花脸稿、稿件 ZIP |
 | 校对 | 内置 155 条校对词表（错别字 / 近义混淆 / 语病 / 套话虚词 / 称谓规范 / 公文用语六组，必错一键替换）+ 15 条文档级规则（文号 / 日期 / 标题 / 附件 / 称谓 / 句末 / 行文语体） |
 | 导入 | 23 种格式文件新建文档（Word / Excel / PPT / ODF / RTF / EPUB / CSV…），词库与校对词表支持 Excel 导入导出 |
-| 平台 | Windows x64 安装程序、macOS Apple Silicon DMG、Linux ARM64/AMD64 deb（含麒麟等国产系统打印兼容）、Arch/Omarchy 运行包与 PKGBUILD（均附 SHA-256） |
+| 平台 | Windows x64 安装程序、Linux ARM64 deb（GLIBC 2.28，兼容 Ubuntu 20.04 / 麒麟 V10，含国产系统打印兼容）（均附 SHA-256） |
 
 ## 快速开始
 
@@ -262,7 +262,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-GitHub Actions：CI 在 Windows / Linux / macOS 三平台执行格式、静态检查和测试；推送 `v*` 标签后自动构建各平台安装包与 SHA-256 校验和并创建 Release。
+GitHub Actions：CI 在 Windows x64 与 Linux ARM64（GLIBC 2.28）两个平台执行格式、静态检查和测试；推送 `v*` 标签后自动构建 Windows x64 安装程序与 Linux ARM64 deb（兼容 Ubuntu 20.04）及 SHA-256 校验和并创建 Release。
 
 ## 许可
 
