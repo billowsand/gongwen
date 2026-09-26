@@ -125,7 +125,7 @@ impl ZipPasswordDialog {
     }
 }
 
-/// 导入 ZIP 的预览状态：清单、勾选、关键词过滤与是否跳过同源记录。
+/// 导入 ZIP 的预览状态：清单、逐篇身份判定、动作与过滤条件。
 pub(crate) struct ImportPreview {
     manifest: manuscript_io::Manifest,
     zip_path: PathBuf,
@@ -133,6 +133,7 @@ pub(crate) struct ImportPreview {
     keyword: String,
     relations: Vec<manuscript_io::sync::RecordPreview>,
     actions: Vec<manuscript_io::sync::ImportAction>,
+    reviews: Vec<Option<MergeReview>>,
     manifest_hash: String,
     focused: Option<usize>,
     /// 包内随附的标准词库；旧包无此条目时为 None。
@@ -149,6 +150,14 @@ pub(crate) struct PendingMergeDialog {
     choices: Vec<bool>,
     markdown_override: Option<String>,
     take_status: bool,
+    review: Option<MergeReview>,
+}
+
+struct MergeReview {
+    hash: String,
+    parsed_blocks: usize,
+    warnings: Vec<String>,
+    notes: Vec<String>,
 }
 
 fn import_action_label(action: &manuscript_io::sync::ImportAction) -> &'static str {
@@ -164,7 +173,12 @@ fn import_action_label(action: &manuscript_io::sync::ImportAction) -> &'static s
     }
 }
 
-fn import_preview_details(ui: &mut egui::Ui, preview: &mut ImportPreview, index: usize) {
+fn import_preview_details(
+    ui: &mut egui::Ui,
+    preview: &mut ImportPreview,
+    index: usize,
+    config: &crate::models::AppConfig,
+) {
     use manuscript_io::sync::{ImportAction, Relationship};
     let record = &preview.manifest.records[index];
     let relation = &preview.relations[index];
@@ -192,6 +206,26 @@ fn import_preview_details(ui: &mut egui::Ui, preview: &mut ImportPreview, index:
             &base.revision_uuid[..8]
         ));
     }
+    if let Some(local) = &relation.local_markdown {
+        ui.collapsing("本机正文全文", |ui| {
+            let mut text = local.clone();
+            ui.add(
+                egui::TextEdit::multiline(&mut text)
+                    .interactive(false)
+                    .desired_rows(10)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+    }
+    ui.collapsing("导入正文全文", |ui| {
+        let mut text = record.content_markdown.clone();
+        ui.add(
+            egui::TextEdit::multiline(&mut text)
+                .interactive(false)
+                .desired_rows(10)
+                .desired_width(f32::INFINITY),
+        );
+    });
     ui.horizontal_wrapped(|ui| {
         if ui.button("跳过").clicked() {
             preview.actions[index] = ImportAction::Skip;
@@ -312,7 +346,7 @@ fn import_preview_details(ui: &mut egui::Ui, preview: &mut ImportPreview, index:
                 choice_index += 1;
             }
         }
-        if let Ok((_, merged, _)) = proposal.resolve(choices) {
+        if let Ok((snapshot, merged, _)) = proposal.resolve(choices) {
             ui.strong("合并后正文");
             if let Some(edited) = markdown_override {
                 ui.add(
@@ -321,7 +355,7 @@ fn import_preview_details(ui: &mut egui::Ui, preview: &mut ImportPreview, index:
                         .desired_width(f32::INFINITY),
                 );
                 if ui.button("重置为逐项选择的结果").clicked() {
-                    *edited = merged;
+                    *edited = merged.clone();
                 }
             } else {
                 let mut display = merged.clone();
@@ -332,11 +366,66 @@ fn import_preview_details(ui: &mut egui::Ui, preview: &mut ImportPreview, index:
                         .desired_width(f32::INFINITY),
                 );
                 if ui.button("手工调整正文").clicked() {
-                    *markdown_override = Some(merged);
+                    *markdown_override = Some(merged.clone());
                 }
+            }
+            let candidate = markdown_override.as_deref().unwrap_or(&merged);
+            let hash =
+                crate::manuscript::sync::payload_hash(&snapshot, candidate, "").unwrap_or_default();
+            if preview.reviews[index]
+                .as_ref()
+                .is_none_or(|review| review.hash != hash)
+            {
+                preview.reviews[index] = build_merge_review(config, &snapshot, candidate).ok();
+            }
+            if let Some(review) = &preview.reviews[index] {
+                merge_review_ui(ui, review);
             }
         }
     }
+}
+
+fn build_merge_review(
+    config: &crate::models::AppConfig,
+    snapshot: &crate::models::DraftInput,
+    markdown: &str,
+) -> anyhow::Result<MergeReview> {
+    let hash = crate::manuscript::sync::payload_hash(snapshot, markdown, "")?;
+    let parsed_blocks = crate::export::parse_markdown(markdown).len();
+    let warnings = crate::validator::validate(
+        snapshot,
+        markdown,
+        &config.vocabulary,
+        &config.security_rules,
+    );
+    let mut notes = crate::proofread_rules::check(snapshot, markdown);
+    notes.extend(crate::proofread::Lexicon::resolved(&config.proofread).check(markdown));
+    Ok(MergeReview {
+        hash,
+        parsed_blocks,
+        warnings,
+        notes: notes
+            .into_iter()
+            .map(|note| format!("{}：{}", note.level.label(), note.message))
+            .collect(),
+    })
+}
+
+fn merge_review_ui(ui: &mut egui::Ui, review: &MergeReview) {
+    ui.label(format!(
+        "合并候选已解析并复核：{} 个区块，{} 条要素提示，{} 条文字提示。",
+        review.parsed_blocks,
+        review.warnings.len(),
+        review.notes.len()
+    ));
+    ui.collapsing("查看复核详情", |ui| {
+        for warning in &review.warnings {
+            ui.colored_label(warn(), warning);
+        }
+        for note in &review.notes {
+            ui.colored_label(warn(), note);
+        }
+    });
 }
 
 impl GongwenApp {
@@ -1044,7 +1133,7 @@ impl GongwenApp {
                             }
                         });
                     if let Some(index) = preview.focused {
-                        import_preview_details(ui, preview, index);
+                        import_preview_details(ui, preview, index, &self.config);
                     }
                     ui.horizontal(|ui| {
                         if ui.button("确认所选处理").clicked() {
@@ -1134,7 +1223,7 @@ impl GongwenApp {
                             index += 1;
                         }
                     }
-                    if let Ok((_, merged, _)) = proposal.resolve(&dialog.choices) {
+                    if let Ok((snapshot, merged, _)) = proposal.resolve(&dialog.choices) {
                         ui.strong("合并后正文");
                         if let Some(edited) = &mut dialog.markdown_override {
                             ui.add(
@@ -1143,7 +1232,7 @@ impl GongwenApp {
                                     .desired_width(f32::INFINITY),
                             );
                             if ui.button("重置为逐项选择的结果").clicked() {
-                                *edited = merged;
+                                *edited = merged.clone();
                             }
                         } else {
                             let mut display = merged.clone();
@@ -1154,8 +1243,22 @@ impl GongwenApp {
                                     .desired_width(f32::INFINITY),
                             );
                             if ui.button("手工调整正文").clicked() {
-                                dialog.markdown_override = Some(merged);
+                                dialog.markdown_override = Some(merged.clone());
                             }
+                        }
+                        let candidate = dialog.markdown_override.as_deref().unwrap_or(&merged);
+                        let hash = crate::manuscript::sync::payload_hash(&snapshot, candidate, "")
+                            .unwrap_or_default();
+                        if dialog
+                            .review
+                            .as_ref()
+                            .is_none_or(|review| review.hash != hash)
+                        {
+                            dialog.review =
+                                build_merge_review(&self.config, &snapshot, candidate).ok();
+                        }
+                        if let Some(review) = &dialog.review {
+                            merge_review_ui(ui, review);
                         }
                     }
                     ui.horizontal(|ui| {
@@ -2656,6 +2759,7 @@ impl GongwenApp {
             let manifest_hash =
                 crate::manuscript::sync::bytes_hash(&serde_json::to_vec(&manifest)?);
             let selected = vec![true; manifest.records.len()];
+            let reviews = (0..selected.len()).map(|_| None).collect();
             Ok(ImportPreview {
                 manifest,
                 zip_path: path,
@@ -2663,6 +2767,7 @@ impl GongwenApp {
                 keyword: String::new(),
                 relations,
                 actions,
+                reviews,
                 manifest_hash,
                 focused: None,
                 vocabulary,
@@ -2685,7 +2790,7 @@ impl GongwenApp {
 
     pub(crate) fn confirm_import(&mut self) {
         use manuscript_io::sync::ImportAction;
-        let Some(preview) = self.manuscript_import_preview.take() else {
+        let Some(mut preview) = self.manuscript_import_preview.take() else {
             return;
         };
         let actions = preview
@@ -2700,6 +2805,34 @@ impl GongwenApp {
                 }
             })
             .collect::<Vec<_>>();
+        let unreviewed = actions.iter().enumerate().find_map(|(index, action)| {
+            let ImportAction::Merge {
+                choices,
+                markdown_override,
+                ..
+            } = action
+            else {
+                return None;
+            };
+            let proposal = preview.relations[index].proposal.as_ref()?;
+            let (snapshot, merged, _) = proposal.resolve(choices).ok()?;
+            let candidate = markdown_override.as_deref().unwrap_or(&merged);
+            let hash = crate::manuscript::sync::payload_hash(&snapshot, candidate, "").ok()?;
+            if preview.reviews[index]
+                .as_ref()
+                .is_some_and(|review| review.hash == hash)
+            {
+                None
+            } else {
+                Some(index)
+            }
+        });
+        if let Some(index) = unreviewed {
+            preview.focused = Some(index);
+            self.manuscript_import_preview = Some(preview);
+            self.status = "请先逐篇查看合并候选和规则复核结果，再确认导入。".into();
+            return;
+        }
         for (action, relation) in actions.iter().zip(&preview.relations) {
             if matches!(
                 action,
@@ -2726,6 +2859,7 @@ impl GongwenApp {
                 &preview.password,
                 &preview.manifest_hash,
                 &actions,
+                &preview.relations,
             )
         })();
         match result {
@@ -2792,6 +2926,7 @@ impl GongwenApp {
                     choices,
                     markdown_override: None,
                     take_status: false,
+                    review: None,
                 });
                 self.status = "已打开待处理分支的合并预览。".into();
             }
@@ -2803,6 +2938,26 @@ impl GongwenApp {
         let Some(dialog) = self.pending_merge.take() else {
             return;
         };
+        let reviewed = dialog
+            .preview
+            .proposal
+            .resolve(&dialog.choices)
+            .ok()
+            .and_then(|(snapshot, merged, _)| {
+                let candidate = dialog.markdown_override.as_deref().unwrap_or(&merged);
+                crate::manuscript::sync::payload_hash(&snapshot, candidate, "").ok()
+            })
+            .is_some_and(|hash| {
+                dialog
+                    .review
+                    .as_ref()
+                    .is_some_and(|review| review.hash == hash)
+            });
+        if !reviewed {
+            self.pending_merge = Some(dialog);
+            self.status = "合并候选已变化，请先查看最新复核结果。".into();
+            return;
+        }
         let id = dialog.manuscript_id;
         if self
             .docs
@@ -2821,7 +2976,7 @@ impl GongwenApp {
                 manuscript_io::sync::merge_pending(
                     store,
                     id,
-                    &dialog.preview.head,
+                    &dialog.preview,
                     &dialog.choices,
                     dialog.markdown_override.as_deref(),
                     dialog.take_status,

@@ -41,12 +41,14 @@ impl Relationship {
 pub struct RecordPreview {
     pub relationship: Relationship,
     pub local_id: Option<i64>,
+    pub local_head: Option<String>,
     pub local_status: Option<crate::models::ManuscriptStatus>,
     pub attachments_changed: bool,
     pub candidates: Vec<i64>,
     pub base: Option<SyncRevision>,
     pub proposal: Option<MergeProposal>,
     pub local_hash: Option<String>,
+    pub local_markdown: Option<String>,
     pub incoming_hash: String,
 }
 
@@ -83,12 +85,14 @@ pub fn inspect_one(
                 Relationship::Legacy
             },
             local_id: existing,
+            local_head: None,
             local_status: None,
             attachments_changed: false,
             candidates,
             base: None,
             proposal: None,
             local_hash: None,
+            local_markdown: None,
             incoming_hash,
         });
     };
@@ -109,12 +113,14 @@ pub fn inspect_one(
         return Ok(RecordPreview {
             relationship: Relationship::New,
             local_id: None,
+            local_head: None,
             local_status: None,
             attachments_changed: false,
             candidates,
             base: None,
             proposal: None,
             local_hash: None,
+            local_markdown: None,
             incoming_hash,
         });
     };
@@ -137,9 +143,12 @@ pub fn inspect_one(
         .chain(record.revisions.iter().cloned())
     {
         if let Some(old) = graph.insert(revision.revision_uuid.clone(), revision.clone())
-            && old.payload_hash != revision.payload_hash
+            && (old.payload_hash != revision.payload_hash || old.parents != revision.parents)
         {
-            bail!("相同版本身份对应不同内容：{}", revision.revision_uuid);
+            bail!(
+                "相同版本身份对应不同内容或父版本：{}",
+                revision.revision_uuid
+            );
         }
     }
     let (_, local_head) = store.document_identity(local_id)?;
@@ -148,9 +157,7 @@ pub fn inspect_one(
         .as_ref()
         .and_then(|head| graph.get(head))
         .is_some_and(|revision| revision.payload_hash == local_hash);
-    let relationship = if local.status == crate::models::ManuscriptStatus::Archived
-        && (local_hash != incoming_hash || local.status != record.status)
-    {
+    let relationship = if local.status == crate::models::ManuscriptStatus::Archived {
         Relationship::Archived
     } else if local_hash == incoming_hash {
         if clean && local_head.as_deref() == Some(remote_head) {
@@ -200,12 +207,14 @@ pub fn inspect_one(
     Ok(RecordPreview {
         relationship,
         local_id: Some(local_id),
+        local_head,
         local_status: Some(local.status),
         attachments_changed,
         candidates,
         base,
         proposal,
         local_hash: Some(local_hash),
+        local_markdown: Some(local.content_markdown),
         incoming_hash,
     })
 }
@@ -246,6 +255,9 @@ fn common_bases(local: &str, incoming: &str, graph: &HashMap<String, SyncRevisio
 #[derive(Debug, Clone)]
 pub struct PendingPreview {
     pub head: String,
+    pub local_head: Option<String>,
+    pub local_hash: String,
+    pub local_status: crate::models::ManuscriptStatus,
     pub base: Option<SyncRevision>,
     pub incoming: SyncRevision,
     pub imported_status: Option<crate::models::ManuscriptStatus>,
@@ -293,13 +305,19 @@ pub fn inspect_pending(store: &mut ManuscriptStore, id: i64, head: &str) -> Resu
             ),
         )?
     };
-    let imported_status = store.pending_sync_status(id, head)?.and_then(|label| {
+    let imported_label = store
+        .pending_sync_status(id, head)?
+        .context("待处理分支已不存在，请重新打开稿件")?;
+    let imported_status = Some(imported_label).and_then(|label| {
         crate::models::ManuscriptStatus::ALL
             .into_iter()
             .find(|status| status.label() == label)
     });
     Ok(PendingPreview {
         head: head.to_string(),
+        local_head,
+        local_hash: payload_hash(&current.snapshot, &current.content_markdown, &current.notes)?,
+        local_status: current.status,
         base,
         incoming,
         imported_status,
@@ -310,13 +328,22 @@ pub fn inspect_pending(store: &mut ManuscriptStore, id: i64, head: &str) -> Resu
 pub fn merge_pending(
     store: &mut ManuscriptStore,
     id: i64,
-    head: &str,
+    expected: &PendingPreview,
     choices: &[bool],
     markdown_override: Option<&str>,
     take_status: bool,
 ) -> Result<()> {
     use crate::manuscript::ManuscriptUpdate;
+    let head = expected.head.as_str();
     let preview = inspect_pending(store, id, head)?;
+    if preview.local_head != expected.local_head
+        || preview.local_hash != expected.local_hash
+        || preview.local_status != expected.local_status
+        || preview.base.as_ref().map(|base| &base.revision_uuid)
+            != expected.base.as_ref().map(|base| &base.revision_uuid)
+    {
+        bail!("本机稿件自分支预览后发生变化，请重新打开合并预览");
+    }
     let current = store.get(id)?.context("稿件不存在")?;
     if current.status == crate::models::ManuscriptStatus::Archived {
         bail!("归档稿件不可合并");
@@ -460,15 +487,33 @@ pub fn import_with_actions(
     password: &str,
     expected_manifest_hash: &str,
     actions: &[ImportAction],
+    expected_previews: &[RecordPreview],
 ) -> Result<SyncImportSummary> {
     use super::{MAX_PDF_BYTES, read_manifest};
     use crate::manuscript::ManuscriptUpdate;
     let manifest = read_manifest(zip_path, password)?;
     let actual_hash = super::bytes_hash(&serde_json::to_vec(&manifest)?);
-    if actual_hash != expected_manifest_hash || actions.len() != manifest.records.len() {
+    if actual_hash != expected_manifest_hash
+        || actions.len() != manifest.records.len()
+        || expected_previews.len() != manifest.records.len()
+    {
         bail!("稿件包自预览后发生变化，请重新预览");
     }
     let before = inspect(store, &manifest)?;
+    for ((action, current), expected) in actions.iter().zip(&before).zip(expected_previews) {
+        if !matches!(action, ImportAction::Skip)
+            && (current.relationship != expected.relationship
+                || current.local_id != expected.local_id
+                || current.local_head != expected.local_head
+                || current.local_hash != expected.local_hash
+                || current.local_status != expected.local_status
+                || current.attachments_changed != expected.attachments_changed
+                || current.base.as_ref().map(|base| &base.revision_uuid)
+                    != expected.base.as_ref().map(|base| &base.revision_uuid))
+        {
+            bail!("本机稿件自预览后发生变化，请重新预览");
+        }
+    }
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
     let images = read_images(&mut archive, &manifest, password, actions)?;
@@ -630,6 +675,9 @@ pub fn import_with_actions(
                 }
                 ImportAction::Pending => {
                     let id = preview.local_id.context("没有可暂存分支的本机稿件")?;
+                    if preview.relationship == Relationship::Archived {
+                        bail!("已归档稿件不能暂存待合并内容，请另存副本");
+                    }
                     link_aliases(store, id, record)?;
                     store.insert_sync_revisions(id, &record.revisions)?;
                     store.save_pending_sync_head(
@@ -895,7 +943,128 @@ mod round_trip_tests {
     ) -> Result<SyncImportSummary> {
         let manifest = super::super::read_manifest(path, PASSWORD)?;
         let hash = super::super::bytes_hash(&serde_json::to_vec(&manifest)?);
-        import_with_actions(store, path, PASSWORD, &hash, &actions)
+        let previews = inspect(store, &manifest)?;
+        import_with_actions(store, path, PASSWORD, &hash, &actions, &previews)
+    }
+
+    #[test]
+    fn repeated_equivalent_import_does_not_grow_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let id_a = create(&mut a, "甲。", "等价稿");
+        let first = dir.path().join("first.zip");
+        export(&mut a, id_a, &first);
+        import(&mut b, &first, vec![ImportAction::New]).unwrap();
+        let id_b = b.list(&Default::default()).unwrap()[0].id;
+        update_body(&mut a, id_a, "甲改。");
+        update_body(&mut b, id_b, "甲改。");
+        let second = dir.path().join("second.zip");
+        export(&mut a, id_a, &second);
+        assert_eq!(
+            inspect(
+                &mut b,
+                &super::super::read_manifest(&second, PASSWORD).unwrap()
+            )
+            .unwrap()[0]
+                .relationship,
+            Relationship::Equivalent
+        );
+        import(
+            &mut b,
+            &second,
+            vec![ImportAction::UseIncoming { take_status: false }],
+        )
+        .unwrap();
+        let count = b.sync_revisions(id_b).unwrap().len();
+        import(
+            &mut b,
+            &second,
+            vec![ImportAction::UseIncoming { take_status: false }],
+        )
+        .unwrap();
+        assert_eq!(b.sync_revisions(id_b).unwrap().len(), count);
+    }
+
+    #[test]
+    fn preview_becomes_invalid_when_local_draft_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let id_a = create(&mut a, "甲。", "过期预览稿");
+        let first = dir.path().join("first.zip");
+        export(&mut a, id_a, &first);
+        import(&mut b, &first, vec![ImportAction::New]).unwrap();
+        let id_b = b.list(&Default::default()).unwrap()[0].id;
+        update_body(&mut a, id_a, "导入侧。");
+        let second = dir.path().join("second.zip");
+        export(&mut a, id_a, &second);
+        let manifest = super::super::read_manifest(&second, PASSWORD).unwrap();
+        let hash = super::super::bytes_hash(&serde_json::to_vec(&manifest).unwrap());
+        let previews = inspect(&mut b, &manifest).unwrap();
+        assert_eq!(previews[0].relationship, Relationship::IncomingAhead);
+        update_body(&mut b, id_b, "本机新编辑。");
+        assert!(
+            import_with_actions(
+                &mut b,
+                &second,
+                PASSWORD,
+                &hash,
+                &[ImportAction::UseIncoming { take_status: false }],
+                &previews
+            )
+            .is_err()
+        );
+        assert_eq!(
+            b.get(id_b).unwrap().unwrap().content_markdown,
+            "本机新编辑。"
+        );
+    }
+
+    #[test]
+    fn pdf_paths_are_unique_when_legacy_source_ids_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let mut ids = Vec::new();
+        for (title, body, bytes) in [
+            ("甲稿", "甲。", b"pdf-a".as_slice()),
+            ("乙稿", "乙。", b"pdf-b".as_slice()),
+        ] {
+            let snapshot = DraftInput {
+                title_hint: title.into(),
+                ..Default::default()
+            };
+            let id = a
+                .create(
+                    &NewManuscript {
+                        snapshot,
+                        content_markdown: body.into(),
+                        status: ManuscriptStatus::Draft,
+                        ..Default::default()
+                    },
+                    Some(7),
+                )
+                .unwrap();
+            a.add_pdf(id, "同名.pdf", bytes).unwrap();
+            ids.push(id);
+        }
+        let zip = dir.path().join("both.zip");
+        super::super::export_zip_selected(&mut a, &ids, &[], &zip, PASSWORD).unwrap();
+        let manifest = super::super::read_manifest(&zip, PASSWORD).unwrap();
+        assert_ne!(
+            manifest.records[0].pdfs[0].path,
+            manifest.records[1].pdfs[0].path
+        );
+        import(&mut b, &zip, vec![ImportAction::New, ImportAction::New]).unwrap();
+        let pdfs = b
+            .list(&Default::default())
+            .unwrap()
+            .into_iter()
+            .map(|row| b.get(row.id).unwrap().unwrap().pdfs[0].bytes.clone())
+            .collect::<Vec<_>>();
+        assert!(pdfs.contains(&b"pdf-a".to_vec()));
+        assert!(pdfs.contains(&b"pdf-b".to_vec()));
     }
 
     #[test]
@@ -1039,8 +1208,11 @@ mod round_trip_tests {
             None,
         )
         .unwrap();
-        forged.revision_uuid = first.revision_uuid;
+        forged.revision_uuid = first.revision_uuid.clone();
         assert!(store.insert_sync_revisions(id, &[forged]).is_err());
+        let mut forged_parent = first;
+        forged_parent.parents.push(uuid::Uuid::new_v4().to_string());
+        assert!(store.insert_sync_revisions(id, &[forged_parent]).is_err());
     }
 
     fn update_body(store: &mut ManuscriptStore, id: i64, body: &str) {
@@ -1182,6 +1354,38 @@ mod round_trip_tests {
         );
     }
 
+    #[test]
+    fn archived_same_content_does_not_accept_new_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let id_a = create(&mut a, "甲。", "归档附件稿");
+        let first = dir.path().join("first.zip");
+        export(&mut a, id_a, &first);
+        import(&mut b, &first, vec![ImportAction::New]).unwrap();
+        let id_b = b.list(&Default::default()).unwrap()[0].id;
+        a.set_status(id_a, ManuscriptStatus::Archived).unwrap();
+        b.set_status(id_b, ManuscriptStatus::Archived).unwrap();
+        b.add_pdf(id_b, "新增.pdf", b"new").unwrap();
+        let second = dir.path().join("second.zip");
+        export(&mut b, id_b, &second);
+        let manifest = super::super::read_manifest(&second, PASSWORD).unwrap();
+        assert_eq!(
+            inspect(&mut a, &manifest).unwrap()[0].relationship,
+            Relationship::Archived
+        );
+        assert!(
+            import(
+                &mut a,
+                &second,
+                vec![ImportAction::UseIncoming { take_status: false }]
+            )
+            .is_err()
+        );
+        assert!(import(&mut a, &second, vec![ImportAction::Pending]).is_err());
+        assert!(a.get(id_a).unwrap().unwrap().pdfs.is_empty());
+    }
+
     /// 把 v2 清单降级写成 v1 旧包：不带稿件身份、版本历史与资源校验值。
     fn write_v1_zip(path: &Path, record: &super::ManifestRecord) {
         use std::io::Write;
@@ -1252,7 +1456,7 @@ mod round_trip_tests {
         assert!(pending.proposal.conflict_count() >= 1);
         // 逐项人工核对后确认合并：生成记录两个父版本的可见合并版本。
         let choices = vec![true; pending.proposal.conflict_count()];
-        merge_pending(&mut c, id_c, &heads[0], &choices, None, false).unwrap();
+        merge_pending(&mut c, id_c, &pending, &choices, None, false).unwrap();
         assert_eq!(c.get(id_c).unwrap().unwrap().content_markdown, "甲。");
         let (_, head) = c.document_identity(id_c).unwrap();
         let merge = c
@@ -1303,7 +1507,7 @@ mod round_trip_tests {
         // 从暂存恢复，逐项核对后确认：采用导入侧。
         let pending = inspect_pending(&mut a, id_a, &heads[0]).unwrap();
         let choices = vec![true; pending.proposal.conflict_count()];
-        merge_pending(&mut a, id_a, &heads[0], &choices, None, false).unwrap();
+        merge_pending(&mut a, id_a, &pending, &choices, None, false).unwrap();
         assert_eq!(
             a.get(id_a).unwrap().unwrap().content_markdown,
             "甲补。\n乙。\n"

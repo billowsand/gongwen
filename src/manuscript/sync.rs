@@ -6,7 +6,7 @@ use chrono::Local;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 const DDL: &str = r#"
@@ -496,17 +496,29 @@ impl ManuscriptStore {
             .collect();
         for revision in revisions {
             revision.verify()?;
-            if let Some((owner, hash)) = self
+            if let Some((owner, hash, parent1, parent2)) = self
                 .conn
                 .query_row(
-                    "SELECT manuscript_id, payload_hash FROM sync_revisions WHERE revision_uuid=?1",
+                    "SELECT manuscript_id, payload_hash, parent1_uuid, parent2_uuid
+                     FROM sync_revisions WHERE revision_uuid=?1",
                     [&revision.revision_uuid],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
                 )
                 .optional()?
             {
-                if owner != id || hash != revision.payload_hash {
-                    bail!("相同版本身份对应不同稿件或内容：{}", revision.revision_uuid);
+                let parents = parent1.into_iter().chain(parent2).collect::<Vec<_>>();
+                if owner != id || hash != revision.payload_hash || parents != revision.parents {
+                    bail!(
+                        "相同版本身份对应不同稿件、内容或父版本：{}",
+                        revision.revision_uuid
+                    );
                 }
                 known.insert(revision.revision_uuid.clone());
                 continue;
@@ -538,6 +550,32 @@ impl ManuscriptStore {
     ) -> Result<()> {
         if local == incoming {
             return self.set_sync_head(id, &local);
+        }
+        let revisions = self.sync_revisions(id)?;
+        let graph = revisions
+            .iter()
+            .map(|revision| (revision.revision_uuid.as_str(), revision.parents.as_slice()))
+            .collect::<HashMap<_, _>>();
+        let reaches = |head: &str, target: &str| {
+            let mut seen = HashSet::new();
+            let mut stack = vec![head];
+            while let Some(uuid) = stack.pop() {
+                if uuid == target {
+                    return true;
+                }
+                if seen.insert(uuid)
+                    && let Some(parents) = graph.get(uuid)
+                {
+                    stack.extend(parents.iter().map(String::as_str));
+                }
+            }
+            false
+        };
+        if reaches(&local, &incoming) {
+            return self.set_sync_head(id, &local);
+        }
+        if reaches(&incoming, &local) {
+            return self.set_sync_head(id, &incoming);
         }
         let join = SyncRevision::new(
             vec![local, incoming],

@@ -893,34 +893,43 @@ impl ManuscriptStore {
             .latest_manuscript_number(manuscript_id)?
             .map_or(1, |n| n + 1);
         let now = Local::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT INTO manuscript_versions (manuscript_id, version_number, name, comment, snapshot_json, content_markdown, notes, title, doc_number, doc_date, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
+        self.conn.execute_batch("SAVEPOINT commit_version")?;
+        let commit = (|| -> Result<()> {
+            self.conn.execute(
+                "INSERT INTO manuscript_versions (manuscript_id, version_number, name, comment, snapshot_json, content_markdown, notes, title, doc_number, doc_date, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    manuscript_id,
+                    number,
+                    name.trim(),
+                    comment.trim(),
+                    snapshot_json,
+                    content_markdown,
+                    notes,
+                    title,
+                    doc_number,
+                    doc_date,
+                    now,
+                ],
+            )?;
+            self.append_visible_sync_revision(
                 manuscript_id,
-                number,
-                name.trim(),
-                comment.trim(),
-                snapshot_json,
-                content_markdown,
-                notes,
-                title,
-                doc_number,
-                doc_date,
-                now,
-            ],
-        )?;
-        self.append_visible_sync_revision(
-            manuscript_id,
-            &sync::VisibleRevision {
-                number,
-                name: name.trim(),
-                comment: comment.trim(),
-                snapshot,
-                markdown: content_markdown,
-                notes,
-            },
-        )?;
+                &sync::VisibleRevision {
+                    number,
+                    name: name.trim(),
+                    comment: comment.trim(),
+                    snapshot,
+                    markdown: content_markdown,
+                    notes,
+                },
+            )
+        })();
+        if let Err(error) = commit {
+            self.conn
+                .execute_batch("ROLLBACK TO commit_version; RELEASE commit_version")?;
+            return Err(error);
+        }
+        self.conn.execute_batch("RELEASE commit_version")?;
         Ok(VersionRow {
             version_number: number,
             name: name.trim().to_string(),

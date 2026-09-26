@@ -1,8 +1,7 @@
 //! 稿件 ZIP 导出/导入。
 //!
-//! ZIP 布局：`manifests.json`（带 schema 版本）+ `pdf/<id>_<序号>_<净化文件名>` 附件。
-//! 导出按 `ManuscriptFilter` 过滤；导入由预览勾选 + 关键词过滤 + `skip_existing_by_id`
-//! 决定写哪些记录，满足“导入也支持过滤筛选”。
+//! ZIP 布局：加密清单、按稿件 UUID 命名的 PDF 附件和带校验值的图片资源。
+//! 导出按筛选条件或勾选稿件；导入由逐篇身份判定和用户选定的动作决定。
 
 #[cfg(test)]
 use crate::manuscript::NewManuscript;
@@ -119,7 +118,7 @@ pub struct ManifestPdf {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestRecord {
-    /// 导出用源库 id（`source_id.unwrap_or(local_id)`）；导入写入 source_id 列做去重。
+    /// 旧格式保留的来源库整数 id；新版仅供兼容展示，不参与稿件身份判定。
     pub id: i64,
     pub title: String,
     pub kind: TemplateKind,
@@ -269,7 +268,7 @@ fn export_zip_ids(
         let mut pdfs = Vec::new();
         for (idx, pdf) in record.pdfs.iter().enumerate() {
             let entry = format!(
-                "pdf/{export_id}_{idx}_{}",
+                "pdf/{document_uuid}_{idx}_{}",
                 sanitize_entry_name(&pdf.file_name)
             );
             pdf_blobs.push((entry.clone(), pdf.bytes.clone()));
