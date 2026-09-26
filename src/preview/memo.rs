@@ -64,6 +64,39 @@ pub(crate) fn memo<T: Send + Sync + 'static>(
     value
 }
 
+/// 字体图集的「代」：epaint 每次推倒重建字体（图集装满、像素密度或文字选项
+/// 变了）就加一。跨帧留着的 galley 里存的是旧图集的字形坐标，重建之后再画
+/// 就是乱码——缓存了 galley 的地方要把它放进缓存键。
+///
+/// 做法是每帧向 epaint 要同一个探针 galley：它自己的排版缓存命中就还是上一帧
+/// 那个 `Arc`，字体一重建缓存清空，拿到的就是新的一份。
+pub(crate) fn font_epoch(ctx: &egui::Context) -> u64 {
+    #[derive(Clone, Default)]
+    struct Epoch {
+        probe: Option<Arc<egui::Galley>>,
+        epoch: u64,
+    }
+    let probe = ctx.fonts_mut(|fonts| {
+        fonts.layout_no_wrap(
+            "字".to_string(),
+            egui::FontId::proportional(12.0),
+            egui::Color32::BLACK,
+        )
+    });
+    ctx.data_mut(|data| {
+        let state = data.get_temp_mut_or_default::<Epoch>(egui::Id::new("gw-font-epoch"));
+        if !state
+            .probe
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(previous, &probe))
+        {
+            state.epoch += 1;
+            state.probe = Some(probe);
+        }
+        state.epoch
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +126,23 @@ mod tests {
         });
         assert_eq!(runs, 2);
         assert_eq!(recomputed.as_str(), "重算");
+    }
+
+    #[test]
+    fn font_epoch_holds_across_frames_and_moves_when_fonts_rebuild() {
+        let ctx = egui::Context::default();
+        let mut epochs = Vec::new();
+        for _ in 0..3 {
+            let _ = ctx.run_ui(Default::default(), |ui| epochs.push(font_epoch(ui.ctx())));
+        }
+        assert_eq!(epochs[1], epochs[2], "字体没动，代不该变");
+        // 像素密度一变，epaint 整套重建字体。
+        ctx.set_pixels_per_point(2.0);
+        let mut after = 0;
+        for _ in 0..2 {
+            let _ = ctx.run_ui(Default::default(), |ui| after = font_epoch(ui.ctx()));
+        }
+        assert_ne!(after, epochs[2], "字体重建后代要变");
     }
 
     #[test]

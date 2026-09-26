@@ -295,6 +295,38 @@ mod tests {
     }
 
     #[test]
+    fn red_approval_pages_far_away_are_not_painted() {
+        let ctx = context();
+        let mut input = DraftInput {
+            kind: TemplateKind::RedHeadApproval,
+            ..Default::default()
+        };
+        input.profile.reporting_leaders = "张三".into();
+        let markdown = long_markdown();
+        // 开着页边行号时每页照画（号码要一路数下来），拿它当整篇真画的对照。
+        let full = frame(&ctx, &input, &markdown, 0.0, true);
+        let top = frame(&ctx, &input, &markdown, 0.0, false);
+        assert!(contains(&full, "第40节第3段"), "开着行号应整篇画出");
+        assert!(!contains(&top, "第40节第3段"), "远处的纸不该再画");
+        assert!(contains(&top, "张三"), "首页照画");
+        assert!(
+            (full.content_height - top.content_height).abs() < 0.5,
+            "占位高度应与真画一致：{} vs {}",
+            full.content_height,
+            top.content_height
+        );
+        let bottom = frame(&ctx, &input, &markdown, full.content_height - 900.0, false);
+        assert!(contains(&bottom, "第40节第3段"), "滚到文末，末页照画");
+        assert!(contains(&bottom, "四十、专项工作40"), "{:?}", bottom.texts);
+
+        // 表单一改，缓存的版面就作废：首页上立刻是新的呈报领导。
+        input.profile.reporting_leaders = "李四".into();
+        let changed = frame(&ctx, &input, &markdown, 0.0, false);
+        assert!(contains(&changed, "李四"), "{:?}", changed.texts);
+        assert!(!contains(&changed, "张三"));
+    }
+
+    #[test]
     fn skipped_headings_still_advance_the_numbering() {
         let ctx = context();
         let input = DraftInput {

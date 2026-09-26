@@ -7,9 +7,11 @@ use crate::export;
 use crate::export::RedlineKind;
 use crate::export::{LocatedBlock, MarkdownBlock};
 use crate::models::{DraftInput, NumberingConfig};
+use crate::preview::cull::Cull;
 use crate::preview::gutter;
 use crate::preview::layout::{MeasuredTable, measure_table};
 use crate::preview::marks;
+use crate::preview::render::{anchored, block_key};
 use crate::preview::{
     BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
     clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
@@ -74,6 +76,23 @@ impl RedPrintFragment {
 pub(crate) struct RedPrintPage {
     pub(crate) fragments: Vec<RedPrintFragment>,
     pub(crate) tables: Vec<RedTableSlice>,
+}
+
+impl RedPrintPage {
+    /// 这一页上有没有落在 `anchor` 里的源码：有就得画出来，才能滚过去。
+    fn touches(&self, anchor: &Range<usize>) -> bool {
+        let hit = |source: &Range<usize>| anchor.start < source.end && source.start < anchor.end;
+        self.fragments.iter().any(|fragment| {
+            fragment.range.as_ref().is_some_and(hit)
+                || fragment
+                    .source_segments
+                    .iter()
+                    .any(|segment| hit(&segment.source))
+        }) || self
+            .tables
+            .iter()
+            .any(|slice| slice.rows.iter().any(|row| hit(&slice.sources[*row])))
+    }
 }
 
 /// 落在某一页上的一段表格：同一张表可以跨页，续页上表头重复一遍，与 TeX 的
@@ -1189,12 +1208,31 @@ pub(crate) fn paint_red_print_pages(
     clicked: &mut Option<Range<usize>>,
     elements: &ElementMarks,
 ) {
+    // 可视区上下各放宽一屏：这之外的纸只占位、不画（见 `preview::cull`）。
+    let clip = ui.clip_rect();
+    let margin = clip.height().max(200.0);
+    let window = egui::Rangef::new(clip.top() - margin, clip.bottom() + margin);
+    // 页边行号是整篇一路数下来的，跳过一页后面的号就全错了；开着行号时照画。
+    let line_numbers = metrics.line_numbers_on();
     for (page_index, page_layout) in layout_state.pages.iter().enumerate() {
         if page_index > 0 {
             ui.add_space(14.0);
         }
         // 呈批件是真分页的：每翻一页，页边的号栏另起一条。
         metrics.next_page();
+        let top = ui.cursor().min.y;
+        let far = top + metrics.page_height < window.min || top > window.max;
+        let pending_anchor =
+            *scroll_to_anchor && anchor.is_some_and(|anchor| page_layout.touches(anchor));
+        if far && !line_numbers && !pending_anchor {
+            // 与下面画纸时占的一样大：左侧居中留白 + 一张纸。
+            let side = ((metrics.viewport - metrics.page) / 2.0).max(0.0);
+            ui.allocate_exact_size(
+                egui::vec2(side + metrics.page, metrics.page_height),
+                egui::Sense::hover(),
+            );
+            continue;
+        }
         ui.horizontal(|ui| {
             let side = ((metrics.viewport - metrics.page) / 2.0).max(0.0);
             ui.add_space(side);
@@ -1500,25 +1538,46 @@ pub(crate) fn red_approval_print_preview(
     markdown: &str,
     elements: &ElementMarks,
 ) {
-    let (layout_state, rows) = red_build_print_layout(
-        ui,
-        metrics,
-        input,
-        display,
-        body,
-        title,
-        attachment_names,
-        numbering,
+    // 分页要把整篇正文量一遍，长稿每帧好几毫秒。结果只取决于下面这些输入，
+    // 没变就复用上一次的版面。版面里存着 galley，字体图集一重建字形坐标就作废，
+    // 所以图集的「代」也进键（`memo::font_epoch`）。
+    let key = super::memo::key((
         markdown,
-        elements,
-    );
+        numbering,
+        serde_json::to_string(input).ok(),
+        red_responsible_rows(input, display),
+        crate::export::element_display::addressee_display(input, display),
+        crate::export::element_display::signing_unit_display(input, display),
+        format!("{elements:?}"),
+        (
+            metrics.scale.to_bits(),
+            ui.ctx().pixels_per_point().to_bits(),
+            theme::revision(),
+            super::memo::font_epoch(ui.ctx()),
+        ),
+    ));
+    let cached = super::memo::memo(ui.ctx(), "red-print-layout", key, || {
+        red_build_print_layout(
+            ui,
+            metrics,
+            input,
+            display,
+            body,
+            title,
+            attachment_names,
+            numbering,
+            markdown,
+            elements,
+        )
+    });
+    let (layout_state, rows) = &*cached;
     paint_red_print_pages(
         ui,
         metrics,
-        &layout_state,
+        layout_state,
         input,
         display,
-        &rows,
+        rows,
         anchor,
         scroll_to_anchor,
         clicked,
@@ -1526,6 +1585,8 @@ pub(crate) fn red_approval_print_preview(
     );
 
     // 附件仍沿用现有的逐份分页渲染；正文和附件概要已经由上面的打印分页器处理。
+    // 附件里远离视野的块同样只占位（见 `preview::cull`）。
+    let cull = Cull::new(ui, metrics, "official");
     for (index, attachment) in attachments.iter().enumerate() {
         ui.add_space(14.0);
         sheet(ui, metrics, |ui| {
@@ -1544,18 +1605,35 @@ pub(crate) fn red_approval_print_preview(
                 Align::LEFT,
             );
             for located in attachment {
-                clickable_content_block(
+                let key = block_key(located, &counters, true, numbering);
+                let heading =
+                    matches!(located.block, MarkdownBlock::Heading(..)).then_some(&located.range);
+                let drawn = cull.block(
                     ui,
                     metrics,
-                    located,
-                    markdown,
-                    &mut counters,
-                    true,
-                    numbering,
-                    anchor,
-                    scroll_to_anchor,
-                    clicked,
+                    key,
+                    &located.range,
+                    anchored(anchor, &located.range),
+                    heading,
+                    |ui| {
+                        clickable_content_block(
+                            ui,
+                            metrics,
+                            located,
+                            markdown,
+                            &mut counters,
+                            true,
+                            numbering,
+                            anchor,
+                            scroll_to_anchor,
+                            clicked,
+                        )
+                    },
                 );
+                // 跳过排版的标题照样占号，后面的编号才接得上。
+                if !drawn && let MarkdownBlock::Heading(level, _) = &located.block {
+                    let _ = export::official_heading_prefix(*level, &mut counters, numbering);
+                }
             }
         });
     }

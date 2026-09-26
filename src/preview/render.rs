@@ -56,7 +56,7 @@ impl std::hash::Hash for BlockShape<'_> {
 
 /// 单块（非紧缩标题）的缓存键。只有标题的排版取决于编号计数器——编号字数
 /// 不同，折行就可能不同；段落、表格不带计数器，前面加一个标题不连累它们重排。
-fn block_key(
+pub(crate) fn block_key(
     located: &LocatedBlock,
     counters: &[usize; 4],
     numbered: bool,
