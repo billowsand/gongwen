@@ -8,13 +8,15 @@
 //! 引擎里的 panic 不能把整篇文稿带走：按键路径整个套在 `catch_unwind` 里，拦下之后
 //! 卸掉引擎（`RefCell` 可能停在借出状态，再调一定还会 panic），这次按键当没发生。
 
+use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use eframe::egui;
-use qingjian_core::{CandidateLayout, Engine, FumaTable};
+use qingjian_core::{Candidate, CandidateKind, CandidateLayout, Engine, FumaTable};
+use qingjian_dictionary::Dictionary;
 
 use super::ImeSettings;
 use super::data;
@@ -113,6 +115,9 @@ pub(crate) struct Ime {
     /// 辅码表加载了几个字；`None` 表示没装表（辅码关着）。
     fuma_words: Option<usize>,
 
+    /// 候选窗里要打「公文词表」标记的词：词表带进来、基础词库同一读音没有的（见 `lexicon`）。
+    pub(super) lexicon_marks: HashSet<lexicon::MarkedWord>,
+
     /// 上一帧有可编辑控件持有焦点（egui 的 `output.ime` 非空）。只有为真才接管键盘：
     /// 否则按键会被我们吃掉却没人在文本框里接收。
     editable_focus: bool,
@@ -148,6 +153,7 @@ impl Ime {
             window_size: None,
             rows_width: None,
             fuma_words: None,
+            lexicon_marks: HashSet::new(),
             editable_focus: false,
             focus_id: None,
             anchor: None,
@@ -156,6 +162,7 @@ impl Ime {
             last_flush: Instant::now(),
         };
         ime.apply_fuma();
+        ime.refresh_lexicon_marks();
         ime
     }
 
@@ -240,6 +247,7 @@ impl Ime {
         if turned_on && self.assembled.is_none() {
             // 关掉再打开时重新试一次：上次可能是数据还没准备好。
             self.assembled = load();
+            self.refresh_lexicon_marks();
         }
         if !settings.enabled {
             self.drop_composition();
@@ -417,6 +425,30 @@ impl Ime {
         if let Some(assembly) = self.assembled.as_mut() {
             assembly.engine.set_extra_dictionaries(dictionaries);
         }
+        self.refresh_lexicon_marks();
+    }
+
+    /// 重算要打词表标记的词：读词表导出的那本附加词库，与引擎的基础词库比。
+    /// 没有引擎或还没同步过词表时为空，候选窗就不标。
+    fn refresh_lexicon_marks(&mut self) {
+        let Some(assembly) = self.assembled.as_ref() else {
+            self.lexicon_marks.clear();
+            return;
+        };
+        let path = data::dicts_dir().map(|dir| dir.join(lexicon::FILE_NAME));
+        self.lexicon_marks = match path.map(Dictionary::from_path) {
+            Some(Ok(words)) => lexicon::marked_words(&words, assembly.engine.dictionary()),
+            _ => HashSet::new(),
+        };
+    }
+
+    /// 这个候选要不要打「公文词表」标记：只看词库词，整句、快捷候选、英文不标。
+    pub(super) fn lexicon_marked(&self, candidate: &Candidate) -> bool {
+        candidate.kind == CandidateKind::Chinese
+            && !self.lexicon_marks.is_empty()
+            && self
+                .lexicon_marks
+                .contains(&(candidate.text.clone(), candidate.syllables.join(" ")))
     }
 
     /// 记下本帧的焦点与光标矩形。

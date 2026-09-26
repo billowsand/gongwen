@@ -358,3 +358,29 @@ fn active_ime_turns_the_system_input_method_off() {
     // 光标矩形记下来给候选窗定位。
     assert_eq!(ime.anchor, Some(ime_output().cursor_rect));
 }
+
+/// 公文词表标记按「词 + 读音」对：标了的词才带圆点，同一页的别的词不带；
+/// 带标记的候选窗照常画得出来。
+#[test]
+fn lexicon_marks_follow_word_and_reading() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    ime.lexicon_marks
+        .insert(("开放".to_owned(), "kai fang".to_owned()));
+    // 同字不同音的不算：基础词库里原来那个读法不该跟着带标记
+    ime.lexicon_marks
+        .insert(("开发".to_owned(), "kai fa ge".to_owned()));
+    focus(&ctx, &mut ime);
+    for c in "kaif".chars() {
+        type_char_with_candidates(&ctx, &mut ime, c);
+    }
+    let marked: Vec<(String, bool)> = ime
+        .layout
+        .page(0)
+        .into_iter()
+        .filter_map(|cell| cell.candidate())
+        .map(|candidate| (candidate.text.clone(), ime.lexicon_marked(candidate)))
+        .collect();
+    assert!(marked.contains(&("开放".to_owned(), true)), "{marked:?}");
+    assert!(marked.contains(&("开发".to_owned(), false)), "{marked:?}");
+}

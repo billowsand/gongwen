@@ -9,6 +9,14 @@
 //! `词\t音节（空格分隔）\t词频`，`#` 开头的行是注释、空行忽略。
 //! 音节写法与 `flypy` 的规范化一致（`lüe` → `lve`），也正是引擎的
 //! `canonical_syllable` 认的那一套。
+//!
+//! 候选窗给「词表带进来的新词」打标记（词前小圆点，见 `candidates`）：只标基础词库里
+//! 同一读音查不到的词。「公文」「综合」这类基础词库本来就有的不标，标了只是噪声；
+//! 本单位专名、只在词表里才有的读法才是标记要告诉人的东西。
+
+use std::collections::HashSet;
+
+use qingjian_dictionary::Dictionary;
 
 use crate::lexicon::{LexiconTerm, flypy};
 
@@ -44,6 +52,28 @@ pub(crate) fn build(terms: &[LexiconTerm]) -> (String, usize) {
         written += 1;
     }
     (out, written)
+}
+
+/// 要打标记的一条词：（词，空格分隔的音节）。候选的 `Candidate::syllables` 就是命中词条的
+/// 读音，拿它拼出同样的键就能对上。
+pub(crate) type MarkedWord = (String, String);
+
+/// 候选窗里要打标记的词：词表导出的附加词库里有、基础词库里同一读音查不到的词。
+///
+/// 按「词 + 读音」比，不只按词：人工给多音词标了基础词库没有的读法，那个读法
+/// 是词表带进来的，而基础词库里原来那个读法的同一个词不该跟着带上标记。
+pub(crate) fn marked_words(lexicon: &Dictionary, base: &Dictionary) -> HashSet<MarkedWord> {
+    lexicon
+        .entries()
+        .filter(|entry| {
+            let syllables: Vec<&str> = entry.pinyin.split_whitespace().collect();
+            !base
+                .lookup(&syllables, false)
+                .iter()
+                .any(|found| found.exact && found.text == entry.text)
+        })
+        .map(|entry| (entry.text.to_owned(), entry.pinyin.to_owned()))
+        .collect()
 }
 
 /// 词的读音：有人工标注就用标注的，否则取字典默认读音（多音字取首选）。
@@ -141,6 +171,31 @@ mod tests {
             frequency(&term("丙", "", 1_000_000, 1_000_000)),
             MAX_FREQUENCY
         );
+    }
+
+    /// 只标基础词库里（同一读音）没有的词；基础词库里有的常用词不标。
+    #[test]
+    fn marks_only_words_missing_from_the_base_dictionary() {
+        let base = Dictionary::parse(
+            "综合	zong he	9000
+公文	gong wen	8000
+",
+        )
+        .unwrap();
+        let (tsv, _) = build(&[
+            term("综合处", "zong he chu", 1, 1),
+            term("公文", "", 1, 1),
+            // 基础词库里有这个词，但人工标的读音不一样：这个读法是词表带进来的
+            term("综合", "zong ge", 1, 1),
+        ]);
+        let lexicon = Dictionary::parse(&tsv).unwrap();
+        let marked = marked_words(&lexicon, &base);
+        let has = |text: &str, pinyin: &str| marked.contains(&(text.to_owned(), pinyin.to_owned()));
+        assert!(has("综合处", "zong he chu"), "{marked:?}");
+        assert!(!has("公文", "gong wen"), "{marked:?}");
+        assert!(has("综合", "zong ge"), "{marked:?}");
+        assert!(!has("综合", "zong he"), "{marked:?}");
+        assert_eq!(marked.len(), 2);
     }
 
     /// 注释行以 `#` 开头（引擎按注释跳过），且不影响条数。

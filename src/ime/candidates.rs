@@ -46,12 +46,23 @@ const SPARKLE_WAIST: f32 = 0.18;
 /// 词后右上角小字（辅码）与前面候选词 / 星标的间距。
 const CORNER_GAP: f32 = 1.0;
 
-/// 候选窗里的一个候选：页内下标、文本、是不是本地整句、右上角要标的辅码。
+/// 序号与候选词之间的间距。
+const INDEX_GAP: f32 = 3.0;
+
+/// 词表标记（词前小圆点）的直径。
+const LEXICON_DOT: f32 = 4.0;
+
+/// 词表标记与后面候选词的间距。
+const LEXICON_GAP: f32 = 2.0;
+
+/// 候选窗里的一个候选：页内下标、文本、是不是本地整句、右上角要标的辅码、
+/// 是不是公文词表带进来的词。
 struct Row {
     index: usize,
     text: String,
     sentence: bool,
     corner: Option<String>,
+    lexicon: bool,
 }
 
 impl Ime {
@@ -85,6 +96,7 @@ impl Ime {
                     sentence: candidate.kind == CandidateKind::Sentence,
                     // 还要敲的辅码，标哪几码由引擎按档位定（`Engine::fuma_mark`）
                     corner: candidate.fuma.clone(),
+                    lexicon: self.lexicon_marked(candidate),
                 })
             })
             .collect();
@@ -236,7 +248,8 @@ fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit) {
 }
 
 /// 一个候选：弱化的小号序号 + 正文字号的候选文本；本地整句拼出的候选词后右上角带星标，
-/// 和词库里现成的词区分；辅码小字再跟在后面，同样顶在右上角。
+/// 和词库里现成的词区分；辅码小字再跟在后面，同样顶在右上角。公文词表带进来的词在词前
+/// 带一个弱化色小圆点：右上角已经归星标与辅码，标记放左边才不挤。
 ///
 /// 辅码跟在词后同一行、顶格对齐，不另起一行：另起一行的话它一出现 / 消失，候选窗高度就跟着跳。
 fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Response {
@@ -245,23 +258,28 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
         color,
         ..Default::default()
     };
+    // 选中的序号跟着高亮走，但要比候选本身淡：它只是个按键提示。词表圆点同色。
+    let hint_color = if selected {
+        theme::accent_active().gamma_multiply(0.7)
+    } else {
+        theme::text_muted()
+    };
+    let index = (row.index + 1).to_string();
     let mut job = egui::text::LayoutJob::default();
-    job.append(
-        &(row.index + 1).to_string(),
-        0.0,
-        format(
-            theme::font_sizes::SMALL,
-            if selected {
-                // 选中的序号跟着高亮走，但要比候选本身淡：它只是个按键提示。
-                theme::accent_active().gamma_multiply(0.7)
-            } else {
-                theme::text_muted()
-            },
-        ),
-    );
+    job.append(&index, 0.0, format(theme::font_sizes::SMALL, hint_color));
+    let mut text_gap = INDEX_GAP;
+    if row.lexicon {
+        // 给圆点让出位置，做法同星标：几乎没宽度的空格，靠前导空白撑开
+        job.append(
+            " ",
+            INDEX_GAP + LEXICON_DOT,
+            format(1.0, egui::Color32::TRANSPARENT),
+        );
+        text_gap = LEXICON_GAP;
+    }
     job.append(
         &row.text,
-        3.0,
+        text_gap,
         format(
             theme::font_sizes::BODY,
             if selected {
@@ -320,6 +338,25 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
             egui::Rect::from_min_size(min, egui::Vec2::splat(SPARKLE_SIZE)),
             color,
         ));
+    }
+    if row.lexicon {
+        // 紧跟序号之后、竖直居中：序号的宽度要量出来才知道圆点落在哪
+        let content = response.rect.shrink2(CELL_PADDING);
+        let index_width = ui
+            .painter()
+            .layout_no_wrap(
+                index,
+                egui::FontId::proportional(theme::font_sizes::SMALL),
+                hint_color,
+            )
+            .size()
+            .x;
+        let center = egui::pos2(
+            content.left() + index_width + INDEX_GAP + LEXICON_DOT / 2.0,
+            content.center().y,
+        );
+        ui.painter()
+            .circle_filled(center, LEXICON_DOT / 2.0, hint_color);
     }
     response
 }
