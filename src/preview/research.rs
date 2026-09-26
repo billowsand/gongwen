@@ -10,7 +10,10 @@
 //!   编号"第N章"），`###`、`####` 依次是节和小节，编号 `N.M`、`N.M.K`，
 //!   由程序生成，正文里不写；
 //! - 摘要、版本变更记录、参考文献这些区段由 `<!-- [...] -->` 标记切换，标题
-//!   不编号；附录切到字母章号"附录A"。
+//!   不编号；附录切到字母章号"附录A"；部分段（`<!-- [部分] -->`）里的 `#` 是
+//!   部分（"第一部分"，小一黑体居中），章号跨部分连续；
+//! - `<!-- [不编号] -->` 管紧随标题的整棵子树：不占章节号，不编号章里的图表
+//!   题注改用全篇共用、不带章号的流水号。
 //!
 //! 排版规则一律照 `tex_research_emitter` 抄，不另立一套：预览与编译出的 PDF
 //! 对不上，比预览简陋更糟——用户会照着预览改，改出来的 PDF 却是另一个样子。
@@ -28,10 +31,13 @@ use super::layout::{
 use super::render::{PreviewOutput, clickable_content_block, image_block};
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
-    RESEARCH_CHAPTER_PT, gutter, indent, math_flow,
+    RESEARCH_CHAPTER_PT, RESEARCH_PART_PT, gutter, indent, math_flow,
 };
 use crate::export::crossref::{self, ResearchMarks};
-use crate::export::{self, LocatedBlock, MarkdownBlock, ResearchSection, parse_research_marker};
+use crate::export::{
+    self, LocatedBlock, MarkdownBlock, ResearchSection, parse_research_marker,
+    parse_unnumbered_marker,
+};
 use crate::models::DraftInput;
 use crate::models::NumberingConfig;
 use crate::theme;
@@ -56,15 +62,25 @@ enum Kind<'a> {
         number: String,
         text: String,
     },
+    /// 部分：部分段里的 `#`。`heading` 是"第一部分"，`number` 是 `\thepart`
+    /// （"一"）——`{@id}` 引的是后者。
+    Part {
+        heading: String,
+        number: String,
+        text: String,
+    },
+    /// 不编号的部分：`<!-- [不编号] -->` 下部分段里的 `#`。
+    PartStar(String),
     /// 编号节，`number` 形如 `1.2`、`A.2.1`。
     Section { number: String, text: String },
-    /// 不编号的章标题：摘要、版本变更记录、参考文献的首个标题。
+    /// 不编号的章标题：摘要、版本变更记录、参考文献的首个标题，以及
+    /// `<!-- [不编号] -->` 下的章。
     ChapterStar(String),
     /// 报告题名：正文区段的 `#`。题名印在封面上，正文纸上不再排第二遍，
     /// 所以它不落版面；只进导航大纲，并在文档要素的「文件名称」留空时
     /// 顶上封面题名（与 mdx 的 `TexResearchEmitter::report_title` 同一口径）。
     ReportTitle(String),
-    /// 不编号的节标题：上面那些区段里后续的标题。
+    /// 不编号的节标题：上面那些区段里后续的标题，以及不编号子树里的节。
     SectionStar(String),
     /// 摘要里的标题，mdx 排成一段加粗正文。
     AbstractHeading(String),
@@ -110,6 +126,17 @@ struct Walk {
     subsubsection: usize,
     figure: usize,
     table: usize,
+    /// 部分序号：跨区段不清零，与 LaTeX 的 part 计数器一致。
+    part: usize,
+    /// 刚读到不编号标记、还在等它的标题（mdx `parser::parse` 的同名状态）。
+    unnumbered_pending: bool,
+    /// 不编号子树的根标题层级（源码里的 `#` 数）。
+    unnumbered_root: Option<u8>,
+    /// 当前在不编号章里：图表题注是不带章号的流水号（`\mdxfreenumbers`）。
+    free: bool,
+    /// 不编号章的图、表流水号，全篇共用。
+    free_figure: usize,
+    free_table: usize,
 }
 
 impl Default for Walk {
@@ -127,6 +154,12 @@ impl Default for Walk {
             subsubsection: 0,
             figure: 0,
             table: 0,
+            part: 0,
+            unnumbered_pending: false,
+            unnumbered_root: None,
+            free: false,
+            free_figure: 0,
+            free_table: 0,
         }
     }
 }
@@ -145,6 +178,7 @@ impl Walk {
     /// 开新章：节、图、表的计数器都跟着归零，与 LaTeX 的 `\chapter` 一致。
     /// 返回（纸面前缀，`\thechapter`）。
     fn open_chapter(&mut self) -> (String, String) {
+        self.free = false;
         self.chapter += 1;
         self.section_no = 0;
         self.subsection = 0;
@@ -193,19 +227,54 @@ impl Walk {
         }
     }
 
-    /// `\thefigure` / `\thetable`：都是"章号.序号"，跟着章归零。
+    /// `\thefigure` / `\thetable`：都是"章号.序号"，跟着章归零。不编号章里
+    /// 是全篇共用的流水号，不带章号（md2tex.cls 的 `\mdxfreenumbers`）。
     fn open_figure(&mut self) -> String {
+        if self.free {
+            self.free_figure += 1;
+            return self.free_figure.to_string();
+        }
         self.figure += 1;
         format!("{}.{}", self.chapter_number(), self.figure)
     }
 
     fn open_table(&mut self) -> String {
+        if self.free {
+            self.free_table += 1;
+            return self.free_table.to_string();
+        }
         self.table += 1;
         format!("{}.{}", self.chapter_number(), self.table)
     }
 
+    /// 开新部分。返回（纸面前缀"第一部分"，`\thepart`"一"）。
+    fn open_part(&mut self) -> (String, String) {
+        self.part += 1;
+        let number = export::number_to_chinese(self.part);
+        (format!("第{number}部分"), number)
+    }
+
+    /// 这个标题是否落在不编号子树里，照 mdx `parser::parse` 的判定：标记交给
+    /// 紧随的标题并以它为根，更深的标题都在子树里，同级或更高一级的结束子树。
+    fn unnumbered(&mut self, level: u8) -> bool {
+        if std::mem::take(&mut self.unnumbered_pending) {
+            self.unnumbered_root = Some(level);
+            return true;
+        }
+        match self.unnumbered_root {
+            Some(root) if level > root => true,
+            _ => {
+                self.unnumbered_root = None;
+                false
+            }
+        }
+    }
+
     fn enter(&mut self, next: ResearchSection) {
         self.section = next;
+        // 区段标记结束不编号子树，也把图表题注切回章号
+        self.unnumbered_root = None;
+        self.free = false;
         match next {
             ResearchSection::Abstract => {
                 self.abstract_skipped_heading = false;
@@ -222,7 +291,8 @@ impl Walk {
             ResearchSection::ChangeLog | ResearchSection::References => {
                 self.star_heading_done = false;
             }
-            ResearchSection::Body => {}
+            // 章号跨部分连续，不清计数器
+            ResearchSection::Body | ResearchSection::Part => {}
         }
     }
 }
@@ -250,11 +320,24 @@ fn walk<'a>(
             visit(located, Kind::Skip, None);
             continue;
         }
+        // 不编号标记只交给紧随的标题，中间隔了别的内容就作废（空行不成块）。
+        if !matches!(
+            located.block,
+            MarkdownBlock::Title(_) | MarkdownBlock::Heading(..) | MarkdownBlock::Html(_)
+        ) {
+            walk.unnumbered_pending = false;
+        }
         let kind = match &located.block {
             // 区段标记不落在纸上，只改后面各块的身份。公文解析器把
             // `<!-- [正文] -->`、`<!-- [附件] -->` 认成了它自己的区段，落到这里
             // 按原文重判一次，免得附录被当成公文附件。
             MarkdownBlock::Html(text) => {
+                if parse_unnumbered_marker(text) {
+                    walk.unnumbered_pending = true;
+                    visit(located, Kind::Skip, None);
+                    continue;
+                }
+                walk.unnumbered_pending = false;
                 if let Some(next) = parse_research_marker(text) {
                     walk.enter(next);
                 }
@@ -303,6 +386,11 @@ fn walk<'a>(
 /// 一个标题在纸面上的身份，规则照 `TexResearchEmitter::emit_heading`。
 fn heading(walk: &mut Walk, level: u8, text: &str) -> Kind<'static> {
     let text = text.trim().to_string();
+    // 报告题名在交给 mdx 之前就被拿掉了：它既不接收不编号标记，也不打断子树。
+    if walk.section == ResearchSection::Body && level == 1 {
+        return Kind::ReportTitle(text);
+    }
+    let unnumbered = walk.unnumbered(level);
     match walk.section {
         ResearchSection::Abstract => {
             if walk.abstract_skipped_heading {
@@ -328,7 +416,9 @@ fn heading(walk: &mut Walk, level: u8, text: &str) -> Kind<'static> {
             }
             let shifted = walk.appendix_saw_h1;
             match (level, shifted) {
+                (1, _) | (2, false) if unnumbered => unnumbered_chapter(walk, text),
                 (1, _) | (2, false) => chapter(walk, text),
+                _ if unnumbered => Kind::SectionStar(text),
                 (2, true) | (3, false) => Kind::Section {
                     number: walk.open_section(3),
                     text,
@@ -343,9 +433,26 @@ fn heading(walk: &mut Walk, level: u8, text: &str) -> Kind<'static> {
                 },
             }
         }
-        ResearchSection::Body => match level {
-            1 => Kind::ReportTitle(text),
+        // 正文段的 `#` 已在上面当报告题名处理，走到这里的 `#` 都是部分段的。
+        ResearchSection::Body | ResearchSection::Part => match level {
+            1 => {
+                // 部分标题是原文（一级标题不经公文解析器去编号），手写的
+                // "第一部分"在这里剥掉，与 mdx 的 `heading::clean` 一致。
+                let text = export::clean_heading_number(&text);
+                if unnumbered {
+                    Kind::PartStar(text)
+                } else {
+                    let (heading, number) = walk.open_part();
+                    Kind::Part {
+                        heading,
+                        number,
+                        text,
+                    }
+                }
+            }
+            2 if unnumbered => unnumbered_chapter(walk, text),
             2 => chapter(walk, text),
+            3..=5 if unnumbered => Kind::SectionStar(text),
             3..=5 => Kind::Section {
                 number: walk.open_section(level),
                 text,
@@ -354,6 +461,12 @@ fn heading(walk: &mut Walk, level: u8, text: &str) -> Kind<'static> {
             _ => Kind::Skip,
         },
     }
+}
+
+/// 不编号章：不占章号，其中的图表题注切到不带章号的流水号。
+fn unnumbered_chapter(walk: &mut Walk, text: String) -> Kind<'static> {
+    walk.free = true;
+    Kind::ChapterStar(text)
 }
 
 fn chapter(walk: &mut Walk, text: String) -> Kind<'static> {
@@ -464,7 +577,9 @@ fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
         if let Some(anchor) = anchor {
             let number = match &kind {
                 // 章锚点引的是 `\thechapter`（`1`、`A`），不是"第1章"整串。
-                Kind::Chapter { number, .. } | Kind::Section { number, .. } => Some(number.clone()),
+                Kind::Chapter { number, .. }
+                | Kind::Section { number, .. }
+                | Kind::Part { number, .. } => Some(number.clone()),
                 Kind::Figure { number, .. } => number.clone(),
                 Kind::Table { caption } => caption.as_ref().map(|caption| caption.number.clone()),
                 _ => None,
@@ -527,6 +642,9 @@ pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
                 (2, Some(format!("{heading}{CHAPTER_GAP}")), text)
             }
             Kind::ChapterStar(text) => (2, None, text),
+            // 部分与章同级：导航只分到"章"这一层缩进，部分靠编号区分。
+            Kind::Part { heading, text, .. } => (2, Some(format!("{heading}{CHAPTER_GAP}")), text),
+            Kind::PartStar(text) => (2, None, text),
             // 报告题名是大纲的根，不占章号。
             Kind::ReportTitle(text) => (1, None, text),
             // 层级由编号自己说明：`1.1` 是节，`1.1.1` 是小节，附录的 `A.1` 同理。
@@ -907,6 +1025,28 @@ fn body_item(
                 |ui| chapter_title(ui, metrics, &text),
             );
         }
+        Kind::Part { heading, text, .. } => {
+            clickable_rows(
+                ui,
+                metrics,
+                &source,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+                |ui| part_title(ui, metrics, Some(&heading), &text),
+            );
+        }
+        Kind::PartStar(text) => {
+            clickable_rows(
+                ui,
+                metrics,
+                &source,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+                |ui| part_title(ui, metrics, None, &text),
+            );
+        }
         // 报告题名不落在正文纸上：它已经印在封面（`cover_sheet`）里了。
         Kind::ReportTitle(_) => {}
         Kind::Section { number, text } => {
@@ -1127,6 +1267,32 @@ fn chapter_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
         Align::Center,
     );
     ui.add_space(metrics.line);
+}
+
+/// 部分标题：小一黑体居中，"第一部分"一行、题目一行（ctex 的 part 格式）。
+/// PDF 里部分独占一页；预览是一张连续的纸，上下各留三行空白示意。
+fn part_title(ui: &mut egui::Ui, metrics: &Metrics, heading: Option<&str>, text: &str) {
+    ui.add_space(metrics.line * 3.0);
+    if let Some(heading) = heading {
+        line_block(
+            ui,
+            metrics,
+            heading,
+            theme::FONT_HEITI,
+            RESEARCH_PART_PT,
+            Align::Center,
+        );
+        ui.add_space(metrics.line * 0.5);
+    }
+    line_block(
+        ui,
+        metrics,
+        text,
+        theme::FONT_HEITI,
+        RESEARCH_PART_PT,
+        Align::Center,
+    );
+    ui.add_space(metrics.line * 3.0);
 }
 
 /// 节标题：黑体，字号随正文，缩进 2 字（`\titlespacing` 的 2em）。
@@ -1523,6 +1689,76 @@ mod tests {
             shape,
             vec![
                 (1, None, "某某问题研究报告".to_string()),
+                (2, Some("第1章\u{3000}".to_string()), "研究背景".to_string()),
+                (3, Some("1.1 ".to_string()), "研究方法".to_string()),
+            ]
+        );
+    }
+
+    /// 部分段的 `#` 印成"第一部分"+题目，章号跨部分连续；`{@part:x}` 引出"一"。
+    #[test]
+    fn parts_are_printed_and_chapters_keep_counting_across_them() {
+        let text = drawn(concat!(
+            "# 某某问题研究报告\n\n",
+            "<!-- [部分] -->\n\n",
+            "# 第一部分 现状分析 {#part:xz}\n\n",
+            "## 研究背景\n\n见第{@part:xz}部分。\n\n",
+            "# 对策建议\n\n",
+            "## 总体思路\n\n正文。\n",
+        ));
+        assert!(text.contains("第一部分\n现状分析"), "{text}");
+        assert!(text.contains("第二部分\n对策建议"), "{text}");
+        assert!(text.contains("第1章　研究背景"), "{text}");
+        assert!(text.contains("第2章　总体思路"), "{text}");
+        assert!(text.contains("见第一部分。"), "{text}");
+        assert!(!text.contains("某某问题研究报告\n第一部分"), "{text}");
+    }
+
+    /// 不编号子树：标题不带号、不占号；不编号章的表题用全篇共用的流水号。
+    #[test]
+    fn an_unnumbered_subtree_prints_without_numbers_and_captions_run_apart() {
+        let table = "| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n";
+        let text = drawn(&format!(
+            "<!-- [不编号] -->\n## 前言\n\n表：前言表\n\n{table}\n### 编写说明\n\n\
+             ## 研究背景\n\n表：背景表\n\n{table}\n### 基本情况\n\n\
+             <!-- [不编号] -->\n### 附带说明\n\n### 主要问题\n\n\
+             <!-- [不编号] -->\n## 结束语\n\n表：结束表\n\n{table}"
+        ));
+        assert!(text.contains("前言"), "{text}");
+        assert!(text.contains("编写说明"), "{text}");
+        assert!(!text.contains("1.1 编写说明"), "{text}");
+        assert!(text.contains("第1章　研究背景"), "前言不占章号：{text}");
+        assert!(text.contains("1.1 基本情况"), "{text}");
+        assert!(!text.contains("1.2 附带说明"), "{text}");
+        assert!(text.contains("1.2 主要问题"), "不编号的节不占节号：{text}");
+        assert!(
+            text.contains("表 1 \n前言表") || text.contains("表 1 前言表"),
+            "{text}"
+        );
+        assert!(text.contains("表 1.1 "), "{text}");
+        assert!(text.contains("表 2 "), "结束语接着前言的流水号：{text}");
+    }
+
+    /// 导航大纲：部分与章同级，带"第一部分"；不编号的章与节没有编号。
+    #[test]
+    fn the_outline_lists_parts_and_unnumbered_headings() {
+        let entries = outline(concat!(
+            "<!-- [不编号] -->\n## 前言\n\n",
+            "<!-- [部分] -->\n\n# 现状分析\n\n## 研究背景\n\n### 研究方法\n",
+        ));
+        let shape: Vec<(u8, Option<String>, String)> = entries
+            .iter()
+            .map(|entry| (entry.level, entry.number.clone(), entry.text.clone()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (2, None, "前言".to_string()),
+                (
+                    2,
+                    Some("第一部分\u{3000}".to_string()),
+                    "现状分析".to_string()
+                ),
                 (2, Some("第1章\u{3000}".to_string()), "研究背景".to_string()),
                 (3, Some("1.1 ".to_string()), "研究方法".to_string()),
             ]

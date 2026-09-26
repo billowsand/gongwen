@@ -1288,11 +1288,13 @@ pub(crate) fn parse_numbered_table_marker(line: &str) -> bool {
 }
 
 /// 研究报告的区段，与 mdx 的 `MarkerKind` 一一对应。公文只分正文与附件两段
-/// （见 [`MarkdownSection`]），研究报告多出摘要、版本变更记录和参考文献。
+/// （见 [`MarkdownSection`]），研究报告多出摘要、部分、版本变更记录和参考文献。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResearchSection {
     Abstract,
     Body,
+    /// 部分段：段内每个 `#` 开一个部分（`\part`，"第一部分"），`##` 起与正文段相同。
+    Part,
     Appendix,
     ChangeLog,
     References,
@@ -1304,6 +1306,7 @@ impl ResearchSection {
         match self {
             Self::Abstract => "摘要",
             Self::Body => "正文",
+            Self::Part => "部分",
             Self::Appendix => "附录",
             Self::ChangeLog => "版本变更记录",
             Self::References => "参考文献",
@@ -1328,16 +1331,104 @@ pub(crate) fn parse_research_marker(line: &str) -> Option<ResearchSection> {
         "附录" | "附件" | "appendix" | "attachment" => Some(ResearchSection::Appendix),
         "版本变更记录" | "changelog" | "version" => Some(ResearchSection::ChangeLog),
         "参考文献" | "references" | "bibliography" => Some(ResearchSection::References),
+        "部分" | "part" => Some(ResearchSection::Part),
         _ => None,
     }
+}
+
+/// 识别不编号标记：独占一行的 `<!-- [不编号] -->`（含英文变体）。写法跟着 mdx 的
+/// `common::markers::is_unnumbered` 走。
+///
+/// 标记管紧随其后的那个标题连同它的整棵子树：更深的标题都不编号，遇到同级或
+/// 更高一级的标题（或区段标记）恢复编号。中间只许隔空行。
+pub(crate) fn parse_unnumbered_marker(line: &str) -> bool {
+    let Some(inner) = line
+        .trim()
+        .strip_prefix("<!--")
+        .and_then(|rest| rest.strip_suffix("-->"))
+    else {
+        return false;
+    };
+    matches!(
+        inner
+            .trim()
+            .trim_start_matches(['[', '【'])
+            .trim_end_matches([']', '】'])
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "不编号" | "unnumbered" | "nonumber" | "no-number" | "no_number"
+    )
+}
+
+/// 研究报告里不编号标记的落点，照 mdx `parser::parse` 的判定走一遍源码。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct UnnumberedScan<'a> {
+    /// 落在不编号子树里的标题，每条是 `#` 之后的原文（行尾锚点还在）。
+    pub(crate) headings: Vec<&'a str>,
+    /// 后面紧跟的不是标题、因而不生效的标记条数。
+    pub(crate) dangling: usize,
+    /// 标记紧贴在报告题名上：题名归封面、导出时整行拿掉，标记就落到了下一个标题上。
+    pub(crate) on_title: bool,
+}
+
+/// 扫一遍研究报告源码，找出不编号标记管到的标题。
+///
+/// 报告题名（正文区段的第一个 `#`）在交给 mdx 之前就被拿掉了，所以它既不
+/// 接收标记、也不打断子树——与导出时 mdx 看到的源码一致。
+pub(crate) fn research_unnumbered_headings(text: &str) -> UnnumberedScan<'_> {
+    let mut scan = UnnumberedScan::default();
+    let mut section = ResearchSection::Body;
+    let mut title_seen = false;
+    let mut pending = false;
+    let mut root: Option<usize> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if parse_unnumbered_marker(trimmed) {
+            pending = true;
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(next) = parse_research_marker(trimmed) {
+            section = next;
+            root = None;
+        }
+        let level = trimmed.len() - trimmed.trim_start_matches('#').len();
+        if level == 0 {
+            scan.dangling += usize::from(std::mem::take(&mut pending));
+            continue;
+        }
+        let heading = trimmed[level..].trim();
+        if section == ResearchSection::Body && level == 1 && !title_seen {
+            title_seen = true;
+            scan.on_title |= pending;
+            continue;
+        }
+        let covered = if std::mem::take(&mut pending) {
+            root = Some(level);
+            true
+        } else if root.is_some_and(|root| level > root) {
+            true
+        } else {
+            root = None;
+            false
+        };
+        if covered {
+            scan.headings.push(heading);
+        }
+    }
+    scan.dangling += usize::from(pending);
+    scan
 }
 
 /// 研究报告正文区段里的 `#` 标题，按出现顺序，每条是 `# ` 之后的原文
 /// （行尾锚点还在，取用的一方自己按需剥）。
 ///
 /// 正文区的 `#` 是报告题名：印在封面上，正文纸上不排第二遍，整篇至多一个。
-/// 附录区的 `#` 是附录自己的章标题，摘要、版本变更记录、参考文献区段里的标题
-/// 另有归属，都不在内——所以这里必须跟着区段标记走一遍，不能只数行首的 `# `。
+/// 附录区的 `#` 是附录自己的章标题，部分区的 `#` 是部分（`\part`），摘要、
+/// 版本变更记录、参考文献区段里的标题另有归属，都不在内——所以这里必须跟着区段标记走一遍，不能只数行首的 `# `。
 pub(crate) fn research_report_titles(text: &str) -> Vec<&str> {
     let mut section = ResearchSection::Body;
     let mut titles = Vec::new();
@@ -1555,6 +1646,42 @@ mod compact_style_tests {
         assert!(blocks.iter().zip(flags).any(|(block, selected)| {
             selected && matches!(block, MarkdownBlock::Heading(3, text) if text == "子项")
         }));
+    }
+}
+
+#[cfg(test)]
+mod research_marker_tests {
+    use super::*;
+
+    #[test]
+    fn part_marker_is_a_research_section_and_parts_are_not_report_titles() {
+        assert_eq!(
+            parse_research_marker("<!-- 【部分】 -->"),
+            Some(ResearchSection::Part)
+        );
+        assert_eq!(
+            research_report_titles("# 报告\n\n<!-- [部分] -->\n\n# 现状分析\n\n## 背景\n"),
+            vec!["报告"]
+        );
+    }
+
+    /// 与 mdx `parser::parse` 同一套判定：标记管紧随标题的子树，报告题名先被拿掉。
+    #[test]
+    fn unnumbered_scan_follows_the_mdx_parser() {
+        assert!(parse_unnumbered_marker("<!--【不编号】-->"));
+        assert!(!parse_unnumbered_marker("<!-- [编号] -->"));
+        let scan = research_unnumbered_headings(concat!(
+            "<!-- [不编号] -->\n# 报告\n\n",
+            "## 前言 {#chap:qy}\n\n### 说明\n\n## 研究背景\n\n",
+            "<!-- [不编号] -->\n\n段落。\n\n",
+            "<!-- [部分] -->\n<!-- [不编号] -->\n# 总论\n\n## 概述\n\n# 分论\n",
+        ));
+        assert!(scan.on_title);
+        assert_eq!(scan.dangling, 1);
+        assert_eq!(
+            scan.headings,
+            vec!["前言 {#chap:qy}", "说明", "总论", "概述"]
+        );
     }
 }
 

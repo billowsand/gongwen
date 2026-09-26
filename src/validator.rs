@@ -62,10 +62,12 @@ fn research_title_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<St
 /// 研究报告行内标记的核对：悬空交叉引用在 PDF 里会印成 `??`，重复锚点的编号
 /// 以先到的为准，缺键的文献引用印出来是 `[?]`——都提前在这里说出来。
 fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<String>) {
-    // 挂在报告题名上的锚点不生效（见 [`research_title_warnings`]），不能算数：
-    // 引到它的 `{@id}` 照样要报悬空，否则预览印 `??`、校验却说没事。
+    // 挂在报告题名、不编号标题上的锚点不生效（见 [`research_title_warnings`]、
+    // [`research_unnumbered_warnings`]），不能算数：引到它的 `{@id}` 照样要报
+    // 悬空，否则预览印 `??`、校验却说没事。
     let on_title: Vec<&str> = export::research_report_titles(text)
         .into_iter()
+        .chain(export::research_unnumbered_headings(text).headings)
         .filter_map(|line| export::crossref::split_label(line).1)
         .collect();
     // 一趟走完：交叉引用要对照的去重清单，和重复定义的计数，都出自这一张表。
@@ -109,6 +111,27 @@ fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<Str
     }
 }
 
+/// 不编号标记的三条检查：标记要紧贴一个标题，不能挂在报告题名上，管到的
+/// 标题不占编号、锚点挂上去引不出号。
+fn research_unnumbered_warnings(text: &str, warnings: &mut Vec<String>) {
+    let scan = export::research_unnumbered_headings(text);
+    if scan.dangling > 0 {
+        warnings.push("不编号标记“<!-- [不编号] -->”后面应紧跟一个标题，否则不生效".into());
+    }
+    if scan.on_title {
+        warnings.push(
+            "不编号标记不能写在报告题名（#）前：题名印在封面上，标记会落到下一个标题上".into(),
+        );
+    }
+    for heading in scan.headings {
+        if let Some(id) = export::crossref::split_label(heading).1 {
+            warnings.push(format!(
+                "不编号的标题不占编号，锚点 {{#{id}}} 挂在它上面引不出编号"
+            ));
+        }
+    }
+}
+
 /// 研究报告的区段结构：附件标识与附录一一对应，不编号的区段要自带标题。
 ///
 /// 附件的写法与公文统一——每加一份附件就写一个附件标识。mdx 那边两种写法都编
@@ -144,6 +167,8 @@ fn research_section_warnings(text: &str, warnings: &mut Vec<String>) {
             }
             // 摘要的标题由 `\begin{abstract}` 自己排，一个不写也不缺题。
             Section::Abstract => {}
+            // 部分段数的是部分（`#`），章照正文段的规矩走，不必另查。
+            Section::Part => *chapters += usize::from(level == 1),
             _ if level <= 2 => *chapters += 1,
             _ => {}
         }
@@ -159,6 +184,12 @@ fn research_section_warnings(text: &str, warnings: &mut Vec<String>) {
     }
     if appendices.clone().any(|(_, chapters)| *chapters == 0) {
         warnings.push("附件标识之后应写“## 附录标题”".into());
+    }
+    if spans
+        .iter()
+        .any(|(section, parts)| *section == Section::Part && *parts == 0)
+    {
+        warnings.push("部分标识“<!-- [部分] -->”之后应写“# 部分标题”，每个 # 开一个部分".into());
     }
     for (section, _) in spans.iter().filter(|(section, chapters)| {
         matches!(section, Section::ChangeLog | Section::References) && *chapters == 0
@@ -240,6 +271,7 @@ pub fn validate(
         }
         research_mark_warnings(input, text, &mut warnings);
         research_section_warnings(text, &mut warnings);
+        research_unnumbered_warnings(text, &mut warnings);
     } else {
         if body_h1_count == 0 {
             warnings.push("缺少一级标题，请在导出前补充“# 标题”".into());
@@ -1250,6 +1282,82 @@ mod tests {
             !separated.iter().any(|warning| warning.contains("附录")),
             "每份附录各带标识就不该再提示：{separated:?}"
         );
+    }
+
+    fn research_input() -> DraftInput {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+        input
+    }
+
+    /// 部分标识之后要有 `#`；部分段里的 `#` 不算报告题名。
+    #[test]
+    fn research_parts_want_a_heading_and_are_not_report_titles() {
+        let input = research_input();
+        let good = validate(
+            &input,
+            "# 某某问题研究报告\n\n<!-- [部分] -->\n\n# 现状分析\n\n## 研究背景\n\n正文。\n\n# 对策建议\n\n## 总体思路\n\n正文。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !good
+                .iter()
+                .any(|warning| warning.contains("部分") || warning.contains("报告题名")),
+            "{good:?}"
+        );
+        let empty = validate(
+            &input,
+            "## 研究背景\n\n正文。\n\n<!-- [部分] -->\n\n## 总体思路\n\n正文。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            empty
+                .iter()
+                .any(|warning| warning.contains("之后应写“# 部分标题”")),
+            "{empty:?}"
+        );
+    }
+
+    /// 不编号标记：悬空、挂在题名上、不编号标题带锚点，都要说出来；引到那个
+    /// 锚点的 `{@id}` 按悬空报。
+    #[test]
+    fn research_unnumbered_marker_misuse_is_flagged() {
+        let input = research_input();
+        let good = validate(
+            &input,
+            "# 某某问题研究报告\n\n<!-- [不编号] -->\n## 前言\n\n正文。\n\n## 研究背景\n\n正文。\n",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !good.iter().any(|warning| warning.contains("不编号")),
+            "{good:?}"
+        );
+
+        let warnings = validate(
+            &input,
+            concat!(
+                "<!-- [不编号] -->\n# 某某问题研究报告\n\n",
+                "<!-- [不编号] -->\n## 前言 {#chap:qy}\n\n见{@chap:qy}。\n\n",
+                "<!-- [不编号] -->\n正文。\n",
+            ),
+            &[],
+            &rules(),
+        );
+        for expected in [
+            "后面应紧跟一个标题",
+            "不能写在报告题名（#）前",
+            "锚点 {#chap:qy} 挂在它上面引不出编号",
+            "交叉引用 {@chap:qy} 没有对应的锚点",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(expected)),
+                "缺 {expected}：{warnings:?}"
+            );
+        }
     }
 
     /// 版本变更记录、参考文献的标题由区段里的首个标题充当，缺了 PDF 里就是无题的。

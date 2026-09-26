@@ -96,6 +96,7 @@ const RESEARCH_LINE_PT: f32 = 24.0;
 // `\chapter*` 都写死 `\zihao{-2}`（18bp）。封面的文件类型才是 `\zihao{2}`，
 // 所以两者各占一个常量，不再共用。
 const RESEARCH_CHAPTER_PT: f32 = 18.0; // 章标题，小二
+const RESEARCH_PART_PT: f32 = 24.0; // 部分标题，小一
 const RESEARCH_CAPTION_PT: f32 = 12.0; // 图表题注，小四
 
 /// 缩放后的版式尺寸，单位都是 egui 逻辑像素。

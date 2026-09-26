@@ -499,12 +499,19 @@ impl DraftPage<'_> {
     /// 把区段标记（`<!-- [正文] -->` 等）插入审校稿：插到光标所在行的行首，
     /// 从没点进过编辑框时追加到文末。标记必须独占一行导出器才认，
     /// 正文等区段标记全篇只允许一个；附件与附录标记可重复插入，
-    /// 每次都代表一份新材料。
+    /// 每次都代表一份新材料；不编号标记每个不编号的标题前各写一个，部分标记
+    /// 从别的区段切回部分段时也要再写一次，两者同样可重复。
     pub(crate) fn insert_section_marker(&mut self, ctx: &egui::Context, marker: &str, label: &str) {
         if self.doc.read_only() {
             return;
         }
-        if !["<!-- [附件] -->", "<!-- [附录] -->"].contains(&marker)
+        if ![
+            "<!-- [附件] -->",
+            "<!-- [附录] -->",
+            "<!-- [部分] -->",
+            "<!-- [不编号] -->",
+        ]
+        .contains(&marker)
             && self
                 .doc
                 .generated_markdown
