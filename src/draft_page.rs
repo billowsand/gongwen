@@ -247,9 +247,6 @@ impl ExportLinks {
 pub(crate) const TOOLBAR_CONTROL_HEIGHT: f32 = 28.0;
 
 const SCREEN_PT: f32 = 96.0 / 72.0;
-/// 一帧内宽度变化超过这么多点，就当成跳变而非拖动：拖分隔条一帧只走几个像素，
-/// 而切换显示方式、窗口最大化是一步到位的，没有"连续缩放"可言。
-const DRAG_STEP_MAX: f32 = 64.0;
 
 const OFFICIAL_PAGE_WIDTH: f32 = 595.28 * SCREEN_PT;
 const OFFICIAL_PAGE_HEIGHT: f32 = 841.89 * SCREEN_PT;
@@ -377,12 +374,8 @@ pub(crate) struct DraftSession {
     pub(crate) preview_zoom: Option<f32>,
     /// 上一帧自适应算出的倍率，用作手动加减档的起点。
     pub(crate) preview_fit_scale: f32,
-    /// 版面上一次"落定"时所用的缩放倍率。拖动分隔条、缩放窗口的过程中它保持
-    /// 不变，让字号恒定、排版缓存全部命中；真正的视觉缩放交给层变换。
-    /// 0 表示还没排过，第一帧直接按目标倍率落定。
-    pub(crate) preview_layout_scale: f32,
-    /// 上一帧量到的预览可视宽度，用来判断宽度是否还在变化。
-    pub(crate) preview_last_width: f32,
+    /// 拖动分隔条、缩放窗口时冻结版面的缩放状态（见 `preview::freeze`）。
+    pub(crate) preview_freeze: crate::preview::ScaleFreeze,
     /// 公文预览滚动区上一帧的滚动位置与内容总高。右缘的导航刻度靠它把标题的
     /// 版面位置换算成刻度条上的位置，也靠它判断当前滚到了哪一节。
     pub(crate) preview_scroll: PreviewScroll,
@@ -548,8 +541,7 @@ impl DraftSession {
             clear_review_confirm: false,
             preview_zoom: None,
             preview_fit_scale: 1.0,
-            preview_layout_scale: 0.0,
-            preview_last_width: 0.0,
+            preview_freeze: crate::preview::ScaleFreeze::default(),
             preview_scroll: PreviewScroll::default(),
             preview_anchor: None,
             pending_source_jump: None,
@@ -2425,14 +2417,14 @@ mod split_resize_tests {
         // egui 要一两帧才量准滚动区，先热一下再取基准。
         harness.frame(900.0);
         harness.frame(900.0);
-        let settled = harness.doc.preview_layout_scale;
+        let settled = harness.doc.preview_freeze.layout_scale;
         assert!(settled > 0.0, "首帧应当直接落定");
 
         // 连续改变宽度：排版缩放不许动。
         for i in 1..=20 {
             harness.frame(900.0 + i as f32 * 3.7);
             assert_eq!(
-                harness.doc.preview_layout_scale, settled,
+                harness.doc.preview_freeze.layout_scale, settled,
                 "第 {i} 帧宽度仍在变，版面缩放不应重排"
             );
         }
@@ -2453,14 +2445,14 @@ mod split_resize_tests {
         for i in 1..=10 {
             harness.frame(900.0 + i as f32 * 3.7);
         }
-        let frozen = harness.doc.preview_layout_scale;
+        let frozen = harness.doc.preview_freeze.layout_scale;
         let shown = harness.doc.preview_fit_scale;
         assert_ne!(frozen, shown, "拖动中两者本就该不同");
 
         // 松手：宽度不再变化。
         harness.frame(900.0 + 10.0 * 3.7);
         assert_eq!(
-            harness.doc.preview_layout_scale, shown,
+            harness.doc.preview_freeze.layout_scale, shown,
             "落定帧必须按精确倍率重排"
         );
     }
@@ -2504,14 +2496,14 @@ mod split_resize_tests {
         let mut dragging = Harness::new();
         dragging.frame(width - 40.0);
         dragging.frame(width - 40.0);
-        let frozen = dragging.doc.preview_layout_scale;
+        let frozen = dragging.doc.preview_freeze.layout_scale;
         let actual = dragging.paper(width);
         assert_ne!(
-            dragging.doc.preview_layout_scale, 0.0,
+            dragging.doc.preview_freeze.layout_scale, 0.0,
             "应当仍冻结在旧倍率上"
         );
         assert_eq!(
-            dragging.doc.preview_layout_scale, frozen,
+            dragging.doc.preview_freeze.layout_scale, frozen,
             "这一帧宽度在变，不应重排"
         );
 
@@ -2560,7 +2552,7 @@ mod split_resize_tests {
         harness.frame(900.0);
         harness.frame(1400.0);
         assert_eq!(
-            harness.doc.preview_layout_scale, harness.doc.preview_fit_scale,
+            harness.doc.preview_freeze.layout_scale, harness.doc.preview_fit_scale,
             "一步到位的跳变应当立即按精确倍率重排"
         );
     }
@@ -2577,7 +2569,7 @@ mod split_resize_tests {
         for i in 0..40 {
             harness.frame(700.0 + i as f32);
         }
-        let frozen = harness.doc.preview_layout_scale;
+        let frozen = harness.doc.preview_freeze.layout_scale;
 
         let mut times = Vec::new();
         let mut rebuilds = 0;
@@ -2586,7 +2578,7 @@ mod split_resize_tests {
             let (elapsed, rebuilt) = harness.frame(700.0 + i as f32 * 3.7);
             times.push(elapsed);
             rebuilds += u32::from(rebuilt);
-            if harness.doc.preview_layout_scale != frozen {
+            if harness.doc.preview_freeze.layout_scale != frozen {
                 relayouts += 1;
             }
         }

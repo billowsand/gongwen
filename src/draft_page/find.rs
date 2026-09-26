@@ -46,6 +46,8 @@ pub(crate) struct DraftDiffState {
     pub(crate) preview_target: Option<Range<usize>>,
     /// 上一帧右栏预览里悬停的变更，左栏据此描边。
     pub(crate) preview_hover: Option<usize>,
+    /// 拖动分隔条、收起时间轴时冻结右栏版面的缩放状态（见 `preview::freeze`）。
+    pub(crate) preview_freeze: crate::preview::ScaleFreeze,
     /// 对照基准（换稿件 / 换基准版时读一次库）。
     pub(crate) baseline: Option<super::version_diff::Baseline>,
     /// 当前正文聚成的变更块（可编辑统一 diff 的数据）。

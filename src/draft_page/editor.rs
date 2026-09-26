@@ -5,11 +5,11 @@
 
 use crate::app::visible_rows;
 use crate::draft_page::{
-    DRAG_STEP_MAX, DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH,
-    OFFICIAL_PAGE_HEIGHT, OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH,
-    PreviewMode, PreviewScroll, continue_ordered_list, editor_cursor, editor_selection,
-    is_table_separator_line, is_table_source_line, jump_to_source, markdown_heading_level,
-    markdown_matches_mode, select_source_range, table_column_count,
+    DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH, OFFICIAL_PAGE_HEIGHT,
+    OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH, PreviewMode,
+    PreviewScroll, continue_ordered_list, editor_cursor, editor_selection, is_table_separator_line,
+    is_table_source_line, jump_to_source, markdown_heading_level, markdown_matches_mode,
+    select_source_range, table_column_count,
 };
 use crate::export;
 use crate::highlight::ordered_list_lines;
@@ -752,83 +752,28 @@ impl DraftPage<'_> {
                     .as_ref()
                     .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown));
 
-                // —— 宽度还在变的帧里不重排版面 ——
-                // 自适应缩放是窗格宽度的连续函数，宽度每帧变一点，字号就每帧
-                // 全新：galley 缓存全部落空，上千个汉字要按新字号重新栅格化进
-                // 字体图集；图集一装满，epaint 会把整套字体连同缓存推倒重建、
-                // 重传整张纹理（fonts.rs 的 fill_ratio > 0.8 分支）。这正是拖
-                // 动分隔条时那一下下的顿挫——它是尖峰，不是普遍变慢，所以把字
-                // 号量化成档位只能让它变稀，消不掉。
-                //
-                // 改成：宽度还在变的这些帧，版面沿用上一次落定的缩放（字号恒
-                // 定、缓存全命中、图集一动不动），视觉上的缩放交给一次层变换连
-                // 续完成——变换系数是浮点，要多连续有多连续，一格都不跳。宽度
-                // 一停下来就按精确缩放重排一次，文字随即恢复锐利。
-                let visible = ui
-                    .clip_rect()
-                    .intersect(ui.ctx().input(|input| input.content_rect()));
-                let target = preview::fit_scale(visible.width(), self.doc.preview_zoom);
-                // 只有"拖动幅度"的宽度变化才值得冻结版面：分隔条一帧走几个像素，
-                // 中间那些帧连起来才是一个连续动作。首帧（滚动区还没量准，可视宽
-                // 度是无穷大）、切换显示方式、窗口最大化这类一步到位的跳变没有
-                // 连续过程可言，直接按精确倍率重排，省得白白糊一帧。
-                let step = (visible.width() - self.doc.preview_last_width).abs();
-                let settled =
-                    !(0.5..=DRAG_STEP_MAX).contains(&step) || self.doc.preview_layout_scale <= 0.0;
-                self.doc.preview_last_width = visible.width();
-                if settled {
-                    self.doc.preview_layout_scale = target;
-                }
-                let layout_scale = self.doc.preview_layout_scale;
-                let ratio = target / layout_scale;
-                // 以可视区顶边中点为支点：纸张本来就横向居中于 viewport，绕这个
-                // 点缩放后依旧严丝合缝地居中，顶部那一行也钉在原处不漂。
-                let transform = (!settled && (ratio - 1.0).abs() > 1e-4).then(|| {
-                    let pivot = egui::pos2(visible.center().x, visible.top()).to_vec2();
-                    egui::emath::TSTransform::from_translation(pivot)
-                        * egui::emath::TSTransform::from_scaling(ratio)
-                        * egui::emath::TSTransform::from_translation(-pivot)
-                });
-
-                // 变换会把裁剪矩形一并缩放，先按逆变换预补偿，变换之后正好落回
-                // 真正的可视区，内容不会被切掉或漏出。
-                let clip = ui.clip_rect();
-                if let Some(transform) = transform {
-                    ui.set_clip_rect(transform.inverse().mul_rect(clip));
-                }
-                // 只圈住预览自己发出的这段图形。滚动条是 ScrollArea 在这段范围
-                // 之外画的，因此不会跟着一起缩放。
-                let layer = ui.layer_id();
-                let first = ui.painter().add(egui::Shape::Noop);
-
-                let output = preview::official_preview(
+                // 宽度还在变的帧里不重排版面，缩放交给层变换（见 `preview::freeze`）。
+                let frozen = preview::show_frozen(
                     ui,
-                    &self.doc.draft,
-                    &display,
-                    &self.doc.generated_markdown,
-                    preview::PreviewScale {
-                        zoom: Some(layout_scale),
-                        // 裁剪矩形被预补偿过，量出来会偏窄，这里给真实窗格宽度。
-                        viewport: Some(visible.width()),
+                    &mut self.doc.preview_freeze,
+                    self.doc.preview_zoom,
+                    |ui, scale| {
+                        preview::official_preview(
+                            ui,
+                            &self.doc.draft,
+                            &display,
+                            &self.doc.generated_markdown,
+                            scale,
+                            anchor.as_ref(),
+                            self.doc.pending_render_jump,
+                            &self.config.numbering,
+                            self.config.show_preview_line_numbers,
+                            &crate::visual_diff::ElementMarks::default(),
+                        )
                     },
-                    anchor.as_ref(),
-                    self.doc.pending_render_jump,
-                    &self.config.numbering,
-                    self.config.show_preview_line_numbers,
-                    &crate::visual_diff::ElementMarks::default(),
                 );
-
-                if let Some(transform) = transform {
-                    let last = ui.painter().add(egui::Shape::Noop);
-                    ui.ctx().graphics_mut(|graphics| {
-                        graphics
-                            .entry(layer)
-                            .transform_range(first, last, transform);
-                    });
-                    ui.set_clip_rect(clip);
-                    // 拖动一停，还需要再来一帧才能发现"宽度没变"并按精确缩放重排。
-                    ui.ctx().request_repaint();
-                }
+                let output = frozen.inner;
+                let target = frozen.target;
 
                 self.doc.pending_render_jump = false;
                 // 加减档以"眼睛看到的倍率"为起点，而不是本帧用来排版的那个。

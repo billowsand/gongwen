@@ -480,6 +480,7 @@ impl DraftPage<'_> {
         let display = UnitDisplay::new(&self.config.vocabulary);
         let mut output = None;
         let mut hovered = None;
+        let freeze = &mut state.preview_freeze;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -487,18 +488,23 @@ impl DraftPage<'_> {
                     .id_salt("version_diff_preview_scroll")
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        output = Some(preview::official_preview(
-                            ui,
-                            &self.doc.draft,
-                            &display,
-                            &view.doc.markdown,
-                            preview::PreviewScale::zoom(None),
-                            anchor.as_ref(),
-                            scroll,
-                            &self.config.numbering,
-                            false,
-                            &view.doc.elements,
-                        ));
+                        // 拖分隔条、收起时间轴时宽度逐帧在变：沿用落定的版面，只做
+                        // 层变换，否则长稿每帧都要按新字号整篇重排。
+                        let frozen = preview::show_frozen(ui, freeze, None, |ui, scale| {
+                            preview::official_preview(
+                                ui,
+                                &self.doc.draft,
+                                &display,
+                                &view.doc.markdown,
+                                scale,
+                                anchor.as_ref(),
+                                scroll,
+                                &self.config.numbering,
+                                false,
+                                &view.doc.elements,
+                            )
+                        });
+                        output = Some(frozen.inner);
                         hovered = preview::hovered_source(ui.ctx());
                         ui.add_space(12.0);
                     });
@@ -1342,11 +1348,15 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.frame_sized(1600.0, events)
+        }
+
+        fn frame_sized(&mut self, width: f32, events: Vec<egui::Event>) -> egui::FullOutput {
             self.clock += 0.05;
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(1600.0, 1000.0),
+                    egui::vec2(width, 1000.0),
                 )),
                 time: Some(self.clock),
                 events,
@@ -2119,6 +2129,32 @@ mod tests {
             "导出花脸稿必须是 v1→工作区内容"
         );
         assert!(cached.markdown.contains("工作区独有的一段。"));
+    }
+
+    /// 窗口宽度逐帧在变（拖分隔条、收起时间轴）时，右栏沿用落定的版面缩放，
+    /// 不按新字号整篇重排；宽度停下来再按精确倍率落定。
+    #[test]
+    fn preview_scale_stays_frozen_while_the_width_is_changing() {
+        let mut harness = Harness::new();
+        for _ in 0..3 {
+            harness.frame_sized(1600.0, Vec::new());
+        }
+        let settled = harness.doc.draft_diff.preview_freeze.layout_scale;
+        assert!(settled > 0.0, "首帧就该落定一个倍率");
+        for step in 1..=5 {
+            harness.frame_sized(1600.0 + step as f32 * 4.0, Vec::new());
+            assert_eq!(
+                harness.doc.draft_diff.preview_freeze.layout_scale, settled,
+                "拖动中版面缩放不该跟着变"
+            );
+        }
+        // 宽度停下：下一帧量到"没变"，按精确倍率重排。
+        harness.frame_sized(1620.0, Vec::new());
+        harness.frame_sized(1620.0, Vec::new());
+        assert!(
+            harness.doc.draft_diff.preview_freeze.layout_scale > settled,
+            "宽度停下后应按更宽的窗格落定更大的倍率"
+        );
     }
 
     /// 长稿打字的帧耗时探针（人工运行：`cargo test --release --bin gongwen-assistant

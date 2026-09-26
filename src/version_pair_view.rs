@@ -5,7 +5,7 @@
 
 use crate::diff::{self, ContentSnapshot, ManuscriptDiff};
 use crate::diff_view::{self, DiffViewState};
-use crate::preview::{self, PreviewScale};
+use crate::preview;
 use crate::redline::{self, RedlineDoc};
 use crate::units::UnitDisplay;
 use crate::version_link::ChangeLinks;
@@ -49,6 +49,8 @@ pub(crate) struct VersionPairViewState {
     preview_target: Option<Range<usize>>,
     preview_hover: Option<usize>,
     preview_scroll: bool,
+    /// 拖动分隔条时冻结右栏版面的缩放状态（见 `preview::freeze`）。
+    preview_freeze: preview::ScaleFreeze,
 }
 
 impl VersionPairViewState {
@@ -146,6 +148,7 @@ impl VersionPairViewState {
         let preview_target = &mut self.preview_target;
         let preview_hover = &mut self.preview_hover;
         let preview_scroll = &mut self.preview_scroll;
+        let preview_freeze = &mut self.preview_freeze;
         let focus = (total > 0).then(|| view.focus().min(total - 1));
         let hover_from_preview = *preview_hover;
 
@@ -252,18 +255,22 @@ impl VersionPairViewState {
                     .id_salt(("version_pair_preview", cache_key))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let output = preview::official_preview(
-                            ui,
-                            &new.snapshot,
-                            display,
-                            &redline.markdown,
-                            PreviewScale::zoom(None),
-                            anchor.as_ref(),
-                            scroll,
-                            numbering,
-                            false,
-                            &redline.elements,
-                        );
+                        // 拖分隔条时沿用落定的版面，只做层变换（见 `preview::freeze`）。
+                        let output = preview::show_frozen(ui, preview_freeze, None, |ui, scale| {
+                            preview::official_preview(
+                                ui,
+                                &new.snapshot,
+                                display,
+                                &redline.markdown,
+                                scale,
+                                anchor.as_ref(),
+                                scroll,
+                                numbering,
+                                false,
+                                &redline.elements,
+                            )
+                        })
+                        .inner;
                         let hovered = preview::hovered_source(ui.ctx());
                         ui.add_space(12.0);
                         (output.clicked, hovered)

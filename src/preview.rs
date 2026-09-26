@@ -9,6 +9,7 @@ use eframe::egui::FontId;
 use std::cell::RefCell;
 use std::ops::Range;
 
+mod freeze;
 mod gutter;
 mod header;
 mod layout;
@@ -21,6 +22,7 @@ mod render;
 mod research;
 mod tail;
 
+pub(crate) use freeze::{ScaleFreeze, show_frozen};
 pub(crate) use gutter::Gutter;
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
