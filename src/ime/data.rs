@@ -80,6 +80,16 @@ pub(crate) fn fuma_path(scheme: FumaScheme) -> Option<PathBuf> {
     Some(dir.join(file))
 }
 
+/// 小鹤音形码表的存放路径（使用者自己导入的，转成了 UTF-8）。
+///
+/// **不随包分发**：码表许可「只限私人使用，不得修改和发布」，只能由使用者自己导入。
+/// 文件不在就当音形关着。
+pub(crate) fn yinxing_path() -> Option<PathBuf> {
+    let dir = learning_dir()?.join("yinxing");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("flypy-yinxing.txt"))
+}
+
 /// 当前构建是否打包了「内置示例小鹤辅码」内容。
 ///
 /// 见 `Cargo.toml` 的 `ime-builtin-xiaohe` feature：默认关闭（发布构建必关），

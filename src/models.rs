@@ -2009,6 +2009,17 @@ pub struct ImeConfig {
     /// 候选窗字号，相对正文字号的百分比：100 / 125 / 150，越界按 100–200 夹住。
     pub candidate_font_percent: u16,
 
+    /// 小鹤音形：缓冲区从空开始敲 1–4 键时，码表里的简码、四码排在候选最前。
+    /// 要双拼选小鹤、并在设置页导入自己的音形码表才真的生效（码表不随包）。
+    pub yinxing: bool,
+
+    /// 开头四码只对应一个词组（二字及以上）时自动上屏。默认关：不加 `'` 直接打整句双拼时，
+    /// 每 4 键都可能撞上某个词组的四码被顶上屏（实测 10 句常用公文错 7 处）。
+    pub yinxing_auto_commit: bool,
+
+    /// 整句打出的三字及以上词有音形码时，状态栏提示一句。
+    pub yinxing_hint: bool,
+
     /// 自定义短语：敲一串字母在固定位置出一段文字（常用套语、单位全称、落款）。
     /// 日期（`rq`）、时间（`sj`）、星期（`xq`）引擎已内置，不必再配。
     pub phrases: Vec<ImePhrase>,
@@ -2054,6 +2065,9 @@ impl Default for ImeConfig {
             page_keys: "[]".to_string(),
             candidate_vertical: false,
             candidate_font_percent: 100,
+            yinxing: false,
+            yinxing_auto_commit: false,
+            yinxing_hint: true,
             phrases: Vec::new(),
         }
     }

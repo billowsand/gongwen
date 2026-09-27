@@ -23,6 +23,7 @@ use super::data;
 use super::engine::{self, Assembly};
 use super::keys::{self, Action, Key, Route};
 use super::lexicon;
+use super::yinxing::Yinxing;
 use crate::lexicon::LexiconTerm;
 use crate::models::ImePhrase;
 
@@ -148,8 +149,14 @@ pub(crate) struct Ime {
     /// 上次把学习数据写盘的时刻。
     last_flush: Instant,
 
-    /// 要交给状态栏的一句话（删了哪个词的学习记录），应用取走即清。
-    notice: Option<String>,
+    /// 要交给状态栏的一句话（删了哪个词的学习记录、音形码提示），应用取走即清。
+    pub(super) notice: Option<String>,
+
+    /// 小鹤音形：码表、词表补码、调频（见 `yinxing`）。
+    pub(super) yinxing: Yinxing,
+
+    /// 这段组句是从空缓冲开始敲的（没有半段上屏过）：只有这样才认音形码。
+    pub(super) fresh: bool,
 
     /// 配置里的自定义短语（原样），见 `phrases`。
     pub(super) phrases: Vec<ImePhrase>,
@@ -181,7 +188,10 @@ impl Ime {
             last_flush: Instant::now(),
             notice: None,
             phrases: Vec::new(),
+            yinxing: Yinxing::default(),
+            fresh: false,
         };
+        ime.load_yinxing();
         ime.apply_fuma();
         ime.refresh_lexicon_marks();
         ime
@@ -343,6 +353,7 @@ impl Ime {
         if let Some(assembly) = self.assembled.as_mut() {
             assembly.engine.flush_learning();
         }
+        self.flush_yinxing();
     }
 
     /// 切中英。状态栏点一下与单击 `Shift` 是同一个开关。
@@ -366,6 +377,7 @@ impl Ime {
     /// 装配附加词库，不用重启。
     pub(crate) fn sync_lexicon(&mut self, terms: &[LexiconTerm]) -> anyhow::Result<usize> {
         let dir = data::dicts_dir().context("无法确定输入法词库目录")?;
+        self.sync_yinxing_lexicon(terms);
         let (tsv, written) = lexicon::build(terms);
         let path = dir.join(lexicon::FILE_NAME);
         std::fs::write(&path, tsv)
@@ -504,7 +516,7 @@ impl Ime {
     }
 
     /// 引擎（不可变）。查询与读组句状态都只要不可变借用。
-    fn engine(&self) -> Option<&Engine> {
+    pub(super) fn engine(&self) -> Option<&Engine> {
         self.assembled.as_ref().map(|assembly| &assembly.engine)
     }
 
@@ -524,6 +536,8 @@ impl Ime {
             full_width: !self.english && self.settings.full_width_punctuation,
             // 辅码表真的装上了才算开着：配了方案但没导入表时，大写字母照旧是临时英文。
             fuma: self.engine().is_some_and(|engine| engine.fuma_enabled()),
+            // `'` 引导整句只为躲开头四码的自动上屏：自动上屏关着就不必，单引号照旧
+            yinxing: self.yinxing_active() && self.settings.yinxing_auto_commit,
         }
     }
 
@@ -548,9 +562,8 @@ impl Ime {
         let Some(engine) = self.engine() else {
             return;
         };
-        let empty = empty_layout(self.settings.page_size);
-        let (preedit, layout) = if engine.composition().is_empty() {
-            (Preedit::default(), empty)
+        let (preedit, mut items) = if engine.composition().is_empty() {
+            (Preedit::default(), Vec::new())
         } else {
             match engine.query() {
                 Ok(query) => (
@@ -558,21 +571,23 @@ impl Ime {
                         text: query.marked_text(),
                         caret: query.marked_cursor(),
                     },
-                    CandidateLayout::new(query.candidates.items.clone(), self.settings.page_size),
+                    query.candidates.items,
                 ),
                 // 拼音切不动（`v`、`Ai` 的 `i` 这类不成音节的键）：拼音串照样要画出来，
-                // 候选是空的。这里**不能**用 `CandidateLayout::default()`——它的每页格数
-                // 是 0，候选窗拿它算页数会除零 panic，整个应用当场退出。
+                // 引擎给不出候选（音形码表可能还有，比如二简 `aq`）。
                 Err(_) => {
                     let composition = engine.composition();
                     let text = composition.text().to_owned();
                     let caret = text[..composition.cursor()].chars().count();
-                    (Preedit { text, caret }, empty)
+                    (Preedit { text, caret }, Vec::new())
                 }
             }
         };
+        self.merge_yinxing(&mut items);
         self.preedit = preedit;
-        self.layout = layout;
+        // 没有候选也按设置里的每页格数建布局，**不能**用 `CandidateLayout::default()`：
+        // 它的每页格数是 0，候选窗拿它算页数会除零 panic，整个应用当场退出。
+        self.layout = CandidateLayout::new(items, self.settings.page_size.max(1));
         if reset_highlight {
             self.highlight = 0;
         }
@@ -693,6 +708,7 @@ impl Ime {
         if action == Action::Passthrough {
             return false;
         }
+        let pushed = matches!(action, Action::Push(_));
         let outcome = self.execute_guarded(action);
         if let Some(text) = outcome.commit {
             // 上屏走 egui 的文本插入通路：在光标处插入、替换选区、进撤销栈，
@@ -700,6 +716,11 @@ impl Ime {
             kept.push(egui::Event::Text(text));
         }
         if outcome.recompose {
+            self.refresh(true);
+        }
+        // 刚敲满开头四码、只对应一个词组：自动上屏
+        if pushed && let Some(text) = self.yinxing_auto_commit() {
+            kept.push(egui::Event::Text(text));
             self.refresh(true);
         }
         outcome.consumed
@@ -732,7 +753,12 @@ impl Ime {
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;
                 };
+                let started = engine.composition().is_empty();
                 engine.push(c);
+                // 从空开始敲的才认音形码；半段上屏后剩下的拼音不算
+                if started {
+                    self.fresh = true;
+                }
                 Outcome::CHANGED
             }
             Action::Backspace => {
@@ -752,27 +778,35 @@ impl Ime {
             }
             Action::CommitHighlighted => {
                 let candidate = self.layout.candidate(self.highlight).cloned();
+                let code = self.yinxing_code();
+                let full_width = self.settings.full_width_punctuation;
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;
                 };
                 // 没有候选（缓冲还没切出音节）时把缓冲原样上屏。
-                let text = match candidate {
-                    Some(candidate) => engine.commit(&candidate),
-                    None => engine.take_raw(),
+                let text = match &candidate {
+                    Some(candidate) => engine.commit(candidate),
+                    None => take_raw_or_quote(engine, full_width),
                 };
+                if let Some(candidate) = &candidate {
+                    self.after_commit(candidate, code.as_deref());
+                }
                 Outcome::commit(text)
             }
             Action::CommitIndex(index) => {
                 let page_size = self.settings.page_size.max(1);
                 let page = self.highlight / page_size;
                 let candidate = self.layout.candidate(page * page_size + index).cloned();
+                let code = self.yinxing_code();
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;
                 };
                 let Some(candidate) = candidate else {
                     return Outcome::PASSTHROUGH;
                 };
-                Outcome::commit(engine.commit(&candidate))
+                let text = engine.commit(&candidate);
+                self.after_commit(&candidate, code.as_deref());
+                Outcome::commit(text)
             }
             Action::Forget(index) => {
                 let page_size = self.settings.page_size.max(1);
@@ -790,10 +824,11 @@ impl Ime {
                 Outcome::CHANGED
             }
             Action::CommitRaw => {
+                let full_width = self.settings.full_width_punctuation;
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;
                 };
-                Outcome::commit(engine.take_raw())
+                Outcome::commit(take_raw_or_quote(engine, full_width))
             }
             Action::FlushRaw => {
                 let Some(engine) = self.engine_mut() else {
@@ -918,6 +953,19 @@ fn forget_notice(text: &str, forgotten: qingjian_core::Forgotten) -> String {
         (false, true) => format!("输入法：已清除「{text}」的学习记录，排序回到词库默认。"),
         (false, false) => format!("输入法：「{text}」没有可删的学习记录（词库自带的词删不掉）。"),
     }
+}
+
+/// 缓冲原样上屏。只有一个 `'` 时（开了音形，`'` 用来引导整句）当它是引号：
+/// 敲了 `'` 又没接着打，要的就是个引号。
+fn take_raw_or_quote(engine: &mut Engine, full_width: bool) -> String {
+    let raw = engine.take_raw();
+    if raw == "'"
+        && full_width
+        && let Some(quote) = engine.punctuate('\'')
+    {
+        return quote.to_owned();
+    }
+    raw
 }
 
 /// 挪拼音光标。高亮与翻页不归这里管。

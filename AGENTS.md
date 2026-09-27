@@ -20,6 +20,9 @@
     导出的附加词库（`dicts/`）、辅码表（`fuma/`）。
   - 辅码（形码）表**不随包**：权利归方案作者、上游未获再分发授权，只能由使用者
     在设置页自己导入。
+  - 小鹤音形码表（简码与开头四码，`src/ime/yinxing.rs`）同样**不随包、不入库**：
+    许可只限私人使用，由使用者导入到 `config_dir()/ime/yinxing/`。需求与取舍见
+    `docs/ime-yinxing-requirements.md`。
 - 模型接入：本机 LM Studio / Ollama，走 OpenAI 兼容接口（`src/lmstudio.rs`、
   `src/rag.rs`、`src/rag_client.rs`）。
 

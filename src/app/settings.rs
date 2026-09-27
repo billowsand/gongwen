@@ -1696,6 +1696,8 @@ impl GongwenApp {
         let has_builtin_xiaohe = crate::ime::Ime::has_builtin_xiaohe();
         // 文件对话框与同步都在布局之后做：放在闭包里会阻塞布局、还要跟 `self.config` 抢借用。
         let mut import_fuma = false;
+        let mut import_yinxing = false;
+        let yinxing_entries = self.ime.yinxing_entries();
         let mut request_builtin_xiaohe = false;
         let mut sync_lexicon = false;
 
@@ -1860,6 +1862,66 @@ impl GongwenApp {
             },
         );
 
+        sub_heading(
+            ui,
+            "小鹤音形",
+            Some(
+                "缓冲区从空开始敲 1–4 键时，码表里的一简、二简、三简与四码排在候选最前，\
+                 空格上屏；不选、接着打就是整句双拼。句中照旧打双拼全码。",
+            ),
+        );
+        ui.checkbox(
+            &mut self.config.ime.yinxing,
+            "启用小鹤音形（简码与开头四码）",
+        );
+        setting_continuation(ui, |ui| {
+            let xiaohe = self.config.ime.shuangpin.trim() == "xiaohe";
+            let (text, color) = match (yinxing_entries, xiaohe) {
+                (_, false) => (
+                    "音形码按小鹤双拼编码：要先把上面的「双拼」选成小鹤。".to_owned(),
+                    theme::warn(),
+                ),
+                (Some(entries), true) => (format!("码表已加载：{entries} 条。"), theme::text_muted()),
+                (None, true) => (
+                    "还没有码表：导入你自己的小鹤音形码表（搜狗自定义短语格式「编码,位置=字词」）。"
+                        .to_owned(),
+                    theme::text_muted(),
+                ),
+            };
+            ui.label(
+                egui::RichText::new(text)
+                    .size(theme::font_sizes::SMALL)
+                    .color(color),
+            );
+            if ui
+                .button("导入音形码表…")
+                .on_hover_text(
+                    "码表权利归小鹤方案作者、只限私人使用：程序只把它存到本机用户目录\n\
+                     （config_dir()/ime/yinxing/），不随安装包分发。",
+                )
+                .clicked()
+            {
+                import_yinxing = true;
+            }
+        });
+        ui.add_enabled_ui(self.config.ime.yinxing, |ui| {
+            ui.checkbox(
+                &mut self.config.ime.yinxing_auto_commit,
+                "开头四码只对应一个词组时自动上屏",
+            )
+            .on_hover_text(
+                "打开后，整句要先敲一个 ' 再打：不然每 4 键都可能撞上某个词组的四码被顶上屏\
+                 （「统一」变「同意」、「任务」变「人物」）。单字四码不自动上屏。",
+            );
+            ui.checkbox(
+                &mut self.config.ime.yinxing_hint,
+                "整句打出的长词有音形码时，在状态栏提示",
+            )
+            .on_hover_text(
+                "比如整句打出「中华人民共和国」，提示它的四码是 vhrg。同一个词最多提示三次。",
+            );
+        });
+
         sub_heading(ui, "标点", None);
         ui.checkbox(
             &mut self.config.ime.full_width_punctuation,
@@ -1902,6 +1964,9 @@ impl GongwenApp {
 
         if import_fuma {
             self.import_fuma_table_dialog();
+        }
+        if import_yinxing {
+            self.import_yinxing_table_dialog();
         }
         if request_builtin_xiaohe {
             self.install_builtin_xiaohe_confirm_window(ui.ctx());
@@ -1982,6 +2047,20 @@ impl GongwenApp {
         match self.ime.import_fuma_table(&path) {
             Ok(words) => self.status = format!("辅码表已导入：{words} 字。"),
             Err(error) => self.status = format!("导入辅码表失败：{error:#}"),
+        }
+    }
+
+    fn import_yinxing_table_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("音形码表", &["txt"])
+            .set_title("选择小鹤音形码表（每行「编码,位置=字词」）")
+            .pick_file()
+        else {
+            return;
+        };
+        match self.ime.import_yinxing_table(&path) {
+            Ok(entries) => self.status = format!("音形码表已导入：{entries} 条。"),
+            Err(error) => self.status = format!("导入音形码表失败：{error:#}"),
         }
     }
 

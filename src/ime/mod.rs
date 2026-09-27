@@ -11,6 +11,7 @@
 //! * `candidates`：候选窗与拼音串。
 //! * `exempt`：不走输入法的文本框（密码、接口地址这类只收 ASCII 的字段）。
 //! * `phrases`：自定义短语（常用套语、单位全称）交给引擎。
+//! * `yinxing`：小鹤音形——简码与开头四码，叠在双拼整句上。
 //!
 //! 词库与语言模型是 `.qj` 数据文件（vendor 自字在输入法，见 `vendor/qingjian/README.md`），
 //! 找得到才启用；找不到就退回系统输入法，不挡用户打字。
@@ -26,6 +27,7 @@ mod keys;
 mod lexicon;
 mod phrases;
 mod session;
+mod yinxing;
 
 pub(crate) use cursor::follow_cursor;
 pub(crate) use exempt::exempt;
@@ -61,6 +63,15 @@ pub(crate) struct ImeSettings {
 
     /// 候选窗字号，相对正文的百分比。
     pub(crate) font_percent: u16,
+
+    /// 小鹤音形：简码与开头四码（要双拼选小鹤、导入码表才真的生效）。
+    pub(crate) yinxing: bool,
+
+    /// 开头四码只对应一个词组时自动上屏（默认关，见 `models::ImeConfig`）。
+    pub(crate) yinxing_auto_commit: bool,
+
+    /// 整句打出的长词有音形码时，状态栏提示一句。
+    pub(crate) yinxing_hint: bool,
 }
 
 impl Default for ImeSettings {
@@ -75,6 +86,9 @@ impl Default for ImeSettings {
             page_keys: ('[', ']'),
             vertical: false,
             font_percent: 100,
+            yinxing: false,
+            yinxing_auto_commit: false,
+            yinxing_hint: true,
         }
     }
 }
@@ -111,7 +125,18 @@ impl ImeSettings {
             page_keys: parse_page_keys(page_keys).unwrap_or(Self::default().page_keys),
             vertical: false,
             font_percent: 100,
+            yinxing: false,
+            yinxing_auto_commit: false,
+            yinxing_hint: true,
         }
+    }
+
+    /// 小鹤音形的三个开关：启用、开头四码唯一自动上屏、编码提示。
+    pub(crate) fn with_yinxing(mut self, enabled: bool, auto_commit: bool, hint: bool) -> Self {
+        self.yinxing = enabled;
+        self.yinxing_auto_commit = auto_commit;
+        self.yinxing_hint = hint;
+        self
     }
 
     /// 候选窗的排法与字号。字号夹在 100%–200%：再小不如正文，再大候选窗就占半屏了。

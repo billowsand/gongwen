@@ -782,3 +782,138 @@ fn candidate_window_follows_the_look_settings() {
         "{large:?}"
     );
 }
+
+/// 小鹤双拼 + 音形码表的输入法：`kdfa` 是开发（双拼全码与二字词四码一样）。
+fn yinxing_ime() -> Ime {
+    let mut ime = mini_ime();
+    ime.apply_settings(ImeSettings {
+        shuangpin: Some(qingjian_core::ShuangpinScheme::Xiaohe),
+        ..ImeSettings::default().with_yinxing(true, true, true)
+    });
+    ime.yinxing
+        .set_table(Some(crate::ime::yinxing::Table::parse(YINXING_TABLE)));
+    ime
+}
+
+const YINXING_TABLE: &str =
+    "d,1=的\nkdfa,1=开发\nvuku,1=知识库\njiyk,1=诘\nlild,1=理论\nlild,2=历朝历代\n";
+
+/// 开头四码只对应一个词组：敲满四键就上屏，不用空格。
+#[test]
+fn a_unique_four_key_word_commits_itself() {
+    let ctx = egui::Context::default();
+    let mut ime = yinxing_ime();
+    focus(&ctx, &mut ime);
+    let mut typed = String::new();
+    for c in "vuku".chars() {
+        typed.push_str(&inserted(&type_char(&ctx, &mut ime, c)));
+    }
+    assert_eq!(typed, "知识库");
+    assert!(ime.preedit.text.is_empty());
+}
+
+/// 单字四码只排首选、不自动上屏；重码也不上屏，接着敲就继续组句。
+#[test]
+fn single_characters_and_duplicates_wait_for_a_choice() {
+    let ctx = egui::Context::default();
+    let mut ime = yinxing_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "jiyk");
+    assert_eq!(ime.layout.candidate(0).map(|c| c.text.as_str()), Some("诘"));
+    assert!(!ime.preedit.text.is_empty(), "单字四码不该自动上屏");
+    let _ = type_char(&ctx, &mut ime, ' ');
+
+    type_str(&ctx, &mut ime, "lild");
+    assert!(!ime.preedit.text.is_empty(), "重码不该自动上屏");
+    let routed = type_char(&ctx, &mut ime, 'k');
+    assert!(inserted(&routed).is_empty(), "第 5 键接着组句");
+    assert!(
+        (0..ime.layout.len()).all(|i| ime.layout.candidate(i).is_none_or(|c| c.text != "理论")),
+        "过了四键码表就不参与"
+    );
+}
+
+/// 一简：敲一键、空格上屏码表里的字。
+#[test]
+fn one_key_short_codes_come_first() {
+    let ctx = egui::Context::default();
+    let mut ime = yinxing_ime();
+    focus(&ctx, &mut ime);
+    let _ = type_char(&ctx, &mut ime, 'd');
+    let routed = type_char(&ctx, &mut ime, ' ');
+    assert_eq!(inserted(&routed), "的");
+}
+
+/// 先敲 `'` 就跳过开头四码；单独一个 `'` 上屏时是引号。
+#[test]
+fn a_leading_apostrophe_skips_the_four_key_codes() {
+    let ctx = egui::Context::default();
+    let mut ime = yinxing_ime();
+    focus(&ctx, &mut ime);
+    let mut typed = String::new();
+    for c in "'kdfa".chars() {
+        typed.push_str(&inserted(&type_char(&ctx, &mut ime, c)));
+    }
+    assert!(typed.is_empty(), "不该自动上屏：{typed}");
+    let routed = type_char(&ctx, &mut ime, ' ');
+    assert_eq!(inserted(&routed), "开发", "按整句双拼出开发");
+
+    let _ = type_char(&ctx, &mut ime, '\'');
+    let routed = type_char(&ctx, &mut ime, ' ');
+    assert_eq!(inserted(&routed), "‘", "单独一个 ' 是引号");
+}
+
+/// 四码重码随使用调频。
+#[test]
+fn four_key_duplicates_follow_usage() {
+    let ctx = egui::Context::default();
+    let mut ime = yinxing_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "lild");
+    let routed = type_char(&ctx, &mut ime, '2');
+    assert_eq!(inserted(&routed), "历朝历代");
+
+    type_str(&ctx, &mut ime, "lild");
+    assert_eq!(
+        ime.layout.candidate(0).map(|c| c.text.as_str()),
+        Some("历朝历代")
+    );
+}
+
+/// 双拼不是小鹤时音形不参与。
+#[test]
+fn yinxing_needs_the_xiaohe_scheme() {
+    let mut ime = yinxing_ime();
+    ime.apply_settings(ImeSettings::default().with_yinxing(true, true, true));
+    assert!(!ime.yinxing_active());
+}
+
+/// 默认不自动上屏：四码词排首选，空格上屏；自动上屏关着时 `'` 照旧是标点。
+#[test]
+fn four_key_words_wait_for_space_by_default() {
+    let ctx = egui::Context::default();
+    let mut ime = yinxing_ime();
+    ime.apply_settings(ImeSettings {
+        shuangpin: Some(qingjian_core::ShuangpinScheme::Xiaohe),
+        ..ImeSettings::default().with_yinxing(true, false, true)
+    });
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "vuku");
+    assert_eq!(
+        ime.layout.candidate(0).map(|c| c.text.as_str()),
+        Some("知识库")
+    );
+    assert!(!ime.preedit.text.is_empty(), "默认不自动上屏");
+    let routed = type_char(&ctx, &mut ime, ' ');
+    assert_eq!(inserted(&routed), "知识库");
+
+    let routed = type_char(&ctx, &mut ime, '\'');
+    assert_eq!(inserted(&routed), "‘");
+}
+
+/// 配置默认关自动上屏。
+#[test]
+fn auto_commit_is_off_by_default() {
+    assert!(!crate::models::ImeConfig::default().yinxing_auto_commit);
+    assert!(!ImeSettings::default().yinxing_auto_commit);
+}

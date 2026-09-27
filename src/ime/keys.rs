@@ -237,6 +237,9 @@ pub(crate) struct Route {
 
     /// 开着双拼辅码：组句中的大写字母是辅码键，进缓冲区而不是当临时英文。
     pub(crate) fuma: bool,
+
+    /// 开着小鹤音形的四码自动上屏：没在组句时的 `'` 开一段组句，用来跳过开头四码、直接打整句。
+    pub(crate) yinxing: bool,
 }
 
 /// 一次按键的分流结果。
@@ -294,6 +297,9 @@ fn route_char(c: char, route: Route, settings: &ImeSettings) -> Action {
         return Action::Insert(c);
     }
     if !route.composing {
+        if c == '\'' && route.yinxing {
+            return Action::Push(c);
+        }
         return route_punctuation(c, route);
     }
     if ('1'..='9').contains(&c) && route.candidates > 0 {
@@ -345,6 +351,7 @@ mod tests {
             english: false,
             full_width: true,
             fuma: false,
+            yinxing: false,
         }
     }
 
@@ -356,6 +363,7 @@ mod tests {
             english: false,
             full_width: true,
             fuma: false,
+            yinxing: false,
         }
     }
 
@@ -614,6 +622,17 @@ mod tests {
             ..idle()
         };
         assert_eq!(char_route('M', english_fuma), Action::Insert('M'));
+    }
+
+    /// 开着音形时，没在组句的 `'` 开一段组句（跳过开头四码）；没开时照旧是标点。
+    #[test]
+    fn apostrophe_starts_a_sentence_when_yinxing_is_on() {
+        let yinxing = Route {
+            yinxing: true,
+            ..idle()
+        };
+        assert_eq!(char_route('\'', yinxing), Action::Push('\''));
+        assert_eq!(char_route('\'', idle()), Action::Punctuate('\''));
     }
 
     /// 翻页键可以配置。

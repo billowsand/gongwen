@@ -653,4 +653,5 @@ pub(crate) fn ime_settings_of(ime: &crate::models::ImeConfig) -> crate::ime::Ime
     .with_fuma(&ime.fuma)
     .with_fuma_hint(&ime.fuma_hint)
     .with_candidate_look(ime.candidate_vertical, ime.candidate_font_percent)
+    .with_yinxing(ime.yinxing, ime.yinxing_auto_commit, ime.yinxing_hint)
 }

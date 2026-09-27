@@ -272,6 +272,9 @@
     "page_keys": "[]",
     "candidate_vertical": false,
     "candidate_font_percent": 100,
+    "yinxing": false,
+    "yinxing_auto_commit": false,
+    "yinxing_hint": true,
     "phrases": []
   },
   "theme": "claude"
