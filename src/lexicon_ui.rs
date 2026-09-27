@@ -557,22 +557,25 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     }
                     let mut pinyin = term.pinyin.clone();
                     let mut code = term.code_override.clone();
-                    let pinyin_changed = ui
-                        .add(
+                    // 标音与短码只收字母，不走应用内输入法（不然敲的拼音会被组成汉字）
+                    let pinyin_changed = crate::ime::exempt(
+                        ui.add(
                             egui::TextEdit::singleline(&mut pinyin)
                                 .hint_text("标音")
                                 .desired_width(78.0),
-                        )
-                        .on_hover_text("多音字的读音，如「chong qing shi」。改过就锁定，重扫不覆盖")
-                        .lost_focus();
-                    let code_changed = ui
-                        .add(
+                        ),
+                    )
+                    .on_hover_text("多音字的读音，如「chong qing shi」。改过就锁定，重扫不覆盖")
+                    .lost_focus();
+                    let code_changed = crate::ime::exempt(
+                        ui.add(
                             egui::TextEdit::singleline(&mut code)
                                 .hint_text("短码")
                                 .desired_width(56.0),
-                        )
-                        .on_hover_text("给天天要打的长词配个自定义短码，留空则按四码规则")
-                        .lost_focus();
+                        ),
+                    )
+                    .on_hover_text("给天天要打的长词配个自定义短码，留空则按四码规则")
+                    .lost_focus();
                     if (pinyin_changed && pinyin != term.pinyin)
                         || (code_changed && code != term.code_override)
                     {

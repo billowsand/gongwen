@@ -921,19 +921,24 @@ impl GongwenApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label("密码");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut dialog.password)
-                                .password(!dialog.show_password)
-                                .desired_width(260.0),
+                        // 密码不走应用内输入法：否则敲的字母会明文出现在候选窗里
+                        crate::ime::exempt(
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.password)
+                                    .password(!dialog.show_password)
+                                    .desired_width(260.0),
+                            ),
                         );
                     });
                     if !importing {
                         ui.horizontal(|ui| {
                             ui.label("确认");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut dialog.confirmation)
-                                    .password(!dialog.show_password)
-                                    .desired_width(260.0),
+                            crate::ime::exempt(
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.confirmation)
+                                        .password(!dialog.show_password)
+                                        .desired_width(260.0),
+                                ),
                             );
                         });
                         ui.weak(

@@ -266,9 +266,11 @@ fn fuma_hint_label(key: &str) -> &'static str {
 }
 
 /// 一行文本输入设置项。
+///
+/// 这里的字段全是接口地址、API Key、代理地址这类只收 ASCII 的值，不走应用内输入法。
 fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
     setting_row(ui, label, None, |ui| {
-        ui.add(theme::field(value, hint, f32::INFINITY));
+        crate::ime::exempt(ui.add(theme::field(value, hint, f32::INFINITY)));
     });
 }
 
@@ -1167,7 +1169,7 @@ impl GongwenApp {
         );
         setting_row(ui, "模型", None, |ui| {
             if self.models.is_empty() {
-                ui.text_edit_singleline(&mut self.config.lm_studio.model);
+                crate::ime::exempt(ui.text_edit_singleline(&mut self.config.lm_studio.model));
             } else {
                 egui::ComboBox::from_id_salt("model_selector")
                     .selected_text(if self.config.lm_studio.model.is_empty() {
@@ -1241,7 +1243,7 @@ impl GongwenApp {
             );
             setting_row(ui, "模型", None, |ui| {
                 if self.models.is_empty() {
-                    ui.text_edit_singleline(&mut self.config.revise_model.model);
+                    crate::ime::exempt(ui.text_edit_singleline(&mut self.config.revise_model.model));
                 } else {
                     egui::ComboBox::from_id_salt("revise_model_selector")
                         .selected_text(if self.config.revise_model.model.is_empty() {
@@ -1382,7 +1384,7 @@ impl GongwenApp {
         );
         setting_row(ui, "模型", None, |ui| {
             if self.embedding_models.is_empty() {
-                ui.text_edit_singleline(&mut self.config.rag.embedding.model)
+                crate::ime::exempt(ui.text_edit_singleline(&mut self.config.rag.embedding.model))
                     .on_hover_text("可手填模型名，或点右侧按钮从服务读取");
             } else {
                 egui::ComboBox::from_id_salt("embedding_model_selector")
@@ -1456,7 +1458,7 @@ impl GongwenApp {
             });
             setting_row(ui, "模型", None, |ui| {
                 if self.rerank_models.is_empty() {
-                    ui.text_edit_singleline(&mut self.config.rag.rerank.model)
+                    crate::ime::exempt(ui.text_edit_singleline(&mut self.config.rag.rerank.model))
                         .on_hover_text("留空则跳过重排；可手填或点右侧按钮从服务读取");
                 } else {
                     egui::ComboBox::from_id_salt("rerank_model_selector")

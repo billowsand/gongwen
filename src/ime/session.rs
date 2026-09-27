@@ -125,6 +125,9 @@ pub(crate) struct Ime {
     /// 上一帧的焦点控件。焦点换地方就丢掉这段拼音，别飘到新的输入框里。
     pub(super) focus_id: Option<egui::Id>,
 
+    /// 上一帧声明过不走输入法的控件（密码、接口地址……，见 `exempt`）。
+    exempt: HashSet<egui::Id>,
+
     /// 光标在屏幕上的矩形，候选窗的锚点。
     pub(super) anchor: Option<egui::Rect>,
 
@@ -156,6 +159,7 @@ impl Ime {
             lexicon_marks: HashSet::new(),
             editable_focus: false,
             focus_id: None,
+            exempt: HashSet::new(),
             anchor: None,
             shift_alone: false,
             system_ime_off: false,
@@ -274,7 +278,8 @@ impl Ime {
         }
         // 焦点刚换过地方的那一帧不接键盘：这时 `editable_focus` 还是上一帧的，
         // 而按键已经该归新控件了；不然回车、空格这类键会被白白吃掉。
-        if focus_changed || !self.editable_focus {
+        // 声明过不走输入法的字段（密码、接口地址）同样不接：按键原样交给文本框。
+        if focus_changed || !self.editable_focus || self.focus_exempt() {
             self.drop_composition();
             return;
         }
@@ -292,6 +297,8 @@ impl Ime {
 
     /// 帧尾：记下光标矩形当候选窗锚点，并关掉系统输入法。要在所有控件跑完之后调用。
     pub(crate) fn end_frame(&mut self, ctx: &egui::Context) {
+        // 本帧控件的声明留给下一帧帧首用；不管接不接管都要取走，别越攒越多。
+        self.exempt = super::exempt::take(ctx);
         if !self.active() {
             // 不接管键盘：光标矩形照旧报给系统输入法。
             let anchor = ctx.output(|output| output.ime.map(|ime| ime.cursor_rect));
@@ -449,6 +456,11 @@ impl Ime {
             && self
                 .lexicon_marks
                 .contains(&(candidate.text.clone(), candidate.syllables.join(" ")))
+    }
+
+    /// 焦点落在声明过不走输入法的控件上。
+    pub(crate) fn focus_exempt(&self) -> bool {
+        self.focus_id.is_some_and(|id| self.exempt.contains(&id))
     }
 
     /// 记下本帧的焦点与光标矩形。

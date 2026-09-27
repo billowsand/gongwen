@@ -384,3 +384,68 @@ fn lexicon_marks_follow_word_and_reading() {
     assert!(marked.contains(&("开放".to_owned(), true)), "{marked:?}");
     assert!(marked.contains(&("开发".to_owned(), false)), "{marked:?}");
 }
+
+/// 跑一帧，焦点落在 `id` 上、并把它声明成不走输入法的字段（密码框那样）。
+fn exempt_frame(
+    ctx: &egui::Context,
+    ime: &mut Ime,
+    id: egui::Id,
+    events: Vec<egui::Event>,
+) -> Vec<egui::Event> {
+    let input = egui::RawInput {
+        events,
+        ..Default::default()
+    };
+    let mut routed = Vec::new();
+    let _ = ctx.run_ui(input, |ui| {
+        let ctx = ui.ctx();
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        ctx.output_mut(|output| output.ime = Some(ime_output()));
+        ime.begin_frame(ctx);
+        routed = ctx.input(|i| i.events.clone());
+        crate::ime::exempt::declare(ctx, id);
+        ime.end_frame(ctx);
+    });
+    routed
+}
+
+/// 声明过不走输入法的字段（密码框）：字母、数字、标点原样进文本框，
+/// 不组句（拼音不会明文出现在候选窗里）、不选词、不转全角。
+#[test]
+fn exempt_fields_bypass_the_ime() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    let id = egui::Id::new("password");
+    // 头一帧焦点刚落进来、声明也才第一次出现：下一帧起才生效
+    let _ = exempt_frame(&ctx, &mut ime, id, Vec::new());
+
+    let text: Vec<egui::Event> = "kai1,."
+        .chars()
+        .map(|c| egui::Event::Text(c.to_string()))
+        .collect();
+    let routed = exempt_frame(&ctx, &mut ime, id, text);
+    assert_eq!(inserted(&routed), "kai1,.", "按键必须原样交给文本框");
+    assert!(ime.preedit.text.is_empty(), "密码不能出现在拼音串里");
+}
+
+/// 声明是逐帧的：控件不再声明，同一个焦点就回到输入法。
+#[test]
+fn exemption_lapses_when_the_field_stops_declaring() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    let id = egui::Id::new("field");
+    let _ = exempt_frame(&ctx, &mut ime, id, Vec::new());
+    let _ = exempt_frame(&ctx, &mut ime, id, Vec::new());
+    assert!(ime.focus_exempt());
+
+    // 这一帧不声明（同一个焦点）
+    let input = egui::RawInput::default();
+    let _ = ctx.run_ui(input, |ui| {
+        let ctx = ui.ctx();
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        ctx.output_mut(|output| output.ime = Some(ime_output()));
+        ime.begin_frame(ctx);
+        ime.end_frame(ctx);
+    });
+    assert!(!ime.focus_exempt(), "上一帧没声明，就该回到输入法");
+}

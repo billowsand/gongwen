@@ -9,6 +9,7 @@
 //! * `keys`：按键分流（哪些键归引擎、哪些交给应用）。
 //! * `session`：组句状态、上屏、键盘接管。
 //! * `candidates`：候选窗与拼音串。
+//! * `exempt`：不走输入法的文本框（密码、接口地址这类只收 ASCII 的字段）。
 //!
 //! 词库与语言模型是 `.qj` 数据文件（vendor 自字在输入法，见 `vendor/qingjian/README.md`），
 //! 找得到才启用；找不到就退回系统输入法，不挡用户打字。
@@ -19,11 +20,13 @@ mod candidates;
 mod cursor;
 mod data;
 mod engine;
+mod exempt;
 mod keys;
 mod lexicon;
 mod session;
 
 pub(crate) use cursor::follow_cursor;
+pub(crate) use exempt::exempt;
 pub(crate) use session::Ime;
 
 /// 输入法设置：由应用配置映射过来，改一项就作用到引擎上。
