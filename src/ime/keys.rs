@@ -6,7 +6,8 @@
 //! * 英文模式（`Shift` 单击切过来的持久状态）字母直接进文本框，不进缓冲、不出候选。
 //! * 组句中的 `1`–`9` 选当前页第几个、空格上屏高亮、回车原样上屏、`[` `]` 翻页、
 //!   上下挪高亮、左右 / Home / End 挪拼音光标、退格删一个字母、Esc 丢掉整段。
-//! * 组句中的 `Delete` 删光标后的一个字母，`Ctrl+退格` / `Ctrl+←` / `Ctrl+→` 按音节删、按音节挪。
+//! * 组句中的 `Delete` 删光标后的一个字母，`Ctrl+退格` / `Ctrl+←` / `Ctrl+→` 按音节删、按音节挪，
+//!   `Ctrl+数字` 删掉当前页第几个候选的学习记录（学错的词、误造的用户词）。
 //! * 没在组句时只有标点问一句引擎（要不要转全角），其余一律交给应用；退格顺带告诉引擎
 //!   删的是刚上屏的字（选错了删掉重打，那次学习就退回去），回车、方向键、快捷键这类
 //!   会让光标离开刚才上屏位置的键顺带断开上文（下一个词按句首记）。
@@ -63,6 +64,9 @@ pub(crate) enum Key {
     SyllableLeft,
     SyllableRight,
 
+    /// Ctrl（macOS 上是 Command）+ 1–9：删当前页第几个候选的学习记录（0 起）。
+    Forget(usize),
+
     /// 其余带 Ctrl / Alt / Command 的组合键：快捷键，归应用。
     Shortcut,
 }
@@ -74,6 +78,13 @@ impl Key {
     pub(crate) fn from_egui(key: egui::Key, modifiers: egui::Modifiers) -> Option<Self> {
         if is_modifier(key) {
             return None;
+        }
+        if (modifiers.ctrl || modifiers.command)
+            && !modifiers.alt
+            && !modifiers.shift
+            && let Some(index) = digit_index(key)
+        {
+            return Some(Self::Forget(index));
         }
         if modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd {
             // Windows / Linux 的 Ctrl、macOS 的 Option 是按词挪的那一档；macOS 的 Command
@@ -103,6 +114,14 @@ impl Key {
             _ => return None,
         })
     }
+}
+
+/// 数字键 1–9 → 0–8。
+fn digit_index(key: egui::Key) -> Option<usize> {
+    use egui::Key::*;
+    [Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9]
+        .iter()
+        .position(|&digit| digit == key)
 }
 
 /// 修饰键本身。egui 把它们也当普通键报。
@@ -147,6 +166,9 @@ pub(crate) enum Action {
 
     /// 删光标前的一个音节。
     DeleteSyllable,
+
+    /// 删当前页第几个候选的学习记录（0 起）。
+    Forget(usize),
 
     /// 选当前页第几个候选（0 起）。
     CommitIndex(usize),
@@ -242,7 +264,8 @@ pub(crate) fn route(key: Key, route: Route, settings: &ImeSettings) -> Action {
         Key::SyllableBackspace => Action::DeleteSyllable,
         Key::SyllableLeft => Action::Navigate(Navigation::SyllableLeft),
         Key::SyllableRight => Action::Navigate(Navigation::SyllableRight),
-        Key::Tab | Key::Shortcut => Action::FlushRaw,
+        Key::Forget(index) if route.candidates > 0 => Action::Forget(index),
+        Key::Tab | Key::Forget(_) | Key::Shortcut => Action::FlushRaw,
     }
 }
 
@@ -427,6 +450,7 @@ mod tests {
             Key::SyllableBackspace,
             Key::SyllableLeft,
             Key::SyllableRight,
+            Key::Forget(0),
             Key::Shortcut,
         ] {
             assert_eq!(
@@ -503,6 +527,12 @@ mod tests {
             at(Key::SyllableRight),
             Action::Navigate(Navigation::SyllableRight)
         );
+        assert_eq!(at(Key::Forget(1)), Action::Forget(1));
+        assert_eq!(
+            route(Key::Forget(1), composing(0), &settings()),
+            Action::FlushRaw,
+            "没有候选可删时当普通快捷键"
+        );
         assert_eq!(at(Key::Shortcut), Action::FlushRaw);
         assert_eq!(at(Key::Tab), Action::FlushRaw);
     }
@@ -525,6 +555,12 @@ mod tests {
             Some(Key::SyllableRight)
         );
         assert_eq!(Key::from_egui(egui::Key::V, ctrl), Some(Key::Shortcut));
+        assert_eq!(Key::from_egui(egui::Key::Num3, ctrl), Some(Key::Forget(2)));
+        assert_eq!(
+            Key::from_egui(egui::Key::Num3, ctrl | egui::Modifiers::SHIFT),
+            Some(Key::Shortcut)
+        );
+        assert_eq!(Key::from_egui(egui::Key::Num0, ctrl), Some(Key::Shortcut));
         assert_eq!(Key::from_egui(egui::Key::Z, ctrl), Some(Key::Shortcut));
         assert_eq!(
             Key::from_egui(egui::Key::ArrowLeft, egui::Modifiers::MAC_CMD),

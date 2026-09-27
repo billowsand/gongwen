@@ -566,6 +566,10 @@ impl eframe::App for GongwenApp {
         // 设置从配置里来，每帧对一次（设置没变是空操作）。
         self.ime.apply_settings(self.ime_settings());
         self.ime.begin_frame(&ctx);
+        // 输入法要说的话（删了哪个词的学习记录）走状态栏
+        if let Some(notice) = self.ime.take_notice() {
+            self.status = notice;
+        }
         // 代理同理：设置页一改，下一个请求就按新通道走，不必先保存。
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);

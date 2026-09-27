@@ -700,3 +700,33 @@ fn moving_the_caret_away_breaks_the_chain() {
         assert_eq!(weight, 1, "{away:?} 之后删的是别处，不该撤回");
     }
 }
+
+/// Ctrl+数字删掉当页那个候选的学习记录：拼音留着接着选，状态栏有一句话。
+#[test]
+fn ctrl_digit_forgets_a_candidate() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let ctx = egui::Context::default();
+    let mut ime = learning_ime(dir.path());
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kaifa");
+    let _ = type_char(&ctx, &mut ime, '2');
+    let weight = |ime: &Ime| ime.engine().expect("引擎").learner().weight("凯发");
+    assert_eq!(weight(&ime), 1);
+
+    type_str(&ctx, &mut ime, "kaifa");
+    let index = (0..ime.layout.len())
+        .find(|&i| ime.layout.candidate(i).is_some_and(|c| c.text == "凯发"))
+        .expect("候选里应当有凯发");
+    let digit = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3][index];
+    let routed = frame(
+        &ctx,
+        &mut ime,
+        vec![key_event(digit, true, egui::Modifiers::CTRL)],
+    );
+    assert!(routed.is_empty(), "不该交给应用：{routed:?}");
+    assert_eq!(weight(&ime), 0);
+    assert_eq!(ime.preedit.text, "kai'fa", "拼音留着");
+    let notice = ime.take_notice().expect("状态栏要有提示");
+    assert!(notice.contains("凯发"), "{notice}");
+    assert!(ime.take_notice().is_none(), "取走即清");
+}

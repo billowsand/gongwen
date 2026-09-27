@@ -146,6 +146,9 @@ pub(crate) struct Ime {
 
     /// 上次把学习数据写盘的时刻。
     last_flush: Instant,
+
+    /// 要交给状态栏的一句话（删了哪个词的学习记录），应用取走即清。
+    notice: Option<String>,
 }
 
 impl Ime {
@@ -172,6 +175,7 @@ impl Ime {
             shift_pressed_at: Instant::now(),
             system_ime_off: false,
             last_flush: Instant::now(),
+            notice: None,
         };
         ime.apply_fuma();
         ime.refresh_lexicon_marks();
@@ -338,6 +342,11 @@ impl Ime {
     /// 切中英。状态栏点一下与单击 `Shift` 是同一个开关。
     pub(crate) fn toggle_english(&mut self) {
         self.english = !self.english;
+    }
+
+    /// 取走要交给状态栏的一句话。
+    pub(crate) fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     /// 辅码表加载了几个字；`None` 表示没装表。
@@ -759,6 +768,21 @@ impl Ime {
                 };
                 Outcome::commit(engine.commit(&candidate))
             }
+            Action::Forget(index) => {
+                let page_size = self.settings.page_size.max(1);
+                let page = self.highlight / page_size;
+                let candidate = self.layout.candidate(page * page_size + index).cloned();
+                let Some(engine) = self.engine_mut() else {
+                    return Outcome::PASSTHROUGH;
+                };
+                let Some(candidate) = candidate else {
+                    return Outcome::NAVIGATED;
+                };
+                let forgotten = engine.forget(&candidate);
+                self.notice = Some(forget_notice(&candidate.text, forgotten));
+                // 排序跟着变了：重查
+                Outcome::CHANGED
+            }
             Action::CommitRaw => {
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;
@@ -879,6 +903,15 @@ impl Drop for Ime {
 /// 穿出去，应用直接闪退）。每页格数与设置一致，空布局与有候选时同一套算法。
 fn empty_layout(page_size: usize) -> CandidateLayout {
     CandidateLayout::new(Vec::new(), page_size.max(1))
+}
+
+/// 删完学习记录之后给状态栏的话。
+fn forget_notice(text: &str, forgotten: qingjian_core::Forgotten) -> String {
+    match (forgotten.user_word, forgotten.learning) {
+        (true, _) => format!("输入法：已删除用户词「{text}」。"),
+        (false, true) => format!("输入法：已清除「{text}」的学习记录，排序回到词库默认。"),
+        (false, false) => format!("输入法：「{text}」没有可删的学习记录（词库自带的词删不掉）。"),
+    }
 }
 
 /// 挪拼音光标。高亮与翻页不归这里管。
