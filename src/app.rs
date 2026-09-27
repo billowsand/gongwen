@@ -283,6 +283,8 @@ pub struct GongwenApp {
     /// 导出预览的缓存：算一次要给每个词出码，不能每帧重算。
     /// 键是算这份预览时用的口径，口径一变就重算。
     pub(crate) lexicon_preview: Option<(lexicon::export::ExportOptions, LexiconPreview)>,
+    /// 词表最后一次改动的时刻；还没同步给输入法时为 `Some`。
+    pub(crate) ime_lexicon_changed_at: Option<std::time::Instant>,
     pub(crate) lexicon_export_result: Option<String>,
     /// 手工加词输入框。
     pub(crate) lexicon_new_term: String,
@@ -514,6 +516,7 @@ impl GongwenApp {
             lexicon_scan_result: None,
             lexicon_export: lexicon::export::ExportOptions::default(),
             lexicon_preview: None,
+            ime_lexicon_changed_at: None,
             lexicon_export_result: None,
             lexicon_new_term: String::new(),
             lexicon_clear_confirm: false,
@@ -571,6 +574,7 @@ impl eframe::App for GongwenApp {
         if let Some(notice) = self.ime.take_notice() {
             self.status = notice;
         }
+        self.sync_lexicon_to_ime_if_due(&ctx);
         // 代理同理：设置页一改，下一个请求就按新通道走，不必先保存。
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);

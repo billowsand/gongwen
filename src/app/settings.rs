@@ -1855,8 +1855,8 @@ impl GongwenApp {
         setting_continuation(ui, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "同步到 config_dir()/ime/dicts/，与学习数据同一个用户目录；\
-                     改完词表回来点一下即可，不用重启。",
+                    "同步到 config_dir()/ime/dicts/，与学习数据同一个用户目录。\
+                     词表页里接受、拒绝、改读音之后几秒内会自动同步，这个按钮留着手动补一次。",
                 )
                 .size(theme::font_sizes::SMALL)
                 .color(theme::text_muted()),

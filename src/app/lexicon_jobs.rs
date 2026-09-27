@@ -6,7 +6,12 @@
 use crate::app::{GongwenApp, LexiconPreview, WorkerResult};
 use crate::lexicon::{self, TermState, export, scan};
 use crate::storage;
+use eframe::egui;
 use std::thread;
+use std::time::Duration;
+
+/// 词表最后一次改动之后等多久再同步给输入法。
+const IME_LEXICON_SYNC_DELAY: Duration = Duration::from_secs(2);
 
 /// 词表后台任务的结果。
 pub(crate) enum LexiconJob {
@@ -83,8 +88,7 @@ impl GongwenApp {
             self.lexicon_error = Some(format!("更新词条状态失败：{error:#}"));
             return;
         }
-        self.lexicon_dirty = true;
-        self.lexicon_preview = None;
+        self.lexicon_changed();
         // 接受/拒绝会改变 jieba 用户词典的内容，立刻换上新的，
         // 免得这一轮检索与标题断行还在用旧词典。
         self.reload_lexicon_user_dict();
@@ -108,8 +112,7 @@ impl GongwenApp {
         };
         match store.set_state_many(&ids, TermState::Accepted) {
             Ok(()) => {
-                self.lexicon_dirty = true;
-                self.lexicon_preview = None;
+                self.lexicon_changed();
                 self.status = format!("已接受 {count} 个词条。");
                 self.reload_lexicon_user_dict();
             }
@@ -124,8 +127,7 @@ impl GongwenApp {
         };
         match store.clear_all() {
             Ok(()) => {
-                self.lexicon_dirty = true;
-                self.lexicon_preview = None;
+                self.lexicon_changed();
                 self.lexicon_scan_result = None;
                 self.status = "公文词表已清空。".into();
                 lexicon::segmenter::install_user_dict("");
@@ -140,8 +142,7 @@ impl GongwenApp {
         };
         match store.set_reading(id, pinyin, code_override) {
             Ok(()) => {
-                self.lexicon_dirty = true;
-                self.lexicon_preview = None;
+                self.lexicon_changed();
             }
             Err(error) => self.lexicon_error = Some(format!("保存读音失败：{error:#}")),
         }
@@ -155,13 +156,37 @@ impl GongwenApp {
         match store.add_manual(&term) {
             Ok(()) => {
                 self.lexicon_new_term.clear();
-                self.lexicon_dirty = true;
-                self.lexicon_preview = None;
+                self.lexicon_changed();
                 self.status = format!("「{term}」已加入公文词表。");
                 self.reload_lexicon_user_dict();
             }
             Err(error) => self.lexicon_error = Some(format!("{error:#}")),
         }
+    }
+
+    /// 词表改了：列表要重读、导出预览作废，并排上一次输入法同步
+    /// （见 [`Self::sync_lexicon_to_ime_if_due`]）。
+    fn lexicon_changed(&mut self) {
+        self.lexicon_dirty = true;
+        self.lexicon_preview = None;
+        self.ime_lexicon_changed_at = Some(std::time::Instant::now());
+    }
+
+    /// 词表改完、安静了一会儿，就把它同步给输入法，新接受的词不用重启就能打。
+    ///
+    /// 等一等再同步：接受 / 拒绝常常是一口气点十几下，每点一下都整份重写词库、
+    /// 重载附加词库不值当。没到点就约好到点重画一帧，免得界面闲着时一直不同步。
+    pub(crate) fn sync_lexicon_to_ime_if_due(&mut self, ctx: &egui::Context) {
+        let Some(changed_at) = self.ime_lexicon_changed_at else {
+            return;
+        };
+        let elapsed = changed_at.elapsed();
+        if elapsed < IME_LEXICON_SYNC_DELAY {
+            ctx.request_repaint_after(IME_LEXICON_SYNC_DELAY - elapsed);
+            return;
+        }
+        self.ime_lexicon_changed_at = None;
+        self.sync_lexicon_to_ime(false);
     }
 
     /// 把已接受的词重新挂成 jieba 用户词典。
@@ -244,8 +269,7 @@ impl GongwenApp {
                         self.status = "词表扫描失败。".into();
                     }
                 }
-                self.lexicon_dirty = true;
-                self.lexicon_preview = None;
+                self.lexicon_changed();
                 // 扫描把标准词库的专名也并了进来，词典跟着换一次。
                 self.reload_lexicon_user_dict();
             }
