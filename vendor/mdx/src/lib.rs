@@ -16,6 +16,9 @@ mod tex_research_emitter;
 /// 表格源码与自己预览用的网格是否一致。
 pub use common::table;
 
+/// 研究报告插图的默认宽度。公开出来供调用方的预览照同一规则排图。
+pub use common::figure_size;
+
 /// 转换后的目标格式。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OutputFormat {

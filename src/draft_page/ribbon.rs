@@ -12,9 +12,11 @@ use crate::draft_page::{
 use crate::export;
 use crate::export::ColumnAlign;
 use crate::models::{ExportSelection, RibbonTab};
+use crate::preview::{self, LabelKind, LabelTarget};
 use crate::storage;
 use crate::theme;
 use eframe::egui;
+use egui::AtomExt;
 
 /// 「研报」分区里选中的插入动作：区段标记、锚点、交叉引用、文献引用、脚注
 /// 和表题。
@@ -737,27 +739,16 @@ impl DraftPage<'_> {
                 theme::Icon::Open,
                 "交叉引用",
             ))
+            // 下拉里要切筛选组，点一下就收起就没法用了；选中目标时再手动关。
+            .config(
+                egui::containers::menu::MenuConfig::default()
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+            )
             .ui(ui, |ui| {
-                ui.set_min_width(220.0);
-                let ids = export::crossref::label_ids(&self.doc.generated_markdown);
-                if ids.is_empty() {
-                    ui.weak("稿中还没有锚点。先用「锚点」在标题、表题或图片行尾写一个。");
-                    return;
+                if let Some(id) = crossref_menu(ui, &self.doc.generated_markdown) {
+                    action = Some(MarkupInsert::Snippet(format!("{{@{id}}}"), 0, "交叉引用"));
+                    ui.close();
                 }
-                egui::ScrollArea::vertical()
-                    .max_height(320.0)
-                    .show(ui, |ui| {
-                        for id in ids {
-                            if ui.add(theme::menu_text_item(id)).clicked() {
-                                action = Some(MarkupInsert::Snippet(
-                                    format!("{{@{id}}}"),
-                                    0,
-                                    "交叉引用",
-                                ));
-                                ui.close();
-                            }
-                        }
-                    });
             })
             .0
             .on_hover_text("插入 {@id} 交叉引用：预览与 PDF 中印成被引对象的编号");
@@ -1397,5 +1388,212 @@ impl DraftPage<'_> {
         {
             self.actions.push(DraftAction::OpenSettings);
         }
+    }
+}
+
+/// 交叉引用下拉的三个筛选组：文章结构（部分、章、节、小节）、图、表。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CrossrefGroup {
+    Structure,
+    Figure,
+    Table,
+}
+
+impl CrossrefGroup {
+    const ALL: [Self; 3] = [Self::Structure, Self::Figure, Self::Table];
+
+    fn of(kind: LabelKind) -> Self {
+        match kind {
+            LabelKind::Figure => Self::Figure,
+            LabelKind::Table => Self::Table,
+            LabelKind::Part | LabelKind::Chapter | LabelKind::Section | LabelKind::Subsection => {
+                Self::Structure
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Structure => "结构",
+            Self::Figure => "图",
+            Self::Table => "表",
+        }
+    }
+
+    fn empty_hint(self) -> &'static str {
+        match self {
+            Self::Structure => "还没有带锚点的编号标题。在章、节标题行尾加 {#id}。",
+            Self::Figure => "还没有带锚点的图。在有图注的图片行尾加 {#id}。",
+            Self::Table => "还没有带锚点的表。在表题行尾加 {#id}。",
+        }
+    }
+}
+
+/// 交叉引用下拉的内容，返回选中目标的 id。
+///
+/// 候选在下拉展开时现算：`label_targets` 只走一遍解析、不排版，功能区每帧重画，
+/// 下拉收着就一次都不算。选过的筛选组记在 egui 临时内存里，下次展开还停在那组。
+fn crossref_menu(ui: &mut egui::Ui, markdown: &str) -> Option<String> {
+    ui.set_min_width(320.0);
+    let targets = preview::research_label_targets(markdown);
+    // 挂在不编号标题、无图注图片或普通段落上的锚点没有号可引，不列出，只报个数。
+    let unreferable = export::crossref::label_ids(markdown)
+        .len()
+        .saturating_sub(targets.len());
+    if targets.is_empty() {
+        ui.weak(if unreferable == 0 {
+            "稿中还没有锚点。先用「锚点」在标题、表题或图片行尾写一个。"
+        } else {
+            "稿中的锚点都不在编号标题、图注或表题上，引用会印成 ??。"
+        });
+        return None;
+    }
+
+    let count = |group: CrossrefGroup| {
+        targets
+            .iter()
+            .filter(|t| CrossrefGroup::of(t.kind) == group)
+            .count()
+    };
+    let memory = egui::Id::new("research-crossref-group");
+    let mut group = ui
+        .data(|data| data.get_temp::<CrossrefGroup>(memory))
+        .or_else(|| {
+            CrossrefGroup::ALL
+                .into_iter()
+                .find(|group| count(*group) > 0)
+        })
+        .unwrap_or(CrossrefGroup::Structure);
+    theme::segmented(ui, |ui| {
+        for candidate in CrossrefGroup::ALL {
+            let label = format!("{} {}", candidate.label(), count(candidate));
+            if ui.selectable_label(group == candidate, label).clicked() {
+                group = candidate;
+            }
+        }
+    });
+    ui.data_mut(|data| data.insert_temp(memory, group));
+    ui.add_space(4.0);
+
+    let mut chosen = None;
+    let mut shown = targets
+        .iter()
+        .filter(|target| CrossrefGroup::of(target.kind) == group)
+        .peekable();
+    if shown.peek().is_none() {
+        ui.weak(group.empty_hint());
+    } else {
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for target in shown {
+                    if ui
+                        .add(crossref_row(target, ui.available_width()))
+                        .on_hover_text(format!("{{@{}}}", target.id))
+                        .clicked()
+                    {
+                        chosen = Some(target.id.clone());
+                    }
+                }
+            });
+    }
+    if unreferable > 0 {
+        ui.separator();
+        ui.weak(format!(
+            "另有 {unreferable} 个锚点不在编号标题、图注或表题上，引用会印成 ??，未列出。"
+        ));
+    }
+    chosen
+}
+
+/// 一条可引目标：编号（加粗）、题名（淡色，过长截断）、右侧淡色分类。
+/// 结构组按层级缩进，与导航大纲读起来是同一棵树。
+fn crossref_row(target: &LabelTarget, width: f32) -> egui::Button<'static> {
+    let indent = match target.kind {
+        LabelKind::Section => 14.0,
+        LabelKind::Subsection => 28.0,
+        _ => 0.0,
+    };
+    let mut atoms = egui::Atoms::default();
+    if indent > 0.0 {
+        atoms.push_right(egui::Atom::default().atom_size(egui::vec2(indent, 0.0)));
+    }
+    atoms.push_right(egui::RichText::new(target.number.clone()).strong());
+    atoms.push_right(
+        egui::RichText::new(target.title.clone())
+            .weak()
+            .atom_shrink(true),
+    );
+    egui::Button::new(atoms)
+        .right_text(egui::RichText::new(target.kind.label()).weak().small())
+        .truncate()
+        .corner_radius(egui::CornerRadius::same(5))
+        .min_size(egui::vec2(width, 26.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::FontConfig;
+
+    /// 在一帧里画出交叉引用下拉，返回每段文字的（内容，左缘，右缘，纵坐标）。
+    fn menu_texts(markdown: &str) -> Vec<(String, f32, f32, f32)> {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &FontConfig::default());
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(raw, |ui| {
+            ui.set_max_width(320.0);
+            let _ = crossref_menu(ui, markdown);
+        });
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_string(),
+                    text.pos.x,
+                    text.pos.x + text.galley.size().x,
+                    text.pos.y,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn left_of(texts: &[(String, f32, f32, f32)], text: &str) -> f32 {
+        texts
+            .iter()
+            .find(|(t, ..)| t == text)
+            .unwrap_or_else(|| panic!("没画出「{text}」：{texts:?}"))
+            .1
+    }
+
+    /// 结构组按层级缩进；长题名截断在分类标签之前，不压到它身上。
+    #[test]
+    fn structure_rows_indent_by_level_and_long_titles_stop_before_the_tag() {
+        let long = "一个非常非常非常非常非常非常非常长的小节标题用来测试截断";
+        let markdown = format!(
+            "<!-- [正文] -->\n\n## 研究背景 {{#b}}\n\n### 研究方法 {{#c}}\n\n\
+             #### {long} {{#d}}\n\n![架构](a.png){{#e}}\n\n段落 {{#p}}\n"
+        );
+        let texts = menu_texts(&markdown);
+        for tab in ["结构 3", "图 1", "表 0"] {
+            left_of(&texts, tab);
+        }
+        let chapter = left_of(&texts, "第1章");
+        let section = left_of(&texts, "1.1");
+        let subsection = left_of(&texts, "1.1.1");
+        assert!(chapter < section && section < subsection, "{texts:?}");
+        let title_right = texts.iter().find(|(t, ..)| t == long).expect("长题名").2;
+        assert!(title_right <= left_of(&texts, "小节"), "{texts:?}");
+        // 图不在结构组里；挂在段落上的锚点只报个数。
+        assert!(!texts.iter().any(|(t, ..)| t == "图 1.1"), "{texts:?}");
+        assert!(texts.iter().any(|(t, ..)| t.starts_with("另有 1 个锚点")));
     }
 }

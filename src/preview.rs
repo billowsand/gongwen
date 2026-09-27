@@ -37,6 +37,7 @@ pub(crate) use layout::{
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
 pub(crate) use research::outline as research_outline;
+pub(crate) use research::{LabelKind, LabelTarget, label_targets as research_label_targets};
 pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 // test-only names（根文件的测试模块使用）
 #[cfg(test)]
@@ -102,6 +103,10 @@ const RESEARCH_LINE_PT: f32 = 24.0;
 const RESEARCH_CHAPTER_PT: f32 = 18.0; // 章标题，小二
 const RESEARCH_PART_PT: f32 = 24.0; // 部分标题，小一
 const RESEARCH_CAPTION_PT: f32 = 12.0; // 图表题注，小四
+// 表格正文：`md2tex.cls` 给 longtblr 的 `\fontsize{12bp}{18pt}\selectfont\song`，
+// 表头黑体；与公文表格的仿宋四号、21 磅行距不是一套。
+const RESEARCH_TABLE_PT: f32 = 12.0;
+const RESEARCH_TABLE_LINE_PT: f32 = 18.0;
 
 /// 缩放后的版式尺寸，单位都是 egui 逻辑像素。
 pub(crate) struct Metrics {
@@ -119,6 +124,10 @@ pub(crate) struct Metrics {
     /// 共用的块渲染自动跟着版式走，不必为研究报告各复制一份。
     body_family: &'static str,
     body_pt: f32,
+    /// 表格正文的字面、字号与格内行距（表头一律黑体，加粗一律专用粗体，只换字号）。
+    table_family: &'static str,
+    table_pt: f32,
+    table_line_pt: f32,
     /// 本帧纸面上每一条「改得动的行」的位置，画完纸再统一标到页边。
     /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
     /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
@@ -180,6 +189,9 @@ impl Metrics {
             line: LINE_PT * PT * scale,
             body_family: theme::FONT_FANGSONG,
             body_pt: BODY_PT,
+            table_family: theme::FONT_FANGSONG,
+            table_pt: TABLE_PT,
+            table_line_pt: TABLE_LINE_PT,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }
@@ -202,6 +214,9 @@ impl Metrics {
             // 编译出的 PDF 为准。
             body_family: theme::FONT_SONGTI,
             body_pt: RESEARCH_BODY_PT,
+            table_family: theme::FONT_SONGTI,
+            table_pt: RESEARCH_TABLE_PT,
+            table_line_pt: RESEARCH_TABLE_LINE_PT,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }

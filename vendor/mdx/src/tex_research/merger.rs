@@ -70,7 +70,7 @@ impl Merger {
 
         // 3. 使用 Rust emitter 生成 LaTeX
         println!("正在生成 LaTeX...");
-        let mut emitter = TexResearchEmitter::new();
+        let mut emitter = TexResearchEmitter::new().with_image_dir(out_dir);
         emitter.emit_all(&blocks);
 
         // 如果有摘要，完成摘要收集

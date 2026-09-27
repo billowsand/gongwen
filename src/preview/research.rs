@@ -27,9 +27,12 @@
 
 use super::cull::Cull;
 use super::layout::{
-    TextRun, clickable, clickable_rows, is_renderable_paragraph, line_block, line_block_runs, sheet,
+    TextRun, clickable, clickable_rows, is_renderable_paragraph, line_block, line_block_runs,
+    line_block_runs_spaced, sheet,
 };
-use super::render::{BlockShape, PreviewOutput, anchored, clickable_content_block, image_block};
+use super::render::{
+    BlockShape, PreviewOutput, anchored, clickable_content_block, research_image_block,
+};
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
     RESEARCH_CHAPTER_PT, RESEARCH_PART_PT, gutter, indent, math_flow,
@@ -45,6 +48,7 @@ use crate::theme;
 use eframe::egui;
 use egui::Align;
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -576,21 +580,90 @@ fn strip_caption_number(caption: &str) -> String {
 
 /// 第一遍：给全文的锚点和文献引用编号。
 fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
+    collect_marks_with(blocks, markdown, |_, _| {})
+}
+
+/// 一个锚点挂在什么东西上：`{@id}` 印的号，以及交叉引用菜单要的分类、纸面前缀和题名。
+struct Anchored<'k> {
+    kind: LabelKind,
+    /// `{@id}` 印出来的那串：章是 `\thechapter`（`1`、`A`），不是"第1章"整串。
+    reference: &'k str,
+    /// 章、部分在纸面上的整串前缀（"第1章""附录A""第一部分"）；节、图、表没有。
+    heading: Option<&'k str>,
+    title: &'k str,
+}
+
+impl<'k> Anchored<'k> {
+    fn of(kind: &'k Kind<'_>) -> Option<Self> {
+        let (kind, reference, heading, title) = match kind {
+            Kind::Part {
+                heading,
+                number,
+                text,
+            } => (
+                LabelKind::Part,
+                number,
+                Some(heading.as_str()),
+                text.as_str(),
+            ),
+            Kind::Chapter {
+                heading,
+                number,
+                text,
+            } => (
+                LabelKind::Chapter,
+                number,
+                Some(heading.as_str()),
+                text.as_str(),
+            ),
+            // 节的深浅由编号自己说明：`1.2` 是节，`1.2.3` 起是小节，附录 `A.1` 同理。
+            Kind::Section { number, text } => {
+                let kind = if number.matches('.').count() > 1 {
+                    LabelKind::Subsection
+                } else {
+                    LabelKind::Section
+                };
+                (kind, number, None, text.as_str())
+            }
+            Kind::Figure {
+                number: Some(number),
+                alt,
+                ..
+            } => (LabelKind::Figure, number, None, *alt),
+            Kind::Table {
+                caption: Some(caption),
+            } => (
+                LabelKind::Table,
+                &caption.number,
+                None,
+                caption.text.as_str(),
+            ),
+            _ => return None,
+        };
+        Some(Self {
+            kind,
+            reference,
+            heading,
+            title,
+        })
+    }
+}
+
+/// 同 [`collect_marks`]，每登记一个锚点就把它交给 `on_anchor`。
+///
+/// 交叉引用菜单与排版共用这一遍：分类、编号的口径只有一份，菜单里写的号就是纸上印的号。
+fn collect_marks_with(
+    blocks: &[LocatedBlock],
+    markdown: &str,
+    mut on_anchor: impl FnMut(&str, Anchored<'_>),
+) -> ResearchMarks {
     let mut marks = ResearchMarks::default();
     walk(blocks, markdown, |located, kind, anchor| {
-        if let Some(anchor) = anchor {
-            let number = match &kind {
-                // 章锚点引的是 `\thechapter`（`1`、`A`），不是"第1章"整串。
-                Kind::Chapter { number, .. }
-                | Kind::Section { number, .. }
-                | Kind::Part { number, .. } => Some(number.clone()),
-                Kind::Figure { number, .. } => number.clone(),
-                Kind::Table { caption } => caption.as_ref().map(|caption| caption.number.clone()),
-                _ => None,
-            };
-            if let Some(number) = number {
-                marks.define(anchor, &number);
-            }
+        if let Some(anchor) = anchor
+            && let Some(target) = Anchored::of(&kind)
+        {
+            marks.define(anchor, target.reference);
+            on_anchor(anchor, target);
         }
         // 表题自己那一块被并进了表格，锚点却写在它身上，所以要单独认一次。
         if let Kind::Table {
@@ -599,8 +672,10 @@ fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
             && let Some(anchor) = markdown
                 .get(caption.source.clone())
                 .and_then(|raw| crossref::split_label(raw).1)
+            && let Some(target) = Anchored::of(&kind)
         {
-            marks.define(anchor, &caption.number);
+            marks.define(anchor, target.reference);
+            on_anchor(anchor, target);
         }
         if let Some(raw) = markdown.get(located.range.clone()) {
             for key in crossref::citation_keys(raw) {
@@ -609,6 +684,75 @@ fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
         }
     });
     marks
+}
+
+/// 交叉引用目标的分类，由锚点挂在哪一块上判定，不看 id 怎么起名。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LabelKind {
+    Part,
+    Chapter,
+    Section,
+    Subsection,
+    Figure,
+    Table,
+}
+
+impl LabelKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Part => "部分",
+            Self::Chapter => "章",
+            Self::Section => "节",
+            Self::Subsection => "小节",
+            Self::Figure => "图",
+            Self::Table => "表",
+        }
+    }
+}
+
+/// 交叉引用菜单里的一条可引目标。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LabelTarget {
+    pub(crate) id: String,
+    pub(crate) kind: LabelKind,
+    /// 纸面上印在标题或题注前的编号：第一部分、第1章、附录A、1.2、图 1.3、表 2。
+    pub(crate) number: String,
+    /// 标题、图注或表题，行内标记已换成纸面字面。
+    pub(crate) title: String,
+}
+
+/// 全文可被 `{@id}` 引用的目标，按出现顺序；同一个 id 重复定义只留第一次，
+/// 与 [`ResearchMarks::define`] 一致。
+///
+/// 只走第一遍解析（不排版、不做第二遍切块），比导航大纲还省；起草页只在
+/// 交叉引用下拉展开时才调它。挂在不编号标题或普通段落上的锚点没有号可引，
+/// 不在其列——引了也只会印成 `??`。
+pub(crate) fn label_targets(markdown: &str) -> Vec<LabelTarget> {
+    let blocks = export::parse_markdown_located(markdown);
+    let mut targets: Vec<LabelTarget> = Vec::new();
+    let marks = collect_marks_with(&blocks, markdown, |id, target| {
+        if targets.iter().any(|seen| seen.id == id) {
+            return;
+        }
+        let number = match target.kind {
+            LabelKind::Figure => format!("图 {}", target.reference),
+            LabelKind::Table => format!("表 {}", target.reference),
+            _ => target.heading.unwrap_or(target.reference).to_string(),
+        };
+        targets.push(LabelTarget {
+            id: id.to_string(),
+            kind: target.kind,
+            number,
+            // 第一遍的题名还带着行尾锚点和行内标记，等编号全定下来再换。
+            title: target.title.to_string(),
+        });
+    });
+    for target in &mut targets {
+        if let Cow::Owned(title) = marks.apply(&target.title) {
+            target.title = title;
+        }
+    }
+    targets
 }
 
 /// 导航大纲里的一条标题。
@@ -1144,24 +1288,19 @@ fn body_item(
                 scroll_to_anchor,
                 clicked,
                 |ui| {
-                    image_block(ui, metrics, alt, src);
-                    // `\caption` 排在 figure 环境的图下方，居中，字号随正文。
+                    research_image_block(ui, metrics, alt, src);
+                    // `\caption` 排在 figure 环境的图下方，居中，与表题同一套字面。
                     if let Some(number) = &number {
-                        line_block(
-                            ui,
-                            metrics,
-                            &format!("图 {number} {alt}"),
-                            metrics.body_family,
-                            RESEARCH_BODY_PT,
-                            Align::Center,
-                        );
+                        ui.add_space(metrics.pt(CAPTION_GAP_PT));
+                        caption_line(ui, metrics, "图", number, alt);
                     }
                 },
             );
+            space_after_float(ui, metrics);
         }
         Kind::Table { caption } => {
-            // 表题排在表上方：longtblr 的 caption 就在表头之前，标签黑体小四、
-            // 题名宋体小四（md2tex.cls 的 caption-tag / caption-text）。
+            // 表题排在表上方：longtblr 的 caption 就在表头之前。
+            ui.add_space(metrics.pt(FLOAT_SEP_PT));
             if let Some(caption) = &caption {
                 clickable_rows(
                     ui,
@@ -1170,25 +1309,7 @@ fn body_item(
                     anchor,
                     scroll_to_anchor,
                     clicked,
-                    |ui| {
-                        line_block_runs(
-                            ui,
-                            metrics,
-                            &[
-                                TextRun {
-                                    text: &format!("表 {} ", caption.number),
-                                    family: theme::FONT_HEITI,
-                                    size: RESEARCH_CAPTION_PT,
-                                },
-                                TextRun {
-                                    text: &caption.text,
-                                    family: metrics.body_family,
-                                    size: RESEARCH_CAPTION_PT,
-                                },
-                            ],
-                            Align::Center,
-                        );
-                    },
+                    |ui| caption_line(ui, metrics, "表", &caption.number, &caption.text),
                 );
             }
             plain(
@@ -1200,6 +1321,7 @@ fn body_item(
                 scroll_to_anchor,
                 clicked,
             );
+            space_after_float(ui, metrics);
         }
         Kind::Plain => plain(
             ui,
@@ -1288,6 +1410,50 @@ const CHAPTER_GAP: &str = "\u{3000}";
 /// 用全角空格就宽出一倍——"1.1" 本身没有夹空格，看着宽是这个间隔撑的。
 /// 不用 U+2002（en space）是因为 SimHei 没有这个码位，会掉进回退字体。
 const SECTION_GAP: &str = " ";
+
+/// 图与图题之间的空：`md2tex.cls` 的 `\abovecaptionskip`。
+const CAPTION_GAP_PT: f32 = 6.0;
+
+/// 图题、表题的行距：`\zihao{-4}` 在 ctex 下的行距约 18 磅。占正文 24 磅的
+/// 行框，字下方会多出一截空，表题就离表格远、离上一段近了。
+const CAPTION_LINE_PT: f32 = 18.0;
+
+/// 图、表与上下正文之间多留的空，对应 PDF 里 figure 的 `\intextsep`、longtblr
+/// 的 presep / postsep。取值对照编译出的 PDF 量过（见 [`space_after_float`]）。
+const FLOAT_SEP_PT: f32 = 8.0;
+
+/// 图、表之后的空。预览里一行字的行距留白全在字的下方（egui 的行框从字顶
+/// 起算），所以正文紧跟在表格边框、图题后面时字顶一点空都没有——表格前面有
+/// 上一段自带的行距留白，后面没有。这里把正文一行的留白补上，前后才对称：
+/// 表格下边框到下一段字顶约 18 磅，与 PDF 相当。
+fn space_after_float(ui: &mut egui::Ui, metrics: &Metrics) {
+    let leading = metrics.line - metrics.pt(RESEARCH_BODY_PT);
+    ui.add_space(metrics.pt(FLOAT_SEP_PT) + leading);
+}
+
+/// 图题、表题：标签（"图 1.1""表 1.1"）黑体、题名宋体，都是小四，居中一行，
+/// 标签后空半个字——与 `md2tex.cls` 里 caption 包和 tabularray 的两处设置一致。
+/// 预览的黑体西文是半角，一个 ASCII 空格正好是 0.5em（同 [`SECTION_GAP`]）。
+fn caption_line(ui: &mut egui::Ui, metrics: &Metrics, tag: &str, number: &str, text: &str) {
+    line_block_runs_spaced(
+        ui,
+        metrics,
+        &[
+            TextRun {
+                text: &format!("{tag} {number} "),
+                family: theme::FONT_HEITI,
+                size: RESEARCH_CAPTION_PT,
+            },
+            TextRun {
+                text,
+                family: metrics.body_family,
+                size: RESEARCH_CAPTION_PT,
+            },
+        ],
+        Align::Center,
+        metrics.pt(CAPTION_LINE_PT),
+    );
+}
 
 /// 章标题：小二黑体居中，上下各空一行。
 fn chapter_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
@@ -1650,6 +1816,187 @@ mod tests {
         assert!(text.contains("见??。"), "{text}");
     }
 
+    /// 纸面上画出来的文字块，连同它们的 galley（要看字面、字号与位置）。
+    fn drawn_texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<&egui::epaint::TextShape> {
+        flatten(shapes)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::epaint::Shape::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 图题与表题同一套字面（`md2tex.cls` 的 caption 包与 tabularray 两处一致）：
+    /// 标签黑体、题名宋体，都是小四；表格正文也是宋体小四，不是公文的仿宋四号。
+    #[test]
+    fn figure_and_table_captions_share_one_typeface() {
+        let shapes = drawn_shapes(concat!(
+            "<!-- [正文] -->\n\n## 章\n\n",
+            "![总体架构](images/a.png)\n\n",
+            "表：样本分布\n| 地区 | 样本 |\n| --- | --- |\n| 华东 | 12 |\n",
+        ));
+        let texts = drawn_texts(&shapes);
+        let caption_fonts = |prefix: &str| {
+            let galley = &texts
+                .iter()
+                .find(|text| text.galley.text().starts_with(prefix))
+                .unwrap_or_else(|| panic!("没画出“{prefix}”"))
+                .galley;
+            let sections = &galley.job.sections;
+            (
+                sections[0].format.font_id.clone(),
+                sections[sections.len() - 1].format.font_id.clone(),
+            )
+        };
+        let figure = caption_fonts("图 1.1");
+        let table = caption_fonts("表 1.1");
+        assert_eq!(figure, table, "图题与表题应同一套字面");
+        let metrics = Metrics::research(1000.0, Some(1.0));
+        assert_eq!(
+            figure.0,
+            metrics.font(theme::FONT_HEITI, RESEARCH_CAPTION_PT)
+        );
+        assert_eq!(
+            figure.1,
+            metrics.font(theme::FONT_SONGTI, RESEARCH_CAPTION_PT)
+        );
+        let cell = texts
+            .iter()
+            .find(|text| text.galley.text() == "华东")
+            .expect("表格正文");
+        assert_eq!(
+            cell.galley.job.sections[0].format.font_id, figure.1,
+            "表格正文与题名同为宋体小四"
+        );
+    }
+
+    /// 插图宽度照 `mdx::figure_size` 取档、居中，与导出的 TeX / Word 一致：
+    /// 方图是 0.8 档，不再像公文那样按像素原样铺到版心宽。
+    #[test]
+    fn figures_take_the_export_width_step_and_are_centered() {
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        theme::configure_fonts(&ctx, &FontConfig::default());
+        let dir = crate::images::image_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("gw_research_width_{}.png", std::process::id());
+        let path = dir.join(&name);
+        image::RgbaImage::from_pixel(1200, 1200, image::Rgba([0, 0, 255, 255]))
+            .save(&path)
+            .unwrap();
+        let markdown = format!("<!-- [正文] -->\n\n## 章\n\n![方图](images/{name})\n");
+        let input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 6000.0),
+            )),
+            ..Default::default()
+        };
+        let frame = || {
+            ctx.run_ui(raw.clone(), |ui| {
+                let _ = research_preview(
+                    ui,
+                    &input,
+                    &markdown,
+                    PreviewScale::zoom(Some(1.0)),
+                    None,
+                    false,
+                    &NumberingConfig::default(),
+                    false,
+                );
+            })
+            .shapes
+        };
+        // 首帧交给后台解码，等解码完再排。
+        let mut figure = None;
+        for _ in 0..20 {
+            let shapes = frame();
+            figure = flatten(&shapes).into_iter().find_map(|shape| match shape {
+                // `Image::paint_at` 画成带纹理笔刷的矩形。
+                egui::epaint::Shape::Rect(rect) if rect.brush.is_some() => Some(rect.rect),
+                _ => None,
+            });
+            if figure.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(&path);
+        let figure = figure.expect("图片应在几帧内解码画出");
+        let metrics = Metrics::research(1000.0, Some(1.0));
+        assert!(
+            (figure.width() - metrics.content * 0.8).abs() < 1.0,
+            "方图应占版心宽 0.8：{figure:?}，版心 {}",
+            metrics.content
+        );
+        assert!((figure.width() - figure.height()).abs() < 1.0, "{figure:?}");
+        // 居中：左右留白相等。纸的版心左沿 = 图左沿 − 一侧留白。
+        let side = (metrics.content - figure.width()) / 2.0;
+        let shapes = frame();
+        let caption = drawn_texts(&shapes)
+            .into_iter()
+            .find(|text| text.galley.text().starts_with("图 1.1"))
+            .map(|text| text.pos.x)
+            .expect("图题");
+        // 图题是画在版心正中的 galley，原点横坐标就是版心中线。
+        assert!(
+            (figure.center().x - caption).abs() < 1.0,
+            "图应居中：图 {figure:?}，版心中线 {caption}，一侧留白 {side}"
+        );
+    }
+
+    /// 图题不贴着图，表格后面的正文不贴着表格下边框：预览的行距留白全在字
+    /// 下方，这两处原先一点空都没有。
+    #[test]
+    fn captions_and_following_text_keep_clear_of_figures_and_tables() {
+        let shapes = drawn_shapes(concat!(
+            "<!-- [正文] -->\n\n## 章\n\n",
+            "![总体架构](images/a.png)\n\n",
+            "表：样本分布\n| 地区 | 样本 |\n| --- | --- |\n| 华东 | 12 |\n\n",
+            "表后正文。\n",
+        ));
+        let texts = drawn_texts(&shapes);
+        let top_of = |needle: &str| {
+            texts
+                .iter()
+                .find(|text| text.galley.text().contains(needle))
+                .unwrap_or_else(|| panic!("没画出“{needle}”"))
+                .pos
+                .y
+        };
+        let figure_caption = top_of("图 1.1");
+        let table_caption = top_of("表 1.1");
+        let after = top_of("表后正文");
+        // 图片找不到时画占位框，表格画格线：都是描边矩形，按位置区分。
+        let bottom_of_rects_in = |from: f32, to: f32| {
+            flatten(&shapes)
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    egui::epaint::Shape::Rect(rect) => Some(rect.rect),
+                    _ => None,
+                })
+                .filter(|rect| rect.min.y > from && rect.max.y <= to)
+                .map(|rect| rect.max.y)
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let metrics = Metrics::research(1000.0, Some(1.0));
+        let figure_bottom = bottom_of_rects_in(0.0, figure_caption);
+        assert!(
+            figure_caption - figure_bottom >= metrics.pt(CAPTION_GAP_PT) - 1.0,
+            "图题与图之间应留 \\abovecaptionskip：{figure_bottom} → {figure_caption}"
+        );
+        let table_bottom = bottom_of_rects_in(table_caption, after);
+        assert!(
+            after - table_bottom >= metrics.pt(FLOAT_SEP_PT) + metrics.pt(8.0),
+            "表后正文应离开表格下边框：{table_bottom} → {after}"
+        );
+    }
+
     #[test]
     fn a_table_caption_written_after_the_table_still_prints_above_it() {
         let text = drawn("## 章\n\n| 项 | 数 |\n| --- | --- |\n| 甲 | 1 |\n\n表：样本分布\n");
@@ -1796,6 +2143,62 @@ mod tests {
                 (2, Some("第1章\u{3000}".to_string()), "研究背景".to_string()),
                 (3, Some("1.1 ".to_string()), "研究方法".to_string()),
             ]
+        );
+    }
+
+    fn targets(markdown: &str) -> Vec<(String, LabelKind, String, String)> {
+        label_targets(markdown)
+            .into_iter()
+            .map(|t| (t.id, t.kind, t.number, t.title))
+            .collect()
+    }
+
+    /// 交叉引用菜单按锚点挂的位置分类，编号与纸面同源，id 怎么起名不影响判断。
+    #[test]
+    fn label_targets_classify_by_position_and_carry_the_printed_number() {
+        let table = "| 项 | 数 |\n| --- | --- |\n| 甲 | 1 |\n\n";
+        let markdown = format!(
+            "# 某某问题研究报告\n\n<!-- [部分] -->\n\n\
+             # 第一部分 现状分析 {{#a}}\n\n\
+             ## 研究背景 {{#b}}\n\n\
+             ### 研究方法，见第{{@b}}章 {{#c}}\n\n\
+             #### 数据来源 {{#d}}\n\n\
+             ![总体架构](images/a.png){{#e}}\n\n\
+             表：样本分布 {{#f}}\n\n{table}\
+             <!-- [附录] -->\n\n## 调研问卷 {{#g}}\n\n### 问卷说明 {{#h}}\n"
+        );
+        let s = |v: &str| v.to_string();
+        assert_eq!(
+            targets(&markdown),
+            vec![
+                (s("a"), LabelKind::Part, s("第一部分"), s("现状分析")),
+                (s("b"), LabelKind::Chapter, s("第1章"), s("研究背景")),
+                (s("c"), LabelKind::Section, s("1.1"), s("研究方法，见第1章")),
+                (s("d"), LabelKind::Subsection, s("1.1.1"), s("数据来源")),
+                (s("e"), LabelKind::Figure, s("图 1.1"), s("总体架构")),
+                (s("f"), LabelKind::Table, s("表 1.1"), s("样本分布")),
+                (s("g"), LabelKind::Chapter, s("附录A"), s("调研问卷")),
+                (s("h"), LabelKind::Section, s("A.1"), s("问卷说明")),
+            ]
+        );
+    }
+
+    /// 没有号可引的锚点（不编号标题、无图注图片、普通段落）不进菜单；重名只留第一次。
+    #[test]
+    fn label_targets_skip_what_cannot_be_numbered_and_keep_the_first_duplicate() {
+        let markdown = "<!-- [正文] -->\n\n\
+             <!-- [不编号] -->\n## 前言 {#pre}\n\n\
+             ## 研究背景 {#dup}\n\n\
+             ![](images/a.png){#bare}\n\n\
+             ## 现状 {#dup}\n";
+        assert_eq!(
+            targets(markdown),
+            vec![(
+                "dup".to_string(),
+                LabelKind::Chapter,
+                "第1章".to_string(),
+                "研究背景".to_string()
+            )]
         );
     }
 }

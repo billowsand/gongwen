@@ -794,9 +794,20 @@ pub(crate) fn content_block(
     }
 }
 
-/// 图片块：位图按版心宽度等比渲染，加载失败显示占位卡片；PDF 取第一页光栅化
-/// 后同样按版心宽度画（见 `preview::pdf_figure`）。外层已由 clickable 包装。
+/// 图片块：位图按原始尺寸画、最宽到版心宽，加载失败显示占位卡片；PDF 取第一页
+/// 光栅化后按版心宽度画（见 `preview::pdf_figure`）。外层已由 clickable 包装。
 pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str) {
+    figure_block(ui, metrics, alt, src, false);
+}
+
+/// 研究报告的插图：宽度按 `mdx::figure_size` 定、居中，与导出的 TeX（`width=
+/// 0.8\textwidth` 之类加 `\centering`）和 Word 同一规则。
+pub(crate) fn research_image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str) {
+    figure_block(ui, metrics, alt, src, true);
+}
+
+/// `research` 为真时按 `figure_size` 定宽居中，否则是公文的排法。
+fn figure_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str, research: bool) {
     let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
     let path = match images::resolve(src) {
         Ok(path) => path,
@@ -806,7 +817,7 @@ pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: 
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
     if is_pdf {
-        return pdf_block(ui, metrics, alt, src, &path, &file_name);
+        return pdf_block(ui, metrics, alt, src, &path, &file_name, research);
     }
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -820,11 +831,43 @@ pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: 
     // 用 fit_to_original_size 按纹理尺寸布局，再受 max_size 限制（宽=版心、高不设限）。
     // 不能用默认的 Fraction 适配：滚动区里 available_size.y 是无穷大，会把图片高度
     // 撑成无穷大，矩形超出可视区域而不绘制。
-    ui.add(
-        egui::Image::from_bytes(uri, bytes)
-            .fit_to_original_size(1.0)
-            .max_size(egui::vec2(metrics.content, f32::INFINITY)),
-    );
+    let image = egui::Image::from_bytes(uri, bytes).fit_to_original_size(1.0);
+    if research {
+        // 纹理解码好了才知道像素尺寸；还在后台解码的那几帧照公文的排法先占着。
+        let size = image
+            .load_for_size(ui.ctx(), egui::vec2(metrics.content, f32::INFINITY))
+            .ok()
+            .and_then(|poll| match poll {
+                egui::load::TexturePoll::Ready { texture } => Some(texture.size),
+                egui::load::TexturePoll::Pending { .. } => None,
+            });
+        if let Some(size) = size.filter(|size| size.x >= 1.0 && size.y >= 1.0) {
+            let source = mdx::figure_size::FigureSource::Raster {
+                width_px: size.x.round() as u32,
+                height_px: size.y.round() as u32,
+            };
+            return centered_figure(ui, metrics, source, size, |ui, rect| {
+                image.paint_at(ui, rect);
+            });
+        }
+    }
+    ui.add(image.max_size(egui::vec2(metrics.content, f32::INFINITY)));
+}
+
+/// 按 `figure_size` 算出的宽度占一整行版心，图画在正中。`size` 只用来取宽高比。
+fn centered_figure(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    source: mdx::figure_size::FigureSource,
+    size: egui::Vec2,
+    paint: impl FnOnce(&mut egui::Ui, egui::Rect),
+) {
+    let width = metrics.content * mdx::figure_size::width_fraction(source) as f32;
+    let height = width * size.y / size.x;
+    let (row, _) =
+        ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
+    let rect = egui::Rect::from_center_size(row.center(), egui::vec2(width, height));
+    paint(ui, rect);
 }
 
 /// PDF 插图：第一页占满版心宽，与导出的 `\includegraphics[width=\textwidth]`
@@ -836,8 +879,22 @@ fn pdf_block(
     src: &str,
     path: &std::path::Path,
     file_name: &str,
+    research: bool,
 ) {
     match pdf_figure::page(ui.ctx(), src, path) {
+        pdf_figure::PdfPage::Ready(texture) if research => {
+            // 预览只光栅化第一页，纹理的宽高比就是页面的宽高比；PDF 是矢量图，
+            // 不受分辨率上限约束。
+            let size = texture.size_vec2();
+            let source = mdx::figure_size::FigureSource::Vector {
+                width: f64::from(size.x),
+                height: f64::from(size.y),
+            };
+            centered_figure(ui, metrics, source, size, |ui, rect| {
+                egui::Image::from_texture(egui::load::SizedTexture::from_handle(&texture))
+                    .paint_at(ui, rect);
+            });
+        }
         pdf_figure::PdfPage::Ready(texture) => {
             let size = texture.size_vec2();
             let height = metrics.content * size.y / size.x.max(1.0);

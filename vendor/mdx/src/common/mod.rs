@@ -6,6 +6,7 @@ pub mod ast;
 pub mod citation;
 pub mod crossref;
 pub mod docx_image;
+pub mod figure_size;
 pub mod front_matter;
 pub mod heading;
 pub mod images;

@@ -7,7 +7,7 @@ use crate::export;
 use crate::export::table::ColumnAlignment;
 use crate::preview::gutter;
 use crate::preview::marks::{self, LineMarks};
-use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT, TABLE_LINE_PT, TABLE_PT};
+use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT};
 use crate::theme;
 use eframe::egui;
 use eframe::egui::text::{LayoutJob, TextFormat};
@@ -502,6 +502,18 @@ pub(crate) fn line_block_runs(
     runs: &[TextRun<'_>],
     align: Align,
 ) {
+    line_block_runs_spaced(ui, metrics, runs, align, metrics.line);
+}
+
+/// 同 [`line_block_runs`]，行距另给：比正文小的字（研究报告的图题、表题）
+/// 若仍占正文的行框，字下方会多出一截空，挤在图与正文、表题与表格之间。
+pub(crate) fn line_block_runs_spaced(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    runs: &[TextRun<'_>],
+    align: Align,
+    line: f32,
+) {
     let mut job = job(metrics.content);
     job.halign = align;
     for run in runs {
@@ -511,7 +523,7 @@ pub(crate) fn line_block_runs(
             &mut job,
             metrics,
             run.text,
-            text_format(metrics.font(run.family, run.size), metrics.line),
+            text_format(metrics.font(run.family, run.size), line),
         );
     }
     if align == Align::Center {
@@ -921,7 +933,8 @@ pub(crate) struct MeasuredTable {
     cells: Vec<TableCellLayout>,
 }
 
-/// 表格：四号字、行距 21 磅，表头黑体居中，列宽直接取导出器算好的智能列宽，
+/// 表格：字面、字号与格内行距跟着版式走（公文仿宋四号、21 磅；研究报告宋体
+/// 小四、18 磅，见 [`Metrics`]），表头黑体居中，列宽直接取导出器算好的智能列宽，
 /// 因此预览的列宽与导出的 Word 表格一致。`content_width` 是表格占的版心宽度。
 pub(crate) fn measure_table(
     ui: &egui::Ui,
@@ -946,19 +959,19 @@ pub(crate) fn measure_table(
         .collect::<Vec<_>>();
 
     // 先排出所有锚点单元格，再由跨行单元格反推各物理行所需高度。
-    let line = metrics.pt(TABLE_LINE_PT);
+    let line = metrics.pt(metrics.table_line_pt);
     let mut cells = Vec::new();
     let mut row_heights = vec![line; rows.len()];
-    let bold_font = metrics.font(theme::FONT_BOLD, TABLE_PT);
+    let bold_font = metrics.font(theme::FONT_BOLD, metrics.table_pt);
     for (row_index, row) in rows.iter().enumerate() {
         let header = row_index == 0;
         let font = metrics.font(
             if header {
                 theme::FONT_HEITI
             } else {
-                theme::FONT_FANGSONG
+                metrics.table_family
             },
-            TABLE_PT,
+            metrics.table_pt,
         );
         for column in 0..widths.len() {
             let span = export::table_span_at(spans, row_index, column);

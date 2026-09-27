@@ -1,5 +1,6 @@
 //! DOCX 图片读取、格式转换和等比缩放。
 
+use super::figure_size;
 use anyhow::{Context, Result};
 use docx_rs::Pic;
 use image::GenericImageView;
@@ -14,13 +15,38 @@ const PDF_DPI: u32 = 200;
 
 /// 读取本地图片，统一转成 DOCX 可稳定嵌入的 PNG，并在超宽时等比缩放。
 pub fn load(url: &str, base_dir: &Path, max_width_emu: u32) -> Result<Pic> {
+    let (mut pic, _) = decode(url, base_dir)?;
+    let (width_emu, height_emu) = pic.size;
+    if width_emu > max_width_emu {
+        let scaled_height =
+            ((u64::from(height_emu) * u64::from(max_width_emu)) / u64::from(width_emu)) as u32;
+        pic = pic.size(max_width_emu, scaled_height.max(1));
+    }
+    Ok(pic)
+}
+
+/// 研究报告的插图：宽度按 [`figure_size::width_fraction`] 定，与 TeX 和预览
+/// 同一规则；`text_width_emu` 是版心宽。
+pub fn load_research(url: &str, base_dir: &Path, text_width_emu: u32) -> Result<Pic> {
+    let (pic, source) = decode(url, base_dir)?;
+    let (width_px, height_px) = pic.size;
+    let fraction = figure_size::width_fraction(source);
+    let width = (f64::from(text_width_emu) * fraction).round() as u32;
+    let height = (f64::from(width) * f64::from(height_px) / f64::from(width_px)).round() as u32;
+    Ok(pic.size(width.max(1), height.max(1)))
+}
+
+/// 读图并转成 PNG，一并交回定宽用的原始尺寸：位图是像素，PDF 是页面尺寸
+/// （读不出页面尺寸时拿栅格化后的像素当比例用，照样按矢量图算）。
+fn decode(url: &str, base_dir: &Path) -> Result<(Pic, figure_size::FigureSource)> {
     if url.starts_with("http://") || url.starts_with("https://") {
         anyhow::bail!("DOCX 暂不下载远程图片 '{url}'");
     }
 
     let (path_url, pdf_page) = split_pdf_page(url)?;
     let path = resolve_path(path_url, base_dir);
-    let bytes = if is_pdf(&path) {
+    let pdf = is_pdf(&path);
+    let bytes = if pdf {
         rasterize_pdf_page(&path, pdf_page.unwrap_or(1))?
     } else {
         fs::read(&path).with_context(|| format!("读取图片 {} 失败", path.display()))?
@@ -37,18 +63,25 @@ pub fn load(url: &str, base_dir: &Path, max_width_emu: u32) -> Result<Pic> {
         .write_to(&mut png, image::ImageFormat::Png)
         .with_context(|| format!("转换图片 {} 为 PNG 失败", path.display()))?;
 
-    let mut pic = Pic::new_with_dimensions(png.into_inner(), width_px, height_px);
-    let (width_emu, height_emu) = pic.size;
-    if width_emu > max_width_emu {
-        let scaled_height =
-            ((u64::from(height_emu) * u64::from(max_width_emu)) / u64::from(width_emu)) as u32;
-        pic = pic.size(max_width_emu, scaled_height.max(1));
-    }
-    Ok(pic)
+    let source = if pdf {
+        figure_size::probe(&path, pdf_page).unwrap_or(figure_size::FigureSource::Vector {
+            width: f64::from(width_px),
+            height: f64::from(height_px),
+        })
+    } else {
+        figure_size::FigureSource::Raster {
+            width_px,
+            height_px,
+        }
+    };
+    Ok((
+        Pic::new_with_dimensions(png.into_inner(), width_px, height_px),
+        source,
+    ))
 }
 
 /// PDF 图片默认使用第一页；`file.pdf#page=2` 可选择其他页。
-fn split_pdf_page(url: &str) -> Result<(&str, Option<u32>)> {
+pub(crate) fn split_pdf_page(url: &str) -> Result<(&str, Option<u32>)> {
     let Some((path, page_text)) = url.rsplit_once("#page=") else {
         return Ok((url, None));
     };
@@ -173,6 +206,18 @@ mod tests {
         let pic = load("wide.png", dir.path(), 10 * EMU_PER_PIXEL).unwrap();
         assert_eq!(pic.size, (10 * EMU_PER_PIXEL, 2 * EMU_PER_PIXEL));
         assert!(!pic.image.is_empty());
+    }
+
+    /// 研究报告的插图按版心宽的档位定宽、等比定高，与 TeX 的 `width=0.8\textwidth` 一致。
+    #[test]
+    fn research_figures_take_the_width_step_of_the_text_block() {
+        let dir = tempfile::tempdir().unwrap();
+        image::DynamicImage::new_rgb8(1200, 1200)
+            .save(dir.path().join("square.png"))
+            .unwrap();
+        let text_width = 5_616_000;
+        let pic = load_research("square.png", dir.path(), text_width).unwrap();
+        assert_eq!(pic.size, (4_492_800, 4_492_800));
     }
 
     #[test]

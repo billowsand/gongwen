@@ -74,7 +74,9 @@ const PAGE_LEFT: i32 = 1587; // 28 mm
 const PAGE_RIGHT: i32 = 1474; // 26 mm
 const PAGE_FOOTER: i32 = 1588; // 页脚距页面下沿 28 mm，与公文 docx 一致
 const SIZE_FOOTER: usize = 28; // 页码四号，对齐 md2tex.cls
-const MAX_IMAGE_WIDTH_EMU: u32 = 5_600_000; // 约 156 mm，限制在版心内
+/// 版心宽 156 mm（A4 减左右边距 28 / 26 mm），插图宽度按它的比例给，
+/// 见 `figure_size`。
+const TEXT_WIDTH_EMU: u32 = (crate::common::figure_size::TEXT_WIDTH_MM * 36_000.0) as u32;
 const MAX_INLINE_IMAGE_WIDTH_EMU: u32 = 1_800_000;
 const TABLE_CONTENT_WIDTH_TWIPS: usize = 8_844; // 156 mm
 
@@ -1206,7 +1208,7 @@ impl MainEmitter {
     }
 
     fn add_figure(&mut self, docx: Docx, alt: &str, url: &str) -> Docx {
-        match crate::common::docx_image::load(url, &self.image_base_dir, MAX_IMAGE_WIDTH_EMU) {
+        match crate::common::docx_image::load_research(url, &self.image_base_dir, TEXT_WIDTH_EMU) {
             Ok(pic) => {
                 let has_caption = !alt.trim().is_empty();
                 let figure = Paragraph::new()

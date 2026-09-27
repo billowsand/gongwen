@@ -12,7 +12,9 @@
 //! - 分章输出：每章切为 data/ 部件，附录切为 appendix/ 部件，主文件 \input 引用
 
 use crate::common::ast::{Block, Inline, LineAlign, MarkerKind};
+use crate::common::figure_size;
 use crate::common::table_to_longtblr::emit_longtblr;
+use std::path::{Path, PathBuf};
 
 /// 文档模式：控制特殊章节的处理方式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +96,18 @@ pub struct TexResearchEmitter {
     /// 最近一次 \item 行写入 out 之后的位置；遇到更深层级时，
     /// 在此位置插入 \begin{...} 把子环境挂在父 \item 之后。
     last_item_end: usize,
+    /// 插图 url 相对的目录（输出目录，图片已由 `images::relocate` 复制进去）。
+    /// 读得到图片就按 `figure_size` 定宽；None 或读不到时退回满宽加限高。
+    image_dir: Option<PathBuf>,
 }
 
 impl TexResearchEmitter {
+    /// 插图 url 相对的目录，用来读图片尺寸定宽（见 [`figure_width_option`]）。
+    pub fn with_image_dir(mut self, dir: &Path) -> Self {
+        self.image_dir = Some(dir.to_path_buf());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
             out: String::new(),
@@ -132,6 +143,7 @@ impl TexResearchEmitter {
             list_level: 0,
             list_env: Vec::new(),
             last_item_end: 0,
+            image_dir: None,
         }
     }
 
@@ -545,7 +557,8 @@ impl TexResearchEmitter {
         // [H]（float 宏包）：图片就地排版，不漂移到页首/页尾
         let mut fig = String::from("\\begin{figure}[H]\n\\centering\n");
         fig.push_str(&format!(
-            "\\includegraphics[width=\\textwidth]{{{}}}\n",
+            "\\includegraphics[{}]{{{}}}\n",
+            figure_width_option(self.image_dir.as_deref(), url),
             escape_href_url(url)
         ));
         if !alt.is_empty() {
@@ -922,6 +935,30 @@ fn escape_latex(s: &str) -> String {
         }
     }
     out
+}
+
+/// `\includegraphics` 的尺寸选项：读得到图片就按 `figure_size` 定宽（满宽
+/// 一档写 `\textwidth`，其余写成版心宽的倍数）；远程图片、找不到的文件退回
+/// 满宽，但限高 `keepaspectratio`，竖图至少不会高过版心。
+fn figure_width_option(image_dir: Option<&Path>, url: &str) -> String {
+    let source = image_dir.and_then(|dir| {
+        let (path, page) = crate::common::docx_image::split_pdf_page(url).ok()?;
+        figure_size::probe(&dir.join(path), page)
+    });
+    let Some(source) = source else {
+        return format!(
+            "width=\\textwidth,height={}\\textheight,keepaspectratio",
+            figure_size::MAX_HEIGHT_RATIO
+        );
+    };
+    let fraction = figure_size::width_fraction(source);
+    if fraction >= 1.0 {
+        return "width=\\textwidth".to_string();
+    }
+    // 档位本身是两位小数；照上限原样给的宽度留三位，去掉尾零。
+    let digits = format!("{fraction:.3}");
+    let digits = digits.trim_end_matches('0').trim_end_matches('.');
+    format!("width={digits}\\textwidth")
 }
 
 fn escape_href_url(s: &str) -> String {
@@ -1462,8 +1499,11 @@ mod tests {
         let body = test_body(e);
         assert!(body.contains("\\begin{figure}[H]"), "got {}", body);
         assert!(body.contains("\\centering"));
+        // 没给图片目录、读不到尺寸：满宽但限高
         assert!(
-            body.contains("\\includegraphics[width=\\textwidth]{figs/framework.png}"),
+            body.contains(
+                "\\includegraphics[width=\\textwidth,height=0.6\\textheight,keepaspectratio]{figs/framework.png}"
+            ),
             "got {}",
             body
         );
@@ -1484,8 +1524,46 @@ mod tests {
             label: None,
         }]));
         let body = test_body(e);
-        assert!(body.contains("\\includegraphics[width=\\textwidth]{a.png}"));
+        assert!(body.contains(
+            "\\includegraphics[width=\\textwidth,height=0.6\\textheight,keepaspectratio]{a.png}"
+        ));
         assert!(!body.contains("\\caption"));
+    }
+
+    /// 读得到图片就按 `figure_size` 定宽：宽图满宽，方图 0.8 档，竖图受限高。
+    #[test]
+    fn test_figure_width_follows_image_proportions() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, width, height) in [
+            ("wide.png", 1920, 1080),
+            ("square.png", 1200, 1200),
+            ("phone.png", 1170, 2532),
+        ] {
+            image::RgbaImage::new(width, height)
+                .save(dir.path().join(name))
+                .unwrap();
+        }
+        let mut e = TexResearchEmitter::new().with_image_dir(dir.path());
+        for url in ["wide.png", "square.png", "phone.png"] {
+            e.emit_block(&Block::Paragraph(vec![Inline::Image {
+                alt: String::new(),
+                url: url.into(),
+                label: None,
+            }]));
+        }
+        let body = test_body(e);
+        assert!(
+            body.contains("\\includegraphics[width=\\textwidth]{wide.png}"),
+            "got {body}"
+        );
+        assert!(
+            body.contains("\\includegraphics[width=0.8\\textwidth]{square.png}"),
+            "got {body}"
+        );
+        assert!(
+            body.contains("\\includegraphics[width=0.4\\textwidth]{phone.png}"),
+            "got {body}"
+        );
     }
 
     #[test]

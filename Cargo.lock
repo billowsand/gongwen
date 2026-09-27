@@ -3236,6 +3236,7 @@ dependencies = [
  "biblatex",
  "chrono",
  "docx-rs",
+ "hayro-syntax",
  "image",
  "regex",
  "tempfile",

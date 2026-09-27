@@ -233,7 +233,13 @@
 %% ============================================================
 \renewcommand\figurename{图}
 \renewcommand\tablename{表}
-\captionsetup{labelsep=space}
+%% 图题与表题同一套字面：标签（"图 1.1""表 1.1"）黑体、题名宋体，都是小四，
+%% 标签与题名之间隔半个字（\enskip）。表题由 tabularray 自己排（见下方
+%% longtblr 的 caption-tag / caption-text / caption-sep），两处要一起改。
+\DeclareCaptionFont{mdxcaptiontag}{\heiti\enhei}
+\DeclareCaptionFont{mdxcaptiontext}{\song\zihao{-4}}
+\DeclareCaptionLabelSeparator{mdxenskip}{\enskip}
+\captionsetup{labelsep=mdxenskip, font=mdxcaptiontext, labelfont=mdxcaptiontag}
 
 %% ============================================================
 %% 列表设置（依赖下面的 \circlenum / \textcriclednum，所以放在它们之后）
@@ -267,7 +273,7 @@
 \setlength{\floatsep}{6pt plus 1pt minus 1pt}
 \setlength{\textfloatsep}{8pt plus 1pt minus 1pt}
 \setlength{\intextsep}{6pt plus 1pt minus 1pt}
-\setlength{\abovecaptionskip}{4pt}
+\setlength{\abovecaptionskip}{6pt}
 \setlength{\belowcaptionskip}{4pt}
 
 %% 长表格前后留白紧凑；longtblr/longtable 均可跨页断开，
@@ -330,8 +336,11 @@
 }
 \DefTblrTemplate{contfoot-text}{default}{下一页继续}
 \DefTblrTemplate{conthead-text}{default}{（续表）}
-\SetTblrStyle{caption-tag}{font=\heiti\zihao{-4}}
+%% 表题与图题一致（见"浮动体标题"）；tabularray 默认的分隔符是西文冒号，
+%% 换成与图题相同的半字空。
+\SetTblrStyle{caption-tag}{font=\heiti\enhei\zihao{-4}}
 \SetTblrStyle{caption-text}{font=\song\zihao{-4}}
+\DefTblrTemplate{caption-sep}{default}{\enskip}
 
 \newcommand{\longtblrfont}{\fontsize{12bp}{18pt}\selectfont\song}
 \newcommand{\longtblrsmall}{\fontsize{10bp}{15pt}\selectfont\song}
