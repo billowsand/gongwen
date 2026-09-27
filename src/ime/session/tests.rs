@@ -562,3 +562,58 @@ fn moving_the_pinyin_caret_updates_the_preedit() {
     let _ = frame(&ctx, &mut ime, vec![key_event(egui::Key::Home, true, none)]);
     assert_eq!(ime.preedit.caret, 0);
 }
+
+fn shift_down() -> egui::Event {
+    key_event(egui::Key::ShiftLeft, true, egui::Modifiers::SHIFT)
+}
+
+fn shift_up() -> egui::Event {
+    key_event(egui::Key::ShiftLeft, false, egui::Modifiers::NONE)
+}
+
+/// 按着 Shift 点鼠标是扩选，松开 Shift 不切中英。
+#[test]
+fn shift_click_with_the_mouse_is_not_a_tap() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+
+    let _ = frame(&ctx, &mut ime, vec![shift_down()]);
+    let click = egui::Event::PointerButton {
+        pos: egui::pos2(50.0, 50.0),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::SHIFT,
+    };
+    let _ = frame(&ctx, &mut ime, vec![click]);
+    let _ = frame(&ctx, &mut ime, vec![shift_up()]);
+    assert!(!ime.english(), "Shift+点击不该切模式");
+}
+
+/// 按住 Shift 太久再松开不算单击。
+#[test]
+fn holding_shift_too_long_is_not_a_tap() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+
+    let _ = frame(&ctx, &mut ime, vec![shift_down()]);
+    ime.shift_pressed_at = Instant::now() - SHIFT_TAP_MAX - Duration::from_millis(100);
+    let _ = frame(&ctx, &mut ime, vec![shift_up()]);
+    assert!(!ime.english(), "按太久不该切模式");
+}
+
+/// 组句中单击 Shift 切英文：已经敲的字母原样上屏。
+#[test]
+fn tapping_shift_while_composing_commits_the_letters() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kai");
+
+    let _ = frame(&ctx, &mut ime, vec![shift_down()]);
+    let routed = frame(&ctx, &mut ime, vec![shift_up()]);
+    assert_eq!(inserted(&routed), "kai");
+    assert!(ime.english());
+    assert!(ime.preedit.text.is_empty());
+}

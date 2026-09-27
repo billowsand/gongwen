@@ -28,6 +28,10 @@ use crate::lexicon::LexiconTerm;
 /// 学习数据落盘的间隔。被杀进程最多丢这么久的选择记录。
 const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Shift 按下到抬起不超过这么久才算单击。按住 Shift 犹豫半天再松开多半是想打大写、
+/// 或者改主意了，不该切中英。
+const SHIFT_TAP_MAX: Duration = Duration::from_millis(500);
+
 /// 要画在候选窗里的拼音串与光标位置（字符数）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Preedit {
@@ -131,8 +135,11 @@ pub(crate) struct Ime {
     /// 光标在屏幕上的矩形，候选窗的锚点。
     pub(super) anchor: Option<egui::Rect>,
 
-    /// Shift 单击判定：按下 Shift 之后还没有别的键插进来。
+    /// Shift 单击判定：按下 Shift 之后还没有别的键（或鼠标点击）插进来。
     shift_alone: bool,
+
+    /// 这次 Shift 是什么时候按下的，判「按得太久不算单击」。
+    shift_pressed_at: Instant,
 
     /// 已经显式让后端关过系统输入法了吗。
     system_ime_off: bool,
@@ -162,6 +169,7 @@ impl Ime {
             exempt: HashSet::new(),
             anchor: None,
             shift_alone: false,
+            shift_pressed_at: Instant::now(),
             system_ime_off: false,
             last_flush: Instant::now(),
         };
@@ -572,6 +580,12 @@ impl Ime {
                     ..
                 } => self.route_key(*key, *pressed, *repeat, *modifiers, &mut kept),
                 // 字符走 `Text`：`Key` 事件对纯字母没有插入语义，两边都处理会插两次。
+                // 按着 Shift 点鼠标、滚滚轮是扩选，不是单击 Shift
+                egui::Event::PointerButton { pressed: true, .. }
+                | egui::Event::MouseWheel { .. } => {
+                    self.shift_alone = false;
+                    false
+                }
                 // 剪切、粘贴不走 `Key` 事件（egui-winit 直接换成这两个事件），也改正文：
                 // 与快捷键同样处理，组句中先把拼音原样上屏。复制不动正文，不管。
                 egui::Event::Cut | egui::Event::Paste(_) => {
@@ -606,10 +620,12 @@ impl Ime {
         kept: &mut Vec<egui::Event>,
     ) -> bool {
         if !pressed {
-            // Shift 按下到抬起之间没有别的键插进来，就是一次单击：切中英。
+            // Shift 按下到抬起之间没有别的键插进来、也没按太久，就是一次单击：切中英。
             if is_shift(key) && self.shift_alone {
                 self.shift_alone = false;
-                self.english = !self.english;
+                if self.shift_pressed_at.elapsed() <= SHIFT_TAP_MAX {
+                    self.shift_tapped(kept);
+                }
             }
             return false;
         }
@@ -617,6 +633,7 @@ impl Ime {
             // 按着 Ctrl / Alt 再按 Shift 是组合键的一部分，不算单击
             if !repeat && !(modifiers.ctrl || modifiers.alt || modifiers.command) {
                 self.shift_alone = true;
+                self.shift_pressed_at = Instant::now();
             }
             return false;
         }
@@ -625,6 +642,19 @@ impl Ime {
             Some(ime_key) => self.handle(ime_key, kept),
             None => false,
         }
+    }
+
+    /// 单击 Shift：切中英。组句中切到英文时，已经敲的字母原样上屏——
+    /// 打了 `hello` 才发现该是英文，单击 Shift 就是 hello，不用删了重打。
+    fn shift_tapped(&mut self, kept: &mut Vec<egui::Event>) {
+        if !self.english && self.composing() {
+            let outcome = self.execute_guarded(Action::CommitRaw);
+            if let Some(text) = outcome.commit {
+                kept.push(egui::Event::Text(text));
+            }
+            self.refresh(true);
+        }
+        self.english = !self.english;
     }
 
     /// 分流一次按键并执行。返回是否吃掉（不再交给应用）。
