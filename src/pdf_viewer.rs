@@ -14,14 +14,15 @@
 //! 系统程序仍作为加密或复杂外来 PDF 的兼容性兜底。
 
 use crate::app::WorkerResult;
+use crate::pdf_text::{self, PageText};
 use crate::theme;
 use eframe::egui;
 use hayro::{
     RenderCache, RenderSettings,
-    hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf},
+    hayro_interpret::{InterpreterCache, InterpreterSettings, hayro_syntax::Pdf},
     vello_cpu::color::palette::css::WHITE,
 };
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -71,6 +72,8 @@ pub(crate) enum PdfMessage {
         width: u16,
         image: egui::ColorImage,
     },
+    /// 一页的文字层（每个字的位置与内容）。与渲染宽度无关，每页只需一份。
+    Text { index: usize, text: PageText },
     /// 打开失败。渲染线程随即退出。
     Failed(String),
 }
@@ -116,6 +119,34 @@ struct PageSlot {
     /// 最近一次出现在视口或预取区的帧号，淘汰时按它排序。
     last_used: u64,
     bytes: usize,
+    /// 文字层：显示文本光标、拖选与复制都靠它。不占显存，淘汰纹理时保留。
+    text: Option<PageText>,
+}
+
+/// 选区的一端：第几页、该页第几个字之前。
+type TextPos = (usize, usize);
+
+/// 文字选区。两端重合就是没选。
+#[derive(Default)]
+struct TextSelection {
+    /// 按下鼠标的那一端，拖动时不动。
+    anchor: TextPos,
+    /// 跟着鼠标走的那一端。
+    focus: TextPos,
+    dragging: bool,
+}
+
+impl TextSelection {
+    /// 按阅读顺序排好的两端；没选时为 `None`。
+    fn range(&self) -> Option<(TextPos, TextPos)> {
+        let start = self.anchor.min(self.focus);
+        let end = self.anchor.max(self.focus);
+        (start != end).then_some((start, end))
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// 渲染队列。主线程整批替换，渲染线程从队首取。
@@ -230,6 +261,7 @@ pub(crate) struct PdfSession {
     wheel_at: f64,
     quiet_until: f64,
     frame: u64,
+    selection: TextSelection,
     error: Option<String>,
 }
 
@@ -275,6 +307,7 @@ impl PdfSession {
             wheel_at: f64::NEG_INFINITY,
             quiet_until: f64::NEG_INFINITY,
             frame: 0,
+            selection: TextSelection::default(),
             error: None,
         }
     }
@@ -332,6 +365,13 @@ impl PdfSession {
                     image,
                     egui::TextureOptions::LINEAR,
                 ));
+            }
+            PdfMessage::Text { index, text } => {
+                if let Some(slot) = self.slots.get_mut(index)
+                    && slot.text.is_none()
+                {
+                    slot.text = Some(text);
+                }
             }
             PdfMessage::Failed(error) => {
                 self.error = Some(error);
@@ -613,6 +653,21 @@ impl PdfSession {
         if ctx.memory(|memory| memory.focused().is_some()) {
             return;
         }
+        // ⌘C / Ctrl+C 复制选中的文字；egui 把它报成 `Event::Copy`，不是按键。
+        if let Some(range) = self.selection.range() {
+            let copy = ctx.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Copy))
+            });
+            if copy {
+                ctx.copy_text(selected_text(&self.slots, range));
+            }
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.selection.clear();
+            }
+        }
         let none = egui::Modifiers::NONE;
         let (next, previous, first, last) = ctx.input_mut(|input| {
             // 用 `|` 而不是 `||`：两个键都要消费掉，不能短路。
@@ -695,10 +750,13 @@ impl PdfSession {
         // 闭包里要可变借用 slots，先把别的字段读出来。
         let frame = self.frame;
         let slots = &mut self.slots;
+        let selection = &mut self.selection;
         let (wanted, current) = scroll
             .show(ui, |ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(content_width, total), egui::Sense::hover());
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(content_width, total),
+                    egui::Sense::click_and_drag(),
+                );
                 let clip = ui.clip_rect();
                 // 视口上下各多备一屏，滚起来才不总看见占位白页。
                 let prefetch = clip.expand2(egui::vec2(0.0, clip.height()));
@@ -707,6 +765,7 @@ impl PdfSession {
                 // 当前页取占视口高度最多的那页，而不是露了一条边的上一页。
                 let mut current = None;
                 let mut best_visible = 0.0;
+                let mut shown = Vec::new();
 
                 // 只看预取区附近的页：先二分找到第一页，300 页也不用逐页判断。
                 let first = tops.partition_point(|top| rect.top() + top < prefetch.top());
@@ -736,7 +795,9 @@ impl PdfSession {
                         current = Some(index);
                     }
                     paint_page(painter, page_rect, index, slot);
+                    shown.push((index, page_rect));
                 }
+                select_text(ui, &response, &shown, slots, selection);
                 (wanted, current)
             })
             .inner;
@@ -789,8 +850,10 @@ impl PdfSession {
 
         let frame = self.frame;
         let slots = &mut self.slots;
+        let selection = &mut self.selection;
         let output = scroll.show(ui, |ui| {
-            let (rect, _) = ui.allocate_exact_size(content, egui::Sense::hover());
+            let (rect, response) = ui.allocate_exact_size(content, egui::Sense::click_and_drag());
+            let mut shown = Vec::with_capacity(pages.len());
             let row_width: f32 = pages.iter().map(|(_, size)| size.x).sum::<f32>()
                 + PAGE_GAP * (pages.len() - 1) as f32;
             let mut left = rect.center().x - row_width / 2.0;
@@ -802,8 +865,10 @@ impl PdfSession {
                 let slot = &mut slots[index];
                 slot.last_used = frame;
                 paint_page(ui.painter(), page_rect, index, slot);
+                shown.push((index, page_rect));
                 left += size.x + PAGE_GAP;
             }
+            select_text(ui, &response, &shown, slots, selection);
         });
         let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
         self.at_top = output.state.offset.y <= 1.0;
@@ -1068,6 +1133,166 @@ fn paint_page(painter: &egui::Painter, rect: egui::Rect, index: usize, slot: &Pa
     );
 }
 
+/// 页面文字的指针交互：悬停显示文本光标，按住拖动选字，拖出视口时自动滚动，
+/// 右键可复制；最后把选区高亮画在页面上。`shown` 是这一帧画出来的页及其位置。
+fn select_text(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    shown: &[(usize, egui::Rect)],
+    slots: &[PageSlot],
+    selection: &mut TextSelection,
+) {
+    let ctx = ui.ctx();
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        // 起点取按下的位置，不取越过拖动阈值时的位置，首字才不会漏选。
+        let origin = ctx
+            .input(|input| input.pointer.press_origin())
+            .or(response.interact_pointer_pos());
+        let extend = ctx.input(|input| input.modifiers.shift) && selection.range().is_some();
+        match origin.and_then(|pos| caret_in(shown, slots, pos, false)) {
+            Some(caret) => {
+                if !extend {
+                    selection.anchor = caret;
+                }
+                selection.focus = caret;
+                selection.dragging = true;
+            }
+            None => selection.clear(),
+        }
+    }
+    if selection.dragging {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if let Some(caret) = caret_in(shown, slots, pos, true) {
+                selection.focus = caret;
+            }
+            // 拖到视口上下边外面就朝那边滚，越远滚得越快。
+            let clip = ui.clip_rect();
+            let over = if pos.y < clip.top() {
+                clip.top() - pos.y
+            } else if pos.y > clip.bottom() {
+                clip.bottom() - pos.y
+            } else {
+                0.0
+            };
+            if over != 0.0 {
+                ui.scroll_with_delta_animation(
+                    egui::vec2(0.0, over.clamp(-40.0, 40.0)),
+                    egui::style::ScrollAnimation::none(),
+                );
+                ctx.request_repaint();
+            }
+            ctx.set_cursor_icon(egui::CursorIcon::Text);
+        }
+        if !response.dragged() {
+            selection.dragging = false;
+        }
+    }
+    if response.clicked() {
+        // Shift+单击把选区延伸到点击处，普通单击取消选区。
+        let caret = response
+            .interact_pointer_pos()
+            .and_then(|pos| caret_in(shown, slots, pos, false));
+        match caret {
+            Some(caret) if ctx.input(|input| input.modifiers.shift) => selection.focus = caret,
+            _ => selection.clear(),
+        }
+    }
+    if let Some(pos) = response.hover_pos()
+        && shown.iter().any(|&(index, rect)| {
+            rect.contains(pos)
+                && slots[index]
+                    .text
+                    .as_ref()
+                    .is_some_and(|text| text.hit(to_local(rect, pos)))
+        })
+    {
+        ctx.set_cursor_icon(egui::CursorIcon::Text);
+    }
+
+    let range = selection.range();
+    response.context_menu(|ui| {
+        let copy = ui.add_enabled(range.is_some(), egui::Button::new("复制"));
+        if copy.clicked() {
+            if let Some(range) = range {
+                ui.ctx().copy_text(selected_text(slots, range));
+            }
+            ui.close();
+        }
+    });
+
+    let Some(range) = range else {
+        return;
+    };
+    // 页面恒为白纸，选区色不随深浅主题变。
+    let fill = theme::accent().gamma_multiply(0.3);
+    for &(index, rect) in shown {
+        let (Some(text), Some((start, end))) = (&slots[index].text, page_span(range, index)) else {
+            continue;
+        };
+        for block in text.highlight(start, end) {
+            let block = egui::Rect::from_min_max(
+                rect.min + block.min.to_vec2() * rect.size(),
+                rect.min + block.max.to_vec2() * rect.size(),
+            );
+            ui.painter().rect_filled(block, 0, fill);
+        }
+    }
+}
+
+/// 屏幕坐标换成页面内的归一化坐标。
+fn to_local(page: egui::Rect, pos: egui::Pos2) -> egui::Pos2 {
+    egui::pos2(
+        (pos.x - page.left()) / page.width(),
+        (pos.y - page.top()) / page.height(),
+    )
+}
+
+/// 指针落点对应的插入位置。拖选时指针可能在页缝或页面外，`nearest` 为真就找最近的一页。
+fn caret_in(
+    shown: &[(usize, egui::Rect)],
+    slots: &[PageSlot],
+    pos: egui::Pos2,
+    nearest: bool,
+) -> Option<TextPos> {
+    let &(index, rect) = shown
+        .iter()
+        .find(|(_, rect)| rect.contains(pos))
+        .or_else(|| {
+            if !nearest {
+                return None;
+            }
+            shown.iter().min_by(|(_, a), (_, b)| {
+                a.distance_sq_to_pos(pos)
+                    .total_cmp(&b.distance_sq_to_pos(pos))
+            })
+        })?;
+    let text = slots[index].text.as_ref()?;
+    Some((index, text.caret_at(to_local(rect, pos))))
+}
+
+/// 选区落在某一页上的那一段（插入位置），页尾用 `usize::MAX` 表示、用时再夹。
+fn page_span((start, end): (TextPos, TextPos), page: usize) -> Option<(usize, usize)> {
+    if page < start.0 || page > end.0 {
+        return None;
+    }
+    let from = if page == start.0 { start.1 } else { 0 };
+    let to = if page == end.0 { end.1 } else { usize::MAX };
+    Some((from, to))
+}
+
+/// 选区的文字。页与页之间换行；还没取到文字层的页跳过。
+fn selected_text(slots: &[PageSlot], range: (TextPos, TextPos)) -> String {
+    (range.0.0..=range.1.0)
+        .filter_map(|index| {
+            let text = slots.get(index)?.text.as_ref()?;
+            let (start, end) = page_span(range, index)?;
+            let part = text.text(start, end);
+            (!part.is_empty()).then_some(part)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 渲染线程数：CPU 的一半，至少 1 条，至多 `MAX_RENDER_THREADS` 条。
 fn render_threads() -> usize {
     thread::available_parallelism()
@@ -1153,8 +1378,27 @@ fn render_loop(
     // 字体与图像的解码结果都落在这里。hayro 的建议就是每份 PDF 建一个、全程复用；
     // 每页新建一个等于每翻一页重新解码一遍嵌入的中文字体。
     let cache = RenderCache::new();
+    // 取文字层另走一遍内容流，字体解码缓存单独一份（`RenderCache` 里那份不对外）。
+    // 每页只取一次；几条线程偶尔重复取同一页也无妨，主线程只留第一份。
+    let text_cache = InterpreterCache::new();
+    let mut text_done = HashSet::new();
     while let Some(job) = queue.next() {
         let (generation, index, width) = job;
+        if text_done.insert(index)
+            && let Some(page) = pages.get(index)
+        {
+            let text = pdf_text::extract(page, &text_cache);
+            let delivered = results
+                .send(WorkerResult::Pdf {
+                    key,
+                    message: PdfMessage::Text { index, text },
+                })
+                .is_ok();
+            if !delivered {
+                queue.finish(job);
+                return;
+            }
+        }
         let image = pages.get(index).map(|page| {
             let (page_width, _) = page.render_dimensions();
             let scale = f32::from(width) / page_width;
@@ -1311,6 +1555,82 @@ mod tests {
         assert_eq!(image.width(), 400);
         assert_eq!(image.height(), 600);
         assert!(image.pixels.iter().all(|pixel| pixel.a() == 255));
+    }
+
+    /// 页面文字层：词间空格并进同一行，坐标按页面归一且上下方向对，复制出的文字对。
+    #[test]
+    fn reports_text_layer_for_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one-page.pdf");
+        std::fs::write(&path, minimal_pdf()).unwrap();
+
+        let (commands, rx) = spawn_worker(path);
+        commands.0.replace(1, vec![(0, 400)]);
+
+        let mut got = None;
+        assert!(drain(&rx, |message| match message {
+            PdfMessage::Text { index, text } => {
+                got = Some((index, text));
+                true
+            }
+            _ => false,
+        }));
+        let (index, text) = got.unwrap();
+        assert_eq!(index, 0);
+        // 「Hello PDF」一行：基线在 PDF 坐标 y=150（自下而上），即页高 300 的正中。
+        assert_eq!(text.lines.len(), 1, "{:?}", text.lines);
+        assert!(text.hit(egui::pos2(0.15, 0.47)));
+        assert!(text.hit(egui::pos2(0.6, 0.47)));
+        assert!(!text.hit(egui::pos2(0.15, 0.3)));
+        assert!(!text.hit(egui::pos2(0.95, 0.47)));
+        assert_eq!(text.text(0, usize::MAX), "Hello PDF");
+        // 从「PDF」左边拖到行尾。
+        let start = text.caret_at(egui::pos2(0.4, 0.47));
+        assert_eq!(text.text(start, usize::MAX), "PDF");
+    }
+
+    /// 跨页选区：首页从插入点到页尾、中间页整页、末页从页首到插入点，页间换行；
+    /// 还没取到文字层的页跳过。
+    #[test]
+    fn selected_text_spans_pages() {
+        let page = |words: &[&str]| {
+            let glyphs = words
+                .iter()
+                .enumerate()
+                .map(|(row, word)| pdf_text::TextGlyph {
+                    rect: egui::Rect::from_min_size(
+                        egui::pos2(0.1, 0.1 * row as f32),
+                        egui::vec2(0.05, 0.05),
+                    ),
+                    text: (*word).into(),
+                    space_before: false,
+                })
+                .collect::<Vec<_>>();
+            let lines = glyphs
+                .iter()
+                .enumerate()
+                .map(|(index, glyph)| pdf_text::TextLine {
+                    rect: glyph.rect,
+                    start: index,
+                    end: index + 1,
+                    vertical: false,
+                })
+                .collect();
+            PageSlot {
+                text: Some(PageText { glyphs, lines }),
+                ..PageSlot::default()
+            }
+        };
+        let slots = vec![
+            page(&["甲", "乙"]),
+            page(&["丙"]),
+            PageSlot::default(),
+            page(&["丁", "戊"]),
+        ];
+        assert_eq!(selected_text(&slots, ((0, 1), (3, 1))), "乙\n丙\n丁");
+        assert_eq!(selected_text(&slots, ((1, 0), (1, 1))), "丙");
+        assert_eq!(page_span(((0, 1), (3, 1)), 2), Some((0, usize::MAX)));
+        assert_eq!(page_span(((0, 1), (3, 1)), 4), None);
     }
 
     /// 整批替换：上一批没轮到的页作废，新一批按顺序取；正在渲的同一页不重复派发。
