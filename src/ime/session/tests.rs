@@ -917,3 +917,33 @@ fn auto_commit_is_off_by_default() {
     assert!(!crate::models::ImeConfig::default().yinxing_auto_commit);
     assert!(!ImeSettings::default().yinxing_auto_commit);
 }
+
+/// 回归：直接按小鹤双拼建输入法（启动时就是这样按配置建的），双拼要当场生效。
+///
+/// 此前 `new` 没把双拼推给引擎，之后的 `apply_settings` 见设置没变又直接返回，引擎一直是全拼：
+/// `keyivgih` 选了「可以」之后，剩下的 `vgih` 按全拼切不动，候选是空的。
+#[test]
+fn shuangpin_from_the_start_takes_effect() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let dict = dir.path().join("dict.tsv");
+    std::fs::write(&dict, "可以\tke yi\t9000\n正常\tzheng chang\t9000\n").expect("写词库");
+    let data = ImeData { dict, lm: None };
+    let assembly = engine::assemble(&data, None, &dir.path().join("dicts")).expect("装配引擎");
+    let mut ime = Ime::for_test(
+        assembly,
+        ImeSettings {
+            shuangpin: Some(qingjian_core::ShuangpinScheme::Xiaohe),
+            ..ImeSettings::default()
+        },
+    );
+    let ctx = egui::Context::default();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "keyivgih");
+    let index = (0..ime.layout.len())
+        .find(|&i| ime.layout.candidate(i).is_some_and(|c| c.text == "可以"))
+        .expect("候选里应当有可以");
+    let digit = char::from_digit(index as u32 + 1, 10).expect("在第一页");
+    assert_eq!(inserted(&type_char(&ctx, &mut ime, digit)), "可以");
+    assert_eq!(ime.preedit.text, "zheng'chang", "剩下的 vgih 按小鹤双拼切");
+    assert_eq!(inserted(&type_char(&ctx, &mut ime, ' ')), "正常");
+}

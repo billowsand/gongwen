@@ -166,6 +166,20 @@ impl Ime {
     /// 装配输入法。找不到数据（或缺词库）就返回一个不可用的输入法，键盘留给系统输入法。
     pub(crate) fn new(settings: ImeSettings) -> Self {
         let assembled = if settings.enabled { load() } else { None };
+        let mut ime = Self::bare(assembled, settings);
+        ime.install_dev_tables();
+        ime.load_yinxing();
+        ime.apply_fuma();
+        ime.refresh_lexicon_marks();
+        ime
+    }
+
+    /// 用装配好的引擎（或者没有）建输入法，并把设置推给引擎。不碰用户目录。
+    ///
+    /// 设置**必须在这里**推给引擎：之后每帧的 [`Self::apply_settings`] 见设置没变就直接返回，
+    /// 这里漏了，引擎就一直停在默认的全拼——配置是小鹤双拼时，`keyi` 按全拼碰巧也读成「可以」，
+    /// 剩下的 `vgih` 却怎么也切不动。
+    fn bare(assembled: Option<Assembly>, settings: ImeSettings) -> Self {
         let mut ime = Self {
             assembled,
             settings,
@@ -191,23 +205,16 @@ impl Ime {
             yinxing: Yinxing::default(),
             fresh: false,
         };
-        ime.install_dev_tables();
-        ime.load_yinxing();
-        ime.apply_fuma();
-        ime.refresh_lexicon_marks();
+        ime.push_settings();
         ime
     }
 
     /// 测试用：拿一份现成的引擎当输入法（不依赖随包的 `.qj` 数据）。
     #[cfg(test)]
+    ///
+    /// 与 [`Self::new`] 走同一个 [`Self::bare`]，设置怎么推给引擎两边一样；只是不读用户目录。
     pub(super) fn for_test(assembly: Assembly, settings: ImeSettings) -> Self {
-        let mut ime = Self::new(ImeSettings {
-            enabled: false,
-            ..settings
-        });
-        ime.settings = settings;
-        ime.assembled = Some(assembly);
-        ime
+        Self::bare(Some(assembly), settings)
     }
 
     /// 候选窗量到的尺寸。
@@ -299,13 +306,17 @@ impl Ime {
         if !settings.enabled {
             self.drop_composition();
         }
-        if let Some(assembly) = self.assembled.as_mut() {
-            assembly.engine.set_shuangpin(settings.shuangpin);
-            assembly
-                .engine
-                .set_full_width_punctuation(settings.full_width_punctuation);
-        }
+        self.push_settings();
         self.apply_fuma();
+    }
+
+    /// 把双拼方案与全角标点推给引擎。
+    fn push_settings(&mut self) {
+        let settings = self.settings;
+        if let Some(engine) = self.engine_mut() {
+            engine.set_shuangpin(settings.shuangpin);
+            engine.set_full_width_punctuation(settings.full_width_punctuation);
+        }
     }
 
     /// 帧首：接管键盘。要在任何控件跑之前调用。
