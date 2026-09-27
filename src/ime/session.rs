@@ -250,7 +250,21 @@ impl Ime {
         self.english
     }
 
-    /// 词库 / 语言模型的来历，设置页显示一行。
+    /// 词库与整句模型的一句话概况，设置页状态行用：「词库 9.3 万条 · 整句模型已加载」。
+    /// 词库名、许可、加载耗时这些细节见 [`Self::data_summary`]，挂在悬停提示上。
+    pub(crate) fn data_brief(&self) -> Option<String> {
+        let assembly = self.assembled.as_ref()?;
+        let model = match assembly.bigrams {
+            Some(_) => "整句模型已加载",
+            None => "没有整句模型（长句会差一些）",
+        };
+        Some(format!(
+            "词库 {} 条 · {model}",
+            ten_thousands(assembly.dictionary_entries)
+        ))
+    }
+
+    /// 词库 / 语言模型的来历，设置页悬停提示显示。
     pub(crate) fn data_summary(&self) -> Option<String> {
         let assembly = self.assembled.as_ref()?;
         let mut summary = match &assembly.dictionary_name {
@@ -937,6 +951,15 @@ impl Drop for Ime {
         // 退出前把学习数据落一次盘，别让最后几十次选词白学。
         self.flush();
     }
+}
+
+/// 大数按「万」说：92810 → 「9.3 万」，不满一万照写。
+fn ten_thousands(count: usize) -> String {
+    if count < 10_000 {
+        return count.to_string();
+    }
+    let wan = format!("{:.1}", count as f64 / 10_000.0);
+    format!("{} 万", wan.trim_end_matches(".0"))
 }
 
 /// 没有候选时的布局。**不用 `CandidateLayout::default()`**：它的每页格数是 0，
