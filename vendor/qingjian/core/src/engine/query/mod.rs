@@ -217,7 +217,9 @@ impl Engine {
 
         // 辅码：两码都敲了就严格过滤，词级候选按文本首末字形码对敲出的两码，对不上不出（语义同水杉）；
         // 只敲了首码时不排除任何候选（`ljm` 的 蓝莓 还要出），只把首码对得上的标出来由排序顶到最前。
-        // 前缀候选也按它们自己的文本算（开发 覆不满 kai'fa'zhe 的时候同样过这道闸）
+        // 前缀候选也按它们自己的文本算（开发 覆不满 kai'fa'zhe 的时候同样过这道闸）。
+        // 两码正好也是个音节时（`wody`）辅码优先：正好盖满辅码键之前那段拼音、两码全对的（沃）顶到最前，
+        // 按两个音节读的（我顿、我）照常留着
         match fuma_codes {
             Some(FumaCodes::Both(codes)) => {
                 scored.retain(|item| self.fuma_expected(item.hit.text) == Some(codes));
@@ -227,6 +229,18 @@ impl Engine {
                     item.fuma_hit = self
                         .fuma_expected(item.hit.text)
                         .is_some_and(|expected| codes.admits(expected));
+                }
+            }
+            Some(codes @ FumaCodes::Pair(_)) => {
+                let base = self
+                    .fuma_base(keys, codes)
+                    .and_then(|base| base.segmentation())
+                    .map(|base| base.letters());
+                for item in &mut scored {
+                    item.fuma_hit = Some(item.coverage) == base
+                        && self
+                            .fuma_expected(item.hit.text)
+                            .is_some_and(|expected| codes.admits(expected));
                 }
             }
             None => {}
@@ -256,6 +270,12 @@ impl Engine {
             );
             (choice, log_prob)
         });
+        // 辅码优先那档的命中（排序已把它们排在最前）连整句、英文、快捷候选也要压过：先摘出来，别的插完再放回最前
+        let pinned = if matches!(fuma_codes, Some(FumaCodes::Pair(_))) {
+            scored.iter().take_while(|item| item.fuma_hit).count()
+        } else {
+            0
+        };
         let mut items: Vec<Candidate> = scored
             .into_iter()
             .map(|s| Candidate {
@@ -267,6 +287,7 @@ impl Engine {
                 fuma: None,
             })
             .collect();
+        let pinned: Vec<Candidate> = items.drain(..pinned).collect();
         // 中文优先：整句先进去占第一，英文词紧跟其后（第二）；关掉时英文词先进、整句排在开头的英文后面。
         // 辅码两码那档不出 emoji 与英文补全：敲辅码就是在选字。但整串正好是个英文词时（`rust` 被读成
         // ru + 辅码 st）英文词照出，排在辅码筛出的字后面（筛空了就是第一），不然空格 / 回车只剩 ru
@@ -294,6 +315,7 @@ impl Engine {
         if !fuma_filters {
             self.insert_emoji(&mut items);
         }
+        items.splice(0..0, pinned);
         // 候选右上角标还要敲的辅码（只敲了首码时 栏ˢ；学码档下没敲时 栏ᵐˢ），下一键敲什么一眼看到。
         // 只标词库词与整句：快捷候选（日期）、英文、emoji 的「首末字」不是用户在打的字
         if self.fuma_enabled() {

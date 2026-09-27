@@ -389,30 +389,31 @@ impl Engine {
         self.composition.drain_prefix(consumed);
     }
 
-    /// 只敲了辅码首码时，这次上屏要不要连那一键也吃掉。
+    /// 辅码键还留在解码里时（只敲了首码、或两码正好也是个音节），这次上屏要连带吃掉几个辅码键。
     ///
-    /// 那一键没从解码里剥掉（`ljm` 仍读成 `lan m…`，蓝莓 这类简拼词还要出），所以两种候选并存：
-    /// 盖满「辅码键之前那段拼音」且首码对得上的（栏）是按辅码选的，吃掉那一键；
-    /// 首码对不上的（蓝）是普通的前缀候选，那一键留着当下一个字的声母。
-    fn consumed_first_code(&self, keys: &str, candidate: &Candidate, pinyin_len: usize) -> bool {
-        let Some(codes @ FumaCodes::First(_)) = self.fuma_codes(keys) else {
-            return false;
+    /// 那几键没从解码里剥掉（`ljm` 仍读成 `lan m…`、`wody` 仍读成 `wo dun`，另一种读法的候选还要出），
+    /// 所以两种候选并存：盖满「辅码键之前那段拼音」且辅码对得上的（栏、沃）是按辅码选的，吃掉那几键；
+    /// 对不上的（蓝、我）是普通的前缀候选，那几键留着当下一个字的拼音。
+    fn consumed_fuma_keys(&self, keys: &str, candidate: &Candidate, pinyin_len: usize) -> usize {
+        let Some(codes @ (FumaCodes::First(_) | FumaCodes::Pair(_))) = self.fuma_codes(keys) else {
+            return 0;
         };
         let base_len = self
-            .decode(&keys[..keys.len() - 1])
-            .map_or(0, |decoded| decoded.pinyin().len());
-        pinyin_len == base_len
+            .fuma_base(keys, codes)
+            .map_or(0, |base| base.pinyin().len());
+        let admitted = pinyin_len == base_len
             && self
                 .fuma_expected(&candidate.text)
-                .is_some_and(|expected| codes.admits(expected))
+                .is_some_and(|expected| codes.admits(expected));
+        if admitted { codes.len() } else { 0 }
     }
 
     /// 候选消耗多少作用域字节，以及按输入串记学习用的键（候选覆盖的那段全拼字母）。
     /// 纠错生效时按纠正后的拼音算，再按那处编辑换算回原串；双拼按解出的全拼算，再换算回键数。
     ///
     /// 辅码两码都敲了时那 2 键挂在整段末尾（解码已剥掉）：候选盖满拼音就连它们一起吃，
-    /// 盖不满的由 [`Self::consume_scope`] 丢。只敲了首码时那一键还在解码里（它也可能是下一个字的声母），
-    /// 见 [`Self::consumed_first_code`]。
+    /// 盖不满的由 [`Self::consume_scope`] 丢。只敲了首码、或两码正好也是个音节时，辅码键还在解码里
+    /// （它们也可能是下一个字的拼音），见 [`Self::consumed_fuma_keys`]。
     pub(super) fn consumed_by(&self, candidate: &Candidate) -> (usize, String) {
         let keys = self.composition.scope();
         if let Some(decoded) = self.decode(keys) {
@@ -421,7 +422,7 @@ impl Engine {
             if pinyin_len == decoded.pinyin().len() {
                 key_len += self.fuma_bytes(keys);
             }
-            key_len += usize::from(self.consumed_first_code(keys, candidate, pinyin_len));
+            key_len += self.consumed_fuma_keys(keys, candidate, pinyin_len);
             return (key_len, choice_key(decoded.pinyin(), pinyin_len));
         }
         let consumed = match self.active_correction(keys) {

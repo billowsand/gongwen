@@ -333,3 +333,58 @@ fn fuma_without_table_or_full_pinyin_changes_nothing() {
     let query = plain.query().unwrap();
     assert_eq!(query.candidates.items[0].text, "kaifafX");
 }
+
+/// 两码正好也是个音节（`wody`：沃 = `dy`，`dy` 又是 dun）：辅码优先，两码全对的前缀候选顶到最前，
+/// 选中时连这两键一起吃掉；按两个音节读的候选照常留着，选它们时这两键留作下一个音节。
+#[test]
+fn syllable_shaped_codes_take_priority_without_excluding() {
+    // 这张表里 开 = `fa`，正好是音节 fa 的双拼
+    let mut engine = xiaohe();
+    engine.set_fuma(Some(Arc::new(FumaTable::parse("开=fa\n发=xa\n").unwrap())));
+    engine.set_input("kdfa");
+    let query = engine.query().unwrap();
+    // 拼音行照旧读成两个音节，那两键不剥
+    assert_eq!(query.marked_text(), "kai'fa");
+    let texts: Vec<&str> = query
+        .candidates
+        .items
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    assert_eq!(texts[0], "开", "两码全对的排最前：{texts:?}");
+    assert!(texts.contains(&"开发"), "不排他：{texts:?}");
+    // 两码已经敲满，不再标还要敲的码
+    assert!(query.candidates.items[0].fuma.is_none());
+
+    // 选 开：辅码键一起吃掉，不留成下一个音节
+    let kai = query.candidates.items[0].clone();
+    engine.commit(&kai);
+    assert!(engine.composition().is_empty());
+
+    // 选按两个音节读的 开发：同样全吃
+    engine.set_input("kdfa");
+    let kaifa = engine
+        .query()
+        .unwrap()
+        .candidates
+        .items
+        .iter()
+        .find(|c| c.text == "开发")
+        .cloned()
+        .unwrap();
+    engine.commit(&kaifa);
+    assert!(engine.composition().is_empty());
+}
+
+/// 两码对不上时一切照旧：没有候选被顶上来，选前缀候选时那两键就是下一个音节。
+#[test]
+fn syllable_shaped_codes_that_miss_change_nothing() {
+    // 默认表里 开 = `fk`，`fa` 对不上
+    let mut engine = fuma_engine();
+    engine.set_input("kdfa");
+    let items = engine.query().unwrap().candidates.items;
+    assert_eq!(items[0].text, "开发");
+    let kai = items.iter().find(|c| c.text == "开").cloned().unwrap();
+    engine.commit(&kai);
+    assert_eq!(engine.composition().text(), "fa");
+}

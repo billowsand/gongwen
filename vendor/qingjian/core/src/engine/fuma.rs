@@ -6,7 +6,9 @@
 //!   辅码匹配的候选置顶（[`FumaCodes::First`]）。这一键不从解码里剥掉，简拼词照常出。
 //! - **两个键**（`ljms`、`ljmS`）：这两键解不成一个完整音节，或者里面有大写（用户明说了是辅码），
 //!   没有歧义，只留匹配的候选（[`FumaCodes::Both`]）。这两键从解码里剥掉。
-//!   两键都是小写且正好是一个合法音节时（正常的双音节连打）不当辅码，落回一个键那档。
+//! - **两个键且正好是一个音节**（`wody`：沃 = `dy`，`dy` 又是 dun）：辅码优先，两码全对的
+//!   前缀候选（沃）顶到最前、选中时连这两键一起吃掉；按两个音节读的候选（我顿、我）照常跟在后面，
+//!   选它们时这两键留作下一个音节（[`FumaCodes::Pair`]）。这两键不从解码里剥掉。
 //!
 //! 第一键大写表示两码反转顺序匹配（`Ke` / `KE` 匹配实际辅码 `ek`），与水杉（MSIME-Engine）一致。
 //!
@@ -15,7 +17,7 @@
 use std::borrow::Cow;
 
 use crate::FumaHint;
-use crate::shuangpin::Scheme;
+use crate::shuangpin::{Decoded, Scheme};
 
 use super::Engine;
 
@@ -27,6 +29,10 @@ pub(super) enum FumaCodes {
 
     /// 两码都敲了：已小写、已按反转规则排好。只留匹配的候选。
     Both([char; 2]),
+
+    /// 两码都敲了，但两键全小写、本身又是一个完整音节：与「下一个音节」有歧义。
+    /// 辅码优先：两码全对的前缀候选置顶，其余照常出。
+    Pair([char; 2]),
 }
 
 impl FumaCodes {
@@ -34,15 +40,23 @@ impl FumaCodes {
     pub(super) fn admits(self, expected: [char; 2]) -> bool {
         match self {
             Self::First(code) => expected[0] == code,
-            Self::Both(codes) => expected == codes,
+            Self::Both(codes) | Self::Pair(codes) => expected == codes,
+        }
+    }
+
+    /// 缓冲区末尾占了几个键。
+    pub(super) fn len(self) -> usize {
+        match self {
+            Self::First(_) => 1,
+            Self::Both(_) | Self::Pair(_) => 2,
         }
     }
 }
 
 /// 缓冲区里认出的辅码键。
 pub(super) struct FumaInput<'a> {
-    /// 喂给双拼解码的键串：两码那档剥掉末 2 键，一个键那档不剥（末键仍按拼音解，简拼词还要出）；
-    /// 都已小写化，本来就全小写时不复制。
+    /// 喂给双拼解码的键串：两码那档剥掉末 2 键；一个键那档与「两键正好是音节」那档不剥
+    /// （这几键仍按拼音解，另一种读法的候选还要出）；都已小写化，本来就全小写时不复制。
     pub base: Cow<'a, str>,
 
     /// 敲出的码。
@@ -66,12 +80,14 @@ impl Engine {
             && keys.len() >= 4
         {
             let (first, second) = (*first as char, *second as char);
-            if first.is_ascii_alphabetic()
-                && second.is_ascii_alphabetic()
-                && let Some(codes) = two_key_codes(scheme, first, second)
-            {
-                let base = lowercased(&keys[..keys.len() - 2]);
-                if scheme.decode(&base).is_complete() {
+            if first.is_ascii_alphabetic() && second.is_ascii_alphabetic() {
+                let codes = two_key_codes(scheme, first, second);
+                let prefix = lowercased(&keys[..keys.len() - 2]);
+                if scheme.decode(&prefix).is_complete() {
+                    let base = match codes {
+                        FumaCodes::Pair(_) => lowercased(keys),
+                        _ => prefix,
+                    };
                     return Some(FumaInput { base, codes });
                 }
             }
@@ -97,7 +113,7 @@ impl Engine {
         })
     }
 
-    /// 解码时从末尾剥掉几个字节（一个键那档不剥，见 [`FumaInput::base`]）。
+    /// 解码时从末尾剥掉几个字节（只有两码那档剥，见 [`FumaInput::base`]）。
     pub(super) fn fuma_bytes(&self, keys: &str) -> usize {
         match self.fuma_input(keys).map(|input| input.codes) {
             Some(FumaCodes::Both(_)) => 2,
@@ -106,13 +122,22 @@ impl Engine {
     }
 
     /// 拼音行要补画的辅码段：**只有两码那档**，因为那 2 键被解码剥掉了，不补画就一点痕迹都没有。
-    /// 首码那档的键还原样留在拼音里（`ljm` → `lan'm`），再画一遍就重复了。
+    /// 首码那档与「两键正好是音节」那档的键还原样留在拼音里（`ljm` → `lan'm`、`wody` → `wo'dun`），
+    /// 再画一遍就重复了。
     pub(super) fn fuma_keys(&self) -> Option<&str> {
         let keys = self.composition.scope();
         match self.fuma_input(keys)?.codes {
             FumaCodes::Both(_) => Some(&keys[keys.len() - 2..]),
-            FumaCodes::First(_) => None,
+            FumaCodes::First(_) | FumaCodes::Pair(_) => None,
         }
+    }
+
+    /// 辅码键之前那段键解出来的双拼（不再认辅码，原样解）：辅码候选要正好盖满这段拼音，
+    /// 选中时才连辅码键一起吃掉。
+    pub(super) fn fuma_base(&self, keys: &str, codes: FumaCodes) -> Option<Decoded> {
+        let scheme = self.fuma_scheme()?;
+        let prefix = keys.get(..keys.len().checked_sub(codes.len())?)?;
+        Some(scheme.decode(&lowercased(prefix)))
     }
 
     /// 辅码认到了就返回敲出的码。
@@ -128,10 +153,13 @@ impl Engine {
     /// 候选右上角要标的辅码（[`crate::FumaHint`]）：只敲了首码时，首码对得上的候选标第二码；
     /// 学码档下没敲辅码时标完整两码。两码敲满（已严格过滤、辅码段在拼音行里）、首码对不上
     /// （`ljm` 的 蓝莓，`m` 是下一个字的声母）、表里查不到时都不标。
+    ///
+    /// 两码正好也是个音节时（`wody`）按没敲辅码算：那两键更可能只是下一个音节，学码档照常标完整两码。
     pub(super) fn fuma_mark(&self, codes: Option<FumaCodes>, text: &str) -> Option<String> {
         let expected = || self.fuma_expected(text);
+        let codes = codes.filter(|codes| !matches!(codes, FumaCodes::Pair(_)));
         match (self.fuma_hint, codes) {
-            (FumaHint::Off, _) | (_, Some(FumaCodes::Both(_))) => None,
+            (FumaHint::Off, _) | (_, Some(FumaCodes::Both(_) | FumaCodes::Pair(_))) => None,
             (_, Some(codes @ FumaCodes::First(_))) => expected()
                 .filter(|&expected| codes.admits(expected))
                 .map(|expected| expected[1].to_string()),
@@ -142,8 +170,8 @@ impl Engine {
         }
     }
 
-    /// 辅码两码都敲了时 `text` 能不能出候选（严格过滤）；没敲或只敲了首码一律放行
-    /// （首码那档靠置顶表达偏好，不排除别的候选）。
+    /// 辅码两码都敲了时 `text` 能不能出候选（严格过滤）；没敲、只敲了首码或两键正好是音节时一律放行
+    /// （这两种情况靠置顶表达偏好，不排除别的候选）。
     pub(super) fn fuma_admits(&self, text: &str) -> bool {
         let Some(FumaCodes::Both(codes)) = self.fuma_codes(self.composition.scope()) else {
             return true;
@@ -157,19 +185,23 @@ impl Engine {
     }
 }
 
-/// 末 2 键能不能当辅码：含大写就是用户明说了（第一键大写表示反转顺序）；
-/// 全小写时只有这两键解不成一个完整音节才算（能解成音节的是正常的双音节连打，不抢）。
-fn two_key_codes(scheme: Scheme, first: char, second: char) -> Option<FumaCodes> {
+/// 末 2 键当辅码是哪一档：含大写就是用户明说了（第一键大写表示反转顺序）；
+/// 全小写时解不成一个完整音节的严格过滤，正好是一个音节的（`dy` 也是 dun）两种读法都留着、辅码优先。
+fn two_key_codes(scheme: Scheme, first: char, second: char) -> FumaCodes {
     let mut codes = [first.to_ascii_lowercase(), second.to_ascii_lowercase()];
     if first.is_ascii_uppercase() {
         codes.swap(0, 1);
-        return Some(FumaCodes::Both(codes));
+        return FumaCodes::Both(codes);
     }
     if second.is_ascii_uppercase() {
-        return Some(FumaCodes::Both(codes));
+        return FumaCodes::Both(codes);
     }
     let pair: String = [first, second].iter().collect();
-    (!scheme.decode(&pair).is_complete()).then_some(FumaCodes::Both(codes))
+    if scheme.decode(&pair).is_complete() {
+        FumaCodes::Pair(codes)
+    } else {
+        FumaCodes::Both(codes)
+    }
 }
 
 /// 小写化，本来就没有大写时原样借用（辅码判定挂在每次解码上，不能每次都复制一份键串）。
