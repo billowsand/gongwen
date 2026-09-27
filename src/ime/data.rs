@@ -115,6 +115,25 @@ pub(crate) fn builtin_xiaohe() -> Option<&'static str> {
     }
 }
 
+/// 开发构建内置的小鹤辅码表（`assets/fuma/danzi.txt`，UTF-8）。
+///
+/// 见 `Cargo.toml` 的 `ime-dev-tables` feature：**只给本机自用**，发布构建里
+/// 连这个函数都不存在。内容与 [`builtin_xiaohe`] 相同，只是这份走「首次运行
+/// 自动装入」的路子。
+#[cfg(feature = "ime-dev-tables")]
+pub(crate) fn builtin_dev_fuma() -> &'static str {
+    include_str!("../../assets/fuma/danzi.txt")
+}
+
+/// 开发构建内置的小鹤音形码表（`assets/fuma/quan.txt`）。
+///
+/// 返回的是**原始字节**：这份表是 UTF-16LE（搜狗自定义短语格式），调用方要用
+/// [`crate::text_file::decode`] 解码后再用。同样只在 `ime-dev-tables` 下存在。
+#[cfg(feature = "ime-dev-tables")]
+pub(crate) fn builtin_dev_yinxing() -> &'static [u8] {
+    include_bytes!("../../assets/fuma/quan.txt")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

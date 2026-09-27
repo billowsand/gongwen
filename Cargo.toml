@@ -25,6 +25,16 @@ linux-portal-dialogs = ["rfd/async-std", "rfd/xdg-portal"]
 # 出现「使用内置示例小鹤辅码」按钮，按下后**当场复制到用户目录**并要求使用者
 # 已从方案作者处取得使用授权的二次确认。
 ime-builtin-xiaohe = []
+# 开发期内置码表：把 `assets/fuma/danzi.txt`（小鹤辅码）与 `assets/fuma/quan.txt`
+# （小鹤音形）编译进二进制，启动时装进用户目录，首次运行默认就是
+# 「小鹤双拼 + 小鹤辅码 + 小鹤音形」，不用再手动导入。
+#
+# **只给本机自用**：这两份码表权利归小鹤方案作者、未获再分发授权（见
+# `assets/fuma/README.md`），开启后产出的二进制**不得对外分发**，也不要进
+# CI/CD；发布流程与本仓库的 CI 都不带它。`scripts/package-dev.ps1` 会带这个
+# feature 构建本机测试包。两个表文件都被 `.gitignore` 挡住、只有本机有，
+# 缺失时 `include_str!` / `include_bytes!` 会让编译直接失败。
+ime-dev-tables = []
 
 [dependencies]
 aho-corasick = "1.1.5"

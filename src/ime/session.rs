@@ -191,6 +191,7 @@ impl Ime {
             yinxing: Yinxing::default(),
             fresh: false,
         };
+        ime.install_dev_tables();
         ime.load_yinxing();
         ime.apply_fuma();
         ime.refresh_lexicon_marks();
@@ -446,6 +447,32 @@ impl Ime {
     /// 当前构建是否打包了内置示例小鹤辅码表。
     pub(crate) fn has_builtin_xiaohe() -> bool {
         data::has_builtin_xiaohe()
+    }
+
+    /// 开发构建（`ime-dev-tables`）：把内置的 danzi / quan 码表装进用户目录，
+    /// 让首次运行就能直接用上辅码与音形，不用手动导入。
+    ///
+    /// **只在文件不存在时写**，不覆盖使用者自己导入或改过的表；发布构建里是空操作
+    /// （`data::builtin_dev_*` 返回 `None`）。输入法本身关着时也不装——那时用户在用
+    /// 系统输入法，装了也没用。
+    fn install_dev_tables(&self) {
+        #[cfg(feature = "ime-dev-tables")]
+        if self.settings.enabled {
+            if let Some(path) = data::fuma_path(qingjian_core::FumaScheme::Xiaohe)
+                && !path.is_file()
+                && let Err(error) = std::fs::write(&path, data::builtin_dev_fuma())
+            {
+                eprintln!("[ime] 写入内置辅码表失败：{}（{error}）", path.display());
+            }
+            if let Some(path) = data::yinxing_path()
+                && !path.is_file()
+            {
+                let (text, _) = crate::text_file::decode(data::builtin_dev_yinxing());
+                if let Err(error) = std::fs::write(&path, text) {
+                    eprintln!("[ime] 写入内置音形码表失败：{}（{error}）", path.display());
+                }
+            }
+        }
     }
 
     /// 辅码表：方案变了就重新加载。表是使用者自己导入的（不随包，见

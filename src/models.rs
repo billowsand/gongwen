@@ -2055,17 +2055,26 @@ impl Default for ImePhrase {
 
 impl Default for ImeConfig {
     fn default() -> Self {
+        // `ime-dev-tables`（本机自用的开发构建）默认就用小鹤双拼 + 小鹤辅码 +
+        // 小鹤音形——码表在二进制里、启动时自动装进用户目录，不用手动导入；
+        // 发布构建保持全拼、无辅码、音形关闭。已有 config.json 的机器不受这里
+        // 影响（配置已明确写入），在设置页改一次或删掉 config.json 即可。
+        let (shuangpin, fuma, yinxing) = if cfg!(feature = "ime-dev-tables") {
+            ("xiaohe".to_string(), "xiaohe".to_string(), true)
+        } else {
+            (String::new(), String::new(), false)
+        };
         Self {
             enabled: true,
-            shuangpin: String::new(),
-            fuma: String::new(),
+            shuangpin,
+            fuma,
             fuma_hint: "typed".to_string(),
             full_width_punctuation: true,
             page_size: 5,
             page_keys: "[]".to_string(),
             candidate_vertical: false,
             candidate_font_percent: 100,
-            yinxing: false,
+            yinxing,
             yinxing_auto_commit: false,
             yinxing_hint: true,
             phrases: Vec::new(),
