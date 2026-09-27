@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+mod caret;
 mod diff_editor;
 mod diff_gaps;
 mod diff_hunks;

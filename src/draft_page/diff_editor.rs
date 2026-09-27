@@ -8,6 +8,7 @@
 //!
 //! 数据（变更块、还原）在 `diff_hunks`；本文件只管画和收集交互，不改状态。
 
+use super::caret::show_with_glyph_caret;
 use super::diff_gaps::{Gap, gap_spans, line_first_rows, open_gaps};
 use super::diff_hunks::{DeletedRow, Hunk};
 use super::editor::editor_id;
@@ -120,16 +121,18 @@ pub(crate) fn diff_editor(
     let output = ui
         .horizontal_top(|ui| {
             ui.add_space(GUTTER);
-            egui::TextEdit::multiline(text)
-                .id(editor_id())
-                .interactive(editable)
-                .frame(egui::Frame::NONE)
-                .margin(egui::Margin::ZERO)
-                .code_editor()
-                .layouter(&mut layouter)
-                .desired_width(text_width)
-                .desired_rows(4)
-                .show(ui)
+            show_with_glyph_caret(ui, editable, |ui| {
+                egui::TextEdit::multiline(text)
+                    .id(editor_id())
+                    .interactive(editable)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .code_editor()
+                    .layouter(&mut layouter)
+                    .desired_width(text_width)
+                    .desired_rows(4)
+                    .show(ui)
+            })
         })
         .inner;
 

@@ -4,6 +4,7 @@
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::app::visible_rows;
+use crate::draft_page::caret::show_with_glyph_caret;
 use crate::draft_page::{
     DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH, OFFICIAL_PAGE_HEIGHT,
     OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH, PreviewMode,
@@ -597,19 +598,21 @@ impl DraftPage<'_> {
                                         if show_line_numbers {
                                             ui.add_space(gutter);
                                         }
-                                        let output = egui::TextEdit::multiline(text)
-                                        .id(editor_id())
-                                        .interactive(editable)
-                                        .frame(egui::Frame::NONE)
-                                        .margin(egui::Margin::ZERO)
-                                        .code_editor()
-                                        .layouter(&mut layouter)
-                                        .desired_width(OFFICIAL_EDITOR_CONTENT_WIDTH)
-                                        .desired_rows(rows)
-                                        .hint_text(
-                                            "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
-                                        )
-                                        .show(ui);
+                                        let output = show_with_glyph_caret(ui, editable, |ui| {
+                                            egui::TextEdit::multiline(text)
+                                            .id(editor_id())
+                                            .interactive(editable)
+                                            .frame(egui::Frame::NONE)
+                                            .margin(egui::Margin::ZERO)
+                                            .code_editor()
+                                            .layouter(&mut layouter)
+                                            .desired_width(OFFICIAL_EDITOR_CONTENT_WIDTH)
+                                            .desired_rows(rows)
+                                            .hint_text(
+                                                "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
+                                            )
+                                            .show(ui)
+                                        });
                                         editor_lost_focus |= output.response.lost_focus();
                                         if show_line_numbers {
                                             paint_editor_line_numbers(
@@ -660,16 +663,20 @@ impl DraftPage<'_> {
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         let mut show_editor = |ui: &mut egui::Ui| {
-                            egui::TextEdit::multiline(text)
-                                .id(editor_id())
-                                .interactive(editable)
-                                .frame(egui::Frame::NONE)
-                                .code_editor()
-                                .layouter(&mut layouter)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(rows)
-                                .hint_text("生成结果将在这里显示，也可以直接粘贴已有稿件再导出……")
-                                .show(ui)
+                            show_with_glyph_caret(ui, editable, |ui| {
+                                egui::TextEdit::multiline(text)
+                                    .id(editor_id())
+                                    .interactive(editable)
+                                    .frame(egui::Frame::NONE)
+                                    .code_editor()
+                                    .layouter(&mut layouter)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(rows)
+                                    .hint_text(
+                                        "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
+                                    )
+                                    .show(ui)
+                            })
                         };
                         let output = if show_line_numbers {
                             ui.horizontal_top(|ui| {
