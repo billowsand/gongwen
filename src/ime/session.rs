@@ -790,6 +790,13 @@ impl Ime {
                     }
                 }
             }
+            Action::NoteBackspace => {
+                if let Some(engine) = self.engine_mut() {
+                    engine.note_backspace();
+                }
+                // 删字的事还是文本框自己干
+                Outcome::PASSTHROUGH
+            }
             Action::Insert(c) => {
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;

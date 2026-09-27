@@ -617,3 +617,46 @@ fn tapping_shift_while_composing_commits_the_letters() {
     assert!(ime.english());
     assert!(ime.preedit.text.is_empty());
 }
+
+/// 同一个读音两个词、带真学习数据的输入法。
+fn learning_ime(dir: &std::path::Path) -> Ime {
+    let dict = dir.join("dict.tsv");
+    std::fs::write(&dict, "开发\tkai fa\t9000\n凯发\tkai fa\t100\n").expect("写词库");
+    let data = ImeData { dict, lm: None };
+    let assembly = engine::assemble(&data, Some(dir), &dir.join("dicts")).expect("装配引擎");
+    Ime::for_test(assembly, ImeSettings::default())
+}
+
+/// 选错了词、退格删掉、重打选了别的：那次选错的学习退回去。
+/// 退格本身照样交给文本框去删正文。
+#[test]
+fn erasing_a_wrong_pick_and_retyping_retracts_its_learning() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let ctx = egui::Context::default();
+    let mut ime = learning_ime(dir.path());
+    focus(&ctx, &mut ime);
+    let weight = |ime: &Ime, text: &str| ime.engine().expect("引擎").learner().weight(text);
+
+    type_str(&ctx, &mut ime, "kaifa");
+    let routed = type_char(&ctx, &mut ime, '2');
+    assert_eq!(inserted(&routed), "凯发");
+    assert_eq!(weight(&ime, "凯发"), 1);
+
+    let backspace = vec![
+        key_event(egui::Key::Backspace, true, egui::Modifiers::NONE),
+        key_event(egui::Key::Backspace, false, egui::Modifiers::NONE),
+    ];
+    for _ in 0..2 {
+        let routed = frame(&ctx, &mut ime, backspace.clone());
+        assert_eq!(routed, backspace, "退格要交给文本框");
+    }
+    // 刚才学过，凯发 已经排到前面：按位置找 开发 再用数字键选
+    type_str(&ctx, &mut ime, "kaifa");
+    let index = (0..ime.layout.len())
+        .find(|&i| ime.layout.candidate(i).is_some_and(|c| c.text == "开发"))
+        .expect("候选里应当有开发");
+    let digit = char::from_digit(index as u32 + 1, 10).expect("在第一页");
+    let routed = type_char(&ctx, &mut ime, digit);
+    assert_eq!(inserted(&routed), "开发");
+    assert_eq!(weight(&ime, "凯发"), 0, "选错的那次应当退回");
+}
