@@ -219,58 +219,65 @@ impl GongwenApp {
                 } else {
                     theme::card().inner_margin(egui::Margin::symmetric(10, 5))
                 };
-                let row = frame.show(ui, |ui| {
-                    ui.set_width((row_width - 20.0).max(180.0));
-                    ui.horizontal(|ui| {
-                        ui.add_sized(
-                            [24.0, 22.0],
-                            egui::Label::new(
-                                egui::RichText::new(format!("{:02}", index + 1))
-                                    .color(theme::text_muted()),
-                            ),
-                        );
-                        ui.add_space(3.0);
-                        // 标题占满左侧剩余空间，状态标签固定在行尾；长标题截断。
-                        let badge_width = if entry.is_builtin() { 64.0 } else { 0.0 };
-                        let title_width =
-                            (ui.available_width() - badge_width - ui.spacing().item_spacing.x)
-                                .max(80.0);
-                        ui.add_sized(
-                            [title_width, 22.0],
-                            egui::Label::new(egui::RichText::new(&entry.name).strong()).truncate(),
-                        );
-                        if entry.is_builtin() {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
+                // 整张卡片可点：手型指针 + 悬停/按下底色过渡，见 `theme::clickable_card`。
+                let row =
+                    theme::clickable_card(ui, ("ai_prompt_row", entry.id), frame, selected, |ui| {
+                        ui.set_width((row_width - 20.0).max(180.0));
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [24.0, 22.0],
+                                egui::Label::new(
+                                    egui::RichText::new(format!("{:02}", index + 1))
+                                        .color(theme::text_muted()),
+                                ),
+                            );
+                            ui.add_space(3.0);
+                            // 标题占满左侧剩余空间，状态标签固定在行尾；长标题截断。
+                            let badge_width = if entry.is_builtin() { 64.0 } else { 0.0 };
+                            let title_width =
+                                (ui.available_width() - badge_width - ui.spacing().item_spacing.x)
+                                    .max(80.0);
+                            // 标题左对齐，紧跟序号，和下面的摘要行起笔一致。
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(title_width, 22.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
-                                    theme::chip(ui, "内置", theme::info(), theme::surface_sunk());
+                                    ui.set_min_width(title_width);
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&entry.name).strong())
+                                            .truncate(),
+                                    );
                                 },
                             );
-                        }
-                    });
-                    let preview = if entry.instruction.trim().is_empty() {
-                        "只按内置标准做格式规整".to_string()
-                    } else {
-                        summarize(&entry.instruction, 36)
-                    };
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("{} · {preview}", entry.kinds_label()))
-                                .color(theme::text_soft()),
+                            if entry.is_builtin() {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        theme::chip(
+                                            ui,
+                                            "内置",
+                                            theme::info(),
+                                            theme::surface_sunk(),
+                                        );
+                                    },
+                                );
+                            }
+                        });
+                        let preview = if entry.instruction.trim().is_empty() {
+                            "只按内置标准做格式规整".to_string()
+                        } else {
+                            summarize(&entry.instruction, 36)
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{} · {preview}", entry.kinds_label()))
+                                    .color(theme::text_soft()),
+                            )
+                            .truncate(),
                         )
-                        .truncate(),
-                    )
-                    .on_hover_text(&entry.instruction);
-                });
-                if ui
-                    .interact(
-                        row.response.rect,
-                        ui.id().with(("ai_prompt_row", entry.id)),
-                        egui::Sense::click(),
-                    )
-                    .on_hover_text("点击编辑")
-                    .clicked()
-                {
+                        .on_hover_text(&entry.instruction);
+                    });
+                if row.response.clicked() {
                     edit = Some(entry.id);
                 }
             }

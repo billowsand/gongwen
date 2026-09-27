@@ -405,14 +405,21 @@ impl GongwenApp {
             shown += 1;
 
             let selected = self.proofread_page.selected.as_deref() == Some(entry.id.as_str());
-            egui::Frame::new()
+            let frame = egui::Frame::new()
                 .fill(if selected {
                     theme::accent_soft()
                 } else {
                     theme::surface()
                 })
-                .inner_margin(egui::Margin::symmetric(6, 2))
-                .show(ui, |ui| {
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::symmetric(6, 2));
+            // 整行可点（复选框除外）：手型指针 + 悬停/按下底色过渡，见 `theme::clickable_card`。
+            let row = theme::clickable_card(
+                ui,
+                ("proofread_row", entry.id.as_str()),
+                frame,
+                selected,
+                |ui| {
                     ui.set_width(row_width);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
@@ -446,18 +453,16 @@ impl GongwenApp {
                             } else {
                                 theme::text_muted()
                             });
-                        if ui
-                            .add_sized(
-                                [title_width, 26.0],
-                                egui::Label::new(label)
-                                    .sense(egui::Sense::click())
-                                    .truncate(),
-                            )
-                            .on_hover_text(format!("{title}\n{detail}"))
-                            .clicked()
-                        {
-                            select = Some(entry.id.clone());
-                        }
+                        // 标题左对齐，紧跟复选框；悬停看完整写法与统计。
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(title_width, 26.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_width(title_width);
+                                ui.add(egui::Label::new(label).truncate())
+                                    .on_hover_text(format!("{title}\n{detail}"));
+                            },
+                        );
 
                         if show_group {
                             ui.add_sized([64.0, 26.0], egui::Label::new(&entry.group).truncate())
@@ -477,7 +482,11 @@ impl GongwenApp {
                             ),
                         );
                     });
-                });
+                },
+            );
+            if row.response.clicked() {
+                select = Some(entry.id.clone());
+            }
             ui.add_space(2.0);
         }
 

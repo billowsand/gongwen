@@ -1255,6 +1255,72 @@ pub fn card() -> egui::Frame {
         .inner_margin(Margin::same(10))
 }
 
+/// 可点击的卡片行（列表里“点一下选中/编辑”的条目）。
+///
+/// 整张卡片都是点击区：指针移上去变成手型，底色淡入悬停色、描边加深；按下时
+/// 底色再压一档，松开回弹，手感和按钮一致。选中项在强调色淡底上做同样的深浅变化。
+///
+/// 点击感知挂在外层 `Ui` 上（`UiBuilder::sense`），它比子部件先注册，卡片里的
+/// 复选框、小按钮仍优先拿到点击。卡片内关掉 `selectable_labels`：否则标签会把
+/// 点击吞掉，指针还会变成文本 I 形光标。悬停用 `contains_pointer` 的几何判断，
+/// 指针落在子部件上时整张卡片仍算悬停，底色不会一闪一闪。
+///
+/// `frame` 的底色与描边作为静止态；返回值的 `response` 是整张卡片的点击响应。
+pub fn clickable_card<R>(
+    ui: &mut egui::Ui,
+    id_salt: impl egui::AsIdSalt,
+    frame: egui::Frame,
+    selected: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .sense(egui::Sense::click()),
+        |ui| {
+            ui.style_mut().interaction.selectable_labels = false;
+            // 取的是上一帧的矩形与交互状态，本帧据此决定底色，再画内容。
+            let response = ui.response();
+            let hovered = response.contains_pointer();
+            let pressed = hovered && response.is_pointer_button_down_on();
+            if hovered {
+                // 先设手型，子部件（如输入框）若要自己的光标可以在后面覆盖。
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let id = ui.id();
+            let hover_t = ui
+                .ctx()
+                .animate_bool_with_time(id.with("hover"), hovered, anim::FAST);
+            let press_t = ui
+                .ctx()
+                .animate_bool_with_time(id.with("press"), pressed, anim::FAST);
+
+            let (hover_fill, press_fill) = if selected {
+                (
+                    mix_color(accent_soft(), accent(), 0.06),
+                    mix_color(accent_soft(), accent(), 0.14),
+                )
+            } else {
+                (surface_hover(), surface_active())
+            };
+            let fill = frame
+                .fill
+                .lerp_to_gamma(hover_fill, hover_t)
+                .lerp_to_gamma(press_fill, press_t);
+            let mut stroke = frame.stroke;
+            if stroke.width > 0.0 {
+                let target = if selected { accent() } else { border_strong() };
+                stroke.color = stroke.color.lerp_to_gamma(target, hover_t * 0.6);
+            }
+
+            let mut prepared = frame.fill(fill).stroke(stroke).begin(ui);
+            let inner = add_contents(&mut prepared.content_ui);
+            prepared.end(ui);
+            inner
+        },
+    )
+}
+
 /// 面板外框：只填底色，不描边；`margin` 为内边距。
 pub fn panel(fill: Color32, margin: i8) -> egui::Frame {
     egui::Frame::new()
