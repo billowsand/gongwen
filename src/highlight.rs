@@ -188,19 +188,27 @@ impl MarkdownHighlighter {
     }
 }
 
+/// 编辑区默认行高相对字号的倍数：字号拉平后各行高度接近，行距略微放宽一点
+/// 更透气，避免看着太挤。
+const LINE_HEIGHT_RATIO: f32 = 1.35;
+
 fn format(font: FontId, color: Color32) -> TextFormat {
+    let line_height = Some(font.size * LINE_HEIGHT_RATIO);
     TextFormat {
         font_id: font,
         color,
+        line_height,
         ..Default::default()
     }
 }
 
 fn filled(font: FontId, color: Color32, background: Color32) -> TextFormat {
+    let line_height = Some(font.size * LINE_HEIGHT_RATIO);
     TextFormat {
         font_id: font,
         color,
         background,
+        line_height,
         ..Default::default()
     }
 }
@@ -844,10 +852,12 @@ fn highlight_line(job: &mut LayoutJob, line: &str, fonts: &EditorFonts, research
             .get(hashes)
             .is_some_and(u8::is_ascii_whitespace)
     {
+        // 层级主要靠字体（黑体/楷体/仿宋）和颜色区分，与正式预览
+        // （`preview/layout.rs::heading_family`）一致；字号只留一点点提示，
+        // 不再和正文拉开明显差距。
         let scale = match hashes {
-            1 => 1.30,
-            2 => 1.16,
-            3 => 1.07,
+            1 => 1.06,
+            2 => 1.03,
             _ => 1.0,
         };
         let size = (base_size * scale).round();
