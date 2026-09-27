@@ -2003,6 +2003,12 @@ pub struct ImeConfig {
     /// 翻页键：`[]`、`,.`、`-=` 三种，其余按默认 `[]` 处理。
     pub page_keys: String,
 
+    /// 候选竖排（一个候选一行）。默认横排。
+    pub candidate_vertical: bool,
+
+    /// 候选窗字号，相对正文字号的百分比：100 / 125 / 150，越界按 100–200 夹住。
+    pub candidate_font_percent: u16,
+
     /// 自定义短语：敲一串字母在固定位置出一段文字（常用套语、单位全称、落款）。
     /// 日期（`rq`）、时间（`sj`）、星期（`xq`）引擎已内置，不必再配。
     pub phrases: Vec<ImePhrase>,
@@ -2046,6 +2052,8 @@ impl Default for ImeConfig {
             full_width_punctuation: true,
             page_size: 5,
             page_keys: "[]".to_string(),
+            candidate_vertical: false,
+            candidate_font_percent: 100,
             phrases: Vec::new(),
         }
     }

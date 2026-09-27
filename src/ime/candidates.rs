@@ -1,4 +1,4 @@
-//! 候选窗：贴光标画一行候选 + 拼音串。
+//! 候选窗：贴光标画一行（或竖排一列）候选 + 拼音串。
 //!
 //! 应用内输入法没有系统候选窗可用（系统输入法已经被关掉了），所以这一块自己画：
 //! 拼音串与它的光标位置、当前页的候选、页码。
@@ -58,6 +58,32 @@ const LEXICON_GAP: f32 = 2.0;
 /// 自定义短语在候选窗里最多显示几个字，多出来的用省略号。
 const PHRASE_PREVIEW_CHARS: usize = 16;
 
+/// 候选窗的排法与字号，设置页里来。字号按比例放大正文与小字两档，
+/// 星标、词表圆点这些画出来的记号跟着放大，间距不动。
+#[derive(Debug, Clone, Copy)]
+struct Look {
+    vertical: bool,
+    scale: f32,
+}
+
+impl Look {
+    fn small(self) -> f32 {
+        theme::font_sizes::SMALL * self.scale
+    }
+
+    fn body(self) -> f32 {
+        theme::font_sizes::BODY * self.scale
+    }
+
+    fn sparkle(self) -> f32 {
+        SPARKLE_SIZE * self.scale
+    }
+
+    fn dot(self) -> f32 {
+        LEXICON_DOT * self.scale
+    }
+}
+
 /// 候选窗里的一个候选：页内下标、文本、是不是本地整句、右上角要标的辅码、
 /// 是不是公文词表带进来的词。
 struct Row {
@@ -110,6 +136,10 @@ impl Ime {
             })
             .collect();
         let preedit = self.preedit.clone();
+        let look = Look {
+            vertical: self.settings.vertical,
+            scale: f32::from(self.settings.font_percent) / 100.0,
+        };
         let highlight = self.highlight.saturating_sub(page * page_size);
         let position = self.window_position(ctx, anchor);
         let rows_width = self.rows_width().unwrap_or(0.0);
@@ -141,9 +171,9 @@ impl Ime {
                         // （12/14）与颜色（弱化/正文）已经把两行分得很开了。
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                            header(ui, &preedit, page, pages, rows_width);
+                            header(ui, &preedit, page, pages, rows_width, look);
                             ui.add_space(ROW_GAP);
-                            measured = candidates_row(ui, &rows, highlight, &mut clicked);
+                            measured = candidates_row(ui, &rows, highlight, &mut clicked, look);
                         });
                     });
             });
@@ -183,17 +213,24 @@ impl Ime {
 }
 
 /// 表头：左边拼音串，右边页码（只有一页就不画）。
-fn header(ui: &mut egui::Ui, preedit: &Preedit, page: usize, pages: usize, rows_width: f32) {
+fn header(
+    ui: &mut egui::Ui,
+    preedit: &Preedit,
+    page: usize,
+    pages: usize,
+    rows_width: f32,
+    look: Look,
+) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-        pinyin_strip(ui, preedit);
+        pinyin_strip(ui, preedit, look);
         if pages <= 1 {
             return;
         }
         let text = format!("{}/{}", page + 1, pages);
         let galley = ui.painter().layout_no_wrap(
             text.clone(),
-            egui::FontId::proportional(theme::font_sizes::SMALL),
+            egui::FontId::proportional(look.small()),
             theme::text_muted(),
         );
         // 页码顶到右边：按上一帧量到的候选行宽度算空档。候选行的宽度不受表头影响，
@@ -202,21 +239,24 @@ fn header(ui: &mut egui::Ui, preedit: &Preedit, page: usize, pages: usize, rows_
         ui.add_space(space.max(HEADER_GAP));
         ui.label(
             egui::RichText::new(text)
-                .size(theme::font_sizes::SMALL)
+                .size(look.small())
                 .color(theme::text_muted()),
         );
     });
 }
 
-/// 候选行。返回量到的宽度，下一帧的表头拿它摆页码。
+/// 候选行（竖排时是一列）。返回量到的宽度，下一帧的表头拿它摆页码。
+///
+/// 竖排时每个候选按自己的宽度左对齐，不撑满整列：Area 里用两端对齐的布局，
+/// 可用宽度是整个视口，候选窗会被一下撑到屏幕那么宽。
 fn candidates_row(
     ui: &mut egui::Ui,
     rows: &[Row],
     highlight: usize,
     clicked: &mut Option<usize>,
+    look: Look,
 ) -> f32 {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = CELL_GAP;
+    let mut add_rows = |ui: &mut egui::Ui| {
         ui.spacing_mut().button_padding = CELL_PADDING;
         // 没选中的候选不描边、不上底，只在鼠标底下才浮出一块淡底。
         let widgets = &mut ui.visuals_mut().widgets;
@@ -229,27 +269,36 @@ fn candidates_row(
         widgets.hovered.expansion = 0.0;
         widgets.active.expansion = 0.0;
         for row in rows {
-            if candidate_button(ui, row, row.index == highlight).clicked() {
+            if candidate_button(ui, row, row.index == highlight, look).clicked() {
                 *clicked = Some(row.index);
             }
         }
-    })
-    .response
-    .rect
-    .width()
+    };
+    let response = if look.vertical {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = CELL_GAP;
+            add_rows(ui);
+        })
+        .response
+    } else {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = CELL_GAP;
+            add_rows(ui);
+        })
+        .response
+    };
+    response.rect.width()
 }
 
 /// 拼音串：光标位置用一条竖线标出来。字号比候选小一档、颜色弱一档，
 /// 一眼就分得清哪一行是打进去的、哪一行是要选的。
-fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit) {
+fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
     let chars: Vec<char> = preedit.text.chars().collect();
     let caret = preedit.caret.min(chars.len());
     let before: String = chars[..caret].iter().collect();
     let after: String = chars[caret..].iter().collect();
     let small = |text: String, color: egui::Color32| {
-        egui::RichText::new(text)
-            .size(theme::font_sizes::SMALL)
-            .color(color)
+        egui::RichText::new(text).size(look.small()).color(color)
     };
     ui.label(small(before, theme::text_muted()));
     ui.label(small("|".into(), theme::accent()));
@@ -261,7 +310,7 @@ fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit) {
 /// 带一个弱化色小圆点：右上角已经归星标与辅码，标记放左边才不挤。
 ///
 /// 辅码跟在词后同一行、顶格对齐，不另起一行：另起一行的话它一出现 / 消失，候选窗高度就跟着跳。
-fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Response {
+fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) -> egui::Response {
     let format = |size: f32, color: egui::Color32| egui::TextFormat {
         font_id: egui::FontId::proportional(size),
         color,
@@ -275,13 +324,13 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
     };
     let index = (row.index + 1).to_string();
     let mut job = egui::text::LayoutJob::default();
-    job.append(&index, 0.0, format(theme::font_sizes::SMALL, hint_color));
+    job.append(&index, 0.0, format(look.small(), hint_color));
     let mut text_gap = INDEX_GAP;
     if row.lexicon {
         // 给圆点让出位置，做法同星标：几乎没宽度的空格，靠前导空白撑开
         job.append(
             " ",
-            INDEX_GAP + LEXICON_DOT,
+            INDEX_GAP + look.dot(),
             format(1.0, egui::Color32::TRANSPARENT),
         );
         text_gap = LEXICON_GAP;
@@ -290,7 +339,7 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
         &row.text,
         text_gap,
         format(
-            theme::font_sizes::BODY,
+            look.body(),
             if selected {
                 theme::accent_active()
             } else {
@@ -302,14 +351,14 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
         // 给星标让出位置：一个几乎没宽度的空格，靠前导空白撑开
         job.append(
             " ",
-            SPARKLE_GAP + SPARKLE_SIZE,
+            SPARKLE_GAP + look.sparkle(),
             format(1.0, egui::Color32::TRANSPARENT),
         );
     }
     // 辅码小字：序号那档字号、弱化色，顶到行首当上标
     let corner_format = egui::TextFormat {
         valign: egui::Align::TOP,
-        ..format(theme::font_sizes::SMALL, theme::text_muted())
+        ..format(look.small(), theme::text_muted())
     };
     let corner_width = row.corner.as_ref().map_or(0.0, |corner| {
         job.append(corner, CORNER_GAP, corner_format.clone());
@@ -335,7 +384,7 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
         // 贴着候选词右上角：右边收进内边距，顶上与字形顶部大致齐平
         let content = response.rect.shrink2(CELL_PADDING);
         let min = egui::pos2(
-            content.right() - corner_width - SPARKLE_SIZE,
+            content.right() - corner_width - look.sparkle(),
             content.top() + content.height() * 0.15,
         );
         let color = if selected {
@@ -344,7 +393,7 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
             theme::accent()
         };
         ui.painter().add(sparkle(
-            egui::Rect::from_min_size(min, egui::Vec2::splat(SPARKLE_SIZE)),
+            egui::Rect::from_min_size(min, egui::Vec2::splat(look.sparkle())),
             color,
         ));
     }
@@ -353,19 +402,15 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool) -> egui::Respo
         let content = response.rect.shrink2(CELL_PADDING);
         let index_width = ui
             .painter()
-            .layout_no_wrap(
-                index,
-                egui::FontId::proportional(theme::font_sizes::SMALL),
-                hint_color,
-            )
+            .layout_no_wrap(index, egui::FontId::proportional(look.small()), hint_color)
             .size()
             .x;
         let center = egui::pos2(
-            content.left() + index_width + INDEX_GAP + LEXICON_DOT / 2.0,
+            content.left() + index_width + INDEX_GAP + look.dot() / 2.0,
             content.center().y,
         );
         ui.painter()
-            .circle_filled(center, LEXICON_DOT / 2.0, hint_color);
+            .circle_filled(center, look.dot() / 2.0, hint_color);
     }
     response
 }

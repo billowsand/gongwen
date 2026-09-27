@@ -1837,6 +1837,28 @@ impl GongwenApp {
                     }
                 });
         });
+        setting_row(ui, "候选排列", None, |ui| {
+            ui.selectable_value(&mut self.config.ime.candidate_vertical, false, "横排");
+            ui.selectable_value(&mut self.config.ime.candidate_vertical, true, "竖排");
+        });
+        setting_row(
+            ui,
+            "候选字号",
+            Some("相对正文字号放大，看不清候选时调大一档。"),
+            |ui| {
+                egui::ComboBox::from_id_salt("ime_candidate_font")
+                    .selected_text(format!("{}%", self.config.ime.candidate_font_percent))
+                    .show_ui(ui, |ui| {
+                        for percent in crate::ime::FONT_PERCENT_OPTIONS {
+                            ui.selectable_value(
+                                &mut self.config.ime.candidate_font_percent,
+                                percent,
+                                format!("{percent}%"),
+                            );
+                        }
+                    });
+            },
+        );
 
         sub_heading(ui, "标点", None);
         ui.checkbox(

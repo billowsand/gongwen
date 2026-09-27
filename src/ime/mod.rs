@@ -55,6 +55,12 @@ pub(crate) struct ImeSettings {
 
     /// 上一页 / 下一页键。
     pub(crate) page_keys: (char, char),
+
+    /// 候选竖排（一个候选一行）。
+    pub(crate) vertical: bool,
+
+    /// 候选窗字号，相对正文的百分比。
+    pub(crate) font_percent: u16,
 }
 
 impl Default for ImeSettings {
@@ -67,6 +73,8 @@ impl Default for ImeSettings {
             full_width_punctuation: true,
             page_size: 5,
             page_keys: ('[', ']'),
+            vertical: false,
+            font_percent: 100,
         }
     }
 }
@@ -76,6 +84,9 @@ pub(crate) const MAX_PAGE_SIZE: usize = 9;
 
 /// 翻页键的三组预设（与上游输入法一致）。
 pub(crate) const PAGE_KEY_OPTIONS: [&str; 3] = ["[]", ",.", "-="];
+
+/// 设置页里列的候选字号（相对正文的百分比）。
+pub(crate) const FONT_PERCENT_OPTIONS: [u16; 3] = [100, 125, 150];
 
 impl ImeSettings {
     /// 从配置里的原始取值来：双拼方案名、翻页键、每页候选数。
@@ -98,7 +109,16 @@ impl ImeSettings {
             full_width_punctuation,
             page_size: page_size.clamp(1, MAX_PAGE_SIZE),
             page_keys: parse_page_keys(page_keys).unwrap_or(Self::default().page_keys),
+            vertical: false,
+            font_percent: 100,
         }
+    }
+
+    /// 候选窗的排法与字号。字号夹在 100%–200%：再小不如正文，再大候选窗就占半屏了。
+    pub(crate) fn with_candidate_look(mut self, vertical: bool, font_percent: u16) -> Self {
+        self.vertical = vertical;
+        self.font_percent = font_percent.clamp(100, 200);
+        self
     }
 
     /// 界面上列的双拼方案：第一项是全拼（配置里写空串），其后是引擎支持的四套。
@@ -255,6 +275,24 @@ mod tests {
         assert_eq!(hint(""), FumaHint::Typed);
         assert_eq!(hint("有时"), FumaHint::Typed);
         assert_eq!(ImeSettings::fuma_hint_options().len(), FumaHint::ALL.len());
+    }
+
+    /// 候选字号夹在 100%–200%。
+    #[test]
+    fn candidate_font_is_clamped() {
+        let look = |percent| {
+            ImeSettings::default()
+                .with_candidate_look(true, percent)
+                .font_percent
+        };
+        assert_eq!(look(0), 100);
+        assert_eq!(look(125), 125);
+        assert_eq!(look(999), 200);
+        assert!(
+            ImeSettings::default()
+                .with_candidate_look(true, 100)
+                .vertical
+        );
     }
 
     /// 辅码方案列表第一项是不用。

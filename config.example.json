@@ -270,6 +270,8 @@
     "full_width_punctuation": true,
     "page_size": 5,
     "page_keys": "[]",
+    "candidate_vertical": false,
+    "candidate_font_percent": 100,
     "phrases": []
   },
   "theme": "claude"

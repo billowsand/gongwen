@@ -754,3 +754,31 @@ fn custom_phrases_come_out_at_their_position() {
     let routed = type_char(&ctx, &mut ime, ' ');
     assert_eq!(inserted(&routed), "特此函告");
 }
+
+/// 敲一串拼音、画出候选窗，返回候选窗量到的尺寸。
+fn candidate_window(settings: ImeSettings) -> egui::Vec2 {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    ime.apply_settings(settings);
+    focus(&ctx, &mut ime);
+    for c in "kai".chars() {
+        type_char_with_candidates(&ctx, &mut ime, c);
+    }
+    ime.window_size().expect("候选窗应当画出来了")
+}
+
+/// 竖排比横排高、比横排窄，而且不会被撑到视口那么宽；字号放大候选窗跟着变大。
+#[test]
+fn candidate_window_follows_the_look_settings() {
+    let horizontal = candidate_window(ImeSettings::default());
+    let vertical = candidate_window(ImeSettings::default().with_candidate_look(true, 100));
+    assert!(vertical.y > horizontal.y, "{vertical:?} vs {horizontal:?}");
+    assert!(vertical.x < horizontal.x, "{vertical:?} vs {horizontal:?}");
+    assert!(vertical.x < 300.0, "竖排候选窗不该被撑宽：{vertical:?}");
+
+    let large = candidate_window(ImeSettings::default().with_candidate_look(false, 150));
+    assert!(
+        large.x > horizontal.x && large.y > horizontal.y,
+        "{large:?}"
+    );
+}
