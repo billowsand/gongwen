@@ -6,8 +6,10 @@
 //! * 英文模式（`Shift` 单击切过来的持久状态）字母直接进文本框，不进缓冲、不出候选。
 //! * 组句中的 `1`–`9` 选当前页第几个、空格上屏高亮、回车原样上屏、`[` `]` 翻页、
 //!   上下挪高亮、左右 / Home / End 挪拼音光标、退格删一个字母、Esc 丢掉整段。
+//! * 组句中的 `Delete` 删光标后的一个字母，`Ctrl+退格` / `Ctrl+←` / `Ctrl+→` 按音节删、按音节挪。
 //! * 没在组句时只有标点问一句引擎（要不要转全角），其余一律交给应用。
-//! * 带 Ctrl / Alt / Command 的组合键永远交给应用。
+//! * 其余带 Ctrl / Alt / Command 的组合键（以及 `Tab`）交给应用；组句中先把拼音原样上屏，
+//!   免得快捷键作用在候选窗背后的正文上、拼音却还悬着（`Ctrl+V` 粘到了拼音前面这类）。
 //!
 //! 分流是纯函数：只吃 [`Route`] 里的状态，不碰引擎，所以不用真实词库就能测。
 
@@ -45,11 +47,43 @@ pub(crate) enum Key {
     /// PageUp / PageDown：翻页。
     PageUp,
     PageDown,
+
+    /// Delete：删光标后的一个字母。
+    Delete,
+
+    /// Tab。
+    Tab,
+
+    /// Ctrl / Alt + 退格：删光标前的一个音节。
+    SyllableBackspace,
+
+    /// Ctrl / Alt + 左右：拼音光标按音节挪。
+    SyllableLeft,
+    SyllableRight,
+
+    /// 其余带 Ctrl / Alt / Command 的组合键：快捷键，归应用。
+    Shortcut,
 }
 
 impl Key {
     /// 认 egui 的主键。返回 `None` 表示这个键与输入法无关（字母靠字符事件走）。
-    pub(crate) fn from_egui(key: egui::Key) -> Option<Self> {
+    ///
+    /// 修饰键本身（单按一下 Ctrl）也是 `None`：它还不是快捷键，不该把拼音冲上屏。
+    pub(crate) fn from_egui(key: egui::Key, modifiers: egui::Modifiers) -> Option<Self> {
+        if is_modifier(key) {
+            return None;
+        }
+        if modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd {
+            // Windows / Linux 的 Ctrl、macOS 的 Option 是按词挪的那一档；macOS 的 Command
+            // 是整行，输入法里没有对应，当普通快捷键。
+            let word = (modifiers.ctrl || modifiers.alt) && !modifiers.mac_cmd;
+            return Some(match key {
+                egui::Key::Backspace if word => Self::SyllableBackspace,
+                egui::Key::ArrowLeft if word => Self::SyllableLeft,
+                egui::Key::ArrowRight if word => Self::SyllableRight,
+                _ => Self::Shortcut,
+            });
+        }
         Some(match key {
             egui::Key::Backspace => Self::Backspace,
             egui::Key::Escape => Self::Escape,
@@ -62,9 +96,27 @@ impl Key {
             egui::Key::End => Self::End,
             egui::Key::PageUp => Self::PageUp,
             egui::Key::PageDown => Self::PageDown,
+            egui::Key::Delete => Self::Delete,
+            egui::Key::Tab => Self::Tab,
             _ => return None,
         })
     }
+}
+
+/// 修饰键本身。egui 把它们也当普通键报。
+fn is_modifier(key: egui::Key) -> bool {
+    use egui::Key::*;
+    matches!(
+        key,
+        ShiftLeft
+            | ShiftRight
+            | ControlLeft
+            | ControlRight
+            | AltLeft
+            | AltRight
+            | SuperLeft
+            | SuperRight
+    )
 }
 
 /// 这次按键要做什么。
@@ -84,6 +136,15 @@ pub(crate) enum Action {
 
     /// 缓冲原样上屏（回车）。
     CommitRaw,
+
+    /// 缓冲原样上屏，但这次按键**照样交给应用**（快捷键、Tab、粘贴）。
+    FlushRaw,
+
+    /// 删光标后的一个字母。
+    DeleteForward,
+
+    /// 删光标前的一个音节。
+    DeleteSyllable,
 
     /// 选当前页第几个候选（0 起）。
     CommitIndex(usize),
@@ -121,6 +182,12 @@ pub(crate) enum Navigation {
 
     /// 拼音光标到末尾。
     CursorEnd,
+
+    /// 拼音光标左移一个音节。
+    SyllableLeft,
+
+    /// 拼音光标右移一个音节。
+    SyllableRight,
 }
 
 /// 分流时要知道的壳状态。
@@ -161,6 +228,11 @@ pub(crate) fn route(key: Key, route: Route, settings: &ImeSettings) -> Action {
         Key::Right => Action::Navigate(Navigation::CursorRight),
         Key::Home => Action::Navigate(Navigation::CursorHome),
         Key::End => Action::Navigate(Navigation::CursorEnd),
+        Key::Delete => Action::DeleteForward,
+        Key::SyllableBackspace => Action::DeleteSyllable,
+        Key::SyllableLeft => Action::Navigate(Navigation::SyllableLeft),
+        Key::SyllableRight => Action::Navigate(Navigation::SyllableRight),
+        Key::Tab | Key::Shortcut => Action::FlushRaw,
     }
 }
 
@@ -339,6 +411,12 @@ mod tests {
             Key::Right,
             Key::Home,
             Key::End,
+            Key::Delete,
+            Key::Tab,
+            Key::SyllableBackspace,
+            Key::SyllableLeft,
+            Key::SyllableRight,
+            Key::Shortcut,
         ] {
             assert_eq!(
                 route(key, idle(), &settings()),
@@ -374,6 +452,55 @@ mod tests {
         assert_eq!(
             route(Key::End, composing(5), &settings()),
             Action::Navigate(Navigation::CursorEnd)
+        );
+    }
+
+    /// 组句中：Delete 删后一个字母，Ctrl+退格 / 左右按音节，其余快捷键与 Tab 先上屏拼音再交给应用。
+    #[test]
+    fn editing_keys_while_composing_stay_in_the_composition() {
+        let at = |key| route(key, composing(5), &settings());
+        assert_eq!(at(Key::Delete), Action::DeleteForward);
+        assert_eq!(at(Key::SyllableBackspace), Action::DeleteSyllable);
+        assert_eq!(
+            at(Key::SyllableLeft),
+            Action::Navigate(Navigation::SyllableLeft)
+        );
+        assert_eq!(
+            at(Key::SyllableRight),
+            Action::Navigate(Navigation::SyllableRight)
+        );
+        assert_eq!(at(Key::Shortcut), Action::FlushRaw);
+        assert_eq!(at(Key::Tab), Action::FlushRaw);
+    }
+
+    /// 修饰键组合认成哪个键：Ctrl / Alt 的退格与左右按音节，其余是快捷键，单按修饰键不算。
+    #[test]
+    fn modifier_combinations_are_recognized() {
+        let ctrl = egui::Modifiers::CTRL;
+        let alt = egui::Modifiers::ALT;
+        assert_eq!(
+            Key::from_egui(egui::Key::Backspace, ctrl),
+            Some(Key::SyllableBackspace)
+        );
+        assert_eq!(
+            Key::from_egui(egui::Key::ArrowLeft, alt),
+            Some(Key::SyllableLeft)
+        );
+        assert_eq!(
+            Key::from_egui(egui::Key::ArrowRight, ctrl),
+            Some(Key::SyllableRight)
+        );
+        assert_eq!(Key::from_egui(egui::Key::V, ctrl), Some(Key::Shortcut));
+        assert_eq!(Key::from_egui(egui::Key::Z, ctrl), Some(Key::Shortcut));
+        assert_eq!(
+            Key::from_egui(egui::Key::ArrowLeft, egui::Modifiers::MAC_CMD),
+            Some(Key::Shortcut)
+        );
+        assert_eq!(Key::from_egui(egui::Key::ControlLeft, ctrl), None);
+        assert_eq!(Key::from_egui(egui::Key::A, egui::Modifiers::NONE), None);
+        assert_eq!(
+            Key::from_egui(egui::Key::Delete, egui::Modifiers::NONE),
+            Some(Key::Delete)
         );
     }
 

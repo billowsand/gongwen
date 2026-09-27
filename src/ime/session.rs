@@ -66,7 +66,7 @@ impl Outcome {
         recompose: true,
     };
 
-    /// 吃掉了，只挪了高亮 / 光标。
+    /// 吃掉了，只挪了高亮 / 翻了页。
     const NAVIGATED: Self = Self {
         consumed: true,
         commit: None,
@@ -572,6 +572,12 @@ impl Ime {
                     ..
                 } => self.route_key(*key, *pressed, *repeat, *modifiers, &mut kept),
                 // 字符走 `Text`：`Key` 事件对纯字母没有插入语义，两边都处理会插两次。
+                // 剪切、粘贴不走 `Key` 事件（egui-winit 直接换成这两个事件），也改正文：
+                // 与快捷键同样处理，组句中先把拼音原样上屏。复制不动正文，不管。
+                egui::Event::Cut | egui::Event::Paste(_) => {
+                    self.shift_alone = false;
+                    self.handle(Key::Shortcut, &mut kept)
+                }
                 egui::Event::Text(text) => match single_char(text) {
                     Some(c) => {
                         // 字符也要按掉「Shift 单击」：Shift、字母、Shift 这个序列里
@@ -590,7 +596,7 @@ impl Ime {
         kept
     }
 
-    /// 一次功能键 / 修饰键事件：判 Shift 单击、放过组合键，然后分流。
+    /// 一次功能键 / 修饰键事件：判 Shift 单击，然后分流（组合键怎么分见 `Key::from_egui`）。
     fn route_key(
         &mut self,
         key: egui::Key,
@@ -607,18 +613,15 @@ impl Ime {
             }
             return false;
         }
-        if modifiers.ctrl || modifiers.alt || modifiers.command {
-            self.shift_alone = false;
-            return false;
-        }
         if is_shift(key) {
-            if !repeat {
+            // 按着 Ctrl / Alt 再按 Shift 是组合键的一部分，不算单击
+            if !repeat && !(modifiers.ctrl || modifiers.alt || modifiers.command) {
                 self.shift_alone = true;
             }
             return false;
         }
         self.shift_alone = false;
-        match Key::from_egui(key) {
+        match Key::from_egui(key, modifiers) {
             Some(ime_key) => self.handle(ime_key, kept),
             None => false,
         }
@@ -717,6 +720,32 @@ impl Ime {
                 };
                 Outcome::commit(engine.take_raw())
             }
+            Action::FlushRaw => {
+                let Some(engine) = self.engine_mut() else {
+                    return Outcome::PASSTHROUGH;
+                };
+                let raw = engine.take_raw();
+                // 按键本身照样交给应用：先插拼音，再轮到快捷键
+                Outcome {
+                    consumed: false,
+                    commit: (!raw.is_empty()).then_some(raw),
+                    recompose: true,
+                }
+            }
+            Action::DeleteForward => {
+                let Some(engine) = self.engine_mut() else {
+                    return Outcome::PASSTHROUGH;
+                };
+                engine.delete_forward();
+                Outcome::CHANGED
+            }
+            Action::DeleteSyllable => {
+                let Some(engine) = self.engine_mut() else {
+                    return Outcome::PASSTHROUGH;
+                };
+                engine.delete_syllable_backward();
+                Outcome::CHANGED
+            }
             Action::Punctuate(c) => {
                 let Some(engine) = self.engine_mut() else {
                     return Outcome::PASSTHROUGH;
@@ -746,7 +775,9 @@ impl Ime {
         }
     }
 
-    /// 挪高亮 / 翻页 / 挪拼音光标。光标没有上屏语义，只重算拼音串的位置。
+    /// 挪高亮 / 翻页 / 挪拼音光标。
+    ///
+    /// 挪拼音光标要重查：拼音串里那条竖线要跟着走，候选也按光标前的那一段重排。
     fn navigate(&mut self, navigation: keys::Navigation) -> Outcome {
         use keys::Navigation;
         let count = self.layout.len();
@@ -762,25 +793,11 @@ impl Ime {
                     engine.note_page_turn();
                 }
             }
-            Navigation::CursorLeft => {
+            cursor => {
                 if let Some(engine) = self.engine_mut() {
-                    engine.move_cursor_left();
+                    move_cursor(engine, cursor);
                 }
-            }
-            Navigation::CursorRight => {
-                if let Some(engine) = self.engine_mut() {
-                    engine.move_cursor_right();
-                }
-            }
-            Navigation::CursorHome => {
-                if let Some(engine) = self.engine_mut() {
-                    engine.move_cursor_home();
-                }
-            }
-            Navigation::CursorEnd => {
-                if let Some(engine) = self.engine_mut() {
-                    engine.move_cursor_end();
-                }
+                return Outcome::CHANGED;
             }
         }
         Outcome::NAVIGATED
@@ -804,6 +821,28 @@ impl Drop for Ime {
 /// 穿出去，应用直接闪退）。每页格数与设置一致，空布局与有候选时同一套算法。
 fn empty_layout(page_size: usize) -> CandidateLayout {
     CandidateLayout::new(Vec::new(), page_size.max(1))
+}
+
+/// 挪拼音光标。高亮与翻页不归这里管。
+fn move_cursor(engine: &mut Engine, navigation: keys::Navigation) {
+    use keys::Navigation;
+    match navigation {
+        Navigation::CursorLeft => {
+            engine.move_cursor_left();
+        }
+        Navigation::CursorRight => {
+            engine.move_cursor_right();
+        }
+        Navigation::CursorHome => engine.move_cursor_home(),
+        Navigation::CursorEnd => engine.move_cursor_end(),
+        Navigation::SyllableLeft => {
+            engine.move_cursor_syllable_left();
+        }
+        Navigation::SyllableRight => {
+            engine.move_cursor_syllable_right();
+        }
+        Navigation::Highlight(_) | Navigation::Page(_) => {}
+    }
 }
 
 /// 高亮挪 `delta`，夹在 `[0, count-1]` 里；没有候选就归零。

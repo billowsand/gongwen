@@ -231,7 +231,7 @@ fn shift_with_another_key_in_between_is_not_a_click() {
     assert!(!ime.english(), "Shift 中间夹了字母，不该切模式");
 }
 
-/// 带 Ctrl 的组合键一律交给应用。
+/// 没在组句时，带 Ctrl 的组合键原样交给应用。
 #[test]
 fn command_combinations_pass_through() {
     let ctx = egui::Context::default();
@@ -448,4 +448,117 @@ fn exemption_lapses_when_the_field_stops_declaring() {
         ime.end_frame(ctx);
     });
     assert!(!ime.focus_exempt(), "上一帧没声明，就该回到输入法");
+}
+
+/// 敲一串拼音。
+fn type_str(ctx: &egui::Context, ime: &mut Ime, text: &str) {
+    for c in text.chars() {
+        let _ = type_char(ctx, ime, c);
+    }
+}
+
+/// 组句中的快捷键：先把拼音原样上屏，快捷键本身照样交给应用，而且排在拼音后面。
+#[test]
+fn shortcuts_while_composing_flush_the_pinyin_first() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kai");
+
+    let undo = key_event(egui::Key::Z, true, egui::Modifiers::CTRL);
+    let routed = frame(&ctx, &mut ime, vec![undo.clone()]);
+    assert_eq!(routed, vec![egui::Event::Text("kai".into()), undo]);
+    assert!(ime.preedit.text.is_empty());
+}
+
+/// 粘贴不走 `Key` 事件，同样要先把拼音上屏，别粘到拼音前面去。
+#[test]
+fn pasting_while_composing_flushes_the_pinyin_first() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kai");
+
+    let paste = egui::Event::Paste("正文".into());
+    let routed = frame(&ctx, &mut ime, vec![paste.clone()]);
+    assert_eq!(routed, vec![egui::Event::Text("kai".into()), paste]);
+}
+
+/// 单按一下 Ctrl 还不是快捷键，拼音留着。
+#[test]
+fn a_lone_modifier_keeps_the_composition() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kai");
+
+    let routed = frame(
+        &ctx,
+        &mut ime,
+        vec![key_event(
+            egui::Key::ControlLeft,
+            true,
+            egui::Modifiers::CTRL,
+        )],
+    );
+    assert!(inserted(&routed).is_empty(), "{routed:?}");
+    assert_eq!(ime.preedit.text, "kai");
+}
+
+/// Ctrl+退格删的是拼音里最后一个音节，不是候选窗背后的正文。
+#[test]
+fn ctrl_backspace_deletes_a_syllable_of_the_composition() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kaifa");
+
+    let routed = frame(
+        &ctx,
+        &mut ime,
+        vec![key_event(egui::Key::Backspace, true, egui::Modifiers::CTRL)],
+    );
+    assert!(routed.is_empty(), "不该交给文本框：{routed:?}");
+    assert_eq!(ime.preedit.text, "kai");
+}
+
+/// Delete 删拼音光标后的字母，不碰正文。
+#[test]
+fn delete_removes_the_letter_after_the_pinyin_caret() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kaifa");
+
+    let none = egui::Modifiers::NONE;
+    let _ = frame(&ctx, &mut ime, vec![key_event(egui::Key::Home, true, none)]);
+    let routed = frame(
+        &ctx,
+        &mut ime,
+        vec![key_event(egui::Key::Delete, true, none)],
+    );
+    assert!(routed.is_empty(), "不该交给文本框：{routed:?}");
+    let raw = ime.engine().expect("引擎").composition().text().to_owned();
+    assert_eq!(raw, "aifa");
+}
+
+/// 挪拼音光标后，候选窗里的光标竖线跟着走。
+#[test]
+fn moving_the_pinyin_caret_updates_the_preedit() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    type_str(&ctx, &mut ime, "kaifa");
+    let end = ime.preedit.caret;
+
+    let none = egui::Modifiers::NONE;
+    let _ = frame(
+        &ctx,
+        &mut ime,
+        vec![key_event(egui::Key::ArrowLeft, true, none)],
+    );
+    assert!(ime.preedit.caret < end, "光标应当左移：{:?}", ime.preedit);
+
+    let _ = frame(&ctx, &mut ime, vec![key_event(egui::Key::Home, true, none)]);
+    assert_eq!(ime.preedit.caret, 0);
 }
