@@ -377,7 +377,8 @@ impl GongwenApp {
                 .to_string();
         }
         let kind = config.last_template;
-        let ime = crate::ime::Ime::new(crate::ime::ImeSettings::default());
+        // 按配置装：配置里关掉了输入法就不装配引擎，不白读词库和语言模型。
+        let ime = crate::ime::Ime::new(session::ime_settings_of(&config.ime));
         let (sender, receiver) = mpsc::channel();
         // 先摆一篇空白稿兜底；下面会话恢复成功就把它换掉。
         let docs = vec![DraftSession::blank(0, &config)];
