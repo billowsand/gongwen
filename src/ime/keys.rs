@@ -8,7 +8,8 @@
 //!   上下挪高亮、左右 / Home / End 挪拼音光标、退格删一个字母、Esc 丢掉整段。
 //! * 组句中的 `Delete` 删光标后的一个字母，`Ctrl+退格` / `Ctrl+←` / `Ctrl+→` 按音节删、按音节挪。
 //! * 没在组句时只有标点问一句引擎（要不要转全角），其余一律交给应用；退格顺带告诉引擎
-//!   删的是刚上屏的字（选错了删掉重打，那次学习就退回去）。
+//!   删的是刚上屏的字（选错了删掉重打，那次学习就退回去），回车、方向键、快捷键这类
+//!   会让光标离开刚才上屏位置的键顺带断开上文（下一个词按句首记）。
 //! * 其余带 Ctrl / Alt / Command 的组合键（以及 `Tab`）交给应用；组句中先把拼音原样上屏，
 //!   免得快捷键作用在候选窗背后的正文上、拼音却还悬着（`Ctrl+V` 粘到了拼音前面这类）。
 //!
@@ -159,6 +160,9 @@ pub(crate) enum Action {
     /// 没在组句时的退格：交给应用删正文，同时告诉引擎删的是刚上屏的字。
     NoteBackspace,
 
+    /// 光标要离开刚才上屏的位置（换行、方向键、快捷键）：交给应用，同时断开上文。
+    BreakChain,
+
     /// 组句内的导航。
     Navigate(Navigation),
 
@@ -221,7 +225,8 @@ pub(crate) fn route(key: Key, route: Route, settings: &ImeSettings) -> Action {
     match key {
         Key::Char(c) => route_char(c, route, settings),
         Key::Backspace if !route.composing => Action::NoteBackspace,
-        _ if !route.composing => Action::Passthrough,
+        Key::Escape if !route.composing => Action::Passthrough,
+        _ if !route.composing => Action::BreakChain,
         Key::Backspace => Action::Backspace,
         Key::Escape => Action::Clear,
         Key::Enter => Action::CommitRaw,
@@ -247,7 +252,8 @@ fn route_key_english(key: Key, route: Route) -> Action {
         Key::Char(c) if c.is_ascii_alphabetic() => Action::Insert(c),
         Key::Char(c) => route_punctuation(c, route),
         Key::Backspace => Action::NoteBackspace,
-        _ => Action::Passthrough,
+        Key::Escape => Action::Passthrough,
+        _ => Action::BreakChain,
     }
 }
 
@@ -403,10 +409,10 @@ mod tests {
         assert_eq!(char_route('，', half), Action::Passthrough);
     }
 
+    /// 没在组句时的功能键交给应用，并断开上文：光标离开了刚才上屏的位置。
     #[test]
-    fn function_keys_are_passed_through_when_idle() {
+    fn function_keys_break_the_chain_when_idle() {
         for key in [
-            Key::Escape,
             Key::Enter,
             Key::Up,
             Key::Down,
@@ -425,8 +431,8 @@ mod tests {
         ] {
             assert_eq!(
                 route(key, idle(), &settings()),
-                Action::Passthrough,
-                "{key:?} 没在组句时应当交给应用"
+                Action::BreakChain,
+                "{key:?} 没在组句时应当交给应用并断开上文"
             );
         }
     }
@@ -458,6 +464,12 @@ mod tests {
             route(Key::End, composing(5), &settings()),
             Action::Navigate(Navigation::CursorEnd)
         );
+    }
+
+    /// Esc 不挪光标，原样交给应用。
+    #[test]
+    fn idle_escape_is_passed_through() {
+        assert_eq!(route(Key::Escape, idle(), &settings()), Action::Passthrough);
     }
 
     /// 没在组句时的退格删的是正文：交给应用，并告诉引擎（英文模式也一样）。
@@ -536,7 +548,11 @@ mod tests {
         assert_eq!(char_route('a', english), Action::Insert('a'));
         assert_eq!(char_route('A', english), Action::Insert('A'));
         assert_eq!(char_route('，', english), Action::Punctuate('，'));
-        assert_eq!(route(Key::Enter, english, &settings()), Action::Passthrough);
+        assert_eq!(route(Key::Enter, english, &settings()), Action::BreakChain);
+        assert_eq!(
+            route(Key::Escape, english, &settings()),
+            Action::Passthrough
+        );
         // 英文模式下敲的数字不选词，也不会进拼音缓冲。
         assert_eq!(char_route('3', english), Action::Punctuate('3'));
     }

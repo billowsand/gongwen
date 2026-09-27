@@ -660,3 +660,43 @@ fn erasing_a_wrong_pick_and_retyping_retracts_its_learning() {
     assert_eq!(inserted(&routed), "开发");
     assert_eq!(weight(&ime, "凯发"), 0, "选错的那次应当退回");
 }
+
+/// 上屏之后光标挪走（方向键、点鼠标）再退格，删的是别处的字：不算选错，不撤回学习。
+/// 挪光标的键与点击本身照样交给文本框。
+#[test]
+fn moving_the_caret_away_breaks_the_chain() {
+    let none = egui::Modifiers::NONE;
+    let backspace = vec![
+        key_event(egui::Key::Backspace, true, none),
+        key_event(egui::Key::Backspace, false, none),
+    ];
+    let left = key_event(egui::Key::ArrowLeft, true, none);
+    let click = egui::Event::PointerButton {
+        pos: egui::pos2(50.0, 50.0),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: none,
+    };
+    for away in [left, click] {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let ctx = egui::Context::default();
+        let mut ime = learning_ime(dir.path());
+        focus(&ctx, &mut ime);
+
+        type_str(&ctx, &mut ime, "kaifa");
+        let _ = type_char(&ctx, &mut ime, '2');
+        let routed = frame(&ctx, &mut ime, vec![away.clone()]);
+        assert_eq!(routed, vec![away.clone()], "要交给文本框");
+        for _ in 0..2 {
+            let _ = frame(&ctx, &mut ime, backspace.clone());
+        }
+        type_str(&ctx, &mut ime, "kaifa");
+        let index = (0..ime.layout.len())
+            .find(|&i| ime.layout.candidate(i).is_some_and(|c| c.text == "开发"))
+            .expect("候选里应当有开发");
+        let digit = char::from_digit(index as u32 + 1, 10).expect("在第一页");
+        let _ = type_char(&ctx, &mut ime, digit);
+        let weight = ime.engine().expect("引擎").learner().weight("凯发");
+        assert_eq!(weight, 1, "{away:?} 之后删的是别处，不该撤回");
+    }
+}

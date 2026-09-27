@@ -581,8 +581,12 @@ impl Ime {
                 } => self.route_key(*key, *pressed, *repeat, *modifiers, &mut kept),
                 // 字符走 `Text`：`Key` 事件对纯字母没有插入语义，两边都处理会插两次。
                 // 按着 Shift 点鼠标、滚滚轮是扩选，不是单击 Shift
-                egui::Event::PointerButton { pressed: true, .. }
-                | egui::Event::MouseWheel { .. } => {
+                egui::Event::PointerButton { pressed: true, .. } => {
+                    self.shift_alone = false;
+                    self.pointer_pressed();
+                    false
+                }
+                egui::Event::MouseWheel { .. } => {
                     self.shift_alone = false;
                     false
                 }
@@ -641,6 +645,17 @@ impl Ime {
         match Key::from_egui(key, modifiers) {
             Some(ime_key) => self.handle(ime_key, kept),
             None => false,
+        }
+    }
+
+    /// 按下鼠标：没在组句时多半是把光标点到了别处，断开上文。组句中不断——
+    /// 那是在点候选窗。
+    fn pointer_pressed(&mut self) {
+        if self.composing() {
+            return;
+        }
+        if let Some(engine) = self.engine_mut() {
+            engine.break_chain();
         }
     }
 
@@ -789,6 +804,12 @@ impl Ime {
                         Outcome::PASSTHROUGH
                     }
                 }
+            }
+            Action::BreakChain => {
+                if let Some(engine) = self.engine_mut() {
+                    engine.break_chain();
+                }
+                Outcome::PASSTHROUGH
             }
             Action::NoteBackspace => {
                 if let Some(engine) = self.engine_mut() {
