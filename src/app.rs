@@ -565,6 +565,7 @@ impl eframe::App for GongwenApp {
         // 输入法要在所有控件之前接管键盘：该吃的按键在这里吃掉、该上屏的塞回事件队列。
         // 设置从配置里来，每帧对一次（设置没变是空操作）。
         self.ime.apply_settings(self.ime_settings());
+        self.ime.apply_phrases(&self.config.ime.phrases);
         self.ime.begin_frame(&ctx);
         // 输入法要说的话（删了哪个词的学习记录）走状态栏
         if let Some(notice) = self.ime.take_notice() {

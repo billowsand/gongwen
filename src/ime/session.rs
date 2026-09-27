@@ -24,6 +24,7 @@ use super::engine::{self, Assembly};
 use super::keys::{self, Action, Key, Route};
 use super::lexicon;
 use crate::lexicon::LexiconTerm;
+use crate::models::ImePhrase;
 
 /// 学习数据落盘的间隔。被杀进程最多丢这么久的选择记录。
 const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
@@ -149,6 +150,9 @@ pub(crate) struct Ime {
 
     /// 要交给状态栏的一句话（删了哪个词的学习记录），应用取走即清。
     notice: Option<String>,
+
+    /// 配置里的自定义短语（原样），见 `phrases`。
+    pub(super) phrases: Vec<ImePhrase>,
 }
 
 impl Ime {
@@ -176,6 +180,7 @@ impl Ime {
             system_ime_off: false,
             last_flush: Instant::now(),
             notice: None,
+            phrases: Vec::new(),
         };
         ime.apply_fuma();
         ime.refresh_lexicon_marks();
@@ -264,6 +269,7 @@ impl Ime {
             // 关掉再打开时重新试一次：上次可能是数据还没准备好。
             self.assembled = load();
             self.refresh_lexicon_marks();
+            self.push_phrases();
         }
         if !settings.enabled {
             self.drop_composition();
@@ -886,7 +892,7 @@ impl Ime {
     }
 
     /// 引擎（可变）。
-    fn engine_mut(&mut self) -> Option<&mut Engine> {
+    pub(super) fn engine_mut(&mut self) -> Option<&mut Engine> {
         self.assembled.as_mut().map(|assembly| &mut assembly.engine)
     }
 }

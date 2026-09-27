@@ -2002,6 +2002,38 @@ pub struct ImeConfig {
 
     /// 翻页键：`[]`、`,.`、`-=` 三种，其余按默认 `[]` 处理。
     pub page_keys: String,
+
+    /// 自定义短语：敲一串字母在固定位置出一段文字（常用套语、单位全称、落款）。
+    /// 日期（`rq`）、时间（`sj`）、星期（`xq`）引擎已内置，不必再配。
+    pub phrases: Vec<ImePhrase>,
+}
+
+/// 输入法的一条自定义短语：敲 `code` 时在候选第 `position` 位出 `text`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImePhrase {
+    /// 输入码：1–32 个小写英文字母。
+    pub code: String,
+
+    /// 上屏的文字，可以换行。
+    pub text: String,
+
+    /// 候选位置，1–9。
+    pub position: usize,
+
+    /// 停用的短语留着配置、不出候选。
+    pub enabled: bool,
+}
+
+impl Default for ImePhrase {
+    fn default() -> Self {
+        Self {
+            code: String::new(),
+            text: String::new(),
+            position: 1,
+            enabled: true,
+        }
+    }
 }
 
 impl Default for ImeConfig {
@@ -2014,6 +2046,7 @@ impl Default for ImeConfig {
             full_width_punctuation: true,
             page_size: 5,
             page_keys: "[]".to_string(),
+            phrases: Vec::new(),
         }
     }
 }

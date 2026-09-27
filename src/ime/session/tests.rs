@@ -730,3 +730,27 @@ fn ctrl_digit_forgets_a_candidate() {
     assert!(notice.contains("凯发"), "{notice}");
     assert!(ime.take_notice().is_none(), "取走即清");
 }
+
+/// 自定义短语：敲输入码，固定位置出那段文字；表改得不合法时沿用上一份。
+#[test]
+fn custom_phrases_come_out_at_their_position() {
+    let ctx = egui::Context::default();
+    let mut ime = mini_ime();
+    focus(&ctx, &mut ime);
+    let phrase = |code: &str, text: &str| crate::models::ImePhrase {
+        code: code.to_owned(),
+        text: text.to_owned(),
+        ..Default::default()
+    };
+    ime.apply_phrases(&[phrase("tchg", "特此函告")]);
+
+    type_str(&ctx, &mut ime, "tchg");
+    let routed = type_char(&ctx, &mut ime, ' ');
+    assert_eq!(inserted(&routed), "特此函告");
+
+    // 大写输入码不合法：引擎沿用上一份，tchg 照样能打
+    ime.apply_phrases(&[phrase("TCHG", "特此通知")]);
+    type_str(&ctx, &mut ime, "tchg");
+    let routed = type_char(&ctx, &mut ime, ' ');
+    assert_eq!(inserted(&routed), "特此函告");
+}

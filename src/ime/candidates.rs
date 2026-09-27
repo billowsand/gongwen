@@ -10,7 +10,7 @@
 //! 只能把文本排到下一帧的事件队列最前面（见 `session::Ime::begin_frame`）。
 
 use eframe::egui;
-use qingjian_core::CandidateKind;
+use qingjian_core::{CandidateKind, CustomPhrase};
 
 use super::keys::Action;
 use super::session::{Ime, Preedit};
@@ -55,6 +55,9 @@ const LEXICON_DOT: f32 = 4.0;
 /// 词表标记与后面候选词的间距。
 const LEXICON_GAP: f32 = 2.0;
 
+/// 自定义短语在候选窗里最多显示几个字，多出来的用省略号。
+const PHRASE_PREVIEW_CHARS: usize = 16;
+
 /// 候选窗里的一个候选：页内下标、文本、是不是本地整句、右上角要标的辅码、
 /// 是不是公文词表带进来的词。
 struct Row {
@@ -92,7 +95,13 @@ impl Ime {
             .filter_map(|(offset, cell)| {
                 cell.candidate().map(|candidate| Row {
                     index: offset,
-                    text: candidate.text.clone(),
+                    // 自定义短语可能很长、带换行：候选窗里只放一行预览
+                    text: match candidate.kind {
+                        CandidateKind::Custom(_) => {
+                            CustomPhrase::preview(&candidate.text, PHRASE_PREVIEW_CHARS)
+                        }
+                        _ => candidate.text.clone(),
+                    },
                     sentence: candidate.kind == CandidateKind::Sentence,
                     // 还要敲的辅码，标哪几码由引擎按档位定（`Engine::fuma_mark`）
                     corner: candidate.fuma.clone(),

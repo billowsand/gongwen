@@ -269,7 +269,8 @@
     "fuma_hint": "typed",
     "full_width_punctuation": true,
     "page_size": 5,
-    "page_keys": "[]"
+    "page_keys": "[]",
+    "phrases": []
   },
   "theme": "claude"
 }

@@ -1845,6 +1845,8 @@ impl GongwenApp {
         )
         .on_hover_text("，。：；这些标点在中文模式下转成全角；英文模式与数字后的小数点始终半角。");
 
+        self.ime_phrases_ui(ui);
+
         sub_heading(
             ui,
             "公文词表",
@@ -1868,7 +1870,8 @@ impl GongwenApp {
         setting_continuation(ui, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "单击 Shift 切中英·空格上屏·1–9 选词·[ ] 翻页·Esc 取消·退格删一个字母",
+                    "单击 Shift 切中英·空格上屏·1–9 选词·[ ] 翻页·Esc 取消·退格删一个字母·\
+                     Ctrl+退格删一个音节·Ctrl+数字删掉那个词的学习记录",
                 )
                 .size(theme::font_sizes::SMALL)
                 .color(theme::text_muted()),
@@ -1974,6 +1977,79 @@ impl GongwenApp {
             Ok(_) => {}
             Err(error) => self.status = format!("同步输入法词库失败：{error:#}"),
         }
+    }
+
+    /// 输入法的自定义短语表：输入码、候选位置、上屏文字，改完立即生效。
+    fn ime_phrases_ui(&mut self, ui: &mut egui::Ui) {
+        sub_heading(
+            ui,
+            "自定义短语",
+            Some(
+                "敲一串字母，在候选的固定位置出一段文字：常用套语、单位全称、落款。\n\
+                 日期（rq）、时间（sj）、星期（xq）已经内置，不必再配。",
+            ),
+        );
+        let mut remove = None;
+        for (index, phrase) in self.config.ime.phrases.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut phrase.enabled, "")
+                    .on_hover_text("停用的短语留着、不出候选");
+                // 输入码只收小写字母，不走应用内输入法
+                crate::ime::exempt(ui.add(theme::field(&mut phrase.code, "输入码", 90.0)));
+                egui::ComboBox::from_id_salt(("ime_phrase_position", index))
+                    .selected_text(format!("第 {} 位", phrase.position))
+                    .width(64.0)
+                    .show_ui(ui, |ui| {
+                        for position in 1..=crate::ime::MAX_PAGE_SIZE {
+                            ui.selectable_value(
+                                &mut phrase.position,
+                                position,
+                                format!("第 {position} 位"),
+                            );
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::multiline(&mut phrase.text)
+                        .hint_text("上屏的文字，可以换行")
+                        .desired_rows(1)
+                        .desired_width((ui.available_width() - 40.0).max(160.0)),
+                );
+                if ui
+                    .add(theme::secondary_icon_button(theme::Icon::Trash, ""))
+                    .on_hover_text("删除这条短语")
+                    .clicked()
+                {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            self.config.ime.phrases.remove(index);
+        }
+        setting_continuation(ui, |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::FilePlus, "添加短语"))
+                .clicked()
+            {
+                self.config
+                    .ime
+                    .phrases
+                    .push(crate::models::ImePhrase::default());
+            }
+            let (text, color) = match crate::ime::validate_phrases(&self.config.ime.phrases) {
+                Ok(()) => (
+                    "改完立即生效。输入码为 1–32 个小写字母，同一输入码的同一位置只能放一条。"
+                        .to_owned(),
+                    theme::text_muted(),
+                ),
+                Err(error) => (format!("{error}；改好之前沿用上一份。"), theme::warn()),
+            };
+            ui.label(
+                egui::RichText::new(text)
+                    .size(theme::font_sizes::SMALL)
+                    .color(color),
+            );
+        });
     }
 
     fn persistence_section_ui(&mut self, ui: &mut egui::Ui) {
