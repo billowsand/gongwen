@@ -697,7 +697,7 @@ impl GongwenApp {
                             theme::Icon::PackageOpen,
                             "导入到知识库",
                         ))
-                        .on_hover_text("把勾选的稿件切块、向量化后加入知识库，供起草时检索参考")
+                        .on_hover_text("把勾选的稿件加入知识库；再到知识库页点「建立索引」，起草时就能检索参考")
                         .clicked()
                     {
                         self.knowledge_import_selected_manuscripts();

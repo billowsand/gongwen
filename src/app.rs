@@ -240,10 +240,14 @@ pub struct GongwenApp {
     pub(crate) knowledge_filter_kind: Option<TemplateKind>,
     pub(crate) knowledge_dirty: bool,
     pub(crate) knowledge_delete_confirm: Option<i64>,
-    /// 索引进度：(done, total, current_title)。
+    /// 导入 / 索引进度：(done, total, current_title)。
     pub(crate) knowledge_index_progress: Option<(usize, usize, String)>,
-    /// 上次索引的结果摘要。
+    /// 进度条前的动作名：「正在导入」或「正在建立索引」。
+    pub(crate) knowledge_progress_verb: &'static str,
+    /// 上次导入或索引的结果摘要。
     pub(crate) knowledge_index_result: Option<String>,
+    /// 已导入、尚未建立索引的文档数（不受文种筛选影响）。
+    pub(crate) knowledge_unindexed: usize,
     /// 检索测试框。
     pub(crate) knowledge_test_query: String,
     pub(crate) knowledge_test_results: Vec<rag::RetrievedChunk>,
@@ -485,7 +489,9 @@ impl GongwenApp {
             knowledge_dirty: true,
             knowledge_delete_confirm: None,
             knowledge_index_progress: None,
+            knowledge_progress_verb: "正在建立索引",
             knowledge_index_result: None,
+            knowledge_unindexed: 0,
             knowledge_test_query: String::new(),
             knowledge_test_results: Vec::new(),
             knowledge_mode: KnowledgeMode::default(),

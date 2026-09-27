@@ -4,6 +4,7 @@
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
 use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState};
+use crate::doc_import;
 use crate::draft_page::{AiProposal, DocKey, DraftSession};
 use crate::export;
 use crate::knowledge;
@@ -72,11 +73,16 @@ pub(crate) enum WorkerResult {
 
 /// 知识库后台任务的结果。
 pub(crate) enum KnowledgeJob {
-    /// 索引进度（每篇回报一次）。
+    /// 导入或索引的进度（每篇回报一次）。
     IndexProgress {
         done: usize,
         total: usize,
         current_title: String,
+    },
+    /// 外部文档导入整批完成（只入库、未索引）。`failed` 是 (文件名, 错误)。
+    ImportFinished {
+        ok: usize,
+        failed: Vec<(String, String)>,
     },
     /// 索引整批完成。`failed` 是 (标题, 错误)。
     IndexFinished {
@@ -391,6 +397,20 @@ impl GongwenApp {
             } => {
                 self.knowledge_index_progress = Some((done, total, current_title));
             }
+            KnowledgeJob::ImportFinished { ok, failed } => {
+                self.knowledge_busy = false;
+                self.knowledge_index_progress = None;
+                self.knowledge_dirty = true;
+                let next = if ok == 0 {
+                    String::new()
+                } else {
+                    "，尚未建立索引，点「建立索引」后才能被检索".to_string()
+                };
+                self.knowledge_index_result = Some(format!(
+                    "导入完成：{ok} 篇成功{next}{}。",
+                    failure_summary(&failed)
+                ));
+            }
             KnowledgeJob::IndexFinished { ok, failed } => {
                 self.knowledge_busy = false;
                 self.knowledge_index_progress = None;
@@ -398,16 +418,7 @@ impl GongwenApp {
                 self.knowledge_index_result = Some(if failed.is_empty() {
                     format!("索引完成：{ok} 篇全部成功。")
                 } else {
-                    let detail = failed
-                        .iter()
-                        .take(3)
-                        .map(|(title, err)| format!("《{title}》：{err}"))
-                        .collect::<Vec<_>>()
-                        .join("；");
-                    format!(
-                        "索引完成：{ok} 篇成功，{} 篇失败（{detail}）。",
-                        failed.len()
-                    )
+                    format!("索引完成：{ok} 篇成功{}。", failure_summary(&failed))
                 });
             }
             KnowledgeJob::SearchDone(Ok(outcome)) => {
@@ -454,6 +465,7 @@ impl GongwenApp {
         self.knowledge_chunk_count = store.count_chunks().unwrap_or(0);
         self.knowledge_indexed_manuscripts = store.indexed_manuscript_ids().unwrap_or_default();
         self.knowledge_embed_models = store.distinct_embed_models().unwrap_or_default();
+        self.knowledge_unindexed = store.unindexed_doc_ids().map_or(0, |ids| ids.len());
     }
 
     /// 库内是否存在与当前配置不同的 embedding 模型。换模型后维度多半不同，
@@ -478,12 +490,11 @@ impl GongwenApp {
         ))
     }
 
-    /// 打开外部 markdown 文件选择框，进入导入确认（选文种）。
-    pub(crate) fn knowledge_pick_markdown(&mut self) {
-        let paths = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown"])
-            .pick_files();
-        let Some(paths) = paths else { return };
+    /// 打开外部文档选择框（Markdown / Word / 电子版 PDF 等），进入导入确认（选文种）。
+    pub(crate) fn knowledge_pick_documents(&mut self) {
+        let Some(paths) = doc_import::pick_knowledge_files() else {
+            return;
+        };
         if paths.is_empty() {
             return;
         }
@@ -493,63 +504,107 @@ impl GongwenApp {
         });
     }
 
-    /// 确认导入外部 markdown：读出文件内容，归一化成导入项后建索引。
+    /// 确认导入外部文档：在后台线程逐个转成 markdown 存进知识库，不建索引。
+    ///
+    /// 导入与索引分开：导入只需本地转换，不依赖 embedding 服务，导完立刻在「库内
+    /// 文档」里看得到；索引另点「建立索引」。转换放进后台：单个 docx 是毫秒级，
+    /// 但一次选几十个文件、或几百页的 PDF 就会卡住界面。失败（扫描版 PDF、加密、
+    /// 格式坏了）逐个记下，汇总在结果摘要里，不让后一条把前一条覆盖掉。
     pub(crate) fn knowledge_confirm_import(&mut self) {
         let Some(draft) = self.knowledge_import.take() else {
             return;
         };
-        let mut items = Vec::new();
-        // 逐个收集读取失败，别让后一条把前一条的错误覆盖掉——选十个文件失败九个
-        // 时，只看得到最后一条错误是没法排查的。GBK 等非 UTF-8 编码由
-        // `text_file` 自动识别，走到这里的是真正读不动的文件。
-        let mut failures: Vec<String> = Vec::new();
-        for path in &draft.paths {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
-            match crate::text_file::read_to_string(path) {
-                Ok(content) => {
-                    let title = export::extract_title(&content, "");
-                    items.push(knowledge::KnowledgeImportItem {
-                        source: knowledge::KnowledgeSource::Markdown,
-                        source_manuscript_id: None,
-                        source_path: path.display().to_string(),
-                        kind: draft.kind,
-                        title,
-                        content_markdown: content,
-                    });
-                }
-                Err(error) => failures.push(format!("{name}（{error}）")),
+        if self.knowledge_busy {
+            self.knowledge_error = Some("知识库任务正在进行中，请稍候再导入。".into());
+            return;
+        }
+        let db_path = match storage::manuscript_db_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.knowledge_error = Some(format!("知识库路径不可用：{error:#}"));
+                return;
             }
-        }
-        if !failures.is_empty() {
-            // 放进 knowledge_error 而不是 status：status 紧接着会被索引进度覆盖。
-            self.knowledge_error = Some(format!(
-                "{} 个文件读取失败，未加入知识库：{}。若是 GBK 编码，请先另存为 UTF-8。",
-                failures.len(),
-                failures.join("；")
-            ));
-        } else {
-            self.knowledge_error = None;
-        }
-        self.start_knowledge_index(items, false);
+        };
+        self.knowledge_error = None;
+        let kind = draft.kind;
+        let paths = draft.paths;
+        let total = paths.len();
+        self.knowledge_busy = true;
+        self.knowledge_index_result = None;
+        self.knowledge_progress_verb = "正在导入";
+        self.knowledge_index_progress = Some((0, total, String::new()));
+        let tx = self.sender.clone();
+        thread::spawn(move || {
+            let mut ok = 0usize;
+            let mut failed: Vec<(String, String)> = Vec::new();
+            let mut store = match knowledge::KnowledgeStore::open(&db_path) {
+                Ok(store) => store,
+                Err(error) => {
+                    failed.push(("知识库".into(), format!("打开知识库失败：{error:#}")));
+                    let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::ImportFinished {
+                        ok,
+                        failed,
+                    }));
+                    return;
+                }
+            };
+            for (index, path) in paths.iter().enumerate() {
+                let name = doc_import::file_label(path);
+                let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::IndexProgress {
+                    done: index,
+                    total,
+                    current_title: name.clone(),
+                }));
+                let content = match doc_import::to_knowledge_markdown(path) {
+                    Ok(content) => content,
+                    // 摘要里已经有文件名，只留根因，别把"解析 X 失败"再说一遍。
+                    Err(error) => {
+                        failed.push((name, error.root_cause().to_string()));
+                        continue;
+                    }
+                };
+                // Word / PDF 转出来的大多没有 `# ` 大标题，用文件名兜底，
+                // 免得整库都叫「未命名公文」。
+                let stem = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let item = knowledge::KnowledgeImportItem {
+                    source: knowledge::KnowledgeSource::Markdown,
+                    source_manuscript_id: None,
+                    source_path: path.display().to_string(),
+                    kind,
+                    title: export::extract_title(&content, &stem),
+                    content_markdown: content,
+                };
+                match store.import_document(&item) {
+                    Ok(_) => ok += 1,
+                    Err(error) => failed.push((name, format!("写入知识库失败：{error:#}"))),
+                }
+            }
+            let _ = tx.send(WorkerResult::Knowledge(KnowledgeJob::ImportFinished {
+                ok,
+                failed,
+            }));
+        });
     }
 
-    /// 把稿件库当前勾选的稿件加入知识库。
+    /// 把稿件库当前勾选的稿件加入知识库（只入库，不建索引）。稿件正文已在库里，
+    /// 写一遍是毫秒级，直接在主线程做。
     pub(crate) fn knowledge_import_selected_manuscripts(&mut self) {
         let ids: Vec<i64> = self.manuscript_selected.iter().copied().collect();
         if ids.is_empty() {
             self.status = "请先在稿件管理里勾选要加入知识库的稿件。".into();
             return;
         }
-        let Some(store) = self.manuscript_store.as_mut() else {
+        let Some(manuscripts) = self.manuscript_store.as_mut() else {
             self.status = "稿件库不可用。".into();
             return;
         };
         let mut items = Vec::new();
+        let mut failed: Vec<(String, String)> = Vec::new();
         for id in ids {
-            match store.get(id) {
+            match manuscripts.get(id) {
                 Ok(Some(record)) => items.push(knowledge::KnowledgeImportItem {
                     source: knowledge::KnowledgeSource::Manuscript,
                     source_manuscript_id: Some(record.id),
@@ -559,84 +614,110 @@ impl GongwenApp {
                     content_markdown: record.content_markdown,
                 }),
                 Ok(None) => {}
-                Err(error) => self.status = format!("读取稿件 #{id} 失败：{error:#}"),
+                Err(error) => failed.push((format!("稿件 #{id}"), format!("{error:#}"))),
             }
         }
-        self.start_knowledge_index(items, false);
-    }
-
-    /// 重建全部索引：清空后把库内所有文档重新嵌入。这里实现为“对现有文档逐一
-    /// 重新切块+嵌入”，用于更换 embedding 模型后。
-    pub(crate) fn knowledge_rebuild_all(&mut self) {
         let Some(store) = self.knowledge_store.as_mut() else {
             self.status = "知识库不可用。".into();
             return;
         };
-        let docs = match store.list_docs(None) {
-            Ok(docs) => docs,
-            Err(error) => {
-                self.status = format!("读取知识库失败：{error:#}");
+        let mut ok = 0usize;
+        for item in &items {
+            match store.import_document(item) {
+                Ok(_) => ok += 1,
+                Err(error) => failed.push((item.title.clone(), format!("{error:#}"))),
+            }
+        }
+        self.knowledge_dirty = true;
+        let message = format!(
+            "已把 {ok} 篇稿件加入知识库{}{}。",
+            if ok > 0 {
+                "，到知识库页点「建立索引」后才能被检索"
+            } else {
+                ""
+            },
+            failure_summary(&failed)
+        );
+        self.status = message.clone();
+        self.knowledge_index_result = Some(message);
+    }
+
+    /// 为已导入、尚未索引的文档建立索引。
+    pub(crate) fn knowledge_build_index(&mut self) {
+        let ids = match self.knowledge_store.as_mut().map(|s| s.unindexed_doc_ids()) {
+            Some(Ok(ids)) => ids,
+            Some(Err(error)) => {
+                self.knowledge_error = Some(format!("读取知识库失败：{error:#}"));
+                return;
+            }
+            None => {
+                self.knowledge_error = Some("知识库不可用。".into());
                 return;
             }
         };
-        let mut items = Vec::new();
-        for doc in docs {
-            if let Ok(Some((title, content))) = store.get_doc_content(doc.id) {
-                let source = if doc.source == "manuscript" {
-                    knowledge::KnowledgeSource::Manuscript
-                } else {
-                    knowledge::KnowledgeSource::Markdown
-                };
-                items.push(knowledge::KnowledgeImportItem {
-                    source,
-                    source_manuscript_id: doc.source_manuscript_id,
-                    source_path: doc.source_path,
-                    kind: doc.kind,
-                    title,
-                    content_markdown: content,
-                });
-            }
-        }
-        self.start_knowledge_index(items, true);
-    }
-
-    /// 在后台线程跑索引流水线：切块 → 分词 → 批量嵌入 → 入库。
-    /// `rebuild` 为 true 时先清空（保留元数据重新嵌入）。
-    pub(crate) fn start_knowledge_index(
-        &mut self,
-        items: Vec<knowledge::KnowledgeImportItem>,
-        rebuild: bool,
-    ) {
-        if self.knowledge_busy {
-            self.status = "知识库任务正在进行中…".into();
+        if ids.is_empty() {
+            self.knowledge_index_result = Some("没有待索引的文档。".into());
             return;
         }
-        if items.is_empty() {
-            if !rebuild {
-                self.status = "没有可索引的内容。".into();
+        self.start_knowledge_index(ids);
+    }
+
+    /// 重建全部索引：对库内所有文档逐一重新切块+嵌入，用于更换 embedding 模型后。
+    pub(crate) fn knowledge_rebuild_all(&mut self) {
+        let ids = match self.knowledge_store.as_mut().map(|s| s.all_doc_ids()) {
+            Some(Ok(ids)) => ids,
+            Some(Err(error)) => {
+                self.knowledge_error = Some(format!("读取知识库失败：{error:#}"));
+                return;
             }
+            None => {
+                self.knowledge_error = Some("知识库不可用。".into());
+                return;
+            }
+        };
+        if ids.is_empty() {
+            self.knowledge_index_result = Some("知识库还是空的，先导入文档。".into());
+            return;
+        }
+        self.start_knowledge_index(ids);
+    }
+
+    /// 在后台线程跑索引流水线：切块 → 分词 → 批量嵌入 → 原地替换切块。
+    ///
+    /// 前置条件不满足时的提示放进 `knowledge_error`：它就挂在知识库页上，
+    /// 而 `status` 在这一页看不到，点了按钮没反应会让人以为程序坏了。
+    fn start_knowledge_index(&mut self, doc_ids: Vec<i64>) {
+        if self.knowledge_busy {
+            self.knowledge_error = Some("知识库任务正在进行中，请稍候。".into());
             return;
         }
         if self.config.rag.embedding.model.trim().is_empty() {
-            self.status = "请先在“设置”中配置知识库 embedding 模型。".into();
+            self.knowledge_error = Some(
+                "还没有配置 embedding 模型，无法建立索引：请先到「设置 → 知识库」填写。文档已在库内，配置好后再点「建立索引」即可。"
+                    .into(),
+            );
             return;
         }
-        let Some(db_path) = storage::manuscript_db_path().ok() else {
-            self.status = "知识库路径不可用。".into();
-            return;
+        let db_path = match storage::manuscript_db_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.knowledge_error = Some(format!("知识库路径不可用：{error:#}"));
+                return;
+            }
         };
+        self.knowledge_error = None;
         self.knowledge_busy = true;
         self.knowledge_index_result = None;
-        self.knowledge_index_progress = Some((0, items.len(), String::new()));
+        self.knowledge_progress_verb = "正在建立索引";
+        self.knowledge_index_progress = Some((0, doc_ids.len(), String::new()));
         let cfg = self.config.rag.clone();
         let tx = self.sender.clone();
-        let _ = rebuild; // replace_document 已按来源去重，重建等价于逐篇重嵌。
         thread::spawn(move || {
             let progress_tx = tx.clone();
             let (ok, failed) = knowledge::run_index_pipeline_with(
                 db_path,
                 cfg,
-                items,
+                doc_ids,
                 move |done, total, title| {
                     let _ =
                         progress_tx.send(WorkerResult::Knowledge(KnowledgeJob::IndexProgress {
@@ -1125,4 +1206,19 @@ impl GongwenApp {
             }
         }
     }
+}
+
+/// 结果摘要里的失败部分：「，N 篇失败（《甲》：原因；…）」，最多列三条；无失败为空串。
+fn failure_summary(failed: &[(String, String)]) -> String {
+    if failed.is_empty() {
+        return String::new();
+    }
+    let detail = failed
+        .iter()
+        .take(3)
+        .map(|(title, err)| format!("《{title}》：{err}"))
+        .collect::<Vec<_>>()
+        .join("；");
+    let more = if failed.len() > 3 { "；…" } else { "" };
+    format!("，{} 篇失败（{detail}{more}）", failed.len())
 }

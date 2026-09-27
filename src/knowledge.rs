@@ -61,7 +61,8 @@ pub fn content_hash(markdown: &str) -> String {
 /// 文档来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeSource {
-    /// 外部 markdown 文件。
+    /// 外部文件：Markdown 原文，或经 `doc_import` 转换的 Word / PDF 等文档。
+    /// 库里仍记作 `markdown`，与旧数据保持一致。
     Markdown,
     /// 从稿件库勾选。
     Manuscript,
@@ -107,7 +108,7 @@ pub struct KnowledgeChunkRow {
     pub text: String,
 }
 
-/// 待索引的一篇知识库文档（导入外部 md 或从稿件库勾选归一化而来）。
+/// 待导入的一篇知识库文档（外部文档转换后或从稿件库勾选归一化而来）。
 #[derive(Debug, Clone)]
 pub struct KnowledgeImportItem {
     pub source: KnowledgeSource,
@@ -118,16 +119,17 @@ pub struct KnowledgeImportItem {
     pub content_markdown: String,
 }
 
-/// 索引流水线：对每篇文档切块 → jieba 分词 → 批量嵌入 → 整篇替换入库。
-/// `rebuild` 为 true 时（换模型后）不重删文档，只逐篇重新嵌入（replace 已按来源去重）。
-/// 每篇独立处理，单篇失败不中断整批。返回 (成功数, [(标题, 错误)])。
+/// 索引流水线：对库内每篇指定文档切块 → jieba 分词 → 批量嵌入 → 原地替换切块。
+/// 导入与索引是两步：导入只存正文（见 [`KnowledgeStore::import_document`]），这里
+/// 按 id 回库取正文，文档 id 不变。每篇独立处理，单篇失败不中断整批。
+/// 返回 (成功数, [(标题, 错误)])。
 pub fn run_index_pipeline_with<F: Fn(usize, usize, String)>(
     db_path: PathBuf,
     config: RagConfig,
-    items: Vec<KnowledgeImportItem>,
+    doc_ids: Vec<i64>,
     progress: F,
 ) -> (usize, Vec<(String, String)>) {
-    let total = items.len();
+    let total = doc_ids.len();
     let mut ok = 0usize;
     let mut failed: Vec<(String, String)> = Vec::new();
     let params = rag::ChunkParams::from(&config);
@@ -137,47 +139,55 @@ pub fn run_index_pipeline_with<F: Fn(usize, usize, String)>(
         Err(error) => {
             return (
                 0,
-                items
-                    .into_iter()
-                    .map(|item| (item.title, format!("打开知识库失败：{error:#}")))
-                    .collect(),
+                vec![("知识库".to_string(), format!("打开知识库失败：{error:#}"))],
             );
         }
     };
 
-    for (index, item) in items.into_iter().enumerate() {
-        progress(index, total, item.title.clone());
-        match index_one(&mut store, &config, &params, &item) {
+    for (index, id) in doc_ids.into_iter().enumerate() {
+        let (title, content) = match store.get_doc_content(id) {
+            Ok(Some(doc)) => doc,
+            // 索引期间被删掉的文档直接跳过，不算失败。
+            Ok(None) => continue,
+            Err(error) => {
+                failed.push((format!("#{id}"), format!("{error:#}")));
+                continue;
+            }
+        };
+        progress(index, total, title.clone());
+        match index_one(&mut store, &config, &params, id, &title, &content) {
             Ok(()) => ok += 1,
-            Err(error) => failed.push((item.title.clone(), format!("{error:#}"))),
+            Err(error) => failed.push((title, format!("{error:#}"))),
         }
     }
     progress(total, total, String::new());
     (ok, failed)
 }
 
-/// 索引单篇：切块、分词、批量嵌入（失败重试一次），最后整篇替换。
+/// 索引单篇：切块、分词、批量嵌入（失败重试一次），最后原地替换该篇的切块。
 fn index_one(
     store: &mut KnowledgeStore,
     config: &RagConfig,
     params: &rag::ChunkParams,
-    item: &KnowledgeImportItem,
+    doc_id: i64,
+    title: &str,
+    content: &str,
 ) -> Result<()> {
-    let chunks = rag::chunk_markdown(&item.content_markdown, params);
+    let chunks = rag::chunk_markdown(content, params);
     if chunks.is_empty() {
         anyhow::bail!("正文为空，没有可索引的内容");
     }
-    let title = if item.title.trim().is_empty() {
-        "未命名公文".to_string()
+    let title = if title.trim().is_empty() {
+        "未命名公文"
     } else {
-        item.title.trim().to_string()
+        title.trim()
     };
     // 检索文本 = 标题 + 小节 + 正文。切块时 `#`/`##` 标题行只留在 section 里、
     // 不进正文，若照原样索引，按标题检索就一条都命中不了——而公文标题恰恰是
     // 信息密度最高的一句。向量与 FTS 都用这个复合文本。
     let index_texts: Vec<String> = chunks
         .iter()
-        .map(|chunk| index_text(&title, &chunk.section, &chunk.text))
+        .map(|chunk| index_text(title, &chunk.section, &chunk.text))
         .collect();
     let embeddings = embed_with_retry(config, &index_texts)?;
     let new_chunks: Vec<NewKnowledgeChunk> = chunks
@@ -199,18 +209,7 @@ fn index_one(
             }
         })
         .collect();
-    let meta = NewKnowledgeDoc {
-        source: item.source,
-        source_manuscript_id: item.source_manuscript_id,
-        source_path: item.source_path.clone(),
-        kind: item.kind,
-        title,
-        content_hash: content_hash(&item.content_markdown),
-        content_markdown: item.content_markdown.clone(),
-        embed_model: config.embedding.model.clone(),
-    };
-    store.replace_document(&meta, &new_chunks)?;
-    Ok(())
+    store.replace_chunks(doc_id, &new_chunks, &config.embedding.model)
 }
 
 /// 拼出用于检索的复合文本：标题 / 小节 / 正文。小节与标题重复时不重复拼。
@@ -402,6 +401,88 @@ impl KnowledgeStore {
         }
         tx.commit()?;
         Ok(doc_id)
+    }
+
+    /// 导入一篇文档：只存正文，不切块、不嵌入（`chunk_count` 为 0、`embed_model`
+    /// 为空即"待索引"）。判重同 [`Self::replace_document`]：同来源或同正文的旧文档
+    /// 连同其索引一并替换，因为正文可能改过，旧索引已经对不上。
+    pub fn import_document(&mut self, item: &KnowledgeImportItem) -> Result<i64> {
+        let title = if item.title.trim().is_empty() {
+            "未命名公文".to_string()
+        } else {
+            item.title.trim().to_string()
+        };
+        let meta = NewKnowledgeDoc {
+            source: item.source,
+            source_manuscript_id: item.source_manuscript_id,
+            source_path: item.source_path.clone(),
+            kind: item.kind,
+            title,
+            content_hash: content_hash(&item.content_markdown),
+            content_markdown: item.content_markdown.clone(),
+            embed_model: String::new(),
+        };
+        self.replace_document(&meta, &[])
+    }
+
+    /// 原地替换一篇文档的全部切块，并记下切块数与嵌入模型。文档 id 与创建时间不变。
+    pub fn replace_chunks(
+        &mut self,
+        doc_id: i64,
+        chunks: &[NewKnowledgeChunk],
+        embed_model: &str,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM knowledge_chunks WHERE doc_id = ?1",
+            params![doc_id],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO knowledge_chunks (doc_id, ord, section, text, tokens, embedding, dims)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for chunk in chunks {
+                stmt.execute(params![
+                    doc_id,
+                    chunk.ord as i64,
+                    chunk.section,
+                    chunk.text,
+                    chunk.tokens,
+                    chunk.embedding,
+                    chunk.dims as i64
+                ])?;
+            }
+        }
+        let updated = tx.execute(
+            "UPDATE knowledge_docs SET chunk_count = ?1, embed_model = ?2, updated_at = ?3 WHERE id = ?4",
+            params![chunks.len() as i64, embed_model, Self::now(), doc_id],
+        )?;
+        if updated == 0 {
+            anyhow::bail!("文档已不在知识库中");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 尚未建立索引的文档 id（导入后还没嵌入过的）。
+    pub fn unindexed_doc_ids(&mut self) -> Result<Vec<i64>> {
+        self.doc_ids("SELECT id FROM knowledge_docs WHERE embed_model = '' ORDER BY id")
+    }
+
+    /// 全部文档 id（重建索引用）。
+    pub fn all_doc_ids(&mut self) -> Result<Vec<i64>> {
+        self.doc_ids("SELECT id FROM knowledge_docs ORDER BY id")
+    }
+
+    fn doc_ids(&mut self, sql: &str) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// 删除一篇文档（chunks 级联清除，FTS 由触发器同步）。
@@ -778,6 +859,59 @@ mod tests {
         let ids = s.indexed_manuscript_ids().unwrap();
         assert!(ids.contains(&42));
         assert!(!ids.contains(&43));
+    }
+
+    #[test]
+    fn import_then_index_keeps_doc_id() {
+        let mut s = store();
+        let item = KnowledgeImportItem {
+            source: KnowledgeSource::Markdown,
+            source_manuscript_id: None,
+            source_path: "/tmp/甲函.docx".into(),
+            kind: TemplateKind::OfficialLetter,
+            title: "甲函".into(),
+            content_markdown: "## 一、背景\n\n正文。".into(),
+        };
+        let id = s.import_document(&item).unwrap();
+        // 导入后在列表里可见，但处于待索引状态。
+        let docs = s.list_docs(None).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].chunk_count, 0);
+        assert!(docs[0].embed_model.is_empty());
+        assert_eq!(s.unindexed_doc_ids().unwrap(), vec![id]);
+
+        s.replace_chunks(
+            id,
+            &[chunk(0, "正文。", Some(vec![1.0, 0.0]))],
+            "test-embed",
+        )
+        .unwrap();
+        let docs = s.list_docs(None).unwrap();
+        assert_eq!(docs[0].id, id);
+        assert_eq!(docs[0].chunk_count, 1);
+        assert_eq!(docs[0].embed_model, "test-embed");
+        assert!(s.unindexed_doc_ids().unwrap().is_empty());
+        assert_eq!(s.count_chunks().unwrap(), 1);
+
+        // 再索引一次是替换而不是追加。
+        s.replace_chunks(
+            id,
+            &[chunk(0, "一", None), chunk(1, "二", None)],
+            "test-embed",
+        )
+        .unwrap();
+        assert_eq!(s.count_chunks().unwrap(), 2);
+
+        // 重新导入同一文件会把旧索引一并清掉，回到待索引。
+        let id2 = s.import_document(&item).unwrap();
+        assert_eq!(s.count_chunks().unwrap(), 0);
+        assert_eq!(s.unindexed_doc_ids().unwrap(), vec![id2]);
+    }
+
+    #[test]
+    fn replace_chunks_on_missing_doc_fails() {
+        let mut s = store();
+        assert!(s.replace_chunks(999, &[], "test-embed").is_err());
     }
 
     /// 单条命中时不该被归一化成 0 分（界面会显示成“关键词 0.000”）。

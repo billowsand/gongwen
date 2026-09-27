@@ -1,5 +1,5 @@
-//! 知识库页：文档的分组列表、导入（外部 markdown / 库内稿件）、删除、重建索引、
-//! 检索测试。从 app.rs 拆出以控制体积；通过 `GongwenApp` 上的 `pub(crate)` 字段
+//! 知识库页：文档的分组列表、导入（外部文档 / 库内稿件）、建立与重建索引、删除、
+//! 检索测试。导入只存正文，索引另点按钮建立，两步分开。从 app.rs 拆出以控制体积；通过 `GongwenApp` 上的 `pub(crate)` 字段
 //! 与方法读写状态。
 
 use crate::app::{GongwenApp, KnowledgeMode};
@@ -71,16 +71,35 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
             if ui
                 .add_enabled(
                     !busy,
-                    theme::icon_text_button(theme::Icon::FileUp, "导入 Markdown"),
+                    theme::icon_text_button(theme::Icon::FileUp, "导入文档"),
                 )
-                .on_hover_text("选择本机 .md 公文加入知识库")
+                .on_hover_text(
+                    "选择本机公文加入知识库：Markdown、Word、WPS 另存的 docx、PDF（电子版）等；扫描版 PDF 无法导入",
+                )
                 .clicked()
             {
-                app.knowledge_pick_markdown();
+                app.knowledge_pick_documents();
+            }
+            // 右到左布局，先加的靠右：「建立索引」紧挨「导入文档」，顺着操作次序。
+            let pending = app.knowledge_unindexed;
+            let label = if pending > 0 {
+                format!("建立索引（{pending}）")
+            } else {
+                "建立索引".to_string()
+            };
+            if ui
+                .add_enabled(
+                    !busy && pending > 0,
+                    theme::icon_text_button(theme::Icon::Sparkles, &label),
+                )
+                .on_hover_text("为已导入、还没建立索引的文档切块、嵌入；建好索引才能被检索与问答用到")
+                .clicked()
+            {
+                app.knowledge_build_index();
             }
             if ui
                 .add_enabled(
-                    !busy,
+                    !busy && !app.knowledge_docs.is_empty(),
                     theme::icon_text_button(theme::Icon::Refresh, "重建索引"),
                 )
                 .on_hover_text("对库内全部文档重新切块、嵌入（更换 embedding 模型后用）")
@@ -120,9 +139,12 @@ fn index_status(app: &mut GongwenApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             theme::spinner(ui, 14.0, theme::accent());
             let text = if title.is_empty() {
-                format!("正在建立索引… {done}/{total}")
+                format!("{}… {done}/{total}", app.knowledge_progress_verb)
             } else {
-                format!("正在建立索引… {done}/{total}　《{title}》")
+                format!(
+                    "{}… {done}/{total}　《{title}》",
+                    app.knowledge_progress_verb
+                )
             };
             ui.label(text);
         });
@@ -146,7 +168,7 @@ fn index_status(app: &mut GongwenApp, ui: &mut egui::Ui) {
 fn doc_list(app: &mut GongwenApp, ui: &mut egui::Ui) {
     if app.knowledge_docs.is_empty() {
         theme::card().show(ui, |ui| {
-            ui.weak("知识库还是空的。点右上角「导入 Markdown」选本机公文，或到「稿件管理」勾选稿件后用工具栏的「导入到知识库」。");
+            ui.weak("知识库还是空的。点右上角「导入文档」选本机公文（Word、PDF 电子版、Markdown 等），或到「稿件管理」勾选稿件后用工具栏的「导入到知识库」；导入后再点「建立索引」，就能检索与问答了。");
         });
         return;
     }
@@ -171,7 +193,11 @@ fn doc_list(app: &mut GongwenApp, ui: &mut egui::Ui) {
                             {
                                 delete_pending = Some(doc.id);
                             }
-                            ui.weak(format!("{} 块", doc.chunk_count));
+                            if doc.embed_model.is_empty() {
+                                ui.colored_label(theme::warn(), "未索引");
+                            } else {
+                                ui.weak(format!("{} 块", doc.chunk_count));
+                            }
                         });
                     });
                     ui.horizontal(|ui| {
@@ -180,12 +206,20 @@ fn doc_list(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         } else {
                             "外部文件"
                         };
-                        ui.weak(format!("来源：{source_label}"));
+                        // 悬停看具体出处：外部文件给完整路径，稿件给稿件编号。
+                        let origin = match doc.source_manuscript_id {
+                            Some(id) => format!("稿件 #{id}"),
+                            None => doc.source_path.clone(),
+                        };
+                        let source = ui.weak(format!("来源：{source_label}"));
+                        if !origin.is_empty() {
+                            source.on_hover_text(origin);
+                        }
                         ui.separator();
                         ui.weak(format!(
                             "嵌入模型：{}",
                             if doc.embed_model.is_empty() {
-                                "未嵌入"
+                                "—"
                             } else {
                                 &doc.embed_model
                             }
@@ -309,7 +343,7 @@ fn search_results(app: &mut GongwenApp, ui: &mut egui::Ui) {
     }
     if app.knowledge_test_results.is_empty() {
         if !app.knowledge_test_query.trim().is_empty() {
-            ui.weak("未检索到相关片段。可先「导入 Markdown」或在稿件管理「导入到知识库」。");
+            ui.weak("未检索到相关片段。可先「导入文档」或在稿件管理「导入到知识库」，再点「建立索引」。");
         }
         return;
     }
@@ -515,7 +549,7 @@ fn import_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
         return;
     }
     let mut open = true;
-    egui::Window::new("导入 Markdown 到知识库")
+    egui::Window::new("导入文档到知识库")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])

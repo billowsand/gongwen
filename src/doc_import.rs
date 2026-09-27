@@ -8,10 +8,15 @@
 //! 一堆按坐标排的文字片段：正文会被拼成一整段，表格会散架；中文 PDF 还得看
 //! 字体有没有内嵌 ToUnicode 映射，没有就是满屏乱码；扫描件更是一个字都取不到。
 //! 与其让人拿到一份需要重排的稿子，不如在选文件这一步就说清楚不支持。
+//!
+//! 知识库导入（[`to_knowledge_markdown`]）是例外：检索只要文字对、不要版式，
+//! 所以收**电子版** PDF；扫描件没有文字层，anydoc 会逐页查出来，这里整份拒收。
 
 use crate::models::ResearchMetadata;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use regex::Regex;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 /// 走 `anydoc` 转换的二进制文档格式，全部小写。
 const CONVERTED: &[&str] = &[
@@ -45,15 +50,31 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
 
 /// 打开"从文档导入"的文件选择框，返回用户选中的文件。
 pub(crate) fn pick_file() -> Option<std::path::PathBuf> {
-    let all: Vec<&str> = FILTER_GROUPS
+    file_dialog(false).pick_file()
+}
+
+/// 打开知识库导入的文件选择框（可多选），比起草页多一组电子版 PDF。
+pub(crate) fn pick_knowledge_files() -> Option<Vec<PathBuf>> {
+    file_dialog(true).pick_files()
+}
+
+/// 按 [`FILTER_GROUPS`] 拼文件对话框；`with_pdf` 时追加 PDF 一组。
+fn file_dialog(with_pdf: bool) -> rfd::FileDialog {
+    let mut all: Vec<&str> = FILTER_GROUPS
         .iter()
         .flat_map(|(_, extensions)| extensions.iter().copied())
         .collect();
+    if with_pdf {
+        all.push("pdf");
+    }
     let mut dialog = rfd::FileDialog::new().add_filter("所有支持的格式", &all);
     for (label, extensions) in FILTER_GROUPS {
         dialog = dialog.add_filter(*label, extensions);
     }
-    dialog.pick_file()
+    if with_pdf {
+        dialog = dialog.add_filter("PDF（电子版）", &["pdf"]);
+    }
+    dialog
 }
 
 /// 打开“从文件夹新建研究报告”的目录选择框。
@@ -173,22 +194,46 @@ pub(crate) fn supported_summary() -> String {
 
 /// 把一个文档转成 markdown。返回的内容已经归一化，可直接插进编辑器。
 pub(crate) fn to_markdown(path: &Path) -> Result<String> {
-    let extension = path
-        .extension()
-        .map(|ext| ext.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    if extension == "pdf" {
+    if extension_of(path) == "pdf" {
         bail!(
             "PDF 不支持导入：PDF 只存版面不存结构，抽出来的正文会丢段落、表格会散架，\
              扫描件更是取不到文字。请改用原始的 Word 文件，或先另存为 docx。"
         );
     }
+    convert(path)
+}
+
+/// 知识库导入用的转换：比 [`to_markdown`] 多收电子版 PDF，并给没用标题样式的
+/// 公文补出章节标题（见 [`promote_headings`]）。Markdown 原文作者自己排过结构，不动。
+pub(crate) fn to_knowledge_markdown(path: &Path) -> Result<String> {
+    let extension = extension_of(path);
+    if extension == "pdf" {
+        return Ok(promote_headings(&convert_pdf(path)?));
+    }
+    let markdown = convert(path)?;
+    if matches!(extension.as_str(), "md" | "markdown") {
+        Ok(markdown)
+    } else {
+        Ok(promote_headings(&markdown))
+    }
+}
+
+/// 小写扩展名，没有扩展名时为空串。
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// 非 PDF 格式的转换：纯文本直读，其余走 `anydoc`。
+fn convert(path: &Path) -> Result<String> {
+    let extension = extension_of(path);
     let markdown = if PLAIN.contains(&extension.as_str()) {
         crate::text_file::read_to_string(path)
             .with_context(|| format!("读取 {} 失败", file_label(path)))?
     } else if CONVERTED.contains(&extension.as_str()) {
         anydoc::to_markdown(path)
-            .map_err(|error| anyhow::anyhow!("{error}"))
+            .map_err(describe_convert_error)
             .with_context(|| format!("解析 {} 失败", file_label(path)))?
     } else {
         bail!(
@@ -196,7 +241,63 @@ pub(crate) fn to_markdown(path: &Path) -> Result<String> {
             supported_summary()
         );
     };
-    let markdown = normalize(&markdown);
+    finish(path, &markdown)
+}
+
+/// 电子版 PDF 的转换。扫描页（哪怕只有一页）整份拒收：缺了那几页的内容
+/// 进了知识库，检索时会被当成"原文里没有"，比不收更误导。
+fn convert_pdf(path: &Path) -> Result<String> {
+    let markdown = anydoc::to_markdown(path)
+        .map_err(|error| match error {
+            anydoc::ConvertError::NeedsOcr { pages, page_count } => {
+                anyhow!(needs_ocr_message(&pages, page_count))
+            }
+            other => describe_convert_error(other),
+        })
+        .with_context(|| format!("解析 {} 失败", file_label(path)))?;
+    if looks_garbled(&markdown) {
+        bail!(
+            "{} 提取出的文字是乱码：PDF 里的字体没有内嵌文字编码映射，取不到真实文字。\
+             请改用原始的 Word 文件。",
+            file_label(path)
+        );
+    }
+    finish(path, &markdown)
+}
+
+/// 扫描版 PDF 的提示语：全是扫描页与只有个别扫描页分开说。
+fn needs_ocr_message(pages: &[u32], page_count: u32) -> String {
+    if pages.len() as u32 >= page_count {
+        return "这是扫描版 PDF，页面只是图片、没有文字层，无法导入。\
+                请改用原始的 Word 文件，或先用 OCR 软件识别成文字版。"
+            .to_string();
+    }
+    let mut listed = pages
+        .iter()
+        .take(5)
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join("、");
+    if pages.len() > 5 {
+        listed.push_str(&format!(" 等 {} 页", pages.len()));
+    }
+    format!(
+        "第 {listed} 页是扫描图片、没有文字层，整份 PDF 未导入（共 {page_count} 页）。\
+         请改用原始的 Word 文件，或先用 OCR 软件识别成文字版。"
+    )
+}
+
+/// 把 anydoc 的常见错误翻成中文；其余原样透出，便于排查。
+fn describe_convert_error(error: anydoc::ConvertError) -> anyhow::Error {
+    match error {
+        anydoc::ConvertError::Encrypted => anyhow!("文件设了密码，请先去掉密码再导入"),
+        other => anyhow!("{other}"),
+    }
+}
+
+/// 转换结果的公共收尾：归一化，并拒收提取不出文字的文件。
+fn finish(path: &Path, markdown: &str) -> Result<String> {
+    let markdown = normalize(markdown);
     if markdown.is_empty() {
         bail!(
             "{} 里没有提取到文字：文件可能是空的，或者内容全是图片。",
@@ -204,6 +305,86 @@ pub(crate) fn to_markdown(path: &Path) -> Result<String> {
         );
     }
     Ok(markdown)
+}
+
+/// 判断 PDF 抽出的文字是不是乱码。
+///
+/// 字体没内嵌 ToUnicode 映射时，anydoc 只记一条日志、照样返回文字，乱码会悄悄进
+/// 索引。乱码的样子有两种：替换符、私用区、控制字符这类"根本不是字"的；以及把
+/// 字形编号当 Latin-1 解出来的一串带重音的西文字母。前者超过 5%、后者超过 30%
+/// 就判为乱码——正常的中英文不会碰到，德法文重音字母也远到不了 30%。
+fn looks_garbled(text: &str) -> bool {
+    let mut total = 0usize;
+    let mut invalid = 0usize;
+    let mut latin_extended = 0usize;
+    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+        total += 1;
+        if ch == '\u{fffd}' || ('\u{e000}'..='\u{f8ff}').contains(&ch) || ch.is_control() {
+            invalid += 1;
+        } else if ('\u{80}'..='\u{24f}').contains(&ch) {
+            latin_extended += 1;
+        }
+    }
+    total > 0 && (invalid * 20 > total || latin_extended * 10 > total * 3)
+}
+
+/// 给没用 Word 标题样式的公文补出章节标题。
+///
+/// 按国标排的公文，「一、总体要求」这类一级标题多半是直接设黑体三号，没套标题
+/// 样式；anydoc 只认标题样式与大纲级别，转出来就是普通段落。知识库切块按 `##`
+/// 分节，认不出标题就只能按长度硬切，检索结果里也没有章节路径。这里把"短、不以
+/// 句读结尾、以 `一、` 或 `第X章` / `第X部分` 开头"的独立段落升成 `##`，编号原样
+/// 保留（预览渲染时 `clean_heading_number` 会先清掉旧编号，不会重复）。
+///
+/// 已经有 `##` 的文档说明作者用了标题样式，不再猜。`（一）` 这类二级标题不升：
+/// 切块器会把 `###` 并回上一节，升了也不改变分块。
+fn promote_headings(markdown: &str) -> String {
+    if markdown
+        .lines()
+        .any(|line| line.trim_start().starts_with("## "))
+    {
+        return markdown.to_string();
+    }
+    let mut in_code = false;
+    markdown
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("```") {
+                in_code = !in_code;
+            }
+            match heading_candidate(line) {
+                Some(title) if !in_code => format!("## {title}"),
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 判断一行是否像公文一级标题，是则返回去掉整行加粗后的标题文字。
+fn heading_candidate(line: &str) -> Option<String> {
+    let text = line.trim();
+    // 整行加粗是 Word 里手工设粗体的标题。
+    let text = text
+        .strip_prefix("**")
+        .and_then(|inner| inner.strip_suffix("**"))
+        .unwrap_or(text)
+        .trim();
+    // 标题一般不过二三十字；更长的是"一、……。"这种段首带编号的正文段。
+    if text.is_empty() || text.chars().count() > 40 {
+        return None;
+    }
+    if text.ends_with(['。', '；', ';', '，', ',', '：', ':', '！', '？', '!', '?']) {
+        return None;
+    }
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"^(?:[一二三四五六七八九十百]+、|第[一二三四五六七八九十百零\d]+(?:章|部分))\s*\S",
+        )
+        .expect("valid heading pattern")
+    });
+    re.is_match(text).then(|| text.to_string())
 }
 
 /// 状态栏与错误信息里用的文件名。
@@ -402,6 +583,144 @@ mod tests {
         let error = to_markdown(&PathBuf::from("样例.wps")).unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("不支持的文件格式 .wps"), "{message}");
+    }
+
+    #[test]
+    fn knowledge_promotes_bare_level_one_headings() {
+        let raw = "关于加强某项工作的通知\n\n一、总体要求\n\n正文一段。\n\n**二、工作安排**\n\n第一章 总则\n\n正文二段。";
+        assert_eq!(
+            promote_headings(raw),
+            "关于加强某项工作的通知\n\n## 一、总体要求\n\n正文一段。\n\n## 二、工作安排\n\n## 第一章 总则\n\n正文二段。"
+        );
+    }
+
+    #[test]
+    fn knowledge_leaves_numbered_paragraphs_alone() {
+        // 段首带编号的正文、以句读结尾的短句、二级标题、条文与代码块都不升。
+        let long = format!("一、{}", "提高认识，".repeat(10));
+        for line in [
+            long.as_str(),
+            "一、请各单位于5月底前报送。",
+            "（一）组织领导",
+            "第一条 为规范管理，制定本办法",
+            "一、",
+        ] {
+            assert_eq!(heading_candidate(line), None, "{line}");
+        }
+        let fenced = "```\n一、示例\n```";
+        assert_eq!(promote_headings(fenced), fenced);
+    }
+
+    #[test]
+    fn knowledge_keeps_existing_heading_styles() {
+        let raw = "## 一、总体要求\n\n二、工作安排";
+        assert_eq!(promote_headings(raw), raw);
+    }
+
+    #[test]
+    fn knowledge_markdown_is_not_rewritten() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("底稿.md");
+        std::fs::write(&path, "一、总体要求\n\n正文。").expect("写入");
+        assert_eq!(
+            to_knowledge_markdown(&path).unwrap(),
+            "一、总体要求\n\n正文。"
+        );
+        let text = dir.path().join("底稿.txt");
+        std::fs::write(&text, "一、总体要求\n\n正文。").expect("写入");
+        assert_eq!(
+            to_knowledge_markdown(&text).unwrap(),
+            "## 一、总体要求\n\n正文。"
+        );
+    }
+
+    #[test]
+    fn garbled_text_is_detected() {
+        assert!(!looks_garbled("关于加强某项工作的通知。Hello, world!"));
+        assert!(!looks_garbled("Die Größe der Übung für Äpfel"));
+        assert!(looks_garbled("ÄÖÜ×Þßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþ"));
+        assert!(looks_garbled("正文\u{fffd}\u{fffd}\u{e001}\u{e002}"));
+    }
+
+    #[test]
+    fn needs_ocr_message_distinguishes_whole_and_partial_scans() {
+        assert!(needs_ocr_message(&[1, 2], 2).contains("扫描版 PDF"));
+        let partial = needs_ocr_message(&[2, 3, 4, 5, 6, 7], 10);
+        assert!(partial.contains("第 2、3、4、5、6 等 6 页"), "{partial}");
+        assert!(partial.contains("共 10 页"), "{partial}");
+    }
+
+    /// 手搓一份单页 PDF：`resources` 是页面资源字典，`content` 是内容流。
+    fn minimal_pdf(resources: &str, content: &str, extra_objects: &[String]) -> Vec<u8> {
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources {resources} /Contents 4 0 R >>"
+            ),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+        ];
+        objects.extend(extra_objects.iter().cloned());
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn knowledge_accepts_text_pdf() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("电子版.pdf");
+        let pdf = minimal_pdf(
+            "<< /Font << /F1 5 0 R >> >>",
+            "BT /F1 12 Tf 72 760 Td (Annual work report of the office) Tj ET",
+            &["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string()],
+        );
+        std::fs::write(&path, pdf).expect("写入");
+        let markdown = to_knowledge_markdown(&path).unwrap();
+        assert!(markdown.contains("Annual work report"), "{markdown}");
+        // 起草页仍然不收 PDF。
+        assert!(to_markdown(&path).is_err());
+    }
+
+    #[test]
+    fn knowledge_rejects_scanned_pdf() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("扫描件.pdf");
+        // 整页只画一张 8×8 灰度图、没有任何文字，就是扫描件的样子。
+        let pixels = "80".repeat(64);
+        let pdf = minimal_pdf(
+            "<< /XObject << /Im1 5 0 R >> >>",
+            "q 595 0 0 842 0 0 cm /Im1 Do Q",
+            &[format!(
+                "<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray \
+                 /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{pixels}>\nendstream",
+                pixels.len() + 1
+            )],
+        );
+        std::fs::write(&path, pdf).expect("写入");
+        let message = format!("{:#}", to_knowledge_markdown(&path).unwrap_err());
+        assert!(message.contains("扫描版 PDF"), "{message}");
     }
 
     #[test]
