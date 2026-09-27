@@ -231,6 +231,14 @@ mod tests {
         assert!(errs.is_empty(), "{errs:?}");
     }
 
+    /// 图片与锚点之间隔一个空格（起草页「锚点」按钮就是这么插的）照样生效。
+    #[test]
+    fn spaced_image_label_passes() {
+        let md = "图{@abc}所示。\n\n![截屏](images/a.png) {#abc}\n\n后文\n";
+        let errs = errors(md, Support::Full);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
     #[test]
     fn dangling_ref_is_error() {
         let errs = errors("见第{@chap:missing}章。", Support::Full);

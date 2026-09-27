@@ -51,10 +51,16 @@ fn footnote_matcher() -> &'static Regex {
     })
 }
 
-/// 图片标签属性：紧跟 `![alt](url)` 之后的 `{#id}`（锚定匹配，用于向前窥探）。
+/// 图片标签属性：`![alt](url)` 之后的 `{#id}`（锚定匹配，用于向前窥探）。
+///
+/// 中间容许行内空白：标题、表题的锚点本来就容许 `题 {#id}`，公文助手起草页
+/// 插入锚点时也带前导空格，图片若只认紧贴写法，`![图](a.png) {#fig}` 就会
+/// 静默丢掉锚点，引用处报"未定义"。
 fn label_attr_matcher() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\{#([A-Za-z][\w:.-]*)\}").expect("invalid label attr regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"^[ \t]*\{#([A-Za-z][\w:.-]*)\}").expect("invalid label attr regex")
+    })
 }
 
 /// 把一段已正规化引号的纯文本拆成 Inline 列表。
@@ -381,6 +387,20 @@ mod tests {
                 },
                 Inline::Text("后续".into()),
             ]
+        );
+    }
+
+    /// 起草页插入的锚点带前导空格，`) {#id}` 也要认成图片锚点。
+    #[test]
+    fn parses_image_label_attr_after_space() {
+        let inlines = parse("![架构](figs/arch.png) {#fig:arch}");
+        assert_eq!(
+            inlines,
+            vec![Inline::Image {
+                alt: "架构".into(),
+                url: "figs/arch.png".into(),
+                label: Some("fig:arch".into()),
+            }]
         );
     }
 
