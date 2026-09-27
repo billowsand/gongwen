@@ -67,3 +67,6 @@ reasonix.toml
 # pi 扩展与包安装目录：.pi/settings.json 入库共享，依赖本身不入库（启动时自动安装）
 .pi/npm/
 .pi/git/
+# 第三方输入法码表（小鹤音形等）：权利归方案作者、只限私人使用，只能由使用者导入本机，不入库
+/assets/fuma/*.txt
+!/assets/fuma/xiaohe.txt
