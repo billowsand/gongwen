@@ -108,11 +108,48 @@ pub(crate) fn security_level_color(level: SecurityLevel) -> egui::Color32 {
     }
 }
 
-pub(crate) fn security_level_list_label(level: SecurityLevel) -> &'static str {
-    match level {
-        SecurityLevel::Unmarked => "—",
-        _ => level.marking(),
+/// 表格表头：文字在单元格内水平居中，与居中显示的数据列对齐。
+pub(crate) fn centered_header(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.centered_and_justified(|ui| ui.strong(text)).inner
+}
+
+/// 表格数据单元格：可点击的文字铺满单元格宽度、居中显示，过长时截断。
+///
+/// 用 `add_sized` 撑满整格，悬停底色覆盖整个单元格，各列宽窄不一时
+/// 文字也都落在列中线上，和 [`centered_header`] 的表头对齐。
+pub(crate) fn centered_cell_text(
+    ui: &mut egui::Ui,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    ui.add_sized(
+        [ui.available_width(), 20.0],
+        egui::Button::selectable(false, text).truncate(),
+    )
+}
+
+/// 表格空值占位：在单元格正中画一段短而淡的细线，表示“无”。
+///
+/// 不直接写“—”字符：中文字体里的破折号又粗又宽、颜色和粗细随字体走，
+/// 放进左对齐单元格还会贴着左边，跟有值的行对不齐。这里吃满单元格宽度并
+/// 带点击感知，整行单击/双击照常生效；线宽和颜色固定，各列观感一致。
+pub(crate) fn empty_cell_placeholder(ui: &mut egui::Ui) -> egui::Response {
+    let height = ui.spacing().interact_size.y.min(20.0);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let half = 5.0;
+        let center = rect.center();
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - half, center.y),
+                egui::pos2(center.x + half, center.y),
+            ],
+            egui::Stroke::new(1.5, theme::text_muted().gamma_multiply(0.7)),
+        );
     }
+    response
 }
 
 /// 时间显示：中文成文日期原样返回；RFC3339/ISO 日期只取前 10 位（YYYY-MM-DD）。

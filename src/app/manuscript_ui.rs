@@ -5,8 +5,9 @@
 
 use crate::app::{
     FORM_CONTROL_HEIGHT, GongwenApp, VersionDiffState, VersionScope, WorkerResult, accent,
-    joined_metadata, metadata_grid_row, present_or_dash, security_level_color,
-    security_level_list_label, short_date, status_color, summarize, truncate, warn,
+    centered_cell_text, centered_header, empty_cell_placeholder, joined_metadata,
+    metadata_grid_row, present_or_dash, security_level_color, short_date, status_color, summarize,
+    truncate, warn,
 };
 use crate::doc_import;
 use crate::draft_page::DraftSession;
@@ -1376,34 +1377,34 @@ impl GongwenApp {
                     }
                 });
                 header.col(|ui| {
-                    ui.strong("状态");
+                    centered_header(ui, "状态");
                 });
                 if !compact {
                     header.col(|ui| {
-                        ui.strong("文档类型");
+                        centered_header(ui, "文档类型");
                     });
                     header.col(|ui| {
-                        ui.strong("密级");
+                        centered_header(ui, "密级");
                     });
                 }
                 header.col(|ui| {
-                    ui.strong("标题");
+                    centered_header(ui, "标题");
                 });
                 header.col(|ui| {
-                    ui.strong("文号");
+                    centered_header(ui, "文号");
                 });
                 header.col(|ui| {
-                    ui.strong("成文日期");
+                    centered_header(ui, "成文日期");
                 });
                 if !compact {
                     header.col(|ui| {
-                        ui.strong("更新");
+                        centered_header(ui, "更新");
                     });
                     header.col(|ui| {
-                        ui.strong("归档");
+                        centered_header(ui, "归档");
                     });
                     header.col(|ui| {
-                        ui.strong("知识库");
+                        centered_header(ui, "知识库");
                     });
                 }
                 header.col(|ui| {
@@ -1450,8 +1451,8 @@ impl GongwenApp {
                     });
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
-                        let response = ui.selectable_label(
-                            false,
+                        let response = centered_cell_text(
+                            ui,
                             egui::RichText::new(data.status.label())
                                 .color(status_color(data.status)),
                         );
@@ -1462,7 +1463,7 @@ impl GongwenApp {
                     if !compact {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
-                            let response = ui.selectable_label(false, data.kind.label());
+                            let response = centered_cell_text(ui, data.kind.label());
                             row_clicked.set(row_clicked.get() | response.clicked());
                             row_double_clicked
                                 .set(row_double_clicked.get() | response.double_clicked());
@@ -1470,11 +1471,15 @@ impl GongwenApp {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
                             let security_level = SecurityLevel::from_marking(&data.security_level);
-                            let response = ui.selectable_label(
-                                false,
-                                egui::RichText::new(security_level_list_label(security_level))
-                                    .color(security_level_color(security_level)),
-                            );
+                            let response = if security_level == SecurityLevel::Unmarked {
+                                empty_cell_placeholder(ui).on_hover_text("未标密")
+                            } else {
+                                centered_cell_text(
+                                    ui,
+                                    egui::RichText::new(security_level.marking())
+                                        .color(security_level_color(security_level)),
+                                )
+                            };
                             row_clicked.set(row_clicked.get() | response.clicked());
                             row_double_clicked
                                 .set(row_double_clicked.get() | response.double_clicked());
@@ -1482,27 +1487,29 @@ impl GongwenApp {
                     }
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
-                        let response = ui.add_sized(
-                            [ui.available_width(), 20.0],
-                            egui::Button::selectable(false, &data.title).truncate(),
-                        );
+                        let response = centered_cell_text(ui, &data.title);
                         row_clicked.set(row_clicked.get() | response.clicked());
                         row_double_clicked
                             .set(row_double_clicked.get() | response.double_clicked());
                     });
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
-                        let response = ui.add_sized(
-                            [ui.available_width(), 20.0],
-                            egui::Button::selectable(false, &data.doc_number).truncate(),
-                        );
+                        let response = if data.doc_number.trim().is_empty() {
+                            empty_cell_placeholder(ui).on_hover_text("未编文号")
+                        } else {
+                            centered_cell_text(ui, &data.doc_number)
+                        };
                         row_clicked.set(row_clicked.get() | response.clicked());
                         row_double_clicked
                             .set(row_double_clicked.get() | response.double_clicked());
                     });
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
-                        let response = ui.selectable_label(false, short_date(&data.doc_date));
+                        let response = if data.doc_date.trim().is_empty() {
+                            empty_cell_placeholder(ui).on_hover_text("未填成文日期")
+                        } else {
+                            centered_cell_text(ui, short_date(&data.doc_date))
+                        };
                         row_clicked.set(row_clicked.get() | response.clicked());
                         row_double_clicked
                             .set(row_double_clicked.get() | response.double_clicked());
@@ -1510,20 +1517,19 @@ impl GongwenApp {
                     if !compact {
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
-                            let response = ui.selectable_label(false, short_date(&data.updated_at));
+                            let response = centered_cell_text(ui, short_date(&data.updated_at));
                             row_clicked.set(row_clicked.get() | response.clicked());
                             row_double_clicked
                                 .set(row_double_clicked.get() | response.double_clicked());
                         });
                         row.col(|ui| {
                             ui.set_opacity(seen_t);
-                            let response = ui.selectable_label(
-                                false,
-                                data.archived_at
-                                    .as_deref()
-                                    .map(short_date)
-                                    .unwrap_or_else(|| "—".to_string()),
-                            );
+                            let response = match data.archived_at.as_deref() {
+                                Some(at) if !at.trim().is_empty() => {
+                                    centered_cell_text(ui, short_date(at))
+                                }
+                                _ => empty_cell_placeholder(ui),
+                            };
                             row_clicked.set(row_clicked.get() | response.clicked());
                             row_double_clicked
                                 .set(row_double_clicked.get() | response.double_clicked());
@@ -1535,19 +1541,28 @@ impl GongwenApp {
                             ui.set_opacity(seen_t);
                             let indexed = self.knowledge_indexed_manuscripts.contains(&data.id);
                             let response = if indexed {
-                                ui.horizontal(|ui| {
-                                    theme::dot(ui, theme::success());
-                                    ui.selectable_label(
-                                        false,
-                                        egui::RichText::new("已入库").color(accent()),
+                                // 圆点 + 文字是两个部件，没法交给 centered_cell_text；
+                                // 先量出整组宽度，左侧补足一半余量，让这组内容落在列中线上。
+                                let label = egui::RichText::new("已入库").color(accent());
+                                let text_width = egui::WidgetText::from(label.clone())
+                                    .into_galley(
+                                        ui,
+                                        Some(egui::TextWrapMode::Extend),
+                                        f32::INFINITY,
+                                        egui::TextStyle::Button,
                                     )
-                                })
-                                .inner
+                                    .size()
+                                    .x;
+                                let spacing = ui.spacing();
+                                let group_width = 8.0
+                                    + spacing.item_spacing.x
+                                    + text_width
+                                    + 2.0 * spacing.button_padding.x;
+                                ui.add_space(((ui.available_width() - group_width) / 2.0).max(0.0));
+                                theme::dot(ui, theme::success());
+                                ui.selectable_label(false, label)
                             } else {
-                                ui.selectable_label(
-                                    false,
-                                    egui::RichText::new("—").color(theme::text_muted()),
-                                )
+                                empty_cell_placeholder(ui)
                             };
                             let response = response.on_hover_text(if indexed {
                                 "这篇稿件已加入知识库，再次导入会覆盖旧的索引"
