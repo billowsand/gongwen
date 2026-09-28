@@ -49,6 +49,23 @@ fn signature_units_tex(units: &[String], marks: &[FieldMark]) -> String {
         .collect()
 }
 
+/// 落款单位块宽度（毫米）：成文日期要居中于“落款单位 + 签字空间”，TeX 量不出
+/// vbox 的自然宽度，这里按字数算好最宽一行的宽度写进类文件。写成毫米而不是
+/// em：这条 \setlength 在导言区执行，那里的字号不是三号。
+/// 带要素标注时每行是「旧值 + 新值」并排，宽度得按标注后的文本算，否则定宽
+/// 摆位的落款与日期居中会对不上。
+fn signature_unit_width_mm(units: &[String], marks: &[FieldMark]) -> f32 {
+    if marks.iter().any(|mark| mark.changed()) {
+        let marked = marks
+            .iter()
+            .map(|mark| crate::export::strip_redline(&mark.marked()))
+            .collect::<Vec<_>>();
+        crate::export::red_signature_unit_width_mm(&marked)
+    } else {
+        crate::export::red_signature_unit_width_mm(units)
+    }
+}
+
 /// 成文日期三条命令（带要素标注：变了的部件整体删旧插新）。日期未填时不写
 /// 命令，沿用类默认；自由文本日期切不开——原样时不写，变了把整串删旧插新写进
 /// `\SignatureYear`（年月日三字仍由类补）。
@@ -142,12 +159,14 @@ pub(crate) fn white_paper_tex_with_numbering(
     let security = security_commands(input, elements.security());
     // 呈报领导（楷体顶格）按人员编码排序、相同职务合并后写入 \Recipient。
     let leaders = addressee_display(input, display);
-    // 落款单位：每个单位一行、行间空一行（便于签字），整体右对齐；显示文本
-    // 少于 5 字时逐字用 `\hspace*` 分散对齐到 5 字宽，与预览/Word 各端一致。
+    // 落款单位：每个单位一行、行间空一行（便于签字），整体右对齐、右侧留签字
+    // 空间；显示文本少于 5 字时逐字用 `\hspace*` 分散对齐到 5 字宽，与预览/Word
+    // 各端一致。成文日期居中于“单位 + 签字空间”，要先知道单位块多宽。
     let units = signing_unit_display(input, display)
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
+    let signature_unit_width_mm = signature_unit_width_mm(&units, elements.signing_units());
     let signature_unit = signature_units_tex(&units, elements.signing_units());
     // 规格 §3.3：预览版占位区域统一 1em 宽，成文日期“日”留空，与公函一致。
     // 成文日期未填时沿用类默认：年份取当前年、日期留空待填。
@@ -163,6 +182,7 @@ pub(crate) fn white_paper_tex_with_numbering(
 {body}
 }}
 {attachment_command}\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
+\setlength{{\SignatureUnitWidth}}{{{signature_unit_width:.3}mm}}
 {date_commands}\begin{{document}}
 \makeletter
 \end{{document}}
@@ -174,6 +194,7 @@ pub(crate) fn white_paper_tex_with_numbering(
         body = body,
         attachment_command = attachment_command,
         signature_unit = signature_unit,
+        signature_unit_width = signature_unit_width_mm,
         date_commands = date_commands,
     )
 }
@@ -234,21 +255,8 @@ pub(crate) fn red_head_approval_tex_with_numbering(
         .into_iter()
         .filter(|unit| !unit.trim().is_empty())
         .collect::<Vec<_>>();
-    // 成文日期要居中于“落款单位 + 签字空间”，TeX 量不出 vbox 的自然宽度，
-    // 这里按字数算好最宽一行的宽度写进类文件。写成毫米而不是 em：这条
-    // \setlength 在导言区执行，那里的字号不是三号。
-    // 带要素标注时每行是「旧值 + 新值」并排，宽度得按标注后的文本算，
-    // 否则定宽摆位的落款与日期居中会对不上（Word / 预览右对齐，不涉及）。
-    let width_units = if elements.signing_units().iter().any(|mark| mark.changed()) {
-        elements
-            .signing_units()
-            .iter()
-            .map(|mark| crate::export::strip_redline(&mark.marked()))
-            .collect()
-    } else {
-        signature_units.clone()
-    };
-    let signature_unit_width_mm = crate::export::red_signature_unit_width_mm(&width_units);
+    let signature_unit_width_mm =
+        signature_unit_width_mm(&signature_units, elements.signing_units());
     let signature_unit = signature_units_tex(&signature_units, elements.signing_units());
     let preview = input.profile.letter_version == LetterVersion::Preview;
     let placeholder = "\\makebox[1em][c]{}";
@@ -286,7 +294,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
 {body}
 }}
 {attachment_command}\renewcommand{{\SignatureUnit}}{{{signature_unit}}}
-\setlength{{\RedSignatureUnitWidth}}{{{signature_unit_width:.3}mm}}
+\setlength{{\SignatureUnitWidth}}{{{signature_unit_width:.3}mm}}
 \setlength{{\RedRecordUnitWidth}}{{{record_unit_width:.3}mm}}
 \setlength{{\RedRecordContactWidth}}{{{record_contact_width:.3}mm}}
 \setlength{{\RedRecordPhoneWidth}}{{{record_phone_width:.3}mm}}

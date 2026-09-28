@@ -319,7 +319,7 @@ mod tests {
         // “某某委员会”5 字、“第二落款单位”6 字，取最宽的 6 字 = 6×5.6444mm。
         // 必须是绝对长度：这条 \setlength 在导言区执行，写 em 会按导言区字号折算。
         assert!(
-            tex.contains("\\setlength{\\RedSignatureUnitWidth}{33.867mm}"),
+            tex.contains("\\setlength{\\SignatureUnitWidth}{33.867mm}"),
             "落款单位块宽度应取最宽一行、且写成绝对长度：{tex}"
         );
     }
@@ -384,8 +384,10 @@ mod tests {
         assert!(
             GONGHAN_CLASS.contains("\\setlength{\\RedApprovalSignatureRoom}{4cm}")
                 && GONGHAN_CLASS.contains(
-                    "\\makebox[\\dimexpr\\RedSignatureUnitWidth+\\RedApprovalSignatureRoom\\relax][c]"
-                ),
+                    "\\newcommand{\\RedApprovalSignature}{\\gwa@roomsignature{\\RedApprovalSignatureRoom}}"
+                )
+                && GONGHAN_CLASS
+                    .contains("\\makebox[\\dimexpr\\SignatureUnitWidth+#1\\relax][c]"),
             "落款右侧要留 4cm 签字位，成文日期居中于“单位 + 签字位”"
         );
         assert!(
@@ -429,6 +431,17 @@ mod tests {
         assert!(
             tex.contains("\\renewcommand{\\SignatureUnit}{办\\hspace*{1em}公\\hspace*{1em}室}"),
             "落款少于 5 字应分散对齐到 5 字宽：{tex}"
+        );
+        // 成文日期居中于“落款单位 + 签字空间”：单位块按分散后的 5 字宽写入。
+        assert!(
+            tex.contains("\\setlength{\\SignatureUnitWidth}{28.222mm}"),
+            "白头件也要写入落款单位块宽度：{tex}"
+        );
+        assert!(
+            GONGHAN_CLASS.contains(
+                "\\newcommand{\\WhitePaperSignature}{\\gwa@roomsignature{\\WhitePaperSignatureRoom}}"
+            ),
+            "白头件成文日期应与红头呈批件一样居中于“单位 + 签字位”"
         );
         assert!(tex.contains("\\renewcommand{\\SignatureYear}{2026}"));
         assert!(tex.contains("\\renewcommand{\\SignatureMonth}{8}"));

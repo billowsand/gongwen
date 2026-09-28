@@ -176,8 +176,13 @@ pub(crate) const SIGNATURE_ROOM_TWIPS: usize = 2_268;
 ///
 /// 成文日期要落在「落款单位 + 右侧签字空间」这一整段的正中，所以得先知道
 /// 单位块有多宽。少于 5 字的单位会被分散对齐到 5 字宽（见 `units::spread_gap`），
-/// 按分散后的宽度算；多个单位取最宽的一个。
+/// 按分散后的宽度算；多个单位取最宽的一个。白头件与红头呈批件共用。
+///
+/// 单位块最宽只到「版心 − 签字空间」：再长的单位名在那一栏里折行，按字数
+/// 算出的宽度会超出版心，日期就被推到版心外。
 pub(crate) fn red_signature_unit_width_em(units: &[String]) -> f32 {
+    let max_em =
+        (RED_RECORD_TOTAL_TWIPS - SIGNATURE_ROOM_TWIPS) as f32 / RED_RECORD_EM_TWIPS as f32;
     units
         .iter()
         .map(|unit| {
@@ -188,6 +193,7 @@ pub(crate) fn red_signature_unit_width_em(units: &[String]) -> f32 {
             }
         })
         .fold(0.0f32, f32::max)
+        .min(max_em)
 }
 
 /// 同上，换算成缇（Word 用）。1 em = 三号字 16 pt = 320 缇。

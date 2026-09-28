@@ -740,19 +740,37 @@
 \newlength{\WhitePaperSignatureRoom}
 \setlength{\WhitePaperSignatureRoom}{4cm}
 
-% 白头件落款：落款单位靠左排，右侧留出签字空间；签字一般位于单位右侧。
-% 单位与日期之间空 1 行。落款前的“此页无正文”判定由 \WhitePaperClosing 负责。
-\newcommand{\WhitePaperSignature}{%
-    \noindent\hspace*{\fill}%
-    \begin{minipage}[t]{11cm}%
-        \raggedleft
+% 落款单位块的宽度（最宽的一行），白头件与红头呈批件共用。由导出器按字数算好
+% 写入——TeX 量不出 vbox 的自然宽度，而成文日期要居中于“单位 + 签字空间”，
+% 必须知道单位块有多宽。
+\newlength{\SignatureUnitWidth}
+\setlength{\SignatureUnitWidth}{0pt}
+
+% 带签字空间的落款（白头件、红头呈批件共用），#1 是右侧签字空间宽度：
+% 多个落款单位自上而下右对齐（单位之间的空行由导出器注入），但右侧留出签字
+% 空间，签名写在单位名右边；最后一个单位与成文日期之间固定空一行，日期落在
+% “落款单位 + 签字空间”这一整段的正中。
+\newcommand{\gwa@roomsignature}[1]{%
+    \begingroup
         \gwa@bodyspacing
-        \SignatureUnit{}\par
+        \setlength{\parindent}{0pt}%
+        \noindent\begin{minipage}[t]{\dimexpr\textwidth-#1\relax}%
+            \gwa@bodyspacing
+            \raggedleft
+            \SignatureUnit{}%
+        \end{minipage}%
+        \hspace*{#1}\par
         \vspace{\baselineskip}%
-        \SignatureYear{}年\SignatureMonth{}月\SignatureDay{}日
-    \end{minipage}%
-    \hspace*{\WhitePaperSignatureRoom}\par
+        % 先跳到最宽那行单位的左沿，再在“单位 + 签字空间”的整段里居中。
+        \noindent\hspace*{\dimexpr\textwidth-#1-\SignatureUnitWidth\relax}%
+        \makebox[\dimexpr\SignatureUnitWidth+#1\relax][c]{%
+            \SignatureYear{}年\SignatureMonth{}月\SignatureDay{}日}\par
+    \endgroup
 }
+
+% 白头件落款：落款单位靠左排，右侧留出签字空间；成文日期居中于“单位 + 签字
+% 空间”。落款前的“此页无正文”判定由 \WhitePaperClosing 负责。
+\newcommand{\WhitePaperSignature}{\gwa@roomsignature{\WhitePaperSignatureRoom}}
 
 % 版记命令
 \newcommand{\FooterRecord}{%
@@ -921,31 +939,8 @@
 % 红头呈批件落款右侧留给签字的空间，与白头件同宽。
 \newlength{\RedApprovalSignatureRoom}
 \setlength{\RedApprovalSignatureRoom}{4cm}
-% 落款单位块的宽度（最宽的一行）。由导出器按字数算好写入——TeX 量不出 vbox 的
-% 自然宽度，而成文日期要居中于“单位 + 签字空间”，必须知道单位块有多宽。
-\newlength{\RedSignatureUnitWidth}
-\setlength{\RedSignatureUnitWidth}{0pt}
-
-% 红头呈批件落款：多个落款单位自上而下右对齐（单位之间的空行由导出器注入），
-% 但右侧留出签字空间，签名写在单位名右边；最后一个单位与成文日期之间固定空
-% 一行，日期落在“落款单位 + 签字空间”这一整段的正中。
-\newcommand{\RedApprovalSignature}{%
-    \begingroup
-        \gwa@bodyspacing
-        \setlength{\parindent}{0pt}%
-        \noindent\begin{minipage}[t]{\dimexpr\textwidth-\RedApprovalSignatureRoom\relax}%
-            \gwa@bodyspacing
-            \raggedleft
-            \SignatureUnit{}%
-        \end{minipage}%
-        \hspace*{\RedApprovalSignatureRoom}\par
-        \vspace{\baselineskip}%
-        % 先跳到最宽那行单位的左沿，再在“单位 + 签字空间”的整段里居中。
-        \noindent\hspace*{\dimexpr\textwidth-\RedApprovalSignatureRoom-\RedSignatureUnitWidth\relax}%
-        \makebox[\dimexpr\RedSignatureUnitWidth+\RedApprovalSignatureRoom\relax][c]{%
-            \SignatureYear{}年\SignatureMonth{}月\SignatureDay{}日}\par
-    \endgroup
-}
+% 红头呈批件落款：与白头件同一排法（见 \gwa@roomsignature）。
+\newcommand{\RedApprovalSignature}{\gwa@roomsignature{\RedApprovalSignatureRoom}}
 
 % 红头呈批件落款不得出现在首页。是否标注“此页无正文”由连续流排过程中记录的
 % 实际行数决定：正文没有超过首页额度才标注，已经续排到第二页则紧随正文落款。

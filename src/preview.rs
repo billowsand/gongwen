@@ -611,14 +611,29 @@ mod tests {
         let rows = text_rows(&output);
         // 单位两行 + 日期一行（单位间与日期前各空一行不产生文本）。
         assert_eq!(rows.len(), 3, "落款应有两行单位与一行日期：{rows:?}");
-        let right = rows.iter().map(|row| row.max.x).collect::<Vec<_>>();
-        let max_right = right.iter().cloned().fold(f32::MIN, f32::max);
-        for (index, row) in rows.iter().enumerate() {
+        let max_right = rows[..2]
+            .iter()
+            .map(|row| row.max.x)
+            .fold(f32::MIN, f32::max);
+        for (index, row) in rows[..2].iter().enumerate() {
             assert!(
                 (row.max.x - max_right).abs() <= 1.0,
-                "第 {index} 行应右对齐：{row:?}，最大右缘 {max_right}"
+                "第 {index} 行单位应右对齐：{row:?}，最大右缘 {max_right}"
             );
         }
+        // 成文日期居中于“落款单位 + 签字空间”：中点在单位块左沿与签字位右缘
+        // （版心右缘）之间，而不是与单位右对齐。
+        let unit_left = rows[..2]
+            .iter()
+            .map(|row| row.min.x)
+            .fold(f32::MAX, f32::min);
+        let content_right = max_right + metrics.mm(crate::export::SIGNATURE_ROOM_MM);
+        let expected_center = (unit_left + content_right) / 2.0;
+        let date_center = rows[2].center().x;
+        assert!(
+            (date_center - expected_center).abs() <= 3.0,
+            "成文日期中点应在单位与签字空间中间：实际 {date_center:.1}，应为 {expected_center:.1}（{rows:?}）"
+        );
         // 简称 3 字分散到 5 字宽：行宽应明显大于 3 字自然宽（≈62px）、
         // 而等于 5 字宽（≈103px，按实际字体度量）。
         for row in &rows[..2] {
@@ -668,7 +683,7 @@ mod tests {
 
     /// 防御性落款辅助布局仍可独立使用；主预览走上面的红头打印分页器。
     #[test]
-    fn red_head_approval_signature_helper_stays_right_aligned() {
+    fn red_head_approval_signature_helper_matches_white_paper() {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let available = 1000.0;
@@ -696,13 +711,21 @@ mod tests {
         let rows = text_rows(&output);
         // 两个落款单位各一行 + 日期一行；单位间与日期前的空行不产生文本。
         assert_eq!(rows.len(), 3, "两个落款单位都要列出：{rows:?}");
-        let red_right = rows.iter().map(|row| row.max.x).fold(f32::MIN, f32::max);
-        for row in &rows {
+        let red_right = rows[..2]
+            .iter()
+            .map(|row| row.max.x)
+            .fold(f32::MIN, f32::max);
+        for row in &rows[..2] {
             assert!(
                 (row.max.x - red_right).abs() <= 1.0,
-                "红头呈批件的辅助落款应保持全部右对齐：{rows:?}"
+                "红头呈批件的辅助落款单位应右对齐：{rows:?}"
             );
         }
+        // 成文日期与导出一致，居中于“单位 + 签字空间”，比单位右缘更靠右。
+        assert!(
+            rows[2].max.x > red_right + 1.0,
+            "成文日期应居中于单位与签字空间之间：{rows:?}"
+        );
 
         // 与同内容的白头件逐行位置一致。
         let mut white = input.clone();

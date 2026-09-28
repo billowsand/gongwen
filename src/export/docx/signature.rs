@@ -134,9 +134,9 @@ pub(crate) fn main_issuing_unit(input: &DraftInput, display: &UnitDisplay) -> St
 /// 白头件与红头呈批件的落款：多单位自上而下分行、行间空一行（便于分别签字），
 /// 整体右对齐；显示文本少于 5 字时按字间距分散对齐到 5 字宽。
 ///
-/// `signing_room_twips` 是落款右侧留给签字的空间：白头件传 0（版式已在别处
-/// 留位），红头呈批件传 4cm——单位名整体左移让出签字位，成文日期则落在
-/// 「落款单位 + 签字空间」这一整段的正中。
+/// `signing_room_twips` 是落款右侧留给签字的空间：白头件与红头呈批件都传
+/// 4cm——单位名整体左移让出签字位，成文日期则落在「落款单位 + 签字空间」
+/// 这一整段的正中；传 0 时日期与单位一起右对齐。
 pub(crate) fn add_white_paper_signature(
     doc: Docx,
     input: &DraftInput,
@@ -215,13 +215,9 @@ pub(crate) fn add_white_paper_signature(
     for run in signature_date_runs(input, elements) {
         date = date.add_run(run);
     }
-    let date = if input.kind == TemplateKind::WhitePaper || signing_room_twips == 0 {
-        date.align(AlignmentType::Right).indent(
-            Some(0),
-            None,
-            Some(signing_room_twips as i32),
-            None,
-        )
+    let date = if signing_room_twips == 0 {
+        date.align(AlignmentType::Right)
+            .indent(Some(0), None, Some(0), None)
     } else {
         // 左缩进到最宽那行单位的左沿，再在剩下的“单位 + 签字空间”里居中，
         // 段落右缘就是版心右缘，居中位置正好是这一整段的中点。

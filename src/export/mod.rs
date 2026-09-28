@@ -64,13 +64,13 @@ pub(crate) use red::{
     RED_APPROVAL_RULE_TWIPS, RED_RECORD_LABEL_CONTACT_TWIPS, RED_RECORD_LABEL_UNIT_TWIPS,
     RedRecordColumns, SIGNATURE_ROOM_MM, SIGNATURE_ROOM_TWIPS, red_approval_body_metrics,
     red_approval_wrap_lines, red_record_columns, red_record_name_twips, red_record_phone_twips,
-    red_record_scale_units, red_record_unit_twips, red_signature_unit_width_mm,
-    red_signature_unit_width_twips,
+    red_record_scale_units, red_record_unit_twips, red_signature_unit_width_em,
+    red_signature_unit_width_mm, red_signature_unit_width_twips,
 };
 #[cfg(test)]
 pub(crate) use red::{
     RED_RECORD_EM_TWIPS, RED_RECORD_LABEL_PHONE_TWIPS, RED_RECORD_MIN_UNIT_TWIPS,
-    RED_RECORD_TOTAL_TWIPS, red_signature_unit_width_em,
+    RED_RECORD_TOTAL_TWIPS,
 };
 #[cfg(test)]
 pub(crate) use text::InlineSegment;
@@ -650,6 +650,12 @@ mod tests {
         // 全是短单位时统一按分散后的 5 字宽。
         assert_eq!(red_signature_unit_width_em(&["办公室".to_string()]), 5.0);
         assert_eq!(red_signature_unit_width_em(&[]), 0.0);
+        // 长单位名在「版心 − 签字空间」一栏里折行，宽度封顶，日期不出版心。
+        let long = vec!["中央网信办新闻舆论处舆情分析研究中心综合协调办公室".to_string()];
+        assert_eq!(
+            red_signature_unit_width_twips(&long),
+            RED_RECORD_TOTAL_TWIPS - SIGNATURE_ROOM_TWIPS
+        );
     }
 
     /// 首页正文行数随标题行数与承办条目数递减，并保留下限。

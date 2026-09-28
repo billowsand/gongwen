@@ -1240,8 +1240,19 @@ mod tests {
             xml.contains("w:spacing w:val=\"320\""),
             "3 字简称应有 1em 字符间距：{xml}"
         );
-        // 单位与日期段落都右对齐。
+        // 单位段落右对齐、右侧留签字空间。
         assert!(xml.contains("w:val=\"right\""), "落款应右对齐：{xml}");
+        // 成文日期居中于“落款单位 + 签字空间”：左缩进到单位块（分散后 5 字宽）
+        // 的左沿，段落右缘是版心右缘。
+        let date = paragraph_containing(&xml, "2026年8月7日");
+        let expected_left = TABLE_CONTENT_WIDTH_TWIPS
+            - crate::export::SIGNATURE_ROOM_TWIPS
+            - crate::export::red_signature_unit_width_twips(&["省教育厅".to_string()]);
+        assert!(
+            date.contains(r#"w:val="center""#)
+                && date.contains(&format!(r#"w:left="{expected_left}""#)),
+            "白头件成文日期应居中于单位与签字空间之间：{date}"
+        );
         // 不出现未分散的整串简称。
         assert!(!xml.contains("省教育厅"), "简称不应整串出现：{xml}");
     }

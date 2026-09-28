@@ -73,7 +73,8 @@ pub(crate) fn addressee_block(
 }
 
 /// 落款：单位与成文日期。函稿/电话通知排在版心右侧 11cm 块内居中；白头件右侧
-/// 留 4cm 签字空间、单位与日期之间空一行、多单位行间各空一行；联合发文模式 1 排成两列。
+/// 留 4cm 签字空间、单位与日期之间空一行、多单位行间各空一行，成文日期居中于
+/// “单位 + 签字空间”；联合发文模式 1 排成两列。
 pub(crate) fn signature_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -97,9 +98,9 @@ pub(crate) fn signature_block(
     let width = metrics.mm(SIGNATURE_WIDTH_MM).min(metrics.content);
     match input.kind {
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
-            // 块内右对齐；单位与日期之间空一行，多个单位自上而下分行、行间各空
-            // 一行（便于分别签字）。红头呈批件的主预览已由打印分页器接管；这里
-            // 保留相同的辅助布局，供独立块测试与防御性回落使用。
+            // 单位块内右对齐、右侧留签字空间；单位与日期之间空一行，多个单位自上
+            // 而下分行、行间各空一行（便于分别签字）。红头呈批件的主预览已由打印
+            // 分页器接管；这里保留相同的辅助布局，供独立块测试与防御性回落使用。
             let room = metrics.mm(crate::export::SIGNATURE_ROOM_MM);
             let left = (metrics.content - room - width).max(0.0);
             let units = display
@@ -174,19 +175,41 @@ pub(crate) fn signature_block(
                 width,
                 Align::Min,
             ));
-            if elements.date().changed() {
-                galleys.push(marks::marked_line_galley(
+            // 成文日期居中于“落款单位 + 签字空间”这一整段，与 TeX / Word
+            // 同一算法——单位块宽度按字数算（少于 5 字按分散后的 5 字宽），
+            // 带要素标注时按「旧值 + 新值」并排后的文本算。
+            stacked(ui, metrics, &galleys, left, width, Align::Max);
+            let width_units = if line_marks.iter().any(|mark| mark.changed()) {
+                line_marks
+                    .iter()
+                    .map(|mark| crate::export::strip_redline(&mark.marked()))
+                    .collect()
+            } else {
+                units.clone()
+            };
+            let unit_width =
+                crate::export::red_signature_unit_width_em(&width_units) * metrics.pt(BODY_PT);
+            let span = (unit_width + room).min(metrics.content);
+            let date_galley = if elements.date().changed() {
+                marks::marked_line_galley(
                     ui,
                     metrics,
                     &elements.date().marked_line(),
-                    width,
-                    Align::Min,
+                    span,
+                    Align::Center,
                     text_format(font, metrics.line),
-                ));
+                )
             } else {
-                galleys.push(line_galley(ui, metrics, &date, font, width, Align::Min));
-            }
-            stacked(ui, metrics, &galleys, left, width, Align::Max);
+                line_galley(ui, metrics, &date, font, span, Align::Center)
+            };
+            stacked(
+                ui,
+                metrics,
+                &[date_galley],
+                metrics.content - span,
+                span,
+                Align::Center,
+            );
         }
         _ => {
             let unit = if is_joint_mode_one(input) {
