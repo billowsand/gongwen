@@ -633,6 +633,23 @@ pub(crate) fn aligned_block(
     text: &str,
     align: export::LineAlign,
 ) {
+    // 研究报告的对齐行里可以写公式：`$...$` 与文字混排，整行 `$$...$$` 是
+    // 独立公式，都按这一行的对齐方式放（与 PDF 一致）。
+    if metrics.math {
+        let flow_align = match align {
+            export::LineAlign::Center => Align::Center,
+            export::LineAlign::Right => Align::Max,
+        };
+        let style = math_flow::FlowStyle::aligned(metrics, flow_align);
+        if let Some((src, mark)) = math_flow::display_source(text) {
+            math_flow::display_line(ui, metrics, &src, mark, &style);
+            return;
+        }
+        if math_flow::has_math(text) {
+            math_flow::flow(ui, metrics, text, &style);
+            return;
+        }
+    }
     let mut job = job(metrics.content);
     job.halign = match align {
         export::LineAlign::Center => Align::Center,

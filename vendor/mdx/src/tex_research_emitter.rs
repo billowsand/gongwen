@@ -902,6 +902,15 @@ fn citation_latex(items: &[QuoteItem]) -> String {
             _ if index > 0 => s.push_str("\\par\n"),
             _ => {}
         }
+        // 整行独立公式：单独一段居中，不缩进（`\noindent` 在 `\item` 之后
+        // 也抵掉首行缩进）。
+        if let Some(source) = sole_display_math(item) {
+            list_no = 0;
+            s.push_str(&format!(
+                "{{\\centering\\noindent \\(\\displaystyle {source}\\)\\par}}\n"
+            ));
+            continue;
+        }
         match item {
             QuoteItem::List { content, .. } => {
                 list_no += 1;
@@ -940,6 +949,14 @@ fn box_latex(
     ));
     let mut list_no = 0;
     for item in items {
+        // 整行独立公式：这一格居中，不缩进。
+        if let Some(source) = sole_display_math(item) {
+            list_no = 0;
+            s.push_str(&format!(
+                "\\SetCell{{c}} \\(\\displaystyle {source}\\) \\\\\n"
+            ));
+            continue;
+        }
         s.push_str("\\hspace*{2em}");
         match item {
             QuoteItem::List { content, .. } => {
@@ -956,6 +973,17 @@ fn box_latex(
     }
     s.push_str("\\end{mdxboxtblr}");
     s
+}
+
+/// 引文、文框里整行写成 `$$...$$` 的一段：返回公式源码。
+fn sole_display_math(item: &QuoteItem) -> Option<&str> {
+    match item {
+        QuoteItem::Paragraph(inlines) => match inlines.as_slice() {
+            [Inline::DisplayMath(source)] => Some(source),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// 第 `index` 种文框名称的计数器键：a、b……z、aa、ab……（只用小写字母，
@@ -1066,6 +1094,14 @@ fn render_inlines(inlines: &[Inline]) -> String {
             // 行内公式：公式源码原样进 \(...\)，不做 LaTeX 转义
             Inline::Math(t) => {
                 s.push_str("\\(");
+                s.push_str(t);
+                s.push_str("\\)");
+            }
+            // 独立公式总是独占一行（居中 / 居右区、引用块），外层已按行排好
+            // 对齐；这里排成展示样式（求和上下限在上下），不用 `\[`，以免
+            // 盖掉所在行的居右。
+            Inline::DisplayMath(t) => {
+                s.push_str("\\(\\displaystyle ");
                 s.push_str(t);
                 s.push_str("\\)");
             }
@@ -1333,6 +1369,35 @@ mod tests {
         );
         assert!(body.contains("\\(\\sum{}\\)"), "{body}");
         assert!(!body.contains("\\{\\}"), "单元格转义不应重复：{body}");
+    }
+
+    /// 居中 / 居右区、引文、文框里整行的 `$$...$$` 是独立公式：对齐行按行对齐
+    /// 排成展示样式，引文里单独一段居中，文框里那一格居中。
+    #[test]
+    fn whole_line_display_math_in_aligned_lines_and_quotes() {
+        let body = emit_all_body(&crate::parser::parse(concat!(
+            "## 公式\n\n",
+            "<!-- [居右] -->\n$x$，**还是**\n$$\\sum_a^b$$\n\n",
+            "> 引文。\n> $$\\sum_a^b$$\n\n",
+            "> [!例子] 标题\n>\n> $$\\sum_a^b$$\n",
+        )));
+        assert!(
+            body.contains("{\\noindent\\raggedleft \\(x\\)，\\textbf{还是}\\par}"),
+            "{body}"
+        );
+        assert!(
+            body.contains("{\\noindent\\raggedleft \\(\\displaystyle \\sum_a^b\\)\\par}"),
+            "{body}"
+        );
+        assert!(
+            body.contains("\\par\n{\\centering\\noindent \\(\\displaystyle \\sum_a^b\\)\\par}"),
+            "{body}"
+        );
+        assert!(
+            body.contains("\\SetCell{c} \\(\\displaystyle \\sum_a^b\\) \\\\"),
+            "{body}"
+        );
+        assert!(!body.contains("\\$"), "{body}");
     }
 
     #[test]

@@ -211,6 +211,24 @@ fn quote_lines(
     let width = (metrics.content - style.inset - style.right_inset).max(1.0);
     let mut list_no = 0usize;
     for line in lines {
+        // 整行 `$$...$$`：独立公式单独一行，在块内居中（与 PDF 一致）。
+        if style.math
+            && line.kind == QuoteLineKind::Paragraph
+            && let Some((src, mark)) = math_flow::display_source(&line.text)
+        {
+            let mut flow = flow_style(metrics, line.kind, &mut list_no, style, width);
+            flow.align = Align::Center;
+            clickable_rows(
+                ui,
+                metrics,
+                &line.source,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+                |ui| math_flow::display_line(ui, metrics, &src, mark, &flow),
+            );
+            continue;
+        }
         if style.math && math_flow::has_math(&line.text) {
             let flow = flow_style(metrics, line.kind, &mut list_no, style, width);
             clickable_rows(

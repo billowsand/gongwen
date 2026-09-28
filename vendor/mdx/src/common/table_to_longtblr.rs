@@ -108,6 +108,8 @@ fn push_cell_inlines(result: &mut String, inlines: &[Inline], math: bool) {
                 result.push_str("\\)");
             }
             Inline::Math(t) => result.push_str(&escape_latex(&format!("${t}$"))),
+            // 单元格按行内解析，不会出现独立公式；万一出现照源码印。
+            Inline::DisplayMath(t) => result.push_str(&escape_latex(&format!("$${t}$$"))),
         }
     }
 }

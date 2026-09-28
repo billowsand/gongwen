@@ -638,6 +638,7 @@ fn render_inlines(inlines: &[Inline]) -> String {
             }
             // 公文不支持公式：输出转义后的源码原文（$...$ 印成字面文字）
             Inline::Math(t) => s.push_str(&escape_latex(&format!("${t}$"))),
+            Inline::DisplayMath(t) => s.push_str(&escape_latex(&format!("$${t}$$"))),
         }
     }
     s
@@ -1038,6 +1039,9 @@ mod tests {
         // （$、^ 等 LaTeX 特殊字符照常转义，印成字面文字）
         let rendered = render_inlines(&[Inline::Math("E=mc^2".into())]);
         assert_eq!(rendered, "\\$E=mc\\textasciicircum{}2\\$");
+        // 居中区、引用块里整行的 `$$...$$` 同样印源码。
+        let rendered = render_inlines(&[Inline::DisplayMath("E=mc^2".into())]);
+        assert_eq!(rendered, "\\$\\$E=mc\\textasciicircum{}2\\$\\$");
 
         let mut e = TexEmitter::new();
         e.emit_block(&Block::Math("E=mc^2".into()));

@@ -687,7 +687,13 @@ mod tests {
                 "### 小节 $x^2$\n\n",
                 "> 引文 $x_1^2$ 照排。\n\n",
                 "> [!专栏] 标题 $a_i$\n>\n> 内容 $\\sum_{a}^{b}=A$ 认证\n\n",
-                "| 公式 | 说明 |\n| --- | --- |\n| $\\sum_{i=1}^{n} x_i$ | 求和 |\n",
+                "| 公式 | 说明 |\n| --- | --- |\n| $\\sum_{i=1}^{n} x_i$ | 求和 |\n\n",
+                // 居中 / 居右区与引用块里整行的 `$$...$$` 是独立公式。
+                "<!-- [居中] -->\n$\\sum{}$，**我们**\n$$\\sum_a^b$$\n\n",
+                "<!-- [居右] -->\n$\\sum{}$，**还是**\n$$\\sum_a^b$$\n\n",
+                "> [!例子] 标题\n>\n> $$\\sum_a^b$$\n\n",
+                "> $$\\sum_a^b$$\n\n",
+                "> 引文第一段。\n> $$\\sum_a^b$$\n",
             ),
             &selection,
             &crate::units::UnitDisplay::new(&[]),
@@ -716,6 +722,10 @@ mod tests {
         assert!(
             !tex_source.contains(r"\$"),
             "公式的 $ 不应被转义：{tex_source}"
+        );
+        assert!(
+            tex_source.contains(r"\(\displaystyle \sum_a^b\)"),
+            "居中区、引用块里的 $$ 应排成独立公式：{tex_source}"
         );
         let outcome = compile_research_pdf(tex).unwrap();
         assert!(outcome.pdf.is_some_and(|path| path.is_file()));

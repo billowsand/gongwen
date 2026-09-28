@@ -287,6 +287,11 @@ pub fn flatten(inlines: &[Inline]) -> String {
                 s.push_str(t);
                 s.push('$');
             }
+            Inline::DisplayMath(t) => {
+                s.push_str("$$");
+                s.push_str(t);
+                s.push_str("$$");
+            }
         }
     }
     s

@@ -79,20 +79,60 @@ pub(crate) fn block_source(trimmed: &str) -> Option<&str> {
 /// `mark` 是整个公式的花脸稿标记：公式不拆，改了就整块删旧插新（方案规则 13）。
 pub(crate) fn display_block(ui: &mut egui::Ui, metrics: &Metrics, src: &str, mark: RedlineKind) {
     ui.add_space(metrics.line * 0.5);
-    match cached(ui.ctx(), src, true, metrics.body_pt * metrics.scale) {
+    let mut style = FlowStyle::body(metrics);
+    style.lead.clear();
+    style.align = egui::Align::Center;
+    display_line(ui, metrics, src, mark, &style);
+    ui.add_space(metrics.line * 0.5);
+}
+
+/// 整行写成 `$$...$$` 的一行（居中 / 居右区、引文、文框里，可带花脸稿哨兵）：
+/// 返回公式源码与整块的花脸稿标注；不是就返回 `None`。
+pub(crate) fn display_source(text: &str) -> Option<(String, RedlineKind)> {
+    let bare = export::strip_redline(text);
+    let src = block_source(bare.trim())?.to_string();
+    Some((src, display_mark(text)))
+}
+
+/// 独立公式段的整块标注：段里第一处增删标记的类型，没有就是未改动。
+pub(crate) fn display_mark(text: &str) -> RedlineKind {
+    export::redline_chunks(text)
+        .iter()
+        .map(|chunk| chunk.kind)
+        .find(|kind| *kind != RedlineKind::Same)
+        .unwrap_or(RedlineKind::Same)
+}
+
+/// 一个独立公式独占一行，按 `style` 的字号、缩进、宽度与对齐放；上下不另留空。
+pub(crate) fn display_line(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    src: &str,
+    mark: RedlineKind,
+    style: &FlowStyle,
+) {
+    match cached(ui.ctx(), src, true, style.math_pt * metrics.scale) {
         Cached::Ready {
             texture,
             mut size,
             mut baseline,
         } => {
-            // 比版心还宽的公式按比例压进版心，与图片块的口径一致。
-            if size.x > metrics.content {
-                let fit = metrics.content / size.x;
+            // 比排字宽度还宽的公式按比例压进去，与图片块的口径一致。
+            if size.x > style.width {
+                let fit = style.width / size.x;
                 size *= fit;
                 baseline *= fit;
             }
+            let slack = style.width - size.x;
+            let offset = style.left
+                + match style.align {
+                    egui::Align::Min => 0.0,
+                    egui::Align::Center => slack / 2.0,
+                    egui::Align::Max => slack,
+                };
             place(ui, metrics, size.y, |painter, rect| {
-                let image = egui::Rect::from_center_size(rect.center(), size);
+                let image =
+                    egui::Rect::from_min_size(rect.left_top() + egui::vec2(offset, 0.0), size);
                 metrics.push_tint(image.expand2(egui::vec2(3.0, 1.0)));
                 metrics.mark_sourced_row(rect, rect.top() + baseline);
                 painter.image(
@@ -105,10 +145,19 @@ pub(crate) fn display_block(ui: &mut egui::Ui, metrics: &Metrics, src: &str, mar
             });
         }
         Cached::Failed => {
-            placeholder_block(ui, metrics, src, metrics.line * 1.5, metrics.content);
+            placeholder_block(ui, metrics, src, style.line * 1.5, style.width);
         }
     }
-    ui.add_space(metrics.line * 0.5);
+}
+
+impl FlowStyle {
+    /// 居中 / 居右区的一行：正文字面，不缩进，满版心宽。
+    pub(crate) fn aligned(metrics: &Metrics, align: egui::Align) -> Self {
+        let mut style = Self::body(metrics);
+        style.lead.clear();
+        style.align = align;
+        style
+    }
 }
 
 /// 渲染失败的占位：虚线框 + 框内灰色小字写出公式源码。

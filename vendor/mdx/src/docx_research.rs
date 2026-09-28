@@ -1614,6 +1614,7 @@ fn inline_run_style(ip: &Inline) -> (String, bool, bool) {
         Inline::Footnote(t) => (format!("（{}）", t), false, false),
         // docx 不支持公式，降级为源码原文
         Inline::Math(t) => (format!("${t}$"), false, false),
+        Inline::DisplayMath(t) => (format!("$${t}$$"), false, false),
     }
 }
 

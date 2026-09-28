@@ -1437,7 +1437,9 @@ fn plain(
                 // `$$`，标记整块画。
                 let bare = export::strip_redline(text);
                 match math_flow::block_source(bare.trim()) {
-                    Some(src) => math_flow::display_block(ui, metrics, src, display_mark(text)),
+                    Some(src) => {
+                        math_flow::display_block(ui, metrics, src, math_flow::display_mark(text))
+                    }
                     None => math_flow::paragraph(ui, metrics, text),
                 }
             },
@@ -1457,15 +1459,6 @@ fn plain(
         scroll_to_anchor,
         clicked,
     );
-}
-
-/// 独立公式段的整块标注：段里第一处增删标记的类型，没有就是未改动。
-fn display_mark(text: &str) -> export::RedlineKind {
-    export::redline_chunks(text)
-        .iter()
-        .map(|chunk| chunk.kind)
-        .find(|kind| *kind != export::RedlineKind::Same)
-        .unwrap_or(export::RedlineKind::Same)
 }
 
 /// 章号与章名之间的间隔：ctex 的 `chapter/aftername` 默认 `\quad`，一个汉字宽，
@@ -2306,8 +2299,16 @@ mod tests {
             "> 引文 $\\sum{}$ 照排。\n\n",
             "> [!例子] 标题 $a_i$\n>\n> 内容 $\\sum_a=A$ 认证\n\n",
             "| 公式 | 说明 |\n| --- | --- |\n| $\\sum{}$ | 求和 |\n\n",
-            "见“$\\sum$”。\n",
+            "见“$\\sum$”。\n\n",
+            // 居中 / 居右区、引文、文框里整行的 `$$` 是独立公式。
+            "<!-- [居中] -->\n$\\sum{}$,**我们**\n$$\\sum_a^b$$\n\n",
+            "<!-- [居右] -->\n$\\sum{}$，**还是**\n$$\\sum_a^b$$\n\n",
+            "> [!例子] 标题\n>\n> $$\\sum_a^b$$\n\n",
+            "> $$\\sum_a^b$$\n",
         ));
+        assert!(text.contains("我们"), "{text}");
+        assert!(text.contains("还是"), "{text}");
+        assert!(!text.contains("**"), "{text}");
         // 公式都贴成图，纸面上不该再印出源码。
         for source in ["$", "\\sum", "\\alpha", "x^2", "a_i"] {
             assert!(!text.contains(source), "{source} 应排成公式：{text}");

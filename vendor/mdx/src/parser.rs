@@ -68,7 +68,7 @@ pub fn parse(content: &str) -> Vec<Block> {
                     Some(next) => align = next,
                     None => blocks.push(Block::Aligned {
                         align,
-                        content: inline::parse(text),
+                        content: line_inlines(text),
                     }),
                 }
                 i += 1;
@@ -274,11 +274,33 @@ fn parse_quote(lines: &[String]) -> (Option<String>, Block) {
             } else if !boxed && quote::is_source(text) {
                 QuoteItem::Source(inline::parse(text))
             } else {
-                QuoteItem::Paragraph(inline::parse(text))
+                QuoteItem::Paragraph(line_inlines(text))
             }
         })
         .collect();
     (label, Block::Quote { kind, items })
+}
+
+/// 居中 / 居右区、引用块里的一整行：整行是一对 `$$...$$` 就是独立公式，
+/// 否则按行内格式解析。
+fn line_inlines(text: &str) -> Vec<Inline> {
+    match display_math_line(text) {
+        Some(source) => vec![Inline::DisplayMath(source.to_string())],
+        None => inline::parse(text),
+    }
+}
+
+/// 整行被一对 `$$` 包住、中间有内容：返回公式源码。与公文助手预览的
+/// `math_flow::block_source` 同一口径。
+fn display_math_line(text: &str) -> Option<&str> {
+    let text = text.trim();
+    if text.len() <= 4 {
+        return None;
+    }
+    text.strip_prefix("$$")?
+        .strip_suffix("$$")
+        .map(str::trim)
+        .filter(|inner| !inner.is_empty())
 }
 
 fn take_leading_table_caption(blocks: &mut Vec<Block>) -> Option<(String, Option<String>)> {
@@ -1210,6 +1232,36 @@ mod tests {
             })
             .expect("math block");
         assert_eq!(math, "\\int_0^1 x^2\\,dx = \\frac{1}{3}");
+    }
+
+    /// 居中 / 居右区、引用块里整行的 `$$...$$` 是独立公式；行内的 `$$` 不结对。
+    #[test]
+    fn whole_line_display_math_in_aligned_lines_and_quotes() {
+        let blocks = parse("<!-- [居中] -->\n$$\\sum_a^b$$\n见 $$x$$ 所示\n\n> $$\\sum_a^b$$\n");
+        assert!(matches!(
+            &blocks[0],
+            Block::Aligned { content, .. }
+                if content == &[Inline::DisplayMath("\\sum_a^b".into())]
+        ));
+        assert!(matches!(
+            &blocks[1],
+            Block::Aligned { content, .. }
+                if !content.iter().any(|ip| matches!(ip, Inline::DisplayMath(_)))
+        ));
+        let quote = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Quote { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("引用块");
+        assert_eq!(
+            quote,
+            &[QuoteItem::Paragraph(vec![Inline::DisplayMath(
+                "\\sum_a^b".into()
+            )])],
+            "{blocks:?}"
+        );
     }
 
     #[test]

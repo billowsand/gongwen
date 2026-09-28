@@ -750,6 +750,7 @@ fn add_inlines(
             Inline::Footnote(t) => (format!("（{}）", t), false, false),
             // docx 不支持公式，降级为源码原文
             Inline::Math(t) => (format!("${t}$"), false, false),
+            Inline::DisplayMath(t) => (format!("$${t}$$"), false, false),
         };
         let mut run = Run::new().add_text(&text).fonts(font_set(font)).size(size);
         if bold || force_bold {

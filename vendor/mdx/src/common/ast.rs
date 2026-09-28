@@ -169,6 +169,10 @@ pub enum Inline {
     /// 行内 LaTeX 数学公式。如 `$E=mc^2$`，保存 `$` 之间的公式源码原文。
     /// 仅 research tex 输出 `\(...\)`；official / docx 降级为转义后的源码原文。
     Math(String),
+    /// 独立公式：居中 / 居右区、引用块里整行写成 `$$...$$`，保存定界符之间的
+    /// 源码原文（正文里独占一段的 `$$` 是 [`Block::Math`]）。它总是那一行的
+    /// 唯一内容。research tex 排成展示样式的公式；official / docx 降级为源码原文。
+    DisplayMath(String),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
