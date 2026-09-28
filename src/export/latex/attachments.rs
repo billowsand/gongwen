@@ -70,8 +70,7 @@ pub(crate) fn official_heading_to_tex(
     let rendered = match level {
         2 => format!("\\noindent\\hspace*{{2em}}{{\\heiti\\enheiti {escaped}}}\\par"),
         3 => format!("\\noindent\\hspace*{{2em}}{{\\kai\\enkai {escaped}}}\\par"),
-        4 => format!("\\noindent\\hspace*{{2em}}{escaped}\\par"),
-        5 => format!("\\noindent\\hspace*{{2em}}\\GwBold{{{escaped}}}\\par"),
+        4 | 5 => format!("\\noindent\\hspace*{{2em}}\\GwBold{{{escaped}}}\\par"),
         _ => return None,
     };
     Some(rendered)

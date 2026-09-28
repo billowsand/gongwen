@@ -26,6 +26,8 @@ pub(crate) fn heading_family(level: u8) -> &'static str {
     match level {
         2 => theme::FONT_HEITI,
         3 => theme::FONT_KAITI,
+        // 4、5 级（默认编“1.”“(1)”）连编号一起加粗，与 Word / TeX 同步。
+        4 | 5 => theme::FONT_BOLD,
         _ => theme::FONT_FANGSONG,
     }
 }

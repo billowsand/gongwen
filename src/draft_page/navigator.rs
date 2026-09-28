@@ -1181,8 +1181,8 @@ mod tests {
                 theme::FONT_BIAOSONG,
                 theme::FONT_HEITI,
                 theme::FONT_KAITI,
-                theme::FONT_FANGSONG,
-                theme::FONT_FANGSONG,
+                theme::FONT_BOLD,
+                theme::FONT_BOLD,
             ]
             .map(theme::official_family)
         );

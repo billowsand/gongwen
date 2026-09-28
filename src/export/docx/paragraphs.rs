@@ -158,7 +158,7 @@ pub(crate) fn heading_paragraph_with_number(
                 .add_text(piece)
                 .fonts(chinese_fonts(font))
                 .size(BODY_SIZE);
-            if level == 5 {
+            if matches!(level, 4 | 5) {
                 run = apply_bold(run, bold);
             }
             run
@@ -170,7 +170,7 @@ pub(crate) fn heading_paragraph_with_number(
             .add_text(number)
             .fonts(chinese_fonts(font))
             .size(BODY_SIZE);
-        if level == 5 {
+        if matches!(level, 4 | 5) {
             run = apply_bold(run, bold);
         }
         if whole_added {
@@ -189,7 +189,7 @@ pub(crate) fn heading_paragraph_with_number(
             .add_text(piece)
             .fonts(chinese_fonts(font))
             .size(BODY_SIZE);
-        if level == 5 {
+        if matches!(level, 4 | 5) {
             run = apply_bold(run, bold);
         }
         run
@@ -218,7 +218,7 @@ pub(crate) fn compact_heading_paragraph(
     body: &str,
     bold: BoldFont<'_>,
 ) -> Paragraph {
-    // 与 `heading_paragraph` 的层级字体保持一致：2 级黑体、3 级楷体、其余仿宋（5 级加粗）。
+    // 与 `heading_paragraph` 的层级字体保持一致：2 级黑体、3 级楷体、其余仿宋（4、5 级加粗）。
     let font = match level {
         2 => "黑体",
         3 => "楷体_GB2312",
@@ -229,7 +229,7 @@ pub(crate) fn compact_heading_paragraph(
             .add_text(piece)
             .fonts(chinese_fonts(font))
             .size(BODY_SIZE);
-        if level == 5 {
+        if matches!(level, 4 | 5) {
             run = apply_bold(run, bold);
         }
         run
