@@ -633,8 +633,12 @@ mod tests {
         let content_right = max_right + metrics.mm(crate::export::SIGNATURE_ROOM_MM);
         let expected_center = (unit_left + content_right) / 2.0;
         let date_center = rows[2].center().x;
+        // 8 px 容差：算法按字数 + em 算出单位块宽度，em→px 与具体字体度量有关，
+        // Windows 与 Linux 度量有 ~4 px 漂移；3 px 容差在本机字体上够，但 CI 的
+        // GLIBC 2.28 / ARM64 上撑死 4.3 px。结构断言（日期中点落在中间而不是
+        // 紧贴单位右缘）仍由较大范围守住，不会被无意义抖动打掉。
         assert!(
-            (date_center - expected_center).abs() <= 3.0,
+            (date_center - expected_center).abs() <= 8.0,
             "成文日期中点应在单位与签字空间中间：实际 {date_center:.1}，应为 {expected_center:.1}（{rows:?}）"
         );
         // 简称 3 字分散到 5 字宽：行宽应明显大于 3 字自然宽（≈62px）、
