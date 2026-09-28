@@ -245,7 +245,7 @@ AI 能力放在确定性能力之后，因为它的设计前提是「先管住�
 ## 项目结构与开发
 
 ```text
-src/                应用代码（约 12.2 万行 Rust，1289 项自动化测试）
+src/                应用代码（约 12.6 万行 Rust，1343 项自动化测试）
 assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
