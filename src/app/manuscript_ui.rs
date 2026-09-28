@@ -161,6 +161,58 @@ struct MergeReview {
     notes: Vec<String>,
 }
 
+/// 单篇删除的二次确认气泡，贴在触发它的按钮下方弹出。
+///
+/// 以前确认条放在列表上方：离删除按钮太远，而且一插进来整个列表就往下挤一截。
+/// 气泡是独立图层，不占版面，点外面或按 Esc 即收起（把 `open` 置为 false）。
+/// 返回 true 表示用户点了「确认删除」。
+fn delete_confirm_popup(anchor: &egui::Response, open: &mut bool) -> bool {
+    let mut confirmed = false;
+    egui::Popup::from_response(anchor)
+        .id(anchor.id.with("delete_confirm"))
+        .open_bool(open)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::BOTTOM_END)
+        .align_alternatives(&[egui::RectAlign::TOP_END])
+        .show(|ui| {
+            ui.colored_label(warn(), "删除后不可恢复，确认删除这篇稿件吗？");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("取消").clicked() {
+                    ui.close();
+                }
+                if ui
+                    .add(theme::warning_icon_button(theme::Icon::Trash, "确认删除"))
+                    .clicked()
+                {
+                    confirmed = true;
+                    ui.close();
+                }
+            });
+        });
+    confirmed
+}
+
+/// 若 `pending` 正指向这一行，就在 `anchor` 下弹出删除确认；确认或收起后清掉 `pending`。
+fn row_delete_confirm(
+    anchor: &egui::Response,
+    pending: &mut Option<i64>,
+    id: i64,
+    action: &mut Option<ManuscriptAction>,
+) {
+    if *pending != Some(id) {
+        return;
+    }
+    let mut open = true;
+    if delete_confirm_popup(anchor, &mut open) {
+        *action = Some(ManuscriptAction::Delete(id));
+        open = false;
+    }
+    if !open {
+        *pending = None;
+    }
+}
+
 fn import_action_label(action: &manuscript_io::sync::ImportAction) -> &'static str {
     use manuscript_io::sync::ImportAction;
     match action {
@@ -789,35 +841,13 @@ impl GongwenApp {
         }
     }
 
-    /// 删除 / 归档 / 导入预览三组确认区。可能写入 `action`，在帧末执行。
+    /// 批量删除 / 归档 / 导入预览三组确认区。可能写入 `action`，在帧末执行。
+    /// 单篇删除不在这里确认，而是在行内删除按钮下方弹出气泡，见 `delete_confirm_popup`。
     pub(crate) fn manuscript_confirm_groups(
         &mut self,
         ui: &mut egui::Ui,
         action: &mut Option<ManuscriptAction>,
     ) {
-        if let Some(id) = self.manuscript_delete_confirm {
-            let mut do_delete = false;
-            let mut do_cancel = false;
-            ui.group(|ui| {
-                ui.colored_label(warn(), "删除后不可恢复，确认删除这篇稿件吗？");
-                ui.horizontal(|ui| {
-                    if ui.button("确认删除").clicked() {
-                        do_delete = true;
-                    }
-                    if ui.button("取消").clicked() {
-                        do_cancel = true;
-                    }
-                });
-            });
-            if do_cancel {
-                self.manuscript_delete_confirm = None;
-            } else if do_delete {
-                self.manuscript_delete_confirm = None;
-                *action = Some(ManuscriptAction::Delete(id));
-            }
-            ui.add_space(6.0);
-        }
-
         if self.manuscript_batch_delete_confirm {
             let deletable = self
                 .manuscript_rows
@@ -1587,7 +1617,7 @@ impl GongwenApp {
                     row.col(|ui| {
                         ui.set_opacity(seen_t);
                         if compact {
-                            ui.menu_button("•••", |ui| match data.status {
+                            let menu = ui.menu_button("•••", |ui| match data.status {
                                 ManuscriptStatus::Archived => {
                                     if ui.button("打开只读公文").clicked() {
                                         *action = Some(ManuscriptAction::Edit(data.id));
@@ -1646,8 +1676,16 @@ impl GongwenApp {
                                     }
                                 }
                             });
+                            // 菜单点「删除」后自身已收起，确认气泡改贴在「•••」下方。
+                            row_delete_confirm(
+                                &menu.response,
+                                &mut self.manuscript_delete_confirm,
+                                data.id,
+                                action,
+                            );
                             return;
                         }
+                        let mut trash_button = None;
                         ui.horizontal(|ui| match data.status {
                             ManuscriptStatus::Archived => {
                                 if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
@@ -1688,11 +1726,17 @@ impl GongwenApp {
                                 {
                                     *action = Some(ManuscriptAction::ArchivePending(data.id));
                                 }
-                                if theme::danger_icon_button(ui, theme::Icon::Trash, "删除")
-                                    .clicked()
-                                {
-                                    *action = Some(ManuscriptAction::DeletePending(data.id));
+                                let trash =
+                                    theme::danger_icon_button(ui, theme::Icon::Trash, "删除");
+                                if trash.clicked() {
+                                    // 再点一次删除按钮就收起确认气泡。
+                                    if self.manuscript_delete_confirm == Some(data.id) {
+                                        self.manuscript_delete_confirm = None;
+                                    } else {
+                                        *action = Some(ManuscriptAction::DeletePending(data.id));
+                                    }
                                 }
+                                trash_button = Some(trash);
                             }
                             _ => {
                                 if theme::icon_button(ui, theme::Icon::Eye, "查看详情")
@@ -1717,13 +1761,27 @@ impl GongwenApp {
                                 {
                                     *action = Some(ManuscriptAction::ArchivePending(data.id));
                                 }
-                                if theme::danger_icon_button(ui, theme::Icon::Trash, "删除")
-                                    .clicked()
-                                {
-                                    *action = Some(ManuscriptAction::DeletePending(data.id));
+                                let trash =
+                                    theme::danger_icon_button(ui, theme::Icon::Trash, "删除");
+                                if trash.clicked() {
+                                    // 再点一次删除按钮就收起确认气泡。
+                                    if self.manuscript_delete_confirm == Some(data.id) {
+                                        self.manuscript_delete_confirm = None;
+                                    } else {
+                                        *action = Some(ManuscriptAction::DeletePending(data.id));
+                                    }
                                 }
+                                trash_button = Some(trash);
                             }
                         });
+                        if let Some(trash) = trash_button {
+                            row_delete_confirm(
+                                &trash,
+                                &mut self.manuscript_delete_confirm,
+                                data.id,
+                                action,
+                            );
+                        }
                     });
                 });
             });
