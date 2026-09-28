@@ -216,7 +216,7 @@ impl DraftPage<'_> {
                             .on_hover_text(tip)
                             .clicked()
                         {
-                            self.doc.preview_mode = mode;
+                            self.switch_preview_mode(mode);
                         }
                     }
                     if self.doc.preview_mode == PreviewMode::Source {
@@ -1206,7 +1206,7 @@ impl DraftPage<'_> {
             .on_hover_text("最新提交版本与当前修订逐字比较")
             .clicked()
         {
-            self.doc.preview_mode = PreviewMode::VersionDiff;
+            self.switch_preview_mode(PreviewMode::VersionDiff);
         }
 
         if ui
@@ -1278,7 +1278,7 @@ impl DraftPage<'_> {
                 .on_hover_text(tip)
                 .clicked()
             {
-                self.doc.preview_mode = mode;
+                self.switch_preview_mode(mode);
             }
         }
         toolbar_separator(ui);
@@ -1350,7 +1350,7 @@ impl DraftPage<'_> {
             .on_hover_text("进入版本对照模式并展开左侧的版本时间轴")
             .clicked()
         {
-            self.doc.preview_mode = PreviewMode::VersionDiff;
+            self.switch_preview_mode(PreviewMode::VersionDiff);
             self.doc.draft_diff.timeline.expanded = true;
         }
         // 两处行号各管一边，标签必须各自说清是哪一边：编辑区的号数的是源码行，

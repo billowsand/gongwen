@@ -504,6 +504,7 @@ impl DraftPage<'_> {
         // 拆开借用：编辑框要可变借文本，布局器要可变借高亮缓存。
         let jump = self.doc.pending_source_jump.take();
         let selection = self.doc.pending_source_selection.take();
+        let reveal = std::mem::take(&mut self.doc.pending_source_reveal);
         let programmatic_source_move = jump.is_some() || selection.is_some();
         let anchor = self
             .doc
@@ -639,6 +640,24 @@ impl DraftPage<'_> {
                                         } else if let Some(offset) = jump {
                                             jump_to_source(ui, &output, text, offset);
                                         }
+                                        if reveal {
+                                            // 换模式重排后光标可能滚出了视野：拉回
+                                            // 来并恢复焦点，让用户接着刚才的位置改。
+                                            // 本帧另有跳转/选区请求时以它们为准，
+                                            // 它们自己会滚动。
+                                            ui.ctx()
+                                                .memory_mut(|memory| memory.request_focus(editor_id()));
+                                            if !programmatic_source_move
+                                                && let Some(cursor) =
+                                                    output.cursor_range.map(|range| range.primary)
+                                            {
+                                                let rect = output
+                                                    .galley
+                                                    .pos_from_cursor(cursor)
+                                                    .translate(output.galley_pos.to_vec2());
+                                                ui.scroll_to_rect(rect, None);
+                                            }
+                                        }
                                         if output.cursor_range.is_some_and(|range| {
                                             source_line_at_char(text, range.primary.index.0)
                                                 != active_line
@@ -733,6 +752,22 @@ impl DraftPage<'_> {
                         } else if let Some(offset) = jump {
                             jump_to_source(ui, &output, text, offset);
                         }
+                        if reveal {
+                            // 换模式重排后光标可能滚出了视野：拉回来并恢复焦点，
+                            // 让用户接着刚才的位置改。本帧另有跳转/选区请求时以
+                            // 它们为准，它们自己会滚动。
+                            ui.ctx()
+                                .memory_mut(|memory| memory.request_focus(editor_id()));
+                            if !programmatic_source_move
+                                && let Some(cursor) = output.cursor_range.map(|range| range.primary)
+                            {
+                                let rect = output
+                                    .galley
+                                    .pos_from_cursor(cursor)
+                                    .translate(output.galley_pos.to_vec2());
+                                ui.scroll_to_rect(rect, None);
+                            }
+                        }
                         if !programmatic_source_move
                             && self.doc.preview_mode == PreviewMode::Split
                             && output.response.has_focus()
@@ -784,6 +819,44 @@ impl DraftPage<'_> {
                     ui.ctx().request_repaint();
                 }
             }
+        }
+        // 单栏模式（Markdown / 实时排版）没有光标跟随，同步高亮不会自己更新：
+        // 光标离开它所在的段时把它撤掉，否则从对照模式带过来的旧高亮会一直
+        // 留在版面上，选在别处也不消失。
+        if self.doc.preview_mode != PreviewMode::Split && !programmatic_source_move {
+            let focused = ui.ctx().memory(|memory| memory.has_focus(editor_id()));
+            let source = &self.doc.generated_markdown;
+            let cursor_line = focused
+                .then(|| editor_cursor(ui.ctx(), source))
+                .flatten()
+                .map(|byte| source[..byte].rfind('\n').map_or(0, |index| index + 1));
+            if let (Some(anchor_line), Some(cursor_line)) =
+                (self.doc.preview_cursor_line, cursor_line)
+                && cursor_line != anchor_line
+            {
+                self.doc.preview_anchor = None;
+                self.doc.preview_cursor_line = None;
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+
+    /// 切换审校显示方式。离开对照模式时清掉光标跟随高亮——它锚在旧段落上，
+    /// 单栏模式不会随光标更新，留着就是一块甩不掉的底色；切到带源码编辑框的
+    /// 模式时请求下一帧把光标滚回视野并恢复焦点，否则换栏宽重排后刚才改到
+    /// 哪儿就看不到了。查找条开着时不抢输入焦点。
+    pub(crate) fn switch_preview_mode(&mut self, mode: PreviewMode) {
+        if self.doc.preview_mode == PreviewMode::Split && mode != PreviewMode::Split {
+            self.doc.preview_anchor = None;
+            self.doc.preview_cursor_line = None;
+        }
+        self.doc.preview_mode = mode;
+        if matches!(
+            mode,
+            PreviewMode::Source | PreviewMode::Hybrid | PreviewMode::Split
+        ) && !self.doc.markdown_find.open
+        {
+            self.doc.pending_source_reveal = true;
         }
     }
 

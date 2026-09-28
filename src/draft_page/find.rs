@@ -400,12 +400,20 @@ impl DraftPage<'_> {
         self.doc.pending_source_jump = None;
         let Some(range) = range else {
             self.doc.preview_anchor = None;
+            self.doc.preview_cursor_line = None;
             self.doc.pending_source_selection = None;
             self.doc.pending_render_jump = false;
             return;
         };
         self.doc.pending_source_selection = Some(range.clone());
         self.doc.pending_render_jump = true;
+        // 记下命中所在的段：单栏模式里光标离开这一段时撤销高亮（对照模式
+        // 则由光标跟随每帧重写），不登记的话查找高亮会被当成残留立即清掉。
+        self.doc.preview_cursor_line = Some(
+            self.doc.generated_markdown[..range.start.min(self.doc.generated_markdown.len())]
+                .rfind('\n')
+                .map_or(0, |index| index + 1),
+        );
         self.doc.preview_anchor =
             self.doc
                 .generated_markdown

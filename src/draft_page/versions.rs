@@ -14,7 +14,7 @@ use std::ops::Range;
 impl DraftPage<'_> {
     /// 切回 Markdown 源码并把光标 / 选区定位到给定范围。
     pub(crate) fn jump_to_source(&mut self, range: Range<usize>) {
-        self.doc.preview_mode = PreviewMode::Source;
+        self.switch_preview_mode(PreviewMode::Source);
         self.select_find_match(Some(range));
     }
 

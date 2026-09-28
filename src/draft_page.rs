@@ -396,6 +396,9 @@ pub(crate) struct DraftSession {
     pub(crate) pending_render_jump: bool,
     /// 分栏模式中上一次同步到预览的 Markdown 行首；只在跨行时触发滚动。
     pub(crate) preview_cursor_line: Option<usize>,
+    /// 切换显示方式后，源码编辑框下一帧把光标滚回视野并恢复焦点：换模式
+    /// 重排后光标可能落在滚动区外，不拉回来用户就找不到刚才编辑的位置。
+    pub(crate) pending_source_reveal: bool,
     /// 审校区查找/替换条的状态。
     pub(crate) markdown_find: MarkdownFindState,
     /// 「插入 → 表格」里手填的行列数，记住上一次填的值。行数含表头。
@@ -557,6 +560,7 @@ impl DraftSession {
             pending_source_selection: None,
             pending_render_jump: false,
             preview_cursor_line: None,
+            pending_source_reveal: false,
             markdown_find: MarkdownFindState::default(),
             table_size: (3, 3),
             highlighter: MarkdownHighlighter::default(),
@@ -718,6 +722,7 @@ impl DraftSession {
         self.pending_source_selection = None;
         self.pending_render_jump = false;
         self.preview_cursor_line = None;
+        self.pending_source_reveal = false;
     }
 }
 
@@ -1813,6 +1818,83 @@ mod split_resize_tests {
             Some(expected),
             "点击后应选中提示指向的那一段"
         );
+    }
+
+    /// 从对照模式切回 Markdown：光标跟随高亮要清掉，且要登记一次「把光标滚回
+    /// 视野」的请求——否则旧高亮会一直留在版面上，重排后用户找不到刚才的位置。
+    #[test]
+    fn leaving_split_mode_clears_cursor_follow_highlight() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Split;
+        let start = harness.doc.generated_markdown.find('加').unwrap();
+        let range = start..start + "加强".len();
+        let text = harness.doc.generated_markdown[range.clone()].to_owned();
+        harness.doc.preview_anchor = Some(PreviewAnchor { range, text });
+        harness.doc.preview_cursor_line = Some(start);
+
+        {
+            let mut page = DraftPage {
+                doc: &mut harness.doc,
+                config: &mut harness.config,
+                store: None,
+                sender: &harness.sender,
+                status: &mut harness.status,
+                version_switch: &mut harness.version_switch,
+                revert_confirm: &mut harness.revert_confirm,
+                actions: &mut harness.actions,
+                export_links: &mut harness.export_links,
+                metrics: &mut harness.metrics,
+            };
+            page.switch_preview_mode(PreviewMode::Source);
+        }
+
+        assert_eq!(harness.doc.preview_mode, PreviewMode::Source);
+        assert!(
+            harness.doc.preview_anchor.is_none(),
+            "对照模式的高亮不该带到单栏模式"
+        );
+        assert!(harness.doc.preview_cursor_line.is_none());
+        assert!(
+            harness.doc.pending_source_reveal,
+            "切回带编辑框的模式后应把光标滚回视野"
+        );
+    }
+
+    /// 切到不带编辑框的模式不需要拉回光标；查找条开着时不抢输入焦点。
+    #[test]
+    fn switching_mode_respects_rendered_view_and_find_bar() {
+        let mut harness = Harness::new();
+        harness.doc.preview_mode = PreviewMode::Split;
+        harness.doc.markdown_find.open = true;
+        let (reveal_with_find, reveal_rendered, reveal_source) = {
+            let mut page = DraftPage {
+                doc: &mut harness.doc,
+                config: &mut harness.config,
+                store: None,
+                sender: &harness.sender,
+                status: &mut harness.status,
+                version_switch: &mut harness.version_switch,
+                revert_confirm: &mut harness.revert_confirm,
+                actions: &mut harness.actions,
+                export_links: &mut harness.export_links,
+                metrics: &mut harness.metrics,
+            };
+            // 查找条开着：切回 Markdown 也不抢焦点。
+            page.switch_preview_mode(PreviewMode::Source);
+            let reveal_with_find = page.doc.pending_source_reveal;
+            // 没有编辑框的模式：无需拉回光标。
+            page.switch_preview_mode(PreviewMode::Split);
+            page.doc.markdown_find.open = false;
+            page.switch_preview_mode(PreviewMode::Rendered);
+            let reveal_rendered = page.doc.pending_source_reveal;
+            // 编辑框与查找条都就绪：正常登记拉回请求。
+            page.switch_preview_mode(PreviewMode::Source);
+            let reveal_source = page.doc.pending_source_reveal;
+            (reveal_with_find, reveal_rendered, reveal_source)
+        };
+        assert!(!reveal_with_find, "查找条开着时不应请求聚焦编辑框");
+        assert!(!reveal_rendered);
+        assert!(reveal_source);
     }
 
     impl Harness {

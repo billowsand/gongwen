@@ -152,6 +152,7 @@ impl DraftPage<'_> {
         self.doc.pending_source_jump = None;
         self.doc.pending_source_selection = None;
         self.doc.pending_render_jump = false;
+        self.doc.pending_source_reveal = false;
         self.doc.markdown_find = MarkdownFindState::default();
     }
 
