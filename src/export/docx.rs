@@ -7,7 +7,7 @@ use crate::export::title;
 use crate::export::title::TitlePlan;
 use crate::export::{
     MarkdownBlock, MarkdownSection, attachment_names, compact_heading_flags, official_heading_text,
-    parse_markdown_with_numbering, plain_text,
+    parse_markdown_with_lines_with_numbering, plain_text,
 };
 #[cfg(test)]
 use crate::models::StyleMode;
@@ -171,7 +171,7 @@ pub fn write_docx_with_numbering(
         return write_meeting_agenda_docx(path, input, markdown, fonts, numbering, elements);
     }
 
-    let blocks = parse_markdown_with_numbering(markdown, numbering);
+    let (blocks, block_lines) = parse_markdown_with_lines_with_numbering(markdown, numbering);
     let title = blocks
         .iter()
         .find_map(|b| match b {
@@ -401,7 +401,8 @@ pub fn write_docx_with_numbering(
         let mut in_attachment = false;
         let mut seen_document_title = false;
         let mut counters = [0usize; 4];
-        let compact_headings = compact_heading_flags(&blocks, input.profile.style_mode);
+        let compact_headings =
+            compact_heading_flags(&blocks, &block_lines, input.profile.style_mode);
         let mut index = 0usize;
         while index < blocks.len() {
             let block = &blocks[index];

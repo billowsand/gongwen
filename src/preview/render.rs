@@ -344,7 +344,11 @@ impl OfficialParse {
             .iter()
             .map(|&index| blocks[index].clone())
             .collect::<Vec<_>>();
-        let compact_headings = export::compact_heading_flags(&body_plain, style_mode);
+        let body_lines = export::block_start_lines(
+            markdown,
+            body.iter().map(|&index| located[index].range.start),
+        );
+        let compact_headings = export::compact_heading_flags(&body_plain, &body_lines, style_mode);
         let title = body.iter().find_map(|&index| match &located[index].block {
             MarkdownBlock::Title(text) => {
                 Some((marks::plain_keep_marks(text), located[index].range.clone()))

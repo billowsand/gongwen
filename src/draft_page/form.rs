@@ -1582,7 +1582,7 @@ impl DraftPage<'_> {
                     row_label_with_info(
                         ui,
                         "排版风格",
-                        "全局紧缩会合并全文最深级标题与紧随正文；节内紧缩以 ## 为边界，合并每节内各自最深级的标题与紧随正文。",
+                        "全局紧缩会合并全文最深级标题与紧随正文；节内紧缩以 ## 为边界，合并每节内各自最深级的标题与紧随正文。标题与正文之间不空行才合并，空一行则标题照常单独成段。",
                     );
                     egui::ComboBox::from_id_salt("style_mode")
                         .selected_text(self.doc.draft.profile.style_mode.label())

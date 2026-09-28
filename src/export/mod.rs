@@ -50,9 +50,9 @@ pub(crate) use headings::{
 #[allow(unused_imports)]
 pub(crate) use parse::{
     ColumnAlign, LineAlign, LocatedBlock, MarkdownBlock, MarkdownSection, ResearchSection,
-    TableSpan, block_span_for_line, body_heading_max_level, circled_number, compact_heading_flags,
-    is_image_line, normalize_ordered_list_punctuation, parse_align_marker, parse_list_item,
-    parse_markdown, parse_markdown_located, parse_markdown_located_research,
+    TableSpan, block_span_for_line, block_start_lines, body_heading_max_level, circled_number,
+    compact_heading_flags, is_image_line, normalize_ordered_list_punctuation, parse_align_marker,
+    parse_list_item, parse_markdown, parse_markdown_located, parse_markdown_located_research,
     parse_markdown_located_with_numbering, parse_markdown_with_lines,
     parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering,
     parse_numbered_table_marker, parse_ordered_item, parse_research_marker, parse_section_marker,

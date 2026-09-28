@@ -628,7 +628,7 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
     let mut attachment_title_count = 0usize;
     let mut current_attachment_is_landscape = false;
     let mut counters = [0usize; 4];
-    let compact_headings = crate::export::compact_heading_flags(blocks, style_mode);
+    let compact_headings = crate::export::compact_heading_flags(blocks, lines, style_mode);
 
     let mut index = 0usize;
     while index < blocks.len() {

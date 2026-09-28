@@ -691,7 +691,9 @@ pub(crate) fn red_build_print_layout(
         .iter()
         .map(|located| located.block.clone())
         .collect::<Vec<_>>();
-    let compact_headings = export::compact_heading_flags(&body_plain, input.profile.style_mode);
+    let body_lines = export::block_start_lines(markdown, body.iter().map(|b| b.range.start));
+    let compact_headings =
+        export::compact_heading_flags(&body_plain, &body_lines, input.profile.style_mode);
     let mut counters = [0usize; 4];
     let mut index = 0usize;
     while index < body.len() {

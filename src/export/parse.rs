@@ -1461,8 +1461,46 @@ pub(crate) fn body_heading_max_level(blocks: &[MarkdownBlock]) -> u8 {
     max_level
 }
 
+/// 各块在源码里的 1-based 起始行号；`starts` 是各块起始字节偏移。
+/// 预览手里只有 `LocatedBlock` 的字节范围，用它换成 [`compact_heading_flags`] 要的行号。
+pub(crate) fn block_start_lines(
+    markdown: &str,
+    starts: impl IntoIterator<Item = usize>,
+) -> Vec<usize> {
+    let line_starts: Vec<usize> = source_lines(markdown)
+        .into_iter()
+        .map(|(offset, _)| offset)
+        .collect();
+    starts
+        .into_iter()
+        .map(|start| line_of(&line_starts, start))
+        .collect()
+}
+
 /// 返回正文区中应当与后续段落合并的标题位置。
-pub(crate) fn compact_heading_flags(blocks: &[MarkdownBlock], mode: StyleMode) -> Vec<bool> {
+///
+/// 选中的那一级标题，还得在源码里与下一块**紧挨着写、中间不空行**才接排；空一行
+/// 就照常另起一段——与列表「贴着正文写并入上段、空一行独立成段」同一个口径。
+/// `lines` 与 `blocks` 一一对应，是各块的 1-based 起始行号；缺了行号无从判断，
+/// 按贴着写处理。
+pub(crate) fn compact_heading_flags(
+    blocks: &[MarkdownBlock],
+    lines: &[usize],
+    mode: StyleMode,
+) -> Vec<bool> {
+    let mut flags = compact_heading_levels(blocks, mode);
+    for (index, flag) in flags.iter_mut().enumerate() {
+        if let (Some(heading), Some(next)) = (lines.get(index), lines.get(index + 1))
+            && *next > heading + 1
+        {
+            *flag = false;
+        }
+    }
+    flags
+}
+
+/// 紧缩风格按层级选出的标题：全局紧缩取全篇最深一级，节内紧缩取每节各自最深一级。
+fn compact_heading_levels(blocks: &[MarkdownBlock], mode: StyleMode) -> Vec<bool> {
     let mut flags = vec![false; blocks.len()];
     match mode {
         StyleMode::Normal => {}
@@ -1619,10 +1657,10 @@ mod compact_style_tests {
 
     #[test]
     fn section_compact_chooses_each_level_two_sections_own_deepest_heading() {
-        let blocks = parse_markdown(
+        let (blocks, lines) = parse_markdown_with_lines(
             "# 标题\n\n## 总体要求\n节首正文。\n### 子项\n子项正文。\n\n## 工作安排\n第二节正文。",
         );
-        let flags = compact_heading_flags(&blocks, StyleMode::SectionCompact);
+        let flags = compact_heading_flags(&blocks, &lines, StyleMode::SectionCompact);
         let selected = blocks
             .iter()
             .zip(flags)
@@ -1639,13 +1677,43 @@ mod compact_style_tests {
 
     #[test]
     fn global_compact_still_chooses_only_the_documents_deepest_level() {
-        let blocks =
-            parse_markdown("# 标题\n\n## 第一节\n### 子项\n正文。\n\n## 第二节\n第二节正文。");
-        let flags = compact_heading_flags(&blocks, StyleMode::Compact);
+        let (blocks, lines) = parse_markdown_with_lines(
+            "# 标题\n\n## 第一节\n### 子项\n正文。\n\n## 第二节\n第二节正文。",
+        );
+        let flags = compact_heading_flags(&blocks, &lines, StyleMode::Compact);
         assert_eq!(flags.iter().filter(|selected| **selected).count(), 1);
         assert!(blocks.iter().zip(flags).any(|(block, selected)| {
             selected && matches!(block, MarkdownBlock::Heading(3, text) if text == "子项")
         }));
+    }
+
+    /// 标题下空一行就另起一段，贴着写才接排；层级选择不受影响。
+    #[test]
+    fn blank_line_after_heading_keeps_it_on_its_own_line() {
+        let (blocks, lines) = parse_markdown_with_lines(
+            "# 标题\n\n## 一节\n\n### 贴着写\n正文甲。\n\n### 空一行\n\n正文乙。",
+        );
+        let flags = compact_heading_flags(&blocks, &lines, StyleMode::Compact);
+        let selected = blocks
+            .iter()
+            .zip(&flags)
+            .filter_map(|(block, selected)| selected.then_some(block))
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec![&MarkdownBlock::Heading(3, "贴着写".into())]);
+
+        let flags = compact_heading_flags(&blocks, &lines, StyleMode::SectionCompact);
+        assert_eq!(flags.iter().filter(|selected| **selected).count(), 1);
+    }
+
+    #[test]
+    fn block_start_lines_matches_parser_line_numbers() {
+        let markdown = "# 标题\r\n\r\n## 一节\r\n正文。\r\n";
+        let (_, lines) = parse_markdown_with_lines(markdown);
+        let located = parse_markdown_located(markdown);
+        assert_eq!(
+            block_start_lines(markdown, located.iter().map(|block| block.range.start)),
+            lines
+        );
     }
 }
 
