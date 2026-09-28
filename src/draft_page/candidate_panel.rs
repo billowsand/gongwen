@@ -15,6 +15,7 @@ use eframe::egui;
 use std::ops::Range;
 
 const PANEL_DEFAULT_HEIGHT: f32 = 290.0;
+const PANEL_MIN_HEIGHT: f32 = 170.0;
 const LIST_DEFAULT_WIDTH: f32 = 250.0;
 const ROW_HEIGHT: f32 = 46.0;
 /// 条目悬停时最多预览这么多字。
@@ -40,11 +41,14 @@ impl DraftPage<'_> {
     /// 编辑区底部的候选区。只在有源码编辑框的显示方式下出现。
     pub(crate) fn candidate_panel_ui(&mut self, ui: &mut egui::Ui) {
         let open = self.doc.candidates.open;
+        // 最高只占编辑区七成，正文总要留出能写字的地方。
+        let max_height = (ui.available_height() * 0.7).max(PANEL_MIN_HEIGHT);
         let panel = if open {
-            egui::Panel::bottom("candidate_panel_v1")
+            // v2：v1 的内容比面板高，面板每帧被撑高一点，旧版记住的高度作废。
+            egui::Panel::bottom("candidate_panel_v2")
                 .resizable(true)
-                .default_size(PANEL_DEFAULT_HEIGHT)
-                .size_range(170.0..=680.0)
+                .default_size(PANEL_DEFAULT_HEIGHT.min(max_height))
+                .size_range(PANEL_MIN_HEIGHT..=max_height)
         } else {
             egui::Panel::bottom("candidate_bar_v1").resizable(false)
         };
@@ -59,7 +63,19 @@ impl DraftPage<'_> {
                 self.candidate_header_ui(ui, &mut actions);
                 if open {
                     ui.add_space(4.0);
-                    self.candidate_body_ui(ui, &mut actions);
+                    // 可拖动的面板会按内容的实际高度长大；内容一旦比面板高哪怕一个
+                    // 像素，下一帧面板就被撑高、内容跟着变高，于是自己一路往上长。
+                    // 所以正文部分画在一块定死大小、不向外报尺寸的子区域里，
+                    // 放不下的裁掉，面板高度只由拖动决定。
+                    let rect = ui.available_rect_before_wrap();
+                    let mut body = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    body.set_clip_rect(rect.intersect(ui.clip_rect()));
+                    self.candidate_body_ui(&mut body, &mut actions);
+                    ui.allocate_rect(rect, egui::Sense::hover());
                 }
             });
         for action in actions {
@@ -323,16 +339,24 @@ impl DraftPage<'_> {
             font_size,
             egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into()),
         );
-        let hint_height = 20.0;
+        // 全文框的高度要精确扣掉卡片边距、与提示行之间的间距和提示行本身
+        // （横排一行至少一个控件高），多出一点就会把可拖动的面板撑高。
+        let card = theme::card();
+        let hint_row = ui.spacing().interact_size.y;
+        let text_height = (ui.available_height()
+            - card.total_margin().sum().y
+            - ui.spacing().item_spacing.y
+            - hint_row)
+            .max(40.0);
         let before = selection_before_show(&ctx, id);
         let mut changed = false;
         let mut lost_focus = false;
         let mut menu = None;
-        theme::card().show(ui, |ui| {
+        card.show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("candidate_detail_scroll", key))
                 .auto_shrink([false; 2])
-                .max_height((ui.available_height() - hint_height).max(60.0))
+                .max_height(text_height)
                 .show(ui, |ui| {
                     let text = &mut self.doc.candidates.items[index].record.text;
                     let mut read_only_text = text.as_str();
@@ -750,6 +774,41 @@ mod tests {
         let saved = harness.store.load_candidates(harness.id).unwrap();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].text, picked);
+    }
+
+    #[test]
+    fn expanded_panel_keeps_its_height_across_frames() {
+        let mut harness = Harness::new();
+        harness.select_in_editor("成立工作专班，每月召开一次调度会。");
+        let output = right_click_editor(&mut harness);
+        let item = text_at(&output, |text| text == "移入候选区").unwrap();
+        harness.click(item);
+        harness.doc.candidates.open = true;
+        harness.frame(Vec::new());
+        harness.frame(Vec::new());
+        let key = harness.doc.candidates.items[0].key;
+        let settled = harness.rect_of(candidate_editor_id(key));
+        let mut output = harness.frame(Vec::new());
+        for _ in 0..30 {
+            output = harness.frame(Vec::new());
+        }
+        // 面板内容不能比面板高：否则每帧把可拖动的底栏再撑高一点，自己往上长。
+        assert_eq!(harness.rect_of(candidate_editor_id(key)), settled);
+        // 底部的提示行完整画在窗口里，没有被裁掉一半。
+        let hint = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape)
+                    if shape.galley.text().starts_with("拖选任意文字") =>
+                {
+                    Some((shape.visual_bounding_rect(), clipped.clip_rect))
+                }
+                _ => None,
+            })
+            .expect("应画出操作提示");
+        assert!(hint.1.contains_rect(hint.0), "提示行被裁掉：{hint:?}");
+        assert!(hint.0.bottom() <= 900.0);
     }
 
     #[test]
