@@ -2017,6 +2017,84 @@ mod split_resize_tests {
         assert!(harness.doc.source_minimap.offset > editor_before);
     }
 
+    #[test]
+    fn source_minimap_edge_drag_advances_smoothly_across_frames() {
+        fn frame(harness: &mut Harness, events: Vec<egui::Event>) {
+            harness.clock += 1;
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 900.0),
+                )),
+                time: Some(harness.clock as f64 / 60.0),
+                predicted_dt: 1.0 / 60.0,
+                events,
+                ..Default::default()
+            };
+            let _ = harness.ctx.clone().run_ui(raw, |ui| {
+                let mut page = DraftPage {
+                    doc: &mut harness.doc,
+                    config: &mut harness.config,
+                    store: None,
+                    sender: &harness.sender,
+                    status: &mut harness.status,
+                    version_switch: &mut harness.version_switch,
+                    revert_confirm: &mut harness.revert_confirm,
+                    actions: &mut harness.actions,
+                    export_links: &mut harness.export_links,
+                    metrics: &mut harness.metrics,
+                };
+                page.preview_ui(ui);
+            });
+        }
+
+        let mut harness = Harness::new();
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+        let rect = harness
+            .ctx
+            .read_response(egui::Id::new("gw_source_minimap"))
+            .expect("源码模式应显示缩略图")
+            .rect;
+        let start = egui::pos2(rect.center().x, rect.top() + 48.0);
+        let edge = egui::pos2(start.x, rect.bottom() - 38.0);
+        frame(
+            &mut harness,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame(&mut harness, vec![egui::Event::PointerMoved(edge)]);
+        let first = harness.doc.source_minimap.mini_scroll;
+        frame(&mut harness, vec![egui::Event::PointerMoved(edge)]);
+        let second = harness.doc.source_minimap.mini_scroll;
+        assert!(first > 0.0 && second > first, "触边后应继续缓慢滚动");
+        assert!(second - first < 2.0, "按住边缘一帧不应突然跳过多行");
+        frame(&mut harness, vec![egui::Event::PointerMoved(edge)]);
+        let third = harness.doc.source_minimap.mini_scroll;
+        assert!(third > second && third - second < 2.0);
+        frame(
+            &mut harness,
+            vec![egui::Event::PointerButton {
+                pos: edge,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let released = harness.doc.source_minimap.mini_scroll;
+        frame(&mut harness, vec![egui::Event::PointerMoved(edge)]);
+        assert!(
+            (harness.doc.source_minimap.mini_scroll - released).abs() < 2.0,
+            "松开后正文回传不应把缩略图重新居中"
+        );
+    }
+
     /// 指着刻度点一下，就该跳到那一节——这是整个导航唯一的核心动作。
     /// 顺带锁住刻度带确实压在版面之上拿得到指针：它要是被下面的正文块抢了点击，
     /// 表现就是点了刻度却选中了一段正文。

@@ -14,6 +14,9 @@ use std::hash::{Hash, Hasher};
 const MINIMAP_WIDTH: f32 = 94.0;
 const MINIMAP_SCALE: f32 = 0.16;
 const MINIMAP_VIEWPORT_HEIGHT: f32 = 96.0;
+/// 拖到缩略图边缘后的自动滚动：速度与越界距离成正比，并有上限，避免长稿飞页。
+const MINIMAP_EDGE_GAIN: f32 = 4.0;
+const MINIMAP_EDGE_MAX_SPEED: f32 = 240.0;
 const OUTLINE_WIDTH: f32 = 268.0;
 const OUTLINE_ROW_HEIGHT: f32 = 28.0;
 const OUTLINE_INDENT: f32 = 18.0;
@@ -285,6 +288,7 @@ pub(crate) struct SourceMinimap {
     pub(crate) mini_scroll: f32,
     last_editor_offset: Option<f32>,
     drag_anchor_y: f32,
+    dragging: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -333,6 +337,11 @@ impl SourceMinimap {
     /// 正文位置变动且可见框将离开缩略图时才跟随；单独滚动缩略图时保留用户所看的段落。
     fn follow_editor(&mut self, layout: MiniLayout) {
         self.mini_scroll = self.mini_scroll.clamp(0.0, layout.max_scroll());
+        if self.dragging {
+            // 拖动已经在控制缩略图的滚动位置，正文回传的 offset 只用于下次比较。
+            self.last_editor_offset = Some(self.offset);
+            return;
+        }
         if self
             .last_editor_offset
             .is_some_and(|previous| (previous - self.offset).abs() < 0.5)
@@ -348,6 +357,23 @@ impl SourceMinimap {
             self.mini_scroll = top + layout.box_height * 0.5 - layout.height * 0.5;
         }
         self.mini_scroll = self.mini_scroll.clamp(0.0, layout.max_scroll());
+    }
+
+    /// 手指先带着可见框走；碰到边缘后，可见框停在边缘，内容按越界距离匀速
+    /// 滑过。位移由秒数而非帧数决定，低帧率也不会突然加速。
+    fn drag_to(&mut self, layout: MiniLayout, pointer_y: f32, dt: f32) -> f32 {
+        let desired_top = pointer_y - self.drag_anchor_y;
+        let overflow = if desired_top < 0.0 {
+            desired_top
+        } else {
+            (desired_top + layout.box_height - layout.height).max(0.0)
+        };
+        let speed =
+            (overflow * MINIMAP_EDGE_GAIN).clamp(-MINIMAP_EDGE_MAX_SPEED, MINIMAP_EDGE_MAX_SPEED);
+        self.mini_scroll =
+            (self.mini_scroll + speed * dt.clamp(0.0, 1.0 / 30.0)).clamp(0.0, layout.max_scroll());
+        let visible_top = desired_top.clamp(0.0, (layout.height - layout.box_height).max(0.0));
+        layout.editor_offset_for(self.mini_scroll + visible_top)
     }
 
     pub(crate) fn visible_source_offset(&self) -> usize {
@@ -531,6 +557,38 @@ impl DraftPage<'_> {
                     .input_mut(|input| input.smooth_scroll_delta.y = 0.0);
             }
         }
+        let hit_top = rect.top() + layout.box_top(map.offset) - map.mini_scroll;
+        let hit_viewport = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), hit_top),
+            egui::vec2(rect.width(), layout.box_height),
+        );
+        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+            if response.drag_started() {
+                map.dragging = true;
+                let origin = ui
+                    .input(|input| input.pointer.press_origin())
+                    .unwrap_or(pointer);
+                map.drag_anchor_y = if hit_viewport.contains(origin) {
+                    origin.y - hit_viewport.top()
+                } else {
+                    layout.box_height * 0.5
+                };
+            }
+            if response.dragged() {
+                map.dragging = true;
+                let dt = ui.input(|input| input.stable_dt.max(input.predicted_dt));
+                map.requested_offset = Some(map.drag_to(layout, pointer.y - rect.top(), dt));
+                ui.ctx().request_repaint();
+            } else if response.clicked() && !hit_viewport.contains(pointer) {
+                let top = pointer.y - rect.top() + map.mini_scroll - layout.box_height * 0.5;
+                map.requested_offset = Some(layout.editor_offset_for(top));
+                ui.ctx().request_repaint();
+            }
+        }
+        if response.drag_stopped() {
+            map.dragging = false;
+            map.last_editor_offset = Some(map.offset);
+        }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, theme::surface());
         let buckets = (rect.height() * ui.ctx().pixels_per_point())
@@ -572,7 +630,8 @@ impl DraftPage<'_> {
                 egui::Stroke::new(if heading { 2.0 } else { 1.0 }, color),
             );
         }
-        let top = rect.top() + layout.box_top(map.offset) - map.mini_scroll;
+        let top = rect.top() + layout.box_top(map.requested_offset.unwrap_or(map.offset))
+            - map.mini_scroll;
         let viewport = egui::Rect::from_min_size(
             egui::pos2(rect.left(), top),
             egui::vec2(rect.width(), layout.box_height),
@@ -584,36 +643,6 @@ impl DraftPage<'_> {
             egui::Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
-        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
-            if response.drag_started() {
-                map.drag_anchor_y = if viewport.contains(pointer) {
-                    pointer.y - viewport.top()
-                } else {
-                    layout.box_height * 0.5
-                };
-            }
-            if response.dragged() {
-                let edge = 24.0;
-                let shift = if pointer.y < rect.top() + edge {
-                    -((rect.top() + edge - pointer.y) / edge).clamp(0.0, 1.0) * 12.0
-                } else if pointer.y > rect.bottom() - edge {
-                    ((pointer.y - rect.bottom() + edge) / edge).clamp(0.0, 1.0) * 12.0
-                } else {
-                    0.0
-                };
-                map.mini_scroll = (map.mini_scroll + shift).clamp(0.0, layout.max_scroll());
-            }
-            if response.dragged() || (response.clicked() && !viewport.contains(pointer)) {
-                let anchor = if response.dragged() {
-                    map.drag_anchor_y
-                } else {
-                    layout.box_height * 0.5
-                };
-                let box_top = pointer.y - rect.top() + map.mini_scroll - anchor;
-                map.requested_offset = Some(layout.editor_offset_for(box_top));
-                ui.ctx().request_repaint();
-            }
-        }
         response.on_hover_text("滚轮浏览全文；点击或拖动定位");
     }
 }
@@ -850,6 +879,44 @@ mod tests {
         map.mini_scroll = 0.0;
         map.follow_editor(layout);
         assert_eq!(map.mini_scroll, 0.0, "用户滚动缩略图后不应被自动拉回");
+    }
+
+    #[test]
+    fn minimap_drag_tracks_pointer_and_edge_speed_uses_distance_and_time() {
+        let mut map = SourceMinimap {
+            content_height: 12_000.0,
+            viewport_height: 600.0,
+            mini_scroll: 500.0,
+            drag_anchor_y: 48.0,
+            ..Default::default()
+        };
+        let layout = MiniLayout::new(&map, 500.0);
+        let inside = map.drag_to(layout, 200.0, 1.0 / 60.0);
+        assert_eq!(map.mini_scroll, 500.0);
+        let lower = map.drag_to(layout, 220.0, 1.0 / 60.0);
+        assert!(lower > inside, "框在可见范围内应直接跟随指针");
+        assert_eq!(map.mini_scroll, 500.0);
+
+        let edge = layout.height - layout.box_height + map.drag_anchor_y;
+        let _ = map.drag_to(layout, edge, 1.0 / 60.0);
+        assert_eq!(map.mini_scroll, 500.0, "刚碰到边缘时速度应从零开始");
+        let _ = map.drag_to(layout, edge + 10.0, 1.0 / 60.0);
+        let one_frame = map.mini_scroll - 500.0;
+        assert!((one_frame - 40.0 / 60.0).abs() < 0.01);
+        let _ = map.drag_to(layout, edge + 10.0, 1.0 / 30.0);
+        assert!((map.mini_scroll - 500.0 - one_frame * 3.0).abs() < 0.01);
+
+        map.mini_scroll = 500.0;
+        let _ = map.drag_to(layout, edge + 500.0, 1.0);
+        assert!((map.mini_scroll - 508.0).abs() < 0.01, "停顿一帧不应飞页");
+        map.dragging = true;
+        map.offset = 9_000.0;
+        map.follow_editor(layout);
+        assert_eq!(map.mini_scroll, 508.0, "拖动时正文回传不应把地图拉走");
+
+        map.mini_scroll = 500.0;
+        let _ = map.drag_to(layout, 38.0, 1.0 / 60.0);
+        assert!(map.mini_scroll < 500.0, "上边缘应同样平滑地反向滚动");
     }
 
     #[test]
