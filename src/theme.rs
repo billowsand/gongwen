@@ -2566,10 +2566,38 @@ fn load_system_ui_font(fonts: &mut egui::FontDefinitions, key: &str) -> Option<S
         }
         let mut font_data = egui::FontData::from_owned(data);
         font_data.index = candidate.index;
+        center_line_gap(&mut font_data);
         fonts.font_data.insert(key.to_owned(), font_data.into());
         return Some(key.to_owned());
     }
     None
+}
+
+/// egui 排字时基线固定落在行顶往下 ascent 处，字体的 line gap 整段加在行底，
+/// line gap 大的字体字面就整体偏上。冬青黑体（Hiragino Sans GB，新版 macOS 上
+/// 苹方不在 /System/Library/Fonts，系统默认实际落到它）的 line gap 是半个字高，
+/// 按钮、下拉框里的字明显靠上。把字形下移半个 line gap，上下各分一半，字面
+/// 落回行正中；line gap 为 0 的字体不受影响。
+fn center_line_gap(font_data: &mut egui::FontData) {
+    font_data.tweak.y_offset_factor = line_gap_offset_factor(&font_data.font, font_data.index);
+}
+
+/// 半个 line gap 占字号的比例，即 `FontTweak::y_offset_factor` 该取的值。
+/// ttf_parser 与 egui 所用的 skrifa 一样：OS/2 置了 USE_TYPO_METRICS 才用 typo
+/// 度量，否则用 hhea，两边读到的 line gap 是同一个数。
+fn line_gap_offset_factor(data: &[u8], index: u32) -> f32 {
+    let Ok(face) = ttf_parser::Face::parse(data, index) else {
+        return 0.0;
+    };
+    let gap = f32::from(face.line_gap().max(0));
+    gap / 2.0 / f32::from(face.units_per_em())
+}
+
+/// 给已经装进 `font_data` 的用户所选字体补上 `center_line_gap`。
+fn center_loaded_line_gap(fonts: &mut egui::FontDefinitions, key: &str) {
+    if let Some(data) = fonts.font_data.get_mut(key) {
+        center_line_gap(std::sync::Arc::make_mut(data));
+    }
 }
 
 /// 取公文字体族。字体缺失时 `configure_fonts` 会使用独立的预览后备字体，不会报错。
@@ -2664,6 +2692,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         )
     });
     if let Some(font) = custom_ui_font {
+        center_loaded_line_gap(&mut fonts, &font);
         fonts
             .families
             .entry(egui::FontFamily::Proportional)
@@ -2684,6 +2713,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
     });
     let mut editor_family = Vec::new();
     if let Some(font) = custom_editor_font {
+        center_loaded_line_gap(&mut fonts, &font);
         editor_family.push(font);
     }
     editor_family.extend(
@@ -2998,6 +3028,19 @@ mod tests {
     /// 断的是字体族末尾那支字体的字库，而不是 egui 的 `has_glyph`：后者返回的
     /// 是「这个字是不是落在拥有替代字形的那支字体上」，主字体自带 `◻` 时会把
     /// 正常的字也判成排不出来，问不出我们要的答案。
+    /// 冬青黑体的 line gap 是半个字高（500/1000），字形要下移四分之一字号才居中；
+    /// 这是新版 macOS 找不到苹方时的系统默认界面字体，界面文字曾因此整体偏上。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hiragino_glyphs_shift_down_by_half_the_line_gap() {
+        use crate::theme::line_gap_offset_factor;
+
+        let Ok(data) = std::fs::read("/System/Library/Fonts/Hiragino Sans GB.ttc") else {
+            return;
+        };
+        assert_eq!(line_gap_offset_factor(&data, 0), 0.25);
+    }
+
     #[test]
     fn every_preview_font_family_ends_with_a_font_that_covers_rare_characters() {
         use crate::models::FontConfig;
