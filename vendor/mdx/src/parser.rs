@@ -13,8 +13,8 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-use crate::common::ast::{Block, Inline};
-use crate::common::{heading, inline, markers, quotes, table};
+use crate::common::ast::{Block, Inline, QuoteItem, QuoteKind};
+use crate::common::{heading, inline, markers, quote, quotes, table};
 
 /// 把整段 markdown 解析成 IR。
 pub fn parse(content: &str) -> Vec<Block> {
@@ -90,6 +90,22 @@ pub fn parse(content: &str) -> Vec<Block> {
             unnumbered_root = None;
             blocks.push(Block::Marker(kind));
             i += 1;
+            continue;
+        }
+
+        // 1.5) 引用块：连续的 `>` 行，遇到不带 `>` 的行（含空行）结束。
+        // 专栏首行的 `{#box:id}` 与表题一样剥成锚点块，放在引用块之前。
+        if quote::strip_marker(line).is_some() {
+            list_indents.clear();
+            let start = i;
+            while i < lines.len() && quote::strip_marker(&lines[i]).is_some() {
+                i += 1;
+            }
+            let (label, block) = parse_quote(&lines[start..i]);
+            if let Some(id) = label {
+                blocks.push(Block::Label(id));
+            }
+            blocks.push(block);
             continue;
         }
 
@@ -222,6 +238,47 @@ pub fn parse(content: &str) -> Vec<Block> {
         i += 1;
     }
     blocks
+}
+
+/// 一组连续的 `>` 行 → 引用块，连同文框标题上的锚点。
+///
+/// 块内每条非空行各成一段（空的 `>` 行只起分隔作用），行首写 `- ` / `1. `
+/// 的是列表项，引文里 `——` 开头的是出处。块内不认标题、表格：引用块不进
+/// 章节编号，也不排表。
+fn parse_quote(lines: &[String]) -> (Option<String>, Block) {
+    let mut inner: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| quote::strip_marker(l))
+        .collect();
+    let mut kind = QuoteKind::Citation;
+    let mut label = None;
+    if let Some((name, title)) = inner.first().and_then(|first| quote::box_head(first)) {
+        let (title, id) = strip_label_attr(title);
+        label = id;
+        kind = QuoteKind::Box {
+            name: inline::unescape(name),
+            title: inline::parse(&title),
+        };
+        inner.remove(0);
+    }
+    let boxed = matches!(kind, QuoteKind::Box { .. });
+    let items = inner
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .map(|text| {
+            if let Some((ordered, _, content)) = detect_list(text) {
+                QuoteItem::List {
+                    ordered,
+                    content: inline::parse(&content),
+                }
+            } else if !boxed && quote::is_source(text) {
+                QuoteItem::Source(inline::parse(text))
+            } else {
+                QuoteItem::Paragraph(inline::parse(text))
+            }
+        })
+        .collect();
+    (label, Block::Quote { kind, items })
 }
 
 fn take_leading_table_caption(blocks: &mut Vec<Block>) -> Option<(String, Option<String>)> {
@@ -1016,6 +1073,72 @@ mod tests {
         assert!(blocks
             .iter()
             .any(|block| matches!(block, Block::List { level: 3, .. })));
+    }
+
+    fn quote_blocks(md: &str) -> Vec<(QuoteKind, Vec<QuoteItem>)> {
+        parse(md)
+            .into_iter()
+            .filter_map(|b| match b {
+                Block::Quote { kind, items } => Some((kind, items)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn consecutive_quote_lines_form_one_citation_with_a_source() {
+        let blocks =
+            quote_blocks("正文\n\n> 第一段\n> 仍是一行一段\n>\n> - 列表项\n> ——《意见》\n\n正文");
+        assert_eq!(blocks.len(), 1);
+        let (kind, items) = &blocks[0];
+        assert_eq!(*kind, QuoteKind::Citation);
+        assert!(matches!(&items[0], QuoteItem::Paragraph(i) if inline::flatten(i) == "第一段"));
+        assert!(
+            matches!(&items[1], QuoteItem::Paragraph(i) if inline::flatten(i) == "仍是一行一段")
+        );
+        assert!(
+            matches!(&items[2], QuoteItem::List { ordered: false, content } if inline::flatten(content) == "列表项")
+        );
+        assert!(matches!(&items[3], QuoteItem::Source(i) if inline::flatten(i) == "——《意见》"));
+    }
+
+    #[test]
+    fn a_blank_line_ends_the_quote_and_escaped_markers_stay_text() {
+        let blocks = parse("> 甲\n\n> 乙\n\n\\> 字面\n\n>5%的企业");
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Quote { .. }))
+                .count(),
+            2
+        );
+        let texts: Vec<String> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph(i) => Some(inline::flatten(i)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["> 字面".to_string(), ">5%的企业".to_string()]);
+    }
+
+    #[test]
+    fn box_title_line_carries_the_label_and_dashes_stay_paragraphs() {
+        let blocks = parse("> [!案例] 某市做法 {#case:city}\n>\n> 一是……\n> ——不是出处");
+        assert!(matches!(&blocks[0], Block::Label(id) if id == "case:city"));
+        let Block::Quote {
+            kind: QuoteKind::Box { name, title },
+            items,
+        } = &blocks[1]
+        else {
+            panic!("应是文框：{blocks:?}");
+        };
+        assert_eq!(name, "案例");
+        assert_eq!(inline::flatten(title), "某市做法");
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .all(|item| matches!(item, QuoteItem::Paragraph(_))));
     }
 
     #[test]

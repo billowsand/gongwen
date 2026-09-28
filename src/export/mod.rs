@@ -49,15 +49,16 @@ pub(crate) use headings::{
 };
 #[allow(unused_imports)]
 pub(crate) use parse::{
-    ColumnAlign, LineAlign, LocatedBlock, MarkdownBlock, MarkdownSection, ResearchSection,
-    TableSpan, block_span_for_line, block_start_lines, body_heading_max_level, circled_number,
-    compact_heading_flags, is_image_line, normalize_ordered_list_punctuation, parse_align_marker,
-    parse_list_item, parse_markdown, parse_markdown_located, parse_markdown_located_research,
-    parse_markdown_located_with_numbering, parse_markdown_with_lines,
-    parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering,
-    parse_numbered_table_marker, parse_ordered_item, parse_research_marker, parse_section_marker,
-    parse_table_cells, parse_unnumbered_marker, renumber_ordered_groups, research_report_titles,
-    research_unnumbered_headings, source_lines, table_span_at,
+    ColumnAlign, LineAlign, LocatedBlock, MarkdownBlock, MarkdownSection, QuoteBox, QuoteLine,
+    QuoteLineKind, ResearchSection, TableSpan, block_span_for_line, block_start_lines,
+    body_heading_max_level, circled_number, compact_heading_flags, flatten_quotes, is_image_line,
+    normalize_ordered_list_punctuation, parse_align_marker, parse_list_item, parse_markdown,
+    parse_markdown_located, parse_markdown_located_research, parse_markdown_located_with_numbering,
+    parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
+    parse_markdown_with_numbering, parse_numbered_table_marker, parse_ordered_item,
+    parse_research_marker, parse_section_marker, parse_table_cells, parse_unnumbered_marker,
+    renumber_ordered_groups, research_report_titles, research_unnumbered_headings, source_lines,
+    table_span_at,
 };
 pub(crate) use red::{
     RED_APPROVAL_GUTTER_TWIPS, RED_APPROVAL_NARROW_MM, RED_APPROVAL_RULE_MM,

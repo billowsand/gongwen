@@ -308,7 +308,10 @@ impl OfficialParse {
         numbering: &NumberingConfig,
         style_mode: crate::models::StyleMode,
     ) -> Self {
-        let located = export::parse_markdown_located_with_numbering(markdown, numbering);
+        // 公文没有引文、专栏版式，引用块按普通段落排，与导出一致。
+        let located = export::flatten_quotes(export::parse_markdown_located_with_numbering(
+            markdown, numbering,
+        ));
         let blocks = located
             .iter()
             .map(|block| block.block.clone())
@@ -793,7 +796,12 @@ pub(crate) fn content_block(
         } => table_block(ui, metrics, rows, aligns, spans, *numbered),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
         MarkdownBlock::Aligned { align, text } => aligned_block(ui, metrics, text, *align),
-        MarkdownBlock::Title(_) | MarkdownBlock::Marker(_) | MarkdownBlock::Html(_) => {}
+        // 公文的引用块已由 `OfficialParse` 拆成段落；研究报告的引用块在
+        // `preview::research` 里自己排，都不走这里
+        MarkdownBlock::Title(_)
+        | MarkdownBlock::Marker(_)
+        | MarkdownBlock::Html(_)
+        | MarkdownBlock::Quote { .. } => {}
         MarkdownBlock::Paragraph(_) => {}
     }
 }

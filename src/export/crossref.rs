@@ -79,6 +79,28 @@ fn split_keys(inner: &str) -> impl Iterator<Item = &str> {
         .map(|key| key.trim().trim_start_matches('@'))
 }
 
+/// 全文每一处锚点定义：id 与 `{#id}` 在全文里的字节范围，按出现顺序，不去重。
+/// 查重复定义用：同一个 id 出现几次就有几条。
+pub(crate) fn label_definitions(text: &str) -> Vec<(&str, std::ops::Range<usize>)> {
+    let mut definitions = Vec::new();
+    let mut offset = 0usize;
+    for piece in text.split_inclusive('\n') {
+        let line = piece.trim_end_matches(['\n', '\r']);
+        if split_label(line).1.is_some()
+            && let Some(caps) = label_re().captures(line)
+        {
+            let id = caps.get(1).expect("锚点 id");
+            // `{#` 在 id 前面两个字节，`}` 紧跟在 id 后面。
+            definitions.push((
+                &text[offset + id.start()..offset + id.end()],
+                offset + id.start() - 2..offset + id.end() + 1,
+            ));
+        }
+        offset += piece.len();
+    }
+    definitions
+}
+
 /// 全文所有行尾锚点的 id，按出现顺序；同一个 id 重复定义只留第一次。
 /// 起草页「交叉引用」菜单拿它列出可引的目标。
 pub(crate) fn label_ids(text: &str) -> Vec<&str> {
@@ -290,6 +312,17 @@ mod tests {
         assert_eq!(label_ids(text), ["chap:a", "fig:x"]);
         // 行内的 `{#` 不是锚点：锚点必须独占行尾。
         assert!(label_ids("正文里 {#inline} 不算。").is_empty());
+    }
+
+    #[test]
+    fn label_definitions_keep_every_occurrence_with_its_span() {
+        let text = "## 甲 {#chap:a}\r\n正文。\n![图](a.png){#fig:x}\n## 乙 {#chap:a}";
+        let definitions = label_definitions(text);
+        let ids: Vec<&str> = definitions.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, ["chap:a", "fig:x", "chap:a"]);
+        for (id, span) in &definitions {
+            assert_eq!(&text[span.clone()], format!("{{#{id}}}"));
+        }
     }
 
     #[test]

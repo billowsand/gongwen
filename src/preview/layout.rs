@@ -581,7 +581,7 @@ pub(crate) fn tint_rect(left: f32, right: f32, top: f32, height: f32) -> egui::R
 }
 
 /// 一段文字里每一行相对段首的上沿、行高与基线。
-fn row_spans(galley: &egui::Galley) -> Vec<(f32, f32, f32)> {
+pub(crate) fn row_spans(galley: &egui::Galley) -> Vec<(f32, f32, f32)> {
     galley
         .rows
         .iter()
@@ -591,7 +591,7 @@ fn row_spans(galley: &egui::Galley) -> Vec<(f32, f32, f32)> {
 
 /// 把一段已经排好的文字逐行记进行号刻度。`rect` 是这一段占住的版心区域，
 /// 行的横坐标一律取版心左沿：正文怎么缩进、标题怎么居中，页边那一列都不跟着晃。
-fn mark_gutter_rows(metrics: &Metrics, rect: egui::Rect, rows: &[(f32, f32, f32)]) {
+pub(crate) fn mark_gutter_rows(metrics: &Metrics, rect: egui::Rect, rows: &[(f32, f32, f32)]) {
     for &(top, height, baseline) in rows {
         metrics.mark_sourced_row(
             egui::Rect::from_min_size(

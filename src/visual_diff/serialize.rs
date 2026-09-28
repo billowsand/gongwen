@@ -15,9 +15,10 @@
 use super::model::VisualBlock;
 use super::overlay::{BlockOverlay, Fragment, OverlayItem, RedlineOverlay, TableOverlay};
 use crate::export::{
-    ColumnAlign, LineAlign, MarkdownBlock, MarkdownSection, REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN,
-    REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN, RedlineKind, TableSpan, inline_char_spans, mark_added,
-    mark_deleted, parse_align_marker, parse_numbered_table_marker, table_span_at,
+    ColumnAlign, LineAlign, MarkdownBlock, MarkdownSection, QuoteLineKind, REDLINE_ADD_CLOSE,
+    REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN, RedlineKind, TableSpan,
+    inline_char_spans, mark_added, mark_deleted, parse_align_marker, parse_numbered_table_marker,
+    table_span_at,
 };
 use std::ops::Range;
 
@@ -66,6 +67,8 @@ pub(crate) fn to_marked_markdown(overlay: &RedlineOverlay) -> String {
 pub(crate) fn to_marked_markdown_with_spans(overlay: &RedlineOverlay) -> (String, Vec<MarkedSpan>) {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut align_group: Option<LineAlign> = None;
+    // 正在写的引用块是不是文框；None 表示上一块不是引用块的行。
+    let mut quote_group: Option<bool> = None;
     for item in &overlay.items {
         let (overlay_block, deleted) = match item {
             OverlayItem::Block(block) => (block, false),
@@ -140,6 +143,15 @@ pub(crate) fn to_marked_markdown_with_spans(overlay: &RedlineOverlay) -> (String
             // 上一块是列表项、这一块不是：先关掉它的 tight 标记。
             last.tight_after = false;
         }
+        // 引用块逐行成块（见 `model::quote_pieces`）：同一个引用块的各行单换行
+        // 接排，写回去才是一个块；文框首行、或者引文与文框相接时另起一块。
+        let quote = quote_piece(&overlay_block.block);
+        if quote.is_some_and(|(is_box, is_title)| !is_title && quote_group == Some(is_box))
+            && let Some(last) = chunks.last_mut()
+        {
+            last.tight_after = true;
+        }
+        quote_group = quote.map(|(is_box, _)| is_box);
         chunks.push(Chunk {
             lines,
             tight_after,
@@ -168,6 +180,17 @@ pub(crate) fn to_marked_markdown_with_spans(overlay: &RedlineOverlay) -> (String
         }
     }
     (out, spans)
+}
+
+/// 引用块的一行小块：（是否属于文框，是否是文框首行）。
+fn quote_piece(block: &VisualBlock) -> Option<(bool, bool)> {
+    match block {
+        VisualBlock::Parsed {
+            block: MarkdownBlock::Quote { boxed, lines },
+            ..
+        } => Some((boxed.is_some(), lines.is_empty())),
+        _ => None,
+    }
 }
 
 fn align_marker(align: LineAlign) -> &'static str {
@@ -265,6 +288,23 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                     return Vec::new();
                 }
                 vec![marked]
+            }
+            // 引用块的一行（专栏标题单独一块），按 `>` 写回。
+            MarkdownBlock::Quote { boxed, lines } => {
+                let marked = styled_marked(&overlay.text, raw);
+                match (lines.first().map(|line| line.kind), boxed) {
+                    // 文框首行没有标题也要写：`[!名称]` 本身就是文框的标志。
+                    (None, Some(boxed)) => {
+                        vec![
+                            format!("> [!{}] {marked}", boxed.name)
+                                .trim_end()
+                                .to_string(),
+                        ]
+                    }
+                    _ if marked.is_empty() => Vec::new(),
+                    (Some(QuoteLineKind::ListItem), _) => vec![format!("> - {marked}")],
+                    _ => vec![format!("> {marked}")],
+                }
             }
             MarkdownBlock::Image { alt, src } => {
                 if deleted {
@@ -590,6 +630,33 @@ mod tests {
             &DocumentModel::from_markdown(new),
         );
         to_marked_markdown(&overlay)
+    }
+
+    /// 引用块逐行比对，写回时仍是 `>` 块：同一个块的行单换行接排，文框首行
+    /// 带回原名称（没有标题也写），块与块之间空一行；改动只标在改了的那一行。
+    #[test]
+    fn quotes_are_written_back_as_quote_blocks() {
+        let old = "前文。\n\n> 坚持统筹发展。\n> ——《意见》\n\n> [!专栏] 某市做法\n>\n> 一是先定场景。\n> - 甲\n\n> [!例子]\n> 内容。\n";
+        let new = "前文。\n\n> 坚持统筹发展和安全。\n> ——《意见》\n\n> [!专栏] 某市做法\n>\n> 一是先定场景。\n> - 甲\n\n> [!例子]\n> 内容。\n";
+        let text = readable(&marked(old, new));
+        assert_eq!(
+            text,
+            "前文。\n\n> 坚持统筹发展[和安全]。\n> ——《意见》\n\n> [!专栏] 某市做法\n> 一是先定场景。\n> - 甲\n\n> [!例子]\n> 内容。",
+            "{text}"
+        );
+        // 写回的稿子解析出来仍是一篇引文、一个专栏。
+        let blocks = crate::export::parse_markdown_located(&strip_redline(&marked(old, new)));
+        let names: Vec<Option<String>> = blocks
+            .into_iter()
+            .filter_map(|located| match located.block {
+                MarkdownBlock::Quote { boxed, .. } => Some(boxed.map(|boxed| boxed.name)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![None, Some("专栏".to_string()), Some("例子".to_string())]
+        );
     }
 
     fn readable(marked: &str) -> String {

@@ -510,6 +510,7 @@
   \subsubsection*{#1}\phantomsection\addcontentsline{toc}{subsubsection}{#1}}
 
 %% 不编号章里的图表题注：不带章号，全篇的不编号章共用一套流水号（图1、表2）。
+%% 文框（专栏、案例……）另有自己的一对计数器，按 \ifmdx@free 挑用哪个，见下方 \mdxboxstep。
 %% \chapter* 不动 figure/table 计数器，这里先存下编号章里的值换成流水号；
 %% 下一个编号章前 \mdxchapternumbers 把流水号存回去、恢复"章号.序号"。
 %% \theH... 一并换掉，免得 hyperref 的锚点与编号章里的撞名。
@@ -540,6 +541,64 @@
     \let\theHfigure\mdx@theHfigure
     \let\theHtable\mdx@theHtable
   \fi}
+
+%% ============================================================
+%% 引文与文框：Markdown 的 `>` 引用块
+%% ============================================================
+%% 引文：楷体、与正文同字号，整段左右各缩进两字，首行再缩进两字，前后各空
+%% 半行。出处行（`——《…》`）用 \mdxquotesource 靠右排。
+\newenvironment{mdxquote}{%
+  \par\vspace{0.5\baselineskip}%
+  \begin{list}{}{%
+    \setlength{\leftmargin}{2em}\setlength{\rightmargin}{2em}%
+    \setlength{\topsep}{0pt}\setlength{\partopsep}{0pt}%
+    \setlength{\parsep}{0pt}\setlength{\itemsep}{0pt}%
+    \setlength{\itemindent}{2em}\setlength{\listparindent}{2em}}%
+  \item[]\kai}%
+  {\end{list}\vspace{0.5\baselineskip}}
+\newcommand{\mdxquotesource}[1]{\par{\raggedleft\noindent #1\par}}
+
+%% 文框：`> [!名称] 标题`，细框、浅灰底的单列长表，标题行"名称 2.1　标题"黑体
+%% 居中，内文楷体小四。一段一行，跨页时在段与段之间断开；主题里去掉 longtblr
+%% 的表题与"续表"，也不占表格编号。
+%%
+%% 名称写什么印什么（专栏、案例、例子……），每种名称各编各的号，第一次出现时
+%% 由 \mdxboxstep 现建一对计数器：
+%%   mdxbox<键>      随章归零，编号"章号.序号"（附录里是"A.1"），与图表同一口径；
+%%   mdxfreebox<键>  全篇共用，不编号章里用（\ifmdx@free，见 \mdxfreenumbers）。
+%% <键> 是 emitter 按名称首次出现的先后给的 ASCII 字母（a、b……）：中文名称不进
+%% 控制序列名，hyperref 的锚点名也就只有 ASCII。编号不能在单元格里步进
+%% （tabularray 会把单元格排好几遍量尺寸），emitter 在表格之前写 \mdxboxstep，
+%% \label 紧随其后；编号存进 \mdx@boxnumber 供标题行取用。
+\newcommand{\mdxboxstep}[1]{%
+  \@ifundefined{c@mdxbox#1}{%
+    \newcounter{mdxbox#1}[chapter]%
+    \newcounter{mdxfreebox#1}%
+    \expandafter\gdef\csname themdxbox#1\endcsname{\thechapter.\arabic{mdxbox#1}}%
+    \expandafter\gdef\csname theHmdxbox#1\endcsname{\theHchapter.\arabic{mdxbox#1}}%
+    \expandafter\gdef\csname themdxfreebox#1\endcsname{\arabic{mdxfreebox#1}}%
+    \expandafter\gdef\csname theHmdxfreebox#1\endcsname{mdxfree.\arabic{mdxfreebox#1}}%
+  }{}%
+  \ifmdx@free\refstepcounter{mdxfreebox#1}\else\refstepcounter{mdxbox#1}\fi
+  \xdef\mdx@boxnumber{\@currentlabel}}
+\NewTblrTheme{mdxbox}{
+  \DefTblrTemplate{caption}{default}{}
+  \DefTblrTemplate{conthead}{default}{}
+  \DefTblrTemplate{capcont}{default}{}
+  \DefTblrTemplate{contfoot}{default}{}
+}
+\NewTblrEnviron{mdxboxtblr}
+\SetTblrOuter[mdxboxtblr]{long, theme=mdxbox, entry=none, label=none,
+  presep=0.5\baselineskip, postsep=0.5\baselineskip}
+\SetTblrInner[mdxboxtblr]{
+  width=\linewidth, colspec={X}, hline{1,Z}={0.6pt}, vline{1,Z}={0.6pt},
+  cells={bg=black!7, halign=j, font=\kai\fontsize{12bp}{20pt}\selectfont},
+  row{1}={halign=c, abovesep=6pt, belowsep=4pt,
+    font=\heiti\enhei\fontsize{12bp}{20pt}\selectfont},
+  leftsep=1em, rightsep=1em, rowsep=0pt, row{Z}={belowsep=8pt}
+}
+%% 文框标题行：\mdxboxtitle{名称}{标题}。
+\newcommand{\mdxboxtitle}[2]{#1\enskip\mdx@boxnumber\quad #2}
 
 %% ============================================================
 %% 空白偶数页无页码

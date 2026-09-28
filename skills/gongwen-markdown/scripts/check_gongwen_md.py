@@ -186,8 +186,8 @@ def check(text: str, kind: str) -> Report:
 
         if line in {"---", "***", "___"} or re.fullmatch(r"-{3,}|\*{3,}|_{3,}", line):
             report.error(number, "不要写分隔线，版记横线由程序画")
-        if line.startswith(">"):
-            report.error(number, "不支持引用块 `>`，会原样印出")
+        if re.match(r">(\s|>|$)", line) and not research:
+            report.warn(number, "公文没有引文、文框版式，引用块 `>` 按普通段落排；行首要写字面 `>` 时写 `\\>`")
         if re.search(r"(?<!!)\[[^\]]+\]\((?:https?:|www\.)", line):
             report.warn(number, "公文不放超链接，`[文字](网址)` 会原样印出")
         if re.search(r"<(?!!--)[a-zA-Z/][^>]*>", line):
@@ -228,7 +228,15 @@ def check(text: str, kind: str) -> Report:
 
     # 研究报告里标题、表题行上的锚点也要收进来（上面跳过了标题行）。
     if research:
-        for line in stripped:
+        first_defined: dict[str, int] = {}
+        for index, line in enumerate(stripped, start=1):
+            match = re.search(r"\{#([A-Za-z][\w:.-]*)\}\s*$", line)
+            if match:
+                anchor = match.group(1)
+                if anchor in first_defined:
+                    report.error(index, f"锚点 {{#{anchor}}} 与第 {first_defined[anchor]} 行重复，导出 PDF 会中止；改成不同的 id（可加 -2）")
+                else:
+                    first_defined[anchor] = index
             for match in re.finditer(r"\{#([A-Za-z][\w:.-]*)\}", line):
                 anchors.add(match.group(1))
         for number, ref in refs:

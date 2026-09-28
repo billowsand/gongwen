@@ -11,7 +11,7 @@
 //! - 目录只在 `<!-- [目录] -->` 处排（`\mdxtableofcontents`，单独一套大写罗马页码）
 //! - 分章输出：每章切为 data/ 部件，附录切为 appendix/ 部件，主文件 \input 引用
 
-use crate::common::ast::{Block, Inline, LineAlign, MarkerKind};
+use crate::common::ast::{Block, Inline, LineAlign, MarkerKind, QuoteItem, QuoteKind};
 use crate::common::figure_size;
 use crate::common::table_to_longtblr::emit_longtblr;
 use std::path::{Path, PathBuf};
@@ -96,6 +96,9 @@ pub struct TexResearchEmitter {
     /// 最近一次 \item 行写入 out 之后的位置；遇到更深层级时，
     /// 在此位置插入 \begin{...} 把子环境挂在父 \item 之后。
     last_item_end: usize,
+    /// 文框名称（专栏、案例……）按首次出现的先后排：下标换成 md2tex.cls 里
+    /// 那对计数器的 ASCII 键（见 [`box_key`]），每种名称各编各的号。
+    box_names: Vec<String>,
     /// 插图 url 相对的目录（输出目录，图片已由 `images::relocate` 复制进去）。
     /// 读得到图片就按 `figure_size` 定宽；None 或读不到时退回满宽加限高。
     image_dir: Option<PathBuf>,
@@ -143,6 +146,7 @@ impl TexResearchEmitter {
             list_level: 0,
             list_env: Vec::new(),
             last_item_end: 0,
+            box_names: Vec::new(),
             image_dir: None,
         }
     }
@@ -244,6 +248,10 @@ impl TexResearchEmitter {
             Block::Math(content) => {
                 self.reset_list();
                 self.emit_math_block(content);
+            }
+            Block::Quote { kind, items } => {
+                self.reset_list();
+                self.emit_quote(kind, items);
             }
             Block::Toc => {
                 self.emit_toc();
@@ -607,6 +615,34 @@ impl TexResearchEmitter {
         );
     }
 
+    /// 引用块：引文排进 `mdxquote` 环境，文框排成 `mdxboxtblr` 长表（见
+    /// md2tex.cls）。文框上的锚点（`Block::Label` → pending_label）挂在文框号上。
+    fn emit_quote(&mut self, kind: &QuoteKind, items: &[QuoteItem]) {
+        let label = self.pending_label.take();
+        let latex = match kind {
+            QuoteKind::Citation => citation_latex(items),
+            QuoteKind::Box { name, title } => {
+                let index = match self.box_names.iter().position(|seen| seen == name) {
+                    Some(index) => index,
+                    None => {
+                        self.box_names.push(name.clone());
+                        self.box_names.len() - 1
+                    }
+                };
+                box_latex(&box_key(index), name, title, items, label.as_deref())
+            }
+        };
+        if latex.is_empty() {
+            return;
+        }
+        if self.in_abstract {
+            self.abstract_content.push(latex);
+            return;
+        }
+        self.out.push_str(&latex);
+        self.out.push_str("\n\n");
+    }
+
     fn emit_code_block(&mut self, lang: &Option<String>, content: &str) {
         if self.in_abstract {
             return;
@@ -841,6 +877,128 @@ impl Default for TexResearchEmitter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ========== 引文与文框 ==========
+
+/// 引文：一行一段，列表项前缀与正文一级列表相同（⑴ ⑵），出处行靠右。
+fn citation_latex(items: &[QuoteItem]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\\begin{mdxquote}\n");
+    let mut list_no = 0;
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            QuoteItem::Source(inlines) => {
+                list_no = 0;
+                s.push_str(&format!(
+                    "\\mdxquotesource{{{}}}\n",
+                    render_inlines(inlines)
+                ));
+                continue;
+            }
+            _ if index > 0 => s.push_str("\\par\n"),
+            _ => {}
+        }
+        match item {
+            QuoteItem::List { content, .. } => {
+                list_no += 1;
+                s.push_str(&list_label_latex(list_no));
+                s.push_str(&render_inlines(content));
+            }
+            _ => {
+                list_no = 0;
+                s.push_str(&render_inlines(item.inlines()));
+            }
+        }
+        s.push('\n');
+    }
+    s.push_str("\\end{mdxquote}");
+    s
+}
+
+/// 文框：标题一行，其后一段一行。编号在表格之前步进（单元格会被排好几遍），
+/// 锚点紧随其后。`key` 选这种名称自己的那对计数器。
+fn box_latex(
+    key: &str,
+    name: &str,
+    title: &[Inline],
+    items: &[QuoteItem],
+    label: Option<&str>,
+) -> String {
+    let mut s = format!("\\mdxboxstep{{{key}}}");
+    if let Some(label) = label {
+        s.push_str(&format!("\\label{{{label}}}"));
+    }
+    s.push_str("\n\\begin{mdxboxtblr}{}\n");
+    s.push_str(&format!(
+        "\\mdxboxtitle{{{}}}{{{}}} \\\\\n",
+        escape_latex(name),
+        render_cell_inlines(title)
+    ));
+    let mut list_no = 0;
+    for item in items {
+        s.push_str("\\hspace*{2em}");
+        match item {
+            QuoteItem::List { content, .. } => {
+                list_no += 1;
+                s.push_str(&list_label_latex(list_no));
+                s.push_str(&render_cell_inlines(content));
+            }
+            _ => {
+                list_no = 0;
+                s.push_str(&render_cell_inlines(item.inlines()));
+            }
+        }
+        s.push_str(" \\\\\n");
+    }
+    s.push_str("\\end{mdxboxtblr}");
+    s
+}
+
+/// 第 `index` 种文框名称的计数器键：a、b……z、aa、ab……（只用小写字母，
+/// 控制序列名与 hyperref 锚点名都安全）。
+fn box_key(index: usize) -> String {
+    let mut key = Vec::new();
+    let mut n = index + 1;
+    while n > 0 {
+        n -= 1;
+        key.push(b'a' + (n % 26) as u8);
+        n /= 26;
+    }
+    key.reverse();
+    String::from_utf8(key).expect("ASCII 键")
+}
+
+/// 块内第 `n` 个列表项的前缀：前二十个用正文列表同一个 `\circlenum`（⑴ …… ⒇）。
+fn list_label_latex(n: usize) -> String {
+    if n <= 20 {
+        format!("\\circlenum{{{n}}}")
+    } else {
+        format!("({n})")
+    }
+}
+
+/// 文框单元格里的行内内容，降级规则与表格单元格一致：
+/// - tabularray 单元格里 `\footnote` 不生效，脚注降级为全角括号内联注释；
+/// - 文框内文是小四，公式的上下标要 8pt 的数学字体，随包 texbundle 里没有，
+///   行内公式按源码原文印出。
+fn render_cell_inlines(inlines: &[Inline]) -> String {
+    render_inlines(&cell_inlines(inlines))
+}
+
+fn cell_inlines(inlines: &[Inline]) -> Vec<Inline> {
+    inlines
+        .iter()
+        .map(|ip| match ip {
+            Inline::Footnote(text) => Inline::Text(format!("（{text}）")),
+            Inline::Math(source) => Inline::Text(format!("${source}$")),
+            Inline::Bold(children) => Inline::Bold(cell_inlines(children)),
+            Inline::Italic(children) => Inline::Italic(cell_inlines(children)),
+            other => other.clone(),
+        })
+        .collect()
 }
 
 // ========== 字符串工具 ==========
@@ -1124,6 +1282,49 @@ mod tests {
         let mut e = TexResearchEmitter::new();
         e.emit_all(blocks);
         test_body(e)
+    }
+
+    #[test]
+    fn citation_goes_into_mdxquote_with_the_source_flushed_right() {
+        let body = emit_all_body(&crate::parser::parse(
+            "## 政策\n\n> 第一段\n> - 列表项\n> ——《意见》\n",
+        ));
+        assert!(
+            body.contains(
+                "\\begin{mdxquote}\n第一段\n\\par\n\\circlenum{1}列表项\n\\mdxquotesource{——《意见》}\n\\end{mdxquote}"
+            ),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn each_box_name_steps_its_own_counter_before_the_table() {
+        let body = emit_all_body(&crate::parser::parse(
+            "## 实践\n\n> [!专栏] 做法 {#box:a}\n>\n> 一是[^n]:(注)，$p$。\n\n> [!案例] 某市\n\n> [!专栏] 又一个\n",
+        ));
+        assert!(
+            body.contains(
+                "\\mdxboxstep{a}\\label{box:a}\n\\begin{mdxboxtblr}{}\n\\mdxboxtitle{专栏}{做法} \\\\\n\\hspace*{2em}一是（注），\\$p\\$。 \\\\\n\\end{mdxboxtblr}"
+            ),
+            "{body}"
+        );
+        // 每种名称各用一对计数器：专栏是 a，案例是 b，第二个专栏还是 a
+        assert!(
+            body.contains("\\mdxboxstep{b}\n\\begin{mdxboxtblr}{}\n\\mdxboxtitle{案例}{某市}"),
+            "{body}"
+        );
+        assert!(
+            body.contains("\\mdxboxstep{a}\n\\begin{mdxboxtblr}{}\n\\mdxboxtitle{专栏}{又一个}"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn box_keys_are_lowercase_letters() {
+        assert_eq!(box_key(0), "a");
+        assert_eq!(box_key(25), "z");
+        assert_eq!(box_key(26), "aa");
+        assert_eq!(box_key(27), "ab");
     }
 
     /// 目录插在摘要与正文之间（`[正文]` 标记写在目录前后都算），摘要单独编页。

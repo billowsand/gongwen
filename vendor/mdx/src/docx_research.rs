@@ -24,10 +24,11 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local};
 use docx_rs::*;
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::common::ast::{Block, Inline, LineAlign, MarkerKind};
+use crate::common::ast::{Block, Inline, LineAlign, MarkerKind, QuoteItem, QuoteKind};
 use crate::common::front_matter::{self, Metadata};
 use crate::common::numbering::{int_to_roman, number_to_uppercase_letter};
 use crate::common::table::{span_at, TableSpan};
@@ -829,6 +830,8 @@ struct MainEmitter {
     suppress_next_heading: Option<&'static str>,
     table_counter: usize,
     figure_counter: usize,
+    /// 文框按名称各编各的号（专栏、案例……），随章归零。
+    box_counters: HashMap<String, usize>,
     /// 部分段（`<!-- [部分] -->`）：H1 排成"第一部分"，其余同正文
     part_mode: bool,
     /// 部分序号（跨区段不清零，与 LaTeX 的 part 计数器一致）
@@ -840,6 +843,7 @@ struct MainEmitter {
     /// 不编号章的图、表流水号，全篇共用
     free_table: usize,
     free_figure: usize,
+    free_boxes: HashMap<String, usize>,
     image_base_dir: PathBuf,
     /// 目录已经排过：`<!-- [目录] -->` 写了多处时只认第一处
     toc_done: bool,
@@ -878,12 +882,14 @@ impl MainEmitter {
             suppress_next_heading: None,
             table_counter: 0,
             figure_counter: 0,
+            box_counters: HashMap::new(),
             part_mode: false,
             part: 0,
             pending_unnumbered: false,
             free_numbers: false,
             free_table: 0,
             free_figure: 0,
+            free_boxes: HashMap::new(),
             image_base_dir,
             toc_done: false,
             toc_range: None,
@@ -979,6 +985,16 @@ impl MainEmitter {
                 };
                 add_table(docx, rows, spans, *numbered)
             }
+            Block::Quote { kind, items } => {
+                self.list.reset();
+                match kind {
+                    QuoteKind::Citation => add_citation(docx, items, &self.image_base_dir),
+                    QuoteKind::Box { name, title } => {
+                        let number = self.next_box_number(name);
+                        add_box(docx, name, &number, title, items, &self.image_base_dir)
+                    }
+                }
+            }
             Block::CodeBlock { content, .. } => {
                 self.list.reset();
                 add_code_block(docx, content)
@@ -1013,6 +1029,7 @@ impl MainEmitter {
                 self.appendix_idx = 0;
                 self.appendix_saw_h1 = false;
                 self.table_counter = 0;
+                self.box_counters.clear();
                 self.figure_counter = 0;
             }
             MarkerKind::Body => {
@@ -1021,6 +1038,7 @@ impl MainEmitter {
                 self.section = 0;
                 self.subsection = 0;
                 self.table_counter = 0;
+                self.box_counters.clear();
                 self.figure_counter = 0;
             }
             MarkerKind::Reference => {
@@ -1063,6 +1081,7 @@ impl MainEmitter {
                     self.free_numbers = false;
                     self.appendix_idx += 1;
                     self.table_counter = 0;
+                    self.box_counters.clear();
                     self.figure_counter = 0;
                     let letter = (b'A' + (self.appendix_idx - 1) as u8) as char;
                     let label = format!("附录 {} {}", letter, text);
@@ -1098,6 +1117,7 @@ impl MainEmitter {
                 self.section = 0;
                 self.subsection = 0;
                 self.table_counter = 0;
+                self.box_counters.clear();
                 self.figure_counter = 0;
                 let label = format!("第{}章 {}", chinese_chapter(self.chapter), text);
                 docx = page_break(docx);
@@ -1184,6 +1204,18 @@ impl MainEmitter {
         self.object_number(self.table_counter)
     }
 
+    fn next_box_number(&mut self, name: &str) -> String {
+        if self.free_numbers {
+            let counter = self.free_boxes.entry(name.to_string()).or_default();
+            *counter += 1;
+            return counter.to_string();
+        }
+        let counter = self.box_counters.entry(name.to_string()).or_default();
+        *counter += 1;
+        let counter = *counter;
+        self.object_number(counter)
+    }
+
     fn next_figure_number(&mut self) -> String {
         if self.free_numbers {
             self.free_figure += 1;
@@ -1238,6 +1270,7 @@ impl MainEmitter {
 struct ChangelogEmitter {
     list: ListState,
     table_counter: usize,
+    box_counters: HashMap<String, usize>,
     image_base_dir: PathBuf,
 }
 
@@ -1246,6 +1279,7 @@ impl ChangelogEmitter {
         Self {
             list: ListState::default(),
             table_counter: 0,
+            box_counters: HashMap::new(),
             image_base_dir,
         }
     }
@@ -1312,6 +1346,18 @@ impl ChangelogEmitter {
                         &self.image_base_dir,
                     )
                 })
+            }
+            Block::Quote { kind, items } => {
+                self.list.reset();
+                match kind {
+                    QuoteKind::Citation => add_citation(docx, items, &self.image_base_dir),
+                    QuoteKind::Box { name, title } => {
+                        let counter = self.box_counters.entry(name.clone()).or_default();
+                        *counter += 1;
+                        let number = counter.to_string();
+                        add_box(docx, name, &number, title, items, &self.image_base_dir)
+                    }
+                }
             }
             Block::Marker(_)
             | Block::Toc
@@ -1571,7 +1617,18 @@ fn inline_run_style(ip: &Inline) -> (String, bool, bool) {
     }
 }
 
-fn add_inlines(mut p: Paragraph, inlines: &[Inline], image_base_dir: &Path) -> Paragraph {
+fn add_inlines(p: Paragraph, inlines: &[Inline], image_base_dir: &Path) -> Paragraph {
+    add_inlines_with(p, inlines, image_base_dir, FONT_BODY, SIZE_BODY)
+}
+
+/// 同 [`add_inlines`]，另给正文字体与字号：引文、文框用楷体，文框内文小四。
+fn add_inlines_with(
+    mut p: Paragraph,
+    inlines: &[Inline],
+    image_base_dir: &Path,
+    font: &str,
+    size: usize,
+) -> Paragraph {
     for ip in inlines {
         if let Inline::Image { alt, url, .. } = ip {
             match crate::common::docx_image::load(url, image_base_dir, MAX_INLINE_IMAGE_WIDTH_EMU) {
@@ -1581,20 +1638,20 @@ fn add_inlines(mut p: Paragraph, inlines: &[Inline], image_base_dir: &Path) -> P
                     p = p.add_run(
                         Run::new()
                             .add_text(image_error_text(alt, url))
-                            .fonts(font_set(FONT_BODY))
-                            .size(SIZE_BODY),
+                            .fonts(font_set(font))
+                            .size(size),
                     );
                 }
             }
             continue;
         }
         let (text, bold, italic) = inline_run_style(ip);
-        let mut run = Run::new().add_text(&text).size(SIZE_BODY);
+        let mut run = Run::new().add_text(&text).size(size);
         // 斜体在中文里用楷体表达（与 LaTeX `ItalicFont={FZKai-Z03}` 一致）
         if italic {
             run = run.fonts(font_set(FONT_KAI)).italic();
         } else {
-            run = run.fonts(font_set(FONT_BODY));
+            run = run.fonts(font_set(font));
         }
         if bold {
             run = run.bold();
@@ -1776,6 +1833,171 @@ fn add_table(docx: Docx, rows: &[Vec<String>], spans: &[TableSpan], numbered: bo
                 .set(TableBorder::new(TableBorderPosition::InsideV).size(4)),
         );
     docx.add_table(table)
+}
+
+// ============================================================
+// 引文与文框（对齐 md2tex.cls 的 mdxquote / mdxboxtblr）
+// ============================================================
+
+/// 两个正文汉字宽（14pt × 2）。
+const INDENT_BODY_2EM: i32 = 560;
+/// 文框内文小四，行距 20pt；首行缩进两个小四汉字。
+const SIZE_BOX: usize = 24;
+const LINE_BOX: i32 = 400;
+const INDENT_BOX_2EM: i32 = 480;
+/// 文框底色，与 TeX 的 `black!7` 相当。
+const BOX_FILL: &str = "EDEDED";
+
+/// 块内第 `n` 个列表项的前缀，与正文一级列表相同（⑴ ⑵ ……）。
+fn quote_list_prefix(n: usize) -> String {
+    PAREN_CIRCLE_NUMBERS
+        .get(n.wrapping_sub(1))
+        .map(|prefix| format!("{prefix} "))
+        .unwrap_or_else(|| format!("({n}) "))
+}
+
+/// 引用块逐行的行内内容，列表项前面补上前缀。
+fn quote_item_inlines(items: &[QuoteItem]) -> Vec<Vec<Inline>> {
+    let mut list_no = 0;
+    items
+        .iter()
+        .map(|item| match item {
+            QuoteItem::List { content, .. } => {
+                list_no += 1;
+                let mut inlines = vec![Inline::Text(quote_list_prefix(list_no))];
+                inlines.extend(content.iter().cloned());
+                inlines
+            }
+            _ => {
+                list_no = 0;
+                item.inlines().to_vec()
+            }
+        })
+        .collect()
+}
+
+/// 引文：楷体、与正文同字号，左右各缩进两字、首行再缩进两字，前后各空半行；
+/// 出处行靠右、不缩进。
+fn add_citation(mut docx: Docx, items: &[QuoteItem], image_base_dir: &Path) -> Docx {
+    let last = items.len().saturating_sub(1);
+    for (index, (item, inlines)) in items.iter().zip(quote_item_inlines(items)).enumerate() {
+        let mut spacing = LineSpacing::new()
+            .line(LINE_BODY)
+            .line_rule(LineSpacingType::AtLeast);
+        if index == 0 {
+            spacing = spacing.before(240);
+        }
+        if index == last {
+            spacing = spacing.after(240);
+        }
+        let p = Paragraph::new().line_spacing(spacing);
+        let p = match item {
+            QuoteItem::Source(_) => p.align(AlignmentType::Right).indent(
+                Some(INDENT_BODY_2EM),
+                None,
+                Some(INDENT_BODY_2EM),
+                None,
+            ),
+            _ => p.align(AlignmentType::Both).indent(
+                Some(INDENT_BODY_2EM),
+                Some(SpecialIndentType::FirstLine(INDENT_BODY_2EM)),
+                Some(INDENT_BODY_2EM),
+                None,
+            ),
+        };
+        docx = docx.add_paragraph(add_inlines_with(
+            p,
+            &inlines,
+            image_base_dir,
+            FONT_KAI,
+            SIZE_BODY,
+        ));
+    }
+    docx
+}
+
+/// 文框：一格满版心宽的表格，细框浅灰底；标题"专栏 2.1　标题"黑体居中，
+/// 内文楷体小四。整栏一格，Word 默认允许跨页断开。前后各留半行空。
+fn add_box(
+    docx: Docx,
+    name: &str,
+    number: &str,
+    title: &[Inline],
+    items: &[QuoteItem],
+    image_base_dir: &Path,
+) -> Docx {
+    let title_paragraph = Paragraph::new()
+        .align(AlignmentType::Center)
+        .line_spacing(
+            LineSpacing::new()
+                .line(LINE_BOX)
+                .line_rule(LineSpacingType::AtLeast)
+                .before(120)
+                .after(80),
+        )
+        .add_run(
+            Run::new()
+                .add_text(format!("{name} {number}\u{3000}"))
+                .fonts(font_set(FONT_HEAD))
+                .size(SIZE_BOX),
+        );
+    let title_paragraph =
+        add_inlines_with(title_paragraph, title, image_base_dir, FONT_HEAD, SIZE_BOX);
+    let mut cell = TableCell::new()
+        .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+        .shading(Shading::new().fill(BOX_FILL))
+        .add_paragraph(title_paragraph);
+    let lines = quote_item_inlines(items);
+    let last = lines.len().saturating_sub(1);
+    for (index, inlines) in lines.iter().enumerate() {
+        let mut spacing = LineSpacing::new()
+            .line(LINE_BOX)
+            .line_rule(LineSpacingType::AtLeast);
+        if index == last {
+            spacing = spacing.after(160);
+        }
+        let p = Paragraph::new()
+            .align(AlignmentType::Both)
+            .indent(
+                Some(0),
+                Some(SpecialIndentType::FirstLine(INDENT_BOX_2EM)),
+                None,
+                None,
+            )
+            .line_spacing(spacing);
+        cell = cell.add_paragraph(add_inlines_with(
+            p,
+            inlines,
+            image_base_dir,
+            FONT_KAI,
+            SIZE_BOX,
+        ));
+    }
+    let border = |position| TableBorder::new(position).size(5);
+    let table = Table::new(vec![TableRow::new(vec![cell])])
+        .set_grid(vec![TABLE_CONTENT_WIDTH_TWIPS])
+        .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+        .layout(TableLayoutType::Fixed)
+        .margins(TableCellMargins::new().margin(0, 240, 0, 240))
+        .set_borders(
+            TableBorders::with_empty()
+                .set(border(TableBorderPosition::Top))
+                .set(border(TableBorderPosition::Left))
+                .set(border(TableBorderPosition::Bottom))
+                .set(border(TableBorderPosition::Right)),
+        );
+    box_spacer(box_spacer(docx).add_table(table))
+}
+
+/// 文框前后的半行空（TeX 的 presep / postsep）。
+fn box_spacer(docx: Docx) -> Docx {
+    docx.add_paragraph(
+        Paragraph::new().line_spacing(
+            LineSpacing::new()
+                .line(240)
+                .line_rule(LineSpacingType::Exact),
+        ),
+    )
 }
 
 // ============================================================
@@ -1971,6 +2193,45 @@ mod tests {
             .main
             .iter()
             .any(|b| matches!(b, Block::Heading { level: 2, .. })));
+    }
+
+    /// 引文逐行成段、楷体缩进；文框是一格表格，标题带"名称 章号.序号"，每种名称各编各的号。
+    #[test]
+    fn quotes_become_indented_paragraphs_and_a_numbered_box() {
+        let mut e = MainEmitter::new();
+        let blocks = crate::parser::parse(
+            "## 实践\n\n> 引文\n> ——《意见》\n\n> [!专栏] 做法\n>\n> 一是……\n\n> [!案例] 某市\n\n> [!专栏] 又一个\n",
+        );
+        let docx = e.emit_all(Docx::new(), &blocks);
+        let texts = paragraph_texts(&docx);
+        assert!(texts.iter().any(|t| t == "引文"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "——《意见》"), "{texts:?}");
+        let cell_texts: Vec<String> = docx
+            .document
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                DocumentChild::Table(table) => Some(table),
+                _ => None,
+            })
+            .flat_map(|table| &table.rows)
+            .flat_map(|TableChild::TableRow(row)| &row.cells)
+            .flat_map(|TableRowChild::TableCell(cell)| &cell.children)
+            .filter_map(|content| match content {
+                TableCellContent::Paragraph(paragraph) => Some(paragraph.raw_text()),
+                _ => None,
+            })
+            .collect();
+        // 每种名称各编各的号
+        assert_eq!(
+            cell_texts,
+            vec![
+                "专栏 1.1\u{3000}做法",
+                "一是……",
+                "案例 1.1\u{3000}某市",
+                "专栏 1.2\u{3000}又一个"
+            ]
+        );
     }
 
     #[test]

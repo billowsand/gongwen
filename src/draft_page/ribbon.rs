@@ -728,8 +728,9 @@ impl DraftPage<'_> {
             if ui
                 .add(theme::icon_text_button(theme::Icon::Hash, "锚点"))
                 .on_hover_text(
-                    "锚点写在标题、表题或图片行的行尾，供交叉引用。\
-                     把“ {#}”追加到光标所在行行尾，在花括号里填 id",
+                    "给光标所在的章节标题、图片、表格或文框挂一个锚点，供交叉引用。\
+                     id 自动起：前缀按对象（chap: sec: fig: tbl: box: case:……）、\
+                     后面是标题拼音，全文不重复；光标在表格或文框里时挂到表题或首行上",
                 )
                 .clicked()
             {
@@ -1397,15 +1398,17 @@ enum CrossrefGroup {
     Structure,
     Figure,
     Table,
+    Box,
 }
 
 impl CrossrefGroup {
-    const ALL: [Self; 3] = [Self::Structure, Self::Figure, Self::Table];
+    const ALL: [Self; 4] = [Self::Structure, Self::Figure, Self::Table, Self::Box];
 
     fn of(kind: LabelKind) -> Self {
         match kind {
             LabelKind::Figure => Self::Figure,
             LabelKind::Table => Self::Table,
+            LabelKind::Box => Self::Box,
             LabelKind::Part | LabelKind::Chapter | LabelKind::Section | LabelKind::Subsection => {
                 Self::Structure
             }
@@ -1417,6 +1420,7 @@ impl CrossrefGroup {
             Self::Structure => "结构",
             Self::Figure => "图",
             Self::Table => "表",
+            Self::Box => "文框",
         }
     }
 
@@ -1425,6 +1429,7 @@ impl CrossrefGroup {
             Self::Structure => "还没有带锚点的编号标题。在章、节标题行尾加 {#id}。",
             Self::Figure => "还没有带锚点的图。在有图注的图片行尾加 {#id}。",
             Self::Table => "还没有带锚点的表。在表题行尾加 {#id}。",
+            Self::Box => "还没有带锚点的文框。在 `> [!专栏] 标题` 这类首行行尾加 {#id}。",
         }
     }
 }
@@ -1442,9 +1447,9 @@ fn crossref_menu(ui: &mut egui::Ui, markdown: &str) -> Option<String> {
         .saturating_sub(targets.len());
     if targets.is_empty() {
         ui.weak(if unreferable == 0 {
-            "稿中还没有锚点。先用「锚点」在标题、表题或图片行尾写一个。"
+            "稿中还没有锚点。先用「锚点」在标题、表题、图片或文框首行行尾写一个。"
         } else {
-            "稿中的锚点都不在编号标题、图注或表题上，引用会印成 ??。"
+            "稿中的锚点都不在编号标题、图注、表题或文框上，引用会印成 ??。"
         });
         return None;
     }
@@ -1502,6 +1507,18 @@ fn crossref_menu(ui: &mut egui::Ui, markdown: &str) -> Option<String> {
         ui.weak(format!(
             "另有 {unreferable} 个锚点不在编号标题、图注或表题上，引用会印成 ??，未列出。"
         ));
+    }
+    // 重复定义的锚点菜单里只列第一处；多出来的会让导出 PDF 中止，这里也说一声，
+    // 具体位置在审校抽屉里（`validator::research_anchor_notes`）。
+    let duplicated = export::crossref::label_definitions(markdown)
+        .len()
+        .saturating_sub(export::crossref::label_ids(markdown).len());
+    if duplicated > 0 {
+        ui.separator();
+        ui.colored_label(
+            theme::warn(),
+            format!("有 {duplicated} 处锚点与前面的 id 重复，导出 PDF 会中止；位置见审校提示。"),
+        );
     }
     chosen
 }

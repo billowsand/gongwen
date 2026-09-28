@@ -35,7 +35,7 @@ use super::render::{
 };
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
-    RESEARCH_CHAPTER_PT, RESEARCH_PART_PT, gutter, indent, math_flow,
+    RESEARCH_CHAPTER_PT, RESEARCH_PART_PT, gutter, indent, math_flow, research_quote,
 };
 use crate::export::crossref::{self, ResearchMarks};
 use crate::export::{
@@ -56,7 +56,7 @@ use std::sync::OnceLock;
 /// 一块内容在纸面上的身份。编号在这里一次算好：印它要用，锚点表也要用。
 /// 可哈希：它是块排版指纹的一部分（`preview::cull`）。
 #[derive(Hash)]
-enum Kind<'a> {
+pub(super) enum Kind<'a> {
     /// 不落在纸上：文件名称、区段标记、已经并进表格的表题。
     Skip,
     /// 普通内容块，交给共用部件照原样画。
@@ -104,14 +104,25 @@ enum Kind<'a> {
     },
     /// 表格，连同并进来的表题。
     Table { caption: Option<Caption> },
+    /// 引文：`>` 引用块，排法见 `research_quote`。
+    Citation,
+    /// 文框：首行 `> [!名称] 标题` 的引用块（专栏、案例……）。`number` 是这种
+    /// 名称自己的编号（"2.1"，不编号章里是流水号），`{@id}` 引的就是它，名称
+    /// 由写正文的人自己写；`heading` 是纸面上的整串前缀（"案例 2.1"）。
+    Box {
+        number: String,
+        heading: String,
+        name: &'a str,
+        title: &'a str,
+    },
 }
 
 /// 一条并进表格的表题：编号、题名，以及它自己那一行源码的位置。
 #[derive(Hash)]
-struct Caption {
-    number: String,
-    text: String,
-    source: Range<usize>,
+pub(super) struct Caption {
+    pub(super) number: String,
+    pub(super) text: String,
+    pub(super) source: Range<usize>,
 }
 
 /// 走一遍块序列时的计数器与区段状态，规则全部照 `tex_research_emitter`。
@@ -134,6 +145,9 @@ struct Walk {
     subsubsection: usize,
     figure: usize,
     table: usize,
+    /// 文框序号，每种名称各编各的，与图表一样跟着章归零（md2tex.cls 的
+    /// `\mdxboxstep`）。
+    boxes: HashMap<String, usize>,
     /// 部分序号：跨区段不清零，与 LaTeX 的 part 计数器一致。
     part: usize,
     /// 刚读到不编号标记、还在等它的标题（mdx `parser::parse` 的同名状态）。
@@ -145,6 +159,7 @@ struct Walk {
     /// 不编号章的图、表流水号，全篇共用。
     free_figure: usize,
     free_table: usize,
+    free_boxes: HashMap<String, usize>,
 }
 
 impl Default for Walk {
@@ -162,12 +177,14 @@ impl Default for Walk {
             subsubsection: 0,
             figure: 0,
             table: 0,
+            boxes: HashMap::new(),
             part: 0,
             unnumbered_pending: false,
             unnumbered_root: None,
             free: false,
             free_figure: 0,
             free_table: 0,
+            free_boxes: HashMap::new(),
         }
     }
 }
@@ -193,6 +210,7 @@ impl Walk {
         self.subsubsection = 0;
         self.figure = 0;
         self.table = 0;
+        self.boxes.clear();
         let number = self.chapter_number();
         // ctex 的 `name = {第,章}` 是直接和 `\thechapter` 拼起来的，中间不插空格，
         // 数字两侧一空排出来就比 PDF 宽半个字。
@@ -255,6 +273,19 @@ impl Walk {
         format!("{}.{}", self.chapter_number(), self.table)
     }
 
+    /// 文框编号：与图表同一口径，每种名称各编各的。
+    fn open_box(&mut self, name: &str) -> String {
+        if self.free {
+            let counter = self.free_boxes.entry(name.to_string()).or_default();
+            *counter += 1;
+            return counter.to_string();
+        }
+        let counter = self.boxes.entry(name.to_string()).or_default();
+        *counter += 1;
+        let counter = *counter;
+        format!("{}.{}", self.chapter_number(), counter)
+    }
+
     /// 开新部分。返回（纸面前缀"第一部分"，`\thepart`"一"）。
     fn open_part(&mut self) -> (String, String) {
         self.part += 1;
@@ -313,7 +344,7 @@ impl Walk {
 ///
 /// `visit` 的第三个参数是这一块定义的锚点 `{#id}`——只有第一遍用得上，第二遍
 /// 拿到的源码里锚点已经被换掉了。
-fn walk<'a>(
+pub(super) fn walk<'a>(
     blocks: &'a [LocatedBlock],
     markdown: &str,
     mut visit: impl FnMut(&'a LocatedBlock, Kind<'a>, Option<&str>),
@@ -367,6 +398,18 @@ fn walk<'a>(
                 alt,
                 src,
             },
+            MarkdownBlock::Quote {
+                boxed: Some(boxed), ..
+            } => {
+                let number = walk.open_box(&boxed.name);
+                Kind::Box {
+                    heading: format!("{} {number}", boxed.name),
+                    number,
+                    name: &boxed.name,
+                    title: &boxed.title,
+                }
+            }
+            MarkdownBlock::Quote { .. } => Kind::Citation,
             MarkdownBlock::Table { .. } => {
                 let caption = captions.get(&index).map(|caption| {
                     let block = &blocks[*caption];
@@ -487,8 +530,13 @@ fn chapter(walk: &mut Walk, text: String) -> Kind<'static> {
 }
 
 /// 这一块定义的锚点 `{#id}`。锚点写在源码行尾，排版前已被剥掉，所以回原文去取。
+/// 文框的锚点写在首行行尾，不在块尾。
 fn anchor_of<'a>(markdown: &'a str, located: &LocatedBlock) -> Option<&'a str> {
     let raw = markdown.get(located.range.clone())?;
+    let raw = match located.block {
+        MarkdownBlock::Quote { .. } => raw.lines().next()?,
+        _ => raw,
+    };
     crossref::split_label(raw).1
 }
 
@@ -588,7 +636,8 @@ struct Anchored<'k> {
     kind: LabelKind,
     /// `{@id}` 印出来的那串：章是 `\thechapter`（`1`、`A`），不是"第1章"整串。
     reference: &'k str,
-    /// 章、部分在纸面上的整串前缀（"第1章""附录A""第一部分"）；节、图、表没有。
+    /// 章、部分、文框在纸面上的整串前缀（"第1章""附录A""第一部分""案例 2.1"）；
+    /// 节、图、表没有。
     heading: Option<&'k str>,
     title: &'k str,
 }
@@ -638,6 +687,12 @@ impl<'k> Anchored<'k> {
                 None,
                 caption.text.as_str(),
             ),
+            Kind::Box {
+                number,
+                heading,
+                title,
+                ..
+            } => (LabelKind::Box, number, Some(heading.as_str()), *title),
             _ => return None,
         };
         Some(Self {
@@ -695,6 +750,7 @@ pub(crate) enum LabelKind {
     Subsection,
     Figure,
     Table,
+    Box,
 }
 
 impl LabelKind {
@@ -706,6 +762,7 @@ impl LabelKind {
             Self::Subsection => "小节",
             Self::Figure => "图",
             Self::Table => "表",
+            Self::Box => "文框",
         }
     }
 }
@@ -715,7 +772,8 @@ impl LabelKind {
 pub(crate) struct LabelTarget {
     pub(crate) id: String,
     pub(crate) kind: LabelKind,
-    /// 纸面上印在标题或题注前的编号：第一部分、第1章、附录A、1.2、图 1.3、表 2。
+    /// 纸面上印在标题或题注前的编号：第一部分、第1章、附录A、1.2、图 1.3、表 2、
+    /// 专栏 2.1、案例 1.1。
     pub(crate) number: String,
     /// 标题、图注或表题，行内标记已换成纸面字面。
     pub(crate) title: String,
@@ -1323,6 +1381,24 @@ fn body_item(
             );
             space_after_float(ui, metrics);
         }
+        Kind::Citation => research_quote::citation(
+            ui,
+            metrics,
+            &located.block,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+        ),
+        Kind::Box { heading, .. } => research_quote::boxed(
+            ui,
+            metrics,
+            &heading,
+            &located.block,
+            &source,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+        ),
         Kind::Plain => plain(
             ui,
             metrics,
@@ -2199,6 +2275,62 @@ mod tests {
                 "第1章".to_string(),
                 "研究背景".to_string()
             )]
+        );
+    }
+
+    /// 引文与文框：文框名称写什么印什么，每种名称各编各的号，口径与图表相同
+    /// （章号.序号，不编号章里是流水号，附录带字母章号）；`{@id}` 印的是号，
+    /// `>` 与 `[!名称]` 不印在纸上。
+    #[test]
+    fn quotes_print_as_citations_and_separately_numbered_boxes() {
+        let text = drawn(concat!(
+            "<!-- [正文] -->\n\n",
+            "<!-- [不编号] -->\n## 前言\n\n",
+            "> [!专栏] 名词解释\n>\n> 授权运营是指……\n\n",
+            "## 地方实践\n\n",
+            "见案例{@case:city}与专栏{@box:sg}。\n\n",
+            "> 坚持统筹发展和安全。\n> - 明确授权条件；\n> ——《意见》\n\n",
+            "> [!案例] 某市做法 {#case:city}\n>\n> 一是先定场景。\n\n",
+            "> [!专栏] 新加坡经验 {#box:sg}\n>\n> ……\n\n",
+            "> [!例子]\n>\n> 没有标题的例子。\n\n",
+            "> [!案例] 某省做法\n\n",
+            "<!-- [附录] -->\n\n## 附录的标题\n\n",
+            "> [!案例] 附录里的案例\n",
+        ));
+        assert!(text.contains("专栏 1\u{3000}名词解释"), "{text}");
+        assert!(text.contains("见案例1.1与专栏1.1。"), "{text}");
+        assert!(text.contains("案例 1.1\u{3000}某市做法"), "{text}");
+        assert!(text.contains("专栏 1.1\u{3000}新加坡经验"), "{text}");
+        assert!(
+            text.contains("例子 1.1\n"),
+            "没有标题只印名称与编号：{text}"
+        );
+        assert!(text.contains("案例 1.2\u{3000}某省做法"), "{text}");
+        assert!(text.contains("案例 A.1\u{3000}附录里的案例"), "{text}");
+        assert!(text.contains("坚持统筹发展和安全。"), "{text}");
+        assert!(text.contains("⑴ 明确授权条件；"), "{text}");
+        assert!(text.contains("——《意见》"), "{text}");
+        for symbol in ["> ", "[!", "{#", "{@"] {
+            assert!(
+                !text.contains(symbol),
+                "源码符号“{symbol}”不应印在纸上：{text}"
+            );
+        }
+    }
+
+    /// 文框进交叉引用菜单，编号带自己的名称；引文没有号，挂了锚点也不列。
+    #[test]
+    fn boxes_are_label_targets_and_citations_are_not() {
+        let s = |v: &str| v.to_string();
+        assert_eq!(
+            targets(
+                "## 地方实践\n\n> [!案例] 某市做法 {#case:city}\n>\n> 一是……\n\n\
+                 > [!专栏] 新加坡经验 {#box:sg}\n\n> 引文 {#q}\n"
+            ),
+            vec![
+                (s("case:city"), LabelKind::Box, s("案例 1.1"), s("某市做法")),
+                (s("box:sg"), LabelKind::Box, s("专栏 1.1"), s("新加坡经验")),
+            ]
         );
     }
 }

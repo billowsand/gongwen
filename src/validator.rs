@@ -24,6 +24,49 @@ pub fn estimate_layout_notes(markdown: &str) -> Vec<ReviewNote> {
         .collect()
 }
 
+/// 研究报告里重复定义的锚点，每处多出来的定义一条提示，带着 `{#id}` 的位置，
+/// 审校抽屉里点一下就跳过去。
+///
+/// 第一处定义留着不报：它是被引用的那个，要改的是后面几处。mdx 的交叉引用检查
+/// 把重复定义当错误，导出 PDF 会整个中止（`check_or_bail`），所以这条不是
+/// 「以先到的为准」的提醒，是必须改的问题。报告题名上的锚点不算：题名交给 mdx
+/// 之前就被拿掉了，它和正文里同名的锚点并不冲突（它本身另有一条提示）。
+pub fn research_anchor_notes(input: &DraftInput, markdown: &str) -> Vec<ReviewNote> {
+    if !input.kind.is_research() {
+        return Vec::new();
+    }
+    // 报告题名那一行在全文里的位置（`research_report_titles` 返回的是原文切片）。
+    let title = export::research_report_titles(markdown)
+        .first()
+        .map(|title| {
+            let start = title.as_ptr() as usize - markdown.as_ptr() as usize;
+            start..start + title.len()
+        });
+    let line_of = |offset: usize| markdown[..offset].matches('\n').count() + 1;
+    let mut first_seen: Vec<(&str, usize)> = Vec::new();
+    let mut notes = Vec::new();
+    for (id, span) in export::crossref::label_definitions(markdown) {
+        if title
+            .as_ref()
+            .is_some_and(|title| title.contains(&span.start))
+        {
+            continue;
+        }
+        let line = line_of(span.start);
+        match first_seen.iter().find(|(known, _)| *known == id) {
+            Some((_, first)) => notes.push(ReviewNote::located(
+                format!(
+                    "第 {line} 行的锚点 {{#{id}}} 与第 {first} 行重复：导出 PDF 会因此中止。\
+                     删掉这一处，再用「研报 › 锚点」重挂一个不重复的"
+                ),
+                span,
+            )),
+            None => first_seen.push((id, line)),
+        }
+    }
+    notes
+}
+
 /// 正文为空的提示语。导出闸门要按它认人，所以拎成常量，别让两处文案各写各的。
 const EMPTY_BODY: &str = "模型未返回正文";
 
@@ -59,8 +102,8 @@ fn research_title_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<St
     }
 }
 
-/// 研究报告行内标记的核对：悬空交叉引用在 PDF 里会印成 `??`，重复锚点的编号
-/// 以先到的为准，缺键的文献引用印出来是 `[?]`——都提前在这里说出来。
+/// 研究报告行内标记的核对：悬空交叉引用在 PDF 里会印成 `??`，缺键的文献引用
+/// 印出来是 `[?]`——都提前在这里说出来。重复锚点见 [`research_anchor_notes`]。
 fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<String>) {
     // 挂在报告题名、不编号标题上的锚点不生效（见 [`research_title_warnings`]、
     // [`research_unnumbered_warnings`]），不能算数：引到它的 `{@id}` 照样要报
@@ -70,7 +113,8 @@ fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<Str
         .chain(export::research_unnumbered_headings(text).headings)
         .filter_map(|line| export::crossref::split_label(line).1)
         .collect();
-    // 一趟走完：交叉引用要对照的去重清单，和重复定义的计数，都出自这一张表。
+    // 交叉引用要对照的锚点清单（带定义次数）。重复定义另由
+    // [`research_anchor_notes`] 逐处报、带位置，这里不重复说。
     let mut labels: Vec<(&str, usize)> = Vec::new();
     for line in text.lines() {
         let Some(id) = export::crossref::split_label(line).1 else {
@@ -89,11 +133,6 @@ fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<Str
         let dead = on_title.iter().filter(|known| **known == id).count();
         if defined == dead {
             warnings.push(format!("交叉引用 {{@{id}}} 没有对应的锚点 {{#{id}}}"));
-        }
-    }
-    for (id, count) in labels {
-        if count > 1 {
-            warnings.push(format!("锚点 {{#{id}}} 定义了多次，编号以先到的为准"));
         }
     }
     let bib = input.research.bibliography_content.trim();
@@ -444,6 +483,11 @@ pub fn mustfix_issues(
 ) -> Vec<String> {
     validate(input, markdown, vocabulary, rules)
         .into_iter()
+        .chain(
+            research_anchor_notes(input, markdown)
+                .into_iter()
+                .map(|note| note.message),
+        )
         .filter(|message| !is_advisory(message))
         .collect()
 }
@@ -1497,11 +1541,13 @@ mod tests {
                 .any(|warning| warning.contains("没有对应的锚点")),
             "{also_on_chapter:?}"
         );
+        // 题名在交给 mdx 之前就被拿掉了，它和章上的同名锚点不冲突，不报重复。
         assert!(
-            also_on_chapter
-                .iter()
-                .any(|warning| warning.contains("定义了多次")),
-            "{also_on_chapter:?}"
+            research_anchor_notes(
+                &input,
+                "# 报告 {#chap:t}\n\n## 研究背景 {#chap:t}\n\n见{@chap:t}。\n"
+            )
+            .is_empty()
         );
     }
 
@@ -1545,38 +1591,41 @@ mod tests {
         );
     }
 
-    /// 同一锚点定义多次时编号以先到的为准，要提示用户删掉多余的。
+    /// 同一锚点定义多次会让导出 PDF 中止：每处多出来的定义各报一条，带行号和
+    /// `{#id}` 的位置，第一处不报；也进必改清单。
     #[test]
-    fn duplicate_anchors_are_flagged() {
+    fn duplicate_anchors_are_located_one_note_per_extra_definition() {
         let mut input = DraftInput::default();
         input.kind = TemplateKind::ResearchReport;
         input.profile.kind = TemplateKind::ResearchReport;
 
-        let duplicated = validate(
-            &input,
-            "# 报告\n\n## 研究背景 {#chap:bg}\n\n正文。\n\n## 研究方法 {#chap:bg}\n\n正文。\n",
-            &[],
-            &rules(),
+        let markdown = "# 报告\n\n## 研究背景 {#chap:bg}\n\n正文。\n\n\
+                        ## 研究方法 {#chap:bg}\n\n![架构](a.png){#chap:bg}\n";
+        let notes = research_anchor_notes(&input, markdown);
+        let messages: Vec<&str> = notes.iter().map(|note| note.message.as_str()).collect();
+        assert_eq!(notes.len(), 2, "{messages:?}");
+        assert!(
+            messages[0].starts_with("第 7 行的锚点 {#chap:bg} 与第 3 行重复"),
+            "{messages:?}"
         );
         assert!(
-            duplicated
+            messages[1].starts_with("第 9 行的锚点 {#chap:bg} 与第 3 行重复"),
+            "{messages:?}"
+        );
+        for note in &notes {
+            let span = note.span.clone().expect("带位置");
+            assert_eq!(&markdown[span], "{#chap:bg}");
+        }
+        assert!(
+            mustfix_issues(&input, markdown, &[], &rules())
                 .iter()
-                .any(|warning| warning.contains("锚点 {#chap:bg} 定义了多次")),
-            "{duplicated:?}"
+                .any(|issue| issue.contains("与第 3 行重复")),
         );
 
-        let distinct = validate(
-            &input,
-            "# 报告\n\n## 研究背景 {#chap:bg}\n\n正文。\n\n## 研究方法 {#chap:m}\n\n正文。\n",
-            &[],
-            &rules(),
-        );
-        assert!(
-            !distinct
-                .iter()
-                .any(|warning| warning.contains("定义了多次")),
-            "锚点各不相同就不该提示：{distinct:?}"
-        );
+        let distinct = "# 报告\n\n## 研究背景 {#chap:bg}\n\n## 研究方法 {#chap:m}\n";
+        assert!(research_anchor_notes(&input, distinct).is_empty());
+        // 公文没有锚点语法，不查
+        assert!(research_anchor_notes(&DraftInput::default(), markdown).is_empty());
     }
 
     /// 已导入 .bib 时逐键核对：正文引用的键不在文献库里要指出来，同一缺键

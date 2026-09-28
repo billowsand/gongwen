@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
-use crate::common::ast::{Block, Inline, LineAlign};
+use crate::common::ast::{quote_as_paragraphs, Block, Inline, LineAlign};
 use crate::common::numbering::{int_to_roman, number_to_chinese, number_to_uppercase_letter};
 use crate::parser;
 
@@ -232,6 +232,12 @@ impl TexEmitter {
             Block::Aligned { align, content } => {
                 self.reset_list();
                 self.emit_aligned(*align, content);
+            }
+            Block::Quote { kind, items } => {
+                self.reset_list();
+                for paragraph in quote_as_paragraphs(kind, items) {
+                    self.emit_paragraph(&paragraph);
+                }
             }
             Block::List {
                 ordered: _,

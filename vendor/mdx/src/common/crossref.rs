@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use super::ast::{Block, Inline};
+use super::ast::{Block, Inline, QuoteKind};
 
 /// 锚点在输出端的生效范围
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,10 +79,17 @@ pub fn check(blocks: &[Block], support: Support) -> Report {
                     Some(Block::Table { .. }) => {
                         define!(id);
                     }
+                    // 文框有编号，引文没有：锚点只能挂在文框上
+                    Some(Block::Quote {
+                        kind: QuoteKind::Box { .. },
+                        ..
+                    }) if support == Support::Full => {
+                        define!(id);
+                    }
                     _ => {
                         report
                             .errors
-                            .push(format!("锚点 '{id}' 未挂接到标题或表格，不会生效"));
+                            .push(format!("锚点 '{id}' 未挂接到标题、表格或文框，不会生效"));
                     }
                 }
             }
@@ -93,6 +100,14 @@ pub fn check(blocks: &[Block], support: Support) -> Report {
             Block::List { content, .. } => {
                 collect_inline_refs(content, &mut used);
                 check_image_labels(content, &mut report, &mut defined);
+            }
+            Block::Quote { kind, items } => {
+                if let QuoteKind::Box { title, .. } = kind {
+                    collect_inline_refs(title, &mut used);
+                }
+                for item in items {
+                    collect_inline_refs(item.inlines(), &mut used);
+                }
             }
             Block::Table { rows, .. } => {
                 // 单元格是 raw 字符串，引用在行内解析时才出现，此处补查
@@ -310,6 +325,17 @@ mod tests {
         let md = "表：题 {#tbl:t}\n\n| A |\n|---|\n| 见{@fig:nope} |\n";
         let errs = errors(md, Support::Full);
         assert!(errs.iter().any(|e| e.contains("fig:nope")), "{errs:?}");
+    }
+
+    #[test]
+    fn box_label_is_defined_and_citation_label_is_not() {
+        let md = "> [!专栏] 做法 {#box:a}\n>\n> 见{@box:a}。\n";
+        assert!(errors(md, Support::Full).is_empty());
+        // 专栏在公文样式下没有编号
+        assert!(!errors(md, Support::FiguresAndTables).is_empty());
+        // 引文里的引用照样要查
+        let errs = errors("> 见{@box:nope}。\n", Support::Full);
+        assert!(errs.iter().any(|e| e.contains("box:nope")), "{errs:?}");
     }
 
     #[test]

@@ -824,16 +824,11 @@ fn resolve_run(
         );
     }
 
-    // 3b. 对齐行配对：相似度 ≥ 0.4 的按最高分配对做词级比较；配不上的
-    //     整行删除 / 新增（居中 / 居右行常常整行改写）。
-    let aligned_pairs = best_pairs(
-        old,
-        new,
-        old_blocks,
-        new_blocks,
-        &used_old,
-        &used_new,
-        |block| {
+    // 3b. 对齐行、引用块的行配对：相似度 ≥ 0.4 的按最高分配对做词级比较；
+    //     配不上的整行删除 / 新增（居中 / 居右行常常整行改写）。两种各配各的，
+    //     引文的一行不会配到居中行上去。
+    let aligned_pairs = [
+        (|block: &VisualBlock| {
             matches!(
                 block,
                 VisualBlock::Parsed {
@@ -841,9 +836,31 @@ fn resolve_run(
                     ..
                 }
             )
+        }) as fn(&VisualBlock) -> bool,
+        |block: &VisualBlock| {
+            matches!(
+                block,
+                VisualBlock::Parsed {
+                    block: MarkdownBlock::Quote { .. },
+                    ..
+                }
+            )
         },
-        LIST_PAIR_SIMILARITY,
-    );
+    ]
+    .into_iter()
+    .flat_map(|is_kind| {
+        best_pairs(
+            old,
+            new,
+            old_blocks,
+            new_blocks,
+            &used_old,
+            &used_new,
+            is_kind,
+            LIST_PAIR_SIMILARITY,
+        )
+    })
+    .collect::<Vec<_>>();
     for (oi, ni) in aligned_pairs {
         used_old[oi] = true;
         used_new[ni] = true;

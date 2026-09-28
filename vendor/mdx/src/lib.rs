@@ -16,6 +16,9 @@ mod tex_research_emitter;
 /// 表格源码与自己预览用的网格是否一致。
 pub use common::table;
 
+/// 引用块 `>` 的行级识别。公开出来供调用方的预览照同一规则认引文与文框。
+pub use common::quote;
+
 /// 研究报告插图的默认宽度。公开出来供调用方的预览照同一规则排图。
 pub use common::figure_size;
 

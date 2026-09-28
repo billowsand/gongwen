@@ -22,6 +22,8 @@ mod pdf_figure;
 mod red;
 mod render;
 mod research;
+mod research_anchor;
+mod research_quote;
 mod tail;
 
 pub(crate) use freeze::{ScaleFreeze, show_frozen};
@@ -38,6 +40,7 @@ pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
 pub(crate) use research::outline as research_outline;
 pub(crate) use research::{LabelKind, LabelTarget, label_targets as research_label_targets};
+pub(crate) use research_anchor::{AnchorRefusal, suggest as suggest_research_anchor};
 pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 // test-only names（根文件的测试模块使用）
 #[cfg(test)]

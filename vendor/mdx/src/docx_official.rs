@@ -19,7 +19,7 @@ use docx_rs::*;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use crate::common::ast::{Block, Inline, LineAlign, MarkerKind};
+use crate::common::ast::{quote_as_paragraphs, Block, Inline, LineAlign, MarkerKind};
 use crate::common::front_matter;
 use crate::common::inline;
 use crate::common::numbering::{int_to_roman, number_to_chinese, number_to_uppercase_letter};
@@ -240,6 +240,14 @@ impl OfficialEmitter {
                 } else {
                     self.add_body_paragraph(docx, inlines)
                 }
+            }
+            Block::Quote { kind, items } => {
+                self.list.reset();
+                quote_as_paragraphs(kind, items)
+                    .iter()
+                    .fold(docx, |docx, paragraph| {
+                        self.add_body_paragraph(docx, paragraph)
+                    })
             }
             Block::Aligned { align, content } => {
                 self.list.reset();

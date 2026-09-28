@@ -775,7 +775,8 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                     tex_escape(src)
                 ));
             }
-            MarkdownBlock::Html(_) => {}
+            // 引用块已由 `flatten_quotes` 拆成段落，到不了这里
+            MarkdownBlock::Html(_) | MarkdownBlock::Quote { .. } => {}
         }
         index += 1;
     }

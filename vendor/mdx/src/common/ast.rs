@@ -73,8 +73,63 @@ pub enum Block {
     /// 标记后面紧跟的不是标题时，parser 直接丢掉它。仅研究报告使用，公文忽略。
     Unnumbered,
 
+    /// 引用块：连续的 `>` 行（见 [`super::quote`]）。研究报告按 `kind` 排成
+    /// 引文或文框（专栏、案例……）；公文没有这两种版式，按普通段落排。
+    /// 文框标题行尾的 `{#id}` 锚点与表格一样，另起一个 `Block::Label` 放在本块之前。
+    Quote {
+        kind: QuoteKind,
+        items: Vec<QuoteItem>,
+    },
+
     /// 空行；多数 emitter 直接忽略。
     Empty,
+}
+
+/// 引用块的版式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuoteKind {
+    /// 引文：`>` 开头的普通引用，排成楷体、左右各缩进两字的独立引文。
+    Citation,
+    /// 文框：首行写 `> [!名称] 标题`，排成带编号（"专栏 2.1""案例 1.3"）和边框
+    /// 的方框。`name` 写什么印什么，每种名称各编各的号。
+    Box { name: String, title: Vec<Inline> },
+}
+
+/// 引用块里的一行。块内每条非空源码行各成一段，与正文"一行一段"一致。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuoteItem {
+    Paragraph(Vec<Inline>),
+    /// 引文的出处行：以 `——` 开头，整行靠右、不缩进。文框里没有这种行。
+    Source(Vec<Inline>),
+    /// 列表项，写法与正文列表相同（`- ` / `1. `），块内只排一级。
+    List {
+        ordered: bool,
+        content: Vec<Inline>,
+    },
+}
+
+/// 公文没有引文、文框版式：引用块按普通段落排，文框的名称与标题降为一段加粗文字。
+pub fn quote_as_paragraphs(kind: &QuoteKind, items: &[QuoteItem]) -> Vec<Vec<Inline>> {
+    let mut paragraphs = Vec::with_capacity(items.len() + 1);
+    if let QuoteKind::Box { name, title } = kind {
+        let mut head = vec![Inline::Text(name.clone())];
+        if !title.is_empty() {
+            head.push(Inline::Text("\u{3000}".into()));
+            head.extend(title.iter().cloned());
+        }
+        paragraphs.push(vec![Inline::Bold(head)]);
+    }
+    paragraphs.extend(items.iter().map(|item| item.inlines().to_vec()));
+    paragraphs
+}
+
+impl QuoteItem {
+    pub fn inlines(&self) -> &[Inline] {
+        match self {
+            Self::Paragraph(inlines) | Self::Source(inlines) => inlines,
+            Self::List { content, .. } => content,
+        }
+    }
 }
 
 /// 居中 / 居右标记指定的整行对齐方式。

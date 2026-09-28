@@ -281,6 +281,8 @@ pub(crate) fn body_stats(markdown: &str) -> (usize, usize) {
                 paragraphs += 1;
                 text.clone()
             }
+            // `parse_markdown` 已把引用块拆成了段落
+            export::MarkdownBlock::Quote { .. } => continue,
             export::MarkdownBlock::Table { rows, .. } => rows
                 .iter()
                 .flat_map(|row| row.iter().cloned())
@@ -553,31 +555,39 @@ impl DraftPage<'_> {
         splice_own_line(text, pos, line)
     }
 
-    /// 研究报告的锚点 ` {#}`：追加到光标所在行的行尾，光标落进花括号里，
-    /// 紧接着就能敲 id。锚点只在标题、表题或图片行的行尾生效，导出为
-    /// LaTeX 的 `\label`，供 `{@id}` 交叉引用。
+    /// 研究报告的「锚点」按钮：按光标所在的块挂一个自动起名的锚点。
+    ///
+    /// 挂在哪一行、叫什么由 `preview::suggest_research_anchor` 定：光标在表格里
+    /// 挂到表题行，在文框里挂到首行；id 是「前缀:标题拼音」，全文不重复（见
+    /// `preview::research_anchor`）。挂不了（正文段落、不编号标题、没图注的图……）
+    /// 就在状态栏说明原因；这一处已有锚点就把光标移过去，不再挂第二个。
     pub(crate) fn insert_label(&mut self, ctx: &egui::Context) {
         if self.doc.read_only() {
             return;
         }
-        let cursor = editor_cursor(ctx, &self.doc.generated_markdown);
-        let text = &mut self.doc.generated_markdown;
-        let pos = cursor.unwrap_or(text.len()).min(text.len());
-        let line_start = text[..pos].rfind('\n').map_or(0, |index| index + 1);
-        let line_end = text[pos..]
-            .find('\n')
-            .map_or(text.len(), |index| pos + index);
-        if export::crossref::split_label(&text[line_start..line_end])
-            .1
-            .is_some()
-        {
-            *self.status = "本行已有锚点，直接改花括号里的 id 即可。".into();
-            return;
+        let text = &self.doc.generated_markdown;
+        let cursor = editor_cursor(ctx, text).unwrap_or(text.len());
+        match crate::preview::suggest_research_anchor(text, cursor) {
+            Ok(suggestion) => {
+                let label = format!(" {{#{}}}", suggestion.id);
+                self.doc
+                    .generated_markdown
+                    .insert_str(suggestion.line_end, &label);
+                // 光标停在 id 末尾：想改名直接往前删改。
+                self.doc.pending_source_jump = Some(suggestion.line_end + label.len() - 1);
+                *self.status = format!(
+                    "已插入锚点 {{#{}}}。引用时在「交叉引用」下拉里选它；改 id 要连同引用一起改。",
+                    suggestion.id
+                );
+            }
+            Err(crate::preview::AnchorRefusal::Existing { id, span }) => {
+                self.doc.pending_source_jump = Some(span.end.saturating_sub(1));
+                *self.status = format!("这里已有锚点 {{#{id}}}，不再重复添加。");
+            }
+            Err(crate::preview::AnchorRefusal::NotNumbered(reason)) => {
+                *self.status = format!("没有插入锚点：{reason}。");
+            }
         }
-        text.insert_str(line_end, " {#}");
-        // 光标落进花括号内，直接敲 id。
-        self.doc.pending_source_jump = Some(line_end + " {#".len());
-        *self.status = "已插入锚点：在花括号里写 id（字母开头，可含数字与 : . - _）。".into();
     }
 
     /// 把一段块级 Markdown 插进审校稿，返回插入内容自身的起始字节。

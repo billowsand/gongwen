@@ -5,7 +5,9 @@
 //! 解析规则生成进文本，标题上的手写编号已清掉（成文时编号由导出器再生成，
 //! 因此标题与列表的「编号」天然不在比较范围内，方案规则 8 的第一半由此满足）。
 
-use crate::export::{MarkdownBlock, TableSpan, parse_markdown_located_with_numbering};
+use crate::export::{
+    LocatedBlock, MarkdownBlock, QuoteLine, TableSpan, parse_markdown_located_with_numbering,
+};
 use crate::models::{DraftInput, NumberingConfig};
 use std::ops::Range;
 
@@ -75,6 +77,7 @@ impl VisualBlock {
                 | MarkdownBlock::Paragraph(text)
                 | MarkdownBlock::OrderedListItem { text, .. }
                 | MarkdownBlock::Aligned { text, .. } => Some(text.as_str()),
+                MarkdownBlock::Quote { .. } => quote_piece_text(block),
                 _ => None,
             },
             Self::Element { text, .. } => Some(text.as_str()),
@@ -122,6 +125,7 @@ impl DocumentModel {
     ) -> Self {
         let blocks = parse_markdown_located_with_numbering(markdown, numbering)
             .into_iter()
+            .flat_map(|located| quote_pieces(markdown, located))
             .map(|located| {
                 // 段内列表的生成编号是版式不是正文：原文与纯文本都剥掉，
                 // 序列化后由导出器按设置重新生成（编号顺移因此不标注）。
@@ -234,7 +238,54 @@ fn raw_text_of(block: &MarkdownBlock) -> Option<&str> {
         | MarkdownBlock::Paragraph(text)
         | MarkdownBlock::OrderedListItem { text, .. }
         | MarkdownBlock::Aligned { text, .. } => Some(text.as_str()),
+        MarkdownBlock::Quote { .. } => quote_piece_text(block),
         _ => None,
+    }
+}
+
+/// 引用块拆成逐行的小块参与比较，与居中 / 居右行一样逐行配对：文框的首行
+/// 一块，其后每行一块。小块仍是 `MarkdownBlock::Quote`，只带一行（首行那块不带
+/// 行），文框的每一块都带着首行——序列化靠它认出哪几块同属一个文框，再按 `>`
+/// 写回、归并成一个引用块（见 `serialize`）。
+///
+/// 首行那块比较的是标题；名称（专栏、案例……）不参与比较，改了名称不标注，
+/// 写回时用新版的名称。
+fn quote_pieces(markdown: &str, located: LocatedBlock) -> Vec<LocatedBlock> {
+    let MarkdownBlock::Quote { boxed, lines } = &located.block else {
+        return vec![located];
+    };
+    let piece = |lines: Vec<QuoteLine>, range: Range<usize>| LocatedBlock {
+        block: MarkdownBlock::Quote {
+            boxed: boxed.clone(),
+            lines,
+        },
+        range,
+        source_segments: Vec::new(),
+        generated_prefixes: Vec::new(),
+    };
+    let mut pieces = Vec::with_capacity(lines.len() + 1);
+    if boxed.is_some() {
+        let first_line = markdown
+            .get(located.range.clone())
+            .and_then(|raw| raw.lines().next())
+            .map_or(0, str::len);
+        let start = located.range.start;
+        pieces.push(piece(Vec::new(), start..start + first_line));
+    }
+    for line in lines {
+        pieces.push(piece(vec![line.clone()], line.source.clone()));
+    }
+    pieces
+}
+
+/// 引用块小块的文字：带一行就是那一行，只带首行就是文框标题。
+pub(crate) fn quote_piece_text(block: &MarkdownBlock) -> Option<&str> {
+    let MarkdownBlock::Quote { boxed, lines } = block else {
+        return None;
+    };
+    match lines.first() {
+        Some(line) => Some(line.text.as_str()),
+        None => boxed.as_ref().map(|boxed| boxed.title.as_str()),
     }
 }
 
@@ -252,6 +303,16 @@ fn replace_text(block: &MarkdownBlock, plain: String) -> MarkdownBlock {
             align: *align,
             text: plain,
         },
+        MarkdownBlock::Quote { boxed, lines } => {
+            let mut lines = lines.clone();
+            let mut boxed = boxed.clone();
+            match (lines.first_mut(), boxed.as_mut()) {
+                (Some(line), _) => line.text = plain,
+                (None, Some(boxed)) => boxed.title = plain,
+                (None, None) => {}
+            }
+            MarkdownBlock::Quote { boxed, lines }
+        }
         other => other.clone(),
     }
 }

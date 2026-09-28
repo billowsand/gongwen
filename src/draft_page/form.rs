@@ -647,6 +647,11 @@ impl DraftPage<'_> {
         .into_iter()
         .map(ReviewNote::from)
         .collect();
+        // 重复锚点逐处报、带位置：点一下跳到多出来的那个 `{#id}`。
+        self.doc.warnings.extend(validator::research_anchor_notes(
+            &self.doc.draft,
+            &self.doc.generated_markdown,
+        ));
         // 文字校对与要素校验并列：前者管词语用法，后者管必填与互斥。两边的提示
         // 都带 span，抽屉里点一下就能跳到出问题的那几个字。
         // 用合并过用户覆盖层的词表，而不是内置种子——否则词表页上改了不生效。

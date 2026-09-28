@@ -14,6 +14,7 @@ pub mod inline;
 pub mod markers;
 pub mod numbering;
 pub mod parts;
+pub mod quote;
 pub mod quotes;
 pub mod table;
 pub mod table_layout;

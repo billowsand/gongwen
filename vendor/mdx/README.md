@@ -110,6 +110,23 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 - `tex_research/merger.rs` 与 `docx_research.rs::split_blocks`：报告题名只认正文
   区段里的第一个 `#`，部分、摘要、附录段里的 `#` 不再被拿去当题名删掉。
 
+研究报告的引文与文框（Markdown 的 `>` 引用块）同样先在这里落地：
+
+- 新增 `common/quote.rs`（行首 `>` 的认法、`[!名称]` 文框首行、`——` 出处行），
+  `lib.rs` 导出 `mdx::quote` 供公文助手的预览解析器共用；
+- `common/ast.rs` 新增 `Block::Quote`、`QuoteKind`、`QuoteItem` 与
+  `quote_as_paragraphs`；`parser.rs` 把连续的 `>` 行解析成一个块（一行一段），
+  文框首行的 `{#id}` 剥成 `Block::Label`；
+- `common/crossref.rs`：锚点可以挂在文框上，引用块里的 `{@id}` 照样检查；
+- `resources/research/md2tex.cls` 新增 `mdxquote` 环境、`\mdxquotesource`、
+  `\mdxboxstep`（每种文框名称第一次出现时现建一对计数器：随章归零的与不编号章
+  用的流水号）与 `mdxboxtblr` 长表（细框、浅灰底、不占表号）；
+  `tex_research_emitter.rs` 按名称首次出现的先后给计数器分配 ASCII 键，
+  文框单元格里的脚注、行内公式按表格单元格的规则降级；
+- `docx_research.rs`：引文排成楷体缩进段落，文框排成一格表格（浅灰底、细框），
+  每种名称各编各的号，口径与 TeX 相同；`tex_official.rs` / `docx_official.rs`
+  按普通段落排。
+
 ## 改动规则
 
 **不要直接改这里的代码。** 一旦这份副本与上游分叉，"研究报告的排版与 mdx 保持

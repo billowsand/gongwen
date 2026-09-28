@@ -48,6 +48,114 @@ pub(crate) enum MarkdownBlock {
         align: LineAlign,
         text: String,
     },
+    /// 引用块：连续的 `>` 行，行级识别与 mdx 同用 `mdx::quote`。研究报告排成
+    /// 引文或文框（专栏、案例……）；公文没有这两种版式，按普通段落排（见
+    /// [`flatten_quotes`]）。
+    Quote {
+        /// 文框的首行（`> [!名称] 标题`）；引文是 None。
+        boxed: Option<QuoteBox>,
+        /// 块内各行：去掉 `>` 之后的非空行，一行一段，与 mdx 一致。
+        lines: Vec<QuoteLine>,
+    },
+}
+
+/// 文框的首行 `> [!名称] 标题`。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct QuoteBox {
+    /// 方括号里写的名称，写什么印什么：专栏、案例、例子……每种名称各编各的号。
+    pub(crate) name: String,
+    /// 标题，已剥掉行尾锚点；可以为空。
+    pub(crate) title: String,
+}
+
+impl QuoteBox {
+    /// 纸面上印的标题行，不带编号时的样子："案例　某市做法"；没有标题只印名称。
+    pub(crate) fn heading(&self) -> String {
+        if self.title.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}\u{3000}{}", self.name, self.title)
+        }
+    }
+}
+
+/// 引用块里的一行。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct QuoteLine {
+    pub(crate) kind: QuoteLineKind,
+    /// 去掉 `>` 之后的内容；列表项另去掉 `- ` / `1. ` 前缀。
+    pub(crate) text: String,
+    /// 这一行在源码里的字节范围（整行，含 `>`）。
+    pub(crate) source: std::ops::Range<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum QuoteLineKind {
+    Paragraph,
+    /// 引文的出处行：`——` 开头，靠右排。文框里没有这种行。
+    Source,
+    /// 列表项，编号（⑴ ⑵）按块内连续的列表项现排。
+    ListItem,
+}
+
+/// 公文没有引文、文框版式：引用块拆成普通的块——文框的名称与标题降为一段加粗文字，
+/// 其余每行一段，列表项照常按设置编号。其余块原样保留。
+///
+/// 公文的导出与预览在拿到块序列时先过这一道（见 [`parse_markdown_with_numbering`]、
+/// [`parse_markdown_with_lines_with_numbering`] 与 `preview::render` 的 `OfficialParse`），
+/// 下游各版式因此不必认得引用块。研究报告、版本对照要保留引用块，不走这里。
+pub(crate) fn flatten_quotes(blocks: Vec<LocatedBlock>) -> Vec<LocatedBlock> {
+    let paragraph = |source: std::ops::Range<usize>, text: String| {
+        let (text, source_segments, generated_prefixes) = mapped_paragraph(&[ParagraphPart {
+            source: source.clone(),
+            text,
+            join: ParagraphJoin::Soft,
+            prefix_chars: 0,
+        }]);
+        LocatedBlock {
+            block: MarkdownBlock::Paragraph(text),
+            range: source,
+            source_segments,
+            generated_prefixes,
+        }
+    };
+    let mut out = Vec::with_capacity(blocks.len());
+    for located in blocks {
+        let MarkdownBlock::Quote { boxed, lines } = &located.block else {
+            out.push(located);
+            continue;
+        };
+        if let Some(boxed) = boxed {
+            // 标题行的范围：块首到第一条内容行之前（没有内容行就是整块）。
+            let end = lines
+                .first()
+                .map_or(located.range.end, |line| line.source.start)
+                .max(located.range.start);
+            out.push(paragraph(
+                located.range.start..end,
+                format!("**{}**", boxed.heading()),
+            ));
+        }
+        let mut number = 0;
+        for line in lines {
+            if line.kind == QuoteLineKind::ListItem {
+                number += 1;
+                out.push(LocatedBlock {
+                    block: MarkdownBlock::OrderedListItem {
+                        number,
+                        text: line.text.clone(),
+                    },
+                    range: line.source.clone(),
+                    source_segments: Vec::new(),
+                    generated_prefixes: Vec::new(),
+                });
+            } else {
+                number = 0;
+                out.push(paragraph(line.source.clone(), line.text.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// 居中 / 居右标记指定的整行对齐方式。
@@ -194,7 +302,7 @@ pub(crate) fn parse_markdown_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Vec<MarkdownBlock> {
-    parse_markdown_located_with_numbering(markdown, numbering)
+    flatten_quotes(parse_markdown_located_with_numbering(markdown, numbering))
         .into_iter()
         .map(|located| located.block)
         .collect()
@@ -213,7 +321,7 @@ pub(crate) fn parse_markdown_with_lines_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> (Vec<MarkdownBlock>, Vec<usize>) {
-    let located = parse_markdown_located_with_numbering(markdown, numbering);
+    let located = flatten_quotes(parse_markdown_located_with_numbering(markdown, numbering));
     let starts: Vec<usize> = source_lines(markdown)
         .into_iter()
         .map(|(offset, _)| offset)
@@ -482,6 +590,60 @@ fn parse_located(
                 });
                 index += 1;
             }
+            continue;
+        } else if mdx::quote::strip_marker(line).is_some() {
+            // 引用块：连续的 `>` 行，遇到不带 `>` 的行（含空行）结束。认法与
+            // mdx 同用 `mdx::quote`：块内一行一段，列表项、出处行各自认出来，
+            // 文框首行的行尾锚点剥掉（锚点由研究报告预览回原文去取）。
+            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            let first = index;
+            let mut end = span.end;
+            let mut boxed = None;
+            let mut quote_lines = Vec::new();
+            while index < lines.len() {
+                let text = lines[index].text.trim();
+                let Some(inner) = mdx::quote::strip_marker(text) else {
+                    break;
+                };
+                let span = lines[index].start..lines[index].start + lines[index].len;
+                end = span.end;
+                index += 1;
+                if index - 1 == first
+                    && let Some((name, title)) =
+                        mdx::quote::strip_marker(super::crossref::split_label(text).0)
+                            .and_then(mdx::quote::box_head)
+                {
+                    boxed = Some(QuoteBox {
+                        name: name.to_string(),
+                        title: title.to_string(),
+                    });
+                    continue;
+                }
+                if inner.is_empty() {
+                    continue;
+                }
+                let (kind, text) = match parse_list_item(inner) {
+                    Some((_, item)) => (QuoteLineKind::ListItem, item),
+                    None if boxed.is_none() && mdx::quote::is_source(inner) => {
+                        (QuoteLineKind::Source, inner)
+                    }
+                    None => (QuoteLineKind::Paragraph, inner),
+                };
+                quote_lines.push(QuoteLine {
+                    kind,
+                    text: text.to_string(),
+                    source: span,
+                });
+            }
+            blocks.push(LocatedBlock {
+                block: MarkdownBlock::Quote {
+                    boxed,
+                    lines: quote_lines,
+                },
+                range: start..end,
+                source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
+            });
             continue;
         } else if let Some(section) = parse_section_marker(line) {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
@@ -1750,6 +1912,94 @@ mod research_marker_tests {
             scan.headings,
             vec!["前言 {#chap:qy}", "说明", "总论", "概述"]
         );
+    }
+
+    /// 一个引用块：（专栏标题，各行的种类与文字）。
+    type QuoteShape = (Option<String>, Vec<(QuoteLineKind, String)>);
+
+    fn quotes(markdown: &str) -> Vec<QuoteShape> {
+        parse_markdown_located(markdown)
+            .into_iter()
+            .filter_map(|located| match located.block {
+                MarkdownBlock::Quote { boxed, lines } => Some((
+                    boxed.map(|boxed| boxed.heading()),
+                    lines
+                        .into_iter()
+                        .map(|line| (line.kind, line.text))
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 与 mdx `parser::parse_quote` 同一套认法：一行一段，空的 `>` 行只作分隔，
+    /// 列表项与出处行各自认出来，空行结束引用块。
+    #[test]
+    fn quote_lines_are_classified_like_mdx() {
+        let markdown = "正文。\n\n> 第一段\n> 第二段\n>\n> - 列表项\n> ——《意见》\n\n正文。";
+        assert_eq!(
+            quotes(markdown),
+            vec![(
+                None,
+                vec![
+                    (QuoteLineKind::Paragraph, "第一段".to_string()),
+                    (QuoteLineKind::Paragraph, "第二段".to_string()),
+                    (QuoteLineKind::ListItem, "列表项".to_string()),
+                    (QuoteLineKind::Source, "——《意见》".to_string()),
+                ],
+            )]
+        );
+        let located = parse_markdown_located(markdown);
+        let quote = &located[1];
+        assert_eq!(
+            &markdown[quote.range.clone()],
+            "> 第一段\n> 第二段\n>\n> - 列表项\n> ——《意见》"
+        );
+    }
+
+    /// 文框首行取出名称、剥掉锚点；文框里 `——` 开头的行仍是段落。`\>` 与 `>5%` 不开引用块。
+    #[test]
+    fn box_head_keeps_its_name_and_escaped_markers_stay_text() {
+        assert_eq!(
+            quotes("> [!案例] 某市做法 {#case:city}\n>\n> ——不是出处"),
+            vec![(
+                Some("案例\u{3000}某市做法".to_string()),
+                vec![(QuoteLineKind::Paragraph, "——不是出处".to_string())],
+            )]
+        );
+        assert!(quotes("\\> 字面\n\n>5%的企业").is_empty());
+        assert_eq!(quotes("> 甲\n\n> 乙").len(), 2);
+    }
+
+    /// 公文没有引文、文框版式：导出拿到的是普通段落，文框名称与标题加粗，列表照常编号。
+    #[test]
+    fn official_exports_see_quotes_as_plain_paragraphs() {
+        assert_eq!(
+            parse_markdown("> [!专栏] 做法\n>\n> 一是……\n> - 甲\n> - 乙"),
+            vec![
+                MarkdownBlock::Paragraph("**专栏\u{3000}做法**".into()),
+                MarkdownBlock::Paragraph("一是……".into()),
+                MarkdownBlock::OrderedListItem {
+                    number: 1,
+                    text: "甲".into(),
+                },
+                MarkdownBlock::OrderedListItem {
+                    number: 2,
+                    text: "乙".into(),
+                },
+            ]
+        );
+        let (blocks, lines) = parse_markdown_with_lines("前文。\n\n> 引文\n> ——出处");
+        assert_eq!(
+            blocks,
+            vec![
+                MarkdownBlock::Paragraph("前文。".into()),
+                MarkdownBlock::Paragraph("引文".into()),
+                MarkdownBlock::Paragraph("——出处".into()),
+            ]
+        );
+        assert_eq!(lines, vec![1, 3, 4]);
     }
 }
 

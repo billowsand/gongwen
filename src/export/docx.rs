@@ -469,7 +469,11 @@ pub fn write_docx_with_numbering(
     } else {
         for block in &blocks {
             match block {
-                MarkdownBlock::Title(_) | MarkdownBlock::Html(_) | MarkdownBlock::Marker(_) => {}
+                // 引用块已由 `flatten_quotes` 拆成段落，到不了这里
+                MarkdownBlock::Title(_)
+                | MarkdownBlock::Html(_)
+                | MarkdownBlock::Marker(_)
+                | MarkdownBlock::Quote { .. } => {}
                 MarkdownBlock::Image { alt, src } => {
                     if let Some(paragraph) = image_paragraph(alt, src) {
                         doc = doc.add_paragraph(paragraph);
