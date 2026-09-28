@@ -845,6 +845,23 @@ mod tests {
         assert!(!tex.contains("\\textbf{"), "{tex}");
     }
 
+    #[test]
+    fn deep_headings_use_fangsong_fake_bold_independent_of_body_bold_style() {
+        let mut input = DraftInput::default();
+        let markdown = "# 测试函\n\n#### 三级标题\n\n##### 四级标题\n\n请**务必**报送。";
+        let tex = letter_tex(&input, markdown);
+        for title in ["三级标题", "四级标题"] {
+            let at = tex.find(title).unwrap();
+            let start = tex[..at].rfind("\\fs\\textbf{").unwrap();
+            assert!(at - start < 32, "{tex}");
+        }
+        assert!(tex.contains("\\GwBold{务必}"), "{tex}");
+
+        input.profile.style_mode = StyleMode::Compact;
+        let tex = letter_tex(&input, "# 测试函\n\n#### 标题\n紧跟正文。");
+        assert!(tex.contains("\\fs\\textbf{1.标题。}"), "{tex}");
+    }
+
     /// 钩子的两条分支：按文件加载用拷进临时目录的固定文件名，按名字加载用家族名。
     /// 没配的位置继续用内置字体，两边都要保持原样。
     #[test]

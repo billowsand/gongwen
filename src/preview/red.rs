@@ -57,6 +57,7 @@ pub(crate) struct RedPrintFragment {
     /// 两端对齐后的逐行 galley，与 `galley.rows` 一一对应；非空时按行画，
     /// 空表示这一段不参与对齐（标题、落款等自有对齐方式的固定片段）。
     justified: Vec<Arc<egui::Galley>>,
+    synthetic_bold_chars: Vec<Range<usize>>,
     x: f32,
     y: f32,
     pub(crate) width: f32,
@@ -275,12 +276,13 @@ fn red_inline_job(
     for segment in segments {
         let font = match segment.style {
             RedTextStyle::Heading(level) => metrics.font(heading_family(level), BODY_PT),
-            RedTextStyle::List => normal.clone(),
-            RedTextStyle::Body if segment.parenthesized => {
+            RedTextStyle::Body | RedTextStyle::List if segment.parenthesized => {
                 metrics.font(theme::FONT_KAITI, PAREN_PT)
             }
-            RedTextStyle::Body if segment.bold => metrics.font(theme::FONT_BOLD, BODY_PT),
-            RedTextStyle::Body => normal.clone(),
+            RedTextStyle::Body | RedTextStyle::List if segment.bold && metrics.dedicated_bold => {
+                metrics.font(theme::FONT_BOLD, BODY_PT)
+            }
+            RedTextStyle::Body | RedTextStyle::List => normal.clone(),
         };
         job.append(
             &segment.text,
@@ -354,6 +356,20 @@ fn red_place_styled_flow_text(
             continue;
         }
         let indent_this_fragment = first_fragment && first_line_indent;
+        let mut cursor = usize::from(indent_this_fragment) * INDENT_CHARS as usize;
+        let mut synthetic_bold_chars = Vec::new();
+        for segment in &segments {
+            let end = cursor + segment.text.chars().count();
+            if matches!(segment.style, RedTextStyle::Heading(4 | 5))
+                || (matches!(segment.style, RedTextStyle::Body | RedTextStyle::List)
+                    && segment.bold
+                    && !segment.parenthesized
+                    && !metrics.dedicated_bold)
+            {
+                synthetic_bold_chars.push(cursor..end);
+            }
+            cursor = end;
+        }
         let flow_job = red_inline_job(metrics, width, &segments, indent_this_fragment);
         let galley = layout(ui, flow_job.clone());
         // 正文两端对齐，与 Word 导出和 TeX 一致；末行保持自然宽度。
@@ -405,6 +421,7 @@ fn red_place_styled_flow_text(
             source_segments: fragment_segments,
             galley,
             justified,
+            synthetic_bold_chars,
             x: layout_state.body_left(metrics),
             y: layout_state.cursor_y,
             width,
@@ -465,6 +482,7 @@ fn red_place_aligned_text(
             source_segments: Vec::new(),
             galley,
             justified: Vec::new(),
+            synthetic_bold_chars: Vec::new(),
             x,
             y: layout_state.cursor_y,
             width,
@@ -600,6 +618,7 @@ pub(crate) fn red_fixed_fragment(
         visible_height: red_row_top(metrics, galley.rows.len().max(1)),
         galley,
         justified: Vec::new(),
+        synthetic_bold_chars: Vec::new(),
         x,
         y,
         width,
@@ -1470,6 +1489,27 @@ pub(crate) fn paint_red_print_pages(
                             );
                         }
                         painter.galley(at, row.clone(), theme::paper::ink());
+                        for chars in &fragment.synthetic_bold_chars {
+                            let row_end = first_char + placed.glyphs.len();
+                            let start = chars.start.max(first_char);
+                            let end = chars.end.min(row_end);
+                            if start < end {
+                                let placed_row = &row.rows[0];
+                                let left =
+                                    placed_row.pos.x + placed_row.glyphs[start - first_char].pos.x;
+                                let right = placed_row.pos.x
+                                    + placed_row.glyphs[end - first_char - 1].max_x();
+                                let clip = egui::Rect::from_min_max(
+                                    at + egui::vec2(left, 0.0),
+                                    at + egui::vec2(right + 0.4, placed.size.y),
+                                );
+                                painter.with_clip_rect(clip).galley(
+                                    at + egui::vec2(0.4, 0.0),
+                                    row.clone(),
+                                    theme::paper::ink(),
+                                );
+                            }
+                        }
                         first_char += placed.glyphs.len();
                     }
                 }

@@ -167,12 +167,7 @@ pub(crate) fn add_official_content_block(
             // （方案规则 8），需要知道前缀边界。
             let number = official_heading_prefix(*level, counters, numbering);
             if let Some(number) = number {
-                doc = doc.add_paragraph(heading_paragraph_with_number(
-                    *level,
-                    Some(&number),
-                    text,
-                    bold,
-                ));
+                doc = doc.add_paragraph(heading_paragraph_with_number(*level, Some(&number), text));
             }
         }
         MarkdownBlock::Paragraph(text)

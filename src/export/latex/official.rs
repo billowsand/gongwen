@@ -693,11 +693,11 @@ pub(crate) fn official_letter_sections_to_tex_with_barrier_with_numbering(
                     };
                     let heading_escaped = marked_tex_escape(text);
                     let body_escaped = body_text_to_tex(body_text);
-                    // 标题段采用与独立标题一致的层级字体：2 级黑体、3 级楷体、4、5 级加粗。
+                    // 标题段采用与独立标题一致的层级字体：2 级黑体、3 级楷体、4、5 级仿宋合成加粗。
                     let title_tex = match *level {
                         2 => format!("\\heiti\\enheiti {number}{heading_escaped}。"),
                         3 => format!("\\kai\\enkai {number}{heading_escaped}。"),
-                        4 | 5 => format!("\\GwBold{{{number}{heading_escaped}。}}"),
+                        4 | 5 => format!("\\fs\\textbf{{{number}{heading_escaped}。}}"),
                         _ => unreachable!(),
                     };
                     target_tex_section(section, &mut body, &mut attachments).push(format!(

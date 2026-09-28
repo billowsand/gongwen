@@ -2389,9 +2389,17 @@ pub const FONT_BIAOSONG: &str = "gw-biaosong";
 /// 页码与纸面行号用的字体族，内置为宋体。纸上的非正文数字（页码）在公文里
 /// 本来就有自己的一副字面，页边的行号沿用同一副，与正文仿宋一眼可辨。
 pub const FONT_SONGTI: &str = "gw-songti";
-/// 正文加粗用的字体族。egui 没有合成粗体，预览一直用黑体近似「当前字体直接
-/// 加粗」；设置里改选专用粗体字体后，这个族换成选定的字面，与 Word / TeX 同步。
+/// 正文选「专用粗体字体」时使用的字面；合成加粗由预览在原字面上叠绘。
 pub const FONT_BOLD: &str = "gw-bold";
+
+const DEDICATED_BOLD_PREVIEW_ID: &str = "gw-dedicated-bold-preview";
+
+pub fn preview_uses_dedicated_bold(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<bool>(egui::Id::new(DEDICATED_BOLD_PREVIEW_ID))
+            .unwrap_or(false)
+    })
+}
 
 /// Markdown 源码编辑器专用的 egui 字体族名。单独注册一族而不是直接复用
 /// `Proportional`，编辑器换字体就不必给高亮布局函数加参数。
@@ -2654,6 +2662,12 @@ fn font_candidates(bundled: Option<&Path>, file: &str, system: &[&str]) -> Vec<P
 /// 配置界面与公文预览的字体。`config` 里选了本机字体的位置，预览也跟着换，
 /// 否则屏幕上看到的版式和编译出来的 PDF 对不上。
 pub fn configure_fonts(ctx: &egui::Context, config: &FontConfig) {
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new(DEDICATED_BOLD_PREVIEW_ID),
+            config.uses_dedicated_bold_font(),
+        );
+    });
     ctx.set_fonts(font_definitions(config));
 }
 
@@ -2851,8 +2865,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         let mut candidates =
             font_candidates(bundled_fonts.as_deref(), bundled_file, system_candidates);
         // 设置里指定了本机字体就排在最前；读不出来（文件被删）时照旧回退。
-        // 粗体字面只在「专用粗体字体」模式下生效，否则预览仍按黑体近似，
-        // 免得屏幕上换了字体、导出的 Word / PDF 却没换。
+        // 粗体字面只在「专用粗体字体」模式下生效；合成模式在原字面上叠绘。
         let selected = match role {
             FontRole::Bold if !config.uses_dedicated_bold_font() => None,
             _ => config.active(role),

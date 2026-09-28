@@ -30,11 +30,11 @@ pub(crate) use freeze::{ScaleFreeze, show_frozen};
 pub(crate) use gutter::Gutter;
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
 pub(crate) use layout::{
-    ClickableSourceSegment, aligned_block, append_inline, body_block, clickable,
-    clickable_body_block, clickable_justified_job, draw_justified, first_ink, heading_family,
-    hovered_source, indent, is_renderable_paragraph, job, justified_rows, layout, line_block,
-    line_galley, place, row_tint_offset, scroll_preview_to_rect, sheet, single_line, stacked,
-    table_block, text_format,
+    ClickableSourceSegment, aligned_block, append_inline_with_bold_ranges, body_block, clickable,
+    clickable_body_block, clickable_justified_job, draw_justified_with_bold, first_ink,
+    heading_family, hovered_source, indent, is_renderable_paragraph, job, justified_rows, layout,
+    line_block, line_galley, place, row_tint_offset, scroll_preview_to_rect, sheet, single_line,
+    stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
@@ -45,6 +45,8 @@ pub(crate) use tail::{addressee_block, footer_record, signature_block, signature
 // test-only names（根文件的测试模块使用）
 #[cfg(test)]
 pub(crate) use header::security_text;
+#[cfg(test)]
+pub(crate) use layout::append_inline;
 #[cfg(test)]
 pub(crate) use red::{fitting_closing_gap_lines, red_build_print_layout};
 #[cfg(test)]
@@ -127,7 +129,8 @@ pub(crate) struct Metrics {
     /// 共用的块渲染自动跟着版式走，不必为研究报告各复制一份。
     body_family: &'static str,
     body_pt: f32,
-    /// 表格正文的字面、字号与格内行距（表头一律黑体，加粗一律专用粗体，只换字号）。
+    dedicated_bold: bool,
+    /// 表格正文的字面、字号与格内行距（表头一律黑体，加粗跟随设置）。
     table_family: &'static str,
     table_pt: f32,
     table_line_pt: f32,
@@ -194,6 +197,7 @@ impl Metrics {
             line: LINE_PT * PT * scale,
             body_family: theme::FONT_FANGSONG,
             body_pt: BODY_PT,
+            dedicated_bold: false,
             table_family: theme::FONT_FANGSONG,
             table_pt: TABLE_PT,
             table_line_pt: TABLE_LINE_PT,
@@ -220,6 +224,7 @@ impl Metrics {
             // 编译出的 PDF 为准。
             body_family: theme::FONT_SONGTI,
             body_pt: RESEARCH_BODY_PT,
+            dedicated_bold: false,
             table_family: theme::FONT_SONGTI,
             table_pt: RESEARCH_TABLE_PT,
             table_line_pt: RESEARCH_TABLE_LINE_PT,
@@ -232,6 +237,11 @@ impl Metrics {
     /// 开着行号排版：版面照旧，只是每画一条来自源码的行就记一笔。
     fn with_line_numbers(self, on: bool) -> Self {
         self.gutter.borrow_mut().enable(on);
+        self
+    }
+
+    fn with_bold_style(mut self, ctx: &egui::Context) -> Self {
+        self.dedicated_bold = theme::preview_uses_dedicated_bold(ctx);
         self
     }
 
@@ -324,9 +334,13 @@ impl Metrics {
         self.font(self.body_family, self.body_pt)
     }
 
-    /// 正文里的加粗：字号跟随正文，字面换成专用粗体。
+    /// 正文里的加粗：专用模式换字面，合成模式沿用正文字面。
     fn body_bold_font(&self) -> FontId {
-        self.font(theme::FONT_BOLD, self.body_pt)
+        if self.dedicated_bold {
+            self.font(theme::FONT_BOLD, self.body_pt)
+        } else {
+            self.body_font()
+        }
     }
 }
 
@@ -347,6 +361,39 @@ mod tests {
     use crate::units::UnitDisplay;
     use eframe::egui;
     use eframe::egui::Align;
+
+    #[test]
+    fn markdown_bold_preview_follows_the_configured_style() {
+        let ctx = egui::Context::default();
+        let mut fonts = crate::models::FontConfig::default();
+        for dedicated in [false, true] {
+            fonts.bold_style = if dedicated {
+                crate::models::BoldStyle::DedicatedFont
+            } else {
+                crate::models::BoldStyle::Synthetic
+            };
+            theme::configure_fonts(&ctx, &fonts);
+            let metrics = Metrics::new(1000.0, Some(1.0)).with_bold_style(&ctx);
+            let normal = metrics.body_font();
+            let mut job = job(metrics.content);
+            let ranges =
+                append_inline_with_bold_ranges(&mut job, &metrics, "普通**重点**末尾", &normal);
+            let bold = job
+                .sections
+                .iter()
+                .find(|section| {
+                    job.text[section.byte_range.start.0..section.byte_range.end.0].contains("重点")
+                })
+                .unwrap();
+            if dedicated {
+                assert!(ranges.is_empty());
+                assert_eq!(bold.format.font_id, metrics.font(theme::FONT_BOLD, BODY_PT));
+            } else {
+                assert_eq!(ranges, vec![2..4]);
+                assert_eq!(bold.format.font_id, normal);
+            }
+        }
+    }
 
     /// 一份两级单位的词库：厅下面挂一个处，处有简称。
     fn vocabulary() -> Vec<VocabularyEntry> {

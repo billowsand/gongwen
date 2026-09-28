@@ -467,6 +467,7 @@ struct LabelRow {
     rect: egui::Rect,
     galley: std::sync::Arc<egui::Galley>,
     color: egui::Color32,
+    synthetic_bold: bool,
 }
 
 /// 把全篇标题按源码顺序排成一份大纲。
@@ -537,6 +538,8 @@ fn outline_rows(
             rect,
             galley,
             color: base.gamma_multiply(reveal),
+            synthetic_bold: matches!(placed[index].entry.level, 4 | 5)
+                && placed[index].entry.family == theme::FONT_FANGSONG,
         });
     }
     rows
@@ -703,6 +706,13 @@ fn paint_panel_labels(
     }
     for row in rows {
         painter.galley(row.rect.left_top(), row.galley.clone(), row.color);
+        if row.synthetic_bold {
+            painter.galley(
+                row.rect.left_top() + egui::vec2(0.4, 0.0),
+                row.galley.clone(),
+                row.color,
+            );
+        }
     }
 }
 
@@ -1183,8 +1193,8 @@ mod tests {
                 theme::FONT_BIAOSONG,
                 theme::FONT_HEITI,
                 theme::FONT_KAITI,
-                theme::FONT_BOLD,
-                theme::FONT_BOLD,
+                theme::FONT_FANGSONG,
+                theme::FONT_FANGSONG,
             ]
             .map(theme::official_family)
         );

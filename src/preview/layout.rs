@@ -27,8 +27,8 @@ pub(crate) fn heading_family(level: u8) -> &'static str {
     match level {
         2 => theme::FONT_HEITI,
         3 => theme::FONT_KAITI,
-        // 4、5 级（默认编“1.”“(1)”）连编号一起加粗，与 Word / TeX 同步。
-        4 | 5 => theme::FONT_BOLD,
+        // 4、5 级始终沿用仿宋，不受正文「专用粗体字体」设置影响。
+        4 | 5 => theme::FONT_FANGSONG,
         _ => theme::FONT_FANGSONG,
     }
 }
@@ -264,7 +264,23 @@ fn wrapped_section(
 /// 会先数掉行首空白（`num_leading_spaces`）再把余下的字撑满整行宽，正文首行缩进
 /// 的那两个全角空格既会被挤出版心，又会让首行多撑开两个字。这里换成自己逐行补
 /// 字距：先按不对齐排一遍拿到断行位置，再逐行用 `extra_letter_spacing` 补足。
-pub(crate) fn draw_justified(ui: &mut egui::Ui, metrics: &Metrics, job: LayoutJob) {
+pub(crate) fn draw_justified_with_bold(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    job: LayoutJob,
+    synthetic_bold: bool,
+) {
+    let range = 0..job.text.chars().count();
+    let ranges = synthetic_bold.then_some(range);
+    draw_justified_with_bold_ranges(ui, metrics, job, ranges.as_slice());
+}
+
+pub(crate) fn draw_justified_with_bold_ranges(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    job: LayoutJob,
+    synthetic_bold: &[Range<usize>],
+) {
     let width = job.wrap.max_width;
     let base = layout(ui, job.clone());
     if !width.is_finite() || base.rows.len() < 2 {
@@ -272,12 +288,85 @@ pub(crate) fn draw_justified(ui: &mut egui::Ui, metrics: &Metrics, job: LayoutJo
         let galley = base.clone();
         let rect = ui.add(egui::Label::new(base)).rect;
         marks::paint_galley_marks(ui.painter(), metrics, rect.left_top(), &galley);
+        for chars in synthetic_bold {
+            paint_synthetic_bold_galley(ui.painter(), rect.left_top(), &galley, chars.clone());
+        }
         return;
     }
     let rows = justified_rows(ui, &job, &base);
     let height = base.size().y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    paint_justified_rows(ui.painter(), metrics, rect.left_top(), &job, &base, rows);
+    paint_justified_rows(
+        ui.painter(),
+        metrics,
+        rect.left_top(),
+        &job,
+        &base,
+        rows.clone(),
+    );
+    for chars in synthetic_bold {
+        paint_synthetic_bold_rows(ui.painter(), rect.left_top(), &base, &rows, chars.clone());
+    }
+}
+
+pub(crate) fn paint_synthetic_bold_galley(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    galley: &Arc<egui::Galley>,
+    chars: Range<usize>,
+) {
+    let mut row_start = 0;
+    for row in &galley.rows {
+        let row_end = row_start + row.glyphs.len();
+        let start = chars.start.max(row_start);
+        let end = chars.end.min(row_end);
+        if start < end {
+            let left = row.pos.x + row.glyphs[start - row_start].pos.x;
+            let right = row.pos.x + row.glyphs[end - row_start - 1].max_x();
+            let clip = egui::Rect::from_min_max(
+                origin + egui::vec2(left, row.pos.y),
+                origin + egui::vec2(right + 0.4, row.pos.y + row.size.y),
+            );
+            painter.with_clip_rect(clip).galley(
+                origin + egui::vec2(0.4, 0.0),
+                galley.clone(),
+                theme::paper::ink(),
+            );
+        }
+        row_start = row_end;
+    }
+}
+
+/// egui 没有静态字体的合成粗体：用同一份原字形微移重绘，不改变字宽和断行。
+pub(crate) fn paint_synthetic_bold_rows(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    base: &egui::Galley,
+    rows: &[Arc<egui::Galley>],
+    chars: Range<usize>,
+) {
+    let mut row_start = 0;
+    for (placed, galley) in base.rows.iter().zip(rows) {
+        let row_end = row_start + placed.glyphs.len();
+        let start = chars.start.max(row_start);
+        let end = chars.end.min(row_end);
+        if start < end {
+            let row = &galley.rows[0];
+            let left = row.pos.x + row.glyphs[start - row_start].pos.x;
+            let right = row.pos.x + row.glyphs[end - row_start - 1].max_x();
+            let at = origin + placed.pos.to_vec2();
+            let clip = egui::Rect::from_min_max(
+                at + egui::vec2(left, 0.0),
+                at + egui::vec2(right + 0.4, placed.size.y),
+            );
+            painter.with_clip_rect(clip).galley(
+                at + egui::vec2(0.4, 0.0),
+                galley.clone(),
+                theme::paper::ink(),
+            );
+        }
+        row_start = row_end;
+    }
 }
 
 /// 把 [`justified_rows`] 切好的逐行 galley 画到 `origin` 处，再补上花脸稿的新增框。
@@ -620,8 +709,8 @@ pub(crate) fn body_block(
             text_format(normal.clone(), metrics.line),
         );
     }
-    append_inline(&mut job, metrics, text, &normal);
-    draw_justified(ui, metrics, job);
+    let bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, text, &normal);
+    draw_justified_with_bold_ranges(ui, metrics, job, &bold_ranges);
 }
 
 /// 居中 / 居右区的一行：正文字体、不缩进，整行相对版心居中或靠右，与 Word 的
@@ -655,7 +744,7 @@ pub(crate) fn aligned_block(
         export::LineAlign::Center => Align::Center,
         export::LineAlign::Right => Align::Max,
     };
-    append_inline(&mut job, metrics, text, &metrics.body_font());
+    let bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, text, &metrics.body_font());
     // halign 让每行相对 galley 原点对齐，所以原点要放在版心中线或右沿上，
     // 道理同 `line_block_runs` 的居中分支。
     let galley = layout(ui, job);
@@ -669,7 +758,10 @@ pub(crate) fn aligned_block(
         let origin = egui::pos2(x, rect.top());
         push_galley_tints(metrics, &galley, origin);
         marks::paint_galley_marks(painter, metrics, origin, &galley);
-        painter.galley(origin, galley, theme::paper::ink());
+        painter.galley(origin, galley.clone(), theme::paper::ink());
+        for chars in &bold_ranges {
+            paint_synthetic_bold_galley(painter, origin, &galley, chars.clone());
+        }
         mark_gutter_rows(metrics, rect, &rows);
     });
 }
@@ -698,7 +790,7 @@ pub(crate) fn clickable_body_block(
     } else {
         0
     };
-    append_inline(&mut job, metrics, text, &normal);
+    let bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, text, &normal);
     let adjusted = segments
         .iter()
         .map(|segment| ClickableSourceSegment {
@@ -718,6 +810,7 @@ pub(crate) fn clickable_body_block(
         anchor,
         scroll_to_anchor,
         clicked,
+        &bold_ranges,
     );
 }
 
@@ -763,6 +856,7 @@ pub(crate) fn row_tint_offset(row: &egui::epaint::text::Row) -> f32 {
 }
 
 /// 为已经构造好的连续段落布局添加源码行级交互；紧缩段可借此保留标题/正文字体。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn clickable_justified_job(
     ui: &mut egui::Ui,
     metrics: &Metrics,
@@ -771,6 +865,7 @@ pub(crate) fn clickable_justified_job(
     anchor: Option<&Range<usize>>,
     scroll_to_anchor: &mut bool,
     clicked: &mut Option<Range<usize>>,
+    synthetic_bold_chars: &[Range<usize>],
 ) {
     let base = layout(ui, job.clone());
     let rows = justified_rows(ui, &job, &base);
@@ -870,37 +965,59 @@ pub(crate) fn clickable_justified_job(
         block_rect.left_top(),
         &job,
         &base,
-        rows,
+        rows.clone(),
     );
+    for chars in synthetic_bold_chars {
+        paint_synthetic_bold_rows(
+            ui.painter(),
+            block_rect.left_top(),
+            &base,
+            &rows,
+            chars.clone(),
+        );
+    }
 }
 
-/// 行内片段按导出规则上色：括号内容楷体四号，加粗走 `theme::FONT_BOLD`。
-///
-/// egui 不做合成加粗，所以「当前字体直接加粗」在预览里仍用黑体近似；设置里改选
-/// 专用粗体字体后，`FONT_BOLD` 换成选定的字面，与 Word / TeX 同步。
+/// 行内片段按导出规则上色：括号内容楷体四号，粗体按设置沿用原字面或换专用字面。
 ///
 /// 与 DOCX 的 `body_runs` 同一个切法：先按花脸稿哨兵切块，再在块内解析行内样式；
 /// 没有哨兵时只有一块 `Same`，与从前逐字一致。
+#[cfg(test)]
 pub(crate) fn append_inline(job: &mut LayoutJob, metrics: &Metrics, text: &str, normal: &FontId) {
+    let _ = append_inline_with_bold_ranges(job, metrics, text, normal);
+}
+
+pub(crate) fn append_inline_with_bold_ranges(
+    job: &mut LayoutJob,
+    metrics: &Metrics,
+    text: &str,
+    normal: &FontId,
+) -> Vec<Range<usize>> {
+    let mut bold_ranges = Vec::new();
     let mut previous = export::RedlineKind::Same;
     for chunk in export::redline_chunks(text) {
         let mut gap = marks::chunk_gap(metrics, previous, chunk.kind);
         for segment in export::inline_segments(&chunk.text) {
             let font = if segment.parenthesized {
                 metrics.font(theme::FONT_KAITI, PAREN_PT)
-            } else if segment.bold {
+            } else if segment.bold && metrics.dedicated_bold {
                 metrics.body_bold_font()
             } else {
                 normal.clone()
             };
+            let start = job.text.chars().count();
             job.append(
                 &segment.text,
                 std::mem::take(&mut gap),
                 marks::mark_format(text_format(font, metrics.line), chunk.kind),
             );
+            if segment.bold && !segment.parenthesized && !metrics.dedicated_bold {
+                bold_ranges.push(start..start + segment.text.chars().count());
+            }
             previous = chunk.kind;
         }
     }
+    bold_ranges
 }
 
 /// 与导出一致：空段落和 HTML 包裹行不成段。
@@ -939,6 +1056,7 @@ pub(crate) struct TableCellLayout {
     row_span: usize,
     column_span: usize,
     galley: Arc<egui::Galley>,
+    synthetic_bold_chars: Vec<Range<usize>>,
     padding: f32,
     align: ColumnAlignment,
     /// 格内的行内公式（只有研究报告版式才排），画格子时贴在 galley 的占位上。
@@ -984,7 +1102,6 @@ pub(crate) fn measure_table(
     let line = metrics.pt(metrics.table_line_pt);
     let mut cells = Vec::new();
     let mut row_heights = vec![line; rows.len()];
-    let bold_font = metrics.font(theme::FONT_BOLD, metrics.table_pt);
     for (row_index, row) in rows.iter().enumerate() {
         let header = row_index == 0;
         let font = metrics.font(
@@ -995,6 +1112,11 @@ pub(crate) fn measure_table(
             },
             metrics.table_pt,
         );
+        let bold_font = if metrics.dedicated_bold {
+            metrics.font(theme::FONT_BOLD, metrics.table_pt)
+        } else {
+            font.clone()
+        };
         for column in 0..widths.len() {
             let span = export::table_span_at(spans, row_index, column);
             if span.is_some_and(|span| !span.is_anchor(row_index, column)) {
@@ -1026,14 +1148,20 @@ pub(crate) fn measure_table(
                 ColumnAlignment::Right => Align::RIGHT,
                 ColumnAlignment::Left => Align::LEFT,
             };
-            // 表头整行黑体，不再认单元格里的加粗；正文格按 `**` 换粗体字面，
+            // 表头整行黑体，不再认单元格里的加粗；正文格按 `**` 排粗体，
             // 与 DOCX 的 table_runs_sized、TeX 的 \GwBold 一致。括号换楷体那条
             // 规则只管正文，表格三端都不用。
             //
             // 研究报告的格子里有行内公式时走 `math_flow`：公式占位、画格子时贴图，
             // 与 PDF 的 longtblr 一样排成公式。
             let mut math = Vec::new();
+            let mut synthetic_bold_chars = Vec::new();
             if metrics.math && math_flow::has_math(text) {
+                let cell_text = if header {
+                    export::plain_text(text)
+                } else {
+                    text.to_string()
+                };
                 let bold = if header { &font } else { &bold_font };
                 let style = math_flow::FlowStyle::block(
                     (font.clone(), bold.clone()),
@@ -1041,7 +1169,14 @@ pub(crate) fn measure_table(
                     line,
                     cell_job.wrap.max_width,
                 );
-                math = math_flow::append_with_math(ui, metrics, &mut cell_job, text, &style);
+                math = math_flow::append_with_math(
+                    ui,
+                    metrics,
+                    &mut cell_job,
+                    &cell_text,
+                    &style,
+                    &mut synthetic_bold_chars,
+                );
             } else if header {
                 cell_job.append(
                     &export::plain_text(text),
@@ -1059,11 +1194,15 @@ pub(crate) fn measure_table(
                         } else {
                             font.clone()
                         };
+                        let start = cell_job.text.chars().count();
                         cell_job.append(
                             &segment.text,
                             std::mem::take(&mut gap),
                             marks::mark_format(text_format(segment_font, line), chunk.kind),
                         );
+                        if segment.bold && !metrics.dedicated_bold {
+                            synthetic_bold_chars.push(start..start + segment.text.chars().count());
+                        }
                         previous = chunk.kind;
                     }
                 }
@@ -1079,6 +1218,7 @@ pub(crate) fn measure_table(
                 row_span,
                 column_span,
                 galley,
+                synthetic_bold_chars,
                 padding,
                 align,
                 math,
@@ -1209,6 +1349,14 @@ impl MeasuredTable {
                 cell.galley.clone(),
                 theme::paper::ink(),
             );
+            for chars in &cell.synthetic_bold_chars {
+                paint_synthetic_bold_galley(
+                    painter,
+                    egui::pos2(anchor, top),
+                    &cell.galley,
+                    chars.clone(),
+                );
+            }
             math_flow::paint_slots(
                 painter,
                 metrics,

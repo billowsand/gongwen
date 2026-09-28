@@ -7,8 +7,8 @@
 //! 框内用灰色小字写出公式源码，不 panic、不阻塞预览。
 
 use super::layout::{
-    indent, is_no_line_end, is_no_line_start, job, layout, place, row_tint_offset, text_format,
-    tint_rect,
+    indent, is_no_line_end, is_no_line_start, job, layout, paint_synthetic_bold_galley, place,
+    row_tint_offset, text_format, tint_rect,
 };
 use super::marks;
 use super::math_render;
@@ -278,6 +278,7 @@ enum Atom {
         width: f32,
         /// 花脸稿标记。
         mark: RedlineKind,
+        synthetic_bold: bool,
     },
     Math(MathAtom),
 }
@@ -462,6 +463,7 @@ fn atoms(
     for chunk in export::redline_chunks(&joined) {
         let mark = chunk.kind;
         for segment in export::inline_segments(&chunk.text) {
+            let synthetic_bold = segment.bold && !segment.parenthesized && !metrics.dedicated_bold;
             let font = match &style.paren {
                 Some(paren) if segment.parenthesized => paren.clone(),
                 _ if segment.bold => style.bold.clone(),
@@ -488,6 +490,7 @@ fn atoms(
                         font: font.clone(),
                         width: std::mem::take(&mut word_width),
                         mark,
+                        synthetic_bold,
                     });
                 }
                 if ch == MATH_SLOT {
@@ -504,6 +507,7 @@ fn atoms(
                     font: font.clone(),
                     width,
                     mark,
+                    synthetic_bold,
                 });
             }
             if !word.is_empty() {
@@ -512,6 +516,7 @@ fn atoms(
                     font,
                     width: word_width,
                     mark,
+                    synthetic_bold,
                 });
             }
         }
@@ -724,16 +729,25 @@ fn draw_line(
         }
     }
     let mut slots: Vec<(usize, f32, &MathAtom)> = Vec::new();
+    let mut bold_ranges = Vec::new();
     for atom in atoms {
         match atom {
             Atom::Text {
-                text, font, mark, ..
+                text,
+                font,
+                mark,
+                synthetic_bold,
+                ..
             } => {
+                let start = job.text.chars().count();
                 job.append(
                     text,
                     0.0,
                     marks::mark_format(text_format(font.clone(), style.line), *mark),
                 );
+                if *synthetic_bold {
+                    bold_ranges.push(start..start + text.chars().count());
+                }
             }
             Atom::Math(math) => {
                 let pad = math.size.x - em;
@@ -790,6 +804,9 @@ fn draw_line(
         );
     }
     painter.galley(text_origin, galley.clone(), theme::paper::ink());
+    for chars in bold_ranges {
+        paint_synthetic_bold_galley(painter, text_origin, &galley, chars);
+    }
     let math_rects: Vec<egui::Rect> = slots
         .iter()
         .map(|&(char_index, pad, math)| {
@@ -849,6 +866,7 @@ pub(crate) fn append_with_math(
     job: &mut LayoutJob,
     text: &str,
     style: &FlowStyle,
+    synthetic_bold_ranges: &mut Vec<Range<usize>>,
 ) -> Vec<MathSlot> {
     let (normal, bold, line) = (&style.normal, &style.bold, style.line);
     let band = line_band(ui, style);
@@ -879,7 +897,11 @@ pub(crate) fn append_with_math(
                     job.append("\u{3000}", pad, text_format(normal.clone(), line));
                 }
                 if !part.is_empty() {
+                    let start = job.text.chars().count();
                     job.append(part, std::mem::take(&mut gap), format.clone());
+                    if segment.bold && !metrics.dedicated_bold {
+                        synthetic_bold_ranges.push(start..start + part.chars().count());
+                    }
                 }
             }
             previous = chunk.kind;
@@ -966,6 +988,7 @@ mod tests {
             font: egui::FontId::default(),
             width,
             mark: RedlineKind::Same,
+            synthetic_bold: false,
         }
     }
 

@@ -235,7 +235,7 @@
     \fi
 }
 
-% 正文里 Markdown 加粗与五级标题统一走 \GwBold，而不是直接写 \textbf。
+% 正文里的 Markdown 加粗走 \GwBold；四、五级标题固定在仿宋上用 \textbf 合成加粗。
 % 默认就是 \textbf：配合正文字体的 AutoFakeBold，字形不变、只加重笔画，与从前
 % 逐字节一致。设置里改选「专用粗体字体」时，生成器在导言区 \renewcommand 它，
 % 换成真正的粗体字面；预览与 Word 导出同步换，三端看到的是同一种加粗。

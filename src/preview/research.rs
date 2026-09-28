@@ -899,6 +899,7 @@ pub(crate) fn research_preview(
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
     let metrics = Metrics::research(scale.viewport.unwrap_or(visible.width()), scale.zoom)
+        .with_bold_style(ui.ctx())
         .with_line_numbers(line_numbers);
     // 两遍：先给锚点和文献定号，再按纸面字面重新切块。研究报告的标题编号不跟
     // 设置里的公文编号样式走；序号表的分组编号跟设置，与导出一致。
@@ -1096,10 +1097,21 @@ fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, markdow
             let mut job = egui::text::LayoutJob::default();
             job.wrap.max_width = wrap;
             job.halign = spec.align;
-            let slots = math_flow::append_with_math(ui, metrics, &mut job, &title, &style);
+            let mut bold_ranges = Vec::new();
+            let slots = math_flow::append_with_math(
+                ui,
+                metrics,
+                &mut job,
+                &title,
+                &style,
+                &mut bold_ranges,
+            );
             let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
             let origin = at(center_x, l::TITLE_TOP);
             painter.galley(origin, galley.clone(), ink);
+            for chars in bold_ranges {
+                super::layout::paint_synthetic_bold_galley(painter, origin, &galley, chars);
+            }
             math_flow::paint_slots(painter, metrics, origin, &galley, &slots);
             l::TITLE_TOP + galley.size().y / metrics.mm(1.0)
         } else {

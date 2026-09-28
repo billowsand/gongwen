@@ -5,8 +5,7 @@
 
 use crate::export::docx::{
     BODY_SIZE, BoldFont, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS,
-    TITLE_SIZE, apply_bold, body_run, body_runs, chinese_fonts, marked_runs, security_runs,
-    title_run,
+    TITLE_SIZE, body_run, body_runs, chinese_fonts, marked_runs, security_runs, title_run,
 };
 use crate::export::title;
 use crate::export::title::TitlePlan;
@@ -123,8 +122,8 @@ pub(crate) fn letter_security_paragraph(input: &DraftInput, mark: &FieldMark) ->
     paragraph
 }
 
-pub(crate) fn heading_paragraph(level: u8, text: &str, bold: BoldFont<'_>) -> Paragraph {
-    heading_paragraph_with_number(level, None, text, bold)
+pub(crate) fn heading_paragraph(level: u8, text: &str) -> Paragraph {
+    heading_paragraph_with_number(level, None, text)
 }
 
 /// 与 [`heading_paragraph`] 相同，另带自动编号前缀。新增标题整体加框时
@@ -133,7 +132,6 @@ pub(crate) fn heading_paragraph_with_number(
     level: u8,
     number: Option<&str>,
     text: &str,
-    bold: BoldFont<'_>,
 ) -> Paragraph {
     let font = match level {
         2 => "黑体",
@@ -159,7 +157,7 @@ pub(crate) fn heading_paragraph_with_number(
                 .fonts(chinese_fonts(font))
                 .size(BODY_SIZE);
             if matches!(level, 4 | 5) {
-                run = apply_bold(run, bold);
+                run = run.bold();
             }
             run
         });
@@ -171,7 +169,7 @@ pub(crate) fn heading_paragraph_with_number(
             .fonts(chinese_fonts(font))
             .size(BODY_SIZE);
         if matches!(level, 4 | 5) {
-            run = apply_bold(run, bold);
+            run = run.bold();
         }
         if whole_added {
             run = run.text_border(
@@ -190,7 +188,7 @@ pub(crate) fn heading_paragraph_with_number(
             .fonts(chinese_fonts(font))
             .size(BODY_SIZE);
         if matches!(level, 4 | 5) {
-            run = apply_bold(run, bold);
+            run = run.bold();
         }
         run
     });
@@ -230,7 +228,7 @@ pub(crate) fn compact_heading_paragraph(
             .fonts(chinese_fonts(font))
             .size(BODY_SIZE);
         if matches!(level, 4 | 5) {
-            run = apply_bold(run, bold);
+            run = run.bold();
         }
         run
     });

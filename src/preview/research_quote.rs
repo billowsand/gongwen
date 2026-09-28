@@ -13,7 +13,8 @@
 
 use super::layout::{
     TextRun, clickable_rows, indent, job, justified_rows, layout, line_block_runs_spaced,
-    mark_gutter_rows, paint_justified_rows, place, push_galley_tints, row_spans, text_format,
+    mark_gutter_rows, paint_justified_rows, paint_synthetic_bold_galley, paint_synthetic_bold_rows,
+    place, push_galley_tints, row_spans, text_format,
 };
 use super::{Metrics, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT, marks, math_flow};
 use crate::export::{self, MarkdownBlock, QuoteLine, QuoteLineKind};
@@ -263,7 +264,7 @@ fn quote_lines(
                 }
             }
         }
-        append_text(&mut job, metrics, &line.text, style);
+        let bold_ranges = append_text(&mut job, metrics, &line.text, style);
         clickable_rows(
             ui,
             metrics,
@@ -271,7 +272,7 @@ fn quote_lines(
             anchor,
             scroll_to_anchor,
             clicked,
-            |ui| inset_paragraph(ui, metrics, job, style.inset),
+            |ui| inset_paragraph(ui, metrics, job, style.inset, &bold_ranges),
         );
     }
 }
@@ -304,7 +305,14 @@ fn flow_style(
     }
     math_flow::FlowStyle {
         normal,
-        bold: metrics.font(theme::FONT_BOLD, style.size),
+        bold: metrics.font(
+            if metrics.dedicated_bold {
+                theme::FONT_BOLD
+            } else {
+                style.family
+            },
+            style.size,
+        ),
         paren: None,
         math_pt: style.size,
         line: style.line,
@@ -327,11 +335,24 @@ fn list_label(n: usize) -> String {
         .unwrap_or_else(|| format!("({n}) "))
 }
 
-/// 行内文字：加粗换黑体，其余一律用块的字面（不套公文的括号楷体规则），
+/// 行内文字：加粗跟随设置，其余一律用块的字面（不套公文的括号楷体规则），
 /// 花脸稿的增删标记照正文的办法打。
-fn append_text(job: &mut LayoutJob, metrics: &Metrics, text: &str, style: &Style) {
+fn append_text(
+    job: &mut LayoutJob,
+    metrics: &Metrics,
+    text: &str,
+    style: &Style,
+) -> Vec<Range<usize>> {
     let normal = metrics.font(style.family, style.size);
-    let bold = metrics.font(theme::FONT_BOLD, style.size);
+    let bold = metrics.font(
+        if metrics.dedicated_bold {
+            theme::FONT_BOLD
+        } else {
+            style.family
+        },
+        style.size,
+    );
+    let mut bold_ranges = Vec::new();
     let mut previous = export::RedlineKind::Same;
     for chunk in export::redline_chunks(text) {
         let mut gap = marks::chunk_gap(metrics, previous, chunk.kind);
@@ -341,19 +362,30 @@ fn append_text(job: &mut LayoutJob, metrics: &Metrics, text: &str, style: &Style
             } else {
                 normal.clone()
             };
+            let start = job.text.chars().count();
             job.append(
                 &segment.text,
                 std::mem::take(&mut gap),
                 marks::mark_format(text_format(font, style.line), chunk.kind),
             );
+            if segment.bold && !metrics.dedicated_bold {
+                bold_ranges.push(start..start + segment.text.chars().count());
+            }
             previous = chunk.kind;
         }
     }
+    bold_ranges
 }
 
 /// 一段相对版心左沿缩进 `left` 的文字：两端对齐（末行除外）；`halign` 是
 /// `Max` 时整段靠右。底色、行号、花脸稿标注与正文同一口径。
-fn inset_paragraph(ui: &mut egui::Ui, metrics: &Metrics, job: LayoutJob, left: f32) {
+fn inset_paragraph(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    job: LayoutJob,
+    left: f32,
+    bold_ranges: &[Range<usize>],
+) {
     let right_aligned = job.halign == Align::Max;
     let width = job.wrap.max_width;
     let base = layout(ui, job.clone());
@@ -365,14 +397,20 @@ fn inset_paragraph(ui: &mut egui::Ui, metrics: &Metrics, job: LayoutJob, left: f
             Some(rows) => {
                 let origin = egui::pos2(rect.left() + left, rect.top());
                 push_galley_tints(metrics, &base, origin);
-                paint_justified_rows(painter, metrics, origin, &job, &base, rows);
+                paint_justified_rows(painter, metrics, origin, &job, &base, rows.clone());
+                for chars in bold_ranges {
+                    paint_synthetic_bold_rows(painter, origin, &base, &rows, chars.clone());
+                }
             }
             // halign 让每行相对 galley 原点靠右，原点放在可用宽度的右沿上。
             None => {
                 let origin = egui::pos2(rect.left() + left + width, rect.top());
                 push_galley_tints(metrics, &base, origin);
                 marks::paint_galley_marks(painter, metrics, origin, &base);
-                painter.galley(origin, base, theme::paper::ink());
+                painter.galley(origin, base.clone(), theme::paper::ink());
+                for chars in bold_ranges {
+                    paint_synthetic_bold_galley(painter, origin, &base, chars.clone());
+                }
             }
         }
         mark_gutter_rows(metrics, rect, &spans);

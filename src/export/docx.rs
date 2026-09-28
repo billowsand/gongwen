@@ -480,7 +480,7 @@ pub fn write_docx_with_numbering(
                     }
                 }
                 MarkdownBlock::Heading(level, text) => {
-                    doc = doc.add_paragraph(heading_paragraph(*level, text, bold));
+                    doc = doc.add_paragraph(heading_paragraph(*level, text));
                 }
                 MarkdownBlock::Paragraph(text) => {
                     if text.trim().is_empty() || text.contains("<div") || text.contains("</div") {
@@ -836,6 +836,52 @@ mod tests {
         let run = bold_run(&xml, "务必");
         assert!(run.contains("w:eastAsia=\"黑体\""), "{run}");
         assert!(!run.contains("<w:b "), "{run}");
+    }
+
+    #[test]
+    fn deep_headings_keep_synthetic_fangsong_with_dedicated_body_bold() {
+        let temp = tempfile::tempdir().unwrap();
+        let markdown = "# 测试函\n\n#### 三级标题\n\n##### 四级标题\n\n请**务必**报送。";
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::PlainDocument;
+        let mut fonts = crate::models::FontConfig::default();
+        fonts.bold_style = crate::models::BoldStyle::DedicatedFont;
+        let path = temp.path().join("headings.docx");
+        write_docx_with_numbering(
+            &path,
+            &input,
+            markdown,
+            &UnitDisplay::new(&[]),
+            &fonts,
+            &NumberingConfig::default(),
+            &crate::visual_diff::ElementMarks::default(),
+        )
+        .unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        for title in ["三级标题", "四级标题"] {
+            let run = bold_run(&xml, title);
+            assert!(run.contains("w:eastAsia=\"仿宋_GB2312\""), "{run}");
+            assert!(run.contains("<w:b "), "{run}");
+        }
+        let body = bold_run(&xml, "务必");
+        assert!(body.contains("w:eastAsia=\"黑体\""), "{body}");
+
+        input.profile.style_mode = StyleMode::Compact;
+        let compact = temp.path().join("compact-headings.docx");
+        write_docx_with_numbering(
+            &compact,
+            &input,
+            "# 测试函\n\n#### 紧缩标题\n紧跟正文。",
+            &UnitDisplay::new(&[]),
+            &fonts,
+            &NumberingConfig::default(),
+            &crate::visual_diff::ElementMarks::default(),
+        )
+        .unwrap();
+        let xml = zip_text(&compact, "word/document.xml");
+        let run = bold_run(&xml, "紧缩标题");
+        assert!(run.contains("w:eastAsia=\"仿宋_GB2312\""), "{run}");
+        assert!(run.contains("<w:b "), "{run}");
     }
 
     /// 取含 `needle` 的那个 run 的 XML。

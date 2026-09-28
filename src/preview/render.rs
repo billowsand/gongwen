@@ -14,10 +14,10 @@ use crate::preview::marks;
 use crate::preview::pdf_figure;
 use crate::preview::{
     BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT,
-    addressee_block, aligned_block, append_inline, body_block, clickable, clickable_body_block,
-    clickable_justified_job, draw_justified, footer_record, header_block, heading_family, indent,
-    is_renderable_paragraph, job, line_block, place, red_approval_print_preview, sheet,
-    signature_block, table_block, text_format,
+    addressee_block, aligned_block, append_inline_with_bold_ranges, body_block, clickable,
+    clickable_body_block, clickable_justified_job, draw_justified_with_bold, footer_record,
+    header_block, heading_family, indent, is_renderable_paragraph, job, line_block, place,
+    red_approval_print_preview, sheet, signature_block, table_block, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -230,6 +230,10 @@ pub(crate) fn clickable_content_block(
                 anchor,
                 scroll_to_anchor,
                 clicked,
+                &matches!(*level, 4 | 5)
+                    .then(|| 0..segments[0].chars.end)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
             );
         }
         MarkdownBlock::OrderedListItem { number, text } => {
@@ -406,6 +410,7 @@ pub(crate) fn official_preview(
         .intersect(ui.ctx().input(|input| input.content_rect()));
     // 居中用的宽度优先取调用方给的真实宽度（见 `PreviewScale::viewport`）。
     let metrics = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom)
+        .with_bold_style(ui.ctx())
         .with_line_numbers(line_numbers);
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
     // 跟随设置里的编号样式；紧缩风格跟随模板配置。
@@ -698,7 +703,10 @@ fn clickable_compact_block(
         text_format(metrics.font(heading_family(level), BODY_PT), metrics.line),
     );
     let body_start = INDENT_CHARS as usize + export::strip_redline(&heading_text).chars().count();
-    append_inline(&mut job, metrics, body, &normal);
+    let mut bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, body, &normal);
+    if matches!(level, 4 | 5) {
+        bold_ranges.insert(0, INDENT_CHARS as usize..body_start);
+    }
     let mut segments = vec![ClickableSourceSegment {
         source: heading_source,
         chars: 0..body_start,
@@ -715,6 +723,7 @@ fn clickable_compact_block(
         anchor,
         scroll_to_anchor,
         clicked,
+        &bold_ranges,
     );
 }
 
@@ -728,7 +737,7 @@ pub(crate) fn heading_block(
     numbering: &NumberingConfig,
 ) {
     if let Some(job) = heading_job(metrics, level, text, counters, numbered, numbering) {
-        draw_justified(ui, metrics, job);
+        draw_justified_with_bold(ui, metrics, job, matches!(level, 4 | 5));
     }
 }
 
