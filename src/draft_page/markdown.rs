@@ -456,7 +456,193 @@ pub(crate) fn toggle_align_region(
     (out, region_end + marker.len() + 1, AlignEdit::Added)
 }
 
+/// 引文 / 文框动作做了什么，状态栏据此报告。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuoteEdit {
+    /// 光标在空行上：插了一个带占位文字的模板。
+    Template,
+    /// 把选中的几行包成了引文或文框。
+    Wrapped,
+    /// 文框换了名称（案例 → 专栏）。
+    Renamed,
+    /// 去掉了引用标记，恢复成普通段落。
+    Removed,
+}
+
+/// 引文模板与其中要选中的占位文字。
+const QUOTE_TEMPLATE: (&str, &str) = ("> 引文内容\n>\n> ——出处", "引文内容");
+/// 文框标题的占位文字。
+const BOX_TITLE_PLACEHOLDER: &str = "标题";
+
+/// 研究报告的引文（`name` 为 None）与文框（`name` 为名称）：把选区覆盖的几行
+/// 包成引用块，返回改后的全文、改完要选中的范围（空范围即光标）与做了什么。
+///
+/// - 选区落在已有的引用块里时按整块处理（先把覆盖范围扩到整块）；
+/// - 覆盖的全是空行：插一个模板，选中占位文字，直接打字就替换掉；
+/// - 引文按钮点在引文或文框里、文框按钮点在同名文框里：去掉 `>`，恢复成普通
+///   段落，文框首行只留标题（锚点一并去掉——普通段落上的锚点引不出号）；
+/// - 文框按钮点在别的名称的文框里：就地改名；
+/// - 其余情况：每行加 `> `，空行写成 `>`；文框另在上面加首行 `> [!名称] 标题`。
+///   前后紧挨着正文时各补一个空行，源码上看得清块的边界。
+pub(crate) fn toggle_quote_region(
+    text: &str,
+    selection: &Range<usize>,
+    name: Option<&str>,
+) -> (String, Range<usize>, QuoteEdit) {
+    let ranges = line_ranges(text);
+    let line = |index: usize| &text[ranges[index].clone()];
+    let is_quote = |index: usize| mdx::quote::strip_marker(line(index)).is_some();
+    let is_blank = |index: usize| line(index).trim().is_empty();
+    let box_name = |index: usize| {
+        mdx::quote::strip_marker(export::crossref::split_label(line(index)).0)
+            .and_then(mdx::quote::box_head)
+            .map(|(name, _)| name)
+    };
+
+    let mut first = line_at_byte(&ranges, selection.start);
+    let mut last = line_at_byte(&ranges, selection.end.max(selection.start));
+    while first > 0 && is_quote(first) && is_quote(first - 1) {
+        first -= 1;
+    }
+    while last + 1 < ranges.len() && is_quote(last) && is_quote(last + 1) {
+        last += 1;
+    }
+    let span = ranges[first].start..ranges[last].end;
+    let mut out = text.to_string();
+    // 前后紧挨着正文就各补一个空行。
+    let lead = if first > 0 && !is_blank(first - 1) {
+        "\n"
+    } else {
+        ""
+    };
+    let tail = if last + 1 < ranges.len() && !is_blank(last + 1) {
+        "\n"
+    } else {
+        ""
+    };
+
+    if (first..=last).all(is_blank) {
+        let (template, placeholder) = match name {
+            None => (QUOTE_TEMPLATE.0.to_string(), QUOTE_TEMPLATE.1),
+            Some(name) => (
+                format!("> [!{name}] {BOX_TITLE_PLACEHOLDER}\n>\n> 内容"),
+                BOX_TITLE_PLACEHOLDER,
+            ),
+        };
+        out.replace_range(span.clone(), &format!("{lead}{template}{tail}"));
+        let at = span.start + lead.len() + template.find(placeholder).unwrap_or(0);
+        return (out, at..at + placeholder.len(), QuoteEdit::Template);
+    }
+
+    let head = box_name(first);
+    let all_quoted = (first..=last).all(|index| is_blank(index) || is_quote(index));
+    if all_quoted && (name.is_none() || head.is_some() && head == name) {
+        let replaced = (first..=last)
+            .filter_map(|index| {
+                let source = line(index);
+                if index == first && head.is_some() {
+                    let (without_label, _) = export::crossref::split_label(source);
+                    let title = mdx::quote::strip_marker(without_label)
+                        .and_then(mdx::quote::box_head)
+                        .map_or("", |(_, title)| title);
+                    // 没有标题的首行整行去掉，不留一个空行。
+                    return (!title.is_empty()).then(|| title.to_string());
+                }
+                Some(
+                    mdx::quote::strip_marker(source)
+                        .unwrap_or(source)
+                        .to_string(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.replace_range(span.clone(), &replaced);
+        let end = span.start + replaced.len();
+        return (out, end..end, QuoteEdit::Removed);
+    }
+
+    if let (Some(current), Some(name)) = (head, name)
+        && current != name
+    {
+        // 只换方括号里的名称，标题与锚点原样留着。
+        let source = line(first);
+        let at = ranges[first].start + source.find(current).unwrap_or(0);
+        out.replace_range(at..at + current.len(), name);
+        let end = ranges[last].end + name.len() - current.len();
+        return (out, end..end, QuoteEdit::Renamed);
+    }
+
+    let mut lines = Vec::with_capacity(last - first + 3);
+    let mut placeholder = None;
+    if let Some(name) = name
+        && head.is_none()
+    {
+        let head_line = format!("> [!{name}] {BOX_TITLE_PLACEHOLDER}");
+        placeholder = Some(head_line.len() - BOX_TITLE_PLACEHOLDER.len());
+        lines.push(head_line);
+        lines.push(">".to_string());
+    }
+    for index in first..=last {
+        let source = line(index);
+        lines.push(if is_blank(index) {
+            ">".to_string()
+        } else if is_quote(index) {
+            source.to_string()
+        } else {
+            format!("> {}", source.trim_start())
+        });
+    }
+    let block = lines.join("\n");
+    let start = span.start + lead.len();
+    out.replace_range(span, &format!("{lead}{block}{tail}"));
+    let selected = match placeholder {
+        Some(offset) => start + offset..start + offset + BOX_TITLE_PLACEHOLDER.len(),
+        None => start + block.len()..start + block.len(),
+    };
+    (out, selected, QuoteEdit::Wrapped)
+}
+
 impl DraftPage<'_> {
+    /// 研究报告的「引文」「文框」按钮：见 [`toggle_quote_region`]。
+    /// `name` 为 None 是引文，否则是文框名称（专栏、案例……）。
+    pub(crate) fn toggle_quote(&mut self, ctx: &egui::Context, name: Option<&str>) {
+        if self.doc.read_only() {
+            return;
+        }
+        let mut text = self.doc.generated_markdown.clone();
+        // 从没点进过编辑框：在文末另起一行插模板，不去包最后那一段。
+        let range = editor_selection(ctx, &text).unwrap_or_else(|| {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.len()..text.len()
+        });
+        let (updated, selection, edit) = toggle_quote_region(&text, &range, name);
+        self.doc.generated_markdown = updated;
+        if selection.is_empty() {
+            self.doc.pending_source_jump = Some(selection.start);
+        } else {
+            self.doc.pending_source_selection = Some(selection);
+        }
+        let what = name.unwrap_or("引文");
+        *self.status = match (edit, name) {
+            (QuoteEdit::Template, None) => {
+                "已插入引文：写好原文，出处写在“——”那一行，靠右排。".into()
+            }
+            (QuoteEdit::Template, Some(_)) => format!(
+                "已插入{what}：先写标题，编号“{what} 2.1”由程序生成；行尾可用「锚点」挂 id。"
+            ),
+            (QuoteEdit::Wrapped, None) => {
+                "已设为引文：楷体、左右各缩进两字；“——”开头的一行是出处。".into()
+            }
+            (QuoteEdit::Wrapped, Some(_)) => {
+                format!("已包成{what}：先写标题，编号由程序生成。")
+            }
+            (QuoteEdit::Renamed, _) => format!("已改为{what}，编号按{what}另起。"),
+            (QuoteEdit::Removed, _) => "已去掉引用标记，恢复成普通段落。".into(),
+        };
+    }
+
     /// 光标所在行受哪种对齐标记管，用来点亮「格式」分区里对应的按钮。
     pub(crate) fn align_at_cursor(&self, ctx: &egui::Context) -> Option<export::LineAlign> {
         let text = &self.doc.generated_markdown;
@@ -902,5 +1088,84 @@ mod own_line_tests {
         let inserted = splice_own_line(&mut text, 9_999, "表：");
         assert_eq!(text, "表：\n正文");
         assert_eq!(&text[inserted], "表：");
+    }
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::*;
+
+    /// 光标停在 `at` 这个子串开头。
+    fn caret(text: &str, at: &str) -> Range<usize> {
+        let index = text.find(at).expect("子串在文中");
+        index..index
+    }
+
+    #[test]
+    fn blank_line_gets_a_template_with_the_placeholder_selected() {
+        let text = "前文。\n\n后文。";
+        let blank = "前文。
+"
+        .len();
+        let (out, selected, edit) = toggle_quote_region(text, &(blank..blank), None);
+        assert_eq!(edit, QuoteEdit::Template);
+        assert_eq!(out, "前文。\n\n> 引文内容\n>\n> ——出处\n\n后文。");
+        assert_eq!(&out[selected], "引文内容");
+
+        let (out, selected, _) = toggle_quote_region("", &(0..0), Some("案例"));
+        assert_eq!(out, "> [!案例] 标题\n>\n> 内容");
+        assert_eq!(&out[selected], "标题");
+    }
+
+    #[test]
+    fn selected_lines_are_wrapped_and_padded() {
+        let text = "前文。\n坚持统筹发展和安全。\n\n——《意见》\n后文。";
+        let start = text.find("坚持").unwrap();
+        let end = text.find("》").unwrap();
+        let (out, selected, edit) = toggle_quote_region(text, &(start..end), None);
+        assert_eq!(edit, QuoteEdit::Wrapped);
+        assert_eq!(
+            out,
+            "前文。\n\n> 坚持统筹发展和安全。\n>\n> ——《意见》\n\n后文。"
+        );
+        assert!(selected.is_empty());
+
+        let (out, selected, _) = toggle_quote_region(text, &caret(text, "坚持"), Some("专栏"));
+        assert_eq!(
+            out,
+            "前文。\n\n> [!专栏] 标题\n>\n> 坚持统筹发展和安全。\n\n——《意见》\n后文。"
+        );
+        assert_eq!(&out[selected], "标题");
+    }
+
+    #[test]
+    fn a_plain_quote_becomes_a_box_and_a_box_can_be_renamed() {
+        let text = "> 一是先定场景。\n> 二是分场景准入。";
+        let (out, _, _) = toggle_quote_region(text, &caret(text, "二是"), Some("案例"));
+        assert_eq!(
+            out,
+            "> [!案例] 标题\n>\n> 一是先定场景。\n> 二是分场景准入。"
+        );
+
+        let boxed = "> [!案例] 某市做法 {#case:city}\n>\n> 一是先定场景。";
+        let (out, _, edit) = toggle_quote_region(boxed, &caret(boxed, "一是"), Some("专栏"));
+        assert_eq!(edit, QuoteEdit::Renamed);
+        assert_eq!(out, "> [!专栏] 某市做法 {#case:city}\n>\n> 一是先定场景。");
+    }
+
+    #[test]
+    fn clicking_inside_an_existing_block_removes_the_markers() {
+        let text = "前文。\n\n> 引文\n>\n> ——出处\n\n后文。";
+        let (out, _, edit) = toggle_quote_region(text, &caret(text, "引文"), None);
+        assert_eq!(edit, QuoteEdit::Removed);
+        assert_eq!(out, "前文。\n\n引文\n\n——出处\n\n后文。");
+
+        // 文框：同名再点一次去掉，首行只留标题，锚点一并去掉；没有标题的首行整行去掉。
+        let boxed = "> [!案例] 某市做法 {#case:city}\n>\n> 一是先定场景。";
+        let (out, _, _) = toggle_quote_region(boxed, &caret(boxed, "一是"), Some("案例"));
+        assert_eq!(out, "某市做法\n\n一是先定场景。");
+        let bare = "> [!例子]\n> 甲";
+        let (out, _, _) = toggle_quote_region(bare, &caret(bare, "甲"), None);
+        assert_eq!(out, "甲");
     }
 }

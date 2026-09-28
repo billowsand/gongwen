@@ -18,8 +18,8 @@ use crate::theme;
 use eframe::egui;
 use egui::AtomExt;
 
-/// 「研报」分区里选中的插入动作：区段标记、锚点、交叉引用、文献引用、脚注
-/// 和表题。
+/// 「研报」分区里选中的插入动作：区段标记、锚点、交叉引用、文献引用、脚注、
+/// 表题、引文与文框。
 ///
 /// 下拉闭包借着 `self.doc` 取候选（锚点清单、BibTeX 键），插入要的却是
 /// `&mut self`，两件事不能同时发生：闭包里只记下选了什么，等闭包结束再动正文。
@@ -32,7 +32,21 @@ enum MarkupInsert {
     Caption,
     /// 插在光标处的行内标记：内容、光标从末尾回退的字节数、叫法。
     Snippet(String, usize, &'static str),
+    /// 引文（None）或文框（名称），见 `markdown::toggle_quote_region`。
+    Quote(Option<&'static str>),
 }
+
+/// 「文框」下拉里列的名称。名称写什么印什么、每种各编各的号，这里只列常用的；
+/// 别的名称插进来后直接改方括号里的字。
+const BOX_NAMES: [(&str, &str); 4] = [
+    (
+        "专栏",
+        "国外经验、背景材料等与主线分开的成段材料；锚点前缀 box:",
+    ),
+    ("案例", "典型案例、外地做法；锚点前缀 case:"),
+    ("例子", "举例说明；锚点前缀 ex:"),
+    ("做法", "某地、某部门的具体做法"),
+];
 
 impl DraftPage<'_> {
     /// 起草页功能区：第一行是分区卡与常驻入口，第二行是当前分区的按钮。
@@ -644,7 +658,7 @@ impl DraftPage<'_> {
     ///
     /// 这些语法只有研究报告认，摆进「插入」会让公文用户面对一排用不上的按钮，
     /// 所以自成一个分区卡（见 [`RibbonTab::shown_for`]），按 区段标记 / 行内标记
-    /// / 表题 分三组。
+    /// / 表题 / 引文与文框 分四组。
     ///
     /// 两份候选清单（交叉引用的锚点、文献引用的 BibTeX 键）都放在下拉展开时
     /// 才算：功能区每帧重画，把全文逐行跑一遍正则、再把整份 `.bib` 扫一遍，
@@ -809,6 +823,41 @@ impl DraftPage<'_> {
                 action = Some(MarkupInsert::Caption);
             }
         });
+        toolbar_separator(ui);
+
+        // 四、引文与文框：`>` 引用块。选中几行就包成块，光标在空行上插模板，
+        // 在已有的块里再点一次去掉标记。
+        ui.add_enabled_ui(editable, |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Type, "引文"))
+                .on_hover_text(
+                    "把选中的几行设为引文（行首加“> ”）：楷体、左右各缩进两字，                     “——”开头的一行是出处、靠右排；光标在空行上时插一个模板，                     在引文里再点一次恢复成普通段落",
+                )
+                .clicked()
+            {
+                action = Some(MarkupInsert::Quote(None));
+            }
+            egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
+                theme::Icon::Square,
+                "文框",
+            ))
+            .ui(ui, |ui| {
+                for (name, tip) in BOX_NAMES {
+                    if ui
+                        .add(theme::menu_text_item(name))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        action = Some(MarkupInsert::Quote(Some(name)));
+                        ui.close();
+                    }
+                }
+            })
+            .0
+            .on_hover_text(
+                "把选中的几行包成文框（首行“> [!案例] 标题”）：细框、浅灰底，                 标题行印“案例 2.1　标题”，每种名称各编各的号；光标在空行上时插一个模板，                 在文框里选另一个名称就改名，选同一个名称恢复成普通段落",
+            );
+        });
 
         match action {
             Some(MarkupInsert::Marker(text, label)) => {
@@ -816,6 +865,7 @@ impl DraftPage<'_> {
             }
             Some(MarkupInsert::Label) => self.insert_label(ui.ctx()),
             Some(MarkupInsert::Caption) => self.insert_table_caption(ui.ctx()),
+            Some(MarkupInsert::Quote(name)) => self.toggle_quote(ui.ctx(), name),
             Some(MarkupInsert::Snippet(text, back, label)) => {
                 self.insert_inline(ui.ctx(), &text, back, label);
             }
