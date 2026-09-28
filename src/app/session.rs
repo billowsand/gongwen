@@ -77,6 +77,15 @@ impl GongwenApp {
         if let TabRef::Doc(key) = self.tabs[tab]
             && let Some(index) = self.doc_index_of_key(key)
         {
+            // 候选区里还没来得及写下去的字，关标签前补写一次。
+            let id = self.docs[index].manuscript_id;
+            if let Some(error) =
+                self.docs[index]
+                    .candidates
+                    .sync(id, self.manuscript_store.as_mut(), true)
+            {
+                self.status = error;
+            }
             self.docs.remove(index);
             if index < self.active_doc {
                 self.active_doc -= 1;
@@ -408,6 +417,16 @@ impl GongwenApp {
         if let Some(store) = self.manuscript_store.as_mut() {
             let _ = store.save_open_tabs(&tabs, active);
         }
+        // 候选区里正在打的字等不到停手了：切标签、关窗前一并写下去。
+        for doc in &mut self.docs {
+            let id = doc.manuscript_id;
+            if let Some(error) = doc
+                .candidates
+                .sync(id, self.manuscript_store.as_mut(), true)
+            {
+                self.status = error;
+            }
+        }
     }
 
     /// 尚未入库的新稿，一旦真的动过就静默建一条草稿记录。此后它就有了身份，
@@ -529,6 +548,24 @@ impl GongwenApp {
             && ctx.input_mut(|input| input.consume_shortcut(&heading_focus))
         {
             self.draft_page().open_heading_focus(ctx);
+        }
+
+        // 主快捷键+Shift+X：把正文选区移入候选区。Windows 上 winit 把带 Shift 的
+        // Ctrl+X 也报成一次「剪切」事件，不一并吃掉的话编辑框会先把选区剪走。
+        let to_candidates = egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::X,
+        );
+        if self.showing_doc()
+            && ctx.memory(|memory| memory.has_focus(editor_id()))
+            && ctx.input_mut(|input| input.consume_shortcut(&to_candidates))
+        {
+            ctx.input_mut(|input| {
+                input
+                    .events
+                    .retain(|event| !matches!(event, egui::Event::Cut))
+            });
+            self.draft_page().move_selection_to_candidates(ctx);
         }
 
         let new_doc = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);

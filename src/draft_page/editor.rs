@@ -4,6 +4,7 @@
 //! `draft_page` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::app::visible_rows;
+use crate::draft_page::candidates;
 use crate::draft_page::caret::show_with_glyph_caret;
 use crate::draft_page::{
     DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH, OFFICIAL_PAGE_HEIGHT,
@@ -335,35 +336,45 @@ impl DraftPage<'_> {
         }
         egui::CentralPanel::default()
             .frame(theme::panel(theme::canvas(), 10))
-            .show(ui, |ui| match self.doc.preview_mode {
-                PreviewMode::Source => self.source_editor_ui(ui),
-                PreviewMode::Hybrid => self.markdown_hybrid_editor(ui),
-                PreviewMode::Rendered => {
-                    let region = ui.max_rect();
-                    self.markdown_render(ui);
-                    // 必须排在预览之后：标题的屏幕位置是回查预览本帧注册的
-                    // widget 得来的，先画就只能拿到上一帧的版面。
-                    self.navigator_overlay(ui, region);
+            .show(ui, |ui| {
+                // 候选区挂在编辑区底部，对照模式下横跨源码与版式两栏。
+                if self.candidates_available() {
+                    self.candidate_panel_ui(ui);
                 }
-                PreviewMode::VersionDiff => self.version_diff_mode_ui(ui),
-                PreviewMode::Split => {
-                    egui::Panel::left("preview_split")
-                        .default_size(420.0)
-                        .size_range(280.0..=900.0)
-                        .frame(egui::Frame::new().inner_margin(egui::Margin {
-                            right: 8,
-                            ..egui::Margin::ZERO
-                        }))
-                        .show(ui, |ui| self.markdown_editor(ui));
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::NONE)
-                        .show(ui, |ui| {
-                            let region = ui.max_rect();
-                            self.markdown_render(ui);
-                            self.navigator_overlay(ui, region);
-                        });
-                }
+                self.preview_body_ui(ui);
             });
+    }
+
+    fn preview_body_ui(&mut self, ui: &mut egui::Ui) {
+        match self.doc.preview_mode {
+            PreviewMode::Source => self.source_editor_ui(ui),
+            PreviewMode::Hybrid => self.markdown_hybrid_editor(ui),
+            PreviewMode::Rendered => {
+                let region = ui.max_rect();
+                self.markdown_render(ui);
+                // 必须排在预览之后：标题的屏幕位置是回查预览本帧注册的
+                // widget 得来的，先画就只能拿到上一帧的版面。
+                self.navigator_overlay(ui, region);
+            }
+            PreviewMode::VersionDiff => self.version_diff_mode_ui(ui),
+            PreviewMode::Split => {
+                egui::Panel::left("preview_split")
+                    .default_size(420.0)
+                    .size_range(280.0..=900.0)
+                    .frame(egui::Frame::new().inner_margin(egui::Margin {
+                        right: 8,
+                        ..egui::Margin::ZERO
+                    }))
+                    .show(ui, |ui| self.markdown_editor(ui));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        let region = ui.max_rect();
+                        self.markdown_render(ui);
+                        self.navigator_overlay(ui, region);
+                    });
+            }
+        }
     }
 
     /// 返回是否点了关闭按钮——关闭请求由 `create_ui` 在面板动画之外落地，
@@ -543,6 +554,8 @@ impl DraftPage<'_> {
         let research = self.doc.draft.kind.is_research();
         let mut editor_lost_focus = false;
         let mut cursor_follow = None;
+        let selection_before = candidates::selection_before_show(ui.ctx(), editor_id());
+        let mut menu_action = None;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
             if hybrid {
                 highlighter.layout_hybrid(
@@ -620,6 +633,12 @@ impl DraftPage<'_> {
                                             .show(ui)
                                         });
                                         editor_lost_focus |= output.response.lost_focus();
+                                        menu_action = candidates::editor_context_menu(
+                                            ui,
+                                            &output,
+                                            selection_before,
+                                            editable,
+                                        );
                                         if show_line_numbers {
                                             paint_editor_line_numbers(
                                                 ui,
@@ -721,6 +740,12 @@ impl DraftPage<'_> {
                             show_editor(ui)
                         };
                         editor_lost_focus |= output.response.lost_focus();
+                        menu_action = candidates::editor_context_menu(
+                            ui,
+                            &output,
+                            selection_before,
+                            editable,
+                        );
                         // Ctrl+滚轮调整源码字号：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量
                         // 报成 zoom_delta，滚动区不会同时滚动，两者天然不冲突。
                         let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
@@ -838,6 +863,9 @@ impl DraftPage<'_> {
                 self.doc.preview_cursor_line = None;
                 ui.ctx().request_repaint();
             }
+        }
+        if let Some(action) = menu_action {
+            self.run_editor_menu_action(ui.ctx(), action);
         }
     }
 

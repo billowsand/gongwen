@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+mod candidate_panel;
+mod candidates;
 mod caret;
 mod diff_editor;
 mod diff_gaps;
@@ -376,6 +378,8 @@ pub(crate) struct DraftSession {
     pub(crate) clear_review_confirm: bool,
     /// 打开着的标题聚焦编辑对话框；None 表示没开。
     pub(crate) heading_focus: Option<heading_focus::HeadingFocus>,
+    /// 候选区：写稿时暂时移出正文、以后可能还要用的文字。按稿件各存一份。
+    pub(crate) candidates: candidates::CandidateState,
     /// 公文预览的缩放倍率；None 表示按面板宽度自适应。
     pub(crate) preview_zoom: Option<f32>,
     /// 上一帧自适应算出的倍率，用作手动加减档的起点。
@@ -553,6 +557,7 @@ impl DraftSession {
             result_drawer_open: false,
             clear_review_confirm: false,
             heading_focus: None,
+            candidates: candidates::CandidateState::default(),
             preview_zoom: None,
             preview_fit_scale: 1.0,
             preview_freeze: crate::preview::ScaleFreeze::default(),

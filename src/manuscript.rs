@@ -18,6 +18,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+pub(crate) mod candidates;
 pub(crate) mod merge;
 pub(crate) mod sync;
 
@@ -380,6 +381,8 @@ impl ManuscriptStore {
         if version < 6 {
             self.conn.execute_batch("PRAGMA user_version = 6")?;
         }
+        // 起草页候选区：同样幂等建表，不单开档位。
+        candidates::ensure_schema(&self.conn)?;
         sync::migrate(&mut self.conn)?;
         Ok(())
     }
