@@ -518,6 +518,19 @@ impl GongwenApp {
             self.draft_page().toggle_bold(ctx);
         }
 
+        // 主快捷键+Shift+H：标题聚焦编辑，把光标所在这一级的标题集中起来改。
+        // 只在 Markdown 与 Markdown 对照模式下生效，其余模式不消费这组按键。
+        let heading_focus = egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::H,
+        );
+        if self.showing_doc()
+            && self.draft_page().heading_focus_available()
+            && ctx.input_mut(|input| input.consume_shortcut(&heading_focus))
+        {
+            self.draft_page().open_heading_focus(ctx);
+        }
+
         let new_doc = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
         if ctx.input_mut(|input| input.consume_shortcut(&new_doc)) {
             self.new_blank_manuscript();

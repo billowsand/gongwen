@@ -312,6 +312,7 @@ impl DraftPage<'_> {
             self.doc.markdown_find.open = true;
             self.doc.markdown_find.focus_query = true;
         }
+        self.heading_focus_button(ui);
         if ui
             .add_enabled(
                 has_draft,
@@ -1058,6 +1059,7 @@ impl DraftPage<'_> {
             {
                 heading = Some((0, "正文"));
             }
+            self.heading_focus_button(ui);
             toolbar_separator(ui);
 
             // 二、字符与段落

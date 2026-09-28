@@ -29,6 +29,7 @@ mod diff_hunks;
 mod editor;
 mod find;
 mod form;
+mod heading_focus;
 mod markdown;
 mod navigator;
 mod page;
@@ -373,6 +374,8 @@ pub(crate) struct DraftSession {
     /// “清空审校稿”的二次确认。清空会同时丢掉审校提示、查找状态和导出结果，
     /// 必须由模态框拦住，不能在拥挤的功能区里单击即执行。
     pub(crate) clear_review_confirm: bool,
+    /// 打开着的标题聚焦编辑对话框；None 表示没开。
+    pub(crate) heading_focus: Option<heading_focus::HeadingFocus>,
     /// 公文预览的缩放倍率；None 表示按面板宽度自适应。
     pub(crate) preview_zoom: Option<f32>,
     /// 上一帧自适应算出的倍率，用作手动加减档的起点。
@@ -549,6 +552,7 @@ impl DraftSession {
             preview_mode: PreviewMode::Source,
             result_drawer_open: false,
             clear_review_confirm: false,
+            heading_focus: None,
             preview_zoom: None,
             preview_fit_scale: 1.0,
             preview_freeze: crate::preview::ScaleFreeze::default(),
@@ -711,6 +715,7 @@ impl DraftSession {
         self.output_files.clear();
         self.export_error = None;
         self.clear_review_confirm = false;
+        self.heading_focus = None;
         self.ai_review_baseline = None;
         self.ai_proposal = None;
         self.outline = None;

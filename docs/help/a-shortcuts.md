@@ -16,6 +16,7 @@
 |---|---|
 | `Ctrl+B` / `⌘B` | 加粗（焦点在正文编辑框时） |
 | `Ctrl+F` / `⌘F` | 查找替换 |
+| `Ctrl+Shift+H` / `⌘⇧H` | 标题聚焦编辑（Markdown 与 Markdown 对照模式） |
 | `Enter` / `Shift+Enter` | 查找下一个 / 上一个 |
 | `Ctrl` + `+` | 源码编辑器字号放大 |
 | `Ctrl` + `-` | 源码编辑器字号缩小 |

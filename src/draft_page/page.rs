@@ -90,6 +90,7 @@ impl DraftPage<'_> {
                 self.preview_ui(ui);
             });
         self.clear_review_confirm_modal(ui.ctx());
+        self.heading_focus_modal(ui.ctx());
     }
 
     /// 清空审校稿的确认框使用真正的 Modal：遮罩会阻止点击穿透到编辑器或功能区，
@@ -154,6 +155,7 @@ impl DraftPage<'_> {
         self.doc.pending_render_jump = false;
         self.doc.pending_source_reveal = false;
         self.doc.markdown_find = MarkdownFindState::default();
+        self.doc.heading_focus = None;
     }
 
     /// 只读稿件的顶部横幅。发布件可以就地退回草稿继续改，归档件只作说明。
