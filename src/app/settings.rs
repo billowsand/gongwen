@@ -1613,7 +1613,7 @@ impl GongwenApp {
             &mut self.config.show_source_minimap,
             "Markdown 源码模式显示右侧缩略图",
         )
-        .on_hover_text("缩略图显示全文结构与当前可见范围；点击或拖动可快速定位");
+        .on_hover_text("缩略图可用滚轮浏览长稿；点击或拖动可快速定位");
         ui.checkbox(
             &mut self.config.show_preview_navigator,
             "公文预览与对照模式显示右缘导航刻度",

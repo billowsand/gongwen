@@ -1963,6 +1963,60 @@ mod split_resize_tests {
         );
     }
 
+    #[test]
+    fn source_minimap_wheel_scrolls_its_own_long_canvas() {
+        let mut harness = Harness::new();
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+        let rect = harness
+            .ctx
+            .read_response(egui::Id::new("gw_source_minimap"))
+            .expect("源码模式应显示缩略图")
+            .rect;
+        assert!(
+            harness.doc.source_minimap.content_height * 0.16 > rect.height(),
+            "测试稿应让缩略图长于右侧栏"
+        );
+        let editor_before = harness.doc.source_minimap.offset;
+        harness.clock += 1;
+        let at = rect.center();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 900.0),
+            )),
+            time: Some(harness.clock as f64 / 60.0),
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -160.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = harness.ctx.clone().run_ui(raw, |ui| {
+            let mut page = DraftPage {
+                doc: &mut harness.doc,
+                config: &mut harness.config,
+                store: None,
+                sender: &harness.sender,
+                status: &mut harness.status,
+                version_switch: &mut harness.version_switch,
+                revert_confirm: &mut harness.revert_confirm,
+                actions: &mut harness.actions,
+                export_links: &mut harness.export_links,
+                metrics: &mut harness.metrics,
+            };
+            page.preview_ui(ui);
+        });
+        assert!(harness.doc.source_minimap.mini_scroll > 0.0);
+        assert_eq!(harness.doc.source_minimap.offset, editor_before);
+        harness.preview_click(at);
+        assert!(harness.doc.source_minimap.offset > editor_before);
+    }
+
     /// 指着刻度点一下，就该跳到那一节——这是整个导航唯一的核心动作。
     /// 顺带锁住刻度带确实压在版面之上拿得到指针：它要是被下面的正文块抢了点击，
     /// 表现就是点了刻度却选中了一段正文。

@@ -1310,7 +1310,7 @@ impl DraftPage<'_> {
                 theme::icon_text_button(theme::Icon::Rows, "缩略图")
                     .selected(self.config.show_source_minimap),
             )
-            .on_hover_text("Markdown 源码右侧的全文缩略图，点击或拖动定位")
+            .on_hover_text("Markdown 源码右侧的缩略图，滚轮浏览，点击或拖动定位")
             .clicked()
         {
             self.config.show_source_minimap = !self.config.show_source_minimap;

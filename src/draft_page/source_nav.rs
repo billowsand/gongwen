@@ -6,13 +6,14 @@
 
 use crate::draft_page::{DraftPage, editor_id, line_ranges, navigator};
 use crate::models::{NumberingConfig, TemplateKind};
-use crate::storage;
 use crate::theme;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 const MINIMAP_WIDTH: f32 = 94.0;
+const MINIMAP_SCALE: f32 = 0.16;
+const MINIMAP_VIEWPORT_HEIGHT: f32 = 96.0;
 const OUTLINE_WIDTH: f32 = 268.0;
 const OUTLINE_ROW_HEIGHT: f32 = 28.0;
 const OUTLINE_INDENT: f32 = 18.0;
@@ -281,14 +282,72 @@ pub(crate) struct SourceMinimap {
     pub(crate) viewport_height: f32,
     pub(crate) offset: f32,
     pub(crate) requested_offset: Option<f32>,
+    pub(crate) mini_scroll: f32,
+    last_editor_offset: Option<f32>,
     drag_anchor_y: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MiniLayout {
+    height: f32,
+    map_height: f32,
+    box_height: f32,
+    editor_max: f32,
+}
+
+impl MiniLayout {
+    fn new(map: &SourceMinimap, height: f32) -> Self {
+        let height = height.max(1.0);
+        let box_height = MINIMAP_VIEWPORT_HEIGHT.min(height);
+        Self {
+            height,
+            map_height: (map.content_height * MINIMAP_SCALE).max(box_height),
+            box_height,
+            editor_max: (map.content_height - map.viewport_height).max(0.0),
+        }
+    }
+
+    fn max_scroll(self) -> f32 {
+        (self.map_height - self.height).max(0.0)
+    }
+
+    fn box_top(self, editor_offset: f32) -> f32 {
+        if self.editor_max <= 0.0 {
+            0.0
+        } else {
+            (editor_offset / self.editor_max).clamp(0.0, 1.0) * (self.map_height - self.box_height)
+        }
+    }
+
+    fn editor_offset_for(self, box_top: f32) -> f32 {
+        let travel = self.map_height - self.box_height;
+        if travel <= 0.0 {
+            0.0
+        } else {
+            (box_top / travel).clamp(0.0, 1.0) * self.editor_max
+        }
+    }
+}
+
 impl SourceMinimap {
-    fn target_offset_for(content_height: f32, viewport_height: f32, fraction: f32) -> f32 {
-        let total = content_height.max(1.0);
-        let max_offset = (total - viewport_height).max(0.0);
-        (fraction.clamp(0.0, 1.0) * total - viewport_height * 0.5).clamp(0.0, max_offset)
+    /// 正文位置变动且可见框将离开缩略图时才跟随；单独滚动缩略图时保留用户所看的段落。
+    fn follow_editor(&mut self, layout: MiniLayout) {
+        self.mini_scroll = self.mini_scroll.clamp(0.0, layout.max_scroll());
+        if self
+            .last_editor_offset
+            .is_some_and(|previous| (previous - self.offset).abs() < 0.5)
+        {
+            return;
+        }
+        self.last_editor_offset = Some(self.offset);
+        let top = layout.box_top(self.offset);
+        let margin = ((layout.height - layout.box_height) * 0.25).clamp(0.0, 18.0);
+        if top < self.mini_scroll + margin
+            || top + layout.box_height > self.mini_scroll + layout.height - margin
+        {
+            self.mini_scroll = top + layout.box_height * 0.5 - layout.height * 0.5;
+        }
+        self.mini_scroll = self.mini_scroll.clamp(0.0, layout.max_scroll());
     }
 
     pub(crate) fn visible_source_offset(&self) -> usize {
@@ -369,14 +428,22 @@ impl DraftPage<'_> {
             egui::Panel::right("source_minimap_v1")
                 .default_size(MINIMAP_WIDTH)
                 .resizable(false)
-                .frame(theme::panel(theme::surface_sunk(), 6))
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::surface())
+                        .inner_margin(egui::Margin::symmetric(4, 10)),
+                )
                 .show(ui, |ui| self.source_minimap_ui(ui));
         }
         if show_outline {
             egui::Panel::left("source_outline_v1")
                 .default_size(OUTLINE_WIDTH)
                 .size_range(160.0..=300.0)
-                .frame(theme::panel(theme::surface_sunk(), 8))
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::surface())
+                        .inner_margin(egui::Margin::symmetric(4, 10)),
+                )
                 .show(ui, |ui| self.source_outline_ui(ui));
         }
         egui::CentralPanel::default()
@@ -385,25 +452,7 @@ impl DraftPage<'_> {
     }
 
     fn source_outline_ui(&mut self, ui: &mut egui::Ui) {
-        let mut close = false;
-        ui.horizontal(|ui| {
-            ui.strong("目录");
-            ui.weak(format!("{} 项", self.doc.source_outline.len()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                close = theme::icon_button(ui, theme::Icon::X, "收起 Markdown 目录").clicked();
-                if !self.doc.source_outline.collapsed.is_empty()
-                    && ui.small_button("全部展开").clicked()
-                {
-                    self.doc.source_outline.collapsed.clear();
-                }
-            });
-        });
-        ui.separator();
-        if close {
-            self.config.show_source_outline = false;
-            let _ = storage::save(self.config);
-        }
-        if self.doc.source_outline.entries.is_empty() {
+        if self.doc.source_outline.len() == 0 {
             ui.add_space(8.0);
             ui.weak("还没有 Markdown 标题");
             ui.weak("用 #、##、### 等标记标题");
@@ -462,18 +511,6 @@ impl DraftPage<'_> {
     }
 
     fn source_minimap_ui(&mut self, ui: &mut egui::Ui) {
-        let mut close = false;
-        ui.horizontal(|ui| {
-            ui.weak("缩略图");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                close = theme::icon_button(ui, theme::Icon::X, "收起 Markdown 缩略图").clicked();
-            });
-        });
-        ui.separator();
-        if close {
-            self.config.show_source_minimap = false;
-            let _ = storage::save(self.config);
-        }
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), ui.available_height()),
             egui::Sense::hover(),
@@ -483,10 +520,19 @@ impl DraftPage<'_> {
             egui::Id::new("gw_source_minimap"),
             egui::Sense::click_and_drag(),
         );
+        let map = &mut self.doc.source_minimap;
+        let layout = MiniLayout::new(map, rect.height());
+        map.follow_editor(layout);
+        if response.hovered() {
+            let wheel = ui.input(|input| input.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                map.mini_scroll = (map.mini_scroll - wheel).clamp(0.0, layout.max_scroll());
+                ui.ctx()
+                    .input_mut(|input| input.smooth_scroll_delta.y = 0.0);
+            }
+        }
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 3.0, theme::surface_sunk());
-        let map = &self.doc.source_minimap;
-        let total = map.content_height.max(1.0);
+        painter.rect_filled(rect, 0.0, theme::surface());
         let buckets = (rect.height() * ui.ctx().pixels_per_point())
             .ceil()
             .max(1.0) as usize;
@@ -495,8 +541,11 @@ impl DraftPage<'_> {
             if row.blank {
                 continue;
             }
-            let fraction = (row.top / total).clamp(0.0, 1.0);
-            let index = ((fraction * buckets as f32) as usize).min(buckets - 1);
+            let y = row.top * MINIMAP_SCALE - map.mini_scroll;
+            if !(0.0..rect.height()).contains(&y) {
+                continue;
+            }
+            let index = ((y / rect.height() * buckets as f32) as usize).min(buckets - 1);
             let mark = &mut marks[index];
             mark.0 = mark.0.max(row.width.clamp(0.05, 1.0));
             mark.1 |= row.heading;
@@ -523,12 +572,10 @@ impl DraftPage<'_> {
                 egui::Stroke::new(if heading { 2.0 } else { 1.0 }, color),
             );
         }
-        let top = rect.top() + rect.height() * (map.offset / total).clamp(0.0, 1.0);
-        let height =
-            (rect.height() * map.viewport_height / total).clamp(8.0, rect.height().max(8.0));
+        let top = rect.top() + layout.box_top(map.offset) - map.mini_scroll;
         let viewport = egui::Rect::from_min_size(
-            egui::pos2(rect.left(), top.min(rect.bottom() - height)),
-            egui::vec2(rect.width(), height),
+            egui::pos2(rect.left(), top),
+            egui::vec2(rect.width(), layout.box_height),
         );
         painter.rect_filled(viewport, 2.0, theme::accent_soft().gamma_multiply(0.65));
         painter.rect_stroke(
@@ -537,38 +584,45 @@ impl DraftPage<'_> {
             egui::Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
-        let content_height = map.content_height;
-        let viewport_height = map.viewport_height;
         if let Some(pointer) = ui.ctx().pointer_interact_pos() {
             if response.drag_started() {
-                self.doc.source_minimap.drag_anchor_y = if viewport.contains(pointer) {
-                    pointer.y - viewport.center().y
+                map.drag_anchor_y = if viewport.contains(pointer) {
+                    pointer.y - viewport.top()
+                } else {
+                    layout.box_height * 0.5
+                };
+            }
+            if response.dragged() {
+                let edge = 24.0;
+                let shift = if pointer.y < rect.top() + edge {
+                    -((rect.top() + edge - pointer.y) / edge).clamp(0.0, 1.0) * 12.0
+                } else if pointer.y > rect.bottom() - edge {
+                    ((pointer.y - rect.bottom() + edge) / edge).clamp(0.0, 1.0) * 12.0
                 } else {
                     0.0
                 };
+                map.mini_scroll = (map.mini_scroll + shift).clamp(0.0, layout.max_scroll());
             }
             if response.dragged() || (response.clicked() && !viewport.contains(pointer)) {
                 let anchor = if response.dragged() {
-                    self.doc.source_minimap.drag_anchor_y
+                    map.drag_anchor_y
                 } else {
-                    0.0
+                    layout.box_height * 0.5
                 };
-                let fraction = ((pointer.y - anchor - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                self.doc.source_minimap.requested_offset = Some(SourceMinimap::target_offset_for(
-                    content_height,
-                    viewport_height,
-                    fraction,
-                ));
+                let box_top = pointer.y - rect.top() + map.mini_scroll - anchor;
+                map.requested_offset = Some(layout.editor_offset_for(box_top));
                 ui.ctx().request_repaint();
             }
         }
-        response.on_hover_text("点击跳转；按住拖动可连续定位");
+        response.on_hover_text("滚轮浏览全文；点击或拖动定位");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{OutlineNode, SourceMiniRow, SourceMinimap, SourceOutline, outline_row_ui};
+    use super::{
+        MiniLayout, OutlineNode, SourceMiniRow, SourceMinimap, SourceOutline, outline_row_ui,
+    };
     use crate::draft_page::navigator;
     use crate::models::{HeadingNumbering, NumberingConfig, TemplateKind};
     use eframe::egui;
@@ -778,11 +832,24 @@ mod tests {
     }
 
     #[test]
-    fn minimap_click_centers_a_long_document_and_clamps_its_ends() {
-        assert_eq!(SourceMinimap::target_offset_for(1000.0, 200.0, 0.0), 0.0);
-        assert_eq!(SourceMinimap::target_offset_for(1000.0, 200.0, 0.5), 400.0);
-        assert_eq!(SourceMinimap::target_offset_for(1000.0, 200.0, 1.0), 800.0);
-        assert_eq!(SourceMinimap::target_offset_for(120.0, 200.0, 0.8), 0.0);
+    fn minimap_keeps_a_fixed_viewport_and_scrolls_past_the_panel_height() {
+        let mut map = SourceMinimap {
+            content_height: 12_000.0,
+            viewport_height: 600.0,
+            offset: 9_000.0,
+            ..Default::default()
+        };
+        let layout = MiniLayout::new(&map, 500.0);
+        assert_eq!(layout.box_height, 96.0);
+        assert!(layout.map_height > layout.height);
+        assert!((layout.editor_offset_for(layout.box_top(5_700.0)) - 5_700.0).abs() < 0.1);
+        map.follow_editor(layout);
+        assert!(map.mini_scroll > 0.0);
+        let box_top = layout.box_top(map.offset) - map.mini_scroll;
+        assert!(box_top >= 0.0 && box_top + layout.box_height <= layout.height);
+        map.mini_scroll = 0.0;
+        map.follow_editor(layout);
+        assert_eq!(map.mini_scroll, 0.0, "用户滚动缩略图后不应被自动拉回");
     }
 
     #[test]
