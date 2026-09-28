@@ -942,7 +942,7 @@ pub(crate) struct TableCellLayout {
     padding: f32,
     align: ColumnAlignment,
     /// 格内的行内公式（只有研究报告版式才排），画格子时贴在 galley 的占位上。
-    math: Vec<math_flow::CellMath>,
+    math: Vec<math_flow::MathSlot>,
 }
 
 /// 量好尺寸、还没落到纸上的表格：各列宽、各行高与每个锚点单元格。
@@ -1034,13 +1034,14 @@ pub(crate) fn measure_table(
             // 与 PDF 的 longtblr 一样排成公式。
             let mut math = Vec::new();
             if metrics.math && math_flow::has_math(text) {
-                let fonts = if header {
-                    (&font, &font)
-                } else {
-                    (&font, &bold_font)
-                };
-                let wrap = cell_job.wrap.max_width;
-                math = math_flow::append_cell(ui, metrics, &mut cell_job, text, fonts, line, wrap);
+                let bold = if header { &font } else { &bold_font };
+                let style = math_flow::FlowStyle::block(
+                    (font.clone(), bold.clone()),
+                    metrics.table_pt,
+                    line,
+                    cell_job.wrap.max_width,
+                );
+                math = math_flow::append_with_math(ui, metrics, &mut cell_job, text, &style);
             } else if header {
                 cell_job.append(
                     &export::plain_text(text),
@@ -1208,7 +1209,7 @@ impl MeasuredTable {
                 cell.galley.clone(),
                 theme::paper::ink(),
             );
-            math_flow::paint_cell(
+            math_flow::paint_slots(
                 painter,
                 metrics,
                 egui::pos2(anchor, top),

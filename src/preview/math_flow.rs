@@ -158,6 +158,28 @@ impl FlowStyle {
         style.align = align;
         style
     }
+
+    /// 整块排好再贴到纸上的文字（表格单元格、封面题名，配
+    /// [`append_with_math`]）：`fonts` 是正常与加粗两种字面，`math_pt` 是公式
+    /// 字号（磅），`width` 是公式最多能占的宽度。
+    pub(crate) fn block(
+        (normal, bold): (egui::FontId, egui::FontId),
+        math_pt: f32,
+        line: f32,
+        width: f32,
+    ) -> Self {
+        Self {
+            normal,
+            bold,
+            paren: None,
+            math_pt,
+            line,
+            left: 0.0,
+            width,
+            lead: Vec::new(),
+            align: egui::Align::Min,
+        }
+    }
 }
 
 /// 渲染失败的占位：虚线框 + 框内灰色小字写出公式源码。
@@ -230,54 +252,18 @@ enum Piece<'a> {
     Math(&'a str),
 }
 
-/// 词法：`\$` 是字面 `$`；`$...$` 结对要求内容非空、不含换行、不含 `$`；
-/// 行内的 `$$` 不结对，两个字符都留在文本里（mdx 里 `$$` 也只有行首才是块级，
-/// 预览与它对齐）。`$` 与 `\` 都是 ASCII，按字节扫不会切进 UTF-8 序列内部。
+/// 词法见 [`export::inline_math_spans`]（与 mdx 的行内解析同一套规则）。
 fn split_pieces(text: &str) -> Vec<Piece<'_>> {
-    let bytes = text.as_bytes();
     let mut pieces = Vec::new();
     let mut text_start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'$') {
-            i += 2;
-            continue;
+    for span in export::inline_math_spans(text) {
+        if text_start < span.start {
+            pieces.push(Piece::Text(&text[text_start..span.start]));
         }
-        if bytes[i] != b'$' {
-            i += 1;
-            continue;
-        }
-        if bytes.get(i + 1) == Some(&b'$') {
-            i += 2;
-            continue;
-        }
-        // 找下一个未转义的 `$` 做闭合一侧。
-        let mut j = i + 1;
-        let close = loop {
-            match bytes.get(j) {
-                None => break None,
-                Some(b'\\') if bytes.get(j + 1) == Some(&b'$') => j += 2,
-                Some(b'$') => break Some(j),
-                Some(_) => j += 1,
-            }
-        };
-        let paired = close.is_some_and(|close| {
-            let inner = &text[i + 1..close];
-            !inner.is_empty() && !inner.contains(['$', '\n'])
-        });
-        if paired {
-            let close = close.expect("paired 蕴含 close");
-            if text_start < i {
-                pieces.push(Piece::Text(&text[text_start..i]));
-            }
-            pieces.push(Piece::Math(&text[i + 1..close]));
-            i = close + 1;
-            text_start = i;
-        } else {
-            i += 1;
-        }
+        pieces.push(Piece::Math(&text[span.start + 1..span.end - 1]));
+        text_start = span.end;
     }
-    if text_start < bytes.len() {
+    if text_start < text.len() {
         pieces.push(Piece::Text(&text[text_start..]));
     }
     pieces
@@ -843,40 +829,29 @@ fn paint_math(painter: &egui::Painter, metrics: &Metrics, rect: egui::Rect, math
     marks::paint_block_mark(painter, metrics, rect, math.mark);
 }
 
-// ── 表格单元格 ──────────────────────────────────────────────────────────────
+// ── 整块排好的文字（表格单元格、封面题名） ───────────────────────────────────
 
-/// 单元格 galley 里的一个行内公式：第 `slot` 个字符是它的全角空格占位，
-/// 前面用 `pad` 补足盒宽（同 [`draw_line`] 的做法），画格子时按该字的位置贴图。
-pub(crate) struct CellMath {
+/// galley 里的一个行内公式：第 `slot` 个字符是它的全角空格占位，前面用 `pad`
+/// 补足盒宽（同 [`draw_line`] 的做法），画的时候按该字的位置贴图。
+pub(crate) struct MathSlot {
     slot: usize,
     pad: f32,
     atom: MathAtom,
 }
 
-/// 把单元格文字（含 `$...$`）追加进 `job`：文字照常带字面与花脸稿标记，
-/// 公式换成补过宽度的占位空格，返回各公式的占位信息。单元格按 `width`
-/// 折行，公式盒子按 `line` 行距等比压进一行。
-pub(crate) fn append_cell(
+/// 把含 `$...$` 的文字追加进 `job`：文字照常带字面与花脸稿标记，公式换成
+/// 补过宽度的占位空格，返回各公式的占位信息。字面、行距与公式字号取自
+/// `style`，比 `style.width` 宽的公式按比例压窄；折行、对齐由 `job` 自己定。
+/// 用于排成一整块再贴到纸上的文字（表格单元格、封面题名），配 [`paint_slots`]。
+pub(crate) fn append_with_math(
     ui: &egui::Ui,
     metrics: &Metrics,
     job: &mut LayoutJob,
     text: &str,
-    (normal, bold): (&egui::FontId, &egui::FontId),
-    line: f32,
-    width: f32,
-) -> Vec<CellMath> {
-    let style = FlowStyle {
-        normal: normal.clone(),
-        bold: bold.clone(),
-        paren: None,
-        math_pt: metrics.table_pt,
-        line,
-        left: 0.0,
-        width,
-        lead: Vec::new(),
-        align: egui::Align::Min,
-    };
-    let band = line_band(ui, &style);
+    style: &FlowStyle,
+) -> Vec<MathSlot> {
+    let (normal, bold, line) = (&style.normal, &style.bold, style.line);
+    let band = line_band(ui, style);
     let em = ui
         .ctx()
         .fonts_mut(|fonts| fonts.glyph_width(normal, '\u{3000}'));
@@ -893,10 +868,10 @@ pub(crate) fn append_cell(
                 if index > 0
                     && let Some(src) = sources.next()
                 {
-                    let mut atom = math_atom(ui.ctx(), metrics, &style, src, band);
+                    let mut atom = math_atom(ui.ctx(), metrics, style, src, band);
                     atom.mark = chunk.kind;
                     let pad = std::mem::take(&mut gap) + atom.size.x - em;
-                    maths.push(CellMath {
+                    maths.push(MathSlot {
                         slot: job.text.chars().count(),
                         pad,
                         atom,
@@ -913,13 +888,13 @@ pub(crate) fn append_cell(
     maths
 }
 
-/// 按 `append_cell` 记下的占位贴公式。`origin` 是单元格 galley 的画点。
-pub(crate) fn paint_cell(
+/// 按 [`append_with_math`] 记下的占位贴公式。`origin` 是 galley 的画点。
+pub(crate) fn paint_slots(
     painter: &egui::Painter,
     metrics: &Metrics,
     origin: egui::Pos2,
     galley: &egui::Galley,
-    maths: &[CellMath],
+    maths: &[MathSlot],
 ) {
     for math in maths {
         let mut first = 0usize;

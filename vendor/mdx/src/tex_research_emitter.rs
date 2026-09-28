@@ -1110,10 +1110,10 @@ fn render_inlines(inlines: &[Inline]) -> String {
     s
 }
 
-/// 标题文字：行内公式排成公式，其余按纯文本转义。标题会进目录与 PDF 书签，
+/// 标题文字（章节标题、封面题名）：行内公式排成公式，其余按纯文本转义。标题会进目录与 PDF 书签，
 /// 公式包一层 `\texorpdfstring`，书签里写公式源码。没有公式的标题与原来
 /// 一样整段转义。
-fn heading_latex(text: &str) -> String {
+pub(crate) fn heading_latex(text: &str) -> String {
     let inlines = crate::common::inline::parse(text);
     if !inlines.iter().any(|ip| matches!(ip, Inline::Math(_))) {
         return escape_latex(text);

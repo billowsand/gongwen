@@ -74,11 +74,46 @@ pub fn title_plan(title: &str, chars_per_line: usize) -> TitlePlan {
 /// 研究报告封面题名的分行：一行放得下就一行，否则按公文标题的规矩在词边界
 /// 均衡换行（首行不短于末行）。封面题名不做横向压缩——封面留白足，分两行
 /// 比把字压扁更庄重。
+///
+/// 题名里的行内公式 `$...$` 整个不拆：先换成一个占位字（按一个汉字宽计，
+/// 与排出来的公式差不多宽），分好行再换回源码。
 pub fn cover_title_lines(title: &str) -> Vec<String> {
     let title = title.trim();
     if title.is_empty() {
         return Vec::new();
     }
+    let spans = super::inline_math_spans(title);
+    if spans.is_empty() {
+        return plain_cover_title_lines(title);
+    }
+    let mut masked = String::with_capacity(title.len());
+    let mut sources = Vec::with_capacity(spans.len());
+    let mut start = 0usize;
+    for span in spans {
+        masked.push_str(&title[start..span.start]);
+        masked.push(MATH_MASK);
+        sources.push(&title[span.clone()]);
+        start = span.end;
+    }
+    masked.push_str(&title[start..]);
+    let mut sources = sources.into_iter();
+    plain_cover_title_lines(&masked)
+        .into_iter()
+        .map(|line| {
+            line.chars()
+                .map(|ch| match ch {
+                    MATH_MASK => sources.next().unwrap_or_default().to_string(),
+                    other => other.to_string(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// 封面题名分行时顶替一个行内公式的占位字（对象替换符，题名里不会出现）。
+const MATH_MASK: char = '\u{FFFC}';
+
+fn plain_cover_title_lines(title: &str) -> Vec<String> {
     let per_line = chars_per_line_for(COVER_TITLE_WIDTH_PT, COVER_TITLE_SIZE_PT);
     if display_units(title) <= per_line * 2 {
         return vec![title.to_string()];
@@ -555,6 +590,23 @@ mod tests {
             );
             assert!(!lines[1].starts_with('的'), "{lines:?}");
         }
+    }
+
+    /// 题名里的行内公式整个不拆：分行后每行的 `$` 成对，拼回去与原题名一致。
+    #[test]
+    fn cover_title_keeps_inline_math_whole() {
+        assert_eq!(
+            cover_title_lines("这时白头件的题目$\\sum_a^b$"),
+            ["这时白头件的题目$\\sum_a^b$"]
+        );
+        let title = "关于加快构建全市一体化算力网络$\\sum_{i=1}^{n} x_i$的若干建议";
+        let lines = cover_title_lines(title);
+        assert_eq!(lines.join(""), title);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert!(
+            lines.iter().all(|line| line.matches('$').count() % 2 == 0),
+            "公式不得拆开：{lines:?}"
+        );
     }
 
     #[test]

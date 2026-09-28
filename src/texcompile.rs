@@ -662,7 +662,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut input = DraftInput {
             kind: TemplateKind::ResearchReport,
-            title_hint: "数学公式研究报告测试".into(),
+            // 题名里也带公式：封面排成公式，文件名里的 `\`、`$` 照常处理。
+            title_hint: "数学公式研究报告测试$\\sum_a^b$".into(),
             ..Default::default()
         };
         input.research.institution = "测试单位".into();
@@ -726,6 +727,12 @@ mod tests {
         assert!(
             tex_source.contains(r"\(\displaystyle \sum_a^b\)"),
             "居中区、引用块里的 $$ 应排成独立公式：{tex_source}"
+        );
+        assert!(
+            tex_source.contains(
+                r"\newcommand{\covertitle}{数学公式研究报告测试\texorpdfstring{\(\sum_a^b\)}"
+            ),
+            "封面题名里的公式应排成公式：{tex_source}"
         );
         let outcome = compile_research_pdf(tex).unwrap();
         assert!(outcome.pdf.is_some_and(|path| path.is_file()));

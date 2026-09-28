@@ -1084,11 +1084,27 @@ fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, markdow
         // 题名、稿次、外文原题顺排。题名按公文标题的断行规矩分行，与导出的
         // PDF、Word 用同一个函数，断在同一处。
         let title = export::title::cover_title_lines(title).join("\n");
-        let mut bottom = text(
-            CoverText::new(&title, theme::FONT_BIAOSONG, l::TITLE_PT).leading(l::TITLE_LEADING),
-            center_x,
-            l::TITLE_TOP,
-        );
+        let spec =
+            CoverText::new(&title, theme::FONT_BIAOSONG, l::TITLE_PT).leading(l::TITLE_LEADING);
+        let mut bottom = if math_flow::has_math(&title) {
+            // 题名里有行内公式：公式占位排进同一个 galley，再按占位贴图，
+            // 与 PDF 封面一样排成公式。
+            let font = metrics.font(spec.family, spec.pt);
+            let wrap = metrics.mm(spec.wrap);
+            let line = font.size * spec.leading;
+            let style = math_flow::FlowStyle::block((font.clone(), font), spec.pt, line, wrap);
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = wrap;
+            job.halign = spec.align;
+            let slots = math_flow::append_with_math(ui, metrics, &mut job, &title, &style);
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+            let origin = at(center_x, l::TITLE_TOP);
+            painter.galley(origin, galley.clone(), ink);
+            math_flow::paint_slots(painter, metrics, origin, &galley, &slots);
+            l::TITLE_TOP + galley.size().y / metrics.mm(1.0)
+        } else {
+            text(spec, center_x, l::TITLE_TOP)
+        };
         if let Some(version) = cover::version_mark(&meta.version) {
             bottom = text(
                 CoverText::new(&version, theme::FONT_SONGTI, l::VERSION_PT),
@@ -2123,6 +2139,26 @@ mod tests {
         assert!(!text.contains("某某问题研究报告"), "{text}");
         assert!(text.contains("第1章　研究背景"), "{text}");
         assert!(!text.contains("第2章"), "报告题名不应占用章号：{text}");
+    }
+
+    /// 封面题名里的行内公式与 PDF 一样排成公式：纸上只剩题名文字，不印源码。
+    #[test]
+    fn inline_math_in_the_cover_title_is_typeset() {
+        for (hint, markdown) in [
+            (
+                "",
+                "<!-- [正文] -->\n\n# 这时白头件的题目$\\sum_a^b$\n\n## 背景\n",
+            ),
+            (
+                "这时白头件的题目$\\sum_a^b$",
+                "<!-- [正文] -->\n\n## 背景\n",
+            ),
+        ] {
+            let text = drawn_titled(hint, markdown);
+            assert!(text.contains("这时白头件的题目"), "{text}");
+            assert!(!text.contains('$'), "{text}");
+            assert!(!text.contains("\\sum"), "{text}");
+        }
     }
 
     /// 封面题名的兜底：文档要素的「文件名称」留空时取正文区的 `#`，行尾锚点

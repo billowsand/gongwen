@@ -53,6 +53,49 @@ pub(crate) fn number_to_chinese(number: usize) -> String {
     }
 }
 
+/// 研究报告行内公式 `$...$` 在文本里的字节范围（含两侧 `$`），按出现顺序。
+///
+/// 词法与 mdx 的行内解析一致：`\$` 是字面 `$`；结对要求内容非空、不含换行、
+/// 不含 `$`；行内的 `$$` 不结对，两个字符都算普通文字（mdx 里 `$$` 只有整行
+/// 才是独立公式）。`$` 与 `\` 都是 ASCII，按字节扫不会切进 UTF-8 序列内部。
+pub(crate) fn inline_math_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        // 找下一个未转义的 `$` 做闭合一侧。
+        let mut j = i + 1;
+        let close = loop {
+            match bytes.get(j) {
+                None => break None,
+                Some(b'\\') if bytes.get(j + 1) == Some(&b'$') => j += 2,
+                Some(b'$') => break Some(j),
+                Some(_) => j += 1,
+            }
+        };
+        match close {
+            Some(close) if close > i + 1 && !text[i + 1..close].contains(['$', '\n']) => {
+                spans.push(i..close + 1);
+                i = close + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    spans
+}
+
 pub(crate) fn plain_text(text: &str) -> String {
     inline_segments(text)
         .into_iter()

@@ -253,7 +253,7 @@ fn render_template(
     cover: &CoverInfo,
     has_citations: bool,
 ) -> String {
-    let escaped_title = title.map(escape_latex);
+    let escaped_title = title.map(crate::tex_research_emitter::heading_latex);
     let mut rendered = template.to_string();
 
     if let Ok(re) = regex::Regex::new(r"(?s)\$if\(title\)\$(.*?)\$else\$(.*?)\$endif\$") {
@@ -343,7 +343,7 @@ fn render_template(
         .map(|title| {
             crate::cover::title_lines(title, cover.title_lines.as_deref())
                 .iter()
-                .map(|line| escape_latex(line))
+                .map(|line| crate::tex_research_emitter::heading_latex(line))
                 .collect::<Vec<_>>()
                 .join(r"\\")
         })
@@ -407,6 +407,22 @@ mod tests {
         let template = "$if(title)$T:$title$$else$UNTITLED$endif$\n$body$";
         let rendered = render_template(template, "BODY", Some("A&B"), &CoverInfo::default(), false);
         assert_eq!(rendered, "T:A\\&B\nBODY");
+    }
+
+    /// 题名里的行内公式排成公式：`\papertitle` 与封面题名都包 `\texorpdfstring`，
+    /// 其余文字照常转义。
+    #[test]
+    fn title_with_inline_math_is_typeset() {
+        let template = "$title$|$covertitle$";
+        let rendered = render_template(
+            template,
+            "",
+            Some("题目$\\sum_a^b$&"),
+            &CoverInfo::default(),
+            false,
+        );
+        let expected = "题目\\texorpdfstring{\\(\\sum_a^b\\)}{\\textbackslash{}sum\\_a\\textasciicircum{}b}\\&";
+        assert_eq!(rendered, format!("{expected}|{expected}"));
     }
 
     #[test]
