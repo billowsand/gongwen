@@ -34,6 +34,7 @@ mod navigator;
 mod page;
 mod revise;
 mod ribbon;
+mod source_nav;
 mod table;
 mod tasks;
 mod timeline;
@@ -52,6 +53,7 @@ pub(crate) use markdown::{
     markdown_heading_level, split_row, table_column_count, tidy_blank_lines, toggle_bullet,
 };
 pub(crate) use navigator::PreviewScroll;
+pub(crate) use source_nav::{SourceMinimap, SourceOutline};
 pub(crate) use table::{TableOp, table_grid_picker};
 pub(crate) use timeline::VersionTimelineState;
 // test-only names: only compiled in test builds (kept for the root test modules)
@@ -380,6 +382,10 @@ pub(crate) struct DraftSession {
     /// 公文预览滚动区上一帧的滚动位置与内容总高。右缘的导航刻度靠它把标题的
     /// 版面位置换算成刻度条上的位置，也靠它判断当前滚到了哪一节。
     pub(crate) preview_scroll: PreviewScroll,
+    /// 源码模式的标题目录缓存；正文改变时重建。
+    pub(crate) source_outline: SourceOutline,
+    /// 源码模式的全文缩略图与编辑器滚动量。
+    pub(crate) source_minimap: SourceMinimap,
     /// 在公文预览里点中的那一块：预览和源码两边都会给它铺底色。
     pub(crate) preview_anchor: Option<PreviewAnchor>,
     /// 待处理的“跳到源码”请求，编辑框下次绘制时把光标挪过去并滚动到位。
@@ -544,6 +550,8 @@ impl DraftSession {
             preview_fit_scale: 1.0,
             preview_freeze: crate::preview::ScaleFreeze::default(),
             preview_scroll: PreviewScroll::default(),
+            source_outline: SourceOutline::default(),
+            source_minimap: SourceMinimap::default(),
             preview_anchor: None,
             pending_source_jump: None,
             pending_source_selection: None,
@@ -1929,6 +1937,30 @@ mod split_resize_tests {
     fn percentile(values: &mut [f32], p: f32) -> f32 {
         values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         values[((values.len() as f32 - 1.0) * p) as usize]
+    }
+
+    /// 源码缩略图必须覆盖整篇，而不是只画当前屏幕；点底部应把长稿滚到后段。
+    #[test]
+    fn source_minimap_click_reaches_later_sections() {
+        let mut harness = Harness::new();
+        harness.preview_frames(egui::pos2(10.0, 10.0), 3);
+        assert_eq!(harness.doc.source_outline.len(), 41);
+        assert!(harness.doc.source_minimap.rows.len() > 100);
+        assert!(
+            harness.doc.source_minimap.content_height > harness.doc.source_minimap.viewport_height
+        );
+        let rect = harness
+            .ctx
+            .read_response(egui::Id::new("gw_source_minimap"))
+            .expect("源码模式应显示可交互的缩略图")
+            .rect;
+        let before = harness.doc.source_minimap.offset;
+        harness.preview_click(egui::pos2(rect.center().x, rect.bottom() - 10.0));
+        assert!(
+            harness.doc.source_minimap.offset > before + 100.0,
+            "点缩略图底部后应跳到后段，实际偏移 {}",
+            harness.doc.source_minimap.offset
+        );
     }
 
     /// 指着刻度点一下，就该跳到那一节——这是整个导航唯一的核心动作。

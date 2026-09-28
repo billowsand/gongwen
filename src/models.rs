@@ -1687,6 +1687,12 @@ pub struct AppConfig {
     pub allow_free_text: bool,
     /// 在 Markdown 源码与实时排版编辑器左侧显示源码行号。
     pub show_editor_line_numbers: bool,
+    /// Markdown 源码模式左侧显示可跳转的标题目录。
+    #[serde(default = "source_navigation_default")]
+    pub show_source_outline: bool,
+    /// Markdown 源码模式右侧显示可点击、可拖动的全文缩略图。
+    #[serde(default = "source_navigation_default")]
+    pub show_source_minimap: bool,
     /// 在公文预览与对照模式的右缘显示导航刻度（悬停展开成标题列表）。
     /// 默认开：刻度只占右缘十几个点，且不吃点击。关掉后右缘完全干净。
     pub show_preview_navigator: bool,
@@ -1746,6 +1752,8 @@ impl Default for AppConfig {
             security_rules: SecurityRules::default(),
             allow_free_text: true,
             show_editor_line_numbers: true,
+            show_source_outline: true,
+            show_source_minimap: true,
             show_preview_navigator: true,
             show_preview_line_numbers: false,
             editor_font_size: 14.0,
@@ -2277,6 +2285,11 @@ impl AppConfig {
 
 /// 旧配置文件里没有这个开关；缺省按开启处理。
 fn auto_save_default() -> bool {
+    true
+}
+
+/// 旧配置文件没有源码导航开关；升级后默认显示目录与缩略图。
+fn source_navigation_default() -> bool {
     true
 }
 

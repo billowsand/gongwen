@@ -1605,6 +1605,16 @@ impl GongwenApp {
         )
         .on_hover_text("行号只用于定位，不会写入稿件或导出文件");
         ui.checkbox(
+            &mut self.config.show_source_outline,
+            "Markdown 源码模式显示标题目录",
+        )
+        .on_hover_text("目录与预览使用相同的标题和编号；点标题跳转，点箭头收放下级");
+        ui.checkbox(
+            &mut self.config.show_source_minimap,
+            "Markdown 源码模式显示右侧缩略图",
+        )
+        .on_hover_text("缩略图显示全文结构与当前可见范围；点击或拖动可快速定位");
+        ui.checkbox(
             &mut self.config.show_preview_navigator,
             "公文预览与对照模式显示右缘导航刻度",
         )

@@ -943,6 +943,18 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     );
     field(
         &mut out,
+        "Markdown 显示目录",
+        yes_no(a.show_source_outline),
+        yes_no(b.show_source_outline),
+    );
+    field(
+        &mut out,
+        "Markdown 显示缩略图",
+        yes_no(a.show_source_minimap),
+        yes_no(b.show_source_minimap),
+    );
+    field(
+        &mut out,
         "预览显示导航刻度",
         yes_no(a.show_preview_navigator),
         yes_no(b.show_preview_navigator),

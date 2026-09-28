@@ -568,18 +568,18 @@ fn outline_top(rail: egui::Rect, heights: &[(usize, f32)], anchor: Option<usize>
 }
 
 /// 每一级固定的字号。
-fn label_size(level: u8) -> f32 {
+pub(crate) fn label_size(level: u8) -> f32 {
     LEVEL_FONT[usize::from(level.saturating_sub(1).min(3))]
 }
 
 /// 层级缩进。公文正文层级最浅是二级（「一、」），所以从二级起算。
-fn level_indent(level: u8) -> f32 {
+pub(crate) fn level_indent(level: u8) -> f32 {
     f32::from(level.saturating_sub(2).min(LEVEL_INDENT_MAX)) * LEVEL_INDENT
 }
 
 /// 板上某一层级的标题该用哪支字体。直接取版式预览那一套，不另立一份映射：
 /// 两份映射迟早会走岔，而走岔的表现是导航里的「一、」是黑体、纸上却成了楷体。
-fn label_family(entry: &NavEntry) -> egui::FontFamily {
+pub(crate) fn label_family(entry: &NavEntry) -> egui::FontFamily {
     theme::official_family(entry.family)
 }
 
@@ -614,10 +614,12 @@ fn label_galley(
 
 /// 导航里实际显示的标题文字。附件编号自成一套，正式标题前加区段标识后，
 /// 正文和附件中同时出现的「一、」才不会被误看成重复编号。
-fn label_text(entry: &NavEntry) -> String {
+pub(crate) fn label_text(entry: &NavEntry) -> String {
+    // 源码中的加粗标记和反斜杠转义不占纸面字宽；两处目录都显示排版后的字面。
+    let visible = export::plain_text(&entry.text);
     let heading = match &entry.number {
-        Some(number) => format!("{number}{}", entry.text),
-        None => entry.text.clone(),
+        Some(number) => format!("{number}{visible}"),
+        None => visible,
     };
     if entry.is_attachment_title {
         format!("【附件】{heading}")

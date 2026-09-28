@@ -219,6 +219,33 @@ impl DraftPage<'_> {
                             self.doc.preview_mode = mode;
                         }
                     }
+                    if self.doc.preview_mode == PreviewMode::Source {
+                        toolbar_separator(ui);
+                        if theme::view_icon_button(
+                            ui,
+                            self.config.show_source_minimap,
+                            theme::Icon::Rows,
+                            "Markdown 缩略图",
+                        )
+                        .on_hover_text("显示或收起源码右侧的全文缩略图")
+                        .clicked()
+                        {
+                            self.config.show_source_minimap = !self.config.show_source_minimap;
+                            self.persist_ribbon();
+                        }
+                        if theme::view_icon_button(
+                            ui,
+                            self.config.show_source_outline,
+                            theme::Icon::List,
+                            "Markdown 目录",
+                        )
+                        .on_hover_text("显示或收起源码左侧的标题目录")
+                        .clicked()
+                        {
+                            self.config.show_source_outline = !self.config.show_source_outline;
+                            self.persist_ribbon();
+                        }
+                    }
                 });
             });
             selected_rect
@@ -1262,6 +1289,33 @@ impl DraftPage<'_> {
             PreviewMode::Rendered | PreviewMode::Split
         );
         ui.add_enabled_ui(zoomable, |ui| self.zoom_controls(ui));
+        toolbar_separator(ui);
+
+        let source = self.doc.preview_mode == PreviewMode::Source;
+        if ui
+            .add_enabled(
+                source,
+                theme::icon_text_button(theme::Icon::List, "目录")
+                    .selected(self.config.show_source_outline),
+            )
+            .on_hover_text("Markdown 源码左侧的标题目录，点标题跳转")
+            .clicked()
+        {
+            self.config.show_source_outline = !self.config.show_source_outline;
+            self.persist_ribbon();
+        }
+        if ui
+            .add_enabled(
+                source,
+                theme::icon_text_button(theme::Icon::Rows, "缩略图")
+                    .selected(self.config.show_source_minimap),
+            )
+            .on_hover_text("Markdown 源码右侧的全文缩略图，点击或拖动定位")
+            .clicked()
+        {
+            self.config.show_source_minimap = !self.config.show_source_minimap;
+            self.persist_ribbon();
+        }
         toolbar_separator(ui);
 
         let form_collapsed = self.doc.form_collapsed;

@@ -336,7 +336,7 @@ impl DraftPage<'_> {
         egui::CentralPanel::default()
             .frame(theme::panel(theme::canvas(), 10))
             .show(ui, |ui| match self.doc.preview_mode {
-                PreviewMode::Source => self.markdown_editor(ui),
+                PreviewMode::Source => self.source_editor_ui(ui),
                 PreviewMode::Hybrid => self.markdown_hybrid_editor(ui),
                 PreviewMode::Rendered => {
                     let region = ui.max_rect();
@@ -474,6 +474,11 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn markdown_editor_impl(&mut self, ui: &mut egui::Ui, hybrid: bool) {
+        let source_mode = !hybrid && self.doc.preview_mode == PreviewMode::Source;
+        let source_scroll_request = source_mode
+            .then(|| self.doc.source_minimap.requested_offset.take())
+            .flatten();
+        let mut source_rows = Vec::new();
         // 行数必须在进入 ScrollArea 之前算：滚动方向上的 available_height
         // 是无穷大，拿进去算会得到 usize::MAX 行，整个界面将无法布局。
         let rows = visible_rows(ui);
@@ -657,11 +662,20 @@ impl DraftPage<'_> {
                     });
                 });
         } else {
-            theme::card().show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("preview_scroll")
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
+            let source_scroll = theme::card()
+                .show(ui, |ui| {
+                    let mut scroll = egui::ScrollArea::vertical()
+                        .id_salt("preview_scroll")
+                        .auto_shrink([false; 2]);
+                    if source_mode && self.doc.source_minimap.visible {
+                        scroll = scroll.scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        );
+                    }
+                    if let Some(offset) = source_scroll_request {
+                        scroll = scroll.vertical_scroll_offset(offset);
+                    }
+                    let scrolled = scroll.show(ui, |ui| {
                         let mut show_editor = |ui: &mut egui::Ui| {
                             show_with_glyph_caret(ui, editable, |ui| {
                                 egui::TextEdit::multiline(text)
@@ -707,6 +721,13 @@ impl DraftPage<'_> {
                                 egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into()),
                             );
                         }
+                        if source_mode {
+                            source_rows = crate::draft_page::source_nav::capture_source_rows(
+                                text,
+                                &output,
+                                &self.doc.source_outline,
+                            );
+                        }
                         if let Some(range) = selection {
                             select_source_range(ui, &output, text, range);
                         } else if let Some(offset) = jump {
@@ -721,7 +742,28 @@ impl DraftPage<'_> {
                             });
                         }
                     });
-            });
+                    (
+                        scrolled.state.offset.y,
+                        scrolled.content_size.y,
+                        scrolled.inner_rect.top(),
+                        scrolled.inner_rect.height(),
+                    )
+                })
+                .inner;
+            if source_mode {
+                let first_layout =
+                    self.doc.source_minimap.rows.is_empty() && !source_rows.is_empty();
+                self.doc.source_minimap.update(
+                    source_rows,
+                    source_scroll.0,
+                    source_scroll.1,
+                    source_scroll.2,
+                    source_scroll.3,
+                );
+                if first_layout {
+                    ui.ctx().request_repaint();
+                }
+            }
         }
         if editable && editor_lost_focus {
             let normalized = export::normalize_ordered_list_punctuation(text);
