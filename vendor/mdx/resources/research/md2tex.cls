@@ -43,6 +43,14 @@
 %% 数学公式支持（mathtools 依赖并自动加载 amsmath，显式列出以便预热同步）
 \RequirePackage{amsmath}
 \RequirePackage{mathtools}
+%% 数学字体各字号一律按随包的 10/12pt 字形缩放。LaTeX 默认按设计字号取
+%% cmmi8、cmsy7 这类字形，随包 texbundle 里只有 cmmi10/12、cmr10/12、
+%% cmsy10、cmex10 的轮廓：小四（文框、表格）的上下标要 8pt，编译就停在
+%% 缺字体上。缩放后小字号少了光学修正，换来公式在任何字号下都排得出。
+\DeclareFontShape{OML}{cmm}{m}{it}{<-11>cmmi10<11->cmmi12}{\skewchar\font=127}
+\DeclareFontShape{OMS}{cmsy}{m}{n}{<->cmsy10}{\skewchar\font=48}
+\DeclareFontShape{OMX}{cmex}{m}{n}{<->cmex10}{}
+\DeclareFontShape{OT1}{cmr}{m}{n}{<-11>cmr10<11->cmr12}{}
 
 %% hyperref 放在最后，避免冲突
 \RequirePackage[unicode,CJKbookmarks=true,bookmarksopen=true,bookmarksnumbered=true,linktoc=all]{hyperref}

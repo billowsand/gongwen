@@ -7,6 +7,7 @@ use crate::export;
 use crate::export::table::ColumnAlignment;
 use crate::preview::gutter;
 use crate::preview::marks::{self, LineMarks};
+use crate::preview::math_flow;
 use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT};
 use crate::theme;
 use eframe::egui;
@@ -923,6 +924,8 @@ pub(crate) struct TableCellLayout {
     galley: Arc<egui::Galley>,
     padding: f32,
     align: ColumnAlignment,
+    /// 格内的行内公式（只有研究报告版式才排），画格子时贴在 galley 的占位上。
+    math: Vec<math_flow::CellMath>,
 }
 
 /// 量好尺寸、还没落到纸上的表格：各列宽、各行高与每个锚点单元格。
@@ -1009,7 +1012,19 @@ pub(crate) fn measure_table(
             // 表头整行黑体，不再认单元格里的加粗；正文格按 `**` 换粗体字面，
             // 与 DOCX 的 table_runs_sized、TeX 的 \GwBold 一致。括号换楷体那条
             // 规则只管正文，表格三端都不用。
-            if header {
+            //
+            // 研究报告的格子里有行内公式时走 `math_flow`：公式占位、画格子时贴图，
+            // 与 PDF 的 longtblr 一样排成公式。
+            let mut math = Vec::new();
+            if metrics.math && math_flow::has_math(text) {
+                let fonts = if header {
+                    (&font, &font)
+                } else {
+                    (&font, &bold_font)
+                };
+                let wrap = cell_job.wrap.max_width;
+                math = math_flow::append_cell(ui, metrics, &mut cell_job, text, fonts, line, wrap);
+            } else if header {
                 cell_job.append(
                     &export::plain_text(text),
                     0.0,
@@ -1048,6 +1063,7 @@ pub(crate) fn measure_table(
                 galley,
                 padding,
                 align,
+                math,
             });
         }
     }
@@ -1174,6 +1190,13 @@ impl MeasuredTable {
                 egui::pos2(anchor, top),
                 cell.galley.clone(),
                 theme::paper::ink(),
+            );
+            math_flow::paint_cell(
+                painter,
+                metrics,
+                egui::pos2(anchor, top),
+                &cell.galley,
+                &cell.math,
             );
         }
         marked

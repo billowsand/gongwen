@@ -131,6 +131,8 @@ pub(crate) struct Metrics {
     table_family: &'static str,
     table_pt: f32,
     table_line_pt: f32,
+    /// 行内 `$...$` 排成公式（研究报告），否则照源码印（公文不支持公式）。
+    math: bool,
     /// 本帧纸面上每一条「改得动的行」的位置，画完纸再统一标到页边。
     /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
     /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
@@ -195,6 +197,7 @@ impl Metrics {
             table_family: theme::FONT_FANGSONG,
             table_pt: TABLE_PT,
             table_line_pt: TABLE_LINE_PT,
+            math: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }
@@ -220,6 +223,7 @@ impl Metrics {
             table_family: theme::FONT_SONGTI,
             table_pt: RESEARCH_TABLE_PT,
             table_line_pt: RESEARCH_TABLE_LINE_PT,
+            math: true,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }

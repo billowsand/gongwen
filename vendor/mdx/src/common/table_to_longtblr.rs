@@ -29,47 +29,50 @@ fn generate_smart_colspec(columns: &[ColumnLayout]) -> String {
 
 /// 转义 LaTeX 特殊字符（不处理行内格式标记）。
 fn escape_latex(s: &str) -> String {
-    let mut result = s.to_string();
-    let latex_escapes = [
-        ('\\', "\\textbackslash{}"),
-        ('&', "\\&"),
-        ('%', "\\%"),
-        ('$', "\\$"),
-        ('#', "\\#"),
-        ('_', "\\_"),
-        ('{', "\\{"),
-        ('}', "\\}"),
-        ('~', "\\textasciitilde{}"),
-        ('^', "\\textasciicircum{}"),
-    ];
-    for (from, to) in latex_escapes {
-        result = result.replace(from, to);
+    // 逐字符转义：先整体替换 `\` 再替换 `{`/`}` 会把 `\textbackslash{}` 自己的
+    // 花括号又转义一遍，印出 `\{}` 之类的多余字符。
+    let mut result = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => result.push_str("\\textbackslash{}"),
+            '&' => result.push_str("\\&"),
+            '%' => result.push_str("\\%"),
+            '$' => result.push_str("\\$"),
+            '#' => result.push_str("\\#"),
+            '_' => result.push_str("\\_"),
+            '{' => result.push_str("\\{"),
+            '}' => result.push_str("\\}"),
+            '~' => result.push_str("\\textasciitilde{}"),
+            '^' => result.push_str("\\textasciicircum{}"),
+            other => result.push(other),
+        }
     }
     result
 }
 
 /// 将单元格内容转换为 LaTeX：先解析 **加粗**/*斜体*/`代码`/链接 行内格式，
 /// 再对纯文本段落做 LaTeX 转义。
-fn cell_to_latex(cell: &str) -> String {
+/// `math` 为真时行内公式排成公式（研究报告），否则降级为转义后的源码原文（公文）。
+fn cell_to_latex(cell: &str, math: bool) -> String {
     let mut result = String::new();
-    push_cell_inlines(&mut result, &crate::common::inline::parse(cell));
+    push_cell_inlines(&mut result, &crate::common::inline::parse(cell), math);
     result
 }
 
 /// 把 inline::parse 之后的节点序列推入 result（处理粗体 / 斜体嵌套）。
 /// 末尾返回借用以方便链式调用时复用，但本文件内主要靠 result 累加。
-fn push_cell_inlines(result: &mut String, inlines: &[Inline]) {
+fn push_cell_inlines(result: &mut String, inlines: &[Inline], math: bool) {
     for ip in inlines {
         match ip {
             Inline::Text(t) => result.push_str(&escape_latex(t)),
             Inline::Bold(children) => {
                 result.push_str("\\textbf{");
-                push_cell_inlines(result, children);
+                push_cell_inlines(result, children, math);
                 result.push('}');
             }
             Inline::Italic(children) => {
                 result.push_str("\\textit{");
-                push_cell_inlines(result, children);
+                push_cell_inlines(result, children, math);
                 result.push('}');
             }
             Inline::Code(t) => {
@@ -97,7 +100,13 @@ fn push_cell_inlines(result: &mut String, inlines: &[Inline]) {
                 result.push_str(&escape_latex(t));
                 result.push('）');
             }
-            // 单元格内公式：本函数 official / research 共用，统一降级为转义后的源码原文
+            // 单元格内公式：研究报告排成公式，源码原样进 \(...\)；公文不支持公式，
+            // 降级为转义后的源码原文。
+            Inline::Math(t) if math => {
+                result.push_str("\\(");
+                result.push_str(t);
+                result.push_str("\\)");
+            }
             Inline::Math(t) => result.push_str(&escape_latex(&format!("${t}$"))),
         }
     }
@@ -111,6 +120,7 @@ fn process_row(
     columns: &[ColumnLayout],
     numbered: bool,
     row_index: usize,
+    math: bool,
 ) -> String {
     let is_header = row_index == 0;
     // 有 X 列时表格撑满版心，整行合并格才能按 \linewidth 算宽；全是定宽列的窄表
@@ -126,7 +136,7 @@ fn process_row(
             if span.is_some_and(|span| !span.is_anchor(row_index, column_index)) {
                 return String::new();
             }
-            let content = cell_to_latex(cell);
+            let content = cell_to_latex(cell, math);
             let content = if is_header {
                 format!("\\heiti {}", content)
             } else {
@@ -184,6 +194,28 @@ pub fn emit_longtblr(
     numbered: bool,
     caption: Option<&str>,
     label: Option<&str>,
+) -> String {
+    emit(rows, spans, numbered, caption, label, false)
+}
+
+/// 同 [`emit_longtblr`]，但单元格里的行内公式排成公式（研究报告用）。
+pub fn emit_longtblr_with_math(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    numbered: bool,
+    caption: Option<&str>,
+    label: Option<&str>,
+) -> String {
+    emit(rows, spans, numbered, caption, label, true)
+}
+
+fn emit(
+    rows: &[Vec<String>],
+    spans: &[TableSpan],
+    numbered: bool,
+    caption: Option<&str>,
+    label: Option<&str>,
+    math: bool,
 ) -> String {
     if rows.is_empty() {
         return String::new();
@@ -246,7 +278,9 @@ pub fn emit_longtblr(
     let mut content_lines = vec![longtblr_begin];
 
     for row_index in 0..rows.len() {
-        content_lines.push(process_row(rows, spans, &columns, numbered, row_index));
+        content_lines.push(process_row(
+            rows, spans, &columns, numbered, row_index, math,
+        ));
     }
 
     // 添加结束标记
@@ -277,6 +311,28 @@ pub fn table_block_to_longtblr(block: &Block, caption: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 逐字符转义：`\textbackslash{}` 自己的花括号不能再被转义一遍。
+    #[test]
+    fn escapes_each_special_character_once() {
+        assert_eq!(
+            escape_latex(r"a\b{c}~^"),
+            r"a\textbackslash{}b\{c\}\textasciitilde{}\textasciicircum{}"
+        );
+    }
+
+    /// 公文表格不支持公式，照旧印源码；研究报告表格排成公式。
+    #[test]
+    fn math_in_cells_only_for_research_tables() {
+        let rows = vec![
+            vec!["公式".to_string(), "说明".to_string()],
+            vec!["$x^2$".to_string(), "平方".to_string()],
+        ];
+        let official = emit_longtblr(&rows, &[], false, None, None);
+        assert!(official.contains(r"\$x\textasciicircum{}2\$"), "{official}");
+        let research = emit_longtblr_with_math(&rows, &[], false, None, None);
+        assert!(research.contains(r"\(x^2\)"), "{research}");
+    }
 
     #[test]
     fn narrow_numeric_column_uses_fixed_width() {

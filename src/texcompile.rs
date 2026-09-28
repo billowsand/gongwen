@@ -675,7 +675,20 @@ mod tests {
         let files = crate::export::export_all(
             temp.path(),
             &input,
-            "<!-- [摘要] -->\n\n这是摘要。\n\n<!-- [正文] -->\n\n## 模型与方法\n\n质能方程 $E=mc^2$ 与求和 $\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$。\n\n$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$",
+            // 标题、引文、文框、表格里的行内公式也要编得过：文框与表格是小四，
+            // 上下标落到 8pt，随包只有 10/12pt 的数学字形，靠 md2tex.cls 的缩放映射。
+            concat!(
+                "<!-- [摘要] -->\n\n这是摘要 $x_i$。\n\n",
+                "> [!例子] 摘要里的 $a_i$\n>\n> 内容 $\\sum_a=A$ 认证\n\n",
+                "| 公式 | 说明 |\n| --- | --- |\n| $\\sum{}$ | a\\\\b |\n\n",
+                "<!-- [正文] -->\n\n## 模型与$\\sum_{i}$方法\n\n",
+                "质能方程 $E=mc^2$ 与求和 $\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$。\n\n",
+                "$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n",
+                "### 小节 $x^2$\n\n",
+                "> 引文 $x_1^2$ 照排。\n\n",
+                "> [!专栏] 标题 $a_i$\n>\n> 内容 $\\sum_{a}^{b}=A$ 认证\n\n",
+                "| 公式 | 说明 |\n| --- | --- |\n| $\\sum_{i=1}^{n} x_i$ | 求和 |\n",
+            ),
             &selection,
             &crate::units::UnitDisplay::new(&[]),
             &FontConfig::default(),

@@ -17,7 +17,7 @@ use crate::export;
 use crate::export::RedlineKind;
 use crate::theme;
 use eframe::egui;
-use egui::text::CCursor;
+use egui::text::{CCursor, LayoutJob};
 use std::ops::Range;
 
 /// 光栅化超采样倍率：按 192dpi 出图、贴图缩小一半，高分屏不糊。
@@ -292,144 +292,229 @@ impl Atom {
     }
 }
 
-/// 含 `$` 的段落的混排入口：首行缩进 2 字，文本原子与公式盒子贪心流式排版。
+/// 公式在拼接文本里的占位符。整段先拼成「文字 + 占位符」一次过
+/// `inline_segments`，引号配对、加粗、括号与花脸稿标记才不会在公式两侧断开
+/// （分片各算一遍时，公式后面的右引号会被当成新一段的左引号）。
+const MATH_SLOT: char = '\u{FFFC}';
+
+/// 混排一段的字面与位置：正文段落与引文各一套。
+pub(crate) struct FlowStyle {
+    pub(crate) normal: egui::FontId,
+    pub(crate) bold: egui::FontId,
+    /// 括号内文字的字面（正文的括号楷体规则）；`None` 表示不套这条规则。
+    pub(crate) paren: Option<egui::FontId>,
+    /// 公式字号（磅，未缩放）。
+    pub(crate) math_pt: f32,
+    pub(crate) line: f32,
+    /// 相对版心左沿缩进多少。
+    pub(crate) left: f32,
+    /// 可排字的宽度。
+    pub(crate) width: f32,
+    /// 首行前缀（缩进、列表号）：文字与字面。
+    pub(crate) lead: Vec<(String, egui::FontId)>,
+    /// 每行在排字宽度里的对齐：正文靠左，标题居中，引文出处行靠右。
+    pub(crate) align: egui::Align,
+}
+
+impl FlowStyle {
+    /// 研究报告正文段落：首行缩进 2 字，满版心宽。
+    fn body(metrics: &Metrics) -> Self {
+        Self {
+            normal: metrics.body_font(),
+            bold: metrics.body_bold_font(),
+            paren: Some(metrics.font(theme::FONT_KAITI, super::PAREN_PT)),
+            math_pt: metrics.body_pt,
+            line: metrics.line,
+            left: 0.0,
+            width: metrics.content,
+            lead: vec![(indent(INDENT_CHARS), metrics.body_font())],
+            align: egui::Align::Min,
+        }
+    }
+
+    /// 整行一种字面的标题类文字（章节标题、文框标题）：加粗不换字面，
+    /// 行距 `line`，满版心宽，可带首行前缀。
+    pub(crate) fn heading(
+        metrics: &Metrics,
+        family: &str,
+        size: f32,
+        line: f32,
+        align: egui::Align,
+        lead: &str,
+    ) -> Self {
+        let font = metrics.font(family, size);
+        Self {
+            normal: font.clone(),
+            bold: font.clone(),
+            paren: None,
+            math_pt: size,
+            line,
+            left: 0.0,
+            width: metrics.content,
+            lead: if lead.is_empty() {
+                Vec::new()
+            } else {
+                vec![(lead.to_string(), font)]
+            },
+            align,
+        }
+    }
+}
+
+/// 这段文字里有没有能结对的行内公式。
+pub(crate) fn has_math(text: &str) -> bool {
+    text.contains('$')
+        && split_pieces(text)
+            .iter()
+            .any(|piece| matches!(piece, Piece::Math(_)))
+}
+
+/// 含 `$` 的正文段落的混排入口：首行缩进 2 字，文本原子与公式盒子贪心流式排版。
 ///
 /// 取舍：含公式的段落不做两端对齐，一律左对齐——公式是固定宽度的盒子，
 /// 两端对齐只能拉伸文本原子之间的缝隙，盒子两侧的空白忽宽忽窄反而更难看。
 pub(crate) fn paragraph(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
-    let pieces = split_pieces(text);
-    let normal = metrics.body_font();
-    let indent_width = ui
-        .ctx()
-        .fonts_mut(|fonts| fonts.glyph_width(&normal, '\u{3000}'))
-        * INDENT_CHARS;
-    let band = line_band(ui, metrics);
-    let mut atoms = Vec::new();
-    // 花脸稿哨兵可能跨过公式（整个公式被删 / 新增），标记状态跨片段接力。
-    let mut mark = RedlineKind::Same;
-    for piece in pieces {
-        match piece {
-            Piece::Text(text) => mark = text_atoms(ui.ctx(), metrics, text, mark, &mut atoms),
-            Piece::Math(src) => {
-                let mut math = math_atom(ui.ctx(), metrics, src, band);
-                math.mark = mark;
-                atoms.push(Atom::Math(math));
+    flow(ui, metrics, text, &FlowStyle::body(metrics));
+}
+
+/// 按给定字面与位置混排一段。
+pub(crate) fn flow(ui: &mut egui::Ui, metrics: &Metrics, text: &str, style: &FlowStyle) {
+    let lead_width = ui.ctx().fonts_mut(|fonts| {
+        let mut width = 0.0;
+        for (text, font) in &style.lead {
+            for ch in text.chars() {
+                width += fonts.glyph_width(font, ch);
             }
         }
-    }
+        width
+    });
+    let band = line_band(ui, style);
+    let atoms = atoms(ui.ctx(), metrics, style, text, band);
     if atoms.is_empty() {
         return;
     }
-    let lines = break_lines(&atoms, metrics.content - indent_width, metrics.content);
+    let lines = break_lines(&atoms, style.width - lead_width, style.width);
     for (index, range) in lines.into_iter().enumerate() {
         let before = range
             .start
             .checked_sub(1)
             .is_some_and(|previous| atoms[previous].added_text());
         let after = atoms.get(range.end).is_some_and(Atom::added_text);
-        draw_line(ui, metrics, &atoms[range], index == 0, (before, after));
+        draw_line(
+            ui,
+            metrics,
+            style,
+            &atoms[range],
+            index == 0,
+            (before, after),
+        );
     }
 }
 
-/// 文本片段切原子：先过 `export::inline_segments` 保留加粗/括号的字体归属，
-/// 再按 CJK 逐字、ASCII 按单词切开。`\$` 在这里折回字面的 `$`。
-///
-/// `mark` 是进入这段文字时的花脸稿状态（哨兵可能在前一段里开启），返回离开时的状态。
-fn text_atoms(
+/// 段落源码切成原子：公式换成占位符拼回整段，先过 `export::redline_chunks`
+/// 与 `export::inline_segments` 保留花脸稿标记与加粗/括号的字体归属，再按
+/// CJK 逐字、ASCII 按单词切开，遇到占位符换回公式盒子。`\$` 在这里折回字面的 `$`。
+fn atoms(
     ctx: &egui::Context,
     metrics: &Metrics,
+    style: &FlowStyle,
     text: &str,
-    mark: RedlineKind,
-    out: &mut Vec<Atom>,
-) -> RedlineKind {
-    let normal = metrics.body_font();
-    // 接上一段没闭合的标记：补一个开启哨兵，`redline_chunks` 才认得出来。
-    let text = match mark {
-        RedlineKind::Same => text.to_string(),
-        RedlineKind::Deleted => format!("{}{text}", export::REDLINE_DEL_OPEN),
-        RedlineKind::Added => format!("{}{text}", export::REDLINE_ADD_OPEN),
-    };
-    let chunks = export::redline_chunks(&text);
-    ctx.fonts_mut(|fonts| {
-        for chunk in &chunks {
-            let mark = chunk.kind;
-            for segment in export::inline_segments(&chunk.text) {
-                let font = if segment.parenthesized {
-                    metrics.font(theme::FONT_KAITI, super::PAREN_PT)
-                } else if segment.bold {
-                    metrics.body_bold_font()
+    band: (f32, f32),
+) -> Vec<Atom> {
+    let (joined, sources) = join_pieces(text);
+    let mut sources = sources.into_iter();
+    let mut out = Vec::new();
+    for chunk in export::redline_chunks(&joined) {
+        let mark = chunk.kind;
+        for segment in export::inline_segments(&chunk.text) {
+            let font = match &style.paren {
+                Some(paren) if segment.parenthesized => paren.clone(),
+                _ if segment.bold => style.bold.clone(),
+                _ => style.normal.clone(),
+            };
+            let mut word = String::new();
+            let mut word_width = 0.0f32;
+            let mut chars = segment.text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                let ch = if ch == '\\' && chars.peek() == Some(&'$') {
+                    chars.next();
+                    '$'
                 } else {
-                    normal.clone()
+                    ch
                 };
-                let mut word = String::new();
-                let mut word_width = 0.0f32;
-                let mut chars = segment.text.chars().peekable();
-                while let Some(ch) = chars.next() {
-                    let ch = if ch == '\\' && chars.peek() == Some(&'$') {
-                        chars.next();
-                        '$'
-                    } else {
-                        ch
-                    };
-                    if ch.is_ascii_alphanumeric() {
-                        word_width += fonts.glyph_width(&font, ch);
-                        word.push(ch);
-                        continue;
-                    }
-                    if !word.is_empty() {
-                        out.push(Atom::Text {
-                            text: std::mem::take(&mut word),
-                            font: font.clone(),
-                            width: std::mem::take(&mut word_width),
-                            mark,
-                        });
-                    }
-                    let width = fonts.glyph_width(&font, ch);
-                    out.push(Atom::Text {
-                        text: ch.to_string(),
-                        font: font.clone(),
-                        width,
-                        mark,
-                    });
+                if ch.is_ascii_alphanumeric() {
+                    word_width += ctx.fonts_mut(|fonts| fonts.glyph_width(&font, ch));
+                    word.push(ch);
+                    continue;
                 }
                 if !word.is_empty() {
                     out.push(Atom::Text {
-                        text: word,
-                        font,
-                        width: word_width,
+                        text: std::mem::take(&mut word),
+                        font: font.clone(),
+                        width: std::mem::take(&mut word_width),
                         mark,
                     });
                 }
+                if ch == MATH_SLOT {
+                    if let Some(src) = sources.next() {
+                        let mut math = math_atom(ctx, metrics, style, src, band);
+                        math.mark = mark;
+                        out.push(Atom::Math(math));
+                    }
+                    continue;
+                }
+                let width = ctx.fonts_mut(|fonts| fonts.glyph_width(&font, ch));
+                out.push(Atom::Text {
+                    text: ch.to_string(),
+                    font: font.clone(),
+                    width,
+                    mark,
+                });
+            }
+            if !word.is_empty() {
+                out.push(Atom::Text {
+                    text: word,
+                    font,
+                    width: word_width,
+                    mark,
+                });
             }
         }
-    });
-    // 离开时的状态：最后一个哨兵说了算；这段里没有哨兵就沿用进入时的。
-    text.chars()
-        .rev()
-        .find_map(|ch| match ch {
-            export::REDLINE_DEL_OPEN => Some(RedlineKind::Deleted),
-            export::REDLINE_ADD_OPEN => Some(RedlineKind::Added),
-            export::REDLINE_DEL_CLOSE | export::REDLINE_ADD_CLOSE => Some(RedlineKind::Same),
-            _ => None,
-        })
-        .unwrap_or(mark)
+    }
+    out
 }
 
-/// 正文一行的垂直空间：`(基线以上, 基线以下)`，行高就是两者之和。
-/// 基线位置按正文字体在固定行距下排一个全角空格量出来，与 `draw_line` 的口径一致。
-fn line_band(ui: &egui::Ui, metrics: &Metrics) -> (f32, f32) {
+/// 公式换成 [`MATH_SLOT`] 拼回整段，公式源码按出现顺序另存。
+fn join_pieces(text: &str) -> (String, Vec<&str>) {
+    let mut joined = String::with_capacity(text.len());
+    let mut sources = Vec::new();
+    for piece in split_pieces(text) {
+        match piece {
+            Piece::Text(text) => joined.extend(text.chars().filter(|&ch| ch != MATH_SLOT)),
+            Piece::Math(src) => {
+                joined.push(MATH_SLOT);
+                sources.push(src);
+            }
+        }
+    }
+    (joined, sources)
+}
+
+/// 一行的垂直空间：`(基线以上, 基线以下)`，行高就是两者之和。
+/// 基线位置按该段字体在固定行距下排一个全角空格量出来，与 `draw_line` 的口径一致。
+fn line_band(ui: &egui::Ui, style: &FlowStyle) -> (f32, f32) {
     let mut probe = job(f32::INFINITY);
     probe.append(
         "\u{3000}",
         0.0,
-        text_format(metrics.body_font(), metrics.line),
+        text_format(style.normal.clone(), style.line),
     );
     let above = layout(ui, probe)
         .rows
         .first()
         .and_then(|row| row.glyphs.first())
-        .map_or(metrics.line * 0.75, |glyph| glyph.pos.y);
-    (above, metrics.line - above)
+        .map_or(style.line * 0.75, |glyph| glyph.pos.y);
+    (above, style.line - above)
 }
 
 /// 行内公式要压进多少倍才能按基线对齐塞进一行（不超过 1，不放大）。
@@ -450,18 +535,24 @@ fn fit_to_band(size: egui::Vec2, baseline: f32, (above, below): (f32, f32)) -> f
 
 /// 一个行内公式原子：渲染成功是纹理盒子，失败是虚线占位框盒子。
 /// `band` 是正文一行在基线上下的空间，公式按它等比压缩，见 [`fit_to_band`]。
-fn math_atom(ctx: &egui::Context, metrics: &Metrics, src: &str, band: (f32, f32)) -> MathAtom {
-    match cached(ctx, src, false, metrics.body_pt * metrics.scale) {
+fn math_atom(
+    ctx: &egui::Context,
+    metrics: &Metrics,
+    style: &FlowStyle,
+    src: &str,
+    band: (f32, f32),
+) -> MathAtom {
+    match cached(ctx, src, false, style.math_pt * metrics.scale) {
         Cached::Ready {
             texture,
             mut size,
             mut baseline,
         } => {
-            // 先压进一行的高度，再看宽度：比版心还宽的公式按比例压进版心，
+            // 先压进一行的高度，再看宽度：比排字宽度还宽的公式按比例压进去，
             // 免得行内盒子直接溢出纸面。
             let mut fit = fit_to_band(size, baseline, band);
-            if size.x * fit > metrics.content {
-                fit = metrics.content / size.x;
+            if size.x * fit > style.width {
+                fit = style.width / size.x;
             }
             size *= fit;
             baseline *= fit;
@@ -476,7 +567,7 @@ fn math_atom(ctx: &egui::Context, metrics: &Metrics, src: &str, band: (f32, f32)
         Cached::Failed => {
             let font = metrics.font(metrics.body_family, RESEARCH_CAPTION_PT);
             let pad = metrics.pt(PLACEHOLDER_PAD_PT);
-            let max_text = metrics.content * PLACEHOLDER_TEXT_WIDTH;
+            let max_text = style.width * PLACEHOLDER_TEXT_WIDTH;
             let label = ctx.fonts_mut(|fonts| {
                 let mut width = |text: &str| {
                     fonts
@@ -499,8 +590,8 @@ fn math_atom(ctx: &egui::Context, metrics: &Metrics, src: &str, band: (f32, f32)
                     .size()
             });
             let size = egui::vec2(
-                (text_size.x + 2.0 * pad).min(metrics.content),
-                (text_size.y + 2.0 * pad).max(metrics.line * 0.8),
+                (text_size.x + 2.0 * pad).min(style.width),
+                (text_size.y + 2.0 * pad).max(style.line * 0.8),
             );
             MathAtom {
                 texture: None,
@@ -582,21 +673,20 @@ fn break_lines(atoms: &[Atom], first_width: f32, width: f32) -> Vec<Range<usize>
 fn draw_line(
     ui: &mut egui::Ui,
     metrics: &Metrics,
+    style: &FlowStyle,
     atoms: &[Atom],
     first_line: bool,
     continues: (bool, bool),
 ) {
-    let normal = metrics.body_font();
+    let normal = style.normal.clone();
     let em = ui
         .ctx()
         .fonts_mut(|fonts| fonts.glyph_width(&normal, '\u{3000}'));
     let mut job = job(f32::INFINITY);
     if first_line {
-        job.append(
-            &indent(INDENT_CHARS),
-            0.0,
-            text_format(normal.clone(), metrics.line),
-        );
+        for (text, font) in &style.lead {
+            job.append(text, 0.0, text_format(font.clone(), style.line));
+        }
     }
     let mut slots: Vec<(usize, f32, &MathAtom)> = Vec::new();
     for atom in atoms {
@@ -607,13 +697,13 @@ fn draw_line(
                 job.append(
                     text,
                     0.0,
-                    marks::mark_format(text_format(font.clone(), metrics.line), *mark),
+                    marks::mark_format(text_format(font.clone(), style.line), *mark),
                 );
             }
             Atom::Math(math) => {
                 let pad = math.size.x - em;
                 slots.push((job.text.chars().count(), pad, math));
-                job.append("\u{3000}", pad, text_format(normal.clone(), metrics.line));
+                job.append("\u{3000}", pad, text_format(normal.clone(), style.line));
             }
         }
     }
@@ -622,7 +712,7 @@ fn draw_line(
 
     // 行高 = max(正文行距, 各公式图高)；基线先让文本在行里垂直居中，
     // 再上抬到能兜住最深的公式顶部，行高随之兜底到最深的公式底部。
-    let mut height = metrics.line;
+    let mut height = style.line;
     for math in atoms.iter().filter_map(|atom| match atom {
         Atom::Math(math) => Some(math),
         _ => None,
@@ -633,8 +723,8 @@ fn draw_line(
         .rows
         .first()
         .and_then(|row| row.glyphs.first())
-        .map_or(metrics.line * 0.75, |glyph| glyph.pos.y);
-    let mut baseline = (height - metrics.line) / 2.0 + text_baseline;
+        .map_or(style.line * 0.75, |glyph| glyph.pos.y);
+    let mut baseline = (height - style.line) / 2.0 + text_baseline;
     for math in atoms.iter().filter_map(|atom| match atom {
         Atom::Math(math) => Some(math),
         _ => None,
@@ -646,7 +736,16 @@ fn draw_line(
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
     let painter = ui.painter();
-    let text_origin = rect.left_top() + egui::vec2(0.0, baseline - text_baseline);
+    // 行的左沿：缩进之后；居中、靠右的行按剩下的宽度往右推。
+    let slack = (style.width - galley.size().x).max(0.0);
+    let left = rect.left()
+        + style.left
+        + match style.align {
+            egui::Align::Min => 0.0,
+            egui::Align::Center => slack / 2.0,
+            egui::Align::Max => slack,
+        };
+    let text_origin = egui::pos2(left, rect.top() + baseline - text_baseline);
     if let Some(boxes) = marks::LineMarks::of(&galley.job) {
         boxes.continuing(continues.0, continues.1).paint_galley(
             painter,
@@ -659,7 +758,7 @@ fn draw_line(
     let math_rects: Vec<egui::Rect> = slots
         .iter()
         .map(|&(char_index, pad, math)| {
-            let x = rect.left() + galley.pos_from_cursor(CCursor::new(char_index)).left() - pad;
+            let x = left + galley.pos_from_cursor(CCursor::new(char_index)).left() - pad;
             let top = rect.top() + baseline - math.baseline;
             egui::Rect::from_min_size(egui::pos2(x, top), math.size)
         })
@@ -668,25 +767,129 @@ fn draw_line(
         metrics.mark_sourced_row(rect, text_origin.y + row.pos.y + text_baseline);
         push_line_tint(metrics, row, text_origin, &math_rects);
     }
-    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
     for ((_, _, math), math_rect) in slots.into_iter().zip(math_rects) {
-        match &math.texture {
-            Some(texture) => {
-                painter.image(texture.id(), math_rect, uv, egui::Color32::WHITE);
-            }
-            None => {
-                dashed_rect(painter, math_rect, metrics.scale);
-                let font = metrics.font(metrics.body_family, RESEARCH_CAPTION_PT);
-                let label =
-                    painter.layout_no_wrap(math.label.clone(), font, theme::paper::ink_muted());
-                painter.galley(
-                    math_rect.center() - label.size() / 2.0,
-                    label,
-                    theme::paper::ink_muted(),
-                );
-            }
+        paint_math(painter, metrics, math_rect, math);
+    }
+}
+
+/// 把一个公式盒子贴到 `rect`：成功的贴纹理，失败的画虚线占位框写源码；
+/// 再按花脸稿标记整块画删除线或加框。
+fn paint_math(painter: &egui::Painter, metrics: &Metrics, rect: egui::Rect, math: &MathAtom) {
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    match &math.texture {
+        Some(texture) => {
+            painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
         }
-        marks::paint_block_mark(painter, metrics, math_rect, math.mark);
+        None => {
+            dashed_rect(painter, rect, metrics.scale);
+            let font = metrics.font(metrics.body_family, RESEARCH_CAPTION_PT);
+            let label = painter.layout_no_wrap(math.label.clone(), font, theme::paper::ink_muted());
+            painter.galley(
+                rect.center() - label.size() / 2.0,
+                label,
+                theme::paper::ink_muted(),
+            );
+        }
+    }
+    marks::paint_block_mark(painter, metrics, rect, math.mark);
+}
+
+// ── 表格单元格 ──────────────────────────────────────────────────────────────
+
+/// 单元格 galley 里的一个行内公式：第 `slot` 个字符是它的全角空格占位，
+/// 前面用 `pad` 补足盒宽（同 [`draw_line`] 的做法），画格子时按该字的位置贴图。
+pub(crate) struct CellMath {
+    slot: usize,
+    pad: f32,
+    atom: MathAtom,
+}
+
+/// 把单元格文字（含 `$...$`）追加进 `job`：文字照常带字面与花脸稿标记，
+/// 公式换成补过宽度的占位空格，返回各公式的占位信息。单元格按 `width`
+/// 折行，公式盒子按 `line` 行距等比压进一行。
+pub(crate) fn append_cell(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    job: &mut LayoutJob,
+    text: &str,
+    (normal, bold): (&egui::FontId, &egui::FontId),
+    line: f32,
+    width: f32,
+) -> Vec<CellMath> {
+    let style = FlowStyle {
+        normal: normal.clone(),
+        bold: bold.clone(),
+        paren: None,
+        math_pt: metrics.table_pt,
+        line,
+        left: 0.0,
+        width,
+        lead: Vec::new(),
+        align: egui::Align::Min,
+    };
+    let band = line_band(ui, &style);
+    let em = ui
+        .ctx()
+        .fonts_mut(|fonts| fonts.glyph_width(normal, '\u{3000}'));
+    let (joined, sources) = join_pieces(text);
+    let mut sources = sources.into_iter();
+    let mut maths = Vec::new();
+    let mut previous = RedlineKind::Same;
+    for chunk in export::redline_chunks(&joined) {
+        let mut gap = marks::chunk_gap(metrics, previous, chunk.kind);
+        for segment in export::inline_segments(&chunk.text) {
+            let font = if segment.bold { bold } else { normal };
+            let format = marks::mark_format(text_format(font.clone(), line), chunk.kind);
+            for (index, part) in segment.text.split(MATH_SLOT).enumerate() {
+                if index > 0
+                    && let Some(src) = sources.next()
+                {
+                    let mut atom = math_atom(ui.ctx(), metrics, &style, src, band);
+                    atom.mark = chunk.kind;
+                    let pad = std::mem::take(&mut gap) + atom.size.x - em;
+                    maths.push(CellMath {
+                        slot: job.text.chars().count(),
+                        pad,
+                        atom,
+                    });
+                    job.append("\u{3000}", pad, text_format(normal.clone(), line));
+                }
+                if !part.is_empty() {
+                    job.append(part, std::mem::take(&mut gap), format.clone());
+                }
+            }
+            previous = chunk.kind;
+        }
+    }
+    maths
+}
+
+/// 按 `append_cell` 记下的占位贴公式。`origin` 是单元格 galley 的画点。
+pub(crate) fn paint_cell(
+    painter: &egui::Painter,
+    metrics: &Metrics,
+    origin: egui::Pos2,
+    galley: &egui::Galley,
+    maths: &[CellMath],
+) {
+    for math in maths {
+        let mut first = 0usize;
+        for row in &galley.rows {
+            let count = row.char_count_including_newline().0;
+            if math.slot < first + count
+                && let Some(glyph) = row.glyphs.get(math.slot - first)
+            {
+                let x = origin.x + row.pos.x + glyph.pos.x - math.pad;
+                let baseline = origin.y + row.pos.y + glyph.pos.y;
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(x, baseline - math.atom.baseline),
+                    math.atom.size,
+                );
+                paint_math(painter, metrics, rect, &math.atom);
+                break;
+            }
+            first += count;
+        }
     }
 }
 
@@ -795,6 +998,26 @@ mod tests {
                 .iter()
                 .all(|piece| matches!(piece, Piece::Text(_)))
         );
+    }
+
+    /// 公式换成占位符拼回整段：公式两侧的引号在同一段里配对，
+    /// `“$x$”` 印出来是一左一右，不是两个左引号。
+    #[test]
+    fn quotes_pair_across_inline_math() {
+        let (joined, sources) = join_pieces("见“$\\sum$”与\"$x$\"。");
+        assert_eq!(sources, vec!["\\sum", "x"]);
+        assert_eq!(
+            export::plain_text(&joined),
+            format!("见“{MATH_SLOT}”与“{MATH_SLOT}”。")
+        );
+    }
+
+    #[test]
+    fn has_math_needs_a_pair() {
+        assert!(has_math("内容 $\\sum_a=A$ 认证"));
+        assert!(!has_math("价格 $5 元"));
+        assert!(!has_math("$$\\sum_a^b$$"));
+        assert!(!has_math("没有公式"));
     }
 
     #[test]

@@ -27,7 +27,7 @@
 
 use super::cull::Cull;
 use super::layout::{
-    TextRun, clickable, clickable_rows, is_renderable_paragraph, line_block, line_block_runs,
+    TextRun, clickable, clickable_rows, is_renderable_paragraph, line_block,
     line_block_runs_spaced, sheet,
 };
 use super::render::{
@@ -1317,22 +1317,14 @@ fn body_item(
                 scroll_to_anchor,
                 clicked,
                 |ui| {
-                    line_block_runs(
+                    title_line(
                         ui,
                         metrics,
-                        &[
-                            TextRun {
-                                text: &indent(INDENT_CHARS),
-                                family: theme::FONT_BOLD,
-                                size: RESEARCH_BODY_PT,
-                            },
-                            TextRun {
-                                text: &text,
-                                family: theme::FONT_BOLD,
-                                size: RESEARCH_BODY_PT,
-                            },
-                        ],
+                        &text,
+                        theme::FONT_BOLD,
+                        RESEARCH_BODY_PT,
                         Align::LEFT,
+                        &indent(INDENT_CHARS),
                     );
                 },
             );
@@ -1534,15 +1526,35 @@ fn caption_line(ui: &mut egui::Ui, metrics: &Metrics, tag: &str, number: &str, t
 /// 章标题：小二黑体居中，上下各空一行。
 fn chapter_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
     ui.add_space(metrics.line);
-    line_block(
+    title_line(
         ui,
         metrics,
         text,
         theme::FONT_HEITI,
         RESEARCH_CHAPTER_PT,
         Align::Center,
+        "",
     );
     ui.add_space(metrics.line);
+}
+
+/// 标题类的一行字：含行内公式时交给 `math_flow` 排成公式（与 PDF 一致），
+/// 否则照常按纯文本排。`lead` 是首行前缀（节标题的 2 字缩进）。
+fn title_line(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    family: &str,
+    size: f32,
+    align: Align,
+    lead: &str,
+) {
+    if math_flow::has_math(text) {
+        let style = math_flow::FlowStyle::heading(metrics, family, size, metrics.line, align, lead);
+        math_flow::flow(ui, metrics, text, &style);
+    } else {
+        line_block(ui, metrics, &format!("{lead}{text}"), family, size, align);
+    }
 }
 
 /// 部分标题：小一黑体居中，"第一部分"一行、题目一行（ctex 的 part 格式）。
@@ -1560,26 +1572,28 @@ fn part_title(ui: &mut egui::Ui, metrics: &Metrics, heading: Option<&str>, text:
         );
         ui.add_space(metrics.line * 0.5);
     }
-    line_block(
+    title_line(
         ui,
         metrics,
         text,
         theme::FONT_HEITI,
         RESEARCH_PART_PT,
         Align::Center,
+        "",
     );
     ui.add_space(metrics.line * 3.0);
 }
 
 /// 节标题：黑体，字号随正文，缩进 2 字（`\titlespacing` 的 2em）。
 fn section_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
-    line_block(
+    title_line(
         ui,
         metrics,
-        &format!("{}{text}", indent(INDENT_CHARS)),
+        text,
         theme::FONT_HEITI,
         RESEARCH_BODY_PT,
         Align::LEFT,
+        &indent(INDENT_CHARS),
     );
 }
 
@@ -2281,6 +2295,31 @@ mod tests {
     /// 引文与文框：文框名称写什么印什么，每种名称各编各的号，口径与图表相同
     /// （章号.序号，不编号章里是流水号，附录带字母章号）；`{@id}` 印的是号，
     /// `>` 与 `[!名称]` 不印在纸上。
+    #[test]
+    fn inline_math_is_typeset_everywhere_the_pdf_typesets_it() {
+        let text = drawn(concat!(
+            "<!-- [摘要] -->\n\n",
+            "## 摘要里的$\\alpha$\n\n",
+            "<!-- [正文] -->\n\n",
+            "## 我们的$\\sum$\n\n",
+            "### 小节$x^2$\n\n",
+            "> 引文 $\\sum{}$ 照排。\n\n",
+            "> [!例子] 标题 $a_i$\n>\n> 内容 $\\sum_a=A$ 认证\n\n",
+            "| 公式 | 说明 |\n| --- | --- |\n| $\\sum{}$ | 求和 |\n\n",
+            "见“$\\sum$”。\n",
+        ));
+        // 公式都贴成图，纸面上不该再印出源码。
+        for source in ["$", "\\sum", "\\alpha", "x^2", "a_i"] {
+            assert!(!text.contains(source), "{source} 应排成公式：{text}");
+        }
+        assert!(text.contains("我们的"), "{text}");
+        assert!(text.contains("内容"), "{text}");
+        assert!(text.contains("求和"), "{text}");
+        // 公式两侧的引号照常配对：一左一右。
+        assert!(text.contains("见“"), "{text}");
+        assert!(text.contains("”。"), "{text}");
+    }
+
     #[test]
     fn quotes_print_as_citations_and_separately_numbered_boxes() {
         let text = drawn(concat!(

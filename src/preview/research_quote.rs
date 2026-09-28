@@ -8,15 +8,14 @@
 //!   "专栏 2.1　标题"黑体小四居中，每种名称各编各的号，内文
 //!   楷体小四（行距 20 磅），左右各留一字、首行缩进两字。
 //!
-//! 块内一行一段（与 mdx 一致），每一行各自可点、各自上行号。文框里的行内公式
-//! 与表格单元格一样按源码原文印出（随包 TeX 没有小四公式要用的字号）；引文里
-//! 的公式预览同样印源码，PDF 照常排成公式。
+//! 块内一行一段（与 mdx 一致），每一行各自可点、各自上行号。引文、文框（含
+//! 文框标题）里的行内公式与 PDF 一样排成公式，含公式的行交给 `math_flow` 混排。
 
 use super::layout::{
     TextRun, clickable_rows, indent, job, justified_rows, layout, line_block_runs_spaced,
     mark_gutter_rows, paint_justified_rows, place, push_galley_tints, row_spans, text_format,
 };
-use super::{Metrics, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT, marks};
+use super::{Metrics, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT, marks, math_flow};
 use crate::export::{self, MarkdownBlock, QuoteLine, QuoteLineKind};
 use crate::theme;
 use eframe::egui;
@@ -60,6 +59,7 @@ pub(super) fn citation(
         line: metrics.line,
         inset: metrics.pt(CITATION_INSET_PT),
         right_inset: metrics.pt(CITATION_INSET_PT),
+        math: true,
     };
     ui.add_space(metrics.line * 0.5);
     quote_lines(
@@ -119,6 +119,18 @@ pub(super) fn boxed(
         scroll_to_anchor,
         clicked,
         |ui| {
+            if math_flow::has_math(&heading) {
+                let style = math_flow::FlowStyle::heading(
+                    metrics,
+                    theme::FONT_HEITI,
+                    RESEARCH_CAPTION_PT,
+                    metrics.pt(BOX_LINE_PT),
+                    Align::Center,
+                    "",
+                );
+                math_flow::flow(ui, metrics, &heading, &style);
+                return;
+            }
             line_block_runs_spaced(
                 ui,
                 metrics,
@@ -139,6 +151,7 @@ pub(super) fn boxed(
         line: metrics.pt(BOX_LINE_PT),
         inset: metrics.pt(BOX_INSET_PT),
         right_inset: metrics.pt(BOX_INSET_PT),
+        math: true,
     };
     quote_lines(
         ui,
@@ -181,6 +194,8 @@ struct Style {
     inset: f32,
     /// 右侧让出多少。
     right_inset: f32,
+    /// 行内公式排成公式还是印源码。
+    math: bool,
 }
 
 /// 块内各行：一行一段，首行缩进两字，列表项前补 ⑴ ⑵，出处行靠右。
@@ -196,6 +211,19 @@ fn quote_lines(
     let width = (metrics.content - style.inset - style.right_inset).max(1.0);
     let mut list_no = 0usize;
     for line in lines {
+        if style.math && math_flow::has_math(&line.text) {
+            let flow = flow_style(metrics, line.kind, &mut list_no, style, width);
+            clickable_rows(
+                ui,
+                metrics,
+                &line.source,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+                |ui| math_flow::flow(ui, metrics, &line.text, &flow),
+            );
+            continue;
+        }
         let mut job = job(width);
         let font = metrics.font(style.family, style.size);
         match line.kind {
@@ -227,6 +255,45 @@ fn quote_lines(
             clicked,
             |ui| inset_paragraph(ui, metrics, job, style.inset),
         );
+    }
+}
+
+/// 含行内公式的一行交给 `math_flow` 混排：首行前缀、靠右与字面同 `quote_lines`，
+/// 加粗换黑体、不套括号楷体规则，与 [`append_text`] 一致。
+fn flow_style(
+    metrics: &Metrics,
+    kind: QuoteLineKind,
+    list_no: &mut usize,
+    style: &Style,
+    width: f32,
+) -> math_flow::FlowStyle {
+    let normal = metrics.font(style.family, style.size);
+    let mut lead = Vec::new();
+    let align_right = kind == QuoteLineKind::Source;
+    if align_right {
+        *list_no = 0;
+    } else {
+        lead.push((indent(2.0), normal.clone()));
+        if kind == QuoteLineKind::ListItem {
+            *list_no += 1;
+            lead.push((
+                list_label(*list_no),
+                metrics.font(theme::FONT_SONGTI, style.size),
+            ));
+        } else {
+            *list_no = 0;
+        }
+    }
+    math_flow::FlowStyle {
+        normal,
+        bold: metrics.font(theme::FONT_BOLD, style.size),
+        paren: None,
+        math_pt: style.size,
+        line: style.line,
+        left: style.inset,
+        width,
+        lead,
+        align: if align_right { Align::Max } else { Align::Min },
     }
 }
 

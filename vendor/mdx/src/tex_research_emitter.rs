@@ -13,7 +13,7 @@
 
 use crate::common::ast::{Block, Inline, LineAlign, MarkerKind, QuoteItem, QuoteKind};
 use crate::common::figure_size;
-use crate::common::table_to_longtblr::emit_longtblr;
+use crate::common::table_to_longtblr::emit_longtblr_with_math;
 use std::path::{Path, PathBuf};
 
 /// 文档模式：控制特殊章节的处理方式
@@ -397,7 +397,7 @@ impl TexResearchEmitter {
     }
 
     fn emit_heading(&mut self, level: u8, text: &str) {
-        let escaped = escape_latex(text);
+        let escaped = heading_latex(text);
         let unnumbered = std::mem::take(&mut self.pending_unnumbered);
         // 待挂接的锚点；摘要/变更记录/参考文献等不编号标题直接丢弃
         let label_cmd = self
@@ -601,12 +601,13 @@ impl TexResearchEmitter {
 
         if self.in_abstract {
             // 摘要模式：收集表格
-            let table_latex = emit_longtblr(rows, spans, numbered, caption, label.as_deref());
+            let table_latex =
+                emit_longtblr_with_math(rows, spans, numbered, caption, label.as_deref());
             self.abstract_content.push(table_latex);
             return;
         }
 
-        let table_latex = emit_longtblr(rows, spans, numbered, caption, label.as_deref());
+        let table_latex = emit_longtblr_with_math(rows, spans, numbered, caption, label.as_deref());
         self.out.push_str(&table_latex);
         self.out.push_str(
             "
@@ -980,10 +981,10 @@ fn list_label_latex(n: usize) -> String {
     }
 }
 
-/// 文框单元格里的行内内容，降级规则与表格单元格一致：
-/// - tabularray 单元格里 `\footnote` 不生效，脚注降级为全角括号内联注释；
-/// - 文框内文是小四，公式的上下标要 8pt 的数学字体，随包 texbundle 里没有，
-///   行内公式按源码原文印出。
+/// 文框单元格里的行内内容，降级规则与表格单元格一致：tabularray 单元格里
+/// `\footnote` 不生效，脚注降级为全角括号内联注释。行内公式照常排成公式——
+/// 小四的上下标要 8pt 数学字体，md2tex.cls 已把各字号的数学字体映射到随包的
+/// 10/12pt 字形上。
 fn render_cell_inlines(inlines: &[Inline]) -> String {
     render_inlines(&cell_inlines(inlines))
 }
@@ -993,7 +994,6 @@ fn cell_inlines(inlines: &[Inline]) -> Vec<Inline> {
         .iter()
         .map(|ip| match ip {
             Inline::Footnote(text) => Inline::Text(format!("（{text}）")),
-            Inline::Math(source) => Inline::Text(format!("${source}$")),
             Inline::Bold(children) => Inline::Bold(cell_inlines(children)),
             Inline::Italic(children) => Inline::Italic(cell_inlines(children)),
             other => other.clone(),
@@ -1069,6 +1069,29 @@ fn render_inlines(inlines: &[Inline]) -> String {
                 s.push_str(t);
                 s.push_str("\\)");
             }
+        }
+    }
+    s
+}
+
+/// 标题文字：行内公式排成公式，其余按纯文本转义。标题会进目录与 PDF 书签，
+/// 公式包一层 `\texorpdfstring`，书签里写公式源码。没有公式的标题与原来
+/// 一样整段转义。
+fn heading_latex(text: &str) -> String {
+    let inlines = crate::common::inline::parse(text);
+    if !inlines.iter().any(|ip| matches!(ip, Inline::Math(_))) {
+        return escape_latex(text);
+    }
+    let mut s = String::new();
+    for ip in &inlines {
+        match ip {
+            Inline::Math(source) => s.push_str(&format!(
+                "\\texorpdfstring{{\\({source}\\)}}{{{}}}",
+                escape_latex(source)
+            )),
+            other => s.push_str(&escape_latex(&crate::common::inline::flatten(
+                std::slice::from_ref(other),
+            ))),
         }
     }
     s
@@ -1297,6 +1320,21 @@ mod tests {
         );
     }
 
+    /// 标题、表格单元格里的行内公式排成公式；标题里的公式包 `\texorpdfstring`，
+    /// 书签写源码。
+    #[test]
+    fn inline_math_in_headings_and_table_cells() {
+        let body = emit_all_body(&crate::parser::parse(
+            "## 我们的$\\sum$\n\n| 公式 | 说明 |\n| --- | --- |\n| $\\sum{}$ | a\\\\b |\n",
+        ));
+        assert!(
+            body.contains("\\chapter{我们的\\texorpdfstring{\\(\\sum\\)}{\\textbackslash{}sum}}"),
+            "{body}"
+        );
+        assert!(body.contains("\\(\\sum{}\\)"), "{body}");
+        assert!(!body.contains("\\{\\}"), "单元格转义不应重复：{body}");
+    }
+
     #[test]
     fn each_box_name_steps_its_own_counter_before_the_table() {
         let body = emit_all_body(&crate::parser::parse(
@@ -1304,7 +1342,7 @@ mod tests {
         ));
         assert!(
             body.contains(
-                "\\mdxboxstep{a}\\label{box:a}\n\\begin{mdxboxtblr}{}\n\\mdxboxtitle{专栏}{做法} \\\\\n\\hspace*{2em}一是（注），\\$p\\$。 \\\\\n\\end{mdxboxtblr}"
+                "\\mdxboxstep{a}\\label{box:a}\n\\begin{mdxboxtblr}{}\n\\mdxboxtitle{专栏}{做法} \\\\\n\\hspace*{2em}一是（注），\\(p\\)。 \\\\\n\\end{mdxboxtblr}"
             ),
             "{body}"
         );
