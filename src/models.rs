@@ -1700,6 +1700,10 @@ pub struct AppConfig {
     /// 页边有没有号是投屏对稿才需要的取舍，旧配置缺该字段时按关处理。
     #[serde(default)]
     pub show_preview_line_numbers: bool,
+    /// 标题聚焦编辑用大字排：投屏给领导看着改时只留放大的标题，不显示提示与说明。
+    /// 记住上一次的选择，旧配置缺该字段时按关处理。
+    #[serde(default)]
+    pub heading_focus_large: bool,
     /// Markdown 源码编辑器的字号（px）。可用 Ctrl+滚轮或 Ctrl± 调整。
     pub editor_font_size: f32,
     /// AI 优化提示词库。首次载入为空时补齐预置项，见 `ensure_ai_prompts`。
@@ -1756,6 +1760,7 @@ impl Default for AppConfig {
             show_source_minimap: true,
             show_preview_navigator: true,
             show_preview_line_numbers: false,
+            heading_focus_large: false,
             editor_font_size: 14.0,
             ai_prompts: vec![],
             last_ai_prompt: 0,

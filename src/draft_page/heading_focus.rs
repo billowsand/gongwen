@@ -20,6 +20,8 @@ const EXCERPT_CHARS: usize = 34;
 const LENGTH_HINT_MIN_ITEMS: usize = 3;
 /// 与同组中位字数相差超过这么多字就标出来。
 const LENGTH_HINT_TOLERANCE: usize = 2;
+/// 大字模式下标题的字号：投屏时后排也看得清。
+const LARGE_FONT_SIZE: f32 = 30.0;
 
 /// 对话框里的一条标题。
 #[derive(Debug, Clone)]
@@ -37,6 +39,8 @@ pub(crate) struct FocusItem {
     sibling: bool,
     /// 这一节正文的开头，已去掉 Markdown 标记。
     excerpt: String,
+    /// 这条标题在纸上的字面，大字模式按它排，领导看到的就是印出来的样子。
+    family: &'static str,
 }
 
 impl FocusItem {
@@ -64,6 +68,8 @@ pub(crate) struct HeadingFocus {
     whole_document: bool,
     /// 下一帧要把焦点给哪一条。
     focus_row: Option<usize>,
+    /// 最近一次在改的那一条。点「大字」会让输入框失焦，切换后把焦点还给它。
+    last_row: Option<usize>,
 }
 
 impl HeadingFocus {
@@ -234,6 +240,7 @@ pub(crate) fn collect(
             parent_label: parent.map(|parent| navigator::label_text(&entries[parent])),
             sibling: parent == current_parent,
             excerpt: section_excerpt(markdown, &ranges, line),
+            family: entry.family,
         });
     }
 
@@ -255,6 +262,7 @@ pub(crate) fn collect(
         current: current_item,
         whole_document: false,
         focus_row: Some(current_item),
+        last_row: None,
     })
 }
 
@@ -370,10 +378,17 @@ impl DraftPage<'_> {
         };
         let mut apply = false;
         let mut cancel = false;
+        let mut large = self.config.heading_focus_large;
         let response = egui::Modal::new(egui::Id::new(("heading_focus", self.doc.key)))
             .frame(theme::card())
             .show(ctx, |ui| {
-                ui.set_width(640.0);
+                // 大字模式给投屏用，尽量铺满屏幕宽度，长标题也不必折断。
+                let width = if large {
+                    (ctx.content_rect().width() * 0.85).clamp(640.0, 1600.0)
+                } else {
+                    640.0
+                };
+                ui.set_width(width);
                 // 先于各输入框认下主快捷键+回车：单行输入框见回车会自己丢焦点。
                 if ui.input_mut(|input| {
                     input.consume_shortcut(&egui::KeyboardShortcut::new(
@@ -383,18 +398,23 @@ impl DraftPage<'_> {
                 }) {
                     apply = true;
                 }
-                heading_focus_header(ui, &mut focus);
+                heading_focus_header(ui, &mut focus, &mut large);
                 ui.add_space(8.0);
-                heading_focus_rows(ui, &mut focus);
-                ui.add_space(6.0);
-                theme::caption(
-                    ui,
-                    "编号由程序生成，这里只改文字；字数与同组多数相差较大的会标黄，便于对仗。\
-                     回车跳到下一条。",
-                );
+                heading_focus_rows(ui, &mut focus, large);
+                if !large {
+                    ui.add_space(6.0);
+                    theme::caption(
+                        ui,
+                        "编号由程序生成，这里只改文字；字数与同组多数相差较大的会标黄，便于对仗。                         回车跳到下一条。",
+                    );
+                }
                 ui.add_space(10.0);
                 heading_focus_footer(ui, &focus, &mut apply, &mut cancel);
             });
+        if large != self.config.heading_focus_large {
+            self.config.heading_focus_large = large;
+            let _ = crate::storage::save(self.config);
+        }
         // 点遮罩关窗只在没改动时生效，免得手一滑丢掉一整组修改；Esc 与取消照常关。
         let escape = response.is_top_modal
             && !response.any_popup_open
@@ -411,7 +431,7 @@ impl DraftPage<'_> {
     }
 }
 
-fn heading_focus_header(ui: &mut egui::Ui, focus: &mut HeadingFocus) {
+fn heading_focus_header(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: &mut bool) {
     ui.horizontal(|ui| {
         ui.add(theme::Icon::Heading.image().tint(theme::accent()));
         ui.heading("标题聚焦编辑");
@@ -422,6 +442,20 @@ fn heading_focus_header(ui: &mut egui::Ui, focus: &mut HeadingFocus) {
             theme::accent(),
             theme::accent_soft(),
         );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(theme::icon_text_button(theme::Icon::ZoomIn, "大字").selected(*large))
+                .on_hover_text(if *large {
+                    "回到常规排版：显示字数、正文开头与说明"
+                } else {
+                    "投屏用：标题按纸上字体放大，不显示字数、正文开头与说明"
+                })
+                .clicked()
+            {
+                *large = !*large;
+                focus.focus_row = focus.last_row.or(Some(focus.current));
+            }
+        });
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -460,64 +494,103 @@ fn heading_focus_header(ui: &mut egui::Ui, focus: &mut HeadingFocus) {
     });
 }
 
-fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus) {
-    const NUMBER_WIDTH: f32 = 64.0;
+fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) {
     const COUNT_WIDTH: f32 = 44.0;
     const REVERT_WIDTH: f32 = 24.0;
+    // 大字模式：编号栏按字号放宽，行距拉开，字数与下方的提示行都不画。
+    let number_width = if large { LARGE_FONT_SIZE * 4.2 } else { 64.0 };
+    let row_height = if large {
+        LARGE_FONT_SIZE * 1.6
+    } else {
+        ui.spacing().interact_size.y
+    };
     let visible = focus.visible().collect::<Vec<_>>();
     let focus_row = focus.focus_row.take();
     let mut next_focus = None;
     let mut last_parent = None;
     egui::ScrollArea::vertical()
         .id_salt("heading_focus_rows")
-        .max_height(ui.ctx().content_rect().height() * 0.55)
+        .max_height(ui.ctx().content_rect().height() * if large { 0.7 } else { 0.55 })
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            if large {
+                ui.spacing_mut().item_spacing.y = 10.0;
+            }
             for (position, &index) in visible.iter().enumerate() {
                 let typical = focus.typical_length(focus.items[index].parent);
                 let item = &mut focus.items[index];
                 if focus.whole_document && (position == 0 || last_parent != Some(item.parent)) {
                     ui.add_space(if position == 0 { 0.0 } else { 6.0 });
-                    theme::caption(
-                        ui,
-                        &format!(
-                            "上级：{}",
-                            item.parent_label.as_deref().unwrap_or("（顶层）")
-                        ),
+                    let label = format!(
+                        "上级：{}",
+                        item.parent_label.as_deref().unwrap_or("（顶层）")
                     );
+                    if large {
+                        ui.label(
+                            egui::RichText::new(label)
+                                .size(LARGE_FONT_SIZE * 0.6)
+                                .color(theme::text_muted()),
+                        );
+                    } else {
+                        theme::caption(ui, &label);
+                    }
                 }
                 last_parent = Some(item.parent);
                 let current = index == focus.current;
                 let frame = egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .inner_margin(if large {
+                        egui::Margin::symmetric(10, 8)
+                    } else {
+                        egui::Margin::symmetric(6, 4)
+                    })
                     .corner_radius(4.0)
                     .fill(if current {
                         theme::accent_soft().gamma_multiply(0.45)
                     } else {
                         egui::Color32::TRANSPARENT
                     });
+                let font = large.then(|| {
+                    egui::FontId::new(LARGE_FONT_SIZE, theme::official_family(item.family))
+                });
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.allocate_ui_with_layout(
-                            egui::vec2(NUMBER_WIDTH, ui.spacing().interact_size.y),
+                            egui::vec2(number_width, row_height),
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
-                                ui.label(
-                                    egui::RichText::new(
-                                        item.number.as_deref().map_or("", str::trim),
-                                    )
-                                    .color(theme::text_muted()),
-                                );
+                                // 投屏时没有「原文」行，改过的条目靠编号变色认出来。
+                                let color = if large && item.modified() {
+                                    theme::accent()
+                                } else {
+                                    theme::text_muted()
+                                };
+                                let mut number = egui::RichText::new(
+                                    item.number.as_deref().map_or("", str::trim),
+                                )
+                                .color(color);
+                                if let Some(font) = &font {
+                                    number = number.font(font.clone());
+                                }
+                                ui.label(number);
                             },
                         );
-                        let width = (ui.available_width()
-                            - COUNT_WIDTH
-                            - REVERT_WIDTH
-                            - ui.spacing().item_spacing.x * 2.0)
-                            .max(120.0);
+                        let reserved = if large {
+                            REVERT_WIDTH
+                        } else {
+                            COUNT_WIDTH + REVERT_WIDTH
+                        };
+                        let width =
+                            (ui.available_width() - reserved - ui.spacing().item_spacing.x * 2.0)
+                                .max(120.0);
                         let id = ui.id().with(("heading_focus_text", index));
-                        let response =
-                            ui.add(theme::field(&mut item.text, "标题文字", width).id(id));
+                        let mut field = theme::field(&mut item.text, "标题文字", width).id(id);
+                        if let Some(font) = &font {
+                            field = field.font(font.clone());
+                        }
+                        let response = ui.add(field);
+                        if response.has_focus() {
+                            focus.last_row = Some(index);
+                        }
                         if focus_row == Some(index) {
                             response.request_focus();
                             response.scroll_to_me(None);
@@ -534,25 +607,8 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus) {
                         {
                             next_focus = visible.get(position + 1).copied();
                         }
-                        let count = visible_chars(&item.text);
-                        let uneven = typical
-                            .is_some_and(|typical| count.abs_diff(typical) > LENGTH_HINT_TOLERANCE);
-                        let count_label = ui.add_sized(
-                            [COUNT_WIDTH, ui.spacing().interact_size.y],
-                            egui::Label::new(egui::RichText::new(format!("{count} 字")).color(
-                                if item.cleaned().is_empty() {
-                                    theme::danger()
-                                } else if uneven {
-                                    theme::warn()
-                                } else {
-                                    theme::text_muted()
-                                },
-                            )),
-                        );
-                        if uneven && let Some(typical) = typical {
-                            count_label.on_hover_text(format!(
-                                "同组多数标题约 {typical} 字，这条相差较大"
-                            ));
+                        if !large {
+                            count_label(ui, item, typical, COUNT_WIDTH);
                         }
                         if item.modified() {
                             if theme::icon_button(ui, theme::Icon::Undo, "还原这一条").clicked()
@@ -563,30 +619,58 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus) {
                             ui.add_space(REVERT_WIDTH);
                         }
                     });
-                    let (note, color) = if item.cleaned().is_empty() {
-                        ("标题不能为空".to_string(), theme::danger())
-                    } else if item.modified() {
-                        (format!("原文：{}", item.original), theme::text_muted())
-                    } else {
-                        (item.excerpt.clone(), theme::text_muted())
-                    };
-                    if !note.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.add_space(NUMBER_WIDTH + ui.spacing().item_spacing.x);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(note)
-                                        .size(theme::font_sizes::SMALL)
-                                        .color(color),
-                                )
-                                .truncate(),
-                            );
-                        });
+                    if !large {
+                        note_line(ui, item, number_width);
                     }
                 });
             }
         });
     focus.focus_row = next_focus;
+}
+
+/// 常规模式右侧的字数：清空标红，与同组中位数相差较大的标黄。
+fn count_label(ui: &mut egui::Ui, item: &FocusItem, typical: Option<usize>, width: f32) {
+    let count = visible_chars(&item.text);
+    let uneven = typical.is_some_and(|typical| count.abs_diff(typical) > LENGTH_HINT_TOLERANCE);
+    let color = if item.cleaned().is_empty() {
+        theme::danger()
+    } else if uneven {
+        theme::warn()
+    } else {
+        theme::text_muted()
+    };
+    let label = ui.add_sized(
+        [width, ui.spacing().interact_size.y],
+        egui::Label::new(egui::RichText::new(format!("{count} 字")).color(color)),
+    );
+    if uneven && let Some(typical) = typical {
+        label.on_hover_text(format!("同组多数标题约 {typical} 字，这条相差较大"));
+    }
+}
+
+/// 常规模式标题下方的一行：清空时提示，改过显示原文，否则是这一节正文的开头。
+fn note_line(ui: &mut egui::Ui, item: &FocusItem, indent: f32) {
+    let (note, color) = if item.cleaned().is_empty() {
+        ("标题不能为空".to_string(), theme::danger())
+    } else if item.modified() {
+        (format!("原文：{}", item.original), theme::text_muted())
+    } else {
+        (item.excerpt.clone(), theme::text_muted())
+    };
+    if note.is_empty() {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(indent + ui.spacing().item_spacing.x);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(note)
+                    .size(theme::font_sizes::SMALL)
+                    .color(color),
+            )
+            .truncate(),
+        );
+    });
 }
 
 fn heading_focus_footer(
@@ -771,39 +855,62 @@ mod tests {
         assert!(visible_chars(&focus.items[2].text).abs_diff(typical) > LENGTH_HINT_TOLERANCE);
     }
 
-    /// 端到端：按光标打开对话框，焦点落在光标所在那一条，改字后主快捷键+回车写回。
-    #[test]
-    fn the_dialog_opens_on_the_current_heading_and_writes_back() {
-        use crate::draft_page::{DraftSession, ExportLinks, editor_id};
-        use crate::models::AppConfig;
+    /// 起草页的一个最小外壳：只画标题聚焦对话框，光标事先放在 `at` 那里。
+    struct DialogHarness {
+        ctx: egui::Context,
+        doc: crate::draft_page::DraftSession,
+        config: crate::models::AppConfig,
+        sender: std::sync::mpsc::Sender<crate::app::WorkerResult>,
+        _keep: std::sync::mpsc::Receiver<crate::app::WorkerResult>,
+        status: String,
+        version_switch: Option<crate::app::VersionSwitchPrompt>,
+        revert_confirm: Option<(i64, i64)>,
+        metrics: crate::metrics::Metrics,
+        actions: Vec<crate::app::DraftAction>,
+        export_links: crate::draft_page::ExportLinks,
+    }
 
-        let ctx = egui::Context::default();
-        theme::configure_icons(&ctx);
-        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
-        let mut config = AppConfig {
-            last_template: TemplateKind::OfficialLetter,
-            ..Default::default()
-        };
-        let mut doc = DraftSession::with_markdown(1, &config, DOC.to_string());
-        doc.preview_mode = PreviewMode::Source;
-        let mut state = egui::text_edit::TextEditState::default();
-        let at = DOC[..DOC.find("健全制度").unwrap()].chars().count();
-        state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(
-                egui::text::CCursor::new(at),
-            )));
-        state.store(&ctx, editor_id());
+    impl DialogHarness {
+        fn new(markdown: &str, at: &str, large: bool) -> Self {
+            let ctx = egui::Context::default();
+            theme::configure_icons(&ctx);
+            theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+            let config = crate::models::AppConfig {
+                last_template: TemplateKind::OfficialLetter,
+                heading_focus_large: large,
+                ..Default::default()
+            };
+            let mut doc =
+                crate::draft_page::DraftSession::with_markdown(1, &config, markdown.to_string());
+            doc.preview_mode = PreviewMode::Source;
+            let mut state = egui::text_edit::TextEditState::default();
+            let chars = markdown[..markdown.find(at).expect("光标位置在文中")]
+                .chars()
+                .count();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(chars),
+                )));
+            state.store(&ctx, crate::draft_page::editor_id());
+            let (sender, _keep) = std::sync::mpsc::channel();
+            Self {
+                ctx,
+                doc,
+                config,
+                sender,
+                _keep,
+                status: String::new(),
+                version_switch: None,
+                revert_confirm: None,
+                metrics: crate::metrics::Metrics::default(),
+                actions: Vec::new(),
+                export_links: crate::draft_page::ExportLinks::default(),
+            }
+        }
 
-        let (sender, _keep) = std::sync::mpsc::channel();
-        let mut status = String::new();
-        let mut version_switch = None;
-        let mut revert_confirm = None;
-        let mut metrics = crate::metrics::Metrics::default();
-        let mut actions = Vec::new();
-        let mut export_links = ExportLinks::default();
-        let mut frame = |events: Vec<egui::Event>, open: bool, doc: &mut DraftSession| {
-            let _ = ctx.clone().run_ui(
+        fn frame(&mut self, events: Vec<egui::Event>, open: bool) -> egui::FullOutput {
+            self.ctx.clone().run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -814,60 +921,116 @@ mod tests {
                 },
                 |ui| {
                     let mut page = DraftPage {
-                        doc,
-                        config: &mut config,
+                        doc: &mut self.doc,
+                        config: &mut self.config,
                         store: None,
-                        sender: &sender,
-                        status: &mut status,
-                        version_switch: &mut version_switch,
-                        revert_confirm: &mut revert_confirm,
-                        metrics: &mut metrics,
-                        actions: &mut actions,
-                        export_links: &mut export_links,
+                        sender: &self.sender,
+                        status: &mut self.status,
+                        version_switch: &mut self.version_switch,
+                        revert_confirm: &mut self.revert_confirm,
+                        metrics: &mut self.metrics,
+                        actions: &mut self.actions,
+                        export_links: &mut self.export_links,
                     };
                     if open {
                         page.open_heading_focus(ui.ctx());
                     }
                     page.heading_focus_modal(ui.ctx());
                 },
-            );
-        };
-        let key = |key, modifiers| egui::Event::Key {
+            )
+        }
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
             key,
             physical_key: None,
             pressed: true,
             repeat: false,
             modifiers,
-        };
+        }
+    }
 
-        frame(Vec::new(), true, &mut doc);
-        let focus = doc.heading_focus.as_ref().expect("对话框应已打开");
+    /// 本帧画出来的全部文字，每段附带字号。
+    fn painted(output: &egui::FullOutput) -> Vec<(String, f32)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, f32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let size = text
+                        .galley
+                        .job
+                        .sections
+                        .first()
+                        .map_or(0.0, |section| section.format.font_id.size);
+                    out.push((text.galley.text().to_string(), size));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// 端到端：按光标打开对话框，焦点落在光标所在那一条，改字后主快捷键+回车写回。
+    #[test]
+    fn the_dialog_opens_on_the_current_heading_and_writes_back() {
+        let mut harness = DialogHarness::new(DOC, "健全制度", false);
+        harness.frame(Vec::new(), true);
+        let focus = harness.doc.heading_focus.as_ref().expect("对话框应已打开");
         assert_eq!(focus.items[focus.current].original, "完善制度机制");
-        frame(Vec::new(), false, &mut doc);
+        harness.frame(Vec::new(), false);
         let mut typing = vec![key(egui::Key::Backspace, egui::Modifiers::NONE); 2];
         typing.push(egui::Event::Text("体系建设".to_string()));
-        frame(typing, false, &mut doc);
-        let focus = doc.heading_focus.as_ref().expect("改字时对话框仍开着");
+        harness.frame(typing, false);
+        let focus = harness
+            .doc
+            .heading_focus
+            .as_ref()
+            .expect("改字时对话框仍开着");
         assert_eq!(focus.items[1].text, "完善制度体系建设");
         assert_eq!(focus.modified_count(), 1);
 
-        frame(
-            vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)],
-            false,
-            &mut doc,
-        );
-        assert!(doc.heading_focus.is_none(), "写回后对话框应关闭");
-        assert!(doc.generated_markdown.contains(
-            "
-### 完善制度体系建设
-"
-        ));
-        assert!(doc.generated_markdown.contains(
-            "
-### 强化组织领导
-"
-        ));
-        let jump = doc.pending_source_jump.expect("光标应回到原来那一节");
-        assert!(doc.generated_markdown[jump..].starts_with("健全制度"));
+        harness.frame(vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)], false);
+        let markdown = &harness.doc.generated_markdown;
+        assert!(harness.doc.heading_focus.is_none(), "写回后对话框应关闭");
+        assert!(markdown.contains("\n### 完善制度体系建设\n"));
+        assert!(markdown.contains("\n### 强化组织领导\n"));
+        let jump = harness
+            .doc
+            .pending_source_jump
+            .expect("光标应回到原来那一节");
+        assert!(markdown[jump..].starts_with("健全制度"));
+    }
+
+    /// 大字模式给投屏用：标题放大，字数、正文开头与说明一概不画；常规模式照常都有。
+    #[test]
+    fn large_mode_enlarges_headings_and_drops_the_notes() {
+        let visible = |large: bool| {
+            let mut harness = DialogHarness::new(DOC, "健全制度", large);
+            harness.frame(Vec::new(), true);
+            painted(&harness.frame(Vec::new(), false))
+        };
+        let has = |texts: &[(String, f32)], needle: &str| {
+            texts.iter().any(|(text, _)| text.contains(needle))
+        };
+
+        let normal = visible(false);
+        assert!(has(&normal, "各地要高度重视"), "常规模式显示正文开头");
+        assert!(has(&normal, "6 字"), "常规模式显示字数");
+        assert!(has(&normal, "编号由程序生成"), "常规模式显示说明");
+
+        let large = visible(true);
+        assert!(!has(&large, "各地要高度重视"));
+        assert!(!has(&large, "6 字"));
+        assert!(!has(&large, "编号由程序生成"));
+        let heading = large
+            .iter()
+            .find(|(text, _)| text == "完善制度机制")
+            .expect("标题照常画出");
+        assert_eq!(heading.1, LARGE_FONT_SIZE);
     }
 }
