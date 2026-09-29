@@ -187,7 +187,11 @@ pub(crate) fn white_paper_tex_with_numbering(
 \makeletter
 \end{{document}}
 "#,
-        duplex_option = if input.profile.duplex_printing { ",duplex" } else { "" },
+        duplex_option = if input.profile.duplex_printing {
+            ",duplex"
+        } else {
+            ""
+        },
         title = tex_escape(title),
         title_content = title_content_tex(title),
         security = security,
@@ -312,7 +316,11 @@ pub(crate) fn red_head_approval_tex_with_numbering(
 \makeredapproval
 \end{{document}}
 "#,
-        duplex_option = if input.profile.duplex_printing { ",duplex" } else { "" },
+        duplex_option = if input.profile.duplex_printing {
+            ",duplex"
+        } else {
+            ""
+        },
         issuing = tex_escape(&issuing),
         document_year = document_year_arg,
         department = department_arg,

@@ -22,7 +22,9 @@ use crate::storage;
 use crate::theme;
 use crate::units::UnitDisplay;
 use eframe::egui;
+use std::cell::RefCell;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// 当前帧 TextEdit 的实际选区；拖拽期间不能只读上一帧存下的光标状态。
 fn output_selection(text: &str, output: &egui::text_edit::TextEditOutput) -> Option<Range<usize>> {
@@ -30,6 +32,464 @@ fn output_selection(text: &str, output: &egui::text_edit::TextEditOutput) -> Opt
     let primary = byte_at_char(text, range.primary.index.0);
     let secondary = byte_at_char(text, range.secondary.index.0);
     (primary != secondary).then_some(primary.min(secondary)..primary.max(secondary))
+}
+
+/// TextEdit 目前只支持拖动选区端点，按在已有选区里仍会重新选字。
+/// 这里保存按下时的选区，在松开前恢复它，并在落点确定后一次性移动正文。
+pub(crate) struct TextDrag {
+    source: Range<usize>,
+    original: String,
+    press_cursor: egui::text::CCursor,
+    press_pos: egui::Pos2,
+    moved: bool,
+}
+
+fn restore_drag_selection(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    range: egui::text::CCursorRange,
+) {
+    let mut state = output.state.clone();
+    state.cursor.set_char_range(Some(range));
+    state.store(ui.ctx(), editor_id());
+}
+
+/// 从屏幕坐标换算成 Markdown 字符位置，软换行和实时排版复用 TextEdit 的 galley。
+fn drag_cursor_at(
+    output: &egui::text_edit::TextEditOutput,
+    pos: egui::Pos2,
+) -> egui::text::CCursor {
+    output.galley.cursor_from_pos(pos - output.galley_pos)
+}
+
+struct DropLocation {
+    byte: usize,
+    caret: egui::Rect,
+}
+
+/// 落点只认编辑框的可见区域，避免鼠标移到侧栏或滚动区外时误插入。
+fn drag_drop_location(
+    output: &egui::text_edit::TextEditOutput,
+    text: &str,
+    visible: egui::Rect,
+    pos: egui::Pos2,
+) -> Option<DropLocation> {
+    if !visible.contains(pos) {
+        return None;
+    }
+    let cursor = drag_cursor_at(output, pos);
+    Some(DropLocation {
+        byte: byte_at_char(text, cursor.index.0),
+        caret: output
+            .galley
+            .pos_from_cursor(cursor)
+            .translate(output.galley_pos.to_vec2()),
+    })
+}
+
+/// 浮卡只显示一个短摘录；换行用可见符号表示，不让长段正文盖住落点。
+fn drag_excerpt(selected: &str) -> (String, String) {
+    let mut excerpt = String::new();
+    let mut shown = 0usize;
+    for ch in selected.chars() {
+        if ch == '\r' {
+            continue;
+        }
+        if shown == 18 {
+            excerpt.push('…');
+            break;
+        }
+        excerpt.push(if ch == '\n' { '↵' } else { ch });
+        shown += 1;
+    }
+    let lines = selected.split('\n').count();
+    let chars = selected.chars().filter(|ch| !ch.is_whitespace()).count();
+    let detail = if lines > 1 {
+        format!("{lines} 行 · {chars} 字")
+    } else {
+        format!("{chars} 字")
+    };
+    (excerpt, detail)
+}
+
+fn drag_card_rect(pointer: egui::Pos2, size: egui::Vec2, screen: egui::Rect) -> egui::Rect {
+    let mut left = pointer.x + 16.0;
+    if left + size.x > screen.right() - 8.0 {
+        left = pointer.x - size.x - 16.0;
+    }
+    let mut top = pointer.y + 18.0;
+    if top + size.y > screen.bottom() - 8.0 {
+        top = pointer.y - size.y - 14.0;
+    }
+    let left = left.clamp(
+        screen.left() + 8.0,
+        (screen.right() - size.x - 8.0).max(screen.left() + 8.0),
+    );
+    let top = top.clamp(
+        screen.top() + 8.0,
+        (screen.bottom() - size.y - 8.0).max(screen.top() + 8.0),
+    );
+    egui::Rect::from_min_size(egui::pos2(left, top), size)
+}
+
+/// 浮卡不参与命中测试；鼠标点仍直接交给编辑器的 galley 决定落点。
+fn paint_drag_card(
+    ctx: &egui::Context,
+    pointer: egui::Pos2,
+    selected: &str,
+    status: &str,
+    valid: bool,
+) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("gw-markdown-drag-card"),
+    ));
+    let (excerpt, detail) = drag_excerpt(selected);
+    let first = painter.layout_no_wrap(excerpt, egui::FontId::proportional(13.0), theme::text());
+    let second = painter.layout_no_wrap(
+        format!("{detail} · {status}"),
+        egui::FontId::proportional(11.0),
+        theme::text_muted(),
+    );
+    let size = egui::vec2(
+        first.size().x.max(second.size().x) + 24.0,
+        first.size().y + second.size().y + 20.0,
+    );
+    let rect = drag_card_rect(pointer, size, ctx.content_rect());
+    painter.rect_filled(
+        rect.translate(egui::vec2(0.0, 3.0)),
+        7.0,
+        egui::Color32::from_black_alpha(32),
+    );
+    painter.rect_filled(rect, 7.0, theme::surface());
+    painter.rect_stroke(
+        rect,
+        7.0,
+        egui::Stroke::new(
+            1.0,
+            if valid {
+                theme::accent()
+            } else {
+                theme::border_strong()
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let second_y = 10.0 + first.size().y;
+    painter.galley(rect.min + egui::vec2(12.0, 8.0), first, theme::text());
+    painter.galley(
+        rect.min + egui::vec2(12.0, second_y),
+        second,
+        theme::text_muted(),
+    );
+}
+
+fn scroll_drag_edge(ui: &egui::Ui, visible: egui::Rect, pos: egui::Pos2) {
+    if pos.x < visible.left()
+        || pos.x > visible.right()
+        || pos.y < visible.top() - 20.0
+        || pos.y > visible.bottom() + 20.0
+    {
+        return;
+    }
+    let band = 28.0;
+    let near_top = ((visible.top() + band - pos.y) / band).clamp(0.0, 1.0);
+    let near_bottom = ((pos.y - visible.bottom() + band) / band).clamp(0.0, 1.0);
+    let delta = (near_top - near_bottom) * 14.0;
+    if delta.abs() > 0.5 {
+        ui.scroll_with_delta(egui::vec2(0.0, delta));
+    }
+}
+
+fn paint_drop_marker(ui: &egui::Ui, visible: egui::Rect, caret: egui::Rect) {
+    let painter = ui.painter_at(visible);
+    let x = caret.left();
+    let top = caret.top();
+    painter.line_segment(
+        [egui::pos2(x, top + 4.0), egui::pos2(x, caret.bottom())],
+        egui::Stroke::new(2.0, theme::accent()),
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(x - 4.0, top),
+            egui::pos2(x + 4.0, top),
+            egui::pos2(x, top + 5.0),
+        ],
+        theme::accent(),
+        egui::Stroke::NONE,
+    ));
+}
+
+/// 返回移动后的全文与新选区。落在原选区内（含两端）不改正文。
+fn moved_text(text: &str, source: Range<usize>, target: usize) -> Option<(String, Range<usize>)> {
+    if source.is_empty()
+        || source.end > text.len()
+        || target > text.len()
+        || !text.is_char_boundary(source.start)
+        || !text.is_char_boundary(source.end)
+        || !text.is_char_boundary(target)
+        || (source.start..=source.end).contains(&target)
+    {
+        return None;
+    }
+    let selected = &text[source.clone()];
+    let insert_at = if target > source.end {
+        target - selected.len()
+    } else {
+        target
+    };
+    let mut updated = text.to_owned();
+    updated.replace_range(source, "");
+    updated.insert_str(insert_at, selected);
+    Some((updated, insert_at..insert_at + selected.len()))
+}
+
+/// 每帧在 TextEdit 绘制后处理按下、拖动、松开；返回需要提交的单次编辑。
+fn handle_text_drag(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    text: &str,
+    drag: &mut Option<TextDrag>,
+    before: Option<egui::text::CCursorRange>,
+    editable: bool,
+    paint: Option<(&Arc<egui::Galley>, egui::Color32)>,
+) -> Option<(String, Range<usize>)> {
+    if !editable {
+        *drag = None;
+        return None;
+    }
+    let (pressed, down, released, pos, shift) = ui.input(|input| {
+        (
+            input.pointer.button_pressed(egui::PointerButton::Primary),
+            input.pointer.button_down(egui::PointerButton::Primary),
+            input.pointer.button_released(egui::PointerButton::Primary),
+            input.pointer.latest_pos(),
+            input.modifiers.shift,
+        )
+    });
+    let visible = output.response.rect.intersect(ui.clip_rect());
+    if pressed
+        && !shift
+        && let (Some(pos), Some(range)) = (pos, before.filter(|range| !range.is_empty()))
+        && visible.contains(pos)
+    {
+        let cursor = drag_cursor_at(output, pos);
+        let [start, end] = range.sorted_cursors();
+        if (start.index.0..end.index.0).contains(&cursor.index.0) {
+            *drag = Some(TextDrag {
+                source: byte_at_char(text, start.index.0)..byte_at_char(text, end.index.0),
+                original: text.to_owned(),
+                press_cursor: cursor,
+                press_pos: pos,
+                moved: false,
+            });
+        }
+    }
+    if drag.is_none()
+        && let (Some(pos), Some(range)) = (pos, before.filter(|range| !range.is_empty()))
+        && visible.contains(pos)
+    {
+        let index = drag_cursor_at(output, pos).index.0;
+        let [start, end] = range.sorted_cursors();
+        if (start.index.0..end.index.0).contains(&index) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        }
+    }
+    let active = drag.as_mut()?;
+    if active.original != text {
+        *drag = None;
+        return None;
+    }
+    let start = egui::text::CCursor::new(text[..active.source.start].chars().count());
+    let end = egui::text::CCursor::new(text[..active.source.end].chars().count());
+    let selection = egui::text::CCursorRange::two(start, end);
+    if down {
+        if pos.is_some_and(|pos| pos.distance(active.press_pos) > 4.0) {
+            active.moved = true;
+        }
+        restore_drag_selection(ui, output, selection);
+        // TextEdit 本帧已画了它自己的拖选范围。用布局器留的干净 galley
+        // 覆画原选区，避免源文字在拖动中消失或出现另一块错误选区。
+        if let Some((clean_galley, background)) = paint {
+            let painter = ui.painter_at(output.text_clip_rect);
+            painter.rect_filled(output.text_clip_rect, 0.0, background);
+            let mut galley = Arc::clone(clean_galley);
+            egui::text_selection::visuals::paint_text_selection(
+                &mut galley,
+                ui.visuals(),
+                &selection,
+                None,
+            );
+            painter.galley(
+                output.galley_pos - egui::vec2(galley.rect.left(), 0.0),
+                galley,
+                theme::text(),
+            );
+        }
+        if active.moved
+            && let Some(pos) = pos
+        {
+            scroll_drag_edge(ui, visible, pos);
+            let location = drag_drop_location(output, text, visible, pos);
+            let valid = location.as_ref().is_some_and(|location| {
+                !(active.source.start..=active.source.end).contains(&location.byte)
+            });
+            if valid && let Some(location) = location {
+                paint_drop_marker(ui, visible, location.caret);
+            }
+            let status = if valid {
+                "移到此处"
+            } else if visible.contains(pos) {
+                "原位置"
+            } else {
+                "移出编辑区"
+            };
+            paint_drag_card(
+                ui.ctx(),
+                pos,
+                &active.original[active.source.clone()],
+                status,
+                valid,
+            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        }
+        ui.ctx().request_repaint();
+        return None;
+    }
+    let active = drag.take().unwrap();
+    if !released {
+        return None;
+    }
+    if !active.moved {
+        restore_drag_selection(
+            ui,
+            output,
+            egui::text::CCursorRange::one(active.press_cursor),
+        );
+        return None;
+    }
+    restore_drag_selection(ui, output, selection);
+    let location = drag_drop_location(output, text, visible, pos?)?;
+    moved_text(text, active.source, location.byte)
+}
+
+#[cfg(test)]
+mod text_drag_tests {
+    use super::*;
+
+    #[test]
+    fn moving_chinese_selection_adjusts_the_destination() {
+        let text = "甲乙丙丁戊";
+        assert_eq!(
+            moved_text(text, 3..9, text.len()),
+            Some(("甲丁戊乙丙".to_owned(), 9..15))
+        );
+        assert_eq!(
+            moved_text(text, 6..12, 0),
+            Some(("丙丁甲乙戊".to_owned(), 0..6))
+        );
+        assert_eq!(moved_text(text, 3..9, 6), None);
+        assert_eq!(moved_text(text, 3..9, 3), None);
+        assert_eq!(moved_text(text, 3..9, 9), None);
+        assert_eq!(moved_text(text, 1..9, 0), None);
+    }
+
+    #[test]
+    fn drag_card_stays_on_screen_and_summarizes_long_text() {
+        let (excerpt, detail) = drag_excerpt("第一行\n第二行很长很长很长很长很长很长很长");
+        assert!(excerpt.contains('↵'));
+        assert!(excerpt.ends_with('…'));
+        assert!(detail.starts_with("2 行"));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let card = drag_card_rect(egui::pos2(390.0, 290.0), egui::vec2(180.0, 44.0), screen);
+        assert!(screen.contains_rect(card));
+        assert!(card.right() < 390.0);
+        assert!(card.bottom() < 290.0);
+    }
+
+    #[test]
+    fn pointer_drag_moves_existing_selection() {
+        let ctx = egui::Context::default();
+        let mut text = "甲乙丙丁".to_owned();
+        let mut drag = None;
+        let mut clock = 0.0;
+        {
+            let mut frame = |events: Vec<egui::Event>| {
+                clock += 0.05;
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 300.0),
+                    )),
+                    time: Some(clock),
+                    events,
+                    ..Default::default()
+                };
+                let mut positions = [egui::Pos2::ZERO; 3];
+                let output = ctx.clone().run_ui(raw, |ui| {
+                    let before = candidates::selection_before_show(ui.ctx(), editor_id());
+                    let output = egui::TextEdit::multiline(&mut text)
+                        .id(editor_id())
+                        .desired_width(400.0)
+                        .show(ui);
+                    for (slot, index) in [(0, 1), (1, 2), (2, 4)] {
+                        positions[slot] = output
+                            .galley
+                            .pos_from_cursor(egui::text::CCursor::new(index))
+                            .min
+                            + output.galley_pos.to_vec2()
+                            + egui::vec2(2.0, 5.0);
+                    }
+                    if let Some((updated, range)) =
+                        handle_text_drag(ui, &output, &text, &mut drag, before, true, None)
+                    {
+                        crate::draft_page::diff_editor::replace_with_undo(
+                            ui.ctx(),
+                            &mut text,
+                            updated,
+                            range.end,
+                        );
+                    }
+                });
+                (positions, output, text.clone())
+            };
+            let [start, middle, end] = frame(Vec::new()).0;
+            let mut state = egui::TextEdit::load_state(&ctx, editor_id()).unwrap();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(1),
+                    egui::text::CCursor::new(3),
+                )));
+            state.store(&ctx, editor_id());
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(vec![egui::Event::PointerMoved(start), button(start, true)]);
+            let (_, inside, _) = frame(vec![egui::Event::PointerMoved(middle)]);
+            assert!(inside.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("原位置"))
+            }));
+            assert_eq!(frame(vec![button(middle, false)]).2, "甲乙丙丁");
+            let outside = egui::pos2(500.0, 250.0);
+            frame(vec![egui::Event::PointerMoved(start), button(start, true)]);
+            let (_, outside_frame, _) = frame(vec![egui::Event::PointerMoved(outside)]);
+            assert!(outside_frame.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("移出编辑区"))
+            }));
+            assert_eq!(frame(vec![button(outside, false)]).2, "甲乙丙丁");
+            frame(vec![egui::Event::PointerMoved(start), button(start, true)]);
+            let (_, dragging, _) = frame(vec![egui::Event::PointerMoved(end)]);
+            assert!(dragging.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("移到此处"))
+            }));
+            frame(vec![button(end, false)]);
+        }
+        assert_eq!(text, "甲丁乙丙");
+    }
 }
 
 /// 在公文预览里点中的那一块：记下它在 Markdown 中的字节范围，以及点击当时
@@ -572,10 +1032,12 @@ impl DraftPage<'_> {
         let mut editor_lost_focus = false;
         let mut cursor_follow = None;
         let mut selected_after = None;
+        let mut drag_move = None;
         let selection_before = candidates::selection_before_show(ui.ctx(), editor_id());
         let mut menu_action = None;
+        let clean_galley = RefCell::new(None);
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-            if hybrid {
+            let galley = if hybrid {
                 highlighter.layout_hybrid(
                     ui,
                     buffer.as_str(),
@@ -596,7 +1058,9 @@ impl DraftPage<'_> {
                     &editor_fonts,
                     research,
                 )
-            }
+            };
+            *clean_galley.borrow_mut() = Some(Arc::clone(&galley));
+            galley
         };
         if hybrid {
             let viewport_width = ui.available_width();
@@ -651,6 +1115,18 @@ impl DraftPage<'_> {
                                             &output,
                                             selection_before,
                                             editable,
+                                        );
+                                        drag_move = handle_text_drag(
+                                            ui,
+                                            &output,
+                                            text,
+                                            &mut self.doc.text_drag,
+                                            selection_before,
+                                            editable,
+                                            clean_galley
+                                                .borrow()
+                                                .as_ref()
+                                                .map(|galley| (galley, theme::paper::bg())),
                                         );
                                         if show_line_numbers {
                                             paint_editor_line_numbers(
@@ -766,6 +1242,18 @@ impl DraftPage<'_> {
                             selection_before,
                             editable,
                         );
+                        drag_move = handle_text_drag(
+                            ui,
+                            &output,
+                            text,
+                            &mut self.doc.text_drag,
+                            selection_before,
+                            editable,
+                            clean_galley
+                                .borrow()
+                                .as_ref()
+                                .map(|galley| (galley, theme::surface())),
+                        );
                         // Ctrl+滚轮调整源码字号：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量
                         // 报成 zoom_delta，滚动区不会同时滚动，两者天然不冲突。
                         let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
@@ -854,6 +1342,18 @@ impl DraftPage<'_> {
                     ui.ctx().request_repaint();
                 }
             }
+        }
+        if let Some((updated, range)) = drag_move {
+            crate::draft_page::diff_editor::replace_with_undo(ui.ctx(), text, updated, range.end);
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id()) {
+                let start = egui::text::CCursor::new(text[..range.start].chars().count());
+                let end = egui::text::CCursor::new(text[..range.end].chars().count());
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(start, end)));
+                state.store(ui.ctx(), editor_id());
+            }
+            ui.ctx().request_repaint();
         }
         if editable && editor_lost_focus {
             let normalized = export::normalize_ordered_list_punctuation(text);

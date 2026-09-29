@@ -397,6 +397,8 @@ pub(crate) struct DraftSession {
     pub(crate) preview_anchor: Option<PreviewAnchor>,
     /// 分栏模式里编辑器的非空文字选区；预览按可见字符映射它，不复用整行锚点。
     pub(crate) preview_selection: Option<Range<usize>>,
+    /// 源码编辑框中正在拖动的文字选区；按稿件隔离，避免切换标签后误改别篇。
+    pub(crate) text_drag: Option<editor::TextDrag>,
     /// 待处理的“跳到源码”请求，编辑框下次绘制时把光标挪过去并滚动到位。
     pub(crate) pending_source_jump: Option<usize>,
     /// 查找命中需要选中完整范围；普通预览点击仍只移动光标。
@@ -568,6 +570,7 @@ impl DraftSession {
             source_minimap: SourceMinimap::default(),
             preview_anchor: None,
             preview_selection: None,
+            text_drag: None,
             pending_source_jump: None,
             pending_source_selection: None,
             pending_render_jump: false,
