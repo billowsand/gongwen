@@ -322,8 +322,9 @@ pub(crate) fn paint(
             || pointer.is_some_and(|at| {
                 at.y >= row.top && at.y <= row.bottom && at.x >= chip.left() && at.x <= row.right
             })
-            || matches!((&row.source, anchor), (Some(source), Some(anchor))
-                if !anchor.is_empty() && anchor.start < source.end && source.start < anchor.end);
+            || (!super::layout::has_text_selection(ui.ctx())
+                && matches!((&row.source, anchor), (Some(source), Some(anchor))
+                if !anchor.is_empty() && anchor.start < source.end && source.start < anchor.end));
         if active {
             ui.painter()
                 .rect_filled(chip, egui::CornerRadius::same(CHIP_RADIUS), theme::accent());

@@ -22,6 +22,132 @@ pub(crate) struct ClickableSourceSegment {
     pub(crate) chars: Range<usize>,
 }
 
+/// 分栏编辑器的选区只在预览绘制期间有效；预览仍用源码范围决定哪些块需要排版。
+/// 真正铺色时再把源码字符映射到纸面字符，不能把整行锚点当作选区。
+#[derive(Clone)]
+struct PreviewTextSelection {
+    source: Arc<str>,
+    range: Range<usize>,
+}
+
+fn selection_id() -> egui::Id {
+    egui::Id::new("gw-preview-text-selection")
+}
+
+pub(crate) fn set_text_selection(ctx: &egui::Context, source: &str, range: Option<Range<usize>>) {
+    ctx.data_mut(|data| {
+        if let Some(range) = range {
+            data.insert_temp(
+                selection_id(),
+                Arc::new(PreviewTextSelection {
+                    source: Arc::from(source),
+                    range,
+                }),
+            );
+        } else {
+            data.remove::<Arc<PreviewTextSelection>>(selection_id());
+        }
+    });
+}
+
+fn text_selection(ui: &egui::Ui) -> Option<Arc<PreviewTextSelection>> {
+    ui.ctx()
+        .data(|data| data.get_temp::<Arc<PreviewTextSelection>>(selection_id()))
+}
+
+pub(super) fn has_text_selection(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<Arc<PreviewTextSelection>>(selection_id())
+            .is_some()
+    })
+}
+
+/// 将选中的源码字符与这一段的可见字符对齐。Markdown 标记、自动编号和缩进
+/// 不会被误认作被选文字；同一源码段落中的换行与版面换行也不改变字符映射。
+fn selected_visible_chars(
+    selection: &PreviewTextSelection,
+    rendered: &str,
+    segment: &ClickableSourceSegment,
+) -> Vec<Range<usize>> {
+    if selection.range.start >= segment.source.end || segment.source.start >= selection.range.end {
+        return Vec::new();
+    }
+    let Some(source) = selection.source.get(segment.source.clone()) else {
+        return Vec::new();
+    };
+    let atoms = export::inline_char_spans(source);
+    let visible = rendered
+        .chars()
+        .skip(segment.chars.start)
+        .take(segment.chars.end.saturating_sub(segment.chars.start))
+        .collect::<Vec<_>>();
+    if atoms.is_empty() || visible.is_empty() {
+        return Vec::new();
+    }
+    let mut pairs = Vec::new();
+    if atoms.len().saturating_mul(visible.len()) <= 300_000 {
+        let width = visible.len() + 1;
+        let mut lcs = vec![0usize; (atoms.len() + 1) * width];
+        for i in (0..atoms.len()).rev() {
+            for j in (0..visible.len()).rev() {
+                let at = i * width + j;
+                lcs[at] = if atoms[i].1 == visible[j] {
+                    1 + lcs[(i + 1) * width + j + 1]
+                } else {
+                    lcs[(i + 1) * width + j].max(lcs[at + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < atoms.len() && j < visible.len() {
+            let current = lcs[i * width + j];
+            if lcs[i * width + j + 1] == current {
+                j += 1; // 等价匹配时跳过纸面自动生成的前缀。
+            } else if atoms[i].1 == visible[j] && current == 1 + lcs[(i + 1) * width + j + 1] {
+                pairs.push((i, j));
+                i += 1;
+                j += 1;
+            } else {
+                i += 1;
+            }
+        }
+    } else {
+        // 极长的单行不用二次方内存；从末尾对齐可跳过纸面自动编号。
+        let mut j = visible.len();
+        for i in (0..atoms.len()).rev() {
+            while j > 0 {
+                j -= 1;
+                if atoms[i].1 == visible[j] {
+                    pairs.push((i, j));
+                    break;
+                }
+            }
+            if j == 0 {
+                break;
+            }
+        }
+        pairs.reverse();
+    }
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (source_index, visible_index) in pairs {
+        let source_char = &atoms[source_index].0;
+        if segment.source.start + source_char.start >= selection.range.end
+            || segment.source.start + source_char.end <= selection.range.start
+        {
+            continue;
+        }
+        let index = segment.chars.start + visible_index;
+        if let Some(last) = ranges.last_mut()
+            && last.end == index
+        {
+            last.end += 1;
+        } else {
+            ranges.push(index..index + 1);
+        }
+    }
+    ranges
+}
+
 /// 正文各级标题的字体：与 `export::docx::heading_paragraph` 保持一致。
 pub(crate) fn heading_family(level: u8) -> &'static str {
     match level {
@@ -872,6 +998,15 @@ pub(crate) fn clickable_justified_job(
     let height = base.size().y;
     let (block_rect, _) =
         ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
+    let selection = text_selection(ui);
+    let selected_chars = segments
+        .iter()
+        .map(|segment| {
+            selection.as_ref().map_or_else(Vec::new, |selection| {
+                selected_visible_chars(selection, &job.text, segment)
+            })
+        })
+        .collect::<Vec<_>>();
 
     let mut row_start = 0usize;
     for (row_index, (placed, row_galley)) in base.rows.iter().zip(&rows).enumerate() {
@@ -889,7 +1024,7 @@ pub(crate) fn clickable_justified_job(
                 .find(|segment| segment.chars.start < row_end && row_start < segment.chars.end)
                 .map(|segment| segment.source.clone()),
         );
-        for segment in segments {
+        for (segment_index, segment) in segments.iter().enumerate() {
             let start = segment.chars.start.max(row_start);
             let end = segment.chars.end.min(row_end);
             if start >= end {
@@ -933,11 +1068,12 @@ pub(crate) fn clickable_justified_job(
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 note_hovered(ui, &segment.source);
             }
-            let anchored = anchor.is_some_and(|anchor| {
-                !anchor.is_empty()
-                    && anchor.start < segment.source.end
-                    && segment.source.start < anchor.end
-            });
+            let anchored = selection.is_none()
+                && anchor.is_some_and(|anchor| {
+                    !anchor.is_empty()
+                        && anchor.start < segment.source.end
+                        && segment.source.start < anchor.end
+                });
             if anchored && *scroll_to_anchor {
                 scroll_preview_to_rect(ui, rect);
                 *scroll_to_anchor = false;
@@ -954,6 +1090,17 @@ pub(crate) fn clickable_justified_job(
                         theme::paper::hover_tint()
                     },
                 );
+            }
+            for selected in &selected_chars[segment_index] {
+                let from = selected.start.max(start);
+                let to = selected.end.min(end);
+                if from < to {
+                    ui.painter().rect_filled(
+                        row_rect(from - row_start, to - row_start),
+                        3.0,
+                        theme::md::selection_bg(),
+                    );
+                }
             }
         }
         row_start = row_end;
@@ -1439,6 +1586,18 @@ pub(crate) fn clickable(
         scroll_preview_to_rect(ui, rect);
         *scroll_to_anchor = false;
     }
+    if anchored && text_selection(ui).is_some() {
+        ui.painter().set(
+            backdrop,
+            egui::Shape::rect_stroke(
+                rect,
+                3.0,
+                Stroke::new(2.0, theme::md::selection_bg()),
+                egui::StrokeKind::Inside,
+            ),
+        );
+        return;
+    }
     let fill = if anchored {
         theme::accent_soft()
     } else if response.hovered() {
@@ -1493,6 +1652,7 @@ pub(crate) fn clickable_rows(
         scroll_preview_to_rect(ui, whole);
         *scroll_to_anchor = false;
     }
+    let selection_active = text_selection(ui).is_some();
     let mut shapes = Vec::new();
     for (index, rect) in tints.iter().enumerate() {
         let response = ui.interact(
@@ -1506,6 +1666,15 @@ pub(crate) fn clickable_rows(
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             note_hovered(ui, range);
+        }
+        if anchored && selection_active {
+            shapes.push(egui::Shape::rect_stroke(
+                *rect,
+                3.0,
+                Stroke::new(2.0, theme::md::selection_bg()),
+                egui::StrokeKind::Inside,
+            ));
+            continue;
         }
         let fill = if anchored {
             theme::accent_soft()
@@ -1603,6 +1772,124 @@ pub(crate) fn sheet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_selection_follows_exact_visible_characters_across_source_lines() {
+        let source = "第一行\n第二行";
+        let selection = PreviewTextSelection {
+            source: Arc::from(source),
+            range: "第".len().."第一行\n第".len(),
+        };
+        let first = ClickableSourceSegment {
+            source: 0.."第一行".len(),
+            chars: 0..3,
+        };
+        let second = ClickableSourceSegment {
+            source: "第一行\n".len()..source.len(),
+            chars: 3..6,
+        };
+        assert_eq!(
+            selected_visible_chars(&selection, "第一行第二行", &first),
+            vec![1..3]
+        );
+        assert_eq!(
+            selected_visible_chars(&selection, "第一行第二行", &second),
+            vec![3..4]
+        );
+    }
+
+    #[test]
+    fn preview_selection_skips_markdown_marks_and_generated_prefix() {
+        let source = "**重点**继续";
+        let segment = ClickableSourceSegment {
+            source: 0..source.len(),
+            chars: 0..4,
+        };
+        let selection = PreviewTextSelection {
+            source: Arc::from(source),
+            range: 0.."**重点**".len(),
+        };
+        assert_eq!(
+            selected_visible_chars(&selection, "重点继续", &segment),
+            vec![0..2]
+        );
+        let mark_only = PreviewTextSelection {
+            source: Arc::from(source),
+            range: 0..2,
+        };
+        assert!(selected_visible_chars(&mark_only, "重点继续", &segment).is_empty());
+
+        let source = "- 事项";
+        let list = ClickableSourceSegment {
+            source: 0..source.len(),
+            chars: 0..5,
+        };
+        let selection = PreviewTextSelection {
+            source: Arc::from(source),
+            range: "- ".len()..source.len(),
+        };
+        assert_eq!(
+            selected_visible_chars(&selection, "（一）事项", &list),
+            vec![3..5]
+        );
+    }
+
+    #[test]
+    fn preview_paints_selected_fragments_without_cursor_anchor_fill() {
+        fn collect(shape: &egui::Shape, selected: &mut usize, anchored: &mut usize) {
+            match shape {
+                egui::Shape::Rect(rect) if rect.fill == theme::md::selection_bg() => {
+                    *selected += 1;
+                }
+                egui::Shape::Rect(rect) if rect.fill == theme::accent_soft() => {
+                    *anchored += 1;
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, selected, anchored);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let source = "第一行\n第二行";
+        let range = "第".len().."第一行\n第".len();
+        let segments = [
+            ClickableSourceSegment {
+                source: 0.."第一行".len(),
+                chars: 0..3,
+            },
+            ClickableSourceSegment {
+                source: "第一行\n".len()..source.len(),
+                chars: 3..6,
+            },
+        ];
+        set_text_selection(&ctx, source, Some(range.clone()));
+        let output = ctx.run_ui(Default::default(), |ui| {
+            let metrics = Metrics::research(1000.0, Some(1.0));
+            let mut scroll = false;
+            let mut clicked = None;
+            clickable_body_block(
+                ui,
+                &metrics,
+                "第一行第二行",
+                false,
+                &segments,
+                Some(&range),
+                &mut scroll,
+                &mut clicked,
+            );
+        });
+        let (mut selected, mut anchored) = (0, 0);
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut selected, &mut anchored);
+        }
+        assert_eq!(selected, 2, "两条源码行各自只画选中的那一截");
+        assert_eq!(anchored, 0, "文字选区期间不能再画光标同步底色");
+    }
 
     /// 研究报告按行高亮：带首行缩进的单行，底色从第一个实字起笔、不压缩进，
     /// 且字形框在底色里垂直居中（上下余量相差不过 1px）。

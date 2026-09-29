@@ -33,8 +33,8 @@ pub(crate) use layout::{
     ClickableSourceSegment, aligned_block, append_inline_with_bold_ranges, body_block, clickable,
     clickable_body_block, clickable_justified_job, draw_justified_with_bold, first_ink,
     heading_family, hovered_source, indent, is_renderable_paragraph, job, justified_rows, layout,
-    line_block, line_galley, place, row_tint_offset, scroll_preview_to_rect, sheet, single_line,
-    stacked, table_block, text_format,
+    line_block, line_galley, place, row_tint_offset, scroll_preview_to_rect, set_text_selection,
+    sheet, single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};

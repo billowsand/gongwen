@@ -395,6 +395,8 @@ pub(crate) struct DraftSession {
     pub(crate) source_minimap: SourceMinimap,
     /// 在公文预览里点中的那一块：预览和源码两边都会给它铺底色。
     pub(crate) preview_anchor: Option<PreviewAnchor>,
+    /// 分栏模式里编辑器的非空文字选区；预览按可见字符映射它，不复用整行锚点。
+    pub(crate) preview_selection: Option<Range<usize>>,
     /// 待处理的“跳到源码”请求，编辑框下次绘制时把光标挪过去并滚动到位。
     pub(crate) pending_source_jump: Option<usize>,
     /// 查找命中需要选中完整范围；普通预览点击仍只移动光标。
@@ -565,6 +567,7 @@ impl DraftSession {
             source_outline: SourceOutline::default(),
             source_minimap: SourceMinimap::default(),
             preview_anchor: None,
+            preview_selection: None,
             pending_source_jump: None,
             pending_source_selection: None,
             pending_render_jump: false,
@@ -728,6 +731,7 @@ impl DraftSession {
         self.revisions.clear();
         self.revise_cache.clear();
         self.preview_anchor = None;
+        self.preview_selection = None;
         self.pending_source_jump = None;
         self.pending_source_selection = None;
         self.pending_render_jump = false;
@@ -1840,6 +1844,7 @@ mod split_resize_tests {
         let range = start..start + "加强".len();
         let text = harness.doc.generated_markdown[range.clone()].to_owned();
         harness.doc.preview_anchor = Some(PreviewAnchor { range, text });
+        harness.doc.preview_selection = Some(start..start + "加强".len());
         harness.doc.preview_cursor_line = Some(start);
 
         {
@@ -1863,6 +1868,7 @@ mod split_resize_tests {
             harness.doc.preview_anchor.is_none(),
             "对照模式的高亮不该带到单栏模式"
         );
+        assert!(harness.doc.preview_selection.is_none());
         assert!(harness.doc.preview_cursor_line.is_none());
         assert!(
             harness.doc.pending_source_reveal,

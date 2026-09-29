@@ -6,6 +6,7 @@
 use crate::app::visible_rows;
 use crate::draft_page::candidates;
 use crate::draft_page::caret::show_with_glyph_caret;
+use crate::draft_page::markdown::byte_at_char;
 use crate::draft_page::{
     DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH, OFFICIAL_PAGE_HEIGHT,
     OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH, PreviewMode,
@@ -22,6 +23,14 @@ use crate::theme;
 use crate::units::UnitDisplay;
 use eframe::egui;
 use std::ops::Range;
+
+/// 当前帧 TextEdit 的实际选区；拖拽期间不能只读上一帧存下的光标状态。
+fn output_selection(text: &str, output: &egui::text_edit::TextEditOutput) -> Option<Range<usize>> {
+    let range = output.cursor_range?;
+    let primary = byte_at_char(text, range.primary.index.0);
+    let secondary = byte_at_char(text, range.secondary.index.0);
+    (primary != secondary).then_some(primary.min(secondary)..primary.max(secondary))
+}
 
 /// 在公文预览里点中的那一块：记下它在 Markdown 中的字节范围，以及点击当时
 /// 这段范围里的原文。
@@ -517,11 +526,22 @@ impl DraftPage<'_> {
         let selection = self.doc.pending_source_selection.take();
         let reveal = std::mem::take(&mut self.doc.pending_source_reveal);
         let programmatic_source_move = jump.is_some() || selection.is_some();
-        let anchor = self
-            .doc
-            .preview_anchor
-            .as_ref()
-            .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown));
+        let selected_before = if self.doc.preview_mode == PreviewMode::Split {
+            editor_selection(ui.ctx(), &self.doc.generated_markdown)
+                .filter(|range| !range.is_empty())
+                .or_else(|| selection.clone().filter(|range| !range.is_empty()))
+        } else {
+            None
+        };
+        let anchor = selected_before
+            .is_none()
+            .then(|| {
+                self.doc
+                    .preview_anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown))
+            })
+            .flatten();
         let search_matches = if self.doc.markdown_find.open {
             markdown_matches_mode(
                 &self.doc.generated_markdown,
@@ -554,6 +574,7 @@ impl DraftPage<'_> {
         let research = self.doc.draft.kind.is_research();
         let mut editor_lost_focus = false;
         let mut cursor_follow = None;
+        let mut selected_after = None;
         let selection_before = candidates::selection_before_show(ui.ctx(), editor_id());
         let mut menu_action = None;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -715,20 +736,27 @@ impl DraftPage<'_> {
                     }
                     let scrolled = scroll.show(ui, |ui| {
                         let mut show_editor = |ui: &mut egui::Ui| {
-                            show_with_glyph_caret(ui, editable, |ui| {
-                                egui::TextEdit::multiline(text)
-                                    .id(editor_id())
-                                    .interactive(editable)
-                                    .frame(egui::Frame::NONE)
-                                    .code_editor()
-                                    .layouter(&mut layouter)
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(rows)
-                                    .hint_text(
-                                        "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
-                                    )
-                                    .show(ui)
+                            ui.scope(|ui| {
+                                if self.doc.preview_mode == PreviewMode::Split {
+                                    ui.visuals_mut().selection.bg_fill = theme::md::selection_bg();
+                                    ui.visuals_mut().selection.stroke.color = theme::text();
+                                }
+                                show_with_glyph_caret(ui, editable, |ui| {
+                                    egui::TextEdit::multiline(text)
+                                        .id(editor_id())
+                                        .interactive(editable)
+                                        .frame(egui::Frame::NONE)
+                                        .code_editor()
+                                        .layouter(&mut layouter)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(rows)
+                                        .hint_text(
+                                            "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
+                                        )
+                                        .show(ui)
+                                })
                             })
+                            .inner
                         };
                         let output = if show_line_numbers {
                             ui.horizontal_top(|ui| {
@@ -797,8 +825,18 @@ impl DraftPage<'_> {
                             && self.doc.preview_mode == PreviewMode::Split
                             && output.response.has_focus()
                         {
-                            cursor_follow = output.cursor_range.map(|range| {
-                                source_line_range_at_char(text, range.primary.index.0)
+                            selected_after = output_selection(text, &output);
+                            cursor_follow = selected_after
+                                .is_none()
+                                .then(|| {
+                                    output.cursor_range.map(|range| {
+                                        source_line_range_at_char(text, range.primary.index.0)
+                                    })
+                                })
+                                .flatten();
+                        } else if self.doc.preview_mode == PreviewMode::Split {
+                            selected_after = output_selection(text, &output).or_else(|| {
+                                editor_selection(ui.ctx(), text).filter(|range| !range.is_empty())
                             });
                         }
                     });
@@ -829,6 +867,15 @@ impl DraftPage<'_> {
             let normalized = export::normalize_ordered_list_punctuation(text);
             if normalized != *text {
                 *text = normalized;
+            }
+        }
+        if self.doc.preview_mode == PreviewMode::Split {
+            if self.doc.preview_selection != selected_after {
+                self.doc.preview_selection = selected_after;
+                ui.ctx().request_repaint();
+            }
+            if self.doc.preview_selection.is_some() {
+                self.doc.pending_render_jump = false;
             }
         }
         if let Some(range) = cursor_follow {
@@ -876,6 +923,7 @@ impl DraftPage<'_> {
     pub(crate) fn switch_preview_mode(&mut self, mode: PreviewMode) {
         if self.doc.preview_mode == PreviewMode::Split && mode != PreviewMode::Split {
             self.doc.preview_anchor = None;
+            self.doc.preview_selection = None;
             self.doc.preview_cursor_line = None;
         }
         self.doc.preview_mode = mode;
@@ -891,16 +939,24 @@ impl DraftPage<'_> {
     /// 公文版式预览。正文为空时也照排——红头、密级、文号、主送、落款这些
     /// 行文要素来自表单，填完就能先看版式。
     pub(crate) fn markdown_render(&mut self, ui: &mut egui::Ui) {
+        let selection = (self.doc.preview_mode == PreviewMode::Split)
+            .then(|| self.doc.preview_selection.clone())
+            .flatten()
+            .filter(|range| {
+                !range.is_empty() && self.doc.generated_markdown.get(range.clone()).is_some()
+            });
+        preview::set_text_selection(ui.ctx(), &self.doc.generated_markdown, selection.clone());
         let scrolled = egui::ScrollArea::both()
             .id_salt("render_scroll")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 let display = UnitDisplay::new(&self.config.vocabulary);
-                let anchor = self
-                    .doc
-                    .preview_anchor
-                    .as_ref()
-                    .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown));
+                let anchor = selection.or_else(|| {
+                    self.doc
+                        .preview_anchor
+                        .as_ref()
+                        .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown))
+                });
 
                 // 宽度还在变的帧里不重排版面，缩放交给层变换（见 `preview::freeze`）。
                 let frozen = preview::show_frozen(
@@ -931,6 +987,7 @@ impl DraftPage<'_> {
                 // 点中版式上的某一块：源码里同步高亮，并把光标带过去。
                 if let Some(range) = output.clicked {
                     let line_start = range.start;
+                    self.doc.preview_selection = None;
                     self.doc.pending_source_selection = None;
                     self.doc.pending_source_jump = Some(line_start);
                     self.doc.preview_anchor =
@@ -946,6 +1003,7 @@ impl DraftPage<'_> {
                 }
                 ui.add_space(12.0);
             });
+        preview::set_text_selection(ui.ctx(), &self.doc.generated_markdown, None);
         // 右缘导航刻度要把标题的版面位置换算成刻度条上的位置，量度只有滚动区知道。
         self.doc.preview_scroll = PreviewScroll {
             offset_y: scrolled.state.offset.y,

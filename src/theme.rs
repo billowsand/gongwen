@@ -1236,6 +1236,29 @@ pub mod md {
     pub fn anchor_bg() -> Color32 {
         current().md.anchor_bg
     }
+    /// Markdown 分栏模式的文字选区。按同步锚点的色相选另一组颜色，
+    /// 避免两种含义叠在一起时分不清实际选中了哪些字。
+    pub fn selection_bg() -> Color32 {
+        let anchor = current().md.anchor_bg;
+        let dark = current().dark;
+        if anchor.g() > anchor.r() && anchor.g() > anchor.b() {
+            if dark {
+                Color32::from_rgb(0x53, 0x3D, 0x68)
+            } else {
+                Color32::from_rgb(0xDF, 0xCB, 0xF3)
+            }
+        } else if anchor.b() > anchor.r() {
+            if dark {
+                Color32::from_rgb(0x64, 0x49, 0x28)
+            } else {
+                Color32::from_rgb(0xF5, 0xD3, 0xA2)
+            }
+        } else if dark {
+            Color32::from_rgb(0x28, 0x49, 0x6A)
+        } else {
+            Color32::from_rgb(0xB9, 0xD8, 0xF5)
+        }
+    }
     /// 查找条的普通命中；当前命中仍用更醒目的 `anchor_bg`。
     pub fn search_bg() -> Color32 {
         current().md.search_bg
