@@ -1357,7 +1357,14 @@ pub(crate) fn paint_red_print_pages(
                     top_left,
                     egui::vec2(fragment.width, fragment.visible_height),
                 );
+                let text_selected = super::layout::has_text_selection(ui.ctx());
                 if !fragment.source_segments.is_empty() {
+                    let selected_chars = super::layout::selected_chars_for_segments(
+                        ui.ctx(),
+                        // 避头尾排版插入了硬换行；段内字符下标按原文数，得剔掉它们。
+                        &fragment.galley.job.text.replace('\n', ""),
+                        &fragment.source_segments,
+                    );
                     let mut row_start = 0usize;
                     for (row_index, (placed, row_galley)) in fragment
                         .galley
@@ -1389,7 +1396,8 @@ pub(crate) fn paint_red_print_pages(
                                 })
                                 .map(|segment| segment.source.clone()),
                         );
-                        for segment in &fragment.source_segments {
+                        for (segment_index, segment) in fragment.source_segments.iter().enumerate()
+                        {
                             let start = segment.chars.start.max(row_start);
                             let end = segment.chars.end.min(row_end);
                             if start >= end {
@@ -1432,11 +1440,12 @@ pub(crate) fn paint_red_print_pages(
                             if response.hovered() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
-                            let anchored = anchor.is_some_and(|anchor| {
-                                !anchor.is_empty()
-                                    && anchor.start < segment.source.end
-                                    && segment.source.start < anchor.end
-                            });
+                            let anchored = !text_selected
+                                && anchor.is_some_and(|anchor| {
+                                    !anchor.is_empty()
+                                        && anchor.start < segment.source.end
+                                        && segment.source.start < anchor.end
+                                });
                             if anchored && *scroll_to_anchor {
                                 scroll_preview_to_rect(ui, line_rect);
                                 *scroll_to_anchor = false;
@@ -1453,6 +1462,17 @@ pub(crate) fn paint_red_print_pages(
                                         theme::paper::hover_tint()
                                     },
                                 );
+                            }
+                            for selected in &selected_chars[segment_index] {
+                                let from = selected.start.max(start);
+                                let to = selected.end.min(end);
+                                if from < to {
+                                    ui.painter().rect_filled(
+                                        row_rect(from - row_start, to - row_start),
+                                        3.0,
+                                        theme::md::selection_bg(),
+                                    );
+                                }
                             }
                         }
                         row_start = row_end;
@@ -1483,9 +1503,12 @@ pub(crate) fn paint_red_print_pages(
                     if response.clicked() {
                         *clicked = Some(range.clone());
                     }
-                    let anchored = anchor.is_some_and(|anchor| {
-                        !anchor.is_empty() && anchor.start < range.end && range.start < anchor.end
-                    });
+                    let anchored = !text_selected
+                        && anchor.is_some_and(|anchor| {
+                            !anchor.is_empty()
+                                && anchor.start < range.end
+                                && range.start < anchor.end
+                        });
                     if anchored && *scroll_to_anchor {
                         scroll_preview_to_rect(ui, rect);
                         *scroll_to_anchor = false;
@@ -1595,9 +1618,12 @@ pub(crate) fn paint_red_print_pages(
                     if response.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    let anchored = anchor.is_some_and(|anchor| {
-                        !anchor.is_empty() && anchor.start < source.end && source.start < anchor.end
-                    });
+                    let anchored = !super::layout::has_text_selection(ui.ctx())
+                        && anchor.is_some_and(|anchor| {
+                            !anchor.is_empty()
+                                && anchor.start < source.end
+                                && source.start < anchor.end
+                        });
                     if anchored && *scroll_to_anchor {
                         scroll_preview_to_rect(ui, row_rect);
                         *scroll_to_anchor = false;

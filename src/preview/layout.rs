@@ -55,6 +55,23 @@ fn text_selection(ui: &egui::Ui) -> Option<Arc<PreviewTextSelection>> {
         .data(|data| data.get_temp::<Arc<PreviewTextSelection>>(selection_id()))
 }
 
+/// 各源码段里被选中的纸面字符范围；没有文字选区时每段都是空。
+pub(super) fn selected_chars_for_segments(
+    ctx: &egui::Context,
+    rendered: &str,
+    segments: &[ClickableSourceSegment],
+) -> Vec<Vec<Range<usize>>> {
+    let selection = ctx.data(|data| data.get_temp::<Arc<PreviewTextSelection>>(selection_id()));
+    segments
+        .iter()
+        .map(|segment| {
+            selection.as_ref().map_or_else(Vec::new, |selection| {
+                selected_visible_chars(selection, rendered, segment)
+            })
+        })
+        .collect()
+}
+
 pub(super) fn has_text_selection(ctx: &egui::Context) -> bool {
     ctx.data(|data| {
         data.get_temp::<Arc<PreviewTextSelection>>(selection_id())
