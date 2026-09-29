@@ -2156,8 +2156,11 @@ mod split_resize_tests {
             .read_response(egui::Id::new("gw_source_minimap"))
             .expect("源码模式应显示缩略图")
             .rect;
-        let start = egui::pos2(rect.center().x, rect.top() + 48.0);
-        let edge = egui::pos2(start.x, rect.bottom() - 38.0);
+        // 可见框现在随正文视口等比缩放；从中心拖到下沿外 10 点，验证小幅越界
+        // 的速度，而不是依赖旧版固定 96 点高的可见框。
+        let half_box = harness.doc.source_minimap.viewport_height * 0.16 * 0.5;
+        let start = egui::pos2(rect.center().x, rect.top() + half_box);
+        let edge = egui::pos2(start.x, rect.bottom() - half_box + 10.0);
         frame(
             &mut harness,
             vec![

@@ -955,7 +955,7 @@ impl DraftPage<'_> {
         let source_scroll_request = source_mode
             .then(|| self.doc.source_minimap.requested_offset.take())
             .flatten();
-        let mut source_rows = Vec::new();
+        let mut source_content = crate::draft_page::source_nav::SourceMiniContent::default();
         // 行数必须在进入 ScrollArea 之前算：滚动方向上的 available_height
         // 是无穷大，拿进去算会得到 usize::MAX 行，整个界面将无法布局。
         let rows = visible_rows(ui);
@@ -1274,10 +1274,10 @@ impl DraftPage<'_> {
                             );
                         }
                         if source_mode {
-                            source_rows = crate::draft_page::source_nav::capture_source_rows(
+                            source_content = crate::draft_page::source_nav::capture_source_rows(
                                 text,
                                 &output,
-                                &self.doc.source_outline,
+                                clean_galley.borrow().clone(),
                             );
                         }
                         if let Some(range) = selection {
@@ -1330,9 +1330,9 @@ impl DraftPage<'_> {
                 .inner;
             if source_mode {
                 let first_layout =
-                    self.doc.source_minimap.rows.is_empty() && !source_rows.is_empty();
+                    self.doc.source_minimap.rows.is_empty() && !source_content.rows.is_empty();
                 self.doc.source_minimap.update(
-                    source_rows,
+                    source_content,
                     source_scroll.0,
                     source_scroll.1,
                     source_scroll.2,

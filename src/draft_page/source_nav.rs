@@ -10,11 +10,12 @@ use crate::theme;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
-const MINIMAP_WIDTH: f32 = 94.0;
+const MINIMAP_WIDTH: f32 = 132.0;
 const MINIMAP_SCALE: f32 = 0.16;
 const MINIMAP_BAR_WIDTH: f32 = 8.0;
-const MINIMAP_VIEWPORT_HEIGHT: f32 = 96.0;
+const MINIMAP_MARGIN: f32 = 5.0;
 /// 拖到缩略图边缘后的自动滚动：速度与越界距离成正比，并有上限，避免长稿飞页。
 const MINIMAP_EDGE_GAIN: f32 = 4.0;
 const MINIMAP_EDGE_MAX_SPEED: f32 = 240.0;
@@ -81,10 +82,6 @@ impl SourceOutline {
         self.entries
             .iter()
             .rposition(|entry| entry.line.start <= byte)
-    }
-
-    fn contains_heading_at(&self, byte: usize) -> bool {
-        self.entries.iter().any(|entry| entry.line.start == byte)
     }
 
     fn visible_indices(&self) -> Vec<usize> {
@@ -273,12 +270,15 @@ fn outline_row_ui(
 pub(crate) struct SourceMiniRow {
     pub(crate) top: f32,
     pub(crate) height: f32,
-    /// 行首缩进与行宽，都是占编辑器宽度的比例。
-    pub(crate) left: f32,
-    pub(crate) width: f32,
     pub(crate) source_offset: usize,
-    pub(crate) heading: bool,
-    pub(crate) blank: bool,
+}
+
+/// 保留高亮布局的共享引用，缩略图复用真实字形，不另外排版或模拟横条。
+#[derive(Debug, Default)]
+pub(crate) struct SourceMiniContent {
+    pub(crate) rows: Vec<SourceMiniRow>,
+    galley: Option<Arc<egui::Galley>>,
+    editor_width: f32,
 }
 
 #[derive(Debug, Default)]
@@ -290,6 +290,8 @@ pub(crate) struct SourceMinimap {
     pub(crate) offset: f32,
     pub(crate) requested_offset: Option<f32>,
     pub(crate) mini_scroll: f32,
+    galley: Option<Arc<egui::Galley>>,
+    editor_width: f32,
     last_editor_offset: Option<f32>,
     drag_anchor_y: f32,
     dragging: bool,
@@ -297,6 +299,7 @@ pub(crate) struct SourceMinimap {
 
 #[derive(Debug, Clone, Copy)]
 struct MiniLayout {
+    scale: f32,
     height: f32,
     map_height: f32,
     box_height: f32,
@@ -304,12 +307,21 @@ struct MiniLayout {
 }
 
 impl MiniLayout {
+    #[cfg(test)]
     fn new(map: &SourceMinimap, height: f32) -> Self {
+        Self::with_width(map, height, MINIMAP_WIDTH)
+    }
+
+    fn with_width(map: &SourceMinimap, height: f32, width: f32) -> Self {
         let height = height.max(1.0);
-        let box_height = MINIMAP_VIEWPORT_HEIGHT.min(height);
+        let usable = (width - MINIMAP_MARGIN - MINIMAP_BAR_WIDTH - 3.0).max(1.0);
+        // 横纵使用同一倍率，宽窗口也能容纳整行，中文不会被压成窄条。
+        let scale = MINIMAP_SCALE.min(usable / map.editor_width.max(1.0));
+        let box_height = (map.viewport_height * scale).clamp(1.0, height);
         Self {
+            scale,
             height,
-            map_height: (map.content_height * MINIMAP_SCALE).max(box_height),
+            map_height: (map.content_height * scale).max(box_height),
             box_height,
             editor_max: (map.content_height - map.viewport_height).max(0.0),
         }
@@ -398,16 +410,18 @@ impl SourceMinimap {
 
     pub(crate) fn update(
         &mut self,
-        mut rows: Vec<SourceMiniRow>,
+        mut content: SourceMiniContent,
         offset: f32,
         content_height: f32,
         viewport_top: f32,
         viewport_height: f32,
     ) {
-        for row in &mut rows {
+        for row in &mut content.rows {
             row.top = row.top - viewport_top + offset;
         }
-        self.rows = rows;
+        self.rows = content.rows;
+        self.galley = content.galley;
+        self.editor_width = content.editor_width;
         self.offset = offset;
         self.content_height = content_height.max(viewport_height);
         self.viewport_height = viewport_height;
@@ -417,29 +431,66 @@ impl SourceMinimap {
 pub(crate) fn capture_source_rows(
     text: &str,
     output: &egui::text_edit::TextEditOutput,
-    outline: &SourceOutline,
-) -> Vec<SourceMiniRow> {
+    galley: Option<Arc<egui::Galley>>,
+) -> SourceMiniContent {
     let ranges = line_ranges(text);
     let editor_width = output.response.rect.width().max(1.0);
     let mut source_line = 0usize;
     let mut rows = Vec::with_capacity(output.galley.rows.len());
     for placed in &output.galley.rows {
         let line_start = ranges[source_line.min(ranges.len() - 1)].start;
-        let left = placed.glyphs.first().map_or(0.0, |glyph| glyph.pos.x);
         rows.push(SourceMiniRow {
             top: output.galley_pos.y + placed.pos.y,
             height: placed.size.y,
-            left: (left / editor_width).clamp(0.0, 1.0),
-            width: ((placed.size.x - left).max(0.0) / editor_width).clamp(0.0, 1.0),
             source_offset: line_start,
-            heading: outline.contains_heading_at(line_start),
-            blank: placed.glyphs.is_empty(),
         });
         if placed.ends_with_newline {
             source_line += 1;
         }
     }
-    rows
+    SourceMiniContent {
+        rows,
+        galley,
+        editor_width,
+    }
+}
+
+/// 只缩放当前小地图范围内的字形网格；全文仍共享编辑器布局，长稿不会复制
+/// 所有字形。交给 TextShape 在帧末处理字体纹理坐标，避免图集增长后采样错位。
+fn minimap_text_shape(
+    map: &SourceMinimap,
+    layout: MiniLayout,
+    rect: egui::Rect,
+) -> Option<egui::epaint::TextShape> {
+    let galley = map.galley.as_ref()?;
+    let first = map
+        .rows
+        .partition_point(|row| (row.top + row.height) * layout.scale < map.mini_scroll);
+    let end = map
+        .rows
+        .partition_point(|row| row.top * layout.scale <= map.mini_scroll + layout.height);
+    let visible = galley.rows.get(first..end)?;
+    if visible.is_empty() {
+        return None;
+    }
+    let mut mini = (**galley).clone();
+    mini.rows = visible.to_vec();
+    mini.num_vertices = visible
+        .iter()
+        .map(|row| row.visuals.mesh.vertices.len())
+        .sum();
+    mini.num_indices = visible
+        .iter()
+        .map(|row| row.visuals.mesh.indices.len())
+        .sum();
+    let mut shape = egui::epaint::TextShape::new(egui::Pos2::ZERO, Arc::new(mini), theme::text());
+    shape.transform(egui::emath::TSTransform::from_scaling(layout.scale));
+    let galley_top = map.rows.first()?.top;
+    shape.pos = egui::pos2(
+        rect.left() + MINIMAP_MARGIN,
+        rect.top() + galley_top * layout.scale - map.mini_scroll,
+    );
+    Some(shape)
 }
 
 impl DraftPage<'_> {
@@ -565,7 +616,7 @@ impl DraftPage<'_> {
             egui::Sense::click_and_drag(),
         );
         let map = &mut self.doc.source_minimap;
-        let layout = MiniLayout::new(map, rect.height());
+        let layout = MiniLayout::with_width(map, rect.height(), rect.width());
         map.follow_editor(layout);
         if response.hovered() {
             let wheel = ui.input(|input| input.smooth_scroll_delta.y);
@@ -609,48 +660,23 @@ impl DraftPage<'_> {
         }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, theme::surface());
-        // 每个视觉行画成与正文行等比缩小的实心条：行与行首尾相接，像 Sublime
-        // 那样和左侧正文一一对应，不再是稀疏的细线。
-        let margin = 4.0;
-        let usable = (rect.width() - margin - MINIMAP_BAR_WIDTH - 3.0).max(1.0);
-        let first = map
-            .rows
-            .partition_point(|row| (row.top + row.height) * MINIMAP_SCALE < map.mini_scroll);
-        for row in map.rows[first..].iter() {
-            let y = row.top * MINIMAP_SCALE - map.mini_scroll;
-            if y > rect.height() {
-                break;
-            }
-            if row.blank {
-                continue;
-            }
-            let pitch = (row.height * MINIMAP_SCALE).max(1.0);
-            let bar_height = if row.heading {
-                (pitch * 0.9).max(2.0)
-            } else {
-                (pitch * 0.68).max(1.5)
-            };
-            let x0 = rect.left() + margin + usable * row.left.clamp(0.0, 0.95);
-            let x1 = (x0 + (usable * row.width).max(if row.heading { 8.0 } else { 3.0 }))
-                .min(rect.left() + margin + usable);
-            let color = if row.heading {
-                theme::accent()
-            } else {
-                theme::text_muted().gamma_multiply(0.5)
-            };
-            let bar = egui::Rect::from_min_max(
-                egui::pos2(x0, rect.top() + y + (pitch - bar_height) * 0.5),
-                egui::pos2(x1, rect.top() + y + (pitch + bar_height) * 0.5),
-            );
-            painter.rect_filled(bar, 0.0, color);
-        }
         let top = rect.top() + layout.box_top(map.requested_offset.unwrap_or(map.offset))
             - map.mini_scroll;
         let viewport = egui::Rect::from_min_size(
             egui::pos2(rect.left(), top),
             egui::vec2(rect.width() - MINIMAP_BAR_WIDTH - 2.0, layout.box_height),
         );
-        painter.rect_filled(viewport, 0.0, theme::accent_soft().gamma_multiply(0.55));
+        // 可见框先铺底，真实字形后画，避免透明蒙层冲淡缩小后的笔画。
+        painter.rect_filled(viewport, 0.0, theme::accent_soft().gamma_multiply(0.4));
+        if let Some(shape) = minimap_text_shape(map, layout, rect) {
+            painter.add(shape);
+        }
+        painter.rect_stroke(
+            viewport,
+            0.0,
+            egui::Stroke::new(1.0, theme::accent().gamma_multiply(0.45)),
+            egui::StrokeKind::Inside,
+        );
 
         // 右侧细滚动条：对应整篇正文，独立于缩略图自己的滚动。
         let track = egui::Rect::from_min_max(
@@ -698,7 +724,8 @@ impl DraftPage<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MiniLayout, OutlineNode, SourceMiniRow, SourceMinimap, SourceOutline, outline_row_ui,
+        MiniLayout, OutlineNode, SourceMiniRow, SourceMinimap, SourceOutline, minimap_text_shape,
+        outline_row_ui,
     };
     use crate::draft_page::navigator;
     use crate::models::{HeadingNumbering, NumberingConfig, TemplateKind};
@@ -909,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn minimap_keeps_a_fixed_viewport_and_scrolls_past_the_panel_height() {
+    fn minimap_viewport_matches_text_scale_and_scrolls_past_the_panel_height() {
         let mut map = SourceMinimap {
             content_height: 12_000.0,
             viewport_height: 600.0,
@@ -927,6 +954,94 @@ mod tests {
         map.mini_scroll = 0.0;
         map.follow_editor(layout);
         assert_eq!(map.mini_scroll, 0.0, "用户滚动缩略图后不应被自动拉回");
+
+        map.editor_width = 1_400.0;
+        let wide = MiniLayout::new(&map, 500.0);
+        assert!(wide.scale < layout.scale, "宽正文应等比缩小以保留完整行");
+        assert!((wide.box_height - map.viewport_height * wide.scale).abs() < 0.01);
+        assert!((wide.box_top(5_700.0) - 5_700.0 * wide.scale).abs() < 0.01);
+    }
+
+    #[test]
+    fn minimap_preserves_glyphs_spaces_colors_and_only_scales_visible_rows() {
+        let ctx = egui::Context::default();
+        crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let mut galley = None;
+        let heading_color = egui::Color32::from_rgb(70, 100, 180);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                "## 项目安排\n\n",
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(20.0), heading_color),
+            );
+            job.append(
+                &"  - 推进重点工作，保留缩进与字形。\n".repeat(100),
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(18.0), egui::Color32::GRAY),
+            );
+            job.wrap.max_width = 400.0;
+            galley = Some(ui.painter().layout_job(job));
+        });
+        let galley = galley.unwrap();
+        let original_height = galley.rows[0].size.y;
+        let map = SourceMinimap {
+            rows: galley
+                .rows
+                .iter()
+                .map(|row| SourceMiniRow {
+                    top: row.pos.y + 6.0,
+                    height: row.size.y,
+                    ..Default::default()
+                })
+                .collect(),
+            content_height: galley.size().y,
+            viewport_height: 300.0,
+            editor_width: 400.0,
+            galley: Some(galley.clone()),
+            ..Default::default()
+        };
+        let rect = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(132.0, 120.0));
+        let layout = MiniLayout::with_width(&map, rect.height(), rect.width());
+        let shape = minimap_text_shape(&map, layout, rect).unwrap();
+        assert!(shape.galley.rows.len() < galley.rows.len());
+        assert_eq!(shape.galley.rows[0].text(), "## 项目安排");
+        assert!(shape.galley.rows[1].glyphs.is_empty());
+        assert!(shape.galley.rows[2].text().starts_with("  - "));
+        for (small, original) in shape.galley.rows.iter().zip(&galley.rows) {
+            for (a, b) in small
+                .visuals
+                .mesh
+                .vertices
+                .iter()
+                .zip(&original.visuals.mesh.vertices)
+            {
+                assert_eq!(a.color, b.color);
+                assert_eq!(a.uv, b.uv, "字体纹理坐标由帧末的文字渲染器处理");
+                assert!(a.pos.distance((b.pos.to_vec2() * layout.scale).to_pos2()) < 0.001);
+            }
+        }
+        assert!(
+            shape.galley.rows[0]
+                .visuals
+                .mesh
+                .vertices
+                .iter()
+                .any(|v| v.color == heading_color)
+        );
+        assert!((shape.pos.y - rect.top() - 6.0 * layout.scale).abs() < 0.001);
+        assert_eq!(
+            galley.rows[0].size.y, original_height,
+            "缩略图不能改动编辑器的共享布局"
+        );
+
+        let scrolled = SourceMinimap {
+            mini_scroll: 200.0,
+            ..map
+        };
+        let shape = minimap_text_shape(&scrolled, layout, rect).unwrap();
+        assert!(shape.galley.rows[0].pos.y > 0.0, "滚动后只保留后段字形");
+        assert!(shape.galley.rows[0].pos.y + shape.pos.y <= rect.top());
     }
 
     #[test]
