@@ -42,12 +42,7 @@ pub(crate) fn add_smart_table(
     if grid.is_empty() {
         return doc;
     }
-    // 规格 §6：表头含“姓名/联系人”的列，非表头单元格按版记的方式处理姓名宽度。
-    let name_column = rows.first().and_then(|header| {
-        header
-            .iter()
-            .position(|cell| cell.contains("姓名") || cell.contains("联系人"))
-    });
+    let name_column = crate::export::table::name_column(rows);
 
     let table_rows = rows
         .iter()

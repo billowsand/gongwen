@@ -12,6 +12,8 @@ use crate::export::{ColumnAlign, MarkdownBlock, MarkdownSection, TableSpan};
 pub(crate) struct TableColumn {
     /// 占版心宽度的比例，各列相加为 1。
     pub(crate) fraction: f32,
+    /// 导出时的列宽（twip）：居中格的压缩、换行按它判定，预览与导出同一口径。
+    pub(crate) twips: usize,
     pub(crate) alignment: table::ColumnAlignment,
 }
 
@@ -32,6 +34,7 @@ pub(crate) fn table_columns(
         .enumerate()
         .map(|(index, width)| TableColumn {
             fraction: *width as f32 / total,
+            twips: *width,
             alignment: alignments
                 .get(index)
                 .copied()

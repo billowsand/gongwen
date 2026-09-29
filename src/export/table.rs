@@ -618,12 +618,7 @@ pub(super) fn to_longtblr(
     if rows.is_empty() || columns.is_empty() {
         return String::new();
     }
-    // 规格 §6：表头含“姓名/联系人”的列，非表头单元格按版记的方式处理姓名宽度。
-    let name_column = rows.first().and_then(|header| {
-        header
-            .iter()
-            .position(|cell| cell.contains("姓名") || cell.contains("联系人"))
-    });
+    let name_column = name_column(rows);
     let colspec = columns
         .iter()
         .map(|column| {
@@ -710,20 +705,17 @@ pub(super) fn to_longtblr(
                     row_index,
                     column_index,
                 );
-                let plain = plain_cell_text(cell);
+                let column_span = span.map_or(1, |span| span.column_span);
+                let width = grid
+                    .iter()
+                    .skip(column_index)
+                    .take(column_span)
+                    .sum::<usize>();
                 if cell_align == ColumnAlignment::Center
-                    && !is_name
-                    && !cell.contains("**")
-                    && !plain.is_empty()
+                    && let Some(plan) = centered_cell_plan(cell, is_name, width)
                 {
-                    let column_span = span.map_or(1, |span| span.column_span);
-                    let width = grid
-                        .iter()
-                        .skip(column_index)
-                        .take(column_span)
-                        .sum::<usize>();
                     let font = if row_index == 0 { "\\heiti\\enheiti " } else { "" };
-                    match super::title::cell_plan(&plain, width, super::docx::TABLE_SIZE * 10) {
+                    match plan {
                         (super::title::TitlePlan::SingleLine, _) => {}
                         (super::title::TitlePlan::Compressed, scale) => {
                             content = format!(
@@ -798,6 +790,34 @@ pub(super) fn to_longtblr(
     }
     output.push_str("\\end{longtblr}");
     output
+}
+
+/// 规格 §6：表头含“姓名/联系人”的列，非表头单元格按版记的方式处理姓名宽度。
+pub(crate) fn name_column(rows: &[Vec<String>]) -> Option<usize> {
+    rows.first().and_then(|header| {
+        header
+            .iter()
+            .position(|cell| cell.contains("姓名") || cell.contains("联系人"))
+    })
+}
+
+/// 居中格的排布，与主标题同一套：多出 1–2 字横向压缩，再多按分词均衡换行。
+/// 姓名格、带加粗标记的格、空格不处理（`None`）。`width_twips` 是这一格
+/// （含横向合并的各列）在智能列宽里的宽度。TeX 与预览共用这条判定。
+pub(crate) fn centered_cell_plan(
+    cell: &str,
+    is_name: bool,
+    width_twips: usize,
+) -> Option<(super::title::TitlePlan, usize)> {
+    let plain = plain_cell_text(cell);
+    if is_name || cell.contains("**") || plain.is_empty() {
+        return None;
+    }
+    Some(super::title::cell_plan(
+        &plain,
+        width_twips,
+        super::docx::TABLE_SIZE * 10,
+    ))
 }
 
 /// 数据行单元格的 TeX：先按花脸稿哨兵切块，块内再走加粗逻辑；

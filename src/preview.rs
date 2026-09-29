@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 
 mod cull;
+mod fit;
 mod freeze;
 mod gutter;
 mod header;
@@ -1507,6 +1508,50 @@ mod tests {
                 "标题“{title}”应相对版心居中：实际中心 {center:.1}，期望 {expected:.1}（{bounds:?}）"
             );
         }
+    }
+
+    #[test]
+    fn document_titles_wrap_at_words_like_the_export() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let available = 1000.0;
+        let metrics = Metrics::new(available, Some(1.0));
+        let draw = |title: &str| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(available, 1200.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| fit::title_block(ui, &metrics, title))
+        };
+        let per_line = export::title::chars_per_line();
+        // 排出来的行数：按 galley 的行数，不按文本图形个数（一个标题只一个图形）。
+        let galley_rows = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(shape) => Some(shape.galley.rows.len()),
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+
+        // 超出较多：与导出在同一处按词断行。
+        let long = "关于进一步加强全市基层治理体系和治理能力现代化建设的实施方案";
+        let export::title::TitlePlan::Wrapped(lines) = export::title::title_plan(long, per_line)
+        else {
+            panic!("应分行");
+        };
+        let output = draw(long);
+        assert_eq!(text_of(&output), lines.join("\n"));
+        assert_eq!(
+            galley_rows(&output),
+            lines.len(),
+            "各行都放得下，不应再被折行"
+        );
     }
 
     #[test]

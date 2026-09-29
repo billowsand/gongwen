@@ -13,9 +13,9 @@ use crate::preview::layout::{MeasuredTable, measure_table};
 use crate::preview::marks;
 use crate::preview::render::{anchored, block_key};
 use crate::preview::{
-    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, TITLE_PT,
-    clickable, clickable_content_block, document_number, first_ink, header_unit, heading_family,
-    indent, is_renderable_paragraph, job, justified_rows, layout, line_block, row_tint_offset,
+    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, clickable,
+    clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
+    is_renderable_paragraph, job, justified_rows, layout, line_block, row_tint_offset,
     scroll_preview_to_rect, sheet, signature_date, single_line, text_format,
 };
 use crate::theme;
@@ -612,6 +612,19 @@ pub(crate) fn red_fixed_fragment(
         text_format(metrics.font(family, size), metrics.line),
     );
     let galley = layout(ui, job);
+    red_galley_fragment(metrics, galley, width, align, range, x, y)
+}
+
+/// 已排好的 galley 按固定位置落成一段：锚点语义同 [`red_fixed_fragment`]。
+fn red_galley_fragment(
+    metrics: &Metrics,
+    galley: Arc<egui::Galley>,
+    width: f32,
+    align: Align,
+    range: Option<Range<usize>>,
+    x: f32,
+    y: f32,
+) -> RedPrintFragment {
     RedPrintFragment {
         range,
         source_segments: Vec::new(),
@@ -717,12 +730,24 @@ pub(crate) fn red_build_print_layout(
     let mut state = RedPrintLayout::new(metrics.mm(37.0 + 55.0), first_body_bottom);
 
     if !title.0.is_empty() {
-        let fragment = red_fixed_fragment(
+        // 与导出同一套排布：窄栏里多出 1–2 字横向压缩，再多按分词均衡换行。
+        let fit = super::fit::red_approval_title(ui.ctx(), &title.0);
+        let galley = super::fit::centered_galley(
             ui,
             metrics,
-            &title.0,
-            theme::FONT_BIAOSONG,
-            18.0,
+            &fit,
+            text_format(
+                metrics.font(
+                    theme::FONT_BIAOSONG,
+                    export::title::RED_APPROVAL_TITLE_SIZE_PT as f32,
+                ),
+                metrics.line,
+            ),
+            narrow,
+        );
+        let fragment = red_galley_fragment(
+            metrics,
+            galley,
             narrow,
             Align::Center,
             Some(title.1.clone()),
@@ -1751,14 +1776,7 @@ pub(crate) fn red_approval_print_preview(
                         scroll_to_anchor,
                         clicked,
                         |ui| {
-                            line_block(
-                                ui,
-                                metrics,
-                                &marks::plain_keep_marks(text),
-                                theme::FONT_BIAOSONG,
-                                TITLE_PT,
-                                Align::Center,
-                            );
+                            super::fit::title_block(ui, metrics, &marks::plain_keep_marks(text));
                             ui.add_space(metrics.pt(18.0));
                         },
                     );

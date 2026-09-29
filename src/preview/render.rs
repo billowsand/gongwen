@@ -13,11 +13,11 @@ use crate::preview::gutter;
 use crate::preview::marks;
 use crate::preview::pdf_figure;
 use crate::preview::{
-    BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, TITLE_PT,
-    addressee_block, aligned_block, append_inline_with_bold_ranges, body_block, clickable,
-    clickable_body_block, clickable_justified_job, draw_justified_with_bold, footer_record,
-    header_block, heading_family, indent, is_renderable_paragraph, job, line_block, place,
-    red_approval_print_preview, sheet, signature_block, table_block, text_format,
+    BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, addressee_block,
+    aligned_block, append_inline_with_bold_ranges, body_block, clickable, clickable_body_block,
+    clickable_justified_job, draw_justified_with_bold, footer_record, header_block, heading_family,
+    indent, is_renderable_paragraph, job, line_block, place, red_approval_print_preview, sheet,
+    signature_block, table_block, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -491,14 +491,8 @@ pub(crate) fn official_preview(
                 &mut scroll_to_anchor,
                 &mut clicked,
                 |ui| {
-                    line_block(
-                        ui,
-                        &metrics,
-                        &title,
-                        theme::FONT_BIAOSONG,
-                        TITLE_PT,
-                        Align::Center,
-                    );
+                    // 与导出同一套排布：多出 1–2 字横向压缩，再多按分词均衡换行。
+                    crate::preview::fit::title_block(ui, &metrics, &title);
                 },
             );
         }
@@ -575,13 +569,10 @@ pub(crate) fn official_preview(
                         &mut scroll_to_anchor,
                         &mut clicked,
                         |ui| {
-                            line_block(
+                            crate::preview::fit::title_block(
                                 ui,
                                 &metrics,
                                 &marks::plain_keep_marks(text),
-                                theme::FONT_BIAOSONG,
-                                TITLE_PT,
-                                Align::Center,
                             );
                             ui.add_space(metrics.pt(18.0));
                         },
