@@ -13,6 +13,7 @@ use std::hash::{Hash, Hasher};
 
 const MINIMAP_WIDTH: f32 = 94.0;
 const MINIMAP_SCALE: f32 = 0.16;
+const MINIMAP_BAR_WIDTH: f32 = 8.0;
 const MINIMAP_VIEWPORT_HEIGHT: f32 = 96.0;
 /// 拖到缩略图边缘后的自动滚动：速度与越界距离成正比，并有上限，避免长稿飞页。
 const MINIMAP_EDGE_GAIN: f32 = 4.0;
@@ -271,6 +272,9 @@ fn outline_row_ui(
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SourceMiniRow {
     pub(crate) top: f32,
+    pub(crate) height: f32,
+    /// 行首缩进与行宽，都是占编辑器宽度的比例。
+    pub(crate) left: f32,
     pub(crate) width: f32,
     pub(crate) source_offset: usize,
     pub(crate) heading: bool,
@@ -421,9 +425,12 @@ pub(crate) fn capture_source_rows(
     let mut rows = Vec::with_capacity(output.galley.rows.len());
     for placed in &output.galley.rows {
         let line_start = ranges[source_line.min(ranges.len() - 1)].start;
+        let left = placed.glyphs.first().map_or(0.0, |glyph| glyph.pos.x);
         rows.push(SourceMiniRow {
             top: output.galley_pos.y + placed.pos.y,
-            width: (placed.size.x / editor_width).clamp(0.0, 1.0),
+            height: placed.size.y,
+            left: (left / editor_width).clamp(0.0, 1.0),
+            width: ((placed.size.x - left).max(0.0) / editor_width).clamp(0.0, 1.0),
             source_offset: line_start,
             heading: outline.contains_heading_at(line_start),
             blank: placed.glyphs.is_empty(),
@@ -450,23 +457,42 @@ impl DraftPage<'_> {
         let show_outline = self.config.show_source_outline
             && available >= if show_minimap { 600.0 } else { 450.0 };
         self.doc.source_minimap.visible = show_minimap;
-        if show_minimap {
-            egui::Panel::right("source_minimap_v1")
-                .default_size(MINIMAP_WIDTH)
-                .resizable(false)
-                .frame(theme::pane().inner_margin(egui::Margin::symmetric(4, theme::PANE_PADDING)))
-                .show(ui, |ui| self.source_minimap_ui(ui));
-        }
-        if show_outline {
-            egui::Panel::left("source_outline_v1")
-                .default_size(OUTLINE_WIDTH)
-                .size_range(160.0..=300.0)
-                .frame(theme::pane().inner_margin(egui::Margin::symmetric(4, theme::PANE_PADDING)))
-                .show(ui, |ui| self.source_outline_ui(ui));
-        }
-        egui::CentralPanel::default()
-            .frame(theme::pane())
-            .show(ui, |ui| self.markdown_editor(ui));
+        // 大纲、正文、小地图共用同一张卡片，之间不留缝，像 Sublime 一样贴着正文。
+        let pad = theme::PANE_PADDING;
+        let card = theme::pane().inner_margin(egui::Margin {
+            left: if show_outline { 0 } else { pad },
+            right: if show_minimap { 0 } else { pad },
+            top: pad,
+            bottom: pad,
+        });
+        egui::CentralPanel::default().frame(card).show(ui, |ui| {
+            if show_outline {
+                egui::Panel::left("source_outline_v1")
+                    .default_size(OUTLINE_WIDTH)
+                    .size_range(160.0..=300.0)
+                    .frame(egui::Frame::new().inner_margin(egui::Margin {
+                        left: pad,
+                        right: 4,
+                        top: 0,
+                        bottom: 0,
+                    }))
+                    .show(ui, |ui| self.source_outline_ui(ui));
+            }
+            if show_minimap {
+                egui::Panel::right("source_minimap_v1")
+                    .default_size(MINIMAP_WIDTH)
+                    .resizable(false)
+                    .frame(egui::Frame::new())
+                    .show_separator_line(false)
+                    .show(ui, |ui| self.source_minimap_ui(ui));
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    left: if show_outline { pad } else { 0 },
+                    ..egui::Margin::ZERO
+                }))
+                .show(ui, |ui| self.markdown_editor(ui));
+        });
     }
 
     fn source_outline_ui(&mut self, ui: &mut egui::Ui) {
@@ -583,57 +609,87 @@ impl DraftPage<'_> {
         }
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, theme::surface());
-        let buckets = (rect.height() * ui.ctx().pixels_per_point())
-            .ceil()
-            .max(1.0) as usize;
-        let mut marks = vec![(0.0f32, false); buckets];
-        for row in &map.rows {
+        // 每个视觉行画成与正文行等比缩小的实心条：行与行首尾相接，像 Sublime
+        // 那样和左侧正文一一对应，不再是稀疏的细线。
+        let margin = 4.0;
+        let usable = (rect.width() - margin - MINIMAP_BAR_WIDTH - 3.0).max(1.0);
+        let first = map
+            .rows
+            .partition_point(|row| (row.top + row.height) * MINIMAP_SCALE < map.mini_scroll);
+        for row in map.rows[first..].iter() {
+            let y = row.top * MINIMAP_SCALE - map.mini_scroll;
+            if y > rect.height() {
+                break;
+            }
             if row.blank {
                 continue;
             }
-            let y = row.top * MINIMAP_SCALE - map.mini_scroll;
-            if !(0.0..rect.height()).contains(&y) {
-                continue;
-            }
-            let index = ((y / rect.height() * buckets as f32) as usize).min(buckets - 1);
-            let mark = &mut marks[index];
-            mark.0 = mark.0.max(row.width.clamp(0.05, 1.0));
-            mark.1 |= row.heading;
-        }
-        let margin = 5.0;
-        let usable = (rect.width() - margin * 2.0).max(1.0);
-        let bucket_height = rect.height() / buckets as f32;
-        for (index, (width, heading)) in marks.into_iter().enumerate() {
-            if width == 0.0 {
-                continue;
-            }
-            let y = rect.top() + index as f32 * bucket_height;
-            let width = (usable * width).max(if heading { 8.0 } else { 3.0 });
-            let color = if heading {
+            let pitch = (row.height * MINIMAP_SCALE).max(1.0);
+            let bar_height = if row.heading {
+                (pitch * 0.9).max(2.0)
+            } else {
+                (pitch * 0.68).max(1.5)
+            };
+            let x0 = rect.left() + margin + usable * row.left.clamp(0.0, 0.95);
+            let x1 = (x0 + (usable * row.width).max(if row.heading { 8.0 } else { 3.0 }))
+                .min(rect.left() + margin + usable);
+            let color = if row.heading {
                 theme::accent()
             } else {
-                theme::text_muted().gamma_multiply(0.55)
+                theme::text_muted().gamma_multiply(0.5)
             };
-            painter.line_segment(
-                [
-                    egui::pos2(rect.left() + margin, y),
-                    egui::pos2(rect.left() + margin + width, y),
-                ],
-                egui::Stroke::new(if heading { 2.0 } else { 1.0 }, color),
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(x0, rect.top() + y + (pitch - bar_height) * 0.5),
+                egui::pos2(x1, rect.top() + y + (pitch + bar_height) * 0.5),
             );
+            painter.rect_filled(bar, 0.0, color);
         }
         let top = rect.top() + layout.box_top(map.requested_offset.unwrap_or(map.offset))
             - map.mini_scroll;
         let viewport = egui::Rect::from_min_size(
             egui::pos2(rect.left(), top),
-            egui::vec2(rect.width(), layout.box_height),
+            egui::vec2(rect.width() - MINIMAP_BAR_WIDTH - 2.0, layout.box_height),
         );
-        painter.rect_filled(viewport, 4.0, theme::accent_soft().gamma_multiply(0.65));
-        painter.rect_stroke(
-            viewport,
-            4.0,
-            egui::Stroke::new(1.0, theme::accent()),
-            egui::StrokeKind::Inside,
+        painter.rect_filled(viewport, 0.0, theme::accent_soft().gamma_multiply(0.55));
+
+        // 右侧细滚动条：对应整篇正文，独立于缩略图自己的滚动。
+        let track = egui::Rect::from_min_max(
+            egui::pos2(rect.right() - MINIMAP_BAR_WIDTH, rect.top()),
+            rect.right_bottom(),
+        );
+        let bar = ui.interact(
+            track,
+            egui::Id::new("gw_source_minimap_bar"),
+            egui::Sense::click_and_drag(),
+        );
+        let ratio = (map.viewport_height / map.content_height.max(1.0)).clamp(0.0, 1.0);
+        let thumb_height =
+            (track.height() * ratio).clamp(20.0_f32.min(track.height()), track.height());
+        let travel = (track.height() - thumb_height).max(0.0);
+        if (bar.dragged() || bar.clicked())
+            && layout.editor_max > 0.0
+            && travel > 0.0
+            && let Some(pointer) = bar.interact_pointer_pos()
+        {
+            let thumb_top = (pointer.y - track.top() - thumb_height * 0.5).clamp(0.0, travel);
+            map.requested_offset = Some(thumb_top / travel * layout.editor_max);
+            ui.ctx().request_repaint();
+        }
+        let shown = map.requested_offset.unwrap_or(map.offset);
+        let thumb_top = if layout.editor_max > 0.0 {
+            (shown / layout.editor_max).clamp(0.0, 1.0) * travel
+        } else {
+            0.0
+        };
+        let active = bar.hovered() || bar.dragged();
+        painter.rect_filled(track, 0.0, theme::text_muted().gamma_multiply(0.08));
+        painter.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(track.left() + 1.0, track.top() + thumb_top),
+                egui::vec2(track.width() - 2.0, thumb_height),
+            ),
+            2.0,
+            theme::text_muted().gamma_multiply(if active { 0.75 } else { 0.45 }),
         );
         response.on_hover_text("滚轮浏览全文；点击或拖动定位");
     }
