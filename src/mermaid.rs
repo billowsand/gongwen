@@ -1,9 +1,14 @@
-//! Mermaid 流程图的本机渲染与导出缓存。源码始终保留在 Markdown 中。
+//! Mermaid 图表的本机渲染与导出缓存。源码始终保留在 Markdown 中。
 //!
-//! 一张图的来路：merman 解析排版出 SVG（配色、线型取自 [`DiagramTheme`]，字体随
-//! 文种）→ 按实际字号把图摆到版心宽的画布上 → 用随包字体转 PNG（预览、Word）或
-//! PDF（TeX）。各导出器照旧把图片铺满画布，图内文字因此总是设定的字号：小图不会
-//! 被放大成大字，宽图、长图才整体缩小到版心以内。
+//! 一张图的来路：引擎解析排版出 SVG（配色取自 [`DiagramTheme`]，字体随文种）→
+//! 按实际字号把图摆到版心宽的画布上 → 用随包字体转 PNG（预览、Word）或 PDF（TeX）。
+//! 各导出器照旧把图片铺满画布，图内文字因此总是设定的字号：小图不会被放大成大字，
+//! 宽图、长图才整体缩小到版心以内。
+//!
+//! 图种按围栏首行路由到两个纯 Rust 引擎（都稳定版，不引浏览器）：
+//! - merman 0.7：flowchart / graph（泳道图用 subgraph 分组表达）；
+//! - mermaid-rs-renderer 0.2.2：sequenceDiagram、gantt、pie、sankey-beta、timeline、
+//!   radar-beta。它的 SVG 再经 [`fixup_mmdr_colors`] 把写死的引擎调色板换成当前配色。
 
 use crate::models::DiagramTheme;
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,10 +27,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const CACHE_DIR: &str = "mermaid-cache";
-/// 配色、字体、画布算法或 merman 版本变了都要改这里，旧缓存随之失效。
-const STYLE_VERSION: &str = "gongwen-mermaid-v2/merman-0.7";
+/// 配色、字体、画布算法或引擎版本变了都要改这里，旧缓存随之失效。
+const STYLE_VERSION: &str = "gongwen-mermaid-v3/mmdr-0.2.2";
 
-/// 排版用的字号（px）。merman 的内边距、节点间距是按 14–16px 的字定的，直接拿
+/// 排版用的字号（px）。两个引擎的内边距、节点间距是按 14–16px 的字定的，直接拿
 /// 9pt 去排，框会显得空；先按 14px 排，落画布时再整体缩到目标字号。
 const LAYOUT_FONT_PX: f64 = 14.0;
 /// PNG 的分辨率：Word 与预览共用，打印不发虚。
@@ -132,6 +137,9 @@ pub(crate) struct Palette {
     /// 子图（分组框）的底色与虚线框。
     pub cluster_fill: &'static str,
     pub cluster_stroke: &'static str,
+    /// 分类色：饼图扇区、桑基节点、时间线分区、雷达曲线按出现顺序循环取色。
+    /// 墨线/素灰给灰阶（黑白打印可辨），藏青/青瓷给同族色加米棕点缀。红色不用。
+    pub category: &'static [&'static str; 8],
 }
 
 pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
@@ -144,6 +152,10 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             decision: "#FFFFFF",
             cluster_fill: "#FFFFFF",
             cluster_stroke: "#808080",
+            category: &[
+                "#262626", "#4D4D4D", "#6E6E6E", "#8F8F8F", "#B0B0B0", "#5C5C5C", "#999999",
+                "#CFCFCF",
+            ],
         },
         DiagramTheme::Gray => Palette {
             fill: "#F2F2F2",
@@ -153,6 +165,10 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             decision: "#E1E1E1",
             cluster_fill: "#FAFAFA",
             cluster_stroke: "#A6A6A6",
+            category: &[
+                "#404040", "#606060", "#808080", "#A0A0A0", "#C0C0C0", "#505050", "#909090",
+                "#B0B0B0",
+            ],
         },
         DiagramTheme::Navy => Palette {
             fill: "#EAF0F7",
@@ -162,6 +178,10 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             decision: "#FBF2DE",
             cluster_fill: "#F6F8FB",
             cluster_stroke: "#8EA3BB",
+            category: &[
+                "#1F3A5F", "#3E5674", "#5F7BA0", "#8EA3BB", "#B9C8D8", "#8A7B52", "#B4A67F",
+                "#D8CC9F",
+            ],
         },
         DiagramTheme::Celadon => Palette {
             fill: "#E6F1ED",
@@ -171,6 +191,10 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             decision: "#F6F2E6",
             cluster_fill: "#F4F8F6",
             cluster_stroke: "#90B3A7",
+            category: &[
+                "#2E6A5A", "#4A7668", "#6FA394", "#9DC2B4", "#C9DED4", "#8A7B52", "#B4A67F",
+                "#D8CC9F",
+            ],
         },
     }
 }
@@ -351,6 +375,7 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
         decision,
         cluster_fill,
         cluster_stroke,
+        category: _,
     } = palette;
     // merman 按 SVG 根元素的 id 给这些规则加作用域，排在 Mermaid 自带样式之后，
     // 同权重下后写的生效。
@@ -410,21 +435,46 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
         .with_strict_parsing()
 }
 
-/// 首版只接流程图，且不让单张图改版式、引外部资源。
-fn check(source: &str) -> Result<()> {
-    let header = source
+/// 围栏首行决定走哪个引擎。merman 0.7 只认流程图；其余图种由
+/// mermaid-rs-renderer 渲染，它的主题字段在 Rust 里配置。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineKind {
+    Merman,
+    Mmdr,
+}
+
+/// 图头：第一个非空、非 `%%` 注释行的首词；空围栏返回空串。
+fn header(source: &str) -> &str {
+    source
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with("%%"))
-        .unwrap_or("");
-    if !matches!(
-        header.split_whitespace().next(),
-        Some("flowchart" | "graph")
-    ) {
-        bail!("首版 Mermaid 只支持 flowchart/graph 流程图");
+        .map(|line| line.split_whitespace().next().unwrap_or(""))
+        .unwrap_or("")
+}
+
+/// 按图头选引擎；不认识的图头返回 `None`。
+fn engine_kind(source: &str) -> Option<EngineKind> {
+    match header(source) {
+        "flowchart" | "graph" => Some(EngineKind::Merman),
+        "sequenceDiagram" | "gantt" | "pie" | "sankey-beta" | "timeline" | "radar-beta" => {
+            Some(EngineKind::Mmdr)
+        }
+        _ => None,
+    }
+}
+
+/// 不让单张图改版式、引外部资源；只放行已接入引擎的图种。
+fn check(source: &str) -> Result<()> {
+    if engine_kind(source).is_none() {
+        bail!(
+            "暂不支持的 Mermaid 图种「{}」：目前支持 flowchart/graph（含泳道分组）、\
+             sequenceDiagram、gantt、pie、sankey-beta、timeline、radar-beta",
+            header(source)
+        );
     }
     if source.contains("%%{") {
-        bail!("Mermaid 图内暂不支持 %%{{init}}%% 配置指令，样式在「流程图样式」里统一设置");
+        bail!("Mermaid 图内暂不支持 %%{{init}}%% 配置指令，样式在「图表样式」里统一设置");
     }
     for line in source.lines().map(str::trim) {
         if line == "click" || line.starts_with("click ") {
@@ -643,12 +693,100 @@ fn to_pdf(svg: &str) -> Result<Vec<u8>> {
     .map_err(|error| anyhow!("Mermaid PDF 渲染失败：{error}"))
 }
 
+/// 把当前配色翻译成 mermaid-rs-renderer 的 Theme。甘特、时间线、饼图直接读这些
+/// 字段；字号固定排版字号，落画布时再整体缩到目标字号（与 merman 路径一致）。
+fn mmdr_theme(palette: Palette, style: Style) -> mermaid_rs_renderer::Theme {
+    let mut theme = mermaid_rs_renderer::Theme::modern();
+    theme.font_family = style.font_family().to_string();
+    theme.font_size = LAYOUT_FONT_PX as f32;
+    theme.background = "#FFFFFF".to_string();
+    theme.primary_color = palette.fill.to_string();
+    theme.primary_border_color = palette.stroke.to_string();
+    theme.primary_text_color = palette.text.to_string();
+    theme.secondary_color = palette.decision.to_string();
+    theme.tertiary_color = palette.fill.to_string();
+    theme.text_color = palette.text.to_string();
+    theme.line_color = palette.line.to_string();
+    theme.edge_label_background = "#FFFFFF".to_string();
+    theme.cluster_background = palette.cluster_fill.to_string();
+    theme.cluster_border = palette.cluster_stroke.to_string();
+    theme.sequence_actor_fill = palette.fill.to_string();
+    theme.sequence_actor_border = palette.stroke.to_string();
+    theme.sequence_actor_line = palette.line.to_string();
+    theme.sequence_note_fill = palette.decision.to_string();
+    theme.sequence_note_border = palette.cluster_stroke.to_string();
+    theme.sequence_activation_fill = palette.fill.to_string();
+    theme.sequence_activation_border = palette.stroke.to_string();
+    // 饼图扇区按分类色循环；填色本来就浅，不再叠透明度，打印不发灰。
+    let mut pie_colors: [String; 12] =
+        std::array::from_fn(|index| palette.category[index % palette.category.len()].to_string());
+    pie_colors[..palette.category.len()].clone_from_slice(&palette.category.map(str::to_string));
+    theme.pie_colors = pie_colors;
+    theme.pie_opacity = 1.0;
+    theme.pie_stroke_color = palette.stroke.to_string();
+    theme.pie_outer_stroke_color = palette.stroke.to_string();
+    theme.pie_title_text_color = palette.text.to_string();
+    theme.pie_section_text_color = palette.text.to_string();
+    theme.pie_legend_text_color = palette.text.to_string();
+    theme.pie_title_text_size = 16.0;
+    theme.pie_section_text_size = 12.0;
+    theme.pie_legend_text_size = 12.0;
+    theme
+}
+
+/// mermaid-rs-renderer 0.2.2 的桑基节点色与雷达曲线色是引擎写死的调色板
+/// （含红/粉色，不合公文配色），按出现顺序整串替换成当前配色的分类色。
+/// 常量在锁定的 0.2.2 里是固定的；引擎升级时要重新核对这一段。
+fn fixup_mmdr_colors(svg: &str, source: &str, palette: Palette) -> String {
+    let mut out = svg.to_string();
+    match header(source) {
+        "sankey-beta" => {
+            const SANKEY_PALETTE: [&str; 10] = [
+                "#4e79a7", "#f28e2c", "#e15759", "#76b7b2", "#59a14f", "#edc949", "#af7aa1",
+                "#ff9da7", "#9c755f", "#bab0ab",
+            ];
+            for (index, color) in SANKEY_PALETTE.iter().enumerate() {
+                out = out.replace(color, palette.category[index % palette.category.len()]);
+            }
+            // 引擎默认链路半透明（0.5），白底上洗得发灰；配色本身已够轻，加深到 0.85。
+            out = out.replace("stroke-opacity=\"0.5\"", "stroke-opacity=\"0.85\"");
+        }
+        "radar-beta" => {
+            const RADAR_HUES: [i32; 12] = [240, 60, 80, 270, 300, 330, 0, 30, 90, 150, 180, 210];
+            for (index, hue) in RADAR_HUES.iter().enumerate() {
+                let needle = format!("hsl({hue}, 100%, 76.2745098039%)");
+                out = out.replace(&needle, palette.category[index % palette.category.len()]);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// mmdr 量宽走系统 fontdb：量宽时按字体族链落到系统里同度量的一支（Windows 的
+/// 仿宋/黑体、Linux 的 serif/sans CJK），渲染时 resvg 用随包字体。中西文都是
+/// 全宽/半宽等宽推进，两边只差拉丁字形的几个百分点，框内留白足够吸收。
+fn render_mmdr(source: &str, style: Style, theme: DiagramTheme) -> Result<String> {
+    let palette = palette(theme, style);
+    let options = mermaid_rs_renderer::RenderOptions {
+        theme: mmdr_theme(palette, style),
+        ..Default::default()
+    };
+    let svg = mermaid_rs_renderer::render_with_options(source, options)
+        .map_err(|error| anyhow!("Mermaid 解析或排版失败：{error}"))?;
+    Ok(fixup_mmdr_colors(&svg, source, palette))
+}
+
 fn render(source: &str, style: Style, theme: DiagramTheme, format: Format) -> Result<Vec<u8>> {
     check(source)?;
-    let svg = renderer(style, theme)
-        .render_svg_sync(source)
-        .map_err(|error| anyhow!("Mermaid 解析或排版失败：{error}"))?
-        .context("Mermaid 围栏里没有图形")?;
+    let svg = match engine_kind(source) {
+        Some(EngineKind::Merman) => renderer(style, theme)
+            .render_svg_sync(source)
+            .map_err(|error| anyhow!("Mermaid 解析或排版失败：{error}"))?
+            .context("Mermaid 围栏里没有图形")?,
+        Some(EngineKind::Mmdr) => render_mmdr(source, style, theme)?,
+        None => unreachable!("check 已拦下不支持的图种"),
+    };
     let (width, height) = view_box(&svg).context("Mermaid 输出缺少 viewBox")?;
     let placement = placement(style, width, height);
     match format {
@@ -820,6 +958,35 @@ mod tests {
 
     const SAMPLE: &str = "flowchart TD\n S([收文]) --> A[登记编号]\n A --> B{是否需要会签}\n B -- 是 --> C[相关单位会签]\n B -- 否 --> D[审核]\n C --> D\n subgraph 签发环节\n D --> E[领导签发]\n E --> F[(归档)]\n end\n F --> G((办结))";
 
+    /// 本期接入的全部图种：一份能代表该图种最小语法的中文样例。
+    const KIND_SAMPLES: &[(&str, &str)] = &[
+        ("flowchart", SAMPLE),
+        (
+            "sequence",
+            "sequenceDiagram\n  经办人->>处长: 提交请示\n  处长-->>经办人: 退回修改\n  Note over 处长: 研究\n  loop 修改\n    经办人->>处长: 再次报送\n  end",
+        ),
+        (
+            "gantt",
+            "gantt\n  title 项目进度\n  dateFormat YYYY-MM-DD\n  section 调研\n  收集资料 :a1, 2026-10-01, 10d\n  撰写报告 :a2, after a1, 7d\n  section 审定\n  内部评审 :a3, after a2, 5d",
+        ),
+        (
+            "pie",
+            "pie title 经费构成\n  \"人员经费\" : 45\n  \"公用经费\" : 30\n  \"项目支出\" : 25",
+        ),
+        (
+            "sankey",
+            "sankey-beta\n  财政预算,人员经费,45\n  财政预算,公用经费,30\n  财政预算,项目支出,25",
+        ),
+        (
+            "timeline",
+            "timeline\n  title 工作规划\n  section 2026年 第四季度\n    完成调研 : 形成调研报告\n  section 2027年 上半年\n    出台办法 : 印发实施",
+        ),
+        (
+            "radar",
+            "radar-beta\n  axis 政治素质, 业务能力, 工作作风, 创新意识\n  curve 部门甲 {0.9, 0.8, 0.85, 0.7}\n  curve 部门乙 {0.7, 0.9, 0.75, 0.85}",
+        ),
+    ];
+
     #[test]
     fn native_flowchart_renders_both_formats() {
         let source = "flowchart LR\n A[收文登记] --> B{是否会签}\n B -- 是 --> C[会签]";
@@ -847,22 +1014,52 @@ mod tests {
         assert!(fs::read(dir.path().join(pdf)).unwrap().starts_with(b"%PDF"));
     }
 
-    /// 设了 `GONGWEN_MERMAID_PREVIEW` 就把每套配色、两种文种的样图写进那个目录，
-    /// 调配色时对着看。
+    /// 每种图都能渲出 PNG 与 PDF；桑基与雷达的引擎写死色板要已被换成分类色。
+    #[test]
+    fn every_kind_renders_both_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        for (kind, sample) in KIND_SAMPLES {
+            for format in [Format::Png, Format::Pdf] {
+                let path = cache_at(
+                    dir.path(),
+                    sample,
+                    Style::Official,
+                    DiagramTheme::Auto,
+                    format,
+                )
+                .unwrap_or_else(|error| panic!("{kind} {format:?} 渲染失败：{error:#}"));
+                let bytes = fs::read(dir.path().join(path)).unwrap();
+                match format {
+                    Format::Png => assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n"),
+                    Format::Pdf => assert!(bytes.starts_with(b"%PDF")),
+                }
+            }
+        }
+        // 藏青下桑基节点不再出现引擎自带的红粉色。
+        let svg = render_mmdr(KIND_SAMPLES[4].1, Style::Official, DiagramTheme::Navy).unwrap();
+        assert!(svg.contains("#1F3A5F"));
+        assert!(!svg.contains("#e15759"));
+        assert!(!svg.contains("#ff9da7"));
+    }
+
+    /// 设了 `GONGWEN_MERMAID_PREVIEW` 就把每种图、每套配色、两种文种的样图写进那个
+    /// 目录，调配色时对着看。
     #[test]
     fn every_theme_renders_sample() {
         let dir = tempfile::tempdir().unwrap();
         let preview = std::env::var_os("GONGWEN_MERMAID_PREVIEW").map(std::path::PathBuf::from);
         for theme in DiagramTheme::ALL {
             for style in [Style::Official, Style::Research] {
-                let image = cache_at(dir.path(), SAMPLE, style, theme, Format::Png).unwrap();
-                if let Some(preview) = &preview {
-                    fs::create_dir_all(preview).unwrap();
-                    fs::copy(
-                        dir.path().join(&image),
-                        preview.join(format!("{style:?}-{theme:?}.png")),
-                    )
-                    .unwrap();
+                for (kind, sample) in KIND_SAMPLES {
+                    let image = cache_at(dir.path(), sample, style, theme, Format::Png).unwrap();
+                    if let Some(preview) = &preview {
+                        fs::create_dir_all(preview).unwrap();
+                        fs::copy(
+                            dir.path().join(&image),
+                            preview.join(format!("{kind}-{style:?}-{theme:?}.png")),
+                        )
+                        .unwrap();
+                    }
                 }
             }
         }
@@ -902,7 +1099,14 @@ mod tests {
     fn check_rejects_overrides_but_keeps_arrow_syntax() {
         assert!(check("%% 注释\nflowchart LR\n A <--> B\n C <-.-> D").is_ok());
         assert!(check("graph TD;\n A --> B").is_ok());
-        assert!(check("sequenceDiagram\n A->>B: 你好").is_err());
+        assert!(check("sequenceDiagram\n A->>B: 你好").is_ok());
+        assert!(check("gantt\n A :a1, 2026-10-01, 3d").is_ok());
+        assert!(check("pie title 构成\n \"甲\" : 1").is_ok());
+        assert!(check("sankey-beta\n 甲,乙,1").is_ok());
+        assert!(check("timeline\n section 一期\n 任务").is_ok());
+        assert!(check("radar-beta\n axis a, b\n curve x {1, 2}").is_ok());
+        // 未接入的图种给出清单式报错。
+        assert!(check("stateDiagram-v2\n [*] --> 甲").is_err());
         assert!(check("flowchart LR\n A[甲<br>乙] --> B").is_err());
         assert!(check("flowchart LR\n A --> B\n click A \"https://example.com\"").is_err());
         assert!(check("%%{init: {'theme':'dark'}}%%\nflowchart LR\n A --> B").is_err());

@@ -1246,7 +1246,8 @@ impl PaperMode {
     }
 }
 
-/// 流程图（Mermaid 围栏）的配色与线型。字体、字号不在这里：它们随文种走，
+/// Mermaid 图表（流程、泳道、序列、甘特、饼、桑基、时间线、雷达）的配色与线型。
+/// 字体、字号不在这里：它们随文种走，
 /// 公文用仿宋、研究报告用黑体，并按正文字号定出图内字号。预览与导出同一套。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1772,7 +1773,7 @@ pub struct AppConfig {
     pub theme: ThemeName,
     /// 屏幕上公文纸面的明暗。导出结果不受影响。
     pub paper: PaperMode,
-    /// 流程图的配色与线型，预览与导出一致。旧配置缺该字段时按「按文种自动」。
+    /// 图表的配色与线型，预览与导出一致。旧配置缺该字段时按「按文种自动」。
     pub diagram_theme: DiagramTheme,
     /// 源码编辑器里各处 Markdown 元素分别用哪支字面。旧配置缺该字段时按默认值
     /// 补齐，即六处全用编辑器字体。

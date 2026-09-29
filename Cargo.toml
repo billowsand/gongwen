@@ -61,6 +61,9 @@ mdx = { path = "vendor/mdx" }
 merman = { version = "0.7.0", features = ["raster"] }
 # 只为实现 merman 的 TextMeasurer：它的 TextStyle / TextMetrics 没有经 merman 重导出。
 merman-render = "0.7.0"
+# 甘特 / 饼 / 桑基 / 时间线 / 雷达走第二个纯 Rust 引擎（merman 0.7 只有流程与序列），
+# 只取 SVG 字符串，PNG / PDF 仍由本项目自己的 resvg / svg2pdf 管线转换。
+mermaid-rs-renderer = { version = "0.2.2", default-features = false }
 pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 # 应用内输入法：拼音引擎、词库、bigram 整句与用户学习，全部进程内，没有 server。
 # vendor 自字在输入法（GPL-3.0-or-later），见 vendor/qingjian/README.md。

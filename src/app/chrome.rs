@@ -841,10 +841,10 @@ impl GongwenApp {
                     }
                 }
             });
-            // 流程图样式紧挨外观主题：同是「看起来什么样」，但它管的是纸面上的图，
+            // 图表样式紧挨外观主题：同是「看起来什么样」，但它管的是纸面上的图，
             // 导出也跟着变。
             egui::containers::menu::SubMenuButton::from_button(
-                theme::menu_item(theme::Icon::GitCommit, "流程图样式")
+                theme::menu_item(theme::Icon::GitCommit, "图表样式")
                     .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
             )
             .ui(ui, |ui| {

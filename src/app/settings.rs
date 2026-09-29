@@ -51,7 +51,7 @@ pub(crate) enum SettingsSection {
     Network,
     /// 输出与录入（输出目录、编辑器选项）。
     Output,
-    /// 界面主题、公文纸面与流程图样式。
+    /// 界面主题、公文纸面与图表样式。
     Theme,
     /// 界面字体与编译字体。
     Font,
@@ -670,16 +670,16 @@ impl GongwenApp {
         let _ = storage::save(&self.config);
     }
 
-    /// 切换流程图样式并立即生效：预览下一帧按新配色重画，导出也跟着换。
-    /// 设置页与应用菜单的「流程图样式」子菜单共用这一入口。
+    /// 切换图表样式并立即生效：预览下一帧按新配色重画，导出也跟着换。
+    /// 设置页与应用菜单的「图表样式」子菜单共用这一入口。
     pub(crate) fn apply_diagram_theme(&mut self, diagram_theme: DiagramTheme) {
         self.config.diagram_theme = diagram_theme;
         crate::mermaid::set_theme(diagram_theme);
-        self.status = format!("流程图样式已切换为「{}」。", diagram_theme.label());
+        self.status = format!("图表样式已切换为「{}」。", diagram_theme.label());
         let _ = storage::save(&self.config);
     }
 
-    /// 画一张流程图样式卡：白纸上一框、一菱形、一框的缩略流程。「按文种自动」
+    /// 画一张图表样式卡：白纸上一框、一菱形、一框的缩略流程。「按文种自动」
     /// 左右各画公文与研究报告的实际配色。
     fn diagram_theme_card(&self, ui: &mut egui::Ui, diagram_theme: DiagramTheme) -> egui::Response {
         use crate::mermaid::{Style, palette};
@@ -890,9 +890,9 @@ impl GongwenApp {
 
         sub_heading(
             ui,
-            "流程图样式",
+            "图表样式",
             Some(
-                "Mermaid 流程图的配色与线型，预览与导出的 Word、PDF 一致。字体与字号随文种：公文用仿宋小四，研究报告用黑体小五。",
+                "Mermaid 图表的配色与线型，预览与导出的 Word、PDF 一致。覆盖流程（泳道）、序列、甘特、饼、桑基、时间线与雷达七种图。字体与字号随文种：公文用仿宋小四，研究报告用黑体小五。",
             ),
         );
         let mut pending = None;

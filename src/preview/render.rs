@@ -842,8 +842,8 @@ pub(crate) fn diagram_image_block(
         crate::mermaid::Style::Official
     };
     match crate::mermaid::cache(source, style, crate::mermaid::Format::Png) {
-        Ok(src) => figure_block(ui, metrics, "流程图", &src, research),
-        Err(error) => image_placeholder(ui, metrics, "流程图", "Mermaid", &error.to_string()),
+        Ok(src) => figure_block(ui, metrics, "图表", &src, research),
+        Err(error) => image_placeholder(ui, metrics, "图表", "Mermaid", &error.to_string()),
     }
 }
 

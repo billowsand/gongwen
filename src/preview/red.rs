@@ -952,7 +952,7 @@ pub(crate) fn red_build_print_layout(
                     &mut state,
                     located.range.clone(),
                     vec![RedFlowSegment {
-                        text: format!("〔流程图：{caption}〕"),
+                        text: format!("〔图表：{caption}〕"),
                         bold: false,
                         parenthesized: false,
                         style: RedTextStyle::Body,
