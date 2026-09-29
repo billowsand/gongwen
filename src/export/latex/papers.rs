@@ -174,7 +174,7 @@ pub(crate) fn white_paper_tex_with_numbering(
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[proof,noforcenewpage,whitepaper]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,whitepaper{duplex_option}]{{gonghan-gwa}}
 {security}\renewcommand{{\DocumentTitle}}{{{title}}}
 \renewcommand{{\TitleContent}}{{{title_content}}}
 \renewcommand{{\Recipient}}{{{leaders}}}
@@ -187,6 +187,7 @@ pub(crate) fn white_paper_tex_with_numbering(
 \makeletter
 \end{{document}}
 "#,
+        duplex_option = if input.profile.duplex_printing { ",duplex" } else { "" },
         title = tex_escape(title),
         title_content = title_content_tex(title),
         security = security,
@@ -287,7 +288,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
 
     format!(
         r#"%!TEX program = xelatex
-\documentclass[proof,noforcenewpage,redapproval]{{gonghan-gwa}}
+\documentclass[proof,noforcenewpage,redapproval{duplex_option}]{{gonghan-gwa}}
 \renewcommand{{\IssuingUnit}}{{{issuing}}}
 \renewcommand{{\Year}}{{{document_year}}}
 \renewcommand{{\DepartmentCode}}{{{department}}}
@@ -311,6 +312,7 @@ pub(crate) fn red_head_approval_tex_with_numbering(
 \makeredapproval
 \end{{document}}
 "#,
+        duplex_option = if input.profile.duplex_printing { ",duplex" } else { "" },
         issuing = tex_escape(&issuing),
         document_year = document_year_arg,
         department = department_arg,

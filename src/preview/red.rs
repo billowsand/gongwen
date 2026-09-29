@@ -1338,9 +1338,16 @@ pub(crate) fn paint_red_print_pages(
                     14.0,
                     theme::paper::ink(),
                 );
-                let center = page.min + egui::vec2(metrics.page / 2.0, metrics.mm(282.0));
+                // 单面居中；双面按装订外侧：奇数页靠右、偶数页靠左（与 TeX / Word 一致）。
+                let x = if !input.profile.duplex_printing {
+                    metrics.page / 2.0 - page_number.size().x / 2.0
+                } else if (page_index + 1) % 2 == 1 {
+                    metrics.mm(28.0 + 156.0) - page_number.size().x
+                } else {
+                    metrics.mm(28.0)
+                };
                 ui.painter().galley(
-                    center - egui::vec2(page_number.size().x / 2.0, 0.0),
+                    page.min + egui::vec2(x, metrics.mm(282.0)),
                     page_number,
                     theme::paper::ink(),
                 );

@@ -1829,7 +1829,7 @@ impl DraftPage<'_> {
                         ui.end_row();
                     }
 
-                    if kind.uses_letter_layout() {
+                    if kind.uses_letter_layout() || kind == TemplateKind::WhitePaper {
                         row_label(ui, "打印方式");
                         ui.checkbox(&mut self.doc.draft.profile.duplex_printing, "双面打印")
                             .on_hover_text(
