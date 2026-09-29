@@ -418,11 +418,6 @@ pub(crate) fn footer_record(
         + split_units(&input.profile.copies_to).len()
         + split_units(responsible_field).len();
     let copies_to = crate::export::element_display::copies_to_display(input, display);
-    let head = if copies_to.trim().is_empty() {
-        String::new()
-    } else {
-        format!("抄送：{copies_to}")
-    };
 
     // 承办单位/联系人/电话：联合发文有多行，其余只有一行。联合发文的承办单位
     // 与联系人成对录入（一一对应），旧稿件按索引回落配对。
@@ -453,27 +448,27 @@ pub(crate) fn footer_record(
     let thick = metrics.mm(0.6).max(1.0);
     let thin = metrics.mm(0.3).max(1.0);
 
-    // 抄送行：三字符悬挂缩进，共印份数固定在行末。抄送变了就把值画成
-    // 旧值删除线、新值加框（「抄送：」标签不进标注）。
-    let head_galley = if elements.copies_to().changed() {
-        marks::marked_line_galley(
-            ui,
-            metrics,
-            &format!("抄送：{}", elements.copies_to().marked()),
-            metrics.content,
-            Align::LEFT,
-            text_format(font.clone(), metrics.line),
-        )
+    // 抄送行：三字符悬挂缩进（续行与首个抄送单位对齐），共印份数固定在最后一行的
+    // 行末；最后一行放不下（留 2em 空隙）就另起一行，与 TeX 的 \PrintCopiesAtLineEnd 一致。
+    // 抄送变了就把值画成旧值删除线、新值加框（「抄送：」标签不进标注）。
+    let hang = metrics.pt(RECORD_PT) * 3.0;
+    let show_label = elements.copies_to().changed() || !copies_to.trim().is_empty();
+    let head_value = if elements.copies_to().changed() {
+        elements.copies_to().marked()
     } else {
-        line_galley(
-            ui,
-            metrics,
-            &head,
-            font.clone(),
-            metrics.content,
-            Align::LEFT,
-        )
+        copies_to.clone()
     };
+    let label_galley =
+        show_label.then(|| line_galley(ui, metrics, "抄送：", font.clone(), hang, Align::LEFT));
+    let value_width = metrics.content - hang;
+    let head_galley = marks::marked_line_galley(
+        ui,
+        metrics,
+        &head_value,
+        value_width,
+        Align::LEFT,
+        text_format(font.clone(), metrics.line),
+    );
     let copies_galley = line_galley(
         ui,
         metrics,
@@ -482,7 +477,15 @@ pub(crate) fn footer_record(
         metrics.content,
         Align::Max,
     );
-    let head_height = head_galley.size().y.max(line);
+    let last_row = head_galley.rows.last();
+    let last_row_y = last_row.map_or(0.0, |row| row.pos.y);
+    let last_row_right = last_row.map_or(0.0, |row| row.rect().max.x);
+    let em = metrics.pt(RECORD_PT);
+    let copies_wraps =
+        show_label && last_row_right + 2.0 * em + copies_galley.size().x > value_width;
+    let head_rows = head_galley.rows.len().max(1) + usize::from(copies_wraps);
+    let head_height = line * head_rows as f32;
+    let copies_row_y = last_row_y + if copies_wraps { line } else { 0.0 };
 
     // 三列：承办单位左、联系人中、联系电话右；第 2 行起用 5em/4em 占位与首行对齐。
     let cells: Vec<[Arc<egui::Galley>; 3]> = rows
@@ -544,11 +547,19 @@ pub(crate) fn footer_record(
         // 这里按字形真实框取中，让每行字坐在两条线正中。
         let centered =
             |galley: &egui::Galley, height: f32| height / 2.0 - galley_visual_midline(galley);
-        let head_pos = egui::pos2(rect.left(), y + centered(&head_galley, head_height));
+        let text_dy = centered(&copies_galley, line);
+        if let Some(label) = &label_galley {
+            painter.galley(
+                egui::pos2(rect.left(), y + text_dy),
+                label.clone(),
+                theme::paper::ink(),
+            );
+        }
+        let head_pos = egui::pos2(rect.left() + hang, y + text_dy);
         painter.galley(head_pos, head_galley.clone(), theme::paper::ink());
         marks::paint_galley_marks(painter, metrics, head_pos, &head_galley);
         painter.galley(
-            egui::pos2(rect.right(), y + centered(&copies_galley, head_height)),
+            egui::pos2(rect.right(), y + text_dy + copies_row_y),
             copies_galley.clone(),
             theme::paper::ink(),
         );
