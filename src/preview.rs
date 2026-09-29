@@ -58,7 +58,9 @@ pub(crate) use tail::{signature_seal_mark, signature_unit};
 const PT: f32 = 96.0 / 72.0;
 
 // 与 export::docx 的常量对应（那边是半磅，这里是磅）。
-const BODY_PT: f32 = 16.0; // 三号
+// 三号：TeX 的 \zihao{3} 是 15.75bp，版心 156mm（442.2pt）恰好容 28 字；
+// 取 16pt 则只装得下 27.6 字，预览每行会少一个字。
+const BODY_PT: f32 = 15.75;
 const TITLE_PT: f32 = 22.0; // 二号
 const TABLE_PT: f32 = 14.0; // 四号
 const PAREN_PT: f32 = 14.0; // 括号内容，楷体四号

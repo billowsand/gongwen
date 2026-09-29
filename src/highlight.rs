@@ -214,7 +214,7 @@ fn filled(font: FontId, color: Color32, background: Color32) -> TextFormat {
 }
 
 const PT: f32 = 96.0 / 72.0;
-const OFFICIAL_BODY_PT: f32 = 16.0;
+const OFFICIAL_BODY_PT: f32 = 15.75; // 与预览的三号一致，版心恰好 28 字
 const OFFICIAL_TITLE_PT: f32 = 22.0;
 const OFFICIAL_TABLE_PT: f32 = 14.0;
 const OFFICIAL_LINE_PT: f32 = 28.0;
