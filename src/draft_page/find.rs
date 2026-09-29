@@ -78,6 +78,9 @@ pub(crate) struct MarkdownFindState {
     pub(crate) regex: bool,
     pub(crate) current: usize,
     pub(crate) focus_query: bool,
+    /// 上次替用户选中命中时的（序号、查询、大小写、正则）。只在它变了才重新选中，
+    /// 否则每帧都把光标拽回命中处，用户在别处点击、输入都会被抢回去。
+    pub(crate) synced: Option<(usize, String, bool, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -252,13 +255,15 @@ impl DraftPage<'_> {
         } else {
             self.doc.markdown_find.current = self.doc.markdown_find.current.min(matches.len() - 1);
         }
-        let anchored = self
-            .doc
-            .preview_anchor
-            .as_ref()
-            .and_then(|anchor| anchor.range_in(&self.doc.generated_markdown));
-        if !matches.is_empty() && anchored.as_ref() != matches.get(self.doc.markdown_find.current) {
+        let sync_key = (
+            self.doc.markdown_find.current,
+            self.doc.markdown_find.query.clone(),
+            self.doc.markdown_find.case_sensitive,
+            self.doc.markdown_find.regex,
+        );
+        if !matches.is_empty() && self.doc.markdown_find.synced.as_ref() != Some(&sync_key) {
             self.select_find_match(matches.get(self.doc.markdown_find.current).cloned());
+            self.doc.markdown_find.synced = Some(sync_key);
         }
 
         let mut action = None;
@@ -391,6 +396,7 @@ impl DraftPage<'_> {
 
     pub(crate) fn close_markdown_find(&mut self) {
         self.doc.markdown_find.open = false;
+        self.doc.markdown_find.synced = None;
         self.doc.pending_source_selection = None;
         self.doc.pending_render_jump = false;
         self.doc.preview_anchor = None;
