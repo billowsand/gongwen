@@ -71,6 +71,26 @@ pub fn title_plan(title: &str, chars_per_line: usize) -> TitlePlan {
     TitlePlan::Wrapped(wrap_units(&title_units(title), chars_per_line))
 }
 
+/// 表格单元格左右内边距合计（twip）：Word 默认 108 ×2，tabularray 默认 6pt ×2，
+/// 取偏大的一侧，宁可少放一点也不让压缩后的字形顶到格线。
+const CELL_PADDING_TWIPS: usize = 240;
+
+/// 居中单元格的排布：与主标题同一套规矩——超出一行 1–2 个字宽横向压缩，
+/// 再多则 jieba 在词边界均衡换行。返回排布方案与压缩时的横向缩放百分比。
+///
+/// `width_twips` 是整格宽度（含内边距），`em_twips` 是单元格字号对应的字宽。
+/// 格子窄到放不下 2 个字时不做处理（`SingleLine`），交给排版引擎自然折行。
+pub fn cell_plan(text: &str, width_twips: usize, em_twips: usize) -> (TitlePlan, usize) {
+    let usable = width_twips.saturating_sub(CELL_PADDING_TWIPS);
+    let chars = usable.checked_div(em_twips).unwrap_or(0);
+    if chars < 2 {
+        return (TitlePlan::SingleLine, 100);
+    }
+    let plan = title_plan(text, chars);
+    let scale = compressed_scale_percent_for(text, usable as f64 / 20.0, em_twips / 20);
+    (plan, scale)
+}
+
 /// 研究报告封面题名的分行：一行放得下就一行，否则按公文标题的规矩在词边界
 /// 均衡换行（首行不短于末行）。封面题名不做横向压缩——封面留白足，分两行
 /// 比把字压扁更庄重。

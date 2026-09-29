@@ -653,6 +653,15 @@ pub(super) fn to_longtblr(
         .iter()
         .any(|column| matches!(column.width, ColumnWidth::Relative(_)));
 
+    // 居中格与主标题同一套排布，需要格宽：与 Word 用同一份智能列宽推算。
+    let (grid, _) = to_docx_grid(
+        rows,
+        aligns,
+        spans,
+        super::docx::TABLE_CONTENT_WIDTH_TWIPS,
+        super::docx::TABLE_SIZE * 10,
+    );
+
     let mut output = format!(
         "\\begin{{longtblr}}[\n  label = none,\n  entry = none,\n]{{\n  colspec = {{{colspec}}},\n  rowhead = 1,\n  hlines,\n  vlines,\n  row{{1}} = {{c, font=\\heiti\\enheiti}},\n}}\n"
     );
@@ -674,7 +683,8 @@ pub(super) fn to_longtblr(
                     .chars()
                     .filter(|ch| !crate::export::is_redline_sentinel(*ch))
                     .collect::<String>();
-                let escaped = if name_column == Some(column_index) && row_index > 0 {
+                let is_name = name_column == Some(column_index) && row_index > 0;
+                let escaped = if is_name {
                     let name = latex_name(&cleaned);
                     if segments.iter().any(|segment| segment.bold) {
                         format!("\\GwBold{{{name}}}")
@@ -684,40 +694,59 @@ pub(super) fn to_longtblr(
                 } else if row_index == 0 {
                     tex_escape(&cleaned)
                 } else {
-                    // 单元格也要能画花脸稿标记：表格里改了一个数字、一个时限，
-                    // 恰恰是最需要让领导一眼看见的地方。先按哨兵切块，块内再走
-                    // 原来的加粗逻辑；没有哨兵时就是一整块，与从前完全一致。
-                    redline_chunks(cell)
-                        .into_iter()
-                        .map(|chunk| {
-                            // 加粗包在标注宏外面（见 `redline_macro`）。
-                            let segments = inline_segments(&chunk.text);
-                            let count = segments.len();
-                            segments
-                                .iter()
-                                .enumerate()
-                                .map(|(index, segment)| {
-                                    let marked = redline_macro(
-                                        chunk.kind,
-                                        index,
-                                        count,
-                                        &tex_escape(&segment.text),
-                                    );
-                                    if segment.bold {
-                                        format!("\\GwBold{{{marked}}}")
-                                    } else {
-                                        marked
-                                    }
-                                })
-                                .collect::<String>()
-                        })
-                        .collect::<String>()
+                    data_cell_tex(cell)
                 };
-                let content = if row_index == 0 {
+                let mut content = if row_index == 0 {
                     format!("\\heiti\\enheiti {escaped}")
                 } else {
                     escaped
                 };
+                // 居中格：多出 1–2 字横向压缩，再多按分词均衡换行（花括号让 `\\` 在格内生效）。
+                let cell_align = resolve_cell_alignment(
+                    rows,
+                    spans,
+                    &column_alignments,
+                    numbered,
+                    row_index,
+                    column_index,
+                );
+                let plain = plain_cell_text(cell);
+                if cell_align == ColumnAlignment::Center
+                    && !is_name
+                    && !cell.contains("**")
+                    && !plain.is_empty()
+                {
+                    let column_span = span.map_or(1, |span| span.column_span);
+                    let width = grid
+                        .iter()
+                        .skip(column_index)
+                        .take(column_span)
+                        .sum::<usize>();
+                    let font = if row_index == 0 { "\\heiti\\enheiti " } else { "" };
+                    match super::title::cell_plan(&plain, width, super::docx::TABLE_SIZE * 10) {
+                        (super::title::TitlePlan::SingleLine, _) => {}
+                        (super::title::TitlePlan::Compressed, scale) => {
+                            content = format!(
+                                "\\scalebox{{{}}}[1]{{{content}}}",
+                                scale as f64 / 100.0
+                            );
+                        }
+                        (super::title::TitlePlan::Wrapped(lines), _) => {
+                            let pieces = crate::export::redline_slice_lines(cell, &lines)
+                                .iter()
+                                .map(|piece| {
+                                    if row_index == 0 {
+                                        tex_escape(&plain_cell_text(piece))
+                                    } else {
+                                        data_cell_tex(piece)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\\\\");
+                            content = format!("{{{font}{pieces}}}");
+                        }
+                    }
+                }
                 if let Some(span) = span {
                     let align = match resolve_cell_alignment(
                         rows,
@@ -769,6 +798,32 @@ pub(super) fn to_longtblr(
     }
     output.push_str("\\end{longtblr}");
     output
+}
+
+/// 数据行单元格的 TeX：先按花脸稿哨兵切块，块内再走加粗逻辑；
+/// 表格里改了一个数字、一个时限，恰恰是最需要让领导一眼看见的地方。
+fn data_cell_tex(cell: &str) -> String {
+    // 加粗包在标注宏外面（见 `redline_macro`）。
+    redline_chunks(cell)
+        .into_iter()
+        .map(|chunk| {
+            let segments = inline_segments(&chunk.text);
+            let count = segments.len();
+            segments
+                .iter()
+                .enumerate()
+                .map(|(index, segment)| {
+                    let marked =
+                        redline_macro(chunk.kind, index, count, &tex_escape(&segment.text));
+                    if segment.bold {
+                        format!("\\GwBold{{{marked}}}")
+                    } else {
+                        marked
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<String>()
 }
 
 /// 规格 §3.2/§6 姓名宽度：2 字姓名中间加 1em，4 字姓名压缩到 3 字宽，保证视觉对齐。
@@ -1364,5 +1419,27 @@ mod tests {
         assert!(tex.contains("Q["), "应当是定宽列：{tex}");
         assert!(!tex.contains("X["), "{tex}");
         assert!(!tex.contains("\\parbox"), "{tex}");
+    }
+
+    #[test]
+    fn centered_cell_compresses_small_overflow_and_wraps_large_at_word_boundaries() {
+        // 列宽由智能列宽定；这里直接验证单元格排布函数与 TeX 输出的对接。
+        let table = vec![
+            vec!["项目".to_string(), "说明".to_string()],
+            vec![
+                "国家发展和改革委员会办公厅综合司".to_string(),
+                "甲".to_string(),
+            ],
+        ];
+        let aligns = [ColumnAlign::Center, ColumnAlign::Center];
+        let tex = to_longtblr(&table, &aligns, &[], false);
+        assert!(
+            tex.contains("\\scalebox") || tex.contains("\\\\"),
+            "过长的居中格应压缩或按词换行：{tex}"
+        );
+        assert!(
+            !tex.contains("国家发展和改革委员\\\\会"),
+            "词不能被拆开：{tex}"
+        );
     }
 }

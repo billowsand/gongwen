@@ -13,7 +13,7 @@ use crate::export::table::{ColumnAlignment, resolve_cell_alignment, to_docx_grid
 use crate::export::title;
 use crate::export::{
     ColumnAlign, MarkdownBlock, TableSpan, inline_segments, official_heading_prefix, plain_text,
-    table_span_at,
+    redline_slice_lines, table_span_at,
 };
 use crate::models::{DraftInput, FontConfig, ListNumbering, NumberingConfig};
 use anyhow::{Context, Result};
@@ -106,8 +106,41 @@ pub(crate) fn add_smart_table(
                     table_runs_sized(text, row_index == 0, TABLE_SIZE, bold)
                 };
                 let mut paragraph = Paragraph::new();
-                for run in runs {
-                    paragraph = paragraph.add_run(run);
+                // 居中格与主标题同一套排布：多出 1–2 字横向压缩，再多按分词均衡换行。
+                // 带加粗标记的格、姓名列保持原样。
+                let plain = plain_text(text);
+                let plan = if matches!(alignment, AlignmentType::Center)
+                    && !(name_column == Some(column_index) && row_index > 0)
+                    && !text.contains("**")
+                    && !plain.is_empty()
+                {
+                    title::cell_plan(&plain, width, TABLE_SIZE * 10)
+                } else {
+                    (title::TitlePlan::SingleLine, 100)
+                };
+                match plan {
+                    (title::TitlePlan::SingleLine, _) => {
+                        for run in runs {
+                            paragraph = paragraph.add_run(run);
+                        }
+                    }
+                    (title::TitlePlan::Compressed, scale) => {
+                        for run in table_runs_sized(text, row_index == 0, TABLE_SIZE, bold) {
+                            paragraph = paragraph.add_run(run.stretch(scale as i32));
+                        }
+                    }
+                    (title::TitlePlan::Wrapped(lines), _) => {
+                        let pieces = redline_slice_lines(text, &lines);
+                        for (index, piece) in pieces.iter().enumerate() {
+                            for run in table_runs_sized(piece, row_index == 0, TABLE_SIZE, bold) {
+                                paragraph = paragraph.add_run(run);
+                            }
+                            if index + 1 < pieces.len() {
+                                paragraph = paragraph
+                                    .add_run(Run::new().add_break(BreakType::TextWrapping));
+                            }
+                        }
+                    }
                 }
                 let paragraph = paragraph.align(alignment).line_spacing(
                     LineSpacing::new()

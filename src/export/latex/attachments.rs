@@ -5,6 +5,7 @@
 
 use crate::export::latex::{marked_heading_tex, marked_tex_escape};
 use crate::export::table::requires_landscape;
+use crate::export::title::{self, TitlePlan};
 use crate::export::{MarkdownBlock, MarkdownSection, official_heading_prefix};
 use crate::models::NumberingConfig;
 
@@ -40,9 +41,23 @@ pub(crate) fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> 
 pub(crate) fn attachment_document_title_to_tex(text: &str) -> String {
     // 附件标识位于第一行，正式标题置于第三行；用固定正文行距留出第二行。
     // 标题改动也就地标注（花脸稿哨兵在解析后注入，这里走标注感知的转义）。
+    // 排布与主标题同一套：多出 1–2 字横向压缩，再多按分词均衡换行。
+    let plain = crate::export::plain_text(text);
+    let body = match title::title_plan(&plain, title::chars_per_line()) {
+        TitlePlan::SingleLine => marked_tex_escape(text),
+        TitlePlan::Compressed => format!(
+            "\\scalebox{{{}}}[1]{{{}}}",
+            title::compressed_scale_percent(&plain) as f64 / 100.0,
+            marked_tex_escape(text)
+        ),
+        TitlePlan::Wrapped(lines) => crate::export::redline_slice_lines(text, &lines)
+            .iter()
+            .map(|line| marked_tex_escape(line))
+            .collect::<Vec<_>>()
+            .join("\\\\"),
+    };
     format!(
-        "\\vspace{{\\BodyBaselineSkip}}\n{{\\centering\\bs\\enbt\\zihao{{2}}\\setlength{{\\baselineskip}}{{\\BodyBaselineSkip}} {}\\par}}",
-        marked_tex_escape(text)
+        "\\vspace{{\\BodyBaselineSkip}}\n{{\\centering\\bs\\enbt\\zihao{{2}}\\setlength{{\\baselineskip}}{{\\BodyBaselineSkip}} {body}\\par}}"
     )
 }
 
@@ -74,4 +89,25 @@ pub(crate) fn official_heading_to_tex(
         _ => return None,
     };
     Some(rendered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_title_wraps_at_words_like_the_main_title() {
+        let tex = attachment_document_title_to_tex(
+            "关于进一步加强全市基层治理体系和治理能力现代化建设的实施方案附件材料汇编",
+        );
+        assert!(tex.contains("\\\\"), "长标题应分行：{tex}");
+    }
+
+    #[test]
+    fn attachment_title_compresses_small_overflow() {
+        // 一行 20 字宽，21 个汉字只超一字。
+        let tex = attachment_document_title_to_tex("一二三四五六七八九十一二三四五六七八九十一");
+        assert!(tex.contains("\\scalebox"), "{tex}");
+        assert!(!tex.contains("\\\\"), "{tex}");
+    }
 }

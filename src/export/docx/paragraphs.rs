@@ -296,23 +296,16 @@ pub(crate) fn joint_signature_cell_paragraph(value: &str, row_index: usize) -> P
 /// 附件正式标题：附件标识占第一行，空一行后第三行才是标题（TeX 在标题前发
 /// `\vspace{\BodyBaselineSkip}`，标题后不再另加间距）。
 pub(crate) fn attachment_document_title_paragraph(text: &str) -> Paragraph {
-    add_runs(
-        Paragraph::new(),
-        marked_runs(text, |piece| {
-            Run::new()
-                .add_text(piece)
-                .fonts(chinese_fonts("方正小标宋简体"))
-                .size(TITLE_SIZE)
-        }),
-    )
-    .align(AlignmentType::Center)
-    .line_spacing(
-        LineSpacing::new()
-            .before(super::BODY_LINE_TWIPS)
-            .line(super::BODY_LINE_TWIPS as i32)
-            .line_rule(LineSpacingType::Exact),
-    )
-    .keep_next(true)
+    // 与主标题同一套排布：多出 1–2 字横向压缩，再多按分词均衡换行。
+    let plan = title::title_plan(&crate::export::plain_text(text), title::chars_per_line());
+    document_title_paragraph(text, &plan)
+        .line_spacing(
+            LineSpacing::new()
+                .before(super::BODY_LINE_TWIPS)
+                .line(super::BODY_LINE_TWIPS as i32)
+                .line_rule(LineSpacingType::Exact),
+        )
+        .keep_next(true)
 }
 
 /// 公文主标题段，按排布方案渲染：
