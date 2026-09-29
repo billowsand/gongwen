@@ -454,26 +454,18 @@ impl DraftPage<'_> {
             egui::Panel::right("source_minimap_v1")
                 .default_size(MINIMAP_WIDTH)
                 .resizable(false)
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme::surface())
-                        .inner_margin(egui::Margin::symmetric(4, 10)),
-                )
+                .frame(theme::pane().inner_margin(egui::Margin::symmetric(4, theme::PANE_PADDING)))
                 .show(ui, |ui| self.source_minimap_ui(ui));
         }
         if show_outline {
             egui::Panel::left("source_outline_v1")
                 .default_size(OUTLINE_WIDTH)
                 .size_range(160.0..=300.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme::surface())
-                        .inner_margin(egui::Margin::symmetric(4, 10)),
-                )
+                .frame(theme::pane().inner_margin(egui::Margin::symmetric(4, theme::PANE_PADDING)))
                 .show(ui, |ui| self.source_outline_ui(ui));
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
+            .frame(theme::pane())
             .show(ui, |ui| self.markdown_editor(ui));
     }
 
@@ -636,10 +628,10 @@ impl DraftPage<'_> {
             egui::pos2(rect.left(), top),
             egui::vec2(rect.width(), layout.box_height),
         );
-        painter.rect_filled(viewport, 2.0, theme::accent_soft().gamma_multiply(0.65));
+        painter.rect_filled(viewport, 4.0, theme::accent_soft().gamma_multiply(0.65));
         painter.rect_stroke(
             viewport,
-            2.0,
+            4.0,
             egui::Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );

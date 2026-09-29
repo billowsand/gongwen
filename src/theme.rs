@@ -1344,6 +1344,33 @@ pub fn clickable_card<R>(
     )
 }
 
+/// 常规面板的圆角。卡片、目录、缩略图、候选区与浮板都用它；纸面要像纸，是唯一的例外（3）。
+pub const PANE_RADIUS: u8 = 8;
+/// 面板与面板、面板与窗口边缘之间的缝。
+pub const PANE_GAP: i8 = 6;
+/// 面板内边距。
+pub const PANE_PADDING: i8 = 8;
+
+/// 浮起元素（浮板、纸面）统一的一档投影；`alpha` 由调用方按纸面明暗给。
+pub fn float_shadow(alpha: u8) -> egui::epaint::Shadow {
+    egui::epaint::Shadow {
+        offset: [0, 3],
+        blur: 14,
+        spread: 0,
+        color: Color32::from_black_alpha(alpha),
+    }
+}
+
+/// 平铺面板外框：surface 底 + 细描边 + 统一圆角，不加阴影，四周留出 [`PANE_GAP`] 的缝。
+pub fn pane() -> egui::Frame {
+    egui::Frame::new()
+        .fill(surface())
+        .stroke(Stroke::new(1.0, border()))
+        .corner_radius(CornerRadius::same(PANE_RADIUS))
+        .inner_margin(Margin::same(PANE_PADDING))
+        .outer_margin(Margin::same(PANE_GAP))
+}
+
 /// 面板外框：只填底色，不描边；`margin` 为内边距。
 pub fn panel(fill: Color32, margin: i8) -> egui::Frame {
     egui::Frame::new()

@@ -58,7 +58,7 @@ const PANEL_WIDTH: f32 = 288.0;
 /// 板内文字四周的留白，以及板的圆角。
 const PANEL_PAD_X: f32 = 14.0;
 const PANEL_PAD_Y: f32 = 9.0;
-const PANEL_RADIUS: u8 = 10;
+const PANEL_RADIUS: u8 = theme::PANE_RADIUS;
 /// 板面的不透明度。留一丝透，底下纸面的色调还能渗上来一点——全不透就是一块
 /// 挡板，不是亚克力。
 const PANEL_ALPHA: f32 = 0.94;
@@ -731,16 +731,7 @@ fn paint_panel(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
         return;
     }
     let shadow_alpha = f32::from(theme::paper::shadow_alpha()) * 1.6 * reveal;
-    painter.add(
-        egui::epaint::Shadow {
-            // 往左下偏一点：板是从右边推出来的，光从左上来。
-            offset: [-3, 4],
-            blur: 18,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(shadow_alpha.min(255.0) as u8),
-        }
-        .as_shape(rect, PANEL_RADIUS),
-    );
+    painter.add(theme::float_shadow(shadow_alpha.min(255.0) as u8).as_shape(rect, PANEL_RADIUS));
     painter.rect_filled(
         rect,
         PANEL_RADIUS,

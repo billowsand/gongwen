@@ -12,7 +12,7 @@ use crate::preview::{INDENT_CHARS, Metrics, PAREN_PT};
 use crate::theme;
 use eframe::egui;
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{Align, Color32, FontId, Stroke};
+use eframe::egui::{Align, FontId, Stroke};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -1740,12 +1740,7 @@ pub(crate) fn sheet(
                 .fill(theme::paper::bg())
                 .stroke(Stroke::new(1.0, theme::border()))
                 .corner_radius(egui::CornerRadius::same(3))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 2],
-                    blur: 10,
-                    spread: 0,
-                    color: Color32::from_black_alpha(theme::paper::shadow_alpha()),
-                })
+                .shadow(theme::float_shadow(theme::paper::shadow_alpha()))
                 .show(ui, |ui| {
                     // 页边距用 add_space 铺出来：`Margin` 是 i8，放大后会溢出。
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;

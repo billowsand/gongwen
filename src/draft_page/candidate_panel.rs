@@ -53,31 +53,25 @@ impl DraftPage<'_> {
             egui::Panel::bottom("candidate_bar_v1").resizable(false)
         };
         let mut actions = Vec::new();
-        panel
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::surface())
-                    .inner_margin(egui::Margin::symmetric(10, 5)),
-            )
-            .show(ui, |ui| {
-                self.candidate_header_ui(ui, &mut actions);
-                if open {
-                    ui.add_space(4.0);
-                    // 可拖动的面板会按内容的实际高度长大；内容一旦比面板高哪怕一个
-                    // 像素，下一帧面板就被撑高、内容跟着变高，于是自己一路往上长。
-                    // 所以正文部分画在一块定死大小、不向外报尺寸的子区域里，
-                    // 放不下的裁掉，面板高度只由拖动决定。
-                    let rect = ui.available_rect_before_wrap();
-                    let mut body = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(rect)
-                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                    );
-                    body.set_clip_rect(rect.intersect(ui.clip_rect()));
-                    self.candidate_body_ui(&mut body, &mut actions);
-                    ui.allocate_rect(rect, egui::Sense::hover());
-                }
-            });
+        panel.frame(theme::pane()).show(ui, |ui| {
+            self.candidate_header_ui(ui, &mut actions);
+            if open {
+                ui.add_space(4.0);
+                // 可拖动的面板会按内容的实际高度长大；内容一旦比面板高哪怕一个
+                // 像素，下一帧面板就被撑高、内容跟着变高，于是自己一路往上长。
+                // 所以正文部分画在一块定死大小、不向外报尺寸的子区域里，
+                // 放不下的裁掉，面板高度只由拖动决定。
+                let rect = ui.available_rect_before_wrap();
+                let mut body = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                body.set_clip_rect(rect.intersect(ui.clip_rect()));
+                self.candidate_body_ui(&mut body, &mut actions);
+                ui.allocate_rect(rect, egui::Sense::hover());
+            }
+        });
         for action in actions {
             self.run_panel_action(ui.ctx(), action);
         }
@@ -176,13 +170,13 @@ impl DraftPage<'_> {
             .default_size(LIST_DEFAULT_WIDTH)
             .size_range(180.0..=460.0)
             .frame(egui::Frame::new().inner_margin(egui::Margin {
-                right: 6,
+                right: 4,
                 ..egui::Margin::ZERO
             }))
             .show(ui, |ui| self.candidate_list_ui(ui, actions));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin {
-                left: 8,
+                left: 4,
                 ..egui::Margin::ZERO
             }))
             .show(ui, |ui| self.candidate_detail_ui(ui, actions));

@@ -344,7 +344,7 @@ impl DraftPage<'_> {
                 .show(ui, |ui| self.markdown_find_ui(ui));
         }
         egui::CentralPanel::default()
-            .frame(theme::panel(theme::canvas(), 10))
+            .frame(egui::Frame::new().fill(theme::canvas()))
             .show(ui, |ui| {
                 // 候选区挂在编辑区底部，对照模式下横跨源码与版式两栏。
                 if self.candidates_available() {
@@ -370,13 +370,10 @@ impl DraftPage<'_> {
                 egui::Panel::left("preview_split")
                     .default_size(420.0)
                     .size_range(280.0..=900.0)
-                    .frame(egui::Frame::new().inner_margin(egui::Margin {
-                        right: 8,
-                        ..egui::Margin::ZERO
-                    }))
+                    .frame(theme::pane())
                     .show(ui, |ui| self.markdown_editor(ui));
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::NONE)
+                    .frame(theme::pane())
                     .show(ui, |ui| {
                         let region = ui.max_rect();
                         self.markdown_render(ui);
@@ -615,14 +612,9 @@ impl DraftPage<'_> {
                             .stroke(egui::Stroke::new(1.0, theme::border_strong()))
                             // 编辑区的纸比预览页更贴近眼睛，投影一直比预览重一档：
                             // 明色纸下 18+24 与改成跟随纸面之前的 42 完全一致。
-                            .shadow(egui::epaint::Shadow {
-                                offset: [0, 3],
-                                blur: 14,
-                                spread: 0,
-                                color: egui::Color32::from_black_alpha(
-                                    theme::paper::shadow_alpha().saturating_add(24),
-                                ),
-                            })
+                            .shadow(theme::float_shadow(
+                                theme::paper::shadow_alpha().saturating_add(24),
+                            ))
                             .inner_margin(egui::Margin::ZERO)
                             .show(ui, |ui| {
                                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
