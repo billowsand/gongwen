@@ -31,6 +31,14 @@ pub(crate) const RED_RECORD_NAME_TWIPS: usize = 3 * RED_RECORD_EM_TWIPS;
 pub(crate) const RED_RECORD_CONTACT_COLUMN_TWIPS: usize =
     RED_RECORD_LABEL_CONTACT_TWIPS + RED_RECORD_NAME_TWIPS + RED_RECORD_GUTTER_TWIPS;
 
+/// 定稿导出（TeX / Word）里联系人姓名留给手写签字的空位：4 em。姓名由经办人
+/// 现场手写，导出时不印，联系人与电话之间要比印姓名时空得更宽。预览仍显示姓名。
+pub(crate) const RED_RECORD_SIGN_TWIPS: usize = 4 * RED_RECORD_EM_TWIPS;
+
+/// 手写签字版式的联系人栏宽：标签 4 em + 签字空位 4 em + 栏间留白 1 em。
+pub(crate) const RED_RECORD_SIGN_CONTACT_COLUMN_TWIPS: usize =
+    RED_RECORD_LABEL_CONTACT_TWIPS + RED_RECORD_SIGN_TWIPS + RED_RECORD_GUTTER_TWIPS;
+
 /// 承办单位栏的最小宽度：电话号码再长，也不能把承办单位栏挤到 6 em 以下。
 pub(crate) const RED_RECORD_MIN_UNIT_TWIPS: usize = 6 * RED_RECORD_EM_TWIPS;
 
@@ -75,18 +83,26 @@ impl RedRecordColumns {
 ///   号码短就把余量让给承办单位栏，号码过长则封顶，自己压缩兜底；
 /// - 承办单位栏拿版心剩余的全部宽度，内容仍超出时才按比例横向压缩。
 pub(crate) fn red_record_columns(rows: &[[String; 3]]) -> RedRecordColumns {
+    red_record_columns_with_contact(rows, RED_RECORD_CONTACT_COLUMN_TWIPS)
+}
+
+/// 同 [`red_record_columns`]，但联系人栏按手写签字留白加宽：导出（TeX / Word）用。
+pub(crate) fn red_record_signing_columns(rows: &[[String; 3]]) -> RedRecordColumns {
+    red_record_columns_with_contact(rows, RED_RECORD_SIGN_CONTACT_COLUMN_TWIPS)
+}
+
+fn red_record_columns_with_contact(rows: &[[String; 3]], contact: usize) -> RedRecordColumns {
     let phone_need = rows
         .iter()
         .enumerate()
         .map(|(index, row)| red_record_phone_twips(&row[2], index == 0))
         .max()
         .unwrap_or(RED_RECORD_LABEL_PHONE_TWIPS);
-    let phone_max =
-        RED_RECORD_TOTAL_TWIPS - RED_RECORD_CONTACT_COLUMN_TWIPS - RED_RECORD_MIN_UNIT_TWIPS;
+    let phone_max = RED_RECORD_TOTAL_TWIPS - contact - RED_RECORD_MIN_UNIT_TWIPS;
     let phone = phone_need.clamp(RED_RECORD_LABEL_PHONE_TWIPS, phone_max);
     RedRecordColumns {
-        unit: RED_RECORD_TOTAL_TWIPS - RED_RECORD_CONTACT_COLUMN_TWIPS - phone,
-        contact: RED_RECORD_CONTACT_COLUMN_TWIPS,
+        unit: RED_RECORD_TOTAL_TWIPS - contact - phone,
+        contact,
         phone,
     }
 }
@@ -108,6 +124,7 @@ pub(crate) fn red_record_phone_twips(phone: &str, with_label: bool) -> usize {
 }
 
 /// 姓名在承办区里的自然宽度：2–4 字恒归一到 3 em，更长的名字按实际字数计。
+#[cfg(test)]
 pub(crate) fn red_record_name_twips(name: &str) -> usize {
     if (2..=4).contains(&name.chars().count()) {
         RED_RECORD_NAME_TWIPS

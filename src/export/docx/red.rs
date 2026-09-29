@@ -127,7 +127,8 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
     let rows = entries
         .iter()
         .map(|entry| {
-            let (name, name_size) = docx_name(&entry.name, BODY_SIZE);
+            // 联系人姓名导出时留空给经办人手写签字（预览仍显示）。
+            let (name, name_size) = docx_name("", BODY_SIZE);
             (
                 [display.abbr(&entry.unit), name, entry.phone.clone()],
                 name_size,
@@ -135,7 +136,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
         })
         .collect::<Vec<_>>();
     let display_rows = rows.iter().map(|(row, _)| row.clone()).collect::<Vec<_>>();
-    let columns = crate::export::red_record_columns(&display_rows);
+    let columns = crate::export::red_record_signing_columns(&display_rows);
     let rows = rows
         .iter()
         .enumerate()
@@ -163,8 +164,7 @@ pub(crate) fn red_approval_record_table(input: &DraftInput, display: &UnitDispla
                         if first { "联系人：" } else { "" },
                         &row[1],
                         *name_size,
-                        crate::export::RED_RECORD_LABEL_CONTACT_TWIPS
-                            + crate::export::red_record_name_twips(&entries[index].name),
+                        crate::export::RED_RECORD_LABEL_CONTACT_TWIPS,
                         AlignmentType::Left,
                         columns.contact_usable(),
                         if first {

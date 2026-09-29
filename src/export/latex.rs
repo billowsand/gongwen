@@ -262,18 +262,18 @@ mod tests {
             &UnitDisplay::new(&[]),
         );
         assert!(
-            tex.contains("\\RedRecordRow{综合处}{王\\hspace{1em}五}{010-12345678}"),
+            tex.contains("\\RedRecordRow{综合处}{}{010-12345678}"),
             "承办区首行走 \\RedRecordRow：{tex}"
         );
         assert!(
-            tex.contains("\\RedRecordRowCont{业务处}{赵\\hspace{1em}六}{010-87654321}"),
+            tex.contains("\\RedRecordRowCont{业务处}{}{010-87654321}"),
             "续行不重复标签、取值缩进对齐：{tex}"
         );
-        // 栏宽按各行内容一次算定并注入类文件：联系人栏固定 8 em（45.156mm），
+        // 栏宽按各行内容一次算定并注入类文件：联系人姓名留空给手写签字、联系人栏 9 em（50.800mm），
         // 两条 12 位号码 → 电话栏 50.800mm，余量归承办单位栏。
         assert!(
-            tex.contains("\\setlength{\\RedRecordUnitWidth}{60.043mm}")
-                && tex.contains("\\setlength{\\RedRecordContactWidth}{45.156mm}")
+            tex.contains("\\setlength{\\RedRecordUnitWidth}{54.398mm}")
+                && tex.contains("\\setlength{\\RedRecordContactWidth}{50.800mm}")
                 && tex.contains("\\setlength{\\RedRecordPhoneWidth}{50.800mm}"),
             "承办区栏宽应按内容算定并与 Word/预览同源：{tex}"
         );

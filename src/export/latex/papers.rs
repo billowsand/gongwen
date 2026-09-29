@@ -276,7 +276,12 @@ pub(crate) fn red_head_approval_tex_with_numbering(
     let record_rows = red_approval_record_display_rows(&entries, display);
     // 三栏宽度按各行实际内容一次算定并注入类文件（与 Word/预览同源）：联系人栏
     // 固定 8 em 永不压缩，电话栏按最长号码定宽，承办单位栏吃版心余量。
-    let record_columns = crate::export::red_record_columns(&record_rows);
+    // 联系人姓名导出时留空给经办人手写签字（预览仍显示），联系人栏相应加宽。
+    let record_rows = record_rows
+        .into_iter()
+        .map(|[unit, _, phone]| [unit, String::new(), phone])
+        .collect::<Vec<_>>();
+    let record_columns = crate::export::red_record_signing_columns(&record_rows);
     let responsible_rows = red_approval_responsible_rows_tex(&record_rows);
     let title_plain = plain_text(title);
 

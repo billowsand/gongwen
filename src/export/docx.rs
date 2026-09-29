@@ -1853,12 +1853,12 @@ mod tests {
                 && date.contains(&format!(r#"w:left="{expected_left}""#)),
             "成文日期应居中于单位与签字空间之间：{date}"
         );
-        // 承办区栏宽按内容一次算定：联系人栏固定 8 em，电话栏按最长号码定宽，
-        // 承办单位栏吃版心余量。本例两条号码都是 12 位 → 3404/2560/2880。
+        // 承办区栏宽按内容一次算定：联系人栏固定 9 em（标签 4 + 手写签字空位 4 + 留白 1），
+        // 电话栏按最长号码定宽，承办单位栏吃版心余量。本例两条号码都是 12 位 → 3084/2880/2880。
         assert!(
             xml.contains(&format!(
                 "<w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" /><w:gridCol w:w=\"{}\" w:type=\"dxa\" />",
-                3_404, 2_560, 2_880
+                3_084, 2_880, 2_880
             )),
             "承办区栏宽应与 LaTeX/预览同源：{xml}"
         );
@@ -1896,7 +1896,7 @@ mod tests {
         write_docx_ok(&path, &input, "# 标题\n\n正文。妥否，请指示。").unwrap();
         // 承办区排在正文流最前面（随三张浮动表一起）。
         let xml = zip_text(&path, "word/document.xml");
-        let columns = crate::export::red_record_columns(&[
+        let columns = crate::export::red_record_signing_columns(&[
             [
                 "教师工作与师资管理处".to_string(),
                 "王五".to_string(),
