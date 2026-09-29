@@ -1,8 +1,11 @@
 //! 主标题、附件标题与居中表格格的排布，与导出同一套判定（`export::title`）：
-//! 超出一行较多时按分词在词边界均衡换行，词不被拆到两行。
+//! 超出一行 1–2 个字宽时横向压扁字形保持单行，超出更多时按分词在词边界均衡换行。
 //!
 //! 判定只看纯文字与宽度，预览与导出调同一个函数、用同一份宽度（标题取版心，
-//! 表格取导出的智能列宽 twip），因此分几行、断在哪与 Word/PDF 一致。
+//! 表格取导出的智能列宽 twip），因此分几行、断在哪、压不压与 Word/PDF 一致。
+//!
+//! egui 的字体没有横向缩放，压缩靠排好之后把 galley 的横坐标整体乘上比例
+//! （[`squeeze`]）：字形、底色、花脸稿标记、点击命中都读同一份 galley，一起变窄。
 
 use super::Metrics;
 use super::layout::{
@@ -20,22 +23,34 @@ use std::sync::Arc;
 pub(crate) struct Fit {
     /// 原样文字（可带花脸稿哨兵、表格格里的行内标记）；换行方案已用 `\n` 接好各行。
     pub(crate) text: String,
+    /// 横向缩放，1.0 为原宽。
+    pub(crate) scale: f32,
 }
 
 impl Fit {
-    fn from_plan(marked: &str, plan: &title::TitlePlan) -> Self {
+    fn from_plan(marked: &str, plan: &title::TitlePlan, scale_percent: usize) -> Self {
         match plan {
-            title::TitlePlan::SingleLine | title::TitlePlan::Compressed => Self::plain(marked),
+            title::TitlePlan::SingleLine => Self::plain(marked),
+            title::TitlePlan::Compressed => Self {
+                text: marked.to_string(),
+                scale: scale_percent as f32 / 100.0,
+            },
             title::TitlePlan::Wrapped(lines) => Self {
                 text: export::redline_slice_lines(marked, lines).join("\n"),
+                scale: 1.0,
             },
         }
     }
 
-    pub(crate) fn plain(text: &str) -> Self {
+    fn plain(text: &str) -> Self {
         Self {
             text: text.to_string(),
+            scale: 1.0,
         }
+    }
+
+    pub(crate) fn compressed(&self) -> bool {
+        self.scale < 1.0
     }
 }
 
@@ -44,7 +59,8 @@ impl Fit {
 pub(crate) fn document_title(ctx: &egui::Context, marked: &str) -> Fit {
     cached(ctx, ("title", marked), || {
         let plain = export::strip_redline(marked);
-        Fit::from_plan(marked, &title::title_plan(&plain, title::chars_per_line()))
+        let plan = title::title_plan(&plain, title::chars_per_line());
+        Fit::from_plan(marked, &plan, title::compressed_scale_percent(&plain))
     })
 }
 
@@ -53,7 +69,12 @@ pub(crate) fn red_approval_title(ctx: &egui::Context, marked: &str) -> Fit {
     cached(ctx, ("red-title", marked), || {
         let plain = export::strip_redline(marked);
         let plan = title::title_plan(&plain, title::red_approval_chars_per_line());
-        Fit::from_plan(marked, &plan)
+        let scale = title::compressed_scale_percent_for(
+            &plain,
+            title::RED_APPROVAL_TITLE_WIDTH_PT,
+            title::RED_APPROVAL_TITLE_SIZE_PT,
+        );
+        Fit::from_plan(marked, &plan, scale)
     })
 }
 
@@ -69,7 +90,7 @@ pub(crate) fn table_cell(
         ctx,
         ("cell", cell, is_name, width_twips),
         || match export::table::centered_cell_plan(cell, is_name, width_twips) {
-            Some((plan, _)) => Fit::from_plan(cell, &plan),
+            Some((plan, scale)) => Fit::from_plan(cell, &plan, scale),
             None => Fit::plain(cell),
         },
     )
@@ -100,7 +121,40 @@ fn cached(ctx: &egui::Context, key: impl std::hash::Hash, compute: impl FnOnce()
     fit
 }
 
-/// 按排布结果把一段带哨兵的文字排成居中 galley：换行方案各行已由 `\n` 分开。
+/// 把排好的 galley 横向压到 `scale` 倍（字高不变），以 galley 的 x = 0 为不动点：
+/// 居中排版时那正是中线，压完仍然居中。
+pub(crate) fn squeeze(galley: Arc<egui::Galley>, scale: f32) -> Arc<egui::Galley> {
+    if scale >= 1.0 {
+        return galley;
+    }
+    let mut galley = Arc::unwrap_or_clone(galley);
+    for placed in &mut galley.rows {
+        placed.pos.x *= scale;
+        let row = Arc::make_mut(&mut placed.row);
+        row.size.x *= scale;
+        for glyph in &mut row.glyphs {
+            glyph.pos.x *= scale;
+            glyph.advance_width *= scale;
+            glyph.uv_rect.offset.x *= scale;
+            glyph.uv_rect.size.x *= scale;
+        }
+        for vertex in &mut row.visuals.mesh.vertices {
+            vertex.pos.x *= scale;
+        }
+        squeeze_rect(&mut row.visuals.mesh_bounds, scale);
+    }
+    squeeze_rect(&mut galley.rect, scale);
+    squeeze_rect(&mut galley.mesh_bounds, scale);
+    Arc::new(galley)
+}
+
+fn squeeze_rect(rect: &mut egui::Rect, scale: f32) {
+    rect.min.x *= scale;
+    rect.max.x *= scale;
+}
+
+/// 按排布结果把一段带哨兵的文字排成居中 galley：换行方案各行已由 `\n` 分开；
+/// 压缩方案先不限宽排成一行（按 `width` 排会被折成两行），再横向压扁。
 pub(crate) fn centered_galley(
     ui: &egui::Ui,
     metrics: &Metrics,
@@ -108,10 +162,14 @@ pub(crate) fn centered_galley(
     format: egui::TextFormat,
     width: f32,
 ) -> Arc<egui::Galley> {
-    let mut job = job(width);
+    let mut job = job(if fit.compressed() {
+        f32::INFINITY
+    } else {
+        width
+    });
     job.halign = Align::Center;
     marks::append_marked_text(&mut job, metrics, &fit.text, format);
-    layout(ui, job)
+    squeeze(layout(ui, job), fit.scale)
 }
 
 /// 公文主标题、附件标题：小标宋二号，相对版心居中，排布见 [`document_title`]。
@@ -138,6 +196,17 @@ pub(crate) fn title_block(ui: &mut egui::Ui, metrics: &Metrics, marked: &str) {
 mod tests {
     use super::*;
 
+    fn galley_of(ctx: &egui::Context, text: &str, halign: Align) -> Arc<egui::Galley> {
+        let mut job = job(f32::INFINITY);
+        job.halign = halign;
+        job.append(
+            text,
+            0.0,
+            text_format(egui::FontId::proportional(22.0), 28.0),
+        );
+        ctx.fonts_mut(|fonts| fonts.layout_job(job))
+    }
+
     #[test]
     fn long_titles_break_at_the_same_words_as_the_export() {
         let ctx = egui::Context::default();
@@ -148,6 +217,20 @@ mod tests {
             panic!("应分行");
         };
         assert_eq!(fit.text, lines.join("\n"));
+        assert_eq!(fit.scale, 1.0);
+    }
+
+    #[test]
+    fn a_small_overflow_is_squeezed_onto_one_line() {
+        let ctx = egui::Context::default();
+        let text = "一二三四五六七八九十一二三四五六七八九十一";
+        let fit = document_title(&ctx, text);
+        assert_eq!(fit.text, text);
+        assert_eq!(
+            fit.scale,
+            title::compressed_scale_percent(text) as f32 / 100.0
+        );
+        assert!(fit.compressed());
     }
 
     #[test]
@@ -174,5 +257,35 @@ mod tests {
         let bold = format!("**{long}**");
         assert_eq!(table_cell(&ctx, &bold, false, 1500), Fit::plain(&bold));
         assert_ne!(table_cell(&ctx, long, false, 1500), Fit::plain(long));
+    }
+
+    #[test]
+    fn squeezing_narrows_every_coordinate_around_the_center() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let galley = galley_of(&ctx, "Squeeze the glyphs", Align::Center);
+        let squeezed = squeeze(galley.clone(), 0.8);
+        assert!((squeezed.rect.width() - galley.rect.width() * 0.8).abs() < 0.01);
+        assert!((squeezed.rect.center().x - galley.rect.center().x * 0.8).abs() < 0.01);
+        assert_eq!(squeezed.rect.height(), galley.rect.height());
+        let (before, after) = (&galley.rows[0], &squeezed.rows[0]);
+        let last = before.glyphs.len() - 1;
+        assert!(
+            (after.pos.x + after.glyphs[last].max_x()
+                - 0.8 * (before.pos.x + before.glyphs[last].max_x()))
+            .abs()
+                < 0.01
+        );
+        let right = |row: &egui::epaint::text::PlacedRow| {
+            row.visuals
+                .mesh
+                .vertices
+                .iter()
+                .map(|vertex| row.pos.x + vertex.pos.x)
+                .fold(f32::MIN, f32::max)
+        };
+        assert!((right(after) - 0.8 * right(before)).abs() < 0.01);
+        // 不压缩时原样返回同一份。
+        assert!(Arc::ptr_eq(&squeeze(galley.clone(), 1.0), &galley));
     }
 }

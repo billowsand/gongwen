@@ -1511,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn document_titles_wrap_at_words_like_the_export() {
+    fn document_titles_squeeze_or_wrap_at_words_like_the_export() {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let available = 1000.0;
@@ -1539,7 +1539,20 @@ mod tests {
                 .sum::<usize>()
         };
 
-        // 超出较多：与导出在同一处按词断行。
+        // 超出一字：单行横向压扁，排版框不超版心、仍相对版心居中。
+        let squeezed = "一二三四五六七八九十一二三四五六七八九十一";
+        assert_eq!(squeezed.chars().count(), per_line + 1);
+        let output = draw(squeezed);
+        assert_eq!(galley_rows(&output), 1, "压缩后应是一行");
+        let bounds = layout_bounds(&output);
+        assert!(
+            bounds.width() <= metrics.content + 0.5 && bounds.width() > metrics.content * 0.9,
+            "压缩后应恰好排满版心：{bounds:?}，版心 {}",
+            metrics.content
+        );
+        assert!((bounds.center().x - metrics.content / 2.0).abs() <= 1.0);
+
+        // 超出更多：与导出在同一处按词断行。
         let long = "关于进一步加强全市基层治理体系和治理能力现代化建设的实施方案";
         let export::title::TitlePlan::Wrapped(lines) = export::title::title_plan(long, per_line)
         else {

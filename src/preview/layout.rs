@@ -1314,8 +1314,8 @@ pub(crate) fn measure_table(
                 ColumnAlignment::Left => Align::LEFT,
             };
             let has_math = metrics.math && math_flow::has_math(text);
-            // 居中格与导出同一套排布：按导出的格宽判定，超出较多时按分词均衡
-            // 换行（各行以 `\n` 接好）。含公式的格照旧自然折行。
+            // 居中格与导出同一套排布：按导出的格宽判定，多出 1–2 字横向压扁，
+            // 再多按分词均衡换行（各行以 `\n` 接好）。含公式的格照旧自然折行。
             let fit = if align == ColumnAlignment::Center && !has_math {
                 let twips = columns[column..column + column_span]
                     .iter()
@@ -1324,9 +1324,16 @@ pub(crate) fn measure_table(
                 let is_name = name_column == Some(column) && row_index > 0;
                 super::fit::table_cell(ui.ctx(), text, is_name, twips)
             } else {
-                super::fit::Fit::plain(text)
+                super::fit::Fit {
+                    text: text.to_string(),
+                    scale: 1.0,
+                }
             };
             let text = fit.text.as_str();
+            if fit.compressed() {
+                // 按格宽排会被折成两行：先排成一行再压。
+                cell_job.wrap.max_width = f32::INFINITY;
+            }
             // 表头整行黑体，不再认单元格里的加粗；正文格按 `**` 排粗体，
             // 与 DOCX 的 table_runs_sized、TeX 的 \GwBold 一致。括号换楷体那条
             // 规则只管正文，表格三端都不用。
@@ -1386,7 +1393,7 @@ pub(crate) fn measure_table(
                     }
                 }
             }
-            let galley = layout(ui, cell_job);
+            let galley = super::fit::squeeze(layout(ui, cell_job), fit.scale);
             if row_span == 1 {
                 row_heights[row_index] =
                     row_heights[row_index].max(galley.size().y + 2.0 * padding);
@@ -1801,16 +1808,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn centered_table_cells_wrap_at_the_same_words_as_the_export() {
+    fn centered_table_cells_squeeze_or_wrap_exactly_like_the_export() {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let metrics = Metrics::new(1000.0, Some(1.0));
         let aligns = [export::ColumnAlign::Center, export::ColumnAlign::Left];
         // 第二列是带句读的长说明（居左），占去大部分宽度；第一列的居中格逐字加长，
-        // 直到需要按词换行。
+        // 依次经过放得下、压缩、换行三种排布。
         let source = "国家发展和改革委员会办公厅综合司综合协调处政策研究室";
         let note = "这是一段很长的说明文字，用来占去表格的大部分宽度，好让第一列窄下来，看看居中格怎么排。";
-        let mut wrapped = 0;
+        let (mut squeezed, mut wrapped) = (0, 0);
         for count in 2..=source.chars().count() {
             let long = source.chars().take(count).collect::<String>();
             let long = long.as_str();
@@ -1829,20 +1836,28 @@ mod tests {
                 .find(|cell| cell.row == 1 && cell.column == 0)
                 .expect("长格");
             let twips = export::table_columns(&rows, &aligns, &[])[0].twips;
+            let inner = table.widths[0] - 2.0 * cell.padding;
             match export::table::centered_cell_plan(long, false, twips) {
                 Some((export::title::TitlePlan::Wrapped(lines), _)) => {
                     wrapped += 1;
                     assert_eq!(cell.galley.text(), lines.join("\n"));
                     assert_eq!(cell.galley.rows.len(), lines.len(), "{long}");
                 }
+                Some((export::title::TitlePlan::Compressed, _)) => {
+                    squeezed += 1;
+                    assert_eq!(cell.galley.rows.len(), 1, "{long}");
+                    assert!(cell.galley.rect.width() <= inner, "{long}");
+                }
                 plan => {
-                    // 放得下的原样一行；只多出 1–2 字的仍按格宽自然折行。
                     assert!(plan.is_some(), "居中格应参与判定");
-                    assert_eq!(cell.galley.text().replace('\n', ""), long);
+                    assert_eq!(cell.galley.text(), long);
                 }
             }
         }
-        assert!(wrapped > 0, "应有需要换行的长度");
+        assert!(
+            squeezed > 0 && wrapped > 0,
+            "压缩 {squeezed} 次、换行 {wrapped} 次"
+        );
     }
 
     #[test]
