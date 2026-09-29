@@ -13,9 +13,9 @@ use crate::preview::layout::{MeasuredTable, measure_table};
 use crate::preview::marks;
 use crate::preview::render::{anchored, block_key};
 use crate::preview::{
-    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT,
-    clickable_content_block, document_number, first_ink, header_unit, heading_family, indent,
-    is_renderable_paragraph, job, justified_rows, layout, line_block, row_tint_offset,
+    BODY_PT, CLOSING_GAP_LINES, HEADER_PT, INDENT_CHARS, LINE_PT, MM, Metrics, PAREN_PT, TITLE_PT,
+    clickable, clickable_content_block, document_number, first_ink, header_unit, heading_family,
+    indent, is_renderable_paragraph, job, justified_rows, layout, line_block, row_tint_offset,
     scroll_preview_to_rect, sheet, signature_date, single_line, text_format,
 };
 use crate::theme;
@@ -1651,6 +1651,31 @@ pub(crate) fn red_approval_print_preview(
                 Align::LEFT,
             );
             for located in attachment {
+                // 附件正式标题与正文标题使用同一层级编码，与白头件一致。
+                if let MarkdownBlock::Title(text) = &located.block {
+                    counters.fill(0);
+                    let range = located.range.clone();
+                    clickable(
+                        ui,
+                        metrics,
+                        &range,
+                        anchor,
+                        scroll_to_anchor,
+                        clicked,
+                        |ui| {
+                            line_block(
+                                ui,
+                                metrics,
+                                &marks::plain_keep_marks(text),
+                                theme::FONT_BIAOSONG,
+                                TITLE_PT,
+                                Align::Center,
+                            );
+                            ui.add_space(metrics.pt(18.0));
+                        },
+                    );
+                    continue;
+                }
                 let key = block_key(located, &counters, true, numbering);
                 let heading =
                     matches!(located.block, MarkdownBlock::Heading(..)).then_some(&located.range);
