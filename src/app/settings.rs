@@ -9,8 +9,8 @@
 
 use crate::app::{GongwenApp, warn};
 use crate::models::{
-    BoldStyle, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole, HeadingNumbering,
-    ListNumbering, PaperMode, ProxyMode, RerankMode, ThemeName,
+    BoldStyle, DiagramTheme, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole,
+    HeadingNumbering, ListNumbering, PaperMode, ProxyMode, RerankMode, ThemeName,
 };
 use crate::storage;
 use crate::system_fonts;
@@ -51,7 +51,7 @@ pub(crate) enum SettingsSection {
     Network,
     /// 输出与录入（输出目录、编辑器选项）。
     Output,
-    /// 界面主题与公文纸面。
+    /// 界面主题、公文纸面与流程图样式。
     Theme,
     /// 界面字体与编译字体。
     Font,
@@ -670,6 +670,110 @@ impl GongwenApp {
         let _ = storage::save(&self.config);
     }
 
+    /// 切换流程图样式并立即生效：预览下一帧按新配色重画，导出也跟着换。
+    /// 设置页与应用菜单的「流程图样式」子菜单共用这一入口。
+    pub(crate) fn apply_diagram_theme(&mut self, diagram_theme: DiagramTheme) {
+        self.config.diagram_theme = diagram_theme;
+        crate::mermaid::set_theme(diagram_theme);
+        self.status = format!("流程图样式已切换为「{}」。", diagram_theme.label());
+        let _ = storage::save(&self.config);
+    }
+
+    /// 画一张流程图样式卡：白纸上一框、一菱形、一框的缩略流程。「按文种自动」
+    /// 左右各画公文与研究报告的实际配色。
+    fn diagram_theme_card(&self, ui: &mut egui::Ui, diagram_theme: DiagramTheme) -> egui::Response {
+        use crate::mermaid::{Style, palette};
+        let selected = diagram_theme == self.config.diagram_theme;
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(168.0, 92.0), egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter_at(rect);
+            // 卡片底恒为白纸：配色是给纸面用的，不随界面明暗变。
+            painter.rect_filled(rect, 10.0, egui::Color32::WHITE);
+            let stroke = if selected {
+                egui::Stroke::new(2.0, theme::accent())
+            } else {
+                egui::Stroke::new(1.0, theme::border_strong())
+            };
+            painter.rect_stroke(rect, 10.0, stroke, egui::StrokeKind::Inside);
+            let color = |hex: &str| egui::Color32::from_hex(hex).unwrap_or(egui::Color32::GRAY);
+            let sketch = rect
+                .shrink2(egui::vec2(12.0, 10.0))
+                .with_max_y(rect.top() + 58.0);
+            let halves = match diagram_theme {
+                DiagramTheme::Auto => vec![
+                    (sketch.split_left_right_at_fraction(0.5).0, Style::Official),
+                    (sketch.split_left_right_at_fraction(0.5).1, Style::Research),
+                ],
+                _ => vec![(sketch, Style::Research)],
+            };
+            for (area, style) in halves {
+                let palette = palette(diagram_theme, style);
+                let (fill, border, line) = (
+                    color(palette.fill),
+                    color(palette.stroke),
+                    color(palette.line),
+                );
+                let node = egui::vec2((area.width() * 0.26).min(34.0), 14.0);
+                let y = area.center().y;
+                let left =
+                    egui::Rect::from_center_size(egui::pos2(area.left() + node.x / 2.0, y), node);
+                let right =
+                    egui::Rect::from_center_size(egui::pos2(area.right() - node.x / 2.0, y), node);
+                let center = egui::pos2(area.center().x, y);
+                let radius = 13.0_f32.min(area.width() * 0.16);
+                let diamond = vec![
+                    center + egui::vec2(0.0, -radius),
+                    center + egui::vec2(radius, 0.0),
+                    center + egui::vec2(0.0, radius),
+                    center + egui::vec2(-radius, 0.0),
+                ];
+                let line_stroke = egui::Stroke::new(1.0, line);
+                painter.arrow(
+                    egui::pos2(left.right(), y),
+                    egui::vec2(center.x - radius - left.right(), 0.0),
+                    line_stroke,
+                );
+                painter.arrow(
+                    egui::pos2(center.x + radius, y),
+                    egui::vec2(right.left() - center.x - radius, 0.0),
+                    line_stroke,
+                );
+                for node in [left, right] {
+                    painter.rect_filled(node, 1.0, fill);
+                    painter.rect_stroke(
+                        node,
+                        1.0,
+                        egui::Stroke::new(1.0, border),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                painter.add(egui::Shape::convex_polygon(
+                    diamond,
+                    color(palette.decision),
+                    egui::Stroke::new(1.0, border),
+                ));
+            }
+            painter.text(
+                egui::pos2(rect.left() + 12.0, rect.bottom() - 10.0),
+                egui::Align2::LEFT_BOTTOM,
+                diagram_theme.label(),
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_rgb(0x22, 0x22, 0x22),
+            );
+            if selected {
+                painter.text(
+                    egui::pos2(rect.right() - 12.0, rect.bottom() - 10.0),
+                    egui::Align2::RIGHT_BOTTOM,
+                    "✓ 当前",
+                    egui::FontId::proportional(12.0),
+                    theme::accent(),
+                );
+            }
+        }
+        response.on_hover_text(diagram_theme.hint())
+    }
+
     /// 画一张主题预览卡；返回值为卡片的点击响应。
     fn theme_card(&self, ui: &mut egui::Ui, name: ThemeName) -> egui::Response {
         let palette = theme::by_name(name);
@@ -783,6 +887,27 @@ impl GongwenApp {
                 }
             }
         });
+
+        sub_heading(
+            ui,
+            "流程图样式",
+            Some(
+                "Mermaid 流程图的配色与线型，预览与导出的 Word、PDF 一致。字体与字号随文种：公文用仿宋小四，研究报告用黑体小五。",
+            ),
+        );
+        let mut pending = None;
+        ui.horizontal_wrapped(|ui| {
+            for diagram_theme in DiagramTheme::ALL {
+                if self.diagram_theme_card(ui, diagram_theme).clicked()
+                    && self.config.diagram_theme != diagram_theme
+                {
+                    pending = Some(diagram_theme);
+                }
+            }
+        });
+        if let Some(diagram_theme) = pending {
+            self.apply_diagram_theme(diagram_theme);
+        }
     }
 
     /// 字体设置：界面与 Markdown 源码编辑器字体可分别个性化，五个编译位置也可分别换成本机字体。

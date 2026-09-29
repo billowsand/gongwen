@@ -795,6 +795,17 @@ pub(crate) fn content_block(
             numbered,
         } => table_block(ui, metrics, rows, aligns, spans, *numbered),
         MarkdownBlock::Image { alt, src } => image_block(ui, metrics, alt, src),
+        MarkdownBlock::Diagram { source, caption } => {
+            diagram_image_block(ui, metrics, source, false);
+            if !caption.is_empty() {
+                aligned_block(
+                    ui,
+                    metrics,
+                    &format!("图：{caption}"),
+                    export::LineAlign::Center,
+                );
+            }
+        }
         MarkdownBlock::Aligned { align, text } => aligned_block(ui, metrics, text, *align),
         // 公文的引用块已由 `OfficialParse` 拆成段落；研究报告的引用块在
         // `preview::research` 里自己排，都不走这里
@@ -816,6 +827,24 @@ pub(crate) fn image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: 
 /// 0.8\textwidth` 之类加 `\centering`）和 Word 同一规则。
 pub(crate) fn research_image_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str) {
     figure_block(ui, metrics, alt, src, true);
+}
+
+/// Mermaid 由本机 Rust 引擎生成图片后，复用普通插图的缩放与占位逻辑。
+pub(crate) fn diagram_image_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    source: &str,
+    research: bool,
+) {
+    let style = if research {
+        crate::mermaid::Style::Research
+    } else {
+        crate::mermaid::Style::Official
+    };
+    match crate::mermaid::cache(source, style, crate::mermaid::Format::Png) {
+        Ok(src) => figure_block(ui, metrics, "流程图", &src, research),
+        Err(error) => image_placeholder(ui, metrics, "流程图", "Mermaid", &error.to_string()),
+    }
 }
 
 /// `research` 为真时按 `figure_size` 定宽居中，否则是公文的排法。

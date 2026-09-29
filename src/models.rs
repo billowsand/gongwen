@@ -1246,6 +1246,52 @@ impl PaperMode {
     }
 }
 
+/// 流程图（Mermaid 围栏）的配色与线型。字体、字号不在这里：它们随文种走，
+/// 公文用仿宋、研究报告用黑体，并按正文字号定出图内字号。预览与导出同一套。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagramTheme {
+    /// 公文用「墨线」，研究报告用「藏青」。
+    #[default]
+    Auto,
+    /// 白底黑线、不填色：最接近手绘的公文流程图，黑白打印、复印都不走样。
+    Ink,
+    /// 浅灰填色、深灰线条，判断框略深：层次比墨线多一级，打印仍是灰阶。
+    Gray,
+    /// 藏青线条、雾蓝填色，判断框用米黄：研究报告里克制的一点颜色。
+    Navy,
+    /// 青瓷绿线条、淡青填色，判断框用米白：比藏青更柔和，适合长报告。
+    Celadon,
+}
+
+impl DiagramTheme {
+    /// 全部可选项，顺序与菜单、设置页展示一致。
+    pub const ALL: [DiagramTheme; 5] =
+        [Self::Auto, Self::Ink, Self::Gray, Self::Navy, Self::Celadon];
+
+    /// 菜单与设置页展示的名字。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "按文种自动",
+            Self::Ink => "墨线",
+            Self::Gray => "素灰",
+            Self::Navy => "藏青",
+            Self::Celadon => "青瓷",
+        }
+    }
+
+    /// 悬停说明。
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Auto => "公文用「墨线」，研究报告用「藏青」",
+            Self::Ink => "白底黑线、不填色，黑白打印与复印不走样，适合红头公文",
+            Self::Gray => "浅灰填色、深灰线条，层次清楚，打印仍是灰阶",
+            Self::Navy => "藏青线条、雾蓝填色、米黄判断框，研究报告里克制的一点颜色",
+            Self::Celadon => "青瓷绿线条、淡青填色，比藏青柔和，适合长报告",
+        }
+    }
+}
+
 /// Markdown 源码编辑器里某一处可以用的字面。
 ///
 /// 「编辑器字体」是设置里那支通用编辑器字体（没单独选就跟随界面字体）；其余四项
@@ -1726,6 +1772,8 @@ pub struct AppConfig {
     pub theme: ThemeName,
     /// 屏幕上公文纸面的明暗。导出结果不受影响。
     pub paper: PaperMode,
+    /// 流程图的配色与线型，预览与导出一致。旧配置缺该字段时按「按文种自动」。
+    pub diagram_theme: DiagramTheme,
     /// 源码编辑器里各处 Markdown 元素分别用哪支字面。旧配置缺该字段时按默认值
     /// 补齐，即六处全用编辑器字体。
     pub editor_fonts: EditorFontScheme,
@@ -1772,6 +1820,7 @@ impl Default for AppConfig {
             numbering: NumberingConfig::default(),
             theme: ThemeName::default(),
             paper: PaperMode::default(),
+            diagram_theme: DiagramTheme::default(),
             editor_fonts: EditorFontScheme::default(),
             ribbon_tab: RibbonTab::default(),
             ribbon_collapsed: false,

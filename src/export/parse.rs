@@ -42,6 +42,11 @@ pub(crate) enum MarkdownBlock {
         alt: String,
         src: String,
     },
+    /// 本机渲染的 Mermaid 流程图；图题紧跟结束围栏，源码范围覆盖整块。
+    Diagram {
+        source: String,
+        caption: String,
+    },
     /// 居中 / 居右区里的一行（见 [`parse_align_marker`]）：标记行下方直到空行为止，
     /// 每条源码行各成一行，不缩进、不两端对齐，也不再认标题、列表、表格语法。
     Aligned {
@@ -554,6 +559,40 @@ fn parse_located(
         }
         if line.is_empty() {
             flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+        } else if crate::mermaid::is_open(line)
+            // 还没写结束围栏（正在输入）时不认成图：否则后文整段被吞进图里、
+            // 从预览上消失。按普通段落显示，导出时由 `mermaid::materialize` 报行号。
+            && lines[index + 1..]
+                .iter()
+                .any(|next| crate::mermaid::is_close(&next.text))
+        {
+            flush(&mut paragraph, &mut paragraph_range, &mut blocks);
+            index += 1;
+            let mut source = Vec::new();
+            while !crate::mermaid::is_close(&lines[index].text) {
+                source.push(lines[index].text.as_ref());
+                index += 1;
+            }
+            let mut end = lines[index].start + lines[index].len;
+            index += 1;
+            let mut caption = String::new();
+            if let Some(next) = lines.get(index)
+                && let Some((text, _)) = crate::mermaid::caption(next.text.as_ref())
+            {
+                caption = text.to_string();
+                end = next.start + next.len;
+                index += 1;
+            }
+            blocks.push(LocatedBlock {
+                block: MarkdownBlock::Diagram {
+                    source: source.join("\n"),
+                    caption,
+                },
+                range: start..end,
+                source_segments: Vec::new(),
+                generated_prefixes: Vec::new(),
+            });
+            continue;
         } else if let Some(mut align) = parse_align_marker(line) {
             // 居中 / 居右区：标记行本身按 Html 跳过，不落纸面；其下每条非空行
             // 原样成一行，遇到空行结束，恢复正常排版。区内再写一个对齐标记
@@ -1724,6 +1763,41 @@ fn compact_heading_levels(blocks: &[MarkdownBlock], mode: StyleMode) -> Vec<bool
 #[cfg(test)]
 mod ordered_list_tests {
     use super::*;
+
+    #[test]
+    fn mermaid_block_keeps_source_caption_and_range() {
+        let source = "前文。\n\n```mermaid\nflowchart LR\n A[登记] --> B[办理]\n```\n图：办理流程 {#fig:process}\n\n后文。";
+        let blocks = parse_markdown_located(source);
+        let diagram = blocks
+            .iter()
+            .find(|located| matches!(located.block, MarkdownBlock::Diagram { .. }))
+            .unwrap();
+        assert_eq!(
+            diagram.block,
+            MarkdownBlock::Diagram {
+                source: "flowchart LR\n A[登记] --> B[办理]".into(),
+                caption: "办理流程".into(),
+            }
+        );
+        assert_eq!(
+            &source[diagram.range.clone()],
+            "```mermaid\nflowchart LR\n A[登记] --> B[办理]\n```\n图：办理流程 {#fig:process}"
+        );
+        assert!(
+            matches!(&blocks.last().unwrap().block, MarkdownBlock::Paragraph(text) if text == "后文。")
+        );
+    }
+
+    #[test]
+    fn unclosed_mermaid_fence_does_not_swallow_the_rest() {
+        let blocks = parse_markdown("```mermaid\nflowchart LR\n\n后文。");
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, MarkdownBlock::Diagram { .. }))
+        );
+        assert!(matches!(blocks.last(), Some(MarkdownBlock::Paragraph(text)) if text == "后文。"));
+    }
 
     #[test]
     fn renumbering_makes_each_group_consecutive_from_its_own_first_number() {

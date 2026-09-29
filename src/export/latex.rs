@@ -81,6 +81,12 @@ pub fn write_tex_with_numbering(
     numbering: &NumberingConfig,
     elements: &crate::visual_diff::ElementMarks,
 ) -> Result<()> {
+    let rendered = crate::mermaid::materialize(
+        markdown,
+        crate::mermaid::Style::Official,
+        crate::mermaid::Format::Pdf,
+    )?;
+    let markdown = rendered.as_str();
     let content = match input.kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
             official_letter_tex_with_numbering(input, markdown, display, numbering, elements)

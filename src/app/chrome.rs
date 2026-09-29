@@ -10,7 +10,7 @@ use crate::app::{
 };
 use crate::doc_import;
 use crate::draft_page::{PreviewMode, TOOLBAR_CONTROL_HEIGHT, toolbar_separator};
-use crate::models::{ManuscriptStatus, ThemeName};
+use crate::models::{DiagramTheme, ManuscriptStatus, ThemeName};
 use crate::theme;
 use crate::version;
 use eframe::egui;
@@ -838,6 +838,30 @@ impl GongwenApp {
                             self.apply_theme(ui.ctx(), name);
                             ui.close();
                         }
+                    }
+                }
+            });
+            // 流程图样式紧挨外观主题：同是「看起来什么样」，但它管的是纸面上的图，
+            // 导出也跟着变。
+            egui::containers::menu::SubMenuButton::from_button(
+                theme::menu_item(theme::Icon::GitCommit, "流程图样式")
+                    .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+            )
+            .ui(ui, |ui| {
+                for diagram_theme in DiagramTheme::ALL {
+                    let selected = diagram_theme == self.config.diagram_theme;
+                    if ui
+                        .add(theme::menu_selectable_item(selected, diagram_theme.label()))
+                        .on_hover_text(diagram_theme.hint())
+                        .clicked()
+                        && !selected
+                    {
+                        self.apply_diagram_theme(diagram_theme);
+                        ui.close();
+                    }
+                    // 「按文种自动」与四套具体配色分开两段。
+                    if diagram_theme == DiagramTheme::Auto {
+                        ui.separator();
                     }
                 }
             });

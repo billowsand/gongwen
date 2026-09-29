@@ -31,7 +31,8 @@ use super::layout::{
     line_block_runs_spaced, sheet,
 };
 use super::render::{
-    BlockShape, PreviewOutput, anchored, clickable_content_block, research_image_block,
+    BlockShape, PreviewOutput, anchored, clickable_content_block, diagram_image_block,
+    research_image_block,
 };
 use super::{
     INDENT_CHARS, Metrics, PreviewScale, RESEARCH_BODY_PT, RESEARCH_CAPTION_PT,
@@ -101,6 +102,11 @@ pub(super) enum Kind<'a> {
         number: Option<String>,
         alt: &'a str,
         src: &'a str,
+    },
+    Diagram {
+        number: Option<String>,
+        caption: &'a str,
+        source: &'a str,
     },
     /// 表格，连同并进来的表题。
     Table { caption: Option<Caption> },
@@ -398,6 +404,11 @@ pub(super) fn walk<'a>(
                 alt,
                 src,
             },
+            MarkdownBlock::Diagram { source, caption } => Kind::Diagram {
+                number: (!caption.trim().is_empty()).then(|| walk.open_figure()),
+                caption,
+                source,
+            },
             MarkdownBlock::Quote {
                 boxed: Some(boxed), ..
             } => {
@@ -535,6 +546,7 @@ fn anchor_of<'a>(markdown: &'a str, located: &LocatedBlock) -> Option<&'a str> {
     let raw = markdown.get(located.range.clone())?;
     let raw = match located.block {
         MarkdownBlock::Quote { .. } => raw.lines().next()?,
+        MarkdownBlock::Diagram { .. } => raw.lines().last()?,
         _ => raw,
     };
     crossref::split_label(raw).1
@@ -679,6 +691,11 @@ impl<'k> Anchored<'k> {
                 alt,
                 ..
             } => (LabelKind::Figure, number, None, *alt),
+            Kind::Diagram {
+                number: Some(number),
+                caption,
+                ..
+            } => (LabelKind::Figure, number, None, *caption),
             Kind::Table {
                 caption: Some(caption),
             } => (
@@ -1371,6 +1388,28 @@ fn body_item(
                     if let Some(number) = &number {
                         ui.add_space(metrics.pt(CAPTION_GAP_PT));
                         caption_line(ui, metrics, "图", number, alt);
+                    }
+                },
+            );
+            space_after_float(ui, metrics);
+        }
+        Kind::Diagram {
+            number,
+            caption,
+            source: diagram,
+        } => {
+            clickable(
+                ui,
+                metrics,
+                &source,
+                anchor,
+                scroll_to_anchor,
+                clicked,
+                |ui| {
+                    diagram_image_block(ui, metrics, diagram, true);
+                    if let Some(number) = &number {
+                        ui.add_space(metrics.pt(CAPTION_GAP_PT));
+                        caption_line(ui, metrics, "图", number, caption);
                     }
                 },
             );

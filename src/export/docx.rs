@@ -164,6 +164,12 @@ pub fn write_docx_with_numbering(
     if !input.kind.uses_official_docx() {
         bail!("研究报告的 Word 由 mdx research 转换器生成，不走公文 Word 排版");
     }
+    let rendered = crate::mermaid::materialize(
+        markdown,
+        crate::mermaid::Style::Official,
+        crate::mermaid::Format::Png,
+    )?;
+    let markdown = rendered.as_str();
     // 加粗文字的排法：None 交给 Word 合成粗体（字体不变，等同点了加粗按钮），
     // Some 换用专用粗体字面。
     let bold = fonts.bold_family_docx();
@@ -473,6 +479,7 @@ pub fn write_docx_with_numbering(
                 MarkdownBlock::Title(_)
                 | MarkdownBlock::Html(_)
                 | MarkdownBlock::Marker(_)
+                | MarkdownBlock::Diagram { .. }
                 | MarkdownBlock::Quote { .. } => {}
                 MarkdownBlock::Image { alt, src } => {
                     if let Some(paragraph) = image_paragraph(alt, src) {

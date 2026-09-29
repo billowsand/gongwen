@@ -280,7 +280,9 @@ pub(crate) fn red_approval_body_metrics(blocks: &[MarkdownBlock]) -> RedApproval
                 let units = title::display_units(&format!("{number}.{}", plain_text(text))) + 4;
                 metrics.lines += units.div_ceil(per_line).max(1);
             }
-            MarkdownBlock::Table { .. } | MarkdownBlock::Image { .. }
+            MarkdownBlock::Table { .. }
+            | MarkdownBlock::Image { .. }
+            | MarkdownBlock::Diagram { .. }
                 if metrics.lines_before_float.is_none() =>
             {
                 metrics.lines_before_float = Some(metrics.lines);

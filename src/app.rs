@@ -353,6 +353,7 @@ impl GongwenApp {
         // 预览字体要按配置装，所以先读配置再装字体。
         theme::set_current(config.theme);
         theme::set_current_paper(config.paper);
+        crate::mermaid::set_theme(config.diagram_theme);
         theme::configure_fonts(&cc.egui_ctx, &config.fonts);
         theme::configure_icons(&cc.egui_ctx);
         theme::configure_style(&cc.egui_ctx);

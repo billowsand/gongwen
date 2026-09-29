@@ -22,6 +22,7 @@ mod lmstudio;
 mod macos_window;
 mod manuscript;
 mod manuscript_io;
+mod mermaid;
 mod metrics;
 mod models;
 mod net;

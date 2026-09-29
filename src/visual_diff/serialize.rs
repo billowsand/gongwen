@@ -318,6 +318,13 @@ fn emit_block(overlay: &BlockOverlay, deleted: bool) -> Vec<String> {
                     vec![format!("![{alt}]({src})")]
                 }
             }
+            MarkdownBlock::Diagram { caption, .. } => {
+                if deleted {
+                    vec![mark_deleted(&format!("［流程图：{caption}］"))]
+                } else {
+                    raw.lines().map(str::to_string).collect()
+                }
+            }
             MarkdownBlock::Table {
                 aligns, numbered, ..
             } => {

@@ -942,6 +942,25 @@ pub(crate) fn red_build_print_layout(
                     false,
                 );
             }
+            MarkdownBlock::Diagram { caption, .. } => {
+                if state.page_index == 0 {
+                    state.next_page(metrics);
+                }
+                red_place_flow_text(
+                    ui,
+                    metrics,
+                    &mut state,
+                    located.range.clone(),
+                    vec![RedFlowSegment {
+                        text: format!("〔流程图：{caption}〕"),
+                        bold: false,
+                        parenthesized: false,
+                        style: RedTextStyle::Body,
+                        mark: RedlineKind::Same,
+                    }],
+                    false,
+                );
+            }
             MarkdownBlock::Paragraph(_) => {}
         }
         index += 1;

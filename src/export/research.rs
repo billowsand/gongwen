@@ -136,7 +136,8 @@ pub(crate) fn write_tex(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Result<()> {
-    let source = ResearchSourceBundle::create(input, markdown, numbering)?;
+    let source =
+        ResearchSourceBundle::create(input, markdown, numbering, crate::mermaid::Format::Pdf)?;
     clear_generated_parts(path.parent().unwrap_or_else(|| Path::new(".")))?;
     mdx::convert(ConvertRequest {
         input: source.markdown.clone(),
@@ -159,7 +160,8 @@ pub(crate) fn write_docx(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Result<()> {
-    let source = ResearchSourceBundle::create(input, markdown, numbering)?;
+    let source =
+        ResearchSourceBundle::create(input, markdown, numbering, crate::mermaid::Format::Png)?;
     mdx::convert(ConvertRequest {
         input: source.markdown.clone(),
         output: Some(path.to_path_buf()),
@@ -213,16 +215,23 @@ struct ResearchSourceBundle {
 }
 
 impl ResearchSourceBundle {
-    fn create(input: &DraftInput, markdown: &str, numbering: &NumberingConfig) -> Result<Self> {
+    fn create(
+        input: &DraftInput,
+        markdown: &str,
+        numbering: &NumberingConfig,
+        format: crate::mermaid::Format,
+    ) -> Result<Self> {
         let root = tempfile::Builder::new()
             .prefix("gongwen-research-")
             .tempdir()
             .context("无法创建研究报告临时目录")?;
-        crate::images::copy_refs(markdown, root.path())?;
+        let rendered =
+            crate::mermaid::materialize(markdown, crate::mermaid::Style::Research, format)?;
+        crate::images::copy_refs(&rendered, root.path())?;
         let bibliography = copy_bibliography(&input.research, root.path())?;
         let document = markdown_with_frontmatter(
             input,
-            markdown,
+            &rendered,
             bibliography.as_deref().map(|_| "references.bib"),
             numbering,
         );

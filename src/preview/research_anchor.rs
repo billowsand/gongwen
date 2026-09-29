@@ -126,6 +126,14 @@ fn target_of(
         Kind::Figure { number: None, .. } => Err(AnchorRefusal::NotNumbered(
             "没有图注的图片不编号。先在 ![图注](…) 的方括号里写上图注，再挂锚点",
         )),
+        Kind::Diagram {
+            number: Some(_),
+            caption,
+            ..
+        } => Ok(named("fig", caption)),
+        Kind::Diagram { number: None, .. } => Err(AnchorRefusal::NotNumbered(
+            "没有图题的流程图不编号。先在结束围栏下一行写“图：题名”，再挂锚点",
+        )),
         Kind::Box { name, title, .. } => {
             let slug_source = if title.trim().is_empty() { name } else { title };
             Ok(Named {
@@ -152,6 +160,11 @@ fn target_of(
     // 引用块（文框）的锚点写在首行，光标在框里哪一行都挂到首行上。
     let line = match located.block {
         MarkdownBlock::Quote { .. } => line,
+        MarkdownBlock::Diagram { .. } => {
+            let raw = &markdown[located.range.clone()];
+            let offset = raw.rfind('\n').map_or(0, |pos| pos + 1);
+            located.range.start + offset..located.range.end
+        }
         _ => located.range.clone(),
     };
     Some((line, target))
@@ -276,6 +289,7 @@ mod tests {
         "<!-- [不编号] -->\n## 前言\n\n",
         "## 研究背景\n\n### 数据来源与方法\n\n正文段落。\n\n",
         "![总体架构](images/a.png)\n\n![](images/b.png)\n\n",
+        "```mermaid\nflowchart LR\n A[收文] --> B[办理]\n```\n图：办理流程\n\n",
         "表：三省样本分布\n\n| 省份 | 样本数 |\n| --- | --- |\n| 甲省 | 320 |\n\n",
         "| 无题 | 表 |\n| --- | --- |\n| 1 | 2 |\n\n",
         "> [!案例] 某市场景牵引做法\n>\n> 一是先定场景。\n\n",
@@ -288,6 +302,7 @@ mod tests {
         assert_eq!(id(REPORT, "研究背景"), "chap:yanjiu-beijing");
         assert_eq!(id(REPORT, "数据来源"), "sec:shuju-laiyuan-fangfa");
         assert_eq!(id(REPORT, "![总体架构]"), "fig:zongti-jiagou");
+        assert_eq!(id(REPORT, "flowchart LR"), "fig:banli-liucheng");
         // jieba 把“样本分布”切成一个词，拼音就连写成一段
         assert_eq!(id(REPORT, "表：三省"), "tbl:sansheng-yangbenfenbu");
         // 光标在表格里、文框正文里，都挂到表题行、首行上
@@ -306,6 +321,8 @@ mod tests {
         );
         let suggestion = at(REPORT, "一是先定").unwrap();
         assert!(REPORT[..suggestion.line_end].ends_with("> [!案例] 某市场景牵引做法"));
+        let suggestion = at(REPORT, "flowchart LR").unwrap();
+        assert!(REPORT[..suggestion.line_end].ends_with("图：办理流程"));
     }
 
     #[test]
