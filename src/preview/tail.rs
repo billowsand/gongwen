@@ -484,8 +484,8 @@ pub(crate) fn footer_record(
     let copies_wraps =
         show_label && last_row_right + 2.0 * em + copies_galley.size().x > value_width;
     let head_rows = head_galley.rows.len().max(1) + usize::from(copies_wraps);
-    let head_height = line * head_rows as f32;
-    let copies_row_y = last_row_y + if copies_wraps { line } else { 0.0 };
+    let head_height = metrics.line * head_rows as f32;
+    let copies_row_y = last_row_y + if copies_wraps { metrics.line } else { 0.0 };
 
     // 三列：承办单位左、联系人中、联系电话右；第 2 行起用 5em/4em 占位与首行对齐。
     let cells: Vec<[Arc<egui::Galley>; 3]> = rows
@@ -547,7 +547,7 @@ pub(crate) fn footer_record(
         // 这里按字形真实框取中，让每行字坐在两条线正中。
         let centered =
             |galley: &egui::Galley, height: f32| height / 2.0 - galley_visual_midline(galley);
-        let text_dy = centered(&copies_galley, line);
+        let text_dy = centered(&copies_galley, metrics.line);
         if let Some(label) = &label_galley {
             painter.galley(
                 egui::pos2(rect.left(), y + text_dy),
