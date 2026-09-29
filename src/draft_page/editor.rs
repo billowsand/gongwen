@@ -1277,6 +1277,7 @@ impl DraftPage<'_> {
                             source_content = crate::draft_page::source_nav::capture_source_rows(
                                 text,
                                 &output,
+                                &self.doc.source_outline,
                                 clean_galley.borrow().clone(),
                             );
                         }
