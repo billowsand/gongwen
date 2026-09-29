@@ -626,6 +626,57 @@ pub(crate) fn red_fixed_fragment(
     }
 }
 
+/// 落款单位一行，右对齐于 `right`。`spread` 为 `Some` 时按字间距分散排版
+/// （少于 5 字的单位，见 `units::spread_gap`），缺省同 [`red_fixed_fragment`]。
+fn red_signature_fragment(
+    ui: &egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    spread: Option<f32>,
+    right: f32,
+    y: f32,
+) -> RedPrintFragment {
+    let Some(gap) = spread else {
+        return red_fixed_fragment(
+            ui,
+            metrics,
+            text,
+            theme::FONT_FANGSONG,
+            BODY_PT,
+            metrics.mm(116.0),
+            Align::Max,
+            None,
+            right,
+            y,
+        );
+    };
+    let width = metrics.mm(116.0);
+    let mut job = job(width);
+    job.halign = Align::Max;
+    let gap_px = gap * metrics.pt(BODY_PT);
+    let format = text_format(metrics.font(theme::FONT_FANGSONG, BODY_PT), metrics.line);
+    for (index, ch) in text.chars().enumerate() {
+        job.append(
+            &ch.to_string(),
+            if index == 0 { 0.0 } else { gap_px },
+            format.clone(),
+        );
+    }
+    let galley = layout(ui, job);
+    RedPrintFragment {
+        range: None,
+        source_segments: Vec::new(),
+        visible_height: red_row_top(metrics, galley.rows.len().max(1)),
+        galley,
+        justified: Vec::new(),
+        synthetic_bold_chars: Vec::new(),
+        x: right,
+        y,
+        width,
+        align: Align::Max,
+    }
+}
+
 pub(crate) fn red_responsible_rows(input: &DraftInput, display: &UnitDisplay) -> Vec<[String; 3]> {
     let entries = crate::models::joint_responsible_entries(&input.profile);
     if entries.is_empty() {
@@ -943,18 +994,13 @@ pub(crate) fn red_build_print_layout(
         if index > 0 {
             state.cursor_y += metrics.line;
         }
-        let fragment = red_fixed_fragment(
-            ui,
-            metrics,
-            unit,
-            theme::FONT_FANGSONG,
-            BODY_PT,
-            metrics.mm(116.0),
-            Align::Max,
-            None,
-            signature_right,
-            state.cursor_y,
-        );
+        // 少于 5 字的单位分散对齐到 5 字宽，与 TeX / Word 一致；带花脸稿标注的
+        // 行按原样排（TeX 也不对标注行分散）。
+        let spread = (export::strip_redline(unit) == *unit)
+            .then(|| crate::units::spread_gap(unit))
+            .flatten();
+        let fragment =
+            red_signature_fragment(ui, metrics, unit, spread, signature_right, state.cursor_y);
         state.cursor_y += fragment.visible_height;
         state.push(fragment);
     }
@@ -964,16 +1010,25 @@ pub(crate) fn red_build_print_layout(
     } else {
         signature_date(input)
     };
+    // 与 TeX 一致：成文日期居中于「落款单位块 + 右侧签字空间」这一整段，
+    // 而不是版心左侧 116 mm 的正中。
+    let plain_lines = signature_lines
+        .iter()
+        .map(|line| export::strip_redline(line))
+        .collect::<Vec<_>>();
+    let unit_width = metrics.mm(export::red_signature_unit_width_mm(&plain_lines));
+    let room = metrics.mm(export::SIGNATURE_ROOM_MM);
+    let span = unit_width + room;
     let date = red_fixed_fragment(
         ui,
         metrics,
         &date_text,
         theme::FONT_FANGSONG,
         BODY_PT,
-        metrics.mm(116.0),
+        span,
         Align::Center,
         None,
-        left + metrics.mm(116.0) / 2.0,
+        signature_right + room - span / 2.0,
         state.cursor_y,
     );
     state.push(date);
