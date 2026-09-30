@@ -19,6 +19,7 @@
 - 正常权限完整串行测试：1487 通过、0 失败、36 忽略，37.87 秒；包括现有回环、HTTP/SOCKS 代理和服务不可达降级测试。
 - 实施前已向 crates.io 复核目标版本未撤回。
 - 待补：最终锁文件安全复扫、两平台 CI、实际 HTTPS 证书/代理矩阵验证。当前状态为 Windows 自动验证通过，尚未达到正式发布验收。
+- 后续结果：OSV 复扫未再匹配到该 TLS 漏洞；[CI 36789545743](https://github.com/billowsand/gongwen/actions/runs/36789545743) 的 Windows/Linux 默认并行测试、Linux GLIBC 2.28 发布构建与干净 Ubuntu 20.04 安装启动均通过。实际 HTTPS 证书/代理矩阵仍待真机验收。
 
 ## 1B：Excel 导入的 XML 安全升级
 
@@ -41,3 +42,12 @@
 首次词典加载为 96.35 ms。首次耗时受冷缓存影响，后续不得直接用单次结果推断稳定收益。完整样本记录保留于本机 `tmp/dependency-bench-*.json`。
 
 calamine 升级后的词表导入中位数为 1.659 ms，导出 1.600 ms；相关路径未见回退。分词 0.112 ms，与基线相近。花脸稿此次测得 30.60 ms（与前次 27.66 ms 有波动，但本批未改变其依赖）；分词升级时用重复进程采样进一步对照，不将单次波动归因于 Excel 库。
+
+## 第 2 批：兼容维护
+
+- encoding_rs 0.8.42、uuid 1.26.1、jiff/jiff-static 0.2.37、thiserror/thiserror-impl 2.0.21、zerocopy/derive 0.8.59、toml 1.1.6+spec-1.1.0、rusqlite 0.40.2 / libsqlite3-sys 0.38.2。
+- 仅定向更新锁文件，保持既有清单的兼容范围。其他父库的 thiserror 1.x、toml 0.8 原样保留；恢复 resolver 带入的无关 tempfile/getrandom 选择变化。
+- 没有数据库迁移、输入法内核同步或数据格式变更。新增 UTF-16BE 生僻字和损坏 UTF-16 的业务边界测试，以及有效 .qj 词库/整句模型的往返和截断报错测试。
+- 格式、全目标检查、clippy 零警告通过；正常权限完整串行测试：1493 通过、0 失败、37 忽略，57.84 秒。
+- 单独启用随包数据测试：真实 dict.qj / lm.qj 读取、词条/模型规模及「gongwen」候选查询通过，0.09 秒；学习目录使用临时目录。
+- 第 2 批最终版本的两平台 CI 随后统一验证。

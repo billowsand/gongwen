@@ -129,6 +129,50 @@ pub(super) fn load_extra(dir: &Path) -> Vec<Dictionary> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn qj_dictionary_and_language_model_round_trip() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let dictionary =
+            Dictionary::parse("公文\tgong wen\t9000\n公文助手\tgong wen zhu shou\t8000\n")
+                .expect("测试词库");
+        let dict_path = dir.path().join("词库.qj");
+        dictionary
+            .write_qj(&dict_path, &Default::default())
+            .expect("写二进制词库");
+        let reopened = Dictionary::from_path(&dict_path).expect("回读二进制词库");
+        assert_eq!(reopened.len(), dictionary.len());
+        assert_eq!(reopened.total_frequency(), dictionary.total_frequency());
+        for (syllables, partial) in [(vec!["gong", "wen"], false), (vec!["gong"], true)] {
+            assert_eq!(
+                reopened.lookup(&syllables, partial),
+                dictionary.lookup(&syllables, partial)
+            );
+        }
+
+        let model = BigramModel::parse(
+            "<s>\t100\n公文\t50\n助手\t40\n",
+            "<s>\t公文\t45\n公文\t助手\t35\n",
+        )
+        .expect("测试整句模型");
+        let lm_path = dir.path().join("整句.qj");
+        model
+            .write_qj(&lm_path, &Default::default())
+            .expect("写二进制模型");
+        let reopened = BigramModel::from_path(&lm_path).expect("回读二进制模型");
+        assert_eq!(reopened.word_count(), model.word_count());
+        assert_eq!(reopened.bigram_count(), model.bigram_count());
+
+        // 从实际有效容器截断，避免只验证 TSV 回退分支。
+        let bytes = std::fs::read(&dict_path).expect("读取词库");
+        let broken_dict_path = dir.path().join("损坏词库.qj");
+        std::fs::write(&broken_dict_path, &bytes[..bytes.len() / 2]).expect("截断词库");
+        assert!(Dictionary::open_qj(&broken_dict_path).is_err());
+        let bytes = std::fs::read(&lm_path).expect("读取模型");
+        let broken_lm_path = dir.path().join("损坏整句.qj");
+        std::fs::write(&broken_lm_path, &bytes[..bytes.len() / 2]).expect("截断模型");
+        assert!(BigramModel::from_path(&broken_lm_path).is_err());
+    }
+
     /// 附加词库目录不存在时安静地返回空表，不当错误。
     #[test]
     fn missing_extra_directory_is_not_an_error() {

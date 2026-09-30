@@ -154,4 +154,4 @@ Windows x64 与 Linux ARM64 都验收；GUI 改动与性能升级分开归因。
 | mdx、qingjian 源码整块同步 | 现有版本号不能说明上游提交差异；mdx 还有本地改动 | 上游有明确修复/收益，补丁与数据兼容性核对完成 |
 | merman 0.8 alpha、zip 9 pre | 预发布版 | 有可验证收益的稳定发布版 |
 
-实施状态：第 0 批已记录代码、资产和 Windows 自动测试基线，性能与真机基线待补；1A 已完成 Windows 自动验证，正式交付条件待补；其余批次未开始。详细结果见 `rust-dependency-upgrade-validation.md`。后续继续记录每批最终版本、验证、性能与待办。
+实施状态：第 0 批已记录代码、资产、Windows 自动测试与固定样本性能基线，真机基线待补；1A 的两平台 CI、Linux GLIBC 2.28 构建和 Ubuntu 20.04 安装启动全部通过；1B 已完成 Windows 自动验证、安全复扫和性能对照；第 2 批正在验证，其余批次未开始。详细结果见 `rust-dependency-upgrade-validation.md`。升级工作在独立分支及草稿 PR 中进行，每批单独提交；后续继续记录最终版本、验证、性能与待办。
