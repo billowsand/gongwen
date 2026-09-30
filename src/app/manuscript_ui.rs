@@ -117,6 +117,8 @@ pub(crate) struct ZipPasswordDialog {
     confirmation: String,
     remember: bool,
     show_password: bool,
+    /// 导出同步包时连同所选呈批件的送批材料一起打包（默认勾选）。
+    include_send_package: bool,
     error: Option<String>,
 }
 
@@ -129,6 +131,7 @@ impl ZipPasswordDialog {
             password,
             remember: remembered.is_some(),
             show_password: false,
+            include_send_package: true,
             error: None,
         }
     }
@@ -144,6 +147,8 @@ pub(crate) struct ImportPreview {
     actions: Vec<manuscript_io::sync::ImportAction>,
     reviews: Vec<Option<MergeReview>>,
     manifest_hash: String,
+    /// 每篇主件的送批材料清单差异（两边一致或包里没带清单时为 None）。
+    package_diffs: Vec<Option<manuscript_io::sync::PackageDifference>>,
     focused: Option<usize>,
     /// 包内随附的标准词库；旧包无此条目时为 None。
     vocabulary: Option<manuscript_io::VocabularyFile>,
@@ -344,6 +349,18 @@ fn import_preview_details(
         "拟执行：{}",
         import_action_label(&preview.actions[index])
     ));
+    let package_diff = preview.package_diffs[index];
+    if let Some(diff) = package_diff
+        && matches!(
+            preview.actions[index],
+            ImportAction::Skip | ImportAction::Pending | ImportAction::LinkPending { .. }
+        )
+    {
+        ui.weak(format!(
+            "两边送批材料清单不同（本机 {} 件、导入 {} 件）；要采用导入版，请选「采用导入版」或「生成合并版本」后勾选。",
+            diff.local, diff.incoming
+        ));
+    }
     if let Some(local_hash) = &relation.local_hash {
         ui.weak(format!(
             "本机内容：{}；导入内容：{}",
@@ -394,7 +411,13 @@ fn import_preview_details(
             Relationship::IncomingAhead | Relationship::Equivalent | Relationship::Same
         ) && ui.button("采用导入版及新增附件").clicked()
         {
-            preview.actions[index] = ImportAction::UseIncoming { take_status: false };
+            preview.actions[index] = ImportAction::UseIncoming {
+                take_status: false,
+                take_package: manuscript_io::sync::default_take_package(
+                    relation.relationship,
+                    package_diff,
+                ),
+            };
         }
         if relation.relationship == Relationship::Diverged
             && let Some(proposal) = &relation.proposal
@@ -404,6 +427,10 @@ fn import_preview_details(
                 choices: vec![false; proposal.conflict_count()],
                 markdown_override: None,
                 take_status: false,
+                take_package: manuscript_io::sync::default_take_package(
+                    relation.relationship,
+                    package_diff,
+                ),
             };
         }
         if relation.local_id.is_some()
@@ -437,8 +464,15 @@ fn import_preview_details(
             }
         }
     }
-    if let ImportAction::UseIncoming { take_status } | ImportAction::Merge { take_status, .. } =
-        &mut preview.actions[index]
+    if let ImportAction::UseIncoming {
+        take_status,
+        take_package,
+    }
+    | ImportAction::Merge {
+        take_status,
+        take_package,
+        ..
+    } = &mut preview.actions[index]
         && let Some(local_id) = relation.local_id
     {
         ui.checkbox(
@@ -448,6 +482,16 @@ fn import_preview_details(
                 record.status.label()
             ),
         );
+        // 清单增删不产生版本，分不出哪边新：两边不同时由人决定。
+        if let Some(diff) = package_diff {
+            ui.checkbox(
+                take_package,
+                format!(
+                    "送批材料清单也采用导入版（本机 {} 件 → 导入 {} 件）",
+                    diff.local, diff.incoming
+                ),
+            );
+        }
     }
     if let (
         Some(proposal),
@@ -1092,6 +1136,18 @@ impl GongwenApp {
                             .on_hover_text("保存在本机受限权限文件中，下次仍会显示确认窗口");
                         ui.checkbox(&mut dialog.show_password, "显示密码");
                     });
+                    if matches!(
+                        dialog.purpose,
+                        ZipPasswordPurpose::FilteredExport | ZipPasswordPurpose::SelectedExport
+                    ) {
+                        ui.checkbox(
+                            &mut dialog.include_send_package,
+                            "连同呈批件的送批材料一起导出",
+                        )
+                        .on_hover_text(
+                            "把所选呈批件挂着的函稿、研究报告等随行件也打进包里；不勾时只带清单，对方本机没有这些稿件时显示为「本机未找到」",
+                        );
+                    }
                     if let Some(error) = &dialog.error {
                         ui.colored_label(warn(), error);
                     }
@@ -1140,6 +1196,7 @@ impl GongwenApp {
                             dialog.purpose,
                             dialog.password,
                             dialog.remember,
+                            dialog.include_send_package,
                         );
                     }
                     Err(error) => {
@@ -2752,15 +2809,18 @@ impl GongwenApp {
         purpose: ZipPasswordPurpose,
         password: String,
         remember: bool,
+        include_send_package: bool,
     ) {
         let retry_import = match &purpose {
             ZipPasswordPurpose::Import(path) => Some(path.clone()),
             _ => None,
         };
         let completed = match purpose {
-            ZipPasswordPurpose::FilteredExport => self.perform_export_manuscripts_zip(&password),
+            ZipPasswordPurpose::FilteredExport => {
+                self.perform_export_manuscripts_zip(&password, include_send_package)
+            }
             ZipPasswordPurpose::SelectedExport => {
-                self.perform_export_selected_manuscripts_zip(&password)
+                self.perform_export_selected_manuscripts_zip(&password, include_send_package)
             }
             ZipPasswordPurpose::PdfExport(options) => {
                 self.perform_export_selected_manuscript_pdfs(options, &password)
@@ -2833,7 +2893,11 @@ impl GongwenApp {
         self.open_zip_password_dialog(ZipPasswordPurpose::FilteredExport);
     }
 
-    fn perform_export_manuscripts_zip(&mut self, password: &str) -> bool {
+    fn perform_export_manuscripts_zip(
+        &mut self,
+        password: &str,
+        include_send_package: bool,
+    ) -> bool {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("公文稿件-{stamp}.zip");
         let Some(path) = rfd::FileDialog::new()
@@ -2848,15 +2912,18 @@ impl GongwenApp {
             return false;
         }
         let filter = self.manuscript_filter.clone();
-        let result: anyhow::Result<manuscript_io::ExportSummary> = match self
-            .manuscript_store
-            .as_mut()
-        {
-            Some(store) => {
-                manuscript_io::export_zip(store, &filter, &self.config.vocabulary, &path, password)
-            }
-            None => Err(anyhow::anyhow!("稿件库不可用")),
-        };
+        let result: anyhow::Result<manuscript_io::ExportSummary> =
+            match self.manuscript_store.as_mut() {
+                Some(store) => manuscript_io::export_zip(
+                    store,
+                    &filter,
+                    &self.config.vocabulary,
+                    &path,
+                    password,
+                    include_send_package,
+                ),
+                None => Err(anyhow::anyhow!("稿件库不可用")),
+            };
         match result {
             Ok(summary) => {
                 self.status = format!(
@@ -2886,7 +2953,11 @@ impl GongwenApp {
         self.open_zip_password_dialog(ZipPasswordPurpose::SelectedExport);
     }
 
-    fn perform_export_selected_manuscripts_zip(&mut self, password: &str) -> bool {
+    fn perform_export_selected_manuscripts_zip(
+        &mut self,
+        password: &str,
+        include_send_package: bool,
+    ) -> bool {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let default_name = format!("所选公文稿件-{stamp}.zip");
         let Some(path) = rfd::FileDialog::new()
@@ -2896,7 +2967,14 @@ impl GongwenApp {
         else {
             return false;
         };
-        let ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
+        let mut ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
+        // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
+        if include_send_package
+            && let Some(store) = self.manuscript_store.as_ref()
+            && let Ok(expanded) = store.with_send_package_items(&ids)
+        {
+            ids = expanded;
+        }
         if let Err(error) = self.save_open_manuscripts_for_zip(Some(&ids)) {
             self.status = format!("导出前保存所选工作稿失败：{error:#}");
             return false;
@@ -2908,6 +2986,7 @@ impl GongwenApp {
                 &self.config.vocabulary,
                 &path,
                 password,
+                false,
             ),
             None => Err(anyhow::anyhow!("稿件库不可用")),
         };
@@ -3009,45 +3088,65 @@ impl GongwenApp {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
             let relations = manuscript_io::sync::inspect(store, &manifest)?;
-            use manuscript_io::sync::{ImportAction, Relationship};
+            use manuscript_io::sync::{ImportAction, Relationship, default_take_package};
+            let package_diffs = relations
+                .iter()
+                .zip(&manifest.records)
+                .map(|(relation, record)| {
+                    manuscript_io::sync::package_difference(store, relation.local_id, record)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let actions = relations
                 .iter()
                 .enumerate()
-                .map(|(index, relation)| match relation.relationship {
-                    Relationship::New | Relationship::Legacy if relation.candidates.is_empty() => {
-                        ImportAction::New
-                    }
-                    Relationship::New | Relationship::Legacy => ImportAction::Skip,
-                    Relationship::IncomingAhead | Relationship::Equivalent => {
-                        ImportAction::UseIncoming { take_status: false }
-                    }
-                    Relationship::Same
-                        if relation.attachments_changed
-                            || relation
-                                .local_status
-                                .is_some_and(|status| status != manifest.records[index].status) =>
-                    {
-                        ImportAction::UseIncoming {
-                            take_status: relation
-                                .local_status
-                                .is_some_and(|status| status != manifest.records[index].status),
+                .map(|(index, relation)| {
+                    let take_package =
+                        default_take_package(relation.relationship, package_diffs[index]);
+                    match relation.relationship {
+                        Relationship::New | Relationship::Legacy
+                            if relation.candidates.is_empty() =>
+                        {
+                            ImportAction::New
                         }
-                    }
-                    Relationship::Diverged
-                        if relation
-                            .proposal
-                            .as_ref()
-                            .is_some_and(|proposal| proposal.conflict_count() == 0) =>
-                    {
-                        ImportAction::Merge {
-                            choices: Vec::new(),
-                            markdown_override: None,
-                            take_status: false,
+                        Relationship::New | Relationship::Legacy => ImportAction::Skip,
+                        Relationship::IncomingAhead | Relationship::Equivalent => {
+                            ImportAction::UseIncoming {
+                                take_status: false,
+                                take_package,
+                            }
                         }
-                    }
-                    Relationship::Diverged | Relationship::NoBase => ImportAction::Pending,
-                    Relationship::Archived | Relationship::Same | Relationship::LocalAhead => {
-                        ImportAction::Skip
+                        // 内容一样但清单不同、且本机清单为空：采用导入版不会丢任何东西。
+                        Relationship::Same
+                            if relation.attachments_changed
+                                || take_package
+                                || relation.local_status.is_some_and(|status| {
+                                    status != manifest.records[index].status
+                                }) =>
+                        {
+                            ImportAction::UseIncoming {
+                                take_status: relation
+                                    .local_status
+                                    .is_some_and(|status| status != manifest.records[index].status),
+                                take_package,
+                            }
+                        }
+                        Relationship::Diverged
+                            if relation
+                                .proposal
+                                .as_ref()
+                                .is_some_and(|proposal| proposal.conflict_count() == 0) =>
+                        {
+                            ImportAction::Merge {
+                                choices: Vec::new(),
+                                markdown_override: None,
+                                take_status: false,
+                                take_package,
+                            }
+                        }
+                        Relationship::Diverged | Relationship::NoBase => ImportAction::Pending,
+                        Relationship::Archived | Relationship::Same | Relationship::LocalAhead => {
+                            ImportAction::Skip
+                        }
                     }
                 })
                 .collect();
@@ -3064,6 +3163,7 @@ impl GongwenApp {
                 actions,
                 reviews,
                 manifest_hash,
+                package_diffs,
                 focused: None,
                 vocabulary,
                 merge_vocabulary: true,

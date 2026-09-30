@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 use crate::manuscript::NewManuscript;
+use crate::manuscript::send_package::{SendPackageSnapshot, is_owner_kind};
 use crate::manuscript::sync::{SyncRevision, bytes_hash};
 use crate::manuscript::{ManuscriptFilter, ManuscriptRecord, ManuscriptStore};
 use crate::models::{
@@ -142,6 +143,11 @@ pub struct ManifestRecord {
     pub head_revision_uuid: Option<String>,
     #[serde(default)]
     pub revisions: Vec<SyncRevision>,
+    /// 主件（呈批件）的送批材料清单与钉版。字段缺失 = 旧版程序导出的包，导入时
+    /// 不动本机清单；显式的空清单才表示「对方把清单清空了」。为空时不写出，旧包记录的
+    /// 序列化结果不变，旧包导入的指纹去重不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_package: Option<SendPackageSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,32 +222,44 @@ pub struct ImportOptions {
 
 /// 按过滤条件导出稿件（含 PDF 附件）为 ZIP。`vocabulary` 为标准词库，非空时随包导出，
 /// 便于把稿件带到另一台电脑后保持要素一致。没有符合条件稿件时直接报错。
+/// `include_send_package` 为真时，所选呈批件的随行件（送批材料）一并打包。
 pub fn export_zip(
     store: &mut ManuscriptStore,
     filter: &ManuscriptFilter,
     vocabulary: &[VocabularyEntry],
     zip_path: &Path,
     password: &str,
+    include_send_package: bool,
 ) -> Result<ExportSummary> {
     validate_export_password(password)?;
     let rows = store.list(filter)?;
     if rows.is_empty() {
         bail!("没有符合过滤条件的稿件");
     }
-    let ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    let mut ids = rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    if include_send_package {
+        ids = store.with_send_package_items(&ids)?;
+    }
     export_zip_ids(store, &ids, vocabulary, zip_path, password)
 }
 
 /// 只导出稿件管理页明确勾选的记录。
+/// 只导出稿件管理页明确勾选的记录；`include_send_package` 同 [`export_zip`]。
 pub fn export_zip_selected(
     store: &mut ManuscriptStore,
     ids: &[i64],
     vocabulary: &[VocabularyEntry],
     zip_path: &Path,
     password: &str,
+    include_send_package: bool,
 ) -> Result<ExportSummary> {
     validate_export_password(password)?;
-    export_zip_ids(store, ids, vocabulary, zip_path, password)
+    let ids = if include_send_package {
+        store.with_send_package_items(ids)?
+    } else {
+        ids.to_vec()
+    };
+    export_zip_ids(store, &ids, vocabulary, zip_path, password)
 }
 
 fn export_zip_ids(
@@ -266,6 +284,13 @@ fn export_zip_ids(
         let revisions = store.sync_revisions(id)?;
         let aliases = store.document_aliases(id)?;
         let export_id = record.source_id.unwrap_or(record.id);
+        // 呈批件一律带上清单（哪怕是空的）：对方据此知道这边把清单清空了。
+        // 改过文种但还挂着随行件的也带，免得清单在同步中丢掉。
+        let send_package = if is_owner_kind(record.kind) || store.has_send_package_items(id)? {
+            Some(store.send_package_snapshot(id)?)
+        } else {
+            None
+        };
         let mut pdfs = Vec::new();
         for (idx, pdf) in record.pdfs.iter().enumerate() {
             let entry = format!(
@@ -300,6 +325,7 @@ fn export_zip_ids(
             aliases,
             head_revision_uuid: Some(head.revision_uuid),
             revisions,
+            send_package,
         });
     }
     // 全部历史版本引用的图片也必须随包保存，不能只收活稿。
@@ -1180,6 +1206,7 @@ mod tests {
             &[],
             &zip_path,
             TEST_PASSWORD,
+            false,
         )
         .unwrap();
         assert_eq!(summary.records, 1);
@@ -1240,6 +1267,7 @@ mod tests {
             &sample_vocabulary(),
             &zip_path,
             TEST_PASSWORD,
+            false,
         )
         .unwrap();
 
@@ -1288,6 +1316,7 @@ mod tests {
             &sample_vocabulary(),
             &zip_path,
             TEST_PASSWORD,
+            false,
         )
         .unwrap();
 
@@ -1327,6 +1356,7 @@ mod tests {
             &[],
             &zip_path,
             TEST_PASSWORD,
+            false,
         )
         .unwrap();
         assert!(read_vocabulary(&zip_path, TEST_PASSWORD).unwrap().is_none());
@@ -1393,6 +1423,7 @@ mod tests {
             aliases: Vec::new(),
             head_revision_uuid: None,
             revisions: Vec::new(),
+            send_package: None,
         };
         let entries = collect_image_entries(base.path(), &[record]);
         assert_eq!(entries.len(), 2);
@@ -1463,6 +1494,7 @@ mod tests {
             &[],
             &zip_path,
             TEST_PASSWORD,
+            false,
         )
         .unwrap();
 
@@ -1490,6 +1522,7 @@ mod tests {
             &[],
             &zip_path,
             TEST_PASSWORD,
+            false,
         )
         .unwrap();
 
@@ -1532,7 +1565,8 @@ mod tests {
             .unwrap();
 
         let summary =
-            export_zip_selected(&mut store, &[second], &[], &zip_path, TEST_PASSWORD).unwrap();
+            export_zip_selected(&mut store, &[second], &[], &zip_path, TEST_PASSWORD, false)
+                .unwrap();
         assert_eq!(summary.records, 1);
         let manifest = read_manifest(&zip_path, TEST_PASSWORD).unwrap();
         assert_eq!(manifest.records.len(), 1);
@@ -1562,7 +1596,7 @@ mod tests {
             kind: Some(TemplateKind::MeetingAgenda),
             ..Default::default()
         };
-        assert!(export_zip(&mut store, &filter, &[], &zip_path, TEST_PASSWORD).is_err());
+        assert!(export_zip(&mut store, &filter, &[], &zip_path, TEST_PASSWORD, false).is_err());
         assert!(!zip_path.exists());
     }
 

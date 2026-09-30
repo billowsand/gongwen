@@ -131,6 +131,18 @@ PDF 内容去重只增不删同名改名、仅空白 + 仅标记变化的干净�
   `cargo clippy --locked --all-targets -- -D warnings` 通过。全量并行测试曾有 1 个既有
   图片预览用例失败，单独复跑通过；该用例与本次同步修改无关。
 
+### 送批材料清单随包（2026-09-30）
+
+送批材料（`docs/send-package-design.md`）第四期在同步包里加了一个字段：主件
+（呈批件）记录上的 `send_package`（按顺序的随行件 UUID、钉版与主件钉版）。要点：
+
+- 字段为空时不写出（`skip_serializing_if`），旧包记录的序列化结果不变，
+  `legacy_fingerprint` 去重不受影响；字段缺失表示旧版程序导出，导入时不动本机清单。
+- 清单增删不产生版本，内容相同或分叉时分不出哪边新：`ImportAction::UseIncoming` /
+  `Merge` 多了 `take_package`，默认只在导入版较新、或本机清单为空时采用。
+- 清单在整包稿件落库之后统一写入（随行件可能排在主件后面），与稿件在同一个导入事务里。
+- 改导入动作或清单结构时，同时看 `manuscript_io::sync::send_package_sync_tests`。
+
 ### 下一步
 
 - 人眼验收：导入预览逐篇处理界面、冲突勾选与合并全文预览、详情页待处理分支入口、

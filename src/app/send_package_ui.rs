@@ -264,7 +264,11 @@ impl GongwenApp {
                 }
                 wrapped_soft(
                     ui,
-                    "随呈批件一起送批的独立稿件（函稿、普通公文、研究报告等）。导出时每件取最新提交版，按下面的顺序合并成一个 PDF。",
+                    if archived {
+                        "随呈批件一起送批的独立稿件。已归档：导出时每件取归档时钉住的版本，按下面的顺序合并成一个 PDF。"
+                    } else {
+                        "随呈批件一起送批的独立稿件（函稿、普通公文、研究报告等）。导出时每件取最新提交版，按下面的顺序合并成一个 PDF。"
+                    },
                 );
                 if let Some(error) = &panel.error {
                     ui.colored_label(theme::danger(), format!("读取失败：{error}"));

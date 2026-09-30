@@ -259,6 +259,37 @@ pub struct ExportRecord {
     pub items: Vec<ExportItemRecord>,
 }
 
+/// 清单的原样快照：按顺序的 `(随行件 UUID, 钉住的版本)` 加主件钉版。
+/// 同步包里就是这份东西。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SendPackageSnapshot {
+    pub items: Vec<(String, Option<String>)>,
+    #[serde(default)]
+    pub owner_pin: Option<String>,
+}
+
+impl SendPackageSnapshot {
+    /// 与另一份比较时只看清单（随行件与顺序），钉版随归档状态走，不单独算差异。
+    pub fn same_items(&self, other: &Self) -> bool {
+        self.items
+            .iter()
+            .map(|(uuid, _)| uuid)
+            .eq(other.items.iter().map(|(uuid, _)| uuid))
+    }
+
+    /// 去掉钉版：带到未归档的稿件上时用。
+    pub fn without_pins(&self) -> Self {
+        Self {
+            items: self
+                .items
+                .iter()
+                .map(|(uuid, _)| (uuid.clone(), None))
+                .collect(),
+            owner_pin: None,
+        }
+    }
+}
+
 /// 指向某一版的引用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisionRef {
@@ -816,6 +847,77 @@ impl ManuscriptStore {
                 |row| row.get::<_, Option<i64>>(0),
             )
             .optional()?)
+    }
+
+    /// 清单的原样快照（按顺序的随行件 UUID 与钉版）加主件钉版，供同步包导出与比对。
+    pub fn send_package_snapshot(&self, owner_id: i64) -> Result<SendPackageSnapshot> {
+        Ok(SendPackageSnapshot {
+            items: self
+                .send_package_items(owner_id)?
+                .into_iter()
+                .map(|item| (item.item_uuid, item.pinned_revision_uuid))
+                .collect(),
+            owner_pin: self.owner_pin(owner_id)?,
+        })
+    }
+
+    /// 同步导入时整体替换清单（连同钉版）。数据来自另一台电脑，引用规则在那边已经
+    /// 把过关，这里只剔掉指向主件自己的项和重复项，不再按本机规则拒收——拒收会丢数据。
+    /// 调用方负责只在本机主件未归档、或刚由导入新建时调用。
+    pub fn replace_send_package(
+        &self,
+        owner_id: i64,
+        snapshot: &SendPackageSnapshot,
+    ) -> Result<()> {
+        let own: HashSet<String> = identity_uuids(&self.conn, owner_id)?.into_iter().collect();
+        self.conn.execute(
+            "DELETE FROM send_package_items WHERE owner_id=?1",
+            [owner_id],
+        )?;
+        let now = Local::now().to_rfc3339();
+        let mut seen = HashSet::new();
+        for (uuid, pin) in &snapshot.items {
+            if own.contains(uuid) || !seen.insert(uuid.clone()) {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT INTO send_package_items (owner_id, item_uuid, sort_order, pinned_revision_uuid, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![owner_id, uuid, seen.len() as i64 - 1, pin, now],
+            )?;
+        }
+        match &snapshot.owner_pin {
+            Some(pin) => self.conn.execute(
+                "INSERT OR REPLACE INTO send_package_owner_pins (owner_id, revision_uuid) VALUES (?1, ?2)",
+                params![owner_id, pin],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM send_package_owner_pins WHERE owner_id=?1",
+                [owner_id],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// 导出同步包时把所选主件的随行件并进来：原顺序在前，新增的随后，本机找不到的略过。
+    pub fn with_send_package_items(&self, ids: &[i64]) -> Result<Vec<i64>> {
+        let mut out: Vec<i64> = Vec::with_capacity(ids.len());
+        let mut seen = HashSet::new();
+        for &id in ids {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+        for &id in ids {
+            for item in self.send_package_items(id)? {
+                if let Some(item_id) = item.manuscript_id
+                    && seen.insert(item_id)
+                {
+                    out.push(item_id);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// 主件归档时钉住的自身版本。

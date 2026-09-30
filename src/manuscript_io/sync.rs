@@ -1,5 +1,6 @@
 //! 导入包的逐篇身份判定与共同祖先查找。
 use super::{Manifest, ManifestRecord};
+use crate::manuscript::send_package::SendPackageSnapshot;
 use crate::manuscript::{
     ManuscriptStore,
     merge::MergeProposal,
@@ -438,13 +439,17 @@ mod tests {
 pub enum ImportAction {
     Skip,
     New,
+    /// `take_package`：主件的送批材料清单也采用导入版（清单变动不产生版本，
+    /// 分不出哪边新，内容相同或分叉时由人决定）。
     UseIncoming {
         take_status: bool,
+        take_package: bool,
     },
     Merge {
         choices: Vec<bool>,
         markdown_override: Option<String>,
         take_status: bool,
+        take_package: bool,
     },
     Pending,
     LinkPending {
@@ -552,6 +557,8 @@ pub fn import_with_actions(
     let mut created_files = Vec::new();
     let result = (|| -> Result<SyncImportSummary> {
         let mut summary = SyncImportSummary::default();
+        // 送批材料清单等整包稿件都落库后再写：随行件可能排在主件后面才导入。
+        let mut packages: Vec<(i64, SendPackageSnapshot)> = Vec::new();
         for (index, ((record, action), preview)) in manifest
             .records
             .iter()
@@ -582,6 +589,10 @@ pub fn import_with_actions(
                         store.sync_checkpoint(id)?;
                         store.record_legacy_import(&legacy_fingerprint(record)?, id)?;
                     }
+                    // 新建的稿件原样带上清单；归档主件连同钉版一起来。
+                    if let Some(package) = &record.send_package {
+                        packages.push((id, package.clone()));
+                    }
                     summary.created += 1;
                     id
                 }
@@ -589,10 +600,17 @@ pub fn import_with_actions(
                     let id =
                         create_record(store, record, Some(crate::models::ManuscriptStatus::Draft))?;
                     store.sync_checkpoint(id)?;
+                    // 副本是草稿，清单照带、钉版不带。
+                    if let Some(package) = &record.send_package {
+                        packages.push((id, package.without_pins()));
+                    }
                     summary.created += 1;
                     id
                 }
-                ImportAction::UseIncoming { take_status } => {
+                ImportAction::UseIncoming {
+                    take_status,
+                    take_package,
+                } => {
                     if !matches!(
                         preview.relationship,
                         Relationship::IncomingAhead | Relationship::Equivalent | Relationship::Same
@@ -627,6 +645,9 @@ pub fn import_with_actions(
                     if *take_status {
                         apply_status(store, id, record.status)?;
                     }
+                    if *take_package && let Some(package) = &record.send_package {
+                        packages.push((id, incoming_package(package, *take_status, record)));
+                    }
                     store.materialize_imported_versions(id, &record.revisions)?;
                     summary.updated += 1;
                     summary.changed_ids.push(id);
@@ -636,6 +657,7 @@ pub fn import_with_actions(
                     choices,
                     markdown_override,
                     take_status,
+                    take_package,
                 } => {
                     if preview.relationship != Relationship::Diverged {
                         bail!("共同基线已变化，请重新预览");
@@ -667,6 +689,9 @@ pub fn import_with_actions(
                     )?;
                     if *take_status {
                         apply_status(store, id, record.status)?;
+                    }
+                    if *take_package && let Some(package) = &record.send_package {
+                        packages.push((id, incoming_package(package, *take_status, record)));
                     }
                     store.materialize_imported_versions(id, &record.revisions)?;
                     summary.merged += 1;
@@ -749,6 +774,9 @@ pub fn import_with_actions(
                 }
             }
         }
+        for (id, package) in &packages {
+            store.replace_send_package(*id, package)?;
+        }
         std::fs::create_dir_all(&image_dir)?;
         for (path, bytes) in &images {
             let dest = crate::images::resolve_from_base(&crate::storage::config_dir()?, path)?;
@@ -776,6 +804,55 @@ pub fn import_with_actions(
             }
             Err(error)
         }
+    }
+}
+
+/// 采用导入版清单时带不带钉版：只有这次连状态一起采用、且导入侧是归档状态才带。
+/// 本机没归档就钉版，会让还在办的呈批件导出旧版本。
+fn incoming_package(
+    package: &SendPackageSnapshot,
+    take_status: bool,
+    record: &ManifestRecord,
+) -> SendPackageSnapshot {
+    if take_status && record.status == crate::models::ManuscriptStatus::Archived {
+        package.clone()
+    } else {
+        package.without_pins()
+    }
+}
+
+/// 导入预览里某篇主件的送批材料清单差异：本机与导入各几件、本机是否为空。
+/// 两边一致或导入包没带清单（旧版程序导出）时为 `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackageDifference {
+    pub local: usize,
+    pub incoming: usize,
+}
+
+pub fn package_difference(
+    store: &ManuscriptStore,
+    local_id: Option<i64>,
+    record: &ManifestRecord,
+) -> Result<Option<PackageDifference>> {
+    let (Some(local_id), Some(incoming)) = (local_id, &record.send_package) else {
+        return Ok(None);
+    };
+    let local = store.send_package_snapshot(local_id)?;
+    Ok((!local.same_items(incoming)).then_some(PackageDifference {
+        local: local.items.len(),
+        incoming: incoming.items.len(),
+    }))
+}
+
+/// 默认要不要采用导入版清单：导入版较新时采用；内容相同或分叉时分不出哪边新，
+/// 只在本机清单为空（没什么可丢）时采用。
+pub fn default_take_package(
+    relationship: Relationship,
+    difference: Option<PackageDifference>,
+) -> bool {
+    match difference {
+        None => relationship == Relationship::IncomingAhead,
+        Some(difference) => relationship == Relationship::IncomingAhead || difference.local == 0,
     }
 }
 
@@ -933,7 +1010,7 @@ mod round_trip_tests {
     }
 
     fn export(store: &mut ManuscriptStore, id: i64, path: &Path) {
-        super::super::export_zip_selected(store, &[id], &[], path, PASSWORD).unwrap();
+        super::super::export_zip_selected(store, &[id], &[], path, PASSWORD, false).unwrap();
     }
 
     fn import(
@@ -973,14 +1050,20 @@ mod round_trip_tests {
         import(
             &mut b,
             &second,
-            vec![ImportAction::UseIncoming { take_status: false }],
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: false,
+            }],
         )
         .unwrap();
         let count = b.sync_revisions(id_b).unwrap().len();
         import(
             &mut b,
             &second,
-            vec![ImportAction::UseIncoming { take_status: false }],
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: false,
+            }],
         )
         .unwrap();
         assert_eq!(b.sync_revisions(id_b).unwrap().len(), count);
@@ -1010,7 +1093,10 @@ mod round_trip_tests {
                 &second,
                 PASSWORD,
                 &hash,
-                &[ImportAction::UseIncoming { take_status: false }],
+                &[ImportAction::UseIncoming {
+                    take_status: false,
+                    take_package: false
+                }],
                 &previews
             )
             .is_err()
@@ -1050,7 +1136,7 @@ mod round_trip_tests {
             ids.push(id);
         }
         let zip = dir.path().join("both.zip");
-        super::super::export_zip_selected(&mut a, &ids, &[], &zip, PASSWORD).unwrap();
+        super::super::export_zip_selected(&mut a, &ids, &[], &zip, PASSWORD, false).unwrap();
         let manifest = super::super::read_manifest(&zip, PASSWORD).unwrap();
         assert_ne!(
             manifest.records[0].pdfs[0].path,
@@ -1115,7 +1201,10 @@ mod round_trip_tests {
         import(
             &mut a,
             &second,
-            vec![ImportAction::UseIncoming { take_status: false }],
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: false,
+            }],
         )
         .unwrap();
         assert_eq!(
@@ -1156,6 +1245,7 @@ mod round_trip_tests {
                 choices: vec![],
                 markdown_override: None,
                 take_status: false,
+                take_package: false,
             }],
         )
         .unwrap();
@@ -1298,7 +1388,10 @@ mod round_trip_tests {
         import(
             &mut a,
             &second,
-            vec![ImportAction::UseIncoming { take_status: true }],
+            vec![ImportAction::UseIncoming {
+                take_status: true,
+                take_package: false,
+            }],
         )
         .unwrap();
         let record = a.get(id_a).unwrap().unwrap();
@@ -1378,7 +1471,10 @@ mod round_trip_tests {
             import(
                 &mut a,
                 &second,
-                vec![ImportAction::UseIncoming { take_status: false }]
+                vec![ImportAction::UseIncoming {
+                    take_status: false,
+                    take_package: false
+                }]
             )
             .is_err()
         );
@@ -1621,7 +1717,10 @@ mod round_trip_tests {
         let summary = import(
             &mut b,
             &third,
-            vec![ImportAction::UseIncoming { take_status: false }],
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: false,
+            }],
         )
         .unwrap();
         assert_eq!(summary.pdfs_added, 1);
@@ -1641,7 +1740,10 @@ mod round_trip_tests {
         let summary = import(
             &mut a,
             &fourth,
-            vec![ImportAction::UseIncoming { take_status: false }],
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: false,
+            }],
         )
         .unwrap();
         assert_eq!(summary.pdfs_added, 0);
@@ -1681,6 +1783,7 @@ mod round_trip_tests {
                 choices: Vec::new(),
                 markdown_override: None,
                 take_status: false,
+                take_package: false,
             }],
         )
         .unwrap();
@@ -1699,7 +1802,10 @@ mod round_trip_tests {
         import(
             &mut b,
             &third,
-            vec![ImportAction::UseIncoming { take_status: false }],
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: false,
+            }],
         )
         .unwrap();
         assert_eq!(b.get(id_b).unwrap().unwrap().content_markdown, merged);
@@ -1746,6 +1852,7 @@ mod round_trip_tests {
                 choices: Vec::new(),
                 markdown_override: None,
                 take_status: false,
+                take_package: false,
             }],
         )
         .unwrap();
@@ -1776,6 +1883,7 @@ mod round_trip_tests {
                 choices: vec![true],
                 markdown_override: None,
                 take_status: false,
+                take_package: false,
             }],
         )
         .unwrap();
@@ -1788,5 +1896,235 @@ mod round_trip_tests {
                 .document_number,
             "9"
         );
+    }
+}
+
+#[cfg(test)]
+mod send_package_sync_tests {
+    use super::*;
+    use crate::manuscript::NewManuscript;
+    use crate::manuscript::send_package::PinChoice;
+    use crate::models::{DraftInput, ManuscriptStatus, TemplateKind};
+    use std::path::Path;
+
+    const PASSWORD: &str = "Jade!River7Cloud";
+
+    fn create(store: &mut ManuscriptStore, kind: TemplateKind, title: &str) -> i64 {
+        let id = store
+            .create(
+                &NewManuscript {
+                    snapshot: DraftInput {
+                        kind,
+                        title_hint: title.into(),
+                        ..Default::default()
+                    },
+                    content_markdown: format!("# {title}\n\n正文。"),
+                    status: ManuscriptStatus::Draft,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let (snapshot, markdown) = store.snapshot_of(id).unwrap().unwrap();
+        store
+            .commit_manuscript_version(id, "初稿", "", &snapshot, &markdown, "")
+            .unwrap();
+        id
+    }
+
+    fn export(store: &mut ManuscriptStore, ids: &[i64], include: bool, path: &Path) {
+        super::super::export_zip_selected(store, ids, &[], path, PASSWORD, include).unwrap();
+    }
+
+    fn manifest(path: &Path) -> Manifest {
+        super::super::read_manifest(path, PASSWORD).unwrap()
+    }
+
+    fn import(store: &mut ManuscriptStore, path: &Path, actions: Vec<ImportAction>) {
+        let manifest = manifest(path);
+        let hash = super::super::bytes_hash(&serde_json::to_vec(&manifest).unwrap());
+        let previews = inspect(store, &manifest).unwrap();
+        import_with_actions(store, path, PASSWORD, &hash, &actions, &previews).unwrap();
+    }
+
+    fn id_by_title(store: &mut ManuscriptStore, title: &str) -> i64 {
+        store
+            .list(&Default::default())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.title == title)
+            .unwrap()
+            .id
+    }
+
+    fn item_titles(store: &mut ManuscriptStore, owner: i64) -> Vec<Option<String>> {
+        store
+            .send_package_items(owner)
+            .unwrap()
+            .into_iter()
+            .map(|item| {
+                item.manuscript_id
+                    .and_then(|id| store.manuscript_brief(id).unwrap())
+                    .map(|brief| brief.title)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn package_travels_with_items_order_and_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let owner = create(&mut a, TemplateKind::WhitePaper, "请示");
+        let letter = create(&mut a, TemplateKind::OfficialLetter, "函稿");
+        let report = create(&mut a, TemplateKind::ResearchReport, "报告");
+        a.add_send_package_item(owner, report).unwrap();
+        a.add_send_package_item(owner, letter).unwrap();
+        a.archive_with_send_package(owner, PinChoice::Exported)
+            .unwrap();
+
+        let zip = dir.path().join("pkg.zip");
+        export(&mut a, &[owner], true, &zip);
+        let records = manifest(&zip).records;
+        // 只勾了主件，随行件跟着进包；主件记录带着清单与钉版。
+        assert_eq!(records.len(), 3);
+        let package = records[0].send_package.as_ref().unwrap();
+        assert_eq!(package.items.len(), 2);
+        assert!(package.owner_pin.is_some());
+        assert!(package.items.iter().all(|(_, pin)| pin.is_some()));
+        assert!(records[1].send_package.is_none(), "函稿、报告不是主件");
+
+        import(&mut b, &zip, vec![ImportAction::New; 3]);
+        let owner_b = id_by_title(&mut b, "请示");
+        assert_eq!(
+            item_titles(&mut b, owner_b),
+            vec![Some("报告".into()), Some("函稿".into())]
+        );
+        let plan = b.send_package_plan(owner_b).unwrap();
+        assert!(plan.ready());
+        assert!(plan.entries.iter().all(|entry| entry.pinned));
+        assert_eq!(
+            b.manuscript_brief(owner_b).unwrap().unwrap().status,
+            ManuscriptStatus::Archived
+        );
+    }
+
+    #[test]
+    fn list_only_package_resolves_once_items_arrive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let owner = create(&mut a, TemplateKind::RedHeadApproval, "请示");
+        let letter = create(&mut a, TemplateKind::OfficialLetter, "函稿");
+        a.add_send_package_item(owner, letter).unwrap();
+
+        let only_owner = dir.path().join("owner.zip");
+        export(&mut a, &[owner], false, &only_owner);
+        assert_eq!(manifest(&only_owner).records.len(), 1);
+        import(&mut b, &only_owner, vec![ImportAction::New]);
+        let owner_b = id_by_title(&mut b, "请示");
+        assert_eq!(item_titles(&mut b, owner_b), vec![None]);
+        assert!(!b.send_package_plan(owner_b).unwrap().ready());
+
+        let items = dir.path().join("items.zip");
+        export(&mut a, &[letter], false, &items);
+        import(&mut b, &items, vec![ImportAction::New]);
+        assert_eq!(item_titles(&mut b, owner_b), vec![Some("函稿".into())]);
+        assert!(b.send_package_plan(owner_b).unwrap().ready());
+    }
+
+    #[test]
+    fn same_content_with_different_list_needs_explicit_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let mut b = ManuscriptStore::open(&dir.path().join("b.db")).unwrap();
+        let owner = create(&mut a, TemplateKind::WhitePaper, "请示");
+        let letter = create(&mut a, TemplateKind::OfficialLetter, "函稿");
+        let report = create(&mut a, TemplateKind::ResearchReport, "报告");
+        a.add_send_package_item(owner, letter).unwrap();
+        let first = dir.path().join("first.zip");
+        export(&mut a, &[owner, report], true, &first);
+        import(&mut b, &first, vec![ImportAction::New; 3]);
+        let owner_b = id_by_title(&mut b, "请示");
+
+        // A 只改了清单，内容没动：对 B 来说是「同一版本」，但清单不同。
+        a.add_send_package_item(owner, report).unwrap();
+        let second = dir.path().join("second.zip");
+        export(&mut a, &[owner], false, &second);
+        let record = &manifest(&second).records[0];
+        let previews = inspect(&mut b, &manifest(&second)).unwrap();
+        assert_eq!(previews[0].relationship, Relationship::Same);
+        let diff = package_difference(&b, previews[0].local_id, record)
+            .unwrap()
+            .unwrap();
+        assert_eq!((diff.local, diff.incoming), (1, 2));
+        // 本机清单不空：默认不采用，免得旧包把本机刚改的清单冲掉。
+        assert!(!default_take_package(Relationship::Same, Some(diff)));
+
+        import(
+            &mut b,
+            &second,
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: false,
+            }],
+        );
+        assert_eq!(item_titles(&mut b, owner_b), vec![Some("函稿".into())]);
+        import(
+            &mut b,
+            &second,
+            vec![ImportAction::UseIncoming {
+                take_status: false,
+                take_package: true,
+            }],
+        );
+        assert_eq!(
+            item_titles(&mut b, owner_b),
+            vec![Some("函稿".into()), Some("报告".into())]
+        );
+        assert_eq!(package_difference(&b, Some(owner_b), record).unwrap(), None);
+
+        // 本机清单为空时默认采用：没什么可丢。
+        assert!(default_take_package(
+            Relationship::Same,
+            Some(PackageDifference {
+                local: 0,
+                incoming: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn pins_travel_only_when_archived_status_is_taken() {
+        let package = SendPackageSnapshot {
+            items: vec![("item".into(), Some("rev".into()))],
+            owner_pin: Some("owner-rev".into()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let owner = create(&mut a, TemplateKind::WhitePaper, "请示");
+        a.set_status(owner, ManuscriptStatus::Archived).unwrap();
+        let zip = dir.path().join("a.zip");
+        export(&mut a, &[owner], false, &zip);
+        let record = manifest(&zip).records.remove(0);
+        assert_eq!(incoming_package(&package, true, &record), package);
+        assert_eq!(
+            incoming_package(&package, false, &record),
+            package.without_pins()
+        );
+    }
+
+    #[test]
+    fn records_without_package_serialize_like_old_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = ManuscriptStore::open(&dir.path().join("a.db")).unwrap();
+        let plain = create(&mut a, TemplateKind::PlainDocument, "通知");
+        let zip = dir.path().join("plain.zip");
+        export(&mut a, &[plain], false, &zip);
+        let record = manifest(&zip).records.remove(0);
+        assert!(record.send_package.is_none());
+        // 旧包导入按整条记录的序列化做指纹去重，新字段为空时不能出现在序列化结果里。
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value.get("send_package").is_none());
     }
 }
