@@ -847,6 +847,7 @@ impl DraftPage<'_> {
     /// 闭包内直接改 `self.doc.result_drawer_open` 会被局部副本写回覆盖。
     pub(crate) fn result_drawer_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut close_requested = false;
+        let mut copy_all = false;
         // 标题与关闭按钮独占一行——右侧抽屉只有 300 点上下，挤不下一整排。
         ui.horizontal(|ui| {
             // 抽屉里现在有两类东西：能一键改的修订建议，和只能提请注意的要素
@@ -861,8 +862,19 @@ impl DraftPage<'_> {
                 if theme::icon_button(ui, theme::Icon::X, "关闭审校提示（Esc）").clicked() {
                     close_requested = true;
                 }
+                // 提示常要贴给别人或贴进聊天里问，逐条右键复制之外再给一个整份复制。
+                let copyable = self.doc.export_error.is_some() || !self.doc.warnings.is_empty();
+                if copyable
+                    && theme::icon_button(ui, theme::Icon::Copy, "复制全部审校提示").clicked()
+                {
+                    copy_all = true;
+                }
             });
         });
+        if copy_all {
+            ui.ctx().copy_text(self.warnings_text());
+            *self.status = "审校提示已复制到剪贴板。".into();
+        }
         ui.separator();
         egui::ScrollArea::vertical()
             .id_salt("warning_result_scroll")
@@ -883,12 +895,13 @@ impl DraftPage<'_> {
                                     .color(theme::danger())
                                     .strong(),
                             );
-                            ui.add(
+                            let response = ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(error).color(theme::text_soft()),
                                 )
                                 .wrap_mode(egui::TextWrapMode::Wrap),
                             );
+                            copy_menu(&response, error, self.status);
                         });
                     ui.add_space(8.0);
                 }
@@ -1529,10 +1542,11 @@ impl DraftPage<'_> {
                     // 提示往往很长，必须显式换行，否则会把底部面板顶宽。
                     let text = egui::RichText::new(format!("· {}", warning.message));
                     let Some(span) = warning.span.clone() else {
-                        ui.add(
+                        let response = ui.add(
                             egui::Label::new(text.color(theme::text_soft()))
                                 .wrap_mode(egui::TextWrapMode::Wrap),
                         );
+                        copy_menu(&response, &warning.message, self.status);
                         continue;
                     };
                     // 能定位到正文的提示（孤行等）做成可点的：点一下切回 Markdown
@@ -1546,16 +1560,44 @@ impl DraftPage<'_> {
                                 .sense(egui::Sense::click()),
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("点击定位到正文中的这一段");
+                        .on_hover_text("点击定位到正文中的这一段，右键可复制");
                     if response.clicked() {
                         jump = Some(span);
                     }
+                    copy_menu(&response, &warning.message, self.status);
                 }
             });
         if let Some(span) = jump {
             self.jump_to_source(span);
         }
     }
+
+    /// 抽屉里全部提示的纯文本：导出失败原因在前，要素与版式提示逐条一行。
+    fn warnings_text(&self) -> String {
+        let mut lines = Vec::new();
+        if let Some(error) = &self.doc.export_error {
+            lines.push(format!("导出失败：{error}"));
+        }
+        lines.extend(
+            self.doc
+                .warnings
+                .iter()
+                .map(|warning| format!("· {}", warning.message)),
+        );
+        lines.join("\n")
+    }
+}
+
+/// 给一条提示挂右键菜单「复制」。可点的提示左键已经用来定位正文，复制只能放右键；
+/// 普通提示虽能拖选，但抽屉窄、长提示折好几行，拖选很难一次选全。
+fn copy_menu(response: &egui::Response, text: &str, status: &mut String) {
+    response.context_menu(|ui| {
+        if ui.button("复制这条提示").clicked() {
+            ui.ctx().copy_text(text.to_owned());
+            *status = "已复制到剪贴板。".into();
+            ui.close();
+        }
+    });
 }
 
 #[cfg(test)]
