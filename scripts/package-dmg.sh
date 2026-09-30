@@ -1,66 +1,206 @@
 #!/usr/bin/env bash
-# Package the portable macOS layout (binary + TeX runtime) as an app bundle
-# and a drag-to-Applications DMG.
+# 一键打包 macOS DMG：构建二进制 → 按 runtime 清单组装便携布局 → .app bundle
+# → ad-hoc 签名 → 带「应用程序」拖放链接的 DMG。供本机使用（发布流水线只产
+# Windows / Linux ARM64，不产 macOS 包）。
 #
-# Usage: package-dmg.sh <version> <staging-dir> <output-dir>
+# 用法：
+#   scripts/package-dmg.sh [选项]                                 # 一键完整打包
+#   scripts/package-dmg.sh <version> <staging-dir> <output-dir>   # 旧接口：只把
+#       现成便携目录打成 DMG（staging 由 scripts/package-portable.ps1
+#       -ArchiveFormat none 生成，含 gongwen-assistant、runtime/ 与 README/LICENSE）
 #
-# The staging directory is produced by scripts/package-portable.ps1 with
-# -ArchiveFormat none; it contains `gongwen-assistant`, `runtime/`, and the
-# README/LICENSE documents. This script lays that tree out as
-# GongwenAssistant.app, generates the .icns icon from the PNG assets with
-# iconutil, ad-hoc signs every binary, then builds the DMG with hdiutil.
+# 选项：
+#   --version X.Y.Z   版本号；缺省从 Cargo.toml 读取。
+#   --output DIR      产物目录；缺省 <仓库>/dist/macos。
+#   --staging DIR     复用现成便携目录，跳过构建与组装。
+#   --skip-build      不重新 cargo build，直接用 target/release/gongwen-assistant。
+#   -h, --help        显示帮助。
+#
+# 产物：dist/macos/gongwen-assistant-<版本>-macos-<架构>.dmg（附 .sha256）。
+# 打开 DMG 把「公文助手」拖进「应用程序」即可。未做 Developer ID 签名，
+# 仅 ad-hoc 签名（identity "-"），本机可直接运行。
+#
+# 一键模式的 staging 组装与 scripts/package-portable.ps1 保持一致：
+#   - 校验 runtime/SHA256SUMS.<平台>.txt 里每个资产的 SHA-256；
+#   - tectonic/<平台>/tectonic 映射为 runtime/tectonic/tectonic（程序按
+#     可执行文件旁 runtime/ 查找，见 src/portable_runtime.rs）；
+#   - 附 README / THIRD_PARTY_NOTICES / LICENSE / config.example.json；
+#   - 把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill（zip，
+#     顶层一个 gongwen-markdown/ 文件夹，条目名正斜杠）。
 set -euo pipefail
 
-VERSION="${1:?usage: package-dmg.sh <version> <staging-dir> <output-dir>}"
-STAGING="${2:?missing staging directory}"
-OUTPUT_DIR="${3:?missing output directory}"
-
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BUNDLE_ID="com.billowsand.gongwen"
 APP_NAME="公文助手"
 BUNDLE_NAME="GongwenAssistant.app"
-DMG_NAME="gongwen-assistant-${VERSION}-macos-arm64.dmg"
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ ! -x "$STAGING/gongwen-assistant" ]; then
-    echo "error: staging binary not found or not executable: $STAGING/gongwen-assistant" >&2
+die() {
+    echo "error: $*" >&2
     exit 1
+}
+
+usage() {
+    sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+VERSION=""
+STAGING=""
+OUTPUT_DIR=""
+SKIP_BUILD=0
+
+# 旧三段式接口：<version> <staging-dir> <output-dir>（首参数不以 - 开头）。
+if [ $# -eq 3 ] && [ "${1#-}" = "$1" ]; then
+    VERSION="$1"
+    STAGING="$2"
+    OUTPUT_DIR="$3"
+else
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --version)
+                [ $# -ge 2 ] || die "--version 缺少参数"
+                VERSION="$2"
+                shift 2
+                ;;
+            --output)
+                [ $# -ge 2 ] || die "--output 缺少参数"
+                OUTPUT_DIR="$2"
+                shift 2
+                ;;
+            --staging)
+                [ $# -ge 2 ] || die "--staging 缺少参数"
+                STAGING="$2"
+                shift 2
+                ;;
+            --skip-build)
+                SKIP_BUILD=1
+                shift
+                ;;
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            *)
+                die "未知选项：$1（旧接口需三个参数：<version> <staging-dir> <output-dir>）"
+                ;;
+        esac
+    done
 fi
-if [ ! -x "$STAGING/runtime/tectonic/tectonic" ]; then
-    echo "error: staging runtime tectonic not found or not executable" >&2
-    exit 1
+
+case "$(uname -s)" in
+    Darwin) ;;
+    *) die "package-dmg.sh 只能在 macOS 上运行（需要 hdiutil / codesign / iconutil）" ;;
+esac
+
+# 版本号只维护在 Cargo.toml，与 bump-version.ps1 保持一致。
+if [ -z "$VERSION" ]; then
+    VERSION="$(
+        grep -m1 '^version[[:space:]]*=' "$PROJECT_ROOT/Cargo.toml" |
+            sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/'
+    )"
 fi
+case "$VERSION" in
+    [0-9]*\.[0-9]*\.[0-9]*) ;;
+    *) die "无法确定 x.y.z 版本号（得到：$VERSION）" ;;
+esac
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+    arm64) SUFFIX="darwin-arm64" ;;
+    x86_64) SUFFIX="darwin-amd64" ;;
+    *) SUFFIX="darwin-$ARCH" ;;
+esac
+
 if [ ! -f "$PROJECT_ROOT/assets/app-icon/app-icon-1024.png" ]; then
-    echo "error: icon source not found: $PROJECT_ROOT/assets/app-icon/app-icon-1024.png" >&2
-    exit 1
+    die "图标源图不存在：$PROJECT_ROOT/assets/app-icon/app-icon-1024.png"
 fi
 
 BUILD_ROOT="$(mktemp -d)"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 
+STAGE="$BUILD_ROOT/staging"
+if [ -n "$STAGING" ]; then
+    STAGE="$(cd "$STAGING" && pwd -P)"
+else
+    mkdir -p "$STAGE"
+
+    if [ "$SKIP_BUILD" -eq 0 ]; then
+        echo "==> cargo build --release --locked"
+        (cd "$PROJECT_ROOT" && cargo build --release --locked)
+    fi
+    BIN="$PROJECT_ROOT/target/release/gongwen-assistant"
+    [ -f "$BIN" ] || die "找不到二进制：$BIN（去掉 --skip-build 或先构建）"
+    cp "$BIN" "$STAGE/gongwen-assistant"
+
+    # 按 runtime 清单校验并组装；缺平台清单时回退 SHA256SUMS.txt（与
+    # package-portable.ps1 的回退一致）。
+    MANIFEST="$PROJECT_ROOT/runtime/SHA256SUMS.$SUFFIX.txt"
+    if [ ! -f "$MANIFEST" ]; then
+        MANIFEST="$PROJECT_ROOT/runtime/SHA256SUMS.txt"
+    fi
+    [ -f "$MANIFEST" ] || die "缺少 runtime 校验清单：runtime/SHA256SUMS.$SUFFIX.txt"
+    echo "==> 校验并组装 runtime（$(basename "$MANIFEST")）"
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in '' | \#*) continue ;; esac
+        read -r sum rel <<<"$line"
+        src="$PROJECT_ROOT/runtime/$rel"
+        [ -f "$src" ] || die "runtime 清单中的资产不存在：$src"
+        actual="$(shasum -a 256 "$src" | awk '{print toupper($1)}')"
+        expected="$(printf '%s' "$sum" | tr '[:lower:]' '[:upper:]')"
+        [ "$actual" = "$expected" ] || die "SHA-256 不匹配：$src（期望 $expected，实际 $actual）"
+        case "$rel" in
+            tectonic/"$SUFFIX"/*) dest="runtime/tectonic/${rel##*/}" ;;
+            *) dest="runtime/$rel" ;;
+        esac
+        mkdir -p "$STAGE/$(dirname "$dest")"
+        cp "$src" "$STAGE/$dest"
+    done <"$MANIFEST"
+    [ -f "$STAGE/runtime/tectonic/tectonic" ] ||
+        die "runtime 清单未提供 tectonic，PDF 编译将不可用（$SUFFIX）"
+
+    for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
+        [ -f "$PROJECT_ROOT/$doc" ] && cp "$PROJECT_ROOT/$doc" "$STAGE/"
+    done
+
+    SKILL_SRC="$PROJECT_ROOT/skills/gongwen-markdown"
+    [ -f "$SKILL_SRC/SKILL.md" ] || die "技能包源目录不存在：$SKILL_SRC"
+    mkdir -p "$STAGE/skills"
+    command -v zip >/dev/null 2>&1 || die "找不到 zip 命令（打包技能包需要）"
+    (cd "$PROJECT_ROOT/skills" &&
+        zip -Xrq "$STAGE/skills/gongwen-markdown.skill" gongwen-markdown \
+            -x '*__pycache__*' -x '*.DS_Store')
+
+    chmod 755 "$STAGE/gongwen-assistant" "$STAGE/runtime/tectonic/tectonic"
+fi
+
+if [ ! -x "$STAGE/gongwen-assistant" ]; then
+    die "staging 里没有可执行的二进制：$STAGE/gongwen-assistant"
+fi
+if [ ! -x "$STAGE/runtime/tectonic/tectonic" ]; then
+    die "staging 里没有可执行的 runtime tectonic：$STAGE/runtime/tectonic/tectonic"
+fi
+
 MACOS_DIR="$BUILD_ROOT/$BUNDLE_NAME/Contents/MacOS"
 RESOURCES_DIR="$BUILD_ROOT/$BUNDLE_NAME/Contents/Resources"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-# Executable next to its runtime/, matching the lookup in
-# src/portable_runtime.rs (current_exe().parent()/runtime).
-cp "$STAGING/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
-cp -a "$STAGING/runtime" "$MACOS_DIR/runtime"
+# 可执行文件与 runtime/ 同级，对应 src/portable_runtime.rs 的查找逻辑
+# （current_exe().parent()/runtime）。
+cp "$STAGE/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
+cp -a "$STAGE/runtime" "$MACOS_DIR/runtime"
 chmod 755 "$MACOS_DIR/gongwen-assistant" "$MACOS_DIR/runtime/tectonic/tectonic"
 
-# Documentation travels inside the bundle so the DMG stays a plain
-# drag-to-Applications drop.
+# 文档随包进 bundle，DMG 保持纯拖放布局。
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
-    if [ -f "$STAGING/$doc" ]; then
-        cp "$STAGING/$doc" "$RESOURCES_DIR/$doc"
+    if [ -f "$STAGE/$doc" ]; then
+        cp "$STAGE/$doc" "$RESOURCES_DIR/$doc"
     fi
 done
-# AI skill pack (skills/gongwen-markdown.skill, built by package-portable.ps1).
-if [ -d "$STAGING/skills" ]; then
-    cp -a "$STAGING/skills" "$RESOURCES_DIR/skills"
+# AI 技能包（skills/gongwen-markdown.skill，由 package-portable.ps1 或一键模式生成）。
+if [ -d "$STAGE/skills" ]; then
+    cp -a "$STAGE/skills" "$RESOURCES_DIR/skills"
 fi
 
-# Generate the .icns from the pre-rendered PNGs. iconutil requires the full
-# fixed-size iconset; sips guarantees exact pixel dimensions.
+# 由预渲染 PNG 生成 .icns。iconutil 需要完整固定尺寸 iconset，sips 保证像素精确。
 ICONSET="$BUILD_ROOT/AppIcon.iconset"
 mkdir -p "$ICONSET"
 render() {
@@ -82,7 +222,7 @@ render 512 icon_512x512.png
 render 1024 icon_512x512@2x.png
 iconutil -c icns "$ICONSET" -o "$RESOURCES_DIR/AppIcon.icns"
 
-cat > "$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
+cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -117,18 +257,26 @@ cat > "$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# No Developer ID is available, so sign ad hoc (identity "-"). This keeps the
-# app runnable on Apple Silicon and covers the bundled Tectonic binary.
+# 没有 Developer ID，做 ad-hoc 签名（identity "-"）。覆盖内置的 Tectonic
+# 二进制，保证 Apple Silicon 上可直接运行。
 codesign --force --deep --sign - "$BUILD_ROOT/$BUNDLE_NAME"
 codesign --verify --deep --strict "$BUILD_ROOT/$BUNDLE_NAME"
 
-# Drag-to-Applications DMG: the bundle plus a symlink to /Applications.
+# 拖放到「应用程序」的 DMG：bundle 加 /Applications 符号链接。
 DMG_ROOT="$BUILD_ROOT/dmg"
 mkdir -p "$DMG_ROOT"
 cp -R "$BUILD_ROOT/$BUNDLE_NAME" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
 
+[ -n "$OUTPUT_DIR" ] || OUTPUT_DIR="$PROJECT_ROOT/dist/macos"
+case "$OUTPUT_DIR" in
+    /*) ;;
+    *) OUTPUT_DIR="$PROJECT_ROOT/$OUTPUT_DIR" ;;
+esac
 mkdir -p "$OUTPUT_DIR"
+
+DMG_NAME="gongwen-assistant-${VERSION}-macos-${ARCH}.dmg"
+echo "==> 生成磁盘映像：$OUTPUT_DIR/$DMG_NAME"
 hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$DMG_ROOT" \
@@ -138,6 +286,6 @@ hdiutil create \
 hdiutil verify "$OUTPUT_DIR/$DMG_NAME" >/dev/null
 
 shasum -a 256 "$OUTPUT_DIR/$DMG_NAME" |
-    awk '{ printf "%s  %s\n", $1, $2 }' > "$OUTPUT_DIR/$DMG_NAME.sha256"
+    awk '{ printf "%s  %s\n", $1, $2 }' >"$OUTPUT_DIR/$DMG_NAME.sha256"
 
 echo "Created: $OUTPUT_DIR/$DMG_NAME"
