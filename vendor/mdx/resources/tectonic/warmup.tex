@@ -30,6 +30,9 @@
 % 数学公式支持（与 resources/research/md2tex.cls 保持同步）
 \usepackage{amsmath}
 \usepackage{mathtools}
+% amssymb（依赖 amsfonts）：\mathbb / \mathfrak 与 \varnothing 等符号，
+% 需要把 msam / msbm / eufm 各设计字号的 TFM 与 PFB 解析进 bundle
+\usepackage{amssymb}
 \usepackage{gbt7714}
 \citestyle{numbers}
 \usepackage[unicode,CJKbookmarks=true]{hyperref}
@@ -71,16 +74,24 @@ fn main() { println!("offline"); }
 \[
   \int_0^1 x^2\,dx = \frac{1}{3}
 \]
+% amsfonts 符号：两种字号都排一遍，让 msam / msbm / eufm 的
+% TFM 与 PFB 按实际字号解析进缓存。
+行内 $\mathbb{R}$、$\mathbb{E}[X]$、$\mathfrak{F}$、$\varnothing \leqslant \therefore$、$\mathsf{T}$。
+\[
+  \mathbb{N} \subset \mathbb{R}, \qquad \mathfrak{so}(n)
+\]
 
 {\fontsize{14.05249pt}{24pt}\selectfont
 研究正文字号下的行内公式 $E=mc^2$、$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$、
 $a \leq b \cdot c \times d \pm e \neq f \to \infty$、$\alpha + \beta \geq \gamma$、
-$\sqrt{x^2+y^2}$ 与 $\lim_{x \to 0} \frac{\sin x}{x} = 1$。
+$\sqrt{x^2+y^2}$ 与 $\lim_{x \to 0} \frac{\sin x}{x} = 1$、$\mathbb{R}^n$、$\mathsf{T}$。
 \[
   \begin{pmatrix} a & b \\ c & d \end{pmatrix}
   \begin{cases} x + y = 1 \\ x - y = 2 \end{cases}
   \qquad
   \begin{aligned} u &= v + w \\ &= z \end{aligned}
+  \qquad
+  \mathbb{E}[X] = \sum_{i} x_i\,p_i, \qquad \hat\beta = (X^{\mathsf{T}}X)^{-1}X^{\mathsf{T}}y
 \]}
 
 \begin{asparaenum}

@@ -43,7 +43,12 @@ runtime/
   actually exercised by all `gonghan-gwa.cls` document variants and by mdx's
   research warm-up document (including `ctexbook`, TikZ, listings, `gbt7714`
   and, since runtime v0.6.0, `amsmath`/`mathtools` for research-report math
-  formulas). Both styles are recompiled with a fresh cache and
+  formulas). It was additionally hand-merged with the `amsfonts` package
+  (`amsfonts`/`amssymb` and the msam/msbm/eufm fonts, so `\mathbb` and
+  friends work) plus the cm family TFM/PFB at the design sizes (5–9pt, bold)
+  that research-report math can hit; the research warm-up document now
+  exercises these so future rebuilds keep them. Both styles are recompiled
+  with a fresh cache and
   `--only-cached --untrusted` before publishing. The authoritative checksum is
   the `texbundle/gongwen-texlive.ttb` line of each `SHA256SUMS.<suffix>.txt`;
   that is the value `scripts/package-portable.ps1` actually verifies.

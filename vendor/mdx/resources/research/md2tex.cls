@@ -43,6 +43,9 @@
 %% 数学公式支持（mathtools 依赖并自动加载 amsmath，显式列出以便预热同步）
 \RequirePackage{amsmath}
 \RequirePackage{mathtools}
+%% amssymb 提供 \mathbb、\mathfrak 与 \varnothing、\leqslant 等符号
+%% （随包 texbundle 已内置 amsfonts 及 msam/msbm/eufm 字体）
+\RequirePackage{amssymb}
 %% 数学字体各字号一律按随包的 10/12pt 字形缩放。LaTeX 默认按设计字号取
 %% cmmi8、cmsy7 这类字形，随包 texbundle 里只有 cmmi10/12、cmr10/12、
 %% cmsy10、cmex10 的轮廓：小四（文框、表格）的上下标要 8pt，编译就停在
