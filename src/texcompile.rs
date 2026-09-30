@@ -185,6 +185,54 @@ pub fn compile_pdf_with_proof(tex_path: &Path, fonts: &FontConfig) -> Result<Com
     })
 }
 
+/// 常见但离线 bundle 未内置的数学命令（需要 mathrsfs、bm 等额外宏包）。
+/// 用户公式里写了这些命令时编译报 Undefined control sequence，
+/// 这里把错误翻译成可操作建议。
+fn needs_unbundled_package(command: &str) -> bool {
+    matches!(
+        command,
+        "\\mathscr" | "\\bm" | "\\xymatrix" | "\\ce" | "\\chemfig" | "\\tikzchemical"
+    )
+}
+
+/// 从 Tectonic 输出里提取失败位置和具体命令，把常见底层错误翻译成人话。
+/// 返回应排在原始日志前面的提示；识别不了就返回 None，维持原样输出。
+fn tectonic_failure_hint(stdout: &str, stderr: &str) -> Option<String> {
+    let location = regex::Regex::new(r"error: (\S+?):(\d+): ")
+        .unwrap()
+        .captures(stderr)
+        .map(|cap| (cap[1].to_string(), cap[2].to_string()));
+    let (file, line) = location?;
+    if stdout.contains("Undefined control sequence") {
+        let command =
+            regex::Regex::new(r"! Undefined control sequence\.\s*\r?\nl\.\d+ (\\[A-Za-z@]+)")
+                .unwrap()
+                .captures(stdout)
+                .map(|cap| cap[1].to_string());
+        return Some(match &command {
+            Some(cmd) if needs_unbundled_package(cmd) => format!(
+                "数学公式使用了「{cmd}」：该命令需要导出环境未内置的宏包，\
+                 请改用已有命令或删除。出错位置在 {file} 第 {line} 行附近。"
+            ),
+            Some(cmd) => format!(
+                "数学公式包含不支持的命令「{cmd}」：导出环境内置 LaTeX 内核、\
+                 amsmath / mathtools 与 amssymb 的命令。出错位置在 {file} 第 {line} 行附近。"
+            ),
+            None => format!(
+                "数学公式包含不支持的命令（Undefined control sequence）。\
+                 出错位置在 {file} 第 {line} 行附近。"
+            ),
+        });
+    }
+    let missing = regex::Regex::new(r"File `([^']+)' not found")
+        .unwrap()
+        .captures(stdout)?;
+    Some(format!(
+        "编译缺少文件「{}」，出错位置在 {file} 第 {line} 行附近。",
+        &missing[1]
+    ))
+}
+
 /// 研究报告必须使用随应用发布的固定 Tectonic 与离线 bundle，不允许回退到
 /// 用户系统中的 XeLaTeX/Tectonic，否则字体、宏包和参考文献结果不可复现。
 ///
@@ -252,8 +300,11 @@ fn compile_with_portable_tectonic(
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let hint = tectonic_failure_hint(&stdout, &stderr);
         bail!(
-            "内置 Tectonic 离线编译失败\nstdout:\n{}\nstderr:\n{}",
+            "内置 Tectonic 离线编译失败{}{}\nstdout:\n{}\nstderr:\n{}",
+            hint.as_deref().map_or("", |_| "："),
+            hint.as_deref().unwrap_or_default(),
             stdout.trim(),
             stderr.trim()
         );
@@ -462,6 +513,44 @@ mod tests {
                 .iter()
                 .any(|path| path.to_string_lossy().ends_with("xelatex.exe"))
         );
+    }
+
+    /// 真实报错日志节选（研究报告编译含未内置宏包命令的公式）。
+    const UNDEFINED_CONTROL_SEQUENCE_LOG: &str = "\
+[5]\n! Undefined control sequence.\nl.81 \\mathscr\n            {F} = \\{A\\}\n";
+
+    #[test]
+    fn unbundled_package_commands_get_actionable_hint() {
+        let stderr = "error: data/chapter02.tex:81: Undefined control sequence\nerror: something bad happened inside XeTeX, but no output was logged\n";
+        let hint = tectonic_failure_hint(UNDEFINED_CONTROL_SEQUENCE_LOG, stderr).unwrap();
+        assert!(hint.contains("\\mathscr"), "{hint}");
+        assert!(hint.contains("未内置"), "{hint}");
+        assert!(hint.contains("chapter02.tex 第 81 行"), "{hint}");
+    }
+
+    #[test]
+    fn unknown_math_command_gets_generic_hint() {
+        let stdout = "\
+[5]\n! Undefined control sequence.\nl.12 \\fancyvector\n            {a}\n";
+        let stderr = "error: data/chapter01.tex:12: Undefined control sequence\n";
+        let hint = tectonic_failure_hint(stdout, stderr).unwrap();
+        assert!(hint.contains("\\fancyvector"), "{hint}");
+        assert!(!hint.contains("amsfonts"), "{hint}");
+    }
+
+    #[test]
+    fn missing_file_gets_hint() {
+        let stdout = "\n! LaTeX Error: File `amsfonts.sty' not found..\n\nl.3 \\begin\n";
+        let stderr = "error: data/chapter01.tex:3: LaTeX Error\n";
+        let hint = tectonic_failure_hint(stdout, stderr).unwrap();
+        assert!(hint.contains("amsfonts.sty"), "{hint}");
+    }
+
+    #[test]
+    fn unrecognized_failure_has_no_hint() {
+        assert!(tectonic_failure_hint("", "").is_none());
+        // stderr 没有 error: file:line: 定位时不瞎猜。
+        assert!(tectonic_failure_hint(UNDEFINED_CONTROL_SEQUENCE_LOG, "").is_none());
     }
 
     /// 一张 100x50 红色 PNG，供带图编译测试写入配置目录的 images/ 下。
@@ -685,6 +774,10 @@ mod tests {
                 "<!-- [正文] -->\n\n## 模型与$\\sum_{i}$方法\n\n",
                 "质能方程 $E=mc^2$ 与求和 $\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$。\n\n",
                 "$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n",
+                // amssymb（\\mathbb、\\mathfrak、\\varnothing 等）与 \\mathsf 走
+                // 随包 texbundle 内置的 amsfonts 与 lmsans 字体，两种字号都排。
+                "期望 $\\mathbb{E}[X]$、转置 $X^{\\mathsf{T}}$、滤波器 $\\mathfrak{F}$、空集 $\\varnothing$、小于等于 $\\leqslant$、所以 $\\therefore$。\n\n",
+                "$$\\mathbb{E}[X]=\\int_{-\\infty}^{\\infty} x\\,f(x)\\,dx, \\qquad \\hat{\\beta}=(X^{\\mathsf{T}}X)^{-1}X^{\\mathsf{T}}y$$\n\n",
                 "### 小节 $x^2$\n\n",
                 "> 引文 $x_1^2$ 照排。\n\n",
                 "> [!专栏] 标题 $a_i$\n>\n> 内容 $\\sum_{a}^{b}=A$ 认证\n\n",
