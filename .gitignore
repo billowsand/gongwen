@@ -64,6 +64,12 @@ reasonix.toml
 # code-review-graph: 本地图数据库（MCP 配置 .mcp.json / opencode.jsonc 入库共享）
 .code-review-graph/
 
+# archify 生成的架构报告（本地工具产物，不入库）
+.archify/
+
+# Python 字节码缓存
+__pycache__/
+
 # pi 扩展与包安装目录：.pi/settings.json 入库共享，依赖本身不入库（启动时自动安装）
 .pi/npm/
 .pi/git/
