@@ -38,15 +38,58 @@ fn dependency_performance_probe() {
     let path = dir.path().join("词表.xlsx");
     let config = crate::models::ProofreadConfig::default();
     crate::proofread_xlsx::to_xlsx(&config, &path).expect("准备词表");
+    let db_path = dir.path().join("扫描样本.db");
+    {
+        let mut store = crate::manuscript::ManuscriptStore::open(&db_path).expect("临时稿件库");
+        store
+            .create(
+                &crate::manuscript::NewManuscript {
+                    snapshot: crate::models::DraftInput::default(),
+                    content_markdown: old.clone(),
+                    notes: String::new(),
+                    status: crate::models::ManuscriptStatus::Published,
+                    created_at: None,
+                    updated_at: None,
+                    published_at: None,
+                    archived_at: None,
+                },
+                None,
+            )
+            .expect("写入扫描样本");
+    }
+    let scan_options = crate::lexicon::scan::ScanOptions {
+        include_drafts: false,
+        include_knowledge: false,
+        rescan_all: true,
+    };
+    let contract_samples: Vec<_> = crate::lexicon::segmenter::DEPENDENCY_CONTRACT_SAMPLES
+        .iter().map(|text| serde_json::json!({
+            "text": text,
+            "cut": jieba.cut(text, true).iter().map(|token| token.word).collect::<Vec<_>>(),
+            "tags": jieba.tag(text, true).iter().map(|tag| (tag.word, tag.tag)).collect::<Vec<_>>(),
+        })).collect();
     let report = serde_json::json!({
         "body_chars": body.chars().count(),
         "dictionary_first_us": first_dictionary_us,
         "dictionary_instances": sample(5, jieba_rs::Jieba::new),
         "segmentation": sample(30, || jieba.cut(&body, true)),
+        "segmentation_short": sample(100, || jieba.cut(sentence, true)),
         "tagging": sample(30, || jieba.tag(&body, true)),
         "redline": sample(30, || crate::redline::build(&old, &new)),
         "xlsx_import": sample(30, || crate::proofread_xlsx::parse(&path).expect("回读词表")),
         "xlsx_export": sample(30, || crate::proofread_xlsx::to_xlsx(&config, &path).expect("导出词表")),
+        "user_dictionary_reload": sample(5, || {
+            let mut dictionary = jieba_rs::Jieba::new();
+            dictionary.load_dict(&mut std::io::Cursor::new("新舆处 500 nz\n专项整治行动 300 n\n")).expect("加载用户词典");
+            dictionary
+        }),
+        "full_lexicon_scan": sample(10, || {
+            let summary = crate::lexicon::scan::run_scan_with(db_path.clone(), scan_options.clone(), config.clone(), Vec::new(), |_, _, _| {}).expect("完整词表扫描");
+            assert_eq!(summary.scanned, 1);
+            assert!(summary.failed.is_empty());
+            summary
+        }),
+        "contract_samples": contract_samples,
     });
     println!("DEPENDENCY_BENCH={report}");
     if let Ok(path) = std::env::var("GONGWEN_BENCH_OUTPUT") {

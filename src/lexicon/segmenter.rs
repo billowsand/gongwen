@@ -128,9 +128,73 @@ impl Drop for TestGuard {
     }
 }
 
+/// 依赖升级时用同一组文本对比分词与词性结果；只存在于测试构建。
+#[cfg(test)]
+pub(crate) const DEPENDENCY_CONTRACT_SAMPLES: &[&str] = &[
+    "新舆处关于2026年度专项整治的通知，公办〔2026〕17号。",
+    "预算120.50万元，增长50%，2026年10月1日完成。",
+    "型号WES-5.4.5与Alpha123、OPENSSL_1_1_1发布。",
+    "中文𠮟与English mixed\t空格　\r\n下一行。",
+    "公式$x^2$与$$\\frac{a}{b}$$、标点（附件一）。",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_unicode_segmentation_preserves_text_and_offsets() {
+        let jieba = Jieba::new();
+        for text in DEPENDENCY_CONTRACT_SAMPLES {
+            for hmm in [false, true] {
+                let tokens = jieba.cut(text, hmm);
+                assert_eq!(
+                    tokens.iter().map(|token| token.word).collect::<String>(),
+                    *text
+                );
+                let mut byte_cursor = 0;
+                for token in tokens {
+                    assert_eq!(token.byte_start, byte_cursor);
+                    assert_eq!(&text[token.byte_start..token.byte_end], token.word);
+                    assert_eq!(
+                        text.chars()
+                            .skip(token.start)
+                            .take(token.end - token.start)
+                            .collect::<String>(),
+                        token.word
+                    );
+                    byte_cursor = token.byte_end;
+                }
+                assert_eq!(byte_cursor, text.len());
+                let tags = jieba.tag(text, hmm);
+                assert_eq!(tags.iter().map(|tag| tag.word).collect::<String>(), *text);
+                for tag in tags {
+                    assert_eq!(&text[tag.byte_start..tag.byte_end], tag.word);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn connected_alphanumeric_runs_remain_whole() {
+        let jieba = Jieba::new();
+        for compound in [
+            "WES-5.4.5",
+            "Alpha123",
+            "OPENSSL_1_1_1",
+            "01.01.00070",
+            "50%",
+        ] {
+            let text = format!("型号{compound}发布");
+            assert!(
+                jieba
+                    .cut(&text, true)
+                    .iter()
+                    .any(|token| token.word == compound),
+                "连续片段被切碎：{text}"
+            );
+        }
+    }
 
     #[test]
     fn tokenize_separates_words_with_spaces() {
