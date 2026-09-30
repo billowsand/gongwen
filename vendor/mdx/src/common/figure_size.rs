@@ -90,6 +90,20 @@ pub fn width_fraction(source: FigureSource) -> f64 {
         .unwrap_or(cap)
 }
 
+/// 公文助手生成的 Mermaid 画布已按版心与纸面字号排好，不能再次按面积缩放。
+/// 专用文件名前缀随图片复制到 figures/ 后仍保留；普通图片沿用原有分档。
+pub fn width_fraction_for_path(source: FigureSource, path: &Path) -> f64 {
+    if path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.starts_with("gongwen-mermaid-canvas-"))
+    {
+        1.0
+    } else {
+        width_fraction(source)
+    }
+}
+
 /// 读一张本地插图的原始尺寸：PDF 取 `page` 页（从 1 起）的页面尺寸，其余按
 /// 位图读文件头。读不出来返回 `None`，调用方退回原先的排法。
 pub fn probe(path: &Path, page: Option<u32>) -> Option<FigureSource> {
@@ -117,6 +131,31 @@ pub fn probe(path: &Path, page: Option<u32>) -> Option<FigureSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_canvas_bypasses_area_steps_after_copying() {
+        for source in [
+            FigureSource::Raster {
+                width_px: 1843,
+                height_px: 180,
+            },
+            FigureSource::Vector {
+                width: 442.0,
+                height: 43.0,
+            },
+        ] {
+            for path in [
+                "mermaid-cache/gongwen-mermaid-canvas-test.png",
+                "figures/gongwen-mermaid-canvas-test.pdf",
+            ] {
+                assert_eq!(width_fraction_for_path(source, Path::new(path)), 1.0);
+            }
+            assert_eq!(
+                width_fraction_for_path(source, Path::new("figures/photo.png")),
+                width_fraction(source)
+            );
+        }
+    }
 
     /// 足够大的位图：分辨率上限不起作用，只看面积与限高。
     fn raster(ratio_w: u32, ratio_h: u32) -> FigureSource {

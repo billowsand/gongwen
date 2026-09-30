@@ -30,7 +30,8 @@ pub fn load(url: &str, base_dir: &Path, max_width_emu: u32) -> Result<Pic> {
 pub fn load_research(url: &str, base_dir: &Path, text_width_emu: u32) -> Result<Pic> {
     let (pic, source) = decode(url, base_dir)?;
     let (width_px, height_px) = pic.size;
-    let fraction = figure_size::width_fraction(source);
+    let (path, _) = split_pdf_page(url)?;
+    let fraction = figure_size::width_fraction_for_path(source, Path::new(path));
     let width = (f64::from(text_width_emu) * fraction).round() as u32;
     let height = (f64::from(width) * f64::from(height_px) / f64::from(width_px)).round() as u32;
     Ok(pic.size(width.max(1), height.max(1)))

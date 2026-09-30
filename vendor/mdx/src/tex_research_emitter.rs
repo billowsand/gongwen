@@ -1168,7 +1168,7 @@ fn figure_width_option(image_dir: Option<&Path>, url: &str) -> String {
             figure_size::MAX_HEIGHT_RATIO
         );
     };
-    let fraction = figure_size::width_fraction(source);
+    let fraction = figure_size::width_fraction_for_path(source, Path::new(url));
     if fraction >= 1.0 {
         return "width=\\textwidth".to_string();
     }

@@ -3,7 +3,7 @@
 //! 一张图的来路：引擎解析排版出 SVG（配色取自 [`DiagramTheme`]，字体随文种）→
 //! 按实际字号把图摆到版心宽的画布上 → 用随包字体转 PNG（预览、Word）或 PDF（TeX）。
 //! 各导出器照旧把图片铺满画布，图内文字因此总是设定的字号：小图不会被放大成大字，
-//! 宽图、长图才整体缩小到版心以内。
+//! 超出版心的图缩放到可用区域并显示警告，提醒字号可能低于下限。
 //!
 //! 全部图种都由 merman（纯 Rust，与 Zed 的 Markdown 预览同一引擎，不引浏览器）
 //! 解析排版：flowchart / graph（泳道图用 subgraph 分组表达）、sequenceDiagram、
@@ -12,7 +12,7 @@
 
 use crate::models::DiagramTheme;
 use anyhow::{Context, Result, anyhow, bail};
-use mdx::figure_size::{self, FigureSource};
+use mdx::figure_size;
 use merman::render::{
     HeadlessRenderer, HostThemeOutput, HostThemeProfile, HostThemeRoles, TextMeasurer,
     VendoredFontMetricsTextMeasurer,
@@ -28,11 +28,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const CACHE_DIR: &str = "mermaid-cache";
 /// 配色、字体、画布算法或引擎版本变了都要改这里，旧缓存随之失效。
-const STYLE_VERSION: &str = "gongwen-mermaid-v5/merman-0.7";
+const STYLE_VERSION: &str = "gongwen-mermaid-v10/merman-0.7";
 
-/// 排版用的字号（px）。引擎的内边距、节点间距是按 14–16px 的字定的，直接拿
-/// 9pt 去排，框会显得空；先按 14px 排，落画布时再整体缩到目标字号。
-const LAYOUT_FONT_PX: f64 = 14.0;
+/// 排版用的字号（px）。按 18px 测量中文，再换算到纸面字号；
+/// 原生时间线和饼图的固定几何留白也随之收紧，文字不缩小。
+const LAYOUT_FONT_PX: f64 = 18.0;
 /// PNG 的分辨率：Word 与预览共用，打印不发虚。
 const PNG_DPI: f64 = 300.0;
 /// 公文版心（GB/T 9704）：156 × 225 mm，与研究报告的 `md2tex.cls` 同宽同高。
@@ -62,11 +62,11 @@ impl Style {
         }
     }
 
-    /// 图内字号（pt）：公文小四，比三号正文低两档；研究报告小五，与图题同档。
+    /// 图内字号（pt）：公文小四，比三号正文低两档；研究报告五号，刻度和连线标签也不低于此字号。
     fn font_pt(self) -> f64 {
         match self {
             Self::Official => 12.0,
-            Self::Research => 9.0,
+            Self::Research => 10.5,
         }
     }
 
@@ -382,9 +382,9 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
         cluster_stroke,
         category,
     } = palette;
-    // 各图种的标题、坐标刻度统一字号：标题比正文大一档，刻度小一档。
+    // 标题略大，刻度与正文同号，避免中文日期和分支文字低于字号下限。
     let title_px = LAYOUT_FONT_PX + 2.0;
-    let tick_px = LAYOUT_FONT_PX - 2.0;
+    let tick_px = LAYOUT_FONT_PX;
     // merman 按 SVG 根元素的 id 给这些规则加作用域，排在 Mermaid 自带样式之后，
     // 同权重下后写的生效。框用节点线宽与主色，线用连线线宽与线色，各图种一个样。
     // 甘特的「今天」竖线随渲染日期漂移，纸面上没有意义，缓存也会过期，一律不画。
@@ -399,9 +399,9 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
          .edgeLabel rect{{opacity:1;fill:#FFFFFF;}}\
          .cluster rect{{fill:{cluster_fill};stroke:{cluster_stroke};\
          stroke-width:{line:.2}px;stroke-dasharray:6 3;}}\
-         text{{fill:{text};}}\
+         text{{fill:{text};font-family:{family};font-size:{LAYOUT_FONT_PX}px!important;}}\
          .cluster-label text,.cluster text{{fill:{stroke};}}\
-         .pieTitleText,.titleText,&>text{{font-size:{title_px}px;font-weight:normal;fill:{text};}}\
+         .pieTitleText,.titleText,&>text{{font-size:{title_px}px!important;font-weight:normal;fill:{text};}}\
          .actor,.note,.labelBox,.activation0,.activation1,.activation2\
          {{stroke-width:{node:.2}px;}}\
          .actor-line,.messageLine0,.messageLine1{{stroke-width:{line:.2}px;}}\
@@ -409,7 +409,7 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
          .task{{stroke-width:{node:.2}px;}}\
          .today{{display:none;}}\
          .grid .tick line{{stroke:{cluster_stroke};stroke-width:{half:.2}px;opacity:1;}}\
-         .grid .tick text{{fill:{text};font-size:{tick_px}px;}}\
+         .grid .tick text{{fill:{text};font-size:{tick_px}px!important;}}\
          .timeline-node .node-bkg{{fill:{decision};stroke:{stroke};stroke-width:{node:.2}px;}}\
          .taskWrapper .timeline-node .node-bkg{{fill:{fill};}}\
          .eventWrapper .timeline-node .node-bkg{{fill:#FFFFFF;}}\
@@ -417,6 +417,7 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
          .timeline-node text{{fill:{text};}}\
          .lineWrapper line{{stroke:{line_color};stroke-width:{line:.2}px;}}",
         half = line / 2.0,
+        family = style.font_family(),
     );
     let theme = HostThemeProfile::builder()
         .font_family(style.font_family())
@@ -454,37 +455,51 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
             scoped_css: Some(css),
             ..HostThemeOutput::resvg_safe_editor()
         })
-        // 比 Mermaid 默认的 50 / 50 / 15 收紧：版心窄，图要紧凑。连线用圆角折线，
-        // 比默认的样条曲线规整、像手绘的流程图；子图标题下多留一点，进来的箭头
+        // 比 Mermaid 默认的 50 / 50 / 15 收紧：版心窄，图要紧凑。连线用直线段，
+        // 比默认的样条曲线规整；子图标题下多留一点，进来的箭头
         // 不压字。
+        .site_config("fontSize", LAYOUT_FONT_PX)
+        .site_config("fontFamily", style.font_family())
         .site_config("htmlLabels", false)
         .site_config(
             "flowchart",
             serde_json::json!({
                 "htmlLabels": false,
-                "curve": "rounded",
-                "nodeSpacing": 30,
-                "rankSpacing": 38,
-                "padding": 8,
-                "diagramPadding": 6,
-                "subGraphTitleMargin": { "top": 4, "bottom": 10 },
+                "curve": "linear",
+                "nodeSpacing": 28,
+                "rankSpacing": 32,
+                "padding": 12,
+                "diagramPadding": 10,
+                "wrappingWidth": 216,
+                "subGraphTitleMargin": { "top": 6, "bottom": 14 },
             }),
         )
         // 甘特按版心宽铺开，任务与分段字号同正文；刻度只写月-日，版心宽里排得下。
         .site_config(
             "gantt",
             serde_json::json!({
-                "useWidth": text_width,
+                "useWidth": text_width - 24.0,
                 "fontSize": LAYOUT_FONT_PX,
                 "sectionFontSize": LAYOUT_FONT_PX,
-                "barHeight": 24,
-                "barGap": 6,
-                "topPadding": 40,
-                "leftPadding": 80,
-                "rightPadding": 20,
+                "barHeight": 32,
+                "barGap": 10,
+                "topPadding": 48,
+                "leftPadding": 132,
+                "rightPadding": 64,
                 "axisFormat": "%m-%d",
             }),
         )
+        // 序列图的角色、消息、备注共用中文字号，角色高度给汉字上下留白。
+        .site_config(
+            "sequence",
+            serde_json::json!({
+                "actorMargin": 36, "width": 140, "height": 48,
+                "messageMargin": 32, "noteMargin": 12,
+                "mirrorActors": false,
+            }),
+        )
+        // 图例放在下方，避免固定直径的饼图加右侧图例后挤出版心。
+        .site_config("pie", serde_json::json!({ "legendPosition": "bottom" }))
         // 时间线左侧默认留 150 px 空白，收到与标题对齐。
         .site_config("timeline", serde_json::json!({ "leftMargin": 40 }))
         .build();
@@ -553,64 +568,45 @@ struct Placement {
     scale: f64,
 }
 
-fn placement(style: Style, width: f64, height: f64) -> Placement {
+fn placement(style: Style, width: f64, height: f64) -> Result<Placement> {
     let natural = style.font_pt() / LAYOUT_FONT_PX;
-    match style {
-        // 公文 TeX 写 `width=\textwidth`、Word 按版心宽封顶，画布恒为版心宽。
-        Style::Official => {
-            let scale = natural
-                .min(OFFICIAL_TEXT_WIDTH_PT / width)
-                .min(OFFICIAL_MAX_HEIGHT_RATIO * OFFICIAL_TEXT_HEIGHT_PT / height);
-            Placement {
-                width: OFFICIAL_TEXT_WIDTH_PT,
-                height: height * scale,
-                scale,
-            }
-        }
-        Style::Research => research_placement(width, height, natural),
-    }
-}
-
-/// 研究报告的插图由 mdx 按 `figure_size` 分四档定宽。画布宽取某一档、且 mdx 对这块
-/// 画布算出的恰好就是这一档时，图就原样大小落到纸上。从原始大小往下找第一个成立的
-/// 缩放，同一缩放下先试窄档，画布两侧的留白少一些。
-fn research_placement(width: f64, height: f64, natural: f64) -> Placement {
-    let mut scale = natural.min(RESEARCH_TEXT_WIDTH_PT / width);
-    while scale > natural * 0.2 {
-        let (drawn, tall) = (width * scale, height * scale);
-        for step in figure_size::WIDTH_STEPS.iter().rev() {
-            let canvas = step * RESEARCH_TEXT_WIDTH_PT;
-            if canvas + 1e-6 >= drawn && lands_on(canvas, tall, *step) {
-                return Placement {
-                    width: canvas,
-                    height: tall,
-                    scale,
-                };
-            }
-        }
-        scale *= 0.98;
-    }
-    // 找不到（极端的长条图）就给满宽画布，交给 mdx 按比例缩放。
-    let scale = natural
-        .min(RESEARCH_TEXT_WIDTH_PT / width)
-        .min(figure_size::MAX_HEIGHT_RATIO * RESEARCH_TEXT_HEIGHT_PT / height);
-    Placement {
-        width: RESEARCH_TEXT_WIDTH_PT,
+    let (text_width, max_height) = match style {
+        Style::Official => (
+            OFFICIAL_TEXT_WIDTH_PT,
+            OFFICIAL_MAX_HEIGHT_RATIO * OFFICIAL_TEXT_HEIGHT_PT,
+        ),
+        Style::Research => (
+            RESEARCH_TEXT_WIDTH_PT,
+            figure_size::MAX_HEIGHT_RATIO * RESEARCH_TEXT_HEIGHT_PT,
+        ),
+    };
+    let scale = natural.min(text_width / width).min(max_height / height);
+    Ok(Placement {
+        width: text_width,
         height: height * scale,
         scale,
-    }
+    })
 }
 
-/// mdx 对这块画布算出的宽度是否正好是 `step` 档。高度上下浮动 1% 也不变才算，
-/// 免得 PNG 取整像素后被推到邻档，Word 与 PDF 里的图大小不一。
-fn lands_on(width: f64, height: f64, step: f64) -> bool {
-    [0.99, 1.0, 1.01].iter().all(|factor| {
-        let fraction = figure_size::width_fraction(FigureSource::Vector {
-            width,
-            height: height * factor,
-        });
-        (fraction - step).abs() < 1e-6
+/// 警告跟随图片缓存保存，预览与导出均可提示，重新打开应用后仍可读取。
+fn size_warning(style: Style, placed: Placement) -> Option<String> {
+    let font = placed.scale * LAYOUT_FONT_PX;
+    (font < style.font_pt() - 1e-6).then(|| {
+        format!(
+            "图表过大，已缩小以完整显示；图中文字约为 {font:.1} pt，低于本稿要求的 {:.1} pt。请缩短节点文字、改为纵向排列或拆成多张图。",
+            style.font_pt()
+        )
     })
+}
+
+pub(crate) fn cached_warning(path: &str) -> Option<String> {
+    warning_at(&crate::storage::config_dir().ok()?, path)
+}
+
+fn warning_at(base: &Path, path: &str) -> Option<String> {
+    fs::read_to_string(base.join(path).with_extension("warning.txt"))
+        .ok()
+        .filter(|text| !text.is_empty())
 }
 
 /// SVG 根元素 `viewBox` 的宽高。
@@ -743,18 +739,314 @@ fn to_pdf(svg: &str) -> Result<Vec<u8>> {
     .map_err(|error| anyhow!("Mermaid PDF 渲染失败：{error}"))
 }
 
-fn render(source: &str, style: Style, theme: DiagramTheme, format: Format) -> Result<Vec<u8>> {
+/// 甘特自动日期刻度按西文小字估算间距；保留网格，只疏排会重叠的日期标签。
+/// 末端刻度预留空间，不能为容纳日期再缩小字体。
+fn space_gantt_ticks(svg: &str, style: Style) -> String {
+    static TICKS: OnceLock<regex::Regex> = OnceLock::new();
+    let ticks = TICKS.get_or_init(|| {
+        regex::Regex::new(
+            r#"<g class="tick" opacity="1" transform="translate\(([-0-9.]+),0\)">.*?<text[^>]*>([^<]*)</text></g>"#,
+        ).unwrap()
+    });
+    let measurer = FontMeasurer {
+        inner: VendoredFontMetricsTextMeasurer::default(),
+    };
+    let text_style = TextStyle {
+        font_family: Some(style.font_family().into()),
+        font_size: LAYOUT_FONT_PX,
+        font_weight: None,
+    };
+    let labels: Vec<_> = ticks.captures_iter(svg).collect();
+    if labels.is_empty() {
+        return svg.to_string();
+    }
+    let bounds = |label: &regex::Captures<'_>| {
+        let x: f64 = label[1].parse().unwrap_or(0.0);
+        let width = measurer.width(&label[2], &text_style);
+        (x - width / 2.0, x + width / 2.0)
+    };
+    let mut last_left = 0.0;
+    let gap = LAYOUT_FONT_PX * 0.6;
+    let mut previous_right = f64::NEG_INFINITY;
+    let mut result = String::with_capacity(svg.len());
+    let mut end = 0;
+    let mut run_end = 0;
+    for (index, label) in labels.iter().enumerate() {
+        if index == run_end {
+            run_end = (index + 1..labels.len())
+                .find(|next| bounds(&labels[*next]).0 < bounds(&labels[*next - 1]).0)
+                .unwrap_or(labels.len());
+            last_left = bounds(&labels[run_end - 1]).0;
+            previous_right = f64::NEG_INFINITY;
+        }
+        let matched = label.get(0).unwrap();
+        result.push_str(&svg[end..matched.start()]);
+        let (left, right) = bounds(label);
+        let keep =
+            left >= previous_right + gap && (index + 1 == run_end || right + gap <= last_left);
+        if keep {
+            result.push_str(matched.as_str());
+            previous_right = right;
+        } else {
+            let group = matched.as_str();
+            let start = group.find("<text").unwrap();
+            let stop = group.find("</text>").unwrap() + "</text>".len();
+            result.push_str(&group[..start]);
+            result.push_str(&group[stop..]);
+        }
+        end = matched.end();
+    }
+    result.push_str(&svg[end..]);
+    result
+}
+
+/// 复用引擎生成的扇区和文字，单独缩小几何，图例横排并在超宽时换行。
+fn compact_pie(svg: &str, style: Style) -> Result<String> {
+    let regex = |pattern| regex::Regex::new(pattern).unwrap();
+    let paths = regex(r#"<path[^>]*class="pieCircle"[^>]*/>"#);
+    let slices = regex(
+        r#"<text transform="translate\(([-0-9.]+),([-0-9.]+)\)" class="slice"[^>]*>(.*?)</text>"#,
+    );
+    let legends = regex(r#"<g class="legend"[^>]*>(<rect[^>]*/>)<text[^>]*>(.*?)</text></g>"#);
+    let title = regex(r#"<text[^>]*class="pieTitleText"[^>]*>(.*?)</text>"#);
+    let styles = regex(r"(?s)<style>.*?</style>");
+    let measurer = FontMeasurer {
+        inner: VendoredFontMetricsTextMeasurer::default(),
+    };
+    let text_style = TextStyle {
+        font_family: Some(style.font_family().into()),
+        font_size: LAYOUT_FONT_PX,
+        font_weight: None,
+    };
+    let items: Vec<_> = legends.captures_iter(svg).collect();
+    if items.is_empty() {
+        return Ok(svg.to_string());
+    }
+    let max_width = 420.0;
+    let mut rows: Vec<Vec<(String, String, f64)>> = vec![Vec::new()];
+    let mut row_width = 0.0;
+    for item in items {
+        let width = 26.0 + measurer.width(&item[2], &text_style) + 20.0;
+        if row_width + width > max_width && !rows.last().unwrap().is_empty() {
+            rows.push(Vec::new());
+            row_width = 0.0;
+        }
+        rows.last_mut()
+            .unwrap()
+            .push((item[1].to_string(), item[2].to_string(), width));
+        row_width += width;
+    }
+    let width = rows
+        .iter()
+        .map(|row| row.iter().map(|item| item.2).sum::<f64>())
+        .fold(260.0, f64::max)
+        + 24.0;
+    let factor = 0.62;
+    let radius = 185.0 * factor;
+    let title_text = title.captures(svg).map(|capture| capture[1].to_string());
+    let top = if title_text.is_some() { 40.0 } else { 12.0 };
+    let center_y = top + radius;
+    let legend_y = center_y + radius + 22.0;
+    let height = legend_y + rows.len() as f64 * 30.0 + 8.0;
+    let start = svg.find('>').context("饼图 SVG 缺少根元素")?;
+    let mut root = svg[..start].to_string();
+    for name in ["width", "height", "viewBox", "style"] {
+        root = strip_attribute(&root, name);
+    }
+    let mut result =
+        format!("{root} width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">");
+    for css in styles.find_iter(svg) {
+        result.push_str(css.as_str());
+    }
+    if let Some(title) = title_text {
+        result.push_str(&format!(
+            "<text class=\"pieTitleText\" x=\"{}\" y=\"24\" text-anchor=\"middle\">{title}</text>",
+            width / 2.0
+        ));
+    }
+    result.push_str(&format!(
+        "<g transform=\"translate({}, {center_y})\"><g transform=\"scale({factor})\">",
+        width / 2.0
+    ));
+    for path in paths.find_iter(svg) {
+        result.push_str(path.as_str());
+    }
+    result.push_str("</g>");
+    for label in slices.captures_iter(svg) {
+        let x = label[1].parse::<f64>().context("饼图标签横坐标无效")? * factor;
+        let y = label[2].parse::<f64>().context("饼图标签纵坐标无效")? * factor;
+        result.push_str(&format!(
+            "<text class=\"slice\" x=\"{x}\" y=\"{y}\" text-anchor=\"middle\">{}</text>",
+            &label[3]
+        ));
+    }
+    result.push_str("</g>");
+    for (index, row) in rows.iter().enumerate() {
+        let mut x = (width - row.iter().map(|item| item.2).sum::<f64>() + 20.0) / 2.0;
+        let y = legend_y + index as f64 * 30.0;
+        for (rect, label, item_width) in row {
+            result.push_str(&format!("<g class=\"legend\" transform=\"translate({x},{y})\">{rect}<text x=\"26\" y=\"15\">{label}</text></g>"));
+            x += item_width;
+        }
+    }
+    result.push_str("</svg>");
+    Ok(result)
+}
+
+/// 压缩时间线的纵向几何，文字反向补偿保持纸面字号；按可见边界收掉四周空白。
+fn compact_timeline(svg: &str) -> Result<String> {
+    let title = regex::Regex::new(
+        r#"<text x="([^"]+)" font-size="4ex" font-weight="bold" y="([^"]+)">(.*?)</text>"#,
+    )
+    .unwrap();
+    let svg = title.replace_all(svg, |capture: &regex::Captures<'_>| {
+        format!(
+            "<text class=\"titleText\" x=\"{}\" y=\"{}\">{}</text>",
+            &capture[1], &capture[2], &capture[3]
+        )
+    });
+    let start = svg.find('>').context("时间线 SVG 缺少根元素")?;
+    let end = svg.rfind("</svg>").context("时间线 SVG 未闭合")?;
+    let text = regex::Regex::new(r"<text ").unwrap();
+    let content = text.replace_all(&svg[start + 1..end], "<text transform=\"scale(1,1.25)\" ");
+    let compressed = format!(
+        "{}><g transform=\"scale(1,0.8)\">{content}</g></svg>",
+        &svg[..start]
+    );
+    let view =
+        regex::Regex::new(r#"viewBox="([-0-9.]+) ([-0-9.]+) ([-0-9.]+) ([-0-9.]+)""#).unwrap();
+    let viewport = view.captures(&compressed).context("时间线缺少 viewBox")?;
+    let viewport_width = viewport[3].parse::<f64>()?;
+    let viewport_height = viewport[4].parse::<f64>()?;
+    // 百分比根尺寸会引入默认视口的等比居中留白，测量前明确指定 viewBox 尺寸。
+    let root_end = compressed.find('>').unwrap();
+    let mut root = compressed[..root_end].to_string();
+    for name in ["width", "height", "style"] {
+        root = strip_attribute(&root, name);
+    }
+    let compressed = format!(
+        "{root} width=\"{viewport_width}\" height=\"{viewport_height}\"{}",
+        &compressed[root_end..]
+    );
+    let options = usvg::Options {
+        fontdb: fonts(),
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_str(&compressed, &options).context("时间线边界测量失败")?;
+    // 零面积辅助线会污染几何边界，用透明画布的实际绘制外缘定尺寸。
+    // 仅测量边界，PDF 中的图形和文字仍保留矢量。
+    let zoom = (1200.0 / tree.size().width())
+        .min(1200.0 / tree.size().height())
+        .min(2.0);
+    let mut pixels = tiny_skia::Pixmap::new(
+        (tree.size().width() * zoom).ceil() as u32,
+        (tree.size().height() * zoom).ceil() as u32,
+    )
+    .context("时间线测量画布无效")?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(zoom, zoom),
+        &mut pixels.as_mut(),
+    );
+    let (mut left_px, mut top_px, mut right_px, mut bottom_px) =
+        (pixels.width(), pixels.height(), 0, 0);
+    for (index, pixel) in pixels.pixels().iter().enumerate() {
+        if pixel.alpha() > 0 {
+            let x = index as u32 % pixels.width();
+            let y = index as u32 / pixels.width();
+            left_px = left_px.min(x);
+            top_px = top_px.min(y);
+            right_px = right_px.max(x);
+            bottom_px = bottom_px.max(y);
+        }
+    }
+    let bounds = usvg::Rect::from_ltrb(
+        left_px as f32 / zoom,
+        top_px as f32 / zoom,
+        (right_px + 1) as f32 / zoom,
+        (bottom_px + 1) as f32 / zoom,
+    )
+    .context("时间线没有可见内容")?;
+    let view =
+        regex::Regex::new(r#"viewBox="([-0-9.]+) ([-0-9.]+) ([-0-9.]+) ([-0-9.]+)""#).unwrap();
+    let original = view.captures(&compressed).context("时间线缺少 viewBox")?;
+    let x = original[1].parse::<f64>()?;
+    let y = original[2].parse::<f64>()?;
+    let w = original[3].parse::<f64>()?;
+    let h = original[4].parse::<f64>()?;
+    let sx = w / f64::from(tree.size().width());
+    let sy = h / f64::from(tree.size().height());
+    let left = x + f64::from(bounds.left()) * sx - 12.0;
+    let top = y + f64::from(bounds.top()) * sy - 12.0;
+    let width = f64::from(bounds.width()) * sx + 24.0;
+    let height = f64::from(bounds.height()) * sy + 24.0;
+    let centered_title =
+        regex::Regex::new(r#"<text transform="scale\(1,1.25\)" class="titleText" x="[^"]+""#)
+            .unwrap();
+    let compressed = centered_title.replace(
+        &compressed,
+        format!(
+            "<text transform=\"scale(1,1.25)\" class=\"titleText\" text-anchor=\"middle\" x=\"{}\"",
+            left + width / 2.0
+        ),
+    );
+    Ok(view
+        .replace(
+            &compressed,
+            format!("viewBox=\"{left} {top} {width} {height}\""),
+        )
+        .into_owned())
+}
+
+/// 只翻译引擎生成的分组角标；消息、角色与用户写的条件说明保持原文。
+fn chinese_sequence_labels(svg: &str) -> String {
+    static LABELS: OnceLock<regex::Regex> = OnceLock::new();
+    let labels = LABELS.get_or_init(|| {
+        regex::Regex::new(r#"(<text\b[^>]*class="labelText"[^>]*>)(loop|alt)(</text>)"#)
+            .expect("序列图角标匹配式有效")
+    });
+    labels
+        .replace_all(svg, |capture: &regex::Captures<'_>| {
+            let label = match &capture[2] {
+                "loop" => "循环",
+                "alt" => "条件",
+                _ => unreachable!(),
+            };
+            format!("{}{label}{}", &capture[1], &capture[3])
+        })
+        .into_owned()
+}
+
+/// 排版修整由预览和两种导出格式共用，不改变稿件中的图表源码。
+fn layout_svg(source: &str, style: Style, theme: DiagramTheme) -> Result<String> {
     check(source)?;
     let svg = renderer(style, theme)
         .render_svg_sync(source)
         .map_err(|error| anyhow!("Mermaid 解析或排版失败：{error}"))?
         .context("Mermaid 围栏里没有图形")?;
+    match header(source) {
+        "sequenceDiagram" => Ok(chinese_sequence_labels(&svg)),
+        "gantt" => Ok(space_gantt_ticks(&svg, style)),
+        "pie" => compact_pie(&svg, style),
+        "timeline" => compact_timeline(&svg),
+        _ => Ok(svg),
+    }
+}
+
+fn render(
+    source: &str,
+    style: Style,
+    theme: DiagramTheme,
+    format: Format,
+) -> Result<(Vec<u8>, Option<String>)> {
+    let svg = layout_svg(source, style, theme)?;
     let (width, height) = view_box(&svg).context("Mermaid 输出缺少 viewBox")?;
-    let placement = placement(style, width, height);
-    match format {
+    let placement = placement(style, width, height)?;
+    let bytes = match format {
         Format::Png => to_png(&compose(&svg, placement, Some("#FFFFFF"))?),
         Format::Pdf => to_pdf(&compose(&svg, placement, None)?),
-    }
+    }?;
+    Ok((bytes, size_warning(style, placement)))
 }
 
 /// 画不出来的图记下错误：预览每帧都会来问，改好源码之前不必每帧重排一遍。
@@ -783,7 +1075,7 @@ fn cache_at(
     }
     let digest = hash.finalize();
     let name = format!(
-        "{}.{}",
+        "gongwen-mermaid-canvas-{}.{}",
         digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -803,7 +1095,7 @@ fn cache_at(
     if let Some(error) = lock().get(&relative) {
         bail!("{error}");
     }
-    let bytes = match render(source, style, theme, format) {
+    let (bytes, warning) = match render(source, style, theme, format) {
         Ok(bytes) => bytes,
         Err(error) => {
             let mut failures = lock();
@@ -816,6 +1108,10 @@ fn cache_at(
         }
     };
     fs::create_dir_all(path.parent().expect("缓存文件有父目录"))?;
+    fs::write(
+        path.with_extension("warning.txt"),
+        warning.unwrap_or_default(),
+    )?;
     // 先写临时文件再改名：预览线程与导出线程可能同时生成同一张图，另一方不能
     // 读到写了一半的文件。
     let partial = path.with_extension(format!("{}.part", std::process::id()));
@@ -894,6 +1190,9 @@ fn materialize_at(
         }
         let path = cache_at(base, &source, style, theme, format)
             .with_context(|| format!("第 {} 行的 Mermaid 图渲染失败", start + 1))?;
+        if let Some(warning) = warning_at(base, &path) {
+            out.push_str(&format!("\n图表警告：{warning}\n\n"));
+        }
         match style {
             Style::Research => {
                 out.push_str(&format!("![{title}]({path})"));
@@ -918,7 +1217,71 @@ fn materialize_at(
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = "flowchart TD\n S([收文]) --> A[登记编号]\n A --> B{是否需要会签}\n B -- 是 --> C[相关单位会签]\n B -- 否 --> D[审核]\n C --> D\n subgraph 签发环节\n D --> E[领导签发]\n E --> F[(归档)]\n end\n F --> G((办结))";
+    /// 用实际 Markdown 测试稿批量验证图例，输出逐图结果和样图供人工复核。
+    #[test]
+    #[ignore = "需要设置 GONGWEN_MERMAID_TEST_FILE 与 GONGWEN_MERMAID_PREVIEW"]
+    fn comprehensive_markdown_fixture_renders_in_all_styles() {
+        let file = std::env::var_os("GONGWEN_MERMAID_TEST_FILE").expect("缺少测试稿路径");
+        let output = std::path::PathBuf::from(
+            std::env::var_os("GONGWEN_MERMAID_PREVIEW").expect("缺少样图目录"),
+        );
+        fs::create_dir_all(&output).unwrap();
+        let markdown = fs::read_to_string(file).unwrap();
+        let blocks = crate::export::parse_markdown(&markdown);
+        let diagrams: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| {
+                if let crate::export::MarkdownBlock::Diagram { source, caption } = block {
+                    Some((source, caption))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(!diagrams.is_empty(), "测试稿没有 Mermaid 图例");
+        let cache = tempfile::tempdir().unwrap();
+        let mut records = Vec::new();
+        let mut failures = Vec::new();
+        for (index, (source, caption)) in diagrams.iter().enumerate() {
+            for style in [Style::Official, Style::Research] {
+                for theme in DiagramTheme::ALL {
+                    for format in [Format::Png, Format::Pdf] {
+                        let result = cache_at(cache.path(), source, style, theme, format);
+                        let error = result.as_ref().err().map(|error| format!("{error:#}"));
+                        if let Ok(relative) = result {
+                            let name = format!(
+                                "case{:02}-{style:?}-{theme:?}.{}",
+                                index + 1,
+                                format.extension()
+                            );
+                            fs::copy(cache.path().join(relative), output.join(name)).unwrap();
+                        }
+                        if let Some(error) = &error {
+                            failures.push(format!(
+                                "案例{:02} {caption} {style:?} {theme:?} {format:?}: {error}",
+                                index + 1
+                            ));
+                        }
+                        records.push(serde_json::json!({"case": index + 1, "caption": caption, "style": format!("{style:?}"), "theme": format!("{theme:?}"), "format": format.extension(), "error": error}));
+                    }
+                }
+            }
+        }
+        fs::write(
+            output.join("validation.json"),
+            serde_json::to_string_pretty(&records).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "{} 个图例，共 {} 项渲染验证，失败 {} 项",
+            diagrams.len(),
+            records.len(),
+            failures.len()
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    const SAMPLE: &str = "flowchart TD\n A[收文登记] --> B{是否会签}\n B -- 是 --> C[相关单位会签]\n B -- 否 --> D[审核签发]\n C --> D\n D --> E[归档保存]";
 
     /// 本期接入的全部图种：一份能代表该图种最小语法的中文样例。
     const KIND_SAMPLES: &[(&str, &str)] = &[
@@ -940,6 +1303,217 @@ mod tests {
             "timeline\n  title 工作规划\n  section 2026年 第四季度\n    完成调研 : 形成调研报告\n  section 2027年 上半年\n    出台办法 : 印发实施",
         ),
     ];
+
+    /// 字号要按最终 SVG 的变换核对，而非只检查主题配置里的数值。
+    #[test]
+    fn rendered_text_keeps_the_document_font_floor() {
+        fn check_text(group: &usvg::Group, minimum: f64) -> usize {
+            let mut count = 0;
+            for node in group.children() {
+                match node {
+                    usvg::Node::Group(group) => count += check_text(group, minimum),
+                    usvg::Node::Text(text) => {
+                        let scale = f64::from(text.abs_transform().sy);
+                        for chunk in text.chunks() {
+                            for span in chunk.spans() {
+                                let actual = f64::from(span.font_size().get()) * scale;
+                                assert!(actual >= minimum - 0.01, "文字只有 {actual} pt");
+                                count += 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            count
+        }
+        for style in [Style::Official, Style::Research] {
+            for (kind, source) in KIND_SAMPLES {
+                let svg = layout_svg(source, style, DiagramTheme::Auto).unwrap();
+                let (width, height) = view_box(&svg).unwrap();
+                let canvas = compose(&svg, placement(style, width, height).unwrap(), None).unwrap();
+                let tree = usvg::Tree::from_str(
+                    &canvas,
+                    &usvg::Options {
+                        fontdb: fonts(),
+                        ..usvg::Options::default()
+                    },
+                )
+                .unwrap();
+                assert!(
+                    check_text(tree.root(), style.font_pt()) > 0,
+                    "{kind} 没有文字"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gantt_date_labels_do_not_overlap_or_clip() {
+        fn dates(group: &usvg::Group, boxes: &mut Vec<usvg::Rect>) {
+            for node in group.children() {
+                match node {
+                    usvg::Node::Group(group) => dates(group, boxes),
+                    usvg::Node::Text(text)
+                        if text.chunks().iter().any(|chunk| {
+                            let label = chunk.text();
+                            label.chars().count() == 5 && label.starts_with("10")
+                        }) =>
+                    {
+                        boxes.push(text.abs_bounding_box())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for style in [Style::Official, Style::Research] {
+            let source = KIND_SAMPLES
+                .iter()
+                .find(|(kind, _)| *kind == "gantt")
+                .unwrap()
+                .1;
+            let svg = layout_svg(source, style, DiagramTheme::Auto).unwrap();
+            let (width, height) = view_box(&svg).unwrap();
+            let canvas = compose(&svg, placement(style, width, height).unwrap(), None).unwrap();
+            let tree = usvg::Tree::from_str(
+                &canvas,
+                &usvg::Options {
+                    fontdb: fonts(),
+                    ..usvg::Options::default()
+                },
+            )
+            .unwrap();
+            let mut boxes = Vec::new();
+            dates(tree.root(), &mut boxes);
+            assert!(boxes.len() >= 2);
+            boxes.sort_by(|a, b| a.left().total_cmp(&b.left()));
+            for pair in boxes.windows(2) {
+                assert!(pair[0].right() < pair[1].left(), "日期刻度重叠");
+            }
+            for rect in boxes {
+                assert!(
+                    rect.left() >= 0.0 && rect.right() <= tree.size().width(),
+                    "日期被裁切"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_has_a_title_and_small_outer_margins() {
+        let source = KIND_SAMPLES
+            .iter()
+            .find(|(kind, _)| *kind == "timeline")
+            .unwrap()
+            .1;
+        let svg = layout_svg(source, Style::Research, DiagramTheme::Auto).unwrap();
+        assert!(svg.contains("class=\"titleText\""));
+        assert!(svg.contains("工作规划"));
+        let (width, height) = view_box(&svg).unwrap();
+        let canvas = compose(
+            &svg,
+            placement(Style::Research, width, height).unwrap(),
+            None,
+        )
+        .unwrap();
+        let bytes = to_png(&canvas).unwrap();
+        let image = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        let ink: Vec<_> = (0..image.height())
+            .filter(|y| {
+                (0..image.width()).any(|x| {
+                    image
+                        .get_pixel(x, *y)
+                        .0
+                        .iter()
+                        .any(|channel| *channel < 240)
+                })
+            })
+            .collect();
+        assert!(*ink.first().unwrap() <= 40, "时间线上方留白过大");
+        assert!(
+            image.height() - ink.last().unwrap() <= 40,
+            "时间线下方留白过大"
+        );
+    }
+
+    #[test]
+    fn pie_legends_share_one_row_and_chart_is_smaller() {
+        let source = KIND_SAMPLES
+            .iter()
+            .find(|(kind, _)| *kind == "pie")
+            .unwrap()
+            .1;
+        let original = renderer(Style::Research, DiagramTheme::Auto)
+            .render_svg_sync(source)
+            .unwrap()
+            .unwrap();
+        let compact = layout_svg(source, Style::Research, DiagramTheme::Auto).unwrap();
+        assert!(view_box(&compact).unwrap().1 < view_box(&original).unwrap().1 * 0.8);
+        let regex =
+            regex::Regex::new(r#"class="legend" transform="translate\([^,]+,([^)]*)\)""#).unwrap();
+        let rows: Vec<_> = regex
+            .captures_iter(&compact)
+            .map(|capture| capture[1].to_string())
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row == &rows[0]));
+    }
+
+    #[test]
+    fn sequence_loop_and_alt_labels_are_chinese_in_all_styles() {
+        let source = "sequenceDiagram\n participant A as 经办人\n participant B as 审核人\n loop 复核\n alt 材料齐全\n A->>B: loop\n else 补充材料\n B-->>A: alt\n end\n end";
+        let labels = regex::Regex::new(r#"class="labelText"[^>]*>([^<]+)</text>"#).unwrap();
+        for style in [Style::Official, Style::Research] {
+            for theme in DiagramTheme::ALL {
+                let svg = layout_svg(source, style, theme).unwrap();
+                let actual: Vec<_> = labels
+                    .captures_iter(&svg)
+                    .map(|capture| capture[1].to_owned())
+                    .collect();
+                assert!(actual.contains(&"循环".to_owned()));
+                assert!(actual.contains(&"条件".to_owned()));
+                assert!(!actual.iter().any(|label| label == "loop" || label == "alt"));
+                assert!(svg.contains("复核"));
+                assert!(svg.contains("材料齐全"));
+                assert!(svg.contains("补充材料"));
+                assert!(svg.contains(">loop</"));
+                assert!(svg.contains(">alt</"));
+                for format in [Format::Png, Format::Pdf] {
+                    assert!(!render(source, style, theme, format).unwrap().0.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_diagram_still_renders_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "flowchart LR\n A[收文登记办理归档收文登记办理归档] --> B[收文登记办理归档收文登记办理归档] --> C[收文登记办理归档收文登记办理归档]";
+        for format in [Format::Png, Format::Pdf] {
+            let markdown = format!("前文。\n\n```mermaid\n{source}\n```\n图：超宽测试\n");
+            let output = materialize_at(
+                dir.path(),
+                &markdown,
+                Style::Official,
+                DiagramTheme::Auto,
+                format,
+            )
+            .unwrap();
+            assert!(output.contains("图表警告："));
+            assert!(output.contains("低于本稿要求"));
+            assert!(output.contains("超宽测试"));
+            let path = cache_at(
+                dir.path(),
+                source,
+                Style::Official,
+                DiagramTheme::Auto,
+                format,
+            )
+            .unwrap();
+            assert!(dir.path().join(&path).is_file());
+            assert!(warning_at(dir.path(), &path).is_some());
+        }
+    }
 
     #[test]
     fn native_flowchart_renders_both_formats() {
@@ -1035,6 +1609,16 @@ mod tests {
                     let image = cache_at(dir.path(), sample, style, theme, Format::Png).unwrap();
                     if let Some(preview) = &preview {
                         fs::create_dir_all(preview).unwrap();
+                        if *kind == "timeline"
+                            && style == Style::Research
+                            && theme == DiagramTheme::Auto
+                        {
+                            fs::write(
+                                preview.join("timeline-layout.svg"),
+                                layout_svg(sample, style, theme).unwrap(),
+                            )
+                            .unwrap();
+                        }
                         fs::copy(
                             dir.path().join(&image),
                             preview.join(format!("{kind}-{style:?}-{theme:?}.png")),
@@ -1097,42 +1681,86 @@ mod tests {
 
     #[test]
     fn official_canvas_is_text_width_and_keeps_font_size() {
-        let small = placement(Style::Official, 300.0, 120.0);
+        let small = placement(Style::Official, 300.0, 120.0).unwrap();
         assert!((small.width - OFFICIAL_TEXT_WIDTH_PT).abs() < 1e-6);
         assert!((small.scale - 12.0 / LAYOUT_FONT_PX).abs() < 1e-9);
-        // 宽图缩到版心宽，长图缩到限高。
-        let wide = placement(Style::Official, 2000.0, 120.0);
-        assert!((wide.width - 2000.0 * wide.scale).abs() < 1e-6);
-        let tall = placement(Style::Official, 200.0, 3000.0);
-        assert!(tall.height <= OFFICIAL_MAX_HEIGHT_RATIO * OFFICIAL_TEXT_HEIGHT_PT + 1e-6);
+        // 超宽、超高仍显示，并明确提示缩小后的字号。
+        assert!(
+            size_warning(
+                Style::Official,
+                placement(Style::Official, 2000.0, 120.0).unwrap()
+            )
+            .is_some()
+        );
+        assert!(
+            size_warning(
+                Style::Official,
+                placement(Style::Official, 200.0, 3000.0).unwrap()
+            )
+            .is_some()
+        );
     }
 
     #[test]
-    fn research_canvas_lands_on_its_own_width_step() {
-        let natural = 9.0 / LAYOUT_FONT_PX;
-        for (width, height) in [
-            (160.0, 90.0),
-            (300.0, 260.0),
-            (420.0, 420.0),
-            (280.0, 950.0),
-            (1400.0, 200.0),
-            (300.0, 2400.0),
-        ] {
-            let placed = placement(Style::Research, width, height);
-            // mdx 给这块画布的宽度就是画布本身：TeX 与 Word 都不会再缩放。
-            let fraction = figure_size::width_fraction(FigureSource::Vector {
-                width: placed.width,
-                height: placed.height,
-            });
-            assert!(
-                (fraction * RESEARCH_TEXT_WIDTH_PT - placed.width).abs() < 0.01,
-                "{width}×{height} 落在 {fraction}"
-            );
+    fn research_canvas_keeps_font_size_without_bottom_padding() {
+        let natural = 10.5 / LAYOUT_FONT_PX;
+        for (width, height) in [(160.0, 90.0), (300.0, 260.0), (420.0, 420.0)] {
+            let placed = placement(Style::Research, width, height).unwrap();
+            assert!((placed.width - RESEARCH_TEXT_WIDTH_PT).abs() < 0.01);
             assert!(width * placed.scale <= placed.width + 1e-6);
-            assert!(placed.scale <= natural + 1e-9);
+            assert!((placed.scale - natural).abs() < 1e-9);
+            assert!((placed.height - height * natural).abs() < 1e-9);
         }
-        // 不高不宽的图保持原样字号。
-        assert!((placement(Style::Research, 300.0, 260.0).scale - natural).abs() < 1e-9);
+        assert!(
+            size_warning(
+                Style::Research,
+                placement(Style::Research, 1400.0, 200.0).unwrap()
+            )
+            .is_some()
+        );
+        assert!(
+            size_warning(
+                Style::Research,
+                placement(Style::Research, 300.0, 2400.0).unwrap()
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn short_horizontal_diagram_has_no_artificial_bottom_space() {
+        let source = "flowchart LR\n A[收文] --> B[办理] --> C[归档]";
+        let svg = layout_svg(source, Style::Research, DiagramTheme::Auto).unwrap();
+        let (width, height) = view_box(&svg).unwrap();
+        let placed = placement(Style::Research, width, height).unwrap();
+        assert!((placed.height - height * 10.5 / LAYOUT_FONT_PX).abs() < 1e-9);
+        let dir = tempfile::tempdir().unwrap();
+        for format in [Format::Png, Format::Pdf] {
+            let relative = cache_at(
+                dir.path(),
+                source,
+                Style::Research,
+                DiagramTheme::Auto,
+                format,
+            )
+            .unwrap();
+            let path = dir.path().join(relative);
+            let size = mdx::figure_size::probe(&path, None).unwrap();
+            assert_eq!(
+                mdx::figure_size::width_fraction_for_path(size, Path::new("figures/photo.png")),
+                mdx::figure_size::width_fraction(size),
+            );
+            if let Some(preview) = std::env::var_os("GONGWEN_MERMAID_PREVIEW") {
+                let preview = std::path::PathBuf::from(preview);
+                fs::create_dir_all(&preview).unwrap();
+                fs::copy(
+                    &path,
+                    preview.join(format!("horizontal-Research.{}", format.extension())),
+                )
+                .unwrap();
+            }
+            assert_eq!(mdx::figure_size::width_fraction_for_path(size, &path), 1.0);
+        }
     }
 
     #[test]
@@ -1200,14 +1828,22 @@ mod tests {
             if extension == "tex" {
                 let chapter = fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap();
                 assert!(chapter.contains("figures/"));
+                assert!(chapter.contains("\\includegraphics[width=\\textwidth]"));
             } else {
                 let file = fs::File::open(output).unwrap();
-                let archive = zip::ZipArchive::new(file).unwrap();
+                let mut archive = zip::ZipArchive::new(file).unwrap();
                 assert!(
                     archive
                         .file_names()
                         .any(|name| name.starts_with("word/media/"))
                 );
+                let mut xml = String::new();
+                std::io::Read::read_to_string(
+                    &mut archive.by_name("word/document.xml").unwrap(),
+                    &mut xml,
+                )
+                .unwrap();
+                assert!(xml.contains("cx=\"5616000\""), "图表宽度必须保持 156 mm");
             }
         }
     }

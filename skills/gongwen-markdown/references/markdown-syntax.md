@@ -206,13 +206,15 @@ flowchart LR
 
 | 图种 | 围栏首行 | 说明 |
 | --- | --- | --- |
-| 流程图 | `flowchart LR` / `graph LR` | 泳道用 `subgraph 泳道名` 分组表达 |
-| 序列图 | `sequenceDiagram` | 角色直接用中文名；支持 `Note`、`loop`、`alt` |
+| 流程图 | `flowchart TD` / `flowchart LR` / `graph LR` | 多环节优先纵向；泳道用 `subgraph 泳道名` 分组表达 |
+| 序列图 | `sequenceDiagram` | 角色直接用中文名；支持 `Note`、`loop`、`alt`；`loop`／`alt` 角标固定显示“循环”／“条件” |
 | 甘特图 | `gantt` | 须写 `dateFormat`，如 `dateFormat YYYY-MM-DD` |
 | 饼图 | `pie title 标题` | 中文扇区名要加英文引号：`"人员经费" : 45` |
 | 时间线 | `timeline` | `section` 分段，事件缩进写在段下 |
 
 - 围栏和图题均独占一行，前后留空行。图题可省略。
+- 图中文字：公文仿宋小四（12 pt），研究报告黑体五号（10.5 pt），刻度和标签同号。
+  节点文字尽量简短，多环节优先 `flowchart TD` / `TB`；超出版心会缩小后继续显示，并警告实际字号低于要求，建议调整或拆图。
 - 公文图题只写文字，不手写图号。研究报告可在图题末尾加 `{#fig:id}`，见
   [research-report.md](research-report.md)。
 - 图内暂不支持 Mermaid 配置指令、HTML、点击链接或自定义样式；上表以外的图种

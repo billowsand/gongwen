@@ -842,7 +842,15 @@ pub(crate) fn diagram_image_block(
         crate::mermaid::Style::Official
     };
     match crate::mermaid::cache(source, style, crate::mermaid::Format::Png) {
-        Ok(src) => figure_block(ui, metrics, "图表", &src, research),
+        Ok(src) => {
+            if let Some(warning) = crate::mermaid::cached_warning(&src) {
+                ui.label(
+                    egui::RichText::new(format!("图表警告：{warning}"))
+                        .color(egui::Color32::from_rgb(160, 95, 20)),
+                );
+            }
+            figure_block(ui, metrics, "图表", &src, research);
+        }
         Err(error) => image_placeholder(ui, metrics, "图表", "Mermaid", &error.to_string()),
     }
 }
@@ -887,7 +895,7 @@ fn figure_block(ui: &mut egui::Ui, metrics: &Metrics, alt: &str, src: &str, rese
                 width_px: size.x.round() as u32,
                 height_px: size.y.round() as u32,
             };
-            return centered_figure(ui, metrics, source, size, |ui, rect| {
+            return centered_figure(ui, metrics, source, src, size, |ui, rect| {
                 image.paint_at(ui, rect);
             });
         }
@@ -900,10 +908,12 @@ fn centered_figure(
     ui: &mut egui::Ui,
     metrics: &Metrics,
     source: mdx::figure_size::FigureSource,
+    src: &str,
     size: egui::Vec2,
     paint: impl FnOnce(&mut egui::Ui, egui::Rect),
 ) {
-    let width = metrics.content * mdx::figure_size::width_fraction(source) as f32;
+    let width = metrics.content
+        * mdx::figure_size::width_fraction_for_path(source, std::path::Path::new(src)) as f32;
     let height = width * size.y / size.x;
     let (row, _) =
         ui.allocate_exact_size(egui::vec2(metrics.content, height), egui::Sense::hover());
@@ -931,7 +941,7 @@ fn pdf_block(
                 width: f64::from(size.x),
                 height: f64::from(size.y),
             };
-            centered_figure(ui, metrics, source, size, |ui, rect| {
+            centered_figure(ui, metrics, source, src, size, |ui, rect| {
                 egui::Image::from_texture(egui::load::SizedTexture::from_handle(&texture))
                     .paint_at(ui, rect);
             });
