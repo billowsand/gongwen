@@ -200,6 +200,11 @@ foreach ($entry in $runtimeEntries) {
     Copy-Item -LiteralPath $entry.Source -Destination $destination
 }
 
+# 应用依赖的许可证由本仓库维护；外部 runtime 清单可能尚未包含它。
+$matcherLicenseDir = Join-Path $OutputDir "runtime/licenses"
+New-Item -ItemType Directory -Force -Path $matcherLicenseDir | Out-Null
+Copy-Item -LiteralPath ([System.IO.Path]::Combine($runtimeRoot, "licenses/NUCLEO-MPL-2.0.txt")) -Destination $matcherLicenseDir
+
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "README.md")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "THIRD_PARTY_NOTICES.md")) -Destination $OutputDir
 Copy-Item -LiteralPath ([System.IO.Path]::Combine($projectRoot, "LICENSE")) -Destination $OutputDir

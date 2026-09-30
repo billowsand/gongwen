@@ -64,6 +64,7 @@ mdx = { path = "vendor/mdx" }
 merman = { version = "0.7.0", features = ["raster"] }
 # 只为实现 merman 的 TextMeasurer：它的 TextStyle / TextMetrics 没有经 merman 重导出。
 merman-render = "0.7.0"
+nucleo-matcher = "0.3.1"
 pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 # 应用内输入法：拼音引擎、词库、bigram 整句与用户学习，全部进程内，没有 server。
 # vendor 自字在输入法（GPL-3.0-or-later），见 vendor/qingjian/README.md。
@@ -94,18 +95,22 @@ zip = "4.3"
 [target.'cfg(windows)'.dependencies]
 # 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。
 # 该 crate 已随 winit 在依赖树中，这里只是声明直接引用。
+# DataExchange / Memory 用于把导出成品以 CF_HDROP 放进剪贴板（复制文件）。
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_UI_Controls_Dialogs",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # winit 的窗口图标命令在 macOS 上无效；用 AppKit 同步更新 Dock 图标。
+# NSPasteboard / NSURL 用于把导出成品放进剪贴板（复制文件）。
 objc2 = "0.5.2"
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSImage", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSData", "NSGeometry", "NSString", "NSUserDefaults"] }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSImage", "NSPasteboard", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSArray", "NSData", "NSGeometry", "NSString", "NSURL", "NSUserDefaults"] }
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
@@ -120,3 +125,8 @@ strip = true
 # 仍然编译快、可调试。首次会多花一分钟重编依赖，之后不受影响。
 [profile.dev.package."*"]
 opt-level = 3
+
+[dev-dependencies]
+egui_kittest = { version = "0.35", default-features = false }
+insta = "1.48.0"
+proptest = "1.11.0"

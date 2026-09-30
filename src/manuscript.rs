@@ -20,6 +20,7 @@ use std::time::Duration;
 
 pub(crate) mod candidates;
 pub(crate) mod merge;
+mod search;
 pub(crate) mod send_package;
 pub(crate) mod sync;
 

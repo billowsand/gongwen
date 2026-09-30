@@ -659,7 +659,9 @@ impl GongwenApp {
         theme::reconfigure_style(ctx);
         theme::apply_app_icon(ctx, name);
         self.status = format!("界面主题已切换为「{}」。", theme::by_name(name).label);
-        let _ = storage::save(&self.config);
+        if let Err(error) = storage::save(&self.config) {
+            self.status = format!("界面主题已在本次生效，但配置保存失败：{error:#}");
+        }
     }
 
     /// 切换纸面显示模式并立即生效。只影响屏幕预览，导出结果不变。
@@ -667,7 +669,9 @@ impl GongwenApp {
         self.config.paper = mode;
         theme::set_current_paper(mode);
         self.status = format!("公文纸面已切换为「{}」。", mode.label());
-        let _ = storage::save(&self.config);
+        if let Err(error) = storage::save(&self.config) {
+            self.status = format!("纸面显示已在本次生效，但配置保存失败：{error:#}");
+        }
     }
 
     /// 切换图表样式并立即生效：预览下一帧按新配色重画，导出也跟着换。
@@ -676,7 +680,9 @@ impl GongwenApp {
         self.config.diagram_theme = diagram_theme;
         crate::mermaid::set_theme(diagram_theme);
         self.status = format!("图表样式已切换为「{}」。", diagram_theme.label());
-        let _ = storage::save(&self.config);
+        if let Err(error) = storage::save(&self.config) {
+            self.status = format!("图表样式已在本次生效，但配置保存失败：{error:#}");
+        }
     }
 
     /// 画一张图表样式卡：白纸上一框、一菱形、一框的缩略流程。「按文种自动」

@@ -198,3 +198,11 @@ core / lm / translate / learning），随源码存放在 `vendor/qingjian/`，�
 权利归方案作者，上游未取得再分发授权（见上游 `assets/fuma/README.md`）。
 因此本发行版不包含任何辅码表，只提供导入入口：使用者在设置页自行导入一份
 `字=两码` 的文本，文件保存在本机用户目录（`config_dir()/ime/fuma/`）。
+
+## nucleo-matcher
+
+快捷查找使用 nucleo-matcher 0.3.1，许可为 MPL-2.0。上游源码未修改，完整许可证随运行资源保存在 `runtime/licenses/NUCLEO-MPL-2.0.txt`。
+
+- 上游项目：<https://github.com/helix-editor/nucleo>
+- 发布源码包：<https://crates.io/crates/nucleo-matcher/0.3.1>
+- 用途：原文、拼音和首字母候选的模糊匹配；不参与正文自动修改。

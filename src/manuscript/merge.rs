@@ -5,6 +5,9 @@ use serde_json::Value;
 use similar::{DiffTag, TextDiff};
 use std::ops::Range;
 
+#[cfg(test)]
+mod property_tests;
+
 #[derive(Debug, Clone)]
 pub struct FieldConflict {
     pub path: Vec<String>,

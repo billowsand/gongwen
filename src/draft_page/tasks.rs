@@ -9,6 +9,7 @@ use crate::app::{
 use crate::doc_import;
 use crate::draft_page::{AiTaskRequest, AiWorkflowKind, DocKey, DraftPage, ExportKind, FileAction};
 use crate::export;
+use crate::file_clipboard;
 use crate::images;
 use crate::lmstudio;
 use crate::models::{DraftInput, ExportSelection, GeneratedDraft, ReviewNote, TemplateKind};
@@ -564,7 +565,7 @@ impl DraftPage<'_> {
 
     /// 仿 WinEdt 的成品入口：TEX / PDF / WORD 三枚，当前文稿的导出目录里有
     /// 对应成品才点亮，点开的是当前文稿最近一次导出（属于它的子目录中修改时间
-    /// 最新）留下的那一份。右键可在文件管理器里定位。
+    /// 最新）留下的那一份。右键可复制文件到剪贴板、另存到别处或在文件管理器里定位。
     pub(crate) fn export_open_buttons(&mut self, ui: &mut egui::Ui) {
         // 导出目录里同一文稿的文件夹都以“去掉时间戳的导出主干”为前缀，
         // 用它过滤出属于当前文稿的目录，避免打开别的文稿的成品。
@@ -594,7 +595,24 @@ impl DraftPage<'_> {
             let response =
                 response.on_hover_text(format!("打开最近导出的 {label}：{}", path.display()));
             response.context_menu(|ui| {
-                if ui.button("在文件管理器中定位").clicked() {
+                if ui
+                    .add(theme::menu_item(theme::Icon::Copy, "复制文件"))
+                    .clicked()
+                {
+                    action = Some(FileAction::CopyToClipboard(path.clone()));
+                    ui.close();
+                }
+                if ui
+                    .add(theme::menu_item(theme::Icon::FileDown, "导出到…"))
+                    .clicked()
+                {
+                    action = Some(FileAction::SaveAs(path.clone()));
+                    ui.close();
+                }
+                if ui
+                    .add(theme::menu_item(theme::Icon::Reveal, "在文件管理器中定位"))
+                    .clicked()
+                {
                     action = Some(FileAction::Reveal(path.clone()));
                     ui.close();
                 }
@@ -626,6 +644,13 @@ impl DraftPage<'_> {
         let (result, path, verb) = match action {
             FileAction::Open(path) => (open_in_os(&path), path, "打开"),
             FileAction::Reveal(path) => (reveal_in_os(&path), path, "定位"),
+            FileAction::CopyToClipboard(path) => {
+                (file_clipboard::copy_file(&path), path, "复制到剪贴板")
+            }
+            FileAction::SaveAs(path) => {
+                self.save_export_copy(&path);
+                return;
+            }
         };
         match result {
             Ok(()) => {
@@ -638,6 +663,34 @@ impl DraftPage<'_> {
             }
             Err(error) => *self.status = format!("{verb}失败：{error}"),
         }
+    }
+
+    /// 右键“导出到…”：弹出保存框，把这份成品另存一份到用户选的位置。
+    fn save_export_copy(&mut self, source: &Path) {
+        let file_name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut dialog = rfd::FileDialog::new().set_file_name(&file_name);
+        if let Some(extension) = source.extension().and_then(|extension| extension.to_str()) {
+            let label = format!("{} 文件", extension.to_ascii_uppercase());
+            dialog = dialog.add_filter(label, &[extension]);
+        }
+        let Some(target) = dialog.save_file() else {
+            return;
+        };
+        let same = match (source.canonicalize(), target.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if same {
+            *self.status = "目标就是原文件，未做改动。".into();
+            return;
+        }
+        *self.status = match std::fs::copy(source, &target) {
+            Ok(_) => format!("已导出到 {}。", target.display()),
+            Err(error) => format!("导出到 {} 失败：{error}", target.display()),
+        };
     }
 
     /// 功能区“导入文档”：选一个现成文档，转成 markdown 插到编辑器光标处。

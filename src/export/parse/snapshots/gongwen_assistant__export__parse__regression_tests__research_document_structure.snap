@@ -1,0 +1,95 @@
+---
+source: src/export/parse/regression_tests.rs
+expression: "parse_markdown_located_research(markdown, &ResearchMarks::default(),\n&NumberingConfig::default())"
+---
+[
+    LocatedBlock {
+        block: Title(
+            "研究报告",
+        ),
+        range: 0..14,
+        source_segments: [],
+        generated_prefixes: [],
+    },
+    LocatedBlock {
+        block: Heading(
+            2,
+            "方法",
+        ),
+        range: 16..25,
+        source_segments: [],
+        generated_prefixes: [],
+    },
+    LocatedBlock {
+        block: Paragraph(
+            "行内公式 $a+b$ 保留。",
+        ),
+        range: 27..55,
+        source_segments: [
+            RenderedSourceSegment {
+                source: 27..55,
+                chars: 0..14,
+            },
+        ],
+        generated_prefixes: [],
+    },
+    LocatedBlock {
+        block: Paragraph(
+            "$$ x^2+y^2=z^2 $$",
+        ),
+        range: 57..74,
+        source_segments: [
+            RenderedSourceSegment {
+                source: 57..59,
+                chars: 0..2,
+            },
+            RenderedSourceSegment {
+                source: 60..71,
+                chars: 2..14,
+            },
+            RenderedSourceSegment {
+                source: 72..74,
+                chars: 14..17,
+            },
+        ],
+        generated_prefixes: [],
+    },
+    LocatedBlock {
+        block: Quote {
+            boxed: None,
+            lines: [
+                QuoteLine {
+                    kind: Paragraph,
+                    text: "引文第一行。",
+                    source: 76..96,
+                },
+                QuoteLine {
+                    kind: Source,
+                    text: "——资料来源",
+                    source: 97..117,
+                },
+            ],
+        },
+        range: 76..117,
+        source_segments: [],
+        generated_prefixes: [],
+    },
+    LocatedBlock {
+        block: Image {
+            alt: "示意图",
+            src: "images/example.png",
+        },
+        range: 119..151,
+        source_segments: [],
+        generated_prefixes: [],
+    },
+    LocatedBlock {
+        block: Diagram {
+            source: "flowchart LR\n A[登记] --> B[办理]",
+            caption: "",
+        },
+        range: 153..205,
+        source_segments: [],
+        generated_prefixes: [],
+    },
+]
