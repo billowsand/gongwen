@@ -5,10 +5,10 @@
 //! 各导出器照旧把图片铺满画布，图内文字因此总是设定的字号：小图不会被放大成大字，
 //! 宽图、长图才整体缩小到版心以内。
 //!
-//! 图种按围栏首行路由到两个纯 Rust 引擎（都稳定版，不引浏览器）：
-//! - merman 0.7：flowchart / graph（泳道图用 subgraph 分组表达）；
-//! - mermaid-rs-renderer 0.2.2：sequenceDiagram、gantt、pie、sankey-beta、timeline、
-//!   radar-beta。它的 SVG 再经 [`fixup_mmdr_colors`] 把写死的引擎调色板换成当前配色。
+//! 全部图种都由 merman（纯 Rust，与 Zed 的 Markdown 预览同一引擎，不引浏览器）
+//! 解析排版：flowchart / graph（泳道图用 subgraph 分组表达）、sequenceDiagram、
+//! gantt、pie、timeline。配色经同一套主题角色、分类色与作用域 CSS 下发，各图种的
+//! 线宽、字体、底色一致。桑基图、雷达图经实测版式不成熟，暂不支持，check 会给出提示。
 
 use crate::models::DiagramTheme;
 use anyhow::{Context, Result, anyhow, bail};
@@ -28,9 +28,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const CACHE_DIR: &str = "mermaid-cache";
 /// 配色、字体、画布算法或引擎版本变了都要改这里，旧缓存随之失效。
-const STYLE_VERSION: &str = "gongwen-mermaid-v3/mmdr-0.2.2";
+const STYLE_VERSION: &str = "gongwen-mermaid-v5/merman-0.7";
 
-/// 排版用的字号（px）。两个引擎的内边距、节点间距是按 14–16px 的字定的，直接拿
+/// 排版用的字号（px）。引擎的内边距、节点间距是按 14–16px 的字定的，直接拿
 /// 9pt 去排，框会显得空；先按 14px 排，落画布时再整体缩到目标字号。
 const LAYOUT_FONT_PX: f64 = 14.0;
 /// PNG 的分辨率：Word 与预览共用，打印不发虚。
@@ -137,8 +137,8 @@ pub(crate) struct Palette {
     /// 子图（分组框）的底色与虚线框。
     pub cluster_fill: &'static str,
     pub cluster_stroke: &'static str,
-    /// 分类色：饼图扇区、桑基节点、时间线分区、雷达曲线按出现顺序循环取色。
-    /// 墨线/素灰给灰阶（黑白打印可辨），藏青/青瓷给同族色加米棕点缀。红色不用。
+    /// 分类色：目前供饼图扇区循环取色（其余图种尚未开放）。一律浅中调：亮色靠
+    /// 色相区分、深色只做锚点，黑白打印下灰阶仍可辨；红色不用。
     pub category: &'static [&'static str; 8],
 }
 
@@ -153,8 +153,8 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             cluster_fill: "#FFFFFF",
             cluster_stroke: "#808080",
             category: &[
-                "#262626", "#4D4D4D", "#6E6E6E", "#8F8F8F", "#B0B0B0", "#5C5C5C", "#999999",
-                "#CFCFCF",
+                "#F0F0F0", "#DDDDDD", "#C8C8C8", "#B2B2B2", "#9C9C9C", "#868686", "#6E6E6E",
+                "#565656",
             ],
         },
         DiagramTheme::Gray => Palette {
@@ -166,8 +166,8 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             cluster_fill: "#FAFAFA",
             cluster_stroke: "#A6A6A6",
             category: &[
-                "#404040", "#606060", "#808080", "#A0A0A0", "#C0C0C0", "#505050", "#909090",
-                "#B0B0B0",
+                "#F4F4F4", "#E4E4E4", "#D2D2D2", "#C0C0C0", "#ACACAC", "#969696", "#7E7E7E",
+                "#666666",
             ],
         },
         DiagramTheme::Navy => Palette {
@@ -179,8 +179,8 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             cluster_fill: "#F6F8FB",
             cluster_stroke: "#8EA3BB",
             category: &[
-                "#1F3A5F", "#3E5674", "#5F7BA0", "#8EA3BB", "#B9C8D8", "#8A7B52", "#B4A67F",
-                "#D8CC9F",
+                "#AFC8E3", "#E2C184", "#9CC6B2", "#C8B48F", "#7E9CC0", "#EAD9AC", "#6FA08C",
+                "#B7A273",
             ],
         },
         DiagramTheme::Celadon => Palette {
@@ -192,8 +192,8 @@ pub(crate) fn palette(theme: DiagramTheme, style: Style) -> Palette {
             cluster_fill: "#F4F8F6",
             cluster_stroke: "#90B3A7",
             category: &[
-                "#2E6A5A", "#4A7668", "#6FA394", "#9DC2B4", "#C9DED4", "#8A7B52", "#B4A67F",
-                "#D8CC9F",
+                "#A9D2C2", "#E2C184", "#8FBFAE", "#C8B48F", "#7CB3A0", "#EAD9AC", "#5E9783",
+                "#B7A273",
             ],
         },
     }
@@ -367,6 +367,11 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
     let (node_pt, line_pt) = style.stroke_pt();
     let node = node_pt / scale;
     let line = line_pt / scale;
+    // 甘特图按给定宽度铺开（默认 1184 px），取版心宽换算回排版 px，落纸时不再缩小。
+    let text_width = match style {
+        Style::Official => OFFICIAL_TEXT_WIDTH_PT,
+        Style::Research => RESEARCH_TEXT_WIDTH_PT,
+    } / scale;
     let Palette {
         fill,
         stroke,
@@ -375,10 +380,14 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
         decision,
         cluster_fill,
         cluster_stroke,
-        category: _,
+        category,
     } = palette;
+    // 各图种的标题、坐标刻度统一字号：标题比正文大一档，刻度小一档。
+    let title_px = LAYOUT_FONT_PX + 2.0;
+    let tick_px = LAYOUT_FONT_PX - 2.0;
     // merman 按 SVG 根元素的 id 给这些规则加作用域，排在 Mermaid 自带样式之后，
-    // 同权重下后写的生效。
+    // 同权重下后写的生效。框用节点线宽与主色，线用连线线宽与线色，各图种一个样。
+    // 甘特的「今天」竖线随渲染日期漂移，纸面上没有意义，缓存也会过期，一律不画。
     let css = format!(
         ".node rect,.node circle,.node ellipse,.node polygon,.node path\
          {{fill:{fill};stroke:{stroke};stroke-width:{node:.2}px;}}\
@@ -386,11 +395,28 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
          .flowchart-link,.edgePath .path{{stroke:{line_color};stroke-width:{line:.2}px;}}\
          .marker,.marker.cross{{fill:{line_color};stroke:{line_color};}}\
          .arrowheadPath{{fill:{line_color};}}\
+         marker path{{fill:{line_color};}}\
          .edgeLabel rect{{opacity:1;fill:#FFFFFF;}}\
          .cluster rect{{fill:{cluster_fill};stroke:{cluster_stroke};\
          stroke-width:{line:.2}px;stroke-dasharray:6 3;}}\
          text{{fill:{text};}}\
-         .cluster-label text,.cluster text{{fill:{stroke};}}"
+         .cluster-label text,.cluster text{{fill:{stroke};}}\
+         .pieTitleText,.titleText,&>text{{font-size:{title_px}px;font-weight:normal;fill:{text};}}\
+         .actor,.note,.labelBox,.activation0,.activation1,.activation2\
+         {{stroke-width:{node:.2}px;}}\
+         .actor-line,.messageLine0,.messageLine1{{stroke-width:{line:.2}px;}}\
+         .loopLine{{stroke:{cluster_stroke};stroke-width:{line:.2}px;stroke-dasharray:6 3;}}\
+         .task{{stroke-width:{node:.2}px;}}\
+         .today{{display:none;}}\
+         .grid .tick line{{stroke:{cluster_stroke};stroke-width:{half:.2}px;opacity:1;}}\
+         .grid .tick text{{fill:{text};font-size:{tick_px}px;}}\
+         .timeline-node .node-bkg{{fill:{decision};stroke:{stroke};stroke-width:{node:.2}px;}}\
+         .taskWrapper .timeline-node .node-bkg{{fill:{fill};}}\
+         .eventWrapper .timeline-node .node-bkg{{fill:#FFFFFF;}}\
+         .timeline-node line{{stroke:none;}}\
+         .timeline-node text{{fill:{text};}}\
+         .lineWrapper line{{stroke:{line_color};stroke-width:{line:.2}px;}}",
+        half = line / 2.0,
     );
     let theme = HostThemeProfile::builder()
         .font_family(style.font_family())
@@ -398,14 +424,32 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
         .roles(HostThemeRoles {
             canvas: Some("#FFFFFF".into()),
             surface: Some(fill.into()),
+            // 甘特里已完成的任务退成浅底，进行中的任务与判断节点同一个强调色。
+            surface_alt: Some(cluster_fill.into()),
+            surface_muted: Some(decision.into()),
             text: Some(text.into()),
             border: Some(stroke.into()),
             line: Some(line_color.into()),
             edge_label_background: Some("#FFFFFF".into()),
             cluster_background: Some(cluster_fill.into()),
             cluster_border: Some(cluster_stroke.into()),
+            note_background: Some(decision.into()),
+            note_border: Some(stroke.into()),
+            actor_background: Some(fill.into()),
+            activation_background: Some(fill.into()),
             ..HostThemeRoles::default()
         })
+        // 饼图扇区、时间线分区按分类色循环。
+        .series_palette(category.iter().copied())
+        // 甘特的关键任务默认填红，换成强调色；饼图不叠透明度，打印不发灰。
+        .theme_variable("critBkgColor", decision)
+        .theme_variable("critBorderColor", stroke)
+        .theme_variable("pieOpacity", "1")
+        .theme_variable("pieStrokeWidth", format!("{node:.2}px"))
+        .theme_variable("pieOuterStrokeWidth", format!("{node:.2}px"))
+        .theme_variable("pieTitleTextSize", format!("{title_px}px"))
+        .theme_variable("pieSectionTextSize", format!("{LAYOUT_FONT_PX}px"))
+        .theme_variable("pieLegendTextSize", format!("{LAYOUT_FONT_PX}px"))
         .output(HostThemeOutput {
             scoped_css: Some(css),
             ..HostThemeOutput::resvg_safe_editor()
@@ -426,6 +470,23 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
                 "subGraphTitleMargin": { "top": 4, "bottom": 10 },
             }),
         )
+        // 甘特按版心宽铺开，任务与分段字号同正文；刻度只写月-日，版心宽里排得下。
+        .site_config(
+            "gantt",
+            serde_json::json!({
+                "useWidth": text_width,
+                "fontSize": LAYOUT_FONT_PX,
+                "sectionFontSize": LAYOUT_FONT_PX,
+                "barHeight": 24,
+                "barGap": 6,
+                "topPadding": 40,
+                "leftPadding": 80,
+                "rightPadding": 20,
+                "axisFormat": "%m-%d",
+            }),
+        )
+        // 时间线左侧默认留 150 px 空白，收到与标题对齐。
+        .site_config("timeline", serde_json::json!({ "leftMargin": 40 }))
         .build();
     HeadlessRenderer::new()
         .with_host_theme(&theme)
@@ -433,14 +494,6 @@ fn renderer(style: Style, theme: DiagramTheme) -> HeadlessRenderer {
             inner: VendoredFontMetricsTextMeasurer::default(),
         }))
         .with_strict_parsing()
-}
-
-/// 围栏首行决定走哪个引擎。merman 0.7 只认流程图；其余图种由
-/// mermaid-rs-renderer 渲染，它的主题字段在 Rust 里配置。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EngineKind {
-    Merman,
-    Mmdr,
 }
 
 /// 图头：第一个非空、非 `%%` 注释行的首词；空围栏返回空串。
@@ -453,23 +506,20 @@ fn header(source: &str) -> &str {
         .unwrap_or("")
 }
 
-/// 按图头选引擎；不认识的图头返回 `None`。
-fn engine_kind(source: &str) -> Option<EngineKind> {
-    match header(source) {
-        "flowchart" | "graph" => Some(EngineKind::Merman),
-        "sequenceDiagram" | "gantt" | "pie" | "sankey-beta" | "timeline" | "radar-beta" => {
-            Some(EngineKind::Mmdr)
-        }
-        _ => None,
-    }
+/// 已接入的图头。merman 认得的图种更多，这里只放行调过版式的几种。
+fn supported(source: &str) -> bool {
+    matches!(
+        header(source),
+        "flowchart" | "graph" | "sequenceDiagram" | "gantt" | "pie" | "timeline"
+    )
 }
 
 /// 不让单张图改版式、引外部资源；只放行已接入引擎的图种。
 fn check(source: &str) -> Result<()> {
-    if engine_kind(source).is_none() {
+    if !supported(source) {
         bail!(
             "暂不支持的 Mermaid 图种「{}」：目前支持 flowchart/graph（含泳道分组）、\
-             sequenceDiagram、gantt、pie、sankey-beta、timeline、radar-beta",
+             sequenceDiagram、gantt、pie、timeline；桑基图与雷达图暂不成熟，后续开放",
             header(source)
         );
     }
@@ -693,100 +743,12 @@ fn to_pdf(svg: &str) -> Result<Vec<u8>> {
     .map_err(|error| anyhow!("Mermaid PDF 渲染失败：{error}"))
 }
 
-/// 把当前配色翻译成 mermaid-rs-renderer 的 Theme。甘特、时间线、饼图直接读这些
-/// 字段；字号固定排版字号，落画布时再整体缩到目标字号（与 merman 路径一致）。
-fn mmdr_theme(palette: Palette, style: Style) -> mermaid_rs_renderer::Theme {
-    let mut theme = mermaid_rs_renderer::Theme::modern();
-    theme.font_family = style.font_family().to_string();
-    theme.font_size = LAYOUT_FONT_PX as f32;
-    theme.background = "#FFFFFF".to_string();
-    theme.primary_color = palette.fill.to_string();
-    theme.primary_border_color = palette.stroke.to_string();
-    theme.primary_text_color = palette.text.to_string();
-    theme.secondary_color = palette.decision.to_string();
-    theme.tertiary_color = palette.fill.to_string();
-    theme.text_color = palette.text.to_string();
-    theme.line_color = palette.line.to_string();
-    theme.edge_label_background = "#FFFFFF".to_string();
-    theme.cluster_background = palette.cluster_fill.to_string();
-    theme.cluster_border = palette.cluster_stroke.to_string();
-    theme.sequence_actor_fill = palette.fill.to_string();
-    theme.sequence_actor_border = palette.stroke.to_string();
-    theme.sequence_actor_line = palette.line.to_string();
-    theme.sequence_note_fill = palette.decision.to_string();
-    theme.sequence_note_border = palette.cluster_stroke.to_string();
-    theme.sequence_activation_fill = palette.fill.to_string();
-    theme.sequence_activation_border = palette.stroke.to_string();
-    // 饼图扇区按分类色循环；填色本来就浅，不再叠透明度，打印不发灰。
-    let mut pie_colors: [String; 12] =
-        std::array::from_fn(|index| palette.category[index % palette.category.len()].to_string());
-    pie_colors[..palette.category.len()].clone_from_slice(&palette.category.map(str::to_string));
-    theme.pie_colors = pie_colors;
-    theme.pie_opacity = 1.0;
-    theme.pie_stroke_color = palette.stroke.to_string();
-    theme.pie_outer_stroke_color = palette.stroke.to_string();
-    theme.pie_title_text_color = palette.text.to_string();
-    theme.pie_section_text_color = palette.text.to_string();
-    theme.pie_legend_text_color = palette.text.to_string();
-    theme.pie_title_text_size = 16.0;
-    theme.pie_section_text_size = 12.0;
-    theme.pie_legend_text_size = 12.0;
-    theme
-}
-
-/// mermaid-rs-renderer 0.2.2 的桑基节点色与雷达曲线色是引擎写死的调色板
-/// （含红/粉色，不合公文配色），按出现顺序整串替换成当前配色的分类色。
-/// 常量在锁定的 0.2.2 里是固定的；引擎升级时要重新核对这一段。
-fn fixup_mmdr_colors(svg: &str, source: &str, palette: Palette) -> String {
-    let mut out = svg.to_string();
-    match header(source) {
-        "sankey-beta" => {
-            const SANKEY_PALETTE: [&str; 10] = [
-                "#4e79a7", "#f28e2c", "#e15759", "#76b7b2", "#59a14f", "#edc949", "#af7aa1",
-                "#ff9da7", "#9c755f", "#bab0ab",
-            ];
-            for (index, color) in SANKEY_PALETTE.iter().enumerate() {
-                out = out.replace(color, palette.category[index % palette.category.len()]);
-            }
-            // 引擎默认链路半透明（0.5），白底上洗得发灰；配色本身已够轻，加深到 0.85。
-            out = out.replace("stroke-opacity=\"0.5\"", "stroke-opacity=\"0.85\"");
-        }
-        "radar-beta" => {
-            const RADAR_HUES: [i32; 12] = [240, 60, 80, 270, 300, 330, 0, 30, 90, 150, 180, 210];
-            for (index, hue) in RADAR_HUES.iter().enumerate() {
-                let needle = format!("hsl({hue}, 100%, 76.2745098039%)");
-                out = out.replace(&needle, palette.category[index % palette.category.len()]);
-            }
-        }
-        _ => {}
-    }
-    out
-}
-
-/// mmdr 量宽走系统 fontdb：量宽时按字体族链落到系统里同度量的一支（Windows 的
-/// 仿宋/黑体、Linux 的 serif/sans CJK），渲染时 resvg 用随包字体。中西文都是
-/// 全宽/半宽等宽推进，两边只差拉丁字形的几个百分点，框内留白足够吸收。
-fn render_mmdr(source: &str, style: Style, theme: DiagramTheme) -> Result<String> {
-    let palette = palette(theme, style);
-    let options = mermaid_rs_renderer::RenderOptions {
-        theme: mmdr_theme(palette, style),
-        ..Default::default()
-    };
-    let svg = mermaid_rs_renderer::render_with_options(source, options)
-        .map_err(|error| anyhow!("Mermaid 解析或排版失败：{error}"))?;
-    Ok(fixup_mmdr_colors(&svg, source, palette))
-}
-
 fn render(source: &str, style: Style, theme: DiagramTheme, format: Format) -> Result<Vec<u8>> {
     check(source)?;
-    let svg = match engine_kind(source) {
-        Some(EngineKind::Merman) => renderer(style, theme)
-            .render_svg_sync(source)
-            .map_err(|error| anyhow!("Mermaid 解析或排版失败：{error}"))?
-            .context("Mermaid 围栏里没有图形")?,
-        Some(EngineKind::Mmdr) => render_mmdr(source, style, theme)?,
-        None => unreachable!("check 已拦下不支持的图种"),
-    };
+    let svg = renderer(style, theme)
+        .render_svg_sync(source)
+        .map_err(|error| anyhow!("Mermaid 解析或排版失败：{error}"))?
+        .context("Mermaid 围栏里没有图形")?;
     let (width, height) = view_box(&svg).context("Mermaid 输出缺少 viewBox")?;
     let placement = placement(style, width, height);
     match format {
@@ -967,23 +929,15 @@ mod tests {
         ),
         (
             "gantt",
-            "gantt\n  title 项目进度\n  dateFormat YYYY-MM-DD\n  section 调研\n  收集资料 :a1, 2026-10-01, 10d\n  撰写报告 :a2, after a1, 7d\n  section 审定\n  内部评审 :a3, after a2, 5d",
+            "gantt\n  title 项目进度\n  dateFormat YYYY-MM-DD\n  section 调研\n  收集资料 :done, a1, 2026-10-01, 10d\n  撰写报告 :active, a2, after a1, 7d\n  section 审定\n  内部评审 :crit, a3, after a2, 5d",
         ),
         (
             "pie",
             "pie title 经费构成\n  \"人员经费\" : 45\n  \"公用经费\" : 30\n  \"项目支出\" : 25",
         ),
         (
-            "sankey",
-            "sankey-beta\n  财政预算,人员经费,45\n  财政预算,公用经费,30\n  财政预算,项目支出,25",
-        ),
-        (
             "timeline",
             "timeline\n  title 工作规划\n  section 2026年 第四季度\n    完成调研 : 形成调研报告\n  section 2027年 上半年\n    出台办法 : 印发实施",
-        ),
-        (
-            "radar",
-            "radar-beta\n  axis 政治素质, 业务能力, 工作作风, 创新意识\n  curve 部门甲 {0.9, 0.8, 0.85, 0.7}\n  curve 部门乙 {0.7, 0.9, 0.75, 0.85}",
         ),
     ];
 
@@ -1014,7 +968,7 @@ mod tests {
         assert!(fs::read(dir.path().join(pdf)).unwrap().starts_with(b"%PDF"));
     }
 
-    /// 每种图都能渲出 PNG 与 PDF；桑基与雷达的引擎写死色板要已被换成分类色。
+    /// 每种图都能渲出 PNG 与 PDF。
     #[test]
     fn every_kind_renders_both_formats() {
         let dir = tempfile::tempdir().unwrap();
@@ -1035,11 +989,38 @@ mod tests {
                 }
             }
         }
-        // 藏青下桑基节点不再出现引擎自带的红粉色。
-        let svg = render_mmdr(KIND_SAMPLES[4].1, Style::Official, DiagramTheme::Navy).unwrap();
-        assert!(svg.contains("#1F3A5F"));
-        assert!(!svg.contains("#e15759"));
-        assert!(!svg.contains("#ff9da7"));
+    }
+
+    /// 全部图种走同一套主题：饼图扇区取分类色，甘特的关键任务不落 Mermaid 默认的红，
+    /// 「今天」竖线不画，序列、时间线与流程图同一支线色。
+    #[test]
+    fn every_kind_follows_the_palette() {
+        let palette = palette(DiagramTheme::Navy, Style::Research);
+        let svg = |kind: &str| {
+            let sample = KIND_SAMPLES
+                .iter()
+                .find(|(name, _)| *name == kind)
+                .unwrap()
+                .1;
+            renderer(Style::Research, DiagramTheme::Navy)
+                .render_svg_sync(sample)
+                .unwrap()
+                .unwrap()
+        };
+        assert!(svg("pie").contains(palette.category[0]));
+        let gantt = svg("gantt");
+        assert!(!gantt.contains("fill:red"));
+        assert!(gantt.contains(".today {display:none;}"));
+        for kind in ["sequence", "timeline"] {
+            assert!(svg(kind).contains(palette.line), "{kind}");
+        }
+    }
+
+    /// 桑基图与雷达图版式不成熟，明确拒绝并提示后续开放。
+    #[test]
+    fn sankey_and_radar_are_not_supported_yet() {
+        assert!(check("sankey-beta\n 甲,乙,1").is_err());
+        assert!(check("radar-beta\n axis 甲, 乙\n curve 丙 {1, 2}").is_err());
     }
 
     /// 设了 `GONGWEN_MERMAID_PREVIEW` 就把每种图、每套配色、两种文种的样图写进那个
@@ -1102,11 +1083,11 @@ mod tests {
         assert!(check("sequenceDiagram\n A->>B: 你好").is_ok());
         assert!(check("gantt\n A :a1, 2026-10-01, 3d").is_ok());
         assert!(check("pie title 构成\n \"甲\" : 1").is_ok());
-        assert!(check("sankey-beta\n 甲,乙,1").is_ok());
         assert!(check("timeline\n section 一期\n 任务").is_ok());
-        assert!(check("radar-beta\n axis a, b\n curve x {1, 2}").is_ok());
         // 未接入的图种给出清单式报错。
         assert!(check("stateDiagram-v2\n [*] --> 甲").is_err());
+        assert!(check("sankey-beta\n 甲,乙,1").is_err());
+        assert!(check("radar-beta\n axis a, b\n curve x {1, 2}").is_err());
         assert!(check("flowchart LR\n A[甲<br>乙] --> B").is_err());
         assert!(check("flowchart LR\n A --> B\n click A \"https://example.com\"").is_err());
         assert!(check("%%{init: {'theme':'dark'}}%%\nflowchart LR\n A --> B").is_err());

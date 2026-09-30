@@ -202,7 +202,7 @@ flowchart LR
 图：收文办理流程
 ````
 
-支持七种图，围栏首行写明图种：
+支持五种图，围栏首行写明图种：
 
 | 图种 | 围栏首行 | 说明 |
 | --- | --- | --- |
@@ -210,15 +210,13 @@ flowchart LR
 | 序列图 | `sequenceDiagram` | 角色直接用中文名；支持 `Note`、`loop`、`alt` |
 | 甘特图 | `gantt` | 须写 `dateFormat`，如 `dateFormat YYYY-MM-DD` |
 | 饼图 | `pie title 标题` | 中文扇区名要加英文引号：`"人员经费" : 45` |
-| 桑基图 | `sankey-beta` | 每行 `来源,去向,数值` |
 | 时间线 | `timeline` | `section` 分段，事件缩进写在段下 |
-| 雷达图 | `radar-beta` | `axis` 列维度，`curve 名称 {数值, …}`；轴和曲线直接写中文名 |
 
 - 围栏和图题均独占一行，前后留空行。图题可省略。
 - 公文图题只写文字，不手写图号。研究报告可在图题末尾加 `{#fig:id}`，见
   [research-report.md](research-report.md)。
 - 图内暂不支持 Mermaid 配置指令、HTML、点击链接或自定义样式；上表以外的图种
-  （如 stateDiagram、mindmap）暂不支持。
+  （如桑基图、雷达图、stateDiagram、mindmap）暂不支持。
 
 ## 10. 占位与其他字符
 

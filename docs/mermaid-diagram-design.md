@@ -2,17 +2,20 @@
 
 ## 当前进度与边界
 
-图种已接入七种（Rust 原生，不依赖 Node.js / Chromium）：
-
-- **flowchart / graph**（含泳道分组）：merman 0.7 渲染；
-- **sequenceDiagram / gantt / pie / sankey-beta / timeline / radar-beta**：
-  mermaid-rs-renderer 0.2.2 渲染（merman 0.7 只支持流程图，甘特等五种由第二个
-  纯 Rust 引擎承担，按围栏首行路由）。
+图种已接入五种：flowchart / graph（含泳道分组）、sequenceDiagram、gantt、pie、
+timeline，全部由 merman 0.7 渲染（Rust 原生，不依赖 Node.js / Chromium；与 Zed
+编辑器 Markdown 预览用的是同一个引擎）。曾经把序列、甘特、饼、时间线交给第二个
+引擎 mermaid-rs-renderer，两套引擎的配色、线宽、标题字号各成一路，已撤掉，
+只留 merman 一套主题。
 
 配色五选一（见「样式」），字体字号随文种固定。泳道图用 `subgraph` 分组表达；
-雷达的轴与曲线直接写中文名（`axis 政治素质, 业务能力`），不要用
-`axis a["标签"]` 的 merman 语法；饼图中文扇区名要加英文引号
-（`"人员经费" : 45`）。与 Mermaid.js 的语法及像素排版不保证完全一致。
+饼图中文扇区名要加英文引号（`"人员经费" : 45`）。与 Mermaid.js 的语法及像素
+排版不保证完全一致。
+
+**桑基图与雷达图**曾经接通过，但版式不成熟：桑基的节点柱过细、标签压链路，
+单源图退化成色柱；雷达轴标签贴边、网格无刻度读数，与公文版式差距大。这两图种
+在 check 里明确拒绝并提示后续开放；merman 本身支持，重新开放时照下文「各图种
+统一」的做法补作用域 CSS 即可。
 
 ## 用户写法
 
@@ -54,8 +57,8 @@ flowchart LR
 | 藏青 | `#EAF0F7` / `#1F3A5F` | `#3E5674` | 米黄 `#FBF2DE` | `#F6F8FB`、`#8EA3BB` 虚线 |
 | 青瓷 | `#E6F1ED` / `#2E6A5A` | `#4A7668` | 米白 `#F6F2E6` | `#F4F8F6`、`#90B3A7` 虚线 |
 
-「按文种自动」（默认）：公文用墨线，研究报告用藏青。分类色按图种取：饼图扇区、
-桑基节点、雷达曲线直接用分类色序列，时间线分区由主色派生。
+「按文种自动」（默认）：公文用墨线，研究报告用藏青。分类色一律浅中调：亮色靠色相
+区分、深色只做锚点，目前只有饼图扇区按分类色循环。
 
 | 项目 | 公文 | 研究报告 |
 | --- | --- | --- |
@@ -69,19 +72,27 @@ flowchart LR
 不产生 `foreignObject`。围栏内的 `%%{init}%%`、`click` 和 HTML 标签一律拒绝，
 单张图改不了统一版式；`<-->` 这类箭头写法不受影响。
 
-mermaid-rs-renderer 一路的配色在 Rust 里直接配它的 `Theme`（主色、线色、序列角色、
-饼图扇区等），另外两处引擎写死的调色板在 SVG 成串替换：
+### 各图种统一
 
-- 桑基节点色板（含红/粉）→ 当前配色的分类色，链路透明度 0.5 → 0.85；
-- 雷达曲线 `hsl(固定色相, 100%, 76.27%)` → 分类色。
+所有图种共用一个 `HostThemeProfile`，规则是：**框**一律节点线宽 + 主色边框，
+**线**一律连线线宽 + 线色，**标题**比正文大一档（16 px 排版），**刻度**小一档。
 
-替换常量随 mermaid-rs-renderer 0.2.2 锁定，引擎升级必须重新核对。分类色另用于
-饼图扇区（`pie_colors` 按分类色循环）与时间线分区（主色派生）。
+| 图种 | 做法 |
+| --- | --- |
+| 序列 | 角色框同流程节点；备注用判断框的强调色；`loop` 等分组框同子图的浅色虚线框 |
+| 甘特 | 任务条同流程节点；进行中（`active`）、关键（`crit`）用强调色——Mermaid 默认关键任务填红，这里不用；已完成（`done`）退成分组框浅底；网格线用分组框浅色细线；「今天」竖线随渲染日期漂移，纸面上无意义，缓存也会过期，一律隐藏 |
+| 甘特宽度 | Mermaid 默认按 1184 px 铺开，落进版心要缩成五六号字；`useWidth` 取版心宽换算的排版 px，字号与其他图一致。刻度默认只写 `月-日`（`%m-%d`），围栏里写了 `axisFormat` 以围栏为准 |
+| 饼 | 扇区按分类色循环（`series_palette` → `pie1…`），不叠透明度；描边同节点线宽 |
+| 时间线 | 分段标题框用强调色、分期框用主色、事件框白底，都带主色边框；去掉 Mermaid 按分段上色的彩色底线；主轴与虚线同线色、线宽；左侧 150 px 留白收到 40 px |
+
+作用域 CSS 里用到的类名（`.timeline-node`、`.taskWrapper`、`.grid .tick`、
+`.today`、`.loopLine` 等）是 merman 0.7 的 SVG 结构，升级 merman 时要重跑
+`every_theme_renders_sample` 核对样图。
 
 ## 尺寸：字号不随图变
 
-merman 与 mermaid-rs-renderer 都先按 14 px 排版（它们的内边距、间距按这个字号
-设计），再整体缩放到目标字号，摆到一块**画布**上：
+merman 先按 14 px 排版（它的内边距、间距按这个字号设计），再整体缩放到目标字号，
+摆到一块**画布**上：
 
 - 公文：画布恒为版心宽 156 mm。公文 TeX 写 `width=\textwidth`、Word 按版心宽封顶，
   图片铺满画布时图内文字正好是小四。宽图缩到版心宽，长图缩到版心高的 70%。
@@ -99,11 +110,9 @@ merman 与 mermaid-rs-renderer 都先按 14 px 排版（它们的内边距、间
 Markdown Mermaid 围栏 + 可选图题／锚点
   → 解析器：MarkdownBlock::Diagram { 源码、图题 }，源码范围覆盖整块；
     没有结束围栏时不认成图，免得后文从预览里消失
-  → 按围栏首行路由引擎：
-      ├─ merman 0.7（flowchart / graph）：
-      │   配色（DiagramTheme）+ 文种字体 + 真实字宽的 TextMeasurer → SVG
-      └─ mermaid-rs-renderer 0.2.2（序列 / 甘特 / 饼 / 桑基 / 时间线 / 雷达）：
-          Rust 侧 Theme 配色 → SVG → 写死色板整串替换成分类色
+  → 围栏首行核对图种白名单
+  → merman 0.7：配色（DiagramTheme）+ 分类色 + 作用域 CSS + 文种字体
+      + 真实字宽的 TextMeasurer → SVG
   → 按文种算画布，嵌入 SVG
       ├─ 预览：300 DPI PNG，与 Word 共用一份缓存
       ├─ TeX／PDF：svg2pdf 单页矢量 PDF（1 单位 = 1 pt），\includegraphics 引入
@@ -114,9 +123,6 @@ Markdown Mermaid 围栏 + 可选图题／锚点
   Windows 与麒麟上字形、换行一致；没有 runtime 字体目录时才退到系统字体。
 - **字宽**：merman 自带的量法按西文字体字宽表估，仿宋会估窄（字撑出菱形）、
   黑体会估宽。`FontMeasurer` 改用同一支字体的真实字宽，行高与折行仍交给 merman。
-  mermaid-rs-renderer 的量宽器只认系统字体，给它与渲染同一条字体族链
-  （仿宋/黑体在前、serif/sans-serif 殿后）：量宽落到系统里同度量的那支，渲染用
-  随包字体，中西文都是等宽推进，两边只差拉丁字形的几个百分点，框内留白吸收。
 - **缓存**：`config_dir()/mermaid-cache/`，键为样式版本 + 引擎版本 + 文种 +
   配色 + 源码，扩展名区分格式；先写临时文件再改名，预览与导出并发不会读到半截。
   渲染失败的源码记在内存里，预览不必每帧重排。换配色即换文件名，预览下一帧重画。
@@ -131,20 +137,16 @@ Markdown Mermaid 围栏 + 可选图题／锚点
 - 缓存只增不减，编辑途中每个能排出来的中间态都会留一张图，后续需要按时间清理。
 - 花脸稿里改动过的图按新版原样显示，看不出图内哪里变了；删掉的图显示为占位文字。
 - 红头呈批件的纸面预览沿用图片的做法，只显示「〔图表：图题〕」占位，导出才有图。
-- mermaid-rs-renderer 0.2.2 的 timeline 不渲染 section 标题，阶段信息只能写进
-  事件文字；雷达用中文原名，`axis a["标签"]` 语法会原样印出。
-- 双引擎的语法与像素不完全一致（如序列图箭头、甘特日期轴刻度），升级任一引擎时
-  要重跑 `every_theme_renders_sample` 全量样图核对。
+- 时间线的框高按 merman 的行高估算，文字贴框上沿、下方留白偏多，与 Mermaid.js 一致。
+- 饼图画布固定 450 px 高，在公文里偏大；后续可按版心再收。
 
 ## 原生 Rust 引擎与落地顺序
 
 优先验证 [`merman`](https://github.com/Latias94/merman)：它在 Rust 进程中解析、布局并
 输出 SVG，按 feature 可输出 PNG/PDF，无需 Node.js 或 Chromium；还提供可取消请求、
 资源上限与宿主文字宽度测量接口。它与官方 Mermaid.js 并非逐像素相同，尤其要核对
-中文字宽、HTML 标签、复杂子图与箭头。作为备选，
-[`mermaid-rs-renderer`](https://docs.rs/mermaid-rs-renderer/latest/mermaid_rs_renderer/)
-能处理候选的流程图、时序图、状态图和类图并输出 SVG/PNG，主题与布局可在 Rust 里配置，但语法覆盖要
-逐例检查。两者的最终选型以固定版本实测为准，不在此时锁定某个 crate。
+中文字宽、HTML 标签、复杂子图与箭头。选型已定为 merman（Zed 编辑器同款），
+曾并用的 mermaid-rs-renderer 因两套主题风格不一已撤掉。
 `merman` 的仓库主线 API 与已发布稳定版可能不同；原型须先锁定具体版本，当前项目
 Rust 1.97.1 满足其稳定版文档标出的最低 1.95，但仍需实际编译验证。
 
@@ -169,4 +171,3 @@ PDF、Word 中一致；源码语法错误能定位到围栏；导出不丢图；
 - Mermaid 官方主题说明：<https://mermaid.js.org/config/theming>
 - Mermaid CLI 官方说明：<https://github.com/mermaid-js/mermaid-cli/blob/master/README.md>
 - Merman 原生渲染说明：<https://github.com/Latias94/merman>
-- mermaid-rs-renderer API：<https://docs.rs/mermaid-rs-renderer/latest/mermaid_rs_renderer/>
