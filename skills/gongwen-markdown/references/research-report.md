@@ -240,7 +240,11 @@ flowchart LR
 - 居中 / 居右区、引文、文框里整行写 `$$...$$` 也是独立公式（对齐区跟着该行对齐，
   引文、文框里居中）；行中间的 `$$` 不算公式。
 
-- 支持 amsmath / mathtools 常见构造：分数、上下标、求和、积分、矩阵、`cases` 等。
+- 支持 amsmath / mathtools / amssymb 常见构造：分数、上下标、求和、积分、矩阵、
+  `cases`、`\mathbb{...}` 黑板粗体、`\mathfrak{...}` 哥特体、`\varnothing`、
+  `\leqslant`、`\therefore` 等符号。
+- 不得使用未随包内置的宏包命令：`\mathscr`（mathrsfs）、`\bm`（bm）等会导致
+  导出编译失败；花体字母一律用 `\mathcal` 代替。
 - 字面美元符写成 `\$`。
 - 公式里尽量不夹中文；确需时用 `\text{中文}`（预览可能显示占位框，导出正常）。
 
