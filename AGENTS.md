@@ -9,7 +9,8 @@
 - 导出链：Markdown → DOCX（`docx-rs`）/ TeX → PDF（本机 Tectonic / XeLaTeX）、
   XLSX（`rust_xlsxwriter`）、稿件库与词表用 `rusqlite`。研究报告支持 LaTeX 数学
   公式（`$...$` / `$$...$$`）：导出走 tectonic + amsmath/mathtools（需要 runtime
-  v0.6.0 起的 texbundle），预览用 `latex-rust` crate 进程内渲染（STIX Two Math，
+  v0.6.0 起的 texbundle），预览用 `latex-rust` 进程内渲染（vendor 在
+  `vendor/latex-rust/`，加了中文字形回退：STIX Two Math 缺的字走随包仿宋，
   与导出字形不一致属预期）。
 - 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`。
 - 输入法：应用内拼音输入法，引擎、词库与整句模型都在本进程里，不用系统输入法、

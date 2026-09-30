@@ -1,0 +1,323 @@
+# Gold tests — Milestone 6 accents and decorations
+# Contract: code must match these values. Do not edit golds to hide a bug.
+# `expect` for kind=dims is MathBox::dim_gold() (STIX Two Math).
+
+[[gold]]
+name = "hat-x-ast"
+kind = "ast"
+input = "\\hat{x}"
+expect = "(accent hat (atom Ord \"x\"))"
+
+[[gold]]
+name = "hat-x"
+kind = "dims"
+input = "\\hat{x}"
+expect = "w=0.559 h=0.674 d=0.01"
+
+[[gold]]
+name = "hat-x-svg"
+kind = "svg"
+input = "\\hat{x}"
+paths = "2"
+rects = "0"
+lines = "0"
+
+[[gold]]
+name = "hat-f-italic"
+kind = "dims"
+input = "\\hat{f}"
+expect = "w=0.641 h=0.905 d=0.225"
+
+[[gold]]
+name = "check-x"
+kind = "dims"
+input = "\\check{x}"
+expect = "w=0.559 h=0.678 d=0.01"
+
+[[gold]]
+name = "breve-x"
+kind = "dims"
+input = "\\breve{x}"
+expect = "w=0.559 h=0.683 d=0.01"
+
+[[gold]]
+name = "acute-x"
+kind = "dims"
+input = "\\acute{x}"
+expect = "w=0.559 h=0.674 d=0.01"
+
+[[gold]]
+name = "grave-x"
+kind = "dims"
+input = "\\grave{x}"
+expect = "w=0.559 h=0.674 d=0.01"
+
+[[gold]]
+name = "tilde-x"
+kind = "dims"
+input = "\\tilde{x}"
+expect = "w=0.559 h=0.642 d=0.01"
+
+[[gold]]
+name = "bar-x"
+kind = "dims"
+input = "\\bar{x}"
+expect = "w=0.559 h=0.61 d=0.01"
+
+[[gold]]
+name = "vec-v"
+kind = "dims"
+input = "\\vec{v}"
+expect = "w=0.948 h=0.939 d=0.009"
+
+[[gold]]
+name = "dot-x"
+kind = "dims"
+input = "\\dot{x}"
+expect = "w=0.559 h=0.673 d=0.01"
+
+[[gold]]
+name = "ddot-x"
+kind = "dims"
+input = "\\ddot{x}"
+expect = "w=0.559 h=0.672 d=0.01"
+
+[[gold]]
+name = "dddot-x"
+kind = "dims"
+input = "\\dddot{x}"
+expect = "w=0.575 h=0.637 d=0.01"
+
+[[gold]]
+name = "ddddot-x"
+kind = "dims"
+input = "\\ddddot{x}"
+expect = "w=0.575 h=0.637 d=0.01"
+
+[[gold]]
+name = "mathring-x"
+kind = "dims"
+input = "\\mathring{x}"
+expect = "w=0.559 h=0.729 d=0.01"
+
+[[gold]]
+name = "widehat-xyz"
+kind = "dims"
+input = "\\widehat{x+y+z}"
+expect = "w=3.890888888888888888888888 h=0.752 d=0.22"
+
+[[gold]]
+name = "widehat-xyz-svg"
+kind = "svg"
+input = "\\widehat{x+y+z}"
+paths = "6"
+rects = "0"
+lines = "0"
+
+[[gold]]
+name = "widetilde-xyz"
+kind = "dims"
+input = "\\widetilde{xyz}"
+expect = "w=1.562 h=0.644 d=0.22"
+
+[[gold]]
+name = "overline-xy"
+kind = "dims"
+input = "\\overline{x+y}"
+expect = "w=2.233444444444444444444444 h=0.869 d=0.22"
+
+[[gold]]
+name = "overline-xy-svg"
+kind = "svg"
+input = "\\overline{x+y}"
+paths = "3"
+rects = "1"
+lines = "0"
+
+[[gold]]
+name = "underline-abc"
+kind = "dims"
+input = "\\underline{abc}"
+expect = "w=1.487 h=0.705 d=0.323"
+
+[[gold]]
+name = "overrightarrow-AB"
+kind = "dims"
+input = "\\overrightarrow{AB}"
+expect = "w=1.447 h=1.121 d=0.0"
+
+[[gold]]
+name = "overrightarrow-AB-svg"
+kind = "svg"
+input = "\\overrightarrow{AB}"
+paths = "5"
+rects = "0"
+lines = "0"
+
+[[gold]]
+name = "overleftarrow-AB"
+kind = "dims"
+input = "\\overleftarrow{AB}"
+expect = "w=1.593 h=1.121 d=0.0"
+
+[[gold]]
+name = "overleftrightarrow-AB"
+kind = "dims"
+input = "\\overleftrightarrow{AB}"
+expect = "w=1.406 h=1.121 d=0.0"
+
+[[gold]]
+name = "underleftarrow-AB"
+kind = "dims"
+input = "\\underleftarrow{AB}"
+expect = "w=1.593 h=0.661 d=0.703"
+
+[[gold]]
+name = "underrightarrow-AB"
+kind = "dims"
+input = "\\underrightarrow{AB}"
+expect = "w=1.447 h=0.661 d=0.703"
+
+[[gold]]
+name = "underleftrightarrow-AB"
+kind = "dims"
+input = "\\underleftrightarrow{AB}"
+expect = "w=1.406 h=0.661 d=0.703"
+
+[[gold]]
+name = "xleftarrow-n-infty"
+kind = "dims"
+input = "\\xleftarrow{n \\to \\infty}"
+expect = "w=1.7262 h=1.1023 d=0.0"
+
+[[gold]]
+name = "xrightarrow-optional"
+kind = "dims"
+input = "\\xrightarrow[b]{a}"
+expect = "w=1.612 h=1.1037 d=1.1719"
+
+[[gold]]
+name = "overbrace-abc-n"
+kind = "dims"
+input = "\\overbrace{a+b+c}^{n}"
+expect = "w=4.054 h=2.3173 d=0.04"
+
+[[gold]]
+name = "overbrace-abc-n-svg"
+kind = "svg"
+input = "\\overbrace{a+b+c}^{n}"
+paths = "17"
+rects = "0"
+lines = "0"
+
+[[gold]]
+name = "underbrace-x1-x2"
+kind = "dims"
+input = "\\underbrace{x_1 + x_2}_{n=2}"
+expect = "w=3.154 h=0.558 d=2.0208"
+
+[[gold]]
+name = "overset-bang-eq"
+kind = "dims"
+input = "\\overset{!}{=}"
+expect = "w=0.72 h=1.1689 d=0.0"
+
+[[gold]]
+name = "underset-lim"
+kind = "dims"
+input = "\\underset{n \\to \\infty}{\\lim}"
+expect = "w=1.7262 h=0.706 d=1.0123"
+
+[[gold]]
+name = "stackrel-star-eq"
+kind = "dims"
+input = "\\stackrel{*}{=}"
+expect = "w=0.72 h=1.1773 d=0.0"
+
+[[gold]]
+name = "cancel-xy"
+kind = "dims"
+input = "\\cancel{x+y}"
+expect = "w=2.233444444444444444444444 h=0.558 d=0.22"
+
+[[gold]]
+name = "cancel-xy-lines"
+kind = "lines"
+input = "\\cancel{x+y}"
+expect = "x1=0.0 y1=-0.22 x2=2.233444444444444444444444 y2=0.558 t=0.068"
+
+[[gold]]
+name = "cancel-xy-svg"
+kind = "svg"
+input = "\\cancel{x+y}"
+paths = "3"
+rects = "0"
+lines = "1"
+
+[[gold]]
+name = "bcancel-x"
+kind = "lines"
+input = "\\bcancel{x}"
+expect = "x1=0.0 y1=0.479 x2=0.559 y2=-0.01 t=0.068"
+
+[[gold]]
+name = "xcancel-abc"
+kind = "lines"
+input = "\\xcancel{abc}"
+expect = "x1=0.0 y1=-0.012 x2=1.487 y2=0.705 t=0.068 | x1=0.0 y1=0.705 x2=1.487 y2=-0.012 t=0.068"
+
+[[gold]]
+name = "xcancel-abc-svg"
+kind = "svg"
+input = "\\xcancel{abc}"
+paths = "3"
+rects = "0"
+lines = "2"
+
+[[gold]]
+name = "cancelto-0-x"
+kind = "dims"
+input = "\\cancelto{0}{x}"
+expect = "w=0.9455 h=0.9361 d=0.01"
+
+[[gold]]
+name = "cancelto-0-x-svg"
+kind = "svg"
+input = "\\cancelto{0}{x}"
+paths = "2"
+rects = "0"
+lines = "1"
+
+[[gold]]
+name = "boxed-frac"
+kind = "dims"
+input = "\\boxed{\\frac{1}{2}}"
+expect = "w=0.679833333333333333333333 h=1.198966666666666666666666 d=0.751666666666666666666666"
+
+[[gold]]
+name = "boxed-frac-svg"
+kind = "svg"
+input = "\\boxed{\\frac{1}{2}}"
+paths = "2"
+rects = "2"
+lines = "0"
+
+[[gold]]
+name = "fbox-x"
+kind = "dims"
+input = "\\fbox{x}"
+expect = "w=0.892333333333333333333333 h=0.645666666666666666666666 d=0.176666666666666666666666"
+
+[[gold]]
+name = "empty_hat"
+kind = "err"
+error = "Malformed"
+input = "\\hat{}"
+expect = "malformed: empty accent base"
+
+[[gold]]
+name = "unknown_widebox"
+kind = "err"
+error = "Unsupported"
+input = "\\widebox{x}"
+expect = "unsupported: accent widebox"

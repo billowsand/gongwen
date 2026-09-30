@@ -3518,9 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "latex-rust"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aea2d0425d4ee210c55372493fbf35e61d59cf74cb241a7a1929e8de55763612"
+version = "2.0.1"
 dependencies = [
  "tiny-skia",
  "ttf-parser",

@@ -1,0 +1,502 @@
+# Gold tests — Milestone 5 symbol coverage
+# Contract: code must match these values. Do not edit golds to hide a bug.
+# `expect` is the Unicode glyph locked in the box tree (and the catalog).
+
+[[gold]]
+name = "greek_alpha"
+kind = "glyph"
+input = "\\alpha"
+expect = "𝛼"
+class = "Ord"
+
+[[gold]]
+name = "greek_beta"
+kind = "glyph"
+input = "\\beta"
+expect = "𝛽"
+class = "Ord"
+
+[[gold]]
+name = "greek_gamma"
+kind = "glyph"
+input = "\\gamma"
+expect = "𝛾"
+class = "Ord"
+
+[[gold]]
+name = "greek_delta"
+kind = "glyph"
+input = "\\delta"
+expect = "𝛿"
+class = "Ord"
+
+[[gold]]
+name = "greek_epsilon"
+kind = "glyph"
+input = "\\epsilon"
+expect = "𝜖"
+class = "Ord"
+
+[[gold]]
+name = "greek_varepsilon"
+kind = "glyph"
+input = "\\varepsilon"
+expect = "𝜀"
+class = "Ord"
+
+[[gold]]
+name = "greek_zeta"
+kind = "glyph"
+input = "\\zeta"
+expect = "𝜁"
+class = "Ord"
+
+[[gold]]
+name = "greek_eta"
+kind = "glyph"
+input = "\\eta"
+expect = "𝜂"
+class = "Ord"
+
+[[gold]]
+name = "greek_theta"
+kind = "glyph"
+input = "\\theta"
+expect = "𝜃"
+class = "Ord"
+
+[[gold]]
+name = "greek_vartheta"
+kind = "glyph"
+input = "\\vartheta"
+expect = "𝜗"
+class = "Ord"
+
+[[gold]]
+name = "greek_iota"
+kind = "glyph"
+input = "\\iota"
+expect = "𝜄"
+class = "Ord"
+
+[[gold]]
+name = "greek_kappa"
+kind = "glyph"
+input = "\\kappa"
+expect = "𝜅"
+class = "Ord"
+
+[[gold]]
+name = "greek_varkappa"
+kind = "glyph"
+input = "\\varkappa"
+expect = "𝜘"
+class = "Ord"
+
+[[gold]]
+name = "greek_lambda"
+kind = "glyph"
+input = "\\lambda"
+expect = "𝜆"
+class = "Ord"
+
+[[gold]]
+name = "greek_mu"
+kind = "glyph"
+input = "\\mu"
+expect = "𝜇"
+class = "Ord"
+
+[[gold]]
+name = "greek_nu"
+kind = "glyph"
+input = "\\nu"
+expect = "𝜈"
+class = "Ord"
+
+[[gold]]
+name = "greek_xi"
+kind = "glyph"
+input = "\\xi"
+expect = "𝜉"
+class = "Ord"
+
+[[gold]]
+name = "greek_pi"
+kind = "glyph"
+input = "\\pi"
+expect = "𝜋"
+class = "Ord"
+
+[[gold]]
+name = "greek_varpi"
+kind = "glyph"
+input = "\\varpi"
+expect = "𝜛"
+class = "Ord"
+
+[[gold]]
+name = "greek_rho"
+kind = "glyph"
+input = "\\rho"
+expect = "𝜌"
+class = "Ord"
+
+[[gold]]
+name = "greek_varrho"
+kind = "glyph"
+input = "\\varrho"
+expect = "𝜚"
+class = "Ord"
+
+[[gold]]
+name = "greek_sigma"
+kind = "glyph"
+input = "\\sigma"
+expect = "𝜎"
+class = "Ord"
+
+[[gold]]
+name = "greek_varsigma"
+kind = "glyph"
+input = "\\varsigma"
+expect = "𝜍"
+class = "Ord"
+
+[[gold]]
+name = "greek_tau"
+kind = "glyph"
+input = "\\tau"
+expect = "𝜏"
+class = "Ord"
+
+[[gold]]
+name = "greek_upsilon"
+kind = "glyph"
+input = "\\upsilon"
+expect = "𝜐"
+class = "Ord"
+
+[[gold]]
+name = "greek_phi"
+kind = "glyph"
+input = "\\phi"
+expect = "𝜙"
+class = "Ord"
+
+[[gold]]
+name = "greek_varphi"
+kind = "glyph"
+input = "\\varphi"
+expect = "𝜑"
+class = "Ord"
+
+[[gold]]
+name = "greek_chi"
+kind = "glyph"
+input = "\\chi"
+expect = "𝜒"
+class = "Ord"
+
+[[gold]]
+name = "greek_psi"
+kind = "glyph"
+input = "\\psi"
+expect = "𝜓"
+class = "Ord"
+
+[[gold]]
+name = "greek_omega"
+kind = "glyph"
+input = "\\omega"
+expect = "𝜔"
+class = "Ord"
+
+[[gold]]
+name = "greek_Gamma"
+kind = "glyph"
+input = "\\Gamma"
+expect = "Γ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Delta"
+kind = "glyph"
+input = "\\Delta"
+expect = "Δ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Theta"
+kind = "glyph"
+input = "\\Theta"
+expect = "Θ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Lambda"
+kind = "glyph"
+input = "\\Lambda"
+expect = "Λ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Xi"
+kind = "glyph"
+input = "\\Xi"
+expect = "Ξ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Pi"
+kind = "glyph"
+input = "\\Pi"
+expect = "Π"
+class = "Ord"
+
+[[gold]]
+name = "greek_Sigma"
+kind = "glyph"
+input = "\\Sigma"
+expect = "Σ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Upsilon"
+kind = "glyph"
+input = "\\Upsilon"
+expect = "Υ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Phi"
+kind = "glyph"
+input = "\\Phi"
+expect = "Φ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Psi"
+kind = "glyph"
+input = "\\Psi"
+expect = "Ψ"
+class = "Ord"
+
+[[gold]]
+name = "greek_Omega"
+kind = "glyph"
+input = "\\Omega"
+expect = "Ω"
+class = "Ord"
+
+[[gold]]
+name = "hebrew_aleph"
+kind = "glyph"
+input = "\\aleph"
+expect = "ℵ"
+class = "Ord"
+
+[[gold]]
+name = "hebrew_beth"
+kind = "glyph"
+input = "\\beth"
+expect = "ℶ"
+class = "Ord"
+
+[[gold]]
+name = "hebrew_gimel"
+kind = "glyph"
+input = "\\gimel"
+expect = "ℷ"
+class = "Ord"
+
+[[gold]]
+name = "hebrew_daleth"
+kind = "glyph"
+input = "\\daleth"
+expect = "ℸ"
+class = "Ord"
+
+[[gold]]
+name = "bin_times"
+kind = "glyph"
+input = "\\times"
+expect = "×"
+class = "Bin"
+
+[[gold]]
+name = "rel_leq"
+kind = "glyph"
+input = "\\leq"
+expect = "≤"
+class = "Rel"
+
+[[gold]]
+name = "not_leq"
+kind = "not"
+input = "\\not\\leq"
+expect = "≤"
+class = "Rel"
+
+[[gold]]
+name = "nless"
+kind = "glyph"
+input = "\\nless"
+expect = "≮"
+class = "Rel"
+
+[[gold]]
+name = "ngtr"
+kind = "glyph"
+input = "\\ngtr"
+expect = "≯"
+class = "Rel"
+
+[[gold]]
+name = "arrow_rightarrow"
+kind = "glyph"
+input = "\\rightarrow"
+expect = "→"
+class = "Rel"
+
+[[gold]]
+name = "arrow_longrightarrow"
+kind = "glyph"
+input = "\\longrightarrow"
+expect = "⟶"
+class = "Rel"
+
+[[gold]]
+name = "arrow_long_wider"
+kind = "wider"
+input = "\\longrightarrow"
+lhs = "\\rightarrow"
+
+[[gold]]
+name = "font_bb_R"
+kind = "glyph"
+input = "\\mathbb{R}"
+expect = "ℝ"
+class = "Ord"
+
+[[gold]]
+name = "font_cal_L"
+kind = "glyph"
+input = "\\mathcal{L}"
+expect = "ℒ"
+class = "Ord"
+
+[[gold]]
+name = "font_frak_g"
+kind = "glyph"
+input = "\\mathfrak{g}"
+expect = "𝔤"
+class = "Ord"
+
+[[gold]]
+name = "font_bf_x"
+kind = "glyph"
+input = "\\mathbf{x}"
+expect = "𝐱"
+class = "Ord"
+
+[[gold]]
+name = "font_rm_d"
+kind = "glyph"
+input = "\\mathrm{d}"
+expect = "d"
+class = "Ord"
+
+[[gold]]
+name = "font_it_d"
+kind = "glyph"
+input = "\\mathit{d}"
+expect = "𝑑"
+class = "Ord"
+
+[[gold]]
+name = "font_scr_H"
+kind = "glyph"
+input = "\\mathscr{H}"
+expect = "ℋ"
+class = "Ord"
+
+[[gold]]
+name = "font_sf_A"
+kind = "glyph"
+input = "\\mathsf{A}"
+expect = "𝖠"
+class = "Ord"
+
+[[gold]]
+name = "font_tt_A"
+kind = "glyph"
+input = "\\mathtt{A}"
+expect = "𝙰"
+class = "Ord"
+
+[[gold]]
+name = "font_bb_digit"
+kind = "glyph"
+input = "\\mathbb{0}"
+expect = "𝟘"
+class = "Ord"
+
+[[gold]]
+name = "boldsymbol_alpha"
+kind = "glyph"
+input = "\\boldsymbol{\\alpha}"
+expect = "𝜶"
+class = "Ord"
+
+[[gold]]
+name = "ams_boxplus"
+kind = "glyph"
+input = "\\boxplus"
+expect = "⊞"
+class = "Bin"
+
+[[gold]]
+name = "ams_lesssim"
+kind = "glyph"
+input = "\\lesssim"
+expect = "≲"
+class = "Rel"
+
+[[gold]]
+name = "ams_twoheadrightarrow"
+kind = "glyph"
+input = "\\twoheadrightarrow"
+expect = "↠"
+class = "Rel"
+
+[[gold]]
+name = "ams_complement"
+kind = "glyph"
+input = "\\complement"
+expect = "∁"
+class = "Ord"
+
+[[gold]]
+name = "op_sin"
+kind = "glyph"
+input = "\\sin"
+expect = "s"
+
+[[gold]]
+name = "missing_glyph"
+kind = "err_layout"
+input = "\u{0378}"
+expect = "missing glyph"
+
+[[gold]]
+name = "unknown_font_style"
+kind = "err_parse"
+input = "\\mathfoo{x}"
+expect = "unsupported: font style mathfoo"
+
+[[gold]]
+name = "math_minus_a_b"
+kind = "glyph"
+input = "a-b"
+expect = "−"

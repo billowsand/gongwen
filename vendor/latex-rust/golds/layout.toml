@@ -1,0 +1,374 @@
+# Gold tests — Milestone 3 layout engine
+# Contract: code must match these values. Do not edit golds to hide a bug.
+# `expect` for kind=dims is MathBox::dim_gold() (STIX Two Math).
+
+[[gold]]
+name = "frac-num-den-display"
+kind = "style_frac"
+style = "display"
+input = "\\frac{1}{2}"
+expect = "text text-cramped"
+
+[[gold]]
+name = "frac-num-den-text"
+kind = "style_frac"
+style = "text"
+input = "\\frac{1}{2}"
+expect = "script script-cramped"
+
+[[gold]]
+name = "frac-num-den-script"
+kind = "style_frac"
+style = "script"
+input = "\\frac{1}{2}"
+expect = "scriptscript scriptscript-cramped"
+
+[[gold]]
+name = "glyph-x-text"
+kind = "dims"
+style = "text"
+input = "x"
+expect = "w=0.559 h=0.479 d=0.01"
+
+[[gold]]
+name = "glyph-x-display"
+kind = "dims"
+style = "display"
+input = "x"
+expect = "w=0.559 h=0.479 d=0.01"
+
+[[gold]]
+name = "glyph-x-script"
+kind = "dims"
+style = "script"
+input = "x"
+expect = "w=0.3913 h=0.3353 d=0.007"
+
+[[gold]]
+name = "ord-ord-ab"
+kind = "dims"
+style = "text"
+input = "ab"
+expect = "w=1.073 h=0.705 d=0.012"
+
+[[gold]]
+name = "ord-bin-text"
+kind = "dims"
+style = "text"
+input = "a+b"
+expect = "w=2.237444444444444444444444 h=0.705 d=0.04"
+
+[[gold]]
+name = "ord-bin-script-no-med"
+kind = "dims"
+style = "script"
+input = "a+b"
+expect = "w=1.2551 h=0.4935 d=0.028"
+
+[[gold]]
+name = "ord-rel-text"
+kind = "dims"
+style = "text"
+input = "a=b"
+expect = "w=2.348555555555555555555555 h=0.705 d=0.012"
+
+[[gold]]
+name = "bin-after-open"
+kind = "dims"
+style = "text"
+input = "(+a"
+expect = "w=1.632 h=0.736 d=0.196"
+
+[[gold]]
+name = "paren-row"
+kind = "dims"
+style = "text"
+input = "(a+b)"
+expect = "w=2.951444444444444444444444 h=0.736 d=0.196"
+
+[[gold]]
+name = "frac-half-text"
+kind = "dims"
+style = "text"
+input = "\\frac{1}{2}"
+expect = "w=0.3465 h=1.0323 d=0.585"
+
+[[gold]]
+name = "frac-half-display"
+kind = "dims"
+style = "display"
+input = "\\frac{1}{2}"
+expect = "w=0.495 h=1.279 d=0.64"
+
+[[gold]]
+name = "frac-wide-num"
+kind = "dims"
+style = "text"
+input = "\\frac{a+b}{c+d}"
+expect = "w=1.2551 h=1.0785 d=0.613"
+
+[[gold]]
+name = "sqrt-x-text"
+kind = "dims"
+style = "text"
+input = "\\sqrt{x}"
+expect = "w=1.353 h=0.922 d=0.265"
+
+[[gold]]
+name = "sqrt-x-display"
+kind = "dims"
+style = "display"
+input = "\\sqrt{x}"
+expect = "w=1.353 h=0.922 d=0.265"
+
+[[gold]]
+name = "sqrt-n-x"
+kind = "dims"
+style = "text"
+input = "\\sqrt[3]{x}"
+expect = "w=1.35525 h=0.922 d=0.265"
+
+[[gold]]
+name = "sup-x2-text"
+kind = "dims"
+style = "text"
+input = "x^2"
+expect = "w=0.9435 h=0.8108 d=0.01"
+
+[[gold]]
+name = "sup-x2-display"
+kind = "dims"
+style = "display"
+input = "x^2"
+expect = "w=0.9435 h=0.8108 d=0.01"
+
+[[gold]]
+name = "sup-x2-cramped"
+kind = "dims"
+style = "text-cramped"
+input = "x^2"
+expect = "w=0.9435 h=0.7028 d=0.01"
+
+[[gold]]
+name = "sub-x2"
+kind = "dims"
+style = "text"
+input = "x_2"
+expect = "w=0.9335 h=0.479 d=0.21"
+
+[[gold]]
+name = "subsup-x"
+kind = "dims"
+style = "text"
+input = "x_2^3"
+expect = "w=0.9435 h=0.8108 d=0.2499"
+
+[[gold]]
+name = "sup-f2-italic"
+kind = "dims"
+style = "text"
+input = "f^2"
+expect = "w=0.9715 h=0.8108 d=0.225"
+
+[[gold]]
+name = "left-frac-text"
+kind = "dims"
+style = "text"
+input = "\\left(\\frac{1}{2}\\right)"
+expect = "w=1.2465 h=1.223 d=0.683"
+
+[[gold]]
+name = "left-frac-display"
+kind = "dims"
+style = "display"
+input = "\\left(\\frac{1}{2}\\right)"
+expect = "w=1.441 h=1.342 d=0.802"
+
+[[gold]]
+name = "left-brace"
+kind = "dims"
+style = "text"
+input = "\\left\\{x\\right\\}"
+expect = "w=1.213 h=0.736 d=0.197"
+
+[[gold]]
+name = "big-paren"
+kind = "dims"
+style = "text"
+input = "\\big("
+expect = "w=0.404 h=0.983 d=0.443"
+
+[[gold]]
+name = "Big-paren"
+kind = "dims"
+style = "text"
+input = "\\Big("
+expect = "w=0.45 h=1.223 d=0.683"
+
+[[gold]]
+name = "bigg-paren"
+kind = "dims"
+style = "text"
+input = "\\bigg("
+expect = "w=0.519 h=1.582 d=1.042"
+
+[[gold]]
+name = "Bigg-paren"
+kind = "dims"
+style = "text"
+input = "\\Bigg("
+expect = "w=0.564 h=1.82 d=1.28"
+
+[[gold]]
+name = "sum-limits-display"
+kind = "dims"
+style = "display"
+input = "\\sum_{k=1}^{n}"
+expect = "w=1.2236 h=1.5613 d=1.5765"
+
+[[gold]]
+name = "sum-scripts-text"
+kind = "dims"
+style = "text"
+input = "\\sum_{k=1}^{n}"
+expect = "w=2.1876 h=0.782 d=0.2975"
+
+[[gold]]
+name = "int-display"
+kind = "dims"
+style = "display"
+input = "\\int_0^1"
+expect = "w=1.9465 h=1.429 d=0.917"
+
+[[gold]]
+name = "int-text"
+kind = "dims"
+style = "text"
+input = "\\int_0^1"
+expect = "w=1.2885 h=0.8073 d=0.2471"
+
+[[gold]]
+name = "pmatrix"
+kind = "dims"
+style = "text"
+input = "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}"
+expect = "w=2.520555555555555555555555 h=1.103 d=0.929"
+
+[[gold]]
+name = "cases"
+kind = "dims"
+style = "text"
+input = "\\begin{cases}a\\\\b\\end{cases}"
+expect = "w=0.927 h=0.983 d=0.929"
+
+[[gold]]
+name = "alpha"
+kind = "dims"
+style = "text"
+input = "\\alpha"
+expect = "w=0.585 h=0.479 d=0.014"
+
+[[gold]]
+name = "quad"
+kind = "dims"
+style = "text"
+input = "\\quad"
+expect = "w=1.0 h=0.0 d=0.0"
+
+[[gold]]
+name = "thin-space"
+kind = "dims"
+style = "text"
+input = "a\\,b"
+expect = "w=1.239666666666666666666666 h=0.705 d=0.012"
+
+[[gold]]
+name = "hat-x"
+kind = "dims"
+style = "text"
+input = "\\hat{x}"
+expect = "w=0.559 h=0.674 d=0.01"
+
+[[gold]]
+name = "overline-x"
+kind = "dims"
+style = "text"
+input = "\\overline{x}"
+expect = "w=0.559 h=0.79 d=0.01"
+
+[[gold]]
+name = "textcolor-red-dims"
+kind = "dims"
+style = "text"
+input = "\\textcolor{red}{x}"
+expect = "w=0.559 h=0.479 d=0.01"
+
+[[gold]]
+name = "textcolor-red"
+kind = "color"
+style = "text"
+input = "\\textcolor{red}{x}"
+expect = "#ff0000"
+
+[[gold]]
+name = "color-red"
+kind = "color"
+style = "text"
+input = "\\color{red}x"
+expect = "#ff0000"
+
+[[gold]]
+name = "nested-color"
+kind = "color_nested"
+style = "text"
+input = "\\textcolor{red}{\\textcolor{blue}{x}}"
+expect = "red-then-blue"
+
+[[gold]]
+name = "color-scope-restore"
+kind = "color_nested"
+style = "text"
+input = "{\\color{red} x + {\\color{blue} y} + z}"
+expect = "red-then-blue"
+
+[[gold]]
+name = "color-green-following"
+kind = "color"
+style = "text"
+input = "\\color{green} a"
+expect = "#00ff00"
+
+[[gold]]
+name = "colorbox-yellow"
+kind = "back_color"
+style = "text"
+input = "\\colorbox{yellow}{x}"
+expect = "#ffff00"
+
+[[gold]]
+name = "colorbox-cyan-frac"
+kind = "back_color"
+style = "text"
+input = "\\colorbox{cyan}{\\frac{a}{b}}"
+expect = "#00ffff"
+
+[[gold]]
+name = "fcolorbox-red-yellow-fill"
+kind = "back_color"
+style = "text"
+input = "\\fcolorbox{red}{yellow}{x}"
+expect = "#ffff00"
+
+[[gold]]
+name = "fcolorbox-red-yellow-stroke"
+kind = "frame_stroke"
+style = "text"
+input = "\\fcolorbox{red}{yellow}{x}"
+expect = "#ff0000"
+
+[[gold]]
+name = "minus-bin-a-b"
+kind = "dims"
+style = "text"
+input = "a-b"
+expect = "w=2.237444444444444444444444 h=0.705 d=0.012"

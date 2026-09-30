@@ -1,0 +1,1187 @@
+# Gold tests — Milestone 2 parser
+# Contract: code must match these values. Do not edit golds to hide a bug.
+
+[[gold]]
+name = "atom"
+kind = "ast"
+input = "x"
+expect = "(atom Ord \"x\")"
+
+[[gold]]
+name = "frac"
+kind = "ast"
+input = "\\frac{1}{2}"
+expect = "(frac (atom Ord \"1\") (atom Ord \"2\"))"
+
+[[gold]]
+name = "sqrt"
+kind = "ast"
+input = "\\sqrt{x}"
+expect = "(sqrt (atom Ord \"x\"))"
+
+[[gold]]
+name = "sqrtn"
+kind = "ast"
+input = "\\sqrt[n]{x}"
+expect = "(sqrtn (atom Ord \"n\") (atom Ord \"x\"))"
+
+[[gold]]
+name = "sup"
+kind = "ast"
+input = "x^2"
+expect = "(sup (atom Ord \"x\") (atom Ord \"2\"))"
+
+[[gold]]
+name = "sub"
+kind = "ast"
+input = "x_i"
+expect = "(sub (atom Ord \"x\") (atom Ord \"i\"))"
+
+[[gold]]
+name = "subsup"
+kind = "ast"
+input = "x_i^2"
+expect = "(subsup (atom Ord \"x\") (atom Ord \"i\") (atom Ord \"2\"))"
+
+[[gold]]
+name = "row"
+kind = "ast"
+input = "a+b"
+expect = "(row (atom Ord \"a\") (atom Bin \"+\") (atom Ord \"b\"))"
+
+[[gold]]
+name = "delim_paren"
+kind = "ast"
+input = "\\left(x\\right)"
+expect = "(delim ( (atom Ord \"x\") ))"
+
+[[gold]]
+name = "delim_brack"
+kind = "ast"
+input = "\\left[x\\right]"
+expect = "(delim [ (atom Ord \"x\") ])"
+
+[[gold]]
+name = "delim_brace"
+kind = "ast"
+input = "\\left\\{x\\right\\}"
+expect = "(delim \\{ (atom Ord \"x\") \\})"
+
+[[gold]]
+name = "delim_bar"
+kind = "ast"
+input = "\\left|x\\right|"
+expect = "(delim | (atom Ord \"x\") |)"
+
+[[gold]]
+name = "delim_vert"
+kind = "ast"
+input = "\\left\\|x\\right\\|"
+expect = "(delim \\| (atom Ord \"x\") \\|)"
+
+[[gold]]
+name = "delim_angle"
+kind = "ast"
+input = "\\left\\langle x\\right\\rangle"
+expect = "(delim langle (atom Ord \"x\") rangle)"
+
+[[gold]]
+name = "delim_floor"
+kind = "ast"
+input = "\\left\\lfloor x\\right\\rfloor"
+expect = "(delim lfloor (atom Ord \"x\") rfloor)"
+
+[[gold]]
+name = "delim_ceil"
+kind = "ast"
+input = "\\left\\lceil x\\right\\rceil"
+expect = "(delim lceil (atom Ord \"x\") rceil)"
+
+[[gold]]
+name = "delim_empty"
+kind = "ast"
+input = "\\left.x\\right."
+expect = "(delim . (atom Ord \"x\") .)"
+
+[[gold]]
+name = "matrix"
+kind = "ast"
+input = "\\begin{matrix}a&b\\\\c&d\\end{matrix}"
+expect = "(matrix matrix ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "pmatrix"
+kind = "ast"
+input = "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}"
+expect = "(matrix pmatrix ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "bmatrix"
+kind = "ast"
+input = "\\begin{bmatrix}a&b\\\\c&d\\end{bmatrix}"
+expect = "(matrix bmatrix ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "vmatrix"
+kind = "ast"
+input = "\\begin{vmatrix}a&b\\\\c&d\\end{vmatrix}"
+expect = "(matrix vmatrix ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "Vmatrix"
+kind = "ast"
+input = "\\begin{Vmatrix}a&b\\\\c&d\\end{Vmatrix}"
+expect = "(matrix Vmatrix ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "Bmatrix"
+kind = "ast"
+input = "\\begin{Bmatrix}a&b\\\\c&d\\end{Bmatrix}"
+expect = "(matrix Bmatrix ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "cases"
+kind = "ast"
+input = "\\begin{cases}a\\\\b\\end{cases}"
+expect = "(matrix cases ((atom Ord \"a\")) ((atom Ord \"b\")))"
+
+[[gold]]
+name = "array"
+kind = "ast"
+input = "\\begin{array}{cc}a&b\\\\c&d\\end{array}"
+expect = "(matrix array cc ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "aligned"
+kind = "ast"
+input = "\\begin{aligned}a&=b\\\\c&=d\\end{aligned}"
+expect = "(matrix aligned ((atom Ord \"a\") (row (atom Rel \"=\") (atom Ord \"b\"))) ((atom Ord \"c\") (row (atom Rel \"=\") (atom Ord \"d\"))))"
+
+[[gold]]
+name = "align"
+kind = "ast"
+input = "\\begin{align}a&=b\\\\c&=d\\end{align}"
+expect = "(matrix align ((atom Ord \"a\") (row (atom Rel \"=\") (atom Ord \"b\"))) ((atom Ord \"c\") (row (atom Rel \"=\") (atom Ord \"d\"))))"
+
+[[gold]]
+name = "gather"
+kind = "ast"
+input = "\\begin{gather}a\\\\b\\end{gather}"
+expect = "(matrix gather ((atom Ord \"a\")) ((atom Ord \"b\")))"
+
+[[gold]]
+name = "multline"
+kind = "ast"
+input = "\\begin{multline}a\\\\b\\end{multline}"
+expect = "(matrix multline ((atom Ord \"a\")) ((atom Ord \"b\")))"
+
+[[gold]]
+name = "equation"
+kind = "ast"
+input = "\\begin{equation}x\\end{equation}"
+expect = "(matrix equation ((atom Ord \"x\")))"
+
+[[gold]]
+name = "sum"
+kind = "ast"
+input = "\\sum_{i=1}^n"
+expect = "(sum (row (atom Ord \"i\") (atom Rel \"=\") (atom Ord \"1\")) (atom Ord \"n\"))"
+
+[[gold]]
+name = "sum_bare"
+kind = "ast"
+input = "\\sum"
+expect = "(sum _ _)"
+
+[[gold]]
+name = "prod"
+kind = "ast"
+input = "\\prod_i"
+expect = "(prod (atom Ord \"i\") _)"
+
+[[gold]]
+name = "int"
+kind = "ast"
+input = "\\int_a^b"
+expect = "(int (atom Ord \"a\") (atom Ord \"b\"))"
+
+[[gold]]
+name = "iint"
+kind = "ast"
+input = "\\iint"
+expect = "(iint _ _)"
+
+[[gold]]
+name = "iiint"
+kind = "ast"
+input = "\\iiint"
+expect = "(iiint _ _)"
+
+[[gold]]
+name = "oint"
+kind = "ast"
+input = "\\oint"
+expect = "(oint _ _)"
+
+[[gold]]
+name = "oiint"
+kind = "ast"
+input = "\\oiint"
+expect = "(oiint _ _)"
+
+[[gold]]
+name = "lim"
+kind = "ast"
+input = "\\lim_{x}"
+expect = "(lim (atom Ord \"x\"))"
+
+[[gold]]
+name = "overunder"
+kind = "ast"
+input = "\\overset{a}{b}"
+expect = "(overunder (atom Ord \"b\") (atom Ord \"a\") _)"
+
+[[gold]]
+name = "underset"
+kind = "ast"
+input = "\\underset{a}{b}"
+expect = "(overunder (atom Ord \"b\") _ (atom Ord \"a\"))"
+
+[[gold]]
+name = "stackrel"
+kind = "ast"
+input = "\\stackrel{*}{=}"
+expect = "(overunder (atom Rel \"=\") (atom Bin \"*\") _)"
+
+[[gold]]
+name = "accent_hat"
+kind = "ast"
+input = "\\hat{x}"
+expect = "(accent hat (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_check"
+kind = "ast"
+input = "\\check{x}"
+expect = "(accent check (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_breve"
+kind = "ast"
+input = "\\breve{x}"
+expect = "(accent breve (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_acute"
+kind = "ast"
+input = "\\acute{x}"
+expect = "(accent acute (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_grave"
+kind = "ast"
+input = "\\grave{x}"
+expect = "(accent grave (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_tilde"
+kind = "ast"
+input = "\\tilde{x}"
+expect = "(accent tilde (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_bar"
+kind = "ast"
+input = "\\bar{x}"
+expect = "(accent bar (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_vec"
+kind = "ast"
+input = "\\vec{x}"
+expect = "(accent vec (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_dot"
+kind = "ast"
+input = "\\dot{x}"
+expect = "(accent dot (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_ddot"
+kind = "ast"
+input = "\\ddot{x}"
+expect = "(accent ddot (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_dddot"
+kind = "ast"
+input = "\\dddot{x}"
+expect = "(accent dddot (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_widehat"
+kind = "ast"
+input = "\\widehat{x}"
+expect = "(accent widehat (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_widetilde"
+kind = "ast"
+input = "\\widetilde{x}"
+expect = "(accent widetilde (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_overline"
+kind = "ast"
+input = "\\overline{x}"
+expect = "(accent overline (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_underline"
+kind = "ast"
+input = "\\underline{x}"
+expect = "(accent underline (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_overbrace"
+kind = "ast"
+input = "\\overbrace{x}"
+expect = "(accent overbrace (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_underbrace"
+kind = "ast"
+input = "\\underbrace{x}"
+expect = "(accent underbrace (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_overleftarrow"
+kind = "ast"
+input = "\\overleftarrow{x}"
+expect = "(accent overleftarrow (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_overrightarrow"
+kind = "ast"
+input = "\\overrightarrow{x}"
+expect = "(accent overrightarrow (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_cancel"
+kind = "ast"
+input = "\\cancel{x}"
+expect = "(accent cancel (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_bcancel"
+kind = "ast"
+input = "\\bcancel{x}"
+expect = "(accent bcancel (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_xcancel"
+kind = "ast"
+input = "\\xcancel{x}"
+expect = "(accent xcancel (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_boxed"
+kind = "ast"
+input = "\\boxed{x}"
+expect = "(accent boxed (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_mathring"
+kind = "ast"
+input = "\\mathring{x}"
+expect = "(accent mathring (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_not"
+kind = "ast"
+input = "\\not="
+expect = "(accent not (atom Rel \"=\"))"
+
+[[gold]]
+name = "font_rm"
+kind = "ast"
+input = "\\mathrm{R}"
+expect = "(text rm \"R\")"
+
+[[gold]]
+name = "font_bf"
+kind = "ast"
+input = "\\mathbf{R}"
+expect = "(text bf \"R\")"
+
+[[gold]]
+name = "font_it"
+kind = "ast"
+input = "\\mathit{R}"
+expect = "(text it \"R\")"
+
+[[gold]]
+name = "font_rm_script_base"
+kind = "ast"
+input = "\\mathrm{rad\\,s^{-1}}"
+expect = "(row (text rm \"rad\") (space thin) (sup (text rm \"s\") (row (atom Bin \"-\") (text rm \"1\"))))"
+
+[[gold]]
+name = "font_rm_script"
+kind = "ast"
+input = "\\mathrm{x^a}"
+expect = "(sup (text rm \"x\") (text rm \"a\"))"
+
+[[gold]]
+name = "font_bf_fraction"
+kind = "ast"
+input = "\\mathbf{\\frac{a}{b}}"
+expect = "(frac (text bf \"a\") (text bf \"b\"))"
+
+[[gold]]
+name = "font_rm_radical"
+kind = "ast"
+input = "\\mathrm{\\sqrt{n}}"
+expect = "(sqrt (text rm \"n\"))"
+
+[[gold]]
+name = "font_bf_delimited"
+kind = "ast"
+input = "\\mathbf{\\left(x\\right)}"
+expect = "(delim ( (text bf \"x\") ))"
+
+[[gold]]
+name = "font_sf"
+kind = "ast"
+input = "\\mathsf{R}"
+expect = "(text sf \"R\")"
+
+[[gold]]
+name = "font_tt"
+kind = "ast"
+input = "\\mathtt{R}"
+expect = "(text tt \"R\")"
+
+[[gold]]
+name = "font_bb"
+kind = "ast"
+input = "\\mathbb{R}"
+expect = "(text bb \"R\")"
+
+[[gold]]
+name = "font_cal"
+kind = "ast"
+input = "\\mathcal{L}"
+expect = "(text cal \"L\")"
+
+[[gold]]
+name = "font_frak"
+kind = "ast"
+input = "\\mathfrak{g}"
+expect = "(text frak \"g\")"
+
+[[gold]]
+name = "font_scr"
+kind = "ast"
+input = "\\mathscr{H}"
+expect = "(text scr \"H\")"
+
+[[gold]]
+name = "font_boldsymbol"
+kind = "ast"
+input = "\\boldsymbol{x}"
+expect = "(text boldsymbol \"x\")"
+
+[[gold]]
+name = "font_pmb"
+kind = "ast"
+input = "\\pmb{x}"
+expect = "(text pmb \"x\")"
+
+[[gold]]
+name = "text"
+kind = "ast"
+input = "\\text{hello world}"
+expect = "(text text \"hello world\")"
+
+[[gold]]
+name = "operatorname"
+kind = "ast"
+input = "\\operatorname{Hom}"
+expect = "(op Hom)"
+
+[[gold]]
+name = "space_thin"
+kind = "ast"
+input = "a\\,b"
+expect = "(row (atom Ord \"a\") (space thin) (atom Ord \"b\"))"
+
+[[gold]]
+name = "space_med"
+kind = "ast"
+input = "a\\:b"
+expect = "(row (atom Ord \"a\") (space medium) (atom Ord \"b\"))"
+
+[[gold]]
+name = "space_thick"
+kind = "ast"
+input = "a\\;b"
+expect = "(row (atom Ord \"a\") (space thick) (atom Ord \"b\"))"
+
+[[gold]]
+name = "space_neg"
+kind = "ast"
+input = "a\\!b"
+expect = "(row (atom Ord \"a\") (space negthin) (atom Ord \"b\"))"
+
+[[gold]]
+name = "space_quad"
+kind = "ast"
+input = "a\\quad b"
+expect = "(row (atom Ord \"a\") (space quad) (atom Ord \"b\"))"
+
+[[gold]]
+name = "space_qquad"
+kind = "ast"
+input = "a\\qquad b"
+expect = "(row (atom Ord \"a\") (space qquad) (atom Ord \"b\"))"
+
+[[gold]]
+name = "space_control"
+kind = "ast"
+input = "a\\ b"
+expect = "(row (atom Ord \"a\") (space control) (atom Ord \"b\"))"
+
+[[gold]]
+name = "hspace"
+kind = "ast"
+input = "a\\hspace{2em}b"
+expect = "(row (atom Ord \"a\") (space hspace 2) (atom Ord \"b\"))"
+
+[[gold]]
+name = "op_sin"
+kind = "ast"
+input = "\\sin"
+expect = "(op sin)"
+
+[[gold]]
+name = "op_cos"
+kind = "ast"
+input = "\\cos"
+expect = "(op cos)"
+
+[[gold]]
+name = "op_tan"
+kind = "ast"
+input = "\\tan"
+expect = "(op tan)"
+
+[[gold]]
+name = "op_cot"
+kind = "ast"
+input = "\\cot"
+expect = "(op cot)"
+
+[[gold]]
+name = "op_sec"
+kind = "ast"
+input = "\\sec"
+expect = "(op sec)"
+
+[[gold]]
+name = "op_csc"
+kind = "ast"
+input = "\\csc"
+expect = "(op csc)"
+
+[[gold]]
+name = "op_arcsin"
+kind = "ast"
+input = "\\arcsin"
+expect = "(op arcsin)"
+
+[[gold]]
+name = "op_arccos"
+kind = "ast"
+input = "\\arccos"
+expect = "(op arccos)"
+
+[[gold]]
+name = "op_arctan"
+kind = "ast"
+input = "\\arctan"
+expect = "(op arctan)"
+
+[[gold]]
+name = "op_sinh"
+kind = "ast"
+input = "\\sinh"
+expect = "(op sinh)"
+
+[[gold]]
+name = "op_cosh"
+kind = "ast"
+input = "\\cosh"
+expect = "(op cosh)"
+
+[[gold]]
+name = "op_tanh"
+kind = "ast"
+input = "\\tanh"
+expect = "(op tanh)"
+
+[[gold]]
+name = "op_coth"
+kind = "ast"
+input = "\\coth"
+expect = "(op coth)"
+
+[[gold]]
+name = "op_log"
+kind = "ast"
+input = "\\log"
+expect = "(op log)"
+
+[[gold]]
+name = "op_ln"
+kind = "ast"
+input = "\\ln"
+expect = "(op ln)"
+
+[[gold]]
+name = "op_lg"
+kind = "ast"
+input = "\\lg"
+expect = "(op lg)"
+
+[[gold]]
+name = "op_exp"
+kind = "ast"
+input = "\\exp"
+expect = "(op exp)"
+
+[[gold]]
+name = "op_limsup"
+kind = "ast"
+input = "\\limsup"
+expect = "(op limsup)"
+
+[[gold]]
+name = "op_liminf"
+kind = "ast"
+input = "\\liminf"
+expect = "(op liminf)"
+
+[[gold]]
+name = "op_sup"
+kind = "ast"
+input = "\\sup"
+expect = "(op sup)"
+
+[[gold]]
+name = "op_inf"
+kind = "ast"
+input = "\\inf"
+expect = "(op inf)"
+
+[[gold]]
+name = "op_max"
+kind = "ast"
+input = "\\max"
+expect = "(op max)"
+
+[[gold]]
+name = "op_min"
+kind = "ast"
+input = "\\min"
+expect = "(op min)"
+
+[[gold]]
+name = "op_det"
+kind = "ast"
+input = "\\det"
+expect = "(op det)"
+
+[[gold]]
+name = "op_dim"
+kind = "ast"
+input = "\\dim"
+expect = "(op dim)"
+
+[[gold]]
+name = "op_ker"
+kind = "ast"
+input = "\\ker"
+expect = "(op ker)"
+
+[[gold]]
+name = "op_deg"
+kind = "ast"
+input = "\\deg"
+expect = "(op deg)"
+
+[[gold]]
+name = "op_gcd"
+kind = "ast"
+input = "\\gcd"
+expect = "(op gcd)"
+
+[[gold]]
+name = "op_lcm"
+kind = "ast"
+input = "\\lcm"
+expect = "(op lcm)"
+
+[[gold]]
+name = "op_Pr"
+kind = "ast"
+input = "\\Pr"
+expect = "(op Pr)"
+
+[[gold]]
+name = "op_arg"
+kind = "ast"
+input = "\\arg"
+expect = "(op arg)"
+
+[[gold]]
+name = "large_coprod"
+kind = "ast"
+input = "\\coprod"
+expect = "(op coprod limits)"
+
+[[gold]]
+name = "large_bigcup"
+kind = "ast"
+input = "\\bigcup"
+expect = "(op bigcup limits)"
+
+[[gold]]
+name = "large_bigcap"
+kind = "ast"
+input = "\\bigcap"
+expect = "(op bigcap limits)"
+
+[[gold]]
+name = "large_bigsqcup"
+kind = "ast"
+input = "\\bigsqcup"
+expect = "(op bigsqcup limits)"
+
+[[gold]]
+name = "large_bigvee"
+kind = "ast"
+input = "\\bigvee"
+expect = "(op bigvee limits)"
+
+[[gold]]
+name = "large_bigwedge"
+kind = "ast"
+input = "\\bigwedge"
+expect = "(op bigwedge limits)"
+
+[[gold]]
+name = "large_bigoplus"
+kind = "ast"
+input = "\\bigoplus"
+expect = "(op bigoplus limits)"
+
+[[gold]]
+name = "large_bigotimes"
+kind = "ast"
+input = "\\bigotimes"
+expect = "(op bigotimes limits)"
+
+[[gold]]
+name = "large_biguplus"
+kind = "ast"
+input = "\\biguplus"
+expect = "(op biguplus limits)"
+
+[[gold]]
+name = "symbol_alpha"
+kind = "ast"
+input = "\\alpha"
+expect = "(symbol alpha)"
+
+[[gold]]
+name = "color_scope"
+kind = "ast"
+input = "{\\color{red}x}"
+expect = "(color #ff0000 (atom Ord \"x\"))"
+
+[[gold]]
+name = "textcolor"
+kind = "ast"
+input = "\\textcolor{blue}{x}"
+expect = "(textcolor #0000ff (atom Ord \"x\"))"
+
+[[gold]]
+name = "colorbox"
+kind = "ast"
+input = "\\colorbox{yellow}{x}"
+expect = "(colorbox #ffff00 (atom Ord \"x\"))"
+
+[[gold]]
+name = "fcolorbox"
+kind = "ast"
+input = "\\fcolorbox{blue}{red}{x}"
+expect = "(fcolorbox #0000ff #ff0000 (atom Ord \"x\"))"
+
+[[gold]]
+name = "textcolor_rgb"
+kind = "ast"
+input = "\\textcolor[rgb]{0.0,0.6,0.0}{x}"
+expect = "(textcolor #009900 (atom Ord \"x\"))"
+
+[[gold]]
+name = "define_rgb"
+kind = "ast"
+input = "\\definecolor{mygreen}{rgb}{0.0,0.6,0.0}\\textcolor{mygreen}{x}"
+expect = "(textcolor #009900 (atom Ord \"x\"))"
+
+[[gold]]
+name = "define_named"
+kind = "ast"
+input = "\\definecolor{myred}{named}{red}\\textcolor{myred}{x}"
+expect = "(textcolor #ff0000 (atom Ord \"x\"))"
+
+[[gold]]
+name = "define_html"
+kind = "ast"
+input = "\\definecolor{myblue}{HTML}{3366ff}\\textcolor{myblue}{x}"
+expect = "(textcolor #3366ff (atom Ord \"x\"))"
+
+[[gold]]
+name = "define_cmyk"
+kind = "ast"
+input = "\\definecolor{myred}{cmyk}{0,1,1,0}\\textcolor{myred}{x}"
+expect = "(textcolor #ff0000 (atom Ord \"x\"))"
+
+[[gold]]
+name = "define_gray"
+kind = "ast"
+input = "\\definecolor{mygray}{gray}{0.5}\\textcolor{mygray}{x}"
+expect = "(textcolor #808080 (atom Ord \"x\"))"
+
+[[gold]]
+name = "strut"
+kind = "ast"
+input = "\\strut"
+expect = "(strut 7/10 3/10)"
+
+[[gold]]
+name = "phantom"
+kind = "ast"
+input = "\\phantom{x}"
+expect = "(phantom (atom Ord \"x\"))"
+
+[[gold]]
+name = "vphantom"
+kind = "ast"
+input = "\\vphantom{x}"
+expect = "(vphantom (atom Ord \"x\"))"
+
+[[gold]]
+name = "hphantom"
+kind = "ast"
+input = "\\hphantom{x}"
+expect = "(hphantom (atom Ord \"x\"))"
+
+[[gold]]
+name = "inline_dollar"
+kind = "ast"
+input = "$x$"
+expect = "(atom Ord \"x\")"
+
+[[gold]]
+name = "display_dollar"
+kind = "ast"
+input = "$$x$$"
+expect = "(atom Ord \"x\")"
+
+[[gold]]
+name = "display_bracket"
+kind = "ast"
+input = "\\[x\\]"
+expect = "(atom Ord \"x\")"
+
+[[gold]]
+name = "inline_paren"
+kind = "ast"
+input = "\\(x\\)"
+expect = "(atom Ord \"x\")"
+
+[[gold]]
+name = "over"
+kind = "ast"
+input = "{a \\over b}"
+expect = "(frac (atom Ord \"a\") (atom Ord \"b\"))"
+
+[[gold]]
+name = "choose"
+kind = "ast"
+input = "{n \\choose k}"
+expect = "(delim ( (frac (atom Ord \"n\") (atom Ord \"k\")) ))"
+
+[[gold]]
+name = "binom"
+kind = "ast"
+input = "\\binom{n}{k}"
+expect = "(delim ( (frac (atom Ord \"n\") (atom Ord \"k\")) ))"
+
+[[gold]]
+name = "colorbox_frac"
+kind = "ast"
+input = "\\colorbox{yellow}{\\frac{1}{2}}"
+expect = "(colorbox #ffff00 (frac (atom Ord \"1\") (atom Ord \"2\")))"
+
+[[gold]]
+name = "unknown"
+kind = "err"
+error = "Unknown"
+input = "\\notacommandxyz"
+expect = "unknown command: \\notacommandxyz"
+
+[[gold]]
+name = "malformed_frac"
+kind = "err"
+error = "Malformed"
+input = "\\frac{1}"
+expect = "malformed: missing argument"
+
+[[gold]]
+name = "malformed_brace"
+kind = "err"
+error = "Malformed"
+input = "{x"
+expect = "malformed: unmatched '{'"
+
+[[gold]]
+name = "unmatched_left"
+kind = "err"
+error = "UnmatchedDelimiter"
+input = "\\left(x"
+expect = "unmatched delimiter"
+
+[[gold]]
+name = "unmatched_right"
+kind = "err"
+error = "UnmatchedDelimiter"
+input = "x\\right)"
+expect = "unmatched delimiter"
+
+[[gold]]
+name = "unsupported_env"
+kind = "err"
+error = "Unsupported"
+input = "\\begin{tikzpicture}x\\end{tikzpicture}"
+expect = "unsupported: environment tikzpicture"
+
+[[gold]]
+name = "trailing_bs"
+kind = "err"
+error = "TrailingBackslash"
+input = "x\\"
+expect = "trailing backslash"
+
+[[gold]]
+name = "unsupported_color"
+kind = "err"
+error = "Unsupported"
+input = "\\textcolor{notacolor}{x}"
+expect = "unsupported: named color notacolor"
+
+[[gold]]
+name = "big_paren"
+kind = "ast"
+input = "\\big("
+expect = "(big big Open \"(\")"
+
+[[gold]]
+name = "Big_paren"
+kind = "ast"
+input = "\\Big("
+expect = "(big Big Open \"(\")"
+
+[[gold]]
+name = "bigg_paren"
+kind = "ast"
+input = "\\bigg("
+expect = "(big bigg Open \"(\")"
+
+[[gold]]
+name = "Bigg_paren"
+kind = "ast"
+input = "\\Bigg("
+expect = "(big Bigg Open \"(\")"
+
+[[gold]]
+name = "bigl_paren"
+kind = "ast"
+input = "\\bigl("
+expect = "(big big Open \"(\")"
+
+[[gold]]
+name = "unknown_font_style"
+kind = "err"
+error = "Unsupported"
+input = "\\mathfoo{x}"
+expect = "unsupported: font style mathfoo"
+
+[[gold]]
+name = "symbol_Gamma"
+kind = "ast"
+input = "\\Gamma"
+expect = "(symbol Gamma)"
+
+[[gold]]
+name = "symbol_varepsilon"
+kind = "ast"
+input = "\\varepsilon"
+expect = "(symbol varepsilon)"
+
+[[gold]]
+name = "xrightarrow"
+kind = "ast"
+input = "\\xrightarrow{f}"
+expect = "(overunder (symbol longrightarrow) (atom Ord \"f\") _)"
+
+[[gold]]
+name = "colon_punct"
+kind = "ast"
+input = ":"
+expect = "(atom Punct \":\")"
+
+[[gold]]
+name = "accent_ddddot"
+kind = "ast"
+input = "\\ddddot{x}"
+expect = "(accent ddddot (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_overleftrightarrow"
+kind = "ast"
+input = "\\overleftrightarrow{x}"
+expect = "(accent overleftrightarrow (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_underleftarrow"
+kind = "ast"
+input = "\\underleftarrow{x}"
+expect = "(accent underleftarrow (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_underrightarrow"
+kind = "ast"
+input = "\\underrightarrow{x}"
+expect = "(accent underrightarrow (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_underleftrightarrow"
+kind = "ast"
+input = "\\underleftrightarrow{x}"
+expect = "(accent underleftrightarrow (atom Ord \"x\"))"
+
+[[gold]]
+name = "accent_fbox"
+kind = "ast"
+input = "\\fbox{x}"
+expect = "(accent boxed (atom Ord \"x\"))"
+
+[[gold]]
+name = "cancelto"
+kind = "ast"
+input = "\\cancelto{0}{x}"
+expect = "(cancelto (atom Ord \"0\") (atom Ord \"x\"))"
+
+[[gold]]
+name = "overbrace_annotation"
+kind = "ast"
+input = "\\overbrace{a+b+c}^{n}"
+expect = "(overunder (accent overbrace (row (atom Ord \"a\") (atom Bin \"+\") (atom Ord \"b\") (atom Bin \"+\") (atom Ord \"c\"))) (atom Ord \"n\") _)"
+
+[[gold]]
+name = "underbrace_annotation"
+kind = "ast"
+input = "\\underbrace{x_1 + x_2}_{n=2}"
+expect = "(overunder (accent underbrace (row (sub (atom Ord \"x\") (atom Ord \"1\")) (atom Bin \"+\") (sub (atom Ord \"x\") (atom Ord \"2\")))) _ (row (atom Ord \"n\") (atom Rel \"=\") (atom Ord \"2\")))"
+
+[[gold]]
+name = "xleftarrow"
+kind = "ast"
+input = "\\xleftarrow{n \\to \\infty}"
+expect = "(overunder (symbol longleftarrow) (row (atom Ord \"n\") (symbol to) (symbol infty)) _)"
+
+[[gold]]
+name = "xrightarrow_optional"
+kind = "ast"
+input = "\\xrightarrow[b]{a}"
+expect = "(overunder (symbol longrightarrow) (atom Ord \"a\") (atom Ord \"b\"))"
+
+[[gold]]
+name = "empty_hat"
+kind = "err"
+error = "Malformed"
+input = "\\hat{}"
+expect = "malformed: empty accent base"
+
+[[gold]]
+name = "unknown_widebox"
+kind = "err"
+error = "Unsupported"
+input = "\\widebox{x}"
+expect = "unsupported: accent widebox"
+
+[[gold]]
+name = "define_RGB"
+kind = "ast"
+input = "\\definecolor{mygreen}{RGB}{0,153,0}\\textcolor{mygreen}{x}"
+expect = "(textcolor #009900 (atom Ord \"x\"))"
+
+[[gold]]
+name = "textcolor_RGB"
+kind = "ast"
+input = "\\textcolor[RGB]{0,153,0}{x}"
+expect = "(textcolor #009900 (atom Ord \"x\"))"
+
+[[gold]]
+name = "define_cmyk_orange"
+kind = "ast"
+input = "\\definecolor{myorange}{cmyk}{0,0.4,1,0}\\textcolor{myorange}{x}"
+expect = "(textcolor #ff9900 (atom Ord \"x\"))"
+
+[[gold]]
+name = "color_nested_group"
+kind = "ast"
+input = "{\\color{red} x + {\\color{blue} y} + z}"
+expect = "(color #ff0000 (row (atom Ord \"x\") (atom Bin \"+\") (color #0000ff (atom Ord \"y\")) (atom Bin \"+\") (atom Ord \"z\")))"
+
+[[gold]]
+name = "unsupported_color_model"
+kind = "err"
+error = "Unsupported"
+input = "\\definecolor{x}{spot}{0.5}"
+expect = "unsupported: color model spot"
+
+[[gold]]
+name = "definecolor_forward_ref"
+kind = "err"
+error = "Unsupported"
+input = "\\textcolor{later}{x}\\definecolor{later}{rgb}{0,0,1}"
+expect = "unsupported: named color later"
+
+[[gold]]
+name = "malformed_color_spec"
+kind = "err"
+error = "Malformed"
+input = "\\textcolor[rgb]{0.5}{x}"
+expect = "malformed: color spec `0.5` (need 3 components)"
+
+[[gold]]
+name = "nesting_too_deep"
+kind = "err"
+error = "Malformed"
+input = "{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{x}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}"
+expect = "malformed: input nests deeper than 32 levels"

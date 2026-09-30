@@ -1,0 +1,334 @@
+# Gold tests — Milestone 4 SVG renderer
+# Contract: code must match these values. Do not edit golds to hide a bug.
+# Structural match: path/rect counts, xmlns, fill. Dimensions are 12 pt em.
+
+[[gold]]
+name = "glyph-x"
+kind = "svg"
+input = "x"
+paths = "1"
+rects = "0"
+contains = "xmlns=\"http://www.w3.org/2000/svg\""
+expect = "width=\"6.708pt\""
+
+[[gold]]
+name = "digit-2"
+kind = "svg"
+input = "2"
+paths = "1"
+rects = "0"
+
+[[gold]]
+name = "alpha"
+kind = "svg"
+input = "\\alpha"
+paths = "1"
+rects = "0"
+
+[[gold]]
+name = "frac-half"
+kind = "svg"
+input = "\\frac{1}{2}"
+paths = "2"
+rects = "1"
+
+[[gold]]
+name = "sqrt-x"
+kind = "svg"
+input = "\\sqrt{x}"
+paths = "2"
+rects = "1"
+
+[[gold]]
+name = "sup-x2"
+kind = "svg"
+input = "x^2"
+paths = "2"
+rects = "0"
+
+[[gold]]
+name = "sub-x2"
+kind = "svg"
+input = "x_2"
+paths = "2"
+rects = "0"
+
+[[gold]]
+name = "subsup"
+kind = "svg"
+input = "x_2^3"
+paths = "3"
+rects = "0"
+
+[[gold]]
+name = "left-right"
+kind = "svg"
+input = "\\left( x \\right)"
+paths = "3"
+rects = "0"
+
+[[gold]]
+name = "left-brace-frac"
+kind = "svg"
+input = "\\left\\{ \\frac{1}{2} \\right\\}"
+paths = "4"
+rects = "1"
+
+[[gold]]
+name = "sum-display"
+kind = "svg"
+style = "display"
+input = "\\sum_{k=1}^{n}"
+paths = "5"
+rects = "0"
+
+[[gold]]
+name = "int-display"
+kind = "svg"
+style = "display"
+input = "\\int_0^1"
+paths = "3"
+rects = "0"
+
+[[gold]]
+name = "pmatrix"
+kind = "svg"
+input = "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}"
+paths = "6"
+rects = "0"
+
+[[gold]]
+name = "hat-x"
+kind = "svg"
+input = "\\hat{x}"
+paths = "2"
+rects = "0"
+
+[[gold]]
+name = "overline-row"
+kind = "svg"
+input = "\\overline{x+y}"
+paths = "3"
+rects = "1"
+
+[[gold]]
+name = "textcolor-red"
+kind = "svg"
+input = "\\textcolor{red}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#ff0000\""
+
+[[gold]]
+name = "color-blue-group"
+kind = "svg"
+input = "{\\color{blue} x + y} + z"
+paths = "5"
+rects = "0"
+fill = "fill=\"#0000ff\""
+
+[[gold]]
+name = "colorbox-yellow-frac"
+kind = "svg"
+input = "\\colorbox{yellow}{\\frac{1}{2}}"
+paths = "2"
+rects = "2"
+fill = "fill=\"#ffff00\""
+
+[[gold]]
+name = "definecolor-mygreen"
+kind = "svg"
+input = "\\definecolor{mygreen}{rgb}{0,0.6,0}\\textcolor{mygreen}{f}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#009900\""
+
+[[gold]]
+name = "textcolor-blue-frac"
+kind = "svg"
+input = "\\textcolor{blue}{\\frac{1}{2}}"
+paths = "2"
+rects = "1"
+fill = "fill=\"#0000ff\""
+
+[[gold]]
+name = "textcolor-define-rgb-half"
+kind = "svg"
+input = "\\definecolor{mycolor}{rgb}{0,0.5,1}\\textcolor{mycolor}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#0080ff\""
+
+[[gold]]
+name = "color-red-group"
+kind = "svg"
+input = "{\\color{red} x + y}"
+paths = "3"
+rects = "0"
+fill = "fill=\"#ff0000\""
+
+[[gold]]
+name = "color-scope-restore"
+kind = "svg"
+input = "{\\color{red} x + {\\color{blue} y} + z}"
+paths = "5"
+rects = "0"
+fill = "fill=\"#ff0000\""
+contains = "fill=\"#0000ff\""
+
+[[gold]]
+name = "color-green-following"
+kind = "svg"
+input = "\\color{green} a"
+paths = "1"
+rects = "0"
+fill = "fill=\"#00ff00\""
+
+[[gold]]
+name = "colorbox-yellow-x"
+kind = "svg"
+input = "\\colorbox{yellow}{x}"
+paths = "1"
+rects = "1"
+fill = "fill=\"#ffff00\""
+
+[[gold]]
+name = "colorbox-cyan-frac"
+kind = "svg"
+input = "\\colorbox{cyan}{\\frac{a}{b}}"
+paths = "2"
+rects = "2"
+fill = "fill=\"#00ffff\""
+
+[[gold]]
+name = "fcolorbox-red-yellow"
+kind = "svg"
+input = "\\fcolorbox{red}{yellow}{x}"
+paths = "1"
+rects = "2"
+fill = "fill=\"#ffff00\""
+contains = "stroke=\"#ff0000\""
+
+[[gold]]
+name = "definecolor-RGB"
+kind = "svg"
+input = "\\definecolor{mygreen}{RGB}{0,153,0}\\textcolor{mygreen}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#009900\""
+
+[[gold]]
+name = "definecolor-HTML"
+kind = "svg"
+input = "\\definecolor{mygreen}{HTML}{009900}\\textcolor{mygreen}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#009900\""
+
+[[gold]]
+name = "definecolor-cmyk"
+kind = "svg"
+input = "\\definecolor{myorange}{cmyk}{0,0.4,1,0}\\textcolor{myorange}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#ff9900\""
+
+[[gold]]
+name = "definecolor-gray"
+kind = "svg"
+input = "\\definecolor{mygray}{gray}{0.5}\\textcolor{mygray}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#808080\""
+
+[[gold]]
+name = "textcolor-black"
+kind = "svg"
+input = "\\textcolor{black}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#000000\" stroke=\"#000000\""
+
+[[gold]]
+name = "textcolor-white"
+kind = "svg"
+input = "\\textcolor{white}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#ffffff\""
+
+[[gold]]
+name = "textcolor-Cerulean"
+kind = "svg"
+input = "\\textcolor{Cerulean}{x}"
+paths = "1"
+rects = "0"
+fill = "fill=\"#0fe3ff\""
+
+[[gold]]
+name = "color-three-level"
+kind = "svg"
+input = "{\\color{red} x{\\color{blue} y{\\color{green} z}}}"
+paths = "3"
+rects = "0"
+fill = "fill=\"#ff0000\""
+contains = "fill=\"#00ff00\""
+
+[[gold]]
+name = "unsupported-color-model"
+kind = "err"
+input = "\\definecolor{x}{spot}{0.5}"
+expect = "unsupported: color model spot"
+
+[[gold]]
+name = "unknown-color-name"
+kind = "err"
+input = "\\textcolor{notacolor}{x}"
+expect = "unsupported: named color notacolor"
+
+[[gold]]
+name = "definecolor-forward-ref"
+kind = "err"
+input = "\\textcolor{later}{x}\\definecolor{later}{rgb}{0,0,1}"
+expect = "unsupported: named color later"
+
+[[gold]]
+name = "malformed-color-spec"
+kind = "err"
+input = "\\textcolor[rgb]{0.5}{x}"
+expect = "malformed: color spec"
+
+[[gold]]
+name = "aligned"
+kind = "svg"
+input = "\\begin{aligned} x &= 1 \\\\ y &= 2 \\end{aligned}"
+paths = "6"
+rects = "0"
+
+[[gold]]
+name = "big-paren"
+kind = "svg"
+input = "\\big("
+paths = "1"
+rects = "0"
+
+[[gold]]
+name = "Big-paren"
+kind = "svg"
+input = "\\Big("
+paths = "1"
+rects = "0"
+
+[[gold]]
+name = "bigg-paren"
+kind = "svg"
+input = "\\bigg("
+paths = "1"
+rects = "0"
+
+[[gold]]
+name = "Bigg-paren"
+kind = "svg"
+input = "\\Bigg("
+paths = "1"
+rects = "0"

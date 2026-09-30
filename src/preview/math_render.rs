@@ -4,16 +4,15 @@
 //! 都是微秒级。导出端仍以 tectonic + amsmath 为准，所以预览字形（STIX Two Math）
 //! 与导出 PDF（CM 数学字体）不一致属预期，排版尺寸以导出为准。
 //!
-//! STIX Two Math 没有中文字形，`\text{中文}` 直接排会报缺字形。含中文的
-//! `\text` 类命令（`\text`、`\mbox`、`\textrm`、`\textbf`、`\textit`、
-//! `\textsf`、`\texttt`）在顶层出现时由本层拆出来，用随包仿宋单独光栅化，
-//! 再按基线拼回位图；嵌在分数、上下标里的中文仍报错画占位框（导出不受影响）。
+//! STIX Two Math 没有中文字形：`MathFont` 配了随包仿宋作回退 face（vendor
+//! latex-rust 的 `stix_two_math_with_fallback`），主 face 缺的字度量与轮廓都走
+//! 回退 face，`\text{中文}` 嵌在上下标、分数里也能渲染。找不到随包字体时退回
+//! 无回退的 STIX，中文公式报错画占位框（导出 PDF 不受影响）。
 
 use eframe::egui;
 use latex_rust::{
     BoxContent, Color as MathColor, Dim, MathBox, MathFont, MathStyle, PngBackground, PngOptions,
 };
-use resvg::{tiny_skia, usvg};
 use std::sync::OnceLock;
 
 /// 排版或光栅化失败。预览把错误画成占位框，不向上抛 panic。
@@ -44,55 +43,18 @@ pub(crate) struct RenderedMath {
 
 fn font() -> Result<&'static MathFont, MathError> {
     static FONT: OnceLock<Result<MathFont, String>> = OnceLock::new();
-    FONT.get_or_init(|| MathFont::stix_two_math().map_err(|e| e.to_string()))
-        .as_ref()
-        .map_err(|e| MathError(e.clone()))
-}
-
-/// 随包仿宋：`\text{中文}` 拆出来后的渲染字体，与公文正文一脉。
-struct CjkFont {
-    db: std::sync::Arc<usvg::fontdb::Database>,
-    family: String,
-    data: Vec<u8>,
-    ascender: f32,
-    descender: f32,
-    units_per_em: f32,
-}
-
-fn cjk_font() -> Result<&'static CjkFont, MathError> {
-    static FONT: OnceLock<Option<CjkFont>> = OnceLock::new();
     FONT.get_or_init(|| {
-        let dir = crate::portable_runtime::find_font_dir()?;
-        let data = std::fs::read(dir.join("FangSong.ttf")).ok()?;
-        let mut db = usvg::fontdb::Database::new();
-        db.load_font_data(data.clone());
-        let family = db.faces().next()?.families.first()?.0.clone();
-        let face = ttf_parser::Face::parse(&data, 0).ok()?;
-        let (ascender, descender, units_per_em) = (
-            f32::from(face.ascender()),
-            f32::from(face.descender()),
-            f32::from(face.units_per_em()),
-        );
-        Some(CjkFont {
-            db: std::sync::Arc::new(db),
-            family,
-            data,
-            ascender,
-            descender,
-            units_per_em,
-        })
+        // 随包仿宋只加载一次，生命周期全程有效。
+        let fallback = crate::portable_runtime::find_font_dir()
+            .and_then(|dir| std::fs::read(dir.join("FangSong.ttf")).ok())
+            .map(|data| Box::leak(data.into_boxed_slice()) as &'static [u8]);
+        match fallback {
+            Some(bytes) => MathFont::stix_two_math_with_fallback(bytes).map_err(|e| e.to_string()),
+            None => MathFont::stix_two_math().map_err(|e| e.to_string()),
+        }
     })
     .as_ref()
-    .ok_or_else(|| MathError("随包中文字体不可用".into()))
-}
-
-/// 物理像素位图（超采样后、贴图前的口径），基线从图顶量起。
-struct Bitmap {
-    /// 预乘 RGBA，长度 = width * height * 4。
-    premul: Vec<u8>,
-    width: usize,
-    height: usize,
-    baseline: f32,
+    .map_err(|e| MathError(e.clone()))
 }
 
 /// Dim 是有理数，只在出图边界上转成 f32（crate 自己的光栅化也是这么干的）。
@@ -115,29 +77,6 @@ pub(crate) fn render(
     color: egui::Color32,
     oversample: f32,
 ) -> Result<RenderedMath, MathError> {
-    let bitmap = if let Some(segments) = split_cjk_text(src) {
-        render_segments(&segments, display, font_size_pt, color, oversample)?
-    } else {
-        render_math_bitmap(src, display, font_size_pt, color, oversample)?
-    };
-    Ok(RenderedMath {
-        image: egui::ColorImage::from_rgba_unmultiplied(
-            [bitmap.width, bitmap.height],
-            &unpremul(&bitmap.premul),
-        ),
-        size: egui::vec2(bitmap.width as f32, bitmap.height as f32) / oversample,
-        baseline: bitmap.baseline / oversample,
-    })
-}
-
-/// 纯数学段：latex-rust 排版 + 光栅化 + 裁剪。
-fn render_math_bitmap(
-    src: &str,
-    display: bool,
-    font_size_pt: f32,
-    color: egui::Color32,
-    oversample: f32,
-) -> Result<Bitmap, MathError> {
     let font = font()?;
     let ast = latex_rust::parse(src).map_err(|e| MathError(e.to_string()))?;
     let style = if display {
@@ -186,305 +125,22 @@ fn render_math_bitmap(
         right = right.max(ink_right);
         bottom = bottom.max(ink_bottom);
     }
-    let crop_w = right.saturating_sub(left).max(1);
-    let crop_h = bottom.saturating_sub(top).max(1);
-    // 裁出的区段连同基线一起平移回原点。
+    let (crop_w, crop_h) = (
+        right.saturating_sub(left).max(1),
+        bottom.saturating_sub(top).max(1),
+    );
     let mut rgba = Vec::with_capacity(crop_w * crop_h * 4);
     for y in top..top + crop_h {
         let row = (y * width + left) * 4;
         rgba.extend_from_slice(&decoded.as_raw()[row..row + crop_w * 4]);
     }
-    Ok(Bitmap {
-        premul: premul(&rgba),
-        width: crop_w,
-        height: crop_h,
-        baseline: baseline_phys - top as f32,
+    let image = egui::ColorImage::from_rgba_unmultiplied([crop_w, crop_h], &rgba);
+
+    Ok(RenderedMath {
+        image,
+        size: egui::vec2(crop_w as f32, crop_h as f32) / oversample,
+        baseline: (baseline_phys - top as f32) / oversample,
     })
-}
-
-/// 拆分后的公式段：数学部分走 STIX，含中文的 `\text` 类命令走仿宋。
-enum Segment {
-    Math(String),
-    Cjk(String),
-}
-
-/// 可拆分的 `\text` 类命令。`\mathrm`、`\mathbf` 等数学字体命令保持原样
-/// （中文出现在那里本来就是不规范的写法，报错画占位框）。
-const TEXT_COMMANDS: &[&str] = &[
-    "text", "mbox", "textrm", "textbf", "textit", "textsf", "texttt",
-];
-
-/// 在顶层把含中文的 `\text{...}` 拆成独立段。没有任何可拆段时返回 None，
-/// 整体走纯数学渲染。拆不了的情况（嵌在分数/上下标里、中文段带着上下标）
-/// 同样返回 None，维持原来的报错占位框。
-fn split_cjk_text(src: &str) -> Option<Vec<Segment>> {
-    let font = font().ok()?;
-    let chars: Vec<char> = src.chars().collect();
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut math = String::new();
-    let mut depth = 0usize;
-    let mut found_cjk = false;
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\\' && depth == 0 {
-            let mut j = i + 1;
-            let mut name = String::new();
-            while j < chars.len() && chars[j].is_ascii_alphabetic() {
-                name.push(chars[j]);
-                j += 1;
-            }
-            if TEXT_COMMANDS.contains(&name.as_str()) {
-                let mut k = j;
-                while k < chars.len() && chars[k].is_whitespace() {
-                    k += 1;
-                }
-                if k < chars.len() && chars[k] == '{' {
-                    // 配平花括号取参数。
-                    let mut arg = String::new();
-                    let mut d = 0usize;
-                    let mut m = k;
-                    while m < chars.len() {
-                        match chars[m] {
-                            '{' => {
-                                d += 1;
-                                if d > 1 {
-                                    arg.push('{');
-                                }
-                            }
-                            '}' => {
-                                d -= 1;
-                                if d == 0 {
-                                    break;
-                                }
-                                arg.push('}');
-                            }
-                            other => arg.push(other),
-                        }
-                        m += 1;
-                    }
-                    let followed_by_script = matches!(chars.get(m + 1), Some('^') | Some('_'));
-                    let has_cjk = arg.chars().any(|ch| font.glyph(ch).is_err());
-                    if m < chars.len() && has_cjk && !followed_by_script {
-                        found_cjk = true;
-                        if !math.trim().is_empty() {
-                            segments.push(Segment::Math(std::mem::take(&mut math)));
-                        }
-                        segments.push(Segment::Cjk(arg));
-                        i = m + 1;
-                        continue;
-                    }
-                }
-            }
-            math.push(c);
-            if name.is_empty() {
-                // 反斜杠转义（`\{`、`\ ` 等）：被转义的字符原样带走。
-                if j < chars.len() {
-                    math.push(chars[j]);
-                }
-                i = (j + 1).min(chars.len());
-            } else {
-                // 普通命令原样保留，继续扫描命令名之后。
-                math.push_str(&name);
-                i = j;
-            }
-            continue;
-        }
-        match c {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        math.push(c);
-        i += 1;
-    }
-    if !math.is_empty() {
-        segments.push(Segment::Math(math));
-    }
-    found_cjk.then_some(segments)
-}
-
-/// 中文段：SVG `<text>` 走 usvg/resvg 光栅化，字体库只装随包仿宋，
-/// 度量（字宽、基线）用 ttf-parser 按同一字体实测量，两边不会错位。
-fn render_cjk_bitmap(
-    text: &str,
-    font_size_pt: f32,
-    color: egui::Color32,
-    oversample: f32,
-) -> Result<Bitmap, MathError> {
-    let font = cjk_font()?;
-    let face = ttf_parser::Face::parse(&font.data, 0)
-        .map_err(|e| MathError(format!("中文字体解析失败：{e}")))?;
-    let advance = |ch: char| {
-        face.glyph_index(ch)
-            .and_then(|glyph| face.glyph_hor_advance(glyph))
-            .map_or(font.units_per_em, f32::from)
-            / font.units_per_em
-    };
-    let font_size_px = font_size_pt * (96.0 / 72.0) * oversample;
-    let pad = (font_size_px * 0.25).ceil();
-    let width = (text.chars().map(advance).sum::<f32>() * font_size_px + pad * 2.0)
-        .ceil()
-        .max(1.0) as u32;
-    let ascender = font.ascender / font.units_per_em * font_size_px;
-    let descender = -font.descender / font.units_per_em * font_size_px;
-    let height = (ascender + descender + pad * 2.0).ceil().max(1.0) as u32;
-    let baseline = pad + ascender;
-    let escaped = text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    let svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\">\
-         <text x=\"{pad}\" y=\"{baseline:.2}\" font-family=\"{}\" font-size=\"{font_size_px:.2}\" \
-         fill=\"#{:02x}{:02x}{:02x}\">{escaped}</text></svg>",
-        font.family,
-        color.r(),
-        color.g(),
-        color.b()
-    );
-    let tree = usvg::Tree::from_str(
-        &svg,
-        &usvg::Options {
-            fontdb: font.db.clone(),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| MathError(format!("中文公式排版失败：{e}")))?;
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| MathError("中文公式画布无效".into()))?;
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
-    Ok(Bitmap {
-        premul: pixmap.take(),
-        width: width as usize,
-        height: height as usize,
-        baseline,
-    })
-}
-
-/// 各段按基线拼成一张位图。段之间不加胶：TeX 里 `\text` 是 Ord 原子，
-/// 与两侧数学原子的间距本来就是零，显式间距（`\ `）留在数学段里。
-fn render_segments(
-    segments: &[Segment],
-    display: bool,
-    font_size_pt: f32,
-    color: egui::Color32,
-    oversample: f32,
-) -> Result<Bitmap, MathError> {
-    let mut bitmaps = Vec::with_capacity(segments.len());
-    for segment in segments {
-        let bitmap = match segment {
-            Segment::Math(src) => {
-                // latex-rust 把行尾的控制空格（`\ `）当成悬空反斜杠报错，
-                // 补一个空分组既保住间距又能解析。
-                let padded;
-                let src = if src.chars().nth_back(1).is_some_and(|c| c == '\\')
-                    && src.chars().last().is_some_and(|c| c.is_whitespace())
-                {
-                    padded = format!("{src}{{}}");
-                    &padded
-                } else {
-                    src
-                };
-                render_math_bitmap(src, display, font_size_pt, color, oversample)?
-            }
-            Segment::Cjk(text) => render_cjk_bitmap(text, font_size_pt, color, oversample)?,
-        };
-        bitmaps.push(bitmap);
-    }
-    let baseline = bitmaps
-        .iter()
-        .map(|bitmap| bitmap.baseline)
-        .fold(0.0f32, f32::max);
-    let height = bitmaps
-        .iter()
-        .map(|bitmap| baseline - bitmap.baseline + bitmap.height as f32)
-        .fold(0.0f32, f32::max)
-        .ceil() as usize;
-    let width = bitmaps.iter().map(|bitmap| bitmap.width).sum::<usize>();
-    let mut out = vec![0u8; width * height * 4];
-    let mut x = 0usize;
-    for bitmap in &bitmaps {
-        let y = (baseline - bitmap.baseline).round() as usize;
-        blit(
-            &mut out,
-            (width, height),
-            &bitmap.premul,
-            (bitmap.width, bitmap.height),
-            (x, y),
-        );
-        x += bitmap.width;
-    }
-    Ok(Bitmap {
-        premul: out,
-        width,
-        height,
-        baseline,
-    })
-}
-
-/// 预乘 alpha：直乘 RGBA → 预乘 RGBA。
-fn premul(rgba: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
-        let a = u32::from(px[3]);
-        for channel in &px[0..3] {
-            out.push(((u32::from(*channel) * a + 127) / 255) as u8);
-        }
-        out.push(px[3]);
-    }
-    out
-}
-
-/// 预乘 → 直乘，四舍五入回误差用 a/2 补偿；全透像素保持全零。
-fn unpremul(premul: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(premul.len());
-    for px in premul.chunks_exact(4) {
-        let a = u32::from(px[3]);
-        let restore = |channel: u8| -> u8 {
-            let numer = u32::from(channel) * 255 + a / 2;
-            numer.checked_div(a).unwrap_or(0) as u8
-        };
-        for channel in &px[0..3] {
-            out.push(restore(*channel));
-        }
-        out.push(px[3]);
-    }
-    out
-}
-
-/// 预乘 RGBA 的 source-over 前景叠加。
-fn blit(
-    dst: &mut [u8],
-    (dst_w, dst_h): (usize, usize),
-    src: &[u8],
-    (src_w, src_h): (usize, usize),
-    (x_off, y_off): (usize, usize),
-) {
-    for y in 0..src_h {
-        let dy = y_off + y;
-        if dy >= dst_h {
-            break;
-        }
-        for x in 0..src_w {
-            let dx = x_off + x;
-            if dx >= dst_w {
-                break;
-            }
-            let s = (y * src_w + x) * 4;
-            let d = (dy * dst_w + dx) * 4;
-            let sa = u32::from(src[s + 3]);
-            if sa == 0 {
-                continue;
-            }
-            let inv = 255 - sa;
-            for c in 0..3 {
-                dst[d + c] =
-                    (u32::from(src[s + c]) + (u32::from(dst[d + c]) * inv + 127) / 255) as u8;
-            }
-            dst[d + 3] = (sa + (u32::from(dst[d + 3]) * inv + 127) / 255) as u8;
-        }
-    }
 }
 
 /// 光栅化前四周留白的 em 数。latex-rust 的画布紧贴盒模型，而 STIX Two Math 的
@@ -545,6 +201,11 @@ mod tests {
     fn render_ok(src: &str, display: bool) -> RenderedMath {
         render(src, display, 14.0, BLACK, 2.0)
             .unwrap_or_else(|e| panic!("公式应渲染成功：{src}，实际失败：{e}"))
+    }
+
+    /// 回退中文字体是否就位；没随包字体的环境（CI）跳过中文用例。
+    fn has_fallback_font() -> bool {
+        font().map(|f| f.fallback_face().is_some()).unwrap_or(false)
     }
 
     /// 研究报告里常见的构造都要能排出来。
@@ -652,21 +313,22 @@ mod tests {
         assert!(render(r"\notarealcommand{1}", false, 14.0, BLACK, 1.0).is_err());
     }
 
-    /// 中文混排：含中文的顶层 `\text` 拆出用仿宋渲染，整式可出图且墨迹非空。
-    /// 跑在没随包字体的环境（CI）时安静跳过。
+    /// 中文混排：`\text{中文}` 嵌在任何深度都走回退字体渲染，整式可出图。
+    /// 没随包字体的环境（CI）安静跳过。
     #[test]
-    fn chinese_text_renders_with_fallback() {
-        if cjk_font().is_err() {
+    fn chinese_text_renders_via_fallback_font() {
+        if !has_fallback_font() {
             eprintln!("跳过：当前环境没有随包中文字体");
             return;
         }
         for src in [
             r"\text{中文}",
             r"\{x \mid x\in A \ \text{或}\ x\in B\}",
-            r"\text{或}A\text{或}",
+            r"S = \underbrace{\frac{1}{2}ab\sin C}_{\text{三角形面积公式}}",
+            r"\text{期望}\ \mathbb{E}[X]\ \text{或} = 0",
+            r"\text{或}^2",
         ] {
-            let rendered = render(src, false, 14.0, BLACK, 2.0)
-                .unwrap_or_fail(&format!("中文公式应渲染成功：{src}"));
+            let rendered = render_ok(src, false);
             assert!(
                 rendered.size.x > 0.0 && rendered.size.y > 0.0,
                 "{src} 尺寸应非零"
@@ -674,62 +336,5 @@ mod tests {
             let has_ink = rendered.image.pixels.iter().any(|px| px.a() > 0);
             assert!(has_ink, "{src} 应有墨迹");
         }
-        // 嵌在上下标、分数里的中文 \text 拆不出来，维持报错占位框（导出正常）。
-        assert!(
-            render(
-                r"S = \underbrace{\frac{1}{2}ab}_{\text{三角形面积}}",
-                false,
-                14.0,
-                BLACK,
-                1.0
-            )
-            .is_err()
-        );
-    }
-
-    /// 测试小工具：把渲染失败炸成带上下文的 panic。
-    trait RenderExt {
-        fn unwrap_or_fail(self, context: &str) -> RenderedMath;
-    }
-
-    impl RenderExt for Result<RenderedMath, MathError> {
-        fn unwrap_or_fail(self, context: &str) -> RenderedMath {
-            self.unwrap_or_else(|e| panic!("{context}，实际失败：{e}"))
-        }
-    }
-
-    #[test]
-    fn splits_top_level_cjk_text_only() {
-        let names = |segments: Option<Vec<Segment>>| {
-            segments
-                .iter()
-                .flatten()
-                .map(|segment| match segment {
-                    Segment::Math(s) => format!("M:{s}"),
-                    Segment::Cjk(s) => format!("C:{s}"),
-                })
-                .collect::<Vec<_>>()
-        };
-        // 顶层中文 \text 拆成三段，两侧数学原样保留（含显式空格 `\ `）。
-        assert_eq!(
-            names(split_cjk_text(r"\{x \mid x\in A \ \text{或}\ x\in B\}")),
-            vec![
-                r"M:\{x \mid x\in A \ ".to_string(),
-                "C:或".to_string(),
-                r"M:\ x\in B\}".to_string(),
-            ]
-        );
-        assert_eq!(
-            names(split_cjk_text(r"\text{或}A\text{或}")),
-            vec!["C:或".to_string(), "M:A".to_string(), "C:或".to_string()]
-        );
-        // 纯英文 \text 与纯数学不拆。
-        assert!(split_cjk_text(r"\text{abc}").is_none());
-        assert!(split_cjk_text(r"x^2+y^2").is_none());
-        // 嵌在分组里、或中文段带着上下标，拆不了就维持整体报错占位框。
-        assert!(split_cjk_text(r"{\text{或}}").is_none());
-        assert!(split_cjk_text(r"\text{或}^2").is_none());
-        // 转义花括号不干扰深度统计。
-        assert!(split_cjk_text(r"\{ \text{或} \}").is_some());
     }
 }

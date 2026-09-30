@@ -1,0 +1,244 @@
+# Milestone 7 — multiline environments, numbering, array, substack.
+
+[[gold]]
+name = "aligned-two-ast"
+kind = "ast"
+input = "\\begin{aligned} f(x) &= x^2 + 2x + 1 \\\\ &= (x+1)^2 \\end{aligned}"
+expect = "(matrix aligned ((row (atom Ord \"f\") (atom Open \"(\") (atom Ord \"x\") (atom Close \")\")) (row (atom Rel \"=\") (sup (atom Ord \"x\") (atom Ord \"2\")) (atom Bin \"+\") (atom Ord \"2\") (atom Ord \"x\") (atom Bin \"+\") (atom Ord \"1\"))) ((row) (row (atom Rel \"=\") (atom Open \"(\") (atom Ord \"x\") (atom Bin \"+\") (atom Ord \"1\") (sup (atom Close \")\") (atom Ord \"2\")))))"
+
+[[gold]]
+name = "aligned-two-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{aligned} f(x) &= x^2 + 2x + 1 \\\\ &= (x+1)^2 \\end{aligned}"
+expect = "w=7.669166666666666666666666 h=0.8108 d=1.4318"
+
+[[gold]]
+name = "aligned-three-eq-x"
+kind = "eq_x"
+style = "display"
+input = "\\begin{aligned}a&=1\\\\aa&=2\\\\aaa&=3\\end{aligned}"
+expect = "="
+
+[[gold]]
+name = "aligned-three-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{aligned}a&=1\\\\aa&=2\\\\aaa&=3\\end{aligned}"
+expect = "w=3.157777777777777777777777 h=0.639 d=1.725"
+
+[[gold]]
+name = "aligned-frac-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{aligned} \\frac{a}{b} &= c \\end{aligned}"
+expect = "w=1.966777777777777777777777 h=1.119 d=0.652"
+
+[[gold]]
+name = "align-two-ast"
+kind = "ast"
+input = "\\begin{align} f(x) &= x^2 + 1 \\\\ g(x) &= 2x - 3 \\end{align}"
+expect = "(matrix align ((row (atom Ord \"f\") (atom Open \"(\") (atom Ord \"x\") (atom Close \")\")) (row (atom Rel \"=\") (sup (atom Ord \"x\") (atom Ord \"2\")) (atom Bin \"+\") (atom Ord \"1\"))) ((row (atom Ord \"g\") (atom Open \"(\") (atom Ord \"x\") (atom Close \")\")) (row (atom Rel \"=\") (atom Ord \"2\") (atom Ord \"x\") (atom Bin \"-\") (atom Ord \"3\"))))"
+
+[[gold]]
+name = "align-two-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{align} f(x) &= x^2 + 1 \\\\ g(x) &= 2x - 3 \\end{align}"
+expect = "w=7.770222222222222222222222 h=0.8108 d=1.386"
+
+[[gold]]
+name = "align-nonumber-ast"
+kind = "ast"
+input = "\\begin{align} f(x) &= x^2 + 1 \\\\ g(x) &= 2x - 3 \\nonumber \\end{align}"
+expect = "(matrix align ((row (atom Ord \"f\") (atom Open \"(\") (atom Ord \"x\") (atom Close \")\")) (row (atom Rel \"=\") (sup (atom Ord \"x\") (atom Ord \"2\")) (atom Bin \"+\") (atom Ord \"1\"))) ((row (atom Ord \"g\") (atom Open \"(\") (atom Ord \"x\") (atom Close \")\")) (row (atom Rel \"=\") (atom Ord \"2\") (atom Ord \"x\") (atom Bin \"-\") (atom Ord \"3\")) (nonumber)))"
+
+[[gold]]
+name = "align-nonumber-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{align} f(x) &= x^2 + 1 \\\\ g(x) &= 2x - 3 \\nonumber \\end{align}"
+expect = "w=7.770222222222222222222222 h=0.8108 d=1.386"
+
+[[gold]]
+name = "align-tag-ast"
+kind = "ast"
+input = "\\begin{align} f(x) &= x^2 \\tag{*} \\end{align}"
+expect = "(matrix align ((row (atom Ord \"f\") (atom Open \"(\") (atom Ord \"x\") (atom Close \")\")) (row (atom Rel \"=\") (sup (atom Ord \"x\") (atom Ord \"2\"))) (tag (atom Bin \"*\"))))"
+
+[[gold]]
+name = "align-tag-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{align} f(x) &= x^2 \\tag{*} \\end{align}"
+expect = "w=5.915277777777777777777777 h=0.8108 d=0.225"
+
+[[gold]]
+name = "gather-two-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{gather} x + y = 1 \\\\ 2x - y = 3 \\end{gather}"
+expect = "w=6.708 h=0.736 d=1.376"
+
+[[gold]]
+name = "gather-nonumber-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{gather} x + y = 1 \\\\ 2x - y = 3 \\nonumber \\end{gather}"
+expect = "w=6.708 h=0.736 d=1.284"
+
+[[gold]]
+name = "multline-two-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{multline} f(x) = a_0 + a_1 x \\\\ + a_2 x^2 \\end{multline}"
+expect = "w=8.917 h=0.736 d=1.4458"
+
+[[gold]]
+name = "multline-three-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{multline} a \\\\ b \\\\ c \\end{multline}"
+expect = "w=2.764 h=0.736 d=1.62"
+
+[[gold]]
+name = "equation-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{equation} E = mc^2 \\end{equation}"
+expect = "w=5.717055555555555555555555 h=0.8108 d=0.196"
+
+[[gold]]
+name = "equation-nonumber-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{equation} E = mc^2 \\nonumber \\end{equation}"
+expect = "w=3.508055555555555555555555 h=0.8108 d=0.012"
+
+[[gold]]
+name = "equation-label"
+kind = "label"
+style = "display"
+key = "e"
+input = "\\begin{equation}\\label{e}x\\end{equation}"
+expect = "(1)"
+
+[[gold]]
+name = "equation-forward-ref"
+kind = "label"
+style = "display"
+key = "e"
+input = "\\ref{e}\\begin{equation}\\label{e}x\\end{equation}"
+expect = "(1)"
+
+[[gold]]
+name = "ref-ast"
+kind = "ast"
+input = "\\ref{e}"
+expect = "(ref e)"
+
+[[gold]]
+name = "cases-piecewise-dims"
+kind = "dims"
+style = "display"
+input = "f(x)=\\begin{cases} x^2 & \\text{if } x > 0 \\\\ 0 & \\text{if } x = 0 \\\\ -x^2 & \\text{if } x < 0 \\end{cases}"
+expect = "w=9.433833333333333333333333 h=1.702 d=1.9848"
+
+[[gold]]
+name = "cases-frac-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{cases} \\frac{1}{2} \\\\ b \\end{cases}"
+expect = "w=1.019 h=1.702 d=1.557"
+
+[[gold]]
+name = "array-lcr-ast"
+kind = "ast"
+input = "\\begin{array}{lcr} a & b & c \\\\ d & e & f \\end{array}"
+expect = "(matrix array lcr ((atom Ord \"a\") (atom Ord \"b\") (atom Ord \"c\")) ((atom Ord \"d\") (atom Ord \"e\") (atom Ord \"f\")))"
+
+[[gold]]
+name = "array-lcr-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{array}{lcr} a & b & c \\\\ d & e & f \\end{array}"
+expect = "w=2.762111111111111111111111 h=0.705 d=1.148"
+
+[[gold]]
+name = "array-hline-ast"
+kind = "ast"
+input = "\\begin{array}{c} a \\\\ \\hline b \\end{array}"
+expect = "(matrix array c ((atom Ord \"a\")) (hline) ((atom Ord \"b\")))"
+
+[[gold]]
+name = "array-hline-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{array}{c} a \\\\ \\hline b \\end{array}"
+expect = "w=0.555 h=0.479 d=0.797"
+
+[[gold]]
+name = "array-vrule-ast"
+kind = "ast"
+input = "\\begin{array}{|c|c|} a & b \\\\ c & d \\end{array}"
+expect = "(matrix array |c|c| ((atom Ord \"a\") (atom Ord \"b\")) ((atom Ord \"c\") (atom Ord \"d\")))"
+
+[[gold]]
+name = "array-vrule-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{array}{|c|c|} a & b \\\\ c & d \\end{array}"
+expect = "w=1.315 h=0.705 d=0.929"
+
+[[gold]]
+name = "split-in-equation-ast"
+kind = "ast"
+input = "\\begin{equation}\\begin{split} f(x) &= (x+1)^2 \\\\ &= x^2 + 2x + 1 \\end{split}\\end{equation}"
+expect = "(matrix equation ((matrix split ((row (atom Ord \"f\") (atom Open \"(\") (atom Ord \"x\") (atom Close \")\")) (row (atom Rel \"=\") (atom Open \"(\") (atom Ord \"x\") (atom Bin \"+\") (atom Ord \"1\") (sup (atom Close \")\") (atom Ord \"2\")))) ((row) (row (atom Rel \"=\") (sup (atom Ord \"x\") (atom Ord \"2\")) (atom Bin \"+\") (atom Ord \"2\") (atom Ord \"x\") (atom Bin \"+\") (atom Ord \"1\"))))))"
+
+[[gold]]
+name = "split-in-equation-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{equation}\\begin{split} f(x) &= (x+1)^2 \\\\ &= x^2 + 2x + 1 \\end{split}\\end{equation}"
+expect = "w=9.878166666666666666666666 h=0.8108 d=1.2758"
+
+[[gold]]
+name = "substack-ast"
+kind = "ast"
+input = "\\sum_{\\substack{i=1 \\\\ i \\neq j}}^{n}"
+expect = "(sum (substack (row (atom Ord \"i\") (atom Rel \"=\") (atom Ord \"1\")) (row (atom Ord \"i\") (symbol neq) (atom Ord \"j\"))) (atom Ord \"n\"))"
+
+[[gold]]
+name = "substack-dims"
+kind = "dims"
+style = "display"
+input = "\\sum_{\\substack{i=1 \\\\ i \\neq j}}^{n}"
+expect = "w=1.112 h=1.5613 d=2.05335"
+
+[[gold]]
+name = "intertext-ast"
+kind = "ast"
+input = "\\begin{align} x &= 1 \\\\ \\intertext{note} y &= 2 \\end{align}"
+expect = "(matrix align ((atom Ord \"x\") (row (atom Rel \"=\") (atom Ord \"1\"))) (intertext (text text \"note\")) ((atom Ord \"y\") (row (atom Rel \"=\") (atom Ord \"2\"))))"
+
+[[gold]]
+name = "intertext-dims"
+kind = "dims"
+style = "display"
+input = "\\begin{align} x &= 1 \\\\ \\intertext{note} y &= 2 \\end{align}"
+expect = "w=4.260777777777777777777777 h=0.736 d=2.172"
+
+[[gold]]
+name = "mismatch-align-gather"
+kind = "err"
+error = "Malformed"
+input = "\\begin{align}a\\end{gather}"
+expect = "align"
+
+[[gold]]
+name = "unknown-environment"
+kind = "err"
+error = "Unsupported"
+input = "\\begin{foo}a\\end{foo}"
+expect = "environment foo"

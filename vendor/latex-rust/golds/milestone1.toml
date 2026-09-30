@@ -1,0 +1,376 @@
+# Gold tests — Milestone 1
+# Contract: code must match these values. Do not edit golds to hide a bug.
+
+[[gold]]
+name = "tok_frac"
+kind = "tokenize"
+input = "\\frac{1}{2}"
+expect = "cmd:frac { char:1 } { char:2 }"
+
+[[gold]]
+name = "tok_super_sub"
+kind = "tokenize"
+input = "x_i^2"
+expect = "char:x _ char:i ^ char:2"
+
+[[gold]]
+name = "tok_sqrt_index"
+kind = "tokenize"
+input = "\\sqrt[n]{x}"
+expect = "cmd:sqrt char:[ char:n char:] { char:x }"
+
+[[gold]]
+name = "tok_sum_int"
+kind = "tokenize"
+input = "\\sum_{i=1}^{n}\\int_{a}^{b}"
+expect = "cmd:sum _ { char:i char:= char:1 } ^ { char:n } cmd:int _ { char:a } ^ { char:b }"
+
+[[gold]]
+name = "tok_greek"
+kind = "tokenize"
+input = "\\alpha\\beta\\Gamma\\pi"
+expect = "cmd:alpha cmd:beta cmd:Gamma cmd:pi"
+
+[[gold]]
+name = "tok_inline_dollar"
+kind = "tokenize"
+input = "$x$"
+expect = "$ char:x $"
+
+[[gold]]
+name = "tok_display_dollar"
+kind = "tokenize"
+input = "$$x$$"
+expect = "$$ char:x $$"
+
+[[gold]]
+name = "tok_display_bracket"
+kind = "tokenize"
+input = "\\[x\\]"
+expect = "cmd:[ char:x cmd:]"
+
+[[gold]]
+name = "tok_inline_paren"
+kind = "tokenize"
+input = "\\(x\\)"
+expect = "cmd:( char:x cmd:)"
+
+[[gold]]
+name = "tok_comment"
+kind = "tokenize"
+input = "a% hide\nb"
+expect = "char:a char:b"
+
+[[gold]]
+name = "tok_trailing_backslash"
+kind = "tokenize_err"
+input = "x\\"
+expect = "trailing backslash"
+
+[[gold]]
+name = "dim_add"
+kind = "dim"
+op = "add"
+lhs = "1"
+rhs = "2"
+expect = "3"
+
+[[gold]]
+name = "dim_mul"
+kind = "dim"
+op = "mul"
+lhs = "4"
+rhs = "5"
+expect = "20"
+
+[[gold]]
+name = "dim_div"
+kind = "dim"
+op = "div"
+lhs = "1"
+rhs = "2"
+expect = "0.5"
+
+[[gold]]
+name = "dim_mu_to_em"
+kind = "dim"
+op = "from_mu"
+lhs = "18"
+expect = "1"
+
+[[gold]]
+name = "dim_as_ratio"
+kind = "dim"
+op = "as_ratio"
+lhs = "0.5"
+expect = "1/2"
+
+[[gold]]
+name = "dim_as_ratio_repeating"
+kind = "dim"
+op = "as_ratio"
+lhs = "0.125"
+expect = "1/8"
+
+[[gold]]
+name = "dim_font_units"
+kind = "dim"
+op = "font_units"
+lhs = "479"
+rhs = "1000"
+expect = "0.479"
+
+[[gold]]
+name = "box_hpack"
+kind = "box"
+op = "hpack"
+widths = "10,20,30"
+expect_width = "60"
+
+[[gold]]
+name = "box_vpack"
+kind = "box"
+op = "vpack"
+heights = "1,2"
+depths = "3,4"
+expect_height = "1"
+expect_depth = "9"
+
+[[gold]]
+name = "font_upem"
+kind = "font"
+op = "units_per_em"
+expect = "1000"
+
+[[gold]]
+name = "font_hhea"
+kind = "font"
+op = "hhea"
+expect = "762,-238"
+
+[[gold]]
+name = "font_advance_x"
+kind = "font"
+op = "advance"
+input = "x"
+expect = "479"
+
+[[gold]]
+name = "font_advance_M"
+kind = "font"
+op = "advance"
+input = "M"
+expect = "895"
+
+[[gold]]
+name = "font_advance_plus"
+kind = "font"
+op = "advance"
+input = "+"
+expect = "720"
+
+[[gold]]
+name = "font_advance_sum"
+kind = "font"
+op = "advance"
+input = "∑"
+expect = "936"
+
+[[gold]]
+name = "font_advance_int"
+kind = "font"
+op = "advance"
+input = "∫"
+expect = "684"
+
+[[gold]]
+name = "font_sha256"
+kind = "font"
+op = "sha256"
+expect = "f2076b9f1676438439dd41e23676f5ab99056e83d6b8f8c27841591ef2ccfa72"
+
+[[gold]]
+name = "font_missing"
+kind = "font"
+op = "missing"
+input = "\u{0378}"
+expect = "missing glyph"
+
+[[gold]]
+name = "sym_count"
+kind = "symbol"
+op = "count"
+expect = "476"
+
+[[gold]]
+name = "sym_alpha"
+kind = "symbol"
+op = "lookup"
+input = "\\alpha"
+expect = "α"
+
+[[gold]]
+name = "sym_frac"
+kind = "symbol"
+op = "lookup"
+input = "frac"
+expect = "\\frac{}{}"
+
+[[gold]]
+name = "sym_greek"
+kind = "symbol"
+op = "category_count"
+input = "Greek"
+expect = "42"
+
+[[gold]]
+name = "tok_textcolor"
+kind = "tokenize"
+input = "\\textcolor{red}{x}"
+expect = "cmd:textcolor { char:r char:e char:d } { char:x }"
+
+[[gold]]
+name = "tok_color_scope"
+kind = "tokenize"
+input = "{\\color{blue}x+y}+z"
+expect = "{ cmd:color { char:b char:l char:u char:e } char:x char:+ char:y } char:+ char:z"
+
+[[gold]]
+name = "tok_colorbox"
+kind = "tokenize"
+input = "\\colorbox{yellow}{\\frac{1}{2}}"
+expect = "cmd:colorbox { char:y char:e char:l char:l char:o char:w } { cmd:frac { char:1 } { char:2 } }"
+
+[[gold]]
+name = "tok_definecolor"
+kind = "tokenize"
+input = "\\definecolor{mygreen}{rgb}{0.0,0.6,0.0}"
+expect = "cmd:definecolor { char:m char:y char:g char:r char:e char:e char:n } { char:r char:g char:b } { char:0 char:. char:0 char:, char:0 char:. char:6 char:, char:0 char:. char:0 }"
+
+[[gold]]
+name = "color_named_red"
+kind = "color"
+op = "named"
+input = "red"
+expect = "#ff0000"
+
+[[gold]]
+name = "color_named_blue"
+kind = "color"
+op = "named"
+input = "blue"
+expect = "#0000ff"
+
+[[gold]]
+name = "color_dvips_royalblue"
+kind = "color"
+op = "named"
+input = "RoyalBlue"
+expect = "#0080ff"
+
+[[gold]]
+name = "color_named_count"
+kind = "color"
+op = "named_count"
+expect = "76"
+
+[[gold]]
+name = "color_rgb_mygreen"
+kind = "color"
+op = "model"
+model = "rgb"
+input = "0.0,0.6,0.0"
+expect = "#009900"
+
+[[gold]]
+name = "color_html"
+kind = "color"
+op = "model"
+model = "HTML"
+input = "3366ff"
+expect = "#3366ff"
+
+[[gold]]
+name = "color_gray"
+kind = "color"
+op = "model"
+model = "gray"
+input = "0.5"
+expect = "#808080"
+
+[[gold]]
+name = "color_cmyk_red"
+kind = "color"
+op = "model"
+model = "cmyk"
+input = "0,1,1,0"
+expect = "#ff0000"
+
+[[gold]]
+name = "color_spot_unsupported"
+kind = "color"
+op = "error"
+model = "spot"
+input = "0.5"
+expect = "unsupported"
+
+[[gold]]
+name = "color_unknown_name"
+kind = "color"
+op = "error_named"
+input = "notacolor"
+expect = "unsupported"
+
+[[gold]]
+name = "color_define_mygreen"
+kind = "color"
+op = "define"
+lhs = "mygreen"
+model = "rgb"
+input = "0.0,0.6,0.0"
+expect = "#009900"
+
+[[gold]]
+name = "color_RGB"
+kind = "color"
+op = "model"
+model = "RGB"
+input = "0,153,0"
+expect = "#009900"
+
+[[gold]]
+name = "color_cmyk_orange"
+kind = "color"
+op = "model"
+model = "cmyk"
+input = "0,0.4,1,0"
+expect = "#ff9900"
+
+[[gold]]
+name = "color_cerulean"
+kind = "color"
+op = "named"
+input = "Cerulean"
+expect = "#0fe3ff"
+
+[[gold]]
+name = "color_black"
+kind = "color"
+op = "named"
+input = "black"
+expect = "#000000"
+
+[[gold]]
+name = "color_white"
+kind = "color"
+op = "named"
+input = "white"
+expect = "#ffffff"
+
+[[gold]]
+name = "color_malformed_rgb"
+kind = "color"
+op = "error_malformed"
+model = "rgb"
+input = "0.5"
+expect = "malformed"

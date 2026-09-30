@@ -44,10 +44,14 @@ Math formulas in research-report previews are rendered in-process by the
 which is dual-licensed under MIT OR Apache-2.0. The crate embeds the
 STIX Two Math font (SIL Open Font License 1.1) used for the preview glyphs;
 exported PDFs do not contain STIX outlines (they use TeX's math fonts via
-the bundled Tectonic runtime).
+the bundled Tectonic runtime). A source copy is vendored in
+`vendor/latex-rust` (with a patch adding a fallback face for characters
+STIX lacks, e.g. CJK, drawn from the bundled FangSong); its license texts
+are preserved at `vendor/latex-rust/LICENSE-MIT` and
+`vendor/latex-rust/LICENSE-APACHE`.
 
 - Project: <https://github.com/jscarr64/LaTeX-Rust>
-- Version: `latex-rust@1.0.4`
+- Version: `latex-rust@2.0.1`
 - STIX Two Math: <https://github.com/stipub/stixfonts> (SIL OFL 1.1)
 
 ## Hayro and Vello CPU
