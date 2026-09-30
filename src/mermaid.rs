@@ -1797,7 +1797,7 @@ mod tests {
         use mdx::{ConvertRequest, DocumentStyle, OutputFormat};
 
         let dir = tempfile::tempdir().unwrap();
-        let body = "# 流程研究\n\n<!-- [正文] -->\n\n## 办理环节\n\n```mermaid\nflowchart LR\n A[收文] --> B[办理]\n```\n图：办理流程 {#fig:flow}\n";
+        let body = "# 流程研究\n\n<!-- [正文] -->\n\n## 办理环节\n\n见图 {@fig:flow}。\n\n```mermaid\nflowchart LR\n A[收文] --> B[办理]\n```\n图：办理流程 {#fig:flow}\n";
         for (format, output_format, extension) in [
             (Format::Pdf, OutputFormat::Tex, "tex"),
             (Format::Png, OutputFormat::Docx, "docx"),
