@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "gongwen-assistant"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "aho-corasick",
  "anydoc",
