@@ -196,6 +196,12 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "数据存放路径与备份建议"
     ),
     chapter!(
+        "22-send-package",
+        Part::Ops,
+        "送批材料",
+        "呈批件挂随行件、合并 PDF 与归档钉版"
+    ),
+    chapter!(
         "a-shortcuts",
         Part::Appendix,
         "附录 A 快捷键一览",
