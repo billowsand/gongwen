@@ -40,6 +40,8 @@ struct PackageRow {
     state: Option<PackageItemState>,
     /// 最近一次导出里这一件用的版本号；没导出过或当时不在清单里为 `None`。
     last_exported: Option<i64>,
+    /// 主件归档时钉住的版本：外层 `None` 为没钉；内层同 `revision_number`。
+    pinned: Option<Option<Option<i64>>>,
 }
 
 /// 导出前的确认：计划已生成，等人勾选目录页、选保存位置。
@@ -128,12 +130,17 @@ impl SendPackagePanel {
                 })
             };
             let (owner_uuid, _) = store.document_identity(self.owner_id)?;
+            let pinned = |uuid: Option<String>| -> anyhow::Result<Option<Option<Option<i64>>>> {
+                uuid.map(|uuid| store.revision_number(&uuid)).transpose()
+            };
             let mut owner = load_row(store, String::new(), Some(self.owner_id))?;
             owner.last_exported = exported(&owner_uuid);
+            owner.pinned = pinned(store.owner_pin(self.owner_id)?)?;
             let mut items = Vec::new();
             for item in store.send_package_items(self.owner_id)? {
                 let mut row = load_row(store, item.item_uuid, item.manuscript_id)?;
                 row.last_exported = exported(&row.item_uuid);
+                row.pinned = pinned(item.pinned_revision_uuid)?;
                 items.push(row);
             }
             self.owner = Some(owner);
@@ -168,6 +175,7 @@ fn load_row(
         brief,
         state,
         last_exported: None,
+        pinned: None,
     })
 }
 
@@ -598,6 +606,35 @@ fn row_card(
             ui.weak("关联照旧保留：从同步包导入该稿件后自动恢复；不再需要可以移除。");
             return;
         };
+        // 归档后钉住了版本：导出只用这一版，之后的提交与未提交修改都与送批材料无关。
+        if let Some(pinned) = row.pinned {
+            ui.horizontal_wrapped(|ui| {
+                match pinned {
+                    Some(Some(number)) => {
+                        theme::chip(
+                            ui,
+                            &format!("钉住 v{number}"),
+                            theme::success(),
+                            theme::success_soft(),
+                        );
+                    }
+                    Some(None) => {
+                        theme::chip(
+                            ui,
+                            "钉住导出时的版本",
+                            theme::success(),
+                            theme::success_soft(),
+                        );
+                    }
+                    None => {
+                        ui.colored_label(theme::danger(), "钉住的版本在本机找不到");
+                    }
+                }
+                ui.weak("归档时固定，以后导出都用这一版");
+                ui.colored_label(status_color(brief.status), brief.status.label());
+            });
+            return;
+        }
         match &state.latest {
             Some(latest) => {
                 let mut line = format!("v{}", latest.visible_number);

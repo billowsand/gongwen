@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS send_package_exports (
 );
 CREATE INDEX IF NOT EXISTS idx_send_package_exports_owner ON send_package_exports(owner_id);
 
+-- 主件自己在归档时钉住的版本（随行件的钉版记在 send_package_items 上）。
+CREATE TABLE IF NOT EXISTS send_package_owner_pins (
+    owner_id      INTEGER PRIMARY KEY REFERENCES manuscripts(id) ON DELETE CASCADE,
+    revision_uuid TEXT    NOT NULL
+);
+
 -- 每次导出里每个件（主件 sort_order = 0）的身份与版本；标题、文种冗余保存，
 -- 稿件以后改名或删除，记录照样读得懂。
 CREATE TABLE IF NOT EXISTS send_package_export_items (
@@ -251,6 +257,73 @@ pub struct ExportRecord {
     pub with_toc: bool,
     pub total_pages: i64,
     pub items: Vec<ExportItemRecord>,
+}
+
+/// 指向某一版的引用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionRef {
+    pub revision_uuid: String,
+    pub visible_number: Option<i64>,
+}
+
+/// 归档时钉哪一版。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PinChoice {
+    /// 最近一次导出用的版本，即实际送出去的那一套（默认）；没导出过的件用最新提交版。
+    #[default]
+    Exported,
+    /// 当前最新提交版；没有提交版本的件退回导出时的版本。
+    Latest,
+}
+
+/// 钉版预览里的一件（第 0 件是主件）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinPreviewEntry {
+    pub document_uuid: String,
+    /// 本机找不到时为空。
+    pub title: String,
+    pub exported: Option<RevisionRef>,
+    pub latest: Option<RevisionRef>,
+}
+
+impl PinPreviewEntry {
+    /// 按选择实际要钉的版本。
+    pub fn pin(&self, choice: PinChoice) -> Option<&RevisionRef> {
+        match choice {
+            PinChoice::Exported => self.exported.as_ref().or(self.latest.as_ref()),
+            PinChoice::Latest => self.latest.as_ref().or(self.exported.as_ref()),
+        }
+    }
+
+    /// 送出之后又提交过新版本：两种选择会钉到不同的版本上。
+    pub fn changed_since_export(&self) -> bool {
+        matches!((&self.exported, &self.latest), (Some(a), Some(b)) if a.revision_uuid != b.revision_uuid)
+    }
+}
+
+/// 归档前的钉版预览。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinPreview {
+    /// 最近一次导出的时间；从没导出过为 `None`。
+    pub exported_at: Option<String>,
+    pub entries: Vec<PinPreviewEntry>,
+}
+
+impl PinPreview {
+    /// 有件在送出之后改过，需要让人选钉哪一版。
+    pub fn needs_choice(&self) -> bool {
+        self.entries
+            .iter()
+            .any(PinPreviewEntry::changed_since_export)
+    }
+
+    /// 既没导出过、也没有提交版本的件：归档会被拒绝。
+    pub fn unpinnable(&self) -> Vec<&PinPreviewEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.exported.is_none() && entry.latest.is_none())
+            .collect()
+    }
 }
 
 /// 稿件的全部身份：当前 UUID 加上合并身份后留下的别名。随行件按其中任一个引用都算。
@@ -552,7 +625,7 @@ impl ManuscriptStore {
     /// 取不到的记下拦截原因。只读库，不改任何东西。
     pub fn send_package_plan(&self, owner_id: i64) -> Result<SendPackagePlan> {
         let (owner_uuid, _) = self.document_identity(owner_id)?;
-        let mut targets = vec![(Some(owner_id), owner_uuid, None)];
+        let mut targets = vec![(Some(owner_id), owner_uuid, self.owner_pin(owner_id)?)];
         for item in self.send_package_items(owner_id)? {
             targets.push((
                 item.manuscript_id,
@@ -730,6 +803,132 @@ impl ManuscriptStore {
             out.push(record);
         }
         Ok(out)
+    }
+
+    /// 某一版在本机版本图里的显示序号：外层 `None` 表示本机没有这一版，
+    /// 内层 `None` 表示有但它是不显示序号的同步检查点。
+    pub fn revision_number(&self, revision_uuid: &str) -> Result<Option<Option<i64>>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT visible_number FROM sync_revisions WHERE revision_uuid=?1",
+                [revision_uuid],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?)
+    }
+
+    /// 主件归档时钉住的自身版本。
+    pub fn owner_pin(&self, owner_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT revision_uuid FROM send_package_owner_pins WHERE owner_id=?1",
+                [owner_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// 归档前的钉版预览：主件与各随行件「送出时的版本」（最近一次导出记录里的）与
+    /// 「当前最新提交版」。没挂送批材料时为 `None`。
+    pub fn archive_pin_preview(&self, owner_id: i64) -> Result<Option<PinPreview>> {
+        if !self.has_send_package_items(owner_id)? {
+            return Ok(None);
+        }
+        let last_export = self.send_package_exports(owner_id)?.into_iter().next();
+        let exported = |uuid: &str| {
+            last_export.as_ref().and_then(|record| {
+                record
+                    .items
+                    .iter()
+                    .find(|item| item.document_uuid == uuid)
+                    .map(|item| RevisionRef {
+                        revision_uuid: item.revision_uuid.clone(),
+                        visible_number: item.visible_number,
+                    })
+            })
+        };
+        let (owner_uuid, _) = self.document_identity(owner_id)?;
+        let mut targets = vec![(Some(owner_id), owner_uuid)];
+        for item in self.send_package_items(owner_id)? {
+            targets.push((item.manuscript_id, item.item_uuid));
+        }
+        let mut entries = Vec::with_capacity(targets.len());
+        for (manuscript_id, document_uuid) in targets {
+            let brief = match manuscript_id {
+                Some(id) => self.manuscript_brief(id)?,
+                None => None,
+            };
+            let latest = match &brief {
+                Some(brief) => {
+                    self.latest_committed_revision(brief.id)?
+                        .map(|latest| RevisionRef {
+                            revision_uuid: latest.revision_uuid,
+                            visible_number: Some(latest.visible_number),
+                        })
+                }
+                None => None,
+            };
+            entries.push(PinPreviewEntry {
+                title: brief.map(|brief| brief.title).unwrap_or_default(),
+                exported: exported(&document_uuid),
+                document_uuid,
+                latest,
+            });
+        }
+        Ok(Some(PinPreview {
+            exported_at: last_export.map(|record| record.exported_at),
+            entries,
+        }))
+    }
+
+    /// 归档主件；挂着送批材料时在同一事务里把主件和各随行件钉在选定的版本上。
+    /// 有一件既没导出过、也没有提交版本（包括本机找不到的）就整体拒绝。
+    pub fn archive_with_send_package(&mut self, owner_id: i64, choice: PinChoice) -> Result<()> {
+        let preview = self.archive_pin_preview(owner_id)?;
+        if let Some(preview) = &preview
+            && let Some(entry) = preview
+                .entries
+                .iter()
+                .find(|entry| entry.pin(choice).is_none())
+        {
+            let title = if entry.title.is_empty() {
+                "本机未找到的稿件"
+            } else {
+                entry.title.as_str()
+            };
+            bail!("送批材料里《{title}》既没导出过、也没有提交版本，先处理或移出清单再归档");
+        }
+        self.conn.execute_batch("SAVEPOINT archive_send_package")?;
+        let result = (|| -> Result<()> {
+            if let Some(preview) = &preview {
+                for (index, entry) in preview.entries.iter().enumerate() {
+                    let pin = entry.pin(choice).expect("上面已拦下");
+                    if index == 0 {
+                        self.conn.execute(
+                            "INSERT OR REPLACE INTO send_package_owner_pins (owner_id, revision_uuid)
+                             VALUES (?1, ?2)",
+                            params![owner_id, pin.revision_uuid],
+                        )?;
+                    } else {
+                        self.conn.execute(
+                            "UPDATE send_package_items SET pinned_revision_uuid=?1
+                             WHERE owner_id=?2 AND item_uuid=?3",
+                            params![pin.revision_uuid, owner_id, entry.document_uuid],
+                        )?;
+                    }
+                }
+            }
+            self.set_status(owner_id, ManuscriptStatus::Archived)
+        })();
+        if let Err(error) = result {
+            self.conn
+                .execute_batch("ROLLBACK TO archive_send_package; RELEASE archive_send_package")?;
+            return Err(error);
+        }
+        self.conn.execute_batch("RELEASE archive_send_package")?;
+        Ok(())
     }
 
     /// 清单可改：主件存在且未归档。
@@ -1186,6 +1385,143 @@ mod tests {
         assert_eq!(brief.status, ManuscriptStatus::Published);
         assert!(!brief.title.is_empty());
         assert_eq!(store.manuscript_brief(9999).unwrap(), None);
+    }
+
+    /// 按当前计划记一次导出，模拟「送出去了」。
+    fn record_export(store: &mut ManuscriptStore, owner: i64) {
+        let plan = store.send_package_plan(owner).unwrap();
+        let items: Vec<ExportItemRecord> = plan
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let revision = entry.revision.as_ref().unwrap();
+                ExportItemRecord {
+                    sort_order: index as i64,
+                    document_uuid: entry.document_uuid.clone(),
+                    revision_uuid: revision.revision_uuid.clone(),
+                    payload_hash: revision.payload_hash.clone(),
+                    visible_number: revision.visible_number,
+                    title: entry.title.clone(),
+                    kind: entry.kind,
+                    page_count: 1,
+                    blank_pages: 0,
+                }
+            })
+            .collect();
+        store
+            .record_send_package_export(owner, "/tmp/x.pdf", false, 2, &items)
+            .unwrap();
+    }
+
+    fn plan_versions(store: &ManuscriptStore, owner: i64) -> Vec<Option<i64>> {
+        store
+            .send_package_plan(owner)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.revision.as_ref().and_then(|r| r.visible_number))
+            .collect()
+    }
+
+    #[test]
+    fn archiving_pins_what_was_sent_by_default() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::WhitePaper, "呈批件");
+        let letter = create(&mut store, TemplateKind::OfficialLetter, "函稿");
+        let report = create(&mut store, TemplateKind::ResearchReport, "报告");
+        store.add_send_package_item(owner, letter).unwrap();
+        commit(&mut store, owner, "送审稿");
+        commit(&mut store, letter, "初稿");
+        record_export(&mut store, owner);
+        // 送出之后：主件和函稿都又改了一版，报告是导出后才加进来的。
+        edit(&mut store, owner, "# 呈批件\n\n第二稿。");
+        commit(&mut store, owner, "修改稿");
+        edit(&mut store, letter, "# 函稿\n\n第二稿。");
+        commit(&mut store, letter, "修改稿");
+        commit(&mut store, report, "初稿");
+        store.add_send_package_item(owner, report).unwrap();
+
+        let preview = store.archive_pin_preview(owner).unwrap().unwrap();
+        assert!(preview.needs_choice());
+        assert!(preview.exported_at.is_some());
+        assert!(preview.unpinnable().is_empty());
+        let changed: Vec<bool> = preview
+            .entries
+            .iter()
+            .map(PinPreviewEntry::changed_since_export)
+            .collect();
+        assert_eq!(changed, vec![true, true, false]);
+
+        store
+            .archive_with_send_package(owner, PinChoice::Exported)
+            .unwrap();
+        assert_eq!(
+            store.manuscript_brief(owner).unwrap().unwrap().status,
+            ManuscriptStatus::Archived
+        );
+        // 主件与函稿钉在送出时的 v1；报告没导出过，钉最新的 v1。
+        assert_eq!(
+            plan_versions(&store, owner),
+            vec![Some(1), Some(1), Some(1)]
+        );
+        let plan = store.send_package_plan(owner).unwrap();
+        assert!(plan.entries.iter().all(|entry| entry.pinned));
+
+        // 钉住之后，随行件再提交新版本也不影响导出。
+        edit(&mut store, letter, "# 函稿\n\n第三稿。");
+        commit(&mut store, letter, "三稿");
+        assert_eq!(
+            plan_versions(&store, owner),
+            vec![Some(1), Some(1), Some(1)]
+        );
+    }
+
+    #[test]
+    fn archiving_can_pin_latest_and_without_package_is_plain() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::RedHeadApproval, "呈批件");
+        let letter = create(&mut store, TemplateKind::OfficialLetter, "函稿");
+        store.add_send_package_item(owner, letter).unwrap();
+        commit(&mut store, owner, "送审稿");
+        commit(&mut store, letter, "初稿");
+        record_export(&mut store, owner);
+        edit(&mut store, letter, "# 函稿\n\n第二稿。");
+        commit(&mut store, letter, "修改稿");
+        store
+            .archive_with_send_package(owner, PinChoice::Latest)
+            .unwrap();
+        assert_eq!(plan_versions(&store, owner), vec![Some(1), Some(2)]);
+
+        // 没挂送批材料的稿件照常归档，不写钉版。
+        let plain = create(&mut store, TemplateKind::WhitePaper, "另一件");
+        assert_eq!(store.archive_pin_preview(plain).unwrap(), None);
+        store
+            .archive_with_send_package(plain, PinChoice::Exported)
+            .unwrap();
+        assert_eq!(store.owner_pin(plain).unwrap(), None);
+    }
+
+    #[test]
+    fn archiving_is_refused_whole_when_an_item_cannot_be_pinned() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::WhitePaper, "呈批件");
+        let notice = create(&mut store, TemplateKind::PlainDocument, "通知");
+        store.add_send_package_item(owner, notice).unwrap();
+        commit(&mut store, owner, "送审稿");
+        let preview = store.archive_pin_preview(owner).unwrap().unwrap();
+        assert_eq!(preview.unpinnable().len(), 1);
+        let error = store
+            .archive_with_send_package(owner, PinChoice::Exported)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("《通知》"), "{error}");
+        // 整体没动：没归档、没写钉版。
+        assert_eq!(
+            store.manuscript_brief(owner).unwrap().unwrap().status,
+            ManuscriptStatus::Draft
+        );
+        assert_eq!(store.owner_pin(owner).unwrap(), None);
     }
 
     #[test]

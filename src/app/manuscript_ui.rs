@@ -12,7 +12,9 @@ use crate::app::{
 use crate::doc_import;
 use crate::draft_page::DraftSession;
 use crate::export;
-use crate::manuscript::send_package::{SendPackageReferrer, is_owner_kind};
+use crate::manuscript::send_package::{
+    PinChoice, PinPreview, RevisionRef, SendPackageReferrer, is_owner_kind,
+};
 use crate::manuscript::{
     ManuscriptFilter, ManuscriptRecord, ManuscriptStore, ManuscriptUpdate, NewManuscript,
 };
@@ -81,6 +83,9 @@ pub(crate) enum PdfAction {
 pub(crate) struct ArchivePending {
     manuscript_id: i64,
     pdf_paths: Vec<PathBuf>,
+    /// 挂着送批材料时的钉版预览；进入确认时查一次。
+    send_package: Option<PinPreview>,
+    pin_choice: PinChoice,
 }
 
 /// 「导出 PDF」选项弹窗的勾选状态：盖章件取附件、非盖章件编译生成。
@@ -221,6 +226,69 @@ fn delete_confirm_popup(
             });
         });
     confirmed
+}
+
+/// 归档确认里的送批材料钉版：列出每件将钉在哪一版；送出之后有件改过时让人选
+/// 钉送出时的版本还是当前最新版本。返回 true 表示有件钉不住、不能归档。
+fn archive_pin_ui(ui: &mut egui::Ui, preview: &PinPreview, choice: &mut PinChoice) -> bool {
+    ui.add_space(4.0);
+    ui.strong(format!(
+        "送批材料（{} 件）归档后固定在以下版本，以后导出都用这一套：",
+        preview.entries.len() - 1
+    ));
+    if preview.needs_choice() {
+        ui.weak(format!(
+            "最近一次导出（{}）之后，有件又提交了新版本：",
+            preview
+                .exported_at
+                .as_deref()
+                .map(short_date)
+                .unwrap_or_default()
+        ));
+        ui.radio_value(
+            choice,
+            PinChoice::Exported,
+            "钉在送出时的版本（与已送出的材料一致）",
+        );
+        ui.radio_value(choice, PinChoice::Latest, "钉在当前最新版本");
+    }
+    let version = |pin: Option<&RevisionRef>| match pin {
+        Some(pin) => pin
+            .visible_number
+            .map_or_else(|| "导出时的版本".to_string(), |n| format!("v{n}")),
+        None => "钉不住".into(),
+    };
+    for (index, entry) in preview.entries.iter().enumerate() {
+        let title = if entry.title.is_empty() {
+            "（本机未找到的稿件）"
+        } else {
+            entry.title.as_str()
+        };
+        let role = if index == 0 { "主件" } else { "随行件" };
+        let pin = entry.pin(*choice);
+        let mut line = format!("{role}《{}》：{}", summarize(title, 24), version(pin));
+        if entry.changed_since_export() {
+            line.push_str(&format!(
+                "（送出时 {}，最新 {}）",
+                version(entry.exported.as_ref()),
+                version(entry.latest.as_ref())
+            ));
+        } else if entry.exported.is_none()
+            && entry.latest.is_some()
+            && preview.exported_at.is_some()
+        {
+            line.push_str("（导出后才加入，用最新提交版）");
+        }
+        if pin.is_some() {
+            ui.label(line);
+        } else {
+            ui.colored_label(
+                theme::danger(),
+                format!("{line}：既没导出过、也没有提交版本"),
+            );
+        }
+    }
+    !preview.unpinnable().is_empty()
 }
 
 /// 若 `pending` 正指向这一行，就在 `anchor` 下弹出删除确认；确认或收起后清掉 `pending`。
@@ -1090,11 +1158,15 @@ impl GongwenApp {
                 let manuscript_id = pending.manuscript_id;
                 let mut do_archive = false;
                 let mut do_cancel = false;
+                let mut blocked = false;
                 ui.group(|ui| {
                     ui.colored_label(
                         warn(),
                         "归档将冻结该稿件：标题、正文、时间等关键信息此后均不可修改。",
                     );
+                    if let Some(preview) = &pending.send_package {
+                        blocked = archive_pin_ui(ui, preview, &mut pending.pin_choice);
+                    }
                     ui.horizontal_wrapped(|ui| {
                         if ui
                             .add(theme::icon_text_button(
@@ -1121,7 +1193,11 @@ impl GongwenApp {
                             }
                         }
                         ui.separator();
-                        if ui.button("确认归档").clicked() {
+                        if ui
+                            .add_enabled(!blocked, egui::Button::new("确认归档"))
+                            .on_disabled_hover_text("送批材料里有钉不住版本的件，先处理或移出清单")
+                            .clicked()
+                        {
                             do_archive = true;
                         }
                         if ui.button("取消").clicked() {
@@ -2232,23 +2308,31 @@ impl GongwenApp {
             }
             ManuscriptAction::OpenSendPackage(id) => self.open_send_package(id),
             ManuscriptAction::ArchivePending(id) => {
+                let send_package = self
+                    .manuscript_store
+                    .as_ref()
+                    .and_then(|store| store.archive_pin_preview(id).ok())
+                    .flatten();
                 self.manuscript_archive_pending = Some(ArchivePending {
                     manuscript_id: id,
                     pdf_paths: Vec::new(),
+                    send_package,
+                    pin_choice: PinChoice::default(),
                 });
             }
             ManuscriptAction::Archive(id) => {
-                let pdfs = self
+                let (pdfs, pin_choice) = self
                     .manuscript_archive_pending
                     .take()
-                    .map(|p| p.pdf_paths)
+                    .map(|p| (p.pdf_paths, p.pin_choice))
                     .unwrap_or_default();
                 let result: anyhow::Result<()> = (|| {
                     let store = self
                         .manuscript_store
                         .as_mut()
                         .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
-                    store.set_status(id, ManuscriptStatus::Archived)?;
+                    // 挂着送批材料时连同钉版在一个事务里完成；没挂的就是普通归档。
+                    store.archive_with_send_package(id, pin_choice)?;
                     for path in &pdfs {
                         let bytes = std::fs::read(path)?;
                         let name = path
