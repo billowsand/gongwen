@@ -185,4 +185,35 @@ CREATE TABLE IF NOT EXISTS send_package_export_items (
 
 ## 实施进度
 
-**状态：方案已定，尚未开工。**（2026-09-30）
+**状态：第一期（数据层）完成，第二期未开工。**（2026-09-30）
+
+### 第一期：数据层
+
+代码在 `src/manuscript/send_package.rs`（`ManuscriptStore` 的子模块，与候选区同样做法）。
+
+- 三张表在 `migrate()` 末尾幂等建表；导出记录两张表本期只建表，读写在第三期。
+- 接口：`send_package_items` / `has_send_package_items` / `send_package_referrers` /
+  `send_package_add_block`（返回 `AddBlock`，带 `reason()` 供界面置灰说明）/
+  `add_send_package_item` / `remove_send_package_item` / `reorder_send_package` /
+  `latest_committed_revision` / `send_package_item_state`（最新提交版、有无未提交修改、
+  有无待处理分支）。
+- 删除保护接在 `delete` / `delete_many` 的事务里（`detach_before_delete`）：
+  `delete` 原先不走事务，现在改为事务内先摘关联再删行。
+- 测试 10 个，覆盖顺序、排列校验、引用规则（含嵌套两个方向）、一稿多引、归档只读、
+  删除摘关联与拒删（含批量整批回滚）、主件删除级联、别名解析与本机未找到、版本状态。
+
+**与方案的出入**
+
+- 删除保护比方案更严：方案写「被已归档主件**钉住**的稿件不能删」，实现为「被**已归档**
+  主件引用就不能删」，不看是否钉版。钉版要到第四期才有，这之前归档的主件没有钉版记录，
+  按原写法随行件照样能删，归档材料就会缺件。
+- 「最新提交版」取 `sync_revisions` 里 `visible_number` 最大的一行；它与
+  `manuscript_versions` 的最新版本号一一对应（提交与导入落地时两边同时写）。
+
+**已知坑 / 下一步**
+
+- 模块顶部有 `#![cfg_attr(not(test), allow(dead_code))]`：第二期界面接入后删掉。
+- 第二期界面要用到：删除确认前调 `send_package_referrers` 列出引用方；
+  主件改文种前用 `has_send_package_items` 提示。
+- 依赖要求 rustc 1.95；Linux 沙箱没装 GTK 开发库时，用
+  `--no-default-features --features linux-portal-dialogs` 编译测试。

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 pub(crate) mod candidates;
 pub(crate) mod merge;
+pub(crate) mod send_package;
 pub(crate) mod sync;
 
 /// schema 版本 1：稿件表 + PDF 附件表。
@@ -384,6 +385,8 @@ impl ManuscriptStore {
         // 起草页候选区：同样幂等建表，不单开档位。
         candidates::ensure_schema(&self.conn)?;
         sync::migrate(&mut self.conn)?;
+        // 送批材料：同样幂等建表，不单开档位。
+        send_package::ensure_schema(&self.conn)?;
         Ok(())
     }
 
@@ -545,7 +548,8 @@ impl ManuscriptStore {
         Ok(())
     }
 
-    /// 删除稿件（连同附件级联）。归档行拒绝删除。
+    /// 删除稿件（连同附件级联）。归档行拒绝删除；被已归档呈批件用作送批材料的也拒绝，
+    /// 被其他呈批件用作送批材料的连同关联一起删除。
     /// 删除后清理仅被该稿件引用的孤儿图片文件（见 `purge_orphan_images`）。
     pub fn delete(&mut self, id: i64) -> Result<()> {
         let current = self.status_of(id)?.context("稿件不存在")?;
@@ -553,15 +557,17 @@ impl ManuscriptStore {
             bail!("归档稿件不可删除");
         }
         let record = self.get(id)?;
-        self.conn
-            .execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
+        let tx = self.conn.transaction()?;
+        send_package::detach_before_delete(&tx, id)?;
+        tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
+        tx.commit()?;
         if let Some(record) = record {
             self.purge_orphan_images(&[record]);
         }
         Ok(())
     }
 
-    /// 原子批量删除：任一稿件不存在或已归档时整批不落库。
+    /// 原子批量删除：任一稿件不存在、已归档或被已归档呈批件用作送批材料时整批不落库。
     pub fn delete_many(&mut self, ids: &[i64]) -> Result<()> {
         // 事务前先收集记录：图片清理在事务提交后进行，事务失败时不会误删文件。
         let mut deleted = Vec::new();
@@ -582,6 +588,7 @@ impl ManuscriptStore {
             if status == ManuscriptStatus::Archived {
                 bail!("归档稿件不可删除");
             }
+            send_package::detach_before_delete(&tx, id)?;
             tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
         }
         tx.commit()?;
