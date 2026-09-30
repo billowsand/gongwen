@@ -946,6 +946,7 @@ impl DraftPage<'_> {
             ));
             self.doc.output_files.clear();
             self.doc.export_error = None;
+            self.notice_hidden_send_package(old_kind);
         }
 
         if self.doc.draft.kind.is_research() {
@@ -1873,5 +1874,29 @@ impl DraftPage<'_> {
             });
         }
         ui.add_space(8.0);
+    }
+}
+
+impl DraftPage<'_> {
+    /// 挂着送批材料的呈批件改成别的文种时提示一句：清单不删，只是面板隐藏，
+    /// 改回白头件或红头呈批件即恢复。只在文种切换那一刻查一次库。
+    fn notice_hidden_send_package(&mut self, old_kind: TemplateKind) {
+        use crate::manuscript::send_package::is_owner_kind;
+        if !is_owner_kind(old_kind) || is_owner_kind(self.doc.draft.kind) {
+            return;
+        }
+        let (Some(id), Some(store)) = (self.doc.manuscript_id, self.store.as_deref()) else {
+            return;
+        };
+        let count = store
+            .send_package_items(id)
+            .map(|items| items.len())
+            .unwrap_or(0);
+        if count > 0 {
+            *self.status = format!(
+                "本件挂着 {count} 件送批材料：改成{}后送批材料暂不显示，改回白头件或红头呈批件即恢复。",
+                self.doc.draft.kind.label()
+            );
+        }
     }
 }

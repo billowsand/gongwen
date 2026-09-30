@@ -7,8 +7,6 @@
 //! - 版本一律取离线同步版本图里的可见提交版本，不另起一套。
 //! - 被已归档主件引用的稿件不能删除；其余被引用的稿件删除时连同关联一起清掉，
 //!   删除前的二次确认由界面按 [`ManuscriptStore::send_package_referrers`] 列出。
-// 第二期接入界面之前，这里的读写接口只有测试在用。
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::{ManuscriptStore, str_to_status};
 use crate::models::{ManuscriptStatus, TemplateKind};
@@ -147,6 +145,15 @@ pub struct SendPackageReferrer {
     pub title: String,
     pub status: ManuscriptStatus,
     pub pinned_revision_uuid: Option<String>,
+}
+
+/// 面板每行要显示的稿件概要：取自反规范化列，不读快照与附件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManuscriptBrief {
+    pub id: i64,
+    pub title: String,
+    pub kind: TemplateKind,
+    pub status: ManuscriptStatus,
 }
 
 /// 稿件的全部身份：当前 UUID 加上合并身份后留下的别名。随行件按其中任一个引用都算。
@@ -379,6 +386,30 @@ impl ManuscriptStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// 稿件概要（标题、文种、状态）；不存在时为 `None`。
+    pub fn manuscript_brief(&self, id: i64) -> Result<Option<ManuscriptBrief>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT title, kind, status FROM manuscripts WHERE id=?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(|(title, kind, status)| ManuscriptBrief {
+            id,
+            title,
+            kind: super::str_to_kind(&kind).unwrap_or(TemplateKind::OfficialLetter),
+            status: str_to_status(&status).unwrap_or(ManuscriptStatus::Draft),
+        }))
     }
 
     /// 最新提交版：版本图里带显示序号的最新一版，与版本面板的「最新版」一致。
@@ -738,6 +769,21 @@ mod tests {
         assert_eq!(v2.visible_number, 2);
         assert_ne!(v2.revision_uuid, v1.revision_uuid);
         assert!(!state.has_uncommitted);
+    }
+
+    #[test]
+    fn brief_reads_title_kind_and_status() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::RedHeadApproval, "关于某事的请示");
+        store
+            .set_status(owner, ManuscriptStatus::Published)
+            .unwrap();
+        let brief = store.manuscript_brief(owner).unwrap().unwrap();
+        assert_eq!(brief.id, owner);
+        assert_eq!(brief.kind, TemplateKind::RedHeadApproval);
+        assert_eq!(brief.status, ManuscriptStatus::Published);
+        assert!(!brief.title.is_empty());
+        assert_eq!(store.manuscript_brief(9999).unwrap(), None);
     }
 
     #[test]

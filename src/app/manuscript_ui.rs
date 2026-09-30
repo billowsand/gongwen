@@ -12,6 +12,7 @@ use crate::app::{
 use crate::doc_import;
 use crate::draft_page::DraftSession;
 use crate::export;
+use crate::manuscript::send_package::{SendPackageReferrer, is_owner_kind};
 use crate::manuscript::{
     ManuscriptFilter, ManuscriptRecord, ManuscriptStore, ManuscriptUpdate, NewManuscript,
 };
@@ -46,6 +47,8 @@ pub(crate) enum ManuscriptAction {
     DeletePending(i64),
     /// 进入归档确认（先选扫描盖章 PDF）。
     ArchivePending(i64),
+    /// 打开某篇呈批件的送批材料面板。
+    OpenSendPackage(i64),
     /// 打开版本对照窗，对照该版本与其上一版（旧在左、新在右）。
     DiffVersion {
         manuscript_id: i64,
@@ -166,8 +169,16 @@ struct MergeReview {
 /// 以前确认条放在列表上方：离删除按钮太远，而且一插进来整个列表就往下挤一截。
 /// 气泡是独立图层，不占版面，点外面或按 Esc 即收起（把 `open` 置为 false）。
 /// 返回 true 表示用户点了「确认删除」。
-fn delete_confirm_popup(anchor: &egui::Response, open: &mut bool) -> bool {
+fn delete_confirm_popup(
+    anchor: &egui::Response,
+    open: &mut bool,
+    refs: &[SendPackageReferrer],
+) -> bool {
     let mut confirmed = false;
+    // 被已归档呈批件用作送批材料的稿件删不掉（归档材料不能缺件），确认键直接不给。
+    let archived_owner = refs
+        .iter()
+        .find(|owner| owner.status == ManuscriptStatus::Archived);
     egui::Popup::from_response(anchor)
         .id(anchor.id.with("delete_confirm"))
         .open_bool(open)
@@ -175,15 +186,34 @@ fn delete_confirm_popup(anchor: &egui::Response, open: &mut bool) -> bool {
         .align(egui::RectAlign::BOTTOM_END)
         .align_alternatives(&[egui::RectAlign::TOP_END])
         .show(|ui| {
-            ui.colored_label(warn(), "删除后不可恢复，确认删除这篇稿件吗？");
+            if let Some(owner) = archived_owner {
+                ui.colored_label(
+                    warn(),
+                    format!(
+                        "该稿件是已归档呈批件《{}》的送批材料，不能删除。",
+                        owner.title
+                    ),
+                );
+            } else {
+                ui.colored_label(warn(), "删除后不可恢复，确认删除这篇稿件吗？");
+                if !refs.is_empty() {
+                    let titles = refs
+                        .iter()
+                        .map(|owner| format!("《{}》", owner.title))
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    ui.weak(format!("它是{titles}的送批材料，删除后会从中移除。"));
+                }
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.button("取消").clicked() {
                     ui.close();
                 }
-                if ui
-                    .add(theme::warning_icon_button(theme::Icon::Trash, "确认删除"))
-                    .clicked()
+                if archived_owner.is_none()
+                    && ui
+                        .add(theme::warning_icon_button(theme::Icon::Trash, "确认删除"))
+                        .clicked()
                 {
                     confirmed = true;
                     ui.close();
@@ -197,6 +227,7 @@ fn delete_confirm_popup(anchor: &egui::Response, open: &mut bool) -> bool {
 fn row_delete_confirm(
     anchor: &egui::Response,
     pending: &mut Option<i64>,
+    refs: &[SendPackageReferrer],
     id: i64,
     action: &mut Option<ManuscriptAction>,
 ) {
@@ -204,7 +235,7 @@ fn row_delete_confirm(
         return;
     }
     let mut open = true;
-    if delete_confirm_popup(anchor, &mut open) {
+    if delete_confirm_popup(anchor, &mut open, refs) {
         *action = Some(ManuscriptAction::Delete(id));
         open = false;
     }
@@ -763,9 +794,10 @@ impl GongwenApp {
                             deletable,
                             theme::warning_icon_button(theme::Icon::Trash, "批量删除"),
                         )
-                        .on_hover_text("归档稿件不会被删除")
+                        .on_hover_text("归档稿件和已归档呈批件的送批材料不会被删除")
                         .clicked()
                     {
+                        self.manuscript_batch_delete_blocked = self.batch_delete_blocked();
                         self.manuscript_batch_delete_confirm = true;
                     }
                     if theme::icon_button(ui, theme::Icon::X, "清空选择").clicked() {
@@ -858,10 +890,13 @@ impl GongwenApp {
                 })
                 .map(|row| row.id)
                 .collect::<Vec<_>>();
+            let (packaged, deletable): (Vec<i64>, Vec<i64>) = deletable
+                .into_iter()
+                .partition(|id| self.manuscript_batch_delete_blocked.contains(id));
             let archived = self
                 .manuscript_selected
                 .len()
-                .saturating_sub(deletable.len());
+                .saturating_sub(deletable.len() + packaged.len());
             let mut confirm = false;
             let mut cancel = false;
             ui.group(|ui| {
@@ -875,8 +910,17 @@ impl GongwenApp {
                 if archived > 0 {
                     ui.weak(format!("另有 {archived} 篇归档稿件受保护，将保留不动。"));
                 }
+                if !packaged.is_empty() {
+                    ui.weak(format!(
+                        "另有 {} 篇是已归档呈批件的送批材料，将保留不动。",
+                        packaged.len()
+                    ));
+                }
                 ui.horizontal(|ui| {
-                    if ui.button("确认批量删除").clicked() {
+                    if ui
+                        .add_enabled(!deletable.is_empty(), egui::Button::new("确认批量删除"))
+                        .clicked()
+                    {
                         confirm = true;
                     }
                     if ui.button("取消").clicked() {
@@ -1680,6 +1724,7 @@ impl GongwenApp {
                             row_delete_confirm(
                                 &menu.response,
                                 &mut self.manuscript_delete_confirm,
+                                &self.manuscript_delete_refs,
                                 data.id,
                                 action,
                             );
@@ -1778,6 +1823,7 @@ impl GongwenApp {
                             row_delete_confirm(
                                 &trash,
                                 &mut self.manuscript_delete_confirm,
+                                &self.manuscript_delete_refs,
                                 data.id,
                                 action,
                             );
@@ -1949,6 +1995,48 @@ impl GongwenApp {
                             metadata_grid_row(ui, "备注", &detail.notes);
                         }
                     });
+
+                if is_owner_kind(detail.kind) {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(format!(
+                            "送批材料（{}）",
+                            self.manuscript_package_titles.len()
+                        ));
+                        if ui
+                            .add(theme::icon_text_button(theme::Icon::Package, "管理…"))
+                            .on_hover_text("查看各件的提交版本，增删、调整顺序")
+                            .clicked()
+                        {
+                            *action = Some(ManuscriptAction::OpenSendPackage(detail_id));
+                        }
+                    });
+                    if self.manuscript_package_titles.is_empty() {
+                        ui.weak("还没有送批材料。");
+                    }
+                    for (index, title) in self.manuscript_package_titles.iter().enumerate() {
+                        ui.add(egui::Label::new(format!("{}. {title}", index + 1)).truncate())
+                            .on_hover_text(title);
+                    }
+                }
+                if !self.manuscript_referrers.is_empty() {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.strong("用作以下呈批件的送批材料");
+                    for owner in &self.manuscript_referrers {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(status_color(owner.status), owner.status.label());
+                            if ui
+                                .add(egui::Link::new(summarize(&owner.title, 24)))
+                                .on_hover_text(format!("{}\n打开它的送批材料", owner.title))
+                                .clicked()
+                            {
+                                *action = Some(ManuscriptAction::OpenSendPackage(owner.owner_id));
+                            }
+                        });
+                    }
+                }
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -2135,8 +2223,14 @@ impl GongwenApp {
                 self.sync_record_status(id);
             }
             ManuscriptAction::DeletePending(id) => {
+                self.manuscript_delete_refs = self
+                    .manuscript_store
+                    .as_ref()
+                    .and_then(|store| store.send_package_referrers(id).ok())
+                    .unwrap_or_default();
                 self.manuscript_delete_confirm = Some(id);
             }
+            ManuscriptAction::OpenSendPackage(id) => self.open_send_package(id),
             ManuscriptAction::ArchivePending(id) => {
                 self.manuscript_archive_pending = Some(ArchivePending {
                     manuscript_id: id,
@@ -2299,6 +2393,7 @@ impl GongwenApp {
             Ok(Some(record)) => {
                 self.manuscript_detail = Some(record);
                 self.refresh_manuscript_versions(id);
+                self.refresh_detail_send_package(id);
             }
             Ok(None) => {
                 self.status = "稿件不存在或已被删除。".into();
@@ -2318,6 +2413,44 @@ impl GongwenApp {
             .as_mut()
             .and_then(|store| store.list_manuscript_versions(id).ok())
             .unwrap_or_default();
+    }
+
+    /// 载入详情时同步读取送批材料（呈批件的清单标题）与引用它的呈批件。
+    fn refresh_detail_send_package(&mut self, id: i64) {
+        self.manuscript_package_titles.clear();
+        self.manuscript_referrers.clear();
+        let Some(store) = self.manuscript_store.as_ref() else {
+            return;
+        };
+        if let Ok(items) = store.send_package_items(id) {
+            self.manuscript_package_titles = items
+                .iter()
+                .map(|item| {
+                    item.manuscript_id
+                        .and_then(|item_id| store.manuscript_brief(item_id).ok().flatten())
+                        .map(|brief| brief.title)
+                        .unwrap_or_else(|| "（本机未找到该稿件）".into())
+                })
+                .collect();
+        }
+        self.manuscript_referrers = store.send_package_referrers(id).unwrap_or_default();
+    }
+
+    /// 所选稿件中被已归档呈批件用作送批材料、因而不能删的那些。
+    fn batch_delete_blocked(&self) -> BTreeSet<i64> {
+        let Some(store) = self.manuscript_store.as_ref() else {
+            return BTreeSet::new();
+        };
+        self.manuscript_selected
+            .iter()
+            .copied()
+            .filter(|&id| {
+                store.send_package_referrers(id).is_ok_and(|refs| {
+                    refs.iter()
+                        .any(|owner| owner.status == ManuscriptStatus::Archived)
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn reload_detail(&mut self) {

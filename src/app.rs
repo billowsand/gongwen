@@ -35,6 +35,7 @@ mod lexicon_jobs;
 mod manuscript_ui;
 mod outline_ui;
 mod proofread_ui;
+mod send_package_ui;
 mod session;
 mod settings;
 mod sop_ui;
@@ -51,6 +52,7 @@ pub(crate) use manuscript_ui::{
     ArchivePending, ImportPreview, PdfExportDialog, PendingMergeDialog, ZipPasswordDialog,
 };
 pub(crate) use proofread_ui::ProofreadPageState;
+pub(crate) use send_package_ui::SendPackagePanel;
 pub(crate) use session::{DraftAction, ExitPrompt};
 pub(crate) use settings::SettingsSection;
 pub(crate) use tabs::{NavPage, TabRef};
@@ -137,6 +139,8 @@ pub struct GongwenApp {
     metrics: crate::metrics::Metrics,
     /// 办理进度面板是否打开。纯当次会话状态，不进配置。
     sop_open: bool,
+    /// 送批材料面板；None 表示未打开。
+    send_package: Option<SendPackagePanel>,
     vocabulary_import_conflicts: Option<Vec<vocabulary_xlsx::Conflict>>,
     /// 词库有尚未写入本机配置的编辑。
     vocabulary_dirty: bool,
@@ -185,7 +189,11 @@ pub struct GongwenApp {
     /// 各状态稿件数 [新建, 草稿, 发布, 归档]；新建恒为 0（已取消，见 manuscript.rs）。
     manuscript_count: [i64; 4],
     manuscript_delete_confirm: Option<i64>,
+    /// 待删稿件被哪些呈批件用作送批材料；进入删除确认时查一次，确认气泡里提示。
+    manuscript_delete_refs: Vec<manuscript::send_package::SendPackageReferrer>,
     manuscript_batch_delete_confirm: bool,
+    /// 批量删除里因被已归档呈批件用作送批材料而须保留的稿件 id；进入确认时查一次。
+    manuscript_batch_delete_blocked: BTreeSet<i64>,
     /// 「导出 PDF」批量导出是否正在后台执行（防重复触发）。
     manuscript_pdf_export_busy: bool,
     /// 「导出 PDF」选项弹窗；None 表示未打开。
@@ -211,6 +219,9 @@ pub struct GongwenApp {
     revert_confirm: Option<(i64, i64)>,
     /// 详情页当前稿件的版本历史，随 `refresh_detail` 一起载入。
     manuscript_versions: Vec<manuscript::VersionRow>,
+    /// 详情页当前稿件的送批材料标题（呈批件才有）与引用它的呈批件，随 `refresh_detail` 载入。
+    manuscript_package_titles: Vec<String>,
+    manuscript_referrers: Vec<manuscript::send_package::SendPackageReferrer>,
     /// 配置版本历史窗是否打开。
     config_versions_open: bool,
     /// 等待二次确认“应用”的配置版本号。
@@ -417,6 +428,7 @@ impl GongwenApp {
             ime,
             metrics: crate::metrics::load(),
             sop_open: false,
+            send_package: None,
             macos_titlebar_metrics,
             docs,
             pdfs: Vec::new(),
@@ -453,7 +465,9 @@ impl GongwenApp {
             manuscript_selected: BTreeSet::new(),
             manuscript_count: [0; 4],
             manuscript_delete_confirm: None,
+            manuscript_delete_refs: Vec::new(),
             manuscript_batch_delete_confirm: false,
+            manuscript_batch_delete_blocked: BTreeSet::new(),
             manuscript_pdf_export_busy: false,
             manuscript_pdf_export: None,
             manuscript_zip_password: None,
@@ -469,6 +483,8 @@ impl GongwenApp {
             switch_after_commit: None,
             revert_confirm: None,
             manuscript_versions: Vec::new(),
+            manuscript_package_titles: Vec::new(),
+            manuscript_referrers: Vec::new(),
             config_versions_open: false,
             config_apply_confirm: None,
             tabs: vec![TabRef::Doc(0)],
@@ -676,6 +692,7 @@ impl eframe::App for GongwenApp {
         self.ai_proposal_window(&ctx);
         self.outline_window(&ctx);
         self.sop_window(&ctx);
+        self.send_package_window(&ctx);
         self.version_commit_window(&ctx);
         self.version_switch_window(&ctx);
         self.revert_confirm_window(&ctx);

@@ -328,6 +328,7 @@ impl GongwenApp {
             match action {
                 DraftAction::SaveToLibrary => self.save_to_manuscript_library(),
                 DraftAction::OpenSopPanel => self.sop_open = true,
+                DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
                 DraftAction::OpenAiWorkbench { selection } => self.open_ai_workbench(selection),
                 DraftAction::RevertToDraft(id) => {

@@ -295,6 +295,22 @@ impl DraftPage<'_> {
                 .push(DraftAction::OpenVersionCommit(VersionScope::Manuscript(id)));
         }
         self.version_switch_picker(ui);
+        // 送批材料只属于呈批件，跟入库、版本放一组：面板里看的正是各件的提交版本。
+        if crate::manuscript::send_package::is_owner_kind(self.doc.draft.kind)
+            && ui
+                .add_enabled(
+                    saved,
+                    theme::icon_text_button(theme::Icon::Package, "送批材料"),
+                )
+                .on_hover_text(
+                    "挂上随呈批件一起送批的函稿、普通公文、研究报告等，查看各件的提交版本",
+                )
+                .on_disabled_hover_text("先“保存”到稿件库，再挂送批材料")
+                .clicked()
+            && let Some(id) = self.doc.manuscript_id
+        {
+            self.actions.push(DraftAction::OpenSendPackage(id));
+        }
         toolbar_separator(ui);
 
         // 二、稿件本身的编辑动作
