@@ -286,6 +286,7 @@ impl GongwenApp {
             || self.knowledge_busy
             || self.docs.iter().any(|doc| doc.busy)
             || self.pdfs.iter().any(PdfSession::busy)
+            || self.send_package_exporting()
     }
 
     /// 当前标签是稿件时返回它；停在导航页时为 None。

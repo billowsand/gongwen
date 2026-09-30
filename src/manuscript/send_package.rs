@@ -8,8 +8,8 @@
 //! - 被已归档主件引用的稿件不能删除；其余被引用的稿件删除时连同关联一起清掉，
 //!   删除前的二次确认由界面按 [`ManuscriptStore::send_package_referrers`] 列出。
 
-use super::{ManuscriptStore, str_to_status};
-use crate::models::{ManuscriptStatus, TemplateKind};
+use super::{ManuscriptStore, kind_to_str, str_to_kind, str_to_status};
+use crate::models::{DraftInput, ManuscriptStatus, TemplateKind};
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -154,6 +154,103 @@ pub struct ManuscriptBrief {
     pub title: String,
     pub kind: TemplateKind,
     pub status: ManuscriptStatus,
+}
+
+/// 导出计划里某一件用的版本：不可变快照，导出与记录都以它为准。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedRevision {
+    pub revision_uuid: String,
+    pub payload_hash: String,
+    /// 本机显示序号；钉住的版本若是同步检查点则没有序号。
+    pub visible_number: Option<i64>,
+    pub snapshot: DraftInput,
+    pub content_markdown: String,
+}
+
+/// 某一件不能进包的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanBlocker {
+    /// 从未提交过版本。
+    NeverCommitted,
+    /// 本机找不到这篇稿件。
+    Missing,
+    /// 钉住的版本在本机版本图里找不到。
+    PinnedRevisionMissing,
+}
+
+impl PlanBlocker {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NeverCommitted => "从未提交过版本，请先提交一个版本",
+            Self::Missing => "本机未找到该稿件，请先从同步包导入或移出清单",
+            Self::PinnedRevisionMissing => "归档时钉住的版本在本机找不到",
+        }
+    }
+}
+
+/// 导出计划里的一件（第 0 件是主件）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanEntry {
+    pub manuscript_id: Option<i64>,
+    pub document_uuid: String,
+    pub title: String,
+    pub kind: TemplateKind,
+    /// 要进包的版本；`None` 时 `blocker` 说明原因。
+    pub revision: Option<PlannedRevision>,
+    pub blocker: Option<PlanBlocker>,
+    /// 活稿行与所用版本内容不同：这些修改不会进包。钉版时不提示。
+    pub has_uncommitted: bool,
+    pub has_pending_branch: bool,
+    /// 用的是主件归档时钉住的版本，而不是最新提交版。
+    pub pinned: bool,
+}
+
+/// 一次合并导出的计划：点导出时生成、给用户确认，确认后整份交给后台线程。
+/// 版本快照已取出，之后再有人提交新版本也不会混进这一次导出。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendPackagePlan {
+    pub owner_id: i64,
+    pub entries: Vec<PlanEntry>,
+}
+
+impl SendPackagePlan {
+    pub fn owner_title(&self) -> &str {
+        self.entries
+            .first()
+            .map(|entry| entry.title.as_str())
+            .unwrap_or_default()
+    }
+
+    /// 没有拦截项、可以导出。
+    pub fn ready(&self) -> bool {
+        self.entries.iter().all(|entry| entry.revision.is_some())
+    }
+}
+
+/// 导出记录里一件的身份与版本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportItemRecord {
+    /// 主件为 0，随行件从 1 起；目录页不记。
+    pub sort_order: i64,
+    pub document_uuid: String,
+    pub revision_uuid: String,
+    pub payload_hash: String,
+    pub visible_number: Option<i64>,
+    pub title: String,
+    pub kind: TemplateKind,
+    pub page_count: i64,
+    pub blank_pages: i64,
+}
+
+/// 一次合并导出的记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRecord {
+    pub id: i64,
+    pub exported_at: String,
+    pub output_path: String,
+    pub with_toc: bool,
+    pub total_pages: i64,
+    pub items: Vec<ExportItemRecord>,
 }
 
 /// 稿件的全部身份：当前 UUID 加上合并身份后留下的别名。随行件按其中任一个引用都算。
@@ -303,7 +400,7 @@ impl ManuscriptStore {
         let Some((kind, status)) = owner else {
             return Ok(Some(AddBlock::OwnerMissing));
         };
-        if !super::str_to_kind(&kind).is_some_and(is_owner_kind) {
+        if !str_to_kind(&kind).is_some_and(is_owner_kind) {
             return Ok(Some(AddBlock::OwnerKind));
         }
         if str_to_status(&status) == Some(ManuscriptStatus::Archived) {
@@ -407,7 +504,7 @@ impl ManuscriptStore {
         Ok(row.map(|(title, kind, status)| ManuscriptBrief {
             id,
             title,
-            kind: super::str_to_kind(&kind).unwrap_or(TemplateKind::OfficialLetter),
+            kind: str_to_kind(&kind).unwrap_or(TemplateKind::OfficialLetter),
             status: str_to_status(&status).unwrap_or(ManuscriptStatus::Draft),
         }))
     }
@@ -449,6 +546,190 @@ impl ManuscriptStore {
             has_uncommitted,
             has_pending_branch: !self.pending_sync_heads(id)?.is_empty(),
         })
+    }
+
+    /// 生成导出计划：主件在前，随行件按清单顺序；每件取钉住的版本或最新提交版，
+    /// 取不到的记下拦截原因。只读库，不改任何东西。
+    pub fn send_package_plan(&self, owner_id: i64) -> Result<SendPackagePlan> {
+        let (owner_uuid, _) = self.document_identity(owner_id)?;
+        let mut targets = vec![(Some(owner_id), owner_uuid, None)];
+        for item in self.send_package_items(owner_id)? {
+            targets.push((
+                item.manuscript_id,
+                item.item_uuid,
+                item.pinned_revision_uuid,
+            ));
+        }
+        let mut entries = Vec::with_capacity(targets.len());
+        for (manuscript_id, document_uuid, pinned) in targets {
+            let brief = match manuscript_id {
+                Some(id) => self.manuscript_brief(id)?,
+                None => None,
+            };
+            let Some(brief) = brief else {
+                entries.push(PlanEntry {
+                    manuscript_id: None,
+                    document_uuid,
+                    title: String::new(),
+                    kind: TemplateKind::OfficialLetter,
+                    revision: None,
+                    blocker: Some(PlanBlocker::Missing),
+                    has_uncommitted: false,
+                    has_pending_branch: false,
+                    pinned: false,
+                });
+                continue;
+            };
+            let state = self.send_package_item_state(brief.id)?;
+            let (revision, blocker) = match &pinned {
+                Some(uuid) => match self.planned_revision(brief.id, uuid)? {
+                    Some(revision) => (Some(revision), None),
+                    None => (None, Some(PlanBlocker::PinnedRevisionMissing)),
+                },
+                None => match &state.latest {
+                    Some(latest) => (
+                        self.planned_revision(brief.id, &latest.revision_uuid)?,
+                        None,
+                    ),
+                    None => (None, Some(PlanBlocker::NeverCommitted)),
+                },
+            };
+            entries.push(PlanEntry {
+                manuscript_id: Some(brief.id),
+                document_uuid,
+                title: brief.title,
+                kind: brief.kind,
+                revision,
+                blocker,
+                has_uncommitted: pinned.is_none() && state.has_uncommitted,
+                has_pending_branch: state.has_pending_branch,
+                pinned: pinned.is_some(),
+            });
+        }
+        Ok(SendPackagePlan { owner_id, entries })
+    }
+
+    /// 从版本图里取出某一版的完整快照。
+    fn planned_revision(&self, id: i64, revision_uuid: &str) -> Result<Option<PlannedRevision>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT payload_hash, visible_number, snapshot_json, content_markdown
+                 FROM sync_revisions WHERE manuscript_id=?1 AND revision_uuid=?2",
+                params![id, revision_uuid],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((payload_hash, visible_number, json, content_markdown)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(PlannedRevision {
+            revision_uuid: revision_uuid.to_string(),
+            payload_hash,
+            visible_number,
+            snapshot: serde_json::from_str(&json).context("版本快照数据损坏")?,
+            content_markdown,
+        }))
+    }
+
+    /// 写一条导出记录（连同每一件），返回记录 id。
+    pub fn record_send_package_export(
+        &mut self,
+        owner_id: i64,
+        output_path: &str,
+        with_toc: bool,
+        total_pages: i64,
+        items: &[ExportItemRecord],
+    ) -> Result<i64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO send_package_exports (owner_id, exported_at, output_path, with_toc, total_pages)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                owner_id,
+                Local::now().to_rfc3339(),
+                output_path,
+                with_toc,
+                total_pages
+            ],
+        )?;
+        let export_id = tx.last_insert_rowid();
+        for item in items {
+            tx.execute(
+                "INSERT INTO send_package_export_items
+                 (export_id, sort_order, document_uuid, revision_uuid, payload_hash,
+                  visible_number, title, kind, page_count, blank_pages)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    export_id,
+                    item.sort_order,
+                    item.document_uuid,
+                    item.revision_uuid,
+                    item.payload_hash,
+                    item.visible_number,
+                    item.title,
+                    kind_to_str(item.kind),
+                    item.page_count,
+                    item.blank_pages
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(export_id)
+    }
+
+    /// 主件的历次导出记录，最新的在前。
+    pub fn send_package_exports(&self, owner_id: i64) -> Result<Vec<ExportRecord>> {
+        let heads = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, exported_at, output_path, with_toc, total_pages
+                 FROM send_package_exports WHERE owner_id=?1 ORDER BY id DESC",
+            )?;
+            stmt.query_map([owner_id], |row| {
+                Ok(ExportRecord {
+                    id: row.get(0)?,
+                    exported_at: row.get(1)?,
+                    output_path: row.get(2)?,
+                    with_toc: row.get(3)?,
+                    total_pages: row.get(4)?,
+                    items: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT sort_order, document_uuid, revision_uuid, payload_hash, visible_number,
+                    title, kind, page_count, blank_pages
+             FROM send_package_export_items WHERE export_id=?1 ORDER BY sort_order",
+        )?;
+        let mut out = Vec::with_capacity(heads.len());
+        for mut record in heads {
+            record.items = stmt
+                .query_map([record.id], |row| {
+                    Ok(ExportItemRecord {
+                        sort_order: row.get(0)?,
+                        document_uuid: row.get(1)?,
+                        revision_uuid: row.get(2)?,
+                        payload_hash: row.get(3)?,
+                        visible_number: row.get(4)?,
+                        title: row.get(5)?,
+                        kind: str_to_kind(&row.get::<_, String>(6)?)
+                            .unwrap_or(TemplateKind::OfficialLetter),
+                        page_count: row.get(7)?,
+                        blank_pages: row.get(8)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.push(record);
+        }
+        Ok(out)
     }
 
     /// 清单可改：主件存在且未归档。
@@ -769,6 +1050,127 @@ mod tests {
         assert_eq!(v2.visible_number, 2);
         assert_ne!(v2.revision_uuid, v1.revision_uuid);
         assert!(!state.has_uncommitted);
+    }
+
+    #[test]
+    fn plan_uses_latest_commit_and_flags_what_cannot_go_in() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::WhitePaper, "呈批件");
+        let letter = create(&mut store, TemplateKind::OfficialLetter, "函稿");
+        let notice = create(&mut store, TemplateKind::PlainDocument, "通知");
+        store.add_send_package_item(owner, letter).unwrap();
+        store.add_send_package_item(owner, notice).unwrap();
+        commit(&mut store, owner, "送审稿");
+        commit(&mut store, letter, "初稿");
+        edit(&mut store, letter, "# 函稿\n\n还没提交的修改。");
+
+        let plan = store.send_package_plan(owner).unwrap();
+        assert_eq!(plan.owner_title(), "呈批件");
+        let titles: Vec<&str> = plan.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, vec!["呈批件", "函稿", "通知"]);
+        // 函稿进包的是 v1 的内容，不是活稿行里未提交的修改。
+        let letter_entry = &plan.entries[1];
+        let revision = letter_entry.revision.as_ref().unwrap();
+        assert_eq!(revision.visible_number, Some(1));
+        assert!(!revision.content_markdown.contains("还没提交"));
+        assert!(letter_entry.has_uncommitted);
+        assert!(!plan.entries[0].has_uncommitted);
+        // 通知从未提交，拦下。
+        assert_eq!(plan.entries[2].revision, None);
+        assert_eq!(plan.entries[2].blocker, Some(PlanBlocker::NeverCommitted));
+        assert!(!plan.ready());
+
+        commit(&mut store, notice, "初稿");
+        assert!(store.send_package_plan(owner).unwrap().ready());
+    }
+
+    #[test]
+    fn plan_honours_pins_and_reports_missing_items() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::RedHeadApproval, "呈批件");
+        let letter = create(&mut store, TemplateKind::OfficialLetter, "函稿");
+        store.add_send_package_item(owner, letter).unwrap();
+        commit(&mut store, owner, "送审稿");
+        commit(&mut store, letter, "初稿");
+        let v1 = store.latest_committed_revision(letter).unwrap().unwrap();
+        edit(&mut store, letter, "# 函稿\n\n第二稿。");
+        commit(&mut store, letter, "修改稿");
+        store
+            .conn
+            .execute(
+                "UPDATE send_package_items SET pinned_revision_uuid=?1 WHERE owner_id=?2",
+                params![v1.revision_uuid, owner],
+            )
+            .unwrap();
+        let missing = uuid::Uuid::new_v4().to_string();
+        store
+            .conn
+            .execute(
+                "INSERT INTO send_package_items (owner_id, item_uuid, sort_order, added_at)
+                 VALUES (?1, ?2, 9, '2026-09-30T00:00:00+08:00')",
+                params![owner, missing],
+            )
+            .unwrap();
+
+        let plan = store.send_package_plan(owner).unwrap();
+        let pinned = &plan.entries[1];
+        assert!(pinned.pinned);
+        assert_eq!(
+            pinned.revision.as_ref().unwrap().revision_uuid,
+            v1.revision_uuid
+        );
+        assert!(!pinned.has_uncommitted, "钉版时不提示未提交修改");
+        assert_eq!(plan.entries[2].blocker, Some(PlanBlocker::Missing));
+        assert_eq!(plan.entries[2].document_uuid, missing);
+
+        // 钉住的版本不存在时拦下。
+        store
+            .conn
+            .execute(
+                "UPDATE send_package_items SET pinned_revision_uuid='nope' WHERE item_uuid=?1",
+                [uuid_of(&store, letter)],
+            )
+            .unwrap();
+        let plan = store.send_package_plan(owner).unwrap();
+        assert_eq!(
+            plan.entries[1].blocker,
+            Some(PlanBlocker::PinnedRevisionMissing)
+        );
+    }
+
+    #[test]
+    fn export_records_round_trip_newest_first() {
+        let mut store = store();
+        let owner = create(&mut store, TemplateKind::WhitePaper, "呈批件");
+        let item = |order: i64, title: &str, pages: i64| ExportItemRecord {
+            sort_order: order,
+            document_uuid: format!("doc-{title}"),
+            revision_uuid: format!("rev-{title}"),
+            payload_hash: format!("hash-{title}"),
+            visible_number: Some(order + 1),
+            title: title.into(),
+            kind: TemplateKind::OfficialLetter,
+            page_count: pages,
+            blank_pages: pages % 2,
+        };
+        let first = store
+            .record_send_package_export(owner, "/tmp/a.pdf", false, 4, &[item(0, "甲", 3)])
+            .unwrap();
+        let items = vec![item(0, "甲", 3), item(1, "乙", 2)];
+        let second = store
+            .record_send_package_export(owner, "/tmp/b.pdf", true, 8, &items)
+            .unwrap();
+        let records = store.send_package_exports(owner).unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![second, first]
+        );
+        assert!(records[0].with_toc);
+        assert_eq!(records[0].total_pages, 8);
+        assert_eq!(records[0].items, items);
+        // 主件删除时记录一并清掉。
+        store.delete(owner).unwrap();
+        assert!(store.send_package_exports(owner).unwrap().is_empty());
     }
 
     #[test]

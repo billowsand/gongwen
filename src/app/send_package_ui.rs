@@ -3,13 +3,22 @@
 //! 数据层在 `manuscript::send_package`，方案见 `docs/send-package-design.md`。
 //! 面板只负责组织：不碰任何件的正文与行文要素。各件的版本状态查库得来，
 //! 每隔几秒自动重查一次——别的标签里提交了版本，这里不用手动刷新也能跟上。
+//!
+//! 合并导出分两步：点「导出合并 PDF…」先生成导出计划（每件用哪一版、哪件不能进包）
+//! 给人确认；确认后整份计划交给后台线程逐件编译、合并，确认之后再提交的版本不会混进来。
 
-use crate::app::{GongwenApp, short_date, status_color, summarize};
-use crate::manuscript::send_package::{AddBlock, ManuscriptBrief, PackageItemState};
+use crate::app::{
+    GongwenApp, VersionDiffState, VersionScope, WorkerResult, short_date, status_color, summarize,
+};
+use crate::manuscript::send_package::{
+    AddBlock, ExportRecord, ManuscriptBrief, PackageItemState, SendPackagePlan,
+};
 use crate::manuscript::{ManuscriptFilter, ManuscriptRow, ManuscriptStore};
+use crate::manuscript_io::send_package::SendPackageOutcome;
 use crate::models::{ManuscriptStatus, TemplateKind};
 use crate::theme;
 use eframe::egui;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// 面板状态自动重查的间隔。
@@ -19,6 +28,8 @@ const ROWS_MAX_HEIGHT: f32 = 460.0;
 const ROWS_MAX_HEIGHT_PICKING: f32 = 240.0;
 /// 添加稿件的候选列表最多列这么多条，再多请用关键词缩小范围。
 const PICKER_LIMIT: usize = 200;
+/// 导出前确认清单最高这么高，件多了就滚动。
+const CONFIRM_MAX_HEIGHT: f32 = 220.0;
 
 /// 面板里的一行：主件或随行件。
 struct PackageRow {
@@ -27,6 +38,33 @@ struct PackageRow {
     /// 本机找不到的随行件为 `None`。
     brief: Option<ManuscriptBrief>,
     state: Option<PackageItemState>,
+    /// 最近一次导出里这一件用的版本号；没导出过或当时不在清单里为 `None`。
+    last_exported: Option<i64>,
+}
+
+/// 导出前的确认：计划已生成，等人勾选目录页、选保存位置。
+struct ExportConfirm {
+    plan: SendPackagePlan,
+    with_toc: bool,
+}
+
+/// 后台导出线程发回的消息。
+pub(crate) enum SendPackageEvent {
+    Progress {
+        text: String,
+    },
+    Done {
+        owner_id: i64,
+        with_toc: bool,
+        result: Result<SendPackageOutcome, String>,
+    },
+}
+
+/// 正在后台进行的合并导出。放在应用上而不是面板上：导出途中关掉面板，
+/// 导出照样跑完、照样记账。
+pub(crate) struct SendPackageExportJob {
+    owner_id: i64,
+    progress: String,
 }
 
 /// 添加稿件的候选区。
@@ -45,6 +83,11 @@ pub(crate) struct SendPackagePanel {
     owner: Option<PackageRow>,
     items: Vec<PackageRow>,
     picker: Option<Picker>,
+    confirm: Option<ExportConfirm>,
+    /// 历次导出记录，最新的在前。
+    exports: Vec<ExportRecord>,
+    /// 最近一次导出失败的完整原因；状态栏一行放不下。
+    export_error: Option<String>,
     loaded_at: Option<Instant>,
     error: Option<String>,
 }
@@ -56,6 +99,9 @@ impl SendPackagePanel {
             owner: None,
             items: Vec::new(),
             picker: None,
+            confirm: None,
+            exports: Vec::new(),
+            export_error: None,
             loaded_at: None,
             error: None,
         }
@@ -71,13 +117,28 @@ impl SendPackagePanel {
     /// 从库里重读主件与清单。出错时保留上次的内容，只记下错误。
     fn reload(&mut self, store: &ManuscriptStore) {
         let result = (|| -> anyhow::Result<()> {
-            let owner = load_row(store, String::new(), Some(self.owner_id))?;
+            let exports = store.send_package_exports(self.owner_id)?;
+            let exported = |uuid: &str| {
+                exports.first().and_then(|record| {
+                    record
+                        .items
+                        .iter()
+                        .find(|item| item.document_uuid == uuid)
+                        .and_then(|item| item.visible_number)
+                })
+            };
+            let (owner_uuid, _) = store.document_identity(self.owner_id)?;
+            let mut owner = load_row(store, String::new(), Some(self.owner_id))?;
+            owner.last_exported = exported(&owner_uuid);
             let mut items = Vec::new();
             for item in store.send_package_items(self.owner_id)? {
-                items.push(load_row(store, item.item_uuid, item.manuscript_id)?);
+                let mut row = load_row(store, item.item_uuid, item.manuscript_id)?;
+                row.last_exported = exported(&row.item_uuid);
+                items.push(row);
             }
             self.owner = Some(owner);
             self.items = items;
+            self.exports = exports;
             Ok(())
         })();
         self.error = result.err().map(|error| format!("{error:#}"));
@@ -106,17 +167,33 @@ fn load_row(
         item_uuid,
         brief,
         state,
+        last_exported: None,
     })
 }
 
 /// 面板里点出的动作，帧末统一执行。
 enum PanelAction {
     Refresh,
-    Move { from: usize, to: usize },
+    Move {
+        from: usize,
+        to: usize,
+    },
     Remove(String),
     Open(i64),
     Add(i64),
     TogglePicker,
+    /// 对照某件上次导出用的版本与当前最新提交版。
+    Diff {
+        manuscript_id: i64,
+        from: i64,
+        to: i64,
+    },
+    /// 生成导出计划，进入确认。
+    PlanExport,
+    CancelExport,
+    /// 确认后选保存位置、开始导出。
+    StartExport,
+    OpenFile(PathBuf),
     Close,
 }
 
@@ -145,6 +222,8 @@ impl GongwenApp {
         {
             panel.reload(store);
         }
+        // 界面空闲时不重绘，定时刷新也就停了；面板开着就按刷新间隔叫醒一次。
+        ctx.request_repaint_after(REFRESH_INTERVAL);
         if let (Some(picker), Some(store)) = (&mut panel.picker, self.manuscript_store.as_mut()) {
             refresh_picker(picker, store, panel.owner_id);
         }
@@ -155,6 +234,10 @@ impl GongwenApp {
                 .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty())
         };
         let archived = panel.archived();
+        let exporting = self
+            .send_package_export
+            .as_ref()
+            .map(|job| (job.owner_id == panel.owner_id, job.progress.clone()));
         let mut keep = true;
         let mut action = None;
 
@@ -171,15 +254,10 @@ impl GongwenApp {
                 if archived {
                     theme::chip(ui, "已归档 · 只读", theme::text_muted(), theme::surface());
                 }
-                ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(
-                                "随呈批件一起送批的独立稿件（函稿、普通公文、研究报告等）。导出时每件取最新提交版，按下面的顺序合并。",
-                            )
-                            .color(theme::text_soft()),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Wrap),
-                    );
+                wrapped_soft(
+                    ui,
+                    "随呈批件一起送批的独立稿件（函稿、普通公文、研究报告等）。导出时每件取最新提交版，按下面的顺序合并成一个 PDF。",
+                );
                 if let Some(error) = &panel.error {
                     ui.colored_label(theme::danger(), format!("读取失败：{error}"));
                 }
@@ -188,7 +266,7 @@ impl GongwenApp {
                 egui::ScrollArea::vertical()
                     .id_salt("send_package_rows")
                     .auto_shrink([false, true])
-                    .max_height(if panel.picker.is_some() {
+                    .max_height(if panel.picker.is_some() || panel.confirm.is_some() {
                         ROWS_MAX_HEIGHT_PICKING
                     } else {
                         ROWS_MAX_HEIGHT
@@ -213,8 +291,37 @@ impl GongwenApp {
                     });
 
                 ui.add_space(6.0);
+                if let Some(confirm) = &mut panel.confirm {
+                    confirm_ui(ui, confirm, &unsaved_in_editor, &mut action);
+                    return;
+                }
                 let picking = panel.picker.is_some();
                 ui.horizontal(|ui| {
+                    match &exporting {
+                        Some((true, progress)) => {
+                            ui.spinner();
+                            ui.label(progress);
+                        }
+                        Some((false, _)) => {
+                            ui.add_enabled(
+                                false,
+                                theme::icon_text_button(theme::Icon::FileDown, "导出合并 PDF…"),
+                            )
+                            .on_disabled_hover_text("另一件呈批件的送批材料正在导出，请稍候");
+                        }
+                        None => {
+                            if ui
+                                .add(theme::icon_text_button(
+                                    theme::Icon::FileDown,
+                                    "导出合并 PDF…",
+                                ))
+                                .on_hover_text("先列出每件要用的版本给你确认，再逐件编译并合并")
+                                .clicked()
+                            {
+                                action = Some(PanelAction::PlanExport);
+                            }
+                        }
+                    }
                     if !archived
                         && ui
                             .add(theme::icon_text_button(
@@ -237,12 +344,13 @@ impl GongwenApp {
                         }
                     });
                 });
-                if archived {
-                    return;
+                if let Some(error) = &panel.export_error {
+                    ui.colored_label(theme::danger(), format!("上次导出失败，没有生成文件：{error}"));
                 }
-                if let Some(picker) = &mut panel.picker {
+                if !archived && let Some(picker) = &mut panel.picker {
                     picker_ui(ui, picker, &mut action);
                 }
+                history_ui(ui, &panel.exports, &mut action);
             });
         if !keep {
             action = Some(PanelAction::Close);
@@ -299,7 +407,24 @@ impl GongwenApp {
                     };
                     Ok(None)
                 }
-                PanelAction::Open(_) | PanelAction::Close => Ok(None),
+                PanelAction::PlanExport => {
+                    panel.picker = None;
+                    panel.export_error = None;
+                    panel.confirm = Some(ExportConfirm {
+                        plan: store.send_package_plan(owner_id)?,
+                        with_toc: panel.confirm.as_ref().is_some_and(|c| c.with_toc),
+                    });
+                    Ok(None)
+                }
+                PanelAction::CancelExport => {
+                    panel.confirm = None;
+                    Ok(None)
+                }
+                PanelAction::Open(_)
+                | PanelAction::Close
+                | PanelAction::Diff { .. }
+                | PanelAction::StartExport
+                | PanelAction::OpenFile(_) => Ok(None),
             }
         })();
         match result {
@@ -313,6 +438,21 @@ impl GongwenApp {
         match after {
             After::Close => self.send_package = None,
             After::Open(id) => self.open_in_editor(id),
+            After::Diff {
+                manuscript_id,
+                from,
+                to,
+            } => {
+                self.version_diff = Some(VersionDiffState {
+                    scope: VersionScope::Manuscript(manuscript_id),
+                    from: Some(from),
+                    to: Some(to),
+                    to_is_current_config: false,
+                    pair: crate::version_pair_view::VersionPairViewState::default(),
+                });
+            }
+            After::StartExport => self.start_send_package_export(),
+            After::OpenFile(path) => self.open_pdf(path, None),
             After::Reload => {
                 // 清单或引用关系变了，稿件库详情卡里的送批材料 / 被引用也要跟着刷新。
                 self.reload_detail();
@@ -330,6 +470,13 @@ impl GongwenApp {
 enum After {
     Close,
     Open(i64),
+    Diff {
+        manuscript_id: i64,
+        from: i64,
+        to: i64,
+    },
+    StartExport,
+    OpenFile(PathBuf),
     Reload,
     Nothing,
 }
@@ -338,11 +485,24 @@ fn action_kind_after(action: &PanelAction) -> After {
     match action {
         PanelAction::Close => After::Close,
         PanelAction::Open(id) => After::Open(*id),
+        PanelAction::Diff {
+            manuscript_id,
+            from,
+            to,
+        } => After::Diff {
+            manuscript_id: *manuscript_id,
+            from: *from,
+            to: *to,
+        },
+        PanelAction::StartExport => After::StartExport,
+        PanelAction::OpenFile(path) => After::OpenFile(path.clone()),
         PanelAction::Refresh
         | PanelAction::Move { .. }
         | PanelAction::Remove(_)
         | PanelAction::Add(_) => After::Reload,
-        PanelAction::TogglePicker => After::Nothing,
+        PanelAction::TogglePicker | PanelAction::PlanExport | PanelAction::CancelExport => {
+            After::Nothing
+        }
     }
 }
 
@@ -452,6 +612,27 @@ fn row_card(
                     ui.weak(line);
                     ui.colored_label(status_color(brief.status), brief.status.label());
                 });
+                if let Some(exported) = row.last_exported
+                    && exported != latest.visible_number
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            theme::warn(),
+                            format!("上次导出用的是 v{exported}，之后又提交了新版本。"),
+                        );
+                        if ui
+                            .small_button(format!("对照 v{exported} → v{}", latest.visible_number))
+                            .on_hover_text("用版本对照（花脸稿）看这期间改了什么")
+                            .clicked()
+                        {
+                            *action = Some(PanelAction::Diff {
+                                manuscript_id: brief.id,
+                                from: exported,
+                                to: latest.visible_number,
+                            });
+                        }
+                    });
+                }
                 if state.has_uncommitted || unsaved_in_editor(brief.id) {
                     ui.colored_label(
                         theme::danger(),
@@ -567,4 +748,343 @@ fn picker_ui(ui: &mut egui::Ui, picker: &mut Picker, action: &mut Option<PanelAc
                 }
             });
     });
+}
+
+/// 可换行的浅色说明文字。
+fn wrapped_soft(ui: &mut egui::Ui, text: &str) {
+    ui.add(
+        egui::Label::new(egui::RichText::new(text).color(theme::text_soft()))
+            .wrap_mode(egui::TextWrapMode::Wrap),
+    );
+}
+
+/// 导出前的确认清单：每件用哪一版、有什么要注意、哪件不能进包。
+fn confirm_ui(
+    ui: &mut egui::Ui,
+    confirm: &mut ExportConfirm,
+    unsaved_in_editor: &dyn Fn(i64) -> bool,
+    action: &mut Option<PanelAction>,
+) {
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.strong("导出前确认");
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("send_package_confirm_rows")
+            .max_height(CONFIRM_MAX_HEIGHT)
+            .auto_shrink([false, true])
+            .show(ui, |ui| confirm_rows(ui, &confirm.plan, unsaved_in_editor));
+        ui.add_space(6.0);
+        ui.checkbox(&mut confirm.with_toc, "前面加一页送批材料目录");
+        wrapped_soft(
+            ui,
+            "每件从奇数页开始：页数为奇数的件后面自动补一张空白页，双面打印后各件能拆开分别装订。各件页码保持原样。",
+        );
+        let ready = confirm.plan.ready();
+        if !ready {
+            ui.colored_label(
+                theme::danger(),
+                "有不能进包的件：处理好后点「重新检查」，或把它移出清单。",
+            );
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            // 置灰的主按钮文字几乎看不清，不能导出时退回普通按钮样式。
+            let export = if ready {
+                ui.add(theme::primary_button_widget(
+                    theme::Icon::FileDown,
+                    "选择位置并导出",
+                ))
+            } else {
+                ui.add_enabled(
+                    false,
+                    theme::icon_text_button(theme::Icon::FileDown, "选择位置并导出"),
+                )
+            };
+            if export.clicked() {
+                *action = Some(PanelAction::StartExport);
+            }
+            if ui
+                .add(theme::icon_text_button(theme::Icon::Refresh, "重新检查"))
+                .on_hover_text("重新读取各件的最新提交版")
+                .clicked()
+            {
+                *action = Some(PanelAction::PlanExport);
+            }
+            if ui.button("取消").clicked() {
+                *action = Some(PanelAction::CancelExport);
+            }
+        });
+    });
+}
+
+/// 确认清单的逐件行。
+fn confirm_rows(
+    ui: &mut egui::Ui,
+    plan: &SendPackagePlan,
+    unsaved_in_editor: &dyn Fn(i64) -> bool,
+) {
+    for (index, entry) in plan.entries.iter().enumerate() {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("{}.", index + 1));
+            if index == 0 {
+                theme::chip(ui, "主件", theme::accent(), theme::surface());
+            }
+            let title = if entry.title.is_empty() {
+                "（本机未找到的稿件）"
+            } else {
+                entry.title.as_str()
+            };
+            ui.add(egui::Label::new(title).truncate())
+                .on_hover_text(title);
+            match &entry.revision {
+                Some(revision) => {
+                    let version = match revision.visible_number {
+                        Some(number) => format!("v{number}"),
+                        None => "钉住的版本".into(),
+                    };
+                    let label = if entry.pinned {
+                        format!("{version}（归档时钉住）")
+                    } else {
+                        version
+                    };
+                    theme::chip(ui, &label, theme::success(), theme::success_soft());
+                }
+                None => {
+                    theme::chip(ui, "不能进包", theme::danger(), theme::danger_soft());
+                }
+            }
+        });
+        if let Some(blocker) = entry.blocker {
+            ui.colored_label(theme::danger(), format!("    {}", blocker.reason()));
+        }
+        let unsaved = entry.manuscript_id.is_some_and(unsaved_in_editor);
+        if entry.revision.is_some() && (entry.has_uncommitted || unsaved) {
+            ui.colored_label(theme::warn(), "    有未提交的修改，这些修改不会进包。");
+        }
+        if entry.has_pending_branch {
+            ui.colored_label(theme::warn(), "    有待处理的同步分支，用的是本机这一支。");
+        }
+    }
+}
+
+/// 历次导出记录：时间、页数、文件，展开看当时每件的版本与页数。
+fn history_ui(ui: &mut egui::Ui, exports: &[ExportRecord], action: &mut Option<PanelAction>) {
+    if exports.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new(format!("导出记录（{}）", exports.len()))
+        .id_salt("send_package_history")
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("send_package_history_rows")
+                .max_height(200.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for record in exports {
+                        let path = PathBuf::from(&record.output_path);
+                        let name = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| record.output_path.clone());
+                        let toc = if record.with_toc { " · 含目录" } else { "" };
+                        egui::CollapsingHeader::new(format!(
+                            "{} · {} 页{toc} · {name}",
+                            short_date(&record.exported_at),
+                            record.total_pages
+                        ))
+                        .id_salt(("send_package_export", record.id))
+                        .show(ui, |ui| {
+                            for item in &record.items {
+                                let version = item
+                                    .visible_number
+                                    .map_or_else(|| "钉住的版本".into(), |n| format!("v{n}"));
+                                ui.label(format!(
+                                    "{}. {} · {version} · {} 页",
+                                    item.sort_order + 1,
+                                    summarize(&item.title, 30),
+                                    item.page_count
+                                ));
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&record.output_path).weak(),
+                                    )
+                                    .truncate(),
+                                );
+                                if path.exists() {
+                                    if ui.small_button("打开").clicked() {
+                                        *action = Some(PanelAction::OpenFile(path.clone()));
+                                    }
+                                } else {
+                                    ui.weak("（文件已不在）");
+                                }
+                            });
+                        });
+                    }
+                });
+        });
+}
+
+impl GongwenApp {
+    /// 确认后选保存位置，把计划交给后台线程编译合并。
+    fn start_send_package_export(&mut self) {
+        if self.send_package_export.is_some() {
+            self.status = "已有送批材料正在导出，请稍候。".into();
+            return;
+        }
+        let Some(panel) = self.send_package.as_mut() else {
+            return;
+        };
+        let Some(confirm) = panel.confirm.as_ref() else {
+            return;
+        };
+        if !confirm.plan.ready() {
+            return;
+        }
+        let default_name = format!(
+            "{}（送批材料）.pdf",
+            crate::export::safe_filename(confirm.plan.owner_title())
+        );
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name(&default_name)
+            .save_file()
+        else {
+            return;
+        };
+        let path = if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        {
+            path
+        } else {
+            path.with_extension("pdf")
+        };
+        self.run_send_package_export(path);
+    }
+
+    /// 把面板上已确认的计划交给后台线程，导出到 `path`。
+    fn run_send_package_export(&mut self, path: PathBuf) {
+        let Some(panel) = self.send_package.as_mut() else {
+            return;
+        };
+        let Some(confirm) = panel.confirm.take() else {
+            return;
+        };
+        let owner_id = panel.owner_id;
+        let with_toc = confirm.with_toc;
+        let plan = confirm.plan;
+        let vocabulary = self.config.vocabulary.clone();
+        let fonts = self.config.fonts.clone();
+        let numbering = self.config.numbering;
+        let tx = self.sender.clone();
+        self.send_package_export = Some(SendPackageExportJob {
+            owner_id,
+            progress: "正在准备导出…".into(),
+        });
+        self.status = format!("正在导出《{}》的送批材料…", plan.owner_title());
+        std::thread::spawn(move || {
+            let display = crate::units::UnitDisplay::new(&vocabulary);
+            let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
+            let progress_tx = tx.clone();
+            let result = crate::manuscript_io::send_package::export_send_package(
+                &plan,
+                with_toc,
+                &path,
+                |snapshot, markdown, stem| {
+                    crate::manuscript_io::compile_snapshot_pdf(
+                        snapshot, markdown, &display, &fonts, &numbering, stem,
+                    )
+                },
+                |text| {
+                    let _ =
+                        progress_tx.send(WorkerResult::SendPackage(SendPackageEvent::Progress {
+                            text: text.to_string(),
+                        }));
+                },
+            );
+            let _ = tx.send(WorkerResult::SendPackage(SendPackageEvent::Done {
+                owner_id,
+                with_toc,
+                result: result.map_err(|error| format!("{error:#}")),
+            }));
+        });
+    }
+
+    /// 后台导出线程的消息：更新进度，或收尾——写导出记录、在应用内打开成品。
+    pub(crate) fn handle_send_package_event(&mut self, event: SendPackageEvent) {
+        match event {
+            SendPackageEvent::Progress { text } => {
+                if let Some(job) = self.send_package_export.as_mut() {
+                    job.progress = text.clone();
+                }
+                self.status = text;
+            }
+            SendPackageEvent::Done {
+                owner_id,
+                with_toc,
+                result,
+            } => {
+                self.send_package_export = None;
+                match result {
+                    Ok(outcome) => {
+                        let blanks: i64 = outcome
+                            .items
+                            .iter()
+                            .map(|item| item.blank_pages)
+                            .sum::<i64>()
+                            + outcome.toc.map_or(0, |toc| toc.blanks as i64);
+                        let recorded = self.manuscript_store.as_mut().map(|store| {
+                            store.record_send_package_export(
+                                owner_id,
+                                &outcome.path.to_string_lossy(),
+                                with_toc,
+                                outcome.total_pages as i64,
+                                &outcome.items,
+                            )
+                        });
+                        let title = outcome
+                            .items
+                            .first()
+                            .map(|item| item.title.clone())
+                            .unwrap_or_default();
+                        let mut message = format!(
+                            "已导出《{title}》的送批材料：{} 件，共 {} 页（含 {blanks} 张双面打印补白页），{}。",
+                            outcome.items.len(),
+                            outcome.total_pages,
+                            outcome.path.display()
+                        );
+                        if let Some(Err(error)) = recorded {
+                            message.push_str(&format!("但导出记录没写进去：{error:#}"));
+                        }
+                        self.status = message;
+                        if let (Some(panel), Some(store)) =
+                            (self.send_package.as_mut(), self.manuscript_store.as_ref())
+                            && panel.owner_id == owner_id
+                        {
+                            panel.reload(store);
+                        }
+                        // 应用内的 PDF 标签自带打印、系统打开与定位。
+                        self.open_pdf(outcome.path, Some(format!("{title}（送批材料）")));
+                    }
+                    Err(error) => {
+                        self.status = format!("送批材料导出失败，没有生成文件：{error}");
+                        if let Some(panel) = self.send_package.as_mut()
+                            && panel.owner_id == owner_id
+                        {
+                            panel.export_error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 送批材料正在后台导出。
+    pub(crate) fn send_package_exporting(&self) -> bool {
+        self.send_package_export.is_some()
+    }
 }

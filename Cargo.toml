@@ -55,6 +55,9 @@ jieba-rs = "0.10"
 # 研究报告公式的预览渲染：纯 Rust 排版 + PNG 光栅化（STIX Two Math），不走 tectonic。
 # 只开 png feature；它的 egui feature 钉在 egui 0.28，与本项目的 0.35 不兼容。
 latex-rust = { version = "1.0", features = ["png"] }
+# 送批材料合并导出：把逐件编译的 PDF 合成一个、补双面打印的空白页。
+# 只用读写与对象操作，关掉默认的 rayon / chrono-clock。
+lopdf = { version = "0.45.0", default-features = false }
 # 随仓库分发的副本，见 vendor/mdx/README.md：构建不依赖 GitHub 可达，
 # 离线也能从零编译。同步上游的办法写在那份 README 里。
 mdx = { path = "vendor/mdx" }

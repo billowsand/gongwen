@@ -52,7 +52,7 @@ pub(crate) use manuscript_ui::{
     ArchivePending, ImportPreview, PdfExportDialog, PendingMergeDialog, ZipPasswordDialog,
 };
 pub(crate) use proofread_ui::ProofreadPageState;
-pub(crate) use send_package_ui::SendPackagePanel;
+pub(crate) use send_package_ui::{SendPackageEvent, SendPackageExportJob, SendPackagePanel};
 pub(crate) use session::{DraftAction, ExitPrompt};
 pub(crate) use settings::SettingsSection;
 pub(crate) use tabs::{NavPage, TabRef};
@@ -141,6 +141,8 @@ pub struct GongwenApp {
     sop_open: bool,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
+    /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
+    send_package_export: Option<SendPackageExportJob>,
     vocabulary_import_conflicts: Option<Vec<vocabulary_xlsx::Conflict>>,
     /// 词库有尚未写入本机配置的编辑。
     vocabulary_dirty: bool,
@@ -429,6 +431,7 @@ impl GongwenApp {
             metrics: crate::metrics::load(),
             sop_open: false,
             send_package: None,
+            send_package_export: None,
             macos_titlebar_metrics,
             docs,
             pdfs: Vec::new(),

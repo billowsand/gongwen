@@ -53,6 +53,8 @@ pub(crate) enum WorkerResult {
     Lexicon(crate::app::LexiconJob),
     /// 扫描本机字体目录的结果。中文字体文件很大，扫描放在后台线程。
     SystemFonts(Vec<system_fonts::SystemFont>),
+    /// 送批材料合并导出的进度与结果。
+    SendPackage(crate::app::SendPackageEvent),
     /// 稿件 PDF 批量导出的结果。`path` 是保存的 zip 路径。
     ManuscriptPdfExport {
         path: PathBuf,
@@ -336,6 +338,7 @@ impl GongwenApp {
                         self.status = message.clone();
                     }
                 }
+                WorkerResult::SendPackage(event) => self.handle_send_package_event(event),
                 WorkerResult::ManuscriptPdfExport { path, result } => {
                     self.manuscript_pdf_export_busy = false;
                     match result {

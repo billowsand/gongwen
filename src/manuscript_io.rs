@@ -21,6 +21,7 @@ use zip::read::ZipArchive;
 use zip::write::SimpleFileOptions;
 use zip::{AesMode, CompressionMethod, ZipWriter};
 
+pub mod send_package;
 pub mod sync;
 
 pub const MANIFEST_SCHEMA: u32 = 2;
@@ -473,6 +474,26 @@ fn compile_record_pdf(
     numbering: &NumberingConfig,
     stem: &str,
 ) -> Result<Vec<u8>> {
+    compile_snapshot_pdf(
+        &record.snapshot,
+        &record.content_markdown,
+        display,
+        fonts,
+        numbering,
+        stem,
+    )
+}
+
+/// 按一份行文要素 + 正文编译非盖章件 PDF，返回字节；临时目录用后即删。
+/// 活稿行与历史版本快照（送批材料导出）都走这里，版式与单独导出一致。
+pub(crate) fn compile_snapshot_pdf(
+    snapshot: &crate::models::DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    stem: &str,
+) -> Result<Vec<u8>> {
     let counter = PDF_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
         "gongwen_pdf_export_{}_{}_{}",
@@ -486,14 +507,14 @@ fn compile_record_pdf(
         let tex_path = dir.join(format!("{stem}.tex"));
         crate::export::write_tex_for_kind(
             &tex_path,
-            &record.snapshot,
-            &record.content_markdown,
+            snapshot,
+            markdown,
             display,
             fonts,
             numbering,
             &crate::visual_diff::ElementMarks::default(),
         )?;
-        let pdf_path = if record.snapshot.kind.is_research() {
+        let pdf_path = if snapshot.kind.is_research() {
             crate::texcompile::compile_research_pdf(&tex_path)?.pdf
         } else {
             crate::texcompile::compile_pdf_if_available(&tex_path, fonts)?

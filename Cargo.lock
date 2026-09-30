@@ -2554,6 +2554,7 @@ dependencies = [
  "image",
  "jieba-rs",
  "latex-rust",
+ "lopdf",
  "mdx",
  "merman",
  "merman-render",
