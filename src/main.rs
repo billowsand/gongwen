@@ -8,6 +8,7 @@ mod diff_view;
 mod doc_import;
 mod draft_page;
 mod export;
+mod file_clipboard;
 mod help;
 mod highlight;
 mod images;
