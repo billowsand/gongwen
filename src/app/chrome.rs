@@ -694,6 +694,16 @@ impl GongwenApp {
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             self.app_menu_button(ui);
+            if ui
+                .button("快捷查找")
+                .on_hover_text(format!(
+                    "查找稿件、单位人员与常用页面（{}）",
+                    theme::primary_shortcut("K")
+                ))
+                .clicked()
+            {
+                self.open_quick_find();
+            }
             toolbar_separator(ui);
             self.tab_strip(ui);
         });

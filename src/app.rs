@@ -35,6 +35,7 @@ mod lexicon_jobs;
 mod manuscript_ui;
 mod outline_ui;
 mod proofread_ui;
+mod quick_find;
 mod session;
 mod settings;
 mod sop_ui;
@@ -148,6 +149,7 @@ pub struct GongwenApp {
     about_window_open: bool,
     /// 应用内帮助页（[`NavPage::Help`] 标签）的状态。
     help: crate::help::HelpState,
+    quick_find: Option<quick_find::QuickFind>,
     vocabulary_filter: String,
     /// 词库树上当前选中的词条 id，右侧编辑区显示它的详情。
     vocabulary_selected: Option<u64>,
@@ -432,6 +434,7 @@ impl GongwenApp {
             vocabulary_move: None,
             about_window_open: false,
             help: crate::help::HelpState::default(),
+            quick_find: None,
             vocabulary_filter: String::new(),
             vocabulary_selected: None,
             vocabulary_collapsed: BTreeSet::new(),
@@ -683,6 +686,7 @@ impl eframe::App for GongwenApp {
         self.config_versions_window(&ctx);
         self.knowledge_preview_window(&ctx);
         self.about_window(&ctx);
+        self.quick_find_window(&ctx);
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
         // 候选窗浮在所有面板之上；这时编辑框已经画完，光标矩形是本帧最终的那一个。

@@ -1,0 +1,48 @@
+---
+source: src/export/parse/regression_tests.rs
+expression: parse_markdown(markdown)
+---
+[
+    Title(
+        "关于开展检查的通知",
+    ),
+    Heading(
+        2,
+        "工作安排",
+    ),
+    OrderedListItem {
+        number: 1,
+        text: "核对资料。",
+    },
+    OrderedListItem {
+        number: 2,
+        text: "汇总情况。",
+    },
+    Table {
+        rows: [
+            [
+                "单位",
+                "数量",
+            ],
+            [
+                "甲单位",
+                "3",
+            ],
+        ],
+        aligns: [
+            Auto,
+            Right,
+        ],
+        spans: [],
+        numbered: false,
+    },
+    Marker(
+        Attachment,
+    ),
+    Title(
+        "检查清单",
+    ),
+    Paragraph(
+        "附件正文。",
+    ),
+]

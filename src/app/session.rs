@@ -501,6 +501,24 @@ impl GongwenApp {
     /// 应用级快捷键要在各个文本框处理输入前消费，避免保存/查找
     /// 被当前聚焦的编辑控件吞掉。
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let quick_find = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+        if ctx.input_mut(|input| input.consume_shortcut(&quick_find)) {
+            if let Some(state) = self.quick_find.take() {
+                ctx.memory_mut(|memory| {
+                    memory.surrender_focus(super::quick_find::search_id());
+                    if let Some(id) = state.previous_focus {
+                        memory.request_focus(id);
+                    }
+                });
+            } else {
+                self.open_quick_find();
+            }
+            return;
+        }
+        // 查找浮层打开时，快捷键只作用于浮层，不能新建、保存或关闭背后的稿件。
+        if self.quick_find.is_some() {
+            return;
+        }
         #[cfg(target_os = "macos")]
         {
             // macOS 标准窗口快捷键：交给 winit/AppKit 执行，状态会通过
@@ -676,7 +694,9 @@ impl GongwenApp {
                     crate::models::EDITOR_FONT_SIZE_MIN,
                     crate::models::EDITOR_FONT_SIZE_MAX,
                 );
-                let _ = storage::save(&self.config);
+                if let Err(error) = storage::save(&self.config) {
+                    self.status = format!("字号已在本次生效，但配置保存失败：{error:#}");
+                }
             }
         }
 

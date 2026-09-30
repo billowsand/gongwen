@@ -28,6 +28,9 @@ const CONTEXT_CHARS: usize = 12;
 /// 靠上下文也认不准，与其猜错位置改坏正文，不如置灰让用户自己看。
 const MAX_CANDIDATES: usize = 512;
 
+#[cfg(test)]
+mod property_tests;
+
 pub type RevisionId = u64;
 
 /// 建议的来源。决定界面上的来源标签，也决定「永久忽略」的键怎么拼。

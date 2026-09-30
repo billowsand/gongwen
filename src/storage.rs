@@ -53,41 +53,41 @@ pub fn load_remembered_zip_password() -> Result<Option<String>> {
 pub fn save_remembered_zip_password(password: Option<&str>) -> Result<()> {
     let path = config_dir()?.join(ZIP_PASSWORD_FILE);
     if let Some(password) = password {
-        let parent = path.parent().context("ZIP 密码路径缺少父目录")?;
-        fs::create_dir_all(parent)?;
-        let temp = path.with_extension("password.tmp");
-        write_private_file(&temp, password.as_bytes())?;
-        if path.exists() {
-            fs::remove_file(&path)?;
+        if password.len() as u64 > MAX_REMEMBERED_PASSWORD_BYTES {
+            anyhow::bail!("ZIP 密码过长，无法记住");
         }
-        fs::rename(&temp, &path)?;
+        atomic_write(&path, |file| {
+            use std::io::Write;
+            file.write_all(password.as_bytes())?;
+            Ok(())
+        })?;
     } else if path.exists() {
         fs::remove_file(&path)?;
     }
     Ok(())
 }
 
-#[cfg(unix)]
-fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    fs::write(path, bytes)?;
+/// 同目录暂存并刷盘后原子替换；失败时不删除原文件，暂存文件由 RAII 清理。
+/// 配置里也可能包含服务密钥，Unix 下和密码一样限制为仅当前用户可读写。
+fn atomic_write(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut fs::File) -> Result<()>,
+) -> Result<()> {
+    let parent = path.parent().context("保存路径缺少父目录")?;
+    fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    write(temp.as_file_mut())?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    // Unix 上目录项也需刷盘。此处失败时新文件已替换，向调用方如实报告错误。
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -103,16 +103,11 @@ pub fn load() -> Result<AppConfig> {
 
 pub fn save(config: &AppConfig) -> Result<()> {
     let path = config_path()?;
-    let parent = path.parent().context("配置路径缺少父目录")?;
-    fs::create_dir_all(parent)?;
-    let temp = path.with_extension("json.tmp");
-    let raw = serde_json::to_string_pretty(config)?;
-    fs::write(&temp, raw)?;
-    if path.exists() {
-        fs::remove_file(&path)?;
-    }
-    fs::rename(&temp, &path)?;
-    Ok(())
+    atomic_write(&path, |file| {
+        serde_json::to_writer_pretty(file, config)?;
+        Ok(())
+    })
+    .context("保存配置失败，上一次有效配置会在替换前保留")
 }
 
 #[cfg(test)]
@@ -121,6 +116,66 @@ mod tests {
     use crate::models::{
         JointIssuanceMode, LetterVersion, SecurityLevel, TemplateKind, VocabularyCategory,
     };
+
+    #[test]
+    fn failed_write_preserves_previous_file_and_cleans_up_temporary_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("配置.json");
+        fs::write(&path, b"previous config").unwrap();
+        let result = atomic_write(&path, |file| {
+            file.write_all(b"partial replacement")?;
+            anyhow::bail!("模拟写入中途失败")
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"previous config");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_save_replaces_existing_config_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("配置.json");
+        fs::write(&path, b"old config").unwrap();
+        let config = AppConfig {
+            output_dir: "中文路径/导出".into(),
+            ..AppConfig::default()
+        };
+        atomic_write(&path, |file| {
+            serde_json::to_writer_pretty(file, &config)?;
+            Ok(())
+        })
+        .unwrap();
+        let loaded: AppConfig = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(loaded.output_dir, config.output_dir);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn failed_persist_does_not_delete_destination_or_leak_temporary_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("被占用的目标");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("旧数据"), b"keep me").unwrap();
+        assert!(
+            atomic_write(&path, |file| {
+                file.write_all(b"new config")?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read(path.join("旧数据")).unwrap(), b"keep me");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn example_config_matches_the_current_schema() {

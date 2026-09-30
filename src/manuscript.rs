@@ -20,6 +20,7 @@ use std::time::Duration;
 
 pub(crate) mod candidates;
 pub(crate) mod merge;
+mod search;
 pub(crate) mod sync;
 
 /// schema 版本 1：稿件表 + PDF 附件表。

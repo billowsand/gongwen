@@ -11,6 +11,9 @@ use crate::export::{
 use crate::models::{NumberingConfig, StyleMode};
 use std::borrow::Cow;
 
+#[cfg(test)]
+mod regression_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum MarkdownBlock {
     Title(String),
