@@ -3,6 +3,8 @@
 mod ai_guard;
 mod app;
 mod crash_log;
+#[cfg(test)]
+mod dependency_bench;
 mod diff;
 mod diff_view;
 mod doc_import;

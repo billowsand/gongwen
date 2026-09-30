@@ -19,6 +19,10 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "proofread_xlsx/dependency_contracts.rs"]
+mod dependency_contracts;
+
 const SHEET: &str = "校对词表";
 const HEADERS: &[&str] = &[
     "条目编号",
