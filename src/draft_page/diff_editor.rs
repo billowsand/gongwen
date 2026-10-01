@@ -63,6 +63,8 @@ pub(crate) fn diff_editor(
     highlighter: &mut MarkdownHighlighter,
     input: DiffEditorInput<'_>,
 ) -> DiffEditorOutput {
+    let clipboard_before = text.clone();
+    let reference_paste = super::reference_clipboard::before_edit(ui.ctx(), text, input.editable);
     let DiffEditorInput {
         hunks,
         focus,
@@ -253,6 +255,7 @@ pub(crate) fn diff_editor(
 
     // —— 变更块：悬停 / 焦点描边与「还原」按钮 ——
     let pointer = ui.input(|input| input.pointer.hover_pos());
+    super::reference_clipboard::after_edit(ui.ctx(), text, &clipboard_before, reference_paste);
     let mut result = DiffEditorOutput {
         changed: output.response.changed(),
         cursor_line: output

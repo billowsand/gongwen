@@ -964,6 +964,12 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn markdown_editor_impl(&mut self, ui: &mut egui::Ui, hybrid: bool) {
+        let clipboard_before = self.doc.generated_markdown.clone();
+        let reference_paste = super::reference_clipboard::before_edit(
+            ui.ctx(),
+            &clipboard_before,
+            !self.doc.read_only(),
+        );
         let source_mode = !hybrid && self.doc.preview_mode == PreviewMode::Source;
         let source_scroll_request = source_mode
             .then(|| self.doc.source_minimap.requested_offset.take())
@@ -1420,6 +1426,12 @@ impl DraftPage<'_> {
         if let Some(action) = menu_action {
             self.run_editor_menu_action(ui.ctx(), action);
         }
+        super::reference_clipboard::after_edit(
+            ui.ctx(),
+            &mut self.doc.generated_markdown,
+            &clipboard_before,
+            reference_paste,
+        );
     }
 
     /// 切换审校显示方式。离开对照模式时清掉光标跟随高亮——它锚在旧段落上，

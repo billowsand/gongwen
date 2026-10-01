@@ -35,6 +35,7 @@ mod heading_focus;
 mod markdown;
 mod navigator;
 mod page;
+mod reference_clipboard;
 mod references;
 mod revise;
 mod ribbon;

@@ -125,6 +125,7 @@ impl DocumentModel {
     ) -> Self {
         let blocks = parse_markdown_located_with_numbering(markdown, numbering)
             .into_iter()
+            .filter(|located| !matches!(&located.block, MarkdownBlock::Html(line) if line.trim().starts_with(crate::document_reference::DEFINITION)))
             .flat_map(|located| quote_pieces(markdown, located))
             .map(|located| {
                 // 段内列表的生成编号是版式不是正文：原文与纯文本都剥掉，

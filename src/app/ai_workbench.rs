@@ -616,6 +616,14 @@ impl GongwenApp {
             theme::window_enter_anim(ctx, egui::Id::new("ai_proposal_anim"), &window.response);
         }
         if accept {
+            if let Err(error) = crate::document_reference::ensure_preserved(
+                &self.docs[index].generated_markdown,
+                &proposal.result.markdown,
+            ) {
+                self.status = error.to_string();
+                self.docs[index].ai_proposal = Some(proposal);
+                return;
+            }
             let label = proposal.label.clone();
             GongwenApp::take_generated(&mut self.docs[index], proposal.result);
             self.status = format!("已接受“{label}”修改提案，并重新执行审校。 ");

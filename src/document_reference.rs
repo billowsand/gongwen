@@ -305,6 +305,77 @@ pub(crate) fn put(markdown: &str, reference: &Reference) -> String {
     out
 }
 
+/// 只移除引用定义，正文标记原样保留，供原生源码交换与逐条合并使用。
+pub(crate) fn without_definitions(markdown: &str) -> String {
+    markdown
+        .split_inclusive('\n')
+        .filter(|line| !line.trim().starts_with(DEFINITION))
+        .collect()
+}
+
+/// 冲突面板展示人可读的引用信息，实际合并仍使用原定义，绝不丢失身份字段。
+pub(crate) fn conflict_display(markdown: &str) -> String {
+    let references = References::read(markdown);
+    if !references.items.is_empty() && without_definitions(markdown).trim().is_empty() {
+        references
+            .items
+            .values()
+            .map(Reference::display)
+            .collect::<Vec<_>>()
+            .join("；")
+    } else {
+        markdown.to_string()
+    }
+}
+
+/// AI 可以调整引用周围文字及位置，但不得修改定义或增删引用。规则修订也不能
+/// 直接改写结构标记；用户通过引用面板执行这些操作。
+pub(crate) fn ensure_preserved(before: &str, after: &str) -> Result<()> {
+    let old = References::read(before);
+    let new = References::read(after);
+    let counts = |text: &str| {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for (_, id) in occurrences(text) {
+            *counts.entry(id).or_default() += 1;
+        }
+        counts
+    };
+    ensure!(
+        old.items == new.items && counts(before) == counts(after),
+        "该建议改变了公文引用，请通过「公文引用」面板手工核对与调整，当前正文未改变"
+    );
+    ensure!(
+        new.issues.len() <= old.issues.len(),
+        "该建议损坏了公文引用，已放弃采纳"
+    );
+    Ok(())
+}
+
+/// 从别篇粘贴时只带使用到的定义；同 ID 不同快照必须重新生成 ID，不覆盖目标篇。
+pub(crate) fn transfer(
+    fragment: &str,
+    items: &[Reference],
+    target: &str,
+) -> (String, Vec<Reference>) {
+    let destination = References::read(target);
+    let mut text = fragment.to_string();
+    let mut definitions = Vec::new();
+    for reference in items {
+        let mut reference = reference.clone();
+        if destination
+            .items
+            .get(&reference.id)
+            .is_some_and(|old| old != &reference)
+        {
+            let old_token = reference.token();
+            reference.id = uuid::Uuid::new_v4().to_string();
+            text = text.replace(&old_token, &reference.token());
+        }
+        definitions.push(reference);
+    }
+    (text, definitions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +419,103 @@ mod tests {
         );
         assert!(References::check("<!-- gongwen-reference 损坏 -->").is_err());
         assert_eq!(reference.display(), "《呈批件》");
+    }
+
+    #[test]
+    fn document_reference_transfer_does_not_overwrite_another_snapshot() {
+        let reference = Reference::manual("旧函", "办函〔2026〕12号", false).unwrap();
+        let mut other = reference.clone();
+        other.number = "办函〔2026〕13号".into();
+        let target = put(&format!("根据{}办理。", other.token()), &other);
+        let (fragment, definitions) = transfer(
+            &reference.token(),
+            std::slice::from_ref(&reference),
+            &target,
+        );
+        assert_ne!(definitions[0].id, reference.id);
+        let merged = put(&format!("{fragment}\n{target}"), &definitions[0]);
+        References::check(&merged).unwrap();
+        assert_eq!(References::read(&merged).items[&reference.id], other);
+        assert_eq!(
+            References::read(&merged).items[&definitions[0].id].number,
+            reference.number
+        );
+    }
+
+    #[test]
+    fn document_reference_ai_guard_preserves_definition_and_count() {
+        let reference = Reference::manual("检查函", "办函〔2026〕12号", false).unwrap();
+        let before = put(&format!("根据{}办理。", reference.token()), &reference);
+        let after = before.replace("办理", "认真办理");
+        ensure_preserved(&before, &after).unwrap();
+        assert!(ensure_preserved(&before, &before.replace(&reference.token(), "该函")).is_err());
+        let mut changed = reference.clone();
+        changed.number = "办函〔2026〕13号".into();
+        assert!(ensure_preserved(&before, &put(&before, &changed)).is_err());
+        assert!(ensure_preserved("正文", &before).is_err());
+    }
+
+    #[test]
+    fn document_reference_redline_compares_printed_words() {
+        let reference = Reference::manual("检查函", "办函〔2026〕12号", false).unwrap();
+        let before = put(
+            &format!("# 情况报告\n\n根据{}办理。", reference.token()),
+            &reference,
+        );
+        let mut changed = reference.clone();
+        changed.number = "办函〔2026〕13号".into();
+        let after = put(&before, &changed);
+        let redline = crate::redline::build(&before, &after);
+        assert!(!redline.is_empty());
+        assert!(!redline.markdown.contains(PREFIX));
+        assert!(!redline.markdown.contains(DEFINITION));
+        assert!(redline.markdown.contains("12"));
+        assert!(redline.markdown.contains("13"));
+        changed.document_uuid = Some(uuid::Uuid::new_v4().to_string());
+        assert!(crate::redline::build(&after, &put(&after, &changed)).is_empty());
+    }
+
+    #[test]
+    fn document_reference_markdown_archive_has_plain_and_editable_documents() {
+        use std::io::Read;
+        let reference = Reference::manual("来函", "办函〔2026〕12号", false).unwrap();
+        let markdown = put(
+            &format!("# 本篇\n根据{}办理。", reference.token()),
+            &reference,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let output = crate::export::export_artifacts(
+            dir.path(),
+            &crate::models::DraftInput::default(),
+            &markdown,
+            &crate::models::ExportSelection {
+                markdown: true,
+                docx: false,
+                pdf: false,
+                ..Default::default()
+            },
+            &crate::units::UnitDisplay::new(&[]),
+            &crate::models::FontConfig::default(),
+            &crate::models::NumberingConfig::default(),
+            None,
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&output.files[0]).unwrap()).unwrap();
+        for index in 0..zip.len() {
+            let mut file = zip.by_index(index).unwrap();
+            let editable = file.name().ends_with("-可编辑.md");
+            let mut body = String::new();
+            file.read_to_string(&mut body).unwrap();
+            if editable {
+                References::check(&body).unwrap();
+                assert_eq!(References::read(&body).items[&reference.id], reference);
+            } else {
+                assert!(body.contains(&reference.display()));
+                assert!(!body.contains(PREFIX));
+                assert!(!body.contains(DEFINITION));
+            }
+        }
+        assert_eq!(zip.len(), 2);
     }
 
     #[test]

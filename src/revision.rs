@@ -516,6 +516,8 @@ impl RevisionSet {
         candidate.push_str(&text[..span.start]);
         candidate.push_str(&after);
         candidate.push_str(&text[span.end..]);
+        crate::document_reference::ensure_preserved(text, &candidate)
+            .map_err(|error| error.to_string())?;
         verify(text, &candidate)?;
 
         *text = candidate;

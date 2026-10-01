@@ -534,9 +534,18 @@ fn import_preview_details(
             {
                 ui.group(|ui| {
                     ui.strong("正文冲突");
-                    ui.weak(format!("共同基线：{}", truncate(base, 200)));
-                    ui.label(format!("本机：{}", truncate(local, 200)));
-                    ui.label(format!("导入：{}", truncate(incoming, 200)));
+                    ui.weak(format!(
+                        "共同基线：{}",
+                        truncate(&crate::document_reference::conflict_display(base), 200)
+                    ));
+                    ui.label(format!(
+                        "本机：{}",
+                        truncate(&crate::document_reference::conflict_display(local), 200)
+                    ));
+                    ui.label(format!(
+                        "导入：{}",
+                        truncate(&crate::document_reference::conflict_display(incoming), 200)
+                    ));
                     ui.checkbox(&mut choices[choice_index], "采用导入侧");
                 });
                 choice_index += 1;
@@ -1427,10 +1436,28 @@ impl GongwenApp {
                             ui.group(|ui| {
                                 ui.strong("正文冲突");
                                 if !base.is_empty() {
-                                    ui.weak(format!("共同基线：{}", truncate(base, 200)));
+                                    ui.weak(format!(
+                                        "共同基线：{}",
+                                        truncate(
+                                            &crate::document_reference::conflict_display(base),
+                                            200
+                                        )
+                                    ));
                                 }
-                                ui.label(format!("本机：{}", truncate(local, 200)));
-                                ui.label(format!("导入：{}", truncate(incoming, 200)));
+                                ui.label(format!(
+                                    "本机：{}",
+                                    truncate(
+                                        &crate::document_reference::conflict_display(local),
+                                        200
+                                    )
+                                ));
+                                ui.label(format!(
+                                    "导入：{}",
+                                    truncate(
+                                        &crate::document_reference::conflict_display(incoming),
+                                        200
+                                    )
+                                ));
                                 ui.checkbox(&mut dialog.choices[index], "采用导入侧");
                             });
                             index += 1;
