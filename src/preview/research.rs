@@ -15,15 +15,15 @@
 //! - `<!-- [不编号] -->` 管紧随标题的整棵子树：不占章节号，不编号章里的图表
 //!   题注改用全篇共用、不带章号的流水号。
 //!
-//! 排版规则一律照 `tex_research_emitter` 抄，不另立一套：预览与编译出的 PDF
-//! 对不上，比预览简陋更糟——用户会照着预览改，改出来的 PDF 却是另一个样子。
-//! `export::research` 里那条
-//! `mdx_turns_the_marks_the_preview_resolves_into_label_ref_cite_and_caption`
-//! 真跑一遍 mdx 转换，拿生成的 TeX 核对这里的假设。
+//! 排版规则一律照 mdx 的 `typst_research`（它沿用原 TeX 输出的计数器规则）抄，不另立
+//! 一套：预览与导出的 PDF 对不上，比预览简陋更糟——用户会照着预览改，改出来的 PDF
+//! 却是另一个样子。`export::research` 里那条
+//! `typst_data_turns_the_marks_the_preview_resolves_into_label_ref_cite_and_caption`
+//! 真跑一遍 mdx 转换，拿排版数据核对这里的假设。
 //!
 //! 字面是近似：预览只加载得到公文那五个字体，方正书宋、方正黑体分别用宋体、
-//! 黑体顶替。字号、行距、版心是准的，字形要看编译出来的 PDF——表单底部那句
-//! "最终版式以 TeX 编译 PDF 为准"说的就是这件事。
+//! 黑体顶替。字号、行距、版心是准的，字形要看导出的 PDF——表单底部那句
+//! "最终版式以导出的 PDF 为准"说的就是这件事。
 
 use super::cull::Cull;
 use super::layout::{
@@ -131,7 +131,7 @@ pub(super) struct Caption {
     pub(super) source: Range<usize>,
 }
 
-/// 走一遍块序列时的计数器与区段状态，规则全部照 `tex_research_emitter`。
+/// 走一遍块序列时的计数器与区段状态，规则全部照 mdx 的 `typst_research`。
 struct Walk {
     section: ResearchSection,
     /// `\appendix` 发过没有。一旦发过，章号就一直是字母——后面再切回正文区段
@@ -979,7 +979,7 @@ pub(crate) fn research_preview(
     }
 }
 
-/// 封面：照 mdx `cover::layout` 的毫米坐标整页绝对定位，与 TeX 模板的 TikZ
+/// 封面：照 mdx `cover::layout` 的毫米坐标整页绝对定位，与研究报告模板
 /// 封面、Word 的图文框封面是同一张网格。题名换几行都不推动落款。
 fn cover_sheet(ui: &mut egui::Ui, metrics: &Metrics, input: &DraftInput, markdown: &str) {
     use mdx::cover::{self, Family, layout as l};
@@ -1904,7 +1904,7 @@ mod tests {
     }
 
     /// 版本变更记录、参考文献的标题只排一次：区段标记不自带标题，标题由区段
-    /// 里的首个标题充当（与 `tex_research_emitter` 的 `\chapter*` 一致）。
+    /// 里的首个标题充当（与原 TeX 输出的 `\chapter*` 一致）。
     #[test]
     fn a_section_title_is_printed_once_not_once_per_marker_and_heading() {
         for (marker, title) in [
@@ -2021,7 +2021,7 @@ mod tests {
         );
     }
 
-    /// 插图宽度照 `mdx::figure_size` 取档、居中，与导出的 TeX / Word 一致：
+    /// 插图宽度照 `mdx::figure_size` 取档、居中，与导出的 PDF / Word 一致：
     /// 方图是 0.8 档，不再像公文那样按像素原样铺到版心宽。
     #[test]
     fn figures_take_the_export_width_step_and_are_centered() {
@@ -2175,7 +2175,7 @@ mod tests {
 
     /// 正文区段的 `#` 是报告题名：题名归封面，正文纸上一个字都不排，也不占
     /// 章号——随后的 `##` 仍是第1章。与 mdx 一致
-    /// （`tex_research_emitter::tests::test_report_title_heading`）。
+    /// （`export::research` 的 `typst_data_keeps_a_body_h1_off_the_page_and_out_of_the_chapter_count`）。
     #[test]
     fn a_body_h1_is_the_report_title_and_stays_off_the_page() {
         // 封面另给一个文件名称，好把封面上那行题名和正文纸上的内容分开看。

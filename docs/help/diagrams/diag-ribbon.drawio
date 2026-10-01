@@ -31,13 +31,13 @@
         <mxCell id="r6" value="视图&lt;br&gt;显示方式&lt;br&gt;缩放 · 面板开关" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
           <mxGeometry x="370" y="322" width="200" height="118" as="geometry"/>
         </mxCell>
-        <mxCell id="r7" value="输出&lt;br&gt;导出 · 打开目录&lt;br&gt;成品三入口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
+        <mxCell id="r7" value="输出&lt;br&gt;导出 · 打开目录&lt;br&gt;成品入口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#C96442;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontStyle=1;fontSize=17;" vertex="1" parent="1">
           <mxGeometry x="590" y="322" width="200" height="118" as="geometry"/>
         </mxCell>
         <mxCell id="n1" value="★ 研报分区只在「研究报告」文种下显示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
           <mxGeometry x="40" y="480" width="860" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="n2" value="PDF 不是独立勾选项：只要导出了 .tex 就自动编译 PDF" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+        <mxCell id="n2" value="PDF 由内置 Typst 在程序里直接排版，不从 Word 转" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
           <mxGeometry x="40" y="536" width="860" height="50" as="geometry"/>
         </mxCell>
         <mxCell id="n3" value="功能区第二行可整体收起（双击当前分区卡），正文多出一条工具栏的高度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">

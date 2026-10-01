@@ -46,7 +46,7 @@ impl TemplateKind {
             Self::WhitePaper => "适用于内部情况报告、请示和领导呈批",
             Self::RedHeadApproval => "带发文单位红头、文号和首页批示栏的内部呈批件",
             Self::ResearchReport => {
-                "按内置研究报告规范生成 TeX/PDF 与 Word，封面按文件类型分项目类、研究类"
+                "按内置研究报告规范生成 PDF 与 Word，封面按文件类型分项目类、研究类"
             }
         }
     }
@@ -63,13 +63,13 @@ impl TemplateKind {
         matches!(self, Self::WhitePaper | Self::RedHeadApproval)
     }
 
-    /// 研究报告使用独立的 Markdown 扩展、封面元数据和 TeX 排版链。
+    /// 研究报告使用独立的 Markdown 扩展、封面元数据和排版模板。
     pub fn is_research(self) -> bool {
         self == Self::ResearchReport
     }
 
     /// 走公文 Word 排版链（`export::docx`）的文种；研究报告的 Word 另由 mdx
-    /// 的 research 转换器生成，封面与 TeX 同一张网格。
+    /// 的 research 转换器生成，封面与 PDF 同一张网格。
     pub fn uses_official_docx(self) -> bool {
         !self.is_research()
     }
@@ -1218,7 +1218,7 @@ impl ThemeName {
     ];
 }
 
-/// 屏幕上公文纸面的显示模式。**只影响预览显示**，导出的 DOCX/TeX/PDF 一律仍是
+/// 屏幕上公文纸面的显示模式。**只影响预览显示**，导出的 DOCX/PDF 一律仍是
 /// 白纸黑字红头，不受这里的选择影响。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1577,7 +1577,7 @@ pub const EDITOR_FONT_SIZE_MIN: f32 = 10.0;
 pub const EDITOR_FONT_SIZE_MAX: f32 = 24.0;
 
 /// 公文各级标题的编号样式。默认编号链为「一、→（一）→ 1. →（1）」，与
-/// GB/T 9704 的四级标题层级一致；导出的 TeX/PDF、Word 与界面预览共用同一套选择。
+/// GB/T 9704 的四级标题层级一致；导出的 PDF、Word 与界面预览共用同一套选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HeadingNumbering {
@@ -1785,38 +1785,6 @@ pub struct AppConfig {
     /// 应用内拼音输入法。旧配置没有该字段时按默认值补齐（启用全拼、全角标点）。
     #[serde(default)]
     pub ime: ImeConfig,
-    /// 公文 PDF 用哪套引擎排版。研究报告不受影响，固定内置 Tectonic。
-    /// 旧配置没有该字段时取默认的 Typst。
-    pub pdf_engine: PdfEngine,
-}
-
-/// 公文 PDF 的排版引擎。两套版式逐项对照过（见 docs/typst-engine.md），可随时切换。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PdfEngine {
-    /// 进程内 Typst：毫秒级、不落中间文件。
-    #[default]
-    Typst,
-    /// 内置 Tectonic（XeLaTeX）：原有的 TeX 链路，同时产出 .tex 源文件。
-    Tectonic,
-}
-
-impl PdfEngine {
-    pub const ALL: [Self; 2] = [Self::Typst, Self::Tectonic];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Typst => "Typst（内置，推荐）",
-            Self::Tectonic => "Tectonic（TeX）",
-        }
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Typst => "在程序内直接排版，一份公文几十毫秒，只产出 PDF。",
-            Self::Tectonic => "调用内置 Tectonic 编译，同时保留 .tex 源文件，一份约两秒。",
-        }
-    }
 }
 
 impl Default for AppConfig {
@@ -1858,7 +1826,6 @@ impl Default for AppConfig {
             ribbon_tab: RibbonTab::default(),
             ribbon_collapsed: false,
             ime: ImeConfig::default(),
-            pdf_engine: PdfEngine::default(),
         }
     }
 }
@@ -1949,21 +1916,6 @@ impl FontRole {
             Self::Fallback => "SimSun.ttf",
         }
     }
-
-    /// 未配置本机字体时按名字加载所用的字体名。方正小标宋没有稳定的字体名，
-    /// 由类文件另行探测，因此这里返回空串。
-    pub fn bundled_family(self) -> &'static str {
-        match self {
-            Self::Title => "",
-            Self::Heading1 => "SimHei",
-            Self::Heading2 => "KaiTi_GB2312",
-            Self::Body => "FangSong_GB2312",
-            Self::PageNumber => "SimSun",
-            Self::Bold => "SimHei",
-            Self::Fallback => "SimSun",
-        }
-    }
-
     /// 内置字体的中文名，用于界面上说明“不选就用什么”。
     pub fn bundled_label(self) -> &'static str {
         match self {
@@ -1995,7 +1947,7 @@ impl FontRole {
 ///
 /// 中文字体大多没有配套的粗体字面。默认沿用排版器的合成加粗（TeX 的
 /// `AutoFakeBold`、Word 的合成粗体），字形还是当前这套字体，只是加重；
-/// 想要真正的粗体字面时改选专用字体，三端（预览、Word、TeX）一起换。
+/// 想要真正的粗体字面时改选专用字体，三端（预览、Word、PDF）一起换。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoldStyle {
     /// 用当前字体直接加粗。
@@ -2018,7 +1970,7 @@ impl BoldStyle {
     pub fn hint(self) -> &'static str {
         match self {
             Self::Synthetic => {
-                "字体不变（正文仍是仿宋），只加重笔画：Word 里相当于点了加粗按钮，TeX 侧走 AutoFakeBold"
+                "字体不变（正文仍是仿宋），只加重笔画：Word 里相当于点了加粗按钮，PDF 里描边加粗"
             }
             Self::DedicatedFont => {
                 "改用专门的粗体字面；没挑字面、或没开「使用本机字体编译」时用内置黑体"
@@ -2027,12 +1979,12 @@ impl BoldStyle {
     }
 }
 
-/// 某一个位置选定的本机字体。家族名与文件路径都要留：前者给导出的 `.tex`
-/// 拿到别的机器上按名字编译，后者给内置 Tectonic 按文件加载。
+/// 某一个位置选定的本机字体。家族名与文件路径都要留：前者写进 Word 按名字找字体，
+/// 后者给 PDF 排版按文件加载。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontChoice {
-    /// 英文家族名，写进 `.tex` 的按名字加载分支。
+    /// 英文家族名，Word 按名字找字体用。
     pub family: String,
     /// 本地化字体名，只用于界面显示。
     pub display: String,
@@ -2053,18 +2005,6 @@ impl FontChoice {
         } else {
             display
         }
-    }
-
-    /// 拷进临时字体目录后的文件名。扩展名沿用原文件，fontspec 靠它判断格式；
-    /// 重命名后目录里不存在同名的粗体、斜体文件，字面选择因此是确定的。
-    pub fn compiled_file_name(&self, role: FontRole) -> String {
-        let extension = std::path::Path::new(self.path.trim())
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_lowercase())
-            .filter(|ext| ext == "ttf" || ext == "otf")
-            .unwrap_or_else(|| "ttf".to_string());
-        format!("gwa-{}.{extension}", role.key())
     }
 }
 
@@ -2259,27 +2199,11 @@ impl FontConfig {
     pub fn uses_dedicated_bold_font(&self) -> bool {
         self.bold_style == BoldStyle::DedicatedFont
     }
-
-    /// 加粗文字要换用的字体家族名，按 fontconfig 口径（TeX 用）。
+    /// 加粗文字要换用的字体家族名（Word 用）。
     ///
-    /// `None` 表示沿用当前字体直接加粗：Word 写 `w:b` 让它自己合成，TeX 交给
-    /// `AutoFakeBold`。选了「专用粗体字体」但没挑字面（或没开本机字体编译总开关）
-    /// 时回落内置黑体，不会失效。
-    pub fn bold_family(&self) -> Option<&str> {
-        if !self.uses_dedicated_bold_font() {
-            return None;
-        }
-        match self.active(FontRole::Bold) {
-            Some(choice) => Some(choice.family.trim()),
-            None => Some(FontRole::Bold.bundled_family()),
-        }
-    }
-
-    /// 同上，但内置回落写中文字体名。
-    ///
-    /// docx 其余位置写的都是中文名（仿宋_GB2312、黑体、楷体_GB2312），"内置黑体"
-    /// 就该是文档里其它地方用的那个黑体；`SimHei` 是同一款字体在 fontconfig 里的
-    /// 家族名，留给 TeX。用户自己挑了字面时两边都用他选的家族名。
+    /// `None` 表示沿用当前字体直接加粗：Word 写 `w:b` 让它自己合成。选了「专用
+    /// 粗体字体」但没挑字面时回落内置黑体（写中文名，与文档里其它地方用的黑体
+    /// 一致）；用户自己挑了字面就用他选的家族名。
     pub fn bold_family_docx(&self) -> Option<&str> {
         if !self.uses_dedicated_bold_font() {
             return None;
@@ -2288,15 +2212,6 @@ impl FontConfig {
             Some(choice) => Some(choice.family.trim()),
             None => Some(FontRole::Bold.bundled_label()),
         }
-    }
-
-    /// 有没有任何一项决定版式的本机字体生效。全都没有时导出的 `.tex` 与从前完全一致。
-    ///
-    /// 兜底字体不算：它由单独的钩子注入，不该把整段字体设置一起拖进 `.tex`。
-    pub fn any_active(&self) -> bool {
-        FontRole::TYPESETTING
-            .iter()
-            .any(|role| self.active(*role).is_some())
     }
 }
 
@@ -2499,7 +2414,9 @@ impl DraftInput {
 pub struct ExportSelection {
     pub markdown: bool,
     pub docx: bool,
-    pub tex: bool,
+    /// PDF（Typst 排版）。旧配置里这一栏叫 `tex`（当年出的是 TeX 源文件与 PDF）。
+    #[serde(alias = "tex")]
+    pub pdf: bool,
     /// 反复导出同一篇稿件时覆盖同名文件，而不是不断生成 `-2`、`-3` 副本。
     pub overwrite: bool,
 }
@@ -2509,7 +2426,7 @@ impl Default for ExportSelection {
         Self {
             markdown: true,
             docx: true,
-            tex: true,
+            pdf: true,
             overwrite: false,
         }
     }
@@ -2517,7 +2434,7 @@ impl Default for ExportSelection {
 
 impl ExportSelection {
     pub fn any(&self) -> bool {
-        self.markdown || self.docx || self.tex
+        self.markdown || self.docx || self.pdf
     }
 }
 

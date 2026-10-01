@@ -914,14 +914,8 @@ fn settings_changes(a: &AppConfig, b: &AppConfig) -> Vec<FieldChange> {
     field(
         &mut out,
         "导出：PDF",
-        yes_no(a.export.tex),
-        yes_no(b.export.tex),
-    );
-    field(
-        &mut out,
-        "PDF 引擎",
-        a.pdf_engine.label(),
-        b.pdf_engine.label(),
+        yes_no(a.export.pdf),
+        yes_no(b.export.pdf),
     );
     field(
         &mut out,

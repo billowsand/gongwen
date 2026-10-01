@@ -1,15 +1,11 @@
-# Portable TeX runtime
+# Portable runtime
 
-The application expects the following local-only release assets:
+PDFs are typeset in-process by the Typst engine compiled into the application
+(see `docs/typst-engine.md`); no external typesetter ships with it. The
+runtime directory only carries fonts, input-method data and license texts:
 
 ```text
 runtime/
-  tectonic/
-    win-x64/tectonic.exe      # Windows x64 MSVC
-    linux-arm64/tectonic      # Linux ARM64 musl
-    linux-amd64/tectonic      # Linux AMD64 musl
-    darwin-arm64/tectonic     # macOS ARM64
-  texbundle/gongwen-texlive.ttb
   fonts/FangSong.ttf
   fonts/KaiTi.ttf
   fonts/SimHei.ttf
@@ -24,72 +20,32 @@ runtime/
   fonts/texgyretermes-bold.otf
   fonts/texgyretermes-italic.otf
   fonts/texgyretermes-bolditalic.otf
+  ime/dict.qj
+  ime/lm.qj                     # optional sentence model (44 MB)
+  licenses/...
   SHA256SUMS.win-x64.txt
   SHA256SUMS.linux-arm64.txt
   SHA256SUMS.linux-amd64.txt
   SHA256SUMS.darwin-arm64.txt
 ```
 
-- `tectonic.exe` under `win-x64` is the official Tectonic 0.17.0 Windows
-  x64 MSVC build.
-- `tectonic` under `linux-arm64` is the official Tectonic 0.17.0
-  `aarch64-unknown-linux-musl` build.
-- `tectonic` under `linux-amd64` is the official Tectonic 0.17.0
-  `x86_64-unknown-linux-musl` build.
-- `tectonic` under `darwin-arm64` is the official Tectonic 0.17.0
-  `aarch64-apple-darwin` build.
-- `gongwen-texlive.ttb` is a project-specific TTB v1 bundle resolved from
-  Tectonic 0.17.0's pinned upstream bundle. It contains the dependencies
-  actually exercised by all `gonghan-gwa.cls` document variants and by mdx's
-  research warm-up document (including `ctexbook`, TikZ, listings, `gbt7714`
-  and, since runtime v0.6.0, `amsmath`/`mathtools` for research-report math
-  formulas). It was additionally hand-merged with the `amsfonts` package
-  (`amsfonts`/`amssymb` and the msam/msbm/eufm fonts, so `\mathbb` and
-  friends work) plus the cm family TFM/PFB at the design sizes (5–9pt, bold)
-  that research-report math can hit; the research warm-up document now
-  exercises these so future rebuilds keep them. Both styles are recompiled
-  with a fresh cache and
-  `--only-cached --untrusted` before publishing. The authoritative checksum is
-  the `texbundle/gongwen-texlive.ttb` line of each `SHA256SUMS.<suffix>.txt`;
-  that is the value `scripts/package-portable.ps1` actually verifies.
-- Rebuilding the bundle: bump the package lists in mdx's
-  `resources/tectonic/warmup{,-official}.tex`, tag an mdx release so its
-  workflow regenerates the directory bundle (`tectonic-bundle` artifact), then
-  pack the directory into a TTB v1 with a writer matching
-  `tectonic_bundles` 0.4.2's reader (66-byte header; per-file gzip content;
-  embedded `FILELIST`/`SEARCH`/`SHA256SUM`; files under `resolved/`; index
-  gzipped at the end; digest = SHA-256 of the plain index text). A ready-made
-  packer lives in the `gongwen-runtime` repo at `scripts/ttb-pack`
-  (`pack` / `unpack` / `dump` subcommands).
-- **Important:** the mdx artifact only contains what its two warm-up documents
-  resolve — the `gonghan-gwa.cls` (official document) chain is NOT covered by
-  them (e.g. `size10.clo`, `ctex.sty`, `tabularx.sty`, `ulem.sty`,
-  `xstring.sty`). Always union-merge the previous bundle's contents before
-  packing: `ttb-pack unpack <old.ttb> old-dir`, copy any missing files into
-  the new directory bundle, then `ttb-pack pack`. The verification gate is the
-  full app-side smoke suite with a fresh cache, not just the warm-ups:
-  `GONGWEN_RUNTIME_DIR=<repo>/runtime cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored`
-  (it exercises every `gonghan-gwa.cls` variant plus research reports, and
-  since v2.16.2 also math formulas). Only after it passes may the checksums be
-  updated and the `gongwen-runtime` release published.
-- Fonts come in two groups, both loaded **by file name**, never by family
-  name, so no machine has to have them installed:
+- Fonts come in two groups, both loaded **from the files here**, never by an
+  installed family name, so no machine has to have them installed:
   - `FangSong` / `KaiTi` / `SimHei` / `SimSun` / `XiaoBiaoSong` are required by
-    every official-document layout (`gonghan-gwa.cls`, via `\GwaFontPath`) and
-    by the on-screen paper preview. Missing any of them disables PDF output
-    entirely.
+    every official-document layout (`assets/typst/gongwen.typ`) and by the
+    on-screen paper preview. Missing any of them disables PDF output entirely.
   - `FZ*` / `JetBrainsMono` / `texgyretermes-*` are required only by the
-    research-report layout (mdx's `md2tex.cls`, via `\MdxFontPath`). Missing
-    any of them disables research reports alone; official documents keep
-    working.
-- `md2tex.cls` is loaded with `fontset=none`, so the research layout never
-  falls back to ctex's per-platform font detection. That is why no Fandol font
-  is shipped here — nothing references it.
+    research-report layout (`assets/typst/research.typ`). Missing any of them
+    disables research reports alone; official documents keep working.
 - The font files are deployment assets supplied locally by the application
   distributor. They remain ignored by Git; redistribution authorization must
   be checked separately. JetBrains Mono is distributed under the OFL and
   TeX Gyre Termes under the GUST Font License. Keep all license texts in
   `runtime/licenses`.
+- Runtime archives up to `gongwen-runtime` v0.7.0 still contain Tectonic
+  (`tectonic/`), a TeX bundle (`texbundle/`) and their licenses from the old
+  TeX pipeline. They are no longer used: the packaging scripts skip them even
+  when an archive's manifest lists them.
 
 All binary assets are ignored by Git intentionally. Run
 `scripts/package-portable.ps1` after the assets have been placed here. The
@@ -105,5 +61,10 @@ Use `-RuntimeManifest` to point at another manifest, `-OutputDir` and
 `-ArchivePath` to control destinations, and `-Force` for a non-interactive
 overwrite. The release workflow downloads `runtime-<suffix>.zip` from the
 `billowsand/gongwen-runtime` release selected by its `RUNTIME_RELEASE_TAG`;
-that archive must contain the files directly under its root, including `tectonic/`,
-`texbundle/`, `fonts/`, and the matching `SHA256SUMS.<suffix>.txt`.
+that archive must contain the files directly under its root, including
+`fonts/`, `ime/` and the matching `SHA256SUMS.<suffix>.txt`. The release
+smoke test typesets every document kind with the packaged runtime:
+
+```text
+GONGWEN_RUNTIME_DIR=<runtime> cargo test --locked --release --bin gongwen-assistant shipped_runtime_typesets_every_kind -- --ignored
+```

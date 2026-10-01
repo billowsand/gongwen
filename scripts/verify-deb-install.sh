@@ -40,11 +40,9 @@ test "$status" = "install ok installed"
 
 # 装进来的 Depends 必须覆盖二进制实际链接的所有库。
 failed=0
-for bin in /opt/gongwen-assistant/gongwen-assistant \
-           /opt/gongwen-assistant/runtime/tectonic/tectonic; do
+for bin in /opt/gongwen-assistant/gongwen-assistant; do
     echo "== ldd $bin"
-    # 静态链接的（如 tectonic）ldd 返回非零并打印 "not a dynamic executable"，
-    # 没有要找的库，放行。
+    # 静态链接的 ldd 返回非零并打印 "not a dynamic executable"，没有要找的库，放行。
     out="$(ldd "$bin" 2>&1)" || true
     echo "$out"
     if echo "$out" | grep -qF 'not a dynamic executable'; then

@@ -16,14 +16,10 @@
 *.d
 *.pdb
 
-# Local runtime binaries: downloaded or supplied by the package distributor
-/runtime/tectonic/win-x64/
-/runtime/tectonic/linux-arm64/
-/runtime/tectonic/linux-amd64/
-/runtime/tectonic/darwin-arm64/
-# Flattened tectonic binary used by the dev build's runtime lookup
-/runtime/tectonic/tectonic
-/runtime/texbundle/*.ttb
+# Local runtime assets: downloaded or supplied by the package distributor.
+# Older runtime archives still carry Tectonic / a TeX bundle; they are unused.
+/runtime/tectonic/
+/runtime/texbundle/
 /runtime/fonts/*.ttf
 /runtime/fonts/*.otf
 # 应用内输入法的数据文件（dict.qj / lm.qj）：本地开发副本，随包时进 runtime 压缩包

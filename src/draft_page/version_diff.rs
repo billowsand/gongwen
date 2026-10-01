@@ -1098,7 +1098,7 @@ impl DraftPage<'_> {
         }
         let (key, seq) = self.begin_job();
         *self.status = if print_preview {
-            "正在编译花脸稿打印预览…".into()
+            "正在排版花脸稿打印预览…".into()
         } else {
             "正在生成花脸稿…".into()
         };
@@ -1110,12 +1110,10 @@ impl DraftPage<'_> {
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
-        let engine = self.config.pdf_engine;
         let tx = self.sender.clone();
         thread::spawn(move || {
             let display = UnitDisplay::new(&vocabulary);
-            // 与定稿导出同样先落实字体：TeX 里写死按哪个文件加载，等编译时才
-            // 发现缺文件就来不及退回内置字体了。
+            // 与定稿导出同样先落实字体：本机字体文件不在了就退回内置字体。
             let (fonts, _warnings) = crate::system_fonts::resolve(&fonts);
             let result = redline::export_files(
                 &output_dir,
@@ -1125,7 +1123,6 @@ impl DraftPage<'_> {
                 &display,
                 &fonts,
                 &numbering,
-                engine,
             )
             .map_err(|error| format!("{error:#}"));
             let job = if print_preview {

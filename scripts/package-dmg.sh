@@ -22,8 +22,8 @@
 #
 # 一键模式的 staging 组装与 scripts/package-portable.ps1 保持一致：
 #   - 校验 runtime/SHA256SUMS.<平台>.txt 里每个资产的 SHA-256；
-#   - tectonic/<平台>/tectonic 映射为 runtime/tectonic/tectonic（程序按
-#     可执行文件旁 runtime/ 查找，见 src/portable_runtime.rs）；
+#   - 资产放进可执行文件旁的 runtime/（程序按它查找，见 src/portable_runtime.rs），
+#     旧清单里的 Tectonic / TeX bundle 不随包；
 #   - 附 README / THIRD_PARTY_NOTICES / LICENSE / config.example.json；
 #   - 把 skills/gongwen-markdown/ 打成 skills/gongwen-markdown.skill（zip，
 #     顶层一个 gongwen-markdown/ 文件夹，条目名正斜杠）。
@@ -148,14 +148,15 @@ else
         expected="$(printf '%s' "$sum" | tr '[:lower:]' '[:upper:]')"
         [ "$actual" = "$expected" ] || die "SHA-256 不匹配：$src（期望 $expected，实际 $actual）"
         case "$rel" in
-            tectonic/"$SUFFIX"/*) dest="runtime/tectonic/${rel##*/}" ;;
+            # PDF 由 Typst 在进程内排版，旧 runtime 清单里的 TeX 资产不随包。
+            tectonic/* | texbundle/* | licenses/LICENSE.CTAN | licenses/LICENSE.TL | licenses/TECTONIC-LICENSE.txt) continue ;;
             *) dest="runtime/$rel" ;;
         esac
         mkdir -p "$STAGE/$(dirname "$dest")"
         cp "$src" "$STAGE/$dest"
     done <"$MANIFEST"
-    [ -f "$STAGE/runtime/tectonic/tectonic" ] ||
-        die "runtime 清单未提供 tectonic，PDF 编译将不可用（$SUFFIX）"
+    [ -f "$STAGE/runtime/fonts/FangSong.ttf" ] ||
+        die "runtime 清单未提供字体，PDF 排版将不可用（$SUFFIX）"
 
     for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
         [ -f "$PROJECT_ROOT/$doc" ] && cp "$PROJECT_ROOT/$doc" "$STAGE/"
@@ -169,14 +170,14 @@ else
         zip -Xrq "$STAGE/skills/gongwen-markdown.skill" gongwen-markdown \
             -x '*__pycache__*' -x '*.DS_Store')
 
-    chmod 755 "$STAGE/gongwen-assistant" "$STAGE/runtime/tectonic/tectonic"
+    chmod 755 "$STAGE/gongwen-assistant"
 fi
 
 if [ ! -x "$STAGE/gongwen-assistant" ]; then
     die "staging 里没有可执行的二进制：$STAGE/gongwen-assistant"
 fi
-if [ ! -x "$STAGE/runtime/tectonic/tectonic" ]; then
-    die "staging 里没有可执行的 runtime tectonic：$STAGE/runtime/tectonic/tectonic"
+if [ ! -f "$STAGE/runtime/fonts/FangSong.ttf" ]; then
+    die "staging 里没有 runtime 字体：$STAGE/runtime/fonts"
 fi
 
 MACOS_DIR="$BUILD_ROOT/$BUNDLE_NAME/Contents/MacOS"
@@ -187,7 +188,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 # （current_exe().parent()/runtime）。
 cp "$STAGE/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
 cp -a "$STAGE/runtime" "$MACOS_DIR/runtime"
-chmod 755 "$MACOS_DIR/gongwen-assistant" "$MACOS_DIR/runtime/tectonic/tectonic"
+chmod 755 "$MACOS_DIR/gongwen-assistant"
 
 # 文档随包进 bundle，DMG 保持纯拖放布局。
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE; do
@@ -257,8 +258,7 @@ cat >"$BUILD_ROOT/$BUNDLE_NAME/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# 没有 Developer ID，做 ad-hoc 签名（identity "-"）。覆盖内置的 Tectonic
-# 二进制，保证 Apple Silicon 上可直接运行。
+# 没有 Developer ID，做 ad-hoc 签名（identity "-"），保证 Apple Silicon 上可直接运行。
 codesign --force --deep --sign - "$BUILD_ROOT/$BUNDLE_NAME"
 codesign --verify --deep --strict "$BUILD_ROOT/$BUNDLE_NAME"
 

@@ -3035,7 +3035,6 @@ impl GongwenApp {
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
-        let engine = self.config.pdf_engine;
         let password = password.to_string();
         self.manuscript_pdf_export_busy = true;
         self.status = format!("正在导出 {} 篇稿件的 PDF…", ids.len());
@@ -3051,7 +3050,6 @@ impl GongwenApp {
                     &vocabulary,
                     &fonts,
                     &numbering,
-                    engine,
                     &path,
                     &password,
                     |_| {},

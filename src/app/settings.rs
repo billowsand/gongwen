@@ -10,7 +10,7 @@
 use crate::app::{GongwenApp, warn};
 use crate::models::{
     BoldStyle, DiagramTheme, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole,
-    HeadingNumbering, ListNumbering, PaperMode, PdfEngine, ProxyMode, RerankMode, ThemeName,
+    HeadingNumbering, ListNumbering, PaperMode, ProxyMode, RerankMode, ThemeName,
 };
 use crate::storage;
 use crate::system_fonts;
@@ -164,7 +164,7 @@ impl SettingsSection {
                 "起草、文字复核、知识库访问模型服务时走的通道，支持 HTTP / HTTPS / SOCKS 代理。本机地址（localhost、127.0.0.1）始终直连，本地模型服务不受影响。"
             }
             SettingsSection::Output => {
-                "导出 TeX 时会自动检测 XeLaTeX 或 Tectonic；检测到后编译 PDF 并清理中间文件。"
+                "PDF 由内置 Typst 引擎在程序里直接排版，公文与研究报告都是，不依赖本机安装任何排版软件。"
             }
             SettingsSection::Theme => {
                 "界面配色与屏幕上的纸色，点选后立即生效并保存。导出的公文不受影响，\
@@ -172,7 +172,7 @@ impl SettingsSection {
             }
             SettingsSection::Font => "界面、Markdown 编辑器与公文编译三处字体分别设置，互不牵连。",
             SettingsSection::Numbering => {
-                "各级标题与列表项的编号样式。导出的 TeX/PDF、Word 与界面预览、实时排版编辑器\
+                "各级标题与列表项的编号样式。导出的 PDF、Word 与界面预览、实时排版编辑器\
                  统一使用，保证预览所见即导出所得。"
             }
             SettingsSection::Export => {
@@ -873,7 +873,7 @@ impl GongwenApp {
             ui,
             "公文纸面",
             Some(
-                "只改屏幕上预览的纸色，方便深色主题下长时间盯屏。导出的 DOCX、TeX 与 PDF 一律仍是白纸黑字红头，不受此项影响。",
+                "只改屏幕上预览的纸色，方便深色主题下长时间盯屏。导出的 DOCX 与 PDF 一律仍是白纸黑字红头，不受此项影响。",
             ),
         );
         ui.horizontal_wrapped(|ui| {
@@ -998,7 +998,7 @@ impl GongwenApp {
             ui,
             "公文编译字体",
             Some(
-                "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体，排不出的生僻字由内置宋体兜底。改用本机字体后，内置 Tectonic 按文件加载所选字体，导出的 TeX 拿到别的机器上编译时按字体名加载。只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，按文件加载必须额外指定序号，内置 Tectonic 上没有验证过，因此不在可选范围内。",
+                "默认使用随应用分发的内置字体：标题方正小标宋、一级标题黑体、二级标题楷体、正文仿宋、页码宋体，排不出的生僻字由内置宋体兜底。改用本机字体后，排版 PDF 时按文件加载所选字体。只列出 ttf 与 otf。字体集合（ttc，例如 simsun.ttc）一个文件里装着多个字面，按文件加载必须额外指定是哪一个，因此不在可选范围内。研究报告的字体固定，不受这里影响。",
             ),
         );
         ui.checkbox(&mut self.config.fonts.use_system_fonts, "使用本机字体编译")
@@ -1119,7 +1119,7 @@ impl GongwenApp {
 
     /// 标题与列表编号：各级标题与一、二级列表分别选择编号样式。
     ///
-    /// 选择立即写入配置并在保存时生效；预览、实时排版编辑器与导出的 TeX/PDF、
+    /// 选择立即写入配置并在保存时生效；预览、实时排版编辑器与导出的 PDF、
     /// Word 共用同一套选择，保证所见即所得。
     pub(crate) fn numbering_settings_ui(&mut self, ui: &mut egui::Ui) {
         sub_heading(ui, "标题编号", None);
@@ -1848,7 +1848,7 @@ impl GongwenApp {
     }
 
     fn export_section_ui(&mut self, ui: &mut egui::Ui) {
-        // Word 导出尚未达到当前 LaTeX 链路的成熟度，入口保留但暂不允许启用。
+        // Word 导出尚未达到 PDF 的成熟度，入口保留但暂不允许启用。
         self.config.export.docx = false;
         setting_row(ui, "格式", None, |ui| {
             ui.checkbox(&mut self.config.export.markdown, "Markdown");
@@ -1857,35 +1857,13 @@ impl GongwenApp {
                 egui::Checkbox::new(&mut self.config.export.docx, "Word"),
             )
             .on_disabled_hover_text("Word 导出仍在完善，当前请使用 PDF");
-            let pdf_label = match self.config.pdf_engine {
-                PdfEngine::Typst => "PDF",
-                PdfEngine::Tectonic => "LaTeX 与 PDF",
-            };
-            ui.checkbox(&mut self.config.export.tex, pdf_label);
+            ui.checkbox(&mut self.config.export.pdf, "PDF");
         });
         if !self.config.export.any() {
             setting_continuation(ui, |ui| {
                 ui.colored_label(warn(), "未勾选任何导出格式，起草页的导出按钮不会产生文件。");
             });
         }
-        setting_row(
-            ui,
-            "PDF 引擎",
-            Some("公文 PDF 用哪套排版引擎。研究报告不受影响，固定用内置 Tectonic。"),
-            |ui| {
-                for engine in PdfEngine::ALL {
-                    ui.radio_value(&mut self.config.pdf_engine, engine, engine.label())
-                        .on_hover_text(engine.hint());
-                }
-            },
-        );
-        setting_continuation(ui, |ui| {
-            ui.label(
-                egui::RichText::new(self.config.pdf_engine.hint())
-                    .size(theme::font_sizes::SMALL)
-                    .color(theme::text_muted()),
-            );
-        });
         ui.add_space(6.0);
         ui.checkbox(
             &mut self.config.auto_export,

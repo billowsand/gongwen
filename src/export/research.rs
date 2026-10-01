@@ -1,5 +1,6 @@
-//! 研究报告导出：复用固定版本 mdx 的 research 转换器，PDF 统一交给本应用
-//! 的内置 Tectonic 编译。
+//! 研究报告导出：frontmatter、插图与参考文献装进临时目录，交给固定版本 mdx：
+//! Word 由 mdx 的 research 转换器生成，PDF 由 mdx 整理排版数据、`export::typst::research`
+//! 排版。
 
 use crate::export::parse::{MarkdownBlock, TableSpan, table_span_at};
 use crate::models::{DraftInput, NumberingConfig, ResearchMetadata};
@@ -129,52 +130,7 @@ pub(crate) fn cover_title(input: &DraftInput, markdown: &str) -> Option<String> 
         .filter(|title| !title.is_empty())
 }
 
-/// 生成 mdx research 模式规定的主 TeX、类文件、分章、图片与参考文献文件。
-pub(crate) fn write_tex(
-    path: &Path,
-    input: &DraftInput,
-    markdown: &str,
-    numbering: &NumberingConfig,
-) -> Result<()> {
-    write_tex_with_base(
-        path,
-        input,
-        markdown,
-        numbering,
-        &crate::storage::config_dir()?,
-    )
-}
-
-/// 同 [`write_tex`]，插图按 `base_dir` 解析（对照测试用临时目录）。
-pub(crate) fn write_tex_with_base(
-    path: &Path,
-    input: &DraftInput,
-    markdown: &str,
-    numbering: &NumberingConfig,
-    base_dir: &Path,
-) -> Result<()> {
-    let source = ResearchSourceBundle::create(
-        input,
-        markdown,
-        numbering,
-        crate::mermaid::Format::Pdf,
-        base_dir,
-    )?;
-    clear_generated_parts(path.parent().unwrap_or_else(|| Path::new(".")))?;
-    mdx::convert(ConvertRequest {
-        input: source.markdown.clone(),
-        output: Some(path.to_path_buf()),
-        format: OutputFormat::Tex,
-        style: DocumentStyle::Research,
-        template: None,
-        // 编译只能使用 gongwen 固定的内置 Tectonic runtime。
-        compile_pdf: false,
-    })
-    .with_context(|| format!("研究报告 TeX 转换失败：{}", path.display()))?;
-    Ok(())
-}
-
-/// 生成研究报告的 Word：mdx research 转换器排封面、目录与正文，封面与 TeX
+/// 生成研究报告的 Word：mdx research 转换器排封面、目录与正文，封面与 PDF
 /// 模板同一张网格（见 `mdx::cover`）。
 pub(crate) fn write_docx(
     path: &Path,
@@ -194,8 +150,6 @@ pub(crate) fn write_docx(
         output: Some(path.to_path_buf()),
         format: OutputFormat::Docx,
         style: DocumentStyle::Research,
-        template: None,
-        compile_pdf: false,
     })
     .with_context(|| format!("研究报告 Word 转换失败：{}", path.display()))?;
     Ok(())
@@ -215,25 +169,6 @@ pub(crate) fn markdown_source(
         has_bibliography.then_some("references.bib"),
         numbering,
     )
-}
-
-/// 清掉上一次转换留下的分章、附录和图片目录。
-///
-/// mdx 只覆盖这一次用得上的文件，不删多余的。覆盖导出到同一个目录时，上一版多
-/// 出来的 `data/chapter09.tex` 会留在那里：主 TeX 不 `\input` 它，编译看不出问题，
-/// 但把这个目录打包发出去就多带了一章早已删掉的内容。
-///
-/// 只删这三个由 mdx 全权生成的目录，不碰导出目录里的其它东西。
-fn clear_generated_parts(dir: &Path) -> Result<()> {
-    for name in ["data", "appendix", "figures"] {
-        let path = dir.join(name);
-        if !path.is_dir() {
-            continue;
-        }
-        fs::remove_dir_all(&path)
-            .with_context(|| format!("无法清理上一次的研究报告产物：{}", path.display()))?;
-    }
-    Ok(())
 }
 
 /// 交给 mdx 的源码目录：带 frontmatter 的 Markdown、插图与参考文献，放在一个临时
@@ -561,89 +496,39 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mdx_research_writes_the_expected_file_tree() {
+    /// 研究报告 PDF 的排版数据（mdx `typst_research` 整理、公式未排）。
+    fn typst_data(input: &DraftInput, markdown: &str) -> serde_json::Value {
         let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("报告.tex");
-        let mut input = DraftInput {
-            kind: TemplateKind::ResearchReport,
-            title_hint: "测试报告".into(),
-            ..Default::default()
-        };
-        input.research.institution = "测试单位".into();
-        write_tex(
-            &path,
-            &input,
-            "<!-- [正文] -->\n\n## 研究背景\n\n正文。\n\n<!-- [附录] -->\n\n## 数据表\n\n附录内容。", &NumberingConfig::default(),
-        )
-        .expect("研究报告应转换成功");
-        assert!(path.is_file());
-        assert!(dir.path().join("md2tex.cls").is_file());
-        assert!(dir.path().join("data/chapter01.tex").is_file());
-        assert!(dir.path().join("appendix/appendix01.tex").is_file());
-    }
-
-    /// 研究报告的字体必须全部来自随包分发的 runtime，不碰本机安装的字体。
-    ///
-    /// 这件事靠两边配合：mdx 的 md2tex.cls 认 `\MdxFontPath` 并按文件名加载，
-    /// 本应用在编译前注入这个宏、并把 runtime 字体链进同一个目录。哪一边先变，
-    /// 用户那边的表现都是"装了方正就好、没装就 ClassError"——很难查，所以在
-    /// 这里把协议钉死。
-    #[test]
-    fn released_class_loads_research_fonts_from_the_injected_path() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("报告.tex");
-        let mut input = DraftInput {
-            kind: TemplateKind::ResearchReport,
-            title_hint: "测试报告".into(),
-            ..Default::default()
-        };
-        input.research.institution = "测试单位".into();
-        write_tex(
-            &path,
-            &input,
-            "## 研究背景\n\n正文。",
+        let source = ResearchSourceBundle::create(
+            input,
+            markdown,
             &NumberingConfig::default(),
+            crate::mermaid::Format::Pdf,
+            dir.path(),
         )
-        .expect("研究报告应转换成功");
-
-        let class = fs::read_to_string(dir.path().join("md2tex.cls")).unwrap();
-        assert!(
-            class.contains("\\providecommand{\\MdxFontPath}{}"),
-            "md2tex.cls 必须支持宿主注入的字体路径；mdx 升级后请同步本应用的注入逻辑"
-        );
-        // 路径分支引用的每个文件都必须真在 runtime 字体清单里，否则编译时
-        // fontspec 才会报"找不到字体"。
-        for file in crate::portable_runtime::RESEARCH_FONT_FILES {
-            assert!(
-                class.contains(file),
-                "md2tex.cls 的字体 {file} 不在 RESEARCH_FONT_FILES 清单里"
-            );
-        }
-        // ctex 的平台探测会让三个系统排出三种字形，必须钉死。
-        assert!(
-            class.contains("fontset=none"),
-            "md2tex.cls 应钉死 ctex 字库"
-        );
+        .expect("源码目录");
+        let doc = mdx::typst_research::build(&source.markdown).expect("研究报告应转换成功");
+        serde_json::to_value(&doc).unwrap()
     }
 
-    /// 预览把 `{#id}`、`{@id}`、`[@key]` 和表题换成纸面编号，靠的是"mdx 认这
-    /// 几种写法"这个前提（见 `preview::research`）。哪天 mdx 换了写法，预览会
-    /// 一声不响地照旧换、编译却把源码符号原样印进 PDF——所以这里真跑一遍转换，
-    /// 拿生成的 TeX 核对。
-    #[test]
-    fn mdx_turns_the_marks_the_preview_resolves_into_label_ref_cite_and_caption() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("报告.tex");
+    fn research_input() -> DraftInput {
         let mut input = DraftInput {
             kind: TemplateKind::ResearchReport,
             title_hint: "测试报告".into(),
             ..Default::default()
         };
         input.research.institution = "测试单位".into();
+        input
+    }
+
+    /// 预览把 `{#id}`、`{@id}`、`[@key]` 和表题换成纸面编号，靠的是"排版数据认这
+    /// 几种写法"这个前提（见 `preview::research`）。哪天写法变了，预览会一声不响
+    /// 地照旧换、PDF 却把源码符号原样印出来——所以这里真跑一遍转换核对。
+    #[test]
+    fn typst_data_turns_the_marks_the_preview_resolves_into_label_ref_cite_and_caption() {
+        let mut input = research_input();
         input.research.bibliography_content = "@article{wang2020,title={甲},author={王}}\n".into();
-        write_tex(
-            &path,
+        let data = typst_data(
             &input,
             concat!(
                 "<!-- [正文] -->\n\n",
@@ -653,194 +538,120 @@ mod tests {
                 "| 项 | 数 |\n| --- | --- |\n| 甲 | 1 |\n\n",
                 "![总体架构](images/a.png){#fig:a}\n",
             ),
-            &NumberingConfig::default(),
-        )
-        .expect("研究报告应转换成功");
-
-        let tex = fs::read_to_string(&path).unwrap()
-            + &fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap();
+        );
+        let json = data.to_string();
         for expected in [
-            // 锚点：章、表、图三种挂载点都得认（表锚点是 longtblr 的外层选项）。
-            "\\label{chap:bg}",
-            "label={tbl:t}",
-            "\\label{fig:a}",
+            // 锚点：章、表两种挂载点都得认。
+            r#""label":"chap:bg""#,
+            r#""label":"tbl:t""#,
             // 交叉引用与文献引用。
-            "\\ref{chap:bg}",
-            "\\cite{wang2020}",
-            // 表题并进 longtblr 的 caption，图题进 figure 的 \caption。
-            "caption={样本分布}",
-            "\\caption{总体架构}",
+            r#""t":"ref","id":"chap:bg""#,
+            r#""t":"cite","keys":["wang2020"]"#,
+            // 表题进表格。
+            r#""caption":[{"t":"s","v":"样本分布"}]"#,
         ] {
-            assert!(
-                tex.contains(expected),
-                "mdx 应把这处标记转成 {expected}；预览的换算规则要跟着改：{tex}"
-            );
+            assert!(json.contains(expected), "排版数据应有 {expected}：{json}");
         }
-        // 源码符号一个都不该漏进 TeX——漏了就会原样印进 PDF。
+        // 源码符号一个都不该漏进排版数据——漏了就会原样印进 PDF。
         for raw in ["{#", "{@", "[@", "表：样本分布"] {
-            assert!(
-                !tex.contains(raw),
-                "源码符号“{raw}”不应残留在 TeX 里：{tex}"
-            );
+            assert!(!json.contains(raw), "源码符号“{raw}”不应残留：{json}");
         }
     }
 
-    /// 目录只在写了 `<!-- [目录] -->` 时排，排在标记处；模板本身不再无条件排目录。
-    /// 页码切换（大写罗马 → 阿拉伯接续）由 md2tex.cls 的 `\mdxtableofcontents` 负责。
+    /// 目录只在写了 `<!-- [目录] -->` 时排，排在标记处。
     #[test]
-    fn mdx_places_the_toc_only_where_the_marker_is() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let mut input = DraftInput {
-            kind: TemplateKind::ResearchReport,
-            title_hint: "测试报告".into(),
-            ..Default::default()
+    fn typst_data_places_the_toc_only_where_the_marker_is() {
+        let kinds = |data: &serde_json::Value| {
+            data["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["k"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
         };
-        input.research.institution = "测试单位".into();
-
-        let without = dir.path().join("无目录.tex");
-        write_tex(
-            &without,
+        let input = research_input();
+        let without = typst_data(
             &input,
             "<!-- [摘要] -->\n\n摘要。\n\n<!-- [正文] -->\n\n## 研究背景\n\n正文。\n",
-            &NumberingConfig::default(),
-        )
-        .expect("研究报告应转换成功");
-        let tex = fs::read_to_string(&without).unwrap();
-        assert!(!tex.contains("\\tableofcontents"), "{tex}");
-        assert!(!tex.contains("\\mdxtableofcontents"), "{tex}");
+        );
+        assert!(!kinds(&without).contains(&"toc".to_string()));
 
-        let with = dir.path().join("有目录.tex");
-        write_tex(
-            &with,
+        let with = typst_data(
             &input,
             "<!-- [目录] -->\n\n<!-- [摘要] -->\n\n摘要。\n\n<!-- [正文] -->\n\n## 研究背景\n\n正文。\n",
-            &NumberingConfig::default(),
-        )
-        .expect("研究报告应转换成功");
-        let tex = fs::read_to_string(&with).unwrap();
-        assert_eq!(tex.matches("\\mdxtableofcontents\n").count(), 1, "{tex}");
-        let toc_at = tex.find("\\mdxtableofcontents\n").unwrap();
-        let abstract_at = tex.find("\\begin{abstract}").unwrap();
-        assert!(toc_at < abstract_at, "目录应排在标记处，即摘要之前：{tex}");
-        let body = tex
-            .split("\\mainmatter")
-            .nth(1)
-            .expect("模板应有 \\mainmatter");
-        assert!(!body.contains("[目录]"), "目录标记不应原样印出：{tex}");
-
-        let class = fs::read_to_string(dir.path().join("md2tex.cls")).unwrap();
-        assert!(
-            class.contains("\\pagenumbering{Roman}"),
-            "目录应单用大写罗马页码"
         );
+        let kinds = kinds(&with);
+        assert_eq!(kinds.iter().filter(|k| *k == "toc").count(), 1, "{kinds:?}");
+        let toc = kinds.iter().position(|k| k == "toc").unwrap();
+        let abstract_at = kinds.iter().position(|k| k == "abstract").unwrap();
+        assert!(toc < abstract_at, "目录应排在标记处，即摘要之前：{kinds:?}");
     }
 
-    /// 正文区段的 `#` 是报告题名：mdx 不把它排进正文版面（封面已经印过一次，
-    /// 再排一遍会在目录后多出一张只有一行标题的纸），也不占章号——随后的 `##`
-    /// 仍是第一章。预览与导航都按这个口径排，这里真跑一遍转换核对。
+    /// 正文区段的 `#` 是报告题名：不排进正文版面，也不占章号——随后的 `##`
+    /// 仍是第一章。预览与导航都按这个口径排。
     #[test]
-    fn mdx_keeps_a_body_h1_off_the_page_and_out_of_the_chapter_count() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("报告.tex");
-        let mut input = DraftInput {
-            kind: TemplateKind::ResearchReport,
-            title_hint: "测试报告".into(),
-            ..Default::default()
-        };
-        input.research.institution = "测试单位".into();
-        write_tex(
-            &path,
-            &input,
-            concat!(
-                "<!-- [正文] -->\n\n",
-                "# 某某问题研究报告\n\n",
-                "## 研究背景\n\n",
-                "正文。\n",
-            ),
-            &NumberingConfig::default(),
-        )
-        .expect("研究报告应转换成功");
-
-        let tex = fs::read_to_string(&path).unwrap()
-            + &fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap();
-        // 封面题名来自文档要素的「文件名称」（frontmatter），正文 `#` 不另排
-        // 一份：整篇里题名只作为封面的 \papertitle 出现一次。
-        assert_eq!(
-            tex.matches("某某问题研究报告").count(),
-            0,
-            "报告题名不应排进正文版面：{tex}"
+    fn typst_data_keeps_a_body_h1_off_the_page_and_out_of_the_chapter_count() {
+        let data = typst_data(
+            &research_input(),
+            "<!-- [正文] -->\n\n# 某某问题研究报告\n\n## 研究背景\n\n正文。\n",
         );
-        assert!(tex.contains("测试报告"), "封面题名应取文件名称：{tex}");
-        assert_eq!(
-            tex.matches("\\chapter").count(),
-            1,
-            "报告题名不应排成任何一种 \\chapter，编号章应只有“研究背景”一章：{tex}"
+        let blocks = data["blocks"].to_string();
+        assert!(
+            !blocks.contains("某某问题研究报告"),
+            "报告题名不应排进正文版面：{blocks}"
         );
-        assert!(tex.contains("\\chapter{研究背景}"), "{tex}");
+        assert!(
+            data["cover"].to_string().contains("测试报告"),
+            "封面题名应取文件名称"
+        );
+        let chapters: Vec<_> = data["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["k"] == "chapter")
+            .collect();
+        assert_eq!(chapters.len(), 1, "{blocks}");
+        assert_eq!(chapters[0]["prefix"], "第1章");
+        assert!(chapters[0]["text"].to_string().contains("研究背景"));
     }
 
     /// 文档要素的「文件名称」留空时，封面题名回退到正文区的 `#`——与预览的
-    /// `preview::research::report_title` 同一口径，两边不会一个有题名一个空着。
+    /// `preview::research::report_title` 同一口径。
     #[test]
-    fn mdx_falls_back_to_the_body_h1_for_the_cover_title() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("报告.tex");
-        let mut input = DraftInput {
-            kind: TemplateKind::ResearchReport,
-            title_hint: String::new(),
-            ..Default::default()
-        };
-        input.research.institution = "测试单位".into();
-        write_tex(
-            &path,
+    fn typst_data_falls_back_to_the_body_h1_for_the_cover_title() {
+        let mut input = research_input();
+        input.title_hint.clear();
+        let data = typst_data(
             &input,
             "<!-- [正文] -->\n\n# 某某问题研究报告\n\n## 研究背景\n\n正文。\n",
-            &NumberingConfig::default(),
-        )
-        .expect("研究报告应转换成功");
-
-        let tex = fs::read_to_string(&path).unwrap();
+        );
         assert!(
-            tex.contains("\\newcommand{\\papertitle}{某某问题研究报告}"),
-            "封面题名应回退到正文 `#`：{tex}"
+            data["cover"]["title"]
+                .to_string()
+                .contains("某某问题研究报告"),
+            "封面题名应回退到正文 `#`：{}",
+            data["cover"]
         );
     }
 
     /// 反斜杠转义要与预览一致：`\$`、`\*` 印成字面符号，不能漏出反斜杠。
-    /// anydoc 0.2 导入的 Word 正文就会带这些转义。
-    ///
-    /// 注意 `\$价格$` 收尾那个 `$` 没转义，同一段后面再有 `$` 就会和它结对——
-    /// 预览（`math_flow::split_pieces`）同样如此，所以公式放在另一段。
+    /// anydoc 导入的 Word 正文就会带这些转义。
     #[test]
-    fn mdx_honours_backslash_escapes_like_the_preview() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let path = dir.path().join("报告.tex");
-        let mut input = DraftInput {
-            kind: TemplateKind::ResearchReport,
-            title_hint: "测试报告".into(),
-            ..Default::default()
-        };
-        input.research.institution = "测试单位".into();
-        write_tex(
-            &path,
-            &input,
+    fn typst_data_honours_backslash_escapes_like_the_preview() {
+        let data = typst_data(
+            &research_input(),
             concat!(
                 "<!-- [正文] -->\n\n",
                 "## 研究背景\n\n",
                 "单价 \\$20 与 \\$价格$ 不是公式，a \\*b 2 \\* 3。\n\n",
                 "公式 $x^{2}$ 照常。\n",
             ),
-            &NumberingConfig::default(),
-        )
-        .expect("研究报告应转换成功");
-
-        let tex = fs::read_to_string(&path).unwrap()
-            + &fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap_or_default();
-        assert!(!tex.contains("textbackslash"), "不应漏出反斜杠：{tex}");
-        assert!(
-            tex.contains("单价 \\$20 与 \\$价格\\$ 不是公式，a *b 2 * 3。"),
-            "{tex}"
         );
-        assert!(tex.contains("公式 \\(x^{2}\\) 照常。"), "{tex}");
+        let json = data["blocks"].to_string();
+        assert!(
+            json.contains("单价 $20 与 $价格$ 不是公式，a *b 2 * 3。"),
+            "{json}"
+        );
+        assert!(json.contains(r#""t":"math","v":"x^{2}""#), "{json}");
     }
 }

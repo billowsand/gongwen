@@ -1,9 +1,8 @@
-//! Typst 排版引擎：公文 PDF 在本进程里排版，不起子进程、不落中间文件。
+//! Typst 排版引擎：全部 PDF（公文与研究报告）在本进程里排版，不起子进程、不落
+//! 中间文件。整体分工：
 //!
-//! 与 `texcompile`（内置 Tectonic）并列的第二套 PDF 引擎，设置里可切换；研究报告
-//! 不走这里，固定用 Tectonic。整体分工：
-//!
-//! - 版式全部写在随二进制编译进来的模板 `assets/typst/gongwen.typ` 里；
+//! - 版式全部写在随二进制编译进来的模板里：公文 `assets/typst/gongwen.typ`，研究
+//!   报告 `assets/typst/research.typ`；
 //! - 模板只认一份 JSON（`export::typst` 生成）：编号、标题断行、表格列宽、
 //!   压缩比例、要素显示值都由 Rust 算好，模板只负责排；
 //! - 这里实现 Typst 的 `World`：主文件是模板，`/doc.json` 是数据，其余相对

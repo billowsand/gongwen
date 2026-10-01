@@ -30,10 +30,10 @@
 | 随包（装在程序目录） | 用户（在配置目录） |
 |---|---|
 | 公文字体（`font/`） | config.json |
-| TeX 版式类（`gonghan-gwa.cls`、`ulem.sty`） | manuscripts.db |
+| 排版模板（编进程序） | manuscripts.db |
 | 输入法词典（`runtime/ime/dict.qj`） | images/ |
 | 整句模型（`runtime/ime/lm.qj`，可选 44 MB） | ime/ 学习数据 |
-| 便携 TeX 运行时（`runtime/`，部分平台） | |
+| 研究报告字体（`runtime/fonts/`） | |
 
 卸载时随包资源随程序走，用户数据留下。
 
@@ -94,16 +94,9 @@
 
 > **警告** `config.json` 里有你的**完整标准词库（含人员电话）**。分享配置文件前先删敏感字段，或只分享 `config.example.json` 这类模板。
 
-## 便携 TeX 运行时
+## PDF 排版
 
-TeX 编译用**内置 Tectonic**，离线可用。部分平台带便携 TeX 运行时（`runtime/`），不依赖系统装 TeX。
-
-| 产物 | 编译方式 |
-|---|---|
-| 公文 PDF | `texcompile::compile_pdf_with_proof` |
-| 研究报告 PDF | `texcompile::compile_research_pdf` |
-
-拿 `.tex` 到别的机器编译：目标机装 TeX（Tectonic 或 TeX Live）+ 同名字体，就能复现。源码包 `.zip` 里带了字体配置与图片。
+PDF 由程序内置的 **Typst** 引擎直接排版，公文与研究报告都是，完全离线，不依赖本机装任何排版软件。版式模板编进程序本体；字体来自程序目录下的 `runtime/fonts/`（公文另可在设置里换本机字体）。
 
 ## 清理
 

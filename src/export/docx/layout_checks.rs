@@ -1,4 +1,4 @@
-//! 与 TeX 共用输入的版式回归样稿，供 Word / XeLaTeX 实际排版检查。
+//! 与 PDF 共用输入的版式回归样稿，供 Word / Typst 实际排版检查。
 #![allow(clippy::field_reassign_with_default)]
 
 use super::*;
@@ -42,12 +42,14 @@ fn export_layout_comparison() {
             &display,
         )
         .unwrap();
-        crate::export::latex::write_tex(
-            &dir.join(format!("{stem}.tex")),
+        crate::export::write_pdf(
+            &dir.join(format!("{stem}.pdf")),
             &input,
             markdown,
             &display,
             &crate::models::FontConfig::default(),
+            &crate::models::NumberingConfig::default(),
+            &crate::visual_diff::ElementMarks::default(),
         )
         .unwrap();
     }

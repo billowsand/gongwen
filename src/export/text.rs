@@ -580,7 +580,7 @@ pub(crate) fn attachment_names(blocks: &[MarkdownBlock]) -> Vec<String> {
     names
 }
 
-/// 解析界面使用的“YYYY年M月D日”日期，供 Word 与 LaTeX 使用同一套预览占位规则。
+/// 解析界面使用的“YYYY年M月D日”日期，供 Word 与 PDF 使用同一套预览占位规则。
 pub(crate) fn chinese_date_parts(value: &str) -> Option<(&str, &str, &str)> {
     let (year, remainder) = value.trim().split_once('年')?;
     let (month, day) = remainder.split_once('月')?;

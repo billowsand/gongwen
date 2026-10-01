@@ -75,21 +75,19 @@ pub(crate) use table::{
     table_at,
 };
 
-/// 功能区「输出」分区里仿 WinEdt 的三个成品入口。
+/// 功能区「输出」分区里的成品入口。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExportKind {
-    Tex,
     Pdf,
     Word,
 }
 
 impl ExportKind {
-    pub(crate) const ALL: [Self; 3] = [Self::Tex, Self::Pdf, Self::Word];
+    pub(crate) const ALL: [Self; 2] = [Self::Pdf, Self::Word];
 
     /// 悬停说明里用的格式名。
     fn label(self) -> &'static str {
         match self {
-            Self::Tex => "TEX",
             Self::Pdf => "PDF",
             Self::Word => "WORD",
         }
@@ -97,7 +95,6 @@ impl ExportKind {
 
     fn icon(self) -> theme::Icon {
         match self {
-            Self::Tex => theme::Icon::Tex,
             Self::Pdf => theme::Icon::FileTypePdf,
             Self::Word => theme::Icon::FileTypeDoc,
         }
@@ -105,19 +102,18 @@ impl ExportKind {
 
     fn extension(self) -> &'static str {
         match self {
-            Self::Tex => "tex",
             Self::Pdf => "pdf",
             Self::Word => "docx",
         }
     }
 }
 
-/// 导出目录里当前文稿最近一次产出的 tex/pdf/docx，供「输出」分区那三枚入口点亮与打开。
+/// 导出目录里当前文稿最近一次产出的 pdf/docx，供「输出」分区的入口点亮与打开。
 ///
-/// 导出的落盘结构是 `输出目录/<文件名主干>/<文件名主干>.{md,docx,tex,pdf}`，
+/// 导出的落盘结构是 `输出目录/<文件名主干>/<文件名主干>.{md,docx,pdf}`，
 /// 一次导出一个子目录；同一文稿多次导出会按分钟时间戳攒出多个子目录，也会和
 /// 别的文稿的目录混在一起。所以这里先按当前文稿的导出主干前缀过滤出属于它的
-/// 子目录，再按目录修改时间从新到旧翻，先翻到的就是"最近一次"，三种格式都找齐
+/// 子目录，再按目录修改时间从新到旧翻，先翻到的就是"最近一次"，各种格式都找齐
 /// 即停。逐帧翻盘太贵，按目录 + 前缀 + 节流缓存，导出完成时由外壳调
 /// [`ExportLinks::invalidate`] 主动作废。
 #[derive(Default)]
@@ -126,7 +122,6 @@ pub(crate) struct ExportLinks {
     /// 当前文稿的导出主干前缀（`document_stem_prefix`）；换文稿后缓存自动作废。
     stem: Option<String>,
     scanned_at: Option<Instant>,
-    tex: Option<PathBuf>,
     pdf: Option<PathBuf>,
     docx: Option<PathBuf>,
 }
@@ -142,7 +137,6 @@ impl ExportLinks {
 
     pub(crate) fn path(&self, kind: ExportKind) -> Option<&Path> {
         match kind {
-            ExportKind::Tex => self.tex.as_deref(),
             ExportKind::Pdf => self.pdf.as_deref(),
             ExportKind::Word => self.docx.as_deref(),
         }
@@ -175,7 +169,6 @@ impl ExportLinks {
         self.dir = dir.to_owned();
         self.stem = stem.map(str::to_owned);
         self.scanned_at = Some(Instant::now());
-        self.tex = None;
         self.pdf = None;
         self.docx = None;
 
@@ -225,7 +218,7 @@ impl ExportLinks {
     }
 
     fn complete(&self) -> bool {
-        self.tex.is_some() && self.pdf.is_some() && self.docx.is_some()
+        self.pdf.is_some() && self.docx.is_some()
     }
 
     /// 先到先得：调用顺序已经保证是从新到旧。
@@ -238,7 +231,6 @@ impl ExportLinks {
             return;
         };
         let slot = match kind {
-            ExportKind::Tex => &mut self.tex,
             ExportKind::Pdf => &mut self.pdf,
             ExportKind::Word => &mut self.docx,
         };
@@ -965,10 +957,8 @@ mod tests {
         for folder in [&a_old, &a_new, &b_latest] {
             std::fs::create_dir_all(folder).unwrap();
         }
-        // 当前文稿旧导出只产 tex+pdf；新导出三格式齐全。
-        touch_export(&a_old, "tex");
+        // 当前文稿旧导出只产 pdf；新导出两种格式齐全。
         touch_export(&a_old, "pdf");
-        touch_export(&a_new, "tex");
         touch_export(&a_new, "pdf");
         touch_export(&a_new, "docx");
         // 别的文稿最新导出也有 pdf——旧实现会在这里取到它的 pdf/docx。
@@ -1003,30 +993,27 @@ mod tests {
         for folder in [&a_old, &a_new, &b_latest] {
             std::fs::create_dir_all(folder).unwrap();
         }
-        touch_export(&a_old, "tex");
+        touch_export(&a_old, "pdf");
         touch_export(&a_new, "docx");
-        // 别的文稿有 pdf。
+        // 别的文稿更晚的导出也有 pdf 与 docx。
         touch_export(&b_latest, "pdf");
+        touch_export(&b_latest, "docx");
         std::thread::sleep(Duration::from_millis(20));
 
         let mut links = ExportLinks::default();
         links.refresh(dir.to_str().unwrap(), Some(stem));
         assert_eq!(
             links
-                .path(ExportKind::Tex)
+                .path(ExportKind::Pdf)
                 .map(|p| p.parent().unwrap().to_path_buf()),
             Some(a_old.clone()),
-            "tex 应从同文稿更早导出补齐"
+            "pdf 应从同文稿更早导出补齐，不能取自别的文稿"
         );
         assert_eq!(
             links
                 .path(ExportKind::Word)
                 .map(|p| p.parent().unwrap().to_path_buf()),
             Some(a_new.clone())
-        );
-        assert!(
-            links.path(ExportKind::Pdf).is_none(),
-            "pdf 不能取自别的文稿"
         );
     }
 

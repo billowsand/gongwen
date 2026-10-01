@@ -54,7 +54,6 @@ mod skill_pack;
 mod sop;
 mod storage;
 mod system_fonts;
-mod texcompile;
 mod text_file;
 mod theme;
 mod typst_engine;

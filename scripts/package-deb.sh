@@ -39,8 +39,8 @@ if [ ! -x "$STAGING/gongwen-assistant" ]; then
     echo "error: staging binary not found or not executable: $STAGING/gongwen-assistant" >&2
     exit 1
 fi
-if [ ! -x "$STAGING/runtime/tectonic/tectonic" ]; then
-    echo "error: staging runtime tectonic not found or not executable" >&2
+if [ ! -f "$STAGING/runtime/fonts/FangSong.ttf" ]; then
+    echo "error: staging runtime fonts not found: $STAGING/runtime/fonts" >&2
     exit 1
 fi
 
@@ -52,7 +52,7 @@ mkdir -p "$APP_DIR"
 
 # Copy the full portable tree into the install root.
 cp -a "$STAGING"/. "$APP_DIR"/
-chmod 755 "$APP_DIR/gongwen-assistant" "$APP_DIR/runtime/tectonic/tectonic"
+chmod 755 "$APP_DIR/gongwen-assistant"
 
 # Command-line entry point.
 mkdir -p "$PKG_ROOT/usr/bin"
@@ -93,8 +93,8 @@ Recommends: $RECOMMENDS
 Installed-Size: $INSTALLED_SIZE
 Description: 离线公文写作助手 (offline official-document writing assistant)
  公文助手是一个基于 Rust、egui 与本地模型服务（LM Studio / Ollama 等）的
- 离线公文写作桌面应用。内置便携式 TeX 运行时（Tectonic + 离线 bundle + 字体），
- 可导出 Markdown、DOCX、TeX 并编译 PDF。
+ 离线公文写作桌面应用。内置 Typst 排版引擎与字体，
+ 可导出 Markdown、DOCX 与 PDF。
  .
  此包针对 $PLATFORM_DESCRIPTION（glibc >= 2.28），安装在 /opt/gongwen-assistant。
 EOF

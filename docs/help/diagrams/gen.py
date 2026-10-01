@@ -371,7 +371,7 @@ cells, _, bottom = grid(
         "格式\n标题层级 · 加粗\n规范化",
         "审校\n重新校验\n版本对照 · 字数",
         "视图\n显示方式\n缩放 · 面板开关",
-        "输出\n导出 · 打开目录\n成品三入口",
+        "输出\n导出 · 打开目录\n成品入口",
     ],
     y=180, cols=4, cell_h=118, gap_y=24, stroke=ACCENT, bold=True,
 )
@@ -379,7 +379,7 @@ c += cells
 n, nxt = notes([("n1", "★ 研报分区只在「研究报告」文种下显示")], y=bottom + 40)
 c += n
 n, nxt = notes(
-    [("n2", "PDF 不是独立勾选项：只要导出了 .tex 就自动编译 PDF")],
+    [("n2", "PDF 由内置 Typst 在程序里直接排版，不从 Word 转")],
     y=nxt, fill="#F7E4E0", stroke=RED,
 )
 c += n
@@ -408,11 +408,11 @@ c += note("mk", "行内标记\n{@id}　锚点\n[@key]　文献引用\n[^id]　�
 c += note("fm", "数学公式\n行内：单个 $ 包起来\n独立：两个 $ 单独成行\n\n"
                 "公文文种不支持公式，\n$ 始终是普通字符",
           630, 272, 270, 160, fill="#F5EDDC", stroke=AMBER)
-n, nxt = notes([("n1", "研究报告只出 TeX / PDF，不支持导出 Word")], y=496,
+n, nxt = notes([("n1", "研究报告出 PDF 与 Word，Word 走研究报告自己的转换器")], y=496,
                fill="#F7E4E0", stroke=RED)
 c += n
 c += notes(
-    [("n2", "预览字形是 STIX Two Math，导出用 TeX CM 字体——字形不同属正常，版式以导出为准")],
+    [("n2", "公式预览与 PDF 用同一个排版器（STIX Two Math），预览即所得")],
     y=nxt,
 )[0]
 DIAGRAMS["diag-research"] = page("研究报告结构", c)
@@ -420,30 +420,28 @@ DIAGRAMS["diag-research"] = page("研究报告结构", c)
 # ── 8. 导出链路 ─────────────────────────────────────────────────────────────
 c = title("导出链路", w=240)
 c += box("src", "Markdown 审校稿", X0, 168, 240, 90, fill="#F3E5DC", stroke=ACCENT, bold=True)
-c += box("md", "xxx.md", 320, 92, 220, 64)
-c += box("docx", "xxx.docx", 320, 176, 220, 64)
-c += box("tex", "xxx.tex", 320, 260, 220, 64)
-c += box("zip", "xxx-源码包.zip\n.tex + 字体 + 图片附件", 600, 92, 300, 80)
-c += box("pdf", "xxx.pdf\nTectonic 离线编译", 600, 192, 300, 80,
+c += box("docx", "xxx.docx", 320, 92, 220, 64)
+c += box("zip", "xxx-源码包.zip\nMarkdown + 图片附件", 320, 176, 220, 64)
+c += box("pdf", "xxx.pdf\n内置 Typst 程序内排版", 320, 260, 220, 64,
          fill="#DCE8EE", stroke=BLUE, bold=True)
-c += box("orphan", "孤行探针\n实测坐标 → 可点击提示", 600, 292, 300, 80,
+c += box("orphan", "孤行探针\n实测坐标 → 可点击提示", 600, 252, 300, 80,
          fill="#F5EDDC", stroke=AMBER)
-c += edge("e1", "src", "md")
-c += edge("e2", "src", "docx")
-c += edge("e3", "src", "tex")
-c += edge("e4", "tex", "pdf", "自动", BLUE)
-c += edge("e5", "tex", "zip")
-c += edge("e6", "tex", "orphan", dashed=True)
+# 三个产物共用一条竖向总线（审校稿与产物列之间），连线不从盒子身上压过去。
+for cid, tgt, y, color in [("e2", "docx", 124, MUTED),
+                           ("e3", "zip", 208, MUTED), ("e4", "pdf", 292, BLUE)]:
+    c += edge(cid, "src", tgt, stroke=color, exit_xy=(1, 0.5), entry_xy=(0, 0.5),
+              points=[(300, 213), (300, y)])
+c += edge("e6", "pdf", "orphan", dashed=True)
 n, nxt = notes(
     [("gate", "唯一导出闸门是「正文为空」。缺要素 / 必错未清 / 待核实未落实 → 只进审校面板，不挡导出")],
-    y=404, h=54, fill="#F7E4E0", stroke=RED,
+    y=372, h=54, fill="#F7E4E0", stroke=RED,
 )
 c += n
 c += notes(
     [
         ("n1", "每次导出建同名子目录：输出目录 / <主干名> /　主干名 = 文种前缀 + 名称 + 分钟级时间戳（会议议程无时间戳）"),
         ("n2", "覆盖策略：覆盖同名，或生成 -2、-3 副本（默认生成副本）"),
-        ("n3", "编译失败不阻断导出：.md / .docx / .tex 照常生成，PDF 缺失的报错进审校抽屉"),
+        ("n3", "排版失败不阻断导出：.md / .docx 照常生成，PDF 缺失的报错进审校抽屉"),
     ],
     y=nxt, h=52,
 )[0]

@@ -6,18 +6,23 @@ use std::{fs, path::PathBuf};
 const ZIP_PASSWORD_FILE: &str = ".zip-password";
 const MAX_REMEMBERED_PASSWORD_BYTES: u64 = 1024;
 
-/// 测试覆盖的用户目录：只让稿件包同步测试把图片写进临时目录，不影响真实配置目录。
+// 测试覆盖的用户目录：只让稿件包同步测试把图片写进临时目录，不影响真实配置目录。
+// 按线程覆盖：测试并行跑，全局覆盖会让同时在跑的别的测试（如稿件删除时清理孤儿
+// 图片）读到另一个目录，时灵时不灵。
 #[cfg(test)]
-static TEST_CONFIG_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+thread_local! {
+    static TEST_CONFIG_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 pub fn set_test_config_dir(dir: Option<std::path::PathBuf>) {
-    *TEST_CONFIG_DIR.lock().unwrap() = dir;
+    TEST_CONFIG_DIR.with(|cell| *cell.borrow_mut() = dir);
 }
 
 pub fn config_dir() -> Result<PathBuf> {
     #[cfg(test)]
-    if let Some(dir) = TEST_CONFIG_DIR.lock().unwrap().clone() {
+    if let Some(dir) = TEST_CONFIG_DIR.with(|cell| cell.borrow().clone()) {
         return Ok(dir);
     }
     let dirs = ProjectDirs::from("cn", "LocalTools", "GongwenAssistant")

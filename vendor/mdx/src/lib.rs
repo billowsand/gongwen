@@ -7,10 +7,6 @@ mod docx_official;
 mod docx_research;
 mod input;
 mod parser;
-mod tex_compile;
-mod tex_official;
-mod tex_research;
-mod tex_research_emitter;
 
 /// 研究报告的 Typst 排版数据（公文助手的 Typst 引擎用）。
 pub mod typst_research;
@@ -25,18 +21,17 @@ pub use common::quote;
 /// 研究报告插图的默认宽度。公开出来供调用方的预览照同一规则排图。
 pub use common::figure_size;
 
-/// 转换后的目标格式。
+/// 转换后的目标格式。这份副本只出 Word；PDF 由公文助手的 Typst 引擎排
+/// （研究报告的排版数据见 [`typst_research`]）。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Docx,
-    Tex,
 }
 
 impl OutputFormat {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::Docx => "docx",
-            Self::Tex => "tex",
         }
     }
 }
@@ -55,8 +50,6 @@ pub struct ConvertRequest {
     pub output: Option<PathBuf>,
     pub format: OutputFormat,
     pub style: DocumentStyle,
-    pub template: Option<PathBuf>,
-    pub compile_pdf: bool,
 }
 
 /// 转换过程中可供前端展示的消息级别。
@@ -77,7 +70,6 @@ pub struct ProgressEvent {
 #[derive(Clone, Debug)]
 pub struct ConvertOutcome {
     pub output: PathBuf,
-    pub pdf: Option<PathBuf>,
 }
 
 /// 使用默认的空进度接收器执行转换。
@@ -105,14 +97,6 @@ pub fn convert_with_progress(
         level: ProgressLevel::Info,
         message: format!("输出：{}", output.display()),
     });
-
-    if request.style == DocumentStyle::Official && request.template.is_some() {
-        report(ProgressEvent {
-            level: ProgressLevel::Warning,
-            message: "公文 TeX 不支持自定义模板，已忽略该设置".to_owned(),
-        });
-    }
-
     report(ProgressEvent {
         level: ProgressLevel::Info,
         message: "正在解析 Markdown 并生成文档…".to_owned(),
@@ -125,27 +109,14 @@ pub fn convert_with_progress(
         (OutputFormat::Docx, DocumentStyle::Research) => {
             docx_research::run(&request.input, Some(&output))?
         }
-        (OutputFormat::Tex, DocumentStyle::Official) => {
-            tex_official::run(&request.input, Some(&output), request.compile_pdf)?
-        }
-        (OutputFormat::Tex, DocumentStyle::Research) => tex_research::run(
-            &request.input,
-            Some(&output),
-            request.template.as_deref(),
-            request.compile_pdf,
-        )?,
     }
-
-    let pdf = (request.format == OutputFormat::Tex)
-        .then(|| output.with_extension("pdf"))
-        .filter(|path| path.exists());
 
     report(ProgressEvent {
         level: ProgressLevel::Info,
         message: "转换完成".to_owned(),
     });
 
-    Ok(ConvertOutcome { output, pdf })
+    Ok(ConvertOutcome { output })
 }
 
 /// 按 CLI 既有规则计算默认输出文件名。

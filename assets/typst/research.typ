@@ -31,12 +31,12 @@
 // 西文 TeX Gyre Termes 只管拉丁字母（引号、破折号这些中西共用的符号归中文字体，
 // 与 xeCJK 的分类一致）。
 #let latin = (name: F.latin, covers: "latin-in-cjk")
-#let song = (latin, F.song)
-#let kai = (latin, F.kai)
-#let hei = (F.hei,)                        // \heiti\enhei：中西文都用黑体
-#let hei-cjk = (latin, F.hei)              // \heiti：西文仍是 Termes（表头）
-#let xbs = (latin, F.xbs)
-#let mono = ((name: F.mono, covers: "latin-in-cjk"), F.kai)
+#let song = (latin, F.song, F.fallback)
+#let kai = (latin, F.kai, F.fallback)
+#let hei = (F.hei, F.fallback)             // \heiti\enhei：中西文都用黑体
+#let hei-cjk = (latin, F.hei, F.fallback)  // \heiti：西文仍是 Termes（表头）
+#let xbs = (latin, F.xbs, F.fallback)
+#let mono = ((name: F.mono, covers: "latin-in-cjk"), F.kai, F.fallback)
 
 // ---------------- 行内片段 ----------------
 // 加粗：西文换 Termes Bold，汉字描边伪粗（xeCJK AutoFakeBold，只作用于中文字体）。

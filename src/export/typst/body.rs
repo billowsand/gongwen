@@ -4,7 +4,7 @@
 
 use super::data::{Attachment, Block, Runs, Title};
 use super::runs::{body_runs, heading_runs, marked_runs};
-use crate::export::latex::attachment_landscape_flags;
+use crate::export::table::requires_landscape;
 use crate::export::title::{self, TitlePlan};
 use crate::export::{
     LineAlign, MarkdownBlock, MarkdownSection, attachment_names, official_heading_prefix,
@@ -241,4 +241,33 @@ pub(crate) fn sections(
         index += 1;
     }
     Sections { body, attachments }
+}
+
+/// 每个附件只要有一张表在竖页中横向过密，就将整个附件（而非仅表格）改为横页。
+pub(crate) fn attachment_landscape_flags(blocks: &[MarkdownBlock]) -> Vec<bool> {
+    let mut flags = Vec::new();
+    let mut seen_document_title = false;
+    let mut current_attachment = None;
+
+    for block in blocks {
+        match block {
+            MarkdownBlock::Title(_) if !seen_document_title && current_attachment.is_none() => {
+                seen_document_title = true
+            }
+            MarkdownBlock::Marker(MarkdownSection::Attachment) => {
+                flags.push(false);
+                current_attachment = Some(flags.len() - 1);
+            }
+            MarkdownBlock::Marker(MarkdownSection::Body) => current_attachment = None,
+            MarkdownBlock::Table { rows, spans, .. } => {
+                if let Some(index) = current_attachment
+                    && requires_landscape(rows, spans)
+                {
+                    flags[index] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    flags
 }

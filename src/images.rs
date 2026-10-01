@@ -280,12 +280,6 @@ pub(crate) fn image_refs(markdown: &str) -> Vec<String> {
     out
 }
 
-/// 把 markdown 引用的图片文件复制到目标目录（保持 `images/` 相对结构），
-/// 让导出的 md/tex 目录自包含。引用缺失或读取失败时跳过，不阻断导出。
-pub(crate) fn copy_refs(markdown: &str, target_dir: &Path) -> Result<()> {
-    copy_refs_from(&storage::config_dir()?, markdown, target_dir)
-}
-
 pub(crate) fn copy_refs_from(base: &Path, markdown: &str, target_dir: &Path) -> Result<()> {
     for src in image_refs(markdown) {
         let source = match resolve_from(base, &src) {

@@ -952,7 +952,7 @@ impl DraftPage<'_> {
         if self.doc.draft.kind.is_research() {
             ui.add_space(6.0);
             ui.label(
-                egui::RichText::new("研究报告按内置 mdx research 规范排版，仅生成 TeX 与 PDF。")
+                egui::RichText::new("研究报告按内置研究报告规范排版，生成 PDF 与 Word。")
                     .size(11.0)
                     .color(theme::text_soft()),
             );

@@ -173,7 +173,7 @@ jobs:
       image: ubuntu:20.04
     env:
       # 与 release.yml 的 RUNTIME_RELEASE_TAG 保持一致。
-      RUNTIME_RELEASE_TAG: v0.6.0
+      RUNTIME_RELEASE_TAG: v0.7.0
       RUNTIME_REPO: billowsand/gongwen-runtime
       DEBIAN_FRONTEND: noninteractive
     defaults:
@@ -207,12 +207,9 @@ jobs:
             status=$?
             test "$status" -eq 1
           }
-          # 与 package-portable.ps1 的布局一致：平台子目录里的 tectonic 放到
-          # runtime/tectonic/tectonic；zip 不保存执行位，这里补上。
-          install -m 755 \
-            "$staging/runtime/tectonic/linux-arm64/tectonic" \
-            "$staging/runtime/tectonic/tectonic"
-          rm -rf "$staging/runtime/tectonic/linux-arm64"
+          # 与 package-portable.ps1 一致：PDF 由 Typst 在进程内排版，runtime 包里
+          # 旧有的 tectonic/、texbundle/ 不随包。
+          rm -rf "$staging/runtime/tectonic" "$staging/runtime/texbundle"
           cp README.md LICENSE THIRD_PARTY_NOTICES.md "$staging/"
 
       - name: Package deb

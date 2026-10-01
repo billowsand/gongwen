@@ -1442,16 +1442,6 @@ impl DraftPage<'_> {
             self.start_export_current();
         }
         let overwrite = self.config.export.overwrite;
-        // PDF 一栏随引擎：Typst 只出 PDF，Tectonic 连 .tex 源文件一起出。
-        let (pdf_label, pdf_tip) = match self.config.pdf_engine {
-            crate::models::PdfEngine::Typst => (
-                "仅 PDF",
-                "这一次只出 PDF（内置 Typst 排版；研究报告仍用内置 Tectonic）",
-            ),
-            crate::models::PdfEngine::Tectonic => {
-                ("TeX 与 PDF", "这一次只出 tex，并用内置 Tectonic 编译成 PDF")
-            }
-        };
         let mut only: Option<(ExportSelection, &'static str)> = None;
         ui.add_enabled_ui(ready, |ui| {
             for (icon, label, selection, tip) in [
@@ -1461,21 +1451,21 @@ impl DraftPage<'_> {
                     ExportSelection {
                         markdown: false,
                         docx: true,
-                        tex: false,
+                        pdf: false,
                         overwrite,
                     },
                     "这一次只出 docx，不改设置里勾好的常用格式",
                 ),
                 (
-                    theme::Icon::Tex,
-                    pdf_label,
+                    theme::Icon::FileTypePdf,
+                    "仅 PDF",
                     ExportSelection {
                         markdown: false,
                         docx: false,
-                        tex: true,
+                        pdf: true,
                         overwrite,
                     },
-                    pdf_tip,
+                    "这一次只出 PDF，不改设置里勾好的常用格式",
                 ),
                 (
                     theme::Icon::PencilLine,
@@ -1483,7 +1473,7 @@ impl DraftPage<'_> {
                     ExportSelection {
                         markdown: true,
                         docx: false,
-                        tex: false,
+                        pdf: false,
                         overwrite,
                     },
                     "这一次只出 Markdown 源码包：md 正文、稿中引用的图片，研究报告另含 references.bib",

@@ -1831,15 +1831,12 @@ mod tests {
     }
 
     #[test]
-    fn research_converter_embeds_native_diagram_in_tex_and_docx() {
+    fn research_converter_embeds_native_diagram_in_pdf_data_and_docx() {
         use mdx::{ConvertRequest, DocumentStyle, OutputFormat};
 
         let dir = tempfile::tempdir().unwrap();
         let body = "# 流程研究\n\n<!-- [正文] -->\n\n## 办理环节\n\n见图 {@fig:flow}。\n\n```mermaid\nflowchart LR\n A[收文] --> B[办理]\n```\n图：办理流程 {#fig:flow}\n";
-        for (format, output_format, extension) in [
-            (Format::Pdf, OutputFormat::Tex, "tex"),
-            (Format::Png, OutputFormat::Docx, "docx"),
-        ] {
+        let source_for = |format: Format| {
             let rendered = materialize_at(
                 dir.path(),
                 body,
@@ -1852,37 +1849,41 @@ mod tests {
                 format!("---\n文件类型: 研究报告\n文件名称: 流程研究\n---\n\n{rendered}");
             let source = dir.path().join("research.md");
             fs::write(&source, document).unwrap();
-            let output = dir.path().join(format!("report.{extension}"));
-            mdx::convert(ConvertRequest {
-                input: source,
-                output: Some(output.clone()),
-                format: output_format,
-                style: DocumentStyle::Research,
-                template: None,
-                compile_pdf: false,
-            })
+            source
+        };
+
+        // PDF：Typst 排版数据里是一张满宽、带图号的插图。
+        let doc = mdx::typst_research::build(&source_for(Format::Pdf)).unwrap();
+        let data = serde_json::to_value(&doc).unwrap();
+        let figure = data["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["k"] == "figure")
+            .expect("图表应排成插图");
+        assert_eq!(figure["width"], 1.0, "图表宽度必须保持满版心");
+        assert_eq!(figure["number"], "1.1");
+        assert_eq!(figure["label"], "fig:flow");
+
+        // Word。
+        let output = dir.path().join("report.docx");
+        mdx::convert(ConvertRequest {
+            input: source_for(Format::Png),
+            output: Some(output.clone()),
+            format: OutputFormat::Docx,
+            style: DocumentStyle::Research,
+        })
+        .unwrap();
+        let file = fs::File::open(output).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert!(
+            archive
+                .file_names()
+                .any(|name| name.starts_with("word/media/"))
+        );
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut xml)
             .unwrap();
-            assert!(output.is_file());
-            if extension == "tex" {
-                let chapter = fs::read_to_string(dir.path().join("data/chapter01.tex")).unwrap();
-                assert!(chapter.contains("figures/"));
-                assert!(chapter.contains("\\includegraphics[width=\\textwidth]"));
-            } else {
-                let file = fs::File::open(output).unwrap();
-                let mut archive = zip::ZipArchive::new(file).unwrap();
-                assert!(
-                    archive
-                        .file_names()
-                        .any(|name| name.starts_with("word/media/"))
-                );
-                let mut xml = String::new();
-                std::io::Read::read_to_string(
-                    &mut archive.by_name("word/document.xml").unwrap(),
-                    &mut xml,
-                )
-                .unwrap();
-                assert!(xml.contains("cx=\"5616000\""), "图表宽度必须保持 156 mm");
-            }
-        }
+        assert!(xml.contains("cx=\"5616000\""), "图表宽度必须保持 156 mm");
     }
 }

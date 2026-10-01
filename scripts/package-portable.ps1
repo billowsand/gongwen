@@ -73,14 +73,13 @@ function Assert-DirectoryNotInUse([string]$Path) {
     }
 }
 
-function Get-RuntimeDestination([string]$Relative, [string]$PlatformSuffix) {
-    $normalized = $Relative.Replace("/", [System.IO.Path]::DirectorySeparatorChar)
-    $platformPrefix = [System.IO.Path]::Combine("tectonic", $PlatformSuffix) + [System.IO.Path]::DirectorySeparatorChar
-    if ($normalized.StartsWith($platformPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $leaf = [System.IO.Path]::GetFileName($normalized)
-        return [System.IO.Path]::Combine("tectonic", $leaf)
-    }
-    return $normalized
+# PDF 由 Typst 在进程内排版。runtime 包（gongwen-runtime v0.7.0 及更早）里还带着
+# Tectonic、离线 TeX bundle 与它们的许可证；清单里有也不随包。
+function Test-RetiredRuntimeAsset([string]$Relative) {
+    $normalized = $Relative.Replace("\", "/")
+    return $normalized.StartsWith("tectonic/", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $normalized.StartsWith("texbundle/", [System.StringComparison]::OrdinalIgnoreCase) -or
+        @("licenses/LICENSE.CTAN", "licenses/LICENSE.TL", "licenses/TECTONIC-LICENSE.txt") -contains $normalized
 }
 
 # Overwrite removes the output recursively, so protect drive and project roots.
@@ -158,7 +157,7 @@ foreach ($line in Get-Content -LiteralPath $RuntimeManifest -Encoding UTF8) {
     }
     $runtimeEntries += [PSCustomObject]@{
         Source = $asset
-        Destination = [System.IO.Path]::Combine("runtime", (Get-RuntimeDestination $relative $Suffix))
+        Destination = [System.IO.Path]::Combine("runtime", $relative)
     }
 }
 
@@ -238,7 +237,7 @@ finally {
     $skillZip.Dispose()
 }
 if (-not $isWindowsHost) {
-    foreach ($executable in @($BinaryName, [System.IO.Path]::Combine("runtime", "tectonic", "tectonic"))) {
+    foreach ($executable in @($BinaryName)) {
         $executablePath = Join-Path $OutputDir $executable
         if (Test-Path -LiteralPath $executablePath) {
             & chmod +x $executablePath

@@ -66,7 +66,7 @@ code-review-graph watch
 - 第三方代码：`vendor/qingjian/`（输入法内核，GPL，意义不大）、
   `vendor/mdx/`（独立 workspace）
 - 用户/运行时资源：`config.json`、`.env`、`/font/`、
-  `/runtime/{fonts,tectonic,texbundle,ime}/`
+  `/runtime/{fonts,ime}/`
 - AI 工具技能包（外部）：`skills/`
 - 图自身：`.code-review-graph/`
 

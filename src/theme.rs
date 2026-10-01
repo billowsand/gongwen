@@ -4,7 +4,7 @@
 //! 暖灰而非纯黑的文字。除默认外还内置多套明色主题（天青、淡紫等），设置页可
 //! 随时切换。界面上所有颜色都从这里取，避免各处硬编码 RGB；公文「纸面」渲染
 //! （预览、编辑区）的取色集中在 [`paper`] 模块，按设置里的纸面模式走，导出的
-//! DOCX/TeX/PDF 一律仍是白纸黑字红头，不受主题影响。
+//! DOCX/PDF 一律仍是白纸黑字红头，不受主题影响。
 
 use crate::models::{EditorFontFace, FontConfig, FontRole, PaperMode, ThemeName};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
@@ -845,7 +845,7 @@ pub fn revision() -> u64 {
 
 /// 屏幕上的公文纸面取色。
 ///
-/// **只作用于屏幕预览**：导出的 DOCX/TeX/PDF 由 `export` 模块另行生成，完全不读
+/// **只作用于屏幕预览**：导出的 DOCX/PDF 由 `export` 模块另行生成，完全不读
 /// 这里的颜色，因此不论用户把纸面调成什么，落到纸上的永远是白纸黑字红头。
 ///
 /// 「跟随主题」把十二套外观主题收束为五种克制的纸面：本色、宣纸白、雨青灰、
@@ -1686,7 +1686,6 @@ pub enum Icon {
     Square,
     SquareCheck,
     Table,
-    Tex,
     Trash,
     TriangleAlert,
     Type,
@@ -1873,7 +1872,6 @@ impl Icon {
                 include_bytes!("../assets/icons/square-check-big.svg"),
             ),
             Self::Table => ("table", include_bytes!("../assets/icons/table.svg")),
-            Self::Tex => ("tex", include_bytes!("../assets/icons/tex.svg")),
             Self::Trash => ("trash-2", include_bytes!("../assets/icons/trash-2.svg")),
             Self::TriangleAlert => (
                 "triangle-alert",

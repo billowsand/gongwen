@@ -26,10 +26,8 @@ env:
   # v0.5.0 起再带输入法数据（ime/dict.qj + ime/lm.qj）：应用内输入法的词库与整句
   # 模型。它们必须写进各平台的 SHA256SUMS.<suffix>.txt——package-portable.ps1
   # 只按清单复制文件，漏写不会报错，只会让装完的包静默退回系统输入法。
-  # v0.6.0 起 texbundle 含 amsmath/mathtools 及研究正文字号的 CM 数学实体字体，
-  # 研究报告可导出数学公式（对应 mdx v2.16.2）。
-  # v0.7.0 在此之上加入 amssymb + amsfonts 的 msam/msbm/eufm 各字号 TFM/PFB，
-  # 让 \mathbb / \mathfrak / \varnothing / \leqslant / \therefore / \mathsf 直接可用。
+  # PDF 由 Typst 在进程内排版：runtime 包里旧有的 tectonic/、texbundle/ 不再随包
+  # 分发（package-portable.ps1 按清单复制时跳过），只用其中的字体、输入法数据与许可证。
   RUNTIME_RELEASE_TAG: v0.7.0
   RUNTIME_REPO: billowsand/gongwen-runtime
   # 输入法数据的冒烟测试名，各平台都跑这一个（见 src/ime/mod.rs）。
@@ -68,11 +66,11 @@ jobs:
           $staging = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full"
           ./scripts/package-portable.ps1 -Suffix win-x64 -BinaryName gongwen-assistant.exe -OutputDir $staging -ArchiveFormat none -SkipBuild -Force
 
-      - name: Smoke test packaged runtime（TeX 与输入法数据）
+      - name: Smoke test packaged runtime（PDF 排版与输入法数据）
         shell: pwsh
         run: |
           $env:GONGWEN_RUNTIME_DIR = Join-Path $env:GITHUB_WORKSPACE "dist/win-x64-full/runtime"
-          cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
+          cargo test --locked --release --bin gongwen-assistant "shipped_runtime_typesets_every_kind" -- --ignored
           # 输入法数据：真的装配一次引擎并查一个词，不只是看文件在不在。
           cargo test --locked --release --bin gongwen-assistant "$env:IME_SMOKE_TEST" -- --ignored
 
@@ -201,8 +199,6 @@ jobs:
             # extracts them correctly but reports warning status 1 on Linux.
             test "$status" -eq 1
           }
-          test -f runtime/tectonic/linux-arm64/tectonic
-          test -f runtime/texbundle/gongwen-texlive.ttb
           test -f runtime/fonts/FangSong.ttf
           # 研究报告的字体：拿到旧 runtime 时在这里就失败，而不是等用户
           # 点了导出才报 "字体不存在"。
@@ -211,18 +207,12 @@ jobs:
           # 输入法数据：清单里漏了这两项，装完就会静默退回系统输入法。
           test -f runtime/ime/dict.qj
           test -f runtime/ime/lm.qj
-          # zip 不保存 Unix 权限位，解压出来的二进制没有执行位。两份都补上：
-          # 装一份就绪的 tectonic/tectonic，同时让按平台分目录的原始文件也可执行。
-          chmod +x runtime/tectonic/linux-arm64/tectonic
-          install -m 755 \
-            runtime/tectonic/linux-arm64/tectonic \
-            runtime/tectonic/tectonic
 
-      - name: Smoke test packaged runtime（TeX 与输入法数据）
+      - name: Smoke test packaged runtime（PDF 排版与输入法数据）
         run: |
           set -euo pipefail
           export GONGWEN_RUNTIME_DIR="$GITHUB_WORKSPACE/runtime"
-          cargo test --locked --release --bin gongwen-assistant "texcompile::tests::compiles_" -- --ignored
+          cargo test --locked --release --bin gongwen-assistant "shipped_runtime_typesets_every_kind" -- --ignored
           # 输入法数据：真的装配一次引擎并查一个词，不只是看文件在不在。
           cargo test --locked --release --bin gongwen-assistant "$IME_SMOKE_TEST" -- --ignored
 

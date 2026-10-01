@@ -43,7 +43,7 @@ package() {
   install -dm755 "$appdir" "${pkgdir}/usr/bin" "${pkgdir}/usr/share"
   cp -a "${root}/app/." "$appdir/"
   cp -a "${root}/share/." "${pkgdir}/usr/share/"
-  chmod 755 "$appdir/gongwen-assistant" "$appdir/runtime/tectonic/tectonic"
+  chmod 755 "$appdir/gongwen-assistant"
   ln -s /usr/lib/gongwen-assistant/gongwen-assistant \
     "${pkgdir}/usr/bin/gongwen-assistant"
 

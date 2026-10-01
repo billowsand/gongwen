@@ -47,8 +47,6 @@ if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
 
 $requiredFiles = @(
     "gongwen-assistant.exe",
-    "runtime\tectonic\tectonic.exe",
-    "runtime\texbundle\gongwen-texlive.ttb",
     "runtime\fonts\FangSong.ttf",
     "runtime\fonts\KaiTi.ttf",
     "runtime\fonts\SimHei.ttf",

@@ -1,11 +1,11 @@
 //! 研究报告 → Typst 排版数据（公文助手的 Typst 引擎用）。
 //!
-//! 与 `tex_research_emitter` 同一套解析结果、同一套区段规则，只是不出 TeX：把整篇
+//! 沿用原 TeX 输出（`md2tex.cls`）的解析结果与区段规则，把整篇
 //! 报告整理成一份可序列化的 [`Doc`]，交给宿主程序的 Typst 模板去排。章节号、
-//! 图表号、文框号、列表序号都在这里按 `md2tex.cls` 的计数器规则算好，模板只负责排；
+//! 图表号、文框号、列表序号都在这里按原 `md2tex.cls` 的计数器规则算好，模板只负责排；
 //! 只有交叉引用的落点（`{@id}`）与目录页码留给 Typst 自己解析。
 //!
-//! 与 TeX 路径刻意不同的两处（TeX 那边是缺陷）：
+//! 与原 TeX 输出刻意不同的两处（TeX 那边是缺陷）：
 //! - 列表从二级回到一级时序号接着往下数（TeX 会重开一个 asparaenum，从 ⑴ 再数）；
 //! - 参考文献只排一个标题：`<!-- [参考文献] -->` 的标题下直接接文献表（TeX 另起
 //!   一页再排一遍“参考文献”）。
@@ -250,8 +250,8 @@ pub fn build(input: &Path) -> Result<Doc> {
         .with_context(|| format!("读取文件 {} 失败", input.display()))?;
     let content = content.trim_start_matches('\u{feff}');
     let base_dir = input.parent().unwrap_or(Path::new("."));
-    let report_title = crate::tex_research::report_title(content);
-    let body = crate::tex_research::remove_report_title(content);
+    let report_title = report_title_line(content).map(|(_, title)| title);
+    let body = remove_report_title(content);
     let (cover, markdown) = front_matter::parse(&body);
     let title = cover.title.clone().or(report_title);
 
@@ -270,6 +270,44 @@ pub fn build(input: &Path) -> Result<Doc> {
         bibliography: citations.has_citations,
         warnings,
     })
+}
+
+/// 报告题名所在的行号：正文区段里的第一个 `#` 标题。
+///
+/// 只认正文区段（开头的默认区段或 `<!-- [正文] -->` 之后）：摘要、附录、部分等
+/// 区段里的 `#` 各有归属（摘要标题、附录章、部分），拿去当题名就会从正文里丢掉
+/// 一行。与公文助手的 `research_report_titles` 同一口径。
+fn report_title_line(content: &str) -> Option<(usize, String)> {
+    let heading_regex = regex::Regex::new(r"^#\s+(.+?)(?:\s*\{[^}]*\})?\s*$").ok()?;
+    let mut in_body = true;
+    for (index, line) in content.lines().enumerate() {
+        if let Some(kind) = crate::common::markers::detect(line) {
+            in_body = kind == MarkerKind::Body;
+            continue;
+        }
+        if !in_body {
+            continue;
+        }
+        if let Some(caps) = heading_regex.captures(line) {
+            let title = crate::common::heading::clean(caps.get(1)?.as_str().trim());
+            if !title.is_empty() {
+                return Some((index, title));
+            }
+        }
+    }
+    None
+}
+
+/// 去掉报告题名那一行：题名归封面，正文版面不排。
+fn remove_report_title(content: &str) -> String {
+    let skip = report_title_line(content).map(|(index, _)| index);
+    content
+        .lines()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != skip)
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn cover_of(meta: &front_matter::Metadata, title: Option<&str>) -> Cover {
@@ -968,7 +1006,7 @@ impl Builder {
         self.abstract_list_level = 0;
     }
 
-    /// 摘要里的列表前缀（`tex_research_emitter::list_prefix` 的口径）。
+    /// 摘要里的列表前缀：`1.`、`(1)`、`a.`……（原 TeX 输出的口径）。
     fn abstract_prefix(&mut self, level: u8) -> String {
         let index = usize::from(level.clamp(1, 6)) - 1;
         if self.abstract_list_level < level || self.abstract_list_level == 0 {

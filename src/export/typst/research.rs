@@ -14,8 +14,11 @@ use crate::export::research::ResearchSourceBundle;
 use crate::models::{DraftInput, NumberingConfig};
 use crate::typst_engine::{self, Template, TypstJob, TypstOutcome};
 
-/// 研究报告用到的字体（`md2tex.cls` 路径分支里的文件）。
+/// 研究报告用到的字体（随包 `runtime/fonts` 里的文件，见 `portable_runtime`）。
 fn fonts() -> Result<Value> {
+    let dir =
+        crate::portable_runtime::find_font_dir().context("找不到内置字体目录 runtime/fonts")?;
+    crate::portable_runtime::validate_research_fonts(&dir)?;
     let family = |file: &str| typst_engine::bundled_family(file);
     Ok(serde_json::json!({
         "song": family("FZShuSong.ttf")?,
@@ -24,6 +27,8 @@ fn fonts() -> Result<Value> {
         "xbs": family("FZXiaoBiaoSong.ttf")?,
         "latin": family("texgyretermes-regular.otf")?,
         "mono": family("JetBrainsMono-Regular.ttf")?,
+        // 方正书宋覆盖 GBK；更生僻的字由内置宋体兜底（与公文同一份）。
+        "fallback": family("SimSun.ttf")?,
     }))
 }
 

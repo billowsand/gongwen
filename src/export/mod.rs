@@ -6,7 +6,6 @@
 
 mod docx;
 pub(crate) mod element_display;
-mod latex;
 pub(crate) mod research;
 pub(crate) mod table;
 pub(crate) mod title;
@@ -19,18 +18,10 @@ pub(crate) use docx::{write_docx, write_docx_with_numbering};
 pub(crate) use docx::body_runs;
 #[cfg(test)]
 pub(crate) use docx::marked_runs;
-#[cfg(test)]
-pub(crate) use latex::body_text_to_tex;
-#[allow(unused_imports)]
-pub(crate) use latex::copy_count;
-#[cfg(test)]
-pub(crate) use latex::marked_tex_escape;
-#[cfg(test)]
-pub(crate) use latex::write_tex;
 pub(crate) use research::write_docx as write_docx_research;
 
 use crate::models::{
-    DraftInput, ExportSelection, FontConfig, NumberingConfig, PdfEngine, TemplateKind, split_units,
+    DraftInput, ExportSelection, FontConfig, NumberingConfig, TemplateKind, split_units,
 };
 use crate::typst_engine;
 use crate::units::UnitDisplay;
@@ -130,7 +121,7 @@ pub(crate) fn joint_seal_index(input: &DraftInput, display: &UnitDisplay) -> Opt
         .or_else(|| (!split_units(&input.profile.joint_issuing_units).is_empty()).then_some(0))
 }
 
-/// 联合发文落款：主发文单位所在列（0=左列，1=右列）。预览/LaTeX/DOCX 三处共用，
+/// 联合发文落款：主发文单位所在列（0=左列，1=右列）。预览/PDF/DOCX 三处共用，
 /// 把成文日期（含代章）压在主发文单位下方而不是整块居中。
 /// 返回 `None` 表示主单位不在联合单位列表中、未指定，或是跨两列的最后一个单位，
 /// 此时日期仍整体居中。
@@ -143,6 +134,11 @@ pub(crate) fn joint_main_column(input: &DraftInput) -> Option<usize> {
         return None;
     }
     Some(index % 2)
+}
+
+/// 份号逐份编制时一共排几份：共印份数（至少 1）。
+pub(crate) fn copy_count(input: &DraftInput) -> u32 {
+    automatic_print_copies(input).max(1) as u32
 }
 
 /// 一篇稿件对外的标题：标签、状态栏、稿件库记录、导出文件名都用它。
@@ -175,7 +171,7 @@ pub fn extract_title(markdown: &str, fallback: &str) -> String {
 }
 
 /// Markdown 保留“标题 + 正文 + 可选附件”。密级、文号、主送、落款、成文日期、抄送和版记
-/// 都由 DOCX/LaTeX 导出器按锁定元数据渲染，这里不再重复写入。
+/// 都由 DOCX/PDF 导出器按锁定元数据渲染，这里不再重复写入。
 pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
     // 研究报告先出去：有序列表统一收尾标点（`；`/`。`）是公文的行文规范，
     // 研报正文里常有以单位、英文缩写或公式结尾的条目，套上去反而是错的。
@@ -194,25 +190,6 @@ pub fn finalize_markdown(input: &DraftInput, generated: &str) -> String {
         text = format!("# {title}\n\n{text}");
     }
     format!("{}\n", text.trim())
-}
-
-/// 按文档类型写入 TeX。研究报告必须经固定版本 mdx 的 research 模式转换；
-/// 其余文档继续使用公文 LaTeX 导出器。集中这一入口，避免稿件库批量导出等旁路
-/// 绕过研究报告的格式约束。
-pub(crate) fn write_tex_for_kind(
-    path: &Path,
-    input: &DraftInput,
-    markdown: &str,
-    display: &UnitDisplay,
-    fonts: &FontConfig,
-    numbering: &NumberingConfig,
-    elements: &crate::visual_diff::ElementMarks,
-) -> Result<()> {
-    if input.kind.is_research() {
-        research::write_tex(path, input, markdown, numbering)
-    } else {
-        latex::write_tex_with_numbering(path, input, markdown, display, fonts, numbering, elements)
-    }
 }
 
 /// Markdown 源码包：正文 `.md` 加上它引用的全部资源，压成一个 zip。
@@ -293,8 +270,7 @@ pub fn export_all(
     )
 }
 
-/// 与 [`export_all`] 相同，另按设置里的编号样式生成标题与列表编号。PDF 一栏
-/// 走 Tectonic 链路（只写 `.tex`，由调用方编译）。
+/// 与 [`export_all`] 相同，另按设置里的编号样式生成标题与列表编号。
 #[allow(clippy::too_many_arguments)]
 pub fn export_all_with_numbering(
     output_dir: &Path,
@@ -305,15 +281,8 @@ pub fn export_all_with_numbering(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
-    Ok(export_all_with_engine(
-        output_dir,
-        input,
-        markdown,
-        selection,
-        display,
-        fonts,
-        numbering,
-        PdfEngine::Tectonic,
+    Ok(export_artifacts(
+        output_dir, input, markdown, selection, display, fonts, numbering,
     )?
     .files)
 }
@@ -321,14 +290,13 @@ pub fn export_all_with_numbering(
 /// 一次导出的产物。
 pub(crate) struct ExportArtifacts {
     pub files: Vec<PathBuf>,
-    /// Typst 引擎排出了 PDF 时的附带信息（孤行探针报告、排版警告）。
+    /// 排出了 PDF 时的附带信息（孤行探针报告、排版警告）。
     pub typst: Option<typst_engine::TypstOutcome>,
 }
 
-/// 按引擎导出。勾了 PDF（设置里的 TeX 一栏）时：研究报告与 Tectonic 引擎写 `.tex`，
-/// 由调用方编译；Typst 引擎在这里直接排出 `.pdf`，不写 `.tex`。
+/// 导出勾选的格式。PDF 由 Typst 在进程内直接排出（研究报告走 `typst::research`）。
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn export_all_with_engine(
+pub(crate) fn export_artifacts(
     output_dir: &Path,
     input: &DraftInput,
     markdown: &str,
@@ -336,7 +304,6 @@ pub(crate) fn export_all_with_engine(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    engine: PdfEngine,
 ) -> Result<ExportArtifacts> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
@@ -345,8 +312,8 @@ pub(crate) fn export_all_with_engine(
     // 会议议程“名称+会议时间”，白头件“白头+名称+时间戳”，公函“函号+名称+时间戳”，
     // 电话通知“电话通知+时间戳”，普通公文“普通公文+名称+时间戳”。
     let stem = document_stem(input, &title);
-    // 每次导出以文件生成名为单元归档：同一批的 md/docx/tex/pdf
-    // 以及 TeX 类文件都放进同名子目录。不覆盖时在目录名上统一编号，
+    // 每次导出以文件生成名为单元归档：同一批的 md/docx/pdf 都放进同名子目录。
+    // 不覆盖时在目录名上统一编号，
     // 避免各扩展名分别寻找可用名称后落到不同版本。
     let export_stem = if selection.overwrite {
         stem
@@ -381,49 +348,42 @@ pub(crate) fn export_all_with_engine(
         files.push(path);
     }
     let mut typst = None;
-    if selection.tex {
-        if uses_typst(input, engine) {
-            let path = document_dir.join(format!("{export_stem}.pdf"));
-            let outcome = if input.kind.is_research() {
-                self::typst::research::write_pdf(&path, input, markdown, numbering)?
-            } else {
-                self::typst::write_pdf(
-                    &path,
-                    input,
-                    markdown,
-                    display,
-                    fonts,
-                    numbering,
-                    &crate::visual_diff::ElementMarks::default(),
-                )?
-            };
-            files.push(path);
-            typst = Some(outcome);
-        } else {
-            let path = document_dir.join(format!("{export_stem}.tex"));
-            write_tex_for_kind(
-                &path,
-                input,
-                markdown,
-                display,
-                fonts,
-                numbering,
-                &crate::visual_diff::ElementMarks::default(),
-            )?;
-            files.push(path);
-        }
+    if selection.pdf {
+        let path = document_dir.join(format!("{export_stem}.pdf"));
+        let outcome = write_pdf(
+            &path,
+            input,
+            markdown,
+            display,
+            fonts,
+            numbering,
+            &Default::default(),
+        )?;
+        files.push(path);
+        typst = Some(outcome);
     }
     Ok(ExportArtifacts { files, typst })
 }
 
-/// 这份文档的 PDF 是否走 Typst（研究报告与公文都按设置里的引擎）。
-pub(crate) fn uses_typst(_input: &DraftInput, engine: PdfEngine) -> bool {
-    engine == PdfEngine::Typst
+/// 排一份 PDF 写到 `path`：研究报告走 `typst::research`，其余文种走公文模板。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_pdf(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    elements: &crate::visual_diff::ElementMarks,
+) -> Result<typst_engine::TypstOutcome> {
+    if input.kind.is_research() {
+        self::typst::research::write_pdf(path, input, markdown, numbering)
+    } else {
+        self::typst::write_pdf(path, input, markdown, display, fonts, numbering, elements)
+    }
 }
 
-/// 把一份文档编成 PDF，写在 `dir/stem.pdf`，返回 PDF 路径。按引擎：Typst 进程内
-/// 直接排（研究报告走 `typst::research`），Tectonic 先写 `dir/stem.tex` 再编译（研究
-/// 报告经 mdx research 模式；找不到可用 TeX 时返回 `None`）。
+/// 把一份文档排成 PDF，写在 `dir/stem.pdf`，返回 PDF 路径。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_pdf_for_kind(
     dir: &Path,
@@ -434,25 +394,10 @@ pub(crate) fn write_pdf_for_kind(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
     elements: &crate::visual_diff::ElementMarks,
-    engine: PdfEngine,
-) -> Result<Option<PathBuf>> {
-    if uses_typst(input, engine) {
-        let path = dir.join(format!("{stem}.pdf"));
-        if input.kind.is_research() {
-            self::typst::research::write_pdf(&path, input, markdown, numbering)?;
-        } else {
-            self::typst::write_pdf(&path, input, markdown, display, fonts, numbering, elements)?;
-        }
-        return Ok(Some(path));
-    }
-    let tex = dir.join(format!("{stem}.tex"));
-    write_tex_for_kind(&tex, input, markdown, display, fonts, numbering, elements)?;
-    let compiled = if input.kind.is_research() {
-        crate::texcompile::compile_research_pdf(&tex)?
-    } else {
-        crate::texcompile::compile_pdf_with_proof(&tex, fonts)?
-    };
-    Ok(compiled.pdf)
+) -> Result<PathBuf> {
+    let path = dir.join(format!("{stem}.pdf"));
+    write_pdf(&path, input, markdown, display, fonts, numbering, elements)?;
+    Ok(path)
 }
 
 /// 导出文件名的固定前缀（不含分钟级时间戳）。导出目录里属于同一文稿的
@@ -717,7 +662,7 @@ mod tests {
         );
     }
 
-    /// 签字空间在三端必须同宽：mm（预览/LaTeX）与缇（Word）不能各说各话。
+    /// 签字空间在三端必须同宽：mm（预览/PDF）与缇（Word）不能各说各话。
     #[test]
     fn signature_room_is_the_same_width_in_every_unit() {
         assert_eq!(
@@ -736,7 +681,7 @@ mod tests {
             red_signature_unit_width_twips(&units),
             6 * RED_RECORD_EM_TWIPS
         );
-        // 毫米与缇必须指向同一个宽度（LaTeX 用毫米，Word 用缇）。
+        // 毫米与缇必须指向同一个宽度（PDF 用毫米，Word 用缇）。
         let mm = red_signature_unit_width_mm(&units);
         assert!((mm - 33.867).abs() < 0.01, "{mm}");
         assert_eq!(
@@ -1531,20 +1476,26 @@ mod tests {
         input.profile.contact_phone = "010-12345678".into();
         let markdown =
             "# 关于开展测试工作的函\n\n某某部门：\n\n现就有关事项函告如下。\n\n特此函告。";
+        // PDF 要随包字体；没有 runtime/fonts 的环境（CI）只出 md 与 docx。
+        let fonts_available = crate::portable_runtime::find_font_dir().is_some();
+        let selection = ExportSelection {
+            pdf: fonts_available,
+            ..ExportSelection::default()
+        };
         let files = export_all(
             temp.path(),
             &input,
             markdown,
-            &ExportSelection::default(),
+            &selection,
             &UnitDisplay::new(&[]),
             &FontConfig::default(),
         )
         .unwrap();
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.len(), if fonts_available { 3 } else { 2 });
         assert!(files.iter().all(|path| path.metadata().unwrap().len() > 0));
         let document_dir = files[0].parent().unwrap();
         assert!(files.iter().all(|path| path.parent() == Some(document_dir)));
-        // docx / tex 与导出目录同名；md 源码包在同一个主干名后加 `-源码包`。
+        // docx / pdf 与导出目录同名；md 源码包在同一个主干名后加 `-源码包`。
         let dir_name = document_dir.file_name().unwrap().to_string_lossy();
         for path in &files {
             let stem = path.file_stem().unwrap().to_string_lossy();
@@ -1553,7 +1504,6 @@ mod tests {
                 "产物名应与导出目录同源：{stem}"
             );
         }
-        assert!(document_dir.join("gonghan-gwa.cls").exists());
 
         let docx_path = files
             .iter()
@@ -1590,7 +1540,7 @@ mod tests {
         let selection = ExportSelection {
             markdown: true,
             docx: false,
-            tex: false,
+            pdf: false,
             overwrite: true,
         };
         let files = export_all(
@@ -1631,7 +1581,7 @@ mod tests {
         let selection = ExportSelection {
             markdown: true,
             docx: false,
-            tex: false,
+            pdf: false,
             overwrite: true,
         };
         let markdown = format!("# 标题\n\n正文。\n\n![图](images/{name})");
@@ -1664,7 +1614,7 @@ mod tests {
         let selection = ExportSelection {
             markdown: true,
             docx: false,
-            tex: false,
+            pdf: false,
             overwrite: true,
         };
         let files = export_all(
@@ -1701,7 +1651,7 @@ mod tests {
         let selection = ExportSelection {
             markdown: true,
             docx: false,
-            tex: false,
+            pdf: false,
             overwrite: true,
         };
         let first = export_all(

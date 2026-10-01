@@ -2,7 +2,7 @@
 
 ## 获取发布版
 
-GitHub Releases 只提供两种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）与 Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）。macOS、Linux AMD64 与 Arch/Omarchy 不再提供发布包，需要时请按下文从源码构建。两种发布包都内含应用、Tectonic、离线 bundle 与字体，安装后即可离线导出 Markdown、DOCX、TeX 并编译 PDF。
+GitHub Releases 只提供两种发布包：Windows x64 安装程序（`gongwen-assistant-<版本>-win-x64-setup.exe`）与 Linux ARM64 Debian 包（`gongwen-assistant_<版本>_arm64.deb`，按 GLIBC 2.28 构建，兼容 Ubuntu 20.04 / 麒麟 V10 及更新的系统）。macOS、Linux AMD64 与 Arch/Omarchy 不再提供发布包，需要时请按下文从源码构建。两种发布包都内含应用与字体（PDF 由程序内置的 Typst 引擎排版），安装后即可离线导出 Markdown、DOCX 与 PDF。
 
 发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Debian Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`）。相关资产受授权和体积限制，不进入源码仓库。
 
@@ -50,7 +50,7 @@ fcitx5 自己画候选窗。LibreOffice 之类不受影响的程序，是因为�
 前置条件：
 
 - Rust stable（edition 2024）；
-- 可选：本地模型服务（LM Studio 或 Ollama），以及本机 XeLaTeX/Tectonic。
+- 可选：本地模型服务（LM Studio 或 Ollama）。
 
 ```powershell
 cargo run

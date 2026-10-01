@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 macOS 上把便携目录（二进制 + TeX runtime）组装成可双击运行的 .app bundle。
+# 在 macOS 上把便携目录（二进制 + runtime 字体）组装成可双击运行的 .app bundle。
 #
 # 对应 Windows 的 scripts/package-installer.ps1（Inno Setup 安装程序）：这里用
 # macOS 标准 .app 结构（Contents/MacOS + Contents/Resources + Info.plist）产出
@@ -17,9 +17,9 @@
 #   --force      覆盖已存在的 .app（否则报错退出）。
 #   --dmg        额外生成 .dmg 磁盘映像（需要 macOS 自带的 hdiutil 与 shasum）。
 #
-# 说明：gongwen-runtime 目前不发布 macOS 运行时资产；本地 runtime/ 目录若含
-# macOS 的 tectonic 则一并打进 .app（PDF 编译可用），否则只打包应用本体——程序
-# 仍可启动查看界面，仅 TeX/PDF 导出需要后续补充 runtime。
+# 说明：gongwen-runtime 目前不发布 macOS 运行时资产；本地 runtime/ 目录若有字体
+# 则一并打进 .app（PDF 可用），否则只打包应用本体——程序仍可启动查看界面，
+# 仅 PDF 导出需要后续补充 runtime。
 set -euo pipefail
 
 VERSION=""
@@ -121,22 +121,13 @@ else
     done
 fi
 
-# runtime 是可选的：没有也能启动查看界面，PDF 编译需要它。
+# runtime 是可选的：没有也能启动查看界面，PDF 排版需要其中的字体。
 RUNTIME_DIR="$STAGE/runtime"
 if [ -d "$RUNTIME_DIR" ]; then
-    # 若 runtime 是平台子目录布局（如 runtime/tectonic/darwin-arm64/tectonic），
-    # 映射为程序查找的 runtime/tectonic/tectonic。
-    TECTONIC="$RUNTIME_DIR/tectonic/tectonic"
-    if [ ! -f "$TECTONIC" ]; then
-        NESTED="$(find "$RUNTIME_DIR/tectonic" -maxdepth 2 -type f -name tectonic 2>/dev/null | head -n1 || true)"
-        if [ -n "$NESTED" ]; then
-            mkdir -p "$RUNTIME_DIR/tectonic"
-            cp "$NESTED" "$TECTONIC"
-        fi
-    fi
-    [ -f "$TECTONIC" ] || warn "runtime/tectonic/tectonic not found; PDF compilation will be unavailable"
+    # PDF 由 Typst 在进程内排版，旧 runtime 里的 TeX 资产不随包。
+    rm -rf "$RUNTIME_DIR/tectonic" "$RUNTIME_DIR/texbundle"
 else
-    warn "no runtime/ directory; app bundle will not include the TeX runtime (PDF compilation unavailable)"
+    warn "no runtime/ directory; app bundle will not include the bundled fonts (PDF export unavailable)"
 fi
 
 # 生成 .icns（sips + iconutil 为 macOS 自带）；不可用则跳过图标。
@@ -186,7 +177,6 @@ cp "$STAGE/gongwen-assistant" "$MACOS_DIR/gongwen-assistant"
 chmod +x "$MACOS_DIR/gongwen-assistant"
 if [ -d "$STAGE/runtime" ]; then
     cp -a "$STAGE/runtime" "$MACOS_DIR/runtime"
-    chmod +x "$MACOS_DIR/runtime/tectonic/tectonic" 2>/dev/null || true
 fi
 for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
     [ -f "$STAGE/$doc" ] && cp "$STAGE/$doc" "$RESOURCES_DIR/"
@@ -237,10 +227,10 @@ cat >> "$APP_DIR/Contents/Info.plist" <<'EOF'
 EOF
 
 echo "App bundle created: $APP_DIR"
-if [ -f "$MACOS_DIR/runtime/tectonic/tectonic" ]; then
-    echo "TeX runtime included: runtime/tectonic/tectonic"
+if [ -f "$MACOS_DIR/runtime/fonts/FangSong.ttf" ]; then
+    echo "Runtime fonts included: runtime/fonts"
 else
-    echo "TeX runtime NOT included: app starts for preview, but PDF export needs a runtime"
+    echo "Runtime fonts NOT included: app starts for preview, but PDF export needs a runtime"
 fi
 
 if [ "$BUILD_DMG" -eq 1 ]; then

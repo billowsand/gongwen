@@ -1,6 +1,7 @@
 # vendor/mdx
 
-公文助手的研究报告文档类型，TeX 转换与排版规范全部由 mdx 的 research 模式提供。
+公文助手的研究报告文档类型由 mdx 提供：解析与区段规则、封面版式、Word 转换，以及给
+公文助手 Typst 模板的排版数据（`typst_research`）。
 这里是 mdx 源码**随本仓库分发的一份副本**，构建时以 `path` 依赖的方式接入
 （见根 `Cargo.toml`）。
 
@@ -28,8 +29,11 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 - 删掉两个可执行目标（`src/main.rs` 的 `mdx` 命令行、`src/bin/mdx-gui.rs`）
   及其专属依赖 `clap`、`eframe`、`rfd`。公文助手只用库入口 `mdx::convert`，
   砍掉 clap 一家五个 crate 编译也快一些。
-- `resources/` 只保留 `.tex` 与 `.cls`，删掉上游仓库里混进去的编译产物
-  （`.aux`、`.log`、`.pdf`、`.synctex.gz` 等）。
+- 删掉全部 TeX 输出：`tex_official`、`tex_research`、`tex_research_emitter`、
+  `tex_compile`、`common/table_to_longtblr` 与整个 `resources/`（`md2tex.cls`、
+  `official.cls`、模板、Tectonic 预热文件）；`OutputFormat` 只剩 `Docx`，
+  `ConvertRequest` 去掉 `template` / `compile_pdf`。公文助手的 PDF 全部由 Typst 排版，
+  研究报告的排版数据见 `typst_research`。
 - 不保留上游的 `tests/`、`docs/`、`examples/`、`font/`、`scripts/`。
 
 ### 待同步回上游的改动
@@ -58,11 +62,9 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 
 研究报告的 Typst 排版数据同样先在这里落地：
 
-- 新增 `src/typst_research.rs`（`lib.rs` 导出 `typst_research`）：与 `tex_research_emitter`
-  同一套解析与区段规则，产出可序列化的排版数据（封面、区段、算好的编号），交给公文助手的
-  Typst 模板；`Cargo.toml` 为此加了 `serde`；
-- `tex_research/mod.rs` 导出报告题名的取法（`report_title` / `remove_report_title`），
-  两条路径同一口径。
+- 新增 `src/typst_research.rs`（`lib.rs` 导出 `typst_research`）：沿用原 TeX 输出的解析
+  与区段规则，产出可序列化的排版数据（封面、区段、算好的编号），交给公文助手的 Typst
+  模板；报告题名的取法从原 `tex_research/merger.rs` 挪进来；`Cargo.toml` 为此加了 `serde`。
 
 研究报告的目录标记同样先在这里落地：
 
@@ -147,13 +149,14 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 
 ## 同步上游
 
-整目录替换，不要逐文件挑拣：
+整目录替换，不要逐文件挑拣；TeX 输出部分随后删掉（见上文「与上游的差异」），
+`typst_research.rs` 与 `lib.rs` 的改动先合进上游再同步：
 
 ```bash
-rm -rf vendor/mdx/src vendor/mdx/resources
-cp -r /path/to/mdx/src /path/to/mdx/resources vendor/mdx/
+rm -rf vendor/mdx/src
+cp -r /path/to/mdx/src vendor/mdx/
 rm -rf vendor/mdx/src/bin vendor/mdx/src/main.rs vendor/mdx/src/cli.rs
-find vendor/mdx/resources -type f ! -name "*.tex" ! -name "*.cls" -delete
+rm -rf vendor/mdx/src/tex_* vendor/mdx/src/common/table_to_longtblr.rs
 ```
 
 `vendor/mdx/Cargo.toml` 是本仓库维护的（上面那些减法），同步时**不要**覆盖它；
@@ -163,7 +166,6 @@ find vendor/mdx/resources -type f ! -name "*.tex" ! -name "*.cls" -delete
 cargo test --locked --all-targets
 ```
 
-`src/export/research.rs` 里有一条契约测试
-（`released_class_loads_research_fonts_from_the_injected_path`），会检查
-`md2tex.cls` 仍然支持 `\MdxFontPath`、字体文件名与 `RESEARCH_FONT_FILES` 对得上、
-`fontset` 仍被钉死。上游要是动了这几处，这条测试会先红。
+`src/export/research.rs` 与 `src/export/typst/research.rs` 里的测试会真跑一遍
+`typst_research::build`，核对锚点、引用、表题、目录位置与题名口径；上游改了这些写法，
+这几条测试会先红。

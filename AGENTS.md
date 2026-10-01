@@ -6,18 +6,16 @@
 ## 技术栈
 
 - Rust edition 2024（stable），GUI 用 `eframe` / `egui` 0.35，纯 CPU 渲染 PDF 用 `hayro`。
-- 公文 PDF 双引擎（设置页「PDF 引擎」切换，默认 Typst）：**Typst** 进程内排版
-  （`typst` 0.15.1，模板 `assets/typst/gongwen.typ`、数据由 `src/export/typst/` 生成、
-  World 在 `src/typst_engine.rs`；`typst-layout` vendor 在 `vendor/typst-layout/` 打了
-  标点收缩补丁）或 **Tectonic**（下面的 TeX 链路）。研究报告固定 Tectonic。两套版式逐项
-  对照，改版式前先读 `docs/typst-engine.md`，改完跑那里的对照测试与
-  `scripts/typst-compare.py`。
-- 导出链：Markdown → DOCX（`docx-rs`）/ TeX → PDF（本机 Tectonic / XeLaTeX）、
-  XLSX（`rust_xlsxwriter`）、稿件库与词表用 `rusqlite`。研究报告支持 LaTeX 数学
-  公式（`$...$` / `$$...$$`）：导出走 tectonic + amsmath/mathtools（需要 runtime
-  v0.6.0 起的 texbundle），预览用 `latex-rust` 进程内渲染（vendor 在
-  `vendor/latex-rust/`，加了中文字形回退：STIX Two Math 缺的字走随包仿宋，
-  与导出字形不一致属预期）。
+- PDF 全部由 **Typst** 进程内排版（`typst` 0.15.1，World 在 `src/typst_engine.rs`；
+  `typst-layout` vendor 在 `vendor/typst-layout/` 打了标点收缩补丁）。公文模板
+  `assets/typst/gongwen.typ`、数据由 `src/export/typst/` 生成；研究报告模板
+  `assets/typst/research.typ`、数据由 mdx 的 `typst_research` 整理（`src/export/typst/research.rs`）。
+  原 Tectonic / TeX 链路已移除。改版式前先读 `docs/typst-engine.md`，改完出样张
+  （`cargo test --locked typst_samples -- --ignored`）目视检查。
+- 导出链：Markdown → DOCX（`docx-rs`；研究报告的 Word 由 vendor 的 mdx 生成）/ PDF（Typst）、
+  XLSX（`rust_xlsxwriter`）、稿件库与词表用 `rusqlite`。研究报告支持 LaTeX 写法的数学
+  公式（`$...$` / `$$...$$`）：预览与导出都用 `latex-rust` 进程内排版（vendor 在
+  `vendor/latex-rust/`，加了中文字形回退与数组行距 / 数学轴居中补丁；导出出 SVG 嵌进 PDF）。
 - 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`。
 - 输入法：应用内拼音输入法，引擎、词库与整句模型都在本进程里，不用系统输入法、
   也没有独立进程。代码在 `src/ime/`，内核 vendor 自字在输入法（GPL-3.0-or-later），
@@ -52,7 +50,7 @@ cargo build --release --locked
 ## 代码组织
 
 单文件超过约 2000 行就该按功能域拆成模块文件夹。已拆过的：`src/app/`、`src/draft_page/`、
-`src/preview/`、`src/lexicon/`、`src/export/{docx,latex}/`、`src/ime/`。拆分流程见 skill
+`src/preview/`、`src/lexicon/`、`src/export/{docx,typst}/`、`src/ime/`。拆分流程见 skill
 `split-rust-module`（纯代码移动，每拆一个文件单独提交一次，零警告验证）。
 
 `skills/gongwen-markdown/` 是给外部 AI 工具用的技能包（Agent Skill），讲的是起草页
@@ -72,11 +70,12 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 - **离线稿件身份识别与版本合并**（加密 ZIP 多机往返同步）：方案、实施进度、
   出入与已知坑见 `docs/offline-sync-redesign.md`（单文件）。核心是稿件 UUID +
   不可变版本图（UUID、双父、SHA-256），旧 ZIP 仍可读；改同步/导入逻辑前先读它。
-- **Typst 排版引擎**（公文 PDF 双引擎，分支 `feat/typst-engine`）：六个文种、附件、横页、
-  联合发文、份号、花脸稿、孤行探针都已接入并与 TeX 逐行对照，**待真机验收**（打印、送批
-  材料合并、本机字体）。设计、对照结果、已知差异与坑见 `docs/typst-engine.md`（单文件）。
+- **Typst 排版引擎**（分支 `feat/typst-engine`，已替代 Tectonic）：六个文种与研究报告、附件、
+  横页、联合发文、份号、花脸稿、孤行探针都已接入，移除 TeX 前逐行对照过，**待真机验收**
+  （打印、送批材料合并、本机字体、研究报告公式与文献）。设计、对照结论、已知差异与坑见
+  `docs/typst-engine.md`（单文件）。
 - **送批材料**（呈批件挂随行件、按提交版合并成一个 PDF、归档钉版、随同步 ZIP 携带）：
-  五期已全部实现，**待真机验收**（TeX 编译→合并整条链、ZIP 往返）。方案、各期进度、
+  五期已全部实现，**待真机验收**（排版→合并整条链、ZIP 往返）。方案、各期进度、
   与方案的出入和已知坑见 `docs/send-package-design.md`（单文件）。版本与校验值复用离线
   同步的版本图，随行件按稿件 UUID 引用；改导出、归档或同步导入前先读它。
 

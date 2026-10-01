@@ -31,10 +31,10 @@
         <mxCell id="fm" value="数学公式&lt;br&gt;行内：单个 $ 包起来&lt;br&gt;独立：两个 $ 单独成行&lt;br&gt;&lt;br&gt;公文文种不支持公式，&lt;br&gt;$ 始终是普通字符" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5EDDC;strokeColor=#C98A2B;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
           <mxGeometry x="630" y="272" width="270" height="160" as="geometry"/>
         </mxCell>
-        <mxCell id="n1" value="研究报告只出 TeX / PDF，不支持导出 Word" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+        <mxCell id="n1" value="研究报告出 PDF 与 Word，Word 走研究报告自己的转换器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7E4E0;strokeColor=#B23B2E;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
           <mxGeometry x="40" y="496" width="860" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="n2" value="预览字形是 STIX Two Math，导出用 TeX CM 字体——字形不同属正常，版式以导出为准" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
+        <mxCell id="n2" value="公式预览与 PDF 用同一个排版器（STIX Two Math），预览即所得" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F1EA;strokeColor=#D5CEC3;fontColor=#2A2927;fontFamily=Aa顺風顺水顺财神;fontSize=15;align=left;spacingLeft=12;spacingRight=10;" vertex="1" parent="1">
           <mxGeometry x="40" y="552" width="860" height="50" as="geometry"/>
         </mxCell>
       </root>

@@ -598,36 +598,33 @@ mod tests {
     }
 
     #[test]
-    fn toc_page_goes_through_plain_document_tex_with_a_real_table() {
+    fn toc_page_goes_through_plain_document_with_a_real_table() {
         let plan = plan(vec![
             entry("关于申请专项经费的请示", TemplateKind::WhitePaper, Some(2)),
             entry("关于商请支持的函", TemplateKind::OfficialLetter, Some(1)),
         ]);
         let owner = &plan.entries[0].revision.as_ref().unwrap().snapshot;
-        let dir = std::env::temp_dir().join(format!("gw_toc_tex_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let tex_path = dir.join("toc.tex");
-        crate::export::write_tex_for_kind(
-            &tex_path,
+        let Ok(set) = crate::typst_engine::font_set(&Default::default()) else {
+            return;
+        };
+        let data = crate::export::typst::document_json(
             &toc_snapshot(owner),
             &toc_markdown(&plan, &[3, 2]),
             &crate::units::UnitDisplay::new(&[]),
             &Default::default(),
-            &Default::default(),
             &crate::visual_diff::ElementMarks::default(),
+            set.families,
         )
         .unwrap();
-        let tex = std::fs::read_to_string(&tex_path).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(tex.contains("plaindocument"), "目录页应走普通公文版式");
-        assert!(tex.contains(TOC_TITLE));
-        // 管道表被解析成了表格，而不是原样的竖线文字。
         assert!(
-            tex.contains("tabular") || tex.contains("longtable") || tex.contains("tblr"),
-            "{tex}"
+            data.contains(r#""kind":"plain""#),
+            "目录页应走普通公文版式：{data}"
         );
-        assert!(!tex.contains("| 序号 |"), "{tex}");
-        assert!(tex.contains("关于商请支持的函"));
+        assert!(data.contains(TOC_TITLE));
+        // 管道表被解析成了表格，而不是原样的竖线文字。
+        assert!(data.contains(r#""k":"table""#), "{data}");
+        assert!(!data.contains("| 序号 |"), "{data}");
+        assert!(data.contains("关于商请支持的函"));
     }
 
     #[test]

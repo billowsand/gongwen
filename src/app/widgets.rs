@@ -7,12 +7,11 @@ use crate::app::{CONTENT_WIDTH, FORM_CONTROL_HEIGHT, LABEL_WIDTH, MANUAL_BACK_WI
 use crate::export;
 use crate::manuscript;
 use crate::models::{
-    DraftInput, ExportSelection, FontConfig, ManuscriptStatus, NumberingConfig, PdfEngine,
-    ReviewNote, SecurityLevel, VocabularyCategory, VocabularyEntry, join_units, split_units,
+    DraftInput, ExportSelection, FontConfig, ManuscriptStatus, NumberingConfig, ReviewNote,
+    SecurityLevel, VocabularyCategory, VocabularyEntry, join_units, split_units,
 };
 use crate::orphan_probe;
 use crate::system_fonts;
-use crate::texcompile;
 use crate::theme;
 use crate::units::UnitDisplay;
 use eframe::egui;
@@ -990,16 +989,15 @@ pub(crate) struct ExportOutcome {
     pub(crate) warnings: Vec<String>,
     pub(crate) proof_warnings: Vec<ReviewNote>,
     /// 这次是否真的排完版量到了数据。为空的 `proof_warnings` 有两种含义——
-    /// “量过，没有孤行”和“压根没编译”，前者该压住粗估提示，后者不该。
+    /// “量过，没有孤行”和“压根没排版”，前者该压住粗估提示，后者不该。
     pub(crate) proof_measured: bool,
-    /// 导出本身成功但内置 Tectonic 编译 PDF 失败时填这个；走审校抽屉顶部的红色框，
+    /// 导出本身成功但 PDF 排版失败时填这个；走审校抽屉顶部的红色框，
     /// 不与"缺少一级标题"这类样式提示混在一起。
     pub(crate) compile_error: Option<String>,
 }
 
-/// 导出全部勾选格式；生成 TeX 后自动检测本机编译器，有可用引擎时把 PDF 一并加入结果。
-/// 编译失败不阻断导出，PDF 缺失会单独记到 `compile_error` 上走红色提示框，
-/// 已写好的 md/docx/tex 照常保留。
+/// 导出全部勾选格式。PDF 由 Typst 在进程内排出；排版失败不阻断导出，记到
+/// `compile_error` 上走红色提示框，已写好的 md/docx 照常保留。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn export_and_compile(
     output_dir: &Path,
@@ -1009,42 +1007,25 @@ pub(crate) fn export_and_compile(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    engine: PdfEngine,
     mut progress: impl FnMut(&str),
 ) -> anyhow::Result<ExportOutcome> {
-    let typst = selection.tex && export::uses_typst(input, engine);
-    progress(if typst {
-        "正在生成导出文件，用 Typst 排版 PDF…"
+    progress(if selection.pdf {
+        "正在生成导出文件，排版 PDF…"
     } else {
         "正在生成导出文件…"
     });
     let display = UnitDisplay::new(vocabulary);
-    // 字体文件在排版之前就要落实：TeX 里写死了按哪个文件加载，等到编译时
-    // 才发现文件不在就只能报错，而这里还来得及退回内置字体。
+    // 本机字体在排版之前就要落实：文件不在了还来得及退回内置字体。
     let (fonts, mut warnings) = system_fonts::resolve(fonts);
     let mut proof_warnings: Vec<ReviewNote> = Vec::new();
     let mut proof_measured = false;
-    // 孤行只有排完版才知道：Tectonic 读类文件写出的实测坐标，Typst 读模板留下的
-    // 段首段尾位置，两边报告同一种格式。
-    let mut take_proof = |report: &str| {
-        proof_measured = true;
-        proof_warnings.extend(orphan_probe::find_orphans(report).iter().map(|metric| {
-            let message = orphan_probe::format_warning(metric, markdown);
-            // 带上这一段的字节范围，审校面板里点一下就能选中它。
-            match export::block_span_for_line(markdown, metric.source_line) {
-                Some(span) => ReviewNote::located(message, span),
-                None => ReviewNote::from(message),
-            }
-        }));
-    };
     let mut compile_error: Option<String> = None;
-    let artifacts = match export::export_all_with_engine(
-        output_dir, input, markdown, selection, &display, &fonts, numbering, engine,
+    let artifacts = match export::export_artifacts(
+        output_dir, input, markdown, selection, &display, &fonts, numbering,
     ) {
         Ok(artifacts) => artifacts,
-        // Typst 排版失败时 md / docx 已经写好了，不让整次导出作废：与 Tectonic
-        // 编译失败一样走红色提示框。
-        Err(error) if typst => {
+        // PDF 排版失败时 md / docx 已经写好了，不让整次导出作废，走红色提示框。
+        Err(error) if selection.pdf => {
             compile_error = Some(format!("{error:#}"));
             export::ExportArtifacts {
                 files: Vec::new(),
@@ -1053,36 +1034,22 @@ pub(crate) fn export_and_compile(
         }
         Err(error) => return Err(error),
     };
-    let mut files = artifacts.files;
+    let files = artifacts.files;
     if let Some(outcome) = artifacts.typst {
+        // 孤行只有排完版才知道：模板在段首段尾留下位置，拼成探针报告。
         if let Some(report) = &outcome.proof {
-            take_proof(report);
+            proof_measured = true;
+            proof_warnings.extend(orphan_probe::find_orphans(report).iter().map(|metric| {
+                let message = orphan_probe::format_warning(metric, markdown);
+                // 带上这一段的字节范围，审校面板里点一下就能选中它。
+                match export::block_span_for_line(markdown, metric.source_line) {
+                    Some(span) => ReviewNote::located(message, span),
+                    None => ReviewNote::from(message),
+                }
+            }));
         }
         warnings.extend(outcome.warnings);
         progress("PDF 排版完成，正在整理导出结果…");
-    }
-    if let Some(tex) = files
-        .iter()
-        .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
-    {
-        progress("正在使用内置 Tectonic 离线编译 PDF…");
-        let compile = if input.kind.is_research() {
-            texcompile::compile_research_pdf(tex)
-        } else {
-            texcompile::compile_pdf_with_proof(tex, &fonts)
-        };
-        match compile {
-            Ok(outcome) => {
-                if let Some(pdf) = outcome.pdf {
-                    files.push(pdf);
-                    progress("PDF 编译完成，正在整理导出结果…");
-                }
-                if let Some(report) = outcome.proof {
-                    take_proof(&report);
-                }
-            }
-            Err(error) => compile_error = Some(format!("{error:#}")),
-        }
     }
     Ok(ExportOutcome {
         files,

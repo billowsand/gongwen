@@ -1,20 +1,19 @@
-//! 研究报告 Typst / TeX 双引擎对照：同一份稿子分别走 mdx + 内置 Tectonic 与 Typst，
-//! PDF 落到 `tmp/typst-compare/research-<用例>/`，再由 `scripts/typst-compare.py`
-//! 逐行比对基线位置。依赖本机 `runtime/`，默认忽略：
+//! 研究报告 Typst 样张：封面、目录、部分、文框、长表、公式、文献各排一遍，PDF 与模板
+//! 数据落到 `tmp/typst-samples/research-<用例>/`，改模板后目视检查用。依赖本机随包字体，
+//! 默认忽略：
 //!
 //! ```text
-//! cargo test --locked typst_tex_compare_research -- --ignored --nocapture
-//! python scripts/typst-compare.py research-full research-project ...
+//! cargo test --locked typst_samples_research -- --ignored --nocapture
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use crate::models::{DraftInput, NumberingConfig, TemplateKind};
 
-fn compare_dir() -> PathBuf {
+fn sample_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tmp")
-        .join("typst-compare")
+        .join("typst-samples")
 }
 
 /// 插图：一张横图、一张竖图，写进 `base/images/`。
@@ -351,30 +350,18 @@ fn base_input() -> DraftInput {
     input
 }
 
-fn run(only_typst: bool) {
+fn run() {
     if crate::portable_runtime::find_font_dir().is_none() {
         return;
     }
     let numbering = NumberingConfig::default();
-    let base = compare_dir().join("research-images");
+    let base = sample_dir().join("research-images");
     write_images(&base);
     for case in cases() {
-        let dir = compare_dir().join(case.name);
+        let dir = sample_dir().join(case.name);
         std::fs::create_dir_all(&dir).unwrap();
         let mut input = base_input();
         (case.tweak)(&mut input);
-        if !only_typst {
-            let tex = dir.join("tex.tex");
-            crate::export::research::write_tex_with_base(
-                &tex,
-                &input,
-                case.markdown,
-                &numbering,
-                &base,
-            )
-            .unwrap();
-            crate::texcompile::compile_research_pdf(&tex).unwrap();
-        }
         let data =
             super::research::document_json(&input, case.markdown, &numbering, &base).unwrap();
         std::fs::write(dir.join("doc.json"), data).unwrap();
@@ -394,12 +381,6 @@ fn run(only_typst: bool) {
 
 #[test]
 #[ignore = "依赖本机 runtime，手动运行"]
-fn typst_tex_compare_research() {
-    run(false);
-}
-
-#[test]
-#[ignore = "依赖本机 runtime，手动运行"]
-fn typst_tex_compare_research_typst_only() {
-    run(true);
+fn typst_samples_research() {
+    run();
 }

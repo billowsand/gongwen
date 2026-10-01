@@ -32,9 +32,7 @@ mod tokenize;
 pub(crate) use compare::diff_documents;
 pub(crate) use elements::{ElementMarks, element_marks};
 pub(crate) use model::DocumentModel;
-#[cfg(test)]
-pub(crate) use postprocess::REDLINE_PREAMBLE_TEX;
-pub(crate) use postprocess::{redline_research_docx, redline_research_tex_files};
+pub(crate) use postprocess::redline_research_docx;
 #[cfg(test)]
 pub(crate) use serialize::to_marked_markdown;
 pub(crate) use serialize::{MarkedSpan, SourceSide, to_marked_markdown_with_spans};

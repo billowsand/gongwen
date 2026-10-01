@@ -1,7 +1,6 @@
 //! 与 mdx official/research 共用思路的智能表格列宽分析。
 
-use super::latex::redline_macro;
-use super::{ColumnAlign, TableSpan, inline_segments, redline_chunks, table_span_at};
+use super::{ColumnAlign, TableSpan, inline_segments, table_span_at};
 use regex::Regex;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -608,192 +607,8 @@ pub(crate) fn resolve_cell_alignment(
     }
 }
 
-pub(super) fn to_longtblr(
-    rows: &[Vec<String>],
-    aligns: &[ColumnAlign],
-    spans: &[TableSpan],
-    numbered: bool,
-) -> String {
-    let columns = analyze_table(rows, aligns, spans);
-    if rows.is_empty() || columns.is_empty() {
-        return String::new();
-    }
-    let name_column = name_column(rows);
-    let colspec = columns
-        .iter()
-        .map(|column| {
-            let align = match column.alignment {
-                ColumnAlignment::Left => 'l',
-                ColumnAlignment::Center => 'c',
-                ColumnAlignment::Right => 'r',
-            };
-            // 竖向一律居中（`m`），跟 DOCX 的 vertical_align 与预览的画法对齐。
-            // tabularray 的默认值不写在规格里，别赖它——纵向合并一出来就看得见。
-            match column.width {
-                ColumnWidth::FixedEm(em) => format!("Q[{align},m,wd={em:.0}em]"),
-                ColumnWidth::Relative(1.0) => format!("X[{align},m]"),
-                ColumnWidth::Relative(ratio) => format!("X[{ratio:.1},{align},m]"),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let column_alignments = columns
-        .iter()
-        .map(|column| column.alignment)
-        .collect::<Vec<_>>();
-    let column_count = columns.len();
-    // 有 X 列时表格撑满版心，整行合并格才能按 \linewidth 算宽；全是定宽列的窄表
-    // 套了反而会把盒子撑出表外。
-    let full_width = columns
-        .iter()
-        .any(|column| matches!(column.width, ColumnWidth::Relative(_)));
-
-    // 居中格与主标题同一套排布，需要格宽：与 Word 用同一份智能列宽推算。
-    let (grid, _) = to_docx_grid(
-        rows,
-        aligns,
-        spans,
-        super::docx::TABLE_CONTENT_WIDTH_TWIPS,
-        super::docx::TABLE_SIZE * 10,
-    );
-
-    let mut output = format!(
-        "\\begin{{longtblr}}[\n  label = none,\n  entry = none,\n]{{\n  colspec = {{{colspec}}},\n  rowhead = 1,\n  hlines,\n  vlines,\n  row{{1}} = {{c, font=\\heiti\\enheiti}},\n}}\n"
-    );
-    for (row_index, row) in rows.iter().enumerate() {
-        let cells = row
-            .iter()
-            .enumerate()
-            .map(|(column_index, cell)| {
-                let span = table_span_at(spans, row_index, column_index);
-                if span.is_some_and(|span| !span.is_anchor(row_index, column_index)) {
-                    return String::new();
-                }
-                let segments = inline_segments(cell);
-                // 姓名列要按字数算宽度，哨兵会让 2 字姓名被当成 4 字。这里先滤掉。
-                let cleaned = segments
-                    .iter()
-                    .map(|segment| segment.text.as_str())
-                    .collect::<String>()
-                    .chars()
-                    .filter(|ch| !crate::export::is_redline_sentinel(*ch))
-                    .collect::<String>();
-                let is_name = name_column == Some(column_index) && row_index > 0;
-                let escaped = if is_name {
-                    let name = latex_name(&cleaned);
-                    if segments.iter().any(|segment| segment.bold) {
-                        format!("\\GwBold{{{name}}}")
-                    } else {
-                        name
-                    }
-                } else if row_index == 0 {
-                    tex_escape(&cleaned)
-                } else {
-                    data_cell_tex(cell)
-                };
-                let mut content = if row_index == 0 {
-                    format!("\\heiti\\enheiti {escaped}")
-                } else {
-                    escaped
-                };
-                // 居中格：多出 1–2 字横向压缩，再多按分词均衡换行（花括号让 `\\` 在格内生效）。
-                let cell_align = resolve_cell_alignment(
-                    rows,
-                    spans,
-                    &column_alignments,
-                    numbered,
-                    row_index,
-                    column_index,
-                );
-                let column_span = span.map_or(1, |span| span.column_span);
-                let width = grid
-                    .iter()
-                    .skip(column_index)
-                    .take(column_span)
-                    .sum::<usize>();
-                if cell_align == ColumnAlignment::Center
-                    && let Some(plan) = centered_cell_plan(cell, is_name, width)
-                {
-                    let font = if row_index == 0 { "\\heiti\\enheiti " } else { "" };
-                    match plan {
-                        (super::title::TitlePlan::SingleLine, _) => {}
-                        (super::title::TitlePlan::Compressed, scale) => {
-                            content = format!(
-                                "\\scalebox{{{}}}[1]{{{content}}}",
-                                scale as f64 / 100.0
-                            );
-                        }
-                        (super::title::TitlePlan::Wrapped(lines), _) => {
-                            let pieces = crate::export::redline_slice_lines(cell, &lines)
-                                .iter()
-                                .map(|piece| {
-                                    if row_index == 0 {
-                                        tex_escape(&plain_cell_text(piece))
-                                    } else {
-                                        data_cell_tex(piece)
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\\\\");
-                            content = format!("{{{font}{pieces}}}");
-                        }
-                    }
-                }
-                if let Some(span) = span {
-                    let align = match resolve_cell_alignment(
-                        rows,
-                        spans,
-                        &column_alignments,
-                        numbered,
-                        row_index,
-                        column_index,
-                    ) {
-                        ColumnAlignment::Left => 'l',
-                        ColumnAlignment::Center => 'c',
-                        ColumnAlignment::Right => 'r',
-                    };
-                    let mut options = Vec::new();
-                    if span.row_span > 1 {
-                        options.push(format!("r={}", span.row_span));
-                    }
-                    if span.column_span > 1 {
-                        options.push(format!("c={}", span.column_span));
-                    }
-                    // 整行合并格在 tabularray 2022A（内置 bundle 钉死的版本）下拿不到
-                    // 最终列宽：文字框被算成第一遍的窄宽度，短标题会中途折行。套一个
-                    // 按版心算好宽度的 \parbox，让内容按整行宽度排；2023A 起 tabularray
-                    // 自己就对，这个盒子是无害的冗余。盒子占满整格，`\SetCell` 的
-                    // 对齐管不到盒内文字，得在盒里再写一遍。
-                    let content = if full_width && span.column_span == column_count {
-                        let inner_align = match align {
-                            'l' => "\\raggedright",
-                            'r' => "\\raggedleft",
-                            _ => "\\centering",
-                        };
-                        format!(
-                            "\\parbox[c]{{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}}{{{inner_align} {content}}}"
-                        )
-                    } else {
-                        content
-                    };
-                    // 只写水平对齐；竖向居中由 colspec 里的 `m` 统一管，
-                    // 与 `\SetCell[c=2]{c}` 的官方写法一致。
-                    format!("\\SetCell[{}]{{{align}}} {content}", options.join(","))
-                } else {
-                    content
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" & ");
-        output.push_str(&cells);
-        output.push_str(" \\\\\n");
-    }
-    output.push_str("\\end{longtblr}");
-    output
-}
-
-/// Typst 引擎的表格数据：与 [`to_longtblr`] 同一套判定（智能列宽、单元格对齐、
-/// 姓名列、居中格压缩 / 换行），只是产出给模板的结构而不是 TeX 源码。
+/// Typst 模板的表格数据：智能列宽、单元格对齐、姓名列、居中格压缩 / 换行都在
+/// 这里定好，模板只负责排。
 /// 列宽保留 tabularray 的语义（`X` 比例按内容宽分、`Q` 定宽），由模板换算。
 pub(super) fn to_typst_table(
     rows: &[Vec<String>],
@@ -928,7 +743,7 @@ pub(crate) fn name_column(rows: &[Vec<String>]) -> Option<usize> {
 
 /// 居中格的排布，与主标题同一套：多出 1–2 字横向压缩，再多按分词均衡换行。
 /// 姓名格、带加粗标记的格、空格不处理（`None`）。`width_twips` 是这一格
-/// （含横向合并的各列）在智能列宽里的宽度。TeX 与预览共用这条判定。
+/// （含横向合并的各列）在智能列宽里的宽度。PDF 与预览共用这条判定。
 pub(crate) fn centered_cell_plan(
     cell: &str,
     is_name: bool,
@@ -945,62 +760,6 @@ pub(crate) fn centered_cell_plan(
     ))
 }
 
-/// 数据行单元格的 TeX：先按花脸稿哨兵切块，块内再走加粗逻辑；
-/// 表格里改了一个数字、一个时限，恰恰是最需要让领导一眼看见的地方。
-fn data_cell_tex(cell: &str) -> String {
-    // 加粗包在标注宏外面（见 `redline_macro`）。
-    redline_chunks(cell)
-        .into_iter()
-        .map(|chunk| {
-            let segments = inline_segments(&chunk.text);
-            let count = segments.len();
-            segments
-                .iter()
-                .enumerate()
-                .map(|(index, segment)| {
-                    let marked =
-                        redline_macro(chunk.kind, index, count, &tex_escape(&segment.text));
-                    if segment.bold {
-                        format!("\\GwBold{{{marked}}}")
-                    } else {
-                        marked
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect::<String>()
-}
-
-/// 规格 §3.2/§6 姓名宽度：2 字姓名中间加 1em，4 字姓名压缩到 3 字宽，保证视觉对齐。
-fn latex_name(value: &str) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    match chars.len() {
-        2 => format!("{}\\hspace{{1em}}{}", chars[0], chars[1]),
-        4 => format!("\\resizebox{{3em}}{{0.9em}}{{{}}}", tex_escape(value)),
-        _ => tex_escape(value),
-    }
-}
-
-fn tex_escape(value: &str) -> String {
-    let mut output = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\\' => output.push_str("\\textbackslash{}"),
-            '{' => output.push_str("\\{"),
-            '}' => output.push_str("\\}"),
-            '#' => output.push_str("\\#"),
-            '$' => output.push_str("\\$"),
-            '%' => output.push_str("\\%"),
-            '&' => output.push_str("\\&"),
-            '_' => output.push_str("\\_"),
-            '^' => output.push_str("\\textasciicircum{}"),
-            '~' => output.push_str("\\textasciitilde{}"),
-            _ => output.push(ch),
-        }
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1011,6 +770,19 @@ mod tests {
             vec!["1".into(), "短项".into(), "这是一段很长的说明文字。".into()],
             vec!["2".into(), "另一项".into(), "另一段较长的说明文字。".into()],
         ]
+    }
+
+    fn typst(
+        rows: &[Vec<String>],
+        aligns: &[ColumnAlign],
+        spans: &[TableSpan],
+        numbered: bool,
+    ) -> crate::export::typst::data::Table {
+        to_typst_table(rows, aligns, spans, numbered, "t".into()).expect("应排成表格")
+    }
+
+    fn cell_json(table: &crate::export::typst::data::Table) -> String {
+        serde_json::to_string(&table.rows).unwrap()
     }
 
     #[test]
@@ -1036,30 +808,28 @@ mod tests {
         // 没写冒号的第二列不受影响，仍按内容判定。
         assert_eq!(alignments[1], ColumnAlignment::Center);
 
-        // TeX 的 colspec 跟着换成 l / r。
-        let tex = to_longtblr(&rows(), &aligns, &[], false);
-        let colspec = tex
-            .lines()
-            .find(|line| line.contains("colspec"))
-            .expect("有 colspec");
-        assert!(colspec.contains("[l,"), "首列应左对齐：{colspec}");
-        assert!(colspec.contains(",r,m]"), "末列应右对齐：{colspec}");
+        // 排版数据的列对齐跟着换成 l / r。
+        let table = typst(&rows(), &aligns, &[], false);
+        assert_eq!(table.cols[0].align, "l", "首列应左对齐");
+        assert_eq!(table.cols[2].align, "r", "末列应右对齐");
     }
 
     #[test]
-    fn tex_uses_longtblr_with_matching_smart_columns() {
-        let tex = to_longtblr(&rows(), &[], &[], false);
-        assert!(tex.contains("\\begin{longtblr}"));
-        assert!(tex.contains("label = none"));
-        assert!(tex.contains("entry = none"));
-        assert!(!tex.contains("caption ="));
-        assert!(tex.contains("Q[c,m,wd=2em]"));
-        assert!(tex.contains("X["));
-        assert!(tex.contains("rowhead = 1"));
+    fn typst_table_uses_smart_columns() {
+        let table = typst(&rows(), &[], &[], false);
+        assert_eq!(
+            (table.cols[0].kind, table.cols[0].v),
+            ("em", 2.0),
+            "窄序号列定宽 2 字"
+        );
+        assert!(
+            table.cols.iter().any(|c| c.kind == "fr"),
+            "其余列按比例分宽"
+        );
     }
 
     #[test]
-    fn tex_emits_horizontal_and_vertical_spans() {
+    fn typst_table_carries_horizontal_and_vertical_spans() {
         let table = vec![
             vec!["类别".into(), "项目".into(), "说明".into()],
             vec!["横向".into(), String::new(), "备注".into()],
@@ -1080,10 +850,11 @@ mod tests {
                 column_span: 1,
             },
         ];
-        let tex = to_longtblr(&table, &[], &spans, false);
-        assert!(tex.contains("\\SetCell[c=2]{c} 横向"), "{tex}");
-        assert!(tex.contains("\\SetCell[r=2]{c} 纵向"), "{tex}");
-        assert!(!tex.contains("横向 & 备注"), "被覆盖格不得重复内容：{tex}");
+        let table = typst(&table, &[], &spans, false);
+        assert_eq!(table.rows[1].len(), 2, "被覆盖格不出现");
+        assert_eq!(table.rows[1][0].colspan, 2);
+        assert_eq!(table.rows[2][0].rowspan, 2);
+        assert_eq!(table.rows[3].len(), 2, "纵向合并的续行少一格");
     }
 
     #[test]
@@ -1147,14 +918,15 @@ mod tests {
     }
 
     #[test]
-    fn tex_table_preserves_markdown_bold_and_normalizes_quotes() {
+    fn table_cells_preserve_markdown_bold_and_normalize_quotes() {
         let table = vec![
             vec!["项目".into(), "说明".into()],
             vec!["甲".into(), "\"**重点**\"内容".into()],
         ];
-        let tex = to_longtblr(&table, &[], &[], false);
-        assert!(tex.contains("“\\GwBold{重点}”内容"), "{tex}");
-        assert!(!tex.contains("**"));
+        let json = cell_json(&typst(&table, &[], &[], false));
+        assert!(json.contains(r#""t":"重点","b":true"#), "{json}");
+        assert!(json.contains("“") && json.contains("”"), "{json}");
+        assert!(!json.contains("**"), "{json}");
     }
 
     #[test]
@@ -1165,13 +937,11 @@ mod tests {
             vec!["2".into(), "王小明".into()],
             vec!["3".into(), "欧阳翠花".into()],
         ];
-        let tex = to_longtblr(&table, &[], &[], false);
-        // 2 字姓名中间加 1em。
-        assert!(tex.contains("张\\hspace{1em}三"));
-        // 4 字姓名压缩到 3 字宽。
-        assert!(tex.contains("\\resizebox{3em}{0.9em}{欧阳翠花}"));
-        // 3 字姓名原样。
-        assert!(tex.contains("王小明"));
+        // 姓名格交给模板：2 字中间加 1em、4 字压到 3 字宽、3 字原样。
+        let json = cell_json(&typst(&table, &[], &[], false));
+        for name in ["张三", "王小明", "欧阳翠花"] {
+            assert!(json.contains(&format!(r#""name":"{name}""#)), "{json}");
+        }
     }
 
     /// 合并格跨过的列本来就放得下内容时，不得把锚点列撑宽、把别的列挤窄。
@@ -1489,10 +1259,9 @@ mod tests {
         );
     }
 
-    /// TeX 那边同样按序号表的规矩给分组行写左对齐。整行合并格要套 `\parbox`
-    /// 撑到整行宽度（tabularray 2022A 的整行合并宽度是坏的）。
+    /// 序号表的分组行（整行合并）靠左；普通表格的整行合并居中。
     #[test]
-    fn tex_aligns_numbered_group_rows_to_the_left() {
+    fn numbered_group_rows_are_left_aligned_in_the_typst_table() {
         let table = vec![
             vec!["序号".into(), "标题".into(), "内容".into()],
             vec!["（一）大标题".into(), String::new(), String::new()],
@@ -1504,51 +1273,17 @@ mod tests {
             row_span: 1,
             column_span: 3,
         }];
-        let tex = to_longtblr(&table, &[], &spans, true);
-        assert!(
-            tex.contains("\\SetCell[c=3]{l} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{\\raggedright （一）大标题}"),
-            "{tex}"
-        );
-        let plain = to_longtblr(&table, &[], &spans, false);
-        assert!(
-            plain.contains("\\SetCell[c=3]{c} \\parbox[c]{\\dimexpr\\linewidth-\\leftsep-\\rightsep-2\\rulewidth\\relax}{\\centering （一）大标题}"),
-            "{plain}"
-        );
+        let numbered = typst(&table, &[], &spans, true);
+        assert_eq!(numbered.rows[1].len(), 1);
+        assert_eq!(numbered.rows[1][0].colspan, 3);
+        assert_eq!(numbered.rows[1][0].align, "l");
+        let plain = typst(&table, &[], &spans, false);
+        assert_eq!(plain.rows[1][0].align, "c");
     }
 
-    /// `\parbox` 只补整行合并：部分横向合并（`横向合并` 跨两列）不套，行为与从前一致。
+    /// 全是定宽数字列的窄表不撑满版心。
     #[test]
-    fn full_row_span_gets_a_parbox_but_a_partial_span_does_not() {
-        let table = vec![
-            vec!["甲".into(), "乙".into(), "丙".into()],
-            vec!["整行合并".into(), String::new(), String::new()],
-            vec!["部分合并".into(), String::new(), "末".into()],
-        ];
-        let spans = [
-            TableSpan {
-                row: 1,
-                column: 0,
-                row_span: 1,
-                column_span: 3,
-            },
-            TableSpan {
-                row: 2,
-                column: 0,
-                row_span: 1,
-                column_span: 2,
-            },
-        ];
-        let tex = to_longtblr(&table, &[], &spans, false);
-        assert!(tex.contains("\\SetCell[c=3]{c} \\parbox[c]"), "{tex}");
-        assert!(
-            tex.contains("\\SetCell[c=2]{c} 部分合并"),
-            "部分合并不该套 parbox：{tex}"
-        );
-    }
-
-    /// 全是定宽数字列的窄表不撑满版心，整行合并格不能按 \linewidth 套盒子。
-    #[test]
-    fn narrow_fixed_width_table_gets_no_parbox() {
+    fn narrow_numeric_table_keeps_fixed_width_columns() {
         let table = vec![
             vec!["1".into(), "2".into()],
             vec!["3".into(), "4".into()],
@@ -1560,31 +1295,28 @@ mod tests {
             row_span: 1,
             column_span: 2,
         }];
-        let tex = to_longtblr(&table, &[], &spans, false);
-        assert!(tex.contains("Q["), "应当是定宽列：{tex}");
-        assert!(!tex.contains("X["), "{tex}");
-        assert!(!tex.contains("\\parbox"), "{tex}");
+        let table = typst(&table, &[], &spans, false);
+        assert!(table.cols.iter().all(|c| c.kind == "em"), "应当全是定宽列");
     }
 
     #[test]
     fn centered_cell_compresses_small_overflow_and_wraps_large_at_word_boundaries() {
-        // 列宽由智能列宽定；这里直接验证单元格排布函数与 TeX 输出的对接。
-        let table = vec![
-            vec!["项目".to_string(), "说明".to_string()],
-            vec![
-                "国家发展和改革委员会办公厅综合司".to_string(),
-                "甲".to_string(),
-            ],
-        ];
-        let aligns = [ColumnAlign::Center, ColumnAlign::Center];
-        let tex = to_longtblr(&table, &aligns, &[], false);
+        let text = "国家发展和改革委员会办公厅综合司";
+        let em = super::super::docx::TABLE_SIZE * 10;
+        // 只差一个字：横向压缩。
+        let (plan, _) = centered_cell_plan(text, false, (text.chars().count() - 1) * em + 400)
+            .expect("居中格有排布方案");
         assert!(
-            tex.contains("\\scalebox") || tex.contains("\\\\"),
-            "过长的居中格应压缩或按词换行：{tex}"
+            matches!(plan, super::super::title::TitlePlan::Compressed),
+            "{plan:?}"
         );
-        assert!(
-            !tex.contains("国家发展和改革委员\\\\会"),
-            "词不能被拆开：{tex}"
-        );
+        // 差得多：按词边界换行，词不能被拆开。
+        let (plan, _) = centered_cell_plan(text, false, 9 * em).expect("居中格有排布方案");
+        let super::super::title::TitlePlan::Wrapped(lines) = plan else {
+            panic!("过长的居中格应按词换行：{plan:?}");
+        };
+        assert!(lines.len() > 1, "{lines:?}");
+        assert!(!lines[0].ends_with("委员"), "词不能被拆开：{lines:?}");
+        assert_eq!(lines.concat(), text);
     }
 }

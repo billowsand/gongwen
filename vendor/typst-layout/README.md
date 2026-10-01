@@ -38,5 +38,5 @@ src/inline/linebreak.rs Estimates::compute
 
 1. 把新版本的 `typst-layout` 源码替换进来（`src/`、`Cargo.toml`，保留本 README 与 `LICENSE`）；
 2. 按上面清单重新打补丁；
-3. 跑 `cargo test --locked typst_tex_compare -- --ignored` 与
-   `python scripts/typst-compare.py`，确认断行、分页仍与 TeX 一致（见 docs/typst-engine.md）。
+3. 跑 `cargo test --locked typst_samples -- --ignored` 出样张，与升级前的样张对比断行、分页
+   （见 docs/typst-engine.md）。

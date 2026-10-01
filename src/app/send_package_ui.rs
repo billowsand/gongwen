@@ -1021,7 +1021,6 @@ impl GongwenApp {
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
-        let engine = self.config.pdf_engine;
         let tx = self.sender.clone();
         self.send_package_export = Some(SendPackageExportJob {
             owner_id,
@@ -1038,7 +1037,7 @@ impl GongwenApp {
                 &path,
                 |snapshot, markdown, stem| {
                     crate::manuscript_io::compile_snapshot_pdf(
-                        snapshot, markdown, &display, &fonts, &numbering, engine, stem,
+                        snapshot, markdown, &display, &fonts, &numbering, stem,
                     )
                 },
                 |text| {

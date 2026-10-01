@@ -31,7 +31,7 @@ pub(crate) const RED_RECORD_NAME_TWIPS: usize = 3 * RED_RECORD_EM_TWIPS;
 pub(crate) const RED_RECORD_CONTACT_COLUMN_TWIPS: usize =
     RED_RECORD_LABEL_CONTACT_TWIPS + RED_RECORD_NAME_TWIPS + RED_RECORD_GUTTER_TWIPS;
 
-/// 定稿导出（TeX / Word）里联系人姓名留给手写签字的空位：4 em。姓名由经办人
+/// 定稿导出（PDF / Word）里联系人姓名留给手写签字的空位：4 em。姓名由经办人
 /// 现场手写，导出时不印，联系人与电话之间要比印姓名时空得更宽。预览仍显示姓名。
 pub(crate) const RED_RECORD_SIGN_TWIPS: usize = 4 * RED_RECORD_EM_TWIPS;
 
@@ -42,7 +42,7 @@ pub(crate) const RED_RECORD_SIGN_CONTACT_COLUMN_TWIPS: usize =
 /// 承办单位栏的最小宽度：电话号码再长，也不能把承办单位栏挤到 6 em 以下。
 pub(crate) const RED_RECORD_MIN_UNIT_TWIPS: usize = 6 * RED_RECORD_EM_TWIPS;
 
-/// 承办区三栏的栏宽方案（缇）。按各行实际内容一次算定，Word/LaTeX/预览三端共用。
+/// 承办区三栏的栏宽方案（缇）。按各行实际内容一次算定，Word/PDF/预览三端共用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RedRecordColumns {
     /// 承办单位栏：吃掉版心余量，内容仍放不下时才横向压缩。
@@ -54,7 +54,7 @@ pub(crate) struct RedRecordColumns {
 }
 
 impl RedRecordColumns {
-    /// 缇 → 毫米（LaTeX 注入与预览绘制用）。
+    /// 缇 → 毫米（PDF 与预览绘制用）。
     pub(crate) fn mm(twips: usize) -> f32 {
         twips as f32 / 1440.0 * 25.4
     }
@@ -86,7 +86,7 @@ pub(crate) fn red_record_columns(rows: &[[String; 3]]) -> RedRecordColumns {
     red_record_columns_with_contact(rows, RED_RECORD_CONTACT_COLUMN_TWIPS)
 }
 
-/// 同 [`red_record_columns`]，但联系人栏按手写签字留白加宽：导出（TeX / Word）用。
+/// 同 [`red_record_columns`]，但联系人栏按手写签字留白加宽：导出（PDF / Word）用。
 pub(crate) fn red_record_signing_columns(rows: &[[String; 3]]) -> RedRecordColumns {
     red_record_columns_with_contact(rows, RED_RECORD_SIGN_CONTACT_COLUMN_TWIPS)
 }
@@ -218,7 +218,7 @@ pub(crate) fn red_signature_unit_width_twips(units: &[String]) -> usize {
     (red_signature_unit_width_em(units) * RED_RECORD_EM_TWIPS as f32).round() as usize
 }
 
-/// 同上，换算成毫米（LaTeX 用）。
+/// 同上，换算成毫米（PDF 用）。
 ///
 /// 必须写成绝对长度：这条 `\setlength` 在导言区执行，那里的字号不是三号，
 /// 直接写 `em` 会按导言区的字号折算，成文日期就会偏出居中位置。

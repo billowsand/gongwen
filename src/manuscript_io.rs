@@ -403,7 +403,6 @@ pub fn export_selected_pdfs(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    engine: crate::models::PdfEngine,
     zip_path: &Path,
     password: &str,
     mut progress: impl FnMut(&str),
@@ -457,7 +456,7 @@ pub fn export_selected_pdfs(
                 }
             }
             if options.compiled {
-                match compile_record_pdf(&record, &display, &fonts, numbering, engine, &stem) {
+                match compile_record_pdf(&record, &display, &fonts, numbering, &stem) {
                     Ok(pdf_bytes) => {
                         let entry = unique_zip_name(&mut used_names, &stem, "pdf");
                         zip.start_file(entry, stored_options)?;
@@ -493,13 +492,12 @@ pub fn export_selected_pdfs(
 static PDF_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 在临时工作目录编译单篇稿件，返回生成的 PDF 字节；目录用后即删。
-/// TeX 引擎未检测到时视为该篇失败（原因写入汇总，不阻断整批）。
+/// 排版失败时视为该篇失败（原因写入汇总，不阻断整批）。
 fn compile_record_pdf(
     record: &ManuscriptRecord,
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    engine: crate::models::PdfEngine,
     stem: &str,
 ) -> Result<Vec<u8>> {
     compile_snapshot_pdf(
@@ -508,12 +506,11 @@ fn compile_record_pdf(
         display,
         fonts,
         numbering,
-        engine,
         stem,
     )
 }
 
-/// 按一份行文要素 + 正文编译非盖章件 PDF，返回字节；临时目录用后即删。
+/// 按一份行文要素 + 正文排出非盖章件 PDF，返回字节；临时目录用后即删。
 /// 活稿行与历史版本快照（送批材料导出）都走这里，版式与单独导出一致。
 pub(crate) fn compile_snapshot_pdf(
     snapshot: &crate::models::DraftInput,
@@ -521,7 +518,6 @@ pub(crate) fn compile_snapshot_pdf(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    engine: crate::models::PdfEngine,
     stem: &str,
 ) -> Result<Vec<u8>> {
     let counter = PDF_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -543,9 +539,7 @@ pub(crate) fn compile_snapshot_pdf(
             fonts,
             numbering,
             &crate::visual_diff::ElementMarks::default(),
-            engine,
-        )?
-        .context("未检测到可用的内置 TeX 运行时，无法编译 PDF")?;
+        )?;
         std::fs::read(&pdf_path).with_context(|| format!("无法读取编译产物 {}", pdf_path.display()))
     })();
     // 清理临时目录；清理失败不掩盖编译结果。
@@ -1047,7 +1041,6 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
-            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -1116,7 +1109,6 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
-            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -1152,7 +1144,6 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
-            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -1162,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn export_selected_pdfs_compiled_without_engine_fails_gracefully() {
+    fn export_selected_pdfs_typesets_compiled_pdfs() {
         let dir = tempfile::tempdir().unwrap();
         let zip_path = dir.path().join("compiled.zip");
         let mut store = mem_store();
@@ -1178,21 +1169,17 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
-            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},
         )
         .unwrap();
         assert_eq!(summary.records, 1);
-        // 本机有 TeX 引擎则编译成功；没有则记入失败——两种情况都不应 panic，zip 均可读。
+        // 排版在进程内完成；只有找不到随包字体（沙箱环境）时才记入失败，不应 panic。
         assert!(
             summary.pdfs == 1 || !summary.failed.is_empty(),
-            "有引擎应产出 PDF，无引擎应记入失败：{summary:?}"
+            "应产出 PDF 或记入失败：{summary:?}"
         );
-        if let Some((_, reason)) = summary.failed.first() {
-            assert!(reason.contains("TeX"), "失败原因应说明编译问题：{reason}");
-        }
         let names = zip_names(&zip_path);
         assert!(names.len() <= 1);
     }

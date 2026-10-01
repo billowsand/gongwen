@@ -22,8 +22,8 @@ if [ ! -x "$STAGING/gongwen-assistant" ]; then
     echo "error: staging binary not found or not executable: $STAGING/gongwen-assistant" >&2
     exit 1
 fi
-if [ ! -x "$STAGING/runtime/tectonic/tectonic" ]; then
-    echo "error: staging runtime tectonic not found or not executable" >&2
+if [ ! -f "$STAGING/runtime/fonts/FangSong.ttf" ]; then
+    echo "error: staging runtime fonts not found: $STAGING/runtime/fonts" >&2
     exit 1
 fi
 
@@ -35,7 +35,7 @@ SHARE_ROOT="$ARCHIVE_ROOT/share"
 
 mkdir -p "$APP_ROOT" "$SHARE_ROOT/applications"
 cp -a "$STAGING"/. "$APP_ROOT"/
-chmod 755 "$APP_ROOT/gongwen-assistant" "$APP_ROOT/runtime/tectonic/tectonic"
+chmod 755 "$APP_ROOT/gongwen-assistant"
 cp "$PROJECT_ROOT/assets/linux/cn.localtools.GongwenAssistant.desktop" \
     "$SHARE_ROOT/applications/"
 

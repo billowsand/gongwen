@@ -1,8 +1,7 @@
 //! 研究报告公式的预览渲染：latex-rust 进程内排版 + PNG 光栅化。
 //!
-//! 不走 tectonic 往返——整文件编译是秒级延迟，跟不上逐帧预览；这里解析加光栅化
-//! 都是微秒级。导出端仍以 tectonic + amsmath 为准，所以预览字形（STIX Two Math）
-//! 与导出 PDF（CM 数学字体）不一致属预期，排版尺寸以导出为准。
+//! 解析加光栅化都是微秒级，跟得上逐帧预览。导出 PDF 用的是同一个排版器（出 SVG，
+//! 见 `export::typst::math`），预览与 PDF 的公式字形、尺寸一致。
 //!
 //! STIX Two Math 没有中文字形：`MathFont` 配了随包仿宋作回退 face（vendor
 //! latex-rust 的 `stix_two_math_with_fallback`），主 face 缺的字度量与轮廓都走

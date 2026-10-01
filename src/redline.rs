@@ -8,13 +8,12 @@
 //!
 //! 实现上不走「往源码里插哨兵」的老路：哨兵在**解析后**由视觉模型重新生成
 //! 的标注稿里注入（见 `visual_diff`），标题、表格、公式都能安全携带标记，
-//! 一切就地标注，不再附「花脸稿说明」页。研究报告的 Word / TeX 由 mdx
-//! 转换器生成，哨兵原样穿过转换，产物落地后由 `visual_diff::postprocess`
-//! 换成删除线 / 边框（Word）或 `\GwDel` / `\GwAdd` 宏（TeX）。
+//! 一切就地标注，不再附「花脸稿说明」页。PDF 由 Typst 模板按片段上的标注直接
+//! 画；研究报告的 Word 由 mdx 转换器生成，哨兵原样穿过转换，产物落地后由
+//! `visual_diff::postprocess` 换成删除线 / 边框。
 
 use crate::export;
 use crate::models::{DraftInput, FontConfig, NumberingConfig};
-use crate::texcompile;
 use crate::units::UnitDisplay;
 use crate::visual_diff;
 use anyhow::{Context, Result};
@@ -92,9 +91,8 @@ pub struct RedlineFormats {
 ///
 /// 复用定稿那条导出链路：同一个 `.cls`、同一套字体和版心，所以花脸稿看起来就是
 /// 这份公文本身，只是多了增删标记。唯一的不同是文件名带 `-花脸稿`，且落在自己的
-/// 子目录里，不会和定稿混在一起被误发。研究报告走 mdx 转换器，标记在产物落地后
-/// 注入。PDF 按设置里的引擎排（研究报告固定 Tectonic）。
-#[allow(clippy::too_many_arguments)] // 与定稿导出同一组排版参数，外加花脸稿数据与引擎。
+/// 子目录里，不会和定稿混在一起被误发。研究报告的 Word 走 mdx 转换器，标记在产物
+/// 落地后注入；PDF 由 Typst 模板直接画删除线与新增框。
 pub fn export_files(
     output_dir: &Path,
     input: &DraftInput,
@@ -103,7 +101,6 @@ pub fn export_files(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
-    engine: crate::models::PdfEngine,
 ) -> Result<Vec<PathBuf>> {
     let markdown = &doc.markdown;
     // 标题取自正文 H1，哨兵已在生成时避开标题语法位置，这里再兜一层底：
@@ -133,9 +130,8 @@ pub fn export_files(
         }
         files.push(path);
     }
-    if formats.pdf && export::uses_typst(input, engine) {
-        // Typst 引擎：花脸稿的删除线、新增框由模板直接画，不经 TeX 宏。
-        let outcome = export::write_pdf_for_kind(
+    if formats.pdf {
+        let pdf = export::write_pdf_for_kind(
             &dir,
             &stem,
             input,
@@ -144,37 +140,9 @@ pub fn export_files(
             fonts,
             numbering,
             &doc.elements,
-            engine,
         )
         .with_context(|| "花脸稿 PDF 排版失败".to_string())?;
-        files.extend(outcome);
-    } else if formats.pdf {
-        let tex = dir.join(format!("{stem}.tex"));
-        export::write_tex_for_kind(
-            &tex,
-            input,
-            markdown,
-            display,
-            fonts,
-            numbering,
-            &doc.elements,
-        )?;
-        files.push(tex.clone());
-        if input.kind.is_research() {
-            // mdx 转换出的分章 TeX 也要换宏、主文件注入导言区定义。
-            visual_diff::redline_research_tex_files(&dir)?;
-            let outcome = texcompile::compile_research_pdf(&tex)
-                .with_context(|| "花脸稿 PDF 编译失败".to_string())?;
-            if let Some(pdf) = outcome.pdf {
-                files.push(pdf);
-            }
-        } else {
-            let outcome = texcompile::compile_pdf_with_proof(&tex, fonts)
-                .with_context(|| "花脸稿 PDF 编译失败".to_string())?;
-            if let Some(pdf) = outcome.pdf {
-                files.push(pdf);
-            }
-        }
+        files.push(pdf);
     }
     Ok(files)
 }
@@ -348,15 +316,36 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tex_tests {
+pub(crate) mod typst_tests {
     use super::*;
-    use crate::export::write_tex;
     use crate::models::TemplateProfile;
 
-    /// 端到端：花脸稿 Markdown 走定稿那条导出链路，产出的 TeX 里必须是
-    /// `\GwDel` / `\GwAdd`，而不是把哨兵字符原样漏进去——那在纸上就是缺字符。
+    /// 公文模板数据（JSON），字体名用占位：这里只看片段与标注，不排版。
+    pub(crate) fn typst_json(input: &DraftInput, markdown: &str) -> String {
+        let families = crate::typst_engine::FontFamilies {
+            title: "t".into(),
+            heading1: "h1".into(),
+            heading2: "h2".into(),
+            body: "b".into(),
+            page_number: "p".into(),
+            bold: None,
+            fallback: Vec::new(),
+        };
+        crate::export::typst::document_json(
+            input,
+            markdown,
+            &UnitDisplay::new(&[]),
+            &NumberingConfig::default(),
+            &visual_diff::ElementMarks::default(),
+            families,
+        )
+        .expect("模板数据")
+    }
+
+    /// 端到端：花脸稿 Markdown 走定稿那条导出链路，模板数据里必须是删除 / 新增
+    /// 标注，而不是把哨兵字符原样漏进去——那在纸上就是缺字符。
     #[test]
-    fn redline_markdown_becomes_gw_macros_in_tex() {
+    fn redline_markdown_becomes_marks_in_the_template_data() {
         let doc = build(
             "# 关于报送情况的函\n\n同意你单位关于报送情况的请示。",
             "# 关于报送情况的函\n\n同意你单位关于开展检查的请示。",
@@ -366,34 +355,21 @@ mod tex_tests {
             ..Default::default()
         };
         input.profile = TemplateProfile::for_kind(input.kind);
-
-        let dir = tempfile::tempdir().expect("临时目录");
-        let tex = dir.path().join("花脸稿.tex");
-        write_tex(
-            &tex,
-            &input,
-            &doc.markdown,
-            &UnitDisplay::new(&[]),
-            &FontConfig::default(),
-        )
-        .expect("写 TeX");
-        let content = std::fs::read_to_string(&tex).expect("读 TeX");
-
-        assert!(content.contains("\\GwDel{"), "缺少删除标记：{content}");
-        assert!(content.contains("\\GwAdd{"), "缺少新增标记");
+        let data = typst_json(&input, &doc.markdown);
+        assert!(data.contains(r#""m":"del""#), "缺少删除标记：{data}");
+        assert!(data.contains(r#""m":"add""#), "缺少新增标记：{data}");
         assert!(
-            !content.contains('\u{E000}') && !content.contains('\u{E002}'),
-            "哨兵字符漏进了 TeX"
+            !data.contains('\u{E000}') && !data.contains('\u{E002}'),
+            "哨兵字符漏进了模板数据"
         );
     }
 
-    /// 哨兵绝不能出现在 TeX 里——它是私用区码位，字体里没有字形，印出来是豆腐块。
-    ///
-    /// 这条把哨兵**硬塞**进标题、各级小标题、表格、列表、附件标题等所有位置，
-    /// 包括那些不做标记的路径，验证兜底过滤（`tex_escape` / `plain_text` /
-    /// 表格列宽）确实拦得住。将来谁新写一条渲染路径忘了处理，这条会先炸。
+    /// 哨兵绝不能出现在模板数据里——它是私用区码位，字体里没有字形，印出来是
+    /// 豆腐块。这条把哨兵**硬塞**进标题、各级小标题、表格、列表、附件标题等所有
+    /// 位置，包括那些不做标记的路径，验证兜底过滤确实拦得住。将来谁新写一条
+    /// 渲染路径忘了处理，这条会先炸。
     #[test]
-    fn no_sentinel_can_reach_the_tex_through_any_path() {
+    fn no_sentinel_can_reach_the_template_data_through_any_path() {
         use crate::export::{
             REDLINE_ADD_CLOSE, REDLINE_ADD_OPEN, REDLINE_DEL_CLOSE, REDLINE_DEL_OPEN,
         };
@@ -402,9 +378,11 @@ mod tex_tests {
         let a0 = REDLINE_ADD_OPEN;
         let a1 = REDLINE_ADD_CLOSE;
         let markdown = format!(
-            "# 标题{d0}删{d1}里也塞\n\n## 二级{a0}增{a1}标题\n\n正文{d0}删{d1}与{a0}增{a1}。\n\n             - 列表{d0}删{d1}项\n\n1. 有序{a0}增{a1}项\n\n             | 表头{d0}删{d1} | 姓名 |\n| --- | --- |\n| 单元{a0}增{a1}格 | 李四 |\n\n             <!-- [附件] -->\n\n# 附件{d0}删{d1}标题\n\n附件正文{a0}增{a1}。"
+            "# 标题{d0}删{d1}里也塞\n\n## 二级{a0}增{a1}标题\n\n正文{d0}删{d1}与{a0}增{a1}。\n\n\
+             - 列表{d0}删{d1}项\n\n1. 有序{a0}增{a1}项\n\n\
+             | 表头{d0}删{d1} | 姓名 |\n| --- | --- |\n| 单元{a0}增{a1}格 | 李四 |\n\n\
+             <!-- [附件] -->\n\n# 附件{d0}删{d1}标题\n\n附件正文{a0}增{a1}。"
         );
-
         for kind in [
             crate::models::TemplateKind::PlainDocument,
             crate::models::TemplateKind::OfficialLetter,
@@ -416,26 +394,44 @@ mod tex_tests {
                 profile: TemplateProfile::for_kind(kind),
                 ..Default::default()
             };
-            let dir = tempfile::tempdir().expect("临时目录");
-            let tex = dir.path().join("t.tex");
-            write_tex(
-                &tex,
-                &input,
-                &markdown,
-                &UnitDisplay::new(&[]),
-                &FontConfig::default(),
-            )
-            .expect("写 TeX");
-            let content = std::fs::read_to_string(&tex).expect("读 TeX");
+            let data = typst_json(&input, &markdown);
             for (name, ch) in [
                 ("删除起", d0),
                 ("删除止", d1),
                 ("新增起", a0),
                 ("新增止", a1),
             ] {
-                assert!(!content.contains(ch), "{kind:?} 的 TeX 里漏出了{name}哨兵");
+                assert!(!data.contains(ch), "{kind:?} 的模板数据里漏出了{name}哨兵");
             }
         }
+    }
+
+    /// 模板里的标记画法与样式约定一致：删除 = 红色直删除线，新增 = 蓝色方框
+    /// （方案需求结论第 10 条）。模板编进二进制，这里直接查文本。
+    #[test]
+    fn the_templates_wire_the_mark_styles() {
+        for (name, source) in [
+            ("gongwen.typ", crate::typst_engine::TEMPLATE),
+            ("research.typ", crate::typst_engine::RESEARCH_TEMPLATE),
+        ] {
+            assert!(source.contains("C00000"), "{name} 的删除必须是红 #C00000");
+            assert!(source.contains("1F4E9E"), "{name} 的新增必须是蓝 #1F4E9E");
+            assert!(source.contains("strike("), "{name} 的删除要画直删除线");
+            assert!(source.contains("highlight("), "{name} 的新增要套框");
+        }
+    }
+
+    /// 反向保证：没有花脸稿标记的普通稿件，模板数据里不该出现标注。
+    /// 这条守着"改动不影响存量导出"。
+    #[test]
+    fn an_ordinary_document_gains_no_redline_marks() {
+        let mut input = DraftInput {
+            kind: crate::models::TemplateKind::PlainDocument,
+            ..Default::default()
+        };
+        input.profile = TemplateProfile::for_kind(input.kind);
+        let data = typst_json(&input, "# 普通公文\n\n这是一段普通正文，没有任何增删标记。");
+        assert!(!data.contains(r#""m":"#), "{data}");
     }
 
     /// Word 侧同理：哨兵不能进 OOXML。docx 是 zip，直接读整个字节流找码位的
@@ -474,105 +470,21 @@ mod tex_tests {
             }
         }
     }
-
-    /// 类文件里的标记宏必须与样式约定一致：删除 = 红色直删除线，新增 = 蓝色
-    /// 方框（方案需求结论第 10 条；旧实现是穿过字身的波浪线 + 黑色框）。
-    /// 类文件是编译进二进制的，这里直接查它的文本。
-    #[test]
-    fn the_class_wires_the_new_mark_styles() {
-        let class = include_str!("../gonghan-gwa.cls");
-        assert!(
-            class.contains("symbol=\\GwStrikeUnit"),
-            "\\GwDel 必须画直删除线：不再用自绘波浪单元"
-        );
-        assert!(
-            class.contains("\\providecolor{GwaDelColor}")
-                || class.contains("\\definecolor{GwaDelColor}"),
-            "删除色必须定义为 GwaDelColor"
-        );
-        assert!(class.contains("C00000"), "删除必须是红 #C00000");
-        assert!(
-            class.contains("\\providecolor{GwaAddColor}")
-                || class.contains("\\definecolor{GwaAddColor}"),
-            "新增色必须定义为 GwaAddColor"
-        );
-        assert!(class.contains("1F4E9E"), "新增必须是蓝 #1F4E9E");
-        // 删掉的字也是红色：xeCJKfntef 装盒放字，颜色 special 到不了汉字上
-        // （第 ③ 期测试 F2 实测汉字是黑的），只能走字体的 Color 属性。
-        for (name, source) in [
-            ("gonghan-gwa.cls", class),
-            ("研究报告导言区", crate::visual_diff::REDLINE_PREAMBLE_TEX),
-        ] {
-            assert!(
-                source
-                    .contains("\\addfontfeatures{Color=C00000}\\addCJKfontfeatures{Color=C00000}"),
-                "{name} 的 \\GwDel 要用字体颜色染红删掉的字"
-            );
-            // 新增框的竖边不能与框里的字断开到两行（第 ③ 期测试 F3：表格窄列里
-            // 左竖边落在上一行行尾）：留白用 \kern（\hspace 是胶、是断点），竖边
-            // 与字之间 \nobreak，断点只留在框前面。
-            assert!(
-                source
-                    .contains("\\GwBoxBarL}{\\penalty5000\\GwBoxBar\\rlap{\\GwBoxStubs}\\nobreak}")
-                    && source.contains("\\GwBoxBarR}{\\nobreak\\llap{\\GwBoxStubs}\\GwBoxBar}"),
-                "{name} 的竖边要粘住框里的字、框前留断点"
-            );
-            assert!(
-                source.contains("\\GwAddLines{\\kern1.5pt#1\\kern1.5pt}"),
-                "{name} 的 \\GwAdd 留白要用 \\kern"
-            );
-            let add_macros = source
-                .lines()
-                .filter(|line| line.contains("command{\\GwAdd"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                !add_macros.contains("\\hspace"),
-                "{name} 的新增框宏里不能再有 \\hspace：{add_macros}"
-            );
-        }
-    }
-
-    /// 反向保证：没有花脸稿标记的普通稿件，产出的 TeX 里不该出现这两个宏。
-    /// 这条守着"改动不影响存量导出"。
-    #[test]
-    fn an_ordinary_document_gains_no_redline_macros() {
-        let mut input = DraftInput {
-            kind: crate::models::TemplateKind::PlainDocument,
-            ..Default::default()
-        };
-        input.profile = TemplateProfile::for_kind(input.kind);
-
-        let dir = tempfile::tempdir().expect("临时目录");
-        let tex = dir.path().join("定稿.tex");
-        write_tex(
-            &tex,
-            &input,
-            "# 普通公文\n\n这是一段普通正文，没有任何增删标记。",
-            &UnitDisplay::new(&[]),
-            &FontConfig::default(),
-        )
-        .expect("写 TeX");
-        let content = std::fs::read_to_string(&tex).expect("读 TeX");
-        assert!(!content.contains("\\GwDel"));
-        assert!(!content.contains("\\GwAdd"));
-    }
 }
 
 #[cfg(test)]
 mod consistency_tests {
-    //! 一致性测试：同一份标注稿分别生成 DOCX run 序列与 TeX 片段序列，
+    //! 一致性测试：同一份标注稿分别生成 DOCX run 序列与 PDF（Typst）片段序列，
     //! 两边的 `(文字, 类型)` 序列必须完全相同（方案 4.3 节：一份标注层喂
     //! 多处，从结构上保证「预览 = PDF = Word」）。
     //!
     //! 覆盖正文段、列表项、对齐行：三者在两条链路里都走
-    //! `redline_chunks` → 标记宏 / 字符格式。标题与表格的标注在两边各有
-    //! 专门的入口（`marked_runs` / `marked_tex_escape`、逐格切块），由各自
-    //! 的单测把关。
+    //! `redline_chunks` → 片段标注 / 字符格式。标题与表格的标注在两边各有
+    //! 专门的入口（`marked_runs`、逐格切块），由各自的单测把关。
 
     use super::build;
+    use crate::export::body_runs;
     use crate::export::{MarkdownBlock, RedlineKind, parse_markdown};
-    use crate::export::{body_runs, body_text_to_tex};
 
     /// DOCX 侧：用真实的 `body_runs` 生成 run，再按 run 属性取回
     /// `(文字, 类型)`。删除 = 删除线，新增 = 字符边框。
@@ -610,9 +522,9 @@ mod consistency_tests {
         seq
     }
 
-    /// TeX 侧：用真实的 `body_text_to_tex` 生成片段，再解析 `\GwDel` /
-    /// `\GwAdd` 取回 `(文字, 类型)`；`\GwBold`、括号楷体组是透明包装。
-    fn tex_sequence(markdown: &str) -> Vec<(String, RedlineKind)> {
+    /// PDF 侧：用真实的 Typst 片段生成（`typst::runs::body_runs`），按片段上的标注
+    /// 取回 `(文字, 类型)`。加粗、括号楷体是片段属性，不影响序列。
+    fn typst_sequence(markdown: &str) -> Vec<(String, RedlineKind)> {
         let mut seq = Vec::new();
         for block in parse_markdown(markdown) {
             let text = match &block {
@@ -621,7 +533,7 @@ mod consistency_tests {
                 | MarkdownBlock::Aligned { text, .. } => text,
                 _ => continue,
             };
-            for (text, kind) in extract_tex_fragments(&body_text_to_tex(text)) {
+            for (text, kind) in typst_fragments(&crate::export::typst::runs::body_runs(text)) {
                 push_merged(&mut seq, text, kind);
             }
         }
@@ -641,87 +553,27 @@ mod consistency_tests {
         seq.push((text, kind));
     }
 
-    /// 解析 `body_text_to_tex` 的输出：`\GwDel{…}` / `\GwAdd{…}` 换类型，
-    /// 其余包装（`\GwBold`、括号楷体组、普通分组）透明穿过，转义还原。
-    fn extract_tex_fragments(tex: &str) -> Vec<(String, RedlineKind)> {
-        const KAI_GROUP: &str = "{\\kai\\enkai\\zihao{4} ";
-        const KAI_GROUP_FROZEN: &str = "{\\GwBoxFreeze\\kai\\enkai\\zihao{4} ";
-        let chars: Vec<char> = tex.chars().collect();
-        let mut stack: Vec<RedlineKind> = vec![RedlineKind::Same];
-        let mut buf = String::new();
-        let mut out: Vec<(String, RedlineKind)> = Vec::new();
-        fn flush(out: &mut Vec<(String, RedlineKind)>, stack: &[RedlineKind], buf: &mut String) {
-            if !buf.is_empty() {
-                push_merged(out, std::mem::take(buf), *stack.last().expect("栈非空"));
-            }
+    /// Typst 片段 → `(文字, 类型)`：`m` 是 `del` / `add`，间隙、占位片段没有文字。
+    pub(super) fn typst_fragments(
+        runs: &[crate::export::typst::data::Run],
+    ) -> Vec<(String, RedlineKind)> {
+        let mut out = Vec::new();
+        for run in runs {
+            let Some(text) = &run.t else {
+                continue;
+            };
+            let kind = match run.m {
+                Some("del") => RedlineKind::Deleted,
+                Some("add") => RedlineKind::Added,
+                _ => RedlineKind::Same,
+            };
+            push_merged(&mut out, text.clone(), kind);
         }
-        let mut index = 0usize;
-        while index < chars.len() {
-            let rest: String = chars[index..].iter().collect();
-            if rest.starts_with("\\GwDel{") {
-                flush(&mut out, &stack, &mut buf);
-                stack.push(RedlineKind::Deleted);
-                index += "\\GwDel{".len();
-            } else if let Some(name) = ["\\GwAdd{", "\\GwAddOpen{", "\\GwAddMid{", "\\GwAddClose{"]
-                .into_iter()
-                .find(|name| rest.starts_with(name))
-            {
-                flush(&mut out, &stack, &mut buf);
-                stack.push(RedlineKind::Added);
-                index += name.len();
-            } else if rest.starts_with("\\GwBold{") {
-                stack.push(*stack.last().expect("栈非空"));
-                index += "\\GwBold{".len();
-            } else if let Some(group) = [KAI_GROUP, KAI_GROUP_FROZEN]
-                .into_iter()
-                .find(|group| rest.starts_with(group))
-            {
-                stack.push(*stack.last().expect("栈非空"));
-                index += group.len();
-            } else if let Some((ch, width)) = tex_unescape(&rest) {
-                buf.push(ch);
-                index += width;
-            } else {
-                match chars[index] {
-                    '{' => stack.push(*stack.last().expect("栈非空")),
-                    '}' => {
-                        // 组关闭前先冲刷：组内文字属于即将弹出的这层类型。
-                        flush(&mut out, &stack, &mut buf);
-                        stack.pop();
-                    }
-                    other => buf.push(other),
-                }
-                index += 1;
-            }
-        }
-        flush(&mut out, &stack, &mut buf);
         out
     }
 
-    /// 反转义：返回 (字符, 消耗的字符数)。不是转义序列时返回 None。
-    fn tex_unescape(rest: &str) -> Option<(char, usize)> {
-        const ESCAPES: [(&str, char); 3] = [
-            ("\\textasciitilde{}", '~'),
-            ("\\textasciicircum{}", '^'),
-            ("\\textbackslash{}", '\\'),
-        ];
-        for (prefix, ch) in ESCAPES {
-            if rest.starts_with(prefix) {
-                return Some((ch, prefix.chars().count()));
-            }
-        }
-        let mut chars = rest.chars();
-        if chars.next() == Some('\\')
-            && let Some(next) = chars.next()
-            && next.is_ascii_punctuation()
-        {
-            return Some((next, 2));
-        }
-        None
-    }
-
     #[test]
-    fn docx_runs_and_tex_fragments_carry_the_same_marks() {
+    fn docx_runs_and_typst_fragments_carry_the_same_marks() {
         let old = concat!(
             "请于8月10日前报送材料，逾期视为放弃。",
             "\n\n各单位要高度重视，加强组织领导。",
@@ -741,11 +593,11 @@ mod consistency_tests {
         );
         let doc = build(old, new);
         let docx = docx_sequence(&doc.markdown);
-        let tex = tex_sequence(&doc.markdown);
+        let typst = typst_sequence(&doc.markdown);
         assert_eq!(
             docx,
-            tex,
-            "DOCX run 序列与 TeX 片段序列必须一致\nmarkdown:\n{}\ndocx: {docx:?}\ntex:  {tex:?}",
+            typst,
+            "DOCX run 序列与 PDF 片段序列必须一致\nmarkdown:\n{}\ndocx: {docx:?}\npdf:  {typst:?}",
             crate::export::strip_redline(&doc.markdown),
         );
         // 第三方：预览的排版任务（方案 4.3「预览 = PDF = Word」）。
@@ -772,15 +624,15 @@ mod consistency_tests {
             "<!-- [居中] -->\n新的第一行\n<!-- [居右] -->\n新的第二行",
         );
         let docx = docx_sequence(&doc.markdown);
-        let tex = tex_sequence(&doc.markdown);
-        assert_eq!(docx, tex, "对齐行的双端序列一致：{docx:?}");
+        let typst = typst_sequence(&doc.markdown);
+        assert_eq!(docx, typst, "对齐行的双端序列一致：{docx:?}");
         let preview = crate::preview::marks::body_sequence(&doc.markdown);
         assert_eq!(docx, preview, "对齐行的预览序列一致：{preview:?}");
     }
 
     // ── 公文要素就地标注（方案需求第 9 条、规则 7）────────────────────────
 
-    use crate::export::{is_redline_sentinel, marked_runs, marked_tex_escape};
+    use crate::export::{is_redline_sentinel, marked_runs};
     use crate::models::{DraftInput, TemplateKind, TemplateProfile};
     use crate::units::UnitDisplay;
     use crate::visual_diff::{ElementMarks, element_marks};
@@ -839,14 +691,14 @@ mod consistency_tests {
     }
 
     /// 三方一致性：同一组要素变化，每个「标注单元」的带哨兵文本分别过预览 /
-    /// DOCX / TeX 三边的**真实**管线（`append_marked_text` / `marked_runs` /
-    /// `marked_tex_escape`），取出的 `(文字, 类型)` 序列必须完全相同。
+    /// DOCX / PDF 三边的**真实**管线（`append_marked_text` / `marked_runs` /
+    /// `typst::runs::marked_runs`），取出的 `(文字, 类型)` 序列必须完全相同。
     ///
     /// 粒度是标注单元：主送、抄送、密级、落款每行、成文日期与发文字号的每个
-    /// 部件（TeX 里日期与文号各是三条命令、中间夹着类文件写死的年月日与〔〕号，
-    /// 整串塞不进任一命令参数，所以按部件标）。
+    /// 部件（日期与文号各分三段、中间夹着版式写死的年月日与〔〕号，
+    /// 按部件标）。
     #[test]
-    fn element_marks_agree_across_preview_docx_and_tex() {
+    fn element_marks_agree_across_preview_docx_and_pdf() {
         let old = element_input();
         let mut new = old.clone();
         new.profile.recipient = "甲市教育局、乙市教育局".into();
@@ -867,9 +719,9 @@ mod consistency_tests {
             checked += 1;
             let preview = preview_element_sequence(&unit);
             let docx = docx_element_sequence(&unit);
-            let tex = extract_tex_fragments(&marked_tex_escape(&unit));
+            let typst = typst_fragments(&crate::export::typst::runs::marked_runs(&unit));
             assert_eq!(docx, preview, "DOCX 与预览的要素标注序列不一致：{unit:?}");
-            assert_eq!(tex, preview, "TeX 与预览的要素标注序列不一致：{unit:?}");
+            assert_eq!(typst, preview, "PDF 与预览的要素标注序列不一致：{unit:?}");
             assert!(
                 preview
                     .iter()
@@ -1085,7 +937,7 @@ mod consistency_tests {
         false
     }
 
-    /// 人工实测：用内置 Tectonic 编译清空要素的公函 / 红头呈批件，并用 pdftotext
+    /// 人工实测：排出清空要素的公函 / 红头呈批件 PDF，并用 pdftotext
     /// 确认删除侧确实进入 PDF 文本层；运行环境需提供 pdftotext。
     #[test]
     #[ignore = "人工实测：编译 PDF 并抽取文字"]
@@ -1102,9 +954,9 @@ mod consistency_tests {
         {
             let (old, new) = element_pair(kind, ElementChange::Cleared);
             let marks = element_marks(&old, &new, &display);
-            let tex = dir.path().join(format!("清空要素-{index}.tex"));
-            crate::export::write_tex_for_kind(
-                &tex,
+            let pdf = dir.path().join(format!("清空要素-{index}.pdf"));
+            crate::export::write_pdf(
+                &pdf,
                 &new,
                 "# 测试公文\n\n正文内容。\n",
                 &display,
@@ -1112,11 +964,7 @@ mod consistency_tests {
                 &numbering,
                 &marks,
             )
-            .expect("写 TeX");
-            let pdf = crate::texcompile::compile_pdf_with_proof(&tex, &fonts)
-                .expect("内置 Tectonic 编译")
-                .pdf
-                .expect("应生成 PDF");
+            .expect("排版 PDF");
             let extracted = Command::new("pdftotext")
                 .arg(&pdf)
                 .arg("-")
@@ -1156,10 +1004,51 @@ mod consistency_tests {
             }
         }
     }
-    /// 六要素 × 清空/新增/修改 × 所有含该版位的文种：校验实际导出的 TeX、Word XML
+    /// 模板数据里有没有一段连续标注为 `mark`、文字包含 `text` 的片段（相邻同标注的
+    /// 片段先接起来：中西文间隙、括号楷体会把一段文字切成几片）。
+    fn typst_has_mark(data: &serde_json::Value, text: &str, mark: &str) -> bool {
+        match data {
+            serde_json::Value::Array(items) if items.iter().any(|v| v.get("t").is_some()) => {
+                let mut current = String::new();
+                for item in items {
+                    match (
+                        item.get("t").and_then(|v| v.as_str()),
+                        item.get("m").and_then(|v| v.as_str()),
+                    ) {
+                        (Some(t), Some(m)) if m == mark => current.push_str(t),
+                        (None, _) => {}
+                        _ => {
+                            if current.contains(text) {
+                                return true;
+                            }
+                            current.clear();
+                        }
+                    }
+                }
+                current.contains(text) || items.iter().any(|v| typst_has_mark(v, text, mark))
+            }
+            serde_json::Value::Array(items) => items.iter().any(|v| typst_has_mark(v, text, mark)),
+            serde_json::Value::Object(map) => map.values().any(|v| typst_has_mark(v, text, mark)),
+            _ => false,
+        }
+    }
+
+    fn placeholder_families() -> crate::typst_engine::FontFamilies {
+        crate::typst_engine::FontFamilies {
+            title: "t".into(),
+            heading1: "h1".into(),
+            heading2: "h2".into(),
+            body: "b".into(),
+            page_number: "p".into(),
+            bold: None,
+            fallback: Vec::new(),
+        }
+    }
+
+    /// 六要素 × 清空/新增/修改 × 所有含该版位的文种：校验 PDF 模板数据、Word XML
     /// 与 egui 全页绘制。红头呈批件没有抄送版位；电话通知、白头件等只校验其现有版位。
     #[test]
-    fn element_change_matrix_keeps_marks_in_tex_word_and_preview() {
+    fn element_change_matrix_keeps_marks_in_pdf_word_and_preview() {
         let kinds = [
             TemplateKind::OfficialLetter,
             TemplateKind::RedHeadApproval,
@@ -1191,19 +1080,8 @@ mod consistency_tests {
             for change in changes {
                 let (old, new) = element_pair(kind, change);
                 let marks = element_marks(&old, &new, &display);
-                let tex_path = dir.path().join(format!("要素-{output_index}.tex"));
                 let docx_path = dir.path().join(format!("要素-{output_index}.docx"));
                 output_index += 1;
-                crate::export::write_tex_for_kind(
-                    &tex_path,
-                    &new,
-                    "# 测试公文\n\n正文内容。\n",
-                    &display,
-                    &fonts,
-                    &numbering,
-                    &marks,
-                )
-                .expect("生成 TeX");
                 crate::export::write_docx_with_numbering(
                     &docx_path,
                     &new,
@@ -1214,7 +1092,21 @@ mod consistency_tests {
                     &marks,
                 )
                 .expect("生成 Word");
-                let tex = std::fs::read_to_string(&tex_path).expect("读取 TeX");
+                let typst_data: serde_json::Value = serde_json::from_str(
+                    &crate::export::typst::document_json(
+                        &new,
+                        "# 测试公文
+
+正文内容。
+",
+                        &display,
+                        &numbering,
+                        &marks,
+                        placeholder_families(),
+                    )
+                    .expect("模板数据"),
+                )
+                .unwrap();
                 let word_xml = all_word_xml(&docx_path);
                 let preview_text = preview_element_output(&new, &display, &marks);
                 let mut checked_fields = 0;
@@ -1239,14 +1131,15 @@ mod consistency_tests {
                     for (unit, old_value, new_value) in changed_units {
                         let preview = preview_element_sequence(&unit);
                         let docx = docx_element_sequence(&unit);
-                        let tex_fragments = extract_tex_fragments(&marked_tex_escape(&unit));
+                        let typst_fragments =
+                            typst_fragments(&crate::export::typst::runs::marked_runs(&unit));
                         assert_eq!(
                             docx, preview,
                             "{kind:?} / {field:?} / {change:?}: Word run 序列"
                         );
                         assert_eq!(
-                            tex_fragments, preview,
-                            "{kind:?} / {field:?} / {change:?}: TeX 片段序列"
+                            typst_fragments, preview,
+                            "{kind:?} / {field:?} / {change:?}: PDF 片段序列"
                         );
                         assert!(
                             preview
@@ -1275,11 +1168,11 @@ mod consistency_tests {
                             .collect::<String>();
                         assert_eq!(
                             deleted, old_value,
-                            "{kind:?} / {field:?}: TeX/Word/预览删除值"
+                            "{kind:?} / {field:?}: PDF/Word/预览删除值"
                         );
                         assert_eq!(
                             added, new_value,
-                            "{kind:?} / {field:?}: TeX/Word/预览新增值"
+                            "{kind:?} / {field:?}: PDF/Word/预览新增值"
                         );
 
                         for (text, mark_kind) in &preview {
@@ -1287,14 +1180,14 @@ mod consistency_tests {
                                 preview_text.contains(text),
                                 "{kind:?} / {field:?} / {change:?}: 预览绘制结果缺少 {text:?}"
                             );
-                            let expected_macro = match mark_kind {
-                                RedlineKind::Deleted => format!("\\GwDel{{{text}}}"),
-                                RedlineKind::Added => format!("\\GwAdd{{{text}}}"),
+                            let mark = match mark_kind {
+                                RedlineKind::Deleted => "del",
+                                RedlineKind::Added => "add",
                                 RedlineKind::Same => unreachable!("标注部件不应有 Same"),
                             };
                             assert!(
-                                tex.contains(&expected_macro),
-                                "{kind:?} / {field:?} / {change:?}: TeX 没有输出 {expected_macro:?}"
+                                typst_has_mark(&typst_data, text, mark),
+                                "{kind:?} / {field:?} / {change:?}: PDF 模板数据缺少 {text:?}（{mark}）"
                             );
                             let property = match mark_kind {
                                 RedlineKind::Deleted => "<w:strike",
@@ -1309,37 +1202,11 @@ mod consistency_tests {
                     }
                 }
                 assert!(checked_fields > 0, "{kind:?} 至少应覆盖一个要素字段");
-                if kind == TemplateKind::OfficialLetter {
-                    assert!(
-                        tex.contains(r"\CopiesToMarkedRow}{true}"),
-                        "抄送行应由类文件保留：{tex}"
-                    );
-                }
             }
-        }
-        let class = include_str!("../gonghan-gwa.cls");
-        for expected in [
-            r"\newcommand{\CopiesToMarkedRow}{false}",
-            r"\equal{\CopiesToMarkedRow}{true}",
-            r"\CopiesToMarked{}\PrintCopiesAtLineEnd{}",
-            r"\SecurityLine{}",
-            r"\RecipientMarked{}：",
-            r"\DocumentNumber{}",
-            r"\SignatureYear{}年\SignatureMonth{}月\SignatureDay{}日",
-            r"\SignatureUnit{}",
-        ] {
-            assert!(
-                class.contains(expected),
-                "TeX 类文件缺少版位输出 {expected}"
-            );
         }
     }
     /// 要素没变时，三处输出与改动前逐字节相同：空标注与不带标注的同一调用
-    /// 产出一致的 TeX / Word 部件，且不出现任何花脸稿宏。
-    ///
-    /// 现有测试（`export::latex::tests`、`export::docx::tests` 里那一批精确
-    /// 断言）继续锁着旧格式，是「定稿导出不受影响」的主要证据；这里再补一个
-    /// 空标注与原生渲染的直接对照。
+    /// 产出一致的 PDF 模板数据 / Word 部件，且不出现任何花脸稿标注。
     #[test]
     fn unchanged_elements_keep_the_plain_output_byte_for_byte() {
         let input = element_input();
@@ -1361,46 +1228,38 @@ mod consistency_tests {
         let numbering = crate::models::NumberingConfig::default();
         let dir = tempfile::tempdir().expect("临时目录");
 
-        let with_marks = dir.path().join("有标注.tex");
-        let without = dir.path().join("无标注.tex");
-        crate::export::write_tex_for_kind(
-            &with_marks,
+        let families = || crate::typst_engine::FontFamilies {
+            title: "t".into(),
+            heading1: "h1".into(),
+            heading2: "h2".into(),
+            body: "b".into(),
+            page_number: "p".into(),
+            bold: None,
+            fallback: Vec::new(),
+        };
+        let a = crate::export::typst::document_json(
             &input,
             markdown,
             &display,
-            &fonts,
             &numbering,
             &marks,
+            families(),
         )
-        .expect("写 TeX");
-        crate::export::write_tex_for_kind(
-            &without,
+        .expect("模板数据");
+        let b = crate::export::typst::document_json(
             &input,
             markdown,
             &display,
-            &fonts,
             &numbering,
             &ElementMarks::default(),
+            families(),
         )
-        .expect("写 TeX");
-        let a = std::fs::read_to_string(&with_marks).expect("读 TeX");
-        let b = std::fs::read_to_string(&without).expect("读 TeX");
+        .expect("模板数据");
         assert_eq!(a, b, "空标注必须与定稿导出逐字节相同");
-        assert!(
-            !a.contains("\\GwDel") && !a.contains("\\GwAdd"),
-            "没变就不该有花脸稿宏：{a}"
-        );
-        // 锁住旧格式：要素命令仍是原生取值。
-        for expected in [
-            "\\renewcommand{\\SignatureYear}{2026}",
-            "\\renewcommand{\\SignatureMonth}{8}",
-            "\\renewcommand{\\SignatureDay}{7}",
-            "\\renewcommand{\\SecurityLevel}{秘密}",
-            "\\renewcommand{\\SecurityPeriod}{{\\ttfamily 10}年}",
-            "\\renewcommand{\\DepartmentCode}{星教函}",
-            "\\renewcommand{\\DocumentNumber}{12}",
-        ] {
-            assert!(a.contains(expected), "TeX 里应保留 {expected}：{a}");
+        assert!(!a.contains(r#""m":"#), "没变就不该有花脸稿标注：{a}");
+        // 要素仍是原生取值。
+        for expected in ["秘密", "星教函", "12"] {
+            assert!(a.contains(expected), "模板数据里应保留 {expected}：{a}");
         }
 
         let docx_with = dir.path().join("有标注.docx");
@@ -1438,7 +1297,7 @@ mod consistency_tests {
         text
     }
 
-    /// 人工实测探针（`cargo test -- --ignored`）：用内置 Tectonic 真编译公函与
+    /// 人工实测探针（`cargo test -- --ignored`）：真排公函与
     /// 红头呈批件的花脸稿 PDF，再把首页 / 末页栅格化成 PNG 供人眼核对要素处的
     /// 删除线与新增框（压字、红头字距、落款右对齐）。产物落在
     /// `tmp/element-marks-full/`。第 ② 期实测已跑通（公函 1 页、呈批件 2 页）。
@@ -1506,7 +1365,6 @@ mod consistency_tests {
                 &display,
                 &fonts,
                 &crate::models::NumberingConfig::default(),
-                crate::models::PdfEngine::Tectonic,
             )
             .unwrap_or_else(|error| panic!("{name} 花脸稿导出失败：{error:#}"));
             let pdf = files
@@ -1555,9 +1413,9 @@ mod consistency_tests {
 
 #[cfg(test)]
 mod research_tests {
-    //! 研究报告的花脸稿导出：Word / TeX 由 mdx 转换器生成，哨兵在产物落地后
-    //! 由 `visual_diff::postprocess` 换成删除线 / 边框或 `\GwDel` / `\GwAdd` 宏。
-    //! 这里验证转换结果真的带上了标记（PDF 编译走 texcompile 的既有测试）。
+    //! 研究报告的花脸稿导出：Word 由 mdx 转换器生成，哨兵在产物落地后由
+    //! `visual_diff::postprocess` 换成删除线 / 边框；PDF 由 Typst 路径把哨兵换成
+    //! 片段标注（`export::typst::research_redline`）。
 
     use super::{RedlineFormats, build, export_files};
     use crate::models::{DraftInput, FontConfig, TemplateKind};
@@ -1592,7 +1450,6 @@ mod research_tests {
             &UnitDisplay::new(&[]),
             &FontConfig::default(),
             &crate::models::NumberingConfig::default(),
-            crate::models::PdfEngine::Tectonic,
         )
         .expect("研究报告花脸稿 Word 应导出成功");
         let path = files
@@ -1619,49 +1476,24 @@ mod research_tests {
     }
 
     #[test]
-    fn research_redline_tex_swaps_sentinels_for_gw_macros() {
+    fn research_redline_pdf_data_carries_marks() {
         let old = "<!-- [正文] -->\n\n## 研究背景\n\n由$x^{2}$可知。";
         let new = "<!-- [正文] -->\n\n## 研究背景\n\n由$x^{3}$可知，另见附件。";
         let doc = build(old, new);
-
-        // 与 export_files 的 PDF 分支相同的前半段：转换 + 换宏。
-        // 编译交给 texcompile 的既有测试，这里不真跑 Tectonic。
         let dir = tempfile::tempdir().expect("临时目录");
-        let tex_path = dir.path().join("报告-花脸稿.tex");
-        crate::export::write_tex_for_kind(
-            &tex_path,
+        let data = crate::export::typst::research::document_json(
             &research_input(),
             &doc.markdown,
-            &UnitDisplay::new(&[]),
-            &FontConfig::default(),
             &crate::models::NumberingConfig::default(),
-            &doc.elements,
+            dir.path(),
         )
-        .expect("研究报告花脸稿 TeX 应生成成功");
-        crate::visual_diff::redline_research_tex_files(dir.path()).expect("换宏");
-        let main = std::fs::read_to_string(&tex_path).expect("读主 TeX");
-        assert!(
-            main.contains("\\providecommand{\\GwDel}"),
-            "主 TeX 应注入花脸稿宏定义：{main}"
-        );
-        // 分章 TeX 里的哨兵应已换成宏。
-        let chapter =
-            std::fs::read_to_string(tex_path.parent().unwrap().join("data/chapter01.tex"))
-                .expect("读分章 TeX");
-        assert!(chapter.contains("\\GwDel{"), "分章应有删除宏：{chapter}");
-        // 新增的一句里带公式：公式不能进 xeCJKfntef 的宏（编译失败），整体装盒
-        // 画框（`\GwAddAtom`），文字部分走 `\GwAddLines`，首尾各一条竖边。
-        assert!(
-            chapter.contains("\\GwDelAtom{\\(x^{2}\\)}"),
-            "删掉的公式整体标注：{chapter}"
-        );
-        assert!(
-            chapter.contains("\\GwBoxBarL\\GwAddAtom{\\kern1.5pt\\(x^{3}\\)}")
-                && chapter.contains("\\GwAddLines{可知，另见附件\\kern1.5pt}\\GwBoxBarR{}"),
-            "分章应有新增宏：{chapter}"
-        );
+        .expect("研究报告花脸稿排版数据应生成成功");
+        assert!(data.contains(r#""m":"del""#), "应有删除标注：{data}");
+        assert!(data.contains(r#""m":"add""#), "应有新增标注：{data}");
+        // 公式整个标注，源码里不剩哨兵（否则排不出来）。
+        assert!(data.contains(r#""v":"x^{3}""#), "{data}");
         for ch in ['\u{E000}', '\u{E001}', '\u{E002}', '\u{E003}'] {
-            assert!(!chapter.contains(ch), "哨兵不得残留：{chapter}");
+            assert!(!data.contains(ch), "哨兵不得残留：{data}");
         }
     }
 }

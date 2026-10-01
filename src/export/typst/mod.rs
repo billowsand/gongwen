@@ -1,20 +1,20 @@
-//! Typst 引擎的导出：把公文（研究报告除外）排成 PDF。
+//! Typst 引擎的导出：公文排成 PDF（研究报告见子模块 `research`）。
 //!
-//! 与 `export::latex` 并列：解析、编号、标题与表格排布全部复用同一套判定，
-//! 只是产出给 `assets/typst/gongwen.typ` 的数据（见 `data`），再交给进程内的
-//! `typst_engine` 排版。不生成任何中间文件；插图直接按用户目录解析、原样嵌入。
+//! 解析、编号、标题与表格排布的判定都在 Rust 侧，产出给 `assets/typst/gongwen.typ`
+//! 的数据（见 `data`），再交给进程内的 `typst_engine` 排版。不生成任何中间文件；
+//! 插图直接按用户目录解析、原样嵌入。
 
 pub(crate) mod body;
-#[cfg(test)]
-mod compare_tests;
 pub(crate) mod data;
 mod frame;
 mod math;
 pub(crate) mod research;
-#[cfg(test)]
-mod research_compare_tests;
 mod research_redline;
+#[cfg(test)]
+mod research_sample_tests;
 pub(crate) mod runs;
+#[cfg(test)]
+mod sample_tests;
 
 use std::path::Path;
 
