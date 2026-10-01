@@ -77,6 +77,27 @@ mod tests {
     }
 
     #[test]
+    fn utf16be_preserves_supplementary_characters() {
+        let sample = format!("{SAMPLE}\n生僻字𠮟与公式$x^2$");
+        let mut bytes = vec![0xFE, 0xFF];
+        for unit in sample.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        let (text, encoding) = decode(&bytes);
+        assert_eq!(text, sample);
+        assert_eq!(encoding, encoding_rs::UTF_16BE);
+    }
+
+    #[test]
+    fn malformed_utf16_is_replaced_without_losing_surrounding_text() {
+        // 独立高代理项与残缺尾字节都应替换，不吞掉前后的合法字。
+        let bytes = [0xFF, 0xFE, 0x41, 0, 0, 0xD8, 0x42, 0, 0x43];
+        let (text, encoding) = decode(&bytes);
+        assert_eq!(text, "A\u{FFFD}B\u{FFFD}");
+        assert_eq!(encoding, encoding_rs::UTF_16LE);
+    }
+
+    #[test]
     fn empty_input_is_empty_utf8() {
         let (text, encoding) = decode(&[]);
         assert!(text.is_empty());

@@ -16,6 +16,10 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "vocabulary_xlsx/dependency_contracts.rs"]
+mod dependency_contracts;
+
 /// 唯一允许出现在 `code` 列的字符集合。
 fn is_valid_code_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
