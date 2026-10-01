@@ -328,7 +328,6 @@ impl GongwenApp {
         for action in std::mem::take(&mut self.draft_actions) {
             match action {
                 DraftAction::SaveToLibrary => self.save_to_manuscript_library(),
-                DraftAction::OpenSopPanel => self.sop_open = true,
                 DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),

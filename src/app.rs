@@ -39,7 +39,6 @@ mod quick_find;
 mod send_package_ui;
 mod session;
 mod settings;
-mod sop_ui;
 mod tabs;
 mod versioning;
 mod vocabulary;
@@ -138,8 +137,6 @@ pub struct GongwenApp {
     models: Vec<String>,
     /// 检查器埋点，只留在本机。单独存文件，不进 config.json。
     metrics: crate::metrics::Metrics,
-    /// 办理进度面板是否打开。纯当次会话状态，不进配置。
-    sop_open: bool,
     /// 送批材料面板；None 表示未打开。
     send_package: Option<SendPackagePanel>,
     /// 正在后台进行的送批材料合并导出；同一时间只跑一个。
@@ -431,7 +428,6 @@ impl GongwenApp {
             config,
             ime,
             metrics: crate::metrics::load(),
-            sop_open: false,
             send_package: None,
             send_package_export: None,
             macos_titlebar_metrics,
@@ -697,7 +693,6 @@ impl eframe::App for GongwenApp {
         self.ai_workbench_window(&ctx);
         self.ai_proposal_window(&ctx);
         self.outline_window(&ctx);
-        self.sop_window(&ctx);
         self.send_package_window(&ctx);
         self.version_commit_window(&ctx);
         self.version_switch_window(&ctx);

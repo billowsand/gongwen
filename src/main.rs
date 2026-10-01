@@ -52,7 +52,6 @@ mod revise_cases;
 mod revise_model;
 mod revision;
 mod skill_pack;
-mod sop;
 mod storage;
 mod system_fonts;
 mod text_file;

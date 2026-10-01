@@ -62,7 +62,7 @@
 
 | 你想 | 看 |
 |---|---|
-| 弄清一份公文从拟到归档怎么走 | [办文全流程与 SOP](chapter:04-workflow) |
+| 弄清一份公文从拟到归档怎么走 | [办文全流程](chapter:04-workflow) |
 | 把要素填对，让文种选对 | [立稿与要素填报](chapter:05-profiles) |
 | 熟悉编辑器与功能区 | [拟稿](chapter:06-editor)、[功能区](chapter:07-ribbon) |
 | 用好 AI | [AI 的边界](chapter:12-ai-guard)、[AI 起草工作台](chapter:13-ai-workbench) |

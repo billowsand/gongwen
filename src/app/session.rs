@@ -29,8 +29,6 @@ pub(crate) enum DraftAction {
     SaveToLibrary,
     /// 打开提交版本对话框。
     OpenVersionCommit(VersionScope),
-    /// 打开办理进度面板。
-    OpenSopPanel,
     /// 打开某篇呈批件的送批材料面板。
     OpenSendPackage(i64),
     /// 查看引用来源稿件，沿用稿件库的只读与标签规则。

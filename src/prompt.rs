@@ -1591,8 +1591,8 @@ mod tests {
 
     #[test]
     fn the_style_guide_never_breaks_the_placeholder_convention() {
-        // 校验、SOP 和高亮都靠「【待核实」前缀识别占位；规范里教模型写的占位
-        // 必须全部以它开头，否则新写法会从「存疑清零」那一步漏过去。
+        // 校验和高亮都靠「【待核实」前缀识别占位；规范里教模型写的占位
+        // 必须全部以它开头，否则新写法不会被「正文含“待核实”字段」这条命中。
         let guide = style_guide(TemplateKind::PlainDocument);
         let re = Regex::new(r"【[^】]*】").unwrap();
         for hit in re.find_iter(&guide) {

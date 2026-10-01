@@ -95,8 +95,8 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
     chapter!(
         "04-workflow",
         Part::Intro,
-        "办文全流程与 SOP",
-        "六步办文与七阶段办理进度"
+        "办文全流程",
+        "六步办文、稿件状态与版本留痕"
     ),
     chapter!(
         "05-profiles",
@@ -267,10 +267,6 @@ pub(crate) const IMAGES: &[HelpImage] = &[
     HelpImage {
         key: "images/diag-quickstart.png",
         bytes: include_bytes!("../../assets/help/images/diag-quickstart.png"),
-    },
-    HelpImage {
-        key: "images/diag-sop.png",
-        bytes: include_bytes!("../../assets/help/images/diag-sop.png"),
     },
     HelpImage {
         key: "images/diag-profile.png",
