@@ -54,6 +54,18 @@ are preserved at `vendor/latex-rust/LICENSE-MIT` and
 - Version: `latex-rust@2.0.1`
 - STIX Two Math: <https://github.com/stipub/stixfonts> (SIL OFL 1.1)
 
+## Typst
+
+Official-document PDFs are typeset in-process by the Typst compiler crates
+(`typst`, `typst-pdf`, `typst-layout` and their `typst-*` dependencies,
+version 0.15.1), distributed under the Apache License 2.0. A source copy of
+`typst-layout` is vendored in `vendor/typst-layout` with a documented patch
+(CJK punctuation shrink limits during justification, see the README there);
+the upstream license text is preserved at `vendor/typst-layout/LICENSE`.
+
+- Project: <https://github.com/typst/typst>
+- Version: `typst@0.15.1`
+
 ## Hayro and Vello CPU
 
 The application uses Hayro 0.7.1 and Vello CPU to parse and rasterize PDF
