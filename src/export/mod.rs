@@ -282,7 +282,7 @@ pub fn export_all_with_numbering(
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
     Ok(export_artifacts(
-        output_dir, input, markdown, selection, display, fonts, numbering,
+        output_dir, input, markdown, selection, display, fonts, numbering, None,
     )?
     .files)
 }
@@ -304,14 +304,13 @@ pub(crate) fn export_artifacts(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    version_name: Option<&str>,
 ) -> Result<ExportArtifacts> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
     let title = document_title(input, markdown);
-    // 按文稿类型生成统一主干名，三格式及编译出的 PDF 共用，方便归档对应：
-    // 会议议程“名称+会议时间”，白头件“白头+名称+时间戳”，公函“函号+名称+时间戳”，
-    // 电话通知“电话通知+时间戳”，普通公文“普通公文+名称+时间戳”。
-    let stem = document_stem(input, &title);
+    // 文件夹与各格式共用主干：文种前缀后追加对应的提交版本名称，未匹配版本时为“待提交”。
+    let stem = document_stem(input, &title, version_name);
     // 每次导出以文件生成名为单元归档：同一批的 md/docx/pdf 都放进同名子目录。
     // 不覆盖时在目录名上统一编号，
     // 避免各扩展名分别寻找可用名称后落到不同版本。
@@ -400,9 +399,9 @@ pub(crate) fn write_pdf_for_kind(
     Ok(path)
 }
 
-/// 导出文件名的固定前缀（不含分钟级时间戳）。导出目录里属于同一文稿的
+/// 导出文件名的固定前缀（不含版本名称）。导出目录里属于同一文稿的
 /// 文件夹都以它为前缀，工具栏“打开最近导出”靠它识别当前文稿的文件夹：
-/// - 会议议程：名称（或 名称 + 会议时间，两者都不带时间戳，前缀即完整主干）；
+/// - 会议议程：名称（或 名称 + 会议时间）；
 /// - 白头件：`白头` + 名称；
 /// - 公函：函号 + 名称（草稿期未编序号时回落机关代字，均缺失时用“公函”）；
 /// - 电话通知：`电话通知`；
@@ -426,16 +425,15 @@ pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
     }
 }
 
-/// 导出文件名的主干按文稿类型区分，`title` 已由 `extract_title` 取好：
-/// 会议议程没有时间戳，其余类型在固定前缀后追加分钟级时间戳。
-pub(crate) fn document_stem(input: &DraftInput, title: &str) -> String {
-    // 时间戳为分钟级，同一分钟内反复导出保持同名，由 overwrite/同名编号决定是否覆盖。
-    let timestamp = chrono::Local::now().format("%Y%m%d%H%M").to_string();
+/// 导出文件名的主干：固定文种前缀 + 提交版本名称；无对应版本时为“待提交”。
+pub(crate) fn document_stem(input: &DraftInput, title: &str, version_name: Option<&str>) -> String {
+    let suffix = version_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(safe_filename)
+        .unwrap_or_else(|| "待提交".into());
     let prefix = document_stem_prefix(input, title);
-    match input.kind {
-        TemplateKind::MeetingAgenda => prefix,
-        _ => format!("{prefix}-{timestamp}"),
-    }
+    format!("{prefix}-{suffix}")
 }
 
 /// 公函文件名的文号前缀：机关代字〔年〕序号号；草稿期未编序号时回落机关代字。
@@ -465,7 +463,7 @@ pub fn safe_filename(value: &str) -> String {
     let mut name = value
         .chars()
         .map(|c| {
-            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
                 '_'
             } else {
                 c
@@ -488,14 +486,15 @@ fn unique_directory_stem(dir: &Path, stem: &str) -> String {
     if !candidate.exists() {
         return stem.to_string();
     }
-    for index in 2..1000 {
+    let mut index = 2_u64;
+    loop {
         let versioned_stem = format!("{stem}-{index}");
         let candidate = dir.join(&versioned_stem);
         if !candidate.exists() {
             return versioned_stem;
         }
+        index += 1;
     }
-    format!("{stem}-{}", chrono::Local::now().timestamp())
 }
 
 #[cfg(test)]
@@ -1695,45 +1694,114 @@ mod tests {
             format!("{dir_name}-源码包")
         );
         assert!(dir_name.ends_with("-2"));
+        assert!(
+            first[0]
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-待提交")
+        );
+    }
+
+    #[test]
+    fn export_uses_version_name_for_directory_and_all_formats() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = DraftInput {
+            kind: TemplateKind::PlainDocument,
+            ..Default::default()
+        };
+        let selection = ExportSelection {
+            markdown: true,
+            docx: true,
+            pdf: true,
+            overwrite: false,
+        };
+        let run = || {
+            export_artifacts(
+                temp.path(),
+                &input,
+                "# 通知\n\n正文。",
+                &selection,
+                &UnitDisplay::new(&[]),
+                &FontConfig::default(),
+                &NumberingConfig::default(),
+                Some("送审稿"),
+            )
+            .unwrap()
+            .files
+        };
+        let first = run();
+        let second = run();
+        for (files, stem) in [
+            (&first, "普通公文-通知-送审稿"),
+            (&second, "普通公文-通知-送审稿-2"),
+        ] {
+            assert_eq!(files.len(), 3);
+            for file in files {
+                assert_eq!(file.parent().unwrap(), temp.path().join(stem));
+                assert!(
+                    file.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(stem)
+                );
+            }
+            assert!(archive_entry(&files[0], &format!("{stem}.md")).is_some());
+            assert!(files[1].ends_with(format!("{stem}.docx")));
+            assert!(files[2].ends_with(format!("{stem}.pdf")));
+        }
     }
 
     #[test]
     fn document_stem_is_per_kind() {
         let mut input = DraftInput::default();
 
-        // 会议议程：名称 + 会议时间；时间里的半角冒号被替换为下划线，保证 Windows 安全。
+        // 会议议程同样带版本后缀；会议时间里的半角冒号被替换为下划线。
         input.kind = TemplateKind::MeetingAgenda;
         input.meeting_time = "2026年8月5日（星期三）14:30".into();
         assert_eq!(
-            document_stem(&input, "开展专题研讨会议"),
-            "开展专题研讨会议-2026年8月5日（星期三）14_30"
+            document_stem(&input, "开展专题研讨会议", Some("送审稿")),
+            "开展专题研讨会议-2026年8月5日（星期三）14_30-送审稿"
         );
         // 会议时间留空时回落名称。
         input.meeting_time = "  ".into();
         assert_eq!(
-            document_stem(&input, "开展专题研讨会议"),
-            "开展专题研讨会议"
+            document_stem(&input, "开展专题研讨会议", None),
+            "开展专题研讨会议-待提交"
         );
 
-        // 白头件：白头 + 名称 + 时间戳，时间戳为 12 位数字。
+        // 白头件：白头 + 名称 + 版本名称。
         input.kind = TemplateKind::WhitePaper;
-        let stem = document_stem(&input, "关于解决XXX问题的请示");
-        let (prefix, rest) = stem.split_once('-').unwrap();
-        assert_eq!(prefix, "白头");
-        assert!(rest.starts_with("关于解决XXX问题的请示-"));
-        assert_timestamp(rest.rsplit('-').next().unwrap());
+        assert_eq!(
+            document_stem(&input, "关于解决XXX问题的请示", Some("定稿")),
+            "白头-关于解决XXX问题的请示-定稿"
+        );
 
-        // 电话通知：只有“电话通知” + 时间戳，不带名称。
+        // 电话通知保留原有前缀，追加版本名称。
         input.kind = TemplateKind::PhoneNotice;
-        let stem = document_stem(&input, "关于召开会议的通知");
-        assert!(stem.starts_with("电话通知-"));
-        assert_timestamp(stem.strip_prefix("电话通知-").unwrap());
+        assert_eq!(
+            document_stem(&input, "关于召开会议的通知", Some("初稿")),
+            "电话通知-初稿"
+        );
 
-        // 普通公文：普通公文 + 名称 + 时间戳。
+        // 普通公文：普通公文 + 名称 + 版本名称。
         input.kind = TemplateKind::PlainDocument;
-        let stem = document_stem(&input, "工作安排");
-        assert!(stem.starts_with("普通公文-工作安排-"));
-        assert_timestamp(stem.rsplit('-').next().unwrap());
+        assert_eq!(
+            document_stem(&input, "工作安排", Some("送审稿")),
+            "普通公文-工作安排-送审稿"
+        );
+        input.kind = TemplateKind::ResearchReport;
+        assert_eq!(
+            document_stem(&input, "专题研究", None),
+            "研究报告-专题研究-待提交"
+        );
+        input.kind = TemplateKind::RedHeadApproval;
+        assert_eq!(
+            document_stem(&input, "呈批事项", None),
+            format!("红头呈批-{}-呈批事项-待提交", letter_prefix(&input))
+        );
     }
 
     #[test]
@@ -1743,34 +1811,43 @@ mod tests {
         input.profile.department_code = "某政函".into();
         input.profile.document_number = "12".into();
         input.date = "2026年8月6日".into();
-        let stem = document_stem(&input, "关于开展测试工作的函");
-        let timestamp = stem.rsplit('-').next().unwrap();
-        assert_eq!(
-            stem.trim_end_matches(&format!("-{timestamp}")),
-            "某政函〔2026〕12号-关于开展测试工作的函"
-        );
-        assert_timestamp(timestamp);
+        let stem = document_stem(&input, "关于开展测试工作的函", Some("送审稿"));
+        assert_eq!(stem, "某政函〔2026〕12号-关于开展测试工作的函-送审稿");
     }
 
     #[test]
     fn official_letter_without_serial_falls_back_to_code() {
-        // 草稿期尚未编发文序号：只带机关代字，仍保留名称与时间戳。
+        // 草稿期尚未编发文序号：只带机关代字，仍保留名称与提交状态。
         let mut input = DraftInput::default();
         input.kind = TemplateKind::OfficialLetter;
         input.profile.department_code = "某政函".into();
-        let stem = document_stem(&input, "关于开展测试工作的函");
-        assert!(stem.starts_with("某政函-关于开展测试工作的函-"));
+        let stem = document_stem(&input, "关于开展测试工作的函", None);
+        assert_eq!(stem, "某政函-关于开展测试工作的函-待提交");
 
         // 代字与序号都缺失：回落“公函”。
         let mut input = DraftInput::default();
         input.kind = TemplateKind::OfficialLetter;
-        let stem = document_stem(&input, "关于开展测试工作的函");
-        assert!(stem.starts_with("公函-关于开展测试工作的函-"));
+        let stem = document_stem(&input, "关于开展测试工作的函", None);
+        assert_eq!(stem, "公函-关于开展测试工作的函-待提交");
     }
 
-    fn assert_timestamp(value: &str) {
-        assert_eq!(value.len(), 12, "时间戳应为 12 位：{value}");
-        assert!(value.chars().all(|character| character.is_ascii_digit()));
+    #[test]
+    fn document_stem_sanitizes_version_name_and_defaults_to_pending() {
+        let input = DraftInput {
+            kind: TemplateKind::PlainDocument,
+            ..Default::default()
+        };
+        assert_eq!(
+            document_stem(&input, "通知", Some("  送审/稿:第一版\n.  ")),
+            "普通公文-通知-送审_稿_第一版_"
+        );
+        for name in [None, Some(""), Some("  ")] {
+            assert_eq!(document_stem(&input, "通知", name), "普通公文-通知-待提交");
+        }
+        assert_eq!(
+            document_stem(&input, "通知", Some(&"版".repeat(100))),
+            format!("普通公文-通知-{}", "版".repeat(80))
+        );
     }
 
     /// 把正文按"完整括号"切段：全角 `（…）`、半角 `(…)` 或方头括号 `【…】`

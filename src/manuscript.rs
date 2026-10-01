@@ -19,6 +19,7 @@ use std::path::Path;
 use std::time::Duration;
 
 pub(crate) mod candidates;
+mod export_naming;
 pub(crate) mod merge;
 mod search;
 pub(crate) mod send_package;

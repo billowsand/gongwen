@@ -1007,6 +1007,7 @@ pub(crate) fn export_and_compile(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    version_name: Option<&str>,
     mut progress: impl FnMut(&str),
 ) -> anyhow::Result<ExportOutcome> {
     progress(if selection.pdf {
@@ -1021,7 +1022,14 @@ pub(crate) fn export_and_compile(
     let mut proof_measured = false;
     let mut compile_error: Option<String> = None;
     let artifacts = match export::export_artifacts(
-        output_dir, input, markdown, selection, &display, &fonts, numbering,
+        output_dir,
+        input,
+        markdown,
+        selection,
+        &display,
+        &fonts,
+        numbering,
+        version_name,
     ) {
         Ok(artifacts) => artifacts,
         // PDF 排版失败时 md / docx 已经写好了，不让整次导出作废，走红色提示框。

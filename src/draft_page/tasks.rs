@@ -127,6 +127,30 @@ impl DraftPage<'_> {
             self.doc.result_drawer_open = true;
         }
 
+        // 在主线程按本次实际导出的快照认定版本；不能只用“已保存”或最新版本名称。
+        let version_name = match (self.doc.manuscript_id, self.store.as_deref_mut()) {
+            (Some(id), Some(store)) => {
+                let selected_version = self
+                    .doc
+                    .loaded_version
+                    .as_ref()
+                    .filter(|loaded| loaded.manuscript_id == id)
+                    .map(|loaded| loaded.version_number);
+                match store.export_version_name(
+                    id,
+                    selected_version,
+                    &self.doc.draft,
+                    &self.doc.generated_markdown,
+                ) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        *self.status = format!("读取导出版本失败：{error:#}");
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
         let (key, seq) = self.begin_job();
         *self.status = "正在导出当前审校稿…".into();
         self.doc.output_files.clear();
@@ -147,6 +171,7 @@ impl DraftPage<'_> {
                 &vocabulary,
                 &fonts,
                 &numbering,
+                version_name.as_deref(),
                 |message| {
                     let _ = tx.send(WorkerResult::Doc {
                         key,
@@ -501,6 +526,7 @@ impl DraftPage<'_> {
                         &config.vocabulary,
                         &config.fonts,
                         &config.numbering,
+                        None,
                         |message| {
                             let _ = tx.send(WorkerResult::Doc {
                                 key,

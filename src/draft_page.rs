@@ -111,9 +111,9 @@ impl ExportKind {
 /// 导出目录里当前文稿最近一次产出的 pdf/docx，供「输出」分区的入口点亮与打开。
 ///
 /// 导出的落盘结构是 `输出目录/<文件名主干>/<文件名主干>.{md,docx,pdf}`，
-/// 一次导出一个子目录；同一文稿多次导出会按分钟时间戳攒出多个子目录，也会和
+/// 同一文稿按版本名称或“待提交”分子目录，不覆盖同名文件时再追加编号，也会和
 /// 别的文稿的目录混在一起。所以这里先按当前文稿的导出主干前缀过滤出属于它的
-/// 子目录，再按目录修改时间从新到旧翻，先翻到的就是"最近一次"，各种格式都找齐
+/// 子目录，再按目录及成品文件的修改时间从新到旧翻，先翻到的就是"最近一次"，各种格式都找齐
 /// 即停。逐帧翻盘太贵，按目录 + 前缀 + 节流缓存，导出完成时由外壳调
 /// [`ExportLinks::invalidate`] 主动作废。
 #[derive(Default)]
@@ -143,7 +143,7 @@ impl ExportLinks {
     }
 
     /// 目录条目是否属于当前绑定的文稿：未绑定时全部认；绑定时按导出主干前缀
-    /// 匹配——`stem` 本身、`stem-N` 编号变体（同名覆盖关掉后同分钟多次导出），
+    /// 匹配——`stem` 本身、`stem-版本名称`（或“待提交”，重复导出可追加编号），
     /// 或摊在根目录的 `stem.<ext>` 成品。用 `-`/`.` 作分界而不是裸前缀，
     /// 避免“关于X”误匹配“关于X的补充”这类邻居。
     fn matches(&self, file_name: &std::ffi::OsStr) -> bool {
@@ -186,17 +186,27 @@ impl ExportLinks {
                 continue;
             };
             if meta.is_dir() {
-                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
                 if self.matches(&entry.file_name()) {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    dirs.push((modified, name, entry.path()));
+                    let path = entry.path();
+                    // 同一个版本覆盖导出时，目录自身的修改时间可能不变，必须也看成品。
+                    let modified = [
+                        format!("{name}.pdf"),
+                        format!("{name}.docx"),
+                        format!("{name}-源码包.zip"),
+                    ]
+                    .iter()
+                    .filter_map(|file| std::fs::metadata(path.join(file)).ok()?.modified().ok())
+                    .chain(meta.modified().ok())
+                    .max()
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                    dirs.push((modified, name, path));
                 }
             } else if self.matches(&entry.file_name()) {
                 loose.push(entry.path());
             }
         }
-        // 文件系统时间戳精度不足时同一批目录会得到相同 mtime，此时按目录名倒序
-        // 兜底：导出目录名带分钟级时间戳，名字越靠后就是越新的导出。
+        // 修改时间相同时按名称排序，使结果稳定；新旧命名的目录都可识别。
         dirs.sort_by(|(a_modified, a_name, _), (b_modified, b_name, _)| {
             b_modified.cmp(a_modified).then_with(|| b_name.cmp(a_name))
         });
@@ -912,7 +922,7 @@ mod tests {
     }
 
     /// 前缀匹配必须用 `-` 作分界：`关于X` 不应误匹配 `关于X的补充`，
-    /// 同时要认得同分钟重复导出产生的 `stem-N` 编号变体。
+    /// 同时要认得版本名称、“待提交”和重复导出产生的编号变体，以及旧时间戳目录。
     #[test]
     fn export_links_stem_matching_uses_dash_boundary() {
         let mut links = ExportLinks {
@@ -927,6 +937,8 @@ mod tests {
             .matches(std::ffi::OsStr::new(name))
         };
         assert!(matches("普通公文-关于X-202601011200"));
+        assert!(matches("普通公文-关于X-送审稿"));
+        assert!(matches("普通公文-关于X-待提交-2"));
         assert!(matches("普通公文-关于X-2"));
         assert!(matches("普通公文-关于X"));
         // 摊在根目录的成品（不带文件夹）也认。
@@ -943,7 +955,7 @@ mod tests {
     }
 
     /// 输出目录里混着当前文稿的多次导出与别的文稿的最新导出时，
-    /// 三枚成品入口必须只认当前文稿最新时间戳文件夹里的文件，不能串到别的文稿。
+    /// 成品入口必须只认当前文稿最近导出文件夹里的文件，不能串到别的文稿。
     #[test]
     fn export_links_only_open_latest_dir_of_current_stem() {
         let root = tempfile::tempdir().unwrap();
@@ -977,6 +989,35 @@ mod tests {
                 "{kind:?} 应指向当前文稿最新导出目录"
             );
         }
+    }
+
+    /// 覆盖旧版本的成品时，即使目录自身时间不变，“最近导出”也必须跟上。
+    #[test]
+    fn export_links_recognizes_overwritten_version_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let stem = "普通公文-通知";
+        let overwritten = root.path().join(format!("{stem}-送审稿"));
+        let other = root.path().join(format!("{stem}-定稿"));
+        let epoch = std::time::UNIX_EPOCH;
+        for folder in [&overwritten, &other] {
+            std::fs::create_dir(folder).unwrap();
+            for extension in ["pdf", "docx"] {
+                touch_export(folder, extension);
+            }
+        }
+        // 两个目录实际的创建时间都在 epoch 之后，用远未来的成品时间模拟覆盖。
+        let path = overwritten.join(format!("{stem}-送审稿.pdf"));
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(epoch + Duration::from_secs(4_000_000_000)),
+            )
+            .unwrap();
+        let mut links = ExportLinks::default();
+        links.refresh(root.path().to_str().unwrap(), Some(stem));
+        assert_eq!(links.path(ExportKind::Pdf), Some(path.as_path()));
     }
 
     /// 当前文稿最新目录缺某种格式时，可以从同文稿更早的导出补齐，
