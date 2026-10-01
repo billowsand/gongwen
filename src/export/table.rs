@@ -792,6 +792,131 @@ pub(super) fn to_longtblr(
     output
 }
 
+/// Typst 引擎的表格数据：与 [`to_longtblr`] 同一套判定（智能列宽、单元格对齐、
+/// 姓名列、居中格压缩 / 换行），只是产出给模板的结构而不是 TeX 源码。
+/// 列宽保留 tabularray 的语义（`X` 比例按内容宽分、`Q` 定宽），由模板换算。
+pub(super) fn to_typst_table(
+    rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
+    spans: &[TableSpan],
+    numbered: bool,
+    id: String,
+) -> Option<crate::export::typst::data::Table> {
+    use crate::export::typst::data::{Table, TableCell, TableColumn};
+    use crate::export::typst::runs::{cell_runs, plain_runs};
+
+    let columns = analyze_table(rows, aligns, spans);
+    if rows.is_empty() || columns.is_empty() {
+        return None;
+    }
+    let align_name = |alignment: ColumnAlignment| match alignment {
+        ColumnAlignment::Left => "l",
+        ColumnAlignment::Center => "c",
+        ColumnAlignment::Right => "r",
+    };
+    let cols = columns
+        .iter()
+        .map(|column| {
+            let (kind, v) = match column.width {
+                // TeX 写的是 `wd={em:.0}em`，取整与之一致。
+                ColumnWidth::FixedEm(em) => ("em", em.round()),
+                ColumnWidth::Relative(ratio) => ("fr", (ratio * 10.0).round() / 10.0),
+            };
+            TableColumn {
+                kind,
+                v,
+                align: align_name(column.alignment),
+            }
+        })
+        .collect::<Vec<_>>();
+    let column_alignments = columns
+        .iter()
+        .map(|column| column.alignment)
+        .collect::<Vec<_>>();
+    let name_column = name_column(rows);
+    let (grid, _) = to_docx_grid(
+        rows,
+        aligns,
+        spans,
+        super::docx::TABLE_CONTENT_WIDTH_TWIPS,
+        super::docx::TABLE_SIZE * 10,
+    );
+
+    let mut out_rows = Vec::with_capacity(rows.len());
+    for (row_index, row) in rows.iter().enumerate() {
+        let mut cells = Vec::new();
+        for (column_index, cell) in row.iter().enumerate() {
+            let span = table_span_at(spans, row_index, column_index);
+            if span.is_some_and(|span| !span.is_anchor(row_index, column_index)) {
+                continue;
+            }
+            let cleaned = plain_cell_text(cell);
+            let is_name = name_column == Some(column_index) && row_index > 0;
+            let header = row_index == 0;
+            let runs = if header {
+                plain_runs(&cleaned)
+            } else {
+                cell_runs(cell)
+            };
+            let alignment = resolve_cell_alignment(
+                rows,
+                spans,
+                &column_alignments,
+                numbered,
+                row_index,
+                column_index,
+            );
+            let column_span = span.map_or(1, |span| span.column_span);
+            let width = grid
+                .iter()
+                .skip(column_index)
+                .take(column_span)
+                .sum::<usize>();
+            let mut lines = None;
+            let mut scale = 1.0;
+            if alignment == ColumnAlignment::Center
+                && let Some(plan) = centered_cell_plan(cell, is_name, width)
+            {
+                match plan {
+                    (super::title::TitlePlan::SingleLine, _) => {}
+                    (super::title::TitlePlan::Compressed, percent) => {
+                        scale = percent as f64 / 100.0;
+                    }
+                    (super::title::TitlePlan::Wrapped(parts), _) => {
+                        lines = Some(
+                            crate::export::redline_slice_lines(cell, &parts)
+                                .iter()
+                                .map(|piece| {
+                                    if header {
+                                        plain_runs(&plain_cell_text(piece))
+                                    } else {
+                                        cell_runs(piece)
+                                    }
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            cells.push(TableCell {
+                runs,
+                align: align_name(alignment),
+                colspan: column_span,
+                rowspan: span.map_or(1, |span| span.row_span),
+                lines,
+                scale,
+                name: is_name.then_some(cleaned),
+            });
+        }
+        out_rows.push(cells);
+    }
+    Some(Table {
+        id,
+        cols,
+        rows: out_rows,
+    })
+}
+
 /// 规格 §6：表头含“姓名/联系人”的列，非表头单元格按版记的方式处理姓名宽度。
 pub(crate) fn name_column(rows: &[Vec<String>]) -> Option<usize> {
     rows.first().and_then(|header| {

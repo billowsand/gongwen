@@ -6,6 +6,12 @@
 ## 技术栈
 
 - Rust edition 2024（stable），GUI 用 `eframe` / `egui` 0.35，纯 CPU 渲染 PDF 用 `hayro`。
+- 公文 PDF 双引擎（设置页「PDF 引擎」切换，默认 Typst）：**Typst** 进程内排版
+  （`typst` 0.15.1，模板 `assets/typst/gongwen.typ`、数据由 `src/export/typst/` 生成、
+  World 在 `src/typst_engine.rs`；`typst-layout` vendor 在 `vendor/typst-layout/` 打了
+  标点收缩补丁）或 **Tectonic**（下面的 TeX 链路）。研究报告固定 Tectonic。两套版式逐项
+  对照，改版式前先读 `docs/typst-engine.md`，改完跑那里的对照测试与
+  `scripts/typst-compare.py`。
 - 导出链：Markdown → DOCX（`docx-rs`）/ TeX → PDF（本机 Tectonic / XeLaTeX）、
   XLSX（`rust_xlsxwriter`）、稿件库与词表用 `rusqlite`。研究报告支持 LaTeX 数学
   公式（`$...$` / `$$...$$`）：导出走 tectonic + amsmath/mathtools（需要 runtime
@@ -66,6 +72,9 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 - **离线稿件身份识别与版本合并**（加密 ZIP 多机往返同步）：方案、实施进度、
   出入与已知坑见 `docs/offline-sync-redesign.md`（单文件）。核心是稿件 UUID +
   不可变版本图（UUID、双父、SHA-256），旧 ZIP 仍可读；改同步/导入逻辑前先读它。
+- **Typst 排版引擎**（公文 PDF 双引擎，分支 `feat/typst-engine`）：六个文种、附件、横页、
+  联合发文、份号、花脸稿、孤行探针都已接入并与 TeX 逐行对照，**待真机验收**（打印、送批
+  材料合并、本机字体）。设计、对照结果、已知差异与坑见 `docs/typst-engine.md`（单文件）。
 - **送批材料**（呈批件挂随行件、按提交版合并成一个 PDF、归档钉版、随同步 ZIP 携带）：
   五期已全部实现，**待真机验收**（TeX 编译→合并整条链、ZIP 往返）。方案、各期进度、
   与方案的出入和已知坑见 `docs/send-package-design.md`（单文件）。版本与校验值复用离线

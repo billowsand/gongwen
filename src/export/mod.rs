@@ -10,6 +10,7 @@ mod latex;
 mod research;
 pub(crate) mod table;
 pub(crate) mod title;
+pub(crate) mod typst;
 pub(crate) use docx::record::automatic_print_copies;
 #[allow(unused_imports)]
 pub(crate) use docx::{write_docx, write_docx_with_numbering};
@@ -29,8 +30,9 @@ pub(crate) use latex::write_tex;
 pub(crate) use research::write_docx as write_docx_research;
 
 use crate::models::{
-    DraftInput, ExportSelection, FontConfig, NumberingConfig, TemplateKind, split_units,
+    DraftInput, ExportSelection, FontConfig, NumberingConfig, PdfEngine, TemplateKind, split_units,
 };
+use crate::typst_engine;
 use crate::units::UnitDisplay;
 use anyhow::{Context, Result};
 use std::fs;
@@ -291,7 +293,8 @@ pub fn export_all(
     )
 }
 
-/// 与 [`export_all`] 相同，另按设置里的编号样式生成标题与列表编号。
+/// 与 [`export_all`] 相同，另按设置里的编号样式生成标题与列表编号。PDF 一栏
+/// 走 Tectonic 链路（只写 `.tex`，由调用方编译）。
 #[allow(clippy::too_many_arguments)]
 pub fn export_all_with_numbering(
     output_dir: &Path,
@@ -302,6 +305,39 @@ pub fn export_all_with_numbering(
     fonts: &FontConfig,
     numbering: &NumberingConfig,
 ) -> Result<Vec<PathBuf>> {
+    Ok(export_all_with_engine(
+        output_dir,
+        input,
+        markdown,
+        selection,
+        display,
+        fonts,
+        numbering,
+        PdfEngine::Tectonic,
+    )?
+    .files)
+}
+
+/// 一次导出的产物。
+pub(crate) struct ExportArtifacts {
+    pub files: Vec<PathBuf>,
+    /// Typst 引擎排出了 PDF 时的附带信息（孤行探针报告、排版警告）。
+    pub typst: Option<typst_engine::TypstOutcome>,
+}
+
+/// 按引擎导出。勾了 PDF（设置里的 TeX 一栏）时：研究报告与 Tectonic 引擎写 `.tex`，
+/// 由调用方编译；Typst 引擎在这里直接排出 `.pdf`，不写 `.tex`。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn export_all_with_engine(
+    output_dir: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    selection: &ExportSelection,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    engine: PdfEngine,
+) -> Result<ExportArtifacts> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
     let title = document_title(input, markdown);
@@ -344,20 +380,71 @@ pub fn export_all_with_numbering(
         }
         files.push(path);
     }
+    let mut typst = None;
     if selection.tex {
-        let path = document_dir.join(format!("{export_stem}.tex"));
-        write_tex_for_kind(
-            &path,
-            input,
-            markdown,
-            display,
-            fonts,
-            numbering,
-            &crate::visual_diff::ElementMarks::default(),
-        )?;
-        files.push(path);
+        if uses_typst(input, engine) {
+            let path = document_dir.join(format!("{export_stem}.pdf"));
+            let outcome = self::typst::write_pdf(
+                &path,
+                input,
+                markdown,
+                display,
+                fonts,
+                numbering,
+                &crate::visual_diff::ElementMarks::default(),
+            )?;
+            files.push(path);
+            typst = Some(outcome);
+        } else {
+            let path = document_dir.join(format!("{export_stem}.tex"));
+            write_tex_for_kind(
+                &path,
+                input,
+                markdown,
+                display,
+                fonts,
+                numbering,
+                &crate::visual_diff::ElementMarks::default(),
+            )?;
+            files.push(path);
+        }
     }
-    Ok(files)
+    Ok(ExportArtifacts { files, typst })
+}
+
+/// 这份文档的 PDF 是否走 Typst：研究报告固定 Tectonic（mdx research 模式）。
+pub(crate) fn uses_typst(input: &DraftInput, engine: PdfEngine) -> bool {
+    engine == PdfEngine::Typst && !input.kind.is_research()
+}
+
+/// 把一份文档编成 PDF，写在 `dir/stem.pdf`，返回 PDF 路径。研究报告固定走 mdx +
+/// 内置 Tectonic；其余按引擎：Typst 进程内直接排，Tectonic 先写 `dir/stem.tex` 再编译
+/// （找不到可用 TeX 时返回 `None`）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_pdf_for_kind(
+    dir: &Path,
+    stem: &str,
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    elements: &crate::visual_diff::ElementMarks,
+    engine: PdfEngine,
+) -> Result<Option<PathBuf>> {
+    if uses_typst(input, engine) {
+        let path = dir.join(format!("{stem}.pdf"));
+        self::typst::write_pdf(&path, input, markdown, display, fonts, numbering, elements)?;
+        return Ok(Some(path));
+    }
+    let tex = dir.join(format!("{stem}.tex"));
+    write_tex_for_kind(&tex, input, markdown, display, fonts, numbering, elements)?;
+    let compiled = if input.kind.is_research() {
+        crate::texcompile::compile_research_pdf(&tex)?
+    } else {
+        crate::texcompile::compile_pdf_with_proof(&tex, fonts)?
+    };
+    Ok(compiled.pdf)
 }
 
 /// 导出文件名的固定前缀（不含分钟级时间戳）。导出目录里属于同一文稿的

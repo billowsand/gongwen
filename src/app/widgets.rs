@@ -7,8 +7,8 @@ use crate::app::{CONTENT_WIDTH, FORM_CONTROL_HEIGHT, LABEL_WIDTH, MANUAL_BACK_WI
 use crate::export;
 use crate::manuscript;
 use crate::models::{
-    DraftInput, ExportSelection, FontConfig, ManuscriptStatus, NumberingConfig, ReviewNote,
-    SecurityLevel, VocabularyCategory, VocabularyEntry, join_units, split_units,
+    DraftInput, ExportSelection, FontConfig, ManuscriptStatus, NumberingConfig, PdfEngine,
+    ReviewNote, SecurityLevel, VocabularyCategory, VocabularyEntry, join_units, split_units,
 };
 use crate::orphan_probe;
 use crate::system_fonts;
@@ -1009,19 +1009,58 @@ pub(crate) fn export_and_compile(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    engine: PdfEngine,
     mut progress: impl FnMut(&str),
 ) -> anyhow::Result<ExportOutcome> {
-    progress("正在生成导出文件…");
+    let typst = selection.tex && export::uses_typst(input, engine);
+    progress(if typst {
+        "正在生成导出文件，用 Typst 排版 PDF…"
+    } else {
+        "正在生成导出文件…"
+    });
     let display = UnitDisplay::new(vocabulary);
-    // 字体文件在写 TeX 之前就要落实：TeX 里写死了按哪个文件加载，等到编译时
+    // 字体文件在排版之前就要落实：TeX 里写死了按哪个文件加载，等到编译时
     // 才发现文件不在就只能报错，而这里还来得及退回内置字体。
-    let (fonts, warnings) = system_fonts::resolve(fonts);
+    let (fonts, mut warnings) = system_fonts::resolve(fonts);
     let mut proof_warnings: Vec<ReviewNote> = Vec::new();
     let mut proof_measured = false;
-    let mut files = export::export_all_with_numbering(
-        output_dir, input, markdown, selection, &display, &fonts, numbering,
-    )?;
+    // 孤行只有排完版才知道：Tectonic 读类文件写出的实测坐标，Typst 读模板留下的
+    // 段首段尾位置，两边报告同一种格式。
+    let mut take_proof = |report: &str| {
+        proof_measured = true;
+        proof_warnings.extend(orphan_probe::find_orphans(report).iter().map(|metric| {
+            let message = orphan_probe::format_warning(metric, markdown);
+            // 带上这一段的字节范围，审校面板里点一下就能选中它。
+            match export::block_span_for_line(markdown, metric.source_line) {
+                Some(span) => ReviewNote::located(message, span),
+                None => ReviewNote::from(message),
+            }
+        }));
+    };
     let mut compile_error: Option<String> = None;
+    let artifacts = match export::export_all_with_engine(
+        output_dir, input, markdown, selection, &display, &fonts, numbering, engine,
+    ) {
+        Ok(artifacts) => artifacts,
+        // Typst 排版失败时 md / docx 已经写好了，不让整次导出作废：与 Tectonic
+        // 编译失败一样走红色提示框。
+        Err(error) if typst => {
+            compile_error = Some(format!("{error:#}"));
+            export::ExportArtifacts {
+                files: Vec::new(),
+                typst: None,
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    let mut files = artifacts.files;
+    if let Some(outcome) = artifacts.typst {
+        if let Some(report) = &outcome.proof {
+            take_proof(report);
+        }
+        warnings.extend(outcome.warnings);
+        progress("PDF 排版完成，正在整理导出结果…");
+    }
     if let Some(tex) = files
         .iter()
         .find(|file| file.extension().is_some_and(|ext| ext == "tex"))
@@ -1038,19 +1077,8 @@ pub(crate) fn export_and_compile(
                     files.push(pdf);
                     progress("PDF 编译完成，正在整理导出结果…");
                 }
-                // 孤行只有排完版才知道，这里读的是类文件写出的实测坐标。
                 if let Some(report) = outcome.proof {
-                    proof_measured = true;
-                    proof_warnings.extend(orphan_probe::find_orphans(&report).iter().map(
-                        |metric| {
-                            let message = orphan_probe::format_warning(metric, markdown);
-                            // 带上这一段的字节范围，审校面板里点一下就能选中它。
-                            match export::block_span_for_line(markdown, metric.source_line) {
-                                Some(span) => ReviewNote::located(message, span),
-                                None => ReviewNote::from(message),
-                            }
-                        },
-                    ));
+                    take_proof(&report);
                 }
             }
             Err(error) => compile_error = Some(format!("{error:#}")),

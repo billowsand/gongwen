@@ -1785,6 +1785,38 @@ pub struct AppConfig {
     /// 应用内拼音输入法。旧配置没有该字段时按默认值补齐（启用全拼、全角标点）。
     #[serde(default)]
     pub ime: ImeConfig,
+    /// 公文 PDF 用哪套引擎排版。研究报告不受影响，固定内置 Tectonic。
+    /// 旧配置没有该字段时取默认的 Typst。
+    pub pdf_engine: PdfEngine,
+}
+
+/// 公文 PDF 的排版引擎。两套版式逐项对照过（见 docs/typst-engine.md），可随时切换。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfEngine {
+    /// 进程内 Typst：毫秒级、不落中间文件。
+    #[default]
+    Typst,
+    /// 内置 Tectonic（XeLaTeX）：原有的 TeX 链路，同时产出 .tex 源文件。
+    Tectonic,
+}
+
+impl PdfEngine {
+    pub const ALL: [Self; 2] = [Self::Typst, Self::Tectonic];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Typst => "Typst（内置，推荐）",
+            Self::Tectonic => "Tectonic（TeX）",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Typst => "在程序内直接排版，一份公文几十毫秒，只产出 PDF。",
+            Self::Tectonic => "调用内置 Tectonic 编译，同时保留 .tex 源文件，一份约两秒。",
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -1826,6 +1858,7 @@ impl Default for AppConfig {
             ribbon_tab: RibbonTab::default(),
             ribbon_collapsed: false,
             ime: ImeConfig::default(),
+            pdf_engine: PdfEngine::default(),
         }
     }
 }

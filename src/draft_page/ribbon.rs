@@ -1442,6 +1442,16 @@ impl DraftPage<'_> {
             self.start_export_current();
         }
         let overwrite = self.config.export.overwrite;
+        // PDF 一栏随引擎：Typst 只出 PDF，Tectonic 连 .tex 源文件一起出。
+        let (pdf_label, pdf_tip) = match self.config.pdf_engine {
+            crate::models::PdfEngine::Typst => (
+                "仅 PDF",
+                "这一次只出 PDF（内置 Typst 排版；研究报告仍用内置 Tectonic）",
+            ),
+            crate::models::PdfEngine::Tectonic => {
+                ("TeX 与 PDF", "这一次只出 tex，并用内置 Tectonic 编译成 PDF")
+            }
+        };
         let mut only: Option<(ExportSelection, &'static str)> = None;
         ui.add_enabled_ui(ready, |ui| {
             for (icon, label, selection, tip) in [
@@ -1458,14 +1468,14 @@ impl DraftPage<'_> {
                 ),
                 (
                     theme::Icon::Tex,
-                    "TeX 与 PDF",
+                    pdf_label,
                     ExportSelection {
                         markdown: false,
                         docx: false,
                         tex: true,
                         overwrite,
                     },
-                    "这一次只出 tex，并用本机 Tectonic/XeLaTeX 编译成 PDF",
+                    pdf_tip,
                 ),
                 (
                     theme::Icon::PencilLine,

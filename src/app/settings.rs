@@ -10,7 +10,7 @@
 use crate::app::{GongwenApp, warn};
 use crate::models::{
     BoldStyle, DiagramTheme, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole,
-    HeadingNumbering, ListNumbering, PaperMode, ProxyMode, RerankMode, ThemeName,
+    HeadingNumbering, ListNumbering, PaperMode, PdfEngine, ProxyMode, RerankMode, ThemeName,
 };
 use crate::storage;
 use crate::system_fonts;
@@ -1856,14 +1856,36 @@ impl GongwenApp {
                 false,
                 egui::Checkbox::new(&mut self.config.export.docx, "Word"),
             )
-            .on_disabled_hover_text("Word 导出仍在完善，当前请使用 LaTeX/PDF");
-            ui.checkbox(&mut self.config.export.tex, "LaTeX");
+            .on_disabled_hover_text("Word 导出仍在完善，当前请使用 PDF");
+            let pdf_label = match self.config.pdf_engine {
+                PdfEngine::Typst => "PDF",
+                PdfEngine::Tectonic => "LaTeX 与 PDF",
+            };
+            ui.checkbox(&mut self.config.export.tex, pdf_label);
         });
         if !self.config.export.any() {
             setting_continuation(ui, |ui| {
                 ui.colored_label(warn(), "未勾选任何导出格式，起草页的导出按钮不会产生文件。");
             });
         }
+        setting_row(
+            ui,
+            "PDF 引擎",
+            Some("公文 PDF 用哪套排版引擎。研究报告不受影响，固定用内置 Tectonic。"),
+            |ui| {
+                for engine in PdfEngine::ALL {
+                    ui.radio_value(&mut self.config.pdf_engine, engine, engine.label())
+                        .on_hover_text(engine.hint());
+                }
+            },
+        );
+        setting_continuation(ui, |ui| {
+            ui.label(
+                egui::RichText::new(self.config.pdf_engine.hint())
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::text_muted()),
+            );
+        });
         ui.add_space(6.0);
         ui.checkbox(
             &mut self.config.auto_export,

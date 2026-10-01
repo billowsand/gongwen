@@ -57,6 +57,7 @@ mod system_fonts;
 mod texcompile;
 mod text_file;
 mod theme;
+mod typst_engine;
 mod units;
 mod validator;
 mod version;

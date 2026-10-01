@@ -116,13 +116,14 @@ pub struct CompileOutcome {
     pub proof: Option<String>,
 }
 
-/// 检测到 TeX 引擎时编译 `.pdf`；未检测到时返回 `Ok(None)` 并保留 `.tex`。
-/// 编译失败时返回错误，调用方仍可把已经生成的 `.tex` 展示给用户。
+/// 测试用：只要 PDF 路径。
+#[cfg(test)]
 pub fn compile_pdf_if_available(tex_path: &Path, fonts: &FontConfig) -> Result<Option<PathBuf>> {
     Ok(compile_pdf_with_proof(tex_path, fonts)?.pdf)
 }
 
-/// 同上，另外把孤行探针报告一并带回。需要审校提示的调用方走这个入口。
+/// 检测到 TeX 引擎时编译 `.pdf`，并把孤行探针报告一并带回；未检测到时 `pdf` 为
+/// `None` 并保留 `.tex`。编译失败时返回错误，调用方仍可把已经生成的 `.tex` 展示给用户。
 pub fn compile_pdf_with_proof(tex_path: &Path, fonts: &FontConfig) -> Result<CompileOutcome> {
     let Some(engine) = find_tex_engine()? else {
         return Ok(CompileOutcome::default());

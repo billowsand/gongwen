@@ -137,6 +137,7 @@ impl DraftPage<'_> {
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
+        let engine = self.config.pdf_engine;
         let tx = self.sender.clone();
         thread::spawn(move || {
             let result = export_and_compile(
@@ -147,6 +148,7 @@ impl DraftPage<'_> {
                 &vocabulary,
                 &fonts,
                 &numbering,
+                engine,
                 |message| {
                     let _ = tx.send(WorkerResult::Doc {
                         key,
@@ -501,6 +503,7 @@ impl DraftPage<'_> {
                         &config.vocabulary,
                         &config.fonts,
                         &config.numbering,
+                        config.pdf_engine,
                         |message| {
                             let _ = tx.send(WorkerResult::Doc {
                                 key,

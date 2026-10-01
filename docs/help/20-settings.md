@@ -139,10 +139,17 @@ RAG 三项配置（Embedding、Rerank、启用开关）。换 embedding 模型�
 
 | 配置 | 说明 |
 |---|---|
-| 默认勾选 | 新建稿子时 md/docx/tex 哪些默认勾上 |
+| 默认勾选 | 新建稿子时 Markdown / Word / PDF 哪些默认勾上 |
 | 覆盖策略 | 覆盖同名 vs 生成副本（默认副本） |
+| PDF 引擎 | **Typst**（默认）或 **Tectonic**，只管公文；研究报告固定用 Tectonic |
 
-PDF 不是独立选项——有 `.tex` 就编。
+两种引擎排出的版式一致（逐行对照过），区别在过程：
+
+- **Typst**：程序内直接排版，一份公文几十毫秒，只出 `.pdf`；
+- **Tectonic**：调用内置 TeX 编译，约两秒一份，同时留下 `.tex` 源文件——要拿 `.tex` 去别处
+  改版式、复现编译时选它。
+
+PDF 一栏的名字随引擎变：Typst 下叫「PDF」，Tectonic 下叫「LaTeX 与 PDF」。
 
 ## 保存与现场
 

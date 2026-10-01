@@ -93,7 +93,8 @@ pub struct RedlineFormats {
 /// 复用定稿那条导出链路：同一个 `.cls`、同一套字体和版心，所以花脸稿看起来就是
 /// 这份公文本身，只是多了增删标记。唯一的不同是文件名带 `-花脸稿`，且落在自己的
 /// 子目录里，不会和定稿混在一起被误发。研究报告走 mdx 转换器，标记在产物落地后
-/// 注入。
+/// 注入。PDF 按设置里的引擎排（研究报告固定 Tectonic）。
+#[allow(clippy::too_many_arguments)] // 与定稿导出同一组排版参数，外加花脸稿数据与引擎。
 pub fn export_files(
     output_dir: &Path,
     input: &DraftInput,
@@ -102,6 +103,7 @@ pub fn export_files(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    engine: crate::models::PdfEngine,
 ) -> Result<Vec<PathBuf>> {
     let markdown = &doc.markdown;
     // 标题取自正文 H1，哨兵已在生成时避开标题语法位置，这里再兜一层底：
@@ -131,7 +133,22 @@ pub fn export_files(
         }
         files.push(path);
     }
-    if formats.pdf {
+    if formats.pdf && export::uses_typst(input, engine) {
+        // Typst 引擎：花脸稿的删除线、新增框由模板直接画，不经 TeX 宏。
+        let outcome = export::write_pdf_for_kind(
+            &dir,
+            &stem,
+            input,
+            markdown,
+            display,
+            fonts,
+            numbering,
+            &doc.elements,
+            engine,
+        )
+        .with_context(|| "花脸稿 PDF 排版失败".to_string())?;
+        files.extend(outcome);
+    } else if formats.pdf {
         let tex = dir.join(format!("{stem}.tex"));
         export::write_tex_for_kind(
             &tex,
@@ -1489,6 +1506,7 @@ mod consistency_tests {
                 &display,
                 &fonts,
                 &crate::models::NumberingConfig::default(),
+                crate::models::PdfEngine::Tectonic,
             )
             .unwrap_or_else(|error| panic!("{name} 花脸稿导出失败：{error:#}"));
             let pdf = files
@@ -1574,6 +1592,7 @@ mod research_tests {
             &UnitDisplay::new(&[]),
             &FontConfig::default(),
             &crate::models::NumberingConfig::default(),
+            crate::models::PdfEngine::Tectonic,
         )
         .expect("研究报告花脸稿 Word 应导出成功");
         let path = files

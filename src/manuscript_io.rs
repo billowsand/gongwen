@@ -403,6 +403,7 @@ pub fn export_selected_pdfs(
     vocabulary: &[VocabularyEntry],
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    engine: crate::models::PdfEngine,
     zip_path: &Path,
     password: &str,
     mut progress: impl FnMut(&str),
@@ -456,7 +457,7 @@ pub fn export_selected_pdfs(
                 }
             }
             if options.compiled {
-                match compile_record_pdf(&record, &display, &fonts, numbering, &stem) {
+                match compile_record_pdf(&record, &display, &fonts, numbering, engine, &stem) {
                     Ok(pdf_bytes) => {
                         let entry = unique_zip_name(&mut used_names, &stem, "pdf");
                         zip.start_file(entry, stored_options)?;
@@ -498,6 +499,7 @@ fn compile_record_pdf(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    engine: crate::models::PdfEngine,
     stem: &str,
 ) -> Result<Vec<u8>> {
     compile_snapshot_pdf(
@@ -506,6 +508,7 @@ fn compile_record_pdf(
         display,
         fonts,
         numbering,
+        engine,
         stem,
     )
 }
@@ -518,6 +521,7 @@ pub(crate) fn compile_snapshot_pdf(
     display: &UnitDisplay,
     fonts: &FontConfig,
     numbering: &NumberingConfig,
+    engine: crate::models::PdfEngine,
     stem: &str,
 ) -> Result<Vec<u8>> {
     let counter = PDF_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -530,21 +534,17 @@ pub(crate) fn compile_snapshot_pdf(
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("无法创建临时工作目录 {}", dir.display()))?;
     let result = (|| {
-        let tex_path = dir.join(format!("{stem}.tex"));
-        crate::export::write_tex_for_kind(
-            &tex_path,
+        let pdf_path = crate::export::write_pdf_for_kind(
+            &dir,
+            stem,
             snapshot,
             markdown,
             display,
             fonts,
             numbering,
             &crate::visual_diff::ElementMarks::default(),
-        )?;
-        let pdf_path = if snapshot.kind.is_research() {
-            crate::texcompile::compile_research_pdf(&tex_path)?.pdf
-        } else {
-            crate::texcompile::compile_pdf_if_available(&tex_path, fonts)?
-        }
+            engine,
+        )?
         .context("未检测到可用的内置 TeX 运行时，无法编译 PDF")?;
         std::fs::read(&pdf_path).with_context(|| format!("无法读取编译产物 {}", pdf_path.display()))
     })();
@@ -1047,6 +1047,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
+            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -1115,6 +1116,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
+            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -1150,6 +1152,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
+            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},
@@ -1175,6 +1178,7 @@ mod tests {
             &sample_vocabulary(),
             &FontConfig::default(),
             &NumberingConfig::default(),
+            crate::models::PdfEngine::Tectonic,
             &zip_path,
             TEST_PASSWORD,
             |_| {},

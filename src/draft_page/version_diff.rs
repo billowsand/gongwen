@@ -1110,6 +1110,7 @@ impl DraftPage<'_> {
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
+        let engine = self.config.pdf_engine;
         let tx = self.sender.clone();
         thread::spawn(move || {
             let display = UnitDisplay::new(&vocabulary);
@@ -1124,6 +1125,7 @@ impl DraftPage<'_> {
                 &display,
                 &fonts,
                 &numbering,
+                engine,
             )
             .map_err(|error| format!("{error:#}"));
             let job = if print_preview {
