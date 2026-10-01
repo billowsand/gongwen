@@ -33,6 +33,8 @@ pub(crate) enum DraftAction {
     OpenSopPanel,
     /// 打开某篇呈批件的送批材料面板。
     OpenSendPackage(i64),
+    /// 查看引用来源稿件，沿用稿件库的只读与标签规则。
+    OpenManuscript(i64),
     /// 打开统一 AI 工作台；若编辑器有选区，一并冻结为受控润色范围。
     OpenAiWorkbench {
         selection: Option<std::ops::Range<usize>>,

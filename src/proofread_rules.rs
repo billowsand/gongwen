@@ -16,7 +16,19 @@ use std::sync::OnceLock;
 
 /// 跑一遍全部文档级规则。
 pub fn check(input: &DraftInput, markdown: &str) -> Vec<ProofNote> {
+    let references = crate::document_reference::References::read(markdown);
+    let masked = crate::document_reference::masked(markdown);
+    let markdown = masked.as_ref();
     let mut notes = Vec::new();
+    notes.extend(references.issues.into_iter().map(|issue| {
+        note(
+            "公文引用完整性",
+            "公文引用",
+            Level::MustFix,
+            issue.message,
+            issue.range,
+        )
+    }));
     if let Some(title) = find_title(markdown) {
         check_title(input.kind, &title, &mut notes);
     }

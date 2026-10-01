@@ -342,6 +342,26 @@ fn merge_references(
             format!("{}\n", reference.definition())
         })
     };
+    // 定义可以在源码任何独占行上；剥离后末行未必有换行，重新追加前须保持独占行。
+    let finish_line = |text: &mut String| {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+    };
+    if let Some(last) = chunks.last_mut() {
+        match last {
+            MarkdownChunk::Text(text) => finish_line(text),
+            MarkdownChunk::Conflict {
+                base,
+                local,
+                incoming,
+            } => {
+                finish_line(base);
+                finish_line(local);
+                finish_line(incoming);
+            }
+        }
+    }
     for id in ids {
         let [base, local, incoming] = sets.each_ref().map(|set| set.items.get(&id));
         if local == incoming || incoming == base {

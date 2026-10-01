@@ -351,6 +351,8 @@ impl Lexicon {
     /// 编成一台 Aho-Corasick 自动机，正文只走一遍。每种写法的命中仍按
     /// `match_indices` 的语义取"从左到右、互不重叠"，所以结果与逐条扫描一致。
     pub fn check(&self, text: &str) -> Vec<ProofNote> {
+        let masked = crate::document_reference::masked(text);
+        let text = masked.as_ref();
         // 带上条目下标：位置、级别、编号都相同时按词表顺序排，与逐条扫描时一致。
         let mut notes: Vec<(usize, ProofNote)> = Vec::new();
         let mut patterns: Vec<&str> = Vec::new();

@@ -55,7 +55,8 @@ impl Reference {
             "发文字号不能包含换行或控制字符"
         );
         ensure!(
-            self.no_number == self.number.is_empty(),
+            (self.no_number && self.number.is_empty())
+                || (!self.no_number && !self.number.trim().is_empty()),
             "请填写完整发文字号，或明确选择无文号"
         );
         for id in [&self.document_uuid, &self.revision_uuid]
@@ -108,7 +109,7 @@ pub(crate) struct References {
 impl References {
     pub fn read(markdown: &str) -> Self {
         let mut result = Self::default();
-        for (start, line) in crate::export::source_lines(markdown) {
+        for (start, line) in definition_lines(markdown) {
             if let Some(json) = line.trim().strip_prefix(DEFINITION) {
                 let parsed = json
                     .strip_suffix(" -->")
@@ -168,17 +169,26 @@ impl References {
 
     /// 替换发生在源码切行以后，原始行长及块范围保持不变。插入普通文字时转义
     /// Markdown 语法，防止名称中的星号、竖线等被误认成加粗或表格。
-    pub fn apply<'a>(&self, line: &'a str) -> Cow<'a, str> {
+    pub fn apply<'a>(
+        &self,
+        line: &'a str,
+        start: usize,
+        spans: &[(Range<usize>, String)],
+    ) -> Cow<'a, str> {
         if line.trim().starts_with(DEFINITION) || !line.contains(PREFIX) {
             return Cow::Borrowed(line);
         }
         let mut text = String::new();
         let mut copied = 0;
-        for (range, id) in occurrences(line) {
+        for (range, id) in spans
+            .iter()
+            .filter(|(range, _)| range.start >= start && range.end <= start + line.len())
+        {
+            let range = range.start - start..range.end - start;
             text.push_str(&line[copied..range.start]);
             let display = self
                 .items
-                .get(&id)
+                .get(id)
                 .map_or_else(|| format!("【公文引用待修复：{id}】"), Reference::display);
             text.push_str(&escape_markdown(&display));
             copied = range.end;
@@ -193,15 +203,19 @@ impl References {
     /// 通用 Markdown / 对外复制使用展开后的正文，不携带内部定义。
     pub fn expanded(&self, markdown: &str) -> String {
         let spans = occurrences(markdown);
+        let definitions = definition_lines(markdown)
+            .into_iter()
+            .map(|(start, _)| start)
+            .collect::<std::collections::BTreeSet<_>>();
         let mut result = String::new();
         let mut start = 0;
         for line in markdown.split_inclusive('\n') {
-            if !line.trim().starts_with(DEFINITION) {
+            if !definitions.contains(&start) {
                 if spans
                     .iter()
                     .any(|(range, _)| range.start >= start && range.start < start + line.len())
                 {
-                    result.push_str(&self.apply(line));
+                    result.push_str(&self.apply(line, start, &spans));
                 } else {
                     result.push_str(line);
                 }
@@ -230,20 +244,13 @@ pub(crate) fn escape_markdown(text: &str) -> String {
 pub(crate) fn occurrences(markdown: &str) -> Vec<(Range<usize>, String)> {
     let mut found = Vec::new();
     let mut offset = 0;
-    let mut fence: Option<char> = None;
+    let mut fence = None;
+    let mut math_delimiter: Option<usize> = None;
     for line in markdown.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            let ch = trimmed.chars().next().unwrap();
-            if fence == Some(ch) {
-                fence = None;
-            } else if fence.is_none() {
-                fence = Some(ch);
-            }
-        } else if fence.is_none() && !trimmed.starts_with(DEFINITION) {
+        if !fence_line(trimmed, &mut fence) && fence.is_none() && !trimmed.starts_with(DEFINITION) {
             let mut index = 0;
-            let mut code = false;
-            let mut math = false;
+            let mut code_delimiter: Option<usize> = None;
             while index < line.len() {
                 let rest = &line[index..];
                 let ch = rest.chars().next().unwrap();
@@ -255,12 +262,27 @@ pub(crate) fn occurrences(markdown: &str) -> Vec<(Range<usize>, String)> {
                     continue;
                 }
                 if ch == '`' {
-                    code = !code;
+                    let length = rest.chars().take_while(|ch| *ch == '`').count();
+                    if code_delimiter == Some(length) {
+                        code_delimiter = None;
+                    } else if code_delimiter.is_none() && math_delimiter.is_none() {
+                        code_delimiter = Some(length);
+                    }
+                    index += length;
+                    continue;
                 }
-                if ch == '$' && !code {
-                    math = !math;
+                if ch == '$' && code_delimiter.is_none() {
+                    let length = rest.chars().take_while(|ch| *ch == '$').count();
+                    if math_delimiter == Some(length) {
+                        math_delimiter = None;
+                    } else if math_delimiter.is_none() {
+                        math_delimiter = Some(length);
+                    }
+                    index += length;
+                    continue;
                 }
-                if !code && !math && rest.starts_with(PREFIX) {
+                if code_delimiter.is_none() && math_delimiter.is_none() && rest.starts_with(PREFIX)
+                {
                     let end = rest
                         .find("}}")
                         .map_or(rest.trim_end_matches(['\r', '\n']).len(), |end| end + 2);
@@ -272,21 +294,30 @@ pub(crate) fn occurrences(markdown: &str) -> Vec<(Range<usize>, String)> {
                 }
             }
         }
+        if math_delimiter == Some(1) {
+            math_delimiter = None;
+        }
         offset += line.len();
     }
     found
 }
 
 pub(crate) fn put(markdown: &str, reference: &Reference) -> String {
+    let definitions = definition_lines(markdown)
+        .into_iter()
+        .map(|(start, _)| start)
+        .collect::<std::collections::BTreeSet<_>>();
     let mut out = String::new();
     let mut replaced = false;
+    let mut start = 0;
     for line in markdown.split_inclusive('\n') {
-        let matches = line
-            .trim()
-            .strip_prefix(DEFINITION)
-            .and_then(|json| json.strip_suffix(" -->"))
-            .and_then(|json| serde_json::from_str::<Reference>(json).ok())
-            .is_some_and(|old| old.id == reference.id);
+        let matches = definitions.contains(&start)
+            && line
+                .trim()
+                .strip_prefix(DEFINITION)
+                .and_then(|json| json.strip_suffix(" -->"))
+                .and_then(|json| serde_json::from_str::<Reference>(json).ok())
+                .is_some_and(|old| old.id == reference.id);
         if matches {
             out.push_str(&reference.definition());
             out.push('\n');
@@ -294,6 +325,7 @@ pub(crate) fn put(markdown: &str, reference: &Reference) -> String {
         } else {
             out.push_str(line);
         }
+        start += line.len();
     }
     if !replaced {
         if !out.ends_with('\n') {
@@ -307,10 +339,92 @@ pub(crate) fn put(markdown: &str, reference: &Reference) -> String {
 
 /// 只移除引用定义，正文标记原样保留，供原生源码交换与逐条合并使用。
 pub(crate) fn without_definitions(markdown: &str) -> String {
+    remove_definitions(markdown, |_| true)
+}
+
+pub(crate) fn remove_definition(markdown: &str, id: &str) -> String {
+    remove_definitions(markdown, |line| {
+        line.trim()
+            .strip_prefix(DEFINITION)
+            .and_then(|json| json.strip_suffix(" -->"))
+            .and_then(|json| serde_json::from_str::<Reference>(json).ok())
+            .is_some_and(|reference| reference.id == id)
+    })
+}
+
+/// 围栏中的源码示例不参与快照解析、替换或移除。
+fn definition_lines(markdown: &str) -> Vec<(usize, &str)> {
+    let mut fence = None;
+    crate::export::source_lines(markdown)
+        .into_iter()
+        .filter(|(_, line)| {
+            let trimmed = line.trim_start();
+            !fence_line(trimmed, &mut fence) && fence.is_none() && trimmed.starts_with(DEFINITION)
+        })
+        .collect()
+}
+
+fn fence_line(line: &str, fence: &mut Option<(char, usize)>) -> bool {
+    let Some(ch @ ('`' | '~')) = line.chars().next() else {
+        return false;
+    };
+    let length = line.chars().take_while(|next| *next == ch).count();
+    if length < 3 {
+        return false;
+    }
+    if let Some((opening, minimum)) = *fence {
+        if opening == ch && length >= minimum && line[length..].trim().is_empty() {
+            *fence = None;
+        }
+    } else {
+        *fence = Some((ch, length));
+    }
+    true
+}
+
+fn remove_definitions(markdown: &str, should_remove: impl Fn(&str) -> bool) -> String {
+    let removals = definition_lines(markdown)
+        .into_iter()
+        .filter(|(_, line)| should_remove(line))
+        .map(|(start, _)| start)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut start = 0;
     markdown
         .split_inclusive('\n')
-        .filter(|line| !line.trim().starts_with(DEFINITION))
+        .filter(|line| {
+            let keep = !removals.contains(&start);
+            start += line.len();
+            keep
+        })
         .collect()
+}
+
+pub(crate) fn to_plain(markdown: &str, reference: &Reference) -> String {
+    let mut result = markdown.to_string();
+    let spans = occurrences(markdown)
+        .into_iter()
+        .filter(|(_, id)| id == &reference.id)
+        .collect::<Vec<_>>();
+    for (range, _) in spans.into_iter().rev() {
+        result.replace_range(range, &escape_markdown(&reference.display()));
+    }
+    remove_definition(&result, &reference.id)
+}
+
+/// 文字校对屏蔽引用元数据与结构标记，字节长度保持不变，其他文字的定位不漂移。
+/// 引用内容需要更正时通过引用面板，不能让普通词表替换把 UUID 或 JSON 改坏。
+pub(crate) fn masked(markdown: &str) -> Cow<'_, str> {
+    if !markdown.contains(PREFIX) && !markdown.contains(DEFINITION) {
+        return Cow::Borrowed(markdown);
+    }
+    let mut bytes = markdown.as_bytes().to_vec();
+    for (range, _) in occurrences(markdown) {
+        bytes[range].fill(b' ');
+    }
+    for (start, line) in definition_lines(markdown) {
+        bytes[start..start + line.len()].fill(b' ');
+    }
+    Cow::Owned(String::from_utf8(bytes).expect("只把完整 UTF-8 范围换成空格"))
 }
 
 /// 冲突面板展示人可读的引用信息，实际合并仍使用原定义，绝不丢失身份字段。
@@ -535,6 +649,133 @@ mod tests {
             )
             .is_empty()
         );
+        assert!(occurrences("``字面 ` {{公文:代码}}``\n$$\n{{公文:跨行公式}}\n$$\n").is_empty());
+    }
+
+    #[test]
+    fn document_reference_fenced_definitions_remain_literal_examples() {
+        let reference = Reference::manual("示例函", "某函〔2026〕8号", false).unwrap();
+        let example = format!(
+            "````markdown\n```\n{}\n{}\n```\n````\n",
+            reference.definition(),
+            reference.token()
+        );
+        References::check(&example).unwrap();
+        assert!(References::read(&example).items.is_empty());
+        assert_eq!(References::read(&example).expanded(&example), example);
+        assert_eq!(without_definitions(&example), example);
+        assert_eq!(remove_definition(&example, &reference.id), example);
+        let actual = put(
+            &format!("{example}\n根据{}办理。", reference.token()),
+            &reference,
+        );
+        References::check(&actual).unwrap();
+        assert_eq!(occurrences(&actual).len(), 1);
+        assert_eq!(References::read(&actual).items.len(), 1);
+    }
+
+    #[test]
+    fn document_reference_merge_keeps_definitions_on_separate_lines() {
+        let reference = Reference::manual("来函", "某函〔2026〕8号", false).unwrap();
+        let base = format!(
+            "{}\n根据{}办理。",
+            reference.definition(),
+            reference.token()
+        );
+        let mut updated = reference.clone();
+        updated.title = "修订后的来函".into();
+        let local = format!("{}\n根据{}办理。", updated.definition(), reference.token());
+        let incoming = base.replace("办理", "认真办理");
+        let input = crate::models::DraftInput::default();
+        let proposal = crate::manuscript::merge::MergeProposal::build(
+            (&input, &base, ""),
+            (&input, &local, ""),
+            (&input, &incoming, ""),
+        )
+        .unwrap();
+        let (_, merged, _) = proposal.resolve(&[]).unwrap();
+        References::check(&merged).unwrap();
+        assert!(merged.contains("认真办理"));
+        assert_eq!(References::read(&merged).items[&reference.id], updated);
+    }
+
+    #[test]
+    fn document_reference_multiline_math_keeps_only_real_occurrences() {
+        let reference = Reference::manual("来函", "某函〔2026〕8号", false).unwrap();
+        let source = put(
+            &format!(
+                "$$\n{} $$ 根据{}办理。",
+                reference.token(),
+                reference.token()
+            ),
+            &reference,
+        );
+        assert_eq!(occurrences(&source).len(), 1);
+        let expanded = References::read(&source).expanded(&source);
+        assert!(expanded.contains(&reference.token()));
+        assert_eq!(expanded.matches(&reference.display()).count(), 1);
+        let lines = crate::export::parse_markdown_located(&source);
+        assert!(lines.iter().any(|line| {
+            matches!(&line.block, crate::export::MarkdownBlock::Paragraph(text)
+                if text.contains(&reference.token()) && text.contains(&reference.display()))
+        }));
+    }
+
+    #[test]
+    fn document_reference_plain_conversion_and_proofreading_keep_source_offsets() {
+        let reference = Reference::manual("有错别字的来函", "某函〔2026〕8号", false).unwrap();
+        let source = put(
+            &format!(
+                "根据{}办理。错别字\n再次引用{}。\n`{}`",
+                reference.token(),
+                reference.token(),
+                reference.token()
+            ),
+            &reference,
+        );
+        let mask = masked(&source);
+        assert_eq!(mask.len(), source.len());
+        assert_eq!(
+            mask.find("错别字"),
+            source.find("。错别字").map(|start| start + "。".len())
+        );
+        let lexicon = crate::proofread::Lexicon::parse(
+            "条目编号\t错误写法\t建议写法\t级别\t命中条件\t分组\t说明\t启用\nTEST\t错别字\t正确词\t必错\t总是\t测试\t\t是\n",
+        );
+        let notes = lexicon.check(&source);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(&source[notes[0].span.clone()], "错别字");
+        let broken = source.replace(&reference.id, "损坏");
+        let notes = crate::proofread_rules::check(&crate::models::DraftInput::default(), &broken);
+        assert!(notes.iter().any(|note| note.group == "公文引用"
+            && note.level == crate::proofread::Level::MustFix
+            && note.replacement.is_none()));
+        let plain = to_plain(&source, &reference);
+        assert_eq!(plain.matches(&reference.display()).count(), 2);
+        assert!(plain.contains(&format!("`{}`", reference.token())));
+        assert!(!plain.contains(DEFINITION));
+        References::check(&plain).unwrap();
+    }
+
+    #[test]
+    fn document_reference_research_editable_source_preserves_numbered_table_tokens() {
+        let reference = Reference::manual("来函", "某函〔2026〕8号", false).unwrap();
+        let markdown = put(
+            &format!(
+                "# 报告\n\n<!-- [序号表] -->\n| 序号 | 依据 |\n| --- | --- |\n| | {} |\n",
+                reference.token()
+            ),
+            &reference,
+        );
+        let source = crate::export::research::markdown_source_editable(
+            &crate::models::DraftInput::default(),
+            &markdown,
+            false,
+            &crate::models::NumberingConfig::default(),
+        );
+        assert!(source.contains(&reference.token()));
+        assert!(!source.contains(&reference.display()));
+        References::check(&source).unwrap();
     }
 
     #[test]

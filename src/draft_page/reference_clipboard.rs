@@ -63,13 +63,12 @@ pub(crate) fn after_edit(
         }
     }
     let references = References::read(before);
-    if references.items.is_empty() {
-        return;
-    }
     let mut copied = None;
+    let mut copy_command = false;
     ctx.output_mut(|output| {
         for command in &mut output.commands {
             if let egui::OutputCommand::CopyText(raw) = command {
+                copy_command = true;
                 let ids = document_reference::occurrences(raw);
                 let items = ids
                     .iter()
@@ -96,5 +95,70 @@ pub(crate) fn after_edit(
     });
     if let Some(clipboard) = copied {
         ctx.data_mut(|data| data.insert_temp(egui::Id::new("reference_clipboard"), clipboard));
+    } else if copy_command {
+        ctx.data_mut(|data| data.remove::<Clipboard>(egui::Id::new("reference_clipboard")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_reference_clipboard_copy_paste_and_undo_are_self_contained() {
+        let ctx = egui::Context::default();
+        let reference = Reference::manual("原函", "某函〔2026〕8号", false).unwrap();
+        let source = document_reference::put(&reference.token(), &reference);
+        let mut copied_text = source.clone();
+        let output = ctx.run_ui(egui::RawInput::default(), |_ui| {
+            ctx.copy_text(reference.token());
+            after_edit(&ctx, &mut copied_text, &source, None);
+        });
+        assert!(output.platform_output.commands.iter().any(|command|
+            matches!(command, egui::OutputCommand::CopyText(text) if text == &reference.display())));
+        let mut different = reference.clone();
+        different.number = "某函〔2026〕9号".into();
+        let mut target = document_reference::put(&different.token(), &different);
+        let before = target.clone();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Paste(reference.display())],
+                ..Default::default()
+            },
+            |_ui| {
+                ctx.memory_mut(|memory| memory.request_focus(editor_id()));
+                let paste = before_edit(&ctx, &target, true).expect("应用内富粘贴");
+                ctx.input(|input| {
+                    for event in &input.events {
+                        if let egui::Event::Paste(text) = event {
+                            target.insert_str(0, text);
+                        }
+                    }
+                });
+                after_edit(&ctx, &mut target, &before, Some(paste));
+            },
+        );
+        References::check(&target).unwrap();
+        let definitions = References::read(&target);
+        assert_eq!(definitions.items.len(), 2);
+        assert_eq!(definitions.items[&reference.id].number, different.number);
+        assert!(
+            definitions
+                .items
+                .values()
+                .any(|item| item.id != reference.id && item.number == reference.number)
+        );
+        let state = egui::TextEdit::load_state(&ctx, editor_id()).unwrap();
+        let mut undoer = state.undoer();
+        let cursor = state.cursor.char_range().unwrap();
+        assert_eq!(undoer.undo(&(cursor, target.clone())).unwrap().1, before);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {
+            ctx.copy_text("普通文字".into());
+            after_edit(&ctx, &mut target, &before, None);
+        });
+        assert!(
+            ctx.data(|data| data.get_temp::<Clipboard>(egui::Id::new("reference_clipboard")))
+                .is_none()
+        );
     }
 }

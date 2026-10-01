@@ -17,6 +17,16 @@ pub(crate) fn markdown_with_frontmatter(
     bibliography: Option<&str>,
     numbering: &NumberingConfig,
 ) -> String {
+    source_with_frontmatter(input, markdown, bibliography, numbering, true)
+}
+
+fn source_with_frontmatter(
+    input: &DraftInput,
+    markdown: &str,
+    bibliography: Option<&str>,
+    numbering: &NumberingConfig,
+    normalize_tables: bool,
+) -> String {
     let meta = &input.research;
     let mut lines = vec![
         "---".to_string(),
@@ -54,8 +64,12 @@ pub(crate) fn markdown_with_frontmatter(
     }
     lines.push("---".to_string());
     lines.push(String::new());
-    let body = write_numbered_tables(markdown.trim_start_matches('\u{feff}').trim(), numbering);
-    lines.push(body.trim().to_string());
+    let body = markdown.trim_start_matches('\u{feff}').trim();
+    lines.push(if normalize_tables {
+        write_numbered_tables(body, numbering)
+    } else {
+        body.to_string()
+    });
     lines.push(String::new());
     lines.join("\n")
 }
@@ -168,6 +182,22 @@ pub(crate) fn markdown_source(
         markdown,
         has_bibliography.then_some("references.bib"),
         numbering,
+    )
+}
+
+/// 原生源码保留序号表标记、引用占位符及定义，重新导入后仍能编辑结构。
+pub(crate) fn markdown_source_editable(
+    input: &DraftInput,
+    markdown: &str,
+    has_bibliography: bool,
+    numbering: &NumberingConfig,
+) -> String {
+    source_with_frontmatter(
+        input,
+        markdown,
+        has_bibliography.then_some("references.bib"),
+        numbering,
+        false,
     )
 }
 

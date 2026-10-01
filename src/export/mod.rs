@@ -229,7 +229,7 @@ fn write_markdown_archive(
         // 普通工具读主文件即可；原生可编辑文件同时保留标记与全部定义，重导入不丢引用。
         zip.start_file(format!("{stem}-可编辑.md"), options)?;
         let editable = if input.kind.is_research() {
-            research::markdown_source(input, markdown, bibliography.is_some(), numbering)
+            research::markdown_source_editable(input, markdown, bibliography.is_some(), numbering)
         } else {
             markdown.to_string()
         };

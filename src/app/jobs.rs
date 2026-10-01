@@ -947,6 +947,13 @@ impl GongwenApp {
         };
         match job {
             DocJob::Drafted(Ok(result)) => {
+                if let Err(error) = crate::document_reference::ensure_preserved(
+                    &self.docs[index].generated_markdown,
+                    &result.markdown,
+                ) {
+                    self.status = error.to_string();
+                    return;
+                }
                 let title = result.title.clone();
                 Self::take_generated(&mut self.docs[index], result);
                 self.status = if self.docs[index].output_files.is_empty() {
@@ -961,6 +968,13 @@ impl GongwenApp {
                 };
             }
             DocJob::Optimized(Ok(result)) => {
+                if let Err(error) = crate::document_reference::ensure_preserved(
+                    &self.docs[index].generated_markdown,
+                    &result.markdown,
+                ) {
+                    self.status = error.to_string();
+                    return;
+                }
                 let title = result.title.clone();
                 Self::take_generated(&mut self.docs[index], result);
                 self.status = if self.docs[index].output_files.is_empty() {
