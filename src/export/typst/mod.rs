@@ -9,6 +9,11 @@ pub(crate) mod body;
 mod compare_tests;
 pub(crate) mod data;
 mod frame;
+mod math;
+pub(crate) mod research;
+#[cfg(test)]
+mod research_compare_tests;
+mod research_redline;
 pub(crate) mod runs;
 
 use std::path::Path;
@@ -85,7 +90,7 @@ pub(crate) fn write_pdf_with_base(
     );
     let missing = drop_missing_images(&mut doc, base_dir);
     let data = serde_json::to_string(&doc).context("无法序列化 Typst 文档数据")?;
-    let mut outcome = typst_engine::compile(&TypstJob { data, base_dir }, &set)?;
+    let mut outcome = typst_engine::compile(&TypstJob::official(data, base_dir), &set)?;
     for src in missing {
         outcome
             .warnings

@@ -136,8 +136,30 @@ pub(crate) fn write_tex(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Result<()> {
-    let source =
-        ResearchSourceBundle::create(input, markdown, numbering, crate::mermaid::Format::Pdf)?;
+    write_tex_with_base(
+        path,
+        input,
+        markdown,
+        numbering,
+        &crate::storage::config_dir()?,
+    )
+}
+
+/// 同 [`write_tex`]，插图按 `base_dir` 解析（对照测试用临时目录）。
+pub(crate) fn write_tex_with_base(
+    path: &Path,
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+    base_dir: &Path,
+) -> Result<()> {
+    let source = ResearchSourceBundle::create(
+        input,
+        markdown,
+        numbering,
+        crate::mermaid::Format::Pdf,
+        base_dir,
+    )?;
     clear_generated_parts(path.parent().unwrap_or_else(|| Path::new(".")))?;
     mdx::convert(ConvertRequest {
         input: source.markdown.clone(),
@@ -160,8 +182,13 @@ pub(crate) fn write_docx(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> Result<()> {
-    let source =
-        ResearchSourceBundle::create(input, markdown, numbering, crate::mermaid::Format::Png)?;
+    let source = ResearchSourceBundle::create(
+        input,
+        markdown,
+        numbering,
+        crate::mermaid::Format::Png,
+        &crate::storage::config_dir()?,
+    )?;
     mdx::convert(ConvertRequest {
         input: source.markdown.clone(),
         output: Some(path.to_path_buf()),
@@ -209,17 +236,25 @@ fn clear_generated_parts(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-struct ResearchSourceBundle {
-    _root: tempfile::TempDir,
-    markdown: PathBuf,
+/// 交给 mdx 的源码目录：带 frontmatter 的 Markdown、插图与参考文献，放在一个临时
+/// 目录里，随值一起删掉。
+pub(crate) struct ResearchSourceBundle {
+    root: tempfile::TempDir,
+    pub(crate) markdown: PathBuf,
 }
 
 impl ResearchSourceBundle {
-    fn create(
+    /// 插图、文献的解析基准（临时目录本身）。
+    pub(crate) fn root(&self) -> &Path {
+        self.root.path()
+    }
+
+    pub(crate) fn create(
         input: &DraftInput,
         markdown: &str,
         numbering: &NumberingConfig,
         format: crate::mermaid::Format,
+        base_dir: &Path,
     ) -> Result<Self> {
         let root = tempfile::Builder::new()
             .prefix("gongwen-research-")
@@ -227,7 +262,7 @@ impl ResearchSourceBundle {
             .context("无法创建研究报告临时目录")?;
         let rendered =
             crate::mermaid::materialize(markdown, crate::mermaid::Style::Research, format)?;
-        crate::images::copy_refs(&rendered, root.path())?;
+        crate::images::copy_refs_from(base_dir, &rendered, root.path())?;
         let bibliography = copy_bibliography(&input.research, root.path())?;
         let document = markdown_with_frontmatter(
             input,
@@ -239,7 +274,7 @@ impl ResearchSourceBundle {
         fs::write(&path, document)
             .with_context(|| format!("无法写入研究报告临时文件：{}", path.display()))?;
         Ok(Self {
-            _root: root,
+            root,
             markdown: path,
         })
     }

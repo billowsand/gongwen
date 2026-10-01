@@ -7,7 +7,7 @@
 | 位置 | 进程内（`typst` crate），模板 `assets/typst/gongwen.typ` | 外部进程，`gonghan-gwa.cls` |
 | 速度 | 一份公文 5–50 ms | 一份约 2 s |
 | 产物 | 只出 `.pdf` | `.tex` + `.pdf` |
-| 研究报告 | 不适用，固定走 Tectonic | mdx research 模式 |
+| 研究报告 | `assets/typst/research.typ`（见下文「研究报告」） | mdx research 模式 |
 
 两套版式逐项对照过（见下文「对照」），换引擎不改变版面。
 
@@ -101,6 +101,44 @@ PDF 与对比图在 `tmp/typst-compare/<用例>/`。用例覆盖公函（含附�
 - 块之间夹硬间距 `v` 时，`v` 叠在下一段的段间距之上；弱间距会与段间距合并成一个。
 - 计数器（页码）在每页开头自动加一：要让新一份从 1 起，在上一份末尾归 0。
 - `context` 里比较含 `em` 的长度要先 `.to-absolute()`。
+
+## 研究报告
+
+研究报告同样有 Typst 路径，版式对照 mdx 的 `md2tex.cls` 与 `template.tex`：
+
+```text
+Markdown ─ export::research（frontmatter、插图、文献装进临时目录）
+         ─ mdx::typst_research::build → 排版数据（封面、区段、编号）
+         ─ export::typst::research_redline（花脸稿哨兵 → 片段标注）
+         ─ export::typst::math（latex-rust 排公式 → SVG）
+         ─ typst_engine（模板 research.typ）→ PDF
+```
+
+- `vendor/mdx/src/typst_research.rs`：与 `tex_research_emitter` 同一套解析与区段规则（摘要、
+  目录、正文、部分、附录、版本变更记录、参考文献、不编号子树），章节号、图表号（不编号章
+  的流水号、附录的 A.1）、文框号、列表序号都按 `md2tex.cls` 的计数器规则在这里算好；
+  交叉引用的编号由模板按锚点处的 metadata 查。
+- 公式：latex-rust 进程内排版成 SVG（字形转路径，STIX Two Math；`\text{中文}` 回退随包
+  方正书宋），与预览同一排版器。尺寸折成 em，模板按所在字号缩放、按盒模型对基线。
+  `vendor/latex-rust` 为此改了两处：matrix、cases、array、align 的行加支柱（按正文
+  14bp/24pt 的 `\baselineskip`），竖排的盒子按数学轴居中（`\vcenter`）；align 右列
+  开头补空 Ord，`&=` 两侧照常留关系符空。
+- 文献：Typst 内置 hayagriva，样式 `gb-7714-2015-numeric`，引用不上标（与
+  `\citestyle{numbers}` 一致）。
+- 页码：模板在每处 `\clearemptydoublepage` 放零高标记，页脚按标记推算页码样式与起始值
+  （封面无页码、摘要单独编页时小写罗马、目录大写罗马、目录后接回阿拉伯）。
+- 对照：`cargo test --locked typst_tex_compare_research -- --ignored`，再
+  `python scripts/typst-compare.py research-full research-parts research-math`。
+
+与 TeX 的已知差异（Typst 更对，未复刻）：
+
+- 列表从二级回到一级时序号接着数（TeX 重开 asparaenum，从 ⑴ 再数）；
+- 参考文献只排一个标题（TeX 在区段标题之后另起一页再排一遍「参考文献」，多出两页）；
+- 正文加粗的汉字是粗的（TeX 的 `AutoFakeBold` 在这套类文件里没生效，汉字不加粗）；
+- 公式字形是 STIX Two Math（TeX 是 Computer Modern），大括号、矩阵括号略小，PDF 里公式
+  是矢量路径、不可选中复制；
+- 文献条目细节随 hayagriva：标题大小写保留原样、网络文献年份带括号，编号与正文的间距
+  略宽（1.45mm）；多篇连续引用印 `[2,3]`（gbt7714 印 `[2-3]`）。
 
 ## 升级 Typst
 

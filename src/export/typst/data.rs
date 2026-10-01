@@ -196,7 +196,7 @@ pub(crate) struct Record {
     #[serde(rename = "print-copies")]
     pub print_copies: u32,
     pub rows: Vec<RecordRow>,
-    /// 联合发文模式 1 的版记（多行、rraystretch 1.15）。
+    /// 联合发文模式 1 的版记（多行、\arraystretch 1.15）。
     pub joint: bool,
 }
 

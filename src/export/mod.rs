@@ -7,7 +7,7 @@
 mod docx;
 pub(crate) mod element_display;
 mod latex;
-mod research;
+pub(crate) mod research;
 pub(crate) mod table;
 pub(crate) mod title;
 pub(crate) mod typst;
@@ -384,15 +384,19 @@ pub(crate) fn export_all_with_engine(
     if selection.tex {
         if uses_typst(input, engine) {
             let path = document_dir.join(format!("{export_stem}.pdf"));
-            let outcome = self::typst::write_pdf(
-                &path,
-                input,
-                markdown,
-                display,
-                fonts,
-                numbering,
-                &crate::visual_diff::ElementMarks::default(),
-            )?;
+            let outcome = if input.kind.is_research() {
+                self::typst::research::write_pdf(&path, input, markdown, numbering)?
+            } else {
+                self::typst::write_pdf(
+                    &path,
+                    input,
+                    markdown,
+                    display,
+                    fonts,
+                    numbering,
+                    &crate::visual_diff::ElementMarks::default(),
+                )?
+            };
             files.push(path);
             typst = Some(outcome);
         } else {
@@ -412,14 +416,14 @@ pub(crate) fn export_all_with_engine(
     Ok(ExportArtifacts { files, typst })
 }
 
-/// 这份文档的 PDF 是否走 Typst：研究报告固定 Tectonic（mdx research 模式）。
-pub(crate) fn uses_typst(input: &DraftInput, engine: PdfEngine) -> bool {
-    engine == PdfEngine::Typst && !input.kind.is_research()
+/// 这份文档的 PDF 是否走 Typst（研究报告与公文都按设置里的引擎）。
+pub(crate) fn uses_typst(_input: &DraftInput, engine: PdfEngine) -> bool {
+    engine == PdfEngine::Typst
 }
 
-/// 把一份文档编成 PDF，写在 `dir/stem.pdf`，返回 PDF 路径。研究报告固定走 mdx +
-/// 内置 Tectonic；其余按引擎：Typst 进程内直接排，Tectonic 先写 `dir/stem.tex` 再编译
-/// （找不到可用 TeX 时返回 `None`）。
+/// 把一份文档编成 PDF，写在 `dir/stem.pdf`，返回 PDF 路径。按引擎：Typst 进程内
+/// 直接排（研究报告走 `typst::research`），Tectonic 先写 `dir/stem.tex` 再编译（研究
+/// 报告经 mdx research 模式；找不到可用 TeX 时返回 `None`）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_pdf_for_kind(
     dir: &Path,
@@ -434,7 +438,11 @@ pub(crate) fn write_pdf_for_kind(
 ) -> Result<Option<PathBuf>> {
     if uses_typst(input, engine) {
         let path = dir.join(format!("{stem}.pdf"));
-        self::typst::write_pdf(&path, input, markdown, display, fonts, numbering, elements)?;
+        if input.kind.is_research() {
+            self::typst::research::write_pdf(&path, input, markdown, numbering)?;
+        } else {
+            self::typst::write_pdf(&path, input, markdown, display, fonts, numbering, elements)?;
+        }
         return Ok(Some(path));
     }
     let tex = dir.join(format!("{stem}.tex"));

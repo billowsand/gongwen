@@ -286,7 +286,7 @@ pub(crate) fn copy_refs(markdown: &str, target_dir: &Path) -> Result<()> {
     copy_refs_from(&storage::config_dir()?, markdown, target_dir)
 }
 
-fn copy_refs_from(base: &Path, markdown: &str, target_dir: &Path) -> Result<()> {
+pub(crate) fn copy_refs_from(base: &Path, markdown: &str, target_dir: &Path) -> Result<()> {
     for src in image_refs(markdown) {
         let source = match resolve_from(base, &src) {
             Ok(source) => source,

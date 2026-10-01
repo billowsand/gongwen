@@ -228,7 +228,7 @@
   costs: (runt: 0%))
 // 断行与两端对齐按 xeCJK 的规矩：汉字固定一个字宽（三号 16pt，不压字距），行太长时
 // 只压标点（上限见 vendor/typst-layout 的补丁），行太短时字间拉开，上限取 CJKglue 的
-// plus 0.08aselineskip。
+// plus 0.08\baselineskip。
 #set par(justify: true, leading: pitch - 16pt, spacing: pitch - 16pt,
   justification-limits: (tracking: (min: 0pt, max: 0.08 * pitch)),
   first-line-indent: (amount: 2em, all: true))
@@ -365,9 +365,9 @@
 
 // ---------------- 版记 ----------------
 // 几何取 TeX 实测（booktabs 线距），以块顶为原点、单位 mm：
-//   单条承办（rraystretch=1）：顶线中心 0.30、抄送行基线 5.84、中线 8.41、承办行基线 13.80、
+//   单条承办（\arraystretch=1）：顶线中心 0.30、抄送行基线 5.84、中线 8.41、承办行基线 13.80、
 //     底线 16.52；
-//   联合发文（rraystretch=1.15，承办逐行列出）：顶线 0.30、抄送 6.41、中线 9.24、首行 15.20、
+//   联合发文（\arraystretch=1.15，承办逐行列出）：顶线 0.30、抄送 6.41、中线 9.24、首行 15.20、
 //     其后每行 +6.81、末行到底线 2.99。
 // 块底贴版心底，底线比版心底再低 1.46mm，与 TeX 一致。
 #let record-geometry(r) = {

@@ -1296,6 +1296,39 @@ impl Engine<'_> {
         )
     }
 
+    /// 行的支柱（TeX 的 `\@arstrutbox` / `\strutbox`）：基线上 0.7、下 0.3 个
+    /// `\baselineskip`。按公文助手研究报告正文 14bp / 24pt 取，即 1.2em / 0.514em，
+    /// 短行之间的行距因此与 TeX 一致（matrix、cases 一行 24pt）。
+    fn strut_row(&self, mut row: MathBox, style: MathStyle) -> MathBox {
+        let em = self.params.em(style);
+        let height = &(&em * &Dim::from_i64(6)) / &Dim::from_i64(5);
+        let depth = &(&em * &Dim::from_i64(18)) / &Dim::from_i64(35);
+        row.height = row.height.max(&height);
+        row.depth = row.depth.max(&depth);
+        row
+    }
+
+    /// `\vcenter`：把竖排的盒子按数学轴居中（matrix、cases、array、aligned）。
+    /// 竖排盒子的基线原在第一行上，行距撑开以后不居中就整体偏下。
+    fn vcenter(&self, bx: MathBox, style: MathStyle) -> MathBox {
+        let axis = &self.params.axis_height * &self.params.scale(style);
+        let shift = &(&(&bx.depth - &bx.height) / &Dim::from_i64(2)) + &axis;
+        MathBox {
+            width: bx.width.clone(),
+            height: &bx.height + &shift,
+            depth: &bx.depth - &shift,
+            italic: Dim::zero(),
+            shift: Dim::zero(),
+            content: BoxContent::HList(vec![bx.with_shift(shift)]),
+        }
+    }
+
+    /// 多行公式（align、gather、multline）行与行之间另加的 `\jot`（3pt，按正文
+    /// 14bp 折成 em）。
+    fn jot(&self, style: MathStyle) -> Dim {
+        &(&self.params.em(style) * &Dim::from_i64(3)) / &Dim::from_i64(14)
+    }
+
     fn align_env(&self, rows: &[EnvRow], style: MathStyle, numbered: bool) -> Result<Item, Error> {
         let mut math_rows: Vec<Vec<MathBox>> = Vec::new();
         let mut nums: Vec<Option<MathBox>> = Vec::new();
@@ -1313,8 +1346,19 @@ impl Engine<'_> {
                 }
                 EnvRow::Cells { cells, .. } => {
                     let mut rboxes = Vec::new();
-                    for c in cells {
-                        rboxes.push(self.layout(c, style)?);
+                    for (j, c) in cells.iter().enumerate() {
+                        // `&=`：右列开头补一个空的 Ord（amsmath 的 `{}`），关系符两侧照常留空。
+                        if j % 2 == 1 {
+                            let mut items = vec![MathNode::Row(Vec::new())];
+                            match c {
+                                MathNode::Row(inner) => items.extend(inner.iter().cloned()),
+                                other => items.push(other.clone()),
+                            }
+                            let node = MathNode::Row(items);
+                            rboxes.push(self.layout(&node, style)?);
+                        } else {
+                            rboxes.push(self.layout(c, style)?);
+                        }
                     }
                     ncols = ncols.max(rboxes.len());
                     math_rows.push(rboxes);
@@ -1335,7 +1379,7 @@ impl Engine<'_> {
             }
         }
         let pair_sep = self.params.em(style);
-        let row_sep = self.params.em(style) / Dim::from_i64(5);
+        let row_sep = self.jot(style);
         let mut packed = Vec::new();
         let mut mi = 0;
         for extra in extras {
@@ -1372,19 +1416,26 @@ impl Engine<'_> {
                     if numbered {
                         body = self.attach_number(body, nums[mi].clone(), style);
                     }
-                    packed.push(body);
+                    packed.push(self.strut_row(body, style));
                     mi += 1;
                 }
             }
         }
+        let packed = MathBox::vpack(packed);
+        // aligned / split 嵌在公式里，按数学轴居中；顶层的 align 不动。
+        let bx = if numbered {
+            packed
+        } else {
+            self.vcenter(packed, style)
+        };
         Ok(Item {
             class: Some(AtomKind::Inner),
-            bx: MathBox::vpack(packed),
+            bx,
         })
     }
 
     fn gather_env(&self, rows: &[EnvRow], style: MathStyle) -> Result<Item, Error> {
-        let row_sep = self.params.em(style) / Dim::from_i64(5);
+        let row_sep = self.jot(style);
         let mut bodies = Vec::new();
         let mut kinds = Vec::new();
         for row in rows {
@@ -1425,7 +1476,8 @@ impl Engine<'_> {
                         Some(s) => Some(self.number_box(&s, MathStyle::Text)?),
                         None => None,
                     };
-                    packed.push(self.attach_number(body, num, style));
+                    let body = self.attach_number(body, num, style);
+                    packed.push(self.strut_row(body, style));
                     bi += 1;
                 }
                 RowKind::Hline => {}
@@ -1457,7 +1509,7 @@ impl Engine<'_> {
         }
         let max_w = bodies.iter().fold(Dim::zero(), |w, b| w.max(&b.width));
         let n = bodies.len();
-        let row_sep = self.params.em(style) / Dim::from_i64(5);
+        let row_sep = self.jot(style);
         let mut packed = Vec::new();
         for (i, b) in bodies.into_iter().enumerate() {
             if i > 0 {
@@ -1470,7 +1522,7 @@ impl Engine<'_> {
             } else {
                 ColSpec::Center
             };
-            packed.push(align_in(b, &max_w, align));
+            packed.push(self.strut_row(align_in(b, &max_w, align), style));
         }
         let mut inner = MathBox::vpack(packed);
         let num = match self.take_number() {
@@ -1515,7 +1567,8 @@ impl Engine<'_> {
     ) -> Result<Item, Error> {
         let thick = self.params.fraction_rule_thickness.clone() * self.params.scale(style);
         let col_sep = self.params.mu(style) * Dim::from_i64(10);
-        let row_sep = self.params.em(style) / Dim::from_i64(5);
+        // 数组行直接相接，行距由支柱撑出（见 `strut_row`）。
+        let row_sep = Dim::zero();
         let mut kinds = Vec::new();
         let mut data: Vec<Vec<MathBox>> = Vec::new();
         let mut ncols_data = 0;
@@ -1629,14 +1682,14 @@ impl Engine<'_> {
                             dj += 1;
                         }
                     }
-                    packed.push(MathBox::hpack(parts));
+                    packed.push(self.strut_row(MathBox::hpack(parts), style));
                     di += 1;
                 }
             }
         }
         Ok(Item {
             class: Some(AtomKind::Inner),
-            bx: MathBox::vpack(packed),
+            bx: self.vcenter(MathBox::vpack(packed), style),
         })
     }
 
@@ -1676,7 +1729,8 @@ impl Engine<'_> {
                 col_w[j] = col_w[j].max(&cell.width);
             }
         }
-        let row_sep = self.params.em(style) / Dim::from_i64(5);
+        // matrix、cases 的行直接相接，行距由支柱撑出（见 `strut_row`）。
+        let row_sep = Dim::zero();
         let mut row_boxes = Vec::new();
         for (ri, row) in cells.into_iter().enumerate() {
             let mut parts = Vec::new();
@@ -1700,9 +1754,9 @@ impl Engine<'_> {
                 };
                 packed = self.attach_number(packed, num, style);
             }
-            row_boxes.push(packed);
+            row_boxes.push(self.strut_row(packed, style));
         }
-        let mut inner = MathBox::vpack(row_boxes);
+        let mut inner = self.vcenter(MathBox::vpack(row_boxes), style);
         let needed = &inner.height + &inner.depth;
         let (ld, rd) = delims;
         if let Some(l) = ld {

@@ -1,0 +1,578 @@
+// 研究报告模板（Typst 引擎）。
+//
+// 数据来自 /doc.json，由 mdx 的 typst_research 整理、src/export/typst/research.rs 补上
+// 字体名与公式 SVG：章节号、图表号、文框号、列表序号都已算好，这里只负责排。版式对照
+// mdx 的 md2tex.cls 与 template.tex，凡标「实测」的数值都是对着内置 Tectonic 的 PDF 量
+// 出来的落点，改动前先跑对照测试（见 docs/typst-engine.md）。
+//
+// 坐标约定：竖向位置未特别说明的，都是「相对版心顶」的基线位置（mm）；pt 是 PostScript
+// 点（bp），TeX 的 pt 另记为 texpt。
+
+#let doc = json("/doc.json")
+#let F = doc.fonts
+
+// ---------------- 版式常量（md2tex.cls） ----------------
+#let texpt = 25.4mm / 72.27
+#let pitch = 24 * texpt                    // \normalsize 14bp / 24pt
+#let body-size = 14pt
+#let top-edge = 11.59pt                    // 实测：页首第一行基线在版心顶下 4.09mm
+#let bottom-edge = body-size - top-edge
+#let text-w = 156mm
+#let text-h = 225mm
+#let top-m = 37mm
+#let inner-m = 28mm
+#let outer-m = 26mm
+// 页码盒：fancyhdr 的 \headwidth 取的是 geometry 生效前的版心宽，页码因此不在版心正中，
+// 奇数页以版心左缘、偶数页以版心右缘为准（实测）。
+#let number-half = 75.57mm
+#let number-base = 8.89mm                  // 页码基线在版心底下（实测）
+
+// ---------------- 字体 ----------------
+// 西文 TeX Gyre Termes 只管拉丁字母（引号、破折号这些中西共用的符号归中文字体，
+// 与 xeCJK 的分类一致）。
+#let latin = (name: F.latin, covers: "latin-in-cjk")
+#let song = (latin, F.song)
+#let kai = (latin, F.kai)
+#let hei = (F.hei,)                        // \heiti\enhei：中西文都用黑体
+#let hei-cjk = (latin, F.hei)              // \heiti：西文仍是 Termes（表头）
+#let xbs = (latin, F.xbs)
+#let mono = ((name: F.mono, covers: "latin-in-cjk"), F.kai)
+
+// ---------------- 行内片段 ----------------
+// 加粗：西文换 Termes Bold，汉字描边伪粗（xeCJK AutoFakeBold，只作用于中文字体）。
+#let fake-bold-cjk(c) = {
+  show regex("[^\u{0}-\u{24F}]+"): it => context text(stroke: 0.02857em + text.fill, it)
+  text(weight: "bold", c)
+}
+
+#let math-box(r) = {
+  if "err" in r { return text(font: mono, r.v) }
+  box(width: r.w * 1em, height: (r.h + r.dp) * 1em, baseline: r.dp * 1em,
+    // 图片放进 place 时按行内元素排、底边贴基线；外面再套一个定高的 box 才落在 dy 处。
+    place(top + left, dx: -r.pad * 1em, dy: -r.pad * 1em,
+      box(height: (r.h + r.dp + 2 * r.pad) * 1em, image(r.f, width: (r.w + 2 * r.pad) * 1em))))
+}
+
+#let ref-run(id) = context {
+  let found = query(label(id))
+  if found.len() > 0 { link(label(id), found.first().value) } else { text(fill: red, id) }
+}
+
+// 汉字（不含标点）：xeCJK 在它与西文之间插 CJKecglue。
+#let cjk-start(r) = r != none and r.t == "s" and r.v.len() > 0 and r.v.clusters().first().match(regex("^[\p{Han}]")) != none
+#let cjk-end(r) = r != none and r.t == "s" and r.v.len() > 0 and r.v.clusters().last().match(regex("^[\p{Han}]")) != none
+
+// 花脸稿：删除的字红色加删除线，新增的字套蓝框（与公文模板同一套画法）。
+#let del-color = rgb("#C00000")
+#let add-color = rgb("#1F4E9E")
+#let del-mark(c) = text(fill: del-color, strike(stroke: 0.6pt + del-color, offset: -0.32em, c))
+#let add-mark(c) = h(2pt) + highlight(fill: none, stroke: 0.5pt + add-color, top-edge: 0.96em,
+  bottom-edge: -0.24em, extent: 1.5pt, c) + h(2pt)
+
+#let runs(rs) = {
+  for (i, r) in rs.enumerate() {
+    let prev = if i > 0 { rs.at(i - 1) } else { none }
+    let next = rs.at(i + 1, default: none)
+    let piece = if r.t == "s" { r.v }
+    else if r.t == "b" { fake-bold-cjk(runs(r.c)) }
+    else if r.t == "i" { text(font: kai, style: "italic", runs(r.c)) }
+    else if r.t == "code" { text(font: mono, r.v) }
+    else if r.t == "link" { link(r.url, text(fill: blue, r.v)) }
+    else if r.t == "img" {
+      box(image(r.src, width: text-w, ..if r.page != none { (page: r.page) }))
+    }
+    // \ref 的编号紧贴汉字（hyperref 的链接盒挡住了 CJKecglue）。
+    else if r.t == "ref" { box(ref-run(r.id)) }
+    else if r.t == "cite" {
+      // \cite 的方括号与前面的汉字之间有 CJKecglue（Termes 词间空）。
+      {
+        if cjk-end(prev) { h(0.25em) }
+        if doc.bibliography { r.keys.map(k => cite(label(k))).join() } else { "[" + r.keys.join(",") + "]" }
+        if cjk-start(next) { h(0.25em) }
+      }
+    }
+    else if r.t == "fn" { footnote(r.v) }
+    else if r.t == "math" { math-box(r) }
+    let m = r.at("m", default: none)
+    if m == "del" { del-mark(piece) } else if m == "add" { add-mark(piece) } else { piece }
+  }
+}
+
+// 文献引用：GB/T 7714 顺序编码，方括号与正文同排（gbt7714 的 \citestyle{numbers}），不上标。
+#show cite: it => { show super: s => s.body; it }
+
+// 交叉引用的落点：编号存在零高的 metadata 里，引用处查出来印。
+#let anchor(id, number) = if id != none { [#metadata(number)#label(id)] }
+
+// ---------------- 页码 ----------------
+// \clearemptydoublepage：在上一页末尾放一个零高的 <gw-clear>，再另起奇数页。标记所在页
+// 是奇数页时，中间插进来的空白页不印页码。\pagenumbering / \setcounter{page} 跟着这个
+// 标记走（num：样式与起始值），从它之后的第一个奇数页起算；目录之后的 "resume" 接着
+// 目录之前的页号往下数。封面在第一个页码段之前，不印页码。
+#let next-odd(m) = if calc.odd(m) { m + 2 } else { m + 1 }
+#let page-segments() = {
+  let out = ()
+  let prev = none
+  let toc-start = none
+  for m in query(<gw-clear>) {
+    let num = m.value
+    if num == none { continue }
+    let first = next-odd(m.location().page())
+    let start = if num.start == "resume" {
+      if prev == none or toc-start == none { 1 } else { prev.start + (toc-start - prev.first) }
+    } else { num.start }
+    if num.style == "I" { toc-start = first } else { prev = (start: start, first: first) }
+    out.push((first: first, start: start, style: num.style))
+  }
+  out
+}
+#let page-label(p, segments) = {
+  let seg = segments.filter(s => s.first <= p)
+  if seg.len() == 0 { return none }
+  let s = seg.last()
+  numbering(s.style, s.start + (p - s.first))
+}
+#let blank-page(p) = query(<gw-clear>).any(m => {
+  let at = m.location().page()
+  at == p - 1 and calc.odd(at)
+})
+
+#let page-number = context {
+  let p = here().page()
+  let label = if blank-page(p) { none } else { page-label(p, page-segments()) }
+  if label != none {
+    let x = if calc.odd(p) { inner-m + number-half } else { 210mm - inner-m - number-half }
+    place(top + left, dx: x - 50mm, dy: top-m + text-h + number-base,
+      box(width: 100mm, align(center, text(font: (F.song,), size: 14pt, top-edge: "baseline",
+        bottom-edge: "baseline", [—#h(0.25em)#label#h(0.25em)—]))))
+  }
+}
+
+// \cleardoublepage：另起奇数页，中间的空白页照印页码。
+#let clear-double() = pagebreak(weak: true, to: "odd")
+#let clear-empty(num: none) = {
+  block(height: 0pt, spacing: 0pt, [#metadata(num)<gw-clear>])
+  pagebreak(to: "odd")
+}
+#let front = doc.blocks.len() > 0 and doc.blocks.first().k == "front"
+
+#set page(paper: "a4", binding: left,
+  margin: (inside: inner-m, outside: outer-m, top: top-m, bottom: 297mm - top-m - text-h),
+  background: page-number)
+
+#set text(font: song, size: body-size, lang: "zh", region: "cn", top-edge: top-edge,
+  bottom-edge: -bottom-edge, overhang: false, costs: (runt: 0%))
+#set par(justify: true, leading: pitch - body-size, spacing: pitch - body-size,
+  justification-limits: (tracking: (min: 0pt, max: 0.02 * pitch)),
+  first-line-indent: (amount: 2em, all: true))
+#set block(spacing: pitch - body-size)
+
+// 脚注：小五号的 \footnotesize（7.5pt），正文里的脚注号 10.5pt 上标（实测）。
+#set footnote(numbering: "1")
+#show footnote: it => {
+  let n = counter(footnote).at(it.location()).first()
+  link(it.location(), super(baseline: -5.07pt, size: 10.5pt, text(font: latin, str(n))))
+}
+// 实测：脚注线在正文末行字身下缘下 1.96mm，脚注基线在线下 3.21mm。
+#set footnote.entry(separator: line(length: 0.4 * text-w, stroke: 0.4 * texpt),
+  clearance: 1.8mm, gap: 3.21mm - 0.66 * 7.5pt - 0.62mm, indent: 0pt)
+#show footnote.entry: it => {
+  set text(size: 7.5pt, top-edge: "cap-height", bottom-edge: -3.06pt)
+  set par(first-line-indent: 0pt, leading: 9 * texpt - 7.5pt, justify: true)
+  let n = counter(footnote).at(it.note.location()).first()
+  h(10.5pt) + super(baseline: -2.72pt, size: 4.98pt, text(font: latin, str(n))) + it.note.body
+}
+
+// ---------------- 标题 ----------------
+// 目录条目：每个进目录的标题前放一个 <gw-toc>，目录按它们的页码排。
+#let toc-entry(kind, prefix, text) = [#metadata((kind: kind, prefix: prefix, text: text))<gw-toc>]
+
+// PDF 书签：一个看不见、不占地方的 heading（版面上的标题另排，免得 heading 自带的字号
+// 与字重掺进来）。
+#let bookmark(level, body) = place(hide(heading(level: level, outlined: false, bookmarked: true, body)))
+#set heading(numbering: none)
+
+// 行末的全角标点：Typst 会把它压掉半个字，居中、居右的行因此偏出去；xeCJK 不压。
+// 行末补一个空盒子挡住。
+#let keep-end = box()
+
+// 在给定基线排一行居中的字：字身上缘固定在基线上 1em，公式不超过 1em 就不会把行撑低。
+#let centered-at(y, body) = place(top + left, dy: y - 1em, box(width: text-w, align(center,
+  text(top-edge: 1em, bottom-edge: "baseline", body + keep-end))))
+
+// 章（ctexbook \chapter）：另起奇数页，小二黑体居中，「第1章」与题名间空一字。
+// 实测：章题基线在版心顶下 28.71mm，其后第一行基线 51.20mm。
+#let chapter-top = 28.71mm
+#let chapter-next = 51.20mm
+#let chapter-block(prefix, body, level: 2, pre: none) = {
+  clear-double()
+  let title = if prefix != none { prefix + h(1em) + body } else { body }
+  block(height: chapter-next - top-edge, width: 100%, spacing: 0pt, {
+    pre
+    bookmark(level, title)
+    set text(font: hei, size: 18pt)
+    centered-at(chapter-top, title)
+  })
+}
+
+#let chapter-prefix(p) = {
+  // 「第1章」：汉字与数字之间是黑体的词间空（xeCJK CJKecglue）。
+  let digits = p.match(regex("[0-9A-Z]+"))
+  if digits == none { return p }
+  p.slice(0, digits.start) + h(0.304em) + digits.text + if digits.end < p.len() { h(0.304em) + p.slice(digits.end) }
+}
+
+#let chapter(b) = {
+  let prefix = if b.prefix != none { chapter-prefix(b.prefix) } else { none }
+  let pre = {
+    if b.toc { toc-entry("chapter", b.prefix, b.text) }
+    if b.number != none { counter(footnote).update(0) }
+  }
+  chapter-block(prefix, runs(b.text), pre: pre)
+  anchor(b.label, b.number)
+}
+
+// 节（titlesec）：缩进两字，黑体四号，编号与题名空半字，前后不加距离。
+// 紧跟在章题之后不再加段距（章题块已经量到下一行基线）；紧跟表格时实测比正文多空 1.83mm。
+#let section(b, prev: none) = {
+  if b.toc and b.level == 1 { toc-entry("section", b.number, b.text) }
+  let num = if b.number != none { b.number + h(0.5em) }
+  let above = if prev == "chapter" { 0pt } else if prev == "table" { 10.47mm - top-edge + 1.83mm } else { pitch - body-size }
+  block(sticky: true, above: above, below: pitch - body-size, {
+    bookmark(b.level + 2, num + runs(b.text))
+    par(first-line-indent: 0pt, justify: false, h(2em) + text(font: hei, num + runs(b.text)))
+  })
+  anchor(b.label, b.number)
+}
+
+// 部分（\part）：独占一页，小一黑体居中；book 类在部分页之后另加一张不印页码的空白页。
+// 实测「第一部分」基线在版心顶下 77.23mm，题名 94.42mm。
+#let part(b) = {
+  clear-double()
+  let head = if b.number != none { [第#b.number;部分] }
+  block(width: 100%, height: 94.42mm, spacing: 0pt, {
+    toc-entry("part", if b.number != none { "第" + b.number + "部分" } else { none }, b.text)
+    bookmark(1, if head != none { head + h(1em) } + runs(b.text))
+    set text(font: hei, size: 24pt)
+    if head != none { centered-at(77.23mm, head) }
+    centered-at(94.42mm, runs(b.text))
+  })
+  anchor(b.label, b.number)
+  clear-empty()
+}
+
+// ---------------- 正文块 ----------------
+#let para(c) = par(runs(c))
+
+#let aligned(b) = {
+  let a = if b.align == "center" { center } else { right }
+  align(a, par(first-line-indent: 0pt, justify: false, runs(b.c) + keep-end))
+}
+
+// 列表（paralist）：一级条目是段落式（asparaenum），⑴ 后退 0.2 字；更深的条目接排在
+// 段内（inparaenum），① 后退 0.3 字。
+#let list-label(e) = {
+  let back = if e.level == 1 { 0.2em } else if e.level == 2 { 0.3em } else { 0em }
+  text(font: (F.song,), e.label) + h(-back)
+}
+#let list-par(b) = {
+  let first = b.items.first()
+  par(b.items.enumerate().map(((i, e)) => {
+    if i > 0 { h(0.25em) }
+    list-label(e) + runs(e.c)
+  }).join())
+}
+
+// 表题与图题（caption）：标签黑体、题名宋体，小四，二者空半字。
+#let caption-line(tag, body) = align(center, par(first-line-indent: 0pt, justify: false,
+  text(size: 12pt, top-edge: 0.83em, bottom-edge: -0.17em,
+    text(font: hei, tag) + h(0.5em) + if body != none { text(font: song, body) } + keep-end)))
+
+// ---------------- 表格（longtblr） ----------------
+#let col-sep = 6 * texpt
+#let rule-w = 0.4 * texpt
+#let table-widths(cols, total) = {
+  let fixed = cols.filter(c => c.kind == "em").map(c => c.v * 12pt).sum(default: 0pt)
+  let ratio = cols.filter(c => c.kind == "fr").map(c => c.v).sum(default: 0)
+  let avail = total - cols.len() * 2 * col-sep - fixed
+  cols.map(c => if c.kind == "em" { c.v * 12pt + 2 * col-sep } else { avail * c.v / ratio + 2 * col-sep })
+}
+#let table-serial = counter("gw-table")
+// 实测：表题基线距上一行基线 10.46mm，表顶线在表题基线下 2.70mm；表底线到下一行基线
+// 10.47mm。
+#let table-block(t, prev: none) = {
+  table-serial.step()
+  let widths = table-widths(t.cols, text-w)
+  let n = t.cols.len()
+  let al(a) = if a == "l" { left } else if a == "r" { right } else { center }
+  let mk(c, header) = {
+    let args = (:)
+    if c.colspan > 1 { args.colspan = c.colspan }
+    if c.rowspan > 1 { args.rowspan = c.rowspan }
+    let body = runs(c.c)
+    if header { body = text(font: hei-cjk, body) }
+    table.cell(..args, align: al(c.align) + horizon, body)
+  }
+  let cell-or-skip(c, header) = if c == none { () } else { (mk(c, header),) }
+  context {
+    let id = "gw-tbl-end-" + str(table-serial.get().first())
+    let start = "gw-tbl-start-" + str(table-serial.get().first())
+    let tag = [表#h(0.25em)#t.number]
+    let body = if t.caption != none { runs(t.caption) }
+    // 表题放进表头：跨页时每页重复，续页上缀「（续表）」（tabularray 的 conthead）。
+    let caption = table.cell(colspan: n, stroke: none, inset: (x: 0pt, top: 0pt, bottom: 2.70mm - 0.17 * 12pt),
+      align: center, context {
+        let first = locate(label(start)).page()
+        let cont = if here().page() > first { h(0.25em) + [（续表）] }
+        text(top-edge: 0.83em, bottom-edge: -0.17em, text(font: hei, tag)
+          + h(0.5em) + text(font: song, body + cont) + keep-end)
+      })
+    // 紧跟章题：实测表题基线在版心顶下 53.23mm（章题块量到 51.20mm 处的下一行基线）。
+    // 紧跟节标题时实测多空 1.90mm。
+    let above = if prev == "chapter" { 53.23mm - (chapter-next - top-edge) - 0.83 * 12pt }
+      else if prev == "section" { 10.46mm + 1.90mm - bottom-edge - 0.83 * 12pt }
+      else { 10.46mm - bottom-edge - 0.83 * 12pt }
+    block(above: above, below: 10.47mm - top-edge, width: 100%, {
+      [#metadata(none)#label(start)]
+      anchor(t.label, t.number)
+      // \fontsize{12bp}{18pt}：每行一个 18pt 的支柱（基线上 0.7、下 0.3）。
+      set text(size: 12pt, top-edge: 0.7 * 18 * texpt, bottom-edge: -0.3 * 18 * texpt)
+      set par(leading: 0pt, spacing: 0pt, first-line-indent: 0pt, justify: false)
+      table(
+        columns: widths,
+        inset: (x: col-sep, y: 2 * texpt + rule-w / 2),
+        stroke: rule-w + black,
+        table.header(caption, ..t.rows.at(0).map(c => cell-or-skip(c, true)).flatten()),
+        ..t.rows.slice(1).map(r => r.map(c => cell-or-skip(c, false)).flatten()).flatten(),
+        // 续表提示（tabularray 的 contfoot）：只在表格还没结束的页上有内容。
+        table.footer(repeat: true, table.cell(colspan: n, stroke: none, inset: 0pt, align: right,
+          context {
+            let end = locate(label(id)).page()
+            if here().page() < end { block(above: 0pt, inset: (top: 2 * texpt), text(size: 12pt)[下一页继续]) }
+          })),
+      )
+      [#metadata(none)#label(id)]
+    })
+  }
+}
+
+// ---------------- 插图（figure [H]） ----------------
+// 实测：图顶距上一行基线 3.07mm，图题基线在图底下 5.67mm，下一行基线距图题基线 13.47mm。
+#let figure-block(f) = {
+  let w = if f.width != none { f.width * text-w } else { text-w }
+  let img = if f.width != none {
+    image(f.src, width: w, ..if f.page != none { (page: f.page) })
+  } else {
+    image(f.src, width: text-w, height: 0.6 * text-h, fit: "contain", ..if f.page != none { (page: f.page) })
+  }
+  block(above: 3.07mm - bottom-edge, below: 13.47mm - 0.17 * 12pt - top-edge, width: 100%, breakable: false, {
+    align(center, img)
+    if f.caption != none {
+      v(5.67mm - 0.83 * 12pt - (pitch - body-size), weak: false)
+      caption-line([图#h(0.25em)#f.number], f.caption)
+    }
+    anchor(f.label, f.number)
+  })
+}
+
+// ---------------- 代码（listings） ----------------
+// 等宽 11bp / 16pt，浅灰底、细框、圆角；行号小号灰色排在框外左侧。
+#let code-block(b) = {
+  let lines = b.text.split("\n")
+  block(above: 10 * texpt, below: 10 * texpt, width: 100%, inset: (left: 5 * texpt, right: 10 * texpt),
+    block(width: 100%, fill: rgb(248, 248, 248), stroke: 0.4pt + rgb(220, 220, 220), radius: 2pt,
+      inset: (left: 15 * texpt, right: 3pt, y: 6 * texpt), {
+      set text(font: mono, size: 11pt, top-edge: 0.7 * 16 * texpt, bottom-edge: -0.3 * 16 * texpt)
+      set par(first-line-indent: 0pt, justify: false, leading: 0pt, spacing: 0pt)
+      grid(columns: (0pt, 1fr), row-gutter: 0pt,
+        ..lines.enumerate().map(((i, l)) => (
+          place(right, dx: -10 * texpt, text(size: 6.5pt, fill: rgb(153, 153, 153), font: (latin,), str(i + 1))),
+          par(l),
+        )).flatten())
+    }))
+}
+
+// ---------------- 公式 ----------------
+#let display-math(b) = {
+  let m = b.at("m", default: none)
+  let body = math-box(b)
+  let body = if m == "del" { del-mark(body) } else if m == "add" { box(stroke: 0.5pt + add-color, inset: 3pt, body) } else { body }
+  align(center, par(first-line-indent: 0pt, justify: false, body))
+}
+
+// ---------------- 引文与文框 ----------------
+// 引文（mdxquote）：楷体，左右各缩进两字，首行再缩进两字，前后各空半行；出处靠右。
+#let quote-block(b) = block(above: 0.5 * pitch + (pitch - body-size), below: 0.5 * pitch + (pitch - body-size),
+  inset: (left: 2em, right: 2em), width: 100%, {
+  set text(font: kai)
+  for l in b.items {
+    if l.k == "source" { align(right, par(first-line-indent: 0pt, justify: false, runs(l.c))) }
+    else if l.k == "math" { display-math(l) }
+    else if l.k == "list" { par(text(font: (F.song,), l.label) + h(-0.2em) + runs(l.c)) }
+    else { par(runs(l.c)) }
+  }
+})
+
+// 文框（mdxboxtblr）：0.6pt 细框、浅灰底，标题行黑体居中，内文楷体小四、一行一格。
+// 实测：标题行基线在框顶下 6.01mm，行距 8.44mm，末行基线到框底 5.45mm。
+#let box-block(b, prev: none) = {
+  let title = text(font: hei, b.name + h(0.5em) + b.number + h(1em) + runs(b.title))
+  // 实测：框顶距上一行基线 5.10mm，框底到下一行基线 8.43mm；两框相接时框间 8.85mm
+  // （tabularray 的 presep 与 postsep 相加）。
+  // 落在页首时框顶仍在版心顶下 3.62mm（TeX 的 presep 前有 \label，不会被页首吃掉）：
+  // 这一段放进框外的块里，块前距相应减掉。
+  let keep = if prev == "chapter" { 0mm } else { 3.62mm }
+  let above = if prev == "box" { 8.85mm } else if prev == "chapter" { 5.10mm - bottom-edge - 3.62mm } else { 5.10mm - bottom-edge }
+  block(above: above - keep, below: 8.43mm - top-edge, width: 100%, {
+  v(keep, weak: false)
+  block(above: 0pt, below: 0pt, width: 100%,
+    fill: luma(93%), stroke: 0.6pt + black, inset: (x: 1em + 0.6pt, top: 6.01mm - 0.83 * 12pt, bottom: 5.45mm - 0.17 * 12pt), {
+    set text(size: 12pt, font: kai, top-edge: 0.83em, bottom-edge: -0.17em)
+    set par(first-line-indent: 0pt, leading: 8.44mm - 12pt, spacing: 8.44mm - 12pt, justify: true)
+    anchor(b.label, b.number)
+    align(center, par(justify: false, title))
+    for l in b.items {
+      if l.k == "math" { align(center, par(math-box(l))) }
+      else if l.k == "list" { par(h(2em) + text(font: (F.song,), l.label) + h(-0.2em) + runs(l.c)) }
+      else { par(h(2em) + runs(l.c)) }
+    }
+  })
+  })
+}
+
+// ---------------- 参考文献 ----------------
+#let bib-block(b) = {
+  if b.titled { chapter-block(none, [参考文献]) }
+  // 条目之间实测比行距多 2.80mm（gbt7714 的 \itemsep）。
+  set par(first-line-indent: 0pt, spacing: pitch - body-size - 0.69mm)
+  block(above: 0pt, bibliography("/references.bib", title: none, style: "gb-7714-2015-numeric"))
+}
+
+// ---------------- 摘要、目录 ----------------
+#let abstract(b, render) = {
+  chapter-block(none, [摘要], pre: toc-entry("chapter", none, ((t: "s", v: "摘要"),)))
+  render(b.blocks)
+}
+
+// 目录：标题小二黑体居中；章条目黑体、页码 Termes 加粗；节条目缩进、带点线。
+// 实测：标题基线在版心顶下 29.52mm，首条目基线 52.02mm。
+#let toc-block() = {
+  clear-empty(num: (style: "I", start: 1))
+  context {
+    block(height: 52.02mm - top-edge, width: 100%, spacing: 0pt, {
+      bookmark(2, [目录])
+      set text(font: hei, size: 18pt)
+      centered-at(29.52mm, [目录])
+    })
+    let segments = page-segments()
+    set par(first-line-indent: 0pt, justify: false)
+    for e in query(<gw-toc>) {
+      let p = e.location().page()
+      let num = page-label(p, segments)
+      let v = e.value
+      let target = e.location()
+      if v.kind == "section" {
+        par(link(target, h(15.75pt) + if v.prefix != none { v.prefix + h(0.5em) } + runs(v.text)
+          + box(width: 1fr, repeat(gap: 10.5pt - 0.25em, justify: false)[.]) + h(1.5em)
+          + box(width: 1.55em, align(right, text(font: (latin,), num)))))
+      } else {
+        let label = if v.prefix != none { text(font: hei, chapter-prefix(v.prefix)) + h(0.8em) }
+        par(link(target, text(font: hei, label + runs(v.text)) + h(1fr)
+          + text(font: (latin,), weight: "bold", num)))
+      }
+    }
+  }
+}
+
+// ---------------- 封面（template.tex 的 titlepage） ----------------
+// 位置按距页面左上角的毫米数（TikZ 节点 anchor=north：节点顶即字形上缘）。
+#let cover() = {
+  let c = doc.cover
+  let at(x, y, anchor: center, body) = place(top + left, dx: x - inner-m - 100mm, dy: y - top-m,
+    box(width: 200mm, align(anchor, text(top-edge: "bounds", bottom-edge: "bounds", body))))
+  let sp = 0.25em
+  if c.security != "" {
+    let years = if c.security-years != "" { [★#c.security-years] }
+    place(top + left, dx: 25mm - inner-m, dy: 20mm - top-m,
+      text(font: hei, size: 12pt, top-edge: "bounds", bottom-edge: "bounds", [#c.security#years]))
+  }
+  if c.number != "" {
+    place(top + left, dx: 185mm - inner-m - 100mm, dy: 20mm - top-m, box(width: 100mm, align(right,
+      text(font: hei, size: 12pt, top-edge: "bounds", bottom-edge: "bounds", [编号：#c.number]))))
+  }
+  at(105mm, 68mm, text(font: hei, size: 18pt, c.doc-type.clusters().join(h(0.5em))))
+  if c.ident != "" { at(105mm, 83mm, text(font: song, size: 14pt, c.ident)) }
+  place(top + left, dx: 25mm - inner-m, dy: 94mm - top-m, rect(width: 160mm, height: 0.5mm, fill: black, stroke: none))
+  if c.stage == none {
+    place(top + left, dx: 25mm - inner-m, dy: 95.3mm - top-m, rect(width: 160mm, height: 0.2mm, fill: black, stroke: none))
+  }
+  context {
+    let title = box(width: 150mm, align(center, text(font: xbs, size: 26pt, top-edge: "bounds", bottom-edge: "bounds",
+      par(leading: 37.7pt - 26pt, first-line-indent: 0pt, justify: false, c.title.map(runs).join(linebreak())))))
+    let y = 114mm
+    place(top + left, dx: 105mm - 75mm - inner-m, dy: y - top-m, title)
+    y += measure(title).height
+    if c.version != "" {
+      let v = text(font: song, size: 15pt, top-edge: "bounds", bottom-edge: "bounds", c.version)
+      y += 6mm
+      at(105mm, y, v)
+      y += measure(v).height
+    }
+    if c.original != "" {
+      at(105mm, y + 6mm, box(width: 150mm, text(font: (latin, F.song), style: "italic", size: 15pt,
+        par(leading: 20pt - 15pt, first-line-indent: 0pt, justify: false, c.original))))
+    }
+  }
+  if c.stage != none {
+    for (i, name) in ("立项论证", "建设实施", "技术实现", "项目总结").enumerate() {
+      let xl = 25mm + i * 40.5mm
+      let current = i == c.stage
+      place(top + left, dx: xl - inner-m, dy: 218mm - top-m,
+        rect(width: 38.5mm, height: if current { 0.8mm } else { 0.2mm }, stroke: none,
+          fill: if current { black } else { luma(65%) }))
+      at(xl + 19.25mm, 221.2mm, text(font: hei, size: 10.5pt, fill: if current { black } else { luma(55%) }, name))
+    }
+  } else if c.byline.len() > 0 {
+    at(105mm, 224mm, text(font: song, size: 14pt, c.byline.join(h(1em))))
+  }
+  context {
+    let inst = text(font: hei, size: 16pt, top-edge: "bounds", bottom-edge: "bounds", c.institution)
+    at(105mm, 245mm, inst)
+    at(105mm, 245mm + measure(inst).height + 5mm, text(font: song, size: 15pt, c.date))
+  }
+}
+
+// ================= 正文 =================
+#let render(blocks) = {
+  let prev = none
+  for b in blocks {
+    let k = b.k
+    let after = prev
+    prev = k
+    if k == "par" { para(b.c) }
+    else if k == "aligned" { aligned(b) }
+    else if k == "list" { list-par(b) }
+    else if k == "chapter" { chapter(b) }
+    else if k == "section" { section(b, prev: after) }
+    else if k == "part" { part(b) }
+    else if k == "table" { table-block(b, prev: after) }
+    else if k == "figure" { figure-block(b) }
+    else if k == "code" { code-block(b) }
+    else if k == "math" { display-math(b) }
+    else if k == "quote" { quote-block(b) }
+    else if k == "box" { box-block(b, prev: after) }
+    else if k == "bib" { bib-block(b) }
+    else if k == "front" { }
+    else if k == "abstract" { abstract(b, render) }
+    else if k == "toc" {
+      toc-block()
+      // 目录之后恢复阿拉伯页码，接着目录之前的页号：摘要单独编页时从 1 起。
+      clear-empty(num: (style: "1", start: if front { 1 } else { "resume" }))
+    }
+  }
+}
+
+#cover()
+// \mainmatter：正文从阿拉伯页码 1 起；摘要单独编页时摘要用小写罗马页码。
+#clear-empty(num: if front { (style: "i", start: 1) } else { (style: "1", start: 1) })
+#render(doc.blocks)

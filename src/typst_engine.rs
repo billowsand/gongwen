@@ -30,9 +30,34 @@ use crate::models::{FontConfig, FontRole};
 
 /// 公文模板。改版式只改这一个文件。
 pub const TEMPLATE: &str = include_str!("../assets/typst/gongwen.typ");
+/// 研究报告模板（对应 mdx 的 `md2tex.cls` + `template.tex`）。
+pub const RESEARCH_TEMPLATE: &str = include_str!("../assets/typst/research.typ");
 
-const MAIN_PATH: &str = "/gongwen.typ";
 const DATA_PATH: &str = "/doc.json";
+
+/// 排哪一种文档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Template {
+    #[default]
+    Official,
+    Research,
+}
+
+impl Template {
+    fn main_path(self) -> &'static str {
+        match self {
+            Self::Official => "/gongwen.typ",
+            Self::Research => "/research.typ",
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::Official => TEMPLATE,
+            Self::Research => RESEARCH_TEMPLATE,
+        }
+    }
+}
 
 /// 一次排版的输入。
 pub struct TypstJob<'a> {
@@ -40,6 +65,21 @@ pub struct TypstJob<'a> {
     pub data: String,
     /// 插图等相对路径的解析基准（导出目录）。
     pub base_dir: &'a Path,
+    pub template: Template,
+    /// 只在内存里的文件（虚拟绝对路径 → 内容），如研究报告的公式 SVG。
+    pub files: HashMap<String, Vec<u8>>,
+}
+
+impl<'a> TypstJob<'a> {
+    /// 公文：模板数据 + 插图目录。
+    pub fn official(data: String, base_dir: &'a Path) -> Self {
+        Self {
+            data,
+            base_dir,
+            template: Template::Official,
+            files: HashMap::new(),
+        }
+    }
 }
 
 /// 一次排版的产物。
@@ -95,6 +135,13 @@ pub struct FontSet {
 /// 随包字体目录。发布包在可执行文件旁的 `runtime/fonts`，开发构建另查仓库根目录。
 fn bundled_font_dir() -> Result<PathBuf> {
     crate::portable_runtime::find_font_dir().context("找不到内置字体目录 runtime/fonts")
+}
+
+/// 随包字体文件的家族名（按 Typst 从文件里读到的名字）。研究报告的字体全部钉死在
+/// 随包文件上，不受设置页的本机字体影响。
+pub fn bundled_family(file: &str) -> Result<String> {
+    let fonts = load_font_file(&bundled_font_dir()?.join(file))?;
+    Ok(fonts[0].info().family.clone())
 }
 
 /// 装载随包字体与设置里生效的本机字体，并定出各角色的家族名。
@@ -173,6 +220,8 @@ struct GongwenWorld {
     data_id: FileId,
     data: Bytes,
     base_dir: PathBuf,
+    template: Template,
+    files: HashMap<FileId, Bytes>,
 }
 
 fn file_id(path: &str) -> FileId {
@@ -181,18 +230,34 @@ fn file_id(path: &str) -> FileId {
 }
 
 impl GongwenWorld {
+    #[cfg(test)]
     fn new(set: &FontSet, data: String, base_dir: &Path) -> Self {
-        let main = file_id(MAIN_PATH);
+        Self::with_template(set, data, base_dir, Template::Official, &HashMap::new())
+    }
+
+    fn with_template(
+        set: &FontSet,
+        data: String,
+        base_dir: &Path,
+        template: Template,
+        files: &HashMap<String, Vec<u8>>,
+    ) -> Self {
+        let main = file_id(template.main_path());
         let data_id = file_id(DATA_PATH);
         Self {
             library: LazyHash::new(Library::default()),
             book: LazyHash::new(FontBook::from_fonts(&set.fonts)),
             fonts: set.fonts.clone(),
             main,
-            main_source: Source::new(main, TEMPLATE.to_string()),
+            main_source: Source::new(main, template.source().to_string()),
             data_id,
             data: Bytes::new(data.into_bytes()),
             base_dir: base_dir.to_path_buf(),
+            template,
+            files: files
+                .iter()
+                .map(|(path, bytes)| (file_id(path), Bytes::new(bytes.clone())))
+                .collect(),
         }
     }
 
@@ -239,7 +304,10 @@ impl World for GongwenWorld {
             return Ok(self.data.clone());
         }
         if id == self.main {
-            return Ok(Bytes::new(TEMPLATE.as_bytes().to_vec()));
+            return Ok(Bytes::new(self.template.source().as_bytes().to_vec()));
+        }
+        if let Some(bytes) = self.files.get(&id) {
+            return Ok(bytes.clone());
         }
         let path = self.resolve(id)?;
         std::fs::read(&path)
@@ -281,7 +349,13 @@ fn describe(world: &GongwenWorld, diag: &SourceDiagnostic) -> String {
 /// 排版并导出 PDF。字体由调用方先用 [`font_set`] 装好：模板数据里要写各角色的
 /// 家族名，两边必须是同一份。
 pub fn compile(job: &TypstJob, set: &FontSet) -> Result<TypstOutcome> {
-    let world = GongwenWorld::new(set, job.data.clone(), job.base_dir);
+    let world = GongwenWorld::with_template(
+        set,
+        job.data.clone(),
+        job.base_dir,
+        job.template,
+        &job.files,
+    );
     let warned = typst::compile::<PagedDocument>(&world);
     let warnings: Vec<String> = warned
         .warnings

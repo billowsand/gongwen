@@ -17,6 +17,16 @@ use std::path::{Path, PathBuf};
 
 use merger::Merger;
 
+/// 报告题名：正文区段的第一个 `#`（与 TeX 路径同一口径）。
+pub(crate) fn report_title(content: &str) -> Option<String> {
+    merger::report_title_line(content).map(|(_, title)| title)
+}
+
+/// 去掉报告题名那一行：题名归封面，正文版面不排。
+pub(crate) fn remove_report_title(content: &str) -> String {
+    merger::remove_first_h1(content)
+}
+
 /// 入口：调研究报告 tex 转换。input 可以是单 .md 或目录。
 pub fn run(
     input: &Path,

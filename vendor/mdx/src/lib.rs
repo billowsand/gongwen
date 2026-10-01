@@ -12,6 +12,9 @@ mod tex_official;
 mod tex_research;
 mod tex_research_emitter;
 
+/// 研究报告的 Typst 排版数据（公文助手的 Typst 引擎用）。
+pub mod typst_research;
+
 /// 表格解析（含 `||` / `^^` 合并单元格）。公开出来供调用方核对：交给 mdx 的
 /// 表格源码与自己预览用的网格是否一致。
 pub use common::table;

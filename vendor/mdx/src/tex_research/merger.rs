@@ -198,7 +198,7 @@ fn strip_utf8_bom(content: &str) -> &str {
 /// 只认正文区段（开头的默认区段或 `<!-- [正文] -->` 之后）：摘要、附录、
 /// 部分等区段里的 `#` 各有归属（摘要标题、附录章、`\part`），拿去当题名
 /// 就会从正文里丢掉一行。与公文助手的 `research_report_titles` 同一口径。
-fn report_title_line(content: &str) -> Option<(usize, String)> {
+pub(crate) fn report_title_line(content: &str) -> Option<(usize, String)> {
     let heading_regex = regex::Regex::new(r"^#\s+(.+?)(?:\s*\{[^}]*\})?\s*$").ok()?;
     let mut in_body = true;
     for (index, line) in content.lines().enumerate() {
@@ -227,7 +227,7 @@ fn extract_title_from_content(content: &str) -> Option<String> {
 }
 
 /// 移除报告题名那一行（与 [`extract_title_from_content`] 取的是同一行）
-fn remove_first_h1(content: &str) -> String {
+pub(crate) fn remove_first_h1(content: &str) -> String {
     let skip = report_title_line(content).map(|(index, _)| index);
     content
         .lines()

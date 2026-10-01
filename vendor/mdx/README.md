@@ -56,6 +56,14 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   `\parbox[t]`；`docx_research.rs` / `docx_official.rs` 输出 `gridSpan` / `vMerge`；
 - `parser.rs`：表前已有表题时不再吞掉表后那一行（那是下一张表的表题）。
 
+研究报告的 Typst 排版数据同样先在这里落地：
+
+- 新增 `src/typst_research.rs`（`lib.rs` 导出 `typst_research`）：与 `tex_research_emitter`
+  同一套解析与区段规则，产出可序列化的排版数据（封面、区段、算好的编号），交给公文助手的
+  Typst 模板；`Cargo.toml` 为此加了 `serde`；
+- `tex_research/mod.rs` 导出报告题名的取法（`report_title` / `remove_report_title`），
+  两条路径同一口径。
+
 研究报告的目录标记同样先在这里落地：
 
 - `common/markers.rs` 新增 `is_toc`，`common/ast.rs` 新增 `Block::Toc`：
