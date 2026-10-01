@@ -81,7 +81,7 @@ resvg = "0.46"
 # 因为 rfd 在启用 gtk3 时会固定选择 GTK3，而不会在运行时退回 portal。
 rfd = { version = "0.15", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
-rust_xlsxwriter = "0.79"
+rust_xlsxwriter = "0.99.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
