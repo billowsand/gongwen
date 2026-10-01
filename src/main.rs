@@ -8,6 +8,7 @@ mod dependency_bench;
 mod diff;
 mod diff_view;
 mod doc_import;
+mod document_reference;
 mod draft_page;
 mod export;
 mod file_clipboard;

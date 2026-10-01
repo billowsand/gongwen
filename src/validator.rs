@@ -249,6 +249,13 @@ pub fn validate(
     let mut warnings = Vec::new();
     let text = markdown.trim();
 
+    warnings.extend(
+        crate::document_reference::References::read(markdown)
+            .issues
+            .into_iter()
+            .map(|issue| issue.message),
+    );
+
     validate_metadata(input, vocabulary, rules, &mut warnings);
 
     if text.is_empty() {

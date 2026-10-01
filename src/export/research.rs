@@ -191,6 +191,9 @@ impl ResearchSourceBundle {
         format: crate::mermaid::Format,
         base_dir: &Path,
     ) -> Result<Self> {
+        crate::document_reference::References::check(markdown)?;
+        let expanded = crate::document_reference::References::read(markdown).expanded(markdown);
+        let markdown = expanded.as_str();
         let root = tempfile::Builder::new()
             .prefix("gongwen-research-")
             .tempdir()

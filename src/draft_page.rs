@@ -35,6 +35,7 @@ mod heading_focus;
 mod markdown;
 mod navigator;
 mod page;
+mod references;
 mod revise;
 mod ribbon;
 mod source_nav;
@@ -380,6 +381,8 @@ pub(crate) struct DraftSession {
     pub(crate) clear_review_confirm: bool,
     /// 打开着的标题聚焦编辑对话框；None 表示没开。
     pub(crate) heading_focus: Option<heading_focus::HeadingFocus>,
+    /// 公文引用插入与管理弹窗，插入点在打开时冻结。
+    pub(crate) reference_picker: Option<references::ReferencePicker>,
     /// 候选区：写稿时暂时移出正文、以后可能还要用的文字。按稿件各存一份。
     pub(crate) candidates: candidates::CandidateState,
     /// 公文预览的缩放倍率；None 表示按面板宽度自适应。
@@ -563,6 +566,7 @@ impl DraftSession {
             result_drawer_open: false,
             clear_review_confirm: false,
             heading_focus: None,
+            reference_picker: None,
             candidates: candidates::CandidateState::default(),
             preview_zoom: None,
             preview_fit_scale: 1.0,

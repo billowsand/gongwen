@@ -306,6 +306,7 @@ pub(crate) fn export_artifacts(
     numbering: &NumberingConfig,
     version_name: Option<&str>,
 ) -> Result<ExportArtifacts> {
+    crate::document_reference::References::check(markdown)?;
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
     let title = document_title(input, markdown);

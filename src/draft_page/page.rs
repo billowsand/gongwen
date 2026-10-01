@@ -92,6 +92,7 @@ impl DraftPage<'_> {
             });
         self.clear_review_confirm_modal(ui.ctx());
         self.heading_focus_modal(ui.ctx());
+        self.reference_picker_modal(ui.ctx());
     }
 
     /// 清空审校稿的确认框使用真正的 Modal：遮罩会阻止点击穿透到编辑器或功能区，

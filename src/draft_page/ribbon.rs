@@ -453,6 +453,13 @@ impl DraftPage<'_> {
     /// 插入：往光标处放东西。功能区扩容之后最主要的受益者。
     pub(crate) fn ribbon_insert(&mut self, ui: &mut egui::Ui) {
         let editable = !self.doc.read_only();
+        if ui
+            .add(theme::icon_text_button(theme::Icon::Quote, "公文引用"))
+            .clicked()
+        {
+            self.open_reference_picker(ui.ctx());
+        }
+        toolbar_separator(ui);
         let in_table = self.table_at_cursor(ui.ctx()).is_some();
 
         // 一、表格

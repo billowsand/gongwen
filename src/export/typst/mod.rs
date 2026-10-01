@@ -74,6 +74,7 @@ pub(crate) fn write_pdf_with_base(
     elements: &ElementMarks,
     base_dir: &Path,
 ) -> Result<TypstOutcome> {
+    crate::document_reference::References::check(markdown)?;
     let rendered = crate::mermaid::materialize(
         markdown,
         crate::mermaid::Style::Official,

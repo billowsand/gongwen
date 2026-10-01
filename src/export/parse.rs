@@ -501,15 +501,28 @@ struct SourceLine<'a> {
 }
 
 fn prepared_lines<'a>(markdown: &'a str, marks: Option<&ResearchMarks>) -> Vec<SourceLine<'a>> {
+    let references = crate::document_reference::References::read(markdown);
+    let occurrences = crate::document_reference::occurrences(markdown);
     source_lines(markdown)
         .into_iter()
-        .map(|(start, raw)| SourceLine {
-            start,
-            len: raw.len(),
-            text: match marks {
-                Some(marks) => marks.apply(raw),
-                None => Cow::Borrowed(raw),
-            },
+        .map(|(start, raw)| {
+            let resolved = if occurrences
+                .iter()
+                .any(|(range, _)| range.start >= start && range.start < start + raw.len())
+            {
+                references.apply(raw)
+            } else {
+                Cow::Borrowed(raw)
+            };
+            let text = match marks {
+                Some(marks) => Cow::Owned(marks.apply(&resolved).into_owned()),
+                None => resolved,
+            };
+            SourceLine {
+                start,
+                len: raw.len(),
+                text,
+            }
         })
         .collect()
 }
