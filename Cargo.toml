@@ -51,7 +51,7 @@ egui_extras = { version = "0.35.0", features = ["image", "svg"] }
 encoding_rs = "0.8.41"
 hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-jieba-rs = "0.10"
+jieba-rs = "0.11.0"
 # 研究报告公式的预览渲染：纯 Rust 排版 + PNG 光栅化（STIX Two Math），不走 tectonic。
 # 只开 png feature；它的 egui feature 钉在 egui 0.28，与本项目的 0.35 不兼容。
 latex-rust = { path = "vendor/latex-rust", features = ["png"] }
