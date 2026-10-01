@@ -49,6 +49,9 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   行加支柱（按正文 14bp/24pt 的 `\baselineskip`）、竖排的盒子按数学轴居中（`\vcenter`）、
   align 右列开头补空 Ord（`&=` 两侧照常留关系符空）。排不出的公式按源码印出并给提示，
   不让整份排版失败。
+  SVG 导出与 PNG 预览均按回退字形标记选择字体轮廓，并按该字体的 `unitsPerEm` 换算
+  大小；SVG 轮廓缓存按字体与 glyph id 隔离。中文条件（如 `\text{为偶数}`）、中文上下标
+  与分数均有回归用例，`research-math` 样张包含这些写法。
 - 字体固定用随包的方正书宋 / 黑体 / 楷体 / 小标宋、TeX Gyre Termes、JetBrains Mono，
   不受设置页本机字体影响；生僻字由内置宋体兜底。缺字体时只挡研究报告
   （`portable_runtime::validate_research_fonts`）。

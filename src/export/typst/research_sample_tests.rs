@@ -286,6 +286,12 @@ $$\mathbf{A} = \begin{pmatrix} a_{11} & a_{12} \\ a_{21} & a_{22} \end{pmatrix},
 
 $$\begin{aligned} y &= ax + b \\ z &= \frac{\partial y}{\partial x} \end{aligned}$$
 
+中文条件与上下标、分数里的中文：
+
+$$\sqrt[n]{a^n} = |a| \quad (n\ \text{为偶数})$$
+
+行内公式 $x_{\text{中文}}$，分式 $\frac{\text{分子}}{\text{分母}}$。
+
 | 符号 | 含义 |
 | --- | --- |
 | $\beta$ | 弹性系数 |
@@ -376,6 +382,15 @@ fn run() {
         for warning in &outcome.warnings {
             eprintln!("{}: {warning}", case.name);
         }
+        assert!(
+            !outcome
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("公式无法排版")),
+            "{} 公式应正常出图：{:?}",
+            case.name,
+            outcome.warnings
+        );
     }
 }
 

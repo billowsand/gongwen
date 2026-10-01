@@ -199,4 +199,63 @@ mod tests {
         assert!(data.get("err").is_some());
         assert_eq!(warnings.len(), 1);
     }
+
+    #[test]
+    fn chinese_math_exports_without_source_fallback() {
+        if font().unwrap().fallback_face().is_none() {
+            return; // CI 没有随包中文字体。
+        }
+        let source = r"\sqrt[n]{a^n} = |a| \quad (n\ \text{为偶数})";
+        let mut data = serde_json::json!({"blocks": [
+            {"k": "math", "v": source},
+            {"t": "math", "v": r"x_{\text{中文}} + \frac{\text{分子}}{\text{分母}}"},
+        ]});
+        let mut files = HashMap::new();
+        let mut warnings = Vec::new();
+        render_all(&mut data, &mut files, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for node in data["blocks"].as_array().unwrap() {
+            assert!(node.get("err").is_none(), "{node}");
+            let svg = &files[node["f"].as_str().unwrap()];
+            assert!(resvg::usvg::Tree::from_data(svg, &Default::default()).is_ok());
+        }
+    }
+
+    /// 同一字形分别作为主字体与回退字体出图，轮廓、缩放必须完全相同。
+    /// 连续换两种中文字体也覆盖进程级缓存不能只按 glyph id 区分的情况。
+    #[test]
+    fn fallback_svg_matches_its_own_font_outlines_and_scale() {
+        let Some(dir) = crate::portable_runtime::find_font_dir() else {
+            return;
+        };
+        let mut outputs = Vec::new();
+        for name in ["FZShuSong.ttf", "FangSong.ttf"] {
+            let bytes = Box::leak(std::fs::read(dir.join(name)).unwrap().into_boxed_slice());
+            let primary = MathFont::from_bytes(bytes).unwrap();
+            let fallback = MathFont::stix_two_math_with_fallback(bytes).unwrap();
+            // 两个字体故意用相同 glyph id，验证轮廓缓存按字体隔离。
+            let glyph_id = 100;
+            for scale in [Dim::one(), Dim::ratio(7, 10)] {
+                let mut boxed = MathBox {
+                    width: Dim::one(),
+                    height: Dim::one(),
+                    depth: Dim::zero(),
+                    italic: Dim::zero(),
+                    shift: Dim::zero(),
+                    content: BoxContent::glyph('为', glyph_id, scale.clone()),
+                };
+                let expected =
+                    latex_rust::render_svg(&boxed, &primary, &SvgOptions::new()).unwrap();
+                boxed.content = BoxContent::glyph(
+                    '为',
+                    glyph_id | latex_rust::font::FALLBACK_GLYPH_FLAG,
+                    scale,
+                );
+                let actual = latex_rust::render_svg(&boxed, &fallback, &SvgOptions::new()).unwrap();
+                assert_eq!(actual, expected, "{name} 回退字形应与自身轮廓及字号一致");
+                outputs.push(expected);
+            }
+        }
+        assert_ne!(outputs[0], outputs[2], "不同字体不能复用同一轮廓");
+    }
 }

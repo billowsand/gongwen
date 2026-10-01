@@ -6,7 +6,7 @@ use super::outline;
 use crate::color::Color;
 use crate::dim::Dim;
 use crate::error::{Error, FontError};
-use crate::font::MathFont;
+use crate::font::{is_fallback_glyph, MathFont};
 use crate::layout::{layout, BoxContent, MathBox, MathStyle};
 use crate::parser::parse;
 
@@ -185,7 +185,16 @@ fn emit(
                 cache.insert(*glyph_id, s.clone());
                 s
             };
-            let k = fu_pt * scale;
+            // 回退字体的轮廓以自身 unitsPerEm 为单位，不能按 STIX 的 1000 换算。
+            let glyph_fu_pt = if is_fallback_glyph(*glyph_id) {
+                let face = font
+                    .fallback_face()
+                    .ok_or(FontError::MissingGlyph { ch: *ch })?;
+                em_pt / &Dim::from_i64(i64::from(face.units_per_em()))
+            } else {
+                fu_pt.clone()
+            };
+            let k = &glyph_fu_pt * scale;
             let sx = k.to_svg_string();
             let nsx = (-k).to_svg_string();
             out.push_str(&format!(

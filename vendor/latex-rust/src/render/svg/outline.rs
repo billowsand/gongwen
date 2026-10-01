@@ -7,11 +7,11 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use ttf_parser::{GlyphId, OutlineBuilder};
+use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
 use crate::dim::Dim;
 use crate::error::{Error, FontError};
-use crate::font::MathFont;
+use crate::font::{is_fallback_glyph, MathFont, FALLBACK_GLYPH_FLAG};
 
 struct PathBuilder {
     d: String,
@@ -76,8 +76,11 @@ impl OutlineBuilder for PathBuilder {
     }
 }
 
-fn path_cache() -> &'static Mutex<HashMap<u16, String>> {
-    static CACHE: OnceLock<Mutex<HashMap<u16, String>>> = OnceLock::new();
+// 字体数据为 static：地址与长度标识字体，同一 glyph id 在不同字体里的轮廓不共用。
+type PathCacheKey = (usize, usize, u16);
+
+fn path_cache() -> &'static Mutex<HashMap<PathCacheKey, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathCacheKey, String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -85,20 +88,29 @@ fn path_cache() -> &'static Mutex<HashMap<u16, String>> {
 ///
 /// Glyph `d` strings are cached process-wide.
 pub fn glyph_path_d(font: &MathFont, glyph_id: u16) -> Result<String, Error> {
+    let (face, glyph_id) = if is_fallback_glyph(glyph_id) {
+        let face = font
+            .fallback_face()
+            .ok_or(FontError::MissingGlyph { ch: '\u{FFFD}' })?;
+        (face, glyph_id & !FALLBACK_GLYPH_FLAG)
+    } else {
+        (font.face(), glyph_id)
+    };
+    let data = face.raw_face().data;
+    let key = (data.as_ptr() as usize, data.len(), glyph_id);
     if let Ok(guard) = path_cache().lock() {
-        if let Some(d) = guard.get(&glyph_id) {
+        if let Some(d) = guard.get(&key) {
             return Ok(d.clone());
         }
     }
-    let d = glyph_path_d_uncached(font, glyph_id)?;
+    let d = glyph_path_d_uncached(face, glyph_id)?;
     if let Ok(mut guard) = path_cache().lock() {
-        guard.insert(glyph_id, d.clone());
+        guard.insert(key, d.clone());
     }
     Ok(d)
 }
 
-fn glyph_path_d_uncached(font: &MathFont, glyph_id: u16) -> Result<String, Error> {
-    let face = font.face();
+fn glyph_path_d_uncached(face: &Face<'_>, glyph_id: u16) -> Result<String, Error> {
     let mut b = PathBuilder { d: String::new() };
     let bbox = face.outline_glyph(GlyphId(glyph_id), &mut b);
     if bbox.is_none() && b.d.is_empty() {
