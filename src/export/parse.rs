@@ -329,6 +329,16 @@ pub(crate) fn parse_markdown_with_lines_with_numbering(
     markdown: &str,
     numbering: &NumberingConfig,
 ) -> (Vec<MarkdownBlock>, Vec<usize>) {
+    let (blocks, lines, _) = parse_markdown_with_lines_and_prefixes(markdown, numbering);
+    (blocks, lines)
+}
+
+/// 与 [`parse_markdown_with_lines_with_numbering`] 相同，另给出每个块里段内列表编号
+/// 占的可见字符范围（[`LocatedBlock::generated_prefixes`]）：PDF 给编号换西文字面要用。
+pub(crate) fn parse_markdown_with_lines_and_prefixes(
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> ParsedWithPrefixes {
     let located = flatten_quotes(parse_markdown_located_with_numbering(markdown, numbering));
     let starts: Vec<usize> = source_lines(markdown)
         .into_iter()
@@ -336,12 +346,21 @@ pub(crate) fn parse_markdown_with_lines_with_numbering(
         .collect();
     let mut blocks = Vec::with_capacity(located.len());
     let mut lines = Vec::with_capacity(located.len());
+    let mut prefixes = Vec::with_capacity(located.len());
     for item in located {
         lines.push(line_of(&starts, item.range.start));
         blocks.push(item.block);
+        prefixes.push(item.generated_prefixes);
     }
-    (blocks, lines)
+    (blocks, lines, prefixes)
 }
+
+/// 块序列、各块起始行号、各块段内列表编号的可见字符范围。
+pub(crate) type ParsedWithPrefixes = (
+    Vec<MarkdownBlock>,
+    Vec<usize>,
+    Vec<Vec<std::ops::Range<usize>>>,
+);
 
 /// 字节偏移落在第几行（1-based）：最后一个不超过它的行首。
 pub(crate) fn line_of(line_starts: &[usize], offset: usize) -> usize {

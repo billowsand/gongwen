@@ -14,10 +14,10 @@ use crate::preview::marks;
 use crate::preview::pdf_figure;
 use crate::preview::{
     BODY_PT, BodyRun, ClickableSourceSegment, INDENT_CHARS, Metrics, PreviewScale, addressee_block,
-    aligned_block, append_inline_with_bold_ranges, body_block, clickable, clickable_body_block,
+    aligned_block, append_numbered_inline, body_block, clickable, clickable_body_block,
     clickable_justified_job, draw_justified_with_bold, footer_record, header_block, heading_family,
-    indent, is_renderable_paragraph, job, line_block, place, red_approval_print_preview, sheet,
-    signature_block, table_block, text_format,
+    indent, is_renderable_paragraph, job, line_block, numbered_body_block, place,
+    red_approval_print_preview, sheet, signature_block, table_block, text_format,
 };
 use crate::theme;
 use crate::units::UnitDisplay;
@@ -131,6 +131,7 @@ pub(crate) fn body_blocks(
                             *level,
                             heading,
                             text,
+                            &next.generated_prefixes,
                             located.range.clone(),
                             &body_segments,
                             counters,
@@ -206,6 +207,7 @@ pub(crate) fn clickable_content_block(
                 ui,
                 metrics,
                 text,
+                &located.generated_prefixes,
                 true,
                 &segments,
                 anchor,
@@ -242,6 +244,7 @@ pub(crate) fn clickable_content_block(
                 ui,
                 metrics,
                 &format!("{prefix}{text}"),
+                std::slice::from_ref(&(0..prefix.chars().count())),
                 true,
                 source,
                 anchor,
@@ -269,6 +272,7 @@ fn clickable_text_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
     text: &str,
+    numbers: &[Range<usize>],
     first_line_indent: bool,
     source: Range<usize>,
     anchor: Option<&Range<usize>>,
@@ -283,6 +287,7 @@ fn clickable_text_block(
         ui,
         metrics,
         text,
+        numbers,
         first_line_indent,
         &segments,
         anchor,
@@ -662,6 +667,7 @@ fn clickable_compact_block(
     level: u8,
     heading: &str,
     body: &str,
+    body_numbers: &[Range<usize>],
     heading_source: Range<usize>,
     body_segments: &[ClickableSourceSegment],
     counters: &mut [usize; 4],
@@ -694,7 +700,7 @@ fn clickable_compact_block(
         text_format(metrics.font(heading_family(level), BODY_PT), metrics.line),
     );
     let body_start = INDENT_CHARS as usize + export::strip_redline(&heading_text).chars().count();
-    let mut bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, body, &normal);
+    let mut bold_ranges = append_numbered_inline(&mut job, metrics, body, &normal, body_numbers);
     if matches!(level, 4 | 5) {
         bold_ranges.insert(0, INDENT_CHARS as usize..body_start);
     }
@@ -786,7 +792,13 @@ pub(crate) fn content_block(
         }
         MarkdownBlock::OrderedListItem { number, text } => {
             let prefix = export::render_list_number(numbering.list2, *number);
-            body_block(ui, metrics, &format!("{prefix}{text}"), true);
+            numbered_body_block(
+                ui,
+                metrics,
+                &format!("{prefix}{text}"),
+                std::slice::from_ref(&(0..prefix.chars().count())),
+                true,
+            );
         }
         MarkdownBlock::Table {
             rows,

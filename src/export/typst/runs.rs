@@ -3,8 +3,13 @@
 //! 与 TeX 路径一一对应：`body_runs` 对应 `body_text_to_tex`，`marked_runs` 对应
 //! `marked_tex_escape`，`heading_runs` 对应 `marked_heading_tex`。
 
+use std::ops::Range;
+
 use super::data::{Run, Runs};
-use crate::export::{RedlineKind, inline_segments, plain_text, redline_chunks, whole_chunk_kind};
+use crate::export::{
+    RedlineKind, inline_segments, numbered_inline_segments, plain_text, redline_chunks,
+    whole_chunk_kind,
+};
 
 /// xeCJK 的 CJKecglue：`\hskip 2pt`（TeX pt）。
 const CJK_LATIN_GAP_PT: f64 = 2.0 * 72.0 / 72.27;
@@ -19,21 +24,24 @@ fn mark_of(kind: RedlineKind) -> Option<&'static str> {
 
 /// 正文段落：先按花脸稿哨兵切块，块内再切加粗 / 括号楷体。
 pub(crate) fn body_runs(text: &str) -> Runs {
-    let mut out = Vec::new();
-    for chunk in redline_chunks(text) {
-        for segment in inline_segments(&chunk.text) {
-            if segment.text.is_empty() {
-                continue;
-            }
-            out.push(Run {
-                t: Some(segment.text),
-                b: segment.bold,
-                k: segment.parenthesized,
-                m: mark_of(chunk.kind),
-                ..Run::default()
-            });
-        }
-    }
+    numbered_body_runs(text, &[])
+}
+
+/// 同 [`body_runs`]，`numbers` 是段内列表编号占的可见字符范围（解析器生成，见
+/// `LocatedBlock::generated_prefixes`）：编号是版式不是括号注释，「(1)」「（1）」这类
+/// 编号不排括号楷体，与正文同字面。
+pub(crate) fn numbered_body_runs(text: &str, numbers: &[Range<usize>]) -> Runs {
+    let out = numbered_inline_segments(text, numbers)
+        .into_iter()
+        .filter(|piece| !piece.segment.text.is_empty())
+        .map(|piece| Run {
+            t: Some(piece.segment.text),
+            b: piece.segment.bold,
+            k: piece.segment.parenthesized,
+            m: mark_of(piece.kind),
+            ..Run::default()
+        })
+        .collect();
     with_punct_kerning(with_cjk_latin_gaps(out))
 }
 
@@ -283,6 +291,30 @@ mod tests {
         assert_eq!(gaps, [-7.0]);
         // 同一段里的相邻标点由 Typst 自己挤，不另补。
         assert!(body_runs("好。」").iter().all(|r| r.g.is_none()));
+    }
+
+    #[test]
+    fn inline_list_numbers_are_not_kai() {
+        // 「（1）」是段内列表编号：不排括号楷体，与前后正文并成一段；正文里的括号照旧。
+        let text = "要求如下：（1）落实**责任**（试行）；（2）加强";
+        let numbers = [5..8, 17..20];
+        let runs = numbered_body_runs(text, &numbers);
+        let plain: Vec<_> = runs
+            .iter()
+            .filter(|r| !r.k && !r.b)
+            .filter_map(|r| r.t.clone())
+            .collect();
+        assert_eq!(plain, ["要求如下：（1）落实", "；（2）加强"]);
+        let kai: Vec<_> = runs
+            .iter()
+            .filter(|r| r.k)
+            .filter_map(|r| r.t.clone())
+            .collect();
+        assert_eq!(kai, ["（试行）"]);
+        assert_eq!(
+            runs.iter().filter_map(|r| r.t.clone()).collect::<String>(),
+            "要求如下：（1）落实责任（试行）；（2）加强"
+        );
     }
 
     #[test]

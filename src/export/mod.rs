@@ -47,11 +47,11 @@ pub(crate) use parse::{
     body_heading_max_level, circled_number, compact_heading_flags, flatten_quotes,
     normalize_ordered_list_punctuation, parse_align_marker, parse_list_item, parse_markdown,
     parse_markdown_located, parse_markdown_located_research, parse_markdown_located_with_numbering,
-    parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
-    parse_markdown_with_numbering, parse_numbered_table_marker, parse_ordered_item,
-    parse_research_marker, parse_section_marker, parse_table_cells, parse_unnumbered_marker,
-    renumber_ordered_groups, research_report_titles, research_unnumbered_headings, source_lines,
-    table_span_at,
+    parse_markdown_with_lines, parse_markdown_with_lines_and_prefixes,
+    parse_markdown_with_lines_with_numbering, parse_markdown_with_numbering,
+    parse_numbered_table_marker, parse_ordered_item, parse_research_marker, parse_section_marker,
+    parse_table_cells, parse_unnumbered_marker, renumber_ordered_groups, research_report_titles,
+    research_unnumbered_headings, source_lines, table_span_at,
 };
 pub(crate) use red::{
     RED_APPROVAL_GUTTER_TWIPS, RED_APPROVAL_NARROW_MM, RED_APPROVAL_RULE_MM,
@@ -75,8 +75,8 @@ pub(crate) use text::{
     attachment_names, attachment_title_name, chinese_date_parts, inline_char_spans,
     inline_math_spans, inline_segments, inline_visible_char_index, inline_visible_char_indices,
     is_redline_sentinel, legacy_attachment_label, mark_added, mark_deleted,
-    normalize_chinese_quotes, number_to_chinese, plain_text, redline_chunks, redline_slice_lines,
-    strip_redline, table_columns, whole_chunk_kind,
+    normalize_chinese_quotes, number_to_chinese, numbered_inline_segments, plain_text,
+    redline_chunks, redline_slice_lines, strip_redline, table_columns, whole_chunk_kind,
 };
 
 pub(crate) fn joint_main_index(input: &DraftInput) -> Option<usize> {

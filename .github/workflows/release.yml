@@ -197,7 +197,7 @@ jobs:
           }
           # 公文与研究报告共用方正 GBK 系列：拿到旧 runtime（中易五支）时在这里
           # 就失败，而不是等用户点了导出才报「字体不存在」。
-          test -f runtime/fonts/FZFangSong.ttf
+          test -f runtime/fonts/GWFangSong.ttf
           test -f runtime/fonts/FZShuSong.ttf
           test -f runtime/SHA256SUMS.txt
 

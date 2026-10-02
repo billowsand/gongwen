@@ -12,7 +12,7 @@ use crate::export::element_display::{
     number_display_parts, signing_unit_display,
 };
 use crate::export::title;
-use crate::export::{MarkdownBlock, parse_markdown_with_lines_with_numbering};
+use crate::export::{MarkdownBlock, parse_markdown_with_lines_and_prefixes};
 use crate::models::{
     DraftInput, JointIssuanceMode, ListNumbering, NumberingConfig, TemplateKind, split_units,
 };
@@ -400,7 +400,7 @@ pub(crate) fn document(
         numbering.list1 = ListNumbering::DecimalDot;
         numbering.list2 = ListNumbering::DecimalDot;
     }
-    let (blocks, lines) = parse_markdown_with_lines_with_numbering(markdown, &numbering);
+    let (blocks, lines, prefixes) = parse_markdown_with_lines_and_prefixes(markdown, &numbering);
     let title_text = blocks
         .iter()
         .find_map(|block| match block {
@@ -410,7 +410,14 @@ pub(crate) fn document(
         .unwrap_or(input.title_hint.as_str())
         .to_string();
     let red = kind == TemplateKind::RedHeadApproval;
-    let parts = sections(&blocks, &lines, input.profile.style_mode, red, &numbering);
+    let parts = sections(
+        &blocks,
+        &lines,
+        &prefixes,
+        input.profile.style_mode,
+        red,
+        &numbering,
+    );
     let title = if red {
         title_data(&title_text, title::red_approval_chars_per_line(), |plain| {
             title::compressed_scale_percent_for(

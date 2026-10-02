@@ -229,7 +229,7 @@ mod tests {
             return;
         };
         let mut outputs = Vec::new();
-        for name in ["FZShuSong.ttf", "FZFangSong.ttf"] {
+        for name in ["FZShuSong.ttf", "GWFangSong.ttf"] {
             let bytes = Box::leak(std::fs::read(dir.join(name)).unwrap().into_boxed_slice());
             let primary = MathFont::from_bytes(bytes).unwrap();
             let fallback = MathFont::stix_two_math_with_fallback(bytes).unwrap();

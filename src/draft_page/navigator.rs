@@ -187,7 +187,7 @@ fn research_entries(markdown: &str) -> Vec<NavEntry> {
             text: entry.text,
             is_attachment_title: false,
             line: entry.line,
-            family: theme::FONT_HEITI,
+            family: theme::FONT_RESEARCH_HEI,
         })
         .collect()
 }
@@ -1057,7 +1057,7 @@ mod tests {
         for entry in &entries {
             assert_eq!(
                 label_family(entry),
-                theme::official_family(theme::FONT_HEITI)
+                theme::official_family(theme::FONT_RESEARCH_HEI)
             );
         }
     }
@@ -1200,7 +1200,7 @@ mod tests {
         .iter()
         .map(label_family)
         {
-            assert_eq!(face, theme::official_family(theme::FONT_HEITI));
+            assert_eq!(face, theme::official_family(theme::FONT_RESEARCH_HEI));
         }
         // 任何一条都不许退回界面默认的无衬线。
         for entry in entries(official) {

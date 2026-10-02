@@ -43,9 +43,10 @@ pub(crate) struct RenderedMath {
 fn font() -> Result<&'static MathFont, MathError> {
     static FONT: OnceLock<Result<MathFont, String>> = OnceLock::new();
     FONT.get_or_init(|| {
-        // 随包仿宋只加载一次，生命周期全程有效。
+        // 公式里的汉字回退到随包方正书宋（与导出的 `export::typst::math` 同一支），
+        // 只加载一次，生命周期全程有效。
         let fallback = crate::portable_runtime::find_font_dir()
-            .and_then(|dir| std::fs::read(dir.join("FZFangSong.ttf")).ok())
+            .and_then(|dir| std::fs::read(dir.join("FZShuSong.ttf")).ok())
             .map(|data| Box::leak(data.into_boxed_slice()) as &'static [u8]);
         match fallback {
             Some(bytes) => MathFont::stix_two_math_with_fallback(bytes).map_err(|e| e.to_string()),

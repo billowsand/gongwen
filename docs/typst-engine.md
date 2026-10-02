@@ -25,12 +25,21 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   本机字体，按路径缓存）、编译、诊断翻译、孤行探针报告、横页结构调整。模板二选一：
   `Template::Official`（`assets/typst/gongwen.typ`）、`Template::Research`
   （`assets/typst/research.typ`），都编进二进制。
-- 随包字体（v0.8.0 runtime 起）：中文统一用覆盖 GBK 的方正系列（仿宋 / 楷体 / 黑体 /
-  书宋 / 小标宋，公文与研究报告共用同一套文件）；正文西文与数字、页码数字用两个
-  拉丁子集字体接管（`GWFangSongLatin` 取仿宋_GB2312 字面、`GWSimSunLatin` 取宋体字面，
-  `scripts/make-latin-subsets.py` 从 `font/` 的开发资产生成），在回退链最前面，
-  用户另选本机字体时不叠加。DOCX 导出不嵌字体、按名引用，名字仍是收文机器上常见的
-  中易字体名（仿宋_GB2312 等），与 PDF 的内嵌字面解耦。
+- 随包字体：中文统一用覆盖 GBK 的方正系列（仿宋 / 楷体 / 黑体 / 书宋 / 小标宋，公文
+  与研究报告共用同一套文件）。仿宋、楷体是合成字体 `GWFangSong.ttf`（公文仿宋，
+  家族名 `GW FangSong`）与 `GWKai.ttf`（公文楷体，`GW Kai`）：汉字与全角标点取方正
+  仿宋_GBK / 方正楷体_GBK，GB2312 里的全部非汉字（西文、数字、带圈数字、弯引号、破折号、
+  省略号、希腊 / 俄文字母、制表符等 443 个字形）取仿宋_GB2312 / 楷体_GB2312，字形之外
+  的度量与方正原版相同；改名由 `scripts/rename-merged-fonts.py` 完成，免得与本机装的
+  方正原版撞名。于是仿宋文字（正文、表格、落款、版记、仿宋标题「1.」「(1)」、列表编号）
+  与楷体文字（楷体标题「（一）」、主送机关、括号楷体）的西文数字都是国标字面，不再挂
+  拉丁子集。页码数字另用 `GWSimSunLatin`（宋体字面，只含 ASCII，
+  `scripts/make-latin-subsets.py` 生成），排在页码字体前面（`FontFamilies::
+  page_number_latin`，页码另选了本机字体时不挂）。黑体（一级标题、表头、附件标识、
+  密级、份号）与小标宋（大标题、附件标题、红头）用自带字面。段内列表的编号范围来自
+  解析器的 `generated_prefixes`，编号不套括号楷体（「(1)」不排楷体四号）。
+  DOCX 导出不嵌字体、按名引用，名字仍是收文机器上常见的中易字体名（仿宋_GB2312 等），
+  不跟这套配方，与 PDF 的内嵌字面解耦。
 
 ### 公文
 
@@ -58,8 +67,16 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   SVG 导出与 PNG 预览均按回退字形标记选择字体轮廓，并按该字体的 `unitsPerEm` 换算
   大小；SVG 轮廓缓存按字体与 glyph id 隔离。中文条件（如 `\text{为偶数}`）、中文上下标
   与分数均有回归用例，`research-math` 样张包含这些写法。
-- 字体固定用随包的方正书宋 / 黑体 / 楷体 / 小标宋（与公文同一份文件）、TeX Gyre
-  Termes、JetBrains Mono，不受设置页本机字体影响；方正书宋覆盖 GBK，兼任兜底。
+- 字体固定用随包的方正书宋 / 黑体 / 合成楷体 GWKai / 小标宋（与公文同一份文件）、
+  TeX Gyre Termes、JetBrains Mono，不受设置页本机字体影响；方正书宋覆盖 GBK，兼任兜底。
+  楷体里的 GB2312 西文被排在前面的 Termes 盖住，只有 latin-in-cjk 让出的弯引号、破折号
+  等落到楷体上。
+  西文与数字一律 Termes（`covers: "latin-in-cjk"`，引号、破折号、省略号归中文字体）：
+  标题类——章 / 节 / 部分标题、目录标题与章条目、图表题标签、文框标题、封面黑体字与
+  小标宋大标题——走模板的 `heavy`（`weight: "bold"`，西文落到 Termes Bold，方正字体只有
+  常规字重不受影响）；正文、页码、列表序号、表头为 Regular；正文 `**加粗**` 走
+  `fake-bold-cjk`。纸面预览用 `theme::FONT_RESEARCH_*` 字体族（`Metrics::font` 把公文
+  族名换过去），Termes 在内存里拿掉 latin-in-cjk 让出的码位（`font_cmap`），取字与 PDF 一致。
   缺字体时只挡研究报告（`portable_runtime::validate_research_fonts`）。
 - 文献：Typst 内置 hayagriva，样式 `gb-7714-2015-numeric`，引用不上标。
 

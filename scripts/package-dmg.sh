@@ -155,7 +155,7 @@ else
         mkdir -p "$STAGE/$(dirname "$dest")"
         cp "$src" "$STAGE/$dest"
     done <"$MANIFEST"
-    [ -f "$STAGE/runtime/fonts/FZFangSong.ttf" ] ||
+    [ -f "$STAGE/runtime/fonts/GWFangSong.ttf" ] ||
         die "runtime 清单未提供字体，PDF 排版将不可用（$SUFFIX）"
 
     for doc in README.md THIRD_PARTY_NOTICES.md LICENSE config.example.json; do
@@ -176,7 +176,7 @@ fi
 if [ ! -x "$STAGE/gongwen-assistant" ]; then
     die "staging 里没有可执行的二进制：$STAGE/gongwen-assistant"
 fi
-if [ ! -f "$STAGE/runtime/fonts/FZFangSong.ttf" ]; then
+if [ ! -f "$STAGE/runtime/fonts/GWFangSong.ttf" ]; then
     die "staging 里没有 runtime 字体：$STAGE/runtime/fonts"
 fi
 

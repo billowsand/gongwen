@@ -2410,8 +2410,9 @@ pub fn segmented<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) 
 
 // ── 字体 ────────────────────────────────────────────────────────────────────
 /// 公文预览专用字体族的名字。与导出器一一对应：正文仿宋、一级标题黑体、
-/// 二级标题楷体、文档标题小标宋。英文、数字不单独设西文字体，一律随对应的
-/// 中文字体排（预览不走 Times New Roman）。
+/// 二级标题楷体、文档标题小标宋。西文与数字的字面与 PDF 一致：仿宋、楷体是合成
+/// 字体，自带仿宋_GB2312 / 楷体_GB2312 字面；页码前面挂宋体字面的拉丁子集；黑体、
+/// 小标宋用自带字面。
 pub const FONT_FANGSONG: &str = "gw-fangsong";
 pub const FONT_HEITI: &str = "gw-heiti";
 pub const FONT_KAITI: &str = "gw-kaiti";
@@ -2421,6 +2422,28 @@ pub const FONT_BIAOSONG: &str = "gw-biaosong";
 pub const FONT_SONGTI: &str = "gw-songti";
 /// 正文选「专用粗体字体」时使用的字面；合成加粗由预览在原字面上叠绘。
 pub const FONT_BOLD: &str = "gw-bold";
+
+/// 研究报告的字体族：中文同公文的方正系列，西文数字一律 TeX Gyre Termes——标题类
+/// （黑体、小标宋）用 Bold，其余 Regular。与 PDF 一样钉死在随包字体上，不受设置页
+/// 本机字体影响。研究报告的版面代码照旧写公文的族名，由 `Metrics::font` 换成这几支
+/// （见 [`research_family`]）。
+pub const FONT_RESEARCH_SONG: &str = "gw-research-song";
+pub const FONT_RESEARCH_KAI: &str = "gw-research-kai";
+pub const FONT_RESEARCH_HEI: &str = "gw-research-hei";
+/// 研究报告表头：黑体字形，西文仍是 Termes Regular（TeX 的 `\heiti` 不带 `\enhei`）。
+pub const FONT_RESEARCH_HEI_PLAIN: &str = "gw-research-hei-plain";
+pub const FONT_RESEARCH_BIAOSONG: &str = "gw-research-biaosong";
+
+/// 研究报告版面里公文族名对应的研究报告字体族；没有对应的原样返回。
+pub fn research_family(family: &str) -> &str {
+    match family {
+        FONT_SONGTI | FONT_FANGSONG => FONT_RESEARCH_SONG,
+        FONT_KAITI => FONT_RESEARCH_KAI,
+        FONT_HEITI => FONT_RESEARCH_HEI,
+        FONT_BIAOSONG => FONT_RESEARCH_BIAOSONG,
+        other => other,
+    }
+}
 
 const DEDICATED_BOLD_PREVIEW_ID: &str = "gw-dedicated-bold-preview";
 
@@ -2832,11 +2855,13 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         glyph_fallback.push(key);
     }
 
+    // 各角色的中文字体（连同兜底链）与是否用内置字体；拉丁子集在下面按用途另挂。
+    let mut bases: BTreeMap<&'static str, (Vec<String>, bool)> = BTreeMap::new();
     for (family, role, bundled_file, system_candidates) in [
         (
             FONT_FANGSONG,
             FontRole::Body,
-            "FZFangSong.ttf",
+            "GWFangSong.ttf",
             &[
                 r"C:\Windows\Fonts\simfang.ttf",
                 r"C:\Windows\Fonts\simsun.ttc",
@@ -2854,7 +2879,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         (
             FONT_KAITI,
             FontRole::Heading2,
-            "FZKai.ttf",
+            "GWKai.ttf",
             &[
                 r"C:\Windows\Fonts\simkai.ttf",
                 r"C:\Windows\Fonts\simfang.ttf",
@@ -2890,9 +2915,8 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             ][..],
         ),
     ] {
-        // 每个字体族只放对应的中文字体。内置字体时西文、数字由拉丁子集
-        // 接管（见下方 latin_subset 注入），与导出的 PDF 同源；不把
-        // Times New Roman 放在最前作西文优先（与国标一致）。
+        // 每个字体族只放对应的中文字体，不把 Times New Roman 放在最前作西文优先
+        // （与国标一致）；内置字体时西文数字由拉丁子集接管，见下方。
         let mut candidates =
             font_candidates(bundled_fonts.as_deref(), bundled_file, system_candidates);
         // 设置里指定了本机字体就排在最前；读不出来（文件被删）时照旧回退。
@@ -2909,20 +2933,6 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             // 一个都没装上时退回界面字体：预览的字体不对，但排版仍然成立。
             None => fallback.clone(),
         };
-        // 内置字体时把拉丁子集排在族首：正文的西文/数字用仿宋_GB2312 字面、
-        // 页码数字用宋体字面，与导出的 PDF 完全一致。用户另选了本机字体就用
-        // 那支字体自己的拉丁字面，不叠加子集。
-        let latin_subset = match role {
-            FontRole::Body => Some(crate::portable_runtime::BODY_LATIN_SUBSET_FILE),
-            FontRole::PageNumber => Some(crate::portable_runtime::PAGE_NUMBER_LATIN_SUBSET_FILE),
-            _ => None,
-        };
-        if selected.is_none()
-            && let (Some(file), Some(dir)) = (latin_subset, bundled_fonts.as_deref())
-            && let Some(key) = load_font(&mut fonts, &mut loaded, file, &[dir.join(file)])
-        {
-            list.insert(0, key);
-        }
         // 兜底字体挂在这支字体后面，只接它排不出的字。
         let tail: Vec<String> = glyph_fallback
             .iter()
@@ -2930,6 +2940,80 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             .cloned()
             .collect();
         list.extend(tail);
+        bases.insert(family, (list, selected.is_none()));
+    }
+
+    // 西文数字与 PDF 一致：仿宋、楷体是合成字体，自带 GB2312 西文字面；页码前面挂
+    // 宋体字面的拉丁子集，只在页码用内置字体时挂（另选了本机字体就用它自己的字面）。
+    for (family, (mut list, bundled)) in bases.clone() {
+        let subset = crate::portable_runtime::SIMSUN_LATIN_SUBSET_FILE;
+        if family == FONT_SONGTI
+            && bundled
+            && let Some(dir) = bundled_fonts.as_deref()
+            && let Some(key) = load_font(&mut fonts, &mut loaded, subset, &[dir.join(subset)])
+        {
+            list.insert(0, key);
+        }
+        fonts
+            .families
+            .insert(egui::FontFamily::Name(family.into()), list);
+    }
+
+    // 研究报告：Termes 只接 latin-in-cjk 的码位（与 PDF 一致），中文用随包方正字体；
+    // 随包字体缺失时退回公文同角色的字体链。
+    let termes = |fonts: &mut egui::FontDefinitions, key: &str, file: &str| {
+        let data = std::fs::read(bundled_fonts.as_deref()?.join(file)).ok()?;
+        let data =
+            crate::font_cmap::restrict(&data, |ch| !crate::font_cmap::is_shared_with_cjk(ch))?;
+        fonts
+            .font_data
+            .insert(key.to_owned(), egui::FontData::from_owned(data).into());
+        Some(key.to_owned())
+    };
+    let termes_regular = termes(&mut fonts, "gw-termes-regular", "texgyretermes-regular.otf");
+    let termes_bold = termes(&mut fonts, "gw-termes-bold", "texgyretermes-bold.otf");
+    for (family, base, bundled_file, latin) in [
+        (
+            FONT_RESEARCH_SONG,
+            FONT_SONGTI,
+            "FZShuSong.ttf",
+            &termes_regular,
+        ),
+        (FONT_RESEARCH_KAI, FONT_KAITI, "GWKai.ttf", &termes_regular),
+        (FONT_RESEARCH_HEI, FONT_HEITI, "FZHei.ttf", &termes_bold),
+        (
+            FONT_RESEARCH_HEI_PLAIN,
+            FONT_HEITI,
+            "FZHei.ttf",
+            &termes_regular,
+        ),
+        (
+            FONT_RESEARCH_BIAOSONG,
+            FONT_BIAOSONG,
+            "XiaoBiaoSong.ttf",
+            &termes_bold,
+        ),
+    ] {
+        let path: Vec<PathBuf> = bundled_fonts
+            .as_deref()
+            .map(|dir| dir.join(bundled_file))
+            .into_iter()
+            .collect();
+        let mut list = match load_font(&mut fonts, &mut loaded, family, &path) {
+            Some(key) => {
+                let mut list = vec![key];
+                for key in &glyph_fallback {
+                    if !list.contains(key) {
+                        list.push(key.clone());
+                    }
+                }
+                list
+            }
+            None => bases[base].0.clone(),
+        };
+        if let Some(latin) = latin {
+            list.insert(0, latin.clone());
+        }
         fonts
             .families
             .insert(egui::FontFamily::Name(family.into()), list);

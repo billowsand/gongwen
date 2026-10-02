@@ -1890,9 +1890,11 @@ impl FontRole {
         match self {
             Self::Title => "公文大标题与附件标题，内置为方正小标宋",
             Self::Heading1 => "一级标题「一、」、表头与附件名，内置为方正黑体",
-            Self::Heading2 => "二级标题「（一）」，内置为方正楷体；同时用作正文的斜体字面",
+            Self::Heading2 => {
+                "二级标题「（一）」，内置为方正楷体（西文、数字与符号取楷体_GB2312 字面）；同时用作主送机关、正文括号与斜体的字面"
+            }
             Self::Body => {
-                "正文与表格，内置为方正仿宋（西文与数字保持仿宋_GB2312 字面）；「1.」「(1)」两级标题在它上面加粗"
+                "正文与表格，内置为方正仿宋（西文、数字与符号取仿宋_GB2312 字面）；「1.」「(1)」两级标题在它上面加粗"
             }
             Self::PageNumber => "页脚页码，内置为方正书宋（数字保持宋体字面）",
             Self::Bold => {
@@ -1908,15 +1910,15 @@ impl FontRole {
     /// 内置字体文件名，未配置本机字体时使用。必须是
     /// `portable_runtime::OFFICIAL_FONT_FILES` 里的一项，由单元测试守住。
     ///
-    /// 中文一律用覆盖 GBK 的方正系列；正文的西文/数字与页码数字另由两个
-    /// 拉丁子集（GWFangSongLatin/GWSimSunLatin，见 `typst_engine::font_set`）
-    /// 接管，保持仿宋_GB2312 与宋体的国标字面。
+    /// 中文一律用覆盖 GBK 的方正系列。仿宋、楷体是合成字体：非汉字字形取
+    /// 仿宋_GB2312 / 楷体_GB2312（见 `portable_runtime::OFFICIAL_FONT_FILES`）；
+    /// 页码数字另由宋体字面的拉丁子集 GWSimSunLatin 接管。
     pub fn bundled_file(self) -> &'static str {
         match self {
             Self::Title => "XiaoBiaoSong.ttf",
             Self::Heading1 => "FZHei.ttf",
-            Self::Heading2 => "FZKai.ttf",
-            Self::Body => "FZFangSong.ttf",
+            Self::Heading2 => "GWKai.ttf",
+            Self::Body => "GWFangSong.ttf",
             Self::PageNumber => "FZShuSong.ttf",
             Self::Bold => "FZHei.ttf",
             Self::Fallback => "FZShuSong.ttf",

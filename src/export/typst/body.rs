@@ -3,7 +3,7 @@
 //! 紧缩合并、附件分区与横页判定，只是产出模板数据。
 
 use super::data::{Attachment, Block, Runs, Title};
-use super::runs::{body_runs, heading_runs, marked_runs};
+use super::runs::{body_runs, heading_runs, marked_runs, numbered_body_runs};
 use crate::export::table::requires_landscape;
 use crate::export::title::{self, TitlePlan};
 use crate::export::{
@@ -75,9 +75,11 @@ fn is_plain_paragraph(text: &str) -> bool {
 }
 
 /// `barrier`：红头呈批件在正文区第一个表格 / 图片之前插一道屏障（附件区不插）。
+/// `prefixes`：各块段内列表编号的可见字符范围：编号不排括号楷体。
 pub(crate) fn sections(
     blocks: &[MarkdownBlock],
     lines: &[usize],
+    prefixes: &[Vec<std::ops::Range<usize>>],
     style_mode: StyleMode,
     barrier: bool,
     numbering: &NumberingConfig,
@@ -112,6 +114,7 @@ pub(crate) fn sections(
     while index < blocks.len() {
         let block = &blocks[index];
         let line = lines.get(index).copied();
+        let numbers = |index: usize| prefixes.get(index).map_or(&[][..], Vec::as_slice);
         match block {
             MarkdownBlock::Title(_) if !seen_document_title && section == MarkdownSection::Body => {
                 seen_document_title = true;
@@ -164,7 +167,7 @@ pub(crate) fn sections(
                     target(section, &mut body, &mut attachments).push(Block::Compact {
                         level: *level,
                         head,
-                        runs: body_runs(body_text),
+                        runs: numbered_body_runs(body_text, numbers(index + 1)),
                         line: lines.get(index + 1).copied(),
                     });
                     index += 1;
@@ -182,7 +185,7 @@ pub(crate) fn sections(
             MarkdownBlock::Paragraph(text) => {
                 if is_plain_paragraph(text) {
                     target(section, &mut body, &mut attachments).push(Block::Par {
-                        runs: body_runs(text),
+                        runs: numbered_body_runs(text, numbers(index)),
                         line,
                     });
                 }

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""从仿宋_GB2312 与宋体提取拉丁字面，生成随包的两个小子集字体。
+"""从宋体提取拉丁字面，生成随包的页码数字子集字体 GWSimSunLatin。
 
-公文正文的西文与数字保持仿宋_GB2312 的字面、页码数字保持宋体字面，
-中文字形统一由字符覆盖更全的方正 GBK 系列承担（见 src/portable_runtime.rs）。
-Typst 按字体列表逐字回退，子集排在中文正文字体之前即可接管拉丁。
+页码数字保持宋体字面，页码的中文字形由方正书宋承担（见 src/portable_runtime.rs）。
+Typst 按字体列表逐字回退，子集排在页码字体之前即可接管拉丁。正文与楷体的国标
+西文字面改由合成字体 GWFangSong / GWKai 自带（scripts/rename-merged-fonts.py），
+不再生成 GWFangSongLatin。
 
 子集只含 U+0020–U+007E：全角标点（——、……等）必须落回中文字体，
 进了子集就会被当成半角字面，反而出错。
@@ -29,7 +30,6 @@ ASCII_PRINTABLE = list(range(0x20, 0x7F))
 
 # (源文件, 产物文件, 新家族名, PostScript 名)
 JOBS = [
-    ("FangSong.ttf", "GWFangSongLatin.ttf", "GW FangSong Latin", "GWFangSongLatin"),
     ("SimSun.ttf", "GWSimSunLatin.ttf", "GW SimSun Latin", "GWSimSunLatin"),
 ]
 

@@ -23,7 +23,7 @@ fn fonts() -> Result<Value> {
     Ok(serde_json::json!({
         "song": family("FZShuSong.ttf")?,
         "hei": family("FZHei.ttf")?,
-        "kai": family("FZKai.ttf")?,
+        "kai": family("GWKai.ttf")?,
         "xbs": family("XiaoBiaoSong.ttf")?,
         "latin": family("texgyretermes-regular.otf")?,
         "mono": family("JetBrainsMono-Regular.ttf")?,
@@ -157,6 +157,115 @@ pub(crate) fn document_json(
 mod tests {
     use super::*;
     use mdx::typst_research::{Doc, Item, build};
+
+    /// 西文数字一律 Termes：标题类（章节标题、图表题标签、封面黑体字与大标题、目录章条目）
+    /// 用 Bold，正文、页码、列表序号用 Regular。
+    #[test]
+    fn latin_is_termes_bold_in_headings_and_regular_elsewhere() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        let input = DraftInput {
+            kind: crate::models::TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        let markdown = concat!(
+            "# 报告C1题名
+
+<!-- [摘要] -->
+
+摘要正文。
+
+",
+            "<!-- [目录] -->
+
+<!-- [正文] -->
+
+## 背景H2
+
+",
+            "正文B3里写**加粗D4**。
+
+### 方法S5
+
+",
+            "表：数据T6说明
+
+| 项目 | 数值 |
+| --- | --- |
+| 测试 | 123 |
+
+",
+            "1. 第一条
+2. 第二条
+3. 第三条
+4. 第四条
+
+",
+        );
+        let bundle = ResearchSourceBundle::create(
+            &input,
+            markdown,
+            &NumberingConfig::default(),
+            crate::mermaid::Format::Pdf,
+            base.path(),
+        )
+        .unwrap();
+        let (data, files, _) = document(&bundle.markdown).unwrap();
+        let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
+        let items = typst_engine::text_fonts_for_test(
+            &TypstJob {
+                data,
+                base_dir: bundle.root(),
+                template: Template::Research,
+                files,
+            },
+            &set,
+        )
+        .unwrap();
+        let termes = typst_engine::bundled_family("texgyretermes-regular.otf").unwrap();
+        let weights = |needle: &str| -> Vec<(String, u16)> {
+            items
+                .iter()
+                .filter(|item| item.text.contains(needle))
+                .map(|item| (item.family.clone(), item.weight))
+                .collect()
+        };
+        for (needle, weight) in [
+            ("C1", 700),
+            ("H2", 700),
+            ("B3", 400),
+            ("D4", 700),
+            ("T6", 400),
+            ("123", 400),
+        ] {
+            let found = weights(needle);
+            assert!(
+                !found.is_empty() && found.iter().all(|(f, w)| *f == termes && *w == weight),
+                "「{needle}」应是 Termes {weight}：{found:?}"
+            );
+        }
+        // 节标题：正文里是 Bold，目录的节条目照 TeX 用正文字面，是 Regular。
+        let section = weights("S5");
+        assert!(section.iter().all(|(f, _)| *f == termes), "{section:?}");
+        assert!(section.iter().any(|(_, w)| *w == 700), "{section:?}");
+        assert!(section.iter().any(|(_, w)| *w == 400), "{section:?}");
+        // 「1.1」三处：目录节条目（Regular）、节标题与表题标签「表 1.1」（Bold）。
+        let numbers = weights("1.1");
+        assert_eq!(
+            numbers.iter().filter(|(_, w)| *w == 700).count(),
+            2,
+            "{numbers:?}"
+        );
+        // 数字一律 Termes（页码、目录页码、封面版本号等）。
+        let digits: Vec<_> = items
+            .iter()
+            .filter(|item| item.text.chars().any(|c| c.is_ascii_digit()))
+            .filter(|item| item.family != termes)
+            .collect();
+        assert!(digits.is_empty(), "数字应一律是 Termes：{digits:?}");
+    }
 
     #[test]
     fn research_physical_page_count_matches_pdf_including_cover_toc_and_blank_pages() {

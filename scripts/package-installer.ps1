@@ -47,12 +47,11 @@ if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
 
 $requiredFiles = @(
     "gongwen-assistant.exe",
-    "runtime\fonts\FZFangSong.ttf",
-    "runtime\fonts\FZKai.ttf",
+    "runtime\fonts\GWFangSong.ttf",
+    "runtime\fonts\GWKai.ttf",
     "runtime\fonts\FZHei.ttf",
     "runtime\fonts\FZShuSong.ttf",
     "runtime\fonts\XiaoBiaoSong.ttf",
-    "runtime\fonts\GWFangSongLatin.ttf",
     "runtime\fonts\GWSimSunLatin.ttf",
     "runtime\fonts\JetBrainsMono-Regular.ttf",
     "runtime\fonts\texgyretermes-regular.otf",

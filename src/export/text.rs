@@ -494,6 +494,51 @@ pub(crate) fn inline_segments(text: &str) -> Vec<InlineSegment> {
     segments
 }
 
+/// 花脸稿块里的一个行内样式片段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NumberedSegment {
+    pub(crate) segment: InlineSegment,
+    pub(crate) kind: RedlineKind,
+}
+
+/// 先按花脸稿哨兵切块、块内再切行内样式（与 [`inline_segments`] 同一个切法）。
+/// `numbers` 是解析器生成的段内列表编号占的可见字符范围（见
+/// `LocatedBlock::generated_prefixes`）：编号是版式不是括号注释，「（1）」「(1)」这类
+/// 编号不标 `parenthesized`，不排楷体四号，与正文同字面。PDF 与纸面预览共用。
+/// `numbers` 为空时与逐块 `inline_segments` 一致。
+pub(crate) fn numbered_inline_segments(
+    text: &str,
+    numbers: &[std::ops::Range<usize>],
+) -> Vec<NumberedSegment> {
+    let mut out: Vec<NumberedSegment> = Vec::new();
+    let mut visible = 0usize;
+    for chunk in redline_chunks(text) {
+        for segment in inline_segments(&chunk.text) {
+            for ch in segment.text.chars() {
+                let number = numbers.iter().any(|range| range.contains(&visible));
+                visible += 1;
+                if let Some(last) = out.last_mut()
+                    && last.kind == chunk.kind
+                    && last.segment.bold == segment.bold
+                    && last.segment.parenthesized == (segment.parenthesized && !number)
+                {
+                    last.segment.text.push(ch);
+                    continue;
+                }
+                out.push(NumberedSegment {
+                    segment: InlineSegment {
+                        text: ch.to_string(),
+                        bold: segment.bold,
+                        parenthesized: segment.parenthesized && !number,
+                    },
+                    kind: chunk.kind,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// 行内 Markdown 的逐个可见字符：来源字节范围、显示字符与是否加粗。
 ///
 /// 与 [`plain_text`] 一一对应（第 i 项就是纯文本的第 i 个字符）。花脸稿把

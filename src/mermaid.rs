@@ -43,8 +43,9 @@ const OFFICIAL_MAX_HEIGHT_RATIO: f64 = 0.7;
 const RESEARCH_TEXT_WIDTH_PT: f64 = figure_size::TEXT_WIDTH_MM / 25.4 * 72.0;
 const RESEARCH_TEXT_HEIGHT_PT: f64 = figure_size::TEXT_HEIGHT_MM / 25.4 * 72.0;
 
-/// 画图要用的随包字体：公文方正仿宋、研究报告方正黑体，方正书宋兜住 GBK 生僻字。
-const FONT_FILES: &[&str] = &["FZFangSong.ttf", "FZShuSong.ttf", "FZHei.ttf"];
+/// 画图要用的随包字体：公文仿宋（合成字体，西文数字取仿宋_GB2312 字面）、研究报告
+/// 方正黑体，方正书宋兜住 GBK 生僻字。
+const FONT_FILES: &[&str] = &["GWFangSong.ttf", "FZShuSong.ttf", "FZHei.ttf"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Style {
@@ -56,7 +57,7 @@ impl Style {
     /// 图内文字：公文用仿宋，与正文一脉；研究报告用黑体，与图题、表头同一路。
     fn font_family(self) -> &'static str {
         match self {
-            Self::Official => "FZFangSong-Z02, FZShuSong-Z01, serif",
+            Self::Official => "GW FangSong, FZShuSong-Z01, serif",
             Self::Research => "FZHei-B01, sans-serif",
         }
     }

@@ -138,20 +138,21 @@ struct RedFlowSegment {
 }
 
 /// 行内 Markdown → 排版片段：与 DOCX 的 `body_runs` 同一个切法，先按花脸稿
-/// 哨兵切块，再在块内解析加粗与括号。没有哨兵时只有一块 `Same`。
-fn red_flow_segments(text: &str, style: RedTextStyle) -> Vec<RedFlowSegment> {
-    export::redline_chunks(text)
+/// 哨兵切块，再在块内解析加粗与括号。没有哨兵时只有一块 `Same`。`numbers` 是
+/// 列表编号占的可见字符范围：编号不套括号楷体。
+fn red_flow_segments(
+    text: &str,
+    style: RedTextStyle,
+    numbers: &[Range<usize>],
+) -> Vec<RedFlowSegment> {
+    export::numbered_inline_segments(text, numbers)
         .into_iter()
-        .flat_map(|chunk| {
-            export::inline_segments(&chunk.text)
-                .into_iter()
-                .map(move |segment| RedFlowSegment {
-                    text: segment.text,
-                    bold: segment.bold,
-                    parenthesized: segment.parenthesized,
-                    style,
-                    mark: chunk.kind,
-                })
+        .map(|piece| RedFlowSegment {
+            text: piece.segment.text,
+            bold: piece.segment.bold,
+            parenthesized: piece.segment.parenthesized,
+            style,
+            mark: piece.kind,
         })
         .collect()
 }
@@ -458,7 +459,7 @@ fn red_place_aligned_text(
         export::LineAlign::Center => Align::Center,
         export::LineAlign::Right => Align::Max,
     };
-    let segments = red_flow_segments(text, RedTextStyle::Body);
+    let segments = red_flow_segments(text, RedTextStyle::Body, &[]);
     loop {
         let width = layout_state.body_width(metrics);
         let available = layout_state.body_bottom(metrics) - layout_state.cursor_y;
@@ -823,7 +824,11 @@ pub(crate) fn red_build_print_layout(
                         let heading_chars = export::strip_redline(&heading_text).chars().count();
                         let mut flow =
                             red_plain_segments(&heading_text, RedTextStyle::Heading(*level));
-                        flow.extend(red_flow_segments(body_text, RedTextStyle::Body));
+                        flow.extend(red_flow_segments(
+                            body_text,
+                            RedTextStyle::Body,
+                            &next.generated_prefixes,
+                        ));
                         let mut source_segments = vec![crate::preview::ClickableSourceSegment {
                             source: located.range.clone(),
                             chars: 0..heading_chars,
@@ -874,7 +879,7 @@ pub(crate) fn red_build_print_layout(
                     ui,
                     metrics,
                     &mut state,
-                    red_flow_segments(text, RedTextStyle::Body),
+                    red_flow_segments(text, RedTextStyle::Body, &located.generated_prefixes),
                     crate::preview::paragraph_source_segments(markdown, located, text),
                     true,
                 );
@@ -891,8 +896,11 @@ pub(crate) fn red_build_print_layout(
             }
             MarkdownBlock::OrderedListItem { number, text } => {
                 let prefix = export::render_list_number(numbering.list2, *number);
-                let mut segments =
-                    red_flow_segments(&format!("{prefix}{text}"), RedTextStyle::List);
+                let mut segments = red_flow_segments(
+                    &format!("{prefix}{text}"),
+                    RedTextStyle::List,
+                    std::slice::from_ref(&(0..prefix.chars().count())),
+                );
                 if let Some(first) = segments.first_mut() {
                     first.text = format!("{}{}", indent(INDENT_CHARS), first.text);
                 }

@@ -30,12 +30,14 @@ mod tail;
 pub(crate) use freeze::{ScaleFreeze, show_frozen};
 pub(crate) use gutter::Gutter;
 pub(crate) use header::{document_number, header_block, header_unit, is_joint_mode_one};
+#[cfg(test)]
+pub(crate) use layout::append_inline_with_bold_ranges;
 pub(crate) use layout::{
-    ClickableSourceSegment, aligned_block, append_inline_with_bold_ranges, body_block, clickable,
+    ClickableSourceSegment, aligned_block, append_numbered_inline, body_block, clickable,
     clickable_body_block, clickable_justified_job, draw_justified_with_bold, first_ink,
     heading_family, hovered_source, indent, is_renderable_paragraph, job, justified_rows, layout,
-    line_block, line_galley, place, row_tint_offset, scroll_preview_to_rect, set_text_selection,
-    sheet, single_line, stacked, table_block, text_format,
+    line_block, line_galley, numbered_body_block, place, row_tint_offset, scroll_preview_to_rect,
+    set_text_selection, sheet, single_line, stacked, table_block, text_format,
 };
 pub(crate) use red::{BodyRun, red_approval_print_preview};
 pub(crate) use render::{clickable_content_block, official_preview, paragraph_source_segments};
@@ -135,10 +137,15 @@ pub(crate) struct Metrics {
     dedicated_bold: bool,
     /// 表格正文的字面、字号与格内行距（表头一律黑体，加粗跟随设置）。
     table_family: &'static str,
+    /// 表头字面：公文黑体；研究报告黑体字形配 Termes Regular。
+    table_header_family: &'static str,
     table_pt: f32,
     table_line_pt: f32,
     /// 行内 `$...$` 排成公式（研究报告），否则照源码印（公文不支持公式）。
     math: bool,
+    /// 研究报告的字体：版面代码写的公文族名经 [`theme::research_family`] 换成
+    /// 西文数字为 Termes 的研究报告字体族。
+    research_fonts: bool,
     /// 本帧纸面上每一条「改得动的行」的位置，画完纸再统一标到页边。
     /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
     /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
@@ -202,9 +209,11 @@ impl Metrics {
             body_pt: BODY_PT,
             dedicated_bold: false,
             table_family: theme::FONT_FANGSONG,
+            table_header_family: theme::FONT_HEITI,
             table_pt: TABLE_PT,
             table_line_pt: TABLE_LINE_PT,
             math: false,
+            research_fonts: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }
@@ -223,14 +232,17 @@ impl Metrics {
             margin_left: RESEARCH_MARGIN_LEFT_MM * MM * PT * scale,
             margin_top: RESEARCH_MARGIN_TOP_MM * MM * PT * scale,
             line: RESEARCH_LINE_PT * PT * scale,
-            // 宋体族：随包的方正书宋（FONT_SONGTI 已经指向它），与编译出的 PDF 同字面。
+            // 宋体族：随包的方正书宋配 Termes（经 research_fonts 换族），与编译出的
+            // PDF 同字面。
             body_family: theme::FONT_SONGTI,
             body_pt: RESEARCH_BODY_PT,
             dedicated_bold: false,
             table_family: theme::FONT_SONGTI,
+            table_header_family: theme::FONT_RESEARCH_HEI_PLAIN,
             table_pt: RESEARCH_TABLE_PT,
             table_line_pt: RESEARCH_TABLE_LINE_PT,
             math: true,
+            research_fonts: true,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }
@@ -328,6 +340,11 @@ impl Metrics {
     }
 
     fn font(&self, family: &str, size: f32) -> FontId {
+        let family = if self.research_fonts {
+            theme::research_family(family)
+        } else {
+            family
+        };
         FontId::new(self.pt(size), theme::official_family(family))
     }
 
@@ -1635,6 +1652,79 @@ mod tests {
                 "{family} 字体族不应含单独的西文字体 gw-latin：{list:?}"
             );
         }
+    }
+
+    /// 预览的西文数字与 PDF 同一套配方：族首挂哪支拉丁字体。
+    #[test]
+    fn preview_families_follow_the_latin_recipe() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let definitions = ctx.fonts(|fonts| fonts.definitions().clone());
+        let head = |family: &str| {
+            definitions
+                .families
+                .get(&egui::FontFamily::Name(family.into()))
+                .and_then(|list| list.first().cloned())
+                .unwrap_or_default()
+        };
+        let simsun = crate::portable_runtime::SIMSUN_LATIN_SUBSET_FILE;
+        for (family, expected) in [
+            // 仿宋、楷体是合成字体，族首就是它自己，不挂子集。
+            (theme::FONT_FANGSONG, theme::FONT_FANGSONG),
+            (theme::FONT_KAITI, theme::FONT_KAITI),
+            (theme::FONT_SONGTI, simsun),
+            (theme::FONT_RESEARCH_SONG, "gw-termes-regular"),
+            (theme::FONT_RESEARCH_KAI, "gw-termes-regular"),
+            (theme::FONT_RESEARCH_HEI_PLAIN, "gw-termes-regular"),
+            (theme::FONT_RESEARCH_HEI, "gw-termes-bold"),
+            (theme::FONT_RESEARCH_BIAOSONG, "gw-termes-bold"),
+        ] {
+            assert_eq!(head(family), expected, "{family}");
+        }
+        // 黑体、小标宋不挂子集。
+        for family in [theme::FONT_HEITI, theme::FONT_BIAOSONG] {
+            assert!(!head(family).starts_with("GW"), "{family}");
+        }
+        // 研究报告的弯引号、破折号归中文字体（与 PDF 的 latin-in-cjk 一致）：在研究报告
+        // 宋体族里排出来，与单用方正书宋同宽；拉丁字母则来自 Termes，宽度不同。
+        let song_list = definitions
+            .families
+            .get(&egui::FontFamily::Name(theme::FONT_RESEARCH_SONG.into()))
+            .unwrap()
+            .clone();
+        let mut probe = definitions.clone();
+        probe.families.insert(
+            egui::FontFamily::Name("cjk-only".into()),
+            vec![song_list[1].clone()],
+        );
+        let ctx = egui::Context::default();
+        ctx.set_fonts(probe);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let width = |text: &str, family: &str| {
+            let font = egui::FontId::new(20.0, egui::FontFamily::Name(family.into()));
+            ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.into(), font, egui::Color32::BLACK)
+                    .size()
+                    .x
+            })
+        };
+        for shared in ["“", "”", "—", "…"] {
+            assert_eq!(
+                width(shared, theme::FONT_RESEARCH_SONG),
+                width(shared, "cjk-only"),
+                "{shared} 应由中文字体出"
+            );
+        }
+        assert_ne!(
+            width("Wax", theme::FONT_RESEARCH_SONG),
+            width("Wax", "cjk-only"),
+            "拉丁字母应由 Termes 出"
+        );
     }
 
     #[test]

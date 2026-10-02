@@ -6,12 +6,11 @@ runtime directory only carries fonts and license texts:
 
 ```text
 runtime/
-  fonts/FZFangSong.ttf
-  fonts/FZKai.ttf
+  fonts/GWFangSong.ttf
+  fonts/GWKai.ttf
   fonts/FZHei.ttf
   fonts/FZShuSong.ttf
   fonts/XiaoBiaoSong.ttf
-  fonts/GWFangSongLatin.ttf
   fonts/GWSimSunLatin.ttf
   fonts/JetBrainsMono-Regular.ttf
   fonts/texgyretermes-regular.otf
@@ -24,17 +23,20 @@ runtime/
 
 - Fonts come in two groups, both loaded **from the files here**, never by an
   installed family name, so no machine has to have them installed:
-  - Chinese glyphs all come from the Founder GBK series (`FZ*`), which covers
-    the full GBK repertoire; `XiaoBiaoSong` (方正小标宋_GBK) is the document
-    title face. They are required by every official-document layout
+  - Chinese glyphs all come from the Founder GBK series, which covers the full
+    GBK repertoire; `XiaoBiaoSong` (方正小标宋_GBK) is the document title face.
+    `GWFangSong.ttf` (公文仿宋) and `GWKai.ttf` (公文楷体) are merged faces:
+    Han characters and full-width punctuation from 方正仿宋_GBK / 方正楷体_GBK,
+    every non-Han glyph of the GB2312 repertoire (Latin, digits, circled
+    numbers, curly quotes, dashes, ellipsis …) from 仿宋_GB2312 / 楷体_GB2312.
+    They are renamed by `scripts/rename-merged-fonts.py` so they never collide
+    with an installed Founder font. They are required by every official-document layout
     (`assets/typst/gongwen.typ`), by the research-report layout
     (`assets/typst/research.typ`) and by the on-screen paper preview. Missing
     any of them disables PDF output entirely.
-  - `GWFangSongLatin.ttf` / `GWSimSunLatin.ttf` are tiny subsets (printable
-    ASCII only) carved out of 仿宋_GB2312 and 宋体 by
-    `scripts/make-latin-subsets.py`. They sit at the head of the fallback
-    chain so that body Latin/digits keep the 仿宋_GB2312 look and page-number
-    digits keep the 宋体 look, as the official-document standard expects.
+  - `GWSimSunLatin.ttf` is a tiny subset (printable ASCII only) carved out of
+    宋体 by `scripts/make-latin-subsets.py`. It sits at the head of the
+    page-number fallback chain so page-number digits keep the 宋体 look.
   - `JetBrainsMono` / `texgyretermes-*` are required only by the
     research-report layout. Missing any of them disables research reports
     alone; official documents keep working.
@@ -47,7 +49,9 @@ runtime/
   (`tectonic/`), a TeX bundle (`texbundle/`), the retired pinyin IME data
   (`ime/`) and the Zhongyi font set from the old pipeline. They are no longer
   used: the packaging scripts skip them even when an archive's manifest lists
-  them. v0.8.0 onwards ships only the fonts listed above.
+  them. v0.8.0 onwards ships only fonts; v0.8.0 itself still carried
+  `FZFangSong.ttf`, `FZKai.ttf` and `GWFangSongLatin.ttf`, replaced by the
+  merged `GWFangSong.ttf` / `GWKai.ttf` in v0.8.1.
 
 All binary assets are ignored by Git intentionally. Run
 `scripts/package-portable.ps1` after the assets have been placed here. The

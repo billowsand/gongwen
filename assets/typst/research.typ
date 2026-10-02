@@ -28,14 +28,17 @@
 #let number-base = 8.89mm                  // 页码基线在版心底下（实测）
 
 // ---------------- 字体 ----------------
-// 西文 TeX Gyre Termes 只管拉丁字母（引号、破折号这些中西共用的符号归中文字体，
-// 与 xeCJK 的分类一致）。
+// 西文与数字一律 TeX Gyre Termes，只管拉丁字母（引号、破折号这些中西共用的符号归
+// 中文字体，与 xeCJK 的分类一致）。标题类（黑体：章节、部分、目录章条目、图表题标签、
+// 文框标题、封面黑体字；封面小标宋大标题）用 Termes Bold，见 heavy；其余 Regular，
+// 正文里的 **加粗** 另走 fake-bold-cjk。
 #let latin = (name: F.latin, covers: "latin-in-cjk")
 #let song = (latin, F.song, F.fallback)
 #let kai = (latin, F.kai, F.fallback)
-#let hei = (F.hei, F.fallback)             // \heiti\enhei：中西文都用黑体
-#let hei-cjk = (latin, F.hei, F.fallback)  // \heiti：西文仍是 Termes（表头）
+#let hei = (latin, F.hei, F.fallback)
 #let xbs = (latin, F.xbs, F.fallback)
+// 标题类文字：西文落到 Termes Bold（中文字体只有常规字重，不受影响）。
+#let heavy(font, ..args, body) = text(font: font, weight: "bold", ..args, body)
 #let mono = ((name: F.mono, covers: "latin-in-cjk"), F.kai, F.fallback)
 
 // ---------------- 行内片段 ----------------
@@ -143,7 +146,7 @@
   if label != none {
     let x = if calc.odd(p) { inner-m + number-half } else { 210mm - inner-m - number-half }
     place(top + left, dx: x - 50mm, dy: top-m + text-h + number-base,
-      box(width: 100mm, align(center, text(font: (F.song,), size: 14pt, top-edge: "baseline",
+      box(width: 100mm, align(center, text(font: song, size: 14pt, top-edge: "baseline",
         bottom-edge: "baseline", [—#h(0.25em)#label#h(0.25em)—]))))
   }
 }
@@ -210,7 +213,7 @@
   block(height: chapter-next - top-edge, width: 100%, spacing: 0pt, {
     pre
     bookmark(level, title)
-    set text(font: hei, size: 18pt)
+    set text(font: hei, weight: "bold", size: 18pt)
     centered-at(chapter-top, title)
   })
 }
@@ -240,7 +243,7 @@
   let above = if prev == "chapter" { 0pt } else if prev == "table" { 10.47mm - top-edge + 1.83mm } else { pitch - body-size }
   block(sticky: true, above: above, below: pitch - body-size, {
     bookmark(b.level + 2, num + runs(b.text))
-    par(first-line-indent: 0pt, justify: false, h(2em) + text(font: hei, num + runs(b.text)))
+    par(first-line-indent: 0pt, justify: false, h(2em) + heavy(hei, num + runs(b.text)))
   })
   anchor(b.label, b.number)
 }
@@ -253,7 +256,7 @@
   block(width: 100%, height: 94.42mm, spacing: 0pt, {
     toc-entry("part", if b.number != none { "第" + b.number + "部分" } else { none }, b.text)
     bookmark(1, if head != none { head + h(1em) } + runs(b.text))
-    set text(font: hei, size: 24pt)
+    set text(font: hei, weight: "bold", size: 24pt)
     if head != none { centered-at(77.23mm, head) }
     centered-at(94.42mm, runs(b.text))
   })
@@ -273,7 +276,7 @@
 // 段内（inparaenum），① 后退 0.3 字。
 #let list-label(e) = {
   let back = if e.level == 1 { 0.2em } else if e.level == 2 { 0.3em } else { 0em }
-  text(font: (F.song,), e.label) + h(-back)
+  text(font: song, e.label) + h(-back)
 }
 #let list-par(b) = {
   let first = b.items.first()
@@ -286,7 +289,7 @@
 // 表题与图题（caption）：标签黑体、题名宋体，小四，二者空半字。
 #let caption-line(tag, body) = align(center, par(first-line-indent: 0pt, justify: false,
   text(size: 12pt, top-edge: 0.83em, bottom-edge: -0.17em,
-    text(font: hei, tag) + h(0.5em) + if body != none { text(font: song, body) } + keep-end)))
+    heavy(hei, tag) + h(0.5em) + if body != none { text(font: song, body) } + keep-end)))
 
 // ---------------- 表格（longtblr） ----------------
 #let col-sep = 6 * texpt
@@ -310,7 +313,8 @@
     if c.colspan > 1 { args.colspan = c.colspan }
     if c.rowspan > 1 { args.rowspan = c.rowspan }
     let body = runs(c.c)
-    if header { body = text(font: hei-cjk, body) }
+    // 表头：黑体字形、西文 Termes Regular（TeX 的 \heiti 不带 \enhei）。
+    if header { body = text(font: hei, body) }
     table.cell(..args, align: al(c.align) + horizon, body)
   }
   let cell-or-skip(c, header) = if c == none { () } else { (mk(c, header),) }
@@ -324,7 +328,7 @@
       align: center, context {
         let first = locate(label(start)).page()
         let cont = if here().page() > first { h(0.25em) + [（续表）] }
-        text(top-edge: 0.83em, bottom-edge: -0.17em, text(font: hei, tag)
+        text(top-edge: 0.83em, bottom-edge: -0.17em, heavy(hei, tag)
           + h(0.5em) + text(font: song, body + cont) + keep-end)
       })
     // 紧跟章题：实测表题基线在版心顶下 53.23mm（章题块量到 51.20mm 处的下一行基线）。
@@ -408,7 +412,7 @@
   for l in b.items {
     if l.k == "source" { align(right, par(first-line-indent: 0pt, justify: false, runs(l.c))) }
     else if l.k == "math" { display-math(l) }
-    else if l.k == "list" { par(text(font: (F.song,), l.label) + h(-0.2em) + runs(l.c)) }
+    else if l.k == "list" { par(text(font: song, l.label) + h(-0.2em) + runs(l.c)) }
     else { par(runs(l.c)) }
   }
 })
@@ -416,7 +420,7 @@
 // 文框（mdxboxtblr）：0.6pt 细框、浅灰底，标题行黑体居中，内文楷体小四、一行一格。
 // 实测：标题行基线在框顶下 6.01mm，行距 8.44mm，末行基线到框底 5.45mm。
 #let box-block(b, prev: none) = {
-  let title = text(font: hei, b.name + h(0.5em) + b.number + h(1em) + runs(b.title))
+  let title = heavy(hei, b.name + h(0.5em) + b.number + h(1em) + runs(b.title))
   // 实测：框顶距上一行基线 5.10mm，框底到下一行基线 8.43mm；两框相接时框间 8.85mm
   // （tabularray 的 presep 与 postsep 相加）。
   // 落在页首时框顶仍在版心顶下 3.62mm（TeX 的 presep 前有 \label，不会被页首吃掉）：
@@ -433,7 +437,7 @@
     align(center, par(justify: false, title))
     for l in b.items {
       if l.k == "math" { align(center, par(math-box(l))) }
-      else if l.k == "list" { par(h(2em) + text(font: (F.song,), l.label) + h(-0.2em) + runs(l.c)) }
+      else if l.k == "list" { par(h(2em) + text(font: song, l.label) + h(-0.2em) + runs(l.c)) }
       else { par(h(2em) + runs(l.c)) }
     }
   })
@@ -461,7 +465,7 @@
   context {
     block(height: 52.02mm - top-edge, width: 100%, spacing: 0pt, {
       bookmark(2, [目录])
-      set text(font: hei, size: 18pt)
+      set text(font: hei, weight: "bold", size: 18pt)
       centered-at(29.52mm, [目录])
     })
     let segments = page-segments()
@@ -476,8 +480,8 @@
           + box(width: 1fr, repeat(gap: 10.5pt - 0.25em, justify: false)[.]) + h(1.5em)
           + box(width: 1.55em, align(right, text(font: (latin,), num)))))
       } else {
-        let label = if v.prefix != none { text(font: hei, chapter-prefix(v.prefix)) + h(0.8em) }
-        par(link(target, text(font: hei, label + runs(v.text)) + h(1fr)
+        let label = if v.prefix != none { chapter-prefix(v.prefix) + h(0.8em) }
+        par(link(target, heavy(hei, label + runs(v.text)) + h(1fr)
           + text(font: (latin,), weight: "bold", num)))
       }
     }
@@ -494,20 +498,20 @@
   if c.security != "" {
     let years = if c.security-years != "" { [★#c.security-years] }
     place(top + left, dx: 25mm - inner-m, dy: 20mm - top-m,
-      text(font: hei, size: 12pt, top-edge: "bounds", bottom-edge: "bounds", [#c.security#years]))
+      heavy(hei, size: 12pt, top-edge: "bounds", bottom-edge: "bounds", [#c.security#years]))
   }
   if c.number != "" {
     place(top + left, dx: 185mm - inner-m - 100mm, dy: 20mm - top-m, box(width: 100mm, align(right,
-      text(font: hei, size: 12pt, top-edge: "bounds", bottom-edge: "bounds", [编号：#c.number]))))
+      heavy(hei, size: 12pt, top-edge: "bounds", bottom-edge: "bounds", [编号：#c.number]))))
   }
-  at(105mm, 68mm, text(font: hei, size: 18pt, c.doc-type.clusters().join(h(0.5em))))
+  at(105mm, 68mm, heavy(hei, size: 18pt, c.doc-type.clusters().join(h(0.5em))))
   if c.ident != "" { at(105mm, 83mm, text(font: song, size: 14pt, c.ident)) }
   place(top + left, dx: 25mm - inner-m, dy: 94mm - top-m, rect(width: 160mm, height: 0.5mm, fill: black, stroke: none))
   if c.stage == none {
     place(top + left, dx: 25mm - inner-m, dy: 95.3mm - top-m, rect(width: 160mm, height: 0.2mm, fill: black, stroke: none))
   }
   context {
-    let title = box(width: 150mm, align(center, text(font: xbs, size: 26pt, top-edge: "bounds", bottom-edge: "bounds",
+    let title = box(width: 150mm, align(center, heavy(xbs, size: 26pt, top-edge: "bounds", bottom-edge: "bounds",
       par(leading: 37.7pt - 26pt, first-line-indent: 0pt, justify: false, c.title.map(runs).join(linebreak())))))
     let y = 114mm
     place(top + left, dx: 105mm - 75mm - inner-m, dy: y - top-m, title)
@@ -530,13 +534,13 @@
       place(top + left, dx: xl - inner-m, dy: 218mm - top-m,
         rect(width: 38.5mm, height: if current { 0.8mm } else { 0.2mm }, stroke: none,
           fill: if current { black } else { luma(65%) }))
-      at(xl + 19.25mm, 221.2mm, text(font: hei, size: 10.5pt, fill: if current { black } else { luma(55%) }, name))
+      at(xl + 19.25mm, 221.2mm, heavy(hei, size: 10.5pt, fill: if current { black } else { luma(55%) }, name))
     }
   } else if c.byline.len() > 0 {
     at(105mm, 224mm, text(font: song, size: 14pt, c.byline.join(h(1em))))
   }
   context {
-    let inst = text(font: hei, size: 16pt, top-edge: "bounds", bottom-edge: "bounds", c.institution)
+    let inst = heavy(hei, size: 16pt, top-edge: "bounds", bottom-edge: "bounds", c.institution)
     at(105mm, 245mm, inst)
     at(105mm, 245mm + measure(inst).height + 5mm, text(font: song, size: 15pt, c.date))
   }

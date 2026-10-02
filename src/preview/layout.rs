@@ -843,6 +843,17 @@ pub(crate) fn body_block(
     text: &str,
     first_line_indent: bool,
 ) {
+    numbered_body_block(ui, metrics, text, &[], first_line_indent);
+}
+
+/// 同 [`body_block`]，`numbers` 范围内的列表编号换宋体西文数字（见 [`append_numbered_inline`]）。
+pub(crate) fn numbered_body_block(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    text: &str,
+    numbers: &[Range<usize>],
+    first_line_indent: bool,
+) {
     let mut job = job(metrics.content);
     let normal = metrics.body_font();
     if first_line_indent {
@@ -852,7 +863,7 @@ pub(crate) fn body_block(
             text_format(normal.clone(), metrics.line),
         );
     }
-    let bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, text, &normal);
+    let bold_ranges = append_numbered_inline(&mut job, metrics, text, &normal, numbers);
     draw_justified_with_bold_ranges(ui, metrics, job, &bold_ranges);
 }
 
@@ -915,6 +926,7 @@ pub(crate) fn clickable_body_block(
     ui: &mut egui::Ui,
     metrics: &Metrics,
     text: &str,
+    numbers: &[Range<usize>],
     first_line_indent: bool,
     segments: &[ClickableSourceSegment],
     anchor: Option<&Range<usize>>,
@@ -933,7 +945,7 @@ pub(crate) fn clickable_body_block(
     } else {
         0
     };
-    let bold_ranges = append_inline_with_bold_ranges(&mut job, metrics, text, &normal);
+    let bold_ranges = append_numbered_inline(&mut job, metrics, text, &normal, numbers);
     let adjusted = segments
         .iter()
         .map(|segment| ClickableSourceSegment {
@@ -1157,29 +1169,39 @@ pub(crate) fn append_inline_with_bold_ranges(
     text: &str,
     normal: &FontId,
 ) -> Vec<Range<usize>> {
+    append_numbered_inline(job, metrics, text, normal, &[])
+}
+
+/// 同 [`append_inline_with_bold_ranges`]，`numbers` 是段内列表编号的可见字符范围
+/// （见 `LocatedBlock::generated_prefixes`）：编号不套括号楷体，与 PDF 一致。
+pub(crate) fn append_numbered_inline(
+    job: &mut LayoutJob,
+    metrics: &Metrics,
+    text: &str,
+    normal: &FontId,
+    numbers: &[Range<usize>],
+) -> Vec<Range<usize>> {
     let mut bold_ranges = Vec::new();
     let mut previous = export::RedlineKind::Same;
-    for chunk in export::redline_chunks(text) {
-        let mut gap = marks::chunk_gap(metrics, previous, chunk.kind);
-        for segment in export::inline_segments(&chunk.text) {
-            let font = if segment.parenthesized {
-                metrics.font(theme::FONT_KAITI, PAREN_PT)
-            } else if segment.bold && metrics.dedicated_bold {
-                metrics.body_bold_font()
-            } else {
-                normal.clone()
-            };
-            let start = job.text.chars().count();
-            job.append(
-                &segment.text,
-                std::mem::take(&mut gap),
-                marks::mark_format(text_format(font, metrics.line), chunk.kind),
-            );
-            if segment.bold && !segment.parenthesized && !metrics.dedicated_bold {
-                bold_ranges.push(start..start + segment.text.chars().count());
-            }
-            previous = chunk.kind;
+    for piece in export::numbered_inline_segments(text, numbers) {
+        let segment = &piece.segment;
+        let font = if segment.parenthesized {
+            metrics.font(theme::FONT_KAITI, PAREN_PT)
+        } else if segment.bold && metrics.dedicated_bold {
+            metrics.body_bold_font()
+        } else {
+            normal.clone()
+        };
+        let start = job.text.chars().count();
+        job.append(
+            &segment.text,
+            marks::chunk_gap(metrics, previous, piece.kind),
+            marks::mark_format(text_format(font, metrics.line), piece.kind),
+        );
+        if segment.bold && !segment.parenthesized && !metrics.dedicated_bold {
+            bold_ranges.push(start..start + segment.text.chars().count());
         }
+        previous = piece.kind;
     }
     bold_ranges
 }
@@ -1271,7 +1293,7 @@ pub(crate) fn measure_table(
         let header = row_index == 0;
         let font = metrics.font(
             if header {
-                theme::FONT_HEITI
+                metrics.table_header_family
             } else {
                 metrics.table_family
             },
@@ -1963,6 +1985,7 @@ mod tests {
                 ui,
                 &metrics,
                 "第一行第二行",
+                &[],
                 false,
                 &segments,
                 Some(&range),

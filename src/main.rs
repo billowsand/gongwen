@@ -12,6 +12,7 @@ mod document_reference;
 mod draft_page;
 mod export;
 mod file_clipboard;
+mod font_cmap;
 mod help;
 mod highlight;
 mod images;

@@ -464,7 +464,7 @@ fn images_are_embedded_and_missing_ones_are_skipped() {
     );
 }
 
-/// 内置正文字体（方正仿宋_GBK）覆盖 GBK：人名里的「喆」直接从正文字体出，
+/// 内置正文字体（合成仿宋，汉字取方正仿宋_GBK）覆盖 GBK：人名里的「喆」直接从正文字体出，
 /// 不经兜底、不丢字。兜底链仍在，留给用户另选的本机字体缺字时用。
 #[test]
 fn rare_characters_render_from_bundled_body_font() {
@@ -479,7 +479,7 @@ fn rare_characters_render_from_bundled_body_font() {
     );
     let fonts = embedded_fonts(&outcome.pdf);
     assert!(
-        fonts.iter().any(|f| f.contains("FZFSK")),
+        fonts.iter().any(|f| f.contains("GWFangSong")),
         "「喆」应从方正仿宋直接出：{fonts:?}"
     );
 }
@@ -667,7 +667,7 @@ fn debug_latin_subsets() {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("font/FangSong.ttf"),
             )),
         ),
-        ("fz-only", mk(Some(font_dir.join("FZFangSong.ttf")))),
+        ("merged", mk(Some(font_dir.join("GWFangSong.ttf")))),
     ];
     for (name, config) in &variants {
         let outcome = compile_plain(markdown, config, &dir);
@@ -697,4 +697,133 @@ fn debug_latin_subsets() {
         .save(dir.join(format!("{name}.png")))
         .unwrap();
     }
+}
+
+/// 排版一份公文，按出现顺序列出每段文字实际落到的字体。
+fn text_fonts(
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> (
+    Vec<crate::typst_engine::TextFont>,
+    crate::typst_engine::FontSet,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (doc, set, _) = super::prepare(
+        input,
+        markdown,
+        &UnitDisplay::new(&[]),
+        &FontConfig::default(),
+        numbering,
+        &ElementMarks::default(),
+        dir.path(),
+    )
+    .unwrap();
+    let data = serde_json::to_string(&doc).unwrap();
+    let items = crate::typst_engine::text_fonts_for_test(
+        &crate::typst_engine::TypstJob::official(data, dir.path()),
+        &set,
+    )
+    .unwrap();
+    (items, set)
+}
+
+/// 段内列表默认的圈号「①②」：出自正文的合成仿宋，即仿宋_GB2312 的字形。
+#[test]
+fn circled_list_numbers_use_the_body_font() {
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let input = base_input(TemplateKind::PlainDocument);
+    let markdown = "# 标题
+
+<!-- [正文] -->
+
+要求如下：
+1. 甲项
+2. 乙项
+";
+    let (items, set) = text_fonts(&input, markdown, &NumberingConfig::default());
+    let circled: Vec<_> = items
+        .iter()
+        .filter(|item| item.text.contains('①') || item.text.contains('②'))
+        .collect();
+    assert!(!circled.is_empty());
+    assert!(
+        circled.iter().all(|item| item.family == set.families.body),
+        "{circled:?}"
+    );
+}
+
+/// 西文数字的字体配方，逐处查实际落到的字体：仿宋文字（正文、仿宋标题、段内与独立
+/// 列表的编号）出自合成仿宋 GWFangSong（仿宋_GB2312 字面），楷体文字（楷体标题、主送
+/// 机关、括号楷体）出自合成楷体 GWKai（楷体_GB2312 字面）；页码前面挂宋体字面的子集；
+/// 黑体标题、小标宋大标题用自带字面。
+#[test]
+fn latin_and_digits_follow_the_font_recipe() {
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let mut input = base_input(TemplateKind::OfficialLetter);
+    input.profile.recipient = "各区民政局R0".into();
+    let markdown = format!(
+        "# 关于T9工作的通知\n\n<!-- [正文] -->\n\n## 一级标题H1\n\n### 二级标题K2\n\n\
+         #### 三级标题F3\n\n##### 四级标题F4\n\n正文B5，说明（括号P6）。\n\n\
+         要求如下：\n1. 段内L7\n2. 段内L8\n\n1. 独立列表L9\n\n{}",
+        "正文填充，把稿件撑到第二页，好让页码印出来。\n\n".repeat(40)
+    );
+    let numbering = NumberingConfig {
+        list1: crate::models::ListNumbering::HalfParen,
+        list2: crate::models::ListNumbering::DecimalDot,
+        ..NumberingConfig::default()
+    };
+    let (items, set) = text_fonts(&input, &markdown, &numbering);
+    let family_of = |needle: &str| -> Vec<String> {
+        items
+            .iter()
+            .filter(|item| item.text.contains(needle))
+            .map(|item| item.family.clone())
+            .collect()
+    };
+    let families = &set.families;
+    let fangsong = families.body.clone();
+    let kai = families.heading2.clone();
+    let simsun = families.page_number_latin.clone().unwrap();
+    assert_eq!(fangsong, "GW FangSong");
+    assert_eq!(kai, "GW Kai");
+    for (needle, expected) in [
+        ("T9", &families.title),
+        ("H1", &families.heading1),
+        ("K2", &kai),
+        ("F3", &fangsong),
+        ("F4", &fangsong),
+        ("B5", &fangsong),
+        ("P6", &kai),
+        ("R0", &kai),
+        ("L7", &fangsong),
+        ("L9", &fangsong),
+        ("(1)", &fangsong),
+        ("(2)", &fangsong),
+    ] {
+        let found = family_of(needle);
+        assert!(
+            !found.is_empty() && found.iter().all(|family| family == expected),
+            "「{needle}」应落到 {expected}：{found:?}"
+        );
+    }
+    // 「1.」：四级标题编号与独立列表编号，都出自合成仿宋。
+    assert!(
+        items
+            .iter()
+            .filter(|item| item.text == "1.")
+            .all(|item| item.family == fangsong)
+    );
+    assert!(items.iter().filter(|item| item.text == "1.").count() >= 2);
+    // 页码「— 2 —」。
+    assert!(
+        items
+            .iter()
+            .any(|item| item.text == "2" && item.family == simsun),
+        "页码应是宋体字面"
+    );
 }
