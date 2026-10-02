@@ -1,7 +1,7 @@
 //! 词表合并、精确查询与个人调整；不解析拼音，不生成候选。
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Entry {
@@ -15,6 +15,13 @@ pub(crate) fn valid_code(code: &str, four: bool) -> bool {
     } else {
         (1..=4).contains(&code.len())
     }) && code.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+/// 词条可以入表：编码合法，文字非空且不含换行、制表符。
+pub(crate) fn valid_entry(entry: &Entry, four: bool) -> bool {
+    valid_code(&entry.code, four)
+        && !entry.text.is_empty()
+        && !entry.text.contains(['\t', '\r', '\n'])
 }
 
 #[derive(Debug, Clone, Default)]
@@ -92,6 +99,9 @@ pub(crate) struct Personal {
     /// 每个编码的显式候选顺序，未指定的仍按基础表、词表顺序排。
     pub order: BTreeMap<String, Vec<String>>,
     pub migrated_phrases: bool,
+    /// 手动指定的二字、三字、四字及以上构词规则；不填按基础表推算。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<[String; 3]>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +116,8 @@ pub(crate) struct Table {
     pub document: Vec<Entry>,
     pub personal: Personal,
     index: BTreeMap<String, Vec<Candidate>>,
+    /// 反查：文字 → 编码，短码在前。含已屏蔽的，查询时再过滤。
+    by_text: HashMap<String, Vec<String>>,
 }
 
 impl Table {
@@ -144,7 +156,34 @@ impl Table {
                 });
             }
         }
+        let mut by_text: HashMap<String, Vec<String>> = HashMap::new();
+        for (code, candidates) in &index {
+            for candidate in candidates {
+                by_text
+                    .entry(candidate.text.clone())
+                    .or_default()
+                    .push(code.clone());
+            }
+        }
+        for codes in by_text.values_mut() {
+            codes.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        }
         self.index = index;
+        self.by_text = by_text;
+    }
+
+    /// 一个词的全部有效编码：编码、在该码候选中的位置（从 1 起）与来源，短码在前。
+    pub fn codes_of(&self, text: &str) -> Vec<(String, usize, Vec<String>)> {
+        self.by_text
+            .get(text)
+            .into_iter()
+            .flatten()
+            .filter_map(|code| {
+                let visible = self.lookup(code);
+                let index = visible.iter().position(|c| c.text == text)?;
+                Some((code.clone(), index + 1, visible[index].sources.clone()))
+            })
+            .collect()
     }
 
     pub fn all(&self, code: &str) -> &[Candidate] {
@@ -163,6 +202,29 @@ impl Table {
             .iter()
             .filter(|c| !self.hidden(code, &c.text))
             .cloned()
+            .collect()
+    }
+
+    /// 以 `prefix` 开头且更长的编码的有效候选：短码在前，同码按候选顺序。
+    pub fn extended(&self, prefix: &str, limit: usize) -> Vec<(String, Candidate)> {
+        let mut codes: Vec<&String> = self
+            .index
+            .range::<str, _>((
+                std::ops::Bound::Excluded(prefix),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(code, _)| code)
+            .take_while(|code| code.starts_with(prefix))
+            .collect();
+        codes.sort_by_key(|code| code.len());
+        codes
+            .into_iter()
+            .flat_map(|code| {
+                self.lookup(code)
+                    .into_iter()
+                    .map(move |candidate| (code.clone(), candidate))
+            })
+            .take(limit)
             .collect()
     }
 

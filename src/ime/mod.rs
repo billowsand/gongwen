@@ -1,9 +1,12 @@
 //! 应用内词表输入法：编码精确查表，词表维护后立即生效。
+mod add_word;
 mod candidates;
 mod cursor;
 mod data;
+mod encoder;
 mod exempt;
 mod keys;
+mod lookup;
 mod manage;
 mod session;
 mod table;

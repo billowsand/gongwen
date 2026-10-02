@@ -48,6 +48,11 @@ pub(crate) struct Ime {
     pub(super) settings: ImeSettings,
     pub(super) table: Table,
     pub(super) manager: super::manage::Manager,
+    pub(super) encoder: super::encoder::Encoder,
+    pub(super) add_word: super::add_word::AddWord,
+    pub(super) lookup: super::lookup::Lookup,
+    /// 最近几次上屏的文字，造词时取尾部的汉字。改正文的其他按键、点鼠标、换焦点都会清空。
+    recent: Vec<String>,
     pub(super) storage_ok: bool,
     pub(super) load_error: Option<String>,
     pub(super) layout: Vec<Candidate>,
@@ -64,7 +69,7 @@ pub(crate) struct Ime {
     shift_alone: bool,
     shift_pressed_at: Instant,
     system_ime_off: bool,
-    notice: Option<String>,
+    pub(super) notice: Option<String>,
     quote_open: bool,
     single_quote_open: bool,
 }
@@ -94,6 +99,7 @@ impl Ime {
             _ => {}
         }
         ime.table.rebuild();
+        ime.rebuild_encoder();
         ime
     }
     fn bare(settings: ImeSettings) -> Self {
@@ -101,6 +107,10 @@ impl Ime {
             settings,
             table: Table::default(),
             manager: Default::default(),
+            encoder: Default::default(),
+            add_word: Default::default(),
+            lookup: Default::default(),
+            recent: Vec::new(),
             storage_ok: true,
             load_error: None,
             layout: Vec::new(),
@@ -238,13 +248,45 @@ impl Ime {
             self.notice = Some(format!("旧短语迁移失败：{error}"));
         }
     }
+    /// 按基础表与手动规则重建出码器。基础表或规则变了才需要。
+    pub(super) fn rebuild_encoder(&mut self) {
+        let custom = self
+            .table
+            .personal
+            .rules
+            .as_ref()
+            .and_then(super::encoder::Rules::parse);
+        self.encoder = super::encoder::Encoder::build(&self.table.base, custom.as_ref());
+    }
+    /// 最近上屏的尾部连续汉字，最多八个。
+    pub(crate) fn recent_han(&self) -> String {
+        let joined: String = self.recent.concat();
+        let mut tail: Vec<char> = joined
+            .chars()
+            .rev()
+            .take_while(|c| is_han(*c))
+            .take(super::add_word::MAX_RECENT_CHARS)
+            .collect();
+        tail.reverse();
+        tail.into_iter().collect()
+    }
+    pub(super) fn remember_commit(&mut self, text: &str) {
+        self.recent.push(text.to_string());
+        if self.recent.len() > 16 {
+            self.recent.remove(0);
+        }
+    }
     pub(super) fn save_personal(&mut self, personal: Personal) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.storage_ok,
             "个人词表文件读取失败，不能覆盖；请先恢复原文件"
         );
         data::save_json(&data::directory()?.join("tables.json"), &personal)?;
+        let rules_changed = personal.rules != self.table.personal.rules;
         self.table.personal = personal;
+        if rules_changed {
+            self.rebuild_encoder();
+        }
         self.manager.dirty = true;
         self.table.rebuild();
         self.refresh(true);
@@ -261,6 +303,7 @@ impl Ime {
         if focus_changed {
             self.focus_id = focused;
             self.drop_composition();
+            self.recent.clear();
         }
         // 焦点刚换过地方的那一帧不接键盘：这时 `editable_focus` 还是上一帧的，
         // 而按键已经该归新控件了；不然回车、空格这类键会被白白吃掉。
@@ -387,7 +430,10 @@ impl Ime {
         }
     }
 
-    fn pointer_pressed(&mut self) {}
+    /// 点鼠标多半挪了光标，最近上屏的字不再连着光标，造词不能再用。
+    fn pointer_pressed(&mut self) {
+        self.recent.clear();
+    }
     /// 单击 Shift：切中英。组码中切到英文时，已经敲的字母原样上屏——
     /// 打了 `hello` 才发现该是英文，单击 Shift 就是 hello，不用删了重打。
     fn shift_tapped(&mut self, kept: &mut Vec<egui::Event>) {
@@ -411,8 +457,14 @@ impl Ime {
     }
     fn handle(&mut self, key: Key, kept: &mut Vec<egui::Event>) -> bool {
         let action = keys::route(key, self.route(), &self.settings);
+        // 输入法不接的按键（方向、退格、英文字符……）都在改正文或挪光标；快捷键除外，
+        // 造词快捷键本身就是一个。
+        if action == Action::Passthrough && !matches!(key, Key::Shortcut) {
+            self.recent.clear();
+        }
         let outcome = self.execute_guarded(action);
         if let Some(text) = outcome.commit.filter(|t| !t.is_empty()) {
+            self.remember_commit(&text);
             kept.push(egui::Event::Text(text));
         }
         if outcome.recompose {
@@ -578,6 +630,15 @@ impl Ime {
         .into()
     }
 }
+fn is_han(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{20000}'..='\u{3134f}'
+    )
+}
 fn is_shift(key: egui::Key) -> bool {
     matches!(key, egui::Key::ShiftLeft | egui::Key::ShiftRight)
 }
@@ -598,6 +659,7 @@ mod tests {
         )
         .entries;
         ime.table.rebuild();
+        ime.rebuild_encoder();
         ime
     }
     fn type_code(ime: &mut Ime, code: &str) -> String {
@@ -698,6 +760,25 @@ mod tests {
             ["公文", "本单位"]
         );
         assert!(ime.table.lookup("ab").is_empty());
+    }
+    #[test]
+    fn recent_commits_feed_make_word_until_editing_keys() {
+        let mut ime = ime();
+        let mut kept = Vec::new();
+        for c in "abcd".chars() {
+            ime.handle(Key::Char(c), &mut kept);
+        }
+        ime.handle(Key::Char(' '), &mut kept);
+        for c in "efgh ".chars() {
+            ime.handle(Key::Char(c), &mut kept);
+        }
+        assert_eq!(ime.recent_han(), "公文词表");
+        // 造词快捷键本身不清空；退格、方向键这类改正文的键清空。
+        ime.handle(Key::Shortcut, &mut kept);
+        assert_eq!(ime.recent_han(), "公文词表");
+        ime.handle(Key::Backspace, &mut kept);
+        assert!(ime.recent_han().is_empty());
+        assert!(!ime.open_make_word());
     }
     #[test]
     fn punctuation_commits_candidate_and_shortcuts_preserve_raw() {

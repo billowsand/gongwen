@@ -588,6 +588,33 @@ impl GongwenApp {
             self.draft_page().move_selection_to_candidates(ctx);
         }
 
+        // 主快捷键+Shift+A：造词。有选区取选区；没有就取输入法最近上屏的一段汉字。
+        let make_word = egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::A,
+        );
+        if ctx.input_mut(|input| input.consume_shortcut(&make_word)) {
+            let selected = ctx
+                .memory(|memory| memory.focused())
+                .and_then(|id| egui::TextEdit::load_state(ctx, id).map(|state| (id, state)))
+                .and_then(|(id, state)| {
+                    let range = state
+                        .cursor
+                        .char_range()
+                        .filter(|range| !range.is_empty())?;
+                    (id == editor_id() && self.showing_doc())
+                        .then(|| range.slice_str(&self.doc().generated_markdown).to_owned())
+                })
+                .filter(|text| !text.contains('\n') && text.chars().count() <= 40);
+            match selected {
+                Some(text) => self.ime.open_add_word(&text, None),
+                None if self.ime.open_make_word() => {}
+                None => {
+                    self.status = "先选中要加的词，或用输入法打出它再按造词快捷键。".into();
+                }
+            }
+        }
+
         let new_doc = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
         if ctx.input_mut(|input| input.consume_shortcut(&new_doc)) {
             self.new_blank_manuscript();

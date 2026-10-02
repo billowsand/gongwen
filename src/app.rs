@@ -705,7 +705,7 @@ impl eframe::App for GongwenApp {
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
         // 候选窗浮在所有面板之上；这时编辑框已经画完，光标矩形是本帧最终的那一个。
-        self.ime.quick_add_ui(&ctx);
+        self.ime.windows_ui(&ctx);
         self.ime.candidates_ui(&ctx);
         // 所有编辑框都画完了，这时 `output.ime` 才是本帧最终的那一个。
         self.ime.end_frame(&ctx);

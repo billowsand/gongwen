@@ -26,47 +26,9 @@ pub(super) struct Manager {
     old: Option<Entry>,
     staged: Option<Staged>,
     message: String,
-    quick_open: bool,
 }
 
 impl Ime {
-    /// 正文右键的选词请求只带文字，不修改正文。
-    pub(crate) fn quick_add_ui(&mut self, ctx: &egui::Context) {
-        if let Some(text) =
-            ctx.data_mut(|data| data.remove_temp::<String>(egui::Id::new("ime-add-word")))
-        {
-            self.manager.text = text;
-            self.manager.code.clear();
-            self.manager.old = None;
-            self.manager.edit_base = false;
-            self.manager.quick_open = true;
-        }
-        if !self.manager.quick_open {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("加入词表")
-            .id(egui::Id::new("ime-add-word-window"))
-            .open(&mut open)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label("填写四码，保存后立即可以输入。");
-                ui.add(egui::TextEdit::singleline(&mut self.manager.text).hint_text("文字"));
-                super::exempt(ui.add(
-                    egui::TextEdit::singleline(&mut self.manager.code).hint_text("四个小写字母"),
-                ));
-                if ui.button("保存词条").clicked() {
-                    self.save_editor();
-                    if self.manager.text.is_empty() {
-                        self.manager.quick_open = false;
-                    }
-                }
-                ui.label(&self.manager.message);
-            });
-        if !open {
-            self.manager.quick_open = false;
-        }
-    }
     pub(crate) fn manager_ui(&mut self, ui: &mut egui::Ui) {
         if self.manager.dirty
             && let Some(Staged {
@@ -121,11 +83,11 @@ impl Ime {
                             .entries
                             .iter()
                             .chain(personal.hidden.iter())
-                            .all(|e| valid_entry(e, false))
+                            .all(|e| table::valid_entry(e, false))
                             && personal
                                 .batches
                                 .iter()
-                                .all(|b| b.entries.iter().all(|e| valid_entry(e, true))),
+                                .all(|b| b.entries.iter().all(|e| table::valid_entry(e, true))),
                         "备份中有无效词条"
                     );
                     // 备份恢复前先保存当前版本，避免误选文件后无法找回。
@@ -141,6 +103,7 @@ impl Ime {
                     self.storage_ok = true;
                     self.load_error = None;
                     self.table.rebuild();
+                    self.rebuild_encoder();
                     self.manager.dirty = true;
                     self.refresh(true);
                     Ok(())
@@ -210,6 +173,7 @@ impl Ime {
         if let Some(error) = &self.load_error {
             ui.colored_label(crate::theme::warn(), error);
         }
+        self.rules_summary(ui);
 
         ui.add_space(8.0);
         ui.label("导入的公文表（停用保留词条；撤销整批移除）");
@@ -355,7 +319,7 @@ impl Ime {
                 self.manager.text.clear();
             }
         });
-        ui.weak("基础表接受 1–4 码，个人与公文词条使用四码。基础表修改后保存在用户目录，不覆盖初始资源文件。");
+        ui.weak("基础表与个人词条接受 1–4 码，公文导入表使用四码。基础表修改后保存在用户目录，不覆盖初始资源文件。");
         ui.horizontal(|ui| {
             if ui.button("撤销上次基础表修改").clicked() {
                 let result = (|| -> anyhow::Result<()> {
@@ -374,6 +338,40 @@ impl Ime {
                 self.report(result, "当前编码顺序已恢复。");
             }
         });
+    }
+    /// 构词规则与它在基础表词组上的命中率。
+    pub(super) fn rules_summary(&self, ui: &mut egui::Ui) {
+        let encoder = &self.encoder;
+        ui.add_space(8.0);
+        ui.label(if encoder.overridden {
+            "构词规则（手动指定）"
+        } else {
+            "构词规则（按基础表推算）"
+        });
+        let inferred = encoder.inferred.texts();
+        for (class, text) in encoder.rules.texts().iter().enumerate() {
+            let stat = encoder.stats[class];
+            let rate = if stat.checked == 0 {
+                "基础表中没有这类词组".to_string()
+            } else {
+                format!(
+                    "基础表 {} 个词组中相符 {}（{:.1}%）",
+                    stat.checked,
+                    stat.matched,
+                    stat.matched as f64 * 100.0 / stat.checked as f64
+                )
+            };
+            let note = if encoder.overridden && inferred[class] != *text {
+                format!("；推算结果为 {}", inferred[class])
+            } else {
+                String::new()
+            };
+            ui.weak(format!(
+                "{} {text}：{}；{rate}{note}",
+                super::encoder::RULE_LABELS[class],
+                encoder.rules.0[class].describe()
+            ));
+        }
     }
     fn stage_import(&mut self, four: bool) {
         let Some(path) = rfd::FileDialog::new()
@@ -414,6 +412,7 @@ impl Ime {
             self.load_error = None;
         }
         self.table.rebuild();
+        self.rebuild_encoder();
         self.refresh(true);
         self.manager.dirty = true;
         Ok(())
@@ -423,8 +422,9 @@ impl Ime {
             code: self.manager.code.trim().into(),
             text: self.manager.text.trim().into(),
         };
-        if !valid_entry(&entry, !self.manager.edit_base) {
-            self.manager.message="编码应为小写字母（基础表 1–4 码，其他词条四码），文字不能为空或包含换行 / 制表符。".into();
+        if !table::valid_entry(&entry, false) {
+            self.manager.message =
+                "编码应为 1–4 个小写字母，文字不能为空或包含换行 / 制表符。".into();
             return;
         }
         let result = if self.manager.edit_base {
@@ -490,9 +490,4 @@ impl Ime {
             Err(error) => format!("操作失败：{error}"),
         };
     }
-}
-fn valid_entry(entry: &Entry, four: bool) -> bool {
-    table::valid_code(&entry.code, four)
-        && !entry.text.is_empty()
-        && !entry.text.contains(['\t', '\r', '\n'])
 }

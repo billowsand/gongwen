@@ -1876,7 +1876,7 @@ impl GongwenApp {
         sub_heading(ui, "按键速查", None);
         setting_note(
             ui,
-            "Shift 切中英；空格选择高亮，1–9 选候选；设置的翻页键或 PageUp / PageDown 翻页；Esc 清码；回车原样上屏编码；方向键、退格、Delete 编辑编码。",
+            "Shift 切中英；空格选择高亮，1–9 选候选；设置的翻页键或 PageUp / PageDown 翻页；Esc 清码；回车原样上屏编码；方向键、退格、Delete 编辑编码；Ctrl+Shift+A 造词（取选区或最近上屏的字），正文右键可加词、查编码。",
         );
     }
     fn ime_candidates_ui(&mut self, ui: &mut egui::Ui) {

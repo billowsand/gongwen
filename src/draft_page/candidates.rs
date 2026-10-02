@@ -532,21 +532,32 @@ pub(crate) fn editor_context_menu(
             action = Some(EditorMenuAction::Paste);
         }
         ui.separator();
-        if menu_entry(ui, has_selection, "加入词表", "") {
-            if let Some(range) = selection_before_show(ui.ctx(), editor_id()) {
-                let sorted = range.sorted_cursors();
-                let text: String = output
-                    .galley
-                    .job
-                    .text
-                    .chars()
-                    .skip(sorted[0].index.0)
-                    .take(sorted[1].index.0 - sorted[0].index.0)
-                    .collect();
-                ui.ctx()
-                    .data_mut(|data| data.insert_temp(egui::Id::new("ime-add-word"), text));
+        // 加词与查码都只带选中的文字过去，不改正文；请求经临时存储交给输入法浮窗。
+        let ime_requests = [
+            (
+                "加入词表",
+                crate::theme::primary_shortcut("Shift+A"),
+                "ime-add-word",
+            ),
+            ("查编码", String::new(), "ime-lookup"),
+        ];
+        for (label, shortcut, request) in ime_requests {
+            if menu_entry(ui, has_selection, label, &shortcut) {
+                if let Some(range) = selection_before_show(ui.ctx(), editor_id()) {
+                    let sorted = range.sorted_cursors();
+                    let text: String = output
+                        .galley
+                        .job
+                        .text
+                        .chars()
+                        .skip(sorted[0].index.0)
+                        .take(sorted[1].index.0 - sorted[0].index.0)
+                        .collect();
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(egui::Id::new(request), text));
+                }
+                ui.close();
             }
-            ui.close();
         }
         if menu_entry(
             ui,

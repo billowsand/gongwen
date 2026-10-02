@@ -178,6 +178,7 @@ impl Ime {
     fn commit_clicked(&mut self, page_index: usize) {
         let outcome = self.execute_guarded(Action::CommitIndex(page_index));
         if let Some(text) = outcome.commit {
+            self.remember_commit(&text);
             self.pending_commit = Some(text);
             self.refresh(true);
         }
