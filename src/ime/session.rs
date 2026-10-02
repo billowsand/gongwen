@@ -282,7 +282,7 @@ impl Ime {
             .iter()
             .filter(|term| term.state == crate::lexicon::TermState::Accepted)
             .filter_map(|term| {
-                let code = term.code().ok()?;
+                let code = term.code_with(&|word| self.suggest_codes(word)).ok()?;
                 table::valid_code(&code, true).then(|| Entry {
                     code,
                     text: term.term.clone(),
@@ -328,6 +328,14 @@ impl Ime {
             .as_ref()
             .and_then(super::encoder::Rules::parse);
         self.encoder = super::encoder::Encoder::build(&self.table.base, custom.as_ref());
+    }
+    /// 按基础表构词规则给词组出的候选码，可能性高的在前。基础表未就绪或出不了码时为 None。
+    pub(crate) fn suggest_codes(&self, word: &str) -> Option<Vec<String>> {
+        if !self.available() {
+            return None;
+        }
+        let suggestions = self.encoder.encode(word).ok()?;
+        Some(suggestions.into_iter().map(|s| s.code).collect())
     }
     /// 最近上屏的尾部连续汉字，最多八个。
     pub(crate) fn recent_han(&self) -> String {

@@ -27,6 +27,8 @@
 | `Ctrl+F` / `⌘F` | 查找替换 |
 | `Ctrl+Shift+H` / `⌘⇧H` | 标题聚焦编辑（Markdown 与 Markdown 对照模式） |
 | `Ctrl+Shift+X` / `⌘⇧X` | 把正文选区移入候选区（焦点在正文编辑框时） |
+| `Ctrl+Shift+A` / `⌘⇧A` | 造词：把选区或最近用输入法上屏的字加入词表，自动出码 |
+| `Ctrl+Delete` | 输入法组码时屏蔽高亮候选 |
 | `Ctrl+Enter` / `⌘↩` | 候选区：把右栏选中的部分插回正文光标处 |
 | `Enter` / `Shift+Enter` | 查找下一个 / 上一个 |
 | `Ctrl` + `+` | 源码编辑器字号放大 |

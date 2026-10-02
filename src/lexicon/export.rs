@@ -96,7 +96,11 @@ impl FlypyExport {
 ///
 /// 排序是 `省键数 × 篇数` 降序：同一个四码下的候选按这个顺序落盘，最常用的
 /// 排在最前面，翻页次数最少。
-pub fn build(terms: &[LexiconTerm], options: &ExportOptions) -> FlypyExport {
+pub fn build(
+    terms: &[LexiconTerm],
+    options: &ExportOptions,
+    suggest: super::Suggest,
+) -> FlypyExport {
     let mut chosen: Vec<&LexiconTerm> = terms.iter().filter(|term| keep(term, options)).collect();
     chosen.sort_by(|left, right| {
         right
@@ -116,7 +120,7 @@ pub fn build(terms: &[LexiconTerm], options: &ExportOptions) -> FlypyExport {
     let mut table = String::from(BOM);
     let mut by_code: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for term in chosen {
-        match term.code() {
+        match term.code_with(suggest) {
             Ok(code) if code.len() != 4 || !code.bytes().all(|b| b.is_ascii_lowercase()) => {
                 export.failed.push(Dropped {
                     term: term.term.clone(),
@@ -238,7 +242,7 @@ mod tests {
             term("公文", 20, TermOrigin::Corpus),
             term("专项整治", 3, TermOrigin::Corpus),
         ];
-        let export = build(&terms, &ExportOptions::default());
+        let export = build(&terms, &ExportOptions::default(), &|_| None);
         assert_eq!(export.written, 1);
         assert!(export.table.contains("专项整治"));
         assert!(!export.table.contains("公文\t"));
@@ -249,7 +253,7 @@ mod tests {
         // 标准词库里的两字简称没有篇数、也不够三字，但必须进码表：
         // 输入法打出来的要和公文落款里的是同一个字符串。
         let terms = vec![term("市府", 0, TermOrigin::Vocabulary)];
-        let export = build(&terms, &ExportOptions::default());
+        let export = build(&terms, &ExportOptions::default(), &|_| None);
         assert_eq!(export.written, 1);
     }
 
@@ -263,7 +267,7 @@ mod tests {
             budget: 1,
             ..ExportOptions::default()
         };
-        let export = build(&terms, &options);
+        let export = build(&terms, &options, &|_| None);
         assert_eq!(export.written, 1);
         assert_eq!(export.truncated, 1);
         // 8 字词省 12 键 × 2 篇 = 24；三字词省 2 键 × 9 篇 = 18。长词胜出。
@@ -280,7 +284,7 @@ mod tests {
         first.code_override = "abcd".into();
         let mut second = term("丁戊己", 2, TermOrigin::Corpus);
         second.code_override = "abcd".into();
-        let export = build(&[first, second], &ExportOptions::default());
+        let export = build(&[first, second], &ExportOptions::default(), &|_| None);
         assert_eq!(export.conflict_codes, 1);
         assert_eq!(export.conflict_terms, 2);
         assert!(
@@ -294,7 +298,7 @@ mod tests {
     fn rejected_terms_never_reach_the_table() {
         let mut rejected = term("套话连篇", 9, TermOrigin::Corpus);
         rejected.state = TermState::Rejected;
-        let export = build(&[rejected], &ExportOptions::default());
+        let export = build(&[rejected], &ExportOptions::default(), &|_| None);
         assert_eq!(export.written, 0);
     }
     #[test]
@@ -302,24 +306,29 @@ mod tests {
         let mut pending = term("专项整治", 9, TermOrigin::Corpus);
         pending.state = TermState::Candidate;
         assert_eq!(
-            build(&[pending.clone()], &ExportOptions::default()).written,
+            build(&[pending.clone()], &ExportOptions::default(), &|_| None).written,
             0
         );
         let options = ExportOptions {
             include_candidates: true,
             ..Default::default()
         };
-        assert_eq!(build(&[pending], &options).written, 1);
+        assert_eq!(build(&[pending], &options, &|_| None).written, 1);
         let mut short = term("本单位", 0, TermOrigin::Manual);
         short.code_override = "ab".into();
-        assert_eq!(build(&[short], &ExportOptions::default()).failed.len(), 1);
+        assert_eq!(
+            build(&[short], &ExportOptions::default(), &|_| None)
+                .failed
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn encoding_failures_are_listed_instead_of_silently_dropped() {
         let mut bad = term("专项整治", 5, TermOrigin::Corpus);
         bad.pinyin = "zhuan xiang".into(); // 四个字只标了两个音节
-        let export = build(&[bad], &ExportOptions::default());
+        let export = build(&[bad], &ExportOptions::default(), &|_| None);
         assert_eq!(export.written, 0);
         assert_eq!(export.failed.len(), 1);
         assert!(export.failed[0].reason.contains("音节"));
@@ -330,6 +339,7 @@ mod tests {
         let export = build(
             &[term("专项整治", 5, TermOrigin::Corpus)],
             &ExportOptions::default(),
+            &|_| None,
         );
         assert!(export.table.starts_with('\u{feff}'));
         assert!(!export.table.contains("---config@"));

@@ -128,7 +128,7 @@ pub struct LexiconTerm {
     pub term: String,
     /// 人工标注的读音（空格分隔的无声调拼音）；空串表示按字典默认读音出码。
     pub pinyin: String,
-    /// 人工指定的编码；空串表示按小鹤四码规则出码。
+    /// 人工指定的编码；空串表示按输入法构词规则出码（基础表未就绪时按小鹤双拼规则）。
     pub code_override: String,
     pub freq_total: i64,
     pub doc_count: i64,
@@ -160,11 +160,32 @@ impl LexiconTerm {
         self.saved_keys() * self.doc_count.max(1)
     }
 
-    /// 这条词最终写进码表的编码。自定义编码优先，其次人工标音，最后字典读音。
+    /// 不经输入法的出码：自定义编码优先，其次人工标音，最后字典读音。
+    #[cfg(test)]
     pub fn code(&self) -> Result<String, flypy::EncodeError> {
+        self.code_with(&|_| None)
+    }
+
+    /// 同 [`Self::code`]，但优先用输入法按基础表推算的构词码（`suggest` 返回按可能性
+    /// 排好的候选码）。人工标音这时只用来在多音字的几个码里挑一个：标音算出的码
+    /// 在候选里就用它，不在（基础表不是小鹤方案）就用最可能的那个。
+    /// `suggest` 给不出码（基础表未就绪、单字、字无字码）时退回拼音出码。
+    pub fn code_with(&self, suggest: Suggest) -> Result<String, flypy::EncodeError> {
         let override_code = self.code_override.trim();
         if !override_code.is_empty() {
             return Ok(override_code.to_ascii_lowercase());
+        }
+        if let Some(suggestions) = suggest(&self.term).filter(|codes| !codes.is_empty()) {
+            if !self.pinyin.trim().is_empty() {
+                let syllables = flypy::parse_pinyin(&self.pinyin);
+                if syllables.len() == self.char_count()
+                    && let Ok(code) = flypy::encode_word_from_pinyin(&syllables)
+                    && suggestions.contains(&code)
+                {
+                    return Ok(code);
+                }
+            }
+            return Ok(suggestions[0].clone());
         }
         let syllables = if self.pinyin.trim().is_empty() {
             flypy::word_pinyin(&self.term)?
@@ -181,6 +202,9 @@ impl LexiconTerm {
         flypy::encode_word_from_pinyin(&syllables)
     }
 }
+
+/// 输入法按基础表构词规则给一个词出的候选码，可能性高的在前；给不出时返回 None。
+pub type Suggest<'a> = &'a dyn Fn(&str) -> Option<Vec<String>>;
 
 /// 列表过滤条件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -778,6 +802,23 @@ mod tests {
         // 自定义短码优先于一切，并归一化成小写。
         t.code_override = "CQS".into();
         assert_eq!(t.code().unwrap(), "cqs");
+    }
+
+    #[test]
+    fn table_suggestions_win_and_manual_pinyin_picks_among_them() {
+        let suggest =
+            |word: &str| (word == "重庆市").then(|| vec!["zqui".to_string(), "iqui".to_string()]);
+        let mut t = term("重庆市", 1);
+        assert_eq!(t.code_with(&suggest).unwrap(), "zqui");
+        t.pinyin = "chong qing shi".into();
+        assert_eq!(t.code_with(&suggest).unwrap(), "iqui");
+        // 标音算出的码不在候选里（基础表不是小鹤方案）：用最可能的候选。
+        t.pinyin = "zhong qing shi".into();
+        assert_eq!(t.code_with(&suggest).unwrap(), "zqui");
+        // 给不出候选时退回拼音出码。
+        assert_eq!(term("公文包", 1).code_with(&suggest).unwrap(), "gwbc");
+        t.code_override = "abcd".into();
+        assert_eq!(t.code_with(&suggest).unwrap(), "abcd");
     }
 
     #[test]

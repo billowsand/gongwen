@@ -60,7 +60,9 @@ impl GongwenApp {
         let Ok(terms) = store.export_candidates() else {
             return LexiconPreview::default();
         };
-        let built = export::build(&terms, &self.lexicon_export);
+        let built = export::build(&terms, &self.lexicon_export, &|word| {
+            self.ime.suggest_codes(word)
+        });
         LexiconPreview {
             written: built.written,
             truncated: built.truncated,
@@ -134,6 +136,11 @@ impl GongwenApp {
             }
             Err(error) => self.lexicon_error = Some(format!("清空词表失败：{error:#}")),
         }
+    }
+
+    /// 输入法按基础表构词规则给词出的候选码；公文词表的编码与输入法加词出码同源。
+    pub(crate) fn suggest_codes(&self, word: &str) -> Option<Vec<String>> {
+        self.ime.suggest_codes(word)
     }
 
     pub(crate) fn set_lexicon_reading(&mut self, id: i64, pinyin: &str, code_override: &str) {
@@ -294,7 +301,9 @@ impl GongwenApp {
                 return;
             }
         };
-        let built = export::build(&terms, &self.lexicon_export);
+        let built = export::build(&terms, &self.lexicon_export, &|word| {
+            self.ime.suggest_codes(word)
+        });
         if built.written == 0 {
             self.lexicon_error = Some("当前口径下没有可导出的词。".into());
             return;

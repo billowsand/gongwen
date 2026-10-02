@@ -509,7 +509,7 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         ui.label(saved.to_string());
                     }
                 });
-                row.col(|ui| match term.code() {
+                row.col(|ui| match term.code_with(&|word| app.suggest_codes(word)) {
                     Ok(code) => {
                         let text = if term.code_override.trim().is_empty() {
                             egui::RichText::new(code)
