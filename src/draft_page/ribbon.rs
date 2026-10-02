@@ -1491,15 +1491,6 @@ impl DraftPage<'_> {
             self.open_output_dir();
         }
         self.export_open_buttons(ui);
-        toolbar_separator(ui);
-
-        if ui
-            .add(theme::icon_text_button(theme::Icon::Settings, "导出设置"))
-            .on_hover_text("到设置页勾选常用导出格式、输出目录与是否覆盖同名文件")
-            .clicked()
-        {
-            self.actions.push(DraftAction::OpenSettings);
-        }
     }
 }
 

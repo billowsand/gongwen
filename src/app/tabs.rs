@@ -346,7 +346,6 @@ impl GongwenApp {
                     version_number,
                 } => self.load_manuscript_version(manuscript_id, version_number),
                 DraftAction::Persist => self.persist(),
-                DraftAction::OpenSettings => self.open_page(NavPage::Settings),
                 DraftAction::OpenPdf(path) => self.open_pdf(path, None),
             }
         }

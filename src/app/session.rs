@@ -46,8 +46,6 @@ pub(crate) enum DraftAction {
     },
     /// 把当前版式记进配置并落盘。
     Persist,
-    /// 打开设置页（功能区「输出 → 导出设置」）。
-    OpenSettings,
     /// 在应用内打开最近导出的 PDF。
     OpenPdf(PathBuf),
 }
