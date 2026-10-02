@@ -715,15 +715,5 @@ impl GongwenApp {
 
 /// 配置里的输入法设置换成引擎那边的写法。启动时（还没有 `GongwenApp`）也要用。
 pub(crate) fn ime_settings_of(ime: &crate::models::ImeConfig) -> crate::ime::ImeSettings {
-    crate::ime::ImeSettings::from_config(
-        ime.enabled,
-        &ime.shuangpin,
-        ime.full_width_punctuation,
-        ime.page_size,
-        &ime.page_keys,
-    )
-    .with_fuma(&ime.fuma)
-    .with_fuma_hint(&ime.fuma_hint)
-    .with_candidate_look(ime.candidate_vertical, ime.candidate_font_percent)
-    .with_yinxing(ime.yinxing, ime.yinxing_auto_commit, ime.yinxing_hint)
+    crate::ime::ImeSettings::from_config(ime)
 }

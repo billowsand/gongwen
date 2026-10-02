@@ -1,4 +1,4 @@
-//! 公文词表页：扫描语料、确认候选词、导出小鹤双拼用户码表。
+//! 公文词表页：扫描语料、确认候选词、导出公文四码词表。
 //!
 //! 一期只做主链路：累积 → 粗筛 → 导出。筛选、批量与读音工作台在二期铺开，
 //! 所以这里的列表刻意只给「接受 / 拒绝」两个动作和一个读音编辑框——这三件事
@@ -187,7 +187,7 @@ fn export_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
         ui.set_width(ui.available_width());
         state
             .show_header(ui, |ui| {
-                ui.label(egui::RichText::new("导出小鹤双拼用户码表").strong());
+                ui.label(egui::RichText::new("导出公文四码词表").strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::primary_icon_button_enabled(
                         ui,
@@ -195,7 +195,7 @@ fn export_panel(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         theme::Icon::FileDown,
                         "导出码表…",
                     )
-                    .on_hover_text("导出后在小鹤输入法的码表管理里导入「主码-用户码表」")
+                    .on_hover_text("在「设置 → 输入法」导入四码词表；已接受的词也会自动同步")
                     .clicked()
                     {
                         app.export_flypy_table();
@@ -215,7 +215,7 @@ fn export_body(app: &mut GongwenApp, ui: &mut egui::Ui, preview: &LexiconPreview
         theme::caption(ui, "最少字数");
         ui.add(egui::DragValue::new(&mut options.min_chars).range(2..=8))
             .on_hover_text(
-                "小鹤词组是四码定长：n 字词正常敲 2n 键，进码表一律 4 键。\
+                "词组编码建议为四码定长：n 字词正常敲 2n 键，进码表一律 4 键。\
                  二字词省 0 键，收进去只会多一条重码",
             );
         ui.add_space(10.0);
@@ -242,8 +242,6 @@ fn export_body(app: &mut GongwenApp, ui: &mut egui::Ui, preview: &LexiconPreview
                 "排除 jieba 自带词典里就有的词。注意公文套语多半也在自带词典里，\
                  而那恰恰是最省键的一类，默认不排除",
             );
-        ui.checkbox(&mut options.with_header, "写入小鹤码表头")
-            .on_hover_text("导入「主码-用户码表」时需要这两行 ---config@ 头");
     });
 
     ui.add_space(9.0);
@@ -506,8 +504,7 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
                 row.col(|ui| {
                     let saved = term.saved_keys();
                     if saved == 0 {
-                        ui.weak("0")
-                            .on_hover_text("二字及以下在小鹤里本来就是四码，省 0 键");
+                        ui.weak("0").on_hover_text("二字词按建议规则编码为四码");
                     } else {
                         ui.label(saved.to_string());
                     }
@@ -570,11 +567,11 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
                     let code_changed = crate::ime::exempt(
                         ui.add(
                             egui::TextEdit::singleline(&mut code)
-                                .hint_text("短码")
+                                .hint_text("四码")
                                 .desired_width(56.0),
                         ),
                     )
-                    .on_hover_text("给天天要打的长词配个自定义短码，留空则按四码规则")
+                    .on_hover_text("填写四码编码，留空则按词组规则生成建议")
                     .lost_focus();
                     if (pinyin_changed && pinyin != term.pinyin)
                         || (code_changed && code != term.code_override)

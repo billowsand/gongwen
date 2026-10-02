@@ -149,7 +149,7 @@ else
         [ "$actual" = "$expected" ] || die "SHA-256 不匹配：$src（期望 $expected，实际 $actual）"
         case "$rel" in
             # PDF 由 Typst 在进程内排版，旧 runtime 清单里的 TeX 资产不随包。
-            tectonic/* | texbundle/* | licenses/LICENSE.CTAN | licenses/LICENSE.TL | licenses/TECTONIC-LICENSE.txt) continue ;;
+            ime/* | tectonic/* | texbundle/* | licenses/LICENSE.CTAN | licenses/LICENSE.TL | licenses/TECTONIC-LICENSE.txt) continue ;;
             *) dest="runtime/$rel" ;;
         esac
         mkdir -p "$STAGE/$(dirname "$dest")"

@@ -1782,7 +1782,7 @@ pub struct AppConfig {
     pub ribbon_tab: RibbonTab,
     /// 功能区第二行（当前分区的按钮）是否收起，只留分区卡那一条。
     pub ribbon_collapsed: bool,
-    /// 应用内拼音输入法。旧配置没有该字段时按默认值补齐（启用全拼、全角标点）。
+    /// 应用内词表输入法。旧配置没有该字段时按默认值补齐（启用词表、全角标点）。
     #[serde(default)]
     pub ime: ImeConfig,
 }
@@ -2008,56 +2008,22 @@ impl FontChoice {
     }
 }
 
-/// 应用内拼音输入法。引擎、词库与整句模型都在本进程里，不走系统输入法。
-///
-/// 词库与语言模型是随包数据（`runtime/ime/`）。数据缺失时本节的开关无效：
-/// 输入法退回系统输入法，不影响应用其余部分。
+/// 应用内词表输入法。基础表与公文四码表合并查询。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImeConfig {
-    /// 启用应用内输入法。关掉就用系统输入法，光标矩形照旧报给后端。
     pub enabled: bool,
-
-    /// 双拼方案：`xiaohe` / `ziranma` / `microsoft` / `sogou`。
-    /// 空字符串（默认）是**全拼**。
-    pub shuangpin: String,
-
-    /// 双拼辅助码（形码）方案：`xiaohe`。空字符串（默认）是不用辅码。
-    /// 码表不随包分发（权利归方案作者），要使用者在设置页自己导入。
-    pub fuma: String,
-
-    /// 候选右上角标辅码的档位：`typed`（默认，只敲了首码时标还要敲的第二码）/
-    /// `always`（学码：没敲辅码时也标完整两码）/ `off`。认不出的值按默认。
-    pub fuma_hint: String,
-
-    /// 中文模式下的全角标点（`，。：；〉《`……），英文模式始终半角。
     pub full_width_punctuation: bool,
-
-    /// 一页显示几个候选（1–9），超出范围按 9 / 1 处理。
     pub page_size: usize,
-
-    /// 翻页键：`[]`、`,.`、`-=` 三种，其余按默认 `[]` 处理。
     pub page_keys: String,
-
-    /// 候选竖排（一个候选一行）。默认横排。
     pub candidate_vertical: bool,
-
-    /// 候选窗字号，相对正文字号的百分比：100 / 125 / 150，越界按 100–200 夹住。
     pub candidate_font_percent: u16,
-
-    /// 小鹤音形：缓冲区从空开始敲 1–4 键时，码表里的简码、四码排在候选最前。
-    /// 要双拼选小鹤、并在设置页导入自己的音形码表才真的生效（码表不随包）。
-    pub yinxing: bool,
-
-    /// 开头四码只对应一个词组（二字及以上）时自动上屏。默认关：不加 `'` 直接打整句双拼时，
-    /// 每 4 键都可能撞上某个词组的四码被顶上屏（实测 10 句常用公文错 7 处）。
-    pub yinxing_auto_commit: bool,
-
-    /// 整句打出的三字及以上词有音形码时，状态栏提示一句。
-    pub yinxing_hint: bool,
-
-    /// 自定义短语：敲一串字母在固定位置出一段文字（常用套语、单位全称、落款）。
-    /// 日期（`rq`）、时间（`sj`）、星期（`xq`）引擎已内置，不必再配。
+    /// 唯一四码候选自动上屏，默认关闭。
+    pub auto_commit: bool,
+    /// 第五码先上屏当前候选，再开始下一编码；无候选时保留原编码。
+    pub fifth_commit: bool,
+    /// 旧配置短语迁移入口；迁移后也保留原配置以便回退。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub phrases: Vec<ImePhrase>,
 }
 
@@ -2091,28 +2057,15 @@ impl Default for ImePhrase {
 
 impl Default for ImeConfig {
     fn default() -> Self {
-        // `ime-dev-tables`（本机自用的开发构建）默认就用小鹤双拼 + 小鹤辅码 +
-        // 小鹤音形——码表在二进制里、启动时自动装进用户目录，不用手动导入；
-        // 发布构建保持全拼、无辅码、音形关闭。已有 config.json 的机器不受这里
-        // 影响（配置已明确写入），在设置页改一次或删掉 config.json 即可。
-        let (shuangpin, fuma, yinxing) = if cfg!(feature = "ime-dev-tables") {
-            ("xiaohe".to_string(), "xiaohe".to_string(), true)
-        } else {
-            (String::new(), String::new(), false)
-        };
         Self {
             enabled: true,
-            shuangpin,
-            fuma,
-            fuma_hint: "typed".to_string(),
             full_width_punctuation: true,
             page_size: 5,
-            page_keys: "[]".to_string(),
+            page_keys: "[]".into(),
             candidate_vertical: false,
             candidate_font_percent: 100,
-            yinxing,
-            yinxing_auto_commit: false,
-            yinxing_hint: true,
+            auto_commit: false,
+            fifth_commit: true,
             phrases: Vec::new(),
         }
     }

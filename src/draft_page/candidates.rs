@@ -532,6 +532,22 @@ pub(crate) fn editor_context_menu(
             action = Some(EditorMenuAction::Paste);
         }
         ui.separator();
+        if menu_entry(ui, has_selection, "加入词表", "") {
+            if let Some(range) = selection_before_show(ui.ctx(), editor_id()) {
+                let sorted = range.sorted_cursors();
+                let text: String = output
+                    .galley
+                    .job
+                    .text
+                    .chars()
+                    .skip(sorted[0].index.0)
+                    .take(sorted[1].index.0 - sorted[0].index.0)
+                    .collect();
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::new("ime-add-word"), text));
+            }
+            ui.close();
+        }
         if menu_entry(
             ui,
             editable && has_selection,

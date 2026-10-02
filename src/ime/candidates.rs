@@ -1,7 +1,7 @@
-//! 候选窗：贴光标画一行（或竖排一列）候选 + 拼音串。
+//! 候选窗：贴光标画一行（或竖排一列）候选 + 编码串。
 //!
 //! 应用内输入法没有系统候选窗可用（系统输入法已经被关掉了），所以这一块自己画：
-//! 拼音串与它的光标位置、当前页的候选、页码。
+//! 编码串与它的光标位置、当前页的候选、页码。
 //!
 //! 中英模式不画在这里：状态栏已经常驻显示（见 `app::chrome`），候选窗再挂一个既重复，
 //! 又把一个全局状态混进了这一次组字的信息里。
@@ -10,7 +10,6 @@
 //! 只能把文本排到下一帧的事件队列最前面（见 `session::Ime::begin_frame`）。
 
 use eframe::egui;
-use qingjian_core::{CandidateKind, CustomPhrase};
 
 use super::keys::Action;
 use super::session::{Ime, Preedit};
@@ -28,23 +27,11 @@ const CELL_PADDING: egui::Vec2 = egui::vec2(4.0, 1.0);
 /// 候选块之间的间隙。加上两边的内边距，两个候选的字距是 10px。
 const CELL_GAP: f32 = 2.0;
 
-/// 拼音串与候选行之间的间隙。
+/// 编码串与候选行之间的间隙。
 const ROW_GAP: f32 = 2.0;
 
-/// 拼音串与页码之间至少留这么宽：候选行很窄时两者不至于挤到一块。
+/// 编码串与页码之间至少留这么宽：候选行很窄时两者不至于挤到一块。
 const HEADER_GAP: f32 = 10.0;
-
-/// 整句星标边长。
-const SPARKLE_SIZE: f32 = 7.0;
-
-/// 整句星标与前面候选词的间距。
-const SPARKLE_GAP: f32 = 1.5;
-
-/// 星标腰身收进去的程度：控制点离中心的距离相对半径的比例，越小尖越细。
-const SPARKLE_WAIST: f32 = 0.18;
-
-/// 词后右上角小字（辅码）与前面候选词 / 星标的间距。
-const CORNER_GAP: f32 = 1.0;
 
 /// 序号与候选词之间的间距。
 const INDEX_GAP: f32 = 3.0;
@@ -55,11 +42,8 @@ const LEXICON_DOT: f32 = 4.0;
 /// 词表标记与后面候选词的间距。
 const LEXICON_GAP: f32 = 2.0;
 
-/// 自定义短语在候选窗里最多显示几个字，多出来的用省略号。
-const PHRASE_PREVIEW_CHARS: usize = 16;
-
 /// 候选窗的排法与字号，设置页里来。字号按比例放大正文与小字两档，
-/// 星标、词表圆点这些画出来的记号跟着放大，间距不动。
+/// 词表圆点这些画出来的记号跟着放大，间距不动。
 #[derive(Debug, Clone, Copy)]
 struct Look {
     vertical: bool,
@@ -75,22 +59,15 @@ impl Look {
         theme::font_sizes::BODY * self.scale
     }
 
-    fn sparkle(self) -> f32 {
-        SPARKLE_SIZE * self.scale
-    }
-
     fn dot(self) -> f32 {
         LEXICON_DOT * self.scale
     }
 }
 
-/// 候选窗里的一个候选：页内下标、文本、是不是本地整句、右上角要标的辅码、
-/// 是不是公文词表带进来的词。
+/// 候选窗中的序号、文字与来源标记。
 struct Row {
     index: usize,
     text: String,
-    sentence: bool,
-    corner: Option<String>,
     lexicon: bool,
 }
 
@@ -115,24 +92,19 @@ impl Ime {
         // 先把要画的东西抄成自己的数据：闭包里还要改 `self`（记下点中的候选）。
         let rows: Vec<Row> = self
             .layout
-            .page(page)
-            .into_iter()
+            .iter()
+            .skip(page * page_size)
+            .take(page_size)
             .enumerate()
-            .filter_map(|(offset, cell)| {
-                cell.candidate().map(|candidate| Row {
-                    index: offset,
-                    // 自定义短语可能很长、带换行：候选窗里只放一行预览
-                    text: match candidate.kind {
-                        CandidateKind::Custom(_) => {
-                            CustomPhrase::preview(&candidate.text, PHRASE_PREVIEW_CHARS)
-                        }
-                        _ => candidate.text.clone(),
-                    },
-                    sentence: candidate.kind == CandidateKind::Sentence,
-                    // 还要敲的辅码，标哪几码由引擎按档位定（`Engine::fuma_mark`）
-                    corner: candidate.fuma.clone(),
-                    lexicon: self.lexicon_marked(candidate),
-                })
+            .map(|(offset, candidate)| Row {
+                index: offset,
+                text: candidate
+                    .text
+                    .replace(['\n', '\r'], " ")
+                    .chars()
+                    .take(24)
+                    .collect(),
+                lexicon: candidate.sources.iter().any(|source| source != "基础表"),
             })
             .collect();
         let preedit = self.preedit.clone();
@@ -164,7 +136,7 @@ impl Ime {
                     // 投影跟主题走：深色底上写死的淡黑托不起窗口。
                     .shadow(ui.style().visuals.popup_shadow)
                     .show(ui, |ui| {
-                        // 两行：上面拼音串与页码，下面候选。挤在一行时拼音、候选、页码
+                        // 两行：上面编码串与页码，下面候选。挤在一行时编码、候选、页码
                         // 混作一团，读的人分不清哪个是打的、哪个是选的。
                         //
                         // 两行之间不画分隔线：一条线加上下留白要吃掉近 10px，而字号
@@ -212,7 +184,7 @@ impl Ime {
     }
 }
 
-/// 表头：左边拼音串，右边页码（只有一页就不画）。
+/// 表头：左边编码串，右边页码（只有一页就不画）。
 fn header(
     ui: &mut egui::Ui,
     preedit: &Preedit,
@@ -223,7 +195,7 @@ fn header(
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-        pinyin_strip(ui, preedit, look);
+        code_strip(ui, preedit, look);
         if pages <= 1 {
             return;
         }
@@ -290,9 +262,9 @@ fn candidates_row(
     response.rect.width()
 }
 
-/// 拼音串：光标位置用一条竖线标出来。字号比候选小一档、颜色弱一档，
+/// 编码串：光标位置用一条竖线标出来。字号比候选小一档、颜色弱一档，
 /// 一眼就分得清哪一行是打进去的、哪一行是要选的。
-fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
+fn code_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
     let chars: Vec<char> = preedit.text.chars().collect();
     let caret = preedit.caret.min(chars.len());
     let before: String = chars[..caret].iter().collect();
@@ -305,11 +277,7 @@ fn pinyin_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
     ui.label(small(after, theme::text_muted()));
 }
 
-/// 一个候选：弱化的小号序号 + 正文字号的候选文本；本地整句拼出的候选词后右上角带星标，
-/// 和词库里现成的词区分；辅码小字再跟在后面，同样顶在右上角。公文词表带进来的词在词前
-/// 带一个弱化色小圆点：右上角已经归星标与辅码，标记放左边才不挤。
-///
-/// 辅码跟在词后同一行、顶格对齐，不另起一行：另起一行的话它一出现 / 消失，候选窗高度就跟着跳。
+/// 候选按钮；新增来源在词前标一个小圆点。
 fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) -> egui::Response {
     let format = |size: f32, color: egui::Color32| egui::TextFormat {
         font_id: egui::FontId::proportional(size),
@@ -327,7 +295,7 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
     job.append(&index, 0.0, format(look.small(), hint_color));
     let mut text_gap = INDEX_GAP;
     if row.lexicon {
-        // 给圆点让出位置，做法同星标：几乎没宽度的空格，靠前导空白撑开
+        // 给圆点让出位置：几乎没宽度的空格，靠前导空白撑开
         job.append(
             " ",
             INDEX_GAP + look.dot(),
@@ -347,31 +315,6 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
             },
         ),
     );
-    if row.sentence {
-        // 给星标让出位置：一个几乎没宽度的空格，靠前导空白撑开
-        job.append(
-            " ",
-            SPARKLE_GAP + look.sparkle(),
-            format(1.0, egui::Color32::TRANSPARENT),
-        );
-    }
-    // 辅码小字：序号那档字号、弱化色，顶到行首当上标
-    let corner_format = egui::TextFormat {
-        valign: egui::Align::TOP,
-        ..format(look.small(), theme::text_muted())
-    };
-    let corner_width = row.corner.as_ref().map_or(0.0, |corner| {
-        job.append(corner, CORNER_GAP, corner_format.clone());
-        CORNER_GAP
-            + ui.painter()
-                .layout_no_wrap(
-                    corner.clone(),
-                    corner_format.font_id.clone(),
-                    corner_format.color,
-                )
-                .size()
-                .x
-    });
     let button = egui::Button::new(job)
         .stroke(egui::Stroke::NONE)
         .corner_radius(4);
@@ -380,23 +323,6 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
     } else {
         button
     });
-    if row.sentence {
-        // 贴着候选词右上角：右边收进内边距，顶上与字形顶部大致齐平
-        let content = response.rect.shrink2(CELL_PADDING);
-        let min = egui::pos2(
-            content.right() - corner_width - look.sparkle(),
-            content.top() + content.height() * 0.15,
-        );
-        let color = if selected {
-            theme::accent_active()
-        } else {
-            theme::accent()
-        };
-        ui.painter().add(sparkle(
-            egui::Rect::from_min_size(min, egui::Vec2::splat(look.sparkle())),
-            color,
-        ));
-    }
     if row.lexicon {
         // 紧跟序号之后、竖直居中：序号的宽度要量出来才知道圆点落在哪
         let content = response.rect.shrink2(CELL_PADDING);
@@ -413,42 +339,4 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
             .circle_filled(center, look.dot() / 2.0, hint_color);
     }
     response
-}
-
-/// 四角星：四个尖在方块各边中点，相邻两尖之间是一条向中心弯的二次曲线。
-/// 星形对中心是「星形域」，从中心扇形三角化就能实心填满（epaint 的多边形填充只认凸形）。
-fn sparkle(rect: egui::Rect, color: egui::Color32) -> egui::Shape {
-    /// 每段曲线切成几截。
-    const STEPS: usize = 4;
-    let c = rect.center();
-    let r = rect.width() / 2.0;
-    let w = r * SPARKLE_WAIST;
-    let tips = [
-        egui::vec2(0.0, -r),
-        egui::vec2(r, 0.0),
-        egui::vec2(0.0, r),
-        egui::vec2(-r, 0.0),
-    ];
-    let controls = [
-        egui::vec2(w, -w),
-        egui::vec2(w, w),
-        egui::vec2(-w, w),
-        egui::vec2(-w, -w),
-    ];
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(c, color);
-    for (i, (&from, &control)) in tips.iter().zip(&controls).enumerate() {
-        let to = tips[(i + 1) % tips.len()];
-        for step in 0..STEPS {
-            let t = step as f32 / STEPS as f32;
-            let u = 1.0 - t;
-            let point = from * (u * u) + control * (2.0 * u * t) + to * (t * t);
-            mesh.colored_vertex(c + point, color);
-        }
-    }
-    let outline = (tips.len() * STEPS) as u32;
-    for i in 0..outline {
-        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % outline);
-    }
-    egui::Shape::mesh(mesh)
 }

@@ -117,7 +117,7 @@ pub(crate) const CONTENT_WIDTH: std::ops::RangeInclusive<f32> = FORM_CONTENT_MIN
 
 pub struct GongwenApp {
     config: AppConfig,
-    /// 应用内拼音输入法：引擎在本进程里，接管键盘时系统输入法被关掉。
+    /// 应用内词表输入法：引擎在本进程里，接管键盘时系统输入法被关掉。
     ime: crate::ime::Ime,
     /// macOS 原生透明标题栏的实测控件尺寸；无值时使用跨平台自绘标题栏。
     macos_titlebar_metrics: Option<crate::macos_window::NativeTitlebarMetrics>,
@@ -705,6 +705,7 @@ impl eframe::App for GongwenApp {
         // 缩放边框放在最后：它要盖在所有浮窗之上，贴边那几像素归窗口缩放。
         self.window_resize_borders(&ctx);
         // 候选窗浮在所有面板之上；这时编辑框已经画完，光标矩形是本帧最终的那一个。
+        self.ime.quick_add_ui(&ctx);
         self.ime.candidates_ui(&ctx);
         // 所有编辑框都画完了，这时 `output.ime` 才是本帧最终的那一个。
         self.ime.end_frame(&ctx);

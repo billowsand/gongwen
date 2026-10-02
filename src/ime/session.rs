@@ -1,85 +1,40 @@
-//! 组句状态与键盘接管：本帧的按键喂给引擎，上屏的文本塞回事件队列。
-//!
-//! 上屏走的是 egui 自己的**文本插入**通路（注入 `Event::Text`），不是 `ImeEvent::Preedit`：
-//! egui 的预编辑文本会被真的写进文本框，而文本一进文本框，焦点一走就没人负责删掉它
-//! （TextEdit 只在 `owns_ime_events` 为真时处理 Ime 事件）。所以拼音只在引擎里，
-//! 画在我们自己的候选窗里（`candidates`），文本框里到上屏为止一个字都没有。
-//!
-//! 引擎里的 panic 不能把整篇文稿带走：按键路径整个套在 `catch_unwind` 里，拦下之后
-//! 卸掉引擎（`RefCell` 可能停在借出状态，再调一定还会 panic），这次按键当没发生。
-
-use std::collections::HashSet;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use anyhow::Context as _;
+//! 词表输入法的焦点、按键与上屏处理。预编辑仅画在候选窗中。
+use super::{
+    ImeSettings, data,
+    keys::{self, Action, Key, Route},
+    table::{self, Candidate, Entry, Personal, Table},
+};
 use eframe::egui;
-use qingjian_core::{Candidate, CandidateKind, CandidateLayout, Engine, FumaTable};
-use qingjian_dictionary::Dictionary;
-
-use super::ImeSettings;
-use super::data;
-use super::engine::{self, Assembly};
-use super::keys::{self, Action, Key, Route};
-use super::lexicon;
-use super::yinxing::Yinxing;
-use crate::lexicon::LexiconTerm;
-use crate::models::ImePhrase;
-
-/// 学习数据落盘的间隔。被杀进程最多丢这么久的选择记录。
-const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Shift 按下到抬起不超过这么久才算单击。按住 Shift 犹豫半天再松开多半是想打大写、
-/// 或者改主意了，不该切中英。
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 const SHIFT_TAP_MAX: Duration = Duration::from_millis(500);
 
-/// 要画在候选窗里的拼音串与光标位置（字符数）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Preedit {
-    /// 拼音串（`ni'hao`），纠错生效时是纠正后的写法。
-    pub(crate) text: String,
-
-    /// 光标在 [`Self::text`] 里的字符位置：`Left` / `Right` 挪的就是它。
-    pub(crate) caret: usize,
+    pub text: String,
+    pub caret: usize,
 }
-
-/// 一次按键的处理结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Outcome {
-    /// 吃掉了，不再交给应用。
-    pub(super) consumed: bool,
-
-    /// 要插进文本框的文本。
-    pub(super) commit: Option<String>,
-
-    /// 缓冲变了：要重查候选并把高亮归零。
-    pub(super) recompose: bool,
+    pub consumed: bool,
+    pub commit: Option<String>,
+    pub recompose: bool,
 }
-
 impl Outcome {
-    /// 交给应用。
     const PASSTHROUGH: Self = Self {
         consumed: false,
         commit: None,
         recompose: false,
     };
-
-    /// 吃掉了，缓冲变了。
     const CHANGED: Self = Self {
         consumed: true,
         commit: None,
         recompose: true,
     };
-
-    /// 吃掉了，只挪了高亮 / 翻了页。
     const NAVIGATED: Self = Self {
         consumed: true,
         commit: None,
         recompose: false,
     };
-
-    /// 吃掉了，上屏一段文本。
     fn commit(text: String) -> Self {
         Self {
             consumed: true,
@@ -89,109 +44,72 @@ impl Outcome {
     }
 }
 
-/// 应用内输入法。
 pub(crate) struct Ime {
-    /// 装配好的引擎；数据缺失或已经崩过时为 `None`，这时键盘整个交给应用。
-    assembled: Option<Assembly>,
-
-    /// 设置。
     pub(super) settings: ImeSettings,
-
-    /// 中英模式：默认中文，`Shift` 单击切换。
-    pub(super) english: bool,
-
-    /// 当前候选的分页布局。
-    pub(super) layout: CandidateLayout,
-
-    /// 高亮：跨页下标。
+    pub(super) table: Table,
+    pub(super) manager: super::manage::Manager,
+    pub(super) storage_ok: bool,
+    pub(super) load_error: Option<String>,
+    pub(super) layout: Vec<Candidate>,
     pub(super) highlight: usize,
-
-    /// 这一帧的拼音串。
     pub(super) preedit: Preedit,
-
-    /// 鼠标点选的候选：下一帧开场就要插进文本框（点击发生在本帧文本框画完之后）。
+    pub(super) english: bool,
     pub(super) pending_commit: Option<String>,
-
-    /// 上一帧候选窗量到的尺寸，用来判断贴光标上方还是下方。
     window_size: Option<egui::Vec2>,
-
-    /// 上一帧候选行量到的宽度，用来把页码顶到右边（见 `candidates::header`）。
     rows_width: Option<f32>,
-
-    /// 辅码表加载了几个字；`None` 表示没装表（辅码关着）。
-    fuma_words: Option<usize>,
-
-    /// 候选窗里要打「公文词表」标记的词：词表带进来、基础词库同一读音没有的（见 `lexicon`）。
-    pub(super) lexicon_marks: HashSet<lexicon::MarkedWord>,
-
-    /// 上一帧有可编辑控件持有焦点（egui 的 `output.ime` 非空）。只有为真才接管键盘：
-    /// 否则按键会被我们吃掉却没人在文本框里接收。
     editable_focus: bool,
-
-    /// 上一帧的焦点控件。焦点换地方就丢掉这段拼音，别飘到新的输入框里。
     pub(super) focus_id: Option<egui::Id>,
-
-    /// 上一帧声明过不走输入法的控件（密码、接口地址……，见 `exempt`）。
     exempt: HashSet<egui::Id>,
-
-    /// 光标在屏幕上的矩形，候选窗的锚点。
     pub(super) anchor: Option<egui::Rect>,
-
-    /// Shift 单击判定：按下 Shift 之后还没有别的键（或鼠标点击）插进来。
     shift_alone: bool,
-
-    /// 这次 Shift 是什么时候按下的，判「按得太久不算单击」。
     shift_pressed_at: Instant,
-
-    /// 已经显式让后端关过系统输入法了吗。
     system_ime_off: bool,
-
-    /// 上次把学习数据写盘的时刻。
-    last_flush: Instant,
-
-    /// 要交给状态栏的一句话（删了哪个词的学习记录、音形码提示），应用取走即清。
-    pub(super) notice: Option<String>,
-
-    /// 小鹤音形：码表、词表补码、调频（见 `yinxing`）。
-    pub(super) yinxing: Yinxing,
-
-    /// 这段组句是从空缓冲开始敲的（没有半段上屏过）：只有这样才认音形码。
-    pub(super) fresh: bool,
-
-    /// 配置里的自定义短语（原样），见 `phrases`。
-    pub(super) phrases: Vec<ImePhrase>,
+    notice: Option<String>,
+    quote_open: bool,
+    single_quote_open: bool,
 }
 
 impl Ime {
-    /// 装配输入法。找不到数据（或缺词库）就返回一个不可用的输入法，键盘留给系统输入法。
     pub(crate) fn new(settings: ImeSettings) -> Self {
-        let assembled = if settings.enabled { load() } else { None };
-        let mut ime = Self::bare(assembled, settings);
-        ime.install_dev_tables();
-        ime.load_yinxing();
-        ime.apply_fuma();
-        ime.refresh_lexicon_marks();
+        let mut ime = Self::bare(settings);
+        match data::load_base() {
+            Ok(entries) => ime.table.base = entries,
+            Err(error) => ime.load_error = Some(error.to_string()),
+        }
+        match data::directory().map(|dir| dir.join("tables.json")) {
+            Ok(path) if path.exists() => match std::fs::read(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| Ok(serde_json::from_slice::<Personal>(&bytes)?))
+            {
+                Ok(personal) => ime.table.personal = personal,
+                Err(error) => {
+                    ime.storage_ok = false;
+                    ime.load_error = Some(format!("个人词表读取失败，保留原文件：{error}"));
+                }
+            },
+            Err(error) => {
+                ime.storage_ok = false;
+                ime.load_error = Some(error.to_string());
+            }
+            _ => {}
+        }
+        ime.table.rebuild();
         ime
     }
-
-    /// 用装配好的引擎（或者没有）建输入法，并把设置推给引擎。不碰用户目录。
-    ///
-    /// 设置**必须在这里**推给引擎：之后每帧的 [`Self::apply_settings`] 见设置没变就直接返回，
-    /// 这里漏了，引擎就一直停在默认的全拼——配置是小鹤双拼时，`keyi` 按全拼碰巧也读成「可以」，
-    /// 剩下的 `vgih` 却怎么也切不动。
-    fn bare(assembled: Option<Assembly>, settings: ImeSettings) -> Self {
-        let mut ime = Self {
-            assembled,
+    fn bare(settings: ImeSettings) -> Self {
+        Self {
             settings,
-            english: false,
-            layout: empty_layout(settings.page_size),
+            table: Table::default(),
+            manager: Default::default(),
+            storage_ok: true,
+            load_error: None,
+            layout: Vec::new(),
             highlight: 0,
-            preedit: Preedit::default(),
+            preedit: Default::default(),
+            english: false,
             pending_commit: None,
             window_size: None,
             rows_width: None,
-            fuma_words: None,
-            lexicon_marks: HashSet::new(),
             editable_focus: false,
             focus_id: None,
             exempt: HashSet::new(),
@@ -199,124 +117,138 @@ impl Ime {
             shift_alone: false,
             shift_pressed_at: Instant::now(),
             system_ime_off: false,
-            last_flush: Instant::now(),
             notice: None,
-            phrases: Vec::new(),
-            yinxing: Yinxing::default(),
-            fresh: false,
-        };
-        ime.push_settings();
-        ime
+            quote_open: false,
+            single_quote_open: false,
+        }
     }
-
-    /// 测试用：拿一份现成的引擎当输入法（不依赖随包的 `.qj` 数据）。
-    #[cfg(test)]
-    ///
-    /// 与 [`Self::new`] 走同一个 [`Self::bare`]，设置怎么推给引擎两边一样；只是不读用户目录。
-    pub(super) fn for_test(assembly: Assembly, settings: ImeSettings) -> Self {
-        Self::bare(Some(assembly), settings)
+    pub(crate) fn available(&self) -> bool {
+        !self.table.base.is_empty()
     }
-
-    /// 候选窗量到的尺寸。
+    pub(crate) fn active(&self) -> bool {
+        self.settings.enabled && self.available()
+    }
+    pub(crate) fn english(&self) -> bool {
+        self.english
+    }
+    pub(crate) fn toggle_english(&mut self) {
+        self.drop_composition();
+        self.english = !self.english;
+    }
+    pub(crate) fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+    pub(crate) fn data_brief(&self) -> Option<String> {
+        self.available().then(|| {
+            format!(
+                "基础表 {} 条 · 公文表 {} 条",
+                self.table.base.len(),
+                self.table.document.len()
+            )
+        })
+    }
+    pub(crate) fn apply_settings(&mut self, settings: ImeSettings) {
+        if self.settings == settings {
+            return;
+        }
+        self.settings = settings;
+        self.drop_composition();
+    }
     pub(super) fn window_size(&self) -> Option<egui::Vec2> {
         self.window_size
     }
-
-    /// 记下候选窗的尺寸。
     pub(super) fn remember_window(&mut self, size: egui::Vec2) {
         self.window_size = Some(size);
     }
-
-    /// 上一帧候选行的宽度。
     pub(super) fn rows_width(&self) -> Option<f32> {
         self.rows_width
     }
-
-    /// 记下候选行的宽度。
     pub(super) fn remember_rows_width(&mut self, width: f32) {
         self.rows_width = Some(width);
     }
-
-    /// 候选窗不画了：量到的尺寸也没用了。
     pub(super) fn forget_window(&mut self) {
         self.window_size = None;
         self.rows_width = None;
     }
-
-    /// 引擎在不在（数据齐、装配成功）。
-    pub(crate) fn available(&self) -> bool {
-        self.assembled.is_some()
+    pub(crate) fn focus_exempt(&self) -> bool {
+        self.focus_id.is_some_and(|id| self.exempt.contains(&id))
     }
-
-    /// 引擎在并且开着。
-    pub(crate) fn active(&self) -> bool {
-        self.settings.enabled && self.assembled.is_some()
+    fn record_focus(&mut self, anchor: Option<egui::Rect>) {
+        self.editable_focus = anchor.is_some();
+        self.anchor = anchor;
     }
-
-    /// 当前是不是英文模式。
-    pub(crate) fn english(&self) -> bool {
-        self.english
+    fn composing(&self) -> bool {
+        !self.preedit.text.is_empty()
     }
-
-    /// 词库与整句模型的一句话概况，设置页状态行用：「词库 9.3 万条 · 整句模型已加载」。
-    /// 词库名、许可、加载耗时这些细节见 [`Self::data_summary`]，挂在悬停提示上。
-    pub(crate) fn data_brief(&self) -> Option<String> {
-        let assembly = self.assembled.as_ref()?;
-        let model = match assembly.bigrams {
-            Some(_) => "整句模型已加载",
-            None => "没有整句模型（长句会差一些）",
-        };
-        Some(format!(
-            "词库 {} 条 · {model}",
-            ten_thousands(assembly.dictionary_entries)
-        ))
+    fn drop_composition(&mut self) {
+        self.preedit = Default::default();
+        self.layout.clear();
+        self.highlight = 0;
+        self.pending_commit = None;
+        self.forget_window();
     }
-
-    /// 词库 / 语言模型的来历，设置页悬停提示显示。
-    pub(crate) fn data_summary(&self) -> Option<String> {
-        let assembly = self.assembled.as_ref()?;
-        let mut summary = match &assembly.dictionary_name {
-            Some(name) => format!("{name}（{} 条）", assembly.dictionary_entries),
-            None => format!("词库 {} 条", assembly.dictionary_entries),
-        };
-        match assembly.bigrams {
-            Some(count) => summary.push_str(&format!("，语言模型 {count} 组")),
-            None => summary.push_str("，无语言模型"),
+    pub(super) fn refresh(&mut self, reset: bool) {
+        self.layout = self.table.lookup(&self.preedit.text);
+        if reset || self.highlight >= self.layout.len() {
+            self.highlight = 0;
         }
-        if let Some(license) = &assembly.dictionary_license {
-            summary.push_str(&format!("，词库许可 {license}"));
-        }
-        summary.push_str(&format!("，加载 {} ms", assembly.load_ms));
-        Some(summary)
     }
-
-    /// 应用设置。设置没变就什么都不做，可以每帧调。
-    pub(crate) fn apply_settings(&mut self, settings: ImeSettings) {
-        if settings == self.settings {
+    pub(crate) fn sync_lexicon(
+        &mut self,
+        terms: &[crate::lexicon::LexiconTerm],
+    ) -> anyhow::Result<usize> {
+        self.table.document = terms
+            .iter()
+            .filter(|term| term.state == crate::lexicon::TermState::Accepted)
+            .filter_map(|term| {
+                let code = term.code().ok()?;
+                table::valid_code(&code, true).then(|| Entry {
+                    code,
+                    text: term.term.clone(),
+                })
+            })
+            .collect();
+        self.table.rebuild();
+        self.manager.dirty = true;
+        self.refresh(true);
+        Ok(self.table.document.len())
+    }
+    /// 兼容旧短语，只迁移一次；超长编码保留在旧配置中，不加入四码输入。
+    pub(crate) fn apply_phrases(&mut self, phrases: &[crate::models::ImePhrase]) {
+        if self.table.personal.migrated_phrases || !self.storage_ok {
             return;
         }
-        let turned_on = settings.enabled && !self.settings.enabled;
-        self.settings = settings;
-        if turned_on && self.assembled.is_none() {
-            // 关掉再打开时重新试一次：上次可能是数据还没准备好。
-            self.assembled = load();
-            self.refresh_lexicon_marks();
-            self.push_phrases();
+        let mut personal = self.table.personal.clone();
+        for phrase in phrases.iter().filter(|p| {
+            p.enabled
+                && table::valid_code(&p.code, false)
+                && !p.text.is_empty()
+                && !p.text.contains(['\r', '\n', '\t'])
+        }) {
+            let entry = Entry {
+                code: phrase.code.clone(),
+                text: phrase.text.clone(),
+            };
+            if !personal.entries.contains(&entry) {
+                personal.entries.push(entry);
+            }
         }
-        if !settings.enabled {
-            self.drop_composition();
+        personal.migrated_phrases = true;
+        if let Err(error) = self.save_personal(personal) {
+            self.notice = Some(format!("旧短语迁移失败：{error}"));
         }
-        self.push_settings();
-        self.apply_fuma();
     }
-
-    /// 把双拼方案与全角标点推给引擎。
-    fn push_settings(&mut self) {
-        let settings = self.settings;
-        if let Some(engine) = self.engine_mut() {
-            engine.set_shuangpin(settings.shuangpin);
-            engine.set_full_width_punctuation(settings.full_width_punctuation);
-        }
+    pub(super) fn save_personal(&mut self, personal: Personal) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.storage_ok,
+            "个人词表文件读取失败，不能覆盖；请先恢复原文件"
+        );
+        data::save_json(&data::directory()?.join("tables.json"), &personal)?;
+        self.table.personal = personal;
+        self.manager.dirty = true;
+        self.table.rebuild();
+        self.refresh(true);
+        Ok(())
     }
 
     /// 帧首：接管键盘。要在任何控件跑之前调用。
@@ -365,287 +297,12 @@ impl Ime {
         // Linux / macOS 落到各自的 text-input 协议。只影响本窗口。
         let anchor = ctx.output_mut(|output| output.ime.take().map(|ime| ime.cursor_rect));
         self.record_focus(anchor);
-        self.flush_if_due();
+
         if !self.system_ime_off {
             // 窗口默认是开着系统输入法的，而 winit 只在 `output.ime` 由 Some 变 None 时
             // 才会调 `set_ime_allowed`：第一帧之前得显式关一次，否则会漏进系统输入法。
             ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(false));
             self.system_ime_off = true;
-        }
-    }
-
-    /// 把学习数据写盘（词频、用户词、个人 n-gram、敲错表）。
-    pub(crate) fn flush(&mut self) {
-        if let Some(assembly) = self.assembled.as_mut() {
-            assembly.engine.flush_learning();
-        }
-        self.flush_yinxing();
-    }
-
-    /// 切中英。状态栏点一下与单击 `Shift` 是同一个开关。
-    pub(crate) fn toggle_english(&mut self) {
-        self.english = !self.english;
-    }
-
-    /// 取走要交给状态栏的一句话。
-    pub(crate) fn take_notice(&mut self) -> Option<String> {
-        self.notice.take()
-    }
-
-    /// 辅码表加载了几个字；`None` 表示没装表。
-    pub(crate) fn fuma_words(&self) -> Option<usize> {
-        self.fuma_words
-    }
-
-    /// 把公文词表同步成输入法的附加词库，返回写进去的条数。
-    ///
-    /// 落在 `config_dir()/ime/dicts/`（与稿件库同一个用户目录），写完立即重新
-    /// 装配附加词库，不用重启。
-    pub(crate) fn sync_lexicon(&mut self, terms: &[LexiconTerm]) -> anyhow::Result<usize> {
-        let dir = data::dicts_dir().context("无法确定输入法词库目录")?;
-        self.sync_yinxing_lexicon(terms);
-        let (tsv, written) = lexicon::build(terms);
-        let path = dir.join(lexicon::FILE_NAME);
-        std::fs::write(&path, tsv)
-            .with_context(|| format!("写入输入法词库失败：{}", path.display()))?;
-        self.reload_extra_dicts();
-        Ok(written)
-    }
-
-    /// 导入辅码表：把选中的文件拷到用户目录再加载。返回表里的字数。
-    ///
-    /// 码表不随包（权利归方案作者），只能由使用者自己导入一份，格式与上游
-    /// `assets/fuma/xiaohe.txt` 一致：每行 `字=两码`。
-    pub(crate) fn import_fuma_table(&mut self, source: &std::path::Path) -> anyhow::Result<usize> {
-        let scheme = self
-            .settings
-            .fuma
-            .context("先在设置里选一个辅码方案，再导入码表")?;
-        let target = data::fuma_path(scheme).context("无法确定辅码表目录")?;
-        // 网上流传的码表不少是 GBK，这里统一转成 UTF-8 再落盘，加载端只认 UTF-8。
-        let content = crate::text_file::read_to_string(source)
-            .with_context(|| format!("读取辅码表失败：{}", source.display()))?;
-        std::fs::write(&target, content)
-            .with_context(|| format!("写入辅码表失败：{}", target.display()))?;
-        self.apply_fuma();
-        self.fuma_words.context("码表里没有认得出的条目")
-    }
-
-    /// 把构建内置的示例小鹤辅码表写进用户目录，并立刻加载。
-    ///
-    /// 仅在 `ime-builtin-xiaohe` feature 开启时**真的有内容可写**：发布构建里
-    /// `data::builtin_xiaohe()` 返回 `None`，本方法直接报错；调用方应在调用
-    /// 前用 [`Self::has_builtin_xiaohe`] 判断。这条路径**绝不**自动触发——
-    /// 调用来自设置页里「使用内置示例小鹤辅码」按钮的二次确认结果。
-    pub(crate) fn install_builtin_xiaohe(&mut self) -> anyhow::Result<usize> {
-        let content = data::builtin_xiaohe().context(
-            "当前构建没有内置示例小鹤辅码表。请检查是否使用 --features ime-builtin-xiaohe 构建，\
-             或改用「导入码表…」按钮从本地 txt 导入。",
-        )?;
-        let scheme = qingjian_core::FumaScheme::Xiaohe;
-        let target = data::fuma_path(scheme).context("无法确定辅码表目录")?;
-        std::fs::write(&target, content)
-            .with_context(|| format!("写入内置辅码表失败：{}", target.display()))?;
-        // 没选方案也把设置改成小鹤，让这次写入立即生效；同样不静默——
-        // 调用方应当在按钮按下时已经看到「码表方案：未选」的提示，并因此触发本方法。
-        if self.settings.fuma.is_none() {
-            self.settings.fuma = Some(scheme);
-        }
-        self.apply_fuma();
-        self.fuma_words.context("内置码表里没有认得出的条目")
-    }
-
-    /// 当前构建是否打包了内置示例小鹤辅码表。
-    pub(crate) fn has_builtin_xiaohe() -> bool {
-        data::has_builtin_xiaohe()
-    }
-
-    /// 开发构建（`ime-dev-tables`）：把内置的 danzi / quan 码表装进用户目录，
-    /// 让首次运行就能直接用上辅码与音形，不用手动导入。
-    ///
-    /// **只在文件不存在时写**，不覆盖使用者自己导入或改过的表；发布构建里是空操作
-    /// （`data::builtin_dev_*` 返回 `None`）。输入法本身关着时也不装——那时用户在用
-    /// 系统输入法，装了也没用。
-    fn install_dev_tables(&self) {
-        #[cfg(feature = "ime-dev-tables")]
-        if self.settings.enabled {
-            if let Some(path) = data::fuma_path(qingjian_core::FumaScheme::Xiaohe)
-                && !path.is_file()
-                && let Err(error) = std::fs::write(&path, data::builtin_dev_fuma())
-            {
-                eprintln!("[ime] 写入内置辅码表失败：{}（{error}）", path.display());
-            }
-            if let Some(path) = data::yinxing_path()
-                && !path.is_file()
-            {
-                let (text, _) = crate::text_file::decode(data::builtin_dev_yinxing());
-                if let Err(error) = std::fs::write(&path, text) {
-                    eprintln!("[ime] 写入内置音形码表失败：{}（{error}）", path.display());
-                }
-            }
-        }
-    }
-
-    /// 辅码表：方案变了就重新加载。表是使用者自己导入的（不随包，见
-    /// `vendor/qingjian/README.md` 的许可说明），不在就当辅码关着。
-    fn apply_fuma(&mut self) {
-        let table = self.settings.fuma.and_then(|scheme| {
-            let path = data::fuma_path(scheme)?;
-            match FumaTable::from_path(&path) {
-                Ok(table) => Some(table),
-                Err(error) => {
-                    eprintln!(
-                        "[ime] 辅码表读取失败，辅码关着：{}（{error}）",
-                        path.display()
-                    );
-                    None
-                }
-            }
-        });
-        self.fuma_words = table.as_ref().map(FumaTable::len);
-        let hint = self.settings.fuma_hint;
-        if let Some(engine) = self.engine_mut() {
-            engine.set_fuma(table.map(Arc::new));
-            engine.set_fuma_hint(hint);
-        }
-    }
-
-    /// 重新装配附加词库目录：公文词表导出的 TSV，加上使用者自己丢进去的领域词库。
-    fn reload_extra_dicts(&mut self) {
-        let Some(dir) = data::dicts_dir() else {
-            return;
-        };
-        let dictionaries = engine::load_extra(&dir);
-        if let Some(assembly) = self.assembled.as_mut() {
-            assembly.engine.set_extra_dictionaries(dictionaries);
-        }
-        self.refresh_lexicon_marks();
-    }
-
-    /// 重算要打词表标记的词：读词表导出的那本附加词库，与引擎的基础词库比。
-    /// 没有引擎或还没同步过词表时为空，候选窗就不标。
-    fn refresh_lexicon_marks(&mut self) {
-        let Some(assembly) = self.assembled.as_ref() else {
-            self.lexicon_marks.clear();
-            return;
-        };
-        let path = data::dicts_dir().map(|dir| dir.join(lexicon::FILE_NAME));
-        self.lexicon_marks = match path.map(Dictionary::from_path) {
-            Some(Ok(words)) => lexicon::marked_words(&words, assembly.engine.dictionary()),
-            _ => HashSet::new(),
-        };
-    }
-
-    /// 这个候选要不要打「公文词表」标记：只看词库词，整句、快捷候选、英文不标。
-    pub(super) fn lexicon_marked(&self, candidate: &Candidate) -> bool {
-        candidate.kind == CandidateKind::Chinese
-            && !self.lexicon_marks.is_empty()
-            && self
-                .lexicon_marks
-                .contains(&(candidate.text.clone(), candidate.syllables.join(" ")))
-    }
-
-    /// 焦点落在声明过不走输入法的控件上。
-    pub(crate) fn focus_exempt(&self) -> bool {
-        self.focus_id.is_some_and(|id| self.exempt.contains(&id))
-    }
-
-    /// 记下本帧的焦点与光标矩形。
-    fn record_focus(&mut self, anchor: Option<egui::Rect>) {
-        self.editable_focus = anchor.is_some();
-        if anchor.is_some() {
-            self.anchor = anchor;
-        }
-    }
-
-    /// 到期就把学习数据落盘。
-    fn flush_if_due(&mut self) {
-        if self.last_flush.elapsed() < FLUSH_INTERVAL {
-            return;
-        }
-        self.last_flush = Instant::now();
-        self.flush();
-    }
-
-    /// 引擎（不可变）。查询与读组句状态都只要不可变借用。
-    pub(super) fn engine(&self) -> Option<&Engine> {
-        self.assembled.as_ref().map(|assembly| &assembly.engine)
-    }
-
-    /// 正在组句（拼音缓冲非空）。
-    fn composing(&self) -> bool {
-        self.engine()
-            .is_some_and(|engine| !engine.composition().is_empty())
-    }
-
-    /// 分流时要知道的当下状态。
-    fn route(&self) -> Route {
-        Route {
-            composing: self.composing(),
-            candidates: self.layout.len(),
-            english: self.english,
-            // 英文模式下的标点保持半角：公文里的小数点、括号都是半角。
-            full_width: !self.english && self.settings.full_width_punctuation,
-            // 辅码表真的装上了才算开着：配了方案但没导入表时，大写字母照旧是临时英文。
-            fuma: self.engine().is_some_and(|engine| engine.fuma_enabled()),
-            // `'` 引导整句只为躲开头四码的自动上屏：自动上屏关着就不必，单引号照旧
-            yinxing: self.yinxing_active() && self.settings.yinxing_auto_commit,
-        }
-    }
-
-    /// 丢掉这段组句。文本框里没有留过东西，所以只要清引擎与显示状态。
-    fn drop_composition(&mut self) {
-        if let Some(assembly) = self.assembled.as_mut()
-            && !assembly.engine.composition().is_empty()
-        {
-            assembly.engine.clear();
-            // 下一个上屏的词按句首记，别把跑题的上下文带到别处。
-            assembly.engine.break_chain();
-        }
-        self.layout = empty_layout(self.settings.page_size);
-        self.preedit = Preedit::default();
-        self.pending_commit = None;
-        self.forget_window();
-        self.highlight = 0;
-    }
-
-    /// 重查候选：缓冲变了（`reset_highlight`）或只挪了光标。
-    pub(super) fn refresh(&mut self, reset_highlight: bool) {
-        let Some(engine) = self.engine() else {
-            return;
-        };
-        let (preedit, mut items) = if engine.composition().is_empty() {
-            (Preedit::default(), Vec::new())
-        } else {
-            match engine.query() {
-                Ok(query) => (
-                    Preedit {
-                        text: query.marked_text(),
-                        caret: query.marked_cursor(),
-                    },
-                    query.candidates.items,
-                ),
-                // 拼音切不动（`v`、`Ai` 的 `i` 这类不成音节的键）：拼音串照样要画出来，
-                // 引擎给不出候选（音形码表可能还有，比如二简 `aq`）。
-                Err(_) => {
-                    let composition = engine.composition();
-                    let text = composition.text().to_owned();
-                    let caret = text[..composition.cursor()].chars().count();
-                    (Preedit { text, caret }, Vec::new())
-                }
-            }
-        };
-        self.merge_yinxing(&mut items);
-        self.preedit = preedit;
-        // 没有候选也按设置里的每页格数建布局，**不能**用 `CandidateLayout::default()`：
-        // 它的每页格数是 0，候选窗拿它算页数会除零 panic，整个应用当场退出。
-        self.layout = CandidateLayout::new(items, self.settings.page_size.max(1));
-        if reset_highlight {
-            self.highlight = 0;
-        }
-        let count = self.layout.len();
-        if self.highlight >= count {
-            self.highlight = count.saturating_sub(1);
         }
     }
 
@@ -673,7 +330,7 @@ impl Ime {
                     false
                 }
                 // 剪切、粘贴不走 `Key` 事件（egui-winit 直接换成这两个事件），也改正文：
-                // 与快捷键同样处理，组句中先把拼音原样上屏。复制不动正文，不管。
+                // 与快捷键同样处理，组码中先把编码原样上屏。复制不动正文，不管。
                 egui::Event::Cut | egui::Event::Paste(_) => {
                     self.shift_alone = false;
                     self.handle(Key::Shortcut, &mut kept)
@@ -730,18 +387,8 @@ impl Ime {
         }
     }
 
-    /// 按下鼠标：没在组句时多半是把光标点到了别处，断开上文。组句中不断——
-    /// 那是在点候选窗。
-    fn pointer_pressed(&mut self) {
-        if self.composing() {
-            return;
-        }
-        if let Some(engine) = self.engine_mut() {
-            engine.break_chain();
-        }
-    }
-
-    /// 单击 Shift：切中英。组句中切到英文时，已经敲的字母原样上屏——
+    fn pointer_pressed(&mut self) {}
+    /// 单击 Shift：切中英。组码中切到英文时，已经敲的字母原样上屏——
     /// 打了 `hello` 才发现该是英文，单击 Shift 就是 hello，不用删了重打。
     fn shift_tapped(&mut self, kept: &mut Vec<egui::Event>) {
         if !self.english && self.composing() {
@@ -754,361 +401,337 @@ impl Ime {
         self.english = !self.english;
     }
 
-    /// 分流一次按键并执行。返回是否吃掉（不再交给应用）。
+    fn route(&self) -> Route {
+        Route {
+            composing: self.composing(),
+            candidates: self.layout.len(),
+            english: self.english,
+            full_width: !self.english && self.settings.full_width_punctuation,
+        }
+    }
     fn handle(&mut self, key: Key, kept: &mut Vec<egui::Event>) -> bool {
         let action = keys::route(key, self.route(), &self.settings);
-        if action == Action::Passthrough {
-            return false;
-        }
-        let pushed = matches!(action, Action::Push(_));
         let outcome = self.execute_guarded(action);
-        if let Some(text) = outcome.commit {
-            // 上屏走 egui 的文本插入通路：在光标处插入、替换选区、进撤销栈，
-            // 与用户手打的字没有区别。
+        if let Some(text) = outcome.commit.filter(|t| !t.is_empty()) {
             kept.push(egui::Event::Text(text));
         }
         if outcome.recompose {
             self.refresh(true);
         }
-        // 刚敲满开头四码、只对应一个词组：自动上屏
-        if pushed && let Some(text) = self.yinxing_auto_commit() {
-            kept.push(egui::Event::Text(text));
-            self.refresh(true);
-        }
         outcome.consumed
     }
-
-    /// 拦 panic 地执行一次动作。
     pub(super) fn execute_guarded(&mut self, action: Action) -> Outcome {
-        match catch_unwind(AssertUnwindSafe(|| self.execute(action))) {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                // 引擎里的 `RefCell` 可能停在借出状态，再调一定还会 panic：
-                // 整个卸掉，退回系统输入法，直到设置里关掉再打开。
-                eprintln!("[ime] 输入法处理按键时 panic，已卸载引擎并退回系统输入法");
-                self.assembled = None;
-                self.drop_composition();
-                Outcome::PASSTHROUGH
-            }
+        let pushed = matches!(action, Action::Push(_));
+        let mut outcome = self.execute(action);
+        if outcome.recompose {
+            self.refresh(true);
         }
+        if pushed
+            && self.preedit.caret == 4
+            && self.settings.auto_commit
+            && self.preedit.text.len() == 4
+            && self.layout.len() == 1
+        {
+            let text = self.commit_at(0).unwrap_or_default();
+            outcome.commit = Some(format!("{}{text}", outcome.commit.unwrap_or_default()));
+            self.refresh(true);
+        }
+        outcome
     }
-
-    /// 执行一次动作。
-    ///
-    /// 每个要用引擎的分支单独借一次：壳这边的字段（`layout` / `highlight`）
-    /// 与引擎在同一时刻只借一边，不用绕借用检查器。
+    fn commit_at(&mut self, index: usize) -> Option<String> {
+        let text = self.layout.get(index)?.text.clone();
+        self.preedit = Default::default();
+        Some(text)
+    }
+    fn take_raw(&mut self) -> String {
+        let text = std::mem::take(&mut self.preedit.text);
+        self.preedit.caret = 0;
+        text
+    }
     fn execute(&mut self, action: Action) -> Outcome {
         match action {
             Action::Passthrough => Outcome::PASSTHROUGH,
-            Action::Navigate(navigation) => self.navigate(navigation),
             Action::Push(c) => {
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                let started = engine.composition().is_empty();
-                engine.push(c);
-                // 从空开始敲的才认音形码；半段上屏后剩下的拼音不算
-                if started {
-                    self.fresh = true;
+                let mut committed = None;
+                if self.preedit.text.len() == 4 {
+                    if !self.settings.fifth_commit || self.preedit.caret != 4 {
+                        return Outcome::NAVIGATED;
+                    }
+                    committed = self.commit_at(self.highlight);
+                    if committed.is_none() {
+                        self.notice = Some("当前四码没有候选，请退格修改或按 Esc 清码。".into());
+                        return Outcome::NAVIGATED;
+                    }
                 }
-                Outcome::CHANGED
-            }
-            Action::Backspace => {
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                engine.backspace();
-                Outcome::CHANGED
-            }
-            Action::Clear => {
-                // 丢掉整段：谁都不要，包括应用（与 Esc 在系统输入法里的语义一致）。
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                engine.clear();
-                Outcome::CHANGED
-            }
-            Action::CommitHighlighted => {
-                let candidate = self.layout.candidate(self.highlight).cloned();
-                let code = self.yinxing_code();
-                let full_width = self.settings.full_width_punctuation;
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                // 没有候选（缓冲还没切出音节）时把缓冲原样上屏。
-                let text = match &candidate {
-                    Some(candidate) => engine.commit(candidate),
-                    None => take_raw_or_quote(engine, full_width),
-                };
-                if let Some(candidate) = &candidate {
-                    self.after_commit(candidate, code.as_deref());
-                }
-                Outcome::commit(text)
-            }
-            Action::CommitIndex(index) => {
-                let page_size = self.settings.page_size.max(1);
-                let page = self.highlight / page_size;
-                let candidate = self.layout.candidate(page * page_size + index).cloned();
-                let code = self.yinxing_code();
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                let Some(candidate) = candidate else {
-                    return Outcome::PASSTHROUGH;
-                };
-                let text = engine.commit(&candidate);
-                self.after_commit(&candidate, code.as_deref());
-                Outcome::commit(text)
-            }
-            Action::Forget(index) => {
-                let page_size = self.settings.page_size.max(1);
-                let page = self.highlight / page_size;
-                let candidate = self.layout.candidate(page * page_size + index).cloned();
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                let Some(candidate) = candidate else {
-                    return Outcome::NAVIGATED;
-                };
-                let forgotten = engine.forget(&candidate);
-                self.notice = Some(forget_notice(&candidate.text, forgotten));
-                // 排序跟着变了：重查
-                Outcome::CHANGED
-            }
-            Action::CommitRaw => {
-                let full_width = self.settings.full_width_punctuation;
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                Outcome::commit(take_raw_or_quote(engine, full_width))
-            }
-            Action::FlushRaw => {
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                let raw = engine.take_raw();
-                // 按键本身照样交给应用：先插拼音，再轮到快捷键
+                self.preedit.text.insert(self.preedit.caret, c);
+                self.preedit.caret += 1;
                 Outcome {
-                    consumed: false,
-                    commit: (!raw.is_empty()).then_some(raw),
+                    consumed: true,
+                    commit: committed,
                     recompose: true,
                 }
             }
+            Action::Backspace => {
+                if self.preedit.caret > 0 {
+                    self.preedit.caret -= 1;
+                    self.preedit.text.remove(self.preedit.caret);
+                }
+                Outcome::CHANGED
+            }
             Action::DeleteForward => {
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                engine.delete_forward();
+                if self.preedit.caret < self.preedit.text.len() {
+                    self.preedit.text.remove(self.preedit.caret);
+                }
                 Outcome::CHANGED
             }
-            Action::DeleteSyllable => {
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                engine.delete_syllable_backward();
+            Action::Clear => {
+                self.preedit = Default::default();
                 Outcome::CHANGED
             }
-            Action::Punctuate(c) => {
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
-                };
-                match engine.punctuate(c) {
-                    Some(text) => Outcome::commit(text.to_owned()),
-                    None => {
-                        // 引擎转不了这个字符（英文、数字后的点、括号……）：交给应用，
-                        // 但告诉引擎它上屏了，好让选词链断在这里。
-                        engine.note_passthrough(c);
-                        Outcome::PASSTHROUGH
-                    }
+            Action::CommitRaw => Outcome::commit(self.take_raw()),
+            Action::FlushRaw => Outcome {
+                consumed: false,
+                commit: Some(self.take_raw()),
+                recompose: true,
+            },
+            Action::CommitHighlighted => match self.commit_at(self.highlight) {
+                Some(text) => Outcome::commit(text),
+                None => Outcome::NAVIGATED,
+            },
+            Action::CommitIndex(index) => {
+                let absolute =
+                    self.highlight / self.settings.page_size * self.settings.page_size + index;
+                match self.commit_at(absolute) {
+                    Some(text) => Outcome::commit(text),
+                    None => Outcome::NAVIGATED,
                 }
-            }
-            Action::BreakChain => {
-                if let Some(engine) = self.engine_mut() {
-                    engine.break_chain();
-                }
-                Outcome::PASSTHROUGH
-            }
-            Action::NoteBackspace => {
-                if let Some(engine) = self.engine_mut() {
-                    engine.note_backspace();
-                }
-                // 删字的事还是文本框自己干
-                Outcome::PASSTHROUGH
             }
             Action::Insert(c) => {
-                let Some(engine) = self.engine_mut() else {
-                    return Outcome::PASSTHROUGH;
+                let mut text = self.take_raw();
+                text.push(c);
+                Outcome::commit(text)
+            }
+            Action::Punctuate(c) => {
+                let prefix = if self.composing() {
+                    self.commit_at(self.highlight)
+                        .unwrap_or_else(|| self.take_raw())
+                } else {
+                    String::new()
                 };
-                // 中文模式里的临时英文：先把拼音原样上屏，再插这个字母。
-                let prefix = (!engine.composition().is_empty()).then(|| engine.take_raw());
-                engine.note_passthrough(c);
-                Outcome::commit(match prefix {
-                    Some(prefix) => format!("{prefix}{c}"),
-                    None => c.to_string(),
-                })
+                let punctuation = self.punctuation(c);
+                Outcome::commit(format!("{prefix}{punctuation}"))
+            }
+            Action::Navigate(nav) => {
+                use keys::Navigation::*;
+                match nav {
+                    Highlight(delta) => {
+                        self.highlight = (self.highlight as isize + delta)
+                            .clamp(0, self.layout.len().saturating_sub(1) as isize)
+                            as usize
+                    }
+                    Page(delta) => {
+                        let size = self.settings.page_size;
+                        let pages = self.layout.len().div_ceil(size).max(1);
+                        let page = (self.highlight as isize / size as isize + delta)
+                            .clamp(0, pages as isize - 1)
+                            as usize;
+                        self.highlight = page * size;
+                    }
+                    CursorLeft => self.preedit.caret = self.preedit.caret.saturating_sub(1),
+                    CursorRight => {
+                        self.preedit.caret = (self.preedit.caret + 1).min(self.preedit.text.len())
+                    }
+                    CursorHome => self.preedit.caret = 0,
+                    CursorEnd => self.preedit.caret = self.preedit.text.len(),
+                };
+                Outcome::NAVIGATED
             }
         }
     }
-
-    /// 挪高亮 / 翻页 / 挪拼音光标。
-    ///
-    /// 挪拼音光标要重查：拼音串里那条竖线要跟着走，候选也按光标前的那一段重排。
-    fn navigate(&mut self, navigation: keys::Navigation) -> Outcome {
-        use keys::Navigation;
-        let count = self.layout.len();
-        let page_size = self.settings.page_size.max(1);
-        match navigation {
-            Navigation::Highlight(delta) => {
-                self.highlight = moved_highlight(self.highlight, count, delta);
+    fn punctuation(&mut self, c: char) -> String {
+        if self.english || !self.settings.full_width_punctuation {
+            return c.to_string();
+        }
+        match c {
+            ',' => "，",
+            '.' => "。",
+            ';' => "；",
+            ':' => "：",
+            '?' => "？",
+            '!' => "！",
+            '(' => "（",
+            ')' => "）",
+            '[' => "【",
+            ']' => "】",
+            '<' => "《",
+            '>' => "》",
+            '"' => {
+                self.quote_open = !self.quote_open;
+                if self.quote_open { "“" } else { "”" }
             }
-            Navigation::Page(step) => {
-                let (highlight, turned) = turned_page(self.highlight, count, page_size, step);
-                self.highlight = highlight;
-                if turned && let Some(engine) = self.engine_mut() {
-                    engine.note_page_turn();
-                }
+            '\'' => {
+                self.single_quote_open = !self.single_quote_open;
+                if self.single_quote_open { "‘" } else { "’" }
             }
-            cursor => {
-                if let Some(engine) = self.engine_mut() {
-                    move_cursor(engine, cursor);
-                }
-                return Outcome::CHANGED;
-            }
+            _ => return c.to_string(),
         }
-        Outcome::NAVIGATED
-    }
-
-    /// 引擎（可变）。
-    pub(super) fn engine_mut(&mut self) -> Option<&mut Engine> {
-        self.assembled.as_mut().map(|assembly| &mut assembly.engine)
+        .into()
     }
 }
-
-impl Drop for Ime {
-    fn drop(&mut self) {
-        // 退出前把学习数据落一次盘，别让最后几十次选词白学。
-        self.flush();
-    }
-}
-
-/// 大数按「万」说：92810 → 「9.3 万」，不满一万照写。
-fn ten_thousands(count: usize) -> String {
-    if count < 10_000 {
-        return count.to_string();
-    }
-    let wan = format!("{:.1}", count as f64 / 10_000.0);
-    format!("{} 万", wan.trim_end_matches(".0"))
-}
-
-/// 没有候选时的布局。**不用 `CandidateLayout::default()`**：它的每页格数是 0，
-/// `pages()` 会拿它作除数，候选窗一画就除零 panic（panic 从 winit 的窗口回调里
-/// 穿出去，应用直接闪退）。每页格数与设置一致，空布局与有候选时同一套算法。
-fn empty_layout(page_size: usize) -> CandidateLayout {
-    CandidateLayout::new(Vec::new(), page_size.max(1))
-}
-
-/// 删完学习记录之后给状态栏的话。
-fn forget_notice(text: &str, forgotten: qingjian_core::Forgotten) -> String {
-    match (forgotten.user_word, forgotten.learning) {
-        (true, _) => format!("输入法：已删除用户词「{text}」。"),
-        (false, true) => format!("输入法：已清除「{text}」的学习记录，排序回到词库默认。"),
-        (false, false) => format!("输入法：「{text}」没有可删的学习记录（词库自带的词删不掉）。"),
-    }
-}
-
-/// 缓冲原样上屏。只有一个 `'` 时（开了音形，`'` 用来引导整句）当它是引号：
-/// 敲了 `'` 又没接着打，要的就是个引号。
-fn take_raw_or_quote(engine: &mut Engine, full_width: bool) -> String {
-    let raw = engine.take_raw();
-    if raw == "'"
-        && full_width
-        && let Some(quote) = engine.punctuate('\'')
-    {
-        return quote.to_owned();
-    }
-    raw
-}
-
-/// 挪拼音光标。高亮与翻页不归这里管。
-fn move_cursor(engine: &mut Engine, navigation: keys::Navigation) {
-    use keys::Navigation;
-    match navigation {
-        Navigation::CursorLeft => {
-            engine.move_cursor_left();
-        }
-        Navigation::CursorRight => {
-            engine.move_cursor_right();
-        }
-        Navigation::CursorHome => engine.move_cursor_home(),
-        Navigation::CursorEnd => engine.move_cursor_end(),
-        Navigation::SyllableLeft => {
-            engine.move_cursor_syllable_left();
-        }
-        Navigation::SyllableRight => {
-            engine.move_cursor_syllable_right();
-        }
-        Navigation::Highlight(_) | Navigation::Page(_) => {}
-    }
-}
-
-/// 高亮挪 `delta`，夹在 `[0, count-1]` 里；没有候选就归零。
-fn moved_highlight(highlight: usize, count: usize, delta: isize) -> usize {
-    if count == 0 {
-        return 0;
-    }
-    (highlight as isize + delta).clamp(0, count as isize - 1) as usize
-}
-
-/// 翻 `step` 页：返回（新的高亮，是否真的翻了页）。高亮落到目标页第一个候选。
-fn turned_page(highlight: usize, count: usize, page_size: usize, step: isize) -> (usize, bool) {
-    if count == 0 {
-        return (0, false);
-    }
-    let pages = count.div_ceil(page_size);
-    let current = highlight / page_size;
-    let target = (current as isize + step).clamp(0, pages as isize - 1) as usize;
-    ((target * page_size).min(count - 1), target != current)
-}
-
-/// Shift 的左右两键都算：egui 把修饰键也当普通键报，没有笼统的 `Key::Shift`。
 fn is_shift(key: egui::Key) -> bool {
     matches!(key, egui::Key::ShiftLeft | egui::Key::ShiftRight)
 }
-
-/// 单个字符；多字符的 `Text`（粘贴、其他输入源）不碰。
 fn single_char(text: &str) -> Option<char> {
     let mut chars = text.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) => Some(c),
-        _ => None,
-    }
-}
-
-/// 找数据并装配引擎。任何一环不通都返回 `None`：输入法不可用，键盘交给系统输入法。
-fn load() -> Option<Assembly> {
-    let data = data::find()?;
-    let learning = data::learning_dir();
-    let extra = learning
-        .as_ref()
-        .map(|dir| dir.join("dicts"))
-        .unwrap_or_default();
-    match engine::assemble(&data, learning.as_deref(), &extra) {
-        Ok(assembly) => {
-            eprintln!(
-                "[ime] 输入法已就绪：词库 {}（{} 条）、语言模型 {:?}、{} ms",
-                data.dict.display(),
-                assembly.dictionary_entries,
-                assembly.bigrams,
-                assembly.load_ms,
-            );
-            Some(assembly)
-        }
-        Err(error) => {
-            eprintln!("[ime] 输入法数据不可用，退回系统输入法：{error:#}");
-            None
-        }
-    }
+    let c = chars.next()?;
+    chars.next().is_none().then_some(c)
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    fn ime() -> Ime {
+        let mut ime = Ime::bare(ImeSettings::default());
+        ime.table.base = table::parse(
+            "a,1=啊\nabcd,1=公文\nefgh,1=词表\nzzzz,1=首选\nzzzz,2=次选",
+            false,
+        )
+        .entries;
+        ime.table.rebuild();
+        ime
+    }
+    fn type_code(ime: &mut Ime, code: &str) -> String {
+        let mut out = String::new();
+        for c in code.chars() {
+            if let Some(s) = ime.execute_guarded(Action::Push(c)).commit {
+                out.push_str(&s);
+            }
+        }
+        out
+    }
+    #[test]
+    fn exact_lookup_fifth_key_and_invalid_code() {
+        let mut ime = ime();
+        assert!(type_code(&mut ime, "abcd").is_empty());
+        assert_eq!(ime.layout[0].text, "公文");
+        assert_eq!(type_code(&mut ime, "e"), "公文");
+        assert_eq!(ime.preedit.text, "e");
+        type_code(&mut ime, "fgh");
+        assert_eq!(
+            ime.execute_guarded(Action::CommitHighlighted)
+                .commit
+                .as_deref(),
+            Some("词表")
+        );
+        type_code(&mut ime, "xxxxa");
+        assert_eq!(ime.preedit.text, "xxxx");
+        assert!(ime.layout.is_empty());
+        assert!(
+            ime.execute_guarded(Action::CommitHighlighted)
+                .commit
+                .is_none()
+        );
+        assert_eq!(
+            ime.execute_guarded(Action::CommitRaw).commit.as_deref(),
+            Some("xxxx")
+        );
+    }
+    #[test]
+    fn auto_commit_single_char_and_conflicts() {
+        let mut ime = ime();
+        ime.settings.auto_commit = true;
+        assert_eq!(type_code(&mut ime, "abcd"), "公文");
+        type_code(&mut ime, "zzzz");
+        assert_eq!(ime.layout.len(), 2);
+        assert_eq!(
+            ime.execute_guarded(Action::CommitIndex(1))
+                .commit
+                .as_deref(),
+            Some("次选")
+        );
+    }
+    #[test]
+    fn literal_codes_and_cursor_editing() {
+        let mut ime = ime();
+        type_code(&mut ime, "a");
+        assert_eq!(ime.layout[0].text, "啊");
+        ime.execute_guarded(Action::Clear);
+        type_code(&mut ime, "ab");
+        assert!(ime.layout.is_empty());
+        ime.execute_guarded(Action::Navigate(keys::Navigation::CursorLeft));
+        ime.execute_guarded(Action::DeleteForward);
+        assert_eq!(ime.preedit.text, "a");
+    }
+    #[test]
+    fn document_table_only_loads_accepted_four_codes() {
+        use crate::lexicon::{LexiconTerm, TermOrigin, TermState};
+        let term = LexiconTerm {
+            id: 1,
+            term: "本单位".into(),
+            pinyin: String::new(),
+            code_override: "abcd".into(),
+            freq_total: 1,
+            doc_count: 1,
+            origin: TermOrigin::Manual,
+            state: TermState::Accepted,
+            locked: true,
+            in_base_dict: false,
+            group_name: String::new(),
+            note: String::new(),
+            first_seen: String::new(),
+            last_seen: String::new(),
+        };
+        let mut candidate = term.clone();
+        candidate.term = "待确认".into();
+        candidate.state = TermState::Candidate;
+        let mut short = term.clone();
+        short.term = "短码".into();
+        short.code_override = "ab".into();
+        let mut ime = ime();
+        assert_eq!(ime.sync_lexicon(&[term, candidate, short]).unwrap(), 1);
+        assert_eq!(
+            ime.table
+                .lookup("abcd")
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            ["公文", "本单位"]
+        );
+        assert!(ime.table.lookup("ab").is_empty());
+    }
+    #[test]
+    fn punctuation_commits_candidate_and_shortcuts_preserve_raw() {
+        let mut ime = ime();
+        type_code(&mut ime, "abcd");
+        assert_eq!(
+            ime.execute_guarded(Action::Punctuate(','))
+                .commit
+                .as_deref(),
+            Some("公文，")
+        );
+        type_code(&mut ime, "ab");
+        let out = ime.execute_guarded(Action::FlushRaw);
+        assert!(!out.consumed);
+        assert_eq!(out.commit.as_deref(), Some("ab"));
+    }
+    #[test]
+    fn focus_change_clears_code_and_mouse_commit_keeps_target() {
+        let mut ime = ime();
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("正文");
+        ctx.memory_mut(|m| m.request_focus(id));
+        ime.focus_id = Some(id);
+        ime.editable_focus = true;
+        type_code(&mut ime, "abcd");
+        ime.pending_commit = Some("公文".into());
+        ime.begin_frame(&ctx);
+        assert!(ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e,egui::Event::Text(s) if s=="公文"))
+        }));
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("新框")));
+        ime.begin_frame(&ctx);
+        assert!(ime.preedit.text.is_empty());
+    }
+}

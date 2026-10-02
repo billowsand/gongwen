@@ -17,17 +17,13 @@
   公式（`$...$` / `$$...$$`）：预览与导出都用 `latex-rust` 进程内排版（vendor 在
   `vendor/latex-rust/`，加了中文字形回退与数组行距 / 数学轴居中补丁；导出出 SVG 嵌进 PDF）。
 - 中文处理：`jieba-rs`（含用户词典）、`pinyin`；文档读取用 `anydoc`。
-- 输入法：应用内拼音输入法，引擎、词库与整句模型都在本进程里，不用系统输入法、
-  也没有独立进程。代码在 `src/ime/`，内核 vendor 自字在输入法（GPL-3.0-or-later），
-  见 `vendor/qingjian/README.md`。
-  - 数据：`runtime/ime/dict.qj`（必需）+ `lm.qj`（可选，44 MB，长句打得少可以不带）。
-  - 学习数据与公文同一个用户目录：`config_dir()/ime/`——词频与用户词、公文词表
-    导出的附加词库（`dicts/`）、辅码表（`fuma/`）。
-  - 辅码（形码）表**不随包**：权利归方案作者、上游未获再分发授权，只能由使用者
-    在设置页自己导入。
-  - 小鹤音形码表（简码与开头四码，`src/ime/yinxing.rs`）同样**不随包、不入库**：
-    许可只限私人使用，由使用者导入到 `config_dir()/ime/yinxing/`。需求与取舍见
-    `docs/ime-yinxing-requirements.md`。
+- 输入法：应用内词表输入法，按完整编码查询基础表与公文四码表，不使用拼音、
+  整句模型、自动调频或独立进程。代码在 `src/ime/`，设计与交接见 `docs/table-ime.md`。
+  - 初始基础表：本机 `assets/fuma/quan.txt`；打包时若存在，独立复制到
+    `runtime/ime/base.txt`，不嵌入二进制。源码中的本机资源不入库。
+  - 用户基础表与个人词表：`config_dir()/ime/base.txt`、`tables.json`；基础表可动态
+    修改，公文表可导入、停用与撤销。公文词表只加载已接受且为四码的词。
+  - 旧 `dict.qj`、`lm.qj`、辅码与拼音学习数据不再使用，也不再随安装包分发。
 - 模型接入：本机 LM Studio / Ollama，走 OpenAI 兼容接口（`src/lmstudio.rs`、
   `src/rag.rs`、`src/rag_client.rs`）。
 
@@ -116,11 +112,9 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   `cargo build --release --locked`，保证 `target/release/` 始终是最新二进制；
   Linux 主机自动加 `--no-default-features --features linux-portal-dialogs`。
   失败仅打印告警、不阻塞提交。
-- 许可证是 **GPL-3.0-or-later**：因为链接了 GPL 的输入法内核（`vendor/qingjian/`），
-  整个程序都按 GPL 分发。改许可证相关的东西要同步 `LICENSE`、`Cargo.toml` 的 `license`、
+- 许可证是 **GPL-3.0-or-later**：项目继续按 GPL 分发；旧输入法内核已移除。改许可证相关的东西要同步 `LICENSE`、`Cargo.toml` 的 `license`、
   `README.md` 许可节、`THIRD_PARTY_NOTICES.md` 四处。
-- 输入法数据（`runtime/ime/dict.qj`、`lm.qj`）是随包资源，本地开发副本不入库；
-  `lm.qj`（44 MB）可选，缺了只是整句能力退化，输入法照常能用。
+- 基础词表是独立文本资源，用户修改保存在配置目录；不再随包携带拼音词库与语言模型。
 - 代码注释、文档、README 一律中文。
 - 应用输出的 `dist/`、`output/`、`tmp/`、`target/` 均为生成物，不要提交。
 - `config.json`、`.env*` 是本机配置，不入库；`config.example.json` 是模板。

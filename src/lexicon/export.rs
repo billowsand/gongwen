@@ -1,15 +1,12 @@
-//! 导出小鹤双拼用户码表。
+//! 导出公文四码词表（文字 TAB 编码，UTF-8 BOM）。
 //!
 //! 码表文件形如：
 //!
 //! ```text
-//! ---config@码表分类=主码-用户码表
-//! ---config@码表别名=用户
 //! 专项整治<TAB>vjvv
 //! ```
 //!
-//! `<TAB>` 是真正的制表符；UTF-8 带 BOM——小鹤原生输入法所在的 Windows
-//! 工具链按 BOM 认编码。
+//! `<TAB>` 是真正的制表符；UTF-8 带 BOM，兼容 Windows 文本工具。
 //!
 //! ## 为什么要有规模预算
 //!
@@ -20,14 +17,12 @@
 use super::{LexiconTerm, TermOrigin, TermState};
 use std::collections::BTreeMap;
 
-/// 小鹤原生输入法的用户码表头。写在文件最前面，`encode` 时可选。
-const FLYPY_HEADER: &str = "---config@码表分类=主码-用户码表\n---config@码表别名=用户\n";
 const BOM: &str = "\u{feff}";
 
 /// 导出口径。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportOptions {
-    /// 最少字数。默认 3——二字词在小鹤里本来就是四码，进码表省 0 键。
+    /// 最少字数。默认 3，优先选跨篇复用的长词。
     pub min_chars: usize,
     /// 语料词至少要出现在几篇里。权威词源不受此限。
     pub min_doc_count: i64,
@@ -38,8 +33,6 @@ pub struct ExportOptions {
     /// 排除 jieba 自带词典里就有的通用词。默认关：公文套语多半也在自带词典里，
     /// 而那恰恰是最该收的一类。
     pub exclude_common: bool,
-    /// 写入小鹤码表头。导进「主码-用户码表」时需要。
-    pub with_header: bool,
 }
 
 impl Default for ExportOptions {
@@ -48,9 +41,8 @@ impl Default for ExportOptions {
             min_chars: 3,
             min_doc_count: 2,
             budget: 1500,
-            include_candidates: true,
+            include_candidates: false,
             exclude_common: false,
-            with_header: true,
         }
     }
 }
@@ -122,12 +114,15 @@ pub fn build(terms: &[LexiconTerm], options: &ExportOptions) -> FlypyExport {
     }
 
     let mut table = String::from(BOM);
-    if options.with_header {
-        table.push_str(FLYPY_HEADER);
-    }
     let mut by_code: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for term in chosen {
         match term.code() {
+            Ok(code) if code.len() != 4 || !code.bytes().all(|b| b.is_ascii_lowercase()) => {
+                export.failed.push(Dropped {
+                    term: term.term.clone(),
+                    reason: "公文词表只导出四个小写字母的编码".into(),
+                });
+            }
             Ok(code) => {
                 table.push_str(&term.term);
                 table.push('\t');
@@ -186,10 +181,10 @@ fn keep(term: &LexiconTerm, options: &ExportOptions) -> bool {
     true
 }
 
-/// 码表文件的建议文件名。小鹤的码表管理按文件名区分来源。
+/// 词表文件的建议文件名。按日期区分导出。
 pub fn suggested_file_name() -> String {
     format!(
-        "公文助手-小鹤用户码表-{}.txt",
+        "公文助手-四码词表-{}.txt",
         chrono::Local::now().format("%Y%m%d")
     )
 }
@@ -226,11 +221,7 @@ mod tests {
             freq_total: doc_count * 2,
             doc_count,
             origin,
-            state: if origin.auto_accepted() {
-                TermState::Accepted
-            } else {
-                TermState::Candidate
-            },
+            state: TermState::Accepted,
             locked: false,
             in_base_dict: false,
             group_name: String::new(),
@@ -306,6 +297,23 @@ mod tests {
         let export = build(&[rejected], &ExportOptions::default());
         assert_eq!(export.written, 0);
     }
+    #[test]
+    fn pending_terms_need_explicit_opt_in_and_short_codes_are_reported() {
+        let mut pending = term("专项整治", 9, TermOrigin::Corpus);
+        pending.state = TermState::Candidate;
+        assert_eq!(
+            build(&[pending.clone()], &ExportOptions::default()).written,
+            0
+        );
+        let options = ExportOptions {
+            include_candidates: true,
+            ..Default::default()
+        };
+        assert_eq!(build(&[pending], &options).written, 1);
+        let mut short = term("本单位", 0, TermOrigin::Manual);
+        short.code_override = "ab".into();
+        assert_eq!(build(&[short], &ExportOptions::default()).failed.len(), 1);
+    }
 
     #[test]
     fn encoding_failures_are_listed_instead_of_silently_dropped() {
@@ -318,18 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn table_carries_bom_and_flypy_header() {
+    fn table_carries_bom_and_plain_four_codes() {
         let export = build(
             &[term("专项整治", 5, TermOrigin::Corpus)],
             &ExportOptions::default(),
         );
         assert!(export.table.starts_with('\u{feff}'));
-        assert!(export.table.contains("---config@码表分类=主码-用户码表"));
-        let bare = ExportOptions {
-            with_header: false,
-            ..ExportOptions::default()
-        };
-        let export = build(&[term("专项整治", 5, TermOrigin::Corpus)], &bare);
         assert!(!export.table.contains("---config@"));
+        assert!(export.table.contains("专项整治\tvxvv"));
     }
 }

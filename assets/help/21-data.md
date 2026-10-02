@@ -8,9 +8,7 @@
 | 稿件库 + 知识库 + 公文词表 | `config/manuscripts.db` | **三者共用一个 SQLite 文件** |
 | 记住的 ZIP 密码 | `config/.zip-password` | Unix 权限 0600 |
 | 插入的图片与 PDF 附件 | `config/images/` | 唯一命名，文档存相对路径 |
-| 输入法学习数据 | `config/ime/` | 词频、用户词 |
-| 输入法附加词库 | `config/ime/dicts/` | 公文词表导出的 |
-| 辅码表 | `config/ime/fuma/` | 自己导入的 |
+| 输入法基础表与个人词表 | `config/ime/` | 基础表、导入表、个人词条、排序与屏蔽 |
 | 检查器埋点 | 单独文件，不进 config.json | 只留本机 |
 
 ![数据目录结构](images/diag-data.png)
@@ -36,23 +34,17 @@
 |---|---|
 | 公文字体（`font/`） | config.json |
 | 排版模板（编进程序） | manuscripts.db |
-| 输入法词典（`runtime/ime/dict.qj`） | images/ |
-| 整句模型（`runtime/ime/lm.qj`，可选 44 MB） | ime/ 学习数据 |
+| 初始基础词表（`runtime/ime/base.txt`） | ime/ 基础表与个人词表 |
 | 研究报告字体（`runtime/fonts/`） | |
 
 卸载时随包资源随程序走，用户数据留下。
 
 ## 输入法数据
 
-| 文件 | 必需 | 说明 |
-|---|---|---|
-| `runtime/ime/dict.qj` | 是 | 程序词典，随包 |
-| `runtime/ime/lm.qj` | 否 | 整句模型 44 MB，缺了只是长句能力退化 |
-| `config/ime/` | — | 学习数据：词频、用户词 |
-| `config/ime/dicts/` | — | 附加词库（公文词表导出的） |
-| `config/ime/fuma/` | — | 辅码表，**自己导入** |
-
-辅码表**不随包**：权利归方案作者，上游未获再分发授权。设置页自己导。
+`config/ime/base.txt` 是当前基础表，`base.previous.txt` 保留上次基础表；
+`tables.json` 保存导入的公文表、个人词条、屏蔽与顺序。
+备份时保存整个 `ime/` 目录，也可在词表管理中导出最终词表与个人备份。
+旧 `dict.qj`、`lm.qj` 与拼音学习数据不再使用。
 
 ## 备份建议
 

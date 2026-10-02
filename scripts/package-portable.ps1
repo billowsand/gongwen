@@ -74,11 +74,12 @@ function Assert-DirectoryNotInUse([string]$Path) {
 }
 
 # PDF 由 Typst 在进程内排版。runtime 包（gongwen-runtime v0.7.0 及更早）里还带着
-# Tectonic、离线 TeX bundle 与它们的许可证；清单里有也不随包。
+# Tectonic、离线 TeX bundle、旧拼音词库与模型；清单里有也不随包。
 function Test-RetiredRuntimeAsset([string]$Relative) {
     $normalized = $Relative.Replace("\", "/")
     return $normalized.StartsWith("tectonic/", [System.StringComparison]::OrdinalIgnoreCase) -or
         $normalized.StartsWith("texbundle/", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $normalized.StartsWith("ime/", [System.StringComparison]::OrdinalIgnoreCase) -or
         @("licenses/LICENSE.CTAN", "licenses/LICENSE.TL", "licenses/TECTONIC-LICENSE.txt") -contains $normalized
 }
 
@@ -147,6 +148,9 @@ foreach ($line in Get-Content -LiteralPath $RuntimeManifest -Encoding UTF8) {
     }
     $expected = $parts[0].ToUpperInvariant()
     $relative = $parts[1].Trim().Replace("/", [System.IO.Path]::DirectorySeparatorChar)
+    if (Test-RetiredRuntimeAsset $relative) {
+        continue
+    }
     $asset = [System.IO.Path]::Combine($runtimeRoot, $relative)
     if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) {
         throw "Missing portable runtime asset: $asset"
@@ -197,6 +201,14 @@ foreach ($entry in $runtimeEntries) {
     $destinationDirectory = Split-Path -Parent $destination
     New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
     Copy-Item -LiteralPath $entry.Source -Destination $destination
+}
+
+# 初始基础词表独立随包，便于更新；缺少本机源文件时由使用者在设置页导入。
+$baseTableSource = Join-Path $projectRoot "assets/fuma/quan.txt"
+if (Test-Path -LiteralPath $baseTableSource -PathType Leaf) {
+    $baseTableDir = Join-Path $OutputDir "runtime/ime"
+    New-Item -ItemType Directory -Force -Path $baseTableDir | Out-Null
+    Copy-Item -LiteralPath $baseTableSource -Destination (Join-Path $baseTableDir "base.txt")
 }
 
 # 应用依赖的许可证由本仓库维护；外部 runtime 清单可能尚未包含它。

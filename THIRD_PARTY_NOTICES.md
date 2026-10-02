@@ -176,34 +176,6 @@ distributed under the MIT License.
 - Project: <https://github.com/mozillazg/rust-pinyin>
 - License: MIT
 
-## 字在输入法（青简）内核
-
-应用内拼音输入法的引擎、词库与整句模型取自**字在**（青简 Qingjian 的 Windows
-分支），以 GPL-3.0-or-later 分发。取的是平台无关的六个 crate（format / dictionary /
-core / lm / translate / learning），随源码存放在 `vendor/qingjian/`，许可证原文保留在
-`vendor/qingjian/LICENSE`；上游的 Windows 平台壳（TSF DLL、Server 进程、自绘渲染器、
-语音 Worker）一个都没有搬，本项目用 egui 自己当壳。
-
-- 上游（字在）：<https://github.com/billowsand/zizai>
-- 上游（青简 Qingjian）：<https://github.com/qingjian-team/qingjian>
-- 取出提交：`fbf709585bf107c653454e5c9da1fbbe464a360d`
-- License: GPL-3.0-or-later
-
-随包数据放在 `runtime/ime/`：
-
-| 文件 | 内容 | 许可 |
-| --- | --- | --- |
-| `dict.qj` | 拼音词库（约 9.3 万条） | MIT AND Unicode-3.0（词表来自《通用规范汉字表》《现代汉语常用词表》与 THUOCL，读音取自 Unihan） |
-| `lm.qj` | bigram 语言模型（约 486 万组，可选） | CC-BY-SA-4.0 AND MIT（语料：中文维基百科与 LCCC） |
-
-`lm.qj` 不在时输入法退到词级候选 + 个人 n-gram，仍可正常打字；取舍与重打办法见
-`vendor/qingjian/README.md`。
-
-**双拼辅码（形码）表不随包分发。** 小鹤辅码表复现的是已发表的输入方案，
-权利归方案作者，上游未取得再分发授权（见上游 `assets/fuma/README.md`）。
-因此本发行版不包含任何辅码表，只提供导入入口：使用者在设置页自行导入一份
-`字=两码` 的文本，文件保存在本机用户目录（`config_dir()/ime/fuma/`）。
-
 ## nucleo-matcher
 
 快捷查找使用 nucleo-matcher 0.3.1，许可为 MPL-2.0。上游源码未修改，完整许可证随运行资源保存在 `runtime/licenses/NUCLEO-MPL-2.0.txt`。

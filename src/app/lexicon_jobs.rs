@@ -137,6 +137,12 @@ impl GongwenApp {
     }
 
     pub(crate) fn set_lexicon_reading(&mut self, id: i64, pinyin: &str, code_override: &str) {
+        let code = code_override.trim();
+        if !code.is_empty() && (code.len() != 4 || !code.bytes().all(|b| b.is_ascii_lowercase())) {
+            self.lexicon_error =
+                Some("公文词条编码应为四个小写字母；留空可按读音生成编码建议。".into());
+            return;
+        }
         let Some(store) = self.lexicon_store.as_mut() else {
             return;
         };
@@ -276,7 +282,7 @@ impl GongwenApp {
         }
     }
 
-    /// 导出小鹤用户码表。有重码时一并写出重码报告，文件名与码表同目录同前缀。
+    /// 导出公文四码词表。有重码时一并写出重码报告，文件名与码表同目录同前缀。
     pub(crate) fn export_flypy_table(&mut self) {
         let Some(store) = self.lexicon_store.as_ref() else {
             return;
@@ -294,7 +300,7 @@ impl GongwenApp {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("小鹤用户码表", &["txt"])
+            .add_filter("公文四码词表", &["txt"])
             .set_file_name(export::suggested_file_name())
             .save_file()
         else {
@@ -317,7 +323,7 @@ impl GongwenApp {
                 Err(error) => message.push_str(&format!("；重码报告写入失败：{error}")),
             }
         }
-        message.push_str("。在小鹤输入法的码表管理里导入「主码-用户码表」即可生效。");
+        message.push_str("。在「设置 → 输入法」导入四码词表即可生效。");
         self.lexicon_export_result = Some(message.clone());
         self.status = message;
     }

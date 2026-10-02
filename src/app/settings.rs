@@ -63,7 +63,7 @@ pub(crate) enum SettingsSection {
     Persistence,
     /// 密级与保密期限规则。
     Security,
-    /// 输入法（应用内拼音引擎）。
+    /// 输入法（应用内词表查询）。
     Input,
     /// 上手指引。
     Guide,
@@ -186,8 +186,7 @@ impl SettingsSection {
                  秘密级不超过十年。本单位口径不同的，直接改下面三个上限。"
             }
             SettingsSection::Input => {
-                "公文助手自带拼音输入法：引擎、词库与整句模型都在本程序里，不依赖系统输入法，\
-                 也与别的应用互不干扰。打开就能打中文，单击 Shift 切中英。"
+                "词表输入法按编码查找基础表与公文四码词表，维护后立即生效。单击 Shift 切中英。"
             }
             SettingsSection::Guide => "第一次用这个程序，按下面的顺序走一遍就能出第一份稿子。",
         }
@@ -249,15 +248,6 @@ fn setting_note(ui: &mut egui::Ui, text: &str) -> egui::Response {
     )
 }
 
-/// 同 [`setting_note`]，但是要人留意的那一档（缺码表、校验没过）。
-fn setting_warn(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.label(
-        egui::RichText::new(text)
-            .size(theme::font_sizes::SMALL)
-            .color(theme::warn()),
-    )
-}
-
 /// 开关行：左列标签，右列复选框。开关和别的控件一样从右列起排，不贴最左边。
 fn setting_toggle(
     ui: &mut egui::Ui,
@@ -276,41 +266,6 @@ fn page_keys_label(keys: &str) -> String {
         (Some(up), Some(down)) => format!("{up} 与 {down}"),
         _ => keys.to_owned(),
     }
-}
-
-/// 输入法分区里要等布局画完再做的事：文件对话框会阻塞布局，同步要借 `self`。
-#[derive(Default)]
-struct ImeActions {
-    import_fuma: bool,
-    import_yinxing: bool,
-    builtin_xiaohe: bool,
-    sync_lexicon: bool,
-}
-
-/// 双拼方案在界面上显示的名字。配置里写空串或认不出的值时都算全拼。
-fn shuangpin_label(key: &str) -> &'static str {
-    crate::ime::ImeSettings::shuangpin_options()
-        .into_iter()
-        .find(|(option, _)| *option == key.trim())
-        .map(|(_, label)| label)
-        .unwrap_or("全拼")
-}
-
-/// 辅码方案在界面上显示的名字。空串或认不出的值都算不用辅码。
-fn fuma_label(key: &str) -> &'static str {
-    crate::ime::ImeSettings::fuma_options()
-        .into_iter()
-        .find(|(option, _)| *option == key.trim())
-        .map(|(_, label)| label)
-        .unwrap_or("不用辅码")
-}
-
-/// 辅码显示档位在界面上显示的名字。认不出的值按默认档（敲了辅码时）。
-fn fuma_hint_label(key: &str) -> &'static str {
-    crate::ime::ImeSettings::default()
-        .with_fuma_hint(key)
-        .fuma_hint
-        .label()
 }
 
 /// 一行文本输入设置项。
@@ -1874,238 +1829,56 @@ impl GongwenApp {
             .on_hover_text("不勾选时每次导出都会生成“标题-2、标题-3”这样的新文件");
     }
 
-    /// 输入法分区：应用内拼音引擎。
-    ///
-    /// 全部按「左列标签、右列控件」排：开关也放右列，不贴最左边；状态小字与按钮排在同一行、
-    /// 竖直居中。分组按使用者关心的事分——怎么打（输入方案、小鹤音形）、候选长什么样（候选窗）、
-    /// 自己加的东西（自定义短语、公文词表），最后是按键速查。输入法关着时下面整块置灰。
+    /// 词表输入法设置：查询行为、候选窗与词表维护。
     fn ime_section_ui(&mut self, ui: &mut egui::Ui) {
-        // 先把引擎那边的状态取成自己的值：下面几个闭包都要改 `self.config`。
-        let available = self.ime.available();
-        let brief = self.ime.data_brief();
-        let summary = self.ime.data_summary();
-        // 文件对话框与同步都在布局之后做：放在闭包里会阻塞布局、还要跟 `self.config` 抢借用。
-        let mut actions = ImeActions::default();
-
-        setting_toggle(
-            ui,
-            "启用",
-            Some("关掉之后，本应用里的中文输入交给系统输入法。"),
-            &mut self.config.ime.enabled,
-            "使用应用内输入法",
-        );
-        setting_row(ui, "引擎", None, |ui| {
-            if available {
-                ui.label(egui::RichText::new("已就绪").color(theme::success()));
-                let response = setting_note(ui, brief.as_deref().unwrap_or_default());
-                if let Some(summary) = &summary {
-                    response.on_hover_text(summary.as_str());
-                }
-            } else {
-                ui.label(egui::RichText::new("未就绪").color(theme::warn()));
-                setting_note(
-                    ui,
-                    "没找到随包的输入法数据，本应用里的中文输入交给系统输入法",
-                )
-                .on_hover_text("要的是 runtime/ime/dict.qj（必需）与 lm.qj（可选）。");
-            }
-        });
-
-        ui.scope(|ui| {
-            if !self.config.ime.enabled {
-                ui.disable();
-            }
-            self.ime_scheme_ui(ui, &mut actions);
-            self.ime_yinxing_ui(ui, &mut actions);
-            self.ime_candidates_ui(ui);
-            self.ime_phrases_ui(ui);
-            self.ime_lexicon_ui(ui, &mut actions);
-            self.ime_keys_ui(ui);
-        });
-
-        if actions.import_fuma {
-            self.import_fuma_table_dialog();
-        }
-        if actions.import_yinxing {
-            self.import_yinxing_table_dialog();
-        }
-        if actions.builtin_xiaohe {
-            self.install_builtin_xiaohe_confirm_window(ui.ctx());
-        }
-        if actions.sync_lexicon {
-            self.sync_lexicon_to_ime(true);
-        }
-    }
-
-    /// 输入方案：双拼、辅码、全角标点。
-    fn ime_scheme_ui(&mut self, ui: &mut egui::Ui, actions: &mut ImeActions) {
-        let fuma_words = self.ime.fuma_words();
-        let has_builtin_xiaohe = crate::ime::Ime::has_builtin_xiaohe();
-
-        sub_heading(ui, "输入方案", None);
-        setting_row(
-            ui,
-            "双拼",
-            Some("默认全拼。改动立即生效。"),
-            |ui| {
-                egui::ComboBox::from_id_salt("ime_shuangpin")
-                    .selected_text(shuangpin_label(&self.config.ime.shuangpin))
-                    .show_ui(ui, |ui| {
-                        for (key, label) in crate::ime::ImeSettings::shuangpin_options() {
-                            ui.selectable_value(
-                                &mut self.config.ime.shuangpin,
-                                key.to_string(),
-                                label,
-                            );
-                        }
-                    });
-            },
-        );
-        setting_row(
-            ui,
-            "辅码",
-            Some("在音节后补两码形码来筛字。码表不随包（权利归方案作者），要自己导入一份。"),
-            |ui| {
-                egui::ComboBox::from_id_salt("ime_fuma")
-                    .selected_text(fuma_label(&self.config.ime.fuma))
-                    .show_ui(ui, |ui| {
-                        for (key, label) in crate::ime::ImeSettings::fuma_options() {
-                            ui.selectable_value(&mut self.config.ime.fuma, key.to_string(), label);
-                        }
-                    });
-                if self.config.ime.fuma.trim().is_empty() {
-                    return;
-                }
-                match fuma_words {
-                    Some(words) => setting_note(ui, &format!("已加载 {words} 字")),
-                    None => setting_warn(ui, "还没有码表"),
-                };
-                if ui
-                    .button("导入码表…")
-                    .on_hover_text("每行「字=两码」的 txt，GBK / UTF-8 都认。")
-                    .clicked()
-                {
-                    actions.import_fuma = true;
-                }
-                // 只在带 `ime-builtin-xiaohe` feature 的构建里出现：发布构建里二进制不含这份码表
-                if has_builtin_xiaohe
-                    && fuma_words.is_none()
-                    && ui
-                        .button("使用内置示例")
-                        .on_hover_text(
-                            "把构建内置的小鹤辅码示例表复制到本机用户目录并加载。\n\
-                             这份表权利归小鹤方案作者；按下后会再确认一次你已从方案作者\n\
-                             处取得使用授权，才会真正写入。",
-                        )
-                        .clicked()
-                {
-                    actions.builtin_xiaohe = true;
-                }
-            },
-        );
-        if !self.config.ime.fuma.trim().is_empty() {
-            setting_row(
-                ui,
-                "辅码提示",
-                Some(
-                    "在候选右上角用淡色小字标辅码：敲了第一码后标出还要敲的第二码；\
-                     「始终」在没敲辅码时也标出完整两码，适合还在记码的时候。",
-                ),
-                |ui| {
-                    ui.add_enabled_ui(fuma_words.is_some(), |ui| {
-                        egui::ComboBox::from_id_salt("ime_fuma_hint")
-                            .selected_text(fuma_hint_label(&self.config.ime.fuma_hint))
-                            .show_ui(ui, |ui| {
-                                for (key, label) in crate::ime::ImeSettings::fuma_hint_options() {
-                                    ui.selectable_value(
-                                        &mut self.config.ime.fuma_hint,
-                                        key.to_string(),
-                                        label,
-                                    );
-                                }
-                            });
-                    });
-                },
-            );
-        }
-        setting_toggle(
-            ui,
-            "标点",
-            Some("，。：；这些标点在中文模式下转成全角；英文模式与数字后的小数点始终半角。"),
-            &mut self.config.ime.full_width_punctuation,
-            "中文模式下用全角标点",
-        );
-    }
-
-    /// 小鹤音形：双拼没选小鹤时只留一行说明，选了才展开。
-    fn ime_yinxing_ui(&mut self, ui: &mut egui::Ui, actions: &mut ImeActions) {
-        let entries = self.ime.yinxing_entries();
-        sub_heading(
-            ui,
-            "小鹤音形",
-            Some(
-                "从空开始敲 1–4 键时，码表里的一简、二简、三简与四码排在候选最前，空格上屏；\
-                 不选、接着打就是整句双拼。句中照旧打双拼全码。",
-            ),
-        );
-        if self.config.ime.shuangpin.trim() != "xiaohe" {
-            setting_row(ui, "", None, |ui| {
-                setting_note(
-                    ui,
-                    "音形码按小鹤双拼编码：把上面的「双拼」选成小鹤双拼后可用。",
-                );
-            });
-            return;
-        }
         setting_toggle(
             ui,
             "启用",
             None,
-            &mut self.config.ime.yinxing,
-            "简码与开头四码",
+            &mut self.config.ime.enabled,
+            "应用内词表输入法",
         );
-        ui.scope(|ui| {
-            if !self.config.ime.yinxing {
-                ui.disable();
+        if let Some(brief) = self.ime.data_brief() {
+            setting_note(ui, &brief);
+        } else {
+            setting_note(ui, "请导入基础词表；未就绪时使用系统输入法");
+        }
+        setting_toggle(
+            ui,
+            "全角标点",
+            None,
+            &mut self.config.ime.full_width_punctuation,
+            "中文模式使用全角标点",
+        );
+        setting_toggle(
+            ui,
+            "四码上屏",
+            Some("完整四码只有一个有效候选时自动上屏，单字和词组一致。"),
+            &mut self.config.ime.auto_commit,
+            "四码唯一候选自动上屏",
+        );
+        setting_toggle(
+            ui,
+            "第五码",
+            Some("四码后再输入一个字母：先上屏当前候选，再开始下一编码；无码不顶屏。"),
+            &mut self.config.ime.fifth_commit,
+            "第五码顶屏",
+        );
+        self.ime_candidates_ui(ui);
+        sub_heading(ui, "词表管理", None);
+        self.ime.manager_ui(ui);
+        ui.horizontal(|ui| {
+            setting_note(ui, "公文词表中已接受且编码为四码的词自动加载");
+            if ui.button("立即同步公文词表").clicked() {
+                self.sync_lexicon_to_ime(true);
             }
-            setting_row(
-                ui,
-                "码表",
-                Some(
-                    "小鹤音形码表（搜狗自定义短语格式「编码,位置=字词」，UTF-16 / GBK 都认）。\n\
-                     权利归方案作者、只限私人使用：程序只存到本机用户目录，不随安装包分发。",
-                ),
-                |ui| {
-                    match entries {
-                        Some(entries) => setting_note(ui, &format!("已加载 {entries} 条")),
-                        None => setting_warn(ui, "还没有码表，导入你自己的那一份"),
-                    };
-                    if ui.button("导入码表…").clicked() {
-                        actions.import_yinxing = true;
-                    }
-                },
-            );
-            setting_toggle(
-                ui,
-                "四码上屏",
-                Some(
-                    "打开后，整句要先敲一个 ' 再打：不然每 4 键都可能撞上某个词组的四码被顶上屏\
-                     （「统一」变「同意」、「任务」变「人物」）。单字四码不自动上屏。",
-                ),
-                &mut self.config.ime.yinxing_auto_commit,
-                "只对应一个词组时自动上屏",
-            );
-            setting_toggle(
-                ui,
-                "编码提示",
-                Some("比如整句打出「中华人民共和国」，提示它的四码是 vhrg。同一个词最多提示三次。"),
-                &mut self.config.ime.yinxing_hint,
-                "整句打出的长词有音形码时，在状态栏提示",
-            );
         });
+        sub_heading(ui, "按键速查", None);
+        setting_note(
+            ui,
+            "Shift 切中英；空格选择高亮，1–9 选候选；设置的翻页键或 PageUp / PageDown 翻页；Esc 清码；回车原样上屏编码；方向键、退格、Delete 编辑编码。",
+        );
     }
-
-    /// 候选窗：每页几个、翻页键、横竖排、字号。
     fn ime_candidates_ui(&mut self, ui: &mut egui::Ui) {
         sub_heading(ui, "候选窗", None);
         setting_row(ui, "每页候选", None, |ui| {
@@ -2158,148 +1931,6 @@ impl GongwenApp {
         );
     }
 
-    /// 公文词表：改动后自动同步，按钮留着手动补一次。
-    fn ime_lexicon_ui(&mut self, ui: &mut egui::Ui, actions: &mut ImeActions) {
-        sub_heading(ui, "公文词表", None);
-        setting_row(
-            ui,
-            "同步",
-            Some(
-                "把公文词表交给输入法当附加词库，本单位专名与套语就能直接打出来；\
-                 开了小鹤音形时，码表里没有的专名按小鹤规则补四码。",
-            ),
-            |ui| {
-                setting_note(ui, "词表改动后几秒内自动同步");
-                if ui.button("立即同步").clicked() {
-                    actions.sync_lexicon = true;
-                }
-            },
-        );
-    }
-
-    /// 按键速查：两组一行的对照表，翻页键跟着设置走。
-    fn ime_keys_ui(&mut self, ui: &mut egui::Ui) {
-        sub_heading(ui, "按键速查", None);
-        let page_keys = page_keys_label(&self.config.ime.page_keys);
-        let keys: [(&str, &str); 10] = [
-            ("单击 Shift", "切中英（打了一半的字母原样上屏）"),
-            ("空格 / 1–9", "上屏首选 / 选第几个"),
-            (&page_keys, "翻页"),
-            ("回车", "字母原样上屏"),
-            ("Esc", "取消这段拼音"),
-            ("退格 / Delete", "删光标前 / 后一个字母"),
-            ("Ctrl+退格", "删一个音节"),
-            ("← → / Ctrl+← →", "按字母 / 按音节挪光标"),
-            ("Ctrl+1–9", "删掉那个候选的学习记录"),
-            ("'（开了四码自动上屏时）", "跳过开头四码，直接打整句"),
-        ];
-        ui.horizontal(|ui| {
-            ui.add_space(SETTING_LABEL_WIDTH + ui.spacing().item_spacing.x);
-            egui::Grid::new("ime_keys")
-                .num_columns(4)
-                .spacing([14.0, 6.0])
-                .show(ui, |ui| {
-                    for pair in keys.chunks(2) {
-                        for (key, meaning) in pair {
-                            ui.label(egui::RichText::new(*key).size(theme::font_sizes::SMALL));
-                            setting_note(ui, meaning);
-                        }
-                        ui.end_row();
-                    }
-                });
-        });
-    }
-
-    /// 「使用内置示例小鹤辅码」的二次确认窗：明确告知版权约束，要求使用者
-    /// 主动声明已取得使用授权后才真正写文件。这条路径**绝不**自动触发——
-    /// 调用方来自设置页按钮的当场点击。
-    fn install_builtin_xiaohe_confirm_window(&mut self, ctx: &egui::Context) {
-        let id = egui::Id::new("install_builtin_xiaohe_confirm");
-        if !ctx.memory(|memory| memory.data.get_temp::<bool>(id).unwrap_or(false)) {
-            ctx.memory_mut(|memory| memory.data.insert_temp(id, true));
-        }
-        let mut confirm = false;
-        let mut cancel = false;
-        let win = egui::Window::new("使用内置示例小鹤辅码")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("这份码表复现的是已发表的小鹤形码方案，权利归方案作者；")
-                    .on_hover_text(
-                        "本应用未取得方案作者的再分发授权，发布构建里完全没有这份码表。\n\
-                         你现在看到的按钮只出现在开发者构建或带 ime-builtin-xiaohe feature 的内部构建里。",
-                    );
-                ui.colored_label(
-                    theme::warn(),
-                    "继续即表示你已从方案作者处取得使用授权；\n\
-                     未取得授权请改用「导入码表…」按钮导入你自己拿到的文件。",
-                );
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(theme::warning_icon_button(theme::Icon::FilePlus, "已获授权，安装"))
-                        .clicked()
-                    {
-                        confirm = true;
-                    }
-                    if ui.button("取消").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-        if let Some(w) = win {
-            theme::window_enter_anim(
-                ctx,
-                egui::Id::new("install_builtin_xiaohe_anim"),
-                &w.response,
-            );
-        }
-        if confirm {
-            ctx.memory_mut(|memory| memory.data.remove::<bool>(id));
-            match self.ime.install_builtin_xiaohe() {
-                Ok(words) => {
-                    self.config.ime.fuma = "xiaohe".to_string();
-                    self.status = format!("内置示例小鹤辅码表已写入本机：{words} 字。");
-                }
-                Err(error) => self.status = format!("写入内置辅码表失败：{error:#}"),
-            }
-        } else if cancel {
-            ctx.memory_mut(|memory| memory.data.remove::<bool>(id));
-        }
-    }
-
-    /// 选一份辅码表导进用户目录。
-    fn import_fuma_table_dialog(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("辅码表", &["txt"])
-            .set_title("选择辅码表（每行「字=两码」）")
-            .pick_file()
-        else {
-            return;
-        };
-        match self.ime.import_fuma_table(&path) {
-            Ok(words) => self.status = format!("辅码表已导入：{words} 字。"),
-            Err(error) => self.status = format!("导入辅码表失败：{error:#}"),
-        }
-    }
-
-    fn import_yinxing_table_dialog(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("音形码表", &["txt"])
-            .set_title("选择小鹤音形码表（每行「编码,位置=字词」）")
-            .pick_file()
-        else {
-            return;
-        };
-        match self.ime.import_yinxing_table(&path) {
-            Ok(entries) => self.status = format!("音形码表已导入：{entries} 条。"),
-            Err(error) => self.status = format!("导入音形码表失败：{error:#}"),
-        }
-    }
-
-    /// 把公文词表同步成输入法的附加词库。`announce` 为真时把结果写进状态栏
-    /// （设置页按钮用），启动时静默。
     pub(crate) fn sync_lexicon_to_ime(&mut self, announce: bool) {
         let terms = match self.lexicon_store.as_ref() {
             Some(store) => store.export_candidates().unwrap_or_default(),
@@ -2312,81 +1943,6 @@ impl GongwenApp {
             Ok(_) => {}
             Err(error) => self.status = format!("同步输入法词库失败：{error:#}"),
         }
-    }
-
-    /// 输入法的自定义短语表：输入码、候选位置、上屏文字，改完立即生效。
-    ///
-    /// 每条短语一行，从右列起排，和上面的设置项左边缘对齐；最后一行是「添加」与校验结果。
-    fn ime_phrases_ui(&mut self, ui: &mut egui::Ui) {
-        sub_heading(
-            ui,
-            "自定义短语",
-            Some(
-                "敲一串字母，在候选的固定位置出一段文字：常用套语、单位全称、落款。\n\
-                 日期（rq）、时间（sj）、星期（xq）已经内置，不必再配。",
-            ),
-        );
-        let mut remove = None;
-        for (index, phrase) in self.config.ime.phrases.iter_mut().enumerate() {
-            let label = if index == 0 { "短语" } else { "" };
-            setting_row(ui, label, None, |ui| {
-                ui.checkbox(&mut phrase.enabled, "")
-                    .on_hover_text("停用的短语留着、不出候选");
-                // 输入码只收小写字母，不走应用内输入法
-                crate::ime::exempt(ui.add(theme::field(&mut phrase.code, "输入码", 80.0)));
-                egui::ComboBox::from_id_salt(("ime_phrase_position", index))
-                    .selected_text(format!("第 {} 位", phrase.position))
-                    .width(64.0)
-                    .show_ui(ui, |ui| {
-                        for position in 1..=crate::ime::MAX_PAGE_SIZE {
-                            ui.selectable_value(
-                                &mut phrase.position,
-                                position,
-                                format!("第 {position} 位"),
-                            );
-                        }
-                    });
-                ui.add(
-                    egui::TextEdit::multiline(&mut phrase.text)
-                        .hint_text("上屏的文字，可以换行")
-                        .desired_rows(1)
-                        .desired_width((ui.available_width() - 48.0).max(160.0)),
-                );
-                if ui
-                    .add(theme::secondary_icon_button(theme::Icon::Trash, ""))
-                    .on_hover_text("删除这条短语")
-                    .clicked()
-                {
-                    remove = Some(index);
-                }
-            });
-        }
-        if let Some(index) = remove {
-            self.config.ime.phrases.remove(index);
-        }
-        let label = if self.config.ime.phrases.is_empty() {
-            "短语"
-        } else {
-            ""
-        };
-        setting_row(ui, label, None, |ui| {
-            if ui
-                .add(theme::icon_text_button(theme::Icon::FilePlus, "添加短语"))
-                .clicked()
-            {
-                self.config
-                    .ime
-                    .phrases
-                    .push(crate::models::ImePhrase::default());
-            }
-            match crate::ime::validate_phrases(&self.config.ime.phrases) {
-                Ok(()) if self.config.ime.phrases.is_empty() => {
-                    setting_note(ui, "还没有短语。输入码是 1–32 个小写字母")
-                }
-                Ok(()) => setting_note(ui, "改完立即生效"),
-                Err(error) => setting_warn(ui, &format!("{error}；改好之前沿用上一份")),
-            };
-        });
     }
 
     /// 保存与现场分区：自动保存到稿件库的开关。

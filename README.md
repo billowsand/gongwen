@@ -255,7 +255,7 @@ src/                应用代码（约 14.2 万行 Rust，1483 项自动化测�
 assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
-vendor/             随仓库分发的第三方源码（mdx、latex-rust、typst-layout、字在输入法内核）
+vendor/             随仓库分发的第三方源码（mdx、latex-rust、typst-layout）
 scripts/            版本号更新与便携包构建脚本
 runtime/            随包字体与输入法词库（不进入 Git）
 config.example.json 示例配置
@@ -271,6 +271,7 @@ GitHub Actions：CI 在 Windows x64 与 Linux ARM64（GLIBC 2.28）两个平台�
 
 ## 许可
 
-本项目以 [GPL-3.0-or-later](LICENSE) 协议开源。改用 GPL 是因为随包集成了字在输入法（青简）
-的拼音引擎与词库，那部分代码是 GPL-3.0-or-later，链接进同一个可执行文件后整个程序都按 GPL 分发。
+本项目继续以 [GPL-3.0-or-later](LICENSE) 协议开源。旧输入法内核已移除。
 第三方组件、随包数据与字体的许可与署名见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+词表输入法以独立的基础表和公文四码表查询候选，支持导入预览、查词查码、重码排序、基础表更新和备份。见 [词表输入法设计与交接](docs/table-ime.md)。

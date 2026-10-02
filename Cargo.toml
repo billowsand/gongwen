@@ -17,24 +17,6 @@ OriginalFilename = "gongwen-assistant.exe"
 default = ["linux-gtk-dialogs"]
 linux-gtk-dialogs = ["rfd/gtk3"]
 linux-portal-dialogs = ["rfd/async-std", "rfd/xdg-portal"]
-# 开发期自带的「内置示例小鹤辅码表」：**默认关闭**。
-# 这份码表权利归方案作者、上游未取得再分发授权（见 `assets/fuma/README.md` 与
-# `vendor/qingjian/README.md`），因此**正式发布构建永远不要带这个 feature**——
-# 一旦开启，`include_str!("../../assets/fuma/xiaohe.txt")` 的内容会嵌入二进制，
-# 性质等同于随包分发。仅在 `cargo run` 或带此 feature 的内部构建里，设置页才会
-# 出现「使用内置示例小鹤辅码」按钮，按下后**当场复制到用户目录**并要求使用者
-# 已从方案作者处取得使用授权的二次确认。
-ime-builtin-xiaohe = []
-# 开发期内置码表：把 `assets/fuma/danzi.txt`（小鹤辅码）与 `assets/fuma/quan.txt`
-# （小鹤音形）编译进二进制，启动时装进用户目录，首次运行默认就是
-# 「小鹤双拼 + 小鹤辅码 + 小鹤音形」，不用再手动导入。
-#
-# **只给本机自用**：这两份码表权利归小鹤方案作者、未获再分发授权（见
-# `assets/fuma/README.md`），开启后产出的二进制**不得对外分发**，也不要进
-# CI/CD；发布流程与本仓库的 CI 都不带它。`scripts/package-dev.ps1` 会带这个
-# feature 构建本机测试包。两个表文件都被 `.gitignore` 挡住、只有本机有，
-# 缺失时 `include_str!` / `include_bytes!` 会让编译直接失败。
-ime-dev-tables = []
 
 [dependencies]
 aho-corasick = "1.1.5"
@@ -66,12 +48,6 @@ merman = { version = "0.7.0", features = ["raster"] }
 merman-render = "0.7.0"
 nucleo-matcher = "0.3.1"
 pinyin = { version = "0.11", default-features = false, features = ["plain"] }
-# 应用内输入法：拼音引擎、词库、bigram 整句与用户学习，全部进程内，没有 server。
-# vendor 自字在输入法（GPL-3.0-or-later），见 vendor/qingjian/README.md。
-qingjian-core = { path = "vendor/qingjian/core" }
-qingjian-dictionary = { path = "vendor/qingjian/dictionary" }
-qingjian-learning = { path = "vendor/qingjian/learning" }
-qingjian-lm = { path = "vendor/qingjian/lm" }
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"] }
 # Mermaid 的 SVG 由本进程自己转 PNG / PDF：随包字体只建一次字体库反复复用，

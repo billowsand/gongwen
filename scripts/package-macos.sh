@@ -125,7 +125,7 @@ fi
 RUNTIME_DIR="$STAGE/runtime"
 if [ -d "$RUNTIME_DIR" ]; then
     # PDF 由 Typst 在进程内排版，旧 runtime 里的 TeX 资产不随包。
-    rm -rf "$RUNTIME_DIR/tectonic" "$RUNTIME_DIR/texbundle"
+    rm -rf "$RUNTIME_DIR/tectonic" "$RUNTIME_DIR/texbundle" "$RUNTIME_DIR/ime"
 else
     warn "no runtime/ directory; app bundle will not include the bundled fonts (PDF export unavailable)"
 fi

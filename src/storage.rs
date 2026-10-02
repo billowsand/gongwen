@@ -242,8 +242,8 @@ mod tests {
         assert_eq!(config.rag.rerank.mode, crate::models::RerankMode::Llm);
         // 输入法：示例配置给的是「启用全拼 + 全角标点 + 一页五个」。
         assert!(config.ime.enabled);
-        assert!(config.ime.shuangpin.is_empty());
-        assert!(config.ime.fuma.is_empty());
+        assert!(!config.ime.auto_commit);
+        assert!(config.ime.fifth_commit);
         assert!(config.ime.full_width_punctuation);
         assert_eq!(config.ime.page_size, 5);
         assert_eq!(config.ime.page_keys, "[]");

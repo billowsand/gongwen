@@ -264,18 +264,13 @@
   },
   "ime": {
     "enabled": true,
-    "shuangpin": "",
-    "fuma": "",
-    "fuma_hint": "typed",
     "full_width_punctuation": true,
     "page_size": 5,
     "page_keys": "[]",
     "candidate_vertical": false,
     "candidate_font_percent": 100,
-    "yinxing": false,
-    "yinxing_auto_commit": false,
-    "yinxing_hint": true,
-    "phrases": []
+    "auto_commit": false,
+    "fifth_commit": true
   },
   "theme": "claude"
 }

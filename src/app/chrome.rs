@@ -100,21 +100,9 @@ fn draw_window_glyph(
 }
 
 /// 底部状态栏的紧凑图标按钮：尺寸、内边距都按 Windows 状态栏风格收小。
-/// 状态栏里的输入法方案标记：双拼取一个字（鹤 / 自 / 微 / 搜），辅码另加一个「辅」。
-/// 两个都没开就返回 `None`（纯全拼，不用额外标记）。
-fn ime_scheme_marker(ime: &crate::models::ImeConfig) -> Option<String> {
-    let mut marker = String::new();
-    match ime.shuangpin.trim() {
-        "xiaohe" => marker.push('鹤'),
-        "ziranma" => marker.push('自'),
-        "microsoft" => marker.push('微'),
-        "sogou" => marker.push('搜'),
-        _ => {}
-    }
-    if !ime.fuma.trim().is_empty() {
-        marker.push('辅');
-    }
-    (!marker.is_empty()).then_some(marker)
+/// 状态栏统一标记词表输入法。
+fn ime_scheme_marker(_ime: &crate::models::ImeConfig) -> Option<String> {
+    Some("词表".into())
 }
 
 /// 状态栏的输入法指示：中 / 英 + 方案标记。整块可点，点了切中英。
