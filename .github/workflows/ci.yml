@@ -173,7 +173,7 @@ jobs:
       image: ubuntu:20.04
     env:
       # 与 release.yml 的 RUNTIME_RELEASE_TAG 保持一致。
-      RUNTIME_RELEASE_TAG: v0.7.0
+      RUNTIME_RELEASE_TAG: v0.8.0
       RUNTIME_REPO: billowsand/gongwen-runtime
       DEBIAN_FRONTEND: noninteractive
     defaults:
