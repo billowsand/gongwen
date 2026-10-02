@@ -5,6 +5,10 @@ use crate::models::TemplateKind;
 
 #[test]
 fn physical_page_count_matches_export_for_all_official_templates() {
+    // 页数要与真实排版的 PDF 对得上，本机没有 runtime/fonts（CI）时跳过。
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
     let base = tempfile::tempdir().unwrap();
     let markdown = format!(
         "# 测试稿件\n\n{}\n<!-- [附件] -->\n# 附件\n\n附件正文。\n",
@@ -50,6 +54,10 @@ fn physical_page_count_matches_export_for_all_official_templates() {
 
 #[test]
 fn copy_numbered_manuscript_counts_one_copy_with_its_original_print_record() {
+    // 同上：要真正排一遍 PDF 才能数份号稿的页数。
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
     let base = tempfile::tempdir().unwrap();
     let mut input = DraftInput::default();
     input.profile.number_copies = true;

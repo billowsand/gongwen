@@ -1483,6 +1483,10 @@ mod research_tests {
 
     #[test]
     fn research_redline_pdf_data_carries_marks() {
+        // 排版数据要真排一遍才能拿到，本机没有 runtime/fonts（CI）时跳过。
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
         let old = "<!-- [正文] -->\n\n## 研究背景\n\n由$x^{2}$可知。";
         let new = "<!-- [正文] -->\n\n## 研究背景\n\n由$x^{3}$可知，另见附件。";
         let doc = build(old, new);

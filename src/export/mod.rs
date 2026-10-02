@@ -1725,10 +1725,12 @@ mod tests {
             kind: TemplateKind::PlainDocument,
             ..Default::default()
         };
+        // PDF 要随包字体；没有 runtime/fonts 的环境（CI）只出 md 与 docx。
+        let fonts_available = crate::portable_runtime::find_font_dir().is_some();
         let selection = ExportSelection {
             markdown: true,
             docx: true,
-            pdf: true,
+            pdf: fonts_available,
             overwrite: false,
         };
         let run = || {
@@ -1751,7 +1753,7 @@ mod tests {
             (&first, "普通公文-通知-送审稿"),
             (&second, "普通公文-通知-送审稿-2"),
         ] {
-            assert_eq!(files.len(), 3);
+            assert_eq!(files.len(), if fonts_available { 3 } else { 2 });
             for file in files {
                 assert_eq!(file.parent().unwrap(), temp.path().join(stem));
                 assert!(
@@ -1763,7 +1765,9 @@ mod tests {
             }
             assert!(archive_entry(&files[0], &format!("{stem}.md")).is_some());
             assert!(files[1].ends_with(format!("{stem}.docx")));
-            assert!(files[2].ends_with(format!("{stem}.pdf")));
+            if fonts_available {
+                assert!(files[2].ends_with(format!("{stem}.pdf")));
+            }
         }
     }
 

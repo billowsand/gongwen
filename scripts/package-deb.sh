@@ -39,7 +39,7 @@ if [ ! -x "$STAGING/gongwen-assistant" ]; then
     echo "error: staging binary not found or not executable: $STAGING/gongwen-assistant" >&2
     exit 1
 fi
-if [ ! -f "$STAGING/runtime/fonts/FangSong.ttf" ]; then
+if [ ! -f "$STAGING/runtime/fonts/FZFangSong.ttf" ]; then
     echo "error: staging runtime fonts not found: $STAGING/runtime/fonts" >&2
     exit 1
 fi

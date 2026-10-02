@@ -227,7 +227,7 @@ cat >> "$APP_DIR/Contents/Info.plist" <<'EOF'
 EOF
 
 echo "App bundle created: $APP_DIR"
-if [ -f "$MACOS_DIR/runtime/fonts/FangSong.ttf" ]; then
+if [ -f "$MACOS_DIR/runtime/fonts/FZFangSong.ttf" ]; then
     echo "Runtime fonts included: runtime/fonts"
 else
     echo "Runtime fonts NOT included: app starts for preview, but PDF export needs a runtime"

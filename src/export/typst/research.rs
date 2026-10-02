@@ -160,6 +160,10 @@ mod tests {
 
     #[test]
     fn research_physical_page_count_matches_pdf_including_cover_toc_and_blank_pages() {
+        // 页数要与真实排版的 PDF 对得上，本机没有 runtime/fonts（CI）时跳过。
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
         let base = tempfile::tempdir().unwrap();
         let input = DraftInput {
             kind: crate::models::TemplateKind::ResearchReport,
