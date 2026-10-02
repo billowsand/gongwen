@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""帮助手册示意图批量生成器：输出 13 个 .drawio，再由 draw.io CLI 导出 PNG。
+"""帮助手册示意图批量生成器：输出 11 个 .drawio，再由 draw.io CLI 导出 PNG。
 
 风格取自应用的 Claude 奶油主题：陶土强调色、暖灰描边。
 

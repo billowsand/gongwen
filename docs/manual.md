@@ -39,7 +39,7 @@
 |---|---|
 | [15 标准词库](help/15-vocabulary.md) | 单位树、人员与 Excel 导入导出 |
 | [16 校对词表](help/16-proofread-table.md) | 六组分类、三级判定与命中条件 |
-| [17 公文词表与输入法](help/17-lexicon.md) | 扫描收词、省键数与小鹤码表 |
+| [17 公文词表与输入法](help/17-lexicon.md) | 扫描收词、省键数与公文四码词表 |
 | [18 知识库与问答](help/18-knowledge.md) | 导入、索引、检索测试与知识库问答 |
 
 ## 第五部分 稿件与设置
@@ -68,4 +68,4 @@
 
 本目录与应用内帮助中心同源：正文以 `assets/help/*.md` 为准，配图在 `assets/help/images/`。新增或修改章节后同步两边，并在 `src/help/content.rs` 的 `CHAPTERS` 里登记。
 
-流程示意图的源文件在 [`help/diagrams/`](help/diagrams/)：`gen.py` 批量生成 13 个 `.drawio`，再用 draw.io 桌面版导出 PNG 到 `assets/help/images/`。改图改 `gen.py` 后重跑即可。
+流程示意图的源文件在 [`help/diagrams/`](help/diagrams/)：`gen.py` 批量生成 11 个 `.drawio`，再用 draw.io 桌面版导出 PNG 到 `assets/help/images/`。改图改 `gen.py` 后重跑即可。

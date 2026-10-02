@@ -174,7 +174,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "17-lexicon",
         Part::Lexicon,
         "公文词表与输入法",
-        "扫描收词、省键数与小鹤码表"
+        "扫描收词、省键数与公文四码词表"
     ),
     chapter!(
         "18-knowledge",
