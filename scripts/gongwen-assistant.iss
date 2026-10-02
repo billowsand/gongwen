@@ -41,8 +41,10 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+; 本包是 x64 二进制，x64compatible 表示 x64 系统与 ARM64 上的 x64 模拟都可安装；
+; 旧写法 x64 在 Inno Setup 6.5+ 已废弃（会被替换成 x64os 并告警）。
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no

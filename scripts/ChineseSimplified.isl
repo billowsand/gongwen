@@ -1,5 +1,9 @@
 ﻿; *** Inno Setup version 6.5.0+ Chinese Simplified messages ***
 ;
+; 已按 Inno Setup 6.7.3 的 Default.isl 核对消息名：两边一一对应，且不含 6.5 之前
+; 才有的 FileExists / ExistingFileNewer，否则 ISCC 会报 "Message name ... is not
+; recognized by this version of Inno Setup" 并忽略（等价于回落默认英文）。
+;
 ; To download user-contributed translations of this file, go to:
 ;   https://jrsoftware.org/files/istrans/
 ;
@@ -334,13 +338,11 @@ ExistingFileReadOnly2=无法替换已存在的文件，它是只读的。
 ExistingFileReadOnlyRetry=移除只读属性并重试(&R)
 ExistingFileReadOnlyKeepExisting=保留已存在的文件(&K)
 ErrorReadingExistingDest=尝试读取已存在的文件时出错：
-FileExists=目标文件已存在。是否要覆盖它？
 FileExistsSelectAction=选择操作
 FileExists2=文件已经存在。
 FileExistsOverwriteExisting=覆盖已存在的文件(&O)
 FileExistsKeepExisting=保留已存在的文件(&K)
 FileExistsOverwriteOrKeepAll=为接下来的冲突文件执行此操作(&D)
-ExistingFileNewer=已存在的文件比安装程序将要安装的文件还要新。是否要覆盖它？
 ExistingFileNewerSelectAction=选择操作
 ExistingFileNewer2=已存在的文件比安装程序将要安装的文件还要新。
 ExistingFileNewerOverwriteExisting=覆盖已存在的文件(&O)

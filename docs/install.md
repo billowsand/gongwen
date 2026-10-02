@@ -6,6 +6,11 @@ GitHub Releases 只提供两种发布包：Windows x64 安装程序（`gongwen-a
 
 发布流水线从 `gongwen-runtime` 仓库下载平台 runtime，与 `scripts/package-portable.ps1` 一起组装为完整安装包：Windows 用 Inno Setup 打成安装程序，Debian Linux 用 `scripts/package-deb.sh` 打成 deb（安装到 `/opt/gongwen-assistant`）。相关资产受授权和体积限制，不进入源码仓库。
 
+本地打 Windows 安装包（`scripts/package-dev.ps1` / `scripts/package-installer.ps1`）需要
+Inno Setup **6.3 或更新**：`.iss` 与 `scripts/ChineseSimplified.isl` 都按 6.7.3 校对过，
+用的是 6.3 引入的 `x64compatible` 架构标识、且不再包含 6.5 前才有的 `FileExists` /
+`ExistingFileNewer` 消息（旧版编译时会给“架构标识废弃”“消息名不认识”的告警）。
+
 ## 在 Omarchy / Arch Linux 安装
 
 Release 不再提供 Omarchy 运行包与 `PKGBUILD`，需从源码构建。该变体显式使用原生 Wayland、XDG Desktop Portal 与稳定的 `cn.localtools.GongwenAssistant` app id；在 Hyprland 平铺会话中会自动使用紧凑窗口控件。
