@@ -20,6 +20,15 @@ use crate::common::front_matter;
 use crate::common::table::span_at;
 use crate::common::table_layout::{analyze_table, cell_alignment, ColumnAlignment, ColumnWidth};
 
+#[path = "research_text.rs"]
+mod research_text;
+
+/// 研究报告中人工书写的可见正文（不含封面元数据和自动生成的目录、编号）。
+/// 与排版共用解析器；引用键、锚点和公式控制命令不算作文字。
+pub fn visible_body_text(markdown: &str) -> String {
+    research_text::body_text(&remove_report_title(markdown))
+}
+
 /// 一份排版数据。
 #[derive(Debug, Serialize)]
 pub struct Doc {

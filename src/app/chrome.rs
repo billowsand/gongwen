@@ -1294,6 +1294,28 @@ impl GongwenApp {
             let ime_english = self.ime.english();
             let ime_scheme = ime_scheme_marker(&self.config.ime);
             let active_doc = self.active_doc;
+            let statistics = if show_doc_controls {
+                let doc = &mut self.docs[active_doc];
+                Some(doc.statistics.update(
+                    &doc.draft,
+                    &doc.generated_markdown,
+                    &self.config,
+                    ui.ctx(),
+                ))
+            } else {
+                None
+            };
+            let statistics_width = statistics.as_ref().map_or(0.0, |(label, _)| {
+                ui.painter()
+                    .layout_no_wrap(
+                        label.clone(),
+                        egui::FontId::proportional(theme::font_sizes::SMALL),
+                        theme::text_soft(),
+                    )
+                    .size()
+                    .x
+                    + 12.0
+            });
             let (timeline_active, result_open, warnings_count, saved) = if show_doc_controls {
                 self.docs
                     .get(active_doc)
@@ -1311,7 +1333,14 @@ impl GongwenApp {
                 (false, false, 0, false)
             };
 
-            let status_limit = (ui.available_width() * 0.38).clamp(160.0, 420.0);
+            // 先给稿件统计和右侧入口留位；窗口变窄时状态文案缩短，模型名自动让位。
+            let reserved = statistics_width
+                + if show_doc_controls { 64.0 } else { 0.0 }
+                + if ime_active { 96.0 } else { 0.0 }
+                + 32.0;
+            let status_limit = (ui.available_width() * 0.38)
+                .clamp(160.0, 420.0)
+                .min((ui.available_width() - reserved).max(0.0));
             ui.horizontal(|ui| {
                 // 行高写死：`set_height` 同时钉住上下限，行内控件才不会去填满面板高度。
                 ui.set_height(ROW_HEIGHT);
@@ -1390,6 +1419,24 @@ impl GongwenApp {
                             let doc = &mut self.docs[active_doc];
                             doc.preview_mode = PreviewMode::VersionDiff;
                             doc.draft_diff.timeline.expanded = true;
+                        }
+                        if let Some((label, tip)) = &statistics {
+                            ui.add_space(8.0);
+                            let response = ui.add_sized(
+                                [
+                                    (statistics_width - 12.0).min(ui.available_width()).max(0.0),
+                                    ROW_HEIGHT,
+                                ],
+                                egui::Label::new(
+                                    egui::RichText::new(label).color(theme::text_soft()),
+                                )
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                            );
+                            if response.on_hover_text(tip).clicked() {
+                                self.docs[active_doc].statistics.retry();
+                                ui.ctx().request_repaint();
+                            }
                         }
                         ui.min_rect().left()
                     })

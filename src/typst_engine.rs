@@ -355,24 +355,7 @@ pub fn compile(job: &TypstJob, set: &FontSet) -> Result<TypstOutcome> {
         job.template,
         &job.files,
     );
-    let warned = typst::compile::<PagedDocument>(&world);
-    let warnings: Vec<String> = warned
-        .warnings
-        .iter()
-        .filter(|d| d.severity == Severity::Warning)
-        .map(|d| describe(&world, d))
-        .collect();
-    let document = match warned.output {
-        Ok(document) => document,
-        Err(errors) => {
-            let message = errors
-                .iter()
-                .map(|d| describe(&world, d))
-                .collect::<Vec<_>>()
-                .join("\n");
-            bail!("Typst 排版失败：{message}");
-        }
-    };
+    let (document, warnings) = layout(&world)?;
     let proof = proof_report(&document);
     let options = typst_pdf::PdfOptions {
         ident: Smart::Auto,
@@ -393,6 +376,40 @@ pub fn compile(job: &TypstJob, set: &FontSet) -> Result<TypstOutcome> {
         proof,
         warnings,
     })
+}
+
+/// 使用导出时的完整排版结果数物理页；不生成 PDF，也不写输出文件。
+pub(crate) fn page_count(job: &TypstJob, set: &FontSet) -> Result<usize> {
+    let world = GongwenWorld::with_template(
+        set,
+        job.data.clone(),
+        job.base_dir,
+        job.template,
+        &job.files,
+    );
+    Ok(layout(&world)?.0.pages().len())
+}
+
+fn layout(world: &GongwenWorld) -> Result<(PagedDocument, Vec<String>)> {
+    let warned = typst::compile::<PagedDocument>(world);
+    let warnings: Vec<String> = warned
+        .warnings
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .map(|d| describe(world, d))
+        .collect();
+    let document = match warned.output {
+        Ok(document) => document,
+        Err(errors) => {
+            let message = errors
+                .iter()
+                .map(|d| describe(world, d))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!("Typst 排版失败：{message}");
+        }
+    };
+    Ok((document, warnings))
 }
 
 /// 横向附件页改成与 TeX（pdflscape）同一种页面结构：纸张仍是竖向 A4、版面内容逆时针

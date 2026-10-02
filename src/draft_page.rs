@@ -40,6 +40,7 @@ mod references;
 mod revise;
 mod ribbon;
 mod source_nav;
+mod statistics;
 mod table;
 mod tasks;
 mod timeline;
@@ -346,6 +347,8 @@ pub(crate) struct DraftSession {
     pub(crate) manuscript_id: Option<i64>,
     pub(crate) draft: DraftInput,
     pub(crate) generated_markdown: String,
+    /// 当前稿件的中英文统计与实际分页缓存。
+    pub(crate) statistics: statistics::DocumentStatistics,
     pub(crate) warnings: Vec<ReviewNote>,
     /// 上一次编译由孤行探针实测出来的提示，以及它对应的正文快照。孤行是排版
     /// 结果，只对那一份正文成立；正文一改这批提示立即作废，等下次编译再报。
@@ -543,6 +546,7 @@ impl DraftSession {
             manuscript_id,
             draft,
             generated_markdown,
+            statistics: statistics::DocumentStatistics::default(),
             warnings: Vec::new(),
             proof_warnings: Vec::new(),
             proof_markdown: String::new(),

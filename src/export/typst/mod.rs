@@ -74,6 +74,68 @@ pub(crate) fn write_pdf_with_base(
     elements: &ElementMarks,
     base_dir: &Path,
 ) -> Result<TypstOutcome> {
+    let (doc, set, missing) = prepare(
+        input, markdown, display, fonts, numbering, elements, base_dir,
+    )?;
+    let data = serde_json::to_string(&doc).context("无法序列化 Typst 文档数据")?;
+    let mut outcome = typst_engine::compile(&TypstJob::official(data, base_dir), &set)?;
+    for src in missing {
+        outcome
+            .warnings
+            .insert(0, format!("插图文件不存在，已略过：{src}"));
+    }
+    std::fs::write(path, &outcome.pdf)
+        .with_context(|| format!("无法写入 PDF：{}", path.display()))?;
+    Ok(outcome)
+}
+
+/// 状态栏按单份稿件数页，份号和版记印数保留，仅省去重复排出的其它份。
+pub(crate) fn page_count(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+) -> Result<usize> {
+    let base = crate::storage::config_dir()?;
+    page_count_with_base(input, markdown, display, fonts, numbering, &base)
+}
+
+fn page_count_with_base(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    base: &Path,
+) -> Result<usize> {
+    let (mut doc, set, _) = prepare(
+        input,
+        markdown,
+        display,
+        fonts,
+        numbering,
+        &Default::default(),
+        base,
+    )?;
+    doc.copies.truncate(1);
+    let data = serde_json::to_string(&doc).context("无法序列化 Typst 文档数据")?;
+    typst_engine::page_count(&TypstJob::official(data, base), &set)
+}
+
+#[cfg(test)]
+mod page_count_tests;
+
+#[allow(clippy::too_many_arguments)]
+fn prepare(
+    input: &DraftInput,
+    markdown: &str,
+    display: &UnitDisplay,
+    fonts: &FontConfig,
+    numbering: &NumberingConfig,
+    elements: &ElementMarks,
+    base_dir: &Path,
+) -> Result<(Doc, typst_engine::FontSet, Vec<String>)> {
     crate::document_reference::References::check(markdown)?;
     let rendered = crate::mermaid::materialize(
         markdown,
@@ -90,16 +152,7 @@ pub(crate) fn write_pdf_with_base(
         set.families.clone(),
     );
     let missing = drop_missing_images(&mut doc, base_dir);
-    let data = serde_json::to_string(&doc).context("无法序列化 Typst 文档数据")?;
-    let mut outcome = typst_engine::compile(&TypstJob::official(data, base_dir), &set)?;
-    for src in missing {
-        outcome
-            .warnings
-            .insert(0, format!("插图文件不存在，已略过：{src}"));
-    }
-    std::fs::write(path, &outcome.pdf)
-        .with_context(|| format!("无法写入 PDF：{}", path.display()))?;
-    Ok(outcome)
+    Ok((doc, set, missing))
 }
 
 /// 同上，插图按用户配置目录解析。

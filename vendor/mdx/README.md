@@ -35,6 +35,8 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
   `ConvertRequest` 去掉 `template` / `compile_pdf`。公文助手的 PDF 全部由 Typst 排版，
   研究报告的排版数据见 `typst_research`。
 - 不保留上游的 `tests/`、`docs/`、`examples/`、`font/`、`scripts/`。
+- `typst_research::visible_body_text` 共用研究报告解析器提取可见正文，供宿主的
+  中英文计数使用；剔除链接地址、引用键和锚点，公式只提取文字说明，不改变排版。
 
 ### 待同步回上游的改动
 

@@ -99,6 +99,41 @@ pub(crate) fn write_pdf(
     )
 }
 
+/// 按完整定稿排版数物理页，封面、目录、附录与自动补的空白页均计入。
+pub(crate) fn page_count(
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+) -> Result<usize> {
+    page_count_with_base(input, markdown, numbering, &crate::storage::config_dir()?)
+}
+
+fn page_count_with_base(
+    input: &DraftInput,
+    markdown: &str,
+    numbering: &NumberingConfig,
+    base_dir: &Path,
+) -> Result<usize> {
+    let bundle = ResearchSourceBundle::create(
+        input,
+        markdown,
+        numbering,
+        crate::mermaid::Format::Pdf,
+        base_dir,
+    )?;
+    let (data, files, _) = document(&bundle.markdown)?;
+    let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
+    typst_engine::page_count(
+        &TypstJob {
+            data,
+            base_dir: bundle.root(),
+            template: Template::Research,
+            files,
+        },
+        &set,
+    )
+}
+
 /// 测试用：只生成模板数据，落盘查看。
 #[cfg(test)]
 pub(crate) fn document_json(
@@ -121,6 +156,39 @@ pub(crate) fn document_json(
 mod tests {
     use super::*;
     use mdx::typst_research::{Doc, Item, build};
+
+    #[test]
+    fn research_physical_page_count_matches_pdf_including_cover_toc_and_blank_pages() {
+        let base = tempfile::tempdir().unwrap();
+        let input = DraftInput {
+            kind: crate::models::TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        let markdown = concat!(
+            "# 页数测试报告\n\n<!-- [摘要] -->\n\n摘要正文。\n\n",
+            "<!-- [目录] -->\n\n<!-- [正文] -->\n\n## 背景\n\n正文。\n\n",
+            "$$x=\\frac{1}{2}$$\n\n## 措施\n\n| 项目 | 数值 |\n| --- | --- |\n| 测试 | 123 |\n\n",
+            "<!-- [附录] -->\n\n## 数据说明\n\n附录正文。\n"
+        );
+        let numbering = NumberingConfig::default();
+        let count = page_count_with_base(&input, markdown, &numbering, base.path()).unwrap();
+        let outcome = write_pdf_with_base(
+            &base.path().join("research.pdf"),
+            &input,
+            markdown,
+            &numbering,
+            base.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            count,
+            crate::manuscript_io::send_package::page_count(&outcome.pdf).unwrap()
+        );
+        assert!(
+            count >= 6,
+            "应计入封面、摘要、目录、多章及附录，实际 {count}"
+        );
+    }
 
     fn build_str(markdown: &str) -> Doc {
         let dir = tempfile::tempdir().unwrap();
