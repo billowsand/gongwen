@@ -21,6 +21,7 @@ use std::time::Duration;
 pub(crate) mod candidates;
 mod export_naming;
 pub(crate) mod merge;
+pub(crate) mod registry;
 mod search;
 pub(crate) mod send_package;
 pub(crate) mod sync;
@@ -386,6 +387,8 @@ impl ManuscriptStore {
         }
         // 起草页候选区：同样幂等建表，不单开档位。
         candidates::ensure_schema(&self.conn)?;
+        // 公文登记簿：同样幂等建表，不单开档位。
+        registry::ensure_schema(&self.conn)?;
         sync::migrate(&mut self.conn)?;
         // 送批材料：同样幂等建表，不单开档位。
         send_package::ensure_schema(&self.conn)?;

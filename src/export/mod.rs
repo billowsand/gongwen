@@ -210,10 +210,9 @@ fn write_markdown_archive(
         .then(|| input.research.bibliography_content.trim())
         .filter(|content| !content.is_empty());
     let document = if input.kind.is_research() {
-        let expanded = crate::document_reference::References::read(markdown).expanded(markdown);
-        research::markdown_source(input, &expanded, bibliography.is_some(), numbering)
+        research::markdown_source(input, markdown, bibliography.is_some(), numbering)
     } else {
-        crate::document_reference::References::read(markdown).expanded(markdown)
+        markdown.to_string()
     };
 
     let file = fs::File::create(path)
@@ -224,17 +223,6 @@ fn write_markdown_archive(
 
     zip.start_file(format!("{stem}.md"), options)?;
     zip.write_all(document.as_bytes())?;
-
-    if markdown.contains(crate::document_reference::DEFINITION) {
-        // 普通工具读主文件即可；原生可编辑文件同时保留标记与全部定义，重导入不丢引用。
-        zip.start_file(format!("{stem}-可编辑.md"), options)?;
-        let editable = if input.kind.is_research() {
-            research::markdown_source_editable(input, markdown, bibliography.is_some(), numbering)
-        } else {
-            markdown.to_string()
-        };
-        zip.write_all(editable.as_bytes())?;
-    }
 
     // 图片按 markdown 里写的相对路径入包（通常是 `images/xxx.png`），解压后
     // 引用不用改就能用。引用缺失时跳过，与从前复制到导出目录的行为一致：
@@ -318,7 +306,6 @@ pub(crate) fn export_artifacts(
     numbering: &NumberingConfig,
     version_name: Option<&str>,
 ) -> Result<ExportArtifacts> {
-    crate::document_reference::References::check(markdown)?;
     fs::create_dir_all(output_dir)
         .with_context(|| format!("无法创建输出目录：{}", output_dir.display()))?;
     let title = document_title(input, markdown);

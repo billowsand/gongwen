@@ -16,19 +16,11 @@ use std::sync::OnceLock;
 
 /// 跑一遍全部文档级规则。
 pub fn check(input: &DraftInput, markdown: &str) -> Vec<ProofNote> {
-    let references = crate::document_reference::References::read(markdown);
+    let mut notes = Vec::new();
+    // 先在原文上查引用写法，再把引用屏蔽掉：引用的名称与文号是事实，其他规则不该去改。
+    check_citations(markdown, &mut notes);
     let masked = crate::document_reference::masked(markdown);
     let markdown = masked.as_ref();
-    let mut notes = Vec::new();
-    notes.extend(references.issues.into_iter().map(|issue| {
-        note(
-            "公文引用完整性",
-            "公文引用",
-            Level::MustFix,
-            issue.message,
-            issue.range,
-        )
-    }));
     if let Some(title) = find_title(markdown) {
         check_title(input.kind, &title, &mut notes);
     }
@@ -102,6 +94,27 @@ fn note_with_fix(
     ProofNote {
         replacement: Some(replacement),
         ..note(id, group, level, message, span)
+    }
+}
+
+// ── 公文引用 ────────────────────────────────────────────────────────────────
+
+/// 正文里《名称》（文号）的括号写法：年份用六角括号、外层用全角括号、序号不编虚位。
+/// 规范写法是确定的，给一键改法。
+fn check_citations(markdown: &str, notes: &mut Vec<ProofNote>) {
+    for citation in crate::document_reference::detect_numbered(markdown) {
+        if citation.standard(markdown) {
+            continue;
+        }
+        let text = citation.text();
+        notes.push(note_with_fix(
+            "RULE-CITATION-NUMBER",
+            "公文引用",
+            Level::MustFix,
+            format!("公文引用的文号写法不规范，应为「{text}」"),
+            citation.range,
+            text,
+        ));
     }
 }
 
@@ -962,6 +975,36 @@ pub fn check_doc_date(input: &DraftInput, today: chrono::NaiveDate) -> Option<St
 
 #[cfg(test)]
 mod tests {
+    // ── 公文引用 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn citation_brackets_get_a_one_click_fix_and_mask_other_rules() {
+        let text = "根据《关于二〇二六年工作的通知》(某办函[2026]012号)要求，\
+                    结合《实施方案》（某办发〔2026〕3号）落实。";
+        let markdown = format!(
+            "# 关于测试有关事项的函
+
+{text}
+"
+        );
+        let notes = check_all_with(&markdown);
+        let hits = notes
+            .iter()
+            .filter(|note| note.entry_id == "RULE-CITATION-NUMBER")
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 1, "规范写法不报");
+        assert_eq!(
+            hits[0].replacement.as_deref(),
+            Some("《关于二〇二六年工作的通知》（某办函〔2026〕12号）")
+        );
+        assert_eq!(
+            &markdown[hits[0].span.clone()],
+            "《关于二〇二六年工作的通知》(某办函[2026]012号)"
+        );
+        // 引用名称里的汉字年份是原文事实，不报年份写法。
+        assert!(notes.iter().all(|note| note.entry_id != "RULE-NUM-YEAR"));
+    }
+
     // ── 敬称与句末标点 ──────────────────────────────────────────────────
 
     #[test]

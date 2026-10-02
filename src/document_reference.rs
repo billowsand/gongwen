@@ -1,367 +1,249 @@
-//! 公文引用：稳定标记与自带快照的定义。定义是独占一行的 HTML 注释，随正文、
-//! 历史版本及同步 ZIP 保存；渲染不依赖来源稿件是否在本机。
+//! 公文引用：正文里的 `《名称》（发文字号）` 就是引用本身，不另存标记或元数据。
+//!
+//! 识别是确定性的：书名号后紧跟的括号里规范化后是「代字〔年份〕序号号」，就认作公文
+//! 引用；`（试行）`、`（征求意见稿）` 之类不算。没有文号的文件只有名称，单凭书名号分不出
+//! 是公文还是书名、法规，只有名称与稿件库或公文登记簿里某份无文号文件完全一致才认。
+//! 来源关联在运行时按文号与名称比对（见 `draft_page::references`），正文里不存任何 ID。
 
-use anyhow::{Result, bail, ensure};
-use serde::{Deserialize, Serialize};
+use anyhow::{Result, ensure};
 use std::{borrow::Cow, collections::BTreeMap, ops::Range};
 
-pub(crate) const PREFIX: &str = "{{公文:";
-pub(crate) const DEFINITION: &str = "<!-- gongwen-reference ";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Reference {
-    pub id: String,
-    pub title: String,
-    pub number: String,
-    pub no_number: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub document_uuid: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision_uuid: Option<String>,
-}
-
-impl Reference {
-    pub fn manual(title: &str, number: &str, no_number: bool) -> Result<Self> {
-        let reference = Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            title: title
-                .trim()
-                .trim_start_matches('《')
-                .trim_end_matches('》')
-                .trim()
-                .into(),
-            number: if no_number {
-                String::new()
-            } else {
-                number.trim().into()
-            },
-            no_number,
-            document_uuid: None,
-            revision_uuid: None,
-        };
-        reference.validate()?;
-        Ok(reference)
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        ensure!(uuid::Uuid::parse_str(&self.id).is_ok(), "引用编号无效");
-        ensure!(!self.title.trim().is_empty(), "请填写公文名称");
-        ensure!(
-            !self.title.chars().any(char::is_control),
-            "公文名称不能包含换行或控制字符"
-        );
-        ensure!(
-            !self.number.chars().any(char::is_control),
-            "发文字号不能包含换行或控制字符"
-        );
-        ensure!(
-            (self.no_number && self.number.is_empty())
-                || (!self.no_number && !self.number.trim().is_empty()),
-            "请填写完整发文字号，或明确选择无文号"
-        );
-        for id in [&self.document_uuid, &self.revision_uuid]
-            .into_iter()
-            .flatten()
-        {
-            ensure!(uuid::Uuid::parse_str(id).is_ok(), "引用来源身份无效");
-        }
-        ensure!(
-            self.revision_uuid.is_none() || self.document_uuid.is_some(),
-            "引用版本缺少来源稿件身份"
-        );
-        Ok(())
-    }
-
-    pub fn token(&self) -> String {
-        format!("{PREFIX}{}}}}}", self.id)
-    }
-
-    pub fn display(&self) -> String {
-        if self.no_number {
-            format!("《{}》", self.title)
-        } else {
-            format!("《{}》（{}）", self.title, self.number)
-        }
-    }
-
-    pub fn definition(&self) -> String {
-        // 避免用户文字提前关闭 HTML 注释，也避免把定义里的标记识别为正文引用。
-        let json = serde_json::to_string(self)
-            .expect("引用可序列化")
-            .replace('<', "\\u003c")
-            .replace('>', "\\u003e");
-        format!("{DEFINITION}{json} -->")
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct Issue {
+/// 正文里识别出的一处公文引用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Citation {
+    /// 从 `《` 到收尾的 `）`（无文号时到 `》`）的字节范围。
     pub range: Range<usize>,
-    pub message: String,
+    pub title: String,
+    /// 括号里的原文；无文号为空。
+    pub number: String,
+    /// 规范后的文号；无文号为空。
+    pub normalized: String,
 }
 
-#[derive(Default)]
-pub(crate) struct References {
-    pub items: BTreeMap<String, Reference>,
-    pub issues: Vec<Issue>,
+impl Citation {
+    /// 规范写法：全角括号、六角括号年份。
+    pub fn text(&self) -> String {
+        display(&self.title, &self.normalized)
+    }
+
+    /// 正文里的写法是否已经规范。
+    pub fn standard(&self, markdown: &str) -> bool {
+        markdown.get(self.range.clone()) == Some(self.text().as_str())
+    }
 }
 
-impl References {
-    pub fn read(markdown: &str) -> Self {
-        let mut result = Self::default();
-        for (start, line) in definition_lines(markdown) {
-            if let Some(json) = line.trim().strip_prefix(DEFINITION) {
-                let parsed = json
-                    .strip_suffix(" -->")
-                    .and_then(|json| serde_json::from_str::<Reference>(json).ok());
-                let issue = match parsed {
-                    Some(reference) => match reference.validate() {
-                        Ok(()) if !result.items.contains_key(&reference.id) => {
-                            result.items.insert(reference.id.clone(), reference);
-                            None
-                        }
-                        Ok(()) => Some("引用定义重复，请修复后导出".into()),
-                        Err(error) => Some(error.to_string()),
-                    },
-                    None => Some("公文引用定义损坏，请修复后导出".into()),
-                };
-                if let Some(message) = issue {
-                    result.issues.push(Issue {
-                        range: start..start + line.len(),
-                        message,
-                    });
-                }
+/// `《名称》（文号）`；没有文号只留书名号。
+pub(crate) fn display(title: &str, number: &str) -> String {
+    if number.is_empty() {
+        format!("《{title}》")
+    } else {
+        format!("《{title}》（{number}）")
+    }
+}
+
+/// 名称去掉用户顺手带上的外层书名号与首尾空白；名称里套的书名号按规范改成〈〉。
+pub(crate) fn clean_title(title: &str) -> String {
+    title
+        .trim()
+        .trim_start_matches('《')
+        .trim_end_matches('》')
+        .trim()
+        .replace('《', "〈")
+        .replace('》', "〉")
+}
+
+/// 登记、插入前的校验：名称不能空、不能跨行，有文号就得认得出是文号。
+/// 返回清理后的名称与规范后的文号（无文号为空）。
+pub(crate) fn validate(title: &str, number: &str, no_number: bool) -> Result<(String, String)> {
+    let title = clean_title(title);
+    ensure!(!title.is_empty(), "请填写公文名称");
+    ensure!(!title.chars().any(char::is_control), "公文名称不能包含换行");
+    if no_number {
+        return Ok((title, String::new()));
+    }
+    let number = normalize_number(number);
+    ensure!(
+        !number.is_empty(),
+        "请填写发文字号，或勾选该文件没有发文字号"
+    );
+    ensure!(
+        is_document_number(&number),
+        "认不出发文字号，应形如 某办函〔2026〕12号"
+    );
+    Ok((title, number))
+}
+
+/// 规范后的文号是否形如「代字〔四位年份〕序号号」。
+pub(crate) fn is_document_number(normalized: &str) -> bool {
+    let Some((code, rest)) = normalized.split_once('〔') else {
+        return false;
+    };
+    let Some((year, serial)) = rest.split_once('〕') else {
+        return false;
+    };
+    let code_len = code.chars().count();
+    (1..=20).contains(&code_len)
+        && !code
+            .chars()
+            .any(|ch| ch.is_whitespace() || "（）()《》，。；：".contains(ch))
+        && year.len() == 4
+        && year.chars().all(|ch| ch.is_ascii_digit())
+        && serial.strip_suffix('号').is_some_and(|digits| {
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+/// 只认有文号的引用。不查稿件库的地方（校对、AI 闸门）用它。
+pub(crate) fn detect_numbered(markdown: &str) -> Vec<Citation> {
+    detect(markdown, |_| false)
+}
+
+/// 识别正文里的公文引用。`untitled` 判断一个名称是不是已知的无文号文件。
+/// 代码围栏、行内代码、公式与转义字符里的书名号不算。
+pub(crate) fn detect(markdown: &str, untitled: impl Fn(&str) -> bool) -> Vec<Citation> {
+    let mut found = Vec::new();
+    for segment in plain_segments(markdown) {
+        let text = &markdown[segment.clone()];
+        let mut search = 0;
+        while let Some(open) = text[search..].find('《').map(|at| search + at) {
+            let title_start = open + '《'.len_utf8();
+            let Some(close) = text[title_start..].find('》').map(|at| title_start + at) else {
+                break;
+            };
+            let title = &text[title_start..close];
+            // 中间又出现《：外层没闭合，从里层重新找。
+            if let Some(inner) = title.rfind('《') {
+                search = title_start + inner;
+                continue;
             }
-        }
-        for (range, id) in occurrences(markdown) {
-            if !result.items.contains_key(&id) {
-                result.issues.push(Issue {
-                    range,
-                    message: format!("公文引用未定义或编号损坏：{id}"),
+            let after = close + '》'.len_utf8();
+            search = after;
+            if title.trim().is_empty() || title.chars().count() > 100 {
+                continue;
+            }
+            let numbered = parenthesized(&text[after..]).and_then(|(inner, length)| {
+                let normalized = normalize_number(inner);
+                is_document_number(&normalized).then(|| (after + length, inner, normalized))
+            });
+            if let Some((end, number, normalized)) = numbered {
+                found.push(Citation {
+                    range: segment.start + open..segment.start + end,
+                    title: title.to_owned(),
+                    number: number.to_owned(),
+                    normalized,
+                });
+                search = end;
+            } else if untitled(title) {
+                found.push(Citation {
+                    range: segment.start + open..segment.start + after,
+                    title: title.to_owned(),
+                    number: String::new(),
+                    normalized: String::new(),
                 });
             }
         }
-        result
-    }
-
-    pub fn check(markdown: &str) -> Result<()> {
-        let references = Self::read(markdown);
-        if !references.issues.is_empty() {
-            bail!(
-                "公文引用需要修复：{}",
-                references
-                    .issues
-                    .iter()
-                    .map(|issue| {
-                        let line = markdown[..issue.range.start]
-                            .bytes()
-                            .filter(|b| *b == b'\n')
-                            .count()
-                            + 1;
-                        format!("第{line}行：{}", issue.message)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("；")
-            );
-        }
-        Ok(())
-    }
-
-    /// 替换发生在源码切行以后，原始行长及块范围保持不变。插入普通文字时转义
-    /// Markdown 语法，防止名称中的星号、竖线等被误认成加粗或表格。
-    pub fn apply<'a>(
-        &self,
-        line: &'a str,
-        start: usize,
-        spans: &[(Range<usize>, String)],
-    ) -> Cow<'a, str> {
-        if line.trim().starts_with(DEFINITION) || !line.contains(PREFIX) {
-            return Cow::Borrowed(line);
-        }
-        let mut text = String::new();
-        let mut copied = 0;
-        for (range, id) in spans
-            .iter()
-            .filter(|(range, _)| range.start >= start && range.end <= start + line.len())
-        {
-            let range = range.start - start..range.end - start;
-            text.push_str(&line[copied..range.start]);
-            let display = self
-                .items
-                .get(id)
-                .map_or_else(|| format!("【公文引用待修复：{id}】"), Reference::display);
-            text.push_str(&escape_markdown(&display));
-            copied = range.end;
-        }
-        if copied == 0 {
-            return Cow::Borrowed(line);
-        }
-        text.push_str(&line[copied..]);
-        Cow::Owned(text)
-    }
-
-    /// 通用 Markdown / 对外复制使用展开后的正文，不携带内部定义。
-    pub fn expanded(&self, markdown: &str) -> String {
-        let spans = occurrences(markdown);
-        let definitions = definition_lines(markdown)
-            .into_iter()
-            .map(|(start, _)| start)
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut result = String::new();
-        let mut start = 0;
-        for line in markdown.split_inclusive('\n') {
-            if !definitions.contains(&start) {
-                if spans
-                    .iter()
-                    .any(|(range, _)| range.start >= start && range.start < start + line.len())
-                {
-                    result.push_str(&self.apply(line, start, &spans));
-                } else {
-                    result.push_str(line);
-                }
-            }
-            start += line.len();
-        }
-        result
-    }
-}
-
-pub(crate) fn escape_markdown(text: &str) -> String {
-    let mut out = String::new();
-    for ch in text.chars() {
-        if matches!(
-            ch,
-            '\\' | '*' | '_' | '`' | '[' | ']' | '{' | '}' | '|' | '$' | '<' | '>'
-        ) {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// 忽略定义、代码围栏、行内代码、公式与显式转义；破损标记也返回，不能静默印出。
-pub(crate) fn occurrences(markdown: &str) -> Vec<(Range<usize>, String)> {
-    let mut found = Vec::new();
-    let mut offset = 0;
-    let mut fence = None;
-    let mut math_delimiter: Option<usize> = None;
-    for line in markdown.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if !fence_line(trimmed, &mut fence) && fence.is_none() && !trimmed.starts_with(DEFINITION) {
-            let mut index = 0;
-            let mut code_delimiter: Option<usize> = None;
-            while index < line.len() {
-                let rest = &line[index..];
-                let ch = rest.chars().next().unwrap();
-                if ch == '\\' {
-                    index += 1;
-                    if index < line.len() {
-                        index += line[index..].chars().next().unwrap().len_utf8();
-                    }
-                    continue;
-                }
-                if ch == '`' {
-                    let length = rest.chars().take_while(|ch| *ch == '`').count();
-                    if code_delimiter == Some(length) {
-                        code_delimiter = None;
-                    } else if code_delimiter.is_none() && math_delimiter.is_none() {
-                        code_delimiter = Some(length);
-                    }
-                    index += length;
-                    continue;
-                }
-                if ch == '$' && code_delimiter.is_none() {
-                    let length = rest.chars().take_while(|ch| *ch == '$').count();
-                    if math_delimiter == Some(length) {
-                        math_delimiter = None;
-                    } else if math_delimiter.is_none() {
-                        math_delimiter = Some(length);
-                    }
-                    index += length;
-                    continue;
-                }
-                if code_delimiter.is_none() && math_delimiter.is_none() && rest.starts_with(PREFIX)
-                {
-                    let end = rest
-                        .find("}}")
-                        .map_or(rest.trim_end_matches(['\r', '\n']).len(), |end| end + 2);
-                    let id = rest[PREFIX.len()..end].trim_end_matches("}}").to_string();
-                    found.push((offset + index..offset + index + end, id));
-                    index += end;
-                } else {
-                    index += ch.len_utf8();
-                }
-            }
-        }
-        if math_delimiter == Some(1) {
-            math_delimiter = None;
-        }
-        offset += line.len();
     }
     found
 }
 
-pub(crate) fn put(markdown: &str, reference: &Reference) -> String {
-    let definitions = definition_lines(markdown)
-        .into_iter()
-        .map(|(start, _)| start)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut out = String::new();
-    let mut replaced = false;
+/// 紧跟在书名号后的一对括号（全角半角混用也算，可嵌套）：返回括号内文字与整对括号的字节长度。
+fn parenthesized(text: &str) -> Option<(&str, usize)> {
+    if !text.starts_with(['（', '(']) {
+        return None;
+    }
+    let mut depth = 0usize;
     let mut start = 0;
-    for line in markdown.split_inclusive('\n') {
-        let matches = definitions.contains(&start)
-            && line
-                .trim()
-                .strip_prefix(DEFINITION)
-                .and_then(|json| json.strip_suffix(" -->"))
-                .and_then(|json| serde_json::from_str::<Reference>(json).ok())
-                .is_some_and(|old| old.id == reference.id);
-        if matches {
-            out.push_str(&reference.definition());
-            out.push('\n');
-            replaced = true;
-        } else {
-            out.push_str(line);
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '（' | '(' => {
+                if depth == 0 {
+                    start = index + ch.len_utf8();
+                }
+                depth += 1;
+            }
+            '）' | ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let inner = &text[start..index];
+                    return (inner.chars().count() <= 40).then_some((inner, index + ch.len_utf8()));
+                }
+            }
+            '\n' => return None,
+            _ => {}
         }
-        start += line.len();
-    }
-    if !replaced {
-        if !out.ends_with('\n') {
-            out.push('\n');
+        if index > 160 {
+            return None;
         }
-        out.push_str(&reference.definition());
-        out.push('\n');
     }
-    out
+    None
 }
 
-/// 只移除引用定义，正文标记原样保留，供原生源码交换与逐条合并使用。
-pub(crate) fn without_definitions(markdown: &str) -> String {
-    remove_definitions(markdown, |_| true)
-}
-
-pub(crate) fn remove_definition(markdown: &str, id: &str) -> String {
-    remove_definitions(markdown, |line| {
-        line.trim()
-            .strip_prefix(DEFINITION)
-            .and_then(|json| json.strip_suffix(" -->"))
-            .and_then(|json| serde_json::from_str::<Reference>(json).ok())
-            .is_some_and(|reference| reference.id == id)
-    })
-}
-
-/// 围栏中的源码示例不参与快照解析、替换或移除。
-fn definition_lines(markdown: &str) -> Vec<(usize, &str)> {
+/// 正文里可以出现引用的片段：跳过代码围栏、行内代码、公式和反斜杠转义，按行切开。
+fn plain_segments(markdown: &str) -> Vec<Range<usize>> {
+    let mut segments = Vec::new();
+    let mut offset = 0;
     let mut fence = None;
-    crate::export::source_lines(markdown)
-        .into_iter()
-        .filter(|(_, line)| {
-            let trimmed = line.trim_start();
-            !fence_line(trimmed, &mut fence) && fence.is_none() && trimmed.starts_with(DEFINITION)
-        })
-        .collect()
+    let mut math: Option<usize> = None;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if !fence_line(trimmed, &mut fence) && fence.is_none() {
+            let mut index = 0;
+            let mut start = 0;
+            let mut code: Option<usize> = None;
+            let mut cut = |from: usize, to: usize| {
+                if from < to {
+                    segments.push(offset + from..offset + to);
+                }
+            };
+            while index < line.len() {
+                let rest = &line[index..];
+                let ch = rest.chars().next().unwrap();
+                let plain = code.is_none() && math.is_none();
+                if ch == '\\' {
+                    if plain {
+                        cut(start, index);
+                    }
+                    index += 1;
+                    if index < line.len() {
+                        index += line[index..].chars().next().unwrap().len_utf8();
+                    }
+                    if plain {
+                        start = index;
+                    }
+                    continue;
+                }
+                let state = match ch {
+                    '`' if math.is_none() => &mut code,
+                    '$' if code.is_none() => &mut math,
+                    _ => {
+                        index += ch.len_utf8();
+                        continue;
+                    }
+                };
+                let length = rest.chars().take_while(|next| *next == ch).count();
+                if plain {
+                    cut(start, index);
+                }
+                if *state == Some(length) {
+                    *state = None;
+                } else if state.is_none() {
+                    *state = Some(length);
+                }
+                index += length;
+                if code.is_none() && math.is_none() {
+                    start = index;
+                }
+            }
+            if code.is_none() && math.is_none() {
+                cut(start, line.len());
+            }
+        }
+        if math == Some(1) {
+            math = None;
+        }
+        offset += line.len();
+    }
+    segments
 }
 
 fn fence_line(line: &str, fence: &mut Option<(char, usize)>) -> bool {
@@ -382,454 +264,200 @@ fn fence_line(line: &str, fence: &mut Option<(char, usize)>) -> bool {
     true
 }
 
-fn remove_definitions(markdown: &str, should_remove: impl Fn(&str) -> bool) -> String {
-    let removals = definition_lines(markdown)
-        .into_iter()
-        .filter(|(_, line)| should_remove(line))
-        .map(|(start, _)| start)
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut start = 0;
-    markdown
-        .split_inclusive('\n')
-        .filter(|line| {
-            let keep = !removals.contains(&start);
-            start += line.len();
-            keep
-        })
-        .collect()
-}
-
-pub(crate) fn to_plain(markdown: &str, reference: &Reference) -> String {
-    let mut result = markdown.to_string();
-    let spans = occurrences(markdown)
-        .into_iter()
-        .filter(|(_, id)| id == &reference.id)
-        .collect::<Vec<_>>();
-    for (range, _) in spans.into_iter().rev() {
-        result.replace_range(range, &escape_markdown(&reference.display()));
-    }
-    remove_definition(&result, &reference.id)
-}
-
-/// 文字校对屏蔽引用元数据与结构标记，字节长度保持不变，其他文字的定位不漂移。
-/// 引用内容需要更正时通过引用面板，不能让普通词表替换把 UUID 或 JSON 改坏。
+/// 文字校对屏蔽公文引用：引用的名称与文号是事实，不能被词表或规则改写。
+/// 字节长度保持不变，其他文字的定位不漂移。
 pub(crate) fn masked(markdown: &str) -> Cow<'_, str> {
-    if !markdown.contains(PREFIX) && !markdown.contains(DEFINITION) {
+    let citations = detect_numbered(markdown);
+    if citations.is_empty() {
         return Cow::Borrowed(markdown);
     }
     let mut bytes = markdown.as_bytes().to_vec();
-    for (range, _) in occurrences(markdown) {
-        bytes[range].fill(b' ');
-    }
-    for (start, line) in definition_lines(markdown) {
-        bytes[start..start + line.len()].fill(b' ');
+    for citation in citations {
+        bytes[citation.range].fill(b' ');
     }
     Cow::Owned(String::from_utf8(bytes).expect("只把完整 UTF-8 范围换成空格"))
 }
 
-/// 冲突面板展示人可读的引用信息，实际合并仍使用原定义，绝不丢失身份字段。
-pub(crate) fn conflict_display(markdown: &str) -> String {
-    let references = References::read(markdown);
-    if !references.items.is_empty() && without_definitions(markdown).trim().is_empty() {
-        references
-            .items
-            .values()
-            .map(Reference::display)
-            .collect::<Vec<_>>()
-            .join("；")
-    } else {
-        markdown.to_string()
-    }
-}
-
-/// AI 可以调整引用周围文字及位置，但不得修改定义或增删引用。规则修订也不能
-/// 直接改写结构标记；用户通过引用面板执行这些操作。
+/// AI 与规则修订可以挪动引用、改周围的话，但不能改动、增删有文号的引用；
+/// 只把括号写法改规范不算改动。
 pub(crate) fn ensure_preserved(before: &str, after: &str) -> Result<()> {
-    let old = References::read(before);
-    let new = References::read(after);
     let counts = |text: &str| {
         let mut counts = BTreeMap::<String, usize>::new();
-        for (_, id) in occurrences(text) {
-            *counts.entry(id).or_default() += 1;
+        for citation in detect_numbered(text) {
+            *counts.entry(citation.text()).or_default() += 1;
         }
         counts
     };
     ensure!(
-        old.items == new.items && counts(before) == counts(after),
-        "该建议改变了公文引用，请通过「公文引用」面板手工核对与调整，当前正文未改变"
-    );
-    ensure!(
-        new.issues.len() <= old.issues.len(),
-        "该建议损坏了公文引用，已放弃采纳"
+        counts(before) == counts(after),
+        "该建议改变了公文引用的名称或文号，已放弃采纳，当前正文未改变"
     );
     Ok(())
 }
 
-/// 从别篇粘贴时只带使用到的定义；同 ID 不同快照必须重新生成 ID，不覆盖目标篇。
-pub(crate) fn transfer(
-    fragment: &str,
-    items: &[Reference],
-    target: &str,
-) -> (String, Vec<Reference>) {
-    let destination = References::read(target);
-    let mut text = fragment.to_string();
-    let mut definitions = Vec::new();
-    for reference in items {
-        let mut reference = reference.clone();
-        if destination
-            .items
-            .get(&reference.id)
-            .is_some_and(|old| old != &reference)
-        {
-            let old_token = reference.token();
-            reference.id = uuid::Uuid::new_v4().to_string();
-            text = text.replace(&old_token, &reference.token());
-        }
-        definitions.push(reference);
+/// 把手工输入的发文字号规范成「机关代字〔年份〕序号号」。
+///
+/// 六角括号不好打，登记时允许用方括号、圆括号、方头括号或干脆不写括号，例如
+/// `某办函[2026]12号`、`某办函(2026)12`、`某办函2026 12`、`某办函2026年第012号`，
+/// 都规范为 `某办函〔2026〕12号`。全角数字转半角，空白去掉，序号按 GB/T 9704 不编虚位。
+/// 认不出年份的原样返回（只去空白），交给用户自己核对预览。
+pub(crate) fn normalize_number(input: &str) -> String {
+    const OPEN: &[char] = &['[', '(', '（', '【', '［', '〔', '{', '｛', '〖', '<', '＜'];
+    const CLOSE: &[char] = &[']', ')', '）', '】', '］', '〕', '}', '｝', '〗', '>', '＞'];
+    // 空白先当分隔符保留（`某办函 2026 12` 要靠它把年份和序号分开），最后统一去掉。
+    const SEPARATORS: &[char] = &[' ', '-', '－', '_', '.', '．', '、', '/', '／', '·', '•'];
+    let text: String = input
+        .chars()
+        .map(|ch| match ch {
+            '０'..='９' => char::from(b'0' + (ch as u32 - '０' as u32) as u8),
+            ch if ch.is_whitespace() => ' ',
+            _ => ch,
+        })
+        .collect();
+    let squeeze = |text: &str| text.chars().filter(|ch| *ch != ' ').collect::<String>();
+    let chars: Vec<char> = text.chars().collect();
+    // 第一段恰好四位、以 19 / 20 开头的数字当年份；代字里偶有数字也不会误认。
+    let year_at = (0..chars.len().saturating_sub(3)).find(|&start| {
+        chars[start..start + 4].iter().all(char::is_ascii_digit)
+            && matches!(chars[start..start + 2], ['1', '9'] | ['2', '0'])
+            && (start == 0 || !chars[start - 1].is_ascii_digit())
+            && chars.get(start + 4).is_none_or(|ch| !ch.is_ascii_digit())
+    });
+    let Some(start) = year_at else {
+        return squeeze(&text);
+    };
+    let prefix: String = chars[..start].iter().collect();
+    let prefix =
+        squeeze(prefix.trim_end_matches(|ch| OPEN.contains(&ch) || SEPARATORS.contains(&ch)));
+    if prefix.is_empty() {
+        return squeeze(&text);
     }
-    (text, definitions)
+    let year: String = chars[start..start + 4].iter().collect();
+    let rest: String = chars[start + 4..].iter().collect();
+    let rest = squeeze(
+        rest.trim_start_matches(|ch| CLOSE.contains(&ch) || SEPARATORS.contains(&ch) || ch == '年')
+            .trim_start_matches('第'),
+    );
+    let serial = rest.strip_suffix('号').unwrap_or(&rest);
+    let rest = if !serial.is_empty() && serial.chars().all(|ch| ch.is_ascii_digit()) {
+        let trimmed = serial.trim_start_matches('0');
+        format!("{}号", if trimmed.is_empty() { "0" } else { trimmed })
+    } else {
+        rest.clone()
+    };
+    format!("{prefix}〔{year}〕{rest}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn texts(markdown: &str) -> Vec<String> {
+        detect_numbered(markdown)
+            .into_iter()
+            .map(|citation| markdown[citation.range].to_owned())
+            .collect()
+    }
+
     #[test]
-    fn snapshot_is_self_contained_and_escapes_markup() {
-        let reference = Reference::manual("关于 A*B 的函", "办函〔2026〕12号", false).unwrap();
-        let source = put(
-            &format!("# 本篇\n根据{}办理。", reference.token()),
-            &reference,
-        );
-        References::check(&source).unwrap();
-        let refs = References::read(&source);
-        assert_eq!(refs.items[&reference.id], reference);
-        let expanded = refs.expanded(&source);
-        assert!(expanded.contains("《关于 A\\*B 的函》（办函〔2026〕12号）"));
-        assert!(!expanded.contains(DEFINITION));
-        let blocks = crate::export::parse_markdown_located(&source);
-        let paragraph = &blocks[1];
+    fn numbered_citations_are_detected_and_others_are_not() {
+        let text = "根据《建设实施方案》（项办函〔2026〕56号）和《某某条例》（试行），\
+                    参照《关于做好防火工作的通知》(某应急[2026]8号)及《会议纪要》（2026年版）。";
         assert_eq!(
-            &source[paragraph.range.clone()],
-            format!("根据{}办理。", reference.token())
+            texts(text),
+            [
+                "《建设实施方案》（项办函〔2026〕56号）",
+                "《关于做好防火工作的通知》(某应急[2026]8号)"
+            ]
         );
-        assert!(
-            matches!(&paragraph.block, crate::export::MarkdownBlock::Paragraph(text) if text.contains("办函〔2026〕12号"))
-        );
-    }
-
-    #[test]
-    fn missing_duplicate_and_damaged_definitions_block_export() {
-        assert!(References::check("根据{{公文:不存在}}办理。").is_err());
-        assert!(References::check("根据{{公文:坏标记").is_err());
-        let reference = Reference::manual("呈批件", "", true).unwrap();
-        assert!(
-            References::check(&format!(
-                "{}\n{}",
-                reference.definition(),
-                reference.definition()
-            ))
-            .is_err()
-        );
-        assert!(References::check("<!-- gongwen-reference 损坏 -->").is_err());
-        assert_eq!(reference.display(), "《呈批件》");
-    }
-
-    #[test]
-    fn document_reference_transfer_does_not_overwrite_another_snapshot() {
-        let reference = Reference::manual("旧函", "办函〔2026〕12号", false).unwrap();
-        let mut other = reference.clone();
-        other.number = "办函〔2026〕13号".into();
-        let target = put(&format!("根据{}办理。", other.token()), &other);
-        let (fragment, definitions) = transfer(
-            &reference.token(),
-            std::slice::from_ref(&reference),
-            &target,
-        );
-        assert_ne!(definitions[0].id, reference.id);
-        let merged = put(&format!("{fragment}\n{target}"), &definitions[0]);
-        References::check(&merged).unwrap();
-        assert_eq!(References::read(&merged).items[&reference.id], other);
+        let citations = detect_numbered(text);
+        assert!(citations[0].standard(text));
+        assert!(!citations[1].standard(text));
         assert_eq!(
-            References::read(&merged).items[&definitions[0].id].number,
-            reference.number
+            citations[1].text(),
+            "《关于做好防火工作的通知》（某应急〔2026〕8号）"
         );
     }
 
     #[test]
-    fn document_reference_ai_guard_preserves_definition_and_count() {
-        let reference = Reference::manual("检查函", "办函〔2026〕12号", false).unwrap();
-        let before = put(&format!("根据{}办理。", reference.token()), &reference);
-        let after = before.replace("办理", "认真办理");
-        ensure_preserved(&before, &after).unwrap();
-        assert!(ensure_preserved(&before, &before.replace(&reference.token(), "该函")).is_err());
-        let mut changed = reference.clone();
-        changed.number = "办函〔2026〕13号".into();
-        assert!(ensure_preserved(&before, &put(&before, &changed)).is_err());
-        assert!(ensure_preserved("正文", &before).is_err());
+    fn nested_brackets_titles_and_full_width_parentheses() {
+        let text =
+            "《关于印发〈实施办法〉的通知》（某办发（2026）3号）与《甲《乙》（某办函〔2026〕1号）";
+        assert_eq!(
+            texts(text),
+            [
+                "《关于印发〈实施办法〉的通知》（某办发（2026）3号）",
+                "《乙》（某办函〔2026〕1号）"
+            ]
+        );
+        assert_eq!(detect_numbered(text)[0].normalized, "某办发〔2026〕3号");
     }
 
     #[test]
-    fn document_reference_redline_compares_printed_words() {
-        let reference = Reference::manual("检查函", "办函〔2026〕12号", false).unwrap();
-        let before = put(
-            &format!("# 情况报告\n\n根据{}办理。", reference.token()),
-            &reference,
-        );
-        let mut changed = reference.clone();
-        changed.number = "办函〔2026〕13号".into();
-        let after = put(&before, &changed);
-        let redline = crate::redline::build(&before, &after);
-        assert!(!redline.is_empty());
-        assert!(!redline.markdown.contains(PREFIX));
-        assert!(!redline.markdown.contains(DEFINITION));
-        assert!(redline.markdown.contains("12"));
-        assert!(redline.markdown.contains("13"));
-        changed.document_uuid = Some(uuid::Uuid::new_v4().to_string());
-        assert!(crate::redline::build(&after, &put(&after, &changed)).is_empty());
+    fn code_math_and_escapes_are_skipped() {
+        let text = "`《甲》（某办函〔2026〕1号）` $《乙》（某办函〔2026〕2号）$ \\《丙》（某办函〔2026〕3号）\n\
+                    ```\n《丁》（某办函〔2026〕4号）\n```\n前文《戊》（某办函〔2026〕5号）";
+        assert_eq!(texts(text), ["《戊》（某办函〔2026〕5号）"]);
     }
 
     #[test]
-    fn document_reference_markdown_archive_has_plain_and_editable_documents() {
-        use std::io::Read;
-        let reference = Reference::manual("来函", "办函〔2026〕12号", false).unwrap();
-        let markdown = put(
-            &format!("# 本篇\n根据{}办理。", reference.token()),
-            &reference,
+    fn untitled_citations_need_a_known_title() {
+        let text = "报《关于报请审定的请示》，参阅《中华人民共和国保守国家秘密法》。";
+        let found = detect(text, |title| title == "关于报请审定的请示");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text(), "《关于报请审定的请示》");
+        assert!(found[0].number.is_empty());
+    }
+
+    #[test]
+    fn validation_and_ai_preservation() {
+        assert_eq!(
+            validate("《某函》", "某办函[2026]12", false).unwrap(),
+            ("某函".into(), "某办函〔2026〕12号".into())
         );
-        let dir = tempfile::tempdir().unwrap();
-        let output = crate::export::export_artifacts(
-            dir.path(),
-            &crate::models::DraftInput::default(),
-            &markdown,
-            &crate::models::ExportSelection {
-                markdown: true,
-                docx: false,
-                pdf: false,
-                ..Default::default()
-            },
-            &crate::units::UnitDisplay::new(&[]),
-            &crate::models::FontConfig::default(),
-            &crate::models::NumberingConfig::default(),
-            None,
-        )
-        .unwrap();
-        let mut zip = zip::ZipArchive::new(std::fs::File::open(&output.files[0]).unwrap()).unwrap();
-        for index in 0..zip.len() {
-            let mut file = zip.by_index(index).unwrap();
-            let editable = file.name().ends_with("-可编辑.md");
-            let mut body = String::new();
-            file.read_to_string(&mut body).unwrap();
-            if editable {
-                References::check(&body).unwrap();
-                assert_eq!(References::read(&body).items[&reference.id], reference);
-            } else {
-                assert!(body.contains(&reference.display()));
-                assert!(!body.contains(PREFIX));
-                assert!(!body.contains(DEFINITION));
-            }
+        assert_eq!(
+            validate("关于印发《实施办法》的通知", "", true).unwrap().0,
+            "关于印发〈实施办法〉的通知"
+        );
+        assert!(validate("某函", "", false).is_err());
+        assert!(validate("某函", "第十二号", false).is_err());
+        assert_eq!(validate("某函", "随便", true).unwrap().1, "");
+
+        let before = "按《甲》(某办函[2026]1号)办理。";
+        ensure_preserved(before, "请按《甲》（某办函〔2026〕1号）抓紧办理。").unwrap();
+        assert!(ensure_preserved(before, "按《甲》（某办函〔2026〕2号）办理。").is_err());
+        assert!(ensure_preserved(before, "按要求办理。").is_err());
+        let masked = masked(before);
+        assert_eq!(masked.len(), before.len());
+        assert!(!masked.contains('甲'));
+    }
+
+    #[test]
+    fn document_number_input_is_normalized_to_hexagonal_brackets() {
+        for input in [
+            "某办函〔2026〕12号",
+            "某办函[2026]12号",
+            "某办函(2026)12",
+            "某办函（2026）12号",
+            "某办函【2026】12号",
+            "某办函 2026 12",
+            "某办函2026-12",
+            "某办函2026年第012号",
+            "某办函 [2026] 12 号",
+            "某办函［２０２６］１２号",
+        ] {
+            assert_eq!(normalize_number(input), "某办函〔2026〕12号", "{input}");
         }
-        assert_eq!(zip.len(), 2);
-    }
-
-    #[test]
-    fn definitions_cannot_close_comments_or_create_tokens() {
-        let reference = Reference::manual("名称 --> {{公文:示例}}", "", true).unwrap();
-        let source = put(&reference.token(), &reference);
-        References::check(&source).unwrap();
-        assert_eq!(References::read(&source).items[&reference.id], reference);
-        assert_eq!(occurrences(&source).len(), 1);
-    }
-
-    #[test]
-    fn literal_code_math_and_escaped_examples_are_not_references() {
-        assert!(
-            occurrences(
-                "`{{公文:代码}}` ${{公文:公式}}$ \\{{公文:转义}}\n```\n{{公文:围栏}}\n```\n"
-            )
-            .is_empty()
-        );
-        assert!(occurrences("``字面 ` {{公文:代码}}``\n$$\n{{公文:跨行公式}}\n$$\n").is_empty());
-    }
-
-    #[test]
-    fn document_reference_fenced_definitions_remain_literal_examples() {
-        let reference = Reference::manual("示例函", "某函〔2026〕8号", false).unwrap();
-        let example = format!(
-            "````markdown\n```\n{}\n{}\n```\n````\n",
-            reference.definition(),
-            reference.token()
-        );
-        References::check(&example).unwrap();
-        assert!(References::read(&example).items.is_empty());
-        assert_eq!(References::read(&example).expanded(&example), example);
-        assert_eq!(without_definitions(&example), example);
-        assert_eq!(remove_definition(&example, &reference.id), example);
-        let actual = put(
-            &format!("{example}\n根据{}办理。", reference.token()),
-            &reference,
-        );
-        References::check(&actual).unwrap();
-        assert_eq!(occurrences(&actual).len(), 1);
-        assert_eq!(References::read(&actual).items.len(), 1);
-    }
-
-    #[test]
-    fn document_reference_merge_keeps_definitions_on_separate_lines() {
-        let reference = Reference::manual("来函", "某函〔2026〕8号", false).unwrap();
-        let base = format!(
-            "{}\n根据{}办理。",
-            reference.definition(),
-            reference.token()
-        );
-        let mut updated = reference.clone();
-        updated.title = "修订后的来函".into();
-        let local = format!("{}\n根据{}办理。", updated.definition(), reference.token());
-        let incoming = base.replace("办理", "认真办理");
-        let input = crate::models::DraftInput::default();
-        let proposal = crate::manuscript::merge::MergeProposal::build(
-            (&input, &base, ""),
-            (&input, &local, ""),
-            (&input, &incoming, ""),
-        )
-        .unwrap();
-        let (_, merged, _) = proposal.resolve(&[]).unwrap();
-        References::check(&merged).unwrap();
-        assert!(merged.contains("认真办理"));
-        assert_eq!(References::read(&merged).items[&reference.id], updated);
-    }
-
-    #[test]
-    fn document_reference_multiline_math_keeps_only_real_occurrences() {
-        let reference = Reference::manual("来函", "某函〔2026〕8号", false).unwrap();
-        let source = put(
-            &format!(
-                "$$\n{} $$ 根据{}办理。",
-                reference.token(),
-                reference.token()
-            ),
-            &reference,
-        );
-        assert_eq!(occurrences(&source).len(), 1);
-        let expanded = References::read(&source).expanded(&source);
-        assert!(expanded.contains(&reference.token()));
-        assert_eq!(expanded.matches(&reference.display()).count(), 1);
-        let lines = crate::export::parse_markdown_located(&source);
-        assert!(lines.iter().any(|line| {
-            matches!(&line.block, crate::export::MarkdownBlock::Paragraph(text)
-                if text.contains(&reference.token()) && text.contains(&reference.display()))
-        }));
-    }
-
-    #[test]
-    fn document_reference_plain_conversion_and_proofreading_keep_source_offsets() {
-        let reference = Reference::manual("有错别字的来函", "某函〔2026〕8号", false).unwrap();
-        let source = put(
-            &format!(
-                "根据{}办理。错别字\n再次引用{}。\n`{}`",
-                reference.token(),
-                reference.token(),
-                reference.token()
-            ),
-            &reference,
-        );
-        let mask = masked(&source);
-        assert_eq!(mask.len(), source.len());
+        // 认不出年份、或只有年份没有代字时原样（去空白）交给用户核对。
+        assert_eq!(normalize_number("某办 函12号"), "某办函12号");
+        assert_eq!(normalize_number("2026-12"), "2026-12");
+        // 序号后的附加文字不动，只统一括号。
         assert_eq!(
-            mask.find("错别字"),
-            source.find("。错别字").map(|start| start + "。".len())
+            normalize_number("某办函[2026]12号附件"),
+            "某办函〔2026〕12号附件"
         );
-        let lexicon = crate::proofread::Lexicon::parse(
-            "条目编号\t错误写法\t建议写法\t级别\t命中条件\t分组\t说明\t启用\nTEST\t错别字\t正确词\t必错\t总是\t测试\t\t是\n",
-        );
-        let notes = lexicon.check(&source);
-        assert_eq!(notes.len(), 1);
-        assert_eq!(&source[notes[0].span.clone()], "错别字");
-        let broken = source.replace(&reference.id, "损坏");
-        let notes = crate::proofread_rules::check(&crate::models::DraftInput::default(), &broken);
-        assert!(notes.iter().any(|note| note.group == "公文引用"
-            && note.level == crate::proofread::Level::MustFix
-            && note.replacement.is_none()));
-        let plain = to_plain(&source, &reference);
-        assert_eq!(plain.matches(&reference.display()).count(), 2);
-        assert!(plain.contains(&format!("`{}`", reference.token())));
-        assert!(!plain.contains(DEFINITION));
-        References::check(&plain).unwrap();
-    }
-
-    #[test]
-    fn document_reference_research_editable_source_preserves_numbered_table_tokens() {
-        let reference = Reference::manual("来函", "某函〔2026〕8号", false).unwrap();
-        let markdown = put(
-            &format!(
-                "# 报告\n\n<!-- [序号表] -->\n| 序号 | 依据 |\n| --- | --- |\n| | {} |\n",
-                reference.token()
-            ),
-            &reference,
-        );
-        let source = crate::export::research::markdown_source_editable(
-            &crate::models::DraftInput::default(),
-            &markdown,
-            false,
-            &crate::models::NumberingConfig::default(),
-        );
-        assert!(source.contains(&reference.token()));
-        assert!(!source.contains(&reference.display()));
-        References::check(&source).unwrap();
-    }
-
-    #[test]
-    fn preview_word_and_pdf_data_share_the_same_reference_text() {
-        use std::io::Read;
-        let reference = Reference::manual("关于开展检查的函", "某办函〔2026〕12号", false).unwrap();
-        let markdown = put(
-            &format!("# 办理情况报告\n\n根据{}办理。", reference.token()),
-            &reference,
-        );
-        let input = crate::models::DraftInput::default();
-        let json = crate::redline::typst_tests::typst_json(&input, &markdown);
-        fn texts(value: &serde_json::Value, out: &mut String) {
-            match value {
-                serde_json::Value::Array(items) => {
-                    for item in items {
-                        texts(item, out);
-                    }
-                }
-                serde_json::Value::Object(fields) => {
-                    if let Some(text) = fields.get("t").and_then(serde_json::Value::as_str) {
-                        out.push_str(text);
-                    }
-                    for (key, value) in fields {
-                        if key != "t" {
-                            texts(value, out);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut rendered = String::new();
-        texts(&serde_json::from_str(&json).unwrap(), &mut rendered);
-        assert!(rendered.contains(&reference.display()), "{rendered}");
-        assert!(!json.contains(PREFIX));
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("引用.docx");
-        crate::export::write_docx(
-            &path,
-            &input,
-            &markdown,
-            &crate::units::UnitDisplay::new(&[]),
-        )
-        .unwrap();
-        let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
-        let mut xml = String::new();
-        zip.by_name("word/document.xml")
-            .unwrap()
-            .read_to_string(&mut xml)
-            .unwrap();
-        assert!(xml.contains("《关于开展检查的函》"));
-        assert!(xml.contains("某办函〔2026〕12号"));
-        assert!(!xml.contains(PREFIX));
-        assert!(!xml.contains(DEFINITION));
+        // 代字本身带数字时，只认四位年份。
+        assert_eq!(normalize_number("某1办函(2026)3"), "某1办函〔2026〕3号");
+        assert_eq!(normalize_number(""), "");
     }
 }

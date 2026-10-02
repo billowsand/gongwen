@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 mod candidate_panel;
 mod candidates;
 mod caret;
+mod citation_marks;
 mod diff_editor;
 mod diff_gaps;
 mod diff_hunks;
@@ -35,7 +36,6 @@ mod heading_focus;
 mod markdown;
 mod navigator;
 mod page;
-mod reference_clipboard;
 mod references;
 mod revise;
 mod ribbon;
@@ -378,6 +378,9 @@ pub(crate) struct DraftSession {
     pub(crate) heading_focus: Option<heading_focus::HeadingFocus>,
     /// 公文引用插入与管理弹窗，插入点在打开时冻结。
     pub(crate) reference_picker: Option<references::ReferencePicker>,
+    /// 公文引用的来源清单：源码编辑框据此给引用画线、出悬停卡片。用到时才读稿件库，
+    /// 引用面板关闭或在卡片里登记后换新。
+    pub(crate) citation_index: Option<references::CitationIndex>,
     /// 候选区：写稿时暂时移出正文、以后可能还要用的文字。按稿件各存一份。
     pub(crate) candidates: candidates::CandidateState,
     /// 公文预览的缩放倍率；None 表示按面板宽度自适应。
@@ -563,6 +566,7 @@ impl DraftSession {
             clear_review_confirm: false,
             heading_focus: None,
             reference_picker: None,
+            citation_index: None,
             candidates: candidates::CandidateState::default(),
             preview_zoom: None,
             preview_fit_scale: 1.0,

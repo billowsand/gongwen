@@ -306,77 +306,7 @@ pub fn merge_markdown(base: &str, local: &str, incoming: &str) -> Vec<MarkdownCh
     if incoming == base {
         return vec![MarkdownChunk::Text(local.to_string())];
     }
-    if [base, local, incoming]
-        .iter()
-        .any(|text| text.contains(crate::document_reference::DEFINITION))
-    {
-        let reference_sets =
-            [base, local, incoming].map(crate::document_reference::References::read);
-        if reference_sets
-            .iter()
-            .all(|references| references.issues.is_empty())
-        {
-            return merge_references(base, local, incoming, &reference_sets);
-        }
-    }
     merge_markdown_lines(base, local, incoming)
-}
-
-/// 引用按稳定 ID 各自合并，正文按原始行合并。两侧新增不同引用不会因定义都在
-/// 文末而产生假冲突；同一条快照两侧都改时整条由用户选，避免拼成未确认的新引用。
-fn merge_references(
-    base: &str,
-    local: &str,
-    incoming: &str,
-    sets: &[crate::document_reference::References; 3],
-) -> Vec<MarkdownChunk> {
-    use crate::document_reference::{Reference, without_definitions};
-    let bodies = [base, local, incoming].map(without_definitions);
-    let mut chunks = merge_markdown_lines(&bodies[0], &bodies[1], &bodies[2]);
-    let ids = sets
-        .iter()
-        .flat_map(|set| set.items.keys().cloned())
-        .collect::<std::collections::BTreeSet<_>>();
-    let definition = |reference: Option<&Reference>| {
-        reference.map_or_else(String::new, |reference| {
-            format!("{}\n", reference.definition())
-        })
-    };
-    // 定义可以在源码任何独占行上；剥离后末行未必有换行，重新追加前须保持独占行。
-    let finish_line = |text: &mut String| {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-    };
-    if let Some(last) = chunks.last_mut() {
-        match last {
-            MarkdownChunk::Text(text) => finish_line(text),
-            MarkdownChunk::Conflict {
-                base,
-                local,
-                incoming,
-            } => {
-                finish_line(base);
-                finish_line(local);
-                finish_line(incoming);
-            }
-        }
-    }
-    for id in ids {
-        let [base, local, incoming] = sets.each_ref().map(|set| set.items.get(&id));
-        if local == incoming || incoming == base {
-            chunks.push(MarkdownChunk::Text(definition(local)));
-        } else if local == base {
-            chunks.push(MarkdownChunk::Text(definition(incoming)));
-        } else {
-            chunks.push(MarkdownChunk::Conflict {
-                base: definition(base),
-                local: definition(local),
-                incoming: definition(incoming),
-            });
-        }
-    }
-    chunks
 }
 
 fn merge_markdown_lines(base: &str, local: &str, incoming: &str) -> Vec<MarkdownChunk> {
@@ -454,58 +384,6 @@ fn merge_markdown_lines(base: &str, local: &str, incoming: &str) -> Vec<Markdown
         out.push(MarkdownChunk::Text(lines[cursor..].concat()));
     }
     out
-}
-
-#[cfg(test)]
-mod reference_tests {
-    use super::*;
-    use crate::document_reference::{Reference, References, put};
-
-    #[test]
-    fn document_reference_conflict_is_a_whole_confirmed_snapshot() {
-        let reference = Reference::manual("旧函", "办函〔2026〕12号", false).unwrap();
-        let base = put(
-            &format!("# 本篇\n根据{}办理。\n", reference.token()),
-            &reference,
-        );
-        let mut a = reference.clone();
-        a.title = "本机函名".into();
-        let mut b = reference.clone();
-        b.number = "办函〔2026〕13号".into();
-        let input = DraftInput::default();
-        let proposal = MergeProposal::build(
-            (&input, &base, ""),
-            (&input, &put(&base, &a), ""),
-            (&input, &put(&base, &b), ""),
-        )
-        .unwrap();
-        assert_eq!(proposal.conflict_count(), 1);
-        for (take, expected) in [(false, a), (true, b)] {
-            let (_, merged, _) = proposal.resolve(&[take]).unwrap();
-            References::check(&merged).unwrap();
-            assert_eq!(References::read(&merged).items[&reference.id], expected);
-        }
-    }
-
-    #[test]
-    fn document_reference_independent_insertions_merge_without_tail_conflict() {
-        let a = Reference::manual("甲函", "", true).unwrap();
-        let b = Reference::manual("乙函", "", true).unwrap();
-        let base = "# 本篇\n第一段。\n\n第二段。\n";
-        let local = put(&base.replace("第一段", &format!("第一段{}", a.token())), &a);
-        let incoming = put(&base.replace("第二段", &format!("第二段{}", b.token())), &b);
-        let input = DraftInput::default();
-        let proposal = MergeProposal::build(
-            (&input, base, ""),
-            (&input, &local, ""),
-            (&input, &incoming, ""),
-        )
-        .unwrap();
-        assert_eq!(proposal.conflict_count(), 0);
-        let (_, merged, _) = proposal.resolve(&[]).unwrap();
-        References::check(&merged).unwrap();
-        assert_eq!(References::read(&merged).items.len(), 2);
-    }
 }
 
 #[cfg(test)]

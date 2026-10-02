@@ -6,7 +6,9 @@
 use crate::app::visible_rows;
 use crate::draft_page::candidates;
 use crate::draft_page::caret::show_with_glyph_caret;
+use crate::draft_page::citation_marks::CardAction;
 use crate::draft_page::markdown::byte_at_char;
+use crate::draft_page::references::CitationIndex;
 use crate::draft_page::{
     DraftPage, PreviewMode, PreviewScroll, continue_ordered_list, editor_cursor, editor_selection,
     jump_to_source, markdown_matches_mode, select_source_range,
@@ -763,12 +765,6 @@ impl DraftPage<'_> {
 
     /// Markdown 源码编辑框，带语法高亮。
     pub(crate) fn markdown_editor(&mut self, ui: &mut egui::Ui) {
-        let clipboard_before = self.doc.generated_markdown.clone();
-        let reference_paste = super::reference_clipboard::before_edit(
-            ui.ctx(),
-            &clipboard_before,
-            !self.doc.read_only(),
-        );
         let source_mode = self.doc.preview_mode == PreviewMode::Source;
         let source_scroll_request = source_mode
             .then(|| self.doc.source_minimap.requested_offset.take())
@@ -834,6 +830,18 @@ impl DraftPage<'_> {
             .editor_font_size
             .clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX);
         let line_number_size = (editor_font_size - 2.0).max(9.0);
+        // 公文引用的来源清单：第一次用到时读稿件库，读不出来就按空清单只画线。
+        if self.doc.citation_index.is_none() {
+            let own = self.doc.manuscript_id;
+            self.doc.citation_index = Some(
+                self.store
+                    .as_deref_mut()
+                    .and_then(|store| CitationIndex::load(store, own).ok())
+                    .unwrap_or_default(),
+            );
+        }
+        let citation_index = self.doc.citation_index.as_ref();
+        let mut citation_action = None;
         let text = &mut self.doc.generated_markdown;
         let highlighter = &mut self.doc.highlighter;
         let editor_fonts = self.config.editor_fonts;
@@ -891,9 +899,6 @@ impl DraftPage<'_> {
                                     .layouter(&mut layouter)
                                     .desired_width(f32::INFINITY)
                                     .desired_rows(rows)
-                                    .hint_text(
-                                        "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
-                                    )
                                     .show(ui)
                             })
                         })
@@ -923,6 +928,12 @@ impl DraftPage<'_> {
                             .as_ref()
                             .map(|galley| (galley, theme::surface())),
                     );
+                    if let Some(index) = citation_index
+                        && self.doc.text_drag.is_none()
+                    {
+                        citation_action =
+                            super::citation_marks::show(ui, &output, text, index, editable);
+                    }
                     // Ctrl+滚轮调整源码字号：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量
                     // 报成 zoom_delta，滚动区不会同时滚动，两者天然不冲突。
                     let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
@@ -1075,12 +1086,46 @@ impl DraftPage<'_> {
         if let Some(action) = menu_action {
             self.run_editor_menu_action(ui.ctx(), action);
         }
-        super::reference_clipboard::after_edit(
-            ui.ctx(),
-            &mut self.doc.generated_markdown,
-            &clipboard_before,
-            reference_paste,
-        );
+        if let Some(action) = citation_action {
+            self.run_citation_card_action(ui.ctx(), action);
+        }
+    }
+
+    /// 执行源码编辑框里公文引用卡片上点的操作。
+    fn run_citation_card_action(&mut self, ctx: &egui::Context, action: CardAction) {
+        match action {
+            CardAction::Rewrite(edits) => {
+                let count = edits.len();
+                let (updated, cursor) =
+                    super::citation_marks::rewrite(&self.doc.generated_markdown, edits);
+                crate::draft_page::diff_editor::replace_with_undo(
+                    ctx,
+                    &mut self.doc.generated_markdown,
+                    updated,
+                    cursor,
+                );
+                *self.status = format!("已改写 {count} 处公文引用，可按 Ctrl+Z 撤销。");
+            }
+            CardAction::Register(title, number) => {
+                let own = self.doc.manuscript_id;
+                let Some(store) = self.store.as_deref_mut() else {
+                    *self.status = "稿件库未打开，无法登记。".into();
+                    return;
+                };
+                *self.status = match store.register_document(&title, &number, number.is_empty()) {
+                    Ok(_) => {
+                        self.doc.citation_index = CitationIndex::load(store, own).ok();
+                        format!("已登记《{title}》到公文登记簿。")
+                    }
+                    Err(error) => format!("登记失败：{error}"),
+                };
+            }
+            CardAction::OpenSource(id) => {
+                self.actions
+                    .push(crate::app::DraftAction::OpenManuscript(id));
+            }
+            CardAction::OpenPanel => self.open_reference_picker(ctx),
+        }
     }
 
     /// 切换审校显示方式。离开对照模式时清掉光标跟随高亮——它锚在旧段落上，

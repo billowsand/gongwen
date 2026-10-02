@@ -1,62 +1,261 @@
-//! 公文引用选择器：冻结插入点与来源快照，确认后一次性写正文及引用定义。
+//! 公文引用面板：「选择来文」帮用户把《名称》（文号）打对后插进正文；「本篇引用」
+//! 从正文识别出全部引用，与稿件库、公文登记簿逐条比对，给出规范写法、改为来源写法、
+//! 登记等操作。
+//!
+//! 正文里只有普通文字（见 `document_reference`），来源关联每次打开面板时现比对，
+//! 不存任何 ID。弹窗打开时冻结正文与插入点，正文在弹窗外被改过就拒绝写入。
 
-use crate::document_reference::{self, Reference, References};
+use crate::document_reference::{self, Citation};
 use crate::draft_page::{DraftPage, diff_editor, editor_selection};
-use crate::manuscript::ManuscriptFilter;
-use crate::models::{ManuscriptStatus, TemplateKind};
+use crate::manuscript::{ManuscriptFilter, ManuscriptStore};
+use crate::models::ManuscriptStatus;
 use crate::{export, theme};
+use anyhow::{anyhow, ensure};
 use eframe::egui;
-use std::collections::BTreeMap;
 use std::ops::Range;
 
-struct SourceState {
-    id: Option<i64>,
-    latest: Option<Reference>,
-    description: String,
+/// 弹窗内容宽度。
+const WIDTH: f32 = 520.0;
+/// 候选列表固定高度：搜索时列表变短，弹窗不跟着跳。
+const LIST_HEIGHT: f32 = 248.0;
+const ROW_HEIGHT: f32 = 30.0;
+
+/// 来源在本机的位置。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SourceKey {
+    Manuscript(i64),
+    Registry(i64),
 }
 
-struct Candidate {
-    id: i64,
+/// 一份可引用的文件：稿件库里的稿件，或公文登记簿里的一条。
+pub(crate) struct Source {
+    pub(crate) key: SourceKey,
     title: String,
+    /// 规范后的发文字号；无文号或未编号为空。
     number: String,
-    kind: TemplateKind,
-    status: ManuscriptStatus,
+    /// 「本篇引用」里的短标签。
+    pub(crate) origin: String,
+    /// 选中时预览下方的说明：取自哪一版等。
+    note: String,
+    /// 更正前的写法（只有登记簿有）。
+    aliases: Vec<(String, String)>,
 }
 
-#[derive(Default, PartialEq, Eq)]
-enum Tab {
-    #[default]
-    Library,
+impl Source {
+    pub(crate) fn text(&self) -> String {
+        document_reference::display(&self.title, &self.number)
+    }
+}
+
+/// 正文里一条引用与来源的比对结果（`usize` 是 `sources` 下标）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Match {
+    /// 名称、文号与来源一致。
+    Exact(usize),
+    /// 写的是登记簿里更正前的写法。
+    Outdated(usize),
+    /// 文号或名称只对上一半。
+    Differs(usize),
+    Unregistered,
+}
+
+/// 「本篇引用」的一条：同一份文件在正文里的全部出现处。
+pub(crate) struct Group {
+    pub(crate) title: String,
+    pub(crate) number: String,
+    pub(crate) ranges: Vec<Range<usize>>,
+    /// 写法不规范的出现处。
+    pub(crate) nonstandard: Vec<Range<usize>>,
+    pub(crate) status: Match,
+}
+
+impl Group {
+    pub(crate) fn text(&self) -> String {
+        document_reference::display(&self.title, &self.number)
+    }
+
+    /// 排序用：有问题的在前，未登记其次，一致的最后。
+    fn rank(&self) -> u8 {
+        match self.status {
+            Match::Outdated(_) | Match::Differs(_) => 0,
+            _ if !self.nonstandard.is_empty() => 0,
+            Match::Unregistered => 1,
+            Match::Exact(_) => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// 从列表选一份文件插入。
+    Browse,
+    /// 手工填写名称与文号插入。
     Manual,
+    /// 更正公文登记簿里的一条。
+    EditRegistry(i64),
+    /// 本篇已有引用。
     Current,
 }
 
+enum Action {
+    Close,
+    Choose(usize),
+    Commit,
+    Insert(String),
+    Locate(Range<usize>),
+    /// 把这些位置的文字换成新写法；`&str` 是状态栏里的动作名。
+    Rewrite(Vec<(Range<usize>, String)>, &'static str),
+    Register(Vec<(String, String)>),
+    OpenSource(i64),
+    EditRegistry(i64),
+    DeleteRegistry(i64),
+    Back,
+}
+
 pub(crate) struct ReferencePicker {
-    tab: Tab,
+    view: View,
     search: String,
-    kind: Option<TemplateKind>,
-    candidates: Vec<Candidate>,
-    /// 弹窗冻结期间正文若变动，拒绝用旧字节位置写入。
+    focus_search: bool,
+    index: CitationIndex,
+    /// 弹窗冻结期间正文若在别处变动，拒绝用旧字节位置写入。
     baseline: String,
     selection: Range<usize>,
-    selected: Option<Reference>,
+    /// 列表里选中的来源（`sources` 下标）。
+    chosen: Option<usize>,
     title: String,
     number: String,
     no_number: bool,
-    description: String,
+    /// 手工填写时同时存入公文登记簿。
+    register: bool,
+    /// 删除登记要再点一次确认。
+    confirm_delete: bool,
     error: Option<String>,
-    editing: Option<String>,
-    sources: BTreeMap<String, SourceState>,
 }
 
 impl ReferencePicker {
-    fn select_snapshot(&mut self, reference: &Reference, editing: bool) {
-        self.editing = editing.then(|| reference.id.clone());
-        self.selected = Some(reference.clone());
-        self.title = reference.title.clone();
-        self.number = reference.number.clone();
-        self.no_number = reference.no_number;
+    fn fill_form(&mut self, title: &str, number: &str, no_number: bool) {
+        self.title = title.to_owned();
+        self.number = number.to_owned();
+        self.no_number = no_number;
         self.error = None;
+        self.confirm_delete = false;
+    }
+
+    fn browse(&mut self) {
+        self.view = View::Browse;
+        self.chosen = None;
+        self.fill_form("", "", false);
+        self.focus_search = true;
+    }
+
+    fn form_view(&self) -> bool {
+        matches!(self.view, View::Manual | View::EditRegistry(_))
+    }
+
+    /// 预览：列表视图是选中来源的写法，表单视图按当前输入（文号已规范）。
+    fn preview(&self) -> Option<String> {
+        if self.form_view() {
+            let title = document_reference::clean_title(&self.title);
+            if title.is_empty() {
+                return None;
+            }
+            let number = if self.no_number {
+                String::new()
+            } else {
+                document_reference::normalize_number(&self.number)
+            };
+            Some(document_reference::display(&title, &number))
+        } else {
+            self.chosen.map(|index| self.index.sources[index].text())
+        }
+    }
+}
+
+/// 可引用的来源清单与比对。面板和编辑器共用：编辑器拿它给正文里的引用画线、出悬停卡片。
+#[derive(Default)]
+pub(crate) struct CitationIndex {
+    sources: Vec<Source>,
+}
+
+impl CitationIndex {
+    pub(crate) fn load(store: &mut ManuscriptStore, own: Option<i64>) -> anyhow::Result<Self> {
+        Ok(Self {
+            sources: load_sources(store, own)?,
+        })
+    }
+
+    /// 已知的无文号文件名称：只有这些单独的书名号才认作引用。
+    fn untitled(&self, title: &str) -> bool {
+        self.sources
+            .iter()
+            .any(|source| source.number.is_empty() && source.title == title)
+    }
+
+    fn citations(&self, markdown: &str) -> Vec<Citation> {
+        document_reference::detect(markdown, |title| self.untitled(title))
+    }
+
+    /// 按文号为主、名称为辅比对来源。
+    fn matching(&self, title: &str, number: &str) -> Match {
+        let find = |predicate: &dyn Fn(&Source) -> bool| self.sources.iter().position(predicate);
+        if let Some(index) = find(&|source| source.title == title && source.number == number) {
+            return Match::Exact(index);
+        }
+        if let Some(index) = find(&|source| {
+            source
+                .aliases
+                .iter()
+                .any(|(old_title, old_number)| old_title == title && old_number == number)
+        }) {
+            return Match::Outdated(index);
+        }
+        if !number.is_empty()
+            && let Some(index) = find(&|source| source.number == number)
+        {
+            return Match::Differs(index);
+        }
+        if let Some(index) = find(&|source| source.title == title && !source.number.is_empty()) {
+            return Match::Differs(index);
+        }
+        Match::Unregistered
+    }
+
+    /// 比对上的来源；未登记为空。
+    pub(crate) fn source(&self, status: Match) -> Option<&Source> {
+        match status {
+            Match::Exact(index) | Match::Outdated(index) | Match::Differs(index) => {
+                self.sources.get(index)
+            }
+            Match::Unregistered => None,
+        }
+    }
+
+    pub(crate) fn groups(&self, markdown: &str) -> Vec<Group> {
+        let mut groups: Vec<Group> = Vec::new();
+        for citation in self.citations(markdown) {
+            let standard = citation.standard(markdown);
+            let index = match groups.iter().position(|group| {
+                group.title == citation.title && group.number == citation.normalized
+            }) {
+                Some(index) => index,
+                None => {
+                    groups.push(Group {
+                        status: self.matching(&citation.title, &citation.normalized),
+                        title: citation.title.clone(),
+                        number: citation.normalized.clone(),
+                        ranges: Vec::new(),
+                        nonstandard: Vec::new(),
+                    });
+                    groups.len() - 1
+                }
+            };
+            if !standard {
+                groups[index].nonstandard.push(citation.range.clone());
+            }
+            groups[index].ranges.push(citation.range);
+        }
+        groups.sort_by_key(Group::rank);
+        groups
     }
 }
 
@@ -64,122 +263,164 @@ impl DraftPage<'_> {
     pub(crate) fn open_reference_picker(&mut self, ctx: &egui::Context) {
         let baseline = self.doc.generated_markdown.clone();
         let selection = editor_selection(ctx, &baseline).unwrap_or(baseline.len()..baseline.len());
-        let mut candidates = Vec::new();
-        let mut error = None;
-        if let Some(store) = self.store.as_deref_mut() {
-            match store.list(&ManuscriptFilter::default()) {
-                Ok(rows) => {
-                    for row in rows {
-                        if Some(row.id) == self.doc.manuscript_id {
-                            continue;
-                        }
-                        match store.snapshot_of(row.id) {
-                            Ok(Some((snapshot, _))) => candidates.push(Candidate {
-                                id: row.id,
-                                title: row.title,
-                                kind: row.kind,
-                                status: row.status,
-                                number: reference_number(&snapshot),
-                            }),
-                            Ok(None) => {}
-                            Err(err) => {
-                                error = Some(format!("读取候选失败：{err}"));
-                                break;
-                            }
-                        }
-                    }
-                    candidates.sort_by_key(|candidate| {
-                        !matches!(
-                            candidate.status,
-                            ManuscriptStatus::Published | ManuscriptStatus::Archived
-                        )
-                    });
-                }
-                Err(err) => error = Some(format!("读取稿件库失败：{err}")),
-            }
-        }
+        let own = self.doc.manuscript_id;
+        let (index, error) = match self.store.as_deref_mut() {
+            Some(store) => match CitationIndex::load(store, own) {
+                Ok(index) => (index, None),
+                Err(err) => (
+                    CitationIndex::default(),
+                    Some(format!("读取稿件库失败：{err}")),
+                ),
+            },
+            None => (CitationIndex::default(), None),
+        };
         let mut picker = ReferencePicker {
-            tab: Tab::Library,
+            view: View::Browse,
             search: String::new(),
-            kind: None,
-            candidates,
+            focus_search: true,
+            index,
             baseline,
             selection,
-            selected: None,
+            chosen: None,
             title: String::new(),
             number: String::new(),
             no_number: false,
-            description: String::new(),
+            register: true,
+            confirm_delete: false,
             error,
-            editing: None,
-            sources: BTreeMap::new(),
         };
-        self.refresh_reference_sources(&mut picker);
+        // 正文里已有引用、又没选中文字时，多半是来核对的，直接看「本篇引用」。
+        if picker.selection.is_empty() && !picker.index.citations(&picker.baseline).is_empty() {
+            picker.view = View::Current;
+        }
         self.doc.reference_picker = Some(picker);
     }
 
-    fn refresh_reference_sources(&mut self, picker: &mut ReferencePicker) {
-        picker.sources.clear();
-        for reference in References::read(&self.doc.generated_markdown)
-            .items
-            .values()
-        {
-            let Some(uuid) = &reference.document_uuid else {
-                continue;
-            };
-            let state = (|| -> anyhow::Result<SourceState> {
-                let store = self
-                    .store
-                    .as_deref_mut()
-                    .ok_or_else(|| anyhow::anyhow!("稿件库未打开"))?;
-                let Some(id) = store.find_document_uuid(uuid)? else {
-                    return Ok(SourceState {
-                        id: None,
-                        latest: None,
-                        description: "本机未找到来源，仍使用本篇保存的引用快照。".into(),
-                    });
-                };
-                let (latest, description) = source_reference(store, id)?;
-                let changed = latest.title != reference.title
-                    || latest.number != reference.number
-                    || latest.no_number != reference.no_number;
-                Ok(SourceState {
-                    id: Some(id),
-                    latest: Some(latest),
-                    description: if changed {
-                        format!("来源名称或文号已变化；{description}，本篇尚未更新。")
-                    } else {
-                        format!("来源名称、文号一致；{description}。")
-                    },
-                })
-            })()
-            .unwrap_or_else(|error| SourceState {
-                id: None,
-                latest: None,
-                description: format!("来源暂不可读取：{error}；引用快照仍可使用。"),
-            });
-            picker.sources.insert(reference.id.clone(), state);
-        }
+    fn picker_store(&mut self) -> anyhow::Result<&mut ManuscriptStore> {
+        self.store
+            .as_deref_mut()
+            .ok_or_else(|| anyhow!("稿件库未打开"))
     }
 
-    fn choose_reference_source(
-        &mut self,
-        picker: &mut ReferencePicker,
-        id: i64,
-    ) -> anyhow::Result<()> {
-        let store = self
-            .store
-            .as_deref_mut()
-            .ok_or_else(|| anyhow::anyhow!("稿件库未打开"))?;
-        let (reference, description) = source_reference(store, id)?;
-        picker.title = reference.title.clone();
-        picker.number = reference.number.clone();
-        picker.no_number = reference.no_number;
-        picker.selected = Some(reference);
-        picker.description = description;
-        picker.error = None;
-        picker.editing = None;
+    fn reload_sources(&mut self, picker: &mut ReferencePicker) -> anyhow::Result<()> {
+        let own = self.doc.manuscript_id;
+        let chosen = picker.chosen.map(|index| picker.index.sources[index].key);
+        picker.index = CitationIndex::load(self.picker_store()?, own)?;
+        picker.chosen = chosen.and_then(|key| {
+            picker
+                .index
+                .sources
+                .iter()
+                .position(|source| source.key == key)
+        });
         Ok(())
+    }
+
+    /// 在冻结的插入点写入引用文字（有选区则替换选区）。
+    fn insert_reference(
+        &mut self,
+        ctx: &egui::Context,
+        picker: &ReferencePicker,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            self.doc.generated_markdown == picker.baseline,
+            "正文已变化，请关闭后重新选择插入位置。"
+        );
+        let mut updated = picker.baseline.clone();
+        updated.replace_range(picker.selection.clone(), text);
+        let cursor = picker.selection.start + text.len();
+        diff_editor::replace_with_undo(ctx, &mut self.doc.generated_markdown, updated, cursor);
+        self.doc.pending_source_jump = Some(cursor);
+        *self.status = "已插入公文引用，可按 Ctrl+Z 撤销。".into();
+        Ok(())
+    }
+
+    /// 改写正文里若干处引用。弹窗不关，冻结的正文与插入点随之更新，便于连着处理下一条。
+    fn rewrite_references(
+        &mut self,
+        ctx: &egui::Context,
+        picker: &mut ReferencePicker,
+        mut edits: Vec<(Range<usize>, String)>,
+    ) -> anyhow::Result<usize> {
+        ensure!(
+            self.doc.generated_markdown == picker.baseline,
+            "正文已变化，请关闭后重新打开公文引用。"
+        );
+        edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        let mut updated = picker.baseline.clone();
+        let mut shift = 0isize;
+        for (range, text) in &edits {
+            if range.end <= picker.selection.start {
+                shift += text.len() as isize - range.len() as isize;
+            }
+            updated.replace_range(range.clone(), text);
+        }
+        let move_by = |at: usize| at.saturating_add_signed(shift).min(updated.len());
+        picker.selection = move_by(picker.selection.start)..move_by(picker.selection.end);
+        let cursor = edits.last().map_or(0, |(range, _)| range.start);
+        diff_editor::replace_with_undo(
+            ctx,
+            &mut self.doc.generated_markdown,
+            updated.clone(),
+            cursor,
+        );
+        picker.baseline = updated;
+        Ok(edits.len())
+    }
+
+    /// 主按钮。返回 `true` 表示完成、关闭弹窗。
+    fn commit_reference(
+        &mut self,
+        ctx: &egui::Context,
+        picker: &mut ReferencePicker,
+        editable: bool,
+    ) -> anyhow::Result<bool> {
+        match picker.view {
+            View::EditRegistry(id) => {
+                self.picker_store()?.update_registered(
+                    id,
+                    &picker.title,
+                    &picker.number,
+                    picker.no_number,
+                )?;
+                self.reload_sources(picker)?;
+                picker.view = View::Browse;
+                picker.chosen = picker
+                    .index
+                    .sources
+                    .iter()
+                    .position(|source| source.key == SourceKey::Registry(id));
+                *self.status = "已更正登记；引用了旧写法的文稿会在「本篇引用」里提示更新。".into();
+                Ok(false)
+            }
+            View::Browse => {
+                ensure!(editable, "只读稿件不能插入引用");
+                let index = picker
+                    .chosen
+                    .ok_or_else(|| anyhow!("请先在列表里选一份文件"))?;
+                let text = picker.index.sources[index].text();
+                self.insert_reference(ctx, picker, &text)?;
+                Ok(true)
+            }
+            View::Manual => {
+                ensure!(editable, "只读稿件不能插入引用");
+                ensure!(
+                    self.doc.generated_markdown == picker.baseline,
+                    "正文已变化，请关闭后重新选择插入位置。"
+                );
+                let (title, number) =
+                    document_reference::validate(&picker.title, &picker.number, picker.no_number)?;
+                if picker.register {
+                    self.picker_store()?
+                        .register_document(&title, &number, number.is_empty())?;
+                }
+                let text = document_reference::display(&title, &number);
+                self.insert_reference(ctx, picker, &text)?;
+                Ok(true)
+            }
+            View::Current => Ok(false),
+        }
     }
 
     pub(crate) fn reference_picker_modal(&mut self, ctx: &egui::Context) {
@@ -187,409 +428,724 @@ impl DraftPage<'_> {
             return;
         };
         let editable = !self.doc.read_only();
-        let mut close = false;
-        let mut insert = false;
-        let mut source = None;
-        let mut locate = None;
-        let mut plain = None;
-        let mut open_source = None;
-        let mut recheck = false;
-        let mut update_source = None;
-        let refs = References::read(&self.doc.generated_markdown);
+        let mut actions = Vec::new();
         let response = egui::Modal::new(egui::Id::new(("document_reference_picker", self.doc.key)))
-            .frame(theme::card())
+            .frame(theme::card().inner_margin(egui::Margin::same(18)))
             .show(ctx, |ui| {
-                self.reference_picker_contents(
-                    ui,
-                    &mut picker,
-                    &refs,
-                    editable,
-                    &mut insert,
-                    &mut close,
-                    &mut source,
-                    &mut locate,
-                    &mut plain,
-                    &mut open_source,
-                    &mut recheck,
-                    &mut update_source,
-                );
+                reference_picker_contents(ui, &mut picker, editable, &mut actions);
             });
-        if recheck {
-            self.refresh_reference_sources(&mut picker);
-        }
-        if let Some((id, reference_id)) = update_source {
-            if let Err(error) = self.choose_reference_source(&mut picker, id) {
-                picker.error = Some(error.to_string());
-            } else if let Some(reference) = &mut picker.selected {
-                reference.id = reference_id.clone();
-                picker.editing = Some(reference_id);
-                picker
-                    .description
-                    .push_str("；核对预览后点击保存，本篇所有出现位置一起更新。");
-            }
-        }
-        if let Some(id) = open_source {
-            self.actions
-                .push(crate::app::DraftAction::OpenManuscript(id));
-            close = true;
-        }
-        if let Some(id) = source {
-            let editing = picker.editing.clone();
-            if let Err(error) = self.choose_reference_source(&mut picker, id) {
-                picker.error = Some(error.to_string());
-            } else if let Some(reference_id) = editing
-                && let Some(reference) = &mut picker.selected
-            {
-                reference.id = reference_id.clone();
-                picker.editing = Some(reference_id);
-            }
-        }
-        if let Some(range) = locate {
-            self.doc.pending_source_selection = Some(range.clone());
-            self.doc.pending_source_jump = Some(range.start);
-            self.doc.pending_source_reveal = true;
-            if self.doc.preview_mode == super::PreviewMode::Rendered {
-                self.doc.preview_mode = super::PreviewMode::Split;
-            }
-            close = true;
-        }
-        if let Some(reference) = plain
-            && editable
-        {
-            let updated = document_reference::to_plain(&self.doc.generated_markdown, &reference);
-            let cursor = document_reference::occurrences(&self.doc.generated_markdown)
-                .into_iter()
-                .find(|(_, id)| id == &reference.id)
-                .map_or(0, |(range, _)| range.start);
-            diff_editor::replace_with_undo(ctx, &mut self.doc.generated_markdown, updated, cursor);
-            self.doc.pending_source_jump = Some(cursor);
-            *self.status = "已将该引用的全部出现位置转为普通文字，可按 Ctrl+Z 撤销。".into();
-            close = true;
-        }
-        if insert && editable {
-            let reference = if picker.tab == Tab::Manual || picker.editing.is_some() {
-                Reference::manual(&picker.title, &picker.number, picker.no_number).map(
-                    |mut reference| {
-                        if let Some(id) = &picker.editing {
-                            reference.id = id.clone();
-                            if let Some(selected) = &picker.selected
-                                && selected.title == reference.title
-                                && selected.number == reference.number
-                                && selected.no_number == reference.no_number
-                            {
-                                reference.document_uuid = selected.document_uuid.clone();
-                                reference.revision_uuid = selected.revision_uuid.clone();
-                            }
-                        }
-                        reference
-                    },
-                )
-            } else {
-                picker
-                    .selected
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("请先选择引用文件"))
-            };
-            match reference.and_then(|reference| {
-                reference.validate()?;
-                Ok(reference)
-            }) {
-                Ok(reference) if self.doc.generated_markdown == picker.baseline => {
-                    let mut updated = picker.baseline.clone();
-                    let cursor = if picker.editing.is_some() {
-                        picker.selection.start
-                    } else {
-                        let token = reference.token();
-                        updated.replace_range(picker.selection.clone(), &token);
-                        picker.selection.start + token.len()
-                    };
-                    let updated = document_reference::put(&updated, &reference);
-                    diff_editor::replace_with_undo(
-                        ctx,
-                        &mut self.doc.generated_markdown,
-                        updated,
-                        cursor,
-                    );
-                    self.doc.pending_source_jump = Some(cursor);
-                    *self.status = if picker.editing.is_some() {
-                        "已更新本篇引用快照，可按 Ctrl+Z 撤销。"
-                    } else {
-                        "已插入公文引用，可按 Ctrl+Z 撤销。"
-                    }
-                    .into();
+        let mut close = response.should_close();
+        for action in actions {
+            let result = match action {
+                Action::Close => {
                     close = true;
+                    Ok(())
                 }
-                Ok(_) => picker.error = Some("正文已变化，请关闭后重新选择插入位置。".into()),
-                Err(error) => picker.error = Some(error.to_string()),
+                Action::Choose(index) => {
+                    picker.chosen = Some(index);
+                    picker.error = None;
+                    picker.confirm_delete = false;
+                    Ok(())
+                }
+                Action::Commit => self
+                    .commit_reference(ctx, &mut picker, editable)
+                    .map(|done| close |= done),
+                Action::Insert(text) => self
+                    .insert_reference(ctx, &picker, &text)
+                    .map(|()| close = true),
+                Action::Locate(range) => {
+                    self.doc.pending_source_selection = Some(range.clone());
+                    self.doc.pending_source_jump = Some(range.start);
+                    self.doc.pending_source_reveal = true;
+                    if self.doc.preview_mode == super::PreviewMode::Rendered {
+                        self.doc.preview_mode = super::PreviewMode::Split;
+                    }
+                    close = true;
+                    Ok(())
+                }
+                Action::Rewrite(edits, label) => self
+                    .rewrite_references(ctx, &mut picker, edits)
+                    .map(|count| {
+                        *self.status = format!("已{label} {count} 处引用，可按 Ctrl+Z 撤销。");
+                    }),
+                Action::Register(items) => (|| {
+                    let store = self.picker_store()?;
+                    for (title, number) in &items {
+                        store.register_document(title, number, number.is_empty())?;
+                    }
+                    self.reload_sources(&mut picker)?;
+                    *self.status = format!("已登记 {} 份文件到公文登记簿。", items.len());
+                    Ok(())
+                })(),
+                Action::OpenSource(id) => {
+                    self.actions
+                        .push(crate::app::DraftAction::OpenManuscript(id));
+                    close = true;
+                    Ok(())
+                }
+                Action::EditRegistry(id) => self.picker_store().and_then(|store| {
+                    let document = store
+                        .get_registered(id)?
+                        .ok_or_else(|| anyhow!("登记已不存在"))?;
+                    picker.view = View::EditRegistry(id);
+                    let no_number = document.number.is_empty();
+                    picker.fill_form(&document.title, &document.number, no_number);
+                    Ok(())
+                }),
+                Action::DeleteRegistry(id) => (|| {
+                    self.picker_store()?.delete_registered(id)?;
+                    picker.chosen = None;
+                    self.reload_sources(&mut picker)?;
+                    picker.browse();
+                    *self.status = "已删除登记；正文里的引用文字不受影响。".into();
+                    Ok(())
+                })(),
+                Action::Back => {
+                    let chosen = match picker.view {
+                        View::EditRegistry(id) => picker
+                            .index
+                            .sources
+                            .iter()
+                            .position(|source| source.key == SourceKey::Registry(id)),
+                        _ => None,
+                    };
+                    picker.browse();
+                    picker.chosen = chosen;
+                    Ok(())
+                }
+            };
+            if let Err(error) = result {
+                picker.error = Some(error.to_string());
             }
         }
-        if !close && !response.should_close() {
+        if close {
+            // 面板里刚读过稿件库、可能还登记过，编辑框直接用这份清单。
+            self.doc.citation_index = Some(picker.index);
+        } else {
             self.doc.reference_picker = Some(picker);
         }
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn reference_picker_contents(
-        &self,
-        ui: &mut egui::Ui,
-        picker: &mut ReferencePicker,
-        refs: &References,
-        editable: bool,
-        insert: &mut bool,
-        close: &mut bool,
-        source: &mut Option<i64>,
-        locate: &mut Option<Range<usize>>,
-        plain: &mut Option<Reference>,
-        open_source: &mut Option<i64>,
-        recheck: &mut bool,
-        update_source: &mut Option<(i64, String)>,
-    ) {
-        ui.set_width(580.0);
-        ui.heading("公文引用");
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(picker.tab == Tab::Library, "从稿件库选择")
-                .clicked()
-            {
-                picker.tab = Tab::Library;
-                picker.editing = None;
-            }
-            if ui
-                .selectable_label(picker.tab == Tab::Manual, "手工登记来文")
-                .clicked()
-            {
-                picker.tab = Tab::Manual;
-                picker.editing = None;
-                picker.selected = None;
-                picker.title.clear();
-                picker.number.clear();
-                picker.no_number = false;
-                picker.description =
-                    "适用于外单位来文、纸质件等，请按原件核对名称和完整发文字号。".into();
-            }
-            if ui
-                .selectable_label(
-                    picker.tab == Tab::Current,
-                    format!("本篇引用（{}）", refs.items.len()),
-                )
-                .clicked()
-            {
-                picker.tab = Tab::Current;
-                *recheck = true;
-            }
+fn reference_picker_contents(
+    ui: &mut egui::Ui,
+    picker: &mut ReferencePicker,
+    editable: bool,
+    actions: &mut Vec<Action>,
+) {
+    ui.set_width(WIDTH);
+    let groups = picker.index.groups(&picker.baseline);
+    let heading = match picker.view {
+        View::EditRegistry(_) => "更正登记",
+        _ => "公文引用",
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(heading)
+                .size(theme::font_sizes::HEADING - 1.0)
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            theme::segmented(ui, |ui| {
+                // 右到左排布：先加的在最右。
+                let current = picker.view == View::Current;
+                if ui
+                    .selectable_label(current, format!("本篇引用 {}", groups.len()))
+                    .clicked()
+                    && !current
+                {
+                    picker.view = View::Current;
+                    picker.error = None;
+                }
+                if ui.selectable_label(!current, "选择来文").clicked() && current {
+                    picker.browse();
+                }
+            });
         });
-        ui.separator();
-        match picker.tab {
-            Tab::Library => {
-                ui.add(
-                    egui::TextEdit::singleline(&mut picker.search)
-                        .hint_text("按公文名称或完整发文字号搜索")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut picker.kind, None, "全部");
-                    for kind in [
-                        TemplateKind::OfficialLetter,
-                        TemplateKind::WhitePaper,
-                        TemplateKind::RedHeadApproval,
-                    ] {
-                        ui.selectable_value(&mut picker.kind, Some(kind), kind.label());
+    });
+    ui.add_space(12.0);
+
+    match picker.view {
+        View::Current => {
+            current_ui(ui, picker, &groups, editable, actions);
+            return;
+        }
+        View::Browse => browse_ui(ui, picker, actions),
+        View::Manual | View::EditRegistry(_) => {
+            if picker.view == View::Manual {
+                if ui.add(egui::Link::new(small("← 从列表选择"))).clicked() {
+                    picker.browse();
+                }
+                ui.add_space(8.0);
+            }
+            let enabled = editable || matches!(picker.view, View::EditRegistry(_));
+            ui.add_enabled_ui(enabled, |ui| form_ui(ui, picker));
+        }
+    }
+    footer_ui(ui, picker, editable, actions);
+}
+
+fn list_frame() -> egui::Frame {
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, theme::border()))
+        .corner_radius(egui::CornerRadius::same(theme::PANE_RADIUS))
+        .inner_margin(egui::Margin::same(4))
+}
+
+fn small(text: &str) -> egui::RichText {
+    egui::RichText::new(text).size(theme::font_sizes::SMALL)
+}
+
+fn browse_ui(ui: &mut egui::Ui, picker: &mut ReferencePicker, actions: &mut Vec<Action>) {
+    let search = ui.add(theme::field(
+        &mut picker.search,
+        "搜索名称或文号",
+        f32::INFINITY,
+    ));
+    if std::mem::take(&mut picker.focus_search) {
+        search.request_focus();
+    }
+    ui.add_space(8.0);
+    list_frame().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("reference_candidates")
+            .auto_shrink([false, false])
+            .min_scrolled_height(LIST_HEIGHT)
+            .max_height(LIST_HEIGHT)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                let query = picker.search.trim().to_lowercase();
+                let mut count = 0;
+                for (index, source) in picker.index.sources.iter().enumerate() {
+                    if !query.is_empty()
+                        && !format!("{} {}", source.title, source.number)
+                            .to_lowercase()
+                            .contains(&query)
+                    {
+                        continue;
                     }
-                });
-                egui::ScrollArea::vertical()
-                    .id_salt("reference_candidates")
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        let query = picker.search.trim().to_lowercase();
-                        let mut count = 0;
-                        for candidate in &picker.candidates {
-                            if picker.kind.is_some_and(|kind| kind != candidate.kind)
-                                || !format!("{} {}", candidate.title, candidate.number)
-                                    .to_lowercase()
-                                    .contains(&query)
-                            {
-                                continue;
-                            }
-                            count += 1;
-                            let label = format!(
-                                "{}\n{} · {} · {}",
-                                candidate.title,
-                                if candidate.number.is_empty() {
-                                    "无文号或未编文号"
-                                } else {
-                                    &candidate.number
-                                },
-                                candidate.kind.label(),
-                                candidate.status.label()
-                            );
-                            if ui.selectable_label(false, label).clicked() {
-                                *source = Some(candidate.id);
-                            }
-                        }
-                        if count == 0 {
-                            ui.weak("没有匹配稿件，可切换到手工登记来文。");
-                        }
-                    });
-            }
-            Tab::Manual => {}
-            Tab::Current => {
-                if ui.button("重新核对来源").clicked() {
-                    *recheck = true;
+                    count += 1;
+                    let tag = matches!(source.key, SourceKey::Registry(_)).then_some("登记簿");
+                    let response = source_row(
+                        ui,
+                        picker.chosen == Some(index),
+                        &source.title,
+                        &source.number,
+                        tag,
+                    );
+                    if response.clicked() {
+                        actions.push(Action::Choose(index));
+                    }
+                    if response.double_clicked() {
+                        actions.push(Action::Commit);
+                    }
                 }
-                let occurrences = document_reference::occurrences(&self.doc.generated_markdown);
-                egui::ScrollArea::vertical()
-                    .id_salt("current_references")
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        for reference in refs.items.values() {
-                            let positions = occurrences.iter()
-                                .filter(|(_, id)| id == &reference.id)
-                                .map(|(range, _)| range.clone())
-                                .collect::<Vec<_>>();
-                            ui.group(|ui| {
-                                ui.label(reference.display());
-                                if let Some(state) = picker.sources.get(&reference.id) {
-                                    ui.weak(&state.description);
-                                    if let Some(latest) = &state.latest
-                                        && (latest.title != reference.title
-                                            || latest.number != reference.number
-                                            || latest.no_number != reference.no_number)
-                                    {
-                                        ui.colored_label(theme::warn(), format!("来源现为：{}", latest.display()));
-                                    }
-                                    ui.horizontal_wrapped(|ui| {
-                                        if let Some(id) = state.id {
-                                            if ui.button("打开来源稿件").clicked() {
-                                                *open_source = Some(id);
-                                            }
-                                            if ui.add_enabled(editable, egui::Button::new("核对并更新引用")).clicked() {
-                                                *update_source = Some((id, reference.id.clone()));
-                                            }
-                                        }
-                                    });
-                                } else {
-                                    ui.weak("手工登记来文");
-                                }
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.weak(format!("使用 {} 处", positions.len()));
-                                    if ui.add_enabled(editable, egui::Button::new("再次插入")).clicked() {
-                                        picker.select_snapshot(reference, false);
-                                        picker.description = "复用本篇已确认的引用快照".into();
-                                    }
-                                    if !positions.is_empty() && ui.button("定位").clicked() {
-                                        *locate = positions.iter()
-                                            .find(|range| range.start > picker.selection.start)
-                                            .or_else(|| positions.first()).cloned();
-                                    }
-                                    if ui.add_enabled(editable, egui::Button::new("编辑快照")).clicked() {
-                                        picker.select_snapshot(reference, true);
-                                        picker.description = format!("修改将影响本篇 {} 处引用；手工改名或改号会解除来源关联。", positions.len());
-                                    }
-                                    if ui.add_enabled(editable, egui::Button::new("替换引用")).clicked() {
-                                        picker.tab = Tab::Library;
-                                        picker.select_snapshot(reference, true);
-                                        picker.description = "选择另一份来源，再核对并保存；本篇所有出现位置一起替换。".into();
-                                    }
-                                    let label = if positions.is_empty() { "移除未使用条目" } else { "全部转为普通文字" };
-                                    if ui.add_enabled(editable, egui::Button::new(label)).clicked() {
-                                        *plain = Some(reference.clone());
-                                    }
-                                });
-                            });
-                        }
-                        if refs.items.is_empty() {
-                            ui.weak("本篇还没有登记公文引用。");
-                        }
-                        for issue in &refs.issues {
-                            ui.colored_label(theme::warn(), &issue.message);
-                        }
+                if count == 0 {
+                    ui.add_space(LIST_HEIGHT / 2.0 - 20.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new(if picker.index.sources.is_empty() {
+                                "稿件库和公文登记簿里还没有可引用的文件"
+                            } else {
+                                "没有匹配的文件"
+                            })
+                            .color(theme::text_muted()),
+                        );
                     });
-            }
-        }
-        ui.separator();
-        ui.label("公文名称");
-        ui.add_enabled(
-            (picker.tab == Tab::Manual || picker.editing.is_some()) && editable,
-            egui::TextEdit::singleline(&mut picker.title).desired_width(f32::INFINITY),
-        );
-        ui.horizontal(|ui| {
-            ui.label("完整发文字号");
-            ui.add_enabled(
-                (picker.tab == Tab::Manual || picker.editing.is_some()) && editable,
-                egui::Checkbox::new(&mut picker.no_number, "该文件无文号"),
-            );
-        });
-        ui.add_enabled(
-            (picker.tab == Tab::Manual || picker.editing.is_some())
-                && !picker.no_number
-                && editable,
-            egui::TextEdit::singleline(&mut picker.number)
-                .hint_text("例如：某办函〔2026〕12号")
-                .desired_width(f32::INFINITY),
-        );
-        ui.weak(&picker.description);
-        if let Some(id) = &picker.editing
-            && let Some(old) = refs.items.get(id)
+                }
+            });
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Link::new(small("列表里没有？手工填写")))
+            .clicked()
         {
-            ui.weak(format!("本篇当前：{}", old.display()));
+            // 搜不到时多半刚输了名称，带过去省得再打一遍。
+            let search = picker.search.trim().to_owned();
+            picker.browse();
+            picker.view = View::Manual;
+            picker.title = search;
+            picker.register = true;
         }
-        if !picker.title.is_empty() {
-            ui.label(format!(
-                "引用预览：{}",
-                if picker.no_number {
-                    format!("《{}》", picker.title)
-                } else {
-                    format!("《{}》（{}）", picker.title, picker.number)
+        let chosen = picker.chosen.map(|index| picker.index.sources[index].key);
+        if let Some(SourceKey::Registry(id)) = chosen {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if picker.confirm_delete {
+                    if ui
+                        .add(egui::Link::new(small("确认删除").color(theme::danger())))
+                        .clicked()
+                    {
+                        actions.push(Action::DeleteRegistry(id));
+                    }
+                } else if ui
+                    .add(egui::Link::new(small("删除登记")))
+                    .on_hover_text("从公文登记簿删除；正文里的引用文字不受影响")
+                    .clicked()
+                {
+                    picker.confirm_delete = true;
                 }
-            ));
+                if ui.add(egui::Link::new(small("更正登记"))).clicked() {
+                    actions.push(Action::EditRegistry(id));
+                }
+            });
         }
-        if let Some(error) = &picker.error {
-            ui.colored_label(theme::warn(), error);
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    editable && !picker.title.is_empty(),
-                    egui::Button::new(if picker.editing.is_some() {
-                        "保存引用修改"
-                    } else if picker.selection.is_empty() {
-                        "插入引用"
-                    } else {
-                        "替换选中文字"
-                    }),
-                )
-                .clicked()
-            {
-                *insert = true;
+    });
+}
+
+fn form_ui(ui: &mut egui::Ui, picker: &mut ReferencePicker) {
+    let width = ui.available_width() - 72.0;
+    egui::Grid::new("reference_form")
+        .num_columns(2)
+        .spacing([12.0, 10.0])
+        .show(ui, |ui| {
+            ui.label("公文名称");
+            ui.add(theme::field(&mut picker.title, "不用加书名号", width));
+            ui.end_row();
+
+            ui.label("发文字号");
+            let number = ui.add_enabled(
+                !picker.no_number,
+                theme::field(&mut picker.number, "某办函[2026]12号，括号可省略", width),
+            );
+            if number.lost_focus() {
+                picker.number = document_reference::normalize_number(&picker.number);
             }
-            if ui.button("关闭").clicked() {
-                *close = true;
-            }
+            ui.end_row();
+
+            ui.label("");
+            ui.checkbox(&mut picker.no_number, "该文件没有发文字号");
+            ui.end_row();
         });
+    if picker.view == View::Manual {
+        ui.add_space(4.0);
+        ui.checkbox(&mut picker.register, "存入公文登记簿，其他文稿也能直接选用");
     }
 }
 
-fn source_reference(
-    store: &mut crate::manuscript::ManuscriptStore,
-    id: i64,
-) -> anyhow::Result<(Reference, String)> {
-    let (document_uuid, _) = store.document_identity(id)?;
-    let live = store
-        .snapshot_of(id)?
-        .ok_or_else(|| anyhow::anyhow!("来源稿件已不存在"))?;
+fn footer_ui(
+    ui: &mut egui::Ui,
+    picker: &ReferencePicker,
+    editable: bool,
+    actions: &mut Vec<Action>,
+) {
+    ui.add_space(14.0);
+    theme::hairline(ui);
+    ui.add_space(10.0);
+    let registry = matches!(picker.view, View::EditRegistry(_));
+    let (label, empty) = match picker.view {
+        View::EditRegistry(_) => ("登记为", "填写名称后在这里预览"),
+        View::Manual => ("将插入", "填写名称后在这里预览"),
+        _ => ("将插入", "在列表里选一份文件"),
+    };
+    theme::caption(ui, label);
+    let preview = picker.preview();
+    match &preview {
+        Some(text) => {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text)
+                        .font(egui::FontId::new(
+                            17.0,
+                            theme::official_family(theme::FONT_FANGSONG),
+                        ))
+                        .color(theme::text()),
+                )
+                .wrap(),
+            );
+        }
+        None => {
+            ui.label(egui::RichText::new(empty).color(theme::text_muted()));
+        }
+    }
+    let note = match picker.view {
+        View::Browse => picker
+            .chosen
+            .map(|index| picker.index.sources[index].note.as_str()),
+        View::EditRegistry(_) => Some("更正后，引用了旧写法的文稿会提示更新，确认后才改正文。"),
+        _ => None,
+    };
+    if let Some(note) = note {
+        ui.add_space(2.0);
+        theme::caption(ui, note);
+    }
+    if let Some(error) = &picker.error {
+        ui.add_space(4.0);
+        ui.colored_label(theme::danger(), error);
+    }
+    ui.add_space(14.0);
+    let (primary, icon) = if registry {
+        ("保存登记", theme::Icon::Save)
+    } else if picker.selection.is_empty() {
+        ("插入", theme::Icon::Quote)
+    } else {
+        ("替换选中文字", theme::Icon::Quote)
+    };
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let enabled = preview.is_some() && (editable || registry);
+            if theme::primary_icon_button_enabled(ui, enabled, icon, primary).clicked() {
+                actions.push(Action::Commit);
+            }
+            // 更正登记是二级步骤，次按钮退回列表；其余关闭弹窗。
+            if registry {
+                if ui.button("返回").clicked() {
+                    actions.push(Action::Back);
+                }
+            } else if ui.button("取消").clicked() {
+                actions.push(Action::Close);
+            }
+        });
+    });
+}
+
+fn current_ui(
+    ui: &mut egui::Ui,
+    picker: &ReferencePicker,
+    groups: &[Group],
+    editable: bool,
+    actions: &mut Vec<Action>,
+) {
+    if groups.is_empty() {
+        ui.allocate_ui(egui::vec2(WIDTH, 150.0), |ui| {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "正文里还没有公文引用。\n直接写《名称》（发文字号）就能识别，\
+                         也可以到「选择来文」里选一份插入。",
+                    )
+                    .color(theme::text_muted()),
+                );
+            });
+        });
+    } else {
+        let nonstandard = groups
+            .iter()
+            .flat_map(|group| {
+                let text = group.text();
+                group
+                    .nonstandard
+                    .iter()
+                    .map(move |range| (range.clone(), text.clone()))
+            })
+            .collect::<Vec<_>>();
+        let unregistered = groups
+            .iter()
+            .filter(|group| group.status == Match::Unregistered && !group.number.is_empty())
+            .map(|group| (group.title.clone(), group.number.clone()))
+            .collect::<Vec<_>>();
+        if editable && (nonstandard.len() > 1 || unregistered.len() > 1) {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if unregistered.len() > 1
+                        && ui
+                            .add(egui::Link::new(small(&format!(
+                                "全部登记（{}）",
+                                unregistered.len()
+                            ))))
+                            .clicked()
+                    {
+                        actions.push(Action::Register(unregistered.clone()));
+                    }
+                    if nonstandard.len() > 1
+                        && ui
+                            .add(egui::Link::new(small(&format!(
+                                "全部改为规范写法（{}）",
+                                nonstandard.len()
+                            ))))
+                            .clicked()
+                    {
+                        actions.push(Action::Rewrite(nonstandard.clone(), "规范"));
+                    }
+                });
+            });
+            ui.add_space(4.0);
+        }
+        list_frame().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("current_references")
+                .auto_shrink([false, true])
+                .max_height(340.0)
+                .show(ui, |ui| {
+                    for (index, group) in groups.iter().enumerate() {
+                        if index > 0 {
+                            theme::hairline(ui);
+                        }
+                        ui.push_id(index, |ui| {
+                            current_row(ui, picker, group, editable, actions);
+                        });
+                    }
+                });
+        });
+    }
+    if let Some(error) = &picker.error {
+        ui.add_space(6.0);
+        ui.colored_label(theme::danger(), error);
+    }
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("关闭").clicked() {
+                actions.push(Action::Close);
+            }
+        });
+    });
+}
+
+/// 「本篇引用」的一行：引用文字、来源标签、出现处数、定位 / 再次插入；
+/// 有要处理的问题才多一行说明和操作。
+fn current_row(
+    ui: &mut egui::Ui,
+    picker: &ReferencePicker,
+    group: &Group,
+    editable: bool,
+    actions: &mut Vec<Action>,
+) {
+    let text = group.text();
+    let source = picker.index.source(group.status);
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if editable && theme::icon_button(ui, theme::Icon::Quote, "在光标处再次插入").clicked()
+            {
+                actions.push(Action::Insert(text.clone()));
+            }
+            if theme::icon_button(ui, theme::Icon::Reveal, "定位到正文").clicked() {
+                actions.push(Action::Locate(
+                    group
+                        .ranges
+                        .iter()
+                        .find(|range| range.start > picker.selection.start)
+                        .or_else(|| group.ranges.first())
+                        .cloned()
+                        .unwrap_or_default(),
+                ));
+            }
+            ui.add_space(6.0);
+            theme::caption(ui, &format!("{} 处", group.ranges.len()));
+            ui.add_space(6.0);
+            let (label, fg, bg) = match group.status {
+                Match::Exact(_) => (
+                    source.map_or("", |source| source.origin.as_str()),
+                    theme::text_soft(),
+                    theme::surface_sunk(),
+                ),
+                Match::Outdated(_) => ("来源已变", theme::warn(), theme::warn_soft()),
+                Match::Differs(_) => ("与来源不一致", theme::warn(), theme::warn_soft()),
+                Match::Unregistered => ("未登记", theme::text_muted(), theme::surface_sunk()),
+            };
+            theme::chip(ui, label, fg, bg);
+            ui.add_space(6.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(&text).truncate());
+            });
+        });
+    });
+    // 每条问题一行：说明文字 + 一个操作。
+    let mut problems: Vec<(String, &str, Action, bool)> = Vec::new();
+    if !group.nonstandard.is_empty() {
+        problems.push((
+            format!("有 {} 处写法不规范", group.nonstandard.len()),
+            "改为规范写法",
+            Action::Rewrite(
+                group
+                    .nonstandard
+                    .iter()
+                    .map(|range| (range.clone(), text.clone()))
+                    .collect(),
+                "规范",
+            ),
+            true,
+        ));
+    }
+    if let (Some(source), Match::Outdated(_) | Match::Differs(_)) = (source, group.status) {
+        let lead = if matches!(group.status, Match::Outdated(_)) {
+            "登记已更正为"
+        } else {
+            "来源为"
+        };
+        problems.push((
+            format!("{lead} {}", source.text()),
+            "改为来源写法",
+            Action::Rewrite(
+                group
+                    .ranges
+                    .iter()
+                    .map(|range| (range.clone(), source.text()))
+                    .collect(),
+                "更新",
+            ),
+            true,
+        ));
+    }
+    if group.status == Match::Unregistered && !group.number.is_empty() {
+        problems.push((
+            "稿件库和公文登记簿里都没有".into(),
+            "登记",
+            Action::Register(vec![(group.title.clone(), group.number.clone())]),
+            false,
+        ));
+    }
+    let open = match source.map(|source| source.key) {
+        Some(SourceKey::Manuscript(id)) => Some(id),
+        _ => None,
+    };
+    for (index, (message, label, action, warning)) in problems.into_iter().enumerate() {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(6.0);
+            let color = if warning {
+                theme::warn()
+            } else {
+                theme::text_muted()
+            };
+            ui.label(small(&message).color(color));
+            if editable && ui.add(egui::Link::new(small(label))).clicked() {
+                actions.push(action);
+            }
+            if index == 0
+                && let Some(id) = open
+                && ui.add(egui::Link::new(small("打开来源"))).clicked()
+            {
+                actions.push(Action::OpenSource(id));
+            }
+        });
+    }
+    ui.add_space(4.0);
+}
+
+/// 候选列表的一行：整行可点，只显示插入后的样子，登记簿的条目右侧标出来。
+fn source_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    title: &str,
+    number: &str,
+    tag: Option<&str>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let painter = ui.painter();
+    let fill = if selected {
+        theme::accent_soft()
+    } else if response.hovered() {
+        theme::surface_hover()
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    painter.rect_filled(rect, 6.0, fill);
+    if selected {
+        let bar = egui::Rect::from_min_size(
+            rect.min + egui::vec2(0.0, 6.0),
+            egui::vec2(3.0, rect.height() - 12.0),
+        );
+        painter.rect_filled(bar, 1.5, theme::accent());
+    }
+    let mut right = rect.right() - 10.0;
+    if let Some(tag) = tag {
+        let galley = painter.layout_no_wrap(
+            tag.to_owned(),
+            egui::FontId::proportional(theme::font_sizes::SMALL),
+            theme::text_muted(),
+        );
+        right -= galley.size().x;
+        painter.galley(
+            egui::pos2(right, rect.center().y - galley.size().y / 2.0),
+            galley,
+            theme::text_muted(),
+        );
+        right -= 12.0;
+    }
+    let font = egui::FontId::proportional(theme::font_sizes::BODY);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &format!("《{title}》"),
+        0.0,
+        egui::TextFormat::simple(font.clone(), theme::text()),
+    );
+    if !number.is_empty() {
+        job.append(
+            &format!("（{number}）"),
+            0.0,
+            egui::TextFormat::simple(font, theme::text_muted()),
+        );
+    }
+    let left = rect.left() + 12.0;
+    job.wrap = egui::text::TextWrapping {
+        max_width: (right - left).max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = painter.layout_job(job);
+    let elided = galley.elided;
+    painter.galley(
+        egui::pos2(left, rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::text(),
+    );
+    if elided {
+        return response.on_hover_text(document_reference::display(title, number));
+    }
+    response
+}
+
+/// 可引用的文件：登记簿在前（专为引用而登记），稿件按已发布 / 已归档优先。
+fn load_sources(store: &mut ManuscriptStore, own: Option<i64>) -> anyhow::Result<Vec<Source>> {
+    let mut sources = store
+        .list_registry()?
+        .into_iter()
+        .map(|document| Source {
+            key: SourceKey::Registry(document.id),
+            title: document.title,
+            number: document.number,
+            origin: "登记簿".into(),
+            note: "取自公文登记簿".into(),
+            aliases: document.aliases,
+        })
+        .collect::<Vec<_>>();
+    let mut manuscripts = Vec::new();
+    for row in store.list(&ManuscriptFilter::default())? {
+        if Some(row.id) == own {
+            continue;
+        }
+        let formal = matches!(
+            row.status,
+            ManuscriptStatus::Published | ManuscriptStatus::Archived
+        );
+        if let Some(source) = manuscript_source(store, row.id)? {
+            manuscripts.push((!formal, source));
+        }
+    }
+    manuscripts.sort_by_key(|(draft, _)| *draft);
+    sources.extend(manuscripts.into_iter().map(|(_, source)| source));
+    Ok(sources)
+}
+
+/// 稿件作为来源：默认取最新提交版，没有提交版时取工作稿并说明。
+fn manuscript_source(store: &mut ManuscriptStore, id: i64) -> anyhow::Result<Option<Source>> {
+    let Some(live) = store.snapshot_of(id)? else {
+        return Ok(None);
+    };
     let latest = store.latest_committed_revision(id)?;
-    let (input, markdown, revision_uuid, description) = if let Some(latest) = latest {
+    let (input, markdown, origin, note) = if let Some(latest) = latest {
         let version = store
             .get_manuscript_version(id, latest.visible_number)?
-            .ok_or_else(|| anyhow::anyhow!("来源版本已不存在"))?;
+            .ok_or_else(|| anyhow!("来源版本已不存在"))?;
         let changed = version.snapshot != live.0 || version.content_markdown != live.1;
+        let number = latest.visible_number;
         (
             version.snapshot,
             version.content_markdown,
-            Some(latest.revision_uuid),
+            format!("稿件 v{number}"),
             format!(
-                "引用最新提交版 v{}{}",
-                latest.visible_number,
+                "取自最新提交版 v{number}{}",
                 if changed {
                     "；来源有未提交修改，本次不采用"
                 } else {
@@ -601,23 +1157,24 @@ fn source_reference(
         (
             live.0,
             live.1,
-            None,
-            "尚无提交版本：本次引用当前工作稿的名称、文号快照".into(),
+            "稿件 工作稿".into(),
+            "尚无提交版本：取当前工作稿的名称与文号".into(),
         )
     };
-    let title = export::plain_text(&export::document_title(&input, &markdown));
-    let number = reference_number(&input);
-    Ok((
-        Reference {
-            id: uuid::Uuid::new_v4().to_string(),
-            title,
-            number,
-            no_number: !input.kind.has_document_number(),
-            document_uuid: Some(document_uuid),
-            revision_uuid,
-        },
-        description,
-    ))
+    let title = document_reference::clean_title(&export::plain_text(&export::document_title(
+        &input, &markdown,
+    )));
+    if title.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Source {
+        key: SourceKey::Manuscript(id),
+        title,
+        number: reference_number(&input),
+        origin,
+        note,
+        aliases: Vec::new(),
+    }))
 }
 
 fn reference_number(input: &crate::models::DraftInput) -> String {
@@ -628,7 +1185,7 @@ fn reference_number(input: &crate::models::DraftInput) -> String {
     if code.is_empty() || year.is_empty() || serial.is_empty() {
         String::new()
     } else {
-        format!("{code}〔{year}〕{serial}号")
+        document_reference::normalize_number(&format!("{code}〔{year}〕{serial}号"))
     }
 }
 
@@ -636,10 +1193,78 @@ fn reference_number(input: &crate::models::DraftInput) -> String {
 mod tests {
     use super::*;
     use crate::manuscript::{ManuscriptStore, ManuscriptUpdate, NewManuscript};
-    use crate::models::{DraftInput, TemplateProfile};
+    use crate::models::{DraftInput, TemplateKind, TemplateProfile};
+
+    fn source(key: SourceKey, title: &str, number: &str, aliases: &[(&str, &str)]) -> Source {
+        Source {
+            key,
+            title: title.into(),
+            number: number.into(),
+            origin: String::new(),
+            note: String::new(),
+            aliases: aliases
+                .iter()
+                .map(|(title, number)| ((*title).into(), (*number).into()))
+                .collect(),
+        }
+    }
 
     #[test]
-    fn document_reference_source_uses_committed_version_and_explicit_working_fallback() {
+    fn citations_group_and_match_sources_by_number_then_title() {
+        let index = CitationIndex {
+            sources: vec![
+                source(
+                    SourceKey::Registry(1),
+                    "关于调整安全检查的函",
+                    "某办函〔2026〕13号",
+                    &[("关于开展安全检查的函", "某办函〔2026〕12号")],
+                ),
+                source(
+                    SourceKey::Manuscript(7),
+                    "建设实施方案",
+                    "项办函〔2026〕56号",
+                    &[],
+                ),
+                source(SourceKey::Manuscript(8), "关于报请审定的请示", "", &[]),
+            ],
+        };
+        let markdown = "根据《建设实施方案》（项办函〔2026〕56号）和《建设实施方案》(项办函[2026]56号)，\
+                        参照《关于开展安全检查的函》（某办函〔2026〕12号）、\
+                        《建设方案》（项办函〔2026〕56号）、《新来文》（某局函〔2026〕1号），\
+                        报《关于报请审定的请示》，学习《保守国家秘密法》。";
+        let groups = index.groups(markdown);
+        let find = |text: &str| {
+            groups
+                .iter()
+                .find(|group| group.text() == text)
+                .unwrap_or_else(|| panic!("缺少 {text}"))
+        };
+        assert_eq!(groups.len(), 5, "法律名称不认作引用");
+        let plan = find("《建设实施方案》（项办函〔2026〕56号）");
+        assert_eq!(plan.ranges.len(), 2);
+        assert_eq!(plan.nonstandard.len(), 1);
+        assert_eq!(plan.status, Match::Exact(1));
+        assert_eq!(
+            find("《关于开展安全检查的函》（某办函〔2026〕12号）").status,
+            Match::Outdated(0)
+        );
+        assert_eq!(
+            find("《建设方案》（项办函〔2026〕56号）").status,
+            Match::Differs(1)
+        );
+        assert_eq!(
+            find("《新来文》（某局函〔2026〕1号）").status,
+            Match::Unregistered
+        );
+        assert_eq!(find("《关于报请审定的请示》").status, Match::Exact(2));
+        // 有问题的排前面，一致且规范的排最后。
+        let last = groups.last().unwrap();
+        assert!(last.nonstandard.is_empty());
+        assert!(matches!(last.status, Match::Exact(_)));
+    }
+
+    #[test]
+    fn manuscript_source_uses_committed_version_and_explicit_working_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ManuscriptStore::open(&dir.path().join("source.db")).unwrap();
         let mut input = DraftInput {
@@ -661,12 +1286,9 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (working, notice) = source_reference(&mut store, id).unwrap();
-        working.validate().unwrap();
-        assert_eq!(working.number, "某办函〔2026〕12号");
-        assert_eq!(working.title, "关于开展检查的函");
-        assert!(working.revision_uuid.is_none());
-        assert!(notice.contains("工作稿"));
+        let working = manuscript_source(&mut store, id).unwrap().unwrap();
+        assert_eq!(working.text(), "《关于开展检查的函》（某办函〔2026〕12号）");
+        assert!(working.note.contains("工作稿"));
         store
             .commit_manuscript_version(id, "提交", "", &input, markdown, "")
             .unwrap();
@@ -681,12 +1303,10 @@ mod tests {
                 },
             )
             .unwrap();
-        let (committed, notice) = source_reference(&mut store, id).unwrap();
-        assert_eq!(committed.title, working.title);
-        assert_eq!(committed.number, working.number);
-        assert!(committed.revision_uuid.is_some());
-        assert_eq!(committed.document_uuid, working.document_uuid);
-        assert!(notice.contains("未提交修改"));
+        let committed = manuscript_source(&mut store, id).unwrap().unwrap();
+        assert_eq!(committed.text(), working.text());
+        assert_eq!(committed.origin, "稿件 v1");
+        assert!(committed.note.contains("未提交修改"));
         let latest = store.get(id).unwrap().unwrap();
         store
             .commit_manuscript_version(
@@ -698,10 +1318,8 @@ mod tests {
                 "",
             )
             .unwrap();
-        let (updated, _) = source_reference(&mut store, id).unwrap();
-        assert_eq!(updated.title, "关于调整检查的函");
-        assert_eq!(updated.number, "某办函〔2026〕13号");
-        assert_ne!(updated.revision_uuid, committed.revision_uuid);
+        let updated = manuscript_source(&mut store, id).unwrap().unwrap();
+        assert_eq!(updated.text(), "《关于调整检查的函》（某办函〔2026〕13号）");
 
         input.kind = TemplateKind::WhitePaper;
         input.profile = TemplateProfile::for_kind(input.kind);
@@ -715,9 +1333,9 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (no_number, _) = source_reference(&mut store, no_number_id).unwrap();
-        no_number.validate().unwrap();
-        assert!(no_number.no_number);
-        assert_eq!(no_number.display(), "《关于报请审定的请示》");
+        let no_number = manuscript_source(&mut store, no_number_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(no_number.text(), "《关于报请审定的请示》");
     }
 }

@@ -520,22 +520,12 @@ struct SourceLine<'a> {
 }
 
 fn prepared_lines<'a>(markdown: &'a str, marks: Option<&ResearchMarks>) -> Vec<SourceLine<'a>> {
-    let references = crate::document_reference::References::read(markdown);
-    let occurrences = crate::document_reference::occurrences(markdown);
     source_lines(markdown)
         .into_iter()
         .map(|(start, raw)| {
-            let resolved = if occurrences
-                .iter()
-                .any(|(range, _)| range.start >= start && range.start < start + raw.len())
-            {
-                references.apply(raw, start, &occurrences)
-            } else {
-                Cow::Borrowed(raw)
-            };
             let text = match marks {
-                Some(marks) => Cow::Owned(marks.apply(&resolved).into_owned()),
-                None => resolved,
+                Some(marks) => Cow::Owned(marks.apply(raw).into_owned()),
+                None => Cow::Borrowed(raw),
             };
             SourceLine {
                 start,
@@ -768,9 +758,7 @@ fn parse_located(
                 source_segments: Vec::new(),
                 generated_prefixes: Vec::new(),
             });
-        } else if line.starts_with(crate::document_reference::DEFINITION)
-            || (line.starts_with("<!--") && line.ends_with("-->"))
-        {
+        } else if line.starts_with("<!--") && line.ends_with("-->") {
             // 不是公文那两种区段标记的 HTML 注释：研究报告的「摘要」「版本变更
             // 记录」「参考文献」都长这样。注释是写给解析器看的，一律不落到纸上，
             // 所以归到 Html——各版式和导出器对 Html 的处理正是"跳过"。当成段落

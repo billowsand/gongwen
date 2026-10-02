@@ -34,16 +34,15 @@ impl TextCounts {
 
     fn for_draft(input: &DraftInput, markdown: &str, numbering: &NumberingConfig) -> Self {
         if input.kind.is_research() {
-            let expanded = crate::document_reference::References::read(markdown).expanded(markdown);
             // Mermaid 源码不落纸面；图题仍按研究报告的图片图题计数。
-            let mut body = expanded.clone();
-            for located in export::parse_markdown_located(&expanded).into_iter().rev() {
+            let mut body = markdown.to_string();
+            for located in export::parse_markdown_located(markdown).into_iter().rev() {
                 if let MarkdownBlock::Diagram { caption, .. } = located.block {
                     let (caption, _) = export::crossref::split_label(&caption);
                     body.replace_range(located.range, &format!("![{caption}](diagram.png)\n"));
                 }
             }
-            let title = export::research::cover_title(input, &expanded).unwrap_or_default();
+            let title = export::research::cover_title(input, markdown).unwrap_or_default();
             return Self::from_text(&format!(
                 "{}\n{}",
                 export::plain_text(&title),

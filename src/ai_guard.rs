@@ -92,15 +92,12 @@ fn extract_facts(
     vocabulary: &[VocabularyEntry],
     heuristic_units: bool,
 ) -> Vec<FactToken> {
-    let reference_tokens = crate::document_reference::occurrences(markdown);
-    let references = crate::document_reference::References::read(markdown);
-    let expanded = references.expanded(markdown);
-    let markdown = expanded.as_str();
     let mut out = BTreeSet::new();
-    for (_, id) in reference_tokens {
+    // 公文引用按规范写法记一条：名称与文号一起作为事实，括号写法不同不算改动。
+    for citation in crate::document_reference::detect_numbered(markdown) {
         out.insert(FactToken {
             kind: FactKind::Document,
-            value: format!("公文引用:{id}"),
+            value: citation.text(),
         });
     }
     for entry in vocabulary {
@@ -201,7 +198,7 @@ pub fn protected_facts_prompt(markdown: &str, vocabulary: &[VocabularyEntry]) ->
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "\n\n【锁定事实——除非本次任务明确要求，否则必须逐字保留】\n{rows}\n不得删除、替换、简称或新增同类事实。\n已有公文引用标记 {{{{公文:UUID}}}} 与 gongwen-reference 注释定义必须原样保留，不得生成、改写或增删引用。"
+        "\n\n【锁定事实——除非本次任务明确要求，否则必须逐字保留】\n{rows}\n不得删除、替换、简称或新增同类事实。\n正文里的公文引用《名称》（发文字号）必须逐字保留，不得改写名称或文号，不得新增或删除引用。"
     )
 }
 

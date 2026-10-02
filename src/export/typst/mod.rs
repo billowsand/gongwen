@@ -136,7 +136,6 @@ fn prepare(
     elements: &ElementMarks,
     base_dir: &Path,
 ) -> Result<(Doc, typst_engine::FontSet, Vec<String>)> {
-    crate::document_reference::References::check(markdown)?;
     let rendered = crate::mermaid::materialize(
         markdown,
         crate::mermaid::Style::Official,

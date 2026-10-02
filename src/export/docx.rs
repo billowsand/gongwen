@@ -164,7 +164,6 @@ pub fn write_docx_with_numbering(
     if !input.kind.uses_official_docx() {
         bail!("研究报告的 Word 由 mdx research 转换器生成，不走公文 Word 排版");
     }
-    crate::document_reference::References::check(markdown)?;
     let rendered = crate::mermaid::materialize(
         markdown,
         crate::mermaid::Style::Official,
