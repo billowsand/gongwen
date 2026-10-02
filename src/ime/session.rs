@@ -71,6 +71,7 @@ pub(crate) struct Ime {
     pub(super) encoder: super::encoder::Encoder,
     pub(super) add_word: super::add_word::AddWord,
     pub(super) lookup: super::lookup::Lookup,
+    pub(super) page: super::page::Page,
     /// 最近几次上屏的文字，造词时取尾部的汉字。改正文的其他按键、点鼠标、换焦点都会清空。
     recent: Vec<String>,
     pub(super) storage_ok: bool,
@@ -134,6 +135,7 @@ impl Ime {
             encoder: Default::default(),
             add_word: Default::default(),
             lookup: Default::default(),
+            page: Default::default(),
             recent: Vec::new(),
             storage_ok: true,
             load_error: None,

@@ -4,7 +4,7 @@
 use super::{
     data, history,
     session::Ime,
-    table::{self, BaseDiff, Candidate, Entry, OverlayReport, Parsed},
+    table::{self, BaseDiff, Entry, OverlayReport, Parsed},
 };
 use crate::theme;
 use eframe::egui;
@@ -27,15 +27,8 @@ struct Staged {
 
 #[derive(Default)]
 pub(super) struct Manager {
-    query: String,
-    conflicts: bool,
-    /// 词表变了：搜索结果、导入预览、体检与修改记录都要重算。
+    /// 词表变了：查询结果、导入预览、体检与修改记录都要重算。
     pub dirty: bool,
-    searched: bool,
-    results: Vec<(String, Candidate)>,
-    code: String,
-    text: String,
-    old: Option<Entry>,
     staged: Option<Staged>,
     pub message: String,
     history: Vec<history::Record>,
@@ -45,19 +38,6 @@ pub(super) struct Manager {
 }
 
 impl Ime {
-    /// 设置页里的词表管理。
-    pub(crate) fn manager_ui(&mut self, ui: &mut egui::Ui) {
-        self.refresh_manager();
-        self.message_ui(ui);
-        self.import_section(ui);
-        self.batches_section(ui);
-        self.rules_summary(ui);
-        self.search_section(ui);
-        self.editor_section(ui);
-        self.overlay_section(ui);
-        self.history_section(ui);
-    }
-
     /// 词表变了之后重算预览、体检与修改记录。每帧调一次，没变是空操作。
     pub(super) fn refresh_manager(&mut self) {
         if self.manager.loaded && !self.manager.dirty {
@@ -71,7 +51,7 @@ impl Ime {
             .map(|dir| history::list(&dir))
             .unwrap_or_default();
         self.manager.loaded = true;
-        // 搜索结果由 `search_section` 按 `dirty` 自己重算后清掉标记。
+        // `dirty` 由词表页看过之后清掉。
     }
 
     pub(super) fn message_ui(&mut self, ui: &mut egui::Ui) {
@@ -389,124 +369,6 @@ impl Ime {
         }
     }
 
-    fn search_section(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("查词 / 查码");
-            // 编码与汉字都可查询，但查询框不接管键盘；可切系统输入或粘贴汉字。
-            if super::exempt(
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.manager.query)
-                        .hint_text("输入完整编码或文字")
-                        .desired_width(190.0),
-                ),
-            )
-            .changed()
-            {
-                self.manager.dirty = true;
-            }
-            if ui
-                .checkbox(&mut self.manager.conflicts, "只看重码")
-                .changed()
-            {
-                self.manager.dirty = true;
-            }
-        });
-        if self.manager.dirty || !self.manager.searched {
-            self.manager.results = self
-                .table
-                .search(self.manager.query.trim(), self.manager.conflicts);
-            self.manager.dirty = false;
-            self.manager.searched = true;
-        }
-        let results = self.manager.results.clone();
-        egui::ScrollArea::vertical()
-            .id_salt("ime_table_results")
-            .max_height(230.0)
-            .show(ui, |ui| {
-                for (code, candidate) in results {
-                    let entry = Entry {
-                        code: code.clone(),
-                        text: candidate.text.clone(),
-                    };
-                    let hidden = self.table.hidden(&code, &candidate.text);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.monospace(&code);
-                        ui.label(&candidate.text);
-                        ui.weak(candidate.sources.join("、"));
-                        if ui.small_button("修改").clicked() {
-                            self.manager.code = code.clone();
-                            self.manager.text = candidate.text.clone();
-                            self.manager.old = Some(entry.clone());
-                        }
-                        if ui
-                            .small_button(if hidden { "恢复" } else { "屏蔽" })
-                            .clicked()
-                        {
-                            let result = self.set_hidden(&entry, !hidden);
-                            self.report(result, "词条状态已更新。");
-                        }
-                        if ui.small_button("首选").clicked() {
-                            self.reorder(&code, &candidate.text, 0);
-                        }
-                        if ui.small_button("↑").clicked() {
-                            self.reorder(&code, &candidate.text, -1);
-                        }
-                        if ui.small_button("↓").clicked() {
-                            self.reorder(&code, &candidate.text, 1);
-                        }
-                        if candidate.sources.iter().any(|s| s == table::PERSONAL)
-                            && ui.small_button("删除个人词").clicked()
-                        {
-                            let result = self.remove_personal(&entry);
-                            self.report(result, "个人词条已删除。");
-                        }
-                    });
-                }
-            });
-        ui.weak("每次最多显示 200 条；输入编码可查看该码的全部候选来源和顺序。");
-        if ui.button("恢复当前编码默认顺序").clicked() {
-            let code = self.manager.query.trim().to_string();
-            let result = self.reset_order(&code);
-            self.report(result, "当前编码顺序已恢复。");
-        }
-    }
-
-    fn editor_section(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(if self.manager.old.is_some() {
-                "修改词条"
-            } else {
-                "添加词条"
-            });
-            super::exempt(
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.manager.code)
-                        .hint_text("编码")
-                        .desired_width(70.0),
-                ),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut self.manager.text)
-                    .hint_text("上屏文字")
-                    .desired_width(180.0),
-            );
-            if ui.button("保存").clicked() {
-                self.save_editor();
-            }
-            if ui.button("清空").clicked() {
-                self.manager.old = None;
-                self.manager.code.clear();
-                self.manager.text.clear();
-            }
-        });
-        ui.weak(
-            "词条为 1–4 码。基础表只读：改动基础表里的词会屏蔽原词、另存一条个人词条，\
-             升级基础表时不会丢。",
-        );
-    }
-
     fn stage_import(&mut self, four: bool) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("词表", &["txt", "tsv"])
@@ -591,28 +453,6 @@ impl Ime {
         self.manager.dirty = true;
         self.refresh(true);
         Ok(())
-    }
-
-    fn save_editor(&mut self) {
-        let entry = Entry {
-            code: self.manager.code.trim().into(),
-            text: self.manager.text.trim().into(),
-        };
-        let result = match self.manager.old.clone() {
-            Some(old) => self.edit_entry(&old, &entry),
-            None => self.add_entry(&entry, false),
-        };
-        if result.is_ok() {
-            self.manager.old = None;
-            self.manager.text.clear();
-            self.manager.code.clear();
-        }
-        self.report(result, "词条已保存，立即生效。");
-    }
-
-    fn reorder(&mut self, code: &str, text: &str, delta: isize) {
-        let result = self.move_word(code, text, delta);
-        self.report(result, "候选顺序已保存。");
     }
 
     pub(super) fn report(&mut self, result: anyhow::Result<()>, success: &str) {

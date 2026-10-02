@@ -38,7 +38,7 @@ impl Ime {
             .show(ctx, |ui| {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.lookup.query)
-                        .hint_text("输入字词或编码")
+                        .hint_text("字词；查编码先按 Shift 切英文")
                         .desired_width(f32::INFINITY),
                 );
                 if self.lookup.focus {

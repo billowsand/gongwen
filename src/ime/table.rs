@@ -305,20 +305,17 @@ impl Table {
             .collect()
     }
 
-    pub fn search(&self, query: &str, conflicts_only: bool) -> Vec<(String, Candidate)> {
+    /// 以 `prefix` 开头的全部编码及候选（含已屏蔽），按编码排序；空前缀为全部。
+    pub fn codes_from<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl Iterator<Item = (&'a String, &'a Vec<Candidate>)> + 'a {
         self.index
-            .iter()
-            .filter(|(code, _)| !conflicts_only || self.lookup(code).len() > 1)
-            .flat_map(|(code, candidates)| {
-                candidates
-                    .iter()
-                    .filter(move |c| {
-                        query.is_empty() || code.as_str() == query || c.text.contains(query)
-                    })
-                    .map(move |c| (code.clone(), c.clone()))
-            })
-            .take(200)
-            .collect()
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix),
+                std::ops::Bound::Unbounded,
+            ))
+            .take_while(move |(code, _)| code.starts_with(prefix))
     }
 
     /// 与最终词表比较，而不是仅在导入文件内部检查重码。

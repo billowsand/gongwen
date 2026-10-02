@@ -10,10 +10,12 @@ mod keys;
 mod lookup;
 mod manage;
 mod ops;
+mod page;
 mod session;
 mod table;
 pub(crate) use cursor::follow_cursor;
 pub(crate) use exempt::exempt;
+pub(crate) use page::PageAction;
 pub(crate) use session::Ime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

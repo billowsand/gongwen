@@ -504,3 +504,39 @@ fn sparkle(rect: egui::Rect, color: egui::Color32) -> egui::Shape {
     }
     egui::Shape::mesh(mesh)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{ImeSettings, table};
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn ime(code: &str) -> Ime {
+        let mut ime = Ime::bare(ImeSettings::default());
+        ime.table.base = table::parse("abcd,1=公文\nab,1=公文", false).entries;
+        ime.table.personal.entries = table::parse("abcd,1=个人词", false).entries;
+        ime.table.rebuild();
+        ime.anchor = Some(egui::Rect::from_min_size(
+            egui::pos2(20.0, 20.0),
+            egui::vec2(2.0, 16.0),
+        ));
+        for c in code.chars() {
+            ime.execute_guarded(Action::Push(c));
+        }
+        ime
+    }
+
+    #[test]
+    fn window_shows_hints_and_empty_code() {
+        let mut harness =
+            Harness::new_ui_state(|ui, ime: &mut Ime| ime.candidates_ui(ui.ctx()), ime("abcd"));
+        harness.run();
+        // 简码提示跟在词后；个人词条带星标（画出来的，不在文字里）。
+        harness.get_by_label_contains("‹ab›");
+        harness.get_by_label_contains("个人词");
+        let mut harness =
+            Harness::new_ui_state(|ui, ime: &mut Ime| ime.candidates_ui(ui.ctx()), ime("zz"));
+        harness.run();
+        harness.get_by_label("空码");
+    }
+}

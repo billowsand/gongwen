@@ -1891,9 +1891,15 @@ impl GongwenApp {
             "列出后续编码的候选",
         );
         sub_heading(ui, "词表管理", None);
-        self.ime.manager_ui(ui);
+        setting_note(
+            ui,
+            "导入与升级基础表、查询维护、查码、体检与修改记录都在「输入法词表」页。\
+             公文词表中已接受且编码为四码的词自动加载。",
+        );
         ui.horizontal(|ui| {
-            setting_note(ui, "公文词表中已接受且编码为四码的词自动加载");
+            if ui.button("打开输入法词表").clicked() {
+                self.open_page(super::NavPage::ImeTable);
+            }
             if ui.button("立即同步公文词表").clicked() {
                 self.sync_lexicon_to_ime(true);
             }

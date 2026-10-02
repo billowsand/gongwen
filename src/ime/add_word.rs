@@ -373,3 +373,25 @@ pub(super) fn parts_text(parts: &[(char, String)]) -> String {
         .collect::<Vec<_>>()
         .join(" · ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::ImeSettings;
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn window_fills_code_by_rule_and_lists_occupants() {
+        let mut ime = Ime::bare(ImeSettings::default());
+        ime.table.base =
+            table::parse("vifo,1=指\ndcsc,1=导\nyrdc,1=引导\nvidc,1=只读词", false).entries;
+        ime.table.rebuild();
+        ime.rebuild_encoder();
+        ime.open_add_word("指导", None);
+        let mut harness = Harness::new_ui_state(|ui, ime: &mut Ime| ime.windows_ui(ui.ctx()), ime);
+        harness.run();
+        assert_eq!(harness.state().add_word.code, "vidc");
+        harness.get_by_label("vidc 现有：1 只读词");
+        harness.get_by_label("保存后新词排第 2 位。");
+    }
+}

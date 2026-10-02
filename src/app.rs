@@ -664,6 +664,13 @@ impl eframe::App for GongwenApp {
                 TabRef::Page(NavPage::Lexicon) => {
                     crate::lexicon_ui::lexicon_ui(self, &mut content_ui)
                 }
+                TabRef::Page(NavPage::ImeTable) => {
+                    if let Some(crate::ime::PageAction::SyncLexicon) =
+                        self.ime.page_ui(&mut content_ui)
+                    {
+                        self.sync_lexicon_to_ime(true);
+                    }
+                }
                 TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(&mut content_ui),
                 TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(&mut content_ui),
                 TabRef::Page(NavPage::Knowledge) => {
