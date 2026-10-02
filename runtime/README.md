@@ -19,10 +19,7 @@ runtime/
   fonts/texgyretermes-italic.otf
   fonts/texgyretermes-bolditalic.otf
   licenses/...
-  SHA256SUMS.win-x64.txt
-  SHA256SUMS.linux-arm64.txt
-  SHA256SUMS.linux-amd64.txt
-  SHA256SUMS.darwin-arm64.txt
+  SHA256SUMS.txt
 ```
 
 - Fonts come in two groups, both loaded **from the files here**, never by an
@@ -64,11 +61,11 @@ directory or archive:
 
 Use `-RuntimeManifest` to point at another manifest, `-OutputDir` and
 `-ArchivePath` to control destinations, and `-Force` for a non-interactive
-overwrite. The release workflow downloads `runtime-<suffix>.zip` from the
+overwrite. The release workflow downloads `runtime.zip` from the
 `billowsand/gongwen-runtime` release selected by its `RUNTIME_RELEASE_TAG`;
 that archive must contain the files directly under its root, including
-`fonts/` and the matching `SHA256SUMS.<suffix>.txt`. The release
-smoke test typesets every document kind with the packaged runtime:
+`fonts/` and `SHA256SUMS.txt`. The release smoke test typesets every
+document kind with the packaged runtime:
 
 ```text
 GONGWEN_RUNTIME_DIR=<runtime> cargo test --locked --release --bin gongwen-assistant shipped_runtime_typesets_every_kind -- --ignored

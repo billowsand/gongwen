@@ -18,7 +18,8 @@ concurrency:
 #
 # Runtime assets are versioned independently of the app; bump this tag only
 # when the runtime contents actually change. The tagged release must provide
-# runtime-win-x64.zip and runtime-linux-arm64.zip.
+# runtime.zip (platform-neutral; Windows installer and Linux deb both pull
+# the same archive).
 env:
   # v0.8.0 起中文字体统一为方正 GBK 系列（仿宋/楷体/黑体/书宋/小标宋），并新增
   # 两个拉丁子集字体（仿宋_GB2312 与宋体的西文/数字字面，由
@@ -52,7 +53,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           New-Item -ItemType Directory -Force -Path runtime | Out-Null
-          $asset = "runtime-win-x64.zip"
+          $asset = "runtime.zip"
           gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force
@@ -184,7 +185,7 @@ jobs:
       - name: Download runtime assets for smoke test
         run: |
           set -euo pipefail
-          asset=runtime-linux-arm64.zip
+          asset=runtime.zip
           curl --fail --location --retry 3 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"
@@ -198,7 +199,7 @@ jobs:
           # 就失败，而不是等用户点了导出才报「字体不存在」。
           test -f runtime/fonts/FZFangSong.ttf
           test -f runtime/fonts/FZShuSong.ttf
-          test -f runtime/SHA256SUMS.linux-arm64.txt
+          test -f runtime/SHA256SUMS.txt
 
       - name: Smoke test packaged runtime（PDF 排版）
         run: |
@@ -236,7 +237,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           New-Item -ItemType Directory -Force -Path runtime | Out-Null
-          $asset = "runtime-linux-arm64.zip"
+          $asset = "runtime.zip"
           gh release download "$env:RUNTIME_RELEASE_TAG" --repo "$env:RUNTIME_REPO" --pattern $asset --dir runtime --clobber
           Expand-Archive -Path (Join-Path "runtime" $asset) -DestinationPath runtime -Force
           Remove-Item -LiteralPath (Join-Path "runtime" $asset) -Force

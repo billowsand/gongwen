@@ -199,7 +199,7 @@ jobs:
           set -euo pipefail
           staging=dist/staging
           chmod 755 "$staging/gongwen-assistant"
-          asset="runtime-linux-arm64.zip"
+          asset="runtime.zip"
           curl --fail --location --retry 3 \
             "https://github.com/${RUNTIME_REPO}/releases/download/${RUNTIME_RELEASE_TAG}/${asset}" \
             --output "/tmp/${asset}"

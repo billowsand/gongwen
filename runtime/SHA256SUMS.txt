@@ -1,4 +1,3 @@
-# Linux ARM64 runtime assets: bundled fonts, input-method data and licenses.
 # PDFs are typeset in-process by Typst; no external typesetter is shipped.
 071768C8B8E2ADE4E739814BC863418C090BFE3A6F61C85992D4234ECB468EC8  fonts/XiaoBiaoSong.ttf
 00FDBFB433AAF4C00DD02B79319BBFE94FFCA399DBA1BE9E6455E4BB650E0273  fonts/FZShuSong.ttf
