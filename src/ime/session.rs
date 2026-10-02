@@ -2,12 +2,32 @@
 use super::{
     ImeSettings, data,
     keys::{self, Action, Key, Route},
-    table::{self, Candidate, Entry, Personal, Table},
+    table::{self, Entry, Personal, Table},
 };
 use eframe::egui;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 const SHIFT_TAP_MAX: Duration = Duration::from_millis(500);
+/// 逐码提示最多补几个候选。
+const PREFIX_HINT_LIMIT: usize = 18;
+
+/// 候选窗里的一格：候选、它所在的编码与附注。
+#[derive(Debug, Clone)]
+pub(crate) struct Slot {
+    pub text: String,
+    pub sources: Vec<String>,
+    pub code: String,
+    pub hint: Option<Hint>,
+}
+
+/// 候选后的小字附注。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Hint {
+    /// 这个词还有更短的码（简码提示）。
+    Shorter(String),
+    /// 逐码提示：还要再打的码。
+    Rest(String),
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Preedit {
@@ -55,8 +75,12 @@ pub(crate) struct Ime {
     recent: Vec<String>,
     pub(super) storage_ok: bool,
     pub(super) load_error: Option<String>,
-    pub(super) layout: Vec<Candidate>,
+    pub(super) layout: Vec<Slot>,
+    /// 布局前多少个是精确匹配的候选，后面是逐码提示补出来的。
+    pub(super) exact: usize,
     pub(super) highlight: usize,
+    /// 高亮是使用者用方向键、翻页挪过去的；只有这样空格才上屏逐码提示的候选。
+    highlight_moved: bool,
     pub(super) preedit: Preedit,
     pub(super) english: bool,
     pub(super) pending_commit: Option<String>,
@@ -114,7 +138,9 @@ impl Ime {
             storage_ok: true,
             load_error: None,
             layout: Vec::new(),
+            exact: 0,
             highlight: 0,
+            highlight_moved: false,
             preedit: Default::default(),
             english: false,
             pending_commit: None,
@@ -193,14 +219,57 @@ impl Ime {
     fn drop_composition(&mut self) {
         self.preedit = Default::default();
         self.layout.clear();
+        self.exact = 0;
         self.highlight = 0;
+        self.highlight_moved = false;
         self.pending_commit = None;
         self.forget_window();
     }
     pub(super) fn refresh(&mut self, reset: bool) {
-        self.layout = self.table.lookup(&self.preedit.text);
+        let code = self.preedit.text.clone();
+        let exact = self.table.lookup(&code);
+        self.exact = exact.len();
+        self.layout = exact
+            .into_iter()
+            .map(|candidate| {
+                // 简码提示：这个词还有更短的码就标出来，位置不在首位时带上位置。
+                let hint = self
+                    .settings
+                    .code_hint
+                    .then(|| self.table.codes_of(&candidate.text))
+                    .and_then(|codes| codes.into_iter().find(|(c, ..)| c.len() < code.len()))
+                    .map(|(short, position, _)| {
+                        if position == 1 {
+                            Hint::Shorter(short)
+                        } else {
+                            Hint::Shorter(format!("{short}·{position}"))
+                        }
+                    });
+                Slot {
+                    text: candidate.text,
+                    sources: candidate.sources,
+                    code: code.clone(),
+                    hint,
+                }
+            })
+            .collect();
+        if self.settings.prefix_hint && (1..4).contains(&code.len()) {
+            for (full, candidate) in self.table.extended(&code, PREFIX_HINT_LIMIT) {
+                // 精确候选里已有的词不再补一遍。
+                if self.layout.iter().any(|slot| slot.text == candidate.text) {
+                    continue;
+                }
+                self.layout.push(Slot {
+                    hint: Some(Hint::Rest(full[code.len()..].to_string())),
+                    text: candidate.text,
+                    sources: candidate.sources,
+                    code: full,
+                });
+            }
+        }
         if reset || self.highlight >= self.layout.len() {
             self.highlight = 0;
+            self.highlight_moved = false;
         }
     }
     pub(crate) fn sync_lexicon(
@@ -275,6 +344,65 @@ impl Ime {
         if self.recent.len() > 16 {
             self.recent.remove(0);
         }
+        if self.settings.phrase_hint
+            && let Some(hint) = self.phrase_hint()
+        {
+            self.notice = Some(hint);
+        }
+    }
+    /// 词组提示：最近几次都是逐个单字上屏，连起来正好是表里的词，就提示它的编码。
+    fn phrase_hint(&self) -> Option<String> {
+        let singles: Vec<&str> = self
+            .recent
+            .iter()
+            .rev()
+            .take_while(|text| text.chars().count() == 1 && text.chars().all(is_han))
+            .take(super::add_word::MAX_RECENT_CHARS)
+            .map(String::as_str)
+            .collect();
+        (2..=singles.len()).rev().find_map(|len| {
+            let word: String = singles[..len].iter().rev().copied().collect();
+            let (code, position, _) = self.table.codes_of(&word).into_iter().next()?;
+            Some(if position == 1 {
+                format!("「{word}」可直接打 {code}")
+            } else {
+                format!("「{word}」可打 {code}，第 {position} 位")
+            })
+        })
+    }
+    /// 屏蔽一个候选：只写个人层，基础表不动。
+    pub(super) fn block(&mut self, code: &str, text: &str) -> anyhow::Result<()> {
+        let entry = Entry {
+            code: code.into(),
+            text: text.into(),
+        };
+        let mut personal = self.table.personal.clone();
+        if !personal.hidden.contains(&entry) {
+            personal.hidden.push(entry);
+        }
+        self.save_personal(personal)
+    }
+    /// 调整候选顺序：`delta` 为 0 置顶，正负数下移、上移。
+    pub(super) fn move_word(&mut self, code: &str, text: &str, delta: isize) -> anyhow::Result<()> {
+        let mut order: Vec<String> = self
+            .table
+            .all(code)
+            .iter()
+            .map(|c| c.text.clone())
+            .collect();
+        let Some(index) = order.iter().position(|w| w == text) else {
+            return Ok(());
+        };
+        let target = if delta == 0 {
+            0
+        } else {
+            (index as isize + delta).clamp(0, order.len().saturating_sub(1) as isize) as usize
+        };
+        let word = order.remove(index);
+        order.insert(target, word);
+        let mut personal = self.table.personal.clone();
+        personal.order.insert(code.into(), order);
+        self.save_personal(personal)
     }
     pub(super) fn save_personal(&mut self, personal: Personal) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -482,7 +610,7 @@ impl Ime {
             && self.preedit.caret == 4
             && self.settings.auto_commit
             && self.preedit.text.len() == 4
-            && self.layout.len() == 1
+            && self.exact == 1
         {
             let text = self.commit_at(0).unwrap_or_default();
             outcome.commit = Some(format!("{}{text}", outcome.commit.unwrap_or_default()));
@@ -494,6 +622,13 @@ impl Ime {
         let text = self.layout.get(index)?.text.clone();
         self.preedit = Default::default();
         Some(text)
+    }
+    /// 空格、标点、第五码上屏的那个候选：逐码提示补出来的只在使用者挪过高亮时才算。
+    fn commit_highlighted(&mut self) -> Option<String> {
+        if self.highlight >= self.exact && !self.highlight_moved {
+            return None;
+        }
+        self.commit_at(self.highlight)
     }
     fn take_raw(&mut self) -> String {
         let text = std::mem::take(&mut self.preedit.text);
@@ -509,7 +644,7 @@ impl Ime {
                     if !self.settings.fifth_commit || self.preedit.caret != 4 {
                         return Outcome::NAVIGATED;
                     }
-                    committed = self.commit_at(self.highlight);
+                    committed = self.commit_highlighted();
                     if committed.is_none() {
                         self.notice = Some("当前四码没有候选，请退格修改或按 Esc 清码。".into());
                         return Outcome::NAVIGATED;
@@ -546,7 +681,7 @@ impl Ime {
                 commit: Some(self.take_raw()),
                 recompose: true,
             },
-            Action::CommitHighlighted => match self.commit_at(self.highlight) {
+            Action::CommitHighlighted => match self.commit_highlighted() {
                 Some(text) => Outcome::commit(text),
                 None => Outcome::NAVIGATED,
             },
@@ -558,6 +693,18 @@ impl Ime {
                     None => Outcome::NAVIGATED,
                 }
             }
+            Action::Block => {
+                if let Some(slot) = self.layout.get(self.highlight).cloned() {
+                    let result = self.block(&slot.code, &slot.text);
+                    self.notice = Some(match result {
+                        Ok(()) => {
+                            format!("已屏蔽「{}」（{}），可在词表页恢复。", slot.text, slot.code)
+                        }
+                        Err(error) => format!("屏蔽失败：{error}"),
+                    });
+                }
+                Outcome::NAVIGATED
+            }
             Action::Insert(c) => {
                 let mut text = self.take_raw();
                 text.push(c);
@@ -565,8 +712,7 @@ impl Ime {
             }
             Action::Punctuate(c) => {
                 let prefix = if self.composing() {
-                    self.commit_at(self.highlight)
-                        .unwrap_or_else(|| self.take_raw())
+                    self.commit_highlighted().unwrap_or_else(|| self.take_raw())
                 } else {
                     String::new()
                 };
@@ -575,6 +721,9 @@ impl Ime {
             }
             Action::Navigate(nav) => {
                 use keys::Navigation::*;
+                if matches!(nav, Highlight(_) | Page(_)) {
+                    self.highlight_moved = true;
+                }
                 match nav {
                     Highlight(delta) => {
                         self.highlight = (self.highlight as isize + delta)
@@ -760,6 +909,50 @@ mod tests {
             ["公文", "本单位"]
         );
         assert!(ime.table.lookup("ab").is_empty());
+    }
+    #[test]
+    fn code_hints_prefix_hints_and_phrase_hint() {
+        let mut ime = ime();
+        ime.table.base.extend(
+            table::parse("ab,1=公文\nabce,1=公式\nabcf,1=公开\nk,1=公\nw,1=文", false).entries,
+        );
+        ime.table.rebuild();
+        type_code(&mut ime, "abcd");
+        assert_eq!(ime.layout[0].hint, Some(Hint::Shorter("ab".into())));
+        ime.execute_guarded(Action::Clear);
+        // 逐码提示：精确候选在前，后续编码补在后面；空格只上屏精确候选。
+        ime.settings.prefix_hint = true;
+        type_code(&mut ime, "abc");
+        assert_eq!(ime.exact, 0);
+        assert_eq!(ime.layout.len(), 3);
+        assert_eq!(ime.layout[0].hint, Some(Hint::Rest("d".into())));
+        assert!(
+            ime.execute_guarded(Action::CommitHighlighted)
+                .commit
+                .is_none()
+        );
+        ime.execute_guarded(Action::Navigate(keys::Navigation::Highlight(1)));
+        assert_eq!(
+            ime.execute_guarded(Action::CommitHighlighted)
+                .commit
+                .as_deref(),
+            Some("公式")
+        );
+        type_code(&mut ime, "ab");
+        assert_eq!(ime.exact, 1);
+        assert_eq!(
+            ime.execute_guarded(Action::CommitIndex(1))
+                .commit
+                .as_deref(),
+            Some("公式")
+        );
+        // 词组提示：逐字打出「公」「文」，提示整词最短的码。
+        let mut kept = Vec::new();
+        ime.handle(Key::Char('k'), &mut kept);
+        ime.handle(Key::Char(' '), &mut kept);
+        ime.handle(Key::Char('w'), &mut kept);
+        ime.handle(Key::Char(' '), &mut kept);
+        assert_eq!(ime.take_notice().as_deref(), Some("「公文」可直接打 ab"));
     }
     #[test]
     fn recent_commits_feed_make_word_until_editing_keys() {

@@ -16,6 +16,8 @@ pub(crate) enum Key {
     PageUp,
     PageDown,
     Delete,
+    /// Ctrl+Delete：组码时屏蔽高亮候选，不组码时交给编辑器删词。
+    Block,
     Shortcut,
 }
 impl Key {
@@ -33,6 +35,9 @@ impl Key {
                 | SuperRight
         ) {
             return None;
+        }
+        if key == Delete && modifiers.command && !modifiers.shift && !modifiers.alt {
+            return Some(Self::Block);
         }
         if modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd {
             return Some(Self::Shortcut);
@@ -68,6 +73,7 @@ pub(crate) enum Action {
     Punctuate(char),
     Insert(char),
     Navigate(Navigation),
+    Block,
     Passthrough,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +127,7 @@ pub(crate) fn route(key: Key, state: Route, settings: &ImeSettings) -> Action {
         Key::Home => Action::Navigate(Navigation::CursorHome),
         Key::End => Action::Navigate(Navigation::CursorEnd),
         Key::Delete => Action::DeleteForward,
+        Key::Block => Action::Block,
         Key::Shortcut => Action::FlushRaw,
         Key::Char(c) => Action::Insert(c),
     }
@@ -149,6 +156,14 @@ mod tests {
             Action::Navigate(Navigation::Page(-1))
         );
         assert_eq!(route(Key::Shortcut, state(), &settings), Action::FlushRaw);
+        assert_eq!(route(Key::Block, state(), &settings), Action::Block);
+        let mut idle = state();
+        idle.composing = false;
+        assert_eq!(route(Key::Block, idle, &settings), Action::Passthrough);
+        assert!(matches!(
+            Key::from_egui(egui::Key::Delete, egui::Modifiers::COMMAND),
+            Some(Key::Block)
+        ));
         let mut english = state();
         english.english = true;
         assert_eq!(

@@ -270,13 +270,13 @@ impl Ime {
                             self.report(result, "词条状态已更新。");
                         }
                         if ui.small_button("首选").clicked() {
-                            self.move_word(&code, &candidate.text, 0);
+                            self.reorder(&code, &candidate.text, 0);
                         }
                         if ui.small_button("↑").clicked() {
-                            self.move_word(&code, &candidate.text, -1);
+                            self.reorder(&code, &candidate.text, -1);
                         }
                         if ui.small_button("↓").clicked() {
-                            self.move_word(&code, &candidate.text, 1);
+                            self.reorder(&code, &candidate.text, 1);
                         }
                         if candidate.sources.iter().any(|s| s == "个人词条")
                             && ui.small_button("删除个人词").clicked()
@@ -463,26 +463,9 @@ impl Ime {
         }
         self.report(result, "词条已保存，立即生效。");
     }
-    fn move_word(&mut self, code: &str, text: &str, delta: isize) {
-        let mut order: Vec<String> = self
-            .table
-            .all(code)
-            .iter()
-            .map(|c| c.text.clone())
-            .collect();
-        if let Some(index) = order.iter().position(|w| w == text) {
-            let target = if delta == 0 {
-                0
-            } else {
-                (index as isize + delta).clamp(0, order.len().saturating_sub(1) as isize) as usize
-            };
-            let word = order.remove(index);
-            order.insert(target, word);
-            let mut personal = self.table.personal.clone();
-            personal.order.insert(code.into(), order);
-            let result = self.save_personal(personal);
-            self.report(result, "候选顺序已保存。");
-        }
+    fn reorder(&mut self, code: &str, text: &str, delta: isize) {
+        let result = self.move_word(code, text, delta);
+        self.report(result, "候选顺序已保存。");
     }
     fn report(&mut self, result: anyhow::Result<()>, success: &str) {
         self.manager.message = match result {

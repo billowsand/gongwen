@@ -2022,6 +2022,12 @@ pub struct ImeConfig {
     pub auto_commit: bool,
     /// 第五码先上屏当前候选，再开始下一编码；无候选时保留原编码。
     pub fifth_commit: bool,
+    /// 简码提示：候选还有更短的码时在词后标出。
+    pub code_hint: bool,
+    /// 词组提示：逐字打出表里已有的词时，在状态栏提示它的编码。
+    pub phrase_hint: bool,
+    /// 逐码提示：一至三码时在精确候选后补出以它开头的候选，并标出还要打的码。
+    pub prefix_hint: bool,
     /// 旧配置短语迁移入口；迁移后也保留原配置以便回退。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub phrases: Vec<ImePhrase>,
@@ -2066,6 +2072,9 @@ impl Default for ImeConfig {
             candidate_font_percent: 100,
             auto_commit: false,
             fifth_commit: true,
+            code_hint: true,
+            phrase_hint: true,
+            prefix_hint: false,
             phrases: Vec::new(),
         }
     }

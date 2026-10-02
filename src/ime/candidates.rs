@@ -12,7 +12,7 @@
 use eframe::egui;
 
 use super::keys::Action;
-use super::session::{Ime, Preedit};
+use super::session::{Hint, Ime, Preedit};
 use crate::theme;
 
 /// 候选窗离光标多远。
@@ -33,17 +33,26 @@ const ROW_GAP: f32 = 2.0;
 /// 编码串与页码之间至少留这么宽：候选行很窄时两者不至于挤到一块。
 const HEADER_GAP: f32 = 10.0;
 
+/// 编码串与「空码」标记的间距。
+const EMPTY_GAP: f32 = 6.0;
+
 /// 序号与候选词之间的间距。
 const INDEX_GAP: f32 = 3.0;
 
-/// 词表标记（词前小圆点）的直径。
-const LEXICON_DOT: f32 = 4.0;
+/// 词表星标边长。
+const SPARKLE_SIZE: f32 = 7.0;
 
-/// 词表标记与后面候选词的间距。
-const LEXICON_GAP: f32 = 2.0;
+/// 词表星标与前面候选词的间距。
+const SPARKLE_GAP: f32 = 1.5;
+
+/// 星标腰身收进去的程度：控制点离中心的距离相对半径的比例，越小尖越细。
+const SPARKLE_WAIST: f32 = 0.18;
+
+/// 词后右上角小字（简码、逐码提示）与前面候选词 / 星标的间距。
+const CORNER_GAP: f32 = 1.0;
 
 /// 候选窗的排法与字号，设置页里来。字号按比例放大正文与小字两档，
-/// 词表圆点这些画出来的记号跟着放大，间距不动。
+/// 星标这些画出来的记号跟着放大，间距不动。
 #[derive(Debug, Clone, Copy)]
 struct Look {
     vertical: bool,
@@ -59,16 +68,30 @@ impl Look {
         theme::font_sizes::BODY * self.scale
     }
 
-    fn dot(self) -> f32 {
-        LEXICON_DOT * self.scale
+    fn sparkle(self) -> f32 {
+        SPARKLE_SIZE * self.scale
     }
 }
 
-/// 候选窗中的序号、文字与来源标记。
+/// 候选窗中的序号、文字、来源星标与词后小字。
 struct Row {
     index: usize,
     text: String,
-    lexicon: bool,
+    /// 来自公文词表、导入表或个人词条（不只在基础表里）。
+    starred: bool,
+    corner: Option<String>,
+    tooltip: String,
+}
+
+/// 在候选上做的事：左键上屏，右键菜单里调序、屏蔽、查码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Commit,
+    Top,
+    Up,
+    Down,
+    Block,
+    Lookup,
 }
 
 impl Ime {
@@ -86,28 +109,45 @@ impl Ime {
         }
         let page_size = self.settings.page_size.max(1);
         let page = self.highlight / page_size;
-        // 页数按设置里的每页格数算，不走 `layout.pages()`：那是拿布局自己记着的
-        // 每页格数当除数，空布局（`CandidateLayout::default()`）里它是 0。
+        // 页数按设置里的每页格数算；空布局也算一页。
         let pages = self.layout.len().div_ceil(page_size).max(1);
         // 先把要画的东西抄成自己的数据：闭包里还要改 `self`（记下点中的候选）。
         let rows: Vec<Row> = self
             .layout
             .iter()
+            .enumerate()
             .skip(page * page_size)
             .take(page_size)
             .enumerate()
-            .map(|(offset, candidate)| Row {
-                index: offset,
-                text: candidate
-                    .text
-                    .replace(['\n', '\r'], " ")
-                    .chars()
-                    .take(24)
-                    .collect(),
-                lexicon: candidate.sources.iter().any(|source| source != "基础表"),
+            .map(|(offset, (absolute, slot))| {
+                let position = if absolute < self.exact {
+                    format!("第 {} 位", absolute + 1)
+                } else {
+                    "逐码提示".to_string()
+                };
+                Row {
+                    index: offset,
+                    text: slot
+                        .text
+                        .replace(['\n', '\r'], " ")
+                        .chars()
+                        .take(24)
+                        .collect(),
+                    starred: slot.sources.iter().any(|source| source != "基础表"),
+                    corner: slot.hint.as_ref().map(|hint| match hint {
+                        Hint::Shorter(code) => format!("‹{code}›"),
+                        Hint::Rest(rest) => rest.clone(),
+                    }),
+                    tooltip: format!(
+                        "来源：{} · 编码 {} · {position}\n右键可置顶、调序、屏蔽",
+                        slot.sources.join("、"),
+                        slot.code
+                    ),
+                }
             })
             .collect();
         let preedit = self.preedit.clone();
+        let empty = self.layout.is_empty();
         let look = Look {
             vertical: self.settings.vertical,
             scale: f32::from(self.settings.font_percent) / 100.0,
@@ -115,7 +155,8 @@ impl Ime {
         let highlight = self.highlight.saturating_sub(page * page_size);
         let position = self.window_position(ctx, anchor);
         let rows_width = self.rows_width().unwrap_or(0.0);
-        let mut clicked = None;
+        let mut picked = None;
+        let mut menu_open = false;
         let mut measured = 0.0;
         let area = egui::Area::new(egui::Id::new("gw-ime-candidates"))
             .order(egui::Order::Tooltip)
@@ -143,21 +184,59 @@ impl Ime {
                         // （12/14）与颜色（弱化/正文）已经把两行分得很开了。
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                            header(ui, &preedit, page, pages, rows_width, look);
+                            header(ui, &preedit, empty, page, pages, rows_width, look);
                             ui.add_space(ROW_GAP);
-                            measured = candidates_row(ui, &rows, highlight, &mut clicked, look);
+                            measured = candidates_row(
+                                ui,
+                                &rows,
+                                highlight,
+                                &mut picked,
+                                &mut menu_open,
+                                look,
+                            );
                         });
                     });
             });
         self.remember_window(area.response.rect.size());
         self.remember_rows_width(measured);
-        if let Some(index) = clicked {
-            self.commit_clicked(index);
-            // 点候选不该把编辑框的焦点带走。
-            if let Some(id) = self.focus_id {
-                ctx.memory_mut(|memory| memory.request_focus(id));
-            }
+        if let Some((index, pick)) = picked {
+            self.apply_pick(ctx, page * page_size + index, index, pick);
         }
+        // 点候选、开右键菜单都不该把编辑框的焦点带走：焦点一换，正在打的码就丢了。
+        if (picked.is_some() || menu_open)
+            && let Some(id) = self.focus_id
+        {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+    }
+
+    /// 候选上的一次操作。`absolute` 是在整个布局里的位置，`page_index` 是本页第几个。
+    fn apply_pick(&mut self, ctx: &egui::Context, absolute: usize, page_index: usize, pick: Pick) {
+        if pick == Pick::Commit {
+            self.commit_clicked(page_index);
+            return;
+        }
+        let Some(slot) = self.layout.get(absolute).cloned() else {
+            return;
+        };
+        let result = match pick {
+            Pick::Top => self.move_word(&slot.code, &slot.text, 0),
+            Pick::Up => self.move_word(&slot.code, &slot.text, -1),
+            Pick::Down => self.move_word(&slot.code, &slot.text, 1),
+            Pick::Block => self.block(&slot.code, &slot.text),
+            Pick::Lookup => {
+                ctx.data_mut(|data| data.insert_temp(egui::Id::new("ime-lookup"), slot.text));
+                return;
+            }
+            Pick::Commit => unreachable!(),
+        };
+        self.notice = Some(match (result, pick) {
+            (Ok(()), Pick::Block) => {
+                format!("已屏蔽「{}」（{}），可在词表页恢复。", slot.text, slot.code)
+            }
+            (Ok(()), _) => format!("已调整「{}」在 {} 中的顺序。", slot.text, slot.code),
+            (Err(error), _) => format!("操作失败：{error}"),
+        });
     }
 
     /// 候选窗摆在光标下方；下方放不下就翻到上方。
@@ -185,10 +264,11 @@ impl Ime {
     }
 }
 
-/// 表头：左边编码串，右边页码（只有一页就不画）。
+/// 表头：左边编码串（空码时跟一个「空码」），右边页码（只有一页就不画）。
 fn header(
     ui: &mut egui::Ui,
     preedit: &Preedit,
+    empty: bool,
     page: usize,
     pages: usize,
     rows_width: f32,
@@ -197,6 +277,14 @@ fn header(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
         code_strip(ui, preedit, look);
+        if empty {
+            ui.add_space(EMPTY_GAP);
+            ui.label(
+                egui::RichText::new("空码")
+                    .size(look.small())
+                    .color(theme::warn()),
+            );
+        }
         if pages <= 1 {
             return;
         }
@@ -226,7 +314,8 @@ fn candidates_row(
     ui: &mut egui::Ui,
     rows: &[Row],
     highlight: usize,
-    clicked: &mut Option<usize>,
+    picked: &mut Option<(usize, Pick)>,
+    menu_open: &mut bool,
     look: Look,
 ) -> f32 {
     let mut add_rows = |ui: &mut egui::Ui| {
@@ -242,9 +331,27 @@ fn candidates_row(
         widgets.hovered.expansion = 0.0;
         widgets.active.expansion = 0.0;
         for row in rows {
-            if candidate_button(ui, row, row.index == highlight, look).clicked() {
-                *clicked = Some(row.index);
+            let response =
+                candidate_button(ui, row, row.index == highlight, look).on_hover_text(&row.tooltip);
+            if response.clicked() {
+                *picked = Some((row.index, Pick::Commit));
             }
+            let menu = response.context_menu(|ui| {
+                let items = [
+                    ("置顶", Pick::Top),
+                    ("上移", Pick::Up),
+                    ("下移", Pick::Down),
+                    ("屏蔽", Pick::Block),
+                    ("查编码", Pick::Lookup),
+                ];
+                for (label, pick) in items {
+                    if ui.button(label).clicked() {
+                        *picked = Some((row.index, pick));
+                        ui.close();
+                    }
+                }
+            });
+            *menu_open |= menu.is_some();
         }
     };
     let response = if look.vertical {
@@ -278,14 +385,15 @@ fn code_strip(ui: &mut egui::Ui, preedit: &Preedit, look: Look) {
     ui.label(small(after, theme::text_muted()));
 }
 
-/// 候选按钮；新增来源在词前标一个小圆点。
+/// 一个候选：弱化的小号序号 + 正文字号的候选文本；不只在基础表里的词（公文词表、
+/// 导入表、个人词条）在词后右上角带星标，简码与逐码提示的小字跟在最后。
 fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) -> egui::Response {
     let format = |size: f32, color: egui::Color32| egui::TextFormat {
         font_id: egui::FontId::proportional(size),
         color,
         ..Default::default()
     };
-    // 选中的序号跟着高亮走，但要比候选本身淡：它只是个按键提示。词表圆点同色。
+    // 选中的序号跟着高亮走，但要比候选本身淡：它只是个按键提示。
     let hint_color = if selected {
         theme::accent_active().gamma_multiply(0.7)
     } else {
@@ -294,19 +402,9 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
     let index = (row.index + 1).to_string();
     let mut job = egui::text::LayoutJob::default();
     job.append(&index, 0.0, format(look.small(), hint_color));
-    let mut text_gap = INDEX_GAP;
-    if row.lexicon {
-        // 给圆点让出位置：几乎没宽度的空格，靠前导空白撑开
-        job.append(
-            " ",
-            INDEX_GAP + look.dot(),
-            format(1.0, egui::Color32::TRANSPARENT),
-        );
-        text_gap = LEXICON_GAP;
-    }
     job.append(
         &row.text,
-        text_gap,
+        INDEX_GAP,
         format(
             look.body(),
             if selected {
@@ -316,6 +414,31 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
             },
         ),
     );
+    if row.starred {
+        // 给星标让出位置：一个几乎没宽度的空格，靠前导空白撑开
+        job.append(
+            " ",
+            SPARKLE_GAP + look.sparkle(),
+            format(1.0, egui::Color32::TRANSPARENT),
+        );
+    }
+    // 简码 / 逐码小字：序号那档字号、弱化色，顶到行首当上标
+    let corner_format = egui::TextFormat {
+        valign: egui::Align::TOP,
+        ..format(look.small(), theme::text_muted())
+    };
+    let corner_width = row.corner.as_ref().map_or(0.0, |corner| {
+        job.append(corner, CORNER_GAP, corner_format.clone());
+        CORNER_GAP
+            + ui.painter()
+                .layout_no_wrap(
+                    corner.clone(),
+                    corner_format.font_id.clone(),
+                    corner_format.color,
+                )
+                .size()
+                .x
+    });
     let button = egui::Button::new(job)
         .stroke(egui::Stroke::NONE)
         .corner_radius(4);
@@ -324,20 +447,60 @@ fn candidate_button(ui: &mut egui::Ui, row: &Row, selected: bool, look: Look) ->
     } else {
         button
     });
-    if row.lexicon {
-        // 紧跟序号之后、竖直居中：序号的宽度要量出来才知道圆点落在哪
+    if row.starred {
+        // 贴着候选词右上角：右边收进内边距，顶上与字形顶部大致齐平
         let content = response.rect.shrink2(CELL_PADDING);
-        let index_width = ui
-            .painter()
-            .layout_no_wrap(index, egui::FontId::proportional(look.small()), hint_color)
-            .size()
-            .x;
-        let center = egui::pos2(
-            content.left() + index_width + INDEX_GAP + look.dot() / 2.0,
-            content.center().y,
+        let min = egui::pos2(
+            content.right() - corner_width - look.sparkle(),
+            content.top() + content.height() * 0.15,
         );
-        ui.painter()
-            .circle_filled(center, look.dot() / 2.0, hint_color);
+        let color = if selected {
+            theme::accent_active()
+        } else {
+            theme::accent()
+        };
+        ui.painter().add(sparkle(
+            egui::Rect::from_min_size(min, egui::Vec2::splat(look.sparkle())),
+            color,
+        ));
     }
     response
+}
+
+/// 四角星：四个尖在方块各边中点，相邻两尖之间是一条向中心弯的二次曲线。
+/// 星形对中心是「星形域」，从中心扇形三角化就能实心填满（epaint 的多边形填充只认凸形）。
+fn sparkle(rect: egui::Rect, color: egui::Color32) -> egui::Shape {
+    /// 每段曲线切成几截。
+    const STEPS: usize = 4;
+    let c = rect.center();
+    let r = rect.width() / 2.0;
+    let w = r * SPARKLE_WAIST;
+    let tips = [
+        egui::vec2(0.0, -r),
+        egui::vec2(r, 0.0),
+        egui::vec2(0.0, r),
+        egui::vec2(-r, 0.0),
+    ];
+    let controls = [
+        egui::vec2(w, -w),
+        egui::vec2(w, w),
+        egui::vec2(-w, w),
+        egui::vec2(-w, -w),
+    ];
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(c, color);
+    for (i, (&from, &control)) in tips.iter().zip(&controls).enumerate() {
+        let to = tips[(i + 1) % tips.len()];
+        for step in 0..STEPS {
+            let t = step as f32 / STEPS as f32;
+            let u = 1.0 - t;
+            let point = from * (u * u) + control * (2.0 * u * t) + to * (t * t);
+            mesh.colored_vertex(c + point, color);
+        }
+    }
+    let outline = (tips.len() * STEPS) as u32;
+    for i in 0..outline {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % outline);
+    }
+    egui::Shape::mesh(mesh)
 }

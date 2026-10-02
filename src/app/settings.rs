@@ -1865,6 +1865,31 @@ impl GongwenApp {
             "第五码顶屏",
         );
         self.ime_candidates_ui(ui);
+        sub_heading(ui, "编码提示", None);
+        setting_toggle(
+            ui,
+            "简码提示",
+            Some("候选还有更短的编码时，在词后用小字标出，如「‹vd›」。"),
+            &mut self.config.ime.code_hint,
+            "标出更短的编码",
+        );
+        setting_toggle(
+            ui,
+            "词组提示",
+            Some("逐字打出的几个字正好是词表里的词时，在状态栏提示它的编码。"),
+            &mut self.config.ime.phrase_hint,
+            "逐字打词时提示词组编码",
+        );
+        setting_toggle(
+            ui,
+            "逐码提示",
+            Some(
+                "一至三码时，在精确候选之后列出以它开头的候选，并标出还要打的码。\
+                 只是提示：空格仍只上屏精确候选，用方向键挪过去或按数字才选得到它们。",
+            ),
+            &mut self.config.ime.prefix_hint,
+            "列出后续编码的候选",
+        );
         sub_heading(ui, "词表管理", None);
         self.ime.manager_ui(ui);
         ui.horizontal(|ui| {
@@ -1876,7 +1901,7 @@ impl GongwenApp {
         sub_heading(ui, "按键速查", None);
         setting_note(
             ui,
-            "Shift 切中英；空格选择高亮，1–9 选候选；设置的翻页键或 PageUp / PageDown 翻页；Esc 清码；回车原样上屏编码；方向键、退格、Delete 编辑编码；Ctrl+Shift+A 造词（取选区或最近上屏的字），正文右键可加词、查编码。",
+            "Shift 切中英；空格选择高亮，1–9 选候选；设置的翻页键或 PageUp / PageDown 翻页；Esc 清码；回车原样上屏编码；方向键、退格、Delete 编辑编码；Ctrl+Delete 屏蔽高亮候选；Ctrl+Shift+A 造词（取选区或最近上屏的字），正文右键可加词、查编码；候选上点右键可置顶、调序、屏蔽。",
         );
     }
     fn ime_candidates_ui(&mut self, ui: &mut egui::Ui) {

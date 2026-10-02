@@ -24,6 +24,9 @@ pub(crate) struct ImeSettings {
     pub font_percent: u16,
     pub auto_commit: bool,
     pub fifth_commit: bool,
+    pub code_hint: bool,
+    pub phrase_hint: bool,
+    pub prefix_hint: bool,
 }
 pub(crate) const MAX_PAGE_SIZE: usize = 9;
 pub(crate) const PAGE_KEY_OPTIONS: [&str; 3] = ["[]", ",.", "-="];
@@ -39,6 +42,9 @@ impl Default for ImeSettings {
             font_percent: 100,
             auto_commit: false,
             fifth_commit: true,
+            code_hint: true,
+            phrase_hint: true,
+            prefix_hint: false,
         }
     }
 }
@@ -59,6 +65,9 @@ impl ImeSettings {
             font_percent: config.candidate_font_percent.clamp(100, 200),
             auto_commit: config.auto_commit,
             fifth_commit: config.fifth_commit,
+            code_hint: config.code_hint,
+            phrase_hint: config.phrase_hint,
+            prefix_hint: config.prefix_hint,
         }
     }
 }
