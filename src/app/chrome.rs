@@ -1305,27 +1305,42 @@ impl GongwenApp {
                     .x
                     + 12.0
             });
-            let (timeline_active, result_open, warnings_count, saved) = if show_doc_controls {
+            let (
+                timeline_active,
+                result_open,
+                warnings_count,
+                saved,
+                candidates_open,
+                candidates_count,
+                candidates_visible,
+            ) = if show_doc_controls {
                 self.docs
                     .get(active_doc)
                     .map(|doc| {
+                        let count = doc.candidates.items.len();
+                        let visible = count > 0
+                            && matches!(doc.preview_mode, PreviewMode::Source | PreviewMode::Split);
                         (
                             doc.preview_mode == PreviewMode::VersionDiff
                                 && doc.draft_diff.timeline.expanded,
                             doc.result_drawer_open,
                             doc.warnings.len() + doc.revisions.pending_count(),
                             doc.manuscript_id.is_some(),
+                            doc.candidates.open,
+                            count,
+                            visible,
                         )
                     })
-                    .unwrap_or((false, false, 0, false))
+                    .unwrap_or((false, false, 0, false, false, 0, false))
             } else {
-                (false, false, 0, false)
+                (false, false, 0, false, false, 0, false)
             };
 
             // 先给稿件统计和右侧入口留位；窗口变窄时状态文案缩短，模型名自动让位。
             let reserved = statistics_width
                 + if show_doc_controls { 64.0 } else { 0.0 }
                 + if ime_active { 96.0 } else { 0.0 }
+                + if candidates_visible { 36.0 } else { 0.0 }
                 + 32.0;
             let status_limit = (ui.available_width() * 0.38)
                 .clamp(160.0, 420.0)
@@ -1350,7 +1365,7 @@ impl GongwenApp {
                 );
                 let left_bound = ui.min_rect().right();
 
-                // 右：导出、审校、版本三个抽屉入口。只留图标，说明放在悬停里。
+                // 右：导出、审校、候选、版本四个抽屉入口。只留图标，说明放在悬停里。
                 let right_bound = ui
                     .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // 输入法指示放最右：它是「现在在中文还是英文」唯一的常显提示，
@@ -1388,6 +1403,33 @@ impl GongwenApp {
                         {
                             let doc = &mut self.docs[active_doc];
                             doc.result_drawer_open = !doc.result_drawer_open;
+                        }
+                        // 候选区入口：只在源码 / 分栏模式且已有条目时显示，与编辑区底
+                        // 部的面板同步。图标方向随当前状态翻转，点一下切换展开。
+                        if candidates_visible {
+                            let candidate_icon = if candidates_open {
+                                theme::Icon::PanelClose
+                            } else {
+                                theme::Icon::PanelOpen
+                            };
+                            let candidate_tip = if candidates_open {
+                                format!("收起候选区（{candidates_count} 条）")
+                            } else {
+                                format!("展开候选区（{candidates_count} 条）")
+                            };
+                            if status_icon_button(
+                                ui,
+                                candidates_open,
+                                candidate_icon,
+                                &candidate_tip,
+                                None,
+                                None,
+                            )
+                            .clicked()
+                            {
+                                let doc = &mut self.docs[active_doc];
+                                doc.candidates.open = !doc.candidates.open;
+                            }
                         }
                         let version_tip = if saved {
                             "版本历史".to_string()

@@ -618,7 +618,9 @@ impl DraftPage<'_> {
             .frame(egui::Frame::new().fill(theme::canvas()))
             .show(ui, |ui| {
                 // 候选区挂在编辑区底部，对照模式下横跨源码与版式两栏。
-                if self.candidates_available() {
+                // 没有条目时不画：编辑区底缘不再留出空条，状态栏入口也
+                // 一并隐藏；用户移入第一条之后，面板和入口自动出现。
+                if self.candidates_available() && !self.doc.candidates.items.is_empty() {
                     self.candidate_panel_ui(ui);
                 }
                 self.preview_body_ui(ui);
