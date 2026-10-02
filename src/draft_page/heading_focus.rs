@@ -508,9 +508,8 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
     let focus_row = focus.focus_row.take();
     let mut next_focus = None;
     let mut last_parent = None;
-    egui::ScrollArea::vertical()
+    theme::popup_scroll(ui.ctx().content_rect().height() * if large { 0.7 } else { 0.55 })
         .id_salt("heading_focus_rows")
-        .max_height(ui.ctx().content_rect().height() * if large { 0.7 } else { 0.55 })
         .auto_shrink([false, true])
         .show(ui, |ui| {
             if large {

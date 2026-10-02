@@ -1992,6 +1992,35 @@ pub fn menu_selectable_item(selected: bool, label: &str) -> egui::Button<'static
         .frame_when_inactive(selected)
 }
 
+/// 浮层（下拉菜单、弹层、模态框、不可拖大小的浮窗）里的竖向滚动列表：最高
+/// `max_height`，内容少时照常按内容收缩。
+///
+/// egui 的浮层按**上一帧**的尺寸给内容留地方，滚动区取「剩下的地方」与 `max_height`
+/// 的较小者。内容一变少（筛选、切组），浮层跟着变矮；下一帧滚动区只剩矮的那么高，
+/// 内容再多也长不回去，只能在一小截里滚。把最小滚动高度也设成 `max_height`，滚动区
+/// 就按 `max_height` 排、自己把浮层撑开，内容不足时仍收缩到内容高度。
+///
+/// 只用在浮层里：嵌在面板里的滚动区可用高度是实打实的，强撑到 `max_height` 会冒出面板。
+pub fn popup_scroll(max_height: f32) -> egui::ScrollArea {
+    egui::ScrollArea::vertical()
+        .max_height(max_height)
+        .min_scrolled_height(max_height)
+}
+
+/// 仿 ComboBox 的下拉按钮：选中项靠左、过长截断，右端一个向下的箭头。配
+/// `egui::Popup::menu` 用。
+///
+/// 弹层内容会变（顶上有筛选框）的下拉用它，不用 `egui::ComboBox`：ComboBox 把内容
+/// 包进自己的滚动区，那个滚动区同样会被上一帧的弹层高度卡住（见 [`popup_scroll`]），
+/// 而且从外面改不了它。
+pub fn dropdown_button(text: impl Into<String>, width: f32) -> egui::Button<'static> {
+    egui::Button::new(text.into())
+        .right_text(Icon::ChevronDown.image_sized(12.0))
+        .image_tint_follows_text_color(true)
+        .truncate()
+        .min_size(egui::vec2(width, 0.0))
+}
+
 /// 在子作用域内把按钮三态底色覆盖成橙色系（clone-on-write，退出自动还原），
 /// 让 `egui::Button` 自己按状态切换底色并保留按压动效。供主按钮与需要自定义
 /// 尺寸的橙色按钮共用。
@@ -3160,6 +3189,59 @@ mod tests {
     use super::{Color32, app_icon, configure_icons};
     use crate::models::ThemeName;
     use crate::theme::{Theme, by_name};
+    use eframe::egui;
+
+    /// 在一个浮层里连画几帧，列表依次是 `rows` 条，返回最后一帧浮层的高度。
+    fn popup_height(rows: &[usize], scroll: impl Fn() -> egui::ScrollArea) -> f32 {
+        let ctx = egui::Context::default();
+        let mut height = 0.0;
+        for &count in rows {
+            // 每种条数画几帧，等浮层尺寸稳定下来。
+            for _ in 0..3 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 800.0),
+                    )),
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(raw, |ui| {
+                    height = egui::Area::new(egui::Id::new("popup"))
+                        .fixed_pos(egui::pos2(10.0, 10.0))
+                        .show(ui.ctx(), |ui| {
+                            scroll().show(ui, |ui| {
+                                for row in 0..count {
+                                    ui.label(format!("第 {row} 条"));
+                                }
+                            });
+                        })
+                        .response
+                        .rect
+                        .height();
+                });
+            }
+        }
+        height
+    }
+
+    /// 浮层里的列表筛少了再放开，要长回原来的高度；egui 原样的滚动区会卡在矮的那截。
+    #[test]
+    fn popup_lists_grow_back_after_shrinking() {
+        let full = popup_height(&[40], || super::popup_scroll(200.0));
+        assert!(full > 150.0, "{full}");
+        let regrown = popup_height(&[40, 2, 40], || super::popup_scroll(200.0));
+        assert!((regrown - full).abs() < 1.0, "{regrown} vs {full}");
+        let short = popup_height(&[40, 2], || super::popup_scroll(200.0));
+        assert!(short < 80.0, "内容少时照常收缩：{short}");
+
+        let stuck = popup_height(&[40, 2, 40], || {
+            egui::ScrollArea::vertical().max_height(200.0)
+        });
+        assert!(
+            stuck < full - 50.0,
+            "对照：原样的滚动区确实长不回去（{stuck}）"
+        );
+    }
 
     /// 预览里的每支公文字体后面都要挂着一支排得出生僻字的字体。
     ///

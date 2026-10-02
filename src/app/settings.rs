@@ -388,15 +388,23 @@ fn font_choice_row(
         } else {
             default_label.to_string()
         };
-        egui::ComboBox::from_id_salt(format!("font_role_{key}"))
-            .selected_text(selected)
+        // 不用 ComboBox：筛选会让弹层变矮，ComboBox 自带的滚动区卡在矮的高度上长不
+        // 回去（见 `theme::dropdown_button`）。
+        let button = ui
+            .push_id(format!("font_role_{key}"), |ui| {
+                ui.add(theme::dropdown_button(selected, 300.0))
+            })
+            .inner
+            .on_hover_text(hint);
+        egui::Popup::menu(&button)
             .width(300.0)
-            // 弹层顶上有筛选框，不能用 egui 默认的 `CloseOnClick`：那条规则把
-            // 弹层里的**任何**一次点击都当成"选完了"，点进筛选框的那一下就先把
-            // 弹层关掉，一个字都打不进去。改成只有点在弹层外面才关，选中字体后
-            // 再由 `ui.close()` 主动关。
+            // 弹层顶上有筛选框，不能用默认的 `CloseOnClick`：那条规则把弹层里的
+            // **任何**一次点击都当成"选完了"，点进筛选框的那一下就先把弹层关掉，
+            // 一个字都打不进去。改成只有点在弹层外面才关，选中字体后再由
+            // `ui.close()` 主动关。
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show_ui(ui, |ui| {
+            .show(|ui| {
+                ui.set_min_width(ui.available_width());
                 let search = ui.add(theme::field(filter, "输入字体名筛选", 280.0));
                 // 弹层一打开就把光标放进筛选框：本机常有上百支字体，打开下拉多半
                 // 就是为了搜，没必要再让人多点一下。只在没有别的控件持有焦点时抢，
@@ -412,40 +420,40 @@ fn font_choice_row(
                     *choice = crate::models::FontChoice::default();
                     ui.close();
                 }
-                let mut list = egui::ScrollArea::vertical().max_height(260.0);
+                let mut list = theme::popup_scroll(260.0);
                 // 改了筛选词就把列表滚回顶部：上一次停在几百行之下，换词后看到的
                 // 是末尾几条，很容易以为"没搜着"。
                 if search.changed() {
                     list = list.vertical_scroll_offset(0.0);
                 }
                 list.show(ui, |ui| {
-                        let needle = filter.trim().to_lowercase();
-                        let mut shown = 0usize;
-                        for font in available.iter().filter(|font| {
-                            needle.is_empty()
-                                || font.display.to_lowercase().contains(&needle)
-                                || font.family.to_lowercase().contains(&needle)
-                        }) {
-                            shown += 1;
-                            // 中文名和英文名不一致时两个都显示：写进 TeX 的是英文名。
-                            let label = if font.display == font.family {
-                                font.family.clone()
-                            } else {
-                                format!("{}（{}）", font.display, font.family)
-                            };
-                            let picked = choice.family == font.family;
-                            if ui.selectable_label(picked, label).clicked() {
-                                *choice = font.to_choice();
-                                ui.close();
-                            }
+                    // 字体名不折行：中英文名并列时宁可截断也别把一行拆成两行。
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    let needle = filter.trim().to_lowercase();
+                    let mut shown = 0usize;
+                    for font in available.iter().filter(|font| {
+                        needle.is_empty()
+                            || font.display.to_lowercase().contains(&needle)
+                            || font.family.to_lowercase().contains(&needle)
+                    }) {
+                        shown += 1;
+                        // 中文名和英文名不一致时两个都显示：写进 TeX 的是英文名。
+                        let label = if font.display == font.family {
+                            font.family.clone()
+                        } else {
+                            format!("{}（{}）", font.display, font.family)
+                        };
+                        let picked = choice.family == font.family;
+                        if ui.selectable_label(picked, label).clicked() {
+                            *choice = font.to_choice();
+                            ui.close();
                         }
-                        if shown == 0 {
-                            ui.weak("没有匹配的字体。");
-                        }
-                    });
-            })
-            .response
-            .on_hover_text(hint);
+                    }
+                    if shown == 0 {
+                        ui.weak("没有匹配的字体。");
+                    }
+                });
+            });
         if theme::icon_button(ui, theme::Icon::Folder, "浏览字体文件").clicked()
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("字体文件", system_fonts::SUPPORTED_EXTENSIONS)

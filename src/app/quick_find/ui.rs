@@ -92,9 +92,8 @@ impl QuickFind {
                 // 下方留足页脚和外边距；小窗口仍能滚动浏览结果。
                 let remaining =
                     ui.ctx().content_rect().bottom() - ui.next_widget_position().y - 64.0;
-                egui::ScrollArea::vertical()
+                theme::popup_scroll(remaining.clamp(64.0, 392.0))
                     .id_salt("quick_find_results")
-                    .max_height(remaining.clamp(64.0, 392.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for (position, &index) in self.results.iter().enumerate() {
