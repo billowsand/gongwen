@@ -104,6 +104,71 @@ pub(crate) struct Personal {
     pub rules: Option<[String; 3]>,
 }
 
+/// 个人词条的来源名。
+pub(crate) const PERSONAL: &str = "个人词条";
+
+/// 个人层体检：多余的个人词条、失效的屏蔽与排序。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OverlayReport {
+    /// 别的来源已经有同码同词。
+    pub redundant: Vec<Entry>,
+    /// 屏蔽的词条已不在任何来源里。
+    pub stale_hidden: Vec<Entry>,
+    /// 显式排序里有已不存在的词的编码。
+    pub stale_order: Vec<String>,
+}
+
+impl OverlayReport {
+    pub fn is_empty(&self) -> bool {
+        self.redundant.is_empty() && self.stale_hidden.is_empty() && self.stale_order.is_empty()
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "{} 条个人词条已被其他来源收录，{} 条屏蔽记录已失效，{} 个编码的排序含已不存在的词",
+            self.redundant.len(),
+            self.stale_hidden.len(),
+            self.stale_order.len()
+        )
+    }
+}
+
+/// 两版基础表的差异。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct BaseDiff {
+    pub added: usize,
+    pub removed: usize,
+    /// 同码同词但在该码里的次序变了。
+    pub moved: usize,
+}
+
+/// 每条（编码, 文字）在该码中的次序。
+fn ranks(entries: &[Entry]) -> HashMap<(&str, &str), usize> {
+    let mut seen = HashMap::<&str, usize>::new();
+    entries
+        .iter()
+        .map(|entry| {
+            let position = seen.entry(entry.code.as_str()).or_default();
+            *position += 1;
+            ((entry.code.as_str(), entry.text.as_str()), *position)
+        })
+        .collect()
+}
+
+pub(crate) fn base_diff(old: &[Entry], new: &[Entry]) -> BaseDiff {
+    let (old, new) = (ranks(old), ranks(new));
+    let mut diff = BaseDiff::default();
+    for (key, position) in &new {
+        match old.get(key) {
+            None => diff.added += 1,
+            Some(before) if before != position => diff.moved += 1,
+            Some(_) => {}
+        }
+    }
+    diff.removed = old.keys().filter(|key| !new.contains_key(*key)).count();
+    diff
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Candidate {
     pub text: String,
@@ -121,6 +186,18 @@ pub(crate) struct Table {
 }
 
 impl Table {
+    /// 拿给定的三层另建一张表，用来预览升级之类的改动。
+    pub fn with(base: Vec<Entry>, document: Vec<Entry>, personal: Personal) -> Self {
+        let mut table = Self {
+            base,
+            document,
+            personal,
+            ..Default::default()
+        };
+        table.rebuild();
+        table
+    }
+
     pub fn rebuild(&mut self) {
         let mut index: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
         let mut add = |entries: &[Entry], source: &str| {
@@ -145,7 +222,7 @@ impl Table {
                 add(&batch.entries, &batch.name);
             }
         }
-        add(&self.personal.entries, "个人词条");
+        add(&self.personal.entries, PERSONAL);
         for (code, candidates) in &mut index {
             if let Some(order) = self.personal.order.get(code) {
                 candidates.sort_by_key(|candidate| {
@@ -270,6 +347,58 @@ impl Table {
         )
     }
 
+    /// 个人层里多余或失效的记录：基础表升级、导入表撤销之后常会留下。
+    pub fn overlay_report(&self) -> OverlayReport {
+        let present = |entry: &Entry| self.all(&entry.code).iter().any(|c| c.text == entry.text);
+        OverlayReport {
+            redundant: self
+                .personal
+                .entries
+                .iter()
+                .filter(|entry| {
+                    self.all(&entry.code)
+                        .iter()
+                        .any(|c| c.text == entry.text && c.sources.iter().any(|s| s != PERSONAL))
+                })
+                .cloned()
+                .collect(),
+            stale_hidden: self
+                .personal
+                .hidden
+                .iter()
+                .filter(|entry| !present(entry))
+                .cloned()
+                .collect(),
+            stale_order: self
+                .personal
+                .order
+                .iter()
+                .filter(|(code, words)| {
+                    let all = self.all(code);
+                    words.iter().any(|w| !all.iter().any(|c| &c.text == w))
+                })
+                .map(|(code, _)| code.clone())
+                .collect(),
+        }
+    }
+
+    /// 按报告清理后的个人层：删多余个人词条与失效屏蔽，排序里去掉已不存在的词。
+    pub fn cleaned(&self, report: &OverlayReport) -> Personal {
+        let mut personal = self.personal.clone();
+        personal.entries.retain(|e| !report.redundant.contains(e));
+        personal.hidden.retain(|e| !report.stale_hidden.contains(e));
+        for code in &report.stale_order {
+            let all = self.all(code);
+            if let Some(words) = personal.order.get_mut(code) {
+                words.retain(|w| all.iter().any(|c| &c.text == w));
+                if words.len() <= 1 {
+                    personal.order.remove(code);
+                }
+            }
+        }
+        personal
+    }
+
     pub fn export(&self) -> String {
         let mut text = String::from("\u{feff}# 词表输入法：编码,候选位置=文字\n");
         for code in self.index.keys() {
@@ -361,6 +490,36 @@ mod tests {
         assert!(t.lookup("abcd").is_empty());
         t.personal.hidden.clear();
         assert_eq!(t.lookup("abcd")[0].text, "基础");
+    }
+    #[test]
+    fn overlay_report_and_base_diff() {
+        let mut table = Table {
+            base: parse("abcd,1=甲\nabcd,2=乙\nefgh,1=丙", false).entries,
+            ..Default::default()
+        };
+        table.personal.entries = parse("abcd,1=甲\nijkl,1=丁", false).entries;
+        table.personal.hidden = parse("efgh,1=丙\nmnop,1=没了", false).entries;
+        table
+            .personal
+            .order
+            .insert("abcd".into(), vec!["乙".into(), "旧词".into(), "甲".into()]);
+        table.rebuild();
+        let report = table.overlay_report();
+        assert_eq!(report.redundant, parse("abcd,1=甲", false).entries);
+        assert_eq!(report.stale_hidden, parse("mnop,1=没了", false).entries);
+        assert_eq!(report.stale_order, ["abcd"]);
+        let cleaned = table.cleaned(&report);
+        assert_eq!(cleaned.entries, parse("ijkl,1=丁", false).entries);
+        assert_eq!(cleaned.order["abcd"], ["乙", "甲"]);
+        let next = parse("abcd,1=乙\nabcd,2=甲\nqrst,1=新", false).entries;
+        assert_eq!(
+            base_diff(&table.base, &next),
+            BaseDiff {
+                added: 1,
+                removed: 1,
+                moved: 2
+            }
+        );
     }
     #[test]
     fn replacing_base_preview_does_not_count_retired_words() {

@@ -126,7 +126,7 @@ impl Ime {
         ime.rebuild_encoder();
         ime
     }
-    fn bare(settings: ImeSettings) -> Self {
+    pub(super) fn bare(settings: ImeSettings) -> Self {
         Self {
             settings,
             table: Table::default(),
@@ -313,7 +313,7 @@ impl Ime {
             }
         }
         personal.migrated_phrases = true;
-        if let Err(error) = self.save_personal(personal) {
+        if let Err(error) = self.save_personal(personal, "迁移旧短语") {
             self.notice = Some(format!("旧短语迁移失败：{error}"));
         }
     }
@@ -370,57 +370,6 @@ impl Ime {
             })
         })
     }
-    /// 屏蔽一个候选：只写个人层，基础表不动。
-    pub(super) fn block(&mut self, code: &str, text: &str) -> anyhow::Result<()> {
-        let entry = Entry {
-            code: code.into(),
-            text: text.into(),
-        };
-        let mut personal = self.table.personal.clone();
-        if !personal.hidden.contains(&entry) {
-            personal.hidden.push(entry);
-        }
-        self.save_personal(personal)
-    }
-    /// 调整候选顺序：`delta` 为 0 置顶，正负数下移、上移。
-    pub(super) fn move_word(&mut self, code: &str, text: &str, delta: isize) -> anyhow::Result<()> {
-        let mut order: Vec<String> = self
-            .table
-            .all(code)
-            .iter()
-            .map(|c| c.text.clone())
-            .collect();
-        let Some(index) = order.iter().position(|w| w == text) else {
-            return Ok(());
-        };
-        let target = if delta == 0 {
-            0
-        } else {
-            (index as isize + delta).clamp(0, order.len().saturating_sub(1) as isize) as usize
-        };
-        let word = order.remove(index);
-        order.insert(target, word);
-        let mut personal = self.table.personal.clone();
-        personal.order.insert(code.into(), order);
-        self.save_personal(personal)
-    }
-    pub(super) fn save_personal(&mut self, personal: Personal) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.storage_ok,
-            "个人词表文件读取失败，不能覆盖；请先恢复原文件"
-        );
-        data::save_json(&data::directory()?.join("tables.json"), &personal)?;
-        let rules_changed = personal.rules != self.table.personal.rules;
-        self.table.personal = personal;
-        if rules_changed {
-            self.rebuild_encoder();
-        }
-        self.manager.dirty = true;
-        self.table.rebuild();
-        self.refresh(true);
-        Ok(())
-    }
-
     /// 帧首：接管键盘。要在任何控件跑之前调用。
     pub(crate) fn begin_frame(&mut self, ctx: &egui::Context) {
         if !self.active() {

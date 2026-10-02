@@ -341,28 +341,7 @@ impl Ime {
             self.add_word.message = "编码为 1–4 个小写字母，文字不能为空或含换行、制表符。".into();
             return false;
         }
-        let mut personal = self.table.personal.clone();
-        personal.hidden.retain(|e| e != &entry);
-        let known = self
-            .table
-            .all(&entry.code)
-            .iter()
-            .any(|c| c.text == entry.text);
-        if !known && !personal.entries.contains(&entry) {
-            personal.entries.push(entry.clone());
-        }
-        if self.add_word.first {
-            let mut order: Vec<String> = self
-                .table
-                .all(&entry.code)
-                .iter()
-                .map(|c| c.text.clone())
-                .filter(|t| t != &entry.text)
-                .collect();
-            order.insert(0, entry.text.clone());
-            personal.order.insert(entry.code.clone(), order);
-        }
-        match self.save_personal(personal) {
+        match self.add_entry(&entry, self.add_word.first) {
             Ok(()) => {
                 self.notice = Some(format!("已加入词表：{} {}", entry.code, entry.text));
                 if next {
