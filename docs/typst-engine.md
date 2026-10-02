@@ -25,6 +25,12 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   本机字体，按路径缓存）、编译、诊断翻译、孤行探针报告、横页结构调整。模板二选一：
   `Template::Official`（`assets/typst/gongwen.typ`）、`Template::Research`
   （`assets/typst/research.typ`），都编进二进制。
+- 随包字体（v0.8.0 runtime 起）：中文统一用覆盖 GBK 的方正系列（仿宋 / 楷体 / 黑体 /
+  书宋 / 小标宋，公文与研究报告共用同一套文件）；正文西文与数字、页码数字用两个
+  拉丁子集字体接管（`GWFangSongLatin` 取仿宋_GB2312 字面、`GWSimSunLatin` 取宋体字面，
+  `scripts/make-latin-subsets.py` 从 `font/` 的开发资产生成），在回退链最前面，
+  用户另选本机字体时不叠加。DOCX 导出不嵌字体、按名引用，名字仍是收文机器上常见的
+  中易字体名（仿宋_GB2312 等），与 PDF 的内嵌字面解耦。
 
 ### 公文
 
@@ -52,9 +58,9 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   SVG 导出与 PNG 预览均按回退字形标记选择字体轮廓，并按该字体的 `unitsPerEm` 换算
   大小；SVG 轮廓缓存按字体与 glyph id 隔离。中文条件（如 `\text{为偶数}`）、中文上下标
   与分数均有回归用例，`research-math` 样张包含这些写法。
-- 字体固定用随包的方正书宋 / 黑体 / 楷体 / 小标宋、TeX Gyre Termes、JetBrains Mono，
-  不受设置页本机字体影响；生僻字由内置宋体兜底。缺字体时只挡研究报告
-  （`portable_runtime::validate_research_fonts`）。
+- 字体固定用随包的方正书宋 / 黑体 / 楷体 / 小标宋（与公文同一份文件）、TeX Gyre
+  Termes、JetBrains Mono，不受设置页本机字体影响；方正书宋覆盖 GBK，兼任兜底。
+  缺字体时只挡研究报告（`portable_runtime::validate_research_fonts`）。
 - 文献：Typst 内置 hayagriva，样式 `gb-7714-2015-numeric`，引用不上标。
 
 ## 版式要点（公文）

@@ -12,30 +12,38 @@ use std::path::{Path, PathBuf};
 ///
 /// 这一组是**全部** PDF 排版和纸面预览的下限：缺任何一个都排不出公文，因此
 /// `find_font_dir` 按它校验。
+///
+/// 中文字形统一用字符覆盖到 GBK 的方正系列；两个 GW*Latin 子集只含可打印
+/// ASCII，来自仿宋_GB2312 与宋体，由 `scripts/make-latin-subsets.py` 生成，
+/// 在字体回退链最前面接管正文的西文/数字与页码数字，保持国标字面。
 pub const OFFICIAL_FONT_FILES: &[&str] = &[
-    "FangSong.ttf",
-    "KaiTi.ttf",
-    "SimHei.ttf",
-    "SimSun.ttf",
+    "FZFangSong.ttf",
+    "FZKai.ttf",
+    "FZHei.ttf",
+    "FZShuSong.ttf",
     "XiaoBiaoSong.ttf",
+    "GWFangSongLatin.ttf",
+    "GWSimSunLatin.ttf",
 ];
 
-/// 研究报告排版所需的字体（方正四款、TeX Gyre Termes、JetBrains Mono），研究报告
-/// 模板按文件名取家族名（`export::typst::research`），**改名要两边一起改**。
+/// 研究报告额外需要的字体（TeX Gyre Termes、JetBrains Mono），研究报告模板按
+/// 文件名取家族名（`export::typst::research`），**改名要两边一起改**。
+/// 方正四款与公文共用，在 [`OFFICIAL_FONT_FILES`] 里。
 ///
 /// 单独成组是因为它只挡研究报告：老 runtime 目录缺这几个字体时，公文照常
 /// 排版和预览，只有研究报告报错，不至于让整台机器失去出 PDF 的能力。
 pub const RESEARCH_FONT_FILES: &[&str] = &[
-    "FZShuSong.ttf",
-    "FZHei.ttf",
-    "FZKai.ttf",
-    "FZXiaoBiaoSong.ttf",
     "JetBrainsMono-Regular.ttf",
     "texgyretermes-regular.otf",
     "texgyretermes-bold.otf",
     "texgyretermes-italic.otf",
     "texgyretermes-bolditalic.otf",
 ];
+
+/// 正文西文/数字的拉丁子集（仿宋_GB2312 字面），在正文回退链最前面。
+pub const BODY_LATIN_SUBSET_FILE: &str = "GWFangSongLatin.ttf";
+/// 页码数字的拉丁子集（宋体字面），在页码回退链最前面。
+pub const PAGE_NUMBER_LATIN_SUBSET_FILE: &str = "GWSimSunLatin.ttf";
 
 /// 两组字体的并集，发布包必须齐备。
 pub fn font_files() -> impl Iterator<Item = &'static str> {

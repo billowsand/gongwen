@@ -2780,7 +2780,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             "gw-preview-fallback",
             &font_candidates(
                 bundled_fonts.as_deref(),
-                "SimSun.ttf",
+                "FZShuSong.ttf",
                 &[
                     r"C:\Windows\Fonts\msyh.ttc",
                     r"C:\Windows\Fonts\SourceHanSansCN-Normal.ttf",
@@ -2836,7 +2836,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         (
             FONT_FANGSONG,
             FontRole::Body,
-            "FangSong.ttf",
+            "FZFangSong.ttf",
             &[
                 r"C:\Windows\Fonts\simfang.ttf",
                 r"C:\Windows\Fonts\simsun.ttc",
@@ -2845,7 +2845,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         (
             FONT_HEITI,
             FontRole::Heading1,
-            "SimHei.ttf",
+            "FZHei.ttf",
             &[
                 r"C:\Windows\Fonts\simhei.ttf",
                 r"C:\Windows\Fonts\msyhbd.ttc",
@@ -2854,7 +2854,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         (
             FONT_KAITI,
             FontRole::Heading2,
-            "KaiTi.ttf",
+            "FZKai.ttf",
             &[
                 r"C:\Windows\Fonts\simkai.ttf",
                 r"C:\Windows\Fonts\simfang.ttf",
@@ -2874,7 +2874,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         (
             FONT_SONGTI,
             FontRole::PageNumber,
-            "SimSun.ttf",
+            "FZShuSong.ttf",
             &[
                 r"C:\Windows\Fonts\simsun.ttc",
                 r"C:\Windows\Fonts\simfang.ttf",
@@ -2883,15 +2883,16 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
         (
             FONT_BOLD,
             FontRole::Bold,
-            "SimHei.ttf",
+            "FZHei.ttf",
             &[
                 r"C:\Windows\Fonts\simhei.ttf",
                 r"C:\Windows\Fonts\msyhbd.ttc",
             ][..],
         ),
     ] {
-        // 每个字体族只放对应的中文字体：英文、数字也用它自带的全角字形，不把
-        // Times New Roman 放在最前作西文优先（与国标一致，预览不单独设英文字体）。
+        // 每个字体族只放对应的中文字体。内置字体时西文、数字由拉丁子集
+        // 接管（见下方 latin_subset 注入），与导出的 PDF 同源；不把
+        // Times New Roman 放在最前作西文优先（与国标一致）。
         let mut candidates =
             font_candidates(bundled_fonts.as_deref(), bundled_file, system_candidates);
         // 设置里指定了本机字体就排在最前；读不出来（文件被删）时照旧回退。
@@ -2908,6 +2909,20 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             // 一个都没装上时退回界面字体：预览的字体不对，但排版仍然成立。
             None => fallback.clone(),
         };
+        // 内置字体时把拉丁子集排在族首：正文的西文/数字用仿宋_GB2312 字面、
+        // 页码数字用宋体字面，与导出的 PDF 完全一致。用户另选了本机字体就用
+        // 那支字体自己的拉丁字面，不叠加子集。
+        let latin_subset = match role {
+            FontRole::Body => Some(crate::portable_runtime::BODY_LATIN_SUBSET_FILE),
+            FontRole::PageNumber => Some(crate::portable_runtime::PAGE_NUMBER_LATIN_SUBSET_FILE),
+            _ => None,
+        };
+        if selected.is_none()
+            && let (Some(file), Some(dir)) = (latin_subset, bundled_fonts.as_deref())
+            && let Some(key) = load_font(&mut fonts, &mut loaded, file, &[dir.join(file)])
+        {
+            list.insert(0, key);
+        }
         // 兜底字体挂在这支字体后面，只接它排不出的字。
         let tail: Vec<String> = glyph_fallback
             .iter()

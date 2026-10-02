@@ -464,26 +464,24 @@ fn images_are_embedded_and_missing_ones_are_skipped() {
     );
 }
 
-/// 仿宋_GB2312 没有的 GBK 字（人名里的「喆」）落到兜底宋体，不丢字。
+/// 内置正文字体（方正仿宋_GBK）覆盖 GBK：人名里的「喆」直接从正文字体出，
+/// 不经兜底、不丢字。兜底链仍在，留给用户另选的本机字体缺字时用。
 #[test]
-fn rare_characters_fall_back_to_simsun() {
+fn rare_characters_render_from_bundled_body_font() {
     if crate::portable_runtime::find_font_dir().is_none() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let uses_simsun = |name: &str| {
-        let outcome = compile_plain(
-            &format!("# 标题\n\n<!-- [正文] -->\n\n联系人{name}。\n"),
-            &FontConfig::default(),
-            dir.path(),
-        );
-        embedded_fonts(&outcome.pdf)
-            .iter()
-            .any(|f| f.contains("SimSun"))
-    };
-    // 对照：同一份稿子换成仿宋里有的字，宋体就不该出现。
-    assert!(!uses_simsun("王哲"), "仿宋有的字不应落到宋体");
-    assert!(uses_simsun("王喆"), "「喆」应落到兜底宋体");
+    let outcome = compile_plain(
+        "# 标题\n\n<!-- [正文] -->\n\n联系人王喆。\n",
+        &FontConfig::default(),
+        dir.path(),
+    );
+    let fonts = embedded_fonts(&outcome.pdf);
+    assert!(
+        fonts.iter().any(|f| f.contains("FZFSK")),
+        "「喆」应从方正仿宋直接出：{fonts:?}"
+    );
 }
 
 /// 选了「专用粗体字体」：加粗字换成粗体字面（内置回落黑体），不再描边。
@@ -498,14 +496,14 @@ fn dedicated_bold_font_replaces_fake_bold() {
         ..FontConfig::default()
     };
     let set = crate::typst_engine::font_set(&fonts).unwrap();
-    assert_eq!(set.families.bold.as_deref(), Some("SimHei"));
+    assert_eq!(set.families.bold.as_deref(), Some("FZHei-B01"));
     let outcome = compile_plain(
         "# 标题\n\n<!-- [正文] -->\n\n**加粗**正文。\n",
         &fonts,
         dir.path(),
     );
     let fonts = embedded_fonts(&outcome.pdf);
-    assert!(fonts.iter().any(|f| f.contains("SimHei")), "{fonts:?}");
+    assert!(fonts.iter().any(|f| f.contains("FZHTK")), "{fonts:?}");
 }
 
 /// 标题压缩 / 换行、全局紧缩 / 节内紧缩的样张。
@@ -635,4 +633,68 @@ fn shipped_runtime_typesets_every_kind() {
     )
     .expect("研究报告排版失败");
     assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+}
+
+/// 临时调试：同一段文字分别用「新方案（拉丁子集+方正）」「旧仿宋_GB2312」「纯方正仿宋」
+/// 各排一版并渲染成 PNG，对照拉丁字面差异。
+#[test]
+#[ignore = "临时调试"]
+fn debug_latin_subsets() {
+    use hayro::hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf};
+    use hayro::vello_cpu::color::palette::css::WHITE;
+    use hayro::{RenderCache, RenderSettings};
+    let markdown = "# 拉丁调试\n\n<!-- [正文] -->\n\n《研究报告全格式测试》（星科函〔2026〕25号）及 wiki 库的对比。\n\n做好①普查登记。②整编加工。③突出重点。④动态更新。\n\n半角括号(2026)25号、全角括号（2026）25号、ABCabc123。\n";
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tmp/latin-debug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let font_dir = crate::portable_runtime::find_font_dir().unwrap();
+    let mk = |body: Option<PathBuf>| {
+        let mut config = FontConfig::default();
+        if let Some(path) = body {
+            config.use_system_fonts = true;
+            config.body = crate::models::FontChoice {
+                family: "debug".into(),
+                display: "debug".into(),
+                path: path.to_string_lossy().into_owned(),
+            };
+        }
+        config
+    };
+    let variants = [
+        ("new-subset", mk(None)),
+        (
+            "old-fangsong",
+            mk(Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("font/FangSong.ttf"),
+            )),
+        ),
+        ("fz-only", mk(Some(font_dir.join("FZFangSong.ttf")))),
+    ];
+    for (name, config) in &variants {
+        let outcome = compile_plain(markdown, config, &dir);
+        std::fs::write(dir.join(format!("{name}.pdf")), &outcome.pdf).unwrap();
+        eprintln!("{name}: {:?}", embedded_fonts(&outcome.pdf));
+        let pdf = Pdf::new(std::sync::Arc::new(outcome.pdf)).unwrap();
+        let page = &pdf.pages()[0];
+        let scale = 1600.0 / page.render_dimensions().0;
+        let pixmap = hayro::render(
+            page,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
+            &RenderSettings {
+                x_scale: scale,
+                y_scale: scale,
+                width: Some(1600),
+                bg_color: WHITE,
+                ..Default::default()
+            },
+        );
+        image::RgbaImage::from_raw(
+            u32::from(pixmap.width()),
+            u32::from(pixmap.height()),
+            pixmap.data_as_u8_slice().to_vec(),
+        )
+        .unwrap()
+        .save(dir.join(format!("{name}.png")))
+        .unwrap();
+    }
 }

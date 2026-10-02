@@ -121,6 +121,11 @@ pub struct FontFamilies {
     pub page_number: String,
     /// 选了「专用粗体字体」时的家族名；`None` 表示用描边伪粗。
     pub bold: Option<String>,
+    /// 正文西文/数字的子集家族（仿宋_GB2312 字面），排在正文字体之前接管拉丁；
+    /// 用户为本机字体时不强加（`None`）。
+    pub body_latin: Option<String>,
+    /// 页码数字的子集家族（宋体字面），同理只在用内置字体时出现。
+    pub page_number_latin: Option<String>,
     /// 缺字兜底链，按顺序查找（用户选的在前，内置宋体垫底）。
     pub fallback: Vec<String>,
 }
@@ -192,10 +197,30 @@ pub fn font_set(fonts: &FontConfig) -> Result<FontSet> {
     let bundled_fallback = bundled
         .get(FontRole::Fallback.bundled_file())
         .cloned()
-        .context("内置兜底宋体缺失")?;
+        .context("内置兜底字体缺失")?;
     if !fallback.contains(&bundled_fallback) {
         fallback.push(bundled_fallback);
     }
+    // 拉丁子集只在对应角色用内置字体时挂上：用户另选了本机字体，西文与数字
+    // 就用那支字体自己的字面，不再叠国标字面。
+    let latin = |role: FontRole, file: &str| -> Result<Option<String>> {
+        if fonts.active(role).is_some() {
+            return Ok(None);
+        }
+        bundled
+            .get(file)
+            .cloned()
+            .map(Some)
+            .with_context(|| format!("拉丁子集字体缺失：{file}"))
+    };
+    let body_latin = latin(
+        FontRole::Body,
+        crate::portable_runtime::BODY_LATIN_SUBSET_FILE,
+    )?;
+    let page_number_latin = latin(
+        FontRole::PageNumber,
+        crate::portable_runtime::PAGE_NUMBER_LATIN_SUBSET_FILE,
+    )?;
     Ok(FontSet {
         fonts: all,
         families: FontFamilies {
@@ -205,6 +230,8 @@ pub fn font_set(fonts: &FontConfig) -> Result<FontSet> {
             body,
             page_number,
             bold,
+            body_latin,
+            page_number_latin,
             fallback,
         },
     })
@@ -559,6 +586,8 @@ mod tests {
                 body: String::new(),
                 page_number: String::new(),
                 bold: None,
+                body_latin: None,
+                page_number_latin: None,
                 fallback: Vec::new(),
             },
         };
@@ -597,7 +626,7 @@ mod glyph_probe {
     #[ignore]
     fn calibrate_punct_shrink() {
         let mut src = String::from("#set page(width: 300mm, height: auto, margin: 5mm)
-#set text(font: \"FangSong_GB2312\", size: 16pt, lang: \"zh\", region: \"cn\", overhang: false, cjk-latin-spacing: none)
+#set text(font: \"FZFangSong-Z02\", size: 16pt, lang: \"zh\", region: \"cn\", overhang: false, cjk-latin-spacing: none)
 #set par(justify: true)
 ");
         for p in "，。、；：！？）」』》（「『《“”".chars() {
@@ -621,7 +650,7 @@ mod glyph_probe {
     #[ignore]
     fn print_punct_bounds() {
         let dir = crate::portable_runtime::find_font_dir().unwrap();
-        for file in ["FangSong.ttf", "KaiTi.ttf", "SimHei.ttf"] {
+        for file in ["FZFangSong.ttf", "FZKai.ttf", "FZHei.ttf"] {
             let bytes = std::fs::read(dir.join(file)).unwrap();
             let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
             let upem = face.units_per_em() as f32;

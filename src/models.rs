@@ -1889,43 +1889,49 @@ impl FontRole {
     pub fn hint(self) -> &'static str {
         match self {
             Self::Title => "公文大标题与附件标题，内置为方正小标宋",
-            Self::Heading1 => "一级标题「一、」、表头与附件名，内置为黑体",
-            Self::Heading2 => "二级标题「（一）」，内置为楷体；同时用作正文的斜体字面",
-            Self::Body => "正文与表格，内置为仿宋；「1.」「(1)」两级标题在它上面加粗",
-            Self::PageNumber => "页脚页码，内置为宋体",
+            Self::Heading1 => "一级标题「一、」、表头与附件名，内置为方正黑体",
+            Self::Heading2 => "二级标题「（一）」，内置为方正楷体；同时用作正文的斜体字面",
+            Self::Body => {
+                "正文与表格，内置为方正仿宋（西文与数字保持仿宋_GB2312 字面）；「1.」「(1)」两级标题在它上面加粗"
+            }
+            Self::PageNumber => "页脚页码，内置为方正书宋（数字保持宋体字面）",
             Self::Bold => {
-                "正文里的 Markdown 加粗文字改用专门的粗体字体时用它，内置为黑体；选「当前字体直接加粗」时不生效，标题始终用仿宋合成加粗"
+                "正文里的 Markdown 加粗文字改用专门的粗体字体时用它，内置为方正黑体；选「当前字体直接加粗」时不生效，标题始终用仿宋合成加粗"
             }
             Self::Fallback => {
-                "上面几支字体排不出的生僻字（「喆」「赟」等）改用它，内置为宋体，覆盖 GBK 全部汉字；\
+                "上面几支字体排不出的生僻字（「喆」「赟」等）改用它，内置为方正书宋，覆盖 GBK 全部汉字；\
                  想排 GBK 以外的字（如「𠮟」）才需要另选一支字库更大的本机字体"
             }
         }
     }
 
     /// 内置字体文件名，未配置本机字体时使用。必须是
-    /// `portable_runtime::FONT_FILES` 里的一项，由单元测试守住。
+    /// `portable_runtime::OFFICIAL_FONT_FILES` 里的一项，由单元测试守住。
+    ///
+    /// 中文一律用覆盖 GBK 的方正系列；正文的西文/数字与页码数字另由两个
+    /// 拉丁子集（GWFangSongLatin/GWSimSunLatin，见 `typst_engine::font_set`）
+    /// 接管，保持仿宋_GB2312 与宋体的国标字面。
     pub fn bundled_file(self) -> &'static str {
         match self {
             Self::Title => "XiaoBiaoSong.ttf",
-            Self::Heading1 => "SimHei.ttf",
-            Self::Heading2 => "KaiTi.ttf",
-            Self::Body => "FangSong.ttf",
-            Self::PageNumber => "SimSun.ttf",
-            Self::Bold => "SimHei.ttf",
-            Self::Fallback => "SimSun.ttf",
+            Self::Heading1 => "FZHei.ttf",
+            Self::Heading2 => "FZKai.ttf",
+            Self::Body => "FZFangSong.ttf",
+            Self::PageNumber => "FZShuSong.ttf",
+            Self::Bold => "FZHei.ttf",
+            Self::Fallback => "FZShuSong.ttf",
         }
     }
     /// 内置字体的中文名，用于界面上说明“不选就用什么”。
     pub fn bundled_label(self) -> &'static str {
         match self {
             Self::Title => "方正小标宋",
-            Self::Heading1 => "黑体",
-            Self::Heading2 => "楷体",
-            Self::Body => "仿宋",
-            Self::PageNumber => "宋体",
-            Self::Bold => "黑体",
-            Self::Fallback => "宋体",
+            Self::Heading1 => "方正黑体",
+            Self::Heading2 => "方正楷体",
+            Self::Body => "方正仿宋",
+            Self::PageNumber => "方正书宋",
+            Self::Bold => "方正黑体",
+            Self::Fallback => "方正书宋",
         }
     }
 
@@ -2164,15 +2170,15 @@ impl FontConfig {
     /// 加粗文字要换用的字体家族名（Word 用）。
     ///
     /// `None` 表示沿用当前字体直接加粗：Word 写 `w:b` 让它自己合成。选了「专用
-    /// 粗体字体」但没挑字面时回落内置黑体（写中文名，与文档里其它地方用的黑体
-    /// 一致）；用户自己挑了字面就用他选的家族名。
+    /// 粗体字体」但没挑字面时回落「黑体」——DOCX 是给别人机器看的交换格式，字体名
+    /// 始终写收文方机器上常见的中易字体名，不随内置 PDF 字体（方正系列）变化。
     pub fn bold_family_docx(&self) -> Option<&str> {
         if !self.uses_dedicated_bold_font() {
             return None;
         }
         match self.active(FontRole::Bold) {
             Some(choice) => Some(choice.family.trim()),
-            None => Some(FontRole::Bold.bundled_label()),
+            None => Some("黑体"),
         }
     }
 }

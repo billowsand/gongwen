@@ -127,7 +127,7 @@ pub(crate) struct Metrics {
     margin_left: f32,
     margin_top: f32,
     line: f32,
-    /// 正文字面与字号。公文是仿宋三号，研究报告是宋体（近似方正书宋）14bp。
+    /// 正文字面与字号。公文是仿宋三号，研究报告是宋体（方正书宋）14bp。
     /// 放进 `Metrics` 而不是在每个部件里写死，是为了让段落、表格、列表这些
     /// 共用的块渲染自动跟着版式走，不必为研究报告各复制一份。
     body_family: &'static str,
@@ -223,8 +223,7 @@ impl Metrics {
             margin_left: RESEARCH_MARGIN_LEFT_MM * MM * PT * scale,
             margin_top: RESEARCH_MARGIN_TOP_MM * MM * PT * scale,
             line: RESEARCH_LINE_PT * PT * scale,
-            // 方正书宋没有随预览分发，用宋体顶替：字号行距是准的，字形以
-            // 编译出的 PDF 为准。
+            // 宋体族：随包的方正书宋（FONT_SONGTI 已经指向它），与编译出的 PDF 同字面。
             body_family: theme::FONT_SONGTI,
             body_pt: RESEARCH_BODY_PT,
             dedicated_bold: false,

@@ -20,12 +20,14 @@ concurrency:
 # when the runtime contents actually change. The tagged release must provide
 # runtime-win-x64.zip and runtime-linux-arm64.zip.
 env:
-  # v0.4.0 起额外分发研究报告排版所需的 9 个字体（方正、TeX Gyre Termes、
-  # JetBrains Mono）。研究报告按文件名从 runtime 加载字体，用户机器不必安装。
-  # 旧 runtime 的拼音词库与语言模型不再随包。
+  # v0.8.0 起中文字体统一为方正 GBK 系列（仿宋/楷体/黑体/书宋/小标宋），并新增
+  # 两个拉丁子集字体（仿宋_GB2312 与宋体的西文/数字字面，由
+  # scripts/make-latin-subsets.py 生成）；中易五支与小标宋简体不再随包。
+  # 研究报告另需 TeX Gyre Termes 与 JetBrains Mono。研究报告按文件名从 runtime
+  # 加载字体，用户机器不必安装。
   # PDF 由 Typst 在进程内排版：runtime 包里旧有的 tectonic/、texbundle/ 不再随包
   # 分发（package-portable.ps1 按清单复制时跳过），只用其中的字体与许可证。
-  RUNTIME_RELEASE_TAG: v0.7.0
+  RUNTIME_RELEASE_TAG: v0.8.0
   RUNTIME_REPO: billowsand/gongwen-runtime
 
 jobs:
@@ -192,9 +194,9 @@ jobs:
             # extracts them correctly but reports warning status 1 on Linux.
             test "$status" -eq 1
           }
-          test -f runtime/fonts/FangSong.ttf
-          # 研究报告的字体：拿到旧 runtime 时在这里就失败，而不是等用户
-          # 点了导出才报 "字体不存在"。
+          # 公文与研究报告共用方正 GBK 系列：拿到旧 runtime（中易五支）时在这里
+          # 就失败，而不是等用户点了导出才报「字体不存在」。
+          test -f runtime/fonts/FZFangSong.ttf
           test -f runtime/fonts/FZShuSong.ttf
           test -f runtime/SHA256SUMS.linux-arm64.txt
 

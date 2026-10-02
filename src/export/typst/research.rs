@@ -24,11 +24,12 @@ fn fonts() -> Result<Value> {
         "song": family("FZShuSong.ttf")?,
         "hei": family("FZHei.ttf")?,
         "kai": family("FZKai.ttf")?,
-        "xbs": family("FZXiaoBiaoSong.ttf")?,
+        "xbs": family("XiaoBiaoSong.ttf")?,
         "latin": family("texgyretermes-regular.otf")?,
         "mono": family("JetBrainsMono-Regular.ttf")?,
-        // 方正书宋覆盖 GBK；更生僻的字由内置宋体兜底（与公文同一份）。
-        "fallback": family("SimSun.ttf")?,
+        // 方正书宋覆盖 GBK，兼任兜底（与公文同一份）；GBK 以外的字由模板继续
+        // 向系统字体回退。
+        "fallback": family("FZShuSong.ttf")?,
     }))
 }
 

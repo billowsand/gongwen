@@ -293,27 +293,16 @@ mod tests {
         assert!(elapsed.as_secs() < 20, "扫描耗时 {elapsed:?} 过长");
     }
 
-    /// 内置兜底字体必须真的补得上正文字体缺的字，否则兜底等于没兜。
-    ///
-    /// 正文的仿宋_GB2312 只有 GB2312 的 6763 个汉字，人名里的「喆」「赟」这类
-    /// GBK 字在它上面没有字形，排出来就是少一个字。这条盯住的是内置宋体的字库
-    /// 范围：换内置字体时若换成一支同样只有 GB2312 的，这里会立刻红。
+    /// 内置兜底字体必须覆盖 GBK 生僻字：它要在用户另选的正文字体缺字时顶上，
+    /// 也是各支内置字体统一的后盾。哪天换成只有 GB2312 的字体，这里会立刻红。
     #[test]
-    fn the_bundled_fallback_font_covers_characters_the_body_font_lacks() {
+    fn the_bundled_fallback_font_covers_gbk_rare_characters() {
         let Some(dir) = crate::portable_runtime::find_font_dir() else {
             return; // 精简检出没有 runtime 字体，跳过。
         };
         let rare = "喆赟昇堃玥頔飏犇翀";
-        let read = |file: &str| std::fs::read(dir.join(file)).expect("内置字体应可读");
-
-        let body = read(FontRole::Body.bundled_file());
-        let body = ttf_parser::Face::parse(&body, 0).expect("正文字体应能解析");
-        assert!(
-            rare.chars().any(|ch| body.glyph_index(ch).is_none()),
-            "正文字体已覆盖这些生僻字，请换一组仍然缺字的样本，别让这条失去意义"
-        );
-
-        let fallback = read(FontRole::Fallback.bundled_file());
+        let fallback =
+            std::fs::read(dir.join(FontRole::Fallback.bundled_file())).expect("兜底字体应可读");
         let fallback = ttf_parser::Face::parse(&fallback, 0).expect("兜底字体应能解析");
         for ch in rare.chars() {
             assert!(
@@ -327,7 +316,7 @@ mod tests {
     fn bundled_fonts_parse_into_named_families() {
         let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("font")
-            .join("SimSun.ttf");
+            .join("FZShuSong.ttf");
         if !bundled.is_file() {
             return; // 精简检出没有字体资产，跳过。
         }

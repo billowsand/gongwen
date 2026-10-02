@@ -25,11 +25,13 @@
 #let topskip = 10 * texpt                  // 首页 picture 原点比版心顶低一个 \topskip
 
 #let fam(main) = (main, ..F.fallback)
-#let fs = fam(F.body)
+// 正文西文/数字用仿宋_GB2312 字面、页码数字用宋体字面：两个拉丁子集家族排在
+// 回退链最前面，Typst 逐字回退时拉丁先落到子集上。选了本机字体时子集缺省。
+#let fs = if F.at("body_latin", default: none) != none { (F.body_latin, ..fam(F.body)) } else { fam(F.body) }
 #let kai = fam(F.heading2)
 #let hei = fam(F.heading1)
 #let xbs = fam(F.title)
-#let song = fam(F.page_number)
+#let song = if F.at("page_number_latin", default: none) != none { (F.page_number_latin, ..fam(F.page_number)) } else { fam(F.page_number) }
 
 // ---------------- 行内片段 ----------------
 // 片段：t 文字；b 加粗；k 括号楷体四号；m 花脸稿（del / add）；g 中西文间隙（pt）；

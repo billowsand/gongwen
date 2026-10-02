@@ -43,9 +43,8 @@ const OFFICIAL_MAX_HEIGHT_RATIO: f64 = 0.7;
 const RESEARCH_TEXT_WIDTH_PT: f64 = figure_size::TEXT_WIDTH_MM / 25.4 * 72.0;
 const RESEARCH_TEXT_HEIGHT_PT: f64 = figure_size::TEXT_HEIGHT_MM / 25.4 * 72.0;
 
-/// 画图要用的随包字体：公文仿宋、研究报告方正黑体（老 runtime 没有时退到黑体），
-/// 宋体兜住 GBK 生僻字。
-const FONT_FILES: &[&str] = &["FangSong.ttf", "SimSun.ttf", "SimHei.ttf", "FZHei.ttf"];
+/// 画图要用的随包字体：公文方正仿宋、研究报告方正黑体，方正书宋兜住 GBK 生僻字。
+const FONT_FILES: &[&str] = &["FZFangSong.ttf", "FZShuSong.ttf", "FZHei.ttf"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Style {
@@ -57,8 +56,8 @@ impl Style {
     /// 图内文字：公文用仿宋，与正文一脉；研究报告用黑体，与图题、表头同一路。
     fn font_family(self) -> &'static str {
         match self {
-            Self::Official => "FangSong_GB2312, SimSun, serif",
-            Self::Research => "FZHei-B01, SimHei, sans-serif",
+            Self::Official => "FZFangSong-Z02, FZShuSong-Z01, serif",
+            Self::Research => "FZHei-B01, sans-serif",
         }
     }
 
@@ -689,8 +688,8 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
                 }
                 None => database.load_system_fonts(),
             }
-            database.set_serif_family("SimSun");
-            database.set_sans_serif_family("SimHei");
+            database.set_serif_family("FZShuSong-Z01");
+            database.set_sans_serif_family("FZHei-B01");
             Arc::new(database)
         })
         .clone()
@@ -699,7 +698,7 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
 fn to_png(svg: &str) -> Result<Vec<u8>> {
     let options = usvg::Options {
         fontdb: fonts(),
-        font_family: "SimSun".into(),
+        font_family: "FZShuSong-Z01".into(),
         ..usvg::Options::default()
     };
     let tree = usvg::Tree::from_str(svg, &options)
@@ -725,7 +724,7 @@ fn to_png(svg: &str) -> Result<Vec<u8>> {
 fn to_pdf(svg: &str) -> Result<Vec<u8>> {
     let options = svg2pdf::usvg::Options {
         fontdb: fonts(),
-        font_family: "SimSun".into(),
+        font_family: "FZShuSong-Z01".into(),
         ..svg2pdf::usvg::Options::default()
     };
     let tree = svg2pdf::usvg::Tree::from_str(svg, &options)

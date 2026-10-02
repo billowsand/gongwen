@@ -329,6 +329,8 @@ pub(crate) mod typst_tests {
             body: "b".into(),
             page_number: "p".into(),
             bold: None,
+            body_latin: None,
+            page_number_latin: None,
             fallback: Vec::new(),
         };
         crate::export::typst::document_json(
@@ -1041,6 +1043,8 @@ mod consistency_tests {
             body: "b".into(),
             page_number: "p".into(),
             bold: None,
+            body_latin: None,
+            page_number_latin: None,
             fallback: Vec::new(),
         }
     }
@@ -1235,6 +1239,8 @@ mod consistency_tests {
             body: "b".into(),
             page_number: "p".into(),
             bold: None,
+            body_latin: None,
+            page_number_latin: None,
             fallback: Vec::new(),
         };
         let a = crate::export::typst::document_json(
