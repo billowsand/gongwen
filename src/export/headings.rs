@@ -75,8 +75,7 @@ pub(crate) fn official_heading_text(
     official_heading_prefix(level, counters, numbering).map(|prefix| format!("{prefix}{text}"))
 }
 
-/// 只生成公文标题编号前缀。实时排版编辑器不能把自动编号真正写进
-/// Markdown，因此用这个共用函数在屏幕上叠加，导出时仍由同一套计数器生成。
+/// 只生成公文标题编号前缀。导出时由同一套计数器生成。
 pub(crate) fn official_heading_prefix(
     level: u8,
     counters: &mut [usize; 4],
@@ -107,7 +106,7 @@ pub(crate) fn official_heading_prefix(
     }
 }
 
-/// 逐行推进标题计数器并返回该行叠加的编号前缀，供实时排版编辑器使用。
+/// 逐行推进标题计数器并返回该行叠加的编号前缀。
 /// 规则与导出器（docx/latex）和预览完全一致：
 /// - 区段标记（正文/附件）处切换区段并重置计数器；
 /// - 正文第一个 `#` 与每个附件标记后的 `#` 都是正式标题；

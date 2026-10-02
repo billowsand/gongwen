@@ -33,6 +33,7 @@ pub(crate) fn is_table_separator_line(line: &str) -> bool {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn table_column_count(line: &str) -> usize {
     split_row(line).len().max(1)
 }

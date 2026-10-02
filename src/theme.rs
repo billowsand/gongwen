@@ -83,8 +83,6 @@ pub struct MdPalette {
     pub anchor_bg: Color32,
     /// 查找条的普通命中；当前命中仍用更醒目的 `anchor_bg`。
     pub search_bg: Color32,
-    /// 实时排版里独占一行的图片引用：TextEdit 无法内嵌图片，用淡底高亮为占位提示。
-    pub image_bg: Color32,
 }
 
 /// 屏幕上的公文纸面家族。
@@ -222,7 +220,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0x2C, 0x53, 0x6B),
                 anchor_bg: Color32::from_rgb(0xF4, 0xE5, 0xDC),
                 search_bg: Color32::from_rgb(0xF6, 0xE7, 0xA9),
-                image_bg: Color32::from_rgb(0xD8, 0xEA, 0xF5),
             },
         }
     }
@@ -274,7 +271,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0x1F, 0x5B, 0x8A),
                 anchor_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
                 search_bg: Color32::from_rgb(0xFF, 0xF1, 0xB8),
-                image_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
             },
         }
     }
@@ -326,7 +322,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0x5B, 0x4A, 0x9E),
                 anchor_bg: Color32::from_rgb(0xEE, 0xE3, 0xFA),
                 search_bg: Color32::from_rgb(0xFF, 0xF1, 0xB8),
-                image_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
             },
         }
     }
@@ -378,7 +373,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0x2F, 0x6B, 0x4A),
                 anchor_bg: Color32::from_rgb(0xDC, 0xED, 0xDB),
                 search_bg: Color32::from_rgb(0xFF, 0xF1, 0xB8),
-                image_bg: Color32::from_rgb(0xD8, 0xEB, 0xF7),
             },
         }
     }
@@ -433,7 +427,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0xD3, 0x36, 0x82),
                 anchor_bg: Color32::from_rgb(0xE2, 0xEC, 0xF5),
                 search_bg: Color32::from_rgb(0xF5, 0xE7, 0xA8),
-                image_bg: Color32::from_rgb(0xDD, 0xEB, 0xEA),
             },
         }
     }
@@ -485,7 +478,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0xEA, 0x76, 0xCB),
                 anchor_bg: Color32::from_rgb(0xED, 0xE2, 0xFC),
                 search_bg: Color32::from_rgb(0xFB, 0xEF, 0xC0),
-                image_bg: Color32::from_rgb(0xDD, 0xE7, 0xFB),
             },
         }
     }
@@ -537,7 +529,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0x07, 0x66, 0x78),
                 anchor_bg: Color32::from_rgb(0xF0, 0xDE, 0xBB),
                 search_bg: Color32::from_rgb(0xF7, 0xE3, 0x9A),
-                image_bg: Color32::from_rgb(0xDF, 0xE7, 0xDC),
             },
         }
     }
@@ -589,7 +580,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0xF1, 0xFA, 0x8C),
                 anchor_bg: Color32::from_rgb(0x3B, 0x34, 0x52),
                 search_bg: Color32::from_rgb(0x4A, 0x43, 0x26),
-                image_bg: Color32::from_rgb(0x1F, 0x3A, 0x44),
             },
         }
     }
@@ -641,7 +631,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0xB4, 0x8E, 0xAD),
                 anchor_bg: Color32::from_rgb(0x3A, 0x4A, 0x5C),
                 search_bg: Color32::from_rgb(0x4A, 0x45, 0x2F),
-                image_bg: Color32::from_rgb(0x2F, 0x3E, 0x4B),
             },
         }
     }
@@ -693,7 +682,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0xD3, 0x86, 0x9B),
                 anchor_bg: Color32::from_rgb(0x45, 0x3A, 0x25),
                 search_bg: Color32::from_rgb(0x4A, 0x42, 0x20),
-                image_bg: Color32::from_rgb(0x2B, 0x3A, 0x3A),
             },
         }
     }
@@ -745,7 +733,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0xFF, 0x9E, 0x64),
                 anchor_bg: Color32::from_rgb(0x2C, 0x33, 0x50),
                 search_bg: Color32::from_rgb(0x42, 0x3A, 0x22),
-                image_bg: Color32::from_rgb(0x1E, 0x30, 0x40),
             },
         }
     }
@@ -797,7 +784,6 @@ impl Theme {
                 quoted: Color32::from_rgb(0xD6, 0x99, 0xB6),
                 anchor_bg: Color32::from_rgb(0x3C, 0x4A, 0x3D),
                 search_bg: Color32::from_rgb(0x45, 0x41, 0x2A),
-                image_bg: Color32::from_rgb(0x2C, 0x3A, 0x40),
             },
         }
     }
@@ -1262,10 +1248,6 @@ pub mod md {
     /// 查找条的普通命中；当前命中仍用更醒目的 `anchor_bg`。
     pub fn search_bg() -> Color32 {
         current().md.search_bg
-    }
-    /// 实时排版里图片引用行的淡底（TextEdit 无法内嵌图片，作为占位提示）。
-    pub fn image_bg() -> Color32 {
-        current().md.image_bg
     }
 }
 

@@ -1,14 +1,14 @@
 //! 编辑框光标：按光标旁字形的字体框画，而不是 egui 默认的整行高。
 //!
 //! egui 的 `TextEdit` 把光标画成整行高、再上下各多出 1.5 px。编辑区给行设了固定
-//! 行高（实时排版为公文的 28 磅，源码模式为字号的 1.35 倍），epaint 又把字形贴在
-//! 行顶、多出来的行距全留在字下方——于是光标比字高出一截，还往下拖进行间空白，
-//! 空行上尤其显眼。这里在编辑框绘制期间关掉 egui 自带的光标，事后按字形高度补画
-//! 一条；闪烁节奏照搬 egui（有改动或光标移动就重新从「亮」开始）。
+//! 行高（源码模式为字号的 1.35 倍），epaint 又把字形贴在行顶、多出来的行距全留
+//! 在字下方——于是光标比字高出一截，还往下拖进行间空白，空行上尤其显眼。这里在
+//! 编辑框绘制期间关掉 egui 自带的光标，事后按字形高度补画一条；闪烁节奏照搬 egui
+//! （有改动或光标移动就重新从「亮」开始）。
 
 use eframe::egui::{self, Galley, Rect, Stroke, text::CCursor, text_edit::TextEditOutput};
 
-/// 比这还小的字形是实时排版里压成近零宽的隐藏标记，不能拿来量光标高度。
+/// 比这还小的字形是源码里被压成近零宽的隐藏标记，不能拿来量光标高度。
 const MIN_GLYPH_HEIGHT: f32 = 4.0;
 
 /// 空行上找不到字形时，往上下各看几行借一个字高。
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_markers_are_skipped() {
+    fn tiny_markers_are_skipped() {
         let tiny = TextFormat {
             font_id: egui::FontId::proportional(0.1),
             line_height: Some(LINE),

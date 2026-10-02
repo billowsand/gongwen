@@ -227,7 +227,7 @@ impl DraftPage<'_> {
     pub(crate) fn candidates_available(&self) -> bool {
         matches!(
             self.doc.preview_mode,
-            PreviewMode::Source | PreviewMode::Hybrid | PreviewMode::Split
+            PreviewMode::Source | PreviewMode::Split
         )
     }
 

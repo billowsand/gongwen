@@ -1262,12 +1262,6 @@ impl DraftPage<'_> {
                 "带语法高亮的源码，导出以此为准",
             ),
             (
-                PreviewMode::Hybrid,
-                theme::Icon::Book,
-                "实时排版",
-                "当前行显示 Markdown 标记，离开后按公文格式渲染",
-            ),
-            (
                 PreviewMode::Rendered,
                 theme::Icon::Eye,
                 "公文预览",
@@ -1375,7 +1369,7 @@ impl DraftPage<'_> {
                 theme::icon_text_button(theme::Icon::ListOrdered, "编辑区行号")
                     .selected(line_numbers),
             )
-            .on_hover_text("在源码与实时排版编辑器左侧显示源码行号")
+            .on_hover_text("在 Markdown 源码编辑器左侧显示源码行号")
             .clicked()
         {
             self.config.show_editor_line_numbers = !line_numbers;

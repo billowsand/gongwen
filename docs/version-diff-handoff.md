@@ -564,8 +564,7 @@ diff 编辑器（每帧给全部源码行画行号、铺底色，60 页约 0.6 m
 
 spike 要逐项验证（写进提交说明）：
 - 点击空隙上下两行、拖选跨过空隙、上下方向键跨过空隙、PageUp / PageDown；
-- 滚动到光标（`TextEdit` 内部按光标矩形 `scroll_to_rect`）、查找高亮（`find.rs`）、行号（`paint_editor_line_numbers`）、
-  混合模式装饰（`paint_hybrid_decorations`）是否跟着下移后的行走；
+- 滚动到光标（`TextEdit` 内部按光标矩形 `scroll_to_rect`）、查找高亮（`find.rs`）、行号（`paint_editor_line_numbers`）是否跟着下移后的行走；
 - 应用内输入法的候选框是否跟着光标（`src/ime/` 取光标矩形）；
 - 连续打字时 galley 的缓存命中情况：egui 按 `LayoutJob` 哈希缓存，改了 galley 就要确认不会每帧重排。
 

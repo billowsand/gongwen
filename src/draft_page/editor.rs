@@ -8,15 +8,11 @@ use crate::draft_page::candidates;
 use crate::draft_page::caret::show_with_glyph_caret;
 use crate::draft_page::markdown::byte_at_char;
 use crate::draft_page::{
-    DraftPage, OFFICIAL_BODY_SIZE, OFFICIAL_EDITOR_CONTENT_WIDTH, OFFICIAL_PAGE_HEIGHT,
-    OFFICIAL_PAGE_MARGIN_LEFT, OFFICIAL_PAGE_MARGIN_TOP, OFFICIAL_PAGE_WIDTH, PreviewMode,
-    PreviewScroll, continue_ordered_list, editor_cursor, editor_selection, is_table_separator_line,
-    is_table_source_line, jump_to_source, markdown_heading_level, markdown_matches_mode,
-    select_source_range, table_column_count,
+    DraftPage, PreviewMode, PreviewScroll, continue_ordered_list, editor_cursor, editor_selection,
+    jump_to_source, markdown_matches_mode, select_source_range,
 };
 use crate::export;
-use crate::highlight::ordered_list_lines;
-use crate::models::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN, NumberingConfig};
+use crate::models::{EDITOR_FONT_SIZE_MAX, EDITOR_FONT_SIZE_MIN};
 use crate::preview;
 use crate::storage;
 use crate::theme;
@@ -54,7 +50,7 @@ fn restore_drag_selection(
     state.store(ui.ctx(), editor_id());
 }
 
-/// 从屏幕坐标换算成 Markdown 字符位置，软换行和实时排版复用 TextEdit 的 galley。
+/// 从屏幕坐标换算成 Markdown 字符位置，软换行也复用 TextEdit 的 galley。
 fn drag_cursor_at(
     output: &egui::text_edit::TextEditOutput,
     pos: egui::Pos2,
@@ -552,17 +548,10 @@ pub(crate) fn source_line_range_at_char(text: &str, char_index: usize) -> Range<
         })
 }
 
-pub(crate) fn active_source_line(ctx: &egui::Context, text: &str) -> usize {
-    egui::TextEdit::load_state(ctx, editor_id())
-        .and_then(|state| state.cursor.char_range())
-        .map_or(0, |range| source_line_at_char(text, range.primary.index.0))
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct EditorLineVisual {
     pub(crate) top: f32,
     pub(crate) bottom: f32,
-    baseline: f32,
 }
 
 pub(crate) fn editor_line_visuals(
@@ -570,36 +559,19 @@ pub(crate) fn editor_line_visuals(
 ) -> Vec<EditorLineVisual> {
     let mut lines = Vec::new();
     let mut top = None;
-    let mut baseline = None;
     let mut bottom = output.galley_pos.y;
     for placed in &output.galley.rows {
         let row_top = output.galley_pos.y + placed.pos.y;
         let row_bottom = row_top + placed.size.y;
         top.get_or_insert(row_top);
-        if baseline.is_none() {
-            baseline = placed
-                .glyphs
-                .iter()
-                .find(|glyph| glyph.font_height > OFFICIAL_BODY_SIZE * 0.5)
-                .or_else(|| placed.glyphs.first())
-                .map(|glyph| row_top + glyph.pos.y);
-        }
         bottom = row_bottom;
         if placed.ends_with_newline {
             let top = top.take().unwrap_or(row_top);
-            lines.push(EditorLineVisual {
-                top,
-                bottom,
-                baseline: baseline.take().unwrap_or((top + bottom) * 0.5),
-            });
+            lines.push(EditorLineVisual { top, bottom });
         }
     }
     if let Some(top) = top {
-        lines.push(EditorLineVisual {
-            top,
-            bottom,
-            baseline: baseline.unwrap_or((top + bottom) * 0.5),
-        });
+        lines.push(EditorLineVisual { top, bottom });
     }
     lines
 }
@@ -608,7 +580,7 @@ pub(crate) fn editor_line_visuals(
 /// 只在第一个视觉行旁显示编号，不把软换行误当成新的源码行。
 /// 行号字号跟随编辑器正文字号（略小两档），避免调大正文后行号显得突兀；
 /// `family` 由调用方按模式给定——源码模式用编辑器字体族，行号和正文的数字
-/// 才是同一副字面，实时排版模式的行号是纸面外的界面元素，仍用界面字体。
+/// 才是同一副字面。
 pub(crate) fn paint_editor_line_numbers(
     ui: &egui::Ui,
     output: &egui::text_edit::TextEditOutput,
@@ -626,169 +598,6 @@ pub(crate) fn paint_editor_line_numbers(
             font.clone(),
             theme::text_muted(),
         );
-    }
-}
-
-/// 实时排版中不写入 Markdown 的视觉层：公文自动编号和表格框线。
-pub(crate) fn paint_hybrid_decorations(
-    ui: &egui::Ui,
-    output: &egui::text_edit::TextEditOutput,
-    text: &str,
-    active_line: usize,
-    numbering: &NumberingConfig,
-) {
-    let visuals = editor_line_visuals(output);
-    let source_lines = text.split('\n').collect::<Vec<_>>();
-    let ordered_lines = ordered_list_lines(text);
-    let painter = ui.painter();
-    let mut counters = export::HeadingCounters::with_numbering(*numbering);
-    let attachment_count = export::parse_markdown(text)
-        .iter()
-        .filter(|block| {
-            matches!(
-                block,
-                export::MarkdownBlock::Marker(export::MarkdownSection::Attachment)
-            )
-        })
-        .count();
-    let mut attachment_index = 0usize;
-
-    for (index, line) in source_lines.iter().enumerate() {
-        // 区段标记与每个附件标题处重置计数器；正文和附件使用同一标题层级。
-        let prefix = counters.next(line);
-        if export::parse_section_marker(line) == Some(export::MarkdownSection::Attachment) {
-            attachment_index += 1;
-            let next_title = source_lines[index + 1..]
-                .iter()
-                .map(|line| line.trim())
-                .find(|line| !line.is_empty());
-            let is_legacy = next_title
-                .and_then(|line| line.strip_prefix("# "))
-                .is_some_and(|title| export::legacy_attachment_label(title).is_some());
-            if index != active_line
-                && !is_legacy
-                && let Some(visual) = visuals.get(index)
-            {
-                let label = if attachment_count == 1 {
-                    "附件".to_string()
-                } else {
-                    format!("附件{attachment_index}")
-                };
-                let font = egui::FontId::new(
-                    OFFICIAL_BODY_SIZE,
-                    theme::official_family(theme::FONT_HEITI),
-                );
-                painter.text(
-                    egui::pos2(output.galley_pos.x, (visual.top + visual.bottom) * 0.5),
-                    egui::Align2::LEFT_CENTER,
-                    label,
-                    font,
-                    theme::paper::ink(),
-                );
-            }
-            continue;
-        }
-        if index != active_line
-            && let (Some(info), Some(visual)) = (ordered_lines[index], visuals.get(index))
-        {
-            let label = if info.inline {
-                export::render_list_number(numbering.list1, info.number)
-            } else {
-                export::render_list_number(numbering.list2, info.number)
-            };
-            let font = egui::FontId::new(
-                OFFICIAL_BODY_SIZE,
-                theme::official_family(theme::FONT_FANGSONG),
-            );
-            let label_galley = painter.layout_no_wrap(label, font, theme::paper::ink());
-            let label_baseline = label_galley
-                .rows
-                .first()
-                .and_then(|row| row.glyphs.first().map(|glyph| row.pos.y + glyph.pos.y))
-                .unwrap_or(label_galley.size().y);
-            painter.galley(
-                egui::pos2(
-                    output.galley_pos.x
-                        + if info.inline {
-                            0.0
-                        } else {
-                            OFFICIAL_BODY_SIZE * 2.0
-                        },
-                    visual.baseline - label_baseline,
-                ),
-                label_galley,
-                theme::paper::ink(),
-            );
-            continue;
-        }
-        let Some(level) = markdown_heading_level(line) else {
-            continue;
-        };
-        if index == active_line {
-            continue;
-        }
-        let (Some(prefix), Some(visual)) = (prefix, visuals.get(index)) else {
-            continue;
-        };
-        let family = match level {
-            2 => theme::FONT_HEITI,
-            3 => theme::FONT_KAITI,
-            _ => theme::FONT_FANGSONG,
-        };
-        let font = egui::FontId::new(OFFICIAL_BODY_SIZE, theme::official_family(family));
-        let prefix_galley = painter.layout_no_wrap(prefix, font, theme::paper::ink());
-        let prefix_baseline = prefix_galley
-            .rows
-            .first()
-            .and_then(|row| row.glyphs.first().map(|glyph| row.pos.y + glyph.pos.y))
-            .unwrap_or(prefix_galley.size().y);
-        painter.galley(
-            egui::pos2(
-                output.galley_pos.x + OFFICIAL_BODY_SIZE * 2.0,
-                visual.baseline - prefix_baseline,
-            ),
-            prefix_galley,
-            theme::paper::ink(),
-        );
-    }
-
-    let stroke = egui::Stroke::new(1.0, theme::paper::ink());
-    let mut index = 0usize;
-    while index < source_lines.len() {
-        if !is_table_source_line(source_lines[index]) {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < source_lines.len() && is_table_source_line(source_lines[index]) {
-            index += 1;
-        }
-        let end = index;
-        let columns = source_lines[start..end]
-            .iter()
-            .map(|line| table_column_count(line))
-            .max()
-            .unwrap_or(1);
-        for row in (start..end).filter(|row| !is_table_separator_line(source_lines[*row])) {
-            let Some(visual) = visuals.get(row) else {
-                continue;
-            };
-            let rect = egui::Rect::from_min_max(
-                egui::pos2(output.galley_pos.x, visual.top),
-                egui::pos2(
-                    output.galley_pos.x + OFFICIAL_EDITOR_CONTENT_WIDTH,
-                    visual.bottom,
-                ),
-            );
-            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
-            for column in 1..columns {
-                let x = rect.left() + rect.width() * column as f32 / columns as f32;
-                painter.line_segment(
-                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    stroke,
-                );
-            }
-        }
     }
 }
 
@@ -817,7 +626,6 @@ impl DraftPage<'_> {
     fn preview_body_ui(&mut self, ui: &mut egui::Ui) {
         match self.doc.preview_mode {
             PreviewMode::Source => self.source_editor_ui(ui),
-            PreviewMode::Hybrid => self.markdown_hybrid_editor(ui),
             PreviewMode::Rendered => {
                 let region = ui.max_rect();
                 self.markdown_render(ui);
@@ -955,22 +763,13 @@ impl DraftPage<'_> {
 
     /// Markdown 源码编辑框，带语法高亮。
     pub(crate) fn markdown_editor(&mut self, ui: &mut egui::Ui) {
-        self.markdown_editor_impl(ui, false);
-    }
-
-    /// 实时公文排版编辑器：Markdown 始终是唯一数据源，只改变屏幕上的布局。
-    pub(crate) fn markdown_hybrid_editor(&mut self, ui: &mut egui::Ui) {
-        self.markdown_editor_impl(ui, true);
-    }
-
-    pub(crate) fn markdown_editor_impl(&mut self, ui: &mut egui::Ui, hybrid: bool) {
         let clipboard_before = self.doc.generated_markdown.clone();
         let reference_paste = super::reference_clipboard::before_edit(
             ui.ctx(),
             &clipboard_before,
             !self.doc.read_only(),
         );
-        let source_mode = !hybrid && self.doc.preview_mode == PreviewMode::Source;
+        let source_mode = self.doc.preview_mode == PreviewMode::Source;
         let source_scroll_request = source_mode
             .then(|| self.doc.source_minimap.requested_offset.take())
             .flatten();
@@ -1029,12 +828,6 @@ impl DraftPage<'_> {
         } else {
             Vec::new()
         };
-        let active_line =
-            if hybrid && editable && ui.ctx().memory(|memory| memory.has_focus(editor_id())) {
-                active_source_line(ui.ctx(), &self.doc.generated_markdown)
-            } else {
-                usize::MAX
-            };
         let show_line_numbers = self.config.show_editor_line_numbers;
         let editor_font_size = self
             .config
@@ -1043,7 +836,6 @@ impl DraftPage<'_> {
         let line_number_size = (editor_font_size - 2.0).max(9.0);
         let text = &mut self.doc.generated_markdown;
         let highlighter = &mut self.doc.highlighter;
-        let numbering = self.config.numbering;
         let editor_fonts = self.config.editor_fonts;
         // 研究报告的 mdx 扩展标记（{#id}、{@id}、[@key]、[^id]:(…)）只在
         // 源码高亮里上色；在闭包外先算成 bool，避免闭包再去借 self.doc。
@@ -1056,311 +848,168 @@ impl DraftPage<'_> {
         let mut menu_action = None;
         let clean_galley = RefCell::new(None);
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-            let galley = if hybrid {
-                highlighter.layout_hybrid(
-                    ui,
-                    buffer.as_str(),
-                    wrap_width.min(OFFICIAL_EDITOR_CONTENT_WIDTH),
-                    active_line,
-                    anchor.as_ref(),
-                    &search_matches,
-                    &numbering,
-                )
-            } else {
-                highlighter.layout(
-                    ui,
-                    buffer.as_str(),
-                    wrap_width,
-                    editor_font_size,
-                    anchor.as_ref(),
-                    &search_matches,
-                    &editor_fonts,
-                    research,
-                )
-            };
+            let galley = highlighter.layout(
+                ui,
+                buffer.as_str(),
+                wrap_width,
+                editor_font_size,
+                anchor.as_ref(),
+                &search_matches,
+                &editor_fonts,
+                research,
+            );
             *clean_galley.borrow_mut() = Some(Arc::clone(&galley));
             galley
         };
-        if hybrid {
-            let viewport_width = ui.available_width();
-            egui::ScrollArea::both()
-                .id_salt("hybrid_editor_scroll")
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    let side_space = ((viewport_width - OFFICIAL_PAGE_WIDTH) * 0.5).max(18.0);
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(side_space);
-                        egui::Frame::new()
-                            .fill(theme::paper::bg())
-                            .stroke(egui::Stroke::new(1.0, theme::border_strong()))
-                            // 编辑区的纸比预览页更贴近眼睛，投影一直比预览重一档：
-                            // 明色纸下 18+24 与改成跟随纸面之前的 42 完全一致。
-                            .shadow(theme::float_shadow(
-                                theme::paper::shadow_alpha().saturating_add(24),
-                            ))
-                            .inner_margin(egui::Margin::ZERO)
-                            .show(ui, |ui| {
-                                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                    ui.set_min_size(egui::vec2(
-                                        OFFICIAL_PAGE_WIDTH,
-                                        OFFICIAL_PAGE_HEIGHT,
-                                    ));
-                                    ui.set_max_width(OFFICIAL_PAGE_WIDTH);
-                                    ui.add_space(OFFICIAL_PAGE_MARGIN_TOP);
-                                    ui.horizontal_top(|ui| {
-                                        let gutter = if show_line_numbers { 38.0 } else { 0.0 };
-                                        ui.add_space((OFFICIAL_PAGE_MARGIN_LEFT - gutter).max(0.0));
-                                        if show_line_numbers {
-                                            ui.add_space(gutter);
-                                        }
-                                        let output = show_with_glyph_caret(ui, editable, |ui| {
-                                            egui::TextEdit::multiline(text)
-                                            .id(editor_id())
-                                            .interactive(editable)
-                                            .frame(egui::Frame::NONE)
-                                            .margin(egui::Margin::ZERO)
-                                            .code_editor()
-                                            .layouter(&mut layouter)
-                                            .desired_width(OFFICIAL_EDITOR_CONTENT_WIDTH)
-                                            .desired_rows(rows)
-                                            .hint_text(
-                                                "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
-                                            )
-                                            .show(ui)
-                                        });
-                                        editor_lost_focus |= output.response.lost_focus();
-                                        menu_action = candidates::editor_context_menu(
-                                            ui,
-                                            &output,
-                                            selection_before,
-                                            editable,
-                                        );
-                                        drag_move = handle_text_drag(
-                                            ui,
-                                            &output,
-                                            text,
-                                            &mut self.doc.text_drag,
-                                            selection_before,
-                                            editable,
-                                            clean_galley
-                                                .borrow()
-                                                .as_ref()
-                                                .map(|galley| (galley, theme::paper::bg())),
-                                        );
-                                        if show_line_numbers {
-                                            paint_editor_line_numbers(
-                                                ui,
-                                                &output,
-                                                line_number_size,
-                                                egui::FontFamily::Proportional,
-                                            );
-                                        }
-                                        paint_hybrid_decorations(
-                                            ui,
-                                            &output,
-                                            text,
-                                            active_line,
-                                            &numbering,
-                                        );
-                                        if let Some(range) = selection {
-                                            select_source_range(ui, &output, text, range);
-                                        } else if let Some(offset) = jump {
-                                            jump_to_source(ui, &output, text, offset);
-                                        }
-                                        if reveal {
-                                            // 换模式重排后光标可能滚出了视野：拉回
-                                            // 来并恢复焦点，让用户接着刚才的位置改。
-                                            // 本帧另有跳转/选区请求时以它们为准，
-                                            // 它们自己会滚动。
-                                            ui.ctx()
-                                                .memory_mut(|memory| memory.request_focus(editor_id()));
-                                            if !programmatic_source_move
-                                                && let Some(cursor) =
-                                                    output.cursor_range.map(|range| range.primary)
-                                            {
-                                                let rect = output
-                                                    .galley
-                                                    .pos_from_cursor(cursor)
-                                                    .translate(output.galley_pos.to_vec2());
-                                                ui.scroll_to_rect(rect, None);
-                                            }
-                                        }
-                                        if output.cursor_range.is_some_and(|range| {
-                                            source_line_at_char(text, range.primary.index.0)
-                                                != active_line
-                                        }) {
-                                            ui.ctx().request_repaint();
-                                        }
-                                        if !programmatic_source_move
-                                            && self.doc.preview_mode == PreviewMode::Split
-                                            && output.response.has_focus()
-                                        {
-                                            cursor_follow = output.cursor_range.map(|range| {
-                                                source_line_range_at_char(
-                                                    text,
-                                                    range.primary.index.0,
-                                                )
-                                            });
-                                        }
-                                    });
-                                });
-                            });
-                    });
-                });
-        } else {
-            let source_scroll = theme::card()
-                .show(ui, |ui| {
-                    let mut scroll = egui::ScrollArea::vertical()
-                        .id_salt("preview_scroll")
-                        .auto_shrink([false; 2]);
-                    if source_mode && self.doc.source_minimap.visible {
-                        scroll = scroll.scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                        );
-                    }
-                    if let Some(offset) = source_scroll_request {
-                        scroll = scroll.vertical_scroll_offset(offset);
-                    }
-                    let scrolled = scroll.show(ui, |ui| {
-                        let mut show_editor = |ui: &mut egui::Ui| {
-                            ui.scope(|ui| {
-                                if self.doc.preview_mode == PreviewMode::Split {
-                                    ui.visuals_mut().selection.bg_fill = theme::md::selection_bg();
-                                    ui.visuals_mut().selection.stroke.color = theme::text();
-                                }
-                                show_with_glyph_caret(ui, editable, |ui| {
-                                    egui::TextEdit::multiline(text)
-                                        .id(editor_id())
-                                        .interactive(editable)
-                                        .frame(egui::Frame::NONE)
-                                        .code_editor()
-                                        .layouter(&mut layouter)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(rows)
-                                        .hint_text(
-                                            "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
-                                        )
-                                        .show(ui)
-                                })
-                            })
-                            .inner
-                        };
-                        let output = if show_line_numbers {
-                            ui.horizontal_top(|ui| {
-                                ui.add_space(38.0);
-                                show_editor(ui)
-                            })
-                            .inner
-                        } else {
-                            show_editor(ui)
-                        };
-                        editor_lost_focus |= output.response.lost_focus();
-                        menu_action = candidates::editor_context_menu(
-                            ui,
-                            &output,
-                            selection_before,
-                            editable,
-                        );
-                        drag_move = handle_text_drag(
-                            ui,
-                            &output,
-                            text,
-                            &mut self.doc.text_drag,
-                            selection_before,
-                            editable,
-                            clean_galley
-                                .borrow()
-                                .as_ref()
-                                .map(|galley| (galley, theme::surface())),
-                        );
-                        // Ctrl+滚轮调整源码字号：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量
-                        // 报成 zoom_delta，滚动区不会同时滚动，两者天然不冲突。
-                        let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
-                        if zoom_delta != 1.0 && output.response.hovered() {
-                            let size = ((editor_font_size * zoom_delta * 2.0).round() / 2.0)
-                                .clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX);
-                            if size != self.config.editor_font_size {
-                                self.config.editor_font_size = size;
-                                let _ = storage::save(self.config);
-                            }
-                        }
-                        if show_line_numbers {
-                            paint_editor_line_numbers(
-                                ui,
-                                &output,
-                                line_number_size,
-                                egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into()),
-                            );
-                        }
-                        if source_mode {
-                            source_content = crate::draft_page::source_nav::capture_source_rows(
-                                text,
-                                &output,
-                                &self.doc.source_outline,
-                                clean_galley.borrow().clone(),
-                            );
-                        }
-                        if let Some(range) = selection {
-                            select_source_range(ui, &output, text, range);
-                        } else if let Some(offset) = jump {
-                            jump_to_source(ui, &output, text, offset);
-                        }
-                        if reveal {
-                            // 换模式重排后光标可能滚出了视野：拉回来并恢复焦点，
-                            // 让用户接着刚才的位置改。本帧另有跳转/选区请求时以
-                            // 它们为准，它们自己会滚动。
-                            ui.ctx()
-                                .memory_mut(|memory| memory.request_focus(editor_id()));
-                            if !programmatic_source_move
-                                && let Some(cursor) = output.cursor_range.map(|range| range.primary)
-                            {
-                                let rect = output
-                                    .galley
-                                    .pos_from_cursor(cursor)
-                                    .translate(output.galley_pos.to_vec2());
-                                ui.scroll_to_rect(rect, None);
-                            }
-                        }
-                        if !programmatic_source_move
-                            && self.doc.preview_mode == PreviewMode::Split
-                            && output.response.has_focus()
-                        {
-                            selected_after = output_selection(text, &output);
-                            cursor_follow = selected_after
-                                .is_none()
-                                .then(|| {
-                                    output.cursor_range.map(|range| {
-                                        source_line_range_at_char(text, range.primary.index.0)
-                                    })
-                                })
-                                .flatten();
-                        } else if self.doc.preview_mode == PreviewMode::Split {
-                            selected_after = output_selection(text, &output).or_else(|| {
-                                editor_selection(ui.ctx(), text).filter(|range| !range.is_empty())
-                            });
-                        }
-                    });
-                    (
-                        scrolled.state.offset.y,
-                        scrolled.content_size.y,
-                        scrolled.inner_rect.top(),
-                        scrolled.inner_rect.height(),
-                    )
-                })
-                .inner;
-            if source_mode {
-                let first_layout =
-                    self.doc.source_minimap.rows.is_empty() && !source_content.rows.is_empty();
-                self.doc.source_minimap.update(
-                    source_content,
-                    source_scroll.0,
-                    source_scroll.1,
-                    source_scroll.2,
-                    source_scroll.3,
-                );
-                if first_layout {
-                    ui.ctx().request_repaint();
+
+        let source_scroll = theme::card()
+            .show(ui, |ui| {
+                let mut scroll = egui::ScrollArea::vertical()
+                    .id_salt("preview_scroll")
+                    .auto_shrink([false; 2]);
+                if source_mode && self.doc.source_minimap.visible {
+                    scroll = scroll.scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                    );
                 }
+                if let Some(offset) = source_scroll_request {
+                    scroll = scroll.vertical_scroll_offset(offset);
+                }
+                let scrolled = scroll.show(ui, |ui| {
+                    let mut show_editor = |ui: &mut egui::Ui| {
+                        ui.scope(|ui| {
+                            if self.doc.preview_mode == PreviewMode::Split {
+                                ui.visuals_mut().selection.bg_fill = theme::md::selection_bg();
+                                ui.visuals_mut().selection.stroke.color = theme::text();
+                            }
+                            show_with_glyph_caret(ui, editable, |ui| {
+                                egui::TextEdit::multiline(text)
+                                    .id(editor_id())
+                                    .interactive(editable)
+                                    .frame(egui::Frame::NONE)
+                                    .code_editor()
+                                    .layouter(&mut layouter)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(rows)
+                                    .hint_text(
+                                        "生成结果将在这里显示，也可以直接粘贴已有稿件再导出……",
+                                    )
+                                    .show(ui)
+                            })
+                        })
+                        .inner
+                    };
+                    let output = if show_line_numbers {
+                        ui.horizontal_top(|ui| {
+                            ui.add_space(38.0);
+                            show_editor(ui)
+                        })
+                        .inner
+                    } else {
+                        show_editor(ui)
+                    };
+                    editor_lost_focus |= output.response.lost_focus();
+                    menu_action =
+                        candidates::editor_context_menu(ui, &output, selection_before, editable);
+                    drag_move = handle_text_drag(
+                        ui,
+                        &output,
+                        text,
+                        &mut self.doc.text_drag,
+                        selection_before,
+                        editable,
+                        clean_galley
+                            .borrow()
+                            .as_ref()
+                            .map(|galley| (galley, theme::surface())),
+                    );
+                    // Ctrl+滚轮调整源码字号：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量
+                    // 报成 zoom_delta，滚动区不会同时滚动，两者天然不冲突。
+                    let zoom_delta = ui.ctx().input(|input| input.zoom_delta());
+                    if zoom_delta != 1.0 && output.response.hovered() {
+                        let size = ((editor_font_size * zoom_delta * 2.0).round() / 2.0)
+                            .clamp(EDITOR_FONT_SIZE_MIN, EDITOR_FONT_SIZE_MAX);
+                        if size != self.config.editor_font_size {
+                            self.config.editor_font_size = size;
+                            let _ = storage::save(self.config);
+                        }
+                    }
+                    if show_line_numbers {
+                        paint_editor_line_numbers(
+                            ui,
+                            &output,
+                            line_number_size,
+                            egui::FontFamily::Name(theme::EDITOR_FONT_FAMILY.into()),
+                        );
+                    }
+                    if source_mode {
+                        source_content = crate::draft_page::source_nav::capture_source_rows(
+                            text,
+                            &output,
+                            &self.doc.source_outline,
+                            clean_galley.borrow().clone(),
+                        );
+                    }
+                    if let Some(range) = selection {
+                        select_source_range(ui, &output, text, range);
+                    } else if let Some(offset) = jump {
+                        jump_to_source(ui, &output, text, offset);
+                    }
+                    if reveal {
+                        // 换模式重排后光标可能滚出了视野：拉回来并恢复焦点，
+                        // 让用户接着刚才的位置改。本帧另有跳转/选区请求时以
+                        // 它们为准，它们自己会滚动。
+                        ui.ctx()
+                            .memory_mut(|memory| memory.request_focus(editor_id()));
+                        if !programmatic_source_move
+                            && let Some(cursor) = output.cursor_range.map(|range| range.primary)
+                        {
+                            let rect = output
+                                .galley
+                                .pos_from_cursor(cursor)
+                                .translate(output.galley_pos.to_vec2());
+                            ui.scroll_to_rect(rect, None);
+                        }
+                    }
+                    if !programmatic_source_move
+                        && self.doc.preview_mode == PreviewMode::Split
+                        && output.response.has_focus()
+                    {
+                        selected_after = output_selection(text, &output);
+                        cursor_follow = selected_after
+                            .is_none()
+                            .then(|| {
+                                output.cursor_range.map(|range| {
+                                    source_line_range_at_char(text, range.primary.index.0)
+                                })
+                            })
+                            .flatten();
+                    } else if self.doc.preview_mode == PreviewMode::Split {
+                        selected_after = output_selection(text, &output).or_else(|| {
+                            editor_selection(ui.ctx(), text).filter(|range| !range.is_empty())
+                        });
+                    }
+                });
+                (
+                    scrolled.state.offset.y,
+                    scrolled.content_size.y,
+                    scrolled.inner_rect.top(),
+                    scrolled.inner_rect.height(),
+                )
+            })
+            .inner;
+        if source_mode {
+            let first_layout =
+                self.doc.source_minimap.rows.is_empty() && !source_content.rows.is_empty();
+            self.doc.source_minimap.update(
+                source_content,
+                source_scroll.0,
+                source_scroll.1,
+                source_scroll.2,
+                source_scroll.3,
+            );
+            if first_layout {
+                ui.ctx().request_repaint();
             }
         }
         if let Some((updated, range)) = drag_move {
@@ -1404,9 +1053,9 @@ impl DraftPage<'_> {
                 }
             }
         }
-        // 单栏模式（Markdown / 实时排版）没有光标跟随，同步高亮不会自己更新：
-        // 光标离开它所在的段时把它撤掉，否则从对照模式带过来的旧高亮会一直
-        // 留在版面上，选在别处也不消失。
+        // Markdown 源码单栏模式没有光标跟随，同步高亮不会自己更新：光标离开它
+        // 所在的段时把它撤掉，否则从对照模式带过来的旧高亮会一直留在版面上，
+        // 选在别处也不消失。
         if self.doc.preview_mode != PreviewMode::Split && !programmatic_source_move {
             let focused = ui.ctx().memory(|memory| memory.has_focus(editor_id()));
             let source = &self.doc.generated_markdown;
@@ -1445,10 +1094,7 @@ impl DraftPage<'_> {
             self.doc.preview_cursor_line = None;
         }
         self.doc.preview_mode = mode;
-        if matches!(
-            mode,
-            PreviewMode::Source | PreviewMode::Hybrid | PreviewMode::Split
-        ) && !self.doc.markdown_find.open
+        if matches!(mode, PreviewMode::Source | PreviewMode::Split) && !self.doc.markdown_find.open
         {
             self.doc.pending_source_reveal = true;
         }

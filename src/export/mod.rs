@@ -44,7 +44,7 @@ pub(crate) use headings::{
 pub(crate) use parse::{
     ColumnAlign, LineAlign, LocatedBlock, MarkdownBlock, MarkdownSection, QuoteBox, QuoteLine,
     QuoteLineKind, ResearchSection, TableSpan, block_span_for_line, block_start_lines,
-    body_heading_max_level, circled_number, compact_heading_flags, flatten_quotes, is_image_line,
+    body_heading_max_level, circled_number, compact_heading_flags, flatten_quotes,
     normalize_ordered_list_punctuation, parse_align_marker, parse_list_item, parse_markdown,
     parse_markdown_located, parse_markdown_located_research, parse_markdown_located_with_numbering,
     parse_markdown_with_lines, parse_markdown_with_lines_with_numbering,
@@ -760,8 +760,8 @@ mod tests {
         assert_eq!(chinese_date_parts("待定"), None);
     }
 
-    /// 实时排版编辑器逐行叠加的标题编号：规则与导出器/预览一致——
-    /// 区段标记与每个附件标题处都重置计数器，附件区整体上移一级编号。
+    /// 标题编号规则与导出器/预览一致——区段标记与每个附件标题处都重置计数器，
+    /// 附件区整体上移一级编号。
     #[test]
     fn heading_prefixes_restart_after_section_markers() {
         let mut counters = HeadingCounters::default();
@@ -806,7 +806,7 @@ mod tests {
             "每个附件之后的内容都重新编号"
         );
 
-        // 旧格式仍可用于实时排版，附件内容层级会在显示期上移一级。
+        // 旧格式附件内容层级会在显示期上移一级。
         let mut counters = HeadingCounters::default();
         counters.next("# 测试函");
         assert_eq!(counters.next("## 一"), Some("一、".to_string()));

@@ -1439,14 +1439,8 @@ pub(crate) fn parse_image(line: &str) -> Option<(String, String)> {
     Some((alt, src.to_string()))
 }
 
-/// 整行是否恰好是一张图片引用（与解析器的独占行识别一致）。
-/// 实时排版编辑器据此把图片行高亮为占位提示。
-pub(crate) fn is_image_line(line: &str) -> bool {
-    parse_image(line.trim()).is_some()
-}
-
 /// 识别 `<!-- [正文] -->`、`<!-- [附件] -->`（含【】与英文变体）这类独占一行的区段标记。
-/// 实时排版编辑器（draft_page / highlight）也复用它，以便在区段切换处重置公文标题计数器。
+/// 区段切换处用它重置公文标题计数器。
 pub(crate) fn parse_section_marker(line: &str) -> Option<MarkdownSection> {
     let inner = line
         .trim()

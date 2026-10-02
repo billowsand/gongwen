@@ -55,8 +55,11 @@ pub(crate) use form::FormSectionState;
 pub(crate) use markdown::{
     body_stats, chinese_today, continue_ordered_list, display_width, editor_cursor,
     editor_selection, is_table_separator_line, is_table_source_line, line_at_byte, line_ranges,
-    markdown_heading_level, split_row, table_column_count, tidy_blank_lines, toggle_bullet,
+    markdown_heading_level, split_row, tidy_blank_lines, toggle_bullet,
 };
+// test-only names: only compiled in test builds
+#[cfg(test)]
+pub(crate) use markdown::table_column_count;
 pub(crate) use navigator::PreviewScroll;
 pub(crate) use source_nav::{SourceMinimap, SourceOutline};
 pub(crate) use table::{TableOp, table_grid_picker};
@@ -255,18 +258,6 @@ impl ExportLinks {
 /// 功能区控件统一高度：按钮、下拉框、状态标签共用一个交互高度，
 /// 免得较高的控件把整行基线撑歪。
 pub(crate) const TOOLBAR_CONTROL_HEIGHT: f32 = 28.0;
-
-const SCREEN_PT: f32 = 96.0 / 72.0;
-
-const OFFICIAL_PAGE_WIDTH: f32 = 595.28 * SCREEN_PT;
-const OFFICIAL_PAGE_HEIGHT: f32 = 841.89 * SCREEN_PT;
-const OFFICIAL_PAGE_MARGIN_LEFT: f32 = 79.35 * SCREEN_PT;
-const OFFICIAL_PAGE_MARGIN_TOP: f32 = 52.0 * SCREEN_PT;
-const OFFICIAL_BODY_SIZE: f32 = 16.0 * SCREEN_PT;
-
-/// A4 公文版心宽度：(595.28 - 79.35 - 73.70) 磅，按 96 dpi 换算。
-/// 实时排版模式固定用这个换行宽度，不随窗口拉宽而改变每行字数。
-const OFFICIAL_EDITOR_CONTENT_WIDTH: f32 = (595.28 - 79.35 - 73.70) * SCREEN_PT;
 
 /// 功能区分组之间的竖线。自绘 1.5px 的 `border_strong` 竖线并留更宽间距，
 /// 比 egui 默认的浅色细线分隔感强得多——功能区二十来个按钮靠它分组，
@@ -775,8 +766,6 @@ pub(crate) struct DraftPage<'a> {
 pub(crate) enum PreviewMode {
     /// 带语法高亮的 Markdown 源码，导出以它为准。
     Source,
-    /// 非活动行按公文版式排版，只有光标所在行显示 Markdown 标记。
-    Hybrid,
     /// 按公文字体与行距渲染的版式预览。
     Rendered,
     /// 左源码、右版式。

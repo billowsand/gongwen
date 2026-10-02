@@ -439,8 +439,8 @@ mod tests {
     }
 
     #[test]
-    fn line_numbers_and_hybrid_decorations_follow_the_shifted_rows() {
-        // 行号与混合模式装饰都走 `editor_line_visuals`，它读的是 galley 行坐标。
+    fn line_numbers_follow_the_shifted_rows() {
+        // 行号走 `editor_line_visuals`，它读的是 galley 行坐标。
         let mut harness = Harness::new(TEXT, gaps());
         let frame = harness.frame(Vec::new());
         assert_eq!(frame.visuals.len(), 5);

@@ -172,8 +172,8 @@ impl SettingsSection {
             }
             SettingsSection::Font => "界面、Markdown 编辑器与公文编译三处字体分别设置，互不牵连。",
             SettingsSection::Numbering => {
-                "各级标题与列表项的编号样式。导出的 PDF、Word 与界面预览、实时排版编辑器\
-                 统一使用，保证预览所见即导出所得。"
+                "各级标题与列表项的编号样式。导出的 PDF、Word 与界面预览统一使用，\
+                 保证预览所见即导出所得。"
             }
             SettingsSection::Export => {
                 "这里的选择对所有稿件生效；起草页的「导出」按钮按这里勾选的格式产出。"
@@ -1119,8 +1119,8 @@ impl GongwenApp {
 
     /// 标题与列表编号：各级标题与一、二级列表分别选择编号样式。
     ///
-    /// 选择立即写入配置并在保存时生效；预览、实时排版编辑器与导出的 PDF、
-    /// Word 共用同一套选择，保证所见即所得。
+    /// 选择立即写入配置并在保存时生效；预览与导出的 PDF、Word 共用同一套选择，
+    /// 保证所见即所得。
     pub(crate) fn numbering_settings_ui(&mut self, ui: &mut egui::Ui) {
         sub_heading(ui, "标题编号", None);
         for (key, label, style) in [
@@ -1732,7 +1732,7 @@ impl GongwenApp {
         .on_hover_text("取消勾选后，起草页这些字段只能从词库中选，杜绝临时手写造成的名称错误");
         ui.checkbox(
             &mut self.config.show_editor_line_numbers,
-            "Markdown 源码与实时排版模式显示行号",
+            "Markdown 源码模式显示行号",
         )
         .on_hover_text("行号只用于定位，不会写入稿件或导出文件");
         ui.checkbox(

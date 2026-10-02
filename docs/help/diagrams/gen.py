@@ -533,36 +533,6 @@ c += notes(
 )[0]
 DIAGRAMS["diag-data"] = page("数据目录", c)
 
-# ── 12. 五种视图 ────────────────────────────────────────────────────────────
-c = title("起草页五种视图", w=300)
-cells, _, bottom = grid(
-    "v",
-    [
-        "源码\n带语法高亮的 Markdown\n（默认）",
-        "实时排版\n非活动行按公文版式排\n只在光标行显示标记",
-        "版式预览\n公文字体与行距\n看纸面效果",
-        "分栏\n左源码 / 右版式\n对照着改",
-        "版本对照\n左侧时间轴选版本\n左 diff 右花脸稿",
-    ],
-    y=96, cols=3, cell_h=128, gap_y=28, stroke=ACCENT, bold=True,
-)
-c += cells
-n, nxt = notes(
-    [("n1", "不熟 Markdown → 先用「实时排版」：只在光标那一行看得到标记")],
-    y=bottom + 40, fill="#DCE8EE", stroke=BLUE,
-)
-c += n
-c += notes(
-    [
-        ("n2", "对版、看成品 → 用「版式预览」；预览右缘有刻度条，靠近推出大纲板"),
-        ("n3", "源码字面三套模板：编辑器字体 / 标题随公文 / 与公文一致（设置 → 字体）"),
-        ("n4", "字号：Ctrl + 加减号 / 0 复位，或 Ctrl + 滚轮——只改屏幕字号，不影响导出"),
-    ],
-    y=nxt,
-)[0]
-DIAGRAMS["diag-editor-views"] = page("五种视图", c)
-
-
 def main() -> None:
     for name, xml in DIAGRAMS.items():
         path = OUT / f"{name}.drawio"

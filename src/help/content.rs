@@ -300,10 +300,6 @@ pub(crate) const IMAGES: &[HelpImage] = &[
         key: "images/diag-data.png",
         bytes: include_bytes!("../../assets/help/images/diag-data.png"),
     },
-    HelpImage {
-        key: "images/diag-editor-views.png",
-        bytes: include_bytes!("../../assets/help/images/diag-editor-views.png"),
-    },
 ];
 
 /// 按 `key` 取配图字节。markdown 里的相对路径原样作 key。

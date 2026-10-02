@@ -545,7 +545,7 @@ fn minimap_blocks(
 }
 
 impl DraftPage<'_> {
-    /// 源码模式自己的两列导航；不会改变实时排版、预览或对照模式的布局。
+    /// 源码模式自己的两列导航；不会改变预览或对照模式的布局。
     pub(crate) fn source_editor_ui(&mut self, ui: &mut egui::Ui) {
         self.doc.source_outline.refresh(
             &self.doc.generated_markdown,

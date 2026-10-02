@@ -1732,7 +1732,7 @@ pub struct AppConfig {
     pub security_rules: SecurityRules,
     /// 允许在词库之外手工填写单位、联系人等字段。
     pub allow_free_text: bool,
-    /// 在 Markdown 源码与实时排版编辑器左侧显示源码行号。
+    /// 在 Markdown 源码编辑器左侧显示源码行号。
     pub show_editor_line_numbers: bool,
     /// Markdown 源码模式左侧显示可跳转的标题目录。
     #[serde(default = "source_navigation_default")]
