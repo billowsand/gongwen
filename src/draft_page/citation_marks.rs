@@ -245,7 +245,7 @@ fn card(
 
 /// 一组字节范围换成字符下标（galley 按字符计）。先按起点排好，从前往后只数一遍，
 /// 长文每帧重算也不至于反复从头数；结果按传入顺序返回。
-fn char_offsets<'a>(
+pub(super) fn char_offsets<'a>(
     text: &str,
     ranges: impl Iterator<Item = &'a Range<usize>>,
 ) -> Vec<(usize, usize)> {
@@ -264,7 +264,11 @@ fn char_offsets<'a>(
 }
 
 /// 字符范围落在 galley 各行上的矩形（屏幕坐标），换行处切成几段。
-fn row_rects(galley: &egui::Galley, origin: egui::Pos2, chars: Range<usize>) -> Vec<egui::Rect> {
+pub(super) fn row_rects(
+    galley: &egui::Galley,
+    origin: egui::Pos2,
+    chars: Range<usize>,
+) -> Vec<egui::Rect> {
     let mut rects = Vec::new();
     let mut row_start = 0;
     for row in &galley.rows {

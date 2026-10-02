@@ -4,6 +4,7 @@
 //! 各功能域已拆分到 `export/` 子模块（Markdown 解析、红头版记、标题计数、
 //! 文本工具），根文件保留导出入口与文件名工具。
 
+pub(crate) mod bibliography;
 mod docx;
 pub(crate) mod element_display;
 pub(crate) mod research;

@@ -73,6 +73,44 @@ pub(crate) fn citation_keys(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// 全文每一组文献引用：整组 `[@…]` 的字节范围与组里的键，按出现顺序。
+/// 源码编辑框据此给引用画线、出悬停卡。
+pub(crate) fn citation_spans(text: &str) -> Vec<(std::ops::Range<usize>, Vec<&str>)> {
+    citation_re()
+        .captures_iter(text)
+        .filter_map(|caps| {
+            let whole = caps.get(0)?;
+            Some((
+                whole.start()..whole.end(),
+                split_keys(caps.get(1)?.as_str()).collect(),
+            ))
+        })
+        .collect()
+}
+
+/// 光标所在的那组文献引用：光标落在 `[@…]` 里面或紧挨在 `]` 之后。返回整组在全文里的
+/// 字节范围与组里的键。起草页插文献时据此并进这一组，免得插出 `[@a][@b]`。
+pub(crate) fn citation_at(
+    text: &str,
+    cursor: usize,
+) -> Option<(std::ops::Range<usize>, Vec<&str>)> {
+    let cursor = cursor.min(text.len());
+    let line_start = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
+    let line_end = text[cursor..]
+        .find('\n')
+        .map_or(text.len(), |at| cursor + at);
+    let line = &text[line_start..line_end];
+    citation_re().captures_iter(line).find_map(|caps| {
+        let whole = caps.get(0)?;
+        let range = line_start + whole.start()..line_start + whole.end();
+        if range.start < cursor && cursor <= range.end {
+            Some((range, split_keys(caps.get(1)?.as_str()).collect()))
+        } else {
+            None
+        }
+    })
+}
+
 fn split_keys(inner: &str) -> impl Iterator<Item = &str> {
     inner
         .split(';')
@@ -155,6 +193,16 @@ pub(crate) fn bibtex_keys(bib: &str) -> Vec<String> {
 pub(crate) struct ResearchMarks {
     labels: HashMap<String, String>,
     citations: HashMap<String, usize>,
+    /// 每个键在正文里被引了几处（`[@a; @a]` 算两处）。
+    uses: HashMap<String, usize>,
+}
+
+/// 正文引过的一条文献：PDF 里的序号与引用处数。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CitedKey {
+    pub(crate) key: String,
+    pub(crate) number: usize,
+    pub(crate) uses: usize,
 }
 
 impl ResearchMarks {
@@ -169,6 +217,22 @@ impl ResearchMarks {
     pub(crate) fn cite(&mut self, key: &str) {
         let next = self.citations.len() + 1;
         self.citations.entry(key.to_string()).or_insert(next);
+        *self.uses.entry(key.to_string()).or_default() += 1;
+    }
+
+    /// 正文引过的文献，按序号排。
+    pub(crate) fn cited(&self) -> Vec<CitedKey> {
+        let mut cited: Vec<_> = self
+            .citations
+            .iter()
+            .map(|(key, number)| CitedKey {
+                key: key.clone(),
+                number: *number,
+                uses: self.uses.get(key).copied().unwrap_or_default(),
+            })
+            .collect();
+        cited.sort_by_key(|cited| cited.number);
+        cited
     }
 
     /// 把一行源码里的行内标记换成纸面上的样子。
@@ -232,6 +296,35 @@ mod tests {
             "见第1章的图1.2[1]。"
         );
         assert_eq!(marks.apply("综述[@wang2020; @li2021]。"), "综述[1,2]。");
+    }
+
+    #[test]
+    fn citation_at_finds_the_group_around_or_just_before_the_cursor() {
+        let text = "甲[@a; @b]乙\n丙[@c]";
+        let at =
+            |cursor: usize| citation_at(text, cursor).map(|(range, keys)| (&text[range], keys));
+        let first = text.find('[').unwrap();
+        assert_eq!(at(first), None, "光标在 [ 之前不算");
+        assert_eq!(at(first + 3), Some(("[@a; @b]", vec!["a", "b"])));
+        let end = first + "[@a; @b]".len();
+        assert_eq!(at(end), Some(("[@a; @b]", vec!["a", "b"])), "紧挨在 ] 之后");
+        assert_eq!(at(end + "乙".len()), None);
+        assert_eq!(at(text.len()), Some(("[@c]", vec!["c"])));
+    }
+
+    /// 序号按首次引用定，处数每处都算，`[@a; @a]` 也是两处。
+    #[test]
+    fn cited_lists_numbers_and_uses_in_number_order() {
+        let mut marks = ResearchMarks::default();
+        for key in citation_keys("先 [@b] 后 [@a; @b]，再 [@b]") {
+            marks.cite(key);
+        }
+        let cited: Vec<_> = marks
+            .cited()
+            .into_iter()
+            .map(|cited| (cited.key, cited.number, cited.uses))
+            .collect();
+        assert_eq!(cited, [("b".into(), 1, 3), ("a".into(), 2, 1)]);
     }
 
     #[test]

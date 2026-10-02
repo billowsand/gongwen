@@ -815,6 +815,49 @@ impl DraftPage<'_> {
         *self.status = format!("已插入{label}。");
     }
 
+    /// 研究报告的文献引用：把 `keys` 插成一组 `[@a; @b]`。光标在已有的 `[@…]` 里或
+    /// 紧挨在它后面时并进那一组（组里已有的键不重复加），免得插出 `[@a][@b]`。
+    pub(crate) fn insert_citations(&mut self, ctx: &egui::Context, keys: &[String]) {
+        if self.doc.read_only() || keys.is_empty() {
+            return;
+        }
+        let text = &self.doc.generated_markdown;
+        let cursor = editor_cursor(ctx, text)
+            .unwrap_or(text.len())
+            .min(text.len());
+        if let Some((range, existing)) = export::crossref::citation_at(text, cursor) {
+            let added: Vec<&String> = keys
+                .iter()
+                .filter(|key| !existing.contains(&key.as_str()))
+                .collect();
+            if added.is_empty() {
+                *self.status = "这几条已在光标处的引用里。".into();
+                return;
+            }
+            let snippet: String = added.iter().map(|key| format!("; @{key}")).collect();
+            // 插在 `]` 前面，光标落到 `]` 之后，接着往下写。
+            let at = range.end - 1;
+            self.doc.generated_markdown.insert_str(at, &snippet);
+            self.doc.pending_source_jump = Some(range.end + snippet.len());
+            *self.status = format!("已把 {} 条文献并入光标处的引用。", added.len());
+            return;
+        }
+        let snippet = format!(
+            "[{}]",
+            keys.iter()
+                .map(|key| format!("@{key}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        self.doc.generated_markdown.insert_str(cursor, &snippet);
+        self.doc.pending_source_jump = Some(cursor + snippet.len());
+        *self.status = if keys.len() == 1 {
+            "已插入文献引用。".into()
+        } else {
+            format!("已插入 {} 条文献引用。", keys.len())
+        };
+    }
+
     /// 光标所在行的标题层级，用来点亮「格式」分区里对应的那枚按钮。
     pub(crate) fn heading_level_at_cursor(&self, ctx: &egui::Context) -> Option<u8> {
         let text = &self.doc.generated_markdown;

@@ -139,10 +139,17 @@ fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<Str
     if bib.is_empty() {
         return;
     }
-    let known_keys = export::crossref::bibtex_keys(bib);
+    let library = export::bibliography::library(bib);
+    // hayagriva 整份拒收有错的 .bib，PDF 就导不出来；行号随提示给出。
+    if let Some(problem) = &library.problem {
+        warnings.push(format!(
+            "参考文献 BibTeX 第 {} 行有错：{}，导出 PDF 会中止",
+            problem.line, problem.message
+        ));
+    }
     let mut reported: Vec<&str> = Vec::new();
     for key in export::crossref::citation_keys(text) {
-        if known_keys.iter().any(|known| known == key) || reported.contains(&key) {
+        if library.contains(key) || reported.contains(&key) {
             continue;
         }
         reported.push(key);
@@ -1685,6 +1692,39 @@ mod tests {
         assert!(
             no_bib.iter().any(|warning| warning.contains("尚未导入")),
             "没导入 .bib 的粗粒度提示应保留：{no_bib:?}"
+        );
+    }
+
+    /// .bib 有错时 PDF 导不出来，审校要带行号提前说；没错时不提。
+    #[test]
+    fn a_broken_bib_is_reported_with_its_line() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+        input.research.bibliography_content = "@article{a, title={甲}}
+@book{a, title={乙}}
+"
+        .into();
+        let text = "# 报告
+
+## 研究背景
+
+综述[@a]。
+";
+        let warnings = validate(&input, text, &[], &rules());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.starts_with("参考文献 BibTeX 第 2 行有错")),
+            "{warnings:?}"
+        );
+        input.research.bibliography_content = "@article{a, title={甲}}
+"
+        .into();
+        let warnings = validate(&input, text, &[], &rules());
+        assert!(
+            !warnings.iter().any(|warning| warning.contains("BibTeX 第")),
+            "{warnings:?}"
         );
     }
 

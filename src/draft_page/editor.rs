@@ -844,6 +844,10 @@ impl DraftPage<'_> {
         }
         let citation_index = self.doc.citation_index.as_ref();
         let mut citation_action = None;
+        // 研究报告的 `[@key]` 画线与悬停卡要看文献库；库按 .bib 内容缓存，这里只取一下。
+        let bib_library = self.doc.draft.kind.is_research().then(|| {
+            crate::export::bibliography::library(&self.doc.draft.research.bibliography_content)
+        });
         let text = &mut self.doc.generated_markdown;
         let highlighter = &mut self.doc.highlighter;
         let editor_fonts = self.config.editor_fonts;
@@ -935,6 +939,15 @@ impl DraftPage<'_> {
                     {
                         citation_action =
                             super::citation_marks::show(ui, &output, text, index, editable);
+                    }
+                    if let Some(library) = &bib_library
+                        && self.doc.text_drag.is_none()
+                    {
+                        let ctx = ui.ctx().clone();
+                        let markdown: &str = text;
+                        super::bib_marks::show(ui, &output, markdown, library, || {
+                            crate::preview::research_citations(&ctx, markdown)
+                        });
                     }
                     // Ctrl+滚轮调整源码字号：按住 Ctrl（mac 为 Cmd）时 egui 把滚动量
                     // 报成 zoom_delta，滚动区不会同时滚动，两者天然不冲突。

@@ -185,6 +185,7 @@ impl DraftPage<'_> {
         ui.add_space(12.0);
         ui.strong("参考文献");
         ui.add_space(4.0);
+        let mut reload_bibliography = None;
         egui::Grid::new("research_bibliography_grid")
             .num_columns(2)
             .min_row_height(FORM_CONTROL_HEIGHT)
@@ -193,7 +194,7 @@ impl DraftPage<'_> {
                 row_label_with_info(
                     ui,
                     "BibTeX",
-                    "文件内容随稿件保存；移动或删除原始 .bib 文件不影响导出。",
+                    "文件内容随稿件保存；移动或删除原始 .bib 文件不影响导出。                     在外部改了 .bib，点「重新读入」换成新内容。",
                 );
                 ui.horizontal(|ui| {
                     let label = if self.doc.draft.research.bibliography_name.is_empty() {
@@ -203,9 +204,18 @@ impl DraftPage<'_> {
                     };
                     if ui
                         .add(theme::icon_text_button(theme::Icon::FileUp, label))
+                        .on_hover_text("选一个 .bib 文件，替换现有的文献库")
                         .clicked()
                     {
                         pick_bibliography = true;
+                    }
+                    if let Some(path) = &self.doc.bibliography_source
+                        && ui
+                            .small_button("重新读入")
+                            .on_hover_text(format!("从 {} 再读一遍", path.display()))
+                            .clicked()
+                    {
+                        reload_bibliography = Some(path.clone());
                     }
                     if !self.doc.draft.research.bibliography_content.is_empty()
                         && ui.small_button("移除").clicked()
@@ -214,30 +224,23 @@ impl DraftPage<'_> {
                     }
                 });
                 ui.end_row();
+
+                if !self.doc.draft.research.bibliography_content.trim().is_empty() {
+                    row_label(ui, "文献");
+                    self.bibliography_summary(ui);
+                    ui.end_row();
+                }
             });
 
         if clear_bibliography {
             self.doc.draft.research.bibliography_name.clear();
             self.doc.draft.research.bibliography_content.clear();
+            self.doc.bibliography_source = None;
         }
-        if pick_bibliography
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("BibTeX", &["bib"])
-                .pick_file()
-        {
-            match crate::text_file::read_to_string(&path) {
-                Ok(content) => {
-                    self.doc.draft.research.bibliography_name = path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "references.bib".to_string());
-                    self.doc.draft.research.bibliography_content = content;
-                    *self.status = "参考文献已随稿件保存。".into();
-                }
-                Err(error) => {
-                    *self.status = format!("读取 BibTeX 失败：{error}");
-                }
-            }
+        if pick_bibliography {
+            self.import_bibliography(None);
+        } else if let Some(path) = reload_bibliography {
+            self.import_bibliography(Some(path));
         }
 
         ui.add_space(10.0);
@@ -248,6 +251,87 @@ impl DraftPage<'_> {
             .size(11.0)
             .color(theme::text_soft()),
         );
+    }
+}
+
+impl DraftPage<'_> {
+    /// 读入一个 .bib 作为本稿的文献库。`path` 为空时弹文件框（文献引用下拉里的
+    /// 「导入 .bib…」也走这里）；给了路径就是「重新读入」。
+    pub(crate) fn import_bibliography(&mut self, path: Option<std::path::PathBuf>) {
+        let reload = path.is_some();
+        let Some(path) = path.or_else(|| {
+            rfd::FileDialog::new()
+                .add_filter("BibTeX", &["bib"])
+                .pick_file()
+        }) else {
+            return;
+        };
+        match crate::text_file::read_to_string(&path) {
+            Ok(content) => {
+                self.doc.draft.research.bibliography_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "references.bib".to_string());
+                let changed = self.doc.draft.research.bibliography_content != content;
+                self.doc.draft.research.bibliography_content = content;
+                self.doc.bibliography_source = Some(path);
+                let library = crate::export::bibliography::library(
+                    &self.doc.draft.research.bibliography_content,
+                );
+                *self.status = match (&library.problem, reload, changed) {
+                    (Some(problem), ..) => format!(
+                        "参考文献已读入，但 BibTeX 第 {} 行有错：{}。改好前导不出 PDF。",
+                        problem.line, problem.message
+                    ),
+                    (None, true, false) => "参考文献没有变化。".into(),
+                    (None, true, true) => {
+                        format!("已重新读入参考文献，共 {} 条。", library.entries.len())
+                    }
+                    (None, false, _) => {
+                        format!("参考文献已随稿件保存，共 {} 条。", library.entries.len())
+                    }
+                };
+            }
+            Err(error) => {
+                *self.status = format!("读取 BibTeX 失败：{error}");
+            }
+        }
+    }
+
+    /// 文献库摘要：共几条、正文引了几条；.bib 有错时橙色指出第几行。
+    fn bibliography_summary(&self, ui: &mut egui::Ui) {
+        let library =
+            crate::export::bibliography::library(&self.doc.draft.research.bibliography_content);
+        let cited = crate::preview::research_citations(ui.ctx(), &self.doc.generated_markdown);
+        let total = library.entries.len();
+        let used = cited
+            .iter()
+            .filter(|cited| library.contains(&cited.key))
+            .count();
+        let missing = cited.len() - used;
+        ui.vertical(|ui| {
+            let mut summary = format!(
+                "共 {total} 条 · 已引 {used} · 未引 {}",
+                total.saturating_sub(used)
+            );
+            if missing > 0 {
+                summary.push_str(&format!(" · 缺 {missing} 个键"));
+            }
+            ui.label(egui::RichText::new(summary).color(theme::text_soft()))
+                .on_hover_text(
+                    "按正文引用统计；未引的文献不进参考文献表。                     缺的键是正文引了、文献库里没有的，PDF 导出会中止。",
+                );
+            if let Some(problem) = &library.problem {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "第 {} 行：{}。导出 PDF 会中止。",
+                        problem.line, problem.message
+                    ))
+                    .size(theme::font_sizes::SMALL)
+                    .color(theme::warn()),
+                );
+            }
+        });
     }
 }
 

@@ -830,6 +830,12 @@ pub(crate) fn label_targets(markdown: &str) -> Vec<LabelTarget> {
     targets
 }
 
+/// 正文引过的文献：序号、引用处数，按序号排。与排版共用第一遍，序号就是纸上印的号
+/// （GB/T 7714 顺序编码制：按首次引用的先后）。
+pub(crate) fn citations(markdown: &str) -> Vec<crossref::CitedKey> {
+    collect_marks(&export::parse_markdown_located(markdown), markdown).cited()
+}
+
 /// 导航大纲里的一条标题。
 ///
 /// 右缘导航原先一律走公文那套计数器，研究报告的 `##` 会被排成「一、」——纸上
@@ -938,8 +944,36 @@ pub(crate) fn research_preview(
     // 远离视野的块只占位、不排版（见 `preview::cull`）。编号都在 `walk` 里算好、
     // 放进 `Kind`，跳过哪一块都不影响后面的编号。
     let cull = Cull::new(ui, &metrics, "research");
+    // 参考文献表：PDF 里接在参考文献区段的标题下面，没有这个区段就排在全文末尾
+    // （mdx `typst_research` 的 `close_reference` / `finish`）。正文没引文献就不排。
+    let library = export::bibliography::library(&input.research.bibliography_content);
+    let cited = super::research_citations(ui.ctx(), markdown);
+    let mut bib = BibPlacement::default();
+    let bib_key = |titled: bool| {
+        super::memo::key((
+            "research-bib",
+            titled,
+            &*cited,
+            &input.research.bibliography_content,
+        ))
+    };
     sheet(ui, &metrics, |ui| {
         walk(&located, markdown, |located, kind, _| {
+            if let Some(next) = section_marker(markdown, located) {
+                if bib.in_references && !bib.done && !cited.is_empty() {
+                    bib.done = true;
+                    let titled = !bib.titled;
+                    let at = located.range.start..located.range.start;
+                    cull.block(ui, &metrics, bib_key(titled), &at, false, None, |ui| {
+                        bibliography(ui, &metrics, titled, &cited, &library);
+                    });
+                }
+                bib.in_references = next == ResearchSection::References;
+                bib.titled = false;
+            }
+            if bib.in_references && matches!(kind, Kind::ChapterStar(_)) {
+                bib.titled = true;
+            }
             if matches!(kind, Kind::Skip | Kind::ReportTitle(_)) {
                 return;
             }
@@ -970,12 +1004,107 @@ pub(crate) fn research_preview(
                 );
             });
         });
+        if !bib.done && !cited.is_empty() {
+            let titled = !(bib.in_references && bib.titled);
+            let at = markdown.len()..markdown.len();
+            cull.block(ui, &metrics, bib_key(titled), &at, false, None, |ui| {
+                bibliography(ui, &metrics, titled, &cited, &library);
+            });
+        }
     });
 
     let numbered = gutter::paint(ui, &metrics, anchor);
     PreviewOutput {
         scale: metrics.scale,
         clicked: clicked.or(numbered),
+    }
+}
+
+/// 参考文献表排到哪了：当前是否在参考文献区段、区段里的标题排过没有、表排过没有。
+#[derive(Default)]
+struct BibPlacement {
+    in_references: bool,
+    /// 区段的首个标题已经排成不编号的章：表直接接在它下面，不再另起“参考文献”。
+    titled: bool,
+    done: bool,
+}
+
+/// 这一块若是区段标记，返回它切到的区段。
+fn section_marker(markdown: &str, located: &LocatedBlock) -> Option<ResearchSection> {
+    match located.block {
+        MarkdownBlock::Html(_) | MarkdownBlock::Marker(_) => markdown
+            .get(located.range.clone())
+            .and_then(|raw| parse_research_marker(raw.trim())),
+        _ => None,
+    }
+}
+
+/// 条目之间比行距多出的空：`research.typ` 的 `bib-block` 实测 2.80 mm。
+const BIB_ITEM_GAP_PT: f32 = 2.8 / 25.4 * 72.0;
+
+/// 参考文献表：序号悬挂在左、著录排在右边一栏，宋体随正文字号。著录取自
+/// `export::bibliography`（与 Typst 同一份 GB/T 7714 样式），号取自第一遍。
+/// 文献库里没有的键照样占号，写明缺失——PDF 那边会中止导出。
+fn bibliography(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    titled: bool,
+    cited: &[crossref::CitedKey],
+    library: &export::bibliography::Library,
+) {
+    if titled {
+        chapter_title(ui, metrics, "参考文献");
+    }
+    let font = metrics.font(metrics.body_family, RESEARCH_BODY_PT);
+    let format = super::text_format(font.clone(), metrics.line);
+    let label = |number: usize| {
+        let mut job = super::job(f32::INFINITY);
+        job.append(&format!("[{number}]"), 0.0, format.clone());
+        super::layout(ui, job)
+    };
+    let labels: Vec<_> = cited.iter().map(|cited| label(cited.number)).collect();
+    // 序号一栏按最宽的号留，再空半个字。
+    let column = labels
+        .iter()
+        .map(|galley| galley.size().x)
+        .fold(0.0, f32::max)
+        + font.size * 0.5;
+    for (index, (cited, number)) in cited.iter().zip(labels).enumerate() {
+        if index > 0 {
+            ui.add_space(metrics.pt(BIB_ITEM_GAP_PT));
+        }
+        let (text, color) = match library.get(&cited.key) {
+            Some(entry) if !entry.formatted.is_empty() => {
+                (entry.formatted.clone(), theme::paper::ink())
+            }
+            Some(entry) => (
+                format!("{}【待核实：BibTeX 有错，排不出著录】", entry.title),
+                theme::warn(),
+            ),
+            None => (
+                format!("【待核实：文献库里没有 {}】", cited.key),
+                theme::warn(),
+            ),
+        };
+        let mut job = super::job(metrics.content - column);
+        job.append(
+            &text,
+            0.0,
+            egui::TextFormat {
+                color,
+                ..format.clone()
+            },
+        );
+        let galley = super::layout(ui, job);
+        let height = galley.size().y.max(number.size().y);
+        super::place(ui, metrics, height, |painter, rect| {
+            painter.galley(rect.left_top(), number, theme::paper::ink());
+            painter.galley(
+                rect.left_top() + egui::vec2(column, 0.0),
+                galley,
+                theme::paper::ink(),
+            );
+        });
     }
 }
 
@@ -1670,13 +1799,18 @@ mod tests {
     /// 同 [`drawn`]，另给文档要素的「文件名称」——封面按它印，用来把封面上的
     /// 题名和正文纸上的内容区分开。
     fn drawn_titled(title_hint: &str, markdown: &str) -> String {
-        let ctx = egui::Context::default();
-        theme::configure_fonts(&ctx, &FontConfig::default());
         let input = DraftInput {
             kind: TemplateKind::ResearchReport,
             title_hint: title_hint.to_string(),
             ..Default::default()
         };
+        drawn_input(&input, markdown)
+    }
+
+    /// 同 [`drawn`]，文档要素整份给出（文献库等）。
+    fn drawn_input(input: &DraftInput, markdown: &str) -> String {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &FontConfig::default());
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1687,7 +1821,7 @@ mod tests {
         let output = ctx.run_ui(raw, |ui| {
             let _ = research_preview(
                 ui,
-                &input,
+                input,
                 markdown,
                 PreviewScale::zoom(Some(1.0)),
                 None,
@@ -2443,6 +2577,94 @@ mod tests {
                 "源码符号“{symbol}”不应印在纸上：{text}"
             );
         }
+    }
+
+    fn with_bib(bib: &str) -> DraftInput {
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        input.research.bibliography_content = bib.to_string();
+        input
+    }
+
+    const BIB: &str = "@article{wang2020, author={王明}, title={数字政府}, journal={中国行政管理}, year={2020}}
+@book{li2021, author={李华}, title={治理现代化}, publisher={人民出版社}, address={北京}, year={2021}}
+@book{unused, author={赵磊}, title={未引用}, publisher={某社}, year={2022}}
+";
+
+    /// 参考文献表接在区段标题下：按首次引用先后编号，只列引过的，缺键写明待核实；
+    /// 区段的标题已经排过，不再另起“参考文献”。
+    #[test]
+    fn the_bibliography_follows_the_reference_heading_in_citation_order() {
+        let text = drawn_input(
+            &with_bib(BIB),
+            concat!(
+                "<!-- [正文] -->
+
+## 背景
+
+先引[@li2021]，再引[@nope; @wang2020]。
+
+",
+                "<!-- [参考文献] -->
+
+## 参考文献
+
+<!-- [附录] -->
+
+## 附表
+
+附录正文。
+",
+            ),
+        );
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("缺「{needle}」：{text}"))
+        };
+        assert!(at("[1]") < at("李华. 治理现代化[M]"), "{text}");
+        assert!(at("[2]") < at("【待核实：文献库里没有 nope】"), "{text}");
+        assert!(at("[3]") < at("王明. 数字政府[J]"), "{text}");
+        assert!(
+            at("王明. 数字政府[J]") < at("附录正文"),
+            "表在附录之前：{text}"
+        );
+        assert!(!text.contains("未引用"), "没引的不进表：{text}");
+        assert_eq!(text.matches("参考文献").count(), 1, "标题只排一次：{text}");
+    }
+
+    /// 没有参考文献区段时表排在全文末尾，自带“参考文献”标题；正文没引就不排。
+    #[test]
+    fn without_a_reference_section_the_bibliography_closes_the_report() {
+        let text = drawn_input(
+            &with_bib(BIB),
+            "<!-- [正文] -->
+
+## 背景
+
+见[@wang2020]。
+
+结尾一段。
+",
+        );
+        let heading = text.find("参考文献").expect("自带标题");
+        assert!(text.find("结尾一段").unwrap() < heading, "{text}");
+        assert!(
+            heading < text.find("王明. 数字政府[J]").expect("著录"),
+            "{text}"
+        );
+
+        let uncited = drawn_input(
+            &with_bib(BIB),
+            "<!-- [正文] -->
+
+## 背景
+
+没有引用。
+",
+        );
+        assert!(!uncited.contains("参考文献"), "{uncited}");
     }
 
     /// 文框进交叉引用菜单，编号带自己的名称；引文没有号，挂了锚点也不列。

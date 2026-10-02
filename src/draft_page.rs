@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+mod bib_marks;
 mod candidate_panel;
 mod candidates;
 mod caret;
@@ -381,6 +382,9 @@ pub(crate) struct DraftSession {
     /// 公文引用的来源清单：源码编辑框据此给引用画线、出悬停卡片。用到时才读稿件库，
     /// 引用面板关闭或在卡片里登记后换新。
     pub(crate) citation_index: Option<references::CitationIndex>,
+    /// 这次打开稿件后 .bib 是从哪个文件读进来的，文档要素的「重新读入」用。不存盘：
+    /// 稿件里只存文件名与内容，换台机器路径就不作数了。
+    pub(crate) bibliography_source: Option<std::path::PathBuf>,
     /// 候选区：写稿时暂时移出正文、以后可能还要用的文字。按稿件各存一份。
     pub(crate) candidates: candidates::CandidateState,
     /// 公文预览的缩放倍率；None 表示按面板宽度自适应。
@@ -567,6 +571,7 @@ impl DraftSession {
             heading_focus: None,
             reference_picker: None,
             citation_index: None,
+            bibliography_source: None,
             candidates: candidates::CandidateState::default(),
             preview_zoom: None,
             preview_fit_scale: 1.0,

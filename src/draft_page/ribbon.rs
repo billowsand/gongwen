@@ -18,6 +18,8 @@ use crate::theme;
 use eframe::egui;
 use egui::AtomExt;
 
+mod citation;
+
 /// 「研报」分区里选中的插入动作：区段标记、锚点、交叉引用、文献引用、脚注、
 /// 表题、引文与文框。
 ///
@@ -34,6 +36,10 @@ enum MarkupInsert {
     Snippet(String, usize, &'static str),
     /// 引文（None）或文框（名称），见 `markdown::toggle_quote_region`。
     Quote(Option<&'static str>),
+    /// 文献引用：这些键插成一组，光标在已有的一组里就并进去。
+    Citation(Vec<String>),
+    /// 文献引用下拉里点了「导入 .bib…」。
+    ImportBibliography,
 }
 
 /// 「文框」下拉里列的名称。名称写什么印什么、每种各编各的号，这里只列常用的；
@@ -810,28 +816,33 @@ impl DraftPage<'_> {
                 theme::Icon::Quote,
                 "文献引用",
             ))
+            // 下拉里要搜索、切筛选组、勾选几条，点一下就收起就没法用了；选中时再手动关。
+            .config(
+                egui::containers::menu::MenuConfig::default()
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+            )
             .ui(ui, |ui| {
-                ui.set_min_width(220.0);
-                let keys =
-                    export::crossref::bibtex_keys(&self.doc.draft.research.bibliography_content);
-                if keys.is_empty() {
-                    ui.weak("先在左侧文档要素导入 .bib 参考文献。");
-                    return;
+                let markdown = &self.doc.generated_markdown;
+                let library =
+                    export::bibliography::library(&self.doc.draft.research.bibliography_content);
+                let cited = preview::research_citations(ui.ctx(), markdown);
+                let cursor = crate::draft_page::editor_cursor(ui.ctx(), markdown);
+                match citation::citation_menu(ui, markdown, &library, &cited, cursor) {
+                    Some(citation::CitationPick::Insert(keys)) => {
+                        action = Some(MarkupInsert::Citation(keys));
+                        ui.close();
+                    }
+                    Some(citation::CitationPick::Import) => {
+                        action = Some(MarkupInsert::ImportBibliography);
+                        ui.close();
+                    }
+                    None => {}
                 }
-                egui::ScrollArea::vertical()
-                    .max_height(320.0)
-                    .show(ui, |ui| {
-                        for key in keys {
-                            if ui.add(theme::menu_text_item(key.as_str())).clicked() {
-                                action =
-                                    Some(MarkupInsert::Snippet(format!("[@{key}]"), 0, "文献引用"));
-                                ui.close();
-                            }
-                        }
-                    });
             })
             .0
-            .on_hover_text("插入 [@key] 文献引用：预览与 PDF 中印成方括号序号");
+            .on_hover_text(
+                "插入 [@key] 文献引用：预览与 PDF 中印成方括号序号（按首次引用先后编号）。                 可搜索作者、题名、年份；勾选几条一起插成 [@a; @b]",
+            );
             if ui
                 .add(theme::icon_text_button(theme::Icon::PencilLine, "脚注"))
                 .on_hover_text(
@@ -908,6 +919,8 @@ impl DraftPage<'_> {
             Some(MarkupInsert::Snippet(text, back, label)) => {
                 self.insert_inline(ui.ctx(), &text, back, label);
             }
+            Some(MarkupInsert::Citation(keys)) => self.insert_citations(ui.ctx(), &keys),
+            Some(MarkupInsert::ImportBibliography) => self.import_bibliography(None),
             None => {}
         }
     }
@@ -929,19 +942,17 @@ impl DraftPage<'_> {
                 ui.weak("标准词库里还没有单位。");
                 return;
             }
-            egui::ScrollArea::vertical()
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    for option in &units {
-                        if ui
-                            .add(theme::menu_text_item(option.full.as_str()))
-                            .clicked()
-                        {
-                            snippet = Some((option.full.clone(), "单位名称"));
-                            ui.close();
-                        }
+            theme::popup_scroll(320.0).show(ui, |ui| {
+                for option in &units {
+                    if ui
+                        .add(theme::menu_text_item(option.full.as_str()))
+                        .clicked()
+                    {
+                        snippet = Some((option.full.clone(), "单位名称"));
+                        ui.close();
                     }
-                });
+                }
+            });
         });
         egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
             theme::Icon::UserPlus,
@@ -953,16 +964,14 @@ impl DraftPage<'_> {
                 ui.weak("标准词库里还没有人员。");
                 return;
             }
-            egui::ScrollArea::vertical()
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    for (name, _) in &contacts {
-                        if ui.add(theme::menu_text_item(name.as_str())).clicked() {
-                            snippet = Some((name.clone(), "人员姓名"));
-                            ui.close();
-                        }
+            theme::popup_scroll(320.0).show(ui, |ui| {
+                for (name, _) in &contacts {
+                    if ui.add(theme::menu_text_item(name.as_str())).clicked() {
+                        snippet = Some((name.clone(), "人员姓名"));
+                        ui.close();
                     }
-                });
+                }
+            });
         });
         egui::containers::menu::MenuButton::from_button(theme::icon_text_button(
             theme::Icon::Phone,
@@ -978,19 +987,17 @@ impl DraftPage<'_> {
                 ui.weak("词库里的人员都还没填电话。");
                 return;
             }
-            egui::ScrollArea::vertical()
-                .max_height(320.0)
-                .show(ui, |ui| {
-                    for (name, phone) in with_phone {
-                        if ui
-                            .add(theme::menu_text_item(format!("{name} {phone}")))
-                            .clicked()
-                        {
-                            snippet = Some((phone.clone(), "联系电话"));
-                            ui.close();
-                        }
+            theme::popup_scroll(320.0).show(ui, |ui| {
+                for (name, phone) in with_phone {
+                    if ui
+                        .add(theme::menu_text_item(format!("{name} {phone}")))
+                        .clicked()
+                    {
+                        snippet = Some((phone.clone(), "联系电话"));
+                        ui.close();
                     }
-                });
+                }
+            });
         });
         if let Some((text, label)) = snippet {
             self.insert_inline(ui.ctx(), &text, 0, label);
@@ -1590,19 +1597,17 @@ fn crossref_menu(ui: &mut egui::Ui, markdown: &str) -> Option<String> {
     if shown.peek().is_none() {
         ui.weak(group.empty_hint());
     } else {
-        egui::ScrollArea::vertical()
-            .max_height(320.0)
-            .show(ui, |ui| {
-                for target in shown {
-                    if ui
-                        .add(crossref_row(target, ui.available_width()))
-                        .on_hover_text(format!("{{@{}}}", target.id))
-                        .clicked()
-                    {
-                        chosen = Some(target.id.clone());
-                    }
+        theme::popup_scroll(320.0).show(ui, |ui| {
+            for target in shown {
+                if ui
+                    .add(crossref_row(target, ui.available_width()))
+                    .on_hover_text(format!("{{@{}}}", target.id))
+                    .clicked()
+                {
+                    chosen = Some(target.id.clone());
                 }
-            });
+            }
+        });
     }
     if unreferable > 0 {
         ui.separator();
