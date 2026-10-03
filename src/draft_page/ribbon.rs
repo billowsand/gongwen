@@ -825,7 +825,11 @@ impl DraftPage<'_> {
                 let markdown = &self.doc.generated_markdown;
                 let library =
                     export::bibliography::library(&self.doc.draft.research.bibliography_content);
-                let cited = preview::research_citations(ui.ctx(), markdown);
+                let cited = preview::research_citations(
+                    ui.ctx(),
+                    markdown,
+                    &self.doc.draft.research.bibliography_content,
+                );
                 let cursor = crate::draft_page::editor_cursor(ui.ctx(), markdown);
                 match citation::citation_menu(ui, markdown, &library, &cited, cursor) {
                     Some(citation::CitationPick::Insert(keys)) => {
@@ -841,7 +845,9 @@ impl DraftPage<'_> {
             })
             .0
             .on_hover_text(
-                "插入 [@key] 文献引用：预览与 PDF 中印成方括号序号（按首次引用先后编号）。                 可搜索作者、题名、年份；勾选几条一起插成 [@a; @b]",
+                "插入 [@key] 文献引用：预览与 PDF 中印成上标方括号序号（按首次引用先后编号）；\
+                 序号作句子成分时手写 @key，与正文平排。\
+                 可搜索作者、题名、年份；勾选几条一起插成 [@a; @b]",
             );
             if ui
                 .add(theme::icon_text_button(theme::Icon::PencilLine, "脚注"))

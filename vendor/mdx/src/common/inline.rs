@@ -15,7 +15,7 @@ use super::ast::Inline;
 
 /// 行内构造统一匹配层：代码、链接/图片、强调、交叉引用、文献引用同处一层。
 ///
-/// 关键在于它们的起始字符互不相同（`` ` `` / `[` / `!` / `*` / `{` / `$`），因此
+/// 关键在于它们的起始字符互不相同（`` ` `` / `[` / `!` / `*` / `{` / `$` / `@`），因此
 /// `find_iter` 的“最左、非重叠”语义天然给出正确优先级：谁先起始谁整体胜出，
 /// 被包住的内部构造再由强调的递归解析处理。这样：
 /// - `` `a*b*c` `` 整段是代码（`` ` `` 起始最靠左），内部 `*` 不成强调；
@@ -26,11 +26,16 @@ use super::ast::Inline;
 /// 唯一留在更高层的是脚注（见 [`parse`]）：脚注不能被强调包裹（既有限制）。
 /// `[` 起始的链接与引用是两个候选，链接需 `](...)` 结构、引用需 `[@...]`，
 /// 二者实际不会匹配同一段；命中后再按 [`link_matcher`] 复核区分。
+///
+/// 叙述式引用 `@key` 排在最后：`{@id}`、`[@a; @b]` 从 `{`、`[` 起始，比里面的 `@`
+/// 靠左，整体先吃掉。key 只认英文字母或下划线开头、字母数字下划线组成，中间可夹
+/// `:` `.` `/` `-`（不收尾），所以“@wang2020。”“@wang2020等”只取到 `wang2020`。
+/// 前一个字符另有要求（见 [`text_citation_is_live`]），邮箱、网址里的 `@` 不算。
 fn inline_matcher() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"`[^`]+`|!?\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|\{@[A-Za-z][\w:.-]*\}|\[(?:@[^\s@;,\[\]{}\\]+)(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*\]|\$(?:\\\$|[^$\n])+\$",
+            r"`[^`]+`|!?\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|\{@[A-Za-z][\w:.-]*\}|\[(?:@[^\s@;,\[\]{}\\]+)(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*\]|\$(?:\\\$|[^$\n])+\$|@[A-Za-z_][A-Za-z0-9_]*(?:[:./-][A-Za-z0-9_]+)*",
         )
         .expect("invalid inline regex")
     })
@@ -159,6 +164,8 @@ fn parse_inline(text: &str) -> Vec<Inline> {
                 }
                 out.push(Inline::Image { alt, url, label });
             }
+            // 叙述式引用 `@key`：剥掉 `@`。
+            b'@' => out.push(Inline::TextCitation(part[1..].to_string())),
             // `[` 起始：有 `](...)` 结构的是链接（文字原样），否则按文献引用解析。
             b'[' => {
                 if let Some(caps) = link_matcher().captures(part) {
@@ -201,12 +208,17 @@ fn escaped_at(text: &str, index: usize) -> bool {
 /// - 强调与公式的收尾定界符被转义：不生效（`*a\*`、`$a\$`）；
 /// - 公式的 `$` 紧跟在另一个未转义的 `$` 后面：不生效，行内 `$$x$$` 整体是文本。
 ///
+/// - 叙述式引用 `@key` 前一个字符不合要求：不生效（见 [`text_citation_is_live`]）。
+///
 /// 代码的收尾反引号不查：代码里的反斜杠本来就是字面的。
 fn delimiters_are_live(text: &str, start: usize, end: usize) -> bool {
     if escaped_at(text, start) {
         return false;
     }
     let part = &text[start..end];
+    if part.starts_with('@') {
+        return text_citation_is_live(text, start);
+    }
     let closer = match part.as_bytes()[0] {
         b'*' if part.starts_with("**") => 2,
         b'*' | b'$' => 1,
@@ -219,6 +231,19 @@ fn delimiters_are_live(text: &str, start: usize, end: usize) -> bool {
         && start > 0
         && text.as_bytes()[start - 1] == b'$'
         && !escaped_at(text, start - 1))
+}
+
+/// 叙述式引用 `@key` 的 `@` 前面只能是行首、空白、非 ASCII 字符（汉字、全角标点）
+/// 或半角左括号。紧跟在字母数字、`.`、`/` 这些后面的 `@` 是邮箱、网址或别的记号
+/// （`user@example.com`、`https://x.org/@me`），不是引用；`[@key, p. 2]` 这类写坏的
+/// 方括号引用里的 `@` 前面是 `[`，也原样保留。
+///
+/// 公文助手 `export::crossref` 认的是同一条规则，两边要一起改。
+pub fn text_citation_is_live(text: &str, at: usize) -> bool {
+    match text[..at].chars().next_back() {
+        None => true,
+        Some(ch) => ch.is_whitespace() || !ch.is_ascii() || ch == '(',
+    }
 }
 
 /// CommonMark 的反斜杠转义：`\` 后跟 ASCII 标点时去掉反斜杠、只留标点；
@@ -275,6 +300,10 @@ pub fn flatten(inlines: &[Inline]) -> String {
                         .join("; "),
                 );
                 s.push(']');
+            }
+            Inline::TextCitation(key) => {
+                s.push('@');
+                s.push_str(key);
             }
             Inline::Footnote(t) => {
                 s.push('（');
@@ -566,12 +595,65 @@ mod tests {
 
     #[test]
     fn unsupported_citations_and_inline_code_stay_literal() {
-        assert_eq!(parse("@key"), vec![Inline::Text("@key".into())]);
         assert_eq!(
             parse("[@key, p. 2]"),
             vec![Inline::Text("[@key, p. 2]".into())]
         );
         assert_eq!(parse("`[@key]`"), vec![Inline::Code("[@key]".into())]);
+    }
+
+    #[test]
+    fn bare_at_key_is_a_text_citation() {
+        assert_eq!(parse("@key"), vec![Inline::TextCitation("key".into())]);
+        assert_eq!(
+            parse("见文献@wang2020。王某等@li_2021:a指出"),
+            vec![
+                Inline::Text("见文献".into()),
+                Inline::TextCitation("wang2020".into()),
+                Inline::Text("。王某等".into()),
+                Inline::TextCitation("li_2021:a".into()),
+                Inline::Text("指出".into()),
+            ]
+        );
+        // key 中间可夹 `:` `.` `/` `-`，收尾的不算。
+        assert_eq!(
+            parse("(@a.b-c.) 与 @d"),
+            vec![
+                Inline::Text("(".into()),
+                Inline::TextCitation("a.b-c".into()),
+                Inline::Text(".) 与 ".into()),
+                Inline::TextCitation("d".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn at_signs_that_are_not_citations_stay_literal() {
+        for literal in [
+            "user@example.com",
+            "https://x.org/@me",
+            "[@key, p. 2]",
+            r"\@key",
+            "@张三",
+            "@1abc",
+            "`@key`",
+            "{@1x}",
+        ] {
+            assert!(
+                !parse(literal)
+                    .iter()
+                    .any(|inline| matches!(inline, Inline::TextCitation(_))),
+                "{literal}"
+            );
+        }
+        // 方括号与交叉引用照旧整体先吃掉，组里的 `@b` 不另算叙述式。
+        assert_eq!(
+            parse("[@a; @b]{@sec:x}"),
+            vec![
+                Inline::Citation(vec!["a".into(), "b".into()]),
+                Inline::CrossRef("sec:x".into()),
+            ]
+        );
     }
 
     #[test]

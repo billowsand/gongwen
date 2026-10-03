@@ -36,6 +36,9 @@ pub struct Doc {
     pub blocks: Vec<Item>,
     /// 正文有文献引用：模板据此装载 `references.bib`。
     pub bibliography: bool,
+    /// 叙述式引用 `@key` 里键在文献库中的那些。模板只把这些排成引用，其余 `@key`
+    /// 是正文碰巧写的 `@`，原样印（见 `common::citation::validate`）。
+    pub text_cites: Vec<String>,
     /// 不阻断排版的提示（缺图之类）。
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -97,8 +100,10 @@ pub enum Run {
     Ref {
         id: String,
     },
+    /// 文献引用。`n` 为叙述式（`@key`，序号与正文平排），否则是方括号引用（上标）。
     Cite {
         keys: Vec<String>,
+        n: bool,
     },
     /// 脚注（内容是纯文字）。
     Fn {
@@ -277,6 +282,7 @@ pub fn build(input: &Path) -> Result<Doc> {
         cover: cover_of(&cover, title.as_deref()),
         blocks: items,
         bibliography: citations.has_citations,
+        text_cites: citations.text_cited.into_iter().collect(),
         warnings,
     })
 }
@@ -1133,7 +1139,14 @@ fn runs(inlines: &[Inline]) -> Vec<Run> {
                 Run::Img { src, page }
             }
             Inline::CrossRef(id) => Run::Ref { id: id.clone() },
-            Inline::Citation(keys) => Run::Cite { keys: keys.clone() },
+            Inline::Citation(keys) => Run::Cite {
+                keys: keys.clone(),
+                n: false,
+            },
+            Inline::TextCitation(key) => Run::Cite {
+                keys: vec![key.clone()],
+                n: true,
+            },
             Inline::Footnote(t) => Run::Fn { v: t.clone() },
             Inline::Math(t) => Run::Math {
                 v: t.clone(),

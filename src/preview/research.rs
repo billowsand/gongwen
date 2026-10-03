@@ -638,9 +638,11 @@ fn strip_caption_number(caption: &str) -> String {
     leading.replace(&caption, "$1").trim().to_string()
 }
 
-/// 第一遍：给全文的锚点和文献引用编号。
-fn collect_marks(blocks: &[LocatedBlock], markdown: &str) -> ResearchMarks {
-    collect_marks_with(blocks, markdown, |_, _| {})
+/// 第一遍：给全文的锚点和文献引用编号。`bib` 是文献库（`.bib` 内容）：叙述式
+/// `@key` 只有键在库里才算引用，与 mdx 排 PDF 时一致。
+fn collect_marks(blocks: &[LocatedBlock], markdown: &str, bib: &str) -> ResearchMarks {
+    let library = export::bibliography::library(bib);
+    collect_marks_with(blocks, markdown, &|key| library.contains(key), |_, _| {})
 }
 
 /// 一个锚点挂在什么东西上：`{@id}` 印的号，以及交叉引用菜单要的分类、纸面前缀和题名。
@@ -727,6 +729,7 @@ impl<'k> Anchored<'k> {
 fn collect_marks_with(
     blocks: &[LocatedBlock],
     markdown: &str,
+    known: &dyn Fn(&str) -> bool,
     mut on_anchor: impl FnMut(&str, Anchored<'_>),
 ) -> ResearchMarks {
     let mut marks = ResearchMarks::default();
@@ -750,7 +753,7 @@ fn collect_marks_with(
             on_anchor(anchor, target);
         }
         if let Some(raw) = markdown.get(located.range.clone()) {
-            for key in crossref::citation_keys(raw) {
+            for key in crossref::citation_keys(raw, known) {
                 marks.cite(key);
             }
         }
@@ -805,7 +808,8 @@ pub(crate) struct LabelTarget {
 pub(crate) fn label_targets(markdown: &str) -> Vec<LabelTarget> {
     let blocks = export::parse_markdown_located(markdown);
     let mut targets: Vec<LabelTarget> = Vec::new();
-    let marks = collect_marks_with(&blocks, markdown, |id, target| {
+    // 菜单只要题名，不看文献库：叙述式 `@key` 不登记，题名里原样留着。
+    let marks = collect_marks_with(&blocks, markdown, &|_| false, |id, target| {
         if targets.iter().any(|seen| seen.id == id) {
             return;
         }
@@ -824,7 +828,7 @@ pub(crate) fn label_targets(markdown: &str) -> Vec<LabelTarget> {
     });
     for target in &mut targets {
         if let Cow::Owned(title) = marks.apply(&target.title) {
-            target.title = title;
+            target.title = crossref::strip_superscript(&title).into_owned();
         }
     }
     targets
@@ -832,8 +836,8 @@ pub(crate) fn label_targets(markdown: &str) -> Vec<LabelTarget> {
 
 /// 正文引过的文献：序号、引用处数，按序号排。与排版共用第一遍，序号就是纸上印的号
 /// （GB/T 7714 顺序编码制：按首次引用的先后）。
-pub(crate) fn citations(markdown: &str) -> Vec<crossref::CitedKey> {
-    collect_marks(&export::parse_markdown_located(markdown), markdown).cited()
+pub(crate) fn citations(markdown: &str, bib: &str) -> Vec<crossref::CitedKey> {
+    collect_marks(&export::parse_markdown_located(markdown), markdown, bib).cited()
 }
 
 /// 导航大纲里的一条标题。
@@ -857,7 +861,8 @@ pub(crate) struct OutlineEntry {
 
 /// 扫一遍源码，按研究报告的规则取出全部标题与编号。
 pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
-    let marks = collect_marks(&export::parse_markdown_located(markdown), markdown);
+    // 大纲只看标题，不看文献库。
+    let marks = collect_marks(&export::parse_markdown_located(markdown), markdown, "");
     // 大纲只看标题，序号表的分组编号样式无关紧要。
     let located =
         export::parse_markdown_located_research(markdown, &marks, &NumberingConfig::default());
@@ -891,7 +896,7 @@ pub(crate) fn outline(markdown: &str) -> Vec<OutlineEntry> {
         entries.push(OutlineEntry {
             level,
             number,
-            text,
+            text: crossref::strip_superscript(&text).into_owned(),
             line: located.range.clone(),
         });
     });
@@ -927,12 +932,13 @@ pub(crate) fn research_preview(
     // 两遍：先给锚点和文献定号，再按纸面字面重新切块。研究报告的标题编号不跟
     // 设置里的公文编号样式走；序号表的分组编号跟设置，与导出一致。
     // 两遍解析只取决于正文与编号样式，正文没动就复用上一次的结果（`preview::memo`）。
+    let bib = &input.research.bibliography_content;
     let located = super::memo::memo(
         ui.ctx(),
         "research-parse",
-        super::memo::key((markdown, numbering)),
+        super::memo::key((markdown, numbering, bib)),
         || {
-            let marks = collect_marks(&export::parse_markdown_located(markdown), markdown);
+            let marks = collect_marks(&export::parse_markdown_located(markdown), markdown, bib);
             export::parse_markdown_located_research(markdown, &marks, numbering)
         },
     );
@@ -947,7 +953,7 @@ pub(crate) fn research_preview(
     // 参考文献表：PDF 里接在参考文献区段的标题下面，没有这个区段就排在全文末尾
     // （mdx `typst_research` 的 `close_reference` / `finish`）。正文没引文献就不排。
     let library = export::bibliography::library(&input.research.bibliography_content);
-    let cited = super::research_citations(ui.ctx(), markdown);
+    let cited = super::research_citations(ui.ctx(), markdown, bib);
     let mut bib = BibPlacement::default();
     let bib_key = |titled: bool| {
         super::memo::key((
@@ -2033,6 +2039,52 @@ mod tests {
             assert!(
                 !text.contains(symbol),
                 "源码符号“{symbol}”不应印在纸上：{text}"
+            );
+        }
+    }
+
+    /// `[@…]` 印成上标：序号缩小、基线抬高，哨兵不落到纸上。普通段落与公式混排的
+    /// 段落各走一条排版路径，两条都要管。
+    #[test]
+    fn bracket_citations_are_drawn_as_superscripts() {
+        let shapes = drawn_shapes(concat!(
+            "<!-- [正文] -->\n\n## 背景\n\n",
+            "研究表明[@a; @b]。\n\n",
+            "公式$x$之后又引[@a]。\n",
+        ));
+        let texts = drawn_texts(&shapes);
+        for text in &texts {
+            assert!(
+                !text
+                    .galley
+                    .text()
+                    .contains([crossref::SUPER_OPEN, crossref::SUPER_CLOSE]),
+                "哨兵不该印出来：{}",
+                text.galley.text()
+            );
+        }
+        for (before, cited) in [("明", "[1,2]"), ("引", "[1]")] {
+            let glyphs: Vec<_> = texts
+                .iter()
+                .flat_map(|text| text.galley.rows.iter())
+                .flat_map(|row| row.glyphs.iter())
+                .collect();
+            let at = glyphs
+                .windows(2)
+                .position(|pair| pair[0].chr.to_string() == before && pair[1].chr == '[')
+                .unwrap_or_else(|| panic!("找不到“{before}{cited}”"));
+            let (body, number) = (glyphs[at], glyphs[at + 1]);
+            assert!(
+                number.font_height < body.font_height * 0.8,
+                "{cited} 应缩小：{} vs {}",
+                number.font_height,
+                body.font_height
+            );
+            assert!(
+                number.pos.y < body.pos.y,
+                "{cited} 的基线应高于正文：{} vs {}",
+                number.pos.y,
+                body.pos.y
             );
         }
     }

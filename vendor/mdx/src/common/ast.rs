@@ -162,8 +162,11 @@ pub enum Inline {
     },
     /// 交叉引用。如 {@chap:overview}，tex 输出 \ref{id}；其他端降级为 id 文本。
     CrossRef(String),
-    /// Pandoc 风格方括号文献引用。如 `[@key]` 或 `[@a; @b]`。
+    /// Pandoc 风格方括号文献引用。如 `[@key]` 或 `[@a; @b]`。研究报告印成上标序号。
     Citation(Vec<String>),
+    /// Pandoc 风格叙述式文献引用：不带方括号的 `@key`，序号作句子成分（“见文献@key”），
+    /// 研究报告与正文平排。key 不在文献库里时按原文 `@key` 印（见 `common::citation`）。
+    TextCitation(String),
     /// 行内脚注。如 `[^1]:(注释内容)`，仅保存注释内容；编号由输出格式自行生成。
     Footnote(String),
     /// 行内 LaTeX 数学公式。如 `$E=mc^2$`，保存 `$` 之间的公式源码原文。

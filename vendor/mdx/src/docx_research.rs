@@ -1610,6 +1610,7 @@ fn inline_run_style(ip: &Inline) -> (String, bool, bool) {
             false,
             false,
         ),
+        Inline::TextCitation(key) => (format!("@{key}"), false, false),
         // docx 暂不生成脚注部件，降级为全角括号内联注释
         Inline::Footnote(t) => (format!("（{}）", t), false, false),
         // docx 不支持公式，降级为源码原文

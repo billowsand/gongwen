@@ -97,7 +97,12 @@ pub(crate) fn append_marked_text(
             continue;
         }
         let gap = chunk_gap(metrics, previous, chunk.kind);
-        job.append(&chunk.text, gap, mark_format(format.clone(), chunk.kind));
+        super::layout::append_run(
+            job,
+            &chunk.text,
+            gap,
+            mark_format(format.clone(), chunk.kind),
+        );
         previous = chunk.kind;
     }
 }

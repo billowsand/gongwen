@@ -78,7 +78,13 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
   `fake-bold-cjk`。纸面预览用 `theme::FONT_RESEARCH_*` 字体族（`Metrics::font` 把公文
   族名换过去），Termes 在内存里拿掉 latin-in-cjk 让出的码位（`font_cmap`），取字与 PDF 一致。
   缺字体时只挡研究报告（`portable_runtime::validate_research_fonts`）。
-- 文献：Typst 内置 hayagriva，样式 `gb-7714-2015-numeric`，引用不上标。
+- 文献：Typst 内置 hayagriva，样式 `gb-7714-2015-numeric`。样式整组标上标，模板先一律去掉，
+  再自己加：`[@key]` 整组上标（`cite-super`：10.5pt、上移 5.07pt，与脚注号相同，整组用 Termes，
+  紧贴前字、不加 CJKecglue）；叙述式 `@key`（mdx `Run::Cite` 的 `n`）与正文平排，前后照旧补
+  CJKecglue。叙述式只认文献库里有的键（`doc.text_cites`，mdx `common::citation::validate`
+  算），其余原样印 `@key`。同组的 cite 紧挨着，Typst 并成一组，由样式排序、压成 `[1–3]`；预览
+  （`crossref::ResearchMarks::citation`）照抄这条规则，上标用哨兵 U+E004/E005 交给
+  `preview::layout::append_run` 缩小上移。
 
 ## 版式要点（公文）
 

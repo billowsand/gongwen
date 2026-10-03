@@ -21,6 +21,10 @@ pub use common::quote;
 /// 研究报告插图的默认宽度。公开出来供调用方的预览照同一规则排图。
 pub use common::figure_size;
 
+/// 叙述式文献引用 `@key` 的 `@` 前一个字符的要求。公开出来供调用方的预览、审校
+/// 照同一规则认引用。
+pub use common::inline::text_citation_is_live;
+
 /// 转换后的目标格式。这份副本只出 Word；PDF 由公文助手的 Typst 引擎排
 /// （研究报告的排版数据见 [`typst_research`]）。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

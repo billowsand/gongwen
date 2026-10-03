@@ -185,6 +185,54 @@ pub(crate) fn text_format(font: FontId, line: f32) -> TextFormat {
     }
 }
 
+/// 上标字号与正文之比：研究报告正文 14 磅、文献序号 10.5 磅，与 PDF 的脚注号同一比例。
+pub(crate) const SUPERSCRIPT_RATIO: f32 = 0.75;
+
+/// 往排版任务里追加一段文字，返回它在任务里的字符范围（不含哨兵）。
+///
+/// 研究报告的方括号文献序号夹在上标哨兵里（`crossref::SUPER_OPEN` / `SUPER_CLOSE`，
+/// 见 `ResearchMarks::apply`）：这里去掉哨兵，中间的字缩到 3/4。行距不变，egui 按
+/// 各字自己的 ascent 落基线，小字的基线就比正文高出一截，成了上标。PDF 里上移
+/// 5.07 磅，预览约 3 磅，看得出是上标即可。没有哨兵时就是一次 `append`。
+pub(crate) fn append_run(
+    job: &mut LayoutJob,
+    text: &str,
+    gap: f32,
+    format: TextFormat,
+) -> Range<usize> {
+    use crate::export::crossref::{SUPER_CLOSE, SUPER_OPEN};
+    let start = job.text.chars().count();
+    if !text.contains([SUPER_OPEN, SUPER_CLOSE]) {
+        job.append(text, gap, format);
+        return start..job.text.chars().count();
+    }
+    let small = TextFormat {
+        font_id: FontId::new(
+            format.font_id.size * SUPERSCRIPT_RATIO,
+            format.font_id.family.clone(),
+        ),
+        ..format.clone()
+    };
+    let mut gap = gap;
+    let mut superscript = false;
+    let mut piece_start = 0;
+    let mut flush = |job: &mut LayoutJob, piece: &str, superscript: bool| {
+        if !piece.is_empty() {
+            let format = if superscript { &small } else { &format };
+            job.append(piece, std::mem::take(&mut gap), format.clone());
+        }
+    };
+    for (at, ch) in text.char_indices() {
+        if ch == SUPER_OPEN || ch == SUPER_CLOSE {
+            flush(job, &text[piece_start..at], superscript);
+            superscript = ch == SUPER_OPEN;
+            piece_start = at + ch.len_utf8();
+        }
+    }
+    flush(job, &text[piece_start..], superscript);
+    start..job.text.chars().count()
+}
+
 pub(crate) fn job(width: f32) -> LayoutJob {
     LayoutJob {
         wrap: egui::text::TextWrapping {
@@ -1192,14 +1240,14 @@ pub(crate) fn append_numbered_inline(
         } else {
             normal.clone()
         };
-        let start = job.text.chars().count();
-        job.append(
+        let range = append_run(
+            job,
             &segment.text,
             marks::chunk_gap(metrics, previous, piece.kind),
             marks::mark_format(text_format(font, metrics.line), piece.kind),
         );
         if segment.bold && !segment.parenthesized && !metrics.dedicated_bold {
-            bold_ranges.push(start..start + segment.text.chars().count());
+            bold_ranges.push(range);
         }
         previous = piece.kind;
     }
@@ -1386,7 +1434,8 @@ pub(crate) fn measure_table(
                     &mut synthetic_bold_chars,
                 );
             } else if header {
-                cell_job.append(
+                append_run(
+                    &mut cell_job,
                     &export::plain_text(text),
                     0.0,
                     text_format(font.clone(), line),
@@ -1402,14 +1451,14 @@ pub(crate) fn measure_table(
                         } else {
                             font.clone()
                         };
-                        let start = cell_job.text.chars().count();
-                        cell_job.append(
+                        let range = append_run(
+                            &mut cell_job,
                             &segment.text,
                             std::mem::take(&mut gap),
                             marks::mark_format(text_format(segment_font, line), chunk.kind),
                         );
                         if segment.bold && !metrics.dedicated_bold {
-                            synthetic_bold_chars.push(start..start + segment.text.chars().count());
+                            synthetic_bold_chars.push(range);
                         }
                         previous = chunk.kind;
                     }

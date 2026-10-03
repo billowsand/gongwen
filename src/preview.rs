@@ -45,15 +45,20 @@ pub(crate) use research::outline as research_outline;
 pub(crate) use research::{LabelKind, LabelTarget, label_targets as research_label_targets};
 pub(crate) use research_anchor::{AnchorRefusal, suggest as suggest_research_anchor};
 
-/// 研究报告正文引过的文献（序号、处数），正文没动就复用上一次的结果。
+/// 研究报告正文引过的文献（序号、处数），正文与文献库没动就复用上一次的结果。
 /// 起草页的文献引用下拉与 `[@key]` 悬停卡每帧都可能要，长稿解析一遍要一两毫秒。
+/// `bib` 是 `.bib` 内容：叙述式 `@key` 只有键在库里才算引用。
 pub(crate) fn research_citations(
     ctx: &egui::Context,
     markdown: &str,
+    bib: &str,
 ) -> std::sync::Arc<Vec<crate::export::crossref::CitedKey>> {
-    memo::memo(ctx, "research-citations", memo::key(markdown), || {
-        research::citations(markdown)
-    })
+    memo::memo(
+        ctx,
+        "research-citations",
+        memo::key((markdown, bib)),
+        || research::citations(markdown, bib),
+    )
 }
 pub(crate) use tail::{addressee_block, footer_record, signature_block, signature_date};
 // test-only names（根文件的测试模块使用）

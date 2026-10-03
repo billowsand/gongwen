@@ -9,15 +9,31 @@ use super::ast::{Block, Inline};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Validated {
     pub has_citations: bool,
+    /// 文献库里的全部键。叙述式引用 `@key` 只有键在这里面才算引用，否则按原文印。
+    pub keys: BTreeSet<String>,
+    /// 正文里真正引到文献的叙述式引用键（键在文献库里）。
+    pub text_cited: BTreeSet<String>,
     source: Option<PathBuf>,
 }
 
+impl Validated {
+    /// 叙述式引用 `@key` 是否真的引了文献库里的一条。
+    pub fn knows(&self, key: &str) -> bool {
+        self.keys.contains(key)
+    }
+}
+
+/// 校验文献引用。方括号引用 `[@key]` 的键必须都在文献库里，否则报错；叙述式引用
+/// `@key` 只认文献库里有的键，其余是正文里碰巧写了个 `@`（账号、记号），不报错，
+/// 排版时原样印出（[`Validated::knows`]）。
 pub fn validate(blocks: &[Block], declared: Option<&str>, base_dir: &Path) -> Result<Validated> {
-    let cited = collect(blocks);
+    let Collected { cited, text_cited } = collect(blocks);
     let Some(declared) = declared else {
         if cited.is_empty() {
             return Ok(Validated {
                 has_citations: false,
+                keys: BTreeSet::new(),
+                text_cited: BTreeSet::new(),
                 source: None,
             });
         }
@@ -43,8 +59,14 @@ pub fn validate(blocks: &[Block], declared: Option<&str>, base_dir: &Path) -> Re
         anyhow::bail!("Bib 文件缺少引用键: {}", missing.join(", "));
     }
 
+    let text_cited: BTreeSet<String> = text_cited
+        .into_iter()
+        .filter(|key| available.contains(key.as_str()))
+        .collect();
     Ok(Validated {
-        has_citations: !cited.is_empty(),
+        has_citations: !cited.is_empty() || !text_cited.is_empty(),
+        keys: available.into_iter().map(str::to_string).collect(),
+        text_cited,
         source: Some(source),
     })
 }
@@ -72,8 +94,15 @@ impl Validated {
     }
 }
 
-fn collect(blocks: &[Block]) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
+/// 正文里的引用键：方括号引用与叙述式引用分开收。
+#[derive(Default)]
+struct Collected {
+    cited: BTreeSet<String>,
+    text_cited: BTreeSet<String>,
+}
+
+fn collect(blocks: &[Block]) -> Collected {
+    let mut keys = Collected::default();
     for block in blocks {
         match block {
             Block::Paragraph(inlines)
@@ -91,10 +120,13 @@ fn collect(blocks: &[Block]) -> BTreeSet<String> {
     keys
 }
 
-fn collect_inlines(inlines: &[Inline], keys: &mut BTreeSet<String>) {
+fn collect_inlines(inlines: &[Inline], keys: &mut Collected) {
     for inline in inlines {
         match inline {
-            Inline::Citation(cited) => keys.extend(cited.iter().cloned()),
+            Inline::Citation(cited) => keys.cited.extend(cited.iter().cloned()),
+            Inline::TextCitation(key) => {
+                keys.text_cited.insert(key.clone());
+            }
             // 加粗 / 斜体内部可再嵌套引用（parser 会递归解析，emitter 也会递归输出
             // \cite），校验必须同样下钻，否则加粗引用的 key 校验被绕过、has_citations
             // 假阴性会漏掉 \bibliography{references}。
@@ -214,6 +246,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn text_citations_count_only_when_the_key_is_in_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("refs.bib"),
+            "@article{a,title={A}}
+",
+        )
+        .unwrap();
+
+        let validated = validate(&blocks("见文献@a。"), Some("refs.bib"), dir.path()).unwrap();
+        assert!(validated.has_citations);
+        assert!(validated.knows("a"));
+
+        // 不在库里的 `@key` 不报错、不算引用：排版时原样印。
+        let validated = validate(&blocks("联系 @admin。"), Some("refs.bib"), dir.path()).unwrap();
+        assert!(!validated.has_citations);
+        assert!(!validated.knows("admin"));
+
+        // 没声明文献库时同理，不要求 front matter。
+        let validated = validate(&blocks("联系 @admin。"), None, dir.path()).unwrap();
+        assert!(!validated.has_citations);
     }
 
     #[test]

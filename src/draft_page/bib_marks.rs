@@ -1,5 +1,5 @@
-//! 源码编辑框里研究报告的文献引用标记：每组 `[@…]` 下面画一道细虚线，组里有键不在
-//! 文献库里的画橙色；指针停在引用上片刻，弹出卡片列出每条文献在参考文献表里的
+//! 源码编辑框里研究报告的文献引用标记：每组 `[@…]` 与每处叙述式 `@key`（键在文献库
+//! 里的才算）下面画一道细虚线，组里有键不在文献库里的画橙色；指针停在引用上片刻，弹出卡片列出每条文献在参考文献表里的
 //! 著录与 PDF 序号。悬停的手感与公文引用（`citation_marks`）一致，画法共用它的
 //! 行矩形计算；卡片只看不改，没有操作。
 
@@ -33,8 +33,11 @@ pub(super) fn show(
     cited: impl FnOnce() -> Arc<Vec<CitedKey>>,
 ) {
     let state_id = egui::Id::new("gw-bib-card");
-    let spans = if text.contains("[@") {
-        crossref::citation_spans(text)
+    let spans: Vec<_> = if text.contains('@') {
+        crossref::citation_marks(text, &|key| library.contains(key))
+            .into_iter()
+            .map(|mark| (mark.range, mark.keys))
+            .collect()
     } else {
         Vec::new()
     };

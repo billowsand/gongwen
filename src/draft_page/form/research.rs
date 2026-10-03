@@ -302,7 +302,11 @@ impl DraftPage<'_> {
     fn bibliography_summary(&self, ui: &mut egui::Ui) {
         let library =
             crate::export::bibliography::library(&self.doc.draft.research.bibliography_content);
-        let cited = crate::preview::research_citations(ui.ctx(), &self.doc.generated_markdown);
+        let cited = crate::preview::research_citations(
+            ui.ctx(),
+            &self.doc.generated_markdown,
+            &self.doc.draft.research.bibliography_content,
+        );
         let total = library.entries.len();
         let used = cited
             .iter()

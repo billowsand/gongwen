@@ -362,14 +362,14 @@ fn append_text(
             } else {
                 normal.clone()
             };
-            let start = job.text.chars().count();
-            job.append(
+            let range = super::layout::append_run(
+                job,
                 &segment.text,
                 std::mem::take(&mut gap),
                 marks::mark_format(text_format(font, style.line), chunk.kind),
             );
             if segment.bold && !metrics.dedicated_bold {
-                bold_ranges.push(start..start + segment.text.chars().count());
+                bold_ranges.push(range);
             }
             previous = chunk.kind;
         }

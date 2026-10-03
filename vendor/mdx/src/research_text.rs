@@ -64,7 +64,10 @@ fn append_inlines(inlines: &[Inline], text: &mut String) {
             Inline::Link { text: value, .. } => text.push_str(value),
             Inline::Bold(items) | Inline::Italic(items) => append_inlines(items, text),
             Inline::Math(source) | Inline::DisplayMath(source) => append_math_text(source, text),
-            Inline::Image { .. } | Inline::CrossRef(_) | Inline::Citation(_) => text.push(' '),
+            Inline::Image { .. }
+            | Inline::CrossRef(_)
+            | Inline::Citation(_)
+            | Inline::TextCitation(_) => text.push(' '),
         }
     }
 }

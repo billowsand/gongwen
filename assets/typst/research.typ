@@ -61,6 +61,10 @@
   if found.len() > 0 { link(label(id), found.first().value) } else { text(fill: red, id) }
 }
 
+// 上标文献序号：与正文脚注号同一字号、同一高度（实测值见下方脚注一节）。整组用 Termes：
+// 区间的连接号（en dash）按中西共用符号会落到中文字体，在上标里显得又宽又散。
+#let cite-super(c) = super(typographic: false, baseline: -5.07pt, size: 10.5pt, text(font: F.latin, c))
+
 // 汉字（不含标点）：xeCJK 在它与西文之间插 CJKecglue。
 #let cjk-start(r) = r != none and r.t == "s" and r.v.len() > 0 and r.v.clusters().first().match(regex("^[\p{Han}]")) != none
 #let cjk-end(r) = r != none and r.t == "s" and r.v.len() > 0 and r.v.clusters().last().match(regex("^[\p{Han}]")) != none
@@ -87,11 +91,21 @@
     // \ref 的编号紧贴汉字（hyperref 的链接盒挡住了 CJKecglue）。
     else if r.t == "ref" { box(ref-run(r.id)) }
     else if r.t == "cite" {
-      // \cite 的方括号与前面的汉字之间有 CJKecglue（Termes 词间空）。
-      {
-        if cjk-end(prev) { h(0.25em) }
-        if doc.bibliography { r.keys.map(k => cite(label(k))).join() } else { "[" + r.keys.join(",") + "]" }
-        if cjk-start(next) { h(0.25em) }
+      let narrative = r.at("n", default: false)
+      if narrative and r.keys.first() not in doc.text_cites {
+        // 键不在文献库里的 `@key` 不是引用，是正文碰巧写的 `@`：原样印。
+        "@" + r.keys.first()
+      } else {
+        let numbers = if doc.bibliography { r.keys.map(k => cite(label(k))).join() } else { "[" + r.keys.join(",") + "]" }
+        if narrative {
+          // 叙述式（“见文献[1]”）：序号作句子成分，与正文平排；方括号与前后汉字之间
+          // 有 CJKecglue（Termes 词间空）。
+          if cjk-end(prev) { h(0.25em) }
+          numbers
+          if cjk-start(next) { h(0.25em) }
+        } else {
+          cite-super(numbers)
+        }
       }
     }
     else if r.t == "fn" { footnote(r.v) }
@@ -101,7 +115,10 @@
   }
 }
 
-// 文献引用：GB/T 7714 顺序编码，方括号与正文同排（gbt7714 的 \citestyle{numbers}），不上标。
+// 文献引用：GB/T 7714 顺序编码。hayagriva 的样式整组标成上标，这里一律先去掉，
+// 上标由 cite-super 统一加：`[@key]` 整组上标、字号与位置同脚注号，紧贴前一个字，
+// 不加 CJKecglue；叙述式 `@key` 与正文平排。同组的几个 cite 紧挨着，Typst 并成一组，
+// 由样式排序、压缩成 [1–3]、[2,4]。
 #show cite: it => { show super: s => s.body; it }
 
 // 交叉引用的落点：编号存在零高的 metadata 里，引用处查出来印。

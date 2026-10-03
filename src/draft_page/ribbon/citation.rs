@@ -459,7 +459,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &FontConfig::default());
         let library = bibliography::parse(bib);
-        let cited = crate::preview::research_citations(&ctx, markdown);
+        let cited = crate::preview::research_citations(&ctx, markdown, bib);
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,

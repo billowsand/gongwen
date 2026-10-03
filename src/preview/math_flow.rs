@@ -7,14 +7,15 @@
 //! 框内用灰色小字写出公式源码，不 panic、不阻塞预览。
 
 use super::layout::{
-    indent, is_no_line_end, is_no_line_start, job, layout, paint_synthetic_bold_galley, place,
-    row_tint_offset, text_format, tint_rect,
+    SUPERSCRIPT_RATIO, append_run, indent, is_no_line_end, is_no_line_start, job, layout,
+    paint_synthetic_bold_galley, place, row_tint_offset, text_format, tint_rect,
 };
 use super::marks;
 use super::math_render;
 use super::{INDENT_CHARS, Metrics, RESEARCH_CAPTION_PT};
 use crate::export;
 use crate::export::RedlineKind;
+use crate::export::crossref::{SUPER_CLOSE, SUPER_OPEN};
 use crate::theme;
 use eframe::egui;
 use egui::text::{CCursor, LayoutJob};
@@ -472,7 +473,27 @@ fn atoms(
             let mut word = String::new();
             let mut word_width = 0.0f32;
             let mut chars = segment.text.chars().peekable();
+            // 文献序号的上标（见 `layout::append_run`）：哨兵之间的字缩小，哨兵本身不排。
+            let mut font = font;
+            let full = font.clone();
             while let Some(ch) = chars.next() {
+                if ch == SUPER_OPEN || ch == SUPER_CLOSE {
+                    if !word.is_empty() {
+                        out.push(Atom::Text {
+                            text: std::mem::take(&mut word),
+                            font: font.clone(),
+                            width: std::mem::take(&mut word_width),
+                            mark,
+                            synthetic_bold,
+                        });
+                    }
+                    font = if ch == SUPER_OPEN {
+                        egui::FontId::new(full.size * SUPERSCRIPT_RATIO, full.family.clone())
+                    } else {
+                        full.clone()
+                    };
+                    continue;
+                }
                 let ch = if ch == '\\' && chars.peek() == Some(&'$') {
                     chars.next();
                     '$'
@@ -897,10 +918,9 @@ pub(crate) fn append_with_math(
                     job.append("\u{3000}", pad, text_format(normal.clone(), line));
                 }
                 if !part.is_empty() {
-                    let start = job.text.chars().count();
-                    job.append(part, std::mem::take(&mut gap), format.clone());
+                    let range = append_run(job, part, std::mem::take(&mut gap), format.clone());
                     if segment.bold && !metrics.dedicated_bold {
-                        synthetic_bold_ranges.push(start..start + part.chars().count());
+                        synthetic_bold_ranges.push(range);
                     }
                 }
             }

@@ -67,6 +67,37 @@ pub fn research_anchor_notes(input: &DraftInput, markdown: &str) -> Vec<ReviewNo
     notes
 }
 
+/// 研究报告里写在句中、句末标点后面的上标文献引用，每处一条，带着“标点 + 引用”的
+/// 位置，审校抽屉里点一下就跳过去。
+///
+/// `[@key]` 印成上标，紧贴前一个字：写在“。”“，”后面，序号就悬在标点右上方。
+/// 惯例是放在标点前（“……研究表明[1]。”）。只提示不改：引号、括号后面的引用
+/// 有时就是要标在整段引文之后，这几个不算；叙述式 `@key` 与正文平排，也不算。
+pub fn research_citation_notes(input: &DraftInput, markdown: &str) -> Vec<ReviewNote> {
+    const PUNCTUATION: [char; 7] = ['。', '，', '、', '；', '：', '！', '？'];
+    if !input.kind.is_research() || !markdown.contains("[@") {
+        return Vec::new();
+    }
+    export::crossref::citation_marks(markdown, &|_| false)
+        .into_iter()
+        .filter_map(|mark| {
+            let punctuation = markdown[..mark.range.start].chars().next_back()?;
+            if !PUNCTUATION.contains(&punctuation) {
+                return None;
+            }
+            let source = &markdown[mark.range.clone()];
+            let start = mark.range.start - punctuation.len_utf8();
+            Some(ReviewNote::located(
+                format!(
+                    "上标文献引用 {source} 写在“{punctuation}”后面，序号会悬在标点右上方；\
+                     按惯例放在标点前，写成“…{source}{punctuation}”"
+                ),
+                start..mark.range.end,
+            ))
+        })
+        .collect()
+}
+
 /// 正文为空的提示语。导出闸门要按它认人，所以拎成常量，别让两处文案各写各的。
 const EMPTY_BODY: &str = "模型未返回正文";
 
@@ -148,7 +179,7 @@ fn research_mark_warnings(input: &DraftInput, text: &str, warnings: &mut Vec<Str
         ));
     }
     let mut reported: Vec<&str> = Vec::new();
-    for key in export::crossref::citation_keys(text) {
+    for key in export::crossref::citation_keys(text, &|key| library.contains(key)) {
         if library.contains(key) || reported.contains(&key) {
             continue;
         }
@@ -1596,6 +1627,31 @@ mod tests {
                 .any(|warning| warning.contains("没有对应的锚点")),
             "引用都有锚点就不该提示：{resolved:?}"
         );
+    }
+
+    /// 上标引用写在句中、句末标点后面：每处一条，位置盖住“标点 + 引用”；
+    /// 引号、括号后面的和叙述式 `@key` 不报。
+    #[test]
+    fn superscript_citations_after_punctuation_are_located() {
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::ResearchReport;
+        input.profile.kind = TemplateKind::ResearchReport;
+
+        let markdown = "# 报告\n\n## 背景\n\n研究表明。[@a]另有，[@b; @c]\
+                        规定“原文”[@d]，见文献@a。正确写法[@e]。\n";
+        let notes = research_citation_notes(&input, markdown);
+        let spans: Vec<&str> = notes
+            .iter()
+            .map(|note| &markdown[note.span.clone().expect("带位置")])
+            .collect();
+        assert_eq!(spans, ["。[@a]", "，[@b; @c]"]);
+        assert!(
+            notes[0].message.contains("按惯例放在标点前，写成“…[@a]。”"),
+            "{}",
+            notes[0].message
+        );
+        input.kind = TemplateKind::PlainDocument;
+        assert!(research_citation_notes(&input, markdown).is_empty());
     }
 
     /// 同一锚点定义多次会让导出 PDF 中止：每处多出来的定义各报一条，带行号和

@@ -652,6 +652,11 @@ impl DraftPage<'_> {
             &self.doc.draft,
             &self.doc.generated_markdown,
         ));
+        // 写在标点后面的上标文献引用：点一下跳到那处。
+        self.doc.warnings.extend(validator::research_citation_notes(
+            &self.doc.draft,
+            &self.doc.generated_markdown,
+        ));
         // 文字校对与要素校验并列：前者管词语用法，后者管必填与互斥。两边的提示
         // 都带 span，抽屉里点一下就能跳到出问题的那几个字。
         // 用合并过用户覆盖层的词表，而不是内置种子——否则词表页上改了不生效。

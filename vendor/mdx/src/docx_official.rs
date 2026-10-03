@@ -747,6 +747,7 @@ fn add_inlines(
                 false,
                 false,
             ),
+            Inline::TextCitation(key) => (format!("@{key}"), false, false),
             Inline::Footnote(t) => (format!("（{}）", t), false, false),
             // docx 不支持公式，降级为源码原文
             Inline::Math(t) => (format!("${t}$"), false, false),

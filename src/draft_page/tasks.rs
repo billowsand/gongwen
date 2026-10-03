@@ -506,6 +506,7 @@ impl DraftPage<'_> {
                 .into_iter()
                 .map(ReviewNote::from)
                 .chain(validator::research_anchor_notes(&input, &markdown))
+                .chain(validator::research_citation_notes(&input, &markdown))
                 .collect();
                 let mut proof_warnings: Vec<ReviewNote> = Vec::new();
                 let mut proof_measured = false;

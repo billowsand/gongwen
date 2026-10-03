@@ -1,10 +1,10 @@
 //! 研究报告的行内扩展标记：锚点 `{#id}`、交叉引用 `{@id}`、文献引用 `[@key]`
-//! 与行内脚注 `[^id]:(内容)`。
+//! 与 `@key`、行内脚注 `[^id]:(内容)`。
 //!
-//! 前三样都来自 mdx research。编译成 PDF 之后它们分别是 `\label`、`\ref` 和
-//! `\cite`：锚点自己不占版面，`{@id}` 印的是被引对象的编号，`[@key]` 印的是
-//! 方括号文献序号。脚注印成 `\footnote{}`，纸面上是页下注。纸上从来看不到大括
-//! 号和 at 号，预览要照纸面显示，就得在排版之前把它们换掉。
+//! 前几样都来自 mdx research。排成 PDF 之后：锚点自己不占版面，`{@id}` 印的是被引
+//! 对象的编号；文献引用按 GB/T 7714 顺序编码制印方括号序号，`[@key]` 整组上标，
+//! 叙述式的 `@key`（“见文献@key”，序号作句子成分）与正文平排。脚注是页下注。纸上
+//! 从来看不到大括号和 at 号，预览要照纸面显示，就得在排版之前把它们换掉。
 //!
 //! 认的写法必须与 mdx 的 `common::inline` / `common::parser` 完全一致——两边认
 //! 的不是同一套，用户就会撞上"预览换了、编译不认"（或者反过来）这种最难查的
@@ -22,12 +22,105 @@ fn crossref_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\{@([A-Za-z][\w:.-]*)\}").expect("交叉引用正则"))
 }
 
-/// 文献引用 `[@key]`、`[@a; @b]`。
-fn citation_re() -> &'static Regex {
+/// 文献引用的行内扫描，照 mdx `common::inline` 的最左匹配次序：脚注、行内代码、
+/// 链接与图片、交叉引用、行内公式只为占住位置（它们里面的 `@` 不是引用），真正要
+/// 收的是方括号引用 `[@a; @b]`（第 1 组）与叙述式引用 `@key`（第 2 组）。
+fn citation_scan_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\[(@[^\s@;,\[\]{}\\]+(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*)\]").expect("文献引用正则")
+        Regex::new(concat!(
+            r"\[\^[^\]]+\][:：](?:\([^)]*\)|（[^）]*）)",
+            r"|`[^`]+`",
+            r"|!?\[[^\]]*\]\([^)]+\)",
+            r"|\{@[A-Za-z][\w:.-]*\}",
+            r"|\[(@[^\s@;,\[\]{}\\]+(?:\s*;\s*@[^\s@;,\[\]{}\\]+)*)\]",
+            r"|\$(?:\\\$|[^$\n])+\$",
+            r"|@([A-Za-z_][A-Za-z0-9_]*(?:[:./-][A-Za-z0-9_]+)*)",
+        ))
+        .expect("文献引用正则")
     })
+}
+
+/// 上标的起止哨兵。预览里方括号引用印成上标：[`ResearchMarks::apply`] 把整组序号
+/// 夹在这两个字符中间，排版时（`preview::layout::append_run`）去掉哨兵、缩小上移。
+/// 私用区字符，与花脸稿哨兵（U+E000–E003）错开。
+pub(crate) const SUPER_OPEN: char = '\u{E004}';
+pub(crate) const SUPER_CLOSE: char = '\u{E005}';
+
+/// 去掉上标哨兵：导航、交叉引用菜单这类只要纯文字的地方用。
+pub(crate) fn strip_superscript(text: &str) -> Cow<'_, str> {
+    if text.contains([SUPER_OPEN, SUPER_CLOSE]) {
+        Cow::Owned(text.replace([SUPER_OPEN, SUPER_CLOSE], ""))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// 正文里的一处文献引用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CitationMark<'a> {
+    /// 整处引用（`[@a; @b]` 或 `@key`）在文字里的字节范围。
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) keys: Vec<&'a str>,
+    /// 叙述式 `@key`：序号与正文平排。否则是方括号引用，印成上标。
+    pub(crate) narrative: bool,
+}
+
+/// 文字里的全部文献引用，按出现顺序。
+///
+/// 叙述式 `@key` 只在 `known(key)` 时算数——键不在文献库里的 `@` 是正文碰巧写的
+/// 账号、记号，mdx 排 PDF 时原样印（`common::citation::validate`）。`@` 前一个字符的
+/// 要求直接用 mdx 的 [`mdx::text_citation_is_live`]，两边是同一条规则。
+pub(crate) fn citation_marks<'a>(
+    text: &'a str,
+    known: &dyn Fn(&str) -> bool,
+) -> Vec<CitationMark<'a>> {
+    let re = citation_scan_re();
+    let mut marks = Vec::new();
+    let mut pos = 0;
+    while let Some(caps) = re.captures_at(text, pos) {
+        let whole = caps.get(0).expect("整体匹配");
+        let narrative = caps.get(2);
+        if escaped_at(text, whole.start())
+            || (narrative.is_some() && !mdx::text_citation_is_live(text, whole.start()))
+        {
+            // 起始字符是字面的：从下一个字符起重找，与 mdx 一致。
+            pos = whole.start()
+                + text[whole.start()..]
+                    .chars()
+                    .next()
+                    .map_or(1, char::len_utf8);
+            continue;
+        }
+        pos = whole.end();
+        if let Some(group) = caps.get(1) {
+            marks.push(CitationMark {
+                range: whole.range(),
+                keys: split_keys(group.as_str()).collect(),
+                narrative: false,
+            });
+        } else if let Some(key) = narrative
+            && known(key.as_str())
+        {
+            marks.push(CitationMark {
+                range: whole.range(),
+                keys: vec![key.as_str()],
+                narrative: true,
+            });
+        }
+    }
+    marks
+}
+
+/// `index` 处的字符前面是否紧跟奇数个反斜杠（被转义成了字面字符）。
+fn escaped_at(text: &str, index: usize) -> bool {
+    text.as_bytes()[..index]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 /// 行尾锚点 `{#id}`。
@@ -64,27 +157,12 @@ pub(crate) fn split_label(text: &str) -> (&str, Option<&str>) {
     (rest, caps.get(1).map(|id| id.as_str()))
 }
 
-/// 一行里出现的文献引用键，按出现顺序；`[@a; @b]` 拆成两条。
-pub(crate) fn citation_keys(text: &str) -> Vec<&str> {
-    citation_re()
-        .captures_iter(text)
-        .filter_map(|caps| caps.get(1))
-        .flat_map(|group| split_keys(group.as_str()))
-        .collect()
-}
-
-/// 全文每一组文献引用：整组 `[@…]` 的字节范围与组里的键，按出现顺序。
-/// 源码编辑框据此给引用画线、出悬停卡。
-pub(crate) fn citation_spans(text: &str) -> Vec<(std::ops::Range<usize>, Vec<&str>)> {
-    citation_re()
-        .captures_iter(text)
-        .filter_map(|caps| {
-            let whole = caps.get(0)?;
-            Some((
-                whole.start()..whole.end(),
-                split_keys(caps.get(1)?.as_str()).collect(),
-            ))
-        })
+/// 文字里出现的文献引用键，按出现顺序；`[@a; @b]` 拆成两条。叙述式 `@key` 只收
+/// `known` 认的（见 [`citation_marks`]）。
+pub(crate) fn citation_keys<'a>(text: &'a str, known: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
+    citation_marks(text, known)
+        .into_iter()
+        .flat_map(|mark| mark.keys)
         .collect()
 }
 
@@ -100,15 +178,13 @@ pub(crate) fn citation_at(
         .find('\n')
         .map_or(text.len(), |at| cursor + at);
     let line = &text[line_start..line_end];
-    citation_re().captures_iter(line).find_map(|caps| {
-        let whole = caps.get(0)?;
-        let range = line_start + whole.start()..line_start + whole.end();
-        if range.start < cursor && cursor <= range.end {
-            Some((range, split_keys(caps.get(1)?.as_str()).collect()))
-        } else {
-            None
-        }
-    })
+    // 只并进方括号组：叙述式 `@key` 是句子成分，插进去的文献另起一组。
+    citation_marks(line, &|_| false)
+        .into_iter()
+        .find_map(|mark| {
+            let range = line_start + mark.range.start..line_start + mark.range.end;
+            (range.start < cursor && cursor <= range.end).then_some((range, mark.keys))
+        })
 }
 
 fn split_keys(inner: &str) -> impl Iterator<Item = &str> {
@@ -235,18 +311,31 @@ impl ResearchMarks {
         cited
     }
 
-    /// 把一行源码里的行内标记换成纸面上的样子。
+    /// 把一行源码里的行内标记换成纸面上的样子。方括号引用的序号夹在上标哨兵
+    /// （[`SUPER_OPEN`]、[`SUPER_CLOSE`]）中间；叙述式 `@key` 只换第一遍登记过的键
+    /// （第一遍只登记文献库里有的，见 [`citation_marks`]），其余原样。
     pub(crate) fn apply<'a>(&self, line: &'a str) -> Cow<'a, str> {
         let (stripped, label) = split_label(line);
-        if label.is_none()
-            && !stripped.contains("{@")
-            && !stripped.contains("[@")
-            && !stripped.contains("[^")
-        {
+        if label.is_none() && !stripped.contains('@') && !stripped.contains("[^") {
             return Cow::Borrowed(line);
         }
-        let text = crossref_re().replace_all(stripped, |caps: &Captures| self.reference(&caps[1]));
-        let text = citation_re().replace_all(&text, |caps: &Captures| self.citation(&caps[1]));
+        let marks = citation_marks(stripped, &|key| self.citations.contains_key(key));
+        let mut cited = String::with_capacity(stripped.len());
+        let mut last = 0;
+        for mark in &marks {
+            cited.push_str(&stripped[last..mark.range.start]);
+            let numbers = self.citation(&mark.keys);
+            if mark.narrative {
+                cited.push_str(&numbers);
+            } else {
+                cited.push(SUPER_OPEN);
+                cited.push_str(&numbers);
+                cited.push(SUPER_CLOSE);
+            }
+            last = mark.range.end;
+        }
+        cited.push_str(&stripped[last..]);
+        let text = crossref_re().replace_all(&cited, |caps: &Captures| self.reference(&caps[1]));
         // 脚注不参与编号，纸面是页下注；预览就地展开成可读形式。
         let text = footnote_re().replace_all(&text, |caps: &Captures| {
             let content = caps
@@ -263,15 +352,34 @@ impl ResearchMarks {
         self.labels.get(id).cloned().unwrap_or_else(|| "??".into())
     }
 
-    /// `\citestyle{numbers}` 下的方括号序号。多键按写的顺序排，不做区间压缩。
-    fn citation(&self, inner: &str) -> String {
-        let numbers = split_keys(inner)
-            .map(|key| match self.citations.get(key) {
-                Some(number) => number.to_string(),
-                None => "?".into(),
-            })
-            .collect::<Vec<_>>();
-        format!("[{}]", numbers.join(","))
+    /// 一组引用的方括号序号，照 hayagriva 的 `gb-7714-2015-numeric`：序号从小到大，
+    /// 三个及以上连号压成区间（`[1–3]`，连接号是 en dash），其余用半角逗号隔开。
+    /// 文献库里没有的键印 `?`，排在最后。
+    fn citation(&self, keys: &[&str]) -> String {
+        let mut numbers: Vec<usize> = keys
+            .iter()
+            .filter_map(|key| self.citations.get(*key).copied())
+            .collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        let mut parts: Vec<String> = Vec::new();
+        let mut index = 0;
+        while index < numbers.len() {
+            let mut end = index;
+            while end + 1 < numbers.len() && numbers[end + 1] == numbers[end] + 1 {
+                end += 1;
+            }
+            if end - index >= 2 {
+                parts.push(format!("{}–{}", numbers[index], numbers[end]));
+            } else {
+                parts.extend(numbers[index..=end].iter().map(usize::to_string));
+            }
+            index = end + 1;
+        }
+        if keys.iter().any(|key| !self.citations.contains_key(*key)) {
+            parts.push("?".into());
+        }
+        format!("[{}]", parts.join(","))
     }
 }
 
@@ -288,19 +396,95 @@ mod tests {
         marks
     }
 
+    /// 上标哨兵换成 `^{…}`，断言好读。
+    fn shown(text: &str) -> String {
+        text.replace(SUPER_OPEN, "^{").replace(SUPER_CLOSE, "}")
+    }
+
     #[test]
     fn crossrefs_and_citations_become_the_numbers_the_pdf_prints() {
         let marks = marks();
         assert_eq!(
-            marks.apply("见第{@chap:a}章的图{@fig:x}[@wang2020]。"),
-            "见第1章的图1.2[1]。"
+            shown(&marks.apply("见第{@chap:a}章的图{@fig:x}[@wang2020]。")),
+            "见第1章的图1.2^{[1]}。"
         );
-        assert_eq!(marks.apply("综述[@wang2020; @li2021]。"), "综述[1,2]。");
+        assert_eq!(
+            shown(&marks.apply("综述[@wang2020; @li2021]。")),
+            "综述^{[1,2]}。"
+        );
+    }
+
+    /// 叙述式 `@key` 与正文平排，只换第一遍登记过的键；其余 `@` 原样。
+    #[test]
+    fn text_citations_print_inline_and_only_for_cited_keys() {
+        let marks = marks();
+        assert_eq!(
+            shown(&marks.apply("见文献@li2021，王某等@wang2020指出。")),
+            "见文献[2]，王某等[1]指出。"
+        );
+        assert_eq!(
+            marks.apply("联系 @admin 或 user@wang2020.cn。"),
+            "联系 @admin 或 user@wang2020.cn。"
+        );
+    }
+
+    /// 与 hayagriva 的 GB/T 7714 顺序编码样式一致：排序、三连号压成区间。
+    #[test]
+    fn citation_groups_sort_and_collapse_like_the_pdf() {
+        let mut marks = ResearchMarks::default();
+        for key in ["a", "b", "c", "d", "e"] {
+            marks.cite(key);
+        }
+        let group = |text: &str| shown(&marks.apply(text));
+        assert_eq!(group("[@c; @a; @b]"), "^{[1–3]}");
+        assert_eq!(group("[@d; @b]"), "^{[2,4]}");
+        assert_eq!(group("[@a; @b; @c; @e]"), "^{[1–3,5]}");
+        assert_eq!(group("[@a; @a]"), "^{[1]}");
+        assert_eq!(group("[@b; @nope]"), "^{[2,?]}");
+    }
+
+    #[test]
+    fn citation_marks_follow_the_mdx_rules() {
+        let known = |key: &str| key != "admin";
+        let marks = |text| {
+            citation_marks(text, &known)
+                .into_iter()
+                .map(|mark| (mark.keys, mark.narrative))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            marks("甲[@a; @b]乙@c。(@d) @admin"),
+            [
+                (vec!["a", "b"], false),
+                (vec!["c"], true),
+                (vec!["d"], true)
+            ]
+        );
+        // 代码、链接、脚注、公式、交叉引用里的 `@` 不是引用；转义的也不是。
+        for literal in [
+            "`[@a] @b`",
+            "[见 @a](https://x/@b)",
+            "注[^1]:(@a)",
+            "$@a$",
+            "{@sec:a}",
+            r"\[@a] \@b",
+            "x@a",
+            "[@a, p. 2]",
+        ] {
+            assert!(marks(literal).is_empty(), "{literal}");
+        }
+    }
+
+    #[test]
+    fn strip_superscript_removes_only_the_sentinels() {
+        let marks = marks();
+        assert_eq!(strip_superscript(&marks.apply("题[@li2021]")), "题[2]");
+        assert!(matches!(strip_superscript("普通"), Cow::Borrowed(_)));
     }
 
     #[test]
     fn citation_at_finds_the_group_around_or_just_before_the_cursor() {
-        let text = "甲[@a; @b]乙\n丙[@c]";
+        let text = "甲[@a; @b]乙\n丙[@c]@d";
         let at =
             |cursor: usize| citation_at(text, cursor).map(|(range, keys)| (&text[range], keys));
         let first = text.find('[').unwrap();
@@ -309,14 +493,16 @@ mod tests {
         let end = first + "[@a; @b]".len();
         assert_eq!(at(end), Some(("[@a; @b]", vec!["a", "b"])), "紧挨在 ] 之后");
         assert_eq!(at(end + "乙".len()), None);
-        assert_eq!(at(text.len()), Some(("[@c]", vec!["c"])));
+        // 叙述式 `@d` 不是组：紧挨着它也不并。
+        assert_eq!(at(text.len()), None);
+        assert_eq!(at(text.len() - 2), Some(("[@c]", vec!["c"])));
     }
 
     /// 序号按首次引用定，处数每处都算，`[@a; @a]` 也是两处。
     #[test]
     fn cited_lists_numbers_and_uses_in_number_order() {
         let mut marks = ResearchMarks::default();
-        for key in citation_keys("先 [@b] 后 [@a; @b]，再 [@b]") {
+        for key in citation_keys("先 [@b] 后 [@a; @b]，再 @b", &|_| true) {
             marks.cite(key);
         }
         let cited: Vec<_> = marks
@@ -331,7 +517,7 @@ mod tests {
     fn unknown_targets_print_the_same_placeholders_latex_would() {
         let marks = marks();
         assert_eq!(marks.apply("见{@chap:nope}。"), "见??。");
-        assert_eq!(marks.apply("见[@nope]。"), "见[?]。");
+        assert_eq!(shown(&marks.apply("见[@nope]。")), "见^{[?]}。");
     }
 
     #[test]
@@ -385,16 +571,18 @@ mod tests {
     fn footnotes_mix_with_text_and_other_marks_on_one_line() {
         let marks = marks();
         assert_eq!(
-            marks.apply("见{@chap:a}章[^1]:(详见附录)[@wang2020]，脚注[^n]：（再注）收尾。"),
-            "见1章〔注：详见附录〕[1]，脚注〔注：再注〕收尾。"
+            shown(
+                &marks.apply("见{@chap:a}章[^1]:(详见附录)[@wang2020]，脚注[^n]：（再注）收尾。")
+            ),
+            "见1章〔注：详见附录〕^{[1]}，脚注〔注：再注〕收尾。"
         );
     }
 
     #[test]
     fn citation_keys_come_out_in_reading_order() {
         assert_eq!(
-            citation_keys("先 [@b] 后 [@a; @c]"),
-            ["b", "a", "c"],
+            citation_keys("先 [@b] 后 [@a; @c]，@d 与 @e", &|key| key != "e"),
+            ["b", "a", "c", "d"],
             "文献序号按正文引用先后排"
         );
     }
