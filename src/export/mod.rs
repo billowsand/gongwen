@@ -142,6 +142,39 @@ pub(crate) fn copy_count(input: &DraftInput) -> u32 {
     automatic_print_copies(input).max(1) as u32
 }
 
+/// 份号与收文单位的对应清单：份号顺序与 [`copy_count`] 一致，依次为主送、抄送、承办单位。
+/// 未开逐份编号或文种无份号时返回 `None`。
+pub(crate) fn copy_roster(input: &DraftInput) -> Option<String> {
+    if !input.profile.number_copies || !input.kind.has_copy_numbering() {
+        return None;
+    }
+    let responsible = if self::docx::is_joint_mode_one(input) {
+        &input.profile.joint_responsible_units
+    } else {
+        &input.profile.responsible_unit
+    };
+    let mut out = String::from(
+        "份号	单位	类别
+",
+    );
+    let mut serial = 0u32;
+    for (label, value) in [
+        ("主送", &input.profile.recipient),
+        ("抄送", &input.profile.copies_to),
+        ("承办", responsible),
+    ] {
+        for unit in split_units(value) {
+            serial += 1;
+            out.push_str(&format!(
+                "{}	{unit}	{label}
+",
+                crate::models::format_copy_number(serial)
+            ));
+        }
+    }
+    (serial > 0).then_some(out)
+}
+
 /// 一篇稿件对外的标题：标签、状态栏、稿件库记录、导出文件名都用它。
 ///
 /// 研究报告与封面同一口径（[`research::cover_title`]）：文档要素的「文件名称」
@@ -379,7 +412,13 @@ pub(crate) fn write_pdf(
     if input.kind.is_research() {
         self::typst::research::write_pdf(path, input, markdown, numbering)
     } else {
-        self::typst::write_pdf(path, input, markdown, display, fonts, numbering, elements)
+        let outcome =
+            self::typst::write_pdf(path, input, markdown, display, fonts, numbering, elements)?;
+        if let Some(roster) = copy_roster(input) {
+            // 清单只为方便整理，写失败不影响 PDF。
+            let _ = std::fs::write(path.with_extension("份号清单.txt"), roster);
+        }
+        Ok(outcome)
     }
 }
 

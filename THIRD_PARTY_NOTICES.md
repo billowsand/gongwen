@@ -11,6 +11,15 @@ License) and TeX Gyre Termes (GUST Font License); their notices are copied to
 `runtime/licenses/JetBrainsMono-OFL.txt` and
 `runtime/licenses/TeX-Gyre-GUST-FONT-LICENSE.txt`.
 
+## egui_dnd
+
+送批材料的拖拽排序使用 `egui_dnd` 0.16.0（MIT），及其依赖
+`egui_animation` 0.12.0、`hello_egui_utils` 0.12.0（MIT）与
+`simple-easing` 1.0.2（MIT OR Apache-2.0）。
+
+- 项目：<https://github.com/lucasmerlin/hello_egui>
+- 许可：<https://github.com/lucasmerlin/hello_egui/blob/main/LICENSE>
+
 ## mdx
 
 Research reports are parsed and laid out (cover, sections, numbering) by mdx,

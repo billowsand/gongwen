@@ -13,10 +13,11 @@ use crate::app::{
 use crate::manuscript::send_package::{
     AddBlock, ExportRecord, ManuscriptBrief, PackageItemState, SendPackagePlan,
 };
-use crate::manuscript::{ManuscriptFilter, ManuscriptRow, ManuscriptStore};
+use crate::manuscript::{ManuscriptFilter, ManuscriptRow, ManuscriptStore, ManuscriptUpdate};
 use crate::manuscript_io::send_package::SendPackageOutcome;
 use crate::models::{ManuscriptStatus, TemplateKind};
 use crate::theme;
+use anyhow::Context as _;
 use eframe::egui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -31,6 +32,10 @@ const PICKER_LIMIT: usize = 200;
 /// 导出前确认清单最高这么高，件多了就滚动。
 const CONFIRM_MAX_HEIGHT: f32 = 220.0;
 
+#[cfg(test)]
+#[path = "send_package_ui_tests.rs"]
+mod tests;
+
 /// 面板里的一行：主件或随行件。
 struct PackageRow {
     /// 随行件的稿件 UUID；主件行为空。
@@ -44,10 +49,31 @@ struct PackageRow {
     pinned: Option<Option<Option<i64>>>,
 }
 
+impl egui_dnd::DragDropItem for &PackageRow {
+    fn id(&self) -> egui::Id {
+        egui::Id::new(&self.item_uuid)
+    }
+}
+
 /// 导出前的确认：计划已生成，等人勾选目录页、选保存位置。
 struct ExportConfirm {
     plan: SendPackagePlan,
     with_toc: bool,
+}
+
+/// 卡片里展开的行内提交表单：同一时刻只开一张。
+struct CommitForm {
+    manuscript_id: i64,
+    name: String,
+    comment: String,
+    /// 刚展开，等下一次绘制时把焦点给版本名输入框。
+    focus: bool,
+    error: Option<String>,
+}
+
+struct SortUndo {
+    before: Vec<String>,
+    after: Vec<String>,
 }
 
 /// 后台导出线程发回的消息。
@@ -92,6 +118,10 @@ pub(crate) struct SendPackagePanel {
     export_error: Option<String>,
     loaded_at: Option<Instant>,
     error: Option<String>,
+    /// 拖动期间暂停定时重读，保证落点索引对应同一份清单。
+    dragging: bool,
+    sort_undo: Option<SortUndo>,
+    commit_form: Option<CommitForm>,
 }
 
 impl SendPackagePanel {
@@ -106,7 +136,42 @@ impl SendPackagePanel {
             export_error: None,
             loaded_at: None,
             error: None,
+            dragging: false,
+            sort_undo: None,
+            commit_form: None,
         }
+    }
+
+    /// 主件与随行件里需要提交版本的件（从未提交、有未提交修改），连同默认版本名。
+    fn pending_commits(&self, unsaved_in_editor: &dyn Fn(i64) -> bool) -> Vec<(i64, String)> {
+        self.owner
+            .iter()
+            .chain(self.items.iter())
+            .filter_map(|row| {
+                let (brief, state) = (row.brief.as_ref()?, row.state.as_ref()?);
+                let needs = row.pinned.is_none()
+                    && brief.status != ManuscriptStatus::Archived
+                    && (state.latest.is_none()
+                        || state.has_uncommitted
+                        || unsaved_in_editor(brief.id));
+                needs.then(|| (brief.id, default_version_name(state)))
+            })
+            .collect()
+    }
+
+    /// 不能进包的件数：找不到稿件、从未提交过版本，或钉住的版本在本机找不到。
+    fn blocked_count(&self) -> usize {
+        self.owner
+            .iter()
+            .chain(self.items.iter())
+            .filter(|row| match row.pinned {
+                Some(pin) => pin.is_none(),
+                None => row
+                    .state
+                    .as_ref()
+                    .is_none_or(|state| state.latest.is_none()),
+            })
+            .count()
     }
 
     fn archived(&self) -> bool {
@@ -116,38 +181,94 @@ impl SendPackagePanel {
             .is_some_and(|brief| brief.status == ManuscriptStatus::Archived)
     }
 
+    fn move_item(
+        &mut self,
+        store: &mut ManuscriptStore,
+        from: usize,
+        to: usize,
+    ) -> anyhow::Result<()> {
+        if from == to || from >= self.items.len() || to >= self.items.len() {
+            return Ok(());
+        }
+        let mut order: Vec<String> = self.items.iter().map(|row| row.item_uuid.clone()).collect();
+        let before = order.clone();
+        let moved = order.remove(from);
+        order.insert(to, moved);
+        self.save_order(store, &order)?;
+        self.sort_undo = Some(SortUndo {
+            before,
+            after: order,
+        });
+        Ok(())
+    }
+
+    fn save_order(&mut self, store: &mut ManuscriptStore, order: &[String]) -> anyhow::Result<()> {
+        store.reorder_send_package(self.owner_id, order)?;
+        // 确认清单是导出计划的快照，排序后须重新生成，不能沿用旧顺序。
+        if let Some(mut confirm) = self.confirm.take() {
+            confirm.plan = store.send_package_plan(self.owner_id)?;
+            self.confirm = Some(confirm);
+        }
+        Ok(())
+    }
+
+    fn undo_sort(&mut self, store: &mut ManuscriptStore) -> anyhow::Result<()> {
+        let Some(undo) = &self.sort_undo else {
+            return Ok(());
+        };
+        let current: Vec<_> = store
+            .send_package_items(self.owner_id)?
+            .into_iter()
+            .map(|item| item.item_uuid)
+            .collect();
+        if current != undo.after {
+            self.sort_undo = None;
+            anyhow::bail!("清单已发生变化，无法撤销上一次排序。");
+        }
+        let before = undo.before.clone();
+        self.save_order(store, &before)?;
+        self.sort_undo = None;
+        Ok(())
+    }
+
     /// 从库里重读主件与清单。出错时保留上次的内容，只记下错误。
     fn reload(&mut self, store: &ManuscriptStore) {
-        let result = (|| -> anyhow::Result<()> {
-            let exports = store.send_package_exports(self.owner_id)?;
-            let exported = |uuid: &str| {
-                exports.first().and_then(|record| {
-                    record
-                        .items
-                        .iter()
-                        .find(|item| item.document_uuid == uuid)
-                        .and_then(|item| item.visible_number)
-                })
-            };
-            let (owner_uuid, _) = store.document_identity(self.owner_id)?;
-            let pinned = |uuid: Option<String>| -> anyhow::Result<Option<Option<Option<i64>>>> {
-                uuid.map(|uuid| store.revision_number(&uuid)).transpose()
-            };
-            let mut owner = load_row(store, String::new(), Some(self.owner_id))?;
-            owner.last_exported = exported(&owner_uuid);
-            owner.pinned = pinned(store.owner_pin(self.owner_id)?)?;
-            let mut items = Vec::new();
-            for item in store.send_package_items(self.owner_id)? {
-                let mut row = load_row(store, item.item_uuid, item.manuscript_id)?;
-                row.last_exported = exported(&row.item_uuid);
-                row.pinned = pinned(item.pinned_revision_uuid)?;
-                items.push(row);
-            }
-            self.owner = Some(owner);
-            self.items = items;
-            self.exports = exports;
-            Ok(())
-        })();
+        let result =
+            (|| -> anyhow::Result<()> {
+                let exports = store.send_package_exports(self.owner_id)?;
+                let exported = |uuid: &str| {
+                    exports.first().and_then(|record| {
+                        record
+                            .items
+                            .iter()
+                            .find(|item| item.document_uuid == uuid)
+                            .and_then(|item| item.visible_number)
+                    })
+                };
+                let (owner_uuid, _) = store.document_identity(self.owner_id)?;
+                let pinned = |uuid: Option<String>| -> anyhow::Result<Option<Option<Option<i64>>>> {
+                    uuid.map(|uuid| store.revision_number(&uuid)).transpose()
+                };
+                let mut owner = load_row(store, String::new(), Some(self.owner_id))?;
+                owner.last_exported = exported(&owner_uuid);
+                owner.pinned = pinned(store.owner_pin(self.owner_id)?)?;
+                let mut items = Vec::new();
+                for item in store.send_package_items(self.owner_id)? {
+                    let mut row = load_row(store, item.item_uuid, item.manuscript_id)?;
+                    row.last_exported = exported(&row.item_uuid);
+                    row.pinned = pinned(item.pinned_revision_uuid)?;
+                    items.push(row);
+                }
+                self.owner = Some(owner);
+                if self.sort_undo.as_ref().is_some_and(|undo| {
+                    !items.iter().map(|row| &row.item_uuid).eq(undo.after.iter())
+                }) {
+                    self.sort_undo = None;
+                }
+                self.items = items;
+                self.exports = exports;
+                Ok(())
+            })();
         self.error = result.err().map(|error| format!("{error:#}"));
         self.loaded_at = Some(Instant::now());
         if let Some(picker) = &mut self.picker {
@@ -179,9 +300,33 @@ fn load_row(
     })
 }
 
+/// 首次提交叫「初稿」，之后叫「修订稿」。
+fn default_version_name(state: &PackageItemState) -> String {
+    if state.latest.is_none() {
+        "初稿"
+    } else {
+        "修订稿"
+    }
+    .into()
+}
+
 /// 面板里点出的动作，帧末统一执行。
 enum PanelAction {
+    /// 在卡片里展开提交表单。
+    OpenCommit {
+        manuscript_id: i64,
+        name: String,
+    },
+    CancelCommit,
+    Commit {
+        manuscript_id: i64,
+        name: String,
+        comment: String,
+    },
+    /// 把所有待提交的件各提交一版，用默认版本名。
+    CommitAll,
     Refresh,
+    UndoSort,
     Move {
         from: usize,
         to: usize,
@@ -223,9 +368,10 @@ impl GongwenApp {
         let Some(mut panel) = self.send_package.take() else {
             return;
         };
-        if panel
-            .loaded_at
-            .is_none_or(|at| at.elapsed() >= REFRESH_INTERVAL)
+        if !panel.dragging
+            && panel
+                .loaded_at
+                .is_none_or(|at| at.elapsed() >= REFRESH_INTERVAL)
             && let Some(store) = self.manuscript_store.as_ref()
         {
             panel.reload(store);
@@ -242,6 +388,9 @@ impl GongwenApp {
                 .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty())
         };
         let archived = panel.archived();
+        let pending = panel.pending_commits(&unsaved_in_editor);
+        let blocked = panel.blocked_count();
+        let total = usize::from(panel.owner.is_some()) + panel.items.len();
         let exporting = self
             .send_package_export
             .as_ref()
@@ -259,21 +408,37 @@ impl GongwenApp {
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                if archived {
-                    theme::chip(ui, "已归档 · 只读", theme::text_muted(), theme::surface());
-                }
-                wrapped_soft(
-                    ui,
+                ui.horizontal_wrapped(|ui| {
                     if archived {
-                        "随呈批件一起送批的独立稿件。已归档：导出时每件取归档时钉住的版本，按下面的顺序合并成一个 PDF。"
+                        theme::chip(ui, "已归档 · 只读", theme::text_muted(), theme::surface());
+                    }
+                    ui.weak(if archived {
+                        "导出时每件取归档时钉住的版本，按下面顺序合并成一个 PDF。"
                     } else {
-                        "随呈批件一起送批的独立稿件（函稿、普通公文、研究报告等）。导出时每件取最新提交版，按下面的顺序合并成一个 PDF。"
-                    },
-                );
+                        "导出时每件取最新提交版，按下面顺序合并成一个 PDF。"
+                    });
+                });
                 if let Some(error) = &panel.error {
                     ui.colored_label(theme::danger(), format!("读取失败：{error}"));
                 }
-                ui.add_space(6.0);
+                if panel.owner.is_some() {
+                    let mut parts = vec![format!("共 {total} 件")];
+                    if blocked > 0 {
+                        parts.push(format!("{blocked} 件不能进包"));
+                    }
+                    if !pending.is_empty() {
+                        parts.push(format!("{} 件待提交", pending.len()));
+                    }
+                    let ready = blocked == 0 && pending.is_empty();
+                    if ready {
+                        parts.push("可导出".into());
+                    }
+                    ui.label(
+                        egui::RichText::new(parts.join(" · "))
+                            .color(if ready { theme::success() } else { theme::warn() }),
+                    );
+                }
+                ui.add_space(4.0);
 
                 egui::ScrollArea::vertical()
                     .id_salt("send_package_rows")
@@ -285,21 +450,29 @@ impl GongwenApp {
                     })
                     .show(ui, |ui| {
                         if let Some(owner) = &panel.owner {
-                            row_card(ui, owner, RowRole::Owner, &unsaved_in_editor, &mut action);
+                            row_card(
+                                ui,
+                                owner,
+                                RowRole::Owner,
+                                None,
+                                &unsaved_in_editor,
+                                &mut panel.commit_form,
+                                &mut action,
+                            );
                         }
                         if panel.items.is_empty() {
                             ui.add_space(4.0);
                             ui.weak("还没有送批材料。");
                         }
-                        let count = panel.items.len();
-                        for (index, row) in panel.items.iter().enumerate() {
-                            let role = RowRole::Item {
-                                index,
-                                count,
-                                editable: !archived,
-                            };
-                            row_card(ui, row, role, &unsaved_in_editor, &mut action);
-                        }
+                        panel.dragging = items_ui(
+                            ui,
+                            panel.owner_id,
+                            &panel.items,
+                            !archived,
+                            &unsaved_in_editor,
+                            &mut panel.commit_form,
+                            &mut action,
+                        );
                     });
 
                 ui.add_space(6.0);
@@ -321,6 +494,15 @@ impl GongwenApp {
                             )
                             .on_disabled_hover_text("另一件呈批件的送批材料正在导出，请稍候");
                         }
+                        None if blocked > 0 => {
+                            ui.add_enabled(
+                                false,
+                                theme::icon_text_button(theme::Icon::FileDown, "导出合并 PDF…"),
+                            )
+                            .on_disabled_hover_text(format!(
+                                "有 {blocked} 件还不能进包（尚未提交版本或找不到稿件）"
+                            ));
+                        }
                         None => {
                             if ui
                                 .add(theme::icon_text_button(
@@ -333,6 +515,18 @@ impl GongwenApp {
                                 action = Some(PanelAction::PlanExport);
                             }
                         }
+                    }
+                    if exporting.is_none()
+                        && pending.len() >= 2
+                        && ui
+                            .add(theme::icon_text_button(theme::Icon::GitCommit, "全部提交"))
+                            .on_hover_text(format!(
+                                "给 {} 件待提交的稿件各提交一个版本（首次叫「初稿」，之后叫「修订稿」）",
+                                pending.len()
+                            ))
+                            .clicked()
+                    {
+                        action = Some(PanelAction::CommitAll);
                     }
                     if !archived
                         && ui
@@ -347,6 +541,9 @@ impl GongwenApp {
                             .clicked()
                     {
                         action = Some(PanelAction::TogglePicker);
+                    }
+                    if !archived && panel.sort_undo.is_some() && ui.small_button("撤销排序").clicked() {
+                        action = Some(PanelAction::UndoSort);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::icon_button(ui, theme::Icon::Refresh, "刷新各件状态")
@@ -373,7 +570,135 @@ impl GongwenApp {
         }
     }
 
+    /// 提交一个稿件版本。稿件在某个标签里开着就提交编辑器里的当前内容（含未保存的修改），
+    /// 否则提交稿件库里存的内容。
+    fn commit_manuscript_from_panel(
+        &mut self,
+        id: i64,
+        name: &str,
+        comment: &str,
+    ) -> anyhow::Result<()> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "版本名称不能为空");
+        let comment = comment.trim();
+        let open = self
+            .docs
+            .iter()
+            .position(|doc| doc.manuscript_id == Some(id));
+        let store = self
+            .manuscript_store
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
+        let notes = store.notes_of(id)?.context("稿件不存在，无法提交版本")?;
+        let (snapshot, content) = match open {
+            Some(index) => {
+                let doc = &self.docs[index];
+                let pair = (doc.draft.clone(), doc.generated_markdown.clone());
+                store.update(
+                    id,
+                    &ManuscriptUpdate {
+                        snapshot: pair.0.clone(),
+                        content_markdown: pair.1.clone(),
+                        notes: notes.clone(),
+                    },
+                )?;
+                pair
+            }
+            None => {
+                let record = store.get(id)?.context("稿件不存在，无法提交版本")?;
+                (record.snapshot, record.content_markdown)
+            }
+        };
+        store.commit_manuscript_version(id, name, comment, &snapshot, &content, &notes)?;
+        if let Some(index) = open {
+            let doc = &mut self.docs[index];
+            doc.loaded_version = None;
+            doc.mark_saved();
+            self.refresh_committed_baseline(index);
+        }
+        self.manuscript_dirty = true;
+        Ok(())
+    }
+
+    /// 提交类动作：要动编辑器标签，单独处理，不与面板借用缠在一起。
+    fn apply_commit_action(&mut self, action: PanelAction) {
+        let single = matches!(action, PanelAction::Commit { .. });
+        let targets: Vec<(i64, String, String)> = match action {
+            PanelAction::Commit {
+                manuscript_id,
+                name,
+                comment,
+            } => vec![(manuscript_id, name, comment)],
+            PanelAction::CommitAll => {
+                let Some(panel) = self.send_package.as_ref() else {
+                    return;
+                };
+                let unsaved = |id: i64| {
+                    self.docs
+                        .iter()
+                        .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty())
+                };
+                panel
+                    .pending_commits(&unsaved)
+                    .into_iter()
+                    .map(|(id, name)| (id, name, String::new()))
+                    .collect()
+            }
+            _ => return,
+        };
+        let mut done = 0;
+        let mut errors = Vec::new();
+        for (id, name, comment) in targets {
+            match self.commit_manuscript_from_panel(id, &name, &comment) {
+                Ok(()) => done += 1,
+                Err(error) => {
+                    let title = self
+                        .manuscript_store
+                        .as_ref()
+                        .and_then(|store| store.manuscript_brief(id).ok().flatten())
+                        .map(|brief| brief.title)
+                        .unwrap_or_default();
+                    errors.push((id, title, format!("{error:#}")));
+                }
+            }
+        }
+        if let Some(panel) = self.send_package.as_mut() {
+            match (single, errors.first()) {
+                (true, Some((_, _, error))) => {
+                    if let Some(form) = &mut panel.commit_form {
+                        form.error = Some(error.clone());
+                    }
+                }
+                _ => panel.commit_form = None,
+            }
+        }
+        self.status = match (done, errors.as_slice()) {
+            (_, []) if single => "已提交版本。".into(),
+            (_, []) => format!("已为 {done} 件稿件各提交一个版本。"),
+            (_, [(_, title, error)]) if single => format!("提交《{title}》失败：{error}"),
+            (_, errors) => format!(
+                "已提交 {done} 件，{} 件失败：{}",
+                errors.len(),
+                errors
+                    .iter()
+                    .map(|(_, title, error)| format!("《{title}》{error}"))
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ),
+        };
+        self.reload_detail();
+        if let (Some(panel), Some(store)) =
+            (self.send_package.as_mut(), self.manuscript_store.as_ref())
+        {
+            panel.reload(store);
+        }
+    }
+
     fn apply_send_package_action(&mut self, action: PanelAction) {
+        if matches!(action, PanelAction::Commit { .. } | PanelAction::CommitAll) {
+            self.apply_commit_action(action);
+            return;
+        }
         let Some(panel) = self.send_package.as_mut() else {
             return;
         };
@@ -386,18 +711,30 @@ impl GongwenApp {
                 .ok_or_else(|| anyhow::anyhow!("稿件库不可用"))?;
             match action {
                 PanelAction::Refresh => Ok(None),
+                PanelAction::OpenCommit {
+                    manuscript_id,
+                    name,
+                } => {
+                    panel.commit_form = Some(CommitForm {
+                        manuscript_id,
+                        name,
+                        comment: String::new(),
+                        focus: true,
+                        error: None,
+                    });
+                    Ok(None)
+                }
+                PanelAction::CancelCommit => {
+                    panel.commit_form = None;
+                    Ok(None)
+                }
+                PanelAction::Commit { .. } | PanelAction::CommitAll => Ok(None),
+                PanelAction::UndoSort => {
+                    panel.undo_sort(store)?;
+                    Ok(Some("已撤销上一次排序。".into()))
+                }
                 PanelAction::Move { from, to } => {
-                    let mut order: Vec<String> = panel
-                        .items
-                        .iter()
-                        .map(|row| row.item_uuid.clone())
-                        .collect();
-                    if from >= order.len() || to >= order.len() {
-                        return Ok(None);
-                    }
-                    let moved = order.remove(from);
-                    order.insert(to, moved);
-                    store.reorder_send_package(owner_id, &order)?;
+                    panel.move_item(store, from, to)?;
                     Ok(None)
                 }
                 PanelAction::Remove(uuid) => {
@@ -509,40 +846,137 @@ fn action_kind_after(action: &PanelAction) -> After {
         PanelAction::StartExport => After::StartExport,
         PanelAction::OpenFile(path) => After::OpenFile(path.clone()),
         PanelAction::Refresh
+        | PanelAction::UndoSort
         | PanelAction::Move { .. }
         | PanelAction::Remove(_)
         | PanelAction::Add(_) => After::Reload,
-        PanelAction::TogglePicker | PanelAction::PlanExport | PanelAction::CancelExport => {
-            After::Nothing
-        }
+        PanelAction::TogglePicker
+        | PanelAction::PlanExport
+        | PanelAction::CancelExport
+        | PanelAction::OpenCommit { .. }
+        | PanelAction::CancelCommit
+        | PanelAction::Commit { .. }
+        | PanelAction::CommitAll => After::Nothing,
     }
 }
 
 #[derive(Clone, Copy)]
 enum RowRole {
     Owner,
-    Item {
-        index: usize,
-        count: usize,
-        editable: bool,
-    },
+    Item { index: usize, editable: bool },
 }
 
-/// 一行的卡片：文种、标题、最新提交版，以及需要注意的状态。
+/// 只把随行件放进拖放列表，主件固定在前；松手后才通过原有事务保存顺序。
+fn items_ui(
+    ui: &mut egui::Ui,
+    owner_id: i64,
+    items: &[PackageRow],
+    editable: bool,
+    unsaved_in_editor: &dyn Fn(i64) -> bool,
+    form: &mut Option<CommitForm>,
+    action: &mut Option<PanelAction>,
+) -> bool {
+    let count = items.len();
+    let id = ("send_package_sort", owner_id);
+    // 换一份拖放状态即可取消手势；松开鼠标前不允许重新触发拖动。
+    let cancel_id = egui::Id::new((id, "cancel"));
+    let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    let pressed = ui.input(|input| input.pointer.any_down());
+    let (generation, cancelled) = ui.data_mut(|data| {
+        let state = data.get_temp_mut_or_default::<(u64, bool)>(cancel_id);
+        if cancel {
+            state.0 = state.0.wrapping_add(1);
+            state.1 = true;
+        }
+        let cancelled = state.1;
+        if !pressed {
+            state.1 = false;
+        }
+        (state.0, cancelled)
+    });
+    if !editable || count < 2 || cancelled {
+        for (index, row) in items.iter().enumerate() {
+            row_card(
+                ui,
+                row,
+                RowRole::Item { index, editable },
+                None,
+                unsaved_in_editor,
+                form,
+                action,
+            );
+        }
+        return cancelled && pressed;
+    }
+    let top = ui.cursor().top();
+    let response = egui_dnd::dnd(ui, (id, generation))
+        .with_touch_config(Some(egui_dnd::DragDropConfig::touch_scroll()))
+        .show(items.iter(), |ui, row, handle, state| {
+            row_card(
+                ui,
+                row,
+                RowRole::Item {
+                    index: state.index,
+                    editable,
+                },
+                Some(handle),
+                unsaved_in_editor,
+                form,
+                action,
+            );
+        });
+    if let Some(update) = response.final_update()
+        && ui
+            .input(|input| input.pointer.interact_pos())
+            .is_some_and(|pos| {
+                ui.clip_rect().contains(pos) && pos.y >= top && pos.y <= ui.cursor().top()
+            })
+    {
+        // 库返回原清单中的插入缝隙（末尾可等于件数）；原有 Move 使用移除后的索引。
+        let to = if update.to > update.from {
+            update.to - 1
+        } else {
+            update.to
+        };
+        if update.from != to {
+            *action = Some(PanelAction::Move {
+                from: update.from,
+                to,
+            });
+        }
+    }
+    response.is_dragging() || response.is_evaluating_drag()
+}
+
+/// 一行的卡片：第一行只有序号与标题（主角），第二行是文种、状态等弱化的元信息，
+/// 需要处理的事用一枚徽标加一个按钮说清，不再整句红字。
 fn row_card(
     ui: &mut egui::Ui,
     row: &PackageRow,
     role: RowRole,
+    handle: Option<egui_dnd::Handle<'_>>,
     unsaved_in_editor: &dyn Fn(i64) -> bool,
+    form: &mut Option<CommitForm>,
     action: &mut Option<PanelAction>,
 ) {
     let frame = match role {
         RowRole::Owner => theme::card().fill(theme::accent_soft()),
         RowRole::Item { .. } => theme::card(),
     };
-    frame.show(ui, |ui| {
+    let hover_id = egui::Id::new(("send_package_card_hover", &row.item_uuid));
+    // 悬停状态取上一帧的：卡片高度本帧才定，指针移动自会触发下一帧重绘。
+    let hovered = ui
+        .data(|data| data.get_temp::<bool>(hover_id))
+        .unwrap_or(false);
+    let card = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
+            if let Some(handle) = handle {
+                handle.ui(ui, |ui| {
+                    ui.add(theme::Icon::Grip.image().tint(theme::text_soft()))
+                        .on_hover_text("按住拖动调整顺序，Esc 取消");
+                });
+            }
             match role {
                 RowRole::Owner => {
                     theme::chip(ui, "主件", theme::accent(), theme::surface());
@@ -551,52 +985,35 @@ fn row_card(
                     ui.strong(format!("{}.", index + 1));
                 }
             }
+            // 右侧按钮平时不画，但位置要留着，标题才不会在悬停时被顶掉。
+            let reserve = match role {
+                RowRole::Item { editable: true, .. } => 80.0,
+                _ => 40.0,
+            };
             match &row.brief {
                 Some(brief) => {
-                    theme::chip(ui, brief.kind.label(), theme::text_soft(), theme::surface());
-                    ui.add(egui::Label::new(egui::RichText::new(&brief.title).strong()).truncate())
+                    ui.scope(|ui| {
+                        ui.set_max_width((ui.available_width() - reserve).max(60.0));
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&brief.title).strong().size(15.5))
+                                .truncate(),
+                        )
                         .on_hover_text(&brief.title);
+                    });
                 }
                 None => {
                     ui.colored_label(theme::warn(), "本机未找到该稿件");
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let RowRole::Item {
-                    index,
-                    count,
-                    editable: true,
-                } = role
+                if !hovered {
+                    return;
+                }
+                if matches!(role, RowRole::Item { editable: true, .. })
+                    && theme::danger_icon_button(ui, theme::Icon::Trash, "移出清单（不删除稿件）")
+                        .clicked()
                 {
-                    if theme::danger_icon_button(ui, theme::Icon::Trash, "移出清单（不删除稿件）")
-                        .clicked()
-                    {
-                        *action = Some(PanelAction::Remove(row.item_uuid.clone()));
-                    }
-                    if ui
-                        .add_enabled_ui(index + 1 < count, |ui| {
-                            theme::icon_button(ui, theme::Icon::ArrowDown, "下移")
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        *action = Some(PanelAction::Move {
-                            from: index,
-                            to: index + 1,
-                        });
-                    }
-                    if ui
-                        .add_enabled_ui(index > 0, |ui| {
-                            theme::icon_button(ui, theme::Icon::ArrowUp, "上移")
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        *action = Some(PanelAction::Move {
-                            from: index,
-                            to: index - 1,
-                        });
-                    }
+                    *action = Some(PanelAction::Remove(row.item_uuid.clone()));
                 }
                 if let Some(brief) = &row.brief
                     && theme::icon_button(ui, theme::Icon::Open, "在公文标签中打开").clicked()
@@ -610,9 +1027,12 @@ fn row_card(
             ui.weak("关联照旧保留：从同步包导入该稿件后自动恢复；不再需要可以移除。");
             return;
         };
-        // 归档后钉住了版本：导出只用这一版，之后的提交与未提交修改都与送批材料无关。
-        if let Some(pinned) = row.pinned {
-            ui.horizontal_wrapped(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.weak(brief.kind.label());
+            ui.weak("·");
+            ui.colored_label(status_color(brief.status), brief.status.label());
+            // 归档后钉住了版本：导出只用这一版，之后的提交与未提交修改都与送批材料无关。
+            if let Some(pinned) = row.pinned {
                 match pinned {
                     Some(Some(number)) => {
                         theme::chip(
@@ -631,36 +1051,53 @@ fn row_card(
                         );
                     }
                     None => {
-                        ui.colored_label(theme::danger(), "钉住的版本在本机找不到");
+                        theme::chip(
+                            ui,
+                            "钉住的版本在本机找不到",
+                            theme::danger(),
+                            theme::danger_soft(),
+                        );
                     }
                 }
-                ui.weak("归档时固定，以后导出都用这一版");
-                ui.colored_label(status_color(brief.status), brief.status.label());
-            });
-            return;
-        }
-        match &state.latest {
-            Some(latest) => {
-                let mut line = format!("v{}", latest.visible_number);
-                if !latest.name.trim().is_empty() {
-                    line.push_str(&format!("「{}」", latest.name.trim()));
-                }
-                line.push_str(&format!(" · {}", short_date(&latest.created_at)));
-                if !latest.comment.trim().is_empty() {
-                    line.push_str(&format!(" · {}", summarize(&latest.comment, 40)));
-                }
-                ui.horizontal_wrapped(|ui| {
+                ui.weak("归档时固定");
+                return;
+            }
+            let can_commit = brief.status != ManuscriptStatus::Archived;
+            let commit_button =
+                |ui: &mut egui::Ui, primary: bool, action: &mut Option<PanelAction>| {
+                    let clicked = if primary {
+                        theme::primary_icon_button(ui, theme::Icon::GitCommit, "提交版本").clicked()
+                    } else {
+                        ui.add(theme::icon_text_button(
+                            theme::Icon::GitCommit,
+                            "提交新版本",
+                        ))
+                        .clicked()
+                    };
+                    if clicked {
+                        *action = Some(PanelAction::OpenCommit {
+                            manuscript_id: brief.id,
+                            name: default_version_name(state),
+                        });
+                    }
+                };
+            match &state.latest {
+                Some(latest) => {
+                    let mut line = format!("v{}", latest.visible_number);
+                    if !latest.name.trim().is_empty() {
+                        line.push_str(&format!("「{}」", latest.name.trim()));
+                    }
+                    line.push_str(&format!(" · {}", short_date(&latest.created_at)));
+                    if !latest.comment.trim().is_empty() {
+                        line.push_str(&format!(" · {}", summarize(&latest.comment, 40)));
+                    }
+                    ui.weak("·");
                     ui.weak(line);
-                    ui.colored_label(status_color(brief.status), brief.status.label());
-                });
-                if let Some(exported) = row.last_exported
-                    && exported != latest.visible_number
-                {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(
-                            theme::warn(),
-                            format!("上次导出用的是 v{exported}，之后又提交了新版本。"),
-                        );
+                    if let Some(exported) = row.last_exported
+                        && exported != latest.visible_number
+                    {
+                        theme::chip(ui, "导出后有新版本", theme::warn(), theme::warn_soft())
+                            .on_hover_text(format!("上次导出用的是 v{exported}"));
                         if ui
                             .small_button(format!("对照 v{exported} → v{}", latest.visible_number))
                             .on_hover_text("用版本对照（花脸稿）看这期间改了什么")
@@ -672,34 +1109,87 @@ fn row_card(
                                 to: latest.visible_number,
                             });
                         }
-                    });
+                    }
+                    if state.has_uncommitted || unsaved_in_editor(brief.id) {
+                        theme::chip(ui, "有未提交修改", theme::warn(), theme::warn_soft())
+                            .on_hover_text(format!(
+                                "这些修改不会进包，导出将使用 v{}",
+                                latest.visible_number
+                            ));
+                        if can_commit {
+                            commit_button(ui, false, action);
+                        }
+                    }
                 }
-                if state.has_uncommitted || unsaved_in_editor(brief.id) {
-                    ui.colored_label(
+                None => {
+                    theme::chip(
+                        ui,
+                        "未提交 · 不能进包",
                         theme::danger(),
-                        format!(
-                            "有未提交的修改，导出将使用 v{}；需要的话先提交版本。",
-                            latest.visible_number
-                        ),
+                        theme::danger_soft(),
                     );
+                    if can_commit {
+                        commit_button(ui, true, action);
+                    }
                 }
             }
-            None => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak("尚无提交版本");
-                    ui.colored_label(status_color(brief.status), brief.status.label());
-                });
-                ui.colored_label(
-                    theme::danger(),
-                    "从未提交过版本，不能进包：请先提交一个版本。",
-                );
+            if state.has_pending_branch {
+                theme::chip(ui, "有待处理同步分支", theme::warn(), theme::warn_soft())
+                    .on_hover_text("导出用的是本机这一支");
             }
-        }
-        if state.has_pending_branch {
-            ui.colored_label(theme::warn(), "有待处理的同步分支：导出用的是本机这一支。");
+        });
+        if let Some(open) = form.as_mut().filter(|f| f.manuscript_id == brief.id) {
+            commit_form_ui(ui, open, action);
         }
     });
+    let now = ui.rect_contains_pointer(card.response.rect);
+    ui.data_mut(|data| data.insert_temp(hover_id, now));
+    if now != hovered {
+        ui.ctx().request_repaint();
+    }
     ui.add_space(4.0);
+}
+
+/// 卡片里的行内提交表单：版本名、备注，回车即提交。
+fn commit_form_ui(ui: &mut egui::Ui, form: &mut CommitForm, action: &mut Option<PanelAction>) {
+    ui.add_space(2.0);
+    let mut submit = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("版本名");
+        let name = ui.add(theme::field(&mut form.name, "必填", 110.0));
+        if form.focus {
+            name.request_focus();
+            form.focus = false;
+        }
+        ui.label("备注");
+        let comment = ui.add(theme::field(&mut form.comment, "可选", 180.0));
+        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if (name.lost_focus() || comment.lost_focus()) && enter {
+            submit = true;
+        }
+        if ui
+            .add_enabled(
+                !form.name.trim().is_empty(),
+                theme::primary_button_widget(theme::Icon::GitCommit, "提交"),
+            )
+            .clicked()
+        {
+            submit = true;
+        }
+        if ui.button("取消").clicked() {
+            *action = Some(PanelAction::CancelCommit);
+        }
+    });
+    if submit && !form.name.trim().is_empty() {
+        *action = Some(PanelAction::Commit {
+            manuscript_id: form.manuscript_id,
+            name: form.name.clone(),
+            comment: form.comment.clone(),
+        });
+    }
+    if let Some(error) = &form.error {
+        ui.colored_label(theme::danger(), error);
+    }
 }
 
 /// 候选条件变了就重查。每条候选附上能否加入的判定，不能加的置灰并说明原因。

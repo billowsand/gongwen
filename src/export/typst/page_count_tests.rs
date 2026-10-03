@@ -84,3 +84,63 @@ fn copy_numbered_manuscript_counts_one_copy_with_its_original_print_record() {
         count * 3
     );
 }
+
+#[test]
+fn copy_numbered_manuscript_with_tables_exports() {
+    // 份号逐份编制时正文按份重复排版，表格结束标签不能重名（曾报 label occurs multiple times）。
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let base = tempfile::tempdir().unwrap();
+    let mut input = DraftInput::default();
+    input.profile.number_copies = true;
+    input.profile.recipient = "甲单位、乙单位".into();
+    let markdown = "# 份号稿\n\n测试正文。\n\n| 序号 | 名称 |\n| --- | --- |\n| 1 | 甲 |\n\n\
+                    | 序号 | 名称 |\n| --- | --- |\n| 2 | 乙 |\n";
+    let outcome = write_pdf_with_base(
+        &base.path().join("copies-tables.pdf"),
+        &input,
+        markdown,
+        &UnitDisplay::new(&[]),
+        &FontConfig::default(),
+        &NumberingConfig::default(),
+        &Default::default(),
+        base.path(),
+    )
+    .unwrap();
+    assert!(crate::manuscript_io::send_package::page_count(&outcome.pdf).unwrap() >= 2);
+}
+
+#[test]
+fn duplex_copy_numbered_manuscript_starts_each_copy_on_a_fresh_sheet() {
+    // 双面逐份编号：单页的一份后要补空白页，下一份才不会与它印在同一张纸上。
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let base = tempfile::tempdir().unwrap();
+    let mut input = DraftInput::default();
+    input.profile.number_copies = true;
+    input.profile.duplex_printing = true;
+    input.profile.recipient = "甲单位、乙单位、丙单位".into();
+    let display = UnitDisplay::new(&[]);
+    let fonts = FontConfig::default();
+    let numbering = NumberingConfig::default();
+    let markdown = "# 份号稿\n\n测试正文。\n";
+    let count =
+        page_count_with_base(&input, markdown, &display, &fonts, &numbering, base.path()).unwrap();
+    let outcome = write_pdf_with_base(
+        &base.path().join("duplex-copies.pdf"),
+        &input,
+        markdown,
+        &display,
+        &fonts,
+        &numbering,
+        &Default::default(),
+        base.path(),
+    )
+    .unwrap();
+    let total = crate::manuscript_io::send_package::page_count(&outcome.pdf).unwrap();
+    // 份与份之间各补一张空白页（最后一份后不补）。
+    assert_eq!(count, 1);
+    assert_eq!(total, 3 * count + 2);
+}

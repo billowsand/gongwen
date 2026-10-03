@@ -95,6 +95,8 @@
 // 段首、段尾各放一个带位置的 metadata，Rust 侧收集后拼成与 \GwaTail 同格式的报告。
 // 份号逐份编制时只有第一份带探针（与 \GwCopyQuiet 一致）。
 #let probing = state("gw-probing", doc.probe)
+// 份号逐份编制时正文按份重复排版，表格的结束标签要带上份次，否则标签重名。
+#let copy-no = state("gw-copy-no", 0)
 #let left-edge(page-no) = if doc.duplex and calc.even(page-no) { outer-m } else { inner-m }
 #let probe-head(line) = if line != none {
   context if probing.get() {
@@ -169,7 +171,7 @@
     if c.at("rowspan", default: 1) > 1 { args.rowspan = c.rowspan }
     table.cell(..args, align: al(c.align) + horizon, cell-content(c, header))
   }
-  let id = t.id
+  let end-label() = label("gw-tbl-end-" + t.id + "-" + str(copy-no.get()))
   // 相邻两张表：TeX 的表后距与表前距相加，Typst 的块间距取大者，这里补足。
   if after-table { v(table-sep, weak: false) }
   block(above: table-sep, below: table-sep, {
@@ -187,11 +189,11 @@
       // 有内容；最后一页内容为空、留白为 0，不占高度。
       table.footer(repeat: true, table.cell(colspan: n, stroke: none, inset: 0pt, align: right,
         context {
-          let end = locate(label("gw-tbl-end-" + id)).page()
+          let end = locate(end-label()).page()
           if here().page() < end { block(above: 0pt, inset: (top: 2 * texpt), continued-note) }
         })),
     )
-    [#metadata(id)#label("gw-tbl-end-" + id)]
+    context [#metadata(t.id)#end-label()]
   })
 }
 
@@ -689,7 +691,10 @@
       // 放在分页之后的话，新页页脚取到的还是旧值。
       counter(page).update(0)
       probing.update(false)
-      pagebreak()
+      copy-no.update(i)
+      // 双面打印时每份必须从纸张正面起：上一份落在奇数页就补一张空白页，
+      // 否则下一份首页会和上一份末页印在同一张纸的两面。
+      if doc.duplex { pagebreak(to: "odd") } else { pagebreak() }
     }
     render-copy(serial)
   }

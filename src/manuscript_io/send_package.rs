@@ -9,7 +9,7 @@
 //!
 //! 编译函数由调用方传入：正式导出走 TeX，测试里换成现成的 PDF 字节。
 
-use crate::manuscript::send_package::{ExportItemRecord, SendPackagePlan};
+use crate::manuscript::send_package::{ExportItemRecord, PlanEntry, SendPackagePlan};
 use crate::models::{DraftInput, TemplateKind, TemplateProfile};
 use anyhow::{Context, Result, bail};
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -140,10 +140,10 @@ pub fn toc_snapshot(owner: &DraftInput) -> DraftInput {
     }
 }
 
-/// 目录页正文：序号、名称、文种、版本、页数（不含补的空白页）。
+/// 目录页正文：序号、名称、文种、密级、版本、页数（不含补的空白页）。
 pub fn toc_markdown(plan: &SendPackagePlan, page_counts: &[usize]) -> String {
     let mut out = format!(
-        "# {TOC_TITLE}\n\n| 序号 | 名称 | 文种 | 版本 | 页数 |\n| --- | --- | --- | --- | --- |\n"
+        "# {TOC_TITLE}\n\n| 序号 | 名称 | 文种 | 密级 | 版本 | 页数 |\n| --- | --- | --- | --- | --- | --- |\n"
     );
     for (index, (entry, pages)) in plan.entries.iter().zip(page_counts).enumerate() {
         let version = match entry.revision.as_ref().and_then(|r| r.visible_number) {
@@ -151,10 +151,11 @@ pub fn toc_markdown(plan: &SendPackagePlan, page_counts: &[usize]) -> String {
             None => "定稿".into(),
         };
         out.push_str(&format!(
-            "| {} | {} | {} | {version} | {pages} |\n",
+            "| {} | {} | {} | {} | {version} | {pages} |\n",
             index + 1,
             table_cell(&entry.title),
             entry.kind.label(),
+            security_cell(entry),
         ));
     }
     let total: usize = page_counts.iter().sum();
@@ -163,6 +164,18 @@ pub fn toc_markdown(plan: &SendPackagePlan, page_counts: &[usize]) -> String {
         plan.entries.len()
     ));
     out
+}
+
+/// 这一件的密级：密级★保密期限，没有保密期限只印密级，无密级印破折号。
+fn security_cell(entry: &PlanEntry) -> String {
+    let Some(revision) = &entry.revision else {
+        return "—".into();
+    };
+    match revision.snapshot.security_marking() {
+        ("", _) => "—".into(),
+        (level, "") => table_cell(level),
+        (level, period) => table_cell(&format!("{level}★{period}")),
+    }
 }
 
 /// 表格单元格里不能出现管道符和换行，`^^` 在本应用的表格语法里是纵向合并。
@@ -530,10 +543,13 @@ mod tests {
         assert_eq!(order, vec!["请示", "函稿", "报告", TOC_TITLE]);
         let toc = &compiled[3].1;
         assert!(
-            toc.contains("| 1 | 请示 | 白头件（呈批件） | v2 | 3 |"),
+            toc.contains("| 1 | 请示 | 白头件（呈批件） | 机密★20年 | v2 | 3 |"),
             "{toc}"
         );
-        assert!(toc.contains("| 3 | 报告 | 研究报告 | v3 | 5 |"), "{toc}");
+        assert!(
+            toc.contains("| 3 | 报告 | 研究报告 | 公开 | v3 | 5 |"),
+            "{toc}"
+        );
         assert!(toc.contains("共 3 件，合计 10 页"), "{toc}");
 
         assert_eq!(
@@ -625,6 +641,55 @@ mod tests {
         assert!(data.contains(r#""k":"table""#), "{data}");
         assert!(!data.contains("| 序号 |"), "{data}");
         assert!(data.contains("关于商请支持的函"));
+    }
+
+    #[test]
+    fn toc_lists_each_items_own_security_marking() {
+        let mut secret = entry("甲", TemplateKind::WhitePaper, Some(1));
+        secret
+            .revision
+            .as_mut()
+            .unwrap()
+            .snapshot
+            .profile
+            .security_level = "秘密".into();
+        secret
+            .revision
+            .as_mut()
+            .unwrap()
+            .snapshot
+            .profile
+            .security_period = "1年".into();
+        let mut internal = entry("乙", TemplateKind::OfficialLetter, Some(1));
+        internal
+            .revision
+            .as_mut()
+            .unwrap()
+            .snapshot
+            .profile
+            .security_level = "内部".into();
+        internal
+            .revision
+            .as_mut()
+            .unwrap()
+            .snapshot
+            .profile
+            .security_period = String::new();
+        let mut plain = entry("丙", TemplateKind::PlainDocument, Some(1));
+        plain
+            .revision
+            .as_mut()
+            .unwrap()
+            .snapshot
+            .profile
+            .security_level = String::new();
+        let toc = toc_markdown(&plan(vec![secret, internal, plain]), &[1, 1, 1]);
+        assert!(
+            toc.contains("| 1 | 甲 | 白头件（呈批件） | 秘密★1年 |"),
+            "{toc}"
+        );
+        assert!(toc.contains("| 2 | 乙 | 公函 | 内部 |"), "{toc}");
+        assert!(toc.contains("| 3 | 丙 | 普通公文 | — |"), "{toc}");
     }
 
     #[test]
