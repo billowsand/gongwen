@@ -21,7 +21,8 @@ static CITATION_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+").ex
 pub(crate) struct Evidence {
     /// K 编号，从 1 起。
     pub(crate) id: usize,
-    pub(crate) chunk_id: i64,
+    /// 去重键：`kb:<片段 id>`、`kbdoc:<文档 id>`、`ms:<稿件 id>:<版本>`……同一份资料只编一个号。
+    pub(crate) key: String,
     pub(crate) doc_title: String,
     pub(crate) section: String,
     pub(crate) kind_label: String,
@@ -41,6 +42,28 @@ impl Evidence {
     }
 }
 
+/// 一份待并入证据包的资料（工具产出）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvidenceDoc {
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) section: String,
+    pub(crate) kind_label: String,
+    pub(crate) text: String,
+}
+
+impl EvidenceDoc {
+    pub(crate) fn from_chunk(chunk: &RetrievedChunk) -> Self {
+        Self {
+            key: format!("kb:{}", chunk.chunk_id),
+            title: chunk.doc_title.clone(),
+            section: chunk.section.clone(),
+            kind_label: chunk.kind.label().to_string(),
+            text: chunk.text.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct EvidencePack {
     items: Vec<Evidence>,
@@ -49,20 +72,25 @@ pub(crate) struct EvidencePack {
 impl EvidencePack {
     /// 并入一批检索结果，按原顺序返回每个片段的编号；已经在包里的片段沿用旧编号。
     pub(crate) fn absorb(&mut self, query: &str, chunks: &[RetrievedChunk]) -> Vec<usize> {
-        chunks
-            .iter()
-            .map(|chunk| {
-                if let Some(existing) = self.items.iter().find(|e| e.chunk_id == chunk.chunk_id) {
+        let docs: Vec<EvidenceDoc> = chunks.iter().map(EvidenceDoc::from_chunk).collect();
+        self.absorb_docs(query, &docs)
+    }
+
+    /// 并入任意来源的资料，按原顺序返回编号；同一个键沿用旧编号。
+    pub(crate) fn absorb_docs(&mut self, query: &str, docs: &[EvidenceDoc]) -> Vec<usize> {
+        docs.iter()
+            .map(|doc| {
+                if let Some(existing) = self.items.iter().find(|e| e.key == doc.key) {
                     return existing.id;
                 }
                 let id = self.items.len() + 1;
                 self.items.push(Evidence {
                     id,
-                    chunk_id: chunk.chunk_id,
-                    doc_title: chunk.doc_title.clone(),
-                    section: chunk.section.clone(),
-                    kind_label: chunk.kind.label().to_string(),
-                    text: chunk.text.clone(),
+                    key: doc.key.clone(),
+                    doc_title: doc.title.clone(),
+                    section: doc.section.clone(),
+                    kind_label: doc.kind_label.clone(),
+                    text: doc.text.clone(),
                     query: query.to_string(),
                 });
                 id
@@ -157,6 +185,28 @@ pub(crate) fn cited_sentences(text: &str) -> Vec<(String, Vec<usize>)> {
             (!ids.is_empty()).then(|| (sentence.to_string(), ids))
         })
         .collect()
+}
+
+/// 测试用的片段构造（工具层的测试也要用）。
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use crate::models::TemplateKind;
+    use crate::rag::RetrievedChunk;
+
+    pub(crate) fn chunk(id: i64, title: &str, text: &str) -> RetrievedChunk {
+        RetrievedChunk {
+            chunk_id: id,
+            doc_id: 1,
+            doc_title: title.into(),
+            kind: TemplateKind::PlainDocument,
+            section: String::new(),
+            text: text.into(),
+            vector_score: 0.0,
+            bm25_score: 0.0,
+            fused_score: 0.0,
+            rerank_score: None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -24,6 +24,8 @@ pub(crate) enum Action {
     KeepOriginal,
     /// 改成「【待核实：…】」占位。
     MarkPending,
+    /// 通用选择题（`ask.choice`）：选中项的值存进步骤的 `save_as` 变量。
+    Pick(serde_json::Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,8 @@ pub(crate) struct Choice {
 pub(crate) enum Target {
     PreDraft,
     Gap(usize),
+    /// 流程中途的通用选择题（`ask.choice`），答案存进变量后流程接着跑。
+    Pick,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

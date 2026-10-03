@@ -2825,6 +2825,7 @@ dependencies = [
  "rust_xlsxwriter",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "similar 3.2.0",
  "svg2pdf",

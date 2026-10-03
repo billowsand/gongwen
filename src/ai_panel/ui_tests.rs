@@ -1,6 +1,7 @@
 //! AI 侧栏界面的测试：发起、停止、选区、红线 1 与结果卡。
 
 use super::*;
+use crate::agent::skill::RESEARCH_DRAFT;
 use crate::app::VersionSwitchPrompt;
 use crate::app::WorkerResult;
 use crate::draft_page::{DraftSession, ExportLinks};
@@ -153,15 +154,14 @@ fn a_stale_selection_is_refused_instead_of_guessed() {
 fn drafting_starts_research_and_only_ever_proposes() {
     let mut harness = Harness::new("");
     let composer = &mut harness.doc.ai_panel.composer;
-    composer.mode = PanelMode::Draft;
     composer.text = "根据材料写一份通知".into();
     composer.use_rag = true;
     harness.with_page(|page| page.send_ai_panel());
 
     let panel = &harness.doc.ai_panel;
     assert_eq!(panel.turns.len(), 1);
-    // 知识库没启用时不检索，也不挂「知识库」chip。
-    assert_eq!(panel.turns[0].title, "起草");
+    // 空稿只有起草类技能可用；知识库没启用时不检索，也不挂「知识库」chip。
+    assert_eq!(panel.turns[0].title, "研究式起草");
     assert!(panel.turns[0].context.is_empty());
     assert!(panel.running());
     assert!(panel.cancel.is_some());
@@ -180,7 +180,7 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
     harness.doc.draft.kind = TemplateKind::PlainDocument;
     harness.doc.ai_panel.open = true;
     let request = TurnRequest {
-        mode: PanelMode::Draft,
+        skill: Some(RESEARCH_DRAFT.into()),
         text: "起草一份商洽函".into(),
         selection: None,
         preset: None,
@@ -194,12 +194,29 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
         model_questions,
         3,
     );
+    let board = crate::agent::board::Board {
+        draft: harness.doc.draft.clone(),
+        request: request.text.clone(),
+        ..Default::default()
+    };
     let panel = &mut harness.doc.ai_panel;
-    let id = panel.push_turn("起草".into(), request.text.clone(), vec![], Some(request));
-    let replies = crate::ai_panel::initial_replies(&questions);
-    panel.ask(questions);
+    let id = panel.push_turn(
+        "研究式起草".into(),
+        request.text.clone(),
+        vec![],
+        Some(request),
+    );
+    panel.ask(Box::new(crate::ai_panel::SkillRun {
+        skill: crate::agent::skill::builtin(RESEARCH_DRAFT).unwrap(),
+        board,
+        suspension: crate::agent::engine::Suspension {
+            questions,
+            resume_at: 1,
+            save_as: None,
+        },
+        use_rag: false,
+    }));
     let turn = panel.turn_mut(id).unwrap();
-    turn.replies = replies;
     // 第二题选「长」；第一题沿用替用户选好的推荐项「切换为公函」。
     turn.replies[1].choice = Some(1);
 
@@ -209,11 +226,12 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
     assert!(has(&texts, "切换为公函（推荐）"), "{texts:?}");
     assert!(has(&texts, "确认，开始起草"), "{texts:?}");
 
-    harness.with_page(|page| page.answer_predraft(id));
+    harness.with_page(|page| page.answer_suspended(id));
     assert_eq!(harness.doc.draft.kind, TemplateKind::OfficialLetter);
     let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
     assert!(turn.state.running(), "答完接着跑，同一轮");
     assert!(turn.questions.is_empty());
+    assert!(turn.run.is_none(), "挂起的流程已带回后台");
     assert_eq!(turn.request.as_ref().unwrap().notes, ["篇幅多长？长"]);
     assert_eq!(harness.doc.ai_panel.turns.len(), 1, "不另开一轮");
     assert!(harness.doc.busy);
@@ -299,7 +317,7 @@ fn toggling_with_a_selection_locks_it_for_polish() {
     let panel = &harness.doc.ai_panel;
     assert!(panel.open);
     assert!(!harness.doc.result_drawer_open, "与审校抽屉互斥");
-    assert_eq!(panel.composer.mode, PanelMode::Polish);
+    assert_eq!(panel.composer.skill.as_deref(), Some(POLISH));
     assert_eq!(panel.composer.selection.as_ref().unwrap().1, "一、");
     // 不带选区再点一下就收起。
     harness.with_page(|page| page.toggle_ai_panel(None));
@@ -307,10 +325,68 @@ fn toggling_with_a_selection_locks_it_for_polish() {
 }
 
 #[test]
-fn empty_document_opens_in_draft_mode() {
+fn the_skill_chip_follows_the_document_and_the_input() {
     let mut harness = Harness::new("");
     harness.with_page(|page| page.toggle_ai_panel(None));
-    assert_eq!(harness.doc.ai_panel.composer.mode, PanelMode::Draft);
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "自动 · 研究式起草"), "空稿只能起草：{texts:?}");
+    assert!(
+        has(&texts, "粘贴材料、写清要求"),
+        "提示换成技能自己的：{texts:?}"
+    );
+    assert!(!has(&texts, "不用预设"), "起草不用润色预设：{texts:?}");
+
+    harness.doc.generated_markdown = "# 标题\n\n一、总体要求\n".into();
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "自动"), "{texts:?}");
+    assert!(
+        has(&texts, "也可以输入 / 选技能"),
+        "有稿、没写要求时给通用提示：{texts:?}"
+    );
+
+    harness.doc.ai_panel.composer.text = "压缩第二部分".into();
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "自动 · 润色"), "{texts:?}");
+    assert!(has(&texts, "不用预设"), "润色带预设下拉框：{texts:?}");
+    assert!(has(&texts, "全文"), "{texts:?}");
+
+    harness.doc.ai_panel.composer.skill = Some(RESEARCH_DRAFT.into());
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(
+        has(&texts, "研究式起草"),
+        "指定的技能优先于触发词：{texts:?}"
+    );
+    assert!(!has(&texts, "自动 · "), "{texts:?}");
+}
+
+#[test]
+fn a_slash_prefix_offers_and_pins_skills() {
+    let mut harness = Harness::new("# 标题\n\n正文\n");
+    harness.doc.ai_panel.open = true;
+    harness.doc.ai_panel.composer.text = "/润".into();
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "润色"), "列出匹配的技能：{texts:?}");
+
+    harness.doc.ai_panel.composer.text = "/润色 只改错别字".into();
+    harness.with_page(|page| page.send_ai_panel());
+    let turn = &harness.doc.ai_panel.turns[0];
+    assert_eq!(turn.title, "润色");
+    assert!(harness.doc.busy);
+
+    harness.with_page(|page| page.stop_ai_task());
+    harness.doc.generated_markdown.clear();
+    harness.doc.ai_panel.composer.text = "/润色 只改错别字".into();
+    harness.with_page(|page| page.send_ai_panel());
+    let error = harness.doc.ai_panel.composer.error.clone().unwrap();
+    assert!(
+        error.contains("正文还是空的"),
+        "指定了用不了的技能要说明原因：{error}"
+    );
 }
 
 #[test]
@@ -483,7 +559,6 @@ fn live_panel_round_trip() {
     harness.config.lm_studio.base_url = url;
     harness.config.lm_studio.model = model;
     harness.config.lm_studio.max_tokens = 6000;
-    harness.doc.ai_panel.composer.mode = PanelMode::Draft;
     harness.doc.ai_panel.composer.text =
         "根据以下要点起草一份通知：各区县做好冬季森林防火；12月1日前完成隐患排查；落实24小时值班。"
             .into();
@@ -492,7 +567,6 @@ fn live_panel_round_trip() {
 
     let started = std::time::Instant::now();
     let mut batches = 0usize;
-    let mut done_seen = false;
     loop {
         let message = harness
             ._keep
@@ -508,14 +582,20 @@ fn live_panel_round_trip() {
                 done,
             } => {
                 batches += 1;
-                done_seen |= done;
                 harness.doc.ai_panel.append(&content, &reasoning, done);
             }
             crate::app::DocJob::ExportProgress(message) => {
                 harness.doc.ai_panel.set_phase(&message);
             }
-            crate::app::DocJob::Proposed(result) => {
-                let result = result.expect("提案应当生成成功");
+            crate::app::DocJob::AiTool(_)
+            | crate::app::DocJob::AiNote(_)
+            | crate::app::DocJob::AiWorkspace(_) => {}
+            crate::app::DocJob::SkillDone(result) => {
+                let crate::ai_panel::SkillResult::Proposal { draft: result, .. } =
+                    *result.expect("提案应当生成成功")
+                else {
+                    panic!("要点写全了，不该停下来问");
+                };
                 let turn = &harness.doc.ai_panel.turns[0];
                 eprintln!(
                     "攒批 {batches} 次；思考 {} 字；流式正文 {} 字；提案 {} 字；审校提示 {} 条；耗时 {:?}\n{}",
@@ -526,9 +606,7 @@ fn live_panel_round_trip() {
                     started.elapsed(),
                     result.markdown
                 );
-                assert!(done_seen, "最后一批应当带 done");
                 assert!(batches > 2, "应当是分批到达的");
-                assert_eq!(turn.state, TurnState::Checking);
                 assert!(!result.markdown.trim().is_empty());
                 // 提案只是提案：正文一个字都没动。
                 assert!(harness.doc.generated_markdown.is_empty());
@@ -540,7 +618,7 @@ fn live_panel_round_trip() {
 }
 
 /// 连真实模型与知识库，从侧栏发起研究式起草，检查后台线程回投的事件。默认忽略；
-/// 环境变量同 `agent::research` 的 `live_research_draft`。
+/// 环境变量同 `agent::engine` 的 `live_research_draft`。
 #[test]
 #[ignore = "需要真实模型与知识库"]
 fn live_research_panel_round_trip() {
@@ -562,7 +640,6 @@ fn live_research_panel_round_trip() {
     config.rag.embedding.api_key = env("GONGWEN_LIVE_EMBED_KEY");
     config.rag.rerank.mode = crate::models::RerankMode::None;
     let composer = &mut harness.doc.ai_panel.composer;
-    composer.mode = PanelMode::Draft;
     composer.use_rag = true;
     // 带上「通知」，免得动笔前因文种卡住；受文对象也写明。
     composer.text = "起草一份通知，部署市直各单位开展人工智能辅助决策系统应用情况调研，\
@@ -601,27 +678,30 @@ fn live_research_panel_round_trip() {
             }
             crate::app::DocJob::AiNote(note) => eprintln!("        · {note}"),
             crate::app::DocJob::ExportProgress(phase) => harness.doc.ai_panel.set_phase(&phase),
-            crate::app::DocJob::ResearchDone(result) => {
+            crate::app::DocJob::SkillDone(result) => {
                 match *result.expect("研究式起草应当成功") {
-                    crate::ai_panel::ResearchResult::Clarify(questions) => {
-                        let texts: Vec<_> = questions.iter().map(|q| q.text.clone()).collect();
+                    crate::ai_panel::SkillResult::Suspended(run) => {
+                        let texts: Vec<_> = run
+                            .suspension
+                            .questions
+                            .iter()
+                            .map(|q| q.text.clone())
+                            .collect();
                         eprintln!("动笔前的问题：{texts:?}，按推荐项作答后接着跑");
                         // 照 apply_doc_job 的做法收下题目，再像用户点「确认」一样作答。
                         harness.doc.busy = false;
-                        let replies = crate::ai_panel::initial_replies(&questions);
                         let id = harness
                             .doc
                             .ai_panel
                             .running_turn_mut()
                             .map(|t| t.id)
                             .unwrap();
-                        harness.doc.ai_panel.ask(questions);
-                        harness.doc.ai_panel.turn_mut(id).unwrap().replies = replies;
-                        harness.with_page(|page| page.answer_predraft(id));
+                        harness.doc.ai_panel.ask(run);
+                        harness.with_page(|page| page.answer_suspended(id));
                         assert!(harness.doc.busy, "答完应当接着跑");
                         continue;
                     }
-                    crate::ai_panel::ResearchResult::Proposal { draft, report } => {
+                    crate::ai_panel::SkillResult::Proposal { draft, report, .. } => {
                         eprintln!(
                             "工具调用 {tools} 次，工作稿更新 {workspaces} 次，证据 {} 段，题 {} 道，用时 {:?}",
                             report.evidence.items().len(),
@@ -635,6 +715,63 @@ fn live_research_panel_round_trip() {
                         assert!(harness.doc.generated_markdown.is_empty(), "正文没动");
                     }
                 }
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 连真实模型：没命中触发词时交模型选技能，选中润色后经引擎改写成提案。默认忽略；
+/// 环境变量同 `live_panel_round_trip`（另可设 `GONGWEN_LIVE_LLM_KEY`）。
+#[test]
+#[ignore = "需要真实模型"]
+fn live_model_routing_and_polish() {
+    let (Ok(url), Ok(model)) = (
+        std::env::var("GONGWEN_LIVE_LLM_URL"),
+        std::env::var("GONGWEN_LIVE_LLM_MODEL"),
+    ) else {
+        eprintln!("未设置 GONGWEN_LIVE_LLM_URL / GONGWEN_LIVE_LLM_MODEL，跳过");
+        return;
+    };
+    let document = "# 关于做好冬季森林防火工作的通知\n\n各区县：\n\n冬天到了，山上的草都干了，大家一定要把防火的事情当回事，\
+                    12月1日前把隐患都查一遍，有问题马上整改。\n";
+    let mut harness = Harness::new(document);
+    harness.config.lm_studio.base_url = url;
+    harness.config.lm_studio.model = model;
+    harness.config.lm_studio.api_key = std::env::var("GONGWEN_LIVE_LLM_KEY").unwrap_or_default();
+    harness.config.lm_studio.timeout_seconds = 300;
+    // 不含任何触发词：两个技能都可用，发送后交模型判断。
+    harness.doc.ai_panel.composer.text = "这段话太口语了，弄得正式一点".into();
+    harness.with_page(|page| page.send_ai_panel());
+    assert_eq!(harness.doc.ai_panel.turns[0].title, "自动选择技能");
+    let started = std::time::Instant::now();
+    loop {
+        let message = harness
+            ._keep
+            .recv_timeout(Duration::from_secs(300))
+            .expect("五分钟内应当有结果");
+        let WorkerResult::Doc { job, .. } = message else {
+            continue;
+        };
+        match job {
+            crate::app::DocJob::AiTool(line) => {
+                eprintln!("[{:>5.1}s] {line}", started.elapsed().as_secs_f32())
+            }
+            crate::app::DocJob::SkillDone(result) => {
+                let crate::ai_panel::SkillResult::Proposal { skill, draft, .. } =
+                    *result.expect("应当成功")
+                else {
+                    panic!("润色不该停下来问");
+                };
+                eprintln!(
+                    "技能：{skill}，用时 {:?}\n{}",
+                    started.elapsed(),
+                    draft.markdown
+                );
+                assert_eq!(skill, "润色", "改写现有正文应当选润色");
+                assert!(draft.markdown.contains("12月1日"), "事实锁定：时限不能丢");
+                assert_eq!(harness.doc.generated_markdown, document, "正文没动");
                 break;
             }
             _ => {}

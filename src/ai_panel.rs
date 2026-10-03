@@ -1,63 +1,44 @@
 //! 起草页右侧的 AI 侧栏。
 //!
-//! 设计见 `docs/ai-agent-workbench.md`。两种用法：
-//! - 润色（第 ① 期）：输入框写要求，模型输出逐段流进任务流，闸门跑完转成结果卡；
-//! - 起草（第 ② 期）：研究式起草（`crate::agent::research`）——动笔前拿不准的先出选择题，
-//!   预研检索、带证据起草、围绕缺口迭代补全、核验引用，最后把要你确认的出成选择题。
+//! 设计见 `docs/ai-agent-workbench.md` 第十六节。每一轮都按一个技能（SKILL.md）跑流程引擎
+//! （`crate::agent::engine`）：技能条默认自动选（上下文过滤 + 触发词，分不出高下时交模型判断），
+//! 也可以点技能条或以「/技能名」开头指定。内置两个技能：
+//! - 研究式起草：动笔前拿不准的先出选择题，预研检索、带证据起草、围绕缺口迭代补全、核验引用，
+//!   最后把要你确认的出成选择题；
+//! - 润色：在事实锁定下改全文或选区。
 //!
-//! 结果一律是提案，由用户点「采用 / 接受」才落入正文（红线 1）。仿写与大纲暂时仍走旧
-//! 工作台，侧栏右上角留了入口。
+//! 模型输出逐段流进任务流；流程要问用户时挂起，答完接着跑。结果一律是提案，由用户点
+//! 「采用 / 接受」才落入正文（红线 1）。仿写与大纲暂时仍走旧工作台，侧栏右上角留了入口。
 //!
 //! 本文件只放状态与纯逻辑；界面在 `ai_panel/ui.rs`，挂在 `DraftPage` 上。
 
 use crate::agent::clarify::{Question, Reply};
 use crate::agent::gaps::Ledger;
+use crate::agent::skill::Skill;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-mod research_job;
+mod skill_job;
 mod ui;
 
-pub(crate) use research_job::{ResearchResult, initial_replies};
+pub(crate) use skill_job::{SkillResult, SkillRun, initial_replies};
 
-/// 侧栏的两种用法。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum PanelMode {
-    /// 在事实锁定下修改现有正文（全文或选区）。
-    #[default]
-    Polish,
-    /// 按输入框里的材料与要求起草。
-    Draft,
-}
-
-impl PanelMode {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Polish => "润色",
-            Self::Draft => "起草",
-        }
-    }
-
-    fn hint(self) -> &'static str {
-        match self {
-            Self::Polish => "说说怎么改，例如：压缩第二部分，不改任务、责任单位和时限",
-            Self::Draft => "粘贴材料、写清要求，例如：根据以下会议纪要起草一份通知……",
-        }
-    }
-}
+/// 技能条在自动模式下、输入框还空着时的提示。
+const AUTO_HINT: &str = "说说要做什么：起草、润色……也可以输入 / 选技能";
 
 /// 输入区的状态。随稿件保存，切换标签页互不影响。
 #[derive(Debug, Default)]
 pub(crate) struct Composer {
-    pub(crate) mode: PanelMode,
+    /// 用户在技能条上指定的技能 id；None 表示自动选。
+    pub(crate) skill: Option<String>,
     pub(crate) text: String,
     /// 打开侧栏时锁定的选区（字节区间）与当时的原文。正文被改动后按原文重新定位。
     pub(crate) selection: Option<(Range<usize>, String)>,
     /// 润色预设（`AppConfig::ai_prompts` 的 id）。None 表示不用预设。
     pub(crate) preset: Option<u32>,
-    /// 起草时检索知识库。
+    /// 技能用到知识库时检索。
     pub(crate) use_rag: bool,
     pub(crate) error: Option<String>,
     /// 首次打开时按设置给过默认值没有。之后以用户的勾选为准，不再覆盖。
@@ -67,12 +48,13 @@ pub(crate) struct Composer {
 /// 一轮请求的原始参数，「重新生成」照它再发一次。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TurnRequest {
-    pub(crate) mode: PanelMode,
+    /// 指定的技能 id；None 表示按上下文与触发词自动选。
+    pub(crate) skill: Option<String>,
     pub(crate) text: String,
     pub(crate) selection: Option<(Range<usize>, String)>,
     pub(crate) preset: Option<u32>,
     pub(crate) use_rag: bool,
-    /// 动笔前澄清的回答（研究式起草重跑时沿用，不再问一遍）。
+    /// 动笔前澄清的回答（重跑时沿用，不再问一遍）。
     pub(crate) notes: Vec<String>,
 }
 
@@ -96,7 +78,7 @@ pub(crate) enum TurnState {
     Streaming,
     /// 模型说完了，程序在跑清洗、规整与闸门。
     Checking,
-    /// 动笔前有题要问，等用户回答后才开始起草。
+    /// 流程停下来问用户（动笔前澄清、选基准稿……），答完接着跑。
     Asking,
     /// 提案已就绪，等用户采用或放弃。
     Proposed(ProposalSummary),
@@ -145,6 +127,8 @@ pub(crate) struct AiTurn {
     pub(crate) replies: Vec<ReplyDraft>,
     /// 研究式起草的结果：台账与证据，按回答修订时要用。
     pub(crate) research: Option<ResearchSnapshot>,
+    /// 挂起的流程：答完题从这里接着跑。
+    pub(crate) run: Option<Box<SkillRun>>,
     pub(crate) started: Instant,
     /// 结束时定格的耗时；运行中为 None，按 `started` 现算。
     pub(crate) elapsed: Option<Duration>,
@@ -178,6 +162,8 @@ pub(crate) struct AiPanel {
     pub(crate) turns: Vec<AiTurn>,
     /// 正在跑的那一轮的停止开关。
     pub(crate) cancel: Option<Arc<AtomicBool>>,
+    /// 技能列表的缓存，技能条每帧要用；打开侧栏和每次发送时重读。
+    pub(crate) skills: Vec<Skill>,
     next_id: u64,
 }
 
@@ -211,6 +197,7 @@ impl AiPanel {
             questions: Vec::new(),
             replies: Vec::new(),
             research: None,
+            run: None,
             started: Instant::now(),
             elapsed: None,
         });
@@ -279,14 +266,22 @@ impl AiPanel {
         }
     }
 
-    /// 动笔前有题要问：这一轮停下来等回答。
-    pub(crate) fn ask(&mut self, questions: Vec<Question>) {
+    /// 流程挂起要问用户：这一轮停下来等回答，挂起的流程存在卡片上。
+    pub(crate) fn ask(&mut self, run: Box<SkillRun>) {
         self.cancel = None;
         if let Some(turn) = self.running_turn_mut() {
-            turn.replies = vec![ReplyDraft::default(); questions.len()];
-            turn.questions = questions;
+            turn.replies = initial_replies(&run.suspension.questions);
+            turn.questions = run.suspension.questions.clone();
+            turn.run = Some(run);
             turn.settle(TurnState::Asking);
         }
+    }
+
+    /// 重读技能列表（内置 + 配置目录），返回加载时的说明。
+    pub(crate) fn reload_skills(&mut self) -> Vec<String> {
+        let (skills, notes) = crate::agent::skill::load_all();
+        self.skills = skills;
+        notes
     }
 
     pub(crate) fn turn_mut(&mut self, id: u64) -> Option<&mut AiTurn> {
@@ -429,8 +424,18 @@ mod tests {
         let mut panel = panel_with_turn();
         panel.cancel = Some(Arc::new(AtomicBool::new(false)));
         panel.step("⌕ 检索".into());
-        panel.ask(vec![]);
+        panel.ask(Box::new(SkillRun {
+            skill: crate::agent::skill::builtin(crate::agent::skill::POLISH).unwrap(),
+            board: crate::agent::board::Board::default(),
+            suspension: crate::agent::engine::Suspension {
+                questions: Vec::new(),
+                resume_at: 1,
+                save_as: None,
+            },
+            use_rag: false,
+        }));
         assert_eq!(panel.turns[0].state, TurnState::Asking);
+        assert!(panel.turns[0].run.is_some(), "挂起的流程存在卡片上");
         assert!(!panel.running(), "问题等着回答时不算在跑");
         assert!(panel.cancel.is_none());
         assert_eq!(panel.turns[0].steps, ["⌕ 检索"]);

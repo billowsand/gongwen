@@ -151,8 +151,8 @@ pub(crate) struct Gap {
     pub(crate) attempts: u8,
     /// 检索时用过的检索词。
     pub(crate) queries: Vec<String>,
-    /// 检索返回过的片段；再搜回来的全是旧片段，就算检索到头了。
-    pub(crate) seen_chunks: Vec<i64>,
+    /// 检索返回过的资料（证据键）；再搜回来的全是旧资料，就算检索到头了。
+    pub(crate) seen_chunks: Vec<String>,
 }
 
 /// 「【待核实：X】」该交给知识库还是交给用户。

@@ -1,21 +1,42 @@
 ---
 name: 研究式起草
-description: 先查后写：按问题检索知识库，带着证据起草，再围绕待核实的缺口反复检索、局部补全，最后核验引用，拿不准的出选择题问用户
-triggers: [起草, 写, 拟, 撰写, 形成]
-max_rounds: 3
-research_questions: 6
-pre_questions: 3
-batch_questions: 4
-attempts_per_gap: 2
-evidence_chars: 8000
-max_checks: 8
+description: 按材料与要求起草通知、请示、函等公文；先查后写：按问题检索知识库，带着证据起草，围绕待核实的缺口反复检索、局部补全，最后核验引用，拿不准的出选择题问用户
+hint: 粘贴材料、写清要求，例如：根据以下会议纪要起草一份通知……
+triggers: [起草, 写一份, 写个, 拟, 撰写, 形成, 草拟]
+when: { text: any }
+output: proposal
+tools: [doc.elements, kb.search, check.placeholders, check.facts, llm.generate, ws.write, ws.replace, ask.choice]
+params:
+  max_rounds: 3
+  research_questions: 6
+  pre_questions: 3
+  batch_questions: 4
+  attempts_per_gap: 2
+  evidence_chars: 8000
+  max_checks: 8
+flow:
+  - step: clarify
+    prompt: 动笔前澄清
+  - step: plan
+    prompt: 预研
+    when: has_sources
+  - step: retrieve
+  - step: generate
+    prompt: 起草附加要求
+  - step: gap_loop
+    fill_prompt: 缺口修订
+    source_prompt: 来源核对
+  - step: verify
+    prompt: 核验
+  - step: ask
 ---
 
 # 研究式起草
 
-本文件由公文助手的研究式起草流程读取：每个二级标题是一个步骤的提示词，`{花括号}`
-里的变量由程序替换。可以复制到配置目录的 `skills/research-draft/SKILL.md` 后修改，
-修改后的版本优先于内置版本；缺了哪个步骤，那一步就沿用内置的写法。
+开头的 `flow` 是流程：`step` 是算子，`tool` 是工具，按书写顺序执行，`when` 不满足的步骤跳过。
+正文每个二级标题是一段提示词，由步骤的 `prompt` 等参数引用，`{花括号}` 里的变量由程序替换。
+可以复制到配置目录的 `skills/research-draft/SKILL.md` 后修改；修改后的版本优先于内置版本，
+缺了哪段提示词、哪个参数，就沿用内置的写法。
 
 ## 动笔前澄清
 

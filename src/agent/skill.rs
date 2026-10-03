@@ -1,40 +1,191 @@
-//! SKILL.md 技能文件：一个流程的提示词与参数。
+//! SKILL.md 技能文件：一个技能的说明、适用条件、可用工具、流程与各步提示词。
 //!
-//! 格式沿用 Agent Skills 的写法（与仓库里的 `skills/gongwen-markdown/` 同构）：
+//! 格式沿用 Agent Skills 的写法——开头是标准 YAML，正文是提示词（`docs/ai-agent-workbench.md` 16.5）：
 //!
 //! ```text
 //! ---
 //! name: 研究式起草
 //! description: ……
-//! triggers: [起草, 写]
-//! max_rounds: 3
+//! triggers: [起草, 写一份]
+//! when: { text: any }
+//! tools: [kb.search, llm.generate]
+//! params: { max_rounds: 3 }
+//! flow:
+//!   - step: clarify          # 执行一个算子
+//!     prompt: 动笔前澄清
+//!   - tool: kb.search         # 直接调一个工具
+//!     args: { query: "{request}" }
+//!     save_as: hits
 //! ---
-//! # 标题
-//! ## 步骤名
-//! 这一步的提示词，{变量} 由程序替换
+//! ## 动笔前澄清
+//! 这一步的提示词，{变量} 由引擎替换
 //! ```
 //!
-//! 内置一份编进二进制；用户把同名目录放到 `配置目录/skills/<目录名>/SKILL.md` 就能覆盖。
-//! 用户版缺了哪个步骤，那一步沿用内置写法——改一处提示词不必把整份抄全。
+//! 内置技能编进二进制；用户技能放在 `配置目录/skills/<id>/SKILL.md`。同 id 的用户技能覆盖内置，
+//! 缺的步骤提示词、参数、流程沿用内置——改一处提示词不必把整份抄全。
 
+use crate::models::TemplateKind;
+use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// 内置的研究式起草技能。
-pub(crate) const RESEARCH_DRAFT_DIR: &str = "research-draft";
-const RESEARCH_DRAFT_BUILTIN: &str =
-    include_str!("../../assets/agent-skills/research-draft/SKILL.md");
+/// 内置技能：(id, 文件内容)。
+const BUILTIN: [(&str, &str); 2] = [
+    (
+        RESEARCH_DRAFT,
+        include_str!("../../assets/agent-skills/research-draft/SKILL.md"),
+    ),
+    (
+        POLISH,
+        include_str!("../../assets/agent-skills/polish/SKILL.md"),
+    ),
+];
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) const RESEARCH_DRAFT: &str = "research-draft";
+pub(crate) const POLISH: &str = "polish";
+
+/// 技能产出什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OutputKind {
+    /// 提案：新稿或改写，用户接受才落入正文。
+    #[default]
+    Proposal,
+    /// 只出问题清单，不改稿。
+    Report,
+}
+
+/// 对正文的要求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TextNeed {
+    #[default]
+    Any,
+    Empty,
+    Present,
+}
+
+/// 对选区的要求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SelectionNeed {
+    #[default]
+    Any,
+    Required,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub(crate) struct WhenSpec {
+    #[serde(default)]
+    pub(crate) text: TextNeed,
+    #[serde(default)]
+    pub(crate) selection: SelectionNeed,
+}
+
+/// 流程里的一步：`step`（算子）与 `tool`（工具）二选一。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct StepSpec {
+    #[serde(default)]
+    pub(crate) step: Option<String>,
+    #[serde(default)]
+    pub(crate) tool: Option<String>,
+    /// 工具的输入；字符串里的 `{变量}` 由引擎替换。
+    #[serde(default)]
+    pub(crate) args: Option<Value>,
+    /// 结果存进黑板的变量名。
+    #[serde(default)]
+    pub(crate) save_as: Option<String>,
+    /// 工具结果是否并入证据包（只对资料类工具有意义）。
+    #[serde(default)]
+    pub(crate) evidence: Option<bool>,
+    /// 执行条件：`has_sources`、`has_text`……或 `{ kind: [研究报告] }`、`{ var: 名字 }`。
+    #[serde(default)]
+    pub(crate) when: Option<Value>,
+    /// `for_each` 的子流程。
+    #[serde(default, rename = "do")]
+    pub(crate) body: Vec<StepSpec>,
+    /// 算子的其余参数：`prompt`、`max`、`rounds`……
+    #[serde(flatten)]
+    pub(crate) params: BTreeMap<String, Value>,
+}
+
+impl StepSpec {
+    /// 「算子 clarify」「工具 kb.search」——过程记录与校验信息里用。
+    pub(crate) fn label(&self) -> String {
+        match (&self.step, &self.tool) {
+            (Some(step), _) => format!("算子 {step}"),
+            (None, Some(tool)) => format!("工具 {tool}"),
+            (None, None) => "空步骤".into(),
+        }
+    }
+
+    pub(crate) fn param_str(&self, key: &str) -> Option<&str> {
+        self.params.get(key).and_then(Value::as_str)
+    }
+
+    pub(crate) fn param_usize(&self, key: &str) -> Option<usize> {
+        self.params.get(key).and_then(as_usize)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Frontmatter {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    hint: String,
+    #[serde(default)]
+    triggers: Vec<String>,
+    #[serde(default)]
+    applies_to: Vec<String>,
+    #[serde(default)]
+    when: WhenSpec,
+    #[serde(default)]
+    output: OutputKind,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    params: BTreeMap<String, Value>,
+    #[serde(default)]
+    flow: Vec<StepSpec>,
+    #[serde(default = "enabled_default")]
+    enabled: bool,
+    /// 第二期的旧写法把参数直接写在顶层（`max_rounds: 3`），照样认作参数。
+    #[serde(flatten)]
+    legacy: BTreeMap<String, Value>,
+}
+
+fn enabled_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Skill {
+    /// 目录名，技能的稳定标识。
+    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) description: String,
+    /// 输入框的占位提示：告诉用户这个技能要写些什么。
+    pub(crate) hint: String,
     pub(crate) triggers: Vec<String>,
-    /// 其余 frontmatter 键值，流程参数从这里取。
-    pub(crate) params: BTreeMap<String, String>,
-    /// 二级标题 → 正文。
+    /// 适用文种；空表示全部。
+    pub(crate) applies_to: Vec<TemplateKind>,
+    pub(crate) when: WhenSpec,
+    pub(crate) output: OutputKind,
+    /// 允许使用的工具（白名单）。
+    pub(crate) tools: Vec<String>,
+    pub(crate) params: BTreeMap<String, Value>,
+    pub(crate) flow: Vec<StepSpec>,
+    pub(crate) enabled: bool,
+    /// 二级标题 → 提示词。
     pub(crate) sections: BTreeMap<String, String>,
-    /// 从哪里读来的：内置，或用户文件的路径。
+    /// 内置，或用户文件的路径。
     pub(crate) origin: String,
+    /// 解析时发现的问题（未知文种名之类），校验时一并报出。
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Skill {
@@ -51,22 +202,40 @@ impl Skill {
     ) -> usize {
         self.params
             .get(key)
-            .and_then(|value| value.trim().parse::<usize>().ok())
+            .and_then(as_usize)
             .unwrap_or(default)
             .clamp(*range.start(), *range.end())
     }
 
-    /// 取一个步骤的提示词并替换变量；该步骤缺失时返回 None。
-    pub(crate) fn render(&self, section: &str, vars: &[(&str, &str)]) -> Option<String> {
-        let mut text = self.section(section)?.to_string();
-        for (key, value) in vars {
-            text = text.replace(&format!("{{{key}}}"), value);
+    /// 流程里用不用知识库：有检索算子，或直接调知识库工具。侧栏据此显示「检索知识库」开关。
+    pub(crate) fn uses_knowledge(&self) -> bool {
+        fn walk(steps: &[StepSpec]) -> bool {
+            steps.iter().any(|step| {
+                matches!(step.step.as_deref(), Some("retrieve" | "plan"))
+                    || step
+                        .tool
+                        .as_deref()
+                        .is_some_and(|tool| tool.starts_with("kb."))
+                    || walk(&step.body)
+            })
         }
-        Some(text)
+        walk(&self.flow)
     }
 
-    /// 用 `fallback` 补齐缺失的步骤与参数。
-    fn merged_with(mut self, fallback: &Skill) -> Skill {
+    /// 提示词里用不用润色预设（`{preset}`）。侧栏据此显示预设下拉框。
+    pub(crate) fn uses_preset(&self) -> bool {
+        self.sections.values().any(|text| text.contains("{preset}"))
+    }
+
+    /// 白名单里有没有这个工具。`http.call:接口` 这类带限定的写法，写了 `http.call` 也算全放行。
+    pub(crate) fn allows_tool(&self, id: &str) -> bool {
+        self.tools.iter().any(|allowed| {
+            allowed == id || id.split_once(':').is_some_and(|(base, _)| allowed == base)
+        })
+    }
+
+    /// 用 `fallback` 补齐缺失的提示词、参数、流程与说明。
+    pub(crate) fn merged_with(mut self, fallback: &Skill) -> Skill {
         for (key, value) in &fallback.sections {
             self.sections
                 .entry(key.clone())
@@ -77,21 +246,50 @@ impl Skill {
                 .entry(key.clone())
                 .or_insert_with(|| value.clone());
         }
-        if self.name.is_empty() {
-            self.name = fallback.name.clone();
-        }
-        if self.description.is_empty() {
-            self.description = fallback.description.clone();
-        }
+        let fill = |own: &mut String, other: &String| {
+            if own.is_empty() {
+                own.clone_from(other);
+            }
+        };
+        fill(&mut self.name, &fallback.name);
+        fill(&mut self.description, &fallback.description);
+        fill(&mut self.hint, &fallback.hint);
         if self.triggers.is_empty() {
-            self.triggers = fallback.triggers.clone();
+            self.triggers.clone_from(&fallback.triggers);
+        }
+        if self.tools.is_empty() {
+            self.tools.clone_from(&fallback.tools);
+        }
+        if self.flow.is_empty() {
+            self.flow.clone_from(&fallback.flow);
+            // 流程沿用内置时，适用条件与产出也沿用，免得两边对不上。
+            self.when = fallback.when;
+            self.output = fallback.output;
+            if self.applies_to.is_empty() {
+                self.applies_to.clone_from(&fallback.applies_to);
+            }
         }
         self
     }
 }
 
-/// 解析 SKILL.md。frontmatter 只认 `键: 值` 与 `键: [甲, 乙]` 两种写法，够用且不必引 YAML 库。
-pub(crate) fn parse(text: &str, origin: &str) -> Result<Skill, String> {
+fn as_usize(value: &Value) -> Option<usize> {
+    value
+        .as_u64()
+        .map(|n| n as usize)
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// 文种名（「研究报告」）或内部名（`ResearchReport`）→ 文种。
+fn kind_from_name(name: &str) -> Option<TemplateKind> {
+    let name = name.trim();
+    TemplateKind::ALL
+        .into_iter()
+        .find(|kind| kind.label() == name || crate::manuscript::kind_to_str(*kind) == name)
+}
+
+/// 解析 SKILL.md。
+pub(crate) fn parse(id: &str, text: &str, origin: &str) -> Result<Skill, String> {
     let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let rest = text
         .strip_prefix("---\n")
@@ -99,39 +297,55 @@ pub(crate) fn parse(text: &str, origin: &str) -> Result<Skill, String> {
     let (front, body) = rest
         .split_once("\n---")
         .ok_or("SKILL.md 的 frontmatter 没有用 --- 收尾")?;
-    let mut skill = Skill {
-        origin: origin.to_string(),
-        ..Skill::default()
+    let front: Frontmatter = if front.trim().is_empty() {
+        serde_yaml::from_str("{}").expect("空对象")
+    } else {
+        serde_yaml::from_str(front).map_err(|error| format!("YAML 开头解析失败：{error}"))?
     };
-    for line in front.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            return Err(format!("frontmatter 这一行看不懂：{line}"));
-        };
-        let key = key.trim();
-        let value = value.trim();
-        match key {
-            "name" => skill.name = value.to_string(),
-            "description" => skill.description = value.to_string(),
-            "triggers" => skill.triggers = parse_list(value),
-            _ => {
-                skill.params.insert(key.to_string(), value.to_string());
-            }
+    let mut warnings = Vec::new();
+    let mut applies_to = Vec::new();
+    for name in &front.applies_to {
+        match kind_from_name(name) {
+            Some(kind) => applies_to.push(kind),
+            None => warnings.push(format!("applies_to 里的「{name}」不是认识的文种")),
         }
     }
+    let mut params = front.params;
+    for (key, value) in front.legacy {
+        params.entry(key).or_insert(value);
+    }
+    Ok(Skill {
+        id: id.to_string(),
+        name: front.name,
+        description: front.description,
+        hint: front.hint,
+        triggers: front.triggers,
+        applies_to,
+        when: front.when,
+        output: front.output,
+        tools: front.tools,
+        params,
+        flow: front.flow,
+        enabled: front.enabled,
+        sections: parse_sections(body),
+        origin: origin.to_string(),
+        warnings,
+    })
+}
+
+/// 正文按二级标题切段；一级标题与第一个二级标题之前的说明不算提示词。
+fn parse_sections(body: &str) -> BTreeMap<String, String> {
+    let mut sections = BTreeMap::new();
     let mut current: Option<(String, String)> = None;
     for line in body.lines() {
         if let Some(title) = line.strip_prefix("## ") {
             if let Some((name, text)) = current.take() {
-                skill.sections.insert(name, text.trim().to_string());
+                sections.insert(name, text.trim().to_string());
             }
             current = Some((title.trim().to_string(), String::new()));
         } else if line.starts_with("# ") {
             if let Some((name, text)) = current.take() {
-                skill.sections.insert(name, text.trim().to_string());
+                sections.insert(name, text.trim().to_string());
             }
         } else if let Some((_, text)) = current.as_mut() {
             text.push_str(line);
@@ -139,57 +353,244 @@ pub(crate) fn parse(text: &str, origin: &str) -> Result<Skill, String> {
         }
     }
     if let Some((name, text)) = current {
-        skill.sections.insert(name, text.trim().to_string());
+        sections.insert(name, text.trim().to_string());
     }
-    Ok(skill)
+    sections
 }
 
-fn parse_list(value: &str) -> Vec<String> {
-    value
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split([',', '，'])
-        .map(|item| item.trim().trim_matches(['"', '\'']).to_string())
-        .filter(|item| !item.is_empty())
+/// 静态校验：步骤写法、算子与工具名、白名单、引用的提示词。返回问题清单，空表示通过。
+///
+/// `operators` 与 `tools` 由调用方给（引擎认识哪些），本模块不依赖引擎。
+pub(crate) fn validate(skill: &Skill, operators: &[&str], tools: &[&str]) -> Vec<String> {
+    let mut problems = skill.warnings.clone();
+    if skill.name.trim().is_empty() {
+        problems.push("缺少 name".into());
+    }
+    if skill.flow.is_empty() {
+        problems.push("flow 是空的，技能什么都不会做".into());
+    }
+    for tool in &skill.tools {
+        let base = tool.split(':').next().unwrap_or(tool);
+        let base = base.strip_suffix(".phone").unwrap_or(base);
+        if !tools.contains(&base) {
+            problems.push(format!("tools 里的「{tool}」不是认识的工具"));
+        }
+    }
+    validate_steps(skill, &skill.flow, operators, tools, &mut problems, "");
+    problems
+}
+
+fn validate_steps(
+    skill: &Skill,
+    steps: &[StepSpec],
+    operators: &[&str],
+    tools: &[&str],
+    problems: &mut Vec<String>,
+    prefix: &str,
+) {
+    for (index, step) in steps.iter().enumerate() {
+        let at = format!("{prefix}第 {} 步", index + 1);
+        match (&step.step, &step.tool) {
+            (Some(_), Some(_)) => problems.push(format!("{at}同时写了 step 和 tool，只能二选一")),
+            (None, None) => problems.push(format!("{at}既没有 step 也没有 tool")),
+            (Some(op), None) => {
+                if !operators.contains(&op.as_str()) {
+                    problems.push(format!("{at}的算子「{op}」不认识"));
+                }
+                if op == "for_each" {
+                    if step.body.is_empty() {
+                        problems.push(format!("{at} for_each 缺少 do 子流程"));
+                    }
+                    if step.param_str("over").is_none() {
+                        problems.push(format!("{at} for_each 缺少 over（要遍历的变量）"));
+                    }
+                    validate_steps(
+                        skill,
+                        &step.body,
+                        operators,
+                        tools,
+                        problems,
+                        &format!("{at}的子流程"),
+                    );
+                }
+            }
+            (None, Some(tool)) => {
+                if !tools.contains(&tool.split(':').next().unwrap_or(tool)) {
+                    problems.push(format!("{at}的工具「{tool}」不认识"));
+                } else if !skill.allows_tool(tool) {
+                    problems.push(format!("{at}用了工具「{tool}」，但它不在 tools 白名单里"));
+                }
+            }
+        }
+        if let Some(condition) = &step.when {
+            condition_problems(condition, &at, problems);
+        }
+        for key in ["prompt", "fill_prompt", "source_prompt"] {
+            if let Some(name) = step.param_str(key)
+                && skill.section(name).is_none()
+            {
+                problems.push(format!("{at}引用的提示词「{name}」在正文里找不到"));
+            }
+        }
+    }
+}
+
+/// `when` 认的条件名（引擎按这张表求值）。
+pub(crate) const CONDITIONS: [&str; 4] =
+    ["has_sources", "has_text", "has_selection", "has_evidence"];
+
+fn condition_problems(condition: &Value, at: &str, problems: &mut Vec<String>) {
+    match condition {
+        Value::String(name) if CONDITIONS.contains(&name.as_str()) => {}
+        Value::String(name) => problems.push(format!(
+            "{at}的条件「{name}」不认识（可用 {}，或 kind / var / not）",
+            CONDITIONS.join("、")
+        )),
+        Value::Array(all) => {
+            for item in all {
+                condition_problems(item, at, problems);
+            }
+        }
+        Value::Object(map) => {
+            for (key, value) in map {
+                match key.as_str() {
+                    "kind" => {
+                        let names: Vec<&str> = match value {
+                            Value::String(name) => vec![name.as_str()],
+                            Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                            _ => Vec::new(),
+                        };
+                        if names.is_empty() {
+                            problems.push(format!("{at}的 kind 条件要写文种名"));
+                        }
+                        for name in names {
+                            if kind_from_name(name).is_none() {
+                                problems
+                                    .push(format!("{at}的 kind 条件里「{name}」不是认识的文种"));
+                            }
+                        }
+                    }
+                    "var" if value.is_string() => {}
+                    "var" => problems.push(format!("{at}的 var 条件要写变量名")),
+                    "not" => condition_problems(value, at, problems),
+                    other => problems.push(format!("{at}的条件「{other}」不认识")),
+                }
+            }
+        }
+        _ => problems.push(format!("{at}的 when 写法不对")),
+    }
+}
+
+/// 内置技能（解析失败是编译期就该发现的错误，测试锁住）。
+pub(crate) fn builtin_skills() -> Vec<Skill> {
+    BUILTIN
+        .iter()
+        .map(|(id, text)| parse(id, text, "内置").expect("内置 SKILL.md 必须能解析"))
         .collect()
 }
 
-/// 内置的研究式起草技能。内置文件解析失败是编译期就该发现的错误，测试锁住。
-pub(crate) fn builtin_research_draft() -> Skill {
-    parse(RESEARCH_DRAFT_BUILTIN, "内置").expect("内置 SKILL.md 必须能解析")
+#[cfg(test)]
+pub(crate) fn builtin(id: &str) -> Option<Skill> {
+    builtin_skills().into_iter().find(|skill| skill.id == id)
 }
 
-/// 读研究式起草技能：用户目录里有就用用户的（缺的步骤用内置补齐），否则用内置。
-/// 用户文件写坏了也不中断起草，退回内置并返回一条说明。
-pub(crate) fn load_research_draft() -> (Skill, Option<String>) {
-    let builtin = builtin_research_draft();
+#[cfg(test)]
+pub(crate) fn builtin_research_draft() -> Skill {
+    builtin(RESEARCH_DRAFT).expect("内置研究式起草")
+}
+
+/// 按引擎认识的算子与工具校验。
+fn check(skill: &Skill) -> Vec<String> {
+    validate(
+        skill,
+        &crate::agent::ops::names(),
+        &crate::agent::tools::ids(),
+    )
+}
+
+/// 全部技能：内置 + 用户目录。同 id 的用户技能覆盖内置（缺的部分用内置补齐）；用户文件
+/// 写坏了不中断：覆盖内置的退回内置，新增的停用，各给一条说明。返回 (技能, 说明)。
+pub(crate) fn load_all() -> (Vec<Skill>, Vec<String>) {
+    let mut skills = builtin_skills();
+    let mut notes = Vec::new();
     let Ok(dir) = crate::storage::config_dir() else {
-        return (builtin, None);
+        return (skills, notes);
     };
-    let path = dir.join("skills").join(RESEARCH_DRAFT_DIR).join("SKILL.md");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return (builtin, None);
+    let Ok(entries) = std::fs::read_dir(dir.join("skills")) else {
+        return (skills, notes);
     };
-    match parse(&text, &path.display().to_string()) {
-        Ok(user) => (user.merged_with(&builtin), None),
-        Err(error) => (
-            builtin,
-            Some(format!(
-                "技能文件 {} 解析失败，已改用内置版本：{error}",
-                path.display()
-            )),
-        ),
+    let mut user_dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    user_dirs.sort();
+    for path in user_dirs {
+        let file = path.join("SKILL.md");
+        let Some(id) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let origin = file.display().to_string();
+        let user = match parse(&id, &text, &origin) {
+            Ok(user) => user,
+            Err(error) => {
+                notes.push(format!("技能文件 {origin} 解析失败，已跳过：{error}"));
+                continue;
+            }
+        };
+        match skills.iter().position(|skill| skill.id == id) {
+            Some(index) => {
+                let merged = user.merged_with(&skills[index]);
+                let problems = check(&merged);
+                if problems.is_empty() {
+                    skills[index] = merged;
+                } else {
+                    notes.push(format!(
+                        "技能文件 {origin} 有问题，沿用内置版本：{}",
+                        problems.join("；")
+                    ));
+                }
+            }
+            None => {
+                let mut user = user;
+                let problems = check(&user);
+                if !problems.is_empty() {
+                    notes.push(format!(
+                        "技能「{}」有问题，已停用：{}",
+                        if user.name.is_empty() {
+                            &id
+                        } else {
+                            &user.name
+                        },
+                        problems.join("；")
+                    ));
+                    user.enabled = false;
+                }
+                skills.push(user);
+            }
+        }
     }
+    (skills, notes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const OPS: [&str; 3] = ["clarify", "generate", "for_each"];
+    const TOOLS: [&str; 4] = ["kb.search", "llm.generate", "vocab.persons", "http.call"];
+
     #[test]
-    fn builtin_skill_has_every_step_and_sane_parameters() {
-        let skill = builtin_research_draft();
-        assert_eq!(skill.name, "研究式起草");
+    fn builtin_skills_parse_with_flows() {
+        let skills = builtin_skills();
+        assert_eq!(skills.len(), 2);
+        let research = builtin_research_draft();
+        assert_eq!(research.name, "研究式起草");
+        assert!(!research.flow.is_empty());
+        assert_eq!(research.flow[0].step.as_deref(), Some("clarify"));
         for step in [
             "动笔前澄清",
             "预研",
@@ -198,71 +599,165 @@ mod tests {
             "来源核对",
             "核验",
         ] {
-            assert!(skill.section(step).is_some(), "缺少步骤：{step}");
+            assert!(research.section(step).is_some(), "缺少步骤：{step}");
         }
-        assert_eq!(skill.param_usize("max_rounds", 0, 1..=10), 3);
-        assert!(skill.triggers.contains(&"起草".to_string()));
-        // 变量都写在花括号里，渲染后不该残留。
-        let rendered = skill
-            .render(
-                "缺口修订",
-                &[("hint", "甲"), ("sentence", "乙"), ("evidence", "丙")],
-            )
-            .unwrap();
-        assert!(!rendered.contains('{'), "{rendered}");
+        assert_eq!(research.param_usize("max_rounds", 0, 1..=10), 3);
+        let polish = builtin(POLISH).unwrap();
+        assert_eq!(polish.when.text, TextNeed::Present);
+        assert!(polish.section("润色").is_some());
     }
 
     #[test]
-    fn parsing_reads_lists_params_and_sections() {
-        let text = "---\nname: 测试\ntriggers: [写, \"拟\"]\nmax_rounds: 9\n---\n# 题\n## 甲\n第一行\n\n第二行\n## 乙\n内容\n";
-        let skill = parse(text, "测试").unwrap();
-        assert_eq!(skill.triggers, ["写", "拟"]);
-        assert_eq!(skill.section("甲"), Some("第一行\n\n第二行"));
-        assert_eq!(skill.section("乙"), Some("内容"));
-        assert_eq!(skill.param_usize("max_rounds", 3, 1..=5), 5, "越界夹回范围");
-        assert_eq!(skill.param_usize("missing", 3, 1..=5), 3);
+    fn builtin_skills_pass_validation_against_the_real_engine() {
+        for skill in builtin_skills() {
+            assert_eq!(
+                check(&skill),
+                Vec::<String>::new(),
+                "内置技能「{}」校验不过",
+                skill.name
+            );
+        }
+    }
+
+    #[test]
+    fn steps_read_tools_args_conditions_and_nested_flows() {
+        let text = "---\nname: 测试\ntools: [kb.search]\nflow:\n  - tool: kb.search\n    args: { query: \"{request}\", top: 5 }\n    save_as: hits\n    evidence: true\n    when: has_sources\n  - step: for_each\n    over: outline\n    do:\n      - step: generate\n        prompt: 写一节\n---\n## 写一节\n内容\n";
+        let skill = parse("t", text, "测试").unwrap();
+        let first = &skill.flow[0];
+        assert_eq!(first.tool.as_deref(), Some("kb.search"));
+        assert_eq!(first.args.as_ref().unwrap()["top"], 5);
+        assert_eq!(first.save_as.as_deref(), Some("hits"));
+        assert_eq!(first.evidence, Some(true));
+        assert_eq!(first.when.as_ref().unwrap(), "has_sources");
+        let second = &skill.flow[1];
+        assert_eq!(second.param_str("over"), Some("outline"));
+        assert_eq!(second.body[0].param_str("prompt"), Some("写一节"));
+        assert!(
+            validate(&skill, &OPS, &TOOLS).is_empty(),
+            "{:?}",
+            validate(&skill, &OPS, &TOOLS)
+        );
+    }
+
+    #[test]
+    fn validation_reports_every_kind_of_mistake() {
+        let text = "---\nname: 坏\napplies_to: [公函, 不存在的文种]\ntools: [kb.search, 乱写.工具]\nflow:\n  - step: 乱写\n  - tool: llm.generate\n  - step: generate\n    tool: kb.search\n  - {}\n  - step: generate\n    prompt: 没有这段\n  - step: for_each\n  - step: generate\n    when: [has_text, 乱写, { kind: 不存在, not: { var: x } }]\n---\n";
+        let skill = parse("bad", text, "测试").unwrap();
+        let problems = validate(&skill, &OPS, &TOOLS).join("\n");
+        for expected in [
+            "不存在的文种",
+            "「乱写.工具」不是认识的工具",
+            "算子「乱写」不认识",
+            "不在 tools 白名单里",
+            "只能二选一",
+            "既没有 step 也没有 tool",
+            "提示词「没有这段」",
+            "缺少 do",
+            "缺少 over",
+            "条件「乱写」不认识",
+            "「不存在」不是认识的文种",
+        ] {
+            assert!(
+                problems.contains(expected),
+                "缺少「{expected}」：\n{problems}"
+            );
+        }
+        assert_eq!(skill.applies_to, [TemplateKind::OfficialLetter]);
+    }
+
+    #[test]
+    fn whitelist_handles_qualified_tools() {
+        let skill = parse(
+            "t",
+            "---\nname: x\ntools: [http.call, vocab.persons.phone]\n---\n",
+            "测试",
+        )
+        .unwrap();
+        assert!(skill.allows_tool("http.call:stat"));
+        assert!(skill.allows_tool("vocab.persons.phone"));
+        assert!(
+            !skill.allows_tool("vocab.persons"),
+            "要电话得明写 .phone，反过来不放行"
+        );
+        assert!(
+            validate(&skill, &OPS, &TOOLS)
+                .iter()
+                .all(|p| !p.contains("不是认识的工具"))
+        );
     }
 
     #[test]
     fn broken_files_are_rejected_with_a_reason() {
         assert!(
-            parse("没有 frontmatter", "x")
+            parse("x", "没有 frontmatter", "x")
                 .unwrap_err()
                 .contains("frontmatter")
         );
-        assert!(parse("---\nname: 甲\n", "x").unwrap_err().contains("收尾"));
         assert!(
-            parse("---\n乱写一行\n---\n", "x")
+            parse("x", "---\nname: 甲\n", "x")
                 .unwrap_err()
-                .contains("看不懂")
+                .contains("收尾")
+        );
+        assert!(
+            parse("x", "---\nflow: [不闭合\n---\n", "x")
+                .unwrap_err()
+                .contains("YAML")
         );
     }
 
     #[test]
-    fn a_partial_user_skill_falls_back_to_builtin_steps() {
-        let user = parse("---\nmax_rounds: 2\n---\n## 预研\n只查政策依据。\n", "用户").unwrap();
+    fn a_partial_or_legacy_user_skill_falls_back_to_builtin() {
+        // 第二期的旧写法：参数写在顶层，没有 flow。
+        let user = parse(
+            RESEARCH_DRAFT,
+            "---\nmax_rounds: 2\n---\n## 预研\n只查政策依据。\n",
+            "用户",
+        )
+        .unwrap();
         let merged = user.merged_with(&builtin_research_draft());
         assert_eq!(merged.section("预研"), Some("只查政策依据。"));
         assert!(merged.section("缺口修订").is_some());
         assert_eq!(merged.param_usize("max_rounds", 3, 1..=10), 2);
         assert_eq!(merged.name, "研究式起草");
+        assert_eq!(
+            merged.flow,
+            builtin_research_draft().flow,
+            "没写 flow 就沿用内置流程"
+        );
     }
 
     #[test]
-    fn user_override_is_read_from_the_config_dir() {
-        let dir = std::env::temp_dir().join(format!("gongwen-skill-{}", std::process::id()));
-        let skill_dir = dir.join("skills").join(RESEARCH_DRAFT_DIR);
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "---\nmax_rounds: 1\n---\n").unwrap();
+    fn user_skills_are_loaded_merged_and_added() {
+        let dir = std::env::temp_dir().join(format!("gongwen-skills-{}", std::process::id()));
+        let skills_dir = dir.join("skills");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(skills_dir.join(RESEARCH_DRAFT)).unwrap();
+        std::fs::create_dir_all(skills_dir.join("my-skill")).unwrap();
+        std::fs::create_dir_all(skills_dir.join("broken")).unwrap();
+        std::fs::write(
+            skills_dir.join(RESEARCH_DRAFT).join("SKILL.md"),
+            "---\nparams: { max_rounds: 1 }\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skills_dir.join("my-skill").join("SKILL.md"),
+            "---\nname: 我的技能\nflow:\n  - step: generate\n---\n",
+        )
+        .unwrap();
+        std::fs::write(skills_dir.join("broken").join("SKILL.md"), "坏掉的文件").unwrap();
         crate::storage::set_test_config_dir(Some(dir.clone()));
-        let (skill, note) = load_research_draft();
-        assert!(note.is_none());
-        assert_eq!(skill.param_usize("max_rounds", 3, 1..=10), 1);
-        std::fs::write(skill_dir.join("SKILL.md"), "坏掉的文件").unwrap();
-        let (skill, note) = load_research_draft();
-        assert!(note.unwrap().contains("已改用内置版本"));
-        assert_eq!(skill.param_usize("max_rounds", 3, 1..=10), 3);
+        let (skills, notes) = load_all();
         crate::storage::set_test_config_dir(None);
+        let research = skills.iter().find(|s| s.id == RESEARCH_DRAFT).unwrap();
+        assert_eq!(research.param_usize("max_rounds", 3, 1..=10), 1);
+        assert!(!research.flow.is_empty());
+        assert!(
+            skills
+                .iter()
+                .any(|s| s.id == "my-skill" && s.name == "我的技能")
+        );
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("broken"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

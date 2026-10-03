@@ -126,12 +126,12 @@ pub(crate) enum DocJob {
     },
     /// 要留在 AI 侧栏卡片上的说明（知识库命中了哪几篇、为什么没命中）。
     AiNote(String),
-    /// 研究式起草的一次工具调用，侧栏「过程」里一行。
+    /// 技能流程的一次工具调用，侧栏「过程」里一行。
     AiTool(String),
-    /// 研究式起草的工作稿整体换新（补全之后）。
+    /// 技能流程的工作稿整体换新（补全之后）。
     AiWorkspace(String),
-    /// 研究式起草结束：动笔前要问的题，或定稿后的提案。
-    ResearchDone(Result<Box<crate::ai_panel::ResearchResult>, String>),
+    /// 技能任务结束：流程挂起要问的题，或定稿后的提案。
+    SkillDone(Result<Box<crate::ai_panel::SkillResult>, String>),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
@@ -944,68 +944,82 @@ impl GongwenApp {
     }
 
     /// 研究式起草结束。
-    fn apply_research_done(
+    fn apply_skill_done(
         &mut self,
         index: usize,
         prefix: &str,
-        result: Result<Box<crate::ai_panel::ResearchResult>, String>,
+        result: Result<Box<crate::ai_panel::SkillResult>, String>,
     ) {
-        use crate::ai_panel::{ResearchResult, ResearchSnapshot};
+        use crate::ai_panel::{ResearchSnapshot, SkillResult};
         let doc = &mut self.docs[index];
         match result.map(|boxed| *boxed) {
-            Ok(ResearchResult::Clarify(questions)) => {
+            Ok(SkillResult::Suspended(run)) => {
                 doc.ai_review_baseline = None;
-                let count = questions.len();
-                let replies = crate::ai_panel::initial_replies(&questions);
-                let turn_id = doc.ai_panel.running_turn_mut().map(|turn| turn.id);
-                doc.ai_panel.ask(questions);
-                if let Some(turn) = turn_id.and_then(|id| doc.ai_panel.turn_mut(id)) {
-                    turn.replies = replies;
-                }
-                self.status = format!("{prefix}动笔前有 {count} 个问题要你确认，在侧栏里选一下。");
+                let count = run.suspension.questions.len();
+                doc.ai_panel.ask(run);
+                self.status = format!("{prefix}有 {count} 个问题要你确认，在侧栏里选一下。");
             }
-            Ok(ResearchResult::Proposal { draft, report }) => {
+            Ok(SkillResult::Proposal {
+                skill,
+                draft,
+                report,
+            }) => {
                 let report = *report;
                 let before = doc
                     .ai_review_baseline
                     .take()
                     .unwrap_or_else(|| doc.generated_markdown.clone());
+                let turn_id = doc.ai_panel.running_turn_mut().map(|turn| {
+                    // 自动选技能时卡片抬头先写着「自动选择技能」，定下来后换成技能名。
+                    if turn.title.starts_with("自动选择技能") {
+                        turn.title = turn.title.replacen("自动选择技能", &skill, 1);
+                    }
+                    turn.id
+                });
+                if doc.ai_prompt_last_label.starts_with("自动选择技能") {
+                    doc.ai_prompt_last_label =
+                        doc.ai_prompt_last_label.replacen("自动选择技能", &skill, 1);
+                }
                 let label = doc.ai_prompt_last_label.clone();
-                let turn_id = doc.ai_panel.running_turn_mut().map(|turn| turn.id);
                 let summary =
                     Self::install_ai_proposal(doc, before, draft, label, &self.config.vocabulary);
                 doc.ai_panel.finish(TurnState::Proposed(summary));
                 let (resolved, _, pending) = report.ledger.counts();
                 let asked = report.questions.len();
                 let rounds = report.rounds;
+                let researched = !report.ledger.gaps.is_empty() || !report.evidence.is_empty();
                 if let Some(turn) = turn_id.and_then(|id| doc.ai_panel.turn_mut(id)) {
                     turn.replies = crate::ai_panel::initial_replies(&report.questions);
                     turn.questions = report.questions;
-                    turn.research = Some(ResearchSnapshot {
-                        raw: report.markdown,
-                        sources: report
-                            .evidence
-                            .items()
-                            .iter()
-                            .map(|item| (item.id, item.source_label()))
-                            .collect(),
-                        ledger: report.ledger,
-                    });
+                    if researched {
+                        turn.research = Some(ResearchSnapshot {
+                            raw: report.markdown,
+                            sources: report
+                                .evidence
+                                .items()
+                                .iter()
+                                .map(|item| (item.id, item.source_label()))
+                                .collect(),
+                            ledger: report.ledger,
+                        });
+                    }
                 }
-                self.status = if asked == 0 {
+                self.status = if !researched {
+                    format!("{prefix}{skill}完成，提案在侧栏里。")
+                } else if asked == 0 {
                     format!(
-                        "{prefix}研究式起草完成（{rounds} 轮）：补全 {resolved} 处缺口，提案在侧栏里。"
+                        "{prefix}{skill}完成（{rounds} 轮）：补全 {resolved} 处缺口，提案在侧栏里。"
                     )
                 } else {
                     format!(
-                        "{prefix}研究式起草完成（{rounds} 轮）：补全 {resolved} 处，还有 {pending} 处待确认，{asked} 道题在侧栏里。"
+                        "{prefix}{skill}完成（{rounds} 轮）：补全 {resolved} 处，还有 {pending} 处待确认，{asked} 道题在侧栏里。"
                     )
                 };
             }
             Err(error) => {
                 doc.ai_review_baseline = None;
                 doc.ai_panel.finish(TurnState::Failed(error.clone()));
-                self.status = format!("{prefix}研究式起草失败：{error}");
+                self.status = format!("{prefix}AI 任务失败：{error}");
             }
         }
     }
@@ -1228,7 +1242,7 @@ impl GongwenApp {
             } => self.docs[index].ai_panel.append(&content, &reasoning, done),
             DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
-            DocJob::ResearchDone(result) => self.apply_research_done(index, &prefix, result),
+            DocJob::SkillDone(result) => self.apply_skill_done(index, &prefix, result),
             DocJob::AiNote(note) => {
                 self.status = format!("{prefix}{note}");
                 self.docs[index].ai_panel.note(note);

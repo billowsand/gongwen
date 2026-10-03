@@ -1,12 +1,75 @@
-//! 研究式起草流程的测试：按脚本回复的假模型 + 假知识库，跑通每条路径。
+//! 流程引擎的测试。
+//!
+//! 前半部分是第二期研究式起草的流程测试，原样改为经引擎跑内置技能（第 ③ 期的验收底线：
+//! 结果不变）；后半部分测引擎本身：工具步骤、条件、逐项、挂起与续跑、润色技能。
 
 use super::*;
-use crate::agent::backend::Completion;
-use crate::agent::clarify::Target;
-use crate::agent::skill::{builtin_research_draft, parse};
-use crate::models::TemplateKind;
+use crate::agent::backend::{Completion, ModelBackend, ModelRole};
+use crate::agent::clarify::{Question, Target};
+use crate::agent::gaps::GapStatus;
+use crate::agent::skill::{Skill, builtin, builtin_research_draft, parse};
+use crate::agent::tools::KnowledgeSearch;
+use crate::agent::tools::testing::FakeManuscripts;
+use crate::lmstudio::StreamDelta;
+use crate::models::{AppConfig, DraftInput, TemplateKind, VocabularyEntry};
 use crate::rag::RetrievedChunk;
 use std::cell::{Cell, RefCell};
+
+/// 第二期的流程入参，测试里照旧用它描述一次起草。
+struct ResearchInput {
+    draft: DraftInput,
+    request: String,
+    notes: Vec<String>,
+    clarified: bool,
+    system_prompt: String,
+    time_sources: String,
+}
+
+/// 第二期的流程结果形状：动笔前挂起，或跑完交付。
+enum ResearchOutcome {
+    Clarify(Vec<Question>),
+    Done(Box<SkillReport>),
+}
+
+type ResearchReport = SkillReport;
+
+fn board_of(input: &ResearchInput) -> Board {
+    Board {
+        draft: input.draft.clone(),
+        request: input.request.clone(),
+        notes: input.notes.clone(),
+        clarified: input.clarified,
+        system_prompt: input.system_prompt.clone(),
+        time_sources: input.time_sources.clone(),
+        ..Board::default()
+    }
+}
+
+/// 经引擎从头跑一遍技能流程。
+fn run(
+    input: &ResearchInput,
+    skill: &Skill,
+    vocabulary: &[VocabularyEntry],
+    model: &dyn ModelBackend,
+    kb: &dyn KnowledgeSearch,
+    emit: &mut dyn FnMut(Event),
+) -> anyhow::Result<ResearchOutcome> {
+    let config = AppConfig::default();
+    let manuscripts = FakeManuscripts { docs: Vec::new() };
+    let env = Env {
+        config: &config,
+        vocabulary,
+        kb,
+        manuscripts: &manuscripts,
+        model,
+        skill,
+    };
+    let mut board = board_of(input);
+    Ok(match super::run(&mut board, &env, 0, emit)? {
+        Outcome::Done => ResearchOutcome::Done(Box::new(SkillReport::from_board(&board))),
+        Outcome::Suspended(suspension) => ResearchOutcome::Clarify(suspension.questions),
+    })
+}
 
 /// 按角色与提示词决定回什么。
 type Responder = Box<dyn Fn(ModelRole, &str) -> String>;
@@ -166,7 +229,7 @@ fn run_with(
     skill: &Skill,
     model: &FakeModel,
     kb: &FakeKb,
-) -> (anyhow::Result<ResearchOutcome>, Vec<ResearchEvent>) {
+) -> (anyhow::Result<ResearchOutcome>, Vec<Event>) {
     let mut events = Vec::new();
     let outcome = run(input, skill, &[], model, kb, &mut |event| {
         events.push(event)
@@ -181,11 +244,11 @@ fn done(outcome: anyhow::Result<ResearchOutcome>) -> ResearchReport {
     }
 }
 
-fn tool_lines(events: &[ResearchEvent]) -> Vec<String> {
+fn tool_lines(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| match event {
-            ResearchEvent::Tool(tool) => Some(tool.summary.clone()),
+            Event::Tool(tool) => Some(tool.summary.clone()),
             _ => None,
         })
         .collect()
@@ -388,7 +451,7 @@ fn without_a_knowledge_base_every_gap_goes_to_the_user() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, ResearchEvent::Note(n) if n.contains("知识库未启用")))
+            .any(|e| matches!(e, Event::Note(n) if n.contains("知识库未启用")))
     );
     // 依据、时限、经费、12次（没有证据可溯源了）全部交给用户，一批最多 4 题。
     assert_eq!(report.questions.len(), 4);
@@ -478,6 +541,7 @@ fn stopping_ends_the_run_between_steps() {
 fn skill_parameters_bound_the_loop() {
     // 只给一轮、每个缺口只查一次：500万元一次没搜到就直接判无答案。
     let skill = parse(
+        "test",
         "---\nmax_rounds: 1\nattempts_per_gap: 1\nmax_checks: 0\nresearch_questions: 0\n---\n",
         "测试",
     )
@@ -512,13 +576,9 @@ fn skill_parameters_bound_the_loop() {
     assert_eq!(gap.status, GapStatus::NoAnswer);
 }
 
-/// 测试用：参数取自 `skill`，缺的步骤用内置补齐。
-fn skill_with_builtin_steps(mut skill: Skill) -> Skill {
-    let builtin = builtin_research_draft();
-    for (key, value) in builtin.sections {
-        skill.sections.entry(key).or_insert(value);
-    }
-    skill
+/// 测试用：参数取自 `skill`，缺的提示词与流程用内置补齐（与用户覆盖文件的合并规则相同）。
+fn skill_with_builtin_steps(skill: Skill) -> Skill {
+    skill.merged_with(&builtin_research_draft())
 }
 
 /// 连真实模型与真实知识库跑一遍研究式起草。默认忽略；需要：
@@ -581,13 +641,13 @@ fn live_research_draft() {
     };
     let skill = builtin_research_draft();
     let started = std::time::Instant::now();
-    let mut print = |event: ResearchEvent| match event {
-        ResearchEvent::Tool(tool) => eprintln!(
+    let mut print = |event: Event| match event {
+        Event::Tool(tool) => eprintln!(
             "[{:>5.1}s] {}",
             started.elapsed().as_secs_f32(),
             tool.line()
         ),
-        ResearchEvent::Note(note) => eprintln!("        · {note}"),
+        Event::Note(note) => eprintln!("        · {note}"),
         _ => {}
     };
     let outcome = run(&research, &skill, &[], &model, &kb, &mut print).unwrap();
@@ -633,4 +693,280 @@ fn live_research_draft() {
     }
     eprintln!("—— 工作稿 ——\n{}", report.markdown);
     assert!(!report.markdown.trim().is_empty());
+}
+
+// —— 引擎本身 ——
+
+/// 在给定黑板上从第 `start` 步跑技能，返回 (结果, 事件, 跑完的黑板)。
+fn run_board(
+    mut board: Board,
+    skill: &Skill,
+    model: &FakeModel,
+    kb: &FakeKb,
+    start: usize,
+) -> (anyhow::Result<Outcome>, Vec<Event>, Board) {
+    let config = AppConfig::default();
+    let manuscripts = FakeManuscripts { docs: Vec::new() };
+    let env = Env {
+        config: &config,
+        vocabulary: &[],
+        kb,
+        manuscripts: &manuscripts,
+        model,
+        skill,
+    };
+    let mut events = Vec::new();
+    let outcome = super::run(&mut board, &env, start, &mut |event| events.push(event));
+    (outcome, events, board)
+}
+
+fn notes(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Note(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn silent_model() -> FakeModel {
+    FakeModel::new(|_, _| "无".into())
+}
+
+#[test]
+fn tool_steps_save_variables_absorb_evidence_and_respect_conditions() {
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [kb.search, doc.stats, note]\nflow:\n  - tool: kb.search\n    args: { query: \"{request}\" }\n    save_as: hits\n  - tool: doc.stats\n    when: has_text\n    save_as: stats\n  - tool: note\n    args: { text: \"查到：{hits}\" }\n    when: { var: hits }\n  - tool: note\n    args: { text: \"不该出现\" }\n    when: { not: has_sources }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let board = Board {
+        request: "起草通知，依据上级要求".into(),
+        ..Board::default()
+    };
+    let (outcome, events, board) = run_board(board, &skill, &silent_model(), &kb(true), 0);
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    assert_eq!(board.evidence.items().len(), 1, "检索结果默认并入证据包");
+    assert_eq!(board.evidence.items()[0].query, "起草通知，依据上级要求");
+    assert_eq!(board.vars["hits"].as_array().unwrap().len(), 1);
+    assert!(
+        !board.vars.contains_key("stats"),
+        "正文为空，has_text 不满足就跳过"
+    );
+    let notes = notes(&events);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with("查到：1. 省森林防火条例："),
+        "{notes:?}"
+    );
+    assert!(
+        tool_lines(&events)
+            .iter()
+            .any(|line| line.contains("检索知识库「")),
+        "工具调用在任务流里留一行"
+    );
+}
+
+#[test]
+fn a_failing_tool_leaves_a_note_and_the_flow_goes_on() {
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [kb.search, note]\nflow:\n  - tool: kb.search\n    args: { query: 防火 }\n    save_as: hits\n  - tool: note\n    args: { text: 接着走 }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let (outcome, events, board) =
+        run_board(Board::default(), &skill, &silent_model(), &kb(false), 0);
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    let notes = notes(&events);
+    assert!(
+        notes[0].contains("工具 kb.search没有做成：知识库未启用"),
+        "{notes:?}"
+    );
+    assert_eq!(notes[1], "接着走");
+    assert!(!board.vars.contains_key("hits"));
+}
+
+#[test]
+fn for_each_runs_the_body_per_item_and_refuses_to_ask_inside() {
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [note, ask.choice]\nflow:\n  - step: for_each\n    over: sections\n    as: section\n    do:\n      - tool: note\n        args: { text: \"第{index}项：{section}\" }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let mut board = Board::default();
+    board.vars.insert(
+        "sections".into(),
+        serde_json::json!(["总体要求", "工作安排"]),
+    );
+    let (outcome, events, _) = run_board(board.clone(), &skill, &silent_model(), &kb(true), 0);
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    assert_eq!(notes(&events), ["第1项：总体要求", "第2项：工作安排"]);
+
+    let asking = parse(
+        "t",
+        "---\nname: 测试\ntools: [ask.choice]\nflow:\n  - step: for_each\n    over: sections\n    do:\n      - tool: ask.choice\n        args: { question: 要吗？, options: [要, 不要] }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let (outcome, _, _) = run_board(board, &asking, &silent_model(), &kb(true), 0);
+    assert!(format!("{:#}", outcome.unwrap_err()).contains("不能停下来问用户"));
+}
+
+#[test]
+fn a_choice_suspends_and_the_answer_resumes_from_the_next_step() {
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [ask.choice, note]\nflow:\n  - step: ask\n    choose_from: candidates\n    question: 照哪篇写？\n    save_as: baseline_id\n  - tool: note\n    args: { text: \"基准稿 {baseline_id}\" }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let mut board = Board::default();
+    board.vars.insert(
+        "candidates".into(),
+        serde_json::json!([{"id": 7, "title": "去年的通知"}, {"id": 9, "title": "前年的通知"}]),
+    );
+    let (outcome, events, mut board) = run_board(board, &skill, &silent_model(), &kb(true), 0);
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("出了选择题就该挂起");
+    };
+    assert_eq!(suspension.resume_at, 1);
+    assert_eq!(suspension.save_as.as_deref(), Some("baseline_id"));
+    assert_eq!(suspension.questions[0].target, Target::Pick);
+    assert_eq!(suspension.questions[0].text, "照哪篇写？");
+    assert!(notes(&events).is_empty(), "挂起后不往下跑");
+
+    let kind = apply_answers(
+        &mut board,
+        &suspension,
+        &[(1, crate::agent::clarify::Reply::Choice(1))],
+    );
+    assert_eq!(kind, None);
+    assert_eq!(board.vars["baseline_id"], 9);
+    let (outcome, events, _) = run_board(
+        board,
+        &skill,
+        &silent_model(),
+        &kb(true),
+        suspension.resume_at,
+    );
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    assert_eq!(notes(&events), ["基准稿 9"]);
+}
+
+#[test]
+fn predraft_answers_become_notes_and_the_flow_continues_without_asking_again() {
+    let model = honest_model();
+    let skill = builtin_research_draft();
+    let mut request = input("起草一份商洽函", false);
+    request.draft.kind = TemplateKind::PlainDocument;
+    let (outcome, _, mut board) = run_board(board_of(&request), &skill, &model, &kb(true), 0);
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("文种对不上应当先问");
+    };
+    assert_eq!(suspension.resume_at, 1, "答完从预研接着跑");
+    let kind = apply_answers(
+        &mut board,
+        &suspension,
+        &[(1, crate::agent::clarify::Reply::Choice(0))],
+    );
+    assert_eq!(
+        kind,
+        Some(TemplateKind::OfficialLetter),
+        "切文种交回界面线程执行"
+    );
+    assert!(board.clarified);
+    // 界面线程切完文种，带着新要素接着跑。
+    board.draft.kind = TemplateKind::OfficialLetter;
+    let (outcome, _, board) = run_board(board, &skill, &model, &kb(true), suspension.resume_at);
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    assert_eq!(model.asked("会让整篇方向写错"), 1, "问过的不再问");
+    assert!(model.asked("到知识库里查清的问题") >= 1);
+    assert!(!board.workspace.is_empty());
+}
+
+#[test]
+fn polish_runs_through_the_engine_with_the_selection_pinned() {
+    let model = FakeModel::new(|_, _| "# 标题\n\n一、甲。\n\n二、乙改。\n".into());
+    let skill = builtin(crate::agent::skill::POLISH).unwrap();
+    let document = "# 标题\n\n一、甲。\n\n二、乙。\n".to_string();
+    let board = Board {
+        request: "压缩".into(),
+        preset: "精简篇幅".into(),
+        selection: Some("二、乙。".into()),
+        workspace: document.clone(),
+        document,
+        system_prompt: "SYSTEM".into(),
+        ..Board::default()
+    };
+    let (outcome, events, board) = run_board(board, &skill, &model, &kb(true), 0);
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    let calls = model.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    let (role, prompt) = &calls[0];
+    assert_eq!(*role, ModelRole::Draft);
+    assert!(prompt.contains("精简篇幅\n\n压缩"), "{prompt}");
+    assert!(
+        prompt.contains("【唯一允许修改的原文片段】\n二、乙。"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("一、甲。"), "改写要带上现有正文：{prompt}");
+    assert_eq!(board.workspace, "# 标题\n\n一、甲。\n\n二、乙改。");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Content(text) if text.contains("乙改"))),
+        "改写结果流进界面"
+    );
+    let report = SkillReport::from_board(&board);
+    assert!(report.questions.is_empty() && report.ledger.gaps.is_empty());
+}
+
+#[test]
+fn rewriting_an_empty_document_is_refused() {
+    let skill = builtin(crate::agent::skill::POLISH).unwrap();
+    let board = Board {
+        request: "压缩".into(),
+        ..Board::default()
+    };
+    let (outcome, _, _) = run_board(board, &skill, &silent_model(), &kb(true), 0);
+    assert!(format!("{:#}", outcome.unwrap_err()).contains("正文还是空的"));
+}
+
+#[test]
+fn conditions_cover_kind_variables_and_negation() {
+    use serde_json::json;
+    let config = AppConfig::default();
+    let manuscripts = FakeManuscripts { docs: Vec::new() };
+    let skill = builtin_research_draft();
+    let model = silent_model();
+    let kb = kb(false);
+    let env = Env {
+        config: &config,
+        vocabulary: &[],
+        kb: &kb,
+        manuscripts: &manuscripts,
+        model: &model,
+        skill: &skill,
+    };
+    let mut board = Board::default();
+    board.draft.kind = TemplateKind::ResearchReport;
+    board.vars.insert("empty".into(), json!([]));
+    board.vars.insert("hits".into(), json!([1]));
+    let holds = |board: &Board, value: serde_json::Value| condition_holds(board, &env, &value);
+    assert!(holds(&board, json!({"kind": ["研究报告", "公函"]})));
+    assert!(holds(&board, json!({"kind": "ResearchReport"})));
+    assert!(!holds(&board, json!({"kind": "公函"})));
+    assert!(holds(&board, json!({"var": "hits"})));
+    assert!(!holds(&board, json!({"var": "empty"})), "空列表算没有");
+    assert!(!holds(&board, json!("has_sources")), "知识库没启用");
+    assert!(holds(&board, json!({"not": "has_sources"})));
+    assert!(
+        !holds(&board, json!(["has_text", {"var": "hits"}])),
+        "列表要全部满足"
+    );
+    assert!(!holds(&board, json!("乱写")), "认不出的条件当不满足");
 }
