@@ -73,11 +73,12 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 - **AI 工作台智能体化**（已替代 AI 起草工作台）：右侧 AI 侧栏 + 流式输出 + SKILL.md 技能
   + 数据接口（内网 HTTP）+ 声明式流程引擎，不引入外部智能体框架。**第 ①（流式输出 + 侧栏骨架）、
   ②（研究式起草 + 选择题澄清 + SKILL.md）、③（工具 → 算子 → 技能三层、流程引擎、技能条）、
-  ④（数据接口 `http.call`、设置页技能 / 数据接口 / 工具调试台）、⑤（12 个内置技能：起草、修改、审核三类；
-  旧的 AI 起草工作台已删除）期已完成**，代码在 `src/agent/`（`tools/`、`ops/`、`engine.rs`、`skill.rs`、
-  `skill_files.rs`、`api.rs`、`router.rs`）、`assets/agent-skills/`、`src/ai_panel/` 与
-  `src/app/agent_settings.rs`。下一步是第 ⑥ 期：界面与设置整合——AI 设置全部收进 AI 管理页、侧栏输入框现代化
-  （`/` 技能与 `@` 文章跟随光标弹出，见 16.13）；自主步骤等顺延到第 ⑦ 期（见第十六节；opencode 接入已作废）。
+  ④（数据接口 `http.call`、技能 / 数据接口 / 工具调试台管理界面）、⑤（12 个内置技能：起草、修改、审核三类；
+  旧的 AI 起草工作台已删除）、⑥（AI 设置全部收进 AI 管理页 `src/app/ai_manage.rs`；一体化输入框，`/` 技能与
+  `@` 引用文章在光标处弹出，`@` 的文章按技能 `references:` 当证据 / 基准稿 / 材料 / 来函）期已完成**，代码在
+  `src/agent/`（`tools/`、`ops/`、`engine.rs`、`references.rs`、`skill.rs`、`skill_files.rs`、`api.rs`、`router.rs`）、
+  `assets/agent-skills/`、`src/ai_panel/`（`composer_ui.rs`、`mention.rs`）与 `src/app/agent_settings.rs`。
+  下一步是第 ⑦ 期：自主步骤（OpenAI 工具调用）、政策依据核对、对比分析等（见第十六节；opencode 接入已作废）。
   方案、红线修订记录、分期、各期进度与已知坑见 `docs/ai-agent-workbench.md`（单文件，第十三节是交接）。
 - **送批材料**（呈批件挂随行件、按提交版合并成一个 PDF、归档钉版、随同步 ZIP 携带）：
   五期已全部实现，**待真机验收**（排版→合并整条链、ZIP 往返）。方案、各期进度、

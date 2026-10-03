@@ -1,10 +1,11 @@
 ---
 name: 仿写
 description: 照着稿件库里的一篇旧稿写新稿（换届、续期、同类事项）：先找候选稿让你选、选仿写方式，再问清这次变了什么；旧稿里没有重新确认的事实一律不沿用，缺的出题问你
-hint: 说清照哪篇、这次变了什么，例如：仿照去年的冬季森林防火通知写今年的，排查改到12月1日前完成
+hint: 说清照哪篇（可以 @ 直接点选）、这次变了什么，例如：仿照去年的冬季森林防火通知写今年的，排查改到12月1日前完成
 triggers: ["(仿照|参照|照着|模仿|仿写|比照|套用).+", 仿写, 照着写]
 when: { text: any }
 output: proposal
+references: baseline
 tools: [ms.search, ms.read, ask.choice, note, doc.elements, kb.search, check.placeholders, check.facts, llm.generate, ws.write, ws.replace]
 params:
   max_rounds: 2
@@ -17,6 +18,7 @@ flow:
   - tool: ms.search
     args: { query: "{request}", limit: 8 }
     save_as: candidates
+    when: { not: { var: baseline } }
   - step: ask
     choose_from: candidates
     question: 照哪篇写？
@@ -28,7 +30,7 @@ flow:
     args: { id: "{baseline_id}" }
     save_as: baseline
     evidence: false
-    when: { var: baseline_id }
+    when: [{ var: baseline_id }, { not: { var: baseline } }]
   - tool: note
     args: { text: 没有选到可仿照的稿件，按材料直接起草。 }
     when: { not: { var: baseline } }
@@ -51,7 +53,7 @@ flow:
 
 # 仿写
 
-流程：按你的话检索稿件库 → 你选基准稿 → 选仿写方式 → 问清这次变了什么 → 起草 → 缺口循环 → 核验 → 出题。
+流程：按你的话检索稿件库 → 你选基准稿（输入框里 @ 了一篇就直接用它，不再列候选） → 选仿写方式 → 问清这次变了什么 → 起草 → 缺口循环 → 核验 → 出题。
 
 基准稿只作写法参考，**不进证据包**：旧稿里的时间、数字、单位、人员、文件，本次材料和你的回答里
 没有的，会被当作「来源不明」查出来问你，不会悄悄沿用。

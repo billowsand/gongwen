@@ -400,7 +400,7 @@ impl DraftPage<'_> {
             .on_disabled_hover_text(if self.config.revise_model.enabled {
                 "需要先有正文，且当前没有正在运行的任务"
             } else {
-                "未启用：请在「设置 → AI 文字复核」中配置复核用的小模型"
+                "未启用：请在「AI 管理 → 文字复核」中配置复核用的小模型"
             })
             .clicked()
         {

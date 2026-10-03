@@ -1,4 +1,4 @@
-//! 设置页「智能体」分组：技能、数据接口、工具调试台（`docs/ai-agent-workbench.md` 16.9）。
+//! AI 管理页「智能体」分组：技能、数据接口、工具调试台（`docs/ai-agent-workbench.md` 16.9、16.13）。
 //!
 //! - 技能：列出内置与用户技能，启用 / 停用，查看与编辑 SKILL.md（保存时校验），复制内置、
 //!   新建、删除、导入导出；
@@ -199,7 +199,7 @@ impl GongwenApp {
                     let mut enabled = skill.enabled;
                     if ui
                         .checkbox(&mut enabled, "")
-                        .on_hover_text("停用后不出现在技能条里，也不会被自动选到")
+                        .on_hover_text("停用后不出现在 / 列表与技能标签里，也不会被自动选到")
                         .changed()
                     {
                         toggles.push((skill.id.clone(), enabled));

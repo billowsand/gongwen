@@ -205,7 +205,7 @@ impl DraftPage<'_> {
         let cfg = self.config.revise_model.clone();
         let tasks = cfg.enabled_tasks();
         if tasks.is_empty() {
-            *self.status = "没有启用任何检查器：请在「设置 → AI 文字复核」中至少开启一项。".into();
+            *self.status = "没有启用任何检查器：请在「AI 管理 → 文字复核」中至少开启一项。".into();
             return;
         }
         let sentences = revise_model::segment_sentences(&markdown, cfg.max_sentence_chars);

@@ -71,15 +71,38 @@ impl Harness {
 
     /// 画一帧侧栏，返回画面上所有文字。
     fn frame_texts(&mut self) -> Vec<String> {
+        self.frame_with(Vec::new())
+    }
+
+    /// 把焦点放进侧栏输入框（下一帧生效）。
+    fn focus_input(&mut self) {
+        let id = egui::Id::new(("ai_panel_input", self.doc.key));
+        self.ctx.memory_mut(|memory| memory.request_focus(id));
+    }
+
+    /// 带着按键画一帧。
+    fn press(&mut self, key: egui::Key) -> Vec<String> {
+        self.frame_with(vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }])
+    }
+
+    fn frame_output(&mut self, events: Vec<egui::Event>, size: egui::Vec2) -> egui::FullOutput {
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1200.0, 900.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
             ..Default::default()
         };
         let ctx = self.ctx.clone();
-        let output = ctx.run_ui(raw, |ui| self.with_page(|page| page.ai_panel_side(ui)));
+        ctx.run_ui(raw, |ui| self.with_page(|page| page.ai_panel_side(ui)))
+    }
+
+    fn frame_with(&mut self, events: Vec<egui::Event>) -> Vec<String> {
+        let output = self.frame_output(events, egui::vec2(1200.0, 900.0));
         fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
             match shape {
                 egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_string()),
@@ -179,12 +202,13 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
     let mut harness = Harness::new("");
     harness.doc.draft.kind = TemplateKind::PlainDocument;
     harness.doc.ai_panel.open = true;
-    let request = TurnRequest {
+    let request = crate::ai_panel::TurnRequest {
         skill: Some(RESEARCH_DRAFT.into()),
         text: "起草一份商洽函".into(),
         selection: None,
         preset: None,
         use_rag: false,
+        refs: Vec::new(),
         notes: Vec::new(),
     };
     let model_questions = vec![("篇幅多长？".to_string(), vec!["短".into(), "长".into()])];
@@ -331,7 +355,7 @@ fn the_skill_chip_follows_the_document_and_the_input() {
     harness.frame_texts();
     let texts = harness.frame_texts();
     assert!(
-        has(&texts, "也可以输入 / 选技能"),
+        has(&texts, "输入 / 选技能"),
         "空稿、没写要求时几个起草类技能都可用：{texts:?}"
     );
     assert!(
@@ -357,7 +381,7 @@ fn the_skill_chip_follows_the_document_and_the_input() {
     let texts = harness.frame_texts();
     assert!(has(&texts, "自动"), "{texts:?}");
     assert!(
-        has(&texts, "也可以输入 / 选技能"),
+        has(&texts, "输入 / 选技能"),
         "有稿、没写要求时给通用提示：{texts:?}"
     );
 
@@ -383,9 +407,21 @@ fn a_slash_prefix_offers_and_pins_skills() {
     let mut harness = Harness::new("# 标题\n\n正文\n");
     harness.doc.ai_panel.open = true;
     harness.doc.ai_panel.composer.text = "/润".into();
+    harness.focus_input();
     harness.frame_texts();
     let texts = harness.frame_texts();
     assert!(has(&texts, "润色"), "列出匹配的技能：{texts:?}");
+    assert!(has(&texts, "↑↓ 选择"), "光标处弹出技能列表：{texts:?}");
+    assert!(!has(&texts, "仿写"), "随输入过滤：{texts:?}");
+
+    // 回车选中高亮项：`/润` 从文字里去掉，技能标签换成润色。
+    harness.press(egui::Key::Enter);
+    let composer = &harness.doc.ai_panel.composer;
+    assert_eq!(composer.skill.as_deref(), Some(POLISH));
+    assert!(composer.text.is_empty(), "{:?}", composer.text);
+    let texts = harness.frame_texts();
+    assert!(!has(&texts, "↑↓ 选择"), "选完弹出层关掉：{texts:?}");
+    harness.doc.ai_panel.composer.skill = None;
 
     harness.doc.ai_panel.composer.text = "/润色 只改错别字".into();
     harness.with_page(|page| page.send_ai_panel());
@@ -845,4 +881,224 @@ fn live_model_routing_and_polish() {
             _ => {}
         }
     }
+}
+
+#[test]
+fn escape_closes_the_popup_until_the_trigger_is_typed_again() {
+    let mut harness = Harness::new("# 标题\n\n正文\n");
+    harness.doc.ai_panel.open = true;
+    harness.doc.ai_panel.composer.text = "/".into();
+    harness.focus_input();
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "↑↓ 选择"), "{texts:?}");
+    harness.press(egui::Key::Escape);
+    let texts = harness.frame_texts();
+    assert!(!has(&texts, "↑↓ 选择"), "Esc 关掉：{texts:?}");
+    assert_eq!(harness.doc.ai_panel.composer.text, "/", "Esc 不动文字");
+    let id = egui::Id::new(("ai_panel_input", harness.doc.key));
+    assert!(
+        harness.ctx.memory(|memory| memory.has_focus(id)),
+        "Esc 被弹出层吃掉，输入框不失焦"
+    );
+}
+
+#[test]
+fn at_lists_articles_by_group_and_leaves_a_reference_mark() {
+    use crate::agent::board::{RefSource, Reference};
+    use crate::ai_panel::mention::CatalogItem;
+    use crate::models::TemplateKind;
+    let mut harness = Harness::new("");
+    harness.doc.ai_panel.open = true;
+    let item = |source, id, title: &str, kind| CatalogItem {
+        reference: Reference {
+            source,
+            id,
+            title: title.into(),
+        },
+        kind,
+        date: "2025-11-02".into(),
+    };
+    harness.doc.ai_panel.composer.popup.catalog = Some(vec![
+        item(
+            RefSource::Manuscript,
+            7,
+            "2025年冬季森林防火通知",
+            TemplateKind::PhoneNotice,
+        ),
+        item(
+            RefSource::Manuscript,
+            8,
+            "安全生产检查方案",
+            TemplateKind::PlainDocument,
+        ),
+        item(
+            RefSource::Knowledge,
+            3,
+            "森林防火条例",
+            TemplateKind::PlainDocument,
+        ),
+    ]);
+    harness.doc.ai_panel.composer.text = "参照@fh".into();
+    harness.focus_input();
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "引用文章"), "{texts:?}");
+    assert!(
+        has(&texts, "稿件库") && has(&texts, "知识库"),
+        "分组：{texts:?}"
+    );
+    assert!(
+        has(&texts, "2025年冬季森林防火通知"),
+        "拼音首字母过滤：{texts:?}"
+    );
+    assert!(has(&texts, "森林防火条例"), "{texts:?}");
+    assert!(!has(&texts, "安全生产检查方案"), "{texts:?}");
+    assert!(
+        has(&texts, "电话通知 · 2025-11-02"),
+        "带文种与日期：{texts:?}"
+    );
+
+    // ↓ 到第二项（知识库那篇），回车插入。
+    harness.press(egui::Key::ArrowDown);
+    harness.press(egui::Key::Enter);
+    let composer = &harness.doc.ai_panel.composer;
+    assert_eq!(composer.text, "参照@《森林防火条例》");
+    assert_eq!(composer.refs.len(), 1);
+    assert_eq!(composer.refs[0].source, RefSource::Knowledge);
+    assert_eq!(composer.refs[0].id, 3);
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "《森林防火条例》"), "底栏出文章标签：{texts:?}");
+
+    harness.doc.ai_panel.composer.text.push_str("写今年的通知");
+    harness.with_page(|page| page.send_ai_panel());
+    let turn = harness.doc.ai_panel.turns.last().expect("开了一轮");
+    assert_eq!(
+        turn.prompt, "参照《森林防火条例》写今年的通知",
+        "发出去的原话去掉 @"
+    );
+    assert!(turn.context.iter().any(|chip| chip == "《森林防火条例》"));
+    let request = turn.request.as_ref().unwrap();
+    assert_eq!(request.refs.len(), 1);
+    assert!(
+        harness.doc.ai_panel.composer.refs.is_empty(),
+        "发出去后清空"
+    );
+    harness.with_page(|page| page.stop_ai_task());
+}
+
+#[test]
+fn deleting_the_mark_drops_the_reference_and_the_chip_unlinks() {
+    use crate::agent::board::{RefSource, Reference};
+    let mut harness = Harness::new("");
+    harness.doc.ai_panel.open = true;
+    let reference = Reference {
+        source: RefSource::Manuscript,
+        id: 7,
+        title: "甲通知".into(),
+    };
+    let composer = &mut harness.doc.ai_panel.composer;
+    composer.refs = vec![reference.clone()];
+    composer.text = "参照@《甲通知》写".into();
+    harness.frame_texts();
+    assert_eq!(harness.doc.ai_panel.composer.refs, [reference]);
+    harness.doc.ai_panel.composer.text = "参照写".into();
+    harness.frame_texts();
+    assert!(
+        harness.doc.ai_panel.composer.refs.is_empty(),
+        "记号删了引用就没了"
+    );
+}
+
+/// 侧栏输入框的样张：空框、`/` 弹出、`@` 弹出、带标签。出到 `tmp/ai-panel-*.png` 目视检查。
+#[test]
+#[ignore = "出样张，手动跑"]
+fn composer_samples() {
+    use crate::agent::board::{RefSource, Reference};
+    use crate::ai_panel::mention::CatalogItem;
+    use crate::models::TemplateKind;
+    let size = egui::vec2(480.0, 720.0);
+    let shoot = |harness: &mut Harness, name: &str| {
+        let mut canvas = crate::ui_snapshot::Canvas::default();
+        theme::configure_style(&harness.ctx);
+        harness.ctx.set_pixels_per_point(2.0);
+        for _ in 0..15 {
+            let output = harness.frame_output(Vec::new(), size);
+            canvas.absorb(&output.textures_delta);
+        }
+        let output = harness.frame_output(Vec::new(), size);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("ai-panel-{name}.png"));
+        canvas.render(&harness.ctx, output, size, theme::canvas(), &path);
+        println!("{}", path.display());
+    };
+
+    let mut harness = Harness::new("");
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    shoot(&mut harness, "empty");
+
+    let mut harness = Harness::new("# 关于做好冬季森林防火工作的通知\n\n一、总体要求\n");
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    harness.doc.ai_panel.composer.text = "/".into();
+    harness.focus_input();
+    shoot(&mut harness, "slash");
+
+    let mut harness = Harness::new("");
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    let item = |source, id, title: &str, kind| CatalogItem {
+        reference: Reference {
+            source,
+            id,
+            title: title.into(),
+        },
+        kind,
+        date: "2025-11-02".into(),
+    };
+    harness.doc.ai_panel.composer.popup.catalog = Some(vec![
+        item(
+            RefSource::Manuscript,
+            7,
+            "关于做好2025年冬季森林防火工作的通知",
+            TemplateKind::PlainDocument,
+        ),
+        item(
+            RefSource::Manuscript,
+            8,
+            "关于开展安全生产大检查的通知",
+            TemplateKind::PlainDocument,
+        ),
+        item(
+            RefSource::Knowledge,
+            3,
+            "森林防火条例",
+            TemplateKind::PlainDocument,
+        ),
+        item(
+            RefSource::Knowledge,
+            4,
+            "应急物资管理办法",
+            TemplateKind::OfficialLetter,
+        ),
+    ]);
+    harness.doc.ai_panel.composer.text = "仿照@".into();
+    harness.focus_input();
+    shoot(&mut harness, "mention");
+
+    let mut harness = Harness::new("# 关于做好冬季森林防火工作的通知\n\n一、总体要求\n");
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    let composer = &mut harness.doc.ai_panel.composer;
+    composer.text = "参照@《2025年冬季森林防火通知》压缩到800字".into();
+    composer.refs = vec![Reference {
+        source: RefSource::Manuscript,
+        id: 7,
+        title: "2025年冬季森林防火通知".into(),
+    }];
+    composer.selection = Some((0..10, "一、总体要求".into()));
+    shoot(&mut harness, "chips");
+    let texts = harness.frame_texts();
+    assert!(
+        !has(&texts, "仿写"),
+        "引用的书名不把技能带偏到仿写：{texts:?}"
+    );
 }

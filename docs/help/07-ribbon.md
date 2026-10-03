@@ -27,7 +27,7 @@
 | AI 文字复核 | 小模型逐句查语病，结果进**修订建议** |
 | 规则校验 | 重新跑要素校验与词表复扫 |
 
-AI 侧栏见 [AI 侧栏与技能](chapter:13-ai-workbench)，文字复核见 [AI 优化、提示词与文字复核](chapter:14-ai-polish)。
+AI 侧栏见 [AI 侧栏与技能](chapter:13-ai-workbench)，文字复核见 [AI 管理：模型、技能与润色预设](chapter:14-ai-polish)。
 
 ## 插入
 

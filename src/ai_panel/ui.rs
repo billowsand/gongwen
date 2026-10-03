@@ -1,12 +1,10 @@
 //! AI 侧栏的界面：标题行、任务流卡片、输入区。挂在 `DraftPage` 上。
 
-use super::skill_job::{asking_labels, unavailable};
-use super::{AUTO_HINT, AiPanel, Composer, ProposalSummary, TurnRequest, TurnState};
-use crate::agent::router::{self, Route, RouteContext};
-use crate::agent::skill::{POLISH, Skill, TextNeed};
+use super::skill_job::asking_labels;
+use super::{ProposalSummary, TurnState};
+use crate::agent::skill::POLISH;
 use crate::app::{DraftAction, GongwenApp};
 use crate::draft_page::{AiProposal, DraftPage};
-use crate::models::TemplateKind;
 use crate::theme;
 use eframe::egui;
 use std::ops::Range;
@@ -46,7 +44,7 @@ impl DraftPage<'_> {
         self.doc.ai_panel.open = open && self.doc.ai_panel.open;
     }
 
-    /// 打开或收起侧栏。带着选区打开时，选区锁进输入区、技能条定在润色。
+    /// 打开或收起侧栏。带着选区打开时，选区锁进输入区、技能定在润色。
     pub(crate) fn toggle_ai_panel(&mut self, selection: Option<Range<usize>>) {
         let selection = selection
             .filter(|range| !range.is_empty())
@@ -110,7 +108,7 @@ impl DraftPage<'_> {
                 ui.menu_button("•••", |ui| {
                     if ui
                         .add(theme::menu_item(theme::Icon::WandSparkles, "管理技能…"))
-                        .on_hover_text("设置页「技能」：启用停用、复制改写、新建、导入导出")
+                        .on_hover_text("AI 管理页「技能」：启用停用、复制改写、新建、导入导出")
                         .clicked()
                     {
                         self.actions.push(DraftAction::OpenSkillSettings);
@@ -217,195 +215,6 @@ impl DraftPage<'_> {
                 }
             }
             None => {}
-        }
-    }
-
-    fn ai_composer_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        theme::hairline(ui);
-        ui.add_space(6.0);
-        if self.doc.ai_panel.skills.is_empty() {
-            let _ = self.doc.ai_panel.reload_skills();
-        }
-        let kind = self.doc.draft.kind;
-        let has_text = !self.doc.generated_markdown.trim().is_empty();
-        let rag_enabled = self.config.rag.enabled;
-        let running = self.doc.ai_panel.running();
-        let selection_now =
-            crate::draft_page::editor_selection(ui.ctx(), &self.doc.generated_markdown)
-                .filter(|range| !range.is_empty());
-        let mut pick_selection = false;
-        let chip = chip_state(&self.doc.ai_panel, has_text, kind);
-        {
-            let AiPanel {
-                skills, composer, ..
-            } = &mut self.doc.ai_panel;
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_id_salt(("ai_panel_skill", self.doc.key))
-                    .selected_text(&chip.label)
-                    .width(150.0)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(&mut composer.skill, None, "自动")
-                            .on_hover_text("按正文状态与输入内容自动选；分不出时发送后由模型判断")
-                            .changed()
-                        {
-                            composer.error = None;
-                        }
-                        for skill in skills.iter().filter(|skill| skill.enabled) {
-                            if ui
-                                .selectable_value(
-                                    &mut composer.skill,
-                                    Some(skill.id.clone()),
-                                    &skill.name,
-                                )
-                                .on_hover_text(&skill.description)
-                                .changed()
-                            {
-                                composer.error = None;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text(&chip.tooltip);
-                if chip.uses_preset {
-                    let selected = composer
-                        .preset
-                        .and_then(|id| self.config.ai_prompt(id))
-                        .map_or("不用预设", |prompt| prompt.name.as_str());
-                    egui::ComboBox::from_id_salt(("ai_panel_preset", self.doc.key))
-                        .selected_text(selected)
-                        .width(110.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut composer.preset, None, "不用预设");
-                            for prompt in self
-                                .config
-                                .ai_prompts
-                                .iter()
-                                .filter(|prompt| prompt.applies_to(kind))
-                            {
-                                ui.selectable_value(
-                                    &mut composer.preset,
-                                    Some(prompt.id),
-                                    &prompt.name,
-                                );
-                            }
-                        });
-                }
-                if let Some((_, text)) = &composer.selection {
-                    if ui
-                        .add(theme::removable_tag_button(
-                            &format!("选区 {} 字", text.chars().count()),
-                            false,
-                        ))
-                        .on_hover_text("只改这段，其余逐字保持不变；点 × 改为全文")
-                        .clicked()
-                    {
-                        composer.selection = None;
-                    }
-                } else if chip.edits_text {
-                    if selection_now.is_some() {
-                        if ui
-                            .small_button("用当前选区")
-                            .on_hover_text("只改编辑器里选中的那段")
-                            .clicked()
-                        {
-                            pick_selection = true;
-                        }
-                    } else {
-                        ui.weak("全文");
-                    }
-                }
-                if chip.uses_knowledge {
-                    ui.add_enabled_ui(rag_enabled, |ui| {
-                        ui.checkbox(&mut composer.use_rag, "检索知识库")
-                            .on_disabled_hover_text("知识库尚未启用，可在设置中配置");
-                    });
-                }
-            });
-        }
-        if pick_selection && let Some(range) = selection_now {
-            let text = self.doc.generated_markdown[range.clone()].to_string();
-            self.doc.ai_panel.composer.selection = Some((range, text));
-        }
-        ui.add_space(4.0);
-
-        // Ctrl+Enter 发送：在输入框画出来之前先把按键吃掉，否则 TextEdit 会把它当换行。
-        // Enter 留给换行与内置输入法上屏。
-        let input_id = egui::Id::new(("ai_panel_input", self.doc.key));
-        let mut send = ui.memory(|memory| memory.has_focus(input_id))
-            && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
-        let AiPanel {
-            skills, composer, ..
-        } = &mut self.doc.ai_panel;
-        ui.add(
-            egui::TextEdit::multiline(&mut composer.text)
-                .id(input_id)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .hint_text(chip.hint.as_str()),
-        );
-        slash_menu(ui, skills, composer);
-        let error = composer.error.clone();
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if let Some(error) = &error {
-                ui.colored_label(theme::danger(), error);
-            } else {
-                ui.label(
-                    egui::RichText::new(format!("{} 发送", theme::primary_shortcut("Enter")))
-                        .small()
-                        .color(theme::text_muted()),
-                );
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if running {
-                    if ui
-                        .add(theme::secondary_icon_button(theme::Icon::Square, "停止"))
-                        .clicked()
-                    {
-                        self.stop_ai_task();
-                        send = false;
-                    }
-                } else if theme::primary_icon_button(ui, theme::Icon::Sparkles, "发送").clicked()
-                {
-                    send = true;
-                }
-            });
-        });
-        if send && !self.doc.ai_panel.running() {
-            self.send_ai_panel();
-        }
-    }
-
-    /// 按输入区的内容发起一轮。
-    fn send_ai_panel(&mut self) {
-        let composer = &self.doc.ai_panel.composer;
-        let request = TurnRequest {
-            skill: composer.skill.clone(),
-            text: composer.text.trim().to_string(),
-            selection: composer.selection.clone(),
-            preset: composer.preset,
-            use_rag: composer.use_rag,
-            notes: Vec::new(),
-        };
-        if self.start_panel_request(request) {
-            let composer = &mut self.doc.ai_panel.composer;
-            composer.text.clear();
-            composer.error = None;
-            // 选区只管这一轮：改完之后原文已变，留着只会让下一轮报「选区失效」。
-            composer.selection = None;
-        }
-    }
-
-    /// 按一轮请求发起技能任务。发不出去时把原因写进输入区，返回 false。
-    fn start_panel_request(&mut self, request: TurnRequest) -> bool {
-        match self.start_skill(request, None) {
-            Ok(()) => true,
-            Err(message) => {
-                self.doc.ai_panel.composer.error = Some(message);
-                false
-            }
         }
     }
 
@@ -977,129 +786,3 @@ fn markdown_preview(ui: &mut egui::Ui, text: &str, caret: bool) {
 #[cfg(test)]
 #[path = "ui_tests.rs"]
 mod tests;
-
-/// 技能条此刻的样子：显示什么、提示什么、要带哪些开关。
-struct ChipState {
-    label: String,
-    tooltip: String,
-    hint: String,
-    uses_preset: bool,
-    uses_knowledge: bool,
-    /// 在现有正文上改（显示选区 / 全文）。
-    edits_text: bool,
-}
-
-/// 按指定的技能（或「/技能名」前缀），或按当前输入自动选出的候选，算出技能条的样子。
-fn chip_state(panel: &AiPanel, has_text: bool, kind: TemplateKind) -> ChipState {
-    let composer = &panel.composer;
-    let skills = &panel.skills;
-    let (pinned, text) = match router::slash(skills, &composer.text) {
-        Some((id, rest)) => (Some(id), rest),
-        None => (composer.skill.clone(), composer.text.as_str()),
-    };
-    let ctx = RouteContext {
-        text,
-        has_text,
-        has_selection: composer.selection.is_some(),
-        kind,
-    };
-    let find = |id: &str| skills.iter().find(|skill| skill.id == id);
-    let (label, tooltip, candidates): (String, String, Vec<&Skill>) =
-        match pinned.as_deref().and_then(find) {
-            Some(skill) => match unavailable(skill, &ctx) {
-                Some(why) => (format!("{}（现在用不了）", skill.name), why, vec![skill]),
-                None => (skill.name.clone(), skill_tooltip(skill), vec![skill]),
-            },
-            None => match router::route(skills, &ctx) {
-                Route::Picked(id) => {
-                    let skill = find(&id).expect("路由只会选列表里的技能");
-                    (
-                        format!("自动 · {}", skill.name),
-                        format!("按当前输入选了「{}」，点这里可以改", skill.name),
-                        vec![skill],
-                    )
-                }
-                Route::Ambiguous(ids) => {
-                    let list: Vec<&Skill> = ids.iter().filter_map(|id| find(id)).collect();
-                    let names: Vec<&str> = list.iter().map(|skill| skill.name.as_str()).collect();
-                    (
-                        "自动".to_string(),
-                        format!("发送后由模型从「{}」里选", names.join("」「")),
-                        list,
-                    )
-                }
-                Route::Nothing => (
-                    "自动".to_string(),
-                    "当前没有可用的技能".to_string(),
-                    Vec::new(),
-                ),
-            },
-        };
-    // 自动模式下输入框还空着、正文又不空时，候选不止一个，给通用提示。
-    let specific = pinned.is_some() || !text.trim().is_empty() || !has_text;
-    let hint = match candidates.as_slice() {
-        [only] if specific && !only.hint.is_empty() => only.hint.clone(),
-        _ => AUTO_HINT.to_string(),
-    };
-    ChipState {
-        label,
-        tooltip,
-        hint,
-        uses_preset: candidates.iter().any(|skill| skill.uses_preset()),
-        uses_knowledge: candidates.iter().any(|skill| skill.uses_knowledge()),
-        edits_text: candidates
-            .iter()
-            .any(|skill| skill.when.text == TextNeed::Present),
-    }
-}
-
-/// 指定技能时的悬浮说明：做什么，加上能用哪些工具、各是什么权限。
-fn skill_tooltip(skill: &Skill) -> String {
-    let tools: Vec<String> = skill
-        .tools
-        .iter()
-        .filter_map(|id| crate::agent::tools::describe(id))
-        .collect();
-    if tools.is_empty() {
-        return skill.description.clone();
-    }
-    format!(
-        "{}\n\n能用的工具：\n{}",
-        skill.description,
-        tools.join("\n")
-    )
-}
-
-/// 输入框以「/」开头时列出匹配的技能，点一下就定在这个技能上、去掉前缀。
-fn slash_menu(ui: &mut egui::Ui, skills: &[Skill], composer: &mut Composer) {
-    let Some(typed) = composer.text.trim_start().strip_prefix(['/', '／']) else {
-        return;
-    };
-    if typed.contains(char::is_whitespace) {
-        return;
-    }
-    let typed = typed.to_string();
-    let matches: Vec<&Skill> = skills
-        .iter()
-        .filter(|skill| {
-            skill.enabled && (skill.name.starts_with(&typed) || skill.id.starts_with(&typed))
-        })
-        .collect();
-    if matches.is_empty() {
-        ui.weak("没有匹配的技能");
-        return;
-    }
-    ui.horizontal_wrapped(|ui| {
-        for skill in matches {
-            if ui
-                .small_button(&skill.name)
-                .on_hover_text(&skill.description)
-                .clicked()
-            {
-                composer.skill = Some(skill.id.clone());
-                composer.text.clear();
-                composer.error = None;
-            }
-        }
-    });
-}

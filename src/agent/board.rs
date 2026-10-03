@@ -53,6 +53,33 @@ pub(crate) struct Board {
     pub(crate) rounds: usize,
     /// 审核类技能的问题清单。
     pub(crate) findings: Vec<Finding>,
+    /// 用户在输入框里 `@` 引用的文章。引擎在第一步之前按技能的 `references` 处理（16.13）。
+    pub(crate) refs: Vec<Reference>,
+    /// 当证据用的引用在证据包里的编号：逐节检索时也一直带着，不被检索结果冲掉。
+    pub(crate) pinned: Vec<usize>,
+}
+
+/// `@` 引用的一篇文章：稿件库或知识库里的文档。正文由引擎在后台线程读。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reference {
+    pub(crate) source: RefSource,
+    pub(crate) id: i64,
+    pub(crate) title: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefSource {
+    Manuscript,
+    Knowledge,
+}
+
+impl RefSource {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            RefSource::Manuscript => "稿件库",
+            RefSource::Knowledge => "知识库",
+        }
+    }
 }
 
 /// 审核类技能查出的一条问题。

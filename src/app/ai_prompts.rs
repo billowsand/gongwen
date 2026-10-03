@@ -1,4 +1,5 @@
-//! AI 提示词管理页（侧栏润色技能的预设）。
+//! AI 管理页的「润色预设」与「输出标准」两个分区（侧栏技能的 `{preset}`）。
+//! 页面布局见 `app::ai_manage`。
 //!
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::ai_prompts`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
@@ -60,7 +61,6 @@ impl AiPromptDraft {
 }
 
 impl GongwenApp {
-    /// 提示词管理页：限定内容阅读宽度，左侧紧凑列表，右侧集中编辑与操作。
     fn can_switch_ai_prompt(&mut self) -> bool {
         let pending = self.ai_prompt_editor.as_ref().is_some_and(|draft| {
             draft.has_pending_changes(draft.id.and_then(|id| self.config.ai_prompt(id)))
@@ -71,7 +71,9 @@ impl GongwenApp {
         !pending
     }
 
-    pub(crate) fn ai_prompts_ui(&mut self, ui: &mut egui::Ui) {
+    /// 润色预设分区：顶上一行计数与「新建预设」，下面列表与编辑区——够宽时并排，
+    /// 窄了上下排。
+    pub(crate) fn ai_presets_section_ui(&mut self, ui: &mut egui::Ui) {
         if self.ai_prompt_editor.is_none() {
             let entry = self
                 .ai_prompt_selected
@@ -83,110 +85,84 @@ impl GongwenApp {
             }
         }
 
-        let available = ui.available_width();
-        let item_gap = ui.spacing().item_spacing.x;
-        let content_width = (available - item_gap).clamp(0.0, 1520.0);
-        let left_margin = ((available - item_gap - content_width) / 2.0).max(0.0);
-        ui.horizontal_top(|ui| {
-            ui.add_space(left_margin);
-            ui.allocate_ui_with_layout(
-                egui::vec2(content_width, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_width(content_width);
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.heading("AI 管理");
-                            let builtin = self
-                                .config
-                                .ai_prompts
-                                .iter()
-                                .filter(|entry| entry.is_builtin())
-                                .count();
-                            ui.weak(format!(
-                                "{} 条优化提示词（内置 {builtin} 条）· 仅保存在本机",
-                                self.config.ai_prompts.len()
-                            ));
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if theme::primary_icon_button(ui, theme::Icon::Save, "保存更改")
-                                .on_hover_text("先应用编辑区内容，再写入本机配置")
-                                .clicked()
-                            {
-                                let mut valid = true;
-                                if let Some(mut draft) = self.ai_prompt_editor.take() {
-                                    match self.apply_ai_prompt_draft(&draft) {
-                                        Ok(id) => {
-                                            self.ai_prompt_selected = Some(id);
-                                            self.ai_prompt_editor = self
-                                                .config
-                                                .ai_prompt(id)
-                                                .map(AiPromptDraft::from_entry);
-                                        }
-                                        Err(message) => {
-                                            draft.error = Some(message);
-                                            self.ai_prompt_editor = Some(draft);
-                                            valid = false;
-                                        }
-                                    }
-                                }
-                                if valid {
-                                    self.persist();
-                                }
-                            }
-                            if ui
-                                .add(theme::icon_text_button(theme::Icon::FilePlus, "新建提示词"))
-                                .on_hover_text("新建条目保存后排在列表最上方")
-                                .clicked()
-                                && self.can_switch_ai_prompt()
-                            {
-                                self.ai_prompt_selected = None;
-                                self.ai_prompt_editor = Some(AiPromptDraft::blank());
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-
-                    egui::ScrollArea::vertical()
-                        .id_salt("ai_prompts")
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            if content_width < 760.0 {
-                                self.ai_prompt_list_ui(ui);
-                                ui.add_space(8.0);
-                                self.ai_prompt_editor_ui(ui);
-                                ui.add_space(8.0);
-                                self.ai_prompt_contract_card_ui(ui);
-                            } else {
-                                let list_width = (content_width * 0.36).clamp(300.0, 460.0);
-                                let editor_width =
-                                    content_width - list_width - 12.0 - 2.0 * item_gap;
-                                ui.horizontal_top(|ui| {
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(list_width, 0.0),
-                                        egui::Layout::top_down(egui::Align::Min),
-                                        |ui| {
-                                            ui.set_width(list_width);
-                                            self.ai_prompt_list_ui(ui);
-                                        },
-                                    );
-                                    ui.add_space(12.0);
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(editor_width, 0.0),
-                                        egui::Layout::top_down(egui::Align::Min),
-                                        |ui| {
-                                            ui.set_width(editor_width);
-                                            self.ai_prompt_editor_ui(ui);
-                                            self.ai_prompt_contract_card_ui(ui);
-                                        },
-                                    );
-                                });
-                            }
-                        });
-                },
-            );
+        ui.horizontal(|ui| {
+            let builtin = self
+                .config
+                .ai_prompts
+                .iter()
+                .filter(|entry| entry.is_builtin())
+                .count();
+            ui.weak(format!(
+                "{} 条预设（内置 {builtin} 条）· 仅保存在本机",
+                self.config.ai_prompts.len()
+            ));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(theme::icon_text_button(theme::Icon::FilePlus, "新建预设"))
+                    .on_hover_text("新建条目保存后排在列表最上方")
+                    .clicked()
+                    && self.can_switch_ai_prompt()
+                {
+                    self.ai_prompt_selected = None;
+                    self.ai_prompt_editor = Some(AiPromptDraft::blank());
+                }
+            });
         });
+        ui.add_space(6.0);
+
+        let content_width = ui.available_width();
+        let item_gap = ui.spacing().item_spacing.x;
+        if content_width < 760.0 {
+            self.ai_prompt_list_ui(ui);
+            ui.add_space(8.0);
+            self.ai_prompt_editor_ui(ui);
+        } else {
+            let list_width = (content_width * 0.38).clamp(280.0, 440.0);
+            let editor_width = content_width - list_width - 12.0 - 2.0 * item_gap;
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(list_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(list_width);
+                        self.ai_prompt_list_ui(ui);
+                    },
+                );
+                ui.add_space(12.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(editor_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(editor_width);
+                        self.ai_prompt_editor_ui(ui);
+                    },
+                );
+            });
+        }
+    }
+
+    /// 页底「保存」前先把编辑区应用到预设库；名称不合格时把错误挂在编辑区上，返回 false。
+    pub(crate) fn apply_pending_ai_prompt(&mut self) -> bool {
+        let Some(mut draft) = self.ai_prompt_editor.take() else {
+            return true;
+        };
+        let entry = draft.id.and_then(|id| self.config.ai_prompt(id));
+        if !draft.has_pending_changes(entry) {
+            self.ai_prompt_editor = Some(draft);
+            return true;
+        }
+        match self.apply_ai_prompt_draft(&draft) {
+            Ok(id) => {
+                self.ai_prompt_selected = Some(id);
+                self.ai_prompt_editor = self.config.ai_prompt(id).map(AiPromptDraft::from_entry);
+                true
+            }
+            Err(message) => {
+                draft.error = Some(message);
+                self.ai_prompt_editor = Some(draft);
+                false
+            }
+        }
     }
 
     pub(crate) fn ai_prompt_list_ui(&mut self, ui: &mut egui::Ui) {
@@ -273,7 +249,7 @@ impl GongwenApp {
             }
 
             if self.config.ai_prompts.is_empty() {
-                ui.weak("提示词库为空。点右上角“新建提示词”添加一条。");
+                ui.weak("提示词库为空。点上方“新建预设”添加一条。");
             }
         });
 
@@ -311,7 +287,7 @@ impl GongwenApp {
                         self.ai_prompt_editor = None;
                     }
                     self.ai_prompt_delete_confirm = None;
-                    self.status = format!("已删除提示词“{name}”。记得点“保存更改”。");
+                    self.status = format!("已删除提示词“{name}”。记得点页底“保存”。");
                 }
                 if ui.button("取消").clicked() {
                     self.ai_prompt_delete_confirm = None;
@@ -446,7 +422,7 @@ impl GongwenApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if theme::primary_icon_button(ui, theme::Icon::Save, "应用到提示词库")
-                    .on_hover_text("写回提示词库；仍需点右上角“保存更改”落盘")
+                    .on_hover_text("写回提示词库；仍需点页底“保存”落盘")
                     .clicked()
                 {
                     submit = true;
@@ -487,7 +463,7 @@ impl GongwenApp {
                     self.ai_prompt_selected = Some(id);
                     self.ai_prompt_editor =
                         self.config.ai_prompt(id).map(AiPromptDraft::from_entry);
-                    self.status = "提示词已更新。点右上角“保存更改”写入本机配置。".into();
+                    self.status = "提示词已更新。点页底“保存”写入本机配置。".into();
                     return;
                 }
                 Err(message) => draft.error = Some(message),
@@ -624,46 +600,26 @@ impl GongwenApp {
         self.status = "已恢复该内置提示词的出厂内容。".into();
     }
 
-    fn ai_prompt_contract_card_ui(&mut self, ui: &mut egui::Ui) {
-        theme::card().show(ui, |ui| {
-            ui.set_width((ui.available_width() - 20.0).max(240.0));
-            self.output_contract_preview_ui(ui);
-        });
-    }
-
     /// 把内置输出标准原样摊开给用户看。它是不可编辑的，但藏着不说会让人
-    /// 怀疑自定义提示词到底还受不受约束。
-    pub(crate) fn output_contract_preview_ui(&mut self, ui: &mut egui::Ui) {
-        let contract_header = egui::CollapsingHeader::new("查看内置输出格式标准（只读）")
-            .id_salt("output_contract_preview")
-            .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("文种");
-                    egui::ComboBox::from_id_salt("contract_kind")
-                        .selected_text(self.ai_contract_preview_kind.label())
-                        .show_ui(ui, |ui| {
-                            for kind in TemplateKind::ALL {
-                                ui.selectable_value(
-                                    &mut self.ai_contract_preview_kind,
-                                    kind,
-                                    kind.label(),
-                                );
-                            }
-                        });
+    /// 怀疑自定义预设到底还受不受约束。
+    pub(crate) fn output_contract_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("文种");
+            egui::ComboBox::from_id_salt("contract_kind")
+                .selected_text(self.ai_contract_preview_kind.label())
+                .show_ui(ui, |ui| {
+                    for kind in TemplateKind::ALL {
+                        ui.selectable_value(&mut self.ai_contract_preview_kind, kind, kind.label());
+                    }
                 });
-                ui.add_space(6.0);
-                let mut contract = prompt::output_contract(self.ai_contract_preview_kind);
-                ui.add(
-                    egui::TextEdit::multiline(&mut contract)
-                        .desired_width(ui.available_width())
-                        .desired_rows(16)
-                        .interactive(false),
-                );
-            });
-        contract_header.header_response.on_hover_text(
-            "下面这段会自动拼在每条提示词之后，并声明优先级更高：\
-自定义指令与它冲突时，一律以它为准。",
+        });
+        ui.add_space(6.0);
+        let mut contract = prompt::output_contract(self.ai_contract_preview_kind);
+        ui.add(
+            egui::TextEdit::multiline(&mut contract)
+                .desired_width(ui.available_width())
+                .desired_rows(24)
+                .interactive(false),
         );
     }
 }

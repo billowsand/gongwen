@@ -85,6 +85,10 @@ pub(crate) fn run(
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<Outcome> {
     let mut ctx = ToolCtx { board, env, emit };
+    // `@` 引用只在第一步之前落一次；挂起后接着跑时已经在黑板上了。
+    if start == 0 && !ctx.board.refs.is_empty() {
+        super::references::apply(&mut ctx);
+    }
     for (index, step) in env.skill.flow.iter().enumerate().skip(start) {
         if let Some((questions, into)) = run_step(&mut ctx, step)? {
             return Ok(Outcome::Suspended(Suspension {

@@ -1,10 +1,11 @@
 ---
 name: 材料成文
 description: 把会议纪要、多份报送材料、口头要点整理成公文：先按原文拆出要点请你确认（不经模型），再按当前文种成文；只用材料、不检索，材料里没有的事实出题问你
-hint: 粘贴材料，说清要写成什么，例如：根据下面的会议纪要整理成一份通知……
+hint: 粘贴材料（或 @ 选稿件、知识库文档），说清要写成什么，例如：根据下面的会议纪要整理成一份通知……
 triggers: ["(根据|按照|依据|把|将)(以下|下面|上述|这份|这些|附后)?的?.{0,8}(纪要|材料|要点|记录|讲话|发言|报送)", 整理成, 材料成文, 形成文稿]
 when: { text: any }
 output: proposal
+references: material
 tools: [doc.elements, check.placeholders, check.facts, llm.generate, ws.write, ws.replace, ask.choice]
 params:
   max_rounds: 1

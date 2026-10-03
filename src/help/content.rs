@@ -150,13 +150,13 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "13-ai-workbench",
         Part::Ai,
         "AI 侧栏与技能",
-        "AI 侧栏、技能条与十二个内置技能"
+        "一体化输入框、/ 技能、@ 引用与十二个内置技能"
     ),
     chapter!(
         "14-ai-polish",
         Part::Ai,
-        "AI 优化、提示词与文字复核",
-        "提示词管理与小模型逐句复核"
+        "AI 管理：模型、技能与润色预设",
+        "AI 相关设置的八个分区与小模型逐句复核"
     ),
     chapter!(
         "15-vocabulary",
@@ -188,7 +188,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "稿件管理",
         "状态机、盖章附件与 ZIP 迁移"
     ),
-    chapter!("20-settings", Part::Ops, "设置全解", "十三个分区逐项说明"),
+    chapter!("20-settings", Part::Ops, "设置全解", "十个分区逐项说明"),
     chapter!(
         "21-data",
         Part::Ops,
@@ -247,10 +247,6 @@ pub(crate) const IMAGES: &[HelpImage] = &[
     HelpImage {
         key: "images/ui-lexicon.png",
         bytes: include_bytes!("../../assets/help/images/ui-lexicon.png"),
-    },
-    HelpImage {
-        key: "images/ui-settings.png",
-        bytes: include_bytes!("../../assets/help/images/ui-settings.png"),
     },
     HelpImage {
         key: "images/ui-themes.png",

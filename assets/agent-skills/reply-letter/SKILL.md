@@ -1,10 +1,11 @@
 ---
 name: 复函
 description: 根据来函起草复函：先列出来函提了哪些事项请你确认，查依据，再逐项答复；来函里的事实照录，没给答复意见的事项留待核实并出题问你
-hint: 粘贴来函全文，再说明答复的基本意见，例如：同意第一项，第二项暂缓……
+hint: 粘贴来函全文（或 @ 选来函），再说明答复的基本意见，例如：同意第一项，第二项暂缓……
 triggers: [复函, 回函, 函复, "(答复|回复).{0,6}(来函|函)", "来函.+"]
 when: { text: any }
 output: proposal
+references: letter
 tools: [doc.elements, kb.search, check.placeholders, check.facts, llm.generate, ws.write, ws.replace, ask.choice]
 params:
   max_rounds: 2

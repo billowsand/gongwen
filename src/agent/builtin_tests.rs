@@ -1,7 +1,7 @@
 //! 内置技能的夹具测试：每个技能用按提示词回话的假模型、假知识库与假稿件库走一遍完整流程，
 //! 挂起的地方像用户一样作答，检查每一步交给模型的东西和最后的工作稿、台账、题目。
 
-use super::board::Board;
+use super::board::{Board, RefSource, Reference};
 use super::clarify::{Reply, Target};
 use super::engine::SkillReport;
 use super::skill::{self, IMITATE, MATERIAL, POLICY_REPORT, REPLY_LETTER, Skill};
@@ -717,4 +717,199 @@ fn live_builtin_skill() {
     }
     eprintln!("—— 工作稿 ——\n{}", report.markdown);
     assert!(!report.markdown.trim().is_empty());
+}
+
+fn reference(source: RefSource, id: i64, title: &str) -> Reference {
+    Reference {
+        source,
+        id,
+        title: title.into(),
+    }
+}
+
+fn manuscript(id: i64, title: &str, markdown: &str) -> ManuscriptDoc {
+    ManuscriptDoc {
+        id,
+        title: title.into(),
+        kind: TemplateKind::PlainDocument,
+        status: ManuscriptStatus::Published,
+        doc_number: String::new(),
+        doc_date: "2025-10-08".into(),
+        draft: DraftInput::default(),
+        markdown: markdown.into(),
+        version: None,
+    }
+}
+
+#[test]
+fn imitate_takes_an_at_referenced_manuscript_as_the_baseline_without_asking() {
+    let skill = builtin(IMITATE);
+    let model = ScriptedModel::new(|_, _| "无".into());
+    let kb = KeywordKb::disabled();
+    let title = "关于做好2025年冬季森林防火工作的通知";
+    let mut start = board(
+        TemplateKind::PlainDocument,
+        "",
+        &format!("参照《{title}》写今年的，排查改到12月1日前完成"),
+    );
+    start.refs = vec![reference(RefSource::Manuscript, 1, title)];
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    driver.manuscripts.docs = vec![
+        manuscript(
+            2,
+            "关于召开安全生产会议的通知",
+            "# 关于召开安全生产会议的通知\n",
+        ),
+        manuscript(1, title, "# 通知\n\n各区县要于11月30日前完成隐患排查。\n"),
+    ];
+    let first = driver.run().expect("要你选怎么仿");
+    assert_eq!(
+        first.save_as.as_deref(),
+        Some("strategy"),
+        "@ 了基准稿就不再列候选让你选：{:?}",
+        first.questions
+    );
+    assert_eq!(driver.board.vars["baseline_id"], 1);
+    assert_eq!(driver.board.vars["baseline"]["title"], title);
+    assert!(
+        driver.board.evidence.is_empty(),
+        "基准稿只作写法参考，不进证据包"
+    );
+    let lines = driver.tool_lines();
+    assert!(
+        lines.iter().any(|line| line.contains("当基准稿")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("读取稿件")),
+        "不再按候选重读：{lines:?}"
+    );
+}
+
+#[test]
+fn reply_letter_takes_an_at_referenced_document_as_the_incoming_letter() {
+    let skill = builtin(REPLY_LETTER);
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("需要逐项答复的事项") {
+            "物资支援：请求支援帐篷20顶".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::new(vec![(
+        "不会命中",
+        chunk(
+            5,
+            "关于商请支援森林防火物资的函",
+            "请求支援帐篷20顶，请予支持为荷。",
+        ),
+    )]);
+    let mut start = board(TemplateKind::OfficialLetter, "", "同意支援");
+    start.refs = vec![reference(
+        RefSource::Knowledge,
+        5,
+        "关于商请支援森林防火物资的函",
+    )];
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    driver.run().expect("来函事项要你确认");
+    let request = &driver.board.request;
+    assert!(
+        request.starts_with("【来函《关于商请支援森林防火物资的函》】\n请求支援帐篷20顶"),
+        "{request}"
+    );
+    assert!(request.ends_with("【答复要求】\n同意支援"), "{request}");
+    let asked = &model.prompts("需要逐项答复的事项")[0];
+    assert!(
+        asked.contains("请求支援帐篷20顶"),
+        "列事项时看得到来函：{asked}"
+    );
+    assert!(driver.board.evidence.is_empty(), "来函不当证据");
+}
+
+#[test]
+fn an_at_referenced_document_joins_the_evidence_and_stays_pinned() {
+    let skill = builtin(POLICY_REPORT);
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("列出章的大纲") {
+            "1. 研究背景：为什么研究".into()
+        } else if prompt.contains("里的一章：研究背景") {
+            "## 研究背景\n\n梅文项目于2017年启动[K1]。".into()
+        } else {
+            "无".into()
+        }
+    });
+    // 知识库启用但检索什么也查不到：引用的那篇照样带进每一章。
+    let kb = KeywordKb::new(Vec::new());
+    let mut start = board(
+        TemplateKind::ResearchReport,
+        "梅文项目研究",
+        "写一份研究报告",
+    );
+    start.refs = vec![reference(RefSource::Manuscript, 9, "梅文项目总结")];
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    driver.manuscripts.docs = vec![manuscript(
+        9,
+        "梅文项目总结",
+        "梅文项目于2017年启动，2020年建成。",
+    )];
+    while let Some(suspension) = driver.run() {
+        let replies: Vec<(usize, Reply)> = suspension
+            .questions
+            .iter()
+            .map(|question| (question.id, Reply::Choice(0)))
+            .collect();
+        driver.answer(&suspension, &replies);
+        if !model.prompts("里的一章：研究背景").is_empty() {
+            break;
+        }
+    }
+    let evidence = driver.board.evidence.items();
+    assert_eq!(evidence.len(), 1, "{evidence:?}");
+    assert_eq!(evidence[0].key, "ms:9:latest");
+    assert_eq!(driver.board.pinned, [1]);
+    let chapter = &model.prompts("里的一章：研究背景")[0];
+    assert!(
+        chapter.contains("[K1] 稿件库《梅文项目总结》"),
+        "逐节检索没查到东西，引用的那篇也在：{chapter}"
+    );
+}
+
+#[test]
+fn material_reads_an_at_referenced_manuscript_and_skips_its_headers() {
+    let skill = builtin(MATERIAL);
+    let model = ScriptedModel::new(|_, _| "无".into());
+    let kb = KeywordKb::disabled();
+    let mut start = board(TemplateKind::PlainDocument, "", "整理成一份通知");
+    start.refs = vec![reference(RefSource::Manuscript, 4, "10月10日会议纪要")];
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    driver.manuscripts.docs = vec![manuscript(
+        4,
+        "10月10日会议纪要",
+        "# 10月10日会议纪要\n\n- 各区县于11月底前完成排查\n- 市应急局牵头督导\n",
+    )];
+    let points = driver.run().expect("要点要你确认");
+    assert_eq!(
+        points.questions[0].prefill, "各区县于11月底前完成排查\n市应急局牵头督导",
+        "抬头、标题与要求都不算要点"
+    );
+}
+
+#[test]
+fn a_missing_reference_is_noted_and_skipped() {
+    let skill = builtin(MATERIAL);
+    let model = ScriptedModel::new(|_, _| "无".into());
+    let kb = KeywordKb::disabled();
+    let mut start = board(TemplateKind::PlainDocument, "", "会议决定：\n- 甲\n- 乙");
+    start.refs = vec![reference(RefSource::Manuscript, 99, "已删除的稿件")];
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    driver.run().expect("照样往下走");
+    assert!(
+        driver.events.iter().any(|event| matches!(
+            event,
+            super::engine::Event::Note(note) if note.contains("《已删除的稿件》读不出来")
+        )),
+        "{:?}",
+        driver.events
+    );
+    assert_eq!(driver.board.request, "会议决定：\n- 甲\n- 乙");
 }

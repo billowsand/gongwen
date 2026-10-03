@@ -1,6 +1,6 @@
 //! F 组：外部系统接口（只查询）。
 //!
-//! 只能调设置页「数据接口」里配好的接口，不能临时拼地址；技能用 `tools: [http.call:<接口 id>]`
+//! 只能调AI 管理页「数据接口」里配好的接口，不能临时拼地址；技能用 `tools: [http.call:<接口 id>]`
 //! 声明具体能调哪几个（`tools::call` 按「工具:接口」查白名单）。
 
 use super::{Input, Permission, Tool, ToolCtx, ToolOutput, arg_str, required};
@@ -25,7 +25,7 @@ impl Tool for HttpCall {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[required(
             "api",
-            "接口 id（设置页「数据接口」里配的；写成 http.call:<id> 时自动填上）；其余参数按接口定义的输入变量给",
+            "接口 id（AI 管理页「数据接口」里配的；写成 http.call:<id> 时自动填上）；其余参数按接口定义的输入变量给",
         )];
         INPUTS
     }
@@ -36,7 +36,7 @@ impl Tool for HttpCall {
     ) -> Result<ToolOutput, String> {
         let id = arg_str(args, "api").unwrap_or_default();
         let endpoint = ctx.env.apis.get(&id).ok_or_else(|| {
-            format!("没有配置 id 为「{id}」的数据接口，先在设置页「数据接口」里添加")
+            format!("没有配置 id 为「{id}」的数据接口，先在AI 管理页「数据接口」里添加")
         })?;
         let mut inputs = args.clone();
         inputs.remove("api");

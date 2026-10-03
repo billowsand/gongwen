@@ -10,7 +10,7 @@
 use crate::app::{GongwenApp, warn};
 use crate::models::{
     BoldStyle, DiagramTheme, EditorFontFace, EditorFontPreset, EditorFontSlot, FontRole,
-    HeadingNumbering, ListNumbering, PaperMode, ProxyMode, RerankMode, ThemeName,
+    HeadingNumbering, ListNumbering, PaperMode, ProxyMode, ThemeName,
 };
 use crate::storage;
 use crate::system_fonts;
@@ -19,17 +19,17 @@ use eframe::egui;
 
 /// 左栏主菜单的宽度。容得下最长的分区名「标题与列表编号」加图标和选中底色的
 /// 内边距，再宽就只是白占正文的地方。
-const MENU_WIDTH: f32 = 188.0;
+pub(super) const MENU_WIDTH: f32 = 188.0;
 /// 左栏连同沉底面板左右内边距一起占掉的宽度。
-const MENU_COLUMN_WIDTH: f32 = MENU_WIDTH + 2.0 * MENU_PANEL_MARGIN as f32;
+pub(super) const MENU_COLUMN_WIDTH: f32 = MENU_WIDTH + 2.0 * MENU_PANEL_MARGIN as f32;
 /// 左栏沉底面板的左右内边距。
-const MENU_PANEL_MARGIN: i8 = 6;
+pub(super) const MENU_PANEL_MARGIN: i8 = 6;
 /// 右栏正文的最大宽度。设置项都是「标签 + 控件」的窄表单，铺满超宽屏只会让
 /// 标签和控件隔着半个屏幕，反而更难读。
-const DETAIL_MAX_WIDTH: f32 = 760.0;
+pub(super) const DETAIL_MAX_WIDTH: f32 = 760.0;
 /// 底部操作条的高度。两栏先把这块高度让出来，「保存设置」才不会被内容顶出视区。
 /// 操作条紧接在两栏之后画，这里多留的高度落在按钮下方，把它和状态栏隔开。
-const FOOTER_HEIGHT: f32 = 62.0;
+pub(super) const FOOTER_HEIGHT: f32 = 62.0;
 /// 设置页表单行的标签列宽。比起草页的窄标签宽，容得下「单轮送检句数上限」这类
 /// 完整的设置项名称，不再被截断成半截。
 const SETTING_LABEL_WIDTH: f32 = 132.0;
@@ -40,24 +40,12 @@ const SETTING_ROW_HEIGHT: f32 = theme::CONTROL_HEIGHT;
 /// 设置页的分区：左侧主菜单的一项对应右侧一屏设置项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsSection {
-    /// 本地模型服务（起草模型的 OpenAI 兼容接口）。
-    #[default]
-    ModelService,
-    /// AI 文字复核（小模型逐句检查）。
-    ReviseModel,
-    /// 知识库（检索增强起草）。
-    Knowledge,
     /// 网络代理（访问模型服务走的通道）。
     Network,
-    /// 技能：SKILL.md 的管理。
-    Skills,
-    /// 数据接口：内网查询接口。
-    DataApis,
-    /// 工具调试台。
-    ToolConsole,
     /// 输出与录入（输出目录、编辑器选项）。
     Output,
     /// 界面主题、公文纸面与图表样式。
+    #[default]
     Theme,
     /// 界面字体与编译字体。
     Font,
@@ -77,24 +65,7 @@ pub(crate) enum SettingsSection {
 
 /// 左侧主菜单的分组。分组名只是小字标题，不可点击——十几项平铺成一列时，
 /// 找一项要从头扫到尾；按「配什么」分成几摞，眼睛一次只在一摞里找。
-const MENU_GROUPS: [(&str, &[SettingsSection]); 6] = [
-    (
-        "智能助手",
-        &[
-            SettingsSection::ModelService,
-            SettingsSection::ReviseModel,
-            SettingsSection::Knowledge,
-            SettingsSection::Network,
-        ],
-    ),
-    (
-        "智能体",
-        &[
-            SettingsSection::Skills,
-            SettingsSection::DataApis,
-            SettingsSection::ToolConsole,
-        ],
-    ),
+const MENU_GROUPS: [(&str, &[SettingsSection]); 4] = [
     (
         "外观",
         &[
@@ -115,20 +86,17 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 6] = [
             SettingsSection::Persistence,
         ],
     ),
-    ("帮助", &[SettingsSection::Guide]),
+    (
+        "网络与帮助",
+        &[SettingsSection::Network, SettingsSection::Guide],
+    ),
 ];
 
 impl SettingsSection {
     /// 左侧主菜单里显示的中文名，同时是右栏的标题。
     pub(crate) fn label(self) -> &'static str {
         match self {
-            SettingsSection::ModelService => "本地模型服务",
-            SettingsSection::ReviseModel => "AI 文字复核",
-            SettingsSection::Knowledge => "知识库",
             SettingsSection::Network => "网络代理",
-            SettingsSection::Skills => "技能",
-            SettingsSection::DataApis => "数据接口",
-            SettingsSection::ToolConsole => "工具调试台",
             SettingsSection::Output => "输出与录入",
             SettingsSection::Theme => "界面主题",
             SettingsSection::Font => "字体",
@@ -144,13 +112,7 @@ impl SettingsSection {
     /// 菜单项与右栏标题共用的图标。
     fn icon(self) -> theme::Icon {
         match self {
-            SettingsSection::ModelService => theme::Icon::PlugZap,
-            SettingsSection::ReviseModel => theme::Icon::Sparkles,
-            SettingsSection::Knowledge => theme::Icon::Library,
             SettingsSection::Network => theme::Icon::Globe,
-            SettingsSection::Skills => theme::Icon::WandSparkles,
-            SettingsSection::DataApis => theme::Icon::Braces,
-            SettingsSection::ToolConsole => theme::Icon::Settings,
             SettingsSection::Output => theme::Icon::Folder,
             SettingsSection::Theme => theme::Icon::Palette,
             SettingsSection::Font => theme::Icon::Type,
@@ -167,32 +129,8 @@ impl SettingsSection {
     /// 看起来没有交互的标题，等于没写；这里改成常显的小字。
     fn description(self) -> &'static str {
         match self {
-            SettingsSection::ModelService => {
-                "应用调用本机 OpenAI 兼容接口，如 LM Studio（http://127.0.0.1:1234/v1）或 \
-                 Ollama（http://127.0.0.1:11434/v1）。正文不会主动发送到互联网。"
-            }
-            SettingsSection::ReviseModel => {
-                "逐句检查语病，结果进「修订建议」，逐条确认后才改正文。与起草模型分开配：\
-                 起草要发挥，复核只要稳——Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多。\
-                 地址和密钥留空表示沿用起草模型的。"
-            }
-            SettingsSection::Knowledge => {
-                "用本地模型服务的 embedding 与 rerank 模型检索历史公文，起草时调出相似稿件作参考。\
-                 两个模型与起草对话模型相互独立。"
-            }
             SettingsSection::Network => {
                 "起草、文字复核、知识库访问模型服务时走的通道，支持 HTTP / HTTPS / SOCKS 代理。本机地址（localhost、127.0.0.1）始终直连，本地模型服务不受影响。"
-            }
-            SettingsSection::Skills => {
-                "AI 侧栏按技能做事：流程、提示词和能用的工具都写在 SKILL.md 里。内置技能可以复制一份改，\
-                 也可以新建自己的；保存时校验，写坏了不影响使用。"
-            }
-            SettingsSection::DataApis => {
-                "让技能调用内网系统（统计、政策库、业务系统、算法服务）取数据。只做查询，不发任何会改变\
-                 对方状态的请求；接口地址与密钥只存在本机，不写进技能文件。"
-            }
-            SettingsSection::ToolConsole => {
-                "选一个工具、填参数、看输出，写技能时用来试工具。对象是当前稿件的副本，改不到正文。"
             }
             SettingsSection::Output => {
                 "PDF 由内置 Typst 引擎在程序里直接排版，公文与研究报告都是，不依赖本机安装任何排版软件。"
@@ -226,7 +164,7 @@ impl SettingsSection {
 
 /// 设置页表单行的标签。固定列宽让同一屏里的控件左边缘对齐；说明挂在标签的
 /// 悬停提示上，不额外占行。
-fn setting_label(ui: &mut egui::Ui, label: &str, tip: Option<&str>) {
+pub(super) fn setting_label(ui: &mut egui::Ui, label: &str, tip: Option<&str>) {
     let response = ui.add_sized(
         [SETTING_LABEL_WIDTH, SETTING_ROW_HEIGHT],
         egui::Label::new(label).wrap_mode(egui::TextWrapMode::Extend),
@@ -254,7 +192,10 @@ pub(super) fn setting_row<R>(
 ///
 /// 内容排在一个**限定了宽度的子 Ui** 里，而不是直接 `horizontal_wrapped` 加空格：
 /// 后者换行后会退回整行的左边缘，长说明的第二行就跑到标签列底下，和上一行对不齐。
-fn setting_continuation<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub(super) fn setting_continuation<R>(
+    ui: &mut egui::Ui,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     let indent = SETTING_LABEL_WIDTH + ui.spacing().item_spacing.x;
     let width = (ui.available_width() - indent).max(160.0);
     ui.horizontal(|ui| {
@@ -271,7 +212,7 @@ fn setting_continuation<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) ->
 
 /// 设置页右列的弱化小字：状态、统计、一句话说明。放在 `setting_row` 里时与同一行的
 /// 按钮竖直居中（`setting_continuation` 按顶端排，小字会比按钮飘高一截）。
-fn setting_note(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(super) fn setting_note(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(
         egui::RichText::new(text)
             .size(theme::font_sizes::SMALL)
@@ -302,7 +243,7 @@ fn page_keys_label(keys: &str) -> String {
 /// 一行文本输入设置项。
 ///
 /// 这里的字段全是接口地址、API Key、代理地址这类只收 ASCII 的值，不走应用内输入法。
-fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
+pub(super) fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
     setting_row(ui, label, None, |ui| {
         crate::ime::exempt(ui.add(theme::field(value, hint, f32::INFINITY)));
     });
@@ -310,7 +251,7 @@ fn setting_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str)
 
 /// 分区内的小标题。比右栏大标题低一级，用来把一屏里的设置项再分成几摞；
 /// 带 `tip` 时补充说明挂在标题的悬停提示上。
-fn sub_heading(ui: &mut egui::Ui, text: &str, tip: Option<&str>) {
+pub(super) fn sub_heading(ui: &mut egui::Ui, text: &str, tip: Option<&str>) {
     ui.add_space(14.0);
     let response = ui.label(egui::RichText::new(text).strong().color(theme::text_soft()));
     if let Some(tip) = tip {
@@ -321,19 +262,17 @@ fn sub_heading(ui: &mut egui::Ui, text: &str, tip: Option<&str>) {
 
 /// 左栏的一个分区条目。整行可点：平板上的设置菜单点哪儿都能进，
 /// 只让文字那几个像素可点是桌面端才有的坏习惯。
-fn settings_menu_item(
+pub(super) fn settings_menu_item(
     ui: &mut egui::Ui,
     selected: bool,
-    section: SettingsSection,
+    icon: theme::Icon,
+    label: &str,
 ) -> egui::Response {
     let width = ui.available_width();
     ui.add(
         egui::Button::new((
-            section
-                .icon()
-                .image()
-                .fit_to_exact_size(egui::vec2(16.0, 16.0)),
-            section.label(),
+            icon.image().fit_to_exact_size(egui::vec2(16.0, 16.0)),
+            label,
             // 末尾放一个可伸张的空原子，图标和文字才会靠左，不会被居中到行中间。
             egui::Atom::grow(),
         ))
@@ -349,7 +288,7 @@ fn settings_menu_item(
 /// 调字号都要滚过一遍；它只在头一次用的时候有用，所以单独成一项。
 fn guide_section_ui(help: &mut crate::help::HelpState, ui: &mut egui::Ui) {
     for (index, step) in [
-        "在「本地模型服务」里填好接口地址——LM Studio 先启动 Local Server，Ollama 先执行 ollama serve。",
+        "在「AI 管理 → 模型服务」里填好接口地址——LM Studio 先启动 Local Server，Ollama 先执行 ollama serve。",
         "点「测试连接 / 刷新模型」，从下拉里选一个中文指令模型。",
         "在「标准词库」里维护单位全称、常见错写和联系人电话。",
         "为每类模板保存默认的发文单位、联系人和呈报领导。",
@@ -514,137 +453,6 @@ fn font_choice_row(
 }
 
 impl GongwenApp {
-    /// 检查器开关。
-    ///
-    /// 逐项可关，是因为**一个爱误报的检查器会把整个功能连坐关掉**：用户不会
-    /// 去分辨是哪一项在捣乱，只会不再打开这个面板。给了开关，坏的那项可以
-    /// 单独摘掉，好的留下。
-    fn revise_tasks_ui(&mut self, ui: &mut egui::Ui) {
-        setting_row(ui, "启用的检查器", None, |ui| {
-            ui.weak("每多开一项，一轮复核的调用次数就多一倍");
-        });
-        for task in &crate::revise_model::TASKS {
-            let mut on = self.config.revise_model.task_enabled(task.id);
-            setting_continuation(ui, |ui| {
-                if ui.checkbox(&mut on, task.label).changed() {
-                    self.config.revise_model.set_task_enabled(task.id, on);
-                }
-                // 默认关着的那些要标出来，别让人以为它和默认开的几条一样有把握。
-                if crate::revise_model::DEFAULT_DISABLED_TASKS.contains(&task.id) {
-                    theme::chip(ui, "默认关闭", warn(), theme::surface());
-                }
-            });
-            setting_continuation(ui, |ui| {
-                ui.weak(task.criteria);
-            });
-        }
-        setting_continuation(ui, |ui| {
-            ui.weak(
-                "标「默认关闭」的项在回归集上还有误报未复测。开之前先跑一遍：\
-                 cargo test --bin gongwen-assistant revise_cases -- --ignored --nocapture",
-            );
-        });
-    }
-
-    /// 文字复核的埋点面板：这个检查器到底在帮忙还是在添乱。
-    ///
-    /// 三个数字要一起看：闸门拦截多说明模型不合用；采纳率低说明这类检查本身
-    /// 不受用；两者都低才说明它真的有价值。只报一个数会误导人。
-    fn revise_metrics_ui(&mut self, ui: &mut egui::Ui) {
-        let mut any = false;
-        let mut clear = false;
-        let mut copied = false;
-        for task in &crate::revise_model::TASKS {
-            let stat = self.metrics.get(task.id);
-            if stat.decisions() == 0 && stat.gate_rejected == 0 {
-                continue;
-            }
-            any = true;
-            ui.horizontal_wrapped(|ui| {
-                setting_label(ui, task.label, None);
-                match stat.adoption() {
-                    Some(rate) if stat.decisions() >= crate::metrics::MIN_SAMPLES => {
-                        ui.colored_label(
-                            if stat.is_underperforming() {
-                                warn()
-                            } else {
-                                theme::text_soft()
-                            },
-                            format!(
-                                "采纳 {:.0}%（采纳 {} / 忽略 {}）",
-                                rate * 100.0,
-                                stat.accepted,
-                                stat.ignored
-                            ),
-                        );
-                    }
-                    _ => {
-                        ui.weak(format!(
-                            "采纳 {} / 忽略 {}（样本不足，暂不计采纳率）",
-                            stat.accepted, stat.ignored
-                        ));
-                    }
-                }
-                if stat.gate_rejected > 0 {
-                    ui.weak(format!("· 闸门拦下 {} 条", stat.gate_rejected));
-                }
-                if stat.undone > 0 {
-                    ui.weak(format!("· 采纳后撤销 {} 次", stat.undone));
-                }
-            });
-            // 拦截原因的分布才是调阈值的依据。只报总数的话，看不出是阈值太紧
-            // 还是提示词让模型话太多。
-            let reasons: Vec<String> = crate::revise_model::GateReason::ALL
-                .into_iter()
-                .map(|reason| (reason, self.metrics.gate_reason_count(task.id, reason)))
-                .filter(|(_, count)| *count > 0)
-                .map(|(reason, count)| format!("{} {count}", reason.label()))
-                .collect();
-            if !reasons.is_empty() {
-                setting_continuation(ui, |ui| {
-                    ui.weak(format!("拦截原因：{}", reasons.join("、")));
-                });
-            }
-            if stat.is_underperforming() {
-                setting_continuation(ui, |ui| {
-                    ui.colored_label(
-                        warn(),
-                        "这个检查器的建议多数被划掉，建议关掉——留着只会让人习惯性忽略整个建议面板。",
-                    );
-                });
-            }
-        }
-        if !any {
-            ui.weak("还没有复核记录。跑过几轮、逐条处理过之后，这里会显示采纳率。");
-            return;
-        }
-        setting_continuation(ui, |ui| {
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Copy, "复制统计摘要"))
-                .on_hover_text("只有编号和计数，不含任何稿件内容，可以拿出内网讨论怎么调阈值")
-                .clicked()
-            {
-                ui.ctx().copy_text(self.metrics.report());
-                copied = true;
-            }
-            if ui
-                .add(theme::icon_text_button(theme::Icon::RotateCcw, "清空统计"))
-                .on_hover_text("换了模型或改了提示词之后，旧统计不再可比，清掉重新攒")
-                .clicked()
-            {
-                clear = true;
-            }
-        });
-        if copied {
-            self.status = "统计摘要已复制到剪贴板（仅计数，不含稿件内容）。".into();
-        }
-        if clear {
-            self.metrics.clear();
-            crate::metrics::save(&mut self.metrics);
-            self.status = "检查器统计已清空。".into();
-        }
-    }
-
     /// 切换主题并立即生效：写入配置、刷新全局样式与窗口图标、保存。
     /// 设置页的主题卡片与应用菜单的「外观主题」子菜单共用这一入口。
     pub(crate) fn apply_theme(&mut self, ctx: &egui::Context, name: ThemeName) {
@@ -1231,6 +1039,7 @@ impl GongwenApp {
 
     /// 左栏主菜单：沉底面板上按组竖排的分区列表，整行可点，选中项常显底色。
     fn settings_menu_ui(&mut self, ui: &mut egui::Ui) {
+        let mut open_ai_page = false;
         egui::Frame::new()
             .fill(theme::surface_sunk())
             .corner_radius(egui::CornerRadius::same(10))
@@ -1241,6 +1050,22 @@ impl GongwenApp {
                     .id_salt("settings_menu_scroll")
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
+                        // 模型、技能这些设置搬去了 AI 管理页，老用户会先来这里找，
+                        // 在菜单顶上留一条去那边的路。
+                        if settings_menu_item(
+                            ui,
+                            false,
+                            theme::Icon::WandSparkles,
+                            "AI 设置在「AI 管理」",
+                        )
+                        .on_hover_text(
+                            "模型服务、文字复核、知识库检索、技能、数据接口、工具调试台与润色预设都已移到 AI 管理页",
+                        )
+                        .clicked()
+                        {
+                            open_ai_page = true;
+                        }
+                        ui.add_space(10.0);
                         for (index, (group, sections)) in MENU_GROUPS.iter().enumerate() {
                             if index > 0 {
                                 ui.add_space(10.0);
@@ -1253,13 +1078,16 @@ impl GongwenApp {
                             ui.add_space(2.0);
                             for section in *sections {
                                 let selected = self.settings_section == *section;
-                                if settings_menu_item(ui, selected, *section).clicked() {
+                                if settings_menu_item(ui, selected, section.icon(), section.label()).clicked() {
                                     self.settings_section = *section;
                                 }
                             }
                         }
                     });
             });
+        if open_ai_page {
+            self.open_page(super::NavPage::AiPrompts);
+        }
     }
 
     /// 右栏：当前分区的标题、说明与设置项。滚动位置按分区各自记忆，
@@ -1295,13 +1123,7 @@ impl GongwenApp {
                         ui.separator();
                         ui.add_space(8.0);
                         match section {
-                            SettingsSection::ModelService => self.model_service_section_ui(ui),
-                            SettingsSection::ReviseModel => self.revise_model_section_ui(ui),
-                            SettingsSection::Knowledge => self.knowledge_section_ui(ui),
                             SettingsSection::Network => self.network_section_ui(ui),
-                            SettingsSection::Skills => self.skills_section_ui(ui),
-                            SettingsSection::DataApis => self.apis_section_ui(ui),
-                            SettingsSection::ToolConsole => self.tool_console_section_ui(ui),
                             SettingsSection::Output => self.output_section_ui(ui),
                             SettingsSection::Theme => self.theme_settings_ui(ui),
                             SettingsSection::Font => self.font_settings_ui(ui),
@@ -1328,153 +1150,9 @@ impl GongwenApp {
         ui.horizontal(|ui| {
             if theme::primary_icon_button(ui, theme::Icon::Save, "保存设置").clicked() {
                 self.persist();
-                // 数据接口页有没保存的修改时一并保存，免得离开设置页后丢掉。
-                self.save_pending_apis();
             }
             ui.add_space(8.0);
             ui.weak("主题、纸面与字体改完立即生效；其余各项要保存后才写入配置文件。");
-        });
-    }
-
-    /// 本地模型服务分区：起草模型的接口地址、模型与生成参数。
-    fn model_service_section_ui(&mut self, ui: &mut egui::Ui) {
-        sub_heading(ui, "接口", None);
-        setting_field(
-            ui,
-            "接口地址",
-            &mut self.config.lm_studio.base_url,
-            "包含 /v1",
-        );
-        setting_row(ui, "模型", None, |ui| {
-            if self.models.is_empty() {
-                crate::ime::exempt(ui.text_edit_singleline(&mut self.config.lm_studio.model));
-            } else {
-                egui::ComboBox::from_id_salt("model_selector")
-                    .selected_text(if self.config.lm_studio.model.is_empty() {
-                        "请选择模型"
-                    } else {
-                        &self.config.lm_studio.model
-                    })
-                    .width(300.0)
-                    .show_ui(ui, |ui| {
-                        for model in &self.models {
-                            ui.selectable_value(
-                                &mut self.config.lm_studio.model,
-                                model.clone(),
-                                model,
-                            );
-                        }
-                    });
-            }
-            if ui
-                .add_enabled(
-                    !self.busy,
-                    theme::icon_text_button(theme::Icon::PlugZap, "测试连接 / 刷新模型"),
-                )
-                .clicked()
-            {
-                self.start_model_probe();
-            }
-        });
-        setting_field(
-            ui,
-            "API Key",
-            &mut self.config.lm_studio.api_key,
-            "本地服务通常可留空",
-        );
-
-        sub_heading(ui, "生成参数", None);
-        setting_row(ui, "温度", None, |ui| {
-            ui.add(
-                egui::Slider::new(&mut self.config.lm_studio.temperature, 0.0..=1.2).step_by(0.05),
-            );
-        });
-        setting_row(ui, "最大输出 Token", None, |ui| {
-            ui.add(egui::DragValue::new(&mut self.config.lm_studio.max_tokens).range(256..=32768));
-        });
-        setting_row(ui, "超时（秒）", None, |ui| {
-            ui.add(
-                egui::DragValue::new(&mut self.config.lm_studio.timeout_seconds).range(5..=1800),
-            );
-        });
-    }
-
-    /// AI 文字复核分区：复核小模型的接口、参数、检查器开关与采纳统计。
-    fn revise_model_section_ui(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(
-            &mut self.config.revise_model.enabled,
-            "启用文字复核（起草页「审校」分区出现入口）",
-        );
-        ui.add_enabled_ui(self.config.revise_model.enabled, |ui| {
-            sub_heading(
-                ui,
-                "接口",
-                Some(
-                    "复核请求会自动带上关闭思考的开关（Qwen3 一类的模型开着 thinking 会把输出预算全花在推理上），服务端不认时会自动去掉重试；若报错提示只拿到思考过程，再到服务端关闭或改用非思考模型。",
-                ),
-            );
-            setting_field(
-                ui,
-                "接口地址",
-                &mut self.config.revise_model.base_url,
-                "留空沿用起草模型的地址",
-            );
-            setting_row(ui, "模型", None, |ui| {
-                if self.models.is_empty() {
-                    crate::ime::exempt(ui.text_edit_singleline(&mut self.config.revise_model.model));
-                } else {
-                    egui::ComboBox::from_id_salt("revise_model_selector")
-                        .selected_text(if self.config.revise_model.model.is_empty() {
-                            "请选择模型"
-                        } else {
-                            &self.config.revise_model.model
-                        })
-                        .width(300.0)
-                        .show_ui(ui, |ui| {
-                            for model in &self.models {
-                                ui.selectable_value(
-                                    &mut self.config.revise_model.model,
-                                    model.clone(),
-                                    model,
-                                );
-                            }
-                        });
-                }
-            });
-            setting_field(
-                ui,
-                "API Key",
-                &mut self.config.revise_model.api_key,
-                "留空沿用起草模型的密钥",
-            );
-
-            sub_heading(ui, "送检范围", None);
-            setting_row(ui, "单句字数上限", None, |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.config.revise_model.max_sentence_chars)
-                        .range(40..=400),
-                )
-                .on_hover_text("超过这个长度的多半是整段没断句，交给小模型只会跑飞，直接跳过");
-            });
-            setting_row(ui, "单轮送检句数上限", None, |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.config.revise_model.max_sentences)
-                        .range(10..=1000),
-                )
-                .on_hover_text("逐句顺序调用，句数越多等得越久");
-            });
-            setting_row(ui, "超时（秒）", None, |ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.config.revise_model.timeout_seconds)
-                        .range(5..=600),
-                );
-            });
-
-            sub_heading(ui, "检查器", None);
-            self.revise_tasks_ui(ui);
-
-            sub_heading(ui, "采纳统计", None);
-            self.revise_metrics_ui(ui);
         });
     }
 
@@ -1541,172 +1219,14 @@ impl GongwenApp {
                     !self.busy,
                     theme::icon_text_button(theme::Icon::PlugZap, "测试连接"),
                 )
-                .on_hover_text("按当前的代理设置访问「本地模型服务」里填的接口地址，读取模型列表")
+                .on_hover_text(
+                    "按当前的代理设置访问「AI 管理 → 模型服务」里填的接口地址，读取模型列表",
+                )
                 .clicked()
             {
                 self.start_model_probe();
             }
         });
-    }
-
-    /// 知识库分区：embedding 与 rerank 模型的接口与检索方式。
-    fn knowledge_section_ui(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.config.rag.enabled, "启用知识库检索增强")
-            .on_hover_text("关闭后，起草页的“参考知识库”开关不生效");
-        sub_heading(ui, "Embedding 模型", None);
-        setting_field(
-            ui,
-            "接口地址",
-            &mut self.config.rag.embedding.base_url,
-            "包含 /v1",
-        );
-        setting_row(ui, "模型", None, |ui| {
-            if self.embedding_models.is_empty() {
-                crate::ime::exempt(ui.text_edit_singleline(&mut self.config.rag.embedding.model))
-                    .on_hover_text("可手填模型名，或点右侧按钮从服务读取");
-            } else {
-                egui::ComboBox::from_id_salt("embedding_model_selector")
-                    .selected_text(if self.config.rag.embedding.model.is_empty() {
-                        "请选择模型"
-                    } else {
-                        &self.config.rag.embedding.model
-                    })
-                    .width(360.0)
-                    .show_ui(ui, |ui| {
-                        for model in &self.embedding_models {
-                            ui.selectable_value(
-                                &mut self.config.rag.embedding.model,
-                                model.clone(),
-                                model,
-                            );
-                        }
-                    });
-            }
-            if ui
-                .add_enabled(
-                    !self.embedding_probe_busy,
-                    theme::icon_text_button(theme::Icon::PlugZap, "测试连接 / 刷新模型"),
-                )
-                .clicked()
-            {
-                self.start_embedding_probe();
-            }
-        });
-        setting_field(
-            ui,
-            "API Key",
-            &mut self.config.rag.embedding.api_key,
-            "本地服务通常可留空",
-        );
-
-        sub_heading(
-            ui,
-            "重排（可选，用于精排检索结果）",
-            Some("rerank 响应字段名等进阶项可在 config.json 的 rag.rerank 节调整，适配不同服务。"),
-        );
-        let rerank_hint = match self.config.rag.rerank.mode {
-            RerankMode::None => "直接按混合召回的融合分取前 N 条。够用，只是排序不如重排精准。",
-            RerankMode::Api => {
-                "需要能提供 rerank 接口的服务（Jina / Cohere / TEI / Infinity 等）。注意：LM Studio 与 Ollama 目前均不提供该专用接口。"
-            }
-            RerankMode::Llm => {
-                "复用上面的对话模型给候选片段打分，不必另起服务。代价是每次检索多一次模型调用（低温短输出，通常几秒）。"
-            }
-        };
-        setting_row(ui, "重排方式", Some(rerank_hint), |ui| {
-            egui::ComboBox::from_id_salt("rerank_mode_selector")
-                .selected_text(self.config.rag.rerank.mode.label())
-                .width(300.0)
-                .show_ui(ui, |ui| {
-                    for mode in RerankMode::ALL {
-                        ui.selectable_value(&mut self.config.rag.rerank.mode, mode, mode.label());
-                    }
-                });
-        });
-        if self.config.rag.rerank.mode == RerankMode::Api {
-            setting_field(
-                ui,
-                "接口地址",
-                &mut self.config.rag.rerank.base_url,
-                "包含 /v1",
-            );
-            setting_row(ui, "端点路径", None, |ui| {
-                ui.text_edit_singleline(&mut self.config.rag.rerank.path)
-                    .on_hover_text("拼在接口地址后，默认 rerank；不同服务路径可能不同");
-            });
-            setting_row(ui, "模型", None, |ui| {
-                if self.rerank_models.is_empty() {
-                    crate::ime::exempt(ui.text_edit_singleline(&mut self.config.rag.rerank.model))
-                        .on_hover_text("留空则跳过重排；可手填或点右侧按钮从服务读取");
-                } else {
-                    egui::ComboBox::from_id_salt("rerank_model_selector")
-                        .selected_text(if self.config.rag.rerank.model.is_empty() {
-                            "请选择（留空跳过重排）"
-                        } else {
-                            &self.config.rag.rerank.model
-                        })
-                        .width(300.0)
-                        .show_ui(ui, |ui| {
-                            // 允许清空：rerank 可选。
-                            if ui
-                                .selectable_label(
-                                    self.config.rag.rerank.model.is_empty(),
-                                    "（不使用）",
-                                )
-                                .clicked()
-                            {
-                                self.config.rag.rerank.model = String::new();
-                            }
-                            for model in &self.rerank_models {
-                                ui.selectable_value(
-                                    &mut self.config.rag.rerank.model,
-                                    model.clone(),
-                                    model,
-                                );
-                            }
-                        });
-                }
-                if ui
-                    .add_enabled(
-                        !self.rerank_probe_busy,
-                        theme::icon_text_button(theme::Icon::PlugZap, "测试连接 / 刷新模型"),
-                    )
-                    .clicked()
-                {
-                    self.start_rerank_probe();
-                }
-            });
-        }
-        if self.config.rag.rerank.mode == RerankMode::Api {
-            setting_field(
-                ui,
-                "API Key",
-                &mut self.config.rag.rerank.api_key,
-                "本地服务通常可留空",
-            );
-        }
-        if self.config.rag.rerank.mode != RerankMode::None {
-            setting_continuation(ui, |ui| {
-                if ui
-                    .add_enabled(
-                        !self.rerank_probe_busy,
-                        theme::icon_text_button(theme::Icon::PlugZap, "验证重排是否真的生效"),
-                    )
-                    .on_hover_text(
-                        "真跑一次重排。只测“连接”是不够的：服务遇到不认识的端点路径\n\
-                                 可能照样返回 200，看着像连上了，实际每次重排都在静默失败。",
-                    )
-                    .clicked()
-                {
-                    self.start_rerank_verify();
-                }
-            });
-            if let Some((ok, message)) = self.rerank_verify_result.clone() {
-                setting_continuation(ui, |ui| {
-                    ui.colored_label(if ok { theme::accent() } else { warn() }, message);
-                });
-            }
-        }
     }
 
     /// 输出与录入分区：输出目录、字段录入方式与编辑器选项。

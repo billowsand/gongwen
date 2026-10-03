@@ -33,7 +33,7 @@ pub(crate) enum DraftAction {
     OpenSendPackage(i64),
     /// 查看引用来源稿件，沿用稿件库的只读与标签规则。
     OpenManuscript(i64),
-    /// 打开设置页的「技能」分区（AI 侧栏右上角「管理技能…」）。
+    /// 打开 AI 管理页的「技能」分区（AI 侧栏右上角「管理技能…」）。
     OpenSkillSettings,
     /// 把已发布的稿件退回草稿，好继续编辑。
     RevertToDraft(i64),

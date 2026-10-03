@@ -179,7 +179,7 @@ impl DraftPage<'_> {
             let missing = crate::agent::skill::missing_apis(skill, &apis);
             if !missing.is_empty() {
                 self.doc.ai_panel.note(format!(
-                    "「{}」要用的数据接口还没配置：{}，相关步骤会跳过。可在设置页「数据接口」添加。",
+                    "「{}」要用的数据接口还没配置：{}，相关步骤会跳过。可在AI 管理页「数据接口」添加。",
                     skill.name,
                     missing.join("、")
                 ));
@@ -253,8 +253,10 @@ impl DraftPage<'_> {
             Some((id, rest)) => (Some(id), rest.to_string()),
             None => (request.skill.clone(), request.text.clone()),
         };
+        // 选技能时不看引用的书名（与输入框里的技能标签一致）；交给技能的原话照旧带着。
+        let routing = super::mention::routing_text(&text, &request.refs);
         let ctx = RouteContext {
-            text: &text,
+            text: &routing,
             has_text: !markdown.trim().is_empty(),
             has_selection: selected.is_some(),
             kind: self.doc.draft.kind,
@@ -318,6 +320,9 @@ impl DraftPage<'_> {
         if use_rag {
             context.push("知识库".to_string());
         }
+        for reference in &request.refs {
+            context.push(format!("《{}》", reference.title));
+        }
         if let Some(text) = &selected {
             context.push(format!("选区 {} 字", text.chars().count()));
         } else if candidates.iter().all(|s| s.when.text == TextNeed::Present) {
@@ -334,6 +339,7 @@ impl DraftPage<'_> {
             workspace: markdown.clone(),
             selection: selected,
             preset: preset.map(|p| p.instruction.clone()).unwrap_or_default(),
+            refs: request.refs.clone(),
             time_sources: [
                 &time.now,
                 &time.yesterday,

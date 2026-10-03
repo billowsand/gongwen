@@ -105,6 +105,21 @@ pub(crate) enum OutputKind {
     Report,
 }
 
+/// `@` 引用的文章怎么用（16.13、决定 F14）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RefUse {
+    /// 并入证据包：可引用、要核验。
+    #[default]
+    Evidence,
+    /// 第一篇当基准稿（变量 `baseline` / `baseline_id`，不进证据包），其余当证据。
+    Baseline,
+    /// 全文并进材料（`{request}` 前面）。
+    Material,
+    /// 当来函：全文以「来函」并进材料。
+    Letter,
+}
+
 /// 对正文的要求。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -196,6 +211,8 @@ struct Frontmatter {
     #[serde(default)]
     output: OutputKind,
     #[serde(default)]
+    references: RefUse,
+    #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
     params: BTreeMap<String, Value>,
@@ -225,6 +242,8 @@ pub(crate) struct Skill {
     pub(crate) applies_to: Vec<TemplateKind>,
     pub(crate) when: WhenSpec,
     pub(crate) output: OutputKind,
+    /// `@` 引用的文章怎么用。
+    pub(crate) references: RefUse,
     /// 允许使用的工具（白名单）。
     pub(crate) tools: Vec<String>,
     pub(crate) params: BTreeMap<String, Value>,
@@ -377,6 +396,7 @@ pub(crate) fn parse(id: &str, text: &str, origin: &str) -> Result<Skill, String>
         applies_to,
         when: front.when,
         output: front.output,
+        references: front.references,
         tools: front.tools,
         params,
         flow: front.flow,

@@ -28,6 +28,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 
 mod agent_settings;
+mod ai_manage;
 mod ai_prompts;
 mod ai_proposal;
 mod chrome;
@@ -44,6 +45,7 @@ mod versioning;
 mod vocabulary;
 mod widgets;
 
+pub(crate) use ai_manage::AiSection;
 pub(crate) use ai_prompts::AiPromptDraft;
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
 pub(crate) use lexicon_jobs::LexiconJob;
@@ -326,7 +328,9 @@ pub struct GongwenApp {
     last_content_tab: Option<TabRef>,
     /// 设置页左侧主菜单当前选中的分区。纯当次会话状态，不进配置。
     settings_section: SettingsSection,
-    /// 设置页「智能体」分组（技能、数据接口、工具调试台）的状态。
+    /// AI 管理页当前的分区。
+    ai_section: AiSection,
+    /// AI 管理页「智能体」分组（技能、数据接口、工具调试台）的状态。
     agent_settings: agent_settings::AgentSettings,
 }
 
@@ -498,7 +502,7 @@ impl GongwenApp {
             // 上次闪退留下了日志就先告诉用户在哪，方便发给维护者排查。
             status: match crate::crash_log::take_unseen_report() {
                 Some(path) => format!("上次运行异常退出，崩溃日志：{}", path.display()),
-                None => "就绪。先在“设置”中连接本地模型服务。".into(),
+                None => "就绪。先在“AI 管理”中连接模型服务。".into(),
             },
             busy: false,
             sender,
@@ -548,6 +552,7 @@ impl GongwenApp {
             font_filter: BTreeMap::new(),
             last_content_tab: None,
             settings_section: SettingsSection::default(),
+            ai_section: AiSection::default(),
             agent_settings: Default::default(),
             embedding_probe_busy: false,
             rerank_probe_busy: false,
@@ -673,7 +678,7 @@ impl eframe::App for GongwenApp {
                     }
                 }
                 TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(&mut content_ui),
-                TabRef::Page(NavPage::AiPrompts) => self.ai_prompts_ui(&mut content_ui),
+                TabRef::Page(NavPage::AiPrompts) => self.ai_manage_ui(&mut content_ui),
                 TabRef::Page(NavPage::Knowledge) => {
                     crate::knowledge_ui::knowledge_ui(self, &mut content_ui)
                 }

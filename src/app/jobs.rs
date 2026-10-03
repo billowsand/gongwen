@@ -700,7 +700,7 @@ impl GongwenApp {
         }
         if self.config.rag.embedding.model.trim().is_empty() {
             self.knowledge_error = Some(
-                "还没有配置 embedding 模型，无法建立索引：请先到「设置 → 知识库」填写。文档已在库内，配置好后再点「建立索引」即可。"
+                "还没有配置 embedding 模型，无法建立索引：请先到「AI 管理 → 知识库检索」填写。文档已在库内，配置好后再点「建立索引」即可。"
                     .into(),
             );
             return;

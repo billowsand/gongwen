@@ -95,10 +95,18 @@ fn is_instruction(line: &str) -> bool {
 fn plan_split(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
     let max = param(ctx, step, &["max"], 30, 1..=60);
     let request = ctx.board.request.clone();
-    let mut items: Vec<String> = request
+    // `@` 引用的材料并进来时带「【引用材料《…》】」抬头，后面跟「【要求】」——
+    // 抬头不是要点，要求那一段也不是材料。
+    let material = request
+        .split_once("\n【要求】")
+        .map_or(request.as_str(), |(material, _)| material);
+    let mut items: Vec<String> = material
         .lines()
+        // 引用的稿件开头是「# 标题」，那是文件名，不是要点。
+        .filter(|line| !line.trim_start().starts_with("# "))
         .map(|line| line.trim().trim_start_matches(['-', '*', '•', '·']).trim())
         .filter(|line| !line.is_empty())
+        .filter(|line| !(line.starts_with('【') && line.ends_with('】')))
         .map(str::to_string)
         .collect();
     // 开头那句「根据以下纪要整理成一份通知：」是要求，不是材料。
@@ -240,9 +248,9 @@ fn plan_queries(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Fl
 /// `from` 指定的变量（默认 `queries`），没有就用用户原话。一个来源都没有时只留一条说明。
 /// 这次查到的证据编号存进 `found`，逐节生成时只用它们。
 pub(super) fn retrieve(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
-    ctx.board
-        .vars
-        .insert(FOUND.into(), Value::Array(Vec::new()));
+    // 用户 `@` 引用的文章每一节都带着，检索结果排在后面。
+    let pinned: Vec<Value> = ctx.board.pinned.iter().map(|id| Value::from(*id)).collect();
+    ctx.board.vars.insert(FOUND.into(), Value::Array(pinned));
     if !has_sources(ctx, step) {
         note(ctx, "知识库未启用：只按材料起草，缺口全部交给你确认。");
         return Ok(Flow::Next);
@@ -256,7 +264,7 @@ pub(super) fn retrieve(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
         Some(Value::String(text)) => text.lines().map(str::to_string).collect(),
         _ => vec![ctx.board.request.trim().to_string()],
     };
-    let mut found: Vec<usize> = Vec::new();
+    let mut found: Vec<usize> = ctx.board.pinned.clone();
     for query in queries.iter().map(|q| q.trim()).filter(|q| !q.is_empty()) {
         check_cancel(ctx)?;
         for (_, id) in fetch_into(ctx, step, query) {

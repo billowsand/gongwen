@@ -112,6 +112,15 @@ impl KnowledgeSearch for KeywordKb {
             Vec::new(),
         ))
     }
+
+    /// 按文档 id 读全文：片段的 `doc_id` 对上就返回那一段。
+    fn read(&self, doc_id: i64) -> anyhow::Result<Option<(String, String)>> {
+        Ok(self
+            .docs
+            .iter()
+            .find(|(_, chunk)| chunk.doc_id == doc_id)
+            .map(|(_, chunk)| (chunk.doc_title.clone(), chunk.text.clone())))
+    }
 }
 
 pub(crate) fn chunk(id: i64, title: &str, text: &str) -> RetrievedChunk {

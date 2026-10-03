@@ -1,17 +1,16 @@
 //! 起草页右侧的 AI 侧栏。
 //!
 //! 设计见 `docs/ai-agent-workbench.md` 第十六节。每一轮都按一个技能（SKILL.md）跑流程引擎
-//! （`crate::agent::engine`）：技能条默认自动选（上下文过滤 + 触发词，分不出高下时交模型判断），
-//! 也可以点技能条或以「/技能名」开头指定。内置两个技能：
-//! - 研究式起草：动笔前拿不准的先出选择题，预研检索、带证据起草、围绕缺口迭代补全、核验引用，
-//!   最后把要你确认的出成选择题；
-//! - 润色：在事实锁定下改全文或选区。
+//! （`crate::agent::engine`）：技能默认自动选（上下文过滤 + 触发词，分不出高下时交模型判断），
+//! 也可以在输入框里敲 `/` 从弹出列表里指定；敲 `@` 引用稿件库或知识库里的文章（16.13）。
 //!
 //! 模型输出逐段流进任务流；流程要问用户时挂起，答完接着跑。结果一律是提案，由用户点
-//! 「采用 / 接受」才落入正文（红线 1）。仿写与大纲暂时仍走旧工作台，侧栏右上角留了入口。
+//! 「采用 / 接受」才落入正文（红线 1）；审核类技能交问题清单。
 //!
-//! 本文件只放状态与纯逻辑；界面在 `ai_panel/ui.rs`，挂在 `DraftPage` 上。
+//! 本文件只放状态与纯逻辑；界面在 `ai_panel/ui.rs`（任务流）与 `ai_panel/composer_ui.rs`
+//! （输入框），`/`、`@` 的识别与过滤在 `ai_panel/mention.rs`。
 
+use crate::agent::board::Reference;
 use crate::agent::clarify::{Question, Reply};
 use crate::agent::gaps::Ledger;
 use crate::agent::skill::Skill;
@@ -20,18 +19,20 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+mod composer_ui;
+mod mention;
 mod skill_job;
 mod ui;
 
 pub(crate) use skill_job::{SkillResult, SkillRun, initial_replies};
 
-/// 技能条在自动模式下、输入框还空着时的提示。
-const AUTO_HINT: &str = "说说要做什么：起草、润色……也可以输入 / 选技能";
+/// 自动选技能、输入框还空着时的提示。
+const AUTO_HINT: &str = "说说要做什么：起草、润色……输入 / 选技能，@ 引用文章";
 
 /// 输入区的状态。随稿件保存，切换标签页互不影响。
 #[derive(Debug, Default)]
 pub(crate) struct Composer {
-    /// 用户在技能条上指定的技能 id；None 表示自动选。
+    /// 用户用 `/` 或技能标签指定的技能 id；None 表示自动选。
     pub(crate) skill: Option<String>,
     pub(crate) text: String,
     /// 打开侧栏时锁定的选区（字节区间）与当时的原文。正文被改动后按原文重新定位。
@@ -43,6 +44,10 @@ pub(crate) struct Composer {
     pub(crate) error: Option<String>,
     /// 首次打开时按设置给过默认值没有。之后以用户的勾选为准，不再覆盖。
     pub(crate) primed: bool,
+    /// `@` 引用的文章；输入框里对应留着 `@《标题》` 记号，记号删了引用也就没了。
+    pub(crate) refs: Vec<Reference>,
+    /// `/`、`@` 弹出层的状态。
+    pub(crate) popup: mention::PopupState,
 }
 
 /// 一轮请求的原始参数，「重新生成」照它再发一次。
@@ -54,6 +59,8 @@ pub(crate) struct TurnRequest {
     pub(crate) selection: Option<(Range<usize>, String)>,
     pub(crate) preset: Option<u32>,
     pub(crate) use_rag: bool,
+    /// `@` 引用的文章。
+    pub(crate) refs: Vec<Reference>,
     /// 动笔前澄清的回答（重跑时沿用，不再问一遍）。
     pub(crate) notes: Vec<String>,
 }
@@ -166,7 +173,7 @@ pub(crate) struct AiPanel {
     pub(crate) turns: Vec<AiTurn>,
     /// 正在跑的那一轮的停止开关。
     pub(crate) cancel: Option<Arc<AtomicBool>>,
-    /// 技能列表的缓存，技能条每帧要用；打开侧栏和每次发送时重读。
+    /// 技能列表的缓存，技能标签与 `/` 弹出列表每帧要用；打开侧栏和每次发送时重读。
     pub(crate) skills: Vec<Skill>,
     next_id: u64,
 }

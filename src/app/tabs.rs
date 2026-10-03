@@ -337,8 +337,8 @@ impl GongwenApp {
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
                 DraftAction::OpenSkillSettings => {
-                    self.settings_section = super::settings::SettingsSection::Skills;
-                    self.open_page(NavPage::Settings);
+                    self.ai_section = super::AiSection::Skills;
+                    self.open_page(NavPage::AiPrompts);
                 }
                 DraftAction::RevertToDraft(id) => {
                     self.transition_status(id, ManuscriptStatus::Draft);

@@ -25,6 +25,7 @@ pub(crate) mod engine;
 pub(crate) mod evidence;
 pub(crate) mod gaps;
 pub(crate) mod ops;
+pub(crate) mod references;
 pub(crate) mod router;
 pub(crate) mod skill;
 pub(crate) mod skill_files;

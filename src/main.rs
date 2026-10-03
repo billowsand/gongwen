@@ -59,6 +59,8 @@ mod system_fonts;
 mod text_file;
 mod theme;
 mod typst_engine;
+#[cfg(test)]
+mod ui_snapshot;
 mod units;
 mod validator;
 mod version;
