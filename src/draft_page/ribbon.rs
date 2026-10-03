@@ -626,8 +626,8 @@ impl DraftPage<'_> {
             if ui
                 .add(theme::icon_text_button(theme::Icon::FileUp, "导入文档"))
                 .on_hover_text(
-                    "从已有的 Word / Excel / PPT / ODF / RTF / EPUB / CSV 文件提取内容，\
-                     转成 Markdown 插到光标处",
+                    "从已有的 Word / Excel / PPT / ODF / RTF / EPUB / CSV / PDF（电子版）文件提取内容，\
+                     转成 Markdown 插到光标处；PDF 不保留版式，导入后请核对正文结构",
                 )
                 .clicked()
             {

@@ -722,8 +722,8 @@ impl DraftPage<'_> {
 
     /// 功能区“导入文档”：选一个现成文档，转成 markdown 插到编辑器光标处。
     ///
-    /// 转换本身在主线程同步做——`anydoc` 的量级是毫秒（实测 docx 6ms、xlsx 0.5ms），
-    /// 而它前面那个文件选择框本来就要阻塞界面，再为它铺一套后台任务通道不划算。
+    /// 沿用主线程同步转换：本机短文档样张提取耗时为毫秒级（PDF 约 4–12ms）。
+    /// 这不是大文件的耗时上限，长 PDF 仍可能让界面短暂等待。
     pub(crate) fn import_document(&mut self, ctx: &egui::Context) {
         if self.doc.read_only() {
             return;
@@ -785,6 +785,7 @@ impl DraftPage<'_> {
             doc_import::file_label(path),
             markdown.chars().count()
         );
+        self.status.push_str(doc_import::import_notice(path));
         if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
             self.open_result_drawer();
         }

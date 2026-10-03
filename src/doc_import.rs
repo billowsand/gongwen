@@ -1,16 +1,11 @@
 //! 从现有文档导入正文：把 Word / Excel / PowerPoint / OpenDocument / RTF /
-//! EPUB / CSV 转成 GitHub 风味 markdown，供起草页在光标处插入或直接新建一篇稿件。
+//! EPUB / CSV / 电子版 PDF 转成 GitHub 风味 markdown，供起草页在光标处插入或新建稿件。
 //!
 //! 转换由 `anydoc` 完成——纯 Rust 实现，不依赖 Office、LibreOffice 或任何外部
 //! 进程，符合本软件"离线可用"的前提。纯文本与 markdown 不走它，直接按 UTF-8 读。
 //!
-//! **PDF 有意不在支持之列**。PDF 里没有段落、标题、表格这些结构，抽出来的只是
-//! 一堆按坐标排的文字片段：正文会被拼成一整段，表格会散架；中文 PDF 还得看
-//! 字体有没有内嵌 ToUnicode 映射，没有就是满屏乱码；扫描件更是一个字都取不到。
-//! 与其让人拿到一份需要重排的稿子，不如在选文件这一步就说清楚不支持。
-//!
-//! 知识库导入（[`to_knowledge_markdown`]）是例外：检索只要文字对、不要版式，
-//! 所以收**电子版** PDF；扫描件没有文字层，anydoc 会逐页查出来，这里整份拒收。
+//! 电子版 PDF 复用 anydoc 的本地文字提取，不执行 OCR；检测到扫描页时整份拒收。
+//! PDF 的段落、标题与表格由版面推断，导入后需要人工核对，不保证还原原版式。
 
 use crate::models::ResearchMetadata;
 use anyhow::{Context, Result, anyhow, bail};
@@ -46,33 +41,28 @@ const FILTER_GROUPS: &[(&str, &[&str])] = &[
     ("OpenDocument", &["odt", "ods", "odp"]),
     ("RTF / EPUB / CSV", &["rtf", "epub", "csv"]),
     ("纯文本 / Markdown", &["md", "markdown", "txt"]),
+    ("PDF（电子版）", &["pdf"]),
 ];
 
 /// 打开"从文档导入"的文件选择框，返回用户选中的文件。
 pub(crate) fn pick_file() -> Option<std::path::PathBuf> {
-    file_dialog(false).pick_file()
+    file_dialog().pick_file()
 }
 
-/// 打开知识库导入的文件选择框（可多选），比起草页多一组电子版 PDF。
+/// 打开知识库导入的文件选择框（可多选）。
 pub(crate) fn pick_knowledge_files() -> Option<Vec<PathBuf>> {
-    file_dialog(true).pick_files()
+    file_dialog().pick_files()
 }
 
-/// 按 [`FILTER_GROUPS`] 拼文件对话框；`with_pdf` 时追加 PDF 一组。
-fn file_dialog(with_pdf: bool) -> rfd::FileDialog {
-    let mut all: Vec<&str> = FILTER_GROUPS
+/// 按 [`FILTER_GROUPS`] 拼文件对话框。
+fn file_dialog() -> rfd::FileDialog {
+    let all: Vec<&str> = FILTER_GROUPS
         .iter()
         .flat_map(|(_, extensions)| extensions.iter().copied())
         .collect();
-    if with_pdf {
-        all.push("pdf");
-    }
     let mut dialog = rfd::FileDialog::new().add_filter("所有支持的格式", &all);
     for (label, extensions) in FILTER_GROUPS {
         dialog = dialog.add_filter(*label, extensions);
-    }
-    if with_pdf {
-        dialog = dialog.add_filter("PDF（电子版）", &["pdf"]);
     }
     dialog
 }
@@ -195,26 +185,29 @@ pub(crate) fn supported_summary() -> String {
 /// 把一个文档转成 markdown。返回的内容已经归一化，可直接插进编辑器。
 pub(crate) fn to_markdown(path: &Path) -> Result<String> {
     if extension_of(path) == "pdf" {
-        bail!(
-            "PDF 不支持导入：PDF 只存版面不存结构，抽出来的正文会丢段落、表格会散架，\
-             扫描件更是取不到文字。请改用原始的 Word 文件，或先另存为 docx。"
-        );
+        return convert_pdf(path);
     }
     convert(path)
 }
 
-/// 知识库导入用的转换：比 [`to_markdown`] 多收电子版 PDF，并给没用标题样式的
-/// 公文补出章节标题（见 [`promote_headings`]）。Markdown 原文作者自己排过结构，不动。
+/// 知识库导入用的转换：给没用标题样式的公文补出章节标题（见 [`promote_headings`]）。
+/// Markdown 原文作者自己排过结构，不动。
 pub(crate) fn to_knowledge_markdown(path: &Path) -> Result<String> {
     let extension = extension_of(path);
-    if extension == "pdf" {
-        return Ok(promote_headings(&convert_pdf(path)?));
-    }
-    let markdown = convert(path)?;
+    let markdown = to_markdown(path)?;
     if matches!(extension.as_str(), "md" | "markdown") {
         Ok(markdown)
     } else {
         Ok(promote_headings(&markdown))
+    }
+}
+
+/// PDF 提取结果需要人工核对；其它格式沿用现有导入提示。
+pub(crate) fn import_notice(path: &Path) -> &'static str {
+    if extension_of(path) == "pdf" {
+        " PDF 版式不保留，请核对段落、标题、表格及页眉页脚，图片与公式可能缺失。"
+    } else {
+        ""
     }
 }
 
@@ -573,9 +566,10 @@ mod tests {
     }
 
     #[test]
-    fn pdf_is_rejected_with_reason() {
-        let error = to_markdown(&PathBuf::from("样例.pdf")).unwrap_err();
-        assert!(format!("{error:#}").contains("PDF 不支持导入"));
+    fn pdf_filter_and_notice_are_available() {
+        assert!(supported_summary().contains("PDF（电子版）"));
+        assert!(import_notice(Path::new("样例.PDF")).contains("请核对段落"));
+        assert!(import_notice(Path::new("样例.docx")).is_empty());
     }
 
     #[test]
@@ -664,6 +658,10 @@ mod tests {
             ),
         ];
         objects.extend(extra_objects.iter().cloned());
+        pdf_from_objects(&objects)
+    }
+
+    fn pdf_from_objects(objects: &[String]) -> Vec<u8> {
         let mut pdf = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
         for (index, body) in objects.iter().enumerate() {
@@ -699,8 +697,7 @@ mod tests {
         std::fs::write(&path, pdf).expect("写入");
         let markdown = to_knowledge_markdown(&path).unwrap();
         assert!(markdown.contains("Annual work report"), "{markdown}");
-        // 起草页仍然不收 PDF。
-        assert!(to_markdown(&path).is_err());
+        assert_eq!(to_markdown(&path).unwrap(), markdown);
     }
 
     #[test]
@@ -721,6 +718,114 @@ mod tests {
         std::fs::write(&path, pdf).expect("写入");
         let message = format!("{:#}", to_knowledge_markdown(&path).unwrap_err());
         assert!(message.contains("扫描版 PDF"), "{message}");
+        let message = format!("{:#}", to_markdown(&path).unwrap_err());
+        assert!(message.contains("扫描版 PDF"), "{message}");
+    }
+
+    #[test]
+    fn draft_accepts_chinese_pdf_with_unicode_mapping() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("中文公文.PDF");
+        let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+            /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+            /CMapName /Test def /CMapType 2 def\n\
+            1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+            4 beginbfchar <0001> <516C> <0002> <6587> <0003> <6B63> <0004> <6587> endbfchar\n\
+            endcmap CMapName currentdict /CMap defineresource pop end end";
+        let pdf = minimal_pdf(
+            "<< /Font << /F1 5 0 R >> >>",
+            "BT /F1 12 Tf 72 760 Td <0001000200030004> Tj ET",
+            &[
+                "<< /Type /Font /Subtype /Type0 /BaseFont /Test /Encoding /Identity-H \
+                 /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>".to_string(),
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Test \
+                 /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >>".to_string(),
+                format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len()),
+            ],
+        );
+        std::fs::write(&path, pdf).expect("写入");
+        let markdown = to_markdown(&path).unwrap();
+        assert!(markdown.contains("公文正文"), "{markdown}");
+
+        // 同一个字形流映射到私用区时，不能把乱码写入正文。
+        let garbled_cmap = cmap
+            .replace("<516C>", "<E001>")
+            .replace("<6587>", "<E002>")
+            .replace("<6B63>", "<E003>");
+        let garbled_pdf = minimal_pdf(
+            "<< /Font << /F1 5 0 R >> >>",
+            "BT /F1 12 Tf 72 760 Td <0001000200030004> Tj ET",
+            &[
+                "<< /Type /Font /Subtype /Type0 /BaseFont /Test /Encoding /Identity-H \
+                 /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>".to_string(),
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Test \
+                 /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >>".to_string(),
+                format!("<< /Length {} >>\nstream\n{garbled_cmap}\nendstream", garbled_cmap.len()),
+            ],
+        );
+        std::fs::write(&path, garbled_pdf).unwrap();
+        let message = format!("{:#}", to_markdown(&path).unwrap_err());
+        // 上游也可能把无法解码的文字判为需要 OCR，两种路径都必须整份拒收。
+        assert!(
+            message.contains("乱码") || message.contains("没有文字层"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn draft_rejects_whole_pdf_when_second_page_is_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("混合文档.pdf");
+        let text = "BT /F1 12 Tf 72 760 Td (Annual work report of the office) Tj ET";
+        let scan = "q 595 0 0 842 0 0 cm /Im1 Do Q";
+        let pixels = "80".repeat(64);
+        let objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{text}\nendstream", text.len()),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im1 8 0 R >> >> /Contents 6 0 R >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{scan}\nendstream", scan.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{pixels}>\nendstream", pixels.len() + 1),
+        ];
+        std::fs::write(&path, pdf_from_objects(&objects)).unwrap();
+        for convert in [to_markdown, to_knowledge_markdown] {
+            let message = format!("{:#}", convert(&path).unwrap_err());
+            assert!(message.contains("第 2 页"), "{message}");
+            assert!(message.contains("整份 PDF 未导入（共 2 页）"), "{message}");
+        }
+    }
+
+    /// 本机样张验收：环境变量使用系统路径分隔符，可传入多份电子版 PDF。
+    #[test]
+    #[ignore = "需用 GONGWEN_IMPORT_PDF_SAMPLES 指定本机电子版 PDF 样张"]
+    fn pdf_import_samples() {
+        let paths = std::env::var_os("GONGWEN_IMPORT_PDF_SAMPLES").expect("请指定 PDF 样张路径");
+        for path in std::env::split_paths(&paths) {
+            let start = std::time::Instant::now();
+            let markdown = to_markdown(&path).expect("电子版 PDF 应能提取正文");
+            eprintln!(
+                "{}：{} 字，耗时 {:?}",
+                path.display(),
+                markdown.chars().count(),
+                start.elapsed()
+            );
+            assert!(
+                markdown
+                    .chars()
+                    .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+                "中文样张应保留汉字"
+            );
+            let output = Path::new("tmp/pdf-import-samples");
+            std::fs::create_dir_all(output).unwrap();
+            let name = path.parent().and_then(Path::file_name).unwrap_or_default();
+            std::fs::write(
+                output.join(format!("{}.md", name.to_string_lossy())),
+                markdown,
+            )
+            .unwrap();
+        }
     }
 
     #[test]

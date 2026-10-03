@@ -19,7 +19,7 @@
 
 导入只是把正文存进库，不需要 embedding 服务；要让文档能被检索和问答用到，还得点「建立索引」（见下节）。从稿件管理「导入到知识库」也是一样。
 
-可导入的格式与起草页「导入文档」相同——Word（docx / doc）、Excel、PowerPoint、OpenDocument、RTF、EPUB、CSV、纯文本、Markdown——另外多收 **PDF（电子版）**：
+可导入的格式与起草页「导入文档」相同——Word（docx / doc）、Excel、PowerPoint、OpenDocument、RTF、EPUB、CSV、纯文本、Markdown，以及 **PDF（电子版）**：
 
 | 情况 | 结果 |
 |---|---|

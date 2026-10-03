@@ -2758,6 +2758,7 @@ impl GongwenApp {
                     "已从 {} 新建稿件（{chars} 字）：请核对正文结构并补齐左侧文档要素。",
                     doc_import::file_label(&path)
                 );
+                self.status.push_str(doc_import::import_notice(&path));
             }
             Err(error) => self.status = format!("导入失败：{error:#}"),
         }
