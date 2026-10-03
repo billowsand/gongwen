@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 
+mod agent_settings;
 mod ai_prompts;
 mod ai_workbench;
 mod chrome;
@@ -329,6 +330,8 @@ pub struct GongwenApp {
     last_content_tab: Option<TabRef>,
     /// 设置页左侧主菜单当前选中的分区。纯当次会话状态，不进配置。
     settings_section: SettingsSection,
+    /// 设置页「智能体」分组（技能、数据接口、工具调试台）的状态。
+    agent_settings: agent_settings::AgentSettings,
 }
 
 /// 导出面板要显示的那几个数，连同各词源占比。整份码表正文不留在这里——
@@ -551,6 +554,7 @@ impl GongwenApp {
             font_filter: BTreeMap::new(),
             last_content_tab: None,
             settings_section: SettingsSection::default(),
+            agent_settings: Default::default(),
             embedding_probe_busy: false,
             rerank_probe_busy: false,
             rerank_verify_result: None,

@@ -49,6 +49,12 @@ pub(crate) enum SettingsSection {
     Knowledge,
     /// 网络代理（访问模型服务走的通道）。
     Network,
+    /// 技能：SKILL.md 的管理。
+    Skills,
+    /// 数据接口：内网查询接口。
+    DataApis,
+    /// 工具调试台。
+    ToolConsole,
     /// 输出与录入（输出目录、编辑器选项）。
     Output,
     /// 界面主题、公文纸面与图表样式。
@@ -71,7 +77,7 @@ pub(crate) enum SettingsSection {
 
 /// 左侧主菜单的分组。分组名只是小字标题，不可点击——十几项平铺成一列时，
 /// 找一项要从头扫到尾；按「配什么」分成几摞，眼睛一次只在一摞里找。
-const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
+const MENU_GROUPS: [(&str, &[SettingsSection]); 6] = [
     (
         "智能助手",
         &[
@@ -79,6 +85,14 @@ const MENU_GROUPS: [(&str, &[SettingsSection]); 5] = [
             SettingsSection::ReviseModel,
             SettingsSection::Knowledge,
             SettingsSection::Network,
+        ],
+    ),
+    (
+        "智能体",
+        &[
+            SettingsSection::Skills,
+            SettingsSection::DataApis,
+            SettingsSection::ToolConsole,
         ],
     ),
     (
@@ -112,6 +126,9 @@ impl SettingsSection {
             SettingsSection::ReviseModel => "AI 文字复核",
             SettingsSection::Knowledge => "知识库",
             SettingsSection::Network => "网络代理",
+            SettingsSection::Skills => "技能",
+            SettingsSection::DataApis => "数据接口",
+            SettingsSection::ToolConsole => "工具调试台",
             SettingsSection::Output => "输出与录入",
             SettingsSection::Theme => "界面主题",
             SettingsSection::Font => "字体",
@@ -131,6 +148,9 @@ impl SettingsSection {
             SettingsSection::ReviseModel => theme::Icon::Sparkles,
             SettingsSection::Knowledge => theme::Icon::Library,
             SettingsSection::Network => theme::Icon::Globe,
+            SettingsSection::Skills => theme::Icon::WandSparkles,
+            SettingsSection::DataApis => theme::Icon::Braces,
+            SettingsSection::ToolConsole => theme::Icon::Settings,
             SettingsSection::Output => theme::Icon::Folder,
             SettingsSection::Theme => theme::Icon::Palette,
             SettingsSection::Font => theme::Icon::Type,
@@ -162,6 +182,17 @@ impl SettingsSection {
             }
             SettingsSection::Network => {
                 "起草、文字复核、知识库访问模型服务时走的通道，支持 HTTP / HTTPS / SOCKS 代理。本机地址（localhost、127.0.0.1）始终直连，本地模型服务不受影响。"
+            }
+            SettingsSection::Skills => {
+                "AI 侧栏按技能做事：流程、提示词和能用的工具都写在 SKILL.md 里。内置技能可以复制一份改，\
+                 也可以新建自己的；保存时校验，写坏了不影响使用。"
+            }
+            SettingsSection::DataApis => {
+                "让技能调用内网系统（统计、政策库、业务系统、算法服务）取数据。只做查询，不发任何会改变\
+                 对方状态的请求；接口地址与密钥只存在本机，不写进技能文件。"
+            }
+            SettingsSection::ToolConsole => {
+                "选一个工具、填参数、看输出，写技能时用来试工具。对象是当前稿件的副本，改不到正文。"
             }
             SettingsSection::Output => {
                 "PDF 由内置 Typst 引擎在程序里直接排版，公文与研究报告都是，不依赖本机安装任何排版软件。"
@@ -206,7 +237,7 @@ fn setting_label(ui: &mut egui::Ui, label: &str, tip: Option<&str>) {
 }
 
 /// 一行设置项：左列标签，右列控件。
-fn setting_row<R>(
+pub(super) fn setting_row<R>(
     ui: &mut egui::Ui,
     label: &str,
     tip: Option<&str>,
@@ -1268,6 +1299,9 @@ impl GongwenApp {
                             SettingsSection::ReviseModel => self.revise_model_section_ui(ui),
                             SettingsSection::Knowledge => self.knowledge_section_ui(ui),
                             SettingsSection::Network => self.network_section_ui(ui),
+                            SettingsSection::Skills => self.skills_section_ui(ui),
+                            SettingsSection::DataApis => self.apis_section_ui(ui),
+                            SettingsSection::ToolConsole => self.tool_console_section_ui(ui),
                             SettingsSection::Output => self.output_section_ui(ui),
                             SettingsSection::Theme => self.theme_settings_ui(ui),
                             SettingsSection::Font => self.font_settings_ui(ui),
@@ -1294,6 +1328,8 @@ impl GongwenApp {
         ui.horizontal(|ui| {
             if theme::primary_icon_button(ui, theme::Icon::Save, "保存设置").clicked() {
                 self.persist();
+                // 数据接口页有没保存的修改时一并保存，免得离开设置页后丢掉。
+                self.save_pending_apis();
             }
             ui.add_space(8.0);
             ui.weak("主题、纸面与字体改完立即生效；其余各项要保存后才写入配置文件。");

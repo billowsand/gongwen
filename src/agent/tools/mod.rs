@@ -11,13 +11,13 @@
 //! - `vocab`：标准词库与规范；
 //! - `check`：确定性检查；
 //! - `calc`：计算与文本；
+//! - `http`：外部系统接口（`http.call`，只查询，只能调设置里配好的接口）；
 //! - `interact`：模型、选择题、留言。
-//!
-//! 外部系统接口（`http.call`）在第 ④ 期加入。
 
 mod calc;
 mod check;
 mod doc;
+mod http;
 mod interact;
 mod store;
 mod vocab;
@@ -26,6 +26,7 @@ mod workspace;
 pub(crate) use interact::ASSIST_SYSTEM;
 pub(crate) use store::{ManuscriptSource, SqliteManuscripts};
 
+use super::api::{ApiSecrets, ApiStore};
 use super::backend::ModelBackend;
 use super::board::Board;
 use super::clarify::Question;
@@ -46,7 +47,6 @@ pub(crate) enum Permission {
     /// 写 AI 工作稿。工作稿不是正文，落地要用户接受。
     WriteWorkspace,
     /// 访问外部系统（只查询）。
-    #[expect(dead_code, reason = "第 ④ 期的 http.call 用")]
     External,
     /// 问用户：出选择题，流程挂起等回答。
     AskUser,
@@ -158,6 +158,9 @@ pub(crate) struct Env<'a> {
     pub(crate) manuscripts: &'a dyn ManuscriptSource,
     pub(crate) model: &'a dyn ModelBackend,
     pub(crate) skill: &'a Skill,
+    /// 设置里配好的数据接口与密钥。
+    pub(crate) apis: &'a ApiStore,
+    pub(crate) secrets: &'a ApiSecrets,
 }
 
 /// 一次工具调用的上下文。
@@ -251,6 +254,7 @@ pub(crate) fn all() -> Vec<&'static dyn Tool> {
     tools.extend(vocab::TOOLS);
     tools.extend(check::TOOLS);
     tools.extend(calc::TOOLS);
+    tools.extend(http::TOOLS);
     tools.extend(interact::TOOLS);
     tools
 }
@@ -283,18 +287,36 @@ pub(crate) fn call(
     args: &Value,
 ) -> Result<ToolOutput, String> {
     let tool = find(id).ok_or_else(|| format!("没有工具「{id}」"))?;
-    if !ctx.env.skill.allows_tool(id) {
+    let mut args = match args {
+        Value::Object(map) => map.clone(),
+        Value::Null => Map::new(),
+        _ => return Err(format!("工具「{id}」的参数必须是键值对象")),
+    };
+    // `http.call:stat` 这类限定写法：限定名就是 `api` 参数。
+    if let Some((_, qualifier)) = id.split_once(':') {
+        match args.get("api").and_then(Value::as_str) {
+            Some(api) if api != qualifier => {
+                return Err(format!(
+                    "工具「{id}」的 api 参数写成了「{api}」，与限定名不一致"
+                ));
+            }
+            _ => {
+                args.insert("api".into(), Value::String(qualifier.to_string()));
+            }
+        }
+    }
+    // 白名单按「工具:接口」查：只声明了 `http.call:stat` 的技能调不到别的接口。
+    let checked = match (tool.id(), args.get("api").and_then(Value::as_str)) {
+        ("http.call", Some(api)) => format!("http.call:{api}"),
+        _ => id.to_string(),
+    };
+    if !ctx.env.skill.allows_tool(&checked) {
         return Err(format!(
-            "技能「{}」没有声明工具「{id}」",
+            "技能「{}」没有声明工具「{checked}」",
             ctx.env.skill.name
         ));
     }
-    let empty = Map::new();
-    let args = match args {
-        Value::Object(map) => map,
-        Value::Null => &empty,
-        _ => return Err(format!("工具「{id}」的参数必须是键值对象")),
-    };
+    let args = &args;
     for input in tool.inputs().iter().filter(|input| input.required) {
         let missing = match args.get(input.name) {
             None | Some(Value::Null) => true,

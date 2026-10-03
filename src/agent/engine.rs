@@ -199,7 +199,13 @@ fn for_each(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<()> {
 pub(crate) fn condition_holds(board: &Board, env: &Env<'_>, condition: &Value) -> bool {
     match condition {
         Value::String(name) => match name.as_str() {
-            "has_sources" => env.kb.enabled(),
+            // 知识库启用了，或技能声明了已配置的数据接口。
+            "has_sources" => {
+                env.kb.enabled()
+                    || env.apis.endpoints.iter().any(|endpoint| {
+                        env.skill.allows_tool(&format!("http.call:{}", endpoint.id))
+                    })
+            }
             "has_text" => !board.document.trim().is_empty(),
             "has_selection" => board
                 .selection

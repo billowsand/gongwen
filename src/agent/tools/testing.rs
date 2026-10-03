@@ -151,6 +151,8 @@ pub(crate) struct Fixture {
     pub(crate) manuscripts: FakeManuscripts,
     pub(crate) model: EchoModel,
     pub(crate) events: Vec<Event>,
+    pub(crate) apis: crate::agent::api::ApiStore,
+    pub(crate) secrets: crate::agent::api::ApiSecrets,
 }
 
 impl Fixture {
@@ -216,6 +218,8 @@ impl Fixture {
                 prompts: RefCell::new(Vec::new()),
             },
             events: Vec::new(),
+            apis: Default::default(),
+            secrets: Default::default(),
         }
     }
 
@@ -227,6 +231,8 @@ impl Fixture {
             manuscripts: &self.manuscripts,
             model: &self.model,
             skill: &self.skill,
+            apis: &self.apis,
+            secrets: &self.secrets,
         };
         let mut events = Vec::new();
         let result = {

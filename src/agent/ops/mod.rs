@@ -8,6 +8,9 @@
 //!
 //! `for_each` 由引擎直接处理。算子的参数先看步骤里写的，再看技能 `params` 里的同名项，
 //! 都没有就用默认值，并夹在合理范围里。
+//!
+//! 检索类算子（`retrieve`、`gap_loop`）除了知识库，还可以查步骤里 `apis:` 列出的数据接口；
+//! 接口调用照样经工具白名单，技能没声明 `http.call:<id>` 就调不到。
 
 mod finish;
 mod gap_loop;
@@ -20,6 +23,7 @@ use super::engine::Event;
 use super::skill::StepSpec;
 use super::tools::{ASSIST_SYSTEM, Permission, ToolCtx, ToolUse, short};
 use crate::lmstudio::StreamDelta;
+use serde_json::Value;
 
 /// 算子执行完之后怎么走。
 pub(crate) enum Flow {
@@ -161,6 +165,98 @@ fn search_into(ctx: &mut ToolCtx<'_, '_>, query: &str) -> Vec<(String, usize)> {
         }
         Err(error) => {
             note(ctx, format!("知识库检索失败：{error:#}"));
+            Vec::new()
+        }
+    }
+}
+
+/// 步骤里写的数据接口：`apis: [stat, { api: policy, args: { keyword: "{query}" } }]`。
+/// 只写 id 时，检索词填给接口的第一个输入变量。
+fn api_sources(step: &StepSpec) -> Vec<(String, Option<Value>)> {
+    let Some(Value::Array(items)) = step.params.get("apis") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Value::String(id) => Some((id.clone(), None)),
+            Value::Object(map) => map
+                .get("api")
+                .and_then(Value::as_str)
+                .map(|id| (id.to_string(), map.get("args").cloned())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 这一步有没有可查的资料来源：知识库启用了，或写了数据接口。
+fn has_sources(ctx: &ToolCtx<'_, '_>, step: &StepSpec) -> bool {
+    ctx.env.kb.enabled() || !api_sources(step).is_empty()
+}
+
+/// 用一个检索词查这一步的全部来源（知识库 + 数据接口），结果并入证据包，
+/// 返回每条资料的 (证据键, 编号)。
+fn fetch_into(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, query: &str) -> Vec<(String, usize)> {
+    let mut found = if ctx.env.kb.enabled() {
+        search_into(ctx, query)
+    } else {
+        Vec::new()
+    };
+    for (api, args) in api_sources(step) {
+        found.extend(call_api_into(ctx, &api, args.as_ref(), query));
+    }
+    found
+}
+
+/// 调一个数据接口。经 `tools::call` 走白名单：技能没声明 `http.call:<id>` 就调不到。
+fn call_api_into(
+    ctx: &mut ToolCtx<'_, '_>,
+    api: &str,
+    args: Option<&Value>,
+    query: &str,
+) -> Vec<(String, usize)> {
+    let args = match args {
+        Some(template) => ctx
+            .board
+            .render_value_with(template, &[("query", query.to_string())]),
+        None => {
+            let first = ctx
+                .env
+                .apis
+                .get(api)
+                .and_then(|endpoint| endpoint.inputs.first())
+                .map(|input| input.name.clone());
+            match first {
+                Some(name) => Value::Object(
+                    [(name, Value::String(query.to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+                None => Value::Null,
+            }
+        }
+    };
+    match super::tools::call(&format!("http.call:{api}"), ctx, &args) {
+        Ok(output) => {
+            tool_line(
+                ctx,
+                "http.call",
+                Permission::External,
+                output.summary.clone(),
+            );
+            if !output.evidence_by_default {
+                return Vec::new();
+            }
+            let ids = ctx.board.evidence.absorb_docs(query, &output.evidence);
+            output
+                .evidence
+                .into_iter()
+                .map(|doc| doc.key)
+                .zip(ids)
+                .collect()
+        }
+        Err(error) => {
+            note(ctx, format!("数据接口「{api}」：{error}"));
             Vec::new()
         }
     }

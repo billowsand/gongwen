@@ -107,12 +107,20 @@ impl Board {
     /// 把工具参数里的字符串逐个渲染。整串只有一个变量时保留变量原来的类型
     /// （例如 `"{baseline_id}"` 渲染成数字），方便直接当工具输入。
     pub(crate) fn render_value(&self, value: &Value) -> Value {
+        self.render_value_with(value, &[])
+    }
+
+    /// 同 [`Board::render_value`]，另带本步变量（如检索词 `{query}`），同名时它们优先。
+    pub(crate) fn render_value_with(&self, value: &Value, locals: &[(&str, String)]) -> Value {
         match value {
             Value::String(text) => {
                 if let Some(caps) = VARIABLE.captures(text)
                     && caps[0].len() == text.len()
                 {
                     let name = &caps[1];
+                    if let Some((_, local)) = locals.iter().find(|(key, _)| *key == name) {
+                        return Value::String(local.clone());
+                    }
                     let (head, field) = match name.split_once('.') {
                         Some((head, field)) => (head, Some(field)),
                         None => (name, None),
@@ -127,14 +135,17 @@ impl Board {
                         }
                     }
                 }
-                Value::String(self.render(text))
+                Value::String(self.render_with(text, locals))
             }
-            Value::Array(items) => {
-                Value::Array(items.iter().map(|v| self.render_value(v)).collect())
-            }
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|v| self.render_value_with(v, locals))
+                    .collect(),
+            ),
             Value::Object(map) => Value::Object(
                 map.iter()
-                    .map(|(key, v)| (key.clone(), self.render_value(v)))
+                    .map(|(key, v)| (key.clone(), self.render_value_with(v, locals)))
                     .collect(),
             ),
             other => other.clone(),

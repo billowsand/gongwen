@@ -1,6 +1,8 @@
 //! 动笔之前：澄清、预研、检索。
 
-use super::{Flow, assist, check_cancel, note, param, phase, prompt, search_into, tool_line};
+use super::{
+    Flow, assist, check_cancel, fetch_into, has_sources, note, param, phase, prompt, tool_line,
+};
 use crate::agent::clarify;
 use crate::agent::skill::StepSpec;
 use crate::agent::tools::{Permission, ToolCtx};
@@ -78,10 +80,10 @@ pub(super) fn plan(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result
     Ok(Flow::Next)
 }
 
-/// `retrieve`：逐个检索词查知识库，结果并入证据包。检索词取 `from` 指定的变量（默认
-/// `queries`），没有就用用户原话。知识库没启用时只留一条说明。
+/// `retrieve`：逐个检索词查知识库与 `apis:` 列出的数据接口，结果并入证据包。检索词取
+/// `from` 指定的变量（默认 `queries`），没有就用用户原话。一个来源都没有时只留一条说明。
 pub(super) fn retrieve(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
-    if !ctx.env.kb.enabled() {
+    if !has_sources(ctx, step) {
         note(ctx, "知识库未启用：只按材料起草，缺口全部交给你确认。");
         return Ok(Flow::Next);
     }
@@ -96,7 +98,7 @@ pub(super) fn retrieve(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
     };
     for query in queries.iter().map(|q| q.trim()).filter(|q| !q.is_empty()) {
         check_cancel(ctx)?;
-        search_into(ctx, query);
+        fetch_into(ctx, step, query);
     }
     Ok(Flow::Next)
 }

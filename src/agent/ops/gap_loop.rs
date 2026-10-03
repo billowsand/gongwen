@@ -4,9 +4,12 @@
 //! 才写回），来源不明的事实找出处。没有进展、检索次数用完或满轮数就停。
 //!
 //! 参数：`rounds`（技能参数 `max_rounds`）、`attempts`（`attempts_per_gap`）、
-//! `evidence_chars`；提示词 `fill_prompt`（默认「缺口修订」）、`source_prompt`（默认「来源核对」）。
+//! `evidence_chars`、`apis`（除知识库外还查哪些数据接口）；提示词 `fill_prompt`（默认「缺口修订」）、
+//! `source_prompt`（默认「来源核对」）。
 
-use super::{Flow, assist, check_cancel, param, phase, prompt, search_into, squash, tool_line};
+use super::{
+    Flow, assist, check_cancel, fetch_into, has_sources, param, phase, prompt, squash, tool_line,
+};
 use crate::agent::backend::ModelRole;
 use crate::agent::engine::Event;
 use crate::agent::evidence;
@@ -46,7 +49,7 @@ pub(super) fn gap_loop(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
             break;
         }
         ctx.board.rounds = round;
-        if !ctx.env.kb.enabled() {
+        if !has_sources(ctx, step) {
             for id in targets {
                 if let Some(gap) = ctx.board.ledger.get_mut(id) {
                     gap.status = GapStatus::NoAnswer;
@@ -111,7 +114,7 @@ fn fill_gap(
     let attempt = gap.attempts + 1;
     let query = gap_query(&gap, attempt, &ctx.board.draft.title_hint);
     phase(ctx, format!("第 {round} 轮 · 查「{}」…", gap.hint));
-    let found = search_into(ctx, &query);
+    let found = fetch_into(ctx, step, &query);
     let fresh = found.iter().any(|(key, _)| !gap.seen_chunks.contains(key));
     let ids: Vec<usize> = found.iter().map(|(_, id)| *id).collect();
     let last_try = attempt >= limits.attempts;

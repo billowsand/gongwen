@@ -63,6 +63,8 @@ fn run(
         manuscripts: &manuscripts,
         model,
         skill,
+        apis: &Default::default(),
+        secrets: &Default::default(),
     };
     let mut board = board_of(input);
     Ok(match super::run(&mut board, &env, 0, emit)? {
@@ -714,6 +716,8 @@ fn run_board(
         manuscripts: &manuscripts,
         model,
         skill,
+        apis: &Default::default(),
+        secrets: &Default::default(),
     };
     let mut events = Vec::new();
     let outcome = super::run(&mut board, &env, start, &mut |event| events.push(event));
@@ -951,6 +955,8 @@ fn conditions_cover_kind_variables_and_negation() {
         manuscripts: &manuscripts,
         model: &model,
         skill: &skill,
+        apis: &Default::default(),
+        secrets: &Default::default(),
     };
     let mut board = Board::default();
     board.draft.kind = TemplateKind::ResearchReport;
@@ -969,4 +975,183 @@ fn conditions_cover_kind_variables_and_negation() {
         "列表要全部满足"
     );
     assert!(!holds(&board, json!("乱写")), "认不出的条件当不满足");
+}
+
+// —— 第 ④ 期验收：数据接口经引擎走完「调用 → 映射 → 证据包 → 引用 → 核验」 ——
+
+#[test]
+fn an_api_feeds_evidence_that_is_cited_verified_and_gap_checked() {
+    use crate::agent::api::test_server::TestServer;
+    use crate::agent::api::{ApiEndpoint, ApiInput, ApiMapping, ApiStore, InputKind};
+    let item =
+        serde_json::json!({"items": [{"id": 7, "region": "全省", "year": 2025, "count": 12}]})
+            .to_string();
+    // 预检索一次，缺口「500万元」定向检索两次（第二次搜回的是旧资料，判无答案）。
+    let server = TestServer::start(vec![(200, item.clone()), (200, item.clone()), (200, item)]);
+    let apis = ApiStore {
+        endpoints: vec![ApiEndpoint {
+            id: "stat".into(),
+            name: "火灾统计".into(),
+            url: format!("{}/stat?region={{region}}", server.url),
+            inputs: vec![ApiInput {
+                name: "region".into(),
+                kind: InputKind::Text,
+                required: true,
+                ..ApiInput::default()
+            }],
+            mapping: ApiMapping {
+                list: "/items".into(),
+                title: "{region}{year}年森林火灾统计".into(),
+                text: "{region}{year}年共发生森林火灾{count}起".into(),
+                source: "省应急厅统计系统".into(),
+                ..ApiMapping::default()
+            },
+            ..ApiEndpoint::default()
+        }],
+    };
+    let skill = parse(
+        "data",
+        "---\nname: 数据分析段落\ntools: [http.call:stat]\nflow:\n  - step: retrieve\n    apis: [{ api: stat, args: { region: \"{query}\" } }]\n  - step: generate\n    prompt: 起草附加要求\n  - step: gap_loop\n    apis: [stat]\n  - step: verify\n  - step: ask\n---\n## 起草附加要求\n【证据】\n{evidence}\n## 缺口修订\n补「{hint}」：{sentence}\n{evidence}\n## 来源核对\n「{value}」：{sentence}\n{evidence}\n## 核验\n具体事实（时间、数字）：{sentence}\n{evidence}\n",
+        "测试",
+    )
+    .unwrap();
+    assert!(
+        crate::agent::skill::validate(
+            &skill,
+            &crate::agent::ops::names(),
+            &crate::agent::tools::ids()
+        )
+        .is_empty()
+    );
+    let model = FakeModel::new(|role, prompt| {
+        if prompt.contains("具体事实（时间、数字）") {
+            "支持".into()
+        } else if prompt.starts_with("「") {
+            "不支持".into()
+        } else if role == ModelRole::Draft {
+            "# 情况通报\n\n一、2025年全省共发生森林火灾12起[K1]。\n\n二、全年投入扑救经费500万元。\n".into()
+        } else {
+            "无".into()
+        }
+    });
+    let config = AppConfig::default();
+    let manuscripts = FakeManuscripts { docs: Vec::new() };
+    let kb = kb(false);
+    let env = Env {
+        config: &config,
+        vocabulary: &[],
+        kb: &kb,
+        manuscripts: &manuscripts,
+        model: &model,
+        skill: &skill,
+        apis: &apis,
+        secrets: &Default::default(),
+    };
+    let mut board = Board {
+        request: "全省".into(),
+        system_prompt: "SYSTEM".into(),
+        ..Board::default()
+    };
+    let mut events = Vec::new();
+    let outcome = super::run(&mut board, &env, 0, &mut |event| events.push(event)).unwrap();
+    assert!(matches!(outcome, Outcome::Done));
+
+    // 调用：检索词填进地址。
+    assert!(
+        server
+            .request(0)
+            .starts_with("GET /stat?region=%E5%85%A8%E7%9C%81 "),
+        "{}",
+        server.request(0)
+    );
+    // 映射 → 证据包：同一条资料只编一个号。
+    let pack = &board.evidence;
+    assert_eq!(pack.items().len(), 1);
+    let evidence = &pack.items()[0];
+    assert_eq!(evidence.key, "http:stat:7");
+    assert_eq!(
+        evidence.source_label(),
+        "《全省2025年森林火灾统计》· 省应急厅统计系统"
+    );
+    // 引用：起草时证据带编号交给模型。
+    assert!(
+        model
+            .calls
+            .borrow()
+            .iter()
+            .any(|(role, prompt)| *role == ModelRole::Draft
+                && prompt.contains("[K1]")
+                && prompt.contains("全省2025年共发生森林火灾12起"))
+    );
+    // 核验：带引用的句子对照接口返回核过一次；12起有出处，不进台账。
+    assert_eq!(model.asked("具体事实（时间、数字）"), 1);
+    let report = SkillReport::from_board(&board);
+    assert!(!report.markdown.contains("[K"), "{}", report.markdown);
+    assert!(report.ledger.gaps.iter().all(|gap| gap.hint != "12起"));
+    // 接口里查不到的经费：定向检索两次后交用户确认。
+    let gap = report
+        .ledger
+        .gaps
+        .iter()
+        .find(|gap| gap.hint == "500万元")
+        .expect("500万元应当入账");
+    assert_eq!(gap.status, GapStatus::NoAnswer);
+    assert_eq!(gap.attempts, 2);
+    assert!(report.questions.iter().any(|q| q.text.contains("500万元")));
+    assert!(
+        tool_lines(&events)
+            .iter()
+            .filter(|line| line.contains("调用接口「火灾统计」→ 1 条"))
+            .count()
+            == 3,
+        "{:?}",
+        tool_lines(&events)
+    );
+}
+
+#[test]
+fn undeclared_apis_are_refused_even_inside_operators() {
+    use crate::agent::api::{ApiEndpoint, ApiStore};
+    let apis = ApiStore {
+        endpoints: vec![ApiEndpoint {
+            id: "stat".into(),
+            name: "火灾统计".into(),
+            url: "http://127.0.0.1:9/stat".into(),
+            ..ApiEndpoint::default()
+        }],
+    };
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [note]\nflow:\n  - step: retrieve\n    apis: [stat]\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let config = AppConfig::default();
+    let manuscripts = FakeManuscripts { docs: Vec::new() };
+    let model = silent_model();
+    let kb = kb(false);
+    let env = Env {
+        config: &config,
+        vocabulary: &[],
+        kb: &kb,
+        manuscripts: &manuscripts,
+        model: &model,
+        skill: &skill,
+        apis: &apis,
+        secrets: &Default::default(),
+    };
+    let mut board = Board {
+        request: "全省".into(),
+        ..Board::default()
+    };
+    let mut events = Vec::new();
+    super::run(&mut board, &env, 0, &mut |event| events.push(event)).unwrap();
+    let notes = notes(&events);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("没有声明工具「http.call:stat」")),
+        "{notes:?}"
+    );
+    assert!(board.evidence.is_empty());
 }

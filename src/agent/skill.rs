@@ -425,6 +425,24 @@ fn validate_steps(
         if let Some(condition) = &step.when {
             condition_problems(condition, &at, problems);
         }
+        if let Some(Value::Array(items)) = step.params.get("apis") {
+            for item in items {
+                let id = match item {
+                    Value::String(id) => Some(id.as_str()),
+                    Value::Object(map) => map.get("api").and_then(Value::as_str),
+                    _ => None,
+                };
+                match id {
+                    Some(id) if skill.allows_tool(&format!("http.call:{id}")) => {}
+                    Some(id) => problems.push(format!(
+                        "{at}的 apis 用了接口「{id}」，但 tools 里没有声明 http.call:{id}"
+                    )),
+                    None => problems.push(format!(
+                        "{at}的 apis 写法不对：写接口 id，或 {{ api: id, args: {{…}} }}"
+                    )),
+                }
+            }
+        }
         for key in ["prompt", "fill_prompt", "source_prompt"] {
             if let Some(name) = step.param_str(key)
                 && skill.section(name).is_none()
@@ -499,6 +517,27 @@ pub(crate) fn builtin_research_draft() -> Skill {
     builtin(RESEARCH_DRAFT).expect("内置研究式起草")
 }
 
+/// 内置技能的原文（技能页「复制为我的技能」、编辑器显示用）。
+pub(crate) fn builtin_text(id: &str) -> Option<&'static str> {
+    BUILTIN
+        .iter()
+        .find(|(builtin, _)| *builtin == id)
+        .map(|(_, text)| *text)
+}
+
+/// 技能声明了、但「数据接口」里还没配的接口 id。
+pub(crate) fn missing_apis(skill: &Skill, apis: &crate::agent::api::ApiStore) -> Vec<String> {
+    let mut missing: Vec<String> = skill
+        .tools
+        .iter()
+        .filter_map(|tool| tool.strip_prefix("http.call:"))
+        .filter(|id| apis.get(id).is_none())
+        .map(str::to_string)
+        .collect();
+    missing.dedup();
+    missing
+}
+
 /// 按引擎认识的算子与工具校验。
 fn check(skill: &Skill) -> Vec<String> {
     validate(
@@ -511,6 +550,17 @@ fn check(skill: &Skill) -> Vec<String> {
 /// 全部技能：内置 + 用户目录。同 id 的用户技能覆盖内置（缺的部分用内置补齐）；用户文件
 /// 写坏了不中断：覆盖内置的退回内置，新增的停用，各给一条说明。返回 (技能, 说明)。
 pub(crate) fn load_all() -> (Vec<Skill>, Vec<String>) {
+    let (mut skills, notes) = load_files();
+    let disabled = crate::agent::skill_files::disabled_ids();
+    for skill in &mut skills {
+        if disabled.contains(&skill.id) {
+            skill.enabled = false;
+        }
+    }
+    (skills, notes)
+}
+
+fn load_files() -> (Vec<Skill>, Vec<String>) {
     let mut skills = builtin_skills();
     let mut notes = Vec::new();
     let Ok(dir) = crate::storage::config_dir() else {
@@ -584,6 +634,29 @@ mod tests {
     const TOOLS: [&str; 4] = ["kb.search", "llm.generate", "vocab.persons", "http.call"];
 
     #[test]
+    fn declared_but_unconfigured_apis_are_reported() {
+        use crate::agent::api::{ApiEndpoint, ApiStore};
+        let skill = parse(
+            "t",
+            "---\nname: x\ntools: [http.call:stat, http.call:policy]\n---\n",
+            "测试",
+        )
+        .unwrap();
+        let apis = ApiStore {
+            endpoints: vec![ApiEndpoint {
+                id: "stat".into(),
+                ..ApiEndpoint::default()
+            }],
+        };
+        assert_eq!(missing_apis(&skill, &apis), ["policy"]);
+        assert_eq!(
+            builtin_text(POLISH).map(|t| t.contains("name: 润色")),
+            Some(true)
+        );
+        assert!(builtin_text("nope").is_none());
+    }
+
+    #[test]
     fn builtin_skills_parse_with_flows() {
         let skills = builtin_skills();
         assert_eq!(skills.len(), 2);
@@ -641,7 +714,7 @@ mod tests {
 
     #[test]
     fn validation_reports_every_kind_of_mistake() {
-        let text = "---\nname: 坏\napplies_to: [公函, 不存在的文种]\ntools: [kb.search, 乱写.工具]\nflow:\n  - step: 乱写\n  - tool: llm.generate\n  - step: generate\n    tool: kb.search\n  - {}\n  - step: generate\n    prompt: 没有这段\n  - step: for_each\n  - step: generate\n    when: [has_text, 乱写, { kind: 不存在, not: { var: x } }]\n---\n";
+        let text = "---\nname: 坏\napplies_to: [公函, 不存在的文种]\ntools: [kb.search, 乱写.工具]\nflow:\n  - step: 乱写\n  - tool: llm.generate\n  - step: generate\n    tool: kb.search\n  - {}\n  - step: generate\n    prompt: 没有这段\n  - step: for_each\n  - step: generate\n    when: [has_text, 乱写, { kind: 不存在, not: { var: x } }]\n  - step: retrieve\n    apis: [stat]\n---\n";
         let skill = parse("bad", text, "测试").unwrap();
         let problems = validate(&skill, &OPS, &TOOLS).join("\n");
         for expected in [
@@ -656,6 +729,7 @@ mod tests {
             "缺少 over",
             "条件「乱写」不认识",
             "「不存在」不是认识的文种",
+            "没有声明 http.call:stat",
         ] {
             assert!(
                 problems.contains(expected),

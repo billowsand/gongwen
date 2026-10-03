@@ -8,6 +8,7 @@
 //!   定稿成提案，不再调模型。
 
 use super::{ReplyDraft, ResearchSnapshot, TurnRequest, TurnState, locate_selection};
+use crate::agent::api::{ApiSecrets, ApiStore};
 use crate::agent::backend::LmBackend;
 use crate::agent::board::Board;
 use crate::agent::clarify::{self, Question, Reply, Target};
@@ -154,6 +155,28 @@ impl DraftPage<'_> {
         *self.status = format!("正在{title}…");
 
         let config = self.config.clone();
+        // 接口定义与密钥在界面线程读：测试替换的配置目录只对当前线程有效。
+        let (apis, secrets) = match (ApiStore::load(), ApiSecrets::load()) {
+            (Ok(apis), Ok(secrets)) => (apis, secrets),
+            (apis, secrets) => {
+                for error in [apis.err(), secrets.err()].into_iter().flatten() {
+                    self.doc
+                        .ai_panel
+                        .note(format!("数据接口配置读不出来：{error:#}"));
+                }
+                (ApiStore::default(), ApiSecrets::default())
+            }
+        };
+        if let Pick::Fixed(skill) = &pick {
+            let missing = crate::agent::skill::missing_apis(skill, &apis);
+            if !missing.is_empty() {
+                self.doc.ai_panel.note(format!(
+                    "「{}」要用的数据接口还没配置：{}，相关步骤会跳过。可在设置页「数据接口」添加。",
+                    skill.name,
+                    missing.join("、")
+                ));
+            }
+        }
         let kind_filter = self.doc.rag_kind_filter.resolve(self.doc.draft.kind);
         let tx = self.sender.clone();
         std::thread::spawn(move || {
@@ -184,7 +207,15 @@ impl DraftPage<'_> {
                     }
                 };
                 run_skill(
-                    pick, &mut board, start, use_rag, &config, &model, &kb, &mut emit,
+                    pick,
+                    &mut board,
+                    start,
+                    use_rag,
+                    &config,
+                    &model,
+                    &kb,
+                    (&apis, &secrets),
+                    &mut emit,
                 )
             };
             batch.flush(&send);
@@ -431,6 +462,7 @@ fn run_skill(
     config: &crate::models::AppConfig,
     model: &LmBackend,
     kb: &RagSearch,
+    (apis, secrets): (&ApiStore, &ApiSecrets),
     emit: &mut dyn FnMut(Event),
 ) -> Result<SkillResult, String> {
     let skill = match pick {
@@ -455,6 +487,8 @@ fn run_skill(
         manuscripts: &SqliteManuscripts,
         model,
         skill: &skill,
+        apis,
+        secrets,
     };
     match engine::run(board, &env, start, emit).map_err(|e| format!("{e:#}"))? {
         Outcome::Suspended(suspension) => Ok(SkillResult::Suspended(Box::new(SkillRun {
