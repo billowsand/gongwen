@@ -200,6 +200,63 @@ fn close_button_rect(tab: egui::Rect) -> egui::Rect {
     )
 }
 
+/// 顶栏纯图标按钮（新建、快捷查找、换肤）的边长：与标签胶囊同高，悬停底色是
+/// 同直径的圆，观感对齐 Chrome 工具栏上的插件按钮。
+const TOOL_BUTTON_SIZE: f32 = TOOLBAR_CONTROL_HEIGHT;
+/// 相邻图标按钮之间的空隙。按钮之间靠悬停圆区分，不需要再留白。
+const TOOL_BUTTON_GAP: f32 = 2.0;
+/// 换肤弹层里每个主题的色样直径。
+const THEME_SWATCH_SIZE: f32 = 14.0;
+/// 收进「词库」子菜单的四张词表，菜单与当前页高亮共用。
+const LEXICON_PAGES: [NavPage; 4] = [
+    NavPage::Vocabulary,
+    NavPage::Proofread,
+    NavPage::Lexicon,
+    NavPage::ImeTable,
+];
+
+/// 顶栏纯图标按钮：常态只有图标，悬停、按下才铺一枚圆形底色。须放在
+/// [`tool_button_scope`] 里加，否则全局按钮内边距会把它撑成扁块。
+fn tool_button(icon: theme::Icon) -> egui::Button<'static> {
+    egui::Button::image(icon.image())
+        .image_tint_follows_text_color(true)
+        .frame_when_inactive(false)
+        .corner_radius(egui::CornerRadius::same((TOOL_BUTTON_SIZE / 2.0) as u8))
+        .min_size(egui::Vec2::splat(TOOL_BUTTON_SIZE))
+        .small()
+}
+
+/// 收紧图标按钮的内边距与间距。全局 `button_padding` 是 10×5、`item_spacing.x`
+/// 是 8，16 px 图标会被撑成 36×30 的扁块，一排按钮之间再各隔 8 px，显得松散。
+/// 弹出的菜单是独立的 Area，不继承这里的样式。
+fn tool_button_scope<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let padding = (TOOL_BUTTON_SIZE - 16.0) / 2.0;
+        ui.spacing_mut().button_padding = egui::vec2(padding, padding);
+        ui.spacing_mut().item_spacing.x = TOOL_BUTTON_GAP;
+        add(ui)
+    })
+    .inner
+}
+
+/// 菜单项按 Windows 惯例用 9pt（≈12px）的紧凑字号，与状态栏同档，条目之间只留
+/// 2 px（全局 7 px 的行距放在菜单里太散）。子菜单、弹层各是独立的 Area，
+/// 不继承父菜单的样式，每一层都要单独调一次。
+fn compact_menu(ui: &mut egui::Ui) {
+    for style in [egui::TextStyle::Button, egui::TextStyle::Small] {
+        ui.style_mut().text_styles.insert(
+            style,
+            egui::FontId::new(theme::font_sizes::SMALL, egui::FontFamily::Proportional),
+        );
+    }
+    ui.spacing_mut().item_spacing.y = 2.0;
+}
+
+/// 菜单条目右端的快捷键提示：弱化色，不和条目名抢视线。
+fn muted_shortcut(text: &str) -> egui::RichText {
+    egui::RichText::new(text).color(theme::text_muted()).small()
+}
+
 impl GongwenApp {
     /// 无边框窗口的顶栏。
     ///
@@ -677,31 +734,50 @@ impl GongwenApp {
         }
     }
 
-    /// 顶格一整行：左边是菜单按钮，右边依次排开所有标签。稿件和导航页共用
-    /// 这一条，界面纵向只让出一行。
+    /// 顶格一整行：左边菜单，中间标签条（末尾是新建按钮），右端贴窗口右沿放
+    /// 快捷查找与换肤两枚图标按钮。稿件和导航页共用这一条，界面纵向只让出一行。
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             self.app_menu_button(ui);
-            if ui
-                .button("快捷查找")
-                .on_hover_text(format!(
-                    "查找稿件、单位人员与常用页面（{}）",
-                    theme::primary_shortcut("K")
-                ))
-                .clicked()
-            {
-                self.open_quick_find();
-            }
             toolbar_separator(ui);
-            self.tab_strip(ui);
+            // 先给右端按钮留足宽度，标签条只在剩下的地方排，标签再多也挤不掉它们。
+            let tools_width =
+                2.0 * TOOL_BUTTON_SIZE + TOOL_BUTTON_GAP + ui.spacing().item_spacing.x;
+            let tabs_width = (ui.available_width() - tools_width).max(0.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(tabs_width, TOOLBAR_CONTROL_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| self.tab_strip(ui),
+            );
+            // `allocate_ui_with_layout` 只按内容实际宽度占位，不会撑满给定宽度；
+            // 右端按钮必须另起一个靠右的布局才贴得住右沿。右到左排，先放的在最右。
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                tool_button_scope(ui, |ui| {
+                    egui::containers::menu::MenuButton::from_button(tool_button(
+                        theme::Icon::Shirt,
+                    ))
+                    .ui(ui, |ui| self.theme_menu(ui))
+                    .0
+                    .on_hover_text("外观主题");
+                    if ui
+                        .add(tool_button(theme::Icon::Search))
+                        .on_hover_text(format!(
+                            "快捷查找：稿件、单位人员与页面（{}）",
+                            theme::primary_shortcut("K")
+                        ))
+                        .clicked()
+                    {
+                        self.open_quick_find();
+                    }
+                });
+            });
         });
     }
 
-    /// 左上角的菜单：应用图标 + 「菜单」文字，点开是五个常驻页面。
-    /// 入口本身带文字而非纯图标——过去只有一枚汉堡图标，五个常驻页面和
+    /// 左上角的菜单：应用图标 + 「菜单」文字，点开是新建入口与各个常驻页面。
+    /// 入口本身带文字而非纯图标——过去只有一枚汉堡图标，常驻页面和
     /// 新建公文这些高频入口藏在里面几乎不可见。
     pub(crate) fn app_menu_button(&mut self, ui: &mut egui::Ui) {
-        let mut open: Option<NavPage> = None;
         egui::containers::menu::MenuButton::from_button(
             egui::Button::image_and_text(
                 theme::Icon::Menu
@@ -712,141 +788,40 @@ impl GongwenApp {
             .image_tint_follows_text_color(true),
         )
         .ui(ui, |ui| {
+            compact_menu(ui);
             ui.set_min_width(148.0);
-            // 菜单项按 Windows 惯例用 9pt（≈12px）的紧凑字号，与状态栏同档。
-            for style in [egui::TextStyle::Button, egui::TextStyle::Small] {
-                ui.style_mut().text_styles.insert(
-                    style,
-                    egui::FontId::new(
-                        theme::font_sizes::SMALL,
-                        egui::FontFamily::Proportional,
-                    ),
-                );
-            }
-            for page in [
-                NavPage::Manuscript,
-                NavPage::Vocabulary,
-                NavPage::Proofread,
-                NavPage::Lexicon,
-                NavPage::ImeTable,
-                NavPage::AiPrompts,
-                NavPage::Knowledge,
-                NavPage::Settings,
-                NavPage::Help,
-            ] {
-                // 菜单高亮表达“当前所在页”，不是“这个页面曾经开成了标签”。
-                // 后台打开但未激活的页面不应和当前页同时显示为选中。
-                let active = self.tabs.get(self.active_tab) == Some(&TabRef::Page(page));
-                let mut item = theme::menu_item(page.icon(), page.label())
-                    .selected(active)
-                    // 选中项常显强调色淡底，而不是只改文字颜色：
-                    // `frame(false)` 会让按钮在未悬停时不画任何背景，
-                    // 选中态退化成「文字变色」，条目本身没有反应。
-                    .frame_when_inactive(active);
-                if page == NavPage::Help {
-                    item = item.right_text("F1");
-                }
-                if ui.add(item).clicked() {
-                    open = Some(page);
-                    ui.close();
-                }
-            }
+            self.new_document_items(ui);
             ui.separator();
-            if ui
-                .add(
-                    theme::menu_item(theme::Icon::FilePlus, "新建空白文档").right_text(
-                            egui::RichText::new(theme::primary_shortcut("N"))
-                                .color(theme::text_muted())
-                                .small(),
-                        ),
-                )
-                .clicked()
-            {
-                open = None;
-                self.new_blank_manuscript();
-                ui.close();
-            }
-            if ui
-                .add(
-                    theme::menu_item(theme::Icon::FileUp, "从文件新建文档"),
-                )
-                .on_hover_text(format!(
-                    "把 Word / Excel / PPT / ODF / RTF / EPUB / CSV 转成 Markdown 新开一篇稿件（可导入 {}）",
-                    doc_import::supported_summary()
-                ))
-                .clicked()
-            {
-                open = None;
-                self.new_manuscript_from_document();
-                ui.close();
-            }
-            if ui
-                .add(theme::menu_item(
-                    theme::Icon::Folder,
-                    "从文件夹新建研究报告",
-                ))
-                .on_hover_text(
-                    "按文件名升序合并文件夹第一层的 .md 文件，并导入本地图片与 BibTeX",
-                )
-                .clicked()
-            {
-                open = None;
-                self.new_research_manuscript_from_folder();
-                ui.close();
-            }
-            ui.separator();
-            if ui
-                .add(
-                    theme::menu_item(theme::Icon::Book, "关于公文助手"),
-                )
-                .clicked()
-            {
-                open = None;
-                self.about_window_open = true;
-                ui.close();
-            }
-            // 外观主题子菜单：主题切换以前只能在设置页里找，放到菜单底部
-            // 随手可换。主题项用 selectable_label，选中项自动带淡底高亮。
-            ui.separator();
+            self.nav_menu_item(ui, NavPage::Manuscript);
+            // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
+            // 子菜单入口也带选中底，顺着高亮就能找到所在位置。
+            let lexicon_active = LEXICON_PAGES
+                .iter()
+                .any(|page| self.tabs.get(self.active_tab) == Some(&TabRef::Page(*page)));
             egui::containers::menu::SubMenuButton::from_button(
-                theme::menu_item(theme::Icon::Palette, "外观主题")
+                theme::menu_item(theme::Icon::Book, "词库")
+                    .selected(lexicon_active)
+                    .frame_when_inactive(lexicon_active)
                     .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
             )
             .ui(ui, |ui| {
-                // 十二套主题按明暗分两段，中间用分隔线断开，菜单才扫得动。
-                for (index, dark) in [false, true].into_iter().enumerate() {
-                    if index > 0 {
-                        ui.separator();
-                    }
-                    for name in ThemeName::ALL
-                        .into_iter()
-                        .filter(|name| theme::by_name(*name).dark == dark)
-                    {
-                        let palette = theme::by_name(name);
-                        let selected = name == self.config.theme;
-                        if ui
-                            .add(theme::menu_selectable_item(selected, palette.label))
-                            .on_hover_text(if selected {
-                                "当前主题"
-                            } else {
-                                "切换后立即生效并保存"
-                            })
-                            .clicked()
-                            && !selected
-                        {
-                            self.apply_theme(ui.ctx(), name);
-                            ui.close();
-                        }
-                    }
+                compact_menu(ui);
+                ui.set_min_width(132.0);
+                for page in LEXICON_PAGES {
+                    self.nav_menu_item(ui, page);
                 }
             });
-            // 图表样式紧挨外观主题：同是「看起来什么样」，但它管的是纸面上的图，
-            // 导出也跟着变。
+            self.nav_menu_item(ui, NavPage::AiPrompts);
+            self.nav_menu_item(ui, NavPage::Knowledge);
+            ui.separator();
+            // 外观主题在顶栏右端的换肤按钮里。图表样式管的是纸面上的图，
+            // 导出也跟着变，留在菜单里挨着设置。
             egui::containers::menu::SubMenuButton::from_button(
                 theme::menu_item(theme::Icon::GitCommit, "图表样式")
                     .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
             )
             .ui(ui, |ui| {
+                compact_menu(ui);
                 for diagram_theme in DiagramTheme::ALL {
                     let selected = diagram_theme == self.config.diagram_theme;
                     if ui
@@ -864,11 +839,129 @@ impl GongwenApp {
                     }
                 }
             });
+            self.nav_menu_item(ui, NavPage::Settings);
+            ui.separator();
+            self.nav_menu_item(ui, NavPage::Help);
+            if ui
+                .add(theme::menu_item(theme::Icon::BrandMark, "关于公文助手"))
+                .clicked()
+            {
+                self.about_window_open = true;
+                ui.close();
+            }
         })
         .0
-        .on_hover_text("稿件管理、标准词库、AI 管理与设置");
-        if let Some(page) = open {
+        .on_hover_text("新建文档、稿件管理、词库、AI 管理与设置");
+    }
+
+    /// 菜单里的一个常驻页面入口。
+    fn nav_menu_item(&mut self, ui: &mut egui::Ui, page: NavPage) {
+        // 菜单高亮表达“当前所在页”，不是“这个页面曾经开成了标签”。
+        // 后台打开但未激活的页面不应和当前页同时显示为选中。
+        let active = self.tabs.get(self.active_tab) == Some(&TabRef::Page(page));
+        let mut item = theme::menu_item(page.icon(), page.label())
+            .selected(active)
+            // 选中项常显强调色淡底，而不是只改文字颜色：
+            // `frame(false)` 会让按钮在未悬停时不画任何背景，
+            // 选中态退化成「文字变色」，条目本身没有反应。
+            .frame_when_inactive(active);
+        if page == NavPage::Help {
+            item = item.right_text(muted_shortcut("F1"));
+        }
+        if ui.add(item).clicked() {
             self.open_page(page);
+            ui.close();
+        }
+    }
+
+    /// 三个新建入口。主菜单与标签栏加号的右键菜单共用。
+    fn new_document_items(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add(
+                theme::menu_item(theme::Icon::FilePlus, "新建空白文档")
+                    .right_text(muted_shortcut(&theme::primary_shortcut("N"))),
+            )
+            .clicked()
+        {
+            self.new_blank_manuscript();
+            ui.close();
+        }
+        if ui
+            .add(theme::menu_item(theme::Icon::FileUp, "从文件新建文档…"))
+            .on_hover_text(format!(
+                "把 Word / Excel / PPT / ODF / RTF / EPUB / CSV 转成 Markdown 新开一篇稿件（可导入 {}）",
+                doc_import::supported_summary()
+            ))
+            .clicked()
+        {
+            self.new_manuscript_from_document();
+            ui.close();
+        }
+        if ui
+            .add(theme::menu_item(
+                theme::Icon::Folder,
+                "从文件夹新建研究报告…",
+            ))
+            .on_hover_text("按文件名升序合并文件夹第一层的 .md 文件，并导入本地图片与 BibTeX")
+            .clicked()
+        {
+            self.new_research_manuscript_from_folder();
+            ui.close();
+        }
+    }
+
+    /// 换肤弹层：十二套主题按明暗分两段，中间一道分隔线。每行左侧一枚色样
+    /// （主题底色的圆 + 强调色圆点），选中项常显淡底并在右端打勾，点了立即
+    /// 生效并保存。色样画在按钮自己的 atom 里，悬停底色才铺得满整行。
+    fn theme_menu(&mut self, ui: &mut egui::Ui) {
+        compact_menu(ui);
+        ui.set_min_width(148.0);
+        let ids = egui::Id::new("theme_swatch");
+        let mut index = 0usize;
+        for dark in [false, true] {
+            if dark {
+                ui.separator();
+            }
+            for name in ThemeName::ALL
+                .into_iter()
+                .filter(|name| theme::by_name(*name).dark == dark)
+            {
+                let palette = theme::by_name(name);
+                let selected = name == self.config.theme;
+                let swatch = ids.with(index);
+                index += 1;
+                let mut item = egui::Button::new((
+                    egui::Atom::custom(swatch, egui::Vec2::splat(THEME_SWATCH_SIZE)),
+                    palette.label,
+                ))
+                .selected(selected)
+                .frame_when_inactive(selected)
+                .corner_radius(egui::CornerRadius::same(5))
+                .min_size(egui::vec2(0.0, 26.0));
+                if selected {
+                    item = item
+                        .right_text(theme::Icon::Check.image_sized(14.0))
+                        .image_tint_follows_text_color(true);
+                }
+                let response = item.atom_ui(ui);
+                if let Some(rect) = response.rect(swatch) {
+                    let painter = ui.painter();
+                    let radius = THEME_SWATCH_SIZE / 2.0;
+                    painter.circle(
+                        rect.center(),
+                        radius - 0.5,
+                        palette.canvas,
+                        egui::Stroke::new(1.0, palette.border_strong),
+                    );
+                    painter.circle_filled(rect.center(), radius * 0.45, palette.accent);
+                }
+                if response.clicked() {
+                    if !selected {
+                        self.apply_theme(ui.ctx(), name);
+                    }
+                    ui.close();
+                }
+            }
         }
     }
 
@@ -997,10 +1090,21 @@ impl GongwenApp {
                 .response
                 .on_hover_text("切换到其余已打开的标签");
         }
-        let new_shortcut = format!("新建空白公文（{}）", theme::primary_shortcut("N"));
-        if theme::icon_button(ui, theme::Icon::FilePlus, &new_shortcut).clicked() {
+        // 加号和浏览器一样单击就新开一篇空白稿；从文件、文件夹新建放在右键菜单
+        // 和左上角主菜单里，不让最常用的操作多点一层。
+        let new_tab = tool_button_scope(ui, |ui| ui.add(tool_button(theme::Icon::Plus)))
+            .on_hover_text(format!(
+                "新建空白文档（{}）\n右键可从文件或文件夹新建",
+                theme::primary_shortcut("N")
+            ));
+        if new_tab.clicked() {
             self.new_blank_manuscript();
         }
+        new_tab.context_menu(|ui| {
+            compact_menu(ui);
+            ui.set_min_width(148.0);
+            self.new_document_items(ui);
+        });
 
         if let Some(tab) = select {
             self.activate_tab(tab);

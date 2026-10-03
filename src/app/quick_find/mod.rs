@@ -197,10 +197,19 @@ impl GongwenApp {
             NavPage::Settings,
             NavPage::Help,
         ] {
+            // 四张词表在主菜单里收进了「词库」子菜单，副标题点明位置，
+            // 别名让「词库」「错别字」「码表」这类说法也能搜到。
+            let (path, aliases) = match page {
+                NavPage::Vocabulary => ("常用页面 · 词库", "词库 单位 人员 联系人 规范名称"),
+                NavPage::Proofread => ("常用页面 · 词库", "词库 错别字 纠错 建议写法"),
+                NavPage::Lexicon => ("常用页面 · 词库", "词库 公文用词 语料"),
+                NavPage::ImeTable => ("常用页面 · 词库", "词库 输入法 编码 查码 码表"),
+                _ => ("常用页面", ""),
+            };
             entries.push(Entry::new(
                 page.label().into(),
-                "常用页面".into(),
-                "",
+                path.into(),
+                aliases,
                 Target::Page(page),
             ));
         }
