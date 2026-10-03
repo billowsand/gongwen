@@ -314,26 +314,6 @@ pub fn place_sibling(
     Ok(())
 }
 
-/// 沿用原有上移/下移按钮的语义，但排序落到独立 sort_order，不再依赖 Vec swap。
-pub fn move_sibling_by(vocab: &mut Vec<VocabularyEntry>, id: u64, offset: isize) -> bool {
-    ensure_sort_orders(vocab);
-    let siblings = sibling_ids(vocab, id);
-    let Some(current) = siblings.iter().position(|candidate| *candidate == id) else {
-        return false;
-    };
-    let target = current as isize + offset;
-    if target < 0 || target >= siblings.len() as isize {
-        return false;
-    }
-    let anchor = siblings[target as usize];
-    let position = if offset < 0 {
-        SiblingPosition::Before(anchor)
-    } else {
-        SiblingPosition::After(anchor)
-    };
-    place_sibling(vocab, id, position).is_ok()
-}
-
 /// 把单位移到新的上级下，或把人员改挂到新的所属单位，并可同时指定落点。
 /// 单位跨层级移动时会成组改写整棵子树的编码及人员引用，避免出现界面看似移动、
 /// 下次整理后又回到原处的情况。

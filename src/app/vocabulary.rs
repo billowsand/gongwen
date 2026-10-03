@@ -16,6 +16,10 @@ use crate::vocabulary_xlsx;
 use eframe::egui;
 use std::collections::BTreeMap;
 
+#[path = "vocabulary_drag.rs"]
+mod drag;
+pub(super) use drag::SortUndo;
+
 /// 同理，词库树上的增删和排序也要等本帧渲染完再改动 `Vec`。
 pub(crate) enum VocabAction {
     /// 新增单位。`parent` 为空表示顶层单位。
@@ -30,14 +34,10 @@ pub(crate) enum VocabAction {
     },
     /// 删除词条；删除单位时连同其下级单位与人员一并删除。
     Delete(u64),
-    /// 在同级之间上移/下移，随后重排层级编码。
-    MoveUp(u64),
-    MoveDown(u64),
+    /// 撤销最近一次同级排序。
+    UndoSort,
     /// 把词条精确放到同级列表中的指定位置。
-    Place {
-        id: u64,
-        position: SiblingPosition,
-    },
+    Place { id: u64, position: SiblingPosition },
     /// 改变所属层级并放到目标同级列表中的精确位置。
     Relocate {
         id: u64,
@@ -183,6 +183,13 @@ impl GongwenApp {
             return;
         }
         let mut action = None;
+        if self
+            .vocabulary_sort_undo
+            .as_ref()
+            .is_some_and(|undo| !undo.valid(&self.config.vocabulary))
+        {
+            self.vocabulary_sort_undo = None;
+        }
         let mut structure_changed = false;
         let unit_count = self
             .config
@@ -309,6 +316,9 @@ impl GongwenApp {
                 .clicked()
             {
                 self.vocabulary_clear_confirm = true;
+            }
+            if self.vocabulary_sort_undo.is_some() && ui.small_button("撤销排序").clicked() {
+                action = Some(VocabAction::UndoSort);
             }
         });
 
@@ -813,9 +823,9 @@ impl GongwenApp {
         ui.horizontal(|ui| {
             ui.strong("单位层级");
             ui.weak(if filter.is_empty() {
-                "点击节点在右侧编辑；行尾按钮调整同级顺序".to_string()
+                "拖动左侧手柄调整同级顺序；Esc 取消".to_string()
             } else {
-                format!("匹配 {} 行", rows.len())
+                format!("匹配 {} 行 · 清除搜索后可拖动排序", rows.len())
             });
         });
         ui.add_space(4.0);
@@ -846,7 +856,15 @@ impl GongwenApp {
             return;
         }
 
-        for row in rows {
+        let tree_top = ui.cursor().top();
+        let dragged = if filter.is_empty() {
+            egui::DragAndDrop::payload::<drag::Payload>(ui.ctx()).map(|payload| payload.0)
+        } else {
+            // 搜索条件改变后当前可见清单已不完整，停止尚未结束的拖动。
+            egui::DragAndDrop::clear_payload(ui.ctx());
+            None
+        };
+        for row in drag::visible_rows(rows, dragged) {
             let entry = &self.config.vocabulary[row.index];
             let id = row.id;
             let name = if entry.canonical.trim().is_empty() {
@@ -858,7 +876,7 @@ impl GongwenApp {
             let parent_code = entry.parent.trim().to_string();
             let owner_code = entry.unit.trim().to_string();
             let selected = self.vocabulary_selected == Some(id);
-            let collapsed = self.vocabulary_collapsed.contains(&id);
+            let collapsed = self.vocabulary_collapsed.contains(&id) || dragged == Some(id);
             // 单位层级并列显示两类代字；人员显示职务、电话及承办权限。
             let detail = if row.is_unit {
                 let mut parts = Vec::new();
@@ -908,15 +926,7 @@ impl GongwenApp {
                     ui.horizontal(|ui| {
                         ui.add_space(row.depth as f32 * 16.0);
                         if filter.is_empty() {
-                            let drag = ui.add(
-                                theme::Icon::Grip
-                                    .image()
-                                    .tint(theme::text_muted())
-                                    .sense(egui::Sense::drag()),
-                            );
-                            drag.dnd_set_drag_payload(id);
-                            drag.on_hover_cursor(egui::CursorIcon::Grab)
-                                .on_hover_text("拖动调整同级顺序");
+                            drag::handle(ui, id);
                         } else {
                             ui.add_space(16.0);
                         }
@@ -1028,18 +1038,6 @@ impl GongwenApp {
                             })
                             .response
                             .on_hover_text("在指定位置新增或移动");
-                            if theme::icon_button(ui, theme::Icon::ArrowDown, "下移")
-                                .on_hover_text("与后一个同级交换")
-                                .clicked()
-                            {
-                                *action = Some(VocabAction::MoveDown(id));
-                            }
-                            if theme::icon_button(ui, theme::Icon::ArrowUp, "上移")
-                                .on_hover_text("与前一个同级交换")
-                                .clicked()
-                            {
-                                *action = Some(VocabAction::MoveUp(id));
-                            }
                         });
                     });
                 })
@@ -1047,45 +1045,10 @@ impl GongwenApp {
                 .rect;
             // 拖到目标行上半部表示插到它前面，下半部表示插到它后面。
             // 只接受同级词条，跨层级移动必须走精确移动面板，避免误改组织关系。
-            if filter.is_empty() {
-                let drop_response = ui.interact(
-                    row_rect,
-                    egui::Id::new(("vocab_drop", id)),
-                    egui::Sense::hover(),
-                );
-                let dragged = drop_response.dnd_hover_payload::<u64>();
-                let valid = dragged.as_ref().is_some_and(|dragged| {
-                    **dragged != id
-                        && units::sibling_ids(&self.config.vocabulary, **dragged).contains(&id)
-                });
-                if valid {
-                    let before = ui
-                        .ctx()
-                        .pointer_interact_pos()
-                        .is_none_or(|pointer| pointer.y <= row_rect.center().y);
-                    let y = if before {
-                        row_rect.top()
-                    } else {
-                        row_rect.bottom()
-                    };
-                    ui.painter().line_segment(
-                        [
-                            egui::pos2(row_rect.left(), y),
-                            egui::pos2(row_rect.right(), y),
-                        ],
-                        egui::Stroke::new(2.0, theme::accent()),
-                    );
-                    if let Some(dragged) = drop_response.dnd_release_payload::<u64>() {
-                        *action = Some(VocabAction::Place {
-                            id: *dragged,
-                            position: if before {
-                                SiblingPosition::Before(id)
-                            } else {
-                                SiblingPosition::After(id)
-                            },
-                        });
-                    }
-                }
+            if filter.is_empty()
+                && let Some(drop) = drag::drop_target(ui, row_rect, id, &self.config.vocabulary)
+            {
+                *action = Some(drop);
             }
             // 悬停用几何判断而非 response.hovered()：行里的按钮和标签会把交互抢走，
             // 指针落在它们上面时整行反而算「未悬停」，背景会一闪一闪。
@@ -1105,6 +1068,13 @@ impl GongwenApp {
                     ),
                 );
             }
+        }
+        if filter.is_empty() {
+            let tree_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.min_rect().left(), tree_top),
+                egui::pos2(ui.min_rect().right(), ui.cursor().top()),
+            );
+            drag::edge_scroll(ui, tree_rect);
         }
     }
 
@@ -1719,6 +1689,9 @@ impl GongwenApp {
     }
 
     pub(crate) fn apply_vocab_action(&mut self, action: VocabAction) {
+        if !matches!(action, VocabAction::Place { .. } | VocabAction::UndoSort) {
+            self.vocabulary_sort_undo = None;
+        }
         match action {
             VocabAction::AddUnit { parent, position } => {
                 // 挂在折叠的上级下面时先展开，否则新节点看不见。
@@ -1807,15 +1780,28 @@ impl GongwenApp {
                 self.vocabulary_selected = None;
                 self.vocabulary_delete_confirm = None;
             }
-            VocabAction::MoveUp(id) | VocabAction::MoveDown(id) => {
-                let up = matches!(action, VocabAction::MoveUp(_));
-                units::move_sibling_by(&mut self.config.vocabulary, id, if up { -1 } else { 1 });
-            }
             VocabAction::Place { id, position } => {
-                if let Err(error) = units::place_sibling(&mut self.config.vocabulary, id, position)
-                {
-                    self.status = format!("调整顺序失败：{error}");
+                match SortUndo::place(&mut self.config.vocabulary, id, position) {
+                    Ok(Some(undo)) => {
+                        self.vocabulary_sort_undo = Some(undo);
+                        self.status = "已调整同级顺序；点击“保存更改”写入本机配置。".into();
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        self.status = format!("调整顺序失败：{error}");
+                        return;
+                    }
                 }
+            }
+            VocabAction::UndoSort => {
+                let Some(undo) = self.vocabulary_sort_undo.take() else {
+                    return;
+                };
+                if let Err(error) = undo.restore(&mut self.config.vocabulary) {
+                    self.status = error;
+                    return;
+                }
+                self.status = "已撤销排序；点击“保存更改”写入本机配置。".into();
             }
             VocabAction::Relocate {
                 id,

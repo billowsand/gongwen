@@ -148,6 +148,8 @@ pub struct GongwenApp {
     vocabulary_setup_name: String,
     /// “精确移动”对话框草稿。
     vocabulary_move: Option<VocabularyMoveDraft>,
+    /// 仅恢复最近一次同级排序，不覆盖词条内容。
+    vocabulary_sort_undo: Option<vocabulary::SortUndo>,
     /// "关于公文助手"弹窗显隐。
     about_window_open: bool,
     /// 应用内帮助页（[`NavPage::Help`] 标签）的状态。
@@ -443,6 +445,7 @@ impl GongwenApp {
             vocabulary_dirty: false,
             vocabulary_setup_name: String::new(),
             vocabulary_move: None,
+            vocabulary_sort_undo: None,
             about_window_open: false,
             help: crate::help::HelpState::default(),
             quick_find: None,
