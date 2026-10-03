@@ -208,14 +208,14 @@ fn stream_once(
 
 /// 一行 SSE 的解析结果。
 #[derive(Debug, PartialEq)]
-enum SseLine {
+pub(super) enum SseLine {
     Data(Value),
     Done,
     /// 空行、`:` 开头的心跳注释、`event:` / `id:` 等用不上的字段，以及解析不了的数据。
     Skip,
 }
 
-fn parse_sse_line(line: &str) -> SseLine {
+pub(super) fn parse_sse_line(line: &str) -> SseLine {
     let line = line.trim_end_matches(['\r', '\n']);
     let Some(data) = line.strip_prefix("data:") else {
         return SseLine::Skip;
@@ -228,7 +228,7 @@ fn parse_sse_line(line: &str) -> SseLine {
 }
 
 /// 流里夹带的错误对象（`{"error": {...}}` 或 `{"error": "..."}`）。
-fn stream_error(value: &Value) -> Option<String> {
+pub(super) fn stream_error(value: &Value) -> Option<String> {
     let error = value.get("error")?;
     Some(
         error["message"]
@@ -331,14 +331,14 @@ const CLOSE_TAGS: [&str; 2] = ["</think>", "</thinking>"];
 /// 切在两个分片中间（`<thi` + `nk>`），所以末尾若是某个标签的前缀，先扣住，
 /// 等下一片来了再判断。
 #[derive(Debug, Default)]
-struct ThinkSplitter {
+pub(super) struct ThinkSplitter {
     in_think: bool,
     pending: String,
 }
 
 impl ThinkSplitter {
     /// 喂一片正文，按顺序回调 `(是否思考, 文字)`；空文字不回调。
-    fn feed(&mut self, chunk: &str, mut out: impl FnMut(bool, &str)) {
+    pub(super) fn feed(&mut self, chunk: &str, mut out: impl FnMut(bool, &str)) {
         let mut buf = std::mem::take(&mut self.pending);
         buf.push_str(chunk);
         let mut rest = buf.as_str();
@@ -367,7 +367,7 @@ impl ThinkSplitter {
     }
 
     /// 流结束：扣着的半截标签原样当文字吐出去。
-    fn flush(&mut self, mut out: impl FnMut(bool, &str)) {
+    pub(super) fn flush(&mut self, mut out: impl FnMut(bool, &str)) {
         let pending = std::mem::take(&mut self.pending);
         if !pending.is_empty() {
             out(self.in_think, &pending);

@@ -512,11 +512,31 @@ fn run_skill(
             suspension,
             use_rag,
         }))),
-        Outcome::Done if skill.output == OutputKind::Report => Ok(SkillResult::Report {
-            skill: skill.name,
-            skill_id: skill.id,
-            findings: board.findings.clone(),
-        }),
+        Outcome::Done if skill.output.is_report(board) => {
+            let mut findings = board.findings.clone();
+            // 自主步骤的答复（「文中共有 3 处日期」这类）作清单的第一条。
+            if skill.output == OutputKind::Auto
+                && let Some(summary) = board
+                    .var_text(crate::agent::ops::AGENT_SUMMARY)
+                    .filter(|summary| !summary.trim().is_empty())
+            {
+                findings.insert(
+                    0,
+                    Finding {
+                        group: "答复".into(),
+                        text: summary,
+                        excerpt: String::new(),
+                        source: String::new(),
+                        fix: None,
+                    },
+                );
+            }
+            Ok(SkillResult::Report {
+                skill: skill.name,
+                skill_id: skill.id,
+                findings,
+            })
+        }
         Outcome::Done => {
             let report = SkillReport::from_board(board);
             if report.markdown.trim().is_empty() {

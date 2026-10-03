@@ -30,7 +30,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// 内置技能：(id, 文件内容)。
-const BUILTIN: [(&str, &str); 12] = [
+const BUILTIN: [(&str, &str); 14] = [
     (
         RESEARCH_DRAFT,
         include_str!("../../assets/agent-skills/research-draft/SKILL.md"),
@@ -79,6 +79,14 @@ const BUILTIN: [(&str, &str); 12] = [
         EXTRACT,
         include_str!("../../assets/agent-skills/extract/SKILL.md"),
     ),
+    (
+        POLICY_BASIS,
+        include_str!("../../assets/agent-skills/policy-basis/SKILL.md"),
+    ),
+    (
+        FREE_TASK,
+        include_str!("../../assets/agent-skills/free-task/SKILL.md"),
+    ),
 ];
 
 pub(crate) const RESEARCH_DRAFT: &str = "research-draft";
@@ -93,6 +101,8 @@ pub(crate) const NORMALIZE: &str = "normalize";
 pub(crate) const REVIEW: &str = "review";
 pub(crate) const FACT_CHECK: &str = "fact-check";
 pub(crate) const EXTRACT: &str = "extract";
+pub(crate) const POLICY_BASIS: &str = "policy-basis";
+pub(crate) const FREE_TASK: &str = "free-task";
 
 /// 技能产出什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -103,6 +113,22 @@ pub(crate) enum OutputKind {
     Proposal,
     /// 只出问题清单，不改稿。
     Report,
+    /// 看结果定（自主步骤用）：工作稿改过就是提案，没改就是清单（自主步骤的答复作一条）。
+    Auto,
+}
+
+impl OutputKind {
+    /// 这次交清单还是提案：`auto` 看工作稿和发起时的正文是否不同。
+    pub(crate) fn is_report(self, board: &super::board::Board) -> bool {
+        match self {
+            OutputKind::Proposal => false,
+            OutputKind::Report => true,
+            OutputKind::Auto => {
+                let workspace = board.workspace.trim();
+                workspace.is_empty() || workspace == board.document.trim()
+            }
+        }
+    }
 }
 
 /// `@` 引用的文章怎么用（16.13、决定 F14）。
@@ -279,7 +305,15 @@ impl Skill {
     /// 流程里用不用知识库：有检索算子、列检索问题的 `plan`，或直接调知识库工具。侧栏据此
     /// 显示「检索知识库」开关；材料成文这类只用材料的技能不显示，也不检索。
     pub(crate) fn uses_knowledge(&self) -> bool {
-        fn walk(steps: &[StepSpec]) -> bool {
+        // 自主步骤没限定工具时用整个白名单。
+        let agent_uses_kb = |step: &StepSpec| match step.params.get("tools") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|id| id.starts_with("kb.")),
+            _ => self.tools.iter().any(|id| id.starts_with("kb.")),
+        };
+        fn walk(steps: &[StepSpec], agent_uses_kb: &dyn Fn(&StepSpec) -> bool) -> bool {
             steps.iter().any(|step| {
                 let op = step.step.as_deref();
                 matches!(op, Some("retrieve" | "fact_check"))
@@ -289,10 +323,11 @@ impl Skill {
                         .tool
                         .as_deref()
                         .is_some_and(|tool| tool.starts_with("kb."))
-                    || walk(&step.body)
+                    || (op == Some("agent") && agent_uses_kb(step))
+                    || walk(&step.body, agent_uses_kb)
             })
         }
-        walk(&self.flow)
+        walk(&self.flow, &agent_uses_kb)
     }
 
     /// 提示词里用不用润色预设（`{preset}`）。侧栏据此显示预设下拉框。
@@ -487,6 +522,9 @@ fn validate_steps(
                         &format!("{at}的子流程"),
                     );
                 }
+                if op == "agent" {
+                    agent_problems(skill, step, &at, problems);
+                }
             }
             (None, Some(tool)) => {
                 if !tools.contains(&tool.split(':').next().unwrap_or(tool)) {
@@ -524,6 +562,41 @@ fn validate_steps(
                 problems.push(format!("{at}引用的提示词「{name}」在正文里找不到"));
             }
         }
+    }
+}
+
+/// 自主步骤的写法：工具都在白名单里、不问用户、`require` 认得、目标提示词在。
+fn agent_problems(skill: &Skill, step: &StepSpec, at: &str, problems: &mut Vec<String>) {
+    if let Some(value) = step.params.get("tools") {
+        match value {
+            Value::Array(items) => {
+                for id in items.iter().filter_map(Value::as_str) {
+                    if !skill.allows_tool(id) {
+                        problems.push(format!("{at}自主步骤的工具「{id}」不在 tools 白名单里"));
+                    } else if super::tools::find(id).is_some_and(|tool| {
+                        tool.id() == "llm.generate"
+                            || tool.permission() == super::tools::Permission::AskUser
+                    }) {
+                        problems.push(format!(
+                            "{at}自主步骤不能用「{id}」（模型本身就在跑；问用户请放到后面的 ask 步骤）"
+                        ));
+                    }
+                }
+            }
+            _ => problems.push(format!("{at}自主步骤的 tools 要写成列表")),
+        }
+    }
+    if let Some(require) = step.param_str("require")
+        && !["workspace", "findings"].contains(&require)
+    {
+        problems.push(format!(
+            "{at}自主步骤的 require「{require}」不认识（可用 workspace、findings）"
+        ));
+    }
+    if step.param_str("prompt").is_none() && skill.section("任务").is_none() {
+        problems.push(format!(
+            "{at}自主步骤没写 prompt，正文里也没有默认的「任务」提示词"
+        ));
     }
 }
 

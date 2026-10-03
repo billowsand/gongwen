@@ -13,6 +13,8 @@
 //! 检索类算子（`retrieve`、`gap_loop`）除了知识库，还可以查步骤里 `apis:` 列出的数据接口；
 //! 接口调用照样经工具白名单，技能没声明 `http.call:<id>` 就调不到。
 
+mod agent;
+mod cite_check;
 mod finish;
 mod gap_loop;
 mod prepare;
@@ -36,9 +38,11 @@ pub(crate) enum Flow {
     SuspendInto(Vec<Question>, String),
 }
 
+pub(crate) use agent::SUMMARY_VAR as AGENT_SUMMARY;
+
 pub(crate) type Operator = fn(&mut ToolCtx<'_, '_>, &StepSpec) -> anyhow::Result<Flow>;
 
-const OPERATORS: [(&str, Operator); 11] = [
+const OPERATORS: [(&str, Operator); 13] = [
     ("clarify", prepare::clarify),
     ("plan", prepare::plan),
     ("retrieve", prepare::retrieve),
@@ -50,6 +54,8 @@ const OPERATORS: [(&str, Operator); 11] = [
     ("review", review::review),
     ("fact_check", review::fact_check),
     ("report", review::report),
+    ("agent", agent::agent),
+    ("cite_check", cite_check::cite_check),
 ];
 
 pub(crate) fn find(name: &str) -> Option<Operator> {

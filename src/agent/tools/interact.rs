@@ -10,7 +10,7 @@ use crate::agent::engine::Event;
 use crate::lmstudio::StreamDelta;
 use serde_json::{Map, Value, json};
 
-pub(super) const TOOLS: [&dyn Tool; 3] = [&Generate, &AskChoice, &Note];
+pub(super) const TOOLS: [&dyn Tool; 4] = [&Generate, &AskChoice, &Note, &AddFinding];
 
 /// 辅助步骤（列问题、核对、出题）的系统提示。
 pub(crate) const ASSIST_SYSTEM: &str =
@@ -219,6 +219,55 @@ impl Tool for Note {
         let text = arg_str(args, "text").unwrap_or_default();
         (ctx.emit)(Event::Note(text.clone()));
         Ok(ToolOutput::new(json!({"text": text}), "留下一条说明"))
+    }
+}
+
+/// 记一条问题：审核类结果（问题清单）的原料。只记不改，改法另由审核算子过闸门。
+struct AddFinding;
+
+impl Tool for AddFinding {
+    fn id(&self) -> &'static str {
+        "finding.add"
+    }
+    fn permission(&self) -> Permission {
+        Permission::Check
+    }
+    fn description(&self) -> &'static str {
+        "在问题清单里记一条：分组、问题、原文片段、依据或出处；不改稿"
+    }
+    fn inputs(&self) -> &'static [Input] {
+        const INPUTS: &[Input] = &[
+            required("text", "问题说明或答复"),
+            optional("group", "分组，如：表述、结构、依据、答复"),
+            optional("excerpt", "原文片段或所在句"),
+            optional("source", "依据或出处"),
+        ];
+        INPUTS
+    }
+    fn run(
+        &self,
+        ctx: &mut ToolCtx<'_, '_>,
+        args: &Map<String, Value>,
+    ) -> Result<ToolOutput, String> {
+        let finding = crate::agent::board::Finding {
+            group: arg_str(args, "group")
+                .filter(|g| !g.trim().is_empty())
+                .unwrap_or_else(|| "问题".into()),
+            text: arg_str(args, "text").unwrap_or_default(),
+            excerpt: arg_str(args, "excerpt").unwrap_or_default(),
+            source: arg_str(args, "source").unwrap_or_default(),
+            fix: None,
+        };
+        let summary = format!(
+            "记下「{}」：{}",
+            finding.group,
+            super::short(&finding.text, 24)
+        );
+        ctx.board.findings.push(finding);
+        Ok(ToolOutput::new(
+            json!({"count": ctx.board.findings.len()}),
+            summary,
+        ))
     }
 }
 

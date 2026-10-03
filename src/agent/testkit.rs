@@ -113,6 +113,20 @@ impl KnowledgeSearch for KeywordKb {
         ))
     }
 
+    /// 文档列表：每个片段算一篇（同一 `doc_id` 只列一次）。
+    fn list(
+        &self,
+        _kind: Option<TemplateKind>,
+    ) -> anyhow::Result<Vec<(i64, String, TemplateKind)>> {
+        let mut out: Vec<(i64, String, TemplateKind)> = Vec::new();
+        for (_, chunk) in &self.docs {
+            if !out.iter().any(|(id, ..)| *id == chunk.doc_id) {
+                out.push((chunk.doc_id, chunk.doc_title.clone(), chunk.kind));
+            }
+        }
+        Ok(out)
+    }
+
     /// 按文档 id 读全文：片段的 `doc_id` 对上就返回那一段。
     fn read(&self, doc_id: i64) -> anyhow::Result<Option<(String, String)>> {
         Ok(self

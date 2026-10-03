@@ -715,6 +715,9 @@ fn live_builtin_skill() {
             finding.source
         );
     }
+    if let Some(summary) = board.vars.get("agent_summary") {
+        eprintln!("  自主步骤的答复：{summary}");
+    }
     eprintln!("—— 工作稿 ——\n{}", report.markdown);
     assert!(!report.markdown.trim().is_empty());
 }

@@ -4,7 +4,9 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod converse;
 mod stream;
+pub use converse::{ConverseError, converse_stream};
 pub use stream::{Finish, StreamDelta, generate_stream};
 
 #[derive(Debug, Deserialize)]
