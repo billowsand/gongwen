@@ -109,16 +109,30 @@ impl ModelBackend for LmBackend {
             ModelRole::Draft => &self.draft,
             ModelRole::Assist => &self.assist,
         };
-        let outcome = lmstudio::generate_stream(
-            config,
-            system,
-            user,
-            config.temperature,
-            config.max_tokens,
-            ChatOptions::default(),
-            &self.cancel,
-            on_delta,
-        )?;
+        let mut attempt = 0;
+        let outcome = loop {
+            attempt += 1;
+            match lmstudio::generate_stream(
+                config,
+                system,
+                user,
+                config.temperature,
+                config.max_tokens,
+                ChatOptions::default(),
+                &self.cancel,
+                &mut *on_delta,
+            ) {
+                // 思考型模型（实测 MiniMax-M2.7）偶尔在思考里把话说完、正文留空：再问一次。
+                Err(error)
+                    if attempt == 1
+                        && error.downcast_ref::<lmstudio::EmptyContent>().is_some()
+                        && !self.cancelled() =>
+                {
+                    continue;
+                }
+                other => break other?,
+            }
+        };
         if outcome.finish == Finish::Cancelled {
             anyhow::bail!("已停止生成");
         }

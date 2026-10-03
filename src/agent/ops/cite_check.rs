@@ -297,6 +297,49 @@ fn closest_passage(source: &str, quote: &str) -> String {
     sentences[from..to].join("")
 }
 
+/// 模型常给原话套一层说法：「原文里对应的原话是“……”」「原文为：……」。只留原话。
+fn strip_wrapper(text: &str) -> String {
+    let mut text = text.trim();
+    for prefix in [
+        "原文里对应的原话是",
+        "原文对应的原话是",
+        "对应的原话是",
+        "原文原话是",
+        "原文为",
+        "原文是",
+        "原话是",
+        "原文",
+        "原话",
+    ] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim_start_matches(['：', ':', ' ']).trim();
+            break;
+        }
+    }
+    text.trim_matches(['“', '”', '「', '」', '"', '。'])
+        .trim()
+        .to_string()
+}
+
+/// 文号年份没用六角括号〔〕：按 GB/T 9704 给改法。
+fn bracket_style(citation: &Citation) -> Option<Finding> {
+    let (cited, span) = citation.number.as_ref()?;
+    if cited.contains('〔') {
+        return None;
+    }
+    Some(Finding {
+        group: "文号写法".into(),
+        text: "文号的年份应使用六角括号〔〕".into(),
+        excerpt: cited.clone(),
+        source: "GB/T 9704 党政机关公文格式".into(),
+        fix: Some(Fix {
+            span: span.clone(),
+            before: cited.clone(),
+            after: normalize_number(cited),
+        }),
+    })
+}
+
 pub(super) fn cite_check(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
     let document = ctx.board.document.clone();
     if document.trim().is_empty() {
@@ -336,6 +379,10 @@ pub(super) fn cite_check(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::
         check_cancel(ctx)?;
         phase(ctx, format!("核对《{}》…", short(&citation.title, 20)));
         let Some(source) = find_source(ctx, step, &citation.title) else {
+            // 括号写法不靠原文也能判。
+            if let Some(finding) = bracket_style(citation) {
+                findings.push(finding);
+            }
             findings.push(Finding {
                 group: "未找到原文".into(),
                 text: format!(
@@ -408,18 +455,8 @@ pub(super) fn cite_check(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::
                         after: correct,
                     }),
                 });
-            } else if !cited.contains('〔') {
-                findings.push(Finding {
-                    group: "文号写法".into(),
-                    text: "文号的年份应使用六角括号〔〕".into(),
-                    excerpt: cited.clone(),
-                    source: "GB/T 9704 党政机关公文格式".into(),
-                    fix: Some(Fix {
-                        span: span.clone(),
-                        before: cited.clone(),
-                        after: cited_norm,
-                    }),
-                });
+            } else if let Some(finding) = bracket_style(citation) {
+                findings.push(finding);
             }
         }
 
@@ -463,7 +500,7 @@ pub(super) fn cite_check(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::
             }
             let original = first
                 .split_once(['｜', '|'])
-                .map(|(_, rest)| rest.trim().to_string())
+                .map(|(_, rest)| strip_wrapper(rest))
                 .filter(|rest| !rest.is_empty())
                 .unwrap_or_else(|| short(&passage, 80));
             findings.push(Finding {

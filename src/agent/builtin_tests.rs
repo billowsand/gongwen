@@ -719,7 +719,9 @@ fn live_builtin_skill() {
         eprintln!("  自主步骤的答复：{summary}");
     }
     eprintln!("—— 工作稿 ——\n{}", report.markdown);
-    assert!(!report.markdown.trim().is_empty());
+    if !skill.output.is_report(&board) {
+        assert!(!report.markdown.trim().is_empty());
+    }
 }
 
 fn reference(source: RefSource, id: i64, title: &str) -> Reference {

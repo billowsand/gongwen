@@ -516,6 +516,7 @@ fn run_skill(
             let mut findings = board.findings.clone();
             // 自主步骤的答复（「文中共有 3 处日期」这类）作清单的第一条。
             if skill.output == OutputKind::Auto
+                && !findings.iter().any(|f| f.group == "答复")
                 && let Some(summary) = board
                     .var_text(crate::agent::ops::AGENT_SUMMARY)
                     .filter(|summary| !summary.trim().is_empty())

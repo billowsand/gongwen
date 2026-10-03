@@ -79,7 +79,7 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   `src/agent/`（`tools/`、`ops/`、`engine.rs`、`references.rs`、`skill.rs`、`skill_files.rs`、`api.rs`、`router.rs`）、
   `assets/agent-skills/`、`src/ai_panel/`（`composer_ui.rs`、`mention.rs`）与 `src/app/agent_settings.rs`。
   第 ⑦ 期（`agent` 自主步骤：原生工具调用 + 文本兜底，`src/agent/ops/agent.rs`、`toolcall.rs`、
-  `lmstudio/converse.rs`；政策依据核对 `cite_check`；兜底技能「自由任务」）代码已完成，**待真机验收**；
+  `lmstudio/converse.rs`；政策依据核对 `cite_check`；兜底技能「自由任务」）已完成，DMXAPI 上的 DeepSeek-V4-Flash 与 MiniMax-M2.7 真机跑通；
   对比分析、评测、留痕、正文区审阅再讨论（见第十六节 F16；opencode 接入已作废）。
   方案、红线修订记录、分期、各期进度与已知坑见 `docs/ai-agent-workbench.md`（单文件，第十三节是交接）。
 - **送批材料**（呈批件挂随行件、按提交版合并成一个 PDF、归档钉版、随同步 ZIP 携带）：

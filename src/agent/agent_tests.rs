@@ -257,7 +257,7 @@ fn policy_basis_checks_title_number_and_quotes_against_the_source() {
     let skill = skill::builtin(POLICY_BASIS).unwrap();
     let model = ScriptedModel::new(|_, prompt| {
         if prompt.contains("强化源头治理") {
-            "不一致｜压实属地责任，强化源头管控".into()
+            "不一致｜原文里对应的原话是“压实属地责任，强化源头管控”".into()
         } else {
             "一致".into()
         }
@@ -306,7 +306,13 @@ fn policy_basis_checks_title_number_and_quotes_against_the_source() {
 
     let quotes = group("表述与原文不一致");
     assert_eq!(quotes.len(), 1, "原话那句不报");
-    assert!(quotes[0].text.contains("压实属地责任，强化源头管控"));
+    assert!(
+        quotes[0]
+            .text
+            .ends_with("原文为「压实属地责任，强化源头管控」"),
+        "模型套的说法去掉，只留原话：{}",
+        quotes[0].text
+    );
     assert!(quotes[0].fix.is_none(), "表述只提示，不替人改引文");
     assert_eq!(
         model.calls.borrow().len(),
@@ -334,4 +340,35 @@ fn policy_basis_says_so_when_there_is_nothing_to_check() {
     assert!(driver.run().is_none());
     assert_eq!(driver.board.findings.len(), 1);
     assert_eq!(driver.board.findings[0].group, "说明");
+}
+
+#[test]
+fn policy_basis_searches_the_knowledge_base_and_checks_brackets_without_a_source() {
+    let skill = skill::builtin(POLICY_BASIS).unwrap();
+    assert!(
+        skill.uses_knowledge(),
+        "要检索知识库：不然侧栏不开检索，原文永远找不到"
+    );
+    let model = ScriptedModel::new(|_, _| "一致".into());
+    let kb = KeywordKb::new(Vec::new());
+    let document = "按照《国务院办公厅关于加强政务舆情回应工作的意见》（国办发[2016]61号）执行。";
+    let mut driver = Driver::new(&skill, &model, &kb, board(document, "核对依据"));
+    assert!(driver.run().is_none());
+    assert!(!kb.queries.borrow().is_empty(), "按标题检索过");
+    let style = driver
+        .board
+        .findings
+        .iter()
+        .find(|f| f.group == "文号写法")
+        .expect("没找到原文也查括号写法");
+    let fix = style.fix.as_ref().unwrap();
+    assert_eq!(&document[fix.span.clone()], "国办发[2016]61号");
+    assert_eq!(fix.after, "国办发〔2016〕61号");
+    assert!(
+        driver
+            .board
+            .findings
+            .iter()
+            .any(|f| f.group == "未找到原文")
+    );
 }

@@ -316,7 +316,7 @@ impl Skill {
         fn walk(steps: &[StepSpec], agent_uses_kb: &dyn Fn(&StepSpec) -> bool) -> bool {
             steps.iter().any(|step| {
                 let op = step.step.as_deref();
-                matches!(op, Some("retrieve" | "fact_check"))
+                matches!(op, Some("retrieve" | "fact_check" | "cite_check"))
                     || (op == Some("plan")
                         && matches!(step.param_str("mode"), None | Some("queries")))
                     || step

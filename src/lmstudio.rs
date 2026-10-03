@@ -287,6 +287,19 @@ fn chat_payload(
     payload
 }
 
+/// 模型没给正文（只有思考过程或什么都没有）。调用方可以据此重试一次：思考型模型偶尔会在
+/// 思考里把话说完、正文留空，再问一次通常就好。
+#[derive(Debug)]
+pub struct EmptyContent(pub String);
+
+impl std::fmt::Display for EmptyContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EmptyContent {}
+
 /// 模型没给正文时的报错。
 ///
 /// 正文为空有三种成因，报出来要能直接指向下一步怎么办，而不是笼统一句
@@ -297,18 +310,37 @@ fn empty_content_error(
     truncated: bool,
     switch_sent: bool,
 ) -> anyhow::Error {
+    anyhow::Error::new(EmptyContent(empty_content_text(
+        max_tokens,
+        thinking,
+        truncated,
+        switch_sent,
+    )))
+}
+
+fn empty_content_text(
+    max_tokens: u32,
+    thinking: bool,
+    truncated: bool,
+    switch_sent: bool,
+) -> String {
     if thinking && switch_sent {
-        anyhow::anyhow!(
+        format!(
             "模型只输出了思考过程，没有正文：{max_tokens} 的输出上限被推理占满。             应用已自动带上关闭思考的开关（chat_template_kwargs.enable_thinking、             think、enable_thinking 三种写法），你的服务端似乎都不认。             请在服务端关掉思考模式，或换一个非思考模型来做文字复核。"
         )
+    } else if thinking && !truncated {
+        // 没撞上限却只有思考：模型在思考里把话说完了，正文留空（MiniMax-M2.7 偶见）。
+        "模型只输出了思考过程，没有正文（没有撞上输出上限，像是把回答写在了思考里）。已经重试过一次；\
+         再遇到可以重新生成，或换一个模型。"
+            .to_string()
     } else if thinking {
         // 起草不关思考（想得周全些写得更好），预算不够时就会这样。
-        anyhow::anyhow!(
+        format!(
             "模型只输出了思考过程，没有正文：{max_tokens} 的输出上限被推理占满。             请在设置里调大「最大输出」，或在服务端关掉思考模式、换一个非思考模型。"
         )
     } else if truncated {
-        anyhow::anyhow!("模型输出在 {max_tokens} token 处被截断，且截断前没有正文")
+        format!("模型输出在 {max_tokens} token 处被截断，且截断前没有正文")
     } else {
-        anyhow::anyhow!("模型服务未返回正文（choices[0].message.content 为空）")
+        "模型服务未返回正文（choices[0].message.content 为空）".to_string()
     }
 }
