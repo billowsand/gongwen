@@ -141,7 +141,10 @@ pub(crate) fn choose_by_model(
 mod tests {
     use super::*;
     use crate::agent::backend::Completion;
-    use crate::agent::skill::{POLISH, RESEARCH_DRAFT, builtin_skills, parse};
+    use crate::agent::skill::{
+        CONDENSE, EXTRACT, FACT_CHECK, IMITATE, MATERIAL, NORMALIZE, POLICY_REPORT, POLISH,
+        REPLY_LETTER, RESEARCH_DRAFT, REVIEW, TONE, builtin_skills, parse,
+    };
     use crate::lmstudio::StreamDelta;
 
     fn ctx(text: &str, has_text: bool) -> RouteContext<'_> {
@@ -156,28 +159,59 @@ mod tests {
     #[test]
     fn an_empty_document_rules_out_polishing() {
         let skills = builtin_skills();
-        assert_eq!(
-            route(&skills, &ctx("润色一下", false)),
-            Route::Picked(RESEARCH_DRAFT.into()),
-            "正文为空时润色不参与，只剩起草"
+        let Route::Ambiguous(tied) = route(&skills, &ctx("润色一下", false)) else {
+            panic!("空稿上「润色」不命中任何能用的技能，交模型");
+        };
+        assert!(
+            !tied.contains(&POLISH.to_string()),
+            "正文为空时润色不参与：{tied:?}"
         );
+        assert!(tied.contains(&RESEARCH_DRAFT.to_string()));
     }
 
     #[test]
     fn triggers_pick_the_skill_and_ties_go_to_the_model() {
         let skills = builtin_skills();
+        let picked = |text: &str, has_text: bool| route(&skills, &ctx(text, has_text));
+        for (text, id) in [
+            ("压缩到800字，不改时限", CONDENSE),
+            ("润色一下第二段", POLISH),
+            ("改成向市政府请示的上行文语气", TONE),
+            ("把单位名称规范一下", NORMALIZE),
+            ("签发前帮我审一下", REVIEW),
+            ("核实一下文中的数字", FACT_CHECK),
+            ("提炼这篇讲话的要点", EXTRACT),
+        ] {
+            assert_eq!(picked(text, true), Route::Picked(id.into()), "{text}");
+        }
         assert_eq!(
-            route(&skills, &ctx("压缩第二部分，不改时限", true)),
-            Route::Picked(POLISH.into())
-        );
-        assert_eq!(
-            route(&skills, &ctx("根据会议纪要起草一份通知", true)),
+            picked("起草一份关于冬季森林防火的通知", false),
             Route::Picked(RESEARCH_DRAFT.into())
         );
-        let Route::Ambiguous(tied) = route(&skills, &ctx("看看这个", true)) else {
+        assert_eq!(
+            picked("根据下面的会议纪要起草一份通知", false),
+            Route::Picked(MATERIAL.into()),
+            "「根据……纪要」比「起草」更具体"
+        );
+        assert_eq!(
+            picked("请仿照去年的冬季防火通知写一份今年的", false),
+            Route::Picked(IMITATE.into()),
+            "「仿照……」比「写一份」更具体"
+        );
+        assert_eq!(
+            picked("起草复函，答复市林业局来函", false),
+            Route::Picked(REPLY_LETTER.into())
+        );
+        let mut report = ctx("起草一份人工智能辅助决策的调研报告", false);
+        report.kind = TemplateKind::ResearchReport;
+        assert_eq!(route(&skills, &report), Route::Picked(POLICY_REPORT.into()));
+        let Route::Ambiguous(tied) = picked("看看这个", true) else {
             panic!("都没命中应当交模型");
         };
-        assert_eq!(tied.len(), 2);
+        assert!(
+            tied.len() >= 2 && !tied.contains(&POLICY_REPORT.to_string()),
+            "{tied:?}"
+        );
     }
 
     #[test]
@@ -245,7 +279,10 @@ mod tests {
 
     #[test]
     fn the_model_chooses_from_a_closed_set() {
-        let skills = builtin_skills();
+        let skills: Vec<Skill> = [RESEARCH_DRAFT, POLISH]
+            .into_iter()
+            .map(|id| crate::agent::skill::builtin(id).unwrap())
+            .collect();
         let candidates: Vec<&Skill> = skills.iter().collect();
         assert_eq!(
             choose_by_model(&Picker("2"), &candidates, "看看").unwrap(),

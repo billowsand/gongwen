@@ -336,7 +336,10 @@ impl GongwenApp {
                 DraftAction::OpenSendPackage(id) => self.open_send_package(id),
                 DraftAction::OpenManuscript(id) => self.open_in_editor(id),
                 DraftAction::OpenVersionCommit(scope) => self.open_version_commit(scope),
-                DraftAction::OpenAiWorkbench { selection } => self.open_ai_workbench(selection),
+                DraftAction::OpenSkillSettings => {
+                    self.settings_section = super::settings::SettingsSection::Skills;
+                    self.open_page(NavPage::Settings);
+                }
                 DraftAction::RevertToDraft(id) => {
                     self.transition_status(id, ManuscriptStatus::Draft);
                     self.sync_record_status(id);

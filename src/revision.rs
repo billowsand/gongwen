@@ -420,6 +420,30 @@ impl RevisionSet {
         permanent: &[String],
     ) -> usize {
         self.items.retain(|item| item.source.is_rule());
+        self.push_model(suggestions, text, permanent)
+    }
+
+    /// 并入一个技能（全面审校之类）给出的建议：只换掉同一检查器（`task`）上一轮的，
+    /// 文字复核等其他模型来源的建议原样留着。返回因正文对不上而丢弃的条数。
+    pub fn merge_model(
+        &mut self,
+        task: &str,
+        suggestions: Vec<ModelSuggestion>,
+        text: &str,
+        permanent: &[String],
+    ) -> usize {
+        self.items.retain(
+            |item| !matches!(&item.source, RevisionSource::Model { task: own } if own == task),
+        );
+        self.push_model(suggestions, text, permanent)
+    }
+
+    fn push_model(
+        &mut self,
+        suggestions: Vec<ModelSuggestion>,
+        text: &str,
+        permanent: &[String],
+    ) -> usize {
         let mut dropped = 0usize;
         for item in suggestions {
             let anchor = Anchor::new(text, &item.span);
@@ -568,6 +592,51 @@ mod tests {
             span,
             replacement: replacement.map(str::to_string),
         }
+    }
+
+    fn model(task: &str, text: &str, before: &str, after: &str) -> ModelSuggestion {
+        let at = text.find(before).expect("原文里要有");
+        ModelSuggestion {
+            span: at..at + before.len(),
+            before: before.into(),
+            after: after.into(),
+            reason: "测试".into(),
+            task: task.into(),
+            group: "表述".into(),
+        }
+    }
+
+    #[test]
+    fn merging_a_skills_suggestions_keeps_other_model_sources() {
+        let text = "甲乙丙丁戊。";
+        let mut set = RevisionSet::default();
+        set.replace_model(vec![model("grammar", text, "甲乙", "甲")], text, &[]);
+        set.merge_model(
+            "skill:review",
+            vec![model("skill:review", text, "丙丁", "丁")],
+            text,
+            &[],
+        );
+        assert_eq!(set.model_count(), 2, "文字复核的建议留着");
+        // 同一技能再跑一次：只换掉自己上一轮的。
+        let dropped = set.merge_model(
+            "skill:review",
+            vec![
+                model("skill:review", text, "戊", "己"),
+                ModelSuggestion {
+                    before: "对不上".into(),
+                    ..model("skill:review", text, "甲", "乙")
+                },
+            ],
+            text,
+            &[],
+        );
+        assert_eq!(dropped, 1, "原文对不上的丢弃并报数");
+        let befores: Vec<&str> = set.items().iter().map(|item| item.before()).collect();
+        assert!(
+            befores.contains(&"甲乙") && befores.contains(&"戊") && !befores.contains(&"丙丁"),
+            "{befores:?}"
+        );
     }
 
     fn set_with(text: &str, notes: Vec<ProofNote>) -> RevisionSet {

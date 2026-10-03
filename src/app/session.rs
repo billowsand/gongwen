@@ -33,10 +33,8 @@ pub(crate) enum DraftAction {
     OpenSendPackage(i64),
     /// 查看引用来源稿件，沿用稿件库的只读与标签规则。
     OpenManuscript(i64),
-    /// 打开统一 AI 工作台；若编辑器有选区，一并冻结为受控润色范围。
-    OpenAiWorkbench {
-        selection: Option<std::ops::Range<usize>>,
-    },
+    /// 打开设置页的「技能」分区（AI 侧栏右上角「管理技能…」）。
+    OpenSkillSettings,
     /// 把已发布的稿件退回草稿，好继续编辑。
     RevertToDraft(i64),
     /// 把某个已提交版本载入当前起草页。

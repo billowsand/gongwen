@@ -112,11 +112,6 @@ pub(crate) enum KnowledgeMode {
 
 /// 起草页发起的后台任务的结果。
 pub(crate) enum DocJob {
-    /// 从零起草的结果。
-    Drafted(Result<GeneratedDraft, String>),
-    Optimized(Result<GeneratedDraft, String>),
-    /// 已有正文上的 AI 结果先进入审阅提案，不直接覆盖。
-    Proposed(Result<GeneratedDraft, String>),
     /// 模型的流式增量，落进 AI 侧栏正在跑的那一轮，不碰正文。`done` 表示模型
     /// 已经说完、接下来是程序校验。
     AiStream {
@@ -141,13 +136,6 @@ pub(crate) enum DocJob {
     RedlinePrintPreview(Result<Vec<std::path::PathBuf>, String>),
     /// 小模型逐句文字复核的结果。只产出待确认的建议，不碰正文。
     Reviewed(Result<crate::revise_model::ReviewOutcome, String>),
-    /// 大纲骨架。只列章节，不写正文。
-    Outlined(Result<crate::outline::Outline, String>),
-    /// 某一小节的正文。逐节回投，写坏了只重跑那一节。
-    SectionDrafted {
-        index: usize,
-        result: Result<String, String>,
-    },
 }
 
 impl GongwenApp {
@@ -959,6 +947,52 @@ impl GongwenApp {
                 doc.ai_panel.ask(run);
                 self.status = format!("{prefix}有 {count} 个问题要你确认，在侧栏里选一下。");
             }
+            Ok(SkillResult::Report {
+                skill,
+                skill_id,
+                findings,
+            }) => {
+                doc.ai_review_baseline = None;
+                let suggestions: Vec<crate::revision::ModelSuggestion> = findings
+                    .iter()
+                    .filter_map(|finding| {
+                        let fix = finding.fix.as_ref()?;
+                        Some(crate::revision::ModelSuggestion {
+                            span: fix.span.clone(),
+                            before: fix.before.clone(),
+                            after: fix.after.clone(),
+                            reason: finding.text.clone(),
+                            task: format!("skill:{skill_id}"),
+                            group: finding.group.clone(),
+                        })
+                    })
+                    .collect();
+                let offered = suggestions.len();
+                let markdown = std::mem::take(&mut doc.generated_markdown);
+                let dropped = doc.revisions.merge_model(
+                    &format!("skill:{skill_id}"),
+                    suggestions,
+                    &markdown,
+                    &self.config.proofread.ignored,
+                );
+                doc.generated_markdown = markdown;
+                let fixes = offered - dropped;
+                let count = findings.len();
+                if let Some(turn) = doc.ai_panel.running_turn_mut() {
+                    turn.findings = findings;
+                }
+                doc.ai_panel.finish(TurnState::Reported { fixes });
+                if fixes > 0 {
+                    doc.result_drawer_open = true;
+                }
+                self.status = match (count, fixes) {
+                    (0, _) => format!("{prefix}{skill}完成：没有发现问题。"),
+                    (_, 0) => format!("{prefix}{skill}完成：{count} 条，清单在侧栏里。"),
+                    _ => format!(
+                        "{prefix}{skill}完成：{count} 条，其中 {fixes} 条有改法，已放进审校抽屉逐条采纳。"
+                    ),
+                };
+            }
             Ok(SkillResult::Proposal {
                 skill,
                 draft,
@@ -981,6 +1015,7 @@ impl GongwenApp {
                         doc.ai_prompt_last_label.replacen("自动选择技能", &skill, 1);
                 }
                 let label = doc.ai_prompt_last_label.clone();
+                let title = draft.title.clone();
                 let summary =
                     Self::install_ai_proposal(doc, before, draft, label, &self.config.vocabulary);
                 doc.ai_panel.finish(TurnState::Proposed(summary));
@@ -1005,7 +1040,7 @@ impl GongwenApp {
                     }
                 }
                 self.status = if !researched {
-                    format!("{prefix}{skill}完成，提案在侧栏里。")
+                    format!("{prefix}{skill}完成：《{title}》的提案在侧栏里。")
                 } else if asked == 0 {
                     format!(
                         "{prefix}{skill}完成（{rounds} 轮）：补全 {resolved} 处缺口，提案在侧栏里。"
@@ -1050,84 +1085,6 @@ impl GongwenApp {
             format!("《{}》", self.docs[index].title())
         };
         match job {
-            DocJob::Drafted(Ok(result)) => {
-                if let Err(error) = crate::document_reference::ensure_preserved(
-                    &self.docs[index].generated_markdown,
-                    &result.markdown,
-                ) {
-                    self.status = error.to_string();
-                    self.docs[index]
-                        .ai_panel
-                        .finish(TurnState::Failed(error.to_string()));
-                    return;
-                }
-                let title = result.title.clone();
-                Self::take_generated(&mut self.docs[index], result);
-                self.docs[index].ai_panel.finish(TurnState::Applied);
-                self.status = if self.docs[index].output_files.is_empty() {
-                    format!(
-                        "{prefix}“{title}”草稿已生成。可直接在右侧修改，然后点“导出当前审校稿”。"
-                    )
-                } else {
-                    format!(
-                        "{prefix}“{title}”已生成并导出 {} 个文件。",
-                        self.docs[index].output_files.len()
-                    )
-                };
-            }
-            DocJob::Optimized(Ok(result)) => {
-                if let Err(error) = crate::document_reference::ensure_preserved(
-                    &self.docs[index].generated_markdown,
-                    &result.markdown,
-                ) {
-                    self.status = error.to_string();
-                    self.docs[index]
-                        .ai_panel
-                        .finish(TurnState::Failed(error.to_string()));
-                    return;
-                }
-                let title = result.title.clone();
-                Self::take_generated(&mut self.docs[index], result);
-                self.docs[index].ai_panel.finish(TurnState::Applied);
-                self.status = if self.docs[index].output_files.is_empty() {
-                    format!(
-                        "{prefix}“{title}”已按“{}”优化，输出格式已按内置标准校正。",
-                        self.docs[index].ai_prompt_last_label
-                    )
-                } else {
-                    format!(
-                        "{prefix}“{title}”已按“{}”优化并导出 {} 个文件。",
-                        self.docs[index].ai_prompt_last_label,
-                        self.docs[index].output_files.len()
-                    )
-                };
-            }
-            DocJob::Proposed(Ok(result)) => {
-                let doc = &mut self.docs[index];
-                let before = doc
-                    .ai_review_baseline
-                    .take()
-                    .unwrap_or_else(|| doc.generated_markdown.clone());
-                let label = doc.ai_prompt_last_label.clone();
-                let summary = Self::install_ai_proposal(
-                    doc,
-                    before,
-                    result,
-                    label.clone(),
-                    &self.config.vocabulary,
-                );
-                let count = summary.fact_changes;
-                self.docs[index]
-                    .ai_panel
-                    .finish(TurnState::Proposed(summary));
-                self.status = if count == 0 {
-                    format!("{prefix}“{label}”修改提案已生成，请对照确认后再应用。")
-                } else {
-                    format!(
-                        "{prefix}“{label}”修改提案已生成，检测到 {count} 项关键事实变化，必须逐项核对。"
-                    )
-                };
-            }
             DocJob::Reviewed(Ok(outcome)) => {
                 // 缓存合并而不是覆盖：这一轮跳过的句子，结论还在旧缓存里。
                 self.docs[index].revise_cache.extend(outcome.cache);
@@ -1170,70 +1127,8 @@ impl GongwenApp {
                 self.status = message;
                 self.docs[index].result_drawer_open = true;
             }
-            DocJob::Outlined(Ok(outline)) => {
-                let count = outline.sections.len();
-                if let Some(draft) = self.docs[index].outline.as_mut() {
-                    draft.outline = outline;
-                    draft.error = None;
-                    draft.open = true;
-                }
-                self.status = if count == 0 {
-                    format!("{prefix}模型没有列出可用的章节，请补充材料后重试。")
-                } else {
-                    format!("{prefix}大纲已列出 {count} 节，请确认后再逐节起草。")
-                };
-            }
-            DocJob::Outlined(Err(error)) => {
-                if let Some(draft) = self.docs[index].outline.as_mut() {
-                    draft.error = Some(error.clone());
-                    draft.open = true;
-                }
-                self.status = format!("{prefix}列大纲失败：{error}");
-            }
-            DocJob::SectionDrafted {
-                index: section,
-                result,
-            } => {
-                let Some(draft) = self.docs[index].outline.as_mut() else {
-                    return;
-                };
-                draft.running = None;
-                let Some(item) = draft.outline.sections.get_mut(section) else {
-                    return;
-                };
-                match result {
-                    Ok(markdown) => {
-                        item.markdown = markdown;
-                        item.state = crate::outline::SectionState::Done;
-                        let heading = item.heading.clone();
-                        let done = draft.outline.done_count();
-                        let total = draft.outline.sections.len();
-                        self.status = format!(
-                            "{prefix}第 {} 节「{heading}」已生成（{done}/{total}）。",
-                            section + 1
-                        );
-                    }
-                    Err(error) => {
-                        item.state = crate::outline::SectionState::Failed(error.clone());
-                        self.status = format!("{prefix}第 {} 节生成失败：{error}", section + 1);
-                    }
-                }
-            }
             DocJob::Reviewed(Err(error)) => {
                 self.status = format!("{prefix}文字复核失败：{error}");
-            }
-            DocJob::Drafted(Err(error)) => {
-                self.status = format!("{prefix}起草失败：{error}");
-                self.docs[index].ai_panel.finish(TurnState::Failed(error));
-            }
-            DocJob::Optimized(Err(error)) => {
-                self.status = format!("{prefix}优化失败：{error}");
-                self.docs[index].ai_panel.finish(TurnState::Failed(error));
-            }
-            DocJob::Proposed(Err(error)) => {
-                self.docs[index].ai_review_baseline = None;
-                self.status = format!("{prefix}生成修改提案失败：{error}");
-                self.docs[index].ai_panel.finish(TurnState::Failed(error));
             }
             DocJob::AiStream {
                 content,

@@ -29,6 +29,8 @@ enum CardAction {
     Rerun(u64),
     /// 交上这一轮选择题的回答。
     Answer(u64),
+    /// 打开审校抽屉（审核类技能把有改法的问题放在那里）。
+    OpenDrawer,
 }
 
 impl DraftPage<'_> {
@@ -106,17 +108,12 @@ impl DraftPage<'_> {
                     self.doc.ai_panel.open = false;
                 }
                 ui.menu_button("•••", |ui| {
-                    // 仿写、知识起草与大纲第 ② – ④ 期并入侧栏，在那之前走旧工作台。
                     if ui
-                        .add(theme::menu_item(
-                            theme::Icon::Copy,
-                            "仿照起草 / 知识起草 / 大纲…",
-                        ))
-                        .on_hover_text("打开原来的 AI 起草工作台")
+                        .add(theme::menu_item(theme::Icon::WandSparkles, "管理技能…"))
+                        .on_hover_text("设置页「技能」：启用停用、复制改写、新建、导入导出")
                         .clicked()
                     {
-                        self.actions
-                            .push(DraftAction::OpenAiWorkbench { selection: None });
+                        self.actions.push(DraftAction::OpenSkillSettings);
                         ui.close();
                     }
                     let can_clear = self
@@ -141,12 +138,14 @@ impl DraftPage<'_> {
         if self.doc.ai_panel.turns.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.weak("在下面写要求，Ctrl+Enter 发送");
+                ui.weak("在下面写要求，Ctrl+Enter 发送；技能会按你的话自动选");
                 ui.add_space(10.0);
                 for example in [
-                    "润色：压缩第二部分，不改任务和时限",
-                    "润色：语气改成上行文",
-                    "起草：根据以下材料写一份通知……",
+                    "起草一份冬季森林防火的通知……",
+                    "根据以下会议纪要整理成通知……",
+                    "仿照去年的通知写今年的……",
+                    "压缩到800字，不改任务和时限",
+                    "签发前帮我审一下",
                 ] {
                     ui.label(
                         egui::RichText::new(example)
@@ -191,6 +190,7 @@ impl DraftPage<'_> {
                     proposal.open = true;
                 }
             }
+            Some(CardAction::OpenDrawer) => self.open_result_drawer(),
             Some(CardAction::Answer(id)) => {
                 let asking = self
                     .doc
@@ -501,7 +501,10 @@ fn turn_card(
             TurnState::Proposed(_) => {
                 theme::chip(ui, "待确认", theme::accent(), theme::accent_soft());
             }
-            TurnState::Accepted | TurnState::Applied => {
+            TurnState::Reported { .. } => {
+                theme::chip(ui, "问题清单", theme::accent(), theme::accent_soft());
+            }
+            TurnState::Accepted => {
                 theme::chip(ui, "已写入正文", theme::success(), theme::success_soft());
             }
             TurnState::Discarded => {
@@ -524,9 +527,13 @@ fn turn_card(
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                egui::RichText::new(format!("{chars} 字 · {seconds:.0} s"))
-                    .small()
-                    .color(theme::text_muted()),
+                egui::RichText::new(if chars == 0 {
+                    format!("{seconds:.0} s")
+                } else {
+                    format!("{chars} 字 · {seconds:.0} s")
+                })
+                .small()
+                .color(theme::text_muted()),
             );
         });
     });
@@ -635,6 +642,11 @@ fn turn_card(
                 );
             }
         }
+        TurnState::Reported { fixes } => {
+            ui.add_space(6.0);
+            findings_ui(ui, &turn.findings, *fixes, action);
+            rerun_button(ui, turn, "重新审一遍", action);
+        }
         TurnState::Stopped => {
             ui.add_space(6.0);
             ui.weak(format!("已停止，生成了 {chars} 字；半截输出不能采用。"));
@@ -647,6 +659,58 @@ fn turn_card(
         }
         _ => {}
     }
+}
+
+/// 审核类技能的问题清单：按分组列出，有改法的注明已进审校抽屉。不改稿。
+fn findings_ui(
+    ui: &mut egui::Ui,
+    findings: &[crate::agent::board::Finding],
+    fixes: usize,
+    action: &mut Option<CardAction>,
+) {
+    if findings.is_empty() {
+        ui.label("没有发现问题。");
+        return;
+    }
+    let mut groups: Vec<&str> = Vec::new();
+    for finding in findings {
+        if !groups.contains(&finding.group.as_str()) {
+            groups.push(&finding.group);
+        }
+    }
+    for group in groups {
+        let items: Vec<_> = findings.iter().filter(|f| f.group == group).collect();
+        ui.label(egui::RichText::new(format!("{group}（{}）", items.len())).strong());
+        for finding in items {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("· {}", finding.text));
+                if let Some(fix) = &finding.fix {
+                    ui.weak(format!("→ 改为「{}」", fix.after));
+                }
+            });
+            if !finding.excerpt.is_empty() {
+                ui.weak(format!("  原文：{}", finding.excerpt));
+            }
+            if !finding.source.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("  {}", finding.source))
+                        .small()
+                        .color(theme::text_muted()),
+                );
+            }
+        }
+        ui.add_space(4.0);
+    }
+    ui.horizontal_wrapped(|ui| {
+        if fixes > 0 {
+            ui.weak(format!("{fixes} 条有改法的已放进审校抽屉，逐条采纳。"));
+            if ui.small_button("打开审校抽屉").clicked() {
+                *action = Some(CardAction::OpenDrawer);
+            }
+        } else {
+            ui.weak("只出清单，不改稿。");
+        }
+    });
 }
 
 /// 选择题。程序推荐的选项已经替用户选上；写了自己的答案就以它为准。
@@ -684,11 +748,14 @@ fn questions_ui(
             }
         });
         if let Some(hint) = &question.custom_hint {
-            let response = ui.add(
+            // 预填了多行内容（如大纲）就给多行框，在原文上改。
+            let edit = if question.prefill.contains('\n') {
+                egui::TextEdit::multiline(&mut draft.custom)
+                    .desired_rows(question.prefill.lines().count().clamp(3, 14))
+            } else {
                 egui::TextEdit::singleline(&mut draft.custom)
-                    .hint_text(hint.as_str())
-                    .desired_width(f32::INFINITY),
-            );
+            };
+            let response = ui.add(edit.hint_text(hint.as_str()).desired_width(f32::INFINITY));
             if response.changed() && !draft.custom.is_empty() {
                 draft.skip = false;
             }

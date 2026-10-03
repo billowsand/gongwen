@@ -1,23 +1,13 @@
-//! AI 提示词管理页与「AI 优化」提示词选择面板。
+//! AI 提示词管理页（侧栏润色技能的预设）。
 //!
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::ai_prompts`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
-use crate::app::{GongwenApp, accent, summarize, warn};
+use crate::app::{GongwenApp, summarize, warn};
 use crate::models::{AiPrompt, TemplateKind, builtin_ai_prompts};
 use crate::prompt;
 use crate::theme;
 use eframe::egui;
-
-/// 点“AI 优化”后弹出的提示词选择面板。`custom` 是一次性指令，用完即弃，
-/// 不进提示词库。
-#[derive(Default)]
-pub(crate) struct AiPromptPicker {
-    keyword: String,
-    custom: String,
-    /// 只列出适用于该文种的提示词；面板打开那一刻的文种，中途切换不影响。
-    kind: TemplateKind,
-}
 
 /// AI 管理页右侧的编辑区。先应用到提示词库，保存更改时写回配置。
 pub(crate) struct AiPromptDraft {
@@ -675,163 +665,5 @@ impl GongwenApp {
             "下面这段会自动拼在每条提示词之后，并声明优先级更高：\
 自定义指令与它冲突时，一律以它为准。",
         );
-    }
-
-    /// “AI 优化”的提示词选择面板。列出适用当前文种的条目，单击即执行；
-    /// 底部可以写一条只用一次的临时指令。
-    pub(crate) fn ai_prompt_picker_window(&mut self, ctx: &egui::Context) {
-        let Some(mut picker) = self.ai_prompt_picker.take() else {
-            theme::reset_window_anim(ctx, egui::Id::new("ai_prompt_picker_anim"));
-            return;
-        };
-        // 审校稿为空就是从零起草，非空就是改现有稿件：同一个面板，两种口径。
-        let drafting = self
-            .active_doc_ref()
-            .is_none_or(|doc| doc.generated_markdown.trim().is_empty());
-        let mut chosen: Option<(String, String)> = None;
-        let mut close = false;
-
-        let win = egui::Window::new(if drafting {
-            "AI 起草"
-        } else {
-            "AI 优化"
-        })
-            .collapsible(false)
-            .resizable(true)
-            .default_width(460.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.weak(format!("当前文种：{}", picker.kind.label()))
-                    .on_hover_text("输出格式标准始终生效，不受下面的指令影响。");
-                if drafting {
-                    ui.colored_label(
-                        accent(),
-                        "当前审校稿为空：下面写明要起草什么，将结合左侧文档要素从零生成。",
-                    );
-                }
-                ui.add_space(6.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut picker.keyword)
-                        .hint_text("按名称筛选")
-                        .desired_width(ui.available_width()),
-                );
-                ui.add_space(6.0);
-
-                let keyword = picker.keyword.trim().to_lowercase();
-                let matches = self
-                    .config
-                    .ai_prompts
-                    .iter()
-                    .filter(|entry| entry.applies_to(picker.kind))
-                    .filter(|entry| {
-                        keyword.is_empty() || entry.name.to_lowercase().contains(&keyword)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-
-                egui::ScrollArea::vertical()
-                    .id_salt("ai_prompt_picker")
-                    .max_height(280.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        if matches.is_empty() {
-                            ui.weak("没有适用于当前文种的提示词。可以在下面临时写一条，或到“AI 管理”页新增。");
-                        }
-                        for entry in &matches {
-                            let last_used = self.config.last_ai_prompt == entry.id;
-                            let frame = if last_used {
-                                theme::card().fill(theme::accent_soft())
-                            } else {
-                                theme::card()
-                            };
-                            let response = frame
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(&entry.name).strong());
-                                        if last_used {
-                                            theme::chip(
-                                                ui,
-                                                "上次使用",
-                                                theme::accent(),
-                                                theme::surface_sunk(),
-                                            );
-                                        }
-                                    });
-                                    let preview = if entry.instruction.trim().is_empty() {
-                                        "只按内置标准做格式规整，不改措辞。".to_string()
-                                    } else {
-                                        summarize(&entry.instruction, 70)
-                                    };
-                                    ui.label(
-                                        egui::RichText::new(preview).color(theme::text_soft()),
-                                    );
-                                })
-                                .response
-                                .interact(egui::Sense::click());
-                            let tip = if drafting {
-                                "按这条提示词起草（素材写在下面的临时提示词里）"
-                            } else {
-                                "按这条提示词优化当前稿件"
-                            };
-                            if response.on_hover_text(tip).clicked() {
-                                self.config.last_ai_prompt = entry.id;
-                                chosen =
-                                    Some((entry.instruction.clone(), entry.name.clone()));
-                            }
-                            ui.add_space(4.0);
-                        }
-                    });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(if drafting {
-                        "写作素材与要求（用完即弃，不进提示词库）"
-                    } else {
-                        "临时提示词（用完即弃，不进提示词库）"
-                    })
-                    .strong(),
-                );
-                ui.add(
-                    egui::TextEdit::multiline(&mut picker.custom)
-                        .hint_text(if drafting {
-                            "例如：就 2026 年度教师培训经费事项向省财政厅去函，背景是……，请求是……"
-                        } else {
-                            "例如：把第三部分改写成三条并列举措，保留全部数据"
-                        })
-                        .desired_width(ui.available_width())
-                        .desired_rows(if drafting { 8 } else { 4 }),
-                );
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let has_custom = !picker.custom.trim().is_empty();
-                    if theme::primary_icon_button_enabled(
-                        ui,
-                        has_custom,
-                        theme::Icon::Sparkles,
-                        if drafting { "按此素材起草" } else { "按此提示词优化" },
-                    )
-                    .clicked()
-                    {
-                        let label = if drafting { "临时素材" } else { "临时提示词" };
-                        chosen = Some((picker.custom.trim().to_string(), label.into()));
-                    }
-                    if ui.button("取消").clicked() {
-                        close = true;
-                    }
-                });
-            });
-        if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("ai_prompt_picker_anim"), &w.response);
-        }
-
-        if let Some((instruction, label)) = chosen {
-            self.draft_page().start_optimize(instruction, label);
-            return;
-        }
-        if !close {
-            self.ai_prompt_picker = Some(picker);
-        }
     }
 }

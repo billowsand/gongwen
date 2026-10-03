@@ -450,32 +450,6 @@ c += notes(
 )[0]
 DIAGRAMS["diag-ai-flow"] = page("AI 闸门", c)
 
-# ── 9. 事实单确认流程 ──────────────────────────────────────────────────────
-c = title("事实单三步：确定性拆分 → 人确认 → 才起草", w=560)
-c += box("mat", "材料原文\n会议纪要 / 来函 / 要点", X0, 96, 250, 96,
-         fill="#F3E5DC", stroke=ACCENT, bold=True)
-c += box("ext", "提取事实单\n程序确定性拆分\n★ 全程不调用模型", 345, 96, 250, 96,
-         fill="#F7E4E0", stroke=RED, bold=True)
-c += box("fact", "事实单（可编辑）\n事项 · 时间 · 地点\n单位 · 人员 · 数字 · 依据", 650, 96, 250, 96,
-         stroke=AMBER, bold=True)
-c += box("human", "人逐项确认\n改文字 · 删条目 · 加条目\n唯一能定事实的地方", 650, 250, 250, 96,
-         fill="#E4EFE4", stroke=GREEN, bold=True)
-c += box("gen", "按确认后的事实起草\n此刻才调模型", 345, 250, 250, 96, stroke=ACCENT, bold=True)
-c += box("out", "修订建议提案\n左当前稿 / 右提案\n事实变化逐项确认", X0, 250, 250, 96,
-         fill="#DCE8EE", stroke=BLUE, bold=True)
-c += edge("e1", "mat", "ext")
-c += edge("e2", "ext", "fact")
-c += edge("e3", "fact", "human")
-c += edge("e4", "human", "gen", "确认后", GREEN)
-c += edge("e5", "gen", "out")
-n, nxt = notes(
-    [("n1", "模型从头到尾没机会自己定事实——这就是红线二在起草这一侧的落地方式")],
-    y=384, fill="#F7E4E0", stroke=RED,
-)
-c += n
-c += notes([("n2", "材料成文 / 知识起草 / 大纲起草三条工作流共用这套流程")], y=nxt)[0]
-DIAGRAMS["diag-ai-workbench"] = page("事实单流程", c)
-
 # ── 10. 稿件状态机 ──────────────────────────────────────────────────────────
 c = title("稿件生命周期状态机", w=340)
 c += box("draft", "草稿\n可编辑", X0, 120, 250, 110,

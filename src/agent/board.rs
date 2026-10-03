@@ -13,9 +13,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-/// 模板变量：`{request}`、`{baseline.title}`。
+/// 模板变量：`{request}`、`{baseline.title}`，可带缺省文字 `{baseline.text|（没有基准稿）}`。
 static VARIABLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)?)\}").expect("变量正则")
+    Regex::new(r"\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)?)(?:\|([^{}]*))?\}")
+        .expect("变量正则")
 });
 
 #[derive(Debug, Clone, Default)]
@@ -50,6 +51,31 @@ pub(crate) struct Board {
     pub(crate) truncated: bool,
     /// 缺口循环跑了几轮。
     pub(crate) rounds: usize,
+    /// 审核类技能的问题清单。
+    pub(crate) findings: Vec<Finding>,
+}
+
+/// 审核类技能查出的一条问题。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Finding {
+    /// 分组：要素与格式、表述、结构、有出处 / 无出处 / 与资料矛盾、要点……
+    pub(crate) group: String,
+    /// 问题说明。
+    pub(crate) text: String,
+    /// 原文片段或所在句。
+    pub(crate) excerpt: String,
+    /// 依据或出处（规则名、[K3]《题名》……）。
+    pub(crate) source: String,
+    /// 有明确改法时：对发起时正文的一处替换，转成审校抽屉里的修订建议逐条采纳。
+    pub(crate) fix: Option<Fix>,
+}
+
+/// 对正文的一处替换。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Fix {
+    pub(crate) span: std::ops::Range<usize>,
+    pub(crate) before: String,
+    pub(crate) after: String,
 }
 
 impl Board {
@@ -99,6 +125,9 @@ impl Board {
                     .find(|(key, _)| *key == name)
                     .map(|(_, value)| value.clone())
                     .or_else(|| self.var_text(name))
+                    // 写了缺省文字时，变量为空也用缺省（如还没填标题提示）。
+                    .filter(|text| caps.get(2).is_none() || !text.trim().is_empty())
+                    .or_else(|| caps.get(2).map(|default| default.as_str().to_string()))
                     .unwrap_or_else(|| caps[0].to_string())
             })
             .into_owned()
@@ -259,6 +288,11 @@ mod tests {
             ),
             "本步·{title}",
             "本步变量优先，替换进去的花括号不再替换"
+        );
+        assert_eq!(
+            board.render("{missing|（无）}·{title|没有标题}·{notes|无回答}"),
+            "（无）·冬季防火·无回答",
+            "缺失或为空时用缺省文字"
         );
         assert_eq!(
             board.render("{hits}"),

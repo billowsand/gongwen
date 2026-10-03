@@ -41,7 +41,7 @@
 
 ### 5. 出稿、改稿、审校、导出
 
-1. **生成草稿**：用「AI 起草工作台」或直接在中央区写 Markdown。工作台五种工作流见 [AI 起草工作台](chapter:13-ai-workbench)。
+1. **生成草稿**：用「AI 助手」侧栏或直接在中央区写 Markdown。侧栏按技能起草、仿写、整理材料、复函和润色，见 [AI 侧栏与技能](chapter:13-ai-workbench)。
 2. **在右侧改稿**：正文永远在你自己手里，AI 给的是建议。
 3. **处理审校提示**：右下状态栏点开审校抽屉。**必错**级清零，**疑似**级自己判断，**提示**级可整组关掉。见 [核稿：审校与校验](chapter:09-proofread)。
 4. **导出签发稿**：功能区「输出」分区选格式，点导出。见 [导出、打印与文件命名](chapter:11-export)。
@@ -65,5 +65,5 @@
 | 弄清一份公文从拟到归档怎么走 | [办文全流程](chapter:04-workflow) |
 | 把要素填对，让文种选对 | [立稿与要素填报](chapter:05-profiles) |
 | 熟悉编辑器与功能区 | [拟稿](chapter:06-editor)、[功能区](chapter:07-ribbon) |
-| 用好 AI | [AI 的边界](chapter:12-ai-guard)、[AI 起草工作台](chapter:13-ai-workbench) |
+| 用好 AI | [AI 的边界](chapter:12-ai-guard)、[AI 侧栏与技能](chapter:13-ai-workbench) |
 | 备份与换机器 | [数据、备份与迁移](chapter:21-data) |

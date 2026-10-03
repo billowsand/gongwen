@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod stream;
-pub use stream::{Finish, StreamDelta, StreamOutcome, generate_stream};
+pub use stream::{Finish, StreamDelta, generate_stream};
 
 #[derive(Debug, Deserialize)]
 struct ChatResponse {

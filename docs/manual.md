@@ -30,7 +30,7 @@
 | 章 | 内容 |
 |---|---|
 | [12 AI 的边界与保障](help/12-ai-guard.md) | 三条红线、事实闸门与采纳自检 |
-| [13 AI 起草工作台](help/13-ai-workbench.md) | 五种工作流与事实单确认流程 |
+| [13 AI 侧栏与技能](help/13-ai-workbench.md) | AI 侧栏、技能条与十二个内置技能 |
 | [14 AI 优化、提示词与文字复核](help/14-ai-polish.md) | 提示词管理与小模型逐句复核 |
 
 ## 第四部分 词表与知识
@@ -68,4 +68,4 @@
 
 本目录与应用内帮助中心同源：正文以 `assets/help/*.md` 为准，配图在 `assets/help/images/`。新增或修改章节后同步两边，并在 `src/help/content.rs` 的 `CHAPTERS` 里登记。
 
-流程示意图的源文件在 [`help/diagrams/`](help/diagrams/)：`gen.py` 批量生成 11 个 `.drawio`，再用 draw.io 桌面版导出 PNG 到 `assets/help/images/`。改图改 `gen.py` 后重跑即可。
+流程示意图的源文件在 [`help/diagrams/`](help/diagrams/)：`gen.py` 批量生成 10 个 `.drawio`，再用 draw.io 桌面版导出 PNG 到 `assets/help/images/`。改图改 `gen.py` 后重跑即可。

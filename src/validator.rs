@@ -512,7 +512,6 @@ pub fn validate(
 /// 排出来——缺主送单位的稿子照样编译得出一份完整的 PDF，而用户往往正是要拿这份
 /// PDF 去看版式、去请人过目。挡着不让编译，等于用「稿子还没定稿」这件人人都知道
 /// 的事，去换掉一个真正有用的功能。所以这里只报数、只进审校抽屉，导出照做；
-/// 真正做不出成品的情况由 [`compile_blocking_issues`] 单独判。
 pub fn mustfix_issues(
     input: &DraftInput,
     markdown: &str,
@@ -528,32 +527,6 @@ pub fn mustfix_issues(
         )
         .filter(|message| !is_advisory(message))
         .collect()
-}
-
-/// 真正让导出做不出成品的问题——唯一的导出闸门。
-///
-/// 判据只有一条：**没有它就排不出 PDF。** 目前只有「正文为空」符合。其余校验
-/// 结论（要素缺失、名称不规范、日期冲突、结构瑕疵）全都不影响能不能排出 PDF，
-/// 因此一律不挡；它们照常出现在审校抽屉里。
-///
-/// 往这里加条目要非常克制：先问「这条真的会让 PDF 编不出来吗」，答案不是斩钉截铁
-/// 的「是」就不该进来。排版挤占、超长、越界之类的问题编译得出 PDF，只是难看，
-/// 那是审校提示要说的事，不是闸门要挡的事。
-pub fn compile_blocking_issues(
-    input: &DraftInput,
-    markdown: &str,
-    vocabulary: &[VocabularyEntry],
-    rules: &SecurityRules,
-) -> Vec<String> {
-    mustfix_issues(input, markdown, vocabulary, rules)
-        .into_iter()
-        .filter(|message| blocks_compilation(message))
-        .collect()
-}
-
-/// 这条校验结论会不会让导出根本做不出成品。
-fn blocks_compilation(message: &str) -> bool {
-    message == EMPTY_BODY
 }
 
 fn is_advisory(message: &str) -> bool {
@@ -2138,26 +2111,5 @@ mod tests {
             &rules(),
         );
         assert!(blockers.iter().all(|message| !message.contains("建议")));
-    }
-
-    /// 要素缺一大片、正文还留着待核实，PDF 照样排得出来——这种稿子必须能导出，
-    /// 因为看版式、请人过目靠的就是这份 PDF。闸门只认「连 PDF 都排不出」。
-    #[test]
-    fn compile_gate_only_trips_on_an_empty_body() {
-        let input = DraftInput::default();
-        let blockers = compile_blocking_issues(
-            &input,
-            "# 关于测试的函\n\n请于【待核实：具体日期】报送材料。",
-            &[],
-            &rules(),
-        );
-        assert!(
-            blockers.is_empty(),
-            "缺要素不该挡编译，却挡下了：{blockers:?}"
-        );
-
-        // 反过来，正文为空连 PDF 都排不出，这一条必须拦住。
-        let blockers = compile_blocking_issues(&input, "   \n", &[], &rules());
-        assert_eq!(blockers, vec![EMPTY_BODY.to_string()]);
     }
 }

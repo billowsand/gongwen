@@ -65,7 +65,7 @@ pub(crate) use markdown::table_column_count;
 pub(crate) use navigator::PreviewScroll;
 pub(crate) use source_nav::{SourceMinimap, SourceOutline};
 pub(crate) use table::{TableOp, table_grid_picker};
-pub(crate) use tasks::reviewed_draft;
+pub(crate) use tasks::{review_notes, reviewed_draft};
 pub(crate) use timeline::VersionTimelineState;
 // test-only names: only compiled in test builds (kept for the root test modules)
 #[cfg(test)]
@@ -281,59 +281,6 @@ pub(crate) fn toolbar_separator(ui: &mut egui::Ui) {
 /// id，后台任务回投时也需要区分“同一篇稿件的前后两次任务”。
 pub(crate) type DocKey = u64;
 
-/// AI 工作台发给起草后台的任务类型。内容生成与润色分开建模，避免再靠
-/// “当前编辑框是不是空”猜用户意图。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AiWorkflowKind {
-    Similar,
-    Knowledge,
-    Material,
-    /// 先列大纲、人确认后再逐节填。见 `crate::outline`。
-    Outline,
-    Polish,
-}
-
-impl AiWorkflowKind {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Similar => "仿照起草",
-            Self::Knowledge => "知识起草",
-            Self::Material => "材料成文",
-            Self::Outline => "大纲起草",
-            Self::Polish => "受控润色",
-        }
-    }
-}
-
-/// 经工作台确认后的执行请求。`baseline` 只用于仿照起草；其他起草模式使用
-/// `material`。已有正文或润色任务一律先生成审阅提案，不直接覆盖。
-pub(crate) struct AiTaskRequest {
-    pub(crate) kind: AiWorkflowKind,
-    pub(crate) label: String,
-    pub(crate) instruction: String,
-    pub(crate) material: String,
-    /// 知识库检索词：用户自己写的那段话。不能拿 `material`——那是包了
-    /// 「【已确认事实单——优先于原始材料】」之类提示词外壳的，外壳里的字会跟着
-    /// 参与关键词召回和向量计算，把检索带偏。
-    pub(crate) query: String,
-    pub(crate) baseline: String,
-    pub(crate) use_rag: bool,
-    pub(crate) review_before_apply: bool,
-}
-
-/// 大纲流程的会话状态。
-///
-/// `material` 要留着：逐节生成时每一节都得重新看一遍素材，否则模型只能照着
-/// 一句话的「本节要写什么」硬编。
-pub(crate) struct OutlineDraft {
-    pub(crate) outline: crate::outline::Outline,
-    pub(crate) material: String,
-    /// 正在生成的小节序号；`None` 表示当前没有小节在跑。
-    pub(crate) running: Option<usize>,
-    pub(crate) open: bool,
-    pub(crate) error: Option<String>,
-}
-
 /// AI 返回但尚未落入正文的修改提案。接受前复用版本对照视图，并对关键事实变化
 /// 另设确认门槛。
 pub(crate) struct AiProposal {
@@ -438,8 +385,6 @@ pub(crate) struct DraftSession {
     pub(crate) ai_review_baseline: Option<String>,
     /// 尚未接受的 AI 修改提案。提案不参与自动保存，也不能直接导出。
     pub(crate) ai_proposal: Option<AiProposal>,
-    /// 待确认的大纲与逐节产物。为 None 表示当前没有在走大纲流程。
-    pub(crate) outline: Option<OutlineDraft>,
     /// 右侧 AI 侧栏：输入区、任务流与停止开关。按稿件各存一份，只在内存里。
     pub(crate) ai_panel: crate::ai_panel::AiPanel,
     /// 本篇待确认的修订建议。词表、文档规则与模型检查器共用这一份。
@@ -458,48 +403,6 @@ pub(crate) struct DraftSession {
     /// 标签刚打开时的内容指纹。“第一次改动才自动入库”靠它区分
     /// “刚复制过来还没动” 和 “真的改了”。
     opened_fingerprint: String,
-    /// 起草时是否检索知识库注入相似稿件片段作参考（仅起草、优化不用）。
-    pub(crate) use_knowledge_rag: bool,
-    /// 知识库检索的文种过滤。
-    pub(crate) rag_kind_filter: RagKindFilter,
-}
-
-/// 起草时知识库检索的文种范围。
-///
-/// 之所以不用 `Option<TemplateKind>`：那样 `None` 既要表示"跟随当前文种"、
-/// 又要表示"不限文种"，只能二选一，结果是**跨文种参考根本选不出来**。
-///
-/// 默认不限文种，与知识库页的检索、问答一致。原先默认跟随当前文种，而知识库常常
-/// 只收了某几类文种（实际遇到过只有两篇研究报告的库），写公函时就一条也检索不到，
-/// 看上去像是知识库没起作用。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum RagKindFilter {
-    /// 跟随当前稿件的文种。
-    Follow,
-    /// 不限文种，全库检索。
-    #[default]
-    All,
-    /// 指定文种。
-    Only(TemplateKind),
-}
-
-impl RagKindFilter {
-    /// 解析成检索层要的过滤条件：None = 不限文种。
-    pub(crate) fn resolve(self, current: TemplateKind) -> Option<TemplateKind> {
-        match self {
-            Self::Follow => Some(current),
-            Self::All => None,
-            Self::Only(kind) => Some(kind),
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Follow => "跟随当前文种",
-            Self::All => "全部文种",
-            Self::Only(kind) => kind.label(),
-        }
-    }
 }
 
 impl DraftSession {
@@ -606,7 +509,6 @@ impl DraftSession {
             ai_prompt_last_label: String::new(),
             ai_review_baseline: None,
             ai_proposal: None,
-            outline: None,
             ai_panel: crate::ai_panel::AiPanel::default(),
             revisions: crate::revision::RevisionSet::default(),
             revise_cache: std::collections::BTreeMap::new(),
@@ -614,8 +516,6 @@ impl DraftSession {
             committed_baseline: None,
             record_status: ManuscriptStatus::Draft,
             opened_fingerprint: String::new(),
-            use_knowledge_rag: false,
-            rag_kind_filter: RagKindFilter::default(),
         };
         session.opened_fingerprint = session.fingerprint();
         session
@@ -752,7 +652,6 @@ impl DraftSession {
         self.heading_focus = None;
         self.ai_review_baseline = None;
         self.ai_proposal = None;
-        self.outline = None;
         // 建议锚在正文上，换了正文就全部失效；忽略记录也只对这一篇成立。
         self.revisions.clear();
         self.revise_cache.clear();

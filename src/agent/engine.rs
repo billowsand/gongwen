@@ -86,19 +86,22 @@ pub(crate) fn run(
 ) -> anyhow::Result<Outcome> {
     let mut ctx = ToolCtx { board, env, emit };
     for (index, step) in env.skill.flow.iter().enumerate().skip(start) {
-        if let Some(questions) = run_step(&mut ctx, step)? {
+        if let Some((questions, into)) = run_step(&mut ctx, step)? {
             return Ok(Outcome::Suspended(Suspension {
                 questions,
                 resume_at: index + 1,
-                save_as: step.save_as.clone(),
+                save_as: into.or_else(|| step.save_as.clone()),
             }));
         }
     }
     Ok(Outcome::Done)
 }
 
+/// 要问用户的题，以及答案存进哪个变量（None 表示步骤的 `save_as`）。
+type Ask = (Vec<Question>, Option<String>);
+
 /// 执行一步；要问用户时返回题目。
-fn run_step(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Option<Vec<Question>>> {
+fn run_step(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Option<Ask>> {
     ops::check_cancel(ctx)?;
     if let Some(condition) = &step.when
         && !condition_holds(ctx.board, ctx.env, condition)
@@ -115,10 +118,11 @@ fn run_step(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Option
                 ops::find(name).ok_or_else(|| anyhow::anyhow!("不认识的算子「{name}」"))?;
             Ok(match operator(ctx, step)? {
                 Flow::Next => None,
-                Flow::Suspend(questions) => Some(questions),
+                Flow::Suspend(questions) => Some((questions, None)),
+                Flow::SuspendInto(questions, var) => Some((questions, Some(var))),
             })
         }
-        (None, Some(tool)) => Ok(run_tool(ctx, step, tool)),
+        (None, Some(tool)) => Ok(run_tool(ctx, step, tool).map(|questions| (questions, None))),
         _ => anyhow::bail!("{}的写法不对：step 与 tool 必须二选一", step.label()),
     }
 }
@@ -274,6 +278,7 @@ pub(crate) fn apply_answers(
         let Some((_, reply)) = replies.iter().find(|(id, _)| *id == question.id) else {
             continue;
         };
+        // 选了值为空的选项（「就按这个」）或跳过：变量保持现值。
         let value = match reply {
             Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
                 Some(Action::Pick(value)) => value.clone(),
@@ -282,7 +287,9 @@ pub(crate) fn apply_answers(
             Reply::Custom(text) => Value::String(text.clone()),
             Reply::Skip => Value::Null,
         };
-        if let Some(name) = &suspension.save_as {
+        if let Some(name) = &suspension.save_as
+            && !value.is_null()
+        {
             board.vars.insert(name.clone(), value);
         }
     }

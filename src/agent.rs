@@ -29,3 +29,8 @@ pub(crate) mod router;
 pub(crate) mod skill;
 pub(crate) mod skill_files;
 pub(crate) mod tools;
+
+#[cfg(test)]
+mod builtin_tests;
+#[cfg(test)]
+mod testkit;

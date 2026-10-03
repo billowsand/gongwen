@@ -24,6 +24,8 @@ mod vocab;
 mod workspace;
 
 pub(crate) use interact::ASSIST_SYSTEM;
+#[cfg(test)]
+pub(crate) use store::ManuscriptDoc;
 pub(crate) use store::{ManuscriptSource, SqliteManuscripts};
 
 use super::api::{ApiSecrets, ApiStore};

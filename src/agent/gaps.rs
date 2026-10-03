@@ -241,8 +241,78 @@ pub(crate) fn untraced_facts(
                 .iter()
                 .any(|other| other.len() > fact.value.len() && other.contains(&fact.value))
         })
-        .filter(|fact| !haystack.contains(&squash(&fact.value)))
+        .filter(|fact| {
+            !equivalent_forms(&fact.value)
+                .iter()
+                .any(|form| haystack.contains(&squash(form)))
+        })
         .collect()
+}
+
+static WEEKDAY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[（(]\s*(?:星期|周)[一二三四五六日天]\s*[)）]|(?:星期|周)[一二三四五六日天]")
+        .expect("星期正则")
+});
+static CLOCK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{1,2})[:：](\d{2})$").expect("时刻正则"));
+static SPOKEN_CLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(凌晨|早上|上午|中午|下午|傍晚|晚上)?(\d{1,2})[点时](?:(\d{1,2})分|(半))?$")
+        .expect("口语时刻正则")
+});
+
+/// 同一个日期或时刻的几种常见写法：材料里写「10月20日下午3点」，稿子里写
+/// 「10月20日（星期二）15:00」，说的是同一件事，不该当成来源不明。
+fn equivalent_forms(value: &str) -> Vec<String> {
+    let mut forms = vec![value.to_string()];
+    let without_weekday = WEEKDAY.replace_all(value, "").trim().to_string();
+    if without_weekday != value && !without_weekday.is_empty() {
+        forms.push(without_weekday);
+    }
+    let clock = if let Some(caps) = CLOCK.captures(value) {
+        caps[1].parse::<u32>().ok().zip(caps[2].parse::<u32>().ok())
+    } else if let Some(caps) = SPOKEN_CLOCK.captures(value) {
+        let hour = caps[2].parse::<u32>().ok();
+        let minute = match (caps.get(3), caps.get(4)) {
+            (Some(m), _) => m.as_str().parse::<u32>().ok(),
+            (None, Some(_)) => Some(30),
+            (None, None) => Some(0),
+        };
+        let afternoon = matches!(
+            caps.get(1).map(|m| m.as_str()),
+            Some("下午" | "傍晚" | "晚上")
+        );
+        hour.zip(minute)
+            .map(|(h, m)| (if afternoon && h < 12 { h + 12 } else { h }, m))
+    } else {
+        None
+    };
+    if let Some((hour, minute)) = clock.filter(|(h, m)| *h < 24 && *m < 60) {
+        let twelve = if hour > 12 { hour - 12 } else { hour };
+        let period = match hour {
+            0..=5 => "凌晨",
+            6..=11 => "上午",
+            12 => "中午",
+            13..=18 => "下午",
+            _ => "晚上",
+        };
+        forms.push(format!("{hour}:{minute:02}"));
+        forms.push(format!("{hour}：{minute:02}"));
+        let tail = match minute {
+            0 => String::new(),
+            30 => "半".to_string(),
+            m => format!("{m}分"),
+        };
+        for unit in ["点", "时"] {
+            if minute == 30 && unit == "时" {
+                forms.push(format!("{hour}时30分"));
+                forms.push(format!("{period}{twelve}时30分"));
+                continue;
+            }
+            forms.push(format!("{hour}{unit}{tail}"));
+            forms.push(format!("{period}{twelve}{unit}{tail}"));
+        }
+    }
+    forms
 }
 
 /// 去掉空白再比：「12 月 1 日」与「12月1日」算同一个。
@@ -447,6 +517,30 @@ mod tests {
         assert_eq!(classify("示意约××，须核实替换", ""), GapKind::Retrievable);
         assert_eq!(classify("近年火灾情况", ""), GapKind::Retrievable);
         assert_eq!(classify("", "会议时间定于【待核实】"), GapKind::NeedsUser);
+    }
+
+    #[test]
+    fn weekday_and_clock_spellings_count_as_the_same_fact() {
+        let draft = "定于2026年10月20日（星期二）15:00召开，14:40开始签到。";
+        let untraced: Vec<String> =
+            untraced_facts(draft, "会议改在2026年10月20日下午3点召开。", &[])
+                .into_iter()
+                .map(|fact| fact.value)
+                .collect();
+        assert!(
+            untraced.iter().all(|v| !v.contains("10月20日")),
+            "{untraced:?}"
+        );
+        assert!(
+            untraced.iter().all(|v| v != "15:00"),
+            "下午3点就是15:00：{untraced:?}"
+        );
+        assert!(
+            untraced.iter().any(|v| v == "14:40"),
+            "签到时间是编的：{untraced:?}"
+        );
+        let forms = equivalent_forms("下午2点半");
+        assert!(forms.contains(&"14:30".to_string()), "{forms:?}");
     }
 
     #[test]

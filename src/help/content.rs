@@ -149,8 +149,8 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
     chapter!(
         "13-ai-workbench",
         Part::Ai,
-        "AI 起草工作台",
-        "AI 侧栏、五种工作流与事实单确认流程"
+        "AI 侧栏与技能",
+        "AI 侧栏、技能条与十二个内置技能"
     ),
     chapter!(
         "14-ai-polish",
@@ -287,10 +287,6 @@ pub(crate) const IMAGES: &[HelpImage] = &[
     HelpImage {
         key: "images/diag-ai-flow.png",
         bytes: include_bytes!("../../assets/help/images/diag-ai-flow.png"),
-    },
-    HelpImage {
-        key: "images/diag-ai-workbench.png",
-        bytes: include_bytes!("../../assets/help/images/diag-ai-workbench.png"),
     },
     HelpImage {
         key: "images/diag-manuscript.png",

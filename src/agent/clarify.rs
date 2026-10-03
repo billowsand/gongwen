@@ -53,6 +53,8 @@ pub(crate) struct Question {
     pub(crate) choices: Vec<Choice>,
     /// `Some(提示)` 表示可以自己填写。
     pub(crate) custom_hint: Option<String>,
+    /// 自己填写框里预先填好的内容（如待确认的大纲），用户在它上面改；多行时显示成多行框。
+    pub(crate) prefill: String,
     /// 可以跳过：动笔前的题跳过就按现有信息写；缺口题跳过就保留待核实。
     pub(crate) skippable: bool,
     pub(crate) target: Target,
@@ -182,6 +184,7 @@ pub(crate) fn predraft_questions(
                 },
             ],
             custom_hint: None,
+            prefill: String::new(),
             skippable: false,
             target: Target::PreDraft,
         });
@@ -209,6 +212,7 @@ pub(crate) fn predraft_questions(
                 .collect(),
             text: question,
             custom_hint: Some("其他，自己写".into()),
+            prefill: String::new(),
             skippable: true,
             target: Target::PreDraft,
         });
@@ -259,6 +263,7 @@ pub(crate) fn gap_question(id: usize, gap: &Gap) -> Question {
         text,
         choices,
         custom_hint,
+        prefill: String::new(),
         skippable: true,
         target: Target::Gap(gap.id),
     }

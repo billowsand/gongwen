@@ -4,8 +4,8 @@
 //! 才写回），来源不明的事实找出处。没有进展、检索次数用完或满轮数就停。
 //!
 //! 参数：`rounds`（技能参数 `max_rounds`）、`attempts`（`attempts_per_gap`）、
-//! `evidence_chars`、`apis`（除知识库外还查哪些数据接口）；提示词 `fill_prompt`（默认「缺口修订」）、
-//! `source_prompt`（默认「来源核对」）。
+//! `evidence_chars`、`apis`（除知识库外还查哪些数据接口）、`search`（为否时不检索，缺口全部
+//! 交用户）；提示词 `fill_prompt`（默认「缺口修订」）、`source_prompt`（默认「来源核对」）。
 
 use super::{
     Flow, assist, check_cancel, fetch_into, has_sources, param, phase, prompt, squash, tool_line,
@@ -49,7 +49,13 @@ pub(super) fn gap_loop(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
             break;
         }
         ctx.board.rounds = round;
-        if !has_sources(ctx, step) {
+        // `search: false`：缺口一律交用户（复函里本单位的情况只有用户知道，查资料只会张冠李戴）。
+        let search = step
+            .params
+            .get("search")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false);
+        if !search || !has_sources(ctx, step) {
             for id in targets {
                 if let Some(gap) = ctx.board.ledger.get_mut(id) {
                     gap.status = GapStatus::NoAnswer;

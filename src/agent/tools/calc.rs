@@ -886,6 +886,32 @@ const STOPWORDS: [&str; 24] = [
     "情况",
 ];
 
+/// 用分词抽关键词：去掉单字、纯数字标点与常见虚词套话，按出现次数排，同次数按先后。
+pub(crate) fn keywords(text: &str, top: usize) -> Vec<String> {
+    let tokens = crate::rag::tokenize(text);
+    let mut counts: Vec<(String, usize, usize)> = Vec::new();
+    for (order, token) in tokens.split_whitespace().enumerate() {
+        if token.chars().count() < 2
+            || token
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_punctuation())
+            || STOPWORDS.contains(&token)
+        {
+            continue;
+        }
+        match counts.iter_mut().find(|(word, _, _)| word == token) {
+            Some(entry) => entry.1 += 1,
+            None => counts.push((token.to_string(), 1, order)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+    counts
+        .into_iter()
+        .take(top)
+        .map(|(word, _, _)| word)
+        .collect()
+}
+
 struct Keywords;
 
 impl Tool for Keywords {
@@ -912,28 +938,7 @@ impl Tool for Keywords {
     ) -> Result<ToolOutput, String> {
         let text = arg_str(args, "text").unwrap_or_else(|| ctx.board.request.clone());
         let top = arg_usize(args, "top").unwrap_or(8).clamp(1, 30);
-        let tokens = crate::rag::tokenize(&text);
-        let mut counts: Vec<(String, usize, usize)> = Vec::new();
-        for (order, token) in tokens.split_whitespace().enumerate() {
-            if token.chars().count() < 2
-                || token
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c.is_ascii_punctuation())
-                || STOPWORDS.contains(&token)
-            {
-                continue;
-            }
-            match counts.iter_mut().find(|(word, _, _)| word == token) {
-                Some(entry) => entry.1 += 1,
-                None => counts.push((token.to_string(), 1, order)),
-            }
-        }
-        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
-        let words: Vec<String> = counts
-            .into_iter()
-            .take(top)
-            .map(|(word, _, _)| word)
-            .collect();
+        let words = keywords(&text, top);
         let summary = format!("关键词：{}", words.join("、"));
         Ok(ToolOutput::new(json!(words), summary))
     }

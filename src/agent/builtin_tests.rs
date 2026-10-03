@@ -1,0 +1,720 @@
+//! 内置技能的夹具测试：每个技能用按提示词回话的假模型、假知识库与假稿件库走一遍完整流程，
+//! 挂起的地方像用户一样作答，检查每一步交给模型的东西和最后的工作稿、台账、题目。
+
+use super::board::Board;
+use super::clarify::{Reply, Target};
+use super::engine::SkillReport;
+use super::skill::{self, IMITATE, MATERIAL, POLICY_REPORT, REPLY_LETTER, Skill};
+use super::testkit::{Driver, KeywordKb, ScriptedModel, chunk};
+use super::tools::ManuscriptDoc;
+use crate::agent::backend::ModelRole;
+use crate::models::{DraftInput, ManuscriptStatus, TemplateKind};
+
+fn builtin(id: &str) -> Skill {
+    skill::builtin(id).expect("内置技能")
+}
+
+fn board(kind: TemplateKind, title: &str, request: &str) -> Board {
+    Board {
+        draft: DraftInput {
+            kind,
+            title_hint: title.into(),
+            ..DraftInput::default()
+        },
+        request: request.into(),
+        system_prompt: "SYSTEM".into(),
+        time_sources: "2026年10月3日".into(),
+        ..Board::default()
+    }
+}
+
+#[test]
+fn policy_report_confirms_the_outline_writes_by_chapter_and_cites_into_the_report() {
+    let skill = builtin(POLICY_REPORT);
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("会让整篇写偏") {
+            "无".into()
+        } else if prompt.contains("列出章的大纲") {
+            "1. 研究背景：为什么研究\n2. 对策建议：怎么办".into()
+        } else if prompt.contains("里的一章：研究背景") {
+            "## 研究背景\n\n梅文项目于2017年启动[K1]。".into()
+        } else if prompt.contains("里的一章：国外做法") {
+            "## 国外做法\n\n外军已部署智能辅助系统[K2]。系统已用于多个战区[K2]。".into()
+        } else if prompt.contains("里的一章：对策建议") {
+            "## 对策建议\n\n建议于【待核实：试点完成时限】前完成试点。".into()
+        } else if prompt.contains("写一段摘要") {
+            "本报告研究人工智能辅助决策的做法与对策。".into()
+        } else if prompt.contains("具体事实（时间、数字") {
+            "支持".into()
+        } else if prompt.contains("需要补全") {
+            "无法补全".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::new(vec![
+        (
+            "研究背景",
+            chunk(1, "梅文项目综述", "梅文项目于2017年启动。"),
+        ),
+        (
+            "国外做法",
+            chunk(2, "外军智能化报告", "外军已部署智能辅助系统。"),
+        ),
+    ]);
+    let mut start = board(
+        TemplateKind::ResearchReport,
+        "人工智能辅助决策研究",
+        "写一份决策参考，讲清背景、国外做法和对策",
+    );
+    start.draft.research.bibliography_content =
+        "@book{maven,\n  title = {梅文项目综述},\n  author = {张三},\n  publisher = {某出版社},\n  year = {2024}\n}\n"
+            .into();
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+
+    // 列大纲后停下来，大纲预填在框里让用户改。
+    let outline = driver.run().expect("大纲要你确认");
+    let question = &outline.questions[0];
+    assert_eq!(question.target, Target::Pick);
+    assert_eq!(question.prefill, "研究背景：为什么研究\n对策建议：怎么办");
+    assert_eq!(outline.save_as.as_deref(), Some("outline"));
+    // 用户在框里加了一章。
+    driver.answer(
+        &outline,
+        &[(
+            1,
+            Reply::Custom("研究背景：为什么研究\n国外做法：别人怎么做\n对策建议：怎么办".into()),
+        )],
+    );
+    assert!(driver.run().is_none(), "确认大纲后一路写完");
+
+    // 逐章写：每章只拿到这一章查到的证据，带着研究报告的写法规则。
+    let chapters = model.prompts("里的一章：");
+    assert_eq!(chapters.len(), 3);
+    assert!(chapters[0].contains("--- [K1]") && !chapters[0].contains("--- [K2]"));
+    assert!(chapters[1].contains("--- [K2]") && !chapters[1].contains("--- [K1]"));
+    assert!(chapters[2].contains("没有查到可用的证据"));
+    assert!(chapters.iter().all(|p| p.contains("文档类型为研究报告")));
+    assert!(
+        chapters[1].contains("梅文项目于2017年启动"),
+        "后写的章能看到前面写好的部分"
+    );
+
+    let report = SkillReport::from_board(&driver.board);
+    let text = &report.markdown;
+    assert!(text.starts_with("# 人工智能辅助决策研究"), "{text}");
+    assert!(
+        text.contains("<!-- [摘要] -->\n\n本报告研究人工智能辅助决策的做法与对策。"),
+        "摘要补进占位：{text}"
+    );
+    let order: Vec<usize> = ["## 研究背景", "## 国外做法", "## 对策建议"]
+        .iter()
+        .map(|heading| text.find(heading).expect(heading))
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "按大纲顺序");
+    // 引用落到报告：文献库里有的写成 [@key]，没有的写成脚注。
+    assert!(text.contains("梅文项目于2017年启动[@maven]。"), "{text}");
+    assert!(
+        text.contains("外军已部署智能辅助系统[^k2]:(来源：《外军智能化报告》)。"),
+        "{text}"
+    );
+    assert!(
+        text.contains("系统已用于多个战区。"),
+        "同一份资料在一章里只挂一次脚注：{text}"
+    );
+    assert!(!text.contains("[K"), "{text}");
+    assert_eq!(
+        model.asked("具体事实（时间、数字"),
+        3,
+        "三句带引用的话都核验过"
+    );
+    assert!(
+        report
+            .questions
+            .iter()
+            .any(|q| q.text.contains("试点完成时限"))
+    );
+    assert!(
+        driver
+            .tool_lines()
+            .iter()
+            .any(|l| l.contains("引用落到报告：文献库 1 处，脚注 1 处"))
+    );
+}
+
+#[test]
+fn imitate_picks_a_baseline_asks_what_changed_and_never_carries_old_facts_silently() {
+    let skill = builtin(IMITATE);
+    let model = ScriptedModel::new(|role, prompt| {
+        if prompt.contains("旧稿（基准稿）") {
+            "完成排查的时限｜沿用旧稿：11月30日｜另定".into()
+        } else if role == ModelRole::Draft && prompt.contains("仿写方式") {
+            "# 关于做好2026年冬季森林防火工作的通知\n\n各区县要于11月30日前完成隐患排查。\n".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        board(
+            TemplateKind::PlainDocument,
+            "",
+            "仿照去年冬季森林防火通知，写今年的通知，排查改到12月1日前完成",
+        ),
+    );
+    let doc = |id: i64, title: &str, markdown: &str| ManuscriptDoc {
+        id,
+        title: title.into(),
+        kind: TemplateKind::PlainDocument,
+        status: ManuscriptStatus::Published,
+        doc_number: String::new(),
+        doc_date: "2025-10-08".into(),
+        draft: DraftInput::default(),
+        markdown: markdown.into(),
+        version: None,
+    };
+    driver.manuscripts.docs = vec![
+        doc(
+            2,
+            "关于召开安全生产会议的通知",
+            "# 关于召开安全生产会议的通知\n",
+        ),
+        doc(
+            1,
+            "关于做好2025年冬季森林防火工作的通知",
+            "# 关于做好2025年冬季森林防火工作的通知\n\n各区县要于11月30日前完成隐患排查。\n",
+        ),
+    ];
+
+    // ① 选基准稿：标题命中得多的排前面。
+    let pick = driver.run().expect("要你选基准稿");
+    assert_eq!(pick.questions[0].text, "照哪篇写？");
+    assert!(
+        pick.questions[0].choices[0]
+            .label
+            .contains("2025年冬季森林防火")
+    );
+    assert!(pick.questions[0].custom_hint.is_none(), "只能从候选里选");
+    driver.answer(&pick, &[(1, Reply::Choice(0))]);
+    assert_eq!(driver.board.vars["baseline_id"], 1);
+
+    // ② 选仿写方式。
+    let strategy = driver.run().expect("要你选怎么仿");
+    assert_eq!(strategy.save_as.as_deref(), Some("strategy"));
+    driver.answer(&strategy, &[(1, Reply::Choice(1))]);
+    assert_eq!(driver.board.vars["strategy"], "结构仿写");
+
+    // ③ 变化清单：对照旧稿问这次变了什么。
+    let changes = driver.run().expect("要你确认变化");
+    assert_eq!(changes.questions[0].target, Target::PreDraft);
+    assert!(model.prompts("旧稿（基准稿）")[0].contains("11月30日前完成隐患排查"));
+    driver.answer(&changes, &[(1, Reply::Custom("12月1日".into()))]);
+    assert!(driver.run().is_none());
+
+    let draft_prompt = &model.prompts("仿写方式")[0];
+    assert!(
+        draft_prompt.contains("【仿写方式：结构仿写】"),
+        "{draft_prompt}"
+    );
+    assert!(
+        draft_prompt.contains("只作写法参考") && draft_prompt.contains("11月30日前完成隐患排查")
+    );
+    assert!(
+        draft_prompt.contains("完成排查的时限？12月1日"),
+        "用户的回答作为已确认信息交给起草"
+    );
+    let report = SkillReport::from_board(&driver.board);
+    assert!(report.evidence.is_empty(), "基准稿不进证据包");
+    assert!(
+        report.questions.iter().any(|q| q.text.contains("11月30日")),
+        "照抄的旧日期被查出来问你：{:?}",
+        report.questions.iter().map(|q| &q.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn material_splits_points_without_a_model_and_writes_only_from_confirmed_points() {
+    let skill = builtin(MATERIAL);
+    assert!(!skill.uses_knowledge(), "材料成文只用材料，不检索");
+    let model = ScriptedModel::new(|role, prompt| {
+        if role == ModelRole::Draft && prompt.contains("已确认的要点") {
+            "# 关于开展隐患排查的通知\n\n各区县于11月底前完成排查，共投入经费500万元。\n".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        board(
+            TemplateKind::PlainDocument,
+            "",
+            "会议时间：10月10日\n- 各区县于11月底前完成排查\n- 市应急局牵头督导",
+        ),
+    );
+    let points = driver.run().expect("要点要你确认");
+    assert_eq!(
+        model.calls.borrow().len(),
+        1,
+        "只调过一次动笔前澄清，拆要点不经模型"
+    );
+    assert_eq!(
+        points.questions[0].prefill,
+        "会议时间：10月10日\n各区县于11月底前完成排查\n市应急局牵头督导"
+    );
+    driver.answer(
+        &points,
+        &[(
+            1,
+            Reply::Custom("各区县于11月底前完成排查\n市应急局牵头督导".into()),
+        )],
+    );
+    assert!(driver.run().is_none());
+    let prompt = &model.prompts("已确认的要点")[0];
+    assert!(
+        prompt.contains("各区县于11月底前完成排查\n市应急局牵头督导"),
+        "{prompt}"
+    );
+    let report = SkillReport::from_board(&driver.board);
+    assert!(
+        report.questions.iter().any(|q| q.text.contains("500万元")),
+        "材料里没有的经费出题问你"
+    );
+    assert!(kb.queries.borrow().is_empty());
+}
+
+#[test]
+fn reply_letter_lists_the_items_retrieves_basis_and_answers_each() {
+    let skill = builtin(REPLY_LETTER);
+    let model = ScriptedModel::new(|role, prompt| {
+        if prompt.contains("需要逐项答复的事项") {
+            "物资支援：请求支援帐篷20顶".into()
+        } else if role == ModelRole::Draft && prompt.contains("来函事项——逐项答复") {
+            "# 关于支援森林防火物资的复函\n\n你单位《关于商请支援森林防火物资的函》（林函〔2026〕5号）收悉。经研究，同意按规定调拨帐篷20顶[K1]。\n\n特此函复。\n".into()
+        } else if prompt.contains("具体事实（时间、数字") {
+            "支持".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::new(vec![(
+        "物资",
+        chunk(
+            1,
+            "应急物资管理办法",
+            "应急物资按规定调拨，帐篷20顶以内由本级审批。",
+        ),
+    )]);
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        board(
+            TemplateKind::OfficialLetter,
+            "",
+            "来函：《关于商请支援森林防火物资的函》（林函〔2026〕5号），请求支援帐篷20顶。答复意见：同意支援。",
+        ),
+    );
+    let items = driver.run().expect("来函事项要你确认");
+    assert_eq!(items.questions[0].prefill, "物资支援：请求支援帐篷20顶");
+    // 点「就按这个写」：清单保持原样。
+    driver.answer(&items, &[(1, Reply::Choice(0))]);
+    assert!(driver.board.vars["items"].is_array());
+    assert!(driver.run().is_none());
+    assert!(
+        kb.queries.borrow().iter().any(|q| q.contains("物资支援")),
+        "按事项检索依据"
+    );
+    let prompt = &model.prompts("来函事项——逐项答复")[0];
+    assert!(prompt.contains("物资支援：请求支援帐篷20顶"));
+    assert!(prompt.contains("[K1]"), "依据带编号交给起草");
+    let report = SkillReport::from_board(&driver.board);
+    assert!(report.markdown.contains("特此函复。"));
+    assert!(!report.markdown.contains("[K"));
+    assert_eq!(model.asked("具体事实（时间、数字"), 1);
+    assert!(
+        report.questions.is_empty(),
+        "来函里的事实都有出处：{:?}",
+        report.questions
+    );
+}
+
+// —— 修改与审核类技能 ——
+
+fn document_board(kind: TemplateKind, document: &str, request: &str) -> Board {
+    let mut board = board(kind, "", request);
+    board.document = document.into();
+    board.workspace = document.into();
+    board
+}
+
+#[test]
+fn condense_measures_the_length_and_revises_once_when_far_off() {
+    let skill = builtin(skill::CONDENSE);
+    let long = "加强巡查。".repeat(40);
+    let short = "加强巡查。".repeat(20);
+    let replies = std::cell::RefCell::new(vec![long.clone(), short.clone()]);
+    let model = ScriptedModel::new(move |_, _| replies.borrow_mut().remove(0));
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        document_board(
+            TemplateKind::PlainDocument,
+            &"加强巡查。".repeat(60),
+            "压缩到100字",
+        ),
+    );
+    assert!(driver.run().is_none());
+    let rewrites = model.prompts("");
+    assert_eq!(rewrites.len(), 2, "第一次 200 字离 100 字太远，再改一次");
+    assert!(
+        rewrites[1].contains("现在约 200 字，要求约 100 字"),
+        "{}",
+        rewrites[1]
+    );
+    assert_eq!(driver.board.workspace, short);
+    let lines = driver.tool_lines();
+    assert!(lines.iter().any(|l| l.contains("再改一次")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("再改后字数 100")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn tone_rewrites_with_the_direction_rules_and_the_fact_lock() {
+    let skill = builtin(skill::TONE);
+    let model = ScriptedModel::new(|_, _| "# 关于申请经费的请示\n\n妥否，请批示。\n".into());
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        document_board(
+            TemplateKind::WhitePaper,
+            "# 关于申请经费的请示\n\n速拨经费50万元。\n",
+            "改成向市政府请示的上行文语气",
+        ),
+    );
+    assert!(driver.run().is_none());
+    let prompt = &model.prompts("")[0];
+    assert!(prompt.contains("请示的结语用「妥否，请批示」") && prompt.contains("改成向市政府请示"));
+    assert!(
+        prompt.contains("50万元"),
+        "事实锁定清单带上原文的数字：{prompt}"
+    );
+}
+
+#[test]
+fn normalize_replaces_aliases_first_then_asks_the_model_on_the_workspace() {
+    let skill = builtin(skill::NORMALIZE);
+    let model = ScriptedModel::new(|_, prompt| {
+        assert!(
+            prompt.contains("市林业和草原局要加强巡查"),
+            "模型改的是换好名称的工作稿：{prompt}"
+        );
+        "市林业和草原局要加强巡查。".into()
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        document_board(
+            TemplateKind::PlainDocument,
+            "林草局要加强巡查。",
+            "规范一下",
+        ),
+    );
+    driver.vocabulary = vec![crate::models::VocabularyEntry {
+        category: crate::models::VocabularyCategory::Unit,
+        canonical: "市林业和草原局".into(),
+        aliases: vec!["林草局".into()],
+        ..Default::default()
+    }];
+    assert!(driver.run().is_none());
+    assert!(
+        driver
+            .tool_lines()
+            .iter()
+            .any(|l| l.contains("规范化单位与人员名称 1 处"))
+    );
+    assert_eq!(driver.board.workspace, "市林业和草原局要加强巡查。");
+}
+
+#[test]
+fn review_lists_problems_and_only_gated_exact_fixes_go_to_the_drawer() {
+    let skill = builtin(skill::REVIEW);
+    assert_eq!(skill.output, skill::OutputKind::Report);
+    let document = "# 关于加强巡查的通知\n\n各地要加强巡查力度不断提高。\n\n请于12月1日前完成。\n";
+    let model = ScriptedModel::new(|_, prompt| {
+        assert!(prompt.contains("加强巡查力度不断提高"), "诊断要看到正文");
+        [
+            "表述｜搭配不当｜加强巡查力度不断提高｜不断加大巡查力度",
+            "表述｜想改日期｜12月1日前完成｜12月5日前完成",
+            "结构｜层次不清｜正文里没有这句话｜改成别的",
+            "逻辑｜要求不明确｜请于12月1日前完成｜无",
+        ]
+        .join("\n")
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        document_board(TemplateKind::PlainDocument, document, "签发前审一下"),
+    );
+    assert!(driver.run().is_none());
+    let findings = &driver.board.findings;
+    let model_findings: Vec<_> = findings
+        .iter()
+        .filter(|f| f.source.contains("模型诊断"))
+        .collect();
+    assert_eq!(model_findings.len(), 4);
+    let fix = model_findings[0]
+        .fix
+        .as_ref()
+        .expect("恰好出现一次、没动事实，收下改法");
+    assert_eq!(&document[fix.span.clone()], "加强巡查力度不断提高");
+    assert_eq!(fix.after, "不断加大巡查力度");
+    assert!(
+        model_findings[1].fix.is_none(),
+        "改了日期，闸门拦下，只作提示"
+    );
+    assert!(model_findings[2].fix.is_none(), "原文找不到，不给改法");
+    assert!(model_findings[3].fix.is_none(), "「无」表示只提示");
+    assert_eq!(driver.board.workspace, document, "审核类不改稿");
+}
+
+#[test]
+fn fact_check_marks_sourced_unsourced_and_contradicted_facts() {
+    let skill = builtin(skill::FACT_CHECK);
+    assert!(skill.uses_knowledge());
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("「500万元」") {
+            "矛盾 K2：全年投入经费300万元".into()
+        } else {
+            "无关".into()
+        }
+    });
+    let kb = KeywordKb::new(vec![
+        (
+            "森林火灾",
+            chunk(1, "年度报告", "2025年全省共发生森林火灾12起，均已扑灭。"),
+        ),
+        ("经费", chunk(2, "财政决算", "全年投入经费300万元。")),
+    ]);
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        document_board(
+            TemplateKind::PlainDocument,
+            "2025年全省共发生森林火灾12起。\n\n依据《森林防火条例》开展工作。\n\n全年投入经费500万元。\n",
+            "核一下数字",
+        ),
+    );
+    assert!(driver.run().is_none());
+    let findings = &driver.board.findings;
+    let group_of = |value: &str| {
+        findings
+            .iter()
+            .find(|f| f.text.contains(value))
+            .map(|f| (f.group.clone(), f.source.clone()))
+            .unwrap_or_else(|| panic!("没有核「{value}」：{findings:?}"))
+    };
+    assert_eq!(findings[0].group, "与资料矛盾", "矛盾的排最前");
+    let (group, source) = group_of("500万元");
+    assert_eq!(group, "与资料矛盾");
+    assert!(
+        source.contains("[K2]") && source.contains("300万元"),
+        "{source}"
+    );
+    assert_eq!(group_of("森林防火条例").0, "无出处");
+    let (group, source) = group_of("2025年");
+    assert_eq!(group, "有出处");
+    assert!(source.contains("《年度报告》"), "{source}");
+}
+
+#[test]
+fn extract_lists_points_without_touching_the_document() {
+    let skill = builtin(skill::EXTRACT);
+    let model = ScriptedModel::new(|_, prompt| {
+        assert!(prompt.contains("（没有选区）"), "没有选区时提炼全文");
+        "加强巡查\n落实责任".into()
+    });
+    let kb = KeywordKb::disabled();
+    let document = "# 讲话\n\n要加强巡查，落实责任。\n";
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        document_board(TemplateKind::PlainDocument, document, "提炼要点"),
+    );
+    assert!(driver.run().is_none());
+    let points: Vec<_> = driver
+        .board
+        .findings
+        .iter()
+        .map(|f| f.text.as_str())
+        .collect();
+    assert_eq!(points, ["加强巡查", "落实责任"]);
+    assert!(driver.board.findings.iter().all(|f| f.group == "要点"));
+    assert_eq!(driver.board.workspace, document);
+}
+
+/// 连真实模型、知识库与稿件库副本跑一个内置技能，挂起时按推荐项（或预填内容）作答。默认忽略；
+/// 环境变量同 `engine::tests::live_research_draft`，另有：
+/// - `GONGWEN_LIVE_SKILL`：技能 id（默认 `policy-report`）；
+/// - `GONGWEN_LIVE_KIND`：文种名（默认按技能取）；`GONGWEN_LIVE_TITLE`：标题提示；
+/// - `GONGWEN_LIVE_REQUEST`：用户原话；`GONGWEN_LIVE_DOCUMENT_FILE`：现有正文（修改、审核类技能用）。
+#[test]
+#[ignore = "需要真实模型与知识库"]
+fn live_builtin_skill() {
+    use super::engine::{self, Event, Outcome};
+    let env = |key: &str| std::env::var(key).unwrap_or_default();
+    if env("GONGWEN_LIVE_LLM_URL").is_empty() || env("GONGWEN_LIVE_KB_DIR").is_empty() {
+        eprintln!("未设置联机测试的环境变量，跳过");
+        return;
+    }
+    crate::storage::set_test_config_dir(Some(env("GONGWEN_LIVE_KB_DIR").into()));
+    let mut config = crate::models::AppConfig::default();
+    config.lm_studio.base_url = env("GONGWEN_LIVE_LLM_URL");
+    config.lm_studio.model = env("GONGWEN_LIVE_LLM_MODEL");
+    config.lm_studio.api_key = env("GONGWEN_LIVE_LLM_KEY");
+    config.lm_studio.timeout_seconds = 300;
+    let mut rag = crate::models::RagConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    rag.embedding.base_url = env("GONGWEN_LIVE_EMBED_URL");
+    rag.embedding.model = env("GONGWEN_LIVE_EMBED_MODEL");
+    rag.embedding.api_key = env("GONGWEN_LIVE_EMBED_KEY");
+    rag.rerank.mode = crate::models::RerankMode::None;
+    let id = match env("GONGWEN_LIVE_SKILL") {
+        id if id.is_empty() => POLICY_REPORT.to_string(),
+        id => id,
+    };
+    let skill = builtin(&id);
+    let kind = TemplateKind::ALL
+        .into_iter()
+        .find(|kind| kind.label() == env("GONGWEN_LIVE_KIND"))
+        .unwrap_or(match id.as_str() {
+            POLICY_REPORT => TemplateKind::ResearchReport,
+            REPLY_LETTER => TemplateKind::OfficialLetter,
+            _ => TemplateKind::PlainDocument,
+        });
+    let kb = crate::agent::tools::RagSearch {
+        enabled: skill.uses_knowledge(),
+        rag,
+        chat: config.lm_studio.clone(),
+        kind_filter: None,
+    };
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let model = crate::agent::backend::LmBackend::new(&config, cancel);
+    let time = crate::prompt::TimeContext::now();
+    let mut board = board(
+        kind,
+        &env("GONGWEN_LIVE_TITLE"),
+        &env("GONGWEN_LIVE_REQUEST"),
+    );
+    board.system_prompt = crate::prompt::build_system_prompt(&time);
+    board.time_sources = format!("{} {}", time.today, time.now);
+    if let Ok(text) = std::fs::read_to_string(env("GONGWEN_LIVE_DOCUMENT_FILE")) {
+        board.document = text.clone();
+        board.workspace = text;
+    }
+    let apis = Default::default();
+    let secrets = Default::default();
+    let run_env = crate::agent::tools::Env {
+        config: &config,
+        vocabulary: &[],
+        kb: &kb,
+        manuscripts: &crate::agent::tools::SqliteManuscripts,
+        model: &model,
+        skill: &skill,
+        apis: &apis,
+        secrets: &secrets,
+    };
+    let started = std::time::Instant::now();
+    let mut print = |event: Event| match event {
+        Event::Tool(tool) => eprintln!(
+            "[{:>5.1}s] {}",
+            started.elapsed().as_secs_f32(),
+            tool.line()
+        ),
+        Event::Note(note) => eprintln!("        · {note}"),
+        _ => {}
+    };
+    let mut next = 0;
+    loop {
+        match engine::run(&mut board, &run_env, next, &mut print).expect("技能应当跑通") {
+            Outcome::Done => break,
+            Outcome::Suspended(suspension) => {
+                let replies: Vec<(usize, Reply)> = suspension
+                    .questions
+                    .iter()
+                    .map(|q| {
+                        eprintln!(
+                            "  问：{} {:?}{}",
+                            q.text,
+                            q.choices
+                                .iter()
+                                .map(|c| c.label.as_str())
+                                .collect::<Vec<_>>(),
+                            if q.prefill.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n{}", q.prefill)
+                            }
+                        );
+                        let reply = if !q.prefill.is_empty() {
+                            Reply::Custom(q.prefill.clone())
+                        } else {
+                            Reply::Choice(q.choices.iter().position(|c| c.recommended).unwrap_or(0))
+                        };
+                        (q.id, reply)
+                    })
+                    .collect();
+                if let Some(kind) = engine::apply_answers(&mut board, &suspension, &replies) {
+                    board.draft.kind = kind;
+                }
+                next = suspension.resume_at;
+            }
+        }
+    }
+    let report = SkillReport::from_board(&board);
+    eprintln!(
+        "—— {}：证据 {} 段，{} 轮，用时 {:?} ——",
+        skill.name,
+        report.evidence.items().len(),
+        report.rounds,
+        started.elapsed()
+    );
+    for question in &report.questions {
+        eprintln!("  题：{}", question.text);
+    }
+    for finding in &board.findings {
+        eprintln!(
+            "  [{}] {}{}｜{}｜{}",
+            finding.group,
+            finding.text,
+            finding
+                .fix
+                .as_ref()
+                .map(|fix| format!(" → 「{}」", fix.after))
+                .unwrap_or_default(),
+            finding.excerpt,
+            finding.source
+        );
+    }
+    eprintln!("—— 工作稿 ——\n{}", report.markdown);
+    assert!(!report.markdown.trim().is_empty());
+}

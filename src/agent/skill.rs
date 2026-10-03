@@ -30,19 +30,69 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// 内置技能：(id, 文件内容)。
-const BUILTIN: [(&str, &str); 2] = [
+const BUILTIN: [(&str, &str); 12] = [
     (
         RESEARCH_DRAFT,
         include_str!("../../assets/agent-skills/research-draft/SKILL.md"),
     ),
     (
+        POLICY_REPORT,
+        include_str!("../../assets/agent-skills/policy-report/SKILL.md"),
+    ),
+    (
+        IMITATE,
+        include_str!("../../assets/agent-skills/imitate/SKILL.md"),
+    ),
+    (
+        MATERIAL,
+        include_str!("../../assets/agent-skills/material/SKILL.md"),
+    ),
+    (
+        REPLY_LETTER,
+        include_str!("../../assets/agent-skills/reply-letter/SKILL.md"),
+    ),
+    (
         POLISH,
         include_str!("../../assets/agent-skills/polish/SKILL.md"),
+    ),
+    (
+        CONDENSE,
+        include_str!("../../assets/agent-skills/condense/SKILL.md"),
+    ),
+    (
+        TONE,
+        include_str!("../../assets/agent-skills/tone/SKILL.md"),
+    ),
+    (
+        NORMALIZE,
+        include_str!("../../assets/agent-skills/normalize/SKILL.md"),
+    ),
+    (
+        REVIEW,
+        include_str!("../../assets/agent-skills/review/SKILL.md"),
+    ),
+    (
+        FACT_CHECK,
+        include_str!("../../assets/agent-skills/fact-check/SKILL.md"),
+    ),
+    (
+        EXTRACT,
+        include_str!("../../assets/agent-skills/extract/SKILL.md"),
     ),
 ];
 
 pub(crate) const RESEARCH_DRAFT: &str = "research-draft";
 pub(crate) const POLISH: &str = "polish";
+pub(crate) const POLICY_REPORT: &str = "policy-report";
+pub(crate) const IMITATE: &str = "imitate";
+pub(crate) const MATERIAL: &str = "material";
+pub(crate) const REPLY_LETTER: &str = "reply-letter";
+pub(crate) const CONDENSE: &str = "condense";
+pub(crate) const TONE: &str = "tone";
+pub(crate) const NORMALIZE: &str = "normalize";
+pub(crate) const REVIEW: &str = "review";
+pub(crate) const FACT_CHECK: &str = "fact-check";
+pub(crate) const EXTRACT: &str = "extract";
 
 /// 技能产出什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -207,11 +257,15 @@ impl Skill {
             .clamp(*range.start(), *range.end())
     }
 
-    /// 流程里用不用知识库：有检索算子，或直接调知识库工具。侧栏据此显示「检索知识库」开关。
+    /// 流程里用不用知识库：有检索算子、列检索问题的 `plan`，或直接调知识库工具。侧栏据此
+    /// 显示「检索知识库」开关；材料成文这类只用材料的技能不显示，也不检索。
     pub(crate) fn uses_knowledge(&self) -> bool {
         fn walk(steps: &[StepSpec]) -> bool {
             steps.iter().any(|step| {
-                matches!(step.step.as_deref(), Some("retrieve" | "plan"))
+                let op = step.step.as_deref();
+                matches!(op, Some("retrieve" | "fact_check"))
+                    || (op == Some("plan")
+                        && matches!(step.param_str("mode"), None | Some("queries")))
                     || step
                         .tool
                         .as_deref()
@@ -443,7 +497,7 @@ fn validate_steps(
                 }
             }
         }
-        for key in ["prompt", "fill_prompt", "source_prompt"] {
+        for key in ["prompt", "evidence_prompt", "fill_prompt", "source_prompt"] {
             if let Some(name) = step.param_str(key)
                 && skill.section(name).is_none()
             {
@@ -659,7 +713,7 @@ mod tests {
     #[test]
     fn builtin_skills_parse_with_flows() {
         let skills = builtin_skills();
-        assert_eq!(skills.len(), 2);
+        assert_eq!(skills.len(), BUILTIN.len());
         let research = builtin_research_draft();
         assert_eq!(research.name, "研究式起草");
         assert!(!research.flow.is_empty());

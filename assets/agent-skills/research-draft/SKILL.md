@@ -22,7 +22,7 @@ flow:
     when: has_sources
   - step: retrieve
   - step: generate
-    prompt: 起草附加要求
+    evidence_prompt: 起草附加要求
   - step: gap_loop
     fill_prompt: 缺口修订
     source_prompt: 来源核对

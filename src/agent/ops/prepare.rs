@@ -10,6 +10,8 @@ use serde_json::Value;
 
 /// 预研列出的检索词存在这个变量里，`retrieve` 默认从这里取。
 const QUERIES: &str = "queries";
+/// 最近一次 `retrieve` 查到的证据编号。
+pub(super) const FOUND: &str = "found";
 
 /// `clarify`：程序规则 + 模型判断，只问会让整篇写偏的事；有题就挂起。已经问过（黑板标了
 /// 已澄清）就跳过。参数 `max`（技能参数 `pre_questions`），提示词默认「动笔前澄清」。
@@ -41,9 +43,168 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
     Ok(Flow::Suspend(questions))
 }
 
-/// `plan`：让模型列出要到知识库里查清的问题，连同用户原话存进 `save_as`（默认 `queries`）。
-/// 参数 `max`（技能参数 `research_questions`），为 0 时只存原话；提示词默认「预研」。
+/// `plan`：让模型列一份清单存进变量。
+///
+/// - `mode: queries`（默认）：要到知识库里查清的问题，连同用户原话存进 `save_as`（默认
+///   `queries`）；参数 `max`（技能参数 `research_questions`），为 0 时只存原话；提示词默认「预研」；
+/// - `mode: list`：任意清单（来函事项、材料要点……），存进 `save_as`（默认 `items`）；
+/// - `mode: outline`：大纲，每行一节，存进 `save_as`（默认 `outline`）；`confirm`（默认是）时
+///   停下来让用户在框里改，答案存回同一个变量；
+/// - `mode: split`：**不调模型**，把用户原话按行（只有一段时按句）拆成要点，存进 `save_as`
+///   （默认 `items`）——材料里的事实原样保留，模型没机会在这一步改错；`confirm` 默认是。
 pub(super) fn plan(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
+    match step.param_str("mode").unwrap_or("queries") {
+        "queries" => plan_queries(ctx, step),
+        "list" => plan_list(ctx, step, false),
+        "outline" => plan_list(ctx, step, true),
+        "split" => plan_split(ctx, step),
+        other => {
+            anyhow::bail!("plan 不认识 mode「{other}」（可用 queries / list / outline / split）")
+        }
+    }
+}
+
+/// 模型回复 → 一行一条，去掉编号与空行、「无」。
+fn lines_of(reply: &str, max: usize) -> Vec<String> {
+    reply
+        .lines()
+        .map(|line| {
+            let line = line.trim().trim_start_matches(['-', '*', '#', ' ']).trim();
+            let line = clarify::strip_numbering(line).trim();
+            // 模型照抄格式说明里的「事项：」「章标题：」前缀时去掉。
+            ["事项：", "事项:", "章标题：", "要点："]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .unwrap_or(line)
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty() && line != "无")
+        .take(max)
+        .collect()
+}
+
+/// 以冒号收尾、说的是「整理成 / 写成 / 起草」的一行，是写作要求而不是材料。
+fn is_instruction(line: &str) -> bool {
+    line.ends_with(['：', ':'])
+        && ["整理", "写成", "写一", "起草", "形成", "拟", "改成"]
+            .iter()
+            .any(|verb| line.contains(verb))
+}
+
+fn plan_split(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
+    let max = param(ctx, step, &["max"], 30, 1..=60);
+    let request = ctx.board.request.clone();
+    let mut items: Vec<String> = request
+        .lines()
+        .map(|line| line.trim().trim_start_matches(['-', '*', '•', '·']).trim())
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    // 开头那句「根据以下纪要整理成一份通知：」是要求，不是材料。
+    if items.len() > 1 && is_instruction(&items[0]) {
+        items.remove(0);
+    }
+    if items.len() < 2 {
+        items = crate::agent::gaps::sentence_spans(&request)
+            .into_iter()
+            .map(|span| request[span].trim().to_string())
+            .filter(|sentence| !sentence.is_empty())
+            .collect();
+    }
+    items.truncate(max);
+    if items.is_empty() {
+        anyhow::bail!("材料是空的，没有可拆的要点");
+    }
+    tool_line(
+        ctx,
+        "plan",
+        Permission::Read,
+        format!("按原文拆出要点 {} 条（不经模型）", items.len()),
+    );
+    let name = step.save_as.as_deref().unwrap_or("items").to_string();
+    finish_list(ctx, step, items, name, "要点", true)
+}
+
+fn plan_list(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, outline: bool) -> anyhow::Result<Flow> {
+    let (default_max, default_var, label) = if outline {
+        (8, "outline", "大纲")
+    } else {
+        (10, "items", "清单")
+    };
+    let max = param(ctx, step, &["max"], default_max, 1..=20);
+    phase(ctx, format!("列{label}…"));
+    let locals = [
+        ("max", max.to_string()),
+        ("request", ctx.board.request_with_notes()),
+    ];
+    let text = prompt(
+        ctx,
+        step,
+        "prompt",
+        if outline { "大纲" } else { "清单" },
+        &locals,
+    )?;
+    let reply = assist(ctx, &text)?;
+    let items = lines_of(&reply, max);
+    if items.is_empty() {
+        anyhow::bail!("模型没有列出{label}");
+    }
+    tool_line(
+        ctx,
+        "plan",
+        Permission::Read,
+        format!("列出{label} {} 条", items.len()),
+    );
+    let name = step.save_as.as_deref().unwrap_or(default_var).to_string();
+    finish_list(ctx, step, items, name, label, outline)
+}
+
+/// 清单存进变量；要确认时停下来让用户在框里改。
+fn finish_list(
+    ctx: &mut ToolCtx<'_, '_>,
+    step: &StepSpec,
+    items: Vec<String>,
+    name: String,
+    label: &str,
+    confirm_by_default: bool,
+) -> anyhow::Result<Flow> {
+    ctx.board.vars.insert(
+        name.clone(),
+        Value::Array(items.iter().cloned().map(Value::String).collect()),
+    );
+    let confirm = step
+        .params
+        .get("confirm")
+        .and_then(Value::as_bool)
+        .unwrap_or(confirm_by_default);
+    if !confirm {
+        return Ok(Flow::Next);
+    }
+    tool_line(
+        ctx,
+        "ask.choice",
+        Permission::AskUser,
+        format!("{label}请你确认"),
+    );
+    let question = clarify::Question {
+        id: 1,
+        text: format!("按这个{label}写吗？可以直接在框里改，每行一条"),
+        choices: vec![clarify::Choice {
+            label: "就按这个写".into(),
+            detail: String::new(),
+            recommended: true,
+            action: clarify::Action::Pick(Value::Null),
+        }],
+        custom_hint: Some("每行一条".into()),
+        prefill: items.join("\n"),
+        skippable: false,
+        target: clarify::Target::Pick,
+    };
+    Ok(Flow::SuspendInto(vec![question], name))
+}
+
+fn plan_queries(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
     let max = param(ctx, step, &["max", "research_questions"], 6, 0..=12);
     let mut queries = vec![ctx.board.request.trim().to_string()];
     if max > 0 {
@@ -54,12 +215,7 @@ pub(super) fn plan(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result
         ];
         let text = prompt(ctx, step, "prompt", "预研", &locals)?;
         let reply = assist(ctx, &text)?;
-        let planned: Vec<String> = reply
-            .lines()
-            .map(|line| clarify::strip_numbering(line.trim()).trim().to_string())
-            .filter(|line| !line.is_empty() && line != "无")
-            .take(max)
-            .collect();
+        let planned = lines_of(&reply, max);
         tool_line(
             ctx,
             "plan",
@@ -82,7 +238,11 @@ pub(super) fn plan(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result
 
 /// `retrieve`：逐个检索词查知识库与 `apis:` 列出的数据接口，结果并入证据包。检索词取
 /// `from` 指定的变量（默认 `queries`），没有就用用户原话。一个来源都没有时只留一条说明。
+/// 这次查到的证据编号存进 `found`，逐节生成时只用它们。
 pub(super) fn retrieve(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
+    ctx.board
+        .vars
+        .insert(FOUND.into(), Value::Array(Vec::new()));
     if !has_sources(ctx, step) {
         note(ctx, "知识库未启用：只按材料起草，缺口全部交给你确认。");
         return Ok(Flow::Next);
@@ -96,9 +256,18 @@ pub(super) fn retrieve(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
         Some(Value::String(text)) => text.lines().map(str::to_string).collect(),
         _ => vec![ctx.board.request.trim().to_string()],
     };
+    let mut found: Vec<usize> = Vec::new();
     for query in queries.iter().map(|q| q.trim()).filter(|q| !q.is_empty()) {
         check_cancel(ctx)?;
-        fetch_into(ctx, step, query);
+        for (_, id) in fetch_into(ctx, step, query) {
+            if !found.contains(&id) {
+                found.push(id);
+            }
+        }
     }
+    ctx.board.vars.insert(
+        FOUND.into(),
+        Value::Array(found.into_iter().map(Value::from).collect()),
+    );
     Ok(Flow::Next)
 }

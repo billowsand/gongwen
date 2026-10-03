@@ -82,8 +82,10 @@ pub(crate) enum TurnState {
     Asking,
     /// 提案已就绪，等用户采用或放弃。
     Proposed(ProposalSummary),
-    /// 不经审阅直接写入了正文（旧工作台的空稿起草）。
-    Applied,
+    /// 审核类技能交了问题清单；`fixes` 条有改法的已放进审校抽屉。
+    Reported {
+        fixes: usize,
+    },
     Accepted,
     Discarded,
     /// 被同一篇稿件的新任务取代。
@@ -129,6 +131,8 @@ pub(crate) struct AiTurn {
     pub(crate) research: Option<ResearchSnapshot>,
     /// 挂起的流程：答完题从这里接着跑。
     pub(crate) run: Option<Box<SkillRun>>,
+    /// 审核类技能的问题清单。
+    pub(crate) findings: Vec<crate::agent::board::Finding>,
     pub(crate) started: Instant,
     /// 结束时定格的耗时；运行中为 None，按 `started` 现算。
     pub(crate) elapsed: Option<Duration>,
@@ -198,6 +202,7 @@ impl AiPanel {
             replies: Vec::new(),
             research: None,
             run: None,
+            findings: Vec::new(),
             started: Instant::now(),
             elapsed: None,
         });
@@ -206,13 +211,6 @@ impl AiPanel {
             self.turns.drain(..excess);
         }
         self.next_id
-    }
-
-    /// 最后一轮是否刚发出、还在等后台接手。
-    pub(crate) fn has_waiting_turn(&self) -> bool {
-        self.turns
-            .last()
-            .is_some_and(|turn| turn.state == TurnState::Waiting)
     }
 
     /// 正在跑的那一轮（最多一轮：同一篇稿件同时只有一个后台任务）。
@@ -444,7 +442,6 @@ mod tests {
     #[test]
     fn deltas_flow_into_the_running_turn() {
         let mut panel = panel_with_turn();
-        assert!(panel.has_waiting_turn());
         panel.append("", "想", false);
         assert_eq!(panel.turns[0].state, TurnState::Streaming);
         panel.append("一、", "", false);

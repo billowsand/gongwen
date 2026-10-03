@@ -110,7 +110,7 @@ fn sending_opens_a_turn_and_stop_releases_the_document() {
 
     let panel = &harness.doc.ai_panel;
     assert_eq!(panel.turns.len(), 1);
-    assert_eq!(panel.turns[0].title, "润色");
+    assert_eq!(panel.turns[0].title, "精简扩写");
     assert_eq!(panel.turns[0].prompt, "压缩一下");
     assert!(panel.running());
     assert!(panel.composer.text.is_empty(), "发出去后输入框清空");
@@ -154,7 +154,7 @@ fn a_stale_selection_is_refused_instead_of_guessed() {
 fn drafting_starts_research_and_only_ever_proposes() {
     let mut harness = Harness::new("");
     let composer = &mut harness.doc.ai_panel.composer;
-    composer.text = "根据材料写一份通知".into();
+    composer.text = "写一份冬季森林防火的通知".into();
     composer.use_rag = true;
     harness.with_page(|page| page.send_ai_panel());
 
@@ -330,12 +330,27 @@ fn the_skill_chip_follows_the_document_and_the_input() {
     harness.with_page(|page| page.toggle_ai_panel(None));
     harness.frame_texts();
     let texts = harness.frame_texts();
-    assert!(has(&texts, "自动 · 研究式起草"), "空稿只能起草：{texts:?}");
     assert!(
-        has(&texts, "粘贴材料、写清要求"),
-        "提示换成技能自己的：{texts:?}"
+        has(&texts, "也可以输入 / 选技能"),
+        "空稿、没写要求时几个起草类技能都可用：{texts:?}"
     );
-    assert!(!has(&texts, "不用预设"), "起草不用润色预设：{texts:?}");
+    assert!(
+        !has(&texts, "不用预设"),
+        "空稿上润色不参与，没有预设下拉框：{texts:?}"
+    );
+
+    harness.doc.ai_panel.composer.text = "起草一份冬季森林防火的通知".into();
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "自动 · 研究式起草"), "{texts:?}");
+    assert!(has(&texts, "检索知识库"), "研究式起草用知识库：{texts:?}");
+
+    harness.doc.ai_panel.composer.text = "根据下面的会议纪要整理".into();
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "自动 · 材料成文"), "{texts:?}");
+    assert!(!has(&texts, "检索知识库"), "材料成文不检索：{texts:?}");
+    harness.doc.ai_panel.composer.text.clear();
 
     harness.doc.generated_markdown = "# 标题\n\n一、总体要求\n".into();
     harness.frame_texts();
@@ -349,7 +364,7 @@ fn the_skill_chip_follows_the_document_and_the_input() {
     harness.doc.ai_panel.composer.text = "压缩第二部分".into();
     harness.frame_texts();
     let texts = harness.frame_texts();
-    assert!(has(&texts, "自动 · 润色"), "{texts:?}");
+    assert!(has(&texts, "自动 · 精简扩写"), "{texts:?}");
     assert!(has(&texts, "不用预设"), "润色带预设下拉框：{texts:?}");
     assert!(has(&texts, "全文"), "{texts:?}");
 
@@ -528,6 +543,58 @@ fn unconfirmed_fact_changes_block_acceptance() {
 }
 
 #[test]
+fn a_report_card_lists_findings_by_group_and_points_to_the_drawer() {
+    use crate::agent::board::{Finding, Fix};
+    let mut harness = Harness::new(
+        "# 标题
+
+各地要加强巡查力度不断提高。
+",
+    );
+    harness.doc.ai_panel.open = true;
+    harness
+        .doc
+        .ai_panel
+        .push_turn("全面审校".into(), "签发前审一下".into(), vec![], None);
+    let finding = |group: &str, text: &str, fix: Option<Fix>| Finding {
+        group: group.into(),
+        text: text.into(),
+        excerpt: "加强巡查力度不断提高".into(),
+        source: "模型诊断，需人工判断".into(),
+        fix,
+    };
+    harness.doc.ai_panel.running_turn_mut().unwrap().findings = vec![
+        finding(
+            "表述",
+            "搭配不当",
+            Some(Fix {
+                span: 0..3,
+                before: "加强巡查力度不断提高".into(),
+                after: "不断加大巡查力度".into(),
+            }),
+        ),
+        finding("要素与格式", "缺少主送机关", None),
+    ];
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Reported { fixes: 1 });
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    for needle in [
+        "问题清单",
+        "表述（1）",
+        "要素与格式（1）",
+        "→ 改为「不断加大巡查力度」",
+        "1 条有改法的已放进审校抽屉",
+        "打开审校抽屉",
+    ] {
+        assert!(has(&texts, needle), "缺少「{needle}」：{texts:?}");
+    }
+    assert!(!harness.doc.ai_panel.running());
+}
+
+#[test]
 fn streaming_card_says_thinking_before_the_first_word() {
     let mut harness = Harness::new("# 标题\n");
     harness.doc.ai_panel.open = true;
@@ -701,6 +768,7 @@ fn live_research_panel_round_trip() {
                         assert!(harness.doc.busy, "答完应当接着跑");
                         continue;
                     }
+                    crate::ai_panel::SkillResult::Report { .. } => panic!("起草不该交问题清单"),
                     crate::ai_panel::SkillResult::Proposal { draft, report, .. } => {
                         eprintln!(
                             "工具调用 {tools} 次，工作稿更新 {workspaces} 次，证据 {} 段，题 {} 道，用时 {:?}",

@@ -184,6 +184,7 @@ impl Tool for AskChoice {
             id: 1,
             text: question,
             choices,
+            prefill: String::new(),
             custom_hint: arg_bool(args, "custom")
                 .unwrap_or(true)
                 .then(|| "自己填写".to_string()),

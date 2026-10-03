@@ -10,11 +10,11 @@
 use super::{ReplyDraft, ResearchSnapshot, TurnRequest, TurnState, locate_selection};
 use crate::agent::api::{ApiSecrets, ApiStore};
 use crate::agent::backend::LmBackend;
-use crate::agent::board::Board;
+use crate::agent::board::{Board, Finding};
 use crate::agent::clarify::{self, Question, Reply, Target};
 use crate::agent::engine::{self, Event, Outcome, SkillReport, Suspension};
 use crate::agent::router::{self, Route, RouteContext};
-use crate::agent::skill::{Skill, TextNeed};
+use crate::agent::skill::{OutputKind, Skill, TextNeed};
 use crate::agent::tools::{Env, Permission, RagSearch, SqliteManuscripts, ToolUse};
 use crate::app::{DocJob, GongwenApp, WorkerResult};
 use crate::draft_page::DraftPage;
@@ -42,6 +42,13 @@ pub(crate) enum SkillResult {
         draft: GeneratedDraft,
         report: Box<SkillReport>,
     },
+    /// 审核类技能的问题清单（不改稿）。
+    Report {
+        skill: String,
+        /// 转修订建议时作检查器名，同一技能再跑一次只换掉自己上一轮的建议。
+        skill_id: String,
+        findings: Vec<Finding>,
+    },
 }
 
 /// 用哪个技能：选定了，或发送后交模型从候选里挑。
@@ -66,6 +73,7 @@ pub(crate) fn initial_replies(questions: &[Question]) -> Vec<ReplyDraft> {
                 .choices
                 .iter()
                 .position(|choice| choice.recommended),
+            custom: question.prefill.clone(),
             ..ReplyDraft::default()
         })
         .collect()
@@ -177,7 +185,8 @@ impl DraftPage<'_> {
                 ));
             }
         }
-        let kind_filter = self.doc.rag_kind_filter.resolve(self.doc.draft.kind);
+        // 不限文种，与知识库页的检索、问答一致。
+        let kind_filter = None;
         let tx = self.sender.clone();
         std::thread::spawn(move || {
             let send = |job: DocJob| {
@@ -497,6 +506,11 @@ fn run_skill(
             suspension,
             use_rag,
         }))),
+        Outcome::Done if skill.output == OutputKind::Report => Ok(SkillResult::Report {
+            skill: skill.name,
+            skill_id: skill.id,
+            findings: board.findings.clone(),
+        }),
         Outcome::Done => {
             let report = SkillReport::from_board(board);
             if report.markdown.trim().is_empty() {

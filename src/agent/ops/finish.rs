@@ -1,4 +1,4 @@
-//! 收尾：核验引用、出题。
+//! 收尾：核验引用、引用落到研究报告的文献体系、出题。
 
 use super::{Flow, assist, check_cancel, param, phase, prompt, squash, tool_line};
 use crate::agent::clarify;
@@ -7,7 +7,10 @@ use crate::agent::evidence;
 use crate::agent::skill::StepSpec;
 use crate::agent::tools::{self, Permission, ToolCtx, short};
 use crate::ai_guard::FactKind;
+use crate::export::bibliography;
+use crate::models::TemplateKind;
 use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// `verify`：带引用的句子逐句对照引到的片段，不支持的去掉引用，其中证据包里都找不到的
 /// 事实交用户确认。参数 `max`（技能参数 `max_checks`），提示词默认「核验」。证据包为空时跳过。
@@ -129,4 +132,115 @@ pub(super) fn ask(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<
     }
     ctx.board.questions = questions;
     Ok(Flow::Next)
+}
+
+/// `cite`：研究报告里，把 [K#] 引用落到报告的文献体系。证据的题名与文献库（文档要素里的
+/// BibTeX）某条题名对得上，就换成 `[@key]`；对不上的换成行内脚注 `[^k3]:(来源：《题名》· 出处)`，
+/// 同一份资料在一章里只挂第一处。
+///
+/// 文献库只读：用不上的证据不会被加进文献库（要素由用户维护，红线 2）。非研究报告不做，
+/// 交付时引用标记照常剥掉。`style: footnote` 时一律用脚注。放在 `verify` 之后——核验要靠
+/// [K#] 找回证据。
+pub(super) fn cite(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
+    if ctx.board.draft.kind != TemplateKind::ResearchReport {
+        return Ok(Flow::Next);
+    }
+    let library = if step.param_str("style") == Some("footnote") {
+        bibliography::Library::default()
+    } else {
+        bibliography::parse(&ctx.board.draft.research.bibliography_content)
+    };
+    let pack = &ctx.board.evidence;
+    let mut uses: BTreeMap<usize, usize> = BTreeMap::new();
+    let (mut to_bib, mut to_note) = (0usize, 0usize);
+    let workspace = ctx.board.workspace.clone();
+    // 每章开头的位置。同一份资料在一章里只挂一次脚注：一本书引了几十处，满篇都是同一条
+    // 脚注没法读（实测踩过）；逐句的出处仍在核实清单里。
+    let chapters: Vec<usize> = workspace
+        .match_indices("\n## ")
+        .map(|(pos, _)| pos + 1)
+        .collect();
+    let mut noted: BTreeSet<(usize, String)> = BTreeSet::new();
+    let cited = evidence::CITATION.replace_all(&workspace, |caps: &regex::Captures<'_>| {
+        let at = caps.get(0).map_or(0, |m| m.start());
+        let chapter = chapters.partition_point(|start| *start <= at);
+        let mut keys: Vec<String> = Vec::new();
+        let mut notes = String::new();
+        for id in evidence::citation_ids(&caps[0]) {
+            let Some(item) = pack.get(id) else {
+                continue;
+            };
+            match bib_key(&library, &item.doc_title) {
+                Some(key) => {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                        to_bib += 1;
+                    }
+                }
+                None => {
+                    if !noted.insert((chapter, item.doc_title.clone())) {
+                        continue;
+                    }
+                    let count = uses.entry(id).or_default();
+                    *count += 1;
+                    let suffix = if *count > 1 {
+                        format!("-{count}")
+                    } else {
+                        String::new()
+                    };
+                    let source = footnote_text(&item.source_label());
+                    notes.push_str(&format!("[^k{id}{suffix}]:(来源：{source})"));
+                    to_note += 1;
+                }
+            }
+        }
+        let mut out = String::new();
+        if !keys.is_empty() {
+            out.push_str(&format!("[@{}]", keys.join("; @")));
+        }
+        out.push_str(&notes);
+        out
+    });
+    if to_bib + to_note == 0 {
+        return Ok(Flow::Next);
+    }
+    ctx.board.workspace = cited.into_owned();
+    tool_line(
+        ctx,
+        "cite",
+        Permission::WriteWorkspace,
+        format!("引用落到报告：文献库 {to_bib} 处，脚注 {to_note} 处"),
+    );
+    (ctx.emit)(Event::Workspace(ctx.board.workspace.clone()));
+    Ok(Flow::Next)
+}
+
+/// 证据题名对上文献库里的哪一条：去掉书名号与空白后相同，或一方包含另一方（至少 6 个字）。
+fn bib_key(library: &bibliography::Library, title: &str) -> Option<String> {
+    let normalize = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '《' | '》' | '“' | '”' | '"'))
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let wanted = normalize(title);
+    if wanted.chars().count() < 2 {
+        return None;
+    }
+    library
+        .entries
+        .iter()
+        .find(|entry| {
+            let have = normalize(&entry.title);
+            !have.is_empty()
+                && (have == wanted
+                    || (wanted.chars().count().min(have.chars().count()) >= 6
+                        && (have.contains(&wanted) || wanted.contains(&have))))
+        })
+        .map(|entry| entry.key.clone())
+}
+
+/// 脚注内容里不能出现半角右括号（脚注写法不支持嵌套），换成全角。
+fn footnote_text(text: &str) -> String {
+    text.replace('(', "（").replace(')', "）")
 }

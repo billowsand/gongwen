@@ -9,6 +9,9 @@ use crate::manuscript::{ManuscriptFilter, VersionRow};
 use crate::models::{DraftInput, ManuscriptStatus, TemplateKind};
 use serde_json::{Map, Value, json};
 
+/// 按一句话检索时先取这么多篇再打分。
+const QUERY_POOL: usize = 500;
+
 pub(super) const TOOLS: [&dyn Tool; 6] =
     [&KbSearch, &KbRead, &KbList, &MsSearch, &MsRead, &MsVersions];
 
@@ -264,11 +267,15 @@ impl Tool for MsSearch {
         Permission::Read
     }
     fn description(&self) -> &'static str {
-        "检索稿件库：按关键词（标题、文号、备注）、文种、状态、成文日期"
+        "检索稿件库：按关键词（标题、文号、备注）或一句话（按标题里的关键词打分排序）、文种、状态、成文日期"
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            optional("keyword", "关键词"),
+            optional("keyword", "关键词：标题、文号、备注里要包含的一段字"),
+            optional(
+                "query",
+                "一句话，如用户原话：抽出关键词，按标题命中多少排序",
+            ),
             optional("kind", "文种"),
             optional("status", "状态：新建 / 草稿 / 已发布 / 已归档"),
             optional("date_from", "成文日期起，YYYY-MM-DD"),
@@ -290,11 +297,35 @@ impl Tool for MsSearch {
             date_to: arg_str(args, "date_to").unwrap_or_default(),
         };
         let limit = arg_usize(args, "limit").unwrap_or(10).clamp(1, 50);
-        let docs = ctx
-            .env
-            .manuscripts
-            .search(&filter, limit)
-            .map_err(|e| format!("{e:#}"))?;
+        let query = arg_str(args, "query").unwrap_or_default();
+        let docs = if query.trim().is_empty() {
+            ctx.env
+                .manuscripts
+                .search(&filter, limit)
+                .map_err(|e| format!("{e:#}"))?
+        } else {
+            // 一句话里抽关键词，标题命中的字数越多越靠前；一个都没命中的不要。
+            let words = super::calc::keywords(&query, 12);
+            let pool = ctx
+                .env
+                .manuscripts
+                .search(&filter, QUERY_POOL)
+                .map_err(|e| format!("{e:#}"))?;
+            let mut scored: Vec<(usize, ManuscriptDoc)> = pool
+                .into_iter()
+                .map(|doc| {
+                    let score = words
+                        .iter()
+                        .filter(|word| doc.title.contains(word.as_str()))
+                        .map(|word| word.chars().count())
+                        .sum();
+                    (score, doc)
+                })
+                .filter(|(score, _)| *score > 0)
+                .collect();
+            scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            scored.into_iter().take(limit).map(|(_, doc)| doc).collect()
+        };
         let count = docs.len();
         let value = Value::Array(
             docs.into_iter()
@@ -310,7 +341,9 @@ impl Tool for MsSearch {
                 })
                 .collect(),
         );
-        let label = if filter.keyword.is_empty() {
+        let label = if !query.trim().is_empty() {
+            format!("「{}」", short(query.trim(), 16))
+        } else if filter.keyword.is_empty() {
             "全部".to_string()
         } else {
             format!("「{}」", short(&filter.keyword, 16))

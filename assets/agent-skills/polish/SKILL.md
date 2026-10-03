@@ -2,7 +2,7 @@
 name: 润色
 description: 在事实锁定下修改现有正文：按要求精简、调整语气、理顺表达，可以只改选区；单位、人员、日期、数字、文件依据的变化必须另行确认
 hint: 说说怎么改，例如：压缩第二部分，不改任务、责任单位和时限
-triggers: [润色, 修改, 改一下, 精简, 压缩, 扩写, 改得, 语气, 通顺, 调整, 理顺, 优化]
+triggers: [润色, 修改, 改一下, 改改, 改得, 通顺, 调整, 理顺, 优化, 改写]
 when: { text: present }
 output: proposal
 tools: [doc.read, doc.selection, check.facts, llm.generate, ws.write]

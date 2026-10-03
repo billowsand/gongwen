@@ -70,13 +70,14 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   横页、联合发文、份号、花脸稿、孤行探针都已接入，移除 TeX 前逐行对照过，**待真机验收**
   （打印、送批材料合并、本机字体、研究报告公式与文献）。设计、对照结论、已知差异与坑见
   `docs/typst-engine.md`（单文件）。
-- **AI 工作台智能体化**（替代 AI 起草工作台）：右侧 AI 侧栏 + 流式输出 + SKILL.md 技能
+- **AI 工作台智能体化**（已替代 AI 起草工作台）：右侧 AI 侧栏 + 流式输出 + SKILL.md 技能
   + 数据接口（内网 HTTP）+ 声明式流程引擎，不引入外部智能体框架。**第 ①（流式输出 + 侧栏骨架）、
   ②（研究式起草 + 选择题澄清 + SKILL.md）、③（工具 → 算子 → 技能三层、流程引擎、技能条）、
-  ④（数据接口 `http.call`、设置页技能 / 数据接口 / 工具调试台）期已完成**，代码在 `src/agent/`
-  （`tools/`、`ops/`、`engine.rs`、`skill.rs`、`skill_files.rs`、`api.rs`、`router.rs`）、`src/ai_panel/`
-  与 `src/app/agent_settings.rs`。下一步是第 ⑤ 期：基础技能（政策研究报告、仿写、材料成文 / 复函），
-  删除旧工作台（见第十六节；opencode 接入已作废）。
+  ④（数据接口 `http.call`、设置页技能 / 数据接口 / 工具调试台）、⑤（12 个内置技能：起草、修改、审核三类；
+  旧的 AI 起草工作台已删除）期已完成**，代码在 `src/agent/`（`tools/`、`ops/`、`engine.rs`、`skill.rs`、
+  `skill_files.rs`、`api.rs`、`router.rs`）、`assets/agent-skills/`、`src/ai_panel/` 与
+  `src/app/agent_settings.rs`。下一步是第 ⑥ 期：自主步骤（工具调用）、政策依据核对、对比分析、数据分析段落
+  （见第十六节；opencode 接入已作废）。
   方案、红线修订记录、分期、各期进度与已知坑见 `docs/ai-agent-workbench.md`（单文件，第十三节是交接）。
 - **送批材料**（呈批件挂随行件、按提交版合并成一个 PDF、归档钉版、随同步 ZIP 携带）：
   五期已全部实现，**待真机验收**（排版→合并整条链、ZIP 往返）。方案、各期进度、

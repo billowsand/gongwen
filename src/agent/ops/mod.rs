@@ -4,7 +4,8 @@
 //! - `prepare`：`clarify`（动笔前澄清）、`plan`（预研列问题）、`retrieve`（多路检索）；
 //! - `write`：`generate`（新稿 / 全文或选区改写）；
 //! - `gap_loop`：缺口循环（识别 → 定向检索 → 局部补全 → 闸门）；
-//! - `finish`：`verify`（核验引用）、`ask`（出题）。
+//! - `finish`：`verify`（核验引用）、`cite`（引用落到研究报告的文献与脚注）、`ask`（出题）；
+//! - `review`：审核类技能的 `review`（全面审校）、`fact_check`（事实核查）、`report`（清单成问题）。
 //!
 //! `for_each` 由引擎直接处理。算子的参数先看步骤里写的，再看技能 `params` 里的同名项，
 //! 都没有就用默认值，并夹在合理范围里。
@@ -15,6 +16,7 @@
 mod finish;
 mod gap_loop;
 mod prepare;
+mod review;
 mod write;
 
 use super::backend::ModelRole;
@@ -28,20 +30,26 @@ use serde_json::Value;
 /// 算子执行完之后怎么走。
 pub(crate) enum Flow {
     Next,
-    /// 停下来问用户。
+    /// 停下来问用户；选择题的答案存进步骤的 `save_as`。
     Suspend(Vec<Question>),
+    /// 停下来问用户，答案存进算子指定的变量（如待确认的大纲）。
+    SuspendInto(Vec<Question>, String),
 }
 
 pub(crate) type Operator = fn(&mut ToolCtx<'_, '_>, &StepSpec) -> anyhow::Result<Flow>;
 
-const OPERATORS: [(&str, Operator); 7] = [
+const OPERATORS: [(&str, Operator); 11] = [
     ("clarify", prepare::clarify),
     ("plan", prepare::plan),
     ("retrieve", prepare::retrieve),
     ("generate", write::generate),
     ("gap_loop", gap_loop::gap_loop),
     ("verify", finish::verify),
+    ("cite", finish::cite),
     ("ask", finish::ask),
+    ("review", review::review),
+    ("fact_check", review::fact_check),
+    ("report", review::report),
 ];
 
 pub(crate) fn find(name: &str) -> Option<Operator> {
