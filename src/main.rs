@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod agent;
 mod ai_guard;
 mod ai_panel;
 mod app;

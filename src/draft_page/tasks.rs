@@ -89,6 +89,56 @@ fn stream_draft_model(
     outcome
 }
 
+/// 模型原文 → 可落入正文的 Markdown：剥思考与围栏、按文种规整、补齐版式要素。
+/// 所有 AI 产物（单次起草、润色、研究式起草）都走这一条，不另起一套。
+pub(crate) fn prepare_model_markdown(input: &DraftInput, raw: &str) -> String {
+    let cleaned = prompt::sanitize_model_markdown(raw);
+    let normalized = prompt::normalize_generated_markdown(input, &cleaned);
+    export::finalize_markdown(input, &normalized)
+}
+
+/// 定稿后的确定性复查：要素校验与研究报告的锚点、引用检查。
+pub(crate) fn review_notes(
+    input: &DraftInput,
+    config: &crate::models::AppConfig,
+    markdown: &str,
+) -> Vec<ReviewNote> {
+    validator::validate(input, markdown, &config.vocabulary, &config.security_rules)
+        .into_iter()
+        .map(ReviewNote::from)
+        .chain(validator::research_anchor_notes(input, markdown))
+        .chain(validator::research_citation_notes(input, markdown))
+        .collect()
+}
+
+/// 不导出的 AI 产物收尾：定稿、复查、版式粗估，撞了输出上限再记一条。
+/// 结果只进提案，由用户接受后才落入正文。
+pub(crate) fn reviewed_draft(
+    input: &DraftInput,
+    config: &crate::models::AppConfig,
+    raw: &str,
+    truncated: bool,
+) -> GeneratedDraft {
+    let markdown = prepare_model_markdown(input, raw);
+    let title = export::document_title(input, &markdown);
+    let mut warnings = review_notes(input, config, &markdown);
+    warnings.extend(validator::estimate_layout_notes(&markdown));
+    if truncated {
+        warnings.push(ReviewNote::from(format!(
+            "{}可在设置里调大「最大输出」后重新生成。",
+            crate::ai_panel::TRUNCATED_NOTE
+        )));
+    }
+    GeneratedDraft {
+        markdown,
+        title,
+        warnings,
+        proof_warnings: Vec::new(),
+        proof_measured: false,
+        files: Vec::new(),
+    }
+}
+
 /// 起草时检索知识库并把结果拼成提示词参考节。检索失败降级为空串，不阻塞
 /// 起草——RAG 是增强而非硬依赖；但降级原因会随 `notes` 回给调用方显示，
 /// 不再是只有翻服务端日志才知道的静默失败。
@@ -620,21 +670,9 @@ impl DraftPage<'_> {
                 }
                 let truncated = outcome.finish == lmstudio::Finish::Length;
                 let raw = outcome.content;
-                let cleaned = prompt::sanitize_model_markdown(&raw);
-                let normalized = prompt::normalize_generated_markdown(&input, &cleaned);
-                let markdown = export::finalize_markdown(&input, &normalized);
+                let markdown = prepare_model_markdown(&input, &raw);
                 let title = export::document_title(&input, &markdown);
-                let mut warnings: Vec<ReviewNote> = validator::validate(
-                    &input,
-                    &markdown,
-                    &config.vocabulary,
-                    &config.security_rules,
-                )
-                .into_iter()
-                .map(ReviewNote::from)
-                .chain(validator::research_anchor_notes(&input, &markdown))
-                .chain(validator::research_citation_notes(&input, &markdown))
-                .collect();
+                let mut warnings = review_notes(&input, &config, &markdown);
                 let mut proof_warnings: Vec<ReviewNote> = Vec::new();
                 let mut proof_measured = false;
                 let estimated = validator::estimate_layout_notes(&markdown);

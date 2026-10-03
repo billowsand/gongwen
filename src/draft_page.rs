@@ -65,6 +65,7 @@ pub(crate) use markdown::table_column_count;
 pub(crate) use navigator::PreviewScroll;
 pub(crate) use source_nav::{SourceMinimap, SourceOutline};
 pub(crate) use table::{TableOp, table_grid_picker};
+pub(crate) use tasks::reviewed_draft;
 pub(crate) use timeline::VersionTimelineState;
 // test-only names: only compiled in test builds (kept for the root test modules)
 #[cfg(test)]

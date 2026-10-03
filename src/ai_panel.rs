@@ -1,18 +1,26 @@
-//! 起草页右侧的 AI 侧栏（智能体工作台第 ① 期：流式输出 + 输入框 + 生成卡 / 结果卡）。
+//! 起草页右侧的 AI 侧栏。
 //!
-//! 设计见 `docs/ai-agent-workbench.md`。本期只接「润色」与「起草」两种用法：
-//! 输入框写要求，发送后模型输出逐段流进任务流；流结束、闸门跑完后同一张卡
-//! 转成结果卡，由用户点「采用 / 接受」才落入正文（红线 1）。仿写、知识起草与
-//! 大纲暂时仍走旧工作台，侧栏右上角留了入口。
+//! 设计见 `docs/ai-agent-workbench.md`。两种用法：
+//! - 润色（第 ① 期）：输入框写要求，模型输出逐段流进任务流，闸门跑完转成结果卡；
+//! - 起草（第 ② 期）：研究式起草（`crate::agent::research`）——动笔前拿不准的先出选择题，
+//!   预研检索、带证据起草、围绕缺口迭代补全、核验引用，最后把要你确认的出成选择题。
+//!
+//! 结果一律是提案，由用户点「采用 / 接受」才落入正文（红线 1）。仿写与大纲暂时仍走旧
+//! 工作台，侧栏右上角留了入口。
 //!
 //! 本文件只放状态与纯逻辑；界面在 `ai_panel/ui.rs`，挂在 `DraftPage` 上。
 
+use crate::agent::clarify::{Question, Reply};
+use crate::agent::gaps::Ledger;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+mod research_job;
 mod ui;
+
+pub(crate) use research_job::{ResearchResult, initial_replies};
 
 /// 侧栏的两种用法。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -64,6 +72,8 @@ pub(crate) struct TurnRequest {
     pub(crate) selection: Option<(Range<usize>, String)>,
     pub(crate) preset: Option<u32>,
     pub(crate) use_rag: bool,
+    /// 动笔前澄清的回答（研究式起草重跑时沿用，不再问一遍）。
+    pub(crate) notes: Vec<String>,
 }
 
 /// 结果卡上的摘要，在提案到达时算一次，不必每帧重算。
@@ -86,6 +96,8 @@ pub(crate) enum TurnState {
     Streaming,
     /// 模型说完了，程序在跑清洗、规整与闸门。
     Checking,
+    /// 动笔前有题要问，等用户回答后才开始起草。
+    Asking,
     /// 提案已就绪，等用户采用或放弃。
     Proposed(ProposalSummary),
     /// 不经审阅直接写入了正文（旧工作台的空稿起草）。
@@ -125,6 +137,14 @@ pub(crate) struct AiTurn {
     pub(crate) phase: String,
     /// 要一直留在卡片上的说明：知识库命中了哪几篇、为什么没命中。
     pub(crate) notes: Vec<String>,
+    /// 研究式起草的过程：每次工具调用一行。
+    pub(crate) steps: Vec<String>,
+    /// 要用户回答的选择题（动笔前，或第一稿之后）。
+    pub(crate) questions: Vec<Question>,
+    /// 每道题当前的作答状态，与 `questions` 一一对应。
+    pub(crate) replies: Vec<ReplyDraft>,
+    /// 研究式起草的结果：台账与证据，按回答修订时要用。
+    pub(crate) research: Option<ResearchSnapshot>,
     pub(crate) started: Instant,
     /// 结束时定格的耗时；运行中为 None，按 `started` 现算。
     pub(crate) elapsed: Option<Duration>,
@@ -187,6 +207,10 @@ impl AiPanel {
             reasoning: String::new(),
             phase: String::new(),
             notes: Vec::new(),
+            steps: Vec::new(),
+            questions: Vec::new(),
+            replies: Vec::new(),
+            research: None,
             started: Instant::now(),
             elapsed: None,
         });
@@ -228,7 +252,11 @@ impl AiPanel {
             turn.phase = "正在校验…".into();
         } else if !content.is_empty() || !reasoning.is_empty() {
             turn.state = TurnState::Streaming;
-            turn.phase.clear();
+            // 只有正文到了才冲掉阶段提示：研究式起草在预研、检索时也有思考增量，
+            // 那时「预研：列出要查的问题…」这类提示还得留着。
+            if !content.is_empty() {
+                turn.phase.clear();
+            }
         }
     }
 
@@ -238,8 +266,38 @@ impl AiPanel {
         }
     }
 
-    pub(crate) fn note(&mut self, note: String) {
+    pub(crate) fn step(&mut self, line: String) {
         if let Some(turn) = self.running_turn_mut() {
+            turn.steps.push(line);
+        }
+    }
+
+    /// 工作稿整体换新（补全之后），卡片上显示最新的一版。
+    pub(crate) fn replace_content(&mut self, content: String) {
+        if let Some(turn) = self.running_turn_mut() {
+            turn.content = content;
+        }
+    }
+
+    /// 动笔前有题要问：这一轮停下来等回答。
+    pub(crate) fn ask(&mut self, questions: Vec<Question>) {
+        self.cancel = None;
+        if let Some(turn) = self.running_turn_mut() {
+            turn.replies = vec![ReplyDraft::default(); questions.len()];
+            turn.questions = questions;
+            turn.settle(TurnState::Asking);
+        }
+    }
+
+    pub(crate) fn turn_mut(&mut self, id: u64) -> Option<&mut AiTurn> {
+        self.turns.iter_mut().find(|turn| turn.id == id)
+    }
+
+    pub(crate) fn note(&mut self, note: String) {
+        if let Some(turn) = self.running_turn_mut()
+            && !turn.notes.contains(&note)
+        {
+            // 研究式起草每检索一次都可能报同一句「重复片段已合并」，留一条就够。
             turn.notes.push(note);
         }
     }
@@ -271,6 +329,39 @@ impl AiPanel {
     pub(crate) fn clear_history(&mut self) {
         self.turns.retain(|turn| turn.state.running());
     }
+}
+
+/// 一道选择题的作答状态。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ReplyDraft {
+    pub(crate) choice: Option<usize>,
+    pub(crate) custom: String,
+    pub(crate) skip: bool,
+}
+
+impl ReplyDraft {
+    /// 写了自己的答案就以它为准；否则看选了哪个选项；都没有就是跳过。
+    pub(crate) fn reply(&self) -> Reply {
+        if self.skip {
+            Reply::Skip
+        } else if !self.custom.trim().is_empty() {
+            Reply::Custom(self.custom.trim().to_string())
+        } else if let Some(index) = self.choice {
+            Reply::Choice(index)
+        } else {
+            Reply::Skip
+        }
+    }
+}
+
+/// 研究式起草留下的东西，按回答修订时要用。
+#[derive(Debug, Clone)]
+pub(crate) struct ResearchSnapshot {
+    /// 定稿前的工作稿（引用标记已剥）。按回答修订在它上面改，再走一遍定稿。
+    pub(crate) raw: String,
+    pub(crate) ledger: Ledger,
+    /// 证据：(编号, 出处)。核实清单里显示来源用。
+    pub(crate) sources: Vec<(usize, String)>,
 }
 
 /// 在当前正文里找回锁定的选区。
@@ -322,6 +413,30 @@ mod tests {
     }
 
     #[test]
+    fn reply_drafts_prefer_custom_text_then_choice_then_skip() {
+        let mut draft = ReplyDraft::default();
+        assert_eq!(draft.reply(), Reply::Skip);
+        draft.choice = Some(1);
+        assert_eq!(draft.reply(), Reply::Choice(1));
+        draft.custom = " 12月1日 ".into();
+        assert_eq!(draft.reply(), Reply::Custom("12月1日".into()));
+        draft.skip = true;
+        assert_eq!(draft.reply(), Reply::Skip);
+    }
+
+    #[test]
+    fn asking_parks_the_turn_until_answered() {
+        let mut panel = panel_with_turn();
+        panel.cancel = Some(Arc::new(AtomicBool::new(false)));
+        panel.step("⌕ 检索".into());
+        panel.ask(vec![]);
+        assert_eq!(panel.turns[0].state, TurnState::Asking);
+        assert!(!panel.running(), "问题等着回答时不算在跑");
+        assert!(panel.cancel.is_none());
+        assert_eq!(panel.turns[0].steps, ["⌕ 检索"]);
+    }
+
+    #[test]
     fn deltas_flow_into_the_running_turn() {
         let mut panel = panel_with_turn();
         assert!(panel.has_waiting_turn());
@@ -346,6 +461,9 @@ mod tests {
         let turn = &panel.turns[0];
         assert!(turn.phase.is_empty());
         assert_eq!(turn.notes, ["知识库：已注入 3 段知识库参考：《甲》"]);
+        // 同一句不重复留。
+        panel.note("知识库：已注入 3 段知识库参考：《甲》".into());
+        assert_eq!(panel.turns[0].notes.len(), 1);
         // 结束之后的说明没有归属，丢掉。
         panel.note("迟到".into());
         assert_eq!(panel.turns[0].notes.len(), 1);

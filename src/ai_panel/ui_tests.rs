@@ -150,23 +150,144 @@ fn a_stale_selection_is_refused_instead_of_guessed() {
 }
 
 #[test]
-fn drafting_always_goes_through_review() {
+fn drafting_starts_research_and_only_ever_proposes() {
     let mut harness = Harness::new("");
+    let composer = &mut harness.doc.ai_panel.composer;
+    composer.mode = PanelMode::Draft;
+    composer.text = "根据材料写一份通知".into();
+    composer.use_rag = true;
+    harness.with_page(|page| page.send_ai_panel());
+
+    let panel = &harness.doc.ai_panel;
+    assert_eq!(panel.turns.len(), 1);
+    // 知识库没启用时不检索，也不挂「知识库」chip。
+    assert_eq!(panel.turns[0].title, "起草");
+    assert!(panel.turns[0].context.is_empty());
+    assert!(panel.running());
+    assert!(panel.cancel.is_some());
+    assert!(harness.doc.busy);
+    // 红线 1：结果只会装成提案，基线记下的是发起时的正文。
+    assert_eq!(harness.doc.ai_review_baseline.as_deref(), Some(""));
+    assert!(harness.doc.ai_proposal.is_none());
+    assert!(harness.doc.generated_markdown.is_empty());
+}
+
+#[test]
+fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
+    use crate::agent::clarify::predraft_questions;
+    use crate::models::TemplateKind;
+    let mut harness = Harness::new("");
+    harness.doc.draft.kind = TemplateKind::PlainDocument;
+    harness.doc.ai_panel.open = true;
     let request = TurnRequest {
         mode: PanelMode::Draft,
-        text: "根据材料写一份通知".into(),
+        text: "起草一份商洽函".into(),
         selection: None,
         preset: None,
-        use_rag: true,
+        use_rag: false,
+        notes: Vec::new(),
     };
-    let (task, title, context) = harness.with_page(|page| page.panel_task(&request)).unwrap();
-    // 红线 1：空稿起草也要用户点一次才落入正文。
-    assert!(task.review_before_apply);
-    // 知识库没启用时不检索，也不挂「知识库」chip。
-    assert!(!task.use_rag);
-    assert_eq!(title, "起草");
-    assert!(context.is_empty());
-    assert!(task.material.contains("根据材料写一份通知"));
+    let model_questions = vec![("篇幅多长？".to_string(), vec!["短".into(), "长".into()])];
+    let questions = predraft_questions(
+        &request.text,
+        TemplateKind::PlainDocument,
+        model_questions,
+        3,
+    );
+    let panel = &mut harness.doc.ai_panel;
+    let id = panel.push_turn("起草".into(), request.text.clone(), vec![], Some(request));
+    let replies = crate::ai_panel::initial_replies(&questions);
+    panel.ask(questions);
+    let turn = panel.turn_mut(id).unwrap();
+    turn.replies = replies;
+    // 第二题选「长」；第一题沿用替用户选好的推荐项「切换为公函」。
+    turn.replies[1].choice = Some(1);
+
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "动笔前先确认这几件事"), "{texts:?}");
+    assert!(has(&texts, "切换为公函（推荐）"), "{texts:?}");
+    assert!(has(&texts, "确认，开始起草"), "{texts:?}");
+
+    harness.with_page(|page| page.answer_predraft(id));
+    assert_eq!(harness.doc.draft.kind, TemplateKind::OfficialLetter);
+    let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+    assert!(turn.state.running(), "答完接着跑，同一轮");
+    assert!(turn.questions.is_empty());
+    assert_eq!(turn.request.as_ref().unwrap().notes, ["篇幅多长？长"]);
+    assert_eq!(harness.doc.ai_panel.turns.len(), 1, "不另开一轮");
+    assert!(harness.doc.busy);
+}
+
+#[test]
+fn research_answers_become_a_new_proposal_without_calling_a_model() {
+    use crate::agent::clarify::gap_questions;
+    use crate::agent::gaps::{GapStatus, Ledger};
+    let mut harness = Harness::new("");
+    let raw = "# 关于冬季防火的通知\n\n请于【待核实：排查完成时限】前完成排查。\n".to_string();
+    let mut ledger = Ledger::default();
+    ledger.sync(&raw, "", &[]);
+    let questions = gap_questions(&ledger, 4);
+    assert_eq!(questions.len(), 1);
+    harness.doc.ai_panel.open = true;
+    let panel = &mut harness.doc.ai_panel;
+    let id = panel.push_turn("起草".into(), "写个通知".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: String::new(),
+        result: GeneratedDraft {
+            markdown: raw.clone(),
+            title: "关于冬季防火的通知".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "起草".into(),
+        fact_changes: Vec::new(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+    });
+    let panel = &mut harness.doc.ai_panel;
+    panel.finish(TurnState::Proposed(ProposalSummary::default()));
+    let turn = panel.turn_mut(id).unwrap();
+    turn.replies = crate::ai_panel::initial_replies(&questions);
+    turn.replies[0].custom = "12月1日".into();
+    turn.questions = questions;
+    turn.research = Some(crate::ai_panel::ResearchSnapshot {
+        raw,
+        ledger,
+        sources: Vec::new(),
+    });
+
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "这几处要你确认"), "{texts:?}");
+    assert!(has(&texts, "按回答修订"), "{texts:?}");
+
+    harness.with_page(|page| page.apply_research_answers(id));
+    let panel = &harness.doc.ai_panel;
+    assert_eq!(panel.turns.len(), 2);
+    assert_eq!(panel.turns[0].state, TurnState::Superseded);
+    let new_turn = &panel.turns[1];
+    assert!(matches!(new_turn.state, TurnState::Proposed(_)));
+    assert!(new_turn.prompt.contains("12月1日"), "{}", new_turn.prompt);
+    assert!(new_turn.questions.is_empty(), "答过的不再问");
+    let research = new_turn.research.as_ref().unwrap();
+    assert_eq!(
+        research.ledger.gaps[0].status,
+        GapStatus::Answered("12月1日".into())
+    );
+    let proposal = harness.doc.ai_proposal.as_ref().unwrap();
+    assert!(
+        proposal.result.markdown.contains("请于12月1日前完成排查"),
+        "{}",
+        proposal.result.markdown
+    );
+    // 仍然只是提案：正文没动，基线还是发起时的空稿。
+    assert!(harness.doc.generated_markdown.is_empty());
+    assert_eq!(proposal.before, "");
+    assert!(!harness.doc.busy, "确定性替换，不起后台任务");
 }
 
 #[test]
@@ -414,6 +535,109 @@ fn live_panel_round_trip() {
                 break;
             }
             other => panic!("意外的回投：{}", std::any::type_name_of_val(&other)),
+        }
+    }
+}
+
+/// 连真实模型与知识库，从侧栏发起研究式起草，检查后台线程回投的事件。默认忽略；
+/// 环境变量同 `agent::research` 的 `live_research_draft`。
+#[test]
+#[ignore = "需要真实模型与知识库"]
+fn live_research_panel_round_trip() {
+    let env = |key: &str| std::env::var(key).unwrap_or_default();
+    if env("GONGWEN_LIVE_LLM_URL").is_empty() || env("GONGWEN_LIVE_KB_DIR").is_empty() {
+        eprintln!("未设置联机测试的环境变量，跳过");
+        return;
+    }
+    let mut harness = Harness::new("");
+    crate::storage::set_test_config_dir(Some(env("GONGWEN_LIVE_KB_DIR").into()));
+    let config = &mut harness.config;
+    config.lm_studio.base_url = env("GONGWEN_LIVE_LLM_URL");
+    config.lm_studio.model = env("GONGWEN_LIVE_LLM_MODEL");
+    config.lm_studio.api_key = env("GONGWEN_LIVE_LLM_KEY");
+    config.lm_studio.timeout_seconds = 300;
+    config.rag.enabled = true;
+    config.rag.embedding.base_url = env("GONGWEN_LIVE_EMBED_URL");
+    config.rag.embedding.model = env("GONGWEN_LIVE_EMBED_MODEL");
+    config.rag.embedding.api_key = env("GONGWEN_LIVE_EMBED_KEY");
+    config.rag.rerank.mode = crate::models::RerankMode::None;
+    let composer = &mut harness.doc.ai_panel.composer;
+    composer.mode = PanelMode::Draft;
+    composer.use_rag = true;
+    // 带上「通知」，免得动笔前因文种卡住；受文对象也写明。
+    composer.text = "起草一份通知，部署市直各单位开展人工智能辅助决策系统应用情况调研，\
+                     简要介绍美军梅文项目的做法和教训作为参考，要求按时报送调研报告。"
+        .into();
+    harness.with_page(|page| page.send_ai_panel());
+    assert!(harness.doc.busy);
+
+    let started = std::time::Instant::now();
+    let mut tools = 0usize;
+    let mut workspaces = 0usize;
+    loop {
+        let message = harness
+            ._keep
+            .recv_timeout(Duration::from_secs(600))
+            .expect("十分钟内应当有结果");
+        let WorkerResult::Doc { job, .. } = message else {
+            continue;
+        };
+        match job {
+            crate::app::DocJob::AiTool(line) => {
+                tools += 1;
+                eprintln!("[{:>5.1}s] {line}", started.elapsed().as_secs_f32());
+                harness.doc.ai_panel.step(line);
+            }
+            crate::app::DocJob::AiWorkspace(text) => {
+                workspaces += 1;
+                harness.doc.ai_panel.replace_content(text);
+            }
+            crate::app::DocJob::AiStream {
+                content,
+                reasoning,
+                done,
+            } => {
+                harness.doc.ai_panel.append(&content, &reasoning, done);
+            }
+            crate::app::DocJob::AiNote(note) => eprintln!("        · {note}"),
+            crate::app::DocJob::ExportProgress(phase) => harness.doc.ai_panel.set_phase(&phase),
+            crate::app::DocJob::ResearchDone(result) => {
+                match *result.expect("研究式起草应当成功") {
+                    crate::ai_panel::ResearchResult::Clarify(questions) => {
+                        let texts: Vec<_> = questions.iter().map(|q| q.text.clone()).collect();
+                        eprintln!("动笔前的问题：{texts:?}，按推荐项作答后接着跑");
+                        // 照 apply_doc_job 的做法收下题目，再像用户点「确认」一样作答。
+                        harness.doc.busy = false;
+                        let replies = crate::ai_panel::initial_replies(&questions);
+                        let id = harness
+                            .doc
+                            .ai_panel
+                            .running_turn_mut()
+                            .map(|t| t.id)
+                            .unwrap();
+                        harness.doc.ai_panel.ask(questions);
+                        harness.doc.ai_panel.turn_mut(id).unwrap().replies = replies;
+                        harness.with_page(|page| page.answer_predraft(id));
+                        assert!(harness.doc.busy, "答完应当接着跑");
+                        continue;
+                    }
+                    crate::ai_panel::ResearchResult::Proposal { draft, report } => {
+                        eprintln!(
+                            "工具调用 {tools} 次，工作稿更新 {workspaces} 次，证据 {} 段，题 {} 道，用时 {:?}",
+                            report.evidence.items().len(),
+                            report.questions.len(),
+                            started.elapsed()
+                        );
+                        assert!(tools > 3, "过程里应当有检索与缺口检查");
+                        assert!(workspaces >= 1);
+                        assert!(!draft.markdown.contains("[K"), "引用标记不进提案");
+                        assert!(!draft.markdown.trim().is_empty());
+                        assert!(harness.doc.generated_markdown.is_empty(), "正文没动");
+                    }
+                }
+                break;
+            }
+            _ => {}
         }
     }
 }

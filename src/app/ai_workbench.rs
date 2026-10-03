@@ -630,6 +630,39 @@ impl GongwenApp {
         }
     }
 
+    /// 把一份 AI 产物装成待审提案：对照 `before` 比关键事实，算好结果卡上的摘要。
+    /// 侧栏开着时结果卡就地给出采用 / 对照 / 放弃，不再自动弹审阅窗。
+    pub(crate) fn install_ai_proposal(
+        doc: &mut DraftSession,
+        before: String,
+        result: crate::models::GeneratedDraft,
+        label: String,
+        vocabulary: &[crate::models::VocabularyEntry],
+    ) -> crate::ai_panel::ProposalSummary {
+        let fact_changes =
+            crate::ai_guard::compare_key_facts(&before, &result.markdown, vocabulary);
+        let summary = crate::ai_panel::ProposalSummary {
+            chars: result.markdown.chars().count(),
+            was_empty: before.trim().is_empty(),
+            fact_changes: fact_changes.len(),
+            warnings: result.warnings.len(),
+            truncated: result
+                .warnings
+                .iter()
+                .any(|note| note.message.starts_with(crate::ai_panel::TRUNCATED_NOTE)),
+        };
+        doc.ai_proposal = Some(crate::draft_page::AiProposal {
+            before,
+            result,
+            label,
+            fact_changes,
+            fact_changes_confirmed: false,
+            view: crate::diff_view::DiffViewState::default(),
+            open: !doc.ai_panel.open,
+        });
+        summary
+    }
+
     /// 接受 AI 提案：落入正文，并把侧栏里对应的结果卡标为已写入。
     ///
     /// 这是正文被 AI 产物改写的唯一入口（红线 1），审阅窗与侧栏结果卡共用。

@@ -25,6 +25,8 @@ enum CardAction {
     Discard,
     Review,
     Rerun(u64),
+    /// 交上这一轮选择题的回答。
+    Answer(u64),
 }
 
 impl DraftPage<'_> {
@@ -157,7 +159,7 @@ impl DraftPage<'_> {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                for turn in &doc.ai_panel.turns {
+                for turn in &mut doc.ai_panel.turns {
                     request_bubble(ui, turn);
                     ui.add_space(6.0);
                     theme::card().show(ui, |ui| {
@@ -180,6 +182,19 @@ impl DraftPage<'_> {
             Some(CardAction::Review) => {
                 if let Some(proposal) = self.doc.ai_proposal.as_mut() {
                     proposal.open = true;
+                }
+            }
+            Some(CardAction::Answer(id)) => {
+                let asking = self
+                    .doc
+                    .ai_panel
+                    .turns
+                    .iter()
+                    .any(|turn| turn.id == id && turn.state == TurnState::Asking);
+                if asking {
+                    self.answer_predraft(id);
+                } else {
+                    self.apply_research_answers(id);
                 }
             }
             Some(CardAction::Rerun(id)) => {
@@ -340,6 +355,7 @@ impl DraftPage<'_> {
             selection: composer.selection.clone().filter(|_| polish),
             preset: composer.preset.filter(|_| polish),
             use_rag: composer.use_rag && !polish,
+            notes: Vec::new(),
         };
         if self.start_panel_request(request) {
             let composer = &mut self.doc.ai_panel.composer;
@@ -352,6 +368,17 @@ impl DraftPage<'_> {
 
     /// 把一轮请求翻译成后台任务并发起。发不出去时把原因写进输入区，返回 false。
     fn start_panel_request(&mut self, request: TurnRequest) -> bool {
+        if request.mode == PanelMode::Draft {
+            // 起草走研究式起草；动笔前问过的回答已在 `notes` 里，重跑不再问一遍。
+            let clarified = !request.notes.is_empty();
+            return match self.start_research(request, clarified, None) {
+                Ok(()) => true,
+                Err(message) => {
+                    self.doc.ai_panel.composer.error = Some(message);
+                    false
+                }
+            };
+        }
         match self.panel_task(&request) {
             Ok((task, title, context)) => {
                 let prompt = if request.text.is_empty() {
@@ -378,7 +405,7 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 校验请求并组装 `AiTaskRequest`、卡片抬头与上下文 chip。
+    /// 润色：校验请求并组装 `AiTaskRequest`、卡片抬头与上下文 chip。
     fn panel_task(
         &self,
         request: &TurnRequest,
@@ -434,44 +461,7 @@ impl DraftPage<'_> {
                     context,
                 ))
             }
-            PanelMode::Draft => {
-                if request.text.is_empty() {
-                    return Err("写下材料或起草要求。".into());
-                }
-                let use_rag = request.use_rag && self.config.rag.enabled;
-                let mut context = Vec::new();
-                if use_rag {
-                    context.push("知识库".into());
-                }
-                if !markdown.trim().is_empty() {
-                    context.push("生成新稿提案".into());
-                }
-                let title = if use_rag {
-                    "起草 · 知识库"
-                } else {
-                    "起草"
-                }
-                .to_string();
-                Ok((
-                    AiTaskRequest {
-                        kind: if use_rag {
-                            AiWorkflowKind::Knowledge
-                        } else {
-                            AiWorkflowKind::Material
-                        },
-                        label: title.clone(),
-                        instruction: String::new(),
-                        material: format!("【原始材料与写作要求】\n{}", request.text),
-                        query: request.text.clone(),
-                        baseline: String::new(),
-                        use_rag,
-                        // 红线 1：哪怕是空稿，模型的产物也要用户点一次才落入正文。
-                        review_before_apply: true,
-                    },
-                    title,
-                    context,
-                ))
-            }
+            PanelMode::Draft => Err("起草走研究式起草，不经这里。".into()),
         }
     }
 
@@ -519,7 +509,7 @@ fn request_bubble(ui: &mut egui::Ui, turn: &super::AiTurn) {
 
 fn turn_card(
     ui: &mut egui::Ui,
-    turn: &super::AiTurn,
+    turn: &mut super::AiTurn,
     proposal: Option<&mut AiProposal>,
     action: &mut Option<CardAction>,
 ) {
@@ -536,10 +526,15 @@ fn turn_card(
                 });
             }
             // 思考型模型可能先想几十秒才出第一个正文字（qwen3.5 9B 实测 27 s），
-            // 这段时间要明说在想，不然看着像卡住了。
+            // 这段时间要明说在做什么，不然看着像卡住了。研究式起草在预研、检索时
+            // 也是这个状态，有阶段提示就显示提示。
             TurnState::Streaming if turn.content.is_empty() => {
                 theme::spinner(ui, 14.0, theme::accent());
-                ui.weak("正在思考…");
+                ui.weak(if turn.phase.is_empty() {
+                    "正在思考…"
+                } else {
+                    &turn.phase
+                });
             }
             TurnState::Streaming => {
                 theme::chip(
@@ -548,10 +543,16 @@ fn turn_card(
                     theme::text_soft(),
                     theme::surface_sunk(),
                 );
+                if !turn.phase.is_empty() {
+                    ui.weak(&turn.phase);
+                }
             }
             TurnState::Checking => {
                 theme::spinner(ui, 14.0, theme::accent());
                 ui.weak(&turn.phase);
+            }
+            TurnState::Asking => {
+                theme::chip(ui, "等你回答", theme::warn(), theme::warn_soft());
             }
             TurnState::Proposed(_) => {
                 theme::chip(ui, "待确认", theme::accent(), theme::accent_soft());
@@ -577,9 +578,6 @@ fn turn_card(
                 theme::chip(ui, "失败", theme::danger(), theme::danger_soft());
             }
         }
-        if turn.state == TurnState::Streaming && !turn.phase.is_empty() {
-            ui.weak(&turn.phase);
-        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{chars} 字 · {seconds:.0} s"))
@@ -597,6 +595,27 @@ fn turn_card(
                     .tint(theme::text_muted()),
             );
             ui.label(egui::RichText::new(note).small().color(theme::text_soft()));
+        });
+    }
+
+    if !turn.steps.is_empty() {
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("过程（{} 步）", turn.steps.len()))
+                .small()
+                .color(theme::text_soft()),
+        )
+        .id_salt(("ai_turn_steps", turn.id))
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("ai_turn_steps_scroll", turn.id))
+                .max_height(180.0)
+                .stick_to_bottom(turn.state.running())
+                .show(ui, |ui| {
+                    for step in &turn.steps {
+                        ui.label(egui::RichText::new(step).small().color(theme::text_soft()));
+                    }
+                });
         });
     }
 
@@ -635,7 +654,8 @@ fn turn_card(
             });
     }
 
-    match &turn.state {
+    let state = turn.state.clone();
+    match &state {
         TurnState::Waiting | TurnState::Streaming | TurnState::Checking => {
             ui.add_space(6.0);
             if ui
@@ -645,11 +665,25 @@ fn turn_card(
                 *action = Some(CardAction::Stop);
             }
         }
+        TurnState::Asking => {
+            ui.add_space(6.0);
+            questions_ui(ui, turn, "确认，开始起草", action);
+        }
         TurnState::Proposed(summary) => {
             ui.add_space(6.0);
             theme::hairline(ui);
             ui.add_space(6.0);
             proposal_actions(ui, summary, proposal, action);
+            if let Some(research) = &turn.research {
+                ui.add_space(6.0);
+                ledger_ui(ui, turn.id, research);
+            }
+            if !turn.questions.is_empty() {
+                ui.add_space(6.0);
+                theme::hairline(ui);
+                ui.add_space(6.0);
+                questions_ui(ui, turn, "按回答修订", action);
+            }
         }
         TurnState::Stopped => {
             ui.add_space(6.0);
@@ -663,6 +697,146 @@ fn turn_card(
         }
         _ => {}
     }
+}
+
+/// 选择题。程序推荐的选项已经替用户选上；写了自己的答案就以它为准。
+fn questions_ui(
+    ui: &mut egui::Ui,
+    turn: &mut super::AiTurn,
+    submit: &str,
+    action: &mut Option<CardAction>,
+) {
+    let predraft = turn.state == TurnState::Asking;
+    ui.label(
+        egui::RichText::new(if predraft {
+            "动笔前先确认这几件事"
+        } else {
+            "这几处要你确认"
+        })
+        .strong(),
+    );
+    for (question, draft) in turn.questions.iter().zip(turn.replies.iter_mut()) {
+        ui.add_space(4.0);
+        ui.label(&question.text);
+        ui.horizontal_wrapped(|ui| {
+            for (index, choice) in question.choices.iter().enumerate() {
+                let selected =
+                    draft.choice == Some(index) && draft.custom.trim().is_empty() && !draft.skip;
+                let label = if choice.recommended {
+                    format!("{}（推荐）", choice.label)
+                } else {
+                    choice.label.clone()
+                };
+                let response = ui.selectable_label(selected, label);
+                let response = if choice.detail.is_empty() {
+                    response
+                } else {
+                    response.on_hover_text(&choice.detail)
+                };
+                if response.clicked() {
+                    draft.choice = Some(index);
+                    draft.custom.clear();
+                    draft.skip = false;
+                }
+            }
+        });
+        if let Some(hint) = &question.custom_hint {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut draft.custom)
+                    .hint_text(hint.as_str())
+                    .desired_width(f32::INFINITY),
+            );
+            if response.changed() && !draft.custom.is_empty() {
+                draft.skip = false;
+            }
+        }
+        if question.skippable {
+            ui.checkbox(
+                &mut draft.skip,
+                if predraft {
+                    "跳过，按现有信息写"
+                } else {
+                    "保留待核实"
+                },
+            );
+        }
+    }
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if theme::primary_icon_button(ui, theme::Icon::SquareCheck, submit).clicked() {
+            *action = Some(CardAction::Answer(turn.id));
+        }
+        if !predraft {
+            ui.weak("没回答的保留待核实，不会替你猜");
+        }
+    });
+}
+
+/// 核实清单：每处缺口怎么处理的、证据出自哪里。
+fn ledger_ui(ui: &mut egui::Ui, turn_id: u64, research: &super::ResearchSnapshot) {
+    use crate::agent::gaps::GapStatus;
+    if research.ledger.gaps.is_empty() && research.sources.is_empty() {
+        return;
+    }
+    let (resolved, handled, pending) = research.ledger.counts();
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!(
+            "核实清单：已补全 {resolved} · 你已处理 {handled} · 待确认 {pending} · 证据 {} 段",
+            research.sources.len()
+        ))
+        .small()
+        .color(theme::text_soft()),
+    )
+    .id_salt(("ai_turn_ledger", turn_id))
+    .default_open(false)
+    .show(ui, |ui| {
+        let source_of = |id: &usize| {
+            research
+                .sources
+                .iter()
+                .find(|(source, _)| source == id)
+                .map_or_else(|| format!("[K{id}]"), |(_, label)| label.clone())
+        };
+        for gap in &research.ledger.gaps {
+            let (mark, color, status) = match &gap.status {
+                GapStatus::Resolved(ids) => (
+                    "✓",
+                    theme::success(),
+                    format!(
+                        "已补全，来源 {}",
+                        ids.iter().map(source_of).collect::<Vec<_>>().join("、")
+                    ),
+                ),
+                GapStatus::Answered(value) => ("✓", theme::success(), format!("你填了：{value}")),
+                GapStatus::Kept => ("✓", theme::success(), "你确认保留原文".into()),
+                GapStatus::Skipped => ("·", theme::text_muted(), "保留待核实".into()),
+                GapStatus::NoAnswer => ("?", theme::warn(), "知识库里没找到".into()),
+                GapStatus::Open => ("?", theme::warn(), "等你提供".into()),
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(color, mark);
+                ui.label(
+                    egui::RichText::new(format!("{}「{}」", gap.kind.label(), gap.hint)).small(),
+                );
+                ui.label(
+                    egui::RichText::new(status)
+                        .small()
+                        .color(theme::text_soft()),
+                );
+            });
+        }
+        if !research.sources.is_empty() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("证据").small().strong());
+            for (id, label) in &research.sources {
+                ui.label(
+                    egui::RichText::new(format!("[K{id}] {label}"))
+                        .small()
+                        .color(theme::text_soft()),
+                );
+            }
+        }
+    });
 }
 
 fn rerun_button(

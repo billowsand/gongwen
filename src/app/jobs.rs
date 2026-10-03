@@ -3,10 +3,10 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::jobs`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
-use crate::ai_panel::{ProposalSummary, TurnState};
+use crate::ai_panel::TurnState;
 use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState};
 use crate::doc_import;
-use crate::draft_page::{AiProposal, DocKey, DraftSession};
+use crate::draft_page::{DocKey, DraftSession};
 use crate::export;
 use crate::knowledge;
 use crate::lmstudio;
@@ -126,6 +126,12 @@ pub(crate) enum DocJob {
     },
     /// 要留在 AI 侧栏卡片上的说明（知识库命中了哪几篇、为什么没命中）。
     AiNote(String),
+    /// 研究式起草的一次工具调用，侧栏「过程」里一行。
+    AiTool(String),
+    /// 研究式起草的工作稿整体换新（补全之后）。
+    AiWorkspace(String),
+    /// 研究式起草结束：动笔前要问的题，或定稿后的提案。
+    ResearchDone(Result<Box<crate::ai_panel::ResearchResult>, String>),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
@@ -937,6 +943,73 @@ impl GongwenApp {
         }
     }
 
+    /// 研究式起草结束。
+    fn apply_research_done(
+        &mut self,
+        index: usize,
+        prefix: &str,
+        result: Result<Box<crate::ai_panel::ResearchResult>, String>,
+    ) {
+        use crate::ai_panel::{ResearchResult, ResearchSnapshot};
+        let doc = &mut self.docs[index];
+        match result.map(|boxed| *boxed) {
+            Ok(ResearchResult::Clarify(questions)) => {
+                doc.ai_review_baseline = None;
+                let count = questions.len();
+                let replies = crate::ai_panel::initial_replies(&questions);
+                let turn_id = doc.ai_panel.running_turn_mut().map(|turn| turn.id);
+                doc.ai_panel.ask(questions);
+                if let Some(turn) = turn_id.and_then(|id| doc.ai_panel.turn_mut(id)) {
+                    turn.replies = replies;
+                }
+                self.status = format!("{prefix}动笔前有 {count} 个问题要你确认，在侧栏里选一下。");
+            }
+            Ok(ResearchResult::Proposal { draft, report }) => {
+                let report = *report;
+                let before = doc
+                    .ai_review_baseline
+                    .take()
+                    .unwrap_or_else(|| doc.generated_markdown.clone());
+                let label = doc.ai_prompt_last_label.clone();
+                let turn_id = doc.ai_panel.running_turn_mut().map(|turn| turn.id);
+                let summary =
+                    Self::install_ai_proposal(doc, before, draft, label, &self.config.vocabulary);
+                doc.ai_panel.finish(TurnState::Proposed(summary));
+                let (resolved, _, pending) = report.ledger.counts();
+                let asked = report.questions.len();
+                let rounds = report.rounds;
+                if let Some(turn) = turn_id.and_then(|id| doc.ai_panel.turn_mut(id)) {
+                    turn.replies = crate::ai_panel::initial_replies(&report.questions);
+                    turn.questions = report.questions;
+                    turn.research = Some(ResearchSnapshot {
+                        raw: report.markdown,
+                        sources: report
+                            .evidence
+                            .items()
+                            .iter()
+                            .map(|item| (item.id, item.source_label()))
+                            .collect(),
+                        ledger: report.ledger,
+                    });
+                }
+                self.status = if asked == 0 {
+                    format!(
+                        "{prefix}研究式起草完成（{rounds} 轮）：补全 {resolved} 处缺口，提案在侧栏里。"
+                    )
+                } else {
+                    format!(
+                        "{prefix}研究式起草完成（{rounds} 轮）：补全 {resolved} 处，还有 {pending} 处待确认，{asked} 道题在侧栏里。"
+                    )
+                };
+            }
+            Err(error) => {
+                doc.ai_review_baseline = None;
+                doc.ai_panel.finish(TurnState::Failed(error.clone()));
+                self.status = format!("{prefix}研究式起草失败：{error}");
+            }
+        }
+    }
+
     /// 后台任务回投。稿件可能已经关闭，或者同一篇又发起了新任务——
     /// 两种情况下这份结果都已作废，直接丢掉，绝不能落到别的稿件上。
     pub(crate) fn apply_doc_job(&mut self, key: DocKey, seq: u64, job: DocJob) {
@@ -948,7 +1021,11 @@ impl GongwenApp {
         }
         if !matches!(
             job,
-            DocJob::ExportProgress(_) | DocJob::AiStream { .. } | DocJob::AiNote(_)
+            DocJob::ExportProgress(_)
+                | DocJob::AiStream { .. }
+                | DocJob::AiNote(_)
+                | DocJob::AiTool(_)
+                | DocJob::AiWorkspace(_)
         ) {
             self.docs[index].busy = false;
         }
@@ -1012,38 +1089,20 @@ impl GongwenApp {
                 };
             }
             DocJob::Proposed(Ok(result)) => {
-                let before = self.docs[index]
+                let doc = &mut self.docs[index];
+                let before = doc
                     .ai_review_baseline
                     .take()
-                    .unwrap_or_else(|| self.docs[index].generated_markdown.clone());
-                let fact_changes = crate::ai_guard::compare_key_facts(
-                    &before,
-                    &result.markdown,
-                    &self.config.vocabulary,
-                );
-                let count = fact_changes.len();
-                let label = self.docs[index].ai_prompt_last_label.clone();
-                let summary = ProposalSummary {
-                    chars: result.markdown.chars().count(),
-                    was_empty: before.trim().is_empty(),
-                    fact_changes: count,
-                    warnings: result.warnings.len(),
-                    truncated: result
-                        .warnings
-                        .iter()
-                        .any(|note| note.message.starts_with(crate::ai_panel::TRUNCATED_NOTE)),
-                };
-                // 侧栏开着时结果卡就地给出采用 / 对照 / 放弃，不再自动弹审阅窗。
-                let open = !self.docs[index].ai_panel.open;
-                self.docs[index].ai_proposal = Some(AiProposal {
+                    .unwrap_or_else(|| doc.generated_markdown.clone());
+                let label = doc.ai_prompt_last_label.clone();
+                let summary = Self::install_ai_proposal(
+                    doc,
                     before,
                     result,
-                    label: label.clone(),
-                    fact_changes,
-                    fact_changes_confirmed: false,
-                    view: crate::diff_view::DiffViewState::default(),
-                    open,
-                });
+                    label.clone(),
+                    &self.config.vocabulary,
+                );
+                let count = summary.fact_changes;
                 self.docs[index]
                     .ai_panel
                     .finish(TurnState::Proposed(summary));
@@ -1167,6 +1226,9 @@ impl GongwenApp {
                 reasoning,
                 done,
             } => self.docs[index].ai_panel.append(&content, &reasoning, done),
+            DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
+            DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
+            DocJob::ResearchDone(result) => self.apply_research_done(index, &prefix, result),
             DocJob::AiNote(note) => {
                 self.status = format!("{prefix}{note}");
                 self.docs[index].ai_panel.note(note);
