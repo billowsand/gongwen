@@ -3,6 +3,7 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::jobs`，与其它子模块共享
 //! `app` 根模块的私有可见性（`GongwenApp` 结构体与根模块常量仍在 app.rs 中）。
 
+use crate::ai_panel::{ProposalSummary, TurnState};
 use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState};
 use crate::doc_import;
 use crate::draft_page::{AiProposal, DocKey, DraftSession};
@@ -116,6 +117,15 @@ pub(crate) enum DocJob {
     Optimized(Result<GeneratedDraft, String>),
     /// 已有正文上的 AI 结果先进入审阅提案，不直接覆盖。
     Proposed(Result<GeneratedDraft, String>),
+    /// 模型的流式增量，落进 AI 侧栏正在跑的那一轮，不碰正文。`done` 表示模型
+    /// 已经说完、接下来是程序校验。
+    AiStream {
+        content: String,
+        reasoning: String,
+        done: bool,
+    },
+    /// 要留在 AI 侧栏卡片上的说明（知识库命中了哪几篇、为什么没命中）。
+    AiNote(String),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
@@ -936,7 +946,10 @@ impl GongwenApp {
         if self.docs[index].job_seq != seq {
             return;
         }
-        if !matches!(job, DocJob::ExportProgress(_)) {
+        if !matches!(
+            job,
+            DocJob::ExportProgress(_) | DocJob::AiStream { .. } | DocJob::AiNote(_)
+        ) {
             self.docs[index].busy = false;
         }
         // 后台跑完的未必是当前显示的那篇，状态栏要点名是谁。
@@ -952,10 +965,14 @@ impl GongwenApp {
                     &result.markdown,
                 ) {
                     self.status = error.to_string();
+                    self.docs[index]
+                        .ai_panel
+                        .finish(TurnState::Failed(error.to_string()));
                     return;
                 }
                 let title = result.title.clone();
                 Self::take_generated(&mut self.docs[index], result);
+                self.docs[index].ai_panel.finish(TurnState::Applied);
                 self.status = if self.docs[index].output_files.is_empty() {
                     format!(
                         "{prefix}“{title}”草稿已生成。可直接在右侧修改，然后点“导出当前审校稿”。"
@@ -973,10 +990,14 @@ impl GongwenApp {
                     &result.markdown,
                 ) {
                     self.status = error.to_string();
+                    self.docs[index]
+                        .ai_panel
+                        .finish(TurnState::Failed(error.to_string()));
                     return;
                 }
                 let title = result.title.clone();
                 Self::take_generated(&mut self.docs[index], result);
+                self.docs[index].ai_panel.finish(TurnState::Applied);
                 self.status = if self.docs[index].output_files.is_empty() {
                     format!(
                         "{prefix}“{title}”已按“{}”优化，输出格式已按内置标准校正。",
@@ -1002,6 +1023,18 @@ impl GongwenApp {
                 );
                 let count = fact_changes.len();
                 let label = self.docs[index].ai_prompt_last_label.clone();
+                let summary = ProposalSummary {
+                    chars: result.markdown.chars().count(),
+                    was_empty: before.trim().is_empty(),
+                    fact_changes: count,
+                    warnings: result.warnings.len(),
+                    truncated: result
+                        .warnings
+                        .iter()
+                        .any(|note| note.message.starts_with(crate::ai_panel::TRUNCATED_NOTE)),
+                };
+                // 侧栏开着时结果卡就地给出采用 / 对照 / 放弃，不再自动弹审阅窗。
+                let open = !self.docs[index].ai_panel.open;
                 self.docs[index].ai_proposal = Some(AiProposal {
                     before,
                     result,
@@ -1009,8 +1042,11 @@ impl GongwenApp {
                     fact_changes,
                     fact_changes_confirmed: false,
                     view: crate::diff_view::DiffViewState::default(),
-                    open: true,
+                    open,
                 });
+                self.docs[index]
+                    .ai_panel
+                    .finish(TurnState::Proposed(summary));
                 self.status = if count == 0 {
                     format!("{prefix}“{label}”修改提案已生成，请对照确认后再应用。")
                 } else {
@@ -1113,13 +1149,32 @@ impl GongwenApp {
             DocJob::Reviewed(Err(error)) => {
                 self.status = format!("{prefix}文字复核失败：{error}");
             }
-            DocJob::Drafted(Err(error)) => self.status = format!("{prefix}起草失败：{error}"),
-            DocJob::Optimized(Err(error)) => self.status = format!("{prefix}优化失败：{error}"),
+            DocJob::Drafted(Err(error)) => {
+                self.status = format!("{prefix}起草失败：{error}");
+                self.docs[index].ai_panel.finish(TurnState::Failed(error));
+            }
+            DocJob::Optimized(Err(error)) => {
+                self.status = format!("{prefix}优化失败：{error}");
+                self.docs[index].ai_panel.finish(TurnState::Failed(error));
+            }
             DocJob::Proposed(Err(error)) => {
                 self.docs[index].ai_review_baseline = None;
                 self.status = format!("{prefix}生成修改提案失败：{error}");
+                self.docs[index].ai_panel.finish(TurnState::Failed(error));
             }
-            DocJob::ExportProgress(message) => self.status = format!("{prefix}{message}"),
+            DocJob::AiStream {
+                content,
+                reasoning,
+                done,
+            } => self.docs[index].ai_panel.append(&content, &reasoning, done),
+            DocJob::AiNote(note) => {
+                self.status = format!("{prefix}{note}");
+                self.docs[index].ai_panel.note(note);
+            }
+            DocJob::ExportProgress(message) => {
+                self.docs[index].ai_panel.set_phase(&message);
+                self.status = format!("{prefix}{message}");
+            }
             DocJob::Exported(Ok(outcome)) => {
                 self.docs[index].output_files = outcome.files;
                 // 编译失败也走 export_error：审校抽屉顶部的红色框会高亮显示，区别于

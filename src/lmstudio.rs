@@ -4,6 +4,9 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod stream;
+pub use stream::{Finish, StreamDelta, StreamOutcome, generate_stream};
+
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
@@ -183,29 +186,15 @@ fn complete_once(
     if config.model.trim().is_empty() {
         return Err(ChatError::Other(anyhow::anyhow!("请先在设置中选择模型")));
     }
-    let mut payload = json!({
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": false
-    });
-    if disable_thinking {
-        let fields = payload.as_object_mut().expect("payload 必然是对象");
-        // 三家写法一起带，不认的通常会被忽略；全被拒时由调用方去掉重试。
-        // vLLM / SGLang / 较新的 LM Studio：透传给 chat template。
-        fields.insert(
-            "chat_template_kwargs".into(),
-            json!({"enable_thinking": false}),
-        );
-        // Ollama 的原生开关。
-        fields.insert("think".into(), json!(false));
-        // 阿里云百炼等把它放在顶层。
-        fields.insert("enable_thinking".into(), json!(false));
-    }
+    let payload = chat_payload(
+        config,
+        system,
+        user,
+        temperature,
+        max_tokens,
+        disable_thinking,
+        false,
+    );
 
     let client = client(config).map_err(ChatError::Other)?;
     let mut request = client
@@ -248,22 +237,76 @@ fn complete_once(
         return Ok(content);
     }
 
-    // 正文为空有三种成因，报出来要能直接指向下一步怎么办，而不是笼统一句
-    // 「未返回正文」让人去翻服务端日志。
     let thinking = choice
         .message
         .reasoning_content
         .is_some_and(|text| !text.trim().is_empty());
-    Err(ChatError::Other(if thinking {
+    Err(ChatError::Other(empty_content_error(
+        max_tokens,
+        thinking,
+        truncated,
+        disable_thinking,
+    )))
+}
+
+/// 组装一次 Chat Completions 请求体。流式与非流式只差 `stream` 一个字段。
+fn chat_payload(
+    config: &LmStudioConfig,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    max_tokens: u32,
+    disable_thinking: bool,
+    stream: bool,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": stream
+    });
+    if disable_thinking {
+        let fields = payload.as_object_mut().expect("payload 必然是对象");
+        // 三家写法一起带，不认的通常会被忽略；全被拒时由调用方去掉重试。
+        // vLLM / SGLang / 较新的 LM Studio：透传给 chat template。
+        fields.insert(
+            "chat_template_kwargs".into(),
+            json!({"enable_thinking": false}),
+        );
+        // Ollama 的原生开关。
+        fields.insert("think".into(), json!(false));
+        // 阿里云百炼等把它放在顶层。
+        fields.insert("enable_thinking".into(), json!(false));
+    }
+    payload
+}
+
+/// 模型没给正文时的报错。
+///
+/// 正文为空有三种成因，报出来要能直接指向下一步怎么办，而不是笼统一句
+/// 「未返回正文」让人去翻服务端日志。
+fn empty_content_error(
+    max_tokens: u32,
+    thinking: bool,
+    truncated: bool,
+    switch_sent: bool,
+) -> anyhow::Error {
+    if thinking && switch_sent {
         anyhow::anyhow!(
-            "模型只输出了思考过程，没有正文：{max_tokens} 的输出上限被推理占满。\
-             应用已自动带上关闭思考的开关（chat_template_kwargs.enable_thinking、\
-             think、enable_thinking 三种写法），你的服务端似乎都不认。\
-             请在服务端关掉思考模式，或换一个非思考模型来做文字复核。"
+            "模型只输出了思考过程，没有正文：{max_tokens} 的输出上限被推理占满。             应用已自动带上关闭思考的开关（chat_template_kwargs.enable_thinking、             think、enable_thinking 三种写法），你的服务端似乎都不认。             请在服务端关掉思考模式，或换一个非思考模型来做文字复核。"
+        )
+    } else if thinking {
+        // 起草不关思考（想得周全些写得更好），预算不够时就会这样。
+        anyhow::anyhow!(
+            "模型只输出了思考过程，没有正文：{max_tokens} 的输出上限被推理占满。             请在设置里调大「最大输出」，或在服务端关掉思考模式、换一个非思考模型。"
         )
     } else if truncated {
         anyhow::anyhow!("模型输出在 {max_tokens} token 处被截断，且截断前没有正文")
     } else {
         anyhow::anyhow!("模型服务未返回正文（choices[0].message.content 为空）")
-    }))
+    }
 }

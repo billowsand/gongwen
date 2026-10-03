@@ -150,7 +150,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "13-ai-workbench",
         Part::Ai,
         "AI 起草工作台",
-        "五种工作流与事实单确认流程"
+        "AI 侧栏、五种工作流与事实单确认流程"
     ),
     chapter!(
         "14-ai-polish",

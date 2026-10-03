@@ -311,6 +311,10 @@ pub(crate) struct AiTaskRequest {
     pub(crate) label: String,
     pub(crate) instruction: String,
     pub(crate) material: String,
+    /// 知识库检索词：用户自己写的那段话。不能拿 `material`——那是包了
+    /// 「【已确认事实单——优先于原始材料】」之类提示词外壳的，外壳里的字会跟着
+    /// 参与关键词召回和向量计算，把检索带偏。
+    pub(crate) query: String,
     pub(crate) baseline: String,
     pub(crate) use_rag: bool,
     pub(crate) review_before_apply: bool,
@@ -435,6 +439,8 @@ pub(crate) struct DraftSession {
     pub(crate) ai_proposal: Option<AiProposal>,
     /// 待确认的大纲与逐节产物。为 None 表示当前没有在走大纲流程。
     pub(crate) outline: Option<OutlineDraft>,
+    /// 右侧 AI 侧栏：输入区、任务流与停止开关。按稿件各存一份，只在内存里。
+    pub(crate) ai_panel: crate::ai_panel::AiPanel,
     /// 本篇待确认的修订建议。词表、文档规则与模型检查器共用这一份。
     pub(crate) revisions: crate::revision::RevisionSet,
     /// 逐句复核的结论缓存：句子指纹 → 模型原话。改了别处的句子不必重问一遍，
@@ -461,12 +467,16 @@ pub(crate) struct DraftSession {
 ///
 /// 之所以不用 `Option<TemplateKind>`：那样 `None` 既要表示"跟随当前文种"、
 /// 又要表示"不限文种"，只能二选一，结果是**跨文种参考根本选不出来**。
+///
+/// 默认不限文种，与知识库页的检索、问答一致。原先默认跟随当前文种，而知识库常常
+/// 只收了某几类文种（实际遇到过只有两篇研究报告的库），写公函时就一条也检索不到，
+/// 看上去像是知识库没起作用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum RagKindFilter {
-    /// 跟随当前稿件的文种，相关度最高。
-    #[default]
+    /// 跟随当前稿件的文种。
     Follow,
     /// 不限文种，全库检索。
+    #[default]
     All,
     /// 指定文种。
     Only(TemplateKind),
@@ -596,6 +606,7 @@ impl DraftSession {
             ai_review_baseline: None,
             ai_proposal: None,
             outline: None,
+            ai_panel: crate::ai_panel::AiPanel::default(),
             revisions: crate::revision::RevisionSet::default(),
             revise_cache: std::collections::BTreeMap::new(),
             saved_baseline: None,

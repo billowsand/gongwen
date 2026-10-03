@@ -520,7 +520,9 @@ impl Default for LmStudioConfig {
             model: String::new(),
             api_key: String::new(),
             temperature: 0.25,
-            max_tokens: 4096,
+            // 思考型模型的推理也算在这里面：qwen3.5 9B 写两百来字的通知要先想近两万字，
+            // 4096 会被思考吃光、一个正文字都出不来。
+            max_tokens: 32000,
             timeout_seconds: 180,
         }
     }

@@ -21,6 +21,8 @@ impl DraftPage<'_> {
         egui::Panel::top("draft_toolbar")
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.ribbon(ui));
+        // AI 侧栏先于审校抽屉声明，贴在最右边。
+        self.ai_panel_side(ui);
         // 历史版本时间轴：第 ④ 期并入左侧时间轴列，旧右侧抽屉下线。
         let mut result_open = self.doc.result_drawer_open;
         let mut close_result = false;

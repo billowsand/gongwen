@@ -21,27 +21,95 @@ use crate::theme;
 use crate::validator;
 use eframe::egui;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
 use std::thread;
+use std::time::{Duration, Instant};
+
+/// 流式增量最多攒这么久就发一次。
+const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+/// 或者攒满这么多字节（约 200 个汉字）就发。两条取先到者：既不让界面一卡一卡，
+/// 也不至于一个 token 一条消息、长稿几千次重绘。
+const STREAM_FLUSH_BYTES: usize = 600;
+
+/// 流式调用起草模型，增量攒批投回界面。最后一批带 `done`，界面据此切到「校验中」。
+fn stream_draft_model(
+    config: &crate::models::LmStudioConfig,
+    system: &str,
+    user: &str,
+    cancel: &AtomicBool,
+    tx: &Sender<WorkerResult>,
+    key: DocKey,
+    seq: u64,
+) -> anyhow::Result<lmstudio::StreamOutcome> {
+    let send = |content: String, reasoning: String, done: bool| {
+        let _ = tx.send(WorkerResult::Doc {
+            key,
+            seq,
+            job: DocJob::AiStream {
+                content,
+                reasoning,
+                done,
+            },
+        });
+    };
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut last_flush = Instant::now();
+    let outcome = lmstudio::generate_stream(
+        config,
+        system,
+        user,
+        config.temperature,
+        config.max_tokens,
+        lmstudio::ChatOptions::default(),
+        cancel,
+        |delta| {
+            match delta {
+                lmstudio::StreamDelta::Content(text) => content.push_str(text),
+                lmstudio::StreamDelta::Reasoning(text) => reasoning.push_str(text),
+            }
+            if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL
+                || content.len() + reasoning.len() >= STREAM_FLUSH_BYTES
+            {
+                send(
+                    std::mem::take(&mut content),
+                    std::mem::take(&mut reasoning),
+                    false,
+                );
+                last_flush = Instant::now();
+            }
+        },
+    );
+    let finished = matches!(&outcome, Ok(o) if o.finish != lmstudio::Finish::Cancelled);
+    if finished || !content.is_empty() || !reasoning.is_empty() {
+        send(content, reasoning, finished);
+    }
+    outcome
+}
 
 /// 起草时检索知识库并把结果拼成提示词参考节。检索失败降级为空串，不阻塞
 /// 起草——RAG 是增强而非硬依赖；但降级原因会随 `notes` 回给调用方显示，
 /// 不再是只有翻服务端日志才知道的静默失败。
+///
+/// 检索本身与知识库页的检索、问答走同一个 [`rag::retrieve`]，检索词也同样是
+/// 用户自己写的那段话（见 [`retrieval_query`]）。
 ///
 /// 返回 (参考节, 给用户看的说明)。
 pub(crate) fn retrieve_reference(
     rag_cfg: &crate::models::RagConfig,
     chat: &crate::models::LmStudioConfig,
     input: &DraftInput,
-    instruction: &str,
+    query: &str,
     kind_filter: Option<TemplateKind>,
 ) -> (String, Vec<String>) {
-    let query = if input.title_hint.trim().is_empty() {
-        instruction.trim().to_string()
-    } else {
-        format!("{}\n{}", input.title_hint.trim(), instruction.trim())
-    };
-    if query.trim().is_empty() {
-        return (String::new(), Vec::new());
+    let query = retrieval_query(input, query);
+    if query.is_empty() {
+        return (
+            String::new(),
+            vec!["没有可用的检索词（材料和标题提示都是空的），本次未检索知识库。".into()],
+        );
     }
     let db_path = match storage::manuscript_db_path() {
         Ok(path) => path,
@@ -58,9 +126,16 @@ pub(crate) fn retrieve_reference(
     };
     let mut notes = outcome.warnings;
     if outcome.chunks.is_empty() {
-        notes.push("知识库没有检索到相关片段，本次未注入参考。".into());
+        notes.push(match kind_filter {
+            Some(kind) => format!(
+                "知识库里没有检索到「{}」文种的相关片段，本次未注入参考；可把检索范围改为「全部文种」。",
+                kind.label()
+            ),
+            None => "知识库没有检索到相关片段，本次未注入参考。".into(),
+        });
         return (String::new(), notes);
     }
+    notes.push(reference_note(&outcome.chunks));
     let refs: Vec<prompt::ReferenceChunk> = outcome
         .chunks
         .into_iter()
@@ -71,8 +146,36 @@ pub(crate) fn retrieve_reference(
             text: chunk.text,
         })
         .collect();
-    notes.push(format!("已注入 {} 段知识库参考。", refs.len()));
     (prompt::format_reference_section(&refs), notes)
+}
+
+/// 知识库检索词：用户自己写的那段话；为空时退回标题提示。
+///
+/// 与知识库页的问答一致，只拿用户的原话去搜，不拼提示词外壳，也不在前面硬加
+/// 标题提示——原先拼的是整段起草材料（含「【已确认事实单——优先于原始材料】」
+/// 「材料要点 1」这类标签），再截成 300 字，标签字挤掉了真正的内容。
+fn retrieval_query(input: &DraftInput, query: &str) -> String {
+    let query = query.trim();
+    if query.is_empty() {
+        input.title_hint.trim().to_string()
+    } else {
+        query.to_string()
+    }
+}
+
+/// 「已注入 N 段参考：《甲》《乙》」。点名出处，用户才知道模型照着什么写的。
+fn reference_note(chunks: &[rag::RetrievedChunk]) -> String {
+    let mut titles: Vec<&str> = Vec::new();
+    for chunk in chunks {
+        if !titles.contains(&chunk.doc_title.as_str()) {
+            titles.push(&chunk.doc_title);
+        }
+    }
+    let named = titles
+        .iter()
+        .map(|title| format!("《{title}》"))
+        .collect::<String>();
+    format!("已注入 {} 段知识库参考：{named}", chunks.len())
 }
 
 impl DraftPage<'_> {
@@ -264,7 +367,7 @@ impl DraftPage<'_> {
     }
 
     /// 让模型先列一份章节大纲。只出骨架，不写正文。
-    pub(crate) fn start_outline(&mut self, material: String, use_rag: bool) {
+    pub(crate) fn start_outline(&mut self, material: String, query: String, use_rag: bool) {
         if self.doc.busy {
             return;
         }
@@ -286,8 +389,7 @@ impl DraftPage<'_> {
         thread::spawn(move || {
             let result = (|| {
                 let reference = if use_rag && config.rag.enabled {
-                    retrieve_reference(&config.rag, &config.lm_studio, &input, &material, rag_kind)
-                        .0
+                    retrieve_reference(&config.rag, &config.lm_studio, &input, &query, rag_kind).0
                 } else {
                     String::new()
                 };
@@ -371,6 +473,7 @@ impl DraftPage<'_> {
             },
             label,
             material: instruction.clone(),
+            query: instruction.clone(),
             instruction,
             baseline: String::new(),
             use_rag: current_empty && self.doc.use_knowledge_rag && self.config.rag.enabled,
@@ -406,6 +509,24 @@ impl DraftPage<'_> {
             self.doc.draft.date = time_context.today.clone();
         }
         self.config.upsert_profile(self.doc.draft.profile.clone());
+        // 侧栏发起的已经开好了这一轮；旧工作台发起的在这里补一轮，流式输出一样
+        // 落进侧栏，用户随时能看、能停。
+        if !self.doc.ai_panel.has_waiting_turn() {
+            let context = if request.use_rag {
+                vec!["知识库".to_string()]
+            } else {
+                Vec::new()
+            };
+            self.doc.ai_panel.push_turn(
+                request.label.clone(),
+                request.label.clone(),
+                context,
+                None,
+            );
+        }
+        self.doc.ai_panel.open = true;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.doc.ai_panel.cancel = Some(cancel.clone());
         let (key, seq) = self.begin_job();
         *self.status = if request.use_rag {
             format!("正在按“{}”检索并起草…", request.label)
@@ -433,6 +554,7 @@ impl DraftPage<'_> {
         let workflow = request.kind;
         let instruction = request.instruction;
         let material = request.material;
+        let query = request.query;
         let baseline = request.baseline;
         let review_before_apply = request.review_before_apply;
         thread::spawn(move || {
@@ -449,18 +571,16 @@ impl DraftPage<'_> {
                             &rag_cfg,
                             &config.lm_studio,
                             &input,
-                            &material,
+                            &query,
                             rag_kind,
                         );
-                        // 检索的降级说明要让用户看见，不能只留在服务端日志里。
-                        if !notes.is_empty() {
+                        // 检索结果与降级说明要让用户看见：一条条留在侧栏卡片上，
+                        // 不能像阶段提示那样第一个字一到就被冲掉。
+                        for note in notes {
                             let _ = tx.send(WorkerResult::Doc {
                                 key,
                                 seq,
-                                job: DocJob::ExportProgress(format!(
-                                    "知识库：{}",
-                                    notes.join("　")
-                                )),
+                                job: DocJob::AiNote(format!("知识库：{note}")),
                             });
                         }
                         reference
@@ -492,7 +612,14 @@ impl DraftPage<'_> {
                         &format!("{}{}", instruction.trim(), protected),
                     )
                 };
-                let raw = lmstudio::generate(&config.lm_studio, &system, &user)?;
+                let outcome =
+                    stream_draft_model(&config.lm_studio, &system, &user, &cancel, &tx, key, seq)?;
+                if outcome.finish == lmstudio::Finish::Cancelled {
+                    // 界面在点停止时已经推进了任务序号，这条结果回去也会被丢掉。
+                    anyhow::bail!("已停止生成");
+                }
+                let truncated = outcome.finish == lmstudio::Finish::Length;
+                let raw = outcome.content;
                 let cleaned = prompt::sanitize_model_markdown(&raw);
                 let normalized = prompt::normalize_generated_markdown(&input, &cleaned);
                 let markdown = export::finalize_markdown(&input, &normalized);
@@ -552,6 +679,12 @@ impl DraftPage<'_> {
                 };
                 if !proof_measured {
                     warnings.extend(estimated);
+                }
+                if truncated {
+                    warnings.push(ReviewNote::from(format!(
+                        "{}可在设置里调大「最大输出」后重新生成。",
+                        crate::ai_panel::TRUNCATED_NOTE
+                    )));
                 }
                 Ok(GeneratedDraft {
                     markdown,
@@ -789,5 +922,115 @@ impl DraftPage<'_> {
         if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
             self.open_result_drawer();
         }
+    }
+}
+
+#[cfg(test)]
+mod retrieval_tests {
+    use super::*;
+    use crate::draft_page::RagKindFilter;
+
+    fn chunk(title: &str) -> rag::RetrievedChunk {
+        rag::RetrievedChunk {
+            chunk_id: 0,
+            doc_id: 0,
+            doc_title: title.into(),
+            kind: TemplateKind::ResearchReport,
+            section: String::new(),
+            text: String::new(),
+            vector_score: 0.0,
+            bm25_score: 0.0,
+            fused_score: 0.0,
+            rerank_score: None,
+        }
+    }
+
+    #[test]
+    fn the_query_is_the_users_own_words() {
+        let input = DraftInput {
+            title_hint: "冬季森林防火".into(),
+            ..Default::default()
+        };
+        assert_eq!(retrieval_query(&input, "  隐患排查要点  "), "隐患排查要点");
+        // 没写材料时才退回标题提示。
+        assert_eq!(retrieval_query(&input, "  "), "冬季森林防火");
+    }
+
+    #[test]
+    fn drafting_searches_all_kinds_by_default_like_the_knowledge_page() {
+        assert_eq!(
+            RagKindFilter::default().resolve(TemplateKind::OfficialLetter),
+            None
+        );
+    }
+
+    #[test]
+    fn the_note_names_each_source_once() {
+        let chunks = [chunk("甲"), chunk("乙"), chunk("甲")];
+        assert_eq!(
+            reference_note(&chunks),
+            "已注入 3 段知识库参考：《甲》《乙》"
+        );
+    }
+
+    /// 拿真实知识库对比改前改后的检索。默认忽略；需要：
+    /// - `GONGWEN_LIVE_KB_DIR`：放着 `manuscripts.db` **副本**的目录；
+    /// - `GONGWEN_LIVE_EMBED_URL` / `GONGWEN_LIVE_EMBED_MODEL`：与入库时同一个 embedding 模型。
+    ///
+    /// 不做重排，免得动用付费接口。
+    #[test]
+    #[ignore = "需要真实知识库与 embedding 服务"]
+    fn live_knowledge_retrieval_before_and_after() {
+        let (Ok(dir), Ok(url), Ok(model)) = (
+            std::env::var("GONGWEN_LIVE_KB_DIR"),
+            std::env::var("GONGWEN_LIVE_EMBED_URL"),
+            std::env::var("GONGWEN_LIVE_EMBED_MODEL"),
+        ) else {
+            eprintln!(
+                "未设置 GONGWEN_LIVE_KB_DIR / GONGWEN_LIVE_EMBED_URL / GONGWEN_LIVE_EMBED_MODEL，跳过"
+            );
+            return;
+        };
+        crate::storage::set_test_config_dir(Some(std::path::PathBuf::from(dir)));
+        let mut rag_cfg = crate::models::RagConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        rag_cfg.embedding.base_url = url;
+        rag_cfg.embedding.model = model;
+        rag_cfg.rerank.mode = crate::models::RerankMode::None;
+        let chat = crate::models::LmStudioConfig::default();
+        let input = DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+
+        let request = "根据知识库，起草一份关于人工智能辅助军事目标识别项目进展情况的报告";
+        // 改前：检索词是整段起草材料（带提示词外壳），文种跟随当前稿件（公函）。
+        let wrapped = format!(
+            "【已确认事实单——优先于原始材料】\n- 材料要点 1：{request}\n\n【原始材料与写作要求】\n{request}"
+        );
+        let old_query = format!("{}\n{}", input.title_hint, wrapped);
+        let (before, before_notes) = retrieve_reference(
+            &rag_cfg,
+            &chat,
+            &input,
+            &old_query,
+            RagKindFilter::Follow.resolve(input.kind),
+        );
+        // 改后：检索词是用户原话，不限文种。
+        let (after, after_notes) = retrieve_reference(
+            &rag_cfg,
+            &chat,
+            &input,
+            request,
+            RagKindFilter::default().resolve(input.kind),
+        );
+        eprintln!(
+            "改前：{before_notes:?}\n改后：{after_notes:?}\n改后参考节前 300 字：{}",
+            after.chars().take(300).collect::<String>()
+        );
+        assert!(before.is_empty(), "跟随公函文种时应当检索不到研究报告");
+        assert!(!after.is_empty(), "不限文种时应当命中");
     }
 }

@@ -38,8 +38,33 @@ pub fn client(target: &str, timeout_seconds: u64) -> Result<Client> {
     build(&current_proxy(), target, timeout_seconds)
 }
 
+/// 流式请求的连接超时。连不上就该立刻报，不必等生成上限。
+const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 为流式补全建一个客户端。
+///
+/// 不能沿用 [`client`]：reqwest blocking 只有 `timeout` 与 `connect_timeout`，没有
+/// 读超时，而 `timeout` 管的是从连接到读完响应体的**总时长**。流式请求照搬它，
+/// 一篇长稿会在生成中途被掐断。这里只把连接卡紧，总时长放宽到原设置的四倍
+/// （至少十分钟）作最后保险；中途要停由用户点停止。
+pub fn stream_client(target: &str, timeout_seconds: u64) -> Result<Client> {
+    let total = Duration::from_secs((timeout_seconds.max(5) * 4).max(600));
+    let builder = Client::builder()
+        .connect_timeout(STREAM_CONNECT_TIMEOUT)
+        .timeout(total);
+    build_with(&current_proxy(), target, builder)
+}
+
 fn build(config: &ProxyConfig, target: &str, timeout_seconds: u64) -> Result<Client> {
     let builder = Client::builder().timeout(Duration::from_secs(timeout_seconds.max(5)));
+    build_with(config, target, builder)
+}
+
+fn build_with(
+    config: &ProxyConfig,
+    target: &str,
+    builder: reqwest::blocking::ClientBuilder,
+) -> Result<Client> {
     let builder = if is_loopback(target) {
         builder.no_proxy()
     } else {

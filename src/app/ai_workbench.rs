@@ -6,7 +6,7 @@
 use crate::app::GongwenApp;
 use crate::diff::{ContentSnapshot, draft_changes, manuscript_diff};
 use crate::diff_view::{DiffViewConfig, manuscript_diff_ui};
-use crate::draft_page::{AiTaskRequest, AiWorkflowKind, RagKindFilter};
+use crate::draft_page::{AiTaskRequest, AiWorkflowKind, DraftSession, RagKindFilter};
 use crate::manuscript::ManuscriptFilter;
 use crate::models::{DraftInput, ManuscriptStatus, TemplateKind};
 use crate::theme;
@@ -382,6 +382,7 @@ impl GongwenApp {
                         }
                     ),
                     material: state.raw_material.trim().to_string(),
+                    query: state.raw_material.trim().to_string(),
                     baseline: baseline.markdown.clone(),
                     use_rag: false,
                     review_before_apply: current_has_text,
@@ -426,7 +427,8 @@ impl GongwenApp {
                 // 再逐节生成，所以这里不能落进整篇起草的 `AiTaskRequest`。
                 if state.workflow == AiWorkflowKind::Outline {
                     let use_rag = self.config.rag.enabled;
-                    self.draft_page().start_outline(material, use_rag);
+                    let query = state.raw_material.trim().to_string();
+                    self.draft_page().start_outline(material, query, use_rag);
                     return true;
                 }
                 AiTaskRequest {
@@ -434,6 +436,7 @@ impl GongwenApp {
                     label: state.workflow.label().to_string(),
                     instruction: String::new(),
                     material,
+                    query: state.raw_material.trim().to_string(),
                     baseline: String::new(),
                     use_rag: state.workflow == AiWorkflowKind::Knowledge,
                     review_before_apply: current_has_text,
@@ -480,6 +483,7 @@ impl GongwenApp {
                         .to_string(),
                     instruction,
                     material: String::new(),
+                    query: String::new(),
                     baseline: String::new(),
                     use_rag: false,
                     review_before_apply: true,
@@ -615,28 +619,51 @@ impl GongwenApp {
         if let Some(window) = win {
             theme::window_enter_anim(ctx, egui::Id::new("ai_proposal_anim"), &window.response);
         }
-        if accept {
-            if let Err(error) = crate::document_reference::ensure_preserved(
-                &self.docs[index].generated_markdown,
-                &proposal.result.markdown,
-            ) {
-                self.status = error.to_string();
-                self.docs[index].ai_proposal = Some(proposal);
-                return;
-            }
-            let label = proposal.label.clone();
-            GongwenApp::take_generated(&mut self.docs[index], proposal.result);
-            self.status = format!("已接受“{label}”修改提案，并重新执行审校。 ");
-            return;
-        }
-        if discard {
-            self.status = format!("已放弃“{}”修改提案，当前审校稿未改变。", proposal.label);
-            return;
-        }
         if !keep {
             proposal.open = false;
         }
         self.docs[index].ai_proposal = Some(proposal);
+        if accept {
+            Self::accept_ai_proposal(&mut self.docs[index], &mut self.status);
+        } else if discard {
+            Self::discard_ai_proposal(&mut self.docs[index], &mut self.status);
+        }
+    }
+
+    /// 接受 AI 提案：落入正文，并把侧栏里对应的结果卡标为已写入。
+    ///
+    /// 这是正文被 AI 产物改写的唯一入口（红线 1），审阅窗与侧栏结果卡共用。
+    /// 关键事实变化没勾确认、或提案丢了正文里的公文引用时拒绝，提案原样留着。
+    pub(crate) fn accept_ai_proposal(doc: &mut DraftSession, status: &mut String) -> bool {
+        let Some(proposal) = doc.ai_proposal.take() else {
+            return false;
+        };
+        if !proposal.fact_changes.is_empty() && !proposal.fact_changes_confirmed {
+            *status = "请先逐项核对关键事实变化，再接受提案。".into();
+            doc.ai_proposal = Some(proposal);
+            return false;
+        }
+        if let Err(error) = crate::document_reference::ensure_preserved(
+            &doc.generated_markdown,
+            &proposal.result.markdown,
+        ) {
+            *status = error.to_string();
+            doc.ai_proposal = Some(proposal);
+            return false;
+        }
+        let label = proposal.label.clone();
+        GongwenApp::take_generated(doc, proposal.result);
+        doc.ai_panel.resolve_proposal(true);
+        *status = format!("已接受“{label}”修改提案。");
+        true
+    }
+
+    /// 放弃 AI 提案，正文不变。
+    pub(crate) fn discard_ai_proposal(doc: &mut DraftSession, status: &mut String) {
+        if let Some(proposal) = doc.ai_proposal.take() {
+            doc.ai_panel.resolve_proposal(false);
+            *status = format!("已放弃“{}”修改提案，当前审校稿未改变。", proposal.label);
+        }
     }
 }
 

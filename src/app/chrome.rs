@@ -1507,6 +1507,10 @@ impl GongwenApp {
                         {
                             let doc = &mut self.docs[active_doc];
                             doc.result_drawer_open = !doc.result_drawer_open;
+                            // 与 AI 侧栏同在右侧，同时开着中央区太窄。
+                            if doc.result_drawer_open {
+                                doc.ai_panel.open = false;
+                            }
                         }
                         // 候选区入口：只在源码 / 分栏模式且已有条目时显示，与编辑区底
                         // 部的面板同步。图标方向随当前状态翻转，点一下切换展开。

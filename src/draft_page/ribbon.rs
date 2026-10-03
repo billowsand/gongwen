@@ -360,27 +360,17 @@ impl DraftPage<'_> {
         }
         toolbar_separator(ui);
 
-        // 三、AI：统一工作台明确分流仿照、知识、材料与受控润色。
-        if theme::primary_icon_button_enabled(
-            ui,
-            !self.doc.busy && editable,
-            theme::Icon::Sparkles,
-            if self.doc.ai_proposal.is_some() {
-                "审阅 AI 提案"
+        // 三、AI：打开或收起右侧 AI 侧栏。生成中也能点开，看进度、点停止。
+        if theme::primary_icon_button_enabled(ui, editable, theme::Icon::Sparkles, "AI 助手")
+            .on_hover_text(if self.doc.ai_panel.open {
+                "收起 AI 侧栏；选中正文再点，则把选区交给 AI 润色"
             } else {
-                "AI 助手"
-            },
-        )
-        .on_hover_text(if self.doc.ai_proposal.is_some() {
-            "返回尚未接受的 AI 修改提案"
-        } else {
-            "仿照已有稿、结合知识库起草、材料成文或在事实锁定下润色"
-        })
-        .clicked()
+                "在右侧打开 AI 侧栏：起草、润色，边生成边显示；选中正文再点只改选区"
+            })
+            .clicked()
         {
             let selection = editor_selection(ui.ctx(), &self.doc.generated_markdown);
-            self.actions
-                .push(DraftAction::OpenAiWorkbench { selection });
+            self.toggle_ai_panel(selection);
         }
         toolbar_separator(ui);
 

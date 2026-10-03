@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod ai_guard;
+mod ai_panel;
 mod app;
 mod crash_log;
 #[cfg(test)]
