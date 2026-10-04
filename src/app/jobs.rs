@@ -127,6 +127,15 @@ pub(crate) enum DocJob {
     AiWorkspace(String),
     /// 技能任务结束：流程挂起要问的题，或定稿后的提案。
     SkillDone(Result<Box<crate::ai_panel::SkillResult>, String>),
+    /// 技能任务开跑前压缩了会话：新的会话摘要与它覆盖到的最后一轮。
+    AiSessionSummary {
+        summary: String,
+        upto: u64,
+    },
+    /// 手动压缩会话的结果：(摘要, 覆盖到的最后一轮, 并进去几轮)。
+    AiCompactDone(Result<(String, u64, usize), String>),
+    /// 这一轮用了哪份风格档案（记一次使用）。
+    StyleUsed(String),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
@@ -951,6 +960,7 @@ impl GongwenApp {
                 skill,
                 skill_id,
                 findings,
+                style,
             }) => {
                 doc.ai_review_baseline = None;
                 let suggestions: Vec<crate::revision::ModelSuggestion> = findings
@@ -980,6 +990,7 @@ impl GongwenApp {
                 let count = findings.len();
                 if let Some(turn) = doc.ai_panel.running_turn_mut() {
                     turn.findings = findings;
+                    turn.style = style.map(|profile| *profile);
                 }
                 doc.ai_panel.finish(TurnState::Reported { fixes });
                 if fixes > 0 {
@@ -1019,6 +1030,8 @@ impl GongwenApp {
                 let summary =
                     Self::install_ai_proposal(doc, before, draft, label, &self.config.vocabulary);
                 doc.ai_panel.finish(TurnState::Proposed(summary));
+                // 新提案到了：下一轮默认接着改它（「改提案」）。
+                doc.ai_panel.composer.skip_proposal = false;
                 let (resolved, _, pending) = report.ledger.counts();
                 let asked = report.questions.len();
                 let rounds = report.rounds;
@@ -1075,6 +1088,8 @@ impl GongwenApp {
                 | DocJob::AiNote(_)
                 | DocJob::AiTool(_)
                 | DocJob::AiWorkspace(_)
+                | DocJob::AiSessionSummary { .. }
+                | DocJob::StyleUsed(_)
         ) {
             self.docs[index].busy = false;
         }
@@ -1138,6 +1153,27 @@ impl GongwenApp {
             DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
             DocJob::SkillDone(result) => self.apply_skill_done(index, &prefix, result),
+            DocJob::AiSessionSummary { summary, upto } => {
+                let session = &mut self.docs[index].ai_panel.session;
+                session.summary = summary;
+                session.compacted_upto = upto;
+            }
+            DocJob::AiCompactDone(Ok((summary, upto, count))) => {
+                let session = &mut self.docs[index].ai_panel.session;
+                session.summary = summary;
+                session.compacted_upto = upto;
+                self.status =
+                    format!("{prefix}会话已压缩：前面 {count} 轮并成了摘要，原始记录仍可翻看。");
+            }
+            DocJob::AiCompactDone(Err(error)) => {
+                self.status = format!("{prefix}压缩会话失败：{error}");
+            }
+            DocJob::StyleUsed(id) => {
+                if let Ok(mut book) = crate::agent::style::StyleBook::load() {
+                    book.record_use(&id);
+                    let _ = book.save();
+                }
+            }
             DocJob::AiNote(note) => {
                 self.status = format!("{prefix}{note}");
                 self.docs[index].ai_panel.note(note);

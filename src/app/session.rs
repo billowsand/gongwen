@@ -35,6 +35,8 @@ pub(crate) enum DraftAction {
     OpenManuscript(i64),
     /// 打开 AI 管理页的「技能」分区（AI 侧栏右上角「管理技能…」）。
     OpenSkillSettings,
+    /// 到 AI 管理页「风格」。
+    OpenStyleSettings,
     /// 把已发布的稿件退回草稿，好继续编辑。
     RevertToDraft(i64),
     /// 把某个已提交版本载入当前起草页。
@@ -81,6 +83,12 @@ impl GongwenApp {
                 self.docs[index]
                     .candidates
                     .sync(id, self.manuscript_store.as_mut(), true)
+            {
+                self.status = error;
+            }
+            // AI 会话同理（跑着的那一轮下次打开时标「已中断」）。
+            if let Some(error) =
+                save_ai_session(&mut self.docs[index], self.manuscript_store.as_mut())
             {
                 self.status = error;
             }
@@ -424,6 +432,9 @@ impl GongwenApp {
             {
                 self.status = error;
             }
+            if let Some(error) = save_ai_session(doc, self.manuscript_store.as_mut()) {
+                self.status = error;
+            }
         }
     }
 
@@ -739,4 +750,22 @@ impl GongwenApp {
 /// 配置里的输入法设置换成引擎那边的写法。启动时（还没有 `GongwenApp`）也要用。
 pub(crate) fn ime_settings_of(ime: &crate::models::ImeConfig) -> crate::ime::ImeSettings {
     crate::ime::ImeSettings::from_config(ime)
+}
+
+/// 立即写下一篇稿件的 AI 会话（关标签、关窗前）。
+fn save_ai_session(
+    doc: &mut crate::draft_page::DraftSession,
+    store: Option<&mut crate::manuscript::ManuscriptStore>,
+) -> Option<String> {
+    use crate::ai_panel::session::SavedProposal;
+    let pending = doc.ai_proposal.as_ref();
+    let make = || SavedProposal::of(pending.expect("只在有提案时调用"));
+    doc.ai_panel.save_session(
+        doc.manuscript_id,
+        store,
+        pending
+            .is_some()
+            .then_some(&make as &dyn Fn() -> SavedProposal),
+        true,
+    )
 }

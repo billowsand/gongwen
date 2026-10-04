@@ -7,6 +7,7 @@
 //! - `apply_research_answers`：交付后附在提案上的题答完——按确定性规则落到工作稿，重新
 //!   定稿成提案，不再调模型。
 
+use super::history::{self, HistoryPlan};
 use super::{ReplyDraft, ResearchSnapshot, TurnRequest, TurnState, locate_selection};
 use crate::agent::api::{ApiSecrets, ApiStore};
 use crate::agent::backend::LmBackend;
@@ -48,11 +49,13 @@ pub(crate) enum SkillResult {
         /// 转修订建议时作检查器名，同一技能再跑一次只换掉自己上一轮的建议。
         skill_id: String,
         findings: Vec<Finding>,
+        /// 风格学习学出的档案（待用户点「保存为风格」）。
+        style: Option<Box<crate::agent::style::StyleProfile>>,
     },
 }
 
 /// 用哪个技能：选定了，或发送后交模型从候选里挑。
-enum Pick {
+pub(super) enum Pick {
     Fixed(Box<Skill>),
     Ask(Vec<Skill>),
 }
@@ -122,7 +125,8 @@ impl DraftPage<'_> {
             return Err("这篇稿件还有任务在跑，稍等一下。".into());
         }
         let time = crate::prompt::TimeContext::now();
-        let (pick, mut board, start, use_rag, title) = match resume {
+        let fresh = resume.is_none();
+        let (pick, mut board, start, use_rag, title, plan) = match resume {
             Some((turn_id, run)) => {
                 let SkillRun {
                     skill,
@@ -148,11 +152,19 @@ impl DraftPage<'_> {
                     suspension.resume_at,
                     use_rag,
                     title,
+                    // 接着跑的沿用发起时的历史（已在黑板上）。
+                    HistoryPlan::default(),
                 )
             }
             None => self.prepare_skill(&request, &time)?,
         };
         board.system_prompt = crate::prompt::build_system_prompt(&time);
+        // 接着跑的沿用发起时挑的风格（已在黑板上）。
+        let style = if fresh {
+            self.style_pick(&request, &board)
+        } else {
+            StylePick::None
+        };
         self.doc.ai_panel.open = true;
         let cancel = Arc::new(AtomicBool::new(false));
         self.doc.ai_panel.cancel = Some(cancel.clone());
@@ -193,6 +205,31 @@ impl DraftPage<'_> {
                 let _ = tx.send(WorkerResult::Doc { key, seq, job });
             };
             let model = LmBackend::new(&config, cancel);
+            if let Some(compaction) = &plan.compact {
+                // 历史太长：先把较早的轮次压成会话摘要（16.15 A.5），摘要回投给界面存进会话。
+                send(DocJob::ExportProgress("会话较长，先压缩较早的轮次…".into()));
+                match compact_session(&model, compaction) {
+                    Ok(summary) => {
+                        board.history = history::render(&summary, &plan.recent);
+                        send(DocJob::AiSessionSummary {
+                            summary,
+                            upto: compaction.upto,
+                        });
+                        send(DocJob::AiTool(
+                            ToolUse::new(
+                                "session.compact",
+                                Permission::Read,
+                                format!("会话压缩：前面 {} 轮并成摘要", compaction.lines.len()),
+                            )
+                            .line(),
+                        ));
+                    }
+                    Err(error) => send(DocJob::AiNote(format!(
+                        "会话压缩没做成（{error:#}），这次只带最近几轮。"
+                    ))),
+                }
+            }
+            board.system_prompt = with_history(&board.system_prompt, &board.history);
             let kb = RagSearch {
                 enabled: use_rag,
                 rag: config.rag.clone(),
@@ -216,7 +253,7 @@ impl DraftPage<'_> {
                     }
                 };
                 run_skill(
-                    pick,
+                    (pick, style),
                     &mut board,
                     start,
                     use_rag,
@@ -228,20 +265,34 @@ impl DraftPage<'_> {
                 )
             };
             batch.flush(&send);
+            let (result, used_style) = result;
+            if let Some(id) = used_style {
+                send(DocJob::StyleUsed(id));
+            }
             send(DocJob::SkillDone(result.map(Box::new)));
         });
         Ok(())
     }
 
     /// 新开一轮：选技能、查条件、备黑板、在任务流里开卡片。
-    fn prepare_skill(
+    pub(super) fn prepare_skill(
         &mut self,
         request: &TurnRequest,
         time: &crate::prompt::TimeContext,
-    ) -> Result<(Pick, Board, usize, bool, String), String> {
+    ) -> Result<(Pick, Board, usize, bool, String, HistoryPlan), String> {
         let load_notes = self.doc.ai_panel.reload_skills();
         let skills = self.doc.ai_panel.skills.clone();
-        let markdown = &self.doc.generated_markdown;
+        // 「改提案」：有待确认的提案、没锁选区时，修改类技能在提案上接着改（16.15 B.7）。
+        // 新提案的改前稿仍是正文，接受时照常对照正文。
+        let proposal_text = self
+            .doc
+            .ai_proposal
+            .as_ref()
+            .filter(|_| request.on_proposal && request.selection.is_none())
+            .map(|proposal| proposal.result.markdown.clone());
+        let markdown = proposal_text
+            .as_ref()
+            .unwrap_or(&self.doc.generated_markdown);
         let selected = match &request.selection {
             Some(selection) => Some(
                 locate_selection(markdown, selection)
@@ -317,6 +368,9 @@ impl DraftPage<'_> {
             title.push_str(&prompt.name);
         }
         let mut context = Vec::new();
+        if proposal_text.is_some() {
+            context.push("改提案".to_string());
+        }
         if use_rag {
             context.push("知识库".to_string());
         }
@@ -330,11 +384,29 @@ impl DraftPage<'_> {
         } else if ctx.has_text {
             context.push("生成新稿提案".to_string());
         }
+        // 本会话里答过的题并进「已确认」，下一轮动笔前澄清不再问（16.15 B.7）。
+        let mut notes: Vec<String> = Vec::new();
+        for note in self
+            .doc
+            .ai_panel
+            .turns
+            .iter()
+            .filter_map(|turn| turn.request.as_ref())
+            .flat_map(|earlier| earlier.notes.iter())
+            .chain(request.notes.iter())
+        {
+            if !notes.contains(note) {
+                notes.push(note.clone());
+            }
+        }
+        let window = crate::lmstudio::context::peek_window(&self.config.lm_studio).tokens;
+        let plan = history::plan(&self.doc.ai_panel, window, false);
         let board = Board {
             draft: self.doc.draft.clone(),
             request: text.trim().to_string(),
-            notes: request.notes.clone(),
+            notes,
             clarified: !request.notes.is_empty(),
+            history: plan.text(),
             document: markdown.clone(),
             workspace: markdown.clone(),
             selection: selected,
@@ -365,7 +437,62 @@ impl DraftPage<'_> {
         for note in load_notes {
             self.doc.ai_panel.note(note);
         }
-        Ok((pick, board, 0, use_rag, title))
+        Ok((pick, board, 0, use_rag, title, plan))
+    }
+
+    /// 这一轮用哪份写法风格（16.15 C.3）：用户指定的，或按文种与场合自动挑；分不出的交给后台
+    /// 让辅助模型挑。
+    fn style_pick(&self, request: &TurnRequest, board: &Board) -> StylePick {
+        use crate::agent::style::{Ranked, StyleChoice, rank};
+        let styles = &self.doc.ai_panel.styles;
+        match &request.style {
+            StyleChoice::Off => StylePick::None,
+            StyleChoice::Fixed(id) => styles
+                .iter()
+                .find(|style| &style.id == id)
+                .map_or(StylePick::None, |style| {
+                    StylePick::Fixed(Box::new(style.clone()), "指定")
+                }),
+            StyleChoice::Auto => {
+                let text = format!("{}\n{}", board.draft.title_hint, board.request);
+                match rank(styles, board.draft.kind, &text) {
+                    Ranked::Picked(style) => StylePick::Fixed(style, "自动选"),
+                    Ranked::Tie(list) => StylePick::Ask(list),
+                    Ranked::Nothing => StylePick::None,
+                }
+            }
+        }
+    }
+
+    /// 手动压缩会话（`/compact`、「•••」→「压缩会话」）：最近 3 轮之前的都并进会话摘要。
+    pub(crate) fn start_compact(&mut self) {
+        if self.doc.busy {
+            *self.status = "这篇稿件还有任务在跑，稍等一下。".into();
+            return;
+        }
+        let window = crate::lmstudio::context::peek_window(&self.config.lm_studio).tokens;
+        let Some(compaction) = history::plan(&self.doc.ai_panel, window, true).compact else {
+            *self.status = format!(
+                "会话还短（不超过 {} 轮新内容），不用压缩。",
+                history::KEEP_RECENT
+            );
+            return;
+        };
+        let (key, seq) = self.begin_job();
+        *self.status = "正在压缩会话…".into();
+        let config = self.config.clone();
+        let tx = self.sender.clone();
+        std::thread::spawn(move || {
+            let model = LmBackend::new(&config, Arc::new(AtomicBool::new(false)));
+            let result = compact_session(&model, &compaction)
+                .map(|summary| (summary, compaction.upto, compaction.lines.len()))
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::AiCompactDone(result),
+            });
+        });
     }
 
     /// 挂起时的题答完了：回答落到黑板（要切的文种由这里切），接着跑。
@@ -467,10 +594,85 @@ impl DraftPage<'_> {
     }
 }
 
-/// 后台线程：定技能、跑引擎、定稿。
+/// 让辅助模型把较早的轮次并进会话摘要。
+fn compact_session(
+    model: &dyn crate::agent::backend::ModelBackend,
+    compaction: &history::Compaction,
+) -> anyhow::Result<String> {
+    let completion = model.complete(
+        crate::agent::backend::ModelRole::Assist,
+        crate::agent::tools::ASSIST_SYSTEM,
+        &history::compact_prompt(compaction),
+        &mut |_| {},
+    )?;
+    let summary = completion.content.trim().to_string();
+    if summary.is_empty() {
+        anyhow::bail!("模型没给出摘要");
+    }
+    Ok(summary)
+}
+
+/// 起草模型的系统提示带上会话历史：只用来理解指代，不当要求、不当出处。
+fn with_history(system: &str, history: &str) -> String {
+    if history.trim().is_empty() {
+        return system.to_string();
+    }
+    format!(
+        "{system}\n\n【本会话之前的往来】（只用来理解这次要求里的指代，如「再短一点」「第二条」指的是哪份稿子、\
+         哪一条；不是新的要求，里面出现的事实也不能当作出处）\n{history}"
+    )
+}
+
+/// 这一轮的写法风格：定了的，或要后台交模型挑的几份。
+pub(crate) enum StylePick {
+    None,
+    /// 档案与来由（「指定」「自动选」）。
+    Fixed(Box<crate::agent::style::StyleProfile>, &'static str),
+    Ask(Vec<crate::agent::style::StyleProfile>),
+}
+
+/// 写稿的技能定下风格：排进黑板（`board.style`），返回用了哪份。审核类技能不用风格。
+pub(super) fn apply_style(
+    style: StylePick,
+    skill: &Skill,
+    board: &mut Board,
+    model: &dyn crate::agent::backend::ModelBackend,
+    emit: &mut dyn FnMut(Event),
+) -> Option<String> {
+    if skill.output == OutputKind::Report || !board.style.is_empty() {
+        return None;
+    }
+    let (profile, reason) = match style {
+        StylePick::None => return None,
+        StylePick::Fixed(profile, reason) => (*profile, reason),
+        StylePick::Ask(list) => {
+            match crate::agent::style::choose_by_model(model, &list, &board.request) {
+                Ok(Some(index)) => (list[index].clone(), "模型从几份里挑的"),
+                Ok(None) => return None,
+                Err(error) => {
+                    emit(Event::Note(format!(
+                        "挑风格时模型出错（{error:#}），这次不用风格。"
+                    )));
+                    return None;
+                }
+            }
+        }
+    };
+    // 风格占起草模型上下文的十分之一以内，放不下先砍范例。
+    let budget = model.window(crate::agent::backend::ModelRole::Draft).tokens / 10;
+    board.style = crate::agent::style::render(&profile, budget);
+    emit(Event::Tool(ToolUse::new(
+        "style",
+        Permission::Read,
+        format!("风格：{}（{reason}）", profile.name),
+    )));
+    Some(profile.id)
+}
+
+/// 后台线程：定技能、定风格、跑引擎、定稿。返回结果与用了哪份风格。
 #[allow(clippy::too_many_arguments)]
 fn run_skill(
-    pick: Pick,
+    (pick, style): (Pick, StylePick),
     board: &mut Board,
     start: usize,
     use_rag: bool,
@@ -479,12 +681,52 @@ fn run_skill(
     kb: &RagSearch,
     (apis, secrets): (&ApiStore, &ApiSecrets),
     emit: &mut dyn FnMut(Event),
-) -> Result<SkillResult, String> {
-    let skill = match pick {
+) -> (Result<SkillResult, String>, Option<String>) {
+    let skill = match resolve_skill(pick, board, model, emit) {
+        Ok(skill) => skill,
+        Err(error) => return (Err(error), None),
+    };
+    let used = apply_style(style, &skill, board, model, emit);
+    if !board.style.is_empty() {
+        board.system_prompt = format!("{}\n\n{}", board.system_prompt, board.style);
+    }
+    (
+        run_engine(
+            skill,
+            board,
+            start,
+            use_rag,
+            config,
+            model,
+            kb,
+            (apis, secrets),
+            emit,
+        ),
+        used,
+    )
+}
+
+/// 定技能：选定了的，或交模型从候选里挑。
+fn resolve_skill(
+    pick: Pick,
+    board: &Board,
+    model: &LmBackend,
+    emit: &mut dyn FnMut(Event),
+) -> Result<Skill, String> {
+    Ok(match pick {
         Pick::Fixed(skill) => *skill,
         Pick::Ask(mut candidates) => {
             let refs: Vec<&Skill> = candidates.iter().collect();
-            let index = router::choose_by_model(model, &refs, &board.request)
+            // 追问（「再短一点」）光看原话分不出该用哪个技能：带上最近一轮的往来。
+            let routing = match board.history.rsplit("\n\n").next() {
+                Some(last) if !last.trim().is_empty() => format!(
+                    "{}\n\n（本会话上一轮：{}）",
+                    board.request,
+                    crate::agent::tools::short(last, 300)
+                ),
+                _ => board.request.clone(),
+            };
+            let index = router::choose_by_model(model, &refs, &routing)
                 .map_err(|e| format!("选技能时模型出错：{e:#}"))?;
             let skill = candidates.swap_remove(index);
             emit(Event::Tool(ToolUse::new(
@@ -494,7 +736,22 @@ fn run_skill(
             )));
             skill
         }
-    };
+    })
+}
+
+/// 跑引擎、定稿。
+#[allow(clippy::too_many_arguments)]
+fn run_engine(
+    skill: Skill,
+    board: &mut Board,
+    start: usize,
+    use_rag: bool,
+    config: &crate::models::AppConfig,
+    model: &LmBackend,
+    kb: &RagSearch,
+    (apis, secrets): (&ApiStore, &ApiSecrets),
+    emit: &mut dyn FnMut(Event),
+) -> Result<SkillResult, String> {
     let env = Env {
         config,
         vocabulary: &config.vocabulary,
@@ -532,10 +789,16 @@ fn run_skill(
                     },
                 );
             }
+            let style = board
+                .vars
+                .get(crate::agent::ops::STYLE_PROFILE)
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .map(Box::new);
             Ok(SkillResult::Report {
                 skill: skill.name,
                 skill_id: skill.id,
                 findings,
+                style,
             })
         }
         Outcome::Done => {

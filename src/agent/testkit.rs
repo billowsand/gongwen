@@ -20,6 +20,8 @@ type Responder = Box<dyn Fn(ModelRole, &str) -> String>;
 pub(crate) struct ScriptedModel {
     respond: Responder,
     pub(crate) calls: RefCell<Vec<(ModelRole, String)>>,
+    /// 假装的上下文窗口（token）。
+    window: usize,
 }
 
 impl ScriptedModel {
@@ -27,7 +29,14 @@ impl ScriptedModel {
         Self {
             respond: Box::new(respond),
             calls: RefCell::new(Vec::new()),
+            window: crate::lmstudio::context::DEFAULT_WINDOW,
         }
+    }
+
+    /// 换一个上下文窗口，测装箱用。
+    pub(crate) fn with_window(mut self, tokens: usize) -> Self {
+        self.window = tokens;
+        self
     }
 
     /// 提示词里含 `needle` 的调用有几次。
@@ -69,6 +78,13 @@ impl ModelBackend for ScriptedModel {
 
     fn cancelled(&self) -> bool {
         false
+    }
+
+    fn window(&self, _role: ModelRole) -> crate::lmstudio::context::Window {
+        crate::lmstudio::context::Window {
+            tokens: self.window,
+            source: crate::lmstudio::context::WindowSource::Manual,
+        }
     }
 }
 
@@ -187,6 +203,11 @@ impl<'a> Driver<'a> {
 
     /// 从上次停下的地方跑到挂起或结束。挂起时返回题目。
     pub(crate) fn run(&mut self) -> Option<Suspension> {
+        self.try_run().expect("技能应当跑通")
+    }
+
+    /// 同 [`Driver::run`]，出错时把错误交回来。
+    pub(crate) fn try_run(&mut self) -> anyhow::Result<Option<Suspension>> {
         let config = AppConfig::default();
         let env = Env {
             config: &config,
@@ -199,17 +220,17 @@ impl<'a> Driver<'a> {
             secrets: &Default::default(),
         };
         let events = &mut self.events;
-        match engine::run(&mut self.board, &env, self.next, &mut |event| {
-            events.push(event)
-        })
-        .expect("技能应当跑通")
-        {
-            Outcome::Done => None,
-            Outcome::Suspended(suspension) => {
-                self.next = suspension.resume_at;
-                Some(suspension)
-            }
-        }
+        Ok(
+            match engine::run(&mut self.board, &env, self.next, &mut |event| {
+                events.push(event)
+            })? {
+                Outcome::Done => None,
+                Outcome::Suspended(suspension) => {
+                    self.next = suspension.resume_at;
+                    Some(suspension)
+                }
+            },
+        )
     }
 
     /// 像用户点「确认」一样回答挂起的题，返回用户选中的文种（若有）。

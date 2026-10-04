@@ -30,7 +30,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// 内置技能：(id, 文件内容)。
-const BUILTIN: [(&str, &str); 14] = [
+const BUILTIN: [(&str, &str); 15] = [
     (
         RESEARCH_DRAFT,
         include_str!("../../assets/agent-skills/research-draft/SKILL.md"),
@@ -87,6 +87,10 @@ const BUILTIN: [(&str, &str); 14] = [
         FREE_TASK,
         include_str!("../../assets/agent-skills/free-task/SKILL.md"),
     ),
+    (
+        STYLE_LEARN,
+        include_str!("../../assets/agent-skills/style-learn/SKILL.md"),
+    ),
 ];
 
 pub(crate) const RESEARCH_DRAFT: &str = "research-draft";
@@ -103,6 +107,7 @@ pub(crate) const FACT_CHECK: &str = "fact-check";
 pub(crate) const EXTRACT: &str = "extract";
 pub(crate) const POLICY_BASIS: &str = "policy-basis";
 pub(crate) const FREE_TASK: &str = "free-task";
+pub(crate) const STYLE_LEARN: &str = "style-learn";
 
 /// 技能产出什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -144,6 +149,8 @@ pub(crate) enum RefUse {
     Material,
     /// 当来函：全文以「来函」并进材料。
     Letter,
+    /// 当样稿：引擎不处理，交给算子自己读（风格学习）。
+    Sample,
 }
 
 /// 对正文的要求。

@@ -19,6 +19,7 @@ struct Harness {
     actions: Vec<DraftAction>,
     export_links: ExportLinks,
     metrics: crate::metrics::Metrics,
+    store: Option<crate::manuscript::ManuscriptStore>,
     _keep: Receiver<WorkerResult>,
 }
 
@@ -49,6 +50,7 @@ impl Harness {
             actions: Vec::new(),
             export_links: ExportLinks::default(),
             metrics: crate::metrics::Metrics::default(),
+            store: None,
             _keep,
         }
     }
@@ -57,7 +59,7 @@ impl Harness {
         let mut page = DraftPage {
             doc: &mut self.doc,
             config: &mut self.config,
-            store: None,
+            store: self.store.as_mut(),
             sender: &self.sender,
             status: &mut self.status,
             version_switch: &mut self.version_switch,
@@ -210,6 +212,8 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
         use_rag: false,
         refs: Vec::new(),
         notes: Vec::new(),
+        on_proposal: false,
+        style: Default::default(),
     };
     let model_questions = vec![("篇幅多长？".to_string(), vec!["短".into(), "长".into()])];
     let questions = predraft_questions(
@@ -1101,4 +1105,303 @@ fn composer_samples() {
         !has(&texts, "仿写"),
         "引用的书名不把技能带偏到仿写：{texts:?}"
     );
+}
+
+/// 追问（16.15 B.7）：有待确认的提案时「再短一点」改的是提案；本会话答过的题并进已确认；
+/// 之前的轮次进 `history`。
+#[test]
+fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
+    let mut harness = Harness::new("原来的正文，写得很长很长。\n");
+    harness.doc.ai_panel.open = true;
+    let earlier = crate::ai_panel::TurnRequest {
+        skill: None,
+        text: "写个通知".into(),
+        selection: None,
+        preset: None,
+        use_rag: false,
+        refs: Vec::new(),
+        notes: vec!["会议时间：下周一".into()],
+        on_proposal: false,
+        style: Default::default(),
+    };
+    harness
+        .doc
+        .ai_panel
+        .push_turn("起草".into(), "写个通知".into(), vec![], Some(earlier));
+    harness.doc.ai_panel.turns[0].content = "提案稿：关于开会的通知。".into();
+    let draft = GeneratedDraft {
+        markdown: "提案稿：关于开会的通知。\n".into(),
+        title: String::new(),
+        warnings: Vec::new(),
+        proof_warnings: Vec::new(),
+        proof_measured: false,
+        files: Vec::new(),
+    };
+    let summary = GongwenApp::install_ai_proposal(
+        &mut harness.doc,
+        "原来的正文，写得很长很长。\n".into(),
+        draft,
+        "起草".into(),
+        &[],
+    );
+    harness.doc.ai_panel.finish(TurnState::Proposed(summary));
+
+    let request = crate::ai_panel::TurnRequest {
+        skill: Some(crate::agent::skill::CONDENSE.into()),
+        text: "再短一点".into(),
+        selection: None,
+        preset: None,
+        use_rag: false,
+        refs: Vec::new(),
+        notes: Vec::new(),
+        on_proposal: true,
+        style: Default::default(),
+    };
+    let time = crate::prompt::TimeContext::now();
+    let (_, board, ..) = harness
+        .with_page(|page| page.prepare_skill(&request, &time))
+        .unwrap();
+    assert_eq!(board.document, "提案稿：关于开会的通知。\n", "改的是提案");
+    assert_eq!(board.workspace, board.document);
+    assert_eq!(board.notes, ["会议时间：下周一"], "答过的题不再问");
+    assert!(
+        board.history.contains("【第 1 轮】你说：写个通知"),
+        "{}",
+        board.history
+    );
+    assert!(board.history.contains("交了提案，还没处理"));
+    let turn = harness.doc.ai_panel.turns.last().unwrap();
+    assert!(
+        turn.context.iter().any(|c| c == "改提案"),
+        "{:?}",
+        turn.context
+    );
+
+    // 点掉「改提案」：改回正文。
+    let mut request = request;
+    request.on_proposal = false;
+    let (_, board, ..) = harness
+        .with_page(|page| page.prepare_skill(&request, &time))
+        .unwrap();
+    assert_eq!(board.document, "原来的正文，写得很长很长。\n");
+}
+
+/// 会话持久化（16.15 B）：关掉重开，侧栏照样开着，待确认的提案正文没动就重新装上；
+/// 「新会话」从空白开始，「历史会话」能切回去。
+#[test]
+fn the_session_comes_back_after_reopening_the_manuscript() {
+    use crate::manuscript::{ManuscriptStore, NewManuscript};
+    let body = "原来的正文。\n";
+    let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+    let id = store
+        .create(
+            &NewManuscript {
+                content_markdown: body.into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let mut harness = Harness::new(body);
+    harness.store = Some(store);
+    harness.doc.manuscript_id = Some(id);
+    harness.with_page(|page| page.sync_ai_session());
+    harness.doc.ai_panel.open = true;
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "压一压".into(), vec![], None);
+    harness.doc.ai_panel.turns[0].content = "压过的正文。".into();
+    let draft = GeneratedDraft {
+        markdown: "压过的正文。\n".into(),
+        title: String::new(),
+        warnings: Vec::new(),
+        proof_warnings: Vec::new(),
+        proof_measured: false,
+        files: Vec::new(),
+    };
+    let summary =
+        GongwenApp::install_ai_proposal(&mut harness.doc, body.into(), draft, "润色".into(), &[]);
+    harness.doc.ai_panel.finish(TurnState::Proposed(summary));
+    harness.with_page(|page| page.save_ai_session(true));
+
+    // 「关掉重开」：同一个库、同一篇稿件，新的标签。
+    let store = harness.store.take();
+    let mut reopened = Harness::new(body);
+    reopened.store = store;
+    reopened.doc.manuscript_id = Some(id);
+    reopened.with_page(|page| page.sync_ai_session());
+    assert!(reopened.doc.ai_panel.open, "侧栏照样开着");
+    assert_eq!(reopened.doc.ai_panel.turns.len(), 1);
+    assert!(matches!(
+        reopened.doc.ai_panel.turns[0].state,
+        TurnState::Proposed(_)
+    ));
+    let proposal = reopened.doc.ai_proposal.as_ref().expect("提案重新装上了");
+    assert_eq!(proposal.result.markdown, "压过的正文。\n");
+    let first = reopened.doc.ai_panel.session.id.clone();
+
+    // 新会话：空白、提案卸下；历史里能切回去，提案又装上。
+    reopened.with_page(|page| page.new_ai_session());
+    assert!(reopened.doc.ai_panel.turns.is_empty());
+    assert!(reopened.doc.ai_proposal.is_none());
+    reopened
+        .doc
+        .ai_panel
+        .push_turn("审校".into(), "审一下".into(), vec![], None);
+    reopened
+        .doc
+        .ai_panel
+        .finish(TurnState::Reported { fixes: 0 });
+    reopened.with_page(|page| page.refresh_ai_sessions());
+    assert_eq!(reopened.doc.ai_panel.session.list.len(), 2);
+    reopened.with_page(|page| page.open_ai_session(&first));
+    assert_eq!(reopened.doc.ai_panel.session.id, first);
+    assert_eq!(reopened.doc.ai_panel.turns[0].prompt, "压一压");
+    assert!(reopened.doc.ai_proposal.is_some());
+    // 切过来的会话成了当前：再开一次停在它上面。
+    reopened.with_page(|page| page.save_ai_session(true));
+    let current = reopened
+        .store
+        .as_ref()
+        .unwrap()
+        .list_ai_sessions(id)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.is_current)
+        .unwrap();
+    assert_eq!(current.id, first);
+}
+
+/// 风格（16.15 C.3）：写稿的技能排进风格并留一行过程；审核类不用；分不出时交模型挑。
+#[test]
+fn writing_skills_carry_the_chosen_style() {
+    use crate::agent::style::{StyleExample, StyleProfile};
+    use crate::agent::testkit::ScriptedModel;
+    use crate::ai_panel::skill_job::{StylePick, apply_style};
+    let profile = |name: &str| StyleProfile {
+        name: name.into(),
+        description: "总体基调：庄重。".into(),
+        examples: vec![StyleExample {
+            role: "开头".into(),
+            text: "为深入贯彻落实……".into(),
+            source: "防火".into(),
+        }],
+        ..StyleProfile::default()
+    };
+    let model = ScriptedModel::new(|_, _| "2".into());
+    let polish = crate::agent::skill::builtin(crate::agent::skill::POLISH).unwrap();
+    let review = crate::agent::skill::builtin(crate::agent::skill::REVIEW).unwrap();
+    let mut lines = Vec::new();
+    let mut emit = |event: crate::agent::engine::Event| {
+        if let crate::agent::engine::Event::Tool(tool) = event {
+            lines.push(tool.summary);
+        }
+    };
+
+    let mut board = crate::agent::board::Board::default();
+    let chosen = profile("部署通知");
+    let used = apply_style(
+        StylePick::Fixed(Box::new(chosen.clone()), "自动选"),
+        &polish,
+        &mut board,
+        &model,
+        &mut emit,
+    );
+    assert_eq!(used.as_deref(), Some(chosen.id.as_str()));
+    assert!(
+        board.style.starts_with("【写法风格：部署通知】"),
+        "{}",
+        board.style
+    );
+    assert!(board.style.contains("不得照搬"));
+
+    let mut board = crate::agent::board::Board::default();
+    let used = apply_style(
+        StylePick::Fixed(Box::new(profile("部署通知")), "指定"),
+        &review,
+        &mut board,
+        &model,
+        &mut emit,
+    );
+    assert!(used.is_none() && board.style.is_empty(), "审核类不用风格");
+
+    let mut board = crate::agent::board::Board::default();
+    let tie = vec![profile("甲"), profile("乙")];
+    let used = apply_style(
+        StylePick::Ask(tie.clone()),
+        &polish,
+        &mut board,
+        &model,
+        &mut emit,
+    );
+    assert_eq!(used.as_deref(), Some(tie[1].id.as_str()), "模型挑了第 2 份");
+    assert!(
+        lines.iter().any(|l| l == "风格：部署通知（自动选）"),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("风格：乙（模型从几份里挑的）")),
+        "{lines:?}"
+    );
+}
+
+/// 会话与风格的样张：标题行（会话名、历史会话、新会话）、压缩摘要行、「改提案」「风格」标签、
+/// 已中断与已过期的卡片。出到 `tmp/ai-panel-session.png` 目视检查。
+#[test]
+#[ignore = "出样张，手动跑"]
+fn session_samples() {
+    use crate::agent::style::StyleProfile;
+    let size = egui::vec2(480.0, 900.0);
+    let mut harness = Harness::new("# 关于做好冬季森林防火工作的通知\n\n一、总体要求\n");
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    let panel = &mut harness.doc.ai_panel;
+    panel.styles = vec![StyleProfile {
+        name: "对下部署类通知".into(),
+        ..StyleProfile::default()
+    }];
+    panel.session.summary = "前面起草了一份冬季森林防火通知，用户确认会议时间为下周一。".into();
+    for (title, prompt) in [("起草", "写个防火通知"), ("精简", "压一压")] {
+        panel.push_turn(title.into(), prompt.into(), vec![], None);
+        panel.finish(TurnState::Accepted);
+    }
+    panel.session.compacted_upto = 2;
+    panel.push_turn("润色".into(), "语气再严一点".into(), vec![], None);
+    panel.finish(TurnState::Interrupted);
+    panel.push_turn(
+        "精简".into(),
+        "再短一点".into(),
+        vec!["改提案".into()],
+        None,
+    );
+    panel.turns.last_mut().unwrap().content =
+        "# 关于做好冬季森林防火工作的通知\n\n各地要压实责任。".into();
+    let draft = GeneratedDraft {
+        markdown: "# 关于做好冬季森林防火工作的通知\n\n各地要压实责任。\n".into(),
+        title: String::new(),
+        warnings: Vec::new(),
+        proof_warnings: Vec::new(),
+        proof_measured: false,
+        files: Vec::new(),
+    };
+    let before = harness.doc.generated_markdown.clone();
+    let summary =
+        GongwenApp::install_ai_proposal(&mut harness.doc, before, draft, "精简".into(), &[]);
+    harness.doc.ai_panel.finish(TurnState::Proposed(summary));
+    harness.doc.ai_panel.composer.text = "第二条展开说".into();
+    let mut canvas = crate::ui_snapshot::Canvas::default();
+    theme::configure_style(&harness.ctx);
+    harness.ctx.set_pixels_per_point(2.0);
+    for _ in 0..15 {
+        let output = harness.frame_output(Vec::new(), size);
+        canvas.absorb(&output.textures_delta);
+    }
+    let output = harness.frame_output(Vec::new(), size);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tmp")
+        .join("ai-panel-session.png");
+    canvas.render(&harness.ctx, output, size, theme::canvas(), &path);
+    println!("{}", path.display());
 }

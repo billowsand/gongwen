@@ -4,8 +4,10 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+pub mod context;
 mod converse;
 mod stream;
+pub use context::ContextOverflow;
 pub use converse::{ConverseError, converse_stream};
 pub use stream::{Finish, StreamDelta, generate_stream};
 
@@ -37,6 +39,28 @@ struct ModelsResponse {
 #[derive(Debug, Deserialize, Serialize)]
 struct ModelInfo {
     id: String,
+    /// vLLM 给的上下文窗口。
+    max_model_len: Option<u64>,
+    /// LM Studio 原生接口给的两个：已加载的与最大的，前者优先。
+    loaded_context_length: Option<u64>,
+    max_context_length: Option<u64>,
+    /// OpenRouter 等的写法。
+    context_length: Option<u64>,
+}
+
+impl ModelInfo {
+    fn context_window(&self) -> Option<usize> {
+        [
+            self.max_model_len,
+            self.loaded_context_length,
+            self.max_context_length,
+            self.context_length,
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|n| n as usize)
+    }
 }
 
 fn client(config: &LmStudioConfig) -> Result<Client> {
@@ -64,13 +88,19 @@ pub fn list_models_at(base_url: &str, api_key: &str, timeout_seconds: u64) -> Re
     if !response.status().is_success() {
         bail!("模型服务返回 HTTP {}", response.status());
     }
-    let mut models = response
+    let data = response
         .json::<ModelsResponse>()
         .context("模型列表格式无法解析")?
-        .data
-        .into_iter()
-        .map(|m| m.id)
-        .collect::<Vec<_>>();
+        .data;
+    // 顺手记下各模型的上下文窗口，自动模式按它算。
+    context::record_service(
+        base_url,
+        &data
+            .iter()
+            .map(|m| (m.id.clone(), m.context_window()))
+            .collect::<Vec<_>>(),
+    );
+    let mut models = data.into_iter().map(|m| m.id).collect::<Vec<_>>();
     models.sort();
     Ok(models)
 }
@@ -154,27 +184,93 @@ pub fn generate_with_options(
 ) -> Result<String> {
     use std::sync::atomic::Ordering::Relaxed;
     let with_switch = options.disable_thinking && !THINKING_SWITCH_REJECTED.load(Relaxed);
-    match complete_once(config, system, user, temperature, max_tokens, with_switch) {
-        Err(ChatError::Rejected(error)) if with_switch => {
-            // 只可能是那几个多出来的字段惹的祸：不带它们再发一次。
-            THINKING_SWITCH_REJECTED.store(true, Relaxed);
-            complete_once(config, system, user, temperature, max_tokens, false).map_err(|second| {
-                match second {
-                    ChatError::Rejected(second) | ChatError::Other(second) => second.context(
-                        format!("（已去掉关闭思考的开关重试；带开关时的首次失败：{error:#}）"),
-                    ),
-                }
-            })
+    let input = context::estimate_tokens(system) + context::estimate_tokens(user);
+    within_window(config, input, max_tokens, |limit| {
+        match complete_once(config, system, user, temperature, limit, with_switch) {
+            Err(ChatError::Rejected(error)) if with_switch => {
+                // 只可能是那几个多出来的字段惹的祸：不带它们再发一次。
+                THINKING_SWITCH_REJECTED.store(true, Relaxed);
+                complete_once(config, system, user, temperature, limit, false)
+                    .map_err(|second| second.switch_retried(&error))
+            }
+            other => other,
         }
-        Err(ChatError::Rejected(error) | ChatError::Other(error)) => Err(error),
-        Ok(text) => Ok(text),
-    }
+    })
+    .map_err(ChatError::into_inner)
 }
 
 /// 区分「服务端嫌请求不合法」和别的失败：只有前者值得去掉开关重试。
+/// 输入超出上下文不算前者（[`ContextOverflow`] 放在 `Other` 里），另由 [`within_window`] 处理。
 enum ChatError {
     Rejected(anyhow::Error),
     Other(anyhow::Error),
+}
+
+impl ChatError {
+    fn into_inner(self) -> anyhow::Error {
+        match self {
+            ChatError::Rejected(error) | ChatError::Other(error) => error,
+        }
+    }
+
+    /// 去掉关思考开关重发后仍失败：带上首次失败的原因。
+    fn switch_retried(self, first: &anyhow::Error) -> Self {
+        let note = format!("（已去掉关闭思考的开关重试；带开关时的首次失败：{first:#}）");
+        match self {
+            ChatError::Rejected(error) => ChatError::Rejected(error.context(note)),
+            ChatError::Other(error) => ChatError::Other(error.context(note)),
+        }
+    }
+
+    /// 非 2xx 响应：输入超长单独认出来，其余 4xx 算「嫌请求不合法」。
+    fn from_status(status: reqwest::StatusCode, body: &str) -> Self {
+        if status.is_client_error()
+            && let Some(overflow) = context::parse_overflow(body)
+        {
+            return ChatError::Other(anyhow::Error::new(overflow));
+        }
+        let error = anyhow::anyhow!("模型服务返回 HTTP {status}：{body}");
+        // 只有 4xx 才可能是「不认识多带的那几个字段」，值得去掉重试；
+        // 5xx 是服务端自己的问题，重试也一样。
+        if status.is_client_error() {
+            ChatError::Rejected(error)
+        } else {
+            ChatError::Other(error)
+        }
+    }
+}
+
+/// 服务端报的超长（还没按它重试过）。
+pub(crate) fn server_overflow(error: &anyhow::Error) -> Option<ContextOverflow> {
+    error
+        .downcast_ref::<ContextOverflow>()
+        .filter(|overflow| overflow.from_server)
+        .cloned()
+}
+
+/// 发请求前按上下文窗口现算输出上限（`docs/ai-agent-workbench.md` 16.15 A.3）：本地估算就放不下的
+/// 不发；服务端报超长时记下它说的上限、重算后重发一次（A.7）。
+fn within_window<T>(
+    config: &LmStudioConfig,
+    input: usize,
+    max_tokens: u32,
+    mut send: impl FnMut(u32) -> std::result::Result<T, ChatError>,
+) -> std::result::Result<T, ChatError> {
+    let window = context::peek_window(config);
+    let Some(limit) = context::output_limit(window.tokens, input, max_tokens) else {
+        let overflow = context::local_overflow(window, input);
+        return Err(ChatError::Other(anyhow::Error::new(overflow)));
+    };
+    match send(limit) {
+        Err(ChatError::Other(error)) => match server_overflow(&error) {
+            Some(overflow) => match context::after_overflow(config, &overflow, input, max_tokens) {
+                Ok(limit) => send(limit),
+                Err(local) => Err(ChatError::Other(anyhow::Error::new(local))),
+            },
+            None => Err(ChatError::Other(error)),
+        },
+        other => other,
+    }
 }
 
 fn complete_once(
@@ -215,14 +311,7 @@ fn complete_once(
         .context("读取模型服务响应失败")
         .map_err(ChatError::Other)?;
     if !status.is_success() {
-        let error = anyhow::anyhow!("模型服务返回 HTTP {status}：{body}");
-        // 只有 4xx 才可能是「不认识多带的那几个字段」，值得去掉重试；
-        // 5xx 是服务端自己的问题，重试也一样。
-        return Err(if status.is_client_error() {
-            ChatError::Rejected(error)
-        } else {
-            ChatError::Other(error)
-        });
+        return Err(ChatError::from_status(status, &body));
     }
 
     let parsed: ChatResponse = serde_json::from_str(&body)

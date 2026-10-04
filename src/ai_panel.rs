@@ -20,7 +20,10 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 mod composer_ui;
+mod history;
 mod mention;
+pub(crate) mod session;
+mod session_ui;
 mod skill_job;
 mod ui;
 
@@ -48,10 +51,15 @@ pub(crate) struct Composer {
     pub(crate) refs: Vec<Reference>,
     /// `/`、`@` 弹出层的状态。
     pub(crate) popup: mention::PopupState,
+    /// 有待确认的提案时，修改类技能改提案而不是改正文（16.15 B.7）。默认是；底栏的「改提案」
+    /// 标签点掉就回到改正文。
+    pub(crate) skip_proposal: bool,
+    /// 写法风格：自动挑 / 指定一份 / 不用（16.15 C.3）。
+    pub(crate) style: crate::agent::style::StyleChoice,
 }
 
 /// 一轮请求的原始参数，「重新生成」照它再发一次。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TurnRequest {
     /// 指定的技能 id；None 表示按上下文与触发词自动选。
     pub(crate) skill: Option<String>,
@@ -63,10 +71,16 @@ pub(crate) struct TurnRequest {
     pub(crate) refs: Vec<Reference>,
     /// 动笔前澄清的回答（重跑时沿用，不再问一遍）。
     pub(crate) notes: Vec<String>,
+    /// 这一轮改的是待确认的提案（「改提案」）。
+    #[serde(default)]
+    pub(crate) on_proposal: bool,
+    /// 写法风格的选择。
+    #[serde(default)]
+    pub(crate) style: crate::agent::style::StyleChoice,
 }
 
 /// 结果卡上的摘要，在提案到达时算一次，不必每帧重算。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProposalSummary {
     /// 提案正文字数。
     pub(crate) chars: usize,
@@ -77,7 +91,7 @@ pub(crate) struct ProposalSummary {
     pub(crate) truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TurnState {
     /// 已发出，还没收到第一个字。
     Waiting,
@@ -99,6 +113,10 @@ pub(crate) enum TurnState {
     Superseded,
     Stopped,
     Failed(String),
+    /// 跑到一半程序关了（读回会话时）。
+    Interrupted,
+    /// 提案交出之后正文改过了（读回会话时），不能再接受。
+    Expired,
 }
 
 impl TurnState {
@@ -140,6 +158,8 @@ pub(crate) struct AiTurn {
     pub(crate) run: Option<Box<SkillRun>>,
     /// 审核类技能的问题清单。
     pub(crate) findings: Vec<crate::agent::board::Finding>,
+    /// 风格学习学出、还没保存的档案。
+    pub(crate) style: Option<crate::agent::style::StyleProfile>,
     pub(crate) started: Instant,
     /// 结束时定格的耗时；运行中为 None，按 `started` 现算。
     pub(crate) elapsed: Option<Duration>,
@@ -162,8 +182,8 @@ impl AiTurn {
 /// 模型输出撞上长度上限时附在审校提示里的文字；结果卡据此亮「输出被截断」。
 pub(crate) const TRUNCATED_NOTE: &str = "模型输出达到长度上限被截断，正文可能不完整。";
 
-/// 任务流最多保留的轮数。只存内存，不落盘。
-const MAX_TURNS: usize = 20;
+/// 一个会话最多保留的轮数，多了从最早的删起（库里一并删）。
+const MAX_TURNS: usize = 100;
 
 /// 一篇稿件的 AI 侧栏。
 #[derive(Debug, Default)]
@@ -175,7 +195,11 @@ pub(crate) struct AiPanel {
     pub(crate) cancel: Option<Arc<AtomicBool>>,
     /// 技能列表的缓存，技能标签与 `/` 弹出列表每帧要用；打开侧栏和每次发送时重读。
     pub(crate) skills: Vec<Skill>,
+    /// 风格档案的缓存（底栏「风格」标签用），与技能列表一起重读。
+    pub(crate) styles: Vec<crate::agent::style::StyleProfile>,
     next_id: u64,
+    /// 当前会话：随稿件存进稿件库（16.15 B）。
+    pub(crate) session: session::Session,
 }
 
 impl AiPanel {
@@ -210,6 +234,7 @@ impl AiPanel {
             research: None,
             run: None,
             findings: Vec::new(),
+            style: None,
             started: Instant::now(),
             elapsed: None,
         });
@@ -284,8 +309,12 @@ impl AiPanel {
 
     /// 重读技能列表（内置 + 配置目录），返回加载时的说明。
     pub(crate) fn reload_skills(&mut self) -> Vec<String> {
-        let (skills, notes) = crate::agent::skill::load_all();
+        let (skills, mut notes) = crate::agent::skill::load_all();
         self.skills = skills;
+        match crate::agent::style::StyleBook::load() {
+            Ok(book) => self.styles = book.styles,
+            Err(error) => notes.push(format!("风格档案读不出来：{error:#}")),
+        }
         notes
     }
 
@@ -332,7 +361,7 @@ impl AiPanel {
 }
 
 /// 一道选择题的作答状态。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReplyDraft {
     pub(crate) choice: Option<usize>,
     pub(crate) custom: String,
@@ -355,7 +384,7 @@ impl ReplyDraft {
 }
 
 /// 研究式起草留下的东西，按回答修订时要用。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ResearchSnapshot {
     /// 定稿前的工作稿（引用标记已剥）。按回答修订在它上面改，再走一遍定稿。
     pub(crate) raw: String,

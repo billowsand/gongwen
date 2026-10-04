@@ -12,7 +12,7 @@ use super::gaps::{Gap, GapKind, GapStatus, Ledger};
 use crate::models::TemplateKind;
 
 /// 选项被选中后做什么。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Action {
     /// 作为已确认的补充信息交给起草（动笔前的题）。
     Note(String),
@@ -28,7 +28,7 @@ pub(crate) enum Action {
     Pick(serde_json::Value),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Choice {
     pub(crate) label: String,
     /// 一句话说明：出处或推荐理由。
@@ -38,7 +38,7 @@ pub(crate) struct Choice {
 }
 
 /// 这道题问的是什么。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Target {
     PreDraft,
     Gap(usize),
@@ -46,7 +46,7 @@ pub(crate) enum Target {
     Pick,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Question {
     pub(crate) id: usize,
     pub(crate) text: String,
@@ -61,7 +61,7 @@ pub(crate) struct Question {
 }
 
 /// 用户对一道题的回答。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Reply {
     Choice(usize),
     Custom(String),

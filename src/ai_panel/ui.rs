@@ -29,6 +29,10 @@ enum CardAction {
     Answer(u64),
     /// 打开审校抽屉（审核类技能把有改法的问题放在那里）。
     OpenDrawer,
+    /// 风格学习的结果存成风格档案。
+    SaveStyle(u64),
+    /// 到 AI 管理页「风格」细改。
+    OpenStyles,
 }
 
 impl DraftPage<'_> {
@@ -101,11 +105,58 @@ impl DraftPage<'_> {
                     .tint(theme::accent()),
             );
             ui.label(egui::RichText::new("AI 助手").strong());
+            let title = self.doc.ai_panel.session_title();
+            if !self.doc.ai_panel.turns.is_empty() {
+                ui.label(
+                    egui::RichText::new(crate::agent::tools::short(&title, 14))
+                        .small()
+                        .color(theme::text_muted()),
+                )
+                .on_hover_text(title);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, theme::Icon::X, "收起 AI 侧栏").clicked() {
                     self.doc.ai_panel.open = false;
                 }
+                let history = theme::icon_button(ui, theme::Icon::History, "历史会话");
+                if history.clicked() {
+                    self.refresh_ai_sessions();
+                }
+                egui::Popup::menu(&history)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.set_min_width(300.0);
+                        self.ai_sessions_menu(ui);
+                    });
+                if theme::icon_button(ui, theme::Icon::Plus, "新会话：从空白开始，追问不带之前的轮次")
+                    .clicked()
+                {
+                    self.new_ai_session();
+                }
                 ui.menu_button("•••", |ui| {
+                    let can_compact = !self.doc.busy
+                        && self
+                            .doc
+                            .ai_panel
+                            .turns
+                            .iter()
+                            .filter(|turn| turn.id > self.doc.ai_panel.session.compacted_upto)
+                            .count()
+                            > super::history::KEEP_RECENT;
+                    if ui
+                        .add_enabled(
+                            can_compact,
+                            theme::menu_item(theme::Icon::Archive, "压缩会话"),
+                        )
+                        .on_hover_text(
+                            "最近 3 轮之前的并成一段摘要，后面的追问只带摘要；原始记录仍可翻看。也可以在输入框敲 /compact",
+                        )
+                        .on_disabled_hover_text("会话还短，不用压缩")
+                        .clicked()
+                    {
+                        self.start_compact();
+                        ui.close();
+                    }
                     if ui
                         .add(theme::menu_item(theme::Icon::WandSparkles, "管理技能…"))
                         .on_hover_text("AI 管理页「技能」：启用停用、复制改写、新建、导入导出")
@@ -165,6 +216,30 @@ impl DraftPage<'_> {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                let session = &doc.ai_panel.session;
+                if !session.summary.trim().is_empty() {
+                    let folded = doc
+                        .ai_panel
+                        .turns
+                        .iter()
+                        .filter(|turn| turn.id <= session.compacted_upto)
+                        .count();
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(format!("前面 {folded} 轮已压缩成摘要，追问只带摘要"))
+                            .small()
+                            .color(theme::text_soft()),
+                    )
+                    .id_salt(("ai_session_summary", doc.key))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(&session.summary)
+                                .small()
+                                .color(theme::text_soft()),
+                        );
+                    });
+                    ui.add_space(8.0);
+                }
                 for turn in &mut doc.ai_panel.turns {
                     request_bubble(ui, turn);
                     ui.add_space(6.0);
@@ -191,6 +266,8 @@ impl DraftPage<'_> {
                 }
             }
             Some(CardAction::OpenDrawer) => self.open_result_drawer(),
+            Some(CardAction::SaveStyle(id)) => self.save_learned_style(id),
+            Some(CardAction::OpenStyles) => self.actions.push(DraftAction::OpenStyleSettings),
             Some(CardAction::Answer(id)) => {
                 let asking = self
                     .doc
@@ -217,6 +294,36 @@ impl DraftPage<'_> {
                 }
             }
             None => {}
+        }
+    }
+
+    /// 风格学习的结果存成风格档案（用户点了「保存为风格」）。
+    fn save_learned_style(&mut self, turn_id: u64) {
+        let Some(profile) = self
+            .doc
+            .ai_panel
+            .turn_mut(turn_id)
+            .and_then(|turn| turn.style.clone())
+        else {
+            return;
+        };
+        let saved = crate::agent::style::StyleBook::load().and_then(|mut book| {
+            book.upsert(profile.clone());
+            book.save()
+        });
+        match saved {
+            Ok(()) => {
+                if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
+                    turn.style = None;
+                    turn.notes.push(format!(
+                        "已保存为风格「{}」，可在 AI 管理页「风格」里细改、设为默认或停用。",
+                        profile.name
+                    ));
+                }
+                let _ = self.doc.ai_panel.reload_skills();
+                *self.status = format!("已保存风格「{}」。", profile.name);
+            }
+            Err(error) => *self.status = format!("保存风格失败：{error:#}"),
         }
     }
 
@@ -334,6 +441,12 @@ fn turn_card(
             }
             TurnState::Failed(_) => {
                 theme::chip(ui, "失败", theme::danger(), theme::danger_soft());
+            }
+            TurnState::Interrupted => {
+                theme::chip(ui, "已中断", theme::warn(), theme::warn_soft());
+            }
+            TurnState::Expired => {
+                theme::chip(ui, "已过期", theme::text_soft(), theme::surface_sunk());
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -456,7 +569,26 @@ fn turn_card(
         TurnState::Reported { fixes } => {
             ui.add_space(6.0);
             findings_ui(ui, &turn.findings, *fixes, action);
-            rerun_button(ui, turn, "重新审一遍", action);
+            if turn.style.is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    if theme::primary_icon_button(ui, theme::Icon::Save, "保存为风格")
+                        .on_hover_text("存进风格档案，以后起草、改写时按文种与场合自动选用")
+                        .clicked()
+                    {
+                        *action = Some(CardAction::SaveStyle(turn.id));
+                    }
+                    if ui
+                        .add(theme::secondary_icon_button(
+                            theme::Icon::Settings,
+                            "到 AI 管理页细改",
+                        ))
+                        .clicked()
+                    {
+                        *action = Some(CardAction::OpenStyles);
+                    }
+                });
+            }
+            rerun_button(ui, turn, "重新做一遍", action);
         }
         TurnState::Stopped => {
             ui.add_space(6.0);
@@ -467,6 +599,16 @@ fn turn_card(
             ui.add_space(6.0);
             ui.colored_label(theme::danger(), error);
             rerun_button(ui, turn, "重试", action);
+        }
+        TurnState::Interrupted => {
+            ui.add_space(6.0);
+            ui.weak("程序关闭时这一轮还没跑完。");
+            rerun_button(ui, turn, "重新生成", action);
+        }
+        TurnState::Expired => {
+            ui.add_space(6.0);
+            ui.weak("提案交出之后正文改过了，这份提案不能再接受。");
+            rerun_button(ui, turn, "重新生成", action);
         }
         _ => {}
     }

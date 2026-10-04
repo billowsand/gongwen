@@ -574,7 +574,8 @@ fn extract_lists_points_without_touching_the_document() {
 /// 环境变量同 `engine::tests::live_research_draft`，另有：
 /// - `GONGWEN_LIVE_SKILL`：技能 id（默认 `policy-report`）；
 /// - `GONGWEN_LIVE_KIND`：文种名（默认按技能取）；`GONGWEN_LIVE_TITLE`：标题提示；
-/// - `GONGWEN_LIVE_REQUEST`：用户原话；`GONGWEN_LIVE_DOCUMENT_FILE`：现有正文（修改、审核类技能用）。
+/// - `GONGWEN_LIVE_REQUEST`：用户原话；`GONGWEN_LIVE_DOCUMENT_FILE`：现有正文（修改、审核类技能用）；
+/// - `GONGWEN_LIVE_STYLE_FILE`：一份风格档案（`StyleProfile` 的 JSON），像侧栏那样排进系统提示。
 #[test]
 #[ignore = "需要真实模型与知识库"]
 fn live_builtin_skill() {
@@ -627,6 +628,22 @@ fn live_builtin_skill() {
     );
     board.system_prompt = crate::prompt::build_system_prompt(&time);
     board.time_sources = format!("{} {}", time.today, time.now);
+    {
+        use crate::agent::backend::ModelBackend;
+        eprintln!(
+            "上下文窗口：{}",
+            model
+                .window(crate::agent::backend::ModelRole::Draft)
+                .label()
+        );
+    }
+    if let Ok(text) = std::fs::read_to_string(env("GONGWEN_LIVE_STYLE_FILE")) {
+        let profile: crate::agent::style::StyleProfile =
+            serde_json::from_str(&text).expect("风格档案 JSON");
+        board.style = crate::agent::style::render(&profile, 6000);
+        board.system_prompt = format!("{}\n\n{}", board.system_prompt, board.style);
+        eprintln!("风格：{}", profile.name);
+    }
     if let Ok(text) = std::fs::read_to_string(env("GONGWEN_LIVE_DOCUMENT_FILE")) {
         board.document = text.clone();
         board.workspace = text;
@@ -917,4 +934,52 @@ fn a_missing_reference_is_noted_and_skipped() {
         driver.events
     );
     assert_eq!(driver.board.request, "会议决定：\n- 甲\n- 乙");
+}
+
+/// 风格学习（16.15 C.2）：`@` 的稿子当样稿交给算子，学出的档案存进变量、清单里列出写法描述，
+/// 不进证据包；没有引用时说明要先 `@`。
+#[test]
+fn style_learn_reads_the_referenced_samples_and_proposes_a_profile() {
+    let skill = builtin(skill::STYLE_LEARN);
+    let model = ScriptedModel::new(|_, _| {
+        "名称：对下部署类通知\n适用场合：部署、通知\n写法描述：\n总体基调：庄重。\n开头：为……现就有关事项通知如下。\n范例：1".into()
+    });
+    let kb = KeywordKb::disabled();
+    let text = "为深入贯彻落实上级部署，切实做好今冬明春森林防火工作，现就有关事项通知如下。\n\n一、提高认识\n\n各地要压实责任、统筹推进，确保不发生重特大森林火灾。\n\n特此通知。";
+    let mut start = board(TemplateKind::PlainDocument, "", "学一下这几篇的风格");
+    start.refs = vec![
+        reference(RefSource::Manuscript, 1, "防火通知"),
+        reference(RefSource::Manuscript, 2, "安全通知"),
+    ];
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    driver.manuscripts.docs = vec![
+        manuscript(1, "防火通知", text),
+        manuscript(2, "安全通知", text),
+    ];
+    assert!(driver.run().is_none());
+    let profile: crate::agent::style::StyleProfile =
+        serde_json::from_value(driver.board.vars[crate::agent::ops::STYLE_PROFILE].clone())
+            .unwrap();
+    assert_eq!(profile.name, "对下部署类通知");
+    assert_eq!(profile.sources.len(), 2);
+    assert!(driver.board.evidence.is_empty(), "样稿不进证据包");
+    let groups: Vec<&str> = driver
+        .board
+        .findings
+        .iter()
+        .map(|f| f.group.as_str())
+        .collect();
+    assert_eq!(groups[0], "风格档案");
+    assert!(groups.contains(&"写法描述"));
+    assert!(skill.output.is_report(&driver.board));
+
+    // 没有 @ 引用：说清要先引用。
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        board(TemplateKind::PlainDocument, "", "学一下风格"),
+    );
+    let error = driver.try_run().unwrap_err().to_string();
+    assert!(error.contains("先用 @ 引用"), "{error}");
 }

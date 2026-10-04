@@ -34,6 +34,8 @@ pub(crate) enum AiSection {
     DataApis,
     /// 工具调试台。
     ToolConsole,
+    /// 写法风格档案（16.15 C）。
+    Styles,
     /// 润色预设库（侧栏技能的 `{preset}`）。
     Presets,
     /// 内置输出标准（只读）。
@@ -58,18 +60,22 @@ const MENU_GROUPS: [(&str, &[AiSection]); 3] = [
             AiSection::ToolConsole,
         ],
     ),
-    ("润色", &[AiSection::Presets, AiSection::Contract]),
+    (
+        "写法",
+        &[AiSection::Styles, AiSection::Presets, AiSection::Contract],
+    ),
 ];
 
 impl AiSection {
     #[cfg(test)]
-    const ALL: [AiSection; 8] = [
+    const ALL: [AiSection; 9] = [
         AiSection::ModelService,
         AiSection::ReviseModel,
         AiSection::Knowledge,
         AiSection::Skills,
         AiSection::DataApis,
         AiSection::ToolConsole,
+        AiSection::Styles,
         AiSection::Presets,
         AiSection::Contract,
     ];
@@ -83,6 +89,7 @@ impl AiSection {
             AiSection::Skills => "技能",
             AiSection::DataApis => "数据接口",
             AiSection::ToolConsole => "工具调试台",
+            AiSection::Styles => "风格",
             AiSection::Presets => "润色预设",
             AiSection::Contract => "输出标准",
         }
@@ -96,6 +103,7 @@ impl AiSection {
             AiSection::Skills => theme::Icon::WandSparkles,
             AiSection::DataApis => theme::Icon::Braces,
             AiSection::ToolConsole => theme::Icon::Settings,
+            AiSection::Styles => theme::Icon::Quote,
             AiSection::Presets => theme::Icon::Edit,
             AiSection::Contract => theme::Icon::Shield,
         }
@@ -126,6 +134,10 @@ impl AiSection {
             }
             AiSection::ToolConsole => {
                 "选一个工具、填参数、看输出，写技能时用来试工具。对象是当前稿件的副本，改不到正文。"
+            }
+            AiSection::Styles => {
+                "从指定的几篇稿子学出一份写法风格（基调、开头、结构、常用表达、结尾），以后起草、改写时按文种与场合\
+                 自动挑一份带上，也可以在侧栏输入框底栏指定。只学写法不学事实；档案只存本机，可导出给同事。"
             }
             AiSection::Presets => {
                 "润色、语气等技能里的 {preset}：选了预设，它的指令就拼进提示词。在侧栏输入框底栏的预设标签里选用。"
@@ -237,6 +249,7 @@ impl GongwenApp {
                             AiSection::Skills => self.skills_section_ui(ui),
                             AiSection::DataApis => self.apis_section_ui(ui),
                             AiSection::ToolConsole => self.tool_console_section_ui(ui),
+                            AiSection::Styles => self.styles_section_ui(ui),
                             AiSection::Presets => self.ai_presets_section_ui(ui),
                             AiSection::Contract => self.output_contract_ui(ui),
                         }
@@ -402,7 +415,52 @@ impl GongwenApp {
             self.status = "检查器统计已清空。".into();
         }
     }
+}
 
+/// 「上下文窗口」一行（16.15 A.1）：自动 / 常用档位 / 手填；自动时写明现在按多少算、从哪来。
+fn context_window_row(
+    ui: &mut egui::Ui,
+    salt: &str,
+    value: &mut u32,
+    auto: crate::lmstudio::context::Window,
+) {
+    use crate::lmstudio::context::tokens_label;
+    const PRESETS: [u32; 6] = [8192, 16_384, 32_768, 65_536, 131_072, 204_800];
+    setting_row(
+        ui,
+        "上下文窗口",
+        Some(
+            "一次请求里输入加输出最多多少 token。自动：先问服务（点「测试连接」时读到），问不到按模型名估，再不行按 32k；服务端报过超长时按它说的算。",
+        ),
+        |ui| {
+            let text = if *value == 0 {
+                format!("自动：{}", auto.label())
+            } else {
+                tokens_label(*value as usize)
+            };
+            egui::ComboBox::from_id_salt(salt)
+                .selected_text(text)
+                .width(240.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(value, 0, "自动");
+                    for preset in PRESETS {
+                        ui.selectable_value(value, preset, tokens_label(preset as usize));
+                    }
+                });
+            if *value != 0 {
+                ui.add(
+                    egui::DragValue::new(value)
+                        .range(2048..=2_000_000)
+                        .speed(256)
+                        .suffix(" token"),
+                )
+                .on_hover_text("也可以直接填");
+            }
+        },
+    );
+}
+
+impl GongwenApp {
     /// 本地模型服务分区：起草模型的接口地址、模型与生成参数。
     fn model_service_section_ui(&mut self, ui: &mut egui::Ui) {
         sub_heading(ui, "接口", None);
@@ -456,9 +514,26 @@ impl GongwenApp {
                 egui::Slider::new(&mut self.config.lm_studio.temperature, 0.0..=1.2).step_by(0.05),
             );
         });
-        setting_row(ui, "最大输出 Token", None, |ui| {
-            ui.add(egui::DragValue::new(&mut self.config.lm_studio.max_tokens).range(256..=32768));
+        setting_row(
+            ui,
+            "最大输出 Token",
+            Some("每次请求还会按上下文窗口的剩余空间自动收紧，不会因为输入加输出超过窗口被拒"),
+            |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut self.config.lm_studio.max_tokens).range(256..=32768),
+                );
+            },
+        );
+        let auto = crate::lmstudio::context::peek_window(&crate::models::LmStudioConfig {
+            context_window: 0,
+            ..self.config.lm_studio.clone()
         });
+        context_window_row(
+            ui,
+            "draft_context_window",
+            &mut self.config.lm_studio.context_window,
+            auto,
+        );
         setting_row(ui, "超时（秒）", None, |ui| {
             ui.add(
                 egui::DragValue::new(&mut self.config.lm_studio.timeout_seconds).range(5..=1800),
@@ -536,6 +611,15 @@ impl GongwenApp {
                         .range(5..=600),
                 );
             });
+            let mut probe = self.config.revise_model.resolve(&self.config.lm_studio);
+            probe.context_window = 0;
+            let auto = crate::lmstudio::context::peek_window(&probe);
+            context_window_row(
+                ui,
+                "revise_context_window",
+                &mut self.config.revise_model.context_window,
+                auto,
+            );
 
             sub_heading(ui, "检查器", None);
             self.revise_tasks_ui(ui);

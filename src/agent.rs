@@ -20,6 +20,7 @@
 pub(crate) mod api;
 pub(crate) mod backend;
 pub(crate) mod board;
+pub(crate) mod budget;
 pub(crate) mod clarify;
 pub(crate) mod engine;
 pub(crate) mod evidence;
@@ -29,6 +30,7 @@ pub(crate) mod references;
 pub(crate) mod router;
 pub(crate) mod skill;
 pub(crate) mod skill_files;
+pub(crate) mod style;
 pub(crate) mod toolcall;
 pub(crate) mod tools;
 
@@ -37,4 +39,6 @@ mod agent_tests;
 #[cfg(test)]
 mod builtin_tests;
 #[cfg(test)]
-mod testkit;
+mod context_tests;
+#[cfg(test)]
+pub(crate) mod testkit;

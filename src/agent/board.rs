@@ -19,7 +19,8 @@ static VARIABLE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("变量正则")
 });
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct Board {
     /// 要素。工具只读，流程不得回写（红线 2）。
     pub(crate) draft: DraftInput,
@@ -57,17 +58,23 @@ pub(crate) struct Board {
     pub(crate) refs: Vec<Reference>,
     /// 当证据用的引用在证据包里的编号：逐节检索时也一直带着，不被检索结果冲掉。
     pub(crate) pinned: Vec<usize>,
+    /// 本会话之前的往来（会话摘要 + 最近几轮），追问时理解「再短一点」指的是什么（16.15 B.7）。
+    /// 起草模型的系统提示自动带上；技能提示词里也可以写 `{history}`。
+    pub(crate) history: String,
+    /// 这一轮用的写法风格（已按预算排好的文字，16.15 C.3）。起草模型的系统提示自动带上；
+    /// 技能提示词里也可以写 `{style}`。接着跑时沿用，不再重挑。
+    pub(crate) style: String,
 }
 
 /// `@` 引用的一篇文章：稿件库或知识库里的文档。正文由引擎在后台线程读。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Reference {
     pub(crate) source: RefSource,
     pub(crate) id: i64,
     pub(crate) title: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum RefSource {
     Manuscript,
     Knowledge,
@@ -83,7 +90,7 @@ impl RefSource {
 }
 
 /// 审核类技能查出的一条问题。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Finding {
     /// 分组：要素与格式、表述、结构、有出处 / 无出处 / 与资料矛盾、要点……
     pub(crate) group: String,
@@ -98,7 +105,7 @@ pub(crate) struct Finding {
 }
 
 /// 对正文的一处替换。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Fix {
     pub(crate) span: std::ops::Range<usize>,
     pub(crate) before: String,
@@ -121,6 +128,8 @@ impl Board {
             "selection" => Some(self.selection.clone().unwrap_or_default()),
             "workspace" => Some(self.workspace.clone()),
             "preset" => Some(self.preset.clone()),
+            "history" => Some(self.history.clone()),
+            "style" => Some(self.style.clone()),
             _ => None,
         };
         if field.is_none()

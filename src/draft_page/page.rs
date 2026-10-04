@@ -18,6 +18,7 @@ const DRAWER_DEFAULT_WIDTH: f32 = 300.0;
 impl DraftPage<'_> {
     pub(crate) fn create_ui(&mut self, ui: &mut egui::Ui) {
         self.sync_candidates(ui.ctx());
+        self.sync_ai_session();
         egui::Panel::top("draft_toolbar")
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.ribbon(ui));

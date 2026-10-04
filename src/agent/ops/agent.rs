@@ -24,6 +24,8 @@ const FINISH: &str = "finish";
 const RESULT_CHARS: usize = 6000;
 /// 同一调用连续几次算绕圈子。
 const REPEAT_LIMIT: usize = 3;
+/// 压缩过的工具结果末尾的记号。
+const COMPACTED: &str = "（原文已省略，需要可再调）";
 
 /// 完成判定后把 `summary` 存进这个变量，`output: auto` 的答复用它。
 pub(crate) const SUMMARY_VAR: &str = "agent_summary";
@@ -166,8 +168,26 @@ pub(super) fn agent(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Resul
     let mut last_call: Option<(String, String, usize)> = None;
     phase(ctx, "自主步骤：模型在决定下一步…");
 
+    let budget = crate::agent::budget::input_budget(ctx.env.model.window(role).tokens);
     for _ in 0..max_turns {
         check_cancel(ctx)?;
+        // 对话超过输入预算的 70% 时压掉较早的工具结果；压完仍超就停（16.15 A.6）。
+        if conversation_tokens(&turns, &specs) > budget * 7 / 10 {
+            let compacted = compact(&mut turns, 2);
+            if compacted > 0 {
+                note(
+                    ctx,
+                    format!("自主步骤对话太长，较早的 {compacted} 条工具结果只留了摘要"),
+                );
+            }
+            if conversation_tokens(&turns, &specs) > budget {
+                note(
+                    ctx,
+                    "自主步骤的对话超出了模型上下文，停在这里；已做的部分留在工作稿。",
+                );
+                return Ok(Flow::Next);
+            }
+        }
         let emit = &mut *ctx.emit;
         // 中间话术不进工作稿，和思考过程一样显示。
         let reply =
@@ -269,6 +289,59 @@ pub(super) fn agent(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Resul
         format!("自主步骤到了 {max_turns} 轮上限，停在这里；已做的部分留在工作稿。"),
     );
     Ok(Flow::Next)
+}
+
+/// 整段对话（含工具说明）的估算 token 数。
+fn conversation_tokens(turns: &[Turn], specs: &[ToolSpec]) -> usize {
+    use crate::lmstudio::context::estimate_tokens;
+    let turns: usize = turns
+        .iter()
+        .map(|turn| match turn {
+            Turn::System(text) | Turn::User(text) => estimate_tokens(text),
+            Turn::Assistant { content, calls } => {
+                estimate_tokens(content)
+                    + calls
+                        .iter()
+                        .map(|call| estimate_tokens(&call.arguments.to_string()) + 8)
+                        .sum::<usize>()
+            }
+            Turn::Tool { content, .. } => estimate_tokens(content) + 8,
+        })
+        .sum();
+    let specs: usize = specs
+        .iter()
+        .map(|spec| estimate_tokens(&spec.to_native().to_string()))
+        .sum();
+    turns + specs
+}
+
+/// 把最近 `keep` 轮模型回复之前的工具结果换成它的第一行（工具的一行摘要）加省略记号，
+/// 返回这次压了几条。
+fn compact(turns: &mut [Turn], keep: usize) -> usize {
+    let assistants: Vec<usize> = turns
+        .iter()
+        .enumerate()
+        .filter(|(_, turn)| matches!(turn, Turn::Assistant { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    let Some(&cut) = assistants
+        .len()
+        .checked_sub(keep)
+        .and_then(|i| assistants.get(i))
+    else {
+        return 0;
+    };
+    let mut compacted = 0;
+    for turn in &mut turns[..cut] {
+        if let Turn::Tool { content, .. } = turn
+            && !content.ends_with(COMPACTED)
+        {
+            let head = content.lines().next().unwrap_or_default().to_string();
+            *content = format!("{head}\n{COMPACTED}");
+            compacted += 1;
+        }
+    }
+    compacted
 }
 
 /// 执行一个工具调用，返回交给模型的文字。

@@ -13,7 +13,7 @@
 //! 结果都只写进工作稿；定稿成提案由调用方负责。
 
 use super::prepare::FOUND;
-use super::{Flow, check_cancel, note, param, phase, prompt, tool_line};
+use super::{Flow, check_cancel, fit_evidence, note, param, phase, prompt, tool_line};
 use crate::agent::backend::ModelRole;
 use crate::agent::board::Board;
 use crate::agent::engine::Event;
@@ -35,12 +35,15 @@ enum Placement {
 
 pub(super) fn generate(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
     check_cancel(ctx)?;
+    let system = ctx.board.system_prompt.clone();
     let (user, label, placement) = match step.param_str("mode").unwrap_or("new") {
-        "new" => (
-            new_draft_prompt(ctx, step)?,
-            "起草中…".to_string(),
-            Placement::Replace,
-        ),
+        "new" => {
+            let chars = param(ctx, step, &["evidence_chars"], 8000, 1000..=40000);
+            let user = fit_evidence(ctx, ModelRole::Draft, &system, chars, |ctx, chars| {
+                new_draft_prompt(ctx, step, chars)
+            })?;
+            (user, "起草中…".to_string(), Placement::Replace)
+        }
         "rewrite" => (
             rewrite_prompt(ctx, step)?,
             "改写中…".to_string(),
@@ -48,7 +51,11 @@ pub(super) fn generate(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
         ),
         "section" => {
             let label = format!("写「{}」…", section_label(ctx));
-            (section_prompt(ctx, step)?, label, Placement::Append)
+            (
+                section_prompt_fitted(ctx, step, &system)?,
+                label,
+                Placement::Append,
+            )
         }
         "fill" => {
             let marker = step
@@ -61,7 +68,7 @@ pub(super) fn generate(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
                 note(ctx, format!("工作稿里没有「{marker}」，跳过这一步"));
                 return Ok(Flow::Next);
             }
-            let text = section_prompt(ctx, step)?;
+            let text = section_prompt_fitted(ctx, step, &system)?;
             (text, "补写中…".to_string(), Placement::Marker(marker))
         }
         other => {
@@ -69,7 +76,6 @@ pub(super) fn generate(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
         }
     };
     phase(ctx, label);
-    let system = ctx.board.system_prompt.clone();
     let emit = &mut *ctx.emit;
     let completion = ctx
         .env
@@ -105,9 +111,12 @@ pub(super) fn generate(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
     Ok(Flow::Next)
 }
 
-fn new_draft_prompt(ctx: &ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<String> {
+fn new_draft_prompt(
+    ctx: &ToolCtx<'_, '_>,
+    step: &StepSpec,
+    chars: usize,
+) -> anyhow::Result<String> {
     let board = &ctx.board;
-    let chars = param(ctx, step, &["evidence_chars"], 8000, 1000..=40000);
     let evidence = if board.evidence.is_empty() {
         String::new()
     } else {
@@ -174,11 +183,30 @@ fn rewrite_prompt(ctx: &ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Stri
     }
     let instruction = rewrite_instruction(ctx, step);
     let protected = crate::ai_guard::protected_facts_prompt(current, ctx.env.vocabulary);
-    Ok(crate::prompt::build_optimize_prompt(
+    let user = crate::prompt::build_optimize_prompt(
         &board.draft,
         current,
         &format!("{}{protected}", instruction.trim()),
-    ))
+    );
+    check_rewrite_fits(ctx, current, &user)?;
+    Ok(user)
+}
+
+/// 改写不能砍正文：原文、提示词与改后稿（约与原文一样长）要一起放进上下文，放不下就停。
+fn check_rewrite_fits(ctx: &ToolCtx<'_, '_>, current: &str, user: &str) -> anyhow::Result<()> {
+    use crate::lmstudio::context::{MIN_OUTPUT, estimate_tokens};
+    let window = ctx.env.model.window(ModelRole::Draft);
+    let output = estimate_tokens(current).max(MIN_OUTPUT);
+    let need = estimate_tokens(&ctx.board.system_prompt) + estimate_tokens(user) + output;
+    if need > window.tokens {
+        anyhow::bail!(
+            "正文约 {} 字，改写要把原文和改后稿一起放进模型上下文（约需 {need} token），\
+             超出了 {}。请选中一部分再做，或换上下文更大的模型。",
+            body_chars(current),
+            window.label()
+        );
+    }
+    Ok(())
 }
 
 /// 用户原话里要的字数：「压缩到800字」「扩写到1500字左右」「控制在2000字以内」。
@@ -252,10 +280,20 @@ fn fit_length(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// 逐节生成的提示：文种写法规则 + 技能里那一段（`{evidence}` 只放这一节查到的证据）。
-fn section_prompt(ctx: &ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<String> {
-    let board = &ctx.board;
+fn section_prompt_fitted(
+    ctx: &mut ToolCtx<'_, '_>,
+    step: &StepSpec,
+    system: &str,
+) -> anyhow::Result<String> {
     let chars = param(ctx, step, &["evidence_chars"], 6000, 1000..=40000);
+    fit_evidence(ctx, ModelRole::Draft, system, chars, |ctx, chars| {
+        section_prompt(ctx, step, chars)
+    })
+}
+
+/// 逐节生成的提示：文种写法规则 + 技能里那一段（`{evidence}` 只放这一节查到的证据）。
+fn section_prompt(ctx: &ToolCtx<'_, '_>, step: &StepSpec, chars: usize) -> anyhow::Result<String> {
+    let board = &ctx.board;
     let ids: Vec<usize> = match board.vars.get(FOUND) {
         Some(Value::Array(items)) => items
             .iter()

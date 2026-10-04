@@ -19,6 +19,7 @@ mod finish;
 mod gap_loop;
 mod prepare;
 mod review;
+mod style_learn;
 mod write;
 
 use super::backend::ModelRole;
@@ -39,10 +40,11 @@ pub(crate) enum Flow {
 }
 
 pub(crate) use agent::SUMMARY_VAR as AGENT_SUMMARY;
+pub(crate) use style_learn::PROFILE_VAR as STYLE_PROFILE;
 
 pub(crate) type Operator = fn(&mut ToolCtx<'_, '_>, &StepSpec) -> anyhow::Result<Flow>;
 
-const OPERATORS: [(&str, Operator); 13] = [
+const OPERATORS: [(&str, Operator); 14] = [
     ("clarify", prepare::clarify),
     ("plan", prepare::plan),
     ("retrieve", prepare::retrieve),
@@ -56,6 +58,7 @@ const OPERATORS: [(&str, Operator); 13] = [
     ("report", review::report),
     ("agent", agent::agent),
     ("cite_check", cite_check::cite_check),
+    ("style_learn", style_learn::style_learn),
 ];
 
 pub(crate) fn find(name: &str) -> Option<Operator> {
@@ -133,6 +136,45 @@ fn prompt(
             anyhow::anyhow!("技能「{}」里没有提示词「{name}」", ctx.env.skill.name)
         })?;
     Ok(ctx.board.render_with(template, locals))
+}
+
+/// 证据放多少字（16.15 A.4）：先按设置值拼，整段提示词超出输入预算就按超出量缩证据重拼。
+/// 缩过时在过程里留一行。固定部分放不下的不在这里管，发请求时由 `lmstudio` 报「输入太长」。
+fn fit_evidence(
+    ctx: &mut ToolCtx<'_, '_>,
+    role: ModelRole,
+    system: &str,
+    wanted: usize,
+    build: impl Fn(&ToolCtx<'_, '_>, usize) -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    use crate::lmstudio::context::estimate_tokens;
+    let budget = super::budget::input_budget(ctx.env.model.window(role).tokens);
+    let total: usize = ctx
+        .board
+        .evidence
+        .items()
+        .iter()
+        .map(|item| item.text.chars().count())
+        .sum();
+    let full = wanted.min(total);
+    let mut chars = full;
+    let mut text = build(ctx, chars)?;
+    while chars > 0 {
+        let used = estimate_tokens(system) + estimate_tokens(&text);
+        if used <= budget {
+            break;
+        }
+        let over = super::budget::tokens_to_chars(used - budget) + 100;
+        chars = chars.saturating_sub(over);
+        text = build(ctx, chars)?;
+    }
+    if chars < full {
+        note(
+            ctx,
+            format!("上下文预算有限，证据只放了约 {chars} 字（共约 {total} 字）"),
+        );
+    }
+    Ok(text)
 }
 
 /// 辅助步骤：思考照样流进界面，正文不流（它是给程序看的）。

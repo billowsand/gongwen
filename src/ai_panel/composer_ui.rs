@@ -261,8 +261,12 @@ impl DraftPage<'_> {
         actions: &mut BarActions,
     ) {
         let kind = self.doc.draft.kind;
+        let has_proposal = self.doc.ai_proposal.is_some();
         let AiPanel {
-            skills, composer, ..
+            skills,
+            composer,
+            styles,
+            ..
         } = &mut self.doc.ai_panel;
         ui.horizontal(|ui| {
             let spacing = ui.spacing().item_spacing.x;
@@ -375,6 +379,10 @@ impl DraftPage<'_> {
                         });
                     }
 
+                    if chip.writes && styles.iter().any(|style| style.enabled) {
+                        style_pill(ui, composer, styles, kind);
+                    }
+
                     if chip.uses_knowledge {
                         let toggle = ui
                             .add_enabled(
@@ -393,6 +401,28 @@ impl DraftPage<'_> {
                             );
                         if toggle.clicked() {
                             composer.use_rag = !composer.use_rag;
+                        }
+                    }
+
+                    if has_proposal && composer.selection.is_none() {
+                        // 「改提案」（16.15 B.7）：开着时「再短一点」改的是刚交的提案。
+                        let toggle = ui
+                            .add(
+                                egui::Button::image_and_text(
+                                    theme::Icon::Edit.image_sized(12.0),
+                                    egui::RichText::new("改提案").small(),
+                                )
+                                .image_tint_follows_text_color(true)
+                                .selected(!composer.skip_proposal)
+                                .corner_radius(egui::CornerRadius::same(255)),
+                            )
+                            .on_hover_text(if composer.skip_proposal {
+                                "现在改的是正文；点一下改为接着改待确认的提案"
+                            } else {
+                                "接着改待确认的提案（如「再短一点」「第二条展开说」），新提案取代旧的；点一下改为改正文"
+                            });
+                        if toggle.clicked() {
+                            composer.skip_proposal = !composer.skip_proposal;
                         }
                     }
 
@@ -600,8 +630,16 @@ impl DraftPage<'_> {
         set_caret(ctx, input_id, caret);
     }
 
-    /// 按输入区的内容发起一轮。
+    /// 按输入区的内容发起一轮。`/compact` 是压缩会话的命令，不发给技能。
     pub(super) fn send_ai_panel(&mut self) {
+        if self.doc.ai_panel.composer.text.trim() == "/compact" {
+            self.doc.ai_panel.composer.text.clear();
+            self.start_compact();
+            return;
+        }
+        let on_proposal = self.doc.ai_proposal.is_some()
+            && !self.doc.ai_panel.composer.skip_proposal
+            && self.doc.ai_panel.composer.selection.is_none();
         let composer = &self.doc.ai_panel.composer;
         let request = TurnRequest {
             skill: composer.skill.clone(),
@@ -611,6 +649,8 @@ impl DraftPage<'_> {
             use_rag: composer.use_rag,
             refs: mention::live_refs(&composer.text, &composer.refs),
             notes: Vec::new(),
+            on_proposal,
+            style: composer.style.clone(),
         };
         if self.start_panel_request(request) {
             let composer = &mut self.doc.ai_panel.composer;
@@ -632,6 +672,72 @@ impl DraftPage<'_> {
             }
         }
     }
+}
+
+/// 底栏的「风格」标签（16.15 C.3）：自动 / 指定一份 / 不用。
+fn style_pill(
+    ui: &mut egui::Ui,
+    composer: &mut super::Composer,
+    styles: &[crate::agent::style::StyleProfile],
+    kind: TemplateKind,
+) {
+    use crate::agent::style::StyleChoice;
+    let label = match &composer.style {
+        StyleChoice::Auto => "风格：自动".to_string(),
+        StyleChoice::Off => "不用风格".to_string(),
+        StyleChoice::Fixed(id) => styles
+            .iter()
+            .find(|style| &style.id == id)
+            .map_or("风格：自动".to_string(), |style| {
+                format!("风格：{}", style.name)
+            }),
+    };
+    let button = ui
+        .add(pill(&label, composer.style != StyleChoice::Auto))
+        .on_hover_text(
+            "写法风格：按文种与场合自动挑，或指定一份；在 AI 管理页「风格」里学习与管理",
+        );
+    egui::Popup::menu(&button).show(|ui| {
+        theme::popup_scroll(320.0).show(ui, |ui| {
+            if ui
+                .add(theme::menu_selectable_item(
+                    composer.style == StyleChoice::Auto,
+                    "自动",
+                ))
+                .on_hover_text(
+                    "按文种、你的原话与场合关键词挑一份；分不出时交模型判断，都对不上就不用",
+                )
+                .clicked()
+            {
+                composer.style = StyleChoice::Auto;
+            }
+            for style in styles.iter().filter(|style| style.enabled) {
+                let fits = style.kinds.is_empty() || style.kinds.contains(&kind);
+                let selected = composer.style == StyleChoice::Fixed(style.id.clone());
+                let text = if fits {
+                    style.name.clone()
+                } else {
+                    format!("{}（不是这个文种的）", style.name)
+                };
+                if ui
+                    .add(theme::menu_selectable_item(selected, &text))
+                    .on_hover_text(crate::agent::tools::short(&style.description, 120))
+                    .clicked()
+                {
+                    composer.style = StyleChoice::Fixed(style.id.clone());
+                }
+            }
+            if ui
+                .add(theme::menu_selectable_item(
+                    composer.style == StyleChoice::Off,
+                    "不用风格",
+                ))
+                .clicked()
+            {
+                composer.style = StyleChoice::Off;
+            }
+        });
+    });
 }
 
 /// 「2025-11-02 10:20:00」→「2025-11-02」。
@@ -861,6 +967,8 @@ struct ChipState {
     uses_knowledge: bool,
     /// 在现有正文上改（显示选区 / 全文）。
     edits_text: bool,
+    /// 会写稿（交提案）：显示「风格」标签。
+    writes: bool,
 }
 
 /// 按指定的技能（或「/技能名」前缀），或按当前输入自动选出的候选，算出技能标签的样子。
@@ -923,6 +1031,9 @@ fn chip_state(panel: &AiPanel, has_text: bool, kind: TemplateKind) -> ChipState 
         hint,
         uses_preset: candidates.iter().any(|skill| skill.uses_preset()),
         uses_knowledge: candidates.iter().any(|skill| skill.uses_knowledge()),
+        writes: candidates
+            .iter()
+            .any(|skill| skill.output != crate::agent::skill::OutputKind::Report),
         edits_text: candidates
             .iter()
             .any(|skill| skill.when.text == TextNeed::Present),

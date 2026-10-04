@@ -18,6 +18,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+pub(crate) mod ai_sessions;
 pub(crate) mod candidates;
 mod export_naming;
 pub(crate) mod merge;
@@ -387,6 +388,8 @@ impl ManuscriptStore {
         }
         // 起草页候选区：同样幂等建表，不单开档位。
         candidates::ensure_schema(&self.conn)?;
+        // AI 侧栏会话：同样幂等建表，不单开档位。
+        ai_sessions::ensure_schema(&self.conn)?;
         // 公文登记簿：同样幂等建表，不单开档位。
         registry::ensure_schema(&self.conn)?;
         sync::migrate(&mut self.conn)?;

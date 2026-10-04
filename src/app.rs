@@ -40,6 +40,7 @@ mod quick_find;
 mod send_package_ui;
 mod session;
 mod settings;
+mod style_settings;
 mod tabs;
 mod versioning;
 mod vocabulary;
@@ -332,6 +333,8 @@ pub struct GongwenApp {
     ai_section: AiSection,
     /// AI 管理页「智能体」分组（技能、数据接口、工具调试台）的状态。
     agent_settings: agent_settings::AgentSettings,
+    /// AI 管理页「风格」分区的状态。
+    styles_page: style_settings::StylesPage,
 }
 
 /// 导出面板要显示的那几个数，连同各词源占比。整份码表正文不留在这里——
@@ -554,6 +557,7 @@ impl GongwenApp {
             settings_section: SettingsSection::default(),
             ai_section: AiSection::default(),
             agent_settings: Default::default(),
+            styles_page: Default::default(),
             embedding_probe_busy: false,
             rerank_probe_busy: false,
             rerank_verify_result: None,

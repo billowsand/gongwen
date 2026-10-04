@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 struct Loaded {
     title: String,
     text: String,
+    /// 稿件库的才知道文种。
+    kind: Option<crate::models::TemplateKind>,
     /// 证据包去重键，与 `ms.read` / `kb.read` 一致：同一篇再被工具读到不重复编号。
     key: String,
     /// 写进 `baseline` 变量的值。
@@ -46,6 +48,7 @@ fn load(ctx: &ToolCtx<'_, '_>, reference: &Reference) -> Result<Loaded, String> 
                     "text": doc.markdown,
                     "elements": serde_json::to_value(&doc.draft).unwrap_or(Value::Null),
                 }),
+                kind: Some(doc.kind),
                 title: doc.title,
                 text: doc.markdown,
             })
@@ -60,6 +63,7 @@ fn load(ctx: &ToolCtx<'_, '_>, reference: &Reference) -> Result<Loaded, String> 
             Ok(Loaded {
                 key: format!("kbdoc:{}", reference.id),
                 value: json!({ "id": reference.id, "title": title, "text": text }),
+                kind: None,
                 title,
                 text,
             })
@@ -67,10 +71,29 @@ fn load(ctx: &ToolCtx<'_, '_>, reference: &Reference) -> Result<Loaded, String> 
     }
 }
 
+/// 读一篇引用当样稿（风格学习）。
+pub(crate) fn load_sample(
+    ctx: &ToolCtx<'_, '_>,
+    reference: &Reference,
+) -> Result<crate::agent::style::Sample, String> {
+    let loaded = load(ctx, reference)?;
+    Ok(crate::agent::style::Sample {
+        source: reference.source,
+        id: reference.id,
+        title: loaded.title,
+        kind: loaded.kind,
+        text: loaded.text,
+    })
+}
+
 /// 按技能的声明把引用落到黑板上。
 pub(crate) fn apply(ctx: &mut ToolCtx<'_, '_>) {
     let refs = ctx.board.refs.clone();
     let usage = ctx.env.skill.references;
+    if usage == RefUse::Sample {
+        // 样稿由算子自己读（风格学习），不进证据也不进材料。
+        return;
+    }
     let mut material = Vec::new();
     let mut baseline_taken = false;
     for reference in &refs {

@@ -17,7 +17,7 @@ pub(crate) static CITATION: LazyLock<Regex> = LazyLock::new(|| {
 static CITATION_NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+").expect("编号正则"));
 
 /// 一段证据。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Evidence {
     /// K 编号，从 1 起。
     pub(crate) id: usize,
@@ -64,7 +64,7 @@ impl EvidenceDoc {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EvidencePack {
     items: Vec<Evidence>,
 }

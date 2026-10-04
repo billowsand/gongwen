@@ -50,7 +50,58 @@ impl From<ConverseError> for anyhow::Error {
 }
 
 /// 跑一轮对话。`tools` 为 None 时不带工具（文本协议）。
+///
+/// 输出上限按上下文窗口现算；服务端报超长时按它说的上限重算、重发一次（同
+/// [`super::generate_stream`]）。超长不算 [`ConverseError::Rejected`]，免得被当成「不认 tools」。
 pub fn converse_stream(
+    config: &LmStudioConfig,
+    messages: &[Value],
+    tools: Option<&[Value]>,
+    temperature: f32,
+    max_tokens: u32,
+    cancel: &AtomicBool,
+    on_delta: &mut dyn FnMut(StreamDelta<'_>),
+) -> Result<ConverseOutcome, ConverseError> {
+    let input = super::context::estimate_tokens(&Value::from(messages.to_vec()).to_string())
+        + tools.map_or(0, |tools| {
+            super::context::estimate_tokens(&Value::from(tools.to_vec()).to_string())
+        });
+    let window = super::context::peek_window(config);
+    let Some(limit) = super::context::output_limit(window.tokens, input, max_tokens) else {
+        let overflow = super::context::local_overflow(window, input);
+        return Err(ConverseError::Other(anyhow::Error::new(overflow)));
+    };
+    match converse_once(
+        config,
+        messages,
+        tools,
+        temperature,
+        limit,
+        cancel,
+        on_delta,
+    ) {
+        Err(ConverseError::Other(error)) => match super::server_overflow(&error) {
+            Some(overflow) => {
+                match super::context::after_overflow(config, &overflow, input, max_tokens) {
+                    Ok(limit) => converse_once(
+                        config,
+                        messages,
+                        tools,
+                        temperature,
+                        limit,
+                        cancel,
+                        on_delta,
+                    ),
+                    Err(local) => Err(ConverseError::Other(anyhow::Error::new(local))),
+                }
+            }
+            None => Err(ConverseError::Other(error)),
+        },
+        other => other,
+    }
+}
+
+fn converse_once(
     config: &LmStudioConfig,
     messages: &[Value],
     tools: Option<&[Value]>,
@@ -88,11 +139,9 @@ pub fn converse_stream(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().unwrap_or_default();
-        let error = anyhow!("模型服务返回 HTTP {status}：{body}");
-        return Err(if status.is_client_error() {
-            ConverseError::Rejected(error)
-        } else {
-            ConverseError::Other(error)
+        return Err(match super::ChatError::from_status(status, &body) {
+            super::ChatError::Rejected(error) => ConverseError::Rejected(error),
+            super::ChatError::Other(error) => ConverseError::Other(error),
         });
     }
     let is_json = response

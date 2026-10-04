@@ -511,6 +511,9 @@ pub struct LmStudioConfig {
     pub temperature: f32,
     pub max_tokens: u32,
     pub timeout_seconds: u64,
+    /// 上下文窗口（token）。0 表示自动：先问服务，问不到按模型名估，再不行按 32k
+    /// （`lmstudio::context`）。
+    pub context_window: u32,
 }
 
 impl Default for LmStudioConfig {
@@ -524,6 +527,7 @@ impl Default for LmStudioConfig {
             // 4096 会被思考吃光、一个正文字都出不来。
             max_tokens: 32000,
             timeout_seconds: 180,
+            context_window: 0,
         }
     }
 }
@@ -589,6 +593,8 @@ pub struct ReviseModelConfig {
     /// 留空表示沿用起草模型的密钥。
     pub api_key: String,
     pub timeout_seconds: u64,
+    /// 上下文窗口（token），0 表示自动，同 [`LmStudioConfig::context_window`]。
+    pub context_window: u32,
     /// 单句送检的字数上限。超过多半是整段没断句，交给小模型只会跑飞。
     pub max_sentence_chars: usize,
     /// 一轮最多送检多少句，免得一篇长稿把本地服务占死。
@@ -610,6 +616,7 @@ impl Default for ReviseModelConfig {
             api_key: String::new(),
             // 小模型单句推理很快，但本地服务冷启动会慢，留足一次的余量即可。
             timeout_seconds: 60,
+            context_window: 0,
             max_sentence_chars: 120,
             max_sentences: 200,
             disabled_tasks: crate::revise_model::DEFAULT_DISABLED_TASKS
@@ -657,6 +664,7 @@ impl ReviseModelConfig {
             // 逐句复核的输出上限按句长现算，这里给个不起作用的兜底值。
             max_tokens: 512,
             timeout_seconds: self.timeout_seconds.max(5),
+            context_window: self.context_window,
         }
     }
 }

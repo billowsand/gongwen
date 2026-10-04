@@ -1,6 +1,7 @@
 //! 模型调用接口。研究式起草的每一步都经它调模型；测试时换成按脚本回复的假模型。
 
 use super::toolcall::{self, Protocol, Reply, ToolCall, ToolSpec, Turn};
+use crate::lmstudio::context::{self, Window, WindowSource};
 use crate::lmstudio::{self, ChatOptions, ConverseError, Finish, StreamDelta};
 use crate::models::{AppConfig, LmStudioConfig};
 use serde_json::Value;
@@ -39,6 +40,14 @@ pub(crate) trait ModelBackend {
 
     /// 用户是否已经点了停止。流程在两步之间查它，不必等下一次模型调用才停。
     fn cancelled(&self) -> bool;
+
+    /// 这个角色的模型上下文窗口，算子装箱时按它分预算（16.15 A）。
+    fn window(&self, _role: ModelRole) -> Window {
+        Window {
+            tokens: context::DEFAULT_WINDOW,
+            source: WindowSource::Default,
+        }
+    }
 
     /// 自主步骤的一轮对话（`docs/ai-agent-workbench.md` 16.14）。
     ///
@@ -79,6 +88,17 @@ impl LmBackend {
             cancel,
         }
     }
+
+    /// 这个角色的接入配置。自动窗口还没问过服务时先问一次（本进程每个模型只问一次），
+    /// 之后发请求时的输出上限就按服务报的窗口算。
+    fn config(&self, role: ModelRole) -> &LmStudioConfig {
+        let config = match role {
+            ModelRole::Draft => &self.draft,
+            ModelRole::Assist => &self.assist,
+        };
+        context::window(config);
+        config
+    }
 }
 
 /// 辅助步骤用的接入配置：配了复核模型就用它，否则沿用起草模型；温度固定 0。
@@ -105,10 +125,7 @@ impl ModelBackend for LmBackend {
         user: &str,
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Completion> {
-        let config = match role {
-            ModelRole::Draft => &self.draft,
-            ModelRole::Assist => &self.assist,
-        };
+        let config = self.config(role);
         let mut attempt = 0;
         let outcome = loop {
             attempt += 1;
@@ -146,6 +163,10 @@ impl ModelBackend for LmBackend {
         self.cancel.load(Ordering::Relaxed)
     }
 
+    fn window(&self, role: ModelRole) -> Window {
+        context::window(self.config(role))
+    }
+
     /// 原生模式发 `tools`，被 4xx 拒收就改文本模式重发一次；回复里没有 `tool_calls` 而正文里写着
     /// `<tool_call>` 的（服务端没开工具解析），同样认出来并转文本模式。
     fn converse(
@@ -156,10 +177,7 @@ impl ModelBackend for LmBackend {
         protocol: Protocol,
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Reply> {
-        let config = match role {
-            ModelRole::Draft => &self.draft,
-            ModelRole::Assist => &self.assist,
-        };
+        let config = self.config(role);
         let native = protocol == Protocol::Native && !NATIVE_TOOLS_REJECTED.load(Ordering::Relaxed);
         if native {
             let specs: Vec<Value> = tools.iter().map(ToolSpec::to_native).collect();
@@ -266,8 +284,25 @@ mod tests {
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let mut bodies = Vec::new();
-            for (status, content_type, body) in responses {
+            let mut responses = responses.into_iter();
+            while let Some((status, content_type, body)) = responses.next() {
                 let (mut stream, _) = listener.accept().unwrap();
+                let mut peek = [0u8; 4];
+                let mut n = 0;
+                while n < 4 {
+                    n = stream.peek(&mut peek).unwrap();
+                }
+                if &peek[..n] == b"GET " {
+                    // 自动窗口先问 `/v1/models`：回 404，这次不算脚本里的一问。
+                    stream
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                    responses = std::iter::once((status, content_type, body))
+                        .chain(responses)
+                        .collect::<Vec<_>>()
+                        .into_iter();
+                    continue;
+                }
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 8192];
                 loop {

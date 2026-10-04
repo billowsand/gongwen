@@ -36,7 +36,7 @@ pub(crate) enum Event {
 }
 
 /// 流程停下来问用户。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Suspension {
     pub(crate) questions: Vec<Question>,
     /// 答完从第几步接着跑。

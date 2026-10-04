@@ -99,7 +99,7 @@ pub(crate) fn find_placeholders(text: &str) -> Vec<Placeholder> {
 }
 
 /// 缺口的类别。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum GapKind {
     /// 政策依据、上级表述、背景情况、通行做法：可以去知识库找。
     Retrievable,
@@ -121,7 +121,7 @@ impl GapKind {
 }
 
 /// 缺口的处理状态。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum GapStatus {
     Open,
     /// 用证据补全了，附证据编号。
@@ -136,7 +136,7 @@ pub(crate) enum GapStatus {
     Skipped,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Gap {
     pub(crate) id: usize,
     pub(crate) kind: GapKind,
@@ -321,7 +321,7 @@ fn squash(text: &str) -> String {
 }
 
 /// 缺口台账。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Ledger {
     pub(crate) gaps: Vec<Gap>,
     next_id: usize,

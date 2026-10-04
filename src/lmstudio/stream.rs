@@ -9,7 +9,10 @@
 //! - [`ThinkSplitter`]：把夹在正文里的 `<think>…</think>` 切到思考通道，
 //!   标签被切在两个分片之间也能认出来。
 
-use super::{ChatError, ChatResponse, THINKING_SWITCH_REJECTED, chat_payload, empty_content_error};
+use super::{
+    ChatError, ChatResponse, THINKING_SWITCH_REJECTED, chat_payload, context, empty_content_error,
+    within_window,
+};
 use crate::models::LmStudioConfig;
 use anyhow::{Context, anyhow};
 use serde_json::Value;
@@ -63,25 +66,25 @@ pub fn generate_stream(
     mut on_delta: impl FnMut(StreamDelta<'_>),
 ) -> anyhow::Result<StreamOutcome> {
     let with_switch = options.disable_thinking && !THINKING_SWITCH_REJECTED.load(Ordering::Relaxed);
-    let request = StreamRequest {
-        config,
-        system,
-        user,
-        temperature,
-        max_tokens,
-    };
-    match stream_once(&request, with_switch, cancel, &mut on_delta) {
-        Err(ChatError::Rejected(error)) if with_switch => {
-            THINKING_SWITCH_REJECTED.store(true, Ordering::Relaxed);
-            stream_once(&request, false, cancel, &mut on_delta).map_err(|second| match second {
-                ChatError::Rejected(second) | ChatError::Other(second) => second.context(format!(
-                    "（已去掉关闭思考的开关重试；带开关时的首次失败：{error:#}）"
-                )),
-            })
+    let input = context::estimate_tokens(system) + context::estimate_tokens(user);
+    within_window(config, input, max_tokens, |limit| {
+        let request = StreamRequest {
+            config,
+            system,
+            user,
+            temperature,
+            max_tokens: limit,
+        };
+        match stream_once(&request, with_switch, cancel, &mut on_delta) {
+            Err(ChatError::Rejected(error)) if with_switch => {
+                THINKING_SWITCH_REJECTED.store(true, Ordering::Relaxed);
+                stream_once(&request, false, cancel, &mut on_delta)
+                    .map_err(|second| second.switch_retried(&error))
+            }
+            other => other,
         }
-        Err(ChatError::Rejected(error) | ChatError::Other(error)) => Err(error),
-        Ok(outcome) => Ok(outcome),
-    }
+    })
+    .map_err(ChatError::into_inner)
 }
 
 struct StreamRequest<'a> {
@@ -126,12 +129,7 @@ fn stream_once(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().unwrap_or_default();
-        let error = anyhow!("模型服务返回 HTTP {status}：{body}");
-        return Err(if status.is_client_error() {
-            ChatError::Rejected(error)
-        } else {
-            ChatError::Other(error)
-        });
+        return Err(ChatError::from_status(status, &body));
     }
     let is_json = response
         .headers()
@@ -506,6 +504,76 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// 依次接 `responses.len()` 个请求的假服务端，返回各次请求的 JSON 请求体。
+    fn fake_server_seq(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                let body = request.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+                bodies.push(serde_json::from_str(body).unwrap_or(Value::Null));
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            bodies
+        });
+        (format!("http://127.0.0.1:{port}/v1"), handle)
+    }
+
+    /// 32k 窗口的服务上，输出上限按剩余空间现算，不再是「输入 + 32000」必然超限；
+    /// 服务端仍报超长时按它说的上限重算、重发一次。
+    #[test]
+    fn the_output_limit_follows_the_window_and_an_overflow_is_retried() {
+        let error = r#"{"object":"error","message":"This model's maximum context length is 16384 tokens. However, you requested 39000 tokens (7000 in the messages, 32000 in the completion).","code":400}"#;
+        let overflow = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{error}",
+            error.len()
+        );
+        let reply = sse_response(&[&delta("好"), "data: [DONE]"]);
+        let (url, server) = fake_server_seq(vec![overflow, reply]);
+        let mut config = config(url);
+        config.context_window = 32_768;
+        let user = "字".repeat(5000);
+        let outcome = generate_stream(
+            &config,
+            "S",
+            &user,
+            0.2,
+            32_000,
+            super::super::ChatOptions::default(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.content, "好");
+        let bodies = server.join().unwrap();
+        let input = context::estimate_tokens("S") + context::estimate_tokens(&user);
+        assert_eq!(bodies[0]["max_tokens"], 32_768 - input - 256);
+        assert_eq!(bodies[1]["max_tokens"], 16_384 - 7350 - 256);
+        // 之后都按服务端说的 16k 算，手动设的 32k 让位。
+        assert_eq!(context::peek_window(&config).tokens, 16_384);
+
+        // 本地估算就放不下的不发请求。
+        let mut small = config.clone();
+        small.base_url = "http://127.0.0.1:9/v1".into();
+        small.context_window = 4096;
+        let error = generate_stream(
+            &small,
+            "S",
+            &user,
+            0.2,
+            32_000,
+            super::super::ChatOptions::default(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<context::ContextOverflow>().is_some());
+        assert!(format!("{error}").contains("放不下"), "{error}");
     }
 
     fn sse_response(events: &[&str]) -> String {

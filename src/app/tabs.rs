@@ -340,6 +340,10 @@ impl GongwenApp {
                     self.ai_section = super::AiSection::Skills;
                     self.open_page(NavPage::AiPrompts);
                 }
+                DraftAction::OpenStyleSettings => {
+                    self.ai_section = super::AiSection::Styles;
+                    self.open_page(NavPage::AiPrompts);
+                }
                 DraftAction::RevertToDraft(id) => {
                     self.transition_status(id, ManuscriptStatus::Draft);
                     self.sync_record_status(id);

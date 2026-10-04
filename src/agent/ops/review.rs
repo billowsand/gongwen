@@ -69,9 +69,40 @@ pub(super) fn review(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Resu
         check_cancel(ctx)?;
         phase(ctx, "通读诊断…");
         let max = param(ctx, step, &["max"], 12, 1..=30);
-        let locals = [("max", max.to_string()), ("document", text.clone())];
-        let reply = assist(ctx, &prompt(ctx, step, "prompt", "诊断", &locals)?)?;
-        let diagnosed = parse_diagnosis(&reply, &text, ctx.env.vocabulary, max);
+        // 长稿放不进上下文时按章节分几段诊断（16.15 A.4），改法仍按全文定位。
+        let fixed = prompt(
+            ctx,
+            step,
+            "prompt",
+            "诊断",
+            &[("max", max.to_string()), ("document", String::new())],
+        )?;
+        let window = ctx
+            .env
+            .model
+            .window(crate::agent::backend::ModelRole::Assist);
+        let room = crate::agent::budget::room_chars(
+            window.tokens,
+            &format!("{}{fixed}", crate::agent::tools::ASSIST_SYSTEM),
+        );
+        let parts = crate::agent::budget::split_by_budget(&text, room);
+        if parts.len() > 1 {
+            super::note(
+                ctx,
+                format!(
+                    "正文较长，模型上下文 {} 放不下全文，分 {} 段诊断",
+                    window.label(),
+                    parts.len()
+                ),
+            );
+        }
+        let mut diagnosed = Vec::new();
+        for part in &parts {
+            check_cancel(ctx)?;
+            let locals = [("max", max.to_string()), ("document", part.clone())];
+            let reply = assist(ctx, &prompt(ctx, step, "prompt", "诊断", &locals)?)?;
+            diagnosed.extend(parse_diagnosis(&reply, &text, ctx.env.vocabulary, max));
+        }
         let fixes = diagnosed.iter().filter(|f| f.fix.is_some()).count();
         tool_line(
             ctx,

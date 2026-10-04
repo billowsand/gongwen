@@ -175,7 +175,7 @@ fn store_path(name: &str) -> anyhow::Result<PathBuf> {
     Ok(crate::storage::config_dir()?.join(name))
 }
 
-fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> anyhow::Result<T> {
+pub(crate) fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> anyhow::Result<T> {
     let path = store_path(name)?;
     match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text)
@@ -185,7 +185,7 @@ fn read_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> anyhow::Re
     }
 }
 
-fn write_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
+pub(crate) fn write_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
     let path = store_path(name)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
