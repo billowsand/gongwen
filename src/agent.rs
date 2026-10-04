@@ -25,6 +25,7 @@ pub(crate) mod clarify;
 pub(crate) mod elements;
 pub(crate) mod engine;
 pub(crate) mod evidence;
+pub(crate) mod gap_revise;
 pub(crate) mod gaps;
 pub(crate) mod ops;
 pub(crate) mod references;

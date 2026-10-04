@@ -27,7 +27,9 @@ mod session_ui;
 mod skill_job;
 mod ui;
 
-pub(crate) use skill_job::{SkillResult, SkillRun, initial_replies};
+pub(crate) use skill_job::{
+    GapRevision, SkillResult, SkillRun, finish_research_revision, initial_replies,
+};
 
 /// 自动选技能、输入框还空着时的提示。
 const AUTO_HINT: &str = "说说要做什么：起草、润色……输入 / 选技能，@ 引用文章";

@@ -689,7 +689,7 @@ struct GapContext {
 fn gap_context(
     question: &crate::agent::clarify::Question,
     research: Option<&super::ResearchSnapshot>,
-    run: Option<&super::skill_job::SkillRun>,
+    run: Option<&super::SkillRun>,
 ) -> Option<GapContext> {
     let crate::agent::clarify::Target::Gap(id) = question.target else {
         return None;

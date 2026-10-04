@@ -4,8 +4,8 @@
 //!   `agent::engine`，事件转成 `DocJob` 回投；也用来接着跑挂起的那一轮；
 //! - `answer_suspended`：挂起时的题答完——回答由引擎按确定性规则落到黑板，要切文种的由
 //!   界面线程切（用户点选，不是模型改），然后从下一步接着跑；
-//! - `apply_research_answers`：交付后附在提案上的题答完——按确定性规则落到工作稿，重新
-//!   定稿成提案，不再调模型。
+//! - `apply_research_answers`：交付后附在提案上的题答完——要填、要删的交模型写进所在段落
+//!   （`agent::gap_revise`，过闸门才用，不过就直接替换），重新定稿成提案。
 
 use super::history::{self, HistoryPlan};
 use super::{ReplyDraft, ResearchSnapshot, TurnRequest, TurnState, locate_selection};
@@ -545,8 +545,6 @@ impl DraftPage<'_> {
             *self.status = "提案已不在了，没法按回答修订；可以重新起草。".into();
             return;
         };
-        let mut ledger = research.ledger.clone();
-        let raw = clarify::apply_gap_replies(&research.raw, &mut ledger, &questions, &replies);
         let summary_lines: Vec<String> = questions
             .iter()
             .zip(&replies)
@@ -565,17 +563,77 @@ impl DraftPage<'_> {
                 }
             })
             .collect();
-        self.install_research_revision(
-            "按回答修订",
-            summary_lines.join("\n"),
-            before,
-            ResearchSnapshot {
-                raw,
-                ledger,
-                sources: research.sources,
-            },
-        );
-        *self.status = "已按你的回答修订，新的提案在侧栏里。".into();
+        let label = "按回答修订";
+        let needs_model = questions
+            .iter()
+            .zip(&replies)
+            .any(|(question, (_, reply))| {
+                matches!(
+                    clarify::gap_edit(question, reply),
+                    clarify::GapEdit::Fill(_) | clarify::GapEdit::Drop
+                )
+            });
+        if !needs_model {
+            // 全是保留待核实、保留原文：确定性改完就定稿，不调模型。
+            let mut ledger = research.ledger.clone();
+            let raw = clarify::apply_gap_replies(&research.raw, &mut ledger, &questions, &replies);
+            self.install_research_revision(
+                label,
+                summary_lines.join("\n"),
+                before,
+                ResearchSnapshot {
+                    raw,
+                    ledger,
+                    sources: research.sources,
+                },
+            );
+            *self.status = "已按你的回答修订，新的提案在侧栏里。".into();
+            return;
+        }
+        if self.doc.busy {
+            *self.status = "这篇稿件还有任务在跑，稍等一下。".into();
+            return;
+        }
+        self.doc
+            .ai_panel
+            .push_turn(label.into(), summary_lines.join("\n"), Vec::new(), None);
+        self.doc.ai_panel.set_phase("正在把你的回答写进所在段落…");
+        let (key, seq) = self.begin_job();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.doc.ai_panel.cancel = Some(cancel.clone());
+        let config = self.config.clone();
+        let tx = self.sender.clone();
+        std::thread::spawn(move || {
+            let model = LmBackend::new(&config, cancel);
+            let mut emit = |line: String| {
+                let _ = tx.send(WorkerResult::Doc {
+                    key,
+                    seq,
+                    job: DocJob::AiTool(line),
+                });
+            };
+            let revised = crate::agent::gap_revise::revise(
+                &model,
+                &research.raw,
+                research.ledger,
+                &questions,
+                &replies,
+                &config.vocabulary,
+                &mut emit,
+            );
+            let _ = tx.send(WorkerResult::Doc {
+                key,
+                seq,
+                job: DocJob::GapRevised(Box::new(GapRevision {
+                    before,
+                    research: ResearchSnapshot {
+                        raw: revised.raw,
+                        ledger: revised.ledger,
+                        sources: research.sources,
+                    },
+                })),
+            });
+        });
     }
 
     /// 撤回 AI 对一处缺口的概括：所在句换回原句（带「【待核实】」占位），缺口改为出题问用户，
@@ -629,28 +687,41 @@ impl DraftPage<'_> {
         before: String,
         research: ResearchSnapshot,
     ) {
-        let draft =
-            crate::draft_page::reviewed_draft(&self.doc.draft, self.config, &research.raw, false);
         self.doc
             .ai_panel
             .push_turn(label.to_string(), prompt, Vec::new(), None);
-        let summary = GongwenApp::install_ai_proposal(
-            self.doc,
-            before,
-            draft,
-            label.to_string(),
-            &self.config.vocabulary,
-        );
-        let remaining = clarify::gap_questions(&research.ledger, BATCH_QUESTIONS);
-        let panel = &mut self.doc.ai_panel;
-        let new_id = panel.turns.last().map(|turn| turn.id);
-        panel.replace_content(research.raw.clone());
-        panel.finish(TurnState::Proposed(summary));
-        if let Some(turn) = new_id.and_then(|id| panel.turn_mut(id)) {
-            turn.replies = initial_replies(&remaining);
-            turn.questions = remaining;
-            turn.research = Some(research);
-        }
+        finish_research_revision(self.doc, self.config, label, before, research);
+    }
+}
+
+/// 按回答修订的后台结果：提案的对照基准与改好的工作稿。
+pub(crate) struct GapRevision {
+    pub(crate) before: String,
+    pub(crate) research: ResearchSnapshot,
+}
+
+/// 正在跑的那一轮收尾：改好的工作稿重新定稿成提案，台账里还要问的出成题附上。
+pub(crate) fn finish_research_revision(
+    doc: &mut crate::draft_page::DraftSession,
+    config: &crate::models::AppConfig,
+    label: &str,
+    before: String,
+    research: ResearchSnapshot,
+) {
+    let draft = crate::draft_page::reviewed_draft(&doc.draft, config, &research.raw, false);
+    let summary =
+        GongwenApp::install_ai_proposal(doc, before, draft, label.to_string(), &config.vocabulary);
+    let remaining = clarify::gap_questions(&research.ledger, BATCH_QUESTIONS);
+    let panel = &mut doc.ai_panel;
+    let Some(id) = panel.running_turn_mut().map(|turn| turn.id) else {
+        return;
+    };
+    panel.replace_content(research.raw.clone());
+    panel.finish(TurnState::Proposed(summary));
+    if let Some(turn) = panel.turn_mut(id) {
+        turn.replies = initial_replies(&remaining);
+        turn.questions = remaining;
+        turn.research = Some(research);
     }
 }
 

@@ -136,6 +136,8 @@ pub(crate) enum DocJob {
     AiCompactDone(Result<(String, u64, usize), String>),
     /// 这一轮用了哪份风格档案（记一次使用）。
     StyleUsed(String),
+    /// 按回答修订的结果：AI 把缺口题的回答写进了所在段落（或闸门不过、直接替换）。
+    GapRevised(Box<crate::ai_panel::GapRevision>),
     ExportProgress(String),
     Exported(Result<ExportOutcome, String>),
     /// 花脸稿导出结果。与定稿导出分开：花脸稿不是成品，不该顶掉工具栏上
@@ -1167,6 +1169,17 @@ impl GongwenApp {
             }
             DocJob::AiCompactDone(Err(error)) => {
                 self.status = format!("{prefix}压缩会话失败：{error}");
+            }
+            DocJob::GapRevised(revision) => {
+                let revision = *revision;
+                crate::ai_panel::finish_research_revision(
+                    &mut self.docs[index],
+                    &self.config,
+                    "按回答修订",
+                    revision.before,
+                    revision.research,
+                );
+                self.status = format!("{prefix}已按你的回答修订，新的提案在侧栏里。");
             }
             DocJob::StyleUsed(id) => {
                 if let Ok(mut book) = crate::agent::style::StyleBook::load() {

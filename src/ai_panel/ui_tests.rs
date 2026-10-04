@@ -266,7 +266,7 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
 }
 
 #[test]
-fn research_answers_become_a_new_proposal_without_calling_a_model() {
+fn research_answers_are_written_in_by_a_background_job_and_fall_back_when_the_model_fails() {
     use crate::agent::clarify::gap_questions;
     use crate::agent::gaps::{GapStatus, Ledger};
     let mut harness = Harness::new("");
@@ -318,7 +318,41 @@ fn research_answers_become_a_new_proposal_without_calling_a_model() {
         "题目要带上所在小节：{texts:?}"
     );
 
+    // 模型连不上：闸门之前就失败，退回直接替换。
+    harness.config.lm_studio.base_url = "http://127.0.0.1:9".into();
+    harness.config.lm_studio.timeout_seconds = 5;
     harness.with_page(|page| page.apply_research_answers(id));
+    assert!(harness.doc.busy, "要填的回答交后台模型写进段落");
+    assert!(harness.doc.ai_panel.running());
+    let mut steps = Vec::new();
+    loop {
+        let message = harness
+            ._keep
+            .recv_timeout(Duration::from_secs(60))
+            .expect("一分钟内应当有结果");
+        let WorkerResult::Doc { job, .. } = message else {
+            continue;
+        };
+        match job {
+            crate::app::DocJob::AiTool(line) => steps.push(line),
+            crate::app::DocJob::GapRevised(revision) => {
+                harness.doc.busy = false;
+                crate::ai_panel::finish_research_revision(
+                    &mut harness.doc,
+                    &harness.config,
+                    "按回答修订",
+                    revision.before,
+                    revision.research,
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        steps.iter().any(|line| line.contains("直接填入")),
+        "{steps:?}"
+    );
     let panel = &harness.doc.ai_panel;
     assert_eq!(panel.turns.len(), 2);
     assert_eq!(panel.turns[0].state, TurnState::Superseded);
@@ -340,7 +374,6 @@ fn research_answers_become_a_new_proposal_without_calling_a_model() {
     // 仍然只是提案：正文没动，基线还是发起时的空稿。
     assert!(harness.doc.generated_markdown.is_empty());
     assert_eq!(proposal.before, "");
-    assert!(!harness.doc.busy, "确定性替换，不起后台任务");
 }
 
 #[test]
