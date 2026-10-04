@@ -194,6 +194,14 @@ impl GongwenApp {
             doc.ai_proposal = Some(proposal);
             return false;
         }
+        // 提案是对着 `before` 生成的。AI 跑着、提案搁着的时候正文都能继续改，
+        // 之后再采用会把这些改动整篇冲掉。自动保存会规整有序列表标点，比较前两边一起规整。
+        let normalize = crate::export::normalize_ordered_list_punctuation;
+        if normalize(&proposal.before) != normalize(&doc.generated_markdown) {
+            *status = "提案生成后正文又改过，直接采用会覆盖这些改动。请让 AI 按当前正文重做，或放弃提案。".into();
+            doc.ai_proposal = Some(proposal);
+            return false;
+        }
         if let Err(error) = crate::document_reference::ensure_preserved(
             &doc.generated_markdown,
             &proposal.result.markdown,

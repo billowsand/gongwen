@@ -232,8 +232,8 @@ pub struct GongwenApp {
     /// 标签栏的内容与顺序。稿件标签按 key 指向 `docs`。
     tabs: Vec<TabRef>,
     active_tab: usize,
-    /// 关闭标签的二次确认：`docs` 里这一篇有未保存改动。
-    close_confirm: Option<usize>,
+    /// 关闭标签的二次确认：按 key 指向有未保存改动的那篇稿件。
+    close_confirm: Option<DocKey>,
     /// 退出前的汇总确认；None 表示没在退出流程里。
     exit_prompt: Option<ExitPrompt>,
     /// 汇总框已放行，下一帧真正关窗。

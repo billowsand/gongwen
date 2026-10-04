@@ -118,8 +118,13 @@ impl GongwenApp {
             return;
         }
         if discard {
-            self.draft_page()
-                .apply_version_switch(prompt.manuscript_id, prompt.target);
+            // 按稿件 ID 找到那一篇再切，确认期间切过标签也不会改到别的稿件。
+            match self.doc_index_of_manuscript(prompt.manuscript_id) {
+                Some(index) => self
+                    .draft_page_at(index)
+                    .apply_version_switch(prompt.manuscript_id, prompt.target),
+                None => self.status = "这篇稿件已关闭，未切换版本。".into(),
+            }
             return;
         }
         if !cancel {
@@ -171,8 +176,14 @@ impl GongwenApp {
         // 实时预览：相对上一版本是否有变更（与名称/注释无关，先算出来避免闭包借用冲突）。
         let has_changes = match &draft.scope {
             VersionScope::Manuscript(id) => {
-                let snapshot = self.doc().draft.clone();
-                let content = self.doc().generated_markdown.clone();
+                // 对话框开着时可能切过标签，内容一律按稿件 ID 取，不用当前活动稿件。
+                let Some(index) = self.doc_index_of_manuscript(*id) else {
+                    self.switch_after_commit = None;
+                    self.status = "这篇稿件已关闭，提交版本已取消。".into();
+                    return;
+                };
+                let snapshot = self.docs[index].draft.clone();
+                let content = self.docs[index].generated_markdown.clone();
                 let notes = self
                     .manuscript_store
                     .as_ref()
@@ -245,17 +256,26 @@ impl GongwenApp {
         if submit {
             match self.run_version_commit(&draft) {
                 Ok(message) => {
-                    self.doc_mut().loaded_version = None;
-                    self.doc_mut().mark_saved();
-                    self.refresh_committed_baseline(self.active_doc);
+                    // 收尾作用在提交的那篇稿件上；配置版本不对应稿件，不碰任何标签。
+                    let committed = match &draft.scope {
+                        VersionScope::Manuscript(id) => self.doc_index_of_manuscript(*id),
+                        VersionScope::Config => None,
+                    };
+                    if let Some(index) = committed {
+                        let doc = &mut self.docs[index];
+                        doc.loaded_version = None;
+                        doc.mark_saved();
+                        doc.draft_diff.view.reset();
+                        self.refresh_committed_baseline(index);
+                    }
                     self.manuscript_dirty = true;
                     self.status = message;
-                    self.doc_mut().draft_diff.view.reset();
                     // "提交为新版本后切换"：提交成功了才真正切过去。
                     if let Some(target) = self.switch_after_commit.take()
                         && let VersionScope::Manuscript(id) = &draft.scope
+                        && let Some(index) = committed
                     {
-                        self.draft_page().apply_version_switch(*id, target);
+                        self.draft_page_at(index).apply_version_switch(*id, target);
                     }
                     // 成功：不恢复 draft，对话框关闭。
                 }
@@ -280,8 +300,12 @@ impl GongwenApp {
         match &draft.scope {
             VersionScope::Manuscript(id) => {
                 let id = *id;
-                let snapshot = self.doc().draft.clone();
-                let content = self.doc().generated_markdown.clone();
+                // 提交的是这篇稿件自己的内容，不是当前活动标签的内容。
+                let index = self
+                    .doc_index_of_manuscript(id)
+                    .context("这篇稿件已关闭，无法提交版本")?;
+                let snapshot = self.docs[index].draft.clone();
+                let content = self.docs[index].generated_markdown.clone();
                 let store = self
                     .manuscript_store
                     .as_mut()

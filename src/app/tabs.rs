@@ -104,6 +104,20 @@ impl GongwenApp {
         self.docs.iter().position(|doc| doc.key == key)
     }
 
+    /// 按 key 取稿件标题；稿件已不在时返回空串，供确认框文案用。
+    pub(crate) fn doc_title_of_key(&self, key: DocKey) -> String {
+        self.doc_index_of_key(key)
+            .map(|index| self.docs[index].title())
+            .unwrap_or_default()
+    }
+
+    /// 按稿件库 ID 找到已打开的稿件，不切换标签。
+    pub(crate) fn doc_index_of_manuscript(&self, id: i64) -> Option<usize> {
+        self.docs
+            .iter()
+            .position(|doc| doc.manuscript_id == Some(id))
+    }
+
     pub(crate) fn pdf_index_of_key(&self, key: PdfKey) -> Option<usize> {
         self.pdfs.iter().position(|pdf| pdf.key == key)
     }
@@ -224,11 +238,7 @@ impl GongwenApp {
 
     /// 同一篇稿件不重复打开：已经开着就切过去。
     pub(crate) fn focus_manuscript(&mut self, id: i64) -> bool {
-        let found = self
-            .docs
-            .iter()
-            .position(|doc| doc.manuscript_id == Some(id));
-        match found {
+        match self.doc_index_of_manuscript(id) {
             Some(index) => {
                 self.activate_doc(index);
                 true

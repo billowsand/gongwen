@@ -583,6 +583,46 @@ fn unconfirmed_fact_changes_block_acceptance() {
 }
 
 #[test]
+fn body_edited_after_proposal_blocks_acceptance() {
+    let mut harness = Harness::new("# 标题\n\n原文。\n");
+    let before = harness.doc.generated_markdown.clone();
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "润色".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before,
+        result: GeneratedDraft {
+            markdown: "# 标题\n\n润色后的原文。\n".into(),
+            title: "标题".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes: Vec::new(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+    // 提案搁着的时候用户又改了正文。
+    let edited = "# 标题\n\n原文。\n\n用户后来补的一段。\n".to_string();
+    harness.doc.generated_markdown = edited.clone();
+
+    assert!(!harness.with_page(|page| GongwenApp::accept_ai_proposal(page.doc, page.status)));
+    assert_eq!(
+        harness.doc.generated_markdown, edited,
+        "用户后来的改动不能被冲掉"
+    );
+    assert!(harness.doc.ai_proposal.is_some(), "提案原样留着");
+}
+
+#[test]
 fn a_report_card_lists_findings_by_group_and_points_to_the_drawer() {
     use crate::agent::board::{Finding, Fix};
     let mut harness = Harness::new(

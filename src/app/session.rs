@@ -7,7 +7,7 @@ use crate::app::{
     AUTOSAVE_INTERVAL, GongwenApp, NavPage, TabRef, VersionCommitDraft, VersionScope,
     default_version_name, unique_version_name,
 };
-use crate::draft_page::{DraftSession, editor_id};
+use crate::draft_page::{DocKey, DraftSession, editor_id};
 use crate::manuscript;
 use crate::storage;
 use crate::theme;
@@ -15,11 +15,14 @@ use eframe::egui;
 use std::path::PathBuf;
 
 /// 退出前的汇总确认。上区必须处理，下区只是提醒。
+///
+/// 记的是稿件 `key` 而不是 `docs` 下标：汇总框开着时 `docs` 仍可能增删，
+/// 下标一错位就会把勾选作用到别的稿件上。
 pub(crate) struct ExitPrompt {
-    /// 有改动没写库的稿件：`(docs 下标, 是否勾选保存)`。默认全勾。
-    unsaved: Vec<(usize, bool)>,
-    /// 已存库但没提交版本的稿件：`(docs 下标, 是否勾选提交)`。默认不勾。
-    uncommitted: Vec<(usize, bool)>,
+    /// 有改动没写库的稿件：`(稿件 key, 是否勾选保存)`。默认全勾。
+    unsaved: Vec<(DocKey, bool)>,
+    /// 已存库但没提交版本的稿件：`(稿件 key, 是否勾选提交)`。默认不勾。
+    uncommitted: Vec<(DocKey, bool)>,
 }
 
 /// 起草页需要外壳代办的事：这些动作要么改的是外壳自己的状态，要么会
@@ -60,7 +63,7 @@ impl GongwenApp {
                     return;
                 };
                 if self.docs[index].is_dirty() {
-                    self.close_confirm = Some(index);
+                    self.close_confirm = Some(*key);
                 } else {
                     self.close_tab(tab);
                 }
@@ -119,18 +122,19 @@ impl GongwenApp {
         self.remember_session();
     }
 
-    /// 关闭未保存稿件的二次确认。
+    /// 关闭未保存稿件的二次确认。按稿件 `key` 绑定，每帧重新定位，
+    /// 确认期间别的标签关掉、`docs` 下标错位也不会处理到别的稿件。
     pub(crate) fn close_confirm_window(&mut self, ctx: &egui::Context) {
-        let Some(index) = self.close_confirm else {
+        let Some(key) = self.close_confirm else {
             theme::reset_window_anim(ctx, egui::Id::new("close_confirm_anim"));
             return;
         };
-        let Some(doc) = self.docs.get(index) else {
+        let Some(doc) = self.doc_index_of_key(key).map(|index| &self.docs[index]) else {
+            // 稿件已经不在了（比如被别处关掉），确认失去对象，直接撤掉。
             self.close_confirm = None;
             return;
         };
         let title = doc.title();
-        let key = doc.key;
         let mut decision: Option<bool> = None;
         let mut cancel = false;
         let win = egui::Window::new("关闭稿件")
@@ -168,6 +172,9 @@ impl GongwenApp {
         };
         self.close_confirm = None;
         if save {
+            let Some(index) = self.doc_index_of_key(key) else {
+                return;
+            };
             let previous = self.active_doc;
             self.active_doc = index;
             self.save_to_manuscript_library();
@@ -193,19 +200,17 @@ impl GongwenApp {
         }
         // 开着自动保存时先静默存一轮，能不打扰就不打扰。
         self.autosave_all();
-        let unsaved: Vec<(usize, bool)> = self
+        let unsaved: Vec<(DocKey, bool)> = self
             .docs
             .iter()
-            .enumerate()
-            .filter(|(_, doc)| doc.is_dirty())
-            .map(|(index, _)| (index, true))
+            .filter(|doc| doc.is_dirty())
+            .map(|doc| (doc.key, true))
             .collect();
-        let uncommitted: Vec<(usize, bool)> = self
+        let uncommitted: Vec<(DocKey, bool)> = self
             .docs
             .iter()
-            .enumerate()
-            .filter(|(_, doc)| doc.has_uncommitted())
-            .map(|(index, _)| (index, false))
+            .filter(|doc| doc.has_uncommitted())
+            .map(|doc| (doc.key, false))
             .collect();
         if unsaved.is_empty() && uncommitted.is_empty() {
             self.remember_session();
@@ -225,6 +230,13 @@ impl GongwenApp {
             theme::reset_window_anim(ctx, egui::Id::new("exit_prompt_anim"));
             return;
         };
+        // 汇总框开着时已经关掉的稿件不再列出，也不再处理。
+        prompt
+            .unsaved
+            .retain(|(key, _)| self.doc_index_of_key(*key).is_some());
+        prompt
+            .uncommitted
+            .retain(|(key, _)| self.doc_index_of_key(*key).is_some());
         let mut decision: Option<bool> = None;
         let mut cancel = false;
         let win = egui::Window::new("退出公文助手")
@@ -235,8 +247,8 @@ impl GongwenApp {
                 ui.set_min_width(420.0);
                 if !prompt.unsaved.is_empty() {
                     ui.label(egui::RichText::new("以下稿件有未保存的改动").strong());
-                    for (index, keep) in prompt.unsaved.iter_mut() {
-                        let title = self.docs[*index].title();
+                    for (key, keep) in prompt.unsaved.iter_mut() {
+                        let title = self.doc_title_of_key(*key);
                         ui.checkbox(keep, format!("保存《{title}》"));
                     }
                     ui.add_space(6.0);
@@ -246,8 +258,8 @@ impl GongwenApp {
                         egui::RichText::new("以下稿件已存库，但相对最新版本还有改动").strong(),
                     );
                     ui.weak("不处理也可以，下次打开继续改；勾选则退出前顺手固化一个版本。");
-                    for (index, commit) in prompt.uncommitted.iter_mut() {
-                        let title = self.docs[*index].title();
+                    for (key, commit) in prompt.uncommitted.iter_mut() {
+                        let title = self.doc_title_of_key(*key);
                         ui.checkbox(commit, format!("提交《{title}》的新版本"));
                     }
                     ui.add_space(6.0);
@@ -291,20 +303,25 @@ impl GongwenApp {
     /// 按汇总框的勾选逐篇保存、逐篇提交版本。
     pub(crate) fn apply_exit_actions(&mut self, prompt: &ExitPrompt) {
         let previous = self.active_doc;
-        for (index, keep) in &prompt.unsaved {
-            if *keep && *index < self.docs.len() {
-                self.active_doc = *index;
+        for (key, keep) in &prompt.unsaved {
+            if !*keep {
+                continue;
+            }
+            if let Some(index) = self.doc_index_of_key(*key) {
+                self.active_doc = index;
                 self.save_to_manuscript_library();
             }
         }
-        for (index, commit) in &prompt.uncommitted {
-            if !*commit || *index >= self.docs.len() {
+        for (key, commit) in &prompt.uncommitted {
+            if !*commit {
                 continue;
             }
-            let Some(id) = self.docs[*index].manuscript_id else {
+            let Some(id) = self
+                .doc_index_of_key(*key)
+                .and_then(|index| self.docs[index].manuscript_id)
+            else {
                 continue;
             };
-            self.active_doc = *index;
             let existing = self
                 .manuscript_store
                 .as_mut()
