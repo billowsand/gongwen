@@ -9,6 +9,7 @@ use crate::app::{
 };
 use crate::draft_page::{DocKey, DraftSession, editor_id};
 use crate::manuscript;
+use crate::modal::{self, Dismiss};
 use crate::storage;
 use crate::theme;
 use eframe::egui;
@@ -126,7 +127,6 @@ impl GongwenApp {
     /// 确认期间别的标签关掉、`docs` 下标错位也不会处理到别的稿件。
     pub(crate) fn close_confirm_window(&mut self, ctx: &egui::Context) {
         let Some(key) = self.close_confirm else {
-            theme::reset_window_anim(ctx, egui::Id::new("close_confirm_anim"));
             return;
         };
         let Some(doc) = self.doc_index_of_key(key).map(|index| &self.docs[index]) else {
@@ -135,39 +135,38 @@ impl GongwenApp {
             return;
         };
         let title = doc.title();
-        let mut decision: Option<bool> = None;
-        let mut cancel = false;
-        let win = egui::Window::new("关闭稿件")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        let dialog = modal::dialog(
+            ctx,
+            egui::Id::new("close_confirm"),
+            "关闭稿件",
+            360.0,
+            Dismiss::EscOrBackdrop,
+            |ui| {
                 ui.label(format!("《{title}》有未保存的改动。"));
-                ui.add_space(6.0);
+                ui.add_space(10.0);
+                let mut save = None;
                 ui.horizontal(|ui| {
                     if theme::primary_icon_button(ui, theme::Icon::Save, "保存并关闭").clicked()
                     {
-                        decision = Some(true);
+                        save = Some(true);
                     }
                     if ui
                         .add(theme::secondary_icon_button(theme::Icon::Trash, "不保存"))
                         .clicked()
                     {
-                        decision = Some(false);
+                        save = Some(false);
                     }
                     if ui.button("取消").clicked() {
-                        cancel = true;
+                        ui.close();
                     }
                 });
-            });
-        if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("close_confirm_anim"), &w.response);
-        }
-        if cancel {
-            self.close_confirm = None;
-            return;
-        }
-        let Some(save) = decision else {
+                save
+            },
+        );
+        let Some(save) = dialog.inner else {
+            if dialog.dismissed {
+                self.close_confirm = None;
+            }
             return;
         };
         self.close_confirm = None;
@@ -218,6 +217,8 @@ impl GongwenApp {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        // 汇总框覆盖了所有稿件，单篇的关闭确认让位，免得两个模态叠在一起。
+        self.close_confirm = None;
         self.exit_prompt = Some(ExitPrompt {
             unsaved,
             uncommitted,
@@ -227,7 +228,6 @@ impl GongwenApp {
     /// 退出汇总框：上区未保存必须处理，下区未提交版本只是提醒。
     pub(crate) fn exit_prompt_window(&mut self, ctx: &egui::Context) {
         let Some(mut prompt) = self.exit_prompt.take() else {
-            theme::reset_window_anim(ctx, egui::Id::new("exit_prompt_anim"));
             return;
         };
         // 汇总框开着时已经关掉的稿件不再列出，也不再处理。
@@ -237,14 +237,13 @@ impl GongwenApp {
         prompt
             .uncommitted
             .retain(|(key, _)| self.doc_index_of_key(*key).is_some());
-        let mut decision: Option<bool> = None;
-        let mut cancel = false;
-        let win = egui::Window::new("退出公文助手")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.set_min_width(420.0);
+        let dialog = modal::dialog(
+            ctx,
+            egui::Id::new("exit_prompt"),
+            "退出公文助手",
+            420.0,
+            Dismiss::EscOrBackdrop,
+            |ui| {
                 if !prompt.unsaved.is_empty() {
                     ui.label(egui::RichText::new("以下稿件有未保存的改动").strong());
                     for (key, keep) in prompt.unsaved.iter_mut() {
@@ -265,31 +264,30 @@ impl GongwenApp {
                     ui.add_space(6.0);
                 }
                 ui.separator();
+                let mut apply = None;
                 ui.horizontal(|ui| {
                     if theme::primary_icon_button(ui, theme::Icon::Save, "处理所选并退出").clicked()
                     {
-                        decision = Some(true);
+                        apply = Some(true);
                     }
                     if ui
                         .add(theme::secondary_icon_button(theme::Icon::X, "直接退出"))
                         .on_hover_text("放弃所有未保存的改动")
                         .clicked()
                     {
-                        decision = Some(false);
+                        apply = Some(false);
                     }
                     if ui.button("取消").clicked() {
-                        cancel = true;
+                        ui.close();
                     }
                 });
-            });
-        if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("exit_prompt_anim"), &w.response);
-        }
-        if cancel {
-            return;
-        }
-        let Some(apply) = decision else {
-            self.exit_prompt = Some(prompt);
+                apply
+            },
+        );
+        let Some(apply) = dialog.inner else {
+            if !dialog.dismissed {
+                self.exit_prompt = Some(prompt);
+            }
             return;
         };
         if apply {
