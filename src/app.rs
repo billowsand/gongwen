@@ -51,7 +51,8 @@ pub(crate) use ai_prompts::AiPromptDraft;
 pub(crate) use jobs::{DocJob, KnowledgeMode, WorkerResult};
 pub(crate) use lexicon_jobs::LexiconJob;
 pub(crate) use manuscript_ui::{
-    ArchivePending, ImportPreview, PdfExportDialog, PendingMergeDialog, ZipPasswordDialog,
+    ArchivePending, BatchDeleteConfirm, ImportPreview, PdfExportDialog, PendingMergeDialog,
+    ZipPasswordDialog,
 };
 pub(crate) use proofread_ui::ProofreadPageState;
 pub(crate) use send_package_ui::{SendPackageEvent, SendPackageExportJob, SendPackagePanel};
@@ -196,9 +197,8 @@ pub struct GongwenApp {
     manuscript_delete_confirm: Option<i64>,
     /// 待删稿件被哪些呈批件用作送批材料；进入删除确认时查一次，确认气泡里提示。
     manuscript_delete_refs: Vec<manuscript::send_package::SendPackageReferrer>,
-    manuscript_batch_delete_confirm: bool,
-    /// 批量删除里因被已归档呈批件用作送批材料而须保留的稿件 id；进入确认时查一次。
-    manuscript_batch_delete_blocked: BTreeSet<i64>,
+    /// 批量删除确认：点按钮那一刻冻结的删除范围，确认期间改勾选不影响它。
+    manuscript_batch_delete: Option<BatchDeleteConfirm>,
     /// 「导出 PDF」批量导出是否正在后台执行（防重复触发）。
     manuscript_pdf_export_busy: bool,
     /// 「导出 PDF」选项弹窗；None 表示未打开。
@@ -478,8 +478,7 @@ impl GongwenApp {
             manuscript_count: [0; 4],
             manuscript_delete_confirm: None,
             manuscript_delete_refs: Vec::new(),
-            manuscript_batch_delete_confirm: false,
-            manuscript_batch_delete_blocked: BTreeSet::new(),
+            manuscript_batch_delete: None,
             manuscript_pdf_export_busy: false,
             manuscript_pdf_export: None,
             manuscript_zip_password: None,

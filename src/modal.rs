@@ -86,7 +86,14 @@ pub(crate) fn dialog<R>(
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> DialogResponse<R> {
     let response = egui::Modal::new(id)
-        .frame(crate::theme::card().inner_margin(egui::Margin::same(16)))
+        .frame(
+            crate::theme::card()
+                .inner_margin(egui::Margin::same(16))
+                .corner_radius(12)
+                .shadow(crate::theme::float_shadow(
+                    if crate::theme::current().dark { 75 } else { 32 },
+                )),
+        )
         .show(ctx, |ui| {
             ui.set_width(width);
             ui.heading(title);

@@ -19,6 +19,7 @@ use crate::manuscript::{
     ManuscriptFilter, ManuscriptRecord, ManuscriptStore, ManuscriptUpdate, NewManuscript,
 };
 use crate::manuscript_io;
+use crate::modal::{self, Dismiss};
 use crate::models::{ManuscriptStatus, SecurityLevel, TemplateKind, VocabularyCategory};
 use crate::storage;
 use crate::theme;
@@ -89,17 +90,32 @@ pub(crate) struct ArchivePending {
 }
 
 /// 「导出 PDF」选项弹窗的勾选状态：盖章件取附件、非盖章件编译生成。
-#[derive(Debug, Clone, Copy)]
+/// `ids` 是打开弹窗那一刻的勾选，之后一路带到导出，不再回头读当前勾选。
+#[derive(Debug, Clone)]
 pub(crate) struct PdfExportDialog {
     stamped: bool,
     compiled: bool,
+    ids: Vec<i64>,
 }
 
+/// 批量删除确认框的内容，点「批量删除」那一刻算好、冻结。
+#[derive(Debug, Clone)]
+pub(crate) struct BatchDeleteConfirm {
+    /// 真正要删的稿件。
+    deletable: Vec<i64>,
+    /// 归档稿件，受保护不删。
+    archived: usize,
+    /// 已归档呈批件的送批材料，受保护不删。
+    packaged: usize,
+}
+
+/// ZIP 密码框之后要做的事。导出范围在打开密码框时就定下来（所选稿件的 id、
+/// 或当时的过滤条件），密码框开着时改勾选、改筛选都不影响这次导出。
 #[derive(Debug, Clone)]
 enum ZipPasswordPurpose {
-    FilteredExport,
-    SelectedExport,
-    PdfExport(manuscript_io::PdfExportOptions),
+    FilteredExport(ManuscriptFilter),
+    SelectedExport(Vec<i64>),
+    PdfExport(manuscript_io::PdfExportOptions, Vec<i64>),
     Import(PathBuf),
 }
 
@@ -297,6 +313,143 @@ fn archive_pin_ui(ui: &mut egui::Ui, preview: &PinPreview, choice: &mut PinChoic
 }
 
 /// 若 `pending` 正指向这一行，就在 `anchor` 下弹出删除确认；确认或收起后清掉 `pending`。
+/// 批量删除确认框。点了删除返回 `inner == true`；删除范围是打开时冻结的 `confirm`。
+fn batch_delete_dialog(
+    ctx: &egui::Context,
+    confirm: &BatchDeleteConfirm,
+) -> modal::DialogResponse<bool> {
+    modal::dialog(
+        ctx,
+        egui::Id::new("manuscript_batch_delete"),
+        "批量删除稿件",
+        400.0,
+        Dismiss::EscOrBackdrop,
+        |ui| {
+            ui.label(format!(
+                "确认删除所选的 {} 篇可删除稿件吗？",
+                confirm.deletable.len()
+            ));
+            ui.colored_label(warn(), "此操作不可恢复。");
+            if confirm.archived > 0 {
+                ui.weak(format!(
+                    "另有 {} 篇归档稿件受保护，将保留不动。",
+                    confirm.archived
+                ));
+            }
+            if confirm.packaged > 0 {
+                ui.weak(format!(
+                    "另有 {} 篇是已归档呈批件的送批材料，将保留不动。",
+                    confirm.packaged
+                ));
+            }
+            ui.add_space(10.0);
+            let mut delete = false;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !confirm.deletable.is_empty(),
+                        theme::warning_icon_button(
+                            theme::Icon::Trash,
+                            &format!("删除 {} 篇", confirm.deletable.len()),
+                        ),
+                    )
+                    .clicked()
+                {
+                    delete = true;
+                }
+                if ui.button("取消").clicked() {
+                    ui.close();
+                }
+            });
+            delete
+        },
+    )
+}
+
+/// ZIP 密码框的表单部分。点了提交按钮返回 `true`，校验与执行由调用方做。
+fn zip_password_form(ui: &mut egui::Ui, dialog: &mut ZipPasswordDialog, importing: bool) -> bool {
+    ui.label(if importing {
+        "必须输入正确密码后才能读取和导入稿件包。"
+    } else {
+        "本次导出的 ZIP 将使用 AES-256 加密，所有文件均受密码保护。"
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("密码");
+        // 密码不走应用内输入法：否则敲的字母会明文出现在候选窗里
+        crate::ime::exempt(
+            ui.add(
+                egui::TextEdit::singleline(&mut dialog.password)
+                    .password(!dialog.show_password)
+                    .desired_width(260.0),
+            ),
+        );
+    });
+    if !importing {
+        ui.horizontal(|ui| {
+            ui.label("确认");
+            crate::ime::exempt(
+                ui.add(
+                    egui::TextEdit::singleline(&mut dialog.confirmation)
+                        .password(!dialog.show_password)
+                        .desired_width(260.0),
+                ),
+            );
+        });
+        ui.weak(
+            "至少 10 位，并包含大写字母、小写字母、数字、符号或中文中的至少三类；不能使用常见口令、连续或重复字符。",
+        );
+    }
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut dialog.remember, "记住密码")
+            .on_hover_text("保存在本机受限权限文件中，下次仍会显示确认窗口");
+        ui.checkbox(&mut dialog.show_password, "显示密码");
+    });
+    if matches!(
+        dialog.purpose,
+        ZipPasswordPurpose::FilteredExport(_) | ZipPasswordPurpose::SelectedExport(_)
+    ) {
+        ui.checkbox(
+            &mut dialog.include_send_package,
+            "连同呈批件的送批材料一起导出",
+        )
+        .on_hover_text(
+            "把所选呈批件挂着的函稿、研究报告等随行件也打进包里；不勾时只带清单，对方本机没有这些稿件时显示为「本机未找到」",
+        );
+    }
+    if let Some(error) = &dialog.error {
+        ui.colored_label(warn(), error);
+    }
+    ui.add_space(10.0);
+    let mut submit = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                !dialog.password.is_empty(),
+                theme::icon_text_button(
+                    if importing {
+                        theme::Icon::PackageOpen
+                    } else {
+                        theme::Icon::Package
+                    },
+                    if importing {
+                        "解密并预览"
+                    } else {
+                        "继续导出"
+                    },
+                ),
+            )
+            .clicked()
+        {
+            submit = true;
+        }
+        if ui.button("取消").clicked() {
+            ui.close();
+        }
+    });
+    submit
+}
+
 fn row_delete_confirm(
     anchor: &egui::Response,
     pending: &mut Option<i64>,
@@ -885,6 +1038,7 @@ impl GongwenApp {
                         self.manuscript_pdf_export = Some(PdfExportDialog {
                             stamped: true,
                             compiled: true,
+                            ids: self.manuscript_selected.iter().copied().collect(),
                         });
                     }
                     if ui
@@ -909,8 +1063,7 @@ impl GongwenApp {
                         .on_hover_text("归档稿件和已归档呈批件的送批材料不会被删除")
                         .clicked()
                     {
-                        self.manuscript_batch_delete_blocked = self.batch_delete_blocked();
-                        self.manuscript_batch_delete_confirm = true;
+                        self.manuscript_batch_delete = Some(self.prepare_batch_delete());
                     }
                     if theme::icon_button(ui, theme::Icon::X, "清空选择").clicked() {
                         self.manuscript_selected.clear();
@@ -992,220 +1145,82 @@ impl GongwenApp {
         ui: &mut egui::Ui,
         action: &mut Option<ManuscriptAction>,
     ) {
-        if self.manuscript_batch_delete_confirm {
-            let deletable = self
-                .manuscript_rows
-                .iter()
-                .filter(|row| {
-                    self.manuscript_selected.contains(&row.id)
-                        && row.status != ManuscriptStatus::Archived
-                })
-                .map(|row| row.id)
-                .collect::<Vec<_>>();
-            let (packaged, deletable): (Vec<i64>, Vec<i64>) = deletable
-                .into_iter()
-                .partition(|id| self.manuscript_batch_delete_blocked.contains(id));
-            let archived = self
-                .manuscript_selected
-                .len()
-                .saturating_sub(deletable.len() + packaged.len());
-            let mut confirm = false;
-            let mut cancel = false;
-            ui.group(|ui| {
-                ui.colored_label(
-                    warn(),
-                    format!(
-                        "确认删除所选的 {} 篇可删除稿件吗？此操作不可恢复。",
-                        deletable.len()
-                    ),
-                );
-                if archived > 0 {
-                    ui.weak(format!("另有 {archived} 篇归档稿件受保护，将保留不动。"));
-                }
-                if !packaged.is_empty() {
-                    ui.weak(format!(
-                        "另有 {} 篇是已归档呈批件的送批材料，将保留不动。",
-                        packaged.len()
+        if let Some(confirm) = &self.manuscript_batch_delete {
+            let dialog = batch_delete_dialog(ui.ctx(), confirm);
+            if dialog.inner {
+                let confirm = self.manuscript_batch_delete.take().unwrap();
+                *action = Some(ManuscriptAction::DeleteSelected(confirm.deletable));
+            } else if dialog.dismissed {
+                self.manuscript_batch_delete = None;
+            }
+        }
+
+        if let Some(export) = self.manuscript_pdf_export.as_mut() {
+            let dialog = modal::dialog(
+                ui.ctx(),
+                egui::Id::new("manuscript_pdf_export"),
+                "导出 PDF",
+                400.0,
+                Dismiss::EscOnly,
+                |ui| {
+                    ui.label(format!(
+                        "已选 {} 篇稿件，导出为 PDF 压缩包：",
+                        export.ids.len()
                     ));
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!deletable.is_empty(), egui::Button::new("确认批量删除"))
-                        .clicked()
-                    {
-                        confirm = true;
-                    }
-                    if ui.button("取消").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-            if cancel {
-                self.manuscript_batch_delete_confirm = false;
-            } else if confirm {
-                self.manuscript_batch_delete_confirm = false;
-                *action = Some(ManuscriptAction::DeleteSelected(deletable));
-            }
-            ui.add_space(6.0);
-        }
-
-        if let Some(mut dialog) = self.manuscript_pdf_export {
-            let mut confirm = false;
-            let mut cancel = false;
-            ui.group(|ui| {
-                ui.label(format!(
-                    "已选 {} 篇稿件，导出为 PDF 压缩包：",
-                    self.manuscript_selected.len()
-                ));
-                ui.checkbox(&mut dialog.stamped, "导出盖章件（直接取附件 PDF）");
-                ui.checkbox(&mut dialog.compiled, "导出非盖章件（编译生成 PDF）");
-                ui.weak("文件名按稿件导出命名（不含时间戳）；盖章件名称追加（盖章）。");
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            dialog.stamped || dialog.compiled,
-                            theme::icon_text_button(theme::Icon::FileDown, "导出"),
-                        )
-                        .clicked()
-                    {
-                        confirm = true;
-                    }
-                    if ui.button("取消").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-            if cancel {
-                self.manuscript_pdf_export = None;
-            } else if confirm {
-                let options = manuscript_io::PdfExportOptions {
-                    stamped: dialog.stamped,
-                    compiled: dialog.compiled,
-                };
-                self.manuscript_pdf_export = None;
-                self.open_zip_password_dialog(ZipPasswordPurpose::PdfExport(options));
-            }
-            ui.add_space(6.0);
-        }
-
-        if self.manuscript_zip_password.is_some() {
-            let mut submit = false;
-            let mut cancel = false;
-            {
-                let dialog = self.manuscript_zip_password.as_mut().unwrap();
-                ui.group(|ui| {
-                    let importing = dialog.purpose.is_import();
-                    ui.strong(if importing {
-                        "输入 ZIP 密码"
-                    } else {
-                        "设置 ZIP 加密密码"
-                    });
-                    ui.label(if importing {
-                        "必须输入正确密码后才能读取和导入稿件包。"
-                    } else {
-                        "本次导出的 ZIP 将使用 AES-256 加密，所有文件均受密码保护。"
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("密码");
-                        // 密码不走应用内输入法：否则敲的字母会明文出现在候选窗里
-                        crate::ime::exempt(
-                            ui.add(
-                                egui::TextEdit::singleline(&mut dialog.password)
-                                    .password(!dialog.show_password)
-                                    .desired_width(260.0),
-                            ),
-                        );
-                    });
-                    if !importing {
-                        ui.horizontal(|ui| {
-                            ui.label("确认");
-                            crate::ime::exempt(
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut dialog.confirmation)
-                                        .password(!dialog.show_password)
-                                        .desired_width(260.0),
-                                ),
-                            );
-                        });
-                        ui.weak(
-                            "至少 10 位，并包含大写字母、小写字母、数字、符号或中文中的至少三类；不能使用常见口令、连续或重复字符。",
-                        );
-                    }
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut dialog.remember, "记住密码")
-                            .on_hover_text("保存在本机受限权限文件中，下次仍会显示确认窗口");
-                        ui.checkbox(&mut dialog.show_password, "显示密码");
-                    });
-                    if matches!(
-                        dialog.purpose,
-                        ZipPasswordPurpose::FilteredExport | ZipPasswordPurpose::SelectedExport
-                    ) {
-                        ui.checkbox(
-                            &mut dialog.include_send_package,
-                            "连同呈批件的送批材料一起导出",
-                        )
-                        .on_hover_text(
-                            "把所选呈批件挂着的函稿、研究报告等随行件也打进包里；不勾时只带清单，对方本机没有这些稿件时显示为「本机未找到」",
-                        );
-                    }
-                    if let Some(error) = &dialog.error {
-                        ui.colored_label(warn(), error);
-                    }
+                    ui.checkbox(&mut export.stamped, "导出盖章件（直接取附件 PDF）");
+                    ui.checkbox(&mut export.compiled, "导出非盖章件（编译生成 PDF）");
+                    ui.weak("文件名按稿件导出命名（不含时间戳）；盖章件名称追加（盖章）。");
+                    ui.add_space(10.0);
+                    let mut confirm = false;
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(
-                                !dialog.password.is_empty(),
-                                theme::icon_text_button(
-                                    if importing {
-                                        theme::Icon::PackageOpen
-                                    } else {
-                                        theme::Icon::Package
-                                    },
-                                    if importing { "解密并预览" } else { "继续导出" },
-                                ),
+                                export.stamped || export.compiled,
+                                theme::icon_text_button(theme::Icon::FileDown, "导出"),
                             )
                             .clicked()
                         {
-                            submit = true;
+                            confirm = true;
                         }
                         if ui.button("取消").clicked() {
-                            cancel = true;
+                            ui.close();
                         }
                     });
-                });
-            }
-            if cancel {
-                self.manuscript_zip_password = None;
-            } else if submit {
-                let validation = {
-                    let dialog = self.manuscript_zip_password.as_ref().unwrap();
-                    if dialog.purpose.is_import() {
-                        (!dialog.password.is_empty())
-                            .then_some(())
-                            .ok_or_else(|| anyhow::anyhow!("请输入 ZIP 密码"))
-                    } else if dialog.password != dialog.confirmation {
-                        Err(anyhow::anyhow!("两次输入的密码不一致"))
-                    } else {
-                        manuscript_io::validate_export_password(&dialog.password)
-                    }
+                    confirm
+                },
+            );
+            if dialog.inner {
+                let export = self.manuscript_pdf_export.take().unwrap();
+                let options = manuscript_io::PdfExportOptions {
+                    stamped: export.stamped,
+                    compiled: export.compiled,
                 };
-                match validation {
-                    Ok(()) => {
-                        let dialog = self.manuscript_zip_password.take().unwrap();
-                        self.run_zip_password_action(
-                            dialog.purpose,
-                            dialog.password,
-                            dialog.remember,
-                            dialog.include_send_package,
-                        );
-                    }
-                    Err(error) => {
-                        self.manuscript_zip_password.as_mut().unwrap().error =
-                            Some(format!("{error:#}"));
-                    }
-                }
+                self.open_zip_password_dialog(ZipPasswordPurpose::PdfExport(options, export.ids));
+            } else if dialog.dismissed {
+                self.manuscript_pdf_export = None;
             }
-            ui.add_space(6.0);
+        }
+
+        if let Some(password) = self.manuscript_zip_password.as_mut() {
+            let importing = password.purpose.is_import();
+            // 有输入的表单：点遮罩不关，免得误点丢掉已经敲好的密码；Esc 与「取消」照常关。
+            let dialog = modal::dialog(
+                ui.ctx(),
+                egui::Id::new("manuscript_zip_password"),
+                if importing {
+                    "输入 ZIP 密码"
+                } else {
+                    "设置 ZIP 加密密码"
+                },
+                420.0,
+                Dismiss::EscOnly,
+                |ui| zip_password_form(ui, password, importing),
+            );
+            if dialog.inner {
+                self.submit_zip_password();
+            } else if dialog.dismissed {
+                self.manuscript_zip_password = None;
+            }
         }
 
         let mut archive_to_confirm: Option<i64> = None;
@@ -2577,21 +2592,63 @@ impl GongwenApp {
         self.manuscript_referrers = store.send_package_referrers(id).unwrap_or_default();
     }
 
-    /// 所选稿件中被已归档呈批件用作送批材料、因而不能删的那些。
-    fn batch_delete_blocked(&self) -> BTreeSet<i64> {
-        let Some(store) = self.manuscript_store.as_ref() else {
-            return BTreeSet::new();
-        };
-        self.manuscript_selected
-            .iter()
-            .copied()
-            .filter(|&id| {
+    /// 按当前勾选算出批量删除的范围并冻结：归档稿件、被已归档呈批件用作送批材料的
+    /// 稿件都保留不动，其余才删。
+    fn prepare_batch_delete(&self) -> BatchDeleteConfirm {
+        let used_by_archived = |id: i64| {
+            self.manuscript_store.as_ref().is_some_and(|store| {
                 store.send_package_referrers(id).is_ok_and(|refs| {
                     refs.iter()
                         .any(|owner| owner.status == ManuscriptStatus::Archived)
                 })
             })
-            .collect()
+        };
+        let candidates = self
+            .manuscript_rows
+            .iter()
+            .filter(|row| {
+                self.manuscript_selected.contains(&row.id)
+                    && row.status != ManuscriptStatus::Archived
+            })
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        let (blocked, deletable): (Vec<i64>, Vec<i64>) =
+            candidates.into_iter().partition(|&id| used_by_archived(id));
+        BatchDeleteConfirm {
+            archived: self
+                .manuscript_selected
+                .len()
+                .saturating_sub(deletable.len() + blocked.len()),
+            packaged: blocked.len(),
+            deletable,
+        }
+    }
+
+    /// ZIP 密码框点了提交：校验通过就执行，否则把错误写回框里。
+    fn submit_zip_password(&mut self) {
+        let Some(dialog) = self.manuscript_zip_password.as_mut() else {
+            return;
+        };
+        let validation = if dialog.purpose.is_import() {
+            (!dialog.password.is_empty())
+                .then_some(())
+                .ok_or_else(|| anyhow::anyhow!("请输入 ZIP 密码"))
+        } else if dialog.password != dialog.confirmation {
+            Err(anyhow::anyhow!("两次输入的密码不一致"))
+        } else {
+            manuscript_io::validate_export_password(&dialog.password)
+        };
+        if let Err(error) = validation {
+            dialog.error = Some(format!("{error:#}"));
+            return;
+        }
+        let dialog = self.manuscript_zip_password.take().unwrap();
+        self.run_zip_password_action(
+            dialog.purpose,
+            dialog.password,
+            dialog.remember,
+            dialog.include_send_package,
+        );
     }
 
     pub(crate) fn reload_detail(&mut self) {
@@ -2817,14 +2874,14 @@ impl GongwenApp {
             _ => None,
         };
         let completed = match purpose {
-            ZipPasswordPurpose::FilteredExport => {
-                self.perform_export_manuscripts_zip(&password, include_send_package)
+            ZipPasswordPurpose::FilteredExport(filter) => {
+                self.perform_export_manuscripts_zip(&filter, &password, include_send_package)
             }
-            ZipPasswordPurpose::SelectedExport => {
-                self.perform_export_selected_manuscripts_zip(&password, include_send_package)
+            ZipPasswordPurpose::SelectedExport(ids) => {
+                self.perform_export_selected_manuscripts_zip(ids, &password, include_send_package)
             }
-            ZipPasswordPurpose::PdfExport(options) => {
-                self.perform_export_selected_manuscript_pdfs(options, &password)
+            ZipPasswordPurpose::PdfExport(options, ids) => {
+                self.perform_export_selected_manuscript_pdfs(options, ids, &password)
             }
             ZipPasswordPurpose::Import(path) => self.prepare_import_manuscript(path, &password),
         };
@@ -2891,11 +2948,13 @@ impl GongwenApp {
             self.status = "稿件库不可用，无法导出。".into();
             return;
         }
-        self.open_zip_password_dialog(ZipPasswordPurpose::FilteredExport);
+        let filter = self.manuscript_filter.clone();
+        self.open_zip_password_dialog(ZipPasswordPurpose::FilteredExport(filter));
     }
 
     fn perform_export_manuscripts_zip(
         &mut self,
+        filter: &ManuscriptFilter,
         password: &str,
         include_send_package: bool,
     ) -> bool {
@@ -2912,12 +2971,11 @@ impl GongwenApp {
             self.status = format!("导出前保存当前工作稿失败：{error:#}");
             return false;
         }
-        let filter = self.manuscript_filter.clone();
         let result: anyhow::Result<manuscript_io::ExportSummary> =
             match self.manuscript_store.as_mut() {
                 Some(store) => manuscript_io::export_zip(
                     store,
-                    &filter,
+                    filter,
                     &self.config.vocabulary,
                     &path,
                     password,
@@ -2951,11 +3009,13 @@ impl GongwenApp {
             self.status = "稿件库不可用，无法导出。".into();
             return;
         }
-        self.open_zip_password_dialog(ZipPasswordPurpose::SelectedExport);
+        let ids = self.manuscript_selected.iter().copied().collect();
+        self.open_zip_password_dialog(ZipPasswordPurpose::SelectedExport(ids));
     }
 
     fn perform_export_selected_manuscripts_zip(
         &mut self,
+        mut ids: Vec<i64>,
         password: &str,
         include_send_package: bool,
     ) -> bool {
@@ -2968,7 +3028,6 @@ impl GongwenApp {
         else {
             return false;
         };
-        let mut ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
         // 随行件也要进包时，它们在起草页里开着的工作稿同样先存一下。
         if include_send_package
             && let Some(store) = self.manuscript_store.as_ref()
@@ -3013,9 +3072,10 @@ impl GongwenApp {
     fn perform_export_selected_manuscript_pdfs(
         &mut self,
         options: manuscript_io::PdfExportOptions,
+        ids: Vec<i64>,
         password: &str,
     ) -> bool {
-        if self.manuscript_selected.is_empty() {
+        if ids.is_empty() {
             self.status = "请先勾选要导出的稿件。".into();
             return false;
         }
@@ -3032,7 +3092,6 @@ impl GongwenApp {
         else {
             return false;
         };
-        let ids = self.manuscript_selected.iter().copied().collect::<Vec<_>>();
         let vocabulary = self.config.vocabulary.clone();
         let fonts = self.config.fonts.clone();
         let numbering = self.config.numbering;
@@ -3468,5 +3527,58 @@ impl GongwenApp {
         PathBuf::from(&self.config.output_dir)
             .join("temp")
             .join(format!("manuscript_{manuscript_id}_{attachment_id}.pdf"))
+    }
+}
+
+#[cfg(test)]
+mod dialog_snapshot_tests {
+    use super::*;
+
+    /// 批量删除确认框样张：`cargo test --locked batch_delete_dialog_snapshot -- --ignored`，
+    /// 输出到 `tmp/batch-delete-dialog.png`，改版时目视检查。
+    #[test]
+    #[ignore]
+    fn batch_delete_dialog_snapshot() {
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        theme::configure_style(&ctx);
+        ctx.set_pixels_per_point(2.0);
+        let size = egui::vec2(720.0, 420.0);
+        let confirm = BatchDeleteConfirm {
+            deletable: vec![1, 2, 3],
+            archived: 1,
+            packaged: 1,
+        };
+        let mut canvas = crate::ui_snapshot::Canvas::default();
+        let frame = || {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| {
+                // 背后摆一点稿件列表的样子，看遮罩压暗的效果。
+                ui.heading("稿件管理");
+                for title in [
+                    "关于开展安全检查的通知",
+                    "关于调整会议时间的函",
+                    "第三季度工作总结",
+                ] {
+                    ui.label(title);
+                }
+                batch_delete_dialog(ui.ctx(), &confirm);
+            })
+        };
+        for _ in 0..5 {
+            let output = frame();
+            canvas.absorb(&output.textures_delta);
+        }
+        let output = frame();
+        canvas.absorb(&output.textures_delta);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join("batch-delete-dialog.png");
+        canvas.render(&ctx, output, size, theme::canvas(), &path);
+        println!("{}", path.display());
     }
 }
