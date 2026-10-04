@@ -14,6 +14,7 @@ use crate::agent::backend::LmBackend;
 use crate::agent::board::{Board, Finding};
 use crate::agent::clarify::{self, Question, Reply, Target};
 use crate::agent::engine::{self, Event, Outcome, SkillReport, Suspension};
+use crate::agent::gaps::GapStatus;
 use crate::agent::router::{self, Route, RouteContext};
 use crate::agent::skill::{OutputKind, Skill, TextNeed};
 use crate::agent::tools::{Env, Permission, RagSearch, SqliteManuscripts, ToolUse};
@@ -564,33 +565,92 @@ impl DraftPage<'_> {
                 }
             })
             .collect();
-        let draft = crate::draft_page::reviewed_draft(&self.doc.draft, self.config, &raw, false);
-        let label = "按回答修订".to_string();
+        self.install_research_revision(
+            "按回答修订",
+            summary_lines.join("\n"),
+            before,
+            ResearchSnapshot {
+                raw,
+                ledger,
+                sources: research.sources,
+            },
+        );
+        *self.status = "已按你的回答修订，新的提案在侧栏里。".into();
+    }
+
+    /// 撤回 AI 对一处缺口的概括：所在句换回原句（带「【待核实】」占位），缺口改为出题问用户，
+    /// 重新定稿成提案。全是确定性替换，不调模型。
+    pub(crate) fn revert_generalized(&mut self, turn_id: u64, gap_id: usize) {
+        let Some(research) = self
+            .doc
+            .ai_panel
+            .turn_mut(turn_id)
+            .and_then(|turn| turn.research.clone())
+        else {
+            return;
+        };
+        let Some(before) = self.doc.ai_proposal.as_ref().map(|p| p.before.clone()) else {
+            *self.status = "提案已不在了，没法撤回；可以重新起草。".into();
+            return;
+        };
+        let mut ledger = research.ledger;
+        let Some(gap) = ledger.get_mut(gap_id) else {
+            return;
+        };
+        let GapStatus::Generalized(original) = gap.status.clone() else {
+            return;
+        };
+        if !research.raw.contains(&gap.sentence) {
+            *self.status = "找不到 AI 改写的那一句了，没法撤回。".into();
+            return;
+        }
+        let raw = research.raw.replacen(&gap.sentence, &original, 1);
+        let hint = gap.hint.clone();
+        gap.sentence = original;
+        gap.status = GapStatus::NoAnswer;
+        self.install_research_revision(
+            "撤回概括",
+            format!("「{hint}」恢复成待核实，改为问你"),
+            before,
+            ResearchSnapshot {
+                raw,
+                ledger,
+                sources: research.sources,
+            },
+        );
+        *self.status = format!("已撤回「{hint}」的概括表述，题目在侧栏里。");
+    }
+
+    /// 研究式起草的工作稿改过之后：开新的一轮、重新定稿成提案，台账里还要问的出成题附上。
+    fn install_research_revision(
+        &mut self,
+        label: &str,
+        prompt: String,
+        before: String,
+        research: ResearchSnapshot,
+    ) {
+        let draft =
+            crate::draft_page::reviewed_draft(&self.doc.draft, self.config, &research.raw, false);
         self.doc
             .ai_panel
-            .push_turn(label.clone(), summary_lines.join("\n"), Vec::new(), None);
+            .push_turn(label.to_string(), prompt, Vec::new(), None);
         let summary = GongwenApp::install_ai_proposal(
             self.doc,
             before,
             draft,
-            label,
+            label.to_string(),
             &self.config.vocabulary,
         );
-        let remaining = clarify::gap_questions(&ledger, BATCH_QUESTIONS);
+        let remaining = clarify::gap_questions(&research.ledger, BATCH_QUESTIONS);
         let panel = &mut self.doc.ai_panel;
         let new_id = panel.turns.last().map(|turn| turn.id);
-        panel.replace_content(raw.clone());
+        panel.replace_content(research.raw.clone());
         panel.finish(TurnState::Proposed(summary));
         if let Some(turn) = new_id.and_then(|id| panel.turn_mut(id)) {
             turn.replies = initial_replies(&remaining);
             turn.questions = remaining;
-            turn.research = Some(ResearchSnapshot {
-                raw,
-                ledger,
-                sources: research.sources,
-            });
+            turn.research = Some(research);
         }
-        *self.status = "已按你的回答修订，新的提案在侧栏里。".into();
     }
 }
 

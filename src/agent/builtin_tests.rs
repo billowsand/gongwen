@@ -1046,3 +1046,53 @@ fn letters_ask_the_six_elements_before_drafting_and_write_the_answers_in() {
         report.questions.iter().map(|q| &q.text).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn retrievable_gaps_the_knowledge_base_cannot_fill_are_generalized_not_asked() {
+    let skill = builtin(skill::RESEARCH_DRAFT);
+    let model = ScriptedModel::new(|role, prompt| {
+        if prompt.contains("需要补全") {
+            "无法补全".into()
+        } else if prompt.contains("材料和知识库里都查不到") {
+            "依据有关规定，现就开展隐患排查有关事项通知如下。".into()
+        } else if role == ModelRole::Draft && prompt.contains("隐患排查") {
+            "# 关于开展冬季森林防火隐患排查的通知\n\n各区县：\n\n\
+             依据【待核实：上级文件依据】，现就开展隐患排查有关事项通知如下。\n"
+                .into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::new(vec![(
+        "隐患排查",
+        chunk(1, "往年通知", "各地要认真开展隐患排查。"),
+    )]);
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        board(
+            TemplateKind::PlainDocument,
+            "",
+            "起草一份通知，部署冬季森林防火隐患排查。",
+        ),
+    );
+    assert!(driver.run().is_none());
+    assert!(
+        driver
+            .board
+            .workspace
+            .contains("依据有关规定，现就开展隐患排查有关事项通知如下。"),
+        "{}",
+        driver.board.workspace
+    );
+    let gap = &driver.board.ledger.gaps[0];
+    assert_eq!(
+        gap.status,
+        super::gaps::GapStatus::Generalized(
+            "依据【待核实：上级文件依据】，现就开展隐患排查有关事项通知如下。".into()
+        )
+    );
+    let report = SkillReport::from_board(&driver.board);
+    assert!(report.questions.is_empty(), "概括过的不再问");
+}

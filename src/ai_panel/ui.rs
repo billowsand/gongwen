@@ -33,6 +33,10 @@ enum CardAction {
     SaveStyle(u64),
     /// 到 AI 管理页「风格」细改。
     OpenStyles,
+    /// 在审阅视图里定位到这段文字（缺口所在句）。
+    Locate(String),
+    /// 撤回 AI 对某处缺口的概括：(轮次, 缺口)。
+    Revert(u64, usize),
 }
 
 impl DraftPage<'_> {
@@ -268,6 +272,14 @@ impl DraftPage<'_> {
             Some(CardAction::OpenDrawer) => self.open_result_drawer(),
             Some(CardAction::SaveStyle(id)) => self.save_learned_style(id),
             Some(CardAction::OpenStyles) => self.actions.push(DraftAction::OpenStyleSettings),
+            Some(CardAction::Locate(text)) => match self.doc.ai_proposal.as_mut() {
+                Some(proposal) => {
+                    proposal.open = true;
+                    proposal.locate = Some(text);
+                }
+                None => *self.status = "提案已不在了，没法定位。".into(),
+            },
+            Some(CardAction::Revert(turn_id, gap_id)) => self.revert_generalized(turn_id, gap_id),
             Some(CardAction::Answer(id)) => {
                 let asking = self
                     .doc
@@ -552,7 +564,7 @@ fn turn_card(
             proposal_actions(ui, summary, proposal, action);
             if let Some(research) = &turn.research {
                 ui.add_space(6.0);
-                ledger_ui(ui, turn.id, research);
+                ledger_ui(ui, turn.id, research, action);
             }
             if !turn.questions.is_empty() {
                 ui.add_space(6.0);
@@ -666,6 +678,91 @@ fn findings_ui(
     });
 }
 
+/// 缺口题在正文里的位置：所在小节、所在整句与缺口字面。研究式起草交付后从快照里查，
+/// 流程挂起时从黑板里查。
+struct GapContext {
+    section: String,
+    sentence: String,
+    literal: String,
+}
+
+fn gap_context(
+    question: &crate::agent::clarify::Question,
+    research: Option<&super::ResearchSnapshot>,
+    run: Option<&super::skill_job::SkillRun>,
+) -> Option<GapContext> {
+    let crate::agent::clarify::Target::Gap(id) = question.target else {
+        return None;
+    };
+    let (ledger, text) = match (research, run) {
+        (Some(research), _) => (&research.ledger, research.raw.as_str()),
+        (None, Some(run)) => (&run.board.ledger, run.board.workspace.as_str()),
+        _ => return None,
+    };
+    let gap = ledger.get(id)?;
+    let pos = text
+        .find(&gap.sentence)
+        .or_else(|| text.find(&gap.literal))
+        .unwrap_or(0);
+    Some(GapContext {
+        section: crate::agent::gaps::section_of(text, pos),
+        sentence: crate::agent::evidence::strip_citations(&gap.sentence)
+            .trim()
+            .to_string(),
+        literal: gap.literal.clone(),
+    })
+}
+
+/// 所在整句，缺口高亮；点一下在审阅视图里定位。
+fn gap_context_ui(ui: &mut egui::Ui, context: &GapContext, action: &mut Option<CardAction>) {
+    if !context.section.is_empty() {
+        ui.label(
+            egui::RichText::new(format!("所在：{}", context.section))
+                .small()
+                .color(theme::text_muted()),
+        );
+    }
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let plain = egui::TextFormat {
+        font_id: font.clone(),
+        color: theme::text_soft(),
+        ..Default::default()
+    };
+    let marked = egui::TextFormat {
+        font_id: font,
+        color: theme::warn(),
+        underline: egui::Stroke::new(1.0, theme::warn()),
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    let sentence = &context.sentence;
+    match sentence.find(&context.literal) {
+        Some(pos) => {
+            job.append(&sentence[..pos], 0.0, plain.clone());
+            job.append(&context.literal, 0.0, marked);
+            job.append(&sentence[pos + context.literal.len()..], 0.0, plain);
+        }
+        None => job.append(sentence, 0.0, plain),
+    }
+    let response = egui::Frame::new()
+        .fill(theme::surface_sunk())
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            job.wrap.max_width = ui.available_width();
+            ui.add(egui::Label::new(job).sense(egui::Sense::click()))
+        })
+        .inner;
+    if response
+        .on_hover_text("在审阅视图里定位到这一句")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
+        *action = Some(CardAction::Locate(context.sentence.clone()));
+    }
+}
+
 /// 选择题。程序推荐的选项已经替用户选上；写了自己的答案就以它为准。
 fn questions_ui(
     ui: &mut egui::Ui,
@@ -675,9 +772,21 @@ fn questions_ui(
 ) {
     let asking = turn.state == TurnState::Asking;
     ui.label(egui::RichText::new(heading).strong());
-    for (question, draft) in turn.questions.iter().zip(turn.replies.iter_mut()) {
-        ui.add_space(4.0);
-        ui.label(&question.text);
+    let super::AiTurn {
+        id: turn_id,
+        questions,
+        replies,
+        research,
+        run,
+        ..
+    } = turn;
+    for (question, draft) in questions.iter().zip(replies.iter_mut()) {
+        ui.add_space(8.0);
+        let context = gap_context(question, research.as_ref(), run.as_deref());
+        ui.label(egui::RichText::new(&question.text).strong());
+        if let Some(context) = &context {
+            gap_context_ui(ui, context, action);
+        }
         ui.horizontal_wrapped(|ui| {
             for (index, choice) in question.choices.iter().enumerate() {
                 let selected =
@@ -694,7 +803,8 @@ fn questions_ui(
                     response.on_hover_text(&choice.detail)
                 };
                 if response.clicked() {
-                    draft.choice = Some(index);
+                    // 再点一次取消选择。
+                    draft.choice = (!selected).then_some(index);
                     draft.custom.clear();
                     draft.skip = false;
                 }
@@ -726,16 +836,21 @@ fn questions_ui(
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         if theme::primary_icon_button(ui, theme::Icon::SquareCheck, submit).clicked() {
-            *action = Some(CardAction::Answer(turn.id));
+            *action = Some(CardAction::Answer(*turn_id));
         }
         if !asking {
-            ui.weak("没回答的保留待核实，不会替你猜");
+            ui.weak("AI 把回答写进所在段落，改完仍是提案；没回答的保留待核实，不会替你猜");
         }
     });
 }
 
 /// 核实清单：每处缺口怎么处理的、证据出自哪里。
-fn ledger_ui(ui: &mut egui::Ui, turn_id: u64, research: &super::ResearchSnapshot) {
+fn ledger_ui(
+    ui: &mut egui::Ui,
+    turn_id: u64,
+    research: &super::ResearchSnapshot,
+    action: &mut Option<CardAction>,
+) {
     use crate::agent::gaps::GapStatus;
     if research.ledger.gaps.is_empty() && research.sources.is_empty() {
         return;
@@ -743,7 +858,7 @@ fn ledger_ui(ui: &mut egui::Ui, turn_id: u64, research: &super::ResearchSnapshot
     let (resolved, handled, pending) = research.ledger.counts();
     egui::CollapsingHeader::new(
         egui::RichText::new(format!(
-            "核实清单：已补全 {resolved} · 你已处理 {handled} · 待确认 {pending} · 证据 {} 段",
+            "核实清单：已补全或概括 {resolved} · 你已处理 {handled} · 待确认 {pending} · 证据 {} 段",
             research.sources.len()
         ))
         .small()
@@ -772,6 +887,12 @@ fn ledger_ui(ui: &mut egui::Ui, turn_id: u64, research: &super::ResearchSnapshot
                 GapStatus::Answered(value) => ("✓", theme::success(), format!("你填了：{value}")),
                 GapStatus::Kept => ("✓", theme::success(), "你确认保留原文".into()),
                 GapStatus::Skipped => ("·", theme::text_muted(), "保留待核实".into()),
+                GapStatus::Dropped => ("·", theme::text_muted(), "你选了删去".into()),
+                GapStatus::Generalized(_) => (
+                    "~",
+                    theme::accent(),
+                    format!("知识库查不到，AI 写成了概括表述：{}", gap.sentence.trim()),
+                ),
                 GapStatus::NoAnswer => ("?", theme::warn(), "知识库里没找到".into()),
                 GapStatus::Open => ("?", theme::warn(), "等你提供".into()),
             };
@@ -785,6 +906,14 @@ fn ledger_ui(ui: &mut egui::Ui, turn_id: u64, research: &super::ResearchSnapshot
                         .small()
                         .color(theme::text_soft()),
                 );
+                if matches!(gap.status, GapStatus::Generalized(_))
+                    && ui
+                        .small_button("撤回")
+                        .on_hover_text("恢复成「【待核实】」占位，改为出题问你")
+                        .clicked()
+                {
+                    *action = Some(CardAction::Revert(turn_id, gap.id));
+                }
             });
         }
         if !research.sources.is_empty() {

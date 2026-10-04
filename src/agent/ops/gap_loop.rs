@@ -5,7 +5,14 @@
 //!
 //! 参数：`rounds`（技能参数 `max_rounds`）、`attempts`（`attempts_per_gap`）、
 //! `evidence_chars`、`apis`（除知识库外还查哪些数据接口）、`search`（为否时不检索，缺口全部
-//! 交用户）；提示词 `fill_prompt`（默认「缺口修订」）、`source_prompt`（默认「来源核对」）。
+//! 交用户）、`generalize`（为否时不概括）；提示词 `fill_prompt`（默认「缺口修订」）、
+//! `source_prompt`（默认「来源核对」）、`generalize_prompt`（默认「缺口概括」，技能里没写就用
+//! 内置的一份）。
+//!
+//! 检索到头仍没答案的「可检索」缺口（政策依据、背景、通行做法），不急着拿去问用户：先交模型
+//! 把所在句改写成不依赖这项具体内容的规范表述（「依据有关规定」），闸门要求不新增任何事实。
+//! 改了的在核实清单里标出来，用户可以撤回成待核实再答。本次安排类（时间、地点、人员、金额）
+//! 不概括——那是只有用户知道的事，概括掉等于替用户拿主意。
 
 use super::{
     Flow, assist, check_cancel, fetch_into, has_sources, param, phase, prompt, squash, tool_line,
@@ -82,11 +89,152 @@ pub(super) fn gap_loop(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
             format!("第 {round} 轮补全 {resolved} 处"),
         );
     }
+    if step
+        .params
+        .get("generalize")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+    {
+        generalize(ctx, step)?;
+    }
     let sources = ctx.board.sources_text();
     let board = &mut *ctx.board;
     board.ledger.sync(&board.workspace, &sources, vocabulary);
     board.ledger.mark_declined(&board.notes);
     Ok(Flow::Next)
+}
+
+/// 技能里没写「缺口概括」这段提示词时用这一份。
+const GENERALIZE_PROMPT: &str = "下面这句公文里「{hint}」需要具体内容，但材料和知识库里都查不到。
+
+【原句】
+{sentence}
+
+把这句改写成不依赖这项具体内容的规范表述，例如把「依据【待核实：上级文件依据】」写成「依据有关规定」，\
+把「按【待核实：审批程序】办理」写成「按规定程序办理」。
+要求：
+1. 不得新写任何时间、数字、单位、人名、文件名；
+2. 除这一处外，原句其余文字尽量不变，句中其他「【待核实：…】」原样保留；
+3. 这一处离开具体内容就说不通时，只输出「无法概括」；
+4. 只输出改后的一整句，不加解释、不加引号。";
+
+/// 检索到头的可检索缺口：交模型写成概括表述，过闸门才写回。只处理真去查过的（`search: false`
+/// 的技能里缺口全是本单位情况，不该概括）。
+fn generalize(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<()> {
+    let targets: Vec<usize> = ctx
+        .board
+        .ledger
+        .gaps
+        .iter()
+        .filter(|gap| {
+            gap.kind == GapKind::Retrievable
+                && gap.status == GapStatus::NoAnswer
+                && gap.attempts > 0
+        })
+        .map(|gap| gap.id)
+        .collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let name = step.param_str("generalize_prompt").unwrap_or("缺口概括");
+    let template = ctx
+        .env
+        .skill
+        .section(name)
+        .unwrap_or(GENERALIZE_PROMPT)
+        .to_string();
+    phase(
+        ctx,
+        format!("{} 处缺口知识库里查不到，改成概括表述…", targets.len()),
+    );
+    for id in targets {
+        check_cancel(ctx)?;
+        let Some(gap) = ctx.board.ledger.get(id).cloned() else {
+            continue;
+        };
+        let locals = [
+            ("hint", gap.hint.clone()),
+            ("sentence", evidence::strip_citations(&gap.sentence)),
+        ];
+        let text = ctx.board.render_with(&template, &locals);
+        let reply = assist(ctx, &text)?;
+        let revised = match gate_generalized(&gap, &reply, ctx.env.vocabulary) {
+            Ok(revised) => revised,
+            Err(why) => {
+                tool_line(
+                    ctx,
+                    "ws.replace",
+                    Permission::WriteWorkspace,
+                    format!("「{}」没概括成：{why}，留给你确认", gap.hint),
+                );
+                continue;
+            }
+        };
+        let workspace = &mut ctx.board.workspace;
+        let Some(pos) = workspace.find(&gap.sentence) else {
+            continue;
+        };
+        workspace.replace_range(pos..pos + gap.sentence.len(), &revised);
+        if let Some(entry) = ctx.board.ledger.get_mut(id) {
+            entry.status = GapStatus::Generalized(gap.sentence.clone());
+            entry.sentence = revised.clone();
+        }
+        tool_line(
+            ctx,
+            "ws.replace",
+            Permission::WriteWorkspace,
+            format!("「{}」查不到，写成：{revised}", gap.hint),
+        );
+        (ctx.emit)(Event::Workspace(ctx.board.workspace.clone()));
+    }
+    Ok(())
+}
+
+/// 概括结果的闸门：缺口没了、别的占位还在、一个新事实都不许有、标记不变、篇幅不离谱。
+fn gate_generalized(
+    gap: &Gap,
+    reply: &str,
+    vocabulary: &[VocabularyEntry],
+) -> Result<String, String> {
+    let revised = reply
+        .trim()
+        .trim_matches(['「', '」', '“', '”', '"'])
+        .trim()
+        .to_string();
+    if revised.is_empty() || revised.contains("无法概括") {
+        return Err("离开具体内容说不通".into());
+    }
+    if revised.lines().count() > 1 {
+        return Err("回了多行，像在解释而不是改写".into());
+    }
+    if revised.contains(&gap.literal) {
+        return Err("占位还在".into());
+    }
+    let before = evidence::strip_citations(&gap.sentence);
+    let after = evidence::strip_citations(&revised);
+    if before.trim() == after.trim() {
+        return Err("原样还回来了".into());
+    }
+    for placeholder in find_placeholders(&before) {
+        if placeholder.literal != gap.literal && !after.contains(&placeholder.literal) {
+            return Err(format!("把别处的「{}」也改掉了", placeholder.literal));
+        }
+    }
+    let (before_len, after_len) = (before.chars().count(), after.chars().count());
+    if after_len * 3 < before_len || after_len > before_len + 20 {
+        return Err("改动幅度过大".into());
+    }
+    if markup_counts(&before) != markup_counts(&after) {
+        return Err("动了 Markdown 标记".into());
+    }
+    let known = crate::ai_guard::extract_key_facts(&before, vocabulary);
+    if let Some(fact) = crate::ai_guard::extract_key_facts(&after, vocabulary)
+        .into_iter()
+        .find(|fact| !known.contains(fact))
+    {
+        return Err(format!("新写了「{}」", fact.value));
+    }
+    Ok(revised)
 }
 
 /// 缺口的检索词：第一次用所在句（去掉占位与引用）加提示；第二次换成提示加标题，
@@ -350,4 +498,52 @@ fn gap_summary(ledger: &Ledger) -> String {
         count(GapKind::NeedsUser),
         count(GapKind::Untraced)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gap(sentence: &str, literal: &str) -> Gap {
+        let mut ledger = Ledger::default();
+        ledger.sync(sentence, "", &[]);
+        let mut gap = ledger
+            .gaps
+            .into_iter()
+            .find(|gap| gap.literal == literal)
+            .expect("占位入账");
+        gap.sentence = sentence.to_string();
+        gap
+    }
+
+    #[test]
+    fn generalizing_may_not_add_facts_or_touch_other_placeholders() {
+        let g = gap(
+            "依据【待核实：上级文件依据】，请于【待核实：完成时限】前完成排查。",
+            "【待核实：上级文件依据】",
+        );
+        assert_eq!(
+            gate_generalized(
+                &g,
+                "「依据有关规定，请于【待核实：完成时限】前完成排查。」",
+                &[]
+            ),
+            Ok("依据有关规定，请于【待核实：完成时限】前完成排查。".to_string())
+        );
+        assert!(
+            gate_generalized(
+                &g,
+                "依据《森林防火条例》，请于【待核实：完成时限】前完成排查。",
+                &[]
+            )
+            .unwrap_err()
+            .contains("新写了")
+        );
+        assert!(
+            gate_generalized(&g, "依据有关规定，请于月底前完成排查。", &[])
+                .unwrap_err()
+                .contains("别处")
+        );
+        assert!(gate_generalized(&g, "无法概括", &[]).is_err());
+    }
 }

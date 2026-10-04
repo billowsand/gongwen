@@ -74,6 +74,23 @@ pub(crate) fn sentence_at(text: &str, pos: usize) -> Range<usize> {
         })
 }
 
+/// `pos` 所在的小节：往前最近的二级及以下标题（去掉 `#`）。一级标题是文题，不算小节；
+/// 在第一个小节之前就返回空。
+pub(crate) fn section_of(text: &str, pos: usize) -> String {
+    let pos = pos.min(text.len());
+    let start = (0..=pos)
+        .rev()
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(0);
+    text[..start]
+        .lines()
+        .rev()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("##"))
+        .map(|line| line.trim_start_matches('#').trim().to_string())
+        .unwrap_or_default()
+}
+
 /// 正文里的一处占位。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Placeholder {
@@ -134,6 +151,10 @@ pub(crate) enum GapStatus {
     Kept,
     /// 用户选择保留待核实。
     Skipped,
+    /// 用户选择删去这一项。
+    Dropped,
+    /// 知识库查不到，AI 把所在句改写成不依赖这项内容的概括表述；附改写前的原句，撤回用。
+    Generalized(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -464,15 +485,18 @@ impl Ledger {
             .collect()
     }
 
-    /// (已补全, 用户已处理, 待处理)
+    /// (已补全或概括, 用户已处理, 待处理)
     pub(crate) fn counts(&self) -> (usize, usize, usize) {
         let mut resolved = 0;
         let mut handled = 0;
         let mut pending = 0;
         for gap in &self.gaps {
             match gap.status {
-                GapStatus::Resolved(_) => resolved += 1,
-                GapStatus::Answered(_) | GapStatus::Kept | GapStatus::Skipped => handled += 1,
+                GapStatus::Resolved(_) | GapStatus::Generalized(_) => resolved += 1,
+                GapStatus::Answered(_)
+                | GapStatus::Kept
+                | GapStatus::Skipped
+                | GapStatus::Dropped => handled += 1,
                 GapStatus::Open | GapStatus::NoAnswer => pending += 1,
             }
         }
@@ -598,6 +622,13 @@ mod tests {
         fresh.sync(filled, "《森林防火条例》", &[]);
         assert!(fresh.gaps.iter().all(|gap| gap.kind != GapKind::Untraced));
         assert_eq!(ledger.counts(), (1, 0, 2));
+    }
+
+    #[test]
+    fn the_section_is_the_nearest_heading_below_the_title() {
+        let text = "# 关于某事的函\n\n开头。\n\n## 工作安排\n\n请于【待核实：时限】前反馈。\n";
+        assert_eq!(section_of(text, text.find("开头").unwrap()), "");
+        assert_eq!(section_of(text, text.find("【待核实").unwrap()), "工作安排");
     }
 
     #[test]

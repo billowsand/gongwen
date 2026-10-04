@@ -291,6 +291,8 @@ pub(crate) struct AiProposal {
     pub(crate) fact_changes_confirmed: bool,
     pub(crate) view: crate::diff_view::DiffViewState,
     pub(crate) open: bool,
+    /// 侧栏里点了缺口所在句：下一帧在审阅窗里把这句所在的改动滚进视野。
+    pub(crate) locate: Option<String>,
 }
 
 /// 一篇打开的稿件：内容、审校结果与这篇稿子自己的视图状态。

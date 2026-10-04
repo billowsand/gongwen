@@ -568,6 +568,7 @@ fn validate_steps(
             "fill_prompt",
             "source_prompt",
             "elements_prompt",
+            "generalize_prompt",
         ] {
             if let Some(name) = step.param_str(key)
                 && skill.section(name).is_none()

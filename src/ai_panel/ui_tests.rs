@@ -270,7 +270,8 @@ fn research_answers_become_a_new_proposal_without_calling_a_model() {
     use crate::agent::clarify::gap_questions;
     use crate::agent::gaps::{GapStatus, Ledger};
     let mut harness = Harness::new("");
-    let raw = "# 关于冬季防火的通知\n\n请于【待核实：排查完成时限】前完成排查。\n".to_string();
+    let raw = "# 关于冬季防火的通知\n\n## 工作安排\n\n请于【待核实：排查完成时限】前完成排查。\n"
+        .to_string();
     let mut ledger = Ledger::default();
     ledger.sync(&raw, "", &[]);
     let questions = gap_questions(&ledger, 4);
@@ -293,6 +294,7 @@ fn research_answers_become_a_new_proposal_without_calling_a_model() {
         fact_changes_confirmed: false,
         view: Default::default(),
         open: false,
+        locate: None,
     });
     let panel = &mut harness.doc.ai_panel;
     panel.finish(TurnState::Proposed(ProposalSummary::default()));
@@ -310,6 +312,11 @@ fn research_answers_become_a_new_proposal_without_calling_a_model() {
     let texts = harness.frame_texts();
     assert!(has(&texts, "这几处要你确认"), "{texts:?}");
     assert!(has(&texts, "按回答修订"), "{texts:?}");
+    assert!(has(&texts, "「排查完成时限」定到什么时候？"), "{texts:?}");
+    assert!(
+        has(&texts, "所在：工作安排"),
+        "题目要带上所在小节：{texts:?}"
+    );
 
     harness.with_page(|page| page.apply_research_answers(id));
     let panel = &harness.doc.ai_panel;
@@ -511,6 +518,7 @@ fn result_card_offers_adoption_and_accepting_writes_the_body() {
         fact_changes_confirmed: false,
         view: Default::default(),
         open: false,
+        locate: None,
     });
     harness
         .doc
@@ -562,6 +570,7 @@ fn unconfirmed_fact_changes_block_acceptance() {
         fact_changes_confirmed: false,
         view: Default::default(),
         open: false,
+        locate: None,
     });
     harness
         .doc
@@ -605,6 +614,7 @@ fn body_edited_after_proposal_blocks_acceptance() {
         fact_changes_confirmed: false,
         view: Default::default(),
         open: false,
+        locate: None,
     });
     harness
         .doc
@@ -1444,4 +1454,62 @@ fn session_samples() {
         .join("ai-panel-session.png");
     canvas.render(&harness.ctx, output, size, theme::canvas(), &path);
     println!("{}", path.display());
+}
+
+#[test]
+fn a_generalized_gap_can_be_reverted_into_a_question() {
+    use crate::agent::gaps::{GapStatus, Ledger};
+    let mut harness = Harness::new("");
+    let original = "依据【待核实：上级文件依据】，现就有关事项通知如下。";
+    let generalized = "依据有关规定，现就有关事项通知如下。";
+    let raw = format!("# 关于冬季防火的通知\n\n{generalized}\n");
+    let mut ledger = Ledger::default();
+    ledger.sync(&format!("# 关于冬季防火的通知\n\n{original}\n"), "", &[]);
+    ledger.gaps[0].status = GapStatus::Generalized(original.into());
+    ledger.gaps[0].sentence = generalized.into();
+    harness.doc.ai_panel.open = true;
+    let panel = &mut harness.doc.ai_panel;
+    let id = panel.push_turn("起草".into(), "写个通知".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: String::new(),
+        result: GeneratedDraft {
+            markdown: raw.clone(),
+            title: "关于冬季防火的通知".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "起草".into(),
+        fact_changes: Vec::new(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    let panel = &mut harness.doc.ai_panel;
+    panel.finish(TurnState::Proposed(ProposalSummary::default()));
+    panel.turn_mut(id).unwrap().research = Some(crate::ai_panel::ResearchSnapshot {
+        raw,
+        ledger,
+        sources: Vec::new(),
+    });
+
+    harness.with_page(|page| page.revert_generalized(id, 1));
+    let panel = &harness.doc.ai_panel;
+    let new_turn = panel.turns.last().unwrap();
+    let research = new_turn.research.as_ref().unwrap();
+    assert!(research.raw.contains(original), "{}", research.raw);
+    assert_eq!(research.ledger.gaps[0].status, GapStatus::NoAnswer);
+    assert_eq!(new_turn.questions.len(), 1, "撤回后改为出题问你");
+    assert!(
+        harness
+            .doc
+            .ai_proposal
+            .as_ref()
+            .unwrap()
+            .result
+            .markdown
+            .contains("【待核实：上级文件依据】")
+    );
 }

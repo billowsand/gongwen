@@ -4,9 +4,9 @@
 //! - 动笔前：只问会让整篇写偏的事（文种、受文对象、目的、篇幅），最多 3 题；
 //! - 第一稿出来后：需要用户提供的、知识库里找不到的、来源不明的，一批最多 4 题。
 //!
-//! 选项尽量由程序给：文种来自固定列表，事实类只给「自己填写 / 保留待核实」，只有措辞、
-//! 方向这类没有标准答案的才用模型出的选项。用户的回答**按确定性规则落到工作稿**
-//! （占位直接替换成答案），不再交给模型改写。
+//! 选项尽量由程序给：文种来自固定列表，事实类只给「自己填写 / 另行通知 / 删去这项 / 保留待核实」，
+//! 只有措辞、方向这类没有标准答案的才用模型出的选项。缺口题的回答怎么落到工作稿见
+//! `apply_gap_replies`：这里是确定性的兜底，界面上先交模型把答案写进所在段落、过闸门。
 
 use super::gaps::{Gap, GapKind, GapStatus, Ledger};
 use crate::models::TemplateKind;
@@ -24,6 +24,10 @@ pub(crate) enum Action {
     KeepOriginal,
     /// 改成「【待核实：…】」占位。
     MarkPending,
+    /// 缺口填成这个值（「另行通知」这类程序给的写法）。
+    Fill(String),
+    /// 删去这一项：连同只为它服务的说法一起去掉。
+    Drop,
     /// 通用选择题（`ask.choice`）：选中项的值存进步骤的 `save_as` 变量。
     Pick(serde_json::Value),
 }
@@ -229,41 +233,89 @@ pub(crate) fn predraft_questions(
     out
 }
 
-/// 一个缺口对应的选择题。
+/// 缺口提示 → 像人问话的问句：「研究方案反馈时限定到什么时候？」。
+fn gap_ask(hint: &str) -> String {
+    let has = |words: &[&str]| words.iter().any(|word| hint.contains(word));
+    let tail = if has(&["时限", "截止", "期限"]) {
+        "定到什么时候"
+    } else if has(&["时间", "日期", "几月", "几日"]) {
+        "定在什么时候"
+    } else if has(&["地点", "会场", "地址"]) {
+        "在哪里"
+    } else if has(&["电话", "手机", "邮箱"]) {
+        "是多少"
+    } else if has(&["联系人", "负责人", "人员", "名单"]) {
+        "是谁"
+    } else if has(&["单位"]) {
+        "是哪个单位"
+    } else if has(&["金额", "经费", "预算", "资金", "数额"]) || hint.ends_with('数') {
+        "是多少"
+    } else {
+        "怎么写"
+    };
+    format!("「{hint}」{tail}？")
+}
+
+/// 时间类缺口：可以「另行通知」。
+fn is_time(hint: &str) -> bool {
+    ["时限", "截止", "期限", "时间", "日期"]
+        .iter()
+        .any(|word| hint.contains(word))
+}
+
+/// 一个缺口对应的选择题。题面只问一件事；所在小节与整句由侧栏按 `Target::Gap` 回查台账显示。
 pub(crate) fn gap_question(id: usize, gap: &Gap) -> Question {
-    let context = around(&gap.sentence, &gap.literal, 16);
+    let choice = |label: &str, detail: &str, recommended: bool, action: Action| Choice {
+        label: label.into(),
+        detail: detail.into(),
+        recommended,
+        action,
+    };
     let (text, choices, custom_hint) = match gap.kind {
         GapKind::Untraced => (
-            format!(
-                "「{}」在材料和知识库里都找不到出处，怎么处理？（原句：{context}）",
-                gap.hint
-            ),
+            format!("「{}」在材料和知识库里都找不到出处，怎么处理？", gap.hint),
             vec![
-                Choice {
-                    label: "改为待核实".into(),
-                    detail: "先占位，核实后再填".into(),
-                    recommended: true,
-                    action: Action::MarkPending,
-                },
-                Choice {
-                    label: "保留原文".into(),
-                    detail: "我确认这个内容无误".into(),
-                    recommended: false,
-                    action: Action::KeepOriginal,
-                },
+                choice(
+                    "改为待核实",
+                    "先占位，核实后再填",
+                    true,
+                    Action::MarkPending,
+                ),
+                choice(
+                    "保留原文",
+                    "我确认这个内容无误",
+                    false,
+                    Action::KeepOriginal,
+                ),
+                choice(
+                    "删去这个说法",
+                    "连同只为它服务的话一起去掉",
+                    false,
+                    Action::Drop,
+                ),
             ],
             Some("改成……".to_string()),
         ),
         GapKind::NeedsUser | GapKind::Retrievable => {
-            let why = if gap.status == GapStatus::NoAnswer {
-                "知识库里没找到"
-            } else {
-                "只有你知道"
-            };
+            let mut choices = Vec::new();
+            if is_time(&gap.hint) {
+                choices.push(choice(
+                    "另行通知",
+                    "写成「具体时间另行通知」",
+                    false,
+                    Action::Fill("另行通知".into()),
+                ));
+            }
+            choices.push(choice(
+                "删去这项",
+                "这项不必写，连同相关说法一起去掉",
+                false,
+                Action::Drop,
+            ));
             (
-                format!("「{}」是什么？（{why}；原句：{context}）", gap.hint),
-                Vec::new(),
-                Some(format!("填写{}", gap.hint)),
+                gap_ask(&gap.hint),
+                choices,
+                Some("直接写，大白话也行，AI 会把它写进句子".to_string()),
             )
         }
     };
@@ -329,8 +381,8 @@ pub(crate) fn resolve_predraft(
 
 /// 把缺口题的回答落到工作稿上，返回改后的正文。台账里对应缺口的状态一并更新。
 ///
-/// 全是确定性替换：占位换成答案；来源不明的事实换成答案、换成占位或原样保留。
-/// 一个都不交给模型——用户亲口给的值，原样写进去最可靠。
+/// 全是确定性改法：占位换成答案；删去就去掉所在句；来源不明的事实换成占位或原样保留。
+/// 这是兜底——界面上先交模型把答案写进所在段落（`gap_revise`），过不了闸门的才这样落。
 pub(crate) fn apply_gap_replies(
     markdown: &str,
     ledger: &mut Ledger,
@@ -348,25 +400,67 @@ pub(crate) fn apply_gap_replies(
         let Some(gap) = ledger.get_mut(gap_id) else {
             continue;
         };
-        match reply {
-            Reply::Custom(value) if !value.trim().is_empty() => {
-                let value = value.trim();
-                text = text.replace(&gap.literal, value);
-                gap.status = GapStatus::Answered(value.to_string());
+        match gap_edit(question, reply) {
+            GapEdit::Fill(value) => {
+                text = text.replace(&gap.literal, &value);
+                gap.status = GapStatus::Answered(value);
             }
-            Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
-                Some(Action::MarkPending) => {
-                    let placeholder = format!("【待核实：{}】", gap.hint);
-                    text = text.replace(&gap.literal, &placeholder);
-                    gap.status = GapStatus::Skipped;
-                }
-                Some(Action::KeepOriginal) => gap.status = GapStatus::Kept,
-                _ => {}
-            },
-            Reply::Skip | Reply::Custom(_) => gap.status = GapStatus::Skipped,
+            GapEdit::Drop => {
+                text = drop_sentence(&text, &gap.literal);
+                gap.status = GapStatus::Dropped;
+            }
+            GapEdit::MarkPending => {
+                let placeholder = format!("【待核实：{}】", gap.hint);
+                text = text.replace(&gap.literal, &placeholder);
+                gap.status = GapStatus::Skipped;
+            }
+            GapEdit::Keep => gap.status = GapStatus::Kept,
+            GapEdit::Skip => gap.status = GapStatus::Skipped,
         }
     }
     text
+}
+
+/// 一道缺口题的回答要对正文做什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GapEdit {
+    Fill(String),
+    Drop,
+    MarkPending,
+    Keep,
+    Skip,
+}
+
+pub(crate) fn gap_edit(question: &Question, reply: &Reply) -> GapEdit {
+    match reply {
+        Reply::Custom(value) if !value.trim().is_empty() => GapEdit::Fill(value.trim().into()),
+        Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
+            Some(Action::Fill(value)) => GapEdit::Fill(value.clone()),
+            Some(Action::Drop) => GapEdit::Drop,
+            Some(Action::MarkPending) => GapEdit::MarkPending,
+            Some(Action::KeepOriginal) => GapEdit::Keep,
+            _ => GapEdit::Skip,
+        },
+        Reply::Skip | Reply::Custom(_) => GapEdit::Skip,
+    }
+}
+
+/// 去掉 `literal` 所在的那一句；整行只有这一句就连行一起去掉。
+pub(crate) fn drop_sentence(text: &str, literal: &str) -> String {
+    let Some(pos) = text.find(literal) else {
+        return text.to_string();
+    };
+    let span = super::gaps::sentence_at(text, pos);
+    let line_start = text[..span.start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[span.end..]
+        .find('\n')
+        .map_or(text.len(), |i| span.end + i);
+    if text[line_start..span.start].trim().is_empty() && text[span.end..line_end].trim().is_empty()
+    {
+        let end = (line_end + 1).min(text.len());
+        return format!("{}{}", &text[..line_start], &text[end..]);
+    }
+    format!("{}{}", &text[..span.start], &text[span.end..])
 }
 
 /// 去掉行首的「1.」「2、」「3)」编号；「2026年……」这种以数字开头的正文不动。
@@ -381,22 +475,6 @@ pub(crate) fn strip_numbering(line: &str) -> &str {
         }
         _ => line,
     }
-}
-
-/// 取 `needle` 前后各 `side` 个字作上下文：长句里要看到的是缺口本身，不是句首。
-fn around(text: &str, needle: &str, side: usize) -> String {
-    let Some(pos) = text.find(needle) else {
-        return text.chars().take(side * 2).collect();
-    };
-    let before: Vec<char> = text[..pos].chars().collect();
-    let after: Vec<char> = text[pos + needle.len()..].chars().collect();
-    let head: String = before[before.len().saturating_sub(side)..].iter().collect();
-    let tail: String = after[..after.len().min(side)].iter().collect();
-    format!(
-        "{}{head}{needle}{tail}{}",
-        if before.len() > side { "…" } else { "" },
-        if after.len() > side { "…" } else { "" }
-    )
 }
 
 #[cfg(test)]
@@ -502,26 +580,28 @@ mod tests {
     }
 
     #[test]
-    fn the_context_shows_the_gap_not_just_the_start_of_a_long_sentence() {
-        let sentence = "据相关研究，美军梅文项目自启动以来，系统已在美国军方各分支中运行，截至2024年已汇集179条数据流。";
-        let context = around(sentence, "2024年", 6);
-        assert_eq!(context, "…中运行，截至2024年已汇集179…");
-        assert_eq!(around("短句2024年。", "2024年", 6), "短句2024年。");
-    }
-
-    #[test]
     fn gap_replies_are_applied_deterministically() {
         let mut ledger = Ledger::default();
-        let text = "请于【待核实：排查完成时限】前完成。会议定于【待核实：会议地点】召开。依据《防火办法》执行。";
+        let text = "请于【待核实：排查完成时限】前完成。会议定于【待核实：会议地点】召开。\
+                    依据《防火办法》执行。\n\n联系人：【待核实：联系人】。\n";
         ledger.sync(text, "", &[]);
-        // 第三个是来源不明的文件名；检索过、找不到出处才出题。
-        assert_eq!(ledger.gaps[2].kind, GapKind::Untraced);
-        assert_eq!(gap_questions(&ledger, 4).len(), 2, "来源不明的先去查");
-        ledger.gaps[2].status = GapStatus::NoAnswer;
+        // 第四个是来源不明的文件名；检索过、找不到出处才出题。
+        assert_eq!(ledger.gaps[3].kind, GapKind::Untraced);
+        assert_eq!(gap_questions(&ledger, 4).len(), 3, "来源不明的先去查");
+        ledger.gaps[3].status = GapStatus::NoAnswer;
         let questions = gap_questions(&ledger, 4);
-        assert_eq!(questions.len(), 3);
-        assert!(questions[0].text.contains("只有你知道"));
-        assert_eq!(questions[2].choices[0].action, Action::MarkPending);
+        let texts: Vec<_> = questions.iter().map(|q| q.text.as_str()).collect();
+        assert_eq!(
+            texts[..3],
+            [
+                "「排查完成时限」定到什么时候？",
+                "「会议地点」在哪里？",
+                "「联系人」是谁？"
+            ]
+        );
+        assert_eq!(questions[0].choices[0].label, "另行通知");
+        assert_eq!(questions[2].choices[0].action, Action::Drop);
+        assert_eq!(questions[3].choices[0].action, Action::MarkPending);
 
         let out = apply_gap_replies(
             text,
@@ -531,16 +611,28 @@ mod tests {
                 (1, Reply::Custom("12月1日".into())),
                 (2, Reply::Skip),
                 (3, Reply::Choice(0)),
+                (4, Reply::Choice(0)),
             ],
         );
         assert_eq!(
             out,
-            "请于12月1日前完成。会议定于【待核实：会议地点】召开。依据【待核实：《防火办法》】执行。"
+            "请于12月1日前完成。会议定于【待核实：会议地点】召开。依据【待核实：《防火办法》】执行。\n\n"
         );
         assert_eq!(ledger.gaps[0].status, GapStatus::Answered("12月1日".into()));
         assert_eq!(ledger.gaps[1].status, GapStatus::Skipped);
-        assert_eq!(ledger.gaps[2].status, GapStatus::Skipped);
+        // 删去这项：整行只有这一句，连行去掉。
+        assert_eq!(ledger.gaps[2].status, GapStatus::Dropped);
+        assert_eq!(ledger.gaps[3].status, GapStatus::Skipped);
         // 处理过的不再出题。
         assert!(gap_questions(&ledger, 4).is_empty());
+    }
+
+    #[test]
+    fn dropping_a_sentence_keeps_the_rest_of_the_line() {
+        let text = "一、加强巡查。请于【待核实：时限】前报送。其余照旧。\n";
+        assert_eq!(
+            drop_sentence(text, "【待核实：时限】"),
+            "一、加强巡查。其余照旧。\n"
+        );
     }
 }

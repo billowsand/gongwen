@@ -5,11 +5,33 @@
 //! 只留下这一部分。
 
 use crate::app::GongwenApp;
-use crate::diff::{ContentSnapshot, manuscript_diff};
+use crate::diff::{ContentSnapshot, DiffBlock, ManuscriptDiff, manuscript_diff};
 use crate::diff_view::{DiffViewConfig, manuscript_diff_ui};
 use crate::draft_page::DraftSession;
 use crate::theme;
 use eframe::egui;
+
+/// 提案正文里 `text`（缺口所在句，找不到就退一步找它的前半句）落在第几处改动。
+fn change_containing(report: &ManuscriptDiff, markdown: &str, text: &str) -> Option<usize> {
+    let head: String = text.chars().take(12).collect();
+    let pos = markdown
+        .find(text)
+        .or_else(|| (!head.is_empty()).then(|| markdown.find(&head)).flatten())?;
+    report
+        .body
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            DiffBlock::Changed(change) => Some(change),
+            DiffBlock::Unchanged(_) => None,
+        })
+        .position(|change| {
+            change
+                .new_range
+                .as_ref()
+                .is_some_and(|range| range.contains(&pos))
+        })
+}
 
 impl GongwenApp {
     pub(crate) fn ai_proposal_window(&mut self, ctx: &egui::Context) {
@@ -39,6 +61,11 @@ impl GongwenApp {
             String::new(),
         );
         let report = manuscript_diff(&old, &new);
+        if let Some(text) = proposal.locate.take()
+            && let Some(index) = change_containing(&report, &proposal.result.markdown, &text)
+        {
+            proposal.view.set_focus(index, true);
+        }
         let win = egui::Window::new("审阅 AI 修改提案")
             .open(&mut keep)
             .collapsible(false)
@@ -177,6 +204,7 @@ impl GongwenApp {
             fact_changes_confirmed: false,
             view: crate::diff_view::DiffViewState::default(),
             open: !doc.ai_panel.open,
+            locate: None,
         });
         summary
     }
