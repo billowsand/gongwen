@@ -210,7 +210,12 @@ impl DraftPage<'_> {
         // —— 统一导航：F7 下一处、Shift+F7 上一处，两栏一起跳 ——
         // 先认 Shift+F7：egui 的 `consume_key` 按「逻辑上匹配」比修饰键，不带 Shift
         // 的那一条也会吃掉 Shift+F7，先查它「上一处」就永远变成「下一处」。
+        // 有模态盖着时不跳。
+        let keys = crate::modal::takes_keys(ui);
         let (previous, next) = ui.input_mut(|input| {
+            if !keys {
+                return (false, false);
+            }
             let previous = input.consume_key(egui::Modifiers::SHIFT, egui::Key::F7);
             (
                 previous,

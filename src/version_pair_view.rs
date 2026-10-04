@@ -126,9 +126,12 @@ impl VersionPairViewState {
             .as_ref()
             .map_or(0, |cache| cache.report.body.changed_count);
         // 先判断 Shift+F7。egui 的 consume_key 会让无修饰键分支也匹配带 Shift 的按键。
+        // 有模态盖着时不跳。
+        let keys = crate::modal::takes_keys(ui);
         let previous =
-            ui.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F7));
-        let next = !previous
+            keys && ui.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F7));
+        let next = keys
+            && !previous
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F7));
         if previous {
             self.step(false);

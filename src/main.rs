@@ -31,6 +31,7 @@ mod manuscript;
 mod manuscript_io;
 mod mermaid;
 mod metrics;
+mod modal;
 mod models;
 mod net;
 mod orphan_probe;

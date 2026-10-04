@@ -611,7 +611,10 @@ impl PdfSession {
         if zoom_delta != 1.0 && ui.rect_contains_pointer(ui.max_rect()) {
             self.set_zoom(self.shown_scale * zoom_delta);
         }
-        self.keyboard(ui.ctx());
+        // 有模态盖着时翻页键、Esc 都归模态。
+        if crate::modal::takes_keys(ui) {
+            self.keyboard(ui.ctx());
+        }
 
         let mut viewport = ui.available_size();
         // 竖向滚动条要从内容区里让出宽度。内容区若按整块面板宽度铺，就正好比可视区宽出

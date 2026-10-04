@@ -527,6 +527,11 @@ impl GongwenApp {
     /// 应用级快捷键要在各个文本框处理输入前消费，避免保存/查找
     /// 被当前聚焦的编辑控件吞掉。
     pub(crate) fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // 有模态盖着时快捷键一律不作用于背后的稿件；唯一例外是查找浮层自己的
+        // 开关键，它要能用同一组键把浮层关掉。
+        if self.modal_guard.active() && self.quick_find.is_none() {
+            return;
+        }
         let quick_find = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
         if ctx.input_mut(|input| input.consume_shortcut(&quick_find)) {
             if let Some(state) = self.quick_find.take() {

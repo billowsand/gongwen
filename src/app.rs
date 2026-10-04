@@ -121,6 +121,8 @@ pub struct GongwenApp {
     config: AppConfig,
     /// 应用内词表输入法：引擎在本进程里，接管键盘时系统输入法被关掉。
     ime: crate::ime::Ime,
+    /// 模态对话框的帧首守卫：收走模态下面的焦点，并据此停用应用级快捷键。
+    modal_guard: crate::modal::ModalGuard,
     /// macOS 原生透明标题栏的实测控件尺寸；无值时使用跨平台自绘标题栏。
     macos_titlebar_metrics: Option<crate::macos_window::NativeTitlebarMetrics>,
     /// 已打开的稿件，每篇一个起草页标签。空表示当前只在导航页里。
@@ -455,6 +457,7 @@ impl GongwenApp {
             about_window_open: false,
             help: crate::help::HelpState::default(),
             quick_find: None,
+            modal_guard: crate::modal::ModalGuard::default(),
             vocabulary_filter: String::new(),
             vocabulary_selected: None,
             vocabulary_collapsed: BTreeSet::new(),
@@ -595,6 +598,8 @@ pub(crate) fn switch_template_profile(
 impl eframe::App for GongwenApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // 模态守卫最先跑：焦点要在输入法接管键盘之前从模态下面收走。
+        self.modal_guard.begin_frame(&ctx);
         // 输入法要在所有控件之前接管键盘：该吃的按键在这里吃掉、该上屏的塞回事件队列。
         // 设置从配置里来，每帧对一次（设置没变是空操作）。
         self.ime.apply_settings(self.ime_settings());

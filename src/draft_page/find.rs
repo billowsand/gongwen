@@ -241,7 +241,10 @@ impl DraftPage<'_> {
     /// VS Code 风格的紧凑查找/替换条：Enter / Shift+Enter 在命中间移动，
     /// 当前命中同时选中源码，并在公文预览中标亮它所在的版式块。
     pub(crate) fn markdown_find_ui(&mut self, ui: &mut egui::Ui) {
-        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        // 有模态盖着时 Esc 归模态，不能先被查找条吃掉。
+        if crate::modal::takes_keys(ui)
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
             self.close_markdown_find();
             return;
         }
