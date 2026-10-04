@@ -66,6 +66,9 @@ pub(crate) enum Dismiss {
     EscOrBackdrop,
     /// 只认 Esc。带输入的表单用：点歪了落在遮罩上不该丢掉已填的内容。
     EscOnly,
+    /// Esc、遮罩都不认，只能点框里的按钮。逐项做了大量选择、重来代价高的框用
+    /// （如导入预览：取消后要重输密码、重新逐篇选择）。
+    ButtonsOnly,
 }
 
 /// [`dialog`] 的结果。
@@ -112,6 +115,7 @@ pub(crate) fn dialog<R>(
                         input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                     }))
         }
+        Dismiss::ButtonsOnly => response.response.should_close(),
     };
     DialogResponse {
         inner: response.inner,
@@ -244,7 +248,11 @@ mod tests {
 
     #[test]
     fn backdrop_click_only_dismisses_plain_confirmations() {
-        for (dismiss, expected) in [(Dismiss::EscOrBackdrop, true), (Dismiss::EscOnly, false)] {
+        for (dismiss, expected) in [
+            (Dismiss::EscOrBackdrop, true),
+            (Dismiss::EscOnly, false),
+            (Dismiss::ButtonsOnly, false),
+        ] {
             let ctx = egui::Context::default();
             // 先画两帧，让模态层登记、遮罩有了上一帧的位置。
             dialog_frame(&ctx, dismiss, Vec::new());
@@ -254,12 +262,16 @@ mod tests {
     }
 
     #[test]
-    fn escape_dismisses_every_dialog() {
-        for dismiss in [Dismiss::EscOrBackdrop, Dismiss::EscOnly] {
+    fn escape_dismisses_all_but_buttons_only_dialogs() {
+        for (dismiss, expected) in [
+            (Dismiss::EscOrBackdrop, true),
+            (Dismiss::EscOnly, true),
+            (Dismiss::ButtonsOnly, false),
+        ] {
             let ctx = egui::Context::default();
             dialog_frame(&ctx, dismiss, Vec::new());
             dialog_frame(&ctx, dismiss, Vec::new());
-            assert!(press_escape(&ctx, dismiss), "{dismiss:?}");
+            assert_eq!(press_escape(&ctx, dismiss), expected, "{dismiss:?}");
         }
     }
 }

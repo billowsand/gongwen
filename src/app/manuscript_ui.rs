@@ -172,6 +172,8 @@ pub(crate) struct ImportPreview {
     merge_vocabulary: bool,
     /// 仅在这次预览/确认导入期间驻留内存，不写入稿件或应用配置。
     password: String,
+    /// 上次确认没能执行的原因，显示在预览框里（框是模态的，状态栏被遮罩压着容易看漏）。
+    notice: Option<String>,
 }
 
 pub(crate) struct PendingMergeDialog {
@@ -181,6 +183,8 @@ pub(crate) struct PendingMergeDialog {
     markdown_override: Option<String>,
     take_status: bool,
     review: Option<MergeReview>,
+    /// 上次确认没能执行的原因，显示在合并框里。
+    notice: Option<String>,
 }
 
 struct MergeReview {
@@ -366,6 +370,345 @@ fn batch_delete_dialog(
     )
 }
 
+/// 大号模态（导入预览、合并）的宽度与正文可滚动高度：随窗口大小走，留出标题与按钮的位置。
+fn large_dialog_size(ctx: &egui::Context) -> (f32, f32) {
+    let screen = ctx.content_rect();
+    (
+        (screen.width() - 96.0).clamp(560.0, 980.0),
+        (screen.height() - 240.0).clamp(220.0, 620.0),
+    )
+}
+
+/// 模态里的错误提示：确认没能执行时说明原因。
+fn dialog_notice(ui: &mut egui::Ui, notice: &Option<String>) {
+    if let Some(notice) = notice {
+        ui.colored_label(warn(), notice);
+    }
+}
+
+/// 归档确认框的表单。点了「确认归档」返回 `true`。
+fn archive_form(ui: &mut egui::Ui, pending: &mut ArchivePending, title: &str) -> bool {
+    if !title.is_empty() {
+        ui.strong(format!("《{}》", summarize(title, 30)));
+    }
+    ui.colored_label(
+        warn(),
+        "归档将冻结该稿件：标题、正文、时间等关键信息此后均不可修改。",
+    );
+    let mut blocked = false;
+    if let Some(preview) = &pending.send_package {
+        egui::ScrollArea::vertical()
+            .id_salt("archive_pin_list")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                blocked = archive_pin_ui(ui, preview, &mut pending.pin_choice);
+            });
+    }
+    ui.add_space(6.0);
+    if ui
+        .add(theme::icon_text_button(
+            theme::Icon::Paperclip,
+            "选择扫描盖章 PDF…",
+        ))
+        .on_hover_text("可多选；归档后仍可在详情页继续添加附件")
+        .clicked()
+        && let Some(paths) = rfd::FileDialog::new()
+            .add_filter("扫描盖章 PDF", &["pdf"])
+            .pick_files()
+    {
+        pending.pdf_paths.extend(paths);
+    }
+    if !pending.pdf_paths.is_empty() {
+        ui.label(format!("已选 {} 个 PDF：", pending.pdf_paths.len()));
+        let mut remove = None;
+        for (index, path) in pending.pdf_paths.iter().enumerate() {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("PDF")
+                .to_string();
+            ui.horizontal(|ui| {
+                ui.label(format!("  {name}"));
+                if theme::icon_button(ui, theme::Icon::X, "不附这个文件").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            pending.pdf_paths.remove(index);
+        }
+    }
+    ui.add_space(10.0);
+    let mut archive = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                !blocked,
+                theme::warning_icon_button(theme::Icon::Archive, "确认归档"),
+            )
+            .on_disabled_hover_text("送批材料里有钉不住版本的件，先处理或移出清单")
+            .clicked()
+        {
+            archive = true;
+        }
+        if ui.button("取消").clicked() {
+            ui.close();
+        }
+    });
+    archive
+}
+
+/// 导入预览框：左栏逐篇勾选，右栏看当前这篇的对照并选处理方式。
+/// 返回 `Some(true)` 确认、`Some(false)` 取消、`None` 继续开着。
+fn import_preview_form(
+    ui: &mut egui::Ui,
+    preview: &mut ImportPreview,
+    config: &crate::models::AppConfig,
+    body_height: f32,
+) -> Option<bool> {
+    let total = preview.manifest.records.len();
+    let selected = preview
+        .selected
+        .iter()
+        .filter(|selected| **selected)
+        .count();
+    ui.label(format!(
+        "共 {total} 篇，已勾选 {selected} 篇。逐篇选择处理方式后才会写入。"
+    ));
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut preview.keyword)
+                .hint_text("按标题/文号过滤")
+                .desired_width(220.0),
+        );
+        if ui.button("全选").clicked() {
+            preview.selected.fill(true);
+        }
+        if ui.button("全不选").clicked() {
+            preview.selected.fill(false);
+        }
+    });
+    if let Some(vocabulary) = &preview.vocabulary {
+        let units = vocabulary
+            .entries
+            .iter()
+            .filter(|entry| entry.category == VocabularyCategory::Unit)
+            .count();
+        let people = vocabulary.entries.len() - units;
+        ui.checkbox(
+            &mut preview.merge_vocabulary,
+            format!("合并包内标准词库到本机（{units} 个单位、{people} 名人员）"),
+        );
+    }
+    ui.add_space(4.0);
+    let keyword = preview.keyword.trim().to_lowercase();
+    let list_width = (ui.available_width() * 0.4).clamp(260.0, 380.0);
+    // 两栏放进定高的盒子：模态的 Area 不限高，竖分隔线会一路撑到无穷高。
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), body_height),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(list_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("import_preview_list")
+                        .max_height(body_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (index, record) in preview.manifest.records.iter().enumerate() {
+                                if !keyword.is_empty()
+                                    && !record.title.to_lowercase().contains(&keyword)
+                                    && !record.doc_number.to_lowercase().contains(&keyword)
+                                {
+                                    continue;
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut preview.selected[index], "");
+                                    ui.vertical(|ui| {
+                                        let focused = preview.focused == Some(index);
+                                        if ui
+                                            .selectable_label(focused, truncate(&record.title, 22))
+                                            .on_hover_text("在右侧查看对照并选择处理方式")
+                                            .clicked()
+                                        {
+                                            preview.focused = Some(index);
+                                        }
+                                        ui.weak(format!(
+                                            "{} · {} · {} · {}",
+                                            record.doc_date,
+                                            record.kind.label(),
+                                            record.status.label(),
+                                            preview.relations[index].relationship.label()
+                                        ));
+                                    });
+                                });
+                                ui.add_space(4.0);
+                            }
+                        });
+                },
+            );
+            ui.separator();
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("import_preview_detail")
+                        .max_height(body_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match preview.focused {
+                            Some(index) => import_preview_details(ui, preview, index, config),
+                            None => {
+                                ui.weak("点左侧任意一篇，在这里查看对照并选择处理方式。");
+                            }
+                        });
+                },
+            );
+        },
+    );
+    ui.add_space(6.0);
+    dialog_notice(ui, &preview.notice);
+    let mut decision = None;
+    ui.horizontal(|ui| {
+        if ui.button("确认所选处理").clicked() {
+            decision = Some(true);
+        }
+        if ui.button("取消").clicked() {
+            decision = Some(false);
+        }
+    });
+    decision
+}
+
+/// 待处理分支的合并框：逐项选冲突、看合并结果与规则复核。点了确认返回 `true`。
+fn pending_merge_form(
+    ui: &mut egui::Ui,
+    dialog: &mut PendingMergeDialog,
+    config: &crate::models::AppConfig,
+    body_height: f32,
+) -> bool {
+    ui.label(format!(
+        "导入分支 {}，{}",
+        &dialog.preview.head[..8.min(dialog.preview.head.len())],
+        if dialog.preview.base.is_some() {
+            "已找到共同基线"
+        } else {
+            "无可信共同基线，请人工选择"
+        }
+    ));
+    ui.weak(format!(
+        "导入版本保存于 {}",
+        dialog.preview.incoming.created_at
+    ));
+    if let Some(status) = dialog.preview.imported_status {
+        ui.checkbox(
+            &mut dialog.take_status,
+            format!("同时采用导入侧生命周期状态：{}", status.label()),
+        );
+    }
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .id_salt("pending_merge_body")
+        .max_height(body_height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            let proposal = &dialog.preview.proposal;
+            let mut index = 0;
+            for conflict in &proposal.field_conflicts {
+                ui.group(|ui| {
+                    ui.strong(if conflict.path.is_empty() {
+                        "全部行文要素".to_string()
+                    } else {
+                        format!("要素：{}", conflict.path.join(" / "))
+                    });
+                    ui.label(format!("本机：{}", conflict.local));
+                    ui.label(format!("导入：{}", conflict.incoming));
+                    ui.checkbox(&mut dialog.choices[index], "采用导入侧");
+                });
+                index += 1;
+            }
+            if let Some((local, incoming)) = &proposal.notes_conflict {
+                ui.group(|ui| {
+                    ui.strong("备注冲突");
+                    ui.label(format!("本机：{}", truncate(local, 150)));
+                    ui.label(format!("导入：{}", truncate(incoming, 150)));
+                    ui.checkbox(&mut dialog.choices[index], "采用导入侧");
+                });
+                index += 1;
+            }
+            for chunk in &proposal.markdown {
+                if let crate::manuscript::merge::MarkdownChunk::Conflict {
+                    base,
+                    local,
+                    incoming,
+                } = chunk
+                {
+                    ui.group(|ui| {
+                        ui.strong("正文冲突");
+                        if !base.is_empty() {
+                            ui.weak(format!("共同基线：{}", truncate(base, 200)));
+                        }
+                        ui.label(format!("本机：{}", truncate(local, 200)));
+                        ui.label(format!("导入：{}", truncate(incoming, 200)));
+                        ui.checkbox(&mut dialog.choices[index], "采用导入侧");
+                    });
+                    index += 1;
+                }
+            }
+            if let Ok((snapshot, merged, _)) = proposal.resolve(&dialog.choices) {
+                ui.strong("合并后正文");
+                if let Some(edited) = &mut dialog.markdown_override {
+                    ui.add(
+                        egui::TextEdit::multiline(edited)
+                            .desired_rows(12)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if ui.button("重置为逐项选择的结果").clicked() {
+                        *edited = merged.clone();
+                    }
+                } else {
+                    let mut display = merged.clone();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut display)
+                            .interactive(false)
+                            .desired_rows(12)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if ui.button("手工调整正文").clicked() {
+                        dialog.markdown_override = Some(merged.clone());
+                    }
+                }
+                let candidate = dialog.markdown_override.as_deref().unwrap_or(&merged);
+                let hash = crate::manuscript::sync::payload_hash(&snapshot, candidate, "")
+                    .unwrap_or_default();
+                if dialog
+                    .review
+                    .as_ref()
+                    .is_none_or(|review| review.hash != hash)
+                {
+                    dialog.review = build_merge_review(config, &snapshot, candidate).ok();
+                }
+                if let Some(review) = &dialog.review {
+                    merge_review_ui(ui, review);
+                }
+            }
+        });
+    ui.add_space(6.0);
+    dialog_notice(ui, &dialog.notice);
+    let mut confirm = false;
+    ui.horizontal(|ui| {
+        if ui.button("确认生成合并版本").clicked() {
+            confirm = true;
+        }
+        if ui.button("稍后处理").clicked() {
+            ui.close();
+        }
+    });
+    confirm
+}
+
 /// ZIP 密码框的表单部分。点了提交按钮返回 `true`，校验与执行由调用方做。
 fn zip_password_form(ui: &mut egui::Ui, dialog: &mut ZipPasswordDialog, importing: bool) -> bool {
     ui.label(if importing {
@@ -492,7 +835,6 @@ fn import_preview_details(
     use manuscript_io::sync::{ImportAction, Relationship};
     let record = &preview.manifest.records[index];
     let relation = &preview.relations[index];
-    ui.separator();
     ui.strong(format!(
         "《{}》：{}",
         record.title,
@@ -1223,289 +1565,65 @@ impl GongwenApp {
             }
         }
 
-        let mut archive_to_confirm: Option<i64> = None;
-        if self.manuscript_archive_pending.is_some() {
-            let (manuscript_id, do_archive, do_cancel) = {
-                let pending = self.manuscript_archive_pending.as_mut().unwrap();
-                let manuscript_id = pending.manuscript_id;
-                let mut do_archive = false;
-                let mut do_cancel = false;
-                let mut blocked = false;
-                ui.group(|ui| {
-                    ui.colored_label(
-                        warn(),
-                        "归档将冻结该稿件：标题、正文、时间等关键信息此后均不可修改。",
-                    );
-                    if let Some(preview) = &pending.send_package {
-                        blocked = archive_pin_ui(ui, preview, &mut pending.pin_choice);
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add(theme::icon_text_button(
-                                theme::Icon::Paperclip,
-                                "选择扫描盖章 PDF…",
-                            ))
-                            .on_hover_text("可多选；归档后仍可在详情页继续添加附件")
-                            .clicked()
-                            && let Some(paths) = rfd::FileDialog::new()
-                                .add_filter("扫描盖章 PDF", &["pdf"])
-                                .pick_files()
-                        {
-                            pending.pdf_paths.extend(paths);
-                        }
-                        if !pending.pdf_paths.is_empty() {
-                            ui.label(format!("已选 {} 个 PDF：", pending.pdf_paths.len()));
-                            for path in pending.pdf_paths.iter() {
-                                let name = path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("PDF")
-                                    .to_string();
-                                ui.label(format!("  {name}"));
-                            }
-                        }
-                        ui.separator();
-                        if ui
-                            .add_enabled(!blocked, egui::Button::new("确认归档"))
-                            .on_disabled_hover_text("送批材料里有钉不住版本的件，先处理或移出清单")
-                            .clicked()
-                        {
-                            do_archive = true;
-                        }
-                        if ui.button("取消").clicked() {
-                            do_cancel = true;
-                        }
-                    });
-                });
-                (manuscript_id, do_archive, do_cancel)
-            };
-            if do_cancel {
-                self.manuscript_archive_pending = None;
-            } else if do_archive {
+        if let Some(pending) = self.manuscript_archive_pending.as_mut() {
+            let manuscript_id = pending.manuscript_id;
+            let title = self
+                .manuscript_rows
+                .iter()
+                .find(|row| row.id == manuscript_id)
+                .map(|row| row.title.clone())
+                .unwrap_or_default();
+            // 选了附件、选了钉版方式的表单：点遮罩不关，Esc 与「取消」照常关。
+            let dialog = modal::dialog(
+                ui.ctx(),
+                egui::Id::new("manuscript_archive"),
+                "归档稿件",
+                460.0,
+                Dismiss::EscOnly,
+                |ui| archive_form(ui, pending, &title),
+            );
+            if dialog.inner {
                 // 保留 pending（含已选 PDF），由 Archive action 读取并执行归档。
-                archive_to_confirm = Some(manuscript_id);
+                *action = Some(ManuscriptAction::Archive(manuscript_id));
+            } else if dialog.dismissed {
+                self.manuscript_archive_pending = None;
             }
-            ui.add_space(6.0);
-        }
-        if let Some(id) = archive_to_confirm {
-            *action = Some(ManuscriptAction::Archive(id));
         }
 
-        if self.manuscript_import_preview.is_some() {
-            let (confirm, cancel) = {
-                let preview = self.manuscript_import_preview.as_mut().unwrap();
-                let mut confirm = false;
-                let mut cancel = false;
-                ui.group(|ui| {
-                    let total = preview.manifest.records.len();
-                    let selected = preview
-                        .selected
-                        .iter()
-                        .filter(|selected| **selected)
-                        .count();
-                    ui.strong("导入预览");
-                    ui.label(format!(
-                        "共 {total} 篇，已勾选 {selected} 篇。逐篇选择处理方式后才会写入。"
-                    ));
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut preview.keyword)
-                                .hint_text("按标题/文号过滤")
-                                .desired_width(220.0),
-                        );
-                        if ui.button("全选").clicked() {
-                            preview.selected.fill(true);
-                        }
-                        if ui.button("全不选").clicked() {
-                            preview.selected.fill(false);
-                        }
-                    });
-                    if let Some(vocabulary) = &preview.vocabulary {
-                        let units = vocabulary
-                            .entries
-                            .iter()
-                            .filter(|entry| entry.category == VocabularyCategory::Unit)
-                            .count();
-                        let people = vocabulary.entries.len() - units;
-                        ui.checkbox(
-                            &mut preview.merge_vocabulary,
-                            format!("合并包内标准词库到本机（{units} 个单位、{people} 名人员）"),
-                        );
-                    }
-                    let keyword = preview.keyword.trim().to_lowercase();
-                    egui::ScrollArea::vertical()
-                        .id_salt("import_preview_list")
-                        .max_height(250.0)
-                        .show(ui, |ui| {
-                            for (index, record) in preview.manifest.records.iter().enumerate() {
-                                if !keyword.is_empty()
-                                    && !record.title.to_lowercase().contains(&keyword)
-                                    && !record.doc_number.to_lowercase().contains(&keyword)
-                                {
-                                    continue;
-                                }
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.checkbox(&mut preview.selected[index], "");
-                                    ui.label(format!(
-                                        "{} · {} · {}（{}）",
-                                        record.doc_date,
-                                        record.kind.label(),
-                                        truncate(&record.title, 32),
-                                        record.status.label()
-                                    ));
-                                    ui.weak(preview.relations[index].relationship.label());
-                                    if ui.button("查看与处理").clicked() {
-                                        preview.focused = Some(index);
-                                    }
-                                });
-                            }
-                        });
-                    if let Some(index) = preview.focused {
-                        import_preview_details(ui, preview, index, &self.config);
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("确认所选处理").clicked() {
-                            confirm = true;
-                        }
-                        if ui.button("取消").clicked() {
-                            cancel = true;
-                        }
-                    });
-                });
-                (confirm, cancel)
-            };
-            if cancel {
-                self.manuscript_import_preview = None;
-            } else if confirm {
-                self.confirm_import();
+        if let Some(preview) = self.manuscript_import_preview.as_mut() {
+            let (width, body) = large_dialog_size(ui.ctx());
+            // 逐篇选好的处理方式重来一遍要再输一次密码，只认按钮，Esc、遮罩都不关。
+            let dialog = modal::dialog(
+                ui.ctx(),
+                egui::Id::new("manuscript_import_preview"),
+                "导入预览",
+                width,
+                Dismiss::ButtonsOnly,
+                |ui| import_preview_form(ui, preview, &self.config, body),
+            );
+            match dialog.inner {
+                Some(true) => self.confirm_import(),
+                Some(false) => self.manuscript_import_preview = None,
+                None => {}
             }
-            ui.add_space(6.0);
         }
 
-        if self.pending_merge.is_some() {
-            let (confirm, cancel) = {
-                let dialog = self.pending_merge.as_mut().unwrap();
-                let mut confirm = false;
-                let mut cancel = false;
-                ui.group(|ui| {
-                    ui.strong("继续合并待处理分支");
-                    ui.label(format!(
-                        "导入分支 {}，{}",
-                        &dialog.preview.head[..8.min(dialog.preview.head.len())],
-                        if dialog.preview.base.is_some() {
-                            "已找到共同基线"
-                        } else {
-                            "无可信共同基线，请人工选择"
-                        }
-                    ));
-                    ui.weak(format!(
-                        "导入版本保存于 {}",
-                        dialog.preview.incoming.created_at
-                    ));
-                    if let Some(status) = dialog.preview.imported_status {
-                        ui.checkbox(
-                            &mut dialog.take_status,
-                            format!("同时采用导入侧生命周期状态：{}", status.label()),
-                        );
-                    }
-                    let proposal = &dialog.preview.proposal;
-                    let mut index = 0;
-                    for conflict in &proposal.field_conflicts {
-                        ui.group(|ui| {
-                            ui.strong(if conflict.path.is_empty() {
-                                "全部行文要素".to_string()
-                            } else {
-                                format!("要素：{}", conflict.path.join(" / "))
-                            });
-                            ui.label(format!("本机：{}", conflict.local));
-                            ui.label(format!("导入：{}", conflict.incoming));
-                            ui.checkbox(&mut dialog.choices[index], "采用导入侧");
-                        });
-                        index += 1;
-                    }
-                    if let Some((local, incoming)) = &proposal.notes_conflict {
-                        ui.group(|ui| {
-                            ui.strong("备注冲突");
-                            ui.label(format!("本机：{}", truncate(local, 150)));
-                            ui.label(format!("导入：{}", truncate(incoming, 150)));
-                            ui.checkbox(&mut dialog.choices[index], "采用导入侧");
-                        });
-                        index += 1;
-                    }
-                    for chunk in &proposal.markdown {
-                        if let crate::manuscript::merge::MarkdownChunk::Conflict {
-                            base,
-                            local,
-                            incoming,
-                        } = chunk
-                        {
-                            ui.group(|ui| {
-                                ui.strong("正文冲突");
-                                if !base.is_empty() {
-                                    ui.weak(format!("共同基线：{}", truncate(base, 200)));
-                                }
-                                ui.label(format!("本机：{}", truncate(local, 200)));
-                                ui.label(format!("导入：{}", truncate(incoming, 200)));
-                                ui.checkbox(&mut dialog.choices[index], "采用导入侧");
-                            });
-                            index += 1;
-                        }
-                    }
-                    if let Ok((snapshot, merged, _)) = proposal.resolve(&dialog.choices) {
-                        ui.strong("合并后正文");
-                        if let Some(edited) = &mut dialog.markdown_override {
-                            ui.add(
-                                egui::TextEdit::multiline(edited)
-                                    .desired_rows(12)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if ui.button("重置为逐项选择的结果").clicked() {
-                                *edited = merged.clone();
-                            }
-                        } else {
-                            let mut display = merged.clone();
-                            ui.add(
-                                egui::TextEdit::multiline(&mut display)
-                                    .interactive(false)
-                                    .desired_rows(12)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if ui.button("手工调整正文").clicked() {
-                                dialog.markdown_override = Some(merged.clone());
-                            }
-                        }
-                        let candidate = dialog.markdown_override.as_deref().unwrap_or(&merged);
-                        let hash = crate::manuscript::sync::payload_hash(&snapshot, candidate, "")
-                            .unwrap_or_default();
-                        if dialog
-                            .review
-                            .as_ref()
-                            .is_none_or(|review| review.hash != hash)
-                        {
-                            dialog.review =
-                                build_merge_review(&self.config, &snapshot, candidate).ok();
-                        }
-                        if let Some(review) = &dialog.review {
-                            merge_review_ui(ui, review);
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("确认生成合并版本").clicked() {
-                            confirm = true;
-                        }
-                        if ui.button("稍后处理").clicked() {
-                            cancel = true;
-                        }
-                    });
-                });
-                (confirm, cancel)
-            };
-            if cancel {
-                self.pending_merge = None;
-            } else if confirm {
+        if let Some(merge) = self.pending_merge.as_mut() {
+            let (width, body) = large_dialog_size(ui.ctx());
+            // 「稍后处理」只是关框，分支仍暂存在库里，Esc 同样处理；点遮罩不关。
+            let dialog = modal::dialog(
+                ui.ctx(),
+                egui::Id::new("manuscript_pending_merge"),
+                "继续合并待处理分支",
+                width,
+                Dismiss::EscOnly,
+                |ui| pending_merge_form(ui, merge, &self.config, body),
+            );
+            if dialog.inner {
                 self.confirm_pending_merge();
+            } else if dialog.dismissed {
+                self.pending_merge = None;
             }
-            ui.add_space(6.0);
         }
     }
 
@@ -3228,6 +3346,7 @@ impl GongwenApp {
                 vocabulary,
                 merge_vocabulary: true,
                 password: password.to_string(),
+                notice: None,
             })
         })();
         match result {
@@ -3284,8 +3403,9 @@ impl GongwenApp {
         });
         if let Some(index) = unreviewed {
             preview.focused = Some(index);
-            self.manuscript_import_preview = Some(preview);
             self.status = "请先逐篇查看合并候选和规则复核结果，再确认导入。".into();
+            preview.notice = Some(self.status.clone());
+            self.manuscript_import_preview = Some(preview);
             return;
         }
         for (action, relation) in actions.iter().zip(&preview.relations) {
@@ -3298,8 +3418,9 @@ impl GongwenApp {
                     .iter()
                     .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty())
             {
-                self.manuscript_import_preview = Some(preview);
                 self.status = "这篇稿件在起草页有未保存修改，请先保存后再导入。".into();
+                preview.notice = Some(self.status.clone());
+                self.manuscript_import_preview = Some(preview);
                 return;
             }
         }
@@ -3360,8 +3481,9 @@ impl GongwenApp {
                 self.status = message;
             }
             Err(error) => {
-                self.manuscript_import_preview = Some(preview);
                 self.status = format!("导入失败：{error:#}");
+                preview.notice = Some(self.status.clone());
+                self.manuscript_import_preview = Some(preview);
             }
         }
     }
@@ -3382,6 +3504,7 @@ impl GongwenApp {
                     markdown_override: None,
                     take_status: false,
                     review: None,
+                    notice: None,
                 });
                 self.status = "已打开待处理分支的合并预览。".into();
             }
@@ -3390,7 +3513,7 @@ impl GongwenApp {
     }
 
     fn confirm_pending_merge(&mut self) {
-        let Some(dialog) = self.pending_merge.take() else {
+        let Some(mut dialog) = self.pending_merge.take() else {
             return;
         };
         let reviewed = dialog
@@ -3409,8 +3532,9 @@ impl GongwenApp {
                     .is_some_and(|review| review.hash == hash)
             });
         if !reviewed {
-            self.pending_merge = Some(dialog);
             self.status = "合并候选已变化，请先查看最新复核结果。".into();
+            dialog.notice = Some(self.status.clone());
+            self.pending_merge = Some(dialog);
             return;
         }
         let id = dialog.manuscript_id;
@@ -3419,8 +3543,9 @@ impl GongwenApp {
             .iter()
             .any(|doc| doc.manuscript_id == Some(id) && doc.is_dirty())
         {
-            self.pending_merge = Some(dialog);
             self.status = "稿件在起草页有未保存修改，请先保存后再合并。".into();
+            dialog.notice = Some(self.status.clone());
+            self.pending_merge = Some(dialog);
             return;
         }
         let result = self
@@ -3451,8 +3576,9 @@ impl GongwenApp {
                 self.status = "待处理分支已合并为新的可见版本。".into();
             }
             Err(error) => {
-                self.pending_merge = Some(dialog);
                 self.status = format!("合并待处理分支失败：{error:#}");
+                dialog.notice = Some(self.status.clone());
+                self.pending_merge = Some(dialog);
             }
         }
     }
@@ -3532,32 +3658,24 @@ impl GongwenApp {
 
 #[cfg(test)]
 mod dialog_snapshot_tests {
+    //! 稿件管理页几个模态框的样张：
+    //! `cargo test --locked dialog_snapshot -- --ignored`，输出到 `tmp/*.png`，改版时目视检查。
     use super::*;
 
-    /// 批量删除确认框样张：`cargo test --locked batch_delete_dialog_snapshot -- --ignored`，
-    /// 输出到 `tmp/batch-delete-dialog.png`，改版时目视检查。
-    #[test]
-    #[ignore]
-    fn batch_delete_dialog_snapshot() {
+    /// 背后摆一点稿件列表的样子，再画 `dialog`，渲染成 `tmp/{name}.png`。
+    fn snapshot(name: &str, size: egui::Vec2, mut dialog: impl FnMut(&mut egui::Ui)) {
         let ctx = egui::Context::default();
         theme::configure_icons(&ctx);
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         theme::configure_style(&ctx);
         ctx.set_pixels_per_point(2.0);
-        let size = egui::vec2(720.0, 420.0);
-        let confirm = BatchDeleteConfirm {
-            deletable: vec![1, 2, 3],
-            archived: 1,
-            packaged: 1,
-        };
         let mut canvas = crate::ui_snapshot::Canvas::default();
-        let frame = || {
+        let mut frame = || {
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 ..Default::default()
             };
             ctx.run_ui(raw, |ui| {
-                // 背后摆一点稿件列表的样子，看遮罩压暗的效果。
                 ui.heading("稿件管理");
                 for title in [
                     "关于开展安全检查的通知",
@@ -3566,10 +3684,11 @@ mod dialog_snapshot_tests {
                 ] {
                     ui.label(title);
                 }
-                batch_delete_dialog(ui.ctx(), &confirm);
+                dialog(ui);
             })
         };
-        for _ in 0..5 {
+        // 多跑几帧，等模态的淡入动画走完（默认每帧按 1/60 秒推进）。
+        for _ in 0..30 {
             let output = frame();
             canvas.absorb(&output.textures_delta);
         }
@@ -3577,8 +3696,125 @@ mod dialog_snapshot_tests {
         canvas.absorb(&output.textures_delta);
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tmp")
-            .join("batch-delete-dialog.png");
+            .join(format!("{name}.png"));
         canvas.render(&ctx, output, size, theme::canvas(), &path);
         println!("{}", path.display());
+    }
+
+    #[test]
+    #[ignore]
+    fn batch_delete_dialog_snapshot() {
+        let confirm = BatchDeleteConfirm {
+            deletable: vec![1, 2, 3],
+            archived: 1,
+            packaged: 1,
+        };
+        snapshot("batch-delete-dialog", egui::vec2(720.0, 420.0), |ui| {
+            batch_delete_dialog(ui.ctx(), &confirm);
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn archive_dialog_snapshot() {
+        let mut pending = ArchivePending {
+            manuscript_id: 1,
+            pdf_paths: vec![
+                PathBuf::from("扫描件-盖章页.pdf"),
+                PathBuf::from("扫描件-附件一.pdf"),
+            ],
+            send_package: None,
+            pin_choice: PinChoice::default(),
+        };
+        snapshot("archive-dialog", egui::vec2(760.0, 480.0), |ui| {
+            modal::dialog(
+                ui.ctx(),
+                egui::Id::new("manuscript_archive"),
+                "归档稿件",
+                460.0,
+                Dismiss::EscOnly,
+                |ui| archive_form(ui, &mut pending, "关于开展安全检查的通知"),
+            );
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn import_preview_dialog_snapshot() {
+        use manuscript_io::sync::{ImportAction, RecordPreview, Relationship};
+        let record = |title: &str, date: &str| manuscript_io::ManifestRecord {
+            id: 0,
+            title: title.into(),
+            kind: TemplateKind::default(),
+            status: ManuscriptStatus::Draft,
+            doc_number: String::new(),
+            doc_date: date.into(),
+            notes: String::new(),
+            content_markdown: format!("# {title}\n\n正文。\n"),
+            snapshot: crate::models::DraftInput::default(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            published_at: None,
+            archived_at: None,
+            pdfs: Vec::new(),
+            document_uuid: None,
+            aliases: Vec::new(),
+            head_revision_uuid: None,
+            revisions: Vec::new(),
+            send_package: None,
+        };
+        let records = vec![
+            record("关于开展安全检查的通知", "2026-09-28"),
+            record("关于调整会议时间的函", "2026-09-30"),
+            record("第三季度工作总结", "2026-10-02"),
+        ];
+        let relation = || RecordPreview {
+            relationship: Relationship::New,
+            local_id: None,
+            local_head: None,
+            local_status: None,
+            attachments_changed: false,
+            candidates: Vec::new(),
+            base: None,
+            proposal: None,
+            local_hash: None,
+            local_markdown: None,
+            incoming_hash: "0".repeat(64),
+        };
+        let count = records.len();
+        let mut preview = ImportPreview {
+            manifest: manuscript_io::Manifest {
+                schema: 2,
+                exported_at: String::new(),
+                records,
+                assets: Vec::new(),
+            },
+            zip_path: PathBuf::new(),
+            selected: vec![true; count],
+            keyword: String::new(),
+            relations: (0..count).map(|_| relation()).collect(),
+            actions: vec![ImportAction::New; count],
+            reviews: (0..count).map(|_| None).collect(),
+            manifest_hash: String::new(),
+            package_diffs: vec![None; count],
+            focused: Some(0),
+            vocabulary: None,
+            merge_vocabulary: true,
+            password: String::new(),
+            notice: Some("请先逐篇查看合并候选和规则复核结果，再确认导入。".into()),
+        };
+        let config = crate::models::AppConfig::default();
+        let size = egui::vec2(1100.0, 760.0);
+        snapshot("import-preview-dialog", size, |ui| {
+            let (width, body) = large_dialog_size(ui.ctx());
+            modal::dialog(
+                ui.ctx(),
+                egui::Id::new("manuscript_import_preview"),
+                "导入预览",
+                width,
+                Dismiss::ButtonsOnly,
+                |ui| import_preview_form(ui, &mut preview, &config, body),
+            );
+        });
     }
 }
