@@ -7,6 +7,7 @@ use crate::app::{
     GongwenApp, VersionScope, VocabularyMoveDraft, unique_name, vocabulary_depths,
     vocabulary_matches, warn, wrapped_hint,
 };
+use crate::modal::{self, Dismiss};
 use crate::models::{VocabularyCategory, VocabularyEntry, VocabularySetupStatus, split_units};
 use crate::storage;
 use crate::theme;
@@ -637,16 +638,14 @@ impl GongwenApp {
                 .unwrap_or_else(|| "本级最后".to_string()),
         };
 
-        let mut open = true;
-        let mut confirm = false;
-        let mut cancel = false;
-        egui::Window::new("精确移动")
-            .id(egui::Id::new("vocabulary_move_window"))
-            .collapsible(false)
-            .resizable(false)
-            .default_width(460.0)
-            .open(&mut open)
-            .show(ctx, |ui| {
+        // 有下拉的表单：点遮罩常常只是想收起下拉，不能顺手把整个框关掉，只认 Esc。
+        let dialog = modal::dialog(
+            ctx,
+            egui::Id::new("vocabulary_move_window"),
+            "精确移动",
+            430.0,
+            Dismiss::EscOnly,
+            |ui| {
                 ui.strong(format!("移动“{}”", entry.canonical.trim()));
                 ui.weak(if is_unit {
                     "选择新的上级单位和准确落点；下级单位及人员会随本单位一起移动。"
@@ -721,23 +720,26 @@ impl GongwenApp {
                         ui.end_row();
                     });
                 ui.add_space(12.0);
+                let mut confirm = false;
                 ui.horizontal(|ui| {
                     if ui.button("确认移动").clicked() {
                         confirm = true;
                     }
                     if ui.button("取消").clicked() {
-                        cancel = true;
+                        ui.close();
                     }
                 });
-            });
+                confirm
+            },
+        );
 
-        if confirm {
+        if dialog.inner {
             self.apply_vocab_action(VocabAction::Relocate {
                 id: draft.id,
                 destination: draft.destination,
                 position: draft.position,
             });
-        } else if open && !cancel {
+        } else if !dialog.dismissed {
             self.vocabulary_move = Some(draft);
         }
     }

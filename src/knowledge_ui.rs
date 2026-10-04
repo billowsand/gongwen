@@ -3,6 +3,7 @@
 //! 与方法读写状态。
 
 use crate::app::{GongwenApp, KnowledgeMode};
+use crate::modal::{self, Dismiss};
 use crate::models::TemplateKind;
 use crate::qa;
 use crate::theme;
@@ -545,19 +546,17 @@ fn result_card(
 }
 
 fn import_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
-    if app.knowledge_import.is_none() {
+    let Some(draft) = app.knowledge_import.as_mut() else {
         return;
-    }
-    let mut open = true;
-    egui::Window::new("导入文档到知识库")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ui.ctx(), |ui| {
-            let Some(draft) = app.knowledge_import.as_mut() else {
-                return;
-            };
+    };
+    // 有下拉的表单：点遮罩常常只是想收起下拉，只认 Esc 与「取消」。
+    let dialog = modal::dialog(
+        ui.ctx(),
+        egui::Id::new("knowledge_import"),
+        "导入文档到知识库",
+        420.0,
+        Dismiss::EscOnly,
+        |ui| {
             ui.label(format!("已选 {} 个文件：", draft.paths.len()));
             for path in draft.paths.iter().take(6) {
                 ui.weak(format!("· {}", path.display()));
@@ -576,17 +575,22 @@ fn import_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         }
                     });
             });
-            ui.add_space(8.0);
+            ui.add_space(10.0);
+            let mut start = false;
             ui.horizontal(|ui| {
                 if ui.button("开始导入").clicked() {
-                    app.knowledge_confirm_import();
+                    start = true;
                 }
                 if ui.button("取消").clicked() {
-                    app.knowledge_import = None;
+                    ui.close();
                 }
             });
-        });
-    if !open {
+            start
+        },
+    );
+    if dialog.inner {
+        app.knowledge_confirm_import();
+    } else if dialog.dismissed {
         app.knowledge_import = None;
     }
 }
@@ -595,28 +599,33 @@ fn delete_confirm(app: &mut GongwenApp, ui: &mut egui::Ui) {
     let Some(id) = app.knowledge_delete_confirm else {
         return;
     };
-    let mut open = true;
-    let mut confirm = false;
-    egui::Window::new("删除知识库文档")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ui.ctx(), |ui| {
+    let dialog = modal::dialog(
+        ui.ctx(),
+        egui::Id::new("knowledge_delete_confirm"),
+        "删除知识库文档",
+        380.0,
+        Dismiss::EscOrBackdrop,
+        |ui| {
             ui.label("确定把这篇文档从知识库删除吗？其切块与索引一并清除，不影响稿件库原件。");
-            ui.add_space(8.0);
+            ui.add_space(10.0);
+            let mut confirm = false;
             ui.horizontal(|ui| {
-                if ui.button("删除").clicked() {
+                if ui
+                    .add(theme::warning_icon_button(theme::Icon::Trash, "删除"))
+                    .clicked()
+                {
                     confirm = true;
                 }
                 if ui.button("取消").clicked() {
-                    app.knowledge_delete_confirm = None;
+                    ui.close();
                 }
             });
-        });
-    if confirm {
+            confirm
+        },
+    );
+    if dialog.inner {
         app.knowledge_delete(id);
-    } else if !open {
+    } else if dialog.dismissed {
         app.knowledge_delete_confirm = None;
     }
 }
