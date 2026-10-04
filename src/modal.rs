@@ -59,6 +59,59 @@ fn focus_is_below_modal(ctx: &egui::Context, id: egui::Id) -> bool {
     })
 }
 
+/// 模态确认框怎样算「被关掉」。被关掉一律按取消处理，绝不触发确认动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dismiss {
+    /// Esc、点遮罩都算取消。纯确认框用。
+    EscOrBackdrop,
+    /// 只认 Esc。带输入的表单用：点歪了落在遮罩上不该丢掉已填的内容。
+    EscOnly,
+}
+
+/// [`dialog`] 的结果。
+pub(crate) struct DialogResponse<R> {
+    pub(crate) inner: R,
+    /// 按 [`Dismiss`] 的规则被关掉了（或内容里调了 `ui.close()`），调用方按取消处理。
+    pub(crate) dismissed: bool,
+}
+
+/// 统一样式的模态确认框：遮罩挡住背后的点击，焦点与快捷键由 [`ModalGuard`] 收走。
+/// 标题、宽度由这里定；按钮与正文由调用方画，`inner` 原样带回。
+pub(crate) fn dialog<R>(
+    ctx: &egui::Context,
+    id: egui::Id,
+    title: &str,
+    width: f32,
+    dismiss: Dismiss,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> DialogResponse<R> {
+    let response = egui::Modal::new(id)
+        .frame(crate::theme::card().inner_margin(egui::Margin::same(16)))
+        .show(ctx, |ui| {
+            ui.set_width(width);
+            ui.heading(title);
+            ui.add_space(6.0);
+            add_contents(ui)
+        });
+    let dismissed = match dismiss {
+        Dismiss::EscOrBackdrop => response.should_close(),
+        // 照 `ModalResponse::should_close` 的规则，只是不认遮罩：只有最顶层、没开下拉
+        // 时才吃 Esc，免得 Esc 本该先关掉的下拉被连带关掉整个框。
+        Dismiss::EscOnly => {
+            response.response.should_close()
+                || (response.is_top_modal
+                    && !response.any_popup_open
+                    && ctx.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    }))
+        }
+    };
+    DialogResponse {
+        inner: response.inner,
+        dismissed,
+    }
+}
+
 /// 这个 `Ui` 所在的层此刻能不能接键盘。不看焦点的按键处理要先问一句：
 /// 有模态盖在上面时按键归模态，不能被背后的页面先吃掉。
 pub(crate) fn takes_keys(ui: &egui::Ui) -> bool {
@@ -124,5 +177,82 @@ mod tests {
             });
         }
         assert_eq!(taken, [true, true, false]);
+    }
+
+    /// 跑一帧只有一个确认框的画面，返回它是否被关掉。
+    fn dialog_frame(ctx: &egui::Context, dismiss: Dismiss, events: Vec<egui::Event>) -> bool {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut dismissed = false;
+        let _ = ctx.run_ui(input, |ui| {
+            dismissed = dialog(
+                ui.ctx(),
+                egui::Id::new("dialog_test"),
+                "确认",
+                200.0,
+                dismiss,
+                |ui| ui.label("内容"),
+            )
+            .dismissed;
+        });
+        dismissed
+    }
+
+    /// 在左上角遮罩上点一下（按下、松开分两帧）。
+    fn click_backdrop(ctx: &egui::Context, dismiss: Dismiss) -> bool {
+        let pos = egui::pos2(5.0, 5.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        dialog_frame(
+            ctx,
+            dismiss,
+            vec![egui::Event::PointerMoved(pos), button(true)],
+        );
+        dialog_frame(ctx, dismiss, vec![button(false)])
+    }
+
+    fn press_escape(ctx: &egui::Context, dismiss: Dismiss) -> bool {
+        dialog_frame(
+            ctx,
+            dismiss,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+    }
+
+    #[test]
+    fn backdrop_click_only_dismisses_plain_confirmations() {
+        for (dismiss, expected) in [(Dismiss::EscOrBackdrop, true), (Dismiss::EscOnly, false)] {
+            let ctx = egui::Context::default();
+            // 先画两帧，让模态层登记、遮罩有了上一帧的位置。
+            dialog_frame(&ctx, dismiss, Vec::new());
+            dialog_frame(&ctx, dismiss, Vec::new());
+            assert_eq!(click_backdrop(&ctx, dismiss), expected, "{dismiss:?}");
+        }
+    }
+
+    #[test]
+    fn escape_dismisses_every_dialog() {
+        for dismiss in [Dismiss::EscOrBackdrop, Dismiss::EscOnly] {
+            let ctx = egui::Context::default();
+            dialog_frame(&ctx, dismiss, Vec::new());
+            dialog_frame(&ctx, dismiss, Vec::new());
+            assert!(press_escape(&ctx, dismiss), "{dismiss:?}");
+        }
     }
 }

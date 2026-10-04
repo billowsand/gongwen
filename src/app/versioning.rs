@@ -11,6 +11,7 @@ use crate::diff;
 use crate::diff_view;
 use crate::draft_page::{DraftSession, LoadedVersion};
 use crate::manuscript::{ManuscriptStore, ManuscriptUpdate, VersionRecord};
+use crate::modal::{self, Dismiss};
 use crate::models::DraftInput;
 use crate::storage;
 use crate::theme;
@@ -69,30 +70,30 @@ impl GongwenApp {
     /// 切换版本前的三选确认：提交为新版本后切换 / 丢弃修改并切换 / 取消。
     pub(crate) fn version_switch_window(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.version_switch.take() else {
-            theme::reset_window_anim(ctx, egui::Id::new("version_switch_anim"));
             return;
         };
         let target_label = match prompt.target {
             VersionTarget::Version(number) => format!("v{number}"),
             VersionTarget::Working => "未提交内容".to_string(),
         };
-        let mut commit_first = false;
-        let mut discard = false;
-        let mut cancel = false;
-        let win = egui::Window::new("切换版本")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        let dialog = modal::dialog(
+            ctx,
+            egui::Id::new("version_switch"),
+            "切换版本",
+            420.0,
+            Dismiss::EscOrBackdrop,
+            |ui| {
                 ui.label(format!("当前内容相对{}有未提交修改。", prompt.base_label));
                 ui.colored_label(warn(), format!("直接切到{target_label}会丢弃这些修改。"));
-                ui.add_space(6.0);
+                ui.add_space(10.0);
+                // `Some(true)` 先提交再切，`Some(false)` 丢弃修改直接切。
+                let mut commit_first = None;
                 ui.horizontal(|ui| {
                     if theme::primary_icon_button(ui, theme::Icon::GitCommit, "提交为新版本后切换")
                         .on_hover_text("先把当前修改固化为一个新版本，再切过去，什么都不丢")
                         .clicked()
                     {
-                        commit_first = true;
+                        commit_first = Some(true);
                     }
                     if ui
                         .add(theme::warning_icon_button(
@@ -102,33 +103,32 @@ impl GongwenApp {
                         .on_hover_text("丢弃当前未提交的修改，直接切到目标版本")
                         .clicked()
                     {
-                        discard = true;
+                        commit_first = Some(false);
                     }
                     if ui.button("取消").clicked() {
-                        cancel = true;
+                        ui.close();
                     }
                 });
-            });
-        if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("version_switch_anim"), &w.response);
-        }
+                commit_first
+            },
+        );
+        let Some(commit_first) = dialog.inner else {
+            if !dialog.dismissed {
+                self.version_switch = Some(prompt);
+            }
+            return;
+        };
         if commit_first {
             self.switch_after_commit = Some(prompt.target);
             self.open_version_commit(VersionScope::Manuscript(prompt.manuscript_id));
             return;
         }
-        if discard {
-            // 按稿件 ID 找到那一篇再切，确认期间切过标签也不会改到别的稿件。
-            match self.doc_index_of_manuscript(prompt.manuscript_id) {
-                Some(index) => self
-                    .draft_page_at(index)
-                    .apply_version_switch(prompt.manuscript_id, prompt.target),
-                None => self.status = "这篇稿件已关闭，未切换版本。".into(),
-            }
-            return;
-        }
-        if !cancel {
-            self.version_switch = Some(prompt);
+        // 按稿件 ID 找到那一篇再切，确认期间切过标签也不会改到别的稿件。
+        match self.doc_index_of_manuscript(prompt.manuscript_id) {
+            Some(index) => self
+                .draft_page_at(index)
+                .apply_version_switch(prompt.manuscript_id, prompt.target),
+            None => self.status = "这篇稿件已关闭，未切换版本。".into(),
         }
     }
 
@@ -170,7 +170,6 @@ impl GongwenApp {
     /// 提交版本对话框（稿件版 / 配置版共用）。
     pub(crate) fn version_commit_window(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.version_commit.take() else {
-            theme::reset_window_anim(ctx, egui::Id::new("version_commit_anim"));
             return;
         };
         // 实时预览：相对上一版本是否有变更（与名称/注释无关，先算出来避免闭包借用冲突）。
@@ -207,24 +206,25 @@ impl GongwenApp {
                     .unwrap_or(true)
             }
         };
-        let mut close = false;
-        let mut submit = false;
-        let win = egui::Window::new("提交版本")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        // 有输入的表单：点到遮罩不关，免得误点丢掉已填的名称和注释；Esc 仍可取消。
+        let dialog = modal::dialog(
+            ctx,
+            egui::Id::new("version_commit"),
+            "提交版本",
+            380.0,
+            Dismiss::EscOnly,
+            |ui| {
                 ui.label("版本名称（默认时间戳，可修改）");
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.name)
-                        .desired_width(380.0)
+                        .desired_width(f32::INFINITY)
                         .hint_text("如 2026-08-07 09:35"),
                 );
                 ui.label("注释");
                 ui.add(
                     egui::TextEdit::multiline(&mut draft.comment)
                         .desired_rows(3)
-                        .desired_width(380.0),
+                        .desired_width(f32::INFINITY),
                 );
                 if !has_changes {
                     ui.colored_label(warn(), "相对上一版本没有内容变更，不能提交。");
@@ -232,6 +232,8 @@ impl GongwenApp {
                 if let Some(error) = &draft.error {
                     ui.colored_label(warn(), error);
                 }
+                ui.add_space(10.0);
+                let mut submit = false;
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(has_changes, egui::Button::new("提交"))
@@ -241,14 +243,14 @@ impl GongwenApp {
                         submit = true;
                     }
                     if ui.button("取消").clicked() {
-                        close = true;
+                        ui.close();
                     }
                 });
-            });
-        if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("version_commit_anim"), &w.response);
-        }
-        if close {
+                submit
+            },
+        );
+        let submit = dialog.inner;
+        if !submit && dialog.dismissed {
             // 取消提交时也放弃"提交后切换"，免得下次提交莫名跳版本。
             self.switch_after_commit = None;
             return; // 关闭：丢弃草稿。
@@ -722,21 +724,21 @@ impl GongwenApp {
     /// "回退到该版本"的二次确认：会覆盖活稿行里未提交的内容，值得问一句。
     pub(crate) fn revert_confirm_window(&mut self, ctx: &egui::Context) {
         let Some((manuscript_id, version_number)) = self.revert_confirm else {
-            theme::reset_window_anim(ctx, egui::Id::new("revert_confirm_anim"));
             return;
         };
-        let mut confirm = false;
-        let mut cancel = false;
-        let win = egui::Window::new("回退到该版本")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+        let dialog = modal::dialog(
+            ctx,
+            egui::Id::new("revert_confirm"),
+            "回退到该版本",
+            380.0,
+            Dismiss::EscOrBackdrop,
+            |ui| {
                 ui.label(format!(
                     "将用 v{version_number} 的内容覆盖这篇稿件的当前内容。"
                 ));
                 ui.colored_label(warn(), "当前未提交的修改会丢失；已提交的版本不受影响。");
-                ui.add_space(6.0);
+                ui.add_space(10.0);
+                let mut confirm = false;
                 ui.horizontal(|ui| {
                     if ui
                         .add(theme::warning_icon_button(
@@ -748,13 +750,13 @@ impl GongwenApp {
                         confirm = true;
                     }
                     if ui.button("取消").clicked() {
-                        cancel = true;
+                        ui.close();
                     }
                 });
-            });
-        if let Some(w) = win {
-            theme::window_enter_anim(ctx, egui::Id::new("revert_confirm_anim"), &w.response);
-        }
+                confirm
+            },
+        );
+        let (confirm, cancel) = (dialog.inner, dialog.dismissed);
         if confirm {
             self.revert_to_version(manuscript_id, version_number);
         } else if cancel {
