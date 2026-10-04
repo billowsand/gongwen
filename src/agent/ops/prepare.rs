@@ -3,9 +3,9 @@
 use super::{
     Flow, assist, check_cancel, fetch_into, has_sources, note, param, phase, prompt, tool_line,
 };
-use crate::agent::clarify;
 use crate::agent::skill::StepSpec;
 use crate::agent::tools::{Permission, ToolCtx};
+use crate::agent::{clarify, elements};
 use serde_json::Value;
 
 /// 预研列出的检索词存在这个变量里，`retrieve` 默认从这里取。
@@ -15,22 +15,81 @@ pub(super) const FOUND: &str = "found";
 
 /// `clarify`：程序规则 + 模型判断，只问会让整篇写偏的事；有题就挂起。已经问过（黑板标了
 /// 已澄清）就跳过。参数 `max`（技能参数 `pre_questions`），提示词默认「动笔前澄清」。
+///
+/// 再按文种的六要素清单查一遍（`elements.rs`）：时限、对象、联系人这些只有起草人知道的事，
+/// 动笔前就问，答案写进第一稿。参数 `elements`（为否时不查）、`element_questions`
+/// （最多几道），提示词 `elements_prompt`（默认「要素检查」，技能里没写就用内置的一份）。
 pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
+    if ctx.board.clarified {
+        return Ok(Flow::Next);
+    }
     let max = param(ctx, step, &["max", "pre_questions"], 3, 0..=5);
-    if ctx.board.clarified || max == 0 {
+    let element_max = if step.params.get("elements").and_then(Value::as_bool) == Some(false) {
+        0
+    } else {
+        param(ctx, step, &["element_questions"], 4, 0..=6)
+    };
+    let checklist = elements::checklist(ctx.board.draft.kind);
+    if max == 0 && (element_max == 0 || checklist.is_empty()) {
         return Ok(Flow::Next);
     }
     phase(ctx, "动笔前检查要求是否明确…");
-    let locals = [
-        ("max", max.to_string()),
-        ("title", ctx.board.draft.title_hint.trim().to_string()),
-        ("request", ctx.board.request_with_notes()),
-    ];
-    let text = prompt(ctx, step, "prompt", "动笔前澄清", &locals)?;
-    let reply = assist(ctx, &text)?;
-    let parsed = clarify::parse_model_questions(&reply, max);
-    let questions =
-        clarify::predraft_questions(&ctx.board.request, ctx.board.draft.kind, parsed, max);
+    let mut questions = Vec::new();
+    if max > 0 {
+        let locals = [
+            ("max", max.to_string()),
+            ("title", ctx.board.draft.title_hint.trim().to_string()),
+            ("request", ctx.board.request_with_notes()),
+        ];
+        let text = prompt(ctx, step, "prompt", "动笔前澄清", &locals)?;
+        let reply = assist(ctx, &text)?;
+        let parsed = clarify::parse_model_questions(&reply, max);
+        questions =
+            clarify::predraft_questions(&ctx.board.request, ctx.board.draft.kind, parsed, max);
+    }
+    if element_max > 0 && !checklist.is_empty() {
+        let request = format!(
+            "{}
+{}",
+            ctx.board.draft.title_hint.trim(),
+            ctx.board.request_with_notes()
+        );
+        let name = step.param_str("elements_prompt").unwrap_or("要素检查");
+        let template = ctx.env.skill.section(name).unwrap_or(elements::PROMPT);
+        let locals = [
+            ("kind", ctx.board.draft.kind.label().to_string()),
+            ("checklist", elements::checklist_text(&checklist)),
+            ("request", request.clone()),
+        ];
+        let text = ctx.board.render_with(template, &locals);
+        let reply = assist(ctx, &text)?;
+        let asked = elements::questions(
+            ctx.board.draft.kind,
+            &request,
+            &reply,
+            questions.len() + 1,
+            element_max,
+        );
+        if !asked.is_empty() {
+            tool_line(
+                ctx,
+                "check.elements",
+                Permission::Check,
+                format!(
+                    "六要素：{} 没讲清楚",
+                    asked
+                        .iter()
+                        .filter_map(|q| match q.target {
+                            clarify::Target::Element(element) => Some(element.label()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ),
+            );
+        }
+        questions.extend(asked);
+    }
     if questions.is_empty() {
         return Ok(Flow::Next);
     }

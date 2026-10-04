@@ -714,6 +714,12 @@ fn questions_ui(
             }
         }
         if question.skippable {
+            // 六要素题跳过不是「按现有信息写」，而是正文留占位、事后不再问。
+            let skip = if matches!(question.target, crate::agent::clarify::Target::Element(_)) {
+                "先不定，正文留待核实"
+            } else {
+                skip
+            };
             ui.checkbox(&mut draft.skip, skip);
         }
     }

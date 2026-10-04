@@ -260,8 +260,8 @@ fn material_splits_points_without_a_model_and_writes_only_from_confirmed_points(
     let points = driver.run().expect("要点要你确认");
     assert_eq!(
         model.calls.borrow().len(),
-        1,
-        "只调过一次动笔前澄清，拆要点不经模型"
+        2,
+        "只调过动笔前澄清与六要素检查，拆要点不经模型"
     );
     assert_eq!(
         points.questions[0].prefill,
@@ -982,4 +982,67 @@ fn style_learn_reads_the_referenced_samples_and_proposes_a_profile() {
     );
     let error = driver.try_run().unwrap_err().to_string();
     assert!(error.contains("先用 @ 引用"), "{error}");
+}
+
+#[test]
+fn letters_ask_the_six_elements_before_drafting_and_write_the_answers_in() {
+    let skill = builtin(skill::RESEARCH_DRAFT);
+    let model = ScriptedModel::new(|role, prompt| {
+        if prompt.contains("逐项检查起草所需的六要素") {
+            "何事｜已给｜商请共建公共数据研究平台\n\
+             何因｜已给｜根据市政府常务会议要求\n\
+             何人｜缺｜我方联系人是谁？\n\
+             何时｜缺｜请对方什么时候前反馈？\n\
+             何地｜不适用\n\
+             何法｜已给｜请书面函复"
+                .into()
+        } else if role == ModelRole::Draft && prompt.contains("研究平台") {
+            "# 关于商请共建公共数据研究平台的函\n\n市数据局：\n\n根据市政府常务会议要求，商请共建\
+             公共数据研究平台。请于10月31日前书面函复。联系人：【待核实：联系人及电话】。\n"
+                .into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        board(
+            TemplateKind::OfficialLetter,
+            "",
+            "给市数据局发函，商请共建公共数据研究平台。根据市政府常务会议要求。请书面函复。",
+        ),
+    );
+    let asked = driver.run().expect("动笔前要问六要素");
+    let targets: Vec<_> = asked.questions.iter().map(|q| q.target).collect();
+    assert_eq!(
+        targets,
+        [
+            Target::Element(super::elements::Element::Who),
+            Target::Element(super::elements::Element::When),
+        ]
+    );
+    driver.answer(
+        &asked,
+        &[(1, Reply::Skip), (2, Reply::Custom("10月31日前".into()))],
+    );
+    assert!(driver.run().is_none());
+    let draft_prompt = &model
+        .prompts("研究平台")
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        draft_prompt.contains("回复时限（请对方办理或回复的时限）：10月31日前（起草人确认）"),
+        "{draft_prompt}"
+    );
+    assert!(draft_prompt.contains("【待核实：联系人及电话】"));
+    let report = SkillReport::from_board(&driver.board);
+    assert!(
+        report.questions.is_empty(),
+        "答过的日期有出处，选了先不定的不再问：{:?}",
+        report.questions.iter().map(|q| &q.text).collect::<Vec<_>>()
+    );
 }

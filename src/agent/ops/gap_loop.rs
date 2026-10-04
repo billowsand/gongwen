@@ -40,6 +40,7 @@ pub(super) fn gap_loop(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
         let sources = ctx.board.sources_text();
         let board = &mut *ctx.board;
         board.ledger.sync(&board.workspace, &sources, vocabulary);
+        board.ledger.mark_declined(&board.notes);
         if round == 1 {
             let summary = gap_summary(&ctx.board.ledger);
             tool_line(ctx, "check.placeholders", Permission::Check, summary);
@@ -84,6 +85,7 @@ pub(super) fn gap_loop(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
     let sources = ctx.board.sources_text();
     let board = &mut *ctx.board;
     board.ledger.sync(&board.workspace, &sources, vocabulary);
+    board.ledger.mark_declined(&board.notes);
     Ok(Flow::Next)
 }
 

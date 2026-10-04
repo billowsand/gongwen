@@ -117,6 +117,8 @@ pub(super) fn ask(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<
         return Ok(output.suspend.map_or(Flow::Next, Flow::Suspend));
     }
     let max = param(ctx, step, &["max", "batch_questions"], 4, 1..=10);
+    let board = &mut *ctx.board;
+    board.ledger.mark_declined(&board.notes);
     let questions = clarify::gap_questions(&ctx.board.ledger, max);
     if questions.is_empty() {
         return Ok(Flow::Next);

@@ -22,6 +22,7 @@ pub(crate) mod backend;
 pub(crate) mod board;
 pub(crate) mod budget;
 pub(crate) mod clarify;
+pub(crate) mod elements;
 pub(crate) mod engine;
 pub(crate) mod evidence;
 pub(crate) mod gaps;

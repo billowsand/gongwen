@@ -41,6 +41,8 @@ pub(crate) struct Choice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Target {
     PreDraft,
+    /// 动笔前的六要素题（`elements.rs`）：答案记作已确认信息，跳过就留固定占位。
+    Element(super::elements::Element),
     Gap(usize),
     /// 流程中途的通用选择题（`ask.choice`），答案存进变量后流程接着跑。
     Pick,
@@ -58,6 +60,13 @@ pub(crate) struct Question {
     /// 可以跳过：动笔前的题跳过就按现有信息写；缺口题跳过就保留待核实。
     pub(crate) skippable: bool,
     pub(crate) target: Target,
+}
+
+impl Target {
+    /// 动笔前问的题（方向题与六要素题）：答案作为已确认信息交给起草。
+    pub(crate) fn is_predraft(self) -> bool {
+        matches!(self, Self::PreDraft | Self::Element(_))
+    }
 }
 
 /// 用户对一道题的回答。
@@ -281,12 +290,14 @@ pub(crate) fn gap_questions(ledger: &Ledger, max: usize) -> Vec<Question> {
         .collect()
 }
 
-/// 动笔前的回答 → (要切换到的文种, 补充给起草的信息)。
+/// 动笔前的回答 → (要切换到的文种, 补充给起草的信息)。`kind` 是出题时的文种，六要素题按它
+/// 回查要素的说法。
 pub(crate) fn resolve_predraft(
     questions: &[Question],
     replies: &[(usize, Reply)],
+    kind: TemplateKind,
 ) -> (Option<TemplateKind>, Vec<String>) {
-    let mut kind = None;
+    let mut switch = None;
     let mut notes = Vec::new();
     for (question_id, reply) in replies {
         let Some(question) = questions.iter().find(|q| q.id == *question_id) else {
@@ -294,17 +305,26 @@ pub(crate) fn resolve_predraft(
         };
         match reply {
             Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
-                Some(Action::SwitchKind(target)) => kind = Some(*target),
+                Some(Action::SwitchKind(target)) => switch = Some(*target),
                 Some(Action::Note(note)) => notes.push(note.clone()),
                 _ => {}
             },
             Reply::Custom(text) if !text.trim().is_empty() => {
-                notes.push(format!("{}{}", question.text, text.trim()));
+                notes.push(match question.target {
+                    Target::Element(element) => {
+                        super::elements::note_for(kind, element, Some(text.trim()))
+                    }
+                    _ => format!("{}{}", question.text, text.trim()),
+                });
             }
-            _ => {}
+            Reply::Skip | Reply::Custom(_) => {
+                if let Target::Element(element) = question.target {
+                    notes.push(super::elements::note_for(kind, element, None));
+                }
+            }
         }
     }
-    (kind, notes)
+    (switch, notes)
 }
 
 /// 把缺口题的回答落到工作稿上，返回改后的正文。台账里对应缺口的状态一并更新。
@@ -475,6 +495,7 @@ mod tests {
                 (2, Reply::Choice(1)),
                 (3, Reply::Custom("各乡镇".into())),
             ],
+            TemplateKind::OfficialLetter,
         );
         assert_eq!(kind, Some(TemplateKind::PlainDocument));
         assert_eq!(notes, ["受文对象是谁？乙", "篇幅多长？各乡镇"]);

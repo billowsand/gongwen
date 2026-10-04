@@ -823,7 +823,7 @@ fn run_engine(
 
 /// 挂起时题目的用途，决定卡片上的说法。
 pub(crate) fn asking_labels(questions: &[Question]) -> (&'static str, &'static str, &'static str) {
-    if questions.iter().any(|q| q.target == Target::PreDraft) {
+    if questions.iter().any(|q| q.target.is_predraft()) {
         (
             "动笔前先确认这几件事",
             "确认，开始起草",

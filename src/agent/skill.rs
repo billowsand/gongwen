@@ -562,7 +562,13 @@ fn validate_steps(
                 }
             }
         }
-        for key in ["prompt", "evidence_prompt", "fill_prompt", "source_prompt"] {
+        for key in [
+            "prompt",
+            "evidence_prompt",
+            "fill_prompt",
+            "source_prompt",
+            "elements_prompt",
+        ] {
             if let Some(name) = step.param_str(key)
                 && skill.section(name).is_none()
             {

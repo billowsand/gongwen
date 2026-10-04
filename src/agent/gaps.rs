@@ -417,6 +417,19 @@ impl Ledger {
         }
     }
 
+    /// 动笔前起草人对六要素选了「先不定」的，占位按约定写成「【待核实：短名】」，已确认信息里
+    /// 记着这个占位：对上的缺口记为保留待核实——不去检索、事后也不再问第二遍。
+    pub(crate) fn mark_declined(&mut self, notes: &[String]) {
+        for gap in &mut self.gaps {
+            if matches!(gap.status, GapStatus::Open | GapStatus::NoAnswer)
+                && gap.kind != GapKind::Untraced
+                && notes.iter().any(|note| note.contains(&gap.literal))
+            {
+                gap.status = GapStatus::Skipped;
+            }
+        }
+    }
+
     pub(crate) fn get(&self, id: usize) -> Option<&Gap> {
         self.gaps.iter().find(|gap| gap.id == id)
     }
@@ -585,6 +598,21 @@ mod tests {
         fresh.sync(filled, "《森林防火条例》", &[]);
         assert!(fresh.gaps.iter().all(|gap| gap.kind != GapKind::Untraced));
         assert_eq!(ledger.counts(), (1, 0, 2));
+    }
+
+    #[test]
+    fn items_declined_before_drafting_are_not_asked_again() {
+        let mut ledger = Ledger::default();
+        ledger.sync(
+            "请于【待核实：回复时限】前函复，联系人【待核实：联系人】。",
+            "",
+            &[],
+        );
+        ledger.mark_declined(&[
+            "回复时限暂未确定：正文写「【待核实：回复时限】」，不要自己编".into(),
+        ]);
+        assert_eq!(ledger.gaps[0].status, GapStatus::Skipped);
+        assert_eq!(ledger.needs_user(), [2]);
     }
 
     #[test]

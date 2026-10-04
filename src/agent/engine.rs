@@ -267,8 +267,8 @@ pub(crate) fn apply_answers(
 ) -> Option<TemplateKind> {
     let questions = &suspension.questions;
     let mut kind = None;
-    if questions.iter().any(|q| q.target == Target::PreDraft) {
-        let (picked, notes) = clarify::resolve_predraft(questions, replies);
+    if questions.iter().any(|q| q.target.is_predraft()) {
+        let (picked, notes) = clarify::resolve_predraft(questions, replies, board.draft.kind);
         board.notes.extend(notes);
         board.clarified = true;
         kind = picked;

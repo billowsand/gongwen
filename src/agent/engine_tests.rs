@@ -665,7 +665,8 @@ fn live_research_draft() {
                 .iter()
                 .map(|q| (q.id, crate::agent::clarify::Reply::Choice(0)))
                 .collect();
-            let (_, notes) = crate::agent::clarify::resolve_predraft(&questions, &replies);
+            let (_, notes) =
+                crate::agent::clarify::resolve_predraft(&questions, &replies, research.draft.kind);
             research.notes = notes;
             research.clarified = true;
             match run(&research, &skill, &[], &model, &kb, &mut print).unwrap() {
