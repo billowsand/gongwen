@@ -41,6 +41,7 @@ mod quick_find;
 mod send_package_ui;
 mod session;
 mod settings;
+mod skill_manager;
 mod style_settings;
 mod tabs;
 mod versioning;

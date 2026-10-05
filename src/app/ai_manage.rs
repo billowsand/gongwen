@@ -241,6 +241,11 @@ impl GongwenApp {
             .inner_margin(egui::Margin::symmetric(18, 14))
             .corner_radius(egui::CornerRadius::same(10))
             .show(ui, |ui| {
+                if section == AiSection::Skills {
+                    ui.set_min_size(ui.available_size());
+                    self.skills_section_ui(ui);
+                    return;
+                }
                 // 数据接口是左列表、右详情，两栏各自滚动，占满整个分区，不套外层滚动区。
                 if section == AiSection::DataApis {
                     ui.set_min_size(ui.available_size());
@@ -275,6 +280,10 @@ impl GongwenApp {
         ui.add_space(6.0);
         ui.separator();
         ui.add_space(4.0);
+        if self.ai_section == AiSection::Skills {
+            ui.weak("技能文件在工作区单独校验与保存；切换文件会保留未保存的修改。");
+            return;
+        }
         ui.horizontal(|ui| {
             if theme::primary_icon_button(ui, theme::Icon::Save, "保存").clicked() {
                 self.save_ai_manage();

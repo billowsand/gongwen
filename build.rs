@@ -4,9 +4,13 @@ use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 const ICON_PATH: &str = "assets/app-icon/app-icon.ico";
 
+#[path = "scripts/build_skill_assets.rs"]
+mod skill_assets;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src");
+    skill_assets::generate();
 
     #[cfg(target_os = "windows")]
     {

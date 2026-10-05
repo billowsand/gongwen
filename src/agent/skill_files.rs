@@ -1,12 +1,14 @@
 //! 技能文件的管理：启用 / 停用、保存（带校验）、复制内置、新建、删除、导入导出。
 //!
 //! 用户技能都在 `配置目录/skills/<id>/SKILL.md`；停用的 id 记在 `配置目录/skills/disabled.json`
-//! （内置技能没有文件可改，停用只能记在这里）。导出的是技能文件本身——技能里没有接口地址与
-//! 密钥（它们在「数据接口」配置里），分享出去不会带走。
+//! （内置技能没有文件可改，停用只能记在这里）。`package` 子模块完整保留辅助文件与子目录，
+//! 导入导出以整个技能包为单位；应用的数据接口配置与密钥不加入技能包。
 
 use super::skill::{self, Skill};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+pub(crate) mod package;
+pub(crate) use package::{export, import, remove};
 
 const DISABLED_FILE: &str = "disabled.json";
 
@@ -117,7 +119,7 @@ pub(crate) fn problems_of(skill: &Skill) -> Vec<String> {
 /// 退回内置）。
 pub(crate) fn save(id: &str, text: &str) -> Result<Vec<String>, String> {
     let problems = check_text(id, text)?;
-    let file = user_file(id).map_err(|e| e.to_string())?;
+    let file = package::destination(id, "SKILL.md").map_err(|e| e.to_string())?;
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -135,115 +137,11 @@ pub(crate) fn create(id: &str) -> anyhow::Result<String> {
     Ok(TEMPLATE.to_string())
 }
 
-/// 删除用户文件。内置技能的覆盖文件删掉后恢复内置版本。
-pub(crate) fn remove(id: &str) -> anyhow::Result<()> {
-    let file = user_file(id)?;
-    if file.exists() {
-        std::fs::remove_file(&file)?;
-    }
-    if let Some(dir) = file.parent()
-        && dir
-            .read_dir()
-            .is_ok_and(|mut entries| entries.next().is_none())
-    {
-        std::fs::remove_dir(dir)?;
-    }
-    Ok(())
-}
-
-/// 导出：目标以 `.skill` 或 `.zip` 结尾就打包成 `<id>/SKILL.md`，否则在目标文件夹下写
-/// `<id>/SKILL.md`。返回写出的路径。
-pub(crate) fn export(id: &str, target: &Path) -> anyhow::Result<PathBuf> {
-    let text = source_text(id)?;
-    let packaged = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("skill") || e.eq_ignore_ascii_case("zip"));
-    if packaged {
-        let mut zip = zip::ZipWriter::new(std::fs::File::create(target)?);
-        zip.start_file(
-            format!("{id}/SKILL.md"),
-            zip::write::SimpleFileOptions::default(),
-        )?;
-        zip.write_all(text.as_bytes())?;
-        zip.finish()?;
-        Ok(target.to_path_buf())
-    } else {
-        let file = target.join(id).join("SKILL.md");
-        std::fs::create_dir_all(file.parent().expect("有上级目录"))?;
-        std::fs::write(&file, text)?;
-        Ok(file)
-    }
-}
-
-/// 导入：`.skill` / `.zip` 包（里面一个或多个 `<id>/SKILL.md`），或一个文件夹（本身有
-/// `SKILL.md`，或下面若干个技能文件夹）。解析不过的跳过并说明。同 id 的用户技能被覆盖。
-/// 返回 (导入的 id, 说明)。
-pub(crate) fn import(path: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    let mut found: Vec<(String, String)> = Vec::new();
-    if path.is_file() {
-        let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-        for index in 0..archive.len() {
-            let mut entry = archive.by_index(index)?;
-            let name = entry.name().replace('\\', "/");
-            let parts: Vec<&str> = name.split('/').filter(|p| !p.is_empty()).collect();
-            if parts.len() >= 2 && parts[parts.len() - 1] == "SKILL.md" {
-                let id = parts[parts.len() - 2].to_string();
-                let mut text = String::new();
-                entry.read_to_string(&mut text)?;
-                found.push((id, text));
-            }
-        }
-    } else if path.join("SKILL.md").is_file() {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-        found.push((id, std::fs::read_to_string(path.join("SKILL.md"))?));
-    } else {
-        let mut dirs: Vec<PathBuf> = std::fs::read_dir(path)?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|dir| dir.join("SKILL.md").is_file())
-            .collect();
-        dirs.sort();
-        for dir in dirs {
-            let id = dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-                .to_string();
-            found.push((id, std::fs::read_to_string(dir.join("SKILL.md"))?));
-        }
-    }
-    if found.is_empty() {
-        anyhow::bail!("{} 里没有找到 SKILL.md", path.display());
-    }
-    let mut imported = Vec::new();
-    let mut notes = Vec::new();
-    for (id, text) in found {
-        if !valid_id(&id) {
-            notes.push(format!("「{id}」不是合法的技能 id，跳过"));
-            continue;
-        }
-        match save(&id, &text) {
-            Ok(problems) => {
-                if !problems.is_empty() {
-                    notes.push(format!("「{id}」有问题：{}", problems.join("；")));
-                }
-                imported.push(id);
-            }
-            Err(error) => notes.push(format!("「{id}」解析失败，跳过：{error}")),
-        }
-    }
-    Ok((imported, notes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::skill::{POLISH, RESEARCH_DRAFT};
+    use std::path::Path;
 
     fn with_dir<R>(name: &str, f: impl FnOnce(&Path) -> R) -> R {
         let dir =
@@ -312,6 +210,11 @@ mod tests {
             );
             assert!(create(POLISH).is_err(), "不能和内置重名");
             assert!(create("中文 id").is_err());
+            assert!(
+                package::save_file("my-skill", "skill.md", "").is_err(),
+                "Windows 上不能绕过入口校验覆盖同名文件"
+            );
+            assert!(check_text("my-skill", &source_text("my-skill").unwrap()).is_ok());
         });
     }
 
@@ -331,6 +234,77 @@ mod tests {
             assert_eq!(ids, [POLISH]);
             std::fs::create_dir_all(dir.join("empty")).unwrap();
             assert!(import(&dir.join("empty")).is_err());
+        });
+    }
+
+    #[test]
+    fn package_round_trip_preserves_nested_text_and_binary_resources() {
+        with_dir("full-package", |dir| {
+            create("multi").unwrap();
+            package::save_file("multi", "references/引用规范.md", "# 引用规范\n保留出处。")
+                .unwrap();
+            package::save_file("multi", "scripts/check.py", "print('不执行')").unwrap();
+            let root = package::folder("multi").unwrap();
+            std::fs::create_dir_all(root.join("assets")).unwrap();
+            std::fs::write(root.join("assets/example.bin"), [0, 255, 1, 128]).unwrap();
+            let original = package::load("multi").unwrap().files;
+            let zip = export("multi", &dir.join("full.skill")).unwrap();
+            let folder = export("multi", &dir.join("out")).unwrap();
+            assert!(
+                folder
+                    .parent()
+                    .unwrap()
+                    .join("references/引用规范.md")
+                    .is_file()
+            );
+            remove("multi").unwrap();
+            assert!(!root.exists(), "删除的是整个包");
+            assert_eq!(import(&zip).unwrap().0, ["multi"]);
+            assert_eq!(package::load("multi").unwrap().files, original);
+            remove("multi").unwrap();
+            import(folder.parent().unwrap()).unwrap();
+            assert_eq!(package::load("multi").unwrap().files, original);
+        });
+    }
+
+    #[test]
+    fn unsafe_archive_paths_are_rejected_before_any_write() {
+        use std::io::Write;
+        with_dir("unsafe-package", |dir| {
+            for (index, path) in [
+                "mine/../escape.txt",
+                "C:/escape.txt",
+                "mine/references/CON.txt",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let zip_path = dir.join(format!("unsafe-{index}.skill"));
+                let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+                zip.start_file("mine/SKILL.md", zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(TEMPLATE.as_bytes()).unwrap();
+                zip.start_file(*path, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(b"invalid").unwrap();
+                zip.finish().unwrap();
+                assert!(import(&zip_path).is_err());
+                assert!(!has_user_file("mine"));
+            }
+        });
+    }
+
+    #[test]
+    fn invalid_entry_does_not_install_auxiliary_files() {
+        with_dir("bad-entry", |dir| {
+            let root = dir.join("bad");
+            std::fs::create_dir_all(root.join("references")).unwrap();
+            std::fs::write(root.join("SKILL.md"), "无 YAML 入口").unwrap();
+            std::fs::write(root.join("references/材料.md"), "材料").unwrap();
+            let (ids, notes) = import(&root).unwrap();
+            assert!(ids.is_empty());
+            assert!(!notes.is_empty());
+            assert!(!package::folder("bad").unwrap().exists());
         });
     }
 }
