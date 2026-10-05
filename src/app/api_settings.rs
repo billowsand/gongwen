@@ -194,11 +194,7 @@ impl ApisPage {
     fn open(&mut self, index: usize) {
         self.detail = Detail::default();
         if let Some(endpoint) = self.store.endpoints.get(index) {
-            self.detail.args = endpoint
-                .inputs
-                .iter()
-                .map(|input| (input.name.clone(), input.example.clone()))
-                .collect();
+            detail::preselect(&mut self.detail, endpoint);
         }
         self.view = View::Endpoint(index);
     }
@@ -227,7 +223,7 @@ impl ApisPage {
             }
             let rx = spawn_trial(
                 endpoint.clone(),
-                endpoint.example_args(),
+                endpoint.trial_args(),
                 self.secrets.clone(),
             );
             self.batch.push((endpoint.id.clone(), rx));
@@ -362,7 +358,7 @@ fn section_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConfig) {
                 ui.set_height(height);
                 match page.view.clone() {
                     View::Endpoint(index) if index < page.store.endpoints.len() => {
-                        detail::endpoint_ui(ui, page, index);
+                        detail::endpoint_ui(ui, page, index, config);
                     }
                     View::Service(host) => service::service_ui(ui, page, &host),
                     View::Import => import::import_ui(ui, page, config),
@@ -1105,6 +1101,80 @@ pub(super) mod tests {
     fn draw(page: &mut ApisPage) -> Vec<String> {
         let config = AppConfig::default();
         render(|ui| section_ui(ui, page, &config))
+    }
+
+    /// 用户给的 TypeSafe 文档（Mintlify）：一个接口、几种问题类型，各有请求示例。
+    fn typesafe_endpoint() -> ApiEndpoint {
+        let doc = include_str!("../agent/api_import/fixtures/typesafe.md");
+        let material = crate::agent::api_import::Material::new(doc);
+        let mut endpoint = crate::agent::api_import::analyze(&material, None, &[])
+            .drafts
+            .remove(0)
+            .endpoint;
+        endpoint.name = "文本评估".into();
+        endpoint
+    }
+
+    #[test]
+    fn several_examples_are_listed_and_can_be_picked_in_try() {
+        let mut page = page_with(vec![typesafe_endpoint()]);
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("用法示例") && has("文档示例：Choice") && has("去试一下"),
+            "接口说明列出样例：{texts:?}"
+        );
+        page.detail.tab = detail::Tab::Try;
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("文档示例：Noul") && has("文档示例：Score") && has("全部 4 组试一遍"),
+            "{texts:?}"
+        );
+        assert!(has("存为样例"), "{texts:?}");
+        assert_eq!(page.detail.example, Some(0), "打开时填好第一组");
+        assert!(
+            page.detail.args["questions"].contains("\"is_urgent\""),
+            "{:?}",
+            page.detail.args
+        );
+        assert!(
+            page.detail.args["questions"].contains('\n'),
+            "JSON 参数排成多行"
+        );
+    }
+
+    #[test]
+    fn running_every_example_reports_each_result() {
+        let server = crate::agent::api::test_server::TestServer::start(vec![
+            (
+                200,
+                serde_json::json!({"answers": {"q": {"type": "noul", "noul": 0.9}}}).to_string(),
+            ),
+            (422, "{\"detail\": \"bad question\"}".into()),
+        ]);
+        let mut endpoint = typesafe_endpoint();
+        endpoint.url = format!("{}/v1/systemone", server.url);
+        endpoint.examples.truncate(2);
+        let mut page = page_with(vec![endpoint]);
+        page.detail.tab = detail::Tab::Try;
+        page.secrets.secrets.insert("token".into(), "k".into());
+        let endpoint = page.store.endpoints[0].clone();
+        detail::start_runs_for_test(&mut page, &endpoint);
+        for _ in 0..200 {
+            let _ = draw(&mut page);
+            if page.detail_runs_done() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has("2 组样例，调通 1 组"), "{texts:?}");
+        assert!(
+            server.request(0).contains("is_urgent"),
+            "第一组发的是它自己的问题"
+        );
     }
 
     #[test]

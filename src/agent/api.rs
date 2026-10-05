@@ -56,16 +56,19 @@ pub(crate) enum InputKind {
     Text,
     Number,
     Bool,
+    /// 一整段 JSON（对象、数组）：键由调用方定的「问题表」、条件列表之类，没法拆成一个个变量。
+    Json,
 }
 
 impl InputKind {
-    pub(crate) const ALL: [InputKind; 3] = [Self::Text, Self::Number, Self::Bool];
+    pub(crate) const ALL: [InputKind; 4] = [Self::Text, Self::Number, Self::Bool, Self::Json];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Text => "文字",
             Self::Number => "数字",
             Self::Bool => "是否",
+            Self::Json => "JSON",
         }
     }
 }
@@ -136,6 +139,18 @@ impl ApiDestination {
     }
 }
 
+/// 一组试调用的输入（「试一下」里一键填入、「全部试一遍」逐个发）。
+/// 只是测试数据，不影响请求与返回的配置，不算进配置指纹。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ApiExample {
+    pub(crate) name: String,
+    /// 这个例子演示什么。
+    pub(crate) note: String,
+    /// 参数名 → 值（JSON 参数写 JSON 文本）。
+    pub(crate) args: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct ApiEndpoint {
@@ -153,6 +168,8 @@ pub(crate) struct ApiEndpoint {
     pub(crate) success: ApiSuccess,
     pub(crate) destination: ApiDestination,
     pub(crate) timeout_seconds: u64,
+    /// 试调样例。
+    pub(crate) examples: Vec<ApiExample>,
 }
 
 impl Default for ApiEndpoint {
@@ -170,6 +187,7 @@ impl Default for ApiEndpoint {
             success: ApiSuccess::default(),
             destination: ApiDestination::Evidence,
             timeout_seconds: DEFAULT_TIMEOUT,
+            examples: Vec::new(),
         }
     }
 }
@@ -405,6 +423,7 @@ impl ApiEndpoint {
         core.id.clear();
         core.name.clear();
         core.description.clear();
+        core.examples.clear();
         for input in &mut core.inputs {
             input.description.clear();
             input.example.clear();
@@ -438,6 +457,30 @@ impl ApiEndpoint {
             .filter(|input| !input.example.is_empty())
             .map(|input| (input.name.clone(), Value::String(input.example.clone())))
             .collect()
+    }
+
+    /// 自动试调用的输入：有样例组用第一组（缺的参数拿参数自己的样例补），没有就用参数样例。
+    pub(crate) fn trial_args(&self) -> Map<String, Value> {
+        let mut args = self.example_args();
+        if let Some(example) = self.examples.first() {
+            for (name, value) in &example.args {
+                if self.inputs.iter().any(|i| i.name == *name) && !value.trim().is_empty() {
+                    args.insert(name.clone(), Value::String(value.clone()));
+                }
+            }
+        }
+        args
+    }
+
+    /// 一组样例的输入（缺的参数拿参数自己的样例补）。
+    pub(crate) fn args_of(&self, example: &ApiExample) -> Map<String, Value> {
+        let mut args = self.example_args();
+        for (name, value) in &example.args {
+            if self.inputs.iter().any(|i| i.name == *name) {
+                args.insert(name.clone(), Value::String(value.clone()));
+            }
+        }
+        args
     }
 }
 
@@ -528,6 +571,11 @@ fn input_values(
                     }
                 },
                 other => return Err(format!("输入 {} 要是「是 / 否」，收到 {other}", input.name)),
+            },
+            InputKind::Json => match raw {
+                Value::String(text) => serde_json::from_str::<Value>(text.trim())
+                    .map_err(|e| format!("输入 {} 要是 JSON：{e}", input.name))?,
+                other => other.clone(),
             },
         };
         values.insert(input.name.clone(), value);
@@ -874,19 +922,27 @@ pub(crate) fn map_counted(
         root.pointer(&mapping.list)
             .ok_or_else(|| format!("返回里找不到列表位置 {}", mapping.list))?
     };
-    let items: Vec<&Value> = match target {
-        Value::Array(items) => items.iter().collect(),
+    // 列表位置指到一张「键 → 对象」的表（按调用方起的名字返回的答案之类）：每一项算一条，
+    // 键当标题与编号。
+    let keyed = !mapping.list.is_empty()
+        && target
+            .as_object()
+            .is_some_and(|map| !map.is_empty() && map.values().all(Value::is_object));
+    let items: Vec<(Option<&String>, &Value)> = match target {
+        Value::Array(items) => items.iter().map(|item| (None, item)).collect(),
+        Value::Object(map) if keyed => map.iter().map(|(key, item)| (Some(key), item)).collect(),
         Value::Null => Vec::new(),
-        other => vec![other],
+        other => vec![(None, other)],
     };
     let total = items.len();
     let items = items
         .into_iter()
         .take(MAX_ITEMS)
         .enumerate()
-        .map(|(index, item)| {
+        .map(|(index, (key, item))| {
             let title = pick(item, &mapping.title)
                 .or_else(|| guess(item, &["title", "name", "标题", "名称"]))
+                .or_else(|| key.cloned())
                 .unwrap_or_default();
             let text = pick(item, &mapping.text)
                 .or_else(|| guess(item, &["text", "content", "summary", "正文", "内容"]))
@@ -896,6 +952,7 @@ pub(crate) fn map_counted(
                 .unwrap_or_else(|| endpoint.name.clone());
             let id = pick(item, &mapping.id)
                 .or_else(|| guess(item, &["id", "ID", "编号"]))
+                .or_else(|| key.cloned())
                 .unwrap_or_else(|| (index + 1).to_string());
             MappedItem {
                 id: truncate(id.trim(), 80),

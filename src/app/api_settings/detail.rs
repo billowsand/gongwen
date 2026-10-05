@@ -5,7 +5,9 @@
 //! 的接口一起重测。下面分三页：
 //! - 「接口说明」读起来像一份接口文档：用途、查询条件、返回什么、技能里怎么引用；点
 //!   「编辑说明」就地改，不另开一套表单；
-//! - 「试一下」左边填请求、右边看响应：状态、耗时、整理后的条目、原始返回、实际请求；
+//! - 「试一下」左边填请求、右边看响应：状态、耗时、整理后的条目、原始返回、实际请求。
+//!   一个接口有几种用法时存成几组样例（识别时文档的请求示例、模型编的典型例子），点一下填入，
+//!   也可以「全部试一遍」；没有样例的可以让 AI 按接口说明编几组；
 //! - 「技术配置」按「请求 → 返回」分组，删除放在最下面。
 
 use super::forms::{self, cell, flex_width, table_head, table_row};
@@ -13,8 +15,12 @@ use super::{
     ApisPage, AuthForm, Health, RAW_PREVIEW_CHARS, View, auth_form_ui, host_of, key_field,
     method_tag, secret_for, spawn_trial,
 };
-use crate::agent::api::{ApiEndpoint, ApiSecrets, MappedItem, TestStatus, Trial};
-use crate::agent::api_import::{auth, infer};
+use crate::agent::api::{
+    self, ApiEndpoint, ApiExample, ApiSecrets, InputKind, MappedItem, TestStatus, Trial,
+};
+use crate::agent::api_import::{auth, examples, infer};
+use crate::agent::backend::LmBackend;
+use crate::models::AppConfig;
 use crate::theme;
 use eframe::egui;
 use serde_json::{Map, Value};
@@ -65,6 +71,62 @@ pub(super) struct Detail {
     auth_form: AuthForm,
     /// 加鉴权时只加这一个接口（默认同一服务器上没带鉴权的一起加：一个服务通常共用一个 Key）。
     auth_this_only: bool,
+    /// 「试一下」里选中的样例；None 表示手填。
+    pub(super) example: Option<usize>,
+    /// 「全部样例试一遍」：后台逐个发，(样例序号, 结果)。
+    runs: Option<Receiver<(usize, Trial)>>,
+    /// 每组样例最近一次的结果（按样例序号）。
+    run_results: Vec<Option<Trial>>,
+    /// AI 正在编样例。
+    generating: Option<Receiver<Generated>>,
+    /// 样例相关的提示：(是否顺利, 文字)。
+    example_note: Option<(bool, String)>,
+}
+
+/// 打开接口时「试一下」先填好：有样例的填第一组，没有的填参数样例。
+pub(super) fn preselect(detail: &mut Detail, endpoint: &ApiEndpoint) {
+    match endpoint.examples.first() {
+        Some(example) => {
+            detail.example = Some(0);
+            detail.args = form_args(endpoint, example);
+        }
+        None => {
+            detail.args = endpoint
+                .inputs
+                .iter()
+                .map(|input| (input.name.clone(), pretty_json(endpoint, &input.example)))
+                .collect();
+        }
+    }
+}
+
+/// AI 编样例的结果：收下的样例与没收的说明，或出错原因。
+type Generated = Result<(Vec<ApiExample>, Vec<String>), String>;
+
+/// 样例的输入转成「试一下」表单里的文字。
+fn form_args(endpoint: &ApiEndpoint, example: &ApiExample) -> BTreeMap<String, String> {
+    endpoint
+        .args_of(example)
+        .into_iter()
+        .map(|(name, value)| {
+            let text = match value {
+                Value::String(text) => text,
+                other => other.to_string(),
+            };
+            (name, pretty_json(endpoint, &text))
+        })
+        .collect()
+}
+
+/// JSON 参数排版成多行，方便看和改。
+fn pretty_json(endpoint: &ApiEndpoint, text: &str) -> String {
+    text.trim_start()
+        .starts_with(['{', '['])
+        .then(|| serde_json::from_str::<Value>(text).ok())
+        .flatten()
+        .filter(|_| endpoint.inputs.iter().any(|i| i.kind == InputKind::Json))
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or_else(|| text.to_string())
 }
 
 impl Detail {
@@ -84,8 +146,14 @@ pub(super) fn discard_edit(page: &mut ApisPage, index: usize) {
     }
 }
 
-pub(super) fn endpoint_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
+pub(super) fn endpoint_ui(
+    ui: &mut egui::Ui,
+    page: &mut ApisPage,
+    index: usize,
+    config: &AppConfig,
+) {
     poll_test(ui.ctx(), page, index);
+    poll_examples(ui.ctx(), page, index);
     header_ui(ui, page, index);
     if page.view != View::Endpoint(index) {
         // 刚删掉了。
@@ -105,7 +173,7 @@ pub(super) fn endpoint_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) 
             match tab {
                 Tab::Doc if page.detail.editing.is_some() => edit_ui(ui, page, index),
                 Tab::Doc => doc_ui(ui, page, index),
-                Tab::Try => try_ui(ui, page, index),
+                Tab::Try => try_ui(ui, page, index, config),
                 Tab::Config => config_ui(ui, page, index),
             }
             ui.add_space(16.0);
@@ -128,6 +196,127 @@ fn poll_test(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
         Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
         Err(TryRecvError::Disconnected) => page.detail.test = None,
     }
+}
+
+/// 取回「全部样例试一遍」与「AI 生成样例」的结果。
+fn poll_examples(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
+    let mut finished = false;
+    if let Some(rx) = &page.detail.runs {
+        loop {
+            match rx.try_recv() {
+                Ok((at, trial)) => {
+                    let results = &mut page.detail.run_results;
+                    if results.len() <= at {
+                        results.resize(at + 1, None);
+                    }
+                    if page.detail.example == Some(at) {
+                        page.detail.result = Some(trial.clone());
+                        page.detail.output = None;
+                    }
+                    results[at] = Some(trial);
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
+            }
+        }
+    }
+    if finished {
+        page.detail.runs = None;
+        let results: Vec<Trial> = page.detail.run_results.iter().flatten().cloned().collect();
+        let passed = results.iter().filter(|t| t.ok()).count();
+        // 测试记录：有没通的记没通的那一次，全通记最后一次。
+        if let Some(trial) = results.iter().find(|t| !t.ok()).or(results.last()).cloned() {
+            let endpoint = page.store.endpoints[index].clone();
+            page.record(&endpoint, &trial);
+        }
+        page.detail.example_note = Some((
+            passed == results.len(),
+            format!("{} 组样例，调通 {passed} 组。", results.len()),
+        ));
+    }
+    if let Some(rx) = &page.detail.generating {
+        match rx.try_recv() {
+            Ok(Ok((made, notes))) => {
+                page.detail.generating = None;
+                let endpoint = &mut page.store.endpoints[index];
+                let before = endpoint.examples.clone();
+                endpoint.examples = examples::combine(made, &before);
+                let added = endpoint
+                    .examples
+                    .iter()
+                    .filter(|e| !before.iter().any(|b| b.args == e.args))
+                    .count();
+                let mut text = if added > 0 {
+                    page.dirty = true;
+                    page.detail.run_results.clear();
+                    page.detail.example = None;
+                    format!("AI 编了 {added} 组样例，排在最前面；记得保存。")
+                } else {
+                    "AI 没编出新的样例（和已有的重复或不合格式）。".to_string()
+                };
+                if !notes.is_empty() {
+                    text.push_str(&format!("（{}）", notes.join("；")));
+                }
+                page.detail.example_note = Some((true, text));
+            }
+            Ok(Err(error)) => {
+                page.detail.generating = None;
+                page.detail.example_note = Some((false, error));
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(150)),
+            Err(TryRecvError::Disconnected) => page.detail.generating = None,
+        }
+    }
+}
+
+/// 后台把每组样例试一遍。
+fn start_runs(detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let endpoint = endpoint.clone();
+    let secrets = secrets.clone();
+    detail.run_results = vec![None; endpoint.examples.len()];
+    detail.example_note = None;
+    std::thread::spawn(move || {
+        for (at, example) in endpoint.examples.iter().enumerate() {
+            let trial = api::trial(&endpoint, &endpoint.args_of(example), &secrets);
+            if tx.send((at, trial)).is_err() {
+                return;
+            }
+        }
+    });
+    detail.runs = Some(rx);
+}
+
+#[cfg(test)]
+pub(super) fn start_runs_for_test(page: &mut ApisPage, endpoint: &ApiEndpoint) {
+    start_runs(&mut page.detail, endpoint, &page.secrets);
+}
+
+#[cfg(test)]
+impl ApisPage {
+    pub(super) fn detail_runs_done(&self) -> bool {
+        self.detail.runs.is_none() && self.detail.example_note.is_some()
+    }
+}
+
+/// 后台让起草模型按接口说明编样例。
+fn start_generating(detail: &mut Detail, endpoint: &ApiEndpoint, config: &AppConfig) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let endpoint = endpoint.clone();
+    let config = config.clone();
+    detail.example_note = None;
+    std::thread::spawn(move || {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let backend = LmBackend::new(&config, cancel);
+        let _ = tx.send(examples::generate(&backend, &endpoint));
+    });
+    detail.generating = Some(rx);
 }
 
 /// 用「试一下」里填的值后台实测一次。
@@ -578,6 +767,7 @@ fn doc_heading(ui: &mut egui::Ui, title: &str, right: impl FnOnce(&mut egui::Ui)
 
 fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
     let mut edit = false;
+    let mut go = None;
     {
         let endpoint = &page.store.endpoints[index];
         doc_heading(ui, "用途", |ui| {
@@ -608,6 +798,26 @@ fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
         doc_heading(ui, "查询条件", |_| {});
         params_table(ui, endpoint);
 
+        if !endpoint.examples.is_empty() {
+            ui.add_space(18.0);
+            doc_heading(ui, "用法示例", |_| {});
+            for (at, example) in endpoint.examples.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(&example.name).strong());
+                    if !example.note.is_empty() {
+                        theme::caption(ui, &example.note);
+                    }
+                    if ui.small_button("去试一下").clicked() {
+                        go = Some(at);
+                    }
+                });
+            }
+            theme::caption(
+                ui,
+                "每组是一种典型用法；「试一下」里点名字填入，也可以全部试一遍。",
+            );
+        }
+
         ui.add_space(18.0);
         doc_heading(ui, "返回什么", |_| {});
         returns_ui(ui, page, endpoint);
@@ -633,6 +843,14 @@ fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
     if edit {
         let snapshot = page.store.endpoints[index].clone();
         page.detail.start_editing(&snapshot);
+    }
+    if let Some(at) = go {
+        let endpoint = page.store.endpoints[index].clone();
+        page.detail.tab = Tab::Try;
+        page.detail.example = Some(at);
+        page.detail.args = form_args(&endpoint, &endpoint.examples[at]);
+        page.detail.result = page.detail.run_results.get(at).cloned().flatten();
+        page.detail.output = None;
     }
 }
 
@@ -861,46 +1079,113 @@ pub(super) fn panel<R>(
         .inner
 }
 
-fn try_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
+fn try_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppConfig) {
     let width = ui.available_width();
     if width >= 720.0 {
         let gap = 14.0;
         let left = ((width - gap) * 0.42).floor();
         let right = width - gap - left - ui.spacing().item_spacing.x;
         ui.horizontal_top(|ui| {
-            cell(ui, left, |ui| request_box(ui, page, index));
+            cell(ui, left, |ui| request_box(ui, page, index, config));
             ui.add_space(gap - ui.spacing().item_spacing.x);
             cell(ui, right, |ui| response_box(ui, page, index));
         });
     } else {
-        request_box(ui, page, index);
+        request_box(ui, page, index, config);
         ui.add_space(12.0);
         response_box(ui, page, index);
     }
 }
 
-/// 左边：按查询条件逐项填写，点「发送请求」。
-fn request_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
-    let endpoint = page.store.endpoints[index].clone();
+/// 样例一行：每组一个可点的标签（试过的标上通没通），选中的显示说明与改名、删除。
+/// 返回点了哪一组。
+fn examples_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) -> Option<usize> {
+    let mut picked = None;
+    let mut remove = None;
+    let endpoint = &page.store.endpoints[index];
+    if endpoint.examples.is_empty() {
+        return None;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        theme::caption(ui, "样例");
+        for (at, example) in endpoint.examples.iter().enumerate() {
+            let mark = match page.detail.run_results.get(at).and_then(Option::as_ref) {
+                Some(trial) if trial.ok() => "✓ ",
+                Some(_) => "✗ ",
+                None => "",
+            };
+            let selected = page.detail.example == Some(at);
+            let mut response = ui.selectable_label(selected, format!("{mark}{}", example.name));
+            if !example.note.is_empty() {
+                response = response.on_hover_text(&example.note);
+            }
+            if response.clicked() {
+                picked = Some(at);
+            }
+        }
+    });
+    if let Some(at) = page.detail.example
+        && at < page.store.endpoints[index].examples.len()
+    {
+        let example = &mut page.store.endpoints[index].examples[at];
+        ui.horizontal_wrapped(|ui| {
+            ui.label("名称");
+            page.dirty |= ui
+                .add(egui::TextEdit::singleline(&mut example.name).desired_width(160.0))
+                .changed();
+            if ui.small_button("删除这组").clicked() {
+                remove = Some(at);
+            }
+        });
+        if !example.note.is_empty() {
+            theme::caption(ui, &example.note);
+        }
+    }
+    if let Some(at) = remove {
+        page.store.endpoints[index].examples.remove(at);
+        if at < page.detail.run_results.len() {
+            page.detail.run_results.remove(at);
+        }
+        page.detail.example = None;
+        page.dirty = true;
+    }
+    ui.add_space(6.0);
+    picked
+}
+
+/// 左边：按查询条件逐项填写，点「发送请求」。有样例的先选一组。
+fn request_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppConfig) {
     let mut fill = false;
     let mut send = false;
+    let mut run_all = false;
+    let mut save = false;
+    let mut generate = false;
+    let mut picked = None;
     let running = page.detail.test.is_some();
+    let has_model = !config.lm_studio.model.trim().is_empty();
+    let generating = page.detail.generating.is_some();
+    let running_all = page.detail.runs.is_some();
+    let examples_count = page.store.endpoints[index].examples.len();
+    let has_inputs = !page.store.endpoints[index].inputs.is_empty();
     panel(
         ui,
         theme::Icon::ArrowUp,
         "请求",
         None,
         |ui| {
-            if !endpoint.inputs.is_empty()
+            if has_inputs
                 && ui
-                    .small_button("填入样例")
-                    .on_hover_text("每个条件填上它的样例值")
+                    .small_button("填入参数样例")
+                    .on_hover_text("每个条件填上它自己的样例值")
                     .clicked()
             {
                 fill = true;
             }
         },
         |ui| {
+            picked = examples_bar(ui, page, index);
+            let endpoint = page.store.endpoints[index].clone();
             if endpoint.inputs.is_empty() {
                 theme::caption(ui, "这个接口不需要查询条件。");
             }
@@ -922,11 +1207,26 @@ fn request_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                     }
                 });
                 let value = page.detail.args.entry(input.name.clone()).or_default();
-                ui.add(
-                    egui::TextEdit::singleline(value)
-                        .hint_text(input.example.as_str())
-                        .desired_width(f32::INFINITY),
-                );
+                if input.kind == InputKind::Json {
+                    ui.add(
+                        egui::TextEdit::multiline(value)
+                            .code_editor()
+                            .desired_rows(5)
+                            .hint_text(input.example.as_str())
+                            .desired_width(f32::INFINITY),
+                    );
+                    if !value.trim().is_empty()
+                        && serde_json::from_str::<Value>(value.trim()).is_err()
+                    {
+                        ui.colored_label(theme::warn(), "不是合法的 JSON");
+                    }
+                } else {
+                    ui.add(
+                        egui::TextEdit::singleline(value)
+                            .hint_text(input.example.as_str())
+                            .desired_width(f32::INFINITY),
+                    );
+                }
                 ui.add_space(6.0);
             }
             let names = endpoint.secret_names();
@@ -976,13 +1276,107 @@ fn request_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                     theme::caption(ui, "用正在编辑的配置，不必先保存");
                 }
             });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if examples_count > 1
+                    && ui
+                        .add_enabled(
+                            !running_all,
+                            theme::secondary_icon_button(
+                                theme::Icon::ListOrdered,
+                                &format!("全部 {examples_count} 组试一遍"),
+                            ),
+                        )
+                        .clicked()
+                {
+                    run_all = true;
+                }
+                if ui
+                    .add(theme::secondary_icon_button(theme::Icon::Save, "存为样例"))
+                    .on_hover_text("把现在填的值存成一组样例")
+                    .clicked()
+                {
+                    save = true;
+                }
+                if has_model
+                    && ui
+                        .add_enabled(
+                            !generating,
+                            theme::secondary_icon_button(theme::Icon::Sparkles, "AI 编几组样例"),
+                        )
+                        .on_hover_text("按接口说明编几组典型用法，每种分支至少一组，内容取材于公文")
+                        .clicked()
+                {
+                    generate = true;
+                }
+                if generating || running_all {
+                    theme::spinner(ui, 14.0, theme::accent());
+                    ui.weak(if generating {
+                        "AI 在编样例…"
+                    } else {
+                        "逐组试调中…"
+                    });
+                }
+            });
+            if let Some((ok, text)) = &page.detail.example_note {
+                let color = if *ok {
+                    theme::text_muted()
+                } else {
+                    theme::warn()
+                };
+                ui.colored_label(color, text);
+            }
         },
     );
+    let endpoint = page.store.endpoints[index].clone();
+    if let Some(at) = picked {
+        page.detail.example = Some(at);
+        page.detail.args = form_args(&endpoint, &endpoint.examples[at]);
+        page.detail.result = page.detail.run_results.get(at).cloned().flatten();
+        page.detail.output = None;
+    }
+    if run_all {
+        start_runs(&mut page.detail, &endpoint, &page.secrets);
+    }
+    if save {
+        let args: BTreeMap<String, String> = page
+            .detail
+            .args
+            .iter()
+            .filter(|(name, value)| {
+                !value.trim().is_empty() && endpoint.inputs.iter().any(|i| i.name == **name)
+            })
+            .map(|(name, value)| {
+                let compact = serde_json::from_str::<Value>(value.trim())
+                    .ok()
+                    .filter(|v| v.is_object() || v.is_array())
+                    .map_or(value.trim().to_string(), |v| v.to_string());
+                (name.clone(), compact)
+            })
+            .collect();
+        let examples = &mut page.store.endpoints[index].examples;
+        if examples.iter().any(|e| e.args == args) {
+            page.detail.example_note = Some((false, "已经有一样的样例了。".into()));
+        } else {
+            examples.push(ApiExample {
+                name: format!("样例 {}", examples.len() + 1),
+                note: "手动保存".into(),
+                args,
+            });
+            page.detail.example = Some(examples.len() - 1);
+            page.dirty = true;
+            page.detail.example_note = Some((true, "已存为样例，可以改个名字；记得保存。".into()));
+        }
+    }
+    if generate {
+        start_generating(&mut page.detail, &endpoint, config);
+    }
     if fill {
+        page.detail.example = None;
         page.detail.args = endpoint
             .inputs
             .iter()
-            .map(|input| (input.name.clone(), input.example.clone()))
+            .map(|input| (input.name.clone(), pretty_json(&endpoint, &input.example)))
             .collect();
     }
     if send {

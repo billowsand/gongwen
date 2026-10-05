@@ -187,7 +187,7 @@ fn specs() -> Vec<ToolSpec> {
                 (
                     "inputs",
                     false,
-                    "数组：[{\"name\", \"kind\": \"text/number/bool\", \"required\", \"description\", \"example\"}]；加 \"remove\": true 表示删掉",
+                    "数组：[{\"name\", \"kind\": \"text/number/bool/json\", \"required\", \"description\", \"example\"}]；加 \"remove\": true 表示删掉",
                 ),
                 ("examples", false, "对象：参数名 → 试调用的值"),
                 (
@@ -263,7 +263,7 @@ fn config_json(endpoint: &ApiEndpoint) -> String {
         .map(|i| {
             json!({
                 "name": i.name,
-                "kind": match i.kind { InputKind::Number => "number", InputKind::Bool => "bool", InputKind::Text => "text" },
+                "kind": match i.kind { InputKind::Number => "number", InputKind::Bool => "bool", InputKind::Text => "text", InputKind::Json => "json" },
                 "required": i.required,
                 "description": i.description,
                 "example": i.example,
@@ -536,6 +536,7 @@ fn kind_of(text: &str) -> InputKind {
     match text.trim().to_ascii_lowercase().as_str() {
         "number" | "int" | "integer" | "float" | "数字" => InputKind::Number,
         "bool" | "boolean" | "是否" => InputKind::Bool,
+        "json" | "object" | "array" | "map" => InputKind::Json,
         _ => InputKind::Text,
     }
 }

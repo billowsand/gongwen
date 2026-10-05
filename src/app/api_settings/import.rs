@@ -135,7 +135,7 @@ impl Candidate {
     fn start_test(&mut self, secrets: &ApiSecrets) {
         self.testing = Some(spawn_trial(
             self.draft.endpoint.clone(),
-            self.draft.endpoint.example_args(),
+            self.draft.endpoint.trial_args(),
             secrets.clone(),
         ));
         self.trial = None;
@@ -864,6 +864,13 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
     );
     if !endpoint.inputs.is_empty() {
         theme::caption(ui, &format!("查询条件：{}", inputs_line(&candidate.draft)));
+    }
+    if !endpoint.examples.is_empty() {
+        let names: Vec<&str> = endpoint.examples.iter().map(|e| e.name.as_str()).collect();
+        theme::caption(
+            ui,
+            &format!("试调样例 {} 组：{}", names.len(), names.join("、")),
+        );
     }
     if !candidate.draft.origins.is_empty() {
         let line = candidate
