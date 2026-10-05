@@ -101,6 +101,21 @@ pub(crate) struct ApiMapping {
     pub(crate) id: String,
 }
 
+/// 业务成功判据：HTTP 200 不等于查询成功，很多接口把失败写在返回体里（`{"code": 500}`）。
+/// `pointer` 空表示没配；`equals` 可以写几个，用 `|` 分开（`0|200`）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ApiSuccess {
+    pub(crate) pointer: String,
+    pub(crate) equals: String,
+}
+
+impl ApiSuccess {
+    pub(crate) fn is_set(&self) -> bool {
+        !self.pointer.trim().is_empty()
+    }
+}
+
 /// 返回去处。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,6 +150,7 @@ pub(crate) struct ApiEndpoint {
     /// 请求体模板（JSON），只对 POST 有意义。
     pub(crate) body: String,
     pub(crate) mapping: ApiMapping,
+    pub(crate) success: ApiSuccess,
     pub(crate) destination: ApiDestination,
     pub(crate) timeout_seconds: u64,
 }
@@ -151,6 +167,7 @@ impl Default for ApiEndpoint {
             headers: Vec::new(),
             body: String::new(),
             mapping: ApiMapping::default(),
+            success: ApiSuccess::default(),
             destination: ApiDestination::Evidence,
             timeout_seconds: DEFAULT_TIMEOUT,
         }
@@ -226,6 +243,68 @@ impl ApiStore {
     }
 }
 
+/// 一个接口最近一次实测的结论。只记结论，不存返回内容与参数。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct TestRecord {
+    pub(crate) ok: bool,
+    /// 本地时间「MM-DD HH:MM」。
+    pub(crate) at: String,
+    pub(crate) summary: String,
+    /// 测试时的配置指纹，配置改过就对不上。
+    pub(crate) fingerprint: String,
+}
+
+/// 实测记录（`api-tests.json`）：接口 id → 最近一次结论。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ApiTestLog {
+    pub(crate) records: BTreeMap<String, TestRecord>,
+}
+
+/// 列表上显示的测试状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestStatus<'a> {
+    Untested,
+    Passed(&'a TestRecord),
+    Failed(&'a TestRecord),
+    /// 测过，但之后改了会影响请求或返回的配置。
+    Stale(&'a TestRecord),
+}
+
+impl ApiTestLog {
+    pub(crate) fn load() -> anyhow::Result<Self> {
+        read_json("api-tests.json")
+    }
+
+    pub(crate) fn save(&self) -> anyhow::Result<()> {
+        write_json("api-tests.json", self)
+    }
+
+    pub(crate) fn record(&mut self, endpoint: &ApiEndpoint, trial: &Trial) {
+        self.records.insert(
+            endpoint.id.clone(),
+            TestRecord {
+                ok: trial.ok(),
+                at: chrono::Local::now().format("%m-%d %H:%M").to_string(),
+                summary: trial.summary(),
+                fingerprint: endpoint.fingerprint(),
+            },
+        );
+    }
+
+    pub(crate) fn status(&self, endpoint: &ApiEndpoint) -> TestStatus<'_> {
+        match self.records.get(&endpoint.id) {
+            None => TestStatus::Untested,
+            Some(record) if record.fingerprint != endpoint.fingerprint() => {
+                TestStatus::Stale(record)
+            }
+            Some(record) if record.ok => TestStatus::Passed(record),
+            Some(record) => TestStatus::Failed(record),
+        }
+    }
+}
+
 impl ApiSecrets {
     pub(crate) fn load() -> anyhow::Result<Self> {
         read_json("api-secrets.json")
@@ -287,11 +366,37 @@ impl ApiEndpoint {
         if !self.mapping.list.is_empty() && !self.mapping.list.starts_with('/') {
             problems.push("列表位置要写成 JSON 指针，以 / 开头，例如 /data/items".into());
         }
+        if self.success.is_set() {
+            if !self.success.pointer.trim().starts_with('/') {
+                problems.push("成功判据的位置要写成 JSON 指针，以 / 开头，例如 /code".into());
+            }
+            if self.success.equals.trim().is_empty() {
+                problems.push("成功判据要写成功时的取值，例如 0".into());
+            }
+        }
         if !(1..=300).contains(&self.timeout_seconds) {
             problems.push("超时要在 1 到 300 秒之间".into());
         }
         problems.dedup();
         problems
+    }
+
+    /// 配置指纹：只算影响请求与返回的部分（名称、说明、参数说明、样例改了不算）。
+    pub(crate) fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut core = self.clone();
+        core.id.clear();
+        core.name.clear();
+        core.description.clear();
+        for input in &mut core.inputs {
+            input.description.clear();
+            input.example.clear();
+        }
+        let text = serde_json::to_string(&core).unwrap_or_default();
+        Sha256::digest(text.as_bytes())[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// 测试用的样例输入。
@@ -536,6 +641,25 @@ pub(crate) struct RawResponse {
 
 /// 发出请求，读回返回体。非 2xx 算失败。
 pub(crate) fn execute(prepared: &Prepared, timeout_seconds: u64) -> Result<RawResponse, String> {
+    let raw = send(prepared, timeout_seconds)?;
+    check_status(&raw)?;
+    Ok(raw)
+}
+
+fn check_status(raw: &RawResponse) -> Result<(), String> {
+    if (200..300).contains(&raw.status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "接口返回 {}：{}",
+            raw.status,
+            crate::agent::tools::short(raw.body.trim(), 200)
+        ))
+    }
+}
+
+/// 发出请求，读回返回体，不管状态码（实测要把出错时的返回也给人看）。
+fn send(prepared: &Prepared, timeout_seconds: u64) -> Result<RawResponse, String> {
     let client =
         crate::net::client(&prepared.url, timeout_seconds).map_err(|e| format!("{e:#}"))?;
     let mut request = match prepared.method {
@@ -562,11 +686,12 @@ pub(crate) fn execute(prepared: &Prepared, timeout_seconds: u64) -> Result<RawRe
         .take(MAX_RESPONSE_BYTES)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("读取返回失败：{e}"))?;
+    let truncated = bytes.len() as u64 >= MAX_RESPONSE_BYTES;
     let body = String::from_utf8_lossy(&bytes).into_owned();
-    if !(200..300).contains(&status) {
+    if truncated {
         return Err(format!(
-            "接口返回 {status}：{}",
-            crate::agent::tools::short(body.trim(), 200)
+            "返回超过 {} MB，读不完整，没有采用；请缩小查询条件",
+            MAX_RESPONSE_BYTES / 1024 / 1024
         ));
     }
     Ok(RawResponse { status, body })
@@ -623,19 +748,91 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+/// 返回体像不像网页：没登录时很多内网系统回一张登录页，状态码照样是 200。
+pub(crate) fn looks_like_html(body: &str) -> bool {
+    let head: String = body
+        .trim_start()
+        .chars()
+        .take(64)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html") || head.starts_with("<head")
+}
+
+/// 判据比较时的取值：真假写成 true / false，不用「是 / 否」，和文档里的写法对得上。
+fn success_text(value: &Value) -> String {
+    match value {
+        Value::Bool(flag) => flag.to_string(),
+        other => value_to_text(other).trim().to_string(),
+    }
+}
+
+/// 按业务成功判据检查返回体。没配判据时不查。
+pub(crate) fn check_success(endpoint: &ApiEndpoint, body: &str) -> Result<(), String> {
+    let success = &endpoint.success;
+    if !success.is_set() {
+        return Ok(());
+    }
+    let root: Value = serde_json::from_str(body)
+        .map_err(|_| "返回的不是 JSON，没法按成功判据检查".to_string())?;
+    let pointer = success.pointer.trim();
+    let actual = root
+        .pointer(pointer)
+        .map(success_text)
+        .ok_or_else(|| format!("返回里没有成功判据的字段 {pointer}"))?;
+    if success
+        .equals
+        .split('|')
+        .map(str::trim)
+        .any(|expected| expected == actual)
+    {
+        return Ok(());
+    }
+    let reason = [
+        "/msg",
+        "/message",
+        "/error",
+        "/errmsg",
+        "/error_msg",
+        "/detail",
+    ]
+    .iter()
+    .find_map(|key| root.pointer(key).map(value_to_text))
+    .filter(|text| !text.trim().is_empty())
+    .map(|text| format!("：{}", crate::agent::tools::short(text.trim(), 120)))
+    .unwrap_or_default();
+    Err(format!(
+        "接口报告查询失败（{pointer} 是 {actual}，成功应为 {}）{reason}",
+        success.equals.trim()
+    ))
+}
+
 /// 按映射把返回体整理成条目。
+#[cfg(test)]
 pub(crate) fn map_response(endpoint: &ApiEndpoint, body: &str) -> Result<Vec<MappedItem>, String> {
+    map_counted(endpoint, body).map(|(items, _)| items)
+}
+
+/// 同 [`map_response`]，另返回列表原有多少条（超过 [`MAX_ITEMS`] 的部分没有收）。
+pub(crate) fn map_counted(
+    endpoint: &ApiEndpoint,
+    body: &str,
+) -> Result<(Vec<MappedItem>, usize), String> {
+    if looks_like_html(body) {
+        return Err("返回的是一张网页（多半是登录页或报错页），不是数据；检查地址与鉴权".into());
+    }
     let mapping = &endpoint.mapping;
     let root: Value = match serde_json::from_str(body) {
         Ok(root) => root,
         Err(_) if mapping.list.is_empty() => {
             // 不是 JSON（纯文本、CSV……）又没要求取列表：整段当一条。
-            return Ok(vec![MappedItem {
+            let item = MappedItem {
                 id: "1".into(),
                 title: endpoint.name.clone(),
                 text: truncate(body.trim(), MAX_ITEM_CHARS),
                 source: endpoint.name.clone(),
-            }]);
+            };
+            return Ok((vec![item], 1));
         }
         Err(error) => return Err(format!("返回的不是 JSON：{error}")),
     };
@@ -650,7 +847,8 @@ pub(crate) fn map_response(endpoint: &ApiEndpoint, body: &str) -> Result<Vec<Map
         Value::Null => Vec::new(),
         other => vec![other],
     };
-    Ok(items
+    let total = items.len();
+    let items = items
         .into_iter()
         .take(MAX_ITEMS)
         .enumerate()
@@ -674,19 +872,123 @@ pub(crate) fn map_response(endpoint: &ApiEndpoint, body: &str) -> Result<Vec<Map
                 source: truncate(source.trim(), 200),
             }
         })
-        .collect())
+        .collect();
+    Ok((items, total))
 }
 
-/// 组请求、发出去、映射，一步到位。返回 (请求描述, 原始返回, 条目)。
+/// 一次调用的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Called {
+    pub(crate) prepared: Prepared,
+    pub(crate) raw: RawResponse,
+    pub(crate) items: Vec<MappedItem>,
+    /// 列表原有多少条；比 `items` 多说明截掉了。
+    pub(crate) total: usize,
+}
+
+/// 组请求、发出去、查业务成功、映射，一步到位。
 pub(crate) fn call(
     endpoint: &ApiEndpoint,
     args: &Map<String, Value>,
     secrets: &ApiSecrets,
-) -> Result<(Prepared, RawResponse, Vec<MappedItem>), String> {
+) -> Result<Called, String> {
     let prepared = prepare(endpoint, args, secrets)?;
     let raw = execute(&prepared, endpoint.timeout_seconds)?;
-    let items = map_response(endpoint, &raw.body)?;
-    Ok((prepared, raw, items))
+    check_success(endpoint, &raw.body)?;
+    let (items, total) = map_counted(endpoint, &raw.body)?;
+    Ok(Called {
+        prepared,
+        raw,
+        items,
+        total,
+    })
+}
+
+/// 实测的分阶段结果：走到哪一步、在哪一步出的错。测试面板与自动填报用，和正式调用
+/// 走同一套「组请求 → 发出 → 状态 → 成功判据 → 映射」，只是出错时把已拿到的东西留着给人看。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Trial {
+    /// 给人看的请求（密钥打码）。
+    pub(crate) request: Option<String>,
+    pub(crate) raw: Option<RawResponse>,
+    pub(crate) items: Vec<MappedItem>,
+    pub(crate) total: usize,
+    pub(crate) error: Option<String>,
+}
+
+impl Trial {
+    pub(crate) fn ok(&self) -> bool {
+        self.error.is_none()
+    }
+
+    /// 一句话结论，列表卡片与测试记录用。
+    /// 配置改了（实测补了映射之类）以后，用已拿到的返回重新检查、映射，不再发请求。
+    pub(crate) fn remap(&mut self, endpoint: &ApiEndpoint) {
+        let Some(raw) = &self.raw else {
+            return;
+        };
+        match check_status(raw)
+            .and_then(|_| check_success(endpoint, &raw.body))
+            .and_then(|_| map_counted(endpoint, &raw.body))
+        {
+            Ok((items, total)) => {
+                self.items = items;
+                self.total = total;
+                self.error = None;
+            }
+            Err(error) => {
+                self.items.clear();
+                self.total = 0;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        match &self.error {
+            Some(error) => crate::agent::tools::short(error, 80),
+            None if self.total > self.items.len() => {
+                format!("取到 {} 条（共 {} 条）", self.items.len(), self.total)
+            }
+            None => format!("取到 {} 条", self.items.len()),
+        }
+    }
+}
+
+/// 实测一次。
+pub(crate) fn trial(
+    endpoint: &ApiEndpoint,
+    args: &Map<String, Value>,
+    secrets: &ApiSecrets,
+) -> Trial {
+    let mut trial = Trial::default();
+    let prepared = match prepare(endpoint, args, secrets) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            trial.error = Some(error);
+            return trial;
+        }
+    };
+    trial.request = Some(prepared.describe());
+    let raw = match send(&prepared, endpoint.timeout_seconds) {
+        Ok(raw) => raw,
+        Err(error) => {
+            trial.error = Some(error);
+            return trial;
+        }
+    };
+    let checked = check_status(&raw)
+        .and_then(|_| check_success(endpoint, &raw.body))
+        .and_then(|_| map_counted(endpoint, &raw.body));
+    trial.raw = Some(raw);
+    match checked {
+        Ok((items, total)) => {
+            trial.items = items;
+            trial.total = total;
+        }
+        Err(error) => trial.error = Some(error),
+    }
+    trial
 }
 
 /// 本机假 HTTP 服务：按顺序回预设的响应，记下收到的请求。测试 `http.call` 与整条
@@ -991,9 +1293,13 @@ mod tests {
         ]);
         let endpoint = stat_endpoint(&server.url);
         let args = json!({"region": "全省", "year": 2025});
-        let (prepared, raw, items) =
-            call(&endpoint, args.as_object().unwrap(), &secrets()).unwrap();
-        assert_eq!(raw.status, 200);
+        let Called {
+            prepared,
+            raw,
+            items,
+            total,
+        } = call(&endpoint, args.as_object().unwrap(), &secrets()).unwrap();
+        assert_eq!((raw.status, total), (200, 1));
         assert!(
             prepared
                 .url
@@ -1014,6 +1320,127 @@ mod tests {
 
         let error = call(&endpoint, args.as_object().unwrap(), &secrets()).unwrap_err();
         assert!(error.contains("接口返回 500"), "{error}");
+    }
+
+    #[test]
+    fn business_failures_and_login_pages_are_not_success() {
+        let mut endpoint = stat_endpoint("http://x");
+        endpoint.success = ApiSuccess {
+            pointer: "/code".into(),
+            equals: "0|200".into(),
+        };
+        assert!(endpoint.problems().is_empty());
+        assert!(check_success(&endpoint, r#"{"code": 0}"#).is_ok());
+        assert!(check_success(&endpoint, r#"{"code": "200"}"#).is_ok());
+        let error = check_success(&endpoint, r#"{"code": 401, "msg": "令牌过期"}"#).unwrap_err();
+        assert!(
+            error.contains("/code 是 401") && error.contains("令牌过期"),
+            "{error}"
+        );
+        let error = check_success(&endpoint, r#"{"data": []}"#).unwrap_err();
+        assert!(error.contains("没有成功判据的字段 /code"), "{error}");
+        endpoint.success.equals = "true".into();
+        endpoint.success.pointer = "/ok".into();
+        assert!(
+            check_success(&endpoint, r#"{"ok": true}"#).is_ok(),
+            "真假按 true 比"
+        );
+
+        let plain = ApiEndpoint::default();
+        let error = map_response(&plain, "<!DOCTYPE html><html>请登录</html>").unwrap_err();
+        assert!(error.contains("网页"), "{error}");
+
+        endpoint.success.pointer = "code".into();
+        assert!(endpoint.problems().iter().any(|p| p.contains("成功判据")));
+    }
+
+    #[test]
+    fn test_records_go_stale_when_the_request_changes() {
+        let mut endpoint = stat_endpoint("http://x");
+        let mut log = ApiTestLog::default();
+        assert_eq!(log.status(&endpoint), TestStatus::Untested);
+        let passed = Trial {
+            items: vec![],
+            ..Trial::default()
+        };
+        log.record(&endpoint, &passed);
+        assert!(matches!(log.status(&endpoint), TestStatus::Passed(r) if r.summary == "取到 0 条"));
+        endpoint.description = "改说明不影响".into();
+        endpoint.inputs[0].example = "甲市".into();
+        assert!(matches!(log.status(&endpoint), TestStatus::Passed(_)));
+        endpoint.mapping.list = "/rows".into();
+        assert!(matches!(log.status(&endpoint), TestStatus::Stale(_)));
+        let failed = Trial {
+            error: Some("接口返回 500".into()),
+            ..Trial::default()
+        };
+        log.record(&endpoint, &failed);
+        assert!(
+            matches!(log.status(&endpoint), TestStatus::Failed(r) if r.summary == "接口返回 500")
+        );
+
+        let mut trial = Trial {
+            raw: Some(RawResponse {
+                status: 200,
+                body: json!({"rows": [{"id": 1}, {"id": 2}]}).to_string(),
+            }),
+            error: Some("旧错误".into()),
+            ..Trial::default()
+        };
+        trial.remap(&endpoint);
+        assert!(trial.ok());
+        assert_eq!(trial.items.len(), 2);
+    }
+
+    #[test]
+    fn long_lists_report_how_many_were_dropped() {
+        let items: Vec<Value> = (0..80).map(|i| json!({"id": i, "title": "条"})).collect();
+        let body = json!({"items": items}).to_string();
+        let endpoint = ApiEndpoint {
+            mapping: ApiMapping {
+                list: "/items".into(),
+                ..ApiMapping::default()
+            },
+            ..ApiEndpoint::default()
+        };
+        let (items, total) = map_counted(&endpoint, &body).unwrap();
+        assert_eq!((items.len(), total), (MAX_ITEMS, 80));
+    }
+
+    #[test]
+    fn a_trial_keeps_the_reply_when_a_later_stage_fails() {
+        let server = TestServer::start(vec![
+            (200, json!({"code": 500, "msg": "无权限"}).to_string()),
+            (403, "禁止访问".into()),
+            (
+                200,
+                json!({"code": 0, "data": {"items": [{"id": 1}]}}).to_string(),
+            ),
+        ]);
+        let mut endpoint = stat_endpoint(&server.url);
+        endpoint.success = ApiSuccess {
+            pointer: "/code".into(),
+            equals: "0".into(),
+        };
+        let args = json!({"region": "全省"});
+        let args = args.as_object().unwrap();
+        let first = trial(&endpoint, args, &secrets());
+        assert!(!first.ok());
+        assert!(first.error.as_deref().unwrap().contains("无权限"));
+        assert!(
+            first.raw.as_ref().unwrap().body.contains("无权限"),
+            "返回留着给人看"
+        );
+        assert!(first.request.as_deref().unwrap().contains("******"));
+        let second = trial(&endpoint, args, &secrets());
+        assert_eq!(second.raw.as_ref().unwrap().status, 403);
+        assert!(second.error.as_deref().unwrap().contains("接口返回 403"));
+        let third = trial(&endpoint, args, &secrets());
+        assert!(third.ok(), "{:?}", third.error);
+        assert_eq!(third.summary(), "取到 1 条");
+
+        let missing = trial(&endpoint, &Map::new(), &secrets());
+        assert!(missing.request.is_none() && missing.error.unwrap().contains("缺少输入"));
     }
 
     #[test]

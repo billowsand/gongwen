@@ -1003,7 +1003,7 @@ fn api_test_ui(ui: &mut egui::Ui, page: &mut ApisPage, endpoint: &ApiEndpoint) {
                     let secrets = page.secrets.clone();
                     std::thread::spawn(move || {
                         let result = api::call(&endpoint, &args, &secrets)
-                            .map(|(prepared, raw, items)| (prepared.describe(), raw, items));
+                            .map(|called| (called.prepared.describe(), called.raw, called.items));
                         let _ = tx.send(result);
                     });
                     page.test = Some(rx);

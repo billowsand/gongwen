@@ -40,10 +40,18 @@ impl Tool for HttpCall {
         })?;
         let mut inputs = args.clone();
         inputs.remove("api");
-        let (_, _, items) = api::call(endpoint, &inputs, ctx.env.secrets)?;
+        let api::Called { items, total, .. } = api::call(endpoint, &inputs, ctx.env.secrets)?;
+        let mut summary = format!("调用接口「{}」→ {} 条", endpoint.name, items.len());
+        if total > items.len() {
+            // 截掉的部分要让模型知道，免得把前几十条当成全部。
+            summary.push_str(&format!(
+                "（共 {total} 条，只给了前 {} 条；要更全的结果请缩小查询条件）",
+                items.len()
+            ));
+        }
         let mut output = ToolOutput::new(
             serde_json::to_value(&items).map_err(|e| e.to_string())?,
-            format!("调用接口「{}」→ {} 条", endpoint.name, items.len()),
+            summary,
         );
         output.evidence = items
             .iter()
