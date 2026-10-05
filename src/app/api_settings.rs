@@ -1,8 +1,10 @@
 //! AI 管理页「数据接口」分区（`docs/http-skill-design.md` 第一层）。
 //!
 //! - 首页是接口卡片列表：能查什么、要填什么、最近一次测试结果；
-//! - 点开是详情：先是易读的名称、说明与查询条件，「试一下」按查询条件逐项填样例实测，
-//!   地址、请求头、请求体、返回映射这些技术配置收在「高级配置」里；
+//! - 点开是详情：先是易读的名称、说明与查询条件，「鉴权」里直接粘贴 Key（没配鉴权的可以
+//!   在这里加上），「试一下」按查询条件逐项填样例实测，地址、请求头、请求体、返回映射这些
+//!   技术配置收在「高级配置」里；
+//! - 密钥由程序统一管：卡片上标「缺密钥」「鉴权没过」，密钥表写明用在哪些接口；
 //! - 「从文档添加」见 [`import`]：粘贴文档或选文件，程序解析 + 起草模型整理，自动试调一次。
 //!
 //! 实测在后台线程里跑，界面每帧取一次结果；测试结论记进 `api-tests.json`。
@@ -15,7 +17,8 @@ use crate::agent::api::{
     self, ApiDestination, ApiEndpoint, ApiHeader, ApiInput, ApiMethod, ApiSecrets, ApiStore,
     ApiTestLog, InputKind, TestStatus, Trial,
 };
-use crate::agent::api_import::infer;
+use crate::agent::api_import::auth::{self, AuthPlace, AuthSpec};
+use crate::agent::api_import::{infer, redact, rename_secret_refs};
 use crate::app::GongwenApp;
 use crate::theme;
 use eframe::egui;
@@ -60,6 +63,92 @@ struct Detail {
     args: BTreeMap<String, String>,
     test: Option<Receiver<Trial>>,
     result: Option<Trial>,
+    /// 「鉴权」里改过 Key、还没重测。
+    key_edited: bool,
+    auth_form: AuthForm,
+    /// 加鉴权时只加这一个接口（默认同一服务器上没带鉴权的一起加：一个服务通常共用一个 Key）。
+    auth_this_only: bool,
+}
+
+/// 「添加鉴权」的小表单：密钥放请求头还是地址参数、叫什么、要不要 Bearer。
+pub(super) struct AuthForm {
+    place: AuthPlace,
+    name: String,
+    bearer: bool,
+}
+
+impl Default for AuthForm {
+    fn default() -> Self {
+        Self {
+            place: AuthPlace::Header,
+            name: "Authorization".into(),
+            bearer: true,
+        }
+    }
+}
+
+/// 画「添加鉴权」表单；点了「加上」返回鉴权方式。
+pub(super) fn auth_form_ui(ui: &mut egui::Ui, form: &mut AuthForm) -> Option<AuthSpec> {
+    let mut added = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.label("密钥放在");
+        ui.selectable_value(&mut form.place, AuthPlace::Header, "请求头");
+        ui.selectable_value(&mut form.place, AuthPlace::Query, "地址参数");
+        ui.label("名字");
+        ui.add(
+            egui::TextEdit::singleline(&mut form.name)
+                .hint_text("Authorization / X-API-Key / token")
+                .desired_width(150.0),
+        );
+        if form.place == AuthPlace::Header {
+            ui.checkbox(&mut form.bearer, "值前加 Bearer");
+        }
+        let spec = AuthSpec {
+            place: form.place,
+            name: form.name.trim().to_string(),
+            bearer: form.bearer && form.place == AuthPlace::Header,
+            basis: "手动添加".into(),
+            value: String::new(),
+        };
+        if ui
+            .add_enabled(spec.valid_name(), egui::Button::new("加上"))
+            .on_disabled_hover_text(
+                "名字用英文字母开头，只能有字母、数字、下划线（请求头还可以有短横线）",
+            )
+            .clicked()
+        {
+            added = Some(spec);
+        }
+    });
+    added
+}
+
+/// 新加的鉴权用哪个密钥名：按字段名起，已有同名的沿用（同一个服务通常共用一个 Key）。
+pub(super) fn secret_for(spec: &AuthSpec, secrets: &mut ApiSecrets) -> String {
+    let name = redact::secret_name(&spec.name);
+    secrets.secrets.entry(name.clone()).or_default();
+    name
+}
+
+/// `http://10.0.0.9:8080/api/x` → `http://10.0.0.9:8080`。
+pub(super) fn host_of(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let host = rest.split(['/', '?']).next().unwrap_or_default();
+            format!("{scheme}://{host}").to_ascii_lowercase()
+        }
+        None => String::new(),
+    }
+}
+
+/// 密钥输入框：打码，提示把 Key 粘进来。
+pub(super) fn key_field(ui: &mut egui::Ui, value: &mut String) -> egui::Response {
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .password(true)
+            .hint_text("把 Key 粘到这里")
+            .desired_width(260.0),
+    )
 }
 
 impl ApisPage {
@@ -232,9 +321,10 @@ fn list_ui(ui: &mut egui::Ui, page: &mut ApisPage) {
     let mut open = None;
     for (index, endpoint) in page.store.endpoints.iter().enumerate() {
         let status = page.log.status(endpoint);
+        let missing = page.secrets.missing(endpoint);
         let response = theme::clickable_card(ui, ("api_card", index), theme::card(), false, |ui| {
             ui.set_width(ui.available_width());
-            endpoint_card(ui, endpoint, status);
+            endpoint_card(ui, endpoint, status, &missing);
         })
         .response;
         if response.clicked() {
@@ -246,10 +336,25 @@ fn list_ui(ui: &mut egui::Ui, page: &mut ApisPage) {
         page.open(index);
     }
     ui.add_space(6.0);
-    egui::CollapsingHeader::new(format!("密钥（{} 个）", page.secrets.secrets.len()))
+    let unfilled = page
+        .secrets
+        .secrets
+        .keys()
+        .filter(|name| !page.secrets.filled(name))
+        .count();
+    let title = if unfilled > 0 {
+        format!(
+            "密钥（{} 个，{unfilled} 个没填）",
+            page.secrets.secrets.len()
+        )
+    } else {
+        format!("密钥（{} 个）", page.secrets.secrets.len())
+    };
+    egui::CollapsingHeader::new(title)
         .id_salt("api_secrets_section")
+        .default_open(unfilled > 0)
         .show(ui, |ui| {
-            page.dirty |= secrets_ui(ui, &mut page.secrets);
+            page.dirty |= secrets_ui(ui, &mut page.secrets, &mut page.store, &page.log);
         });
 }
 
@@ -267,11 +372,16 @@ fn save_button(ui: &mut egui::Ui, page: &mut ApisPage) {
 }
 
 /// 一张接口卡片：名称与状态、能查什么、要填什么、地址。
-fn endpoint_card(ui: &mut egui::Ui, endpoint: &ApiEndpoint, status: TestStatus<'_>) {
+fn endpoint_card(
+    ui: &mut egui::Ui,
+    endpoint: &ApiEndpoint,
+    status: TestStatus<'_>,
+    missing: &[String],
+) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(&endpoint.name).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            status_chip(ui, endpoint, status);
+            status_chip(ui, endpoint, status, missing);
         });
     });
     if endpoint.description.trim().is_empty() {
@@ -310,7 +420,12 @@ fn inputs_summary(endpoint: &ApiEndpoint) -> String {
         .join("、")
 }
 
-fn status_chip(ui: &mut egui::Ui, endpoint: &ApiEndpoint, status: TestStatus<'_>) {
+fn status_chip(
+    ui: &mut egui::Ui,
+    endpoint: &ApiEndpoint,
+    status: TestStatus<'_>,
+    missing: &[String],
+) {
     let problems = endpoint.problems().len();
     if problems > 0 {
         theme::chip(
@@ -321,7 +436,26 @@ fn status_chip(ui: &mut egui::Ui, endpoint: &ApiEndpoint, status: TestStatus<'_>
         );
         return;
     }
+    if !missing.is_empty() {
+        theme::chip(ui, "缺密钥", theme::warn(), theme::warn_soft()).on_hover_text(format!(
+            "密钥「{}」还没填：点开接口，在「鉴权」里粘贴",
+            missing.join("」「")
+        ));
+        return;
+    }
     match status {
+        TestStatus::Failed(record) if record.auth => {
+            theme::chip(
+                ui,
+                &format!("鉴权没过 · {}", record.at),
+                theme::danger(),
+                theme::danger_soft(),
+            )
+            .on_hover_text(format!(
+                "Key 可能不对或已过期，点开接口在「鉴权」里重新粘贴。{}",
+                record.summary
+            ));
+        }
         TestStatus::Untested => {
             theme::chip(ui, "未测试", theme::text_muted(), theme::surface_sunk());
         }
@@ -377,15 +511,18 @@ fn detail_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
     message_ui(ui, &page.message);
     ui.add_space(6.0);
     let status = page.log.status(&page.store.endpoints[index]);
+    let missing = page.secrets.missing(&page.store.endpoints[index]);
     ui.horizontal(|ui| {
         ui.heading(&page.store.endpoints[index].name);
-        status_chip(ui, &page.store.endpoints[index], status);
+        status_chip(ui, &page.store.endpoints[index], status, &missing);
     });
     ui.add_space(6.0);
 
-    let endpoint = &mut page.store.endpoints[index];
-    page.dirty |= basic_form(ui, endpoint, "detail");
+    page.dirty |= basic_form(ui, &mut page.store.endpoints[index], "detail");
     ui.add_space(10.0);
+    auth_section_ui(ui, page, index);
+    ui.add_space(10.0);
+    let endpoint = &mut page.store.endpoints[index];
     section_title(ui, "试一下");
     try_ui(ui, &mut page.detail, endpoint, &page.secrets);
     if let Some(trial) = &page.detail.result
@@ -451,6 +588,105 @@ fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
+/// 详情里的「鉴权」：这个接口要的密钥直接在这里粘贴；没配鉴权的可以加上。
+/// 改了 Key、离开输入框就自动重测一次。
+fn auth_section_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
+    section_title(ui, "鉴权");
+    let names = page.store.endpoints[index].secret_names();
+    if names.is_empty() {
+        let host = host_of(&page.store.endpoints[index].url);
+        let others = page
+            .store
+            .endpoints
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| *i != index && host_of(&e.url) == host && !auth::has_auth(e))
+            .count();
+        theme::caption(ui, "这个接口没配密钥。接口要 Key 的话，在这里加上：");
+        let added = auth_form_ui(ui, &mut page.detail.auth_form);
+        if others > 0 {
+            let mut all = !page.detail.auth_this_only;
+            ui.checkbox(
+                &mut all,
+                format!("同一服务器上没配密钥的其他 {others} 个接口也加上"),
+            );
+            page.detail.auth_this_only = !all;
+        }
+        if let Some(spec) = added {
+            let secret = secret_for(&spec, &mut page.secrets);
+            let all = !page.detail.auth_this_only;
+            for (i, endpoint) in page.store.endpoints.iter_mut().enumerate() {
+                if i == index
+                    || (all && host_of(&endpoint.url) == host && !auth::has_auth(endpoint))
+                {
+                    auth::apply(endpoint, &spec, &secret);
+                }
+            }
+            page.dirty = true;
+        }
+        return;
+    }
+    let mut retest = false;
+    let how = auth::from_endpoint(&page.store.endpoints[index]).map(|(spec, _)| spec.describe());
+    for name in &names {
+        let users: Vec<String> = page
+            .store
+            .endpoints
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| *i != index && e.secret_names().contains(name))
+            .map(|(_, e)| e.name.clone())
+            .collect();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("密钥「{name}」"));
+            let value = page.secrets.secrets.entry(name.clone()).or_default();
+            let response = key_field(ui, value);
+            let filled = !value.trim().is_empty();
+            if response.changed() {
+                page.dirty = true;
+                page.detail.key_edited = true;
+            }
+            if response.lost_focus() && page.detail.key_edited && filled {
+                page.detail.key_edited = false;
+                retest = true;
+            }
+            if filled {
+                theme::caption(ui, "已填");
+            } else {
+                ui.colored_label(theme::warn(), "未填");
+            }
+        });
+        if !users.is_empty() {
+            theme::caption(ui, &format!("也用在：{}（改了一起生效）", users.join("、")));
+        }
+    }
+    if let Some(how) = how {
+        theme::caption(
+            ui,
+            &format!("带法：{how}。要改带法在「高级配置」的请求头里改。"),
+        );
+    }
+    theme::caption(ui, "Key 只存在本机，不导出、不发给模型；记得保存。");
+    if retest && page.detail.test.is_none() {
+        let endpoint = page.store.endpoints[index].clone();
+        start_test(&mut page.detail, &endpoint, &page.secrets);
+    }
+}
+
+/// 用「试一下」里填的值后台实测一次。
+fn start_test(detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets) {
+    let args: Map<String, Value> = endpoint
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let value = detail.args.get(&input.name)?.trim();
+            (!value.is_empty()).then(|| (input.name.clone(), Value::String(value.into())))
+        })
+        .collect();
+    detail.test = Some(spawn_trial(endpoint.clone(), args, secrets.clone()));
+    detail.result = None;
+}
+
 /// 「试一下」：每个查询条件一个输入框，点测试走正式调用的同一条路。
 fn try_ui(ui: &mut egui::Ui, detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets) {
     if endpoint.inputs.is_empty() {
@@ -480,16 +716,7 @@ fn try_ui(ui: &mut egui::Ui, detail: &mut Detail, endpoint: &ApiEndpoint, secret
     ui.horizontal(|ui| {
         if theme::primary_icon_button_enabled(ui, !running, theme::Icon::PlugZap, "测试").clicked()
         {
-            let args: Map<String, Value> = endpoint
-                .inputs
-                .iter()
-                .filter_map(|input| {
-                    let value = detail.args.get(&input.name)?.trim();
-                    (!value.is_empty()).then(|| (input.name.clone(), Value::String(value.into())))
-                })
-                .collect();
-            detail.test = Some(spawn_trial(endpoint.clone(), args, secrets.clone()));
-            detail.result = None;
+            start_test(detail, endpoint, secrets);
         }
         if running {
             theme::spinner(ui, 14.0, theme::accent());
@@ -501,7 +728,25 @@ fn try_ui(ui: &mut egui::Ui, detail: &mut Detail, endpoint: &ApiEndpoint, secret
     if let Some(trial) = &detail.result {
         ui.add_space(4.0);
         trial_ui(ui, trial, "detail");
+        if trial.auth_rejected() {
+            auth_hint(ui, auth::has_auth(endpoint));
+        }
     }
+}
+
+/// 实测像是鉴权没过时的提示。
+pub(super) fn auth_hint(ui: &mut egui::Ui, has_auth: bool) {
+    theme::notice(
+        ui,
+        theme::Icon::Shield,
+        theme::warn(),
+        theme::warn_soft(),
+        if has_auth {
+            "看起来是鉴权没过：Key 不对、过期，或者接口要的带法和这里配的不一样。在「鉴权」里重新粘贴 Key，离开输入框会自动重测。"
+        } else {
+            "看起来接口要鉴权，但这里没配密钥：在「鉴权」里选好带法、加上，再粘贴 Key。"
+        },
+    );
 }
 
 /// 后台实测一次。
@@ -781,14 +1026,21 @@ pub(super) fn advanced_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt:
     *endpoint != before
 }
 
-/// 密钥表。值只在本机，输入框打码。返回是否改了东西。
-fn secrets_ui(ui: &mut egui::Ui, secrets: &mut ApiSecrets) -> bool {
-    ui.weak("请求头或地址里写 {secret:名字} 引用。密钥单独存放在本机，导出接口时不带。");
+/// 密钥表。值只在本机，输入框打码；每个密钥写明用在哪些接口、最近测试鉴权过没过。
+/// 改名时接口里的引用跟着改。返回是否改了东西。
+fn secrets_ui(
+    ui: &mut egui::Ui,
+    secrets: &mut ApiSecrets,
+    store: &mut ApiStore,
+    log: &ApiTestLog,
+) -> bool {
+    ui.weak("Key 单独存放在本机，导出接口、同步稿件时都不带，也不发给模型。");
     let mut changed = false;
     let mut remove = None;
     let mut renames = Vec::new();
     egui::Grid::new("api_secrets")
-        .num_columns(3)
+        .num_columns(4)
+        .spacing([10.0, 6.0])
         .show(ui, |ui| {
             for (name, value) in secrets.secrets.iter_mut() {
                 let mut new_name = name.clone();
@@ -798,13 +1050,33 @@ fn secrets_ui(ui: &mut egui::Ui, secrets: &mut ApiSecrets) -> bool {
                 {
                     renames.push((name.clone(), new_name));
                 }
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(value)
-                            .password(true)
-                            .desired_width(260.0),
-                    )
-                    .changed();
+                changed |= key_field(ui, value).changed();
+                let users: Vec<&ApiEndpoint> = store
+                    .endpoints
+                    .iter()
+                    .filter(|e| e.secret_names().contains(name))
+                    .collect();
+                let rejected: Vec<&str> = users
+                    .iter()
+                    .filter(|e| matches!(log.status(e), TestStatus::Failed(r) if r.auth))
+                    .map(|e| e.name.as_str())
+                    .collect();
+                ui.vertical(|ui| {
+                    if value.trim().is_empty() {
+                        ui.colored_label(theme::warn(), "没填");
+                    } else if !rejected.is_empty() {
+                        ui.colored_label(
+                            theme::danger(),
+                            format!("「{}」鉴权没过，Key 可能已过期", rejected.join("」「")),
+                        );
+                    }
+                    if users.is_empty() {
+                        theme::caption(ui, "没有接口在用");
+                    } else {
+                        let names: Vec<&str> = users.iter().map(|e| e.name.as_str()).collect();
+                        theme::caption(ui, &format!("用在：{}", names.join("、")));
+                    }
+                });
                 if ui.small_button("删除").clicked() {
                     remove = Some(name.clone());
                 }
@@ -812,11 +1084,17 @@ fn secrets_ui(ui: &mut egui::Ui, secrets: &mut ApiSecrets) -> bool {
             }
         });
     for (old, new) in renames {
-        if !new.is_empty()
+        let valid = new.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && new.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if valid
             && !secrets.secrets.contains_key(&new)
             && let Some(value) = secrets.secrets.remove(&old)
         {
-            secrets.secrets.insert(new, value);
+            secrets.secrets.insert(new.clone(), value);
+            let renamed = [(old, new)];
+            for endpoint in &mut store.endpoints {
+                rename_secret_refs(endpoint, &renamed);
+            }
             changed = true;
         }
     }
@@ -907,6 +1185,72 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn missing_keys_show_on_the_card_and_are_pasted_in_the_detail() {
+        let mut with_key = endpoint();
+        with_key.headers.push(ApiHeader {
+            name: "Authorization".into(),
+            value: "Bearer {secret:token}".into(),
+        });
+        let mut page = ApisPage {
+            loaded: true,
+            store: ApiStore {
+                endpoints: vec![with_key],
+            },
+            ..ApisPage::default()
+        };
+        page.secrets.secrets.insert("token".into(), String::new());
+        let texts = render(|ui| list_ui(ui, &mut page));
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has("缺密钥"), "{texts:?}");
+        assert!(has("1 个没填") && has("用在：火灾统计"), "{texts:?}");
+
+        page.open(0);
+        let texts = render(|ui| detail_ui(ui, &mut page, 0));
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("鉴权") && has("密钥「token」") && has("未填"),
+            "{texts:?}"
+        );
+        assert!(has("请求头 Authorization: Bearer 密钥"), "{texts:?}");
+
+        let mut bare = ApisPage {
+            loaded: true,
+            store: ApiStore {
+                endpoints: vec![endpoint()],
+            },
+            ..ApisPage::default()
+        };
+        bare.open(0);
+        let texts = render(|ui| detail_ui(ui, &mut bare, 0));
+        assert!(
+            texts.iter().any(|t| t.contains("这个接口没配密钥")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn auth_failures_are_recognised() {
+        let failed = |status: u16, body: &str| Trial {
+            raw: Some(RawResponse {
+                status,
+                body: body.into(),
+            }),
+            error: Some("失败".into()),
+            ..Trial::default()
+        };
+        assert!(failed(401, "").auth_rejected());
+        assert!(failed(200, "<!DOCTYPE html><html>请登录</html>").auth_rejected());
+        assert!(failed(200, "{\"code\": 401, \"msg\": \"x\"}").auth_rejected());
+        assert!(failed(200, "{\"code\": 500, \"msg\": \"token 已过期\"}").auth_rejected());
+        assert!(!failed(404, "not found").auth_rejected());
+        assert!(!failed(500, "<html>服务器内部错误</html>").auth_rejected());
+        assert!(!failed(200, "{\"code\": 500, \"msg\": \"查询超时\"}").auth_rejected());
+        let mut record_log = ApiTestLog::default();
+        record_log.record(&endpoint(), &failed(403, ""));
+        assert!(record_log.records["stat"].auth);
+    }
+
+    #[test]
     fn the_detail_keeps_technical_fields_folded_and_shows_trial_results() {
         let mut page = ApisPage {
             loaded: true,
@@ -946,8 +1290,9 @@ pub(super) mod tests {
 
         let mut secrets = ApiSecrets::default();
         secrets.secrets.insert("token".into(), "s3cr3t".into());
+        let mut store = page.store.clone();
         let texts = render(|ui| {
-            secrets_ui(ui, &mut secrets);
+            secrets_ui(ui, &mut secrets, &mut store, &ApiTestLog::default());
         });
         assert!(
             !texts.iter().any(|t| t.contains("s3cr3t")),

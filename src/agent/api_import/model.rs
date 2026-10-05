@@ -20,8 +20,9 @@ pub(super) const MAX_MATERIAL_CHARS: usize = 24_000;
 pub(super) fn prompt(material: &str, findings: &str) -> String {
     format!(
         "【接口资料】\n{material}\n\n【程序已经认出的请求】\n{findings}\n\n\
-         请按下面的格式输出资料里的全部接口（每个接口一项）：\n\
-         {{\"endpoints\": [{{\n\
+         请按下面的格式输出资料里的全部接口（每个接口一项），以及调用时密钥怎么带：\n\
+         {{\"auth\": {{\"place\": \"header（请求头）或 query（地址参数）；资料没说鉴权就整个 auth 写 null\", \"name\": \"请求头名或参数名，与资料一致，如 X-API-Key\", \"scheme\": \"Bearer 或空\", \"basis\": \"摘资料原话\"}},\n\
+         \"endpoints\": [{{\n\
          \"name\": \"简短的中文名称，如 政策检索\",\n\
          \"description\": \"一句话：能查什么、按什么条件查\",\n\
          \"method\": \"GET 或 POST；资料写的是 PUT / DELETE 等就照写\",\n\
@@ -90,14 +91,26 @@ fn loose_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Strin
     })
 }
 
+/// 模型说的鉴权方式（只要位置与名字，不要值）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub(crate) struct ModelAuth {
+    pub(crate) place: String,
+    pub(crate) name: String,
+    pub(crate) scheme: String,
+    pub(crate) basis: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Reply {
-    endpoints: Vec<ModelEndpoint>,
+pub(crate) struct Reply {
+    pub(crate) endpoints: Vec<ModelEndpoint>,
+    /// 写成 null 或缺了都算没说。
+    pub(crate) auth: Option<ModelAuth>,
 }
 
 /// 从模型回复里取出接口清单：认 ```json 代码块，也认正文里第一个完整的 JSON 对象。
-pub(super) fn parse(reply: &str) -> Option<Vec<ModelEndpoint>> {
+pub(super) fn parse(reply: &str) -> Option<Reply> {
     let mut start = 0;
     while let Some(found) = reply[start..].find('{') {
         let at = start + found;
@@ -105,7 +118,7 @@ pub(super) fn parse(reply: &str) -> Option<Vec<ModelEndpoint>> {
             && let Ok(parsed) = serde_json::from_str::<Reply>(&reply[at..end])
             && !parsed.endpoints.is_empty()
         {
-            return Some(parsed.endpoints);
+            return Some(parsed);
         }
         start = at + 1;
     }
@@ -119,7 +132,7 @@ mod tests {
     #[test]
     fn replies_are_parsed_loosely() {
         let reply = "<think>想一想 {</think>好的：\n```json\n{\"endpoints\": [{\"name\": \"政策检索\", \"method\": \"POST\", \"url\": \"/api/policy/search\", \"inputs\": [{\"name\": \"keyword\", \"required\": true, \"example\": 5}], \"body\": \"{\\\"keyword\\\": \\\"{keyword}\\\"}\", \"success_equals\": 0, \"extra\": 1}]}\n```";
-        let endpoints = parse(reply).unwrap();
+        let endpoints = parse(reply).unwrap().endpoints;
         assert_eq!(endpoints[0].name, "政策检索");
         assert_eq!(endpoints[0].inputs[0].example, "5");
         assert_eq!(endpoints[0].success_equals, "0");
@@ -128,6 +141,17 @@ mod tests {
             serde_json::json!({"keyword": "{keyword}"})
         );
         assert!(parse("没有 JSON").is_none());
+        let with_auth = parse(
+            r#"{"auth": {"place": "header", "name": "X-API-Key", "basis": "请求头带 X-API-Key"}, "endpoints": [{"name": "a"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(with_auth.auth.unwrap().name, "X-API-Key");
+        assert!(
+            parse(r#"{"auth": null, "endpoints": [{"name": "a"}]}"#)
+                .unwrap()
+                .auth
+                .is_none()
+        );
         assert!(parse("{\"endpoints\": []}").is_none());
     }
 }

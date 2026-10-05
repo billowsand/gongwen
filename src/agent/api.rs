@@ -253,6 +253,8 @@ pub(crate) struct TestRecord {
     pub(crate) summary: String,
     /// 测试时的配置指纹，配置改过就对不上。
     pub(crate) fingerprint: String,
+    /// 失败像是鉴权没过（密钥不对、过期、没带）。
+    pub(crate) auth: bool,
 }
 
 /// 实测记录（`api-tests.json`）：接口 id → 最近一次结论。
@@ -289,6 +291,7 @@ impl ApiTestLog {
                 at: chrono::Local::now().format("%m-%d %H:%M").to_string(),
                 summary: trial.summary(),
                 fingerprint: endpoint.fingerprint(),
+                auth: trial.auth_rejected(),
             },
         );
     }
@@ -312,6 +315,20 @@ impl ApiSecrets {
 
     pub(crate) fn save(&self) -> anyhow::Result<()> {
         write_json("api-secrets.json", self)
+    }
+
+    /// 填了值没有（空白不算）。
+    pub(crate) fn filled(&self, name: &str) -> bool {
+        self.secrets.get(name).is_some_and(|v| !v.trim().is_empty())
+    }
+
+    /// 接口引用了、但还没填值的密钥。
+    pub(crate) fn missing(&self, endpoint: &ApiEndpoint) -> Vec<String> {
+        endpoint
+            .secret_names()
+            .into_iter()
+            .filter(|name| !self.filled(name))
+            .collect()
     }
 }
 
@@ -397,6 +414,21 @@ impl ApiEndpoint {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
+    }
+
+    /// 模板里引用的密钥名，按出现先后、去重。
+    pub(crate) fn secret_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let mut templates: Vec<&str> = vec![&self.url, &self.body];
+        templates.extend(self.headers.iter().map(|h| h.value.as_str()));
+        for template in templates {
+            for caps in PLACEHOLDER.captures_iter(template) {
+                if caps.get(1).is_some() && !names.iter().any(|n| n == &caps[2]) {
+                    names.push(caps[2].to_string());
+                }
+            }
+        }
+        names
     }
 
     /// 测试用的样例输入。
@@ -528,14 +560,14 @@ fn fill(
     let text = PLACEHOLDER.replace_all(template, |caps: &regex::Captures<'_>| {
         let name = &caps[2];
         let raw = if caps.get(1).is_some() {
-            match secrets.secrets.get(name) {
+            match secrets.secrets.get(name).filter(|s| !s.trim().is_empty()) {
                 Some(secret) => {
-                    used.push(secret.clone());
-                    secret.clone()
+                    used.push(secret.trim().to_string());
+                    secret.trim().to_string()
                 }
                 None => {
                     error = Some(format!(
-                        "密钥「{name}」还没有填，在「数据接口」页的密钥里补上"
+                        "密钥「{name}」还没有填，在接口详情的「鉴权」里粘贴"
                     ));
                     String::new()
                 }
@@ -942,6 +974,68 @@ impl Trial {
                 self.error = Some(error);
             }
         }
+    }
+
+    /// 失败像是鉴权没过：401 / 403、回了登录页、返回体说未授权或令牌无效。
+    /// 只看发出去以后的失败；密钥没填（没发出去）不算。
+    pub(crate) fn auth_rejected(&self) -> bool {
+        let Some(raw) = &self.raw else {
+            return false;
+        };
+        if self.error.is_none() {
+            return false;
+        }
+        if matches!(raw.status, 401 | 403 | 407) {
+            return true;
+        }
+        let head: String = raw
+            .body
+            .chars()
+            .take(2000)
+            .collect::<String>()
+            .to_lowercase();
+        if looks_like_html(&raw.body) {
+            // 200 回一张网页多半是登录页；500 的报错页不算。
+            return (200..400).contains(&raw.status)
+                || head.contains("登录")
+                || head.contains("login");
+        }
+        if matches!(raw.status, 404 | 405 | 415) {
+            return false;
+        }
+        if let Ok(root) = serde_json::from_str::<Value>(&head) {
+            let code = ["/code", "/status", "/errcode", "/error_code"]
+                .iter()
+                .find_map(|key| root.pointer(key))
+                .map(|v| value_to_text(v).trim().to_string());
+            if matches!(code.as_deref(), Some("401" | "403")) {
+                return true;
+            }
+        }
+        [
+            "unauthorized",
+            "unauthorised",
+            "forbidden",
+            "access denied",
+            "invalid token",
+            "token",
+            "令牌",
+            "未登录",
+            "请登录",
+            "登录失效",
+            "未授权",
+            "无权",
+            "鉴权",
+            "认证失败",
+            "签名",
+            "signature",
+            "apikey",
+            "api key",
+            "api_key",
+            "密钥",
+        ]
+        .iter()
+        .any(|word| head.contains(word))
     }
 
     pub(crate) fn summary(&self) -> String {

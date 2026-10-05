@@ -3,9 +3,16 @@
 //! 识别（程序解析 + 起草模型整理，见 `agent::api_import`）在后台跑；识别出的只查询接口
 //! 配置齐了就自动用样例值试调一次，调通后按真实返回补返回映射。改数据的接口不能加入，
 //! 判断不了的要人确认只查询。密钥先进一份工作副本，点「加入」才写进本机密钥表。
+//!
+//! 密钥集中在候选上方的「鉴权」卡片里：一个服务通常共用一个 Key，只问一次；粘贴后离开
+//! 输入框，用到它的接口自动重测。文档没写鉴权、接口却拒绝了请求的，在这里补上带法。
 
-use super::{ApisPage, View, advanced_form, basic_form, code_block, spawn_trial, trial_ui};
+use super::{
+    ApisPage, AuthForm, View, advanced_form, auth_form_ui, auth_hint, basic_form, code_block,
+    key_field, secret_for, spawn_trial, trial_ui,
+};
 use crate::agent::api::{ApiSecrets, Trial};
+use crate::agent::api_import::auth;
 use crate::agent::api_import::{
     self, Access, Analysis, Draft, Material, merge_secrets, refine_with_reply, rename_secret_refs,
     secret_refs,
@@ -51,6 +58,11 @@ struct Outcome {
     redacted: String,
     masked: usize,
     candidates: Vec<Candidate>,
+    /// 值是从文档里取来的密钥（可能只是示例）。
+    from_doc: Vec<String>,
+    auth_form: AuthForm,
+    /// 改过、还没触发重测的密钥。
+    edited: Vec<String>,
 }
 
 struct Candidate {
@@ -195,17 +207,26 @@ pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConf
         "核对每个接口：勾选要加入的，补齐标黄的缺项。只查询且配置齐全的会自动用样例值试调一次。",
     );
     ui.add_space(6.0);
+    let panel = theme::card()
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            auth_panel_ui(ui, outcome, &mut flow.secrets)
+        })
+        .inner;
+    ui.add_space(6.0);
     for (index, candidate) in outcome.candidates.iter_mut().enumerate() {
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            candidate_ui(ui, index, candidate, &mut flow.secrets);
+            candidate_ui(ui, index, candidate, &flow.secrets);
         });
         ui.add_space(6.0);
     }
-    // 自动试调：只查询、配置齐了、还没试过的。
-    for candidate in &mut outcome.candidates {
-        if !candidate.auto_tried && candidate.can_test(&flow.secrets) {
-            candidate.start_test(&flow.secrets);
+    // 自动试调：只查询、配置齐了、还没试过的。正在输 Key 时先不调，免得拿半截 Key 去试。
+    if !panel.typing {
+        for candidate in &mut outcome.candidates {
+            if !candidate.auto_tried && candidate.can_test(&flow.secrets) {
+                candidate.start_test(&flow.secrets);
+            }
         }
     }
     add_bar_ui(ui, page);
@@ -362,6 +383,7 @@ fn poll(ctx: &egui::Context, flow: &mut ImportFlow, saved: &ApiSecrets) {
                 flow.running = None;
                 flow.secrets = saved.clone();
                 let renamed = merge_secrets(&mut flow.secrets, &analysis.secrets);
+                let from_doc = doc_values(&analysis.secrets, &renamed, saved);
                 let candidates = analysis
                     .drafts
                     .into_iter()
@@ -376,6 +398,9 @@ fn poll(ctx: &egui::Context, flow: &mut ImportFlow, saved: &ApiSecrets) {
                     masked: material.masked(),
                     redacted: material.redacted,
                     candidates,
+                    from_doc,
+                    auth_form: AuthForm::default(),
+                    edited: Vec::new(),
                 });
             }
             Ok(Err(error)) => {
@@ -396,13 +421,163 @@ fn poll(ctx: &egui::Context, flow: &mut ImportFlow, saved: &ApiSecrets) {
     }
 }
 
+/// 识别出来、带了值的密钥（文档里写的，不是本机原有的）。
+fn doc_values(
+    found: &[(String, String)],
+    renamed: &[(String, String)],
+    saved: &ApiSecrets,
+) -> Vec<String> {
+    found
+        .iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(name, _)| {
+            renamed
+                .iter()
+                .find(|(old, _)| old == name)
+                .map_or(name.clone(), |(_, new)| new.clone())
+        })
+        .filter(|name| !saved.filled(name))
+        .collect()
+}
+
+/// 「鉴权」卡片的结果：有没有密钥输入框正在输入（输入时不自动试调）。
+struct AuthPanel {
+    typing: bool,
+}
+
+/// 候选上方的「鉴权」卡片：每个密钥一个常驻的输入框，写明用在哪些接口、状态如何；
+/// 文档没写鉴权的，在这里选带法补上。
+fn auth_panel_ui(ui: &mut egui::Ui, outcome: &mut Outcome, secrets: &mut ApiSecrets) -> AuthPanel {
+    let mut panel = AuthPanel { typing: false };
+    let mut names: Vec<String> = Vec::new();
+    for candidate in outcome
+        .candidates
+        .iter()
+        .filter(|c| c.draft.access != Access::Write)
+    {
+        for name in secret_refs(&candidate.draft.endpoint) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    let rejected = |candidate: &Candidate| {
+        candidate
+            .trial
+            .as_ref()
+            .is_some_and(|trial| trial.auth_rejected())
+    };
+    ui.label(egui::RichText::new("鉴权").strong());
+    if names.is_empty() {
+        let refused: Vec<String> = outcome
+            .candidates
+            .iter()
+            .filter(|c| rejected(c))
+            .map(|c| c.draft.endpoint.name.clone())
+            .collect();
+        if refused.is_empty() {
+            theme::caption(
+                ui,
+                "文档里没认出鉴权方式。接口要 Key 的话，在这里选好带法加上：",
+            );
+        } else {
+            ui.colored_label(
+                theme::warn(),
+                format!(
+                    "「{}」拒绝了请求，多半要鉴权，但文档里没认出带法：在下面选好再粘贴 Key。",
+                    refused.join("」「")
+                ),
+            );
+        }
+        if let Some(spec) = auth_form_ui(ui, &mut outcome.auth_form) {
+            let secret = secret_for(&spec, secrets);
+            for candidate in &mut outcome.candidates {
+                if candidate.draft.access != Access::Write
+                    && !auth::has_auth(&candidate.draft.endpoint)
+                {
+                    auth::apply(&mut candidate.draft.endpoint, &spec, &secret);
+                    candidate.auto_tried = false;
+                }
+            }
+        }
+        return panel;
+    }
+    let mut committed = Vec::new();
+    for name in &names {
+        let users: Vec<&Candidate> = outcome
+            .candidates
+            .iter()
+            .filter(|c| secret_refs(&c.draft.endpoint).contains(name))
+            .collect();
+        let how = users
+            .iter()
+            .find_map(|c| auth::from_endpoint(&c.draft.endpoint))
+            .filter(|(_, secret)| secret == name)
+            .map(|(spec, _)| spec.describe());
+        let refused: Vec<&str> = users
+            .iter()
+            .filter(|c| rejected(c))
+            .map(|c| c.draft.endpoint.name.as_str())
+            .collect();
+        let passed = users
+            .iter()
+            .any(|c| c.trial.as_ref().is_some_and(|t| t.ok()));
+        let user_names: Vec<&str> = users
+            .iter()
+            .map(|c| c.draft.endpoint.name.as_str())
+            .collect();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("密钥「{name}」"));
+            let value = secrets.secrets.entry(name.clone()).or_default();
+            let response = key_field(ui, value);
+            let filled = !value.trim().is_empty();
+            panel.typing |= response.has_focus();
+            if response.changed() && !outcome.edited.contains(name) {
+                outcome.edited.push(name.clone());
+            }
+            if response.lost_focus() && filled && outcome.edited.contains(name) {
+                committed.push(name.clone());
+            }
+            if !filled {
+                ui.colored_label(theme::warn(), format!("未填：{} 个接口在等它", users.len()));
+            } else if !refused.is_empty() {
+                ui.colored_label(
+                    theme::danger(),
+                    format!(
+                        "「{}」拒绝了请求：Key 可能不对或已过期，重新粘贴",
+                        refused.join("」「")
+                    ),
+                );
+            } else if passed {
+                ui.colored_label(theme::success(), "已调通");
+            } else if outcome.from_doc.contains(name) {
+                theme::caption(ui, "用的是文档里写的值，可能只是示例");
+            }
+        });
+        let mut line = format!("用在：{}", user_names.join("、"));
+        if let Some(how) = how {
+            line = format!("{how}；{line}");
+        }
+        theme::caption(ui, &line);
+    }
+    theme::caption(
+        ui,
+        "粘贴后点别处，用到它的接口会自动重测。Key 只存在本机，不导出、不发给模型。",
+    );
+    for name in committed {
+        outcome.edited.retain(|n| *n != name);
+        for candidate in &mut outcome.candidates {
+            if candidate.testing.is_none() && secret_refs(&candidate.draft.endpoint).contains(&name)
+            {
+                candidate.auto_tried = false;
+            }
+        }
+    }
+    panel
+}
+
 /// 一个候选接口的卡片。
-fn candidate_ui(
-    ui: &mut egui::Ui,
-    index: usize,
-    candidate: &mut Candidate,
-    secrets: &mut ApiSecrets,
-) {
+fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secrets: &ApiSecrets) {
     let writes = candidate.draft.access == Access::Write;
     ui.horizontal(|ui| {
         ui.add_enabled(!writes, egui::Checkbox::without_text(&mut candidate.chosen))
@@ -485,24 +660,6 @@ fn candidate_ui(
             }
         });
     }
-    for name in secret_refs(&candidate.draft.endpoint) {
-        let empty = secrets
-            .secrets
-            .get(&name)
-            .is_none_or(|v| v.trim().is_empty());
-        if empty {
-            ui.horizontal(|ui| {
-                ui.label(format!("密钥「{name}」"));
-                let value = secrets.secrets.entry(name.clone()).or_default();
-                ui.add(
-                    egui::TextEdit::singleline(value)
-                        .password(true)
-                        .hint_text("资料里是占位写法，填真实的值")
-                        .desired_width(260.0),
-                );
-            });
-        }
-    }
     for input in &mut candidate.draft.endpoint.inputs {
         if input.required && input.example.trim().is_empty() {
             ui.horizontal(|ui| {
@@ -549,6 +706,9 @@ fn candidate_ui(
     });
     if let Some(trial) = &candidate.trial {
         trial_ui(ui, trial, &format!("import_{index}"));
+        if trial.auth_rejected() {
+            auth_hint(ui, auth::has_auth(&candidate.draft.endpoint));
+        }
         if !candidate.refined.is_empty() {
             theme::caption(
                 ui,
@@ -727,6 +887,9 @@ mod tests {
             masked: material.masked(),
             redacted: material.redacted,
             candidates: analysis.drafts.into_iter().map(Candidate::new).collect(),
+            from_doc: Vec::new(),
+            auth_form: AuthForm::default(),
+            edited: Vec::new(),
         });
         ApisPage {
             loaded: true,
@@ -753,6 +916,66 @@ mod tests {
         let flow = page.import.as_ref().unwrap();
         let candidate = &flow.outcome.as_ref().unwrap().candidates[0];
         assert!(candidate.testing.is_none(), "没确认只查询不自动试调");
+    }
+
+    #[test]
+    fn the_key_field_stays_while_typing() {
+        let mut page = outcome_page();
+        page.import
+            .as_mut()
+            .unwrap()
+            .secrets
+            .secrets
+            .insert("token".into(), "a".into());
+        let config = AppConfig::default();
+        let texts = render(|ui| import_ui(ui, &mut page, &config));
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("密钥「token」") && has("用在："),
+            "输了一个字输入框还在：{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t == "a"), "Key 打码显示：{texts:?}");
+    }
+
+    #[test]
+    fn without_auth_in_the_document_the_panel_offers_to_add_it() {
+        let doc = "curl 'http://127.0.0.1:9/api/stat?year=2025'";
+        let material = Material::new(doc);
+        let analysis = api_import::analyze(&material, None, &[]);
+        let mut candidates: Vec<Candidate> =
+            analysis.drafts.into_iter().map(Candidate::new).collect();
+        candidates[0].trial = Some(Trial {
+            raw: Some(crate::agent::api::RawResponse {
+                status: 401,
+                body: "{\"msg\": \"未授权\"}".into(),
+            }),
+            error: Some("接口返回 401".into()),
+            ..Trial::default()
+        });
+        let mut page = ApisPage {
+            loaded: true,
+            view: View::Import,
+            import: Some(ImportFlow {
+                outcome: Some(Outcome {
+                    notes: Vec::new(),
+                    model_used: false,
+                    masked: 0,
+                    redacted: String::new(),
+                    candidates,
+                    from_doc: Vec::new(),
+                    auth_form: AuthForm::default(),
+                    edited: Vec::new(),
+                }),
+                ..ImportFlow::default()
+            }),
+            ..ApisPage::default()
+        };
+        let config = AppConfig::default();
+        let texts = render(|ui| import_ui(ui, &mut page, &config));
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has("拒绝了请求，多半要鉴权"), "{texts:?}");
+        assert!(has("密钥放在") && has("加上"), "{texts:?}");
+        assert!(has("看起来接口要鉴权"), "{texts:?}");
     }
 
     #[test]

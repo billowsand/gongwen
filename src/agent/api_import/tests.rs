@@ -234,3 +234,123 @@ fn found_secrets_merge_without_overwriting() {
     assert_eq!(endpoint.headers[0].value, "Bearer {secret:token2}");
     assert_eq!(secret_refs(&endpoint), ["token2"]);
 }
+
+/// 按节写的文档：开头一节写鉴权与接口总览，每个接口一节，地址、方法是字段行，参数是表格。
+const SECTION_DOC: &str = "# 政策平台接口说明\n\n服务地址：http://10.0.0.9:8080\n\n\
+## 一、鉴权\n\n所有接口都要在请求头中携带 `X-API-Key`，值向平台管理员申请。\n\n\
+## 二、接口一览\n\n| 接口名称 | 请求方式 | 接口地址 |\n|---|---|---|\n\
+| 政策检索 | POST | /api/policy/search |\n| 政策详情 | GET | /api/policy/detail |\n| 删除政策 | DELETE | /api/policy/remove |\n\n\
+## 三、接口详情\n\n### 3.1 政策检索\n\n- 请求地址：/api/policy/search\n- 请求方式：POST\n\n\
+**请求参数**\n\n| 参数名 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n\
+| keyword | string | 是 | 关键词，如：中小企业 |\n| size | int | 否 | 返回条数 |\n\n\
+**返回示例**\n\n```json\n{\"code\": 0, \"data\": {\"list\": [{\"id\": 1, \"title\": \"意见\"}]}}\n```\n\n\
+### 3.2 政策详情\n\n请求地址：/api/policy/detail\n\n请求方式：GET\n\n\
+| 参数名 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| id | string | 是 | 政策编号 |\n";
+
+#[test]
+fn sectioned_documents_yield_every_endpoint_with_shared_auth() {
+    let material = Material::new(SECTION_DOC);
+    let analysis = analyze(&material, None, &[]);
+    let mut names: Vec<&str> = analysis
+        .drafts
+        .iter()
+        .map(|d| d.endpoint.name.as_str())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["删除政策", "政策检索", "政策详情"],
+        "总览表与详细一节合成一个"
+    );
+    let find = |name: &str| {
+        analysis
+            .drafts
+            .iter()
+            .find(|d| d.endpoint.name == name)
+            .unwrap()
+    };
+    let search = find("政策检索");
+    assert_eq!(search.endpoint.method, ApiMethod::Post);
+    assert_eq!(
+        search.endpoint.url,
+        "http://10.0.0.9:8080/api/policy/search"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&search.endpoint.body).unwrap(),
+        json!({"keyword": "{keyword}", "size": "{size}"})
+    );
+    let keyword = &search.endpoint.inputs[0];
+    assert!(keyword.required && keyword.description.starts_with("关键词"));
+    assert_eq!(keyword.example, "中小企业");
+    assert_eq!(search.endpoint.inputs[1].kind, InputKind::Number);
+    assert_eq!(
+        search.endpoint.mapping.list, "/data/list",
+        "返回示例挂到这一节"
+    );
+    assert_eq!(search.origin("名称"), Some(Origin::Document));
+    let detail = find("政策详情");
+    assert_eq!(
+        detail.endpoint.url,
+        "http://10.0.0.9:8080/api/policy/detail?id={id}"
+    );
+    assert_eq!(detail.endpoint.inputs[0].description, "政策编号");
+    // 鉴权只问一次：只查询的两个接口共用一个密钥，改数据的不加。
+    for draft in [search, detail] {
+        assert_eq!(
+            draft.endpoint.headers.len(),
+            1,
+            "{:?}",
+            draft.endpoint.headers
+        );
+        assert_eq!(draft.endpoint.headers[0].name, "X-API-Key");
+        assert_eq!(draft.endpoint.headers[0].value, "{secret:x_api_key}");
+        assert_eq!(draft.origin("鉴权"), Some(Origin::Document));
+    }
+    let remove = find("删除政策");
+    assert_eq!(remove.access, Access::Write);
+    assert!(remove.endpoint.headers.is_empty());
+    assert_eq!(analysis.secrets, [("x_api_key".to_string(), String::new())]);
+    assert!(
+        analysis
+            .notes
+            .iter()
+            .any(|n| n.contains("请求头 X-API-Key") && n.contains("2 个接口")),
+        "{:?}",
+        analysis.notes
+    );
+    let missing = search.missing(&ApiSecrets::default());
+    assert!(
+        missing.iter().any(|m| m.contains("x_api_key")),
+        "{missing:?}"
+    );
+}
+
+#[test]
+fn the_model_can_name_the_auth_but_not_invent_it() {
+    let doc = "政策检索：GET http://10.0.0.9/api/policy?keyword=中小企业\n\n调用前联系管理员开通，访问时带上 appToken。";
+    let reply = |name: &str| {
+        json!({
+            "auth": {"place": "query", "name": name, "basis": "访问时带上 appToken"},
+            "endpoints": [{"name": "政策检索", "url": "http://10.0.0.9/api/policy", "access": "query"}]
+        })
+        .to_string()
+    };
+    let real = reply("appToken");
+    let model = ScriptedModel::new(move |_, _| real.clone());
+    let analysis = analyze(&Material::new(doc), Some(&model), &[]);
+    let endpoint = &analysis.drafts[0].endpoint;
+    assert!(
+        endpoint.url.ends_with("&appToken={secret:apptoken}"),
+        "{}",
+        endpoint.url
+    );
+    assert_eq!(analysis.drafts[0].origin("鉴权"), Some(Origin::Model));
+
+    let invented = reply("X-Secret-Key");
+    let model = ScriptedModel::new(move |_, _| invented.clone());
+    let analysis = analyze(&Material::new(doc), Some(&model), &[]);
+    assert!(
+        !auth::has_auth(&analysis.drafts[0].endpoint),
+        "资料里没有的字段名不收"
+    );
+}

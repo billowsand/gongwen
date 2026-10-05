@@ -2,7 +2,7 @@
 //!
 //! 这一步不调模型，认出来的东西来源可靠，后面合并时优先于模型的整理。
 
-use crate::agent::api::ApiMethod;
+use crate::agent::api::{ApiMethod, InputKind};
 use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
@@ -19,6 +19,37 @@ pub(crate) struct RawRequest {
     pub(crate) offset: usize,
     /// 认出来但不支持的写法（`-u 用户名:密码`、表单请求体……）。
     pub(crate) notes: Vec<String>,
+    /// 按节写的文档：这一节的标题，当接口名称用。
+    pub(crate) name: Option<String>,
+    /// 参数表里的参数（按节写的文档）。
+    pub(crate) params: Vec<DocParam>,
+    /// 文档没写请求方式，程序按有无请求体推断的。
+    pub(crate) method_guessed: bool,
+    /// 接口总览表里的一行：只有名称、方法、地址，合并时让位于详细的那一节。
+    pub(crate) overview: bool,
+}
+
+/// 参数表里的一个参数。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct DocParam {
+    pub(crate) name: String,
+    pub(crate) kind: InputKind,
+    pub(crate) required: bool,
+    pub(crate) description: String,
+    pub(crate) example: String,
+    pub(crate) place: ParamPlace,
+}
+
+/// 参数放在哪。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ParamPlace {
+    Query,
+    Body,
+    Path,
+    Header,
+    /// 文档没说，按请求方法定：GET 放地址，POST 放请求体。
+    #[default]
+    Unknown,
 }
 
 /// 文档里的一段 JSON 示例。
@@ -83,7 +114,7 @@ fn same_line_curl(text: &str, offset: usize) -> bool {
     text[line_start..line_end].contains("curl")
 }
 
-fn method_of(word: &str) -> Option<ApiMethod> {
+pub(super) fn method_of(word: &str) -> Option<ApiMethod> {
     match word.to_ascii_uppercase().as_str() {
         "GET" => Some(ApiMethod::Get),
         "POST" => Some(ApiMethod::Post),
@@ -278,7 +309,7 @@ pub(crate) fn json_blocks(text: &str) -> Vec<JsonBlock> {
         if (c == b'{' || c == b'[')
             && at_line_start(text, i)
             && let Some(end) = balanced_end(text, i)
-            && let Ok(value) = serde_json::from_str::<Value>(&text[i..end])
+            && let Some(value) = parse_json(&text[i..end])
             && (value.is_object() || value.is_array())
         {
             blocks.push(JsonBlock {
@@ -292,6 +323,31 @@ pub(crate) fn json_blocks(text: &str) -> Vec<JsonBlock> {
         i += 1;
     }
     blocks
+}
+
+/// 解析一段 JSON 示例。Word 转成的 Markdown 会把 `[`、`_` 写成 `\[`、`\_`：JSON 不认的
+/// 反斜杠转义去掉再试一次。
+fn parse_json(text: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return Some(value);
+    }
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some(next) if "\"\\/bfnrtu".contains(*next) => {
+                    cleaned.push(c);
+                    cleaned.push(chars.next().expect("刚看过"));
+                }
+                Some(_) => {}
+                None => cleaned.push(c),
+            }
+        } else {
+            cleaned.push(c);
+        }
+    }
+    serde_json::from_str(&cleaned).ok()
 }
 
 /// `{` 前面同一行只有空白、引用号或列表符号（也认 `返回示例：{` 这种同行写法）。
@@ -419,5 +475,9 @@ mod tests {
         assert_eq!(blocks[0].value, json!({"keyword": "a"}));
         assert_eq!(blocks[1].role, BlockRole::Response);
         assert_eq!(blocks[1].value["data"]["items"][0]["title"], "x{y}");
+        let word =
+            json_blocks("返回示例：\n\n{\"data\": {\"rows\": \\[{\"page\\_no\": \"a\\\"b\"}]}}\n");
+        assert_eq!(word.len(), 1, "Word 转出来的转义也认");
+        assert_eq!(word[0].value["data"]["rows"][0]["page_no"], "a\"b");
     }
 }

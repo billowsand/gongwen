@@ -70,6 +70,15 @@ impl Secrets {
             return name.clone();
         }
         let base = secret_name(hint);
+        // 文档里同一个字段写了好几次占位：算同一个密钥。
+        if value.is_empty()
+            && self
+                .found
+                .iter()
+                .any(|(existing, v)| *existing == base && v.is_empty())
+        {
+            return base;
+        }
         let mut name = base.clone();
         let mut n = 2;
         while self.found.iter().any(|(existing, _)| *existing == name) {
@@ -122,7 +131,7 @@ impl Secrets {
 }
 
 /// 凭据名：只留英文字母数字下划线，统一小写；`Authorization` 叫 `token` 更好懂。
-fn secret_name(hint: &str) -> String {
+pub(crate) fn secret_name(hint: &str) -> String {
     let lower = hint.to_ascii_lowercase();
     if lower == "authorization" {
         return "token".into();

@@ -1,8 +1,11 @@
 //! 从接口文档自动填报数据接口（`docs/http-skill-design.md` 第一层）。
 //!
 //! 流程：
-//! 1. 程序扫描文档（[`scan`]）：cURL、`GET /路径` 请求行、JSON 示例、服务器地址；
-//! 2. 程序把认出的请求转成模板（[`build`]），凭据提成本机密钥（[`redact`]）；
+//! 1. 程序扫描文档：cURL、`GET /路径` 请求行、JSON 示例、服务器地址（[`scan`]）；按节写的
+//!    文档里「请求地址：」「请求方式：」字段行、键值表、参数表与接口总览表（[`sections`]）；
+//!    同一个地址在几处出现的合成一个；
+//! 2. 程序把认出的请求转成模板（[`build`]），凭据提成本机密钥（[`redact`]）；文档里单独写的
+//!    鉴权方式套到没带鉴权的接口上（[`auth`]）；
 //! 3. 配了起草模型时，把**脱敏后**的文档交给模型整理名称、用途、参数说明与只读性质（[`model`]）；
 //! 4. 合并：程序认出的结构优先，模型补文字；模型给的地址、参数名必须在资料里找得到，
 //!    找不到的不收，并说明；
@@ -10,23 +13,23 @@
 //!
 //! 产物只是候选接口，用户核对、勾选后才进 `apis.json`。这里不发任何外部请求。
 
+pub(crate) mod auth;
 mod build;
 pub(crate) mod infer;
 mod model;
 pub(crate) mod redact;
 mod scan;
+mod sections;
 
 use crate::agent::api::{ApiEndpoint, ApiInput, ApiMethod, ApiSecrets, ApiSuccess, InputKind};
 use crate::agent::backend::{ModelBackend, ModelRole};
+use auth::AuthSpec;
 use model::ModelEndpoint;
 use redact::Secrets;
 use regex::Regex;
-use scan::{BlockRole, JsonBlock, RawRequest};
+use scan::{BlockRole, DocParam, JsonBlock, ParamPlace, RawRequest};
 use serde_json::Value;
 use std::sync::LazyLock;
-
-static SECRET_REF: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{secret:([A-Za-z_][A-Za-z0-9_]*)\}").expect("密钥占位正则"));
 
 /// 地址里出现这些词，多半是改数据的接口。
 const WRITE_WORDS: &[&str] = &[
@@ -114,7 +117,7 @@ impl Draft {
                 .get(&name)
                 .is_none_or(|value| value.trim().is_empty())
             {
-                missing.push(format!("密钥「{name}」的值"));
+                missing.push(format!("密钥「{name}」（在上方「鉴权」里粘贴）"));
             }
         }
         if endpoint.description.trim().is_empty() {
@@ -134,17 +137,7 @@ impl Draft {
 
 /// 接口里引用的密钥名。
 pub(crate) fn secret_refs(endpoint: &ApiEndpoint) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut templates: Vec<&str> = vec![&endpoint.url, &endpoint.body];
-    templates.extend(endpoint.headers.iter().map(|h| h.value.as_str()));
-    for template in templates {
-        for caps in SECRET_REF.captures_iter(template) {
-            if !names.contains(&caps[1].to_string()) {
-                names.push(caps[1].to_string());
-            }
-        }
-    }
-    names
+    endpoint.secret_names()
 }
 
 /// 读进来的资料：程序扫描结果 + 脱敏后的文字。构造时就把凭据提走了。
@@ -160,12 +153,19 @@ pub(crate) struct Material {
     blocks: Vec<JsonBlock>,
     origins: Vec<String>,
     secrets: Secrets,
+    /// 文档里单独写的鉴权方式。
+    auth: Option<AuthSpec>,
+    /// 程序做不了的鉴权（签名、先登录换令牌）。
+    auth_notes: Vec<String>,
 }
 
 impl Material {
     pub(crate) fn new(text: &str) -> Self {
         let text = text.replace("\r\n", "\n");
-        let requests = scan::requests(&text);
+        let mut found = scan::requests(&text);
+        found.extend(sections::requests(&text));
+        found.sort_by_key(|r| r.offset);
+        let requests = merge_requests(found);
         let blocks = scan::json_blocks(&text);
         let origins = scan::origins(&text);
         let mut secrets = Secrets::default();
@@ -187,6 +187,13 @@ impl Material {
                 apply_sample(&mut drafts[0], sample);
             }
         }
+        let (auth, auth_notes) = auth::detect(&text);
+        if let Some(spec) = &auth
+            && !spec.value.is_empty()
+        {
+            // 文档里写了真值：先登记，好遮掉。
+            secrets.add(&spec.name, &spec.value);
+        }
         // 文档正文里明写的令牌（不在 cURL 里的）也遮掉。
         let redacted = secrets.redact(&text);
         let clipped = redacted.chars().count() > model::MAX_MATERIAL_CHARS;
@@ -203,6 +210,8 @@ impl Material {
             blocks,
             origins,
             secrets,
+            auth,
+            auth_notes,
         }
     }
 
@@ -220,6 +229,9 @@ impl Material {
             .iter()
             .map(|d| {
                 let mut line = format!("- {} {}", d.endpoint.method.label(), d.endpoint.url);
+                if !d.endpoint.name.is_empty() {
+                    line.push_str(&format!("（{}）", d.endpoint.name));
+                }
                 if !d.endpoint.body.is_empty() {
                     line.push_str(&format!("  请求体：{}", compact(&d.endpoint.body)));
                 }
@@ -258,6 +270,7 @@ pub(crate) fn analyze(
         ..Analysis::default()
     };
     let mut secrets = material.secrets.clone();
+    let mut model_auth = None;
     match model {
         None => analysis
             .notes
@@ -272,16 +285,22 @@ pub(crate) fn analyze(
             let prompt = model::prompt(&material.redacted, &material.findings());
             match model.complete(ModelRole::Draft, model::SYSTEM, &prompt, &mut |_| {}) {
                 Ok(reply) => match model::parse(&reply.content) {
-                    Some(endpoints) => {
+                    Some(parsed) => {
                         analysis.model_used = true;
                         analysis.drafts = merge(
                             analysis.drafts,
-                            endpoints,
+                            parsed.endpoints,
                             material,
                             &mut secrets,
                             &mut analysis.notes,
                         );
+                        model_auth = parsed
+                            .auth
+                            .and_then(|auth| model_auth_spec(auth, &material.text));
                     }
+                    None if reply.truncated => analysis.notes.push(
+                        "模型的整理太长被截断了，只用了程序解析；接口很多时可以分几次粘贴。".into(),
+                    ),
                     None => analysis.notes.push(
                         "模型没有给出可用的整理结果，只用了程序解析；可以再识别一次。".into(),
                     ),
@@ -294,7 +313,7 @@ pub(crate) fn analyze(
     }
     if analysis.drafts.is_empty() {
         analysis.notes.push(
-            "没有认出接口。资料里最好有 cURL 命令、「GET /路径」这样的请求行或完整的接口地址。"
+            "没有认出接口。资料里最好有 cURL 命令、「GET /路径」这样的请求行、「请求地址：」字段或接口地址表格。"
                 .into(),
         );
     }
@@ -308,6 +327,15 @@ pub(crate) fn analyze(
     {
         apply_sample(draft, block.value.clone());
     }
+    if let Some(note) = finish_auth(
+        &mut analysis.drafts,
+        material.auth.as_ref(),
+        model_auth,
+        &mut secrets,
+    ) {
+        analysis.notes.push(note);
+    }
+    analysis.notes.extend(material.auth_notes.iter().cloned());
     let mut taken: Vec<String> = taken_ids.to_vec();
     for draft in &mut analysis.drafts {
         finish(draft);
@@ -316,6 +344,152 @@ pub(crate) fn analyze(
     }
     analysis.secrets = secrets.found;
     analysis
+}
+
+/// 模型说的鉴权方式：字段名要像样、要在资料里出现过。值一律不收。
+fn model_auth_spec(auth: model::ModelAuth, text: &str) -> Option<AuthSpec> {
+    let place = match auth.place.trim().to_ascii_lowercase().as_str() {
+        "query" | "url" | "参数" => auth::AuthPlace::Query,
+        _ => auth::AuthPlace::Header,
+    };
+    let spec = AuthSpec {
+        place,
+        name: auth.name.trim().to_string(),
+        bearer: place == auth::AuthPlace::Header && auth.scheme.to_lowercase().contains("bearer"),
+        basis: format!("AI 按资料整理：{}", auth.basis.trim()),
+        value: String::new(),
+    };
+    (spec.valid_name() && mentioned(text, &spec.name)).then_some(spec)
+}
+
+/// 鉴权收尾：文档写了鉴权方式的（程序认出的优先，其次模型整理的），没有就照同一份文档里
+/// 已经带了鉴权的接口，给还没带的只查询接口补上。返回一句整体说明。
+fn finish_auth(
+    drafts: &mut [Draft],
+    program: Option<&AuthSpec>,
+    model: Option<AuthSpec>,
+    secrets: &mut Secrets,
+) -> Option<String> {
+    let existing = drafts.iter().find_map(|d| auth::from_endpoint(&d.endpoint));
+    let (spec, origin) = match (program, model) {
+        (Some(spec), _) => (spec.clone(), Origin::Document),
+        (None, Some(spec)) => (spec, Origin::Model),
+        (None, None) => {
+            let (spec, _) = existing.clone()?;
+            (spec, Origin::Document)
+        }
+    };
+    // 同名的鉴权已经有接口带了：用同一个密钥，免得同一个 Key 要填两遍。
+    let secret = match &existing {
+        Some((theirs, secret))
+            if theirs.place == spec.place && theirs.name.eq_ignore_ascii_case(&spec.name) =>
+        {
+            secret.clone()
+        }
+        _ => secrets.add(&spec.name, &spec.value),
+    };
+    let mut count = 0;
+    for draft in drafts.iter_mut() {
+        if draft.access == Access::Write || auth::has_auth(&draft.endpoint) {
+            continue;
+        }
+        auth::apply(&mut draft.endpoint, &spec, &secret);
+        draft.set_origin("鉴权", origin);
+        count += 1;
+    }
+    (count > 0).then(|| {
+        format!(
+            "鉴权：{}（依据：{}），已给 {count} 个接口补上。",
+            spec.describe(),
+            spec.basis
+        )
+    })
+}
+
+/// 同一个地址在文档里出现几次（总览表一行、详细一节、一条 cURL）：合成一个。
+/// 结构以 cURL 或详细的一节为准，名称、参数说明互相补齐。方法明写了又不一样的不合。
+fn merge_requests(found: Vec<RawRequest>) -> Vec<RawRequest> {
+    let mut out: Vec<RawRequest> = Vec::new();
+    for request in found {
+        let key = path_key(&request.url);
+        let same = out.iter().position(|r| {
+            !key.is_empty()
+                && path_key(&r.url) == key
+                && (r.method == request.method || r.method_guessed || request.method_guessed)
+        });
+        match same {
+            Some(index) => {
+                let existing = std::mem::take(&mut out[index]);
+                out[index] = absorb(existing, request);
+            }
+            None => out.push(request),
+        }
+    }
+    out.sort_by_key(|r| r.offset);
+    out
+}
+
+fn absorb(a: RawRequest, b: RawRequest) -> RawRequest {
+    let rich = |r: &RawRequest| !r.headers.is_empty() || r.body.is_some();
+    let b_first = (a.overview && !b.overview) || (!rich(&a) && rich(&b));
+    let (mut primary, other) = if b_first { (b, a) } else { (a, b) };
+    // 名称：详细一节的标题优先于总览表里的写法。
+    if primary.name.is_none() || (primary.overview && !other.overview && other.name.is_some()) {
+        primary.name = other.name.clone().or(primary.name.take());
+    }
+    if !primary.url.starts_with("http")
+        && other.url.starts_with("http")
+        && let Some(origin) = scan::origins(&other.url).first()
+    {
+        primary.url = format!("{origin}{}", primary.url);
+    }
+    if primary.method_guessed && !other.method_guessed {
+        primary.method = other.method;
+        primary.method_guessed = false;
+        primary.notes.retain(|n| !n.starts_with("文档没写请求方式"));
+    } else if other.method.is_none() && !other.method_guessed {
+        // 别处明写了改数据的方法：从严。
+        primary.method = None;
+    }
+    for param in other.params {
+        match primary.params.iter_mut().find(|p| p.name == param.name) {
+            Some(mine) => {
+                if mine.description.is_empty() {
+                    mine.description = param.description;
+                }
+                if mine.example.is_empty() {
+                    mine.example = param.example;
+                }
+            }
+            None => primary.params.push(param),
+        }
+    }
+    for header in other.headers {
+        if !primary
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(&header.0))
+        {
+            primary.headers.push(header);
+        }
+    }
+    if primary.body.is_none() {
+        primary.body = other.body;
+    }
+    if !other.overview {
+        primary.offset = if primary.overview {
+            other.offset
+        } else {
+            primary.offset.min(other.offset)
+        };
+    }
+    primary.overview &= other.overview;
+    for note in other.notes {
+        if !primary.notes.contains(&note) {
+            primary.notes.push(note);
+        }
+    }
+    primary
 }
 
 /// 程序认出的一个请求 → 候选接口。
@@ -329,17 +503,50 @@ fn draft_from_request(
 ) -> Draft {
     let mut inputs = Vec::new();
     let mut notes = request.notes.clone();
-    let url = join_origin(&request.url, origins);
+    let method = request.method.unwrap_or(ApiMethod::Get);
+    // 总览表里的一行后面跟的是下一行，不是它的示例。
+    let in_range =
+        |b: &&JsonBlock| !request.overview && b.offset > request.offset && b.offset < next_offset;
+    // 参数表：放地址上的补进查询串（模板化时登记成输入），POST 没有请求体示例时按参数表拼一个。
+    let in_query = |p: &&DocParam| {
+        p.place == ParamPlace::Query || (p.place == ParamPlace::Unknown && method == ApiMethod::Get)
+    };
+    let mut url = join_origin(&request.url, origins);
+    for param in request.params.iter().filter(in_query) {
+        if !query_has(&url, &param.name) {
+            let example = if param.example.contains(['&', '=', '#', ' ']) {
+                ""
+            } else {
+                param.example.as_str()
+            };
+            let joiner = if url.contains('?') { '&' } else { '?' };
+            url.push_str(&format!("{joiner}{}={example}", param.name));
+        }
+    }
     let url = build::template_url(&url, &mut inputs, secrets);
     let headers = build::template_headers(&request.headers, secrets);
-    let in_range = |b: &&JsonBlock| b.offset > request.offset && b.offset < next_offset;
-    let body_source = request.body.clone().or_else(|| {
-        blocks
-            .iter()
-            .filter(in_range)
-            .find(|b| b.role == BlockRole::Request)
-            .map(|b| b.value.to_string())
-    });
+    let body_source = request
+        .body
+        .clone()
+        .or_else(|| {
+            blocks
+                .iter()
+                .filter(in_range)
+                .find(|b| b.role == BlockRole::Request)
+                .map(|b| b.value.to_string())
+        })
+        .or_else(|| {
+            let fields: serde_json::Map<String, Value> = request
+                .params
+                .iter()
+                .filter(|p| {
+                    method == ApiMethod::Post
+                        && matches!(p.place, ParamPlace::Body | ParamPlace::Unknown)
+                })
+                .map(|p| (p.name.clone(), typed_example(p)))
+                .collect();
+            (!fields.is_empty()).then(|| Value::Object(fields).to_string())
+        });
     let mut body = String::new();
     if let Some(source) = body_source {
         match serde_json::from_str::<Value>(&source) {
@@ -354,12 +561,14 @@ fn draft_from_request(
             _ => notes.push("请求体不是 JSON 对象，没有采用".into()),
         }
     }
+    let described = describe_inputs(&mut inputs, &request.params);
     let write = request.method.is_none() || scan::write_method_near(text, request.offset);
+    let suspicious = write_word(&url);
     let mut draft = Draft {
         endpoint: ApiEndpoint {
             id: build::id_from_path(&url),
-            name: String::new(),
-            method: request.method.unwrap_or(ApiMethod::Get),
+            name: request.name.clone().unwrap_or_default(),
+            method,
             url,
             inputs,
             headers,
@@ -375,16 +584,27 @@ fn draft_from_request(
         access_basis: if write {
             "文档里写的是 PUT / DELETE / PATCH 一类改数据的方法".into()
         } else {
-            String::new()
+            suspicious
+                .map(|word| format!("地址里有「{word}」字样，可能会改数据，请确认"))
+                .unwrap_or_default()
         },
         notes,
         sample: None,
     };
+    if request.name.is_some() {
+        draft.set_origin("名称", Origin::Document);
+    }
     if !draft.endpoint.inputs.is_empty() {
         draft.set_origin("参数", Origin::Document);
     }
+    if described {
+        draft.set_origin("参数说明", Origin::Document);
+    }
     if !draft.endpoint.body.is_empty() {
         draft.set_origin("请求体", Origin::Document);
+    }
+    if auth::has_auth(&draft.endpoint) {
+        draft.set_origin("鉴权", Origin::Document);
     }
     let sample = blocks
         .iter()
@@ -395,6 +615,65 @@ fn draft_from_request(
         apply_sample(&mut draft, sample);
     }
     draft
+}
+
+/// 地址的查询串里有没有这个参数。
+fn query_has(url: &str, name: &str) -> bool {
+    url.split_once('?').is_some_and(|(_, query)| {
+        query
+            .split('&')
+            .any(|pair| pair.split('=').next() == Some(name))
+    })
+}
+
+/// 参数表里的样例按类型写进拼出来的请求体。
+fn typed_example(param: &DocParam) -> Value {
+    let example = param.example.trim();
+    match param.kind {
+        InputKind::Number => example
+            .parse::<i64>()
+            .map(Value::from)
+            .or_else(|_| example.parse::<f64>().map(Value::from))
+            .unwrap_or_else(|_| Value::String(example.to_string())),
+        InputKind::Bool if matches!(example, "true" | "false") => Value::Bool(example == "true"),
+        _ => Value::String(example.to_string()),
+    }
+}
+
+/// 用参数表补输入变量的说明、必填、类型与样例。返回是否补了说明。
+fn describe_inputs(inputs: &mut [ApiInput], params: &[DocParam]) -> bool {
+    let mut described = false;
+    for param in params {
+        let Some(input) = inputs
+            .iter_mut()
+            .find(|i| i.name == build::ident(&param.name))
+        else {
+            continue;
+        };
+        if input.description.is_empty() && !param.description.is_empty() {
+            input.description = param.description.clone();
+            described = true;
+        }
+        input.required = param.required;
+        let example = if input.example.is_empty() {
+            &param.example
+        } else {
+            &input.example
+        };
+        match param.kind {
+            InputKind::Number if example.is_empty() || example.trim().parse::<f64>().is_ok() => {
+                input.kind = InputKind::Number;
+            }
+            InputKind::Bool if matches!(example.trim(), "" | "true" | "false") => {
+                input.kind = InputKind::Bool;
+            }
+            _ => {}
+        }
+        if input.example.is_empty() {
+            input.example = param.example.clone();
+        }
+    }
+    described
 }
 
 /// 用文档里的返回示例补返回映射。
@@ -429,6 +708,14 @@ fn path_key(url: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// 地址里像改数据的字样（`/fav/delete`、`/updateInfo`）。
+fn write_word(url: &str) -> Option<String> {
+    path_key(url)
+        .split(['/', '_', '-', '.'])
+        .find(|seg| WRITE_WORDS.iter().any(|w| seg.starts_with(w)))
+        .map(str::to_string)
+}
+
 /// 资料里提到过这个词没有（不分大小写）。
 fn mentioned(text: &str, word: &str) -> bool {
     let word = word.trim();
@@ -461,10 +748,15 @@ fn merge(
 
 /// 程序认出的接口，用模型的整理补文字说明与性质。
 fn enrich(draft: &mut Draft, found: &ModelEndpoint, text: &str) {
-    if !found.name.trim().is_empty() {
+    // 文档里这一节的标题优先，模型只给没名字的起名。
+    if draft.endpoint.name.trim().is_empty() && !found.name.trim().is_empty() {
         draft.endpoint.name = found.name.trim().to_string();
         draft.set_origin("名称", Origin::Model);
     }
+    let from_table = draft
+        .origins
+        .iter()
+        .any(|(f, o)| *f == "参数说明" && *o == Origin::Document);
     if !found.description.trim().is_empty() {
         draft.endpoint.description = found.description.trim().to_string();
         draft.set_origin("说明", Origin::Model);
@@ -476,11 +768,16 @@ fn enrich(draft: &mut Draft, found: &ModelEndpoint, text: &str) {
             .iter()
             .find(|i| build::ident(&i.name) == input.name)
         {
-            if !theirs.description.trim().is_empty() {
+            if !theirs.description.trim().is_empty()
+                && (input.description.is_empty() || !from_table)
+            {
                 input.description = theirs.description.trim().to_string();
                 described = true;
             }
-            input.required = theirs.required;
+            // 参数表写了必填与否的，以参数表为准。
+            if !from_table {
+                input.required = theirs.required;
+            }
             // 类型只在模型说是数字 / 真假、且样例对得上时改。
             match kind_of(&theirs.kind) {
                 InputKind::Number
@@ -553,11 +850,7 @@ fn apply_access(draft: &mut Draft, found: &ModelEndpoint) {
         return;
     }
     let basis = found.access_basis.trim().to_string();
-    let path = path_key(&draft.endpoint.url);
-    let write_word = path
-        .split(['/', '_', '-', '.'])
-        .find(|seg| WRITE_WORDS.iter().any(|w| seg.starts_with(w)))
-        .map(str::to_string);
+    let write_word = write_word(&draft.endpoint.url);
     let method = found.method.trim().to_ascii_uppercase();
     (draft.access, draft.access_basis) = match found.access.trim() {
         "write" => (Access::Write, basis),
