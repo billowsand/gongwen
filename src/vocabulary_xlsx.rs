@@ -45,6 +45,7 @@ const UNIT_HEADERS: &[&str] = &[
     "别名/常见错写",
     "备注",
     "呈批代字",
+    "职能任务",
 ];
 
 const PERSON_HEADERS: &[&str] = &[
@@ -56,10 +57,11 @@ const PERSON_HEADERS: &[&str] = &[
     "承办上级单位",
     "别名/常见错写",
     "备注",
+    "个人简介",
 ];
 
-const UNIT_COLUMN_WIDTHS: &[f64] = &[14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0];
-const PERSON_COLUMN_WIDTHS: &[f64] = &[14.0, 10.0, 18.0, 14.0, 16.0, 12.0, 28.0, 28.0];
+const UNIT_COLUMN_WIDTHS: &[f64] = &[14.0, 28.0, 28.0, 16.0, 14.0, 10.0, 28.0, 28.0, 14.0, 48.0];
+const PERSON_COLUMN_WIDTHS: &[f64] = &[14.0, 10.0, 18.0, 14.0, 16.0, 12.0, 28.0, 28.0, 48.0];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
@@ -218,6 +220,8 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
     let seal_on_behalf = parse_bool_marker(&row[5]);
     let aliases = parse_aliases(&row[6]);
     let note = row[7].trim().to_string();
+    // 职能任务是后加的列，旧模板没有这一列时读出来是空串。
+    let duties = row[9].trim().to_string();
     let _ = row_num; // 行号仅在出错时用，目前 parse_unit_row 不主动报冲突
     Ok(VocabularyEntry {
         id: 0,
@@ -235,6 +239,8 @@ fn parse_unit_row(row: &[String], row_num: usize) -> Result<VocabularyEntry> {
         can_handle_parent_unit: false,
         department_code,
         approval_department_code,
+        duties,
+        profile: String::new(),
         seal_on_behalf,
         seal_on_behalf_imported: !row[5].trim().is_empty(),
         sort_order: 0,
@@ -250,6 +256,7 @@ fn parse_person_row(row: &[String], _row_num: usize) -> Result<VocabularyEntry> 
     let can_handle_parent_unit = parse_bool_marker(&row[5]);
     let aliases = parse_aliases(&row[6]);
     let note = row[7].trim().to_string();
+    let profile = row[8].trim().to_string();
     Ok(VocabularyEntry {
         id: 0,
         category: VocabularyCategory::Person,
@@ -266,6 +273,8 @@ fn parse_person_row(row: &[String], _row_num: usize) -> Result<VocabularyEntry> 
         can_handle_parent_unit,
         department_code: String::new(),
         approval_department_code: String::new(),
+        duties: String::new(),
+        profile,
         seal_on_behalf: false,
         seal_on_behalf_imported: false,
         sort_order: 0,
@@ -543,6 +552,8 @@ pub fn merge(target: &mut Vec<VocabularyEntry>, incoming: Vec<VocabularyEntry>) 
                     &entry.approval_department_code,
                     &mut existing.approval_department_code,
                 ),
+                (&entry.duties, &mut existing.duties),
+                (&entry.profile, &mut existing.profile),
             ] {
                 if !incoming.is_empty() && *slot != *incoming {
                     *slot = incoming.clone();
@@ -725,6 +736,7 @@ fn write_unit_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) -> R
     sheet.write_string(row, 6, entry.aliases.join("、"))?;
     sheet.write_string(row, 7, entry.note.trim())?;
     sheet.write_string(row, 8, entry.approval_department_code.trim())?;
+    sheet.write_string(row, 9, entry.duties.trim())?;
     Ok(())
 }
 
@@ -742,6 +754,7 @@ fn write_person_row(sheet: &mut Worksheet, row: u32, entry: &VocabularyEntry) ->
     sheet.write_string(row, 5, handle)?;
     sheet.write_string(row, 6, entry.aliases.join("、"))?;
     sheet.write_string(row, 7, entry.note.trim())?;
+    sheet.write_string(row, 8, entry.profile.trim())?;
     Ok(())
 }
 
@@ -842,10 +855,12 @@ mod tests {
         let mut unit = some_unit("00", "甲单位");
         unit.department_code = "甲函".into();
         unit.approval_department_code = "甲呈".into();
+        unit.duties = "负责公共数据归集、共享与开放".into();
         to_xlsx(&[unit], &path, &codes(&["00"])).unwrap();
         let report = parse(&path, &codes(&["00"])).unwrap();
         assert_eq!(report.entries[0].department_code, "甲函");
         assert_eq!(report.entries[0].approval_department_code, "甲呈");
+        assert_eq!(report.entries[0].duties, "负责公共数据归集、共享与开放");
     }
 
     #[test]
@@ -866,6 +881,7 @@ mod tests {
         let report = parse(&path, &codes(&["00"])).unwrap();
         assert_eq!(report.entries[0].department_code, "甲函");
         assert!(report.entries[0].approval_department_code.is_empty());
+        assert!(report.entries[0].duties.is_empty(), "旧模板没有职能任务列");
     }
 
     #[test]
@@ -881,6 +897,7 @@ mod tests {
                 p.phone = "010-1234".into();
                 p.can_handle_parent_unit = true;
                 p.aliases = vec!["张处".into()];
+                p.profile = "分管网络舆情研判，长期从事新闻发布工作".into();
                 p
             },
         ];
@@ -898,6 +915,7 @@ mod tests {
         assert_eq!(person.phone, "010-1234");
         assert!(person.can_handle_parent_unit);
         assert_eq!(person.aliases, ["张处"]);
+        assert_eq!(person.profile, "分管网络舆情研判，长期从事新闻发布工作");
     }
 
     #[test]

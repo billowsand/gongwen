@@ -866,6 +866,10 @@ pub struct VocabularyEntry {
     pub department_code: String,
     /// 单位专属：呈批代字，红头呈批件选中发文单位时自动带出。
     pub approval_department_code: String,
+    /// 单位专属：职能任务（主要职责、分管事项）。智能体分配任务、推荐责任单位时按它对号。
+    pub duties: String,
+    /// 人员专属：个人简介（分管领域、专长、经历）。智能体推荐联系人、负责人时参考。
+    pub profile: String,
     /// 单位专属：以该单位作为公函落款（联合发文时为主发文单位）时是否自动标注“（代章）”。
     /// 仅公函盖章；电话通知等其他文种不适用，一律不标注。
     pub seal_on_behalf: bool,

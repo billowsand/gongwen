@@ -8,8 +8,8 @@
 //! 只有措辞、方向这类没有标准答案的才用模型出的选项。缺口题的回答怎么落到工作稿见
 //! `apply_gap_replies`：这里是确定性的兜底，界面上先交模型把答案写进所在段落、过闸门。
 
-use super::gaps::{Gap, GapKind, GapStatus, Ledger};
-use crate::models::TemplateKind;
+use super::gaps::{Gap, GapKind, GapStatus, Ledger, find_placeholders};
+use crate::models::{TemplateKind, VocabularyCategory, VocabularyEntry};
 
 /// 选项被选中后做什么。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -263,8 +263,78 @@ fn is_time(hint: &str) -> bool {
         .any(|word| hint.contains(word))
 }
 
+/// 缺口在问哪类人或单位：按职能任务 / 个人简介从标准词库里给候选。
+fn who_kind(hint: &str) -> Option<VocabularyCategory> {
+    let has = |words: &[&str]| words.iter().any(|word| hint.contains(word));
+    if has(&["联系人", "负责人", "经办人", "人员"]) {
+        Some(VocabularyCategory::Person)
+    } else if has(&["单位", "部门", "牵头", "责任", "承办", "主办", "配合"]) {
+        Some(VocabularyCategory::Unit)
+    } else {
+        None
+    }
+}
+
+/// 标准词库里职能对得上的单位或人员，做成选项（最多 3 个）。选中就把名称写进去。
+pub(crate) fn vocabulary_choices(
+    vocabulary: &[VocabularyEntry],
+    category: VocabularyCategory,
+    task: &str,
+    with_phone: bool,
+) -> Vec<Choice> {
+    let clip = |text: &str| -> String {
+        let text = text.trim().replace('\n', "；");
+        if text.chars().count() > 40 {
+            text.chars().take(40).collect::<String>() + "…"
+        } else {
+            text
+        }
+    };
+    super::tools::vocab::suggest(vocabulary, category, task, 3)
+        .into_iter()
+        .map(|entry| {
+            let name = entry.canonical.trim().to_string();
+            let (label, detail, value) = match category {
+                VocabularyCategory::Unit => (
+                    name.clone(),
+                    format!("标准词库 · 职能：{}", clip(&entry.duties)),
+                    name,
+                ),
+                _ => {
+                    let unit = super::tools::vocab::unit_of(vocabulary, entry);
+                    let role: Vec<&str> = [entry.position.trim(), unit]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect();
+                    let value = if with_phone && !entry.phone.trim().is_empty() {
+                        format!("{name}，联系电话：{}", entry.phone.trim())
+                    } else {
+                        name.clone()
+                    };
+                    (
+                        if role.is_empty() {
+                            name
+                        } else {
+                            format!("{name}（{}）", role.join(" · "))
+                        },
+                        format!("标准词库 · 简介：{}", clip(&entry.profile)),
+                        value,
+                    )
+                }
+            };
+            Choice {
+                label,
+                detail,
+                recommended: false,
+                action: Action::Fill(value),
+            }
+        })
+        .collect()
+}
+
 /// 一个缺口对应的选择题。题面只问一件事；所在小节与整句由侧栏按 `Target::Gap` 回查台账显示。
-pub(crate) fn gap_question(id: usize, gap: &Gap) -> Question {
+/// 问的是单位或人员时，按标准词库里的职能任务 / 个人简介给候选。
+pub(crate) fn gap_question(id: usize, gap: &Gap, vocabulary: &[VocabularyEntry]) -> Question {
     let choice = |label: &str, detail: &str, recommended: bool, action: Action| Choice {
         label: label.into(),
         detail: detail.into(),
@@ -298,6 +368,13 @@ pub(crate) fn gap_question(id: usize, gap: &Gap) -> Question {
         ),
         GapKind::NeedsUser | GapKind::Retrievable => {
             let mut choices = Vec::new();
+            if let Some(category) = who_kind(&gap.hint) {
+                let task = find_placeholders(&gap.sentence)
+                    .iter()
+                    .fold(gap.sentence.clone(), |text, p| text.replace(&p.literal, ""));
+                let with_phone = gap.hint.contains("联系人") || gap.hint.contains("电话");
+                choices.extend(vocabulary_choices(vocabulary, category, &task, with_phone));
+            }
             if is_time(&gap.hint) {
                 choices.push(choice(
                     "另行通知",
@@ -331,14 +408,18 @@ pub(crate) fn gap_question(id: usize, gap: &Gap) -> Question {
 }
 
 /// 第一稿之后要问的题，最多 `max` 道。
-pub(crate) fn gap_questions(ledger: &Ledger, max: usize) -> Vec<Question> {
+pub(crate) fn gap_questions(
+    ledger: &Ledger,
+    max: usize,
+    vocabulary: &[VocabularyEntry],
+) -> Vec<Question> {
     ledger
         .needs_user()
         .into_iter()
         .filter_map(|id| ledger.get(id))
         .take(max)
         .enumerate()
-        .map(|(index, gap)| gap_question(index + 1, gap))
+        .map(|(index, gap)| gap_question(index + 1, gap, vocabulary))
         .collect()
 }
 
@@ -587,9 +668,9 @@ mod tests {
         ledger.sync(text, "", &[]);
         // 第四个是来源不明的文件名；检索过、找不到出处才出题。
         assert_eq!(ledger.gaps[3].kind, GapKind::Untraced);
-        assert_eq!(gap_questions(&ledger, 4).len(), 3, "来源不明的先去查");
+        assert_eq!(gap_questions(&ledger, 4, &[]).len(), 3, "来源不明的先去查");
         ledger.gaps[3].status = GapStatus::NoAnswer;
-        let questions = gap_questions(&ledger, 4);
+        let questions = gap_questions(&ledger, 4, &[]);
         let texts: Vec<_> = questions.iter().map(|q| q.text.as_str()).collect();
         assert_eq!(
             texts[..3],
@@ -624,7 +705,7 @@ mod tests {
         assert_eq!(ledger.gaps[2].status, GapStatus::Dropped);
         assert_eq!(ledger.gaps[3].status, GapStatus::Skipped);
         // 处理过的不再出题。
-        assert!(gap_questions(&ledger, 4).is_empty());
+        assert!(gap_questions(&ledger, 4, &[]).is_empty());
     }
 
     #[test]
@@ -633,6 +714,57 @@ mod tests {
         assert_eq!(
             drop_sentence(text, "【待核实：时限】"),
             "一、加强巡查。其余照旧。\n"
+        );
+    }
+
+    #[test]
+    fn unit_and_person_gaps_offer_matches_from_the_vocabulary() {
+        let entry = |category, name: &str, about: &str| VocabularyEntry {
+            category,
+            canonical: name.into(),
+            duties: if category == VocabularyCategory::Unit {
+                about.into()
+            } else {
+                String::new()
+            },
+            profile: if category == VocabularyCategory::Person {
+                about.into()
+            } else {
+                String::new()
+            },
+            phone: "12345678".into(),
+            position: "科长".into(),
+            ..VocabularyEntry::default()
+        };
+        let vocabulary = [
+            entry(
+                VocabularyCategory::Unit,
+                "市数据局",
+                "负责公共数据共享与开放",
+            ),
+            entry(VocabularyCategory::Unit, "市应急局", "负责应急救援"),
+            entry(
+                VocabularyCategory::Person,
+                "李四",
+                "长期从事数据共享平台运维",
+            ),
+        ];
+        let text = "由【待核实：牵头单位】负责数据共享平台建设。联系人：【待核实：联系人】，负责数据共享平台对接。";
+        let mut ledger = Ledger::default();
+        ledger.sync(text, "", &[]);
+        let questions = gap_questions(&ledger, 4, &vocabulary);
+        let labels = |q: &Question| {
+            q.choices
+                .iter()
+                .map(|c| c.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(&questions[0]), ["市数据局", "删去这项"]);
+        assert_eq!(labels(&questions[1]), ["李四（科长）", "删去这项"]);
+        assert_eq!(
+            questions[1].choices[0].action,
+            Action::Fill("李四，联系电话：12345678".into()),
+            "联系人带上词库里的电话"
         );
     }
 }

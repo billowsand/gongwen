@@ -343,7 +343,7 @@ mod tests {
     fn setup() -> (Ledger, Vec<Question>) {
         let mut ledger = Ledger::default();
         ledger.sync(RAW, "", &[]);
-        let questions = gap_questions(&ledger, 4);
+        let questions = gap_questions(&ledger, 4, &[]);
         (ledger, questions)
     }
 
@@ -415,7 +415,7 @@ mod tests {
         let raw = "# 函\n\n联系人：【待核实：联系人】。\n\n此函。\n";
         let mut ledger = Ledger::default();
         ledger.sync(raw, "", &[]);
-        let questions = gap_questions(&ledger, 4);
+        let questions = gap_questions(&ledger, 4, &[]);
         let drop = questions[0]
             .choices
             .iter()

@@ -7,8 +7,8 @@
 //! 摘出那几个字。摘录在要求原文里找不到的，按没给处理——模型说「给了」不算数。
 //! 缺的项出成选择题；选项只有程序给的「另行通知」「不写」，具体值一律由起草人填。
 
-use super::clarify::{Action, Choice, Question, Target};
-use crate::models::TemplateKind;
+use super::clarify::{Action, Choice, Question, Target, vocabulary_choices};
+use crate::models::{TemplateKind, VocabularyCategory, VocabularyEntry};
 
 /// 六要素。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -221,12 +221,14 @@ const MAX_QUESTION_CHARS: usize = 30;
 
 /// 按模型的判断出题：缺的、摘录对不上原文的必备项。题号从 `first_id` 起，最多 `max` 道，
 /// 必备的排在前面。模型的回复一行都解析不出来时不出题——宁可少问，不要按坏输出乱问。
+///
+/// 「何人」问的是单位时（致函对象、责任单位、经办单位），按标准词库的职能任务给候选。
 pub(crate) fn questions(
     kind: TemplateKind,
     request: &str,
     reply: &str,
-    first_id: usize,
-    max: usize,
+    (first_id, max): (usize, usize),
+    vocabulary: &[VocabularyEntry],
 ) -> Vec<Question> {
     let parsed = parse(reply);
     if parsed.is_empty() || max == 0 {
@@ -259,8 +261,37 @@ pub(crate) fn questions(
         .into_iter()
         .take(max)
         .enumerate()
-        .map(|(index, (scope, question))| question_for(first_id + index, scope, &question))
+        .map(|(index, (scope, question))| {
+            let mut asked = question_for(first_id + index, scope, &question);
+            if scope.element == Element::Who
+                && let Some(role) = unit_role(kind)
+            {
+                let picks =
+                    vocabulary_choices(vocabulary, VocabularyCategory::Unit, request, false)
+                        .into_iter()
+                        .filter_map(|mut choice| {
+                            let Action::Fill(name) = &choice.action else {
+                                return None;
+                            };
+                            choice.action =
+                                Action::Note(format!("{role}：{name}（起草人从标准词库选定）"));
+                            Some(choice)
+                        });
+                asked.choices.splice(0..0, picks);
+            }
+            asked
+        })
         .collect()
+}
+
+/// 「何人」里能从标准词库按职能挑的那个角色。会议的参会人员不在此列。
+fn unit_role(kind: TemplateKind) -> Option<&'static str> {
+    match kind {
+        TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => Some("致函对象"),
+        TemplateKind::PlainDocument => Some("责任单位"),
+        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => Some("经办单位"),
+        TemplateKind::MeetingAgenda | TemplateKind::ResearchReport => None,
+    }
 }
 
 fn question_for(id: usize, scope: Scope, model_question: &str) -> Question {
@@ -347,7 +378,7 @@ mod tests {
                      何时｜缺｜研究方案请对方什么时候前反馈？\n\
                      何地｜不适用\n\
                      何法｜已给｜请贵局书面函复";
-        let questions = questions(TemplateKind::OfficialLetter, REQUEST, reply, 1, 4);
+        let questions = questions(TemplateKind::OfficialLetter, REQUEST, reply, (1, 4), &[]);
         let texts: Vec<_> = questions.iter().map(|q| q.text.as_str()).collect();
         // 「请贵局书面函复」原文里没有：模型说给了不算数，必备项照问。
         assert_eq!(
@@ -363,14 +394,14 @@ mod tests {
 
     #[test]
     fn unparsable_replies_ask_nothing_and_optional_items_need_an_explicit_gap() {
-        assert!(questions(TemplateKind::OfficialLetter, REQUEST, "好的", 1, 4).is_empty());
+        assert!(questions(TemplateKind::OfficialLetter, REQUEST, "好的", (1, 4), &[]).is_empty());
         // 只提了一项：没提到的必备项照问，没提到的非必备项（何地）不问。
         let questions = questions(
             TemplateKind::OfficialLetter,
             REQUEST,
             "何事｜已给｜商请共建",
-            1,
-            9,
+            (1, 9),
+            &[],
         );
         assert!(
             questions
@@ -384,12 +415,50 @@ mod tests {
     fn research_reports_have_no_checklist_and_the_cap_keeps_required_first() {
         assert!(checklist(TemplateKind::ResearchReport).is_empty());
         let reply = "何事｜缺｜办什么\n何地｜缺｜在哪里\n何时｜缺｜什么时候";
-        let questions = questions(TemplateKind::MeetingAgenda, "", reply, 3, 2);
+        let questions = questions(TemplateKind::MeetingAgenda, "", reply, (3, 2), &[]);
         assert_eq!(questions[0].id, 3);
         assert!(
             questions
                 .iter()
                 .all(|q| q.target != Target::Element(Element::Why))
+        );
+    }
+
+    #[test]
+    fn the_who_question_offers_units_whose_duties_match_the_request() {
+        use crate::models::VocabularyEntry;
+        let unit = |name: &str, duties: &str| VocabularyEntry {
+            category: VocabularyCategory::Unit,
+            canonical: name.into(),
+            duties: duties.into(),
+            ..VocabularyEntry::default()
+        };
+        let vocabulary = [
+            unit(
+                "市数据局",
+                "负责公共数据归集、共享与开放，统筹数据资源平台建设",
+            ),
+            unit("市应急局", "负责安全生产综合监督管理和应急救援"),
+        ];
+        let request = "给有关部门发函，商请共建公共数据研究平台，推动数据共享。";
+        let reply = "何人｜缺｜发给谁？";
+        let questions = questions(
+            TemplateKind::OfficialLetter,
+            request,
+            reply,
+            (1, 9),
+            &vocabulary,
+        );
+        let who = questions
+            .iter()
+            .find(|q| q.target == Target::Element(Element::Who))
+            .expect("何人要问");
+        assert_eq!(who.choices.len(), 1, "只有职能对得上的");
+        assert_eq!(who.choices[0].label, "市数据局");
+        assert!(who.choices[0].detail.contains("职能"));
+        assert_eq!(
+            who.choices[0].action,
+            Action::Note("致函对象：市数据局（起草人从标准词库选定）".into())
         );
     }
 

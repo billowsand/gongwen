@@ -67,8 +67,8 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
             ctx.board.draft.kind,
             &request,
             &reply,
-            questions.len() + 1,
-            element_max,
+            (questions.len() + 1, element_max),
+            ctx.env.vocabulary,
         );
         if !asked.is_empty() {
             tool_line(

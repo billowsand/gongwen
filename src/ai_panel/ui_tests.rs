@@ -274,7 +274,7 @@ fn research_answers_are_written_in_by_a_background_job_and_fall_back_when_the_mo
         .to_string();
     let mut ledger = Ledger::default();
     ledger.sync(&raw, "", &[]);
-    let questions = gap_questions(&ledger, 4);
+    let questions = gap_questions(&ledger, 4, &[]);
     assert_eq!(questions.len(), 1);
     harness.doc.ai_panel.open = true;
     let panel = &mut harness.doc.ai_panel;

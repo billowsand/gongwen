@@ -17,6 +17,71 @@ fn matches(entry: &VocabularyEntry, query: &str) -> bool {
         || entry.aliases.iter().any(|alias| alias.contains(query))
 }
 
+/// 按名称找，也按职能任务 / 个人简介找：「谁管数据共享」查「数据共享」就能找到。
+fn matches_with_duties(entry: &VocabularyEntry, query: &str) -> bool {
+    matches(entry, query) || entry.duties.contains(query) || entry.profile.contains(query)
+}
+
+/// 职能对号时不算数的常见字对：哪个单位的职能里都有。
+const COMMON_PAIRS: [&str; 16] = [
+    "工作", "负责", "有关", "相关", "开展", "组织", "落实", "加强", "推进", "做好", "承担", "协调",
+    "指导", "管理", "建设", "单位",
+];
+
+/// 汉字两两相邻的字对。
+fn pairs(text: &str) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = text
+        .chars()
+        .filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch))
+        .collect();
+    chars
+        .windows(2)
+        .map(|pair| pair.iter().collect::<String>())
+        .filter(|pair| !COMMON_PAIRS.contains(&pair.as_str()))
+        .collect()
+}
+
+/// 按职能任务（单位）或个人简介（人员）给一件事挑候选：字对重合两组以上才算对得上，按重合多少排，
+/// 最多 `max` 个。只读标准词库，候选由用户点选（红线 2：描述类要素的值来自标准词库并注明出处）。
+pub(crate) fn suggest<'a>(
+    vocabulary: &'a [VocabularyEntry],
+    category: VocabularyCategory,
+    task: &str,
+    max: usize,
+) -> Vec<&'a VocabularyEntry> {
+    let wanted = pairs(task);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, &VocabularyEntry)> = vocabulary
+        .iter()
+        .filter(|entry| entry.category == category && !entry.canonical.trim().is_empty())
+        .filter_map(|entry| {
+            let about = match category {
+                VocabularyCategory::Unit => &entry.duties,
+                _ => &entry.profile,
+            };
+            let score = pairs(about).intersection(&wanted).count();
+            (score >= 2).then_some((score, entry))
+        })
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .take(max)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// 人员所属单位的名称（候选的说明里用）。
+pub(crate) fn unit_of<'a>(vocabulary: &'a [VocabularyEntry], person: &VocabularyEntry) -> &'a str {
+    // 未归属的人员：编码为空，别和编码同样为空的单位对上。
+    if person.unit.trim().is_empty() {
+        return "";
+    }
+    unit_name(vocabulary, &person.unit)
+}
+
 fn unit_name<'a>(vocabulary: &'a [VocabularyEntry], code: &str) -> &'a str {
     vocabulary
         .iter()
@@ -34,11 +99,12 @@ impl Tool for Units {
         Permission::Read
     }
     fn description(&self) -> &'static str {
-        "查标准词库里的单位：规范名称、对外名称、简称、别名、层级编码与上级单位"
+        "查标准词库里的单位：规范名称、对外名称、简称、别名、层级编码、上级单位与职能任务。\
+         分配任务、定牵头或责任单位时用 query 写事项关键词，按职能任务对号"
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            optional("query", "按名称、简称或别名找"),
+            optional("query", "按名称、简称、别名或职能任务里的关键词找"),
             optional("parent", "只列这个单位的下级（写单位名称）"),
         ];
         INPUTS
@@ -62,7 +128,9 @@ impl Tool for Units {
         };
         let rows: Vec<Value> = vocabulary
             .iter()
-            .filter(|e| e.category == VocabularyCategory::Unit && matches(e, query.trim()))
+            .filter(|e| {
+                e.category == VocabularyCategory::Unit && matches_with_duties(e, query.trim())
+            })
             .filter(|e| parent_code.as_ref().is_none_or(|code| &e.parent == code))
             .take(MAX_ROWS)
             .map(|e| {
@@ -73,6 +141,7 @@ impl Tool for Units {
                     "aliases": e.aliases,
                     "code": e.code,
                     "parent": unit_name(vocabulary, &e.parent),
+                    "duties": e.duties,
                 })
             })
             .collect();
@@ -94,11 +163,12 @@ impl Tool for Persons {
         Permission::Read
     }
     fn description(&self) -> &'static str {
-        "查标准词库里的人员：姓名、职务、所属单位。电话默认不给，技能声明 vocab.persons.phone 才返回"
+        "查标准词库里的人员：姓名、职务、所属单位、个人简介。推荐联系人、负责人时用 query 写事项关键词，\
+         按个人简介对号。电话默认不给，技能声明 vocab.persons.phone 才返回"
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            optional("query", "按姓名找"),
+            optional("query", "按姓名或个人简介里的关键词找"),
             optional("unit", "只列这个单位的人员（写单位名称）"),
         ];
         INPUTS
@@ -119,7 +189,9 @@ impl Tool for Persons {
         });
         let rows: Vec<Value> = vocabulary
             .iter()
-            .filter(|e| e.category == VocabularyCategory::Person && matches(e, query.trim()))
+            .filter(|e| {
+                e.category == VocabularyCategory::Person && matches_with_duties(e, query.trim())
+            })
             .filter(|e| unit_code.as_ref().is_none_or(|code| &e.unit == code))
             .take(MAX_ROWS)
             .map(|e| {
@@ -127,6 +199,7 @@ impl Tool for Persons {
                     "name": e.canonical,
                     "position": e.position,
                     "unit": unit_name(vocabulary, &e.unit),
+                    "profile": e.profile,
                     "note": e.note,
                 });
                 if with_phone {

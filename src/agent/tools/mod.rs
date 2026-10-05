@@ -20,7 +20,7 @@ mod doc;
 mod http;
 mod interact;
 mod store;
-mod vocab;
+pub(crate) mod vocab;
 mod workspace;
 
 pub(crate) use interact::ASSIST_SYSTEM;

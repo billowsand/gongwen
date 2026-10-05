@@ -142,6 +142,9 @@ fn new_draft_prompt(
             });
         }
     }
+    if let Some(block) = duties_block(&board.request_with_notes(), ctx.env.vocabulary) {
+        extra.push(block);
+    }
     let reference = extra
         .iter()
         .filter(|text| !text.trim().is_empty())
@@ -152,6 +155,38 @@ fn new_draft_prompt(
         ctx.env.vocabulary,
         &material_block(board),
         &reference,
+    ))
+}
+
+/// 要求里要分工、定牵头或责任单位时，附上标准词库里职能对得上的单位，让模型按职能对号，
+/// 不凭印象派活。词库里没有职能任务、或一个都对不上就不附。
+fn duties_block(request: &str, vocabulary: &[crate::models::VocabularyEntry]) -> Option<String> {
+    const ASSIGNING: [&str; 7] = ["分工", "牵头", "负责", "责任单位", "配合", "承办", "分配"];
+    if !ASSIGNING.iter().any(|word| request.contains(word)) {
+        return None;
+    }
+    let units = crate::agent::tools::vocab::suggest(
+        vocabulary,
+        crate::models::VocabularyCategory::Unit,
+        request,
+        8,
+    );
+    if units.is_empty() {
+        return None;
+    }
+    let lines: String = units
+        .iter()
+        .map(|unit| {
+            format!(
+                "\n- {}：{}",
+                unit.canonical.trim(),
+                unit.duties.trim().replace('\n', "；")
+            )
+        })
+        .collect();
+    Some(format!(
+        "【标准词库里职能相关的单位】（分工、确定牵头或责任单位时按职能对号；只能从这里或材料里选，\
+         都不合适就写「【待核实：牵头单位】」，不要凭印象指派）{lines}"
     ))
 }
 
@@ -343,4 +378,28 @@ fn material_block(board: &Board) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod duties_tests {
+    use super::duties_block;
+    use crate::models::{VocabularyCategory, VocabularyEntry};
+
+    #[test]
+    fn units_are_offered_by_duty_only_when_work_is_being_assigned() {
+        let vocabulary = [VocabularyEntry {
+            category: VocabularyCategory::Unit,
+            canonical: "市数据局".into(),
+            duties: "负责公共数据归集、共享与开放".into(),
+            ..VocabularyEntry::default()
+        }];
+        let block = duties_block("起草通知，明确公共数据共享的牵头单位和分工。", &vocabulary)
+            .expect("要分工，就附职能");
+        assert!(
+            block.contains("- 市数据局：负责公共数据归集、共享与开放"),
+            "{block}"
+        );
+        assert!(duties_block("起草通知，推进公共数据共享。", &vocabulary).is_none());
+        assert!(duties_block("起草通知，明确应急救援分工。", &vocabulary).is_none());
+    }
 }

@@ -711,7 +711,7 @@ pub(crate) fn finish_research_revision(
     let draft = crate::draft_page::reviewed_draft(&doc.draft, config, &research.raw, false);
     let summary =
         GongwenApp::install_ai_proposal(doc, before, draft, label.to_string(), &config.vocabulary);
-    let remaining = clarify::gap_questions(&research.ledger, BATCH_QUESTIONS);
+    let remaining = clarify::gap_questions(&research.ledger, BATCH_QUESTIONS, &config.vocabulary);
     let panel = &mut doc.ai_panel;
     let Some(id) = panel.running_turn_mut().map(|turn| turn.id) else {
         return;

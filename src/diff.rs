@@ -835,6 +835,8 @@ fn vocab_field_changes(a: &VocabularyEntry, b: &VocabularyEntry) -> Vec<FieldCha
             .into(),
         });
     }
+    field(&mut out, "职能任务", &a.duties, &b.duties);
+    field(&mut out, "个人简介", &a.profile, &b.profile);
     field(&mut out, "备注", &a.note, &b.note);
     out
 }

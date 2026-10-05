@@ -1484,6 +1484,23 @@ impl GongwenApp {
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(10.0);
+        ui.strong("职能任务");
+        ui.add_space(4.0);
+        wrapped_hint(
+            ui,
+            "主要职责、分管事项，一行一项。AI 分配任务、推荐牵头或责任单位时按它对号。",
+            width + 96.0,
+        );
+        ui.add_space(4.0);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.config.vocabulary[index].duties)
+                .hint_text("如：负责公共数据归集、共享与开放；统筹政务信息化项目建设")
+                .desired_rows(3)
+                .desired_width(width + 96.0),
+        );
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
         ui.strong("检索与备注");
         ui.add_space(8.0);
         egui::Grid::new(("unit_search_editor", index))
@@ -1640,6 +1657,23 @@ impl GongwenApp {
                 );
                 ui.end_row();
             });
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(10.0);
+        ui.strong("个人简介");
+        ui.add_space(4.0);
+        wrapped_hint(
+            ui,
+            "分管领域、专长、经历。AI 推荐联系人、负责人时参考。",
+            width + 96.0,
+        );
+        ui.add_space(4.0);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.config.vocabulary[index].profile)
+                .hint_text("如：分管数据资源处，长期从事数据共享与安全管理")
+                .desired_rows(3)
+                .desired_width(width + 96.0),
+        );
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(10.0);
