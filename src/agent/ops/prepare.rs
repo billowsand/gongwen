@@ -59,6 +59,7 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         let locals = [
             ("kind", ctx.board.draft.kind.label().to_string()),
             ("checklist", elements::checklist_text(&checklist)),
+            ("today", crate::prompt::TimeContext::now().today),
             ("request", request.clone()),
         ];
         let text = ctx.board.render_with(template, &locals);

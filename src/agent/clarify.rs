@@ -28,6 +28,8 @@ pub(crate) enum Action {
     Fill(String),
     /// 删去这一项：连同只为它服务的说法一起去掉。
     Drop,
+    /// AI 建议的写法：点了填进自己填写框，用户可以接着改；交上去时按自己填的算。
+    Suggest(String),
     /// 通用选择题（`ask.choice`）：选中项的值存进步骤的 `save_as` 变量。
     Pick(serde_json::Value),
 }
@@ -407,6 +409,117 @@ pub(crate) fn gap_question(id: usize, gap: &Gap, vocabulary: &[VocabularyEntry])
     }
 }
 
+/// 只有起草人知道、AI 不该猜的：金额、数量、联系方式、编号。这类缺口不出建议。
+fn secret(hint: &str) -> bool {
+    const WORDS: [&str; 11] = [
+        "金额", "经费", "预算", "资金", "数额", "人数", "电话", "手机", "邮箱", "编号", "文号",
+    ];
+    (hint.chars().count() >= 2 && hint.ends_with('数')) || WORDS.iter().any(|w| hint.contains(w))
+}
+
+/// 一道题能不能交 AI 出建议写法：缺口题里不是来源不明的事实（那是核对真假，不是选写法）、
+/// 不是单位人员（候选来自标准词库）、不是金额电话这类只有起草人知道的。
+fn suggestable(question: &Question, ledger: &Ledger) -> Option<(usize, String, String)> {
+    let Target::Gap(id) = question.target else {
+        return None;
+    };
+    let gap = ledger.get(id)?;
+    if gap.kind == GapKind::Untraced || who_kind(&gap.hint).is_some() || secret(&gap.hint) {
+        return None;
+    }
+    let sentence = super::evidence::strip_citations(&gap.sentence)
+        .trim()
+        .to_string();
+    Some((question.id, gap.hint.clone(), sentence))
+}
+
+/// 给起草后的确认题要建议写法的提示词；一道能出建议的都没有就是 `None`。
+pub(crate) fn suggestion_prompt(
+    questions: &[Question],
+    ledger: &Ledger,
+    request: &str,
+    today: &str,
+) -> Option<String> {
+    let items: Vec<String> = questions
+        .iter()
+        .filter_map(|question| suggestable(question, ledger))
+        .map(|(id, hint, sentence)| format!("{id}. 「{hint}」　原句：{sentence}"))
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let request = request.trim();
+    let request: String = if request.chars().count() > 600 {
+        request.chars().take(600).collect::<String>() + "…"
+    } else {
+        request.to_string()
+    };
+    Some(format!(
+        "下面是一份公文稿里还没定下来的几处，起草人要逐一确认。为每一处给 2 到 3 个建议写法，\
+         供起草人参考挑选、修改。
+
+【背景】
+{request}
+【今天】{today}
+
+{}
+
+要求：
+1. 建议要具体、能直接写进这句话，例如时限写「收到本函后15个工作日内」「{today}起一个月内」，\
+方式写「书面函复」「通过电子邮件报送」；
+2. 不要编单位、人名、电话、金额；拿不准的这一处写「无」；
+3. 每处一行，格式严格如下：题号｜建议1｜建议2｜建议3",
+        items.join("\n")
+    ))
+}
+
+/// 模型的建议 → 过闸门后挂到题上：每条不超过 30 字、不重复、不含占位，每题最多 3 条。
+pub(crate) fn add_suggestions(questions: &mut [Question], reply: &str) {
+    for line in reply.lines() {
+        // 「1｜甲｜乙」，模型也常写成「1. 甲｜乙」。
+        let line = line.trim();
+        let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let Ok(id) = line[..digits].parse::<usize>() else {
+            continue;
+        };
+        let rest = line[digits..].trim_start_matches(['.', '、', ')', '）', '．', '｜', '|', ' ']);
+        let Some(question) = questions.iter_mut().find(|q| q.id == id) else {
+            continue;
+        };
+        let values: Vec<String> = rest.split(['｜', '|']).map(str::to_string).collect();
+        question
+            .choices
+            .extend(suggestion_choices(&question.choices, &values));
+    }
+}
+
+/// 一组建议写法 → 选项。`existing` 里已有的（程序给的选项）不重复出。
+pub(crate) fn suggestion_choices(existing: &[Choice], values: &[String]) -> Vec<Choice> {
+    let mut out: Vec<Choice> = Vec::new();
+    for value in values {
+        let value = value
+            .trim()
+            .trim_matches(['「', '」', '“', '”', '"', '。'])
+            .trim();
+        let count = value.chars().count();
+        let junk = value.is_empty()
+            || count > 30
+            || matches!(value, "无" | "建议1" | "建议2" | "建议3")
+            || value.contains("待核实");
+        let seen = existing.iter().chain(&out).any(|c| c.label == value);
+        if junk || seen || out.len() >= 3 {
+            continue;
+        }
+        out.push(Choice {
+            label: value.to_string(),
+            detail: "AI 建议，点了填进下面的框，可以接着改".into(),
+            recommended: false,
+            action: Action::Suggest(value.to_string()),
+        });
+    }
+    out
+}
+
 /// 第一稿之后要问的题，最多 `max` 道。
 pub(crate) fn gap_questions(
     ledger: &Ledger,
@@ -440,6 +553,12 @@ pub(crate) fn resolve_predraft(
             Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
                 Some(Action::SwitchKind(target)) => switch = Some(*target),
                 Some(Action::Note(note)) => notes.push(note.clone()),
+                Some(Action::Suggest(value)) => notes.push(match question.target {
+                    Target::Element(element) => {
+                        super::elements::note_for(kind, element, Some(value))
+                    }
+                    _ => format!("{}{value}", question.text),
+                }),
                 _ => {}
             },
             Reply::Custom(text) if !text.trim().is_empty() => {
@@ -516,7 +635,7 @@ pub(crate) fn gap_edit(question: &Question, reply: &Reply) -> GapEdit {
     match reply {
         Reply::Custom(value) if !value.trim().is_empty() => GapEdit::Fill(value.trim().into()),
         Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
-            Some(Action::Fill(value)) => GapEdit::Fill(value.clone()),
+            Some(Action::Fill(value) | Action::Suggest(value)) => GapEdit::Fill(value.clone()),
             Some(Action::Drop) => GapEdit::Drop,
             Some(Action::MarkPending) => GapEdit::MarkPending,
             Some(Action::KeepOriginal) => GapEdit::Keep,
@@ -766,5 +885,40 @@ mod tests {
             Action::Fill("李四，联系电话：12345678".into()),
             "联系人带上词库里的电话"
         );
+    }
+
+    #[test]
+    fn suggestions_are_asked_only_where_ai_may_guess_and_gated() {
+        let text = "请于【待核实：反馈时限】前以【待核实：报送方式】报送，经费【待核实：经费数额】万元。\
+                    联系人：【待核实：联系人】。";
+        let mut ledger = Ledger::default();
+        ledger.sync(text, "", &[]);
+        let mut questions = gap_questions(&ledger, 4, &[]);
+        let prompt = suggestion_prompt(&questions, &ledger, "起草通知", "2026年10月5日").unwrap();
+        assert!(prompt.contains("1. 「反馈时限」"), "{prompt}");
+        assert!(prompt.contains("2. 「报送方式」"), "{prompt}");
+        assert!(!prompt.contains("「经费数额」"), "金额不让 AI 猜");
+        assert!(!prompt.contains("「联系人」"), "人员的候选来自标准词库");
+        add_suggestions(
+            &mut questions,
+            "1｜收到本通知后10个工作日内｜另行通知｜【待核实：时限】\n\
+             2. 书面形式｜无\n\
+             9｜不存在的题",
+        );
+        let suggested = |q: &Question| {
+            q.choices
+                .iter()
+                .filter(|c| matches!(c.action, Action::Suggest(_)))
+                .map(|c| c.label.clone())
+                .collect::<Vec<_>>()
+        };
+        // 「另行通知」程序已经给了，不重复；带占位的丢掉。
+        assert_eq!(suggested(&questions[0]), ["收到本通知后10个工作日内"]);
+        assert_eq!(suggested(&questions[1]), ["书面形式"]);
+        let edit = gap_edit(
+            &questions[0],
+            &Reply::Choice(questions[0].choices.len() - 1),
+        );
+        assert_eq!(edit, GapEdit::Fill("收到本通知后10个工作日内".into()));
     }
 }

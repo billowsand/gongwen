@@ -119,9 +119,22 @@ pub(super) fn ask(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<
     let max = param(ctx, step, &["max", "batch_questions"], 4, 1..=10);
     let board = &mut *ctx.board;
     board.ledger.mark_declined(&board.notes);
-    let questions = clarify::gap_questions(&ctx.board.ledger, max, ctx.env.vocabulary);
+    let mut questions = clarify::gap_questions(&ctx.board.ledger, max, ctx.env.vocabulary);
     if questions.is_empty() {
         return Ok(Flow::Next);
+    }
+    // 不让人对着空框发愣：能出建议写法的，交辅助模型一次出齐。出错就不给建议，题照问。
+    if let Some(text) = clarify::suggestion_prompt(
+        &questions,
+        &ctx.board.ledger,
+        &ctx.board.request,
+        &crate::prompt::TimeContext::now().today,
+    ) {
+        check_cancel(ctx)?;
+        phase(ctx, "给待确认的几处想几个建议写法…");
+        if let Ok(reply) = assist(ctx, &text) {
+            clarify::add_suggestions(&mut questions, &reply);
+        }
     }
     tool_line(
         ctx,

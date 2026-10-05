@@ -780,15 +780,66 @@ fn gap_context_ui(ui: &mut egui::Ui, context: &GapContext, action: &mut Option<C
     }
 }
 
+/// 一道题现在的作答状态，题卡右上角显示。
+fn reply_state(
+    question: &crate::agent::clarify::Question,
+    draft: &super::ReplyDraft,
+) -> (&'static str, egui::Color32, egui::Color32) {
+    if draft.skip {
+        let label = if matches!(question.target, crate::agent::clarify::Target::Element(_)) {
+            "先不定"
+        } else {
+            "保留待核实"
+        };
+        (label, theme::text_muted(), theme::surface_sunk())
+    } else if !draft.custom.trim().is_empty() {
+        ("已填写", theme::success(), theme::success_soft())
+    } else if draft.choice.is_some() {
+        ("已选", theme::success(), theme::success_soft())
+    } else if question.skippable {
+        ("未答", theme::warn(), theme::warn_soft())
+    } else {
+        ("必答", theme::danger(), theme::danger_soft())
+    }
+}
+
+/// 题卡里的一枚选项。选中的实心强调色带勾；AI 建议用淡强调色底，和程序给的选项分开。
+fn option_pill(ui: &mut egui::Ui, label: &str, selected: bool, suggestion: bool) -> egui::Response {
+    let (fill, stroke, color) = if selected {
+        (theme::accent(), theme::accent(), egui::Color32::WHITE)
+    } else if suggestion {
+        (theme::accent_soft(), theme::accent_soft(), theme::accent())
+    } else {
+        (theme::surface(), theme::border_strong(), theme::text())
+    };
+    let text = egui::RichText::new(label).color(color);
+    let button = if selected {
+        egui::Button::image_and_text(theme::Icon::Check.image(), text)
+            .image_tint_follows_text_color(true)
+    } else {
+        egui::Button::new(text)
+    };
+    ui.add(
+        button
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, stroke))
+            .corner_radius(egui::CornerRadius::same(255))
+            .min_size(egui::vec2(0.0, 26.0)),
+    )
+}
+
 /// 选择题。程序推荐的选项已经替用户选上；写了自己的答案就以它为准。
+///
+/// 每道题一张卡：题号与作答状态、题目、所在句、程序给的选项、AI 建议写法（点了填进输入框，
+/// 可以接着改）、自己写、保留待核实，自上而下一层一层分开。
 fn questions_ui(
     ui: &mut egui::Ui,
     turn: &mut super::AiTurn,
     (heading, submit, skip): (&str, &str, &str),
     action: &mut Option<CardAction>,
 ) {
+    use crate::agent::clarify::Action;
     let asking = turn.state == TurnState::Asking;
-    ui.label(egui::RichText::new(heading).strong());
     let super::AiTurn {
         id: turn_id,
         questions,
@@ -797,66 +848,154 @@ fn questions_ui(
         run,
         ..
     } = turn;
-    for (question, draft) in questions.iter().zip(replies.iter_mut()) {
+    let total = questions.len();
+    let answered = replies
+        .iter()
+        .filter(|draft| !draft.skip && (draft.choice.is_some() || !draft.custom.trim().is_empty()))
+        .count();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(heading).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            theme::caption(ui, &format!("已答 {answered} / {total}"));
+        });
+    });
+    for (index, (question, draft)) in questions.iter().zip(replies.iter_mut()).enumerate() {
         ui.add_space(8.0);
         let context = gap_context(question, research.as_ref(), run.as_deref());
-        ui.label(egui::RichText::new(&question.text).strong());
-        if let Some(context) = &context {
-            gap_context_ui(ui, context, action);
-        }
-        ui.horizontal_wrapped(|ui| {
-            for (index, choice) in question.choices.iter().enumerate() {
-                let selected =
-                    draft.choice == Some(index) && draft.custom.trim().is_empty() && !draft.skip;
-                let label = if choice.recommended {
-                    format!("{}（推荐）", choice.label)
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                theme::caption(ui, &format!("第 {} 题 / 共 {total} 题", index + 1));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (label, fg, bg) = reply_state(question, draft);
+                    theme::chip(ui, label, fg, bg);
+                });
+            });
+            ui.add_space(2.0);
+            ui.add(egui::Label::new(egui::RichText::new(&question.text).strong()).wrap());
+            if let Some(context) = &context {
+                ui.add_space(4.0);
+                gap_context_ui(ui, context, action);
+            }
+
+            let fixed: Vec<usize> = (0..question.choices.len())
+                .filter(|i| !matches!(question.choices[*i].action, Action::Suggest(_)))
+                .collect();
+            let suggested: Vec<usize> = (0..question.choices.len())
+                .filter(|i| matches!(question.choices[*i].action, Action::Suggest(_)))
+                .collect();
+            if !fixed.is_empty() {
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for &i in &fixed {
+                        let choice = &question.choices[i];
+                        let selected = draft.choice == Some(i)
+                            && draft.custom.trim().is_empty()
+                            && !draft.skip;
+                        let label = if choice.recommended {
+                            format!("{}（推荐）", choice.label)
+                        } else {
+                            choice.label.clone()
+                        };
+                        let response = option_pill(ui, &label, selected, false);
+                        let response = if choice.detail.is_empty() {
+                            response
+                        } else {
+                            response.on_hover_text(&choice.detail)
+                        };
+                        if response.clicked() {
+                            // 再点一次取消选择。
+                            draft.choice = (!selected).then_some(i);
+                            draft.custom.clear();
+                            draft.skip = false;
+                        }
+                    }
+                });
+            }
+            if !suggested.is_empty() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        theme::Icon::Sparkles
+                            .image()
+                            .tint(theme::accent())
+                            .fit_to_exact_size(egui::vec2(13.0, 13.0)),
+                    );
+                    theme::caption(ui, "AI 建议 · 点一下填进下面的框，可以接着改");
+                });
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for &i in &suggested {
+                        let Action::Suggest(value) = &question.choices[i].action else {
+                            continue;
+                        };
+                        let selected = !draft.skip && draft.custom.trim() == value.as_str();
+                        if option_pill(ui, value, selected, true)
+                            .on_hover_text(&question.choices[i].detail)
+                            .clicked()
+                        {
+                            draft.custom = value.clone();
+                            draft.choice = None;
+                            draft.skip = false;
+                        }
+                    }
+                });
+            }
+            if let Some(hint) = &question.custom_hint {
+                ui.add_space(8.0);
+                if !question.choices.is_empty() {
+                    theme::caption(ui, "或者自己写");
+                    ui.add_space(2.0);
+                }
+                // 预填了多行内容（如大纲）就给多行框，在原文上改。
+                let edit = if question.prefill.contains('\n') {
+                    egui::TextEdit::multiline(&mut draft.custom)
+                        .desired_rows(question.prefill.lines().count().clamp(3, 14))
                 } else {
-                    choice.label.clone()
+                    egui::TextEdit::singleline(&mut draft.custom)
                 };
-                let response = ui.selectable_label(selected, label);
-                let response = if choice.detail.is_empty() {
-                    response
-                } else {
-                    response.on_hover_text(&choice.detail)
-                };
-                if response.clicked() {
-                    // 再点一次取消选择。
-                    draft.choice = (!selected).then_some(index);
-                    draft.custom.clear();
+                let response = ui.add(
+                    edit.hint_text(hint.as_str())
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::Margin::symmetric(8, 5)),
+                );
+                if response.changed() && !draft.custom.is_empty() {
                     draft.skip = false;
                 }
             }
-        });
-        if let Some(hint) = &question.custom_hint {
-            // 预填了多行内容（如大纲）就给多行框，在原文上改。
-            let edit = if question.prefill.contains('\n') {
-                egui::TextEdit::multiline(&mut draft.custom)
-                    .desired_rows(question.prefill.lines().count().clamp(3, 14))
-            } else {
-                egui::TextEdit::singleline(&mut draft.custom)
-            };
-            let response = ui.add(edit.hint_text(hint.as_str()).desired_width(f32::INFINITY));
-            if response.changed() && !draft.custom.is_empty() {
-                draft.skip = false;
+            if question.skippable {
+                // 六要素题跳过不是「按现有信息写」，而是正文留占位、事后不再问。
+                let skip = if matches!(question.target, crate::agent::clarify::Target::Element(_)) {
+                    "先不定，正文留待核实"
+                } else {
+                    skip
+                };
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.checkbox(
+                            &mut draft.skip,
+                            egui::RichText::new(skip)
+                                .size(theme::font_sizes::SMALL)
+                                .color(theme::text_soft()),
+                        );
+                    });
+                });
             }
-        }
-        if question.skippable {
-            // 六要素题跳过不是「按现有信息写」，而是正文留占位、事后不再问。
-            let skip = if matches!(question.target, crate::agent::clarify::Target::Element(_)) {
-                "先不定，正文留待核实"
-            } else {
-                skip
-            };
-            ui.checkbox(&mut draft.skip, skip);
-        }
+        });
     }
-    ui.add_space(6.0);
+    ui.add_space(10.0);
     ui.horizontal_wrapped(|ui| {
         if theme::primary_icon_button(ui, theme::Icon::SquareCheck, submit).clicked() {
             *action = Some(CardAction::Answer(*turn_id));
         }
         if !asking {
-            ui.weak("AI 把回答写进所在段落，改完仍是提案；没回答的保留待核实，不会替你猜");
+            theme::caption(
+                ui,
+                "AI 把回答写进所在段落，改完仍是提案；没答的保留待核实，不会替你猜",
+            );
         }
     });
 }

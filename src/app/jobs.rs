@@ -1186,6 +1186,7 @@ impl GongwenApp {
                     "按回答修订",
                     revision.before,
                     revision.research,
+                    Some(revision.questions),
                 );
                 self.status = format!("{prefix}已按你的回答修订，新的提案在侧栏里。");
             }

@@ -7,7 +7,7 @@
 //! 摘出那几个字。摘录在要求原文里找不到的，按没给处理——模型说「给了」不算数。
 //! 缺的项出成选择题；选项只有程序给的「另行通知」「不写」，具体值一律由起草人填。
 
-use super::clarify::{Action, Choice, Question, Target, vocabulary_choices};
+use super::clarify::{Action, Choice, Question, Target, suggestion_choices, vocabulary_choices};
 use crate::models::{TemplateKind, VocabularyCategory, VocabularyEntry};
 
 /// 六要素。
@@ -146,10 +146,12 @@ pub(crate) const PROMPT: &str =
 
 每个要素输出一行，格式严格如下（全角竖线分隔）：
 要素｜已给｜从写作要求里原样摘出的那几个字
-要素｜缺｜向起草人提的问题（不超过30字）
+要素｜缺｜向起草人提的问题（不超过30字）｜建议写法1｜建议写法2｜建议写法3
 本次用不上的要素写：要素｜不适用
 
-只判断给没给，不要替起草人编时间、地点、人员、数字；拿不准算不算给了，就写「缺」。
+只判断给没给；拿不准算不算给了，就写「缺」。
+缺的要素附 2 到 3 个建议写法，供起草人参考挑选、修改：要能直接写进公文，时间可按今天（{today}）推算，
+如「收到本函后15个工作日内」；单位、人名、电话、金额不要编，这类不附建议。
 
 【写作要求】
 {request}";
@@ -173,7 +175,8 @@ pub(crate) fn checklist_text(list: &[Scope]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Verdict {
     Given(String),
-    Missing(String),
+    /// (问句, 建议写法)
+    Missing(String, Vec<String>),
     NotApplicable,
 }
 
@@ -200,7 +203,14 @@ fn parse(reply: &str) -> Vec<(Element, Verdict)> {
         } else if status.contains("已给") {
             Verdict::Given(rest)
         } else if status.contains('缺') {
-            Verdict::Missing(rest)
+            let question = parts.get(2).map_or("", |q| *q).to_string();
+            let suggestions = parts
+                .get(3..)
+                .unwrap_or_default()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            Verdict::Missing(question, suggestions)
         } else {
             continue;
         };
@@ -235,13 +245,13 @@ pub(crate) fn questions(
         return Vec::new();
     }
     let haystack = squash(request);
-    let mut picked: Vec<(Scope, String)> = Vec::new();
+    let mut picked: Vec<(Scope, String, Vec<String>)> = Vec::new();
     for scope in checklist(kind) {
         let verdict = parsed
             .iter()
             .find(|(element, _)| *element == scope.element)
             .map(|(_, verdict)| verdict);
-        let question = match verdict {
+        let (question, suggestions) = match verdict {
             // 摘录在原文里找得到才算给了。
             Some(Verdict::Given(excerpt))
                 if !squash(excerpt).is_empty() && haystack.contains(&squash(excerpt)) =>
@@ -249,20 +259,27 @@ pub(crate) fn questions(
                 continue;
             }
             Some(Verdict::NotApplicable) if !scope.required => continue,
-            Some(Verdict::Missing(question)) => question.clone(),
+            Some(Verdict::Missing(question, suggestions)) => {
+                (question.clone(), suggestions.clone())
+            }
             // 必备项：没提、说不适用、摘录对不上，都要问。
-            _ if scope.required => String::new(),
+            _ if scope.required => (String::new(), Vec::new()),
             _ => continue,
         };
-        picked.push((scope, question));
+        picked.push((scope, question, suggestions));
     }
-    picked.sort_by_key(|(scope, _)| !scope.required);
+    picked.sort_by_key(|(scope, _, _)| !scope.required);
     picked
         .into_iter()
         .take(max)
         .enumerate()
-        .map(|(index, (scope, question))| {
+        .map(|(index, (scope, question, suggestions))| {
             let mut asked = question_for(first_id + index, scope, &question);
+            // 「何人」的候选只从标准词库来，模型建议的单位人名不要。
+            if scope.element != Element::Who {
+                let extra = suggestion_choices(&asked.choices, &suggestions);
+                asked.choices.extend(extra);
+            }
             if scope.element == Element::Who
                 && let Some(role) = unit_role(kind)
             {
@@ -460,6 +477,29 @@ mod tests {
             who.choices[0].action,
             Action::Note("致函对象：市数据局（起草人从标准词库选定）".into())
         );
+    }
+
+    #[test]
+    fn missing_items_carry_ai_suggestions_except_for_who() {
+        let reply = "何时｜缺｜对方什么时候前反馈？｜收到本函后15个工作日内｜另行通知\n\
+                     何人｜缺｜发给谁？｜市数据局";
+        let questions = questions(TemplateKind::OfficialLetter, "", reply, (1, 9), &[]);
+        let when = questions
+            .iter()
+            .find(|q| q.target == Target::Element(Element::When))
+            .unwrap();
+        let labels: Vec<_> = when.choices.iter().map(|c| c.label.as_str()).collect();
+        // 「另行通知」程序给过了，模型的同名建议不重复。
+        assert_eq!(labels, ["另行通知", "不写这项", "收到本函后15个工作日内"]);
+        assert_eq!(
+            when.choices[2].action,
+            Action::Suggest("收到本函后15个工作日内".into())
+        );
+        let who = questions
+            .iter()
+            .find(|q| q.target == Target::Element(Element::Who))
+            .unwrap();
+        assert!(who.choices.is_empty(), "模型建议的单位不要");
     }
 
     #[test]

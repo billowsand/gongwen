@@ -384,6 +384,7 @@ fn research_answers_are_written_in_by_a_background_job_and_fall_back_when_the_mo
                     "按回答修订",
                     revision.before,
                     revision.research,
+                    Some(revision.questions),
                 );
                 break;
             }
@@ -1586,4 +1587,85 @@ fn a_generalized_gap_can_be_reverted_into_a_question() {
             .markdown
             .contains("【待核实：上级文件依据】")
     );
+}
+
+/// 交付后确认题的样张：所在句、程序选项、AI 建议、自己写。出到 `tmp/ai-panel-questions.png`。
+#[test]
+#[ignore = "出样张，手动跑"]
+fn question_samples() {
+    use crate::agent::clarify::{add_suggestions, gap_questions};
+    use crate::agent::gaps::Ledger;
+    let size = egui::vec2(480.0, 1500.0);
+    let mut harness = Harness::new("");
+    let raw = "# 关于商请共建公共数据研究平台的函\n\n市数据局：\n\n## 工作安排\n\n\
+               请贵单位于【待核实：研究方案反馈时限】前反馈研究意向、任务分工与资源需求。\
+               跨部门共享的数据须以【待核实：报送方式】报送。\n\n联系人：【待核实：联系人】。\n"
+        .to_string();
+    let mut ledger = Ledger::default();
+    ledger.sync(&raw, "", &[]);
+    let mut questions = gap_questions(&ledger, 4, &[]);
+    add_suggestions(
+        &mut questions,
+        "1｜收到本函后15个工作日内｜2026年10月31日前\n2｜书面函复｜电子邮件",
+    );
+    harness.doc.ai_panel.open = true;
+    let panel = &mut harness.doc.ai_panel;
+    let id = panel.push_turn("研究式起草".into(), "写个函".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: String::new(),
+        result: GeneratedDraft {
+            markdown: raw.clone(),
+            title: "关于商请共建公共数据研究平台的函".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "研究式起草".into(),
+        fact_changes: Vec::new(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    let panel = &mut harness.doc.ai_panel;
+    panel.finish(TurnState::Proposed(ProposalSummary::default()));
+    let turn = panel.turn_mut(id).unwrap();
+    turn.replies = crate::ai_panel::initial_replies(&questions);
+    // 第一题点了 AI 建议，第三题勾了保留待核实。
+    turn.replies[0].custom = "收到本函后15个工作日内".into();
+    turn.replies[2].skip = true;
+    turn.questions = questions;
+    turn.research = Some(crate::ai_panel::ResearchSnapshot {
+        raw,
+        ledger,
+        sources: Vec::new(),
+    });
+
+    let mut canvas = crate::ui_snapshot::Canvas::default();
+    theme::configure_style(&harness.ctx);
+    harness.ctx.set_pixels_per_point(2.0);
+    for _ in 0..15 {
+        let output = harness.frame_output(Vec::new(), size);
+        canvas.absorb(&output.textures_delta);
+    }
+    // 滚到确认题那里，题卡全在视野里。
+    for _ in 0..1 {
+        let output = harness.frame_output(
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -400.0),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+            }],
+            size,
+        );
+        canvas.absorb(&output.textures_delta);
+    }
+    let output = harness.frame_output(Vec::new(), size);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tmp")
+        .join("ai-panel-questions.png");
+    canvas.render(&harness.ctx, output, size, theme::canvas(), &path);
+    println!("{}", path.display());
 }

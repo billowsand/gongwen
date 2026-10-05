@@ -624,11 +624,28 @@ impl DraftPage<'_> {
                 &config.vocabulary,
                 &mut emit,
             );
+            // 还没定的几处接着出题，顺带要建议写法。
+            use crate::agent::backend::ModelBackend as _;
+            let mut remaining =
+                clarify::gap_questions(&revised.ledger, BATCH_QUESTIONS, &config.vocabulary);
+            let today = crate::prompt::TimeContext::now().today;
+            if let Some(text) =
+                clarify::suggestion_prompt(&remaining, &revised.ledger, &revised.raw, &today)
+                && let Ok(reply) = model.complete(
+                    crate::agent::backend::ModelRole::Assist,
+                    crate::agent::tools::ASSIST_SYSTEM,
+                    &text,
+                    &mut |_| {},
+                )
+            {
+                clarify::add_suggestions(&mut remaining, &reply.content);
+            }
             let _ = tx.send(WorkerResult::Doc {
                 key,
                 seq,
                 job: DocJob::GapRevised(Box::new(GapRevision {
                     before,
+                    questions: remaining,
                     research: ResearchSnapshot {
                         raw: revised.raw,
                         ledger: revised.ledger,
@@ -693,13 +710,14 @@ impl DraftPage<'_> {
         self.doc
             .ai_panel
             .push_turn(label.to_string(), prompt, Vec::new(), None);
-        finish_research_revision(self.doc, self.config, label, before, research);
+        finish_research_revision(self.doc, self.config, label, before, research, None);
     }
 }
 
-/// 按回答修订的后台结果：提案的对照基准与改好的工作稿。
+/// 按回答修订的后台结果：提案的对照基准、改好的工作稿与还要问的题（已附建议写法）。
 pub(crate) struct GapRevision {
     pub(crate) before: String,
+    pub(crate) questions: Vec<Question>,
     pub(crate) research: ResearchSnapshot,
 }
 
@@ -710,11 +728,14 @@ pub(crate) fn finish_research_revision(
     label: &str,
     before: String,
     research: ResearchSnapshot,
+    questions: Option<Vec<Question>>,
 ) {
     let draft = crate::draft_page::reviewed_draft(&doc.draft, config, &research.raw, false);
     let summary =
         GongwenApp::install_ai_proposal(doc, before, draft, label.to_string(), &config.vocabulary);
-    let remaining = clarify::gap_questions(&research.ledger, BATCH_QUESTIONS, &config.vocabulary);
+    let remaining = questions.unwrap_or_else(|| {
+        clarify::gap_questions(&research.ledger, BATCH_QUESTIONS, &config.vocabulary)
+    });
     let panel = &mut doc.ai_panel;
     let Some(id) = panel.running_turn_mut().map(|turn| turn.id) else {
         return;
