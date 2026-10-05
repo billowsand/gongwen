@@ -609,7 +609,7 @@ impl DraftPage<'_> {
     }
 
     pub(crate) fn preview_ui(&mut self, ui: &mut egui::Ui) {
-        if self.doc.markdown_find.open {
+        if self.doc.markdown_find.open && self.doc.ai_panel.workspace_view.is_none() {
             egui::Panel::top("preview_find")
                 .frame(theme::panel(theme::surface(), 12))
                 .show(ui, |ui| self.markdown_find_ui(ui));
@@ -628,6 +628,9 @@ impl DraftPage<'_> {
     }
 
     fn preview_body_ui(&mut self, ui: &mut egui::Ui) {
+        if self.ai_workspace_ui(ui) {
+            return;
+        }
         match self.doc.preview_mode {
             PreviewMode::Source => self.source_editor_ui(ui),
             PreviewMode::Rendered => {

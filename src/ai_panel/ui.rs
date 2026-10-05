@@ -19,11 +19,12 @@ const PANEL_MAX_WIDTH: f32 = 640.0;
 const CARD_TEXT_MAX_HEIGHT: f32 = 360.0;
 
 /// 卡片上的按钮动作，画完一轮后统一执行，避免一边借着轮次一边改状态。
-enum CardAction {
+pub(super) enum CardAction {
     Stop,
     Accept,
     Discard,
     Review,
+    Workspace(u64),
     Rerun(u64),
     /// 交上这一轮选择题的回答。
     Answer(u64),
@@ -265,9 +266,21 @@ impl DraftPage<'_> {
             }
             Some(CardAction::Discard) => GongwenApp::discard_ai_proposal(self.doc, self.status),
             Some(CardAction::Review) => {
-                if let Some(proposal) = self.doc.ai_proposal.as_mut() {
-                    proposal.open = true;
+                if let Some(turn) = self
+                    .doc
+                    .ai_panel
+                    .turns
+                    .iter()
+                    .rev()
+                    .find(|turn| matches!(turn.state, TurnState::Proposed(_)))
+                {
+                    self.doc.ai_panel.workspace_view = Some(turn.id);
+                    self.doc.ai_panel.workspace_compare = true;
                 }
+            }
+            Some(CardAction::Workspace(id)) => {
+                self.doc.ai_panel.workspace_view = Some(id);
+                self.doc.ai_panel.workspace_compare = false;
             }
             Some(CardAction::OpenDrawer) => self.open_result_drawer(),
             Some(CardAction::SaveStyle(id)) => self.save_learned_style(id),
@@ -529,7 +542,11 @@ fn turn_card(
         });
     }
 
-    if !turn.content.is_empty() {
+    if turn.is_workspace {
+        if ui.button("查看工作稿").clicked() {
+            *action = Some(CardAction::Workspace(turn.id));
+        }
+    } else if !turn.content.is_empty() {
         ui.add_space(4.0);
         egui::ScrollArea::vertical()
             .id_salt(("ai_turn_content", turn.id))
@@ -946,7 +963,7 @@ fn rerun_button(
 }
 
 /// 结果卡下半部：摘要 chip、关键事实确认与采用 / 对照 / 放弃。
-fn proposal_actions(
+pub(super) fn proposal_actions(
     ui: &mut egui::Ui,
     summary: &ProposalSummary,
     proposal: Option<&mut AiProposal>,

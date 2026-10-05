@@ -436,7 +436,7 @@ impl DraftPage<'_> {
 
     /// 插入：往光标处放东西。功能区扩容之后最主要的受益者。
     pub(crate) fn ribbon_insert(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only();
+        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
         if ui
             .add(theme::icon_text_button(theme::Icon::Quote, "公文引用"))
             .clicked()
@@ -699,7 +699,7 @@ impl DraftPage<'_> {
     /// 才算：功能区每帧重画，把全文逐行跑一遍正则、再把整份 `.bib` 扫一遍，
     /// 长稿子上就是每帧白烧一次。下拉没展开，这两份清单一次都不算。
     pub(crate) fn ribbon_research(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only();
+        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
         // 下拉闭包借着 `self.doc` 取候选，插入要的是 `&mut self`：闭包里只记下
         // 选了什么，等这一组画完再动正文。
         let mut action: Option<MarkupInsert> = None;
@@ -1003,7 +1003,7 @@ impl DraftPage<'_> {
     /// 格式：改已有文字的 Markdown 标记。这里只放导出器认识的语法——
     /// 放个斜体按钮插出来的 `*文字*`，预览和 Word 里就是原样带星号。
     pub(crate) fn ribbon_format(&mut self, ui: &mut egui::Ui) {
-        let editable = !self.doc.read_only();
+        let editable = !self.doc.read_only() && self.doc.ai_panel.workspace_view.is_none();
         let current = self.heading_level_at_cursor(ui.ctx());
         let mut heading: Option<(u8, &'static str)> = None;
         let mut bold = false;

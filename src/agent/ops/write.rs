@@ -76,6 +76,25 @@ pub(super) fn generate(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Re
         }
     };
     phase(ctx, label);
+    let (prefix, suffix) = match &placement {
+        Placement::Replace => (String::new(), String::new()),
+        Placement::Append => {
+            let mut prefix = ctx.board.workspace.trim_end().to_string();
+            if !prefix.is_empty() {
+                prefix.push_str("\n\n");
+            }
+            (prefix, String::new())
+        }
+        Placement::Marker(marker) => {
+            let (prefix, suffix) = ctx
+                .board
+                .workspace
+                .split_once(marker)
+                .expect("已检查补写记号");
+            (prefix.to_string(), suffix.to_string())
+        }
+    };
+    (ctx.emit)(Event::WriteBegin { prefix, suffix });
     let emit = &mut *ctx.emit;
     let completion = ctx
         .env
@@ -292,15 +311,18 @@ fn fit_length(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<()> 
     );
     let user = crate::prompt::build_optimize_prompt(&ctx.board.draft, &current, &instruction);
     phase(ctx, format!("{direction}到约 {target} 字…"));
+    (ctx.emit)(Event::WriteBegin {
+        prefix: String::new(),
+        suffix: String::new(),
+    });
     let system = ctx.board.system_prompt.clone();
     let emit = &mut *ctx.emit;
     let completion = ctx
         .env
         .model
-        .complete(ModelRole::Draft, &system, &user, &mut |delta| {
-            if let StreamDelta::Reasoning(text) = delta {
-                emit(Event::Reasoning(text.to_string()));
-            }
+        .complete(ModelRole::Draft, &system, &user, &mut |delta| match delta {
+            StreamDelta::Reasoning(text) => emit(Event::Reasoning(text.to_string())),
+            StreamDelta::Content(text) => emit(Event::Content(text.to_string())),
         })?;
     ctx.board.truncated |= completion.truncated;
     ctx.board.workspace = crate::prompt::sanitize_model_markdown(&completion.content);

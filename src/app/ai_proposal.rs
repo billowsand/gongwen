@@ -196,6 +196,21 @@ impl GongwenApp {
                 .iter()
                 .any(|note| note.message.starts_with(crate::ai_panel::TRUNCATED_NOTE)),
         };
+        doc.ai_panel.replace_content(result.markdown.clone());
+        // 回答核实题、撤回概括等动作可能在已完成的提案上继续修订。
+        // 同步这轮的全文，采纳后从历史入口查看时也应看到最终版本。
+        if !doc.ai_panel.running()
+            && let Some(turn) = doc
+                .ai_panel
+                .turns
+                .iter_mut()
+                .rev()
+                .find(|turn| matches!(turn.state, crate::ai_panel::TurnState::Proposed(_)))
+        {
+            turn.content = result.markdown.clone();
+            turn.is_workspace = true;
+            turn.stream_suffix.clear();
+        }
         doc.ai_proposal = Some(crate::draft_page::AiProposal {
             before,
             result,

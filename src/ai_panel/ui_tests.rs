@@ -127,6 +127,47 @@ fn has(texts: &[String], needle: &str) -> bool {
 }
 
 #[test]
+fn workspace_is_shown_on_the_left_and_readonly_until_adopted() {
+    let mut harness = Harness::new("原有正文");
+    harness.doc.ai_panel.open = true;
+    harness
+        .doc
+        .ai_panel
+        .push_turn("起草".into(), "写稿".into(), vec![], None);
+    harness
+        .doc
+        .ai_panel
+        .begin_write(String::new(), String::new());
+    harness.doc.ai_panel.append("左侧独有的工作稿", "", false);
+    let sidebar = harness.frame_texts();
+    assert!(has(&sidebar, "查看工作稿"));
+    assert!(!has(&sidebar, "左侧独有的工作稿"), "侧栏不重复展示全文");
+    let ctx = harness.ctx.clone();
+    let mut drawn = false;
+    ctx.memory_mut(|memory| {
+        memory.request_focus(egui::Id::new(("ai_workspace_text", harness.doc.key, 1_u64)))
+    });
+    let output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            events: vec![egui::Event::Text("不应写入".into())],
+            ..Default::default()
+        },
+        |ui| harness.with_page(|page| drawn = page.ai_workspace_ui(ui)),
+    );
+    assert!(drawn);
+    assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.text().contains("左侧独有的工作稿"))));
+    assert_eq!(harness.doc.generated_markdown, "原有正文");
+    assert_eq!(harness.doc.ai_panel.turns[0].content, "左侧独有的工作稿");
+    harness.with_page(|page| page.stop_ai_task());
+    assert_eq!(harness.doc.ai_panel.turns[0].content, "左侧独有的工作稿");
+    assert_eq!(harness.doc.generated_markdown, "原有正文");
+}
+
+#[test]
 fn sending_opens_a_turn_and_stop_releases_the_document() {
     let mut harness = Harness::new("# 标题\n\n一、总体要求\n");
     harness.doc.ai_panel.open = true;

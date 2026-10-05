@@ -43,6 +43,8 @@ pub(crate) struct SavedTurn {
     #[serde(default)]
     pub(crate) content: String,
     #[serde(default)]
+    pub(crate) is_workspace: bool,
+    #[serde(default)]
     pub(crate) reasoning: String,
     #[serde(default)]
     pub(crate) notes: Vec<String>,
@@ -134,6 +136,7 @@ impl SavedTurn {
             request: turn.request.clone(),
             state: turn.state.clone(),
             content: turn.content.clone(),
+            is_workspace: turn.is_workspace,
             reasoning,
             notes: turn.notes.clone(),
             steps: turn.steps.clone(),
@@ -204,6 +207,7 @@ impl SavedTurn {
             }
             other => other,
         };
+        let is_workspace = self.is_workspace || matches!(state, TurnState::Proposed(_));
         let turn = AiTurn {
             id: self.id,
             title: self.title,
@@ -212,6 +216,8 @@ impl SavedTurn {
             request: self.request,
             state,
             content: self.content,
+            is_workspace,
+            stream_suffix: String::new(),
             reasoning: self.reasoning,
             phase: String::new(),
             notes,
@@ -432,6 +438,8 @@ impl AiPanel {
         let loaded_for = self.session.loaded_for;
         let list = std::mem::take(&mut self.session.list);
         self.turns.clear();
+        self.workspace_view = None;
+        self.workspace_compare = false;
         self.session = Session {
             loaded_for,
             list,
@@ -478,6 +486,8 @@ impl AiPanel {
                 turn
             })
             .collect();
+        self.workspace_view = None;
+        self.workspace_compare = false;
         self.next_id = self.turns.iter().map(|turn| turn.id).max().unwrap_or(0);
         let list = std::mem::take(&mut self.session.list);
         self.session = Session {
@@ -646,6 +656,24 @@ mod tests {
     }
 
     #[test]
+    fn stopped_workspace_survives_restart_and_session_switch_resets_the_view() {
+        let mut panel = AiPanel::default();
+        panel.push_turn("起草".into(), "写稿".into(), vec![], None);
+        panel.begin_write("前文".into(), "后文".into());
+        panel.append("补写", "", false);
+        panel.finish(TurnState::Stopped);
+        let json = serde_json::to_string(&SavedTurn::of(&panel.turns[0], None)).unwrap();
+        let saved: SavedTurn = serde_json::from_str(&json).unwrap();
+        let (turn, _) = saved.restore(&[], false);
+        assert!(turn.is_workspace);
+        assert_eq!(turn.content, "前文补写后文");
+        assert!(turn.stream_suffix.is_empty());
+        panel.start_new_session();
+        assert_eq!(panel.workspace_view, None);
+        assert!(panel.turns.is_empty());
+    }
+
+    #[test]
     fn a_running_turn_comes_back_interrupted() {
         let (mut store, id) = store();
         let mut panel = AiPanel::default();
@@ -774,6 +802,7 @@ mod tests {
             request: None,
             state: TurnState::Asking,
             content: String::new(),
+            is_workspace: false,
             reasoning: String::new(),
             notes: vec![],
             steps: vec![],

@@ -248,6 +248,9 @@ impl DraftPage<'_> {
                             Event::Tool(tool) => DocJob::AiTool(tool.line()),
                             Event::Phase(phase) => DocJob::ExportProgress(phase),
                             Event::Workspace(text) => DocJob::AiWorkspace(text),
+                            Event::WriteBegin { prefix, suffix } => {
+                                DocJob::AiWriteBegin { prefix, suffix }
+                            }
                             Event::Note(note) => DocJob::AiNote(note),
                             Event::Content(_) | Event::Reasoning(_) => unreachable!("上面已分流"),
                         });

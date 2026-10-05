@@ -920,6 +920,12 @@ fn polish_runs_through_the_engine_with_the_selection_pinned() {
     );
     assert!(prompt.contains("一、甲。"), "改写要带上现有正文：{prompt}");
     assert_eq!(board.workspace, "# 标题\n\n一、甲。\n\n二、乙改。");
+    let begin = events.iter().position(|e| matches!(e, Event::WriteBegin { prefix, suffix } if prefix.is_empty() && suffix.is_empty())).unwrap();
+    let content = events
+        .iter()
+        .position(|e| matches!(e, Event::Content(_)))
+        .unwrap();
+    assert!(begin < content, "流式增量之前明确写稿目标");
     assert!(
         events
             .iter()

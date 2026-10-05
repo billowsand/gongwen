@@ -125,6 +125,10 @@ pub(crate) enum DocJob {
     AiTool(String),
     /// 技能流程的工作稿整体换新（补全之后）。
     AiWorkspace(String),
+    AiWriteBegin {
+        prefix: String,
+        suffix: String,
+    },
     /// 技能任务结束：流程挂起要问的题，或定稿后的提案。
     SkillDone(Result<Box<crate::ai_panel::SkillResult>, String>),
     /// 技能任务开跑前压缩了会话：新的会话摘要与它覆盖到的最后一轮。
@@ -1055,10 +1059,10 @@ impl GongwenApp {
                     }
                 }
                 self.status = if !researched {
-                    format!("{prefix}{skill}完成：《{title}》的提案在侧栏里。")
+                    format!("{prefix}{skill}完成：《{title}》的提案在左侧 AI 工作稿里。")
                 } else if asked == 0 {
                     format!(
-                        "{prefix}{skill}完成（{rounds} 轮）：补全 {resolved} 处缺口，提案在侧栏里。"
+                        "{prefix}{skill}完成（{rounds} 轮）：补全 {resolved} 处缺口，提案在左侧 AI 工作稿里。"
                     )
                 } else {
                     format!(
@@ -1090,6 +1094,7 @@ impl GongwenApp {
                 | DocJob::AiNote(_)
                 | DocJob::AiTool(_)
                 | DocJob::AiWorkspace(_)
+                | DocJob::AiWriteBegin { .. }
                 | DocJob::AiSessionSummary { .. }
                 | DocJob::StyleUsed(_)
         ) {
@@ -1154,6 +1159,9 @@ impl GongwenApp {
             } => self.docs[index].ai_panel.append(&content, &reasoning, done),
             DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
+            DocJob::AiWriteBegin { prefix, suffix } => {
+                self.docs[index].ai_panel.begin_write(prefix, suffix)
+            }
             DocJob::SkillDone(result) => self.apply_skill_done(index, &prefix, result),
             DocJob::AiSessionSummary { summary, upto } => {
                 let session = &mut self.docs[index].ai_panel.session;

@@ -29,6 +29,11 @@ pub(crate) enum Event {
     Phase(String),
     /// 起草正文的增量。
     Content(String),
+    /// 开始一次写稿：增量插入前缀与后缀之间，区分重写、追加与局部补写。
+    WriteBegin {
+        prefix: String,
+        suffix: String,
+    },
     Reasoning(String),
     /// 工作稿整体换新（补全之后）。
     Workspace(String),

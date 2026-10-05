@@ -26,6 +26,7 @@ pub(crate) mod session;
 mod session_ui;
 mod skill_job;
 mod ui;
+mod workspace_ui;
 
 pub(crate) use skill_job::{
     GapRevision, SkillResult, SkillRun, finish_research_revision, initial_replies,
@@ -142,6 +143,10 @@ pub(crate) struct AiTurn {
     pub(crate) state: TurnState,
     /// 模型正文（流式累加，未经清洗）。
     pub(crate) content: String,
+    /// 明确产出稿件后，全文只在左侧 AI 工作稿展示。
+    pub(crate) is_workspace: bool,
+    /// 流式补写时留在插入位置之后的原文，不进入模型增量。
+    pub(crate) stream_suffix: String,
     /// 思考过程。
     pub(crate) reasoning: String,
     /// 阶段提示：「正在检索知识库…」「正在校验…」。会被下一阶段冲掉。
@@ -202,6 +207,9 @@ pub(crate) struct AiPanel {
     next_id: u64,
     /// 当前会话：随稿件存进稿件库（16.15 B）。
     pub(crate) session: session::Session,
+    /// 当前在左侧查看的工作稿轮次；None 表示查看正式正文。
+    pub(crate) workspace_view: Option<u64>,
+    pub(crate) workspace_compare: bool,
 }
 
 impl AiPanel {
@@ -227,6 +235,8 @@ impl AiPanel {
             request,
             state: TurnState::Waiting,
             content: String::new(),
+            is_workspace: false,
+            stream_suffix: String::new(),
             reasoning: String::new(),
             phase: String::new(),
             notes: Vec::new(),
@@ -264,7 +274,8 @@ impl AiPanel {
         let Some(turn) = self.running_turn_mut() else {
             return;
         };
-        turn.content.push_str(content);
+        let insert_at = turn.content.len() - turn.stream_suffix.len();
+        turn.content.insert_str(insert_at, content);
         turn.reasoning.push_str(reasoning);
         if done {
             turn.state = TurnState::Checking;
@@ -293,8 +304,35 @@ impl AiPanel {
 
     /// 工作稿整体换新（补全之后），卡片上显示最新的一版。
     pub(crate) fn replace_content(&mut self, content: String) {
+        let mut open = None;
         if let Some(turn) = self.running_turn_mut() {
+            if !turn.is_workspace {
+                open = Some(turn.id);
+            }
+            turn.is_workspace = true;
+            turn.stream_suffix.clear();
             turn.content = content;
+        }
+        if let Some(id) = open {
+            self.workspace_view = Some(id);
+            self.workspace_compare = false;
+        }
+    }
+
+    /// 每次写稿先重置流式插入位置；同一轮只自动打开一次，尊重用户切回正文。
+    pub(crate) fn begin_write(&mut self, prefix: String, suffix: String) {
+        let mut open = None;
+        if let Some(turn) = self.running_turn_mut() {
+            if !turn.is_workspace {
+                open = Some(turn.id);
+            }
+            turn.is_workspace = true;
+            turn.content = prefix + &suffix;
+            turn.stream_suffix = suffix;
+        }
+        if let Some(id) = open {
+            self.workspace_view = Some(id);
+            self.workspace_compare = false;
         }
     }
 
@@ -342,6 +380,7 @@ impl AiPanel {
 
     /// 提案被接受或放弃（无论从结果卡还是旧审阅窗点的）。
     pub(crate) fn resolve_proposal(&mut self, accepted: bool) {
+        self.workspace_view = None;
         if let Some(turn) = self
             .turns
             .iter_mut()
@@ -441,6 +480,34 @@ mod tests {
         let mut panel = AiPanel::default();
         panel.push_turn("润色".into(), "压一压".into(), vec![], None);
         panel
+    }
+
+    #[test]
+    fn workspace_streams_replace_append_and_fill_without_stealing_the_view() {
+        let mut panel = panel_with_turn();
+        panel.append("", "先检索", false);
+        assert_eq!(panel.workspace_view, None, "思考不打开工作稿");
+        panel.begin_write(String::new(), String::new());
+        assert_eq!(panel.workspace_view, Some(1));
+        panel.append("# 初稿", "", false);
+        panel.replace_content("# 初稿\n".into());
+        panel.workspace_view = None;
+        panel.begin_write("# 初稿\n\n".into(), String::new());
+        panel.append("第二节", "", false);
+        assert_eq!(panel.turns[0].content, "# 初稿\n\n第二节");
+        assert_eq!(panel.workspace_view, None, "用户切回正文后不抢视图");
+        panel.begin_write("摘要：".into(), "\n\n# 初稿\n\n第二节".into());
+        panel.append("综述", "", false);
+        panel.append("。", "", false);
+        assert_eq!(panel.turns[0].content, "摘要：综述。\n\n# 初稿\n\n第二节");
+        panel.replace_content("清洗后的稿件".into());
+        assert!(panel.turns[0].stream_suffix.is_empty());
+        panel.begin_write(String::new(), String::new());
+        panel.append("改写稿", "", false);
+        panel.finish(TurnState::Stopped);
+        assert_eq!(panel.turns[0].content, "改写稿", "停止保留已生成内容");
+        panel.append("迟到内容", "", false);
+        assert_eq!(panel.turns[0].content, "改写稿");
     }
 
     #[test]

@@ -62,6 +62,12 @@ impl Tool for Generate {
             ModelRole::Draft => ctx.board.system_prompt.clone(),
             ModelRole::Assist => ASSIST_SYSTEM.to_string(),
         };
+        if to_workspace {
+            (ctx.emit)(Event::WriteBegin {
+                prefix: String::new(),
+                suffix: String::new(),
+            });
+        }
         let emit = &mut *ctx.emit;
         let completion = ctx
             .env
