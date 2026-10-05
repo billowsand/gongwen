@@ -1,31 +1,34 @@
 //! AI 管理页「数据接口」分区（`docs/http-skill-design.md` 第一层）。
 //!
-//! - 首页是接口卡片列表：能查什么、要填什么、最近一次测试结果；
-//! - 点开是详情：先是易读的名称、说明与查询条件，「鉴权」里直接粘贴 Key（没配鉴权的可以
-//!   在这里加上），「试一下」按查询条件逐项填样例实测，地址、请求头、请求体、返回映射这些
-//!   技术配置收在「高级配置」里；
-//! - 密钥由程序统一管：卡片上标「缺密钥」「鉴权没过」，密钥表写明用在哪些接口；
-//! - 「从文档添加」见 [`import`]：粘贴文档或选文件，程序解析 + 起草模型整理，自动试调一次。
+//! 左右两栏：
+//! - 左栏是接口列表，按服务器分组——同一台服务器上的接口通常共用一把 Key，组标题上标出
+//!   Key 的状态，点组标题进「服务与密钥」（见 [`service`]）。密钥挂在服务器下面，不再有
+//!   一张独立的密钥表；
+//! - 右栏是选中项：接口详情（见 [`detail`]）顶上是名称、地址与密钥绑定条，下面分「接口说明」
+//!   「试一下」「技术配置」三页；「从文档添加」（见 [`import`]）也在右栏里做。
 //!
 //! 实测在后台线程里跑，界面每帧取一次结果；测试结论记进 `api-tests.json`。
 
 mod assist;
+mod detail;
+mod forms;
 mod import;
+mod service;
 
-use super::agent_settings::{code_block, message_ui, problems_ui};
-use super::settings::setting_row;
+use super::agent_settings::code_block;
 use crate::agent::api::{
-    self, ApiDestination, ApiEndpoint, ApiHeader, ApiInput, ApiMethod, ApiSecrets, ApiStore,
-    ApiTestLog, InputKind, TestStatus, Trial,
+    self, ApiEndpoint, ApiMethod, ApiSecrets, ApiStore, ApiTestLog, TestRecord, TestStatus, Trial,
 };
-use crate::agent::api_import::auth::{self, AuthPlace, AuthSpec};
-use crate::agent::api_import::{infer, redact, rename_secret_refs};
+use crate::agent::api_import::auth::{AuthPlace, AuthSpec};
+use crate::agent::api_import::redact;
 use crate::app::GongwenApp;
+use crate::models::AppConfig;
 use crate::theme;
+use detail::Detail;
 use eframe::egui;
 use import::ImportFlow;
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use service::ServiceState;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
@@ -33,6 +36,11 @@ use std::time::Duration;
 const RAW_PREVIEW_CHARS: usize = 4000;
 /// 测试结果里预览几条。
 const PREVIEW_ITEMS: usize = 5;
+/// 左栏列表宽度的上下限。
+const LIST_MIN_WIDTH: f32 = 230.0;
+const LIST_MAX_WIDTH: f32 = 300.0;
+/// 左栏底部状态条的高度（未保存提示、图例）。
+const LIST_FOOTER_HEIGHT: f32 = 58.0;
 
 /// 数据接口分区的状态。接口与密钥要点保存才落盘；测试记录随测随存。
 #[derive(Default)]
@@ -44,31 +52,25 @@ pub(crate) struct ApisPage {
     dirty: bool,
     view: View,
     message: Option<(bool, String)>,
+    /// 左栏的搜索词。
+    search: String,
     detail: Detail,
+    service: ServiceState,
     import: Option<ImportFlow>,
+    /// 后台在跑的批量实测（换了 Key 以后共用它的接口、服务页「全部重测」）：接口 id → 结果。
+    batch: Vec<(String, Receiver<Trial>)>,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// 右栏显示什么。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 enum View {
+    /// 什么都没选（还没有接口时显示上手说明）。
     #[default]
-    List,
-    Detail(usize),
+    None,
+    Endpoint(usize),
+    /// 一台服务器（`http://host:port`）：它的密钥与上面的接口。
+    Service(String),
     Import,
-}
-
-/// 详情页的临时状态，换接口时清空。
-#[derive(Default)]
-struct Detail {
-    confirm_remove: bool,
-    /// 「试一下」里填的值：参数名 → 值。
-    args: BTreeMap<String, String>,
-    test: Option<Receiver<Trial>>,
-    result: Option<Trial>,
-    /// 「鉴权」里改过 Key、还没重测。
-    key_edited: bool,
-    auth_form: AuthForm,
-    /// 加鉴权时只加这一个接口（默认同一服务器上没带鉴权的一起加：一个服务通常共用一个 Key）。
-    auth_this_only: bool,
 }
 
 /// 「添加鉴权」的小表单：密钥放请求头还是地址参数、叫什么、要不要 Bearer。
@@ -142,6 +144,14 @@ pub(super) fn host_of(url: &str) -> String {
     }
 }
 
+/// 地址去掉服务器部分：`http://10.0.0.9/api/x?a=1` → `/api/x?a=1`。
+fn path_of(url: &str) -> &str {
+    match url.split_once("://") {
+        Some((_, rest)) => rest.find(['/', '?']).map_or("/", |at| &rest[at..]),
+        None => url,
+    }
+}
+
 /// 密钥输入框：打码，提示把 Key 粘进来。
 pub(super) fn key_field(ui: &mut egui::Ui, value: &mut String) -> egui::Response {
     ui.add(
@@ -168,6 +178,9 @@ impl ApisPage {
             self.message = Some((false, errors.join("；")));
         }
         self.loaded = true;
+        if !self.store.endpoints.is_empty() {
+            self.open(0);
+        }
     }
 
     fn save(&mut self) -> anyhow::Result<()> {
@@ -177,6 +190,7 @@ impl ApisPage {
         Ok(())
     }
 
+    /// 打开一个接口：默认先看「接口说明」。
     fn open(&mut self, index: usize) {
         self.detail = Detail::default();
         if let Some(endpoint) = self.store.endpoints.get(index) {
@@ -186,7 +200,12 @@ impl ApisPage {
                 .map(|input| (input.name.clone(), input.example.clone()))
                 .collect();
         }
-        self.view = View::Detail(index);
+        self.view = View::Endpoint(index);
+    }
+
+    fn open_service(&mut self, host: String) {
+        self.service = ServiceState::default();
+        self.view = View::Service(host);
     }
 
     /// 记一次测试结论并落盘（测试记录不等「保存」）。
@@ -195,6 +214,103 @@ impl ApisPage {
         if let Err(error) = self.log.save() {
             self.message = Some((false, format!("测试记录保存失败：{error:#}")));
         }
+    }
+
+    /// 用样例值在后台把这几个接口各测一次（已经在测的不重复发）。
+    fn retest(&mut self, indices: &[usize]) {
+        for &index in indices {
+            let Some(endpoint) = self.store.endpoints.get(index) else {
+                continue;
+            };
+            if self.batch.iter().any(|(id, _)| *id == endpoint.id) {
+                continue;
+            }
+            let rx = spawn_trial(
+                endpoint.clone(),
+                endpoint.example_args(),
+                self.secrets.clone(),
+            );
+            self.batch.push((endpoint.id.clone(), rx));
+        }
+    }
+
+    /// 这个接口正在批量重测。
+    fn retesting(&self, endpoint: &ApiEndpoint) -> bool {
+        self.batch.iter().any(|(id, _)| *id == endpoint.id)
+    }
+
+    /// 取回批量实测的结果，记进测试记录；正开着的接口顺带显示在「试一下」里。
+    fn poll_batch(&mut self, ctx: &egui::Context) {
+        let mut done = Vec::new();
+        self.batch.retain(|(id, rx)| match rx.try_recv() {
+            Ok(trial) => {
+                done.push((id.clone(), trial));
+                false
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+        });
+        for (id, trial) in done {
+            let Some(index) = self.store.endpoints.iter().position(|e| e.id == id) else {
+                continue;
+            };
+            let endpoint = self.store.endpoints[index].clone();
+            self.record(&endpoint, &trial);
+            if self.view == View::Endpoint(index) && self.detail.test.is_none() {
+                self.detail.result = Some(trial);
+            }
+        }
+        if !self.batch.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    /// 在用这个密钥的接口。
+    fn users_of(&self, secret: &str) -> Vec<usize> {
+        self.store
+            .endpoints
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.secret_names().iter().any(|n| n == secret))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 没有接口在用的密钥。
+    fn orphan_secrets(&self) -> Vec<String> {
+        self.secrets
+            .secrets
+            .keys()
+            .filter(|name| self.users_of(name).is_empty())
+            .cloned()
+            .collect()
+    }
+
+    /// 新建一个空接口并打开它的说明编辑。
+    fn add_blank(&mut self) {
+        let n = self.store.endpoints.len() + 1;
+        let mut id = format!("api{n}");
+        let mut k = n;
+        while self.store.get(&id).is_some() {
+            k += 1;
+            id = format!("api{k}");
+        }
+        self.store.endpoints.push(ApiEndpoint {
+            id,
+            name: format!("新接口 {n}"),
+            url: "http://".into(),
+            ..ApiEndpoint::default()
+        });
+        self.dirty = true;
+        let index = self.store.endpoints.len() - 1;
+        self.open(index);
+        self.detail.start_editing(&self.store.endpoints[index]);
+    }
+
+    fn start_import(&mut self) {
+        self.import.get_or_insert_with(ImportFlow::default);
+        self.view = View::Import;
+        self.message = None;
     }
 }
 
@@ -212,528 +328,639 @@ impl GongwenApp {
     }
 
     pub(super) fn apis_section_ui(&mut self, ui: &mut egui::Ui) {
-        let config = &self.config;
-        let page = &mut self.agent_settings.apis;
-        if !page.loaded {
-            page.load();
-        }
-        match page.view {
-            View::List => list_ui(ui, page),
-            View::Detail(index) if index < page.store.endpoints.len() => detail_ui(ui, page, index),
-            View::Detail(_) => page.view = View::List,
-            View::Import => import::import_ui(ui, page, config),
-        }
+        section_ui(ui, &mut self.agent_settings.apis, &self.config);
     }
 }
 
-// —— 列表 ——
-
-fn list_ui(ui: &mut egui::Ui, page: &mut ApisPage) {
-    ui.horizontal_wrapped(|ui| {
-        if theme::primary_icon_button(ui, theme::Icon::WandSparkles, "从文档添加").clicked() {
-            page.import.get_or_insert_with(ImportFlow::default);
-            page.view = View::Import;
-            page.message = None;
-        }
-        if ui
-            .add(theme::secondary_icon_button(theme::Icon::Plus, "手动添加"))
-            .clicked()
-        {
-            let n = page.store.endpoints.len() + 1;
-            let mut id = format!("api{n}");
-            let mut k = n;
-            while page.store.get(&id).is_some() {
-                k += 1;
-                id = format!("api{k}");
-            }
-            page.store.endpoints.push(ApiEndpoint {
-                id,
-                name: format!("新接口 {n}"),
-                url: "http://".into(),
-                ..ApiEndpoint::default()
-            });
-            page.dirty = true;
-            page.open(page.store.endpoints.len() - 1);
-        }
-        if ui
-            .add(theme::secondary_icon_button(
-                theme::Icon::FileUp,
-                "导入配置…",
-            ))
-            .on_hover_text("导入别处导出的接口配置文件（JSON）；同 id 的会覆盖")
-            .clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("接口配置", &["json"])
-                .pick_file()
-        {
-            page.message = Some(
-                match std::fs::read_to_string(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|text| {
-                        serde_json::from_str::<ApiStore>(&text).map_err(|e| e.to_string())
-                    }) {
-                    Ok(incoming) => {
-                        let (added, replaced) = page.store.merge(incoming);
-                        page.dirty = true;
-                        (
-                            true,
-                            format!("导入 {added} 个、覆盖 {replaced} 个，记得保存。"),
-                        )
+/// 整个分区：左栏列表、右栏当前项，两栏各自滚动。
+fn section_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConfig) {
+    if !page.loaded {
+        page.load();
+    }
+    page.poll_batch(ui.ctx());
+    let height = ui.available_height().max(320.0);
+    let width = ui.available_width();
+    let list_width = (width * 0.28).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(list_width, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(list_width);
+                ui.set_height(height);
+                list_column(ui, page);
+            },
+        );
+        theme::divider_v(ui, height);
+        ui.add_space(14.0);
+        let detail_width = ui.available_width();
+        ui.allocate_ui_with_layout(
+            egui::vec2(detail_width, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(detail_width);
+                ui.set_height(height);
+                match page.view.clone() {
+                    View::Endpoint(index) if index < page.store.endpoints.len() => {
+                        detail::endpoint_ui(ui, page, index);
                     }
-                    Err(error) => (false, format!("导入失败：{error}")),
-                },
-            );
-        }
-        if ui
-            .add(theme::secondary_icon_button(
-                theme::Icon::FileDown,
-                "导出配置…",
-            ))
-            .on_hover_text("只导出接口定义，不带密钥")
-            .clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .set_file_name("数据接口.json")
-                .add_filter("接口配置", &["json"])
-                .save_file()
-        {
-            page.message = Some(
-                match serde_json::to_string_pretty(&page.store)
-                    .map_err(|e| e.to_string())
-                    .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()))
-                {
-                    Ok(()) => (true, format!("已导出到 {}（不含密钥）", path.display())),
-                    Err(error) => (false, format!("导出失败：{error}")),
-                },
-            );
-        }
-        save_button(ui, page);
+                    View::Service(host) => service::service_ui(ui, page, &host),
+                    View::Import => import::import_ui(ui, page, config),
+                    View::Endpoint(_) | View::None => {
+                        page.view = View::None;
+                        welcome_ui(ui, page);
+                    }
+                }
+            },
+        );
     });
-    message_ui(ui, &page.message);
-    ui.add_space(8.0);
-    if page.store.endpoints.is_empty() {
-        theme::notice(
-            ui,
-            theme::Icon::HelpCircle,
-            theme::info(),
-            theme::accent_soft(),
-            "还没有接口。点「从文档添加」，粘贴接口文档或 cURL 命令，程序会自动填好配置并试调一次。",
+}
+
+// —— 左栏 ——
+
+/// 同一台服务器上的接口。
+struct Group {
+    host: String,
+    members: Vec<usize>,
+}
+
+/// 按服务器分组，组按第一次出现的先后排。
+fn groups(store: &ApiStore, filter: &str) -> Vec<Group> {
+    let filter = filter.trim().to_lowercase();
+    let mut groups: Vec<Group> = Vec::new();
+    for (index, endpoint) in store.endpoints.iter().enumerate() {
+        if !filter.is_empty() {
+            let hay = format!(
+                "{} {} {} {}",
+                endpoint.name, endpoint.description, endpoint.url, endpoint.id
+            )
+            .to_lowercase();
+            if !hay.contains(&filter) {
+                continue;
+            }
+        }
+        let host = host_of(&endpoint.url);
+        match groups.iter_mut().find(|g| g.host == host) {
+            Some(group) => group.members.push(index),
+            None => groups.push(Group {
+                host,
+                members: vec![index],
+            }),
+        }
+    }
+    groups
+}
+
+fn list_column(ui: &mut egui::Ui, page: &mut ApisPage) {
+    list_toolbar(ui, page);
+    if let Some((ok, text)) = &page.message {
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .size(theme::font_sizes::SMALL)
+                    .color(if *ok {
+                        theme::success()
+                    } else {
+                        theme::danger()
+                    }),
+            )
+            .wrap(),
         );
     }
+    ui.add_space(6.0);
+    let scroll_height = (ui.available_height() - LIST_FOOTER_HEIGHT).max(120.0);
     let mut open = None;
-    for (index, endpoint) in page.store.endpoints.iter().enumerate() {
-        let status = page.log.status(endpoint);
-        let missing = page.secrets.missing(endpoint);
-        let response = theme::clickable_card(ui, ("api_card", index), theme::card(), false, |ui| {
-            ui.set_width(ui.available_width());
-            endpoint_card(ui, endpoint, status, &missing);
-        })
-        .response;
-        if response.clicked() {
-            open = Some(index);
-        }
-        ui.add_space(6.0);
-    }
+    let mut open_service = None;
+    egui::ScrollArea::vertical()
+        .id_salt("api_list_scroll")
+        .max_height(scroll_height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if page.store.endpoints.is_empty() {
+                theme::caption(ui, "还没有接口。点上面的「添加」。");
+                return;
+            }
+            let groups = groups(&page.store, &page.search);
+            if groups.is_empty() {
+                theme::caption(ui, "没有匹配的接口。");
+            }
+            for group in &groups {
+                let selected = page.view == View::Service(group.host.clone());
+                if group_header(ui, page, group, selected).clicked() && !group.host.is_empty() {
+                    open_service = Some(group.host.clone());
+                }
+                for &index in &group.members {
+                    let selected = page.view == View::Endpoint(index);
+                    if endpoint_row(ui, page, index, selected).clicked() {
+                        open = Some(index);
+                    }
+                }
+                ui.add_space(8.0);
+            }
+        });
     if let Some(index) = open {
         page.open(index);
     }
-    ui.add_space(6.0);
-    let unfilled = page
-        .secrets
-        .secrets
-        .keys()
-        .filter(|name| !page.secrets.filled(name))
-        .count();
-    let title = if unfilled > 0 {
-        format!(
-            "密钥（{} 个，{unfilled} 个没填）",
-            page.secrets.secrets.len()
-        )
-    } else {
-        format!("密钥（{} 个）", page.secrets.secrets.len())
-    };
-    egui::CollapsingHeader::new(title)
-        .id_salt("api_secrets_section")
-        .default_open(unfilled > 0)
-        .show(ui, |ui| {
-            page.dirty |= secrets_ui(ui, &mut page.secrets, &mut page.store, &page.log);
-        });
+    if let Some(host) = open_service {
+        page.open_service(host);
+    }
+    list_footer(ui, page);
 }
 
-fn save_button(ui: &mut egui::Ui, page: &mut ApisPage) {
-    if !page.dirty {
-        return;
-    }
-    if theme::primary_icon_button(ui, theme::Icon::Save, "保存").clicked() {
-        page.message = Some(match page.save() {
-            Ok(()) => (true, "已保存，下次发送时生效。".into()),
-            Err(error) => (false, format!("保存失败：{error:#}")),
-        });
-    }
-    ui.colored_label(theme::warn(), "有未保存的修改");
-}
-
-/// 一张接口卡片：名称与状态、能查什么、要填什么、地址。
-fn endpoint_card(
-    ui: &mut egui::Ui,
-    endpoint: &ApiEndpoint,
-    status: TestStatus<'_>,
-    missing: &[String],
-) {
+/// 搜索框、「添加」菜单、导入导出菜单。
+fn list_toolbar(ui: &mut egui::Ui, page: &mut ApisPage) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&endpoint.name).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            status_chip(ui, endpoint, status, missing);
+        let search_width = (ui.available_width() - 112.0).max(80.0);
+        ui.add(theme::field(&mut page.search, "搜索接口", search_width));
+        let add = theme::primary_icon_button(ui, theme::Icon::Plus, "添加");
+        egui::Popup::menu(&add).show(|ui| {
+            if ui
+                .add(theme::menu_item(theme::Icon::WandSparkles, "从文档识别…"))
+                .on_hover_text("粘贴接口文档、cURL 或选文件，程序自动填好并试调")
+                .clicked()
+            {
+                page.start_import();
+            }
+            if ui
+                .add(theme::menu_item(theme::Icon::Edit, "手动填写"))
+                .clicked()
+            {
+                page.add_blank();
+            }
+        });
+        let more = ui
+            .add(
+                egui::Button::image(theme::Icon::Menu.image_sized(16.0))
+                    .image_tint_follows_text_color(true)
+                    .frame_when_inactive(false),
+            )
+            .on_hover_text("导入 / 导出接口配置");
+        egui::Popup::menu(&more).show(|ui| {
+            if ui
+                .add(theme::menu_item(theme::Icon::FileUp, "导入配置…"))
+                .on_hover_text("导入别处导出的接口配置文件（JSON）；同 id 的会覆盖")
+                .clicked()
+            {
+                import_config(page);
+            }
+            if ui
+                .add(theme::menu_item(theme::Icon::FileDown, "导出配置…"))
+                .on_hover_text("只导出接口定义，不带密钥")
+                .clicked()
+            {
+                export_config(page);
+            }
         });
     });
-    if endpoint.description.trim().is_empty() {
-        ui.colored_label(theme::warn(), "还没写说明：模型靠说明判断什么时候该用它");
-    } else {
-        ui.label(endpoint.description.trim());
-    }
-    if !endpoint.inputs.is_empty() {
-        theme::caption(ui, &format!("查询条件：{}", inputs_summary(endpoint)));
-    }
-    ui.label(
-        egui::RichText::new(format!("{} {}", endpoint.method.label(), endpoint.url))
-            .size(theme::font_sizes::SMALL)
-            .color(theme::text_muted()),
+}
+
+fn import_config(page: &mut ApisPage) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("接口配置", &["json"])
+        .pick_file()
+    else {
+        return;
+    };
+    page.message = Some(
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| serde_json::from_str::<ApiStore>(&text).map_err(|e| e.to_string()))
+        {
+            Ok(incoming) => {
+                let (added, replaced) = page.store.merge(incoming);
+                page.dirty = true;
+                (
+                    true,
+                    format!("导入 {added} 个、覆盖 {replaced} 个，记得保存。"),
+                )
+            }
+            Err(error) => (false, format!("导入失败：{error}")),
+        },
     );
 }
 
-/// 「地区（必填）、年份」。
-fn inputs_summary(endpoint: &ApiEndpoint) -> String {
-    endpoint
-        .inputs
-        .iter()
-        .map(|input| {
-            let label = if input.description.trim().is_empty() {
-                input.name.clone()
-            } else {
-                input.description.trim().to_string()
-            };
-            if input.required {
-                format!("{label}（必填）")
-            } else {
-                label
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("、")
-}
-
-fn status_chip(
-    ui: &mut egui::Ui,
-    endpoint: &ApiEndpoint,
-    status: TestStatus<'_>,
-    missing: &[String],
-) {
-    let problems = endpoint.problems().len();
-    if problems > 0 {
-        theme::chip(
-            ui,
-            &format!("配置有 {problems} 个问题"),
-            theme::danger(),
-            theme::danger_soft(),
-        );
+fn export_config(page: &mut ApisPage) {
+    let Some(path) = rfd::FileDialog::new()
+        .set_file_name("数据接口.json")
+        .add_filter("接口配置", &["json"])
+        .save_file()
+    else {
         return;
-    }
-    if !missing.is_empty() {
-        theme::chip(ui, "缺密钥", theme::warn(), theme::warn_soft()).on_hover_text(format!(
-            "密钥「{}」还没填：点开接口，在「鉴权」里粘贴",
-            missing.join("」「")
-        ));
-        return;
-    }
-    match status {
-        TestStatus::Failed(record) if record.auth => {
-            theme::chip(
-                ui,
-                &format!("鉴权没过 · {}", record.at),
-                theme::danger(),
-                theme::danger_soft(),
-            )
-            .on_hover_text(format!(
-                "Key 可能不对或已过期，点开接口在「鉴权」里重新粘贴。{}",
-                record.summary
-            ));
-        }
-        TestStatus::Untested => {
-            theme::chip(ui, "未测试", theme::text_muted(), theme::surface_sunk());
-        }
-        TestStatus::Passed(record) => {
-            theme::chip(
-                ui,
-                &format!("测试通过 · {}", record.at),
-                theme::success(),
-                theme::success_soft(),
-            )
-            .on_hover_text(&record.summary);
-        }
-        TestStatus::Failed(record) => {
-            theme::chip(
-                ui,
-                &format!("测试失败 · {}", record.at),
-                theme::danger(),
-                theme::danger_soft(),
-            )
-            .on_hover_text(&record.summary);
-        }
-        TestStatus::Stale(record) => {
-            theme::chip(ui, "配置改过，需重测", theme::warn(), theme::warn_soft())
-                .on_hover_text(format!("上次 {}：{}", record.at, record.summary));
-        }
-    }
-}
-
-// —— 详情 ——
-
-fn detail_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
-    if let Some(rx) = &page.detail.test {
-        match rx.try_recv() {
-            Ok(trial) => {
-                let endpoint = page.store.endpoints[index].clone();
-                page.record(&endpoint, &trial);
-                page.detail.result = Some(trial);
-                page.detail.test = None;
-            }
-            Err(TryRecvError::Empty) => ui.ctx().request_repaint_after(Duration::from_millis(100)),
-            Err(TryRecvError::Disconnected) => page.detail.test = None,
-        }
-    }
-    ui.horizontal(|ui| {
-        if ui
-            .add(theme::secondary_icon_button(theme::Icon::List, "全部接口"))
-            .clicked()
+    };
+    page.message = Some(
+        match serde_json::to_string_pretty(&page.store)
+            .map_err(|e| e.to_string())
+            .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()))
         {
-            page.view = View::List;
-        }
-        save_button(ui, page);
-    });
-    message_ui(ui, &page.message);
-    ui.add_space(6.0);
-    let status = page.log.status(&page.store.endpoints[index]);
-    let missing = page.secrets.missing(&page.store.endpoints[index]);
-    ui.horizontal(|ui| {
-        ui.heading(&page.store.endpoints[index].name);
-        status_chip(ui, &page.store.endpoints[index], status, &missing);
-    });
-    ui.add_space(6.0);
-
-    page.dirty |= basic_form(ui, &mut page.store.endpoints[index], "detail");
-    ui.add_space(10.0);
-    auth_section_ui(ui, page, index);
-    ui.add_space(10.0);
-    let endpoint = &mut page.store.endpoints[index];
-    section_title(ui, "试一下");
-    try_ui(ui, &mut page.detail, endpoint, &page.secrets);
-    if let Some(trial) = &page.detail.result
-        && trial.raw.is_some()
-    {
-        // 拿到了真实返回、而返回映射还有空着的：给个一键补全。
-        let mut preview = endpoint.clone();
-        let inferred = trial
-            .raw
-            .as_ref()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw.body).ok())
-            .map(|root| infer::infer(&root));
-        if let Some(inferred) = inferred {
-            let filled = infer::fill_mapping(&mut preview.mapping, &mut preview.success, &inferred);
-            if !filled.is_empty()
-                && ui
-                    .add(theme::secondary_icon_button(
-                        theme::Icon::WandSparkles,
-                        &format!("按这次的返回补全：{}", filled.join("、")),
-                    ))
-                    .clicked()
-            {
-                *endpoint = preview;
-                page.dirty = true;
-                if let Some(trial) = &mut page.detail.result {
-                    trial.remap(endpoint);
-                }
-            }
-        }
-    }
-    ui.add_space(10.0);
-    egui::CollapsingHeader::new("高级配置（地址、请求头、请求体、返回映射、成功判据）")
-        .id_salt(("api_advanced", index))
-        .show(ui, |ui| {
-            page.dirty |= advanced_form(ui, endpoint, "detail");
-        });
-    problems_ui(ui, &endpoint.problems());
-    ui.add_space(10.0);
-    if page.detail.confirm_remove {
-        ui.horizontal(|ui| {
-            if theme::danger_icon_button(ui, theme::Icon::Trash, "确认删除这个接口").clicked()
-            {
-                page.store.endpoints.remove(index);
-                page.dirty = true;
-                page.view = View::List;
-                page.detail = Detail::default();
-            }
-            ui.label("再点一次垃圾桶确认删除");
-            if ui.button("取消").clicked() {
-                page.detail.confirm_remove = false;
-            }
-        });
-    } else if ui
-        .add(theme::warning_icon_button(theme::Icon::Trash, "删除接口"))
-        .clicked()
-    {
-        page.detail.confirm_remove = true;
-    }
+            Ok(()) => (true, format!("已导出到 {}（不含密钥）", path.display())),
+            Err(error) => (false, format!("导出失败：{error}")),
+        },
+    );
 }
 
-fn section_title(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).strong());
-    ui.add_space(2.0);
+/// 一组接口的 Key 状态。
+enum KeyState {
+    /// 都不带密钥。
+    None,
+    Missing,
+    Rejected,
+    Ok(Vec<String>),
 }
 
-/// 详情里的「鉴权」：这个接口要的密钥直接在这里粘贴；没配鉴权的可以加上。
-/// 改了 Key、离开输入框就自动重测一次。
-fn auth_section_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
-    section_title(ui, "鉴权");
-    let names = page.store.endpoints[index].secret_names();
+fn key_state(page: &ApisPage, members: &[usize]) -> KeyState {
+    let mut names: Vec<String> = Vec::new();
+    let mut missing = false;
+    let mut rejected = false;
+    for &index in members {
+        let endpoint = &page.store.endpoints[index];
+        for name in endpoint.secret_names() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        missing |= !page.secrets.missing(endpoint).is_empty();
+        rejected |= matches!(page.log.status(endpoint), TestStatus::Failed(r) if r.auth);
+    }
     if names.is_empty() {
-        let host = host_of(&page.store.endpoints[index].url);
-        let others = page
-            .store
-            .endpoints
-            .iter()
-            .enumerate()
-            .filter(|(i, e)| *i != index && host_of(&e.url) == host && !auth::has_auth(e))
-            .count();
-        theme::caption(ui, "这个接口没配密钥。接口要 Key 的话，在这里加上：");
-        let added = auth_form_ui(ui, &mut page.detail.auth_form);
-        if others > 0 {
-            let mut all = !page.detail.auth_this_only;
-            ui.checkbox(
-                &mut all,
-                format!("同一服务器上没配密钥的其他 {others} 个接口也加上"),
-            );
-            page.detail.auth_this_only = !all;
+        KeyState::None
+    } else if missing {
+        KeyState::Missing
+    } else if rejected {
+        KeyState::Rejected
+    } else {
+        KeyState::Ok(names)
+    }
+}
+
+/// Key 状态的小标签：组标题、服务页标题用。
+fn key_chip(ui: &mut egui::Ui, state: &KeyState) -> egui::Response {
+    match state {
+        KeyState::None => small_chip(ui, None, "无需鉴权", theme::text_muted(), None),
+        KeyState::Missing => small_chip(
+            ui,
+            Some(theme::Icon::Shield),
+            "缺 Key",
+            theme::warn(),
+            Some(theme::warn_soft()),
+        ),
+        KeyState::Rejected => small_chip(
+            ui,
+            Some(theme::Icon::Shield),
+            "Key 被拒",
+            theme::danger(),
+            Some(theme::danger_soft()),
+        ),
+        KeyState::Ok(names) => {
+            let text = match names.len() {
+                1 => names[0].clone(),
+                n => format!("{} 等 {n} 个", names[0]),
+            };
+            small_chip(
+                ui,
+                Some(theme::Icon::Shield),
+                &text,
+                theme::success(),
+                Some(theme::success_soft()),
+            )
         }
-        if let Some(spec) = added {
-            let secret = secret_for(&spec, &mut page.secrets);
-            let all = !page.detail.auth_this_only;
-            for (i, endpoint) in page.store.endpoints.iter_mut().enumerate() {
-                if i == index
-                    || (all && host_of(&endpoint.url) == host && !auth::has_auth(endpoint))
-                {
-                    auth::apply(endpoint, &spec, &secret);
+    }
+}
+
+/// 小号胶囊标签，可带图标；`bg` 为空时只有文字。
+fn small_chip(
+    ui: &mut egui::Ui,
+    icon: Option<theme::Icon>,
+    text: &str,
+    fg: egui::Color32,
+    bg: Option<egui::Color32>,
+) -> egui::Response {
+    egui::Frame::new()
+        .fill(bg.unwrap_or(egui::Color32::TRANSPARENT))
+        .corner_radius(egui::CornerRadius::same(255))
+        .inner_margin(egui::Margin::symmetric(7, 1))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.horizontal(|ui| {
+                // 放在右对齐的行里时 horizontal 也从右往左排：图标要后加才落在左边。
+                let reversed = ui.layout().prefer_right_to_left();
+                let label = egui::RichText::new(text)
+                    .size(theme::font_sizes::SMALL)
+                    .color(fg);
+                if reversed {
+                    ui.label(label.clone());
                 }
-            }
-            page.dirty = true;
-        }
+                if let Some(icon) = icon {
+                    ui.add(icon.image_sized(11.0).tint(fg));
+                }
+                if !reversed {
+                    ui.label(label);
+                }
+            });
+        })
+        .response
+}
+
+/// 列表里可点的一行：整行是点击区，选中时铺强调色淡底。
+fn list_row<R>(
+    ui: &mut egui::Ui,
+    id_salt: impl egui::AsIdSalt,
+    selected: bool,
+    margin: egui::Margin,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::Response {
+    let frame = egui::Frame::new()
+        .fill(if selected {
+            theme::accent_soft()
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .corner_radius(egui::CornerRadius::same(7))
+        .inner_margin(margin);
+    theme::clickable_card(ui, id_salt, frame, selected, |ui| {
+        ui.set_width(ui.available_width());
+        add(ui);
+    })
+    .response
+}
+
+fn group_header(
+    ui: &mut egui::Ui,
+    page: &ApisPage,
+    group: &Group,
+    selected: bool,
+) -> egui::Response {
+    let state = key_state(page, &group.members);
+    list_row(
+        ui,
+        ("api_group", &group.host),
+        selected,
+        egui::Margin::symmetric(8, 4),
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    theme::Icon::Globe
+                        .image_sized(12.0)
+                        .tint(theme::text_muted()),
+                );
+                let host = if group.host.is_empty() {
+                    "未填地址".to_string()
+                } else {
+                    group
+                        .host
+                        .split_once("://")
+                        .map_or(group.host.clone(), |(_, h)| h.to_string())
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(host)
+                            .monospace()
+                            .size(theme::font_sizes::SMALL)
+                            .color(theme::text_soft()),
+                    )
+                    .truncate(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    key_chip(ui, &state);
+                });
+            });
+        },
+    )
+    .on_hover_text("这台服务器上的接口共用的密钥：点开填写、更换、全部重测")
+}
+
+fn endpoint_row(
+    ui: &mut egui::Ui,
+    page: &ApisPage,
+    index: usize,
+    selected: bool,
+) -> egui::Response {
+    let endpoint = &page.store.endpoints[index];
+    let health = Health::of(page, endpoint);
+    list_row(
+        ui,
+        ("api_row", index),
+        selected,
+        egui::Margin::symmetric(10, 6),
+        |ui| {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.add_space(6.0);
+                    theme::dot(ui, health.dot());
+                });
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(egui::Label::new(&endpoint.name).truncate());
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        method_tag(ui, endpoint.method);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(path_of(&endpoint.url))
+                                    .monospace()
+                                    .size(theme::font_sizes::SMALL)
+                                    .color(theme::text_muted()),
+                            )
+                            .truncate(),
+                        );
+                    });
+                });
+            });
+        },
+    )
+    .on_hover_text(health.text())
+}
+
+/// 请求方法的小标签：GET 蓝绿、POST 琥珀，扫一眼分得开。
+fn method_tag(ui: &mut egui::Ui, method: ApiMethod) {
+    let (fg, bg) = match method {
+        ApiMethod::Get => (theme::info(), theme::surface_sunk()),
+        ApiMethod::Post => (theme::warn(), theme::warn_soft()),
+    };
+    egui::Frame::new()
+        .fill(bg)
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(5, 0))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(method.label())
+                    .monospace()
+                    .size(11.0)
+                    .strong()
+                    .color(fg),
+            );
+        });
+}
+
+/// 左栏底部：没保存的修改、没接口在用的密钥、状态点图例。
+fn list_footer(ui: &mut egui::Ui, page: &mut ApisPage) {
+    ui.add_space(4.0);
+    theme::hairline(ui);
+    ui.add_space(4.0);
+    if page.dirty {
+        ui.horizontal(|ui| {
+            ui.colored_label(theme::warn(), "有未保存的修改");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::primary_icon_button(ui, theme::Icon::Save, "保存").clicked() {
+                    page.message = Some(match page.save() {
+                        Ok(()) => (true, "已保存，下次发送时生效。".into()),
+                        Err(error) => (false, format!("保存失败：{error:#}")),
+                    });
+                }
+            });
+        });
         return;
     }
-    let mut retest = false;
-    let how = auth::from_endpoint(&page.store.endpoints[index]).map(|(spec, _)| spec.describe());
-    for name in &names {
-        let users: Vec<String> = page
-            .store
-            .endpoints
-            .iter()
-            .enumerate()
-            .filter(|(i, e)| *i != index && e.secret_names().contains(name))
-            .map(|(_, e)| e.name.clone())
-            .collect();
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("密钥「{name}」"));
-            let value = page.secrets.secrets.entry(name.clone()).or_default();
-            let response = key_field(ui, value);
-            let filled = !value.trim().is_empty();
-            if response.changed() {
+    let orphans = page.orphan_secrets();
+    if !orphans.is_empty() {
+        ui.horizontal(|ui| {
+            theme::caption(ui, &format!("{} 个密钥没有接口在用", orphans.len()))
+                .on_hover_text(format!("「{}」", orphans.join("」「")));
+            if ui.small_button("清理").clicked() {
+                for name in &orphans {
+                    page.secrets.secrets.remove(name);
+                }
                 page.dirty = true;
-                page.detail.key_edited = true;
-            }
-            if response.lost_focus() && page.detail.key_edited && filled {
-                page.detail.key_edited = false;
-                retest = true;
-            }
-            if filled {
-                theme::caption(ui, "已填");
-            } else {
-                ui.colored_label(theme::warn(), "未填");
             }
         });
-        if !users.is_empty() {
-            theme::caption(ui, &format!("也用在：{}（改了一起生效）", users.join("、")));
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (color, label) in [
+            (theme::success(), "调通"),
+            (theme::danger(), "失败"),
+            (theme::warn(), "要处理"),
+            (theme::border_strong(), "未测"),
+        ] {
+            theme::dot(ui, color);
+            theme::caption(ui, label);
+            ui.add_space(6.0);
+        }
+    });
+}
+
+/// 一个接口眼下的状况：列表的状态点、详情标题旁的标签用同一套判断。
+enum Health<'a> {
+    Problems(usize),
+    MissingKey(Vec<String>),
+    AuthFailed(&'a TestRecord),
+    Untested,
+    Passed(&'a TestRecord),
+    Failed(&'a TestRecord),
+    Stale(&'a TestRecord),
+}
+
+impl<'a> Health<'a> {
+    fn of(page: &'a ApisPage, endpoint: &ApiEndpoint) -> Self {
+        let problems = endpoint.problems().len();
+        if problems > 0 {
+            return Self::Problems(problems);
+        }
+        let missing = page.secrets.missing(endpoint);
+        if !missing.is_empty() {
+            return Self::MissingKey(missing);
+        }
+        match page.log.status(endpoint) {
+            TestStatus::Failed(record) if record.auth => Self::AuthFailed(record),
+            TestStatus::Failed(record) => Self::Failed(record),
+            TestStatus::Passed(record) => Self::Passed(record),
+            TestStatus::Stale(record) => Self::Stale(record),
+            TestStatus::Untested => Self::Untested,
         }
     }
-    if let Some(how) = how {
+
+    fn dot(&self) -> egui::Color32 {
+        match self {
+            Self::Passed(_) => theme::success(),
+            Self::Failed(_) | Self::AuthFailed(_) | Self::Problems(_) => theme::danger(),
+            Self::MissingKey(_) | Self::Stale(_) => theme::warn(),
+            Self::Untested => theme::border_strong(),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Problems(n) => format!("配置有 {n} 个问题"),
+            Self::MissingKey(_) => "缺密钥".into(),
+            Self::AuthFailed(record) => format!("鉴权没过 · {}", record.at),
+            Self::Untested => "未测试".into(),
+            Self::Passed(record) => format!("测试通过 · {}", record.at),
+            Self::Failed(record) => format!("测试失败 · {}", record.at),
+            Self::Stale(_) => "配置改过，需重测".into(),
+        }
+    }
+
+    /// 悬停说明。
+    fn text(&self) -> String {
+        match self {
+            Self::Problems(_) => "配置有问题，见「技术配置」".into(),
+            Self::MissingKey(names) => {
+                format!("密钥「{}」还没填：在详情顶上粘贴", names.join("」「"))
+            }
+            Self::AuthFailed(record) => format!(
+                "Key 可能不对或已过期，在详情顶上重新粘贴。{}",
+                record.summary
+            ),
+            Self::Untested => "还没测过".into(),
+            Self::Passed(record) | Self::Failed(record) => record.summary.clone(),
+            Self::Stale(record) => format!("上次 {}：{}", record.at, record.summary),
+        }
+    }
+
+    fn chip(&self, ui: &mut egui::Ui) -> egui::Response {
+        let (fg, bg) = match self {
+            Self::Passed(_) => (theme::success(), theme::success_soft()),
+            Self::Failed(_) | Self::AuthFailed(_) | Self::Problems(_) => {
+                (theme::danger(), theme::danger_soft())
+            }
+            Self::MissingKey(_) | Self::Stale(_) => (theme::warn(), theme::warn_soft()),
+            Self::Untested => (theme::text_muted(), theme::surface_sunk()),
+        };
+        theme::chip(ui, &self.label(), fg, bg).on_hover_text(self.text())
+    }
+}
+
+/// 还没选中任何东西：上手说明与两个入口。
+fn welcome_ui(ui: &mut egui::Ui, page: &mut ApisPage) {
+    ui.add_space(40.0);
+    ui.vertical_centered(|ui| {
+        ui.add(
+            theme::Icon::Braces
+                .image_sized(36.0)
+                .tint(theme::border_strong()),
+        );
+        ui.add_space(10.0);
+        let title = if page.store.endpoints.is_empty() {
+            "添加第一个数据接口"
+        } else {
+            "在左边选一个接口"
+        };
+        ui.label(egui::RichText::new(title).size(theme::font_sizes::HEADING));
+        ui.add_space(4.0);
         theme::caption(
             ui,
-            &format!("带法：{how}。要改带法在「高级配置」的请求头里改。"),
+            "粘贴接口文档或 cURL 命令，程序会识别出接口、填好配置并试调一次，缺 Key 会问你。",
         );
-    }
-    theme::caption(ui, "Key 只存在本机，不导出、不发给模型；记得保存。");
-    if retest && page.detail.test.is_none() {
-        let endpoint = page.store.endpoints[index].clone();
-        start_test(&mut page.detail, &endpoint, &page.secrets);
-    }
-}
-
-/// 用「试一下」里填的值后台实测一次。
-fn start_test(detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets) {
-    let args: Map<String, Value> = endpoint
-        .inputs
-        .iter()
-        .filter_map(|input| {
-            let value = detail.args.get(&input.name)?.trim();
-            (!value.is_empty()).then(|| (input.name.clone(), Value::String(value.into())))
-        })
-        .collect();
-    detail.test = Some(spawn_trial(endpoint.clone(), args, secrets.clone()));
-    detail.result = None;
-}
-
-/// 「试一下」：每个查询条件一个输入框，点测试走正式调用的同一条路。
-fn try_ui(ui: &mut egui::Ui, detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets) {
-    if endpoint.inputs.is_empty() {
-        theme::caption(ui, "这个接口不需要查询条件。");
-    }
-    egui::Grid::new("api_try_args")
-        .num_columns(2)
-        .spacing([10.0, 6.0])
-        .show(ui, |ui| {
-            for input in &endpoint.inputs {
-                let label = if input.description.trim().is_empty() {
-                    input.name.clone()
-                } else {
-                    format!("{}（{}）", input.description.trim(), input.name)
-                };
-                ui.label(if input.required {
-                    format!("{label} *")
-                } else {
-                    label
-                });
-                let value = detail.args.entry(input.name.clone()).or_default();
-                ui.add(egui::TextEdit::singleline(value).desired_width(260.0));
-                ui.end_row();
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            // 两个按钮居中：先量出总宽再留左边距。
+            let total = 250.0;
+            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+            if theme::primary_icon_button(ui, theme::Icon::WandSparkles, "从文档添加").clicked()
+            {
+                page.start_import();
+            }
+            if ui
+                .add(theme::secondary_icon_button(theme::Icon::Edit, "手动填写"))
+                .clicked()
+            {
+                page.add_blank();
             }
         });
-    let running = detail.test.is_some();
-    ui.horizontal(|ui| {
-        if theme::primary_icon_button_enabled(ui, !running, theme::Icon::PlugZap, "测试").clicked()
-        {
-            start_test(detail, endpoint, secrets);
-        }
-        if running {
-            theme::spinner(ui, 14.0, theme::accent());
-            ui.weak("请求中…");
-        } else {
-            ui.weak("用的是正在编辑的配置，不必先保存。");
-        }
     });
-    if let Some(trial) = &detail.result {
-        ui.add_space(4.0);
-        trial_ui(ui, trial, "detail");
-        if trial.auth_rejected() {
-            auth_hint(ui, auth::has_auth(endpoint));
-        }
-    }
 }
+
+// —— 实测（详情与导入共用） ——
 
 /// 实测像是鉴权没过时的提示。
 pub(super) fn auth_hint(ui: &mut egui::Ui, has_auth: bool) {
@@ -743,9 +970,9 @@ pub(super) fn auth_hint(ui: &mut egui::Ui, has_auth: bool) {
         theme::warn(),
         theme::warn_soft(),
         if has_auth {
-            "看起来是鉴权没过：Key 不对、过期，或者接口要的带法和这里配的不一样。在「鉴权」里重新粘贴 Key，离开输入框会自动重测。"
+            "看起来是鉴权没过：Key 不对、过期，或者接口要的带法和这里配的不一样。重新粘贴 Key，离开输入框会自动重测。"
         } else {
-            "看起来接口要鉴权，但这里没配密钥：在「鉴权」里选好带法、加上，再粘贴 Key。"
+            "看起来接口要鉴权，但这里没配密钥：选好带法加上，再粘贴 Key。"
         },
     );
 }
@@ -763,7 +990,7 @@ pub(super) fn spawn_trial(
     rx
 }
 
-/// 实测结果：结论、条目预览、请求与原始返回（折叠）。
+/// 精简版实测结果（导入候选用）：结论、条目预览、请求与原始返回（折叠）。
 pub(super) fn trial_ui(ui: &mut egui::Ui, trial: &Trial, salt: &str) {
     match &trial.error {
         None => {
@@ -813,311 +1040,10 @@ pub(super) fn trial_ui(ui: &mut egui::Ui, trial: &Trial, salt: &str) {
     }
 }
 
-// —— 表单 ——
-
-/// 名称、说明与查询条件。返回是否改了东西。
-pub(super) fn basic_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: &str) -> bool {
-    let before = endpoint.clone();
-    setting_row(ui, "名称", None, |ui| {
-        ui.add(egui::TextEdit::singleline(&mut endpoint.name).desired_width(260.0));
-    });
-    setting_row(
-        ui,
-        "说明",
-        Some("这个接口能查什么、按什么查。AI 靠它判断什么时候该调用"),
-        |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut endpoint.description)
-                    .desired_rows(2)
-                    .hint_text("例如：按地区、年份查森林火灾起数")
-                    .desired_width(f32::INFINITY),
-            );
-        },
-    );
-    ui.add_space(4.0);
-    ui.label("查询条件");
-    let mut remove = None;
-    egui::Grid::new(("api_inputs", salt))
-        .num_columns(6)
-        .striped(true)
-        .show(ui, |ui| {
-            ui.weak("参数名");
-            ui.weak("说明");
-            ui.weak("类型");
-            ui.weak("必填");
-            ui.weak("样例");
-            ui.end_row();
-            for (index, input) in endpoint.inputs.iter_mut().enumerate() {
-                ui.add(egui::TextEdit::singleline(&mut input.name).desired_width(90.0));
-                ui.add(
-                    egui::TextEdit::singleline(&mut input.description)
-                        .hint_text("如 地区名称")
-                        .desired_width(150.0),
-                );
-                egui::ComboBox::from_id_salt(("api_input_kind", salt, index))
-                    .selected_text(input.kind.label())
-                    .width(60.0)
-                    .show_ui(ui, |ui| {
-                        for kind in InputKind::ALL {
-                            ui.selectable_value(&mut input.kind, kind, kind.label());
-                        }
-                    });
-                ui.checkbox(&mut input.required, "");
-                ui.add(egui::TextEdit::singleline(&mut input.example).desired_width(90.0));
-                if ui.small_button("删除").clicked() {
-                    remove = Some(index);
-                }
-                ui.end_row();
-            }
-        });
-    if let Some(index) = remove {
-        endpoint.inputs.remove(index);
-    }
-    if ui.small_button("添加查询条件").clicked() {
-        endpoint.inputs.push(ApiInput::default());
-    }
-    *endpoint != before
-}
-
-/// 技术配置：id、方法、地址、请求头、请求体、返回映射、成功判据、去处、超时。
-pub(super) fn advanced_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: &str) -> bool {
-    let before = endpoint.clone();
-    setting_row(
-        ui,
-        "id",
-        Some("技能里写 http.call:<id> 引用它；只能用英文字母、数字、下划线和短横线"),
-        |ui| {
-            ui.add(egui::TextEdit::singleline(&mut endpoint.id).desired_width(200.0));
-        },
-    );
-    setting_row(
-        ui,
-        "方法",
-        Some("只做查询：POST 也只用于带请求体的查询"),
-        |ui| {
-            for method in [ApiMethod::Get, ApiMethod::Post] {
-                ui.selectable_value(&mut endpoint.method, method, method.label());
-            }
-        },
-    );
-    setting_row(
-        ui,
-        "地址",
-        Some("可以带变量：http://10.0.0.8/api/stat?region={region}"),
-        |ui| {
-            ui.add(egui::TextEdit::singleline(&mut endpoint.url).desired_width(f32::INFINITY));
-        },
-    );
-    setting_row(ui, "超时（秒）", None, |ui| {
-        ui.add(egui::DragValue::new(&mut endpoint.timeout_seconds).range(1..=300));
-    });
-    ui.add_space(4.0);
-    ui.label("请求头（密钥写成 {secret:名字}）");
-    let mut remove = None;
-    egui::Grid::new(("api_headers", salt))
-        .num_columns(3)
-        .show(ui, |ui| {
-            for (index, header) in endpoint.headers.iter_mut().enumerate() {
-                ui.add(
-                    egui::TextEdit::singleline(&mut header.name)
-                        .hint_text("Authorization")
-                        .desired_width(140.0),
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut header.value)
-                        .hint_text("Bearer {secret:token}")
-                        .desired_width(260.0),
-                );
-                if ui.small_button("删除").clicked() {
-                    remove = Some(index);
-                }
-                ui.end_row();
-            }
-        });
-    if let Some(index) = remove {
-        endpoint.headers.remove(index);
-    }
-    if ui.small_button("添加请求头").clicked() {
-        endpoint.headers.push(ApiHeader::default());
-    }
-    if endpoint.method == ApiMethod::Post {
-        ui.add_space(4.0);
-        ui.label("请求体模板（JSON；单独一个 \"{变量}\" 会按类型换成数字或是否）");
-        ui.add(
-            egui::TextEdit::multiline(&mut endpoint.body)
-                .code_editor()
-                .desired_rows(4)
-                .desired_width(f32::INFINITY),
-        );
-    }
-    ui.add_space(4.0);
-    ui.label("返回映射（写英文字段名、/JSON 指针、{模板} 或固定文字；留空按常见字段名猜）");
-    let mapping = &mut endpoint.mapping;
-    setting_row(
-        ui,
-        "列表位置",
-        Some("JSON 指针，如 /data/items；留空表示整个返回"),
-        |ui| {
-            ui.add(egui::TextEdit::singleline(&mut mapping.list).desired_width(260.0));
-        },
-    );
-    setting_row(ui, "标题", None, |ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut mapping.title)
-                .hint_text("title")
-                .desired_width(260.0),
-        );
-    });
-    setting_row(
-        ui,
-        "正文",
-        Some("如 {region}{year}年共发生森林火灾{count}起"),
-        |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut mapping.text)
-                    .hint_text("text")
-                    .desired_width(f32::INFINITY),
-            );
-        },
-    );
-    setting_row(ui, "出处", None, |ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut mapping.source)
-                .hint_text("省统计系统")
-                .desired_width(260.0),
-        );
-    });
-    setting_row(
-        ui,
-        "编号",
-        Some("同一条资料只进一次证据包，靠它认"),
-        |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut mapping.id)
-                    .hint_text("id")
-                    .desired_width(160.0),
-            );
-        },
-    );
-    setting_row(
-        ui,
-        "成功判据",
-        Some(
-            "返回里表示查询成功的字段与取值，如 /code 等于 0；多个取值用 | 分开。不填则 HTTP 200 就算成功",
-        ),
-        |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut endpoint.success.pointer)
-                    .hint_text("/code")
-                    .desired_width(120.0),
-            );
-            ui.label("等于");
-            ui.add(
-                egui::TextEdit::singleline(&mut endpoint.success.equals)
-                    .hint_text("0")
-                    .desired_width(80.0),
-            );
-        },
-    );
-    setting_row(ui, "返回去处", None, |ui| {
-        for destination in [ApiDestination::Evidence, ApiDestination::Variable] {
-            ui.selectable_value(&mut endpoint.destination, destination, destination.label());
-        }
-    });
-    *endpoint != before
-}
-
-/// 密钥表。值只在本机，输入框打码；每个密钥写明用在哪些接口、最近测试鉴权过没过。
-/// 改名时接口里的引用跟着改。返回是否改了东西。
-fn secrets_ui(
-    ui: &mut egui::Ui,
-    secrets: &mut ApiSecrets,
-    store: &mut ApiStore,
-    log: &ApiTestLog,
-) -> bool {
-    ui.weak("Key 单独存放在本机，导出接口、同步稿件时都不带，也不发给模型。");
-    let mut changed = false;
-    let mut remove = None;
-    let mut renames = Vec::new();
-    egui::Grid::new("api_secrets")
-        .num_columns(4)
-        .spacing([10.0, 6.0])
-        .show(ui, |ui| {
-            for (name, value) in secrets.secrets.iter_mut() {
-                let mut new_name = name.clone();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut new_name).desired_width(140.0))
-                    .changed()
-                {
-                    renames.push((name.clone(), new_name));
-                }
-                changed |= key_field(ui, value).changed();
-                let users: Vec<&ApiEndpoint> = store
-                    .endpoints
-                    .iter()
-                    .filter(|e| e.secret_names().contains(name))
-                    .collect();
-                let rejected: Vec<&str> = users
-                    .iter()
-                    .filter(|e| matches!(log.status(e), TestStatus::Failed(r) if r.auth))
-                    .map(|e| e.name.as_str())
-                    .collect();
-                ui.vertical(|ui| {
-                    if value.trim().is_empty() {
-                        ui.colored_label(theme::warn(), "没填");
-                    } else if !rejected.is_empty() {
-                        ui.colored_label(
-                            theme::danger(),
-                            format!("「{}」鉴权没过，Key 可能已过期", rejected.join("」「")),
-                        );
-                    }
-                    if users.is_empty() {
-                        theme::caption(ui, "没有接口在用");
-                    } else {
-                        let names: Vec<&str> = users.iter().map(|e| e.name.as_str()).collect();
-                        theme::caption(ui, &format!("用在：{}", names.join("、")));
-                    }
-                });
-                if ui.small_button("删除").clicked() {
-                    remove = Some(name.clone());
-                }
-                ui.end_row();
-            }
-        });
-    for (old, new) in renames {
-        let valid = new.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            && new.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if valid
-            && !secrets.secrets.contains_key(&new)
-            && let Some(value) = secrets.secrets.remove(&old)
-        {
-            secrets.secrets.insert(new.clone(), value);
-            let renamed = [(old, new)];
-            for endpoint in &mut store.endpoints {
-                rename_secret_refs(endpoint, &renamed);
-            }
-            changed = true;
-        }
-    }
-    if let Some(name) = remove {
-        secrets.secrets.remove(&name);
-        changed = true;
-    }
-    if ui.small_button("添加密钥").clicked() {
-        let mut n = secrets.secrets.len() + 1;
-        while secrets.secrets.contains_key(&format!("key{n}")) {
-            n += 1;
-        }
-        secrets.secrets.insert(format!("key{n}"), String::new());
-        changed = true;
-    }
-    changed
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use crate::agent::api::{MappedItem, RawResponse};
+    use crate::agent::api::{ApiHeader, ApiInput, MappedItem, RawResponse};
 
     /// 在一个 egui 帧里画一遍，返回画面上的文字。
     pub(in crate::app) fn render(mut add: impl FnMut(&mut egui::Ui)) -> Vec<String> {
@@ -1127,7 +1053,7 @@ pub(super) mod tests {
         let raw = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(1000.0, 3000.0),
+                egui::vec2(1200.0, 3000.0),
             )),
             ..Default::default()
         };
@@ -1147,7 +1073,7 @@ pub(super) mod tests {
         texts
     }
 
-    fn endpoint() -> ApiEndpoint {
+    pub(super) fn endpoint() -> ApiEndpoint {
         ApiEndpoint {
             id: "stat".into(),
             name: "火灾统计".into(),
@@ -1166,65 +1092,75 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn the_list_shows_what_each_endpoint_answers_and_its_test_status() {
+    fn page_with(endpoints: Vec<ApiEndpoint>) -> ApisPage {
         let mut page = ApisPage {
             loaded: true,
-            store: ApiStore {
-                endpoints: vec![endpoint()],
-            },
+            store: ApiStore { endpoints },
             ..ApisPage::default()
         };
-        let trial = Trial::default();
-        page.log.record(&page.store.endpoints[0], &trial);
-        let texts = render(|ui| list_ui(ui, &mut page));
-        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
-        assert!(has("火灾统计") && has("按地区查森林火灾起数"), "{texts:?}");
-        assert!(has("查询条件：地区（必填）"), "{texts:?}");
-        assert!(has("测试通过"), "{texts:?}");
-        assert!(has("从文档添加") && has("密钥（0 个）"), "{texts:?}");
+        page.open(0);
+        page
+    }
+
+    fn draw(page: &mut ApisPage) -> Vec<String> {
+        let config = AppConfig::default();
+        render(|ui| section_ui(ui, page, &config))
     }
 
     #[test]
-    fn missing_keys_show_on_the_card_and_are_pasted_in_the_detail() {
+    fn the_list_groups_by_server_and_the_detail_reads_like_a_document() {
+        let mut page = page_with(vec![endpoint()]);
+        let trial = Trial::default();
+        page.log.record(&page.store.endpoints[0], &trial);
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("10.0.0.8") && has("无需鉴权"),
+            "按服务器分组：{texts:?}"
+        );
+        assert!(has("火灾统计") && has("/stat"), "{texts:?}");
+        assert!(has("测试通过"), "{texts:?}");
+        assert!(
+            has("用途") && has("按地区查森林火灾起数") && has("查询条件"),
+            "{texts:?}"
+        );
+        assert!(has("region") && has("地区") && has("必填"), "{texts:?}");
+        assert!(has("返回什么") && has("http.call:stat"), "{texts:?}");
+    }
+
+    #[test]
+    fn keys_are_bound_to_endpoints_and_shown_on_the_server_group() {
         let mut with_key = endpoint();
         with_key.headers.push(ApiHeader {
             name: "Authorization".into(),
             value: "Bearer {secret:token}".into(),
         });
-        let mut page = ApisPage {
-            loaded: true,
-            store: ApiStore {
-                endpoints: vec![with_key],
-            },
-            ..ApisPage::default()
-        };
+        let mut page = page_with(vec![with_key]);
         page.secrets.secrets.insert("token".into(), String::new());
-        let texts = render(|ui| list_ui(ui, &mut page));
+        let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
-        assert!(has("缺密钥"), "{texts:?}");
-        assert!(has("1 个没填") && has("用在：火灾统计"), "{texts:?}");
+        assert!(has("缺 Key"), "组标题标出缺 Key：{texts:?}");
+        assert!(has("密钥 token") && has("还没填"), "{texts:?}");
 
-        page.open(0);
-        let texts = render(|ui| detail_ui(ui, &mut page, 0));
+        page.secrets.secrets.insert("token".into(), "s3cr3t".into());
+        let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(
-            has("鉴权") && has("密钥「token」") && has("未填"),
+            has("请求头 Authorization: Bearer 密钥") && has("更换 Key"),
             "{texts:?}"
         );
-        assert!(has("请求头 Authorization: Bearer 密钥"), "{texts:?}");
+        assert!(!has("s3cr3t"), "密钥打码显示：{texts:?}");
 
-        let mut bare = ApisPage {
-            loaded: true,
-            store: ApiStore {
-                endpoints: vec![endpoint()],
-            },
-            ..ApisPage::default()
-        };
-        bare.open(0);
-        let texts = render(|ui| detail_ui(ui, &mut bare, 0));
+        page.open_service("http://10.0.0.8".into());
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has("全部重测") && has("火灾统计"), "{texts:?}");
+        assert!(!has("s3cr3t"), "密钥打码显示：{texts:?}");
+
+        let mut bare = page_with(vec![endpoint()]);
+        let texts = draw(&mut bare);
         assert!(
-            texts.iter().any(|t| t.contains("这个接口没配密钥")),
+            texts.iter().any(|t| t.contains("这个接口不带密钥")),
             "{texts:?}"
         );
     }
@@ -1252,15 +1188,17 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_detail_keeps_technical_fields_folded_and_shows_trial_results() {
-        let mut page = ApisPage {
-            loaded: true,
-            store: ApiStore {
-                endpoints: vec![endpoint()],
-            },
-            ..ApisPage::default()
-        };
-        page.open(0);
+    fn technical_fields_live_in_their_own_tab_and_trials_show_input_and_output() {
+        let mut page = page_with(vec![endpoint()]);
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("接口说明") && has("试一下") && has("技术配置"),
+            "{texts:?}"
+        );
+        assert!(!has("请求体模板"), "技术配置在自己的页里：{texts:?}");
+
+        page.detail.tab = detail::Tab::Try;
         page.detail.result = Some(Trial {
             request: Some("POST http://x".into()),
             raw: Some(RawResponse {
@@ -1276,28 +1214,42 @@ pub(super) mod tests {
             total: 1,
             error: None,
         });
-        let texts = render(|ui| detail_ui(ui, &mut page, 0));
+        let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
-        assert!(
-            has("查询条件") && has("试一下") && has("高级配置"),
-            "{texts:?}"
-        );
-        assert!(!has("请求体模板"), "技术配置默认折叠：{texts:?}");
-        assert!(
-            has("调通了：取到 1 条") && has("【年度统计】共12起"),
-            "{texts:?}"
-        );
-        assert!(has("按这次的返回补全：列表位置"), "{texts:?}");
+        assert!(has("请求") && has("响应") && has("发送请求"), "{texts:?}");
+        assert!(has("HTTP 200") && has("取到 1 条"), "{texts:?}");
+        assert!(has("年度统计") && has("共12起"), "{texts:?}");
+        assert!(has("按这次的返回补全"), "{texts:?}");
 
-        let mut secrets = ApiSecrets::default();
-        secrets.secrets.insert("token".into(), "s3cr3t".into());
-        let mut store = page.store.clone();
-        let texts = render(|ui| {
-            secrets_ui(ui, &mut secrets, &mut store, &ApiTestLog::default());
-        });
+        page.detail.tab = detail::Tab::Config;
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has("请求体模板") && has("删除这个接口"), "{texts:?}");
+    }
+
+    #[test]
+    fn editing_the_description_happens_in_place_and_can_be_discarded() {
+        let mut page = page_with(vec![endpoint()]);
+        page.detail.start_editing(&page.store.endpoints[0]);
+        page.store.endpoints[0].description = "改过的说明".into();
+        let texts = draw(&mut page);
         assert!(
-            !texts.iter().any(|t| t.contains("s3cr3t")),
-            "密钥打码显示：{texts:?}"
+            texts.iter().any(|t| t.contains("正在编辑说明")),
+            "{texts:?}"
         );
+        detail::discard_edit(&mut page, 0);
+        assert_eq!(page.store.endpoints[0].description, "按地区查森林火灾起数");
+        assert!(page.detail.editing.is_none());
+    }
+
+    #[test]
+    fn path_and_host_split_the_url() {
+        assert_eq!(
+            host_of("http://10.0.0.9:8080/api/x"),
+            "http://10.0.0.9:8080"
+        );
+        assert_eq!(path_of("http://10.0.0.9:8080/api/x?a=1"), "/api/x?a=1");
+        assert_eq!(path_of("https://a.b?x=1"), "?x=1");
+        assert_eq!(path_of("https://a.b"), "/");
     }
 }

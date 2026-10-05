@@ -129,9 +129,8 @@ impl AiSection {
                  也可以新建自己的；保存时校验，写坏了不影响使用。"
             }
             AiSection::DataApis => {
-                "让技能调用内网系统（统计、政策库、业务系统、算法服务）取数据。粘贴接口文档或 cURL 就能\
-                 自动填好并试调。只做查询，不发任何会改变对方状态的请求；接口地址与密钥只存在本机，\
-                 不写进技能文件。"
+                "让技能查内网系统（统计、政策库、业务系统、算法服务）的数据。只做查询，不发任何会改变\
+                 对方状态的请求；接口地址与密钥只存在本机，不写进技能文件。"
             }
             AiSection::ToolConsole => {
                 "选一个工具、填参数、看输出，写技能时用来试工具。对象是当前稿件的副本，改不到正文。"
@@ -148,6 +147,29 @@ impl AiSection {
             }
         }
     }
+}
+
+/// 分区标题：图标 + 名称，下面一行小字说明，再一道分隔线。
+fn section_header_ui(ui: &mut egui::Ui, section: AiSection) {
+    ui.horizontal(|ui| {
+        ui.add(
+            section
+                .icon()
+                .image()
+                .tint(theme::accent())
+                .fit_to_exact_size(egui::vec2(20.0, 20.0)),
+        );
+        ui.heading(section.label());
+    });
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(section.description())
+            .size(theme::font_sizes::SMALL)
+            .color(theme::text_muted()),
+    );
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(8.0);
 }
 
 impl GongwenApp {
@@ -219,30 +241,19 @@ impl GongwenApp {
             .inner_margin(egui::Margin::symmetric(18, 14))
             .corner_radius(egui::CornerRadius::same(10))
             .show(ui, |ui| {
+                // 数据接口是左列表、右详情，两栏各自滚动，占满整个分区，不套外层滚动区。
+                if section == AiSection::DataApis {
+                    ui.set_min_size(ui.available_size());
+                    section_header_ui(ui, section);
+                    self.apis_section_ui(ui);
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt(format!("ai_manage_scroll_{section:?}"))
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         ui.set_max_width(max_width.min(ui.available_width()));
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                section
-                                    .icon()
-                                    .image()
-                                    .tint(theme::accent())
-                                    .fit_to_exact_size(egui::vec2(20.0, 20.0)),
-                            );
-                            ui.heading(section.label());
-                        });
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(section.description())
-                                .size(theme::font_sizes::SMALL)
-                                .color(theme::text_muted()),
-                        );
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(8.0);
+                        section_header_ui(ui, section);
                         match section {
                             AiSection::ModelService => self.model_service_section_ui(ui),
                             AiSection::ReviseModel => self.revise_model_section_ui(ui),

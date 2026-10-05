@@ -10,9 +10,10 @@
 //! 输入框，用到它的接口自动重测。文档没写鉴权、接口却拒绝了请求的，在这里补上带法。
 
 use super::assist::{Assist, Update};
+use super::forms;
 use super::{
-    ApisPage, AuthForm, View, advanced_form, auth_form_ui, auth_hint, basic_form, code_block,
-    key_field, secret_for, spawn_trial, trial_ui,
+    ApisPage, AuthForm, View, auth_form_ui, auth_hint, code_block, key_field, secret_for,
+    spawn_trial, trial_ui,
 };
 use crate::agent::api::{ApiSecrets, Trial};
 use crate::agent::api_import::auth;
@@ -172,24 +173,143 @@ fn model_name(config: &AppConfig) -> Option<String> {
     (!model.is_empty()).then(|| model.to_string())
 }
 
+/// 底部「加入」条的高度。
+const BAR_HEIGHT: f32 = 50.0;
+
 pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConfig) {
     let flow = page.import.get_or_insert_with(ImportFlow::default);
     poll(ui.ctx(), flow, &page.secrets);
-    if ui
-        .add(theme::secondary_icon_button(theme::Icon::List, "全部接口"))
-        .clicked()
-    {
-        page.view = View::List;
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("从文档添加接口")
+                .size(theme::font_sizes::HEADING)
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(theme::secondary_icon_button(theme::Icon::X, "收起"))
+                .on_hover_text("识别结果会留着：再点「添加 → 从文档识别」回来接着做")
+                .clicked()
+            {
+                close = true;
+            }
+        });
+    });
+    theme::caption(
+        ui,
+        "粘贴接口文档、cURL 或选文件；识别后接入助手自动试调，缺 Key 会在这里问你。",
+    );
+    ui.add_space(10.0);
+    steps_ui(ui, flow);
+    ui.add_space(10.0);
+    if close {
+        leave(page);
         return;
     }
-    ui.add_space(6.0);
-    input_ui(ui, flow, config, &page.store);
+    let has_bar = flow
+        .outcome
+        .as_ref()
+        .is_some_and(|outcome| !outcome.candidates.is_empty());
+    let body_height = ui.available_height() - if has_bar { BAR_HEIGHT } else { 0.0 };
+    egui::ScrollArea::vertical()
+        .id_salt("api_import_scroll")
+        .max_height(body_height.max(120.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            body_ui(ui, flow, config, &page.store);
+            ui.add_space(12.0);
+        });
+    if has_bar {
+        add_bar_ui(ui, page);
+    }
+}
+
+/// 离开导入：回到第一个接口（没有接口就回上手说明）。
+fn leave(page: &mut ApisPage) {
+    if page.store.endpoints.is_empty() {
+        page.view = View::None;
+    } else {
+        page.open(0);
+    }
+}
+
+/// 三步：粘贴资料 → 识别并试调 → 勾选加入。
+fn steps_ui(ui: &mut egui::Ui, flow: &ImportFlow) {
+    let assisting = flow
+        .outcome
+        .as_ref()
+        .and_then(|outcome| outcome.assist.as_ref())
+        .is_some_and(Assist::running);
+    let current = match &flow.outcome {
+        None if flow.running.is_some() => 1,
+        None => 0,
+        Some(_) if assisting => 1,
+        Some(_) => 2,
+    };
+    ui.horizontal(|ui| {
+        for (index, label) in ["粘贴资料", "识别并试调", "勾选加入"].iter().enumerate()
+        {
+            if index > 0 {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(32.0, 20.0), egui::Sense::hover());
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.center().y,
+                    egui::Stroke::new(1.0, theme::border_strong()),
+                );
+            }
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+            let center = rect.center();
+            if index < current {
+                ui.painter().circle_filled(center, 10.0, theme::accent());
+                theme::Icon::Check
+                    .image_sized(12.0)
+                    .tint(egui::Color32::WHITE)
+                    .paint_at(
+                        ui,
+                        egui::Rect::from_center_size(center, egui::vec2(12.0, 12.0)),
+                    );
+            } else {
+                let color = if index == current {
+                    theme::accent()
+                } else {
+                    theme::border_strong()
+                };
+                ui.painter()
+                    .circle_stroke(center, 9.5, egui::Stroke::new(1.0, color));
+                ui.painter().text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    (index + 1).to_string(),
+                    egui::FontId::proportional(theme::font_sizes::SMALL),
+                    color,
+                );
+            }
+            let text = egui::RichText::new(*label);
+            ui.label(if index == current {
+                text.strong()
+            } else if index < current {
+                text.color(theme::text_soft())
+            } else {
+                text.color(theme::text_muted())
+            });
+        }
+    });
+}
+
+/// 导入页的正文：资料、识别结论、接入助手、鉴权、候选接口。
+fn body_ui(
+    ui: &mut egui::Ui,
+    flow: &mut ImportFlow,
+    config: &AppConfig,
+    store: &crate::agent::api::ApiStore,
+) {
+    input_ui(ui, flow, config, store);
     let Some(outcome) = &mut flow.outcome else {
         return;
     };
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    ui.add_space(12.0);
     for note in &outcome.notes {
         theme::notice(
             ui,
@@ -213,12 +333,6 @@ pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConf
     if outcome.candidates.is_empty() {
         return;
     }
-    ui.label(egui::RichText::new(format!("识别出 {} 个接口", outcome.candidates.len())).strong());
-    theme::caption(
-        ui,
-        "接入助手会逐个试调，缺什么问你；停下以后可以手动核对：勾选要加入的，补齐标黄的缺项。",
-    );
-    ui.add_space(6.0);
     if outcome.auto_assist {
         outcome.auto_assist = false;
         start_assist(outcome, &flow.secrets, config);
@@ -250,7 +364,7 @@ pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConf
     });
     apply_updates(outcome, &mut flow.secrets, updates);
     let assisting = outcome.assist.as_ref().is_some_and(Assist::running);
-    ui.add_space(6.0);
+    ui.add_space(10.0);
     let panel = ui
         .add_enabled_ui(!assisting, |ui| {
             theme::card()
@@ -261,16 +375,30 @@ pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConf
                 .inner
         })
         .inner;
-    ui.add_space(6.0);
-    for (index, candidate) in outcome.candidates.iter_mut().enumerate() {
-        ui.add_enabled_ui(!assisting, |ui| {
-            theme::card().show(ui, |ui| {
-                ui.set_width(ui.available_width());
+    ui.add_space(10.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new(format!("识别出 {} 个接口", outcome.candidates.len())).strong(),
+        );
+        theme::caption(
+            ui,
+            "助手停下以后可以手动核对：勾选要加入的，补齐标黄的缺项。",
+        );
+    });
+    ui.add_space(4.0);
+    ui.add_enabled_ui(!assisting, |ui| {
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for (index, candidate) in outcome.candidates.iter_mut().enumerate() {
+                if index > 0 {
+                    ui.add_space(8.0);
+                    theme::hairline(ui);
+                    ui.add_space(8.0);
+                }
                 candidate_ui(ui, index, candidate, &flow.secrets);
-            });
+            }
         });
-        ui.add_space(6.0);
-    }
+    });
     // 自动试调：只查询、配置齐了、还没试过的。正在输 Key 时先不调，免得拿半截 Key 去试；
     // 助手在跑时由它试。
     if !panel.typing && !assisting {
@@ -280,7 +408,6 @@ pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConf
             }
         }
     }
-    add_bar_ui(ui, page);
 }
 
 /// 资料输入区：粘贴框、选文件、识别。
@@ -837,17 +964,12 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
     egui::CollapsingHeader::new("修改配置")
         .id_salt(("api_import_edit", index))
         .show(ui, |ui| {
-            basic_form(
-                ui,
-                &mut candidate.draft.endpoint,
-                &format!("import_{index}"),
-            );
-            ui.add_space(6.0);
-            advanced_form(
-                ui,
-                &mut candidate.draft.endpoint,
-                &format!("import_{index}"),
-            );
+            let salt = format!("import_{index}");
+            forms::info_form(ui, &mut candidate.draft.endpoint, &salt);
+            ui.add_space(8.0);
+            forms::request_form(ui, &mut candidate.draft.endpoint, &salt);
+            ui.add_space(8.0);
+            forms::response_form(ui, &mut candidate.draft.endpoint);
         });
 }
 
@@ -892,7 +1014,7 @@ fn inputs_line(draft: &Draft) -> String {
         .join("；")
 }
 
-/// 底部：加入选中的接口 / 放弃。
+/// 底部常驻：加入选中的接口 / 放弃。
 fn add_bar_ui(ui: &mut egui::Ui, page: &mut ApisPage) {
     let Some(flow) = &page.import else {
         return;
@@ -908,41 +1030,54 @@ fn add_bar_ui(ui: &mut egui::Ui, page: &mut ApisPage) {
         .collect();
     let testing = chosen.iter().any(|c| c.testing.is_some())
         || outcome.assist.as_ref().is_some_and(Assist::running);
-    ui.add_space(4.0);
+    let passed = chosen
+        .iter()
+        .filter(|c| c.trial.as_ref().is_some_and(Trial::ok))
+        .count();
+    theme::hairline(ui);
+    ui.add_space(8.0);
     let mut add = false;
     let mut discard = false;
-    ui.horizontal_wrapped(|ui| {
-        let enabled = !chosen.is_empty() && unready.is_empty() && !testing;
-        if theme::primary_icon_button_enabled(
-            ui,
-            enabled,
-            theme::Icon::Save,
-            &format!("加入选中的 {} 个接口", chosen.len()),
-        )
-        .clicked()
-        {
-            add = true;
-        }
-        if ui.button("放弃").clicked() {
-            discard = true;
-        }
+    ui.horizontal(|ui| {
         if !unready.is_empty() {
             ui.colored_label(
                 theme::warn(),
                 format!("「{}」还没确认只查询或配置有问题", unready.join("」「")),
             );
         } else if testing {
+            theme::spinner(ui, 14.0, theme::accent());
             ui.weak("等试调结束…");
-        } else if chosen
-            .iter()
-            .any(|c| c.trial.as_ref().is_none_or(|t| !t.ok()))
-        {
-            ui.weak("有接口还没调通，也可以先加入，之后在详情里再测。");
+        } else if passed < chosen.len() {
+            theme::caption(
+                ui,
+                &format!(
+                    "已勾选 {} 个，{passed} 个调通。没调通的也可以先加入，之后在详情里再测。",
+                    chosen.len()
+                ),
+            );
+        } else {
+            theme::caption(ui, &format!("已勾选 {} 个，都调通了。", chosen.len()));
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let enabled = !chosen.is_empty() && unready.is_empty() && !testing;
+            if theme::primary_icon_button_enabled(
+                ui,
+                enabled,
+                theme::Icon::Plus,
+                &format!("加入选中的 {} 个接口", chosen.len()),
+            )
+            .clicked()
+            {
+                add = true;
+            }
+            if ui.button("放弃").clicked() {
+                discard = true;
+            }
+        });
     });
     if discard {
         page.import = None;
-        page.view = View::List;
+        leave(page);
     } else if add {
         add_chosen(page);
     }
@@ -955,6 +1090,7 @@ fn add_chosen(page: &mut ApisPage) {
     let Some(outcome) = flow.outcome else {
         return;
     };
+    let first = page.store.endpoints.len();
     let mut added = Vec::new();
     for candidate in outcome.candidates.into_iter().filter(|c| c.chosen) {
         let mut endpoint = candidate.draft.endpoint;
@@ -980,7 +1116,13 @@ fn add_chosen(page: &mut ApisPage) {
             (false, format!("已加入，但保存失败：{error:#}"))
         }
     });
-    page.view = View::List;
+    let message = page.message.take();
+    if first < page.store.endpoints.len() {
+        page.open(first);
+    } else {
+        leave(page);
+    }
+    page.message = message;
 }
 
 #[cfg(test)]
@@ -1185,7 +1327,7 @@ mod tests {
         add_chosen(&mut page);
         crate::storage::set_test_config_dir(None);
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(page.view, View::List);
+        assert_eq!(page.view, View::Endpoint(0), "加入后打开第一个");
         assert_eq!(page.store.endpoints.len(), 1);
         assert_eq!(page.secrets.secrets["token"], "real");
         assert!(matches!(
