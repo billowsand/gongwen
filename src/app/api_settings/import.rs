@@ -4,15 +4,19 @@
 //! 配置齐了就自动用样例值试调一次，调通后按真实返回补返回映射。改数据的接口不能加入，
 //! 判断不了的要人确认只查询。密钥先进一份工作副本，点「加入」才写进本机密钥表。
 //!
+//! 识别完自动交给「接入助手」（[`assist`](super::assist)）：一直试到调通，缺什么问人。
+//!
 //! 密钥集中在候选上方的「鉴权」卡片里：一个服务通常共用一个 Key，只问一次；粘贴后离开
 //! 输入框，用到它的接口自动重测。文档没写鉴权、接口却拒绝了请求的，在这里补上带法。
 
+use super::assist::{Assist, Update};
 use super::{
     ApisPage, AuthForm, View, advanced_form, auth_form_ui, auth_hint, basic_form, code_block,
     key_field, secret_for, spawn_trial, trial_ui,
 };
 use crate::agent::api::{ApiSecrets, Trial};
 use crate::agent::api_import::auth;
+use crate::agent::api_import::onboard::{Item, State};
 use crate::agent::api_import::{
     self, Access, Analysis, Draft, Material, merge_secrets, refine_with_reply, rename_secret_refs,
     secret_refs,
@@ -63,6 +67,11 @@ struct Outcome {
     auth_form: AuthForm,
     /// 改过、还没触发重测的密钥。
     edited: Vec<String>,
+    /// 识别用的资料（接入助手查资料、核对改动用）。
+    material: Material,
+    assist: Option<Assist>,
+    /// 下一帧自动启动接入助手（刚识别完）。
+    auto_assist: bool,
 }
 
 struct Candidate {
@@ -78,6 +87,8 @@ struct Candidate {
     auto_tried: bool,
     /// 按实测返回补了哪些项。
     refined: Vec<&'static str>,
+    /// 接入助手给的结论。
+    assist_state: Option<State>,
 }
 
 impl Candidate {
@@ -91,6 +102,7 @@ impl Candidate {
             testing: None,
             auto_tried: false,
             refined: Vec::new(),
+            assist_state: None,
         }
     }
 
@@ -204,25 +216,64 @@ pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConf
     ui.label(egui::RichText::new(format!("识别出 {} 个接口", outcome.candidates.len())).strong());
     theme::caption(
         ui,
-        "核对每个接口：勾选要加入的，补齐标黄的缺项。只查询且配置齐全的会自动用样例值试调一次。",
+        "接入助手会逐个试调，缺什么问你；停下以后可以手动核对：勾选要加入的，补齐标黄的缺项。",
     );
     ui.add_space(6.0);
-    let panel = theme::card()
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            auth_panel_ui(ui, outcome, &mut flow.secrets)
+    if outcome.auto_assist {
+        outcome.auto_assist = false;
+        start_assist(outcome, &flow.secrets, config);
+    }
+    let mut updates = outcome
+        .assist
+        .as_mut()
+        .map(|assist| assist.poll(ui.ctx()))
+        .unwrap_or_default();
+    theme::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        match &mut outcome.assist {
+            Some(assist) => updates.extend(assist.ui(ui)),
+            None => {
+                ui.label(egui::RichText::new("接入助手").strong());
+            }
+        }
+        if !outcome.assist.as_ref().is_some_and(Assist::running)
+            && ui
+                .add(theme::secondary_icon_button(
+                    theme::Icon::WandSparkles,
+                    "让助手接着试",
+                ))
+                .on_hover_text("按现在的配置从头试调，没调通的接着问、接着修")
+                .clicked()
+        {
+            start_assist(outcome, &flow.secrets, config);
+        }
+    });
+    apply_updates(outcome, &mut flow.secrets, updates);
+    let assisting = outcome.assist.as_ref().is_some_and(Assist::running);
+    ui.add_space(6.0);
+    let panel = ui
+        .add_enabled_ui(!assisting, |ui| {
+            theme::card()
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    auth_panel_ui(ui, outcome, &mut flow.secrets)
+                })
+                .inner
         })
         .inner;
     ui.add_space(6.0);
     for (index, candidate) in outcome.candidates.iter_mut().enumerate() {
-        theme::card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            candidate_ui(ui, index, candidate, &flow.secrets);
+        ui.add_enabled_ui(!assisting, |ui| {
+            theme::card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                candidate_ui(ui, index, candidate, &flow.secrets);
+            });
         });
         ui.add_space(6.0);
     }
-    // 自动试调：只查询、配置齐了、还没试过的。正在输 Key 时先不调，免得拿半截 Key 去试。
-    if !panel.typing {
+    // 自动试调：只查询、配置齐了、还没试过的。正在输 Key 时先不调，免得拿半截 Key 去试；
+    // 助手在跑时由它试。
+    if !panel.typing && !assisting {
         for candidate in &mut outcome.candidates {
             if !candidate.auto_tried && candidate.can_test(&flow.secrets) {
                 candidate.start_test(&flow.secrets);
@@ -396,11 +447,14 @@ fn poll(ctx: &egui::Context, flow: &mut ImportFlow, saved: &ApiSecrets) {
                     notes: analysis.notes,
                     model_used: analysis.model_used,
                     masked: material.masked(),
-                    redacted: material.redacted,
+                    redacted: material.redacted.clone(),
                     candidates,
                     from_doc,
                     auth_form: AuthForm::default(),
                     edited: Vec::new(),
+                    material,
+                    assist: None,
+                    auto_assist: true,
                 });
             }
             Ok(Err(error)) => {
@@ -417,6 +471,52 @@ fn poll(ctx: &egui::Context, flow: &mut ImportFlow, saved: &ApiSecrets) {
     if let Some(outcome) = &mut flow.outcome {
         for candidate in &mut outcome.candidates {
             candidate.poll(ctx);
+        }
+    }
+}
+
+/// 启动接入助手：候选接口交给它，调通过的不再重测。
+fn start_assist(outcome: &mut Outcome, secrets: &ApiSecrets, config: &AppConfig) {
+    let items = outcome
+        .candidates
+        .iter()
+        .map(|c| {
+            let passed = c.trial.clone().filter(|t| t.ok() && c.testing.is_none());
+            Item::new(c.draft.clone(), c.chosen, c.confirmed, passed)
+        })
+        .collect();
+    outcome.assist = Some(Assist::start(
+        items,
+        secrets.clone(),
+        outcome.material.clone(),
+        config,
+        model_name(config).is_some(),
+    ));
+}
+
+/// 把助手的进展写回候选接口与密钥表。
+fn apply_updates(outcome: &mut Outcome, secrets: &mut ApiSecrets, updates: Vec<Update>) {
+    for update in updates {
+        match update {
+            Update::Item(index, item) => {
+                let Some(candidate) = outcome.candidates.get_mut(index) else {
+                    continue;
+                };
+                let item = *item;
+                candidate.draft = item.draft;
+                candidate.trial = item.trial;
+                candidate.confirmed = item.confirmed;
+                // 助手试过了，界面不再自动试。
+                candidate.auto_tried = true;
+                if matches!(&item.state, State::Excluded(why) if why.contains("改数据")) {
+                    candidate.chosen = false;
+                }
+                candidate.assist_state = Some(item.state);
+            }
+            Update::Secret(name, value) => {
+                secrets.secrets.insert(name, value);
+            }
+            Update::Done(theirs) => *secrets = theirs,
         }
     }
 }
@@ -588,6 +688,20 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
                 .desired_width(220.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            match &candidate.assist_state {
+                Some(State::Done) => {
+                    theme::chip(ui, "调通了", theme::success(), theme::success_soft());
+                }
+                Some(state @ State::Stuck(_)) => {
+                    theme::chip(ui, "没调通", theme::danger(), theme::danger_soft())
+                        .on_hover_text(state.label());
+                }
+                Some(state @ State::Skipped(_)) => {
+                    theme::chip(ui, "跳过了", theme::warn(), theme::warn_soft())
+                        .on_hover_text(state.label());
+                }
+                _ => {}
+            }
             match candidate.draft.access {
                 Access::Query => theme::chip(ui, "只查询", theme::success(), theme::success_soft()),
                 Access::Write => theme::chip(ui, "会改数据", theme::danger(), theme::danger_soft()),
@@ -633,6 +747,10 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
             .collect::<Vec<_>>()
             .join("　");
         theme::caption(ui, &format!("来源：{line}"));
+    }
+
+    if let Some(state @ (State::Stuck(_) | State::Skipped(_))) = &candidate.assist_state {
+        ui.colored_label(theme::warn(), format!("接入助手：{}", state.label()));
     }
 
     // —— 人要补的东西 ——
@@ -788,7 +906,8 @@ fn add_bar_ui(ui: &mut egui::Ui, page: &mut ApisPage) {
         .filter(|c| !c.query() || !c.draft.endpoint.problems().is_empty())
         .map(|c| c.draft.endpoint.name.clone())
         .collect();
-    let testing = chosen.iter().any(|c| c.testing.is_some());
+    let testing = chosen.iter().any(|c| c.testing.is_some())
+        || outcome.assist.as_ref().is_some_and(Assist::running);
     ui.add_space(4.0);
     let mut add = false;
     let mut discard = false;
@@ -885,11 +1004,14 @@ mod tests {
             notes: analysis.notes,
             model_used: false,
             masked: material.masked(),
-            redacted: material.redacted,
+            redacted: material.redacted.clone(),
             candidates: analysis.drafts.into_iter().map(Candidate::new).collect(),
             from_doc: Vec::new(),
             auth_form: AuthForm::default(),
             edited: Vec::new(),
+            material,
+            assist: None,
+            auto_assist: false,
         });
         ApisPage {
             loaded: true,
@@ -965,6 +1087,9 @@ mod tests {
                     from_doc: Vec::new(),
                     auth_form: AuthForm::default(),
                     edited: Vec::new(),
+                    material,
+                    assist: None,
+                    auto_assist: false,
                 }),
                 ..ImportFlow::default()
             }),
@@ -976,6 +1101,47 @@ mod tests {
         assert!(has("拒绝了请求，多半要鉴权"), "{texts:?}");
         assert!(has("密钥放在") && has("加上"), "{texts:?}");
         assert!(has("看起来接口要鉴权"), "{texts:?}");
+    }
+
+    #[test]
+    fn the_assistant_starts_after_recognition_and_asks_for_the_key() {
+        let mut page = outcome_page();
+        {
+            let outcome = page.import.as_mut().unwrap().outcome.as_mut().unwrap();
+            outcome.auto_assist = true;
+            outcome.candidates[0].confirmed = true;
+        }
+        let config = AppConfig::default();
+        let _ = render(|ui| import_ui(ui, &mut page, &config));
+        // 等助手把问题送回来。
+        for _ in 0..200 {
+            let outcome = page.import.as_mut().unwrap().outcome.as_mut().unwrap();
+            let _ = outcome
+                .assist
+                .as_mut()
+                .unwrap()
+                .poll(&egui::Context::default());
+            if outcome.assist.as_ref().unwrap().waiting() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let texts = render(|ui| import_ui(ui, &mut page, &config));
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has("接入助手") && has("需要你补的（1 件）"), "{texts:?}");
+        assert!(has("粘贴密钥「token」") && has("这个先跳过"), "{texts:?}");
+        assert!(has("等你补充"), "{texts:?}");
+        let outcome = page.import.as_mut().unwrap().outcome.as_mut().unwrap();
+        let assist = outcome.assist.as_mut().unwrap();
+        assist.stop();
+        for _ in 0..200 {
+            let _ = assist.poll(&egui::Context::default());
+            if !assist.running() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!assist.running(), "停止后助手结束");
     }
 
     #[test]

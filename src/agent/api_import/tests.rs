@@ -354,3 +354,44 @@ fn the_model_can_name_the_auth_but_not_invent_it() {
         "资料里没有的字段名不收"
     );
 }
+
+#[test]
+fn long_documents_are_tidied_in_parts_and_missed_paths_are_looked_at_again() {
+    let filler = "说明文字。".repeat(3000);
+    let doc = format!(
+        "# 接口\n服务地址：http://10.0.0.9\n\n## 政策检索\n请求地址：/api/policy/search\n请求方式：GET\n{filler}\n\n\
+         ## 政策详情\n详情接口的地址为 /api/policy/detail ，GET 方式，参数 id 为政策编号。\n{filler}\n"
+    );
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("没整理成接口") {
+            json!({"endpoints": [{"name": "政策详情", "method": "GET", "url": "/api/policy/detail",
+                "inputs": [{"name": "id", "required": true, "description": "政策编号"}], "access": "query"}]})
+            .to_string()
+        } else {
+            json!({"endpoints": [{"name": "政策检索", "url": "/api/policy/search", "access": "query"}]})
+                .to_string()
+        }
+    });
+    let analysis = analyze(&Material::new(&doc), Some(&model), &[]);
+    assert!(
+        analysis.notes.iter().any(|n| n.contains("分 2 段")),
+        "{:?}",
+        analysis.notes
+    );
+    assert_eq!(model.asked("没整理成接口"), 1, "查漏只问一次");
+    let names: Vec<&str> = analysis
+        .drafts
+        .iter()
+        .map(|d| d.endpoint.name.as_str())
+        .collect();
+    assert_eq!(names, ["政策检索", "政策详情"]);
+    assert_eq!(
+        analysis.drafts[1].endpoint.url,
+        "http://10.0.0.9/api/policy/detail?id={id}"
+    );
+    assert!(
+        !analysis.notes.iter().any(|n| n.contains("没整理成接口")),
+        "补上以后不再提示：{:?}",
+        analysis.notes
+    );
+}

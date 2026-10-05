@@ -9,6 +9,7 @@
 //!
 //! 实测在后台线程里跑，界面每帧取一次结果；测试结论记进 `api-tests.json`。
 
+mod assist;
 mod import;
 
 use super::agent_settings::{code_block, message_ui, problems_ui};

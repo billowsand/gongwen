@@ -1055,6 +1055,16 @@ pub(crate) fn trial(
     args: &Map<String, Value>,
     secrets: &ApiSecrets,
 ) -> Trial {
+    trial_via(endpoint, args, secrets, send)
+}
+
+/// 同 [`trial`]，发请求这一步可以换掉（测试里不走网络）。
+pub(crate) fn trial_via(
+    endpoint: &ApiEndpoint,
+    args: &Map<String, Value>,
+    secrets: &ApiSecrets,
+    send: impl FnOnce(&Prepared, u64) -> Result<RawResponse, String>,
+) -> Trial {
     let mut trial = Trial::default();
     let prepared = match prepare(endpoint, args, secrets) {
         Ok(prepared) => prepared,

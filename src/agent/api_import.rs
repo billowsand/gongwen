@@ -15,8 +15,10 @@
 
 pub(crate) mod auth;
 mod build;
+mod chunk;
 pub(crate) mod infer;
 mod model;
+pub(crate) mod onboard;
 pub(crate) mod redact;
 mod scan;
 mod sections;
@@ -46,6 +48,8 @@ pub(crate) enum Origin {
     Model,
     /// 实测拿到返回后程序推断的。
     Reply,
+    /// 用户在接入助手里补的。
+    User,
 }
 
 impl Origin {
@@ -54,6 +58,7 @@ impl Origin {
             Self::Document => "文档原文",
             Self::Model => "AI 整理",
             Self::Reply => "实测推断",
+            Self::User => "你补充的",
         }
     }
 }
@@ -145,10 +150,8 @@ pub(crate) fn secret_refs(endpoint: &ApiEndpoint) -> Vec<String> {
 pub(crate) struct Material {
     /// 原文（含凭据），只在本机用来核对，不发出去。
     text: String,
-    /// 发给模型的文字（已脱敏、已截断）。
+    /// 发给模型的文字（已脱敏）。太长的分段发。
     pub(crate) redacted: String,
-    /// 原文太长被截了。
-    pub(crate) clipped: bool,
     drafts: Vec<Draft>,
     blocks: Vec<JsonBlock>,
     origins: Vec<String>,
@@ -196,16 +199,9 @@ impl Material {
         }
         // 文档正文里明写的令牌（不在 cURL 里的）也遮掉。
         let redacted = secrets.redact(&text);
-        let clipped = redacted.chars().count() > model::MAX_MATERIAL_CHARS;
-        let redacted = if clipped {
-            redacted.chars().take(model::MAX_MATERIAL_CHARS).collect()
-        } else {
-            redacted
-        };
         Self {
             text,
             redacted,
-            clipped,
             drafts,
             blocks,
             origins,
@@ -220,13 +216,16 @@ impl Material {
         Secrets::count_masks(&self.redacted)
     }
 
-    /// 程序认出的请求，写给模型参考（模板已脱敏）。
-    fn findings(&self) -> String {
-        if self.drafts.is_empty() {
-            return "（没有认出 cURL 或请求行，请从文字说明里整理）".into();
-        }
-        self.drafts
+    /// 程序认出的请求里、路径在 `piece` 里出现过的，写给模型参考（模板已脱敏）。
+    fn findings_in(drafts: &[Draft], piece: &str) -> String {
+        let piece = piece.to_lowercase();
+        let lines: Vec<String> = drafts
             .iter()
+            .filter(|d| {
+                let path = path_key(&d.endpoint.url);
+                let anchor = path.split("{}").next().unwrap_or_default();
+                !anchor.trim_matches('/').is_empty() && piece.contains(anchor)
+            })
             .map(|d| {
                 let mut line = format!("- {} {}", d.endpoint.method.label(), d.endpoint.url);
                 if !d.endpoint.name.is_empty() {
@@ -237,8 +236,12 @@ impl Material {
                 }
                 line
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect();
+        if lines.is_empty() {
+            "（这一段程序没认出 cURL 或请求行，请从文字说明里整理）".into()
+        } else {
+            lines.join("\n")
+        }
     }
 }
 
@@ -276,40 +279,76 @@ pub(crate) fn analyze(
             .notes
             .push("没有配置起草模型，只做了程序解析：名称、说明等需要手填。".into()),
         Some(model) => {
-            if material.clipped {
-                analysis.notes.push(format!(
-                    "资料太长，只把前 {} 字交给了模型。",
-                    model::MAX_MATERIAL_CHARS
-                ));
-            }
-            let prompt = model::prompt(&material.redacted, &material.findings());
-            match model.complete(ModelRole::Draft, model::SYSTEM, &prompt, &mut |_| {}) {
-                Ok(reply) => match model::parse(&reply.content) {
-                    Some(parsed) => {
-                        analysis.model_used = true;
-                        analysis.drafts = merge(
-                            analysis.drafts,
-                            parsed.endpoints,
-                            material,
-                            &mut secrets,
-                            &mut analysis.notes,
-                        );
-                        model_auth = parsed
-                            .auth
-                            .and_then(|auth| model_auth_spec(auth, &material.text));
-                    }
-                    None if reply.truncated => analysis.notes.push(
-                        "模型的整理太长被截断了，只用了程序解析；接口很多时可以分几次粘贴。".into(),
-                    ),
-                    None => analysis.notes.push(
-                        "模型没有给出可用的整理结果，只用了程序解析；可以再识别一次。".into(),
-                    ),
-                },
-                Err(error) => analysis
+            let chunks = chunk::split(&material.redacted, model::MAX_MATERIAL_CHARS);
+            if chunks.len() > 1 {
+                analysis
                     .notes
-                    .push(format!("调用模型失败（{error:#}），只用了程序解析。")),
+                    .push(format!("资料较长，分 {} 段交给模型整理。", chunks.len()));
+            }
+            let preamble = chunk::preamble(&material.redacted, 1500);
+            for (index, piece) in chunks.iter().enumerate() {
+                if model.cancelled() {
+                    break;
+                }
+                let text = if index == 0 {
+                    piece.clone()
+                } else {
+                    format!("【文档开头（公共说明）】\n{preamble}\n\n【本段】\n{piece}")
+                };
+                let findings = Material::findings_in(&analysis.drafts, piece);
+                let label = if chunks.len() > 1 {
+                    format!("第 {} 段：", index + 1)
+                } else {
+                    String::new()
+                };
+                ask_model(
+                    model,
+                    &text,
+                    &findings,
+                    &label,
+                    material,
+                    &mut analysis,
+                    &mut secrets,
+                    &mut model_auth,
+                );
+            }
+            // 查漏：文档里出现过、没整理成接口的路径，交模型再看一遍。
+            let missing = chunk::uncovered(&material.text, &analysis.drafts);
+            if !missing.is_empty() && !model.cancelled() {
+                let excerpts: Vec<String> = missing
+                    .iter()
+                    .filter_map(|path| chunk::around(&material.redacted, path, 15, 4000, 1))
+                    .collect();
+                let mut text = excerpts.join("\n……\n");
+                if text.chars().count() > model::MAX_MATERIAL_CHARS {
+                    text = text.chars().take(model::MAX_MATERIAL_CHARS).collect();
+                }
+                let findings = format!(
+                    "（程序在资料里还看到这些地址，没整理成接口：{}。请判断哪些是接口并按格式输出；只是说明里顺带提到、不是接口的不要输出）",
+                    missing.join("、")
+                );
+                ask_model(
+                    model,
+                    &format!("【文档开头（公共说明）】\n{preamble}\n\n【相关摘录】\n{text}"),
+                    &findings,
+                    "查漏：",
+                    material,
+                    &mut analysis,
+                    &mut secrets,
+                    &mut model_auth,
+                );
             }
         }
+    }
+    let missing = chunk::uncovered(&material.text, &analysis.drafts);
+    if !missing.is_empty() {
+        let shown: Vec<&str> = missing.iter().take(12).map(String::as_str).collect();
+        analysis.notes.push(format!(
+            "文档里还有 {} 个地址没整理成接口：{}{}。可能只是说明里提到的地址；是接口的话可以手动添加。",
+            missing.len(),
+            shown.join("、"),
+            if missing.len() > shown.len() { "……" } else { "" }
+        ));
     }
     if analysis.drafts.is_empty() {
         analysis.notes.push(
@@ -344,6 +383,49 @@ pub(crate) fn analyze(
     }
     analysis.secrets = secrets.found;
     analysis
+}
+
+/// 交模型整理一段资料，结果并进 `analysis`。
+#[allow(clippy::too_many_arguments)]
+fn ask_model(
+    model: &dyn ModelBackend,
+    text: &str,
+    findings: &str,
+    label: &str,
+    material: &Material,
+    analysis: &mut Analysis,
+    secrets: &mut Secrets,
+    model_auth: &mut Option<AuthSpec>,
+) {
+    let prompt = model::prompt(text, findings);
+    match model.complete(ModelRole::Draft, model::SYSTEM, &prompt, &mut |_| {}) {
+        Ok(reply) => match model::parse(&reply.content) {
+            Some(parsed) => {
+                analysis.model_used = true;
+                analysis.drafts = merge(
+                    std::mem::take(&mut analysis.drafts),
+                    parsed.endpoints,
+                    material,
+                    secrets,
+                    &mut analysis.notes,
+                );
+                if model_auth.is_none() {
+                    *model_auth = parsed
+                        .auth
+                        .and_then(|auth| model_auth_spec(auth, &material.text));
+                }
+            }
+            None if reply.truncated => analysis.notes.push(format!(
+                "{label}模型的整理太长被截断了，这部分只用了程序解析。"
+            )),
+            None => analysis.notes.push(format!(
+                "{label}模型没有给出可用的整理结果，这部分只用了程序解析；可以再识别一次。"
+            )),
+        },
+        Err(error) => analysis.notes.push(format!(
+            "{label}调用模型失败（{error:#}），这部分只用了程序解析。"
+        )),
+    }
 }
 
 /// 模型说的鉴权方式：字段名要像样、要在资料里出现过。值一律不收。
