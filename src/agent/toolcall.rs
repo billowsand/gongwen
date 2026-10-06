@@ -35,7 +35,7 @@ pub(crate) struct ToolSpec {
     /// (参数名, 是否必填, 说明)。文本协议用它列参数；原生协议没有 `schema` 时也用它。
     pub(crate) params: Vec<(String, bool, String)>,
     /// 参数的完整 JSON Schema（类型、枚举、嵌套、必填）。有就原样发给原生协议；数据接口工具
-    /// 现在有（`apidef::tooling`），内置工具以后逐个补（`docs/agent-kernel-hardening.md` 第 4 期）。
+    /// 现在有（`apidef::tooling`），内置工具以后逐个补（`docs/agent-kernel-hardening.md` 第 1 期）。
     pub(crate) schema: Option<Value>,
 }
 
