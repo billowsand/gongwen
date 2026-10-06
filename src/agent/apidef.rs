@@ -11,6 +11,7 @@
 //!
 //! 第一次读的时候，只有旧版 `apis.json` 就按服务器分组迁成 OpenAPI，原文件改名 `.bak` 留着。
 
+pub(crate) mod cases;
 pub(crate) mod import;
 mod lower;
 mod normalize;

@@ -1,6 +1,10 @@
-//! 「试一下」页：左边填请求、右边看响应；样例组一键填入、全部试一遍，AI 编样例。
+//! 「试一下」页：左边填请求、右边看响应。用例一键填入、写期望、全部跑一遍留记录，AI 编用例；
+//! 会改数据的接口发送前要人确认。
 
 use super::*;
+use crate::agent::api::ApiInput;
+use crate::agent::board::value_to_text;
+use crate::modal::{self, Dismiss};
 
 pub(super) fn try_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppConfig) {
     let width = ui.available_width();
@@ -18,10 +22,11 @@ pub(super) fn try_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, confi
         ui.add_space(12.0);
         response_box(ui, page, index);
     }
+    confirm_send_ui(ui, page, index);
 }
 
-/// 样例一行：每组一个可点的标签（试过的标上通没通），选中的显示说明与改名、删除。
-/// 返回点了哪一组。
+/// 用例一行：每条一个可点的标签（跑过的标上过没过），选中的显示说明、改名、删除与期望。
+/// 返回点了哪一条。
 pub(super) fn examples_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) -> Option<usize> {
     let mut picked = None;
     let mut remove = None;
@@ -31,17 +36,25 @@ pub(super) fn examples_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize)
     }
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        theme::caption(ui, "样例");
+        theme::caption(ui, "用例");
         for (at, example) in endpoint.examples.iter().enumerate() {
             let mark = match page.detail.run_results.get(at).and_then(Option::as_ref) {
-                Some(trial) if trial.ok() => "✓ ",
+                Some((_, Ok(()))) => "✓ ",
                 Some(_) => "✗ ",
                 None => "",
             };
             let selected = page.detail.example == Some(at);
             let mut response = ui.selectable_label(selected, format!("{mark}{}", example.name));
-            if !example.note.is_empty() {
-                response = response.on_hover_text(&example.note);
+            let mut hover = example.note.clone();
+            if let Some((_, Err(reason))) = page.detail.run_results.get(at).and_then(Option::as_ref)
+            {
+                if !hover.is_empty() {
+                    hover.push('\n');
+                }
+                hover.push_str(reason);
+            }
+            if !hover.is_empty() {
+                response = response.on_hover_text(hover);
             }
             if response.clicked() {
                 picked = Some(at);
@@ -57,13 +70,14 @@ pub(super) fn examples_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize)
             page.dirty |= ui
                 .add(egui::TextEdit::singleline(&mut example.name).desired_width(160.0))
                 .changed();
-            if ui.small_button("删除这组").clicked() {
+            if ui.small_button("删除这条").clicked() {
                 remove = Some(at);
             }
         });
         if !example.note.is_empty() {
             theme::caption(ui, &example.note);
         }
+        expect_editor(ui, page, index, at);
     }
     if let Some(at) = remove {
         page.store.endpoints[index].examples.remove(at);
@@ -71,13 +85,164 @@ pub(super) fn examples_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize)
             page.detail.run_results.remove(at);
         }
         page.detail.example = None;
+        page.detail.verdict = None;
         page.dirty = true;
     }
     ui.add_space(6.0);
     picked
 }
 
-/// 左边：按查询条件逐项填写，点「发送请求」。有样例的先选一组。
+/// 选中用例的期望：列出来可删；按种类、位置、值加一条；调通过的按这次返回给几条建议，点一下加上。
+fn expect_editor(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, at: usize) {
+    ui.add_space(4.0);
+    theme::caption(ui, "期望（先要调通且业务成功，再逐条检查）");
+    let mut remove = None;
+    for (i, expect) in page.store.endpoints[index].examples[at]
+        .expect
+        .iter()
+        .enumerate()
+    {
+        ui.horizontal(|ui| {
+            ui.label(format!("· {}", expect.label()));
+            if theme::icon_button(ui, theme::Icon::Trash, "删掉这条期望").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    let mut added: Option<cases::Expect> = None;
+    let form = &mut page.detail.expect_form;
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_id_salt(("api_expect_kind", index))
+            .selected_text(form.kind.label())
+            .width(84.0)
+            .show_ui(ui, |ui| {
+                for kind in ExpectKind::ALL {
+                    ui.selectable_value(&mut form.kind, kind, kind.label());
+                }
+            });
+        ui.add(
+            egui::TextEdit::singleline(&mut form.pointer)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("/data/items（空 = 整个返回）")
+                .desired_width(170.0),
+        );
+        if form.kind.needs_value() {
+            let hint = match form.kind {
+                ExpectKind::MinItems => "条数",
+                ExpectKind::Equals => "值",
+                _ => "文字",
+            };
+            ui.add(
+                egui::TextEdit::singleline(&mut form.value)
+                    .hint_text(hint)
+                    .desired_width(90.0),
+            );
+        }
+        if ui.small_button("加上").clicked() {
+            match form.kind.build(&form.pointer, &form.value) {
+                Ok(expect) => added = Some(expect),
+                Err(error) => form.error = Some(error),
+            }
+        }
+    });
+    if let Some(error) = &page.detail.expect_form.error {
+        ui.colored_label(theme::warn(), error);
+    }
+    // 建议：只按调通的真实返回给，人点了才加。
+    let endpoint = &page.store.endpoints[index];
+    let suggestions: Vec<cases::Expect> = match &page.detail.result {
+        Some(trial) if trial.ok() => trial
+            .raw
+            .as_ref()
+            .map(|raw| cases::suggest(endpoint, &form_values(&page.detail, endpoint), &raw.body))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|expect| !endpoint.examples[at].expect.contains(expect))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !suggestions.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+            theme::caption(ui, "按这次的返回建议：");
+            for expect in suggestions {
+                if ui
+                    .small_button(format!("＋ {}", expect.label()))
+                    .on_hover_text("点一下加进这条用例的期望")
+                    .clicked()
+                {
+                    added = Some(expect);
+                }
+            }
+        });
+    }
+    let example = &mut page.store.endpoints[index].examples[at];
+    if let Some(i) = remove {
+        example.expect.remove(i);
+        page.dirty = true;
+    }
+    if let Some(expect) = added {
+        if !example.expect.contains(&expect) {
+            example.expect.push(expect);
+            page.dirty = true;
+        }
+        page.detail.expect_form = ExpectForm::default();
+    }
+}
+
+/// 一个查询条件的输入控件：有枚举的、是否类的出下拉框，JSON 类出多行框，其余单行框。
+fn input_widget(ui: &mut egui::Ui, index: usize, input: &ApiInput, value: &mut String) {
+    let mut options: Vec<String> = input
+        .schema
+        .as_ref()
+        .and_then(|schema| schema.get("enum"))
+        .and_then(Value::as_array)
+        .map(|values| values.iter().map(value_to_text).collect())
+        .unwrap_or_default();
+    if options.is_empty() && input.kind == InputKind::Bool {
+        options = vec!["true".into(), "false".into()];
+    }
+    let shown = |text: &str| match (input.kind, text) {
+        (_, "") => "（不填）".to_string(),
+        (InputKind::Bool, "true") => "是".to_string(),
+        (InputKind::Bool, "false") => "否".to_string(),
+        _ => text.to_string(),
+    };
+    if !options.is_empty() {
+        egui::ComboBox::from_id_salt(("api_input", index, &input.name))
+            .selected_text(shown(value.trim()))
+            .width(ui.available_width().min(260.0))
+            .show_ui(ui, |ui| {
+                if !input.required {
+                    ui.selectable_value(value, String::new(), shown(""));
+                }
+                for option in &options {
+                    ui.selectable_value(value, option.clone(), shown(option));
+                }
+            });
+        return;
+    }
+    if input.kind == InputKind::Json {
+        ui.add(
+            egui::TextEdit::multiline(value)
+                .code_editor()
+                .desired_rows(5)
+                .hint_text(input.example.as_str())
+                .desired_width(f32::INFINITY),
+        );
+        if !value.trim().is_empty() && serde_json::from_str::<Value>(value.trim()).is_err() {
+            ui.colored_label(theme::warn(), "不是合法的 JSON");
+        }
+    } else {
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .hint_text(input.example.as_str())
+                .desired_width(f32::INFINITY),
+        );
+    }
+}
+
+/// 左边：按查询条件逐项填写，点「发送请求」。有用例的先选一条。
 pub(super) fn request_box(
     ui: &mut egui::Ui,
     page: &mut ApisPage,
@@ -96,6 +261,7 @@ pub(super) fn request_box(
     let running_all = page.detail.runs.is_some();
     let examples_count = page.store.endpoints[index].examples.len();
     let has_inputs = !page.store.endpoints[index].inputs.is_empty();
+    let readonly = page.store.endpoints[index].readonly;
     panel(
         ui,
         theme::Icon::ArrowUp,
@@ -135,26 +301,7 @@ pub(super) fn request_box(
                     }
                 });
                 let value = page.detail.args.entry(input.name.clone()).or_default();
-                if input.kind == InputKind::Json {
-                    ui.add(
-                        egui::TextEdit::multiline(value)
-                            .code_editor()
-                            .desired_rows(5)
-                            .hint_text(input.example.as_str())
-                            .desired_width(f32::INFINITY),
-                    );
-                    if !value.trim().is_empty()
-                        && serde_json::from_str::<Value>(value.trim()).is_err()
-                    {
-                        ui.colored_label(theme::warn(), "不是合法的 JSON");
-                    }
-                } else {
-                    ui.add(
-                        egui::TextEdit::singleline(value)
-                            .hint_text(input.example.as_str())
-                            .desired_width(f32::INFINITY),
-                    );
-                }
+                input_widget(ui, index, input, value);
                 ui.add_space(6.0);
             }
             let names = endpoint.secret_names();
@@ -185,6 +332,12 @@ pub(super) fn request_box(
                     format!("配置有 {problems} 个问题，见「技术配置」"),
                 );
             }
+            if !readonly {
+                ui.colored_label(
+                    theme::warn(),
+                    "这个接口会改数据：发送前要确认，不参加「全部跑一遍」，也不给 AI 调。",
+                );
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if theme::primary_icon_button_enabled(
@@ -206,22 +359,24 @@ pub(super) fn request_box(
             });
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                if examples_count > 1
+                if examples_count > 0
+                    && readonly
                     && ui
                         .add_enabled(
                             !running_all,
                             theme::secondary_icon_button(
                                 theme::Icon::ListOrdered,
-                                &format!("全部 {examples_count} 组试一遍"),
+                                &format!("全部 {examples_count} 条用例跑一遍"),
                             ),
                         )
+                        .on_hover_text("逐条实测并检查期望，结果记下来，作为这个接口可用的证明")
                         .clicked()
                 {
                     run_all = true;
                 }
                 if ui
-                    .add(theme::secondary_icon_button(theme::Icon::Save, "存为样例"))
-                    .on_hover_text("把现在填的值存成一组样例")
+                    .add(theme::secondary_icon_button(theme::Icon::Save, "存为用例"))
+                    .on_hover_text("把现在填的值存成一条用例；调通过的会按返回建议期望")
                     .clicked()
                 {
                     save = true;
@@ -230,9 +385,9 @@ pub(super) fn request_box(
                     && ui
                         .add_enabled(
                             !generating,
-                            theme::secondary_icon_button(theme::Icon::Sparkles, "AI 编几组样例"),
+                            theme::secondary_icon_button(theme::Icon::Sparkles, "AI 编几条用例"),
                         )
-                        .on_hover_text("按接口说明编几组典型用法，每种分支至少一组，内容取材于公文")
+                        .on_hover_text("按接口说明编几条典型用法，每种分支至少一条，内容取材于公文；期望要跑通后再加")
                         .clicked()
                 {
                     generate = true;
@@ -240,9 +395,9 @@ pub(super) fn request_box(
                 if generating || running_all {
                     theme::spinner(ui, 14.0, theme::accent());
                     ui.weak(if generating {
-                        "AI 在编样例…"
+                        "AI 在编用例…"
                     } else {
-                        "逐组试调中…"
+                        "逐条跑用例中…"
                     });
                 }
             });
@@ -258,49 +413,20 @@ pub(super) fn request_box(
     );
     let endpoint = page.store.endpoints[index].clone();
     if let Some(at) = picked {
-        page.detail.example = Some(at);
-        page.detail.args = form_args(&endpoint, &endpoint.examples[at]);
-        page.detail.result = page.detail.run_results.get(at).cloned().flatten();
-        page.detail.output = None;
+        pick_example(page, index, at);
     }
     if run_all {
         start_runs(&mut page.detail, &endpoint, &page.secrets);
     }
     if save {
-        let args: BTreeMap<String, String> = page
-            .detail
-            .args
-            .iter()
-            .filter(|(name, value)| {
-                !value.trim().is_empty() && endpoint.inputs.iter().any(|i| i.name == **name)
-            })
-            .map(|(name, value)| {
-                let compact = serde_json::from_str::<Value>(value.trim())
-                    .ok()
-                    .filter(|v| v.is_object() || v.is_array())
-                    .map_or(value.trim().to_string(), |v| v.to_string());
-                (name.clone(), compact)
-            })
-            .collect();
-        let examples = &mut page.store.endpoints[index].examples;
-        if examples.iter().any(|e| e.args == args) {
-            page.detail.example_note = Some((false, "已经有一样的样例了。".into()));
-        } else {
-            examples.push(ApiExample {
-                name: format!("样例 {}", examples.len() + 1),
-                note: "手动保存".into(),
-                args,
-            });
-            page.detail.example = Some(examples.len() - 1);
-            page.dirty = true;
-            page.detail.example_note = Some((true, "已存为样例，可以改个名字；记得保存。".into()));
-        }
+        save_case(page, index);
     }
     if generate {
         start_generating(&mut page.detail, &endpoint, config);
     }
     if fill {
         page.detail.example = None;
+        page.detail.verdict = None;
         page.detail.args = endpoint
             .inputs
             .iter()
@@ -308,7 +434,120 @@ pub(super) fn request_box(
             .collect();
     }
     if send {
-        start_test(&mut page.detail, &endpoint, &page.secrets);
+        if endpoint.readonly {
+            start_test(&mut page.detail, &endpoint, &page.secrets, false);
+        } else {
+            // 会改数据：先把要发的请求摆给人看，确认了才发。
+            let args = form_values(&page.detail, &endpoint);
+            page.detail.confirm_send =
+                Some(api::prepare(&endpoint, &args, &page.secrets).map(|p| p.describe()));
+        }
+    }
+}
+
+/// 「存为用例」：现在填的值存成一条用例并选中它。这次调通过的，结果直接算进它的 ✓，
+/// 下面接着显示按返回建议的期望。
+fn save_case(page: &mut ApisPage, index: usize) {
+    let endpoint = &page.store.endpoints[index];
+    let args: BTreeMap<String, String> = page
+        .detail
+        .args
+        .iter()
+        .filter(|(name, value)| {
+            !value.trim().is_empty() && endpoint.inputs.iter().any(|i| i.name == **name)
+        })
+        .map(|(name, value)| {
+            let compact = serde_json::from_str::<Value>(value.trim())
+                .ok()
+                .filter(|v| v.is_object() || v.is_array())
+                .map_or(value.trim().to_string(), |v| v.to_string());
+            (name.clone(), compact)
+        })
+        .collect();
+    let examples = &mut page.store.endpoints[index].examples;
+    if examples.iter().any(|e| e.args == args) {
+        page.detail.example_note = Some((false, "已经有一样的用例了。".into()));
+        return;
+    }
+    examples.push(ApiExample {
+        name: format!("用例 {}", examples.len() + 1),
+        note: "手动保存".into(),
+        args,
+        ..Default::default()
+    });
+    let at = examples.len() - 1;
+    page.detail.example = Some(at);
+    page.detail.expect_form = ExpectForm::default();
+    page.dirty = true;
+    let passed = page
+        .detail
+        .result
+        .as_ref()
+        .filter(|trial| trial.ok())
+        .cloned();
+    let results = &mut page.detail.run_results;
+    if results.len() <= at {
+        results.resize(at + 1, None);
+    }
+    results[at] = passed.clone().map(|trial| (trial, Ok(())));
+    page.detail.verdict = passed.as_ref().map(|_| Ok(()));
+    page.detail.example_note = Some((
+        true,
+        if passed.is_some() {
+            "已存为用例：可以改个名字，下面「按这次的返回建议」点一下就能加期望；记得保存。".into()
+        } else {
+            "已存为用例：可以改个名字；调通以后会按返回建议期望。记得保存。".into()
+        },
+    ));
+}
+
+/// 会改数据的接口：发送前的确认框，列出要发出的请求（密钥打码）。
+fn confirm_send_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
+    let Some(request) = page.detail.confirm_send.clone() else {
+        return;
+    };
+    let mut confirmed = false;
+    let mut cancelled = false;
+    let response = modal::dialog(
+        ui.ctx(),
+        egui::Id::new(("api_confirm_send", index)),
+        "发送会改数据的请求？",
+        480.0,
+        Dismiss::EscOrBackdrop,
+        |ui| {
+            theme::notice(
+                ui,
+                theme::Icon::TriangleAlert,
+                theme::warn(),
+                theme::warn_soft(),
+                "这个接口没有标成「只查询」，发出去可能改变对方系统里的数据。请核对下面的请求再发。",
+            );
+            ui.add_space(8.0);
+            match &request {
+                Ok(text) => code_view(ui, ("api_confirm_request", index), text),
+                Err(error) => {
+                    ui.colored_label(theme::danger(), format!("请求组不出来：{error}"));
+                }
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if request.is_ok()
+                    && theme::danger_icon_button(ui, theme::Icon::PlugZap, "确认发送").clicked()
+                {
+                    confirmed = true;
+                }
+                if ui.button("取消").clicked() {
+                    cancelled = true;
+                }
+            });
+        },
+    );
+    if confirmed {
+        page.detail.confirm_send = None;
+        let endpoint = page.store.endpoints[index].clone();
+        start_test(&mut page.detail, &endpoint, &page.secrets, true);
+    } else if cancelled || response.dismissed {
+        page.detail.confirm_send = None;
     }
 }
 
@@ -343,6 +582,7 @@ pub(super) fn response_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize)
                 return;
             };
             status_line(ui, trial, page.detail.elapsed, running);
+            verdict_line(ui, page, index, trial);
             if let Some(error) = &trial.error {
                 ui.add_space(4.0);
                 theme::notice(
@@ -569,4 +809,43 @@ pub(super) fn code_view(ui: &mut egui::Ui, id: impl egui::AsIdSalt, text: &str) 
         });
 }
 
-// —— 技术配置 ——
+/// 选着用例发的、调通了：说一句满没满足它的期望。
+fn verdict_line(ui: &mut egui::Ui, page: &ApisPage, index: usize, trial: &Trial) {
+    let (Some(verdict), Some(at)) = (&page.detail.verdict, page.detail.example) else {
+        return;
+    };
+    let Some(example) = page.store.endpoints[index].examples.get(at) else {
+        return;
+    };
+    if !trial.ok() {
+        return;
+    }
+    ui.add_space(4.0);
+    match verdict {
+        Ok(()) if example.expect.is_empty() => {
+            ui.colored_label(
+                theme::success(),
+                format!("用例「{}」通过（只要求调通且业务成功）", example.name),
+            );
+        }
+        Ok(()) => {
+            ui.colored_label(
+                theme::success(),
+                format!(
+                    "用例「{}」通过：满足全部 {} 条期望",
+                    example.name,
+                    example.expect.len()
+                ),
+            );
+        }
+        Err(reason) => {
+            theme::notice(
+                ui,
+                theme::Icon::TriangleAlert,
+                theme::danger(),
+                theme::danger_soft(),
+                format!("用例「{}」没通过：{reason}", example.name),
+            );
+        }
+    }
+}

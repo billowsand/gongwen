@@ -6,8 +6,9 @@
 //! - 「接口说明」读起来像一份接口文档：用途、查询条件、返回什么、技能里怎么引用；点
 //!   「编辑说明」就地改，不另开一套表单；
 //! - 「试一下」左边填请求、右边看响应：状态、耗时、整理后的条目、原始返回、实际请求。
-//!   一个接口有几种用法时存成几组样例（识别时文档的请求示例、模型编的典型例子），点一下填入，
-//!   也可以「全部试一遍」；没有样例的可以让 AI 按接口说明编几组；
+//!   一个接口的几种用法存成几条用例（识别时文档的请求示例、模型编的典型例子、手动存的），
+//!   每条可以写期望（`apidef::cases`），点一下填入；「全部跑一遍」逐条判通过与否并留记录，
+//!   这是接口可用的证明。会改数据的接口「发送请求」要先确认；
 //! - 「技术配置」按「请求 → 返回」分组，删除放在最下面。
 //!
 //! 本文件放状态、后台任务与分页调度；各部分的画法在子模块：[`header`]、[`doc`]、[`try_tab`]、
@@ -31,6 +32,7 @@ use crate::agent::api::{
     self, ApiEndpoint, ApiExample, ApiSecrets, InputKind, MappedItem, TestStatus, Trial,
 };
 use crate::agent::api_import::{auth, examples, infer};
+use crate::agent::apidef::cases::{self, ExpectKind};
 use crate::agent::backend::LmBackend;
 use crate::models::AppConfig;
 use crate::theme;
@@ -59,6 +61,28 @@ enum Output {
     Request,
 }
 
+/// 一条用例最近一次跑的结果：实测与判定（判定先看调通，再看期望）。
+pub(super) type CaseRun = (Trial, Result<(), String>);
+
+/// 「加期望」的小表单。
+pub(super) struct ExpectForm {
+    pub(super) kind: ExpectKind,
+    pub(super) pointer: String,
+    pub(super) value: String,
+    pub(super) error: Option<String>,
+}
+
+impl Default for ExpectForm {
+    fn default() -> Self {
+        Self {
+            kind: ExpectKind::NotEmpty,
+            pointer: String::new(),
+            value: String::new(),
+            error: None,
+        }
+    }
+}
+
 /// 详情页的临时状态，换接口时清空。
 #[derive(Default)]
 pub(super) struct Detail {
@@ -83,12 +107,18 @@ pub(super) struct Detail {
     auth_form: AuthForm,
     /// 加鉴权时只加这一个接口（默认同一服务器上没带鉴权的一起加：一个服务通常共用一个 Key）。
     auth_this_only: bool,
-    /// 「试一下」里选中的样例；None 表示手填。
+    /// 「试一下」里选中的用例；None 表示手填。
     pub(super) example: Option<usize>,
-    /// 「全部样例试一遍」：后台逐个发，(样例序号, 结果)。
-    runs: Option<Receiver<(usize, Trial)>>,
-    /// 每组样例最近一次的结果（按样例序号）。
-    run_results: Vec<Option<Trial>>,
+    /// 「全部跑一遍」：后台逐条跑，(用例序号, 结果)。
+    runs: Option<Receiver<(usize, CaseRun)>>,
+    /// 每条用例最近一次的结果（按用例序号）。
+    run_results: Vec<Option<CaseRun>>,
+    /// 这一次「发送请求」按选中用例的期望判的结果；没选用例时为空。
+    verdict: Option<Result<(), String>>,
+    /// 「加期望」的小表单。
+    expect_form: ExpectForm,
+    /// 会改数据的接口点了「发送请求」：等人确认。内容是要发出的请求（密钥打码）或组不出请求的原因。
+    confirm_send: Option<Result<String, String>>,
     /// AI 正在编样例。
     generating: Option<Receiver<Generated>>,
     /// 样例相关的提示：(是否顺利, 文字)。
@@ -139,6 +169,21 @@ fn pretty_json(endpoint: &ApiEndpoint, text: &str) -> String {
         .filter(|_| endpoint.inputs.iter().any(|i| i.kind == InputKind::Json))
         .and_then(|value| serde_json::to_string_pretty(&value).ok())
         .unwrap_or_else(|| text.to_string())
+}
+
+/// 选中一条用例：填入它的参数，显示它最近一次的结果。
+pub(super) fn pick_example(page: &mut ApisPage, index: usize, at: usize) {
+    let endpoint = &page.store.endpoints[index];
+    let Some(example) = endpoint.examples.get(at) else {
+        return;
+    };
+    page.detail.args = form_args(endpoint, example);
+    page.detail.example = Some(at);
+    let run = page.detail.run_results.get(at).cloned().flatten();
+    page.detail.result = run.as_ref().map(|(trial, _)| trial.clone());
+    page.detail.verdict = run.map(|(_, verdict)| verdict);
+    page.detail.output = None;
+    page.detail.expect_form = ExpectForm::default();
 }
 
 impl Detail {
@@ -200,6 +245,19 @@ fn poll_test(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
         Ok(trial) => {
             let endpoint = page.store.endpoints[index].clone();
             page.record(&endpoint, &trial);
+            // 选着用例发的：按它的期望判，顺带更新它的 ✓ / ✗。
+            page.detail.verdict = None;
+            if let Some(at) = page.detail.example
+                && let Some(example) = endpoint.examples.get(at)
+            {
+                let verdict = cases::judge(&trial, &example.expect);
+                let results = &mut page.detail.run_results;
+                if results.len() <= at {
+                    results.resize(at + 1, None);
+                }
+                results[at] = Some((trial.clone(), verdict.clone()));
+                page.detail.verdict = Some(verdict);
+            }
             page.detail.elapsed = page.detail.started.map(|start| start.elapsed());
             page.detail.result = Some(trial);
             page.detail.output = None;
@@ -210,22 +268,23 @@ fn poll_test(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
     }
 }
 
-/// 取回「全部样例试一遍」与「AI 生成样例」的结果。
+/// 取回「全部跑一遍」与「AI 编用例」的结果。
 fn poll_examples(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
     let mut finished = false;
     if let Some(rx) = &page.detail.runs {
         loop {
             match rx.try_recv() {
-                Ok((at, trial)) => {
+                Ok((at, run)) => {
                     let results = &mut page.detail.run_results;
                     if results.len() <= at {
                         results.resize(at + 1, None);
                     }
                     if page.detail.example == Some(at) {
-                        page.detail.result = Some(trial.clone());
+                        page.detail.result = Some(run.0.clone());
+                        page.detail.verdict = Some(run.1.clone());
                         page.detail.output = None;
                     }
-                    results[at] = Some(trial);
+                    results[at] = Some(run);
                 }
                 Err(TryRecvError::Empty) => {
                     ctx.request_repaint_after(Duration::from_millis(100));
@@ -240,17 +299,27 @@ fn poll_examples(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
     }
     if finished {
         page.detail.runs = None;
-        let results: Vec<Trial> = page.detail.run_results.iter().flatten().cloned().collect();
-        let passed = results.iter().filter(|t| t.ok()).count();
-        // 测试记录：有没通的记没通的那一次，全通记最后一次。
-        if let Some(trial) = results.iter().find(|t| !t.ok()).or(results.last()).cloned() {
-            let endpoint = page.store.endpoints[index].clone();
-            page.record(&endpoint, &trial);
+        let endpoint = page.store.endpoints[index].clone();
+        let runs: Vec<(String, Trial, Result<(), String>)> = page
+            .detail
+            .run_results
+            .iter()
+            .enumerate()
+            .filter_map(|(at, run)| {
+                let (trial, verdict) = run.clone()?;
+                let name = endpoint.examples.get(at)?.name.clone();
+                Some((name, trial, verdict))
+            })
+            .collect();
+        let passed = runs.iter().filter(|(_, _, v)| v.is_ok()).count();
+        if !runs.is_empty() {
+            page.record_suite(&endpoint, &runs);
         }
-        page.detail.example_note = Some((
-            passed == results.len(),
-            format!("{} 组样例，调通 {passed} 组。", results.len()),
-        ));
+        let mut note = format!("{} 条用例，通过 {passed} 条。", runs.len());
+        if let Some((name, _, Err(reason))) = runs.iter().find(|(_, _, v)| v.is_err()) {
+            note.push_str(&format!("「{name}」：{reason}"));
+        }
+        page.detail.example_note = Some((passed == runs.len(), note));
     }
     if let Some(rx) = &page.detail.generating {
         match rx.try_recv() {
@@ -268,9 +337,11 @@ fn poll_examples(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
                     page.dirty = true;
                     page.detail.run_results.clear();
                     page.detail.example = None;
-                    format!("AI 编了 {added} 组样例，排在最前面；记得保存。")
+                    format!(
+                        "AI 编了 {added} 条用例，排在最前面；先跑一遍，跑通的再按真实返回加期望。记得保存。"
+                    )
                 } else {
-                    "AI 没编出新的样例（和已有的重复或不合格式）。".to_string()
+                    "AI 没编出新的用例（和已有的重复或不合格式）。".to_string()
                 };
                 if !notes.is_empty() {
                     text.push_str(&format!("（{}）", notes.join("；")));
@@ -287,7 +358,7 @@ fn poll_examples(ctx: &egui::Context, page: &mut ApisPage, index: usize) {
     }
 }
 
-/// 后台把每组样例试一遍。
+/// 后台把每条用例跑一遍：实测，再判期望。
 fn start_runs(detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets) {
     let (tx, rx) = std::sync::mpsc::channel();
     let endpoint = endpoint.clone();
@@ -296,8 +367,8 @@ fn start_runs(detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets)
     detail.example_note = None;
     std::thread::spawn(move || {
         for (at, example) in endpoint.examples.iter().enumerate() {
-            let trial = api::trial(&endpoint, &endpoint.args_of(example), &secrets);
-            if tx.send((at, trial)).is_err() {
+            let run = cases::run(&endpoint, example, &secrets);
+            if tx.send((at, run)).is_err() {
                 return;
             }
         }
@@ -331,17 +402,32 @@ fn start_generating(detail: &mut Detail, endpoint: &ApiEndpoint, config: &AppCon
     detail.generating = Some(rx);
 }
 
-/// 用「试一下」里填的值后台实测一次。
-fn start_test(detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets) {
-    let args: Map<String, Value> = endpoint
+/// 「试一下」里填的值 → 调用参数（空着的不给）。
+fn form_values(detail: &Detail, endpoint: &ApiEndpoint) -> Map<String, Value> {
+    endpoint
         .inputs
         .iter()
         .filter_map(|input| {
             let value = detail.args.get(&input.name)?.trim();
             (!value.is_empty()).then(|| (input.name.clone(), Value::String(value.into())))
         })
-        .collect();
-    detail.test = Some(spawn_trial(endpoint.clone(), args, secrets.clone()));
+        .collect()
+}
+
+/// 用「试一下」里填的值后台实测一次。`by_hand` 是人确认过的发送：会改数据的接口也发。
+fn start_test(detail: &mut Detail, endpoint: &ApiEndpoint, secrets: &ApiSecrets, by_hand: bool) {
+    let args = form_values(detail, endpoint);
+    detail.test = Some(if by_hand {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (endpoint, secrets) = (endpoint.clone(), secrets.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(api::trial_by_hand(&endpoint, &args, &secrets));
+        });
+        rx
+    } else {
+        spawn_trial(endpoint.clone(), args, secrets.clone())
+    });
+    detail.verdict = None;
     detail.result = None;
     detail.output = None;
     detail.started = Some(Instant::now());

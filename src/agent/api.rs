@@ -221,6 +221,9 @@ pub(crate) struct ApiExample {
     pub(crate) note: String,
     /// 参数名 → 值（JSON 参数写 JSON 文本）。
     pub(crate) args: BTreeMap<String, String>,
+    /// 期望：调通之外还要满足的条件（`apidef::cases`）；空表示只看调通。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) expect: Vec<crate::agent::apidef::cases::Expect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,13 +389,39 @@ pub(crate) struct TestRecord {
     pub(crate) fingerprint: String,
     /// 失败像是鉴权没过（密钥不对、过期、没带）。
     pub(crate) auth: bool,
+    /// 整组用例跑的结果（单次试调为空）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) cases: Vec<CaseRecord>,
 }
 
-/// 实测记录（`api-tests.json`）：接口 id → 最近一次结论。
+impl TestRecord {
+    /// 用例通过几条、共几条。
+    pub(crate) fn case_counts(&self) -> (usize, usize) {
+        (
+            self.cases.iter().filter(|case| case.ok).count(),
+            self.cases.len(),
+        )
+    }
+}
+
+/// 一条用例的结论：只记名称、通过与否、没满足的那条（一句话），不存参数与返回。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct CaseRecord {
+    pub(crate) name: String,
+    pub(crate) ok: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) reason: String,
+}
+
+/// 实测记录（`api-tests.json`）：接口 id → 最近一次单次试调的结论；`suites` 是最近一次整组
+/// 用例的结论，是「接口可用」的证明，状态优先看它。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct ApiTestLog {
     pub(crate) records: BTreeMap<String, TestRecord>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) suites: BTreeMap<String, TestRecord>,
 }
 
 /// 列表上显示的测试状态。
@@ -423,18 +452,62 @@ impl ApiTestLog {
                 summary: trial.summary(),
                 fingerprint: endpoint.fingerprint(),
                 auth: trial.auth_rejected(),
+                cases: Vec::new(),
             },
         );
     }
 
+    /// 记一次整组用例的结论：(用例名, 实测, 判定)。
+    pub(crate) fn record_suite(
+        &mut self,
+        endpoint: &ApiEndpoint,
+        runs: &[(String, Trial, Result<(), String>)],
+    ) {
+        let cases: Vec<CaseRecord> = runs
+            .iter()
+            .map(|(name, _, verdict)| CaseRecord {
+                name: name.clone(),
+                ok: verdict.is_ok(),
+                reason: verdict.clone().err().unwrap_or_default(),
+            })
+            .collect();
+        let passed = cases.iter().filter(|case| case.ok).count();
+        let mut summary = format!("用例 {passed}/{} 通过", cases.len());
+        if let Some(failed) = cases.iter().find(|case| !case.ok) {
+            summary.push_str(&format!(
+                "；「{}」{}",
+                failed.name,
+                crate::agent::tools::short(&failed.reason, 60)
+            ));
+        }
+        self.suites.insert(
+            endpoint.id.clone(),
+            TestRecord {
+                ok: passed == cases.len(),
+                at: chrono::Local::now().format("%m-%d %H:%M").to_string(),
+                summary,
+                fingerprint: endpoint.fingerprint(),
+                auth: runs
+                    .iter()
+                    .any(|(_, trial, verdict)| verdict.is_err() && trial.auth_rejected()),
+                cases,
+            },
+        );
+    }
+
+    /// 状态：配置没改过的整组用例结论优先，其次单次试调，都改过了按较新的那份显示「需重测」。
     pub(crate) fn status(&self, endpoint: &ApiEndpoint) -> TestStatus<'_> {
-        match self.records.get(&endpoint.id) {
-            None => TestStatus::Untested,
-            Some(record) if record.fingerprint != endpoint.fingerprint() => {
-                TestStatus::Stale(record)
-            }
+        let fingerprint = endpoint.fingerprint();
+        let fresh = |record: &&TestRecord| record.fingerprint == fingerprint;
+        let suite = self.suites.get(&endpoint.id);
+        let single = self.records.get(&endpoint.id);
+        match suite.filter(fresh).or_else(|| single.filter(fresh)) {
             Some(record) if record.ok => TestStatus::Passed(record),
             Some(record) => TestStatus::Failed(record),
+            None => match suite.or(single) {
+                Some(record) => TestStatus::Stale(record),
+                None => TestStatus::Untested,
+            },
         }
     }
 }
@@ -1342,8 +1415,26 @@ impl Trial {
     }
 }
 
-/// 实测一次。
+/// 实测一次。会改数据的接口不发（红线：自动试调、批量跑只碰只查询的接口）。
 pub(crate) fn trial(
+    endpoint: &ApiEndpoint,
+    args: &Map<String, Value>,
+    secrets: &ApiSecrets,
+) -> Trial {
+    if !endpoint.readonly {
+        return Trial {
+            error: Some(
+                "这个接口会改数据，不自动试调。只是查询的，在「技术配置」里勾上「只查询」；                 要真的发出去，在「试一下」里点「发送请求」并确认"
+                    .into(),
+            ),
+            ..Trial::default()
+        };
+    }
+    trial_via(endpoint, args, secrets, send)
+}
+
+/// 人在「试一下」里确认过才发：会改数据的接口也发。只给界面的手动发送用。
+pub(crate) fn trial_by_hand(
     endpoint: &ApiEndpoint,
     args: &Map<String, Value>,
     secrets: &ApiSecrets,
@@ -1359,13 +1450,6 @@ pub(crate) fn trial_via(
     send: impl FnOnce(&Prepared, u64) -> Result<RawResponse, String>,
 ) -> Trial {
     let mut trial = Trial::default();
-    if !endpoint.readonly {
-        trial.error = Some(
-            "这个接口会改数据，不自动试调。只是查询的，在「技术配置」里勾上「只查询」；             需要真的发出去的，等调试台（下一期）里二次确认后由人手动发"
-                .into(),
-        );
-        return trial;
-    }
     let prepared = match prepare(endpoint, args, secrets) {
         Ok(prepared) => prepared,
         Err(error) => {

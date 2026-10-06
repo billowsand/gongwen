@@ -286,7 +286,7 @@ pub(super) fn binding_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
         page.detail.key_open = false;
         if page.detail.test.is_none() {
             let endpoint = page.store.endpoints[index].clone();
-            start_test(&mut page.detail, &endpoint, &page.secrets);
+            start_test(&mut page.detail, &endpoint, &page.secrets, false);
         }
         let others: Vec<usize> = page
             .users_of(&name)

@@ -46,9 +46,37 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
 
         if !endpoint.examples.is_empty() {
             ui.add_space(18.0);
-            doc_heading(ui, "用法示例", |_| {});
+            // 最近一次整组用例的结论（配置改过就不算数）。
+            let suite = page
+                .log
+                .suites
+                .get(&endpoint.id)
+                .filter(|record| record.fingerprint == endpoint.fingerprint());
+            doc_heading(ui, "用例", |ui| {
+                if let Some(record) = suite {
+                    let (passed, total) = record.case_counts();
+                    let color = if passed == total {
+                        theme::success()
+                    } else {
+                        theme::danger()
+                    };
+                    ui.colored_label(color, format!("{passed}/{total} 通过 · {}", record.at));
+                }
+            });
             for (at, example) in endpoint.examples.iter().enumerate() {
+                let case = suite
+                    .and_then(|record| record.cases.iter().find(|case| case.name == example.name));
                 ui.horizontal_wrapped(|ui| {
+                    match case {
+                        Some(case) if case.ok => {
+                            ui.colored_label(theme::success(), "✓");
+                        }
+                        Some(case) => {
+                            ui.colored_label(theme::danger(), "✗")
+                                .on_hover_text(&case.reason);
+                        }
+                        None => {}
+                    }
                     ui.label(egui::RichText::new(&example.name).strong());
                     if !example.note.is_empty() {
                         theme::caption(ui, &example.note);
@@ -57,10 +85,22 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                         go = Some(at);
                     }
                 });
+                let expects: Vec<String> = example.expect.iter().map(|e| e.label()).collect();
+                theme::caption(
+                    ui,
+                    &if expects.is_empty() {
+                        "期望：调通且业务成功".to_string()
+                    } else {
+                        format!("期望：调通且业务成功；{}", expects.join("；"))
+                    },
+                );
+                if let Some(case) = case.filter(|case| !case.ok) {
+                    ui.colored_label(theme::danger(), &case.reason);
+                }
             }
             theme::caption(
                 ui,
-                "每组是一种典型用法；「试一下」里点名字填入，也可以全部试一遍。",
+                "每条是一种典型用法，写着期望；在「试一下」里「全部跑一遍」，结果就是这个接口可用的证明。",
             );
         }
 
@@ -91,12 +131,8 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
         page.detail.start_editing(&snapshot);
     }
     if let Some(at) = go {
-        let endpoint = page.store.endpoints[index].clone();
         page.detail.tab = Tab::Try;
-        page.detail.example = Some(at);
-        page.detail.args = form_args(&endpoint, &endpoint.examples[at]);
-        page.detail.result = page.detail.run_results.get(at).cloned().flatten();
-        page.detail.output = None;
+        pick_example(page, index, at);
     }
 }
 

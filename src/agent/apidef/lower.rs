@@ -678,6 +678,14 @@ fn lower_tests(doc: &Value, op: &Value, inputs: &[ApiInput]) -> Vec<ApiExample> 
                     .flatten()
                     .map(|(name, value)| (name.clone(), example_text(kind_of_input(name), value)))
                     .collect(),
+                // 认不出的期望（别处手写的、格式不对的）不收，免得判定时出怪结果。
+                expect: test
+                    .get("expect")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                    .collect(),
             })
             .collect();
     }
@@ -715,6 +723,7 @@ fn lower_tests(doc: &Value, op: &Value, inputs: &[ApiInput]) -> Vec<ApiExample> 
                     .unwrap_or_default()
                     .to_string(),
                 args,
+                ..Default::default()
             })
         })
         .collect()
