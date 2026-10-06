@@ -82,6 +82,7 @@ pub(super) fn from_document(
             name,
             note: "接口文档里的请求示例".into(),
             args,
+            ..Default::default()
         });
     }
     out
@@ -156,6 +157,7 @@ pub(crate) fn check(
                 name,
                 note: example.note.trim().chars().take(80).collect(),
                 args,
+                ..Default::default()
             }),
         }
     }

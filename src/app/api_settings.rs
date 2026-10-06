@@ -213,6 +213,18 @@ impl ApisPage {
         }
     }
 
+    /// 记一次整组用例的结论并落盘。
+    fn record_suite(
+        &mut self,
+        endpoint: &ApiEndpoint,
+        runs: &[(String, Trial, Result<(), String>)],
+    ) {
+        self.log.record_suite(endpoint, runs);
+        if let Err(error) = self.log.save() {
+            self.message = Some((false, format!("测试记录保存失败：{error:#}")));
+        }
+    }
+
     /// 用样例值在后台把这几个接口各测一次（已经在测的不重复发）。
     fn retest(&mut self, indices: &[usize]) {
         for &index in indices {
@@ -925,6 +937,10 @@ impl<'a> Health<'a> {
             Self::MissingKey(_) => "缺密钥".into(),
             Self::AuthFailed(record) => format!("鉴权没过 · {}", record.at),
             Self::Untested => "未测试".into(),
+            Self::Passed(record) | Self::Failed(record) if !record.cases.is_empty() => {
+                let (passed, total) = record.case_counts();
+                format!("用例 {passed}/{total} 通过 · {}", record.at)
+            }
             Self::Passed(record) => format!("测试通过 · {}", record.at),
             Self::Failed(record) => format!("测试失败 · {}", record.at),
             Self::Stale(_) => "配置改过，需重测".into(),
@@ -1169,17 +1185,20 @@ pub(super) mod tests {
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(
-            has("用法示例") && has("文档示例：Choice") && has("去试一下"),
-            "接口说明列出样例：{texts:?}"
+            has("用例")
+                && has("文档示例：Choice")
+                && has("去试一下")
+                && has("期望：调通且业务成功"),
+            "接口说明列出用例与期望：{texts:?}"
         );
         page.detail.tab = detail::Tab::Try;
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(
-            has("文档示例：Noul") && has("文档示例：Score") && has("全部 4 组试一遍"),
+            has("文档示例：Noul") && has("文档示例：Score") && has("全部 4 条用例跑一遍"),
             "{texts:?}"
         );
-        assert!(has("存为样例"), "{texts:?}");
+        assert!(has("存为用例") && has("加上"), "{texts:?}");
         assert_eq!(page.detail.example, Some(0), "打开时填好第一组");
         assert!(
             page.detail.args["questions"].contains("\"is_urgent\""),
@@ -1218,11 +1237,16 @@ pub(super) mod tests {
         }
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
-        assert!(has("2 组样例，调通 1 组"), "{texts:?}");
+        assert!(has("2 条用例，通过 1 条"), "{texts:?}");
+        assert!(has("用例 1/2 通过"), "状态改看整组用例：{texts:?}");
+        assert!(has("按这次的返回建议"), "调通的用例给出建议期望：{texts:?}");
         assert!(
             server.request(0).contains("is_urgent"),
             "第一组发的是它自己的问题"
         );
+        let suite = &page.log.suites[&endpoint.id];
+        assert_eq!(suite.case_counts(), (1, 2));
+        assert!(suite.cases[1].reason.contains("422"), "{:?}", suite.cases);
     }
 
     #[test]

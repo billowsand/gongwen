@@ -122,6 +122,7 @@ fn legacy_endpoints() -> Vec<ApiEndpoint> {
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
+                ..Default::default()
             }],
             ..ApiEndpoint::default()
         },
@@ -664,6 +665,122 @@ fn write_operations_are_not_tried_or_called() {
     let trial = api::trial(delete, &Map::new(), &secrets());
     assert!(trial.error.unwrap().contains("会改数据"));
     assert!(trial.request.is_none(), "没发出去");
+}
+
+#[test]
+fn write_operations_send_only_by_hand() {
+    let server = api::test_server::TestServer::start(vec![(200, r#"{"code": 0}"#.into())]);
+    let (mut store, _) = import(&[("petstore.json", PETSTORE)]);
+    let index = store
+        .endpoints
+        .iter()
+        .position(|e| e.id.ends_with("deletePet"))
+        .unwrap();
+    store.endpoints[index].url = store.endpoints[index]
+        .url
+        .replace("http://10.1.1.1:8080/v1", &server.url);
+    let delete = &store.endpoints[index];
+    let args = json!({"petId": 7}).as_object().cloned().unwrap();
+    let refused = api::trial(delete, &args, &secrets());
+    assert!(refused.request.is_none(), "自动试调不发");
+    let sent = api::trial_by_hand(delete, &args, &secrets());
+    assert!(sent.ok(), "{:?}", sent.error);
+    assert!(
+        server.request(0).starts_with("DELETE /pets/7"),
+        "{}",
+        server.request(0)
+    );
+}
+
+#[test]
+fn case_expectations_round_trip_through_openapi() {
+    use super::cases::Expect;
+    let (mut store, _) = import(&[("petstore.json", PETSTORE)]);
+    let index = store
+        .endpoints
+        .iter()
+        .position(|e| e.id.ends_with("listPets"))
+        .unwrap();
+    store.endpoints[index].examples.push(ApiExample {
+        name: "查标签".into(),
+        args: [("tags".to_string(), r#"["dog"]"#.to_string())].into(),
+        expect: vec![
+            Expect::MinItems {
+                pointer: String::new(),
+                value: 1,
+            },
+            Expect::Equals {
+                pointer: "/0/kind".into(),
+                value: json!("dog"),
+            },
+        ],
+        ..Default::default()
+    });
+    absorb(&mut store);
+    let op = store.services[0].doc.pointer("/paths/~1pets/get").unwrap();
+    assert_eq!(
+        op["x-gongwen-tests"][0]["expect"],
+        json!([
+            {"kind": "min_items", "pointer": "", "value": 1},
+            {"kind": "equals", "pointer": "/0/kind", "value": "dog"}
+        ])
+    );
+    assert_eq!(
+        store.endpoints[index].examples[0].expect.len(),
+        2,
+        "读回来不变"
+    );
+    // 导出再导入，期望跟着文件走。
+    let files: Vec<(String, String)> = export(&store)
+        .into_iter()
+        .map(|(name, doc)| (name, to_text(&doc, false).unwrap()))
+        .collect();
+    let mut again = ApiStore::default();
+    import_files(&mut again, &files);
+    let list = endpoint(&again, "listPets");
+    assert_eq!(
+        list.examples[0].expect,
+        store.endpoints[index].examples[0].expect
+    );
+}
+
+#[test]
+fn status_prefers_a_fresh_case_suite() {
+    let endpoint = legacy_endpoints().remove(0);
+    let mut log = api::ApiTestLog::default();
+    assert!(matches!(log.status(&endpoint), api::TestStatus::Untested));
+    let ok = api::Trial {
+        raw: Some(api::RawResponse {
+            status: 200,
+            body: "{}".into(),
+        }),
+        ..api::Trial::default()
+    };
+    log.record(&endpoint, &ok);
+    log.record_suite(
+        &endpoint,
+        &[
+            ("甲".into(), ok.clone(), Ok(())),
+            (
+                "乙".into(),
+                ok.clone(),
+                Err("期望 /a 不为空，实际为空".into()),
+            ),
+        ],
+    );
+    match log.status(&endpoint) {
+        api::TestStatus::Failed(record) => {
+            assert_eq!(record.case_counts(), (1, 2));
+            assert!(record.summary.contains("「乙」"), "{}", record.summary);
+        }
+        _ => panic!("整组用例优先"),
+    }
+    // 配置改了：整组结论过期；再单次试调一次，显示单次的。
+    let mut changed = endpoint.clone();
+    changed.url.push_str("&x=1");
+    assert!(matches!(log.status(&changed), api::TestStatus::Stale(_)));
+    log.record(&changed, &ok);
+    assert!(matches!(log.status(&changed), api::TestStatus::Passed(r) if r.cases.is_empty()));
 }
 
 #[test]

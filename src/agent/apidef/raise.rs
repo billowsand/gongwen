@@ -304,11 +304,6 @@ fn apply_meta(
             json!(endpoint.timeout_seconds),
         );
     }
-    let old_tests: Vec<Value> = op
-        .get(X_TESTS)
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let has_body_examples = op
         .get("requestBody")
         .map(|rb| deref(doc, rb))
@@ -335,12 +330,8 @@ fn apply_meta(
             if !example.note.is_empty() {
                 test["note"] = json!(example.note);
             }
-            if let Some(expect) = old_tests
-                .iter()
-                .find(|old| old.get("name").and_then(Value::as_str) == Some(&example.name))
-                .and_then(|old| old.get("expect"))
-            {
-                test["expect"] = expect.clone();
+            if !example.expect.is_empty() {
+                test["expect"] = serde_json::to_value(&example.expect).unwrap_or_default();
             }
             test
         })
