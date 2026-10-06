@@ -11,6 +11,7 @@
 //! 只有「只查询且给 AI 用」的接口会编成工具（[`usable`]），这是红线，不在这里放宽。
 
 use crate::agent::api::{ApiEndpoint, ApiStore, InputKind};
+use crate::agent::argcheck;
 use crate::agent::board::value_to_text;
 use crate::agent::toolcall::{ToolCall, ToolSpec, wire_name};
 use serde_json::{Map, Value, json};
@@ -159,53 +160,9 @@ fn clean(schema: &Value) -> Value {
     }
 }
 
-/// 一个参数的简短签名：`region: 文字（必填）`、`level: "省"|"市"`。文本协议与报错里用。
-fn signature(name: &str, schema: &Value, required: bool) -> String {
-    let kind = match schema.get("enum").and_then(Value::as_array) {
-        Some(values) if !values.is_empty() => values
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join("|"),
-        _ => match schema.get("type").and_then(Value::as_str) {
-            Some("string") => "文字".into(),
-            Some("integer") => "整数".into(),
-            Some("number") => "数字".into(),
-            Some("boolean") => "true|false".into(),
-            Some("array") => {
-                let item = schema
-                    .pointer("/items/type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("值");
-                format!("{item} 数组")
-            }
-            Some("object") => "JSON 对象".into(),
-            _ => "JSON".into(),
-        },
-    };
-    format!("{name}: {kind}{}", if required { "（必填）" } else { "" })
-}
-
 /// 整个接口的参数签名，一行。
 pub(crate) fn signatures(endpoint: &ApiEndpoint) -> String {
-    let schema = parameters_schema(endpoint);
-    let required: Vec<&str> = schema["required"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect();
-    let parts: Vec<String> = schema["properties"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .map(|(name, prop)| signature(name, prop, required.contains(&name.as_str())))
-        .collect();
-    if parts.is_empty() {
-        "无参数".into()
-    } else {
-        parts.join(", ")
-    }
+    argcheck::signatures(&parameters_schema(endpoint))
 }
 
 /// 一条正确的调用示例（取第一条用例），报错时给模型照着改。
@@ -244,7 +201,7 @@ pub(crate) fn tool_spec(endpoint: &ApiEndpoint) -> ToolSpec {
                 prop.get("description")
                     .and_then(Value::as_str)
                     .unwrap_or(name),
-                signature(name, prop, required)
+                argcheck::signature(name, prop, required)
             );
             (name.clone(), required, doc)
         })
@@ -285,16 +242,12 @@ pub(crate) fn validate(endpoint: &ApiEndpoint, args: &Map<String, Value>) -> Res
     if problems.is_empty() {
         return Ok(());
     }
-    let mut message = format!(
-        "参数不对：{}。这个接口的参数是：{}",
-        problems.join("；"),
-        signatures(endpoint)
-    );
-    if let Some(sample) = sample_args(endpoint) {
-        message.push_str(&format!("。正确的例子：{sample}"));
-    }
-    message.push_str("。请改好参数再调一次。");
-    Err(message)
+    Err(argcheck::reject(
+        &problems,
+        "接口",
+        &schema,
+        sample_args(endpoint).as_deref(),
+    ))
 }
 
 /// 一个值合不合 schema：类型、枚举、数组元素与对象必填（各查一层，够发现常见填错）。
