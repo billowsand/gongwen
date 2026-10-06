@@ -2303,16 +2303,32 @@ pub fn spinner(ui: &mut egui::Ui, size: f32, color: Color32) -> egui::Response {
     response
 }
 
-/// 一枚淡底圆角标签，用来显示模型名、状态、版本号等元信息。
+/// 一枚单行淡底圆角标签，用来显示模型名、状态、版本号等元信息。
 pub fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) -> egui::Response {
-    egui::Frame::new()
-        .fill(bg)
-        .corner_radius(CornerRadius::same(255))
-        .inner_margin(Margin::symmetric(8, 2))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).color(fg));
-        })
-        .response
+    // 先按整行宽度排好单行文字，再交给外层布局整体换行。若在 Frame 内按
+    // 行尾剩余宽度排字，模型名会被挤成竖排并撑高整张卡片。
+    let galley = egui::WidgetText::from(egui::RichText::new(text).color(fg)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        (ui.max_rect().width() - 16.0).max(0.0),
+        egui::TextStyle::Body,
+    );
+    let truncated = galley.elided;
+    // 文字与背景一起分配空间，避免 Frame 的子布局先在行尾落位。
+    let (rect, response) =
+        ui.allocate_exact_size(galley.size() + egui::vec2(16.0, 4.0), egui::Sense::hover());
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, CornerRadius::same(255), bg);
+        ui.painter()
+            .galley(rect.min + egui::vec2(8.0, 2.0), galley, fg);
+    }
+    if truncated {
+        response.on_hover_text(text)
+    } else {
+        response
+    }
 }
 
 /// 单行输入框。

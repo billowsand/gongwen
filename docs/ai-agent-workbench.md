@@ -440,6 +440,12 @@ src/ai_panel/       侧栏界面：composer、cards、stream_view、outline_card
   `start_provider_probe`，状态挂在 `provider_status`（本进程内），模型清单写回
   `ProviderConfig::models` 缓存；`WorkerResult::Models/EmbeddingModels/RerankModels`
   合并为 `ProviderModels`。
+- 服务商管理页视觉整理（2026-10-06）：内容列居中，最大宽度 1040 pt，卡片等宽；
+  添加入口按本地 / 内网、在线、自定义分组。卡片按身份、接口、模型清单分层，刷新与
+  编辑固定在右侧，窄窗口改为独立操作行；停用和删除收进「更多」。模型清单默认折叠，
+  展开可滚动查看全部缓存模型，成功信息不重复显示；未探测显示「待测试」，失败才显示
+  警示与错误原因。编辑密钥使用密码框。布局回归覆盖窄 / 宽窗口、长接口地址和大量模型。
+  设计参考图为 ImageGen 生成，实际界面仍跟随用户主题与字体；桌面目视验收待完成。
 - rerank 的端点路径与响应字段键是服务端方言，不属于连接身份，留在 `rag.rerank`
   （进阶项仍在 config.json 手调）；「用对话大模型重排」继续复用起草模型。
 - 迁移在 `storage::load` 里跑（`migrate_providers`，幂等），迁移结果立即写回；

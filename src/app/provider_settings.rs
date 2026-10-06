@@ -5,7 +5,7 @@
 //! （同时匹配模型名与提供商名）、选中即关。一家都没刷新出模型时退化为「提供商
 //! 下拉 + 手填模型名」，与改造前的兜底一致。
 
-use super::settings::{setting_continuation, setting_field, sub_heading};
+use super::settings::setting_field;
 use crate::app::{GongwenApp, warn};
 use crate::lmstudio::context::{WindowSource, peek_window, tokens_label};
 use crate::models::{ModelKind, ModelRef, PROVIDER_PRESETS, ProviderConfig, ProviderPreset};
@@ -20,7 +20,7 @@ pub(crate) struct ProviderProbe {
     pub note: String,
 }
 
-/// 状态芯片文案：已连接 · N 个模型 / 未连接 / 已停用。
+/// 连接状态与模型数量分开显示；未探测和探测失败不能混为一谈。
 fn probe_chip(
     status: Option<&ProviderProbe>,
     provider: &ProviderConfig,
@@ -30,191 +30,331 @@ fn probe_chip(
     }
     match status {
         Some(s) if s.busy => ("正在连接…".into(), theme::text_muted()),
-        Some(s) if s.connected => (
-            format!("已连接 · {} 个模型", provider.models.len()),
-            theme::accent(),
-        ),
-        _ if !provider.models.is_empty() => ("未连接 · 用缓存清单".into(), warn()),
-        _ => ("未连接".into(), warn()),
+        Some(s) if s.connected => ("已连接".into(), theme::success()),
+        Some(s) if !s.note.is_empty() => ("连接失败".into(), warn()),
+        _ if !provider.models.is_empty() => ("待测试 · 有缓存".into(), theme::text_muted()),
+        _ => ("待测试".into(), theme::text_muted()),
     }
 }
 
-impl GongwenApp {
-    /// 「模型服务商管理」分区：预设添加 + 提供商卡片列表。
-    pub(crate) fn providers_section_ui(&mut self, ui: &mut egui::Ui) {
-        sub_heading(ui, "添加提供商", None);
-        ui.horizontal_wrapped(|ui| {
-            for preset in PROVIDER_PRESETS {
+#[derive(Clone, Copy)]
+enum ProviderAction {
+    Probe,
+    Edit,
+    Toggle,
+    Delete,
+}
+
+/// 操作区固定在右侧；窄窗口移到独立一行，避免与身份信息相互挤压。
+fn provider_actions_ui(
+    ui: &mut egui::Ui,
+    provider: &ProviderConfig,
+    busy: bool,
+    editing: bool,
+    action: &mut Option<ProviderAction>,
+) {
+    // 用水平行约束操作区高度；直接在纵向容器里右对齐会拿整页剩余高度居中。
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("更多", |ui| {
                 if ui
-                    .add(theme::icon_text_button(theme::Icon::Plus, preset.name))
-                    .on_hover_text(preset.note)
+                    .add(theme::menu_item(
+                        if provider.enabled {
+                            theme::Icon::Square
+                        } else {
+                            theme::Icon::SquareCheck
+                        },
+                        if provider.enabled {
+                            "停用服务商"
+                        } else {
+                            "启用服务商"
+                        },
+                    ))
                     .clicked()
                 {
-                    self.add_provider_from_preset(preset);
+                    *action = Some(ProviderAction::Toggle);
+                    ui.close();
                 }
-            }
-            if ui
-                .add(theme::icon_text_button(theme::Icon::Plus, "自定义"))
-                .on_hover_text("任意 OpenAI 兼容接口，全部自己填")
-                .clicked()
-            {
-                self.add_provider_from_preset(&CUSTOM_PRESET);
-            }
-        });
-        setting_continuation(ui, |ui| {
-            ui.weak("点预设即建好一条，地址自动填好，只补密钥；本地服务（LM Studio / Ollama）连密钥都不用。");
-        });
-
-        sub_heading(
-            ui,
-            "已添加的提供商",
-            Some(
-                "地址与密钥只保存在本机；「测试连接 / 刷新模型」读到的模型清单缓存进配置，服务没开时也能选模型。",
-            ),
-        );
-        if self.config.providers.is_empty() {
-            ui.weak("还没有提供商：从上面的预设添加，或点「自定义」。");
-        }
-        // 逐张卡片画；动作先记下来，循环结束后统一执行，避免借用打架。
-        let mut probe = None;
-        let mut toggle_edit = None;
-        let mut toggle_enabled = None;
-        let mut delete = None;
-        for index in 0..self.config.providers.len() {
-            let provider = self.config.providers[index].clone();
-            let editing = self.provider_edit.contains(&provider.id);
-            let status = self.provider_status.get(&provider.id);
-            let (chip, chip_color) = probe_chip(status, &provider);
-            theme::card()
-                .inner_margin(egui::Margin::symmetric(14, 10))
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.strong(&provider.name);
-                        theme::chip(ui, &chip, chip_color, theme::surface());
-                        ui.label(
-                            egui::RichText::new(if provider.base_url.is_empty() {
-                                "（未填地址）".to_string()
-                            } else {
-                                provider.base_url.clone()
-                            })
-                            .size(theme::font_sizes::SMALL)
-                            .color(theme::text_muted())
-                            .family(egui::FontFamily::Monospace),
-                        );
-                        if ui
-                            .add_enabled(
-                                !status.is_some_and(|s| s.busy),
-                                theme::icon_text_button(
-                                    theme::Icon::PlugZap,
-                                    "测试连接 / 刷新模型",
-                                ),
-                            )
-                            .clicked()
-                        {
-                            probe = Some(provider.id.clone());
-                        }
-                        if ui
-                            .add(theme::icon_text_button(
-                                theme::Icon::Edit,
-                                if editing { "收起" } else { "编辑" },
-                            ))
-                            .clicked()
-                        {
-                            toggle_edit = Some(provider.id.clone());
-                        }
-                        if ui
-                            .add(theme::icon_text_button(
-                                if provider.enabled {
-                                    theme::Icon::Square
-                                } else {
-                                    theme::Icon::SquareCheck
-                                },
-                                if provider.enabled { "停用" } else { "启用" },
-                            ))
-                            .clicked()
-                        {
-                            toggle_enabled = Some(provider.id.clone());
-                        }
-                        if ui
-                            .add(theme::icon_text_button(theme::Icon::Trash, "删除"))
-                            .clicked()
-                        {
-                            delete = Some(provider.id.clone());
-                        }
-                    });
-                    if let Some(s) = status
-                        && !s.note.is_empty()
-                        && !s.busy
-                    {
-                        ui.label(
-                            egui::RichText::new(&s.note)
-                                .size(theme::font_sizes::SMALL)
-                                .color(if s.connected {
-                                    theme::text_muted()
-                                } else {
-                                    warn()
-                                }),
-                        );
-                    }
-                    if !provider.models.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            for model in provider.models.iter().take(8) {
-                                theme::chip(ui, model, theme::text_soft(), theme::surface_sunk());
-                            }
-                            if provider.models.len() > 8 {
-                                ui.weak(format!("… 共 {} 个", provider.models.len()));
-                            }
-                        });
-                    }
-                    if editing {
-                        ui.add_space(6.0);
-                        ui.separator();
-                        setting_field(ui, "名称", &mut self.config.providers[index].name, "");
-                        setting_field(
-                            ui,
-                            "接口地址",
-                            &mut self.config.providers[index].base_url,
-                            "包含 /v1",
-                        );
-                        setting_field(
-                            ui,
-                            "API Key",
-                            &mut self.config.providers[index].api_key,
-                            "本地服务通常可留空；只保存在本机",
-                        );
-                    }
-                });
-            ui.add_space(4.0);
-        }
-        if let Some(id) = probe {
-            self.start_provider_probe(&id);
-        }
-        if let Some(id) = toggle_edit
-            && !self.provider_edit.remove(&id)
-        {
-            self.provider_edit.insert(id);
-        }
-        if let Some(id) = toggle_enabled
-            && let Some(provider) = self.config.provider_mut(&id)
-        {
-            provider.enabled = !provider.enabled;
-        }
-        if let Some(id) = delete {
-            self.delete_provider(&id);
-        }
-        setting_continuation(ui, |ui| {
+                ui.separator();
+                if ui
+                    .add(theme::menu_item(theme::Icon::Trash, "删除服务商"))
+                    .clicked()
+                {
+                    *action = Some(ProviderAction::Delete);
+                    ui.close();
+                }
+            });
             if ui
                 .add(theme::icon_text_button(
-                    theme::Icon::Refresh,
-                    "全部刷新模型",
+                    theme::Icon::Edit,
+                    if editing { "收起" } else { "编辑" },
                 ))
                 .clicked()
             {
-                self.start_all_provider_probes();
+                *action = Some(ProviderAction::Edit);
             }
-        });
-    }
+            if ui
+                .add_enabled(
+                    !busy,
+                    theme::icon_text_button(theme::Icon::Refresh, "刷新模型"),
+                )
+                .on_hover_text("测试连接并更新模型清单")
+                .clicked()
+            {
+                *action = Some(ProviderAction::Probe);
+            }
+        })
+    });
+}
 
+fn provider_identity_ui(
+    ui: &mut egui::Ui,
+    provider: &ProviderConfig,
+    status: Option<&ProviderProbe>,
+) {
+    let (label, color) = probe_chip(status, provider);
+    ui.horizontal_wrapped(|ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(&provider.name)
+                    .size(18.0)
+                    .strong()
+                    .color(theme::text()),
+            )
+            .truncate(),
+        )
+        .on_hover_text(&provider.name);
+        theme::chip(ui, &label, color, theme::surface_sunk());
+    });
+}
+
+/// 等宽卡片：身份与操作、接口地址、按需展开的模型清单和编辑表单。
+fn provider_card_ui(
+    ui: &mut egui::Ui,
+    provider: &mut ProviderConfig,
+    status: Option<&ProviderProbe>,
+    editing: bool,
+) -> egui::InnerResponse<Option<ProviderAction>> {
+    theme::card()
+        .inner_margin(egui::Margin::same(16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut action = None;
+            let busy = status.is_some_and(|s| s.busy);
+            let width = ui.available_width();
+            if width >= 560.0 {
+                ui.horizontal_top(|ui| {
+                    let identity_width = width - 260.0 - ui.spacing().item_spacing.x;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(identity_width, 30.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(identity_width);
+                            provider_identity_ui(ui, provider, status);
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(260.0, 30.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(260.0);
+                            provider_actions_ui(ui, provider, busy, editing, &mut action);
+                        },
+                    );
+                });
+            } else {
+                provider_identity_ui(ui, provider, status);
+                ui.add_space(4.0);
+                provider_actions_ui(ui, provider, busy, editing, &mut action);
+            }
+            ui.add_space(6.0);
+            let address = if provider.base_url.is_empty() {
+                "尚未填写接口地址"
+            } else {
+                &provider.base_url
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(address)
+                        .family(egui::FontFamily::Monospace)
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_muted()),
+                )
+                .truncate(),
+            )
+            .on_hover_text(address);
+            // 成功状态已在标题显示；只将失败原因留在正文，避免重复报数。
+            if let Some(s) = status
+                && !s.busy
+                && !s.connected
+                && !s.note.is_empty()
+            {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(&s.note)
+                        .size(theme::font_sizes::SMALL)
+                        .color(warn()),
+                );
+            }
+            ui.add_space(8.0);
+            ui.separator();
+            if provider.models.is_empty() {
+                ui.label(
+                    egui::RichText::new("暂无模型清单，点击「刷新模型」获取。")
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_muted()),
+                );
+            } else {
+                egui::CollapsingHeader::new(format!("模型清单 · {} 个", provider.models.len()))
+                    .id_salt("models")
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("model_list")
+                            .max_height(180.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    for model in &provider.models {
+                                        theme::chip(
+                                            ui,
+                                            model,
+                                            theme::text_soft(),
+                                            theme::surface_sunk(),
+                                        );
+                                    }
+                                });
+                            });
+                    });
+            }
+            if editing {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                setting_field(ui, "名称", &mut provider.name, "服务商名称");
+                setting_field(ui, "接口地址", &mut provider.base_url, "包含 /v1");
+                // 密钥用密码框显示，免于编辑时明文暴露在界面上。
+                super::settings::setting_row(ui, "API Key", None, |ui| {
+                    crate::ime::exempt(
+                        ui.add(
+                            theme::field(
+                                &mut provider.api_key,
+                                "本地服务通常可留空；只保存在本机",
+                                f32::INFINITY,
+                            )
+                            .password(true),
+                        ),
+                    );
+                });
+            }
+            action
+        })
+}
+
+impl GongwenApp {
+    /// 「模型服务商管理」分区：分组添加入口与等宽服务商卡片。
+    pub(crate) fn providers_section_ui(&mut self, ui: &mut egui::Ui) {
+        let mut preset_to_add = None;
+        theme::card()
+            .fill(theme::surface_sunk())
+            .inner_margin(egui::Margin::same(16))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new("添加服务商").strong().size(16.0));
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (label, local) in [("本地 / 内网服务", true), ("在线服务", false)]
+                    {
+                        ui.menu_button((theme::Icon::Plus.image(), label), |ui| {
+                            for preset in PROVIDER_PRESETS
+                                .iter()
+                                .filter(|p| matches!(p.id, "lmstudio" | "ollama" | "vllm") == local)
+                            {
+                                if ui
+                                    .add(theme::menu_text_item(preset.name))
+                                    .on_hover_text(preset.note)
+                                    .clicked()
+                                {
+                                    preset_to_add = Some(preset);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    if ui
+                        .add(theme::icon_text_button(theme::Icon::Plus, "自定义"))
+                        .on_hover_text("任意 OpenAI 兼容接口")
+                        .clicked()
+                    {
+                        preset_to_add = Some(&CUSTOM_PRESET);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("选择预设后填写连接信息；地址与密钥仅保存在本机。")
+                        .size(theme::font_sizes::SMALL)
+                        .color(theme::text_muted()),
+                );
+            });
+        if let Some(preset) = preset_to_add {
+            self.add_provider_from_preset(preset);
+        }
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("已添加的服务商").strong().size(16.0));
+            ui.weak(format!("{} 家", self.config.providers.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        !self.config.providers.is_empty(),
+                        theme::icon_text_button(theme::Icon::Refresh, "全部刷新"),
+                    )
+                    .on_hover_text("测试所有已启用的服务商，并更新模型清单")
+                    .clicked()
+                {
+                    self.start_all_provider_probes();
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if self.config.providers.is_empty() {
+            ui.label(
+                egui::RichText::new("尚未添加服务商，请从上方选择本地或在线服务。")
+                    .color(theme::text_muted()),
+            );
+        }
+        // 每张卡片使用独立 ID；动作在绘制结束后执行，编辑字段仍直接写入配置。
+        let mut pending = None;
+        for provider in &mut self.config.providers {
+            let editing = self.provider_edit.contains(&provider.id);
+            let status = self.provider_status.get(&provider.id);
+            let provider_id = provider.id.clone();
+            let action = ui
+                .push_id(&provider_id, |ui| {
+                    provider_card_ui(ui, provider, status, editing).inner
+                })
+                .inner;
+            if let Some(action) = action {
+                pending = Some((provider.id.clone(), action));
+            }
+            ui.add_space(10.0);
+        }
+        if let Some((id, action)) = pending {
+            match action {
+                ProviderAction::Probe => self.start_provider_probe(&id),
+                ProviderAction::Edit => {
+                    if !self.provider_edit.remove(&id) {
+                        self.provider_edit.insert(id);
+                    }
+                }
+                ProviderAction::Toggle => {
+                    if let Some(provider) = self.config.provider_mut(&id) {
+                        provider.enabled = !provider.enabled;
+                    }
+                }
+                ProviderAction::Delete => self.delete_provider(&id),
+            }
+        }
+    }
     fn add_provider_from_preset(&mut self, preset: &ProviderPreset) {
         let id = self.config.next_provider_id();
         self.config.providers.push(ProviderConfig {
@@ -502,4 +642,105 @@ pub(crate) fn model_picker(
                 }
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_provider(name: &str, count: usize) -> ProviderConfig {
+        ProviderConfig {
+            id: name.into(),
+            name: name.into(),
+            base_url: format!("https://example.com/{}/v1", "long-path/".repeat(20)),
+            models: (0..count).map(|n| format!("model-{n}")).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cached_models_do_not_imply_a_failed_connection() {
+        let provider = sample_provider("DMXAPI", 523);
+        assert_eq!(probe_chip(None, &provider).0, "待测试 · 有缓存");
+        let failed = ProviderProbe {
+            note: "连接失败：超时".into(),
+            ..Default::default()
+        };
+        assert_eq!(probe_chip(Some(&failed), &provider).0, "连接失败");
+        let connected = ProviderProbe {
+            connected: true,
+            ..Default::default()
+        };
+        assert_eq!(probe_chip(Some(&connected), &provider).0, "已连接");
+    }
+
+    /// 真正运行 egui 布局，覆盖窄窗口、长地址和不同模型数量，防止卡片再次按内容收缩。
+    #[test]
+    fn cards_keep_equal_width_and_collapse_large_model_lists() {
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        for width in [360.0, 760.0, 1040.0] {
+            let mut providers = [
+                sample_provider("DMXAPI", 523),
+                sample_provider("硅基流动", 97),
+            ];
+            let mut rects = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width + 40.0, 800.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_width(width);
+                    rects.clear();
+                    for provider in &mut providers {
+                        let id = provider.id.clone();
+                        let rect = ui
+                            .push_id(id, |ui| {
+                                provider_card_ui(ui, provider, None, false).response.rect
+                            })
+                            .inner;
+                        rects.push(rect);
+                    }
+                },
+            );
+            assert!((rects[0].width() - width).abs() < 2.0, "{width}: {rects:?}");
+            assert!(
+                (rects[0].width() - rects[1].width()).abs() < 1.0,
+                "{rects:?}"
+            );
+            assert!(
+                (rects[0].height() - rects[1].height()).abs() < 1.0,
+                "{rects:?}"
+            );
+            assert!(rects.iter().all(|rect| rect.height() < 180.0), "{rects:?}");
+            let mut more_positions = Vec::new();
+            fn collect_more(shape: &egui::Shape, positions: &mut Vec<egui::Pos2>) {
+                match shape {
+                    egui::Shape::Text(text) if text.galley.text() == "更多" => {
+                        positions.push(text.pos)
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect_more(shape, positions);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for shape in &output.shapes {
+                collect_more(&shape.shape, &mut more_positions);
+            }
+            assert_eq!(more_positions.len(), 2);
+            for (position, card) in more_positions.iter().zip(&rects) {
+                assert!(
+                    position.x > card.right() - 80.0,
+                    "操作区没有靠右：{position:?}, {card:?}"
+                );
+            }
+        }
+    }
 }

@@ -21,6 +21,8 @@ use eframe::egui;
 
 /// 润色预设分区的正文最大宽度：列表和编辑区并排，比表单类分区要宽。
 const PRESETS_MAX_WIDTH: f32 = 1180.0;
+/// 服务商卡片需要同时容纳名称、状态和操作区，比普通设置表单稍宽。
+const PROVIDERS_MAX_WIDTH: f32 = 1040.0;
 
 /// AI 管理页的分区。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -104,8 +106,7 @@ impl AiSection {
     fn description(self) -> &'static str {
         match self {
             AiSection::Providers => {
-                "接口地址与 API Key 只在这里填一次；「模型服务」里起草、复核、知识库各自挑模型即可。\
-                 全部是 OpenAI 兼容接口：本机的 LM Studio、Ollama，内网 vLLM，或各家在线服务。"
+                "管理连接地址与密钥，在「模型服务」中为起草、复核和知识库选择模型。"
             }
             AiSection::ModelService => {
                 "每个功能各自挑一个提供商的模型；地址与密钥到「模型服务商管理」里统一维护。\
@@ -146,7 +147,16 @@ fn section_header_ui(ui: &mut egui::Ui, section: AiSection) {
                 .tint(theme::accent())
                 .fit_to_exact_size(egui::vec2(20.0, 20.0)),
         );
-        ui.heading(section.label());
+        ui.label(
+            egui::RichText::new(section.label())
+                .size(if section == AiSection::Providers {
+                    24.0
+                } else {
+                    theme::font_sizes::HEADING
+                })
+                .strong()
+                .color(theme::text()),
+        );
     });
     ui.add_space(4.0);
     ui.label(
@@ -219,10 +229,10 @@ impl GongwenApp {
 
     fn ai_detail_ui(&mut self, ui: &mut egui::Ui) {
         let section = self.ai_section;
-        let max_width = if section == AiSection::Presets {
-            PRESETS_MAX_WIDTH
-        } else {
-            DETAIL_MAX_WIDTH
+        let max_width = match section {
+            AiSection::Presets => PRESETS_MAX_WIDTH,
+            AiSection::Providers => PROVIDERS_MAX_WIDTH,
+            _ => DETAIL_MAX_WIDTH,
         };
         theme::card()
             .inner_margin(egui::Margin::symmetric(18, 14))
@@ -244,6 +254,24 @@ impl GongwenApp {
                     .id_salt(format!("ai_manage_scroll_{section:?}"))
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
+                        if section == AiSection::Providers {
+                            let width = max_width.min(ui.available_width());
+                            let inset = (ui.available_width() - width) * 0.5;
+                            ui.horizontal_top(|ui| {
+                                ui.add_space(inset);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(width, 0.0),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.set_width(width);
+                                        section_header_ui(ui, section);
+                                        self.providers_section_ui(ui);
+                                        ui.add_space(8.0);
+                                    },
+                                );
+                            });
+                            return;
+                        }
                         ui.set_max_width(max_width.min(ui.available_width()));
                         section_header_ui(ui, section);
                         match section {
