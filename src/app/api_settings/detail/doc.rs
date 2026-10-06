@@ -37,7 +37,6 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
             ui.add(
                 egui::Label::new(egui::RichText::new(description).color(theme::text_soft())).wrap(),
             );
-            theme::caption(ui, "AI 靠这段文字判断什么时候调用这个接口。");
         }
 
         ui.add_space(18.0);
@@ -63,41 +62,47 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                     ui.colored_label(color, format!("{passed}/{total} 通过 · {}", record.at));
                 }
             });
-            for (at, example) in endpoint.examples.iter().enumerate() {
-                let case = suite
-                    .and_then(|record| record.cases.iter().find(|case| case.name == example.name));
-                ui.horizontal_wrapped(|ui| {
-                    match case {
-                        Some(case) if case.ok => {
-                            ui.colored_label(theme::success(), "✓");
+            egui::CollapsingHeader::new(format!("展开 {} 条用例", endpoint.examples.len()))
+                .id_salt(("api_doc_examples", &endpoint.id))
+                .show(ui, |ui| {
+                    for (at, example) in endpoint.examples.iter().enumerate() {
+                        let case = suite.and_then(|record| {
+                            record.cases.iter().find(|case| case.name == example.name)
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            match case {
+                                Some(case) if case.ok => {
+                                    ui.colored_label(theme::success(), "✓");
+                                }
+                                Some(case) => {
+                                    ui.colored_label(theme::danger(), "✗")
+                                        .on_hover_text(&case.reason);
+                                }
+                                None => {}
+                            }
+                            ui.label(egui::RichText::new(&example.name).strong());
+                            if !example.note.is_empty() {
+                                theme::caption(ui, &example.note);
+                            }
+                            if ui.small_button("去试一下").clicked() {
+                                go = Some(at);
+                            }
+                        });
+                        let expects: Vec<String> =
+                            example.expect.iter().map(|e| e.label()).collect();
+                        theme::caption(
+                            ui,
+                            &if expects.is_empty() {
+                                "期望：调通且业务成功".to_string()
+                            } else {
+                                format!("期望：调通且业务成功；{}", expects.join("；"))
+                            },
+                        );
+                        if let Some(case) = case.filter(|case| !case.ok) {
+                            ui.colored_label(theme::danger(), &case.reason);
                         }
-                        Some(case) => {
-                            ui.colored_label(theme::danger(), "✗")
-                                .on_hover_text(&case.reason);
-                        }
-                        None => {}
-                    }
-                    ui.label(egui::RichText::new(&example.name).strong());
-                    if !example.note.is_empty() {
-                        theme::caption(ui, &example.note);
-                    }
-                    if ui.small_button("去试一下").clicked() {
-                        go = Some(at);
                     }
                 });
-                let expects: Vec<String> = example.expect.iter().map(|e| e.label()).collect();
-                theme::caption(
-                    ui,
-                    &if expects.is_empty() {
-                        "期望：调通且业务成功".to_string()
-                    } else {
-                        format!("期望：调通且业务成功；{}", expects.join("；"))
-                    },
-                );
-                if let Some(case) = case.filter(|case| !case.ok) {
-                    ui.colored_label(theme::danger(), &case.reason);
-                }
-            }
             theme::caption(
                 ui,
                 "每条是一种典型用法，写着期望；在「试一下」里「全部跑一遍」，结果就是这个接口可用的证明。",
@@ -119,41 +124,46 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                         .on_hover_text(format!("模型 {}", record.model));
                 }
             });
-            for case in &endpoint.ai_cases {
-                let result =
-                    suite.and_then(|record| record.cases.iter().find(|c| c.name == case.question));
-                ui.horizontal_wrapped(|ui| {
-                    match result {
-                        Some(result) if result.ok => {
-                            ui.colored_label(theme::success(), "✓");
+            egui::CollapsingHeader::new(format!("展开 {} 条 AI 用例", endpoint.ai_cases.len()))
+                .id_salt(("api_doc_ai_examples", &endpoint.id))
+                .show(ui, |ui| {
+                    for case in &endpoint.ai_cases {
+                        let result = suite.and_then(|record| {
+                            record.cases.iter().find(|c| c.name == case.question)
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            match result {
+                                Some(result) if result.ok => {
+                                    ui.colored_label(theme::success(), "✓");
+                                }
+                                Some(result) => {
+                                    ui.colored_label(theme::danger(), "✗")
+                                        .on_hover_text(&result.reason);
+                                }
+                                None => {}
+                            }
+                            ui.label(&case.question);
+                        });
+                        let args: Vec<String> = case
+                            .expect_args
+                            .iter()
+                            .map(|(name, value)| {
+                                format!("{name} = {}", crate::agent::board::value_to_text(value))
+                            })
+                            .collect();
+                        theme::caption(
+                            ui,
+                            &if args.is_empty() {
+                                "期望：调这个接口".to_string()
+                            } else {
+                                format!("期望：调这个接口，{}", args.join("，"))
+                            },
+                        );
+                        if let Some(result) = result.filter(|r| !r.ok) {
+                            ui.colored_label(theme::danger(), &result.reason);
                         }
-                        Some(result) => {
-                            ui.colored_label(theme::danger(), "✗")
-                                .on_hover_text(&result.reason);
-                        }
-                        None => {}
                     }
-                    ui.label(&case.question);
                 });
-                let args: Vec<String> = case
-                    .expect_args
-                    .iter()
-                    .map(|(name, value)| {
-                        format!("{name} = {}", crate::agent::board::value_to_text(value))
-                    })
-                    .collect();
-                theme::caption(
-                    ui,
-                    &if args.is_empty() {
-                        "期望：调这个接口".to_string()
-                    } else {
-                        format!("期望：调这个接口，{}", args.join("，"))
-                    },
-                );
-                if let Some(result) = result.filter(|r| !r.ok) {
-                    ui.colored_label(theme::danger(), &result.reason);
-                }
-            }
             theme::caption(
                 ui,
                 &match suite {
@@ -171,22 +181,25 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
         returns_ui(ui, page, endpoint);
 
         ui.add_space(18.0);
-        doc_heading(ui, "在技能里引用", |_| {});
-        let reference = format!("http.call:{}", endpoint.id);
-        ui.horizontal(|ui| {
-            egui::Frame::new()
-                .fill(theme::canvas())
-                .stroke(egui::Stroke::new(1.0, theme::border()))
-                .corner_radius(egui::CornerRadius::same(6))
-                .inner_margin(egui::Margin::symmetric(10, 4))
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(&reference).monospace());
+        egui::CollapsingHeader::new("在技能里引用")
+            .id_salt(("api_doc_reference", &endpoint.id))
+            .show(ui, |ui| {
+                let reference = format!("http.call:{}", endpoint.id);
+                ui.horizontal(|ui| {
+                    egui::Frame::new()
+                        .fill(theme::canvas())
+                        .stroke(egui::Stroke::new(1.0, theme::border()))
+                        .corner_radius(egui::CornerRadius::same(6))
+                        .inner_margin(egui::Margin::symmetric(10, 4))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(&reference).monospace());
+                        });
+                    if theme::icon_button(ui, theme::Icon::Copy, "复制").clicked() {
+                        ui.ctx().copy_text(reference.clone());
+                    }
                 });
-            if theme::icon_button(ui, theme::Icon::Copy, "复制").clicked() {
-                ui.ctx().copy_text(reference.clone());
-            }
-        });
-        theme::caption(ui, "写进技能 SKILL.md 的 tools 里，技能就能调用这个接口。");
+                theme::caption(ui, "写进技能 SKILL.md 的 tools 里，技能就能调用这个接口。");
+            });
     }
     if edit {
         let snapshot = page.store.endpoints[index].clone();
@@ -266,57 +279,58 @@ pub(super) fn params_table(ui: &mut egui::Ui, endpoint: &ApiEndpoint) {
 
 /// 「返回什么」：每条结果的各项从哪取，加上最近一次测试拿到的样子。
 pub(super) fn returns_ui(ui: &mut egui::Ui, page: &ApisPage, endpoint: &ApiEndpoint) {
-    ui.label(format!(
-        "每次取回一组条目，放进{}；每一条这样整理：",
-        endpoint.destination.label()
-    ));
+    ui.label(format!("结果用于：{}", endpoint.destination.label()));
     ui.add_space(4.0);
-    let mapping = &endpoint.mapping;
-    let field = |value: &str| -> egui::RichText {
-        if value.trim().is_empty() {
-            egui::RichText::new("没指定，按常见字段名猜").color(theme::text_muted())
-        } else {
-            egui::RichText::new(value.trim()).monospace()
-        }
-    };
-    let success = if endpoint.success.is_set() {
-        egui::RichText::new(format!(
-            "{} 等于 {}",
-            endpoint.success.pointer.trim(),
-            endpoint.success.equals.trim()
-        ))
-        .monospace()
-    } else {
-        egui::RichText::new("HTTP 200 就算成功")
-    };
-    let list = if mapping.list.trim().is_empty() {
-        egui::RichText::new("整个返回")
-    } else {
-        egui::RichText::new(mapping.list.trim()).monospace()
-    };
-    let rows = [
-        ("条目位置", list),
-        ("标题", field(&mapping.title)),
-        ("正文", field(&mapping.text)),
-        ("出处", field(&mapping.source)),
-        ("编号", field(&mapping.id)),
-        ("成功判据", success),
-    ];
-    egui::Frame::new()
-        .fill(theme::canvas())
-        .stroke(egui::Stroke::new(1.0, theme::border()))
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(12, 8))
+    egui::CollapsingHeader::new("字段映射与成功判据")
+        .id_salt(("api_doc_mapping", &endpoint.id))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            for (label, value) in rows {
-                ui.horizontal_top(|ui| {
-                    cell(ui, 80.0, |ui| {
-                        theme::caption(ui, label);
-                    });
-                    ui.add(egui::Label::new(value).wrap());
+            let mapping = &endpoint.mapping;
+            let field = |value: &str| -> egui::RichText {
+                if value.trim().is_empty() {
+                    egui::RichText::new("没指定，按常见字段名猜").color(theme::text_muted())
+                } else {
+                    egui::RichText::new(value.trim()).monospace()
+                }
+            };
+            let success = if endpoint.success.is_set() {
+                egui::RichText::new(format!(
+                    "{} 等于 {}",
+                    endpoint.success.pointer.trim(),
+                    endpoint.success.equals.trim()
+                ))
+                .monospace()
+            } else {
+                egui::RichText::new("HTTP 200 就算成功")
+            };
+            let list = if mapping.list.trim().is_empty() {
+                egui::RichText::new("整个返回")
+            } else {
+                egui::RichText::new(mapping.list.trim()).monospace()
+            };
+            let rows = [
+                ("条目位置", list),
+                ("标题", field(&mapping.title)),
+                ("正文", field(&mapping.text)),
+                ("出处", field(&mapping.source)),
+                ("编号", field(&mapping.id)),
+                ("成功判据", success),
+            ];
+            egui::Frame::new()
+                .fill(theme::canvas())
+                .stroke(egui::Stroke::new(1.0, theme::border()))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (label, value) in rows {
+                        ui.horizontal_top(|ui| {
+                            cell(ui, 80.0, |ui| {
+                                theme::caption(ui, label);
+                            });
+                            ui.add(egui::Label::new(value).wrap());
+                        });
+                    }
                 });
-            }
         });
     ui.add_space(6.0);
     match &page.detail.result {

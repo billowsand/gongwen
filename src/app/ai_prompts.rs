@@ -408,7 +408,10 @@ impl GongwenApp {
 要求由内置标准强制，无需也无法在这里改。",
                 );
             });
-            ui.add(
+            crate::app::widgets::bounded_text_edit(
+                ui,
+                "ai_prompt_instruction",
+                8,
                 egui::TextEdit::multiline(&mut draft.instruction)
                     .hint_text("留空表示只按内置标准做格式规整")
                     .desired_width(ui.available_width())
@@ -615,7 +618,10 @@ impl GongwenApp {
         });
         ui.add_space(6.0);
         let mut contract = prompt::output_contract(self.ai_contract_preview_kind);
-        ui.add(
+        crate::app::widgets::bounded_text_edit(
+            ui,
+            "ai_output_contract",
+            24,
             egui::TextEdit::multiline(&mut contract)
                 .desired_width(ui.available_width())
                 .desired_rows(24)

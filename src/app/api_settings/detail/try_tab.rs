@@ -75,20 +75,24 @@ pub(super) fn examples_bar(ui: &mut egui::Ui, page: &mut ApisPage, index: usize)
     if let Some(at) = page.detail.example
         && at < page.store.endpoints[index].examples.len()
     {
-        let example = &mut page.store.endpoints[index].examples[at];
-        ui.horizontal_wrapped(|ui| {
-            ui.label("名称");
-            page.dirty |= ui
-                .add(egui::TextEdit::singleline(&mut example.name).desired_width(160.0))
-                .changed();
-            if ui.small_button("删除这条").clicked() {
-                remove = Some(at);
-            }
-        });
-        if !example.note.is_empty() {
-            theme::caption(ui, &example.note);
-        }
-        expect_editor(ui, page, index, at);
+        egui::CollapsingHeader::new("编辑当前用例与期望")
+            .id_salt(("api_case_edit", index, at))
+            .show(ui, |ui| {
+                let example = &mut page.store.endpoints[index].examples[at];
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("名称");
+                    page.dirty |= ui
+                        .add(egui::TextEdit::singleline(&mut example.name).desired_width(160.0))
+                        .changed();
+                    if ui.small_button("删除这条").clicked() {
+                        remove = Some(at);
+                    }
+                });
+                if !example.note.is_empty() {
+                    theme::caption(ui, &example.note);
+                }
+                expect_editor(ui, page, index, at);
+            });
     }
     if let Some(at) = remove {
         page.store.endpoints[index].examples.remove(at);
@@ -234,7 +238,10 @@ fn input_widget(ui: &mut egui::Ui, index: usize, input: &ApiInput, value: &mut S
         return;
     }
     if input.kind == InputKind::Json {
-        ui.add(
+        crate::app::widgets::bounded_text_edit(
+            ui,
+            ("api_json_input", &input.name),
+            8,
             egui::TextEdit::multiline(value)
                 .code_editor()
                 .desired_rows(5)
@@ -279,6 +286,15 @@ pub(super) fn request_box(
         "请求",
         None,
         |ui| {
+            if theme::primary_icon_button_enabled(ui, !running, theme::Icon::PlugZap, "发送请求")
+                .on_hover_text("使用当前参数与配置发送，无需先保存")
+                .clicked()
+            {
+                send = true;
+            }
+            if running {
+                theme::spinner(ui, 14.0, theme::accent());
+            }
             if has_inputs
                 && ui
                     .small_button("填入参数样例")
@@ -349,25 +365,6 @@ pub(super) fn request_box(
                     "这个接口会改数据：发送前要确认，不参加「全部跑一遍」，也不给 AI 调。",
                 );
             }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if theme::primary_icon_button_enabled(
-                    ui,
-                    !running,
-                    theme::Icon::PlugZap,
-                    "发送请求",
-                )
-                .clicked()
-                {
-                    send = true;
-                }
-                if running {
-                    theme::spinner(ui, 14.0, theme::accent());
-                    ui.weak("请求中…");
-                } else {
-                    theme::caption(ui, "用正在编辑的配置，不必先保存");
-                }
-            });
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 if examples_count > 0
@@ -505,9 +502,10 @@ fn save_case(page: &mut ApisPage, index: usize) {
     page.detail.example_note = Some((
         true,
         if passed.is_some() {
-            "已存为用例：可以改个名字，下面「按这次的返回建议」点一下就能加期望；记得保存。".into()
+            "已存为用例：在「编辑当前用例与期望」里可改名、按返回建议加期望；记得保存。".into()
         } else {
-            "已存为用例：可以改个名字；调通以后会按返回建议期望。记得保存。".into()
+            "已存为用例：在「编辑当前用例与期望」里可改名；调通以后会按返回建议期望。记得保存。"
+                .into()
         },
     ));
 }
@@ -611,9 +609,9 @@ pub(super) fn response_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize)
                         theme::warn(),
                         theme::warn_soft(),
                         if auth::has_auth(&page.store.endpoints[index]) {
-                            "看起来是鉴权没过：Key 不对、过期，或者接口要的带法和这里配的不一样。在上方密钥条里粘贴新的 Key，离开输入框会自动重测。"
+                            "鉴权没过：Key 可能不对、过期或带法不符。通过「管理 → 鉴权与密钥」修改，离开输入框会自动重测。"
                         } else {
-                            "看起来接口要鉴权，但这里没配密钥：在上方点「添加鉴权」选好带法，再粘贴 Key。"
+                            "接口可能需要鉴权，但尚未配置：通过「管理 → 鉴权与密钥」添加带法与 Key。"
                         },
                     );
                 }
@@ -810,7 +808,10 @@ pub(super) fn code_view(ui: &mut egui::Ui, id: impl egui::AsIdSalt, text: &str) 
             });
             ui.push_id(id, |ui| {
                 let mut shown = text;
-                ui.add(
+                crate::app::widgets::bounded_text_edit(
+                    ui,
+                    "api_code_view_scroll",
+                    12,
                     egui::TextEdit::multiline(&mut shown)
                         .code_editor()
                         .frame(egui::Frame::new())

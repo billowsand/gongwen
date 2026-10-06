@@ -213,7 +213,7 @@ pub(super) fn import_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConf
     let body_height = ui.available_height() - if has_bar { BAR_HEIGHT } else { 0.0 };
     egui::ScrollArea::vertical()
         .id_salt("api_import_scroll")
-        .max_height(body_height.max(120.0))
+        .max_height(body_height.max(0.0))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             body_ui(ui, flow, config, &page.store);
@@ -304,31 +304,34 @@ fn body_ui(
     config: &AppConfig,
     store: &crate::agent::api::ApiStore,
 ) {
-    input_ui(ui, flow, config, store);
+    if flow.outcome.is_some() {
+        egui::CollapsingHeader::new("原始资料与识别备注")
+            .id_salt("api_import_source")
+            .show(ui, |ui| {
+                input_ui(ui, flow, config, store);
+                if let Some(outcome) = &flow.outcome {
+                    for note in &outcome.notes {
+                        theme::caption(ui, note);
+                    }
+                    if outcome.model_used {
+                        egui::CollapsingHeader::new(format!(
+                            "发给模型的内容（遮掉了 {} 处密钥）",
+                            outcome.masked
+                        ))
+                        .id_salt("api_import_redacted")
+                        .show(ui, |ui| {
+                            code_block(ui, "api_import_redacted_text", &outcome.redacted)
+                        });
+                    }
+                }
+            });
+    } else {
+        input_ui(ui, flow, config, store);
+    }
     let Some(outcome) = &mut flow.outcome else {
         return;
     };
-    ui.add_space(12.0);
-    for note in &outcome.notes {
-        theme::notice(
-            ui,
-            theme::Icon::HelpCircle,
-            theme::info(),
-            theme::accent_soft(),
-            note.clone(),
-        );
-        ui.add_space(4.0);
-    }
-    if outcome.model_used {
-        egui::CollapsingHeader::new(format!(
-            "发给模型的内容（遮掉了 {} 处密钥）",
-            outcome.masked
-        ))
-        .id_salt("api_import_redacted")
-        .show(ui, |ui| {
-            code_block(ui, "api_import_redacted_text", &outcome.redacted)
-        });
-    }
+    ui.add_space(6.0);
     if outcome.candidates.is_empty() {
         return;
     }
@@ -341,37 +344,53 @@ fn body_ui(
         .as_mut()
         .map(|assist| assist.poll(ui.ctx()))
         .unwrap_or_default();
-    theme::card().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        match &mut outcome.assist {
-            Some(assist) => updates.extend(assist.ui(ui)),
-            None => {
-                ui.label(egui::RichText::new("接入助手").strong());
+    if let Some(assist) = &mut outcome.assist {
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            updates.extend(assist.ui(ui));
+            if !assist.running()
+                && ui
+                    .add(theme::secondary_icon_button(
+                        theme::Icon::WandSparkles,
+                        "重新试调",
+                    ))
+                    .clicked()
+            {
+                outcome.auto_assist = true;
             }
-        }
-        if !outcome.assist.as_ref().is_some_and(Assist::running)
-            && ui
-                .add(theme::secondary_icon_button(
-                    theme::Icon::WandSparkles,
-                    "让助手接着试",
-                ))
-                .on_hover_text("按现在的配置从头试调，没调通的接着问、接着修")
-                .clicked()
-        {
-            start_assist(outcome, &flow.secrets, config);
-        }
-    });
+        });
+    } else if outcome
+        .candidates
+        .iter()
+        .any(|candidate| !candidate.trial.as_ref().is_some_and(Trial::ok))
+        && ui
+            .add(theme::secondary_icon_button(
+                theme::Icon::WandSparkles,
+                "让助手试调",
+            ))
+            .clicked()
+    {
+        start_assist(outcome, &flow.secrets, config);
+    }
     apply_updates(outcome, &mut flow.secrets, updates);
     let assisting = outcome.assist.as_ref().is_some_and(Assist::running);
     ui.add_space(10.0);
+    // 缺密钥、鉴权失败时直接显示；正常鉴权不占用候选区。
+    let needs_auth = outcome.candidates.iter().any(|candidate| {
+        candidate.draft.access != Access::Write
+            && (secret_refs(&candidate.draft.endpoint)
+                .iter()
+                .any(|name| !flow.secrets.filled(name))
+                || candidate.trial.as_ref().is_some_and(Trial::auth_rejected))
+    }) || !outcome.edited.is_empty();
     let panel = ui
         .add_enabled_ui(!assisting, |ui| {
-            theme::card()
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    auth_panel_ui(ui, outcome, &mut flow.secrets)
-                })
-                .inner
+            egui::CollapsingHeader::new("鉴权与密钥 · 按需修改")
+                .id_salt("api_import_auth")
+                .open(needs_auth.then_some(true))
+                .show(ui, |ui| auth_panel_ui(ui, outcome, &mut flow.secrets))
+                .body_returned
+                .unwrap_or_default()
         })
         .inner;
     ui.add_space(10.0);
@@ -433,7 +452,10 @@ fn input_ui(
     };
     ui.add_space(4.0);
     let collapsed = flow.outcome.is_some();
-    ui.add(
+    crate::app::widgets::bounded_text_edit(
+        ui,
+        "api_import_material",
+        if collapsed { 4 } else { 12 },
         egui::TextEdit::multiline(&mut flow.text)
             .hint_text(
                 "粘贴接口文档、cURL 命令、请求与返回示例……\n\n例如：\ncurl -X POST 'http://10.0.0.9/api/policy/search' -H 'Authorization: Bearer xxx' -d '{\"keyword\": \"中小企业\"}'",
@@ -667,6 +689,7 @@ fn doc_values(
 }
 
 /// 「鉴权」卡片的结果：有没有密钥输入框正在输入（输入时不自动试调）。
+#[derive(Default)]
 struct AuthPanel {
     typing: bool,
 }
@@ -831,6 +854,9 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
             match candidate.draft.access {
                 Access::Query => theme::chip(ui, "只查询", theme::success(), theme::success_soft()),
                 Access::Write => theme::chip(ui, "会改数据", theme::danger(), theme::danger_soft()),
+                Access::Unknown if candidate.confirmed => {
+                    theme::chip(ui, "已确认只查询", theme::success(), theme::success_soft())
+                }
                 Access::Unknown => theme::chip(ui, "性质待确认", theme::warn(), theme::warn_soft()),
             };
         });
@@ -850,38 +876,18 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
         return;
     }
     ui.add(
-        egui::TextEdit::multiline(&mut candidate.draft.endpoint.description)
-            .hint_text("这个接口能查什么、按什么查（AI 靠它判断什么时候调用）")
-            .desired_rows(1)
-            .desired_width(f32::INFINITY),
-    );
+        egui::Label::new(
+            egui::RichText::new(&candidate.draft.endpoint.description).color(theme::text_soft()),
+        )
+        .truncate(),
+    )
+    .on_hover_text(&candidate.draft.endpoint.description);
     let endpoint = &candidate.draft.endpoint;
     ui.label(
         egui::RichText::new(format!("{} {}", endpoint.method.label(), endpoint.url))
             .size(theme::font_sizes::SMALL)
             .color(theme::text_muted()),
     );
-    if !endpoint.inputs.is_empty() {
-        theme::caption(ui, &format!("查询条件：{}", inputs_line(&candidate.draft)));
-    }
-    if !endpoint.examples.is_empty() {
-        let names: Vec<&str> = endpoint.examples.iter().map(|e| e.name.as_str()).collect();
-        theme::caption(
-            ui,
-            &format!("试调样例 {} 组：{}", names.len(), names.join("、")),
-        );
-    }
-    if !candidate.draft.origins.is_empty() {
-        let line = candidate
-            .draft
-            .origins
-            .iter()
-            .map(|(field, origin)| format!("{field}·{}", origin.label()))
-            .collect::<Vec<_>>()
-            .join("　");
-        theme::caption(ui, &format!("来源：{line}"));
-    }
-
     if let Some(state @ (State::Stuck(_) | State::Skipped(_))) = &candidate.assist_state {
         ui.colored_label(theme::warn(), format!("接入助手：{}", state.label()));
     }
@@ -927,10 +933,6 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
     for blocker in &blockers {
         ui.colored_label(theme::warn(), format!("· 还缺：{blocker}"));
     }
-    for note in &candidate.draft.notes {
-        theme::caption(ui, &format!("· {note}"));
-    }
-
     // —— 试调 ——
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -956,7 +958,14 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
         }
     });
     if let Some(trial) = &candidate.trial {
-        trial_ui(ui, trial, &format!("import_{index}"));
+        if trial.ok() {
+            ui.colored_label(
+                theme::success(),
+                format!("已调通 · 取到 {} 条", trial.total),
+            );
+        } else if let Some(error) = &trial.error {
+            ui.colored_label(theme::danger(), error);
+        }
         if trial.auth_rejected() {
             auth_hint(ui, auth::has_auth(&candidate.draft.endpoint));
         }
@@ -967,15 +976,57 @@ fn candidate_ui(ui: &mut egui::Ui, index: usize, candidate: &mut Candidate, secr
             );
         }
     }
-    egui::CollapsingHeader::new("修改配置")
-        .id_salt(("api_import_edit", index))
+    egui::CollapsingHeader::new("详情与配置")
+        .id_salt(("api_import_candidate_details", index))
         .show(ui, |ui| {
-            let salt = format!("import_{index}");
-            forms::info_form(ui, &mut candidate.draft.endpoint, &salt);
-            ui.add_space(8.0);
-            forms::request_form(ui, &mut candidate.draft.endpoint, &salt);
-            ui.add_space(8.0);
-            forms::response_form(ui, &mut candidate.draft.endpoint);
+            let endpoint = &candidate.draft.endpoint;
+            egui::CollapsingHeader::new("参数、样例与识别来源")
+                .id_salt(("api_import_sources", index))
+                .show(ui, |ui| {
+                    if !endpoint.inputs.is_empty() {
+                        theme::caption(ui, &format!("查询条件：{}", inputs_line(&candidate.draft)));
+                    }
+                    if !endpoint.examples.is_empty() {
+                        let names: Vec<&str> =
+                            endpoint.examples.iter().map(|e| e.name.as_str()).collect();
+                        theme::caption(
+                            ui,
+                            &format!("试调样例 {} 组：{}", names.len(), names.join("、")),
+                        );
+                    }
+                    if !candidate.draft.origins.is_empty() {
+                        let line = candidate
+                            .draft
+                            .origins
+                            .iter()
+                            .map(|(field, origin)| format!("{field}·{}", origin.label()))
+                            .collect::<Vec<_>>()
+                            .join("　");
+                        theme::caption(ui, &format!("来源：{line}"));
+                    }
+                });
+            if !candidate.draft.notes.is_empty() {
+                egui::CollapsingHeader::new("识别提醒")
+                    .id_salt(("api_import_candidate_notes", index))
+                    .show(ui, |ui| {
+                        for note in &candidate.draft.notes {
+                            theme::caption(ui, &format!("· {note}"));
+                        }
+                    });
+            }
+            if let Some(trial) = &candidate.trial {
+                trial_ui(ui, trial, &format!("import_{index}"));
+            }
+            egui::CollapsingHeader::new("修改配置")
+                .id_salt(("api_import_edit", index))
+                .show(ui, |ui| {
+                    let salt = format!("import_{index}");
+                    forms::info_form(ui, &mut candidate.draft.endpoint, &salt);
+                    ui.add_space(8.0);
+                    forms::request_form(ui, &mut candidate.draft.endpoint, &salt);
+                    ui.add_space(8.0);
+                    forms::response_form(ui, &mut candidate.draft.endpoint);
+                });
         });
 }
 
@@ -1138,6 +1189,45 @@ mod tests {
 
     const DOC: &str = "curl -X POST 'http://127.0.0.1:9/api/policy/search' -H 'Authorization: Bearer <你的令牌>' -d '{\"keyword\": \"中小企业\"}'";
 
+    #[test]
+    fn long_material_keeps_import_actions_in_view() {
+        // 同时覆盖多行文档和没有换行、靠自动折行撑高的资料。
+        for text in ["接口文档\n".repeat(500), "接口资料".repeat(5000)] {
+            let mut flow = ImportFlow {
+                text: text.clone(),
+                ..ImportFlow::default()
+            };
+            let ctx = egui::Context::default();
+            let config = AppConfig::default();
+            let store = crate::agent::api::ApiStore::default();
+            for _ in 0..2 {
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(900.0, 650.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(450.0)
+                            .show(ui, |ui| {
+                                let top = ui.cursor().top();
+                                input_ui(ui, &mut flow, &config, &store);
+                                assert!(
+                                    ui.min_rect().bottom() - top <= 450.0,
+                                    "长资料把选文件与识别按钮挤出视区：{:?}",
+                                    ui.min_rect()
+                                );
+                            });
+                    },
+                );
+            }
+            assert_eq!(flow.text, text, "高度限制不能截断资料");
+        }
+    }
+
     fn outcome_page() -> ApisPage {
         let material = Material::new(DOC);
         let analysis = api_import::analyze(&material, None, &[]);
@@ -1170,13 +1260,32 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "生成识别候选界面样张，供目视检查"]
+    fn api_workbench_import_samples() {
+        let mut page = outcome_page();
+        super::super::tests::snapshot(&mut page, "import-needs-key", egui::vec2(1280.0, 720.0));
+        let flow = page.import.as_mut().unwrap();
+        flow.secrets.secrets.insert("token".into(), "sample".into());
+        let outcome = flow.outcome.as_mut().unwrap();
+        outcome.notes.push("一条识别备注，应默认折叠。".into());
+        let candidate = &mut outcome.candidates[0];
+        candidate.confirmed = true;
+        candidate.auto_tried = true;
+        candidate.trial = Some(Trial {
+            total: 10,
+            ..Trial::default()
+        });
+        super::super::tests::snapshot(&mut page, "import-ready", egui::vec2(1280.0, 720.0));
+    }
+
+    #[test]
     fn candidates_show_what_is_missing_and_wait_for_confirmation() {
         let mut page = outcome_page();
         let config = AppConfig::default();
         let texts = render(|ui| import_ui(ui, &mut page, &config));
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(has("识别出 1 个接口"), "{texts:?}");
-        assert!(has("没有配置起草模型"), "{texts:?}");
+        assert!(has("原始资料"), "资料在识别后收起：{texts:?}");
         assert!(
             has("性质待确认") && has("我确认这个接口只查询"),
             "{texts:?}"
@@ -1191,6 +1300,14 @@ mod tests {
     #[test]
     fn the_key_field_stays_while_typing() {
         let mut page = outcome_page();
+        page.import
+            .as_mut()
+            .unwrap()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .edited
+            .push("token".into());
         page.import
             .as_mut()
             .unwrap()

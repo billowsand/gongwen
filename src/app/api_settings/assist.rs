@@ -244,14 +244,26 @@ impl Assist {
                 }
             }
         });
-        egui::ScrollArea::vertical()
-            .id_salt("api_assist_steps")
-            .max_height(160.0)
-            .stick_to_bottom(true)
+        if self.running()
+            && self.pending.is_none()
+            && let Some(line) = self.steps.last()
+        {
+            ui.add(
+                egui::Label::new(egui::RichText::new(line).color(theme::text_muted())).truncate(),
+            );
+        }
+        egui::CollapsingHeader::new(format!("过程记录 · {} 条", self.steps.len()))
+            .id_salt("api_assist_log")
             .show(ui, |ui| {
-                for line in &self.steps {
-                    theme::caption(ui, &format!("· {line}"));
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("api_assist_steps")
+                    .max_height(160.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.steps {
+                            theme::caption(ui, &format!("· {line}"));
+                        }
+                    });
             });
         if let Some(pending) = &mut self.pending {
             ui.add_space(6.0);
@@ -273,11 +285,16 @@ impl Assist {
                     theme::warn_soft(),
                 )
             };
-            let mut text = report.summary();
-            for line in &report.open {
-                text.push_str(&format!("\n· {line}"));
+            theme::notice(ui, icon, color, soft, report.summary());
+            if !report.open.is_empty() {
+                egui::CollapsingHeader::new(format!("未解决事项 · {} 件", report.open.len()))
+                    .id_salt("api_assist_open_items")
+                    .show(ui, |ui| {
+                        for line in &report.open {
+                            ui.label(line);
+                        }
+                    });
             }
-            theme::notice(ui, icon, color, soft, text);
         }
         updates
     }

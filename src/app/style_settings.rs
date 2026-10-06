@@ -662,7 +662,10 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, busy: bool) -> Option<Edito
         },
     );
     ui.label(egui::RichText::new("写法描述").strong());
-    ui.add(
+    crate::app::widgets::bounded_text_edit(
+        ui,
+        "style_description",
+        10,
         egui::TextEdit::multiline(&mut profile.description)
             .desired_rows(8)
             .desired_width(f32::INFINITY),
@@ -682,7 +685,10 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, busy: bool) -> Option<Edito
                 drop = Some(index);
             }
         });
-        ui.add(
+        crate::app::widgets::bounded_text_edit(
+            ui,
+            ("style_example", index),
+            6,
             egui::TextEdit::multiline(&mut example.text)
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),

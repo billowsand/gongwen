@@ -329,6 +329,29 @@ pub(crate) fn vocabulary_depths(vocab: &[VocabularyEntry]) -> Vec<usize> {
         .collect()
 }
 
+/// 表单中的多行输入限制可见高度，长文本在框内滚动。
+/// `desired_rows` 只是最小行数，不能阻止粘贴内容把后面的操作挤出视区。
+pub(crate) fn bounded_text_edit(
+    ui: &mut egui::Ui,
+    id: impl egui::AsIdSalt,
+    max_rows: usize,
+    edit: egui::TextEdit<'_>,
+) -> egui::Response {
+    let row_height = ui
+        .text_style_height(&egui::TextStyle::Body)
+        .max(ui.text_style_height(&egui::TextStyle::Monospace));
+    let height = (row_height * max_rows as f32 + 12.0)
+        .min((ui.clip_rect().height() * 0.5).max(row_height + 12.0));
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(height)
+        // 表格单元格和左右栏常以 0 高度开始布局，内层滚动区仍须分到可见高度。
+        .min_scrolled_height(height)
+        .auto_shrink([false, true])
+        .show(ui, |ui| ui.add(edit))
+        .inner
+}
+
 /// 按当前可见高度换算编辑框行数；必须在进入 `ScrollArea` 之前调用。
 pub(crate) fn visible_rows(ui: &egui::Ui) -> usize {
     let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);

@@ -28,7 +28,7 @@ use try_tab::try_ui;
 use super::forms::{self, cell, flex_width, table_head, table_row};
 use super::{
     ApisPage, AuthForm, Health, RAW_PREVIEW_CHARS, View, auth_form_ui, host_of, key_field,
-    method_tag, secret_for, spawn_trial,
+    secret_for, spawn_trial,
 };
 use crate::agent::api::{
     self, ApiAiCase, ApiEndpoint, ApiExample, ApiSecrets, InputKind, MappedItem, TestStatus, Trial,
@@ -231,6 +231,10 @@ pub(super) fn pick_example(page: &mut ApisPage, index: usize, at: usize) {
 }
 
 impl Detail {
+    pub(super) fn request_remove(&mut self) {
+        self.confirm_remove = true;
+    }
+
     pub(super) fn start_editing(&mut self, endpoint: &ApiEndpoint) {
         self.editing = Some(endpoint.clone());
         self.tab = Tab::Doc;
@@ -261,17 +265,36 @@ pub(super) fn endpoint_ui(
         // 刚删掉了。
         return;
     }
-    ui.add_space(10.0);
-    binding_ui(ui, page, index);
-    ui.add_space(10.0);
+    ui.add_space(6.0);
     let problems = page.store.endpoints[index].problems().len();
     tab_bar(ui, &mut page.detail.tab, problems);
-    ui.add_space(12.0);
+    ui.add_space(8.0);
     let tab = page.detail.tab;
     egui::ScrollArea::vertical()
         .id_salt(("api_detail_scroll", index, tab as u8))
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            let endpoint = &page.store.endpoints[index];
+            let needs_auth = endpoint
+                .secret_names()
+                .iter()
+                .any(|name| !page.secrets.filled(name))
+                || matches!(page.log.status(endpoint), TestStatus::Failed(record) if record.auth)
+                || page
+                    .detail
+                    .result
+                    .as_ref()
+                    .is_some_and(Trial::auth_rejected);
+            if needs_auth || page.detail.key_edited || page.detail.key_open || page.detail.auth_open
+            {
+                binding_ui(ui, page, index);
+                ui.add_space(8.0);
+            } else if tab == Tab::Config {
+                egui::CollapsingHeader::new("鉴权与密钥")
+                    .id_salt(("api_detail_auth", index))
+                    .show(ui, |ui| binding_ui(ui, page, index));
+                ui.add_space(8.0);
+            }
             match tab {
                 Tab::Doc if page.detail.editing.is_some() => edit_ui(ui, page, index),
                 Tab::Doc => doc_ui(ui, page, index),

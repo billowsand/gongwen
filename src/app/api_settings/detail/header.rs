@@ -1,30 +1,31 @@
-//! 接口详情顶部：名称与状态、用途、地址与密钥绑定条（没填或被拒时就地粘贴、自动重测）。
+//! 接口详情顶部：名称、状态与管理菜单；鉴权细节在内容区按需展示。
 
 use super::*;
 
 pub(super) fn header_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
-    let mut go_try = false;
     let mut remove = false;
     let mut copy = None;
+    let mut manage_auth = false;
     {
         let endpoint = &page.store.endpoints[index];
         let health = Health::of(page, endpoint);
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(&endpoint.name)
-                    .size(theme::font_sizes::HEADING)
-                    .strong(),
-            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&endpoint.name)
+                        .size(theme::font_sizes::HEADING)
+                        .strong(),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&endpoint.name);
             health.chip(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let more = ui
-                    .add(
-                        egui::Button::image(theme::Icon::Menu.image_sized(16.0))
-                            .image_tint_follows_text_color(true)
-                            .frame_when_inactive(false),
-                    )
-                    .on_hover_text("更多");
+                let more = ui.button("管理").on_hover_text("鉴权、复制与删除当前接口");
                 egui::Popup::menu(&more).show(|ui| {
+                    if ui.button("鉴权与密钥…").clicked() {
+                        manage_auth = true;
+                    }
                     if ui
                         .add(theme::menu_item(theme::Icon::Copy, "复制技能引用"))
                         .clicked()
@@ -37,6 +38,7 @@ pub(super) fn header_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                     {
                         copy = Some(endpoint.url.clone());
                     }
+                    ui.separator();
                     if ui
                         .add(theme::menu_item(theme::Icon::Trash, "删除接口…"))
                         .clicked()
@@ -44,57 +46,16 @@ pub(super) fn header_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
                         remove = true;
                     }
                 });
-                if ui
-                    .add(theme::secondary_icon_button(theme::Icon::PlugZap, "试一下"))
-                    .clicked()
-                {
-                    go_try = true;
-                }
             });
-        });
-        let description = endpoint.description.trim();
-        if description.is_empty() {
-            ui.colored_label(
-                theme::warn(),
-                "还没写用途：AI 靠它判断什么时候调用这个接口。",
-            );
-        } else {
-            ui.add(
-                egui::Label::new(egui::RichText::new(description).color(theme::text_soft()))
-                    .truncate(),
-            );
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            egui::Frame::new()
-                .fill(theme::canvas())
-                .stroke(egui::Stroke::new(1.0, theme::border()))
-                .corner_radius(egui::CornerRadius::same(7))
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        method_tag(ui, endpoint.method);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&endpoint.url)
-                                    .monospace()
-                                    .size(13.0)
-                                    .color(theme::text_soft()),
-                            )
-                            .truncate(),
-                        );
-                        if theme::icon_button(ui, theme::Icon::Copy, "复制地址").clicked() {
-                            copy = Some(endpoint.url.clone());
-                        }
-                    });
-                });
         });
     }
     if let Some(text) = copy {
         ui.ctx().copy_text(text);
     }
-    if go_try {
-        page.detail.tab = Tab::Try;
+    if manage_auth {
+        page.detail.tab = Tab::Config;
+        page.detail.key_open = true;
+        page.detail.auth_open = page.store.endpoints[index].secret_names().is_empty();
     }
     if remove {
         page.detail.confirm_remove = true;

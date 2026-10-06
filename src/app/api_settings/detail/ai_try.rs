@@ -298,7 +298,10 @@ fn ask_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppCon
                 return;
             }
             picked = cases_bar(ui, page, index);
-            ui.add(
+            crate::app::widgets::bounded_text_edit(
+                ui,
+                "api_ai_question",
+                6,
                 egui::TextEdit::multiline(&mut page.detail.ai.question)
                     .desired_rows(2)
                     .hint_text("像用户那样问一句，例如：2025 年全省森林火灾多少起？")

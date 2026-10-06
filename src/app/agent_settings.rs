@@ -124,7 +124,10 @@ impl GongwenApp {
         }
         ui.add_space(4.0);
         ui.label("参数（JSON）");
-        ui.add(
+        crate::app::widgets::bounded_text_edit(
+            ui,
+            "tool_console_args",
+            8,
             egui::TextEdit::multiline(&mut page.args)
                 .code_editor()
                 .desired_rows(5)

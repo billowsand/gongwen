@@ -69,7 +69,10 @@ pub(super) fn info_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: &st
     ui.add_space(10.0);
     ui.label(egui::RichText::new("用途").strong());
     theme::caption(ui, "这个接口能查什么、按什么查。AI 靠它判断什么时候该调用");
-    ui.add(
+    crate::app::widgets::bounded_text_edit(
+        ui,
+        ("api_description", salt),
+        6,
         egui::TextEdit::multiline(&mut endpoint.description)
             .desired_rows(3)
             .hint_text("例如：按地区、年份查森林火灾起数，返回每个地区的起数与过火面积")
@@ -139,7 +142,10 @@ fn params_editor(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: &str) {
                 ui.checkbox(&mut input.required, "");
             });
             cell(ui, describe, |ui| {
-                ui.add(
+                crate::app::widgets::bounded_text_edit(
+                    ui,
+                    ("api_input_description", salt, index),
+                    3,
                     egui::TextEdit::multiline(&mut input.description)
                         .hint_text("如：地区名称，填省、市或县")
                         .desired_rows(1)
@@ -273,7 +279,10 @@ pub(super) fn request_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: 
             );
         });
         ui.push_id(("api_body", salt), |ui| {
-            ui.add(
+            crate::app::widgets::bounded_text_edit(
+                ui,
+                "api_body_scroll",
+                8,
                 egui::TextEdit::multiline(&mut endpoint.body)
                     .code_editor()
                     .desired_rows(5)

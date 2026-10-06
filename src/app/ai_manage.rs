@@ -139,6 +139,16 @@ impl AiSection {
 
 /// 分区标题：图标 + 名称，下面一行小字说明，再一道分隔线。
 fn section_header_ui(ui: &mut egui::Ui, section: AiSection) {
+    if section == AiSection::DataApis {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("数据接口").strong());
+            ui.weak("接入与测试").on_hover_text(section.description());
+        });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        return;
+    }
     ui.horizontal(|ui| {
         ui.add(
             section
@@ -172,7 +182,8 @@ fn section_header_ui(ui: &mut egui::Ui, section: AiSection) {
 impl GongwenApp {
     /// AI 管理页：左侧分区菜单 + 右侧当前分区 + 底部保存条，与设置页同一套布局。
     pub(crate) fn ai_manage_ui(&mut self, ui: &mut egui::Ui) {
-        let body_height = (ui.available_height() - FOOTER_HEIGHT).max(240.0);
+        let body_height =
+            (ui.available_height() - FOOTER_HEIGHT - ui.spacing().item_spacing.y).max(0.0);
         let body_width = ui.available_width();
         ui.allocate_ui(egui::vec2(body_width, body_height), |ui| {
             ui.horizontal_top(|ui| {

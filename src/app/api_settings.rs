@@ -39,7 +39,7 @@ const RAW_PREVIEW_CHARS: usize = 4000;
 const PREVIEW_ITEMS: usize = 5;
 /// 左栏列表宽度的上下限。
 const LIST_MIN_WIDTH: f32 = 230.0;
-const LIST_MAX_WIDTH: f32 = 300.0;
+const LIST_MAX_WIDTH: f32 = 260.0;
 /// 左栏底部状态条的高度（未保存提示、图例）。
 const LIST_FOOTER_HEIGHT: f32 = 58.0;
 
@@ -360,9 +360,9 @@ fn section_ui(ui: &mut egui::Ui, page: &mut ApisPage, config: &AppConfig) {
         page.load();
     }
     page.poll_batch(ui.ctx());
-    let height = ui.available_height().max(320.0);
+    let height = ui.available_height().max(0.0);
     let width = ui.available_width();
-    let list_width = (width * 0.28).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
+    let list_width = (width * 0.24).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
             egui::vec2(list_width, height),
@@ -451,7 +451,7 @@ fn list_column(ui: &mut egui::Ui, page: &mut ApisPage) {
         );
     }
     ui.add_space(6.0);
-    let scroll_height = (ui.available_height() - LIST_FOOTER_HEIGHT).max(120.0);
+    let scroll_height = (ui.available_height() - LIST_FOOTER_HEIGHT).max(0.0);
     let mut open = None;
     let mut open_service = None;
     egui::ScrollArea::vertical()
@@ -474,7 +474,23 @@ fn list_column(ui: &mut egui::Ui, page: &mut ApisPage) {
                 }
                 for &index in &group.members {
                     let selected = page.view == View::Endpoint(index);
-                    if endpoint_row(ui, page, index, selected).clicked() {
+                    let response = endpoint_row(ui, page, index, selected);
+                    response.context_menu(|ui| {
+                        if ui.button("打开接口").clicked() {
+                            open = Some(index);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .add(theme::menu_item(theme::Icon::Trash, "删除接口…"))
+                            .clicked()
+                        {
+                            page.open(index);
+                            page.detail.request_remove();
+                            ui.close();
+                        }
+                    });
+                    if response.clicked() {
                         open = Some(index);
                     }
                 }
@@ -675,19 +691,14 @@ fn key_chip(ui: &mut egui::Ui, state: &KeyState) -> egui::Response {
             theme::danger(),
             Some(theme::danger_soft()),
         ),
-        KeyState::Ok(names) => {
-            let text = match names.len() {
-                1 => names[0].clone(),
-                n => format!("{} 等 {n} 个", names[0]),
-            };
-            small_chip(
-                ui,
-                Some(theme::Icon::Shield),
-                &text,
-                theme::success(),
-                Some(theme::success_soft()),
-            )
-        }
+        KeyState::Ok(names) => small_chip(
+            ui,
+            Some(theme::Icon::Shield),
+            "已配置",
+            theme::success(),
+            Some(theme::success_soft()),
+        )
+        .on_hover_text(format!("密钥：{}；点击服务名管理", names.join("、"))),
     }
 }
 
@@ -1116,7 +1127,11 @@ pub(super) mod tests {
     use crate::agent::api::{ApiHeader, ApiInput, MappedItem, RawResponse};
 
     /// 在一个 egui 帧里画一遍，返回画面上的文字。
-    pub(in crate::app) fn render(mut add: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+    pub(in crate::app) fn render(add: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        render_clicking(add, &[])
+    }
+
+    fn render_clicking(mut add: impl FnMut(&mut egui::Ui), clicks: &[&str]) -> Vec<String> {
         let ctx = egui::Context::default();
         theme::configure_icons(&ctx);
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
@@ -1128,7 +1143,41 @@ pub(super) mod tests {
             ..Default::default()
         };
         let _ = ctx.run_ui(raw(), |ui| add(ui));
-        let output = ctx.run_ui(raw(), |ui| add(ui));
+        let mut output = ctx.run_ui(raw(), |ui| add(ui));
+        if !clicks.is_empty() {
+            ctx.style_mut_of(egui::Theme::Dark, |style| style.animation_time = 0.0);
+            ctx.style_mut_of(egui::Theme::Light, |style| style.animation_time = 0.0);
+        }
+        fn position(shape: &egui::epaint::Shape, needle: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == needle => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|s| position(s, needle)),
+                _ => None,
+            }
+        }
+        for needle in clicks {
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|s| position(&s.shape, needle))
+                .unwrap_or_else(|| panic!("找不到要点击的控件：{needle}"));
+            for pressed in [true, false] {
+                let mut input = raw();
+                input.events = vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ];
+                let _ = ctx.run_ui(input, |ui| add(ui));
+            }
+            output = ctx.run_ui(raw(), |ui| add(ui));
+        }
         fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
             match shape {
                 egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_string()),
@@ -1141,6 +1190,62 @@ pub(super) mod tests {
             collect(&clipped.shape, &mut texts);
         }
         texts
+    }
+
+    #[test]
+    fn folded_details_can_be_opened_and_delete_requires_confirmation() {
+        let config = AppConfig::default();
+        let mut page = page_with(vec![typesafe_endpoint()]);
+        page.secrets.secrets.insert("token".into(), "sample".into());
+        let texts = render_clicking(
+            |ui| section_ui(ui, &mut page, &config),
+            &["展开 4 条用例", "在技能里引用"],
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("文档示例：Choice")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with("http.call:")),
+            "{texts:?}"
+        );
+        let texts = render_clicking(
+            |ui| section_ui(ui, &mut page, &config),
+            &["管理", "删除接口…"],
+        );
+        assert!(texts.iter().any(|t| t == "确认删除"), "{texts:?}");
+        assert_eq!(page.store.endpoints.len(), 1, "打开删除确认不会立即删除");
+        render_clicking(|ui| section_ui(ui, &mut page, &config), &["取消"]);
+        assert_eq!(page.store.endpoints.len(), 1);
+        render_clicking(
+            |ui| section_ui(ui, &mut page, &config),
+            &["管理", "删除接口…", "确认删除"],
+        );
+        assert!(page.store.endpoints.is_empty());
+        assert!(page.dirty);
+    }
+
+    #[test]
+    fn bounded_editor_remains_visible_in_zero_height_form_row() {
+        let mut value = "{\n  \"参数\": 1\n}".repeat(100);
+        render(|ui| {
+            ui.allocate_ui(egui::vec2(300.0, 0.0), |ui| {
+                let top = ui.cursor().top();
+                crate::app::widgets::bounded_text_edit(
+                    ui,
+                    "zero_height_editor",
+                    5,
+                    egui::TextEdit::multiline(&mut value)
+                        .code_editor()
+                        .desired_rows(5),
+                );
+                let height = ui.min_rect().bottom() - top;
+                assert!(
+                    height > 30.0 && height < 200.0,
+                    "编辑框必须可见且限高：{height}"
+                );
+            });
+        });
     }
 
     pub(super) fn endpoint() -> ApiEndpoint {
@@ -1180,6 +1285,50 @@ pub(super) mod tests {
         render(|ui| section_ui(ui, page, &config))
     }
 
+    pub(in crate::app) fn snapshot(page: &mut ApisPage, name: &str, size: egui::Vec2) {
+        theme::set_current(crate::models::ThemeName::Green);
+        let ctx = egui::Context::default();
+        theme::configure_icons(&ctx);
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        theme::configure_style(&ctx);
+        let config = AppConfig::default();
+        let mut canvas = crate::ui_snapshot::Canvas::default();
+        let mut frame = || {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    theme::card()
+                        .inner_margin(16)
+                        .show(ui, |ui| section_ui(ui, page, &config));
+                },
+            )
+        };
+        for _ in 0..5 {
+            canvas.absorb(&frame().textures_delta);
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tmp")
+            .join(format!("api-workbench-{name}.png"));
+        canvas.render(&ctx, frame(), size, theme::canvas(), &path);
+    }
+
+    #[test]
+    #[ignore = "生成数据接口界面样张，供目视检查"]
+    fn api_workbench_samples() {
+        let mut page = page_with(vec![typesafe_endpoint(), endpoint()]);
+        page.secrets.secrets.insert("token".into(), "sample".into());
+        snapshot(&mut page, "browse", egui::vec2(1280.0, 720.0));
+        page.detail.tab = detail::Tab::Try;
+        snapshot(&mut page, "try", egui::vec2(1280.0, 720.0));
+        page.detail.tab = detail::Tab::Config;
+        snapshot(&mut page, "config", egui::vec2(1280.0, 720.0));
+        page.detail.tab = detail::Tab::Doc;
+        snapshot(&mut page, "compact", egui::vec2(1000.0, 600.0));
+    }
+
     /// 用户给的 TypeSafe 文档（Mintlify）：一个接口、几种问题类型，各有请求示例。
     fn typesafe_endpoint() -> ApiEndpoint {
         let doc = include_str!("../agent/api_import/fixtures/typesafe.md");
@@ -1198,10 +1347,7 @@ pub(super) mod tests {
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(
-            has("用例")
-                && has("文档示例：Choice")
-                && has("去试一下")
-                && has("期望：调通且业务成功"),
+            has("展开 4 条用例") && !has("文档示例：Choice"),
             "接口说明列出用例与期望：{texts:?}"
         );
         page.detail.tab = detail::Tab::Try;
@@ -1211,7 +1357,10 @@ pub(super) mod tests {
             has("文档示例：Noul") && has("文档示例：Score") && has("全部 4 条用例跑一遍"),
             "{texts:?}"
         );
-        assert!(has("存为用例") && has("加上"), "{texts:?}");
+        assert!(
+            has("存为用例") && has("编辑当前用例与期望") && !has("加上"),
+            "{texts:?}"
+        );
         assert_eq!(page.detail.example, Some(0), "打开时填好第一组");
         assert!(
             page.detail.args["questions"].contains("\"is_urgent\""),
@@ -1235,7 +1384,7 @@ pub(super) mod tests {
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(
-            has("AI 用例") && has("这段话急不急") && has("期望：调这个接口，model = jev-latest"),
+            has("展开 1 条 AI 用例") && !has("这段话急不急"),
             "接口说明列出 AI 用例：{texts:?}"
         );
         page.detail.tab = detail::Tab::Try;
@@ -1281,7 +1430,7 @@ pub(super) mod tests {
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
         assert!(has("2 条用例，通过 1 条"), "{texts:?}");
         assert!(has("用例 1/2 通过"), "状态改看整组用例：{texts:?}");
-        assert!(has("按这次的返回建议"), "调通的用例给出建议期望：{texts:?}");
+        assert!(has("编辑当前用例与期望"), "期望编辑按需展开：{texts:?}");
         assert!(
             server.request(0).contains("is_urgent"),
             "第一组发的是它自己的问题"
@@ -1309,7 +1458,10 @@ pub(super) mod tests {
             "{texts:?}"
         );
         assert!(has("region") && has("地区") && has("必填"), "{texts:?}");
-        assert!(has("返回什么") && has("http.call:stat"), "{texts:?}");
+        assert!(
+            has("返回什么") && has("在技能里引用") && !has("http.call:stat"),
+            "{texts:?}"
+        );
     }
 
     #[test]
@@ -1329,10 +1481,7 @@ pub(super) mod tests {
         page.secrets.secrets.insert("token".into(), "s3cr3t".into());
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
-        assert!(
-            has("请求头 Authorization: Bearer 密钥") && has("更换 Key"),
-            "{texts:?}"
-        );
+        assert!(has("已配置") && !has("更换 Key"), "{texts:?}");
         assert!(!has("s3cr3t"), "密钥打码显示：{texts:?}");
 
         page.open_service("http://10.0.0.8".into());
@@ -1344,7 +1493,7 @@ pub(super) mod tests {
         let mut bare = page_with(vec![endpoint()]);
         let texts = draw(&mut bare);
         assert!(
-            texts.iter().any(|t| t.contains("这个接口不带密钥")),
+            !texts.iter().any(|t| t.contains("这个接口不带密钥")),
             "{texts:?}"
         );
     }
@@ -1408,7 +1557,10 @@ pub(super) mod tests {
         page.detail.tab = detail::Tab::Config;
         let texts = draw(&mut page);
         let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
-        assert!(has("请求体模板") && has("删除这个接口"), "{texts:?}");
+        assert!(
+            has("请求体模板") && has("管理") && !has("删除这个接口"),
+            "{texts:?}"
+        );
     }
 
     #[test]
