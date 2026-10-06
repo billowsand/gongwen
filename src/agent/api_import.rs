@@ -847,7 +847,7 @@ fn path_key(url: &str) -> String {
 }
 
 /// 地址里像改数据的字样（`/fav/delete`、`/updateInfo`）。
-fn write_word(url: &str) -> Option<String> {
+pub(crate) fn write_word(url: &str) -> Option<String> {
     path_key(url)
         .split(['/', '_', '-', '.'])
         .find(|seg| WRITE_WORDS.iter().any(|w| seg.starts_with(w)))

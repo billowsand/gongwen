@@ -1015,6 +1015,7 @@ fn an_api_feeds_evidence_that_is_cited_verified_and_gap_checked() {
             },
             ..ApiEndpoint::default()
         }],
+        ..Default::default()
     };
     let skill = parse(
         "data",
@@ -1126,6 +1127,7 @@ fn undeclared_apis_are_refused_even_inside_operators() {
             url: "http://127.0.0.1:9/stat".into(),
             ..ApiEndpoint::default()
         }],
+        ..Default::default()
     };
     let skill = parse(
         "t",

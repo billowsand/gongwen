@@ -38,6 +38,13 @@ impl Tool for HttpCall {
         let endpoint = ctx.env.apis.get(&id).ok_or_else(|| {
             format!("没有配置 id 为「{id}」的数据接口，先在AI 管理页「数据接口」里添加")
         })?;
+        // 红线：AI 只调只查询的接口；会改数据的、没开放给 AI 的，程序拒绝。
+        if !endpoint.readonly {
+            return Err(format!("接口「{}」会改数据，不给 AI 调", endpoint.name));
+        }
+        if !endpoint.ai {
+            return Err(format!("接口「{}」没有开放给 AI", endpoint.name));
+        }
         let mut inputs = args.clone();
         inputs.remove("api");
         let api::Called { items, total, .. } = api::call(endpoint, &inputs, ctx.env.secrets)?;

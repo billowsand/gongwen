@@ -1,0 +1,24 @@
+openapi: 3.1.0
+info:
+  title: Stat31
+  version: "1"
+servers:
+  - url: http://10.3.3.3
+paths:
+  /items:
+    get:
+      operationId: items
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: [string, "null"]
+            examples: [森林]
+        - name: mode
+          in: query
+          required: true
+          schema:
+            const: brief
+      responses:
+        "200":
+          description: ok

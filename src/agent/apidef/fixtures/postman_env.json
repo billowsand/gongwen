@@ -1,0 +1,8 @@
+{
+  "name": "内网",
+  "values": [
+    {"key": "baseUrl", "value": "http://10.4.4.4:8000", "enabled": true},
+    {"key": "token", "value": "abc123", "type": "secret", "enabled": true}
+  ],
+  "_postman_variable_scope": "environment"
+}

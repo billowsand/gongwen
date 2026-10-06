@@ -21,6 +21,7 @@ use crate::agent::api::{
 };
 use crate::agent::api_import::auth::{AuthPlace, AuthSpec};
 use crate::agent::api_import::redact;
+use crate::agent::apidef;
 use crate::app::GongwenApp;
 use crate::models::AppConfig;
 use crate::theme;
@@ -494,15 +495,17 @@ fn list_toolbar(ui: &mut egui::Ui, page: &mut ApisPage) {
             .on_hover_text("导入 / 导出接口配置");
         egui::Popup::menu(&more).show(|ui| {
             if ui
-                .add(theme::menu_item(theme::Icon::FileUp, "导入配置…"))
-                .on_hover_text("导入别处导出的接口配置文件（JSON）；同 id 的会覆盖")
+                .add(theme::menu_item(theme::Icon::FileUp, "导入接口文件…"))
+                .on_hover_text(
+                    "OpenAPI / Swagger（JSON、YAML）、Postman 集合（可同时选环境文件）、cURL、                     以前导出的接口配置；可以一次选几个文件",
+                )
                 .clicked()
             {
                 import_config(page);
             }
             if ui
-                .add(theme::menu_item(theme::Icon::FileDown, "导出配置…"))
-                .on_hover_text("只导出接口定义，不带密钥")
+                .add(theme::menu_item(theme::Icon::FileDown, "导出为 OpenAPI…"))
+                .on_hover_text("每个服务一份 OpenAPI 3.0，能在 Postman、Apifox 里打开；不带密钥与本机环境地址")
                 .clicked()
             {
                 export_config(page);
@@ -512,47 +515,87 @@ fn list_toolbar(ui: &mut egui::Ui, page: &mut ApisPage) {
 }
 
 fn import_config(page: &mut ApisPage) {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("接口配置", &["json"])
-        .pick_file()
+    let Some(paths) = rfd::FileDialog::new()
+        .add_filter("接口文件", &["json", "yaml", "yml", "txt", "sh"])
+        .pick_files()
     else {
         return;
     };
-    page.message = Some(
-        match std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|text| serde_json::from_str::<ApiStore>(&text).map_err(|e| e.to_string()))
-        {
-            Ok(incoming) => {
-                let (added, replaced) = page.store.merge(incoming);
-                page.dirty = true;
-                (
-                    true,
-                    format!("导入 {added} 个、覆盖 {replaced} 个，记得保存。"),
-                )
-            }
-            Err(error) => (false, format!("导入失败：{error}")),
-        },
-    );
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => files.push((name, text)),
+            Err(error) => errors.push(format!("{name}：读不了（{error}）")),
+        }
+    }
+    let first_new = page.store.endpoints.len();
+    let outcome = apidef::import::import_files(&mut page.store, &files);
+    for (name, value) in outcome.secrets {
+        let slot = page.secrets.secrets.entry(name).or_default();
+        if slot.trim().is_empty() {
+            *slot = value;
+        }
+    }
+    let mut lines = errors;
+    lines.extend(outcome.report);
+    if outcome.added > 0 {
+        page.dirty = true;
+        lines.insert(0, format!("导入了 {} 个接口，记得保存。", outcome.added));
+        page.open(first_new);
+    }
+    page.message = Some((
+        outcome.added > 0,
+        lines.join(
+            "
+",
+        ),
+    ));
 }
 
 fn export_config(page: &mut ApisPage) {
-    let Some(path) = rfd::FileDialog::new()
-        .set_file_name("数据接口.json")
-        .add_filter("接口配置", &["json"])
-        .save_file()
-    else {
+    let files = apidef::export(&page.store);
+    if files.is_empty() {
+        page.message = Some((false, "还没有接口可以导出。".into()));
         return;
+    }
+    let written = if let [(name, doc)] = files.as_slice() {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(name)
+            .add_filter("OpenAPI（JSON）", &["json"])
+            .add_filter("OpenAPI（YAML）", &["yaml", "yml"])
+            .save_file()
+        else {
+            return;
+        };
+        write_doc(&path, doc).map(|()| path.display().to_string())
+    } else {
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        files
+            .iter()
+            .try_for_each(|(name, doc)| write_doc(&dir.join(name), doc))
+            .map(|()| format!("{}（{} 个服务）", dir.display(), files.len()))
     };
-    page.message = Some(
-        match serde_json::to_string_pretty(&page.store)
-            .map_err(|e| e.to_string())
-            .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()))
-        {
-            Ok(()) => (true, format!("已导出到 {}（不含密钥）", path.display())),
-            Err(error) => (false, format!("导出失败：{error}")),
-        },
-    );
+    page.message = Some(match written {
+        Ok(place) => (true, format!("已导出到 {place}（不含密钥）")),
+        Err(error) => (false, format!("导出失败：{error:#}")),
+    });
+}
+
+/// 按扩展名写 JSON 或 YAML。
+fn write_doc(path: &std::path::Path, doc: &Value) -> anyhow::Result<()> {
+    let yaml = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"));
+    std::fs::write(path, apidef::to_text(doc, yaml)?)?;
+    Ok(())
 }
 
 /// 一组接口的 Key 状态。
@@ -767,11 +810,13 @@ fn endpoint_row(
     .on_hover_text(health.text())
 }
 
-/// 请求方法的小标签：GET 蓝绿、POST 琥珀，扫一眼分得开。
+/// 请求方法的小标签：GET 蓝绿、POST 琥珀、改动类（PUT / PATCH）强调色、DELETE 红，扫一眼分得开。
 fn method_tag(ui: &mut egui::Ui, method: ApiMethod) {
     let (fg, bg) = match method {
-        ApiMethod::Get => (theme::info(), theme::surface_sunk()),
+        ApiMethod::Get | ApiMethod::Head => (theme::info(), theme::surface_sunk()),
         ApiMethod::Post => (theme::warn(), theme::warn_soft()),
+        ApiMethod::Put | ApiMethod::Patch => (theme::accent(), theme::accent_soft()),
+        ApiMethod::Delete => (theme::danger(), theme::danger_soft()),
     };
     egui::Frame::new()
         .fill(bg)
@@ -1091,7 +1136,10 @@ pub(super) mod tests {
     fn page_with(endpoints: Vec<ApiEndpoint>) -> ApisPage {
         let mut page = ApisPage {
             loaded: true,
-            store: ApiStore { endpoints },
+            store: ApiStore {
+                endpoints,
+                ..Default::default()
+            },
             ..ApisPage::default()
         };
         page.open(0);

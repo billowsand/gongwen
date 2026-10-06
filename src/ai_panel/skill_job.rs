@@ -192,7 +192,7 @@ impl DraftPage<'_> {
             let missing = crate::agent::skill::missing_apis(skill, &apis);
             if !missing.is_empty() {
                 self.doc.ai_panel.note(format!(
-                    "「{}」要用的数据接口还没配置：{}，相关步骤会跳过。可在AI 管理页「数据接口」添加。",
+                    "「{}」要用的数据接口还没配置或不能给 AI 用：{}，相关步骤会跳过。可在AI 管理页「数据接口」添加或调整。",
                     skill.name,
                     missing.join("、")
                 ));

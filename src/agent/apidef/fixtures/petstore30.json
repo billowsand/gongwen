@@ -1,0 +1,76 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "Petstore", "version": "1.0"},
+  "servers": [{"url": "http://{host}:8080/v1", "variables": {"host": {"default": "10.1.1.1"}}}],
+  "security": [{"api_key": []}],
+  "x-gongwen-success": {"pointer": "/code", "equals": [0]},
+  "paths": {
+    "/pets": {
+      "get": {
+        "operationId": "listPets",
+        "summary": "列出宠物",
+        "tags": ["pets"],
+        "parameters": [
+          {"$ref": "#/components/parameters/Limit"},
+          {"name": "tags", "in": "query", "explode": false, "description": "标签", "schema": {"type": "array", "items": {"type": "string"}}},
+          {"name": "X-Client", "in": "header", "schema": {"type": "string", "enum": ["gongwen"]}}
+        ],
+        "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pets"}}}}}
+      },
+      "post": {
+        "operationId": "searchPets",
+        "summary": "按条件查宠物",
+        "requestBody": {"$ref": "#/components/requestBodies/PetQuery"},
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/pets/{petId}": {
+      "parameters": [{"name": "petId", "in": "path", "required": true, "schema": {"type": "integer"}, "example": 7}],
+      "get": {"operationId": "showPet", "summary": "查一只", "security": [], "responses": {"200": {"description": "ok"}}},
+      "put": {
+        "operationId": "updatePet",
+        "summary": "改一只",
+        "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}}},
+        "responses": {"200": {"description": "ok"}}
+      },
+      "delete": {"operationId": "deletePet", "responses": {"204": {"description": "deleted"}}}
+    },
+    "/pets/{petId}/photo": {
+      "post": {
+        "operationId": "uploadPhoto",
+        "requestBody": {"content": {"multipart/form-data": {"schema": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}}}}},
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/stat": {
+      "get": {
+        "operationId": "统计",
+        "parameters": [{"name": "地区", "in": "query", "required": true, "schema": {"type": "string"}, "example": "全省"}],
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Limit": {"name": "limit", "in": "query", "description": "最多几条", "schema": {"type": "integer", "maximum": 100}}
+    },
+    "requestBodies": {
+      "PetQuery": {
+        "required": true,
+        "content": {"application/json": {
+          "schema": {"$ref": "#/components/schemas/PetQuery"},
+          "examples": {"dog": {"summary": "查狗", "value": {"kind": "dog", "age": 2}}}
+        }}
+      }
+    },
+    "schemas": {
+      "Pet": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "kind": {"type": "string", "enum": ["dog", "cat"]}}},
+      "Pets": {"type": "array", "items": {"$ref": "#/components/schemas/Pet"}},
+      "PetQuery": {"allOf": [
+        {"type": "object", "properties": {"kind": {"type": "string", "enum": ["dog", "cat"]}}, "required": ["kind"]},
+        {"properties": {"age": {"type": "integer"}}}
+      ]}
+    },
+    "securitySchemes": {"api_key": {"type": "apiKey", "in": "header", "name": "X-API-Key"}}
+  }
+}

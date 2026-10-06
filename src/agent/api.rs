@@ -6,7 +6,10 @@
 //!
 //! - 接口定义存在 `配置目录/apis.json`，**不写进技能文件**（技能可以分享，地址不能）；
 //! - 密钥存在 `配置目录/api-secrets.json`，模板里写 `{secret:名字}` 引用，导出接口时不带；
-//! - 只有 `GET` 与 `POST` 两种方法，`POST` 只用于带请求体的查询：接口配置里没有「提交」一类。
+//! - 接口的「真身」是 `apis/<服务>.openapi.json`（见 [`crate::agent::apidef`]）；这里的
+//!   [`ApiEndpoint`] 是从 OpenAPI 编译出来的运行时结构，界面改完再写回 OpenAPI；
+//! - 方法不限于 GET / POST，但只有标了只查询（`readonly`）的接口给 AI 调；会改数据的接口
+//!   只在调试台由人发。
 
 use crate::agent::board::value_to_text;
 use regex::Regex;
@@ -18,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// 模板占位：`{region}`、`{secret:token}`。
-static PLACEHOLDER: LazyLock<Regex> =
+pub(crate) static PLACEHOLDER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{(secret:)?([A-Za-z_][A-Za-z0-9_]*)\}").expect("占位正则"));
 
 /// 返回体最多读这么多字节，防止接口回一个超大文件把内存吃满。
@@ -29,23 +32,83 @@ const MAX_ITEM_CHARS: usize = 3000;
 /// 默认超时（秒）。
 pub(crate) const DEFAULT_TIMEOUT: u64 = 30;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub(crate) enum ApiMethod {
     #[default]
     #[serde(rename = "GET")]
     Get,
-    /// 只用于带请求体的查询。
     #[serde(rename = "POST")]
     Post,
+    #[serde(rename = "PUT")]
+    Put,
+    #[serde(rename = "PATCH")]
+    Patch,
+    #[serde(rename = "DELETE")]
+    Delete,
+    #[serde(rename = "HEAD")]
+    Head,
 }
 
 impl ApiMethod {
+    pub(crate) const ALL: [ApiMethod; 6] = [
+        Self::Get,
+        Self::Post,
+        Self::Put,
+        Self::Patch,
+        Self::Delete,
+        Self::Head,
+    ];
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+            Self::Head => "HEAD",
         }
     }
+
+    /// OpenAPI 里的写法：`get`、`post`……
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Post => "post",
+            Self::Put => "put",
+            Self::Patch => "patch",
+            Self::Delete => "delete",
+            Self::Head => "head",
+        }
+    }
+
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|method| method.key().eq_ignore_ascii_case(key.trim()))
+    }
+
+    /// 能带请求体。
+    pub(crate) fn has_body(self) -> bool {
+        matches!(self, Self::Post | Self::Put | Self::Patch | Self::Delete)
+    }
+
+    /// 按方法默认算不算只查询（地址里的字样另看）。
+    pub(crate) fn reads(self) -> bool {
+        matches!(self, Self::Get | Self::Head)
+    }
+}
+
+/// 请求体的编码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BodyKind {
+    #[default]
+    Json,
+    /// `application/x-www-form-urlencoded`：请求体模板是一个对象，逐项编成 `键=值`。
+    Form,
 }
 
 /// 输入变量的类型。决定请求体里单独一个 `{变量}` 替换成字符串、数字还是真假。
@@ -82,6 +145,15 @@ pub(crate) struct ApiInput {
     pub(crate) required: bool,
     /// 测试时的样例值。
     pub(crate) example: String,
+    /// 地址参数是数组时用逗号连成一个值（`ids=1,2`），不是逐个重复（`ids=1&ids=2`）。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) comma: bool,
+    /// OpenAPI 里这个参数的 schema（枚举、格式、嵌套结构），写回时沿用。
+    #[serde(skip)]
+    pub(crate) schema: Option<Value>,
+    /// 路径参数在 OpenAPI 里的名字（变量名为合法标识符改过时与 `name` 不同）。
+    #[serde(skip)]
+    pub(crate) wire: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -170,6 +242,32 @@ pub(crate) struct ApiEndpoint {
     pub(crate) timeout_seconds: u64,
     /// 试调样例。
     pub(crate) examples: Vec<ApiExample>,
+    #[serde(skip_serializing_if = "is_json_body")]
+    pub(crate) body_kind: BodyKind,
+    /// 只查询、不改变外部系统状态。只有只查询的接口给 AI 调，也只有它们自动试调。
+    pub(crate) readonly: bool,
+    /// 开放给 AI（前提是只查询）。
+    pub(crate) ai: bool,
+    /// 现在还发不了的原因（multipart 表单之类）；非空时 [`prepare`] 拒绝。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) unsupported: String,
+    /// 从哪份 OpenAPI 的哪个操作编译来的（写回时用）；手填的新接口为空。
+    #[serde(skip)]
+    pub(crate) origin: Option<OpOrigin>,
+}
+
+fn is_json_body(kind: &BodyKind) -> bool {
+    *kind == BodyKind::Json
+}
+
+/// 接口在 OpenAPI 里的位置与原文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpOrigin {
+    pub(crate) service: String,
+    pub(crate) path: String,
+    pub(crate) method: ApiMethod,
+    /// 操作对象原文：没建模的字段（标签、返回结构、外部文档……）写回时原样保留。
+    pub(crate) op: Value,
 }
 
 impl Default for ApiEndpoint {
@@ -188,15 +286,28 @@ impl Default for ApiEndpoint {
             destination: ApiDestination::Evidence,
             timeout_seconds: DEFAULT_TIMEOUT,
             examples: Vec::new(),
+            body_kind: BodyKind::Json,
+            readonly: true,
+            ai: true,
+            unsupported: String::new(),
+            origin: None,
         }
     }
 }
 
-/// 全部接口定义（`apis.json`）。
+/// 全部接口：OpenAPI 服务文件 + 编译出来的接口清单。
+///
+/// `endpoints` 是界面与技能用的平铺视图；`services`、`envs` 是落盘的真身。读的时候从
+/// OpenAPI 编译出 `endpoints`，存的时候把改过的接口写回 OpenAPI（[`crate::agent::apidef::absorb`]）。
+/// 序列化只带 `endpoints`，是旧版 `apis.json` 与「导入配置」的格式。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct ApiStore {
     pub(crate) endpoints: Vec<ApiEndpoint>,
+    #[serde(skip)]
+    pub(crate) services: Vec<crate::agent::apidef::Service>,
+    #[serde(skip)]
+    pub(crate) envs: crate::agent::apidef::EnvStore,
 }
 
 /// 密钥（`api-secrets.json`）：名字 → 值。
@@ -230,12 +341,14 @@ pub(crate) fn write_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<
 }
 
 impl ApiStore {
+    /// 读 `apis/` 下的 OpenAPI 并编译；只有旧版 `apis.json` 时先迁移。
     pub(crate) fn load() -> anyhow::Result<Self> {
-        read_json("apis.json")
+        crate::agent::apidef::load_store()
     }
 
-    pub(crate) fn save(&self) -> anyhow::Result<()> {
-        write_json("apis.json", self)
+    /// 把改过的接口写回 OpenAPI 并落盘；`endpoints` 随之换成重新编译的结果（顺序不变）。
+    pub(crate) fn save(&mut self) -> anyhow::Result<()> {
+        crate::agent::apidef::save_store(self)
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<&ApiEndpoint> {
@@ -359,9 +472,12 @@ impl ApiEndpoint {
         } else if !self
             .id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
         {
-            problems.push("id 只能用英文字母、数字、下划线和短横线".into());
+            problems.push("id 只能用英文字母、数字、下划线、短横线和点".into());
+        }
+        if !self.unsupported.trim().is_empty() {
+            problems.push(self.unsupported.trim().to_string());
         }
         if self.name.trim().is_empty() {
             problems.push("缺少名称".into());
@@ -392,11 +508,14 @@ impl ApiEndpoint {
                 }
             }
         }
-        if self.method == ApiMethod::Post
-            && !self.body.trim().is_empty()
-            && serde_json::from_str::<Value>(&self.body).is_err()
-        {
-            problems.push("请求体模板不是合法的 JSON".into());
+        if self.method.has_body() && !self.body.trim().is_empty() {
+            match serde_json::from_str::<Value>(&self.body) {
+                Err(_) => problems.push("请求体模板不是合法的 JSON".into()),
+                Ok(body) if self.body_kind == BodyKind::Form && !body.is_object() => {
+                    problems.push("表单请求体的模板要是一个对象：{\"键\": \"{变量}\"}".into())
+                }
+                Ok(_) => {}
+            }
         }
         if !self.mapping.list.is_empty() && !self.mapping.list.starts_with('/') {
             problems.push("列表位置要写成 JSON 指针，以 / 开头，例如 /data/items".into());
@@ -424,6 +543,8 @@ impl ApiEndpoint {
         core.name.clear();
         core.description.clear();
         core.examples.clear();
+        core.readonly = true;
+        core.ai = true;
         for input in &mut core.inputs {
             input.description.clear();
             input.example.clear();
@@ -491,6 +612,8 @@ pub(crate) struct Prepared {
     pub(crate) url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Option<Value>,
+    /// 请求体按表单（`application/x-www-form-urlencoded`）发，不是 JSON。
+    pub(crate) form: bool,
     /// 用到的密钥值，展示请求时打码用。
     secrets_used: Vec<String>,
 }
@@ -504,7 +627,11 @@ impl Prepared {
         }
         if let Some(body) = &self.body {
             text.push_str("\n\n");
-            text.push_str(&serde_json::to_string_pretty(body).unwrap_or_default());
+            if self.form {
+                text.push_str(&form_encode(body));
+            } else {
+                text.push_str(&serde_json::to_string_pretty(body).unwrap_or_default());
+            }
         }
         for secret in self.secrets_used.iter().filter(|s| !s.is_empty()) {
             text = text.replace(secret.as_str(), "******");
@@ -584,7 +711,7 @@ fn input_values(
 }
 
 /// 地址里的值按 RFC 3986 编码：只留字母数字与 `-._~`，其余按 UTF-8 字节转成 `%XX`。
-fn percent_encode(text: &str) -> String {
+pub(crate) fn percent_encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -635,7 +762,92 @@ fn fill(
     }
 }
 
-/// 请求体模板里逐个字符串替换：整串只有一个 `{变量}` 时换成带类型的值。
+/// 整段模板就是一个输入变量（`{region}`，不是密钥）时返回变量名。
+pub(crate) fn sole_input(template: &str) -> Option<&str> {
+    let caps = PLACEHOLDER.captures(template)?;
+    (caps[0].len() == template.len() && caps.get(1).is_none())
+        .then(|| caps.get(2).map(|m| m.as_str()))
+        .flatten()
+}
+
+/// 整段模板就是一个密钥（`{secret:token}`）时返回密钥名。
+pub(crate) fn sole_secret(template: &str) -> Option<&str> {
+    let caps = PLACEHOLDER.captures(template)?;
+    (caps[0].len() == template.len() && caps.get(1).is_some())
+        .then(|| caps.get(2).map(|m| m.as_str()))
+        .flatten()
+}
+
+/// 模板里有没有占位。
+pub(crate) fn has_placeholder(template: &str) -> bool {
+    PLACEHOLDER.is_match(template)
+}
+
+/// 没给的可选变量：整段只是这个变量的查询参数、请求头、请求体字段整个不发。
+fn absent(values: &BTreeMap<String, Value>, template: &str) -> bool {
+    sole_input(template).is_some_and(|name| matches!(values.get(name), None | Some(Value::Null)))
+}
+
+/// 值在地址、表单里的文字。
+fn plain_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// 组地址：`?` 后面逐个参数处理——没给的可选参数不发，数组按 OpenAPI 默认逐个重复
+/// （`ids=1&ids=2`），输入标了 `comma` 的连成一个（`ids=1,2`）。
+fn fill_url(
+    endpoint: &ApiEndpoint,
+    values: &BTreeMap<String, Value>,
+    secrets: &ApiSecrets,
+    used: &mut Vec<String>,
+) -> Result<String, String> {
+    let template = endpoint.url.trim();
+    let (base, query) = match template.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (template, None),
+    };
+    let mut url = fill(base, values, secrets, true, used)?;
+    let mut pairs = Vec::new();
+    for pair in query.unwrap_or_default().split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if absent(values, value) {
+            continue;
+        }
+        if let Some(name) = sole_input(value)
+            && let Some(Value::Array(items)) = values.get(name)
+        {
+            let texts: Vec<String> = items
+                .iter()
+                .map(|item| percent_encode(&plain_text(item)))
+                .collect();
+            let comma = endpoint
+                .inputs
+                .iter()
+                .any(|input| input.name == name && input.comma);
+            if comma {
+                pairs.push(format!("{key}={}", texts.join(",")));
+            } else {
+                pairs.extend(texts.iter().map(|text| format!("{key}={text}")));
+            }
+            continue;
+        }
+        pairs.push(fill(pair, values, secrets, true, used)?);
+    }
+    if !pairs.is_empty() {
+        url.push('?');
+        url.push_str(&pairs.join("&"));
+    }
+    Ok(url)
+}
+
+/// 请求体模板里逐个字符串替换：整串只有一个 `{变量}` 时换成带类型的值；对象里这样的
+/// 字段变量没给时整个不发。
 fn fill_body(
     template: &Value,
     values: &BTreeMap<String, Value>,
@@ -643,16 +855,10 @@ fn fill_body(
     used: &mut Vec<String>,
 ) -> Result<Value, String> {
     Ok(match template {
-        Value::String(text) => {
-            if let Some(caps) = PLACEHOLDER.captures(text)
-                && caps[0].len() == text.len()
-                && caps.get(1).is_none()
-            {
-                values.get(&caps[2]).cloned().unwrap_or(Value::Null)
-            } else {
-                Value::String(fill(text, values, secrets, false, used)?)
-            }
-        }
+        Value::String(text) => match sole_input(text) {
+            Some(name) => values.get(name).cloned().unwrap_or(Value::Null),
+            None => Value::String(fill(text, values, secrets, false, used)?),
+        },
         Value::Array(items) => Value::Array(
             items
                 .iter()
@@ -661,11 +867,32 @@ fn fill_body(
         ),
         Value::Object(map) => Value::Object(
             map.iter()
+                .filter(|(_, item)| !item.as_str().is_some_and(|text| absent(values, text)))
                 .map(|(key, item)| Ok((key.clone(), fill_body(item, values, secrets, used)?)))
                 .collect::<Result<_, String>>()?,
         ),
         other => other.clone(),
     })
+}
+
+/// 表单请求体：对象逐项编成 `键=值`，数组逐个重复，空值不发。
+pub(crate) fn form_encode(body: &Value) -> String {
+    let mut pairs = Vec::new();
+    if let Value::Object(map) = body {
+        for (key, value) in map {
+            let key = percent_encode(key);
+            match value {
+                Value::Null => {}
+                Value::Array(items) => pairs.extend(
+                    items
+                        .iter()
+                        .map(|item| format!("{key}={}", percent_encode(&plain_text(item)))),
+                ),
+                other => pairs.push(format!("{key}={}", percent_encode(&plain_text(other)))),
+            }
+        }
+    }
+    pairs.join("&")
 }
 
 /// 按模板组请求。
@@ -684,11 +911,11 @@ pub(crate) fn prepare(
     }
     let values = input_values(endpoint, args)?;
     let mut used = Vec::new();
-    let url = fill(endpoint.url.trim(), &values, secrets, true, &mut used)?;
+    let url = fill_url(endpoint, &values, secrets, &mut used)?;
     let headers = endpoint
         .headers
         .iter()
-        .filter(|header| !header.name.trim().is_empty())
+        .filter(|header| !header.name.trim().is_empty() && !absent(&values, &header.value))
         .map(|header| {
             Ok((
                 header.name.trim().to_string(),
@@ -696,10 +923,10 @@ pub(crate) fn prepare(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let body = if endpoint.method == ApiMethod::Post && !endpoint.body.trim().is_empty() {
+    let body = if endpoint.method.has_body() && !endpoint.body.trim().is_empty() {
         let template: Value = serde_json::from_str(&endpoint.body)
             .map_err(|e| format!("请求体模板不是 JSON：{e}"))?;
-        Some(fill_body(&template, &values, secrets, &mut used)?)
+        Some(fill_body(&template, &values, secrets, &mut used)?).filter(|body| !body.is_null())
     } else {
         None
     };
@@ -708,6 +935,7 @@ pub(crate) fn prepare(
         url,
         headers,
         body,
+        form: endpoint.body_kind == BodyKind::Form,
         secrets_used: used,
     })
 }
@@ -742,15 +970,23 @@ fn check_status(raw: &RawResponse) -> Result<(), String> {
 fn send(prepared: &Prepared, timeout_seconds: u64) -> Result<RawResponse, String> {
     let client =
         crate::net::client(&prepared.url, timeout_seconds).map_err(|e| format!("{e:#}"))?;
-    let mut request = match prepared.method {
-        ApiMethod::Get => client.get(&prepared.url),
-        ApiMethod::Post => client.post(&prepared.url),
-    };
+    let method = reqwest::Method::from_bytes(prepared.method.label().as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut request = client.request(method, &prepared.url);
     for (name, value) in &prepared.headers {
         request = request.header(name, value);
     }
-    if let Some(body) = &prepared.body {
-        request = request.json(body);
+    match &prepared.body {
+        Some(body) if prepared.form => {
+            request = request
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(form_encode(body));
+        }
+        Some(body) => request = request.json(body),
+        None => {}
     }
     let response = request.send().map_err(|e| {
         let error = e.without_url();
@@ -1123,6 +1359,13 @@ pub(crate) fn trial_via(
     send: impl FnOnce(&Prepared, u64) -> Result<RawResponse, String>,
 ) -> Trial {
     let mut trial = Trial::default();
+    if !endpoint.readonly {
+        trial.error = Some(
+            "这个接口会改数据，不自动试调。只是查询的，在「技术配置」里勾上「只查询」；             需要真的发出去的，等调试台（下一期）里二次确认后由人手动发"
+                .into(),
+        );
+        return trial;
+    }
     let prepared = match prepare(endpoint, args, secrets) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1616,12 +1859,20 @@ mod tests {
         );
         let mut store = ApiStore {
             endpoints: vec![stat_endpoint("http://x")],
+            ..Default::default()
         };
         store.save().unwrap();
         secrets().save().unwrap();
         assert_eq!(ApiStore::load().unwrap(), store);
         assert_eq!(ApiSecrets::load().unwrap(), secrets());
-        let exported = std::fs::read_to_string(dir.join("apis.json")).unwrap();
+        assert!(!dir.join("apis.json").exists(), "不再写旧版接口文件");
+        let files: Vec<_> = std::fs::read_dir(dir.join("apis"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(files.len(), 1, "一台服务器一份 OpenAPI");
+        let exported = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(exported.contains("\"openapi\": \"3.0.3\""));
         assert!(!exported.contains("s3cr3t"), "接口文件里不带密钥");
         crate::storage::set_test_config_dir(None);
 
@@ -1631,7 +1882,8 @@ mod tests {
         other.id = "other".into();
         assert_eq!(
             store.merge(ApiStore {
-                endpoints: vec![renamed, other]
+                endpoints: vec![renamed, other],
+                ..Default::default()
             }),
             (1, 1)
         );

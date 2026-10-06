@@ -6,7 +6,9 @@
 //! 说明一长就被截成几个字。
 
 use super::super::settings::setting_row;
-use crate::agent::api::{ApiDestination, ApiEndpoint, ApiHeader, ApiInput, ApiMethod, InputKind};
+use crate::agent::api::{
+    ApiDestination, ApiEndpoint, ApiHeader, ApiInput, ApiMethod, BodyKind, InputKind,
+};
 use crate::theme;
 use eframe::egui;
 
@@ -171,16 +173,14 @@ pub(super) fn request_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: 
         "地址",
         Some("可以带变量：http://10.0.0.8/api/stat?region={region}"),
         |ui| {
-            theme::segmented(ui, |ui| {
-                for method in [ApiMethod::Get, ApiMethod::Post] {
-                    ui.selectable_value(&mut endpoint.method, method, method.label())
-                        .on_hover_text(if method == ApiMethod::Post {
-                            "只用于带请求体的查询"
-                        } else {
-                            "查询"
-                        });
-                }
-            });
+            egui::ComboBox::from_id_salt(("api_method", salt))
+                .selected_text(endpoint.method.label())
+                .width(84.0)
+                .show_ui(ui, |ui| {
+                    for method in ApiMethod::ALL {
+                        ui.selectable_value(&mut endpoint.method, method, method.label());
+                    }
+                });
             ui.add(
                 egui::TextEdit::singleline(&mut endpoint.url)
                     .font(egui::TextStyle::Monospace)
@@ -190,8 +190,21 @@ pub(super) fn request_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: 
     );
     setting_row(
         ui,
+        "性质",
+        Some("只有只查询的接口给 AI 调、自动试调；会改数据的接口只能人在调试台发"),
+        |ui| {
+            ui.checkbox(&mut endpoint.readonly, "只查询，不改数据");
+            ui.add_enabled(
+                endpoint.readonly,
+                egui::Checkbox::new(&mut endpoint.ai, "给 AI 用"),
+            )
+            .on_disabled_hover_text("会改数据的接口不给 AI 调");
+        },
+    );
+    setting_row(
+        ui,
         "技能引用 id",
-        Some("只能用英文字母、数字、下划线和短横线"),
+        Some("只能用英文字母、数字、下划线、短横线和点"),
         |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut endpoint.id)
@@ -243,11 +256,21 @@ pub(super) fn request_form(ui: &mut egui::Ui, endpoint: &mut ApiEndpoint, salt: 
     {
         endpoint.headers.push(ApiHeader::default());
     }
-    if endpoint.method == ApiMethod::Post {
+    if endpoint.method.has_body() {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label("请求体模板");
-            theme::caption(ui, "JSON；单独一个 \"{变量}\" 会按类型换成数字或是否");
+            theme::segmented(ui, |ui| {
+                ui.selectable_value(&mut endpoint.body_kind, BodyKind::Json, "JSON");
+                ui.selectable_value(&mut endpoint.body_kind, BodyKind::Form, "表单")
+                    .on_hover_text(
+                        "application/x-www-form-urlencoded：模板写成对象，逐项编成 键=值",
+                    );
+            });
+            theme::caption(
+                ui,
+                "单独一个 \"{变量}\" 会按类型换成数字或是否；没给的可选变量整项不发",
+            );
         });
         ui.push_id(("api_body", salt), |ui| {
             ui.add(

@@ -686,14 +686,18 @@ pub(crate) fn builtin_text(id: &str) -> Option<&'static str> {
         .map(|(_, text)| *text)
 }
 
-/// 技能声明了、但「数据接口」里还没配的接口 id。
+/// 技能声明了、但「数据接口」里还没配的接口 id；配了但不能给 AI 调的注明原因。
 pub(crate) fn missing_apis(skill: &Skill, apis: &crate::agent::api::ApiStore) -> Vec<String> {
     let mut missing: Vec<String> = skill
         .tools
         .iter()
         .filter_map(|tool| tool.strip_prefix("http.call:"))
-        .filter(|id| apis.get(id).is_none())
-        .map(str::to_string)
+        .filter_map(|id| match apis.get(id) {
+            None => Some(id.to_string()),
+            Some(endpoint) if !endpoint.readonly => Some(format!("{id}（会改数据，不给 AI 调）")),
+            Some(endpoint) if !endpoint.ai => Some(format!("{id}（没开放给 AI）")),
+            Some(_) => None,
+        })
         .collect();
     missing.dedup();
     missing
@@ -808,6 +812,7 @@ mod tests {
                 id: "stat".into(),
                 ..ApiEndpoint::default()
             }],
+            ..Default::default()
         };
         assert_eq!(missing_apis(&skill, &apis), ["policy"]);
         assert_eq!(

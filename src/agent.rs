@@ -19,6 +19,7 @@
 
 pub(crate) mod api;
 pub(crate) mod api_import;
+pub(crate) mod apidef;
 pub(crate) mod backend;
 pub(crate) mod board;
 pub(crate) mod budget;

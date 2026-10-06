@@ -1,0 +1,42 @@
+{
+  "info": {"name": "政务查询", "_postman_id": "1", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{token}}", "type": "string"}]},
+  "variable": [{"key": "baseUrl", "value": "http://example.invalid"}],
+  "item": [
+    {"name": "统计", "item": [
+      {
+        "name": "按地区查",
+        "request": {
+          "method": "GET",
+          "header": [{"key": "X-App", "value": "gw"}],
+          "url": {
+            "raw": "{{baseUrl}}/stat/:region?year=2025&page=1",
+            "host": ["{{baseUrl}}"],
+            "path": ["stat", ":region"],
+            "query": [{"key": "year", "value": "2025"}, {"key": "page", "value": "1", "disabled": true}],
+            "variable": [{"key": "region", "value": "全省", "description": "地区"}]
+          }
+        },
+        "response": [{"name": "成功", "code": 200, "body": "{\"code\":0,\"data\":{\"items\":[{\"count\":3}]}}"}]
+      },
+      {
+        "name": "检索",
+        "request": {
+          "method": "POST",
+          "url": "{{baseUrl}}/search",
+          "body": {"mode": "raw", "raw": "{\"keyword\": \"森林防火\", \"size\": 10}", "options": {"raw": {"language": "json"}}}
+        },
+        "event": [{"listen": "test", "script": {"exec": ["pm.test('ok')"]}}]
+      }
+    ]},
+    {
+      "name": "表单查询",
+      "request": {
+        "method": "POST",
+        "auth": {"type": "noauth"},
+        "url": "{{baseUrl}}/lookup",
+        "body": {"mode": "urlencoded", "urlencoded": [{"key": "user", "value": "a"}]}
+      }
+    }
+  ]
+}

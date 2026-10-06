@@ -1,0 +1,43 @@
+{
+  "swagger": "2.0",
+  "info": {"title": "统计系统", "version": "2"},
+  "host": "10.2.2.2:9000",
+  "basePath": "/api",
+  "schemes": ["http"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "securityDefinitions": {"token": {"type": "apiKey", "in": "query", "name": "access_token"}},
+  "security": [{"token": []}],
+  "paths": {
+    "/stat": {
+      "get": {
+        "operationId": "getStat",
+        "summary": "统计",
+        "parameters": [
+          {"name": "regions", "in": "query", "type": "array", "items": {"type": "string"}, "required": true},
+          {"name": "year", "in": "query", "type": "integer", "default": 2025}
+        ],
+        "responses": {"200": {"description": "ok", "schema": {"$ref": "#/definitions/Stat"}}}
+      }
+    },
+    "/query": {
+      "post": {
+        "operationId": "query",
+        "parameters": [{"name": "body", "in": "body", "required": true, "schema": {"$ref": "#/definitions/Query"}}],
+        "responses": {"200": {"description": "ok"}}
+      }
+    },
+    "/lookup": {
+      "post": {
+        "operationId": "formQuery",
+        "consumes": ["application/x-www-form-urlencoded"],
+        "parameters": [{"name": "kw", "in": "formData", "type": "string", "required": true}],
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  },
+  "definitions": {
+    "Stat": {"type": "object", "properties": {"count": {"type": "integer"}}},
+    "Query": {"type": "object", "properties": {"keyword": {"type": "string"}}}
+  }
+}

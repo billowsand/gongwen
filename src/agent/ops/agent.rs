@@ -456,6 +456,7 @@ mod tests {
                 ],
                 ..ApiEndpoint::default()
             }],
+            ..Default::default()
         };
         let spec = spec_of("http.call:stat", &apis).unwrap();
         assert!(spec.description.contains("火灾统计") && spec.description.contains("森林火灾起数"));
