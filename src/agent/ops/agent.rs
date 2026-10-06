@@ -93,6 +93,16 @@ fn spec_of(id: &str, apis: &ApiStore) -> Option<ToolSpec> {
                 if !endpoint.description.trim().is_empty() {
                     description.push_str(&format!("：{}", endpoint.description.trim()));
                 }
+                // 几种用法各给一例，模型照着填（JSON 参数尤其要看例子）。
+                for example in endpoint.examples.iter().take(3) {
+                    let args =
+                        serde_json::to_string(&endpoint.args_of(example)).unwrap_or_default();
+                    description.push_str(&format!(
+                        "\n用法示例「{}」：{}",
+                        example.name,
+                        crate::agent::tools::short(&args, 400)
+                    ));
+                }
                 params.extend(endpoint.inputs.iter().map(input_doc));
             }
             None => description = format!("{description}（接口「{api}」，参数按接口的输入变量给）"),

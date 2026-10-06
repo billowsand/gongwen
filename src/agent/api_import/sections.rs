@@ -460,13 +460,38 @@ fn cell(cells: &[String], index: Option<usize>) -> &str {
     index.and_then(|i| cells.get(i)).map_or("", |c| c.as_str())
 }
 
-fn kind_of(text: &str) -> Option<InputKind> {
+/// 类型写法 → 参数类型。联合类型（`string | object`）里有字符串的按文字收，最宽松；
+/// 纯对象、数组、映射（`map<string, Question>`、`array<string>`）整段按 JSON 传。
+pub(super) fn kind_of(text: &str) -> Option<InputKind> {
     let text = text.to_lowercase();
-    if ["object", "array", "list", "map", "对象", "数组", "集合"]
-        .iter()
-        .any(|w| text.contains(w))
+    let mut depth = 0usize;
+    let mut parts = vec![String::new()];
+    for c in text.chars() {
+        match c {
+            '<' | '[' | '(' => depth += 1,
+            '>' | ']' | ')' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                parts.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        parts.last_mut().expect("至少一段").push(c);
+    }
+    let parts: Vec<&str> = parts.iter().map(|p| p.trim()).collect();
+    let starts = |words: &[&str]| {
+        parts
+            .iter()
+            .any(|part| words.iter().any(|w| part.starts_with(w)))
+    };
+    if starts(&["string", "str", "text", "字符", "文本", "\"", "'"]) {
+        return Some(InputKind::Text);
+    }
+    if starts(&[
+        "object", "array", "list", "map", "dict", "json", "对象", "数组", "集合", "列表",
+    ]) || text.ends_with("[]")
     {
-        return None;
+        return Some(InputKind::Json);
     }
     Some(
         if [
@@ -749,8 +774,15 @@ impl Section {
         self.context.clear();
     }
 
-    fn finish(self, out: &mut Vec<RawRequest>) {
+    fn add_param(&mut self, param: DocParam) {
+        if !self.params.iter().any(|p| p.name == param.name) {
+            self.params.push(param);
+        }
+    }
+
+    fn finish(self, out: &mut Vec<RawRequest>, loose: &mut Vec<(usize, DocParam)>) {
         let Some(url) = self.url else {
+            loose.extend(self.params.into_iter().map(|p| (self.start, p)));
             return;
         };
         let mut found = request(self.title, url, self.method, self.start, false);
@@ -811,14 +843,98 @@ fn request(
     }
 }
 
+/// Mintlify 一类文档站的参数标签：`<ParamField body="state" type="string" required>`。
+static PARAM_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^<(ParamField|ResponseField)\b((?:[^>"/]|"[^"]*"|/[^>])*)(/?)>"#)
+        .expect("参数标签正则")
+});
+static TAG_ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"([A-Za-z_]+)="([^"]*)""#).expect("属性正则"));
+static MD_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\([^)]*\)").expect("链接正则"));
+
+fn unescape_entities(text: &str) -> String {
+    text.replace("&#x22;", "\"")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// 参数标签 → 参数（只认请求参数；名字不像参数名的、返回字段不收）。
+fn param_tag(attrs: &str) -> Option<DocParam> {
+    let mut place = None;
+    let mut name = String::new();
+    let mut kind = String::new();
+    for caps in TAG_ATTR.captures_iter(attrs) {
+        match &caps[1] {
+            "body" => (place, name) = (Some(ParamPlace::Body), caps[2].to_string()),
+            "query" => (place, name) = (Some(ParamPlace::Query), caps[2].to_string()),
+            "path" => (place, name) = (Some(ParamPlace::Path), caps[2].to_string()),
+            "header" => (place, name) = (Some(ParamPlace::Header), caps[2].to_string()),
+            "type" => kind = unescape_entities(&caps[2]),
+            _ => {}
+        }
+    }
+    let place = place?;
+    let valid = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !valid {
+        return None;
+    }
+    // 联合类型里只有一个字面量（`"noul"`）：这就是它的取值。
+    let literal = kind.trim();
+    let example = if literal.starts_with('"') && literal.ends_with('"') && literal.len() > 2 {
+        literal.trim_matches('"').to_string()
+    } else {
+        String::new()
+    };
+    let required = Regex::new(r"\brequired\b")
+        .map(|re| re.is_match(attrs))
+        .unwrap_or(false);
+    Some(DocParam {
+        name,
+        kind: kind_of(&kind).unwrap_or_default(),
+        required,
+        description: String::new(),
+        example,
+        place,
+    })
+}
+
+/// 参数说明：去掉链接、行内代码记号，取第一句话。
+fn tag_description(text: &str) -> String {
+    let text = MD_LINK.replace_all(text.trim(), "$1").replace('`', "");
+    let text = text.trim();
+    let end = text
+        .find(". ")
+        .map(|i| i + 1)
+        .or_else(|| text.find('。').map(|i| i + '。'.len_utf8()))
+        .unwrap_or(text.len());
+    text[..end].trim().to_string()
+}
+
 /// 按节、按表认出的请求。
+#[cfg(test)]
 pub(super) fn requests(text: &str) -> Vec<RawRequest> {
+    parse(text).0
+}
+
+/// 按节、按表认出的请求，以及不在任何接口那一节里的参数（「请求体」单独成节的文档）：
+/// (所在位置, 参数)。后者由调用方按请求体示例挂到接口上。
+pub(super) fn parse(text: &str) -> (Vec<RawRequest>, Vec<(usize, DocParam)>) {
     let mut out = Vec::new();
+    let mut loose = Vec::new();
     let mut overview = Vec::new();
     let mut section = Section::new(None, 0);
     let mut in_fence = false;
     let mut table: Option<Table> = None;
     let mut offset = 0;
+    // 参数标签：嵌套深度（`<Expandable>` 里的是子字段，不收）与正在读说明的那个参数。
+    let mut depth = 0usize;
+    let mut tag: Option<DocParam> = None;
     for raw_line in text.split_inclusive('\n') {
         let start = offset;
         offset += raw_line.len();
@@ -828,6 +944,44 @@ pub(super) fn requests(text: &str) -> Vec<RawRequest> {
             continue;
         }
         if in_fence {
+            continue;
+        }
+        if line.starts_with("<Expandable") {
+            depth += 1;
+            continue;
+        }
+        if line.starts_with("</Expandable") {
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        if let Some(caps) = PARAM_TAG.captures(line) {
+            if depth == 0 {
+                if let Some(done) = tag.take() {
+                    section.add_param(done);
+                }
+                let parsed = (&caps[1] == "ParamField")
+                    .then(|| param_tag(&caps[2]))
+                    .flatten();
+                if caps[3].is_empty() {
+                    tag = parsed;
+                } else if let Some(done) = parsed {
+                    section.add_param(done);
+                }
+            }
+            continue;
+        }
+        if line.starts_with("</ParamField") || line.starts_with("</ResponseField") {
+            if depth == 0
+                && let Some(done) = tag.take()
+            {
+                section.add_param(done);
+            }
+            continue;
+        }
+        if let Some(param) = &mut tag {
+            if depth == 0 && param.description.is_empty() && !line.is_empty() {
+                param.description = tag_description(line);
+            }
             continue;
         }
         if line.starts_with('|') {
@@ -847,7 +1001,7 @@ pub(super) fn requests(text: &str) -> Vec<RawRequest> {
             match heading {
                 Heading::Section(title) => {
                     std::mem::replace(&mut section, Section::new(Some(title), start))
-                        .finish(&mut out);
+                        .finish(&mut out, &mut loose);
                 }
                 Heading::Field(field) => section.pending = Some(field),
                 Heading::Context(title) => {
@@ -872,10 +1026,13 @@ pub(super) fn requests(text: &str) -> Vec<RawRequest> {
     if let Some(done) = table.take() {
         section.table(&done, &mut overview);
     }
-    section.finish(&mut out);
+    if let Some(done) = tag.take() {
+        section.add_param(done);
+    }
+    section.finish(&mut out, &mut loose);
     out.extend(overview);
     out.sort_by_key(|r| r.offset);
-    out
+    (out, loose)
 }
 
 #[cfg(test)]
@@ -904,13 +1061,13 @@ mod tests {
         let names: Vec<&str> = search.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["keyword", "page_size"],
-            "返回参数不算，对象参数跳过"
+            ["keyword", "page_size", "filters"],
+            "返回参数不算，对象参数整段按 JSON 传"
         );
+        assert_eq!(search.params[2].kind, InputKind::Json);
         assert!(search.params[0].required && !search.params[1].required);
         assert_eq!(search.params[0].example, "中小企业");
         assert_eq!(search.params[1].kind, InputKind::Number);
-        assert!(search.notes.iter().any(|n| n.contains("filters")));
         let detail = &found[1];
         assert_eq!(detail.name.as_deref(), Some("政策详情"));
         assert_eq!(detail.url, "/api/policy/{id}");
@@ -970,6 +1127,34 @@ mod tests {
         );
         assert_eq!(found[0].params.len(), 1);
         assert_eq!(found[0].params[0].name, "q");
+    }
+
+    #[test]
+    fn param_field_tags_outside_the_endpoint_section_are_loose() {
+        let doc = "## Evaluation endpoint\n\n```http\nPOST https://h/v1/eval\n```\n\n\
+## Request body\n\n<ParamField body=\"state\" type=\"string | object | array\" required>\n  The content to evaluate. More words.\n</ParamField>\n\n\
+<ParamField body=\"questions\" type=\"map<string, Question>\" required>\n  A map of [Question](#q) objects.\n\n  <Expandable title=\"map entries\">\n    <ParamField body=\"inner\" type=\"Question\">\n      nested\n    </ParamField>\n  </Expandable>\n</ParamField>\n\n\
+### Noul\n\n<ParamField body=\"type\" type=\"&#x22;noul&#x22;\" required />\n\n<ResponseField name=\"answers\" type=\"map\">\n  x\n</ResponseField>\n";
+        let (requests, loose) = parse(doc);
+        assert!(requests.is_empty(), "请求行由 scan 认，这里不重复");
+        let names: Vec<&str> = loose.iter().map(|(_, p)| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["state", "questions", "type"],
+            "嵌套字段、返回字段不收"
+        );
+        assert_eq!(
+            loose[0].1.kind,
+            InputKind::Text,
+            "联合类型里有字符串按文字收"
+        );
+        assert_eq!(loose[0].1.description, "The content to evaluate.");
+        assert_eq!(loose[1].1.kind, InputKind::Json);
+        assert_eq!(loose[1].1.description, "A map of Question objects.");
+        assert!(loose[1].1.required && loose[1].1.place == ParamPlace::Body);
+        assert_eq!(loose[2].1.example, "noul", "字面量类型就是取值");
+        assert_eq!(kind_of("array<string>"), Some(InputKind::Json));
+        assert_eq!(kind_of("integer"), Some(InputKind::Number));
     }
 
     #[test]

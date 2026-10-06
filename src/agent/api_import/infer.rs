@@ -56,6 +56,19 @@ const TEMPLATE_FIELDS: usize = 8;
 
 pub(crate) fn infer(root: &Value) -> Inferred {
     let success = success_of(root);
+    // 「键 → 对象」的表（按调用方起的名字返回的答案）：每项一条，键当标题；各项字段不一样，
+    // 正文不拼模板，整条照录。
+    if find_list(root).is_none()
+        && let Some(pointer) = find_keyed(root)
+    {
+        return Inferred {
+            mapping: ApiMapping {
+                list: pointer,
+                ..ApiMapping::default()
+            },
+            success,
+        };
+    }
     let (list, sample) = match find_list(root) {
         Some((pointer, sample)) => (pointer, Some(sample)),
         None => match root.get("data") {
@@ -101,6 +114,38 @@ pub(crate) fn infer(root: &Value) -> Inferred {
         });
     }
     Inferred { mapping, success }
+}
+
+/// 顶层或 `data` 下面一张「键 → 对象」的表（如 `answers`、`results`）。
+fn find_keyed(root: &Value) -> Option<String> {
+    let keyed = |value: &Value| {
+        value
+            .as_object()
+            .is_some_and(|map| !map.is_empty() && map.values().all(Value::is_object))
+    };
+    let object = root.as_object()?;
+    let preferred = ["answers", "results", "result", "items", "data"];
+    preferred
+        .iter()
+        .filter_map(|key| {
+            object
+                .get(*key)
+                .filter(|v| keyed(v))
+                .map(|_| format!("/{key}"))
+        })
+        .chain(
+            object
+                .iter()
+                .filter(|(key, value)| !preferred.contains(&key.as_str()) && keyed(value))
+                .map(|(key, _)| format!("/{}", escape(key))),
+        )
+        .next()
+        .or_else(|| {
+            let data = object.get("data")?.as_object()?;
+            data.iter()
+                .find(|(_, value)| keyed(value))
+                .map(|(key, _)| format!("/data/{}", escape(key)))
+        })
 }
 
 fn success_of(root: &Value) -> Option<ApiSuccess> {
@@ -177,6 +222,18 @@ pub(crate) fn fill_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyed_answer_tables_become_the_list() {
+        let reply = serde_json::json!({
+            "model": "jev-1.13.0",
+            "answers": {"is_urgent": {"type": "noul", "noul": 0.95}},
+            "usage": {"input_tokens": 296, "output_tokens": 20}
+        });
+        let inferred = infer(&reply);
+        assert_eq!(inferred.mapping.list, "/answers");
+        assert!(inferred.mapping.text.is_empty(), "各项字段不同，不拼模板");
+    }
     use serde_json::json;
 
     #[test]

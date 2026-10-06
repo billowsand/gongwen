@@ -395,3 +395,138 @@ fn long_documents_are_tidied_in_parts_and_missed_paths_are_looked_at_again() {
         analysis.notes
     );
 }
+
+/// Mintlify 文档站导出的接口文档：参数写成 `<ParamField>` 标签，请求体单独成节，
+/// `questions` 是键由调用方定的问题表（是非 / 单选 / 打分三种），后面跟着几个请求示例。
+const TYPESAFE: &str = include_str!("fixtures/typesafe.md");
+
+#[test]
+fn mintlify_docs_keep_map_parameters_whole_and_every_request_example() {
+    let analysis = analyze(&Material::new(TYPESAFE), None, &[]);
+    assert_eq!(analysis.drafts.len(), 1, "{:?}", analysis.notes);
+    let endpoint = &analysis.drafts[0].endpoint;
+    assert_eq!(endpoint.method, ApiMethod::Post);
+    assert_eq!(endpoint.url, "https://api.typesafe.ai/v1/systemone");
+    assert_eq!(endpoint.headers[0].value, "Bearer {secret:token}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&endpoint.body).unwrap(),
+        json!({"state": "{state}", "model": "{model}", "questions": "{questions}"}),
+        "questions 整段一个 JSON 参数，不拆成 type / instructions"
+    );
+    let inputs: Vec<(&str, InputKind, bool)> = endpoint
+        .inputs
+        .iter()
+        .map(|i| (i.name.as_str(), i.kind, i.required))
+        .collect();
+    assert_eq!(
+        inputs,
+        [
+            ("state", InputKind::Text, true),
+            ("model", InputKind::Text, true),
+            ("questions", InputKind::Json, true),
+        ]
+    );
+    assert_eq!(endpoint.inputs[0].description, "The content to evaluate.");
+    assert_eq!(endpoint.inputs[1].example, "jev-latest");
+    let names: Vec<&str> = endpoint.examples.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "文档示例：Request body",
+            "文档示例：Noul",
+            "文档示例：Choice",
+            "文档示例：Score"
+        ],
+        "四个请求示例各成一组，讲字段写法的 JSON 片段不算"
+    );
+    let choice: Value = serde_json::from_str(&endpoint.examples[2].args["questions"]).unwrap();
+    assert_eq!(choice["department"]["type"], "choice");
+    assert_eq!(
+        endpoint.mapping.list, "/answers",
+        "按问题名返回的答案每条一项"
+    );
+    // 每组样例都能组出请求。
+    let mut secrets = crate::agent::api::ApiSecrets::default();
+    secrets.secrets.insert("token".into(), "k".into());
+    for example in &endpoint.examples {
+        let prepared =
+            crate::agent::api::prepare(endpoint, &endpoint.args_of(example), &secrets).unwrap();
+        assert!(
+            prepared.body.unwrap()["questions"].is_object(),
+            "{}",
+            example.name
+        );
+    }
+}
+
+#[test]
+fn the_model_adds_typical_examples_for_every_question_type() {
+    let model = ScriptedModel::new(|_, _| {
+        json!({"endpoints": [{
+            "name": "文本评估", "description": "对一段内容提是非、单选、打分三类问题，按问题名返回答案",
+            "url": "https://api.typesafe.ai/v1/systemone", "method": "POST", "access": "query",
+            "inputs": [
+                {"name": "state", "kind": "text", "required": true, "description": "要评估的内容"},
+                {"name": "model", "kind": "text", "required": true, "description": "模型名"},
+                {"name": "questions", "kind": "json", "required": true, "description": "问题表"}
+            ],
+            "examples": [
+                {"name": "是否紧急（是非）", "note": "noul：判断公文是否有时限要求",
+                 "args": {"state": "请各单位于10月10日前报送防汛工作情况。", "model": "jev-latest",
+                          "questions": {"is_urgent": {"type": "noul", "instructions": "这份通知是否有紧急时限要求？"}}}},
+                {"name": "文种判断（单选）", "note": "choice：判断属于哪一文种",
+                 "args": {"state": "现将《关于加强公文管理的意见》印发给你们，请认真贯彻执行。", "model": "jev-latest",
+                          "questions": {"doc_type": {"type": "choice", "instructions": "这段文字属于哪一文种？",
+                              "criteria": {"通知": "发布、传达要求", "请示": "向上级请求指示", "函": "不相隶属机关之间商洽"}}}}},
+                {"name": "规范程度（打分）", "note": "score：评公文用语规范程度",
+                 "args": {"state": "领导们好，这个事情麻烦尽快搞一下。", "model": "jev-latest",
+                          "questions": {"formality": {"type": "score", "instructions": "用语是否符合公文规范？",
+                              "criteria": ["不规范", "基本规范", "规范"]}}}},
+                {"name": "编了参数", "args": {"state": "x", "model": "jev-latest", "questions": {}, "temperature": 0}}
+            ]
+        }]})
+        .to_string()
+    });
+    let analysis = analyze(&Material::new(TYPESAFE), Some(&model), &[]);
+    let draft = &analysis.drafts[0];
+    let names: Vec<&str> = draft
+        .endpoint
+        .examples
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(
+        &names[..3],
+        ["是否紧急（是非）", "文种判断（单选）", "规范程度（打分）"],
+        "模型的样例在前，文档示例跟在后面"
+    );
+    assert_eq!(names.len(), 7);
+    let types: Vec<String> = draft.endpoint.examples[..3]
+        .iter()
+        .map(|e| {
+            let questions: Value = serde_json::from_str(&e.args["questions"]).unwrap();
+            questions.as_object().unwrap().values().next().unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(types, ["noul", "choice", "score"], "每种问题至少一组");
+    assert!(
+        draft
+            .notes
+            .iter()
+            .any(|n| n.contains("编了参数") && n.contains("temperature")),
+        "{:?}",
+        draft.notes
+    );
+    assert_eq!(draft.origin("样例"), Some(Origin::Model));
+    assert!(model.asked("公文写作") > 0);
+    // 自动试调用第一组。
+    assert!(
+        draft.endpoint.trial_args()["state"]
+            .as_str()
+            .unwrap()
+            .contains("防汛")
+    );
+}

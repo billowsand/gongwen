@@ -344,7 +344,7 @@ impl<'a> Run<'a> {
     /// 试调一次，下结论，报给界面。
     fn test(&mut self, index: usize, desk: &mut dyn Desk) -> Verdict {
         let item = &mut self.items[index];
-        let args = item.draft.endpoint.example_args();
+        let args = item.draft.endpoint.trial_args();
         let mut trial = desk.trial(&item.draft.endpoint, &args, &self.secrets);
         item.trials += 1;
         item.dirty = false;

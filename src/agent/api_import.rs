@@ -16,6 +16,7 @@
 pub(crate) mod auth;
 mod build;
 mod chunk;
+pub(crate) mod examples;
 pub(crate) mod infer;
 mod model;
 pub(crate) mod onboard;
@@ -30,7 +31,7 @@ use model::ModelEndpoint;
 use redact::Secrets;
 use regex::Regex;
 use scan::{BlockRole, DocParam, JsonBlock, ParamPlace, RawRequest};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::LazyLock;
 
 /// 地址里出现这些词，多半是改数据的接口。
@@ -166,7 +167,8 @@ impl Material {
     pub(crate) fn new(text: &str) -> Self {
         let text = text.replace("\r\n", "\n");
         let mut found = scan::requests(&text);
-        found.extend(sections::requests(&text));
+        let (in_sections, loose) = sections::parse(&text);
+        found.extend(in_sections);
         found.sort_by_key(|r| r.offset);
         let requests = merge_requests(found);
         let blocks = scan::json_blocks(&text);
@@ -177,7 +179,15 @@ impl Material {
             .enumerate()
             .map(|(index, request)| {
                 let next = requests.get(index + 1).map_or(usize::MAX, |r| r.offset);
-                draft_from_request(request, next, &text, &blocks, &origins, &mut secrets)
+                draft_from_request(
+                    request,
+                    next,
+                    &text,
+                    &blocks,
+                    &loose,
+                    &origins,
+                    &mut secrets,
+                )
             })
             .collect();
         // 只有一个请求时，文档里任何位置的返回示例都算它的。
@@ -575,11 +585,13 @@ fn absorb(a: RawRequest, b: RawRequest) -> RawRequest {
 }
 
 /// 程序认出的一个请求 → 候选接口。
+#[allow(clippy::too_many_arguments)]
 fn draft_from_request(
     request: &RawRequest,
     next_offset: usize,
     text: &str,
     blocks: &[JsonBlock],
+    loose: &[(usize, DocParam)],
     origins: &[String],
     secrets: &mut Secrets,
 ) -> Draft {
@@ -589,12 +601,40 @@ fn draft_from_request(
     // 总览表里的一行后面跟的是下一行，不是它的示例。
     let in_range =
         |b: &&JsonBlock| !request.overview && b.offset > request.offset && b.offset < next_offset;
+    let requests: Vec<&JsonBlock> = blocks
+        .iter()
+        .filter(in_range)
+        .filter(|b| b.role == BlockRole::Request)
+        .collect();
+    // 「请求体」单独成节的文档：那一节的参数挂到这个接口上。有请求体示例时只收示例的顶层字段
+    // （下面「问题类型」一类小节里的是对象里面的字段，不是请求体的）。
+    let example_keys: Option<Vec<String>> = requests
+        .first()
+        .and_then(|b| b.value.as_object())
+        .map(|map| map.keys().cloned().collect());
+    let mut params = request.params.clone();
+    for (at, param) in loose {
+        let in_scope = *at > request.offset && *at < next_offset && !request.overview;
+        let wanted = match &example_keys {
+            Some(keys) => keys.contains(&param.name),
+            None => request.params.is_empty(),
+        };
+        if in_scope && wanted && !params.iter().any(|p| p.name == param.name) {
+            params.push(param.clone());
+        }
+    }
+    let params = &params;
     // 参数表：放地址上的补进查询串（模板化时登记成输入），POST 没有请求体示例时按参数表拼一个。
     let in_query = |p: &&DocParam| {
         p.place == ParamPlace::Query || (p.place == ParamPlace::Unknown && method == ApiMethod::Get)
     };
+    let json_keys: Vec<String> = params
+        .iter()
+        .filter(|p| p.kind == InputKind::Json)
+        .map(|p| p.name.clone())
+        .collect();
     let mut url = join_origin(&request.url, origins);
-    for param in request.params.iter().filter(in_query) {
+    for param in params.iter().filter(in_query) {
         if !query_has(&url, &param.name) {
             let example = if param.example.contains(['&', '=', '#', ' ']) {
                 ""
@@ -610,16 +650,9 @@ fn draft_from_request(
     let body_source = request
         .body
         .clone()
+        .or_else(|| requests.first().map(|b| b.value.to_string()))
         .or_else(|| {
-            blocks
-                .iter()
-                .filter(in_range)
-                .find(|b| b.role == BlockRole::Request)
-                .map(|b| b.value.to_string())
-        })
-        .or_else(|| {
-            let fields: serde_json::Map<String, Value> = request
-                .params
+            let fields: serde_json::Map<String, Value> = params
                 .iter()
                 .filter(|p| {
                     method == ApiMethod::Post
@@ -630,11 +663,16 @@ fn draft_from_request(
             (!fields.is_empty()).then(|| Value::Object(fields).to_string())
         });
     let mut body = String::new();
+    let mut doc_examples = Vec::new();
     if let Some(source) = body_source {
         match serde_json::from_str::<Value>(&source) {
             Ok(value @ Value::Object(_)) => {
-                let templated = build::template_body(&value, &mut inputs, secrets, &mut notes);
+                let templated = build::template_body(&value, &mut inputs, secrets, &json_keys);
                 body = serde_json::to_string_pretty(&templated).unwrap_or_default();
+                // 文档里的几个请求示例，按模板取成几组试调样例（只有一个的就是参数样例，不另列）。
+                if requests.len() > 1 {
+                    doc_examples = examples::from_document(&templated, &requests, text);
+                }
             }
             _ if build::looks_like_form(&source) => notes.push(
                 "请求体是表单格式（a=1&b=2），暂只支持 JSON 请求体，需要接口方确认能否收 JSON"
@@ -643,7 +681,7 @@ fn draft_from_request(
             _ => notes.push("请求体不是 JSON 对象，没有采用".into()),
         }
     }
-    let described = describe_inputs(&mut inputs, &request.params);
+    let described = describe_inputs(&mut inputs, params);
     let write = request.method.is_none() || scan::write_method_near(text, request.offset);
     let suspicious = write_word(&url);
     let mut draft = Draft {
@@ -655,6 +693,7 @@ fn draft_from_request(
             inputs,
             headers,
             body,
+            examples: doc_examples,
             ..ApiEndpoint::default()
         },
         origins: vec![("地址", Origin::Document), ("方法", Origin::Document)],
@@ -688,10 +727,20 @@ fn draft_from_request(
     if auth::has_auth(&draft.endpoint) {
         draft.set_origin("鉴权", Origin::Document);
     }
+    if !draft.endpoint.examples.is_empty() {
+        draft.set_origin("样例", Origin::Document);
+    }
+    // 返回示例：明说是返回的优先，其次说不清的（文档里讲字段写法的 JSON 片段也是说不清的）。
     let sample = blocks
         .iter()
         .filter(in_range)
-        .find(|b| b.role != BlockRole::Request)
+        .find(|b| b.role == BlockRole::Response)
+        .or_else(|| {
+            blocks
+                .iter()
+                .filter(in_range)
+                .find(|b| b.role == BlockRole::Unknown)
+        })
         .map(|b| b.value.clone());
     if let Some(sample) = sample {
         apply_sample(&mut draft, sample);
@@ -718,6 +767,8 @@ fn typed_example(param: &DocParam) -> Value {
             .or_else(|_| example.parse::<f64>().map(Value::from))
             .unwrap_or_else(|_| Value::String(example.to_string())),
         InputKind::Bool if matches!(example, "true" | "false") => Value::Bool(example == "true"),
+        // JSON 参数：整段放进去，模板化时因为点了名整段做成一个参数。
+        InputKind::Json => serde_json::from_str(example).unwrap_or_else(|_| json!({})),
         _ => Value::String(example.to_string()),
     }
 }
@@ -748,6 +799,11 @@ fn describe_inputs(inputs: &mut [ApiInput], params: &[DocParam]) -> bool {
             }
             InputKind::Bool if matches!(example.trim(), "" | "true" | "false") => {
                 input.kind = InputKind::Bool;
+            }
+            InputKind::Json
+                if example.is_empty() || serde_json::from_str::<Value>(example).is_ok() =>
+            {
+                input.kind = InputKind::Json;
             }
             _ => {}
         }
@@ -881,6 +937,7 @@ fn enrich(draft: &mut Draft, found: &ModelEndpoint, text: &str) {
         draft.set_origin("参数说明", Origin::Model);
     }
     apply_model_response(draft, found, text);
+    apply_model_examples(draft, found);
     apply_access(draft, found);
     draft.notes.extend(
         found
@@ -889,6 +946,19 @@ fn enrich(draft: &mut Draft, found: &ModelEndpoint, text: &str) {
             .filter(|m| !m.trim().is_empty())
             .map(|m| format!("AI 指出缺：{}", m.trim())),
     );
+}
+
+/// 模型编的试调样例：核对后排在文档示例前面。
+fn apply_model_examples(draft: &mut Draft, found: &ModelEndpoint) {
+    if found.examples.is_empty() {
+        return;
+    }
+    let (taken, notes) = examples::check(&draft.endpoint, &found.examples);
+    draft.notes.extend(notes);
+    if !taken.is_empty() {
+        draft.endpoint.examples = examples::combine(taken, &draft.endpoint.examples);
+        draft.set_origin("样例", Origin::Model);
+    }
 }
 
 /// 返回列表与成功判据：模型说的字段名要在资料里出现过，有返回示例时还要在示例里取得到。
@@ -954,6 +1024,7 @@ fn kind_of(kind: &str) -> InputKind {
     match kind.trim().to_ascii_lowercase().as_str() {
         "number" | "int" | "integer" | "float" | "数字" => InputKind::Number,
         "bool" | "boolean" | "是否" => InputKind::Bool,
+        "json" | "object" | "array" | "map" | "list" | "对象" | "数组" => InputKind::Json,
         _ => InputKind::Text,
     }
 }
@@ -1007,7 +1078,13 @@ fn draft_from_model(
                     .collect(),
             )
         });
-        let templated = build::template_body(&object, &mut inputs, secrets, &mut notes);
+        let json_keys: Vec<String> = found
+            .inputs
+            .iter()
+            .filter(|i| kind_of(&i.kind) == InputKind::Json)
+            .map(|i| i.name.trim().to_string())
+            .collect();
+        let templated = build::template_body(&object, &mut inputs, secrets, &json_keys);
         body = serde_json::to_string_pretty(&templated).unwrap_or_default();
     }
     // 参数：名字要在资料里出现过；补上说明、类型、样例。
@@ -1078,6 +1155,7 @@ fn draft_from_model(
     };
     // 去掉了参数以后模板里可能还留着它的占位：程序检查会报出来，交给人改。
     apply_model_response(&mut draft, found, text);
+    apply_model_examples(&mut draft, found);
     apply_access(&mut draft, found);
     draft.notes.extend(
         found

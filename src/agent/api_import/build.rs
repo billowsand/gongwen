@@ -136,25 +136,26 @@ pub(super) fn template_headers(
 }
 
 /// 请求体模板：叶子字段换成 `"{变量}"`，凭据字段换成 `"{secret:名字}"`。
-/// 数组照样例原样发（暂不支持数组输入），记一条说明。
+/// 数组、以及 `json_keys` 里点名的顶层对象（文档说它是 map / object，键由调用方定）整段做成
+/// 一个 JSON 参数，样例照录；其余对象往下拆。
 pub(super) fn template_body(
     value: &Value,
     inputs: &mut Vec<ApiInput>,
     secrets: &mut Secrets,
-    notes: &mut Vec<String>,
+    json_keys: &[String],
 ) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = Map::new();
             for (key, child) in map {
+                let whole = matches!(child, Value::Array(_))
+                    || (child.is_object() && json_keys.iter().any(|k| k == key));
                 let templated = match child {
-                    Value::Object(_) => template_body(child, inputs, secrets, notes),
-                    Value::Array(_) => {
-                        notes.push(format!(
-                            "请求体里的数组字段「{key}」暂不支持做成输入，按样例原样发送"
-                        ));
-                        child.clone()
+                    _ if whole => {
+                        let name = add_input(inputs, key, InputKind::Json, &child.to_string());
+                        Value::String(format!("{{{name}}}"))
                     }
+                    Value::Object(_) => template_body(child, inputs, secrets, &[]),
                     Value::Null => Value::Null,
                     scalar => {
                         let text = match scalar {
@@ -253,16 +254,15 @@ mod tests {
     fn body_fields_become_typed_inputs() {
         let mut inputs = Vec::new();
         let mut secrets = Secrets::default();
-        let mut notes = Vec::new();
         let body = template_body(
             &json!({"keyword": "中小企业", "page": {"size": 10, "exact": true}, "ids": [1, 2], "appSecret": "s3", "q": "{query}"}),
             &mut inputs,
             &mut secrets,
-            &mut notes,
+            &[],
         );
         assert_eq!(
             body,
-            json!({"keyword": "{keyword}", "page": {"size": "{size}", "exact": "{exact}"}, "ids": [1, 2], "appSecret": "{secret:appsecret}", "q": "{query}"})
+            json!({"keyword": "{keyword}", "page": {"size": "{size}", "exact": "{exact}"}, "ids": "{ids}", "appSecret": "{secret:appsecret}", "q": "{query}"})
         );
         let kinds: Vec<(&str, InputKind, &str)> = inputs
             .iter()
@@ -274,10 +274,11 @@ mod tests {
                 ("keyword", InputKind::Text, "中小企业"),
                 ("size", InputKind::Number, "10"),
                 ("exact", InputKind::Bool, "true"),
+                ("ids", InputKind::Json, "[1,2]"),
                 ("query", InputKind::Text, ""),
-            ]
+            ],
+            "数组整段做成 JSON 参数"
         );
-        assert!(notes[0].contains("ids"));
     }
 
     #[test]
