@@ -3,7 +3,7 @@
 use super::toolcall::{self, Protocol, Reply, ToolCall, ToolSpec, Turn};
 use crate::lmstudio::context::{self, Window, WindowSource};
 use crate::lmstudio::{self, ChatOptions, ConverseError, Finish, StreamDelta};
-use crate::models::{AppConfig, LmStudioConfig};
+use crate::models::{AppConfig, LmStudioConfig, ModelRefError};
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,46 +75,35 @@ pub(crate) trait ModelBackend {
 
 /// 接本机 / 内网的 OpenAI 兼容接口。
 pub(crate) struct LmBackend {
-    draft: LmStudioConfig,
-    assist: LmStudioConfig,
+    draft: Result<LmStudioConfig, ModelRefError>,
+    assist: Result<LmStudioConfig, ModelRefError>,
     cancel: Arc<AtomicBool>,
 }
 
 impl LmBackend {
     pub(crate) fn new(config: &AppConfig, cancel: Arc<AtomicBool>) -> Self {
         Self {
-            draft: config.lm_studio.clone(),
-            assist: assist_config(config),
+            draft: config.draft_chat(),
+            assist: config.assist_chat(),
             cancel,
         }
     }
 
     /// 这个角色的接入配置。自动窗口还没问过服务时先问一次（本进程每个模型只问一次），
     /// 之后发请求时的输出上限就按服务报的窗口算。
-    fn config(&self, role: ModelRole) -> &LmStudioConfig {
+    fn config(&self, role: ModelRole) -> anyhow::Result<&LmStudioConfig> {
         let config = match role {
             ModelRole::Draft => &self.draft,
             ModelRole::Assist => &self.assist,
         };
-        context::window(config);
-        config
+        match config {
+            Ok(config) => {
+                context::window(config);
+                Ok(config)
+            }
+            Err(error) => Err(anyhow::Error::new(error.clone())),
+        }
     }
-}
-
-/// 辅助步骤用的接入配置：配了复核模型就用它，否则沿用起草模型；温度固定 0。
-///
-/// 输出上限沿用起草模型的设置，不用复核那套按句长算的小上限：思考型模型的推理也算在
-/// 上限里，给小了正文出不来。
-pub(crate) fn assist_config(config: &AppConfig) -> LmStudioConfig {
-    let revise = &config.revise_model;
-    let mut assist = if revise.enabled && !revise.model.trim().is_empty() {
-        revise.resolve(&config.lm_studio)
-    } else {
-        config.lm_studio.clone()
-    };
-    assist.temperature = 0.0;
-    assist.max_tokens = config.lm_studio.max_tokens;
-    assist
 }
 
 impl ModelBackend for LmBackend {
@@ -125,7 +114,7 @@ impl ModelBackend for LmBackend {
         user: &str,
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Completion> {
-        let config = self.config(role);
+        let config = self.config(role)?;
         let mut attempt = 0;
         let outcome = loop {
             attempt += 1;
@@ -164,7 +153,14 @@ impl ModelBackend for LmBackend {
     }
 
     fn window(&self, role: ModelRole) -> Window {
-        context::window(self.config(role))
+        let config = match role {
+            ModelRole::Draft => &self.draft,
+            ModelRole::Assist => &self.assist,
+        };
+        config.as_ref().map(context::window).unwrap_or(Window {
+            tokens: context::DEFAULT_WINDOW,
+            source: WindowSource::Default,
+        })
     }
 
     /// 原生模式发 `tools`，被 4xx 拒收就改文本模式重发一次；回复里没有 `tool_calls` 而正文里写着
@@ -177,7 +173,7 @@ impl ModelBackend for LmBackend {
         protocol: Protocol,
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Reply> {
-        let config = self.config(role);
+        let config = self.config(role)?;
         let native = protocol == Protocol::Native && !NATIVE_TOOLS_REJECTED.load(Ordering::Relaxed);
         if native {
             let specs: Vec<Value> = tools.iter().map(ToolSpec::to_native).collect();
@@ -263,14 +259,14 @@ mod tests {
         let mut config = AppConfig::default();
         config.lm_studio.model = "draft".into();
         config.lm_studio.max_tokens = 32000;
-        let assist = assist_config(&config);
+        let assist = config.assist_chat().unwrap();
         assert_eq!(assist.model, "draft");
         assert_eq!(assist.temperature, 0.0);
         assert_eq!(assist.max_tokens, 32000);
 
         config.revise_model.enabled = true;
         config.revise_model.model = "small".into();
-        let assist = assist_config(&config);
+        let assist = config.assist_chat().unwrap();
         assert_eq!(assist.model, "small");
         assert_eq!(assist.max_tokens, 32000, "不用复核那套 512 的小上限");
     }

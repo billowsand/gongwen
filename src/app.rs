@@ -37,6 +37,7 @@ mod jobs;
 mod lexicon_jobs;
 mod manuscript_ui;
 mod proofread_ui;
+mod provider_settings;
 mod quick_find;
 mod send_package_ui;
 mod session;
@@ -57,6 +58,7 @@ pub(crate) use manuscript_ui::{
     ZipPasswordDialog,
 };
 pub(crate) use proofread_ui::ProofreadPageState;
+pub(crate) use provider_settings::ProviderProbe;
 pub(crate) use send_package_ui::{SendPackageEvent, SendPackageExportJob, SendPackagePanel};
 pub(crate) use session::{DraftAction, ExitPrompt};
 pub(crate) use settings::SettingsSection;
@@ -141,7 +143,12 @@ pub struct GongwenApp {
     draft_actions: Vec<DraftAction>,
     /// 导出目录里最近的 tex/pdf/docx 索引，工具栏三枚成品入口共用一份。
     export_links: ExportLinks,
-    models: Vec<String>,
+    /// 各提供商的探测状态（本进程内）：连接结果与提示语。模型清单缓存在配置里。
+    pub(crate) provider_status: std::collections::HashMap<String, ProviderProbe>,
+    /// 提供商卡片哪些处于展开编辑态。
+    pub(crate) provider_edit: std::collections::HashSet<String>,
+    /// 各模型选择器弹层的筛选词（键是选择器的 salt）。
+    pub(crate) model_filter: BTreeMap<String, String>,
     /// 检查器埋点，只留在本机。单独存文件，不进 config.json。
     metrics: crate::metrics::Metrics,
     /// 送批材料面板；None 表示未打开。
@@ -310,12 +317,8 @@ pub struct GongwenApp {
     pub(crate) lexicon_clear_confirm: bool,
     /// 外部 md 导入对话框：待导入的文件路径与所选文种。
     pub(crate) knowledge_import: Option<KnowledgeImportDraft>,
-    /// 探测到的 embedding / rerank 端点模型列表；空表示尚未探测，退回手填。
-    pub(crate) embedding_models: Vec<String>,
-    pub(crate) rerank_models: Vec<String>,
-    /// embedding / rerank 探测是否正在进行。
-    pub(crate) embedding_probe_busy: bool,
-    pub(crate) rerank_probe_busy: bool,
+    /// rerank 端点验证是否正在进行。
+    pub(crate) rerank_verify_busy: bool,
     /// rerank 端点验证结果：(是否通过, 说明)。
     pub(crate) rerank_verify_result: Option<(bool, String)>,
     /// 知识库文档预览弹窗：标题、文种、原文。
@@ -450,7 +453,9 @@ impl GongwenApp {
             next_pdf_key: 1,
             draft_actions: Vec::new(),
             export_links: ExportLinks::default(),
-            models: Vec::new(),
+            provider_status: std::collections::HashMap::new(),
+            provider_edit: std::collections::HashSet::new(),
+            model_filter: BTreeMap::new(),
             vocabulary_import_conflicts: None,
             vocabulary_dirty: false,
             vocabulary_setup_name: String::new(),
@@ -551,8 +556,6 @@ impl GongwenApp {
             lexicon_export_result: None,
             lexicon_new_term: String::new(),
             lexicon_clear_confirm: false,
-            embedding_models: Vec::new(),
-            rerank_models: Vec::new(),
             system_fonts: Vec::new(),
             system_fonts_busy: false,
             system_fonts_scanned: false,
@@ -562,8 +565,7 @@ impl GongwenApp {
             ai_section: AiSection::default(),
             agent_settings: Default::default(),
             styles_page: Default::default(),
-            embedding_probe_busy: false,
-            rerank_probe_busy: false,
+            rerank_verify_busy: false,
             rerank_verify_result: None,
             knowledge_preview: None,
         };

@@ -233,8 +233,8 @@ impl DraftPage<'_> {
             board.system_prompt = with_history(&board.system_prompt, &board.history);
             let kb = RagSearch {
                 enabled: use_rag,
-                rag: config.rag.clone(),
-                chat: config.lm_studio.clone(),
+                rag: config.resolved_rag(),
+                chat: config.draft_chat().unwrap_or_default(),
                 kind_filter,
             };
             let mut batch = Batch::default();
@@ -403,7 +403,9 @@ impl DraftPage<'_> {
                 notes.push(note.clone());
             }
         }
-        let window = crate::lmstudio::context::peek_window(&self.config.lm_studio).tokens;
+        let window =
+            crate::lmstudio::context::peek_window(&self.config.draft_chat().unwrap_or_default())
+                .tokens;
         let plan = history::plan(&self.doc.ai_panel, window, false);
         let board = Board {
             draft: self.doc.draft.clone(),
@@ -474,7 +476,9 @@ impl DraftPage<'_> {
             *self.status = "这篇稿件还有任务在跑，稍等一下。".into();
             return;
         }
-        let window = crate::lmstudio::context::peek_window(&self.config.lm_studio).tokens;
+        let window =
+            crate::lmstudio::context::peek_window(&self.config.draft_chat().unwrap_or_default())
+                .tokens;
         let Some(compaction) = history::plan(&self.doc.ai_panel, window, true).compact else {
             *self.status = format!(
                 "会话还短（不超过 {} 轮新内容），不用压缩。",

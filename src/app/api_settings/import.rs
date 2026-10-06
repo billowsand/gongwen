@@ -169,8 +169,7 @@ impl Candidate {
 
 /// 起草模型配了没有。
 fn model_name(config: &AppConfig) -> Option<String> {
-    let model = config.lm_studio.model.trim();
-    (!model.is_empty()).then(|| model.to_string())
+    config.draft_chat().ok().map(|c| c.model)
 }
 
 /// 底部「加入」条的高度。

@@ -1163,7 +1163,7 @@ fn request_box(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &Ap
     let mut generate = false;
     let mut picked = None;
     let running = page.detail.test.is_some();
-    let has_model = !config.lm_studio.model.trim().is_empty();
+    let has_model = config.draft_chat().is_ok();
     let generating = page.detail.generating.is_some();
     let running_all = page.detail.runs.is_some();
     let examples_count = page.store.endpoints[index].examples.len();

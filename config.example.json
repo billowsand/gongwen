@@ -1,12 +1,21 @@
 {
   "lm_studio": {
-    "base_url": "http://127.0.0.1:1234/v1",
-    "model": "请在界面中刷新并选择",
-    "api_key": "",
     "temperature": 0.25,
     "max_tokens": 4096,
     "timeout_seconds": 180
   },
+  "providers": [
+    {
+      "id": "p1",
+      "name": "LM Studio",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key": "",
+      "enabled": true,
+      "models": [],
+      "tags": ["chat", "embedding"]
+    }
+  ],
+  "draft_model": { "provider_id": "p1", "model": "" },
   "output_dir": "./output",
   "vocabulary": [
     {
@@ -217,18 +226,14 @@
   "rag": {
     "enabled": false,
     "embedding": {
-      "base_url": "http://127.0.0.1:1234/v1",
-      "model": "",
-      "api_key": "",
+      "model_ref": { "provider_id": "", "model": "" },
       "batch_size": 32,
       "timeout_seconds": 60
     },
     "rerank": {
       "mode": "llm",
-      "base_url": "http://127.0.0.1:1234/v1",
+      "model_ref": { "provider_id": "", "model": "" },
       "path": "rerank",
-      "model": "",
-      "api_key": "",
       "top_n_field": "top_n",
       "response_results_key": "results",
       "response_index_key": "index",

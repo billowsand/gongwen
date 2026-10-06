@@ -194,7 +194,8 @@ impl DraftPage<'_> {
             return;
         }
         if !self.config.revise_model.enabled {
-            *self.status = "文字复核未启用：请先在设置中配置复核用的小模型。".into();
+            *self.status =
+                "文字复核未启用：请先在「AI 管理 → 模型服务」配置复核用的小模型。".into();
             return;
         }
         let markdown = self.doc.generated_markdown.clone();
@@ -221,7 +222,13 @@ impl DraftPage<'_> {
             sentences.len().min(cfg.max_sentences),
             tasks.len()
         );
-        let draft_model = self.config.lm_studio.clone();
+        let model = match self.config.revise_chat(false) {
+            Ok(model) => model,
+            Err(error) => {
+                *self.status = error.to_string();
+                return;
+            }
+        };
         let lexicon = crate::proofread::Lexicon::resolved(&self.config.proofread);
         let vocabulary = self.config.vocabulary.clone();
         let cache = self.doc.revise_cache.clone();
@@ -240,7 +247,7 @@ impl DraftPage<'_> {
             let result = revise_model::review(
                 revise_model::ReviewRequest {
                     cfg: &cfg,
-                    draft_model: &draft_model,
+                    model: &model,
                     lexicon: &lexicon,
                     vocabulary: &vocabulary,
                     markdown: &markdown,

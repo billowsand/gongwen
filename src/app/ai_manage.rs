@@ -1,14 +1,18 @@
-//! AI 管理页：AI 相关的设置都收在这里——模型服务、文字复核、知识库检索、
-//! 技能、数据接口、工具调试台、润色预设与输出标准（第 ⑥ 期，决定 F15）。
+//! AI 管理页：AI 相关的设置都收在这里——模型服务商管理、模型服务（按功能选模型）、
+//! 技能、数据接口、工具调试台、润色预设与输出标准。
 //!
 //! 布局与设置页相同：左侧分区菜单、右侧当前分区、底部常驻保存条。表单行、
 //! 小标题、菜单项这些画法直接复用 `app::settings` 的，两页看起来是一套东西。
 //! 网络代理是全局的（起草、复核、知识库都走它），留在设置页。
+//!
+//! 模型分两层管：「模型服务商管理」只管连接身份（地址、密钥、模型清单缓存，
+//! 见 `app::provider_settings`）；「模型服务」按功能（文字起草 / 文字复核 /
+//! 知识库检索）各自挑一个提供商的模型，不再碰地址密钥。
 
+use super::provider_settings::{model_picker, provider_ref_chip};
 use super::settings::{
     DETAIL_MAX_WIDTH, FOOTER_HEIGHT, MENU_COLUMN_WIDTH, MENU_PANEL_MARGIN, MENU_WIDTH,
-    setting_continuation, setting_field, setting_label, setting_row, settings_menu_item,
-    sub_heading,
+    setting_continuation, setting_label, setting_row, settings_menu_item, sub_heading,
 };
 use crate::app::{GongwenApp, warn};
 use crate::models::RerankMode;
@@ -21,13 +25,11 @@ const PRESETS_MAX_WIDTH: f32 = 1180.0;
 /// AI 管理页的分区。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum AiSection {
-    /// 起草模型的 OpenAI 兼容接口与生成参数。
+    /// 服务提供商：接口地址、密钥与模型清单缓存。
     #[default]
+    Providers,
+    /// 按功能配模型：文字起草、文字复核、知识库检索。
     ModelService,
-    /// AI 文字复核（小模型逐句检查）。
-    ReviseModel,
-    /// 知识库检索用的 embedding 与 rerank 模型。
-    Knowledge,
     /// 技能：SKILL.md 的管理。
     Skills,
     /// 数据接口：内网查询接口。
@@ -44,14 +46,7 @@ pub(crate) enum AiSection {
 
 /// 左侧菜单的分组。
 const MENU_GROUPS: [(&str, &[AiSection]); 3] = [
-    (
-        "模型",
-        &[
-            AiSection::ModelService,
-            AiSection::ReviseModel,
-            AiSection::Knowledge,
-        ],
-    ),
+    ("模型", &[AiSection::Providers, AiSection::ModelService]),
     (
         "智能体",
         &[
@@ -68,10 +63,9 @@ const MENU_GROUPS: [(&str, &[AiSection]); 3] = [
 
 impl AiSection {
     #[cfg(test)]
-    const ALL: [AiSection; 9] = [
+    const ALL: [AiSection; 8] = [
+        AiSection::Providers,
         AiSection::ModelService,
-        AiSection::ReviseModel,
-        AiSection::Knowledge,
         AiSection::Skills,
         AiSection::DataApis,
         AiSection::ToolConsole,
@@ -83,9 +77,8 @@ impl AiSection {
     /// 菜单里显示的中文名，同时是右栏的标题。
     pub(crate) fn label(self) -> &'static str {
         match self {
+            AiSection::Providers => "模型服务商管理",
             AiSection::ModelService => "模型服务",
-            AiSection::ReviseModel => "文字复核",
-            AiSection::Knowledge => "知识库检索",
             AiSection::Skills => "技能",
             AiSection::DataApis => "数据接口",
             AiSection::ToolConsole => "工具调试台",
@@ -97,9 +90,8 @@ impl AiSection {
 
     fn icon(self) -> theme::Icon {
         match self {
+            AiSection::Providers => theme::Icon::Globe,
             AiSection::ModelService => theme::Icon::PlugZap,
-            AiSection::ReviseModel => theme::Icon::Sparkles,
-            AiSection::Knowledge => theme::Icon::Library,
             AiSection::Skills => theme::Icon::WandSparkles,
             AiSection::DataApis => theme::Icon::Braces,
             AiSection::ToolConsole => theme::Icon::Settings,
@@ -111,18 +103,13 @@ impl AiSection {
 
     fn description(self) -> &'static str {
         match self {
+            AiSection::Providers => {
+                "接口地址与 API Key 只在这里填一次；「模型服务」里起草、复核、知识库各自挑模型即可。\
+                 全部是 OpenAI 兼容接口：本机的 LM Studio、Ollama，内网 vLLM，或各家在线服务。"
+            }
             AiSection::ModelService => {
-                "应用调用 OpenAI 兼容接口，如内网 vLLM、LM Studio（http://127.0.0.1:1234/v1）或 \
-                 Ollama（http://127.0.0.1:11434/v1）。AI 侧栏的技能都用这里的模型。"
-            }
-            AiSection::ReviseModel => {
-                "逐句检查语病，结果进「修订建议」，逐条确认后才改正文。与起草模型分开配：\
-                 起草要发挥，复核只要稳——Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多。\
-                 地址和密钥留空表示沿用起草模型的。"
-            }
-            AiSection::Knowledge => {
-                "用 embedding 与 rerank 模型检索知识库，技能起草时据此取证据。\
-                 两个模型与起草对话模型相互独立。"
+                "每个功能各自挑一个提供商的模型；地址与密钥到「模型服务商管理」里统一维护。\
+                 换服务商不用各处改，在这里重选一次即可。"
             }
             AiSection::Skills => {
                 "AI 侧栏按技能做事：流程、提示词和能用的工具都写在 SKILL.md 里。内置技能可以复制一份改，\
@@ -260,9 +247,8 @@ impl GongwenApp {
                         ui.set_max_width(max_width.min(ui.available_width()));
                         section_header_ui(ui, section);
                         match section {
+                            AiSection::Providers => self.providers_section_ui(ui),
                             AiSection::ModelService => self.model_service_section_ui(ui),
-                            AiSection::ReviseModel => self.revise_model_section_ui(ui),
-                            AiSection::Knowledge => self.knowledge_section_ui(ui),
                             AiSection::Skills => self.skills_section_ui(ui),
                             AiSection::DataApis => self.apis_section_ui(ui),
                             AiSection::ToolConsole => self.tool_console_section_ui(ui),
@@ -482,54 +468,36 @@ fn context_window_row(
 }
 
 impl GongwenApp {
-    /// 本地模型服务分区：起草模型的接口地址、模型与生成参数。
+    /// 「模型服务」分区：按功能配模型——文字起草、文字复核、知识库检索。
+    /// 地址与密钥不在这里填；模型从「模型服务商管理」缓存的清单里挑，
+    /// 选择器按提供商分组、可筛选（与字体选择同一套交互）。
     fn model_service_section_ui(&mut self, ui: &mut egui::Ui) {
-        sub_heading(ui, "接口", None);
-        setting_field(
-            ui,
-            "接口地址",
-            &mut self.config.lm_studio.base_url,
-            "包含 /v1",
+        let providers = self.config.providers.clone();
+
+        // ── 文字起草 ────────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            sub_heading(ui, "文字起草", None);
+            let mref = self.config.draft_model.clone();
+            provider_ref_chip(ui, &self.config, &mref);
+        });
+        ui.label(
+            egui::RichText::new("AI 侧栏的技能都用这里的模型。")
+                .size(theme::font_sizes::SMALL)
+                .color(theme::text_muted()),
         );
         setting_row(ui, "模型", None, |ui| {
-            if self.models.is_empty() {
-                crate::ime::exempt(ui.text_edit_singleline(&mut self.config.lm_studio.model));
-            } else {
-                egui::ComboBox::from_id_salt("model_selector")
-                    .selected_text(if self.config.lm_studio.model.is_empty() {
-                        "请选择模型"
-                    } else {
-                        &self.config.lm_studio.model
-                    })
-                    .width(300.0)
-                    .show_ui(ui, |ui| {
-                        for model in &self.models {
-                            ui.selectable_value(
-                                &mut self.config.lm_studio.model,
-                                model.clone(),
-                                model,
-                            );
-                        }
-                    });
-            }
-            if ui
-                .add_enabled(
-                    !self.busy,
-                    theme::icon_text_button(theme::Icon::PlugZap, "测试连接 / 刷新模型"),
-                )
-                .clicked()
-            {
-                self.start_model_probe();
-            }
+            let mut filter = self.model_filter.get("draft").cloned().unwrap_or_default();
+            model_picker(
+                ui,
+                "draft",
+                &providers,
+                &mut self.config.draft_model,
+                None,
+                &["chat"],
+                &mut filter,
+            );
+            self.model_filter.insert("draft".into(), filter);
         });
-        setting_field(
-            ui,
-            "API Key",
-            &mut self.config.lm_studio.api_key,
-            "本地服务通常可留空",
-        );
-
-        sub_heading(ui, "生成参数", None);
         setting_row(ui, "温度", None, |ui| {
             ui.add(
                 egui::Slider::new(&mut self.config.lm_studio.temperature, 0.0..=1.2).step_by(0.05),
@@ -545,10 +513,11 @@ impl GongwenApp {
                 );
             },
         );
-        let auto = crate::lmstudio::context::peek_window(&crate::models::LmStudioConfig {
-            context_window: 0,
-            ..self.config.lm_studio.clone()
-        });
+        let auto = {
+            let mut probe = self.config.draft_chat().unwrap_or_default();
+            probe.context_window = 0;
+            crate::lmstudio::context::peek_window(&probe)
+        };
         context_window_row(
             ui,
             "draft_context_window",
@@ -560,56 +529,41 @@ impl GongwenApp {
                 egui::DragValue::new(&mut self.config.lm_studio.timeout_seconds).range(5..=1800),
             );
         });
-    }
 
-    /// AI 文字复核分区：复核小模型的接口、参数、检查器开关与采纳统计。
-    fn revise_model_section_ui(&mut self, ui: &mut egui::Ui) {
+        // ── 文字复核 ────────────────────────────────────────────────
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            sub_heading(ui, "文字复核", None);
+            let mref = self.config.revise_model.model_ref.clone();
+            provider_ref_chip(ui, &self.config, &mref);
+        });
+        ui.label(
+            egui::RichText::new(
+                "逐句检查语病，结果进「修订建议」，逐条确认后才改正文。与起草模型分开配：\
+                 起草要发挥，复核只要稳——Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多。\
+                 复核请求会自动带上关闭思考的开关，服务端不认时会自动去掉重试。",
+            )
+            .size(theme::font_sizes::SMALL)
+            .color(theme::text_muted()),
+        );
         ui.checkbox(
             &mut self.config.revise_model.enabled,
             "启用文字复核（起草页「审校」分区出现入口）",
         );
         ui.add_enabled_ui(self.config.revise_model.enabled, |ui| {
-            sub_heading(
-                ui,
-                "接口",
-                Some(
-                    "复核请求会自动带上关闭思考的开关（Qwen3 一类的模型开着 thinking 会把输出预算全花在推理上），服务端不认时会自动去掉重试；若报错提示只拿到思考过程，再到服务端关闭或改用非思考模型。",
-                ),
-            );
-            setting_field(
-                ui,
-                "接口地址",
-                &mut self.config.revise_model.base_url,
-                "留空沿用起草模型的地址",
-            );
-            setting_row(ui, "模型", None, |ui| {
-                if self.models.is_empty() {
-                    crate::ime::exempt(ui.text_edit_singleline(&mut self.config.revise_model.model));
-                } else {
-                    egui::ComboBox::from_id_salt("revise_model_selector")
-                        .selected_text(if self.config.revise_model.model.is_empty() {
-                            "请选择模型"
-                        } else {
-                            &self.config.revise_model.model
-                        })
-                        .width(300.0)
-                        .show_ui(ui, |ui| {
-                            for model in &self.models {
-                                ui.selectable_value(
-                                    &mut self.config.revise_model.model,
-                                    model.clone(),
-                                    model,
-                                );
-                            }
-                        });
-                }
+            setting_row(ui, "模型", Some("留空 = 沿用起草模型"), |ui| {
+                let mut filter = self.model_filter.get("revise").cloned().unwrap_or_default();
+                model_picker(
+                    ui,
+                    "revise",
+                    &providers,
+                    &mut self.config.revise_model.model_ref,
+                    Some("沿用起草模型"),
+                    &["chat"],
+                    &mut filter,
+                );
+                self.model_filter.insert("revise".into(), filter);
             });
-            setting_field(
-                ui,
-                "API Key",
-                &mut self.config.revise_model.api_key,
-                "留空沿用起草模型的密钥",
-            );
 
             sub_heading(ui, "送检范围", None);
             setting_row(ui, "单句字数上限", None, |ui| {
@@ -632,9 +586,11 @@ impl GongwenApp {
                         .range(5..=600),
                 );
             });
-            let mut probe = self.config.revise_model.resolve(&self.config.lm_studio);
-            probe.context_window = 0;
-            let auto = crate::lmstudio::context::peek_window(&probe);
+            let auto = {
+                let mut probe = self.config.revise_chat(false).unwrap_or_default();
+                probe.context_window = 0;
+                crate::lmstudio::context::peek_window(&probe)
+            };
             context_window_row(
                 ui,
                 "revise_context_window",
@@ -648,166 +604,115 @@ impl GongwenApp {
             sub_heading(ui, "采纳统计", None);
             self.revise_metrics_ui(ui);
         });
-    }
 
-    /// 知识库分区：embedding 与 rerank 模型的接口与检索方式。
-    fn knowledge_section_ui(&mut self, ui: &mut egui::Ui) {
+        // ── 知识库检索 ──────────────────────────────────────────────
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            sub_heading(ui, "知识库检索", None);
+            let mref = self.config.rag.embedding.model_ref.clone();
+            provider_ref_chip(ui, &self.config, &mref);
+        });
+        ui.label(
+            egui::RichText::new(
+                "用 embedding 与 rerank 模型检索知识库，技能起草时据此取证据。\
+                 两个模型与起草对话模型相互独立。",
+            )
+            .size(theme::font_sizes::SMALL)
+            .color(theme::text_muted()),
+        );
         ui.checkbox(&mut self.config.rag.enabled, "启用知识库检索增强")
             .on_hover_text("关闭后，AI 侧栏输入框底栏的“知识库”开关不生效");
-        sub_heading(ui, "Embedding 模型", None);
-        setting_field(
-            ui,
-            "接口地址",
-            &mut self.config.rag.embedding.base_url,
-            "包含 /v1",
-        );
-        setting_row(ui, "模型", None, |ui| {
-            if self.embedding_models.is_empty() {
-                crate::ime::exempt(ui.text_edit_singleline(&mut self.config.rag.embedding.model))
-                    .on_hover_text("可手填模型名，或点右侧按钮从服务读取");
-            } else {
-                egui::ComboBox::from_id_salt("embedding_model_selector")
-                    .selected_text(if self.config.rag.embedding.model.is_empty() {
-                        "请选择模型"
-                    } else {
-                        &self.config.rag.embedding.model
-                    })
-                    .width(360.0)
+        ui.add_enabled_ui(self.config.rag.enabled, |ui| {
+            setting_row(ui, "Embedding 模型", None, |ui| {
+                let mut filter = self
+                    .model_filter
+                    .get("embedding")
+                    .cloned()
+                    .unwrap_or_default();
+                model_picker(
+                    ui,
+                    "embedding",
+                    &providers,
+                    &mut self.config.rag.embedding.model_ref,
+                    None,
+                    &["embedding"],
+                    &mut filter,
+                );
+                self.model_filter.insert("embedding".into(), filter);
+            });
+
+            let rerank_hint = match self.config.rag.rerank.mode {
+                RerankMode::None => {
+                    "直接按混合召回的融合分取前 N 条。够用，只是排序不如重排精准。"
+                }
+                RerankMode::Api => {
+                    "需要能提供 rerank 接口的服务（Jina / Cohere / TEI / Infinity 等）。注意：LM Studio 与 Ollama 目前均不提供该专用接口。"
+                }
+                RerankMode::Llm => {
+                    "复用上面的对话模型给候选片段打分，不必另起服务。代价是每次检索多一次模型调用（低温短输出，通常几秒）。"
+                }
+            };
+            setting_row(ui, "重排方式", Some(rerank_hint), |ui| {
+                egui::ComboBox::from_id_salt("rerank_mode_selector")
+                    .selected_text(self.config.rag.rerank.mode.label())
+                    .width(300.0)
                     .show_ui(ui, |ui| {
-                        for model in &self.embedding_models {
+                        for mode in RerankMode::ALL {
                             ui.selectable_value(
-                                &mut self.config.rag.embedding.model,
-                                model.clone(),
-                                model,
+                                &mut self.config.rag.rerank.mode,
+                                mode,
+                                mode.label(),
                             );
                         }
                     });
+            });
+            if self.config.rag.rerank.mode == RerankMode::Api {
+                setting_row(ui, "Rerank 模型", Some("留空则跳过重排"), |ui| {
+                    let mut filter = self
+                        .model_filter
+                        .get("rerank")
+                        .cloned()
+                        .unwrap_or_default();
+                    model_picker(
+                        ui,
+                        "rerank",
+                        &providers,
+                        &mut self.config.rag.rerank.model_ref,
+                        Some("不使用"),
+                        &["rerank"],
+                        &mut filter,
+                    );
+                    self.model_filter.insert("rerank".into(), filter);
+                });
+                setting_continuation(ui, |ui| {
+                    ui.weak(
+                        "rerank 的端点路径与响应字段等进阶项可在 config.json 的 rag.rerank 节调整，适配不同服务。",
+                    );
+                });
             }
-            if ui
-                .add_enabled(
-                    !self.embedding_probe_busy,
-                    theme::icon_text_button(theme::Icon::PlugZap, "测试连接 / 刷新模型"),
-                )
-                .clicked()
-            {
-                self.start_embedding_probe();
-            }
-        });
-        setting_field(
-            ui,
-            "API Key",
-            &mut self.config.rag.embedding.api_key,
-            "本地服务通常可留空",
-        );
-
-        sub_heading(
-            ui,
-            "重排（可选，用于精排检索结果）",
-            Some("rerank 响应字段名等进阶项可在 config.json 的 rag.rerank 节调整，适配不同服务。"),
-        );
-        let rerank_hint = match self.config.rag.rerank.mode {
-            RerankMode::None => "直接按混合召回的融合分取前 N 条。够用，只是排序不如重排精准。",
-            RerankMode::Api => {
-                "需要能提供 rerank 接口的服务（Jina / Cohere / TEI / Infinity 等）。注意：LM Studio 与 Ollama 目前均不提供该专用接口。"
-            }
-            RerankMode::Llm => {
-                "复用上面的对话模型给候选片段打分，不必另起服务。代价是每次检索多一次模型调用（低温短输出，通常几秒）。"
-            }
-        };
-        setting_row(ui, "重排方式", Some(rerank_hint), |ui| {
-            egui::ComboBox::from_id_salt("rerank_mode_selector")
-                .selected_text(self.config.rag.rerank.mode.label())
-                .width(300.0)
-                .show_ui(ui, |ui| {
-                    for mode in RerankMode::ALL {
-                        ui.selectable_value(&mut self.config.rag.rerank.mode, mode, mode.label());
+            if self.config.rag.rerank.mode != RerankMode::None {
+                setting_continuation(ui, |ui| {
+                    if ui
+                        .add_enabled(
+                            !self.rerank_verify_busy,
+                            theme::icon_text_button(theme::Icon::PlugZap, "验证重排是否真的生效"),
+                        )
+                        .on_hover_text(
+                            "真跑一次重排。只测“连接”是不够的：服务遇到不认识的端点路径\n\
+                                     可能照样返回 200，看着像连上了，实际每次重排都在静默失败。",
+                        )
+                        .clicked()
+                    {
+                        self.start_rerank_verify();
                     }
                 });
-        });
-        if self.config.rag.rerank.mode == RerankMode::Api {
-            setting_field(
-                ui,
-                "接口地址",
-                &mut self.config.rag.rerank.base_url,
-                "包含 /v1",
-            );
-            setting_row(ui, "端点路径", None, |ui| {
-                ui.text_edit_singleline(&mut self.config.rag.rerank.path)
-                    .on_hover_text("拼在接口地址后，默认 rerank；不同服务路径可能不同");
-            });
-            setting_row(ui, "模型", None, |ui| {
-                if self.rerank_models.is_empty() {
-                    crate::ime::exempt(ui.text_edit_singleline(&mut self.config.rag.rerank.model))
-                        .on_hover_text("留空则跳过重排；可手填或点右侧按钮从服务读取");
-                } else {
-                    egui::ComboBox::from_id_salt("rerank_model_selector")
-                        .selected_text(if self.config.rag.rerank.model.is_empty() {
-                            "请选择（留空跳过重排）"
-                        } else {
-                            &self.config.rag.rerank.model
-                        })
-                        .width(300.0)
-                        .show_ui(ui, |ui| {
-                            // 允许清空：rerank 可选。
-                            if ui
-                                .selectable_label(
-                                    self.config.rag.rerank.model.is_empty(),
-                                    "（不使用）",
-                                )
-                                .clicked()
-                            {
-                                self.config.rag.rerank.model = String::new();
-                            }
-                            for model in &self.rerank_models {
-                                ui.selectable_value(
-                                    &mut self.config.rag.rerank.model,
-                                    model.clone(),
-                                    model,
-                                );
-                            }
-                        });
+                if let Some((ok, message)) = self.rerank_verify_result.clone() {
+                    setting_continuation(ui, |ui| {
+                        ui.colored_label(if ok { theme::accent() } else { warn() }, message);
+                    });
                 }
-                if ui
-                    .add_enabled(
-                        !self.rerank_probe_busy,
-                        theme::icon_text_button(theme::Icon::PlugZap, "测试连接 / 刷新模型"),
-                    )
-                    .clicked()
-                {
-                    self.start_rerank_probe();
-                }
-            });
-        }
-        if self.config.rag.rerank.mode == RerankMode::Api {
-            setting_field(
-                ui,
-                "API Key",
-                &mut self.config.rag.rerank.api_key,
-                "本地服务通常可留空",
-            );
-        }
-        if self.config.rag.rerank.mode != RerankMode::None {
-            setting_continuation(ui, |ui| {
-                if ui
-                    .add_enabled(
-                        !self.rerank_probe_busy,
-                        theme::icon_text_button(theme::Icon::PlugZap, "验证重排是否真的生效"),
-                    )
-                    .on_hover_text(
-                        "真跑一次重排。只测“连接”是不够的：服务遇到不认识的端点路径\n\
-                                 可能照样返回 200，看着像连上了，实际每次重排都在静默失败。",
-                    )
-                    .clicked()
-                {
-                    self.start_rerank_verify();
-                }
-            });
-            if let Some((ok, message)) = self.rerank_verify_result.clone() {
-                setting_continuation(ui, |ui| {
-                    ui.colored_label(if ok { theme::accent() } else { warn() }, message);
-                });
             }
-        }
+        });
     }
 }
 

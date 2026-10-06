@@ -502,11 +502,213 @@ impl ProofreadConfig {
     }
 }
 
+/// 模型服务提供商预设模板。预设只是模板：点「添加」才实例化成一条
+/// [`ProviderConfig`] 写入配置；模板本身不落盘。地址都要求是 OpenAI 兼容接口
+/// （含 /v1）。用途标签只用于模型选择器里的排序与提示，不做硬性过滤——服务端
+/// 到底加载了什么模型，以「测试连接 / 刷新模型」读到的为准。
+pub struct ProviderPreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base_url: &'static str,
+    /// 本地服务（LM Studio / Ollama）通常不需要密钥。
+    pub needs_key: bool,
+    /// 卡片上的一句话提示。
+    pub note: &'static str,
+    /// 用途标签：`chat` / `embedding` / `rerank`。
+    pub tags: &'static [&'static str],
+}
+
+pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset {
+        id: "lmstudio",
+        name: "LM Studio",
+        base_url: "http://127.0.0.1:1234/v1",
+        needs_key: false,
+        note: "本机 LM Studio 服务",
+        tags: &["chat", "embedding"],
+    },
+    ProviderPreset {
+        id: "ollama",
+        name: "Ollama",
+        base_url: "http://127.0.0.1:11434/v1",
+        needs_key: false,
+        note: "本机 Ollama 服务",
+        tags: &["chat", "embedding"],
+    },
+    ProviderPreset {
+        id: "vllm",
+        name: "vLLM（内网）",
+        base_url: "",
+        needs_key: false,
+        note: "内网 vLLM 部署，地址视部署填写；可同时承载对话、embedding 与 rerank 模型",
+        tags: &["chat", "embedding", "rerank"],
+    },
+    ProviderPreset {
+        id: "opencode-go",
+        name: "OpenCode-Go",
+        base_url: "",
+        needs_key: true,
+        note: "OpenAI 兼容聚合服务，地址与密钥以开通时给的为准",
+        tags: &["chat"],
+    },
+    ProviderPreset {
+        id: "minimax",
+        name: "MiniMax",
+        base_url: "https://api.minimaxi.com/v1",
+        needs_key: true,
+        note: "MiniMax 国内开放平台",
+        tags: &["chat"],
+    },
+    ProviderPreset {
+        id: "kimi-code",
+        name: "Kimi Code",
+        base_url: "https://api.kimi.com/coding/v1",
+        needs_key: true,
+        note: "Kimi Code 订阅的 OpenAI 兼容端点（与 Kimi 开放平台按量计费是两套账户）",
+        tags: &["chat"],
+    },
+    ProviderPreset {
+        id: "dmxapi",
+        name: "DMXAPI",
+        base_url: "https://www.dmxapi.cn/v1",
+        needs_key: true,
+        note: "多模型聚合网关",
+        tags: &["chat", "embedding", "rerank"],
+    },
+    ProviderPreset {
+        id: "siliconflow",
+        name: "硅基流动",
+        base_url: "https://api.siliconflow.cn/v1",
+        needs_key: true,
+        note: "对话、embedding 与 rerank 模型都有",
+        tags: &["chat", "embedding", "rerank"],
+    },
+    ProviderPreset {
+        id: "deepseek",
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com/v1",
+        needs_key: true,
+        note: "DeepSeek 官方开放平台",
+        tags: &["chat"],
+    },
+];
+
+/// 按接口地址猜预设（迁移旧配置时给提供商起名用）。归一化后按主机特征匹配。
+pub fn preset_for_url(base_url: &str) -> Option<&'static ProviderPreset> {
+    let url = base_url.trim().trim_end_matches('/').to_lowercase();
+    if url.is_empty() {
+        return None;
+    }
+    let host_like = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    PROVIDER_PRESETS
+        .iter()
+        .find(|preset| {
+            let preset_url = preset
+                .base_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://");
+            !preset_url.is_empty() && host_like == preset_url
+        })
+        .or_else(|| {
+            // 端口 / 域名特征兜底：本机服务换主机名、聚合站换后缀都还能认出来。
+            if host_like.starts_with("127.0.0.1:1234") || host_like.starts_with("localhost:1234") {
+                return PROVIDER_PRESETS.iter().find(|p| p.id == "lmstudio");
+            }
+            if host_like.starts_with("127.0.0.1:11434") || host_like.starts_with("localhost:11434")
+            {
+                return PROVIDER_PRESETS.iter().find(|p| p.id == "ollama");
+            }
+            let contains = |needle: &str, id: &str| {
+                host_like
+                    .contains(needle)
+                    .then(|| PROVIDER_PRESETS.iter().find(|p| p.id == id))
+                    .flatten()
+            };
+            contains("dmxapi", "dmxapi")
+                .or_else(|| contains("siliconflow", "siliconflow"))
+                .or_else(|| contains("api.deepseek.com", "deepseek"))
+                .or_else(|| contains("minimax", "minimax"))
+                .or_else(|| contains("api.kimi.com", "kimi-code"))
+        })
+}
+
+/// 一个模型服务提供商：连接身份（地址、密钥）的唯一存放处。
+///
+/// 起草、复核、知识库各功能只存 [`ModelRef`] 引用，不再各自填地址密钥；
+/// 换服务商时在「AI 管理 → 模型服务」重选一次即可。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    /// 内部 id（`p1`、`p2`…），改名不影响引用。
+    pub id: String,
+    /// 显示名，如「LM Studio」「内网 vLLM」。
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub enabled: bool,
+    /// 上次「测试连接 / 刷新模型」读到的模型清单，随配置缓存：
+    /// 服务没开时选择器里仍能按这份清单选模型。
+    pub models: Vec<String>,
+    /// 用途标签（chat / embedding / rerank），从预设复制，只用于选择器排序。
+    pub tags: Vec<String>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            enabled: true,
+            models: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
+}
+
+/// 功能侧的模型选择：哪家提供商的哪个模型。
+///
+/// `model` 为空表示「未选择」；复核与 rerank 里空还有「沿用起草 / 跳过重排」
+/// 的语义，由各自的分区说明。提供商被删除时引用保留不清空，界面出警示，
+/// 运行时报错指向「AI 管理 → 模型服务」。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelRef {
+    pub provider_id: String,
+    pub model: String,
+}
+
+impl ModelRef {
+    pub fn is_empty(&self) -> bool {
+        self.model.trim().is_empty()
+    }
+}
+
+/// 模型引用解析失败：提供商被删、被停用或没填地址。消息直接给用户看。
+#[derive(Debug, Clone)]
+pub struct ModelRefError(pub String);
+
+impl fmt::Display for ModelRefError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ModelRefError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LmStudioConfig {
+    /// 旧字段：新配置写的是 `AppConfig::providers` + `draft_model`，这里只在
+    /// 迁移前（或测试直填）承载内联地址；迁移后清空并不再序列化。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
     pub temperature: f32,
     pub max_tokens: u32,
@@ -587,10 +789,14 @@ pub struct ProxyConfig {
 pub struct ReviseModelConfig {
     /// 默认关闭。模型没配好就把入口摆出来，只会让人点一次、失败一次。
     pub enabled: bool,
-    /// 留空表示沿用起草模型的接口地址。
+    /// 复核用的模型。留空 = 沿用起草模型（替代旧的「地址密钥分别留空沿用」规则）。
+    pub model_ref: ModelRef,
+    /// 旧字段：内联地址 / 模型 / 密钥，迁移后清空，仅作向后兼容读取。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
-    /// 留空表示沿用起草模型的密钥。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
     pub timeout_seconds: u64,
     /// 上下文窗口（token），0 表示自动，同 [`LmStudioConfig::context_window`]。
@@ -611,6 +817,7 @@ impl Default for ReviseModelConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            model_ref: ModelRef::default(),
             base_url: String::new(),
             model: String::new(),
             api_key: String::new(),
@@ -673,8 +880,14 @@ impl ReviseModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbeddingConfig {
+    ///  embedding 用的模型，引用「模型服务商管理」里的提供商。
+    pub model_ref: ModelRef,
+    /// 旧字段：内联地址 / 模型 / 密钥，迁移后清空，仅作向后兼容读取。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
     /// 一次请求批量嵌入的块数；本地模型 32 吞吐较好，也避免单批过大超时。
     pub batch_size: usize,
@@ -684,6 +897,7 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
+            model_ref: ModelRef::default(),
             base_url: "http://127.0.0.1:1234/v1".into(),
             model: String::new(),
             api_key: String::new(),
@@ -727,10 +941,17 @@ impl RerankMode {
 pub struct RerankConfig {
     /// 重排方式。默认 `api`，保持既有配置的行为不变。
     pub mode: RerankMode,
+    /// rerank 模型（专用端点模式），引用「模型服务商管理」里的提供商。
+    pub model_ref: ModelRef,
+    /// 旧字段：内联地址 / 模型 / 密钥，迁移后清空，仅作向后兼容读取。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
-    /// 端点路径，拼在 base_url 后（默认 "rerank"）。
+    /// 端点路径，拼在提供商地址后（默认 "rerank"）。路径与响应取值键是各家
+    /// 服务的方言，不属于连接身份，留在功能侧。
     pub path: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
     /// 请求里 top_n 字段名；空串表示不传 top_n。
     pub top_n_field: String,
@@ -745,6 +966,7 @@ impl Default for RerankConfig {
     fn default() -> Self {
         Self {
             mode: RerankMode::default(),
+            model_ref: ModelRef::default(),
             base_url: "http://127.0.0.1:1234/v1".into(),
             path: "rerank".into(),
             model: String::new(),
@@ -806,9 +1028,14 @@ impl Default for RagConfig {
 
 impl RagConfig {
     /// 实际生效的重排方式：选了「专用端点」却没填模型名时降级为不重排。
+    /// 模型名看新引用，也认迁移前的旧内联字段。
     pub fn effective_rerank_mode(&self) -> RerankMode {
         match self.rerank.mode {
-            RerankMode::Api if self.rerank.model.trim().is_empty() => RerankMode::None,
+            RerankMode::Api
+                if self.rerank.model_ref.is_empty() && self.rerank.model.trim().is_empty() =>
+            {
+                RerankMode::None
+            }
             mode => mode,
         }
     }
@@ -1731,6 +1958,10 @@ impl NumberingConfig {
 #[serde(default)]
 pub struct AppConfig {
     pub lm_studio: LmStudioConfig,
+    /// 模型服务提供商清单：地址与密钥的唯一存放处（「AI 管理 → 模型服务商管理」）。
+    pub providers: Vec<ProviderConfig>,
+    /// 文字起草用的模型（引用 providers 中的一项）。
+    pub draft_model: ModelRef,
     pub output_dir: String,
     pub vocabulary: Vec<VocabularyEntry>,
     /// 首次建库引导的完成状态；旧配置会根据是否已有词条在启动时自动迁移。
@@ -1805,6 +2036,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             lm_studio: LmStudioConfig::default(),
+            providers: Vec::new(),
+            draft_model: ModelRef::default(),
             output_dir: String::new(),
             vocabulary: vec![],
             vocabulary_setup: VocabularySetupStatus::Pending,
@@ -1842,6 +2075,314 @@ impl Default for AppConfig {
             ime: ImeConfig::default(),
         }
     }
+}
+
+impl AppConfig {
+    pub fn provider(&self, id: &str) -> Option<&ProviderConfig> {
+        self.providers.iter().find(|p| p.id == id)
+    }
+
+    pub fn provider_mut(&mut self, id: &str) -> Option<&mut ProviderConfig> {
+        self.providers.iter_mut().find(|p| p.id == id)
+    }
+
+    /// 下一个可用的提供商 id（`p1`、`p2`…，取数字后缀最大值加一）。
+    pub fn next_provider_id(&self) -> String {
+        let max = self
+            .providers
+            .iter()
+            .filter_map(|p| p.id.strip_prefix('p'))
+            .filter_map(|n| n.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("p{}", max + 1)
+    }
+
+    /// 校验并取出功能引用的提供商。错误消息直接给用户看。
+    fn require_provider(&self, id: &str, func: &str) -> Result<&ProviderConfig, ModelRefError> {
+        let provider = self.provider(id).ok_or_else(|| {
+            ModelRefError(format!(
+                "{func}引用的提供商已删除：请到「AI 管理 → 模型服务」重新选择模型。"
+            ))
+        })?;
+        if !provider.enabled {
+            return Err(ModelRefError(format!(
+                "{func}用的提供商「{}」已停用：到「AI 管理 → 模型服务商管理」启用，或重新选择模型。",
+                provider.name
+            )));
+        }
+        if provider.base_url.trim().is_empty() {
+            return Err(ModelRefError(format!(
+                "提供商「{}」还没填接口地址：请到「AI 管理 → 模型服务商管理」补齐。",
+                provider.name
+            )));
+        }
+        Ok(provider)
+    }
+
+    /// 起草模型（对话）的完整接入配置：提供商的地址密钥 + 功能侧的生成参数。
+    ///
+    /// 旧配置的内联字段（迁移前 / 测试直填）优先于引用，保证两条路都能跑。
+    pub fn draft_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
+        let mut config = self.lm_studio.clone();
+        if self.draft_model.is_empty() {
+            if !config.model.trim().is_empty() {
+                return Ok(config);
+            }
+            return Err(ModelRefError(
+                "还没有选择起草模型：请到「AI 管理 → 模型服务」选择。".into(),
+            ));
+        }
+        let provider = self.require_provider(&self.draft_model.provider_id, "文字起草")?;
+        config.base_url = provider.base_url.clone();
+        config.api_key = provider.api_key.clone();
+        config.model = self.draft_model.model.trim().to_string();
+        Ok(config)
+    }
+
+    /// 文字复核与智能体辅助步骤的接入配置：配了复核模型（且复核已启用）用它，
+    /// 否则沿用起草模型；温度固定 0，复核要的是可复现，不是发挥。
+    ///
+    /// `assist` 为 true 时输出上限沿用起草模型的设置——自主步骤里思考型模型的
+    /// 推理也算预算，给小了正文出不来；逐句复核则用按句长现算的小上限。
+    pub fn revise_chat(&self, assist: bool) -> Result<LmStudioConfig, ModelRefError> {
+        let draft = self.draft_chat()?;
+        let revise = &self.revise_model;
+        let mut config = if revise.enabled && !revise.model_ref.is_empty() {
+            let provider = self.require_provider(&revise.model_ref.provider_id, "文字复核")?;
+            LmStudioConfig {
+                base_url: provider.base_url.clone(),
+                model: revise.model_ref.model.trim().to_string(),
+                api_key: provider.api_key.clone(),
+                temperature: 0.0,
+                // 逐句复核的输出上限按句长现算，这里给个不起作用的兜底值。
+                max_tokens: 512,
+                timeout_seconds: revise.timeout_seconds.max(5),
+                context_window: revise.context_window,
+            }
+        } else if revise.enabled && !revise.model.trim().is_empty() {
+            // 旧内联字段（未迁移 / 测试直填）。
+            revise.resolve(&draft)
+        } else {
+            LmStudioConfig {
+                temperature: 0.0,
+                max_tokens: 512,
+                timeout_seconds: revise.timeout_seconds.max(5),
+                context_window: if revise.enabled {
+                    revise.context_window
+                } else {
+                    0
+                },
+                ..draft
+            }
+        };
+        if assist {
+            config.max_tokens = self.lm_studio.max_tokens;
+        }
+        Ok(config)
+    }
+
+    /// 智能体辅助步骤用的接入配置（原 `agent::backend::assist_config`）。
+    pub fn assist_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
+        self.revise_chat(true)
+    }
+
+    /// 解析后的知识库配置：embedding / rerank 的地址密钥从提供商填好，
+    /// 其余检索参数原样保留。提供商失效时不报错而是留空地址——检索路径
+    /// 已有「embedding 不可用就退回关键词检索」的降级与告警，界面另有警示芯片。
+    pub fn resolved_rag(&self) -> RagConfig {
+        let mut rag = self.rag.clone();
+        if !rag.embedding.model_ref.is_empty() {
+            let model = rag.embedding.model_ref.model.trim().to_string();
+            match self.provider(&rag.embedding.model_ref.provider_id) {
+                Some(p) if p.enabled && !p.base_url.trim().is_empty() => {
+                    rag.embedding.base_url = p.base_url.clone();
+                    rag.embedding.api_key = p.api_key.clone();
+                }
+                _ => {
+                    rag.embedding.base_url = String::new();
+                    rag.embedding.api_key = String::new();
+                }
+            }
+            rag.embedding.model = model;
+        }
+        if rag.rerank.mode == RerankMode::Api && !rag.rerank.model_ref.is_empty() {
+            let model = rag.rerank.model_ref.model.trim().to_string();
+            match self.provider(&rag.rerank.model_ref.provider_id) {
+                Some(p) if p.enabled && !p.base_url.trim().is_empty() => {
+                    rag.rerank.base_url = p.base_url.clone();
+                    rag.rerank.api_key = p.api_key.clone();
+                }
+                _ => {
+                    rag.rerank.base_url = String::new();
+                    rag.rerank.api_key = String::new();
+                }
+            }
+            rag.rerank.model = model;
+        }
+        rag
+    }
+
+    /// 当前 embedding 模型的名字（解析引用后）。建索引与「换模型提示重建」用它。
+    pub fn embedding_model_name(&self) -> String {
+        if !self.rag.embedding.model_ref.is_empty() {
+            return self.rag.embedding.model_ref.model.trim().to_string();
+        }
+        self.rag.embedding.model.trim().to_string()
+    }
+
+    /// 状态栏上起草模型的显示名：模型（提供商）。
+    pub fn draft_model_label(&self) -> String {
+        let model = if !self.draft_model.is_empty() {
+            self.draft_model.model.trim().to_string()
+        } else {
+            self.lm_studio.model.trim().to_string()
+        };
+        if model.is_empty() {
+            return String::new();
+        }
+        match self.provider(&self.draft_model.provider_id) {
+            Some(p) => format!("{model}（{}）", p.name),
+            None => model,
+        }
+    }
+
+    /// 旧配置迁移：把散在四处的地址 / 密钥 / 模型名归并成提供商清单与模型引用。
+    ///
+    /// 只在还没有任何提供商时跑；同一个「地址 + 密钥」只建一条。提供商按地址
+    /// 匹配预设起名（127.0.0.1:1234 → LM Studio，dmxapi → DMXAPI……），认不出
+    /// 的叫「自定义提供商」。迁移后清空旧内联字段，返回是否发生了改动。
+    pub fn migrate_providers(&mut self) -> bool {
+        if !self.providers.is_empty() {
+            return false;
+        }
+        // 先留住旧值：下面边迁边清。
+        let draft_url = self.lm_studio.base_url.trim().to_string();
+        let draft_key = self.lm_studio.api_key.trim().to_string();
+        let draft_model = self.lm_studio.model.trim().to_string();
+        let mut changed = false;
+
+        // 起草：默认配置也带 127.0.0.1:1234，总能建出第一条（一般是 LM Studio）。
+        if !draft_url.is_empty() || !draft_model.is_empty() {
+            let pid = upsert_provider(&mut self.providers, &draft_url, &draft_key);
+            if !draft_model.is_empty() {
+                self.draft_model = ModelRef {
+                    provider_id: pid,
+                    model: draft_model,
+                };
+            }
+            self.lm_studio.base_url.clear();
+            self.lm_studio.api_key.clear();
+            self.lm_studio.model.clear();
+            changed = true;
+        }
+
+        // 复核：旧规则是地址 / 密钥留空沿用起草，迁移时归并到同一条提供商。
+        let revise_model = self.revise_model.model.trim().to_string();
+        if !revise_model.is_empty() {
+            let url = {
+                let own = self.revise_model.base_url.trim();
+                if own.is_empty() {
+                    draft_url.as_str()
+                } else {
+                    own
+                }
+                .to_string()
+            };
+            let key = {
+                let own = self.revise_model.api_key.trim();
+                if own.is_empty() {
+                    draft_key.as_str()
+                } else {
+                    own
+                }
+                .to_string()
+            };
+            let pid = upsert_provider(&mut self.providers, &url, &key);
+            self.revise_model.model_ref = ModelRef {
+                provider_id: pid,
+                model: revise_model,
+            };
+            changed = true;
+        }
+        self.revise_model.base_url.clear();
+        self.revise_model.api_key.clear();
+        self.revise_model.model.clear();
+
+        // embedding / rerank：各自归并；模型名为空就只清字段、不建引用。
+        let embed_model = self.rag.embedding.model.trim().to_string();
+        let embed_url = self.rag.embedding.base_url.trim().to_string();
+        let embed_key = self.rag.embedding.api_key.trim().to_string();
+        if !embed_model.is_empty() || (!embed_url.is_empty() && embed_url != draft_url) {
+            let pid = upsert_provider(&mut self.providers, &embed_url, &embed_key);
+            if !embed_model.is_empty() {
+                self.rag.embedding.model_ref = ModelRef {
+                    provider_id: pid,
+                    model: embed_model,
+                };
+            }
+            changed = true;
+        }
+        self.rag.embedding.base_url.clear();
+        self.rag.embedding.api_key.clear();
+        self.rag.embedding.model.clear();
+
+        let rerank_model = self.rag.rerank.model.trim().to_string();
+        let rerank_url = self.rag.rerank.base_url.trim().to_string();
+        let rerank_key = self.rag.rerank.api_key.trim().to_string();
+        if !rerank_model.is_empty() || (!rerank_url.is_empty() && rerank_url != draft_url) {
+            let pid = upsert_provider(&mut self.providers, &rerank_url, &rerank_key);
+            if !rerank_model.is_empty() {
+                self.rag.rerank.model_ref = ModelRef {
+                    provider_id: pid,
+                    model: rerank_model,
+                };
+            }
+            changed = true;
+        }
+        self.rag.rerank.base_url.clear();
+        self.rag.rerank.api_key.clear();
+        self.rag.rerank.model.clear();
+
+        changed
+    }
+}
+
+/// 迁移用的归并助手：同一个「地址 + 密钥」只留一条提供商，返回其 id。
+fn upsert_provider(providers: &mut Vec<ProviderConfig>, base_url: &str, api_key: &str) -> String {
+    let url = base_url.trim().trim_end_matches('/').to_string();
+    let key = api_key.trim().to_string();
+    if let Some(existing) = providers
+        .iter()
+        .find(|p| p.base_url == url && p.api_key == key)
+    {
+        return existing.id.clone();
+    }
+    let seq = providers.len() as u32 + 1;
+    let preset = preset_for_url(&url);
+    let name = preset.map(|p| p.name.to_string()).unwrap_or_else(|| {
+        if url.contains("moonshot") {
+            "Kimi 开放平台".into()
+        } else if seq == 1 {
+            "自定义提供商".into()
+        } else {
+            format!("自定义提供商 {seq}")
+        }
+    });
+    let tags = preset
+        .map(|p| p.tags.iter().map(|t| (*t).to_string()).collect())
+        .unwrap_or_default();
+    let id = format!("p{seq}");
+    providers.push(ProviderConfig {
+        id: id.clone(),
+        name,
+        base_url: url,
+        api_key: key,
+        enabled: true,
+        models: Vec::new(),
+        tags,
+    });
+    id
 }
 
 /// 公文排版里可以单独换字体的位置。
@@ -2466,6 +3007,71 @@ pub struct GeneratedDraft {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    /// 旧配置（内联地址密钥）迁移成提供商清单与模型引用：同一地址密钥只建一条，
+    /// 按地址认出预设名，旧字段清空。
+    #[test]
+    fn legacy_inline_endpoints_migrate_into_providers() {
+        let mut config = AppConfig::default();
+        config.lm_studio.base_url = "http://127.0.0.1:1234/v1".into();
+        config.lm_studio.model = "qwen3-8b".into();
+        config.revise_model.enabled = true;
+        config.revise_model.model = "qwen3-4b".into();
+        // 复核地址留空 = 沿用起草，迁移后应指向同一家提供商。
+        config.rag.embedding.base_url = "https://api.siliconflow.cn/v1".into();
+        config.rag.embedding.api_key = "sk-x".into();
+        config.rag.embedding.model = "bge-m3".into();
+
+        assert!(config.migrate_providers());
+        assert_eq!(config.providers.len(), 2);
+        assert_eq!(config.providers[0].name, "LM Studio");
+        assert_eq!(config.providers[1].name, "硅基流动");
+        assert_eq!(config.draft_model.model, "qwen3-8b");
+        assert_eq!(config.revise_model.model_ref.provider_id, "p1");
+        assert_eq!(config.rag.embedding.model_ref.provider_id, "p2");
+        assert!(config.lm_studio.base_url.is_empty(), "旧字段应清空");
+        assert!(config.revise_model.model.is_empty());
+
+        // 幂等：已有提供商时不再迁。
+        assert!(!config.migrate_providers());
+    }
+
+    /// 迁移后的解析：起草 / 复核 / embedding 都拿到提供商的地址密钥。
+    #[test]
+    fn resolvers_fill_endpoint_from_the_provider() {
+        let mut config = AppConfig::default();
+        config.lm_studio.base_url = "https://www.dmxapi.cn/v1".into();
+        config.lm_studio.api_key = "dmx-key".into();
+        config.lm_studio.model = "DeepSeek-V4-Flash".into();
+        config.revise_model.enabled = true;
+        config.revise_model.model = "qwen3-4b".into();
+        config.rag.embedding.base_url = "https://www.dmxapi.cn/v1".into();
+        config.rag.embedding.api_key = "dmx-key".into();
+        config.rag.embedding.model = "bge-m3".into();
+        config.migrate_providers();
+
+        let draft = config.draft_chat().unwrap();
+        assert_eq!(draft.base_url, "https://www.dmxapi.cn/v1");
+        assert_eq!(draft.api_key, "dmx-key");
+        assert_eq!(draft.model, "DeepSeek-V4-Flash");
+
+        let revise = config.revise_chat(false).unwrap();
+        assert_eq!(revise.model, "qwen3-4b");
+        assert_eq!(revise.temperature, 0.0);
+        assert_eq!(revise.base_url, "https://www.dmxapi.cn/v1");
+
+        let rag = config.resolved_rag();
+        assert_eq!(rag.embedding.model, "bge-m3");
+        assert_eq!(rag.embedding.api_key, "dmx-key");
+
+        // 提供商被删除：起草报出指向「模型服务」的错误，引用保留。
+        config.providers.retain(|p| p.id != "p1");
+        let error = config.draft_chat().unwrap_err().to_string();
+        assert!(error.contains("模型服务"), "{error}");
+        assert_eq!(config.draft_model.model, "DeepSeek-V4-Flash");
+        // 知识库解析不报错而是留空地址，交给运行时的降级与告警。
+        assert!(config.resolved_rag().embedding.base_url.is_empty());
+    }
 
     /// 「研报」分区卡只在研究报告下出现，其余分区卡各文种都在。
     #[test]

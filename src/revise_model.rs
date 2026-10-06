@@ -472,7 +472,8 @@ pub fn parse_reply(reply: &str) -> Option<String> {
 /// 一轮复核要用到的全部输入。
 pub struct ReviewRequest<'a> {
     pub cfg: &'a ReviseModelConfig,
-    pub draft_model: &'a LmStudioConfig,
+    /// 已解析的复核模型接入配置（`AppConfig::revise_chat`），含提供商的地址密钥。
+    pub model: &'a LmStudioConfig,
     pub lexicon: &'a Lexicon,
     pub vocabulary: &'a [VocabularyEntry],
     pub markdown: &'a str,
@@ -488,16 +489,15 @@ pub fn review(
 ) -> anyhow::Result<ReviewOutcome> {
     let ReviewRequest {
         cfg,
-        draft_model,
+        model,
         lexicon,
         vocabulary,
         markdown,
         cache,
         tasks,
     } = request;
-    let model = cfg.resolve(draft_model);
     if model.model.trim().is_empty() {
-        anyhow::bail!("请先在设置中为文字复核选择模型");
+        anyhow::bail!("请先在「AI 管理 → 模型服务」为文字复核选择模型");
     }
     let sentences = segment_sentences(markdown, cfg.max_sentence_chars);
     let total = sentences.len().min(cfg.max_sentences);
@@ -518,7 +518,7 @@ pub fn review(
                     // 复核一律要求关思考：这活要的是稳定和快，不需要推理，
                     // 而思考会把输出预算吃光、把一轮几十次调用拖成几分钟。
                     let raw = lmstudio::generate_retrying(
-                        &model,
+                        model,
                         &system,
                         &user,
                         0.0,

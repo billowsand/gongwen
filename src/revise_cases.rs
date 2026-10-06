@@ -339,25 +339,17 @@ mod tests {
         let config = crate::storage::load().unwrap_or_default();
         crate::net::set_proxy(&config.proxy);
         let cfg = config.revise_model.clone();
-        let resolved = cfg.resolve(&config.lm_studio);
+        let resolved = config.revise_chat(false).expect("文字复核模型解析失败");
         // 报错要说清楚「去哪儿改、改成什么」。只说「请在设置中配置」，用户还得
         // 自己去找配置文件在哪——尤其配置目录在各平台上并不一样。
         assert!(
             !resolved.model.trim().is_empty(),
-            "文字复核还没有选模型，无法评测。二选一：\n\
-             （1）打开应用 →「设置 → AI 文字复核」→ 勾选启用 → 选一个模型；\n\
-             （2）直接编辑 {}\n\
-             \u{20}   把 revise_model.model 填成模型名（如 qwen3-8b），\n\
-             \u{20}   base_url 留空则沿用起草模型的 {}。\n\
-             另外请确认本机模型服务已启动并加载了该模型。",
+            "文字复核还没有选模型，无法评测。请打开应用 →「AI 管理 → 模型服务」→ \
+             勾选启用文字复核并选一个模型（配置文件：{}）。\n\
+             另外请确认对应的模型服务已启动并加载了该模型。",
             crate::storage::config_path()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|error| format!("（配置文件路径不可用：{error:#}）")),
-            if config.lm_studio.base_url.trim().is_empty() {
-                "（起草模型也没填地址）".to_string()
-            } else {
-                config.lm_studio.base_url.clone()
-            },
         );
         let lexicon = lexicon();
         let cases = cases();
@@ -386,7 +378,7 @@ mod tests {
                     let outcome = revise_model::review(
                         revise_model::ReviewRequest {
                             cfg: &cfg,
-                            draft_model: &config.lm_studio,
+                            model: &resolved,
                             lexicon: &lexicon,
                             vocabulary: &config.vocabulary,
                             markdown: &case.sentence,

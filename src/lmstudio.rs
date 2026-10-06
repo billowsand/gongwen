@@ -71,12 +71,7 @@ fn endpoint(config: &LmStudioConfig, path: &str) -> String {
     format!("{}/{}", config.base_url.trim_end_matches('/'), path)
 }
 
-pub fn list_models(config: &LmStudioConfig) -> Result<Vec<String>> {
-    list_models_at(&config.base_url, &config.api_key, config.timeout_seconds)
-}
-
-/// 列出任意 OpenAI 兼容端点已加载的模型。知识库的 embedding / rerank 配置
-/// 与对话模型相互独立，探测时各用各的地址。
+/// 列出任意 OpenAI 兼容端点已加载的模型。各提供商探测时各用各的地址。
 pub fn list_models_at(base_url: &str, api_key: &str, timeout_seconds: u64) -> Result<Vec<String>> {
     let client = crate::net::client(base_url, timeout_seconds)?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));

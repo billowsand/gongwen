@@ -98,12 +98,19 @@ fn atomic_write(
 
 pub fn load() -> Result<AppConfig> {
     let path = config_path()?;
-    if !path.exists() {
-        return Ok(AppConfig::default());
+    let mut config = if !path.exists() {
+        AppConfig::default()
+    } else {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("读取配置失败：{}", path.display()))?;
+        serde_json::from_str(&raw).context("配置文件格式无效")?
+    };
+    // 旧配置里的内联地址 / 密钥归并成提供商清单；迁移结果立即写回，
+    // 写盘失败也不影响本次运行（下次启动再迁一次）。
+    if config.migrate_providers() && path.exists() {
+        let _ = save(&config);
     }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("读取配置失败：{}", path.display()))?;
-    serde_json::from_str(&raw).context("配置文件格式无效")
+    Ok(config)
 }
 
 pub fn save(config: &AppConfig) -> Result<()> {

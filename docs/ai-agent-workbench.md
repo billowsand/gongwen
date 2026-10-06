@@ -413,6 +413,41 @@ src/ai_panel/       侧栏界面：composer、cards、stream_view、outline_card
 
 ## 十三、实施进度与交接
 
+### 模型服务提供商化改造（2026-10-06，已完成，待真机验收）
+
+- 模型配置分两层：**提供商管连接身份，功能管选哪个模型**。新增
+  `ProviderConfig`（名称 / 地址 / 密钥 / 启用 / 模型清单缓存 / 用途标签）与
+  `ModelRef`（提供商 id + 模型名）；`AppConfig` 新增 `providers` 与 `draft_model`，
+  复核 / embedding / rerank 各自持 `model_ref`。旧内联字段（`lm_studio.base_url` 等）
+  只作向后兼容读取，迁移后清空并随 `skip_serializing_if` 从 config.json 消失。
+- 内置预设模板表 `PROVIDER_PRESETS`（LM Studio、Ollama、vLLM（内网）、OpenCode-Go、
+  MiniMax、Kimi Code、DMXAPI、硅基流动、DeepSeek，另加「自定义」）：预设只是模板，
+  点「添加」才实例化进配置；迁移旧配置时按地址认预设起名（127.0.0.1:1234 → LM Studio、
+  dmxapi → DMXAPI……），同一「地址 + 密钥」只建一条。
+- 中央解析器在 `AppConfig` 上：`draft_chat()` / `revise_chat(assist)` / `assist_chat()` /
+  `resolved_rag()` / `embedding_model_name()` / `draft_model_label()`。`LmStudioConfig`
+  保留为运行时解析结果，`lmstudio.rs`、`rag.rs`、`rag_client.rs`、复核链路一行不改；
+  提供商被删 / 停用 / 没填地址时报指向「模型服务」的明确错误，知识库解析则留空地址
+  走既有的降级与告警。解析顺序：**旧内联字段优先于引用**（未迁移的配置与测试直填都能跑）。
+- AI 管理页「模型」组收敛为两个分区：「模型服务商管理」（预设添加、提供商卡片、
+  测试连接 / 刷新模型、停用 / 删除，删除被引用的提供商会提示哪些功能在用）与
+  「模型服务」（文字起草 / 文字复核 / 知识库检索三块，每块只有模型选择器 + 本功能
+  参数）。模型选择器在 `app/provider_settings.rs`：弹层按提供商分组列出缓存清单，
+  顶部筛选框自动聚焦、同时匹配模型名与提供商名、行尾标服务自报的上下文窗口、
+  选中即关（与字体选择同一套交互）；一家都没刷新出清单时退化为「提供商下拉 +
+  手填模型名」。复核「留空 = 沿用起草模型」替代旧的「地址密钥分别留空沿用」。
+- 探测归一：三路探测（起草 / embedding / rerank）合并为按提供商的
+  `start_provider_probe`，状态挂在 `provider_status`（本进程内），模型清单写回
+  `ProviderConfig::models` 缓存；`WorkerResult::Models/EmbeddingModels/RerankModels`
+  合并为 `ProviderModels`。
+- rerank 的端点路径与响应字段键是服务端方言，不属于连接身份，留在 `rag.rerank`
+  （进阶项仍在 config.json 手调）；「用对话大模型重排」继续复用起草模型。
+- 迁移在 `storage::load` 里跑（`migrate_providers`，幂等），迁移结果立即写回；
+  迁移与解析器有单元测试（`models::tests`）。
+- 已知边界：预设表里 OpenCode-Go 与 vLLM 的默认地址留空待填；DMXAPI 默认
+  `https://www.dmxapi.cn/v1`（.com 后缀也常见，可在卡片上改）。提供商的「用途标签」
+  只用于选择器排序，不做硬过滤。
+
 ### 左侧 AI 工作稿（2026-10-05）
 
 - 明确写稿后，左侧自动显示「AI 工作稿」；「正文」仍显示 `generated_markdown`。
@@ -785,7 +820,8 @@ GONGWEN_LIVE_LLM_URL=http://127.0.0.1:12345/v1 GONGWEN_LIVE_LLM_MODEL=qwen/qwen3
 
 | 位置 | 内容 |
 |---|---|
-| `app/ai_manage.rs` | 新的 AI 管理页：`AiSection` 八个分区（模型服务、文字复核、知识库检索、技能、数据接口、工具调试台、润色预设、输出标准），两栏布局与设置页同一套画法；页底「保存」先应用润色预设编辑区、再写配置与数据接口（`save_ai_manage`）。模型服务 / 文字复核 / 知识库三个分区的画法从 `settings.rs` 原样搬来 |
+| `app/ai_manage.rs` | 新的 AI 管理页：`AiSection` 八个分区（模型服务商管理、模型服务、技能、数据接口、工具调试台、风格、润色预设、输出标准），两栏布局与设置页同一套画法；页底「保存」先应用润色预设编辑区、再写配置与数据接口（`save_ai_manage`）。2026-10-06 提供商化改造后，「模型服务」一页按功能（起草 / 复核 / 知识库）配模型 |
+| `app/provider_settings.rs` | 「模型服务商管理」分区与可搜索模型选择器（按提供商分组、筛选框、上下文窗口标注）；提供商探测状态 `ProviderProbe` |
 | `app/settings.rs` | 去掉上述六个分区，剩十个；左栏顶上一条「AI 设置在『AI 管理』」直达；表单行、小标题、菜单项等画法改成 `pub(super)` 供 AI 管理页复用 |
 | `app/ai_prompts.rs` | 只剩润色预设库（`ai_presets_section_ui`、`apply_pending_ai_prompt`）与输出标准（`output_contract_ui`） |
 | `app/tabs.rs` | 侧栏「管理技能…」改为打开 AI 管理页的技能分区 |

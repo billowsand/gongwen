@@ -1220,11 +1220,16 @@ impl GongwenApp {
                     theme::icon_text_button(theme::Icon::PlugZap, "测试连接"),
                 )
                 .on_hover_text(
-                    "按当前的代理设置访问「AI 管理 → 模型服务」里填的接口地址，读取模型列表",
+                    "按当前的代理设置访问起草模型所属的提供商（「AI 管理 → 模型服务商管理」），读取模型列表",
                 )
                 .clicked()
             {
-                self.start_model_probe();
+                let pid = self.config.draft_model.provider_id.clone();
+                if pid.is_empty() {
+                    self.start_all_provider_probes();
+                } else {
+                    self.start_provider_probe(&pid);
+                }
             }
         });
     }

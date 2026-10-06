@@ -254,8 +254,8 @@ fn run_tool_in_background(
         let model = crate::agent::backend::LmBackend::new(&config, cancel);
         let kb = crate::agent::tools::RagSearch {
             enabled: config.rag.enabled,
-            rag: config.rag.clone(),
-            chat: config.lm_studio.clone(),
+            rag: config.resolved_rag(),
+            chat: config.draft_chat().unwrap_or_default(),
             kind_filter: None,
         };
         let env = tools::Env {

@@ -82,7 +82,10 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   `lmstudio/converse.rs`；政策依据核对 `cite_check`；兜底技能「自由任务」）已完成，DMXAPI 上的 DeepSeek-V4-Flash 与 MiniMax-M2.7 真机跑通；
   第 ⑧ 期（上下文窗口与压缩 `lmstudio/context.rs`、`agent/budget.rs`；会话随稿件保存与追问 `ai_panel/session.rs`、
   `history.rs`、`manuscript/ai_sessions.rs`；风格管理 `agent/style.rs`、`app/style_settings.rs`、技能「风格学习」）已完成，
-  DMXAPI 上真机跑通。对比分析、数据分析段落、正文区审阅再讨论（见第十六节 F16；opencode 接入已作废）。
+  DMXAPI 上真机跑通。模型配置已提供商化：地址密钥收进「模型服务商管理」
+  （`src/app/provider_settings.rs`，预设模板 + 提供商卡片），「模型服务」按功能
+  （起草 / 复核 / 知识库）选模型（`ModelRef` 引用 + `AppConfig` 中央解析器），
+  旧内联地址字段随启动自动迁移；详见 `docs/ai-agent-workbench.md` 第十三节。对比分析、数据分析段落、正文区审阅再讨论（见第十六节 F16；opencode 接入已作废）。
   方案、红线修订记录、分期、各期进度与已知坑见 `docs/ai-agent-workbench.md`（单文件，第十三节是交接）。
 - **送批材料**（呈批件挂随行件、按提交版合并成一个 PDF、归档钉版、随同步 ZIP 携带）：
   五期已全部实现，**待真机验收**（排版→合并整条链、ZIP 往返）。方案、各期进度、

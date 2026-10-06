@@ -1380,7 +1380,7 @@ impl GongwenApp {
             ui.style_mut().spacing.interact_size.y = ROW_HEIGHT;
 
             let status = self.status.clone();
-            let model = self.config.lm_studio.model.trim().to_owned();
+            let model = self.config.draft_model_label();
             let show_doc_controls = self.showing_doc();
             // 输入法状态：常显的一小块，点一下切中英。
             let ime_active = self.ime.active();

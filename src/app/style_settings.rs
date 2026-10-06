@@ -145,8 +145,8 @@ fn read_sample(
 fn knowledge(config: &crate::models::AppConfig) -> RagSearch {
     RagSearch {
         enabled: true,
-        rag: config.rag.clone(),
-        chat: config.lm_studio.clone(),
+        rag: config.resolved_rag(),
+        chat: config.draft_chat().unwrap_or_default(),
         kind_filter: None,
     }
 }

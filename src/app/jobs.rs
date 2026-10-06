@@ -26,12 +26,11 @@ use std::path::PathBuf;
 use std::thread;
 
 pub(crate) enum WorkerResult {
-    /// 全局任务：探测本地模型服务已加载的模型。
-    Models(Result<Vec<String>, String>),
-    /// 探测知识库 embedding 端点已加载的模型。
-    EmbeddingModels(Result<Vec<String>, String>),
-    /// 探测知识库 rerank 端点已加载的模型。
-    RerankModels(Result<Vec<String>, String>),
+    /// 探测一家提供商：连接结果与已加载模型清单。
+    ProviderModels {
+        provider_id: String,
+        result: Result<Vec<String>, String>,
+    },
     /// 真跑一次 rerank 的验证结果（端点路径 + 响应字段是否对得上）。
     RerankVerify(Result<String, String>),
     /// 某一篇稿件的任务结果。`key` 认稿件、`seq` 认这一次任务：稿件关了或者
@@ -154,21 +153,51 @@ pub(crate) enum DocJob {
 }
 
 impl GongwenApp {
-    pub(crate) fn start_model_probe(&mut self) {
-        if self.busy {
+    /// 探测一家提供商：测试连接并把已加载模型清单缓存进配置。
+    ///
+    /// 各家独立进行，互不阻塞；状态挂在提供商卡片上（`provider_status`）。
+    pub(crate) fn start_provider_probe(&mut self, provider_id: &str) {
+        let Some(provider) = self.config.provider(provider_id) else {
+            return;
+        };
+        let status = self
+            .provider_status
+            .entry(provider_id.to_string())
+            .or_default();
+        if status.busy {
             return;
         }
-        self.busy = true;
-        self.status = "正在连接本地模型服务并读取已加载模型…".into();
-        let config = self.config.lm_studio.clone();
+        status.busy = true;
+        self.status = format!("正在连接「{}」并读取已加载模型…", provider.name);
+        let base_url = provider.base_url.clone();
+        let api_key = provider.api_key.clone();
+        let timeout = self.config.lm_studio.timeout_seconds;
+        let pid = provider_id.to_string();
         let tx = self.sender.clone();
         thread::spawn(move || {
-            let result = lmstudio::list_models(&config).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(WorkerResult::Models(result));
+            let result = lmstudio::list_models_at(&base_url, &api_key, timeout)
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkerResult::ProviderModels {
+                provider_id: pid,
+                result,
+            });
         });
     }
 
-    /// 探测知识库 embedding 端点已加载的模型。
+    /// 刷新所有已启用提供商的模型清单。
+    pub(crate) fn start_all_provider_probes(&mut self) {
+        let ids: Vec<String> = self
+            .config
+            .providers
+            .iter()
+            .filter(|p| p.enabled && !p.base_url.trim().is_empty())
+            .map(|p| p.id.clone())
+            .collect();
+        for id in ids {
+            self.start_provider_probe(&id);
+        }
+    }
+
     /// 扫描本机字体。中文字体文件动辄十几兆，整轮扫描要一两秒，放后台线程做。
     pub(crate) fn start_system_font_scan(&mut self) {
         if self.system_fonts_busy {
@@ -182,48 +211,13 @@ impl GongwenApp {
         });
     }
 
-    pub(crate) fn start_embedding_probe(&mut self) {
-        if self.embedding_probe_busy {
-            return;
-        }
-        self.embedding_probe_busy = true;
-        self.status = "正在连接 embedding 服务并读取模型…".into();
-        let base_url = self.config.rag.embedding.base_url.clone();
-        let api_key = self.config.rag.embedding.api_key.clone();
-        let timeout = self.config.rag.embedding.timeout_seconds;
-        let tx = self.sender.clone();
-        thread::spawn(move || {
-            let result = lmstudio::list_models_at(&base_url, &api_key, timeout)
-                .map_err(|e| format!("{e:#}"));
-            let _ = tx.send(WorkerResult::EmbeddingModels(result));
-        });
-    }
-
-    /// 探测知识库 rerank 端点已加载的模型。
-    pub(crate) fn start_rerank_probe(&mut self) {
-        if self.rerank_probe_busy {
-            return;
-        }
-        self.rerank_probe_busy = true;
-        self.status = "正在连接 rerank 服务并读取模型…".into();
-        let base_url = self.config.rag.rerank.base_url.clone();
-        let api_key = self.config.rag.rerank.api_key.clone();
-        let timeout = self.config.rag.rerank.timeout_seconds;
-        let tx = self.sender.clone();
-        thread::spawn(move || {
-            let result = lmstudio::list_models_at(&base_url, &api_key, timeout)
-                .map_err(|e| format!("{e:#}"));
-            let _ = tx.send(WorkerResult::RerankModels(result));
-        });
-    }
-
     /// 真跑一次 rerank，验证端点路径与响应字段是否对得上。
     ///
     /// 只查 `/v1/models` 是不够的：有些服务（如 LM Studio）对不认识的路径会记
     /// `Unexpected endpoint or method` 却仍返回 200，于是"连接成功"，
     /// 而每次检索的 rerank 都在静默失败。
     pub(crate) fn start_rerank_verify(&mut self) {
-        if self.rerank_probe_busy {
+        if self.rerank_verify_busy {
             return;
         }
         let mode = self.config.rag.rerank.mode;
@@ -232,20 +226,23 @@ impl GongwenApp {
                 self.status = "当前未启用重排，无需验证。".into();
                 return;
             }
-            RerankMode::Api if self.config.rag.rerank.model.trim().is_empty() => {
-                self.status = "请先填写或选择 rerank 模型，再验证。".into();
-                return;
-            }
-            RerankMode::Llm if self.config.lm_studio.model.trim().is_empty() => {
-                self.status = "请先在上面的「对话模型」里选好模型，再验证。".into();
+            RerankMode::Api if self.config.rag.effective_rerank_mode() == RerankMode::None => {
+                self.status = "请先选择 rerank 模型，再验证。".into();
                 return;
             }
             _ => {}
         }
-        self.rerank_probe_busy = true;
+        self.rerank_verify_busy = true;
         self.status = "正在验证重排…".into();
-        let cfg = self.config.rag.rerank.clone();
-        let chat = self.config.lm_studio.clone();
+        let cfg = self.config.resolved_rag().rerank;
+        let chat = match self.config.draft_chat() {
+            Ok(chat) => chat,
+            Err(error) => {
+                self.rerank_verify_busy = false;
+                self.status = error.to_string();
+                return;
+            }
+        };
         let tx = self.sender.clone();
         thread::spawn(move || {
             let result = match mode {
@@ -261,21 +258,44 @@ impl GongwenApp {
     pub(crate) fn poll_worker(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.receiver.try_recv() {
             match result {
-                WorkerResult::Models(Ok(models)) => {
-                    self.busy = false;
-                    self.models = models;
-                    if self.config.lm_studio.model.trim().is_empty() && self.models.len() == 1 {
-                        self.config.lm_studio.model = self.models[0].clone();
+                WorkerResult::ProviderModels {
+                    provider_id,
+                    result,
+                } => {
+                    let status = self.provider_status.entry(provider_id.clone()).or_default();
+                    status.busy = false;
+                    let name = self
+                        .config
+                        .provider(&provider_id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| provider_id.clone());
+                    match result {
+                        Ok(models) => {
+                            status.connected = true;
+                            status.note = if models.is_empty() {
+                                "已连接，但没有已加载模型。".into()
+                            } else {
+                                format!("连接成功，发现 {} 个模型。", models.len())
+                            };
+                            // 只有一个模型且起草还没选时自动选上，省去手选。
+                            if self.config.draft_model.is_empty() && models.len() == 1 {
+                                self.config.draft_model = crate::models::ModelRef {
+                                    provider_id: provider_id.clone(),
+                                    model: models[0].clone(),
+                                };
+                            }
+                            if let Some(provider) = self.config.provider_mut(&provider_id) {
+                                provider.models = models;
+                            }
+                            self.status =
+                                format!("「{name}」{}", self.provider_status[&provider_id].note);
+                        }
+                        Err(error) => {
+                            status.connected = false;
+                            status.note = format!("连接失败：{error}");
+                            self.status = format!("「{name}」连接失败：{error}");
+                        }
                     }
-                    self.status = if self.models.is_empty() {
-                        "已连接，但没有已加载模型。".into()
-                    } else {
-                        format!("连接成功，发现 {} 个模型。", self.models.len())
-                    };
-                }
-                WorkerResult::Models(Err(error)) => {
-                    self.busy = false;
-                    self.status = format!("连接失败：{error}");
                 }
                 WorkerResult::Doc { key, seq, job } => self.apply_doc_job(key, seq, job),
                 WorkerResult::Redline {
@@ -300,45 +320,8 @@ impl GongwenApp {
                     };
                     self.system_fonts = fonts;
                 }
-                WorkerResult::EmbeddingModels(result) => {
-                    self.embedding_probe_busy = false;
-                    match result {
-                        Ok(models) => {
-                            self.status = if models.is_empty() {
-                                "embedding 服务已连接，但没有已加载模型。".into()
-                            } else {
-                                format!("embedding 服务连接成功，发现 {} 个模型。", models.len())
-                            };
-                            // 只有一个模型且未配置时自动选上，省去手选。
-                            if self.config.rag.embedding.model.trim().is_empty()
-                                && models.len() == 1
-                            {
-                                self.config.rag.embedding.model = models[0].clone();
-                            }
-                            self.embedding_models = models;
-                        }
-                        Err(error) => self.status = format!("embedding 连接失败：{error}"),
-                    }
-                }
-                WorkerResult::RerankModels(result) => {
-                    self.rerank_probe_busy = false;
-                    match result {
-                        Ok(models) => {
-                            self.status = if models.is_empty() {
-                                "rerank 服务已连接，但没有已加载模型。".into()
-                            } else {
-                                format!("rerank 服务连接成功，发现 {} 个模型。", models.len())
-                            };
-                            if self.config.rag.rerank.model.trim().is_empty() && models.len() == 1 {
-                                self.config.rag.rerank.model = models[0].clone();
-                            }
-                            self.rerank_models = models;
-                        }
-                        Err(error) => self.status = format!("rerank 连接失败：{error}"),
-                    }
-                }
                 WorkerResult::RerankVerify(result) => {
-                    self.rerank_probe_busy = false;
+                    self.rerank_verify_busy = false;
                     self.rerank_verify_result = Some(match result {
                         Ok(message) => (true, message),
                         Err(error) => (
@@ -493,7 +476,8 @@ impl GongwenApp {
     /// 库内是否存在与当前配置不同的 embedding 模型。换模型后维度多半不同，
     /// 旧块的余弦恒为 0，会静默退出向量召回——必须提示用户重建索引。
     pub(crate) fn knowledge_embed_model_mismatch(&self) -> Option<String> {
-        let current = self.config.rag.embedding.model.trim();
+        let current = self.config.embedding_model_name();
+        let current = current.trim();
         if current.is_empty() {
             return None;
         }
@@ -713,9 +697,9 @@ impl GongwenApp {
             self.knowledge_error = Some("知识库任务正在进行中，请稍候。".into());
             return;
         }
-        if self.config.rag.embedding.model.trim().is_empty() {
+        if self.config.embedding_model_name().is_empty() {
             self.knowledge_error = Some(
-                "还没有配置 embedding 模型，无法建立索引：请先到「AI 管理 → 知识库检索」填写。文档已在库内，配置好后再点「建立索引」即可。"
+                "还没有配置 embedding 模型，无法建立索引：请先到「AI 管理 → 模型服务」的知识库检索块选择。文档已在库内，配置好后再点「建立索引」即可。"
                     .into(),
             );
             return;
@@ -732,7 +716,7 @@ impl GongwenApp {
         self.knowledge_index_result = None;
         self.knowledge_progress_verb = "正在建立索引";
         self.knowledge_index_progress = Some((0, doc_ids.len(), String::new()));
-        let cfg = self.config.rag.clone();
+        let cfg = self.config.resolved_rag();
         let tx = self.sender.clone();
         thread::spawn(move || {
             let progress_tx = tx.clone();
@@ -770,9 +754,9 @@ impl GongwenApp {
         };
         self.knowledge_busy = true;
         self.knowledge_search_warnings.clear();
-        let cfg = self.config.rag.clone();
+        let cfg = self.config.resolved_rag();
         // 重排走「对话大模型」模式时要用到聊天模型的配置。
-        let chat = self.config.lm_studio.clone();
+        let chat = self.config.draft_chat().unwrap_or_default();
         let kind = self.knowledge_filter_kind;
         let tx = self.sender.clone();
         thread::spawn(move || {
@@ -797,9 +781,9 @@ impl GongwenApp {
         };
         self.knowledge_busy = true;
         self.knowledge_qa_pending = Some(question.clone());
-        let cfg = self.config.rag.clone();
+        let cfg = self.config.resolved_rag();
         // 问答要调对话模型生成答案，重排若走「对话大模型」模式也需要聊天配置。
-        let chat = self.config.lm_studio.clone();
+        let chat = self.config.draft_chat().unwrap_or_default();
         let kind = self.knowledge_filter_kind;
         let history = self.knowledge_qa_history.clone();
         let tx = self.sender.clone();
