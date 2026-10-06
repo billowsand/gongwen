@@ -312,7 +312,13 @@ pub(crate) fn call(
         ("http.call", Some(api)) => format!("http.call:{api}"),
         _ => id.to_string(),
     };
-    if !ctx.env.skill.allows_tool(&checked) {
+    let allowed = match (tool.id(), args.get("api").and_then(Value::as_str)) {
+        ("http.call", Some(api)) => {
+            crate::agent::apidef::tooling::allowed(&ctx.env.skill.tools, api, ctx.env.apis)
+        }
+        _ => ctx.env.skill.allows_tool(&checked),
+    };
+    if !allowed {
         return Err(format!(
             "技能「{}」没有声明工具「{checked}」",
             ctx.env.skill.name

@@ -153,6 +153,7 @@ fn specs() -> Vec<ToolSpec> {
             .iter()
             .map(|(n, r, d)| (n.to_string(), *r, d.to_string()))
             .collect(),
+        schema: None,
     };
     vec![
         spec(

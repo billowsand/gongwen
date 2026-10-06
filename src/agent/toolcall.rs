@@ -32,13 +32,27 @@ pub(crate) struct ToolCall {
 pub(crate) struct ToolSpec {
     pub(crate) name: String,
     pub(crate) description: String,
-    /// (参数名, 是否必填, 说明)
+    /// (参数名, 是否必填, 说明)。文本协议用它列参数；原生协议没有 `schema` 时也用它。
     pub(crate) params: Vec<(String, bool, String)>,
+    /// 参数的完整 JSON Schema（类型、枚举、嵌套、必填）。有就原样发给原生协议；数据接口工具
+    /// 现在有（`apidef::tooling`），内置工具以后逐个补（`docs/agent-kernel-hardening.md` 第 4 期）。
+    pub(crate) schema: Option<Value>,
 }
 
 impl ToolSpec {
-    /// OpenAI `tools` 里的一项。参数不标类型：工具的输入本来就是宽松的 JSON，由工具自己解析。
+    /// OpenAI `tools` 里的一项。有 `schema` 用它；没有的只列参数说明、不标类型（内置工具的输入
+    /// 本来就是宽松的 JSON，由工具自己解析）。
     pub(crate) fn to_native(&self) -> Value {
+        if let Some(schema) = &self.schema {
+            return json!({
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": self.description,
+                    "parameters": schema,
+                }
+            });
+        }
         let properties: serde_json::Map<String, Value> = self
             .params
             .iter()
@@ -110,24 +124,37 @@ pub(crate) struct Reply {
     pub(crate) protocol: Protocol,
 }
 
+/// 工具名最长多少（OpenAI 的限制）。
+const MAX_WIRE_NAME: usize = 64;
+
 /// 工具 id → 发给模型的名字：`kb.search` → `kb_search`，`http.call:stat` → `http_call__stat`。
+/// 只用 ASCII 字母、数字、下划线、短横线；限定名里有别的字符（中文接口 id）或整体超长时，
+/// 截短并加上原 id 的哈希，保证不同的 id 不会撞成同一个名字。
 pub(crate) fn wire_name(id: &str) -> String {
     let (base, qualifier) = id.split_once(':').map_or((id, None), |(b, q)| (b, Some(q)));
     let mut name = base.replace('.', "_");
+    let mut lossy = false;
     if let Some(qualifier) = qualifier {
         name.push_str("__");
-        name.push_str(
-            &qualifier
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect::<String>(),
-        );
+        for c in qualifier.chars() {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                name.push(c);
+            } else {
+                // 点换成下划线不丢信息以外的字符（中文、空格……）都算有损。
+                lossy |= c != '.';
+                name.push('_');
+            }
+        }
+    }
+    if lossy || name.len() > MAX_WIRE_NAME {
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(id.as_bytes())[..4]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        name.truncate(MAX_WIRE_NAME - hash.len() - 1);
+        name.push('_');
+        name.push_str(&hash);
     }
     name
 }
@@ -304,6 +331,7 @@ mod tests {
                 ("query".into(), true, "检索词".into()),
                 ("top".into(), false, "最多几段".into()),
             ],
+            schema: None,
         }
     }
 
@@ -311,7 +339,14 @@ mod tests {
     fn wire_names_have_no_dots_or_colons() {
         assert_eq!(wire_name("kb.search"), "kb_search");
         assert_eq!(wire_name("http.call:stat"), "http_call__stat");
-        assert_eq!(wire_name("http.call:省统计"), "http_call_____");
+        let chinese = wire_name("http.call:省统计");
+        assert!(
+            chinese.starts_with("http_call_____") && chinese.len() > 14,
+            "{chinese}"
+        );
+        assert_ne!(chinese, wire_name("http.call:市统计"), "中文 id 不再撞名");
+        assert_eq!(wire_name("http.call:svc.op"), "http_call__svc_op");
+        assert!(wire_name(&format!("http.call:{}", "a".repeat(80))).len() <= 64);
         assert_eq!(wire_name("finish"), "finish");
     }
 

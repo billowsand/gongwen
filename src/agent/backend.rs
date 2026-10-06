@@ -339,6 +339,7 @@ mod tests {
             name: "kb_search".into(),
             description: "检索".into(),
             params: vec![("query".into(), true, "检索词".into())],
+            schema: None,
         }];
         let turns = [Turn::System("S".into()), Turn::User("查防火".into())];
         let backend = |url: &str| {

@@ -47,6 +47,8 @@ impl Tool for HttpCall {
         }
         let mut inputs = args.clone();
         inputs.remove("api");
+        // 参数先按 schema 校验，不合格不发请求，错误连同参数签名与正确示例回给模型自己改。
+        crate::agent::apidef::tooling::validate(endpoint, &inputs)?;
         let api::Called { items, total, .. } = api::call(endpoint, &inputs, ctx.env.secrets)?;
         let mut summary = format!("调用接口「{}」→ {} 条", endpoint.name, items.len());
         if total > items.len() {
@@ -149,6 +151,13 @@ mod tests {
             "{error}"
         );
         let error = fixture.call("http.call:stat", json!({})).unwrap_err();
-        assert!(error.contains("缺少输入 region"), "{error}");
+        assert!(
+            error.contains("缺少必填参数 region"),
+            "调用前先按 schema 校验：{error}"
+        );
+        let error = fixture
+            .call("http.call:stat", json!({"region": "全省", "regoin": "x"}))
+            .unwrap_err();
+        assert!(error.contains("没有参数 regoin"), "{error}");
     }
 }

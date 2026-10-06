@@ -20,6 +20,7 @@ mod raise;
 mod schema;
 #[cfg(test)]
 mod tests;
+pub(crate) mod tooling;
 
 use crate::agent::api::{ApiEndpoint, ApiMethod, ApiStore};
 pub(crate) use lower::base_url;
