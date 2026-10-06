@@ -9,10 +9,15 @@
 //!   一个接口有几种用法时存成几组样例（识别时文档的请求示例、模型编的典型例子），点一下填入，
 //!   也可以「全部试一遍」；没有样例的可以让 AI 按接口说明编几组；
 //! - 「技术配置」按「请求 → 返回」分组，删除放在最下面。
+//!
+//! 本文件放状态、后台任务与分页调度；各部分的画法在子模块：[`header`]、[`doc`]、[`try_tab`]、
+//! [`config`]。
 
+mod config;
 mod doc;
 mod header;
 mod try_tab;
+use config::config_ui;
 use doc::{doc_ui, edit_ui, item_card};
 use header::{Tone, binding_ui, header_ui, strip};
 use try_tab::try_ui;
@@ -457,82 +462,4 @@ pub(super) fn panel<R>(
                 .inner
         })
         .inner
-}
-
-fn config_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
-    let problems = page.store.endpoints[index].problems();
-    if problems.is_empty() {
-        theme::caption(
-            ui,
-            "从文档识别时程序已经填好，一般不用动。改了影响请求或返回的项，要重新测一次。",
-        );
-    } else {
-        let mut text = format!("配置有 {} 个问题：", problems.len());
-        for problem in &problems {
-            text.push_str(&format!("\n· {problem}"));
-        }
-        theme::notice(
-            ui,
-            theme::Icon::TriangleAlert,
-            theme::warn(),
-            theme::warn_soft(),
-            text,
-        );
-    }
-    ui.add_space(10.0);
-    panel(
-        ui,
-        theme::Icon::ArrowUp,
-        "请求",
-        None,
-        |_| {},
-        |ui| {
-            page.dirty |= forms::request_form(ui, &mut page.store.endpoints[index], "detail");
-        },
-    );
-    ui.add_space(12.0);
-    panel(
-        ui,
-        theme::Icon::ArrowDown,
-        "返回",
-        Some("写英文字段名、/JSON 指针、{模板} 或固定文字；留空按常见字段名猜"),
-        |_| {},
-        |ui| {
-            page.dirty |= forms::response_form(ui, &mut page.store.endpoints[index]);
-        },
-    );
-    ui.add_space(12.0);
-    let shared: Vec<String> = page.store.endpoints[index]
-        .secret_names()
-        .into_iter()
-        .filter(|name| page.users_of(name).len() > 1)
-        .collect();
-    panel(
-        ui,
-        theme::Icon::Trash,
-        "删除接口",
-        None,
-        |_| {},
-        |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let mut text = "删除后，引用它的技能运行时会报「找不到接口」。".to_string();
-                if !shared.is_empty() {
-                    text.push_str(&format!(
-                        "密钥 {} 还有其他接口在用，不会删。",
-                        shared.join("、")
-                    ));
-                }
-                theme::caption(ui, &text);
-                if ui
-                    .add(theme::warning_icon_button(
-                        theme::Icon::Trash,
-                        "删除这个接口",
-                    ))
-                    .clicked()
-                {
-                    page.detail.confirm_remove = true;
-                }
-            });
-        },
-    );
 }
