@@ -11,7 +11,7 @@ use crate::export;
 use crate::knowledge;
 use crate::lmstudio;
 use crate::manuscript_io;
-use crate::models::{DraftInput, GeneratedDraft, RerankMode, ReviewNote};
+use crate::models::{DraftInput, GeneratedDraft, ModelKind, RerankMode, ReviewNote};
 use crate::pdf_viewer;
 use crate::pdf_viewer::PdfKey;
 use crate::preview;
@@ -27,9 +27,12 @@ use std::thread;
 
 pub(crate) enum WorkerResult {
     /// 探测一家提供商：连接结果与已加载模型清单。
+    /// `probed_kinds` 是服务原生接口自报的模型用途（目前只有 LM Studio 给），
+    /// 写回配置前还要过一遍 `classify_model` 补名字启发式。
     ProviderModels {
         provider_id: String,
         result: Result<Vec<String>, String>,
+        probed_kinds: std::collections::HashMap<String, ModelKind>,
     },
     /// 真跑一次 rerank 的验证结果（端点路径 + 响应字段是否对得上）。
     RerankVerify(Result<String, String>),
@@ -177,9 +180,16 @@ impl GongwenApp {
         thread::spawn(move || {
             let result = lmstudio::list_models_at(&base_url, &api_key, timeout)
                 .map_err(|e| format!("{e:#}"));
+            // 顺带问原生接口要模型用途；不是 LM Studio 就空表，靠名字归类。
+            let probed_kinds = if result.is_ok() {
+                lmstudio::native_model_kinds(&base_url, &api_key, timeout).unwrap_or_default()
+            } else {
+                std::collections::HashMap::new()
+            };
             let _ = tx.send(WorkerResult::ProviderModels {
                 provider_id: pid,
                 result,
+                probed_kinds,
             });
         });
     }
@@ -261,6 +271,7 @@ impl GongwenApp {
                 WorkerResult::ProviderModels {
                     provider_id,
                     result,
+                    probed_kinds,
                 } => {
                     let status = self.provider_status.entry(provider_id.clone()).or_default();
                     status.busy = false;
@@ -285,6 +296,19 @@ impl GongwenApp {
                                 };
                             }
                             if let Some(provider) = self.config.provider_mut(&provider_id) {
+                                // 用途归类：服务自报优先，其余按名字，认不出留 Unknown。
+                                provider.kinds = models
+                                    .iter()
+                                    .map(|model| {
+                                        (
+                                            model.clone(),
+                                            crate::models::classify_model(
+                                                model,
+                                                probed_kinds.get(model).copied(),
+                                            ),
+                                        )
+                                    })
+                                    .collect();
                                 provider.models = models;
                             }
                             self.status =

@@ -149,6 +149,8 @@ pub struct GongwenApp {
     pub(crate) provider_edit: std::collections::HashSet<String>,
     /// 各模型选择器弹层的筛选词（键是选择器的 salt）。
     pub(crate) model_filter: BTreeMap<String, String>,
+    /// 各模型选择器是否展开了「其他类型的模型」（键是选择器的 salt）。
+    pub(crate) model_picker_show_all: std::collections::HashSet<String>,
     /// 检查器埋点，只留在本机。单独存文件，不进 config.json。
     metrics: crate::metrics::Metrics,
     /// 送批材料面板；None 表示未打开。
@@ -456,6 +458,7 @@ impl GongwenApp {
             provider_status: std::collections::HashMap::new(),
             provider_edit: std::collections::HashSet::new(),
             model_filter: BTreeMap::new(),
+            model_picker_show_all: std::collections::HashSet::new(),
             vocabulary_import_conflicts: None,
             vocabulary_dirty: false,
             vocabulary_setup_name: String::new(),

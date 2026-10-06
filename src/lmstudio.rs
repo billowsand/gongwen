@@ -1,8 +1,9 @@
-use crate::models::LmStudioConfig;
+use crate::models::{LmStudioConfig, ModelKind};
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 
 pub mod context;
 mod converse;
@@ -98,6 +99,51 @@ pub fn list_models_at(base_url: &str, api_key: &str, timeout_seconds: u64) -> Re
     let mut models = data.into_iter().map(|m| m.id).collect::<Vec<_>>();
     models.sort();
     Ok(models)
+}
+
+/// LM Studio 原生接口（≥0.3.6）自报的模型用途：`llm` / `vlm` / `embeddings`。
+///
+/// OpenAI 兼容的 `/v1/models` 不给类型，只有这个接口给。不是 LM Studio
+/// （404 或格式不对）时返回 None，探测静默跳过，不影响模型清单本身。
+pub fn native_model_kinds(
+    base_url: &str,
+    api_key: &str,
+    timeout_seconds: u64,
+) -> Option<HashMap<String, ModelKind>> {
+    #[derive(Deserialize)]
+    struct NativeModels {
+        data: Vec<NativeModel>,
+    }
+    #[derive(Deserialize)]
+    struct NativeModel {
+        id: String,
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    let client = crate::net::client(base_url, timeout_seconds).ok()?;
+    // 原生接口挂在主机根路径上，不在 /v1 下。
+    let root = base_url.trim_end_matches('/').trim_end_matches("/v1");
+    let mut request = client.get(format!("{root}/api/v0/models"));
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key.trim());
+    }
+    let response = request.send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let data = response.json::<NativeModels>().ok()?.data;
+    let kinds = data
+        .into_iter()
+        .map(|model| {
+            // llm / vlm 都按对话；reranker 它多半也报 llm，由名字兜底（classify_model）。
+            let kind = match model.kind.as_str() {
+                "embeddings" => ModelKind::Embedding,
+                _ => ModelKind::Chat,
+            };
+            (model.id, kind)
+        })
+        .collect();
+    Some(kinds)
 }
 
 pub fn generate(config: &LmStudioConfig, system: &str, user: &str) -> Result<String> {

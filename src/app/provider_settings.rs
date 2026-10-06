@@ -8,7 +8,7 @@
 use super::settings::{setting_continuation, setting_field, sub_heading};
 use crate::app::{GongwenApp, warn};
 use crate::lmstudio::context::{WindowSource, peek_window, tokens_label};
-use crate::models::{ModelRef, PROVIDER_PRESETS, ProviderConfig, ProviderPreset};
+use crate::models::{ModelKind, ModelRef, PROVIDER_PRESETS, ProviderConfig, ProviderPreset};
 use crate::theme;
 use eframe::egui;
 
@@ -300,11 +300,23 @@ pub(crate) fn provider_ref_chip(
     }
 }
 
-/// 按功能选模型：弹层按提供商分组列出缓存的模型清单，可筛选。
+/// 用途过滤规则：选对话模型时只藏认得出是向量 / 重排的（认不出的按对话照列，
+/// 误藏比误列糟）；选向量 / 重排时严格只列同类，其余进「其他类型」展开行。
+fn kind_matches_want(kind: ModelKind, want: ModelKind) -> bool {
+    match want {
+        ModelKind::Chat => !matches!(kind, ModelKind::Embedding | ModelKind::Rerank),
+        _ => kind == want,
+    }
+}
+
+/// 按功能选模型：弹层按提供商分组列出缓存的模型清单，可筛选、按用途过滤。
 ///
 /// `allow_empty` 提供「留空」项（复核 = 沿用起草，rerank = 跳过重排）；
-/// `prefer_tags` 让带对应用途标签的提供商排在前面。`filter` 是弹层筛选词的
-/// 存放处（调用方按 salt 存在应用状态里）。
+/// `prefer_tags` 让带对应用途标签的提供商排在前面；`want` 是要选的用途——
+/// 选对话模型时藏起向量 / 重排模型，选向量 / 重排时严格只列同类，
+/// 被过滤的收进弹层底部「其他类型」展开行（`show_all`）防止误藏。
+/// `filter` / `show_all` 的存放处由调用方按 salt 存在应用状态里。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn model_picker(
     ui: &mut egui::Ui,
     salt: &str,
@@ -312,7 +324,9 @@ pub(crate) fn model_picker(
     selection: &mut ModelRef,
     allow_empty: Option<&str>,
     prefer_tags: &[&str],
+    want: ModelKind,
     filter: &mut String,
+    show_all: &mut bool,
 ) {
     let available: Vec<&ProviderConfig> = providers
         .iter()
@@ -394,7 +408,15 @@ pub(crate) fn model_picker(
                     }
                 });
                 let mut shown = 0usize;
+                let mut others = 0usize;
                 for provider in groups {
+                    let kind_of = |model: &String| {
+                        provider
+                            .kinds
+                            .get(model)
+                            .copied()
+                            .unwrap_or(ModelKind::Unknown)
+                    };
                     let items: Vec<&String> = provider
                         .models
                         .iter()
@@ -404,7 +426,15 @@ pub(crate) fn model_picker(
                                 || provider.name.to_lowercase().contains(&needle)
                         })
                         .collect();
-                    if items.is_empty() {
+                    // 用途过滤：认得出用途的按 want 筛选，认不出的（Unknown）在对话
+                    // 选择器里照列、在向量 / 重排选择器里收进展开行——误藏比误列糟。
+                    let visible: Vec<&String> = items
+                        .iter()
+                        .copied()
+                        .filter(|model| *show_all || kind_matches_want(kind_of(model), want))
+                        .collect();
+                    others += items.len() - visible.len();
+                    if visible.is_empty() {
                         continue;
                     }
                     ui.label(
@@ -416,7 +446,7 @@ pub(crate) fn model_picker(
                         .size(theme::font_sizes::SMALL)
                         .color(theme::text_muted()),
                     );
-                    for model in items {
+                    for model in visible {
                         shown += 1;
                         let picked =
                             selection.provider_id == provider.id && selection.model == *model;
@@ -432,10 +462,15 @@ pub(crate) fn model_picker(
                             (window.source == WindowSource::Service)
                                 .then(|| tokens_label(window.tokens))
                         };
-                        let row = match window_label {
+                        let mut row = match window_label {
                             Some(label) => format!("{model}　{label}"),
                             None => model.clone(),
                         };
+                        // 「显示全部」时类型不符的标出来历，免得误选。
+                        let kind = kind_of(model);
+                        if *show_all && kind != ModelKind::Unknown && kind != want {
+                            row = format!("{row}　（{}）", kind.label());
+                        }
                         if ui.selectable_label(picked, row).clicked() {
                             selection.provider_id = provider.id.clone();
                             selection.model = model.clone();
@@ -443,8 +478,27 @@ pub(crate) fn model_picker(
                         }
                     }
                 }
-                if shown == 0 {
+                if shown == 0 && others == 0 {
                     ui.weak("没有匹配的模型；去「模型服务商管理」刷新模型清单。");
+                }
+                if others > 0 {
+                    ui.separator();
+                    let label = if *show_all {
+                        format!("收起 {others} 个其他类型的模型")
+                    } else {
+                        format!("还有 {others} 个其他类型的模型，点击显示")
+                    };
+                    if ui
+                        .selectable_label(
+                            false,
+                            egui::RichText::new(label)
+                                .size(theme::font_sizes::SMALL)
+                                .color(theme::text_muted()),
+                        )
+                        .clicked()
+                    {
+                        *show_all = !*show_all;
+                    }
                 }
             });
         });

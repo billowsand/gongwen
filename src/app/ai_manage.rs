@@ -15,7 +15,7 @@ use super::settings::{
     setting_continuation, setting_label, setting_row, settings_menu_item, sub_heading,
 };
 use crate::app::{GongwenApp, warn};
-use crate::models::RerankMode;
+use crate::models::{ModelKind, RerankMode};
 use crate::theme;
 use eframe::egui;
 
@@ -468,6 +468,24 @@ fn context_window_row(
 }
 
 impl GongwenApp {
+    /// 取模型选择器的弹层状态（筛选词 + 是否显示其他类型），供 `model_picker` 借用。
+    fn picker_state(&self, salt: &str) -> (String, bool) {
+        (
+            self.model_filter.get(salt).cloned().unwrap_or_default(),
+            self.model_picker_show_all.contains(salt),
+        )
+    }
+
+    /// 把模型选择器的弹层状态存回去。
+    fn store_picker_state(&mut self, salt: &str, filter: String, show_all: bool) {
+        self.model_filter.insert(salt.into(), filter);
+        if show_all {
+            self.model_picker_show_all.insert(salt.into());
+        } else {
+            self.model_picker_show_all.remove(salt);
+        }
+    }
+
     /// 「模型服务」分区：按功能配模型——文字起草、文字复核、知识库检索。
     /// 地址与密钥不在这里填；模型从「模型服务商管理」缓存的清单里挑，
     /// 选择器按提供商分组、可筛选（与字体选择同一套交互）。
@@ -486,7 +504,7 @@ impl GongwenApp {
                 .color(theme::text_muted()),
         );
         setting_row(ui, "模型", None, |ui| {
-            let mut filter = self.model_filter.get("draft").cloned().unwrap_or_default();
+            let (mut filter, mut show_all) = self.picker_state("draft");
             model_picker(
                 ui,
                 "draft",
@@ -494,9 +512,11 @@ impl GongwenApp {
                 &mut self.config.draft_model,
                 None,
                 &["chat"],
+                ModelKind::Chat,
                 &mut filter,
+                &mut show_all,
             );
-            self.model_filter.insert("draft".into(), filter);
+            self.store_picker_state("draft", filter, show_all);
         });
         setting_row(ui, "温度", None, |ui| {
             ui.add(
@@ -552,7 +572,7 @@ impl GongwenApp {
         );
         ui.add_enabled_ui(self.config.revise_model.enabled, |ui| {
             setting_row(ui, "模型", Some("留空 = 沿用起草模型"), |ui| {
-                let mut filter = self.model_filter.get("revise").cloned().unwrap_or_default();
+                let (mut filter, mut show_all) = self.picker_state("revise");
                 model_picker(
                     ui,
                     "revise",
@@ -560,9 +580,11 @@ impl GongwenApp {
                     &mut self.config.revise_model.model_ref,
                     Some("沿用起草模型"),
                     &["chat"],
+                    ModelKind::Chat,
                     &mut filter,
+                    &mut show_all,
                 );
-                self.model_filter.insert("revise".into(), filter);
+                self.store_picker_state("revise", filter, show_all);
             });
 
             sub_heading(ui, "送检范围", None);
@@ -624,11 +646,7 @@ impl GongwenApp {
             .on_hover_text("关闭后，AI 侧栏输入框底栏的“知识库”开关不生效");
         ui.add_enabled_ui(self.config.rag.enabled, |ui| {
             setting_row(ui, "Embedding 模型", None, |ui| {
-                let mut filter = self
-                    .model_filter
-                    .get("embedding")
-                    .cloned()
-                    .unwrap_or_default();
+                let (mut filter, mut show_all) = self.picker_state("embedding");
                 model_picker(
                     ui,
                     "embedding",
@@ -636,9 +654,11 @@ impl GongwenApp {
                     &mut self.config.rag.embedding.model_ref,
                     None,
                     &["embedding"],
+                    ModelKind::Embedding,
                     &mut filter,
+                    &mut show_all,
                 );
-                self.model_filter.insert("embedding".into(), filter);
+                self.store_picker_state("embedding", filter, show_all);
             });
 
             let rerank_hint = match self.config.rag.rerank.mode {
@@ -668,11 +688,7 @@ impl GongwenApp {
             });
             if self.config.rag.rerank.mode == RerankMode::Api {
                 setting_row(ui, "Rerank 模型", Some("留空则跳过重排"), |ui| {
-                    let mut filter = self
-                        .model_filter
-                        .get("rerank")
-                        .cloned()
-                        .unwrap_or_default();
+                    let (mut filter, mut show_all) = self.picker_state("rerank");
                     model_picker(
                         ui,
                         "rerank",
@@ -680,9 +696,11 @@ impl GongwenApp {
                         &mut self.config.rag.rerank.model_ref,
                         Some("不使用"),
                         &["rerank"],
+                        ModelKind::Rerank,
                         &mut filter,
+                        &mut show_all,
                     );
-                    self.model_filter.insert("rerank".into(), filter);
+                    self.store_picker_state("rerank", filter, show_all);
                 });
                 setting_continuation(ui, |ui| {
                     ui.weak(

@@ -1,5 +1,6 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -634,6 +635,56 @@ pub fn preset_for_url(base_url: &str) -> Option<&'static ProviderPreset> {
         })
 }
 
+/// 模型用途类别：选择器按它过滤，选对话模型时不再看到向量模型。
+///
+/// OpenAI 兼容的 `/v1/models` 不返回类型，来源优先级：
+/// 服务原生接口自报（LM Studio 的 `/api/v0/models`）> 模型名启发式 > Unknown。
+/// Unknown 按对话模型对待（对话是多数，误藏比误列更糟）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    /// 对话生成（视觉模型 vlm 也归这里，起草 / 复核都用它）。
+    Chat,
+    /// 向量嵌入。
+    Embedding,
+    /// 重排序。
+    Rerank,
+    /// 认不出来，按对话处理。
+    Unknown,
+}
+
+impl ModelKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "对话",
+            Self::Embedding => "向量",
+            Self::Rerank => "重排",
+            Self::Unknown => "未识别",
+        }
+    }
+}
+
+/// 给一个模型定用途类别。`probed` 是服务原生接口自报的类型（没有就 None）。
+///
+/// rerank 关键词最具体，永远优先：服务把 reranker 报成普通 llm 也不耽误。
+pub fn classify_model(name: &str, probed: Option<ModelKind>) -> ModelKind {
+    let lower = name.to_lowercase();
+    if lower.contains("rerank") {
+        return ModelKind::Rerank;
+    }
+    if let Some(kind) = probed.filter(|kind| *kind != ModelKind::Unknown) {
+        return kind;
+    }
+    // 名字启发式：覆盖 bge / gte / e5 / m3e / text-embedding / jina-embeddings /
+    // nomic-embed-text / piccolo 等常见向量模型。认不出就 Unknown，宁漏勿错。
+    const EMBEDDING_HINTS: &[&str] =
+        &["embed", "bge-", "gte-", "e5-", "m3e", "text2vec", "piccolo"];
+    if EMBEDDING_HINTS.iter().any(|hint| lower.contains(hint)) {
+        return ModelKind::Embedding;
+    }
+    ModelKind::Unknown
+}
+
 /// 一个模型服务提供商：连接身份（地址、密钥）的唯一存放处。
 ///
 /// 起草、复核、知识库各功能只存 [`ModelRef`] 引用，不再各自填地址密钥；
@@ -651,6 +702,10 @@ pub struct ProviderConfig {
     /// 上次「测试连接 / 刷新模型」读到的模型清单，随配置缓存：
     /// 服务没开时选择器里仍能按这份清单选模型。
     pub models: Vec<String>,
+    /// 各模型的用途类别（探测时由服务自报或按名字归类），选择器按它过滤。
+    /// 键是模型名；表里没有的模型视为 Unknown。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub kinds: BTreeMap<String, ModelKind>,
     /// 用途标签（chat / embedding / rerank），从预设复制，只用于选择器排序。
     pub tags: Vec<String>,
 }
@@ -664,6 +719,7 @@ impl Default for ProviderConfig {
             api_key: String::new(),
             enabled: true,
             models: Vec::new(),
+            kinds: BTreeMap::new(),
             tags: Vec::new(),
         }
     }
@@ -2380,6 +2436,7 @@ fn upsert_provider(providers: &mut Vec<ProviderConfig>, base_url: &str, api_key:
         api_key: key,
         enabled: true,
         models: Vec::new(),
+        kinds: BTreeMap::new(),
         tags,
     });
     id
@@ -3007,6 +3064,64 @@ pub struct GeneratedDraft {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    /// 用途归类：rerank 关键词最具体（bge-reranker 不能归成向量）；
+    /// 服务自报优先于名字启发式；认不出的按对话处理。
+    #[test]
+    fn classify_model_by_name_and_probe() {
+        assert_eq!(
+            classify_model("bge-reranker-v2-m3", None),
+            ModelKind::Rerank
+        );
+        assert_eq!(
+            classify_model("bge-reranker-v2-m3", Some(ModelKind::Chat)),
+            ModelKind::Rerank,
+            "服务把 reranker 报成 llm 时仍以名字为准"
+        );
+        assert_eq!(classify_model("bge-m3", None), ModelKind::Embedding);
+        assert_eq!(
+            classify_model("bge-large-zh-v1.5", None),
+            ModelKind::Embedding
+        );
+        assert_eq!(
+            classify_model("text-embedding-3-large", None),
+            ModelKind::Embedding
+        );
+        assert_eq!(
+            classify_model("nomic-embed-text", None),
+            ModelKind::Embedding
+        );
+        assert_eq!(
+            classify_model("multilingual-e5-large", None),
+            ModelKind::Embedding
+        );
+        assert_eq!(classify_model("qwen3-8b", None), ModelKind::Unknown);
+        assert_eq!(
+            classify_model("qwen3-8b", Some(ModelKind::Chat)),
+            ModelKind::Chat
+        );
+        assert_eq!(
+            classify_model("some-model", Some(ModelKind::Embedding)),
+            ModelKind::Embedding,
+            "服务自报向量时，名字里没有线索也认"
+        );
+        assert_eq!(
+            classify_model("some-model", Some(ModelKind::Unknown)),
+            ModelKind::Unknown
+        );
+    }
+
+    /// kinds 字段为空时不写进配置，旧配置没有它也能读。
+    #[test]
+    fn provider_kinds_serde_roundtrip() {
+        let provider = ProviderConfig::default();
+        let json = serde_json::to_string(&provider).unwrap();
+        assert!(!json.contains("kinds"));
+
+        let legacy = r#"{"id":"p1","name":"x","models":["m"]}"#;
+        let parsed: ProviderConfig = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.kinds.is_empty());
+    }
 
     /// 旧配置（内联地址密钥）迁移成提供商清单与模型引用：同一地址密钥只建一条，
     /// 按地址认出预设名，旧字段清空。
