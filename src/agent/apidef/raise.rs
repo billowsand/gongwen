@@ -8,9 +8,9 @@
 //! 旧版 `apis.json` 的迁移也走这里：那些接口都没有来源，全部按服务器分组新建服务。
 
 use super::lower::{
-    X_AI, X_DESTINATION, X_EVIDENCE, X_ID, X_INPUTS, X_NAME, X_READONLY, X_SECRET, X_SUCCESS,
-    X_TEMPLATE, X_TESTS, default_readonly, lower_op, pointer_token, secret_of, success_of,
-    timeout_of,
+    X_AI, X_AI_TESTS, X_DESTINATION, X_EVIDENCE, X_ID, X_INPUTS, X_NAME, X_READONLY, X_SECRET,
+    X_SUCCESS, X_TEMPLATE, X_TESTS, default_readonly, lower_op, pointer_token, secret_of,
+    success_of, timeout_of,
 };
 use super::schema::{deref, example_value, identifier, kind_of, percent_decode, schema_of_kind};
 use super::{Service, base_url, default_id, empty_doc, lower_all, service_id, unique};
@@ -341,6 +341,19 @@ fn apply_meta(
         op,
         X_TESTS,
         (!tests.is_empty() || has_body_examples).then_some(Value::Array(tests)),
+    );
+    set_or_remove(
+        op,
+        X_AI_TESTS,
+        (!endpoint.ai_cases.is_empty()).then(|| {
+            Value::Array(
+                endpoint
+                    .ai_cases
+                    .iter()
+                    .map(|case| json!({"question": case.question, "expect": {"args": case.expect_args}}))
+                    .collect(),
+            )
+        }),
     );
     if !op.get("responses").is_some_and(Value::is_object) {
         op.insert("responses".into(), json!({"200": {"description": "成功"}}));

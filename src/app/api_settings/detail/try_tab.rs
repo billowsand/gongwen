@@ -7,6 +7,17 @@ use crate::agent::board::value_to_text;
 use crate::modal::{self, Dismiss};
 
 pub(super) fn try_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize, config: &AppConfig) {
+    theme::segmented(ui, |ui| {
+        ui.selectable_value(&mut page.detail.mode, TryMode::Manual, "手填参数")
+            .on_hover_text("直接调接口；用例证明接口可用");
+        ui.selectable_value(&mut page.detail.mode, TryMode::Ai, "说一句话让 AI 调")
+            .on_hover_text("看模型挑哪个接口、填什么参数；选对了存成 AI 用例");
+    });
+    ui.add_space(8.0);
+    if page.detail.mode == TryMode::Ai {
+        ai_try::ai_ui(ui, page, index, config);
+        return;
+    }
     let width = ui.available_width();
     if width >= 720.0 {
         let gap = 14.0;

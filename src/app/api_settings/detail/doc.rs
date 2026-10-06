@@ -104,6 +104,68 @@ pub(super) fn doc_ui(ui: &mut egui::Ui, page: &mut ApisPage, index: usize) {
             );
         }
 
+        if !endpoint.ai_cases.is_empty() {
+            ui.add_space(18.0);
+            let suite = page.log.ai_suites.get(&endpoint.id);
+            doc_heading(ui, "AI 用例", |ui| {
+                if let Some(record) = suite {
+                    let (passed, total) = record.case_counts();
+                    let color = if passed == total {
+                        theme::success()
+                    } else {
+                        theme::danger()
+                    };
+                    ui.colored_label(color, format!("{passed}/{total} 调对 · {}", record.at))
+                        .on_hover_text(format!("模型 {}", record.model));
+                }
+            });
+            for case in &endpoint.ai_cases {
+                let result =
+                    suite.and_then(|record| record.cases.iter().find(|c| c.name == case.question));
+                ui.horizontal_wrapped(|ui| {
+                    match result {
+                        Some(result) if result.ok => {
+                            ui.colored_label(theme::success(), "✓");
+                        }
+                        Some(result) => {
+                            ui.colored_label(theme::danger(), "✗")
+                                .on_hover_text(&result.reason);
+                        }
+                        None => {}
+                    }
+                    ui.label(&case.question);
+                });
+                let args: Vec<String> = case
+                    .expect_args
+                    .iter()
+                    .map(|(name, value)| {
+                        format!("{name} = {}", crate::agent::board::value_to_text(value))
+                    })
+                    .collect();
+                theme::caption(
+                    ui,
+                    &if args.is_empty() {
+                        "期望：调这个接口".to_string()
+                    } else {
+                        format!("期望：调这个接口，{}", args.join("，"))
+                    },
+                );
+                if let Some(result) = result.filter(|r| !r.ok) {
+                    ui.colored_label(theme::danger(), &result.reason);
+                }
+            }
+            theme::caption(
+                ui,
+                &match suite {
+                    Some(record) if !record.model.is_empty() => format!(
+                        "每条是一句用户可能的问法与期望的参数；上次用模型 {} 跑。在「试一下 → 说一句话让 AI 调」里全部跑一遍。",
+                        record.model
+                    ),
+                    _ => "每条是一句用户可能的问法与期望的参数；在「试一下 → 说一句话让 AI 调」里全部跑一遍。".to_string(),
+                },
+            );
+        }
+
         ui.add_space(18.0);
         doc_heading(ui, "返回什么", |_| {});
         returns_ui(ui, page, endpoint);

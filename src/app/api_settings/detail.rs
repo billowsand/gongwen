@@ -8,12 +8,14 @@
 //! - 「试一下」左边填请求、右边看响应：状态、耗时、整理后的条目、原始返回、实际请求。
 //!   一个接口的几种用法存成几条用例（识别时文档的请求示例、模型编的典型例子、手动存的），
 //!   每条可以写期望（`apidef::cases`），点一下填入；「全部跑一遍」逐条判通过与否并留记录，
-//!   这是接口可用的证明。会改数据的接口「发送请求」要先确认；
+//!   这是接口可用的证明。会改数据的接口「发送请求」要先确认；另一种试法「说一句话让 AI 调」
+//!   看模型挑哪个接口、填什么参数，选对了存成 AI 用例（见 [`ai_try`]）；
 //! - 「技术配置」按「请求 → 返回」分组，删除放在最下面。
 //!
 //! 本文件放状态、后台任务与分页调度；各部分的画法在子模块：[`header`]、[`doc`]、[`try_tab`]、
 //! [`config`]。
 
+mod ai_try;
 mod config;
 mod doc;
 mod header;
@@ -29,9 +31,10 @@ use super::{
     method_tag, secret_for, spawn_trial,
 };
 use crate::agent::api::{
-    self, ApiEndpoint, ApiExample, ApiSecrets, InputKind, MappedItem, TestStatus, Trial,
+    self, ApiAiCase, ApiEndpoint, ApiExample, ApiSecrets, InputKind, MappedItem, TestStatus, Trial,
 };
 use crate::agent::api_import::{auth, examples, infer};
+use crate::agent::apidef::ai_cases::{self, Attempt};
 use crate::agent::apidef::cases::{self, ExpectKind};
 use crate::agent::backend::LmBackend;
 use crate::models::AppConfig;
@@ -59,6 +62,43 @@ enum Output {
     Items,
     Raw,
     Request,
+}
+
+/// 「试一下」的两种试法。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TryMode {
+    /// 手填参数，直接调接口。
+    #[default]
+    Manual,
+    /// 说一句话，让模型挑接口、填参数。
+    Ai,
+}
+
+/// 一次 AI 试调的结果：(问题, 经过)，或出错原因。
+type AiAttempted = Result<(String, Attempt), String>;
+/// 全部 AI 用例跑一遍时每条的结果：(序号, 判定)。
+type AiRun = (usize, Result<(), String>);
+/// AI 出问法的结果：候选与没收的说明。
+type AiProposed = Result<(Vec<ApiAiCase>, Vec<String>), String>;
+
+/// 「说一句话让 AI 调」的临时状态。
+#[derive(Default)]
+pub(super) struct AiTry {
+    pub(super) question: String,
+    attempting: Option<Receiver<AiAttempted>>,
+    /// 最近一次 AI 试调：(问题, 经过)。
+    result: Option<(String, Attempt)>,
+    /// 存 AI 用例时锁定哪些参数：(参数名, 锁定)。
+    lock: Vec<(String, bool)>,
+    /// 选中的 AI 用例。
+    case: Option<usize>,
+    runs: Option<Receiver<AiRun>>,
+    /// 每条 AI 用例最近一次的判定（按序号）。
+    run_results: Vec<Option<Result<(), String>>>,
+    proposing: Option<Receiver<AiProposed>>,
+    /// AI 出的问法，等人逐条确认。
+    proposals: Vec<ApiAiCase>,
+    note: Option<(bool, String)>,
 }
 
 /// 一条用例最近一次跑的结果：实测与判定（判定先看调通，再看期望）。
@@ -119,6 +159,10 @@ pub(super) struct Detail {
     expect_form: ExpectForm,
     /// 会改数据的接口点了「发送请求」：等人确认。内容是要发出的请求（密钥打码）或组不出请求的原因。
     confirm_send: Option<Result<String, String>>,
+    /// 「试一下」用哪种试法。
+    pub(super) mode: TryMode,
+    /// 「说一句话让 AI 调」。
+    pub(super) ai: AiTry,
     /// AI 正在编样例。
     generating: Option<Receiver<Generated>>,
     /// 样例相关的提示：(是否顺利, 文字)。
@@ -211,6 +255,7 @@ pub(super) fn endpoint_ui(
 ) {
     poll_test(ui.ctx(), page, index);
     poll_examples(ui.ctx(), page, index);
+    ai_try::poll(ui.ctx(), page, index);
     header_ui(ui, page, index);
     if page.view != View::Endpoint(index) {
         // 刚删掉了。

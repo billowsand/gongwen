@@ -190,7 +190,7 @@ impl Expect {
 }
 
 /// 期望值与实际值比：数字按数值、文字去首尾空白，数字与数字样的文字也算相等（`0` 与 `"0"`）。
-fn same(actual: &Value, expected: &Value) -> bool {
+pub(super) fn same(actual: &Value, expected: &Value) -> bool {
     let number = |value: &Value| match value {
         Value::Number(n) => n.as_f64(),
         Value::String(text) => text.trim().parse::<f64>().ok(),

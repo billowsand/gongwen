@@ -26,6 +26,7 @@ pub(super) const X_EVIDENCE: &str = "x-gongwen-evidence";
 pub(super) const X_DESTINATION: &str = "x-gongwen-destination";
 pub(super) const X_TIMEOUT: &str = "x-gongwen-timeout";
 pub(super) const X_TESTS: &str = "x-gongwen-tests";
+pub(super) const X_AI_TESTS: &str = "x-gongwen-ai-tests";
 pub(super) const X_SECRET: &str = "x-gongwen-secret";
 pub(super) const X_INPUTS: &str = "x-gongwen-inputs";
 pub(super) const X_TEMPLATE: &str = "x-gongwen-template";
@@ -430,6 +431,22 @@ pub(crate) fn lower_op(
         .filter(|s| !s.is_empty())
         .map_or_else(|| operation_id.clone(), str::to_string);
     let examples = lower_tests(doc, op, &builder.inputs);
+    let ai_cases = op
+        .get(X_AI_TESTS)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|case| {
+            Some(crate::agent::api::ApiAiCase {
+                question: case.get("question")?.as_str()?.to_string(),
+                expect_args: case
+                    .pointer("/expect/args")
+                    .and_then(Value::as_object)
+                    .map(|args| args.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
     Some(ApiEndpoint {
         id,
         name,
@@ -461,6 +478,7 @@ pub(crate) fn lower_op(
             .unwrap_or_else(|| default_readonly(method, path)),
         ai: op.get(X_AI).and_then(Value::as_bool).unwrap_or(true),
         unsupported: builder.notes.join("；"),
+        ai_cases,
         origin: Some(OpOrigin {
             service: service.id.clone(),
             path: path.to_string(),

@@ -211,6 +211,15 @@ impl ApiDestination {
     }
 }
 
+/// 一条 AI 用例：一句问题，期望模型调这个接口、写明的参数取这些值（`apidef::ai_cases`）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ApiAiCase {
+    pub(crate) question: String,
+    /// 期望的参数：只比这里列出的，没列的模型可以自由发挥。
+    pub(crate) expect_args: BTreeMap<String, Value>,
+}
+
 /// 一组试调用的输入（「试一下」里一键填入、「全部试一遍」逐个发）。
 /// 只是测试数据，不影响请求与返回的配置，不算进配置指纹。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -254,6 +263,9 @@ pub(crate) struct ApiEndpoint {
     /// 现在还发不了的原因（multipart 表单之类）；非空时 [`prepare`] 拒绝。
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) unsupported: String,
+    /// AI 用例：一句问题 → 应该调这个接口、参数取什么值。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ai_cases: Vec<ApiAiCase>,
     /// 从哪份 OpenAPI 的哪个操作编译来的（写回时用）；手填的新接口为空。
     #[serde(skip)]
     pub(crate) origin: Option<OpOrigin>,
@@ -293,6 +305,7 @@ impl Default for ApiEndpoint {
             readonly: true,
             ai: true,
             unsupported: String::new(),
+            ai_cases: Vec::new(),
             origin: None,
         }
     }
@@ -392,6 +405,9 @@ pub(crate) struct TestRecord {
     /// 整组用例跑的结果（单次试调为空）。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) cases: Vec<CaseRecord>,
+    /// AI 用例用的哪个模型。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) model: String,
 }
 
 impl TestRecord {
@@ -422,6 +438,9 @@ pub(crate) struct ApiTestLog {
     pub(crate) records: BTreeMap<String, TestRecord>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) suites: BTreeMap<String, TestRecord>,
+    /// 最近一次整组 AI 用例的结论（模型调得对不对），不参与接口状态。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) ai_suites: BTreeMap<String, TestRecord>,
 }
 
 /// 列表上显示的测试状态。
@@ -453,6 +472,37 @@ impl ApiTestLog {
                 fingerprint: endpoint.fingerprint(),
                 auth: trial.auth_rejected(),
                 cases: Vec::new(),
+                model: String::new(),
+            },
+        );
+    }
+
+    /// 记一次整组 AI 用例的结论：(问题, 判定)。
+    pub(crate) fn record_ai_suite(
+        &mut self,
+        endpoint: &ApiEndpoint,
+        model: &str,
+        runs: &[(String, Result<(), String>)],
+    ) {
+        let cases: Vec<CaseRecord> = runs
+            .iter()
+            .map(|(question, verdict)| CaseRecord {
+                name: question.clone(),
+                ok: verdict.is_ok(),
+                reason: verdict.clone().err().unwrap_or_default(),
+            })
+            .collect();
+        let passed = cases.iter().filter(|case| case.ok).count();
+        self.ai_suites.insert(
+            endpoint.id.clone(),
+            TestRecord {
+                ok: passed == cases.len(),
+                at: chrono::Local::now().format("%m-%d %H:%M").to_string(),
+                summary: format!("AI 用例 {passed}/{} 调对", cases.len()),
+                fingerprint: endpoint.fingerprint(),
+                auth: false,
+                cases,
+                model: model.to_string(),
             },
         );
     }
@@ -491,6 +541,7 @@ impl ApiTestLog {
                     .iter()
                     .any(|(_, trial, verdict)| verdict.is_err() && trial.auth_rejected()),
                 cases,
+                model: String::new(),
             },
         );
     }
@@ -616,6 +667,7 @@ impl ApiEndpoint {
         core.name.clear();
         core.description.clear();
         core.examples.clear();
+        core.ai_cases.clear();
         core.readonly = true;
         core.ai = true;
         for input in &mut core.inputs {

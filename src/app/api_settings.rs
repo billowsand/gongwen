@@ -213,6 +213,19 @@ impl ApisPage {
         }
     }
 
+    /// 记一次整组 AI 用例的结论并落盘。
+    fn record_ai_suite(
+        &mut self,
+        endpoint: &ApiEndpoint,
+        model: &str,
+        runs: &[(String, Result<(), String>)],
+    ) {
+        self.log.record_ai_suite(endpoint, model, runs);
+        if let Err(error) = self.log.save() {
+            self.message = Some((false, format!("测试记录保存失败：{error:#}")));
+        }
+    }
+
     /// 记一次整组用例的结论并落盘。
     fn record_suite(
         &mut self,
@@ -1208,6 +1221,35 @@ pub(super) mod tests {
         assert!(
             page.detail.args["questions"].contains('\n'),
             "JSON 参数排成多行"
+        );
+    }
+
+    #[test]
+    fn the_ai_way_of_trying_explains_what_it_needs() {
+        let mut endpoint = typesafe_endpoint();
+        endpoint.ai_cases.push(crate::agent::api::ApiAiCase {
+            question: "这段话急不急".into(),
+            expect_args: [("model".to_string(), serde_json::json!("jev-latest"))].into(),
+        });
+        let mut page = page_with(vec![endpoint]);
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("AI 用例") && has("这段话急不急") && has("期望：调这个接口，model = jev-latest"),
+            "接口说明列出 AI 用例：{texts:?}"
+        );
+        page.detail.tab = detail::Tab::Try;
+        page.detail.mode = detail::TryMode::Ai;
+        page.store.endpoints[0].readonly = false;
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has("不给 AI 用"), "会改数据的接口不给 AI 试：{texts:?}");
+        page.store.endpoints[0].readonly = true;
+        let texts = draw(&mut page);
+        let has = |needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(
+            has("让 AI 调") || has("还没有选起草模型"),
+            "只查询的接口能让 AI 试（没配模型时说清楚）：{texts:?}"
         );
     }
 

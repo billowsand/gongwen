@@ -745,6 +745,43 @@ fn case_expectations_round_trip_through_openapi() {
 }
 
 #[test]
+fn ai_cases_round_trip_through_openapi() {
+    let (mut store, _) = import(&[("petstore.json", PETSTORE)]);
+    let index = store
+        .endpoints
+        .iter()
+        .position(|e| e.id.ends_with("listPets"))
+        .unwrap();
+    store.endpoints[index].ai_cases.push(api::ApiAiCase {
+        question: "最多列 5 只宠物".into(),
+        expect_args: [("limit".to_string(), json!(5))].into(),
+    });
+    let before = store.endpoints[index].fingerprint();
+    absorb(&mut store);
+    let op = store.services[0].doc.pointer("/paths/~1pets/get").unwrap();
+    assert_eq!(
+        op["x-gongwen-ai-tests"],
+        json!([{"question": "最多列 5 只宠物", "expect": {"args": {"limit": 5}}}])
+    );
+    assert_eq!(store.endpoints[index].ai_cases.len(), 1);
+    assert_eq!(
+        store.endpoints[index].fingerprint(),
+        before,
+        "加 AI 用例不让接口测试记录过期"
+    );
+    let files: Vec<(String, String)> = export(&store)
+        .into_iter()
+        .map(|(name, doc)| (name, to_text(&doc, true).unwrap()))
+        .collect();
+    let mut again = ApiStore::default();
+    import_files(&mut again, &files);
+    assert_eq!(
+        endpoint(&again, "listPets").ai_cases,
+        store.endpoints[index].ai_cases
+    );
+}
+
+#[test]
 fn status_prefers_a_fresh_case_suite() {
     let endpoint = legacy_endpoints().remove(0);
     let mut log = api::ApiTestLog::default();
