@@ -44,10 +44,6 @@ const KEEP_RECENT: i64 = 5;
 
 /// 从库里读回来的一份检查点。
 #[derive(Debug, Clone)]
-#[expect(
-    dead_code,
-    reason = "内核加固第 4 期⑤界面「接着跑」接入调用侧（④ 的 resume_checkpoint 已写好）"
-)]
 pub(crate) struct StoredCheckpoint {
     pub(crate) seq: i64,
     pub(crate) label: String,
@@ -179,8 +175,7 @@ impl ManuscriptStore {
 impl ManuscriptStore {
     fn read_run_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCheckpoint> {
         let data: String = row.get(6)?;
-        let at: StepPath = serde_json::from_str(&row.get::<_, String>(1)?)
-            .unwrap_or_else(|_| vec![row.get::<_, i64>(0).unwrap_or(0) as usize]);
+        let at: Option<StepPath> = serde_json::from_str(&row.get::<_, String>(1)?).ok();
         let mut checkpoint: Checkpoint = serde_json::from_str(&data).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 6,
@@ -188,8 +183,11 @@ impl ManuscriptStore {
                 format!("检查点 JSON 读不出来：{error}").into(),
             )
         })?;
-        // 以列里的路径为准（旧行可能只有 data）。
-        checkpoint.at = at;
+        // 以列里的路径为准；列读不出来就用 data 里存的那份——不能拿序号顶替路径，
+        // 序号是这一轮的第几份检查点，不是第几步，顶替了会从错的步骤接着跑。
+        if let Some(at) = at {
+            checkpoint.at = at;
+        }
         Ok(StoredCheckpoint {
             seq: row.get(0)?,
             label: row.get(2)?,
@@ -321,6 +319,24 @@ mod tests {
         assert_eq!(latest.label, "已完成 算子 gap_loop");
         assert_eq!(latest.skill_id, "skill");
         assert!(!latest.checkpoint.partial);
+    }
+
+    /// 路径列坏了就用 data 里存的路径，不能拿序号顶替（序号是第几份检查点，不是第几步）。
+    #[test]
+    fn a_broken_path_column_falls_back_to_the_path_inside_the_data() {
+        let (mut store, session, _) = fixture();
+        for _ in 0..3 {
+            store
+                .save_run_checkpoint(&session, 1, "polish", "h", false, &ckpt(vec![4, 2]))
+                .unwrap();
+        }
+        store
+            .conn
+            .execute("UPDATE ai_run_checkpoints SET at_path = '坏了'", [])
+            .unwrap();
+        let latest = store.latest_run_checkpoint(&session, 1).unwrap().unwrap();
+        assert_eq!(latest.seq, 3);
+        assert_eq!(latest.checkpoint.at, [4, 2]);
     }
 
     #[test]

@@ -600,8 +600,8 @@ impl DraftPage<'_> {
             *self.status = format!(
                 "正文在那一步之后改过了（那时是 {} 字，现在 {} 字），从那里重跑会把这些改动盖掉；\
                  可以「接着跑」或「从头重来」。",
-                crate::agent::tools::short(&stored.checkpoint.board.document, 40),
-                crate::agent::tools::short(&self.doc.generated_markdown, 40),
+                stored.checkpoint.board.document.chars().count(),
+                self.doc.generated_markdown.chars().count(),
             );
             return;
         }
@@ -773,6 +773,15 @@ impl DraftPage<'_> {
             );
             return;
         };
+        // 与答完题接着跑一致：技能改过就提示一句，按新版接着跑。
+        if super::session::skill_hash(&skill) != stored.skill_hash
+            && let Some(turn) = self.doc.ai_panel.turn_mut(turn_id)
+        {
+            turn.notes.push(format!(
+                "技能「{}」的内容改过了，按新版接着跑。",
+                skill.name
+            ));
+        }
         if let Err(error) = self.start_skill(
             request,
             Some((
