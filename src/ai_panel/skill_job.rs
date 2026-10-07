@@ -562,6 +562,30 @@ impl DraftPage<'_> {
         });
     }
 
+    /// 删掉这一轮的检查点（「丢弃」，以及「从头重来」之前先清干净）。
+    /// 清掉之后卡片不再给「接着跑」，也不会再有「从这里重跑」的候选。
+    pub(crate) fn drop_checkpoints(&mut self, turn_id: u64) {
+        let session_id = self.doc.ai_panel.session.id.clone();
+        let Some(store) = self.store.as_deref_mut() else {
+            return;
+        };
+        let removed = match store.delete_run_checkpoints_from(&session_id, turn_id as i64) {
+            Ok(count) => count,
+            Err(error) => {
+                *self.status = format!("删除检查点失败：{error:#}");
+                return;
+            }
+        };
+        if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
+            turn.resumable = None;
+        }
+        *self.status = if removed > 0 {
+            format!("已丢弃这一轮保存的 {removed} 份检查点。")
+        } else {
+            "这一轮没有留下检查点。".into()
+        };
+    }
+
     /// 挂起时的题答完了：回答落到检查点的黑板（要切的文种由这里切），从 `checkpoint.at` 接着跑。
     pub(crate) fn answer_suspended(&mut self, turn_id: u64) {
         if self.doc.busy {
@@ -607,10 +631,6 @@ impl DraftPage<'_> {
     /// 崩溃 / 停止 / 出错后的「接着跑」：从库里取这一轮最新的检查点，组装成挂起那一轮
     /// 同样的 `SkillRun`，走**同一个** `start_skill` 恢复分支、同一个 `engine::run`。
     /// 闸门、定稿、提案生成的代码因此只有一份（红线 3）。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "内核加固第 4 期⑤界面卡片「接着跑」接入调用侧")
-    )]
     pub(crate) fn resume_checkpoint(&mut self, turn_id: u64) {
         if self.doc.busy {
             *self.status = "这篇稿件还有任务在跑，稍等一下。".into();

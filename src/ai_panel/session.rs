@@ -350,6 +350,8 @@ impl SavedTurn {
             replies,
             research: self.research,
             run,
+            // 检查点存在库里：读回后由 `refresh_resumable` 按库里最新一份填。
+            resumable: None,
             findings: self.findings,
             style: self.style,
             started: Instant::now(),

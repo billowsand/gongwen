@@ -23,6 +23,12 @@ pub(super) enum CardAction {
     Stop,
     Accept,
     Discard,
+    /// 丢弃这一轮的检查点（不再能接着跑）。
+    DiscardRun(u64),
+    /// 从最近的检查点接着跑（崩溃 / 停止 / 出错后）。
+    Resume(u64),
+    /// 丢掉检查点，从第一步重来。
+    Restart(u64),
     Review,
     Workspace(u64),
     Rerun(u64),
@@ -265,6 +271,21 @@ impl DraftPage<'_> {
                 GongwenApp::accept_ai_proposal(self.doc, self.config, self.status);
             }
             Some(CardAction::Discard) => GongwenApp::discard_ai_proposal(self.doc, self.status),
+            Some(CardAction::Resume(id)) => self.resume_checkpoint(id),
+            Some(CardAction::Restart(id)) => {
+                self.drop_checkpoints(id);
+                if let Some(request) = self
+                    .doc
+                    .ai_panel
+                    .turns
+                    .iter()
+                    .find(|turn| turn.id == id)
+                    .and_then(|turn| turn.request.clone())
+                {
+                    self.start_panel_request(request);
+                }
+            }
+            Some(CardAction::DiscardRun(id)) => self.drop_checkpoints(id),
             Some(CardAction::Review) => {
                 if let Some(turn) = self
                     .doc
@@ -634,16 +655,19 @@ fn turn_card(
         TurnState::Stopped => {
             ui.add_space(6.0);
             ui.weak(format!("已停止，生成了 {chars} 字；半截输出不能采用。"));
+            resume_actions(ui, turn, action);
             rerun_button(ui, turn, "重新生成", action);
         }
         TurnState::Failed(error) => {
             ui.add_space(6.0);
             ui.colored_label(theme::danger(), error);
+            resume_actions(ui, turn, action);
             rerun_button(ui, turn, "重试", action);
         }
         TurnState::Interrupted => {
             ui.add_space(6.0);
             ui.weak("程序关闭时这一轮还没跑完。");
+            resume_actions(ui, turn, action);
             rerun_button(ui, turn, "重新生成", action);
         }
         TurnState::Expired => {
@@ -1122,6 +1146,52 @@ fn rerun_button(
     {
         *action = Some(CardAction::Rerun(turn.id));
     }
+}
+
+/// 中断 / 停止 / 出错后的「接着跑 · 从头重来 · 丢弃」（内核加固第 4 期）。
+///
+/// 有检查点才给「接着跑」，并注明停在哪一步、什么时候存的；找不到检查点就只留原来的
+/// 「重新生成」，不假装能续。三个按钮只在侧栏发起的轮次上出现。
+fn resume_actions(ui: &mut egui::Ui, turn: &super::AiTurn, action: &mut Option<CardAction>) {
+    if turn.request.is_none() {
+        return;
+    }
+    ui.add_space(6.0);
+    if turn.resumable.is_none() {
+        ui.weak("这一轮没有留下检查点，只能重新生成。");
+        return;
+    }
+    let label = turn.resumable.as_deref().unwrap_or_default();
+    ui.horizontal_wrapped(|ui| {
+        if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "接着跑")
+            .on_hover_text(format!("从最近一步接着跑（{label}）"))
+            .clicked()
+        {
+            *action = Some(CardAction::Resume(turn.id));
+        }
+        if ui
+            .add(theme::secondary_icon_button(
+                theme::Icon::Refresh,
+                "从头重来",
+            ))
+            .on_hover_text("丢掉检查点，从第一步重新跑一遍")
+            .clicked()
+        {
+            *action = Some(CardAction::Restart(turn.id));
+        }
+        if ui
+            .add(theme::secondary_icon_button(theme::Icon::Eraser, "丢弃"))
+            .on_hover_text("删掉这一轮的检查点，不再能接着跑")
+            .clicked()
+        {
+            *action = Some(CardAction::DiscardRun(turn.id));
+        }
+    });
+    ui.label(
+        egui::RichText::new(format!("可接着跑：{label}"))
+            .small()
+            .color(theme::text_muted()),
+    );
 }
 
 /// 结果卡下半部：摘要 chip、关键事实确认与采用 / 对照 / 放弃。

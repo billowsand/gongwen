@@ -4,10 +4,19 @@
 //! 提案怎么办：提案跟着它那一轮存在会话里，切走时从稿件上卸下，切回来正文没动过就重新装上。
 
 use super::session::SavedProposal;
+use crate::ai_panel::TurnState;
 use crate::app::GongwenApp;
 use crate::draft_page::DraftPage;
 use crate::theme;
 use eframe::egui;
+
+/// RFC3339 只留「月-日 时:分」，卡片上用。
+fn short_time(rfc3339: &str) -> String {
+    let Some((_, rest)) = rfc3339.split_once('T') else {
+        return rfc3339.chars().take(16).collect();
+    };
+    rest.chars().take(16).collect()
+}
 
 impl DraftPage<'_> {
     /// 每帧调用：新打开的稿件读回当前会话，新稿第一次入库时把内存里的会话落盘，有改动就写。
@@ -28,7 +37,58 @@ impl DraftPage<'_> {
                 self.load_current_session(id);
             }
         }
+        self.refresh_resumable();
         self.save_ai_session(false);
+    }
+
+    /// 按库里最新的检查点，标出哪些轮次可以「接着跑」（内核加固第 4 期）。
+    ///
+    /// 只看已经结束的轮次（`Interrupted` / `Stopped` / `Failed`）；还在跑或已经出结果的不管。
+    /// 每帧都查代价太大（一次 SELECT × 轮数），所以只在状态集合变化时重查。
+    pub(crate) fn refresh_resumable(&mut self) {
+        let session_id = self.doc.ai_panel.session.id.clone();
+        let targets: Vec<(u64, bool)> = self
+            .doc
+            .ai_panel
+            .turns
+            .iter()
+            .filter(|turn| {
+                matches!(
+                    turn.state,
+                    TurnState::Interrupted | TurnState::Stopped | TurnState::Failed(_)
+                )
+            })
+            .map(|turn| (turn.id, turn.resumable.is_some()))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let Some(store) = self.store.as_deref() else {
+            // 没连稿件库：没有检查点，卡片保持现在的样子。
+            return;
+        };
+        for (turn_id, _) in targets {
+            let stored = store
+                .latest_run_checkpoint(&session_id, turn_id as i64)
+                .ok()
+                .flatten();
+            let summary = stored.map(|stored| {
+                let label = if stored.label.trim().is_empty() {
+                    format!(
+                        "第 {} 步",
+                        stored.checkpoint.at.first().copied().unwrap_or(0) + 1
+                    )
+                } else {
+                    stored.label.clone()
+                };
+                format!("{label} · {}", short_time(&stored.created_at))
+            });
+            if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id)
+                && turn.resumable != summary
+            {
+                turn.resumable = summary;
+            }
+        }
     }
 
     /// 写当前会话。`force` 不等一秒间隔（切会话前用）。

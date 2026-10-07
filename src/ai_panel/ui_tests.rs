@@ -2313,3 +2313,124 @@ fn the_session_history_lands_in_the_system_prompt_exactly_once_after_resuming() 
         "历史只出现一次：{with}"
     );
 }
+
+/// 验收 9：`Interrupted` / `Stopped` / `Failed` 的卡片有检查点时出「接着跑」，没有时保持原样。
+#[test]
+fn interrupted_cards_offer_resume_only_when_a_checkpoint_exists() {
+    use crate::manuscript::{ManuscriptStore, NewManuscript};
+    let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+    let manuscript = store
+        .create(
+            &NewManuscript {
+                content_markdown: "正文。\n".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let mut harness = Harness::new("正文。\n");
+    harness.store = Some(store);
+    harness.doc.manuscript_id = Some(manuscript);
+    harness.doc.ai_panel.open = true;
+    harness.with_page(|page| page.sync_ai_session());
+    let session = harness.doc.ai_panel.session.id.clone();
+
+    // 没有检查点：只有「重新生成」，不假装能续。
+    harness
+        .doc
+        .ai_panel
+        .push_turn("研究式起草".into(), "起草".into(), vec![], Some(request()));
+    let id = harness.doc.ai_panel.turns[0].id;
+    harness.doc.ai_panel.finish(TurnState::Interrupted);
+    harness.with_page(|page| page.refresh_resumable());
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "程序关闭时这一轮还没跑完"), "{texts:?}");
+    assert!(has(&texts, "重新生成"), "{texts:?}");
+    assert!(!has(&texts, "接着跑"), "没有检查点就不给接着跑：{texts:?}");
+
+    // 落一份检查点：卡片出「接着跑 / 从头重来 / 丢弃」，并注明停在哪一步。
+    harness.with_page(|page| page.save_ai_session(true));
+    {
+        let store = harness.store.as_mut().unwrap();
+        store
+            .save_run_checkpoint(
+                &session,
+                id as i64,
+                RESEARCH_DRAFT,
+                "hash",
+                false,
+                &crate::agent::checkpoint::Checkpoint {
+                    at: vec![1],
+                    reason: crate::agent::checkpoint::Reason::Step,
+                    label: "已完成 算子 clarify".into(),
+                    board: crate::agent::board::Board::default(),
+                    partial: false,
+                },
+            )
+            .unwrap();
+    }
+    harness.with_page(|page| page.refresh_resumable());
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "接着跑"), "{texts:?}");
+    assert!(has(&texts, "从头重来"), "{texts:?}");
+    assert!(has(&texts, "丢弃"), "{texts:?}");
+    assert!(
+        has(&texts, "可接着跑：已完成 算子 clarify"),
+        "注明停在哪一步：{texts:?}"
+    );
+
+    // 丢弃：检查点删掉，卡片回到只有「重新生成」。
+    harness.with_page(|page| page.drop_checkpoints(id));
+    assert!(
+        harness
+            .store
+            .as_ref()
+            .unwrap()
+            .list_run_checkpoints(&session, id as i64)
+            .unwrap()
+            .is_empty(),
+        "库里删干净了"
+    );
+    let texts = harness.frame_texts();
+    assert!(!has(&texts, "接着跑"), "{texts:?}");
+    assert!(has(&texts, "重新生成"), "{texts:?}");
+}
+
+/// Stopped 与 Failed 也一样：找到检查点就能接着跑（提示词第 3 节的出入 3）。
+#[test]
+fn stopped_and_failed_cards_also_offer_resume() {
+    for state in [TurnState::Stopped, TurnState::Failed("模型超时".into())] {
+        let mut harness = Harness::new("");
+        harness.doc.ai_panel.open = true;
+        harness
+            .doc
+            .ai_panel
+            .push_turn("研究式起草".into(), "起草".into(), vec![], Some(request()));
+        let id = harness.doc.ai_panel.turns[0].id;
+        harness.doc.ai_panel.finish(state.clone());
+        // 直接标成可续（库里那份检查点在真机上由后台线程落的）。
+        harness.doc.ai_panel.turns[0].resumable = Some("已完成 算子 clarify · 10-07 15:04".into());
+        let texts = harness.frame_texts();
+        assert!(has(&texts, "接着跑"), "{state:?}：{texts:?}");
+        assert!(
+            has(&texts, "可接着跑：已完成 算子 clarify · 10-07 15:04"),
+            "{state:?}：{texts:?}"
+        );
+        assert_eq!(id, 1);
+    }
+}
+
+/// 一份够用的 `TurnRequest`（卡片上的「重新生成」要它）。
+fn request() -> crate::ai_panel::TurnRequest {
+    crate::ai_panel::TurnRequest {
+        skill: Some(RESEARCH_DRAFT.into()),
+        text: "起草".into(),
+        selection: None,
+        preset: None,
+        use_rag: false,
+        refs: Vec::new(),
+        notes: Vec::new(),
+        on_proposal: false,
+        style: Default::default(),
+    }
+}

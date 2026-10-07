@@ -173,6 +173,10 @@ pub(crate) struct AiTurn {
     pub(crate) research: Option<ResearchSnapshot>,
     /// 挂起的流程：答完题从这里接着跑。
     pub(crate) run: Option<Box<SkillRun>>,
+    /// 这一轮能不能「接着跑」（内核加固第 4 期）：`Some(停在哪一步 · 什么时候存的)`。
+    /// 读回会话与每次落盘后由 `session::refresh_resumable` 按库里最新检查点填；
+    /// `None` 表示没有检查点，卡片保持现在的样子，不假装能续。
+    pub(crate) resumable: Option<String>,
     /// 审核类技能的问题清单。
     pub(crate) findings: Vec<crate::agent::board::Finding>,
     /// 风格学习学出、还没保存的档案。
@@ -284,6 +288,7 @@ impl AiPanel {
             replies: Vec::new(),
             research: None,
             run: None,
+            resumable: None,
             findings: Vec::new(),
             style: None,
             started: Instant::now(),

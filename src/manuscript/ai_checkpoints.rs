@@ -145,10 +145,6 @@ impl ManuscriptStore {
 }
 
 /// 读取侧：内核加固第 4 期④「接着跑」、⑤界面显示、⑥「从这里重跑」接入。
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "内核加固第 4 期⑤界面接入调用侧")
-)]
 impl ManuscriptStore {
     fn read_run_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCheckpoint> {
         let data: String = row.get(6)?;
@@ -211,6 +207,20 @@ impl ManuscriptStore {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![session_id, turn_id], Self::read_run_checkpoint)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// 删掉这一轮的全部检查点（「丢弃」），返回删了几份。
+    pub(crate) fn delete_run_checkpoints_from(
+        &mut self,
+        session_id: &str,
+        turn_id: i64,
+    ) -> Result<usize> {
+        self.conn
+            .execute(
+                "DELETE FROM ai_run_checkpoints WHERE session_id = ?1 AND turn_id = ?2",
+                params![session_id, turn_id],
+            )
+            .map_err(Into::into)
     }
 
     /// 删掉 `seq` 之后的检查点（「从这里重跑」覆盖该点之后的产物）。
