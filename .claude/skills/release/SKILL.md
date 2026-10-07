@@ -16,8 +16,8 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
 - 工作流：`ci.yml` 在 push main 时触发（fmt / clippy / test：Windows x64 + Linux ARM64 两平台）；`release.yml` 在 push `v*` tag 时触发，共 5 个 job（build-windows、build-linux-arm64、package-linux-arm64、verify-deb、release）。
 - **版本更新说明由工作流取仓库文件**：`release.yml` 的 `release` job 读 `docs/release-notes/${GITHUB_REF_NAME}.md`，有则 `gh release create --title "公文助手 vX.Y.Z" --notes-file <该文件>`；**缺文件才回退 `--generate-notes` 并打一条 `::warning::`**。所以说明必须在打 tag 前提交进仓库，不是发完再补。
 - **用户文档有三份，发版时都可能过期**（发版前必查，见步骤 3）：
-  - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 23 种格式、校对词表 155 条、文档级规则 25 条、约 9.4 万行 Rust、1000+ 测试——每版都要重新数，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
-  - 使用帮助：应用内嵌正文 `assets/help/*.md`（`include_str!` 打进二进制）＋ 手工副本 `docs/help/*.md`；章节元数据在 `src/help/content.rs` 的 `CHAPTERS`（24 条 = 正文 21 章 + 附录 3 篇）。**改章节要三处同步**，`docs/help/diagrams/` 是可编辑图源，只在 docs 侧。
+  - `README.md`（根目录）：面向读者的宣发版，含成堆**会随版本漂移的硬数字**（文种 7 种、导入 24 种格式、校对词表 155 条、文档级规则 21 条、约 21.2 万行 Rust、1852 项自动化测试——括号里是 v0.9.1 的值，**每版都要重新数**，见步骤 3）。打包脚本会把它复制进发布包（`scripts/package-portable.ps1`、`scripts/package-dmg.sh`），所以它是**随包发行**的文档，不是仓库自留物。
+  - 使用帮助：应用内嵌正文 `assets/help/*.md`（`include_str!` 打进二进制）＋ 手工副本 `docs/help/*.md`；章节元数据在 `src/help/content.rs` 的 `CHAPTERS`（25 条 = 正文 22 章 + 附录 3 篇）。**改章节要三处同步**，`docs/help/diagrams/` 是可编辑图源，只在 docs 侧。
   - `docs/install.md`（安装指南）与 `docs/manual.md`（手册目录页，分部表格列出全部章号章名）。
 - **Release 资产是 4 个**（v0.6.6 之后的口径；macOS、Linux AMD64、Arch/Omarchy 与 PKGBUILD 不再发布）：
   - `gongwen-assistant-X.Y.Z-win-x64-setup.exe` + `.sha256`
@@ -119,16 +119,18 @@ README 哪一节、手册哪一章、要不要重截截图。它能保证不漏�
 # ① 手册两处副本必须逐字一致（docs/help/diagrams 是可编辑图源，只在 docs 侧，故排除）
 diff -rq assets/help docs/help --exclude=diagrams && echo "手册副本一致"
 
-# ② 章节口径：CHAPTERS 24 条 = 正文 21 章 + 附录 3 篇，
-#    与 README「21 章 + 3 附录」、docs/manual.md 的分部表格一致
-grep -c '^ *chapter!' src/help/content.rs     # 24
-ls assets/help/[0-9]*.md | wc -l              # 21
+# ② 章节口径：CHAPTERS 25 条 = 正文 22 章 + 附录 3 篇，
+#    与 README「22 章 + 3 附录」、docs/manual.md 的分部表格一致
+#    （v0.7.0 增补「22 送批材料」一章后即为 25/22/3；若将来又加章，三处同步改这里）
+grep -c '^ *chapter!' src/help/content.rs     # 25
+ls assets/help/[0-9]*.md | wc -l              # 22
 ls assets/help/[a-c]-*.md | wc -l             # 3
 
 # ③ README「文种、导出与平台」表的硬数字，逐条重新数一遍
-grep -v '^#' proofread-lexicon.tsv | tail -n +2 | wc -l   # 校对词表条数（README 现写 155）
-find src -name '*.rs' | xargs wc -l | tail -1              # 代码行数（README 现写“约 9.4 万行”）
-# 测试数：复用步骤 4 那次 cargo test 的输出汇总（README 现写 1000+）
+#    （下面是 v0.9.1 的实际值，仅作对照——每版都要重新数，别直接抄）
+grep -v '^#' proofread-lexicon.tsv | tail -n +2 | wc -l   # 校对词表条数（v0.9.1 时 155）
+find src -name '*.rs' | xargs wc -l | tail -1              # 代码行数（v0.9.1 时约 21.2 万行）
+# 测试数：复用步骤 4 那次 cargo test 的输出汇总（v0.9.1 时 1852）
 cargo test --locked --all-targets --no-fail-fast 2>&1 | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s}'
 ```
 
