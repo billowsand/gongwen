@@ -72,3 +72,4 @@ __pycache__/
 /assets/fuma/*.txt
 !/assets/fuma/xiaohe.txt
 model_api_test.md.txt
+paper-template/
