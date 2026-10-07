@@ -25,6 +25,7 @@ mod render;
 mod research;
 mod research_anchor;
 mod research_quote;
+mod research_terminal;
 mod tail;
 
 pub(crate) use freeze::{ScaleFreeze, show_frozen};
@@ -162,6 +163,7 @@ pub(crate) struct Metrics {
     /// 研究报告的字体：版面代码写的公文族名经 [`theme::research_family`] 换成
     /// 西文数字为 Termes 的研究报告字体族。
     research_fonts: bool,
+    terminal: bool,
     /// 本帧纸面上每一条「改得动的行」的位置，画完纸再统一标到页边。
     /// 版面是一路画下来的，行的位置只有画到那一步才知道，所以这里用内部可变性：
     /// 各版式部件拿到的都是 `&Metrics`，为了记一行而把整条链路改成 `&mut` 不值得。
@@ -230,6 +232,7 @@ impl Metrics {
             table_line_pt: TABLE_LINE_PT,
             math: false,
             research_fonts: false,
+            terminal: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }
@@ -259,6 +262,7 @@ impl Metrics {
             table_line_pt: RESEARCH_TABLE_LINE_PT,
             math: true,
             research_fonts: true,
+            terminal: false,
             gutter: RefCell::default(),
             tints: RefCell::default(),
         }
@@ -356,7 +360,9 @@ impl Metrics {
     }
 
     fn font(&self, family: &str, size: f32) -> FontId {
-        let family = if self.research_fonts {
+        let family = if self.terminal {
+            theme::FONT_RESEARCH_TERMINAL
+        } else if self.research_fonts {
             theme::research_family(family)
         } else {
             family

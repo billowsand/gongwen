@@ -37,15 +37,28 @@ fn fonts() -> Result<Value> {
 type Prepared = (String, HashMap<String, Vec<u8>>, Vec<String>);
 
 /// 生成模板数据与公式 SVG。`source` 是 mdx 源码目录里的 Markdown（插图、文献都在旁边）。
-fn document(source: &Path) -> Result<Prepared> {
+fn document(source: &Path, input: &DraftInput) -> Result<Prepared> {
     let doc = mdx::typst_research::build(source).context("研究报告转换失败")?;
     let mut warnings = doc.warnings.clone();
     let mut data = serde_json::to_value(&doc).context("无法序列化研究报告排版数据")?;
     let mut files = HashMap::new();
     // 花脸稿的哨兵先换成标注：公式源码里的哨兵剥掉才排得出来。
     super::research_redline::apply(&mut data);
-    super::math::render_all(&mut data, &mut files, &mut warnings);
+    let terminal = input.research.template == crate::models::ResearchTemplate::Terminal;
+    let dark = terminal && input.research.palette == crate::models::ResearchPalette::Dark;
+    super::math::render_all_with_color(
+        &mut data,
+        &mut files,
+        &mut warnings,
+        if dark {
+            latex_rust::Color::rgb(231, 237, 240)
+        } else {
+            latex_rust::Color::rgb(0, 0, 0)
+        },
+    );
     data["fonts"] = fonts()?;
+    data["terminal"] = terminal.into();
+    data["dark"] = dark.into();
     let data = serde_json::to_string(&data).context("无法序列化研究报告排版数据")?;
     Ok((data, files, warnings))
 }
@@ -65,7 +78,7 @@ pub(crate) fn write_pdf_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, warnings) = document(&bundle.markdown)?;
+    let (data, files, warnings) = document(&bundle.markdown, input)?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     let mut outcome = typst_engine::compile(
         &TypstJob {
@@ -122,7 +135,7 @@ fn page_count_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, _) = document(&bundle.markdown)?;
+    let (data, files, _) = document(&bundle.markdown, input)?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     typst_engine::page_count(
         &TypstJob {
@@ -150,7 +163,7 @@ pub(crate) fn document_json(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    Ok(document(&bundle.markdown)?.0)
+    Ok(document(&bundle.markdown, input)?.0)
 }
 
 #[cfg(test)]
@@ -212,7 +225,7 @@ mod tests {
             base.path(),
         )
         .unwrap();
-        let (data, files, _) = document(&bundle.markdown).unwrap();
+        let (data, files, _) = document(&bundle.markdown, &input).unwrap();
         let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
         let items = typst_engine::text_fonts_for_test(
             &TypstJob {

@@ -75,7 +75,11 @@ struct Rendered {
     depth: f32,
 }
 
-fn render(source: &str, display: bool) -> Result<Rendered, String> {
+fn render_with_color(
+    source: &str,
+    display: bool,
+    color: latex_rust::Color,
+) -> Result<Rendered, String> {
     let font = font()?;
     let ast = latex_rust::parse(source).map_err(|e| e.to_string())?;
     let style = if display {
@@ -86,6 +90,7 @@ fn render(source: &str, display: bool) -> Result<Rendered, String> {
     let boxed = latex_rust::layout(&ast, font, style).map_err(|e| e.to_string())?;
     let mut options = SvgOptions::new();
     options.font_size_pt = dim_from_f32(SIZE_PT);
+    options.color = color;
     let svg =
         latex_rust::render_svg(&pad_box(&boxed), font, &options).map_err(|e| e.to_string())?;
     Ok(Rendered {
@@ -99,10 +104,21 @@ fn render(source: &str, display: bool) -> Result<Rendered, String> {
 /// 把模板数据里的公式全部排好：行内片段 `{"t":"math"}` 与独立公式块 `{"k":"math"}`
 /// 补上 SVG 路径与尺寸，SVG 放进 `files`（虚拟路径 → 内容）。排不出来的公式写上
 /// `err`，模板照源码印出，提示收进 `warnings`。
+#[cfg(test)]
 pub(crate) fn render_all(
     data: &mut Value,
     files: &mut HashMap<String, Vec<u8>>,
     warnings: &mut Vec<String>,
+) {
+    render_all_with_color(data, files, warnings, latex_rust::Color::rgb(0, 0, 0));
+}
+
+/// 默认公式墨色随模板配色，公式显式颜色仍由解析器保留。
+pub(crate) fn render_all_with_color(
+    data: &mut Value,
+    files: &mut HashMap<String, Vec<u8>>,
+    warnings: &mut Vec<String>,
+    color: latex_rust::Color,
 ) {
     let mut cache: HashMap<(String, bool), Result<(String, Rendered), String>> = HashMap::new();
     walk(data, &mut |node| {
@@ -117,7 +133,7 @@ pub(crate) fn render_all(
             return;
         };
         let entry = cache.entry((source.clone(), display)).or_insert_with(|| {
-            render(&source, display).map(|rendered| {
+            render_with_color(&source, display, color).map(|rendered| {
                 let path = format!("/math/{}.svg", files.len());
                 files.insert(path.clone(), rendered.svg.clone());
                 (path, rendered)

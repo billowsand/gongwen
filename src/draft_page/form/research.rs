@@ -17,6 +17,31 @@ impl DraftPage<'_> {
             .min_row_height(FORM_CONTROL_HEIGHT)
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
+                row_label_with_info(ui, "模板", "模板控制版式；文件类型仍决定项目阶段、署名与外文原题。");
+                egui::ComboBox::from_id_salt("research_template")
+                    .selected_text(self.doc.draft.research.template.label())
+                    .width(field_width)
+                    .show_ui(ui, |ui| {
+                        for template in crate::models::ResearchTemplate::ALL {
+                            ui.selectable_value(&mut self.doc.draft.research.template, template, template.label());
+                        }
+                    });
+                ui.end_row();
+                if self.doc.draft.research.template == crate::models::ResearchTemplate::Terminal {
+                    row_label(ui, "配色");
+                    egui::ComboBox::from_id_salt("research_palette")
+                        .selected_text(self.doc.draft.research.palette.label())
+                        .width(field_width)
+                        .show_ui(ui, |ui| {
+                            for palette in [crate::models::ResearchPalette::Dark, crate::models::ResearchPalette::Bright] {
+                                ui.selectable_value(&mut self.doc.draft.research.palette, palette, palette.label());
+                            }
+                        });
+                    ui.end_row();
+                    row_label(ui, "导出说明");
+                    ui.small("PDF 使用所选配色；Word 使用白图样式，便于编辑与打印。");
+                    ui.end_row();
+                }
                 row_label_with_info(
                     ui,
                     "密级",

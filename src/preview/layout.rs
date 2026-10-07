@@ -1846,12 +1846,13 @@ pub(crate) fn sheet(
         ui.add_space(side);
         ui.vertical(|ui| {
             ui.set_max_width(metrics.page);
-            egui::Frame::new()
+            let frame = egui::Frame::new()
                 .fill(theme::paper::bg())
                 .stroke(Stroke::new(1.0, theme::border()))
                 .corner_radius(egui::CornerRadius::same(3))
                 .shadow(theme::float_shadow(theme::paper::shadow_alpha()))
                 .show(ui, |ui| {
+                    let background = ui.painter().add(egui::Shape::Noop);
                     // 页边距用 add_space 铺出来：`Margin` 是 i8，放大后会溢出。
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                     ui.set_width(metrics.page);
@@ -1869,7 +1870,11 @@ pub(crate) fn sheet(
                         });
                     });
                     ui.add_space(metrics.margin_top);
+                    background
                 });
+            if metrics.terminal {
+                super::research_terminal::paper(ui, metrics, frame.response.rect, frame.inner);
+            }
         });
     });
 }

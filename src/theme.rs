@@ -928,14 +928,57 @@ pub mod paper {
         sheet_for_family(family_for(theme, mode))
     }
 
+    std::thread_local! {
+        // 只在一次报告预览绘制内覆盖纸面，不改应用主题和用户纸色设置。
+        static REPORT_SHEET: std::cell::Cell<Option<Sheet>> = const { std::cell::Cell::new(None) };
+    }
+
+    pub(crate) struct ReportPaper(Option<Sheet>);
+
+    impl Drop for ReportPaper {
+        fn drop(&mut self) {
+            REPORT_SHEET.with(|sheet| sheet.set(self.0));
+        }
+    }
+
+    pub(crate) fn report_paper(dark: bool) -> ReportPaper {
+        let sheet = if dark {
+            Sheet {
+                bg: Color32::from_rgb(20, 27, 33),
+                ink: Color32::from_rgb(231, 237, 240),
+                ink_muted: Color32::from_rgb(141, 218, 233),
+                ink_faint: Color32::from_rgb(80, 122, 136),
+                hover: Color32::from_rgb(37, 56, 65),
+            }
+        } else {
+            Sheet {
+                ink_muted: Color32::from_rgb(54, 85, 99),
+                ink_faint: Color32::from_rgb(160, 173, 179),
+                ..ORIGINAL_SHEET
+            }
+        };
+        ReportPaper(REPORT_SHEET.with(|current| current.replace(Some(sheet))))
+    }
+
+    /// 同一模板内的标题强调色；仍在报告绘制的线程局部作用域里恢复。
+    pub(crate) fn report_ink(ink: Color32) -> ReportPaper {
+        let sheet = Sheet { ink, ..sheet() };
+        ReportPaper(REPORT_SHEET.with(|current| current.replace(Some(sheet))))
+    }
+
     /// 当前生效的纸面取色。
     fn sheet() -> Sheet {
-        sheet_for(current(), *CURRENT_PAPER.read().unwrap())
+        REPORT_SHEET
+            .with(|sheet| sheet.get())
+            .unwrap_or_else(|| sheet_for(current(), *CURRENT_PAPER.read().unwrap()))
     }
 
     /// 当前纸面是否为深色。
     pub fn is_dark() -> bool {
-        family_for(current(), *CURRENT_PAPER.read().unwrap()).is_dark()
+        REPORT_SHEET.with(|sheet| sheet.get()).map_or_else(
+            || family_for(current(), *CURRENT_PAPER.read().unwrap()).is_dark(),
+            |sheet| sheet.bg.r() < 128,
+        )
     }
 
     /// 纸底。
@@ -2543,6 +2586,7 @@ pub const FONT_BOLD: &str = "gw-bold";
 /// （见 [`research_family`]）。
 pub const FONT_RESEARCH_SONG: &str = "gw-research-song";
 pub const FONT_RESEARCH_KAI: &str = "gw-research-kai";
+pub const FONT_RESEARCH_TERMINAL: &str = "gw-research-terminal";
 pub const FONT_RESEARCH_HEI: &str = "gw-research-hei";
 /// 研究报告表头：黑体字形，西文仍是 Termes Regular（TeX 的 `\heiti` 不带 `\enhei`）。
 pub const FONT_RESEARCH_HEI_PLAIN: &str = "gw-research-hei-plain";
@@ -3086,6 +3130,7 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
     };
     let termes_regular = termes(&mut fonts, "gw-termes-regular", "texgyretermes-regular.otf");
     let termes_bold = termes(&mut fonts, "gw-termes-bold", "texgyretermes-bold.otf");
+    let terminal_mono = termes(&mut fonts, "gw-terminal-mono", "JetBrainsMono-Regular.ttf");
     for (family, base, bundled_file, latin) in [
         (
             FONT_RESEARCH_SONG,
@@ -3094,6 +3139,12 @@ fn font_definitions(config: &FontConfig) -> egui::FontDefinitions {
             &termes_regular,
         ),
         (FONT_RESEARCH_KAI, FONT_KAITI, "GWKai.ttf", &termes_regular),
+        (
+            FONT_RESEARCH_TERMINAL,
+            FONT_HEITI,
+            "FZHei.ttf",
+            &terminal_mono,
+        ),
         (FONT_RESEARCH_HEI, FONT_HEITI, "FZHei.ttf", &termes_bold),
         (
             FONT_RESEARCH_HEI_PLAIN,

@@ -185,3 +185,26 @@ PDF 与模板数据（`doc.json`）在 `tmp/typst-samples/<用例>/`。改模板
 
 `typst`、`typst-pdf`、`typst-layout` 三者同版本一起升；`typst-layout` 是 vendored 副本，按
 `vendor/typst-layout/README.md` 重新打补丁，再出一遍样张对比。
+
+## 研究报告多模板（2026-10-07）
+
+要素 `ResearchMetadata.template` 选择经典报告 / 研究终端；`palette` 选择暗场 / 白图。
+主题字段随稿件、不可变版本与离线同步保存。默认值用 `skip_serializing_if` 省略，
+使旧快照反序列化后重新计算 payload_hash 的 JSON 字节保持原样，不能改为总是写出默认值。
+
+两套主题共用 `research.typ` 的语义排版函数：图表、文框、脚注、文献、目录、交叉引用与
+章节编号不另做一套。终端主题仅切换字体、颜色、页框、网格与封面 / 章标题的呈现；
+文件类型仍决定项目阶段、研究署名与外文原题。封面研究结构取正文已有章，最多五项，不生成研究结论。
+
+PDF 由 `export::typst::research::document` 注入 terminal/dark，统计页数、独立导出、
+花脸稿与送批随行件都走同一入口。公式 SVG 的默认墨色由 `render_all_with_color` 设置，
+保留用户在公式里显式指定的颜色。暗场的新增 / 删除标记用高对比色。
+
+egui 预览继续使用原有可点击正文与编号，`research_terminal.rs` 画终端封面 / 纸面装饰；
+`theme::paper::ReportPaper` 是线程局部 RAII 作用域，退出预览后还原纸色，不能改全局主题。
+连续纸面与 PDF 实际分页不同，精确落点以 PDF 为准。Word 为白图适配版（`research_theme.rs`），
+保留 mdx 的封面坐标、语义与字段，不承诺与终端 PDF 的封面 / 页边装饰完全一致。
+
+验收样张：`cargo test --locked typst_samples_research -- --ignored --nocapture`，新增
+`terminal-{dark,bright}-research-{full,parts,math}/`，每页 PNG 与 PDF、doc.json 都在
+`tmp/typst-samples/`。覆盖摘要、目录、部分、附录、长表、文框、图、文献、公式和不同报告类型。

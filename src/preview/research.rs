@@ -926,9 +926,14 @@ pub(crate) fn research_preview(
     let visible = ui
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
-    let metrics = Metrics::research(scale.viewport.unwrap_or(visible.width()), scale.zoom)
+    let terminal = input.research.template == crate::models::ResearchTemplate::Terminal;
+    let _paper = terminal.then(|| {
+        theme::paper::report_paper(input.research.palette == crate::models::ResearchPalette::Dark)
+    });
+    let mut metrics = Metrics::research(scale.viewport.unwrap_or(visible.width()), scale.zoom)
         .with_bold_style(ui.ctx())
         .with_line_numbers(line_numbers);
+    metrics.terminal = terminal;
     // 两遍：先给锚点和文献定号，再按纸面字面重新切块。研究报告的标题编号不跟
     // 设置里的公文编号样式走；序号表的分组编号跟设置，与导出一致。
     // 两遍解析只取决于正文与编号样式，正文没动就复用上一次的结果（`preview::memo`）。
@@ -944,7 +949,11 @@ pub(crate) fn research_preview(
     );
     let mut clicked = None;
 
-    cover_sheet(ui, &metrics, input, markdown);
+    if terminal {
+        super::research_terminal::cover(ui, &metrics, input, markdown);
+    } else {
+        cover_sheet(ui, &metrics, input, markdown);
+    }
 
     ui.add_space(14.0);
     // 远离视野的块只占位、不排版（见 `preview::cull`）。编号都在 `walk` 里算好、
@@ -996,7 +1005,7 @@ pub(crate) fn research_preview(
             let keep = anchored(anchor, &located.range)
                 || matches!(&kind, Kind::Table { caption: Some(caption) }
                     if anchored(anchor, &caption.source));
-            let key = super::memo::key((BlockShape(located), &kind));
+            let key = super::memo::key((BlockShape(located), &kind, terminal));
             cull.block(ui, &metrics, key, &located.range, keep, heading, |ui| {
                 body_item(
                     ui,
@@ -1721,6 +1730,26 @@ fn caption_line(ui: &mut egui::Ui, metrics: &Metrics, tag: &str, number: &str, t
 /// 章标题：小二黑体居中，上下各空一行。
 fn chapter_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
     ui.add_space(metrics.line);
+    if metrics.terminal {
+        let (prefix, title) = text.split_once(CHAPTER_GAP).unwrap_or(("RESEARCH", text));
+        {
+            let _ink = theme::paper::report_ink(super::research_terminal::accent());
+            title_line(
+                ui,
+                metrics,
+                prefix,
+                theme::FONT_HEITI,
+                13.0,
+                Align::LEFT,
+                "",
+            );
+        }
+        ui.add_space(metrics.mm(4.0));
+        title_line(ui, metrics, title, theme::FONT_HEITI, 24.0, Align::LEFT, "");
+        super::research_terminal::rule(ui, metrics);
+        ui.add_space(metrics.line);
+        return;
+    }
     title_line(
         ui,
         metrics,
@@ -1781,6 +1810,14 @@ fn part_title(ui: &mut egui::Ui, metrics: &Metrics, heading: Option<&str>, text:
 
 /// 节标题：黑体，字号随正文，缩进 2 字（`\titlespacing` 的 2em）。
 fn section_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
+    let _ink = metrics
+        .terminal
+        .then(|| theme::paper::report_ink(theme::paper::ink_muted()));
+    let lead = if metrics.terminal {
+        String::new()
+    } else {
+        indent(INDENT_CHARS)
+    };
     title_line(
         ui,
         metrics,
@@ -1788,7 +1825,7 @@ fn section_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
         theme::FONT_HEITI,
         RESEARCH_BODY_PT,
         Align::LEFT,
-        &indent(INDENT_CHARS),
+        &lead,
     );
 }
 
@@ -1845,6 +1882,33 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn terminal_preview_preserves_report_semantics_and_scopes_paper_color() {
+        use crate::models::{ResearchPalette, ResearchTemplate};
+        let original = theme::paper::bg();
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        input.research.template = ResearchTemplate::Terminal;
+        let markdown =
+            "# 研究标题\n\n<!-- [正文] -->\n\n## 研究背景\n\n### 数据来源\n\n这是正文。\n";
+        for palette in [ResearchPalette::Dark, ResearchPalette::Bright] {
+            input.research.palette = palette;
+            let text = drawn_input(&input, markdown);
+            assert!(text.contains("研究终端"));
+            assert!(text.contains("研究标题"));
+            assert!(text.contains("第1章"));
+            assert!(text.contains("1.1 数据来源"));
+            assert!(text.contains("这是正文。"));
+            assert_eq!(
+                theme::paper::bg(),
+                original,
+                "报告绘制不能污染其他预览的纸色"
+            );
+        }
     }
 
     /// 同 [`drawn`]，但保留全部图形：公式纹理、占位虚线都要从 shape 里找。

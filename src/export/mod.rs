@@ -8,6 +8,7 @@ pub(crate) mod bibliography;
 mod docx;
 pub(crate) mod element_display;
 pub(crate) mod research;
+mod research_theme;
 pub(crate) mod table;
 pub(crate) mod title;
 pub(crate) mod typst;

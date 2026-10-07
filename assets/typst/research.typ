@@ -10,6 +10,13 @@
 
 #let doc = json("/doc.json")
 #let F = doc.fonts
+#let terminal = doc.at("terminal", default: false)
+#let dark = terminal and doc.at("dark", default: false)
+#let ink = if dark { rgb("#E7EDF0") } else { black }
+#let accent = if dark { rgb("#FFBD59") } else { rgb("#B53D30") }
+#let cyan = if dark { rgb("#8DDAE9") } else { rgb("#365563") }
+#let panel = if dark { rgb("#1C2831") } else { rgb("#F4F5F5") }
+#let rule = if dark { rgb("#507A88") } else { rgb("#A0ADB3") }
 
 // ---------------- 版式常量（md2tex.cls） ----------------
 #let texpt = 25.4mm / 72.27
@@ -32,14 +39,14 @@
 // 中文字体，与 xeCJK 的分类一致）。标题类（黑体：章节、部分、目录章条目、图表题标签、
 // 文框标题、封面黑体字；封面小标宋大标题）用 Termes Bold，见 heavy；其余 Regular，
 // 正文里的 **加粗** 另走 fake-bold-cjk。
-#let latin = (name: F.latin, covers: "latin-in-cjk")
-#let song = (latin, F.song, F.fallback)
-#let kai = (latin, F.kai, F.fallback)
+#let latin = (name: if terminal { F.mono } else { F.latin }, covers: "latin-in-cjk")
+#let song = (latin, if terminal { F.hei } else { F.song }, F.fallback)
+#let kai = (latin, if terminal { F.hei } else { F.kai }, F.fallback)
 #let hei = (latin, F.hei, F.fallback)
-#let xbs = (latin, F.xbs, F.fallback)
+#let xbs = (latin, if terminal { F.hei } else { F.xbs }, F.fallback)
 // 标题类文字：西文落到 Termes Bold（中文字体只有常规字重，不受影响）。
 #let heavy(font, ..args, body) = text(font: font, weight: "bold", ..args, body)
-#let mono = ((name: F.mono, covers: "latin-in-cjk"), F.kai, F.fallback)
+#let mono = ((name: F.mono, covers: "latin-in-cjk"), if terminal { F.hei } else { F.kai }, F.fallback)
 
 // ---------------- 行内片段 ----------------
 // 加粗：西文换 Termes Bold，汉字描边伪粗（xeCJK AutoFakeBold，只作用于中文字体）。
@@ -70,8 +77,8 @@
 #let cjk-end(r) = r != none and r.t == "s" and r.v.len() > 0 and r.v.clusters().last().match(regex("^[\p{Han}]")) != none
 
 // 花脸稿：删除的字红色加删除线，新增的字套蓝框（与公文模板同一套画法）。
-#let del-color = rgb("#C00000")
-#let add-color = rgb("#1F4E9E")
+#let del-color = if dark { rgb("#FF9292") } else { rgb("#C00000") }
+#let add-color = if dark { rgb("#8CCEFF") } else { rgb("#1F4E9E") }
 #let del-mark(c) = text(fill: del-color, strike(stroke: 0.6pt + del-color, offset: -0.32em, c))
 #let add-mark(c) = h(2pt) + highlight(fill: none, stroke: 0.5pt + add-color, top-edge: 0.96em,
   bottom-edge: -0.24em, extent: 1.5pt, c) + h(2pt)
@@ -84,7 +91,7 @@
     else if r.t == "b" { fake-bold-cjk(runs(r.c)) }
     else if r.t == "i" { text(font: kai, style: "italic", runs(r.c)) }
     else if r.t == "code" { text(font: mono, r.v) }
-    else if r.t == "link" { link(r.url, text(fill: blue, r.v)) }
+    else if r.t == "link" { link(r.url, text(fill: if terminal { cyan } else { blue }, r.v)) }
     else if r.t == "img" {
       box(image(r.src, width: text-w, ..if r.page != none { (page: r.page) }))
     }
@@ -176,11 +183,32 @@
 }
 #let front = doc.blocks.len() > 0 and doc.blocks.first().k == "front"
 
+// 研究终端：整页方格底纹、图框、真实元数据栏。装饰位于页边，不覆盖正文。
+#let terminal-paper = context {
+  let p = here().page()
+  let total = counter(page).final().first()
+  let grid-color = if dark { rgb("#1C2931") } else { rgb("#EDF0F1") }
+  for i in range(0, 43) {
+    place(top + left, dx: i * 5mm, line(start: (0pt, 0pt), end: (0pt, 297mm), stroke: 0.2pt + grid-color))
+  }
+  for i in range(0, 60) {
+    place(top + left, dy: i * 5mm, line(length: 210mm, stroke: 0.2pt + grid-color))
+  }
+  place(top + left, dx: 15mm, dy: 12mm, rect(width: 180mm, height: 273mm, fill: none, stroke: 0.5pt + rule))
+  place(top + left, dx: 18mm, dy: 16mm, box(width: 174mm, text(font: mono, size: 8pt, fill: cyan,
+    grid(columns: (1fr, auto), gutter: 5mm, doc.cover.doc-type, doc.cover.number))))
+  place(top + left, dx: 15mm, dy: 25mm, line(length: 180mm, stroke: 0.5pt + rule))
+  place(top + left, dx: 15mm, dy: 275mm, line(length: 180mm, stroke: 0.5pt + rule))
+  place(top + left, dx: 18mm, dy: 279mm, box(width: 174mm, text(font: mono, size: 8pt, fill: cyan,
+    grid(columns: (1fr, auto), gutter: 5mm, doc.cover.version, [#p / #total]))))
+}
+
 #set page(paper: "a4", binding: left,
   margin: (inside: inner-m, outside: outer-m, top: top-m, bottom: 297mm - top-m - text-h),
-  background: page-number)
+  fill: if dark { rgb("#141B21") } else { white },
+  background: if terminal { terminal-paper } else { page-number })
 
-#set text(font: song, size: body-size, lang: "zh", region: "cn", top-edge: top-edge,
+#set text(font: song, fill: ink, size: body-size, lang: "zh", region: "cn", top-edge: top-edge,
   bottom-edge: -bottom-edge, overhang: false, costs: (runt: 0%))
 #set par(justify: true, leading: pitch - body-size, spacing: pitch - body-size,
   justification-limits: (tracking: (min: 0pt, max: 0.02 * pitch)),
@@ -231,7 +259,16 @@
     pre
     bookmark(level, title)
     set text(font: hei, weight: "bold", size: 18pt)
-    centered-at(chapter-top, title)
+    if terminal {
+      place(top + left, dy: 10mm, box(width: text-w, {
+        set par(first-line-indent: 0pt, justify: false)
+        text(fill: accent, font: mono, size: 13pt, if prefix != none { prefix } else { "RESEARCH" })
+        v(4mm)
+        heavy(hei, size: 24pt, body)
+        v(4mm)
+        line(length: text-w, stroke: 0.6pt + rule)
+      }))
+    } else { centered-at(chapter-top, title) }
   })
 }
 
@@ -260,7 +297,7 @@
   let above = if prev == "chapter" { 0pt } else if prev == "table" { 10.47mm - top-edge + 1.83mm } else { pitch - body-size }
   block(sticky: true, above: above, below: pitch - body-size, {
     bookmark(b.level + 2, num + runs(b.text))
-    par(first-line-indent: 0pt, justify: false, h(2em) + heavy(hei, num + runs(b.text)))
+    par(first-line-indent: 0pt, justify: false, if not terminal { h(2em) } + heavy(hei, fill: if terminal { cyan } else { ink }, num + runs(b.text)))
   })
   anchor(b.label, b.number)
 }
@@ -331,7 +368,7 @@
     if c.rowspan > 1 { args.rowspan = c.rowspan }
     let body = runs(c.c)
     // 表头：黑体字形、西文 Termes Regular（TeX 的 \heiti 不带 \enhei）。
-    if header { body = text(font: hei, body) }
+    if header { body = text(font: hei, fill: if terminal { cyan } else { ink }, body) }
     table.cell(..args, align: al(c.align) + horizon, body)
   }
   let cell-or-skip(c, header) = if c == none { () } else { (mk(c, header),) }
@@ -362,7 +399,7 @@
       table(
         columns: widths,
         inset: (x: col-sep, y: 2 * texpt + rule-w / 2),
-        stroke: rule-w + black,
+        stroke: rule-w + if terminal { rule } else { black },
         table.header(caption, ..t.rows.at(0).map(c => cell-or-skip(c, true)).flatten()),
         ..t.rows.slice(1).map(r => r.map(c => cell-or-skip(c, false)).flatten()).flatten(),
         // 续表提示（tabularray 的 contfoot）：只在表格还没结束的页上有内容。
@@ -401,7 +438,7 @@
 #let code-block(b) = {
   let lines = b.text.split("\n")
   block(above: 10 * texpt, below: 10 * texpt, width: 100%, inset: (left: 5 * texpt, right: 10 * texpt),
-    block(width: 100%, fill: rgb(248, 248, 248), stroke: 0.4pt + rgb(220, 220, 220), radius: 2pt,
+    block(width: 100%, fill: if terminal { panel } else { rgb(248, 248, 248) }, stroke: 0.4pt + if terminal { rule } else { rgb(220, 220, 220) }, radius: if terminal { 0pt } else { 2pt },
       inset: (left: 15 * texpt, right: 3pt, y: 6 * texpt), {
       set text(font: mono, size: 11pt, top-edge: 0.7 * 16 * texpt, bottom-edge: -0.3 * 16 * texpt)
       set par(first-line-indent: 0pt, justify: false, leading: 0pt, spacing: 0pt)
@@ -447,11 +484,11 @@
   block(above: above - keep, below: 8.43mm - top-edge, width: 100%, {
   v(keep, weak: false)
   block(above: 0pt, below: 0pt, width: 100%,
-    fill: luma(93%), stroke: 0.6pt + black, inset: (x: 1em + 0.6pt, top: 6.01mm - 0.83 * 12pt, bottom: 5.45mm - 0.17 * 12pt), {
+    fill: if terminal { panel } else { luma(93%) }, stroke: 0.6pt + if terminal { accent } else { black }, inset: (x: 1em + 0.6pt, top: 6.01mm - 0.83 * 12pt, bottom: 5.45mm - 0.17 * 12pt), {
     set text(size: 12pt, font: kai, top-edge: 0.83em, bottom-edge: -0.17em)
     set par(first-line-indent: 0pt, leading: 8.44mm - 12pt, spacing: 8.44mm - 12pt, justify: true)
     anchor(b.label, b.number)
-    align(center, par(justify: false, title))
+    align(if terminal { left } else { center }, par(justify: false, text(fill: if terminal { accent } else { ink }, title)))
     for l in b.items {
       if l.k == "math" { align(center, par(math-box(l))) }
       else if l.k == "list" { par(h(2em) + text(font: song, l.label) + h(-0.2em) + runs(l.c)) }
@@ -507,7 +544,54 @@
 
 // ---------------- 封面（template.tex 的 titlepage） ----------------
 // 位置按距页面左上角的毫米数（TikZ 节点 anchor=north：节点顶即字形上缘）。
+// 终端封面沿用文件类型的语义，不虚构摘要、图表、英译名或机构资料。
+#let terminal-cover() = {
+  let c = doc.cover
+  let at(y, body) = place(top + left, dy: y, box(width: text-w, body))
+  set par(first-line-indent: 0pt, justify: false)
+  at(4mm, text(font: mono, size: 10pt, fill: cyan, "RESEARCH / 研究终端"))
+  at(22mm, block(fill: accent, inset: (x: 3mm, y: 2mm), text(font: hei, fill: if dark { rgb("#141B21") } else { white }, size: 14pt, c.doc-type)))
+  if c.ident != "" { at(40mm, text(size: 12pt, fill: cyan, c.ident)) }
+  at(58mm, {
+    heavy(hei, size: 28pt, top-edge: "bounds", bottom-edge: "bounds",
+      par(leading: 12pt, c.title.map(runs).join(linebreak())))
+    if c.original != "" { v(6mm); text(size: 12pt, c.original) }
+  })
+  at(118mm, line(length: text-w, stroke: 1pt + accent))
+  at(128mm, {
+    text(font: mono, size: 10pt, fill: cyan, "CONTENTS / 研究结构")
+    v(4mm)
+    let chapters = doc.blocks.filter(b => b.k == "chapter")
+    for b in chapters.slice(0, calc.min(5, chapters.len())) {
+      block(spacing: 2mm, text(size: 12pt, {
+        text(font: mono, fill: accent, if b.prefix != none { b.prefix } else { "—" })
+        h(4mm)
+        runs(b.text)
+      }))
+    }
+  })
+  at(192mm, {
+    if c.stage != none {
+      grid(columns: (1fr, 1fr, 1fr, 1fr), gutter: 2mm,
+        ..("立项论证", "建设实施", "技术实现", "项目总结").enumerate().map(((i, name)) =>
+          block(stroke: 0.6pt + if i == c.stage { accent } else { rule }, inset: 2mm,
+            text(size: 9pt, fill: if i == c.stage { accent } else { cyan }, name))))
+    } else if c.byline.len() > 0 { text(size: 12pt, c.byline.join(h(1em))) }
+    v(6mm)
+    line(length: text-w, stroke: 0.5pt + rule)
+    v(4mm)
+    heavy(hei, size: 16pt, c.institution)
+    v(3mm)
+    text(size: 12pt, c.date)
+  })
+  if c.security != "" {
+    at(-7mm, align(right, text(font: hei, size: 10pt, fill: accent,
+      c.security + if c.security-years != "" { "★" + c.security-years })))
+  }
+}
+
 #let cover() = {
+  if terminal { return terminal-cover() }
   let c = doc.cover
   let at(x, y, anchor: center, body) = place(top + left, dx: x - inner-m - 100mm, dy: y - top-m,
     box(width: 200mm, align(anchor, text(top-edge: "bounds", bottom-edge: "bounds", body))))

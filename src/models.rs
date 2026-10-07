@@ -2976,6 +2976,11 @@ pub struct DraftInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResearchMetadata {
+    /// 版式主题与配色独立于文件类型，随稿件快照保存。
+    #[serde(skip_serializing_if = "ResearchTemplate::is_default")]
+    pub template: ResearchTemplate,
+    #[serde(skip_serializing_if = "ResearchPalette::is_default")]
+    pub palette: ResearchPalette,
     pub security: String,
     pub security_years: String,
     pub file_type: String,
@@ -2997,6 +3002,8 @@ pub struct ResearchMetadata {
 impl Default for ResearchMetadata {
     fn default() -> Self {
         Self {
+            template: ResearchTemplate::default(),
+            palette: ResearchPalette::default(),
             security: "公开".into(),
             security_years: String::new(),
             file_type: "研究报告".into(),
@@ -3009,6 +3016,50 @@ impl Default for ResearchMetadata {
             original_title: String::new(),
             bibliography_name: String::new(),
             bibliography_content: String::new(),
+        }
+    }
+}
+
+/// 研究报告的版式主题；旧稿件没有字段时沿用经典版式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchTemplate {
+    #[default]
+    Classic,
+    Terminal,
+}
+
+impl ResearchTemplate {
+    fn is_default(&self) -> bool {
+        *self == Self::Classic
+    }
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Terminal];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "经典研究报告",
+            Self::Terminal => "研究终端",
+        }
+    }
+}
+
+/// 研究终端的阅读与打印配色，经典模板忽略此设置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchPalette {
+    #[default]
+    Dark,
+    Bright,
+}
+
+impl ResearchPalette {
+    fn is_default(&self) -> bool {
+        *self == Self::Dark
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "暗场阅读",
+            Self::Bright => "白图打印",
         }
     }
 }
@@ -3141,6 +3192,41 @@ pub struct GeneratedDraft {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
+    #[test]
+    fn research_template_defaults_preserve_legacy_snapshot_hash() {
+        use sha2::{Digest, Sha256};
+        let input = DraftInput::default();
+        let legacy = serde_json::to_string(&input).unwrap();
+        assert!(!legacy.contains("\"template\":\"classic\""));
+        assert!(!legacy.contains("\"palette\""));
+        // 模拟旧程序按无新增字段的 JSON 字节计算出的校验值。
+        let mut hash = Sha256::new();
+        for part in [legacy.as_bytes(), "正文".as_bytes(), "备注".as_bytes()] {
+            hash.update((part.len() as u64).to_le_bytes());
+            hash.update(part);
+        }
+        let expected: String = hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let restored: DraftInput = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(restored.research.template, ResearchTemplate::Classic);
+        assert_eq!(
+            crate::manuscript::sync::payload_hash(&restored, "正文", "备注").unwrap(),
+            expected
+        );
+        let mut terminal = restored;
+        terminal.research.template = ResearchTemplate::Terminal;
+        terminal.research.palette = ResearchPalette::Bright;
+        let encoded = serde_json::to_string(&terminal).unwrap();
+        let decoded: DraftInput = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.research, terminal.research);
+        assert_ne!(
+            crate::manuscript::sync::payload_hash(&decoded, "正文", "备注").unwrap(),
+            expected
+        );
+    }
     use super::*;
 
     #[test]

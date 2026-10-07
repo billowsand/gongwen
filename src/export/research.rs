@@ -28,6 +28,23 @@ pub(crate) fn markdown_with_frontmatter(
         format!("撰写时间: {}", one_line(&meta.date)),
         format!("文件名称: {}", one_line(&input.title_hint)),
     ];
+    // 导出的源码记录主题；正文编辑器仍只保存正文。
+    lines.push(format!(
+        "研究模板: {}",
+        if meta.template == crate::models::ResearchTemplate::Terminal {
+            "terminal"
+        } else {
+            "classic"
+        }
+    ));
+    lines.push(format!(
+        "研究配色: {}",
+        if meta.palette == crate::models::ResearchPalette::Dark {
+            "dark"
+        } else {
+            "bright"
+        }
+    ));
     if !meta.security_years.trim().is_empty() {
         lines.insert(2, format!("保密年限: {}", one_line(&meta.security_years)));
     }
@@ -152,6 +169,9 @@ pub(crate) fn write_docx(
         style: DocumentStyle::Research,
     })
     .with_context(|| format!("研究报告 Word 转换失败：{}", path.display()))?;
+    if input.research.template == crate::models::ResearchTemplate::Terminal {
+        super::research_theme::style_docx(path)?;
+    }
     Ok(())
 }
 

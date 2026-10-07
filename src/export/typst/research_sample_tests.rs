@@ -399,3 +399,92 @@ fn run() {
 fn typst_samples_research() {
     run();
 }
+
+/// 两种配色覆盖同一组完整研究语法与不同文件类型，同时留 PNG 供目视验收。
+#[test]
+#[ignore = "依赖本机 runtime，手动运行"]
+fn typst_samples_research_terminal() {
+    use crate::models::{ResearchPalette, ResearchTemplate};
+    use hayro::{
+        RenderCache, RenderSettings,
+        hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf},
+    };
+    let base = sample_dir().join("research-terminal-images");
+    write_images(&base);
+    crate::storage::set_test_config_dir(Some(base.clone()));
+    for palette in [ResearchPalette::Dark, ResearchPalette::Bright] {
+        for case in cases() {
+            let name = format!(
+                "terminal-{}-{}",
+                if palette == ResearchPalette::Dark {
+                    "dark"
+                } else {
+                    "bright"
+                },
+                case.name
+            );
+            let dir = sample_dir().join(&name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut input = base_input();
+            (case.tweak)(&mut input);
+            input.research.template = ResearchTemplate::Terminal;
+            input.research.palette = palette;
+            let outcome = super::research::write_pdf_with_base(
+                &dir.join("typst.pdf"),
+                &input,
+                case.markdown,
+                &NumberingConfig::default(),
+                &base,
+            )
+            .unwrap();
+            crate::export::research::write_docx(
+                &dir.join("terminal.docx"),
+                &input,
+                case.markdown,
+                &NumberingConfig::default(),
+            )
+            .unwrap();
+            let data = super::research::document_json(
+                &input,
+                case.markdown,
+                &NumberingConfig::default(),
+                &base,
+            )
+            .unwrap();
+            std::fs::write(dir.join("doc.json"), data).unwrap();
+            assert!(
+                outcome
+                    .warnings
+                    .iter()
+                    .all(|w| !w.starts_with("公式无法排版")),
+                "{name}: {:?}",
+                outcome.warnings
+            );
+            let pdf = Pdf::new(outcome.pdf).unwrap();
+            let cache = RenderCache::new();
+            for (i, page) in pdf.pages().iter().enumerate() {
+                let scale = 1000.0 / page.render_dimensions().0;
+                let pixmap = hayro::render(
+                    page,
+                    &cache,
+                    &InterpreterSettings::default(),
+                    &RenderSettings {
+                        x_scale: scale,
+                        y_scale: scale,
+                        width: Some(1000),
+                        ..Default::default()
+                    },
+                );
+                image::RgbaImage::from_raw(
+                    u32::from(pixmap.width()),
+                    u32::from(pixmap.height()),
+                    pixmap.data_as_u8_slice().to_vec(),
+                )
+                .unwrap()
+                .save(dir.join(format!("page-{}.png", i + 1)))
+                .unwrap();
+            }
+        }
+    }
+    crate::storage::set_test_config_dir(None);
+}
