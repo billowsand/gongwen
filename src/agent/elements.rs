@@ -49,6 +49,29 @@ impl Element {
             .find(|element| text.contains(element.label()))
     }
 
+    /// 一道别的题问的是不是这个要素（按题面的关键词判断），同一批里同一件事只问一遍。
+    pub(crate) fn covers(self, question: &str) -> bool {
+        let words: &[&str] = match self {
+            Self::What => &["事项", "议题", "办什么"],
+            Self::Why => &["依据", "缘由", "原因", "目的"],
+            Self::Who => &[
+                "受文",
+                "主送",
+                "对象",
+                "发给",
+                "致函",
+                "呈报",
+                "联系人",
+                "参会",
+                "责任单位",
+            ],
+            Self::When => &["时限", "时间", "日期", "截止", "期限", "什么时候"],
+            Self::Where => &["地点", "在哪", "会场"],
+            Self::How => &["方式", "办理要求", "措施", "怎么办", "拟办"],
+        };
+        words.iter().any(|word| question.contains(word))
+    }
+
     /// 自己填写框里的示例。
     fn example(self) -> &'static str {
         match self {

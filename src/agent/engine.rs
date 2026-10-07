@@ -130,18 +130,20 @@ pub(crate) fn run(
         } else {
             0
         };
-        if let Some((questions, into)) = run_step(&mut ctx, step, index, item)? {
-            // 要挂起：先存检查点（reason = Ask）再返回，挂起就是一种检查点。
+        if let Some(ask) = run_step(&mut ctx, step, index, item)? {
+            // 要挂起：先存检查点（reason = Ask）再返回，挂起就是一种检查点。上游决策的题
+            // 答完要回到这一步重做（下游的题以它为前提再出），续跑位置就落在本步。
+            let at = if ask.again { index } else { index + 1 };
             let checkpoint = save(
                 &mut ctx,
-                vec![index + 1],
+                vec![at],
                 Reason::Ask,
                 format!("等你回答：{}", step.label()),
             );
             return Ok(Outcome::Suspended(Box::new(Suspension {
                 checkpoint,
-                questions,
-                save_as: into.or_else(|| step.save_as.clone()),
+                questions: ask.questions,
+                save_as: ask.into.or_else(|| step.save_as.clone()),
             })));
         }
         // 每步成功之后落一份检查点；不在步骤之前存（内容与上一份相同）。
@@ -171,8 +173,24 @@ fn save(ctx: &mut ToolCtx<'_, '_>, at: StepPath, reason: Reason, label: String) 
     checkpoint
 }
 
-/// 要问用户的题，以及答案存进哪个变量（None 表示步骤的 `save_as`）。
-type Ask = (Vec<Question>, Option<String>);
+/// 要问用户的题。
+struct Ask {
+    questions: Vec<Question>,
+    /// 答案存进哪个变量（None 表示步骤的 `save_as`）。
+    into: Option<String>,
+    /// 答完回到这一步重做（[`Flow::SuspendAgain`]）。
+    again: bool,
+}
+
+impl Ask {
+    fn new(questions: Vec<Question>, into: Option<String>) -> Self {
+        Self {
+            questions,
+            into,
+            again: false,
+        }
+    }
+}
 
 /// 执行一步；要问用户时返回题目。
 fn run_step(
@@ -197,11 +215,17 @@ fn run_step(
                 ops::find(name).ok_or_else(|| anyhow::anyhow!("不认识的算子「{name}」"))?;
             Ok(match operator(ctx, step)? {
                 Flow::Next => None,
-                Flow::Suspend(questions) => Some((questions, None)),
-                Flow::SuspendInto(questions, var) => Some((questions, Some(var))),
+                Flow::Suspend(questions) => Some(Ask::new(questions, None)),
+                Flow::SuspendInto(questions, var) => Some(Ask::new(questions, Some(var))),
+                Flow::SuspendAgain(questions) => Some(Ask {
+                    again: true,
+                    ..Ask::new(questions, None)
+                }),
             })
         }
-        (None, Some(tool)) => Ok(run_tool(ctx, step, tool).map(|questions| (questions, None))),
+        (None, Some(tool)) => {
+            Ok(run_tool(ctx, step, tool).map(|questions| Ask::new(questions, None)))
+        }
         _ => anyhow::bail!("{}的写法不对：step 与 tool 必须二选一", step.label()),
     }
 }
@@ -344,6 +368,7 @@ fn var_present(board: &Board, name: &str) -> bool {
 /// 把用户对挂起题目的回答落到黑板上，返回用户选中的文种（切文种由界面线程执行，
 /// 与在要素区下拉框里选是同一回事；引擎不碰要素）。
 ///
+/// - 定文种：记下定下的文种（`premise`），不标记已澄清——流程回到澄清这一步按它出题；
 /// - 动笔前澄清：回答记作已确认信息，标记已澄清；
 /// - 缺口题：按确定性规则改工作稿与台账；
 /// - 选择题：选中项的值存进 `save_as`。
@@ -354,7 +379,12 @@ pub(crate) fn apply_answers(
     replies: &[(usize, Reply)],
 ) -> Option<TemplateKind> {
     let mut kind = None;
-    if questions.iter().any(|q| q.target.is_predraft()) {
+    if questions.iter().any(|q| q.target == Target::Kind) {
+        // 定文种是第一关：只定下前提，不算澄清过——流程回到澄清这一步，按定下的文种再出题。
+        let (picked, _) = clarify::resolve_predraft(questions, replies, board.draft.kind);
+        board.premise = Some(picked.unwrap_or(board.draft.kind));
+        kind = picked;
+    } else if questions.iter().any(|q| q.target.is_predraft()) {
         let (picked, notes) = clarify::resolve_predraft(questions, replies, board.draft.kind);
         board.notes.extend(notes);
         board.clarified = true;

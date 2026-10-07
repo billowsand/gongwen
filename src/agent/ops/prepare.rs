@@ -20,7 +20,16 @@ pub(super) const FOUND: &str = "found";
 /// 再按文种的六要素清单查一遍（`elements.rs`）：时限、对象、联系人这些只有起草人知道的事，
 /// 动笔前就问，答案写进第一稿。参数 `elements`（为否时不查）、`element_questions`
 /// （最多几道），提示词 `elements_prompt`（默认「要素检查」，技能里没写就用内置的一份）。
+///
+/// 分两关（`clarify.rs` 开头的分层）：先定文种——要求点名的文种与当前对不上，或模型问的是
+/// 文种，就**只问这一题**，答完回到本步重做（`Flow::SuspendAgain`）；文种定了才按它出方向题
+/// 与六要素题。要素区里改过文种（当前文种 ≠ 定下的文种）时，以旧文种为前提的澄清作废重问。
 pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
+    let kind = ctx.board.draft.kind;
+    if ctx.board.premise.is_some_and(|premise| premise != kind) {
+        ctx.board.premise = None;
+        ctx.board.clarified = false;
+    }
     if ctx.board.clarified {
         return Ok(Flow::Next);
     }
@@ -30,12 +39,18 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
     } else {
         param(ctx, step, &["element_questions"], 4, 0..=6)
     };
-    let checklist = elements::checklist(ctx.board.draft.kind);
+    let checklist = elements::checklist(kind);
     if max == 0 && (element_max == 0 || checklist.is_empty()) {
         return Ok(Flow::Next);
     }
+    // 第一关：定文种（程序判断，不调模型）。
+    if ctx.board.premise.is_none()
+        && let Some(question) = clarify::kind_question(&ctx.board.request, kind)
+    {
+        return Ok(ask_kind(ctx, question));
+    }
     phase(ctx, "动笔前检查要求是否明确…");
-    let mut questions = Vec::new();
+    let mut direction = Vec::new();
     if max > 0 {
         let locals = [
             ("max", max.to_string()),
@@ -47,9 +62,17 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         let text = format!("{text}\n\n{}", clarify::JSON_HINT);
         let reply = assist_json(ctx, &text, clarify::questions_schema())?;
         let parsed = clarify::parse_model_questions(&reply, max);
-        questions =
-            clarify::predraft_questions(&ctx.board.request, ctx.board.draft.kind, parsed, max);
+        // 模型问的是文种：同样是第一关，单独先问；同批其余的题以旧文种为前提，不要。
+        if ctx.board.premise.is_none()
+            && let Some(question) = clarify::model_kind_question(&parsed, kind)
+        {
+            return Ok(ask_kind(ctx, question));
+        }
+        direction = clarify::predraft_questions(parsed, max);
     }
+    // 第一关过了：后面的题都以这个文种为前提。
+    ctx.board.premise = Some(kind);
+    let mut asked_elements = Vec::new();
     if element_max > 0 && !checklist.is_empty() {
         let request = format!(
             "{}
@@ -67,13 +90,8 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         ];
         let text = ctx.board.render_with(template, &locals);
         let reply = assist(ctx, &text)?;
-        let asked = elements::questions(
-            ctx.board.draft.kind,
-            &request,
-            &reply,
-            (questions.len() + 1, element_max),
-            ctx.env.vocabulary,
-        );
+        let asked =
+            elements::questions(kind, &request, &reply, (1, element_max), ctx.env.vocabulary);
         if !asked.is_empty() {
             tool_line(
                 ctx,
@@ -92,8 +110,9 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
                 ),
             );
         }
-        questions.extend(asked);
+        asked_elements = asked;
     }
+    let questions = clarify::merge_predraft(direction, asked_elements);
     if questions.is_empty() {
         return Ok(Flow::Next);
     }
@@ -101,9 +120,24 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         ctx,
         "ask.choice",
         Permission::AskUser,
-        format!("动笔前有 {} 个问题要你确认", questions.len()),
+        format!(
+            "按{}动笔前有 {} 个问题要你确认",
+            kind.label(),
+            questions.len()
+        ),
     );
     Ok(Flow::Suspend(questions))
+}
+
+/// 只问定文种这一题，答完回到 `clarify` 重做：其余的题按定下的文种再出。
+fn ask_kind(ctx: &mut ToolCtx<'_, '_>, question: clarify::Question) -> Flow {
+    tool_line(
+        ctx,
+        "ask.choice",
+        Permission::AskUser,
+        "先定文种：其余问题按定下的文种再出".to_string(),
+    );
+    Flow::SuspendAgain(vec![question])
 }
 
 /// `plan`：让模型列一份清单存进变量。

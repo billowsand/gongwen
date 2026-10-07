@@ -38,6 +38,9 @@ pub(crate) enum Flow {
     Suspend(Vec<Question>),
     /// 停下来问用户，答案存进算子指定的变量（如待确认的大纲）。
     SuspendInto(Vec<Question>, String),
+    /// 停下来问用户，答完**回到这一步重做**：这批是上游决策（定文种），本步其余的题要以
+    /// 它的答案为前提再出，不能和它挤在同一批里（`docs/ai-agent-workbench.md` 14.11）。
+    SuspendAgain(Vec<Question>),
 }
 
 pub(crate) use agent::SUMMARY_VAR as AGENT_SUMMARY;

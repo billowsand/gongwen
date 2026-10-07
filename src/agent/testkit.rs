@@ -312,18 +312,23 @@ impl<'a> Driver<'a> {
         )
     }
 
-    /// 像用户点「确认」一样回答挂起的题，返回用户选中的文种（若有）。
+    /// 像用户点「确认」一样回答挂起的题，返回用户选中的文种（若有）。选了切换文种就像界面
+    /// 线程那样把要素里的文种也切过去（界面上还会按新文种重新选技能，这里沿用同一技能）。
     pub(crate) fn answer(
         &mut self,
         suspension: &Suspension,
         replies: &[(usize, Reply)],
     ) -> Option<TemplateKind> {
-        engine::apply_answers(
+        let kind = engine::apply_answers(
             &mut self.board,
             &suspension.questions,
             suspension.save_as.as_deref(),
             replies,
-        )
+        );
+        if let Some(kind) = kind {
+            self.board.draft.kind = kind;
+        }
+        kind
     }
 
     /// 任务流里的工具调用行。

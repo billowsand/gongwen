@@ -238,31 +238,28 @@ fn drafting_starts_research_and_only_ever_proposes() {
     assert!(harness.doc.generated_markdown.is_empty());
 }
 
-#[test]
-fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
-    use crate::agent::clarify::predraft_questions;
-    use crate::models::TemplateKind;
-    let mut harness = Harness::new("");
-    harness.doc.draft.kind = TemplateKind::PlainDocument;
-    harness.doc.ai_panel.open = true;
-    let request = crate::ai_panel::TurnRequest {
-        skill: Some(RESEARCH_DRAFT.into()),
-        text: "起草一份商洽函".into(),
+fn panel_request(skill: Option<&str>, text: &str) -> crate::ai_panel::TurnRequest {
+    crate::ai_panel::TurnRequest {
+        skill: skill.map(str::to_string),
+        text: text.into(),
         selection: None,
         preset: None,
         use_rag: false,
         refs: Vec::new(),
         notes: Vec::new(),
+        premise: None,
         on_proposal: false,
         style: Default::default(),
-    };
-    let model_questions = vec![("篇幅多长？".to_string(), vec!["短".into(), "长".into()])];
-    let questions = predraft_questions(
-        &request.text,
-        TemplateKind::PlainDocument,
-        model_questions,
-        3,
-    );
+    }
+}
+
+/// 侧栏里开一轮「研究式起草」，停在动笔前的题上（检查点里的文种是出题时的文种）。
+fn asking_turn(
+    harness: &mut Harness,
+    request: crate::ai_panel::TurnRequest,
+    questions: Vec<crate::agent::clarify::Question>,
+    at: usize,
+) -> u64 {
     let board = crate::agent::board::Board {
         draft: harness.doc.draft.clone(),
         request: request.text.clone(),
@@ -279,7 +276,7 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
         skill: crate::agent::skill::builtin(RESEARCH_DRAFT).unwrap(),
         suspension: crate::agent::engine::Suspension {
             checkpoint: crate::agent::checkpoint::Checkpoint {
-                at: vec![1],
+                at: vec![at],
                 reason: crate::agent::checkpoint::Reason::Ask,
                 label: String::new(),
                 board,
@@ -290,18 +287,28 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
         },
         use_rag: false,
     }));
-    let turn = panel.turn_mut(id).unwrap();
-    // 第二题选「长」；第一题沿用替用户选好的推荐项「切换为公函」。
-    turn.replies[1].choice = Some(1);
+    id
+}
+
+#[test]
+fn predraft_answers_become_notes_and_the_same_turn_continues() {
+    use crate::agent::clarify::predraft_questions;
+    use crate::models::TemplateKind;
+    let mut harness = Harness::new("");
+    harness.doc.draft.kind = TemplateKind::OfficialLetter;
+    harness.doc.ai_panel.open = true;
+    let request = panel_request(Some(RESEARCH_DRAFT), "起草一份商洽函");
+    let model_questions = vec![("篇幅多长？".to_string(), vec!["短".into(), "长".into()])];
+    let questions = predraft_questions(model_questions, 3);
+    let id = asking_turn(&mut harness, request, questions, 1);
+    harness.doc.ai_panel.turn_mut(id).unwrap().replies[0].choice = Some(1);
 
     harness.frame_texts();
     let texts = harness.frame_texts();
     assert!(has(&texts, "动笔前先确认这几件事"), "{texts:?}");
-    assert!(has(&texts, "切换为公函（推荐）"), "{texts:?}");
     assert!(has(&texts, "确认，开始起草"), "{texts:?}");
 
     harness.with_page(|page| page.answer_suspended(id));
-    assert_eq!(harness.doc.draft.kind, TemplateKind::OfficialLetter);
     let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
     assert!(turn.state.running(), "答完接着跑，同一轮");
     assert!(turn.questions.is_empty());
@@ -309,6 +316,82 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
     assert_eq!(turn.request.as_ref().unwrap().notes, ["篇幅多长？长"]);
     assert_eq!(harness.doc.ai_panel.turns.len(), 1, "不另开一轮");
     assert!(harness.doc.busy);
+}
+
+#[test]
+fn switching_the_kind_reroutes_the_skill_in_the_same_card() {
+    // 实测踩过：当前是公函时「政策研究报告」不参与选技能，落到研究式起草；切成研究报告后
+    // 还带着研究式起草按公函出的题接着跑。现在切了文种就按新文种重新选技能、重新出题。
+    use crate::agent::clarify::kind_question;
+    use crate::models::TemplateKind;
+    let mut harness = Harness::new("");
+    harness.doc.draft.kind = TemplateKind::OfficialLetter;
+    harness.doc.ai_panel.open = true;
+    let request = panel_request(None, "请从中总结美军推进人工智能项目的得失，写一个研究报告");
+    let question = kind_question(&request.text, TemplateKind::OfficialLetter).unwrap();
+    let id = asking_turn(&mut harness, request, vec![question], 0);
+
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(
+        has(&texts, "先定文种，其余问题按定下的文种再问"),
+        "{texts:?}"
+    );
+    assert!(has(&texts, "切换为研究报告（推荐）"), "{texts:?}");
+    assert!(has(&texts, "确认文种，继续"), "{texts:?}");
+
+    // 沿用替用户选好的推荐项「切换为研究报告」。
+    harness.with_page(|page| page.answer_suspended(id));
+    assert_eq!(harness.doc.draft.kind, TemplateKind::ResearchReport);
+    assert_eq!(harness.doc.ai_panel.turns.len(), 1, "同一张卡片里重来");
+    let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+    assert_eq!(turn.title, "政策研究报告", "按新文种重新选技能");
+    assert!(turn.state.running());
+    assert!(turn.questions.is_empty() && turn.run.is_none());
+    assert!(
+        turn.notes.iter().any(|n| n.contains("已切换为研究报告")),
+        "{:?}",
+        turn.notes
+    );
+    assert_eq!(
+        turn.request.as_ref().unwrap().premise,
+        Some(TemplateKind::ResearchReport),
+        "重新生成时不再问文种"
+    );
+    assert!(harness.doc.busy);
+}
+
+#[test]
+fn answers_given_under_a_kind_changed_meanwhile_are_voided() {
+    use crate::agent::clarify::predraft_questions;
+    use crate::models::TemplateKind;
+    let mut harness = Harness::new("");
+    harness.doc.draft.kind = TemplateKind::OfficialLetter;
+    harness.doc.ai_panel.open = true;
+    let request = panel_request(Some(RESEARCH_DRAFT), "起草一份商洽函");
+    let questions = predraft_questions(
+        vec![("篇幅多长？".to_string(), vec!["短".into(), "长".into()])],
+        3,
+    );
+    let id = asking_turn(&mut harness, request, questions, 1);
+    harness.doc.ai_panel.turn_mut(id).unwrap().replies[0].choice = Some(1);
+    // 题还没答，用户在要素区把文种改了。
+    harness.doc.draft.kind = TemplateKind::PlainDocument;
+
+    harness.with_page(|page| page.answer_suspended(id));
+    assert_eq!(harness.doc.draft.kind, TemplateKind::PlainDocument);
+    let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+    assert!(turn.state.running(), "同一张卡片里按新文种重来");
+    assert!(
+        turn.request.as_ref().unwrap().notes.is_empty(),
+        "按旧文种答的不落地"
+    );
+    assert!(
+        turn.notes.iter().any(|n| n.contains("这批题作废")),
+        "{:?}",
+        turn.notes
+    );
+    assert_eq!(harness.doc.ai_panel.turns.len(), 1);
 }
 
 #[test]
@@ -1614,6 +1697,7 @@ fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
         use_rag: false,
         refs: Vec::new(),
         notes: vec!["会议时间：下周一".into()],
+        premise: None,
         on_proposal: false,
         style: Default::default(),
     };
@@ -1647,12 +1731,13 @@ fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
         use_rag: false,
         refs: Vec::new(),
         notes: Vec::new(),
+        premise: None,
         on_proposal: true,
         style: Default::default(),
     };
     let time = crate::prompt::TimeContext::now();
     let (_, board, ..) = harness
-        .with_page(|page| page.prepare_skill(&request, &time))
+        .with_page(|page| page.prepare_skill(&request, &time, None))
         .unwrap();
     assert_eq!(board.document, "提案稿：关于开会的通知。\n", "改的是提案");
     assert_eq!(board.workspace, board.document);
@@ -1674,7 +1759,7 @@ fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
     let mut request = request;
     request.on_proposal = false;
     let (_, board, ..) = harness
-        .with_page(|page| page.prepare_skill(&request, &time))
+        .with_page(|page| page.prepare_skill(&request, &time, None))
         .unwrap();
     assert_eq!(board.document, "原来的正文，写得很长很长。\n");
 }
@@ -2056,6 +2141,7 @@ fn suspended_draft(harness: &mut Harness, date: &str) -> (u64, crate::ai_panel::
         use_rag: false,
         refs: Vec::new(),
         notes: Vec::new(),
+        premise: None,
         on_proposal: false,
         style: Default::default(),
     };
@@ -2430,6 +2516,7 @@ fn request() -> crate::ai_panel::TurnRequest {
         use_rag: false,
         refs: Vec::new(),
         notes: Vec::new(),
+        premise: None,
         on_proposal: false,
         style: Default::default(),
     }

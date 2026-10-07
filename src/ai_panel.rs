@@ -80,6 +80,9 @@ pub(crate) struct TurnRequest {
     pub(crate) refs: Vec<Reference>,
     /// 动笔前澄清的回答（重跑时沿用，不再问一遍）。
     pub(crate) notes: Vec<String>,
+    /// 定文种题定下的文种（重跑时沿用，不再问；当前文种与它不符时作废重问）。
+    #[serde(default)]
+    pub(crate) premise: Option<crate::models::TemplateKind>,
     /// 这一轮改的是待确认的提案（「改提案」）。
     #[serde(default)]
     pub(crate) on_proposal: bool,
@@ -302,6 +305,36 @@ impl AiPanel {
             self.turns.drain(..excess);
         }
         self.next_id
+    }
+
+    /// 同一张卡片按新前提重来：定文种题切了文种，技能、要素清单、其余的题都要按新文种重新
+    /// 选、重新出。卡片上已有的过程行与说明留着（看得出为什么重来），题目、挂起的流程与
+    /// 产物清掉，计时接着走。找不到这一轮返回 false。
+    pub(crate) fn restart_turn(
+        &mut self,
+        id: u64,
+        title: String,
+        context: Vec<String>,
+        request: TurnRequest,
+    ) -> bool {
+        let Some(turn) = self.turn_mut(id) else {
+            return false;
+        };
+        turn.title = title;
+        turn.context = context;
+        turn.request = Some(request);
+        turn.questions.clear();
+        turn.replies.clear();
+        turn.run = None;
+        turn.research = None;
+        turn.resumable = None;
+        turn.findings.clear();
+        turn.style = None;
+        turn.content.clear();
+        turn.stream_suffix.clear();
+        turn.is_workspace = false;
+        turn.resume();
+        true
     }
 
     /// 正在跑的那一轮（最多一轮：同一篇稿件同时只有一个后台任务）。

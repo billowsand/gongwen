@@ -1,8 +1,15 @@
 //! 选择题：拿不准的地方不让模型猜，变成选择题交给用户（`docs/ai-agent-workbench.md` 14.11）。
 //!
-//! 两个时机：
-//! - 动笔前：只问会让整篇写偏的事（文种、受文对象、目的、篇幅），最多 3 题；
-//! - 第一稿出来后：需要用户提供的、知识库里找不到的、来源不明的，一批最多 4 题。
+//! 决策按依赖分层，**一批只问一层，上层定了再出下层的题**：
+//! 1. 定文种（[`Target::Kind`]）：文种决定用哪个技能、按哪份六要素清单出题、按哪种版式写，
+//!    是其余一切的前提，单独一批先问；答完回到澄清这一步重做（`Flow::SuspendAgain`），
+//!    换了文种还要按新文种重新选技能；
+//! 2. 动笔前：只问会让整篇写偏的事（行文方向、受文对象、目的、篇幅），最多 3 题，加上按
+//!    已定文种的六要素题；同一件事只问一遍（方向题与要素题话题重叠的，留要素题）；
+//! 3. 第一稿出来后：需要用户提供的、知识库里找不到的、来源不明的，一批最多 4 题；同一句里
+//!    一处选了「删去」，同句其余几处随之删去（[`follow_drops`]），不再各自落地。
+//!
+//! 上层的答案变了，以它为前提的下层题与回答一律作废重出，不拿旧前提下的回答去写稿。
 //!
 //! 选项尽量由程序给：文种来自固定列表，事实类只给「自己填写 / 另行通知 / 删去这项 / 保留待核实」，
 //! 只有措辞、方向这类没有标准答案的才用模型出的选项。缺口题的回答怎么落到工作稿见
@@ -46,6 +53,8 @@ pub(crate) struct Choice {
 /// 这道题问的是什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Target {
+    /// 定文种：其余题的前提，单独一批先问。
+    Kind,
     PreDraft,
     /// 动笔前的六要素题（`elements.rs`）：答案记作已确认信息，跳过就留固定占位。
     Element(super::elements::Element),
@@ -69,9 +78,9 @@ pub(crate) struct Question {
 }
 
 impl Target {
-    /// 动笔前问的题（方向题与六要素题）：答案作为已确认信息交给起草。
+    /// 动笔前问的题（定文种、方向题与六要素题）：答案作为已确认信息交给起草。
     pub(crate) fn is_predraft(self) -> bool {
-        matches!(self, Self::PreDraft | Self::Element(_))
+        matches!(self, Self::Kind | Self::PreDraft | Self::Element(_))
     }
 }
 
@@ -222,62 +231,116 @@ const KIND_WORDS: [(&str, &[TemplateKind]); 12] = [
     ("函", &[TemplateKind::OfficialLetter]),
 ];
 
-/// 要求里点名的文种与当前文种对不上时，返回建议切换到的文种。
-///
-/// 取**最先出现**的文种词：「起草一份通知……要求各单位报送调研报告」要写的是通知，
-/// 后面的调研报告是让别人交的东西。只看开头 120 字。
-pub(crate) fn kind_mismatch(request: &str, current: TemplateKind) -> Option<TemplateKind> {
-    let head: String = request.chars().take(120).collect();
+/// 一段文字点名的文种：取**最先出现**的文种词，同一位置长词优先。点名的是一组文种（「通知」
+/// 可以是普通公文或电话通知）且当前文种在其中时算当前文种。只看开头 120 字。
+fn named_kind(text: &str, current: TemplateKind) -> Option<TemplateKind> {
+    let head: String = text.chars().take(120).collect();
     let (_, _, kinds) = KIND_WORDS
         .iter()
         .filter_map(|(word, kinds)| head.find(word).map(|pos| (pos, word.len(), *kinds)))
         .min_by_key(|(pos, len, _)| (*pos, std::cmp::Reverse(*len)))?;
-    (!kinds.contains(&current)).then(|| kinds[0])
+    Some(if kinds.contains(&current) {
+        current
+    } else {
+        kinds[0]
+    })
 }
 
-/// 动笔前的题：文种不一致（程序判断）在前，模型出的澄清题在后，总数不超过 `max`。
-pub(crate) fn predraft_questions(
-    request: &str,
+/// 要求里点名的文种与当前文种对不上时，返回建议切换到的文种。
+///
+/// 取**最先出现**的文种词：「起草一份通知……要求各单位报送调研报告」要写的是通知，
+/// 后面的调研报告是让别人交的东西。
+pub(crate) fn kind_mismatch(request: &str, current: TemplateKind) -> Option<TemplateKind> {
+    named_kind(request, current).filter(|kind| *kind != current)
+}
+
+fn switch_choice(kind: TemplateKind, recommended: bool) -> Choice {
+    Choice {
+        label: format!("切换为{}", kind.label()),
+        detail: "技能、要素清单、版式与行文规则都随文种变化，后面的问题按新文种重新出".into(),
+        recommended,
+        action: Action::SwitchKind(kind),
+    }
+}
+
+fn keep_choice(current: TemplateKind) -> Choice {
+    Choice {
+        label: format!("保持{}", current.label()),
+        detail: String::new(),
+        recommended: false,
+        action: Action::KeepKind,
+    }
+}
+
+/// 定文种题（程序判断）：要求里点名的文种与当前文种对不上时出这一题。它是其余题的前提，
+/// 必须单独一批先问（[`Target::Kind`]）。
+pub(crate) fn kind_question(request: &str, current: TemplateKind) -> Option<Question> {
+    let kind = kind_mismatch(request, current)?;
+    Some(Question {
+        id: 1,
+        text: format!(
+            "要求里写的是「{}」，当前文种是「{}」，按哪个写？",
+            kind.label(),
+            current.label()
+        ),
+        choices: vec![switch_choice(kind, true), keep_choice(current)],
+        custom_hint: None,
+        prefill: String::new(),
+        skippable: false,
+        target: Target::Kind,
+    })
+}
+
+/// 模型出的题里问文种的：文种是上层决策，不能和以它为前提的题混在一批里当普通备注记下
+/// （选了「通知」却照旧按函出要素题、按函写）。选项能对上文种的，改成定文种题单独先问；
+/// 对不上的（「是 / 否」）返回 None，由 [`predraft_questions`] 丢掉。
+pub(crate) fn model_kind_question(
+    model_questions: &[(String, Vec<String>)],
     current: TemplateKind,
+) -> Option<Question> {
+    model_questions.iter().find_map(|(question, options)| {
+        if !question.contains("文种") {
+            return None;
+        }
+        let mut kinds: Vec<TemplateKind> = Vec::new();
+        for kind in options.iter().filter_map(|o| named_kind(o, current)) {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        if !kinds.iter().any(|kind| *kind != current) {
+            return None;
+        }
+        let mut choices: Vec<Choice> = kinds
+            .iter()
+            .filter(|kind| **kind != current)
+            .map(|kind| switch_choice(*kind, false))
+            .collect();
+        choices.push(keep_choice(current));
+        Some(Question {
+            id: 1,
+            text: question.clone(),
+            choices,
+            custom_hint: None,
+            prefill: String::new(),
+            skippable: false,
+            target: Target::Kind,
+        })
+    })
+}
+
+/// 动笔前的方向题：模型出的澄清题，题号从 1 起，最多 `max` 道。问文种的一律不要——
+/// 走到这里文种已经定了（[`kind_question`] / [`model_kind_question`]）。
+pub(crate) fn predraft_questions(
     model_questions: Vec<(String, Vec<String>)>,
     max: usize,
 ) -> Vec<Question> {
     let mut out = Vec::new();
-    if let Some(kind) = kind_mismatch(request, current) {
-        out.push(Question {
-            id: 1,
-            text: format!(
-                "要求里写的是「{}」，当前文种是「{}」，按哪个写？",
-                kind.label(),
-                current.label()
-            ),
-            choices: vec![
-                Choice {
-                    label: format!("切换为{}", kind.label()),
-                    detail: "版式、行文规则随文种变化".into(),
-                    recommended: true,
-                    action: Action::SwitchKind(kind),
-                },
-                Choice {
-                    label: format!("保持{}", current.label()),
-                    detail: String::new(),
-                    recommended: false,
-                    action: Action::KeepKind,
-                },
-            ],
-            custom_hint: None,
-            prefill: String::new(),
-            skippable: false,
-            target: Target::PreDraft,
-        });
-    }
-    let asked_kind = !out.is_empty();
     for (question, options) in model_questions {
         if out.len() >= max {
             break;
         }
-        // 实测：程序已经问了文种，模型又问「是否按通知（下行）处理」。同一件事不问两遍。
-        if asked_kind && (question.contains("文种") || question.contains("行文方向")) {
+        if question.contains("文种") {
             continue;
         }
         let id = out.len() + 1;
@@ -300,6 +363,29 @@ pub(crate) fn predraft_questions(
         });
     }
     out
+}
+
+/// 同一批里同一件事只问一遍：方向题与已出的六要素题话题重叠的（模型问「受文对象是谁」，
+/// 要素题也问「何人」），丢掉方向题——要素题的选项来自标准词库，答案按要素记。
+/// 题号重新从 1 排起。
+pub(crate) fn merge_predraft(direction: Vec<Question>, elements: Vec<Question>) -> Vec<Question> {
+    let asked: Vec<super::elements::Element> = elements
+        .iter()
+        .filter_map(|q| match q.target {
+            Target::Element(element) => Some(element),
+            _ => None,
+        })
+        .collect();
+    direction
+        .into_iter()
+        .filter(|q| !asked.iter().any(|element| element.covers(&q.text)))
+        .chain(elements)
+        .enumerate()
+        .map(|(index, mut question)| {
+            question.id = index + 1;
+            question
+        })
+        .collect()
 }
 
 /// 缺口提示 → 像人问话的问句：「研究方案反馈时限定到什么时候？」。
@@ -657,7 +743,8 @@ pub(crate) fn apply_gap_replies(
     replies: &[(usize, Reply)],
 ) -> String {
     let mut text = markdown.to_string();
-    for (question_id, reply) in replies {
+    let replies = follow_drops(questions, replies, ledger);
+    for (question_id, reply) in &replies {
         let Some(question) = questions.iter().find(|q| q.id == *question_id) else {
             continue;
         };
@@ -710,6 +797,45 @@ pub(crate) fn gap_edit(question: &Question, reply: &Reply) -> GapEdit {
         },
         Reply::Skip | Reply::Custom(_) => GapEdit::Skip,
     }
+}
+
+/// 同一批缺口题里的依赖：一处选了「删去」，所在那句整句去掉，同一句里的其余几处跟着
+/// 没了落点——再按它们各自的回答去填、去改，就是在给已删的句子写字（模型按段改写时还会
+/// 收到「这句删掉」与「这句填上」两条打架的指令）。这里把它们的回答统一改成「删去」，
+/// 两条落地路径（确定性兜底、按段交模型）都先过这一道。
+pub(crate) fn follow_drops(
+    questions: &[Question],
+    replies: &[(usize, Reply)],
+    ledger: &Ledger,
+) -> Vec<(usize, Reply)> {
+    let sentence_of = |question_id: usize| {
+        let question = questions.iter().find(|q| q.id == question_id)?;
+        let Target::Gap(gap_id) = question.target else {
+            return None;
+        };
+        Some((question, ledger.get(gap_id)?.sentence.trim().to_string()))
+    };
+    let dropped: Vec<String> = replies
+        .iter()
+        .filter_map(|(id, reply)| {
+            let (question, sentence) = sentence_of(*id)?;
+            (gap_edit(question, reply) == GapEdit::Drop && !sentence.is_empty()).then_some(sentence)
+        })
+        .collect();
+    replies
+        .iter()
+        .map(|(id, reply)| {
+            let follow = sentence_of(*id).and_then(|(question, sentence)| {
+                let drop = question
+                    .choices
+                    .iter()
+                    .position(|c| c.action == Action::Drop)?;
+                (dropped.contains(&sentence) && gap_edit(question, reply) != GapEdit::Drop)
+                    .then_some(Reply::Choice(drop))
+            });
+            (*id, follow.unwrap_or_else(|| reply.clone()))
+        })
+        .collect()
 }
 
 /// 去掉 `literal` 所在的那一句；整行只有这一句就连行一起去掉。
@@ -827,50 +953,135 @@ mod tests {
     }
 
     #[test]
-    fn a_model_question_about_the_kind_is_dropped_when_the_program_already_asked() {
+    fn the_kind_question_stands_alone_and_direction_questions_never_ask_the_kind() {
+        // 实测踩过：要求写「研究报告」、当前是公函，定文种题和按公函出的要素题挤在一批，
+        // 选了研究报告，后面几题却还在问公函的致函对象。定文种题只出它自己。
+        let question = kind_question(
+            "根据《梅文项目》总结得失，写一个研究报告",
+            TemplateKind::OfficialLetter,
+        )
+        .expect("文种对不上要问");
+        assert_eq!(question.target, Target::Kind);
+        assert!(!question.skippable);
+        assert!(question.target.is_predraft());
+        assert_eq!(
+            question.choices[0].action,
+            Action::SwitchKind(TemplateKind::ResearchReport)
+        );
+        assert!(question.choices[0].recommended);
+        assert_eq!(question.choices[1].action, Action::KeepKind);
+        assert!(kind_question("写一个研究报告", TemplateKind::ResearchReport).is_none());
+
+        // 方向题里问文种的一律不要（走到这里文种已经定了）；行文方向是方向题，照留。
         let model = vec![
             (
                 "文种与行文方向是否按通知（下行）处理？".to_string(),
                 vec!["是".into(), "否".into()],
             ),
-            ("篇幅多长？".to_string(), vec!["短".into(), "长".into()]),
-        ];
-        let questions = predraft_questions(
-            "起草一份通知",
-            TemplateKind::OfficialLetter,
-            model.clone(),
-            3,
-        );
-        let texts: Vec<_> = questions.iter().map(|q| q.text.as_str()).collect();
-        assert_eq!(texts.len(), 2, "{texts:?}");
-        assert!(texts[1].contains("篇幅"));
-        // 程序没问文种时，模型的文种题照常保留。
-        let questions = predraft_questions("起草一份通知", TemplateKind::PlainDocument, model, 3);
-        assert_eq!(questions.len(), 2);
-    }
-
-    #[test]
-    fn predraft_puts_the_kind_question_first_and_caps_the_count() {
-        let model = vec![
-            ("受文对象是谁？".to_string(), vec!["甲".into(), "乙".into()]),
+            ("行文方向？".to_string(), vec!["上行".into(), "下行".into()]),
             ("篇幅多长？".to_string(), vec!["短".into(), "长".into()]),
             ("语气？".to_string(), vec!["严".into(), "缓".into()]),
         ];
-        let questions = predraft_questions("起草一份通知", TemplateKind::OfficialLetter, model, 3);
-        assert_eq!(questions.len(), 3);
-        assert!(questions[0].text.contains("普通公文"));
-        assert!(questions[0].choices[0].recommended);
+        let questions = predraft_questions(model, 2);
+        let texts: Vec<_> = questions.iter().map(|q| q.text.as_str()).collect();
+        assert_eq!(texts, ["行文方向？", "篇幅多长？"]);
+        assert!(questions.iter().all(|q| q.target == Target::PreDraft));
         let (kind, notes) = resolve_predraft(
             &questions,
-            &[
-                (1, Reply::Choice(0)),
-                (2, Reply::Choice(1)),
-                (3, Reply::Custom("各乡镇".into())),
-            ],
+            &[(1, Reply::Choice(1)), (2, Reply::Custom("一千字".into()))],
             TemplateKind::OfficialLetter,
         );
-        assert_eq!(kind, Some(TemplateKind::PlainDocument));
-        assert_eq!(notes, ["受文对象是谁？乙", "篇幅多长？各乡镇"]);
+        assert_eq!(kind, None);
+        assert_eq!(notes, ["行文方向？下行", "篇幅多长？一千字"]);
+    }
+
+    #[test]
+    fn a_model_question_about_the_kind_becomes_the_kind_question() {
+        let model = vec![
+            (
+                "文种按通知还是按函写？".to_string(),
+                vec!["通知".into(), "公函".into()],
+            ),
+            ("篇幅多长？".to_string(), vec!["短".into(), "长".into()]),
+        ];
+        let question =
+            model_kind_question(&model, TemplateKind::OfficialLetter).expect("选项对得上文种");
+        assert_eq!(question.target, Target::Kind);
+        let actions: Vec<_> = question.choices.iter().map(|c| c.action.clone()).collect();
+        assert_eq!(
+            actions,
+            [
+                Action::SwitchKind(TemplateKind::PlainDocument),
+                Action::KeepKind
+            ]
+        );
+        assert!(
+            question.choices.iter().all(|c| !c.recommended),
+            "模型的判断不替用户推荐"
+        );
+        // 选项对不上文种（是 / 否），或都是当前文种：不算定文种题。
+        let vague = vec![(
+            "文种是否按通知处理？".to_string(),
+            vec!["是".into(), "否".into()],
+        )];
+        assert!(model_kind_question(&vague, TemplateKind::OfficialLetter).is_none());
+        assert!(model_kind_question(&model, TemplateKind::PlainDocument).is_some());
+        let same = vec![(
+            "文种？".to_string(),
+            vec!["普通通知".into(), "电话通知".into()],
+        )];
+        assert!(
+            model_kind_question(&same, TemplateKind::PhoneNotice).is_none(),
+            "通知也算电话通知，只剩当前文种时不问"
+        );
+    }
+
+    #[test]
+    fn the_same_matter_is_asked_once_and_ids_are_renumbered() {
+        let direction = predraft_questions(
+            vec![
+                ("受文对象是谁？".to_string(), vec!["甲".into(), "乙".into()]),
+                ("篇幅多长？".to_string(), vec!["短".into(), "长".into()]),
+            ],
+            3,
+        );
+        let elements = super::super::elements::questions(
+            TemplateKind::OfficialLetter,
+            "",
+            "何人｜缺｜发给谁？\n何时｜缺｜什么时候前回复？",
+            (1, 4),
+            &[],
+        );
+        let merged = merge_predraft(direction, elements);
+        let texts: Vec<_> = merged.iter().map(|q| q.text.as_str()).collect();
+        assert!(!texts.contains(&"受文对象是谁？"), "{texts:?}");
+        assert_eq!(texts[0], "篇幅多长？");
+        let ids: Vec<_> = merged.iter().map(|q| q.id).collect();
+        assert_eq!(ids, (1..=merged.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn answers_in_a_dropped_sentence_follow_the_drop() {
+        let mut ledger = Ledger::default();
+        let text = "请于【待核实：报送时限】前将材料报送【待核实：报送单位】。其余照旧。\n";
+        ledger.sync(text, "", &[]);
+        let questions = gap_questions(&ledger, 4, &[]);
+        assert_eq!(questions.len(), 2);
+        let drop = questions[1]
+            .choices
+            .iter()
+            .position(|c| c.action == Action::Drop)
+            .unwrap();
+        // 第一处填了时限，第二处却把整句删了：时限跟着删，不往已删的句子里填字。
+        let replies = [
+            (1, Reply::Custom("10月31日".into())),
+            (2, Reply::Choice(drop)),
+        ];
+        let followed = follow_drops(&questions, &replies, &ledger);
+        assert_eq!(gap_edit(&questions[0], &followed[0].1), GapEdit::Drop);
+        let out = apply_gap_replies(text, &mut ledger, &questions, &replies);
+        assert_eq!(out, "其余照旧。\n");
+        assert!(ledger.gaps.iter().all(|g| g.status == GapStatus::Dropped));
     }
 
     #[test]

@@ -267,15 +267,20 @@ fn a_mismatched_kind_is_asked_before_writing() {
     let ResearchOutcome::Clarify(questions) = outcome.unwrap() else {
         panic!("文种对不上应当先问");
     };
-    assert_eq!(questions.len(), 1);
-    assert_eq!(questions[0].target, Target::PreDraft);
+    assert_eq!(questions.len(), 1, "定文种单独一批");
+    assert_eq!(questions[0].target, Target::Kind);
     assert!(questions[0].text.contains("公函"), "{}", questions[0].text);
-    assert_eq!(model.asked("会让整篇方向写错"), 1, "模型也判断过一次");
+    assert_eq!(
+        model.asked("会让整篇方向写错"),
+        0,
+        "文种没定之前不出以它为前提的题"
+    );
+    assert_eq!(model.asked("逐项检查起草所需的六要素"), 0);
     assert_eq!(model.asked("到知识库里查清的问题"), 0, "问完才往下走");
     assert!(
         tool_lines(&events)
             .iter()
-            .any(|line| line.contains("1 个问题"))
+            .any(|line| line.contains("先定文种"))
     );
 }
 
@@ -896,7 +901,11 @@ fn predraft_answers_become_notes_and_the_flow_continues_without_asking_again() {
     let Outcome::Suspended(suspension) = outcome.unwrap() else {
         panic!("文种对不上应当先问");
     };
-    assert_eq!(suspension.checkpoint.at, [1], "答完从预研接着跑");
+    assert_eq!(
+        suspension.checkpoint.at,
+        [0],
+        "定文种答完回到澄清这一步重做"
+    );
     let kind = apply_answers(
         &mut board,
         &suspension.questions,
@@ -908,15 +917,141 @@ fn predraft_answers_become_notes_and_the_flow_continues_without_asking_again() {
         Some(TemplateKind::OfficialLetter),
         "切文种交回界面线程执行"
     );
-    assert!(board.clarified);
+    assert_eq!(board.premise, Some(TemplateKind::OfficialLetter));
+    assert!(
+        !board.clarified,
+        "定了文种还没澄清：方向题与要素题按新文种再出"
+    );
     // 界面线程切完文种，带着新要素接着跑。
     board.draft.kind = TemplateKind::OfficialLetter;
     let (outcome, _, board) =
         run_board(board, &skill, &model, &kb(true), &suspension.checkpoint.at);
     assert!(matches!(outcome.unwrap(), Outcome::Done));
-    assert_eq!(model.asked("会让整篇方向写错"), 1, "问过的不再问");
+    assert_eq!(
+        model.asked("会让整篇方向写错"),
+        1,
+        "按新文种问过一次，不再问文种"
+    );
     assert!(model.asked("到知识库里查清的问题") >= 1);
     assert!(!board.workspace.is_empty());
+}
+
+/// 要素检查按公函清单说全缺；方向题只在研究报告下才有。
+fn kind_aware_model() -> FakeModel {
+    FakeModel::new(|_, prompt| {
+        if prompt.contains("逐项检查起草所需的六要素") {
+            "何事｜缺｜办什么？\n何因｜缺｜依据是什么？\n何人｜缺｜致函对象是谁？\n\
+             何时｜缺｜什么时候前回复？\n何法｜缺｜请对方怎么办？"
+                .into()
+        } else if prompt.contains("会让整篇方向写错") && prompt.contains("【当前文种】研究报告")
+        {
+            "研究范围？｜只谈美军｜对照我方".into()
+        } else {
+            "无".into()
+        }
+    })
+}
+
+#[test]
+fn switching_the_kind_regenerates_every_later_question_for_the_new_kind() {
+    // 实测踩过（侧栏截图）：要求写「研究报告」、当前是公函，第 1 题选了「切换为研究报告」，
+    // 同一批的第 2–5 题却还在问公函的何因、致函对象、回复时限。
+    let model = kind_aware_model();
+    let skill = builtin_research_draft();
+    let mut request = input(
+        "根据《梅文项目》总结美军推进人工智能项目中的得失，写一个研究报告",
+        false,
+    );
+    request.draft.kind = TemplateKind::OfficialLetter;
+    let (outcome, _, mut board) = run_board(board_of(&request), &skill, &model, &kb(true), &[]);
+    let Outcome::Suspended(first) = outcome.unwrap() else {
+        panic!("文种对不上应当先问");
+    };
+    let targets: Vec<_> = first.questions.iter().map(|q| q.target).collect();
+    assert_eq!(targets, [Target::Kind], "第一批只有定文种这一题");
+    assert_eq!(
+        model.calls.borrow().len(),
+        0,
+        "文种没定，不按旧文种出任何题"
+    );
+
+    // 选「切换为研究报告」：界面线程切文种，回到澄清这一步按研究报告重新出题。
+    let kind = apply_answers(
+        &mut board,
+        &first.questions,
+        None,
+        &[(1, crate::agent::clarify::Reply::Choice(0))],
+    );
+    assert_eq!(kind, Some(TemplateKind::ResearchReport));
+    board.draft.kind = TemplateKind::ResearchReport;
+    let (outcome, _, _) = run_board(board, &skill, &model, &kb(true), &first.checkpoint.at);
+    let Outcome::Suspended(second) = outcome.unwrap() else {
+        panic!("研究报告的方向题要问");
+    };
+    let texts: Vec<_> = second.questions.iter().map(|q| q.text.as_str()).collect();
+    assert_eq!(texts, ["研究范围？"]);
+    assert!(
+        second
+            .questions
+            .iter()
+            .all(|q| q.target == Target::PreDraft),
+        "公函的六要素题一道都不该出"
+    );
+    assert_eq!(model.asked("逐项检查起草所需的六要素"), 0);
+}
+
+#[test]
+fn keeping_the_kind_asks_the_element_questions_of_that_kind_next() {
+    let model = kind_aware_model();
+    let skill = builtin_research_draft();
+    let mut request = input("写一个研究报告", false);
+    request.draft.kind = TemplateKind::OfficialLetter;
+    let (outcome, _, mut board) = run_board(board_of(&request), &skill, &model, &kb(true), &[]);
+    let Outcome::Suspended(first) = outcome.unwrap() else {
+        panic!("文种对不上应当先问");
+    };
+    let kind = apply_answers(
+        &mut board,
+        &first.questions,
+        None,
+        &[(1, crate::agent::clarify::Reply::Choice(1))],
+    );
+    assert_eq!(kind, None, "保持公函");
+    let (outcome, _, _) = run_board(board, &skill, &model, &kb(true), &first.checkpoint.at);
+    let Outcome::Suspended(second) = outcome.unwrap() else {
+        panic!("公函的六要素要问");
+    };
+    assert!(!second.questions.is_empty());
+    assert!(
+        second
+            .questions
+            .iter()
+            .all(|q| matches!(q.target, Target::Element(_))),
+        "{:?}",
+        second.questions
+    );
+    assert_eq!(model.asked("逐项检查起草所需的六要素"), 1);
+}
+
+#[test]
+fn a_kind_changed_elsewhere_voids_the_clarification_made_for_the_old_kind() {
+    // 按公函澄清过，之后用户在要素区改成普通公文再跑：按公函问的不算数，按普通公文再问。
+    let model = kind_aware_model();
+    let skill = builtin_research_draft();
+    let mut board = board_of(&input("起草一份通知", true));
+    board.premise = Some(TemplateKind::OfficialLetter);
+    board.draft.kind = TemplateKind::PlainDocument;
+    let (outcome, _, board) = run_board(board, &skill, &model, &kb(true), &[]);
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("前提变了要重新澄清");
+    };
+    assert!(
+        suspension
+            .questions
+            .iter()
+            .all(|q| matches!(q.target, Target::Element(_)))
+    );
+    assert_eq!(board.premise, Some(TemplateKind::PlainDocument));
 }
 
 #[test]

@@ -122,6 +122,25 @@ impl DraftPage<'_> {
         request: TurnRequest,
         resume: Option<(u64, Box<SkillRun>)>,
     ) -> Result<(), String> {
+        self.start_skill_in(request, resume, None)
+    }
+
+    /// 同 [`Self::start_skill`] 的新开一轮，只是不另开卡片：在 `turn_id` 这张卡片里重新选技能、
+    /// 从头跑（定文种题切了文种，以旧文种为前提的技能与题目全部作废）。
+    pub(crate) fn reroute_skill(
+        &mut self,
+        turn_id: u64,
+        request: TurnRequest,
+    ) -> Result<(), String> {
+        self.start_skill_in(request, None, Some(turn_id))
+    }
+
+    fn start_skill_in(
+        &mut self,
+        request: TurnRequest,
+        resume: Option<(u64, Box<SkillRun>)>,
+        reroute: Option<u64>,
+    ) -> Result<(), String> {
         if self.doc.read_only() {
             return Err("这篇稿件已发布或归档，只读。".into());
         }
@@ -169,7 +188,7 @@ impl DraftPage<'_> {
                     HistoryPlan::default(),
                 )
             }
-            None => self.prepare_skill(&request, &time)?,
+            None => self.prepare_skill(&request, &time, reroute)?,
         };
         if fresh {
             board.system_prompt = crate::prompt::build_system_prompt(&time);
@@ -337,11 +356,13 @@ impl DraftPage<'_> {
         Ok(())
     }
 
-    /// 新开一轮：选技能、查条件、备黑板、在任务流里开卡片。
+    /// 新开一轮：选技能、查条件、备黑板、在任务流里开卡片。`reroute` 是要重来的那张卡片：
+    /// 不另开，在它里面重来（[`Self::reroute_skill`]）。
     pub(super) fn prepare_skill(
         &mut self,
         request: &TurnRequest,
         time: &crate::prompt::TimeContext,
+        reroute: Option<u64>,
     ) -> Result<(Pick, Board, StepPath, bool, String, HistoryPlan), String> {
         let load_notes = self.doc.ai_panel.reload_skills();
         let skills = self.doc.ai_panel.skills.clone();
@@ -471,6 +492,7 @@ impl DraftPage<'_> {
             request: text.trim().to_string(),
             notes,
             clarified: !request.notes.is_empty(),
+            premise: request.premise,
             history: plan.text(),
             document: markdown.clone(),
             workspace: markdown.clone(),
@@ -496,9 +518,22 @@ impl DraftPage<'_> {
         } else {
             request.text.clone()
         };
-        self.doc
-            .ai_panel
-            .push_turn(title.clone(), prompt, context, Some(request.clone()));
+        match reroute {
+            Some(turn_id) => {
+                if !self
+                    .doc
+                    .ai_panel
+                    .restart_turn(turn_id, title.clone(), context, request.clone())
+                {
+                    return Err("这一轮已不在侧栏里。".into());
+                }
+            }
+            None => {
+                self.doc
+                    .ai_panel
+                    .push_turn(title.clone(), prompt, context, Some(request.clone()));
+            }
+        }
         for note in load_notes {
             self.doc.ai_panel.note(note);
         }
@@ -694,6 +729,27 @@ impl DraftPage<'_> {
         let (Some(mut run), Some(mut request)) = (turn.run.take(), turn.request.clone()) else {
             return;
         };
+        // 动笔前的题都以出题时的文种为前提。等回答的时候用户在要素区改了文种：这批题是按旧
+        // 文种出的（旧文种的要素清单、旧文种选的技能），回答不落地，按新文种重新选技能、重新出题。
+        let premise = run.suspension.checkpoint.board.draft.kind;
+        let current = self.doc.draft.kind;
+        if premise != current
+            && run
+                .suspension
+                .questions
+                .iter()
+                .any(|q| q.target.is_predraft())
+        {
+            turn.notes.push(format!(
+                "出题时是{}，文种已改为{}：这批题作废，按{}重新选技能、重新出题。",
+                premise.label(),
+                current.label(),
+                current.label()
+            ));
+            request.premise = None;
+            self.reroute_turn(turn_id, request);
+            return;
+        }
         let kind = engine::apply_answers(
             &mut run.suspension.checkpoint.board,
             &run.suspension.questions,
@@ -704,12 +760,47 @@ impl DraftPage<'_> {
         request
             .notes
             .clone_from(&run.suspension.checkpoint.board.notes);
+        request.premise = run.suspension.checkpoint.board.premise;
         turn.request = Some(request.clone());
-        if let Some(kind) = kind {
+        if let Some(kind) = kind
+            && kind != current
+        {
             // 用户亲手点的「切换文种」：界面线程改要素，与在要素区下拉框里选是同一回事。
             self.doc.draft.kind = kind;
+            // 文种是技能、要素清单、版式的前提：换了文种，按新文种重新选技能、重新出题，
+            // 同一张卡片里重来（研究报告该走「政策研究报告」，而不是带着公函的流程接着跑）。
+            if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
+                turn.notes.push(format!(
+                    "已切换为{}：按新文种重新选技能、重新出题。",
+                    kind.label()
+                ));
+            }
+            self.reroute_turn(turn_id, request);
+            return;
         }
         if let Err(error) = self.start_skill(request, Some((turn_id, run))) {
+            *self.status = error;
+        }
+    }
+
+    /// 前提变了，这一轮在同一张卡片里从头重来：旧流程的检查点作废（它们挂着旧技能、旧文种，
+    /// 留着只会冒出「从这里重跑」的错误入口）。重来不成（如指定的技能不适用于新文种）就把
+    /// 卡片落成失败，说明原因，不让它停在半截。
+    fn reroute_turn(&mut self, turn_id: u64, request: TurnRequest) {
+        let session_id = self.doc.ai_panel.session.id.clone();
+        if let Some(store) = self.store.as_deref_mut()
+            && let Err(error) = store.delete_run_checkpoints_from(&session_id, turn_id as i64)
+        {
+            self.doc
+                .ai_panel
+                .note(format!("旧流程的检查点没删掉：{error:#}"));
+        }
+        if let Err(error) = self.reroute_skill(turn_id, request) {
+            if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
+                turn.questions.clear();
+                turn.replies.clear();
+                turn.settle(TurnState::Failed(error.clone()));
+            }
             *self.status = error;
         }
     }
@@ -1271,7 +1362,14 @@ fn run_engine(
 
 /// 挂起时题目的用途，决定卡片上的说法。
 pub(crate) fn asking_labels(questions: &[Question]) -> (&'static str, &'static str, &'static str) {
-    if questions.iter().any(|q| q.target.is_predraft()) {
+    if questions.iter().any(|q| q.target == Target::Kind) {
+        // 定文种单独一批：其余问题要等文种定了才按它出，这里说清楚，免得以为只问这一题。
+        (
+            "先定文种，其余问题按定下的文种再问",
+            "确认文种，继续",
+            "跳过",
+        )
+    } else if questions.iter().any(|q| q.target.is_predraft()) {
         (
             "动笔前先确认这几件事",
             "确认，开始起草",

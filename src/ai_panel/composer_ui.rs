@@ -660,6 +660,7 @@ impl DraftPage<'_> {
             use_rag: composer.use_rag,
             refs: mention::live_refs(&composer.text, &composer.refs),
             notes: Vec::new(),
+            premise: None,
             on_proposal,
             style: composer.style.clone(),
         };

@@ -7,7 +7,7 @@
 use super::clarify::Question;
 use super::evidence::EvidencePack;
 use super::gaps::Ledger;
-use crate::models::DraftInput;
+use crate::models::{DraftInput, TemplateKind};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -42,8 +42,12 @@ pub(crate) struct Board {
     pub(crate) vars: BTreeMap<String, Value>,
     /// 交付时要问用户的题。
     pub(crate) questions: Vec<Question>,
-    /// 已经问过动笔前澄清。
+    /// 已经问过动笔前澄清（方向题与六要素题）。只对 `premise` 那个文种成立。
     pub(crate) clarified: bool,
+    /// 定文种这一关的结论：按这个文种写（起草人在定文种题里确认的，或程序核对要求与当前
+    /// 文种无出入）。动笔前的其余题、技能的选择都以它为前提；当前文种与它不符（要素区里
+    /// 改过文种）时，以旧文种为前提的澄清作废重问。`None` 表示这一关还没过。
+    pub(crate) premise: Option<TemplateKind>,
     /// 起草的系统提示（含日期规则）。
     pub(crate) system_prompt: String,
     /// 今天、明天这些日期，算作合法出处。

@@ -87,7 +87,9 @@ pub(crate) fn revise(
 ) -> Revised {
     let mut text = raw.to_string();
     let mut items = Vec::new();
-    for (question_id, reply) in replies {
+    // 同一句里一处删了，其余几处跟着删，别让模型收到「删这句」「填这句」两条打架的指令。
+    let replies = super::clarify::follow_drops(questions, replies, &ledger);
+    for (question_id, reply) in &replies {
         let Some(question) = questions.iter().find(|q| q.id == *question_id) else {
             continue;
         };
