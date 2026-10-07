@@ -1472,16 +1472,15 @@ impl TemplateProfile {
 
 /// 界面主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
 ///
-/// 前八项是明色，后六项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
+/// 前五项是明色，后五项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
 /// 公文纸面另由 [`PaperMode`] 决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
     #[default]
+    // 已移除的主题兼容旧配置，统一回退奶油主题。
+    #[serde(alias = "sky", alias = "lilac", alias = "green", alias = "everforest")]
     Claude,
-    Sky,
-    Lilac,
-    Green,
     /// Solarized Light：终端配色里的经典浅色。
     SolarizedLight,
     /// Catppuccin Latte：冷白底 + 紫色强调。
@@ -1498,19 +1497,14 @@ pub enum ThemeName {
     GruvboxDark,
     /// Tokyo Night：近黑底 + 蓝紫强调。
     TokyoNight,
-    /// Everforest Dark：灰绿底，刺激最小。
-    Everforest,
     /// MDEX 夜墨：纸墨的深色版，暖墨底与鼠尾草绿。
     MdexDark,
 }
 
 impl ThemeName {
     /// 全部可选主题，顺序与设置页展示一致：先明色后深色。
-    pub const ALL: [ThemeName; 14] = [
+    pub const ALL: [ThemeName; 10] = [
         Self::Claude,
-        Self::Sky,
-        Self::Lilac,
-        Self::Green,
         Self::SolarizedLight,
         Self::Latte,
         Self::GruvboxLight,
@@ -1519,7 +1513,6 @@ impl ThemeName {
         Self::Nord,
         Self::GruvboxDark,
         Self::TokyoNight,
-        Self::Everforest,
         Self::MdexDark,
     ];
 }
@@ -1529,7 +1522,7 @@ impl ThemeName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaperMode {
-    /// 跟随界面主题：按主题冷暖与明暗选用本色、宣纸白、雨青灰、夜墨蓝或檀黑棕。
+    /// 跟随界面主题：按主题冷暖与明暗选用本色、宣纸白、夜墨蓝或檀黑棕。
     #[default]
     Follow,
     /// 始终白纸黑字，与打印稿一致。
@@ -3675,16 +3668,25 @@ mod tests {
     #[test]
     fn theme_name_round_trips_and_old_config_defaults_to_claude() {
         let mut config = AppConfig::default();
-        config.theme = ThemeName::Sky;
+        config.theme = ThemeName::Latte;
         let json = serde_json::to_string(&config).expect("应能序列化");
         let back: AppConfig = serde_json::from_str(&json).expect("应能反序列化");
-        assert_eq!(back.theme, ThemeName::Sky, "round-trip 后主题不变");
+        assert_eq!(back.theme, ThemeName::Latte, "round-trip 后主题不变");
 
         // 去掉 theme 键模拟旧配置：载入后回退默认。
         let mut value: serde_json::Value = serde_json::from_str(&json).expect("应能解析为 JSON 值");
         value.as_object_mut().expect("配置应为对象").remove("theme");
-        let old: AppConfig = serde_json::from_value(value).expect("旧配置应能反序列化");
+        let old: AppConfig = serde_json::from_value(value.clone()).expect("旧配置应能反序列化");
         assert_eq!(old.theme, ThemeName::default(), "旧配置回退默认主题");
+
+        // 移除主题后仍能读取完整旧配置，其他设置不受影响。
+        for removed in ["sky", "lilac", "green", "everforest"] {
+            value["theme"] = serde_json::json!(removed);
+            let migrated: AppConfig =
+                serde_json::from_value(value.clone()).expect("旧主题配置应能读取");
+            assert_eq!(migrated.theme, ThemeName::Claude);
+            assert_eq!(migrated.paper, back.paper);
+        }
     }
 
     /// 补齐是幂等的：反复载入不会把预置项复制成好几份，也不会重排用户改过的内容。

@@ -1286,7 +1286,7 @@ pub(super) mod tests {
     }
 
     pub(in crate::app) fn snapshot(page: &mut ApisPage, name: &str, size: egui::Vec2) {
-        theme::set_current(crate::models::ThemeName::Green);
+        theme::set_current(crate::models::ThemeName::Mdex);
         let ctx = egui::Context::default();
         theme::configure_icons(&ctx);
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());

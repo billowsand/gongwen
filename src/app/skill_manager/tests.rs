@@ -152,7 +152,7 @@ fn overview_and_files_render_at_wide_and_narrow_widths() {
 fn skill_manager_samples() {
     let dir = tempfile::tempdir().unwrap();
     crate::storage::set_test_config_dir(Some(dir.path().to_path_buf()));
-    theme::set_current(crate::models::ThemeName::Green);
+    theme::set_current(crate::models::ThemeName::Mdex);
     let ctx = egui::Context::default();
     theme::configure_icons(&ctx);
     theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
@@ -195,7 +195,7 @@ fn skill_manager_samples() {
     theme::set_current(crate::models::ThemeName::Dracula);
     theme::configure_style(&ctx);
     shoot(&mut page, "policy-report-dark", egui::vec2(1500.0, 1200.0));
-    theme::set_current(crate::models::ThemeName::Green);
+    theme::set_current(crate::models::ThemeName::Mdex);
     theme::configure_style(&ctx);
     shoot(
         &mut page,

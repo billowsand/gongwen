@@ -19,24 +19,6 @@ THEMES = {
         "accent": "#C96442",
         "accent_light": "#D47450",
     },
-    "sky": {
-        "tile_top": "#17242E",
-        "tile_bottom": "#0B1B2A",
-        "accent": "#1F8AC0",
-        "accent_light": "#37A0D6",
-    },
-    "lilac": {
-        "tile_top": "#26213A",
-        "tile_bottom": "#171129",
-        "accent": "#8A63C9",
-        "accent_light": "#9C78D8",
-    },
-    "green": {
-        "tile_top": "#1C2A1E",
-        "tile_bottom": "#0F2014",
-        "accent": "#3E8E4E",
-        "accent_light": "#56A262",
-    },
     # Terminal-inspired schemes. The tile stays dark in every theme so the icon
     # reads at taskbar size; only the accent tracks the theme's accent colour.
     "solarized-light": {
@@ -80,12 +62,6 @@ THEMES = {
         "tile_bottom": "#16161E",
         "accent": "#7AA2F7",
         "accent_light": "#9BB8FA",
-    },
-    "everforest": {
-        "tile_top": "#2D353B",
-        "tile_bottom": "#272E33",
-        "accent": "#A7C080",
-        "accent_light": "#BAD096",
     },
 }
 

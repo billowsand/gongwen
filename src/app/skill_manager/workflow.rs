@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn builtin_flows_and_subflows_render_and_fit_narrow_panels() {
-        let colors = colors(crate::models::ThemeName::Green);
+        let colors = colors(crate::models::ThemeName::Mdex);
         for skill in skill::builtin_skills() {
             let mut flows = vec![skill.flow.as_slice()];
             while let Some(steps) = flows.pop() {
@@ -196,7 +196,7 @@ mod tests {
         assert!(!source.contains("\"] --> injected"));
         crate::mermaid::render_interface(
             &source,
-            colors(crate::models::ThemeName::Green),
+            colors(crate::models::ThemeName::Mdex),
             1.0,
             2048,
         )
