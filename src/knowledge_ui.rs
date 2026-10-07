@@ -759,7 +759,7 @@ fn result_card(
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     // 排名徽章。
                     let (bg, fg) = if index == 0 {
-                        (theme::accent(), egui::Color32::WHITE)
+                        (theme::accent(), theme::accent_text())
                     } else {
                         (theme::surface_sunk(), theme::text_soft())
                     };

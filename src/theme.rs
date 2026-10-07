@@ -6,6 +6,8 @@
 //! （预览、编辑区）的取色集中在 [`paper`] 模块，按设置里的纸面模式走，导出的
 //! DOCX/PDF 一律仍是白纸黑字红头，不受主题影响。
 
+mod mdex;
+
 use crate::models::{EditorFontFace, FontConfig, FontRole, PaperMode, ThemeName};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 use std::collections::BTreeMap;
@@ -799,6 +801,8 @@ pub fn by_name(name: ThemeName) -> Theme {
         ThemeName::SolarizedLight => Theme::solarized_light(),
         ThemeName::Latte => Theme::latte(),
         ThemeName::GruvboxLight => Theme::gruvbox_light(),
+        ThemeName::Mdex => mdex::palette(),
+        ThemeName::MdexDark => mdex::dark_palette(),
         ThemeName::Dracula => Theme::dracula(),
         ThemeName::Nord => Theme::nord(),
         ThemeName::GruvboxDark => Theme::gruvbox_dark(),
@@ -994,7 +998,11 @@ pub mod paper {
         fn follow_mode_maps_themes_to_five_paper_families() {
             assert_follow(&[ThemeName::Claude, ThemeName::Latte], ORIGINAL_SHEET);
             assert_follow(
-                &[ThemeName::SolarizedLight, ThemeName::GruvboxLight],
+                &[
+                    ThemeName::SolarizedLight,
+                    ThemeName::GruvboxLight,
+                    ThemeName::Mdex,
+                ],
                 PARCHMENT_SHEET,
             );
             assert_follow(
@@ -1006,7 +1014,11 @@ pub mod paper {
                 NIGHT_BLUE_SHEET,
             );
             assert_follow(
-                &[ThemeName::GruvboxDark, ThemeName::Everforest],
+                &[
+                    ThemeName::GruvboxDark,
+                    ThemeName::Everforest,
+                    ThemeName::MdexDark,
+                ],
                 SANDALWOOD_SHEET,
             );
         }
@@ -1037,8 +1049,10 @@ pub mod paper {
                 ThemeName::Claude,
                 ThemeName::SolarizedLight,
                 ThemeName::GruvboxLight,
+                ThemeName::Mdex,
                 ThemeName::GruvboxDark,
                 ThemeName::Everforest,
+                ThemeName::MdexDark,
             ];
             for name in cool {
                 assert_eq!(
@@ -1256,7 +1270,7 @@ pub fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(surface())
         .stroke(Stroke::new(1.0, border()))
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(chrome_radius(8))
         .inner_margin(Margin::same(10))
 }
 
@@ -1893,8 +1907,42 @@ impl Icon {
     }
 }
 
+/// MDEX 的外壳使用小圆角与细描边，配色仍由统一主题接口提供。
+pub fn is_mdex() -> bool {
+    matches!(current().label, mdex::LABEL | mdex::DARK_LABEL)
+}
+
+fn chrome_radius(default: u8) -> CornerRadius {
+    CornerRadius::same(if is_mdex() { 3 } else { default })
+}
+
+/// 标题栏的品牌图标；MDEX 使用完整双色图标，不给绿色光标整体染色。
+pub fn brand_image(size: f32, tint: Color32) -> egui::Image<'static> {
+    if is_mdex() {
+        egui::Image::from_bytes(
+            if current().dark {
+                "bytes://brand/mdex-dark.svg"
+            } else {
+                "bytes://brand/mdex.svg"
+            },
+            if current().dark {
+                include_bytes!("../assets/app-icon/themes/mdex-dark/app-icon.svg").as_slice()
+            } else {
+                include_bytes!("../assets/app-icon/themes/mdex/app-icon.svg").as_slice()
+            },
+        )
+        .fit_to_exact_size(egui::vec2(size, size))
+    } else {
+        Icon::BrandMark.image_sized(size).tint(tint)
+    }
+}
+
 fn app_icon_png(name: ThemeName) -> &'static [u8] {
     match name {
+        ThemeName::MdexDark => {
+            include_bytes!("../assets/app-icon/themes/mdex-dark/app-icon-256.png")
+        }
+        ThemeName::Mdex => include_bytes!("../assets/app-icon/themes/mdex/app-icon-256.png"),
         ThemeName::Claude => include_bytes!("../assets/app-icon/themes/claude/app-icon-256.png"),
         ThemeName::Sky => include_bytes!("../assets/app-icon/themes/sky/app-icon-256.png"),
         ThemeName::Lilac => include_bytes!("../assets/app-icon/themes/lilac/app-icon-256.png"),
@@ -1973,7 +2021,7 @@ pub fn configure_icons(ctx: &egui::Context) {
 pub fn icon_text_button(icon: Icon, label: &str) -> egui::Button<'static> {
     egui::Button::image_and_text(icon.image(), label.to_owned())
         .image_tint_follows_text_color(true)
-        .corner_radius(CornerRadius::same(7))
+        .corner_radius(chrome_radius(7))
 }
 
 /// 菜单中的图文条目。保持按钮 frame 开启，常态仍由 egui 的 menu style 画成
@@ -1982,14 +2030,14 @@ pub fn icon_text_button(icon: Icon, label: &str) -> egui::Button<'static> {
 pub fn menu_item(icon: Icon, label: &str) -> egui::Button<'static> {
     egui::Button::image_and_text(icon.image(), label.to_owned())
         .image_tint_follows_text_color(true)
-        .corner_radius(CornerRadius::same(5))
+        .corner_radius(chrome_radius(5))
         .min_size(egui::vec2(0.0, 26.0))
 }
 
 /// 菜单中的纯文字条目，与图文条目使用同一高度和悬停反馈。
 pub fn menu_text_item(label: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(label.into())
-        .corner_radius(CornerRadius::same(5))
+        .corner_radius(chrome_radius(5))
         .min_size(egui::vec2(0.0, 26.0))
 }
 
@@ -2029,7 +2077,20 @@ pub fn dropdown_button(text: impl Into<String>, width: f32) -> egui::Button<'sta
         .min_size(egui::vec2(width, 0.0))
 }
 
-/// 在子作用域内把按钮三态底色覆盖成橙色系（clone-on-write，退出自动还原），
+/// 强调色实底上的文字与图标。夜墨的浅绿底使用墨色，避免白字失去对比度。
+pub fn accent_text() -> Color32 {
+    accent_text_for(current())
+}
+
+fn accent_text_for(palette: Theme) -> Color32 {
+    if palette.label == mdex::DARK_LABEL {
+        Color32::from_rgb(0x19, 0x1C, 0x19)
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// 在子作用域内把按钮三态底色覆盖成主题强调色（clone-on-write，退出自动还原），
 /// 让 `egui::Button` 自己按状态切换底色并保留按压动效。供主按钮与需要自定义
 /// 尺寸的橙色按钮共用。
 pub fn accent_scope<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -2037,29 +2098,29 @@ pub fn accent_scope<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::U
         let widgets = &mut ui.visuals_mut().widgets;
         widgets.inactive.weak_bg_fill = accent();
         widgets.inactive.bg_fill = accent();
-        widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+        widgets.inactive.fg_stroke = Stroke::new(1.0, accent_text());
         widgets.hovered.weak_bg_fill = accent_hover();
         widgets.hovered.bg_fill = accent_hover();
-        widgets.hovered.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+        widgets.hovered.fg_stroke = Stroke::new(1.5, accent_text());
         widgets.active.weak_bg_fill = accent_active();
         widgets.active.bg_fill = accent_active();
-        widgets.active.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+        widgets.active.fg_stroke = Stroke::new(1.5, accent_text());
         add_contents(ui)
     })
     .inner
 }
 
-/// 主按钮内部的图文 Button（白字、深橙描边），不含底色——底色由 `accent_scope` 提供。
+/// 主按钮内部的图文 Button（自适应字色、强调色描边），不含底色——底色由 `accent_scope` 提供。
 /// 需要自定义尺寸（如 `add_sized`）时，在 `accent_scope` 里 add 这个 widget。
 pub fn primary_button_widget(icon: Icon, label: &str) -> egui::Button<'static> {
     egui::Button::image_and_text(
-        icon.image().tint(Color32::WHITE),
+        icon.image().tint(accent_text()),
         egui::RichText::new(label.to_owned())
-            .color(Color32::WHITE)
+            .color(accent_text())
             .strong(),
     )
     .stroke(Stroke::new(1.0, accent_active()))
-    .corner_radius(CornerRadius::same(7))
+    .corner_radius(chrome_radius(7))
 }
 
 /// 图标与文字组合的主按钮。
@@ -2090,7 +2151,7 @@ pub fn secondary_icon_button(icon: Icon, label: &str) -> egui::Button<'static> {
         .image_tint_follows_text_color(true)
         .fill(surface())
         .stroke(Stroke::new(1.0, border_strong()))
-        .corner_radius(CornerRadius::same(7))
+        .corner_radius(chrome_radius(7))
 }
 
 /// 图标与文字组合的警示按钮，用于需要保留明确文字的删除/清空操作。
@@ -2099,7 +2160,7 @@ pub fn warning_icon_button(icon: Icon, label: &str) -> egui::Button<'static> {
         icon.image().tint(warn()),
         egui::RichText::new(label.to_owned()).color(warn()),
     )
-    .corner_radius(CornerRadius::same(7))
+    .corner_radius(chrome_radius(7))
 }
 
 /// 已选项标签：文字在左，移除图标固定在右；未知词条沿用警示色。
@@ -2151,7 +2212,7 @@ pub fn ribbon_tab_button(ui: &mut egui::Ui, selected: bool, label: &str) -> egui
         egui::RichText::new(label).color(text_soft())
     };
     let button = egui::Button::new(text)
-        .corner_radius(CornerRadius::same(6))
+        .corner_radius(chrome_radius(6))
         .min_size(egui::vec2(52.0, 24.0));
     ui.add(if selected {
         button.frame(false)
@@ -2174,7 +2235,7 @@ pub fn view_icon_button(
             .selected(selected)
             .frame_when_inactive(selected)
             .min_size(egui::vec2(30.0, 28.0))
-            .corner_radius(CornerRadius::same(6)),
+            .corner_radius(chrome_radius(6)),
     )
     .on_hover_text(label)
 }
@@ -2197,7 +2258,7 @@ fn icon_button_impl(
         egui::Button::image(image)
             .image_tint_follows_text_color(!dangerous)
             .min_size(egui::vec2(28.0, 26.0))
-            .corner_radius(CornerRadius::same(6)),
+            .corner_radius(chrome_radius(6)),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     response.on_hover_text(label)
@@ -2230,7 +2291,7 @@ pub fn titlebar_icon_button(
             Color32::TRANSPARENT
         };
         if fill != Color32::TRANSPARENT {
-            ui.painter().rect_filled(rect, CornerRadius::same(5), fill);
+            ui.painter().rect_filled(rect, chrome_radius(5), fill);
         }
         let tint = if !enabled {
             text_muted()
@@ -2408,7 +2469,7 @@ pub fn notice(
 ) -> egui::Response {
     let response = egui::Frame::new()
         .fill(bg)
-        .corner_radius(CornerRadius::same(7))
+        .corner_radius(chrome_radius(7))
         .inner_margin(Margin {
             left: 12,
             right: 10,
@@ -2451,7 +2512,7 @@ pub fn segmented<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) 
     egui::Frame::new()
         .fill(surface_sunk())
         .stroke(Stroke::new(1.0, border()))
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(chrome_radius(8))
         .inner_margin(Margin::same(3))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -3137,8 +3198,8 @@ pub fn configure_style(ctx: &egui::Context) {
     visuals.panel_fill = canvas();
     visuals.window_fill = surface();
     visuals.window_stroke = Stroke::new(1.0, border());
-    visuals.window_corner_radius = CornerRadius::same(10);
-    visuals.menu_corner_radius = CornerRadius::same(8);
+    visuals.window_corner_radius = chrome_radius(10);
+    visuals.menu_corner_radius = chrome_radius(8);
     visuals.faint_bg_color = surface_sunk();
     visuals.extreme_bg_color = surface();
     visuals.text_edit_bg_color = Some(surface());
@@ -3160,6 +3221,10 @@ pub fn configure_style(ctx: &egui::Context) {
         spread: 0,
         color: Color32::from_black_alpha(if dark { 96 } else { 24 }),
     };
+    if is_mdex() {
+        visuals.window_shadow.blur = 4;
+        visuals.window_shadow.color = Color32::from_black_alpha(12);
+    }
     visuals.popup_shadow = visuals.window_shadow;
 
     let widgets = &mut visuals.widgets;
@@ -3167,33 +3232,33 @@ pub fn configure_style(ctx: &egui::Context) {
     widgets.noninteractive.weak_bg_fill = canvas();
     widgets.noninteractive.bg_stroke = Stroke::new(1.0, border());
     widgets.noninteractive.fg_stroke = Stroke::new(1.0, text());
-    widgets.noninteractive.corner_radius = CornerRadius::same(7);
+    widgets.noninteractive.corner_radius = chrome_radius(7);
 
     widgets.inactive.bg_fill = surface_sunk();
     widgets.inactive.weak_bg_fill = surface_sunk();
     widgets.inactive.bg_stroke = Stroke::new(1.0, border());
     widgets.inactive.fg_stroke = Stroke::new(1.0, text_soft());
-    widgets.inactive.corner_radius = CornerRadius::same(7);
+    widgets.inactive.corner_radius = chrome_radius(7);
 
     widgets.hovered.bg_fill = surface_hover();
     widgets.hovered.weak_bg_fill = surface_hover();
     widgets.hovered.bg_stroke = Stroke::new(1.0, border_strong());
     widgets.hovered.fg_stroke = Stroke::new(1.5, text());
-    widgets.hovered.corner_radius = CornerRadius::same(7);
+    widgets.hovered.corner_radius = chrome_radius(7);
     widgets.hovered.expansion = 0.0;
 
     widgets.active.bg_fill = surface_active();
     widgets.active.weak_bg_fill = surface_active();
     widgets.active.bg_stroke = Stroke::new(1.0, accent());
     widgets.active.fg_stroke = Stroke::new(1.5, text());
-    widgets.active.corner_radius = CornerRadius::same(7);
+    widgets.active.corner_radius = chrome_radius(7);
     widgets.active.expansion = 0.0;
 
     widgets.open.bg_fill = surface_sunk();
     widgets.open.weak_bg_fill = surface_sunk();
     widgets.open.bg_stroke = Stroke::new(1.0, accent());
     widgets.open.fg_stroke = Stroke::new(1.0, text());
-    widgets.open.corner_radius = CornerRadius::same(7);
+    widgets.open.corner_radius = chrome_radius(7);
 
     ctx.set_style_of(base, style);
 }
@@ -3426,6 +3491,19 @@ mod tests {
                 accent_on_soft >= 3.0,
                 "{name:?} 的强调色在淡底上对比度只有 {accent_on_soft:.2}，低于 3.0"
             );
+        }
+    }
+
+    /// 明暗 MDEX 的实底按钮在普通、悬停和按下时均须保持正文级对比度。
+    #[test]
+    fn mdex_button_states_stay_readable() {
+        for name in [ThemeName::Mdex, ThemeName::MdexDark] {
+            let palette = by_name(name);
+            let foreground = super::accent_text_for(palette);
+            for background in [palette.accent, palette.accent_hover, palette.accent_active] {
+                let ratio = contrast(foreground, background);
+                assert!(ratio >= 4.5, "{name:?} 按钮字色对比度只有 {ratio:.2}");
+            }
         }
     }
 

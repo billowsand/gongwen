@@ -919,7 +919,7 @@ fn pill(label: &str, active: bool) -> egui::Button<'static> {
         .corner_radius(egui::CornerRadius::same(255))
 }
 
-/// 圆形发送按钮：主色底白箭头；运行中换成停止方块。
+/// 圆形发送按钮：主色底自适应箭头；运行中换成停止方块。
 fn send_button(ui: &mut egui::Ui, running: bool) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(SEND_SIZE, SEND_SIZE), egui::Sense::click());
@@ -939,7 +939,7 @@ fn send_button(ui: &mut egui::Ui, running: bool) -> egui::Response {
     } else {
         theme::Icon::ArrowUp
     };
-    icon.image_sized(16.0).tint(egui::Color32::WHITE).paint_at(
+    icon.image_sized(16.0).tint(theme::accent_text()).paint_at(
         ui,
         egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0)),
     );

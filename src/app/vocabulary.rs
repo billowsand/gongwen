@@ -463,7 +463,7 @@ impl GongwenApp {
                         number,
                         egui::FontId::proportional(15.0),
                         if active {
-                            egui::Color32::WHITE
+                            theme::accent_text()
                         } else {
                             theme::text_soft()
                         },

@@ -264,7 +264,7 @@ fn steps_ui(ui: &mut egui::Ui, flow: &ImportFlow) {
                 ui.painter().circle_filled(center, 10.0, theme::accent());
                 theme::Icon::Check
                     .image_sized(12.0)
-                    .tint(egui::Color32::WHITE)
+                    .tint(theme::accent_text())
                     .paint_at(
                         ui,
                         egui::Rect::from_center_size(center, egui::vec2(12.0, 12.0)),

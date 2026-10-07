@@ -870,7 +870,7 @@ fn reply_state(
 /// 题卡里的一枚选项。选中的实心强调色带勾；AI 建议用淡强调色底，和程序给的选项分开。
 fn option_pill(ui: &mut egui::Ui, label: &str, selected: bool, suggestion: bool) -> egui::Response {
     let (fill, stroke, color) = if selected {
-        (theme::accent(), theme::accent(), egui::Color32::WHITE)
+        (theme::accent(), theme::accent(), theme::accent_text())
     } else if suggestion {
         (theme::accent_soft(), theme::accent_soft(), theme::accent())
     } else {

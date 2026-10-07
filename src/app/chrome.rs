@@ -171,7 +171,7 @@ fn status_icon_button(
             egui::Align2::CENTER_CENTER,
             &text,
             egui::FontId::proportional(9.0),
-            egui::Color32::WHITE,
+            theme::accent_text(),
         );
     }
     response.on_hover_text(label)
@@ -317,11 +317,8 @@ impl GongwenApp {
             } else {
                 title_color
             };
-            ui.put(
-                brand_rect,
-                theme::Icon::BrandMark.image_sized(18.0).tint(brand_color),
-            )
-            .on_hover_text(version::APP_TITLE);
+            ui.put(brand_rect, theme::brand_image(18.0, brand_color))
+                .on_hover_text(version::APP_TITLE);
             text_right = brand_rect.right();
         }
         // 快速访问工具栏：仿 Word 挂在标题栏上，与停在哪个分区卡无关。
@@ -428,7 +425,7 @@ impl GongwenApp {
             }
             // 关闭键悬停用红底白字（Windows 惯例），其余按钮保持文字色。
             let icon_color = if is_close && hovered {
-                egui::Color32::WHITE
+                theme::accent_text()
             } else {
                 title_color
             };
@@ -1235,7 +1232,7 @@ impl GongwenApp {
         // 文字：未选中深色，悬停加深一档；选中渐变到白字，保证在主题色底上可读。
         let text_color = theme::text_soft()
             .lerp_to_gamma(theme::text(), hover_t * (1.0 - sel_t))
-            .lerp_to_gamma(egui::Color32::WHITE, sel_t);
+            .lerp_to_gamma(theme::accent_text(), sel_t);
         ui.painter().rect(
             rect,
             egui::CornerRadius::same(TOOLBAR_CONTROL_HEIGHT as u8 / 2),
@@ -1264,7 +1261,7 @@ impl GongwenApp {
         } else if !mark.is_empty() {
             // 跟背景/文字同步插值，别用 sel_t > 0.5 那种硬阈值，否则动画中途会跳一下。
             content.colored_label(
-                theme::accent().lerp_to_gamma(egui::Color32::WHITE, sel_t),
+                theme::accent().lerp_to_gamma(theme::accent_text(), sel_t),
                 mark,
             );
         } else if let Some(icon) = icon {
@@ -1314,7 +1311,7 @@ impl GongwenApp {
         // 常态低对比**常显**（不悬停也看得见），悬停标签时升到实色、悬停它
         // 本身时渐变到危险红——三个档位各自明确。
         let close_base = theme::text_muted()
-            .lerp_to_gamma(egui::Color32::WHITE, sel_t)
+            .lerp_to_gamma(theme::accent_text(), sel_t)
             .gamma_multiply(0.55 + 0.45 * hover_t);
         // 悬停关闭键的目标色：未选中是危险红；选中态在主题色胶囊上改用浅色叉
         // （红叉压在主题色上看不清）。两者同样按 sel_t 插值，避免中途突变。
@@ -1329,7 +1326,7 @@ impl GongwenApp {
             TAB_PRESS_ANIM,
         );
         let close_wash = theme::danger()
-            .lerp_to_gamma(egui::Color32::WHITE, sel_t)
+            .lerp_to_gamma(theme::accent_text(), sel_t)
             .gamma_multiply((0.16 + 0.12 * close_press) * close_hover_t);
         content
             .painter()
