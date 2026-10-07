@@ -262,7 +262,7 @@ impl DraftPage<'_> {
         match action {
             Some(CardAction::Stop) => self.stop_ai_task(),
             Some(CardAction::Accept) => {
-                GongwenApp::accept_ai_proposal(self.doc, self.status);
+                GongwenApp::accept_ai_proposal(self.doc, self.config, self.status);
             }
             Some(CardAction::Discard) => GongwenApp::discard_ai_proposal(self.doc, self.status),
             Some(CardAction::Review) => {

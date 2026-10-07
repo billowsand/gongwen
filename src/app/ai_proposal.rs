@@ -170,7 +170,7 @@ impl GongwenApp {
         }
         self.docs[index].ai_proposal = Some(proposal);
         if accept {
-            Self::accept_ai_proposal(&mut self.docs[index], &mut self.status);
+            Self::accept_ai_proposal(&mut self.docs[index], &self.config, &mut self.status);
         } else if discard {
             Self::discard_ai_proposal(&mut self.docs[index], &mut self.status);
         }
@@ -230,11 +230,31 @@ impl GongwenApp {
     ///
     /// 这是正文被 AI 产物改写的唯一入口（红线 1），审阅窗与侧栏结果卡共用。
     /// 关键事实变化没勾确认、或提案丢了正文里的公文引用时拒绝，提案原样留着。
-    pub(crate) fn accept_ai_proposal(doc: &mut DraftSession, status: &mut String) -> bool {
+    /// `proposal.excluded` 非空时只接受其余变更块：合并出的新正文按红线 3 重新过闸门
+    /// （公文引用保全、要素校验与版式估算重算、事实变化不得超出提案已确认的清单）。
+    pub(crate) fn accept_ai_proposal(
+        doc: &mut DraftSession,
+        config: &crate::models::AppConfig,
+        status: &mut String,
+    ) -> bool {
         let Some(proposal) = doc.ai_proposal.take() else {
             return false;
         };
-        if !proposal.fact_changes.is_empty() && !proposal.fact_changes_confirmed {
+        let merged = (!proposal.excluded.is_empty()).then(|| {
+            merged_markdown(
+                &proposal.before,
+                &proposal.result.markdown,
+                &proposal.excluded,
+            )
+        });
+        // 事实变化以合并后的正文为准：被排除的块带来的变化不再显示、不再要求确认。
+        let facts = match &merged {
+            Some(text) => {
+                crate::ai_guard::compare_key_facts(&proposal.before, text, &config.vocabulary)
+            }
+            None => proposal.fact_changes.clone(),
+        };
+        if !facts.is_empty() && !proposal.fact_changes_confirmed {
             *status = "请先逐项核对关键事实变化，再接受提案。".into();
             doc.ai_proposal = Some(proposal);
             return false;
@@ -247,18 +267,51 @@ impl GongwenApp {
             doc.ai_proposal = Some(proposal);
             return false;
         }
-        if let Err(error) = crate::document_reference::ensure_preserved(
-            &doc.generated_markdown,
-            &proposal.result.markdown,
-        ) {
+        let after = merged.as_deref().unwrap_or(&proposal.result.markdown);
+        if let Err(error) =
+            crate::document_reference::ensure_preserved(&doc.generated_markdown, after)
+        {
             *status = error.to_string();
             doc.ai_proposal = Some(proposal);
             return false;
         }
+        let Some(text) = merged else {
+            // 没排除任何块：整篇接受，与原路径逐字节一致。
+            let label = proposal.label.clone();
+            GongwenApp::take_generated(doc, proposal.result);
+            doc.ai_panel.resolve_proposal(true);
+            *status = format!("已接受“{label}”修改提案。");
+            return true;
+        };
+        let excluded = proposal.excluded.len();
+        if text == proposal.before {
+            *status = "所有改动都被排除，没有可接受的内容。".into();
+            doc.ai_proposal = Some(proposal);
+            return false;
+        }
+        // 排除组合造出了已确认清单之外的事实变化（罕见但可能）：落地就绕过了用户确认，拦回。
+        if let Some(extra) = first_new_fact(&facts, &proposal.fact_changes) {
+            *status = format!(
+                "排除部分改动后出现了清单之外的关键事实变化（{}·{}·{}），请恢复部分排除，或让 AI 按当前正文重做。",
+                extra.kind.label(),
+                extra.change.label(),
+                extra.value
+            );
+            doc.ai_proposal = Some(proposal);
+            return false;
+        }
+        // 合并出来的是没过闸门的新文本（红线 3）：要素校验、版式估算按它重算，
+        // 不沿用提案的 warnings。截断标记是生成时的属性，沿用提案的。
+        let truncated = proposal
+            .result
+            .warnings
+            .iter()
+            .any(|note| note.message.starts_with(crate::ai_panel::TRUNCATED_NOTE));
+        let result = crate::draft_page::reviewed_draft(&doc.draft, config, &text, truncated);
         let label = proposal.label.clone();
-        GongwenApp::take_generated(doc, proposal.result);
+        GongwenApp::take_generated(doc, result);
         doc.ai_panel.resolve_proposal(true);
-        *status = format!("已接受“{label}”修改提案。");
+        *status = format!("已接受“{label}”修改提案（排除 {excluded} 处）。");
         true
     }
 

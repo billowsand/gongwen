@@ -71,7 +71,7 @@ impl DraftPage<'_> {
         });
         match action {
             Some(CardAction::Accept) => {
-                if GongwenApp::accept_ai_proposal(self.doc, self.status) {
+                if GongwenApp::accept_ai_proposal(self.doc, self.config, self.status) {
                     return false;
                 }
             }

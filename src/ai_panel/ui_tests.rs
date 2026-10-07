@@ -615,7 +615,11 @@ fn result_card_offers_adoption_and_accepting_writes_the_body() {
     // 结果出来之前，正文一个字都没动。
     assert!(harness.doc.generated_markdown.is_empty());
 
-    assert!(harness.with_page(|page| GongwenApp::accept_ai_proposal(page.doc, page.status)));
+    assert!(harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
     assert_eq!(harness.doc.generated_markdown, "# 关于冬季防火的通知\n");
     assert_eq!(harness.doc.ai_panel.turns[0].state, TurnState::Accepted);
 }
@@ -655,7 +659,11 @@ fn unconfirmed_fact_changes_block_acceptance() {
         .ai_panel
         .finish(TurnState::Proposed(ProposalSummary::default()));
 
-    assert!(!harness.with_page(|page| GongwenApp::accept_ai_proposal(page.doc, page.status)));
+    assert!(!harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
     assert_eq!(harness.doc.generated_markdown, before, "没勾确认不能落地");
     assert!(harness.doc.ai_proposal.is_some(), "提案原样留着");
 
@@ -665,7 +673,11 @@ fn unconfirmed_fact_changes_block_acceptance() {
         .as_mut()
         .unwrap()
         .fact_changes_confirmed = true;
-    assert!(harness.with_page(|page| GongwenApp::accept_ai_proposal(page.doc, page.status)));
+    assert!(harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
     assert_eq!(harness.doc.generated_markdown, after);
 }
 
@@ -703,12 +715,242 @@ fn body_edited_after_proposal_blocks_acceptance() {
     let edited = "# 标题\n\n原文。\n\n用户后来补的一段。\n".to_string();
     harness.doc.generated_markdown = edited.clone();
 
-    assert!(!harness.with_page(|page| GongwenApp::accept_ai_proposal(page.doc, page.status)));
+    assert!(!harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
     assert_eq!(
         harness.doc.generated_markdown, edited,
         "用户后来的改动不能被冲掉"
     );
     assert!(harness.doc.ai_proposal.is_some(), "提案原样留着");
+}
+
+/// 排除一块后接受：正文是合并结果，审校提示按合并后的正文重算，被排除块里
+/// 才有的版式问题不能跟进来（内核加固第 2 期，红线 3）。
+#[test]
+fn accepting_with_exclusions_merges_and_recomputes_warnings() {
+    // 27 字宽的段落：第二行只挂一个句号，版式估算会报「末行挂单字」。
+    let long_paragraph = format!("{}。", "长".repeat(26));
+    let before = "第一段原样。\n\n中间不变。\n\n第三段原样。";
+    let proposal_text = format!("{long_paragraph}\n\n中间不变。\n\n第三段改。");
+    let mut harness = Harness::new(before);
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "润色".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: before.into(),
+        result: GeneratedDraft {
+            markdown: proposal_text.clone(),
+            title: "标题".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes: Vec::new(),
+        excluded: [0].into_iter().collect(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+    // 整篇提案确实带着那条版式提示，排除后才应该消失。
+    let full = crate::draft_page::reviewed_draft(
+        &harness.doc.draft,
+        &harness.config,
+        &proposal_text,
+        false,
+    );
+    assert!(
+        full.warnings
+            .iter()
+            .any(|note| note.message.contains("挂单字")),
+        "长段落应触发版式估算提示：{:?}",
+        full.warnings
+    );
+
+    assert!(harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
+    assert!(
+        harness.doc.generated_markdown.contains("第一段原样。"),
+        "被排除的块保留原文：{}",
+        harness.doc.generated_markdown
+    );
+    assert!(
+        harness.doc.generated_markdown.contains("第三段改。"),
+        "其余块按提案落地：{}",
+        harness.doc.generated_markdown
+    );
+    assert!(
+        !harness
+            .doc
+            .warnings
+            .iter()
+            .any(|note| note.message.contains("挂单字")),
+        "warnings 按合并后的正文重算：{:?}",
+        harness.doc.warnings
+    );
+}
+
+/// 事实联动：一块改日期、一块改措辞；排除改日期那块后事实变化为空，
+/// 不勾确认也能接受（内核加固第 2 期）。
+#[test]
+fn excluding_the_fact_hunk_lifts_the_confirmation_gate() {
+    let before =
+        "# 通知\n\n请各单位于2025年10月1日前报送材料。\n\n二、工作要求\n\n请切实贯彻落实。";
+    let after = "# 通知\n\n请各单位于2025年11月1日前报送材料。\n\n二、工作要求\n\n请全面贯彻落实。";
+    let mut harness = Harness::new(before);
+    let fact_changes =
+        crate::ai_guard::compare_key_facts(before, after, &harness.config.vocabulary);
+    assert!(!fact_changes.is_empty(), "日期变化应被认作关键事实变化");
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "改日期".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: before.into(),
+        result: GeneratedDraft {
+            markdown: after.into(),
+            title: "通知".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes,
+        excluded: [0].into_iter().collect(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+
+    // 没勾确认，但改日期那块被排除了，合并后没有事实变化，可以落地。
+    assert!(harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
+    let landed = &harness.doc.generated_markdown;
+    assert!(landed.contains("2025年10月1日"), "日期保留原文：{landed}");
+    assert!(!landed.contains("2025年11月1日"), "{landed}");
+    assert!(
+        landed.contains("请全面贯彻落实。"),
+        "措辞改动落地：{landed}"
+    );
+}
+
+/// 全部排除等于没接受：拦下、提案原样留着、正文不变（内核加固第 2 期）。
+#[test]
+fn excluding_every_hunk_blocks_acceptance() {
+    let before = "# 通知\n\n原文。\n";
+    let mut harness = Harness::new(before);
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "润色".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: before.into(),
+        result: GeneratedDraft {
+            markdown: "# 通知\n\n改过的原文。\n".into(),
+            title: "通知".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes: Vec::new(),
+        excluded: [0].into_iter().collect(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+
+    assert!(!harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
+    assert_eq!(harness.doc.generated_markdown, before, "正文不变");
+    assert!(harness.doc.ai_proposal.is_some(), "提案原样留着");
+    assert!(
+        harness.status.contains("没有可接受的内容"),
+        "{}",
+        harness.status
+    );
+}
+
+/// 提案被继续修订（重新装提案）后，上次挑的排除块作废（内核加固第 2 期）。
+#[test]
+fn reinstalling_a_proposal_clears_exclusions() {
+    let mut harness = Harness::new("# 标题\n\n原文。\n");
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "润色".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: "# 标题\n\n原文。\n".into(),
+        result: GeneratedDraft {
+            markdown: "# 标题\n\n改过的原文。\n".into(),
+            title: "标题".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes: Vec::new(),
+        excluded: [0].into_iter().collect(),
+        fact_changes_confirmed: false,
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+
+    let revised = GeneratedDraft {
+        markdown: "# 标题\n\n再改一版的原文。\n".into(),
+        title: "标题".into(),
+        warnings: Vec::new(),
+        proof_warnings: Vec::new(),
+        proof_measured: false,
+        files: Vec::new(),
+    };
+    GongwenApp::install_ai_proposal(
+        &mut harness.doc,
+        "# 标题\n\n原文。\n".into(),
+        revised,
+        "润色".into(),
+        &harness.config.vocabulary,
+    );
+    let proposal = harness.doc.ai_proposal.as_ref().unwrap();
+    assert!(proposal.excluded.is_empty(), "新提案按新的块重新挑");
+    assert!(proposal.result.markdown.contains("再改一版"));
 }
 
 #[test]
