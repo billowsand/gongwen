@@ -264,6 +264,7 @@ pub struct GongwenApp {
     /// 知识库文档列表，按文种过滤。
     pub(crate) knowledge_docs: Vec<knowledge::KnowledgeDocRow>,
     pub(crate) knowledge_chunk_count: i64,
+    pub(crate) knowledge_retrieval_elapsed: Option<std::time::Duration>,
     pub(crate) knowledge_filter_kind: Option<TemplateKind>,
     pub(crate) knowledge_dirty: bool,
     pub(crate) knowledge_delete_confirm: Option<i64>,
@@ -526,6 +527,7 @@ impl GongwenApp {
             knowledge_error,
             knowledge_docs: Vec::new(),
             knowledge_chunk_count: 0,
+            knowledge_retrieval_elapsed: None,
             knowledge_filter_kind: None,
             knowledge_dirty: true,
             knowledge_delete_confirm: None,
@@ -620,6 +622,9 @@ impl eframe::App for GongwenApp {
         crate::net::set_proxy(&self.config.proxy);
         self.handle_shortcuts(&ctx);
         self.poll_worker(&ctx);
+        if let Some(elapsed) = crate::rag::take_retrieval_elapsed() {
+            self.knowledge_retrieval_elapsed = Some(elapsed);
+        }
         egui::Panel::top("window_titlebar")
             .frame(
                 egui::Frame::new()

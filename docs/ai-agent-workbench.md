@@ -418,6 +418,11 @@ src/ai_panel/       侧栏界面：composer、cards、stream_view、outline_card
 
 ### 模型服务提供商化改造（2026-10-06，已完成，待真机验收）
 
+- 2026-10-07 第 3 期加固：起草增加 `draft_backup_model`，复核增加
+  `revise_model.backup_model_ref`，均为可选 `ModelRef`。智能体后端只在主模型尚未输出增量时的
+  连接失败、超时或 5xx 切换本次调用，4xx、停止、超长及中途断流不切；下次仍先试主模型。
+  embedding / rerank 不配备用，详见 `agent-kernel-hardening.md` 第五节与第十二节第 3 期交接。
+
 - 模型配置分两层：**提供商管连接身份，功能管选哪个模型**。新增
   `ProviderConfig`（名称 / 地址 / 密钥 / 启用 / 模型清单缓存 / 用途标签）与
   `ModelRef`（提供商 id + 模型名）；`AppConfig` 新增 `providers` 与 `draft_model`，
