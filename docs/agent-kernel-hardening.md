@@ -649,8 +649,20 @@ flow:
 
 ## 十二、交接
 
-**进度**：1 / 5 期。第 1 期（工具契约）已完成（2026-10-07），**待真机验收**（3.6 第 5 条：内网
+**进度**：2 / 5 期。第 1 期（工具契约）已完成（2026-10-07），**待真机验收**（3.6 第 5 条：内网
 DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起草，对比工具调用出错次数）。
+第 2 期（提案逐块接受）已完成（2026-10-07），**待真机验收**：研究式起草出一份三处以上改动的
+提案，在审阅窗里挑着「不要这处」再接受，正文只落地未排除的块；导出 Word / PDF 正常。
+
+### 第 2 期交付了什么
+
+| 方案 | 落点 |
+|---|---|
+| 4.1 交互 | `DiffViewConfig::exclude`（`diff_view.rs` 的 `HunkExclude`）：开关挂在 hunk 上，排除的块整组变灰标「保留原文」，再点恢复；审阅窗（`app/ai_proposal.rs`）横幅有排除时「接受其余 N 处」、全排除不可用；工作稿对照（`ai_panel/workspace_ui.rs`）同一套开关；结果卡按钮带「（排除 N 处）」 |
+| 4.2 数据 | `AiProposal.excluded`（`BTreeSet<usize>`）+ `confirmed_facts`；`install_ai_proposal` 每次新建提案，排除天然清空 |
+| 4.3 合并 | `app::ai_proposal::merged_markdown`：只复用 `diff_hunks::hunks` / `revert`，从后往前还原 |
+| 4.4 重过闸门 | `accept_ai_proposal` 仍是唯一入口：merged 上重跑 `ensure_preserved`、`reviewed_draft`（要素校验、版式估算重算，不沿用提案 warnings）、`compare_key_facts` 必须是已确认清单子集（`first_new_fact`）；全部排除拦下不落地 |
+| 4.5 会话记录 | `AiTurn.excluded_hunks` → `SavedTurn` 同名字段（serde 默认 0，旧会话兼容）；结果卡 chip、工作稿标签、`history::digest` 三处显示「排除 N 处」 |
 
 ### 第 1 期交付了什么
 
@@ -683,7 +695,27 @@ DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起�
 9. **搜索打分改了**（接口搜索也受影响）：整词命中加倍，两字一组的兜底匹配过半才给 1 分。原来
    「工作日」会因为「工作」二字跟所有写「工作稿」的工具打平。
 
-**下一步**：第 2 期（提案逐块接受）或第 3 期（用量、留痕、备用模型），两者独立。
+第 2 期的出入：
+
+10. **`AppConfig` 给接受加了参数，没存进提案**：`accept_ai_proposal(doc, config, status)`——四处
+    调用点本就拿得到 config（两处 `DraftPage`、`GongwenApp`、测试 Harness）。提案是易失界面
+    状态，配置是长寿中央数据，存进 `AiProposal` 等于多养一份要保一致性的拷贝。代价：验收第 6 条
+    「现有测试不改一行」退化为「断言不动，四处调用点各补一个实参」；`AiProposal` 按 4.2 加字段，
+    六处字面构造也各补了初始化。
+11. **勾选重置规则定为「清单变了就作废」**：`AiProposal.confirmed_facts` 记下勾选时核对的那份
+    清单，审阅窗帧首比对，不等就清掉勾选。审阅窗与结果卡的勾选共用这一个字段。
+12. **侧栏「采用」遇到已排除时选「尊重排除」**：按钮变成「接受提案（排除 N 处）」，采用按排除
+    合并；不做「整篇覆盖并清空排除」——用户刚挑完的改动被悄悄冲掉，比按钮文案变化更意外。
+13. **`manuscript_diff_ui` 用可选扩展而不是换视图**：`DiffViewConfig.exclude: Option<HunkExclude>`，
+    返回值带出被点的 hunk 序号。它只有两个调用方（审阅窗、工作稿对照），都接了开关；稿件管理
+    那条线（`versioning.rs` 自己的 `manuscript_diff_ui_impl`）没动。
+14. **结果卡的事实确认仍按完整清单**：卡片不每帧算 merged（省开销），排除后「清单变短不用再
+    确认」只在审阅窗生效；卡片偏严，是有意的。
+15. **子集闸门理论上不可达**：merged 的每一行都来自 before 或提案，事实提取都是行内正则，
+    所以 merged 的事实变化必然 ⊆ 提案的。闸门按防御性关卡保留（`first_new_fact`），用合成输入
+    单测覆盖，没有真例。
+
+**下一步**：第 3 期（用量、留痕、备用模型）。
 
 第 4 期开工时的顺序建议：先 6.1 的数据模型与 `StepPath` 改造（纯类型改动，一次编译通过），再
 6.2 的 `CheckpointSink` 钩子（`Env` 加字段，`testkit` 加内存实现），再 6.3 的表与保留策略，最后
@@ -697,9 +729,15 @@ DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起�
   `every_tool_with_inputs_has_a_typed_schema_and_an_example_that_passes_its_own_check` 会拦。
 - 第 1 期：`ArgKind::OneOf` 比工具原来的读法严格的地方要留意——`ms.search` 的 `status` 原来也认
   `Draft` 这类英文名，现在只认「新建 / 草稿 / 已发布 / 已归档」。内置技能都没用英文写法。
-- 第 2 期：审阅窗的块（`DiffBlock::Changed`）与 `diff_hunks::Hunk` 不是一一对应，一个 hunk 可能
-  盖几条变更，开关挂在 hunk 上。提案在已完成后还会被继续修订（`install_ai_proposal` 的注释），
-  `excluded` 要随之清空。
+- 第 2 期（已落地）：审阅窗的块（`DiffBlock::Changed`）与 `diff_hunks::Hunk` 不是一一对应，
+  一个 hunk 可能盖几条变更，开关挂在 hunk 上。提案在已完成后还会被继续修订
+  （`install_ai_proposal` 新建提案），`excluded` 随之清空——别给提案找别的原地改正文的路径。
+- 第 2 期：相邻变更之间只隔着空行会被 `diff_hunks::hunks` 并成一块。测试要造两个块，中间
+  必须隔一条非空的未改动行。
+- 第 2 期：`merged_markdown` 从后往前还原是有意的：`revert` 依赖块前后未改动上下文行的行号，
+  前面块的坐标只在后面的块先还原时才保持有效。别改成从前往后。
+- 第 2 期：`confirmed_facts` 的相等比对依赖 `compare_key_facts` 输出顺序确定
+  （`diff_facts` 按 `BTreeSet` 迭代，确定）。给它换实现时留意。
 - 第 4 期：`engine::run` 的 `start: usize` 换成 `&StepPath` 会同时改到 `testkit::Driver.next`、
   `skill_job` 的两处调用点、以及 `engine_tests` 里所有手写 `run_board(..., start)` 的用例；
   这是这一期最大的一次机械改动，建议单独一个提交。
