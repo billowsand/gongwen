@@ -1493,6 +1493,67 @@ mod split_resize_tests {
         _keep: Receiver<WorkerResult>,
     }
 
+    /// 使用真实起草页检查直角功能区、表单与正文窗格，样张只写入 tmp。
+    #[test]
+    #[ignore = "出直角界面样张，手动跑"]
+    fn mdex_rectangular_workspace_samples() {
+        let size = egui::vec2(1280.0, 820.0);
+        for (name, path) in [
+            (
+                crate::models::ThemeName::MdexDark,
+                "tmp/mdex-square-dark.png",
+            ),
+            (crate::models::ThemeName::Mdex, "tmp/mdex-square-light.png"),
+        ] {
+            let mut harness = Harness::new();
+            harness.ctx.set_pixels_per_point(1.0);
+            harness.doc.generated_markdown.clear();
+            harness.doc.preview_mode = PreviewMode::Source;
+            harness.doc.form_collapsed = false;
+            harness.config.ribbon_tab = crate::models::RibbonTab::Output;
+            harness.config.ribbon_collapsed = false;
+            harness.config.show_source_outline = false;
+            harness.config.show_source_minimap = false;
+            harness.config.show_editor_line_numbers = false;
+            theme::set_current(name);
+            theme::set_current_paper(crate::models::PaperMode::Follow);
+            theme::configure_style(&harness.ctx);
+            let mut canvas = crate::ui_snapshot::Canvas::default();
+            for _ in 0..5 {
+                let output = harness.ctx.clone().run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let mut page = DraftPage {
+                            doc: &mut harness.doc,
+                            config: &mut harness.config,
+                            store: None,
+                            sender: &harness.sender,
+                            status: &mut harness.status,
+                            version_switch: &mut harness.version_switch,
+                            revert_confirm: &mut harness.revert_confirm,
+                            actions: &mut harness.actions,
+                            export_links: &mut harness.export_links,
+                            metrics: &mut harness.metrics,
+                        };
+                        page.create_ui(ui);
+                    },
+                );
+                canvas.render(
+                    &harness.ctx,
+                    output,
+                    size,
+                    theme::canvas(),
+                    std::path::Path::new(path),
+                );
+            }
+        }
+        theme::set_current(crate::models::ThemeName::default());
+        theme::set_current_paper(crate::models::PaperMode::default());
+    }
+
     impl Harness {
         fn new() -> Self {
             let ctx = egui::Context::default();

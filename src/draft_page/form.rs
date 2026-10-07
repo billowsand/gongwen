@@ -516,10 +516,10 @@ pub(crate) fn layout_thumbnail(
 ) -> Option<FormSection> {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(76.0, 106.0), egui::Sense::hover());
     let painter = ui.painter().clone();
-    painter.rect_filled(rect, egui::CornerRadius::same(4), theme::surface());
+    painter.rect_filled(rect, theme::chrome_radius(4), theme::surface());
     painter.rect_stroke(
         rect,
-        4.0,
+        theme::chrome_radius(4),
         egui::Stroke::new(1.0, theme::border_strong()),
         egui::StrokeKind::Inside,
     );
@@ -543,7 +543,7 @@ pub(crate) fn layout_thumbnail(
         let hovered = response.hovered();
         painter.rect_filled(
             zone,
-            egui::CornerRadius::same(3),
+            theme::chrome_radius(3),
             if hovered {
                 theme::accent_soft()
             } else {
@@ -553,7 +553,7 @@ pub(crate) fn layout_thumbnail(
         if hovered {
             painter.rect_stroke(
                 zone,
-                3.0,
+                theme::chrome_radius(3),
                 egui::Stroke::new(1.0, theme::accent()),
                 egui::StrokeKind::Inside,
             );

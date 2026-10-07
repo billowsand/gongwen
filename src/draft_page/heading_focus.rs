@@ -542,7 +542,7 @@ fn heading_focus_rows(ui: &mut egui::Ui, focus: &mut HeadingFocus, large: bool) 
                     } else {
                         egui::Margin::symmetric(6, 4)
                     })
-                    .corner_radius(4.0)
+                    .corner_radius(theme::chrome_radius(4))
                     .fill(if current {
                         theme::accent_soft().gamma_multiply(0.45)
                     } else {

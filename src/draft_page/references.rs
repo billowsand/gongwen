@@ -588,7 +588,7 @@ fn reference_picker_contents(
 fn list_frame() -> egui::Frame {
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::border()))
-        .corner_radius(egui::CornerRadius::same(theme::PANE_RADIUS))
+        .corner_radius(theme::chrome_radius(theme::PANE_RADIUS))
         .inner_margin(egui::Margin::same(4))
 }
 

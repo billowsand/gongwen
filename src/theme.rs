@@ -1392,6 +1392,9 @@ pub const PANE_PADDING: i8 = 8;
 
 /// 浮起元素（浮板、纸面）统一的一档投影；`alpha` 由调用方按纸面明暗给。
 pub fn float_shadow(alpha: u8) -> egui::epaint::Shadow {
+    if is_mdex() {
+        return egui::epaint::Shadow::NONE;
+    }
     egui::epaint::Shadow {
         offset: [0, 3],
         blur: 14,
@@ -1405,7 +1408,7 @@ pub fn pane() -> egui::Frame {
     egui::Frame::new()
         .fill(surface())
         .stroke(Stroke::new(1.0, border()))
-        .corner_radius(CornerRadius::same(PANE_RADIUS))
+        .corner_radius(chrome_radius(PANE_RADIUS))
         .inner_margin(Margin::same(PANE_PADDING))
         .outer_margin(Margin::same(PANE_GAP))
 }
@@ -1428,6 +1431,29 @@ pub fn ribbon_tray_layout() -> egui::Frame {
 /// 当前分区卡与下方菜单托盘的单一闭合轮廓。两处内凹贝塞尔圆弧把选项卡自然
 /// 接入托盘；最终只保留这一条连续外描边，不会出现两个矩形相叠的接缝。
 pub fn connected_ribbon_shape(tab_rect: egui::Rect, tray_outer_rect: egui::Rect) -> egui::Shape {
+    if is_mdex() {
+        let tray = tray_outer_rect.shrink(2.0);
+        return egui::Shape::Vec(vec![
+            egui::Shape::rect_filled(tray, 0, surface()),
+            egui::Shape::rect_stroke(
+                tray,
+                0,
+                Stroke::new(1.0, border()),
+                egui::StrokeKind::Inside,
+            ),
+            egui::Shape::rect_filled(tab_rect, 0, accent_soft()),
+            egui::Shape::rect_stroke(
+                tab_rect,
+                0,
+                Stroke::new(1.0, border()),
+                egui::StrokeKind::Inside,
+            ),
+            egui::Shape::line_segment(
+                [tab_rect.left_bottom(), tab_rect.right_bottom()],
+                Stroke::new(2.0, accent()),
+            ),
+        ]);
+    }
     const TRAY_RADIUS: f32 = 8.0;
     const TAB_RADIUS: f32 = 6.0;
     const JOIN_RADIUS: f32 = 7.0;
@@ -1950,13 +1976,13 @@ impl Icon {
     }
 }
 
-/// MDEX 的外壳使用小圆角与细描边，配色仍由统一主题接口提供。
+/// MDEX 的外壳使用直角与细描边，配色仍由统一主题接口提供。
 pub fn is_mdex() -> bool {
     matches!(current().label, mdex::LABEL | mdex::DARK_LABEL)
 }
 
-fn chrome_radius(default: u8) -> CornerRadius {
-    CornerRadius::same(if is_mdex() { 3 } else { default })
+pub fn chrome_radius(default: u8) -> CornerRadius {
+    CornerRadius::same(if is_mdex() { 0 } else { default })
 }
 
 /// 标题栏的品牌图标；MDEX 使用完整双色图标，不给绿色光标整体染色。
@@ -2424,7 +2450,7 @@ pub fn chip(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) -> egui::Re
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
     if ui.is_rect_visible(rect) {
-        ui.painter().rect_filled(rect, CornerRadius::same(255), bg);
+        ui.painter().rect_filled(rect, chrome_radius(255), bg);
         ui.painter()
             .galley(rect.min + egui::vec2(8.0, 2.0), galley, fg);
     }
@@ -2539,11 +2565,15 @@ pub fn notice(
     let bar = egui::Rect::from_min_size(response.rect.min, egui::vec2(3.0, response.rect.height()));
     ui.painter().rect_filled(
         bar,
-        CornerRadius {
-            nw: 7,
-            sw: 7,
-            ne: 0,
-            se: 0,
+        if is_mdex() {
+            CornerRadius::ZERO
+        } else {
+            CornerRadius {
+                nw: 7,
+                sw: 7,
+                ne: 0,
+                se: 0,
+            }
         },
         fg,
     );
@@ -3273,8 +3303,7 @@ pub fn configure_style(ctx: &egui::Context) {
         color: Color32::from_black_alpha(if dark { 96 } else { 24 }),
     };
     if is_mdex() {
-        visuals.window_shadow.blur = 4;
-        visuals.window_shadow.color = Color32::from_black_alpha(12);
+        visuals.window_shadow = egui::epaint::Shadow::NONE;
     }
     visuals.popup_shadow = visuals.window_shadow;
 

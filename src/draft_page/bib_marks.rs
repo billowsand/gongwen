@@ -130,7 +130,7 @@ fn card(
             egui::Frame::new()
                 .fill(theme::surface())
                 .stroke(egui::Stroke::new(1.0, theme::border_strong()))
-                .corner_radius(egui::CornerRadius::same(theme::PANE_RADIUS))
+                .corner_radius(theme::chrome_radius(theme::PANE_RADIUS))
                 .inner_margin(egui::Margin::symmetric(12, 10))
                 .shadow(theme::float_shadow(if theme::current().dark {
                     75

@@ -731,16 +731,19 @@ fn paint_panel(painter: &egui::Painter, rect: egui::Rect, reveal: f32) {
         return;
     }
     let shadow_alpha = f32::from(theme::paper::shadow_alpha()) * 1.6 * reveal;
-    painter.add(theme::float_shadow(shadow_alpha.min(255.0) as u8).as_shape(rect, PANEL_RADIUS));
+    painter.add(
+        theme::float_shadow(shadow_alpha.min(255.0) as u8)
+            .as_shape(rect, theme::chrome_radius(PANEL_RADIUS)),
+    );
     painter.rect_filled(
         rect,
-        PANEL_RADIUS,
+        theme::chrome_radius(PANEL_RADIUS),
         theme::surface().gamma_multiply(PANEL_ALPHA * reveal),
     );
     paint_grain(painter, rect, reveal);
     painter.rect_stroke(
         rect,
-        PANEL_RADIUS,
+        theme::chrome_radius(PANEL_RADIUS),
         egui::Stroke::new(1.0, theme::border().gamma_multiply(0.7 * reveal)),
         egui::StrokeKind::Inside,
     );

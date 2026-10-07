@@ -425,7 +425,7 @@ impl DraftPage<'_> {
                 .image_tint_follows_text_color(false)
                 .fill(theme::warn_soft())
                 .stroke(egui::Stroke::NONE)
-                .corner_radius(egui::CornerRadius::same(7)),
+                .corner_radius(theme::chrome_radius(7)),
             )
             .on_hover_text("打开审校提示")
             .clicked()
@@ -1647,7 +1647,7 @@ fn crossref_row(target: &LabelTarget, width: f32) -> egui::Button<'static> {
     egui::Button::new(atoms)
         .right_text(egui::RichText::new(target.kind.label()).weak().small())
         .truncate()
-        .corner_radius(egui::CornerRadius::same(5))
+        .corner_radius(theme::chrome_radius(5))
         .min_size(egui::vec2(width, 26.0))
 }
 

@@ -125,7 +125,7 @@ fn ime_chip(ui: &mut egui::Ui, english: bool, scheme: Option<&str>, height: f32)
         )
         .fill(bg)
         .stroke(egui::Stroke::NONE)
-        .corner_radius(egui::CornerRadius::same(3))
+        .corner_radius(theme::chrome_radius(3))
         .min_size(egui::vec2(0.0, height)),
     )
     .on_hover_text("输入法：点一下切换中 / 英（与单击 Shift 相同）")
@@ -149,7 +149,7 @@ fn status_icon_button(
             .selected(selected)
             .frame_when_inactive(selected)
             .min_size(egui::vec2(24.0, 20.0))
-            .corner_radius(egui::CornerRadius::same(4)),
+            .corner_radius(theme::chrome_radius(4)),
     );
     // 计数徽章：按钮右上角的小圆角气泡，提示条数不用悬停也一眼可见。
     if let Some(count) = badge.filter(|count| *count > 0) {
@@ -163,7 +163,7 @@ fn status_icon_button(
         let center = egui::pos2(rect.right() - 4.0, rect.top() + 3.0);
         ui.painter().rect_filled(
             egui::Rect::from_center_size(center, egui::vec2(width, 12.0)),
-            egui::CornerRadius::same(6),
+            theme::chrome_radius(6),
             theme::warn(),
         );
         ui.painter().text(
@@ -221,7 +221,7 @@ fn tool_button(icon: theme::Icon) -> egui::Button<'static> {
     egui::Button::image(icon.image())
         .image_tint_follows_text_color(true)
         .frame_when_inactive(false)
-        .corner_radius(egui::CornerRadius::same((TOOL_BUTTON_SIZE / 2.0) as u8))
+        .corner_radius(theme::chrome_radius((TOOL_BUTTON_SIZE / 2.0) as u8))
         .min_size(egui::Vec2::splat(TOOL_BUTTON_SIZE))
         .small()
 }
@@ -933,7 +933,7 @@ impl GongwenApp {
                 ))
                 .selected(selected)
                 .frame_when_inactive(selected)
-                .corner_radius(egui::CornerRadius::same(5))
+                .corner_radius(theme::chrome_radius(5))
                 .min_size(egui::vec2(0.0, 26.0));
                 if selected {
                     item = item
@@ -1209,37 +1209,64 @@ impl GongwenApp {
             TAB_SELECT_ANIM,
         );
 
-        // 背景：选中整体填充主题色加深档（胶囊），保证白字对比度；未选中从沉色经悬停色到按下的更深色。
+        // MDEX 选中态使用浅强调底与底部标记；其它主题保持实心胶囊。
+        // 未选中从沉色经悬停色到按下的更深色。
         // 导航页标签（词库、设置等）用更浅的 surface 底 + 实色描边，与文档标签的
         // 沉色底区分——一眼看出「这是导航页，不是打开的文档」。
+        let rectangular = theme::is_mdex();
+        let selected_fill = if rectangular {
+            theme::accent_soft()
+        } else {
+            theme::accent_active()
+        };
+        let selected_border = if rectangular {
+            theme::border()
+        } else {
+            theme::accent_active()
+        };
+        let selected_text = if rectangular {
+            theme::accent()
+        } else {
+            theme::accent_text()
+        };
         let is_page = matches!(self.tabs[tab], TabRef::Page(_));
         let mut bg = (if is_page {
             theme::surface()
         } else {
             theme::surface_sunk()
         })
-        .lerp_to_gamma(theme::accent_active(), sel_t);
+        .lerp_to_gamma(selected_fill, sel_t);
         bg = bg.lerp_to_gamma(theme::surface_hover(), hover_t * (1.0 - sel_t));
         bg = bg.lerp_to_gamma(theme::surface_active(), press_t * (1.0 - sel_t));
-        // 边框：悬停加深；选中与底色同色，视觉上收成无边框的实心胶囊。
+        // 边框：悬停加深；MDEX 常显细线，其它主题选中时与底色同色。
         let border = (if is_page {
             theme::border_strong()
         } else {
             theme::border()
         })
         .lerp_to_gamma(theme::border_strong(), hover_t * (1.0 - sel_t))
-        .lerp_to_gamma(theme::accent_active(), sel_t);
-        // 文字：未选中深色，悬停加深一档；选中渐变到白字，保证在主题色底上可读。
+        .lerp_to_gamma(selected_border, sel_t);
+        // 文字：未选中深色，悬停加深一档；选中按各主题的背景取对比色。
         let text_color = theme::text_soft()
             .lerp_to_gamma(theme::text(), hover_t * (1.0 - sel_t))
-            .lerp_to_gamma(theme::accent_text(), sel_t);
+            .lerp_to_gamma(selected_text, sel_t);
         ui.painter().rect(
             rect,
-            egui::CornerRadius::same(TOOLBAR_CONTROL_HEIGHT as u8 / 2),
+            theme::chrome_radius(TOOLBAR_CONTROL_HEIGHT as u8 / 2),
             bg,
             egui::Stroke::new(1.0, border),
             egui::StrokeKind::Inside,
         );
+
+        if rectangular && sel_t > 0.0 {
+            ui.painter().line_segment(
+                [
+                    rect.left_bottom() - egui::vec2(0.0, 1.0),
+                    rect.right_bottom() - egui::vec2(0.0, 1.0),
+                ],
+                egui::Stroke::new(2.0, theme::accent().gamma_multiply(sel_t)),
+            );
+        }
 
         let mut clicked = false;
         let mut closed = false;
@@ -1260,10 +1287,7 @@ impl GongwenApp {
             theme::spinner(&mut content, 14.0, text_color);
         } else if !mark.is_empty() {
             // 跟背景/文字同步插值，别用 sel_t > 0.5 那种硬阈值，否则动画中途会跳一下。
-            content.colored_label(
-                theme::accent().lerp_to_gamma(theme::accent_text(), sel_t),
-                mark,
-            );
+            content.colored_label(theme::accent().lerp_to_gamma(selected_text, sel_t), mark);
         } else if let Some(icon) = icon {
             // Lucide 图标用 currentColor 描边，这里跟随文字色渐变。
             content.add(
@@ -1311,11 +1335,22 @@ impl GongwenApp {
         // 常态低对比**常显**（不悬停也看得见），悬停标签时升到实色、悬停它
         // 本身时渐变到危险红——三个档位各自明确。
         let close_base = theme::text_muted()
-            .lerp_to_gamma(theme::accent_text(), sel_t)
+            .lerp_to_gamma(
+                if rectangular {
+                    theme::text()
+                } else {
+                    theme::accent_text()
+                },
+                sel_t,
+            )
             .gamma_multiply(0.55 + 0.45 * hover_t);
         // 悬停关闭键的目标色：未选中是危险红；选中态在主题色胶囊上改用浅色叉
         // （红叉压在主题色上看不清）。两者同样按 sel_t 插值，避免中途突变。
-        let close_hover_color = theme::danger().lerp_to_gamma(theme::canvas(), sel_t);
+        let close_hover_color = if rectangular {
+            theme::danger()
+        } else {
+            theme::danger().lerp_to_gamma(theme::canvas(), sel_t)
+        };
         let close_color = close_base.lerp_to_gamma(close_hover_color, close_hover_t);
         // 悬停时叉底下垫一层同色淡圆，按下再深一档：热区变得看得见，也补上了
         // 「按下去了」的反馈。半透明叠在已画好的标签底上，选中态的主题色胶囊
@@ -1328,9 +1363,13 @@ impl GongwenApp {
         let close_wash = theme::danger()
             .lerp_to_gamma(theme::accent_text(), sel_t)
             .gamma_multiply((0.16 + 0.12 * close_press) * close_hover_t);
-        content
-            .painter()
-            .circle_filled(close_rect.center(), CLOSE_HIT / 2.0, close_wash);
+        if rectangular {
+            content.painter().rect_filled(close_rect, 0, close_wash);
+        } else {
+            content
+                .painter()
+                .circle_filled(close_rect.center(), CLOSE_HIT / 2.0, close_wash);
+        }
         // 叉用 Lucide 的 x.svg：与工具栏其余图标同一套 2px 圆头描边，收口
         // 干净、两笔等长，不像系统字体的 × 那样随字体换形、还会被基线拽偏。
         theme::Icon::X

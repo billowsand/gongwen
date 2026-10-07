@@ -701,7 +701,7 @@ impl DraftPage<'_> {
                     egui::Frame::new()
                         .fill(theme::danger_soft())
                         .stroke(egui::Stroke::new(1.0, theme::danger().gamma_multiply(0.35)))
-                        .corner_radius(egui::CornerRadius::same(8))
+                        .corner_radius(theme::chrome_radius(8))
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -883,7 +883,13 @@ impl DraftPage<'_> {
             galley
         };
 
-        let source_scroll = theme::card()
+        // MDEX 外层窗格已描边，正文只保留填色与留白，避免双层边框。
+        let source_frame = if theme::is_mdex() {
+            theme::card().stroke(egui::Stroke::NONE)
+        } else {
+            theme::card()
+        };
+        let source_scroll = source_frame
             .show(ui, |ui| {
                 let mut scroll = egui::ScrollArea::vertical()
                     .id_salt("preview_scroll")
@@ -1258,7 +1264,7 @@ impl DraftPage<'_> {
         egui::Frame::new()
             .fill(theme::warn_soft())
             .stroke(egui::Stroke::new(1.0, theme::warn().gamma_multiply(0.35)))
-            .corner_radius(egui::CornerRadius::same(8))
+            .corner_radius(theme::chrome_radius(8))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());

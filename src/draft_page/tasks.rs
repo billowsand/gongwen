@@ -304,7 +304,7 @@ impl DraftPage<'_> {
                 egui::Button::image(kind.icon().image_sized(16.0).tint(tint))
                     .image_tint_follows_text_color(false)
                     .min_size(egui::vec2(34.0, 26.0))
-                    .corner_radius(egui::CornerRadius::same(6)),
+                    .corner_radius(theme::chrome_radius(6)),
             );
             let Some(path) = path else {
                 response.on_hover_text(format!("导出目录里还没有 {label} 文件"));

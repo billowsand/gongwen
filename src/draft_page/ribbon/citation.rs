@@ -105,7 +105,7 @@ pub(super) fn citation_menu(
             .join("; ");
         egui::Frame::new()
             .fill(theme::accent_soft())
-            .corner_radius(egui::CornerRadius::same(5))
+            .corner_radius(theme::chrome_radius(5))
             .inner_margin(egui::Margin::symmetric(8, 4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -432,7 +432,7 @@ fn citation_row(
         .truncate()
         .selected(highlighted)
         .frame_when_inactive(highlighted)
-        .corner_radius(egui::CornerRadius::same(5))
+        .corner_radius(theme::chrome_radius(5))
         .min_size(egui::vec2(width, 26.0))
 }
 
