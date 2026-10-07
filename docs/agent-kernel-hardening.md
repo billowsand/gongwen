@@ -386,23 +386,39 @@ emit 一条 `Event::Note`。
 
 - **不节流**。一步的代价是一次 LLM 调用或一次检索，底下是一次单行 INSERT。会话落盘那条
   「最多一秒一次」的节流（`src/ai_panel/session.rs:28`）是给每帧变的界面字段用的，检查点不适用。
-- **表**（`src/manuscript/ai_sessions.rs` 的 DDL 里追加，与会话同级联删除）：
+- **表**（`src/manuscript/ai_sessions.rs` 的 DDL 里追加，存取在 `src/manuscript/ai_checkpoints.rs`）：
 
   ```sql
   CREATE TABLE IF NOT EXISTS ai_run_checkpoints (
       session_id TEXT    NOT NULL,
       turn_id    INTEGER NOT NULL,
       seq        INTEGER NOT NULL,
-      at_path    TEXT    NOT NULL,   -- "[2,1]"
+      at_path    TEXT    NOT NULL,   -- "[2,1]"，给人看的
       reason     TEXT    NOT NULL,
       label      TEXT    NOT NULL DEFAULT '',
+      skill_id   TEXT    NOT NULL DEFAULT '',   -- 崩溃恢复时按它找回技能
+      skill_hash TEXT    NOT NULL DEFAULT '',
+      use_rag    INTEGER NOT NULL DEFAULT 0,
       partial    INTEGER NOT NULL DEFAULT 0,
       data       TEXT    NOT NULL,   -- Checkpoint 的 JSON
       created_at TEXT    NOT NULL,
-      PRIMARY KEY (session_id, turn_id, seq)
+      PRIMARY KEY (session_id, turn_id, seq),
+      FOREIGN KEY (session_id, turn_id)
+          REFERENCES ai_session_turns(session_id, turn_id) ON DELETE CASCADE
   );
   ```
 
+  **外键挂在 `ai_session_turns` 上而不是 `ai_sessions`**（第 4 期实施时定的，方案没考虑到）：
+  检查点服务的是「某一轮」，轮次被删（清空任务流等）时它的检查点也该跟着走；只挂会话的话
+  会留下孤儿行。复合外键要求会话行与这一轮都在库里，所以开跑前要强制存一次会话（见下）。
+
+- **写入时机**：开跑前在**界面线程**（`start_skill` 里）如果稿件已入库，先
+  `save_ai_session(..., force = true)` 一次——会话行是第一次 `save_session` 才建的，
+  后台线程写检查点时它可能还不在库里。随后把 `(库路径, session_id, turn_id)` 传进后台线程。
+  **稿件没入库时不存检查点**（给一个什么都不做的 `NoCheckpoint`），卡片行为保持现状。
+  **库路径在界面线程解析好**再传：测试替换的配置目录只对当前线程有效（见
+  `skill_job.rs` 里「接口定义与密钥在界面线程读」那条注释）。后台线程自己开一个连接
+  （同库，WAL），每次 save 是**单行、短事务**。
 - **并发**：稿件库已是 WAL + `busy_timeout` 2000ms（`src/manuscript.rs:346`），后台线程写检查点
   与界面线程写会话可以并存；检查点必须是**单行、短事务**，不要在事务里做别的事。
 - **保留**：每轮留「序号最小的一个 + 最近 5 个」，其余从中间删。原因：`Board` 含工作稿与证据包，
@@ -430,36 +446,43 @@ start_skill(request, Some((turn_id, latest.checkpoint, skill)))
 
 ### 6.5 界面
 
-`TurnState::Interrupted` 现在只有一个「重新生成」。改成：
+`TurnState::Interrupted` 现在只有一个「重新生成」。改成（第 4 期实施时补上了 `Stopped` 与
+`Failed`——点停止和模型超时同样有检查点，见第十二节「与方案的出入」3）：
 
 - 找到检查点 → 卡片上给三个动作：**接着跑**（从最新检查点）/ **从头重来** / **丢弃**，
   并注明停在哪一步、什么时候存的。
 - 找不到检查点 → 保持现在的行为（只有「重新生成」），不要假装能续。
 - 「**从这里重跑**」（选一个旧检查点重跑）**放到本期最后**，前面都验收了再做。重跑前必须确认
-  **正文没动过**（提案已被接受进正文就不能从旧点重跑），这条判定复用现有提案失效那套逻辑。
+  **正文没动过**（提案已被接受进正文就不能从旧点重跑），这条判定是「当前正文 ≠ 那份检查点
+  黑板里的 `document`」。
 
 ### 6.6 只读区重灌（红线 2 的落点）
 
-新增一个小结构，由界面线程在跑之前组装；检查点里**不存**它：
+> **2026-10-07 第 4 期实施时改正**（见第十二节「与方案的出入」1）：原稿把 `request`、
+> `selection`、`preset`、`refs`、`history`、`style` 也列进了重灌范围，太宽了。
+> 实现改成只刷四项：`draft`、`document`、`system_prompt`、`time_sources`。
+
+恢复前由界面线程把下面这几项按**当前值**覆盖黑板（`Board::refresh_from_ui`）：
 
 ```rust
-pub(crate) struct RunInput {
-    pub(crate) draft: DraftInput,       // 要素：以界面为准
-    pub(crate) request: String,
-    pub(crate) document: String,        // 发起时的正文快照
-    pub(crate) selection: Option<String>,
-    pub(crate) preset: String,
-    pub(crate) system_prompt: String,
-    pub(crate) time_sources: String,
-    pub(crate) refs: Vec<Reference>,
-    pub(crate) history: String,
-    pub(crate) style: String,
-}
+// src/agent/board.rs
+/// draft        要素：以界面为准（用户可能刚切了文种、改了成文日期）
+/// document     正文快照：以界面为准
+/// system_prompt 按现在的时间重建（隔天恢复，「今天」得是今天）
+/// time_sources 同上
 ```
 
-`Board::reinject(&mut self, input: &RunInput)` 把这批字段按当前值覆盖。恢复路径**必须**先
-`reinject` 再跑，测试里要有一条专门断言：从检查点恢复后，若界面上把成文日期改过，进模型的要素
-是**新值**而不是检查点里的旧值。
+**不重灌**的：`request`（用户发起时说的话）、`selection`（锁的选区）、`preset`、
+`refs`（引用的文章）、`history`（会话往来）、`style`（写法风格）。它们是**这一轮任务本身
+的输入**，换成界面当前值就成了另一个任务；`board.style` 的约定本来就是「接着跑时沿用，
+不再重挑」。
+
+会话历史在后台线程由 `with_history` 拼进 `system_prompt`。因为恢复路径重灌过
+`system_prompt`（干净的一份，不含旧的历史块），再拼一次即可，**不会拼两遍**——这条有
+测试（`the_session_history_lands_in_the_system_prompt_exactly_once_after_resuming`）。
+
+测试要有一条专门断言：从检查点恢复后，若界面上把成文日期改过，进模型的要素是**新值**
+（`resuming_refreshes_the_authorised_elements_and_dates_from_the_ui`）。
 
 ### 6.7 `SkillRun` / `SavedRun` 的调整
 
@@ -656,16 +679,34 @@ flow:
     `tools` 时直接沿用工具协议回退。拒收记忆仅在进程内，按端点、模型和字段区分。
 20. 无 `[DONE]` 且无 `finish_reason` 的 EOF 判为中断，避免半稿误交付；仅有 `finish_reason` 的服务仍兼容。
 
+### 2026-10-07（第 4 期实施）
+
+21. **检查点表的外键挂 `ai_session_turns` 而不是 `ai_sessions`**。检查点服务的是「某一轮」：
+    轮次被删（清空任务流）时它的检查点也该跟着走，挂会话会留下孤儿行。代价是复合外键要求
+    那一轮已经在库里，所以开跑前（界面线程）先 `save_session(force = true)` 一次。
+22. **库路径在界面线程解析好再传进后台线程**，不在后台线程调 `storage::manuscript_db_path()`：
+    测试替换的配置目录只对当前线程有效（`skill_job.rs` 里接口密钥那条注释同理）。
+23. **恢复时只读区只刷四项**（`draft` / `document` / `system_prompt` / `time_sources`），
+    不刷 `request` / `selection` / `preset` / `refs` / `history` / `style`——它们是这一轮任务
+    本身的输入。改正方案 6.6 的全量列表。
+24. **用量不进检查点**。崩溃那一段的用量在内存里，进程死了就丢；续跑仍沿用 `AiTurn::resume()`
+    累计用时、`usage_job_seq` 补回用量。为它给检查点加一列不值得。
+25. **`Outcome::Suspended` 装 `Box`**：检查点让挂起对象多了整块黑板，不装箱的话
+    `Outcome` 会撑到 1400 字节，`Done` 也跟着占。
+
 ---
 
 ## 十二、交接
 
-**进度**：3 / 5 期。第 1 期（工具契约）已完成（2026-10-07），**待真机验收**（3.6 第 5 条：内网
+**进度**：4 / 5 期。第 1 期（工具契约）已完成（2026-10-07），**待真机验收**（3.6 第 5 条：内网
 DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起草，对比工具调用出错次数）。
 第 2 期（提案逐块接受）已完成（2026-10-07），**待真机验收**：研究式起草出一份三处以上改动的
 提案，在审阅窗里挑着「不要这处」再接受，正文只落地未排除的块；导出 Word / PDF 正常。
 第 3 期（用量、提案卡留痕、备用模型、检索耗时）已完成并合入 main（2026-10-07），
 七牛 DeepSeek V4 Flash 与 MiniMax M2.7 接口实测通过，**仍待内网 vLLM 与 GUI 真机验收**。
+第 4 期（检查点、恢复、只读区重灌、从这里重跑）已完成（2026-10-07），自动化验收 9 条全过，
+**接口级联机验证通过**（见下），**待 GUI 真机验收**（进程被杀后重开接着跑）。第 5 期
+（全流程预算与只读并行）未开工，它建在第 4 期的 `Limit` 检查点与 `StepPath` 上。
 
 ### 第 2 期交付了什么
 
@@ -837,3 +878,78 @@ DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起�
 
 未改、记在这里：`converse.rs` 判断 400 是不是嫌 `stream_options` 时，看报错里有没有 `tool` 字样。
 猜错的后果只是这个端点之后不再要用量（改为估算），不影响功能；真机遇到再细化。
+
+### 第 4 期交付了什么
+
+| 方案 | 落点 |
+|---|---|
+| 6.1 数据模型 | `src/agent/checkpoint.rs`：`StepPath`（`Vec<usize>`）、`Reason`、`Checkpoint`（`at` / `reason` / `label` / `board` 全量 / `partial`）；`Suspension` 改成持有 `checkpoint`，**挂起即一种检查点**；`engine::run` 的 `start: usize` 改成 `at: &[usize]`（`[i]` 顶层第 i 步、`[i,k]` `for_each` 的第 k 项）；`@` 引用只在空路径时落一次；`Outcome::Suspended` 装 `Box`（黑板让枚举撑到 1400 字节） |
+| 6.2 钩子 | `checkpoint::CheckpointSink`（挂在 `Env.ckpt`）+ `NoCheckpoint`；`engine::save` 在**每步成功之后**存一次（`tool:` 步骤、算子 `Flow::Next`、挂起 `Reason::Ask` 存完再返回、`for_each` 每项完成、流程末尾）；`for_each` 带步骤下标，支持从第 k 项接着跑（项列表恢复时从黑板变量重读，`index` 仍 1 基）；写盘失败只 emit 一条 `Event::Note` |
+| 6.3 表与保留 | `src/manuscript/ai_checkpoints.rs`：表 `ai_run_checkpoints`（DDL 在 `ai_sessions.rs`，外键挂 `ai_session_turns` 级联）、`save_run_checkpoint`（单行短事务 + 保留「首 + 近 5」）、`latest_run_checkpoint` / `list_run_checkpoints` / `delete_run_checkpoints_after` / `delete_run_checkpoints_from`；超 512 KB 时证据包只留近 20 条并标 `partial`（`EvidencePack::keep_last`）；写入时机见「与方案的出入」2 |
+| 6.3 去处 | `src/ai_panel/checkpoint.rs` 的 `SqliteCheckpoints`（`RefCell<ManuscriptStore>` 包一层，`CheckpointSink::save` 是 `&self`）；库路径在界面线程解析好传进后台线程 |
+| 6.4 恢复一条路 | `DraftPage::resume_checkpoint(turn_id)`：取库里最新检查点 → 组装成挂起那一轮同样的 `SkillRun` → 走**同一个** `start_skill` 恢复分支 → 同一个 `engine::run`。「答完题接着跑」也改走检查点的黑板，两个按钮最终调同一个函数（闸门、定稿、提案只有一份）。恢复第一件事：`replace_content(检查点里的工作稿)` + 任务流插一行「从『×××』之后接着跑」 |
+| 6.5 界面 | `AiTurn.resumable`（`Some(停在哪一步 · 什么时候存的)`，由 `session_ui::refresh_resumable` 按库里最新检查点填）；`ui.rs` 的 `resume_actions` 在 `Interrupted` / `Stopped` / `Failed` 卡片上给「接着跑 / 从头重来 / 丢弃」，**找不到检查点就只留「重新生成」**；`rerun_from_list` 折叠列出旧检查点供「从这里重跑」 |
+| 6.6 只读区重灌 | `Board::refresh_from_ui(draft, document, time)`：**只刷四项**（见出入 1）；`request` / `selection` / `preset` / `refs` / `history` / `style` 不刷 |
+| 6.7 `SkillRun` / `SavedRun` | `SkillRun` 改成「技能 + 挂起（检查点）」；`SavedRun` 改成「技能 id + 指纹 + `checkpoint` + `questions` + `save_as`」，**自定义宽容反序列化**：旧格式（`board` 与 `suspension` 分开存、`resume_at` 是数字）换算成检查点，认不出时该轮读回 `Interrupted`、不整轮丢 |
+| 从这里重跑 | `DraftPage::rerun_from_checkpoint(turn_id, seq)`：**正文动过就拒绝**（当前正文 ≠ 检查点黑板里的 `document`，报出两处字节数并给出「接着跑 / 从头重来」的出路）；允许时先删该点之后的检查点再走同一个恢复入口 |
+
+### 第 4 期与方案的出入
+
+1. **只读区只刷四项**，不照搬方案 6.6 的全量列表：`request`（发起时说的话）、`selection`（锁的选区）、
+   `preset`、`refs`（引用的文章）、`history`、`style` 是**这一轮任务本身的输入**，换成界面当前值就成了
+   另一个任务；`board.style` 的约定本来就是「接着跑时沿用，不再重挑」。方案 6.6 已改正。
+2. **外键与「会话行还没建 / 稿件没入库」的处理方案没写到**。外键挂 `ai_session_turns`（轮次级联）；
+   开跑前界面线程 `save_session(force = true)` 一次确保会话行与这一轮在库里；稿件没入库时给
+   `NoCheckpoint`，不写也不报错，卡片行为保持现状；库路径在界面线程解析后传进后台线程。
+3. **「接着跑」不只 `Interrupted`，也覆盖 `Stopped` 与 `Failed`**（有检查点时）。点停止、模型超时
+   同样留下了可续的现场，不该逼用户从头重来。
+4. **`Outcome::Suspended` 装 `Box`**：检查点进挂起对象后 `Outcome` 太大，不装箱 `Done` 也跟着占内存。
+5. **`SavedRun` 存 `checkpoint` 而不是 `board` + `suspension`**（方案 6.7 说「持有 board + checkpoint +
+   suspension」）：挂起本来就有检查点，黑板在检查点里，存两份就多一次克隆。
+
+### 第 4 期自动化验收对应
+
+| 验收 | 测试名 |
+|---|---|
+| 1：3 步技能 3 份检查点、从第 2 份恢复逐字节相同 | `checkpoints_land_after_every_step_and_resume_matches_an_uninterrupted_run` |
+| 2：`for_each` 中途恢复不重做已完成项、重做项不叠加 | `for_each_resumes_from_the_next_item_without_redoing_finished_ones` |
+| 3：答题续跑走新入口（`engine_tests` / `builtin_tests` / `ui_tests` 原有挂起与答题测试全过） | `a_choice_suspends_and_the_answer_resumes_from_the_next_step`、`predraft_answers_switch_the_kind_by_the_users_hand_and_continue`、`predraft_answers_become_notes_and_the_flow_continues_without_asking_again`、`asking_parks_the_turn_until_answered` |
+| 4：`@` 引用不在恢复时再落一遍 | `references_are_not_reapplied_when_resuming_from_a_checkpoint` |
+| 5：红线回归（来源不明的事实照样挡） | `a_resumed_workspace_still_goes_through_the_key_fact_gate` |
+| 6：只读区刷新 + 历史只出现一次 | `resuming_refreshes_the_authorised_elements_and_dates_from_the_ui`、`the_session_history_lands_in_the_system_prompt_exactly_once_after_resuming` |
+| 7：旧会话 JSON 读回能续、坏数据读回 `Interrupted` | `old_sessions_with_a_numeric_resume_at_still_resume` |
+| 8：落盘（保留策略 / 512 KB 截断 / 级联删 / 没入库不写） | `checkpoints_round_trip_and_keep_the_first_plus_recent_five`、`an_oversized_checkpoint_keeps_only_recent_evidence_and_is_marked_partial`、`checkpoints_disappear_with_the_turn_and_the_session`、`a_checkpoint_needs_its_turn_row_first`、`a_saved_checkpoint_comes_back_through_another_connection`、`the_no_op_sink_never_fails_and_writes_nothing`、`a_failing_checkpoint_sink_only_leaves_a_note` |
+| 9：界面有检查点才给「接着跑」 | `interrupted_cards_offer_resume_only_when_a_checkpoint_exists`、`stopped_and_failed_cards_also_offer_resume`、`resuming_without_a_checkpoint_says_so_instead_of_pretending`、`a_crashed_turn_resumes_from_the_stored_checkpoint`、`rerunning_from_an_older_checkpoint_requires_an_untouched_document` |
+
+### 第 4 期已知坑与真机验收
+
+- **`#[expect(dead_code)]` 是分期的临时标记**：`StoredCheckpoint`（整型）与 `resume_checkpoint`
+  等按期接入的入口在当期的 `cargo clippy -D warnings` 里会被判死代码，用带 `reason` 的 `expect`
+  标注并写明「第 N 期接入」，下一期接上后删掉。别留着不管，也别为它放宽 lint。
+- **检查点是黑板与位置，不含正文**；检查点里的 `document` 只用于「从这里重跑」的前置判定
+  （正文没动过没有），恢复时一律被界面当前值覆盖。
+- **崩溃那一段的用量丢了**：用量在内存里（`UsageTotals`），进程死了就丢，恢复后从零记起；
+  用时靠 `AiTurn::resume()` 累计续跑之前的。决定记录第 4 条已写明这是有意的取舍，不要为此把用量
+  塞进检查点。
+- **写盘失败不中断流程**：磁盘满、库锁、路径失效都只 emit 一条「检查点没存上」，流程照走——
+  丢了检查点只是不能续，不该把稿子也丢了。`NoCheckpoint`（稿件没入库）同理。
+- **2026-10-07 接口联机验证**（`model_api_test.md.txt` 的端点）：新增联机测试
+  `live_checkpoint_resume_after_an_interruption`（默认 `--ignored`）——真实模型跑政策研究报告第一遍，
+  只在 `GONGWEN_LIVE_STOP_AFTER` 份之前落检查点（之后换 `NoCheckpoint` 模拟进程被杀），再从库里读
+  最新一份、从它的 `at` 接着跑到 `Outcome::Done`。实测：
+  - DashScope `deepseek-v4.1-flash`：检查点写入 SQLite、读回 `at=[1]`，恢复后跑完大纲确认、写入工作稿、
+    逐章 `for_each` 检索；跑到缺口循环时 DashScope 连接超时（网络，非代码）。
+  - OpenRouter `deepseek/deepseek-v4.1-flash`：同样跑完检查点→恢复全链（大纲、六章检索、两轮缺口补全），
+    末尾 TLS 断连（网络）。
+  - OpenRouter `qwen/qwen3.8-flash`：上游限流 429，换模型即可。
+  - siliconflow 与 dmxapi 的 token 已失效（401）。
+  - embedding 用 DashScope `qwen3.7-text-embedding-flash`（可用）。
+- **真机（留给人做）**：① 跑研究式起草，**先另存一份稿子**，跑到一半在任务管理器里结束进程，
+  重开稿件点「接着跑」能续上、任务流里有「从×××之后接着跑」、工作稿回到那一步的样子；
+  ② 跑到一半点「停止」，卡片出「接着跑」，续跑后照旧走闸门出提案；③ 模型超时的卡片同样能续；
+  ④ 丢弃后卡片回到只有「重新生成」；⑤ 从这里重跑：正文没动过时能跑、正文改过时被拒并说清原因；
+  ⑥ 另存成新稿后检查点跟着走（会话 id 换、检查点重新落）。不要把编辑中的稿子丢了。
+
+**下一步**：第 4 期 GUI 真机验收过了再做第 5 期（全流程预算与算子内只读并行）——它建在
+`Reason::Limit` 检查点（引擎在超限时 `save(reason = Limit)` 后停下）与 `StepPath` 上，
+这两条第 4 期已经备好，不要重新设计。
