@@ -343,6 +343,14 @@ fn cases() -> Vec<Case> {
                 input.title_hint = "公式排版测试".into();
             },
         },
+        Case {
+            name: "research-structure",
+            markdown: "# 公共数据授权运营机制研究\n\n<!-- [目录] -->\n\n<!-- [部分] -->\n\n# 公共数据授权运营的现状与主要问题\n\n## 公共数据开发利用政策演进与授权运营制度建设的研究背景\n\n本章梳理政策演进与运营现状。\n\n### 政策脉络\n\n研究采用文献分析与案例比较。\n\n## 地方授权运营实践与主要问题\n\n### 发展现状\n\n正文。\n\n### 主要问题\n\n正文。\n\n# 实施路径与保障机制\n\n## 授权运营收益模型 $R=pq$ 与实施路径\n\n### 总体思路\n\n正文。\n\n<!-- [附录] -->\n\n## 调研说明\n\n附录内容。\n",
+            tweak: |input| {
+                input.research.file_number = "ZT-2026-07".into();
+                input.research.file_type = "专题研究报告".into();
+            },
+        },
     ]
 }
 

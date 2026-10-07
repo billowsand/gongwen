@@ -187,6 +187,7 @@
 #let terminal-paper = context {
   let p = here().page()
   let total = counter(page).final().first()
+  let logical = if blank-page(p) { none } else { page-label(p, page-segments()) }
   let grid-color = if dark { rgb("#1C2931") } else { rgb("#EDF0F1") }
   for i in range(0, 43) {
     place(top + left, dx: i * 5mm, line(start: (0pt, 0pt), end: (0pt, 297mm), stroke: 0.2pt + grid-color))
@@ -200,7 +201,8 @@
   place(top + left, dx: 15mm, dy: 25mm, line(length: 180mm, stroke: 0.5pt + rule))
   place(top + left, dx: 15mm, dy: 275mm, line(length: 180mm, stroke: 0.5pt + rule))
   place(top + left, dx: 18mm, dy: 279mm, box(width: 174mm, text(font: mono, size: 8pt, fill: cyan,
-    grid(columns: (1fr, auto), gutter: 5mm, doc.cover.version, [#p / #total]))))
+    grid(columns: (1fr, auto, auto), gutter: 5mm, doc.cover.version,
+      if logical != none { [P #logical] }, [#p / #total]))))
 }
 
 #set page(paper: "a4", binding: left,
@@ -252,23 +254,54 @@
 // 实测：章题基线在版心顶下 28.71mm，其后第一行基线 51.20mm。
 #let chapter-top = 28.71mm
 #let chapter-next = 51.20mm
-#let chapter-block(prefix, body, level: 2, pre: none) = {
-  clear-double()
+// 终端的编号是独立构件：章用圆形气泡，目录及不编号章用方形签牌。
+#let terminal-dash() = line(length: 100%, stroke: (paint: rule, thickness: 0.45pt, dash: "dashed"))
+#let terminal-badge(value, size: 15mm, round: false, font-size: 19pt) = {
+  let body = align(center + horizon, text(font: mono, fill: accent, weight: "bold", size: font-size,
+    top-edge: "cap-height", bottom-edge: "baseline", value))
+  if round { circle(radius: size / 2, inset: 0pt, fill: none, stroke: 1pt + accent, body) }
+  else { rect(width: size, height: size, inset: 0pt, fill: none, stroke: 1pt + accent, body) }
+}
+#let terminal-stamp(body) = block(spacing: 0pt, {
+  set par(first-line-indent: 0pt, justify: false)
+  box(line(length: 7mm, stroke: 0.7pt + accent))
+  h(3mm)
+  text(font: mono, size: 8pt, fill: cyan, body)
+})
+#let terminal-id(number) = if number == none { "※" } else if number.match(regex("^[0-9]+$")) != none {
+  if int(number) < 10 { "0" + number } else { number }
+} else { number }
+#let terminal-heading(body, prefix: none, number: none, badge: "※", stamp: "RESEARCH / 研究报告") = block(
+  width: 100%, above: 8mm, below: 0pt, breakable: false, {
+    set block(spacing: 0pt)
+    set par(first-line-indent: 0pt, justify: false, leading: 7pt, spacing: 0pt)
+    terminal-stamp(if prefix != none { prefix + " / CHAPTER " + terminal-id(number) } else { stamp })
+    v(7mm)
+    grid(columns: (15mm, 1fr), column-gutter: 5mm, align: horizon,
+      terminal-badge(if number != none { terminal-id(number) } else { badge }, round: number != none),
+      heavy(hei, size: 25pt, top-edge: "bounds", bottom-edge: "bounds", body))
+    v(9mm)
+    terminal-dash()
+    v(10mm, weak: false)
+  })
+#let chapter-block(prefix, body, level: 2, pre: none, number: none) = {
   let title = if prefix != none { prefix + h(1em) + body } else { body }
+  if terminal {
+    return {
+      clear-double()
+      block(width: 100%, spacing: 0pt, {
+        pre
+        bookmark(level, title)
+        terminal-heading(body, prefix: prefix, number: number)
+      })
+    }
+  }
+  clear-double()
   block(height: chapter-next - top-edge, width: 100%, spacing: 0pt, {
     pre
     bookmark(level, title)
     set text(font: hei, weight: "bold", size: 18pt)
-    if terminal {
-      place(top + left, dy: 10mm, box(width: text-w, {
-        set par(first-line-indent: 0pt, justify: false)
-        text(fill: accent, font: mono, size: 13pt, if prefix != none { prefix } else { "RESEARCH" })
-        v(4mm)
-        heavy(hei, size: 24pt, body)
-        v(4mm)
-        line(length: text-w, stroke: 0.6pt + rule)
-      }))
-    } else { centered-at(chapter-top, title) }
+    centered-at(chapter-top, title)
   })
 }
 
@@ -279,13 +312,14 @@
   p.slice(0, digits.start) + h(0.304em) + digits.text + if digits.end < p.len() { h(0.304em) + p.slice(digits.end) }
 }
 
-#let chapter(b) = {
+#let chapter(b, id: none) = {
   let prefix = if b.prefix != none { chapter-prefix(b.prefix) } else { none }
   let pre = {
+    if terminal { [#metadata(none)#label(id)] }
     if b.toc { toc-entry("chapter", b.prefix, b.text) }
     if b.number != none { counter(footnote).update(0) }
   }
-  chapter-block(prefix, runs(b.text), pre: pre)
+  chapter-block(if terminal { b.prefix } else { prefix }, runs(b.text), pre: pre, number: b.number)
   anchor(b.label, b.number)
 }
 
@@ -294,6 +328,22 @@
 #let section(b, prev: none) = {
   if b.toc and b.level == 1 { toc-entry("section", b.number, b.text) }
   let num = if b.number != none { b.number + h(0.5em) }
+  if terminal {
+    block(sticky: true, above: if prev == "chapter" { 0pt } else { 6mm }, below: 4mm, {
+      bookmark(b.level + 2, num + runs(b.text))
+      set par(first-line-indent: 0pt, justify: false)
+      if b.level == 1 {
+        if prev != "chapter" { terminal-dash(); v(4mm) }
+        grid(columns: (auto, 1fr), column-gutter: 4mm, align: horizon,
+          if b.number != none { box(stroke: 0.8pt + accent, inset: (x: 2mm, y: 1.5mm), text(font: mono, fill: accent, b.number)) } else { [] },
+          heavy(hei, size: 17pt, runs(b.text)))
+      } else {
+        par(text(font: mono, fill: accent, num) + heavy(hei, runs(b.text)))
+      }
+    })
+    anchor(b.label, b.number)
+    return
+  }
   let above = if prev == "chapter" { 0pt } else if prev == "table" { 10.47mm - top-edge + 1.83mm } else { pitch - body-size }
   block(sticky: true, above: above, below: pitch - body-size, {
     bookmark(b.level + 2, num + runs(b.text))
@@ -304,9 +354,52 @@
 
 // 部分（\part）：独占一页，小一黑体居中；book 类在部分页之后另加一张不印页码的空白页。
 // 实测「第一部分」基线在版心顶下 77.23mm，题名 94.42mm。
-#let part(b) = {
+#let part(b, children: (), serial: none) = {
   clear-double()
   let head = if b.number != none { [第#b.number;部分] }
+  if terminal {
+    // 明细表只取本部分的章；页码用真正的章节位置查询，不能由样张数字写死。
+    block(width: 100%, spacing: 0pt, {
+      toc-entry("part", if b.number != none { "第" + b.number + "部分" } else { none }, b.text)
+      bookmark(1, if head != none { head + h(1em) } + runs(b.text))
+      set par(first-line-indent: 0pt, justify: false)
+      v(8mm)
+      terminal-stamp("研究分部 / PART " + terminal-id(serial))
+      v(12mm)
+      grid(columns: (8mm, 1fr), column-gutter: 4mm, align: horizon,
+        terminal-badge(if serial != none { "P" + serial } else { "P" }, size: 8mm, font-size: 10pt),
+        text(font: mono, size: 10pt, fill: cyan, head))
+      v(7mm)
+      heavy(hei, size: 30pt, top-edge: "bounds", bottom-edge: "bounds", runs(b.text))
+      v(12mm)
+      text(font: mono, size: 9pt, fill: cyan, "章节明细 / CHAPTER LIST")
+      v(3mm)
+      line(length: text-w, stroke: 0.6pt + rule)
+      for child in children {
+        context {
+          let target = query(label(child.id)).first().location()
+          let num = page-label(target.page(), page-segments())
+          block(width: 100%, above: 3mm, below: 3mm, breakable: false, link(target,
+            grid(columns: (10mm, 1fr, auto, 10mm), column-gutter: 3mm, align: horizon,
+              terminal-badge(if child.b.number != none { child.b.number } else { "—" }, size: 4mm, font-size: 7pt, round: true),
+              text(size: 12pt, runs(child.b.text)),
+              text(font: mono, size: 8pt, fill: cyan, "起始"),
+              align(right, text(font: mono, size: 10pt, fill: cyan, num)))))
+          terminal-dash()
+        }
+      }
+      anchor(b.label, b.number)
+    })
+    if serial != none {
+      // 斜线只填充数字轮廓内部，与参考的线刻部号一致。
+      v(1fr)
+      align(right, text(font: mono, size: 120pt, weight: "bold", top-edge: "bounds", bottom-edge: "bounds",
+        stroke: 0.6pt + cyan, fill: tiling(size: (3mm, 3mm), relative: "parent",
+          place(line(start: (0pt, 3mm), end: (3mm, 0pt), stroke: 0.3pt + rule))), terminal-id(serial)))
+    }
+    clear-empty()
+    return
+  }
   block(width: 100%, height: 94.42mm, spacing: 0pt, {
     toc-entry("part", if b.number != none { "第" + b.number + "部分" } else { none }, b.text)
     bookmark(1, if head != none { head + h(1em) } + runs(b.text))
@@ -517,11 +610,16 @@
 #let toc-block() = {
   clear-empty(num: (style: "I", start: 1))
   context {
-    block(height: 52.02mm - top-edge, width: 100%, spacing: 0pt, {
+    if terminal {
+      block(width: 100%, spacing: 0pt, {
+        bookmark(2, [目录])
+        terminal-heading([目录], badge: "BOM", stamp: "CONTENTS / 研究目录")
+      })
+    } else { block(height: 52.02mm - top-edge, width: 100%, spacing: 0pt, {
       bookmark(2, [目录])
       set text(font: hei, weight: "bold", size: 18pt)
       centered-at(29.52mm, [目录])
-    })
+    }) }
     let segments = page-segments()
     set par(first-line-indent: 0pt, justify: false)
     for e in query(<gw-toc>) {
@@ -529,6 +627,31 @@
       let num = page-label(p, segments)
       let v = e.value
       let target = e.location()
+      if terminal {
+        let part = v.kind == "part"
+        let section = v.kind == "section"
+        let indent = if part { 0mm } else if section { 14mm } else { 0mm }
+        let mark = if part {
+          let parts = doc.blocks.filter(b => b.k == "part" and b.number != none)
+          let indices = parts.enumerate().filter(((i, b)) => "第" + b.number + "部分" == v.prefix)
+          text(font: mono, size: 11pt, fill: accent, "PART " + if indices.len() > 0 { str(indices.first().first() + 1) } else { "—" })
+        } else if section { text(font: mono, fill: cyan, size: 10pt, v.prefix) }
+        else {
+          let number = if v.prefix != none { v.prefix.match(regex("[0-9A-Z]+")) } else { none }
+          terminal-badge(if number != none { number.text } else { "—" }, size: 4mm, round: true, font-size: 7pt)
+        }
+        block(width: 100%, inset: (left: indent), above: if section { 0pt } else { 4mm }, below: 1.8mm, breakable: false,
+          link(target, grid(columns: (if part { 22mm } else { 14mm }, 1fr), align: horizon, {
+            mark
+          }, par({
+            text(font: hei, size: 12pt, weight: if section { "regular" } else { "bold" }, runs(v.text))
+            box(width: 1fr, repeat(gap: 1.5mm, justify: false, text(fill: rule, ".")))
+            h(2mm)
+            box(width: 8mm, align(right, text(font: mono, size: 10pt, fill: cyan, num)))
+          }))))
+        if part { line(length: text-w, stroke: 0.5pt + rule) }
+        continue
+      }
       if v.kind == "section" {
         par(link(target, h(15.75pt) + if v.prefix != none { v.prefix + h(0.5em) } + runs(v.text)
           + box(width: 1fr, repeat(gap: 10.5pt - 0.25em, justify: false)[.]) + h(1.5em)
@@ -650,16 +773,30 @@
 // ================= 正文 =================
 #let render(blocks) = {
   let prev = none
-  for b in blocks {
+  let part-serial = 0
+  for (i, b) in blocks.enumerate() {
     let k = b.k
     let after = prev
     prev = k
     if k == "par" { para(b.c) }
     else if k == "aligned" { aligned(b) }
     else if k == "list" { list-par(b) }
-    else if k == "chapter" { chapter(b) }
+    else if k == "chapter" { chapter(b, id: "gw-chapter-" + str(i)) }
     else if k == "section" { section(b, prev: after) }
-    else if k == "part" { part(b) }
+    else if k == "part" {
+      if b.number != none { part-serial += 1 }
+      let children = ()
+      if terminal {
+        for (j, child) in blocks.slice(i + 1).enumerate() {
+          if child.k == "part" { break }
+          if child.k == "chapter" {
+            if not child.toc or (child.prefix != none and child.prefix.starts-with("附录")) { break }
+            children.push((b: child, id: "gw-chapter-" + str(i + 1 + j)))
+          }
+        }
+      }
+      part(b, children: children, serial: if b.number != none { str(part-serial) })
+    }
     else if k == "table" { table-block(b, prev: after) }
     else if k == "figure" { figure-block(b) }
     else if k == "code" { code-block(b) }
@@ -679,5 +816,8 @@
 
 #cover()
 // \mainmatter：正文从阿拉伯页码 1 起；摘要单独编页时摘要用小写罗马页码。
-#clear-empty(num: if front { (style: "i", start: 1) } else { (style: "1", start: 1) })
+// 目录在首块时由目录自己从封面另起页，避免两次强制分页制造一组空白页。
+#if not (terminal and doc.blocks.len() > 0 and doc.blocks.first().k == "toc") {
+  clear-empty(num: if front { (style: "i", start: 1) } else { (style: "1", start: 1) })
+}
 #render(doc.blocks)

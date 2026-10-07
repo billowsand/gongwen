@@ -317,6 +317,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn terminal_research_chapter_sheets_start_on_separate_odd_pages() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        let mut input = DraftInput {
+            kind: crate::models::TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        input.research.template = crate::models::ResearchTemplate::Terminal;
+        let markdown = "# 研究报告\n\n<!-- [目录] -->\n\n<!-- [部分] -->\n\n# 现状与问题\n\n## 研究背景\n\n正文。\n\n## 主要问题\n\n正文。\n\n# 实施路径\n\n## 对策建议\n\n正文。\n";
+        let bundle = ResearchSourceBundle::create(
+            &input,
+            markdown,
+            &NumberingConfig::default(),
+            crate::mermaid::Format::Pdf,
+            base.path(),
+        )
+        .unwrap();
+        let (data, files, _) = document(&bundle.markdown, &input).unwrap();
+        let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
+        let items = typst_engine::text_fonts_for_test(
+            &TypstJob {
+                data,
+                base_dir: bundle.root(),
+                template: Template::Research,
+                files,
+            },
+            &set,
+        )
+        .unwrap();
+        let mut pages: Vec<_> = items
+            .iter()
+            .filter(|t| t.text.contains("CHAPTER 0"))
+            .map(|t| t.page)
+            .collect();
+        pages.dedup();
+        assert_eq!(pages.len(), 3, "三个章必须各有独立章首页：{pages:?}");
+        assert!(
+            pages.iter().all(|p| p % 2 == 1),
+            "章必须起在奇数页：{pages:?}"
+        );
+        assert!(pages.windows(2).all(|w| w[0] < w[1]));
+    }
+
     fn build_str(markdown: &str) -> Doc {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("r.md");

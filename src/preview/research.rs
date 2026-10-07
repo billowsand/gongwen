@@ -948,6 +948,9 @@ pub(crate) fn research_preview(
         },
     );
     let mut clicked = None;
+    let terminal_entries =
+        terminal.then(|| super::research_terminal::structure(&located, markdown));
+    let mut toc_done = false;
 
     if terminal {
         super::research_terminal::cover(ui, &metrics, input, markdown);
@@ -974,6 +977,23 @@ pub(crate) fn research_preview(
     };
     sheet(ui, &metrics, |ui| {
         walk(&located, markdown, |located, kind, _| {
+            if let Some(entries) = &terminal_entries
+                && !toc_done
+                && super::research_terminal::is_toc(&markdown[located.range.clone()])
+            {
+                toc_done = true;
+                cull.block(
+                    ui,
+                    &metrics,
+                    super::memo::key(("terminal-toc", entries)),
+                    &located.range,
+                    false,
+                    None,
+                    |ui| {
+                        super::research_terminal::toc(ui, &metrics, entries, &mut clicked);
+                    },
+                );
+            }
             if let Some(next) = section_marker(markdown, located) {
                 if bib.in_references && !bib.done && !cited.is_empty() {
                     bib.done = true;
@@ -1005,8 +1025,29 @@ pub(crate) fn research_preview(
             let keep = anchored(anchor, &located.range)
                 || matches!(&kind, Kind::Table { caption: Some(caption) }
                     if anchored(anchor, &caption.source));
-            let key = super::memo::key((BlockShape(located), &kind, terminal));
+            let part_structure = matches!(kind, Kind::Part { .. } | Kind::PartStar(_))
+                .then_some(terminal_entries.as_ref());
+            let key = super::memo::key((BlockShape(located), &kind, terminal, part_structure));
             cull.block(ui, &metrics, key, &located.range, keep, heading, |ui| {
+                if let Some(entries) = &terminal_entries
+                    && let Some(entry) = entries.iter().find(|e| {
+                        e.kind == super::research_terminal::EntryKind::Part
+                            && e.source == located.range
+                    })
+                {
+                    clickable_rows(
+                        ui,
+                        &metrics,
+                        &located.range,
+                        anchor,
+                        &mut scroll_to_anchor,
+                        &mut clicked,
+                        |ui| {
+                            super::research_terminal::part(ui, &metrics, entry, entries);
+                        },
+                    );
+                    return;
+                }
                 body_item(
                     ui,
                     &metrics,
@@ -1681,7 +1722,7 @@ const CHAPTER_GAP: &str = "\u{3000}";
 /// 等宽（`.`、数字、空格都占 0.5em），所以一个 ASCII 空格正好是 0.5em；这里若
 /// 用全角空格就宽出一倍——"1.1" 本身没有夹空格，看着宽是这个间隔撑的。
 /// 不用 U+2002（en space）是因为黑体没有这个码位，会掉进回退字体。
-const SECTION_GAP: &str = " ";
+pub(super) const SECTION_GAP: &str = " ";
 
 /// 图与图题之间的空：`md2tex.cls` 的 `\abovecaptionskip`。
 const CAPTION_GAP_PT: f32 = 6.0;
@@ -1731,23 +1772,15 @@ fn caption_line(ui: &mut egui::Ui, metrics: &Metrics, tag: &str, number: &str, t
 fn chapter_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
     ui.add_space(metrics.line);
     if metrics.terminal {
-        let (prefix, title) = text.split_once(CHAPTER_GAP).unwrap_or(("RESEARCH", text));
-        {
-            let _ink = theme::paper::report_ink(super::research_terminal::accent());
-            title_line(
-                ui,
-                metrics,
-                prefix,
-                theme::FONT_HEITI,
-                13.0,
-                Align::LEFT,
-                "",
-            );
-        }
-        ui.add_space(metrics.mm(4.0));
-        title_line(ui, metrics, title, theme::FONT_HEITI, 24.0, Align::LEFT, "");
-        super::research_terminal::rule(ui, metrics);
-        ui.add_space(metrics.line);
+        let (prefix, title) = text
+            .split_once(CHAPTER_GAP)
+            .map_or((None, text), |(p, t)| (Some(p), t));
+        let number = prefix.map(|p| {
+            p.trim_start_matches("第")
+                .trim_end_matches("章")
+                .trim_start_matches("附录")
+        });
+        super::research_terminal::heading(ui, metrics, title, number, prefix, false);
         return;
     }
     title_line(
@@ -1810,6 +1843,10 @@ fn part_title(ui: &mut egui::Ui, metrics: &Metrics, heading: Option<&str>, text:
 
 /// 节标题：黑体，字号随正文，缩进 2 字（`\titlespacing` 的 2em）。
 fn section_title(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
+    if metrics.terminal {
+        super::research_terminal::section(ui, metrics, text);
+        return;
+    }
     let _ink = metrics
         .terminal
         .then(|| theme::paper::report_ink(theme::paper::ink_muted()));
@@ -1893,15 +1930,17 @@ mod tests {
             ..Default::default()
         };
         input.research.template = ResearchTemplate::Terminal;
-        let markdown =
-            "# 研究标题\n\n<!-- [正文] -->\n\n## 研究背景\n\n### 数据来源\n\n这是正文。\n";
+        let markdown = "# 研究标题\n\n<!-- [目录] -->\n\n<!-- [部分] -->\n\n# 现状与问题\n\n## 研究背景\n\n### 数据来源\n\n这是正文。\n";
         for palette in [ResearchPalette::Dark, ResearchPalette::Bright] {
             input.research.palette = palette;
             let text = drawn_input(&input, markdown);
             assert!(text.contains("研究终端"));
             assert!(text.contains("研究标题"));
+            assert!(text.contains("BOM") && text.contains("PART 1"));
+            assert!(text.contains("章节明细") && text.contains("P1"));
             assert!(text.contains("第1章"));
-            assert!(text.contains("1.1 数据来源"));
+            // 终端的节号在独立方框里，绘制文字不再与标题合成同一个 galley。
+            assert!(text.contains("1.1") && text.contains("数据来源"));
             assert!(text.contains("这是正文。"));
             assert_eq!(
                 theme::paper::bg(),

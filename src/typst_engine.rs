@@ -595,16 +595,17 @@ mod tests {
 /// Typst 逐字回退时一段文字按字体切开，查字体配方就看这个。
 #[cfg(test)]
 pub(crate) fn text_fonts_for_test(job: &TypstJob, set: &FontSet) -> Result<Vec<TextFont>> {
-    fn walk(frame: &typst::layout::Frame, out: &mut Vec<TextFont>) {
+    fn walk(frame: &typst::layout::Frame, page: usize, out: &mut Vec<TextFont>) {
         for (_, item) in frame.items() {
             match item {
-                typst::layout::FrameItem::Group(group) => walk(&group.frame, out),
+                typst::layout::FrameItem::Group(group) => walk(&group.frame, page, out),
                 typst::layout::FrameItem::Text(text) => {
                     let info = text.font.font().info();
                     out.push(TextFont {
                         text: text.text.to_string(),
                         family: info.family.clone(),
                         weight: info.variant.weight.to_number(),
+                        page,
                     });
                 }
                 _ => {}
@@ -620,8 +621,8 @@ pub(crate) fn text_fonts_for_test(job: &TypstJob, set: &FontSet) -> Result<Vec<T
     );
     let (document, _) = layout(&world)?;
     let mut out = Vec::new();
-    for page in document.pages() {
-        walk(&page.frame, &mut out);
+    for (i, page) in document.pages().iter().enumerate() {
+        walk(&page.frame, i + 1, &mut out);
     }
     Ok(out)
 }
@@ -633,6 +634,7 @@ pub(crate) struct TextFont {
     pub text: String,
     pub family: String,
     pub weight: u16,
+    pub page: usize,
 }
 
 /// 测试用：用自定义源码代替模板排版（字体同随包），返回 PDF。
