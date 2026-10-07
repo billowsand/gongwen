@@ -71,3 +71,4 @@ __pycache__/
 # 第三方输入法码表（小鹤音形等）：权利归方案作者、只限私人使用，只能由使用者导入本机，不入库
 /assets/fuma/*.txt
 !/assets/fuma/xiaohe.txt
+model_api_test.md.txt
