@@ -114,6 +114,9 @@ pub(crate) fn unavailable(skill: &Skill, ctx: &RouteContext<'_>) -> Option<Strin
 
 impl DraftPage<'_> {
     /// 发起一轮技能任务。`resume` 是挂起的那一轮：答完接着跑，不另开一轮。
+    ///
+    /// 崩溃 / 停止 / 出错后的「接着跑」也进这里（`DraftPage::resume_checkpoint` 取库里最新
+    /// 一份检查点，组装同样的 `SkillRun`）：两条路径的闸门、定稿、提案代码只有一份。
     pub(crate) fn start_skill(
         &mut self,
         request: TurnRequest,
@@ -127,6 +130,10 @@ impl DraftPage<'_> {
         }
         let time = crate::prompt::TimeContext::now();
         let fresh = resume.is_none();
+        // 恢复时检查点里的工作稿：先让界面回到那一步的样子，再往下跑（崩溃时可能停在半截）。
+        let checkpoint_workspace = resume
+            .as_ref()
+            .map(|(_, run)| run.suspension.checkpoint.board.workspace.clone());
         let (pick, mut board, at, use_rag, title, plan) = match resume {
             Some((turn_id, run)) => {
                 let SkillRun {
@@ -136,14 +143,20 @@ impl DraftPage<'_> {
                 } = *run;
                 let mut board = suspension.checkpoint.board;
                 let at = suspension.checkpoint.at;
-                // 要素与正文以界面上现在的为准：用户可能刚切了文种。
-                board.draft = self.doc.draft.clone();
-                board.document = self.doc.generated_markdown.clone();
+                // 只读区一律以界面当前值重灌（红线 2）：要素、正文、系统提示与合法日期。
+                // 不重灌 request / selection / preset / refs / history / style——它们是这一轮
+                // 任务本身的输入，换成界面当前值就成了另一个任务。
+                let draft = self.doc.draft.clone();
+                let document = self.doc.generated_markdown.clone();
+                board.refresh_from_ui(&draft, &document, &time);
                 let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) else {
                     return Err("这一轮已不在侧栏里。".into());
                 };
                 turn.questions.clear();
                 turn.replies.clear();
+                // 恢复第一件事：任务流里插一行「从×××之后接着跑」。
+                let label = suspension.checkpoint.label.clone();
+                turn.notes.push(format!("从「{label}」之后接着跑。"));
                 turn.resume();
                 let title = turn.title.clone();
                 (
@@ -152,19 +165,25 @@ impl DraftPage<'_> {
                     at,
                     use_rag,
                     title,
-                    // 接着跑的沿用发起时的历史（已在黑板上）。
+                    // 接着跑的沿用发起时的历史（已在黑板上），不重拼。
                     HistoryPlan::default(),
                 )
             }
             None => self.prepare_skill(&request, &time)?,
         };
-        board.system_prompt = crate::prompt::build_system_prompt(&time);
+        if fresh {
+            board.system_prompt = crate::prompt::build_system_prompt(&time);
+        }
         // 接着跑的沿用发起时挑的风格（已在黑板上）。
         let style = if fresh {
             self.style_pick(&request, &board)
         } else {
             StylePick::None
         };
+        // 恢复时先让界面回到检查点里的工作稿，再往下跑。
+        if let Some(run) = checkpoint_workspace {
+            self.doc.ai_panel.replace_content(run);
+        }
         self.doc.ai_panel.open = true;
         let cancel = Arc::new(AtomicBool::new(false));
         self.doc.ai_panel.cancel = Some(cancel.clone());
@@ -543,7 +562,7 @@ impl DraftPage<'_> {
         });
     }
 
-    /// 挂起时的题答完了：回答落到黑板（要切的文种由这里切），接着跑。
+    /// 挂起时的题答完了：回答落到检查点的黑板（要切的文种由这里切），从 `checkpoint.at` 接着跑。
     pub(crate) fn answer_suspended(&mut self, turn_id: u64) {
         if self.doc.busy {
             *self.status = "这篇稿件还有任务在跑，稍等一下。".into();
@@ -581,6 +600,89 @@ impl DraftPage<'_> {
             self.doc.draft.kind = kind;
         }
         if let Err(error) = self.start_skill(request, Some((turn_id, run))) {
+            *self.status = error;
+        }
+    }
+
+    /// 崩溃 / 停止 / 出错后的「接着跑」：从库里取这一轮最新的检查点，组装成挂起那一轮
+    /// 同样的 `SkillRun`，走**同一个** `start_skill` 恢复分支、同一个 `engine::run`。
+    /// 闸门、定稿、提案生成的代码因此只有一份（红线 3）。
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "内核加固第 4 期⑤界面卡片「接着跑」接入调用侧")
+    )]
+    pub(crate) fn resume_checkpoint(&mut self, turn_id: u64) {
+        if self.doc.busy {
+            *self.status = "这篇稿件还有任务在跑，稍等一下。".into();
+            return;
+        }
+        let Some(_manuscript) = self.doc.manuscript_id else {
+            *self.status = "这篇稿件还没存进稿件库，没有检查点可以接着跑。".into();
+            return;
+        };
+        let session_id = self.doc.ai_panel.session.id.clone();
+        let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) else {
+            return;
+        };
+        if turn.run.is_some() {
+            *self.status = "这一轮还在等你回答，答完就会接着跑。".into();
+            return;
+        }
+        let Some(request) = turn.request.clone() else {
+            *self.status = "这一轮不是侧栏发起的，没法接着跑。".into();
+            return;
+        };
+        // 技能改过：提示一句、按新版接着跑；技能删了：不能续。
+        let stored = {
+            let skills = if self.doc.ai_panel.skills.is_empty() {
+                crate::agent::skill::load_all().0
+            } else {
+                self.doc.ai_panel.skills.clone()
+            };
+            let Some(store) = self.store.as_deref() else {
+                *self.status = "稿件库还没连上，检查点读不出来。".into();
+                return;
+            };
+            match store.latest_run_checkpoint(&session_id, turn_id as i64) {
+                Ok(Some(stored)) => Some((stored, skills)),
+                Ok(None) => None,
+                Err(error) => {
+                    *self.status = format!("读取检查点失败：{error:#}");
+                    return;
+                }
+            }
+        };
+        let Some((stored, skills)) = stored else {
+            *self.status = "这一轮没有找到检查点，可以重新生成。".into();
+            return;
+        };
+        let Some(skill) = skills
+            .iter()
+            .find(|skill| skill.id == stored.skill_id)
+            .cloned()
+        else {
+            *self.status = format!(
+                "技能「{}」已经不在了，没法接着跑；可以重新生成。",
+                stored.skill_id
+            );
+            return;
+        };
+        if let Err(error) = self.start_skill(
+            request,
+            Some((
+                turn_id,
+                Box::new(SkillRun {
+                    suspension: Suspension {
+                        // 崩溃不是提问：`questions` 空、`save_as` 空，走的是同一个恢复分支。
+                        checkpoint: stored.checkpoint,
+                        questions: Vec::new(),
+                        save_as: None,
+                    },
+                    skill,
+                    use_rag: stored.use_rag,
+                }),
+            )),
+        ) {
             *self.status = error;
         }
     }
@@ -819,7 +921,7 @@ fn compact_session(
 }
 
 /// 起草模型的系统提示带上会话历史：只用来理解指代，不当要求、不当出处。
-fn with_history(system: &str, history: &str) -> String {
+pub(crate) fn with_history(system: &str, history: &str) -> String {
     if history.trim().is_empty() {
         return system.to_string();
     }

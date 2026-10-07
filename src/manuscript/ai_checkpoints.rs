@@ -46,7 +46,7 @@ const KEEP_RECENT: i64 = 5;
 #[derive(Debug, Clone)]
 #[expect(
     dead_code,
-    reason = "内核加固第 4 期④「统一恢复入口」接入：接着跑、⑤界面、⑥从这里重跑"
+    reason = "内核加固第 4 期⑤界面「接着跑」接入调用侧（④ 的 resume_checkpoint 已写好）"
 )]
 pub(crate) struct StoredCheckpoint {
     pub(crate) seq: i64,
@@ -145,7 +145,10 @@ impl ManuscriptStore {
 }
 
 /// 读取侧：内核加固第 4 期④「接着跑」、⑤界面显示、⑥「从这里重跑」接入。
-#[expect(dead_code, reason = "第 4 期④⑤⑥接入读取侧")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "内核加固第 4 期⑤界面接入调用侧")
+)]
 impl ManuscriptStore {
     fn read_run_checkpoint(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCheckpoint> {
         let data: String = row.get(6)?;
@@ -191,6 +194,10 @@ impl ManuscriptStore {
     }
 
     /// 这一轮存下的全部检查点，按序号（「从这里重跑」的候选列表用）。
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "内核加固第 4 期⑥「从这里重跑」接入")
+    )]
     pub(crate) fn list_run_checkpoints(
         &self,
         session_id: &str,
@@ -207,6 +214,7 @@ impl ManuscriptStore {
     }
 
     /// 删掉 `seq` 之后的检查点（「从这里重跑」覆盖该点之后的产物）。
+    #[expect(dead_code, reason = "内核加固第 4 期⑥「从这里重跑」接入")]
     pub(crate) fn delete_run_checkpoints_after(
         &mut self,
         session_id: &str,

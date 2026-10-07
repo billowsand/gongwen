@@ -232,6 +232,38 @@ impl Board {
         text
     }
 
+    /// 恢复前按界面当前值重灌只读区（红线 2：要素与正文快照以用户手上的为准，
+    /// 系统提示与合法日期按现在重建——隔天恢复，「今天」得是今天）。
+    ///
+    /// `request` / `selection` / `preset` / `refs` / `history` / `style` **不**重灌：它们是
+    /// 这一轮任务本身的输入（发起时说的话、锁的选区、当时挑的风格），换成界面当前值就成了
+    /// 另一个任务（`docs/agent-kernel-hardening.md` 第 4 期与方案的出入 1）。
+    ///
+    /// 两条恢复路径（答完题接着跑、崩溃 / 停止 / 出错后接着跑）都调它，检查点里存的
+    /// 这几个字段一律被覆盖。
+    pub(crate) fn refresh_from_ui(
+        &mut self,
+        draft: &DraftInput,
+        document: &str,
+        time: &crate::prompt::TimeContext,
+    ) {
+        self.draft = draft.clone();
+        self.document = document.to_string();
+        self.system_prompt = crate::prompt::build_system_prompt(time);
+        self.time_sources = [
+            &time.now,
+            &time.yesterday,
+            &time.today,
+            &time.tomorrow,
+            &time.day_after_tomorrow,
+            &time.three_days_later,
+            &time.this_week,
+            &time.next_week,
+        ]
+        .map(String::as_str)
+        .join("\n");
+    }
+
     /// 用户原话加上已确认的回答，给提示词用。
     pub(crate) fn request_with_notes(&self) -> String {
         let mut text = self.request.trim().to_string();

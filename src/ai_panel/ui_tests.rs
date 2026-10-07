@@ -2041,3 +2041,275 @@ fn question_samples() {
     canvas.render(&harness.ctx, output, size, theme::canvas(), &path);
     println!("{}", path.display());
 }
+
+// —— 内核加固第 4 期：检查点与统一恢复入口 ——
+
+/// 一个挂起在检查点上的研究式起草（崩溃恢复用同一份现场）。
+fn suspended_draft(harness: &mut Harness, date: &str) -> (u64, crate::ai_panel::TurnRequest) {
+    use crate::agent::checkpoint::{Checkpoint, Reason};
+    use crate::models::TemplateKind;
+    let request = crate::ai_panel::TurnRequest {
+        skill: Some(RESEARCH_DRAFT.into()),
+        text: "起草一份商洽函".into(),
+        selection: None,
+        preset: None,
+        use_rag: false,
+        refs: Vec::new(),
+        notes: Vec::new(),
+        on_proposal: false,
+        style: Default::default(),
+    };
+    let mut draft = harness.doc.draft.clone();
+    draft.kind = TemplateKind::PlainDocument;
+    draft.date = date.into();
+    let board = crate::agent::board::Board {
+        draft,
+        request: request.text.clone(),
+        // 检查点里存的是「昨天」的系统提示与日期；恢复时都该被界面当前值盖掉。
+        system_prompt: "昨天写的系统提示".into(),
+        time_sources: "昨天".into(),
+        history: "上一轮：交给了提案，还没处理".into(),
+        ..Default::default()
+    };
+    let panel = &mut harness.doc.ai_panel;
+    panel.push_turn(
+        "研究式起草".into(),
+        request.text.clone(),
+        vec![],
+        Some(request.clone()),
+    );
+    panel.ask(Box::new(crate::ai_panel::SkillRun {
+        skill: crate::agent::skill::builtin(RESEARCH_DRAFT).unwrap(),
+        suspension: crate::agent::engine::Suspension {
+            checkpoint: Checkpoint {
+                at: vec![1],
+                reason: Reason::Ask,
+                label: "已完成 算子 clarify".into(),
+                board,
+                partial: false,
+            },
+            questions: Vec::new(),
+            save_as: None,
+        },
+        use_rag: false,
+    }));
+    // 崩溃：这一轮不再等回答，界面回到「已中断」。
+    panel.turns.clear();
+    let id = panel.push_turn(
+        "研究式起草".into(),
+        request.text.clone(),
+        vec![],
+        Some(request.clone()),
+    );
+    panel.finish(TurnState::Interrupted);
+    (id, request)
+}
+
+/// 恢复前在界面上改了成文日期，进模型的是新值；系统提示与日期按现在重建，
+/// `history` 照旧沿用（这一轮任务本身的输入，不重灌）。
+#[test]
+fn resuming_refreshes_the_authorised_elements_and_dates_from_the_ui() {
+    use crate::agent::board::Board;
+    let time = crate::prompt::TimeContext::now();
+    let mut board = Board {
+        draft: crate::models::DraftInput {
+            date: "2025年1月1日".into(),
+            ..Default::default()
+        },
+        document: "旧正文".into(),
+        system_prompt: "昨天写的系统提示".into(),
+        time_sources: "昨天".into(),
+        request: "起草".into(),
+        selection: Some("锁的选区".into()),
+        preset: "精简篇幅".into(),
+        history: "上一轮：交了提案".into(),
+        style: "写法风格".into(),
+        ..Board::default()
+    };
+    let ui_draft = crate::models::DraftInput {
+        date: "2026年10月7日".into(),
+        ..Default::default()
+    };
+    board.refresh_from_ui(&ui_draft, "现在的正文", &time);
+
+    assert_eq!(board.draft.date, "2026年10月7日", "成文日期用界面上新改的");
+    assert_eq!(board.document, "现在的正文");
+    assert_ne!(board.system_prompt, "昨天写的系统提示");
+    assert!(board.time_sources.contains(&time.today));
+    // 这一轮任务本身的输入不重灌。
+    assert_eq!(board.request, "起草");
+    assert_eq!(board.selection.as_deref(), Some("锁的选区"));
+    assert_eq!(board.preset, "精简篇幅");
+    assert_eq!(board.history, "上一轮：交了提案");
+    assert_eq!(board.style, "写法风格");
+}
+
+/// 崩溃 / 停止 / 出错后的「接着跑」：从库里取最新检查点，走与答完题同一个 `start_skill` 分支。
+#[test]
+fn a_crashed_turn_resumes_from_the_stored_checkpoint() {
+    use crate::manuscript::{ManuscriptStore, NewManuscript};
+    let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+    let manuscript = store
+        .create(
+            &NewManuscript {
+                content_markdown: "正文。\n".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let mut harness = Harness::new("正文。\n");
+    harness.store = Some(store);
+    harness.doc.manuscript_id = Some(manuscript);
+    harness.with_page(|page| page.sync_ai_session());
+    let session = harness.doc.ai_panel.session.id.clone();
+
+    let (id, request) = suspended_draft(&mut harness, "2025年1月1日");
+    // 检查点的外键挂在轮次上，先把这一轮存进会话（开跑前 `start_skill` 强制存的那一次）。
+    harness.with_page(|page| page.save_ai_session(true));
+    // 模拟后台线程落下的检查点（第一遍跑过了 clarify，崩在下一步之前）。
+    {
+        let store = harness.store.as_mut().unwrap();
+        let checkpoint = crate::agent::checkpoint::Checkpoint {
+            at: vec![1],
+            reason: crate::agent::checkpoint::Reason::Step,
+            label: "已完成 算子 clarify".into(),
+            board: crate::agent::board::Board {
+                request: "起草一份商洽函".into(),
+                workspace: "写到一半的工作稿".into(),
+                ..Default::default()
+            },
+            partial: false,
+        };
+        store
+            .save_run_checkpoint(
+                &session,
+                id as i64,
+                RESEARCH_DRAFT,
+                "hash",
+                false,
+                &checkpoint,
+            )
+            .unwrap();
+    }
+    // 用户在恢复前改了成文日期。
+    harness.doc.draft.date = "2026年10月7日".into();
+
+    harness.with_page(|page| page.resume_checkpoint(id));
+    let turn = harness.doc.ai_panel.turn_mut(id).expect("还是同一轮");
+    assert!(turn.state.running(), "接着跑了");
+    assert!(turn.run.is_none(), "检查点已带回后台");
+    assert!(
+        turn.notes.iter().any(|n| n.contains("已完成 算子 clarify")),
+        "任务流里插一行从哪儿接着跑：{:?}",
+        turn.notes
+    );
+    assert_eq!(
+        harness.doc.ai_panel.turns[0].content, "写到一半的工作稿",
+        "界面显示的工作稿回到检查点里的样子"
+    );
+    assert_eq!(
+        harness.doc.ai_panel.turns[0].request.as_ref().unwrap(),
+        &request,
+        "沿用发起时的请求"
+    );
+    assert!(harness.doc.busy);
+}
+
+/// 找不到检查点时不假装能续，状态栏说清楚。
+#[test]
+fn resuming_without_a_checkpoint_says_so_instead_of_pretending() {
+    use crate::manuscript::{ManuscriptStore, NewManuscript};
+    let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+    let manuscript = store
+        .create(
+            &NewManuscript {
+                content_markdown: "正文。\n".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let mut harness = Harness::new("正文。\n");
+    harness.store = Some(store);
+    harness.doc.manuscript_id = Some(manuscript);
+    harness.with_page(|page| page.sync_ai_session());
+    let (id, _) = suspended_draft(&mut harness, "2025年1月1日");
+    harness.with_page(|page| page.save_ai_session(true));
+
+    harness.with_page(|page| page.resume_checkpoint(id));
+    assert!(
+        harness.status.contains("没有找到检查点"),
+        "{}",
+        harness.status
+    );
+    let turn = harness.doc.ai_panel.turn_mut(id).expect("还是同一轮");
+    assert!(
+        !turn.state.running(),
+        "没有凭空跑起来，状态仍是 {:?}",
+        turn.state
+    );
+}
+
+/// 红线回归（验收 5）：从检查点续跑出来的工作稿，照样被关键事实比对挡下——
+/// 检查点存的现场不能绕过闸门直接落地（续跑与正常跑完是同一条 `Outcome::Done` 路径）。
+#[test]
+fn a_resumed_workspace_still_goes_through_the_key_fact_gate() {
+    use crate::agent::testkit::{Driver, KeywordKb, ScriptedModel};
+
+    let skill = crate::agent::skill::builtin(crate::agent::skill::POLISH).unwrap();
+    let model = ScriptedModel::new(|_, _| String::new());
+    let kb = KeywordKb::disabled();
+    // 检查点里存着的工作稿：正文里冒出材料没有的日期与人数。
+    let stored = crate::agent::board::Board {
+        request: "压一压".into(),
+        document: "原正文。\n".into(),
+        workspace: "# 关于开展安全生产检查的通知\n\n各单位定于2027年3月18日派出工作组共5人。\n"
+            .into(),
+        ..Default::default()
+    };
+    let mut driver = Driver::new(&skill, &model, &kb, stored.clone());
+    // 从检查点给的路径恢复（这里指向流程末尾，模拟「最后一步之后崩了」）。
+    assert!(driver.run_from(&[usize::MAX]).is_none(), "恢复后跑完了");
+
+    // 定稿闸门（`reviewed_draft` 之后的关键事实比对，Outcome::Done 分支里跑的那个）：
+    // 来源不明的日期与人数照样被记成变化。
+    let changes =
+        crate::ai_guard::compare_key_facts(&stored.document, &driver.board.workspace, &[]);
+    assert!(
+        changes.iter().any(|change| change.value.contains("2027")
+            && change.kind != crate::ai_guard::FactKind::Document),
+        "来源不明的日期照样被记成事实变化：{changes:?}"
+    );
+}
+
+/// 验收 6 的另一半：恢复时系统提示按现在重建（不含旧的历史块），后台再拼一次历史，
+/// 会话历史在 `system_prompt` 里只出现一次。
+#[test]
+fn the_session_history_lands_in_the_system_prompt_exactly_once_after_resuming() {
+    use crate::agent::board::Board;
+    let time = crate::prompt::TimeContext::now();
+    // 检查点里存的是第一遍跑完后拼过历史、又崩掉的 system_prompt。
+    let mut board = Board {
+        system_prompt: format!(
+            "{}\\n\\n【本会话之前的往来】\\n第一轮：写了通知",
+            crate::prompt::build_system_prompt(&time)
+        ),
+        history: "第一轮：写了通知".into(),
+        ..Board::default()
+    };
+    // 恢复：系统提示按现在重建（`refresh_from_ui` 覆盖掉旧的历史块）。
+    board.refresh_from_ui(&Default::default(), "", &time);
+    assert_eq!(
+        board.system_prompt.matches("【本会话之前的往来】").count(),
+        0,
+        "重建后的系统提示是干净的"
+    );
+    // 后台线程只再拼一次。
+    let with = crate::ai_panel::skill_job::with_history(&board.system_prompt, &board.history);
+    assert_eq!(
+        with.matches("【本会话之前的往来】").count(),
+        1,
+        "历史只出现一次：{with}"
+    );
+}

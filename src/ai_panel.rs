@@ -27,7 +27,7 @@ mod provenance;
 pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
 mod session_ui;
-mod skill_job;
+pub(crate) mod skill_job;
 mod ui;
 mod workspace_ui;
 
