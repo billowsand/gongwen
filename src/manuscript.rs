@@ -192,6 +192,12 @@ pub(crate) fn ensure_knowledge_schema(conn: &Connection) -> rusqlite::Result<()>
             "ALTER TABLE knowledge_docs ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
         )?;
     }
+    // 用户手动改过的标题不再被导入标题修正覆盖。
+    if !column_exists(conn, "knowledge_docs", "title_manual")? {
+        conn.execute_batch(
+            "ALTER TABLE knowledge_docs ADD COLUMN title_manual INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_knowledge_docs_hash ON knowledge_docs(content_hash)",
     )?;

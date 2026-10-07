@@ -47,7 +47,7 @@ mod style_settings;
 mod tabs;
 mod versioning;
 mod vocabulary;
-mod widgets;
+pub(crate) mod widgets;
 
 pub(crate) use ai_manage::AiSection;
 pub(crate) use ai_prompts::AiPromptDraft;
@@ -266,7 +266,10 @@ pub struct GongwenApp {
     pub(crate) knowledge_chunk_count: i64,
     pub(crate) knowledge_filter_kind: Option<TemplateKind>,
     pub(crate) knowledge_dirty: bool,
-    pub(crate) knowledge_delete_confirm: Option<i64>,
+    /// 待确认删除的知识库文档（单篇或批量）。
+    pub(crate) knowledge_delete_confirm: Option<Vec<i64>>,
+    /// 知识库页的子页签、文档列表筛选 / 排序 / 勾选、改标题框。
+    pub(crate) knowledge_list: crate::knowledge_ui::KnowledgeListState,
     /// 导入 / 索引进度：(done, total, current_title)。
     pub(crate) knowledge_index_progress: Option<(usize, usize, String)>,
     /// 进度条前的动作名：「正在导入」或「正在建立索引」。
@@ -421,13 +424,23 @@ impl GongwenApp {
             Err(error) => (None, Some(format!("稿件库路径获取失败：{error:#}"))),
         };
         // 知识库与稿件库同一文件、独立连接；打开失败同样不阻塞启动。
-        let (knowledge_store, knowledge_error) = match storage::manuscript_db_path() {
+        let (mut knowledge_store, knowledge_error) = match storage::manuscript_db_path() {
             Ok(path) => match knowledge::KnowledgeStore::open(&path) {
                 Ok(store) => (Some(store), None),
                 Err(error) => (None, Some(format!("知识库打开失败：{error:#}"))),
             },
             Err(error) => (None, Some(format!("知识库路径获取失败：{error:#}"))),
         };
+        // 按当前规则重算外部文件的标题，修正早先导入时识别错的；每次启动都跑，规则不变时不改动。
+        let knowledge_title_note = knowledge_store
+            .as_mut()
+            .and_then(|store| store.repair_import_titles().ok())
+            .filter(|fixed| *fixed > 0)
+            .map(|fixed| {
+                format!(
+                    "已修正 {fixed} 篇导入时识别错的文档标题；点「建立索引」让检索也用上新标题。"
+                )
+            });
         // 公文词表与稿件库、知识库同一文件、独立连接；打开失败同样不阻塞启动。
         let (lexicon_store, lexicon_error) = match storage::manuscript_db_path() {
             Ok(path) => match LexiconStore::open(&path) {
@@ -529,9 +542,10 @@ impl GongwenApp {
             knowledge_filter_kind: None,
             knowledge_dirty: true,
             knowledge_delete_confirm: None,
+            knowledge_list: Default::default(),
             knowledge_index_progress: None,
             knowledge_progress_verb: "正在建立索引",
-            knowledge_index_result: None,
+            knowledge_index_result: knowledge_title_note,
             knowledge_unindexed: 0,
             knowledge_test_query: String::new(),
             knowledge_test_results: Vec::new(),

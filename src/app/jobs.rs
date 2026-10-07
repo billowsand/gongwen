@@ -7,7 +7,6 @@ use crate::ai_panel::TurnState;
 use crate::app::{ExportOutcome, GongwenApp, KnowledgeImportDraft, KnowledgePreviewState};
 use crate::doc_import;
 use crate::draft_page::{DocKey, DraftSession};
-use crate::export;
 use crate::knowledge;
 use crate::lmstudio;
 use crate::manuscript_io;
@@ -604,7 +603,7 @@ impl GongwenApp {
                     source_manuscript_id: None,
                     source_path: path.display().to_string(),
                     kind,
-                    title: export::extract_title(&content, &stem),
+                    title: knowledge::import_title(&content, &stem),
                     content_markdown: content,
                 };
                 match store.import_document(&item) {
@@ -821,18 +820,35 @@ impl GongwenApp {
         });
     }
 
-    /// 删除一篇知识库文档。
-    pub(crate) fn knowledge_delete(&mut self, id: i64) {
+    /// 删除知识库文档（单篇或批量），并从勾选里去掉。
+    pub(crate) fn knowledge_delete(&mut self, ids: &[i64]) {
         if let Some(store) = self.knowledge_store.as_mut() {
-            match store.delete_document(id) {
-                Ok(()) => {
-                    self.status = "已从知识库删除。".into();
+            match store.delete_documents(ids) {
+                Ok(removed) => {
+                    self.status = format!("已从知识库删除 {removed} 篇。");
+                    for id in ids {
+                        self.knowledge_list.selected.remove(id);
+                    }
                     self.knowledge_dirty = true;
                 }
                 Err(error) => self.status = format!("删除失败：{error:#}"),
             }
         }
         self.knowledge_delete_confirm = None;
+    }
+
+    /// 改知识库文档标题；成功后该篇转为待索引（理由见 `rename_document`）。
+    pub(crate) fn knowledge_rename(&mut self, id: i64, title: &str) {
+        if let Some(store) = self.knowledge_store.as_mut() {
+            match store.rename_document(id, title) {
+                Ok(()) => {
+                    self.status = "标题已修改；点「建立索引」让检索也用上新标题。".into();
+                    self.knowledge_dirty = true;
+                }
+                Err(error) => self.status = format!("改标题失败：{error:#}"),
+            }
+        }
+        self.knowledge_list.rename = None;
     }
 
     /// 打开知识库文档预览弹窗：从库里读出标题、文种、原文。

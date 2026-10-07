@@ -58,6 +58,69 @@ pub fn content_hash(markdown: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// 外部文件导入时的标题：取正文首个 `# ` 标题；它以冒号结尾、下一行又是标题时，
+/// 是 PDF 转换把「主标题：副标题」拆成了两行，拼回去；识别得不像标题（见
+/// [`is_poor_title`]）或没有标题时用文件名。
+///
+/// 长标题不算坏标题：论文的完整题目常有一百多字符，而文件名多是
+/// `ssrn-6447919.pdf` 这种编号，换过去反而看不懂。
+pub fn import_title(markdown: &str, file_stem: &str) -> String {
+    let stem = file_stem.trim();
+    let mut lines = markdown
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let Some(heading) = lines
+        .by_ref()
+        .find_map(|line| line.strip_prefix("# ").map(clean_heading))
+        .filter(|heading| !heading.is_empty())
+    else {
+        return if stem.is_empty() {
+            "未命名公文".to_string()
+        } else {
+            stem.to_string()
+        };
+    };
+    if heading.ends_with(['：', ':'])
+        && let Some(subtitle) = lines
+            .next()
+            .filter(|line| line.starts_with('#'))
+            .map(|line| clean_heading(line.trim_start_matches('#')))
+        && !subtitle.is_empty()
+        && subtitle.chars().count() <= 60
+        && !is_poor_title(&subtitle)
+    {
+        return format!("{heading}{subtitle}");
+    }
+    if is_poor_title(&heading) && !stem.is_empty() {
+        stem.to_string()
+    } else {
+        heading
+    }
+}
+
+/// 去掉标题两端空白与 PDF 转换带出的脚注记号（`￥`、`*`、`†` 等）。
+fn clean_heading(line: &str) -> String {
+    line.trim()
+        .trim_end_matches(['￥', '*', '†', '‡', '#'])
+        .trim()
+        .to_string()
+}
+
+/// 从转换稿里取出的首个 `# ` 标题是否不像一篇文档的标题。电子书、网页转出来的
+/// Markdown 常把目录链接（`[](#toc.xhtml…)`）、`{.copyright_}` 这类属性块、
+/// 孤立的「•」「1」排在最前面，拿来当标题整库都看不懂。
+pub fn is_poor_title(title: &str) -> bool {
+    let title = title.trim();
+    // 链接、HTML / 属性残留。
+    const MARKUP: [&str; 6] = ["](", "[[", "{", "}", "=\"", "<"];
+    if MARKUP.iter().any(|mark| title.contains(mark)) {
+        return true;
+    }
+    // 几乎没有文字（只剩标点、符号或一个字）。
+    title.chars().filter(|c| c.is_alphanumeric()).count() < 2
+}
+
 /// 文档来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeSource {
@@ -485,11 +548,78 @@ impl KnowledgeStore {
         Ok(out)
     }
 
-    /// 删除一篇文档（chunks 级联清除，FTS 由触发器同步）。
-    pub fn delete_document(&mut self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM knowledge_docs WHERE id = ?1", params![id])?;
+    /// 删除一批文档（chunks 级联清除，FTS 由触发器同步）。一个事务，要么全删要么不删。
+    pub fn delete_documents(&mut self, ids: &[i64]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut removed = 0;
+        {
+            let mut stmt = tx.prepare("DELETE FROM knowledge_docs WHERE id = ?1")?;
+            for id in ids {
+                removed += stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// 用户改标题。标题拼在每个切块的检索文本里（见 `index_text`），旧索引还带着
+    /// 旧标题，所以有索引的文档改名后标成待索引（`embed_model` 清空），由「建立索引」
+    /// 重做；重做前旧切块照常参与检索。记下 `title_manual`，导入标题修正不再覆盖它。
+    pub fn rename_document(&mut self, id: i64, title: &str) -> Result<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            anyhow::bail!("标题不能为空");
+        }
+        let updated = self.conn.execute(
+            "UPDATE knowledge_docs SET title = ?1, title_manual = 1, embed_model = '', updated_at = ?2
+             WHERE id = ?3",
+            params![title, Self::now(), id],
+        )?;
+        if updated == 0 {
+            anyhow::bail!("文档已不在知识库中");
+        }
         Ok(())
+    }
+
+    /// 按当前规则（[`import_title`]）重算外部文件的标题，修正早先导入时识别错的
+    /// （目录链接、属性块、孤立标点、拆成两行的主副标题）。用户手改过的不动；
+    /// 规则不变时重跑不改任何一篇。改了的同样标成待索引，理由见
+    /// [`Self::rename_document`]。返回修正篇数。
+    pub fn repair_import_titles(&mut self) -> Result<usize> {
+        let candidates: Vec<(i64, String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, title, source_path, content_markdown FROM knowledge_docs
+                 WHERE source = 'markdown' AND title_manual = 0",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let fixes: Vec<(i64, String)> = candidates
+            .into_iter()
+            .filter_map(|(id, title, path, content)| {
+                let stem = Path::new(&path)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let expected = import_title(&content, &stem);
+                (expected != title).then_some((id, expected))
+            })
+            .collect();
+        if fixes.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt =
+                tx.prepare("UPDATE knowledge_docs SET title = ?1, embed_model = '' WHERE id = ?2")?;
+            for (id, title) in &fixes {
+                stmt.execute(params![title, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(fixes.len())
     }
 
     /// 清空全部知识库文档（重建索引前用）。
@@ -771,7 +901,7 @@ mod tests {
             .replace_document(&meta("乙函"), &[chunk(0, "一", None), chunk(1, "二", None)])
             .unwrap();
         assert_eq!(s.count_chunks().unwrap(), 2);
-        s.delete_document(id).unwrap();
+        s.delete_documents(&[id]).unwrap();
         assert_eq!(s.count_chunks().unwrap(), 0, "删文档应级联清块");
     }
 
@@ -947,5 +1077,105 @@ mod tests {
         let only_letter = s.list_docs(Some(TemplateKind::OfficialLetter)).unwrap();
         assert_eq!(only_letter.len(), 1);
         assert_eq!(only_letter[0].title, "公函");
+    }
+
+    #[test]
+    fn poor_titles_fall_back_to_file_name() {
+        for bad in [
+            "[]{#004_toc_Contents.xhtml#page_vii .pagebreak role=\"doc-pagebreak\"}Contents",
+            "{.copyright_}",
+            "•",
+            "1",
+            "世",
+        ] {
+            assert!(is_poor_title(bad), "{bad} 应判为不像标题");
+            assert_eq!(
+                import_title(&format!("# {bad}\n\n正文"), "文件名"),
+                "文件名"
+            );
+        }
+        // 长标题照用：论文全题常过百字符，文件名却多是 `ssrn-6447919.pdf` 这类编号。
+        let long = "Information Warfare and the Contest for Strategic Truth: Implications for Security, Diplomacy";
+        for good in ["关于开展安全生产检查的通知", "Cognitive Superiority", long] {
+            assert!(!is_poor_title(good), "{good} 是正常标题");
+            assert_eq!(
+                import_title(&format!("# {good}\n\n正文"), "ssrn-6502639.pdf"),
+                good
+            );
+        }
+        // 没有 `# ` 标题时照旧用文件名。
+        assert_eq!(import_title("正文", "文件名"), "文件名");
+        assert_eq!(import_title("正文", ""), "未命名公文");
+    }
+
+    #[test]
+    fn split_title_and_subtitle_are_joined() {
+        // PDF 转换把「主标题：副标题」拆成两个标题行，副标题尾巴还挂着脚注记号。
+        let md = "# 话语操控与场景传播：\n# 乌克兰危机中美国主流媒体对俄舆论战 ￥\n任 华\n\n正文";
+        assert_eq!(
+            import_title(md, "EAST202303004"),
+            "话语操控与场景传播：乌克兰危机中美国主流媒体对俄舆论战"
+        );
+        // 下一行是正文就不拼，冒号标题原样保留。
+        let md = "# 背景：\n这里是正文，不是副标题。";
+        assert_eq!(import_title(md, "文件名"), "背景：");
+    }
+
+    #[test]
+    fn rename_marks_reindex_and_survives_repair() {
+        let mut s = store();
+        let id = s
+            .replace_document(&meta("甲函"), &[chunk(0, "一", None)])
+            .unwrap();
+        assert!(s.rename_document(id, "  ").is_err(), "空标题应拒绝");
+        s.rename_document(id, "改过的标题：").unwrap();
+        let doc = &s.list_docs(None).unwrap()[0];
+        assert_eq!(doc.title, "改过的标题：");
+        assert_eq!(doc.embed_model, "", "改名后应转为待索引");
+        assert_eq!(doc.chunk_count, 1, "旧切块保留，重建前照常可检索");
+        assert_eq!(s.unindexed_doc_ids().unwrap(), vec![id]);
+        // 用户手改的标题哪怕“不像标题”，修正也不动它。
+        assert_eq!(s.repair_import_titles().unwrap(), 0);
+        assert!(s.rename_document(id + 100, "x").is_err());
+    }
+
+    #[test]
+    fn repair_import_titles_uses_file_stem_once() {
+        let mut s = store();
+        let mut bad = meta("·");
+        bad.source_path = "/tmp/数字冷战再审视.md".into();
+        s.replace_document(&bad, &[chunk(0, "一", None)]).unwrap();
+        s.replace_document(&meta("甲函"), &[chunk(0, "二", None)])
+            .unwrap();
+        assert_eq!(s.repair_import_titles().unwrap(), 1);
+        let docs = s.list_docs(None).unwrap();
+        let fixed = docs
+            .iter()
+            .find(|doc| doc.title == "数字冷战再审视")
+            .unwrap();
+        assert_eq!(fixed.embed_model, "", "修正后的标题要重建索引才进检索文本");
+        let kept = docs.iter().find(|doc| doc.title == "甲函").unwrap();
+        assert_eq!(kept.embed_model, "test-embed");
+        assert_eq!(s.repair_import_titles().unwrap(), 0, "修正应幂等");
+        // 稿件库来源的标题由稿件维护，不参与重算。
+        let mut from_manuscript = meta("·");
+        from_manuscript.source = KnowledgeSource::Manuscript;
+        from_manuscript.source_manuscript_id = Some(7);
+        from_manuscript.content_markdown = "# 稿件正文".into();
+        from_manuscript.content_hash = content_hash("# 稿件正文");
+        s.replace_document(&from_manuscript, &[]).unwrap();
+        assert_eq!(s.repair_import_titles().unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_documents_removes_batch() {
+        let mut s = store();
+        let a = s.replace_document(&meta("甲函"), &[]).unwrap();
+        let b = s.replace_document(&meta("乙函"), &[]).unwrap();
+        s.replace_document(&meta("丙函"), &[]).unwrap();
+        assert_eq!(s.delete_documents(&[a, b, 9999]).unwrap(), 2);
+        let docs = s.list_docs(None).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].title, "丙函");
     }
 }

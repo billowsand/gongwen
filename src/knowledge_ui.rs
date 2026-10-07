@@ -1,13 +1,17 @@
-//! 知识库页：文档的分组列表、导入（外部文档 / 库内稿件）、建立与重建索引、删除、
-//! 检索测试。导入只存正文，索引另点按钮建立，两步分开。从 app.rs 拆出以控制体积；通过 `GongwenApp` 上的 `pub(crate)` 字段
+//! 知识库页：文档列表（筛选、排序、批量删除、改标题）、导入（外部文档 / 库内稿件）、
+//! 建立与重建索引、检索与问答。导入只存正文，索引另点按钮建立，两步分开。从 app.rs 拆出以控制体积；通过 `GongwenApp` 上的 `pub(crate)` 字段
 //! 与方法读写状态。
 
+use crate::app::widgets::{centered_cell_text, centered_header, short_date};
 use crate::app::{GongwenApp, KnowledgeMode};
+use crate::knowledge::KnowledgeDocRow;
 use crate::modal::{self, Dismiss};
 use crate::models::TemplateKind;
 use crate::qa;
 use crate::theme;
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
+use std::collections::HashSet;
 
 /// 知识库页入口。
 pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
@@ -46,16 +50,69 @@ pub(crate) fn knowledge_ui(app: &mut GongwenApp, ui: &mut egui::Ui) {
         ui.add_space(4.0);
     }
 
-    // 检索区固定显示在列表上方，导入多少数据都看得到、随时可用。
-    search_panel(app, ui);
-    ui.add_space(8.0);
-
-    // 文档列表吃掉剩余高度：写死高度在窗口拉高时留大片空白、压矮时又够不着底部。
-    ui.label(egui::RichText::new("库内文档").strong());
-    ui.add_space(4.0);
-    doc_list(app, ui);
+    // 文档与检索问答分两个子页签，各占满整页高度：放在一页里时列表只分到
+    // 下半截，文档一多就只能在一条窄缝里滚。
+    page_tabs(app, ui);
+    ui.add_space(6.0);
+    match app.knowledge_list.tab {
+        KnowledgeTab::Docs => doc_tab(app, ui),
+        KnowledgeTab::Search => search_panel(app, ui),
+    }
     import_dialog(app, ui);
     delete_confirm(app, ui);
+    rename_dialog(app, ui);
+}
+
+/// 知识库页的子页签。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum KnowledgeTab {
+    #[default]
+    Docs,
+    Search,
+}
+
+/// 文档列表的排序方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DocSort {
+    #[default]
+    UpdatedDesc,
+    Title,
+    ChunksDesc,
+}
+
+impl DocSort {
+    const ALL: [Self; 3] = [Self::UpdatedDesc, Self::Title, Self::ChunksDesc];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::UpdatedDesc => "最近更新",
+            Self::Title => "标题",
+            Self::ChunksDesc => "块数最多",
+        }
+    }
+}
+
+/// 知识库页的界面状态：子页签、文档列表的筛选 / 排序 / 勾选、改标题框。
+#[derive(Debug, Default)]
+pub(crate) struct KnowledgeListState {
+    pub(crate) tab: KnowledgeTab,
+    /// 标题 / 来源路径筛选词，只在内存里过滤列表，不走检索。
+    pub(crate) filter: String,
+    pub(crate) sort: DocSort,
+    pub(crate) only_unindexed: bool,
+    /// 勾选的文档 id。批量操作只作用于其中当前列出的那些。
+    pub(crate) selected: HashSet<i64>,
+    /// 正在改标题的文档：(id, 编辑中的标题)。
+    pub(crate) rename: Option<(i64, String)>,
+}
+
+fn page_tabs(app: &mut GongwenApp, ui: &mut egui::Ui) {
+    let count = app.knowledge_docs.len();
+    ui.horizontal(|ui| {
+        let tab = &mut app.knowledge_list.tab;
+        ui.selectable_value(tab, KnowledgeTab::Docs, format!("文档（{count}）"));
+        ui.selectable_value(tab, KnowledgeTab::Search, "检索 / 问答");
+    });
 }
 
 fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
@@ -166,78 +223,262 @@ fn index_status(app: &mut GongwenApp, ui: &mut egui::Ui) {
     }
 }
 
-fn doc_list(app: &mut GongwenApp, ui: &mut egui::Ui) {
+fn doc_tab(app: &mut GongwenApp, ui: &mut egui::Ui) {
     if app.knowledge_docs.is_empty() {
         theme::card().show(ui, |ui| {
             ui.weak("知识库还是空的。点右上角「导入文档」选本机公文（Word、PDF 电子版、Markdown 等），或到「稿件管理」勾选稿件后用工具栏的「导入到知识库」；导入后再点「建立索引」，就能检索与问答了。");
         });
         return;
     }
-    // 吃掉剩余高度，不写死——写死的高度在窗口拉高时留白、压矮时够不着底部。
-    egui::ScrollArea::vertical()
-        .id_salt("knowledge_doc_list")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let mut delete_pending = None;
-            // 借出 docs 拷贝，避免遍历与 delete 冲突。
-            let docs = app.knowledge_docs.clone();
-            for doc in &docs {
-                theme::card().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        theme::chip(ui, doc.kind.label(), theme::accent(), theme::surface_sunk());
-                        ui.label(egui::RichText::new(&doc.title).strong());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add(theme::icon_text_button(theme::Icon::Trash, "删除"))
-                                .clicked()
-                            {
-                                delete_pending = Some(doc.id);
-                            }
-                            if doc.embed_model.is_empty() {
-                                ui.colored_label(theme::warn(), "未索引");
-                            } else {
-                                ui.weak(format!("{} 块", doc.chunk_count));
-                            }
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        let source_label = if doc.source == "manuscript" {
-                            "稿件库"
-                        } else {
-                            "外部文件"
-                        };
-                        // 悬停看具体出处：外部文件给完整路径，稿件给稿件编号。
-                        let origin = match doc.source_manuscript_id {
-                            Some(id) => format!("稿件 #{id}"),
-                            None => doc.source_path.clone(),
-                        };
-                        let source = ui.weak(format!("来源：{source_label}"));
-                        if !origin.is_empty() {
-                            source.on_hover_text(origin);
-                        }
-                        ui.separator();
-                        ui.weak(format!(
-                            "嵌入模型：{}",
-                            if doc.embed_model.is_empty() {
-                                "—"
-                            } else {
-                                &doc.embed_model
-                            }
-                        ));
-                        ui.separator();
-                        ui.weak(format!(
-                            "更新：{}",
-                            doc.updated_at.get(..10).unwrap_or(&doc.updated_at)
-                        ));
-                    });
-                });
-                ui.add_space(4.0);
+    let visible = visible_docs(&app.knowledge_docs, &app.knowledge_list);
+    let visible_ids: Vec<i64> = visible.iter().map(|&i| app.knowledge_docs[i].id).collect();
+    doc_list_bar(app, ui, &visible_ids);
+    ui.add_space(4.0);
+    if visible.is_empty() {
+        ui.add_space(8.0);
+        ui.weak("没有符合筛选条件的文档。");
+        return;
+    }
+    match doc_table(app, ui, &visible, &visible_ids) {
+        Some(DocAction::Preview(id)) => app.knowledge_open_preview(id),
+        Some(DocAction::Rename(id, title)) => app.knowledge_list.rename = Some((id, title)),
+        Some(DocAction::Delete(id)) => app.knowledge_delete_confirm = Some(vec![id]),
+        None => {}
+    }
+}
+
+/// 列表里一行触发的动作，表格画完再执行，免得边遍历边改。
+enum DocAction {
+    Preview(i64),
+    Rename(i64, String),
+    Delete(i64),
+}
+
+/// 按筛选条件与排序给出可见文档在 `docs` 里的下标。每帧现算：几千篇也只是
+/// 一遍子串匹配加一次排序，不值得做缓存与失效。
+fn visible_docs(docs: &[KnowledgeDocRow], list: &KnowledgeListState) -> Vec<usize> {
+    let needle = list.filter.trim().to_lowercase();
+    let mut visible: Vec<usize> = docs
+        .iter()
+        .enumerate()
+        .filter(|(_, doc)| !list.only_unindexed || doc.embed_model.is_empty())
+        .filter(|(_, doc)| {
+            needle.is_empty()
+                || doc.title.to_lowercase().contains(&needle)
+                || doc.source_path.to_lowercase().contains(&needle)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    match list.sort {
+        // 库里取出来就是按更新时间倒序。
+        DocSort::UpdatedDesc => {}
+        DocSort::Title => visible.sort_by(|&a, &b| docs[a].title.cmp(&docs[b].title)),
+        DocSort::ChunksDesc => {
+            visible.sort_by(|&a, &b| docs[b].chunk_count.cmp(&docs[a].chunk_count))
+        }
+    }
+    visible
+}
+
+/// 列表上方一行：筛选框、排序、只看未索引；勾选了文档时右侧出批量操作。
+fn doc_list_bar(app: &mut GongwenApp, ui: &mut egui::Ui, visible_ids: &[i64]) {
+    let total = app.knowledge_docs.len();
+    let selected: Vec<i64> = visible_ids
+        .iter()
+        .copied()
+        .filter(|id| app.knowledge_list.selected.contains(id))
+        .collect();
+    ui.horizontal(|ui| {
+        let list = &mut app.knowledge_list;
+        ui.add(
+            egui::TextEdit::singleline(&mut list.filter)
+                .hint_text("按标题或文件路径筛选")
+                .desired_width(240.0),
+        );
+        if !list.filter.is_empty()
+            && theme::icon_button(ui, theme::Icon::SearchClear, "清除筛选").clicked()
+        {
+            list.filter.clear();
+        }
+        egui::ComboBox::from_id_salt("knowledge_doc_sort")
+            .selected_text(format!("排序：{}", list.sort.label()))
+            .show_ui(ui, |ui| {
+                for sort in DocSort::ALL {
+                    ui.selectable_value(&mut list.sort, sort, sort.label());
+                }
+            });
+        ui.checkbox(&mut list.only_unindexed, "只看未索引")
+            .on_hover_text("只列出还没建索引、或改过标题待重建索引的文档");
+        if visible_ids.len() != total {
+            ui.weak(format!("{} / {total} 篇", visible_ids.len()));
+        }
+        if selected.is_empty() {
+            return;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(theme::warning_icon_button(
+                    theme::Icon::Trash,
+                    &format!("删除所选（{}）", selected.len()),
+                ))
+                .clicked()
+            {
+                app.knowledge_delete_confirm = Some(selected.clone());
             }
-            if let Some(id) = delete_pending {
-                app.knowledge_delete_confirm = Some(id);
+            if ui.button("取消选择").clicked() {
+                for id in &selected {
+                    app.knowledge_list.selected.remove(id);
+                }
             }
         });
+    });
+}
+
+/// 文档表格：一篇一行，只画可视区里的行（`TableBuilder` 按固定行高虚拟滚动），
+/// 上千篇也不卡。标题列吃剩余宽度并截断，右侧状态与操作列宽度固定，标题再长
+/// 也挤不掉按钮——旧的卡片列表里超长标题会把「删除」挤出卡片，还把整个滚动区
+/// 撑宽，连带后面所有卡片的按钮都跑到可视区外。
+fn doc_table(
+    app: &mut GongwenApp,
+    ui: &mut egui::Ui,
+    visible: &[usize],
+    visible_ids: &[i64],
+) -> Option<DocAction> {
+    const ROW_HEIGHT: f32 = 28.0;
+    let busy = app.knowledge_busy;
+    let docs = &app.knowledge_docs;
+    let selected = &mut app.knowledge_list.selected;
+    let mut action = None;
+    TableBuilder::new(ui)
+        .id_salt("knowledge_doc_table")
+        .striped(true)
+        .auto_shrink([false, false])
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::auto().at_least(28.0)) // 勾选
+        .column(Column::exact(96.0)) // 文种
+        .column(Column::remainder().at_least(160.0).clip(true)) // 标题
+        .column(Column::exact(72.0)) // 块数 / 索引状态
+        .column(Column::exact(96.0)) // 更新
+        .column(Column::exact(72.0)) // 操作
+        .header(ROW_HEIGHT, |mut header| {
+            let mut all_selected =
+                !visible_ids.is_empty() && visible_ids.iter().all(|id| selected.contains(id));
+            header.col(|ui| {
+                if ui
+                    .checkbox(&mut all_selected, "")
+                    .on_hover_text(if all_selected {
+                        "取消选择当前列出的全部文档"
+                    } else {
+                        "选择当前列出的全部文档"
+                    })
+                    .changed()
+                {
+                    for id in visible_ids {
+                        if all_selected {
+                            selected.insert(*id);
+                        } else {
+                            selected.remove(id);
+                        }
+                    }
+                }
+            });
+            header.col(|ui| {
+                centered_header(ui, "文种");
+            });
+            header.col(|ui| {
+                ui.strong("标题");
+            });
+            header.col(|ui| {
+                centered_header(ui, "块数");
+            });
+            header.col(|ui| {
+                centered_header(ui, "更新");
+            });
+            header.col(|ui| {
+                centered_header(ui, "操作");
+            });
+        })
+        .body(|body| {
+            body.rows(ROW_HEIGHT, visible.len(), |mut row| {
+                let doc = &docs[visible[row.index()]];
+                let mut checked = selected.contains(&doc.id);
+                row.set_selected(checked);
+                row.col(|ui| {
+                    if ui.checkbox(&mut checked, "").changed() {
+                        if checked {
+                            selected.insert(doc.id);
+                        } else {
+                            selected.remove(&doc.id);
+                        }
+                    }
+                });
+                row.col(|ui| {
+                    centered_cell_text(ui, doc.kind.label());
+                });
+                row.col(|ui| {
+                    // 标题左对齐、单行截断；点一下预览全文。
+                    let title = egui::Label::new(egui::RichText::new(&doc.title).strong())
+                        .truncate()
+                        .sense(egui::Sense::click());
+                    if ui
+                        .add(title)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_ui(|ui| doc_tooltip(ui, doc))
+                        .clicked()
+                    {
+                        action = Some(DocAction::Preview(doc.id));
+                    }
+                });
+                row.col(|ui| {
+                    if !doc.embed_model.is_empty() {
+                        centered_cell_text(ui, doc.chunk_count.to_string());
+                    } else if doc.chunk_count > 0 {
+                        centered_cell_text(ui, egui::RichText::new("待重建").color(theme::warn()))
+                            .on_hover_text("标题改过，检索暂用旧索引；点「建立索引」更新");
+                    } else {
+                        centered_cell_text(ui, egui::RichText::new("未索引").color(theme::warn()))
+                            .on_hover_text("还没建立索引，检索与问答用不到；点「建立索引」");
+                    }
+                });
+                row.col(|ui| {
+                    centered_cell_text(ui, short_date(&doc.updated_at));
+                });
+                row.col(|ui| {
+                    // 索引任务会回写同一篇的 embed_model，与改名交错会把「待重建」冲掉。
+                    if theme::icon_button_enabled(ui, !busy, theme::Icon::PencilLine, "改标题")
+                        .clicked()
+                    {
+                        action = Some(DocAction::Rename(doc.id, doc.title.clone()));
+                    }
+                    if theme::danger_icon_button(ui, theme::Icon::Trash, "删除").clicked() {
+                        action = Some(DocAction::Delete(doc.id));
+                    }
+                });
+            });
+        });
+    action
+}
+
+/// 标题悬停：完整标题与出处、嵌入模型这些不常看的信息，省得每篇多占一行。
+fn doc_tooltip(ui: &mut egui::Ui, doc: &KnowledgeDocRow) {
+    ui.label(egui::RichText::new(&doc.title).strong());
+    // 外部文件给完整路径，稿件给稿件编号。
+    let origin = match (doc.source.as_str(), doc.source_manuscript_id) {
+        ("manuscript", Some(id)) => format!("稿件库 · 稿件 #{id}"),
+        ("manuscript", None) => "稿件库".to_string(),
+        _ if doc.source_path.is_empty() => "外部文件".to_string(),
+        _ => format!("外部文件 · {}", doc.source_path),
+    };
+    ui.weak(format!("来源：{origin}"));
+    ui.weak(format!(
+        "嵌入模型：{}",
+        if doc.embed_model.is_empty() {
+            "—"
+        } else {
+            &doc.embed_model
+        }
+    ));
+    ui.weak("点击预览全文");
 }
 
 /// 输入区：模式切换（检索 / 问答）共用一个输入框，hint、按钮文字与回车行为
@@ -349,10 +590,9 @@ fn search_results(app: &mut GongwenApp, ui: &mut egui::Ui) {
         return;
     }
 
-    // 结果区限高滚动：它在页面中部，高度跟着窗口走会把下方的文档列表挤没，
-    // 所以这里按可用高度的一半自适应，并留出底部列表的最小可视高度。
+    // 检索问答独占一个子页签，结果区吃满剩余高度；减去的是外层卡片的下内边距。
     let results = app.knowledge_test_results.clone();
-    let max_height = (ui.available_height() - 180.0).clamp(140.0, 420.0);
+    let max_height = (ui.available_height() - 16.0).max(140.0);
     egui::ScrollArea::vertical()
         .id_salt("knowledge_search_results")
         .max_height(max_height)
@@ -399,9 +639,9 @@ fn qa_chat(app: &mut GongwenApp, ui: &mut egui::Ui) {
         }
         return;
     }
-    // 与检索结果区同样的限高策略，把底部文档列表的可视空间留出来。
+    // 与检索结果区同样吃满剩余高度。
     let history = app.knowledge_qa_history.clone();
-    let max_height = (ui.available_height() - 180.0).clamp(140.0, 420.0);
+    let max_height = (ui.available_height() - 16.0).max(140.0);
     egui::ScrollArea::vertical()
         .id_salt("knowledge_qa_history")
         .max_height(max_height)
@@ -463,20 +703,20 @@ fn qa_answer_card(app: &mut GongwenApp, ui: &mut egui::Ui, index: usize, turn: &
 /// 折叠区里的一条引用：出处行 + 片段摘录，可预览整篇文档。
 fn qa_ref_row(app: &mut GongwenApp, ui: &mut egui::Ui, chunk: &crate::rag::RetrievedChunk) {
     ui.horizontal(|ui| {
-        theme::chip(
-            ui,
-            chunk.kind.label(),
-            theme::accent(),
-            theme::surface_sunk(),
-        );
-        ui.label(egui::RichText::new(&chunk.doc_title).strong());
-        if !chunk.section.trim().is_empty() {
-            ui.weak(format!("· {}", chunk.section));
-        }
+        // 与文档列表同理：先排右侧按钮，出处占剩余宽度并截断。
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if theme::icon_button(ui, theme::Icon::Eye, "预览该文档").clicked() {
                 app.knowledge_open_preview(chunk.doc_id);
             }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                theme::chip(
+                    ui,
+                    chunk.kind.label(),
+                    theme::accent(),
+                    theme::surface_sunk(),
+                );
+                chunk_origin(ui, chunk);
+            });
         });
     });
     ui.label(egui::RichText::new(truncate_chars(&chunk.text, 120)).color(theme::text_soft()));
@@ -502,23 +742,7 @@ fn result_card(
     theme::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            // 排名徽章。
-            let (bg, fg) = if index == 0 {
-                (theme::accent(), egui::Color32::WHITE)
-            } else {
-                (theme::surface_sunk(), theme::text_soft())
-            };
-            theme::chip(ui, &format!("#{}", index + 1), fg, bg);
-            theme::chip(
-                ui,
-                chunk.kind.label(),
-                theme::accent(),
-                theme::surface_sunk(),
-            );
-            ui.label(egui::RichText::new(&chunk.doc_title).strong());
-            if !chunk.section.trim().is_empty() {
-                ui.weak(format!("· {}", chunk.section));
-            }
+            // 先排右侧按钮与分数，出处占剩余宽度并截断（理由见 doc_list）。
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // 预览整篇文档（公文版式）。
                 if theme::icon_button(ui, theme::Icon::Eye, "预览该文档").clicked() {
@@ -529,6 +753,22 @@ fn result_card(
                         .strong()
                         .color(theme::accent()),
                 );
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // 排名徽章。
+                    let (bg, fg) = if index == 0 {
+                        (theme::accent(), egui::Color32::WHITE)
+                    } else {
+                        (theme::surface_sunk(), theme::text_soft())
+                    };
+                    theme::chip(ui, &format!("#{}", index + 1), fg, bg);
+                    theme::chip(
+                        ui,
+                        chunk.kind.label(),
+                        theme::accent(),
+                        theme::surface_sunk(),
+                    );
+                    chunk_origin(ui, chunk);
+                });
             });
         });
         ui.label(egui::RichText::new(truncate_chars(&chunk.text, 220)).color(theme::text_soft()));
@@ -596,8 +836,19 @@ fn import_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
 }
 
 fn delete_confirm(app: &mut GongwenApp, ui: &mut egui::Ui) {
-    let Some(id) = app.knowledge_delete_confirm else {
+    let Some(ids) = app.knowledge_delete_confirm.clone() else {
         return;
+    };
+    let message = match ids.as_slice() {
+        [id] => {
+            let title = app
+                .knowledge_docs
+                .iter()
+                .find(|doc| doc.id == *id)
+                .map_or("这篇文档", |doc| doc.title.as_str());
+            format!("确定把《{}》从知识库删除吗？", truncate_chars(title, 40))
+        }
+        _ => format!("确定把所选的 {} 篇文档从知识库删除吗？", ids.len()),
     };
     let dialog = modal::dialog(
         ui.ctx(),
@@ -606,7 +857,8 @@ fn delete_confirm(app: &mut GongwenApp, ui: &mut egui::Ui) {
         380.0,
         Dismiss::EscOrBackdrop,
         |ui| {
-            ui.label("确定把这篇文档从知识库删除吗？其切块与索引一并清除，不影响稿件库原件。");
+            ui.label(message);
+            ui.weak("切块与索引一并清除，不影响稿件库原件与本机文件。");
             ui.add_space(10.0);
             let mut confirm = false;
             ui.horizontal(|ui| {
@@ -624,10 +876,85 @@ fn delete_confirm(app: &mut GongwenApp, ui: &mut egui::Ui) {
         },
     );
     if dialog.inner {
-        app.knowledge_delete(id);
+        app.knowledge_delete(&ids);
     } else if dialog.dismissed {
         app.knowledge_delete_confirm = None;
     }
+}
+
+fn rename_dialog(app: &mut GongwenApp, ui: &mut egui::Ui) {
+    let Some((id, title)) = app.knowledge_list.rename.as_mut() else {
+        return;
+    };
+    let id = *id;
+    let dialog = modal::dialog(
+        ui.ctx(),
+        egui::Id::new("knowledge_rename"),
+        "修改文档标题",
+        460.0,
+        Dismiss::EscOrBackdrop,
+        |ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(title)
+                    .hint_text("文档标题")
+                    .desired_width(ui.available_width()),
+            );
+            // 打开即可输入；失焦那一帧不抢回来，免得按回车后又被拉回输入框。
+            if !response.has_focus() && !response.lost_focus() {
+                response.request_focus();
+            }
+            let enter =
+                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            ui.add_space(4.0);
+            ui.weak("标题参与检索：改完这篇转为「待重建」，点「建立索引」后检索才用上新标题。");
+            ui.add_space(10.0);
+            let valid = !title.trim().is_empty();
+            let mut save = enter && valid;
+            ui.horizontal(|ui| {
+                if ui.add_enabled(valid, egui::Button::new("保存")).clicked() {
+                    save = true;
+                }
+                if ui.button("取消").clicked() {
+                    ui.close();
+                }
+            });
+            save.then(|| title.clone())
+        },
+    );
+    if let Some(title) = dialog.inner {
+        app.knowledge_rename(id, &title);
+    } else if dialog.dismissed {
+        app.knowledge_list.rename = None;
+    }
+}
+
+/// 片段出处「标题 · 小节」：合成一行截断，悬停看全文。
+fn chunk_origin(ui: &mut egui::Ui, chunk: &crate::rag::RetrievedChunk) {
+    let section = chunk.section.trim();
+    let mut job = egui::text::LayoutJob::default();
+    let style = ui.style();
+    egui::RichText::new(&chunk.doc_title).strong().append_to(
+        &mut job,
+        style,
+        egui::FontSelection::Default,
+        egui::Align::Center,
+    );
+    if !section.is_empty() {
+        egui::RichText::new(format!(" · {section}"))
+            .color(ui.visuals().weak_text_color())
+            .append_to(
+                &mut job,
+                style,
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+    }
+    let full = if section.is_empty() {
+        chunk.doc_title.clone()
+    } else {
+        format!("{} · {section}", chunk.doc_title)
+    };
+    ui.add(egui::Label::new(job).truncate()).on_hover_text(full);
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
