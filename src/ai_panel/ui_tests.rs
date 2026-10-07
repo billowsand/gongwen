@@ -277,10 +277,15 @@ fn predraft_answers_switch_the_kind_by_the_users_hand_and_continue() {
     );
     panel.ask(Box::new(crate::ai_panel::SkillRun {
         skill: crate::agent::skill::builtin(RESEARCH_DRAFT).unwrap(),
-        board,
         suspension: crate::agent::engine::Suspension {
+            checkpoint: crate::agent::checkpoint::Checkpoint {
+                at: vec![1],
+                reason: crate::agent::checkpoint::Reason::Ask,
+                label: String::new(),
+                board,
+                partial: false,
+            },
             questions,
-            resume_at: 1,
             save_as: None,
         },
         use_rag: false,

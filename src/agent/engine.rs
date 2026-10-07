@@ -3,12 +3,13 @@
 //! - `step:` 执行一个算子（`ops`），`tool:` 直接调一个工具（`tools`）；
 //! - `when` 不满足的步骤跳过；
 //! - `for_each` 对列表变量逐项跑子流程；
-//! - 算子或工具要问用户时，流程挂起：黑板与下一步的位置交回调用方保存，用户答完后由
-//!   [`apply_answers`] 把回答落到黑板，再从 [`Suspension::resume_at`] 接着跑。
+//! - 算子或工具要问用户时，流程挂起：挂起就是一种检查点（`Reason::Ask`），黑板与下一步的
+//!   位置都在里面，用户答完后由 [`apply_answers`] 把回答落到黑板，再从 `checkpoint.at` 接着跑。
 //!
 //! 引擎只产出工作稿与题目；定稿成提案、交用户接受由调用方负责（红线 1）。
 
 use super::board::Board;
+use super::checkpoint::{Checkpoint, Reason};
 use super::clarify::{self, Action, Question, Reply, Target};
 use super::evidence::{self, EvidencePack};
 use super::gaps::Ledger;
@@ -40,12 +41,12 @@ pub(crate) enum Event {
     Note(String),
 }
 
-/// 流程停下来问用户。
+/// 流程停下来问用户。挂起就是一种检查点（`Reason::Ask`）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Suspension {
+    /// 挂起时的现场；答完把回答落到 `checkpoint.board`，从 `checkpoint.at` 接着跑。
+    pub(crate) checkpoint: Checkpoint,
     pub(crate) questions: Vec<Question>,
-    /// 答完从第几步接着跑。
-    pub(crate) resume_at: usize,
     /// 选择题选中的值存进哪个变量。
     pub(crate) save_as: Option<String>,
 }
@@ -53,7 +54,8 @@ pub(crate) struct Suspension {
 #[derive(Debug, Clone)]
 pub(crate) enum Outcome {
     Done,
-    Suspended(Suspension),
+    /// 挂起带着整块黑板的检查点，装箱别让 `Done` 也跟着占地方。
+    Suspended(Box<Suspension>),
 }
 
 /// 一次技能运行交付的结果。
@@ -108,25 +110,38 @@ fn report_collects_only_workspace_citations_before_stripping() {
     assert_eq!(report.evidence.items().len(), 5);
 }
 
-/// 从第 `start` 步开始执行技能流程。
+/// 从 `at` 接着执行技能流程；空路径表示全新开跑。
 pub(crate) fn run(
     board: &mut Board,
     env: &Env<'_>,
-    start: usize,
+    at: &[usize],
     emit: &mut dyn FnMut(Event),
 ) -> anyhow::Result<Outcome> {
     let mut ctx = ToolCtx { board, env, emit };
-    // `@` 引用只在第一步之前落一次；挂起后接着跑时已经在黑板上了。
-    if start == 0 && !ctx.board.refs.is_empty() {
+    // `@` 引用只在全新开跑（空路径）时落一次；从检查点接着跑时它们已经在黑板上了。
+    if at.is_empty() && !ctx.board.refs.is_empty() {
         super::references::apply(&mut ctx);
     }
-    for (index, step) in env.skill.flow.iter().enumerate().skip(start) {
-        if let Some((questions, into)) = run_step(&mut ctx, step)? {
-            return Ok(Outcome::Suspended(Suspension {
+    let first = at.first().copied().unwrap_or(0);
+    for (index, step) in env.skill.flow.iter().enumerate().skip(first) {
+        // 只有续跑的第一步可能落在 `for_each` 中间，带上项起点；其余步从头跑。
+        let item = if index == first {
+            at.get(1).copied().unwrap_or(0)
+        } else {
+            0
+        };
+        if let Some((questions, into)) = run_step(&mut ctx, step, item)? {
+            return Ok(Outcome::Suspended(Box::new(Suspension {
+                checkpoint: Checkpoint {
+                    at: vec![index + 1],
+                    reason: Reason::Ask,
+                    label: format!("等你回答：{}", step.label()),
+                    board: ctx.board.clone(),
+                    partial: false,
+                },
                 questions,
-                resume_at: index + 1,
                 save_as: into.or_else(|| step.save_as.clone()),
-            }));
+            })));
         }
     }
     Ok(Outcome::Done)
@@ -136,7 +151,11 @@ pub(crate) fn run(
 type Ask = (Vec<Question>, Option<String>);
 
 /// 执行一步；要问用户时返回题目。
-fn run_step(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Option<Ask>> {
+fn run_step(
+    ctx: &mut ToolCtx<'_, '_>,
+    step: &StepSpec,
+    item_from: usize,
+) -> anyhow::Result<Option<Ask>> {
     ops::check_cancel(ctx)?;
     if let Some(condition) = &step.when
         && !condition_holds(ctx.board, ctx.env, condition)
@@ -145,7 +164,7 @@ fn run_step(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Option
     }
     match (step.step.as_deref(), step.tool.as_deref()) {
         (Some("for_each"), None) => {
-            for_each(ctx, step)?;
+            for_each(ctx, step, item_from)?;
             Ok(None)
         }
         (Some(name), None) => {
@@ -200,7 +219,7 @@ fn run_tool(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, id: &str) -> Option<Vec<
 
 /// `for_each`：对列表变量逐项执行子流程，当前项存在 `as` 指定的变量（默认 `item`），
 /// 序号存在 `index`。子流程里不能停下来问用户。
-fn for_each(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<()> {
+fn for_each(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, from: usize) -> anyhow::Result<()> {
     let over = step.param_str("over").unwrap_or_default();
     let items: Vec<Value> = match ctx.board.vars.get(over) {
         Some(Value::Array(items)) => items.clone(),
@@ -219,13 +238,13 @@ fn for_each(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<()> {
     };
     let name = step.param_str("as").unwrap_or("item").to_string();
     let limit = step.param_usize("max").unwrap_or(FOR_EACH_LIMIT);
-    for (index, item) in items.into_iter().take(limit).enumerate() {
+    for (index, item) in items.into_iter().take(limit).enumerate().skip(from) {
         ctx.board.vars.insert(name.clone(), item);
         ctx.board
             .vars
             .insert("index".into(), Value::from(index + 1));
         for sub in &step.body {
-            if run_step(ctx, sub)?.is_some() {
+            if run_step(ctx, sub, 0)?.is_some() {
                 anyhow::bail!("for_each 的子流程里不能停下来问用户，请把提问挪到 for_each 之外");
             }
         }
@@ -293,10 +312,10 @@ fn var_present(board: &Board, name: &str) -> bool {
 /// - 选择题：选中项的值存进 `save_as`。
 pub(crate) fn apply_answers(
     board: &mut Board,
-    suspension: &Suspension,
+    questions: &[Question],
+    save_as: Option<&str>,
     replies: &[(usize, Reply)],
 ) -> Option<TemplateKind> {
-    let questions = &suspension.questions;
     let mut kind = None;
     if questions.iter().any(|q| q.target.is_predraft()) {
         let (picked, notes) = clarify::resolve_predraft(questions, replies, board.draft.kind);
@@ -322,10 +341,10 @@ pub(crate) fn apply_answers(
             Reply::Custom(text) => Value::String(text.clone()),
             Reply::Skip => Value::Null,
         };
-        if let Some(name) = &suspension.save_as
+        if let Some(name) = save_as
             && !value.is_null()
         {
-            board.vars.insert(name.clone(), value);
+            board.vars.insert(name.to_string(), value);
         }
     }
     kind

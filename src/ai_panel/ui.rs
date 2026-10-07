@@ -733,7 +733,10 @@ fn gap_context(
     };
     let (ledger, text) = match (research, run) {
         (Some(research), _) => (&research.ledger, research.raw.as_str()),
-        (None, Some(run)) => (&run.board.ledger, run.board.workspace.as_str()),
+        (None, Some(run)) => {
+            let board = &run.suspension.checkpoint.board;
+            (&board.ledger, board.workspace.as_str())
+        }
         _ => return None,
     };
     let gap = ledger.get(id)?;

@@ -569,10 +569,15 @@ mod tests {
         panel.step("⌕ 检索".into());
         panel.ask(Box::new(SkillRun {
             skill: crate::agent::skill::builtin(crate::agent::skill::POLISH).unwrap(),
-            board: crate::agent::board::Board::default(),
             suspension: crate::agent::engine::Suspension {
+                checkpoint: crate::agent::checkpoint::Checkpoint {
+                    at: vec![1],
+                    reason: crate::agent::checkpoint::Reason::Ask,
+                    label: String::new(),
+                    board: crate::agent::board::Board::default(),
+                    partial: false,
+                },
                 questions: Vec::new(),
-                resume_at: 1,
                 save_as: None,
             },
             use_rag: false,

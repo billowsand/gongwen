@@ -4,6 +4,7 @@
 use super::api::ApiStore;
 use super::backend::{Completion, ModelBackend, ModelRole};
 use super::board::Board;
+use super::checkpoint::StepPath;
 use super::clarify::Reply;
 use super::engine::{self, Event, Outcome, Suspension};
 use super::skill::Skill;
@@ -233,7 +234,7 @@ pub(crate) struct Driver<'a> {
     pub(crate) vocabulary: Vec<crate::models::VocabularyEntry>,
     pub(crate) board: Board,
     pub(crate) events: Vec<Event>,
-    pub(crate) next: usize,
+    pub(crate) next: StepPath,
 }
 
 impl<'a> Driver<'a> {
@@ -252,7 +253,7 @@ impl<'a> Driver<'a> {
             vocabulary: Vec::new(),
             board,
             events: Vec::new(),
-            next: 0,
+            next: Vec::new(),
         }
     }
 
@@ -276,13 +277,13 @@ impl<'a> Driver<'a> {
         };
         let events = &mut self.events;
         Ok(
-            match engine::run(&mut self.board, &env, self.next, &mut |event| {
+            match engine::run(&mut self.board, &env, &self.next, &mut |event| {
                 events.push(event)
             })? {
                 Outcome::Done => None,
                 Outcome::Suspended(suspension) => {
-                    self.next = suspension.resume_at;
-                    Some(suspension)
+                    self.next = suspension.checkpoint.at.clone();
+                    Some(*suspension)
                 }
             },
         )
@@ -294,7 +295,12 @@ impl<'a> Driver<'a> {
         suspension: &Suspension,
         replies: &[(usize, Reply)],
     ) -> Option<TemplateKind> {
-        engine::apply_answers(&mut self.board, suspension, replies)
+        engine::apply_answers(
+            &mut self.board,
+            &suspension.questions,
+            suspension.save_as.as_deref(),
+            replies,
+        )
     }
 
     /// 任务流里的工具调用行。

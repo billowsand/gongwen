@@ -670,9 +670,9 @@ fn live_builtin_skill() {
         Event::Note(note) => eprintln!("        · {note}"),
         _ => {}
     };
-    let mut next = 0;
+    let mut next: Vec<usize> = Vec::new();
     loop {
-        match engine::run(&mut board, &run_env, next, &mut print).expect("技能应当跑通") {
+        match engine::run(&mut board, &run_env, &next, &mut print).expect("技能应当跑通") {
             Outcome::Done => break,
             Outcome::Suspended(suspension) => {
                 let replies: Vec<(usize, Reply)> = suspension
@@ -700,10 +700,15 @@ fn live_builtin_skill() {
                         (q.id, reply)
                     })
                     .collect();
-                if let Some(kind) = engine::apply_answers(&mut board, &suspension, &replies) {
+                if let Some(kind) = engine::apply_answers(
+                    &mut board,
+                    &suspension.questions,
+                    suspension.save_as.as_deref(),
+                    &replies,
+                ) {
                     board.draft.kind = kind;
                 }
-                next = suspension.resume_at;
+                next = suspension.checkpoint.at.clone();
             }
         }
     }

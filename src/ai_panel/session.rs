@@ -11,7 +11,8 @@
 //! 对不上的才序列化重写，最多一秒写一次；关标签、退出前强制补写。
 
 use super::{AiPanel, AiTurn, ReplyDraft, ResearchSnapshot, SkillRun, TurnRequest, TurnState};
-use crate::agent::board::{Board, Finding};
+use crate::agent::board::Finding;
+use crate::agent::checkpoint::Checkpoint;
 use crate::agent::clarify::Question;
 use crate::agent::engine::Suspension;
 use crate::agent::skill::Skill;
@@ -63,7 +64,8 @@ pub(crate) struct SavedTurn {
     pub(crate) replies: Vec<ReplyDraft>,
     #[serde(default)]
     pub(crate) research: Option<ResearchSnapshot>,
-    #[serde(default)]
+    /// 挂起的流程；读不出来时当没存过（这一轮读回为「已中断」），不拖垮整轮。
+    #[serde(default, deserialize_with = "lenient_run")]
     pub(crate) run: Option<SavedRun>,
     #[serde(default)]
     pub(crate) findings: Vec<Finding>,
@@ -78,13 +80,110 @@ pub(crate) struct SavedTurn {
 }
 
 /// 挂起的流程。技能本身不存（它在内置资源或配置目录里），只存 id 与文本指纹。
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct SavedRun {
     pub(crate) skill_id: String,
     pub(crate) skill_hash: String,
-    pub(crate) board: Board,
-    pub(crate) suspension: Suspension,
+    /// 挂起的现场：黑板与接着跑的位置（挂起就是一种检查点，内核加固第 4 期）。
+    pub(crate) checkpoint: Checkpoint,
+    pub(crate) questions: Vec<Question>,
+    pub(crate) save_as: Option<String>,
     pub(crate) use_rag: bool,
+}
+
+impl<'de> Deserialize<'de> for SavedRun {
+    /// 宽容读回：旧格式（黑板与挂起分开存、`resume_at` 是单个数字）换算成检查点；
+    /// 认不出来的交回 Err，外层让这一轮读回为「已中断」，不整轮丢。
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        {
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| serde::de::Error::custom("挂起的流程应当是一个对象"))?;
+            if !object.contains_key("checkpoint") {
+                let board = object
+                    .remove("board")
+                    .ok_or_else(|| serde::de::Error::custom("旧格式缺 board"))?;
+                let suspension = object
+                    .remove("suspension")
+                    .ok_or_else(|| serde::de::Error::custom("旧格式缺 suspension"))?;
+                let at = match suspension.get("resume_at") {
+                    // 旧格式是单个数字；数组照收（中间格式）。
+                    Some(serde_json::Value::Number(n)) => {
+                        vec![n.as_u64().unwrap_or_default() as usize]
+                    }
+                    Some(serde_json::Value::Array(path)) => path
+                        .iter()
+                        .filter_map(serde_json::Value::as_u64)
+                        .map(|index| index as usize)
+                        .collect(),
+                    _ => return Err(serde::de::Error::custom("resume_at 认不出")),
+                };
+                object.insert(
+                    "checkpoint".into(),
+                    serde_json::json!({
+                        "at": at,
+                        "reason": "Ask",
+                        "label": "",
+                        "board": board,
+                        "partial": false,
+                    }),
+                );
+                object.insert(
+                    "questions".into(),
+                    suspension
+                        .get("questions")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::Value::Array(vec![])),
+                );
+                object.insert(
+                    "save_as".into(),
+                    suspension
+                        .get("save_as")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        // 委托给镜像结构体收尾，别再回到自己的 `deserialize`（会无限递归）。
+        let data = SavedRunData::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            skill_id: data.skill_id,
+            skill_hash: data.skill_hash,
+            checkpoint: data
+                .checkpoint
+                .ok_or_else(|| serde::de::Error::custom("缺 checkpoint"))?,
+            questions: data.questions,
+            save_as: data.save_as,
+            use_rag: data.use_rag,
+        })
+    }
+}
+
+/// `SavedRun` 反序列化的落点（不带自定义逻辑，见 `SavedRun::deserialize`）。
+#[derive(Deserialize)]
+struct SavedRunData {
+    skill_id: String,
+    skill_hash: String,
+    checkpoint: Option<Checkpoint>,
+    #[serde(default)]
+    questions: Vec<Question>,
+    #[serde(default)]
+    save_as: Option<String>,
+    #[serde(default)]
+    use_rag: bool,
+}
+
+/// `run` 读不出来时不拖垮整轮：当没存过，读回逻辑会把状态改成「已中断」。
+fn lenient_run<'de, D>(deserializer: D) -> Result<Option<SavedRun>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+        .and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// 待确认的提案：改前正文、提案正文与标题。读回时重新过一遍定稿检查再装上。
@@ -156,8 +255,9 @@ impl SavedTurn {
             run: turn.run.as_ref().map(|run| SavedRun {
                 skill_id: run.skill.id.clone(),
                 skill_hash: skill_hash(&run.skill),
-                board: run.board.clone(),
-                suspension: run.suspension.clone(),
+                checkpoint: run.suspension.checkpoint.clone(),
+                questions: run.suspension.questions.clone(),
+                save_as: run.suspension.save_as.clone(),
                 use_rag: run.use_rag,
             }),
             findings: turn.findings.clone(),
@@ -186,11 +286,21 @@ impl SavedTurn {
                                 skill.name
                             ));
                         }
+                        let SavedRun {
+                            checkpoint,
+                            questions: saved_questions,
+                            save_as,
+                            use_rag,
+                            ..
+                        } = saved;
                         run = Some(Box::new(SkillRun {
                             skill: skill.clone(),
-                            board: saved.board,
-                            suspension: saved.suspension,
-                            use_rag: saved.use_rag,
+                            suspension: Suspension {
+                                checkpoint,
+                                questions: saved_questions,
+                                save_as,
+                            },
+                            use_rag,
                         }));
                         TurnState::Asking
                     }
@@ -555,6 +665,7 @@ impl AiPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::board::Board;
     use crate::agent::clarify::{Action, Choice, Target};
     use crate::ai_panel::ProposalSummary;
     use crate::manuscript::NewManuscript;
@@ -613,13 +724,18 @@ mod tests {
         let skill = crate::agent::skill::builtin(crate::agent::skill::RESEARCH_DRAFT).unwrap();
         panel.ask(Box::new(SkillRun {
             skill,
-            board: Board {
-                request: "写个通知".into(),
-                ..Board::default()
-            },
             suspension: Suspension {
+                checkpoint: Checkpoint {
+                    at: vec![2],
+                    reason: crate::agent::checkpoint::Reason::Ask,
+                    label: String::new(),
+                    board: Board {
+                        request: "写个通知".into(),
+                        ..Board::default()
+                    },
+                    partial: false,
+                },
                 questions: vec![question()],
-                resume_at: 2,
                 save_as: None,
             },
             use_rag: false,
@@ -660,8 +776,8 @@ mod tests {
         assert_eq!(after.turns[0].findings.len(), 1);
         assert_eq!(*states[1], TurnState::Asking, "等回答的照常能答");
         let run = after.turns[1].run.as_ref().expect("挂起的流程读回来了");
-        assert_eq!(run.suspension.resume_at, 2);
-        assert_eq!(run.board.request, "写个通知");
+        assert_eq!(run.suspension.checkpoint.at, [2]);
+        assert_eq!(run.suspension.checkpoint.board.request, "写个通知");
         assert_eq!(after.turns[1].questions.len(), 1);
         assert!(
             matches!(states[2], TurnState::Proposed(_)),
@@ -914,12 +1030,15 @@ mod tests {
             run: Some(SavedRun {
                 skill_id: "gone".into(),
                 skill_hash: String::new(),
-                board: Board::default(),
-                suspension: Suspension {
-                    questions: vec![],
-                    resume_at: 1,
-                    save_as: None,
+                checkpoint: Checkpoint {
+                    at: vec![1],
+                    reason: crate::agent::checkpoint::Reason::Ask,
+                    label: String::new(),
+                    board: Board::default(),
+                    partial: false,
                 },
+                questions: vec![],
+                save_as: None,
                 use_rag: false,
             }),
             findings: vec![],
@@ -952,5 +1071,38 @@ mod tests {
         let saved: SavedTurn = serde_json::from_str(&json).unwrap();
         let (turn, _) = saved.restore(&[], false);
         assert_eq!(turn.excluded_hunks, 2);
+    }
+
+    /// 内核加固第 4 期前的会话：`resume_at` 是单个数字、黑板与挂起分开存，读回能续；
+    /// 认不出来的挂起数据不拖垮整轮，读回为「已中断」。
+    #[test]
+    fn old_sessions_with_a_numeric_resume_at_still_resume() {
+        let old = r#"{
+            "id": 1, "title": "起草", "prompt": "写个通知", "state": "Asking",
+            "questions": [],
+            "run": {
+                "skill_id": "research-draft", "skill_hash": "abc",
+                "board": {"request": "写个通知"},
+                "suspension": {"questions": [], "resume_at": 2, "save_as": null},
+                "use_rag": false
+            }
+        }"#;
+        let saved: SavedTurn = serde_json::from_str(old).unwrap();
+        let run = saved.run.expect("旧格式的挂起读回来了");
+        assert_eq!(run.checkpoint.at, [2], "数字 resume_at 换算成路径");
+        assert_eq!(run.checkpoint.board.request, "写个通知");
+
+        let bad = r#"{
+            "id": 2, "title": "起草", "prompt": "写个通知", "state": "Asking",
+            "run": {"skill_id": "x", "suspension": {"resume_at": "第二步"}}
+        }"#;
+        let saved: SavedTurn = serde_json::from_str(bad).unwrap();
+        assert!(saved.run.is_none(), "认不出来的挂起数据当没存过");
+        let (turn, _) = saved.restore(&[], false);
+        assert_eq!(
+            turn.state,
+            TurnState::Interrupted,
+            "整轮读回为「已中断」，不丢"
+        );
     }
 }

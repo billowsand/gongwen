@@ -12,6 +12,7 @@ use super::{ReplyDraft, ResearchSnapshot, TurnRequest, TurnState, locate_selecti
 use crate::agent::api::{ApiSecrets, ApiStore};
 use crate::agent::backend::{LmBackend, ModelBackend};
 use crate::agent::board::{Board, Finding};
+use crate::agent::checkpoint::StepPath;
 use crate::agent::clarify::{self, Question, Reply, Target};
 use crate::agent::engine::{self, Event, Outcome, SkillReport, Suspension};
 use crate::agent::gaps::GapStatus;
@@ -25,11 +26,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-/// 挂起的一轮：技能、黑板与接着跑的位置。存在这一轮的卡片上，答完原样带回后台。
+/// 挂起的一轮：技能与挂起的现场（黑板与接着跑的位置在检查点里）。答完原样带回后台。
 #[derive(Debug, Clone)]
 pub(crate) struct SkillRun {
     pub(crate) skill: Skill,
-    pub(crate) board: Board,
     pub(crate) suspension: Suspension,
     pub(crate) use_rag: bool,
 }
@@ -127,14 +127,15 @@ impl DraftPage<'_> {
         }
         let time = crate::prompt::TimeContext::now();
         let fresh = resume.is_none();
-        let (pick, mut board, start, use_rag, title, plan) = match resume {
+        let (pick, mut board, at, use_rag, title, plan) = match resume {
             Some((turn_id, run)) => {
                 let SkillRun {
                     skill,
-                    mut board,
                     suspension,
                     use_rag,
                 } = *run;
+                let mut board = suspension.checkpoint.board;
+                let at = suspension.checkpoint.at;
                 // 要素与正文以界面上现在的为准：用户可能刚切了文种。
                 board.draft = self.doc.draft.clone();
                 board.document = self.doc.generated_markdown.clone();
@@ -148,7 +149,7 @@ impl DraftPage<'_> {
                 (
                     Pick::Fixed(Box::new(skill)),
                     board,
-                    suspension.resume_at,
+                    at,
                     use_rag,
                     title,
                     // 接着跑的沿用发起时的历史（已在黑板上）。
@@ -276,7 +277,7 @@ impl DraftPage<'_> {
                 run_skill(
                     (pick, style),
                     &mut board,
-                    start,
+                    at,
                     use_rag,
                     &config,
                     &model,
@@ -307,7 +308,7 @@ impl DraftPage<'_> {
         &mut self,
         request: &TurnRequest,
         time: &crate::prompt::TimeContext,
-    ) -> Result<(Pick, Board, usize, bool, String, HistoryPlan), String> {
+    ) -> Result<(Pick, Board, StepPath, bool, String, HistoryPlan), String> {
         let load_notes = self.doc.ai_panel.reload_skills();
         let skills = self.doc.ai_panel.skills.clone();
         // 「改提案」：有待确认的提案、没锁选区时，修改类技能在提案上接着改（16.15 B.7）。
@@ -467,7 +468,7 @@ impl DraftPage<'_> {
         for note in load_notes {
             self.doc.ai_panel.note(note);
         }
-        Ok((pick, board, 0, use_rag, title, plan))
+        Ok((pick, board, Vec::new(), use_rag, title, plan))
     }
 
     /// 这一轮用哪份写法风格（16.15 C.3）：用户指定的，或按文种与场合自动挑；分不出的交给后台
@@ -549,9 +550,16 @@ impl DraftPage<'_> {
         let (Some(mut run), Some(mut request)) = (turn.run.take(), turn.request.clone()) else {
             return;
         };
-        let kind = engine::apply_answers(&mut run.board, &run.suspension, &replies);
+        let kind = engine::apply_answers(
+            &mut run.suspension.checkpoint.board,
+            &run.suspension.questions,
+            run.suspension.save_as.as_deref(),
+            &replies,
+        );
         // 「重新生成」沿用这次的回答，不再问一遍。
-        request.notes.clone_from(&run.board.notes);
+        request
+            .notes
+            .clone_from(&run.suspension.checkpoint.board.notes);
         turn.request = Some(request.clone());
         if let Some(kind) = kind {
             // 用户亲手点的「切换文种」：界面线程改要素，与在要素区下拉框里选是同一回事。
@@ -857,7 +865,7 @@ pub(super) fn apply_style(
 fn run_skill(
     (pick, style): (Pick, StylePick),
     board: &mut Board,
-    start: usize,
+    at: StepPath,
     use_rag: bool,
     config: &crate::models::AppConfig,
     model: &LmBackend,
@@ -877,7 +885,7 @@ fn run_skill(
         run_engine(
             skill,
             board,
-            start,
+            at,
             use_rag,
             config,
             model,
@@ -927,7 +935,7 @@ fn resolve_skill(
 fn run_engine(
     skill: Skill,
     board: &mut Board,
-    start: usize,
+    at: StepPath,
     use_rag: bool,
     config: &crate::models::AppConfig,
     model: &LmBackend,
@@ -945,11 +953,10 @@ fn run_engine(
         apis,
         secrets,
     };
-    match engine::run(board, &env, start, emit).map_err(|e| format!("{e:#}"))? {
+    match engine::run(board, &env, &at, emit).map_err(|e| format!("{e:#}"))? {
         Outcome::Suspended(suspension) => Ok(SkillResult::Suspended(Box::new(SkillRun {
-            board: board.clone(),
             skill,
-            suspension,
+            suspension: *suspension,
             use_rag,
         }))),
         Outcome::Done if skill.output.is_report(board) => {
