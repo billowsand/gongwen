@@ -847,6 +847,8 @@ pub struct ReviseModelConfig {
     pub enabled: bool,
     /// 复核用的模型。留空 = 沿用起草模型（替代旧的「地址密钥分别留空沿用」规则）。
     pub model_ref: ModelRef,
+    /// 复核与辅助角色共用的备用对话模型。
+    pub backup_model_ref: ModelRef,
     /// 旧字段：内联地址 / 模型 / 密钥，迁移后清空，仅作向后兼容读取。
     #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
@@ -874,6 +876,7 @@ impl Default for ReviseModelConfig {
         Self {
             enabled: false,
             model_ref: ModelRef::default(),
+            backup_model_ref: ModelRef::default(),
             base_url: String::new(),
             model: String::new(),
             api_key: String::new(),
@@ -2018,6 +2021,8 @@ pub struct AppConfig {
     pub providers: Vec<ProviderConfig>,
     /// 文字起草用的模型（引用 providers 中的一项）。
     pub draft_model: ModelRef,
+    /// 起草服务不可用且尚未输出时，本次调用使用的备用对话模型。
+    pub draft_backup_model: ModelRef,
     pub output_dir: String,
     pub vocabulary: Vec<VocabularyEntry>,
     /// 首次建库引导的完成状态；旧配置会根据是否已有词条在启动时自动迁移。
@@ -2094,6 +2099,7 @@ impl Default for AppConfig {
             lm_studio: LmStudioConfig::default(),
             providers: Vec::new(),
             draft_model: ModelRef::default(),
+            draft_backup_model: ModelRef::default(),
             output_dir: String::new(),
             vocabulary: vec![],
             vocabulary_setup: VocabularySetupStatus::Pending,
@@ -2241,6 +2247,53 @@ impl AppConfig {
     /// 智能体辅助步骤用的接入配置（原 `agent::backend::assist_config`）。
     pub fn assist_chat(&self) -> Result<LmStudioConfig, ModelRefError> {
         self.revise_chat(true)
+    }
+
+    fn backup_chat(
+        &self,
+        model: &ModelRef,
+        func: &str,
+        mut config: LmStudioConfig,
+    ) -> Result<Option<LmStudioConfig>, ModelRefError> {
+        if model.is_empty() {
+            return Ok(None);
+        }
+        let provider = self.require_provider(&model.provider_id, func)?;
+        config.base_url = provider.base_url.clone();
+        config.api_key = provider.api_key.clone();
+        config.model = model.model.trim().into();
+        // 备用模型可能有另一种窗口；按它的服务信息自动识别，不沿用主模型的手动值。
+        config.context_window = 0;
+        Ok(Some(config))
+    }
+
+    pub fn draft_backup_chat(&self) -> Result<Option<LmStudioConfig>, ModelRefError> {
+        self.backup_chat(
+            &self.draft_backup_model,
+            "文字起草备用模型",
+            self.lm_studio.clone(),
+        )
+    }
+
+    pub fn revise_backup_chat(
+        &self,
+        assist: bool,
+    ) -> Result<Option<LmStudioConfig>, ModelRefError> {
+        let config = LmStudioConfig {
+            temperature: 0.0,
+            max_tokens: if assist {
+                self.lm_studio.max_tokens
+            } else {
+                512
+            },
+            timeout_seconds: self.revise_model.timeout_seconds.max(5),
+            ..self.lm_studio.clone()
+        };
+        self.backup_chat(
+            &self.revise_model.backup_model_ref,
+            "文字复核备用模型",
+            config,
+        )
     }
 
     /// 解析后的知识库配置：embedding / rerank 的地址密钥从提供商填好，
@@ -3064,6 +3117,38 @@ pub struct GeneratedDraft {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_models_load_old_config_and_report_deleted_providers() {
+        let mut config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.draft_backup_chat().unwrap().is_none());
+        assert!(config.revise_backup_chat(true).unwrap().is_none());
+        config.draft_backup_model = ModelRef {
+            provider_id: "gone".into(),
+            model: "backup".into(),
+        };
+        let error = config.draft_backup_chat().unwrap_err().to_string();
+        assert!(error.contains("文字起草备用模型"));
+        assert!(error.contains("AI 管理 → 模型服务"));
+        config.revise_model.backup_model_ref = config.draft_backup_model.clone();
+        assert!(
+            config
+                .revise_backup_chat(true)
+                .unwrap_err()
+                .to_string()
+                .contains("文字复核备用模型")
+        );
+        config.providers.push(ProviderConfig {
+            id: "gone".into(),
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            ..Default::default()
+        });
+        let backup = config.revise_backup_chat(true).unwrap().unwrap();
+        assert_eq!(backup.model, "backup");
+        assert_eq!(backup.temperature, 0.0);
+        assert_eq!(backup.max_tokens, config.lm_studio.max_tokens);
+        assert_eq!(backup.context_window, 0);
+    }
 
     /// 用途归类：rerank 关键词最具体（bge-reranker 不能归成向量）；
     /// 服务自报优先于名字启发式；认不出的按对话处理。

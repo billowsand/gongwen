@@ -108,8 +108,8 @@ pub(crate) struct LmBackend {
 impl LmBackend {
     pub(crate) fn new(config: &AppConfig, cancel: Arc<AtomicBool>) -> Self {
         Self {
-            draft_backup: Ok(None),
-            assist_backup: Ok(None),
+            draft_backup: config.draft_backup_chat(),
+            assist_backup: config.revise_backup_chat(true),
             notices: Mutex::new(Vec::new()),
             usage: Mutex::new(UsageTotals::default()),
             draft: config.draft_chat(),
