@@ -211,14 +211,23 @@ pub(super) fn section(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
         })
         .unwrap_or(("", text));
     ui.add_space(metrics.mm(4.0));
-    if number.matches('.').count() <= 1 {
+    let level = number.matches('.').count();
+    if level <= 1 {
         dashed_rule(ui, metrics);
         ui.add_space(metrics.mm(4.0));
+    }
+    {
         ui.horizontal_top(|ui| {
-            let width = metrics.pt(8.0 * number.len() as f32).max(metrics.mm(9.0));
+            let pt = if level <= 1 { 13.0 } else { 11.0 };
+            let width = metrics
+                .pt(pt * 0.65 * number.len() as f32)
+                .max(metrics.mm(9.0))
+                + metrics.mm(4.0);
             if !number.is_empty() {
-                let (rect, _) = ui
-                    .allocate_exact_size(egui::vec2(width, metrics.mm(7.0)), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(width, metrics.mm(if level <= 1 { 7.0 } else { 6.0 })),
+                    egui::Sense::hover(),
+                );
                 ui.painter().rect_stroke(
                     rect,
                     0.0,
@@ -229,7 +238,7 @@ pub(super) fn section(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     number,
-                    metrics.font(theme::FONT_RESEARCH_TERMINAL, 13.0),
+                    metrics.font(theme::FONT_RESEARCH_TERMINAL, pt),
                     accent(),
                 );
             }
@@ -238,12 +247,16 @@ pub(super) fn section(ui: &mut egui::Ui, metrics: &Metrics, text: &str) {
                 ui,
                 metrics,
                 title,
-                17.0,
+                if level <= 1 {
+                    17.0
+                } else if level == 2 {
+                    15.0
+                } else {
+                    14.0
+                },
                 metrics.content - width - metrics.mm(5.0),
             );
         });
-    } else {
-        text_block(ui, metrics, text, 14.0, metrics.content);
     }
     ui.add_space(metrics.mm(4.0));
 }

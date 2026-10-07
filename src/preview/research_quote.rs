@@ -54,6 +54,21 @@ pub(super) fn citation(
     if lines.is_empty() {
         return;
     }
+    if metrics.terminal {
+        let (backdrop, top_left) = terminal_card_begin(ui, metrics);
+        terminal_card_title(ui, metrics, "引文", "", "QUOTE");
+        quote_lines(
+            ui,
+            metrics,
+            lines,
+            &terminal_style(metrics),
+            anchor,
+            scroll_to_anchor,
+            clicked,
+        );
+        terminal_card_end(ui, metrics, backdrop, top_left);
+        return;
+    }
     let style = Style {
         family: theme::FONT_KAITI,
         size: RESEARCH_BODY_PT,
@@ -94,6 +109,42 @@ pub(super) fn boxed(
     else {
         return;
     };
+    if metrics.terminal {
+        let (backdrop, top_left) = terminal_card_begin(ui, metrics);
+        let title_source = source.start
+            ..lines
+                .first()
+                .map_or(source.end, |line| line.source.start)
+                .max(source.start);
+        clickable_rows(
+            ui,
+            metrics,
+            &title_source,
+            anchor,
+            scroll_to_anchor,
+            clicked,
+            |ui| {
+                terminal_card_title(
+                    ui,
+                    metrics,
+                    heading,
+                    &boxed.title,
+                    terminal_tag(&boxed.name),
+                );
+            },
+        );
+        quote_lines(
+            ui,
+            metrics,
+            lines,
+            &terminal_style(metrics),
+            anchor,
+            scroll_to_anchor,
+            clicked,
+        );
+        terminal_card_end(ui, metrics, backdrop, top_left);
+        return;
+    }
     ui.add_space(metrics.line * 0.5);
     let backdrop = ui.painter().add(egui::Shape::Noop);
     let top = ui.cursor().top();
@@ -199,6 +250,162 @@ struct Style {
     math: bool,
 }
 
+fn terminal_tag(name: &str) -> &str {
+    match name {
+        "引理" => "LEMMA",
+        "推论" => "COROLLARY",
+        "定理" => "THEOREM",
+        "命题" => "PROPOSITION",
+        "专栏" => "PANEL",
+        "案例" => "CASE",
+        "例子" => "EXAMPLE",
+        "做法" => "PRACTICE",
+        _ => name,
+    }
+}
+
+fn terminal_style(metrics: &Metrics) -> Style {
+    Style {
+        family: theme::FONT_HEITI,
+        size: RESEARCH_CAPTION_PT,
+        line: metrics.pt(BOX_LINE_PT),
+        inset: metrics.mm(4.0),
+        right_inset: metrics.mm(4.0),
+        math: true,
+    }
+}
+
+fn terminal_card_begin(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+) -> (egui::layers::ShapeIdx, egui::Pos2) {
+    ui.add_space(metrics.mm(5.0));
+    let backdrop = ui.painter().add(egui::Shape::Noop);
+    let top_left = ui.cursor().min;
+    ui.add_space(metrics.mm(4.0));
+    (backdrop, top_left)
+}
+
+fn terminal_card_title(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    heading: &str,
+    title: &str,
+    tag: &str,
+) {
+    let font = metrics.font(theme::FONT_RESEARCH_TERMINAL, 7.0);
+    let label = ui
+        .painter()
+        .layout_no_wrap(tag.to_owned(), font, theme::paper::ink_muted());
+    let tag_size = label.size() + egui::vec2(metrics.mm(2.0), metrics.mm(1.2));
+    let width = (metrics.content - metrics.mm(12.0) - tag_size.x).max(metrics.mm(10.0));
+    let mut job = job(width);
+    let normal = metrics.font(theme::FONT_HEITI, 12.0);
+    let (name, number) = heading.split_once(' ').unwrap_or((heading, ""));
+    job.append(name, 0.0, text_format(normal.clone(), metrics.pt(20.0)));
+    if !number.is_empty() {
+        let mut format = text_format(
+            metrics.font(theme::FONT_RESEARCH_TERMINAL, 12.0),
+            metrics.pt(20.0),
+        );
+        format.color = super::research_terminal::accent();
+        job.append(&format!(" {number}"), 0.0, format);
+    }
+    let style =
+        math_flow::FlowStyle::block((normal.clone(), normal), 12.0, metrics.pt(20.0), width);
+    let mut bold = Vec::new();
+    let slots = math_flow::append_with_math(
+        ui,
+        metrics,
+        &mut job,
+        &format!("  {title}"),
+        &style,
+        &mut bold,
+    );
+    let galley = layout(ui, job);
+    let rows = row_spans(&galley);
+    place(
+        ui,
+        metrics,
+        galley.size().y.max(tag_size.y),
+        |painter, rect| {
+            let origin = rect.min + egui::vec2(metrics.mm(4.0), 0.0);
+            push_galley_tints(metrics, &galley, origin);
+            marks::paint_galley_marks(painter, metrics, origin, &galley);
+            painter.galley(origin, galley.clone(), theme::paper::ink());
+            math_flow::paint_slots(painter, metrics, origin, &galley, &slots);
+            mark_gutter_rows(metrics, rect, &rows);
+            let tag_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - metrics.mm(4.0) - tag_size.x, rect.top()),
+                tag_size,
+            );
+            painter.rect_stroke(
+                tag_rect,
+                0.0,
+                egui::Stroke::new(metrics.pt(0.4), theme::paper::ink_faint()),
+                egui::StrokeKind::Inside,
+            );
+            painter.galley(
+                tag_rect.min + egui::vec2(metrics.mm(1.0), metrics.mm(0.6)),
+                label.clone(),
+                theme::paper::ink_muted(),
+            );
+        },
+    );
+    ui.add_space(metrics.mm(3.0));
+}
+
+fn terminal_card_end(
+    ui: &mut egui::Ui,
+    metrics: &Metrics,
+    index: egui::layers::ShapeIdx,
+    top_left: egui::Pos2,
+) {
+    ui.add_space(metrics.mm(4.0));
+    let rect = egui::Rect::from_min_max(
+        top_left,
+        egui::pos2(top_left.x + metrics.content, ui.cursor().top()),
+    );
+    let accent = super::research_terminal::accent();
+    let size = metrics.mm(3.6);
+    let mut shapes = vec![
+        egui::Shape::rect_filled(
+            rect,
+            0.0,
+            if theme::paper::is_dark() {
+                egui::Color32::from_rgb(28, 40, 49)
+            } else {
+                egui::Color32::from_rgb(244, 245, 245)
+            },
+        ),
+        egui::Shape::rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(metrics.pt(0.5), theme::paper::ink_faint()),
+            egui::StrokeKind::Inside,
+        ),
+    ];
+    for points in [
+        vec![
+            rect.left_top() + egui::vec2(0.0, size),
+            rect.left_top(),
+            rect.left_top() + egui::vec2(size, 0.0),
+        ],
+        vec![
+            rect.right_bottom() - egui::vec2(size, 0.0),
+            rect.right_bottom(),
+            rect.right_bottom() - egui::vec2(0.0, size),
+        ],
+    ] {
+        shapes.push(egui::Shape::line(
+            points,
+            egui::Stroke::new(metrics.pt(1.2), accent),
+        ));
+    }
+    ui.painter().set(index, egui::Shape::Vec(shapes));
+    ui.add_space(metrics.mm(5.0));
+}
+
 /// 块内各行：一行一段，首行缩进两字，列表项前补 ⑴ ⑵，出处行靠右。
 fn quote_lines(
     ui: &mut egui::Ui,
@@ -251,7 +458,9 @@ fn quote_lines(
                 job.halign = Align::Max;
             }
             kind => {
-                job.append(&indent(2.0), 0.0, text_format(font.clone(), style.line));
+                if !metrics.terminal {
+                    job.append(&indent(2.0), 0.0, text_format(font.clone(), style.line));
+                }
                 if kind == QuoteLineKind::ListItem {
                     list_no += 1;
                     job.append(
@@ -292,7 +501,9 @@ fn flow_style(
     if align_right {
         *list_no = 0;
     } else {
-        lead.push((indent(2.0), normal.clone()));
+        if !metrics.terminal {
+            lead.push((indent(2.0), normal.clone()));
+        }
         if kind == QuoteLineKind::ListItem {
             *list_no += 1;
             lead.push((

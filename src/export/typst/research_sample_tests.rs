@@ -351,6 +351,13 @@ fn cases() -> Vec<Case> {
                 input.research.file_type = "专题研究报告".into();
             },
         },
+        Case {
+            name: "research-details",
+            markdown: "# 研究终端细节样张\n\n## 研究方法\n\n### 数据来源\n\n正文。\n\n#### 样本选取\n\n正文。\n\n##### 分类依据\n\n正文。\n\n> 授权运营应坚持统筹发展和安全。公式 $R=pq$。\n>\n> ——《研究材料》\n\n> [!引理] 有效样本 {#lem:sample}\n>\n> 按预设分层条件选取样本。\n\n> [!推论] 运营机制\n>\n> 结论由有效样本分析得到。\n> 1. 第一项。\n> 2. 第二项。\n> $$R=pq$$\n\n> [!专栏] 具有较长标题的研究案例说明以及标题中的公式 $R=pq$ 用于检验自动换行与类型签牌是否重叠\n>\n> 长标题正文。\n\n正文引用引理{@lem:sample}。\n",
+            tweak: |input| {
+                input.research.file_type = "专题研究报告".into();
+            },
+        },
     ]
 }
 
@@ -422,6 +429,14 @@ fn typst_samples_research_terminal() {
     crate::storage::set_test_config_dir(Some(base.clone()));
     for palette in [ResearchPalette::Dark, ResearchPalette::Bright] {
         for case in cases() {
+            let mut markdown = case.markdown.to_owned();
+            if case.name == "research-details" {
+                markdown.push_str("\n\n");
+                for i in 1..=35 {
+                    markdown.push_str(&format!("> 跨页材料第{i}段：按预设条件组织样本，核验来源、口径与结论，保留必要的研究过程记录。\n>\n"));
+                }
+                markdown.push_str("> ——跨页研究材料\n");
+            }
             let name = format!(
                 "terminal-{}-{}",
                 if palette == ResearchPalette::Dark {
@@ -440,7 +455,7 @@ fn typst_samples_research_terminal() {
             let outcome = super::research::write_pdf_with_base(
                 &dir.join("typst.pdf"),
                 &input,
-                case.markdown,
+                &markdown,
                 &NumberingConfig::default(),
                 &base,
             )
@@ -448,13 +463,13 @@ fn typst_samples_research_terminal() {
             crate::export::research::write_docx(
                 &dir.join("terminal.docx"),
                 &input,
-                case.markdown,
+                &markdown,
                 &NumberingConfig::default(),
             )
             .unwrap();
             let data = super::research::document_json(
                 &input,
-                case.markdown,
+                &markdown,
                 &NumberingConfig::default(),
                 &base,
             )

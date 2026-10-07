@@ -332,13 +332,11 @@
     block(sticky: true, above: if prev == "chapter" { 0pt } else { 6mm }, below: 4mm, {
       bookmark(b.level + 2, num + runs(b.text))
       set par(first-line-indent: 0pt, justify: false)
-      if b.level == 1 {
-        if prev != "chapter" { terminal-dash(); v(4mm) }
+      {
+        if b.level == 1 and prev != "chapter" { terminal-dash(); v(4mm) }
         grid(columns: (auto, 1fr), column-gutter: 4mm, align: horizon,
-          if b.number != none { box(stroke: 0.8pt + accent, inset: (x: 2mm, y: 1.5mm), text(font: mono, fill: accent, b.number)) } else { [] },
-          heavy(hei, size: 17pt, runs(b.text)))
-      } else {
-        par(text(font: mono, fill: accent, num) + heavy(hei, runs(b.text)))
+          if b.number != none { box(stroke: 0.8pt + accent, inset: (x: 2mm, y: if b.level == 1 { 1.5mm } else { 1mm }), text(font: mono, size: if b.level == 1 { 13pt } else { 11pt }, fill: accent, b.number)) } else { [] },
+          heavy(hei, size: if b.level == 1 { 17pt } else if b.level == 2 { 15pt } else { 14pt }, runs(b.text)))
       }
     })
     anchor(b.label, b.number)
@@ -553,7 +551,43 @@
 
 // ---------------- 引文与文框 ----------------
 // 引文（mdxquote）：楷体，左右各缩进两字，首行再缩进两字，前后各空半行；出处靠右。
-#let quote-block(b) = block(above: 0.5 * pitch + (pitch - body-size), below: 0.5 * pitch + (pitch - body-size),
+#let terminal-card-tag(name) = ("引文": "QUOTE", "引理": "LEMMA", "推论": "COROLLARY", "定理": "THEOREM",
+  "命题": "PROPOSITION", "专栏": "PANEL", "案例": "CASE", "例子": "EXAMPLE", "做法": "PRACTICE").at(name, default: name)
+// 卡片仍可跨页：上角标跟首片、下角标跟末片，不把长引文锁成不可拆的盒子。
+#let terminal-card(name, number: none, title: (), body) = block(width: 100%, above: 5mm, below: 5mm,
+  fill: panel, stroke: 0.5pt + rule, inset: 4mm, {
+    set block(spacing: 0pt)
+    set text(font: hei, size: 12pt, top-edge: "cap-height", bottom-edge: "baseline")
+    set par(first-line-indent: 0pt, justify: false, leading: 8pt, spacing: 3mm)
+    place(top + left, dx: -4mm, dy: -4mm, {
+      place(line(start: (0pt, 3.6mm), end: (0pt, 0pt), stroke: 1.2pt + accent))
+      place(line(length: 3.6mm, stroke: 1.2pt + accent))
+    })
+    block(sticky: true, grid(columns: (1fr, auto), column-gutter: 4mm, align: top,
+      heavy(hei, name + if number != none { h(0.5em) + text(font: mono, fill: accent, number) }
+        + if title.len() > 0 { h(0.8em) + runs(title) }),
+      box(stroke: 0.4pt + rule, inset: (x: 1mm, y: 0.6mm), text(font: mono, size: 7pt, fill: cyan, terminal-card-tag(name)))))
+    v(3mm, weak: false)
+    body
+    block(height: 0pt, width: 100%, above: 0pt, below: 0pt, {
+      place(top + right, dx: 4mm, dy: 4mm, {
+        place(line(start: (-3.6mm, 0pt), end: (0pt, 0pt), stroke: 1.2pt + accent))
+        place(line(start: (0pt, -3.6mm), end: (0pt, 0pt), stroke: 1.2pt + accent))
+      })
+    })
+  })
+#let quote-block(b) = {
+  if terminal {
+    return terminal-card("引文", {
+      for l in b.items {
+        if l.k == "source" { align(right, par(runs(l.c))) }
+        else if l.k == "math" { display-math(l) }
+        else if l.k == "list" { par(text(font: mono, l.label) + h(0.3em) + runs(l.c)) }
+        else { par(runs(l.c)) }
+      }
+    })
+  }
+  block(above: 0.5 * pitch + (pitch - body-size), below: 0.5 * pitch + (pitch - body-size),
   inset: (left: 2em, right: 2em), width: 100%, {
   set text(font: kai)
   for l in b.items {
@@ -563,10 +597,21 @@
     else { par(runs(l.c)) }
   }
 })
+}
 
 // 文框（mdxboxtblr）：0.6pt 细框、浅灰底，标题行黑体居中，内文楷体小四、一行一格。
 // 实测：标题行基线在框顶下 6.01mm，行距 8.44mm，末行基线到框底 5.45mm。
 #let box-block(b, prev: none) = {
+  if terminal {
+    return terminal-card(b.name, number: b.number, title: b.title, {
+      anchor(b.label, b.number)
+      for l in b.items {
+        if l.k == "math" { align(center, par(math-box(l))) }
+        else if l.k == "list" { par(text(font: mono, l.label) + h(0.3em) + runs(l.c)) }
+        else { par(runs(l.c)) }
+      }
+    })
+  }
   let title = heavy(hei, b.name + h(0.5em) + b.number + h(1em) + runs(b.title))
   // 实测：框顶距上一行基线 5.10mm，框底到下一行基线 8.43mm；两框相接时框间 8.85mm
   // （tabularray 的 presep 与 postsep 相加）。

@@ -1952,12 +1952,16 @@ mod tests {
 
     /// 同 [`drawn`]，但保留全部图形：公式纹理、占位虚线都要从 shape 里找。
     fn drawn_shapes(markdown: &str) -> Vec<egui::epaint::ClippedShape> {
-        let ctx = egui::Context::default();
-        theme::configure_fonts(&ctx, &FontConfig::default());
         let input = DraftInput {
             kind: TemplateKind::ResearchReport,
             ..Default::default()
         };
+        drawn_shapes_input(&input, markdown)
+    }
+
+    fn drawn_shapes_input(input: &DraftInput, markdown: &str) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &FontConfig::default());
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1968,7 +1972,7 @@ mod tests {
         ctx.run_ui(raw, |ui| {
             let _ = research_preview(
                 ui,
-                &input,
+                input,
                 markdown,
                 PreviewScale::zoom(Some(1.0)),
                 None,
@@ -1978,6 +1982,45 @@ mod tests {
             );
         })
         .shapes
+    }
+
+    #[test]
+    fn terminal_nested_heading_numbers_are_framed_and_quotes_share_card_style() {
+        use crate::models::ResearchTemplate;
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        input.research.template = ResearchTemplate::Terminal;
+        let shapes = drawn_shapes_input(
+            &input,
+            "## 方法\n\n### 一节\n\n#### 小节\n\n##### 细目\n\n> 普通引文。\n> ——研究材料\n\n> [!引理] 样本\n>\n> 引理内容。\n\n> [!推论] 结论\n>\n> 推论内容。\n",
+        );
+        let flat = flatten(&shapes);
+        for number in ["1.1", "1.1.1", "1.1.1.1"] {
+            let text = flat
+                .iter()
+                .find_map(|s| match s {
+                    egui::Shape::Text(t) if t.galley.text() == number => Some(t),
+                    _ => None,
+                })
+                .expect("编号独立绘制");
+            assert!(flat.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.rect.contains(text.pos + text.galley.size() / 2.0))), "{number} 应位于编号框内");
+        }
+        let text = flat_text(&shapes);
+        for value in [
+            "引文",
+            "QUOTE",
+            "引理",
+            "LEMMA",
+            "推论",
+            "COROLLARY",
+            "研究材料",
+        ] {
+            assert!(text.contains(value), "缺 {value}：{text}");
+        }
+        let corners = flat.iter().filter(|s| matches!(s, egui::Shape::Path(p) if p.points.len() == 3 && p.stroke.width > 0.0)).count();
+        assert!(corners >= 6, "三个引用块各有首尾角标");
     }
 
     /// 递归展开：egui 会把纸面底色等一批 shape 包进 `Shape::Vec`。
