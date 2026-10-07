@@ -1033,6 +1033,12 @@ impl GongwenApp {
                     .take()
                     .unwrap_or_else(|| doc.generated_markdown.clone());
                 let turn_id = doc.ai_panel.running_turn_mut().map(|turn| {
+                    turn.provenance = crate::ai_panel::proposal_source(
+                        &skill,
+                        &turn.usage.draft_models(),
+                        &report.cited_ids,
+                        &report.generated_at,
+                    );
                     // 自动选技能时卡片抬头先写着「自动选择技能」，定下来后换成技能名。
                     if turn.title.starts_with("自动选择技能") {
                         turn.title = turn.title.replacen("自动选择技能", &skill, 1);

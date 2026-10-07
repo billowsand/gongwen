@@ -55,7 +55,6 @@ impl UsageTotals {
         });
     }
 
-    #[cfg(test)]
     pub(crate) fn draft_models(&self) -> Vec<String> {
         let mut models = Vec::new();
         for call in self

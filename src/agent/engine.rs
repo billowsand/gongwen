@@ -59,6 +59,8 @@ pub(crate) enum Outcome {
 /// 一次技能运行交付的结果。
 #[derive(Debug, Clone)]
 pub(crate) struct SkillReport {
+    pub(crate) cited_ids: Vec<usize>,
+    pub(crate) generated_at: String,
     /// 剥掉引用标记的工作稿，交给定稿。
     pub(crate) markdown: String,
     pub(crate) ledger: Ledger,
@@ -73,6 +75,8 @@ impl SkillReport {
     pub(crate) fn from_board(board: &Board) -> Self {
         Self {
             markdown: evidence::strip_citations(&board.workspace),
+            cited_ids: evidence::citation_ids(&board.workspace),
+            generated_at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
             ledger: board.ledger.clone(),
             evidence: board.evidence.clone(),
             questions: board.questions.clone(),
@@ -80,6 +84,28 @@ impl SkillReport {
             truncated: board.truncated,
         }
     }
+}
+
+#[test]
+fn report_collects_only_workspace_citations_before_stripping() {
+    let mut board = Board {
+        workspace: "一。[K1]三。[K3]".into(),
+        ..Default::default()
+    };
+    let docs = (1..=5)
+        .map(|i| evidence::EvidenceDoc {
+            key: i.to_string(),
+            title: "资料".into(),
+            section: String::new(),
+            kind_label: String::new(),
+            text: "材料".into(),
+        })
+        .collect::<Vec<_>>();
+    board.evidence.absorb_docs("材料", &docs);
+    let report = SkillReport::from_board(&board);
+    assert_eq!(report.cited_ids, [1, 3]);
+    assert_eq!(report.markdown, "一。三。");
+    assert_eq!(report.evidence.items().len(), 5);
 }
 
 /// 从第 `start` 步开始执行技能流程。

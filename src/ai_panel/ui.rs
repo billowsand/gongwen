@@ -487,6 +487,13 @@ fn turn_card(
         });
     });
 
+    if !turn.provenance.is_empty() {
+        ui.label(
+            egui::RichText::new(&turn.provenance)
+                .small()
+                .color(theme::text_muted()),
+        );
+    }
     for note in &turn.notes {
         ui.horizontal_wrapped(|ui| {
             ui.add(

@@ -25,6 +25,7 @@ impl DraftPage<'_> {
         };
         let id = turn.id;
         let state = turn.state.clone();
+        let provenance = turn.provenance.clone();
         let showing = panel.workspace_view == Some(id);
         ui.horizontal_wrapped(|ui| {
             if ui.selectable_label(!showing, "正文").clicked() {
@@ -53,6 +54,9 @@ impl DraftPage<'_> {
         ui.separator();
         if panel.workspace_view != Some(id) {
             return false;
+        }
+        if !provenance.is_empty() {
+            ui.weak(provenance);
         }
         let mut action = None;
         ui.push_id(("ai_workspace_controls", self.doc.key, id), |ui| {

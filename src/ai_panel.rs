@@ -22,9 +22,7 @@ use std::time::{Duration, Instant};
 mod composer_ui;
 mod history;
 mod mention;
-#[cfg(test)]
 mod provenance;
-#[cfg(test)]
 pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
 mod session_ui;
