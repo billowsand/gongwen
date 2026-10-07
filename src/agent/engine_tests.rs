@@ -5,13 +5,14 @@
 
 use super::*;
 use crate::agent::backend::{Completion, ModelBackend, ModelRole};
+use crate::agent::checkpoint::{CheckpointSink, NoCheckpoint};
 use crate::agent::clarify::{Question, Target};
 use crate::agent::gaps::GapStatus;
 use crate::agent::skill::{Skill, builtin, builtin_research_draft, parse};
 use crate::agent::tools::KnowledgeSearch;
 use crate::agent::tools::testing::FakeManuscripts;
 use crate::lmstudio::StreamDelta;
-use crate::models::{AppConfig, DraftInput, TemplateKind, VocabularyEntry};
+use crate::models::{AppConfig, DraftInput, ManuscriptStatus, TemplateKind, VocabularyEntry};
 use crate::rag::RetrievedChunk;
 use std::cell::{Cell, RefCell};
 
@@ -65,6 +66,7 @@ fn run(
         skill,
         apis: &Default::default(),
         secrets: &Default::default(),
+        ckpt: &NoCheckpoint,
     };
     let mut board = board_of(input);
     Ok(match super::run(&mut board, &env, &[], emit)? {
@@ -702,23 +704,44 @@ fn live_research_draft() {
 
 /// 在给定黑板上从 `at` 接着跑技能，返回 (结果, 事件, 跑完的黑板)。
 fn run_board(
-    mut board: Board,
+    board: Board,
     skill: &Skill,
     model: &FakeModel,
     kb: &FakeKb,
     at: &[usize],
 ) -> (anyhow::Result<Outcome>, Vec<Event>, Board) {
+    run_board_sinking(
+        board,
+        skill,
+        model,
+        kb,
+        at,
+        &FakeManuscripts { docs: Vec::new() },
+        &NoCheckpoint,
+    )
+}
+
+/// 同 [`run_board`]，带假稿件库与检查点去处。
+fn run_board_sinking(
+    mut board: Board,
+    skill: &Skill,
+    model: &FakeModel,
+    kb: &FakeKb,
+    at: &[usize],
+    manuscripts: &FakeManuscripts,
+    ckpt: &dyn CheckpointSink,
+) -> (anyhow::Result<Outcome>, Vec<Event>, Board) {
     let config = AppConfig::default();
-    let manuscripts = FakeManuscripts { docs: Vec::new() };
     let env = Env {
         config: &config,
         vocabulary: &[],
         kb,
-        manuscripts: &manuscripts,
+        manuscripts,
         model,
         skill,
         apis: &Default::default(),
         secrets: &Default::default(),
+        ckpt,
     };
     let mut events = Vec::new();
     let outcome = super::run(&mut board, &env, at, &mut |event| events.push(event));
@@ -967,6 +990,7 @@ fn conditions_cover_kind_variables_and_negation() {
         skill: &skill,
         apis: &Default::default(),
         secrets: &Default::default(),
+        ckpt: &NoCheckpoint,
     };
     let mut board = Board::default();
     board.draft.kind = TemplateKind::ResearchReport;
@@ -1057,6 +1081,7 @@ fn an_api_feeds_evidence_that_is_cited_verified_and_gap_checked() {
         skill: &skill,
         apis: &apis,
         secrets: &Default::default(),
+        ckpt: &NoCheckpoint,
     };
     let mut board = Board {
         request: "全省".into(),
@@ -1151,6 +1176,7 @@ fn undeclared_apis_are_refused_even_inside_operators() {
         skill: &skill,
         apis: &apis,
         secrets: &Default::default(),
+        ckpt: &NoCheckpoint,
     };
     let mut board = Board {
         request: "全省".into(),
@@ -1166,4 +1192,203 @@ fn undeclared_apis_are_refused_even_inside_operators() {
         "{notes:?}"
     );
     assert!(board.evidence.is_empty());
+}
+
+// —— 检查点（内核加固第 4 期）——
+
+#[test]
+fn checkpoints_land_after_every_step_and_resume_matches_an_uninterrupted_run() {
+    use crate::agent::testkit::{Driver, KeywordKb, ScriptedModel};
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [note]\nflow:\n  - tool: note\n    args: { text: 一 }\n  - tool: note\n    args: { text: 二 }\n  - tool: note\n    args: { text: \"{request}完\" }\n    save_as: done\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let model = ScriptedModel::new(|_, _| "无".into());
+    let kb = KeywordKb::disabled();
+    let start = || Board {
+        request: "起草".into(),
+        ..Board::default()
+    };
+
+    let mut driver = Driver::new(&skill, &model, &kb, start());
+    assert!(driver.run().is_none(), "没有要问的，一次跑完");
+    assert_eq!(
+        driver.checkpoints.saved.borrow().len(),
+        3,
+        "3 步技能落 3 份检查点"
+    );
+
+    // 从第 2 份（第 1 步成功之后，at = [2]）恢复：与不中断跑完逐字节相同。
+    let ckpt = driver.checkpoints.saved.borrow()[1].clone();
+    assert_eq!(ckpt.at, [2]);
+    assert_eq!(ckpt.reason, Reason::Step);
+    let mut resumed = Driver::new(&skill, &model, &kb, ckpt.board.clone());
+    assert!(resumed.run_from(&ckpt.at).is_none());
+    assert_eq!(
+        serde_json::to_value(&resumed.board).unwrap(),
+        serde_json::to_value(&driver.board).unwrap(),
+        "工作稿、证据包、变量逐字节相同"
+    );
+}
+
+#[test]
+fn for_each_resumes_from_the_next_item_without_redoing_finished_ones() {
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [note, ws.write]\nflow:\n  - step: for_each\n    over: sections\n    as: section\n    do:\n      - tool: note\n        args: { text: \"写第{index}章\" }\n      - tool: ws.write\n        args: { text: \"{workspace}## {section}\\n\" }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let mut board = Board::default();
+    board
+        .vars
+        .insert("sections".into(), serde_json::json!(["甲", "乙", "丙"]));
+    let sink = crate::agent::testkit::MemoryCheckpoints::default();
+    let (outcome, _, done_board) = run_board_sinking(
+        board,
+        &skill,
+        &silent_model(),
+        &kb(true),
+        &[],
+        &FakeManuscripts { docs: Vec::new() },
+        &sink,
+    );
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    let paths: Vec<_> = sink.saved.borrow().iter().map(|c| c.at.clone()).collect();
+    assert_eq!(
+        paths,
+        [vec![0, 1], vec![0, 2], vec![0, 3], vec![1]],
+        "每做完一项一份，整步跑完再落一份"
+    );
+
+    // 崩在做第 2 项（乙）的中途：从第 1 项之后的检查点 [0, 1] 恢复。
+    let ckpt = sink.saved.borrow()[0].clone();
+    assert!(!ckpt.board.workspace.contains("## 乙"), "乙还没写进去");
+    let at = ckpt.at.clone();
+    let sink2 = crate::agent::testkit::MemoryCheckpoints::default();
+    let (outcome, events, resumed) = run_board_sinking(
+        ckpt.board,
+        &skill,
+        &silent_model(),
+        &kb(true),
+        &at,
+        &FakeManuscripts { docs: Vec::new() },
+        &sink2,
+    );
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    assert_eq!(notes(&events), ["写第2章", "写第3章"], "已完成的项不重做");
+    assert_eq!(
+        resumed.workspace.matches("## 乙").count(),
+        1,
+        "正在做的那一项从头重做，工作稿里这一章只出现一次"
+    );
+    assert_eq!(
+        serde_json::to_value(&resumed).unwrap(),
+        serde_json::to_value(&done_board).unwrap(),
+        "恢复跑完与不中断跑完逐字节相同"
+    );
+}
+
+#[test]
+fn references_are_not_reapplied_when_resuming_from_a_checkpoint() {
+    // 材料型引用并进用户原话；恢复时若再落一遍，材料就出现两次。
+    let skill = parse(
+        "t",
+        "---\nname: 测试\nreferences: material\ntools: [note]\nflow:\n  - tool: note\n    args: { text: 一 }\n  - tool: note\n    args: { text: 二 }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let manuscripts = FakeManuscripts {
+        docs: vec![crate::agent::tools::ManuscriptDoc {
+            id: 1,
+            title: "防火要点".into(),
+            kind: TemplateKind::PlainDocument,
+            status: ManuscriptStatus::Published,
+            doc_number: String::new(),
+            doc_date: String::new(),
+            draft: DraftInput::default(),
+            markdown: "一是清林边，二是管住火。".into(),
+            version: None,
+        }],
+    };
+    let make_board = || Board {
+        request: "写防火通知".into(),
+        refs: vec![crate::agent::board::Reference {
+            source: crate::agent::board::RefSource::Manuscript,
+            id: 1,
+            title: "防火要点".into(),
+        }],
+        ..Board::default()
+    };
+    let sink = crate::agent::testkit::MemoryCheckpoints::default();
+    let (outcome, _, board) = run_board_sinking(
+        make_board(),
+        &skill,
+        &silent_model(),
+        &kb(true),
+        &[],
+        &manuscripts,
+        &sink,
+    );
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    assert_eq!(
+        board.request.matches("【引用材料").count(),
+        1,
+        "全新开跑落一次"
+    );
+
+    // 从第 1 步成功之后的检查点恢复：引用已在黑板上，不再落一遍。
+    let ckpt = sink.saved.borrow()[0].clone();
+    let at = ckpt.at.clone();
+    let sink2 = crate::agent::testkit::MemoryCheckpoints::default();
+    let (outcome, _, resumed) = run_board_sinking(
+        ckpt.board,
+        &skill,
+        &silent_model(),
+        &kb(true),
+        &at,
+        &manuscripts,
+        &sink2,
+    );
+    assert!(matches!(outcome.unwrap(), Outcome::Done));
+    assert_eq!(
+        resumed.request.matches("【引用材料").count(),
+        1,
+        "从检查点恢复时 @ 引用不再落一遍"
+    );
+}
+
+#[test]
+fn a_failing_checkpoint_sink_only_leaves_a_note() {
+    struct BadSink;
+    impl CheckpointSink for BadSink {
+        fn save(&self, _: &Checkpoint) -> Result<(), String> {
+            Err("磁盘满了".into())
+        }
+    }
+    let skill = parse(
+        "t",
+        "---\nname: 测试\ntools: [note]\nflow:\n  - tool: note\n    args: { text: 一 }\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let (outcome, events, _) = run_board_sinking(
+        Board::default(),
+        &skill,
+        &silent_model(),
+        &kb(true),
+        &[],
+        &FakeManuscripts { docs: Vec::new() },
+        &BadSink,
+    );
+    assert!(
+        matches!(outcome.unwrap(), Outcome::Done),
+        "写盘失败不中断流程"
+    );
+    assert!(
+        notes(&events).iter().any(|n| n.contains("检查点没存上")),
+        "只留一条说明"
+    );
 }

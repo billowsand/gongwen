@@ -270,6 +270,7 @@ fn run_tool_in_background(
             skill: &skill,
             apis: &apis,
             secrets: &secrets,
+            ckpt: &crate::agent::checkpoint::NoCheckpoint,
         };
         let before = board.workspace.clone();
         let mut notes = Vec::new();

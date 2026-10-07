@@ -45,3 +45,18 @@ pub(crate) struct Checkpoint {
     #[serde(default)]
     pub(crate) partial: bool,
 }
+
+/// 检查点的去处。实现方负责落盘（`manuscript::ai_checkpoints`）；失败只能记一条说明，
+/// 不能中断流程（引擎在 `engine::save` 里接住错误）。
+pub(crate) trait CheckpointSink {
+    fn save(&self, ckpt: &Checkpoint) -> Result<(), String>;
+}
+
+/// 不落盘的去处：稿件还没入库时用，检查点只在内存里。
+pub(crate) struct NoCheckpoint;
+
+impl CheckpointSink for NoCheckpoint {
+    fn save(&self, _: &Checkpoint) -> Result<(), String> {
+        Ok(())
+    }
+}

@@ -233,6 +233,7 @@ impl Fixture {
             skill: &self.skill,
             apis: &self.apis,
             secrets: &self.secrets,
+            ckpt: &crate::agent::checkpoint::NoCheckpoint,
         };
         let mut events = Vec::new();
         let result = {

@@ -659,6 +659,7 @@ fn live_builtin_skill() {
         skill: &skill,
         apis: &apis,
         secrets: &secrets,
+        ckpt: &crate::agent::checkpoint::NoCheckpoint,
     };
     let started = std::time::Instant::now();
     let mut print = |event: Event| match event {

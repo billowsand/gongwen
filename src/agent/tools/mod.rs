@@ -163,6 +163,8 @@ pub(crate) struct Env<'a> {
     /// 设置里配好的数据接口与密钥。
     pub(crate) apis: &'a ApiStore,
     pub(crate) secrets: &'a ApiSecrets,
+    /// 每步成功之后检查点落到哪；不落盘的用 `NoCheckpoint`。
+    pub(crate) ckpt: &'a dyn crate::agent::checkpoint::CheckpointSink,
 }
 
 /// 一次工具调用的上下文。

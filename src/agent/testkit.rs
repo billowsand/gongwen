@@ -4,7 +4,7 @@
 use super::api::ApiStore;
 use super::backend::{Completion, ModelBackend, ModelRole};
 use super::board::Board;
-use super::checkpoint::StepPath;
+use super::checkpoint::{Checkpoint, CheckpointSink, StepPath};
 use super::clarify::Reply;
 use super::engine::{self, Event, Outcome, Suspension};
 use super::skill::Skill;
@@ -14,6 +14,19 @@ use crate::lmstudio::StreamDelta;
 use crate::models::{AppConfig, TemplateKind};
 use crate::rag::RetrievedChunk;
 use std::cell::RefCell;
+
+/// 记下每次落盘的内存检查点，测试断言用。
+#[derive(Default)]
+pub(crate) struct MemoryCheckpoints {
+    pub(crate) saved: RefCell<Vec<Checkpoint>>,
+}
+
+impl CheckpointSink for MemoryCheckpoints {
+    fn save(&self, ckpt: &Checkpoint) -> Result<(), String> {
+        self.saved.borrow_mut().push(ckpt.clone());
+        Ok(())
+    }
+}
 
 type Responder = Box<dyn Fn(ModelRole, &str) -> String>;
 
@@ -235,6 +248,8 @@ pub(crate) struct Driver<'a> {
     pub(crate) board: Board,
     pub(crate) events: Vec<Event>,
     pub(crate) next: StepPath,
+    /// 每次落盘的检查点（内存 sink），断言用。
+    pub(crate) checkpoints: MemoryCheckpoints,
 }
 
 impl<'a> Driver<'a> {
@@ -254,12 +269,19 @@ impl<'a> Driver<'a> {
             board,
             events: Vec::new(),
             next: Vec::new(),
+            checkpoints: MemoryCheckpoints::default(),
         }
     }
 
     /// 从上次停下的地方跑到挂起或结束。挂起时返回题目。
     pub(crate) fn run(&mut self) -> Option<Suspension> {
         self.try_run().expect("技能应当跑通")
+    }
+
+    /// 从检查点接着跑（模拟崩溃 / 停止后的恢复）：调用方先把检查点里的黑板换上。
+    pub(crate) fn run_from(&mut self, at: &[usize]) -> Option<Suspension> {
+        self.next = at.to_vec();
+        self.run()
     }
 
     /// 同 [`Driver::run`]，出错时把错误交回来。
@@ -274,6 +296,7 @@ impl<'a> Driver<'a> {
             skill: self.skill,
             apis: &self.apis,
             secrets: &Default::default(),
+            ckpt: &self.checkpoints,
         };
         let events = &mut self.events;
         Ok(

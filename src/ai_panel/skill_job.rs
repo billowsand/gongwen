@@ -952,6 +952,7 @@ fn run_engine(
         skill: &skill,
         apis,
         secrets,
+        ckpt: &crate::agent::checkpoint::NoCheckpoint,
     };
     match engine::run(board, &env, &at, emit).map_err(|e| format!("{e:#}"))? {
         Outcome::Suspended(suspension) => Ok(SkillResult::Suspended(Box::new(SkillRun {

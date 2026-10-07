@@ -9,7 +9,7 @@
 //! 引擎只产出工作稿与题目；定稿成提案、交用户接受由调用方负责（红线 1）。
 
 use super::board::Board;
-use super::checkpoint::{Checkpoint, Reason};
+use super::checkpoint::{Checkpoint, Reason, StepPath};
 use super::clarify::{self, Action, Question, Reply, Target};
 use super::evidence::{self, EvidencePack};
 use super::gaps::Ledger;
@@ -130,21 +130,45 @@ pub(crate) fn run(
         } else {
             0
         };
-        if let Some((questions, into)) = run_step(&mut ctx, step, item)? {
+        if let Some((questions, into)) = run_step(&mut ctx, step, index, item)? {
+            // 要挂起：先存检查点（reason = Ask）再返回，挂起就是一种检查点。
+            let checkpoint = save(
+                &mut ctx,
+                vec![index + 1],
+                Reason::Ask,
+                format!("等你回答：{}", step.label()),
+            );
             return Ok(Outcome::Suspended(Box::new(Suspension {
-                checkpoint: Checkpoint {
-                    at: vec![index + 1],
-                    reason: Reason::Ask,
-                    label: format!("等你回答：{}", step.label()),
-                    board: ctx.board.clone(),
-                    partial: false,
-                },
+                checkpoint,
                 questions,
                 save_as: into.or_else(|| step.save_as.clone()),
             })));
         }
+        // 每步成功之后落一份检查点；不在步骤之前存（内容与上一份相同）。
+        save(
+            &mut ctx,
+            vec![index + 1],
+            Reason::Step,
+            format!("已完成 {}", step.label()),
+        );
     }
     Ok(Outcome::Done)
+}
+
+/// 一步成功之后落一份检查点，返回它（挂起时随 `Suspension` 交回调用方）。
+/// 写盘失败不中断流程，只记一条说明——与工具出错同一个风格。
+fn save(ctx: &mut ToolCtx<'_, '_>, at: StepPath, reason: Reason, label: String) -> Checkpoint {
+    let checkpoint = Checkpoint {
+        at,
+        reason,
+        label,
+        board: ctx.board.clone(),
+        partial: false,
+    };
+    if let Err(error) = ctx.env.ckpt.save(&checkpoint) {
+        (ctx.emit)(Event::Note(format!("检查点没存上：{error}")));
+    }
+    checkpoint
 }
 
 /// 要问用户的题，以及答案存进哪个变量（None 表示步骤的 `save_as`）。
@@ -154,6 +178,7 @@ type Ask = (Vec<Question>, Option<String>);
 fn run_step(
     ctx: &mut ToolCtx<'_, '_>,
     step: &StepSpec,
+    index: usize,
     item_from: usize,
 ) -> anyhow::Result<Option<Ask>> {
     ops::check_cancel(ctx)?;
@@ -164,7 +189,7 @@ fn run_step(
     }
     match (step.step.as_deref(), step.tool.as_deref()) {
         (Some("for_each"), None) => {
-            for_each(ctx, step, item_from)?;
+            for_each(ctx, step, index, item_from)?;
             Ok(None)
         }
         (Some(name), None) => {
@@ -219,7 +244,12 @@ fn run_tool(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, id: &str) -> Option<Vec<
 
 /// `for_each`：对列表变量逐项执行子流程，当前项存在 `as` 指定的变量（默认 `item`），
 /// 序号存在 `index`。子流程里不能停下来问用户。
-fn for_each(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, from: usize) -> anyhow::Result<()> {
+fn for_each(
+    ctx: &mut ToolCtx<'_, '_>,
+    step: &StepSpec,
+    at: usize,
+    from: usize,
+) -> anyhow::Result<()> {
     let over = step.param_str("over").unwrap_or_default();
     let items: Vec<Value> = match ctx.board.vars.get(over) {
         Some(Value::Array(items)) => items.clone(),
@@ -244,10 +274,17 @@ fn for_each(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, from: usize) -> anyhow::
             .vars
             .insert("index".into(), Value::from(index + 1));
         for sub in &step.body {
-            if run_step(ctx, sub, 0)?.is_some() {
+            if run_step(ctx, sub, 0, 0)?.is_some() {
                 anyhow::bail!("for_each 的子流程里不能停下来问用户，请把提问挪到 for_each 之外");
             }
         }
+        // 每做完一项落一份检查点：长循环中断后从下一项接着跑。
+        save(
+            ctx,
+            vec![at, index + 1],
+            Reason::Step,
+            format!("已完成 {} 的第 {} 项", step.label(), index + 1),
+        );
     }
     Ok(())
 }
