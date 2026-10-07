@@ -29,6 +29,12 @@ impl Tool for HttpCall {
         )];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r#"{"api": "stat.fire", "region": "全省"}"#
+    }
+    fn open_args(&self) -> bool {
+        true
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,

@@ -11,11 +11,12 @@
 use super::{Flow, check_cancel, note, param, phase, prompt};
 use crate::agent::api::ApiStore;
 use crate::agent::apidef::tooling::{self, ApiTools, Resolved};
+use crate::agent::argcheck;
 use crate::agent::backend::ModelRole;
 use crate::agent::engine::Event;
 use crate::agent::skill::StepSpec;
 use crate::agent::toolcall::{Protocol, ToolSpec, Turn, wire_name};
-use crate::agent::tools::{self, Permission, ToolCtx, ToolUse};
+use crate::agent::tools::{self, ArgKind, Caller, Permission, ToolCtx, ToolUse};
 use crate::lmstudio::StreamDelta;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -70,25 +71,33 @@ fn allowed_tools(ctx: &ToolCtx<'_, '_>, step: &StepSpec) -> Vec<String> {
         .collect()
 }
 
-/// 内置工具的说明。数据接口不走这里，见 [`tooling::ApiTools`]。
+/// 内置工具的说明：带类型的 JSON Schema（`tools::schema`）。数据接口不走这里，见 [`tooling::ApiTools`]。
 fn spec_of(id: &str) -> Option<ToolSpec> {
     let tool = tools::find(id)?;
+    let schema = tools::schema(tool);
+    // 文本协议只看 `params`：不是文字的参数在说明后面带上签名，例如「days: 整数」。
     let params = tool
         .inputs()
         .iter()
         .map(|input| {
-            (
-                input.name.to_string(),
-                input.required,
-                input.doc.to_string(),
-            )
+            let doc = if input.kind == ArgKind::Text {
+                input.doc.to_string()
+            } else {
+                let prop = &schema["properties"][input.name];
+                format!(
+                    "{}；{}",
+                    input.doc,
+                    argcheck::signature(input.name, prop, input.required)
+                )
+            };
+            (input.name.to_string(), input.required, doc)
         })
         .collect();
     Some(ToolSpec {
         name: wire_name(id),
         description: tool.description().to_string(),
         params,
-        schema: None,
+        schema: Some(schema),
     })
 }
 
@@ -120,7 +129,14 @@ fn finish_spec() -> ToolSpec {
             true,
             "一两句话：做了什么、还有什么要用户确认".into(),
         )],
-        schema: None,
+        schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": {"summary": {
+                "type": "string",
+                "description": "一两句话：做了什么、还有什么要用户确认",
+            }},
+            "required": ["summary"],
+        })),
     }
 }
 
@@ -375,7 +391,7 @@ fn compact(turns: &mut [Turn], keep: usize) -> usize {
 
 /// 执行一个工具调用，返回交给模型的文字。
 fn run_one(ctx: &mut ToolCtx<'_, '_>, id: &str, arguments: &Value) -> String {
-    match tools::call(id, ctx, arguments) {
+    match tools::call_as(id, ctx, arguments, Caller::Model) {
         Ok(output) => {
             if let Some(tool) = tools::find(id) {
                 (ctx.emit)(Event::Tool(ToolUse::new(
@@ -401,7 +417,9 @@ fn run_one(ctx: &mut ToolCtx<'_, '_>, id: &str, arguments: &Value) -> String {
             wrap_result(&output.summary, &output.value)
         }
         Err(error) => {
-            (ctx.emit)(Event::Note(format!("自主步骤调用 {id} 没有做成：{error}")));
+            // 模型拿到整段（错在哪、签名、正确示例）去改；任务流里只留「错在哪」那一句。
+            let brief = error.split("。这个").next().unwrap_or(&error);
+            (ctx.emit)(Event::Note(format!("自主步骤调用 {id} 没有做成：{brief}")));
             format!("出错：{error}")
         }
     }
@@ -423,6 +441,34 @@ fn finish(ctx: &mut ToolCtx<'_, '_>, summary: &str) {
 mod tests {
     use super::*;
     use crate::agent::api::{ApiEndpoint, ApiInput, InputKind};
+
+    #[test]
+    fn built_in_tools_are_described_with_types() {
+        let spec = spec_of("calc.ratio").unwrap();
+        let parameters = &spec.to_native()["function"]["parameters"];
+        assert_eq!(parameters["properties"]["current"]["type"], "number");
+        assert_eq!(
+            parameters["properties"]["kind"]["enum"],
+            serde_json::json!(["yoy", "mom", "growth", "share", "points"])
+        );
+        assert_eq!(parameters["required"], serde_json::json!(["current"]));
+        // 文本协议看 `params`：非文字参数的说明后面带签名。
+        let current = spec
+            .params
+            .iter()
+            .find(|(name, ..)| name == "current")
+            .unwrap();
+        assert!(
+            current.2.ends_with("current: 数字（必填）"),
+            "{}",
+            current.2
+        );
+        let text = spec_of("ws.write").unwrap();
+        assert_eq!(
+            text.params[0].2, "要写入的 Markdown 全文",
+            "文字参数不加签名"
+        );
+    }
 
     #[test]
     fn a_scoped_http_call_lists_the_endpoint_inputs() {

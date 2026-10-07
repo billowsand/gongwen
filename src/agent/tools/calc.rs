@@ -1,7 +1,7 @@
 //! G 组：计算与文本（内置、确定性）。公文里天天用、又最容易被模型算错或写错的，交给程序算。
 
 use super::{
-    Input, Permission, Tool, ToolCtx, ToolOutput, arg_f64, arg_i64, arg_numbers, arg_str,
+    ArgKind, Input, Permission, Tool, ToolCtx, ToolOutput, arg_f64, arg_i64, arg_numbers, arg_str,
     arg_strings, arg_usize, optional, parse_number, required,
 };
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
@@ -77,11 +77,15 @@ impl Tool for DateTool {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
             optional("date", "起始日期，如 2026年10月3日；不给就是今天"),
-            optional("op", "info（默认：星期、季度、月末）/ add / diff"),
-            optional("days", "op 为 add 时加几天，可为负数"),
+            optional("op", "info（默认：星期、季度、月末）/ add / diff")
+                .of(ArgKind::OneOf(&["info", "add", "diff"])),
+            optional("days", "op 为 add 时加几天，可为负数").of(ArgKind::Integer),
             optional("to", "op 为 diff 时的另一个日期"),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"date": "2026年10月3日", "op": "add", "days": 30}"#
     }
     fn run(
         &self,
@@ -151,11 +155,14 @@ impl Tool for Workday {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
             optional("date", "起始日期；不给就是今天"),
-            required("days", "第几个工作日（正整数）"),
-            optional("holidays", "节假日列表；不给就只扣周末"),
-            optional("workdays", "调休上班的周末日期列表"),
+            required("days", "第几个工作日（正整数）").of(ArgKind::Integer),
+            optional("holidays", "节假日列表；不给就只扣周末").of(ArgKind::List),
+            optional("workdays", "调休上班的周末日期列表").of(ArgKind::List),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"date": "2026年9月28日", "days": 5, "holidays": ["2026年10月1日", "2026年10月2日"]}"#
     }
     fn run(
         &self,
@@ -224,16 +231,20 @@ impl Tool for Ratio {
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            required("current", "本期数（算百分点差时是本期百分比）"),
-            optional("previous", "上期数 / 去年同期数"),
-            optional("total", "算占比时的总数"),
+            required("current", "本期数（算百分点差时是本期百分比）").of(ArgKind::Number),
+            optional("previous", "上期数 / 去年同期数").of(ArgKind::Number),
+            optional("total", "算占比时的总数").of(ArgKind::Number),
             optional(
                 "kind",
                 "yoy 同比 / mom 环比 / growth 增长率（默认）/ share 占比 / points 百分点差",
-            ),
-            optional("digits", "保留几位小数，默认 1"),
+            )
+            .of(ArgKind::OneOf(&["yoy", "mom", "growth", "share", "points"])),
+            optional("digits", "保留几位小数，默认 1").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"current": 120, "previous": 100, "kind": "yoy"}"#
     }
     fn run(
         &self,
@@ -317,11 +328,14 @@ impl Tool for Stats {
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            required("values", "数字列表，或用逗号、顿号分隔的一串数"),
-            optional("labels", "与数字一一对应的名称，排名时带上"),
-            optional("digits", "平均数保留几位小数，默认 2"),
+            required("values", "数字列表，或用逗号、顿号分隔的一串数").of(ArgKind::Numbers),
+            optional("labels", "与数字一一对应的名称，排名时带上").of(ArgKind::List),
+            optional("digits", "平均数保留几位小数，默认 2").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"values": [12, 30, 18], "labels": ["甲市", "乙市", "丙市"]}"#
     }
     fn run(
         &self,
@@ -419,10 +433,14 @@ impl Tool for Table {
             optional(
                 "ops",
                 "要做什么：sum（默认）、share 加占比列、total 加合计行，可写多个",
-            ),
-            optional("digits", "占比保留几位小数，默认 1"),
+            )
+            .of(ArgKind::List),
+            optional("digits", "占比保留几位小数，默认 1").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"table": "| 地区 | 起数 |\n|---|---|\n| 甲市 | 12 |\n| 乙市 | 30 |", "column": "起数", "ops": ["sum", "share"]}"#
     }
     fn run(
         &self,
@@ -589,6 +607,9 @@ fn group_words(group: u32, digits: &[char; 10], small: [char; 3]) -> String {
     out
 }
 
+/// 金额能用的单位。
+const MONEY_UNITS: &[&str] = &["元", "万元", "亿元"];
+
 struct Money;
 
 impl Tool for Money {
@@ -603,13 +624,17 @@ impl Tool for Money {
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            required("amount", "金额数字"),
-            optional("op", "upper 大写（默认）/ convert 换算 / format 千分位"),
-            optional("from", "金额的单位：元（默认）/ 万元 / 亿元"),
-            optional("to", "换算成：元 / 万元 / 亿元"),
-            optional("digits", "换算结果保留几位小数，默认 2"),
+            required("amount", "金额数字").of(ArgKind::Number),
+            optional("op", "upper 大写（默认）/ convert 换算 / format 千分位")
+                .of(ArgKind::OneOf(&["upper", "convert", "format"])),
+            optional("from", "金额的单位：元（默认）/ 万元 / 亿元").of(ArgKind::OneOf(MONEY_UNITS)),
+            optional("to", "换算成：元 / 万元 / 亿元").of(ArgKind::OneOf(MONEY_UNITS)),
+            optional("digits", "换算结果保留几位小数，默认 2").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"amount": 1234.5, "op": "upper"}"#
     }
     fn run(
         &self,
@@ -745,9 +770,13 @@ impl Tool for Number {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
             required("value", "数字或汉字数字"),
-            optional("op", "to_chinese / to_arabic；不给按输入自动判断"),
+            optional("op", "to_chinese / to_arabic；不给按输入自动判断")
+                .of(ArgKind::OneOf(&["to_chinese", "to_arabic"])),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"value": "2026", "op": "to_chinese"}"#
     }
     fn run(
         &self,
@@ -818,12 +847,15 @@ impl Tool for Unit {
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            required("value", "数值"),
+            required("value", "数值").of(ArgKind::Number),
             required("from", "原单位，如 亩"),
             required("to", "目标单位，如 公顷"),
-            optional("digits", "保留几位小数，默认 2"),
+            optional("digits", "保留几位小数，默认 2").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"value": 30, "from": "亩", "to": "公顷"}"#
     }
     fn run(
         &self,
@@ -927,9 +959,12 @@ impl Tool for Keywords {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
             optional("text", "要抽关键词的文字；不给就用用户原话"),
-            optional("top", "要几个，默认 8"),
+            optional("top", "要几个，默认 8").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"text": "加强森林防火宣传教育", "top": 5}"#
     }
     fn run(
         &self,
@@ -959,6 +994,9 @@ impl Tool for TextDiff {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[required("before", "原文"), required("after", "改后")];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"before": "各单位要高度重视。", "after": "各有关单位要高度重视。"}"#
     }
     fn run(
         &self,

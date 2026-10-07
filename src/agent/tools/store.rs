@@ -1,8 +1,8 @@
 //! C 组：知识库与稿件库（只读）。资料类结果默认并入证据包，带出处、可被引用、可核验。
 
 use super::{
-    Input, Permission, Tool, ToolCtx, ToolOutput, arg_i64, arg_str, arg_usize, kind_arg, optional,
-    required, short,
+    ArgKind, Input, Permission, Tool, ToolCtx, ToolOutput, arg_i64, arg_str, arg_usize, kind_arg,
+    optional, required, short,
 };
 use crate::agent::evidence::EvidenceDoc;
 use crate::manuscript::{ManuscriptFilter, VersionRow};
@@ -131,10 +131,13 @@ impl Tool for KbSearch {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
             required("query", "检索词：用一句话说要找什么"),
-            optional("kind", "只要某个文种的片段"),
-            optional("top", "最多返回几段"),
+            optional("kind", "只要某个文种的片段").of(ArgKind::Kind),
+            optional("top", "最多返回几段").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"query": "森林防火 责任落实", "top": 5}"#
     }
     fn run(
         &self,
@@ -186,11 +189,15 @@ impl Tool for KbRead {
         "读知识库里某篇文档的全文"
     }
     fn inputs(&self) -> &'static [Input] {
-        const INPUTS: &[Input] = &[required(
-            "doc_id",
-            "文档 id（kb.list 或 kb.search 的结果里有）",
-        )];
+        const INPUTS: &[Input] =
+            &[
+                required("doc_id", "文档 id（kb.list 或 kb.search 的结果里有）")
+                    .of(ArgKind::Integer),
+            ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"doc_id": 12}"#
     }
     fn run(
         &self,
@@ -234,8 +241,11 @@ impl Tool for KbList {
         "列出知识库里的文档"
     }
     fn inputs(&self) -> &'static [Input] {
-        const INPUTS: &[Input] = &[optional("kind", "只列某个文种")];
+        const INPUTS: &[Input] = &[optional("kind", "只列某个文种").of(ArgKind::Kind)];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"kind": "普通公文"}"#
     }
     fn run(
         &self,
@@ -276,13 +286,21 @@ impl Tool for MsSearch {
                 "query",
                 "一句话，如用户原话：抽出关键词，按标题命中多少排序",
             ),
-            optional("kind", "文种"),
-            optional("status", "状态：新建 / 草稿 / 已发布 / 已归档"),
+            optional("kind", "文种").of(ArgKind::Kind),
+            optional("status", "状态：新建 / 草稿 / 已发布 / 已归档").of(ArgKind::OneOf(&[
+                "新建",
+                "草稿",
+                "已发布",
+                "已归档",
+            ])),
             optional("date_from", "成文日期起，YYYY-MM-DD"),
             optional("date_to", "成文日期止，YYYY-MM-DD"),
-            optional("limit", "最多几篇，默认 10"),
+            optional("limit", "最多几篇，默认 10").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"query": "森林防火 通知", "limit": 5}"#
     }
     fn run(
         &self,
@@ -369,10 +387,13 @@ impl Tool for MsRead {
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            required("id", "稿件 id（ms.search 的结果里有）"),
-            optional("version", "版本号；不给读当前版本"),
+            required("id", "稿件 id（ms.search 的结果里有）").of(ArgKind::Integer),
+            optional("version", "版本号；不给读当前版本").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"id": 3}"#
     }
     fn run(
         &self,
@@ -434,8 +455,11 @@ impl Tool for MsVersions {
         "一篇稿件的历史版本列表"
     }
     fn inputs(&self) -> &'static [Input] {
-        const INPUTS: &[Input] = &[required("id", "稿件 id")];
+        const INPUTS: &[Input] = &[required("id", "稿件 id").of(ArgKind::Integer)];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"id": 3}"#
     }
     fn run(
         &self,

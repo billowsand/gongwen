@@ -28,6 +28,9 @@ impl Tool for Elements {
         const INPUTS: &[Input] = &[optional("text", TEXT_DOC)];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r#"{}"#
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -63,6 +66,9 @@ impl Tool for Proofread {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[optional("text", TEXT_DOC)];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{}"#
     }
     fn run(
         &self,
@@ -119,6 +125,9 @@ impl Tool for Facts {
             ),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"sources": "board"}"#
     }
     fn run(
         &self,
@@ -181,6 +190,9 @@ impl Tool for Placeholders {
         const INPUTS: &[Input] = &[optional("text", TEXT_DOC)];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r#"{}"#
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -217,6 +229,9 @@ impl Tool for References {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[optional("text", TEXT_DOC)];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{}"#
     }
     fn run(
         &self,

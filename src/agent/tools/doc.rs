@@ -25,6 +25,9 @@ impl Tool for Read {
         const INPUTS: &[Input] = &[optional("section", "只读这一节：写标题文字（不含编号）")];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r#"{"section": "工作要求"}"#
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -162,6 +165,9 @@ impl Tool for Stats {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[optional("text", "统计这段文字；不给就统计正文")];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"text": "今年以来，全市共发生森林火灾 3 起。"}"#
     }
     fn run(
         &self,

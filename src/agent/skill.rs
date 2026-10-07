@@ -539,6 +539,17 @@ fn validate_steps(
                 } else if !skill.allows_tool(tool) {
                     problems.push(format!("{at}用了工具「{tool}」，但它不在 tools 白名单里"));
                 }
+                // 运行时流程里的工具调用不查多余参数（`tools::Caller::Flow`），拼错的参数名在这里报。
+                if let (Some(found), Some(Value::Object(args))) =
+                    (super::tools::find(tool), step.args.as_ref())
+                    && !found.open_args()
+                {
+                    for name in args.keys() {
+                        if !found.inputs().iter().any(|input| input.name == name) {
+                            problems.push(format!("{at}给工具「{tool}」的参数「{name}」它不认识"));
+                        }
+                    }
+                }
             }
         }
         if let Some(condition) = &step.when {
@@ -880,7 +891,7 @@ mod tests {
 
     #[test]
     fn validation_reports_every_kind_of_mistake() {
-        let text = "---\nname: 坏\napplies_to: [公函, 不存在的文种]\ntools: [kb.search, 乱写.工具]\nflow:\n  - step: 乱写\n  - tool: llm.generate\n  - step: generate\n    tool: kb.search\n  - {}\n  - step: generate\n    prompt: 没有这段\n  - step: for_each\n  - step: generate\n    when: [has_text, 乱写, { kind: 不存在, not: { var: x } }]\n  - step: retrieve\n    apis: [stat]\n---\n";
+        let text = "---\nname: 坏\napplies_to: [公函, 不存在的文种]\ntools: [kb.search, 乱写.工具]\nflow:\n  - step: 乱写\n  - tool: llm.generate\n  - step: generate\n    tool: kb.search\n  - {}\n  - step: generate\n    prompt: 没有这段\n  - step: for_each\n  - step: generate\n    when: [has_text, 乱写, { kind: 不存在, not: { var: x } }]\n  - step: retrieve\n    apis: [stat]\n  - tool: kb.search\n    args: { qeury: 防火 }\n---\n";
         let skill = parse("bad", text, "测试").unwrap();
         let problems = validate(&skill, &OPS, &TOOLS).join("\n");
         for expected in [
@@ -896,6 +907,7 @@ mod tests {
             "条件「乱写」不认识",
             "「不存在」不是认识的文种",
             "没有声明 http.call:stat",
+            "给工具「kb.search」的参数「qeury」它不认识",
         ] {
             assert!(
                 problems.contains(expected),

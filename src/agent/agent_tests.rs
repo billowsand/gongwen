@@ -143,6 +143,47 @@ fn answering_without_editing_becomes_a_report() {
 }
 
 #[test]
+fn wrong_arguments_are_explained_and_the_model_fixes_them() {
+    let skill = agent_skill("calc.date", "");
+    let model = ScriptedModel::new(|_, transcript| {
+        if !transcript.contains("<tool_result name=\"calc_date\"") {
+            // 参数名拼错、op 写成不认识的值。
+            call(
+                "calc_date",
+                r#"{"date": "2026年10月3日", "op": "plus", "dayz": 30}"#,
+            )
+        } else if !transcript.contains("2026年11月2日") {
+            call(
+                "calc_date",
+                r#"{"date": "2026年10月3日", "op": "add", "days": 30}"#,
+            )
+        } else {
+            call("finish", r#"{"summary": "三十天后是 11 月 2 日"}"#)
+        }
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(&skill, &model, &kb, board("原文", "算个日子"));
+    assert!(driver.run().is_none());
+    let second = &model.calls.borrow()[1].1;
+    for part in [
+        "没有参数 dayz",
+        "只能是 info、add、diff 之一",
+        "正确的例子",
+        "days: 整数",
+    ] {
+        assert!(second.contains(part), "{part}：{second}");
+    }
+    let notes = notes(&driver);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("没有参数 dayz") && !n.contains("正确的例子")),
+        "任务流里只留错在哪：{notes:?}"
+    );
+    assert_eq!(driver.board.vars["agent_summary"], "三十天后是 11 月 2 日");
+}
+
+#[test]
 fn unknown_tools_are_refused_and_repeats_are_sent_back() {
     let skill = agent_skill("doc.read", "");
     let model = ScriptedModel::new(|_, transcript| {

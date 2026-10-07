@@ -3,8 +3,8 @@
 //! 任务开始时工作稿是正文的副本：改写类技能直接在上面替换、插入；起草类技能整篇写入。
 
 use super::{
-    Input, Permission, Tool, ToolCtx, ToolOutput, arg_bool, arg_str, arg_usize, optional, required,
-    short,
+    ArgKind, Input, Permission, Tool, ToolCtx, ToolOutput, arg_bool, arg_str, arg_usize, optional,
+    required, short,
 };
 use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value, json};
@@ -129,6 +129,9 @@ impl Tool for Write {
         const INPUTS: &[Input] = &[required("text", "要写入的 Markdown 全文")];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r##"{"text": "# 关于做好森林防火工作的通知\n\n各单位：\n\n……"}"##
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -166,13 +169,20 @@ impl Tool for Replace {
                 "replacement",
                 "替换成什么；正则时可用 $1 引用分组；不给表示删除",
             ),
-            optional("regex", "是否按正则匹配，默认否"),
-            optional("scope", "范围：all（默认）/ section / selection"),
+            optional("regex", "是否按正则匹配，默认否").of(ArgKind::Bool),
+            optional("scope", "范围：all（默认）/ section / selection").of(ArgKind::OneOf(&[
+                "all",
+                "section",
+                "selection",
+            ])),
             optional("heading", "scope 为 section 时，那一节的标题"),
-            optional("max", "最多替换几处，默认 50"),
-            optional("expect", "预期有几处；对不上就一处都不改"),
+            optional("max", "最多替换几处，默认 50").of(ArgKind::Integer),
+            optional("expect", "预期有几处；对不上就一处都不改").of(ArgKind::Integer),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"pattern": "各单位", "replacement": "各有关单位", "scope": "all"}"#
     }
     fn run(
         &self,
@@ -301,7 +311,9 @@ impl Tool for Insert {
     }
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
-            required("at", "位置：start / end / section_end / before / after"),
+            required("at", "位置：start / end / section_end / before / after").of(ArgKind::OneOf(
+                &["start", "end", "section_end", "before", "after"],
+            )),
             optional(
                 "anchor",
                 "section_end 时是标题；before、after 时是要找的文字",
@@ -309,6 +321,9 @@ impl Tool for Insert {
             required("text", "要插入的内容"),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"at": "section_end", "anchor": "工作要求", "text": "（三）加强督导检查。"}"#
     }
     fn run(
         &self,
@@ -407,6 +422,9 @@ impl Tool for Section {
             required("text", "这一节的新内容"),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"heading": "工作要求", "text": "（一）压实责任。……"}"#
     }
     fn run(
         &self,

@@ -37,7 +37,7 @@ use super::evidence::EvidenceDoc;
 use super::skill::Skill;
 use crate::models::{AppConfig, LmStudioConfig, RagConfig, TemplateKind, VocabularyEntry};
 use crate::rag::RetrievedChunk;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 /// 工具的权限级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,17 +186,102 @@ impl ToolCtx<'_, '_> {
     }
 }
 
+/// 工具输入的类型。发给模型的 JSON Schema 由它生成；校验按工具自己读参数的规则来（`arg_*`），
+/// 所以比 schema 宽：数字写成文字、列表写成「1、2，3」都照收，与工具实际能读懂的一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgKind {
+    Text,
+    Integer,
+    Number,
+    Bool,
+    /// 文字列表：数组，或用逗号、顿号、换行分隔的一段字。
+    List,
+    /// 数字列表：数组，或用逗号、顿号、空白分隔的一串数。
+    Numbers,
+    /// 只能取这几个值之一。
+    OneOf(&'static [&'static str]),
+    /// 文种：名称（如「公函」）或内部名。
+    Kind,
+}
+
+impl ArgKind {
+    fn schema(self) -> Value {
+        match self {
+            Self::Text => json!({"type": "string"}),
+            Self::Integer => json!({"type": "integer"}),
+            Self::Number => json!({"type": "number"}),
+            Self::Bool => json!({"type": "boolean"}),
+            Self::List => json!({"type": "array", "items": {"type": "string"}}),
+            Self::Numbers => json!({"type": "array", "items": {"type": "number"}}),
+            Self::OneOf(options) => json!({"type": "string", "enum": options}),
+            Self::Kind => json!({
+                "type": "string",
+                "enum": TemplateKind::ALL.iter().map(|kind| kind.label()).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    /// 这个值工具读不读得懂；读不懂返回给模型看的一句。
+    fn check(self, name: &str, args: &Map<String, Value>) -> Result<(), String> {
+        let value = &args[name];
+        let shown = || crate::agent::board::value_to_text(value);
+        let ok = match self {
+            Self::Text => !matches!(value, Value::Array(_) | Value::Object(_)),
+            Self::Integer => arg_i64(args, name).is_some(),
+            Self::Number => arg_f64(args, name).is_some(),
+            Self::Bool => arg_bool(args, name).is_some(),
+            Self::List => matches!(value, Value::Array(_) | Value::String(_)),
+            Self::Numbers => arg_numbers(args, name).is_some(),
+            Self::OneOf(options) => {
+                let text = arg_str(args, name).unwrap_or_default();
+                if !options.contains(&text.trim()) {
+                    return Err(format!(
+                        "参数 {name} 只能是 {} 之一，收到「{}」",
+                        options.join("、"),
+                        shown()
+                    ));
+                }
+                true
+            }
+            Self::Kind => kind_arg(args, name).is_some(),
+        };
+        if ok {
+            return Ok(());
+        }
+        let want = match self {
+            Self::Text => "文字",
+            Self::Integer => "整数",
+            Self::Number => "数字",
+            Self::Bool => "true 或 false",
+            Self::List => "文字列表",
+            Self::Numbers => "数字列表",
+            Self::OneOf(_) => unreachable!("上面已返回"),
+            Self::Kind => "文种名称（如 公函、普通公文）",
+        };
+        Err(format!("参数 {name} 要是{want}，收到「{}」", shown()))
+    }
+}
+
 /// 工具的一个输入。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Input {
     pub(crate) name: &'static str,
+    pub(crate) kind: ArgKind,
     pub(crate) required: bool,
     pub(crate) doc: &'static str,
+}
+
+impl Input {
+    /// `optional("days", "…").of(ArgKind::Integer)`：声明类型，不写就是文字。
+    pub(crate) const fn of(self, kind: ArgKind) -> Self {
+        Self { kind, ..self }
+    }
 }
 
 pub(crate) const fn required(name: &'static str, doc: &'static str) -> Input {
     Input {
         name,
+        kind: ArgKind::Text,
         required: true,
         doc,
     }
@@ -205,6 +290,7 @@ pub(crate) const fn required(name: &'static str, doc: &'static str) -> Input {
 pub(crate) const fn optional(name: &'static str, doc: &'static str) -> Input {
     Input {
         name,
+        kind: ArgKind::Text,
         required: false,
         doc,
     }
@@ -240,6 +326,15 @@ pub(crate) trait Tool: Sync {
     /// 一句话：能做什么。给技能作者与模型看。
     fn description(&self) -> &'static str;
     fn inputs(&self) -> &'static [Input];
+    /// 一次正确调用的参数（JSON 对象）。参数给错时连同签名一起回给模型照着改；有输入的工具必须给，
+    /// 测试会拿它过一遍自己的校验。
+    fn example(&self) -> &'static str {
+        ""
+    }
+    /// 除了 `inputs` 还收别的参数（`http.call` 的其余参数按接口定义给，由接口自己校验）。
+    fn open_args(&self) -> bool {
+        false
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -282,11 +377,88 @@ pub(crate) fn ids() -> Vec<&'static str> {
     all().into_iter().map(|tool| tool.id()).collect()
 }
 
+/// 工具的参数 schema（发给模型的 JSON Schema）。
+pub(crate) fn schema(tool: &dyn Tool) -> Value {
+    let mut properties = Map::new();
+    for input in tool.inputs() {
+        let mut schema = input.kind.schema();
+        schema["description"] = json!(input.doc);
+        properties.insert(input.name.to_string(), schema);
+    }
+    let required: Vec<&str> = tool
+        .inputs()
+        .iter()
+        .filter(|input| input.required)
+        .map(|input| input.name)
+        .collect();
+    json!({"type": "object", "properties": properties, "required": required})
+}
+
+/// 谁在调工具：模型调的多查一条「没有这个参数」（拼错参数名时告诉它，而不是悄悄当没给）；
+/// 技能流程里的 `tool:` 步骤不查这条，参数名由技能校验在存盘时查（`skill::validate`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Caller {
+    Flow,
+    Model,
+}
+
+/// 按工具的输入查参数：必填、类型，模型调的另查多余参数。不合格返回给模型看的说明：
+/// 错在哪、参数签名、正确示例。
+pub(crate) fn check_args(
+    tool: &dyn Tool,
+    args: &Map<String, Value>,
+    caller: Caller,
+) -> Result<(), String> {
+    let mut problems = Vec::new();
+    if caller == Caller::Model && !tool.open_args() {
+        for name in args.keys() {
+            if !tool.inputs().iter().any(|input| input.name == name) {
+                problems.push(format!("没有参数 {name}"));
+            }
+        }
+    }
+    for input in tool.inputs() {
+        let missing = match args.get(input.name) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(text)) => text.trim().is_empty(),
+            _ => false,
+        };
+        if missing {
+            if input.required {
+                problems.push(format!("缺少必填参数 {}（{}）", input.name, input.doc));
+            }
+            continue;
+        }
+        if let Err(problem) = input.kind.check(input.name, args) {
+            problems.push(problem);
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(crate::agent::argcheck::reject(
+        &problems,
+        &format!("工具「{}」", tool.id()),
+        &schema(tool),
+        Some(tool.example()),
+    ))
+}
+
 /// 调一个工具：查白名单、补参数、跑，出错以文字返回，不让流程崩掉。
 pub(crate) fn call(
     id: &str,
     ctx: &mut ToolCtx<'_, '_>,
     args: &Value,
+) -> Result<ToolOutput, String> {
+    call_as(id, ctx, args, Caller::Flow)
+}
+
+/// 同 [`call`]，`caller` 决定查不查多余参数。
+pub(crate) fn call_as(
+    id: &str,
+    ctx: &mut ToolCtx<'_, '_>,
+    args: &Value,
+    caller: Caller,
 ) -> Result<ToolOutput, String> {
     let tool = find(id).ok_or_else(|| format!("没有工具「{id}」"))?;
     let mut args = match args {
@@ -325,19 +497,7 @@ pub(crate) fn call(
         ));
     }
     let args = &args;
-    for input in tool.inputs().iter().filter(|input| input.required) {
-        let missing = match args.get(input.name) {
-            None | Some(Value::Null) => true,
-            Some(Value::String(text)) => text.trim().is_empty(),
-            _ => false,
-        };
-        if missing {
-            return Err(format!(
-                "工具「{id}」缺少参数 {}（{}）",
-                input.name, input.doc
-            ));
-        }
-    }
+    check_args(tool, args, caller)?;
     tool.run(ctx, args)
 }
 
@@ -495,12 +655,86 @@ mod tests {
         assert!(error.contains("没有声明工具"), "{error}");
         fixture.skill.tools.push("ws.write".into());
         let error = fixture.call("ws.write", json!({})).unwrap_err();
-        assert!(error.contains("缺少参数 text"), "{error}");
+        assert!(error.contains("缺少必填参数 text"), "{error}");
         assert!(
             fixture
                 .call("没有.这个", json!({}))
                 .unwrap_err()
                 .contains("没有工具")
+        );
+    }
+
+    #[test]
+    fn every_tool_with_inputs_has_a_typed_schema_and_an_example_that_passes_its_own_check() {
+        for tool in all() {
+            let schema = schema(tool);
+            for input in tool.inputs() {
+                assert!(
+                    schema["properties"][input.name].get("type").is_some(),
+                    "{} 的 {} 没有类型",
+                    tool.id(),
+                    input.name
+                );
+            }
+            if tool.inputs().is_empty() {
+                continue;
+            }
+            let example: Value = serde_json::from_str(tool.example())
+                .unwrap_or_else(|e| panic!("{} 的示例不是 JSON：{e}", tool.id()));
+            let example = example
+                .as_object()
+                .unwrap_or_else(|| panic!("{} 的示例要是 JSON 对象", tool.id()));
+            assert_eq!(
+                check_args(tool, example, Caller::Model),
+                Ok(()),
+                "{} 的示例过不了自己的校验",
+                tool.id()
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_arguments_come_back_with_the_signature_and_an_example() {
+        let tool = find("calc.date").unwrap();
+        let bad = json!({"op": "plus", "days": "三十", "dayz": 3});
+        let message = check_args(tool, bad.as_object().unwrap(), Caller::Model).unwrap_err();
+        for part in [
+            "没有参数 dayz",
+            "参数 op 只能是 info、add、diff 之一，收到「plus」",
+            "参数 days 要是整数，收到「三十」",
+            "days: 整数",
+            "正确的例子：",
+            "请改好参数再调一次",
+        ] {
+            assert!(message.contains(part), "{part}：{message}");
+        }
+        // 流程里的 `tool:` 步骤不查多余参数；宽松写法（数字写成文字、列表写成一串）照收。
+        let loose = json!({"op": "add", "days": "30", "dayz": 3});
+        assert_eq!(
+            check_args(tool, loose.as_object().unwrap(), Caller::Flow),
+            Ok(())
+        );
+        let stats = find("calc.stats").unwrap();
+        let loose = json!({"values": "1、2，3 4", "digits": "2"});
+        assert_eq!(
+            check_args(stats, loose.as_object().unwrap(), Caller::Model),
+            Ok(())
+        );
+        let kb = find("kb.list").unwrap();
+        let ok = json!({"kind": "公函"});
+        assert_eq!(
+            check_args(kb, ok.as_object().unwrap(), Caller::Model),
+            Ok(())
+        );
+        let bad = json!({"kind": "便条"});
+        let message = check_args(kb, bad.as_object().unwrap(), Caller::Model).unwrap_err();
+        assert!(message.contains("要是文种名称"), "{message}");
+        // http.call 的其余参数按接口定义，由接口自己校验。
+        let http = find("http.call").unwrap();
+        let args = json!({"api": "stat", "region": "全省"});
+        assert_eq!(
+            check_args(http, args.as_object().unwrap(), Caller::Model),
+            Ok(())
         );
     }
 

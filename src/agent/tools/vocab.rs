@@ -1,6 +1,8 @@
 //! D 组：标准词库与规范（只读）。
 
-use super::{Input, Permission, Tool, ToolCtx, ToolOutput, arg_str, kind_arg, optional, required};
+use super::{
+    ArgKind, Input, Permission, Tool, ToolCtx, ToolOutput, arg_str, kind_arg, optional, required,
+};
 use crate::models::{VocabularyCategory, VocabularyEntry};
 use serde_json::{Map, Value, json};
 
@@ -109,6 +111,9 @@ impl Tool for Units {
         ];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r#"{"query": "应急管理"}"#
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -173,6 +178,9 @@ impl Tool for Persons {
         ];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r#"{"unit": "市应急管理局"}"#
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -231,6 +239,9 @@ impl Tool for Normalize {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[required("text", "要规范化的文字")];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"text": "市应急局牵头，各区县配合。"}"#
     }
     fn run(
         &self,
@@ -307,8 +318,11 @@ impl Tool for Style {
         "某个文种的写作规范与语感要求（行文方向、力度词、开头收尾等）"
     }
     fn inputs(&self) -> &'static [Input] {
-        const INPUTS: &[Input] = &[optional("kind", "文种；不给用当前文种")];
+        const INPUTS: &[Input] = &[optional("kind", "文种；不给用当前文种").of(ArgKind::Kind)];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"kind": "公函"}"#
     }
     fn run(
         &self,
@@ -344,6 +358,9 @@ impl Tool for Lexicon {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[required("term", "要查的词或句子")];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"term": "截止"}"#
     }
     fn run(
         &self,

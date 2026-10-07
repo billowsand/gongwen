@@ -1,8 +1,8 @@
 //! H 组：模型、选择题、留言。
 
 use super::{
-    Input, Permission, Tool, ToolCtx, ToolOutput, arg_bool, arg_str, arg_strings, optional,
-    required,
+    ArgKind, Input, Permission, Tool, ToolCtx, ToolOutput, arg_bool, arg_str, arg_strings,
+    optional, required,
 };
 use crate::agent::backend::ModelRole;
 use crate::agent::clarify::{Action, Choice, Question, Target};
@@ -35,10 +35,15 @@ impl Tool for Generate {
             optional(
                 "role",
                 "draft（起草模型，默认）/ assist（辅助模型，温度 0）",
-            ),
-            optional("target", "workspace 表示把结果写入工作稿；不给就只返回文字"),
+            )
+            .of(ArgKind::OneOf(&["draft", "assist"])),
+            optional("target", "workspace 表示把结果写入工作稿；不给就只返回文字")
+                .of(ArgKind::OneOf(&["workspace"])),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"prompt": "写一章", "input": "第二章 主要做法"}"#
     }
     fn run(
         &self,
@@ -125,15 +130,18 @@ impl Tool for AskChoice {
     fn inputs(&self) -> &'static [Input] {
         const INPUTS: &[Input] = &[
             required("question", "问题"),
-            optional("options", "选项文字列表"),
+            optional("options", "选项文字列表").of(ArgKind::List),
             optional(
                 "from",
                 "从某个变量的列表里出选项（如 ms.search 的结果），选中后存那一项的 id",
             ),
-            optional("custom", "是否允许自己填写，默认是"),
-            optional("skip", "是否允许跳过，默认否"),
+            optional("custom", "是否允许自己填写，默认是").of(ArgKind::Bool),
+            optional("skip", "是否允许跳过，默认否").of(ArgKind::Bool),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"question": "怎么仿？", "options": ["同类改稿", "结构仿写"]}"#
     }
     fn run(
         &self,
@@ -217,6 +225,9 @@ impl Tool for Note {
         const INPUTS: &[Input] = &[required("text", "说明文字")];
         INPUTS
     }
+    fn example(&self) -> &'static str {
+        r#"{"text": "没有选到可仿照的稿件，按材料直接起草。"}"#
+    }
     fn run(
         &self,
         ctx: &mut ToolCtx<'_, '_>,
@@ -249,6 +260,9 @@ impl Tool for AddFinding {
             optional("source", "依据或出处"),
         ];
         INPUTS
+    }
+    fn example(&self) -> &'static str {
+        r#"{"text": "第二段的数据缺少出处", "group": "依据", "excerpt": "同比增长 12%"}"#
     }
     fn run(
         &self,
