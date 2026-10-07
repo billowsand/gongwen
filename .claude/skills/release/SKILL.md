@@ -23,6 +23,13 @@ description: 发布 gongwen 新版本到 GitHub Releases：核对 README 与使�
   - `gongwen-assistant-X.Y.Z-win-x64-setup.exe` + `.sha256`
   - `gongwen-assistant_X.Y.Z_arm64.deb` + `.sha256`（Debian buster 容器构建，GLIBC 锁死 2.28，兼容 Ubuntu 20.04 / 麒麟 V10）
 - 本机无 `pwsh`：不能跑 `scripts/bump-version.ps1`，版本号用手动编辑。
+- **提交预分诊（可选加速，用 eval 的 `judge_batch`）**：本机 omp 已接入 TypeSafe
+  （judge 模型角色 = `typesafe/jev-latest`），一条 `judge_batch` 调用就能把本区间每条提交的
+  类别、所属功能域、是否需要动 README 与使用帮助一次性判完，把「逐条 `git show` 读提交」
+  这段重复劳动换成一张表。Jev 是 System One 模型，只出结构化判断、不生成文字，
+  所以它替代的是读提交，不是写说明。
+  **它不替代任何硬性要求**：版本更新说明仍要手写，README / 使用帮助仍要人工过目。
+  没配 TypeSafe 凭据就跳过，流程完全不变。
 - 历史惯例：tag 为 **annotated tag**（消息为中文概述）；release 标题为「公文助手 vX.Y.Z」；版本号按 **patch** 递增（`v0.5.x` 系列）；发布前有一个 `chore: release vX.Y.Z` 提交（可同时带上说明文件）。
 - Release workflow 全程约 20–30 分钟（Windows + Linux ARM64 构建 + 打包），`gh run watch` 一轮就能等完。
 
@@ -52,6 +59,44 @@ git show --stat --format='%s%n%n%b' <commit>   # 逐个看正文与改动面
 - 新版本号 = 最新 tag 的 patch + 1（如 `v0.5.1` → `v0.5.2`）；若含大量新功能且用户有暗示，可 bump minor，否则默认 patch。
 - 用提交正文（本仓库的 `feat`/`fix` 提交信息写得很详细）提炼用户可见变更，作为版本更新说明素材；`refactor`/`docs` 归入「工程与维护」或「文档」。
 
+### 2.5 提交预分诊（可选，用 judge 加速读提交）
+
+本仓库一个版本常有几十条提交，逐条 `git show` 判断「属于哪类、落哪个功能域、要不要动文档」
+是纯重复判断。**用 eval 的 `judge_batch` 把这段交给 Jev**（omp 已接入 TypeSafe，
+judge 角色 = `typesafe/jev-latest`）：把每条提交当成一个 state，三个问题一次批量跑完。
+**它只做判断、不写文字**，所以替代的是读提交，不是写说明。
+
+关键 API 形状（在 eval 单元里跑，`language="py"`）：
+
+- `commits` 是 `{短 sha: {"subject", "body", "stat"}}`，用一次 `git log` 拿到
+  （`--format=%x01%H%x02%s%x02%b%x03` 配 `--shortstat --no-merges` 解析，别逐条调 git）。
+- `questions` 三条：`kind`（choice：user_feature / user_fix / internal_refactor / docs /
+  test_build / unsure）、`section`（choice：排版导出 / AI 智能体 / 数据接口 / 稿件库与版本 /
+  送批材料 / 输入法 / 校对词表 / 平台打包 / other）、`docs`（bool：要不要动 README 与使用帮助）。
+  **criteria 要写足**，官方记录 Jev 偏「字面理解」，判据含糊它就跟着含糊。
+- `b = judge_batch(commits, QUESTIONS)`，然后 **`await b.drain(timeout=30)` 循环取**
+  （`drain` 是协程，得 await；不 await 会静默不消费）。取完 `b.status()` / `b.results()` /
+  `b.failed()` 都在 **`b.close()` 之前**读——close 之后作业引用失效，再读会抛
+  `unknown judge_batch`。judge_batch 是宿主托管的异步作业，会话重置后可用
+  `judge_batch.attach(b.id)` 重新拿回。
+- **不要写成 `for` 循环里逐条 `judge()`**——两个以上 state 一律 `judge_batch`，
+  循环单发既慢又贵。
+- `chore: release vX.Y.Z`、`docs: 同步 README`、`style:` 这类自身不带用户可见变更的提交
+  可以先从 state 里剔掉：分诊标出的「需人工确认」里混着它们会虚高，直接跳过更省事。
+
+- **实测（v0.8.1..HEAD，57 条提交、171 个问题）**：57/57 成功，`typesafe/jev-1.13.0`，
+  **约 1.1–1.8 秒，$0.0028**，0 失败。对照人工逐条读 57 条提交，是数量级上的差距。
+- **置信度分流是安全阀，不要跳过**：Choice 的 `confidence` 低于 0.60、
+  bool 概率落在 0.35–0.65 的含糊区间、或模型自认 `unsure` 的提交，一律交回人工。
+  实测 57 条里会标出 20 条上下，占比不低——**这说明它是筛选器不是判官**。
+- 仓库提交与说明都是中文，Jev 的训练以英文为主、中文能用但精度不等同：
+  实测把「数据接口识别业务失败」判成 AI 智能体、把一批 UI 改动归到「其他」。
+  **照它的「要改文档」清单防漏，别照它的功能域归类照抄**，写说明前人工重排。
+- **凭据**：没配 TypeSafe 时 `judge` 会退到 tiny/smol 对话模型，答案不可信。
+  开跑前先确认 `b.status()["model"]` 是 `typesafe/*`，不是就别用这份结果。
+  凭据用 `/login typesafe` 或环境变量 `TYPESAFE_API_KEY`，**不要写进仓库任何文件**。
+- **没凭据就照原流程人工读提交，不要卡住发版。**
+
 ### 3. 文档同步检查（README 与使用帮助，最容易跳过）
 
 **必须在写版本更新说明、bump 之前做完**，改完的文档要进本版提交集，并在说明的「### 文档」小节里交代。已发生过 README 里硬数字随版本漂移、功能上线而手册没跟上的情况，所以这一步不许省。
@@ -62,6 +107,11 @@ git show --stat --format='%s%n%n%b' <commit>   # 逐个看正文与改动面
 git log v<上次版本>..HEAD --oneline          # 本版提交
 git show --stat --format='%s' <commit>       # 逐个看改到了哪些界面 / 流程 / 格式
 ```
+
+若步骤 2.5 跑过分诊，先拿它的「文档 = 要改」清单当检查表：那条提交对应到
+README 哪一节、手册哪一章、要不要重截截图。它能保证不漏，但不能保证说得准，
+每一条仍要自己看一眼；标「需人工确认」的优先看。分诊没跑或没有 TypeSafe 凭据就按上面的
+`git log` 逐条来，本节的检查要求与分诊无关。
 
 三道机械检查（能自动发现的不靠人眼）：
 
@@ -205,7 +255,7 @@ cd - && rm -rf /tmp/kw
 
 ### 10. 收尾汇报
 
-向用户报告：版本号、release 链接（`https://github.com/billowsand/gongwen/releases/tag/vX.Y.Z`）、CI 与 Release 两个 workflow 结果、发布说明要点、资产口径、过程中遇到的问题与处理（尤其是未提交改动如何处置、CI 失败根因）、**文档核对结论**（README / 使用帮助 / install.md 是本版更新了哪几处，还是确认无需改动）。
+向用户报告：版本号、release 链接（`https://github.com/billowsand/gongwen/releases/tag/vX.Y.Z`）、CI 与 Release 两个 workflow 结果、发布说明要点、资产口径、过程中遇到的问题与处理（尤其是未提交改动如何处置、CI 失败根因）、**文档核对结论**（README / 使用帮助 / install.md 是本版更新了哪几处，还是确认无需改动）。跑过分诊的话，附一句它标出多少条「需人工确认」以及这些是怎么处理的——别让分诊悄悄决定文档核对结论。
 
 ## 版本更新说明模板
 
@@ -255,3 +305,7 @@ cd - && rm -rf /tmp/kw
 | release 标题/正文不对 | `gh release edit vX.Y.Z --title "..." --notes-file ...`（幂等，可重复执行） |
 | 发版后才发现 README / 使用帮助没跟上 | 别指望下版补：优先按步骤 6 移动 tag 重跑（代价是两平台构建再来一轮）；若只是文字补充、不值得重跑，就单独提 `docs:` 提交并用 `gh release edit vX.Y.Z --notes-file …` 把文档改动补进正文，**同时把步骤 3 的检查固化到下一次发版** |
 | 资产数不是 4 | `gh release view vX.Y.Z --json assets --jq '.assets[].name'` 对比上面清单；少平台包看对应 build/package job 的日志 |
+| `judge_batch` 的 `drain()` 取不到东西 | `drain` 是协程，必须 `await`；不 await 会静默不消费、循环立刻空转退出 |
+| 报 `unknown judge_batch "<id>"` | `close()` 之后作业引用失效，状态 / 结果 / 失败项必须在 close 前读完；真丢了结果用 `judge_batch.attach(<id>)` 拿回 |
+| 分诊结果模型不是 `typesafe/*` | 没配 TypeSafe 凭据时 judge 会退到 tiny/smol 对话模型，判定不可信。`/login typesafe` 或设 `TYPESAFE_API_KEY`，或直接跳过分诊走人工 |
+| 分诊结论明显不对（功能域张冠李戴） | 属正常误差：Jev 只出判断不写字、中文精度不等同。照它的「要改文档」清单防漏，别照功能域归类照抄，写说明前人工重排 |
