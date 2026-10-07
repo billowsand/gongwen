@@ -69,7 +69,7 @@ struct BarActions {
 
 impl DraftPage<'_> {
     pub(super) fn ai_composer_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
+        ui.add_space(12.0);
         self.commit_prompt_ui(ui);
         if self.doc.ai_panel.skills.is_empty() {
             let _ = self.doc.ai_panel.reload_skills();
@@ -144,12 +144,18 @@ impl DraftPage<'_> {
         let border = if focused {
             theme::accent()
         } else {
-            theme::border_strong()
+            theme::border().gamma_multiply(0.6)
         };
         let framed = egui::Frame::new()
             .fill(theme::surface())
             .stroke(egui::Stroke::new(1.0, border))
             .corner_radius(egui::CornerRadius::same(14))
+            .shadow(egui::epaint::Shadow {
+                offset: [0, 4],
+                blur: 20,
+                spread: 0,
+                color: egui::Color32::from_black_alpha(24),
+            })
             .inner_margin(egui::Margin {
                 left: 12,
                 right: 8,
@@ -203,22 +209,12 @@ impl DraftPage<'_> {
         ctx.data_mut(|data| data.insert_temp(had_focus_id, has_focus));
 
         let error = self.doc.ai_panel.composer.error.clone();
-        ui.add_space(4.0);
-        match &error {
-            Some(error) => {
-                ui.colored_label(theme::danger(), error);
-            }
-            None => {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} 发送 · / 选技能 · @ 引用文章",
-                        theme::primary_shortcut("Enter")
-                    ))
-                    .small()
-                    .color(theme::text_muted()),
-                );
-            }
+        if let Some(error) = &error {
+            ui.add_space(4.0);
+            ui.colored_label(theme::danger(), error);
         }
+        // 给阴影留出空间，输入框与侧栏底边之间保持呼吸感。
+        ui.add_space(10.0);
 
         if actions.pick_selection
             && let Some(range) = selection_now

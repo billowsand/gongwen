@@ -18,6 +18,36 @@ const PANEL_MAX_WIDTH: f32 = 640.0;
 /// 单张卡片里正文区的最大高度；更长的在卡片内滚动，不把任务流撑成一长条。
 const CARD_TEXT_MAX_HEIGHT: f32 = 360.0;
 
+/// 用主题底色覆盖滚动边缘，形成向背景消隐的柔和过渡；不增加交互层。
+fn conversation_edge_fades(ui: &egui::Ui, rect: egui::Rect, top: bool, bottom: bool) {
+    let height = 32.0_f32.min(rect.height() / 2.0);
+    if height <= 0.0 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    for (enabled, edge, direction) in [(top, rect.top(), 1.0), (bottom, rect.bottom(), -1.0)] {
+        if !enabled {
+            continue;
+        }
+        let base = mesh.vertices.len() as u32;
+        // 多段平滑曲线比单条线性渐变更接近轻柔虚化，中心文字仍然清晰。
+        for step in 0..=8 {
+            let t = step as f32 / 8.0;
+            let alpha = 1.0 - t * t * (3.0 - 2.0 * t);
+            let color = theme::canvas().gamma_multiply(alpha);
+            let y = edge + direction * height * t;
+            mesh.colored_vertex(egui::pos2(rect.left(), y), color);
+            mesh.colored_vertex(egui::pos2(rect.right(), y), color);
+            if step > 0 {
+                let index = base + (step - 1) * 2;
+                mesh.add_triangle(index, index + 1, index + 2);
+                mesh.add_triangle(index + 1, index + 3, index + 2);
+            }
+        }
+    }
+    ui.painter().with_clip_rect(rect).add(mesh);
+}
+
 /// 卡片上的按钮动作，画完一轮后统一执行，避免一边借着轮次一边改状态。
 pub(super) enum CardAction {
     Stop,
@@ -113,8 +143,9 @@ impl DraftPage<'_> {
 
     fn ai_panel_ui(&mut self, ui: &mut egui::Ui) {
         self.ai_panel_header(ui);
-        ui.separator();
+        ui.add_space(8.0);
         egui::Panel::bottom("ai_panel_composer")
+            .show_separator_line(false)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.ai_composer_ui(ui));
         egui::CentralPanel::default()
@@ -140,10 +171,10 @@ impl DraftPage<'_> {
                 .on_hover_text(title);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::icon_button(ui, theme::Icon::X, "收起 AI 侧栏").clicked() {
+                if theme::titlebar_icon_button(ui, true, theme::Icon::X, "收起 AI 侧栏").clicked() {
                     self.doc.ai_panel.open = false;
                 }
-                let history = theme::icon_button(ui, theme::Icon::History, "历史会话");
+                let history = theme::titlebar_icon_button(ui, true, theme::Icon::History, "历史会话");
                 if history.clicked() {
                     self.refresh_ai_sessions();
                 }
@@ -153,13 +184,13 @@ impl DraftPage<'_> {
                         ui.set_min_width(300.0);
                         self.ai_sessions_menu(ui);
                     });
-                if theme::icon_button(ui, theme::Icon::Plus, "新会话：从空白开始，追问不带之前的轮次")
+                if theme::titlebar_icon_button(ui, true, theme::Icon::Plus, "新会话：从空白开始，追问不带之前的轮次")
                     .clicked()
                 {
                     self.new_ai_session();
                 }
                 let options =
-                    theme::icon_button(ui, theme::Icon::Settings, "会话与技能管理");
+                    theme::titlebar_icon_button(ui, true, theme::Icon::Settings, "会话与技能管理");
                 egui::Popup::menu(&options).show(|ui| {
                     let can_compact = !self.doc.busy
                         && self
@@ -214,7 +245,7 @@ impl DraftPage<'_> {
         if self.doc.ai_panel.turns.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.weak("在下面写要求，Ctrl+Enter 发送；技能会按你的话自动选");
+                ui.weak("今天想写些什么？");
                 ui.add_space(10.0);
                 for example in [
                     "起草一份冬季森林防火的通知……",
@@ -239,7 +270,7 @@ impl DraftPage<'_> {
         let checkpoints = self.checkpoint_index();
         let doc = &mut *self.doc;
         let running = doc.ai_panel.running();
-        egui::ScrollArea::vertical()
+        let scroll = egui::ScrollArea::vertical()
             .id_salt(("ai_panel_turns", doc.key))
             .auto_shrink([false, false])
             .stick_to_bottom(true)
@@ -272,7 +303,7 @@ impl DraftPage<'_> {
                 for turn in &mut doc.ai_panel.turns {
                     request_bubble(ui, turn);
                     ui.add_space(6.0);
-                    theme::card().show(ui, |ui| {
+                    egui::Frame::NONE.inner_margin(10).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         turn_card(
                             ui,
@@ -288,6 +319,13 @@ impl DraftPage<'_> {
                     ui.add_space(12.0);
                 }
             });
+        // 只淡出仍有内容的方向，读到首尾时完整消息和操作按钮保持清晰。
+        conversation_edge_fades(
+            ui,
+            scroll.inner_rect,
+            scroll.state.offset.y > 0.5,
+            scroll.content_size.y - scroll.state.offset.y > scroll.inner_rect.height() + 0.5,
+        );
         if running {
             // 计时与流式文字都要动；忙碌时外壳只按 100 ms 刷新，这里提到 50 ms。
             ui.ctx().request_repaint_after(Duration::from_millis(50));
@@ -421,26 +459,31 @@ impl DraftPage<'_> {
 }
 
 fn request_bubble(ui: &mut egui::Ui, turn: &super::AiTurn) {
-    egui::Frame::new()
-        .fill(theme::surface_sunk())
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(10, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new(&turn.title)
-                        .small()
-                        .color(theme::text_soft()),
-                );
-                for chip in &turn.context {
-                    theme::chip(ui, chip, theme::text_soft(), theme::surface());
-                }
+    let width = (ui.available_width() * 0.88 - 20.0).max(0.0);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        egui::Frame::new()
+            .fill(theme::accent_soft())
+            .corner_radius(egui::CornerRadius::same(12))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.set_width(width);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(&turn.title)
+                                .small()
+                                .color(theme::text_soft()),
+                        );
+                        for chip in &turn.context {
+                            theme::chip(ui, chip, theme::text_soft(), theme::surface());
+                        }
+                    });
+                    if turn.prompt != turn.title {
+                        ui.label(&turn.prompt);
+                    }
+                });
             });
-            if turn.prompt != turn.title {
-                ui.label(&turn.prompt);
-            }
-        });
+    });
 }
 
 fn turn_card(

@@ -37,7 +37,7 @@ pub(crate) use skill_job::{
 };
 
 /// 自动选技能、输入框还空着时的提示。
-const AUTO_HINT: &str = "说说要做什么：起草、润色……输入 / 选技能，@ 引用文章";
+const AUTO_HINT: &str = "说说要做什么…";
 
 /// 输入区的状态。随稿件保存，切换标签页互不影响。
 #[derive(Debug, Default)]

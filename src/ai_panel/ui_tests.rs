@@ -531,7 +531,7 @@ fn the_skill_chip_follows_the_document_and_the_input() {
     harness.frame_texts();
     let texts = harness.frame_texts();
     assert!(
-        has(&texts, "输入 / 选技能"),
+        has(&texts, "说说要做什么…"),
         "空稿、没写要求时几个起草类技能都可用：{texts:?}"
     );
     assert!(
@@ -557,7 +557,7 @@ fn the_skill_chip_follows_the_document_and_the_input() {
     let texts = harness.frame_texts();
     assert!(has(&texts, "自动"), "{texts:?}");
     assert!(
-        has(&texts, "输入 / 选技能"),
+        has(&texts, "说说要做什么…"),
         "有稿、没写要求时给通用提示：{texts:?}"
     );
 
