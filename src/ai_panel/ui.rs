@@ -29,6 +29,8 @@ pub(super) enum CardAction {
     Resume(u64),
     /// 丢掉检查点，从第一步重来。
     Restart(u64),
+    /// 从某个旧检查点重跑。
+    RerunFrom(u64, i64),
     Review,
     Workspace(u64),
     Rerun(u64),
@@ -144,7 +146,9 @@ impl DraftPage<'_> {
                 {
                     self.new_ai_session();
                 }
-                ui.menu_button("•••", |ui| {
+                let options =
+                    theme::icon_button(ui, theme::Icon::Settings, "会话与技能管理");
+                egui::Popup::menu(&options).show(|ui| {
                     let can_compact = !self.doc.busy
                         && self
                             .doc
@@ -219,6 +223,8 @@ impl DraftPage<'_> {
             return;
         }
         let mut action = None;
+        // 「从这里重跑」的候选：先把各轮存下的检查点读出来（绘制里不查库）。
+        let checkpoints = self.checkpoint_index();
         let doc = &mut *self.doc;
         let running = doc.ai_panel.running();
         egui::ScrollArea::vertical()
@@ -256,7 +262,16 @@ impl DraftPage<'_> {
                     ui.add_space(6.0);
                     theme::card().show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        turn_card(ui, turn, doc.ai_proposal.as_mut(), &mut action);
+                        turn_card(
+                            ui,
+                            turn,
+                            doc.ai_proposal.as_mut(),
+                            checkpoints
+                                .get(&turn.id)
+                                .map(Vec::as_slice)
+                                .unwrap_or_default(),
+                            &mut action,
+                        );
                     });
                     ui.add_space(12.0);
                 }
@@ -286,6 +301,7 @@ impl DraftPage<'_> {
                 }
             }
             Some(CardAction::DiscardRun(id)) => self.drop_checkpoints(id),
+            Some(CardAction::RerunFrom(id, seq)) => self.rerun_from_checkpoint(id, seq),
             Some(CardAction::Review) => {
                 if let Some(turn) = self
                     .doc
@@ -419,6 +435,7 @@ fn turn_card(
     ui: &mut egui::Ui,
     turn: &mut super::AiTurn,
     proposal: Option<&mut AiProposal>,
+    checkpoints: &[crate::manuscript::ai_checkpoints::CheckpointSummary],
     action: &mut Option<CardAction>,
 ) {
     let seconds = turn.elapsed().as_secs_f32();
@@ -655,19 +672,19 @@ fn turn_card(
         TurnState::Stopped => {
             ui.add_space(6.0);
             ui.weak(format!("已停止，生成了 {chars} 字；半截输出不能采用。"));
-            resume_actions(ui, turn, action);
+            resume_actions(ui, turn, checkpoints, action);
             rerun_button(ui, turn, "重新生成", action);
         }
         TurnState::Failed(error) => {
             ui.add_space(6.0);
             ui.colored_label(theme::danger(), error);
-            resume_actions(ui, turn, action);
+            resume_actions(ui, turn, checkpoints, action);
             rerun_button(ui, turn, "重试", action);
         }
         TurnState::Interrupted => {
             ui.add_space(6.0);
             ui.weak("程序关闭时这一轮还没跑完。");
-            resume_actions(ui, turn, action);
+            resume_actions(ui, turn, checkpoints, action);
             rerun_button(ui, turn, "重新生成", action);
         }
         TurnState::Expired => {
@@ -1152,7 +1169,12 @@ fn rerun_button(
 ///
 /// 有检查点才给「接着跑」，并注明停在哪一步、什么时候存的；找不到检查点就只留原来的
 /// 「重新生成」，不假装能续。三个按钮只在侧栏发起的轮次上出现。
-fn resume_actions(ui: &mut egui::Ui, turn: &super::AiTurn, action: &mut Option<CardAction>) {
+fn resume_actions(
+    ui: &mut egui::Ui,
+    turn: &super::AiTurn,
+    checkpoints: &[crate::manuscript::ai_checkpoints::CheckpointSummary],
+    action: &mut Option<CardAction>,
+) {
     if turn.request.is_none() {
         return;
     }
@@ -1192,6 +1214,49 @@ fn resume_actions(ui: &mut egui::Ui, turn: &super::AiTurn, action: &mut Option<C
             .small()
             .color(theme::text_muted()),
     );
+    rerun_from_list(ui, turn.id, checkpoints, action);
+}
+
+/// 「从这里重跑」：列出差几步之后存的检查点，点一个从那一步之后重跑。
+///
+/// 只在正文没被改过时才允许（判定在 `DraftPage::rerun_from_checkpoint`）；这里先说明这一点，
+/// 点下去被拒了状态栏会说原因。
+fn rerun_from_list(
+    ui: &mut egui::Ui,
+    turn_id: u64,
+    checkpoints: &[crate::manuscript::ai_checkpoints::CheckpointSummary],
+    action: &mut Option<CardAction>,
+) {
+    if checkpoints.len() < 2 {
+        // 只有一份就是「接着跑」那一份，没有「选一个」的余地。
+        return;
+    }
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!("从这里重跑（存了 {} 份）", checkpoints.len()))
+            .small()
+            .color(theme::text_soft()),
+    )
+    .id_salt(("ai_turn_rerun", turn_id))
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.weak("从这一步之后重跑，会覆盖它之后的产物。正文改过就不允许。");
+        for stored in checkpoints.iter().rev() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("#{} {}", stored.seq, stored.label))
+                        .small()
+                        .color(theme::text_muted()),
+                );
+                if stored.partial {
+                    theme::chip(ui, "证据已省略", theme::warn(), theme::warn_soft());
+                }
+                if ui.small_button("重跑").clicked() {
+                    *action = Some(CardAction::RerunFrom(turn_id, stored.seq));
+                }
+            });
+        }
+    });
 }
 
 /// 结果卡下半部：摘要 chip、关键事实确认与采用 / 对照 / 放弃。

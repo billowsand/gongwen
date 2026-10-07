@@ -562,6 +562,92 @@ impl DraftPage<'_> {
         });
     }
 
+    /// 「从这里重跑」：选一个旧检查点，从那一步之后重跑（内核加固第 4 期）。
+    ///
+    /// 前提：**正文没动过**。当前正文 ≠ 那份检查点黑板里的 `document` 时不允许——
+    /// 说明提案已被接受、或用户自己改过，这时从旧点重跑等于把改动悄悄抹掉。
+    /// 重跑会覆盖该点之后的产物：这一轮里该点之后的检查点先删掉。
+    pub(crate) fn rerun_from_checkpoint(&mut self, turn_id: u64, seq: i64) {
+        if self.doc.busy {
+            *self.status = "这篇稿件还有任务在跑，稍等一下。".into();
+            return;
+        }
+        let session_id = self.doc.ai_panel.session.id.clone();
+        let (stored, skills) = {
+            let skills = if self.doc.ai_panel.skills.is_empty() {
+                crate::agent::skill::load_all().0
+            } else {
+                self.doc.ai_panel.skills.clone()
+            };
+            let Some(store) = self.store.as_deref() else {
+                *self.status = "稿件库还没连上，检查点读不出来。".into();
+                return;
+            };
+            match store.list_run_checkpoints(&session_id, turn_id as i64) {
+                Ok(list) => (list.into_iter().find(|stored| stored.seq == seq), skills),
+                Err(error) => {
+                    *self.status = format!("读取检查点失败：{error:#}");
+                    return;
+                }
+            }
+        };
+        let Some(stored) = stored else {
+            *self.status = "这一个检查点已经不在了。".into();
+            return;
+        };
+        // 正文动过就不许重跑：说清楚原因，别让用户以为只是「没找到」。
+        if self.doc.generated_markdown != stored.checkpoint.board.document {
+            *self.status = format!(
+                "正文在那一步之后改过了（那时是 {} 字，现在 {} 字），从那里重跑会把这些改动盖掉；\
+                 可以「接着跑」或「从头重来」。",
+                crate::agent::tools::short(&stored.checkpoint.board.document, 40),
+                crate::agent::tools::short(&self.doc.generated_markdown, 40),
+            );
+            return;
+        }
+        let Some(skill) = skills
+            .iter()
+            .find(|skill| skill.id == stored.skill_id)
+            .cloned()
+        else {
+            *self.status = format!("技能「{}」已经不在了，没法从这里重跑。", stored.skill_id);
+            return;
+        };
+        // 覆盖该点之后的产物：这一轮里 seq 之后的检查点删掉。
+        if let Some(store) = self.store.as_deref_mut()
+            && let Err(error) = store.delete_run_checkpoints_after(&session_id, turn_id as i64, seq)
+        {
+            *self.status = format!("删除旧检查点失败：{error:#}");
+            return;
+        }
+        let Some(request) = self
+            .doc
+            .ai_panel
+            .turn_mut(turn_id)
+            .and_then(|turn| turn.request.clone())
+        else {
+            *self.status = "这一轮不是侧栏发起的，没法从这里重跑。".into();
+            return;
+        };
+        if let Err(error) = self.start_skill(
+            request,
+            Some((
+                turn_id,
+                Box::new(SkillRun {
+                    suspension: Suspension {
+                        checkpoint: stored.checkpoint,
+                        questions: Vec::new(),
+                        save_as: None,
+                    },
+                    skill,
+                    use_rag: stored.use_rag,
+                }),
+            )),
+        ) {
+            *self.status = error;
+        }
+    }
+
     /// 删掉这一轮的检查点（「丢弃」，以及「从头重来」之前先清干净）。
     /// 清掉之后卡片不再给「接着跑」，也不会再有「从这里重跑」的候选。
     pub(crate) fn drop_checkpoints(&mut self, turn_id: u64) {

@@ -41,6 +41,36 @@ impl DraftPage<'_> {
         self.save_ai_session(false);
     }
 
+    /// 各轮存下的检查点（「从这里重跑」的候选）。只在有可续的轮次时才查库。
+    pub(crate) fn checkpoint_index(
+        &self,
+    ) -> std::collections::BTreeMap<u64, Vec<crate::manuscript::ai_checkpoints::CheckpointSummary>>
+    {
+        let mut index = std::collections::BTreeMap::new();
+        let session_id = self.doc.ai_panel.session.id.clone();
+        if session_id.is_empty() {
+            return index;
+        }
+        let Some(store) = self.store.as_deref() else {
+            return index;
+        };
+        for turn in &self.doc.ai_panel.turns {
+            if !matches!(
+                turn.state,
+                TurnState::Interrupted | TurnState::Stopped | TurnState::Failed(_)
+            ) {
+                continue;
+            }
+            if let Ok(list) = store.list_run_checkpoints(&session_id, turn.id as i64) {
+                index.insert(
+                    turn.id,
+                    list.into_iter().map(|stored| stored.summary()).collect(),
+                );
+            }
+        }
+        index
+    }
+
     /// 按库里最新的检查点，标出哪些轮次可以「接着跑」（内核加固第 4 期）。
     ///
     /// 只看已经结束的轮次（`Interrupted` / `Stopped` / `Failed`）；还在跑或已经出结果的不管。

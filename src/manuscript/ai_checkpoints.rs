@@ -65,6 +65,37 @@ fn now() -> String {
     chrono::Local::now().to_rfc3339()
 }
 
+/// 卡片上给「从这里重跑」用的候选（一行一份，不带黑板——黑板只在真正点时才读回来）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckpointSummary {
+    pub(crate) seq: i64,
+    /// 停在哪一步，如「已完成 算子 gap_loop」。
+    pub(crate) label: String,
+    /// 什么时候存的（卡片上显示）。
+    pub(crate) when: String,
+    /// 证据包被截过（超尺寸上限），从这里重跑缺一部分证据。
+    pub(crate) partial: bool,
+}
+
+impl StoredCheckpoint {
+    /// 卡片上的一行（「从这里重跑」的候选）。
+    pub(crate) fn summary(&self) -> CheckpointSummary {
+        CheckpointSummary {
+            seq: self.seq,
+            label: if self.label.trim().is_empty() {
+                format!(
+                    "第 {} 步",
+                    self.checkpoint.at.first().copied().unwrap_or(0) + 1
+                )
+            } else {
+                self.label.clone()
+            },
+            when: self.created_at.clone(),
+            partial: self.checkpoint.partial,
+        }
+    }
+}
+
 fn reason_str(reason: Reason) -> &'static str {
     match reason {
         Reason::Start => "start",
@@ -190,10 +221,6 @@ impl ManuscriptStore {
     }
 
     /// 这一轮存下的全部检查点，按序号（「从这里重跑」的候选列表用）。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "内核加固第 4 期⑥「从这里重跑」接入")
-    )]
     pub(crate) fn list_run_checkpoints(
         &self,
         session_id: &str,
@@ -224,7 +251,6 @@ impl ManuscriptStore {
     }
 
     /// 删掉 `seq` 之后的检查点（「从这里重跑」覆盖该点之后的产物）。
-    #[expect(dead_code, reason = "内核加固第 4 期⑥「从这里重跑」接入")]
     pub(crate) fn delete_run_checkpoints_after(
         &mut self,
         session_id: &str,

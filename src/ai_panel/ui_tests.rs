@@ -2434,3 +2434,99 @@ fn request() -> crate::ai_panel::TurnRequest {
         style: Default::default(),
     }
 }
+
+/// 「从这里重跑」：正文没动过才允许，且会覆盖该点之后的检查点。
+#[test]
+fn rerunning_from_an_older_checkpoint_requires_an_untouched_document() {
+    use crate::agent::checkpoint::{Checkpoint, Reason};
+    use crate::manuscript::{ManuscriptStore, NewManuscript};
+    let mut store = ManuscriptStore::open(std::path::Path::new(":memory:")).unwrap();
+    let manuscript = store
+        .create(
+            &NewManuscript {
+                content_markdown: "正文。\n".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let mut harness = Harness::new("正文。\n");
+    harness.store = Some(store);
+    harness.doc.manuscript_id = Some(manuscript);
+    harness.doc.ai_panel.open = true;
+    harness.with_page(|page| page.sync_ai_session());
+    let session = harness.doc.ai_panel.session.id.clone();
+    harness
+        .doc
+        .ai_panel
+        .push_turn("研究式起草".into(), "起草".into(), vec![], Some(request()));
+    let id = harness.doc.ai_panel.turns[0].id;
+    harness.doc.ai_panel.finish(TurnState::Interrupted);
+    harness.with_page(|page| page.save_ai_session(true));
+    let ckpt = |at: usize| Checkpoint {
+        at: vec![at],
+        reason: Reason::Step,
+        label: format!("已完成 第 {at} 步"),
+        board: crate::agent::board::Board {
+            document: "正文。\n".into(),
+            ..Default::default()
+        },
+        partial: false,
+    };
+    for at in 1..=3 {
+        harness
+            .store
+            .as_mut()
+            .unwrap()
+            .save_run_checkpoint(
+                &session,
+                id as i64,
+                RESEARCH_DRAFT,
+                "hash",
+                false,
+                &ckpt(at),
+            )
+            .unwrap();
+    }
+
+    // 正文动过：拒绝，并说清原因。
+    harness.doc.generated_markdown = "用户自己改过的正文。\n".into();
+    harness.with_page(|page| page.rerun_from_checkpoint(id, 1));
+    assert!(
+        harness.status.contains("正文在那一步之后改过了"),
+        "{}",
+        harness.status
+    );
+    assert!(!harness.doc.busy, "没有跑起来");
+    assert_eq!(
+        harness
+            .store
+            .as_ref()
+            .unwrap()
+            .list_run_checkpoints(&session, id as i64)
+            .unwrap()
+            .len(),
+        3,
+        "被拒时不删任何东西"
+    );
+
+    // 正文没动过：允许，从第 1 步之后重跑，并覆盖该点之后的检查点。
+    harness.doc.generated_markdown = "正文。\n".into();
+    harness.with_page(|page| page.rerun_from_checkpoint(id, 1));
+    assert!(harness.doc.busy, "跑起来了");
+    let left = harness
+        .store
+        .as_ref()
+        .unwrap()
+        .list_run_checkpoints(&session, id as i64)
+        .unwrap();
+    assert_eq!(left.len(), 1, "该点之后的检查点删掉了");
+    assert_eq!(left[0].checkpoint.at, [1]);
+    let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+    assert!(turn.state.running());
+    assert!(
+        turn.notes.iter().any(|n| n.contains("已完成 第 1 步")),
+        "任务流里说明从哪儿接着跑：{:?}",
+        turn.notes
+    );
+}
