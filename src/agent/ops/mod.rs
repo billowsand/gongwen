@@ -14,6 +14,7 @@
 //! 接口调用照样经工具白名单，技能没声明 `http.call:<id>` 就调不到。
 
 mod agent;
+mod catalog;
 mod cite_check;
 mod finish;
 mod gap_loop;

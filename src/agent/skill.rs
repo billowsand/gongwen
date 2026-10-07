@@ -611,6 +611,19 @@ fn agent_problems(skill: &Skill, step: &StepSpec, at: &str, problems: &mut Vec<S
             _ => problems.push(format!("{at}自主步骤的 tools 要写成列表")),
         }
     }
+    match step.params.get("direct") {
+        None => {}
+        Some(Value::Array(items)) => {
+            for id in items.iter().filter_map(Value::as_str) {
+                if !skill.allows_tool(id) {
+                    problems.push(format!(
+                        "{at}自主步骤 direct 里的「{id}」不在 tools 白名单里"
+                    ));
+                }
+            }
+        }
+        Some(_) => problems.push(format!("{at}自主步骤的 direct 要写成列表")),
+    }
     if let Some(require) = step.param_str("require")
         && !["workspace", "findings"].contains(&require)
     {

@@ -226,6 +226,69 @@ fn finishing_too_early_is_sent_back_when_the_workspace_is_required() {
 }
 
 #[test]
+fn with_many_tools_the_model_searches_then_calls() {
+    // 自由任务的整张白名单：超过阈值，只有常用工具直给，其余先搜再调。
+    let free = skill::builtin("free-task").unwrap();
+    let tools: Vec<&str> = free
+        .tools
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !id.starts_with("http.call"))
+        .collect();
+    let skill = agent_skill(&tools.join(", "), "");
+    let model = ScriptedModel::new(|_, transcript| {
+        if !transcript.contains("<tool_result name=\"tool_search\"") {
+            call("tool_search", r#"{"query": "日期推算"}"#)
+        } else if !transcript.contains("2026年11月2日") {
+            call(
+                "tool_call",
+                r#"{"tool": "calc.date", "args": {"date": "2026年10月3日", "op": "add", "days": 30}}"#,
+            )
+        } else {
+            call("finish", r#"{"summary": "11 月 2 日"}"#)
+        }
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(&skill, &model, &kb, board("原文", "三十天后是哪天"));
+    assert!(driver.run().is_none());
+    let found = &model.calls.borrow()[1].1;
+    assert!(found.contains("- 工具 calc.date："), "{found}");
+    assert_eq!(driver.board.vars["agent_summary"], "11 月 2 日");
+    let lines = driver.tool_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("找工具：日期推算")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_direct_list_outside_the_whitelist_is_reported() {
+    let text = "---
+name: 试验
+description: 测试
+output: auto
+tools: [doc.read]
+flow:
+  - step: agent
+    direct: [calc.date]
+---
+
+## 任务
+
+{request}
+";
+    let skill = skill::parse("trial", text, "测试").unwrap();
+    let problems = check(&skill).join(
+        "
+",
+    );
+    assert!(
+        problems.contains("direct 里的「calc.date」不在 tools 白名单里"),
+        "{problems}"
+    );
+}
+
+#[test]
 fn turns_and_calls_are_capped() {
     let skill = agent_skill("kb.search", "    max_turns: 3");
     let model = ScriptedModel::new(|_, transcript| {

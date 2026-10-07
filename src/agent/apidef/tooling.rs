@@ -474,53 +474,67 @@ impl ApiTools {
     }
 }
 
-/// 搜接口：按名称、用途、参数说明里命中的关键词打分，返回前几个的 id、用途与参数签名。
-pub(crate) fn search(ids: &[String], apis: &ApiStore, query: &str) -> String {
-    let words: Vec<String> = query
+/// 检索词切成关键词（空白与常见标点分隔，转小写）。
+pub(crate) fn query_words(query: &str) -> Vec<String> {
+    query
         .split(|c: char| c.is_whitespace() || "，,、；;。".contains(c))
         .map(str::trim)
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
-        .collect();
+        .collect()
+}
+
+/// 关键词命中打分，`name`、`rest` 要先转小写：名称里整词命中 4 分，其余文字里整词命中 2 分；
+/// 整词都没命中时（中文没有空格，「查工作日」整句对不上）按两字一组再试，过半的组命中才给 1 分——
+/// 不然「工作日」会因为「工作」二字跟所有写「工作稿」的工具打成平手。
+pub(crate) fn match_score(words: &[String], name: &str, rest: &str) -> usize {
+    words
+        .iter()
+        .map(|w| {
+            let whole =
+                name.contains(w.as_str()) as usize * 4 + rest.contains(w.as_str()) as usize * 2;
+            if whole > 0 || w.chars().count() <= 2 {
+                return whole;
+            }
+            let chars: Vec<char> = w.chars().collect();
+            let pairs = chars.len() - 1;
+            let hits = chars
+                .windows(2)
+                .filter(|pair| {
+                    let pair: String = pair.iter().collect();
+                    name.contains(&pair) || rest.contains(&pair)
+                })
+                .count();
+            usize::from(hits * 2 > pairs)
+        })
+        .sum()
+}
+
+/// 接口参与搜索的文字：(名称, 用途 + id + 参数说明)，都已转小写。
+pub(crate) fn search_text(endpoint: &ApiEndpoint) -> (String, String) {
+    let rest = format!(
+        "{} {} {}",
+        endpoint.description,
+        endpoint.id,
+        endpoint
+            .inputs
+            .iter()
+            .map(|i| i.description.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    (endpoint.name.to_lowercase(), rest.to_lowercase())
+}
+
+/// 搜接口：按名称、用途、参数说明里命中的关键词打分，返回前几个的 id、用途与参数签名。
+pub(crate) fn search(ids: &[String], apis: &ApiStore, query: &str) -> String {
+    let words = query_words(query);
     let mut scored: Vec<(usize, &ApiEndpoint)> = ids
         .iter()
         .filter_map(|id| apis.get(id))
         .map(|endpoint| {
-            let name = endpoint.name.to_lowercase();
-            let rest = format!(
-                "{} {} {}",
-                endpoint.description,
-                endpoint.id,
-                endpoint
-                    .inputs
-                    .iter()
-                    .map(|i| i.description.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-            .to_lowercase();
-            let score = words
-                .iter()
-                .map(|w| {
-                    let in_name = name.contains(w.as_str()) as usize * 3;
-                    let in_rest = rest.contains(w.as_str()) as usize;
-                    // 中文没有空格：整句没命中时按两字一组再试一次。
-                    let pieces = if in_name + in_rest == 0 && w.chars().count() > 2 {
-                        let chars: Vec<char> = w.chars().collect();
-                        chars
-                            .windows(2)
-                            .filter(|pair| {
-                                let pair: String = pair.iter().collect();
-                                name.contains(&pair) || rest.contains(&pair)
-                            })
-                            .count()
-                    } else {
-                        0
-                    };
-                    in_name + in_rest + pieces
-                })
-                .sum();
-            (score, endpoint)
+            let (name, rest) = search_text(endpoint);
+            (match_score(&words, &name, &rest), endpoint)
         })
         .filter(|(score, _)| *score > 0)
         .collect();
