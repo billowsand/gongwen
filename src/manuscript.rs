@@ -18,6 +18,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+pub(crate) mod ai_checkpoints;
 pub(crate) mod ai_sessions;
 pub(crate) mod candidates;
 mod export_naming;

@@ -106,6 +106,13 @@ impl EvidencePack {
         self.items.is_empty()
     }
 
+    /// 只留最近 `keep` 条（检查点超尺寸上限时截证据包；编号保持原样，允许断号）。
+    pub(crate) fn keep_last(&mut self, keep: usize) {
+        if self.items.len() > keep {
+            self.items.drain(..self.items.len() - keep);
+        }
+    }
+
     pub(crate) fn get(&self, id: usize) -> Option<&Evidence> {
         self.items.iter().find(|item| item.id == id)
     }

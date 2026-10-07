@@ -183,6 +183,20 @@ impl DraftPage<'_> {
             .expect("技能任务已有轮次");
         *self.status = format!("正在{title}…");
 
+        // 检查点（内核加固第 4 期）：稿件已入库就先强制存一次会话——会话行与这一轮都在库里，
+        // 检查点的外键才挂得上。库路径在界面线程解析好再传进后台线程（测试替换的配置目录
+        // 只对当前线程有效）。稿件没入库就不存检查点。
+        let checkpoint_target = match (self.doc.manuscript_id, self.store.is_some()) {
+            (Some(_), true) => {
+                self.save_ai_session(true);
+                let session_id = self.doc.ai_panel.session.id.clone();
+                match crate::storage::manuscript_db_path() {
+                    Ok(path) if !session_id.is_empty() => Some((path, session_id, turn_id as i64)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         let config = self.config.clone();
         // 接口定义与密钥在界面线程读：测试替换的配置目录只对当前线程有效。
         let (apis, secrets) = match (ApiStore::load(), ApiSecrets::load()) {
@@ -283,6 +297,7 @@ impl DraftPage<'_> {
                     &model,
                     &kb,
                     (&apis, &secrets),
+                    checkpoint_target,
                     &mut emit,
                 )
             };
@@ -495,7 +510,7 @@ impl DraftPage<'_> {
         }
     }
 
-    /// 手动压缩会话（`/compact`、「•••」→「压缩会话」）：最近 3 轮之前的都并进会话摘要。
+    /// 手动压缩会话（`/compact`、「会话与技能管理」→「压缩会话」）：最近 3 轮之前的都并进会话摘要。
     pub(crate) fn start_compact(&mut self) {
         if self.doc.busy {
             *self.status = "这篇稿件还有任务在跑，稍等一下。".into();
@@ -871,6 +886,7 @@ fn run_skill(
     model: &LmBackend,
     kb: &RagSearch,
     (apis, secrets): (&ApiStore, &ApiSecrets),
+    checkpoint_target: Option<(std::path::PathBuf, String, i64)>,
     emit: &mut dyn FnMut(Event),
 ) -> (Result<SkillResult, String>, Option<String>) {
     let skill = match resolve_skill(pick, board, model, emit) {
@@ -891,6 +907,7 @@ fn run_skill(
             model,
             kb,
             (apis, secrets),
+            checkpoint_target,
             emit,
         ),
         used,
@@ -941,8 +958,31 @@ fn run_engine(
     model: &LmBackend,
     kb: &RagSearch,
     (apis, secrets): (&ApiStore, &ApiSecrets),
+    checkpoint_target: Option<(std::path::PathBuf, String, i64)>,
     emit: &mut dyn FnMut(Event),
 ) -> Result<SkillResult, String> {
+    // 检查点去处：稿件已入库时写进稿件库（同库另开一个连接，WAL），否则不落盘。
+    let sink = checkpoint_target.and_then(|(path, session_id, turn_id)| {
+        match super::checkpoint::SqliteCheckpoints::open(
+            path,
+            session_id,
+            turn_id,
+            skill.id.clone(),
+            super::session::skill_hash(&skill),
+            use_rag,
+        ) {
+            Ok(sink) => Some(sink),
+            Err(error) => {
+                emit(Event::Note(format!(
+                    "检查点存不了：{error}，这轮不能接着跑"
+                )));
+                None
+            }
+        }
+    });
+    let no_sink = crate::agent::checkpoint::NoCheckpoint;
+    let ckpt: &dyn crate::agent::checkpoint::CheckpointSink =
+        sink.as_ref().map_or(&no_sink, |sink| sink as _);
     let env = Env {
         config,
         vocabulary: &config.vocabulary,
@@ -952,7 +992,7 @@ fn run_engine(
         skill: &skill,
         apis,
         secrets,
-        ckpt: &crate::agent::checkpoint::NoCheckpoint,
+        ckpt,
     };
     match engine::run(board, &env, &at, emit).map_err(|e| format!("{e:#}"))? {
         Outcome::Suspended(suspension) => Ok(SkillResult::Suspended(Box::new(SkillRun {

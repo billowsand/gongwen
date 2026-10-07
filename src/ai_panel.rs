@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+mod checkpoint;
 mod composer_ui;
 mod history;
 mod mention;

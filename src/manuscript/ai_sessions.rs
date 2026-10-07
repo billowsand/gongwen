@@ -30,6 +30,25 @@ CREATE TABLE IF NOT EXISTS ai_session_turns (
     updated_at TEXT    NOT NULL,
     PRIMARY KEY (session_id, turn_id)
 );
+-- 技能运行的检查点（内核加固第 4 期）：每步成功之后一份，外键挂在轮次上，
+-- 轮次或会话被删时级联清除。存取与保留策略在 `ai_checkpoints.rs`。
+CREATE TABLE IF NOT EXISTS ai_run_checkpoints (
+    session_id TEXT    NOT NULL,
+    turn_id    INTEGER NOT NULL,
+    seq        INTEGER NOT NULL,
+    at_path    TEXT    NOT NULL,
+    reason     TEXT    NOT NULL,
+    label      TEXT    NOT NULL DEFAULT '',
+    skill_id   TEXT    NOT NULL DEFAULT '',
+    skill_hash TEXT    NOT NULL DEFAULT '',
+    use_rag    INTEGER NOT NULL DEFAULT 0,
+    partial    INTEGER NOT NULL DEFAULT 0,
+    data       TEXT    NOT NULL,
+    created_at TEXT    NOT NULL,
+    PRIMARY KEY (session_id, turn_id, seq),
+    FOREIGN KEY (session_id, turn_id)
+        REFERENCES ai_session_turns(session_id, turn_id) ON DELETE CASCADE
+);
 "#;
 
 /// 一个会话的抬头（不含各轮）。
