@@ -1162,20 +1162,32 @@ pub(super) fn proposal_actions(
                 });
             }
         });
-        ui.checkbox(
-            &mut proposal.fact_changes_confirmed,
-            "我已逐项核对，上述事实变化符合本次要求",
-        );
+        // 卡片上核对的是完整清单；审阅窗里排除改动后清单变短，那边的勾选作废逻辑
+        // 靠 confirmed_facts 比对，这里同样记下核对的是哪份。
+        let mut checked = proposal.fact_changes_confirmed;
+        if ui
+            .checkbox(&mut checked, "我已逐项核对，上述事实变化符合本次要求")
+            .changed()
+        {
+            proposal.fact_changes_confirmed = checked;
+            proposal.confirmed_facts = if checked {
+                proposal.fact_changes.clone()
+            } else {
+                Vec::new()
+            };
+        }
     }
     let can_accept = proposal.fact_changes.is_empty() || proposal.fact_changes_confirmed;
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
-        let label = if summary.was_empty {
-            "采用为正文"
-        } else {
-            "接受提案"
+        // 在审阅窗里挑过「不要这处」的，卡片上看得到这次只接受其余改动。
+        let label = match (summary.was_empty, proposal.excluded.len()) {
+            (true, 0) => "采用为正文".to_string(),
+            (false, 0) => "接受提案".to_string(),
+            (true, n) => format!("采用为正文（排除 {n} 处）"),
+            (false, n) => format!("接受提案（排除 {n} 处）"),
         };
-        if theme::primary_icon_button_enabled(ui, can_accept, theme::Icon::SquareCheck, label)
+        if theme::primary_icon_button_enabled(ui, can_accept, theme::Icon::SquareCheck, &label)
             .on_disabled_hover_text("请先核对并勾选关键事实变化")
             .clicked()
         {

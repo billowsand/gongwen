@@ -60,6 +60,20 @@ pub struct DiffViewConfig<'a> {
     pub old_label: &'a str,
     /// 右栏表头，如 `当前（未提交）`。
     pub new_label: &'a str,
+    /// 逐块排除（AI 提案审阅）：给出时每个变更块第一处旁画「不要这处」开关，
+    /// 已排除的块整组变淡并标「保留原文」；被点的块序号由返回值带回。
+    /// 不给就是原来的只读对照。
+    pub exclude: Option<HunkExclude<'a>>,
+}
+
+/// 逐块排除的显示参数。开关挂在 hunk 上而不是单条变更上：一个 hunk 可能覆盖
+/// 几条相邻变更（`Hunk.changes` 是变更序号范围），同一 hunk 的变更一起排除。
+#[derive(Clone, Copy)]
+pub struct HunkExclude<'a> {
+    /// `diff_hunks::hunks` 对当前正文 diff 聚出的变更块。
+    pub hunks: &'a [crate::draft_page::diff_hunks::Hunk],
+    /// 已排除的块序号。
+    pub excluded: &'a BTreeSet<usize>,
 }
 
 /// 渲染整份对照（要素 + 备注 + 正文）。
@@ -72,17 +86,18 @@ pub fn manuscript_diff_ui(
     diff: &ManuscriptDiff,
     state: &mut DiffViewState,
     config: &DiffViewConfig<'_>,
-) {
+) -> Option<usize> {
     let DiffViewConfig {
         old_label,
         new_label,
+        exclude,
     } = *config;
     if diff.is_empty() {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| {
             ui.weak(format!("{new_label} 与 {old_label} 一致，没有差异。"));
         });
-        return;
+        return None;
     }
 
     let total_body = diff.body.changed_count;
@@ -152,13 +167,13 @@ pub fn manuscript_diff_ui(
             }
             if diff.body.changed_count == 0 {
                 ui.weak("正文没有变化。");
-                return;
+                return None;
             }
             ui.add_space(2.0);
-            body_ui(ui, &diff.body, state, old_label, new_label, column);
-        });
+            body_ui(ui, &diff.body, state, old_label, new_label, column, exclude)
+        })
+        .inner
 }
-
 /// 字段变更表：方向由列头写死，旧版永远在左。配置版本对照也用它。
 pub fn field_changes_table(
     ui: &mut egui::Ui,
@@ -199,8 +214,10 @@ fn body_ui(
     old_label: &str,
     new_label: &str,
     column: f32,
-) {
+    exclude: Option<HunkExclude<'_>>,
+) -> Option<usize> {
     let mut change_index = 0usize;
+    let mut toggled = None;
     // 不用 Grid：Grid 会把一行两栏压到同一个行高，内容较多的一侧最后几行直接被裁掉
     // ——而改动往往正好让新版多出一行，一裁就把改动本身裁没了。这里自己排两栏：
     // horizontal_top 保证顶部对齐，固定宽度的子区域让两侧各自按需长高。
@@ -237,15 +254,44 @@ fn body_ui(
                 }
             }
             DiffBlock::Changed(change) => {
+                // 开关挂在 hunk 上：一个 hunk 可能盖几条相邻变更，同一 hunk 一起排除；
+                // 只在 hunk 的第一处变更旁画一次。
+                let hunk = exclude.and_then(|e| {
+                    e.hunks
+                        .iter()
+                        .position(|h| h.changes.contains(&change_index))
+                });
+                let muted = match (exclude, hunk) {
+                    (Some(e), Some(h)) => e.excluded.contains(&h),
+                    _ => false,
+                };
+                if let (Some(e), Some(h)) = (exclude, hunk)
+                    && e.hunks[h].changes.start == change_index
+                {
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        let (label, hover) = if muted {
+                            ("恢复这处", "恢复采用这处改动")
+                        } else {
+                            ("不要这处", "排除这处改动，接受时保留原文")
+                        };
+                        if ui.small_button(label).on_hover_text(hover).clicked() {
+                            toggled = Some(h);
+                        }
+                        if muted {
+                            theme::chip(ui, "保留原文", theme::text_soft(), theme::surface_sunk());
+                        }
+                    });
+                }
                 let focused = change_index == state.focus;
                 let mut clicked = false;
                 let mut left_response = None;
                 ui.horizontal_top(|ui| {
                     let left = column_ui(ui, column, |ui| {
-                        change_cell(ui, change, Side::Old, column, focused)
+                        change_cell(ui, change, Side::Old, column, focused, muted)
                     });
                     let right = column_ui(ui, column, |ui| {
-                        change_cell(ui, change, Side::New, column, focused)
+                        change_cell(ui, change, Side::New, column, focused, muted)
                     });
                     clicked = left.clicked() || right.clicked();
                     left_response = Some(left);
@@ -266,6 +312,7 @@ fn body_ui(
             }
         }
     }
+    toggled
 }
 
 /// 一栏：固定宽度、内容自顶向下排。两栏都走这里，同一行左右才对得齐。
@@ -321,6 +368,7 @@ fn change_cell(
     side: Side,
     width: f32,
     focused: bool,
+    muted: bool,
 ) -> egui::Response {
     let (spans, line, absent) = match side {
         Side::Old => (
@@ -334,7 +382,8 @@ fn change_cell(
             change.kind == ChangeKind::Delete,
         ),
     };
-    let fill = if absent {
+    // 被排除的块整组变淡：保留增删轮廓，不再用警示色抢眼。
+    let fill = if absent || muted {
         theme::surface_sunk()
     } else {
         match (side, change.kind) {
@@ -376,9 +425,9 @@ fn change_cell(
             // 必须先排好版再交给 Label：直接把 LayoutJob 交给 Label，egui 会用
             // 当前可用宽度覆盖 job 里的换行宽度，而 Grid 单元格里的"可用宽度"
             // 并不受列宽约束，结果就是整段不换行、把右栏顶出窗口。
-            let galley = ui
-                .ctx()
-                .fonts_mut(|fonts| fonts.layout_job(spans_job(ui, spans, side, width - 60.0)));
+            let galley = ui.ctx().fonts_mut(|fonts| {
+                fonts.layout_job(spans_job(ui, spans, side, width - 60.0, muted))
+            });
             ui.add(egui::Label::new(galley));
         });
     });
@@ -395,16 +444,26 @@ fn spans_job(
     spans: &[InlineSpan],
     side: Side,
     wrap_width: f32,
+    muted: bool,
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width.max(60.0);
     let font = egui::TextStyle::Body.resolve(ui.style());
     for span in spans {
+        // 被排除的块不画增删色与删除线，整段灰字表示「保留原文」。
         let mut format = egui::TextFormat {
             font_id: font.clone(),
-            color: theme::text(),
+            color: if muted {
+                theme::text_muted()
+            } else {
+                theme::text()
+            },
             ..Default::default()
         };
+        if muted {
+            job.append(&span.text, 0.0, format);
+            continue;
+        }
         match span.kind {
             SpanKind::Same => {}
             SpanKind::Removed => {

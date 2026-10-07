@@ -289,6 +289,9 @@ pub(crate) struct AiProposal {
     pub(crate) label: String,
     pub(crate) fact_changes: Vec<crate::ai_guard::FactChange>,
     pub(crate) fact_changes_confirmed: bool,
+    /// 勾选「我已逐项核对」时核对的那份事实清单。排除 / 恢复变更块会让清单变化，
+    /// 变了就把勾选作废，按新清单重新确认（审阅窗帧首比对）。
+    pub(crate) confirmed_facts: Vec<crate::ai_guard::FactChange>,
     /// 用户在审阅窗里排除的变更块（按 `diff_hunks::hunks` 的序号）。提案正文变了
     /// （答完核实题、撤回概括等会在已完成的提案上继续修订）就清空，按新的块重新挑——
     /// `install_ai_proposal` 每次装提案都新建 `AiProposal`，天然满足这一点。

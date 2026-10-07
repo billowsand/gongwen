@@ -4,7 +4,7 @@ use super::TurnState;
 use super::ui::{CardAction, proposal_actions};
 use crate::app::GongwenApp;
 use crate::diff::{ContentSnapshot, manuscript_diff};
-use crate::diff_view::{DiffViewConfig, manuscript_diff_ui};
+use crate::diff_view::{DiffViewConfig, HunkExclude, manuscript_diff_ui};
 use crate::draft_page::DraftPage;
 use eframe::egui;
 
@@ -99,15 +99,27 @@ impl DraftPage<'_> {
                 String::new(),
             );
             let report = manuscript_diff(&old, &new);
-            manuscript_diff_ui(
+            let hunks =
+                crate::draft_page::diff_hunks::hunks(&report.body, &proposal.result.markdown);
+            let toggled = manuscript_diff_ui(
                 ui,
                 &report,
                 &mut proposal.view,
                 &DiffViewConfig {
                     old_label: "当前正文",
                     new_label: "AI 工作稿",
+                    exclude: Some(HunkExclude {
+                        hunks: &hunks,
+                        excluded: &proposal.excluded,
+                    }),
                 },
             );
+            // 与审阅窗同一套「不要这处」：这里也能挑，接受时一样按排除合并。
+            if let Some(hunk) = toggled
+                && !proposal.excluded.remove(&hunk)
+            {
+                proposal.excluded.insert(hunk);
+            }
             return true;
         }
         let turn = self

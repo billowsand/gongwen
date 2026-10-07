@@ -6,7 +6,7 @@
 
 use crate::app::GongwenApp;
 use crate::diff::{ContentSnapshot, DiffBlock, ManuscriptDiff, manuscript_diff};
-use crate::diff_view::{DiffViewConfig, manuscript_diff_ui};
+use crate::diff_view::{DiffViewConfig, HunkExclude, manuscript_diff_ui};
 use crate::draft_page::DraftSession;
 use crate::theme;
 use eframe::egui;
@@ -51,6 +51,7 @@ impl GongwenApp {
         let mut keep = true;
         let mut accept = false;
         let mut discard = false;
+        let mut toggled = None;
         let old = ContentSnapshot::new(
             self.docs[index].draft.clone(),
             proposal.before.clone(),
@@ -62,6 +63,23 @@ impl GongwenApp {
             String::new(),
         );
         let report = manuscript_diff(&old, &new);
+        let hunks = crate::draft_page::diff_hunks::hunks(&report.body, &proposal.result.markdown);
+        // 事实表跟排除联动：按当前合并结果现算，被排除的块带来的变化不再显示、
+        // 不再要求确认。每帧现算——diff 本来就每帧重算，这一步同量级。
+        let merged = merged_markdown(
+            &proposal.before,
+            &proposal.result.markdown,
+            &proposal.excluded,
+        );
+        let facts = if proposal.excluded.is_empty() {
+            proposal.fact_changes.clone()
+        } else {
+            crate::ai_guard::compare_key_facts(&proposal.before, &merged, &self.config.vocabulary)
+        };
+        // 勾选「我已逐项核对」之后清单变了（排除或恢复了改动），勾选作废，按新清单重新核对。
+        if proposal.fact_changes_confirmed && proposal.confirmed_facts != facts {
+            proposal.fact_changes_confirmed = false;
+        }
         if let Some(text) = proposal.locate.take()
             && let Some(index) = change_containing(&report, &proposal.result.markdown, &text)
         {
@@ -87,7 +105,7 @@ impl GongwenApp {
                     );
                 });
                 ui.weak("左侧为当前审校稿，右侧为 AI 提案；接受前不会覆盖正文或自动导出。 ");
-                if !proposal.fact_changes.is_empty() {
+                if !facts.is_empty() {
                     ui.add_space(8.0);
                     theme::card().fill(theme::danger_soft()).show(ui, |ui| {
                         ui.set_width(ui.available_width());
@@ -95,7 +113,7 @@ impl GongwenApp {
                             theme::chip(ui, "关键事实变化", theme::danger(), theme::danger_soft());
                             ui.label(format!(
                                 "检测到 {} 项单位、人员、日期、数字或文件依据变化。",
-                                proposal.fact_changes.len()
+                                facts.len()
                             ));
                         });
                         egui::Grid::new("ai_fact_changes")
@@ -106,7 +124,7 @@ impl GongwenApp {
                                 ui.strong("变化");
                                 ui.strong("内容");
                                 ui.end_row();
-                                for change in &proposal.fact_changes {
+                                for change in &facts {
                                     ui.label(change.kind.label());
                                     ui.colored_label(
                                         if change.change == crate::ai_guard::FactChangeKind::Added {
@@ -120,23 +138,39 @@ impl GongwenApp {
                                     ui.end_row();
                                 }
                             });
-                        ui.checkbox(
-                            &mut proposal.fact_changes_confirmed,
-                            "我已逐项核对，上述事实变化符合本次修改要求",
-                        );
+                        // 勾选绑定当前这张清单：清单随排除变化时，帧首逻辑把旧勾选作废。
+                        let mut checked = proposal.fact_changes_confirmed;
+                        if ui
+                            .checkbox(&mut checked, "我已逐项核对，上述事实变化符合本次修改要求")
+                            .changed()
+                        {
+                            proposal.fact_changes_confirmed = checked;
+                            proposal.confirmed_facts =
+                                if checked { facts.clone() } else { Vec::new() };
+                        }
                     });
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
+                    let nothing_to_accept = merged == proposal.before;
                     let can_accept =
-                        proposal.fact_changes.is_empty() || proposal.fact_changes_confirmed;
+                        (facts.is_empty() || proposal.fact_changes_confirmed) && !nothing_to_accept;
+                    let label = if proposal.excluded.is_empty() {
+                        "接受提案".to_string()
+                    } else {
+                        format!("接受其余 {} 处", hunks.len() - proposal.excluded.len())
+                    };
                     if theme::primary_icon_button_enabled(
                         ui,
                         can_accept,
                         theme::Icon::SquareCheck,
-                        "接受提案",
+                        &label,
                     )
-                    .on_disabled_hover_text("请先确认关键事实变化")
+                    .on_disabled_hover_text(if nothing_to_accept {
+                        "全部改动都被排除，没有可接受的内容"
+                    } else {
+                        "请先确认关键事实变化"
+                    })
                     .clicked()
                     {
                         accept = true;
@@ -152,13 +186,17 @@ impl GongwenApp {
                     }
                 });
                 ui.separator();
-                manuscript_diff_ui(
+                toggled = manuscript_diff_ui(
                     ui,
                     &report,
                     &mut proposal.view,
                     &DiffViewConfig {
                         old_label: "当前审校稿",
                         new_label: "AI 修改提案",
+                        exclude: Some(HunkExclude {
+                            hunks: &hunks,
+                            excluded: &proposal.excluded,
+                        }),
                     },
                 );
             });
@@ -167,6 +205,12 @@ impl GongwenApp {
         }
         if !keep {
             proposal.open = false;
+        }
+        // 「不要这处 / 恢复这处」：切换该 hunk 的排除状态。
+        if let Some(hunk) = toggled
+            && !proposal.excluded.remove(&hunk)
+        {
+            proposal.excluded.insert(hunk);
         }
         self.docs[index].ai_proposal = Some(proposal);
         if accept {
@@ -218,6 +262,7 @@ impl GongwenApp {
             label,
             fact_changes,
             fact_changes_confirmed: false,
+            confirmed_facts: Vec::new(),
             excluded: std::collections::BTreeSet::new(),
             view: crate::diff_view::DiffViewState::default(),
             open: !doc.ai_panel.open,
