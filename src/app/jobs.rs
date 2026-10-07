@@ -125,6 +125,10 @@ pub(crate) enum DocJob {
     AiNote(String),
     /// 技能流程的一次工具调用，侧栏「过程」里一行。
     AiTool(String),
+    AiUsage {
+        turn_id: u64,
+        usage: crate::agent::backend::UsageTotals,
+    },
     /// 技能流程的工作稿整体换新（补全之后）。
     AiWorkspace(String),
     AiWriteBegin {
@@ -1092,6 +1096,11 @@ impl GongwenApp {
         let Some(index) = self.docs.iter().position(|doc| doc.key == key) else {
             return;
         };
+        // 停止会使 job_seq 失效；只读的用量仍可回到原轮次，其余产物照旧丢弃。
+        if let DocJob::AiUsage { turn_id, usage } = job {
+            self.docs[index].ai_panel.record_usage(turn_id, seq, usage);
+            return;
+        }
         if self.docs[index].job_seq != seq {
             return;
         }
@@ -1166,6 +1175,7 @@ impl GongwenApp {
                 done,
             } => self.docs[index].ai_panel.append(&content, &reasoning, done),
             DocJob::AiTool(line) => self.docs[index].ai_panel.step(line),
+            DocJob::AiUsage { .. } => unreachable!("用量已按原轮次回投"),
             DocJob::AiWorkspace(text) => self.docs[index].ai_panel.replace_content(text),
             DocJob::AiWriteBegin { prefix, suffix } => {
                 self.docs[index].ai_panel.begin_write(prefix, suffix)

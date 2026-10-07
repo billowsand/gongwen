@@ -2,17 +2,22 @@
 
 use super::toolcall::{self, Protocol, Reply, ToolCall, ToolSpec, Turn};
 use crate::lmstudio::context::{self, Window, WindowSource};
-use crate::lmstudio::{self, ChatOptions, ConverseError, Finish, StreamDelta};
+use crate::lmstudio::{self, ChatOptions, Finish, StreamDelta};
 use crate::models::{AppConfig, LmStudioConfig, ModelRefError};
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+mod usage;
+pub(crate) use usage::UsageTotals;
 
 /// 服务端拒收过 `tools`：本次运行之后的自主步骤直接走文本协议，不再白白试一次。
 static NATIVE_TOOLS_REJECTED: AtomicBool = AtomicBool::new(false);
 
 /// 这一步该用哪个模型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ModelRole {
     /// 起草与补全：要写得好，用起草模型。
     Draft,
@@ -29,6 +34,9 @@ pub(crate) struct Completion {
 }
 
 pub(crate) trait ModelBackend {
+    fn usage(&self) -> UsageTotals {
+        UsageTotals::default()
+    }
     /// 跑一次补全，正文与思考的增量都经 `on_delta` 回调。用户点了停止时返回错误。
     fn complete(
         &self,
@@ -88,6 +96,10 @@ pub(crate) trait ModelBackend {
 
 /// 接本机 / 内网的 OpenAI 兼容接口。
 pub(crate) struct LmBackend {
+    draft_backup: Result<Option<LmStudioConfig>, ModelRefError>,
+    assist_backup: Result<Option<LmStudioConfig>, ModelRefError>,
+    notices: Mutex<Vec<String>>,
+    usage: Mutex<UsageTotals>,
     draft: Result<LmStudioConfig, ModelRefError>,
     assist: Result<LmStudioConfig, ModelRefError>,
     cancel: Arc<AtomicBool>,
@@ -96,6 +108,10 @@ pub(crate) struct LmBackend {
 impl LmBackend {
     pub(crate) fn new(config: &AppConfig, cancel: Arc<AtomicBool>) -> Self {
         Self {
+            draft_backup: Ok(None),
+            assist_backup: Ok(None),
+            notices: Mutex::new(Vec::new()),
+            usage: Mutex::new(UsageTotals::default()),
             draft: config.draft_chat(),
             assist: config.assist_chat(),
             cancel,
@@ -120,6 +136,102 @@ impl LmBackend {
 }
 
 impl LmBackend {
+    pub(crate) fn take_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notices.lock().unwrap())
+    }
+
+    /// 仅传输失败或 5xx 可以换模型。4xx、超长、解析失败与空正文都保留原错。
+    fn can_fallback(&self, error: &anyhow::Error, started: bool) -> bool {
+        !started
+            && !self.cancelled()
+            && error.downcast_ref::<lmstudio::OutputStarted>().is_none()
+            && (error
+                .downcast_ref::<lmstudio::HttpFailure>()
+                .is_some_and(|e| e.0.is_server_error())
+                || error
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_body()))
+    }
+
+    /// 一次发送的记录包含失败与停止时已收到的正文、思考；工具参数另由结果补入。
+    fn tracked<T>(
+        &self,
+        role: ModelRole,
+        config: &LmStudioConfig,
+        input: usize,
+        on_delta: &mut dyn FnMut(StreamDelta<'_>),
+        mut send: impl FnMut(
+            &LmStudioConfig,
+            &mut dyn FnMut(StreamDelta<'_>),
+        ) -> anyhow::Result<(T, Option<lmstudio::Usage>, String)>,
+    ) -> anyhow::Result<T> {
+        let mut started_output = false;
+        let primary = self.tracked_once(
+            role,
+            config,
+            input,
+            &mut |delta| {
+                started_output = true;
+                on_delta(delta);
+            },
+            &mut send,
+        );
+        let error = match primary {
+            Ok(value) => return Ok(value),
+            Err(error) if self.can_fallback(&error, started_output) => error,
+            Err(error) => return Err(error),
+        };
+        let backup = match role {
+            ModelRole::Draft => &self.draft_backup,
+            ModelRole::Assist => &self.assist_backup,
+        };
+        let backup = match backup {
+            Ok(Some(config)) => config,
+            Ok(None) => return Err(error),
+            Err(why) => return Err(error.context(format!("备用模型配置不可用：{why}"))),
+        };
+        context::window(backup);
+        self.notices.lock().unwrap().push(format!(
+            "主模型 {} 不可用（{error:#}），本次改用 {}",
+            config.model, backup.model
+        ));
+        self.tracked_once(role, backup, input, on_delta, &mut send)
+            .map_err(|why| error.context(format!("备用模型 {} 也失败：{why:#}", backup.model)))
+    }
+
+    fn tracked_once<T>(
+        &self,
+        role: ModelRole,
+        config: &LmStudioConfig,
+        input: usize,
+        on_delta: &mut dyn FnMut(StreamDelta<'_>),
+        send: &mut impl FnMut(
+            &LmStudioConfig,
+            &mut dyn FnMut(StreamDelta<'_>),
+        ) -> anyhow::Result<(T, Option<lmstudio::Usage>, String)>,
+    ) -> anyhow::Result<T> {
+        let started = Instant::now();
+        let mut output = String::new();
+        let result = send(config, &mut |delta| {
+            let (StreamDelta::Content(text) | StreamDelta::Reasoning(text)) = delta;
+            output.push_str(text);
+            on_delta(delta);
+        });
+        let usage = result.as_ref().ok().and_then(|(_, usage, _)| *usage);
+        if let Ok((_, _, extra)) = &result {
+            output.push_str(extra);
+        }
+        self.usage.lock().unwrap().record(
+            role,
+            &config.model,
+            input,
+            &output,
+            usage,
+            started.elapsed().as_millis() as u64,
+        );
+        result.map(|(value, _, _)| value)
+    }
+
     fn complete_with(
         &self,
         role: ModelRole,
@@ -132,15 +244,27 @@ impl LmBackend {
         let mut attempt = 0;
         let outcome = loop {
             attempt += 1;
-            match lmstudio::generate_stream(
+            match self.tracked(
+                role,
                 config,
-                system,
-                user,
-                config.temperature,
-                config.max_tokens,
-                options.clone(),
-                &self.cancel,
-                &mut *on_delta,
+                context::estimate_tokens(system) + context::estimate_tokens(user),
+                on_delta,
+                |config, delta| {
+                    lmstudio::generate_stream(
+                        config,
+                        system,
+                        user,
+                        config.temperature,
+                        config.max_tokens,
+                        options.clone(),
+                        &self.cancel,
+                        delta,
+                    )
+                    .map(|outcome| {
+                        let usage = outcome.usage;
+                        (outcome, usage, String::new())
+                    })
+                },
             ) {
                 // 思考型模型（实测 MiniMax-M2.7）偶尔在思考里把话说完、正文留空：再问一次。
                 Err(error)
@@ -164,6 +288,9 @@ impl LmBackend {
 }
 
 impl ModelBackend for LmBackend {
+    fn usage(&self) -> UsageTotals {
+        self.usage.lock().unwrap().clone()
+    }
     fn complete(
         &self,
         role: ModelRole,
@@ -218,14 +345,35 @@ impl ModelBackend for LmBackend {
         let native = protocol == Protocol::Native && !NATIVE_TOOLS_REJECTED.load(Ordering::Relaxed);
         if native {
             let specs: Vec<Value> = tools.iter().map(ToolSpec::to_native).collect();
-            match lmstudio::converse_stream(
+            match self.tracked(
+                role,
                 config,
-                &toolcall::native_messages(turns),
-                Some(&specs),
-                config.temperature,
-                config.max_tokens,
-                &self.cancel,
+                context::estimate_tokens(
+                    &serde_json::json!(toolcall::native_messages(turns)).to_string(),
+                ) + context::estimate_tokens(&serde_json::json!(specs).to_string()),
                 on_delta,
+                |config, delta| {
+                    lmstudio::converse_stream(
+                        config,
+                        &toolcall::native_messages(turns),
+                        Some(&specs),
+                        config.temperature,
+                        config.max_tokens,
+                        &self.cancel,
+                        delta,
+                    )
+                    .map(|outcome| {
+                        let usage = outcome.usage;
+                        let extra = outcome
+                            .tool_calls
+                            .iter()
+                            .map(|c| format!("{} {}", c.name, c.arguments))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (outcome, usage, extra)
+                    })
+                    .map_err(anyhow::Error::from)
+                },
             ) {
                 Ok(outcome) => {
                     if outcome.finish == Finish::Cancelled {
@@ -263,20 +411,39 @@ impl ModelBackend for LmBackend {
                         protocol: Protocol::Native,
                     });
                 }
-                Err(ConverseError::Rejected(_)) => {
+                Err(error)
+                    if error
+                        .downcast_ref::<lmstudio::HttpFailure>()
+                        .is_some_and(|e| e.0.is_client_error()) =>
+                {
                     NATIVE_TOOLS_REJECTED.store(true, Ordering::Relaxed);
                 }
-                Err(ConverseError::Other(error)) => return Err(error),
+                Err(error) => return Err(error),
             }
         }
-        let outcome = lmstudio::converse_stream(
+        let outcome = self.tracked(
+            role,
             config,
-            &toolcall::text_messages(turns, tools),
-            None,
-            config.temperature,
-            config.max_tokens,
-            &self.cancel,
+            context::estimate_tokens(
+                &serde_json::json!(toolcall::text_messages(turns, tools)).to_string(),
+            ),
             on_delta,
+            |config, delta| {
+                lmstudio::converse_stream(
+                    config,
+                    &toolcall::text_messages(turns, tools),
+                    None,
+                    config.temperature,
+                    config.max_tokens,
+                    &self.cancel,
+                    delta,
+                )
+                .map(|outcome| {
+                    let usage = outcome.usage;
+                    (outcome, usage, String::new())
+                })
+                .map_err(anyhow::Error::from)
+            },
         )?;
         if outcome.finish == Finish::Cancelled {
             anyhow::bail!("已停止生成");
@@ -294,6 +461,176 @@ impl ModelBackend for LmBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn backend_for(url: &str, backup: Option<&str>) -> LmBackend {
+        let mut config = AppConfig::default();
+        config.lm_studio.base_url = url.into();
+        config.lm_studio.model = "主".into();
+        config.lm_studio.context_window = 32000;
+        let mut backend = LmBackend::new(&config, Arc::new(AtomicBool::new(false)));
+        backend.draft_backup = Ok(backup.map(|url| LmStudioConfig {
+            base_url: url.into(),
+            model: "备用".into(),
+            context_window: 32000,
+            ..config.lm_studio.clone()
+        }));
+        backend
+    }
+
+    fn answer(text: &str) -> String {
+        serde_json::json!({"choices":[{"message":{"content":text},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}).to_string()
+    }
+
+    #[test]
+    fn disconnected_primary_uses_backup_and_records_actual_model() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let primary = format!("http://{}/v1", port.local_addr().unwrap());
+        drop(port);
+        let (backup, server) = serve(vec![("200 OK", "application/json", answer("备用工作稿"))]);
+        let backend = backend_for(&primary, Some(&backup));
+        let result = backend
+            .complete_json(
+                ModelRole::Draft,
+                "s",
+                "u",
+                ("reply", serde_json::json!({"type":"object"})),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(result.content, "备用工作稿");
+        server.join().unwrap();
+        assert!(backend.take_notices()[0].contains("本次改用 备用"));
+        let usage = backend.usage();
+        assert_eq!(usage.calls.len(), 2);
+        assert_eq!(usage.draft_models(), ["备用"]);
+        assert_eq!(usage.calls[1].tokens.total_tokens, 13);
+    }
+
+    #[test]
+    fn server_failure_switches_only_this_call_and_next_call_retries_primary() {
+        let (primary, main_server) = serve(vec![
+            ("503 Service Unavailable", "application/json", "{}".into()),
+            ("200 OK", "application/json", answer("主稿")),
+        ]);
+        let (backup, backup_server) = serve(vec![("200 OK", "application/json", answer("备用稿"))]);
+        let backend = backend_for(&primary, Some(&backup));
+        assert_eq!(
+            backend
+                .complete(ModelRole::Draft, "s", "u", &mut |_| {})
+                .unwrap()
+                .content,
+            "备用稿"
+        );
+        assert_eq!(
+            backend
+                .complete(ModelRole::Draft, "s", "u", &mut |_| {})
+                .unwrap()
+                .content,
+            "主稿"
+        );
+        main_server.join().unwrap();
+        backup_server.join().unwrap();
+        assert_eq!(backend.usage().draft_models(), ["备用", "主"]);
+    }
+
+    #[test]
+    fn client_errors_and_partial_content_or_reasoning_never_use_backup() {
+        for body in [None, Some("content"), Some("reasoning_content")] {
+            let standby = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            standby.set_nonblocking(true).unwrap();
+            let backup = format!("http://{}/v1", standby.local_addr().unwrap());
+            let responses = if let Some(channel) = body {
+                vec![(
+                    "200 OK",
+                    "text/event-stream",
+                    format!("data: {{\"choices\":[{{\"delta\":{{\"{channel}\":\"开头\"}}}}]}}\n\n"),
+                )]
+            } else {
+                vec![
+                    ("400 Bad Request", "application/json", "{}".into()),
+                    ("400 Bad Request", "application/json", "{}".into()),
+                ]
+            };
+            let (primary, server) = serve(responses);
+            let backend = backend_for(&primary, Some(&backup));
+            let error = backend
+                .complete(ModelRole::Draft, "s", "u", &mut |_| {})
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(if body.is_some() {
+                "断开连接"
+            } else {
+                "400"
+            }));
+            server.join().unwrap();
+            assert!(standby.accept().is_err(), "备用未收到请求");
+            assert!(backend.take_notices().is_empty());
+        }
+    }
+
+    #[test]
+    fn no_backup_and_failed_backup_preserve_primary_error() {
+        for backup in [None, Some("http://127.0.0.1:1/v1")] {
+            let (primary, server) = serve(vec![(
+                "503 Service Unavailable",
+                "application/json",
+                "primary unavailable".into(),
+            )]);
+            let backend = backend_for(&primary, backup);
+            let error = backend
+                .complete(ModelRole::Draft, "s", "u", &mut |_| {})
+                .unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("503"));
+            assert_eq!(message.contains("也失败"), backup.is_some());
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn context_overflow_and_cancellation_do_not_use_backup() {
+        let backend = backend_for("http://127.0.0.1:1/v1", Some("http://127.0.0.1:2/v1"));
+        let overflow = context::local_overflow(backend.window(ModelRole::Draft), 999999);
+        assert!(!backend.can_fallback(&anyhow::Error::new(overflow), false));
+        backend.cancel.store(true, Ordering::Relaxed);
+        let error = anyhow::Error::new(lmstudio::HttpFailure(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "停机".into(),
+        ));
+        assert!(!backend.can_fallback(&error, false));
+    }
+
+    #[test]
+    fn converse_assist_uses_its_backup_and_accumulates_usage() {
+        let (primary, main_server) = serve(vec![(
+            "503 Service Unavailable",
+            "application/json",
+            "{}".into(),
+        )]);
+        let (backup, backup_server) =
+            serve(vec![("200 OK", "application/json", answer("复核答复"))]);
+        let mut backend = backend_for(&primary, Some(&backup));
+        backend.assist_backup = backend.draft_backup.clone();
+        let reply = backend
+            .converse(
+                ModelRole::Assist,
+                &[Turn::User("复核".into())],
+                &[],
+                Protocol::Text,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(reply.content, "复核答复");
+        assert_eq!(backend.usage().calls.len(), 2);
+        assert!(
+            backend
+                .usage()
+                .calls
+                .iter()
+                .all(|call| call.role == ModelRole::Assist)
+        );
+        main_server.join().unwrap();
+        backup_server.join().unwrap();
+    }
 
     #[test]
     fn assist_falls_back_to_the_draft_model_with_zero_temperature() {

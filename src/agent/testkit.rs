@@ -16,8 +16,44 @@ use std::cell::RefCell;
 
 type Responder = Box<dyn Fn(ModelRole, &str) -> String>;
 
+#[test]
+fn skill_usage_accumulates_before_and_after_answering() {
+    let skill = super::skill::parse("usage", "---\nname: 用量\ntools: [llm.generate, ask.choice]\nflow:\n  - step: generate\n    prompt: 正文\n  - tool: ask.choice\n    args: { question: 继续吗？, options: [继续, 停止] }\n  - step: generate\n    prompt: 正文\n---\n## 正文\n请写工作稿。\n", "测试").unwrap();
+    for reported in [false, true] {
+        let mut model = ScriptedModel::new(|_, _| "工作稿。".into());
+        if reported {
+            model = model.with_usage(crate::lmstudio::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 3,
+                total_tokens: 13,
+            });
+        }
+        let kb = KeywordKb::disabled();
+        let mut driver = Driver::new(&skill, &model, &kb, Board::default());
+        let suspended = driver.run().expect("中间提问挂起");
+        assert_eq!(model.usage().calls.len(), 1);
+        driver.answer(&suspended, &[(suspended.questions[0].id, Reply::Choice(0))]);
+        assert!(driver.run().is_none());
+        let totals = model.usage();
+        assert_eq!(totals.calls.len(), 2);
+        assert_eq!(totals.calls.iter().any(|c| c.estimated), !reported);
+        if reported {
+            assert_eq!(
+                totals
+                    .calls
+                    .iter()
+                    .map(|c| c.tokens.total_tokens)
+                    .sum::<u64>(),
+                26
+            );
+        }
+    }
+}
+
 /// 按提示词内容决定怎么回的假模型，记下每次被问了什么。
 pub(crate) struct ScriptedModel {
+    usage: RefCell<super::backend::UsageTotals>,
+    reported_usage: Option<crate::lmstudio::Usage>,
     respond: Responder,
     pub(crate) calls: RefCell<Vec<(ModelRole, String)>>,
     /// 假装的上下文窗口（token）。
@@ -27,6 +63,8 @@ pub(crate) struct ScriptedModel {
 impl ScriptedModel {
     pub(crate) fn new(respond: impl Fn(ModelRole, &str) -> String + 'static) -> Self {
         Self {
+            usage: RefCell::new(Default::default()),
+            reported_usage: None,
             respond: Box::new(respond),
             calls: RefCell::new(Vec::new()),
             window: crate::lmstudio::context::DEFAULT_WINDOW,
@@ -36,6 +74,11 @@ impl ScriptedModel {
     /// 换一个上下文窗口，测装箱用。
     pub(crate) fn with_window(mut self, tokens: usize) -> Self {
         self.window = tokens;
+        self
+    }
+
+    pub(crate) fn with_usage(mut self, usage: crate::lmstudio::Usage) -> Self {
+        self.reported_usage = Some(usage);
         self
     }
 
@@ -60,15 +103,27 @@ impl ScriptedModel {
 }
 
 impl ModelBackend for ScriptedModel {
+    fn usage(&self) -> super::backend::UsageTotals {
+        self.usage.borrow().clone()
+    }
     fn complete(
         &self,
         role: ModelRole,
-        _system: &str,
+        system: &str,
         user: &str,
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Completion> {
         self.calls.borrow_mut().push((role, user.to_string()));
         let reply = (self.respond)(role, user);
+        self.usage.borrow_mut().record(
+            role,
+            "脚本模型",
+            crate::lmstudio::context::estimate_tokens(system)
+                + crate::lmstudio::context::estimate_tokens(user),
+            &reply,
+            self.reported_usage,
+            0,
+        );
         on_delta(StreamDelta::Content(&reply));
         Ok(Completion {
             content: reply,

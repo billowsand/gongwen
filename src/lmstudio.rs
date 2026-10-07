@@ -9,7 +9,7 @@ pub mod context;
 mod converse;
 mod stream;
 pub use context::ContextOverflow;
-pub use converse::{ConverseError, converse_stream};
+pub use converse::converse_stream;
 pub use stream::{Finish, StreamDelta, generate_stream};
 
 #[derive(Debug, Deserialize)]

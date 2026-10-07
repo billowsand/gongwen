@@ -641,6 +641,14 @@ fn turn_card(
         }
         _ => {}
     }
+    if !turn.state.running() {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(turn.usage.label(turn.elapsed()))
+                .small()
+                .color(theme::text_muted()),
+        );
+    }
 }
 
 /// 审核类技能的问题清单：按分组列出，有改法的注明已进审校抽屉。不改稿。

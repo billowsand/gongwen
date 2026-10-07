@@ -22,6 +22,10 @@ use std::time::{Duration, Instant};
 mod composer_ui;
 mod history;
 mod mention;
+#[cfg(test)]
+mod provenance;
+#[cfg(test)]
+pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
 mod session_ui;
 mod skill_job;
@@ -131,6 +135,10 @@ impl TurnState {
 /// 任务流里的一轮。
 #[derive(Debug)]
 pub(crate) struct AiTurn {
+    /// 用量回投所属的后台任务；停止后仍可记录，不能串到新任务或另一会话。
+    pub(crate) usage_job_seq: Option<u64>,
+    pub(crate) provenance: String,
+    pub(crate) usage: crate::agent::backend::UsageTotals,
     pub(crate) id: u64,
     /// 卡片抬头：「润色 · 精简篇幅」。
     pub(crate) title: String,
@@ -173,6 +181,13 @@ pub(crate) struct AiTurn {
 }
 
 impl AiTurn {
+    pub(crate) fn resume(&mut self) {
+        self.started = Instant::now()
+            .checked_sub(self.elapsed())
+            .unwrap_or_else(Instant::now);
+        self.elapsed = None;
+        self.state = TurnState::Waiting;
+    }
     pub(crate) fn elapsed(&self) -> Duration {
         self.elapsed.unwrap_or_else(|| self.started.elapsed())
     }
@@ -213,6 +228,24 @@ pub(crate) struct AiPanel {
 }
 
 impl AiPanel {
+    /// 用量是只读记录，允许停止后的原任务补回；任务产物仍走原有的过期检查。
+    pub(crate) fn record_usage(
+        &mut self,
+        id: u64,
+        seq: u64,
+        usage: crate::agent::backend::UsageTotals,
+    ) -> bool {
+        let Some(turn) = self
+            .turn_mut(id)
+            .filter(|turn| turn.usage_job_seq == Some(seq))
+        else {
+            return false;
+        };
+        turn.usage.append(usage);
+        turn.usage_job_seq = None;
+        true
+    }
+
     /// 新开一轮。之前还挂着的提案随之作废——新任务会把 `ai_proposal` 清掉。
     pub(crate) fn push_turn(
         &mut self,
@@ -228,6 +261,9 @@ impl AiPanel {
         }
         self.next_id += 1;
         self.turns.push(AiTurn {
+            usage_job_seq: None,
+            provenance: String::new(),
+            usage: Default::default(),
             id: self.next_id,
             title,
             prompt,
@@ -595,6 +631,39 @@ mod tests {
         // 没有在跑的轮次时，迟到的增量直接丢掉。
         panel.append("迟到", "", false);
         assert!(panel.turns[0].content.is_empty());
+    }
+
+    #[test]
+    fn stopped_usage_returns_to_its_original_turn_without_touching_new_tasks() {
+        let mut panel = AiPanel::default();
+        let first = panel.push_turn("起草".into(), "写稿".into(), vec![], None);
+        panel.turns[0].usage_job_seq = Some(4);
+        panel.finish(TurnState::Stopped);
+        panel.push_turn("起草".into(), "另写".into(), vec![], None);
+        panel.turns[1].usage_job_seq = Some(5);
+        let mut usage = crate::agent::backend::UsageTotals::default();
+        usage.record(
+            crate::agent::backend::ModelRole::Draft,
+            "m",
+            10,
+            "半稿",
+            None,
+            1,
+        );
+        assert!(panel.record_usage(first, 4, usage.clone()));
+        assert_eq!(panel.turns[0].usage.calls.len(), 1);
+        assert_eq!(panel.turns[0].state, TurnState::Stopped);
+        assert!(panel.turns[1].usage.calls.is_empty());
+        assert!(
+            !panel.record_usage(first, 4, usage.clone()),
+            "重复回投不重复计数"
+        );
+        panel.turns[1].id = first;
+        panel.turns.remove(0);
+        assert!(
+            !panel.record_usage(first, 4, usage),
+            "编号相同的另一会话不能收旧任务记录"
+        );
     }
 
     #[test]
