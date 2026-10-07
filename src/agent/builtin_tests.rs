@@ -1102,3 +1102,240 @@ fn retrievable_gaps_the_knowledge_base_cannot_fill_are_generalized_not_asked() {
     let report = SkillReport::from_board(&driver.board);
     assert!(report.questions.is_empty(), "概括过的不再问");
 }
+
+/// 连真实模型与真实 SQLite 跑一遍检查点（内核加固第 4 期联机验收）：
+/// 跑到一半停掉（模拟崩溃），从库里的检查点接着跑完，产出工作稿。
+///
+/// 环境变量同 [`live_builtin_skill`]。`GONGWEN_LIVE_STOP_AFTER`：在前 N 份检查点之后
+/// 主动放弃本次运行（模拟进程被杀），再从最新一份恢复。
+#[test]
+#[ignore = "需要真实模型与知识库"]
+fn live_checkpoint_resume_after_an_interruption() {
+    use super::checkpoint::{Checkpoint, CheckpointSink, Reason};
+    use super::engine::{self, Event, Outcome};
+    use crate::manuscript::ai_sessions::AiSessionRecord;
+    use crate::manuscript::{ManuscriptStore, NewManuscript};
+
+    let env = |key: &str| std::env::var(key).unwrap_or_default();
+    if env("GONGWEN_LIVE_LLM_URL").is_empty() || env("GONGWEN_LIVE_KB_DIR").is_empty() {
+        eprintln!("未设置联机测试的环境变量，跳过");
+        return;
+    }
+    crate::storage::set_test_config_dir(Some(env("GONGWEN_LIVE_KB_DIR").into()));
+    let mut config = crate::models::AppConfig::default();
+    config.lm_studio.base_url = env("GONGWEN_LIVE_LLM_URL");
+    config.lm_studio.model = env("GONGWEN_LIVE_LLM_MODEL");
+    config.lm_studio.api_key = env("GONGWEN_LIVE_LLM_KEY");
+    config.lm_studio.timeout_seconds = 300;
+    let rag = crate::models::RagConfig {
+        enabled: true,
+        embedding: crate::models::EmbeddingConfig {
+            base_url: env("GONGWEN_LIVE_EMBED_URL"),
+            model: env("GONGWEN_LIVE_EMBED_MODEL"),
+            api_key: env("GONGWEN_LIVE_EMBED_KEY"),
+            ..Default::default()
+        },
+        rerank: crate::models::RerankConfig {
+            mode: crate::models::RerankMode::None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let kb = crate::agent::tools::RagSearch {
+        enabled: true,
+        rag: rag.clone(),
+        chat: config.lm_studio.clone(),
+        kind_filter: None,
+    };
+
+    // 稿件、会话与这一轮先入库：检查点的外键挂在轮次上。
+    let db = crate::storage::manuscript_db_path().expect("稿件库路径");
+    let session_id = "live-ckpt-session".to_string();
+    {
+        let mut store = ManuscriptStore::open(&db).expect("打开稿件库");
+        let manuscript = store
+            .create(&NewManuscript::default(), None)
+            .expect("建稿件");
+        let record = AiSessionRecord {
+            id: session_id.clone(),
+            title: "联机检查点".into(),
+            is_current: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+            ..AiSessionRecord::default()
+        };
+        store
+            .save_ai_session(manuscript, &record, &[(1, "{}".into())], &[1])
+            .expect("存会话与轮次");
+    }
+
+    let skill = builtin(POLICY_REPORT);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let model = crate::agent::backend::LmBackend::new(&config, cancel);
+    let time = crate::prompt::TimeContext::now();
+    let mut board = board(
+        TemplateKind::ResearchReport,
+        &env("GONGWEN_LIVE_TITLE"),
+        &env("GONGWEN_LIVE_REQUEST"),
+    );
+    board.system_prompt = crate::prompt::build_system_prompt(&time);
+    board.time_sources = format!("{} {}", time.today, time.now);
+
+    let apis = Default::default();
+    let secrets = Default::default();
+    let started = std::time::Instant::now();
+    let mut print = |event: Event| match event {
+        Event::Tool(tool) => eprintln!(
+            "[{:>5.1}s] {}",
+            started.elapsed().as_secs_f32(),
+            tool.line()
+        ),
+        Event::Note(note) => eprintln!("        · {note}"),
+        _ => {}
+    };
+
+    // 第一遍：跑到第 N 份检查点就「崩」（放弃本次运行），检查点已经在库里。
+    let stop_after: usize = env("GONGWEN_LIVE_STOP_AFTER").parse().unwrap_or(3);
+    let sink = |ckpt: &Checkpoint| -> Result<(), String> {
+        let mut store = ManuscriptStore::open(&db).map_err(|e| format!("{e:#}"))?;
+        store
+            .save_run_checkpoint(
+                &session_id,
+                1,
+                &skill.id,
+                &crate::ai_panel::session::skill_hash(&skill),
+                true,
+                ckpt,
+            )
+            .map_err(|e| format!("{e:#}"))
+    };
+    struct CountSink<F: Fn(&Checkpoint) -> Result<(), String>> {
+        inner: F,
+        saved: std::cell::RefCell<Vec<Vec<usize>>>,
+    }
+    impl<F: Fn(&Checkpoint) -> Result<(), String>> CheckpointSink for CountSink<F> {
+        fn save(&self, ckpt: &Checkpoint) -> Result<(), String> {
+            (self.inner)(ckpt)?;
+            self.saved.borrow_mut().push(ckpt.at.clone());
+            Ok(())
+        }
+    }
+    let count = CountSink {
+        inner: sink,
+        saved: std::cell::RefCell::new(Vec::new()),
+    };
+    let no_sink = crate::agent::checkpoint::NoCheckpoint;
+    struct OnlyFirst<'a> {
+        inner: &'a dyn CheckpointSink,
+        left: std::cell::Cell<usize>,
+    }
+    impl CheckpointSink for OnlyFirst<'_> {
+        fn save(&self, ckpt: &Checkpoint) -> Result<(), String> {
+            if self.left.get() == 0 {
+                return Ok(());
+            }
+            self.left.set(self.left.get() - 1);
+            self.inner.save(ckpt)
+        }
+    }
+    let only_first = OnlyFirst {
+        inner: &count,
+        left: std::cell::Cell::new(stop_after),
+    };
+    let ckpt_env = crate::agent::tools::Env {
+        config: &config,
+        vocabulary: &[],
+        kb: &kb,
+        manuscripts: &crate::agent::tools::SqliteManuscripts,
+        model: &model,
+        skill: &skill,
+        apis: &apis,
+        secrets: &secrets,
+        ckpt: &only_first,
+    };
+    let outcome = engine::run(&mut board, &ckpt_env, &[], &mut print);
+    eprintln!(
+        "—— 第一遍 {:?} 后放弃（模拟崩溃）：{outcome:?}",
+        started.elapsed()
+    );
+
+    // 从库里取最新一份检查点，接着跑。
+    let store = ManuscriptStore::open(&db).expect("打开稿件库");
+    let latest = store
+        .latest_run_checkpoint(&session_id, 1)
+        .expect("读检查点")
+        .expect("应当有检查点");
+    eprintln!(
+        "检查点 {} 份；恢复位置 at={:?}（{}）",
+        store
+            .list_run_checkpoints(&session_id, 1)
+            .map(|list| list.len())
+            .unwrap_or(0),
+        latest.checkpoint.at,
+        latest.label
+    );
+    assert!(
+        matches!(latest.checkpoint.reason, Reason::Step | Reason::Ask),
+        "读回来的检查点要能续跑，实际 {:?}",
+        latest.checkpoint.reason
+    );
+    assert!(!count.saved.borrow().is_empty(), "第一遍至少落了一份检查点");
+
+    // 只读区按界面当前值重灌（红线 2），再从检查点接着跑。
+    let mut resumed = latest.checkpoint.board;
+    let at = latest.checkpoint.at.clone();
+    // 检索配置与第一遍相同（embedding 那几项第一遍是单独填的）。
+    let kb2 = crate::agent::tools::RagSearch {
+        enabled: true,
+        rag: rag.clone(),
+        chat: config.draft_chat().unwrap_or_default(),
+        kind_filter: None,
+    };
+    let resume_env = crate::agent::tools::Env {
+        config: &config,
+        vocabulary: &[],
+        kb: &kb2,
+        manuscripts: &crate::agent::tools::SqliteManuscripts,
+        model: &model,
+        skill: &skill,
+        apis: &apis,
+        secrets: &secrets,
+        ckpt: &no_sink,
+    };
+    // 有题就照第一遍那样作答，直到跑完。
+    let mut at = at;
+    loop {
+        match engine::run(&mut resumed, &resume_env, &at, &mut print).expect("恢复应当跑通") {
+            Outcome::Done => break,
+            Outcome::Suspended(suspension) => {
+                let replies: Vec<(usize, Reply)> = suspension
+                    .questions
+                    .iter()
+                    .map(|q| {
+                        eprintln!("  问：{}", q.text);
+                        (q.id, Reply::Choice(0))
+                    })
+                    .collect();
+                let kind = engine::apply_answers(
+                    &mut resumed,
+                    &suspension.questions,
+                    suspension.save_as.as_deref(),
+                    &replies,
+                );
+                if let Some(kind) = kind {
+                    resumed.draft.kind = kind;
+                }
+                at = suspension.checkpoint.at.clone();
+            }
+        }
+    }
+    let report = SkillReport::from_board(&resumed);
+    eprintln!(
+        "—— 恢复跑完 {:?}：工作稿 {} 字，证据 {} 段，题目 {} 道 ——",
+        started.elapsed(),
+        report.markdown.chars().count(),
+        report.evidence.items().len(),
+        report.questions.len()
+    );
+    assert!(!report.markdown.trim().is_empty(), "恢复后照样出稿");
+}
