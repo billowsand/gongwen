@@ -25,6 +25,7 @@ impl DraftPage<'_> {
         };
         let id = turn.id;
         let state = turn.state.clone();
+        let excluded_hunks = turn.excluded_hunks;
         let showing = panel.workspace_view == Some(id);
         ui.horizontal_wrapped(|ui| {
             if ui.selectable_label(!showing, "正文").clicked() {
@@ -35,7 +36,7 @@ impl DraftPage<'_> {
                 panel.workspace_compare = false;
             }
             if showing {
-                ui.weak(match &state {
+                let label = match &state {
                     TurnState::Waiting | TurnState::Streaming => "生成中",
                     TurnState::Checking => "检查中",
                     TurnState::Proposed(_) => "待采纳",
@@ -47,7 +48,13 @@ impl DraftPage<'_> {
                     TurnState::Discarded => "已放弃",
                     TurnState::Superseded | TurnState::Expired => "历史工作稿",
                     TurnState::Reported { .. } => "工作稿",
-                });
+                };
+                // 采纳时排除了几处的，在标签上看得出来。
+                if matches!(state, TurnState::Accepted) && excluded_hunks > 0 {
+                    ui.weak(format!("{label}（排除 {excluded_hunks} 处）"));
+                } else {
+                    ui.weak(label);
+                }
             }
         });
         ui.separator();

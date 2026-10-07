@@ -961,6 +961,56 @@ fn reinstalling_a_proposal_clears_exclusions() {
     assert!(proposal.result.markdown.contains("再改一版"));
 }
 
+/// 结果卡记录：接受后看得出排除了几处，追问历史也带这句话（内核加固第 2 期）。
+#[test]
+fn the_result_card_records_how_many_hunks_were_excluded() {
+    let before = "第一段原样。\n\n中间不变。\n\n第三段原样。";
+    let mut harness = Harness::new(before);
+    harness.doc.ai_panel.open = true;
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "润色".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: before.into(),
+        result: GeneratedDraft {
+            markdown: "第一段改。\n\n中间不变。\n\n第三段改。".into(),
+            title: "标题".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes: Vec::new(),
+        excluded: [0].into_iter().collect(),
+        fact_changes_confirmed: false,
+        confirmed_facts: Vec::new(),
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+
+    assert!(harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
+    let turn = &harness.doc.ai_panel.turns[0];
+    assert_eq!(turn.state, TurnState::Accepted);
+    assert_eq!(turn.excluded_hunks, 1);
+    let digest = crate::ai_panel::history::digest(1, turn).unwrap();
+    assert!(digest.contains("排除了 1 处改动"), "{digest}");
+
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "已写入正文（排除 1 处）"), "{texts:?}");
+}
+
 #[test]
 fn a_report_card_lists_findings_by_group_and_points_to_the_drawer() {
     use crate::agent::board::{Finding, Fix};

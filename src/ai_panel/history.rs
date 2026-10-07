@@ -26,7 +26,14 @@ pub(crate) fn digest(index: usize, turn: &AiTurn) -> Option<String> {
     let head = || short(turn.content.trim(), 300);
     let result = match &turn.state {
         TurnState::Proposed(_) => format!("交了提案，还没处理。提案开头：{}", head()),
-        TurnState::Accepted => format!("交了提案，你已接受写进正文。开头：{}", head()),
+        TurnState::Accepted => {
+            let excluded = if turn.excluded_hunks > 0 {
+                format!("（排除了 {} 处改动）", turn.excluded_hunks)
+            } else {
+                String::new()
+            };
+            format!("交了提案，你已接受写进正文{excluded}。开头：{}", head())
+        }
         TurnState::Discarded => format!("交了提案，你放弃了。开头：{}", head()),
         TurnState::Superseded | TurnState::Expired => {
             format!("交了提案，后来作废了。开头：{}", head())

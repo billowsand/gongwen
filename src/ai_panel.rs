@@ -143,6 +143,9 @@ pub(crate) struct AiTurn {
     pub(crate) state: TurnState,
     /// 模型正文（流式累加，未经清洗）。
     pub(crate) content: String,
+    /// 接受提案时用户排除了几处变更块；0 表示整篇接受（或提案尚未被接受）。
+    /// 随会话存进稿件库，追问时模型知道哪些改动没有落进正文。
+    pub(crate) excluded_hunks: usize,
     /// 明确产出稿件后，全文只在左侧 AI 工作稿展示。
     pub(crate) is_workspace: bool,
     /// 流式补写时留在插入位置之后的原文，不进入模型增量。
@@ -237,6 +240,7 @@ impl AiPanel {
             content: String::new(),
             is_workspace: false,
             stream_suffix: String::new(),
+            excluded_hunks: 0,
             reasoning: String::new(),
             phase: String::new(),
             notes: Vec::new(),
@@ -378,8 +382,9 @@ impl AiPanel {
         }
     }
 
-    /// 提案被接受或放弃（无论从结果卡还是旧审阅窗点的）。
-    pub(crate) fn resolve_proposal(&mut self, accepted: bool) {
+    /// 提案被接受或放弃（无论从结果卡还是旧审阅窗点的）。`excluded_hunks` 是
+    /// 接受时用户排除的变更块数，留在卡片与会话里给追问的模型看。
+    pub(crate) fn resolve_proposal(&mut self, accepted: bool, excluded_hunks: usize) {
         self.workspace_view = None;
         if let Some(turn) = self
             .turns
@@ -387,6 +392,7 @@ impl AiPanel {
             .rev()
             .find(|turn| matches!(turn.state, TurnState::Proposed(_)))
         {
+            turn.excluded_hunks = if accepted { excluded_hunks } else { 0 };
             turn.state = if accepted {
                 TurnState::Accepted
             } else {
@@ -605,7 +611,7 @@ mod tests {
         assert_eq!(panel.turns[0].state, TurnState::Superseded);
         // 已作废的提案不会被后来的接受误标。
         panel.finish(TurnState::Proposed(ProposalSummary::default()));
-        panel.resolve_proposal(true);
+        panel.resolve_proposal(true, 0);
         assert_eq!(panel.turns[0].state, TurnState::Superseded);
         assert_eq!(panel.turns[1].state, TurnState::Accepted);
     }

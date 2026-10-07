@@ -448,7 +448,12 @@ fn turn_card(
                 theme::chip(ui, "问题清单", theme::accent(), theme::accent_soft());
             }
             TurnState::Accepted => {
-                theme::chip(ui, "已写入正文", theme::success(), theme::success_soft());
+                let text = if turn.excluded_hunks > 0 {
+                    format!("已写入正文（排除 {} 处）", turn.excluded_hunks)
+                } else {
+                    "已写入正文".to_string()
+                };
+                theme::chip(ui, &text, theme::success(), theme::success_soft());
             }
             TurnState::Discarded => {
                 theme::chip(ui, "已放弃", theme::text_soft(), theme::surface_sunk());

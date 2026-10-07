@@ -44,6 +44,9 @@ pub(crate) struct SavedTurn {
     pub(crate) content: String,
     #[serde(default)]
     pub(crate) is_workspace: bool,
+    /// 接受提案时排除的变更块数；旧会话没有这个字段，按 0（整篇接受）读回。
+    #[serde(default)]
+    pub(crate) excluded_hunks: usize,
     #[serde(default)]
     pub(crate) reasoning: String,
     #[serde(default)]
@@ -135,6 +138,7 @@ impl SavedTurn {
             context: turn.context.clone(),
             request: turn.request.clone(),
             state: turn.state.clone(),
+            excluded_hunks: turn.excluded_hunks,
             content: turn.content.clone(),
             is_workspace: turn.is_workspace,
             reasoning,
@@ -215,6 +219,7 @@ impl SavedTurn {
             context: self.context,
             request: self.request,
             state,
+            excluded_hunks: self.excluded_hunks,
             content: self.content,
             is_workspace,
             stream_suffix: String::new(),
@@ -283,6 +288,7 @@ fn fingerprint(turn: &AiTurn, has_proposal: bool) -> u64 {
         "running".hash(&mut hasher);
     } else {
         format!("{:?}", turn.state).hash(&mut hasher);
+        turn.excluded_hunks.hash(&mut hasher);
         turn.content.len().hash(&mut hasher);
         turn.notes.len().hash(&mut hasher);
         turn.steps.len().hash(&mut hasher);
@@ -539,6 +545,7 @@ impl AiPanel {
 mod tests {
     use super::*;
     use crate::agent::clarify::{Action, Choice, Target};
+    use crate::ai_panel::ProposalSummary;
     use crate::manuscript::NewManuscript;
     use crate::models::ManuscriptStatus;
     use std::path::Path;
@@ -802,6 +809,7 @@ mod tests {
             request: None,
             state: TurnState::Asking,
             content: String::new(),
+            excluded_hunks: 0,
             is_workspace: false,
             reasoning: String::new(),
             notes: vec![],
@@ -829,5 +837,26 @@ mod tests {
         assert!(matches!(&turn.state, TurnState::Failed(why) if why.contains("不在了")));
         assert!(turn.run.is_none());
         assert_eq!(turn.elapsed, Some(Duration::from_millis(1200)));
+    }
+
+    /// 第 2 期前的会话没有 excluded_hunks 字段，按 0（整篇接受）读回；带排除数的
+    /// 新会话往返不丢（内核加固第 2 期）。
+    #[test]
+    fn excluded_hunks_survive_persistence_and_old_sessions_default_to_zero() {
+        let old = r#"{"id":1,"title":"润色","prompt":"改","state":"Accepted"}"#;
+        let saved: SavedTurn = serde_json::from_str(old).unwrap();
+        assert_eq!(saved.excluded_hunks, 0);
+        let (turn, _) = saved.restore(&[], false);
+        assert_eq!(turn.state, TurnState::Accepted);
+        assert_eq!(turn.excluded_hunks, 0);
+
+        let mut panel = AiPanel::default();
+        panel.push_turn("润色".into(), "改".into(), vec![], None);
+        panel.finish(TurnState::Proposed(ProposalSummary::default()));
+        panel.resolve_proposal(true, 2);
+        let json = serde_json::to_string(&SavedTurn::of(&panel.turns[0], None)).unwrap();
+        let saved: SavedTurn = serde_json::from_str(&json).unwrap();
+        let (turn, _) = saved.restore(&[], false);
+        assert_eq!(turn.excluded_hunks, 2);
     }
 }

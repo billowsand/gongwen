@@ -324,7 +324,7 @@ impl GongwenApp {
             // 没排除任何块：整篇接受，与原路径逐字节一致。
             let label = proposal.label.clone();
             GongwenApp::take_generated(doc, proposal.result);
-            doc.ai_panel.resolve_proposal(true);
+            doc.ai_panel.resolve_proposal(true, 0);
             *status = format!("已接受“{label}”修改提案。");
             return true;
         };
@@ -355,7 +355,7 @@ impl GongwenApp {
         let result = crate::draft_page::reviewed_draft(&doc.draft, config, &text, truncated);
         let label = proposal.label.clone();
         GongwenApp::take_generated(doc, result);
-        doc.ai_panel.resolve_proposal(true);
+        doc.ai_panel.resolve_proposal(true, excluded);
         *status = format!("已接受“{label}”修改提案（排除 {excluded} 处）。");
         true
     }
@@ -363,7 +363,7 @@ impl GongwenApp {
     /// 放弃 AI 提案，正文不变。
     pub(crate) fn discard_ai_proposal(doc: &mut DraftSession, status: &mut String) {
         if let Some(proposal) = doc.ai_proposal.take() {
-            doc.ai_panel.resolve_proposal(false);
+            doc.ai_panel.resolve_proposal(false, 0);
             *status = format!("已放弃“{}”修改提案，当前审校稿未改变。", proposal.label);
         }
     }
