@@ -1,7 +1,8 @@
 //! E 组：确定性检查。不改任何东西，结果给流程判断或交给用户。
 //!
 //! 默认检查工作稿（工作稿为空时检查正文）；给了 `text` 就检查那段文字。
-//! 排版实测（`check.layout`）要走 Typst 编译，第 ④ 期随管理界面一起加。
+//! 不做排版实测工具：真编译太慢，落地闸门（`reviewed_draft`）已对每份提案估算孤行
+//! （`docs/agent-kernel-hardening.md` 3.5）。
 
 use super::{Input, Permission, Tool, ToolCtx, ToolOutput, arg_str, optional, short};
 use crate::agent::gaps::{find_placeholders, sentence_at, untraced_facts};

@@ -164,7 +164,14 @@ pub fn generate_retrying(
     max_tokens: u32,
     options: ChatOptions,
 ) -> Result<String> {
-    match generate_with_options(config, system, user, temperature, max_tokens, options) {
+    match generate_with_options(
+        config,
+        system,
+        user,
+        temperature,
+        max_tokens,
+        options.clone(),
+    ) {
         Ok(text) => Ok(text),
         Err(first) => generate_with_options(config, system, user, temperature, max_tokens, options)
             .with_context(|| format!("重试前的首次失败：{first:#}")),
@@ -179,7 +186,7 @@ static THINKING_SWITCH_REJECTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// 一次补全的可选开关。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatOptions {
     /// 关掉思考型模型的推理输出。
     ///
@@ -187,6 +194,36 @@ pub struct ChatOptions {
     /// 空值。这个开关**由应用发出去**，不该要求用户自己去改服务端配置——
     /// 各家的关法都不一样，让用户去找等于把问题推回去。
     pub disable_thinking: bool,
+    /// 要求按这份 JSON Schema 输出（请求体的 `response_format`，`docs/agent-kernel-hardening.md` 3.4）。
+    /// 只在程序要解析模型输出的地方用；端点不认（4xx）时去掉重发，调用方照样能按文本约定解析。
+    pub json_schema: Option<(&'static str, serde_json::Value)>,
+}
+
+/// 拒收过 `response_format` 的「端点 + 模型」：本进程之后不再带它，免得每次白白被拒一回。
+static FORMAT_REJECTED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn format_key(config: &LmStudioConfig) -> String {
+    format!("{}|{}", config.base_url.trim(), config.model.trim())
+}
+
+/// 这个端点 + 模型拒收过 `response_format` 没有。
+pub(crate) fn format_rejected(config: &LmStudioConfig) -> bool {
+    FORMAT_REJECTED
+        .lock()
+        .map(|set| set.contains(&format_key(config)))
+        .unwrap_or(false)
+}
+
+fn reject_format(config: &LmStudioConfig) {
+    if let Ok(mut set) = FORMAT_REJECTED.lock() {
+        set.insert(format_key(config));
+    }
+}
+
+/// `response_format` 的请求体写法（OpenAI 兼容的 json_schema）。
+fn response_format(name: &str, schema: &serde_json::Value) -> serde_json::Value {
+    json!({"type": "json_schema", "json_schema": {"name": name, "schema": schema}})
 }
 
 /// 用指定的温度与输出上限跑一次对话补全。

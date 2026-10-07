@@ -770,6 +770,7 @@ pub fn review(
                                 max_tokens,
                                 lmstudio::ChatOptions {
                                     disable_thinking: true,
+                                    ..lmstudio::ChatOptions::default()
                                 },
                             )
                         },

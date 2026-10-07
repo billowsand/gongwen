@@ -519,6 +519,8 @@ AI；「自由任务」只经 `api.search` 访问只读且给 AI 用的接口；
   前 3 条用例的参数；调用前 `validate`（必填、多余参数、类型、枚举、数组元素与对象必填各一层，
   对象写成 JSON 字符串的先读出来），不合格不发请求，把错在哪、参数签名与正确示例回给模型。
   一次能用的接口超过 12 个时改成 `api_search` / `api_call` 两级（`ApiTools::Search`）。
+  （2026-10-07：自主步骤里这两个并进内置工具共用的 `tool_search` / `tool_call`，见
+  `docs/agent-kernel-hardening.md` 3.3；「说一句话让 AI 调」仍用 `api_search` / `api_call`。）
 - `ToolSpec` 加 `schema: Option<Value>`，原生协议有就原样发；内置工具仍为 `None`，留给
   `docs/agent-kernel-hardening.md` 第 1 期逐个补，两边不冲突。`wire_name` 遇到中文或超过 64 字符时
   截短加 id 的哈希，中文接口 id 不再撞名。

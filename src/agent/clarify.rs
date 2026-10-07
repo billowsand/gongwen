@@ -86,12 +86,79 @@ pub(crate) enum Reply {
 /// 问题不超过这么多字，长了多半是模型在解释而不是在出题。
 const MAX_QUESTION_CHARS: usize = 40;
 
-/// 解析模型出的澄清题：每行「问题｜选项1｜选项2…」，2–4 个选项。
+/// 要 JSON 时附在澄清提示词末尾的一句。端点支持 `response_format` 时格式由服务端保证，这句是给
+/// 不支持的端点看的；两种回法 [`parse_model_questions`] 都认。
+pub(crate) const JSON_HINT: &str = "也可以按 JSON 输出：{\"questions\": [{\"question\": \"…\", \"options\": [\"…\", \"…\"]}]}，\
+     不需要问时 questions 给空数组。";
+
+/// 澄清题的 JSON Schema（`response_format` 用）。
+pub(crate) fn questions_schema() -> (&'static str, serde_json::Value) {
+    (
+        "clarify_questions",
+        serde_json::json!({
+            "type": "object",
+            "properties": {"questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "options": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 4,
+                        },
+                    },
+                    "required": ["question", "options"],
+                },
+            }},
+            "required": ["questions"],
+        }),
+    )
+}
+
+/// JSON 回法（`{"questions": [{"question", "options"}]}`，可以包在 ```json 代码块里）→ 一行一题的
+/// 文本回法，好走同一道闸门。不是这种 JSON 返回 None。
+fn json_question_lines(reply: &str) -> Option<Vec<String>> {
+    let body = reply.trim();
+    let body = body
+        .strip_prefix("```json")
+        .or_else(|| body.strip_prefix("```"))
+        .and_then(|rest| rest.trim_end().strip_suffix("```"))
+        .unwrap_or(body)
+        .trim();
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let items = value.get("questions")?.as_array()?;
+    Some(
+        items
+            .iter()
+            .map(|item| {
+                let question = item.get("question").and_then(|q| q.as_str()).unwrap_or("");
+                let options: Vec<String> = item
+                    .get("options")
+                    .and_then(|o| o.as_array())
+                    .into_iter()
+                    .flatten()
+                    .map(super::board::value_to_text)
+                    .collect();
+                std::iter::once(question.to_string())
+                    .chain(options)
+                    .collect::<Vec<_>>()
+                    .join("｜")
+            })
+            .collect(),
+    )
+}
+
+/// 解析模型出的澄清题：JSON（[`questions_schema`]），或每行「问题｜选项1｜选项2…」，2–4 个选项。
 ///
 /// 闸门：问题过长、选项数不对、选项为空或重复的整题丢弃；模型说「无」就是没有题。
 pub(crate) fn parse_model_questions(reply: &str, max: usize) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
-    for line in reply.lines() {
+    let lines =
+        json_question_lines(reply).unwrap_or_else(|| reply.lines().map(str::to_string).collect());
+    for line in &lines {
         let line = strip_numbering(line.trim());
         if line.is_empty() || line == "无" {
             continue;
@@ -697,6 +764,33 @@ mod tests {
         // 抄了格式示例的不算题。
         assert!(parse_model_questions("问题｜选项1｜选项2｜选项3", 3).is_empty());
         assert!(parse_model_questions("受文对象？｜选项1｜选项2", 3).is_empty());
+    }
+
+    #[test]
+    fn json_questions_go_through_the_same_gate() {
+        let reply = r#"{"questions": [
+            {"question": "受文对象是谁", "options": ["各区县政府", "市直各部门"]},
+            {"question": "只有一个选项", "options": ["甲"]},
+            {"question": "篇幅多长？", "options": ["500 字以内", "1000 字左右"]}
+        ]}"#;
+        let parsed = parse_model_questions(reply, 3);
+        assert_eq!(parsed.len(), 2, "选项数不对的照样丢");
+        assert_eq!(parsed[0].0, "受文对象是谁？");
+        assert_eq!(parsed[0].1, ["各区县政府", "市直各部门"]);
+        let fenced = "```json
+{\"questions\": [{\"question\": \"篇幅？\", \"options\": [\"短\", \"长\"]}]}
+```";
+        assert_eq!(
+            parse_model_questions(fenced, 3).len(),
+            1,
+            "包在代码块里也认"
+        );
+        assert!(parse_model_questions(r#"{"questions": []}"#, 3).is_empty());
+        let schema = questions_schema().1;
+        assert_eq!(
+            schema["properties"]["questions"]["items"]["required"],
+            serde_json::json!(["question", "options"])
+        );
     }
 
     #[test]

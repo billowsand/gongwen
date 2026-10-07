@@ -67,15 +67,30 @@ pub fn generate_stream(
 ) -> anyhow::Result<StreamOutcome> {
     let with_switch = options.disable_thinking && !THINKING_SWITCH_REJECTED.load(Ordering::Relaxed);
     let input = context::estimate_tokens(system) + context::estimate_tokens(user);
+    let format = options
+        .json_schema
+        .as_ref()
+        .map(|(name, schema)| super::response_format(name, schema));
     within_window(config, input, max_tokens, |limit| {
-        let request = StreamRequest {
+        let mut request = StreamRequest {
             config,
             system,
             user,
             temperature,
             max_tokens: limit,
+            response_format: format.as_ref().filter(|_| !super::format_rejected(config)),
         };
-        match stream_once(&request, with_switch, cancel, &mut on_delta) {
+        let first = stream_once(&request, with_switch, cancel, &mut on_delta);
+        // 带了 `response_format` 被 4xx 拒：先去掉它重发（记下这个端点不认），调用方按文本约定解析。
+        let first = match first {
+            Err(ChatError::Rejected(_)) if request.response_format.is_some() => {
+                super::reject_format(config);
+                request.response_format = None;
+                stream_once(&request, with_switch, cancel, &mut on_delta)
+            }
+            other => other,
+        };
+        match first {
             Err(ChatError::Rejected(error)) if with_switch => {
                 THINKING_SWITCH_REJECTED.store(true, Ordering::Relaxed);
                 stream_once(&request, false, cancel, &mut on_delta)
@@ -93,6 +108,7 @@ struct StreamRequest<'a> {
     user: &'a str,
     temperature: f32,
     max_tokens: u32,
+    response_format: Option<&'a serde_json::Value>,
 }
 
 fn stream_once(
@@ -105,7 +121,7 @@ fn stream_once(
     if config.model.trim().is_empty() {
         return Err(ChatError::Other(anyhow!("请先在设置中选择模型")));
     }
-    let payload = chat_payload(
+    let mut payload = chat_payload(
         config,
         request.system,
         request.user,
@@ -114,6 +130,9 @@ fn stream_once(
         disable_thinking,
         true,
     );
+    if let Some(format) = request.response_format {
+        payload["response_format"] = format.clone();
+    }
     let client = crate::net::stream_client(&config.base_url, config.timeout_seconds)
         .map_err(ChatError::Other)?;
     let mut http = client
@@ -522,6 +541,51 @@ mod tests {
             bodies
         });
         (format!("http://127.0.0.1:{port}/v1"), handle)
+    }
+
+    /// 要 JSON 时带 `response_format`；端点 4xx 拒收就去掉重发，并记住这个端点，之后不再带。
+    #[test]
+    fn a_rejected_response_format_is_dropped_and_remembered() {
+        let error = r#"{"error":"unknown field: response_format"}"#;
+        let rejected = format!(
+            "HTTP/1.1 400 Bad Request
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{error}",
+            error.len()
+        );
+        let reply = || sse_response(&[&delta("好"), "data: [DONE]"]);
+        let (url, server) = fake_server_seq(vec![rejected, reply(), reply()]);
+        let config = config(url);
+        let options = || super::super::ChatOptions {
+            json_schema: Some(("q", serde_json::json!({"type": "object"}))),
+            ..super::super::ChatOptions::default()
+        };
+        for _ in 0..2 {
+            let outcome = generate_stream(
+                &config,
+                "S",
+                "U",
+                0.2,
+                100,
+                options(),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(outcome.content, "好");
+        }
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies[0]["response_format"]["type"], "json_schema");
+        assert_eq!(bodies[0]["response_format"]["json_schema"]["name"], "q");
+        assert!(bodies[1].get("response_format").is_none(), "被拒后去掉重发");
+        assert!(
+            bodies[2].get("response_format").is_none(),
+            "记住了，不再白试"
+        );
+        assert!(super::super::format_rejected(&config));
     }
 
     /// 32k 窗口的服务上，输出上限按剩余空间现算，不再是「输入 + 32000」必然超限；

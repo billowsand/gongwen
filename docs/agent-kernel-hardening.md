@@ -649,16 +649,41 @@ flow:
 
 ## 十二、交接
 
-**进度**：0 / 5 期。本文是方案，代码未动。
+**进度**：1 / 5 期。第 1 期（工具契约）已完成（2026-10-07），**待真机验收**（3.6 第 5 条：内网
+DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起草，对比工具调用出错次数）。
 
-**下一步**：第 1、2、3 期可以并行，建议先做第 1 期——
+### 第 1 期交付了什么
 
-1. 先把 `apidef::tooling` 的校验、签名、示例抽成吃 `&Value` schema 的通用函数，`apidef` 测试
-   照过，单独提交；
-2. `Input` 加 `kind` / `example`（默认值保持行为不变），schema 带上 `type`，单独提交；
-3. 逐工具迁成强类型参数，每个工具一个提交；
-4. 两级访问与元工具合并；
-5. 结构化输出两处；`check.layout` 二选一。
+| 方案 | 落点 |
+|---|---|
+| 3.1 参数类型 | `tools::ArgKind`（文字 / 整数 / 数字 / 真假 / 文字列表 / 数字列表 / 枚举 / 文种）；`Input::of(kind)`；`tools::schema(tool)` 出带 `type` / `enum` 的 JSON Schema；签名与报错拼法抽到 `agent::argcheck`，接口与内置工具共用 |
+| 3.2 出错自纠 | `tools::check_args`：必填、类型，模型调用另查多余参数；报错 = 错在哪 + 参数签名 + 工具示例 + 「请改好再调」；任务流里只留「错在哪」 |
+| 3.3 两级访问 | `ops/catalog.rs`：工具（内置 + 接口）超过 24 个、或接口超过 12 个时，常用工具直给，其余经 `tool_search` / `tool_call`；步骤可写 `direct: [...]` |
+| 3.4 结构化输出 | `ChatOptions::json_schema` → 请求体 `response_format`；`ModelBackend::complete_json`；澄清题要 JSON，`parse_model_questions` 两种回法都认 |
+| 3.5 `check.layout` | 二选一定为**删掉**：从 `ai-agent-workbench.md` 16.3 删除。理由：真编译太慢，且落地闸门 `reviewed_draft` 已对每份提案跑 `estimate_layout_notes` |
+
+### 与方案的出入
+
+1. **没复用 `api.rs` 的 `InputKind`，另立 `ArgKind`**：内置工具要整数、列表、枚举、文种，`InputKind`
+   只有文字 / 数字 / 真假 / JSON。
+2. **两边只共用签名与报错格式，不共用校验**：接口按 OpenAPI schema 严格查（参数原样发给服务端）；
+   内置工具按工具自己读参数的 `arg_*` 宽松规则查（`"30"` 算整数、`"1、2，3"` 算数字列表、
+   `"是"` 算真），保证「校验过了工具就读得懂」，也不会把现有技能流程里的宽松写法判成错。
+3. **示例是工具级的一条，不是每个输入一条**：`Tool::example()` 返回一次正确调用的 JSON；测试拿它
+   过一遍自己的校验，示例和 schema 不会各说各的。
+4. **没做「逐工具迁成强类型 `Args` 反序列化」**：边界上的校验用的就是工具读参数的同一套函数，再加
+   `#[derive(Deserialize)] struct Args` 不增加保证，反而丢掉宽松读法。需要时再议。
+5. **多余参数只在模型调用时查**（`tools::Caller::Model`）。技能流程里 `tool:` 步骤的拼错参数名由
+   `skill::validate` 在存盘时报，运行时不拦，免得已有用户技能因此整步失败。
+6. **`direct:` 写在自主步骤上，不是技能 frontmatter**：与同一步骤的 `tools:` 放在一起。
+7. **`tool_search` 不计入 `max_calls`**：它只是翻目录，轮数上限照样管着它；`tool_call` 照常计数。
+8. **结构化输出只落在澄清题一处**：`finish` 的 `summary` 本来就是工具参数，现在带 schema，已经是
+   结构化的，不必再走 `response_format`。端点拒收的记忆按「base_url + 模型名」存在进程内
+   （`lmstudio::format_rejected`），没有接设置页「测试工具调用」那套缓存。
+9. **搜索打分改了**（接口搜索也受影响）：整词命中加倍，两字一组的兜底匹配过半才给 1 分。原来
+   「工作日」会因为「工作」二字跟所有写「工作稿」的工具打平。
+
+**下一步**：第 2 期（提案逐块接受）或第 3 期（用量、留痕、备用模型），两者独立。
 
 第 4 期开工时的顺序建议：先 6.1 的数据模型与 `StepPath` 改造（纯类型改动，一次编译通过），再
 6.2 的 `CheckpointSink` 钩子（`Env` 加字段，`testkit` 加内存实现），再 6.3 的表与保留策略，最后
@@ -666,8 +691,12 @@ flow:
 
 **已知坑**：
 
-- 第 1 期：接口工具名有 `wire_name` 的 ASCII 化与截短加哈希（`docs/api-workbench.md` 第十二节），
-  元工具合并后 `tool_call` 的参数里写的是哪种名字要定清，建议统一用 `wire_name`。
+- 第 1 期（已处理）：`tool_call` 的 `tool` 填搜索结果里列出的名字——内置工具写 id（`calc.date`，
+  模型名 `calc_date` 也认），接口写 `http.call:<接口 id>`（原 id，不是 `wire_name`，中文 id 照写）。
+- 第 1 期：新增工具时要给 `example()`、给非文字输入标 `.of(ArgKind::…)`；测试
+  `every_tool_with_inputs_has_a_typed_schema_and_an_example_that_passes_its_own_check` 会拦。
+- 第 1 期：`ArgKind::OneOf` 比工具原来的读法严格的地方要留意——`ms.search` 的 `status` 原来也认
+  `Draft` 这类英文名，现在只认「新建 / 草稿 / 已发布 / 已归档」。内置技能都没用英文写法。
 - 第 2 期：审阅窗的块（`DiffBlock::Changed`）与 `diff_hunks::Hunk` 不是一一对应，一个 hunk 可能
   盖几条变更，开关挂在 hunk 上。提案在已完成后还会被继续修订（`install_ai_proposal` 的注释），
   `excluded` 要随之清空。

@@ -1,7 +1,8 @@
 //! 动笔之前：澄清、预研、检索。
 
 use super::{
-    Flow, assist, check_cancel, fetch_into, has_sources, note, param, phase, prompt, tool_line,
+    Flow, assist, assist_json, check_cancel, fetch_into, has_sources, note, param, phase, prompt,
+    tool_line,
 };
 use crate::agent::skill::StepSpec;
 use crate::agent::tools::{Permission, ToolCtx};
@@ -42,7 +43,9 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
             ("request", ctx.board.request_with_notes()),
         ];
         let text = prompt(ctx, step, "prompt", "动笔前澄清", &locals)?;
-        let reply = assist(ctx, &text)?;
+        // 要 JSON（端点支持就由服务端保证格式）；不支持时模型照提示词写「问题｜选项」，两种都认。
+        let text = format!("{text}\n\n{}", clarify::JSON_HINT);
+        let reply = assist_json(ctx, &text, clarify::questions_schema())?;
         let parsed = clarify::parse_model_questions(&reply, max);
         questions =
             clarify::predraft_questions(&ctx.board.request, ctx.board.draft.kind, parsed, max);

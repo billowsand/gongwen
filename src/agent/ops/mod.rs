@@ -193,6 +193,28 @@ fn assist(ctx: &mut ToolCtx<'_, '_>, prompt: &str) -> anyhow::Result<String> {
     Ok(completion.content.trim().to_string())
 }
 
+/// 同 [`assist`]，但要求按 `schema` 输出 JSON；端点不认时就是普通补全，调用方两种都要能解析。
+fn assist_json(
+    ctx: &mut ToolCtx<'_, '_>,
+    prompt: &str,
+    schema: (&'static str, Value),
+) -> anyhow::Result<String> {
+    check_cancel(ctx)?;
+    let emit = &mut *ctx.emit;
+    let completion = ctx.env.model.complete_json(
+        ModelRole::Assist,
+        ASSIST_SYSTEM,
+        prompt,
+        schema,
+        &mut |delta| {
+            if let StreamDelta::Reasoning(text) = delta {
+                emit(Event::Reasoning(text.to_string()));
+            }
+        },
+    )?;
+    Ok(completion.content.trim().to_string())
+}
+
 /// 检索知识库并把结果并入证据包，返回每段的 (证据键, 编号)。失败只留说明，不中断流程。
 fn search_into(ctx: &mut ToolCtx<'_, '_>, query: &str) -> Vec<(String, usize)> {
     match ctx.env.kb.search(query) {

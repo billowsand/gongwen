@@ -38,6 +38,19 @@ pub(crate) trait ModelBackend {
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Completion>;
 
+    /// 同 [`complete`](Self::complete)，但要求按 `schema` 输出 JSON（`response_format`）。端点不认时
+    /// 退回普通补全，所以调用方**必须**同时能按文本约定解析。默认实现就是普通补全（脚本模型）。
+    fn complete_json(
+        &self,
+        role: ModelRole,
+        system: &str,
+        user: &str,
+        _schema: (&'static str, Value),
+        on_delta: &mut dyn FnMut(StreamDelta<'_>),
+    ) -> anyhow::Result<Completion> {
+        self.complete(role, system, user, on_delta)
+    }
+
     /// 用户是否已经点了停止。流程在两步之间查它，不必等下一次模型调用才停。
     fn cancelled(&self) -> bool;
 
@@ -106,12 +119,13 @@ impl LmBackend {
     }
 }
 
-impl ModelBackend for LmBackend {
-    fn complete(
+impl LmBackend {
+    fn complete_with(
         &self,
         role: ModelRole,
         system: &str,
         user: &str,
+        options: ChatOptions,
         on_delta: &mut dyn FnMut(StreamDelta<'_>),
     ) -> anyhow::Result<Completion> {
         let config = self.config(role)?;
@@ -124,7 +138,7 @@ impl ModelBackend for LmBackend {
                 user,
                 config.temperature,
                 config.max_tokens,
-                ChatOptions::default(),
+                options.clone(),
                 &self.cancel,
                 &mut *on_delta,
             ) {
@@ -146,6 +160,33 @@ impl ModelBackend for LmBackend {
             content: outcome.content,
             truncated: outcome.finish == Finish::Length,
         })
+    }
+}
+
+impl ModelBackend for LmBackend {
+    fn complete(
+        &self,
+        role: ModelRole,
+        system: &str,
+        user: &str,
+        on_delta: &mut dyn FnMut(StreamDelta<'_>),
+    ) -> anyhow::Result<Completion> {
+        self.complete_with(role, system, user, ChatOptions::default(), on_delta)
+    }
+
+    fn complete_json(
+        &self,
+        role: ModelRole,
+        system: &str,
+        user: &str,
+        schema: (&'static str, Value),
+        on_delta: &mut dyn FnMut(StreamDelta<'_>),
+    ) -> anyhow::Result<Completion> {
+        let options = ChatOptions {
+            json_schema: Some(schema),
+            ..ChatOptions::default()
+        };
+        self.complete_with(role, system, user, options, on_delta)
     }
 
     fn cancelled(&self) -> bool {
