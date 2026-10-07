@@ -642,13 +642,25 @@ impl DraftPage<'_> {
             }
             PreviewMode::VersionDiff => self.version_diff_mode_ui(ui),
             PreviewMode::Split => {
-                egui::Panel::left("preview_split")
+                theme::configure_comparison_scroll(ui);
+                let source = egui::Panel::left("preview_split")
                     .default_size(420.0)
                     .size_range(280.0..=900.0)
-                    .frame(theme::pane())
+                    .frame(theme::comparison_pane(false))
                     .show(ui, |ui| self.markdown_editor(ui));
+                if theme::is_mdex() {
+                    // 面板保留原生分隔线与调宽热区，三个小点仅提示它可以拖动。
+                    let center = source.response.rect.right_center();
+                    for offset in [-4.0, 0.0, 4.0] {
+                        ui.painter().circle_filled(
+                            center + egui::vec2(0.0, offset),
+                            1.0,
+                            theme::text_muted().gamma_multiply(0.5),
+                        );
+                    }
+                }
                 egui::CentralPanel::default()
-                    .frame(theme::pane())
+                    .frame(theme::comparison_pane(true))
                     .show(ui, |ui| {
                         let region = ui.max_rect();
                         self.markdown_render(ui);

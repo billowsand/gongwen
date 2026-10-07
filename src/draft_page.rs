@@ -1497,21 +1497,31 @@ mod split_resize_tests {
     #[test]
     #[ignore = "出直角界面样张，手动跑"]
     fn mdex_rectangular_workspace_samples() {
+        mdex_workspace_samples(PreviewMode::Source, "square");
+    }
+
+    /// 使用同一渲染入口检查对照区的单分隔线、浮动滚动条与纸张投影。
+    #[test]
+    #[ignore = "出对照界面样张，手动跑"]
+    fn mdex_comparison_workspace_samples() {
+        mdex_workspace_samples(PreviewMode::Split, "comparison");
+    }
+
+    fn mdex_workspace_samples(mode: PreviewMode, stem: &str) {
         let size = egui::vec2(1280.0, 820.0);
-        for (name, path) in [
-            (
-                crate::models::ThemeName::MdexDark,
-                "tmp/mdex-square-dark.png",
-            ),
-            (crate::models::ThemeName::Mdex, "tmp/mdex-square-light.png"),
+        for (name, suffix) in [
+            (crate::models::ThemeName::MdexDark, "dark"),
+            (crate::models::ThemeName::Mdex, "light"),
         ] {
+            let path = format!("tmp/mdex-{stem}-{suffix}.png");
             let mut harness = Harness::new();
             harness.ctx.set_pixels_per_point(1.0);
-            harness.doc.generated_markdown.clear();
-            harness.doc.preview_mode = PreviewMode::Source;
-            harness.doc.form_collapsed = false;
-            harness.config.ribbon_tab = crate::models::RibbonTab::Output;
-            harness.config.ribbon_collapsed = false;
+            harness.doc.generated_markdown =
+                "# 关于加强教育教学工作的函\n\n请各地结合实际，认真组织落实。".into();
+            harness.doc.preview_mode = mode;
+            harness.doc.form_collapsed = mode == PreviewMode::Split;
+            harness.config.ribbon_tab = crate::models::RibbonTab::Home;
+            harness.config.ribbon_collapsed = mode == PreviewMode::Split;
             harness.config.show_source_outline = false;
             harness.config.show_source_minimap = false;
             harness.config.show_editor_line_numbers = false;
@@ -1519,7 +1529,7 @@ mod split_resize_tests {
             theme::set_current_paper(crate::models::PaperMode::Follow);
             theme::configure_style(&harness.ctx);
             let mut canvas = crate::ui_snapshot::Canvas::default();
-            for _ in 0..5 {
+            for _ in 0..3 {
                 let output = harness.ctx.clone().run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
@@ -1546,7 +1556,7 @@ mod split_resize_tests {
                     output,
                     size,
                     theme::canvas(),
-                    std::path::Path::new(path),
+                    std::path::Path::new(&path),
                 );
             }
         }

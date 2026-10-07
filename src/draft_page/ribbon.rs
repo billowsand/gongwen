@@ -62,8 +62,7 @@ impl DraftPage<'_> {
     /// 件不重置——切分区是「现在要干哪一类活」，换篇稿子通常还在干同一类。
     /// 只有「研报」跟着文种走：它那组按钮公文一条都用不上。
     pub(crate) fn ribbon(&mut self, ui: &mut egui::Ui) {
-        // 背景先占绘制位置，等上下两行排版结束、拿到精确矩形后再回填；这样单一
-        // 闭合曲线位于所有按钮后面，不会遮挡文字或点击反馈。
+        // 背景先占绘制位置，等上下两行排版结束后回填，避免遮挡文字或点击反馈。
         let ribbon_background = ui.painter().add(egui::Shape::Noop);
         // 「研报」只在研究报告下出现：配置里存着它、这篇却是公文时，落回「插入」，
         // 否则第二行会画一组这个文种根本用不上的按钮，分区卡还没有哪个是亮的。
@@ -77,6 +76,7 @@ impl DraftPage<'_> {
         ui.add_space(1.0);
         let tray = theme::ribbon_tray_layout().show(ui, |ui| {
             ui.scope(|ui| {
+                theme::configure_ribbon_controls(ui);
                 ui.spacing_mut().interact_size.y = TOOLBAR_CONTROL_HEIGHT;
                 ui.spacing_mut().item_spacing.x = 4.0;
                 // 窗口窄下来时横向滚动，而不是折行：折行会把编辑区一路挤矮，

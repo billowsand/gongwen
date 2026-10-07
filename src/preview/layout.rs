@@ -1848,9 +1848,16 @@ pub(crate) fn sheet(
             ui.set_max_width(metrics.page);
             let frame = egui::Frame::new()
                 .fill(theme::paper::bg())
-                .stroke(Stroke::new(1.0, theme::border()))
+                .stroke(Stroke::new(
+                    1.0,
+                    if theme::is_mdex() {
+                        theme::border().gamma_multiply(0.55)
+                    } else {
+                        theme::border()
+                    },
+                ))
                 .corner_radius(egui::CornerRadius::same(3))
-                .shadow(theme::float_shadow(theme::paper::shadow_alpha()))
+                .shadow(theme::paper_shadow(theme::paper::shadow_alpha()))
                 .show(ui, |ui| {
                     let background = ui.painter().add(egui::Shape::Noop);
                     // 页边距用 add_space 铺出来：`Margin` 是 i8，放大后会溢出。

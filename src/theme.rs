@@ -1403,6 +1403,44 @@ pub fn float_shadow(alpha: u8) -> egui::epaint::Shadow {
     }
 }
 
+/// 纸张保留轻微离底的投影；MDEX 的其它界面仍是平面工具区。
+pub fn paper_shadow(alpha: u8) -> egui::epaint::Shadow {
+    if is_mdex() {
+        egui::epaint::Shadow {
+            offset: [0, 3],
+            blur: 12,
+            spread: 0,
+            color: Color32::from_black_alpha(alpha.max(32)),
+        }
+    } else {
+        float_shadow(alpha)
+    }
+}
+
+/// 对照区不叠面板外框，仅用底色区分源码与纸张承托面。
+pub fn comparison_pane(preview: bool) -> egui::Frame {
+    if !is_mdex() {
+        return pane();
+    }
+    egui::Frame::new()
+        .fill(if preview { canvas() } else { surface() })
+        .inner_margin(Margin::same(if preview { 16 } else { PANE_PADDING }))
+}
+
+/// 对照区的浮动滚动条不占内容宽度，空闲时隐藏，悬停时仍可抓住拖动。
+pub fn configure_comparison_scroll(ui: &mut egui::Ui) {
+    if is_mdex() {
+        ui.spacing_mut().scroll = egui::style::ScrollStyle {
+            bar_width: 6.0,
+            floating_width: 3.0,
+            active_background_opacity: 0.0,
+            interact_background_opacity: 0.0,
+            active_handle_opacity: 0.4,
+            ..egui::style::ScrollStyle::floating()
+        };
+    }
+}
+
 /// 平铺面板外框：surface 底 + 细描边 + 统一圆角，不加阴影，四周留出 [`PANE_GAP`] 的缝。
 pub fn pane() -> egui::Frame {
     egui::Frame::new()
@@ -1420,34 +1458,32 @@ pub fn panel(fill: Color32, margin: i8) -> egui::Frame {
         .inner_margin(Margin::symmetric(margin, (margin / 2).max(4)))
 }
 
-/// 功能区第二行只负责留出内容边距；真正的底色和轮廓要等选项卡、菜单都完成
-/// 排版后，由 [`connected_ribbon_shape`] 一次性画成同一个闭合外形。
+/// 功能区第二行只负责留出内容边距；底色和轮廓等上下两行完成排版后统一绘制。
 pub fn ribbon_tray_layout() -> egui::Frame {
     egui::Frame::new()
         .inner_margin(Margin::symmetric(7, 2))
         .outer_margin(Margin::symmetric(2, 2))
 }
 
-/// 当前分区卡与下方菜单托盘的单一闭合轮廓。两处内凹贝塞尔圆弧把选项卡自然
-/// 接入托盘；最终只保留这一条连续外描边，不会出现两个矩形相叠的接缝。
+/// MDEX 用淡色工具带、底线与同色短标记关联上下两行；其它主题保持闭合曲线。
 pub fn connected_ribbon_shape(tab_rect: egui::Rect, tray_outer_rect: egui::Rect) -> egui::Shape {
     if is_mdex() {
         let tray = tray_outer_rect.shrink(2.0);
+        let fill = mix_color(surface(), accent_soft(), 0.18);
         return egui::Shape::Vec(vec![
-            egui::Shape::rect_filled(tray, 0, surface()),
-            egui::Shape::rect_stroke(
-                tray,
-                0,
+            egui::Shape::rect_filled(tray, 0, fill),
+            egui::Shape::line_segment(
+                [tray.left_bottom(), tray.right_bottom()],
                 Stroke::new(1.0, border()),
-                egui::StrokeKind::Inside,
             ),
-            egui::Shape::rect_filled(tab_rect, 0, accent_soft()),
-            egui::Shape::rect_stroke(
-                tab_rect,
-                0,
-                Stroke::new(1.0, border()),
-                egui::StrokeKind::Inside,
+            egui::Shape::line_segment(
+                [
+                    egui::pos2(tray.left() + 1.0, tray.top() + 6.0),
+                    egui::pos2(tray.left() + 1.0, tray.bottom() - 6.0),
+                ],
+                Stroke::new(2.0, accent()),
             ),
+            egui::Shape::rect_filled(tab_rect, 0, fill),
             egui::Shape::line_segment(
                 [tab_rect.left_bottom(), tab_rect.right_bottom()],
                 Stroke::new(2.0, accent()),
@@ -1486,6 +1522,21 @@ pub fn connected_ribbon_shape(tab_rect: egui::Rect, tray_outer_rect: egui::Rect)
         .into(),
     );
     egui::Shape::Vec(shapes)
+}
+
+/// 仅在 MDEX 下层工具条内弱化常态按钮，悬停、按下与主按钮仍保留明确反馈。
+pub fn configure_ribbon_controls(ui: &mut egui::Ui) {
+    if !is_mdex() {
+        return;
+    }
+    let stroke = Stroke::new(1.0, border().gamma_multiply(0.3));
+    let widgets = &mut ui.visuals_mut().widgets;
+    widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    widgets.inactive.bg_stroke = stroke;
+    widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
+    widgets.noninteractive.weak_bg_fill = Color32::TRANSPARENT;
+    widgets.noninteractive.bg_stroke = stroke;
 }
 
 fn connected_ribbon_fill(tab: egui::Rect, tray: egui::Rect, color: Color32) -> Vec<egui::Shape> {
