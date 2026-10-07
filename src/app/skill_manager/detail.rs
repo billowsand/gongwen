@@ -29,7 +29,7 @@ impl SkillsPage {
                     if skill.flow.is_empty() {
                         ui.weak("此技能未配置流程。");
                     }
-                    flow_ui(ui, &skill.flow, 0);
+                    self.diagrams.show(ui, &skill.flow, 0);
                 });
                 ui.add_space(10.0);
                 if ui.available_width() > 620.0 {
@@ -343,91 +343,7 @@ fn tool_row(ui: &mut egui::Ui, id: &str) {
     ui.add_space(6.0);
 }
 
-pub(super) fn flow_ui(ui: &mut egui::Ui, steps: &[StepSpec], depth: usize) {
-    let width = ui.available_width();
-    ui.with_layout(
-        egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
-        |ui| {
-            for (index, step) in steps.iter().enumerate() {
-                // 先按整张卡片预留空间再换行；Frame 本身不会在绘制前换行。
-                // 箭头随下一步一起移动，避免独自留在上一行末尾。
-                let arrow_width = if index > 0 { 18.0_f32.min(width) } else { 0.0 };
-                let card_width = 180.0_f32.min((width - arrow_width).max(0.0));
-                ui.allocate_ui_with_layout(
-                    egui::vec2(arrow_width + card_width, 0.0),
-                    egui::Layout::left_to_right(egui::Align::Min),
-                    |ui| {
-                        if index > 0 {
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(
-                                    (arrow_width - ui.spacing().item_spacing.x).max(0.0),
-                                    20.0,
-                                ),
-                                egui::Sense::hover(),
-                            );
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "›",
-                                egui::TextStyle::Body.resolve(ui.style()),
-                                theme::text_muted(),
-                            );
-                        }
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(card_width, 0.0),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                egui::Frame::new()
-                                    .fill(theme::surface_sunk())
-                                    .corner_radius(6)
-                                    .inner_margin(10)
-                                    .show(ui, |ui| {
-                                        ui.set_width((card_width - 20.0).max(0.0));
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(format!(
-                                                    "{:02}  {}",
-                                                    index + 1,
-                                                    step_name(step)
-                                                ))
-                                                .strong(),
-                                            )
-                                            .wrap(),
-                                        );
-                                        if let Some(condition) = &step.when {
-                                            let label = match condition.as_str() {
-                                                Some("has_sources") => "有资料时",
-                                                Some("has_text") => "有正文时",
-                                                _ => "按条件执行",
-                                            };
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(label)
-                                                        .small()
-                                                        .color(theme::text_muted()),
-                                                )
-                                                .wrap(),
-                                            )
-                                            .on_hover_text(condition.to_string());
-                                        }
-                                    });
-                            },
-                        );
-                    },
-                );
-            }
-        },
-    );
-    if depth < 8 {
-        for step in steps.iter().filter(|s| !s.body.is_empty()) {
-            egui::CollapsingHeader::new(format!("{} · 子流程", step_name(step)))
-                .id_salt((depth, step.label()))
-                .show(ui, |ui| flow_ui(ui, &step.body, depth + 1));
-        }
-    }
-}
-
-fn step_name(step: &StepSpec) -> String {
+pub(super) fn step_name(step: &StepSpec) -> String {
     let name = step.step.as_deref().unwrap_or_default();
     match name {
         "clarify" => "澄清要求",

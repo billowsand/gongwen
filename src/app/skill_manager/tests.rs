@@ -106,95 +106,6 @@ fn clicking_a_markdown_reference_opens_the_package_file() {
 }
 
 #[test]
-fn flow_cards_wrap_within_the_panel_and_stack_conditions_below_titles() {
-    let ctx = egui::Context::default();
-    for skill in skill::builtin_skills() {
-        let mut flows = vec![skill.flow.as_slice()];
-        while let Some(steps) = flows.pop() {
-            flows.extend(
-                steps
-                    .iter()
-                    .filter(|s| !s.body.is_empty())
-                    .map(|s| s.body.as_slice()),
-            );
-            for width in [140.0, 360.0, 720.0, 1100.0] {
-                let mut bounds = egui::Rect::NOTHING;
-                let output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(width + 40.0, 2000.0),
-                        )),
-                        ..Default::default()
-                    },
-                    |ui| {
-                        ui.set_width(width);
-                        bounds = ui.available_rect_before_wrap();
-                        detail::flow_ui(ui, steps, 8);
-                    },
-                );
-                let cards: Vec<_> = output
-                    .shapes
-                    .iter()
-                    .filter_map(|shape| match &shape.shape {
-                        egui::epaint::Shape::Rect(rect) if rect.fill == theme::surface_sunk() => {
-                            Some(rect.rect)
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(cards.len(), steps.len());
-                for (index, card) in cards.iter().enumerate() {
-                    assert!(
-                        card.left() >= bounds.left() - 0.1 && card.right() <= bounds.right() + 0.1,
-                        "{} 第 {} 步越界：{card:?}，容器 {bounds:?}",
-                        skill.id,
-                        index + 1
-                    );
-                    if index > 0 {
-                        let previous = cards[index - 1];
-                        if card.left() >= previous.right() {
-                            assert!(
-                                (card.top() - previous.top()).abs() < 0.1,
-                                "同行卡片应顶部对齐"
-                            );
-                        }
-                        assert!(
-                            card.left() >= previous.right() || card.top() >= previous.bottom(),
-                            "流程卡片发生重叠"
-                        );
-                    }
-                    let texts: Vec<_> = output
-                        .shapes
-                        .iter()
-                        .filter_map(|shape| match &shape.shape {
-                            egui::epaint::Shape::Text(text) if card.contains(text.pos) => {
-                                Some(text)
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    assert_eq!(texts.len(), if steps[index].when.is_some() { 2 } else { 1 });
-                    for text in &texts {
-                        let rect = text.galley.rect.translate(text.pos.to_vec2());
-                        assert!(
-                            card.expand(0.1).contains_rect(rect),
-                            "卡片文字越界：{rect:?}"
-                        );
-                    }
-                    if texts.len() == 2 {
-                        assert!(
-                            texts[1].pos.y >= texts[0].pos.y + texts[0].galley.size().y,
-                            "条件说明应位于步骤标题下方"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn overview_and_files_render_at_wide_and_narrow_widths() {
     let ctx = egui::Context::default();
     theme::configure_icons(&ctx);
@@ -281,6 +192,16 @@ fn skill_manager_samples() {
     page.select("policy-report");
     shoot(&mut page, "policy-report", egui::vec2(1500.0, 950.0));
     shoot(&mut page, "policy-report-narrow", egui::vec2(600.0, 950.0));
+    theme::set_current(crate::models::ThemeName::Dracula);
+    theme::configure_style(&ctx);
+    shoot(&mut page, "policy-report-dark", egui::vec2(1500.0, 1200.0));
+    theme::set_current(crate::models::ThemeName::Green);
+    theme::configure_style(&ctx);
+    shoot(
+        &mut page,
+        "policy-report-theme-restored",
+        egui::vec2(1500.0, 1200.0),
+    );
     page.select("research-draft");
     page.files_mode = true;
     shoot(&mut page, "builtin", egui::vec2(1500.0, 950.0));

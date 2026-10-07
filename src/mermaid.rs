@@ -26,6 +26,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+mod interface;
+pub(crate) use interface::render_interface;
+
 const CACHE_DIR: &str = "mermaid-cache";
 /// 配色、字体、画布算法或引擎版本变了都要改这里，旧缓存随之失效。
 const STYLE_VERSION: &str = "gongwen-mermaid-v10/merman-0.7";

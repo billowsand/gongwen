@@ -6,6 +6,7 @@ mod detail;
 mod markdown;
 #[cfg(test)]
 mod tests;
+mod workflow;
 
 use crate::agent::api::ApiStore;
 use crate::agent::skill::{self, Skill};
@@ -39,6 +40,7 @@ pub(super) struct SkillsPage {
     file_create_open: bool,
     confirm_remove: bool,
     message: Option<(bool, String)>,
+    diagrams: workflow::DiagramCache,
 }
 
 struct Buffer {
