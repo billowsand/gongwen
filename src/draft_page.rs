@@ -29,7 +29,7 @@ mod caret;
 mod citation_marks;
 mod diff_editor;
 mod diff_gaps;
-mod diff_hunks;
+pub(crate) mod diff_hunks;
 mod editor;
 mod find;
 mod form;
@@ -289,6 +289,10 @@ pub(crate) struct AiProposal {
     pub(crate) label: String,
     pub(crate) fact_changes: Vec<crate::ai_guard::FactChange>,
     pub(crate) fact_changes_confirmed: bool,
+    /// 用户在审阅窗里排除的变更块（按 `diff_hunks::hunks` 的序号）。提案正文变了
+    /// （答完核实题、撤回概括等会在已完成的提案上继续修订）就清空，按新的块重新挑——
+    /// `install_ai_proposal` 每次装提案都新建 `AiProposal`，天然满足这一点。
+    pub(crate) excluded: BTreeSet<usize>,
     pub(crate) view: crate::diff_view::DiffViewState,
     pub(crate) open: bool,
     /// 侧栏里点了缺口所在句：下一帧在审阅窗里把这句所在的改动滚进视野。

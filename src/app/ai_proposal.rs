@@ -10,6 +10,7 @@ use crate::diff_view::{DiffViewConfig, manuscript_diff_ui};
 use crate::draft_page::DraftSession;
 use crate::theme;
 use eframe::egui;
+use std::collections::BTreeSet;
 
 /// 提案正文里 `text`（缺口所在句，找不到就退一步找它的前半句）落在第几处改动。
 fn change_containing(report: &ManuscriptDiff, markdown: &str, text: &str) -> Option<usize> {
@@ -217,6 +218,7 @@ impl GongwenApp {
             label,
             fact_changes,
             fact_changes_confirmed: false,
+            excluded: std::collections::BTreeSet::new(),
             view: crate::diff_view::DiffViewState::default(),
             open: !doc.ai_panel.open,
             locate: None,
@@ -266,5 +268,111 @@ impl GongwenApp {
             doc.ai_panel.resolve_proposal(false);
             *status = format!("已放弃“{}”修改提案，当前审校稿未改变。", proposal.label);
         }
+    }
+}
+
+/// 按用户排除的变更块合并提案正文：`excluded` 里的块（`diff_hunks::hunks` 的序号）
+/// 还原回 `before` 的写法，其余保留提案。只复用 `diff_hunks::hunks` / `revert`，不另写
+/// 合并算法；从后往前还原，前面块的行号不受后面块的还原影响（版本变更第 ③ 期的不变式）。
+fn merged_markdown(before: &str, proposal: &str, excluded: &BTreeSet<usize>) -> String {
+    let mut text = proposal.to_string();
+    if excluded.is_empty() {
+        return text;
+    }
+    let hunks =
+        crate::draft_page::diff_hunks::hunks(&crate::diff::body_diff(before, proposal), proposal);
+    for &index in excluded.iter().rev() {
+        if let Some(hunk) = hunks.get(index) {
+            text = crate::draft_page::diff_hunks::revert(hunk, before, &text).0;
+        }
+    }
+    text
+}
+
+/// `merged` 的事实变化里第一项不在提案已确认清单里的（按类型 + 变化方向 + 值比较）。
+/// 排除组合造出新事实变化（罕见）时用它拦下落地。
+fn first_new_fact<'a>(
+    merged: &'a [crate::ai_guard::FactChange],
+    confirmed: &[crate::ai_guard::FactChange],
+) -> Option<&'a crate::ai_guard::FactChange> {
+    merged.iter().find(|fact| !confirmed.contains(fact))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai_guard::{FactChange, FactChangeKind, FactKind};
+
+    fn excluded(list: &[usize]) -> BTreeSet<usize> {
+        list.iter().copied().collect()
+    }
+
+    // 三块变更之间隔着真正未改动的句子：只隔空行会按 `diff_hunks` 的规则并成一块。
+    const BEFORE: &str =
+        "第一段原样。\n\n中间甲不变。\n\n第二段原样。\n\n中间乙不变。\n\n第三段原样。";
+    const PROPOSAL: &str = "第一段改。\n\n中间甲不变。\n\n第二段改。\n\n中间乙不变。\n\n第三段改。";
+
+    #[test]
+    fn merging_excludes_only_the_middle_hunk() {
+        let merged = merged_markdown(BEFORE, PROPOSAL, &excluded(&[1]));
+        assert_eq!(
+            merged,
+            "第一段改。\n\n中间甲不变。\n\n第二段原样。\n\n中间乙不变。\n\n第三段改。"
+        );
+    }
+
+    #[test]
+    fn merging_excludes_the_first_hunk() {
+        let merged = merged_markdown(BEFORE, PROPOSAL, &excluded(&[0]));
+        assert_eq!(
+            merged,
+            "第一段原样。\n\n中间甲不变。\n\n第二段改。\n\n中间乙不变。\n\n第三段改。"
+        );
+    }
+
+    #[test]
+    fn merging_excludes_the_last_hunk_with_a_trailing_newline() {
+        // 末块连带文末多出的换行一起还原。
+        let before = "开头原样。\n\n中间不变。\n\n结尾原样。";
+        let proposal = "开头原样。\n\n中间不变。\n\n结尾改。\n";
+        assert_eq!(merged_markdown(before, proposal, &excluded(&[0])), before);
+    }
+
+    #[test]
+    fn excluding_every_hunk_restores_the_before_text() {
+        assert_eq!(
+            merged_markdown(BEFORE, PROPOSAL, &excluded(&[0, 1, 2])),
+            BEFORE
+        );
+    }
+
+    #[test]
+    fn excluding_unknown_hunks_keeps_the_proposal() {
+        assert_eq!(merged_markdown(BEFORE, PROPOSAL, &excluded(&[9])), PROPOSAL);
+    }
+
+    #[test]
+    fn first_new_fact_flags_only_changes_outside_the_confirmed_list() {
+        let confirmed = vec![FactChange {
+            kind: FactKind::DateTime,
+            value: "2025年10月1日".into(),
+            change: FactChangeKind::Removed,
+        }];
+        let merged = vec![
+            confirmed[0].clone(),
+            FactChange {
+                kind: FactKind::Unit,
+                value: "某某局".into(),
+                change: FactChangeKind::Added,
+            },
+        ];
+        assert_eq!(first_new_fact(&merged, &confirmed), Some(&merged[1]));
+        assert_eq!(first_new_fact(&merged[..1], &confirmed), None);
+        // 同值不同方向也算清单之外。
+        let opposite = vec![FactChange {
+            change: FactChangeKind::Added,
+            ..confirmed[0].clone()
+        }];
+        assert_eq!(first_new_fact(&opposite, &confirmed), Some(&opposite[0]));
     }
 }
