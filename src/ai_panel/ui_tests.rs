@@ -862,6 +862,65 @@ fn excluding_the_fact_hunk_lifts_the_confirmation_gate() {
     );
 }
 
+/// 排除一块后勾了确认（核对的是变短的清单），再把那块恢复：清单变长了，旧勾选不算数。
+/// 审阅窗帧首会作废勾选，但左侧 AI 工作稿里的「不要这处」不经过那段逻辑，所以接受时
+/// 要按「勾选时核对的清单是否覆盖当前事实变化」判定，不能只看勾选（红线 2、3）。
+#[test]
+fn a_confirmation_given_before_restoring_a_hunk_does_not_cover_its_facts() {
+    let before = "# 通知\n\n请各单位于2025年10月1日前报送材料。\n\n二、工作要求\n\n请切实贯彻落实。\n\n三、经费\n\n本次安排经费100万元。";
+    let after = "# 通知\n\n请各单位于2025年11月1日前报送材料。\n\n二、工作要求\n\n请切实贯彻落实。\n\n三、经费\n\n本次安排经费200万元。";
+    let mut harness = Harness::new(before);
+    let vocabulary = harness.config.vocabulary.clone();
+    let fact_changes = crate::ai_guard::compare_key_facts(before, after, &vocabulary);
+    // 只排除改日期的第一块，剩下经费那块的事实变化。
+    let merged_after = "# 通知\n\n请各单位于2025年10月1日前报送材料。\n\n二、工作要求\n\n请切实贯彻落实。\n\n三、经费\n\n本次安排经费200万元。";
+    let confirmed = crate::ai_guard::compare_key_facts(before, merged_after, &vocabulary);
+    assert!(
+        !confirmed.is_empty() && confirmed.len() < fact_changes.len(),
+        "两块各带事实变化：{fact_changes:?} / {confirmed:?}"
+    );
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "改日期和经费".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: before.into(),
+        result: GeneratedDraft {
+            markdown: after.into(),
+            title: "通知".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes,
+        // 已经恢复了改日期那块：当前不排除任何块。
+        excluded: Default::default(),
+        // 勾选是在排除改日期那块时打的，核对的是变短的清单。
+        fact_changes_confirmed: true,
+        confirmed_facts: confirmed,
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+
+    assert!(!harness.with_page(|page| GongwenApp::accept_ai_proposal(
+        page.doc,
+        page.config,
+        page.status
+    )));
+    assert_eq!(
+        harness.doc.generated_markdown, before,
+        "日期变化没核对过，不能落地"
+    );
+    assert!(harness.doc.ai_proposal.is_some(), "提案原样留着");
+}
+
 /// 全部排除等于没接受：拦下、提案原样留着、正文不变（内核加固第 2 期）。
 #[test]
 fn excluding_every_hunk_blocks_acceptance() {

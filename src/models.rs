@@ -2296,6 +2296,25 @@ impl AppConfig {
         )
     }
 
+    /// 智能体辅助角色的备用模型：配了复核备用就用它；没配、而辅助角色此刻用的就是起草
+    /// 模型（复核没启用或没选模型，见 [`Self::revise_chat`]）时，沿用起草的备用（温度 0）——
+    /// 否则起草模型一挂，起草调用换了备用，澄清、核对、自主步骤这些辅助调用却直接失败。
+    pub fn assist_backup_chat(&self) -> Result<Option<LmStudioConfig>, ModelRefError> {
+        if let Some(own) = self.revise_backup_chat(true)? {
+            return Ok(Some(own));
+        }
+        let revise = &self.revise_model;
+        let own_model =
+            revise.enabled && !(revise.model_ref.is_empty() && revise.model.trim().is_empty());
+        if own_model {
+            return Ok(None);
+        }
+        Ok(self.draft_backup_chat()?.map(|config| LmStudioConfig {
+            temperature: 0.0,
+            ..config
+        }))
+    }
+
     /// 解析后的知识库配置：embedding / rerank 的地址密钥从提供商填好，
     /// 其余检索参数原样保留。提供商失效时不报错而是留空地址——检索路径
     /// 已有「embedding 不可用就退回关键词检索」的降级与告警，界面另有警示芯片。
@@ -3148,6 +3167,43 @@ mod tests {
         assert_eq!(backup.temperature, 0.0);
         assert_eq!(backup.max_tokens, config.lm_studio.max_tokens);
         assert_eq!(backup.context_window, 0);
+    }
+
+    /// 复核没启用时辅助角色用的是起草模型，备用也跟着起草走；启用了复核模型就各管各的。
+    #[test]
+    fn the_assist_role_inherits_the_draft_backup_when_it_runs_on_the_draft_model() {
+        let mut config: AppConfig = serde_json::from_str("{}").unwrap();
+        config.providers.push(ProviderConfig {
+            id: "p".into(),
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            ..Default::default()
+        });
+        config.draft_backup_model = ModelRef {
+            provider_id: "p".into(),
+            model: "起草备用".into(),
+        };
+        config.lm_studio.temperature = 0.7;
+        let assist = config.assist_backup_chat().unwrap().unwrap();
+        assert_eq!(assist.model, "起草备用");
+        assert_eq!(assist.temperature, 0.0, "辅助角色要可复现");
+
+        config.revise_model.enabled = true;
+        config.revise_model.model_ref = ModelRef {
+            provider_id: "p".into(),
+            model: "复核".into(),
+        };
+        assert!(
+            config.assist_backup_chat().unwrap().is_none(),
+            "有自己的复核模型、没配复核备用：不借起草的备用"
+        );
+        config.revise_model.backup_model_ref = ModelRef {
+            provider_id: "p".into(),
+            model: "复核备用".into(),
+        };
+        assert_eq!(
+            config.assist_backup_chat().unwrap().unwrap().model,
+            "复核备用"
+        );
     }
 
     /// 用途归类：rerank 关键词最具体（bge-reranker 不能归成向量）；

@@ -641,7 +641,11 @@ impl GongwenApp {
                 self.store_picker_state("revise", filter, show_all);
             });
 
-            setting_row(ui, "备用模型（可不选）", None, |ui| {
+            setting_row(
+                ui,
+                "备用模型（可不选）",
+                Some("复核模型在吐出第一个字之前不可用时，本次改用它。不选时：若复核沿用起草模型，就沿用起草的备用模型"),
+                |ui| {
                 let (mut filter, mut show_all) = self.picker_state("revise_backup");
                 model_picker(
                     ui,
@@ -655,7 +659,8 @@ impl GongwenApp {
                     &mut show_all,
                 );
                 self.store_picker_state("revise_backup", filter, show_all);
-            });
+                },
+            );
             sub_heading(ui, "送检范围", None);
             setting_row(ui, "单句字数上限", None, |ui| {
                 ui.add(

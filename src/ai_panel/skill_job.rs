@@ -246,21 +246,31 @@ impl DraftPage<'_> {
             };
             let mut batch = Batch::default();
             let result = {
-                let mut emit = |event: Event| match event {
-                    Event::Content(text) => batch.push(&text, "", &send),
-                    Event::Reasoning(text) => batch.push("", &text, &send),
-                    other => {
+                let mut emit = |event: Event| {
+                    // 换用备用模型的说明随下一个事件立刻送出（备用模型一开口就有增量），
+                    // 不等整轮跑完——研究式起草一跑几分钟，用户应当当场看到已经换了模型。
+                    for note in model.take_notices() {
                         batch.flush(&send);
-                        send(match other {
-                            Event::Tool(tool) => DocJob::AiTool(tool.line()),
-                            Event::Phase(phase) => DocJob::ExportProgress(phase),
-                            Event::Workspace(text) => DocJob::AiWorkspace(text),
-                            Event::WriteBegin { prefix, suffix } => {
-                                DocJob::AiWriteBegin { prefix, suffix }
-                            }
-                            Event::Note(note) => DocJob::AiNote(note),
-                            Event::Content(_) | Event::Reasoning(_) => unreachable!("上面已分流"),
-                        });
+                        send(DocJob::AiNote(note));
+                    }
+                    match event {
+                        Event::Content(text) => batch.push(&text, "", &send),
+                        Event::Reasoning(text) => batch.push("", &text, &send),
+                        other => {
+                            batch.flush(&send);
+                            send(match other {
+                                Event::Tool(tool) => DocJob::AiTool(tool.line()),
+                                Event::Phase(phase) => DocJob::ExportProgress(phase),
+                                Event::Workspace(text) => DocJob::AiWorkspace(text),
+                                Event::WriteBegin { prefix, suffix } => {
+                                    DocJob::AiWriteBegin { prefix, suffix }
+                                }
+                                Event::Note(note) => DocJob::AiNote(note),
+                                Event::Content(_) | Event::Reasoning(_) => {
+                                    unreachable!("上面已分流")
+                                }
+                            });
+                        }
                     }
                 };
                 run_skill(

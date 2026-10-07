@@ -309,8 +309,13 @@ impl GongwenApp {
             }
             None => proposal.fact_changes.clone(),
         };
-        if !facts.is_empty() && !proposal.fact_changes_confirmed {
-            *status = "请先逐项核对关键事实变化，再接受提案。".into();
+        if !facts.is_empty() && !confirmation_covers(&proposal, &facts) {
+            *status = if proposal.fact_changes_confirmed {
+                "勾选之后又恢复了被排除的改动，关键事实变化清单变了，请重新核对并勾选。"
+            } else {
+                "请先逐项核对关键事实变化，再接受提案。"
+            }
+            .into();
             doc.ai_proposal = Some(proposal);
             return false;
         }
@@ -395,6 +400,26 @@ fn merged_markdown(before: &str, proposal: &str, excluded: &BTreeSet<usize>) -> 
         }
     }
     text
+}
+
+/// 用户的勾选覆盖得了这份事实变化没有：勾了，且勾选时核对的清单包含其中每一项。
+///
+/// 只看勾选不够：排除一块后勾选（核对的是变短的清单），再在左侧 AI 工作稿里把那块恢复，
+/// 审阅窗帧首的「清单变了就作废勾选」不会跑，恢复回来的事实变化就没人核对过。
+/// 勾选时没记清单的（直接置位，只有测试这么做）按核对了提案的完整清单算。
+fn confirmation_covers(
+    proposal: &crate::draft_page::AiProposal,
+    facts: &[crate::ai_guard::FactChange],
+) -> bool {
+    if !proposal.fact_changes_confirmed {
+        return false;
+    }
+    let checked = if proposal.confirmed_facts.is_empty() {
+        &proposal.fact_changes
+    } else {
+        &proposal.confirmed_facts
+    };
+    facts.iter().all(|fact| checked.contains(fact))
 }
 
 /// `merged` 的事实变化里第一项不在提案已确认清单里的（按类型 + 变化方向 + 值比较）。

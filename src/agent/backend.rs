@@ -109,7 +109,7 @@ impl LmBackend {
     pub(crate) fn new(config: &AppConfig, cancel: Arc<AtomicBool>) -> Self {
         Self {
             draft_backup: config.draft_backup_chat(),
-            assist_backup: config.revise_backup_chat(true),
+            assist_backup: config.assist_backup_chat(),
             notices: Mutex::new(Vec::new()),
             usage: Mutex::new(UsageTotals::default()),
             draft: config.draft_chat(),
