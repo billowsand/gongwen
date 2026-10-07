@@ -9,13 +9,43 @@ pub mod context;
 mod converse;
 mod stream;
 pub use context::ContextOverflow;
-pub use converse::{ConverseError, converse_stream};
+pub use converse::converse_stream;
 pub use stream::{Finish, StreamDelta, generate_stream};
 
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
+
+/// 服务端报告的 token 用量；缺失时由任务后端估算。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct HttpFailure(pub reqwest::StatusCode, pub String);
+
+impl std::fmt::Display for HttpFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "模型服务返回 HTTP {}：{}", self.0, self.1)
+    }
+}
+impl std::error::Error for HttpFailure {}
+
+/// 工具调用增量没有正文回调，但仍然代表模型已经开始输出。
+#[derive(Debug)]
+pub(crate) struct OutputStarted;
+impl std::fmt::Display for OutputStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("模型已开始输出，不能切换备用模型")
+    }
+}
+impl std::error::Error for OutputStarted {}
 
 #[derive(Debug, Deserialize)]
 struct Choice {
@@ -200,8 +230,9 @@ pub struct ChatOptions {
 }
 
 /// 拒收过 `response_format` 的「端点 + 模型」：本进程之后不再带它，免得每次白白被拒一回。
-static FORMAT_REJECTED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(Default::default);
+static FIELD_REJECTED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>,
+> = std::sync::LazyLock::new(Default::default);
 
 fn format_key(config: &LmStudioConfig) -> String {
     format!("{}|{}", config.base_url.trim(), config.model.trim())
@@ -209,15 +240,23 @@ fn format_key(config: &LmStudioConfig) -> String {
 
 /// 这个端点 + 模型拒收过 `response_format` 没有。
 pub(crate) fn format_rejected(config: &LmStudioConfig) -> bool {
-    FORMAT_REJECTED
+    field_rejected(config, "response_format")
+}
+
+fn field_rejected(config: &LmStudioConfig, field: &'static str) -> bool {
+    FIELD_REJECTED
         .lock()
-        .map(|set| set.contains(&format_key(config)))
+        .map(|set| set.contains(&(format_key(config), field)))
         .unwrap_or(false)
 }
 
 fn reject_format(config: &LmStudioConfig) {
-    if let Ok(mut set) = FORMAT_REJECTED.lock() {
-        set.insert(format_key(config));
+    reject_field(config, "response_format");
+}
+
+fn reject_field(config: &LmStudioConfig, field: &'static str) {
+    if let Ok(mut set) = FIELD_REJECTED.lock() {
+        set.insert((format_key(config), field));
     }
 }
 
@@ -307,7 +346,7 @@ impl ChatError {
         {
             return ChatError::Other(anyhow::Error::new(overflow));
         }
-        let error = anyhow::anyhow!("模型服务返回 HTTP {status}：{body}");
+        let error = anyhow::Error::new(HttpFailure(status, body.to_string()));
         // 只有 4xx 才可能是「不认识多带的那几个字段」，值得去掉重试；
         // 5xx 是服务端自己的问题，重试也一样。
         if status.is_client_error() {

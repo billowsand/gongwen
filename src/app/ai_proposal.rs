@@ -105,6 +105,16 @@ impl GongwenApp {
                     );
                 });
                 ui.weak("左侧为当前审校稿，右侧为 AI 提案；接受前不会覆盖正文或自动导出。 ");
+                if let Some(turn) = self.docs[index]
+                    .ai_panel
+                    .turns
+                    .iter()
+                    .rev()
+                    .find(|turn| matches!(turn.state, crate::ai_panel::TurnState::Proposed(_)))
+                    && !turn.provenance.is_empty()
+                {
+                    ui.weak(&turn.provenance);
+                }
                 if !facts.is_empty() {
                     ui.add_space(8.0);
                     theme::card().fill(theme::danger_soft()).show(ui, |ui| {

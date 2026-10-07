@@ -124,6 +124,9 @@ fn toolbar(app: &mut GongwenApp, ui: &mut egui::Ui) {
             app.knowledge_docs.len(),
             app.knowledge_chunk_count
         ));
+        if let Some(elapsed) = app.knowledge_retrieval_elapsed {
+            ui.weak(format!("· 最近一次检索 {:.1} 秒", elapsed.as_secs_f64()));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = app.knowledge_busy;
             if ui

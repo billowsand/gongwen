@@ -256,7 +256,8 @@ merged = 提案正文；把 excluded 里的块按序号从大到小逐个 revert
 - 流式请求带 `stream_options: {"include_usage": true}`，读最后一帧的 `usage`；端点 4xx 时去掉
   这个字段重试，与现有的「去掉关闭思考的开关重试」同一手法（`src/lmstudio.rs:243`）。读不到就
   按字数估算，并标「估」。
-- 引擎加一个累加器（挂在 `Env` 上），每次模型调用记 `prompt / completion tokens、耗时、角色`。
+- 模型后端 `LmBackend` 持有累加器，每次模型调用记 `prompt / completion tokens、耗时、角色、实际模型`；
+  `ModelBackend::usage()` 默认返回空记录，第 5 期 `budget.llm_calls` 复用这里的调用数。
 - 任务流里本轮末尾显示一行：`模型调用 N 次 · 输入 X / 输出 Y token · 用时 Z`。
 - 现有 `Event` 流继续只做界面用，累加器只做记录，两者不合并。
 
@@ -265,14 +266,15 @@ merged = 提案正文；把 excluded 里的块按序号从大到小逐个 revert
 送审材料被质疑时要能回答「这段话是哪次运行、哪个技能、依据哪几条证据生成的」。
 
 - 提案卡与审阅窗标一行：`研究式起草 · DeepSeek-V4-Flash · 证据 K1–K7 · 2026-10-07 14:22`。
-- 字段都已在手：技能名、本轮模型（`ModelRef` 解析结果）、`SkillReport.evidence` 的编号、提案
+- 字段都已在手：技能名、实际起草模型、工作稿剥除引用前提取的编号、提案
   生成时间；写进会话这一轮的记录，随稿件的 AI 会话保存。
 - **边界**：会话是本机工作现场，不进版本快照、不进同步 ZIP（`src/manuscript/ai_sessions.rs:1`）。
   所以留痕只在本机可查；要随稿件流转，以后再考虑写进版本说明，本期不动版本图。
 
 ### 5.3 备用模型
 
-- 「模型服务」里起草 / 复核 / 知识库每个功能可选配一个备用模型（`ModelRef`）。
+- 「模型服务」里起草 / 复核（包括自主步骤的辅助角色）各可选配一个备用对话模型（`ModelRef`）。
+  embedding 不配备用：换模型会使查询向量与已有向量不在同一空间；rerank 沿用不可用时退回融合分的降级。
 - 主模型**在吐出第一个字之前**失败（连不上、超时、5xx）就换备用跑这一次，任务流里写一行
   「主模型不可用，本次改用 X」。4xx 不换（是请求的问题，换了也一样）；**已经开始输出后断流不换**
   （换了会接出两份前缀不同的稿子），照现在的方式报错。
@@ -280,14 +282,14 @@ merged = 提案正文；把 excluded 里的块按序号从大到小逐个 revert
 
 ### 5.4 检索规模：先度量
 
-- 知识库页显示「N 篇 / M 块」，并记最近一次检索的耗时。
+- 知识库页已有「N 篇 · M 块」，只补最近一次检索的耗时（知识库页检索 / 问答与侧栏检索共用入口）。
 - 不加向量索引。等真机数据出来（块数与检索耗时），再定要不要上 sqlite-vec / HNSW，阈值也按
   数据定。
 
 ### 5.5 验收
 
 1. 脚本端点返回带 `usage` 的最后一帧，任务流显示正确累加；端点拒 `stream_options` 时降级为估算。
-2. 留痕：提案卡上证据编号与 `SkillReport.evidence` 一致；重开稿件后会话里仍能看到。
+2. 留痕：提案卡上只列正文实际引用的编号，接受或放弃后仍保留；重开稿件后会话里仍能看到。
 3. 备用模型：主端点连不上 → 改用备用并有说明；主端点输出到一半断开 → 不切换、照常报错。
 4. 真机：内网跑一次研究式起草，记下 token 与耗时，写进交接。
 
@@ -645,14 +647,25 @@ flow:
 15. 修正 10-06 稿 3.2 的理由：重跑当前步安全，是因为检查点含整块黑板，与工具是否幂等无关；要管
     的是黑板之外的副作用（6.2）。
 
+### 2026-10-07（第 3 期实施）
+
+16. 用量累加器放在 `LmBackend`，统一覆盖补全、结构化补全和自主对话；`Env` 继续只持模型接口。
+17. 备用只用于对话模型；embedding 空间不可混用，rerank 沿用融合分降级。
+18. 提案只记录工作稿实际引用的 K 编号；模型名取后端实际产出记录，接受后来源行仍保留。
+19. SSE 字段降级按格式、用量、关思考的顺序；工具对话先处理用量字段再处理工具协议，明确拒收
+    `tools` 时直接沿用工具协议回退。拒收记忆仅在进程内，按端点、模型和字段区分。
+20. 无 `[DONE]` 且无 `finish_reason` 的 EOF 判为中断，避免半稿误交付；仅有 `finish_reason` 的服务仍兼容。
+
 ---
 
 ## 十二、交接
 
-**进度**：2 / 5 期。第 1 期（工具契约）已完成（2026-10-07），**待真机验收**（3.6 第 5 条：内网
+**进度**：3 / 5 期。第 1 期（工具契约）已完成（2026-10-07），**待真机验收**（3.6 第 5 条：内网
 DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起草，对比工具调用出错次数）。
 第 2 期（提案逐块接受）已完成（2026-10-07），**待真机验收**：研究式起草出一份三处以上改动的
 提案，在审阅窗里挑着「不要这处」再接受，正文只落地未排除的块；导出 Word / PDF 正常。
+第 3 期（用量、提案卡留痕、备用模型、检索耗时）已完成并合入 main（2026-10-07），
+七牛 DeepSeek V4 Flash 与 MiniMax M2.7 接口实测通过，**仍待内网 vLLM 与 GUI 真机验收**。
 
 ### 第 2 期交付了什么
 
@@ -715,7 +728,7 @@ DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起�
     所以 merged 的事实变化必然 ⊆ 提案的。闸门按防御性关卡保留（`first_new_fact`），用合成输入
     单测覆盖，没有真例。
 
-**下一步**：第 3 期（用量、留痕、备用模型）。
+**下一步**：完成第 1–3 期联合真机验收，再做第 4 期检查点。
 
 第 4 期开工时的顺序建议：先 6.1 的数据模型与 `StepPath` 改造（纯类型改动，一次编译通过），再
 6.2 的 `CheckpointSink` 钩子（`Env` 加字段，`testkit` 加内存实现），再 6.3 的表与保留策略，最后
@@ -747,3 +760,61 @@ DeepSeek v4 flash 与 MiniMax 2.7 各跑一遍「自由任务」与研究式起�
   事务，别把两者塞进同一次写。
 - 第 4 期真机验收要动「跑到一半结束进程」，注意别把编辑中的稿子一起丢了——先另存一份再试。
 - 第 5 期：`Env` 的 `Sync` 问题见 7.3。
+
+### 第 3 期交付了什么
+
+| 方案 | 落点 |
+|---|---|
+| 5.1 服务用量与字段降级 | `lmstudio::Usage`、`field_rejected`；`stream.rs` / `converse.rs` 读取 SSE 末帧和整段 JSON 的用量 |
+| 5.1 累加、显示、持久化 | `agent/backend/usage.rs` 的 `UsageTotals`；`LmBackend::tracked`；`DocJob::AiUsage` 在结束前回投；`AiTurn` / `SavedTurn` 保存每次角色、模型、token、耗时、估算标记；卡片末尾显示合计 |
+| 5.1 挂起续跑 | `AiTurn::resume` 保留累计耗时，续跑结果追加用量；用户答题的等待时间不计入运行耗时 |
+| 5.2 提案卡留痕 | `SkillReport::from_board` 先取 `cited_ids` 再剥标记；`ai_panel/provenance.rs` 合并连续编号；侧栏、审阅窗和左侧工作稿显示同一来源行；接受 / 放弃后随 `SavedTurn` 保留 |
+| 5.3 备用模型 | `AppConfig::draft_backup_chat` / `revise_backup_chat` 复用提供商校验；模型服务页复用选择器；`LmBackend::tracked` 一处处理三种调用的切换、失败原因和实际模型记录 |
+| 5.4 检索耗时 | `rag::retrieve` 统一计时（包括失败）；进程内交接给 `GongwenApp::knowledge_retrieval_elapsed`；知识库工具栏追加最近一次耗时，不落盘 |
+
+### 第 3 期与方案的出入
+
+1. 累加器放在后端而不是 `Env`：模型发送、重试与实际模型在这里可见，第 5 期可直接取 `usage().calls.len()`。
+   调用数按后端发送尝试计，包含空正文重试、工具协议回退和备用尝试；可选字段协商与超长重算的 HTTP
+   重发属于同一次发送，未单独列为模型调用。失败或停止没有服务用量时，按已收到内容估算并标「约」。
+2. 改正 5.3 的知识库备用说法：embedding 不配备用，否则查询向量会与已有库向量失配；rerank 已有降级。
+3. 篇数、块数已显示，只追加耗时；统一入口用一个进程内待取耗时将后台结果交接给界面，不建索引。
+4. 流式补全按 `response_format` → `stream_options` → 关思考逐项降级，一轮最多四次 HTTP 请求；
+   超长重算最多再执行一轮。工具对话先去用量字段，再由后端降级 `tools`；明确提到 `tools` 的拒收
+   直接回退工具协议，保证原有协议测试与行为兼容。端点不返回用量时仍允许正常生成。
+5. 来源只列正文真正引用的编号，不列整个证据包；留痕只在本机可查，不进版本快照与同步 ZIP。
+6. 收紧无结束标记的 EOF：原实现把它当成功，现在报中断；已有 `finish_reason` 的无 `[DONE]` 响应仍可用。
+
+### 第 3 期自动化验收对应
+
+| 验收 | 测试名 |
+|---|---|
+| 1：SSE 用量 / 降级记忆 | `usage_last_frame_and_rejected_stream_options_are_remembered`、`converse_reads_usage_with_empty_choices`、`converse_drops_rejected_usage_option_and_remembers_endpoint` |
+| 2：两次调用、挂起续跑、停止回投 | `skill_usage_accumulates_before_and_after_answering`、`totals_accumulate_across_resume_and_mark_estimates`、`resuming_a_turn_keeps_elapsed_time_and_existing_usage`、`stopped_usage_returns_to_its_original_turn_without_touching_new_tasks` |
+| 3：引用、接受后留痕、存取兼容 | `report_collects_only_workspace_citations_before_stripping`、`cited_ids_are_sorted_and_compacted_without_unused_evidence`、`provenance_and_usage_survive_acceptance_and_old_sessions_load` |
+| 4：备用与禁止切换边界 | `disconnected_primary_uses_backup_and_records_actual_model`、`server_failure_switches_only_this_call_and_next_call_retries_primary`、`client_errors_and_partial_content_or_reasoning_never_use_backup`、`no_backup_and_failed_backup_preserve_primary_error`、`context_overflow_and_cancellation_do_not_use_backup`、`converse_assist_uses_its_backup_and_accumulates_usage` |
+| 5：旧配置与提供商错误 | `backup_models_load_old_config_and_report_deleted_providers` |
+| 检索耗时 | `retrieval_records_elapsed_even_when_opening_database_fails` |
+
+### 第 3 期已知坑与真机验收
+
+- 2026-10-07 合并：保留第 2 期逐块排除、合并后重过闸门与排除数留痕；联合测试
+  `partial_acceptance_preserves_usage_and_provenance_together` 验证排除数、用量、来源一起存取。
+  main 合并后格式检查、clippy 与全量回归通过：1806 通过、0 失败、39 忽略。
+- 2026-10-07 真实接口测试：七牛 `deepseek/deepseek-v4-flash` 与 `minimax/minimax-m2.7` 各跑
+  流式用量、JSON、原生工具、故障主端点切真实备用四项，共八项全部通过；流式分别为
+  33 / 88 token、3.63 秒和 40 / 128 token、7.56 秒。此结果不替代内网 vLLM 与 GUI 验收。
+- 2026-10-07 自动化验证：每次功能提交前均通过 `cargo fmt --all -- --check`、
+  `cargo clippy --locked --all-targets -- -D warnings` 与全量测试；最终结果为 1788 通过、0 失败、39 忽略。
+  本机资源测试需在沙箱外运行；现有测试断言未修改。各次提交的 release 钩子构建均需完成后再继续。
+- 服务用量缺失时的字符估算不是账单数据。失败调用也估算输入；整轮只要有一次估算就显示「约」。
+- 停止会立即结束卡片计时；最终用量在后台请求返回后补到原轮次，不受停止导致的 `job_seq` 失效影响。
+  流式读取仍沿用阻塞取消机制：服务端长时间不给数据时，用量也要等读取结束才能补齐。
+- 拒收缓存是进程内缓存，服务升级后重启应用才会重新探测；没有新增 tracing、轨迹导出或模型评测集。
+- 备用按角色选，下一次仍从主模型开始。建议内网 DeepSeek v4 flash 与 MiniMax 2.7 互为起草 / 复核备用。
+- 真机：跑一次研究式起草，核对调用数、输入 / 输出 token、总耗时、实际引用编号和本地时间；接受提案，
+  保存稿件并重开，来源行仍应可见；中途答题续跑应累计用量与运行时间。
+- 真机：停掉主模型服务后再起草，确认有「本次改用」说明、来源行是备用模型；恢复主服务后下一次调用
+  应重试主模型。生成到一半停服务应报错、不改用备用；点停止也不切换。
+- 真机：知识库页检索 / 问答与侧栏检索各跑一次，工具栏更新最近耗时。记录块数与耗时，等真机数据出来
+  再定是否需要 sqlite-vec / HNSW，当前不定阈值。

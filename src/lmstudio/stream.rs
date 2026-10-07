@@ -42,6 +42,7 @@ pub enum Finish {
 /// 流式补全的结果。`content` 已剔除 `<think>` 段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamOutcome {
+    pub usage: Option<super::Usage>,
     pub content: String,
     pub reasoning_chars: usize,
     pub finish: Finish,
@@ -72,6 +73,7 @@ pub fn generate_stream(
         .as_ref()
         .map(|(name, schema)| super::response_format(name, schema));
     within_window(config, input, max_tokens, |limit| {
+        let with_switch = with_switch && !THINKING_SWITCH_REJECTED.load(Ordering::Relaxed);
         let mut request = StreamRequest {
             config,
             system,
@@ -79,6 +81,7 @@ pub fn generate_stream(
             temperature,
             max_tokens: limit,
             response_format: format.as_ref().filter(|_| !super::format_rejected(config)),
+            include_usage: !super::field_rejected(config, "stream_options"),
         };
         let first = stream_once(&request, with_switch, cancel, &mut on_delta);
         // 带了 `response_format` 被 4xx 拒：先去掉它重发（记下这个端点不认），调用方按文本约定解析。
@@ -86,6 +89,15 @@ pub fn generate_stream(
             Err(ChatError::Rejected(_)) if request.response_format.is_some() => {
                 super::reject_format(config);
                 request.response_format = None;
+                stream_once(&request, with_switch, cancel, &mut on_delta)
+            }
+            other => other,
+        };
+        // 固定降级顺序：格式 → 用量 → 关思考；最多三次额外请求，超长重算另计一次。
+        let first = match first {
+            Err(ChatError::Rejected(_)) if request.include_usage => {
+                super::reject_field(config, "stream_options");
+                request.include_usage = false;
                 stream_once(&request, with_switch, cancel, &mut on_delta)
             }
             other => other,
@@ -103,6 +115,7 @@ pub fn generate_stream(
 }
 
 struct StreamRequest<'a> {
+    include_usage: bool,
     config: &'a LmStudioConfig,
     system: &'a str,
     user: &'a str,
@@ -132,6 +145,9 @@ fn stream_once(
     );
     if let Some(format) = request.response_format {
         payload["response_format"] = format.clone();
+    }
+    if request.include_usage {
+        payload["stream_options"] = serde_json::json!({"include_usage": true});
     }
     let client = crate::net::stream_client(&config.base_url, config.timeout_seconds)
         .map_err(ChatError::Other)?;
@@ -166,6 +182,7 @@ fn stream_once(
         let parsed: ChatResponse = serde_json::from_str(&body)
             .context("模型服务响应不是兼容的 Chat Completions 格式")
             .map_err(ChatError::Other)?;
+        collector.usage = parsed.usage;
         let Some(choice) = parsed.choices.into_iter().next() else {
             return Err(ChatError::Other(anyhow!(
                 "模型服务返回了空的 choices，请检查模型是否已加载"
@@ -192,13 +209,25 @@ fn stream_once(
                 .context("读取模型服务的流式响应失败")
                 .map_err(ChatError::Other)?;
             if read == 0 {
-                // 没等到 [DONE] 连接就关了：有的服务端就是这样收尾的，按正常结束算。
+                // 接受仅用 finish_reason 收尾的服务；没有任何结束标记的断流不能当成完整稿。
+                if !collector.finished {
+                    return Err(ChatError::Other(anyhow!("模型服务在结束标记之前断开连接")));
+                }
                 break;
             }
             match parse_sse_line(&line) {
                 SseLine::Skip => {}
-                SseLine::Done => break,
+                SseLine::Done => {
+                    collector.finished = true;
+                    break;
+                }
                 SseLine::Data(value) => {
+                    if let Some(usage) = value
+                        .get("usage")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    {
+                        collector.usage = Some(usage);
+                    }
                     if let Some(message) = stream_error(&value) {
                         return Err(ChatError::Other(anyhow!("模型服务在生成中报错：{message}")));
                     }
@@ -257,6 +286,8 @@ pub(super) fn stream_error(value: &Value) -> Option<String> {
 
 /// 收集增量：正文过一遍 `<think>` 切分，同时累计结果。
 struct Collector<'f> {
+    finished: bool,
+    usage: Option<super::Usage>,
     on_delta: &'f mut dyn FnMut(StreamDelta<'_>),
     splitter: ThinkSplitter,
     content: String,
@@ -268,6 +299,8 @@ struct Collector<'f> {
 impl<'f> Collector<'f> {
     fn new(on_delta: &'f mut dyn FnMut(StreamDelta<'_>)) -> Self {
         Self {
+            finished: false,
+            usage: None,
             on_delta,
             splitter: ThinkSplitter::default(),
             content: String::new(),
@@ -294,6 +327,7 @@ impl<'f> Collector<'f> {
     }
 
     fn finish_reason(&mut self, reason: Option<&str>) {
+        self.finished |= reason.is_some();
         if reason == Some("length") {
             self.truncated = true;
         }
@@ -332,6 +366,7 @@ impl<'f> Collector<'f> {
             )));
         }
         Ok(StreamOutcome {
+            usage: self.usage,
             content: self.content,
             reasoning_chars: self.reasoning_chars,
             finish,
@@ -699,6 +734,49 @@ Connection: close
         assert_eq!(seen, ["R:想一下", "C:# 关于", "C:冬季防火的通知"]);
         let request = server.join().unwrap();
         assert!(request.contains("\"stream\":true"), "{request}");
+    }
+
+    #[test]
+    fn usage_last_frame_and_rejected_stream_options_are_remembered() {
+        let error = r#"{"error":"unknown field: stream_options"}"#;
+        let rejected = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{error}",
+            error.len()
+        );
+        let reply = || {
+            sse_response(&[
+                &delta("正文"),
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}",
+                "data: [DONE]",
+            ])
+        };
+        let (url, server) = fake_server_seq(vec![rejected, reply(), reply()]);
+        let config = config(url);
+        for _ in 0..2 {
+            let outcome = generate_stream(
+                &config,
+                "s",
+                "u",
+                0.2,
+                64,
+                super::super::ChatOptions::default(),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(
+                outcome.usage,
+                Some(super::super::Usage {
+                    prompt_tokens: 12,
+                    completion_tokens: 3,
+                    total_tokens: 15
+                })
+            );
+        }
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies[0]["stream_options"]["include_usage"], true);
+        assert!(bodies[1].get("stream_options").is_none());
+        assert!(bodies[2].get("stream_options").is_none());
     }
 
     #[test]

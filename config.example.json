@@ -16,6 +16,7 @@
     }
   ],
   "draft_model": { "provider_id": "p1", "model": "" },
+  "draft_backup_model": { "provider_id": "", "model": "" },
   "output_dir": "./output",
   "vocabulary": [
     {

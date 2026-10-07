@@ -10,7 +10,7 @@
 use super::history::{self, HistoryPlan};
 use super::{ReplyDraft, ResearchSnapshot, TurnRequest, TurnState, locate_selection};
 use crate::agent::api::{ApiSecrets, ApiStore};
-use crate::agent::backend::LmBackend;
+use crate::agent::backend::{LmBackend, ModelBackend};
 use crate::agent::board::{Board, Finding};
 use crate::agent::clarify::{self, Question, Reply, Target};
 use crate::agent::engine::{self, Event, Outcome, SkillReport, Suspension};
@@ -143,9 +143,7 @@ impl DraftPage<'_> {
                 };
                 turn.questions.clear();
                 turn.replies.clear();
-                turn.state = TurnState::Waiting;
-                turn.started = Instant::now();
-                turn.elapsed = None;
+                turn.resume();
                 let title = turn.title.clone();
                 (
                     Pick::Fixed(Box::new(skill)),
@@ -173,6 +171,15 @@ impl DraftPage<'_> {
         self.doc.ai_review_baseline = Some(self.doc.generated_markdown.clone());
         self.doc.ai_proposal = None;
         let (key, seq) = self.begin_job();
+        let turn_id = self
+            .doc
+            .ai_panel
+            .running_turn_mut()
+            .map(|turn| {
+                turn.usage_job_seq = Some(seq);
+                turn.id
+            })
+            .expect("技能任务已有轮次");
         *self.status = format!("正在{title}…");
 
         let config = self.config.clone();
@@ -272,6 +279,13 @@ impl DraftPage<'_> {
             let (result, used_style) = result;
             if let Some(id) = used_style {
                 send(DocJob::StyleUsed(id));
+            }
+            send(DocJob::AiUsage {
+                turn_id,
+                usage: model.usage(),
+            });
+            for note in model.take_notices() {
+                send(DocJob::AiNote(note));
             }
             send(DocJob::SkillDone(result.map(Box::new)));
         });

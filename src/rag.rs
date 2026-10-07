@@ -506,6 +506,36 @@ fn clamp_query(query: &str) -> String {
     split_at_char(trimmed, take).0.trim().to_string()
 }
 
+/// 后台检索完成后的耗时，界面线程每帧取走最近一条；不落盘。
+static LAST_RETRIEVAL: std::sync::Mutex<Option<std::time::Duration>> = std::sync::Mutex::new(None);
+
+pub(crate) fn take_retrieval_elapsed() -> Option<std::time::Duration> {
+    LAST_RETRIEVAL.lock().unwrap().take()
+}
+
+#[test]
+fn retrieval_records_elapsed_even_when_opening_database_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(
+        retrieve(
+            &RagConfig::default(),
+            &crate::models::LmStudioConfig::default(),
+            directory.path(),
+            "查询",
+            None
+        )
+        .is_err()
+    );
+    assert!(take_retrieval_elapsed().is_some());
+}
+
+struct RetrievalTimer(std::time::Instant);
+impl Drop for RetrievalTimer {
+    fn drop(&mut self) {
+        *LAST_RETRIEVAL.lock().unwrap() = Some(self.0.elapsed());
+    }
+}
+
 /// 检索入口：query（用户素材+草稿标题）→ 向量召回 + FTS 召回 → RRF 融合 → rerank 精排。
 ///
 /// 在调用方（起草线程）内同步执行；自己开 `KnowledgeStore` 连接。任一步失败
@@ -518,6 +548,7 @@ pub fn retrieve(
     query: &str,
     kind_filter: Option<TemplateKind>,
 ) -> anyhow::Result<RetrievalOutcome> {
+    let _timer = RetrievalTimer(std::time::Instant::now());
     use crate::knowledge::KnowledgeStore;
     use crate::rag_client;
 

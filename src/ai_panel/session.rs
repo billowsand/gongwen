@@ -32,6 +32,10 @@ const REASONING_KEEP: usize = 20_000;
 /// 存进库里的一轮。
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SavedTurn {
+    #[serde(default)]
+    pub(crate) provenance: String,
+    #[serde(default)]
+    pub(crate) usage: crate::agent::backend::UsageTotals,
     pub(crate) id: u64,
     pub(crate) title: String,
     pub(crate) prompt: String,
@@ -133,6 +137,8 @@ impl SavedTurn {
         };
         Self {
             id: turn.id,
+            usage: turn.usage.clone(),
+            provenance: turn.provenance.clone(),
             title: turn.title.clone(),
             prompt: turn.prompt.clone(),
             context: turn.context.clone(),
@@ -213,6 +219,9 @@ impl SavedTurn {
         };
         let is_workspace = self.is_workspace || matches!(state, TurnState::Proposed(_));
         let turn = AiTurn {
+            usage_job_seq: None,
+            provenance: self.provenance,
+            usage: self.usage,
             id: self.id,
             title: self.title,
             prompt: self.prompt,
@@ -301,6 +310,8 @@ fn fingerprint(turn: &AiTurn, has_proposal: bool) -> u64 {
         turn.title.hash(&mut hasher);
     }
     has_proposal.hash(&mut hasher);
+    turn.usage.calls.len().hash(&mut hasher);
+    turn.provenance.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -663,6 +674,87 @@ mod tests {
     }
 
     #[test]
+    fn provenance_and_usage_survive_acceptance_and_old_sessions_load() {
+        let mut panel = AiPanel::default();
+        panel.push_turn("起草".into(), "写稿".into(), vec![], None);
+        panel.turns[0].provenance = super::super::proposal_source(
+            "研究式起草",
+            &["主模型".into()],
+            &[1, 3],
+            "2026-10-07 14:22",
+        );
+        panel.turns[0].usage.record(
+            crate::agent::backend::ModelRole::Draft,
+            "主模型",
+            10,
+            "稿",
+            None,
+            1,
+        );
+        panel.finish(TurnState::Proposed(Default::default()));
+        panel.resolve_proposal(true, 0);
+        let source = panel.turns[0].provenance.clone();
+        let saved = SavedTurn::of(&panel.turns[0], None);
+        let mut json = serde_json::to_value(saved).unwrap();
+        let (restored, _) = serde_json::from_value::<SavedTurn>(json.clone())
+            .unwrap()
+            .restore(&[], false);
+        assert_eq!(restored.state, TurnState::Accepted);
+        assert_eq!(restored.provenance, source);
+        assert!(source.contains("证据 K1、K3"));
+        assert_eq!(restored.usage.calls.len(), 1);
+        json.as_object_mut().unwrap().remove("usage");
+        json.as_object_mut().unwrap().remove("provenance");
+        let old: SavedTurn = serde_json::from_value(json).unwrap();
+        assert!(old.usage.calls.is_empty());
+        assert!(old.provenance.is_empty());
+    }
+
+    #[test]
+    fn partial_acceptance_preserves_usage_and_provenance_together() {
+        let mut panel = AiPanel::default();
+        panel.push_turn("起草".into(), "写稿".into(), vec![], None);
+        panel.turns[0].provenance = "研究式起草 · 备用模型 · 证据 K1、K3 · 2026-10-07 14:22".into();
+        panel.turns[0].usage.record(
+            crate::agent::backend::ModelRole::Draft,
+            "备用模型",
+            10,
+            "稿",
+            None,
+            1,
+        );
+        panel.finish(TurnState::Proposed(Default::default()));
+        panel.resolve_proposal(true, 2);
+        let json = serde_json::to_string(&SavedTurn::of(&panel.turns[0], None)).unwrap();
+        let (restored, _) = serde_json::from_str::<SavedTurn>(&json)
+            .unwrap()
+            .restore(&[], false);
+        assert_eq!(restored.state, TurnState::Accepted);
+        assert_eq!(restored.excluded_hunks, 2);
+        assert_eq!(restored.provenance, panel.turns[0].provenance);
+        assert_eq!(restored.usage, panel.turns[0].usage);
+    }
+
+    #[test]
+    fn resuming_a_turn_keeps_elapsed_time_and_existing_usage() {
+        let mut panel = AiPanel::default();
+        panel.push_turn("起草".into(), "写稿".into(), vec![], None);
+        let turn = &mut panel.turns[0];
+        turn.elapsed = Some(Duration::from_secs(12));
+        turn.usage.record(
+            crate::agent::backend::ModelRole::Draft,
+            "m",
+            1,
+            "稿",
+            None,
+            1,
+        );
+        turn.resume();
+        assert!(turn.elapsed() >= Duration::from_secs(12));
+        assert_eq!(turn.usage.calls.len(), 1);
+    }
+
+    #[test]
     fn stopped_workspace_survives_restart_and_session_switch_resets_the_view() {
         let mut panel = AiPanel::default();
         panel.push_turn("起草".into(), "写稿".into(), vec![], None);
@@ -802,6 +894,8 @@ mod tests {
     #[test]
     fn a_deleted_skill_cannot_be_resumed() {
         let saved = SavedTurn {
+            provenance: String::new(),
+            usage: Default::default(),
             id: 1,
             title: "x".into(),
             prompt: "y".into(),

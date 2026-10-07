@@ -492,6 +492,13 @@ fn turn_card(
         });
     });
 
+    if !turn.provenance.is_empty() {
+        ui.label(
+            egui::RichText::new(&turn.provenance)
+                .small()
+                .color(theme::text_muted()),
+        );
+    }
     for note in &turn.notes {
         ui.horizontal_wrapped(|ui| {
             ui.add(
@@ -645,6 +652,14 @@ fn turn_card(
             rerun_button(ui, turn, "重新生成", action);
         }
         _ => {}
+    }
+    if !turn.state.running() {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(turn.usage.label(turn.elapsed()))
+                .small()
+                .color(theme::text_muted()),
+        );
     }
 }
 

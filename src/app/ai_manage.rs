@@ -557,6 +557,21 @@ impl GongwenApp {
             );
             self.store_picker_state("draft", filter, show_all);
         });
+        setting_row(ui, "备用模型（可不选）", None, |ui| {
+            let (mut filter, mut show_all) = self.picker_state("draft_backup");
+            model_picker(
+                ui,
+                "draft_backup",
+                &providers,
+                &mut self.config.draft_backup_model,
+                Some("不配置备用"),
+                &["chat"],
+                ModelKind::Chat,
+                &mut filter,
+                &mut show_all,
+            );
+            self.store_picker_state("draft_backup", filter, show_all);
+        });
         setting_row(ui, "温度", None, |ui| {
             ui.add(
                 egui::Slider::new(&mut self.config.lm_studio.temperature, 0.0..=1.2).step_by(0.05),
@@ -626,6 +641,21 @@ impl GongwenApp {
                 self.store_picker_state("revise", filter, show_all);
             });
 
+            setting_row(ui, "备用模型（可不选）", None, |ui| {
+                let (mut filter, mut show_all) = self.picker_state("revise_backup");
+                model_picker(
+                    ui,
+                    "revise_backup",
+                    &providers,
+                    &mut self.config.revise_model.backup_model_ref,
+                    Some("不配置备用"),
+                    &["chat"],
+                    ModelKind::Chat,
+                    &mut filter,
+                    &mut show_all,
+                );
+                self.store_picker_state("revise_backup", filter, show_all);
+            });
             sub_heading(ui, "送检范围", None);
             setting_row(ui, "单句字数上限", None, |ui| {
                 ui.add(
