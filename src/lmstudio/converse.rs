@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(serde::Deserialize)]
 struct ChatResponseRaw {
     choices: Vec<Value>,
+    #[serde(default)]
+    usage: Option<super::Usage>,
 }
 
 /// 回复里的一个工具调用。`arguments` 是原样的 JSON 文本。
@@ -28,6 +30,7 @@ pub struct WireToolCall {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConverseOutcome {
+    pub usage: Option<super::Usage>,
     /// 正文（已剔除 `<think>` 段）。
     pub content: String,
     pub tool_calls: Vec<WireToolCall>,
@@ -110,6 +113,48 @@ fn converse_once(
     cancel: &AtomicBool,
     on_delta: &mut dyn FnMut(StreamDelta<'_>),
 ) -> Result<ConverseOutcome, ConverseError> {
+    let include_usage = !super::field_rejected(config, "stream_options");
+    match converse_send(
+        config,
+        messages,
+        tools,
+        temperature,
+        max_tokens,
+        cancel,
+        on_delta,
+        include_usage,
+    ) {
+        // 用量字段先降级，之后仍是 4xx 才交给后端降级工具协议。
+        Err(ConverseError::Rejected(ref error))
+            if include_usage && !format!("{error:#}").contains("tool") =>
+        {
+            super::reject_field(config, "stream_options");
+            converse_send(
+                config,
+                messages,
+                tools,
+                temperature,
+                max_tokens,
+                cancel,
+                on_delta,
+                false,
+            )
+        }
+        other => other,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn converse_send(
+    config: &LmStudioConfig,
+    messages: &[Value],
+    tools: Option<&[Value]>,
+    temperature: f32,
+    max_tokens: u32,
+    cancel: &AtomicBool,
+    on_delta: &mut dyn FnMut(StreamDelta<'_>),
+    include_usage: bool,
+) -> Result<ConverseOutcome, ConverseError> {
     if config.model.trim().is_empty() {
         return Err(ConverseError::Other(anyhow!("请先在 AI 管理页选择模型")));
     }
@@ -120,6 +165,9 @@ fn converse_once(
         "max_tokens": max_tokens,
         "stream": true,
     });
+    if include_usage {
+        payload["stream_options"] = json!({"include_usage": true});
+    }
     if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
         payload["tools"] = Value::Array(tools.to_vec());
         payload["tool_choice"] = json!("auto");
@@ -158,6 +206,7 @@ fn converse_once(
         let parsed: ChatResponseRaw = serde_json::from_str(&body)
             .context("模型服务响应不是兼容的 Chat Completions 格式")
             .map_err(ConverseError::Other)?;
+        collector.usage = parsed.usage;
         let choice = parsed.choices.first().ok_or_else(|| {
             ConverseError::Other(anyhow!("模型服务返回了空的 choices，请检查模型是否已加载"))
         })?;
@@ -188,14 +237,34 @@ fn converse_once(
             let read = reader
                 .read_line(&mut line)
                 .context("读取模型服务的流式响应失败")
-                .map_err(ConverseError::Other)?;
+                .map_err(|error| {
+                    ConverseError::Other(if collector.calls.is_empty() {
+                        error
+                    } else {
+                        error.context(super::OutputStarted)
+                    })
+                })?;
             if read == 0 {
+                if !collector.finished {
+                    return Err(ConverseError::Other(anyhow!(
+                        "模型服务在结束标记之前断开连接"
+                    )));
+                }
                 break;
             }
             match parse_sse_line(&line) {
                 SseLine::Skip => {}
-                SseLine::Done => break,
+                SseLine::Done => {
+                    collector.finished = true;
+                    break;
+                }
                 SseLine::Data(value) => {
+                    if let Some(usage) = value
+                        .get("usage")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    {
+                        collector.usage = Some(usage);
+                    }
                     if let Some(message) = stream_error(&value) {
                         return Err(ConverseError::Other(anyhow!(
                             "模型服务在生成中报错：{message}"
@@ -226,6 +295,8 @@ fn converse_once(
 }
 
 struct Collector<'f> {
+    finished: bool,
+    usage: Option<super::Usage>,
     on_delta: &'f mut dyn FnMut(StreamDelta<'_>),
     splitter: ThinkSplitter,
     content: String,
@@ -237,6 +308,8 @@ struct Collector<'f> {
 impl<'f> Collector<'f> {
     fn new(on_delta: &'f mut dyn FnMut(StreamDelta<'_>)) -> Self {
         Self {
+            finished: false,
+            usage: None,
             on_delta,
             splitter: ThinkSplitter::default(),
             content: String::new(),
@@ -293,6 +366,7 @@ impl<'f> Collector<'f> {
     }
 
     fn finish_reason(&mut self, reason: Option<&str>) {
+        self.finished |= reason.is_some();
         if reason == Some("length") {
             self.truncated = true;
         }
@@ -321,6 +395,7 @@ impl<'f> Collector<'f> {
             }
         }
         ConverseOutcome {
+            usage: self.usage,
             content: self.content,
             tool_calls: calls,
             finish,
@@ -333,6 +408,105 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn converse_reads_usage_with_empty_choices() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"正文\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":4,\"total_tokens\":25}}\n\ndata: [DONE]\n\n";
+        let (url, server) = serve("200 OK", "text/event-stream", body.into());
+        let config = LmStudioConfig {
+            base_url: url,
+            model: "m".into(),
+            context_window: 32000,
+            ..Default::default()
+        };
+        let outcome = converse_stream(
+            &config,
+            &[json!({"role":"user","content":"u"})],
+            None,
+            0.0,
+            64,
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.usage,
+            Some(super::super::Usage {
+                prompt_tokens: 21,
+                completion_tokens: 4,
+                total_tokens: 25
+            })
+        );
+        assert!(server.join().unwrap().contains("stream_options"));
+    }
+
+    #[test]
+    fn converse_drops_rejected_usage_option_and_remembers_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = config(&format!("http://{}/v1", listener.local_addr().unwrap()));
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for i in 0..3 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&bytes);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|s| s.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + len {
+                            bodies.push(
+                                serde_json::from_slice::<Value>(&bytes[end + 4..end + 4 + len])
+                                    .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let (status, body) = if i == 0 {
+                    (
+                        "400 Bad Request",
+                        json!({"error":"unsupported stream_options"}),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        json!({"choices":[{"message":{"content":"答复"},"finish_reason":"stop"}]}),
+                    )
+                };
+                let body = body.to_string();
+                write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            bodies
+        });
+        for _ in 0..2 {
+            let outcome = converse_stream(
+                &config,
+                &[json!({"role":"user","content":"u"})],
+                None,
+                0.0,
+                64,
+                &AtomicBool::new(false),
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(outcome.usage, None);
+        }
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies[0]["stream_options"]["include_usage"], true);
+        assert!(bodies[1].get("stream_options").is_none());
+        assert!(bodies[2].get("stream_options").is_none());
+    }
 
     /// 起一个只回一次的本机假服务：记下请求体，按 `status` 与 `body` 回话。
     fn serve(
