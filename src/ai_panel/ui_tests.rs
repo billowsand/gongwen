@@ -2530,3 +2530,70 @@ fn rerunning_from_an_older_checkpoint_requires_an_untouched_document() {
         turn.notes
     );
 }
+
+/// 「把 AI 工作稿提交到正文」不发给模型（模型写不了正文），改出「写入正文？」确认卡：
+/// 不开新一轮（新一轮会把挂着的提案作废），提案与正文都原样不动，等用户点。
+#[test]
+fn saying_commit_to_body_shows_the_confirm_card_instead_of_asking_the_model() {
+    let mut harness = Harness::new("# 标题\n\n原文。\n");
+    let before = harness.doc.generated_markdown.clone();
+    harness
+        .doc
+        .ai_panel
+        .push_turn("润色".into(), "润色".into(), vec![], None);
+    harness.doc.ai_proposal = Some(AiProposal {
+        before: before.clone(),
+        result: GeneratedDraft {
+            markdown: "# 标题\n\n润色后的原文。\n".into(),
+            title: "标题".into(),
+            warnings: Vec::new(),
+            proof_warnings: Vec::new(),
+            proof_measured: false,
+            files: Vec::new(),
+        },
+        label: "润色".into(),
+        fact_changes: Vec::new(),
+        excluded: Default::default(),
+        fact_changes_confirmed: false,
+        confirmed_facts: Vec::new(),
+        view: Default::default(),
+        open: false,
+        locate: None,
+    });
+    harness
+        .doc
+        .ai_panel
+        .finish(TurnState::Proposed(ProposalSummary::default()));
+    harness.doc.ai_panel.composer.text = "请把现在的AI工作稿提交到正文".into();
+    harness.with_page(|page| page.send_ai_panel());
+
+    let composer = &harness.doc.ai_panel.composer;
+    assert!(composer.commit_prompt, "弹出确认卡");
+    assert!(composer.text.is_empty() && composer.error.is_none());
+    assert_eq!(harness.doc.ai_panel.turns.len(), 1, "没有开新一轮");
+    assert!(matches!(
+        harness.doc.ai_panel.turns[0].state,
+        TurnState::Proposed(_)
+    ));
+    assert!(harness.doc.ai_proposal.is_some(), "提案还挂着");
+    assert_eq!(harness.doc.generated_markdown, before, "没点之前正文不动");
+}
+
+/// 没有待写入的提案时，说明原因，同样不发给模型。
+#[test]
+fn saying_commit_to_body_without_a_proposal_explains_why() {
+    let mut harness = Harness::new("# 标题\n\n原文。\n");
+    harness.doc.ai_panel.composer.text = "/采用".into();
+    harness.with_page(|page| page.send_ai_panel());
+    let composer = &harness.doc.ai_panel.composer;
+    assert!(!composer.commit_prompt);
+    assert!(
+        composer
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("没有待写入的 AI 提案")),
+        "{:?}",
+        composer.error
+    );
+    assert!(harness.doc.ai_panel.turns.is_empty(), "没有发给技能");
+}

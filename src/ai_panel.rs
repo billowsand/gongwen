@@ -20,6 +20,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 mod checkpoint;
+mod commit_intent;
 mod composer_ui;
 mod history;
 mod mention;
@@ -62,6 +63,8 @@ pub(crate) struct Composer {
     pub(crate) skip_proposal: bool,
     /// 写法风格：自动挑 / 指定一份 / 不用（16.15 C.3）。
     pub(crate) style: crate::agent::style::StyleChoice,
+    /// 用户说了「把工作稿提交到正文」（`commit_intent`）：输入框上方出「写入正文？」确认卡。
+    pub(crate) commit_prompt: bool,
 }
 
 /// 一轮请求的原始参数，「重新生成」照它再发一次。

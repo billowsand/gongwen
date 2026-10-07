@@ -74,6 +74,7 @@ struct BarActions {
 impl DraftPage<'_> {
     pub(super) fn ai_composer_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        self.commit_prompt_ui(ui);
         if self.doc.ai_panel.skills.is_empty() {
             let _ = self.doc.ai_panel.reload_skills();
         }
@@ -630,11 +631,21 @@ impl DraftPage<'_> {
         set_caret(ctx, input_id, caret);
     }
 
-    /// 按输入区的内容发起一轮。`/compact` 是压缩会话的命令，不发给技能。
+    /// 按输入区的内容发起一轮。`/compact` 是压缩会话的命令，不发给技能；「把工作稿提交到
+    /// 正文」这类话（`commit_intent`）也不发给模型——正文只能由用户合并（红线 1），改为弹出
+    /// 「写入正文？」确认卡，点「接受」与结果卡「采用」走同一个 `accept_ai_proposal`。
     pub(super) fn send_ai_panel(&mut self) {
         if self.doc.ai_panel.composer.text.trim() == "/compact" {
             self.doc.ai_panel.composer.text.clear();
             self.start_compact();
+            return;
+        }
+        if super::commit_intent::is_commit_request(&self.doc.ai_panel.composer.text) {
+            let reason = self.commit_unavailable();
+            let composer = &mut self.doc.ai_panel.composer;
+            composer.text.clear();
+            composer.error = reason;
+            composer.commit_prompt = composer.error.is_none();
             return;
         }
         let on_proposal = self.doc.ai_proposal.is_some()
@@ -659,6 +670,121 @@ impl DraftPage<'_> {
             composer.refs.clear();
             // 选区只管这一轮：改完之后原文已变，留着只会让下一轮报「选区失效」。
             composer.selection = None;
+        }
+    }
+
+    /// 现在为什么没有可写入正文的提案；有就是 None。
+    fn commit_unavailable(&self) -> Option<String> {
+        if self.doc.ai_proposal.is_some() {
+            return None;
+        }
+        let panel = &self.doc.ai_panel;
+        Some(if panel.running() {
+            "AI 还在写，跑完会交成提案，到时再写入正文。".into()
+        } else {
+            match panel.turns.iter().rev().map(|turn| &turn.state).find(|state| {
+                matches!(
+                    state,
+                    super::TurnState::Accepted | super::TurnState::Expired | super::TurnState::Discarded
+                )
+            }) {
+                Some(super::TurnState::Accepted) => "最近一份提案已经写入正文了。".into(),
+                Some(super::TurnState::Expired) => {
+                    "提案交出之后正文改过了，不能再写入（会盖掉你的改动）；可以让 AI 按当前正文重做。".into()
+                }
+                _ => "现在没有待写入的 AI 提案：AI 工作稿要等任务跑完交成提案，才能写入正文。".into(),
+            }
+        })
+    }
+
+    /// 「写入正文？」确认卡（`commit_intent` 认出来之后）：提案摘要 + 接受 / 打开审阅 / 算了。
+    /// 有没核对的关键事实变化时不给「接受」，只给「打开审阅核对」——核对只在审阅里做。
+    fn commit_prompt_ui(&mut self, ui: &mut egui::Ui) {
+        if !self.doc.ai_panel.composer.commit_prompt {
+            return;
+        }
+        let Some(proposal) = self.doc.ai_proposal.as_ref() else {
+            // 提案在这期间被接受、放弃或被新任务取代了。
+            self.doc.ai_panel.composer.commit_prompt = false;
+            return;
+        };
+        let changes =
+            crate::diff::body_diff(&proposal.before, &proposal.result.markdown).changed_count;
+        let facts = proposal.fact_changes.len();
+        let needs_review = facts > 0 && !proposal.fact_changes_confirmed;
+        let mut summary = format!(
+            "「{}」提案：{} 字 · 正文变化 {changes} 处 · 关键事实变化 {facts} 项",
+            proposal.label,
+            proposal.result.markdown.chars().count()
+        );
+        if !proposal.excluded.is_empty() {
+            summary.push_str(&format!(
+                "（已排除 {} 处，只写入其余改动）",
+                proposal.excluded.len()
+            ));
+        }
+        #[derive(PartialEq)]
+        enum Choice {
+            Accept,
+            Review,
+            Cancel,
+        }
+        let mut choice = None;
+        theme::card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("写入正文？");
+            ui.label(egui::RichText::new(summary).small());
+            if needs_review {
+                ui.label(
+                    egui::RichText::new("有关键事实变化还没核对，请在审阅里逐项核对后再接受。")
+                        .small()
+                        .color(theme::danger()),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if needs_review {
+                    if theme::primary_icon_button(ui, theme::Icon::Compare, "打开审阅核对")
+                        .clicked()
+                    {
+                        choice = Some(Choice::Review);
+                    }
+                } else {
+                    if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "接受提案")
+                        .clicked()
+                    {
+                        choice = Some(Choice::Accept);
+                    }
+                    if ui
+                        .add(theme::secondary_icon_button(
+                            theme::Icon::Compare,
+                            "打开审阅",
+                        ))
+                        .clicked()
+                    {
+                        choice = Some(Choice::Review);
+                    }
+                }
+                if ui.button("算了").clicked() {
+                    choice = Some(Choice::Cancel);
+                }
+            });
+        });
+        ui.add_space(4.0);
+        let Some(choice) = choice else {
+            return;
+        };
+        self.doc.ai_panel.composer.commit_prompt = false;
+        match choice {
+            // 与结果卡「采用」同一个入口：事实核对、合并后重过闸门都在里面（红线 1、3）。
+            Choice::Accept => {
+                crate::app::GongwenApp::accept_ai_proposal(self.doc, self.config, self.status);
+            }
+            Choice::Review => {
+                if let Some(proposal) = self.doc.ai_proposal.as_mut() {
+                    proposal.open = true;
+                }
+            }
+            Choice::Cancel => {}
         }
     }
 
