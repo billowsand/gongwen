@@ -1567,6 +1567,81 @@ fn at_lists_articles_by_group_and_leaves_a_reference_mark() {
     harness.with_page(|page| page.stop_ai_task());
 }
 
+/// 长列表与同名稿件都不能复用控件 ID；展开后输入框仍可编辑。
+#[test]
+fn article_popup_has_no_widget_id_clashes_with_long_or_duplicate_titles() {
+    use crate::agent::board::{RefSource, Reference};
+    use crate::ai_panel::mention::CatalogItem;
+    let mut harness = Harness::new("");
+    theme::configure_style(&harness.ctx);
+    harness.doc.ai_panel.open = true;
+    harness.doc.ai_panel.composer.popup.catalog = Some(
+        (0..24)
+            .map(|id| CatalogItem {
+                reference: Reference {
+                    source: RefSource::Manuscript,
+                    id,
+                    title: "关于推进人工智能应用与数据治理的研究报告".into(),
+                },
+                kind: crate::models::TemplateKind::ResearchReport,
+                date: "2026-10-08".into(),
+            })
+            .collect(),
+    );
+    harness.doc.ai_panel.composer.text = "请根据 @".into();
+    harness.focus_input();
+    for _ in 0..5 {
+        let texts = harness.frame_texts();
+        assert!(
+            !texts.iter().any(|text| text.contains("use of widget ID")),
+            "控件 ID 冲突：{texts:?}"
+        );
+    }
+    // 同一弹层在窗口缩窄、变矮、再放大后，仍留在侧栏里，且不遮输入文字。
+    for size in [
+        egui::vec2(480.0, 720.0),
+        egui::vec2(340.0, 480.0),
+        egui::vec2(640.0, 720.0),
+    ] {
+        for _ in 0..8 {
+            harness.frame_output(Vec::new(), size);
+        }
+        let input_id = egui::Id::new(("ai_panel_input", harness.doc.key));
+        let popup = harness
+            .ctx
+            .memory(|memory| memory.area_rect(input_id.with("popup")))
+            .unwrap();
+        let input = harness.ctx.read_response(input_id).unwrap().rect;
+        let panel = harness
+            .ctx
+            .data(|data| {
+                data.get_temp::<egui::containers::panel::PanelState>(egui::Id::new("ai_panel_v1"))
+            })
+            .unwrap()
+            .outer_rect;
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(popup),
+            "弹层越界：{size:?} {popup:?}"
+        );
+        assert!(
+            popup.left() >= panel.left() && popup.right() <= panel.right(),
+            "弹层超出侧栏：{popup:?} {panel:?}"
+        );
+        assert!(
+            popup.bottom() <= input.top() - 16.0,
+            "弹层遮住输入文字：{popup:?} {input:?}"
+        );
+        assert!(
+            (popup.left() - (input.left() - 13.0)).abs() < 1.0,
+            "没有对齐输入框：{popup:?} {input:?}"
+        );
+    }
+    harness.press(egui::Key::ArrowDown);
+    harness.press(egui::Key::ArrowDown);
+    harness.press(egui::Key::Enter);
+    assert_eq!(harness.doc.ai_panel.composer.refs[0].id, 2);
+}
+
 #[test]
 fn deleting_the_mark_drops_the_reference_and_the_chip_unlinks() {
     use crate::agent::board::{RefSource, Reference};
@@ -1598,8 +1673,14 @@ fn composer_samples() {
     use crate::ai_panel::mention::CatalogItem;
     use crate::models::TemplateKind;
     let size = egui::vec2(480.0, 720.0);
-    let shoot = |harness: &mut Harness, name: &str| {
-        let mut canvas = crate::ui_snapshot::Canvas::default();
+    // 同一上下文连续出样张时，字体纹理只在第一次上传，必须跨样张保留。
+    let mut canvas = crate::ui_snapshot::Canvas::default();
+    let mut shoot = |harness: &mut Harness, name: &str| {
+        let size = if name.ends_with("narrow") {
+            egui::vec2(340.0, 480.0)
+        } else {
+            size
+        };
         theme::configure_style(&harness.ctx);
         harness.ctx.set_pixels_per_point(2.0);
         for _ in 0..15 {
@@ -1664,6 +1745,39 @@ fn composer_samples() {
     harness.doc.ai_panel.composer.text = "仿照@".into();
     harness.focus_input();
     shoot(&mut harness, "mention");
+
+    // 长列表、同名文章与悬停底色的实际样张；同时检查窄窗口的标题与快捷键分行。
+    harness
+        .doc
+        .ai_panel
+        .composer
+        .popup
+        .catalog
+        .as_mut()
+        .unwrap()
+        .extend((100..116).map(|id| {
+            item(
+                RefSource::Knowledge,
+                id,
+                "关于推进人工智能应用与数据治理的研究报告",
+                TemplateKind::ResearchReport,
+            )
+        }));
+    shoot(&mut harness, "mention-long");
+    let popup_id = egui::Id::new(("ai_panel_input", harness.doc.key)).with("popup");
+    let popup = harness
+        .ctx
+        .memory(|memory| memory.area_rect(popup_id))
+        .unwrap();
+    harness.frame_output(
+        vec![egui::Event::PointerMoved(egui::pos2(
+            popup.left() + 80.0,
+            popup.top() + 120.0,
+        ))],
+        size,
+    );
+    shoot(&mut harness, "mention-hover");
+    shoot(&mut harness, "mention-narrow");
 
     let mut harness = Harness::new("# 关于做好冬季森林防火工作的通知\n\n一、总体要求\n");
     harness.with_page(|page| page.toggle_ai_panel(None));

@@ -20,12 +20,8 @@ use crate::theme;
 use eframe::egui;
 use egui::text::{CCursor, CCursorRange};
 
-/// 弹出层的宽度。
-const POPUP_WIDTH: f32 = 320.0;
 /// 弹出层一屏最多显示几行，多了在层内滚动。
 const POPUP_ROWS: usize = 8;
-/// 弹出层一行的估计高度（两行字），只用来判断往上弹还是往下弹。
-const POPUP_ROW_HEIGHT: f32 = 40.0;
 /// `@` 列表每组最多列几篇；再多就请继续打字过滤。
 const GROUP_LIMIT: usize = 30;
 /// 底栏上可去掉的标签（选区、引用的文章）：与技能标签同一字号，右端一个 ×。
@@ -183,7 +179,7 @@ impl DraftPage<'_> {
                 );
                 output
             });
-        let box_top = framed.response.rect.top();
+        let input_rect = framed.response.rect;
         let output = framed.inner;
 
         // 弹出层跟着这一帧的光标：刚打进去的字也算在过滤里。
@@ -195,16 +191,12 @@ impl DraftPage<'_> {
             && (focused || over_popup || output.response.has_focus())
         {
             let rows = self.popup_rows(&trigger, has_text, kind);
-            let mut caret_rect = output
-                .galley
-                .pos_from_cursor(CCursor::new(caret))
-                .translate(output.galley_pos.to_vec2());
-            // 往上弹时贴着输入框的上沿，不压住框线。
-            caret_rect.min.y = caret_rect.min.y.min(box_top);
             let highlight = self.doc.ai_panel.composer.popup.highlight;
-            if let Some(pick) = popup_ui(&ctx, popup_id, caret_rect, &trigger, &rows, highlight) {
+            if let Some(pick) = popup_ui(&ctx, popup_id, input_rect, &trigger, &rows, highlight) {
                 self.apply_pick(&ctx, input_id, &trigger, caret, pick);
             }
+        } else {
+            ctx.data_mut(|data| data.remove::<PopupSelection>(popup_id.with("selection")));
         }
 
         let has_focus = output.response.has_focus();
@@ -954,81 +946,162 @@ fn send_button(ui: &mut egui::Ui, running: bool) -> egui::Response {
         .on_hover_text(tip)
 }
 
-/// 光标处的弹出列表。靠近窗口底边时向上弹（输入框在侧栏底部，多半是向上）。
+/// 只在筛选或键盘选中项改变时跟随滚动，不能每帧把鼠标滚动拉回选中行。
+type PopupSelection = (Trigger, Option<Pick>, usize);
+
+/// 输入框上沿的弹出列表；空间不足时收缩滚动区，下面更宽裕时改为向下弹。
 /// 点了某一行时返回它。
 fn popup_ui(
     ctx: &egui::Context,
     id: egui::Id,
-    caret: egui::Rect,
+    input_rect: egui::Rect,
     trigger: &Trigger,
     rows: &[Row],
     highlight: usize,
 ) -> Option<Pick> {
-    let screen = ctx.content_rect();
-    let height = rows.len().clamp(1, POPUP_ROWS) as f32 * POPUP_ROW_HEIGHT + 36.0;
-    let up = caret.bottom() + height > screen.bottom() - 8.0;
-    let x = caret
+    let screen = ctx.content_rect().shrink(8.0);
+    // 宽度含边框与内边距，随侧栏收缩，不再跟着 @ 在文字里的横坐标移动。
+    let width = input_rect.width().min(screen.width()).max(1.0);
+    let x = input_rect
         .left()
-        .min(screen.right() - POPUP_WIDTH - 16.0)
-        .max(screen.left() + 8.0);
+        .min(screen.right() - width)
+        .max(screen.left());
+    let style = ctx.global_style();
+    let (body_height, small_height) = ctx.fonts_mut(|fonts| {
+        (
+            fonts.row_height(&egui::TextStyle::Body.resolve(&style)),
+            fonts.row_height(&egui::TextStyle::Small.resolve(&style)),
+        )
+    });
+    let narrow = width < 360.0;
+    let header_height = 22.0
+        + body_height
+        + 12.0
+        + if narrow {
+            small_height + style.spacing.item_spacing.y
+        } else {
+            0.0
+        };
+    let row_height = body_height + small_height + style.spacing.item_spacing.y + 12.0;
+    let wanted_height = header_height + rows.len().clamp(1, POPUP_ROWS) as f32 * row_height;
+    let above = (input_rect.top() - 8.0 - screen.top()).max(0.0);
+    let below = (screen.bottom() - input_rect.bottom() - 8.0).max(0.0);
+    let up = above >= wanted_height || above >= below;
+    let available_height = if up { above } else { below };
     let (pos, pivot) = if up {
-        (egui::pos2(x, caret.top() - 4.0), egui::Align2::LEFT_BOTTOM)
+        (
+            egui::pos2(x, input_rect.top() - 8.0),
+            egui::Align2::LEFT_BOTTOM,
+        )
     } else {
-        (egui::pos2(x, caret.bottom() + 4.0), egui::Align2::LEFT_TOP)
+        (
+            egui::pos2(x, input_rect.bottom() + 8.0),
+            egui::Align2::LEFT_TOP,
+        )
     };
+    let selection = (
+        trigger.clone(),
+        rows.get(highlight).map(|row| row.pick.clone()),
+        rows.len(),
+    );
+    let follow_selection = ctx.data_mut(|data| {
+        let key = id.with("selection");
+        let changed = data.get_temp::<PopupSelection>(key).as_ref() != Some(&selection);
+        data.insert_temp(key, selection);
+        changed
+    });
     let mut clicked = None;
     egui::Area::new(id)
         .order(egui::Order::Foreground)
+        .movable(false)
+        .constrain_to(screen)
+        .default_size(egui::vec2(width, available_height.min(wanted_height)))
         .fixed_pos(pos)
         .pivot(pivot)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_width(POPUP_WIDTH);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(match trigger.kind {
-                            TriggerKind::Skill => "技能",
-                            TriggerKind::Article => "引用文章",
-                        })
-                        .small()
-                        .strong()
-                        .color(theme::text_soft()),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(10))
+                .corner_radius(egui::CornerRadius::same(10))
+                .show(ui, |ui| {
+                    ui.set_width((width - 22.0).max(1.0));
+                    let header_top = ui.cursor().top();
+                    let title = |ui: &mut egui::Ui| {
+                        ui.label(
+                            egui::RichText::new(match trigger.kind {
+                                TriggerKind::Skill => "技能",
+                                TriggerKind::Article => "引用文章",
+                            })
+                            .strong()
+                            .color(theme::text_soft()),
+                        );
+                    };
+                    let hint = |ui: &mut egui::Ui| {
                         ui.label(
                             egui::RichText::new("↑↓ 选择 · 回车确认 · Esc 关闭")
                                 .small()
                                 .color(theme::text_muted()),
                         );
-                    });
-                });
-                if rows.is_empty() {
-                    ui.weak(match trigger.kind {
-                        TriggerKind::Skill => "没有匹配的技能",
-                        TriggerKind::Article => "稿件库与知识库里没有匹配的文章",
-                    });
-                    return;
-                }
-                theme::popup_scroll(POPUP_ROWS as f32 * POPUP_ROW_HEIGHT).show(ui, |ui| {
-                    for (index, row) in rows.iter().enumerate() {
-                        if let Some(group) = row.group {
-                            ui.add_space(2.0);
-                            ui.label(
-                                egui::RichText::new(group)
-                                    .small()
-                                    .color(theme::text_muted()),
+                    };
+                    if narrow {
+                        title(ui);
+                        hint(ui);
+                    } else {
+                        ui.horizontal(|ui| {
+                            title(ui);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    hint(ui);
+                                },
                             );
-                        }
-                        let response = popup_row(ui, row, index == highlight);
-                        if index == highlight {
-                            response.scroll_to_me(None);
-                        }
-                        if response.clicked() {
-                            clicked = Some(row.pick.clone());
-                        }
+                        });
                     }
+                    ui.separator();
+                    // 标题实际高度包含横排的最小行高、分隔线与间距，不能只估算字号。
+                    let actual_header_height = ui.cursor().top() - header_top + 22.0;
+                    let scroll_height = (available_height - actual_header_height)
+                        .max(1.0)
+                        .min(POPUP_ROWS as f32 * row_height);
+                    if rows.is_empty() {
+                        ui.weak(match trigger.kind {
+                            TriggerKind::Skill => "没有匹配的技能",
+                            TriggerKind::Article => "稿件库与知识库里没有匹配的文章",
+                        });
+                        return;
+                    }
+                    theme::popup_scroll(scroll_height)
+                        .id_salt("candidates")
+                        .show(ui, |ui| {
+                            for (index, row) in rows.iter().enumerate() {
+                                if let Some(group) = row.group {
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        egui::RichText::new(group)
+                                            .small()
+                                            .color(theme::text_muted()),
+                                    );
+                                }
+                                // 标题可能重名，也可能筛选后换位置；按来源与真实 ID 隔离整行的控件。
+                                let row_id = match &row.pick {
+                                    Pick::Skill(id) => ui.id().with(("skill", id)),
+                                    Pick::Article(reference) => ui.id().with((
+                                        "article",
+                                        reference.source.label(),
+                                        reference.id,
+                                    )),
+                                };
+                                let response = ui
+                                    .push_id(row_id, |ui| popup_row(ui, row, index == highlight))
+                                    .inner;
+                                if index == highlight && follow_selection {
+                                    response.scroll_to_me(None);
+                                }
+                                if response.clicked() {
+                                    clicked = Some(row.pick.clone());
+                                }
+                            }
+                        });
                 });
-            });
         });
     clicked
 }
@@ -1041,16 +1114,18 @@ fn popup_row(ui: &mut egui::Ui, row: &Row, highlighted: bool) -> egui::Response 
     } else {
         theme::text()
     };
-    let frame = egui::Frame::new()
+    let mut frame = egui::Frame::new()
         .fill(if highlighted {
             theme::accent_soft()
         } else {
             egui::Color32::TRANSPARENT
         })
         .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(8, 4));
-    let inner = frame.show(ui, |ui| {
-        ui.set_width(width - 16.0);
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .begin(ui);
+    {
+        let ui = &mut frame.content_ui;
+        ui.set_width((width - 16.0).max(1.0));
         ui.add(
             egui::Label::new(egui::RichText::new(&row.title).color(title_color))
                 .truncate()
@@ -1067,21 +1142,16 @@ fn popup_row(ui: &mut egui::Ui, row: &Row, highlighted: bool) -> egui::Response 
                 .selectable(false),
             );
         }
-    });
+    }
+    let rect = frame.allocate_space(ui).rect;
     let response = ui
-        .interact(
-            inner.response.rect,
-            ui.id().with(("popup_row", &row.title, row.group)),
-            egui::Sense::click(),
-        )
+        .interact(rect, ui.id().with("select"), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.hovered() && !highlighted {
-        ui.painter().rect_filled(
-            inner.response.rect,
-            egui::CornerRadius::same(6),
-            theme::surface_hover().gamma_multiply(0.6),
-        );
+        frame.frame.fill = theme::surface_hover();
     }
+    // Frame::begin 预留的底色位置在文字之前；交互后补画也不会盖住文字。
+    frame.paint(ui);
     response
 }
 
