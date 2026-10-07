@@ -2684,3 +2684,46 @@ fn saying_commit_to_body_without_a_proposal_explains_why() {
     );
     assert!(harness.doc.ai_panel.turns.is_empty(), "没有发给技能");
 }
+
+/// 回归测试：跑任务时卡片里的阶段提示、过程记录很长，侧栏不能被撑宽、内容不能溢出侧栏。
+///
+/// 曾经阶段提示放在不换行的横排里，一长就把卡片撑得比侧栏还宽：侧栏被顶到最大宽度
+/// 挤压正文区，卡片左右两头都被裁掉。
+#[test]
+fn long_phase_and_steps_stay_inside_the_panel() {
+    let mut harness = Harness::new("# 研究报告\n\n正文内容。\n");
+    theme::configure_style(&harness.ctx);
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    let panel = &mut harness.doc.ai_panel;
+    panel.push_turn("研究式起草".into(), "写一篇研究报告".into(), vec![], None);
+    let turn = panel.turns.last_mut().unwrap();
+    turn.state = TurnState::Streaming;
+    let long = "第 2 轮 · 查「北约及盟国使用MSS时的数据共享边界、指挥权限、目标审批规则以及各类指挥员之间的授权、否决和复核流程」";
+    turn.phase = long.into();
+    turn.steps = (0..6)
+        .map(|i| format!("{i}. 「北约成员国使用中的指挥关系、数据共享边界和目标审批规则以及独立评估机制、误差统计和事故复盘制度」没补上：证据回答不了"))
+        .collect();
+    let size = egui::vec2(1200.0, 900.0);
+    let mut panel_rects = Vec::new();
+    for _ in 0..20 {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let ctx = harness.ctx.clone();
+        let _ = ctx.run_ui(raw, |ui| {
+            egui::CentralPanel::default()
+                .show(ui, |ui| harness.with_page(|page| page.create_ui(ui)));
+        });
+        let state = harness.ctx.data(|data| {
+            data.get_temp::<egui::containers::panel::PanelState>(egui::Id::new("ai_panel_v1"))
+        });
+        panel_rects.push(state.map(|state| state.outer_rect));
+    }
+    let first = panel_rects[1].expect("侧栏应有状态");
+    let last = panel_rects.last().unwrap().expect("侧栏应有状态");
+    assert!(
+        (last.width() - first.width()).abs() < 1.0 && last.width() <= 421.0,
+        "侧栏被内容撑宽：{panel_rects:?}"
+    );
+}

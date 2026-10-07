@@ -56,7 +56,19 @@ impl DraftPage<'_> {
             .default_size(PANEL_DEFAULT_WIDTH)
             .size_range(PANEL_MIN_WIDTH..=PANEL_MAX_WIDTH)
             .frame(theme::panel(theme::canvas(), 12))
-            .show_collapsible(ui, &mut open, |ui| self.ai_panel_ui(ui));
+            .show_collapsible(ui, &mut open, |ui| {
+                // 侧栏宽度只由用户拖动决定。内容画在不回报尺寸的子 Ui 里、超出的裁掉：
+                // 否则哪行字没折行，egui 会按内容把侧栏撑到最大宽度，左半截还会被正文区盖住。
+                let rect = ui.max_rect();
+                let mut content = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                content.set_clip_rect(rect.intersect(ui.clip_rect()));
+                self.ai_panel_ui(&mut content);
+                ui.allocate_rect(rect, egui::Sense::hover());
+            });
         // 标题行的「收起」直接改 `ai_panel.open`，两边取与。
         self.doc.ai_panel.open = open && self.doc.ai_panel.open;
     }
@@ -440,83 +452,10 @@ fn turn_card(
 ) {
     let seconds = turn.elapsed().as_secs_f32();
     let chars = turn.content.chars().count();
+    // 耗时先从右往左占位，状态与阶段提示在剩下的宽度里从左排。阶段提示（如「第 2 轮 · 查
+    // 「……」」）可能很长，只能截断：横排不折行，放任它会把卡片连同侧栏一起撑宽，
+    // 侧栏左半截被正文区盖住。
     ui.horizontal(|ui| {
-        match &turn.state {
-            TurnState::Waiting => {
-                theme::spinner(ui, 14.0, theme::accent());
-                ui.weak(if turn.phase.is_empty() {
-                    "等待模型响应…"
-                } else {
-                    &turn.phase
-                });
-            }
-            // 思考型模型可能先想几十秒才出第一个正文字（qwen3.5 9B 实测 27 s），
-            // 这段时间要明说在做什么，不然看着像卡住了。研究式起草在预研、检索时
-            // 也是这个状态，有阶段提示就显示提示。
-            TurnState::Streaming if turn.content.is_empty() => {
-                theme::spinner(ui, 14.0, theme::accent());
-                ui.weak(if turn.phase.is_empty() {
-                    "正在思考…"
-                } else {
-                    &turn.phase
-                });
-            }
-            TurnState::Streaming => {
-                theme::chip(
-                    ui,
-                    "生成中 · 未校验",
-                    theme::text_soft(),
-                    theme::surface_sunk(),
-                );
-                if !turn.phase.is_empty() {
-                    ui.weak(&turn.phase);
-                }
-            }
-            TurnState::Checking => {
-                theme::spinner(ui, 14.0, theme::accent());
-                ui.weak(&turn.phase);
-            }
-            TurnState::Asking => {
-                theme::chip(ui, "等你回答", theme::warn(), theme::warn_soft());
-            }
-            TurnState::Proposed(_) => {
-                theme::chip(ui, "待确认", theme::accent(), theme::accent_soft());
-            }
-            TurnState::Reported { .. } => {
-                theme::chip(ui, "问题清单", theme::accent(), theme::accent_soft());
-            }
-            TurnState::Accepted => {
-                let text = if turn.excluded_hunks > 0 {
-                    format!("已写入正文（排除 {} 处）", turn.excluded_hunks)
-                } else {
-                    "已写入正文".to_string()
-                };
-                theme::chip(ui, &text, theme::success(), theme::success_soft());
-            }
-            TurnState::Discarded => {
-                theme::chip(ui, "已放弃", theme::text_soft(), theme::surface_sunk());
-            }
-            TurnState::Superseded => {
-                theme::chip(
-                    ui,
-                    "已被新任务取代",
-                    theme::text_soft(),
-                    theme::surface_sunk(),
-                );
-            }
-            TurnState::Stopped => {
-                theme::chip(ui, "已停止", theme::warn(), theme::warn_soft());
-            }
-            TurnState::Failed(_) => {
-                theme::chip(ui, "失败", theme::danger(), theme::danger_soft());
-            }
-            TurnState::Interrupted => {
-                theme::chip(ui, "已中断", theme::warn(), theme::warn_soft());
-            }
-            TurnState::Expired => {
-                theme::chip(ui, "已过期", theme::text_soft(), theme::surface_sunk());
-            }
-        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(if chars == 0 {
@@ -527,6 +466,90 @@ fn turn_card(
                 .small()
                 .color(theme::text_muted()),
             );
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                match &turn.state {
+                    TurnState::Waiting => {
+                        theme::spinner(ui, 14.0, theme::accent());
+                        phase_label(
+                            ui,
+                            if turn.phase.is_empty() {
+                                "等待模型响应…"
+                            } else {
+                                &turn.phase
+                            },
+                        );
+                    }
+                    // 思考型模型可能先想几十秒才出第一个正文字（qwen3.5 9B 实测 27 s），
+                    // 这段时间要明说在做什么，不然看着像卡住了。研究式起草在预研、检索时
+                    // 也是这个状态，有阶段提示就显示提示。
+                    TurnState::Streaming if turn.content.is_empty() => {
+                        theme::spinner(ui, 14.0, theme::accent());
+                        phase_label(
+                            ui,
+                            if turn.phase.is_empty() {
+                                "正在思考…"
+                            } else {
+                                &turn.phase
+                            },
+                        );
+                    }
+                    TurnState::Streaming => {
+                        theme::chip(
+                            ui,
+                            "生成中 · 未校验",
+                            theme::text_soft(),
+                            theme::surface_sunk(),
+                        );
+                        if !turn.phase.is_empty() {
+                            phase_label(ui, &turn.phase);
+                        }
+                    }
+                    TurnState::Checking => {
+                        theme::spinner(ui, 14.0, theme::accent());
+                        phase_label(ui, &turn.phase);
+                    }
+                    TurnState::Asking => {
+                        theme::chip(ui, "等你回答", theme::warn(), theme::warn_soft());
+                    }
+                    TurnState::Proposed(_) => {
+                        theme::chip(ui, "待确认", theme::accent(), theme::accent_soft());
+                    }
+                    TurnState::Reported { .. } => {
+                        theme::chip(ui, "问题清单", theme::accent(), theme::accent_soft());
+                    }
+                    TurnState::Accepted => {
+                        let text = if turn.excluded_hunks > 0 {
+                            format!("已写入正文（排除 {} 处）", turn.excluded_hunks)
+                        } else {
+                            "已写入正文".to_string()
+                        };
+                        theme::chip(ui, &text, theme::success(), theme::success_soft());
+                    }
+                    TurnState::Discarded => {
+                        theme::chip(ui, "已放弃", theme::text_soft(), theme::surface_sunk());
+                    }
+                    TurnState::Superseded => {
+                        theme::chip(
+                            ui,
+                            "已被新任务取代",
+                            theme::text_soft(),
+                            theme::surface_sunk(),
+                        );
+                    }
+                    TurnState::Stopped => {
+                        theme::chip(ui, "已停止", theme::warn(), theme::warn_soft());
+                    }
+                    TurnState::Failed(_) => {
+                        theme::chip(ui, "失败", theme::danger(), theme::danger_soft());
+                    }
+                    TurnState::Interrupted => {
+                        theme::chip(ui, "已中断", theme::warn(), theme::warn_soft());
+                    }
+                    TurnState::Expired => {
+                        theme::chip(ui, "已过期", theme::text_soft(), theme::surface_sunk());
+                    }
+                }
+            });
         });
     });
 
@@ -702,6 +725,12 @@ fn turn_card(
                 .color(theme::text_muted()),
         );
     }
+}
+
+/// 阶段提示：一行放不下就截断，悬停看全文。
+fn phase_label(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(egui::RichText::new(text).weak()).truncate())
+        .on_hover_text(text);
 }
 
 /// 审核类技能的问题清单：按分组列出，有改法的注明已进审校抽屉。不改稿。
