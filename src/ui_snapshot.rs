@@ -82,8 +82,8 @@ impl Canvas {
                 (clipped.clip_rect.min.to_vec2() * ppp).to_pos2(),
                 (clipped.clip_rect.max.to_vec2() * ppp).to_pos2(),
             );
-            for triangle in mesh.indices.chunks_exact(3) {
-                let [a, b, c] = [0, 1, 2].map(|i| &mesh.vertices[triangle[i] as usize]);
+            for triangle in mesh.indices.as_chunks::<3>().0 {
+                let [a, b, c] = triangle.map(|i| &mesh.vertices[i as usize]);
                 raster(&mut buffer, width, height, clip, ppp, texture, [a, b, c]);
             }
         }
