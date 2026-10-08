@@ -165,6 +165,7 @@ fn converse_send(
         "max_tokens": max_tokens,
         "stream": true,
     });
+    super::reasoning::apply(config, &mut payload);
     if include_usage {
         payload["stream_options"] = json!({"include_usage": true});
     }
@@ -573,8 +574,11 @@ mod tests {
         let (url, server) = serve("200 OK", "text/event-stream", body);
         let tools = vec![json!({"type": "function", "function": {"name": "kb_search"}})];
         let mut seen = Vec::new();
+        let mut model = config(&url);
+        model.reasoning_effort = crate::models::ReasoningEffort::High;
+        model.reasoning_format = crate::models::ReasoningFormat::ReasoningObject;
         let outcome = converse_stream(
-            &config(&url),
+            &model,
             &[json!({"role": "user", "content": "查"})],
             Some(&tools),
             0.0,
@@ -586,6 +590,7 @@ mod tests {
         let request: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
         assert_eq!(request["tools"][0]["function"]["name"], "kb_search");
         assert_eq!(request["tool_choice"], "auto");
+        assert_eq!(request["reasoning"], json!({"effort": "high"}));
         assert_eq!(outcome.content, "先查。");
         assert_eq!(outcome.finish, Finish::Stop);
         assert_eq!(outcome.tool_calls.len(), 2);

@@ -579,6 +579,55 @@ impl GongwenApp {
         });
         setting_row(
             ui,
+            "思考深度",
+            Some(
+                "只对支持深度参数的模型生效；越高通常越慢、消耗越多。可用档位由服务端决定，报参数错误时选「沿用服务端」。",
+            ),
+            |ui| {
+                egui::ComboBox::from_id_salt("draft_reasoning_effort")
+                    .selected_text(self.config.lm_studio.reasoning_effort.label())
+                    .show_ui(ui, |ui| {
+                        for effort in crate::models::ReasoningEffort::ALL {
+                            ui.selectable_value(
+                                &mut self.config.lm_studio.reasoning_effort,
+                                effort,
+                                effort.label(),
+                            );
+                        }
+                    });
+            },
+        );
+        if self.config.lm_studio.reasoning_effort != crate::models::ReasoningEffort::Default {
+            setting_row(
+                ui,
+                "深度参数格式",
+                Some(
+                    "按模型服务的接口文档选择；此设置也用于起草备用模型。只调整深度，不负责开启服务端的思考模式。",
+                ),
+                |ui| {
+                    use crate::models::ReasoningFormat;
+                    egui::ComboBox::from_id_salt("draft_reasoning_format")
+                        .selected_text(match self.config.lm_studio.reasoning_format {
+                            ReasoningFormat::ReasoningEffort => "reasoning_effort（兼容接口）",
+                            ReasoningFormat::ReasoningObject => "reasoning.effort（OpenRouter 等）",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.lm_studio.reasoning_format,
+                                ReasoningFormat::ReasoningEffort,
+                                "reasoning_effort（兼容接口）",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.lm_studio.reasoning_format,
+                                ReasoningFormat::ReasoningObject,
+                                "reasoning.effort（OpenRouter 等）",
+                            );
+                        });
+                },
+            );
+        }
+        setting_row(
+            ui,
             "最大输出 Token",
             Some("每次请求还会按上下文窗口的剩余空间自动收紧，不会因为输入加输出超过窗口被拒"),
             |ui| {

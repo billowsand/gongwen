@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 pub mod context;
 mod converse;
+mod reasoning;
 mod stream;
 pub use context::ContextOverflow;
 pub use converse::converse_stream;
@@ -489,6 +490,8 @@ fn chat_payload(
         fields.insert("think".into(), json!(false));
         // 阿里云百炼等把它放在顶层。
         fields.insert("enable_thinking".into(), json!(false));
+    } else {
+        reasoning::apply(config, &mut payload);
     }
     payload
 }

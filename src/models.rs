@@ -762,6 +762,57 @@ impl fmt::Display for ModelRefError {
 
 impl std::error::Error for ModelRefError {}
 
+/// 思考深度由模型服务解释；默认不发送参数，兼容旧配置和非思考模型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    #[default]
+    Default,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Max,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "沿用服务端",
+            Self::Low => "低",
+            Self::Medium => "中",
+            Self::High => "高",
+            Self::Max => "最高",
+        }
+    }
+
+    pub fn wire_value(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::Max => Some("max"),
+        }
+    }
+}
+
+/// 同为 Chat Completions，网关对思考深度的字段写法可能不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningFormat {
+    #[default]
+    ReasoningEffort,
+    ReasoningObject,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LmStudioConfig {
@@ -774,6 +825,8 @@ pub struct LmStudioConfig {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
     pub temperature: f32,
+    pub reasoning_effort: ReasoningEffort,
+    pub reasoning_format: ReasoningFormat,
     pub max_tokens: u32,
     pub timeout_seconds: u64,
     /// 上下文窗口（token）。0 表示自动：先问服务，问不到按模型名估，再不行按 32k
@@ -788,6 +841,8 @@ impl Default for LmStudioConfig {
             model: String::new(),
             api_key: String::new(),
             temperature: 0.25,
+            reasoning_effort: ReasoningEffort::Default,
+            reasoning_format: ReasoningFormat::default(),
             // 思考型模型的推理也算在这里面：qwen3.5 9B 写两百来字的通知要先想近两万字，
             // 4096 会被思考吃光、一个正文字都出不来。
             max_tokens: 32000,
@@ -938,6 +993,8 @@ impl ReviseModelConfig {
             max_tokens: 512,
             timeout_seconds: self.timeout_seconds.max(5),
             context_window: self.context_window,
+            reasoning_effort: ReasoningEffort::Default,
+            reasoning_format: ReasoningFormat::default(),
         }
     }
 }
@@ -2227,6 +2284,8 @@ impl AppConfig {
                 max_tokens: 512,
                 timeout_seconds: revise.timeout_seconds.max(5),
                 context_window: revise.context_window,
+                reasoning_effort: ReasoningEffort::Default,
+                reasoning_format: ReasoningFormat::default(),
             }
         } else if revise.enabled && !revise.model.trim().is_empty() {
             // 旧内联字段（未迁移 / 测试直填）。
@@ -2246,6 +2305,9 @@ impl AppConfig {
         };
         if assist {
             config.max_tokens = self.lm_studio.max_tokens;
+        } else {
+            // 逐句复核的关闭思考降级重试也不能重新带上起草深度。
+            config.reasoning_effort = ReasoningEffort::Default;
         }
         Ok(config)
     }
@@ -2287,6 +2349,8 @@ impl AppConfig {
     ) -> Result<Option<LmStudioConfig>, ModelRefError> {
         let config = LmStudioConfig {
             temperature: 0.0,
+            // 独立复核备用的能力可能不同；辅助角色也不用起草模型的深度参数。
+            reasoning_effort: ReasoningEffort::Default,
             max_tokens: if assist {
                 self.lm_studio.max_tokens
             } else {
