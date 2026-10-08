@@ -1696,6 +1696,7 @@ ACP（Agent Client Protocol）由 Zed 牵头，JetBrains 等编辑器已经采�
 |---|---|---|
 | `clarify` | 动笔前澄清：先定文种（单独一批，答完回到本步重做），再按定下的文种出方向题与六要素题，有题就挂起 | `doc.elements`、`llm.generate`、`ask.choice` |
 | `plan` | 列要查的问题，或列大纲（大纲可要求用户确认） | `llm.generate`、`ask.choice` |
+| `confirm` | 确认任意清单变量（检索问题、要点……）：可直接改，`revise: true` 时还能让 AI 按修改要求重列；`plan` 列出的清单也走它（`docs/decision-modules.md`） | `llm.generate`、`ask.choice` |
 | `retrieve` | 多个检索词 × 多个数据源，结果并入证据包 | `kb.search`、`ms.search`、`http.call` |
 | `generate` | 按提示词生成：新稿 / 全文改写 / 选区改写 / 某一节 | `llm.generate`、`ws.write`、`ws.section` |
 | `for_each` | 对列表逐项执行子流程（如大纲每一节：检索 → 生成本节） | 按子流程 |

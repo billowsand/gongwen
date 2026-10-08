@@ -4,6 +4,7 @@ use super::{
     Flow, assist, assist_json, check_cancel, fetch_into, has_sources, note, param, phase, prompt,
     tool_line,
 };
+use crate::agent::decision::ListConfirm;
 use crate::agent::skill::StepSpec;
 use crate::agent::tools::{Permission, ToolCtx};
 use crate::agent::{clarify, elements};
@@ -203,7 +204,7 @@ fn plan_title(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow
 }
 
 /// 模型回复 → 一行一条，去掉编号与空行、「无」。
-fn lines_of(reply: &str, max: usize) -> Vec<String> {
+pub(super) fn lines_of(reply: &str, max: usize) -> Vec<String> {
     reply
         .lines()
         .map(|line| {
@@ -268,9 +269,21 @@ fn plan_split(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow
         Permission::Read,
         format!("按原文拆出要点 {} 条（不经模型）", items.len()),
     );
+    // 按原文拆的要点不让模型重列：重列就给了它改事实的机会。
     let name = step.save_as.as_deref().unwrap_or("items").to_string();
-    finish_list(ctx, step, items, name, "要点", true)
+    Ok(super::confirm::list(
+        ctx,
+        step,
+        items,
+        ListConfirm::new("要点", name, false),
+        true,
+    ))
 }
+
+/// 大纲的修订提示词（技能里没有「优化大纲」这段时用）。
+const OUTLINE_REVISE_TEMPLATE: &str = "根据原始写作要求和修改要求优化当前大纲。以当前大纲为基础，保留未要求调整的内容，\
+     只输出大纲，每行一章，格式为“章标题：要点”，不加编号、说明或正文，最多 {max} 章。\n\n\
+     【原始写作要求】\n{request}\n\n【当前大纲】\n{outline}\n\n【修改要求】\n{instruction}";
 
 fn plan_list(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, outline: bool) -> anyhow::Result<Flow> {
     let (default_max, default_var, label) = if outline {
@@ -279,44 +292,19 @@ fn plan_list(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, outline: bool) -> anyho
         (10, "items", "清单")
     };
     let max = param(ctx, step, &["max"], default_max, 1..=20);
-    if outline && let Some(revision) = ctx.board.vars.get(crate::agent::outline::REVISION).cloned()
-    {
-        let current = revision["current"].as_str().unwrap_or_default();
-        let instruction = revision["instruction"].as_str().unwrap_or_default();
-        phase(ctx, "按修改要求优化大纲…");
-        let locals = [
-            ("max", max.to_string()),
-            ("request", ctx.board.request_with_notes()),
-            ("outline", current.to_string()),
-            ("instruction", instruction.to_string()),
-        ];
-        let template = ctx.env.skill.section("优化大纲").unwrap_or(
-            "根据原始写作要求和修改要求优化当前大纲。以当前大纲为基础，保留未要求调整的内容，\
-             只输出大纲，每行一章，格式为“章标题：要点”，不加编号、说明或正文，最多 {max} 章。\n\n\
-             【原始写作要求】\n{request}\n\n【当前大纲】\n{outline}\n\n【修改要求】\n{instruction}",
-        );
-        let text = ctx.board.render_with(template, &locals);
-        let result = assist(ctx, &text).map(|reply| crate::prompt::sanitize_model_markdown(&reply));
-        check_cancel(ctx)?;
-        let items = match result {
-            Ok(reply) if !lines_of(&reply, max).is_empty() => lines_of(&reply, max),
-            result => {
-                let reason = result
-                    .err()
-                    .map_or("模型未返回有效大纲".into(), |e| format!("{e:#}"));
-                note(
-                    ctx,
-                    format!("大纲优化未完成（{reason}），已保留当前大纲，可继续修改或重试。"),
-                );
-                current.lines().map(str::to_string).collect()
-            }
-        };
-        ctx.board.vars.remove(crate::agent::outline::REVISION);
-        let name = step.save_as.as_deref().unwrap_or(default_var).to_string();
-        // 优化后始终再次确认，不能因为某份技能关闭了初次确认而直接开写。
-        let mut step = step.clone();
-        step.params.insert("confirm".into(), Value::Bool(true));
-        return finish_list(ctx, &step, items, name, label, true);
+    let name = step.save_as.as_deref().unwrap_or(default_var).to_string();
+    let spec = if outline {
+        ListConfirm::outline(name)
+    } else {
+        ListConfirm::new(label, name, true)
+    };
+    let template = if outline {
+        OUTLINE_REVISE_TEMPLATE
+    } else {
+        super::confirm::REVISE_TEMPLATE
+    };
+    if let Some(flow) = super::confirm::take_revision(ctx, step, &spec, max, template)? {
+        return Ok(flow);
     }
     phase(ctx, format!("列{label}…"));
     let locals = [
@@ -341,52 +329,7 @@ fn plan_list(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, outline: bool) -> anyho
         Permission::Read,
         format!("列出{label} {} 条", items.len()),
     );
-    let name = step.save_as.as_deref().unwrap_or(default_var).to_string();
-    finish_list(ctx, step, items, name, label, outline)
-}
-
-/// 清单存进变量；要确认时停下来让用户在框里改。
-fn finish_list(
-    ctx: &mut ToolCtx<'_, '_>,
-    step: &StepSpec,
-    items: Vec<String>,
-    name: String,
-    label: &str,
-    confirm_by_default: bool,
-) -> anyhow::Result<Flow> {
-    ctx.board.vars.insert(
-        name.clone(),
-        Value::Array(items.iter().cloned().map(Value::String).collect()),
-    );
-    let confirm = step
-        .params
-        .get("confirm")
-        .and_then(Value::as_bool)
-        .unwrap_or(confirm_by_default);
-    if !confirm {
-        return Ok(Flow::Next);
-    }
-    tool_line(
-        ctx,
-        "ask.choice",
-        Permission::AskUser,
-        format!("{label}请你确认"),
-    );
-    let question = clarify::Question {
-        id: 1,
-        text: format!("按这个{label}写吗？可以直接在框里改，每行一条"),
-        choices: vec![clarify::Choice {
-            label: "就按这个写".into(),
-            detail: String::new(),
-            recommended: true,
-            action: clarify::Action::Pick(Value::Null),
-        }],
-        custom_hint: Some("每行一条".into()),
-        prefill: items.join("\n"),
-        skippable: false,
-        target: clarify::Target::Pick,
-    };
-    Ok(Flow::SuspendInto(vec![question], name))
+    Ok(super::confirm::list(ctx, step, items, spec, outline))
 }
 
 fn plan_queries(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {

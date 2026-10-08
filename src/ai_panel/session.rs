@@ -62,6 +62,9 @@ pub(crate) struct SavedTurn {
     pub(crate) questions: Vec<Question>,
     #[serde(default)]
     pub(crate) replies: Vec<ReplyDraft>,
+    /// 这批题的形态；旧会话没有，读回按挂起的流程补（`decision::upgrade`）。
+    #[serde(default)]
+    pub(crate) decision: crate::agent::decision::Decision,
     #[serde(default)]
     pub(crate) research: Option<ResearchSnapshot>,
     /// 挂起的流程；读不出来时当没存过（这一轮读回为「已中断」），不拖垮整轮。
@@ -88,6 +91,7 @@ pub(crate) struct SavedRun {
     pub(crate) checkpoint: Checkpoint,
     pub(crate) questions: Vec<Question>,
     pub(crate) save_as: Option<String>,
+    pub(crate) decision: crate::agent::decision::Decision,
     pub(crate) use_rag: bool,
 }
 
@@ -158,6 +162,7 @@ impl<'de> Deserialize<'de> for SavedRun {
                 .ok_or_else(|| serde::de::Error::custom("缺 checkpoint"))?,
             questions: data.questions,
             save_as: data.save_as,
+            decision: data.decision,
             use_rag: data.use_rag,
         })
     }
@@ -173,6 +178,8 @@ struct SavedRunData {
     questions: Vec<Question>,
     #[serde(default)]
     save_as: Option<String>,
+    #[serde(default)]
+    decision: crate::agent::decision::Decision,
     #[serde(default)]
     use_rag: bool,
 }
@@ -251,6 +258,7 @@ impl SavedTurn {
             steps: turn.steps.clone(),
             questions: turn.questions.clone(),
             replies: turn.replies.clone(),
+            decision: turn.decision.clone(),
             research: turn.research.clone(),
             run: turn.run.as_ref().map(|run| SavedRun {
                 skill_id: run.skill.id.clone(),
@@ -258,6 +266,7 @@ impl SavedTurn {
                 checkpoint: run.suspension.checkpoint.clone(),
                 questions: run.suspension.questions.clone(),
                 save_as: run.suspension.save_as.clone(),
+                decision: run.suspension.decision.clone(),
                 use_rag: run.use_rag,
             }),
             findings: turn.findings.clone(),
@@ -290,16 +299,20 @@ impl SavedTurn {
                             checkpoint,
                             questions: saved_questions,
                             save_as,
+                            decision,
                             use_rag,
                             ..
                         } = saved;
+                        let mut suspension = Suspension {
+                            checkpoint,
+                            questions: saved_questions,
+                            save_as,
+                            decision,
+                        };
+                        crate::agent::decision::upgrade(skill, &mut suspension);
                         run = Some(Box::new(SkillRun {
                             skill: skill.clone(),
-                            suspension: Suspension {
-                                checkpoint,
-                                questions: saved_questions,
-                                save_as,
-                            },
+                            suspension,
                             use_rag,
                         }));
                         TurnState::Asking
@@ -328,6 +341,9 @@ impl SavedTurn {
             other => other,
         };
         let is_workspace = self.is_workspace || matches!(state, TurnState::Proposed(_));
+        let decision = run
+            .as_ref()
+            .map_or(self.decision, |run| run.suspension.decision.clone());
         let turn = AiTurn {
             usage_job_seq: None,
             provenance: self.provenance,
@@ -348,6 +364,7 @@ impl SavedTurn {
             steps: self.steps,
             questions,
             replies,
+            decision,
             research: self.research,
             run,
             // 检查点存在库里：读回后由 `refresh_resumable` 按库里最新一份填。
@@ -407,11 +424,11 @@ fn fingerprint(turn: &AiTurn, has_proposal: bool) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if turn.state.running() {
         "running".hash(&mut hasher);
-        // 优化大纲时输入框仍可编辑：这些输入即使任务在跑也要触发保存。
+        // 优化清单时输入框仍可编辑：这些输入即使任务在跑也要触发保存。
         if turn
             .replies
             .first()
-            .is_some_and(|reply| reply.outline_base.is_some())
+            .is_some_and(|reply| reply.revise_base.is_some())
         {
             format!("{:?}", turn.replies).hash(&mut hasher);
         }
@@ -747,6 +764,7 @@ mod tests {
                 },
                 questions: vec![question()],
                 save_as: None,
+                decision: Default::default(),
             },
             use_rag: false,
         }));
@@ -805,12 +823,12 @@ mod tests {
         let mut panel = saved_panel(&mut store, id);
         let turn = &mut panel.turns[1];
         turn.resume();
-        turn.replies[0].outline_base = Some("背景：原大纲".into());
+        turn.replies[0].revise_base = Some("背景：原大纲".into());
         turn.replies[0].custom = "背景：原大纲".into();
         let before = fingerprint(turn, false);
         turn.replies[0].custom = "背景：等待期间的手工修改".into();
-        turn.replies[0].outline_instruction = "加一章风险分析".into();
-        turn.replies[0].outline_candidate = "风险：AI候选".into();
+        turn.replies[0].revise_instruction = "加一章风险分析".into();
+        turn.replies[0].revise_candidate = "风险：AI候选".into();
         assert_ne!(fingerprint(turn, false), before);
         let encoded = serde_json::to_string(&SavedTurn::of(turn, None)).unwrap();
         let saved: SavedTurn = serde_json::from_str(&encoded).unwrap();
@@ -1056,6 +1074,7 @@ mod tests {
             steps: vec![],
             questions: vec![question()],
             replies: vec![ReplyDraft::default()],
+            decision: Default::default(),
             research: None,
             run: Some(SavedRun {
                 skill_id: "gone".into(),
@@ -1069,6 +1088,7 @@ mod tests {
                 },
                 questions: vec![],
                 save_as: None,
+                decision: Default::default(),
                 use_rag: false,
             }),
             findings: vec![],

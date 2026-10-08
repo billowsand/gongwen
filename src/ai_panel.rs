@@ -175,6 +175,9 @@ pub(crate) struct AiTurn {
     pub(crate) questions: Vec<Question>,
     /// 每道题当前的作答状态，与 `questions` 一一对应。
     pub(crate) replies: Vec<ReplyDraft>,
+    /// 这批题的形态（与 `questions` 一起设置）：清单确认在 AI 重列期间 `run` 交给了后台，
+    /// 卡片仍要按它画。
+    pub(crate) decision: crate::agent::decision::Decision,
     /// 研究式起草的结果：台账与证据，按回答修订时要用。
     pub(crate) research: Option<ResearchSnapshot>,
     /// 挂起的流程：答完题从这里接着跑。
@@ -292,6 +295,7 @@ impl AiPanel {
             steps: Vec::new(),
             questions: Vec::new(),
             replies: Vec::new(),
+            decision: Default::default(),
             research: None,
             run: None,
             resumable: None,
@@ -422,24 +426,26 @@ impl AiPanel {
         if let Some(turn) = self.running_turn_mut() {
             let previous = turn.replies.first().cloned();
             turn.replies = initial_replies(&run.suspension.questions);
-            if crate::agent::outline::step_index(&run.skill, &run.suspension).is_some()
+            if let Some(list) = run.suspension.decision.list().filter(|list| list.revisable)
                 && let Some(previous) = previous
                 && let Some(reply) = turn.replies.first_mut()
             {
                 if previous
-                    .outline_base
+                    .revise_base
                     .as_ref()
                     .is_some_and(|base| base != &previous.custom)
                 {
-                    reply.outline_candidate = reply.custom.clone();
+                    reply.revise_candidate = reply.custom.clone();
                     reply.custom = previous.custom;
-                    turn.notes.push(
-                        "优化期间你又修改了大纲，已保留手工内容；AI 优化结果可单独采用。".into(),
-                    );
+                    turn.notes.push(format!(
+                        "优化期间你又修改了{}，已保留手工内容；AI 优化结果可单独采用。",
+                        list.label
+                    ));
                 }
-                reply.outline_instruction = previous.outline_instruction;
+                reply.revise_instruction = previous.revise_instruction;
             }
             turn.questions = run.suspension.questions.clone();
+            turn.decision = run.suspension.decision.clone();
             turn.run = Some(run);
             turn.settle(TurnState::Asking);
         }
@@ -507,15 +513,15 @@ pub(crate) struct ReplyDraft {
     pub(crate) choice: Option<usize>,
     pub(crate) custom: String,
     pub(crate) skip: bool,
-    /// 大纲确认期间的修改要求；与手工编辑的大纲一起保存。
-    #[serde(default)]
-    pub(crate) outline_instruction: String,
+    /// 清单确认期间的修改要求；与手工编辑的清单一起保存。旧会话里叫 `outline_*`（只有大纲能改）。
+    #[serde(default, alias = "outline_instruction")]
+    pub(crate) revise_instruction: String,
     /// 发起优化时的文本快照，用于保护等待期间新增的手工修改。
-    #[serde(default)]
-    pub(crate) outline_base: Option<String>,
-    /// 等待期间发生手工修改时，AI 返回的大纲先存成候选，不覆盖当前文本。
-    #[serde(default)]
-    pub(crate) outline_candidate: String,
+    #[serde(default, alias = "outline_base")]
+    pub(crate) revise_base: Option<String>,
+    /// 等待期间发生手工修改时，AI 返回的清单先存成候选，不覆盖当前文本。
+    #[serde(default, alias = "outline_candidate")]
+    pub(crate) revise_candidate: String,
 }
 
 impl ReplyDraft {
@@ -648,6 +654,7 @@ mod tests {
                 },
                 questions: Vec::new(),
                 save_as: None,
+                decision: Default::default(),
             },
             use_rag: false,
         }));

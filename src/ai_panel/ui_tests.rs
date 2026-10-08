@@ -292,14 +292,21 @@ fn outline_confirmation_has_editing_and_refinement_controls_and_saves_the_instru
     }));
     let reply = &mut panel.turn_mut(id).unwrap().replies[0];
     reply.custom = "背景：用户手工修改".into();
-    reply.outline_instruction = "增加风险分析".into();
+    reply.revise_instruction = "增加风险分析".into();
     let encoded = serde_json::to_string(reply).unwrap();
     let restored: crate::ai_panel::ReplyDraft = serde_json::from_str(&encoded).unwrap();
     assert_eq!(restored.custom, "背景：用户手工修改");
-    assert_eq!(restored.outline_instruction, "增加风险分析");
+    assert_eq!(restored.revise_instruction, "增加风险分析");
     let old: crate::ai_panel::ReplyDraft =
         serde_json::from_str(r#"{"choice":0,"custom":"旧大纲","skip":false}"#).unwrap();
-    assert!(old.outline_instruction.is_empty());
+    assert!(old.revise_instruction.is_empty());
+    // 改名前存的会话：大纲的修改要求照样读回。
+    let renamed: crate::ai_panel::ReplyDraft = serde_json::from_str(
+        r#"{"choice":0,"custom":"旧大纲","skip":false,"outline_instruction":"旧要求","outline_base":"旧大纲"}"#,
+    )
+    .unwrap();
+    assert_eq!(renamed.revise_instruction, "旧要求");
+    assert_eq!(renamed.revise_base.as_deref(), Some("旧大纲"));
     let texts = harness.frame_texts();
     for label in [
         "确认大纲",
@@ -318,7 +325,7 @@ fn outline_confirmation_has_editing_and_refinement_controls_and_saves_the_instru
     let panel = &mut harness.doc.ai_panel;
     let turn = panel.turn_mut(id).unwrap();
     let mut run = turn.run.take().unwrap();
-    turn.replies[0].outline_base = Some(turn.replies[0].custom.clone());
+    turn.replies[0].revise_base = Some(turn.replies[0].custom.clone());
     turn.resume();
     let texts = harness.frame_texts();
     assert!(
@@ -332,8 +339,8 @@ fn outline_confirmation_has_editing_and_refinement_controls_and_saves_the_instru
     panel.ask(run);
     let reply = &panel.turn_mut(id).unwrap().replies[0];
     assert_eq!(reply.custom, "背景：等待期间的新修改");
-    assert!(reply.outline_candidate.contains("新增风险分析"));
-    assert_eq!(reply.outline_instruction, "增加风险分析");
+    assert!(reply.revise_candidate.contains("新增风险分析"));
+    assert_eq!(reply.revise_instruction, "增加风险分析");
     let texts = harness.frame_texts();
     assert!(texts.iter().any(|text| text.contains("未覆盖你的手工修改")));
 }
@@ -369,6 +376,7 @@ fn asking_turn(
             },
             questions,
             save_as: None,
+            decision: Default::default(),
         },
         use_rag: false,
     }));
@@ -2375,6 +2383,7 @@ fn suspended_draft(harness: &mut Harness, date: &str) -> (u64, crate::ai_panel::
             },
             questions: Vec::new(),
             save_as: None,
+            decision: Default::default(),
         },
         use_rag: false,
     }));

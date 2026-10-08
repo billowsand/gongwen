@@ -532,6 +532,9 @@ fn validate_steps(
                 if op == "agent" {
                     agent_problems(skill, step, &at, problems);
                 }
+                if op == "confirm" && step.param_str("over").is_none() {
+                    problems.push(format!("{at} confirm 缺少 over（要确认的清单变量）"));
+                }
             }
             (None, Some(tool)) => {
                 if !tools.contains(&tool.split(':').next().unwrap_or(tool)) {
@@ -580,6 +583,7 @@ fn validate_steps(
             "source_prompt",
             "elements_prompt",
             "generalize_prompt",
+            "revise_prompt",
         ] {
             if let Some(name) = step.param_str(key)
                 && skill.section(name).is_none()

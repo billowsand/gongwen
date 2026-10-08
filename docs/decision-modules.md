@@ -195,6 +195,37 @@ pub(crate) struct ListConfirm {
 
 ## 八、进度与交接
 
-### 第 ① 期（2026-10-09，进行中）
+### 第 ① 期（2026-10-09，已完成，待 GUI 真机验收）
 
-（完成后在此记录：实际改动、与方案的出入、已知坑、下一步。）
+**改动**
+
+- `src/agent/decision.rs`（新）：`Decision` / `ListConfirm`、`REVISION`、`revisable_step`、
+  `revise`（界面写修订请求）、`upgrade`（旧会话补形态）；原 `src/agent/outline.rs` 删除，三个大纲
+  测试搬过来改成走通用接口，另加 `confirm` 算子、不可修订清单、旧会话升级三个测试。
+- `src/agent/ops/confirm.rs`（新）：`confirm` 算子；`list`（`plan` 列完清单的收尾，原
+  `prepare::finish_list`）；`take_revision`（挂起那一步开头处理修订请求，原 `plan_list` 里的大纲
+  专用分支）。
+- `ops::Flow::SuspendInto` → `Flow::Confirm(题, ListConfirm)`；`engine::Suspension` 加 `decision`
+  （`serde(default)`）；技能校验认 `confirm` 缺 `over` 与 `revise_prompt`；技能管理页步骤名「确认清单」。
+- 界面：`AiTurn.decision`（与 `questions` 一起在 `AiPanel::ask` 里设、随 `SavedTurn` 存）；
+  `outline_ui` → `list_ui`，文字取自 `ListConfirm`；`ReplyDraft.outline_*` → `revise_*`（`serde(alias)`
+  读旧会话，有测试）；`CardAction::RefineOutline` → `ReviseList`；`refine_outline` → `revise_list`；
+  `SavedRun` 加 `decision`，读回时 `decision::upgrade`。
+
+**与方案的出入**
+
+- 修订提示词的变量除 `{current}` 外仍给 `{outline}`（旧技能的「优化大纲」段写的是它），另给 `{label}`；
+  大纲沿用原来的内置写法，其余清单用 `ops::confirm::REVISE_TEMPLATE`。
+- 题目文字沿用「按这个{label}写吗？…」，没改（清单卡片不显示它，只进历史）；自己填写框的提示改取
+  `ListConfirm.hint`（大纲是「每行一章：章标题：要点」）。
+
+**已知坑**
+
+- 流程参数**整串**只写一个变量（`text: '{queries}'`）时，引擎把变量的原值（数组）原样交给工具，
+  `ws.write` 的 `text` 收到数组就写不进去；要写进文字就在变量外加别的字（`'问题：{queries}'`）。这是
+  `Board::render_value` 一直以来的行为，不是这一期引入的；清单确认后选「就按这个写」变量仍是数组，
+  改过才是文字。
+- 修订只认顶层的一步（`for_each` 里本来就不能挂起）。
+
+**下一步**：GUI 真机看一遍研究报告的大纲确认（优化、优化期间手改、确认）与 `split` 要点确认的新
+卡片；然后开第 ② 期（待决事项 + 事实冲突裁决），先细化第四节两行的设计再动手。

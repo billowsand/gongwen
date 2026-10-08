@@ -113,10 +113,11 @@ pub(crate) fn unavailable(skill: &Skill, ctx: &RouteContext<'_>) -> Option<Strin
 }
 
 impl DraftPage<'_> {
-    /// 优化大纲也走唯一的技能恢复入口，返回后仍停在大纲确认。
-    pub(crate) fn refine_outline(&mut self, turn_id: u64) {
+    /// 让 AI 按修改要求重列清单（大纲、检索问题……）：也走唯一的技能恢复入口，返回后仍停在
+    /// 清单确认（`docs/decision-modules.md`）。
+    pub(crate) fn revise_list(&mut self, turn_id: u64) {
         if self.doc.busy || self.doc.read_only() {
-            *self.status = "请等待当前任务结束，并在可编辑稿件中优化大纲。".into();
+            *self.status = "请等待当前任务结束，并在可编辑稿件中优化。".into();
             return;
         }
         let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) else {
@@ -130,21 +131,24 @@ impl DraftPage<'_> {
         else {
             return;
         };
-        if let Err(error) = crate::agent::outline::revise(
-            &run.skill,
+        if let Err(error) = crate::agent::decision::revise(
             &mut run.suspension,
             &reply.custom,
-            &reply.outline_instruction,
+            &reply.revise_instruction,
         ) {
             *self.status = error;
             return;
         }
+        let label = turn
+            .decision
+            .list()
+            .map_or("清单", |list| list.label.as_str());
         turn.notes.push(format!(
-            "大纲修改要求：{}",
-            reply.outline_instruction.trim()
+            "{label}修改要求：{}",
+            reply.revise_instruction.trim()
         ));
-        turn.replies[0].outline_base = Some(turn.replies[0].custom.clone());
-        turn.replies[0].outline_candidate.clear();
+        turn.replies[0].revise_base = Some(turn.replies[0].custom.clone());
+        turn.replies[0].revise_candidate.clear();
         let original = turn.run.take();
         if let Err(error) = self.start_skill(request, Some((turn_id, run))) {
             if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
@@ -213,7 +217,7 @@ impl DraftPage<'_> {
                     return Err("这一轮已不在侧栏里。".into());
                 };
                 // 优化期间仍可手工编辑；返回结果时检测是否新增了修改，防止覆盖。
-                if !board.vars.contains_key(crate::agent::outline::REVISION) {
+                if !board.vars.contains_key(crate::agent::decision::REVISION) {
                     turn.questions.clear();
                     turn.replies.clear();
                 }
@@ -717,6 +721,7 @@ impl DraftPage<'_> {
                         checkpoint: stored.checkpoint,
                         questions: Vec::new(),
                         save_as: None,
+                        decision: Default::default(),
                     },
                     skill,
                     use_rag: stored.use_rag,
@@ -927,6 +932,7 @@ impl DraftPage<'_> {
                         checkpoint: stored.checkpoint,
                         questions: Vec::new(),
                         save_as: None,
+                        decision: Default::default(),
                     },
                     skill,
                     use_rag: stored.use_rag,
@@ -1346,16 +1352,16 @@ fn run_engine(
         secrets,
         ckpt,
     };
-    if board.vars.contains_key(crate::agent::outline::REVISION) {
+    if board.vars.contains_key(crate::agent::decision::REVISION) {
         let checkpoint = crate::agent::checkpoint::Checkpoint {
             at: at.clone(),
             reason: crate::agent::checkpoint::Reason::Step,
-            label: "待优化大纲（含手工修改与修改要求）".into(),
+            label: "待优化的清单（含手工修改与修改要求）".into(),
             board: board.clone(),
             partial: false,
         };
         if let Err(error) = ckpt.save(&checkpoint) {
-            emit(Event::Note(format!("大纲优化现场没存上：{error}")));
+            emit(Event::Note(format!("清单优化现场没存上：{error}")));
         }
     }
     match engine::run(board, &env, &at, emit).map_err(|e| format!("{e:#}"))? {

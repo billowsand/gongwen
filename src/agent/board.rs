@@ -303,7 +303,8 @@ pub(crate) fn value_to_text(value: &Value) -> String {
     }
 }
 
-fn item_line(item: &Value) -> String {
+/// 列表里的一项写成一行：对象取标题与说明，其余照 [`value_to_text`]。
+pub(crate) fn item_line(item: &Value) -> String {
     let Value::Object(map) = item else {
         return value_to_text(item);
     };

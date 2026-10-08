@@ -66,8 +66,8 @@ pub(super) enum CardAction {
     Rerun(u64),
     /// 交上这一轮选择题的回答。
     Answer(u64),
-    /// 按当前框内大纲与修改要求再优化一轮，不进入正文起草。
-    RefineOutline(u64),
+    /// 按当前框内清单（大纲、检索问题……）与修改要求再优化一轮，不往下跑。
+    ReviseList(u64),
     /// 打开审校抽屉（审核类技能把有改法的问题放在那里）。
     OpenDrawer,
     /// 风格学习的结果存成风格档案。
@@ -395,7 +395,7 @@ impl DraftPage<'_> {
                     self.apply_research_answers(id);
                 }
             }
-            Some(CardAction::RefineOutline(id)) => self.refine_outline(id),
+            Some(CardAction::ReviseList(id)) => self.revise_list(id),
             Some(CardAction::Rerun(id)) => {
                 let request = self
                     .doc
@@ -683,9 +683,9 @@ fn turn_card(
             if turn
                 .replies
                 .first()
-                .is_some_and(|reply| reply.outline_base.is_some())
+                .is_some_and(|reply| reply.revise_base.is_some())
             {
-                outline_ui(ui, turn, action);
+                list_ui(ui, turn, action);
             }
             ui.add_space(6.0);
             if ui
@@ -984,12 +984,8 @@ fn questions_ui(
     (heading, submit, skip): (&str, &str, &str),
     action: &mut Option<CardAction>,
 ) {
-    if turn.state == TurnState::Asking
-        && turn.run.as_ref().is_some_and(|run| {
-            crate::agent::outline::step_index(&run.skill, &run.suspension).is_some()
-        })
-    {
-        outline_ui(ui, turn, action);
+    if turn.state == TurnState::Asking && turn.decision.list().is_some() {
+        list_ui(ui, turn, action);
         return;
     }
     use crate::agent::clarify::Action;
@@ -1154,36 +1150,46 @@ fn questions_ui(
     });
 }
 
-/// 大纲编辑与提示词优化共用同一份当前文本，确认前可反复迭代。
-fn outline_ui(ui: &mut egui::Ui, turn: &mut super::AiTurn, action: &mut Option<CardAction>) {
+/// 清单确认（大纲、要点、检索问题……）：直接改与让 AI 按要求重列共用同一份当前文本，确认前
+/// 可反复迭代。标题、占位与按钮文字取自决策形态（`decision::ListConfirm`）；不可修订的清单
+/// （按原文拆的要点）只能直接改。
+fn list_ui(ui: &mut egui::Ui, turn: &mut super::AiTurn, action: &mut Option<CardAction>) {
     let running = turn.state.running();
+    let Some(list) = turn.decision.list().cloned() else {
+        return;
+    };
     let Some(reply) = turn.replies.first_mut() else {
         return;
     };
-    ui.label(egui::RichText::new("确认大纲").strong());
+    let label = list.label.as_str();
+    ui.label(egui::RichText::new(format!("确认{label}")).strong());
     theme::caption(
         ui,
-        "可直接修改大纲，也可填写修改要求让 AI 优化；满意后再开始写作。",
+        &if list.revisable {
+            format!("可直接修改{label}，也可填写修改要求让 AI 优化；满意后再继续。")
+        } else {
+            format!("可直接修改{label}，每行一条；满意后再继续。")
+        },
     );
     ui.add_space(6.0);
     let rows = reply.custom.lines().count().clamp(4, 14);
     ui.add(
         egui::TextEdit::multiline(&mut reply.custom)
-            .id_salt(("outline_text", turn.id))
+            .id_salt(("list_text", turn.id))
             .desired_rows(rows)
             .desired_width(f32::INFINITY)
-            .hint_text("每行一章：章标题：要点"),
+            .hint_text(list.hint.as_str()),
     );
     ui.add_space(8.0);
-    if !reply.outline_candidate.is_empty() {
+    if !reply.revise_candidate.is_empty() {
         ui.collapsing("AI 优化结果（未覆盖你的手工修改）", |ui| {
             ui.add(
-                egui::TextEdit::multiline(&mut reply.outline_candidate)
+                egui::TextEdit::multiline(&mut reply.revise_candidate)
                     .desired_rows(5)
                     .desired_width(f32::INFINITY),
             );
             if ui.button("使用这份优化结果").clicked() {
-                reply.custom = std::mem::take(&mut reply.outline_candidate);
+                reply.custom = std::mem::take(&mut reply.revise_candidate);
             }
         });
     }
@@ -1193,30 +1199,31 @@ fn outline_ui(ui: &mut egui::Ui, turn: &mut super::AiTurn, action: &mut Option<C
             "正在优化，可以继续手工修改；返回结果不会覆盖新增的修改。",
         );
     }
-    ui.label("修改要求");
-    ui.add(
-        egui::TextEdit::multiline(&mut reply.outline_instruction)
-            .id_salt(("outline_instruction", turn.id))
-            .desired_rows(3)
-            .desired_width(f32::INFINITY)
-            .hint_text("例如：合并前两章，增加国内外做法对比，把对策建议细分为三项"),
-    );
-    ui.add_space(8.0);
-    let has_outline = !reply.custom.trim().is_empty();
+    if list.revisable {
+        ui.label("修改要求");
+        ui.add(
+            egui::TextEdit::multiline(&mut reply.revise_instruction)
+                .id_salt(("list_instruction", turn.id))
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text(list.instruction_hint.as_str()),
+        );
+        ui.add_space(8.0);
+    }
+    let has_items = !reply.custom.trim().is_empty();
     ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_enabled(
-                !running && has_outline && !reply.outline_instruction.trim().is_empty(),
-                theme::secondary_icon_button(theme::Icon::Sparkles, "优化大纲"),
-            )
-            .clicked()
-        {
-            *action = Some(CardAction::RefineOutline(turn.id));
-        }
-        ui.add_enabled_ui(!running && has_outline, |ui| {
-            if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "确认大纲，开始写作")
+        if list.revisable
+            && ui
+                .add_enabled(
+                    !running && has_items && !reply.revise_instruction.trim().is_empty(),
+                    theme::secondary_icon_button(theme::Icon::Sparkles, &format!("优化{label}")),
+                )
                 .clicked()
-            {
+        {
+            *action = Some(CardAction::ReviseList(turn.id));
+        }
+        ui.add_enabled_ui(!running && has_items, |ui| {
+            if theme::primary_icon_button(ui, theme::Icon::SquareCheck, &list.submit).clicked() {
                 *action = Some(CardAction::Answer(turn.id));
             }
         });

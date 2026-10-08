@@ -11,6 +11,7 @@
 use super::board::Board;
 use super::checkpoint::{Checkpoint, Reason, StepPath};
 use super::clarify::{self, Action, Question, Reply, Target};
+use super::decision::Decision;
 use super::evidence::{self, EvidencePack};
 use super::gaps::Ledger;
 use super::ops::{self, Flow};
@@ -49,6 +50,10 @@ pub(crate) struct Suspension {
     pub(crate) questions: Vec<Question>,
     /// 选择题选中的值存进哪个变量。
     pub(crate) save_as: Option<String>,
+    /// 这一批题的形态：界面按它画卡片（`docs/decision-modules.md`）。旧会话没有，读回是一批
+    /// 选择题，由 `decision::upgrade` 认出旧的大纲确认。
+    #[serde(default)]
+    pub(crate) decision: Decision,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +166,7 @@ pub(crate) fn run(
                 checkpoint,
                 questions: ask.questions,
                 save_as: ask.into.or_else(|| step.save_as.clone()),
+                decision: ask.decision,
             })));
         }
         // 每步成功之后落一份检查点；不在步骤之前存（内容与上一份相同）。
@@ -197,6 +203,7 @@ struct Ask {
     into: Option<String>,
     /// 答完回到这一步重做（[`Flow::SuspendAgain`]）。
     again: bool,
+    decision: Decision,
 }
 
 impl Ask {
@@ -205,6 +212,7 @@ impl Ask {
             questions,
             into,
             again: false,
+            decision: Decision::Choose,
         }
     }
 }
@@ -233,7 +241,10 @@ fn run_step(
             Ok(match operator(ctx, step)? {
                 Flow::Next => None,
                 Flow::Suspend(questions) => Some(Ask::new(questions, None)),
-                Flow::SuspendInto(questions, var) => Some(Ask::new(questions, Some(var))),
+                Flow::Confirm(questions, list) => Some(Ask {
+                    decision: Decision::ConfirmList(list.clone()),
+                    ..Ask::new(questions, Some(list.var))
+                }),
                 Flow::SuspendAgain(questions) => Some(Ask {
                     again: true,
                     ..Ask::new(questions, None)
