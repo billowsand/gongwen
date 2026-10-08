@@ -75,7 +75,7 @@ pub fn to_xlsx(config: &ProofreadConfig, path: &Path) -> Result<()> {
         sheet.write_string_with_format(0, index as u16, *title, &header)?;
         sheet.set_column_width(index as u16, COLUMN_WIDTHS[index])?;
     }
-    // 表头冻结：141 行往下翻时还看得见列名。
+    // 表头冻结：155 行往下翻时还看得见列名。
     sheet.set_freeze_panes(1, 0)?;
 
     for (row, entry) in lexicon.entries.iter().enumerate() {
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn exported_table_round_trips_into_no_changes() {
         // 最关键的一条：导出再导回来必须是空操作，否则用户只是想备份一下，
-        // 就凭空多出 141 条“改动”。
+        // 就凭空多出 155 条“改动”。
         let mut config = ProofreadConfig::default();
         let (_dir, path) = temp("词表.xlsx");
         to_xlsx(&config, &path).expect("导出");

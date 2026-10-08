@@ -131,8 +131,6 @@ def check(text: str, kind: str) -> Report:
     last_level = 1
     has_attachment_summary = None
     in_fence = False
-    dash_count = 0
-    strong_words = 0
     anchors: set[str] = set()
     refs: list[tuple[int, str]] = []
 
@@ -210,13 +208,12 @@ def check(text: str, kind: str) -> Report:
             report.warn(number, "公文文种不支持公式，`$` 按普通字符印出")
         if re.search(r'"[^"]*[一-鿿][^"]*"', line):
             report.warn(number, "中文里用了半角引号，改用全角“”")
-        if RELATIVE_DATE.search(line):
-            report.warn(number, "有相对日期（今天、下周等），应换算成“YYYY年M月D日（星期X）”")
+        date_line = re.sub(r"[“‘「『][^”’」』]*[”’」』]", "", line)
+        if kind not in {"research-report", "phone-record"} and not in_attachment and not line.startswith(">") and RELATIVE_DATE.search(date_line):
+            report.warn(number, "有相对日期（今天、下周等），请核对材料基准日期后明确日程或期限，不直接按导出当天换算")
         if re.search(r"(?:上午|下午|晚上)\s*\d{1,2}[:：]\d{2}", line):
             report.warn(number, "24 小时制时间前不加“上午/下午”")
 
-        dash_count += line.count("——")
-        strong_words += len(re.findall(r"必须|应当|不得|严禁", line))
 
         if line.startswith("|"):
             continue
@@ -249,13 +246,25 @@ def check(text: str, kind: str) -> Report:
 
     if attachment_count and has_attachment_summary and not research:
         report.error(has_attachment_summary, "已有附件区段，程序会自动生成“附件：1.……”说明，不要手写")
-    if dash_count > 1 and not research:
-        report.warn(0, f"破折号用了 {dash_count} 处，全篇最多一处")
-    if strong_words > 2 and not research:
-        report.warn(0, f"“必须/应当/不得/严禁”合计 {strong_words} 处，建议不超过两处")
-
-    if kind in {"white-paper", "red-head-approval"} and "妥否，请指示" not in text:
-        report.error(0, "呈批件结尾必须有“妥否，请指示。”")
+    # 呈批件是版式，只在主标题明确为请示时核对结语；不设标点或用词配额。
+    section = "正文"
+    main_title = None
+    own_lines = []
+    for line in stripped:
+        marker = re.match(r"^<!--\s*[\[【]?(正文|附件|附录|body|attachment|appendix)[\]】]?\s*-->$", line, re.I)
+        if marker:
+            section = "正文" if marker.group(1).lower() in {"正文", "body"} else "附件"
+            continue
+        if section != "正文" or line.startswith(">"):
+            continue
+        if main_title is None and line.startswith("# "):
+            main_title = line[2:].strip()
+        elif not line.startswith("#"):
+            own_lines.append(re.sub(r"[“‘「『][^”’」』]*[”’」』]", "", line))
+    closing = r"(?:妥否|当否|可否|是否妥当)[，,]?\s*请(?:批示|指示|示下|审批)|请予(?:批复|批准)|特此请示"
+    if kind in {"white-paper", "red-head-approval"} and main_title and main_title.endswith("请示"):
+        if not any(re.search(rf"(?:^|[。！？])\s*(?:以上意见|以上请示|以上事项)?(?:{closing})[。！.!]?\s*$", line) for line in own_lines):
+            report.warn(0, "请示缺少请求性结语，请核对是否需要“妥否，请批示”等结语；报告不加")
     if kind == "white-paper" and attachment_count:
         report.error(0, "白头件只写标题和正文，不带附件区段")
     if kind == "meeting-agenda":

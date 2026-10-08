@@ -79,7 +79,11 @@ impl Tool for Proofread {
         let text = ctx.text_arg(args);
         let lexicon = crate::proofread::Lexicon::resolved(&ctx.env.config.proofread);
         let mut notes = lexicon.check(&text);
-        notes.extend(crate::proofread_rules::check(&ctx.board.draft, &text));
+        notes.extend(crate::proofread_rules::check_with_config(
+            &ctx.board.draft,
+            &text,
+            &ctx.env.config.proofread,
+        ));
         let must = notes
             .iter()
             .filter(|n| n.level == crate::proofread::Level::MustFix)

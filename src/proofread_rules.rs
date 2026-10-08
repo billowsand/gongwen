@@ -14,25 +14,71 @@ use crate::proofread::{Level, ProofNote};
 use regex::Regex;
 use std::sync::OnceLock;
 
+mod catalog;
+mod context;
+#[cfg(test)]
+mod regression_tests;
+pub(crate) use catalog::{RULES, set_style, style_enabled};
+pub(crate) use context::{body_text, declared_kind};
+
 /// 跑一遍全部文档级规则。
 pub fn check(input: &DraftInput, markdown: &str) -> Vec<ProofNote> {
+    check_with_config(input, markdown, &crate::models::ProofreadConfig::default())
+}
+
+pub(crate) fn check_with_config(
+    input: &DraftInput,
+    markdown: &str,
+    config: &crate::models::ProofreadConfig,
+) -> Vec<ProofNote> {
     let mut notes = Vec::new();
     // 先在原文上查引用写法，再把引用屏蔽掉：引用的名称与文号是事实，其他规则不该去改。
     check_citations(markdown, &mut notes);
     let masked = crate::document_reference::masked(markdown);
-    let markdown = masked.as_ref();
-    if let Some(title) = find_title(markdown) {
-        check_title(input.kind, &title, &mut notes);
+    let original = masked.as_ref();
+    let body_text = body_text(original);
+    let markdown = body_text.as_str();
+    // 主文掩码保护附件、引文与非正文块，并在 [正文] 标记后恢复检查。
+    let body = 0..markdown.len();
+    let title = find_title(original);
+    let actual = title.as_ref().and_then(|title| claimed_kind(&title.text));
+    if let Some(title) = &title {
+        check_title(input.kind, title, &mut notes);
     }
-    check_document_kind(input.kind, markdown, &mut notes);
-    check_numbers(markdown, &mut notes);
-    check_heading_numbers(markdown, &mut notes);
-    check_attachments(markdown, &mut notes);
-    check_honorifics(markdown, &mut notes);
-    check_sentence_endings(markdown, &mut notes);
-    check_language_style(input.kind, markdown, &mut notes);
+    check_document_kind(input.kind, actual, markdown, &body, &mut notes);
+    check_numbers(markdown, &body, &mut notes);
+    check_heading_numbers(original, &mut notes);
+    check_attachments(original, markdown, &mut notes);
+    if !matches!(
+        input.kind,
+        TemplateKind::ResearchReport | TemplateKind::PhoneRecord | TemplateKind::MeetingAgenda
+    ) {
+        check_honorifics(markdown, &body, &mut notes);
+    }
+    if !matches!(
+        input.kind,
+        TemplateKind::ResearchReport | TemplateKind::PhoneRecord | TemplateKind::MeetingAgenda
+    ) {
+        check_sentence_endings(original, &mut notes);
+    }
+    check_language_style(input.kind, actual, config, markdown, &mut notes);
     notes.sort_by(|a, b| a.span.start.cmp(&b.span.start).then(a.level.cmp(&b.level)));
     notes
+}
+
+/// 直接引语（“……”）在给定切片里的字节范围。引文里出现请示结语、相对日期、
+/// 汉字年份都是在照录原文，不该拿本稿的规则去改。
+fn quoted_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"[“「][^”」]*[”」]").expect("valid regex"));
+    re.find_iter(text).map(|m| m.range()).collect()
+}
+
+/// 区间是否完全落在某一处引语里。
+fn in_any(spans: &[std::ops::Range<usize>], start: usize, end: usize) -> bool {
+    spans
+        .iter()
+        .any(|span| span.start <= start && end <= span.end)
 }
 
 /// 正文里的文档主标题及其字节范围。
@@ -42,26 +88,20 @@ struct Title {
 }
 
 fn find_title(markdown: &str) -> Option<Title> {
-    let mut offset = 0usize;
-    for line in markdown.split('\n') {
-        let line_start = offset;
-        offset += line.len() + 1;
-        let trimmed = line.trim_start();
-        let Some(rest) = trimmed.strip_prefix("# ") else {
-            continue;
-        };
-        if rest.trim().is_empty() {
-            continue;
-        }
-        // 只取正文主标题；附件标题也是 `# `，但它在附件标记之后，这里取第一个即可。
-        let indent = line.len() - trimmed.len();
-        let start = line_start + indent + "# ".len();
-        return Some(Title {
-            text: rest.to_string(),
-            span: start..start + rest.len(),
-        });
-    }
-    None
+    let (_, range) = context::main_title(markdown)?;
+    let source = markdown.get(range.clone())?;
+    let trimmed = source.trim_start();
+    let rest = trimmed.strip_prefix("# ")?.trim_end();
+    let start = range.start + source.len() - trimmed.len() + 2;
+    Some(Title {
+        text: rest.to_owned(),
+        span: start..start + rest.len(),
+    })
+}
+
+/// 标题末尾自称的法定文种。取最长的那个才准（「通报」「通告」都以「通」开头）。
+fn claimed_kind(text: &str) -> Option<&'static str> {
+    context::claimed_kind(text)
 }
 
 fn note(
@@ -123,39 +163,49 @@ fn check_citations(markdown: &str, notes: &mut Vec<ProofNote>) {
 /// 公文标题里允许出现的标点：书名号和引号。除此之外标题不加标点，尤其不加句号。
 const TITLE_ALLOWED_PUNCT: [char; 6] = ['《', '》', '“', '”', '‘', '’'];
 
-/// 各文种标题允许的结尾文种词。空表示不限。
-fn allowed_suffixes(kind: TemplateKind) -> &'static [&'static str] {
+/// 各文种标题允许的结尾文种词。空表示不比较。
+///
+/// 只有模板与法定文种一一对应时才填：公函就是函，电话通知就是通知。呈批件
+/// 和白头件只是版式，实际文种由标题决定；普通公文更是没有文种信息。把模板名
+/// 当法定文种来卡标题，正是审核报告里那批误报的根子。
+fn definite_suffixes(kind: TemplateKind) -> &'static [&'static str] {
     match kind {
         TemplateKind::OfficialLetter => &["函"],
         TemplateKind::PhoneNotice => &["通知"],
-        TemplateKind::PhoneRecord => &["电话记录单"],
-        // 呈批件可以是请示、报告、意见、方案等，不好收窄。
-        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
-            &["请示", "报告", "意见", "方案", "建议", "说明"]
-        }
-        TemplateKind::PlainDocument
-        | TemplateKind::MeetingAgenda
-        | TemplateKind::ResearchReport => &[],
+        _ => &[],
     }
 }
 
-/// 认得出来的文种词。标题以其中之一结尾，就能判断它自称是什么文种。
-const KNOWN_SUFFIXES: [&str; 12] = [
-    "函", "通知", "通报", "报告", "请示", "批复", "意见", "决定", "纪要", "公告", "通告", "方案",
-];
+/// 正式公文标题才套标题规则。研究报告题名、电话记录单标题、会议名称是事务
+/// 材料或表单的标题，另有写法，不能拿公文标题规范去判。
+fn title_rules_apply(kind: TemplateKind) -> bool {
+    matches!(
+        kind,
+        TemplateKind::OfficialLetter
+            | TemplateKind::PhoneNotice
+            | TemplateKind::WhitePaper
+            | TemplateKind::RedHeadApproval
+            | TemplateKind::PlainDocument
+    )
+}
 
 /// 标题长度上限（字）。二号小标宋在 A4 版心一行约 22 字，超过两行就该考虑
 /// 精简或手工回行——回行要词意完整、呈梯形，程序做不了，只能提示。
 const TITLE_LONG_CHARS: usize = 36;
 
 fn check_title(kind: TemplateKind, title: &Title, notes: &mut Vec<ProofNote>) {
+    if !title_rules_apply(kind)
+        || (matches!(
+            kind,
+            TemplateKind::PlainDocument | TemplateKind::WhitePaper | TemplateKind::RedHeadApproval
+        ) && claimed_kind(&title.text).is_none())
+    {
+        return;
+    }
     let text = title.text.trim();
 
     // 标点。逐字找，报第一个就够，免得一个标题刷出一串提示。
-    if let Some((index, ch)) = text
-        .char_indices()
-        .find(|(_, ch)| is_punctuation(*ch) && !TITLE_ALLOWED_PUNCT.contains(ch))
-    {
+    if let Some((index, ch)) = first_stray_punctuation(text) {
         let start = title.span.start + index;
         notes.push(note(
             "RULE-TITLE-PUNCT",
@@ -166,26 +216,12 @@ fn check_title(kind: TemplateKind, title: &Title, notes: &mut Vec<ProofNote>) {
         ));
     }
 
-    // 「关于」。会议议程的标题是会议名称，不适用。
-    if kind != TemplateKind::MeetingAgenda && !text.contains("关于") {
-        notes.push(note(
-            "RULE-TITLE-GUANYU",
-            "标题规范",
-            Level::Suspect,
-            "公文标题的常规结构是「发文机关＋关于＋事由＋文种」，这里没有「关于」".into(),
-            title.span.clone(),
-        ));
-    }
-
-    // 文种一致。标题自称的文种与所选模板对不上，是最丢人的那类错。
-    let allowed = allowed_suffixes(kind);
+    // 文种一致。标题自称的文种与模板绑定的法定文种对不上，是最丢人的那类错。
+    // 没有绑定文种的模板（呈批件、普通公文）不比较——「没有明确文种时不判冲突」。
+    let allowed = definite_suffixes(kind);
     if !allowed.is_empty()
-        && let Some(claimed) = KNOWN_SUFFIXES
-            .iter()
-            .filter(|suffix| text.ends_with(*suffix))
-            // 「通报」「通告」都以「通」开头，取最长的那个才准。
-            .max_by_key(|suffix| suffix.len())
-        && !allowed.contains(claimed)
+        && let Some(claimed) = claimed_kind(text)
+        && !allowed.contains(&claimed)
     {
         notes.push(note(
             "RULE-TITLE-KIND",
@@ -211,6 +247,23 @@ fn check_title(kind: TemplateKind, title: &Title, notes: &mut Vec<ProofNote>) {
             title.span.clone(),
         ));
     }
+}
+
+/// 标题里第一个不该出现的标点。书名号、引号内部的标点是名称的一部分，
+/// 不在此列（「关于印发《某某工作：试行办法》的通知」不报）。
+fn first_stray_punctuation(text: &str) -> Option<(usize, char)> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '《' | '“' | '‘' => depth += 1,
+            '》' | '”' | '’' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && is_punctuation(ch) && !TITLE_ALLOWED_PUNCT.contains(&ch) => {
+                return Some((index, ch));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_punctuation(ch: char) -> bool {
@@ -242,52 +295,106 @@ fn is_punctuation(ch: char) -> bool {
 // ── 文种越界 / 一文一事 ─────────────────────────────────────────────────────
 
 /// 请示结语。出现它就意味着这份材料在向上级要一个答复。
-fn request_closing() -> &'static Regex {
+pub(crate) fn request_closing() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(妥否|当否|可否|是否妥当)[，,]?\s*请(批示|指示|示下|审批)|请予批复")
+        Regex::new(r"(?:妥否|当否|可否|是否妥当)[，,]?\s*请(?:批示|指示|示下|审批)|请予(?:批复|批准)|特此请示")
             .expect("valid regex")
     })
 }
 
-fn check_document_kind(kind: TemplateKind, markdown: &str, notes: &mut Vec<ProofNote>) {
-    let hits: Vec<_> = request_closing().find_iter(markdown).collect();
+/// 明确的非请示性文种。只有标题自称这几种，才把请示结语判为「夹带请示」。
+/// 「函」不在其中：审批函依法可以请求批准（《条例》第八条），不能一概排除。
+fn is_non_request_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "报告" | "通知" | "通报" | "公告" | "通告" | "纪要" | "决定"
+    )
+}
+
+fn check_document_kind(
+    kind: TemplateKind,
+    actual: Option<&'static str>,
+    markdown: &str,
+    body: &std::ops::Range<usize>,
+    notes: &mut Vec<ProofNote>,
+) {
+    if matches!(
+        kind,
+        TemplateKind::ResearchReport | TemplateKind::PhoneRecord | TemplateKind::MeetingAgenda
+    ) {
+        return;
+    }
+    let Some(slice) = markdown.get(body.clone()) else {
+        return;
+    };
+    // 引文里的请示结语是照录原文，不算本稿的请求。
+    let quotes = quoted_spans(slice);
+    let hits: Vec<(std::ops::Range<usize>, &str)> = request_closing()
+        .find_iter(slice)
+        .filter(|hit| {
+            !in_any(&quotes, hit.start(), hit.end())
+                && closing_is_ours(slice, hit.start(), hit.end())
+        })
+        .map(|hit| {
+            (
+                body.start + hit.start()..body.start + hit.end(),
+                hit.as_str(),
+            )
+        })
+        .collect();
     if hits.is_empty() {
         return;
     }
-    match kind {
-        // 请示类：一份只该请示一件事。出现多处请示结语，多半是把几件事并成了一篇。
-        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
-            if hits.len() > 1 {
-                notes.push(note(
-                    "RULE-ONE-MATTER",
-                    "文种",
-                    Level::Suspect,
-                    format!(
-                        "全文有 {} 处请示结语，疑似一文多事；请示应当一文一事，另一件请另行行文",
-                        hits.len()
-                    ),
-                    hits[1].range(),
-                ));
-            }
+    // 仅明确为请示时核对重复结语；次数不能证明一文多事，未知文种不猜。
+    let request_doc = actual == Some("请示");
+    if request_doc {
+        if hits.len() > 1 {
+            let (span, _) = &hits[1];
+            notes.push(note(
+                "RULE-ONE-MATTER",
+                "文种",
+                Level::Suspect,
+                format!(
+                    "本稿有 {} 处请求性结语，请核对是否重复；仅凭结语次数不能判定一文多事",
+                    hits.len()
+                ),
+                span.clone(),
+            ));
         }
-        // 其余文种不该夹带请示事项。
-        _ => {
-            for hit in &hits {
-                notes.push(note(
-                    "RULE-KIND-REQUEST",
-                    "文种",
-                    Level::MustFix,
-                    format!(
-                        "{}中不得夹带请示事项，这里出现了请示结语「{}」；需要上级答复的事项应另行请示",
-                        kind.label(),
-                        hit.as_str()
-                    ),
-                    hit.range(),
-                ));
-            }
+        return;
+    }
+    // 只有正文自报为非请示性文种时才判「夹带请示」。函可以商洽审批请求，
+    // 电话记录是转述，文种不明时保守不报。
+    if actual.is_some_and(is_non_request_kind) {
+        for (span, text) in &hits {
+            notes.push(note(
+                "RULE-KIND-REQUEST",
+                "文种",
+                Level::MustFix,
+                format!(
+                    "{}中不得夹带请示事项，这里出现了请示结语「{text}」；需要上级答复的事项应另行请示",
+                    actual.unwrap_or(kind.label())
+                ),
+                span.clone(),
+            ));
         }
     }
+}
+
+/// 只把独立结语行视为本稿请求；转述、举例和正文中的片段不作必错判断。
+pub(crate) fn closing_is_ours(text: &str, start: usize, end: usize) -> bool {
+    let line_start = text[..start]
+        .rfind(['\n', '。', '！', '？'])
+        .map_or(0, |pos| {
+            pos + text[pos..].chars().next().expect("句界").len_utf8()
+        });
+    let line_end = text[end..].find('\n').map_or(text.len(), |pos| end + pos);
+    let before = text[line_start..start].trim();
+    let after = text[end..line_end]
+        .trim()
+        .trim_matches(['。', '！', '!', '.']);
+    matches!(before, "" | "以上意见" | "以上请示" | "以上事项") && after.is_empty()
 }
 
 // ── 数字用法 ────────────────────────────────────────────────────────────────
@@ -298,14 +405,22 @@ fn chinese_year() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"[〇零一二三四五六七八九]{4}年").expect("valid regex"))
 }
 
-fn check_numbers(markdown: &str, notes: &mut Vec<ProofNote>) {
-    for hit in chinese_year().find_iter(markdown) {
+fn check_numbers(markdown: &str, body: &std::ops::Range<usize>, notes: &mut Vec<ProofNote>) {
+    let Some(slice) = markdown.get(body.clone()) else {
+        return;
+    };
+    // 引文与附件里的汉字年份是原文事实，不报。
+    let quotes = quoted_spans(slice);
+    for hit in chinese_year().find_iter(slice) {
+        if in_any(&quotes, hit.start(), hit.end()) {
+            continue;
+        }
         notes.push(note(
             "RULE-NUM-YEAR",
             "数字用法",
             Level::Suspect,
             format!("正文里的年份宜用阿拉伯数字，这里是「{}」", hit.as_str()),
-            hit.range(),
+            body.start + hit.start()..body.start + hit.end(),
         ));
     }
 }
@@ -381,6 +496,11 @@ fn parse_sequence(line: &str) -> Option<(SeqLevel, usize, usize)> {
     let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
     if !digits.is_empty()
         && trimmed[digits.len()..].starts_with('.')
+        // 「1.5亿元」是小数不是第三层序号：点号后紧跟数字的不算。
+        && trimmed[digits.len() + 1..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_digit())
         && let Ok(value) = digits.parse::<usize>()
     {
         return Some((SeqLevel::Third, value, indent + digits.len() + 1));
@@ -409,8 +529,11 @@ fn check_heading_numbers(markdown: &str, notes: &mut Vec<ProofNote>) {
     for line in markdown.split('\n') {
         let line_start = offset;
         offset += line.len() + 1;
-        // Markdown 标题由导出器自动编号，手写序号才是这条规则的对象。
-        if line.trim_start().starts_with('#') {
+        let trimmed = line.trim_start();
+        // Markdown 标题由导出器自动编号，手写序号才是这条规则的对象。新标题、
+        // 新区段（附件标记）意味着另一段列表，编号重新起算，跨章节不延续。
+        if trimmed.starts_with('#') || trimmed.starts_with("<!--") {
+            last = [0usize; 4];
             continue;
         }
         let Some((level, value, width)) = parse_sequence(line) else {
@@ -445,19 +568,28 @@ fn check_heading_numbers(markdown: &str, notes: &mut Vec<ProofNote>) {
 
 // ── 附件一致性 ──────────────────────────────────────────────────────────────
 
-/// 正文里声明的附件份数，如「附件：3份」「附件共三份」。
-fn declared_count() -> &'static Regex {
+/// 正文里声明的附件项目数，如「附件3项」「附件共三件」。
+///
+/// 只认「项／件」这类项目量词：「份」是印制份数（一个附件印三份），拿它和
+/// 内嵌附件种类数比较必然误报（见 docs/proofread-rule-audit.md 第三节）。
+fn declared_item_count() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"附件[^。；\n]{0,4}?([0-9]+|[一二三四五六七八九十]+)\s*份")
+        Regex::new(r"附件[^。；\n]{0,6}?([0-9]+|[一二三四五六七八九十]+)\s*(?:项|件)")
             .expect("valid regex")
     })
 }
 
-/// 正文里对某份附件的引用，如「见附件2」「详见附件三」。
+/// 正文里对某份附件的明确序号引用，如「见附件2」「详见附件三」。
+///
+/// 必须带引用动词：裸的「附件3」多半是清单标题或数量说明，且要能在金额、
+/// 单位词前止步（「附件10万元预算表」不是引用附件10）。
 fn attachment_reference() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"附件\s*([0-9]+|[一二三四五六七八九十]+)").expect("valid regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"(?:详见|参见|见|附)\s*附件\s*([0-9]+|[一二三四五六七八九十]+)")
+            .expect("valid regex")
+    })
 }
 
 fn parse_count(text: &str) -> Option<usize> {
@@ -466,42 +598,131 @@ fn parse_count(text: &str) -> Option<usize> {
         .or_else(|| chinese_to_number(text))
 }
 
-fn check_attachments(markdown: &str, notes: &mut Vec<ProofNote>) {
+/// 数量词／单位词：序号后面紧跟这些，说明它其实是数量而不是附件序号。
+fn is_quantity_unit(ch: char) -> bool {
+    matches!(
+        ch,
+        '份' | '万'
+            | '亿'
+            | '元'
+            | '个'
+            | '项'
+            | '件'
+            | '名'
+            | '次'
+            | '条'
+            | '页'
+            | '年'
+            | '月'
+            | '日'
+            | '%'
+            | '％'
+            | '张'
+            | '台'
+            | '套'
+            | '辆'
+            | '人'
+            | '家'
+            | '户'
+            | '本'
+            | '册'
+            | '部'
+            | '支'
+            | '种'
+    )
+}
+
+/// 正文里完整可核验的附件项目清单：「附件：」后紧跟的连续编号项。
+fn declared_list_count(slice: &str) -> Option<(usize, std::ops::Range<usize>)> {
+    let mut count = 0usize;
+    let mut list_span = None;
+    let mut in_list = false;
+    let mut offset = 0usize;
+    for line in slice.split('\n') {
+        let line_start = offset;
+        offset += line.len() + 1;
+        let trimmed = line.trim();
+        if !in_list {
+            let Some(rest) = trimmed
+                .strip_prefix("附件：")
+                .or_else(|| trimmed.strip_prefix("附件:"))
+            else {
+                continue;
+            };
+            in_list = true;
+            list_span = Some(line_start..line_start + line.len());
+            if let Some((SeqLevel::Third, 1, _)) = parse_sequence(rest.trim()) {
+                count += 1;
+            } else if !rest.trim().is_empty() {
+                // 「附件：情况表」「附件：3份」不是编号清单，不宣称有零项。
+                return None;
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((SeqLevel::Third, number, _)) = parse_sequence(trimmed) {
+            if number != count + 1 {
+                return None;
+            }
+            count += 1;
+            if let Some(span) = &mut list_span {
+                span.end = line_start + line.len();
+            }
+            continue;
+        }
+        break;
+    }
+    list_span.filter(|_| count > 0).map(|span| (count, span))
+}
+
+fn check_attachments(markdown: &str, slice: &str, notes: &mut Vec<ProofNote>) {
     let blocks = export::parse_markdown(markdown);
     let actual = export::attachment_names(&blocks).len();
 
-    if let Some(hit) = declared_count().captures(markdown)
-        && let Some(declared) = hit.get(1).and_then(|m| parse_count(m.as_str()))
+    let declared = declared_list_count(slice).or_else(|| {
+        declared_item_count().captures(slice).and_then(|hit| {
+            let value = hit.get(1).and_then(|m| parse_count(m.as_str()))?;
+            let whole = hit.get(0)?;
+            Some((value, whole.start()..whole.end()))
+        })
+    });
+    if let Some((declared, span)) = declared
         && declared != actual
     {
-        let whole = hit.get(0).expect("整体匹配");
         notes.push(note(
             "RULE-ATTACH-COUNT",
             "附件",
-            Level::MustFix,
-            format!("正文说「{}」，但实际只标了 {actual} 份附件", whole.as_str()),
-            whole.range(),
+            Level::Suspect,
+            format!(
+                "正文说明「{}」，编辑区内嵌附件为 {actual} 项；请核对是否另行随附，内嵌项目是否齐全",
+                markdown[span.clone()].trim()
+            ),
+            span,
         ));
     }
 
     // 引用的序号不能超过实际份数。收文单位一清点就会打电话过来。
-    for hit in attachment_reference().captures_iter(markdown) {
+    for hit in attachment_reference().captures_iter(slice) {
         let Some(number) = hit.get(1) else { continue };
         let Some(value) = parse_count(number.as_str()) else {
             continue;
         };
-        // 「附件3份」这种是份数不是序号，前面那条规则已经管了。
         let whole = hit.get(0).expect("整体匹配");
-        if markdown[whole.end()..].starts_with('份') {
+        let after = slice[whole.end()..].trim_start().chars().next();
+        // 「附件3份」是份数、「附件10万元」是金额，都不是序号引用。
+        if after.is_some_and(is_quantity_unit) || after.is_some_and(|ch| ch.is_ascii_digit()) {
             continue;
         }
         if value > actual {
+            let span = whole.range();
             notes.push(note(
                 "RULE-ATTACH-REF",
                 "附件",
-                Level::MustFix,
-                format!("正文引用了「附件{value}」，但实际只有 {actual} 份附件"),
-                whole.range(),
+                Level::Suspect,
+                format!("正文引用了「附件{value}」，编辑区只内嵌 {actual} 项附件；请核对是否另行随附或缺少内容"),
+                span,
             ));
         }
     }
@@ -521,29 +742,55 @@ fn check_attachments(markdown: &str, notes: &mut Vec<ProofNote>) {
 ///
 /// 能做的是两条不依赖隶属关系、而且恰恰是模型做不好的：
 ///
-/// 1. **「贵」不能加在具体单位名前面。** 规范写法是「贵局」「贵委」「贵单位」，
-///    「贵市财政局」不是词。纯字符串判定，零歧义——而这正是模型犯的第三种错。
+/// 1. **「贵」后面直接跟完整单位名多半是误用。** 规范写法是「贵局」「贵委」
+///    「贵单位」；「贵市财政局」不是词。但纯字符串分不清「贵阳市财政局」这种
+///    地名，也容易跨短语误配，所以只降为**疑似**：词库能确认完整机构名之前，
+///    不拿它当必错（见 docs/proofread-rule-audit.md P1）。
 /// 2. **同一篇里不能既称「贵局」又称「你局」。** 这是全篇一致性问题：单看一句
 ///    两种都对，只有通读全文才发现前后不一。模型逐句看，永远发现不了。
-fn check_honorifics(markdown: &str, notes: &mut Vec<ProofNote>) {
+fn check_honorifics(markdown: &str, body: &std::ops::Range<usize>, notes: &mut Vec<ProofNote>) {
+    let Some(slice) = markdown.get(body.clone()) else {
+        return;
+    };
+    // 附件表单与直接引文里的称谓不是本稿行文，不判。
+    let quotes = quoted_spans(slice);
     static ATTACHED: OnceLock<Regex> = OnceLock::new();
-    // 「贵」与机构后缀之间还夹着两个以上汉字，就说明后面跟的是完整单位名。
-    // 「贵局」「贵委」「贵办」中间没有字，不会命中；「贵单位」的「位」不是
-    // 机构后缀，也不会命中。
+    // 「贵」与机构后缀之间夹着少量汉字，多半是完整单位名。中间夹了称谓词或
+    // 动词的按跨短语匹配排除（「贵单位负责联系市财政局」）。
     let attached = ATTACHED.get_or_init(|| {
-        Regex::new(r"贵[\p{Han}]{2,10}(?:委员会|管理局|分局|局|委|办|厅|处|院|校|中心)")
+        Regex::new(r"贵([\p{Han}]{1,5})(?:委员会|管理局|分局|局|委|办|厅|处|院|校|中心)")
             .expect("敬称正则必须有效")
     });
-    for hit in attached.find_iter(markdown) {
+    for hit in attached.captures_iter(slice) {
+        let whole = hit.get(0).expect("整体匹配");
+        if in_any(&quotes, whole.start(), whole.end()) {
+            continue;
+        }
+        let middle = hit.get(1).expect("中间分组").as_str();
+        if ["贵阳", "贵港", "贵溪", "贵定"]
+            .iter()
+            .any(|name| whole.as_str().starts_with(name))
+        {
+            continue;
+        }
+        if [
+            "单位", "公司", "本", "我", "你", "负责", "联系", "请", "要求", "关于", "和", "与",
+            "及", "并", "的", "了", "等", "各", "驻",
+        ]
+        .iter()
+        .any(|word| middle.contains(word))
+        {
+            continue;
+        }
         notes.push(note(
             "RULE-HONOR-ATTACHED",
             "称谓规范",
-            Level::MustFix,
+            Level::Suspect,
             format!(
-                "「{}」把敬称加在了完整单位名前面。「贵」只能代指对方机关，应写「贵局」「贵委」「贵单位」，或直接写单位名称",
-                hit.as_str()
+                "疑似把敬称加在了完整单位名前面：「{}」。「贵」只能代指对方机关，应写「贵局」「贵委」「贵单位」，或直接写单位名称",
+                whole.as_str()
             ),
-            hit.range(),
+            body.start + whole.start()..body.start + whole.end(),
         ));
     }
 
@@ -552,14 +799,17 @@ fn check_honorifics(markdown: &str, notes: &mut Vec<ProofNote>) {
     let paired = paired_honorific(&PAIRED);
     let mut seen_polite: Vec<&str> = Vec::new();
     let mut seen_plain: Vec<(&str, std::ops::Range<usize>)> = Vec::new();
-    for hit in paired.captures_iter(markdown) {
+    for hit in paired.captures_iter(slice) {
         let whole = hit.get(0).expect("整体匹配");
+        if in_any(&quotes, whole.start(), whole.end()) {
+            continue;
+        }
         let suffix = hit.get(2).expect("后缀分组").as_str();
         let honorific = hit.get(1).expect("敬称分组").as_str();
         if honorific == "贵" {
             seen_polite.push(suffix);
         } else {
-            seen_plain.push((suffix, whole.range()));
+            seen_plain.push((suffix, body.start + whole.start()..body.start + whole.end()));
         }
     }
     for (suffix, span) in seen_plain {
@@ -571,7 +821,7 @@ fn check_honorifics(markdown: &str, notes: &mut Vec<ProofNote>) {
             "称谓规范",
             Level::Suspect,
             format!(
-                "全篇对同一对象既称「贵{suffix}」又称「你{suffix}」，请统一（平行文用「贵」，下行文用「你」）"
+                "正文同时出现「贵{suffix}」与「你{suffix}」，请核对是否指向同一机关；不同对象可以使用不同称谓"
             ),
             span,
         ));
@@ -615,6 +865,15 @@ fn check_sentence_endings(markdown: &str, notes: &mut Vec<ProofNote>) {
             }
             export::MarkdownBlock::Paragraph(text) if !in_attachment => {
                 let trimmed = text.trim_end();
+                // 研究公式、图题、表格与 HTML 注释不按句子写，末尾没有句号是对的。
+                if trimmed.starts_with("$$")
+                    || trimmed.starts_with('$')
+                    || trimmed.starts_with('\\')
+                    || trimmed.starts_with('|')
+                    || trimmed.starts_with("<!--")
+                {
+                    continue;
+                }
                 if trimmed.chars().count() < 10 {
                     continue;
                 }
@@ -741,17 +1000,35 @@ const JINYIBU_LIMIT: usize = 3;
 /// 且全是历史陈述而非表态。
 const OPENING_CHARS: usize = 45;
 
-fn check_language_style(kind: TemplateKind, markdown: &str, notes: &mut Vec<ProofNote>) {
+fn check_language_style(
+    kind: TemplateKind,
+    actual: Option<&str>,
+    config: &crate::models::ProofreadConfig,
+    markdown: &str,
+    notes: &mut Vec<ProofNote>,
+) {
     let ranges = body_paragraph_ranges(markdown);
     if ranges.is_empty() {
         return;
     }
-    check_dashes(markdown, &ranges, notes);
-    check_colon_reveal(markdown, &ranges, notes);
-    check_force_words(markdown, &ranges, notes);
-    check_jinyibu(markdown, &ranges, notes);
-    check_opening(markdown, &ranges, notes);
-    check_tone_direction(kind, markdown, &ranges, notes);
+    if style_enabled(config, kind, "RULE-PUNCT-DASH") {
+        check_dashes(markdown, &ranges, notes);
+    }
+    if style_enabled(config, kind, "RULE-FORCE-QUOTA") {
+        check_force_words(markdown, &ranges, notes);
+    }
+    if style_enabled(config, kind, "RULE-WORD-JINYIBU") {
+        check_jinyibu(markdown, &ranges, notes);
+    }
+    if style_enabled(config, kind, "RULE-OPEN-CLICHE") {
+        check_opening(markdown, &ranges, notes);
+    }
+    if !matches!(
+        kind,
+        TemplateKind::ResearchReport | TemplateKind::PhoneRecord | TemplateKind::MeetingAgenda
+    ) {
+        check_tone_direction(kind, actual, markdown, &ranges, notes);
+    }
 }
 
 fn check_dashes(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut Vec<ProofNote>) {
@@ -769,41 +1046,11 @@ fn check_dashes(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut V
         "标点规范",
         Level::Hint,
         format!(
-            "正文用了 {} 处破折号。公文里破折号不做停顿和修辞，全篇至多一处：停顿改逗号，转折断成句号",
+            "正文用了 {} 处破折号，达到所选风格提示阈值；请按表达需要核对，不是公文标点数量上限",
             hits.len()
         ),
         span.clone(),
     ));
-}
-
-/// 冒号揭晓：「办法是：」「主要有：」「原因即：」。公文的冒号只用于引出引语、
-/// 主送机关和「……如下：」承启句，用它揭晓下文是评论体的写法。
-///
-/// 只认「是/有/即/包括」直接接冒号、冒号后紧跟正文（不是引号、不是换行）
-/// 这一种形态。「如下：」不在其中；行末的冒号后面通常是分条列举，那在
-/// 法定公文里是常规写法，不报。宁可漏报。
-fn check_colon_reveal(
-    markdown: &str,
-    ranges: &[std::ops::Range<usize>],
-    notes: &mut Vec<ProofNote>,
-) {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re =
-        RE.get_or_init(|| Regex::new(r"(?:是|有|即|包括)[：:][^“「\n\r]").expect("valid regex"));
-    for (span, text) in find_in_body(markdown, ranges, re) {
-        // 只圈到冒号本身，后面那个字是判定条件，不是问题所在。
-        let colon_end = span.end - text.chars().next_back().map_or(0, char::len_utf8);
-        notes.push(note(
-            "RULE-PUNCT-COLON",
-            "标点规范",
-            Level::Hint,
-            format!(
-                "「{}」用冒号揭晓下文。公文的冒号只引出引语和「……如下：」承启句；这里改成逗号，或直接写内容",
-                text.trim_end_matches(|ch: char| ch != '：' && ch != ':')
-            ),
-            span.start..colon_end,
-        ));
-    }
 }
 
 /// 强制词计数。引号内二十字以内的内容不计——那多是自造概念（需求分
@@ -843,7 +1090,7 @@ fn check_force_words(
         "力度用词",
         Level::Hint,
         format!(
-            "全篇「必须／严禁」共 {} 处，超过 {FORCE_WORD_LIMIT} 处。强制词是稀缺资源，用多了就失效；语气要重时改用「应当」「一律」「不得」",
+            "正文「必须／严禁」共 {} 处，超过所选风格提示阈值 {FORCE_WORD_LIMIT} 处；请结合篇幅、职责和条款核对，不必替换必要的要求",
             hits.len()
         ),
         hits[FORCE_WORD_LIMIT].clone(),
@@ -863,7 +1110,7 @@ fn check_jinyibu(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut 
         "套话虚词",
         Level::Hint,
         format!(
-            "全篇「进一步」出现 {} 次，超过 {JINYIBU_LIMIT} 次。留下后面跟着具体动作的那几处，其余删去",
+            "正文「进一步」出现 {} 次，超过所选风格提示阈值 {JINYIBU_LIMIT} 次；请结合篇幅核对是否冗余",
             hits.len()
         ),
         span.clone(),
@@ -883,12 +1130,18 @@ fn check_opening(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut 
     let Some(pos) = head.find("高度重视") else {
         return;
     };
+    // 只报本机关自己的空表态。「党中央高度重视」「市委市政府历来高度重视」
+    // 是历史陈述，不是本稿态度，报了就是误报（见审核报告 P2）。
+    const SELF: [&str; 7] = ["我局", "我单位", "我办", "我委", "我中心", "本单位", "我们"];
+    if !SELF.iter().any(|word| head.contains(word)) {
+        return;
+    }
     let start = first.start + pos;
     notes.push(note(
         "RULE-OPEN-CLICHE",
         "套话虚词",
         Level::Hint,
-        "开篇就写「高度重视」是空表态。优秀公文第一句直接进入事由；要写重视，落到年份、文件、会议这些具体动作上".into(),
+        "所选风格提示：开篇本机关的「高度重视」是否有具体措施支撑，请结合上下文核对；事实陈述可保留".into(),
         start..start + "高度重视".len(),
     ));
 }
@@ -900,6 +1153,7 @@ fn check_opening(markdown: &str, ranges: &[std::ops::Range<usize>], notes: &mut 
 /// 「要求各县（市、区）……并抄送贵局」不是在要求贵局。
 fn check_tone_direction(
     kind: TemplateKind,
+    actual: Option<&str>,
     markdown: &str,
     ranges: &[std::ops::Range<usize>],
     notes: &mut Vec<ProofNote>,
@@ -913,25 +1167,31 @@ fn check_tone_direction(
                 )
                 .expect("valid regex")
             });
-            for (span, text) in find_in_body(markdown, ranges, re) {
+            for (span, text) in find_in_body(markdown, ranges, re)
+                .into_iter()
+                .filter(|(span, _)| direct_request_start(markdown, span.start))
+            {
                 notes.push(note(
                     "RULE-TONE-PARALLEL",
                     "力度用词",
                     Level::Suspect,
                     format!(
-                        "「{text}」对不相隶属的机关用了命令式。函是平行文，宜写「请贵单位」「希望贵单位」「请予支持」"
+                        "「{text}」为直接要求语气，请核对行文对象和职权依据；平行商洽可用「请贵单位」「请予支持」"
                     ),
                     span,
                 ));
             }
         }
-        TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
+        _ if matches!(actual, Some("请示" | "报告")) => {
             static RE: OnceLock<Regex> = OnceLock::new();
             let re = RE.get_or_init(|| {
                 Regex::new(r"(?:要求|责成|责令)(?:上级|领导|[省市县区州](?:委|政府))")
                     .expect("valid regex")
             });
-            for (span, text) in find_in_body(markdown, ranges, re) {
+            for (span, text) in find_in_body(markdown, ranges, re)
+                .into_iter()
+                .filter(|(span, _)| direct_request_start(markdown, span.start))
+            {
                 notes.push(note(
                     "RULE-TONE-UPWARD",
                     "力度用词",
@@ -941,22 +1201,36 @@ fn check_tone_direction(
                 ));
             }
         }
-        TemplateKind::PhoneRecord
-        | TemplateKind::PhoneNotice
-        | TemplateKind::PlainDocument
-        | TemplateKind::MeetingAgenda
-        | TemplateKind::ResearchReport => {}
+        _ => {}
     }
+}
+
+fn direct_request_start(markdown: &str, start: usize) -> bool {
+    let prefix = &markdown[..start];
+    let boundary = prefix
+        .rfind(['\n', '。', '！', '？', '；'])
+        .map_or(0, |pos| {
+            pos + prefix[pos..].chars().next().expect("边界字符").len_utf8()
+        });
+    matches!(
+        prefix[boundary..].trim(),
+        "" | "现" | "现请" | "我局" | "我办" | "本单位"
+    )
 }
 
 // ── 成文日期 ────────────────────────────────────────────────────────────────
 
-/// 成文日期是否已经过期。**只在导出时调用**——编辑期间日期本来就该是旧的，
-/// 那时候弹提示纯属打扰。
+/// 只在正式导出时核对自动成文日期；手定签发日期和历史稿重导不视为过期。
 ///
 /// `today` 由调用方传入，便于测试。
 pub fn check_doc_date(input: &DraftInput, today: chrono::NaiveDate) -> Option<String> {
-    if input.kind.is_research() {
+    if !input.date_is_auto
+        || input.profile.letter_version == crate::models::LetterVersion::Preview
+        || !matches!(
+            input.kind,
+            TemplateKind::OfficialLetter | TemplateKind::WhitePaper | TemplateKind::RedHeadApproval
+        )
+    {
         return None;
     }
     // `chinese_date_parts` 给的是三个字符串片段，年月日都可能是汉字数字。
@@ -971,7 +1245,7 @@ pub fn check_doc_date(input: &DraftInput, today: chrono::NaiveDate) -> Option<St
         return None;
     }
     Some(format!(
-        "成文日期是 {year} 年 {month} 月 {day} 日，距今 {days} 天。签发日期与成文日期不一致时请先核对。"
+        "自动成文日期是 {year} 年 {month} 月 {day} 日，距今 {days} 天，请核对实际通过或签发日期；历史稿重导可保留原日期。"
     ))
 }
 
@@ -1016,7 +1290,21 @@ mod tests {
             .iter()
             .find(|note| note.entry_id == "RULE-HONOR-ATTACHED")
             .expect("「贵市财政局」应当报出来");
-        assert_eq!(hit.level, Level::MustFix);
+        // 判据不足以确认完整机构名，只给疑似，不再以必错提示。
+        assert_eq!(hit.level, Level::Suspect);
+    }
+
+    #[test]
+    fn a_phrase_that_merely_starts_with_gui_is_not_a_full_unit_name() {
+        // 「贵单位负责联系市财政局」是跨短语匹配，不是「贵＋完整单位名」。
+        let notes = check_all("请贵单位负责联系市财政局，尽快反馈。");
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.entry_id == "RULE-HONOR-ATTACHED"),
+            "跨短语匹配不该报敬称问题：{:?}",
+            notes.iter().map(|n| &n.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1049,6 +1337,23 @@ mod tests {
             notes.iter().any(|note| note.entry_id == "RULE-HONOR-MIXED"),
             "同篇「贵局」与「你局」并用应当报出来"
         );
+    }
+
+    #[test]
+    fn honorifics_in_attachments_and_quotations_are_not_flagged() {
+        // 附件表单里的称谓、引文里的称谓都不是本稿行文。
+        let markdown = "# 关于测试的函\n\n请贵局尽快反馈。\n\n<!-- [附件] -->\n\n# 反馈表\n\n贵市财政局意见栏。";
+        let notes = check_all_with(markdown);
+        assert!(
+            !notes
+                .iter()
+                .any(|note| note.entry_id == "RULE-HONOR-ATTACHED"),
+            "附件里的称谓不该报：{:?}",
+            ids(&notes)
+        );
+
+        let quoted = check_all("来函称“请贵市财政局核实”，我局已转办。");
+        assert!(!ids(&quoted).contains(&"RULE-HONOR-ATTACHED"));
     }
 
     #[test]
@@ -1123,7 +1428,12 @@ mod tests {
     }
 
     fn check_all_with(markdown: &str) -> Vec<ProofNote> {
-        check(&DraftInput::default(), markdown)
+        let input = DraftInput::default();
+        let mut config = crate::models::ProofreadConfig::default();
+        for rule in RULES.iter().filter(|rule| rule.optional) {
+            set_style(&mut config, input.kind, rule.id, true);
+        }
+        check_with_config(&input, markdown, &config)
     }
 
     use super::*;
@@ -1179,13 +1489,83 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_carrying_a_request_closing_is_flagged() {
+    fn templates_without_a_definite_kind_do_not_check_the_title_suffix() {
+        // 呈批件、普通公文只是版式，没有绑定的法定文种，不能拿标题来卡。
+        for kind in [
+            TemplateKind::WhitePaper,
+            TemplateKind::RedHeadApproval,
+            TemplateKind::PlainDocument,
+        ] {
+            let notes = check(&draft(kind), "# 关于某项工作的通知\n\n正文。");
+            assert!(
+                !ids(&notes).contains(&"RULE-TITLE-KIND"),
+                "{} 不该因标题文种报错",
+                kind.label()
+            );
+        }
+    }
+
+    #[test]
+    fn research_and_record_titles_are_not_checked_as_documents() {
+        // 研究报告题名里的冒号、电话记录单标题都不是公文标题规范的对象。
+        let research = check(
+            &draft(TemplateKind::ResearchReport),
+            "# 产业发展：趋势与对策\n\n## 第一章\n\n正文。",
+        );
+        assert!(
+            !ids(&research).contains(&"RULE-TITLE-PUNCT"),
+            "研究报告题名不该报公文标点：{:?}",
+            ids(&research)
+        );
+        let record = check(
+            &draft(TemplateKind::PhoneRecord),
+            "# 电话记录单（重要）\n\n来电内容。",
+        );
+        assert!(!ids(&record).contains(&"RULE-TITLE-PUNCT"));
+    }
+
+    #[test]
+    fn punctuation_inside_book_title_marks_is_not_a_title_error() {
+        let input = draft(TemplateKind::OfficialLetter);
+        let notes = check(&input, "# 关于印发《某某工作：试行办法》的函\n\n正文。");
+        assert!(!ids(&notes).contains(&"RULE-TITLE-PUNCT"));
+    }
+
+    #[test]
+    fn a_report_carrying_a_request_closing_is_flagged() {
+        // 报告不得夹带请示事项；文种由标题认出来。
+        let input = draft(TemplateKind::PlainDocument);
+        let notes = check(
+            &input,
+            "# 关于报送情况的报告\n\n有关情况如上。\n\n妥否，请批示。",
+        );
+        assert!(ids(&notes).contains(&"RULE-KIND-REQUEST"));
+    }
+
+    #[test]
+    fn an_approval_letter_may_request_a_reply() {
+        // 审批函依法可以请求批准，不能一概排除。
         let input = draft(TemplateKind::OfficialLetter);
         let notes = check(
             &input,
-            "# 关于报送情况的函\n\n有关情况如上。\n\n妥否，请批示。",
+            "# 关于核准有关事项的函\n\n有关情况如上。\n\n请予批复。",
         );
-        assert!(ids(&notes).contains(&"RULE-KIND-REQUEST"));
+        assert!(
+            !ids(&notes).contains(&"RULE-KIND-REQUEST"),
+            "函的审批请求不该报：{:?}",
+            ids(&notes)
+        );
+    }
+
+    #[test]
+    fn a_request_closing_in_a_quotation_is_not_this_drafts_request() {
+        // 报告里照录来函原文，不是本稿在请示。
+        let input = draft(TemplateKind::PlainDocument);
+        let notes = check(
+            &input,
+            "# 关于报送情况的报告\n\n来函称“妥否，请批示”，我局已按要求办理。",
+        );
+        assert!(!ids(&notes).contains(&"RULE-KIND-REQUEST"));
     }
 
     #[test]
@@ -1248,9 +1628,39 @@ mod tests {
     }
 
     #[test]
+    fn a_decimal_is_not_a_third_level_number() {
+        // 「1.5亿元」是小数，不是第三层序号。
+        let input = draft(TemplateKind::PlainDocument);
+        let notes = check(&input, "# 情况说明\n\n一、总体情况\n\n1.5亿元投资已到位。");
+        assert!(!ids(&notes).contains(&"RULE-SEQ"));
+    }
+
+    #[test]
+    fn attachment_numbering_restarts_after_the_marker() {
+        // 正文「一、二、」后附件从「一、」重新编号，不算跳号。
+        let input = draft(TemplateKind::OfficialLetter);
+        let markdown = "# 关于报送情况的函\n\n一、第一项\n\n二、第二项\n\n<!-- [附件] -->\n\n# 情况表\n\n一、附件第一项\n\n二、附件第二项";
+        let notes = check(&input, markdown);
+        assert!(
+            !ids(&notes).contains(&"RULE-SEQ"),
+            "附件重新编号不该报：{:?}",
+            ids(&notes)
+        );
+    }
+
+    #[test]
+    fn numbered_lists_restart_under_each_heading() {
+        // 不同章节的清单各从 1 开始。
+        let input = draft(TemplateKind::PlainDocument);
+        let markdown = "# 情况说明\n\n## 甲\n\n1. 甲一\n\n2. 甲二\n\n## 乙\n\n1. 乙一\n\n2. 乙二";
+        let notes = check(&input, markdown);
+        assert!(!ids(&notes).contains(&"RULE-SEQ"));
+    }
+
+    #[test]
     fn a_declared_attachment_count_must_match_reality() {
         let input = draft(TemplateKind::OfficialLetter);
-        let markdown = "# 关于报送情况的函\n\n随文报送附件3份。\n\n<!-- [附件] -->\n\n# 情况表";
+        let markdown = "# 关于报送情况的函\n\n随文报送附件3件。\n\n<!-- [附件] -->\n\n# 情况表";
         let notes = check(&input, markdown);
         assert!(ids(&notes).contains(&"RULE-ATTACH-COUNT"));
     }
@@ -1258,9 +1668,49 @@ mod tests {
     #[test]
     fn a_matching_attachment_count_is_silent() {
         let input = draft(TemplateKind::OfficialLetter);
-        let markdown = "# 关于报送情况的函\n\n随文报送附件2份。\n\n<!-- [附件] -->\n\n# 情况表\n\n<!-- [附件] -->\n\n# 明细表";
+        let markdown = "# 关于报送情况的函\n\n随文报送附件2件。\n\n<!-- [附件] -->\n\n# 情况表\n\n<!-- [附件] -->\n\n# 明细表";
         let notes = check(&input, markdown);
         assert!(!ids(&notes).contains(&"RULE-ATTACH-COUNT"));
+    }
+
+    #[test]
+    fn printed_copies_are_not_compared_with_attachment_kinds() {
+        // 一个附件印三份，正文「附件：3份」说的是份数，不是附件种类数。
+        let input = draft(TemplateKind::OfficialLetter);
+        let markdown = "# 关于报送情况的函\n\n随文报送附件3份。\n\n<!-- [附件] -->\n\n# 情况表";
+        let notes = check(&input, markdown);
+        assert!(
+            !ids(&notes).contains(&"RULE-ATTACH-COUNT"),
+            "印制份数不该当作附件种类数：{:?}",
+            ids(&notes)
+        );
+    }
+
+    #[test]
+    fn an_itemized_attachment_list_is_counted() {
+        // 完整编号清单才拿来比较：清单两项、实际只标一份。
+        let input = draft(TemplateKind::OfficialLetter);
+        let mismatched =
+            "# 关于报送情况的函\n\n附件：1. 统计表\n2. 明细表\n\n<!-- [附件] -->\n\n# 情况表";
+        let notes = check(&input, mismatched);
+        assert!(
+            ids(&notes).contains(&"RULE-ATTACH-COUNT"),
+            "清单 2 项与实际 1 份不符：{:?}",
+            ids(&notes)
+        );
+        let matched = "# 关于报送情况的函\n\n附件：1. 统计表\n\n<!-- [附件] -->\n\n# 情况表";
+        let notes = check(&input, matched);
+        assert!(!ids(&notes).contains(&"RULE-ATTACH-COUNT"));
+    }
+
+    #[test]
+    fn an_amount_is_not_an_attachment_reference() {
+        // 「附件10万元预算表」是金额，不是引用附件10。
+        let input = draft(TemplateKind::OfficialLetter);
+        let markdown =
+            "# 关于报送情况的函\n\n详见附件10万元预算表。\n\n<!-- [附件] -->\n\n# 情况表";
+        let notes = check(&input, markdown);
+        assert!(!ids(&notes).contains(&"RULE-ATTACH-REF"));
     }
 
     #[test]
@@ -1290,8 +1740,8 @@ mod tests {
     #[test]
     fn spans_point_at_the_offending_text() {
         // 提示能不能点着跳过去，全看 span 准不准。
-        let input = draft(TemplateKind::OfficialLetter);
-        let markdown = "# 关于报送情况的函\n\n正文。\n\n妥否，请批示。";
+        let input = draft(TemplateKind::PlainDocument);
+        let markdown = "# 关于报送情况的报告\n\n正文。\n\n妥否，请批示。";
         let notes = check(&input, markdown);
         let hit = notes
             .iter()
@@ -1333,25 +1783,19 @@ mod tests {
     }
 
     #[test]
-    fn colon_used_to_reveal_is_reported_but_quotes_and_ruqxia_are_not() {
-        let notes = check_all("主要做法是：一手抓排查，一手抓整改。");
-        let hit = notes
-            .iter()
-            .find(|n| n.entry_id == "RULE-PUNCT-COLON")
-            .expect("应当报出");
-        assert!(hit.message.contains("是："), "{}", hit.message);
-
-        for ok in [
+    fn colon_enumeration_is_not_flagged() {
+        // GB/T 15834 允许用冒号提示下文；「主要任务包括：调查、评估和整改。」
+        // 是正常列举，不再当作必改（见审核报告 P2）。
+        for text in [
+            "主要做法是：一手抓排查，一手抓整改。",
+            "主要任务包括：调查、评估和整改。",
             "现将有关事项通知如下：",
             "他说：“这个办法好。”",
-            "问题主要有：
-
-一是人手不足。",
         ] {
-            let notes = check_all(ok);
+            let notes = check_all(text);
             assert!(
                 !ids(&notes).contains(&"RULE-PUNCT-COLON"),
-                "「{ok}」是合法用法，不该报"
+                "「{text}」不该报冒号问题"
             );
         }
     }
@@ -1411,6 +1855,17 @@ mod tests {
     }
 
     #[test]
+    fn a_historical_statement_is_not_an_empty_opening_stance() {
+        // 「党中央高度重视」是历史陈述，不是本稿空表态。
+        let notes = check_all("党中央高度重视科技创新工作，作出了一系列重大部署。");
+        assert!(
+            !ids(&notes).contains(&"RULE-OPEN-CLICHE"),
+            "历史陈述不该报：{:?}",
+            ids(&notes)
+        );
+    }
+
+    #[test]
     fn a_letter_must_not_order_its_peer_around() {
         let input = draft(TemplateKind::OfficialLetter);
         let markdown = "# 关于协助核查的函
@@ -1466,8 +1921,7 @@ mod tests {
     fn style_rules_never_reach_must_fix() {
         // 风格偏离不是错误，进了「必错」就会被「采纳全部必错」批量处理。
         let markdown = "# 关于测试的函\n\n我局高度重视——办法是：必须、必须、严禁、必须、严禁、必须进一步、进一步、进一步、进一步。\n\n甲——乙。\n";
-        let input = draft(TemplateKind::OfficialLetter);
-        for note in check(&input, markdown) {
+        for note in check_all_with(markdown) {
             if note.group == "标点规范" && note.entry_id == "RULE-SENTENCE-END" {
                 continue;
             }

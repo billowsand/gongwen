@@ -3,7 +3,7 @@
 //! 由 src/app.rs 拆分而来：本文件是模块 `app::proofread_ui`，与其它子模块共享
 //! `app` 根模块的私有可见性。
 //!
-//! 内置的 141 条是编译进二进制的**种子**，发行版里用户碰不到那个文件，所以
+//! 内置的 155 条是编译进二进制的**种子**，发行版里用户碰不到那个文件，所以
 //! 这一页是唯一的管理入口。三条语义与 AI 提示词页保持一致：内置条目可改、
 //! 可停用、可恢复默认，但删不掉；自建条目可以删。
 //!
@@ -37,6 +37,7 @@ const LEVELS: [(&str, &str); 3] = [
 /// 词表页的界面状态。不进配置文件——都是当次会话的筛选和编辑暂存。
 #[derive(Default)]
 pub(crate) struct ProofreadPageState {
+    pub(crate) document_kind: crate::models::TemplateKind,
     pub(crate) filter: String,
     /// 分组筛选；空串表示全部。
     pub(crate) group: String,
@@ -114,6 +115,7 @@ impl GongwenApp {
         let lexicon = proofread::Lexicon::resolved(&self.config.proofread);
         ui.add_space(4.0);
         self.proofread_overview_ui(ui, &lexicon);
+        self.document_rule_catalog_ui(ui);
 
         for warning in &lexicon.load_warnings {
             theme::notice(
@@ -195,6 +197,53 @@ impl GongwenApp {
                     });
                 },
             );
+        });
+    }
+
+    /// 展示词表之外的文档检查，并按模板选用风格提示。
+    fn document_rule_catalog_ui(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("文档规则与要素校验（含适用范围）", |ui| {
+            ui.weak("文档规则独立于词表；强制检查只读，风格提示默认关闭，按模板明确选用。");
+            egui::ComboBox::from_id_salt("document_rule_template")
+                .selected_text(self.proofread_page.document_kind.label())
+                .show_ui(ui, |ui| {
+                    for kind in crate::models::TemplateKind::ALL {
+                        ui.selectable_value(&mut self.proofread_page.document_kind, kind, kind.label());
+                    }
+                });
+            egui::ScrollArea::vertical().id_salt("document_rule_catalog").max_height(240.0).show(ui, |ui| {
+                for rule in crate::proofread_rules::RULES {
+                    ui.push_id(rule.id, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            if rule.optional {
+                                let mut enabled = crate::proofread_rules::style_enabled(&self.config.proofread, self.proofread_page.document_kind, rule.id);
+                                if ui.checkbox(&mut enabled, rule.name).changed() {
+                                    crate::proofread_rules::set_style(&mut self.config.proofread, self.proofread_page.document_kind, rule.id, enabled);
+                                }
+                            } else {
+                                ui.strong(rule.name);
+                                ui.weak("程序检查");
+                            }
+                            ui.weak(rule.id);
+                            ui.weak(rule.level_label());
+                        });
+                        ui.label(format!("适用：{}", rule.scope));
+                        ui.label(format!("条件：{}", rule.condition));
+                        ui.weak(format!("依据：{}", rule.basis));
+                        ui.separator();
+                    });
+                }
+                ui.strong("要素／模板校验（程序检查）");
+                for description in [
+                    "密级、保密期限与份号：按模板槽位及配置的保密规则核对。",
+                    "主送、发文、呈报领导、联系人：按模板必填项与标准词库核对。",
+                    "联合发文：主办单位、单位互斥、承办人和电话绑定关系。",
+                    "正文结构：标题、附件标记、待核实占位；真实日期与星期冲突。",
+                    "会议议程：仅所选议程模板的固定字段、顺序与标点要求。",
+                    "研究报告：封面要素、区段、锚点、交叉引用与参考文献。",
+                ] { ui.label(description); }
+                ui.weak("要素校验不挡排版导出；签发前需人工核对。风格提示的修改点「保存更改」后持久保存。");
+            });
         });
     }
 

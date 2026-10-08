@@ -459,6 +459,9 @@ pub struct ProofreadConfig {
     pub overrides: Vec<ProofreadOverride>,
     /// 用户自建条目，完整保存——它们没有种子可回落。
     pub custom: Vec<ProofreadRule>,
+    /// 按模板明确选用的文档风格提示。旧配置默认不启用，不影响强制规则。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub document_styles: BTreeMap<String, Vec<String>>,
     /// 永久忽略的修订建议，键为「来源编号 + \u{1} + 原文」。
     ///
     /// 没有忽略机制，误报一次用户就会把整个校对关掉——那比没有这条规则更糟

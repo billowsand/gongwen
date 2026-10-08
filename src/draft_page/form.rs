@@ -699,7 +699,7 @@ impl DraftPage<'_> {
             .revisions
             .push_notes(lexicon.check(&markdown), false, &markdown, &ignored);
         self.doc.revisions.push_notes(
-            proofread_rules::check(&self.doc.draft, &markdown),
+            proofread_rules::check_with_config(&self.doc.draft, &markdown, &self.config.proofread),
             true,
             &markdown,
             &ignored,

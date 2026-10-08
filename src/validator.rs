@@ -381,18 +381,30 @@ pub fn validate(
         }
     }
 
-    let square_year = Regex::new(r"\[[12]\d{3}\]").expect("valid regex");
-    if square_year.is_match(text) {
-        warnings.push("疑似使用方括号文号年份，应核对并改为六角括号〔〕".into());
-    }
-
-    let relative_date =
-        Regex::new(r"今天|明天|后天|大后天|(?:本周|下周)[一二三四五六日天]").expect("valid regex");
-    if let Some(found) = relative_date.find(text) {
+    // 只查「某办函[2026]012号」这种文号写法；裸的年份列表或研究引用不算。
+    let square_year = Regex::new(r"[\p{Han}]{0,8}\[[12]\d{3}\]\s*\d+\s*号").expect("valid regex");
+    if let Some(found) = square_year.find(text) {
         warnings.push(format!(
-            "正文仍含相对日期“{}”，应按生成时的本机时间换算为具体年月日和星期",
+            "疑似使用方括号文号年份“{}”，应核对并改为六角括号〔〕",
             found.as_str()
         ));
+    }
+
+    // 相对日期只查本稿自己写的日程与期限。电话记录是照录原话，研究材料里的
+    // 「今天」是引用语境，都不改（见审核报告 P2）。
+    let own_body = crate::proofread_rules::body_text(text);
+    if !matches!(
+        input.kind,
+        TemplateKind::PhoneRecord | TemplateKind::ResearchReport
+    ) {
+        let relative_date = Regex::new(r"今天|明天|后天|大后天|(?:本周|下周)[一二三四五六日天]")
+            .expect("valid regex");
+        if let Some(found) = relative_date.find(&own_body) {
+            warnings.push(format!(
+                "正文含相对日期“{}”，请核对材料的基准日期；日程或期限宜明确为具体日期，不宜直接按导出当天换算",
+                found.as_str()
+            ));
+        }
     }
 
     validate_date_weekdays(text, &mut warnings);
@@ -469,8 +481,18 @@ pub fn validate(
             if input.profile.reporting_leaders.trim().is_empty() {
                 warnings.push("白头件缺少呈报领导".into());
             }
-            if !text.contains("妥否，请指示") {
-                warnings.push("白头件缺少规范请示结语“妥否，请指示。”".into());
+            // 呈批件可能是请示，也可能是报告。只有标题自称「请示」才要求请示
+            // 结语；自称报告或文种不明时不强加（见审核报告 P1）。
+            let kind = declared_kind(text);
+            if !has_request_closing(&own_body) {
+                if kind == Some("请示") {
+                    warnings.push("白头件（请示）缺少请求性结语，请核对是否需要“妥否，请批示”“妥否，请指示”等结语".into());
+                } else if kind.is_none() {
+                    warnings.push(
+                        "请确认白头件的行文方向：向上请示的结语为“妥否，请指示。”（报告不必加）"
+                            .into(),
+                    );
+                }
             }
             if text.lines().any(|line| {
                 let s = line.trim_start();
@@ -500,8 +522,16 @@ pub fn validate(
                     responsible.len()
                 ));
             }
-            if !text.contains("妥否，请指示") {
-                warnings.push("红头呈批件缺少规范请示结语“妥否，请指示。”".into());
+            let kind = declared_kind(text);
+            if !has_request_closing(&own_body) {
+                if kind == Some("请示") {
+                    warnings.push("红头呈批件（请示）缺少请求性结语，请核对是否需要“妥否，请批示”“妥否，请指示”等结语".into());
+                } else if kind.is_none() {
+                    warnings.push(
+                        "请确认红头呈批件的行文方向：向上请示的结语为“妥否，请指示。”（报告不必加）"
+                            .into(),
+                    );
+                }
             }
             if text.lines().any(|line| {
                 let s = line.trim_start();
@@ -548,6 +578,18 @@ fn is_advisory(message: &str) -> bool {
     ["疑似", "建议", "不宜", "请确认", "未单独填写"]
         .iter()
         .any(|marker| message.contains(marker))
+}
+
+/// 正文标题末尾自称的法定文种。呈批模板只是版式，不能替代实际文种；用它区分
+/// 「向上请示」与「报告」，避免拿模板硬推（见 docs/proofread-rule-audit.md）。
+fn declared_kind(text: &str) -> Option<&'static str> {
+    crate::proofread_rules::declared_kind(text)
+}
+
+fn has_request_closing(body: &str) -> bool {
+    crate::proofread_rules::request_closing()
+        .find_iter(body)
+        .any(|hit| crate::proofread_rules::closing_is_ours(body, hit.start(), hit.end()))
 }
 
 /// 校验表单元数据本身：密级与保密期限的约束、联系人与电话的绑定关系、
@@ -943,13 +985,15 @@ fn check_department_code(
 }
 
 fn validate_meeting_agenda_format(text: &str, warnings: &mut Vec<String>) {
+    // 这些是**当前会议议程模板**的字段与骨架约束（起草提示词和导出器都按它走），
+    // 不是所有会议议程的通用要求。提示语写清楚，免得好议程被当成错。
     let lines = text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     if lines.first().is_none_or(|line| !line.starts_with("# ")) {
-        warnings.push("会议议程第一行必须为“# 会议标题”".into());
+        warnings.push("会议议程模板要求第一行为“# 会议标题”".into());
     }
 
     let required = ["一、时间地点：", "二、参加人员：", "三、研讨内容："];
@@ -959,14 +1003,14 @@ fn validate_meeting_agenda_format(text: &str, warnings: &mut Vec<String>) {
         .collect::<Vec<_>>();
     for (prefix, position) in required.iter().zip(&positions) {
         if position.is_none() {
-            warnings.push(format!("会议议程缺少固定字段“{prefix}”"));
+            warnings.push(format!("会议议程模板缺少固定字段“{prefix}”"));
         }
     }
 
     if let [Some(time), Some(attendees), Some(content)] = positions.as_slice() {
         if !(*time == 1 && *attendees == 2 && *content == 3) {
             warnings.push(
-                "会议议程字段必须按“标题—时间地点—参加人员—研讨内容”顺序排列，且不得插入其他段落"
+                "会议议程模板要求字段按“标题—时间地点—参加人员—研讨内容”顺序排列，且不得插入其他段落"
                     .into(),
             );
         }
@@ -974,7 +1018,7 @@ fn validate_meeting_agenda_format(text: &str, warnings: &mut Vec<String>) {
         let item_pattern = Regex::new(r"^(?P<number>\d+)\. (?P<body>.+)$").expect("valid regex");
         let item_lines = lines.iter().skip(*content + 1).copied().collect::<Vec<_>>();
         if item_lines.is_empty() {
-            warnings.push("会议议程“研讨内容”下至少需要一项议程".into());
+            warnings.push("会议议程模板要求“研讨内容”下至少有一项议程".into());
         } else {
             let mut numbers = Vec::new();
             let mut all_items_valid = true;
@@ -989,7 +1033,7 @@ fn validate_meeting_agenda_format(text: &str, warnings: &mut Vec<String>) {
             }
             if !all_items_valid {
                 warnings.push(
-                    "研讨内容只能使用“1. 事项”格式，每项单独一行，不得使用项目符号、中文序号或多级标题"
+                    "会议议程模板要求研讨内容使用“1. 事项”格式，每项单独一行，不使用项目符号、中文序号或多级标题"
                         .into(),
                 );
             }
@@ -998,7 +1042,7 @@ fn validate_meeting_agenda_format(text: &str, warnings: &mut Vec<String>) {
                 .enumerate()
                 .any(|(index, number)| *number != index + 1)
             {
-                warnings.push("会议议程事项必须从“1.”开始连续编号".into());
+                warnings.push("会议议程模板要求事项从“1.”开始连续编号".into());
             }
             for (index, line) in item_lines.iter().enumerate() {
                 let expected = if index + 1 == item_lines.len() {
@@ -1007,8 +1051,9 @@ fn validate_meeting_agenda_format(text: &str, warnings: &mut Vec<String>) {
                     '；'
                 };
                 if !line.ends_with(expected) {
-                    warnings
-                        .push("会议议程除最后一项使用句号外，其余议程事项均应以分号结尾".into());
+                    warnings.push(
+                        "会议议程模板要求除最后一项使用句号外，其余议程事项均以分号结尾".into(),
+                    );
                     break;
                 }
             }
@@ -1021,16 +1066,7 @@ fn validate_meeting_agenda_format(text: &str, warnings: &mut Vec<String>) {
             || line.starts_with("* ")
             || line.starts_with('|')
     }) {
-        warnings.push("会议议程不得使用二级标题、Markdown 项目符号或表格".into());
-    }
-
-    let exact_skeleton = Regex::new(
-        r"(?s)^# [^\n]+\n\n一、时间地点：[^\n]+\n\n二、参加人员：[^\n]+\n\n三、研讨内容：\n\n(?:\d+\. [^\n]+(?:\n|$))+\z",
-    )
-    .expect("valid regex");
-    if !exact_skeleton.is_match(text.trim()) {
-        warnings
-            .push("会议议程未完全符合固定 Markdown 骨架，请重新生成或按模板调整空行和字段".into());
+        warnings.push("会议议程模板不使用二级标题、Markdown 项目符号或表格".into());
     }
 }
 
@@ -1292,6 +1328,77 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("份号位")),
             "应当提示份号不生效：{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn an_approval_report_does_not_require_a_request_closing() {
+        // 呈批件也可能是报告；报告不要求「妥否，请指示」。
+        let mut input = DraftInput {
+            kind: TemplateKind::WhitePaper,
+            profile: crate::models::TemplateProfile::for_kind(TemplateKind::WhitePaper),
+            ..Default::default()
+        };
+        input.profile.reporting_leaders = "张三".into();
+        let report = validate(
+            &input,
+            "# 关于某某情况的报告\n\n现将有关情况报告如下。",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !report.iter().any(|w| w.contains("妥否，请指示")),
+            "报告不该被要求请示结语：{report:?}"
+        );
+        // 自称请示时仍要求。
+        let request = validate(
+            &input,
+            "# 关于某某事项的请示\n\n现将有关情况报告如下。",
+            &[],
+            &rules(),
+        );
+        assert!(
+            request.iter().any(|w| w.contains("妥否，请指示")),
+            "请示缺少结语应提示：{request:?}"
+        );
+    }
+
+    #[test]
+    fn square_bracket_years_are_only_checked_in_document_numbers() {
+        let input = DraftInput::default();
+        let plain = validate(
+            &input,
+            "# 关于测试的函\n\n研究引用见[2026]。",
+            &[],
+            &rules(),
+        );
+        assert!(!plain.iter().any(|w| w.contains("方括号文号年份")));
+        let number = validate(
+            &input,
+            "# 关于测试的函\n\n依据某办函[2026]012号办理。",
+            &[],
+            &rules(),
+        );
+        assert!(number.iter().any(|w| w.contains("方括号文号年份")));
+    }
+
+    #[test]
+    fn relative_dates_in_a_phone_record_are_not_rewritten() {
+        let mut input = DraftInput {
+            kind: TemplateKind::PhoneRecord,
+            profile: crate::models::TemplateProfile::for_kind(TemplateKind::PhoneRecord),
+            ..Default::default()
+        };
+        input.phone_record.institution = "本单位".into();
+        let warnings = validate(
+            &input,
+            "# 电话记录单\n\n对方称明天报送材料。",
+            &[],
+            &rules(),
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains("相对日期")),
+            "电话记录原话里的相对日期不该改：{warnings:?}"
         );
     }
 
@@ -2075,10 +2182,11 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|warning| warning.contains("不得使用二级标题"))
+                .any(|warning| warning.contains("不使用二级标题"))
         );
+        // 骨架检查已取消：字段、顺序、标点各自报，不再另加一条「未完全符合骨架」。
         assert!(
-            warnings
+            !warnings
                 .iter()
                 .any(|warning| warning.contains("固定 Markdown 骨架"))
         );

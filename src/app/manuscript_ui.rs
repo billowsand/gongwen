@@ -1089,7 +1089,8 @@ fn build_merge_review(
         &config.vocabulary,
         &config.security_rules,
     );
-    let mut notes = crate::proofread_rules::check(snapshot, markdown);
+    let mut notes =
+        crate::proofread_rules::check_with_config(snapshot, markdown, &config.proofread);
     notes.extend(crate::proofread::Lexicon::resolved(&config.proofread).check(markdown));
     Ok(MergeReview {
         hash,
