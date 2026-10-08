@@ -571,24 +571,27 @@ impl ManuscriptStore {
         if current == ManuscriptStatus::Archived {
             bail!("归档稿件不可删除");
         }
-        let record = self.get(id)?;
+        // 只取正文用于删除后的孤儿图片清理：刻意不解码快照，免得一份读不出来的
+        // 快照（例如旧版本遇到新文种）把删除也挡在门外。
+        let content = self.content_of(id)?;
         let tx = self.conn.transaction()?;
         send_package::detach_before_delete(&tx, id)?;
         tx.execute("DELETE FROM manuscripts WHERE id=?1", [id])?;
         tx.commit()?;
-        if let Some(record) = record {
-            self.purge_orphan_images(&[record]);
+        if let Some(content) = content {
+            self.purge_orphan_images(&[content]);
         }
         Ok(())
     }
 
     /// 原子批量删除：任一稿件不存在、已归档或被已归档呈批件用作送批材料时整批不落库。
     pub fn delete_many(&mut self, ids: &[i64]) -> Result<()> {
-        // 事务前先收集记录：图片清理在事务提交后进行，事务失败时不会误删文件。
+        // 事务前先收集正文：图片清理在事务提交后进行，事务失败时不会误删文件。
+        // 同样不解码快照，快照读不出来也要允许删除。
         let mut deleted = Vec::new();
         for &id in ids {
-            if let Some(record) = self.get(id)? {
-                deleted.push(record);
+            if let Some(content) = self.content_of(id)? {
+                deleted.push(content);
             }
         }
         let tx = self.conn.transaction()?;
@@ -615,26 +618,29 @@ impl ManuscriptStore {
     /// 引用，则删除对应文件。引用比较前统一规范化（分隔符、`./` 前缀），避免
     /// 手写别名被误判为不同引用而误删；共享引用与库外引用（未保存草稿或手写
     /// 引用）无法感知，一律保留。清理尽力而为，失败不阻断稿件删除。
-    fn purge_orphan_images(&mut self, deleted: &[ManuscriptRecord]) {
-        let deleted_refs: HashSet<String> = deleted
+    fn purge_orphan_images(&mut self, deleted_contents: &[String]) {
+        let deleted_refs: HashSet<String> = deleted_contents
             .iter()
-            .flat_map(|record| crate::images::image_refs(&record.content_markdown))
+            .flat_map(|content| crate::images::image_refs(content))
             .map(|src| crate::images::normalize_ref(&src))
             .collect();
         if deleted_refs.is_empty() {
             return;
         }
+        // 只扫正文，不解码快照：任何一份快照读不出来都不该让孤儿图片清理整个作废。
         let mut remaining_refs = HashSet::new();
-        let Ok(rows) = self.list(&ManuscriptFilter::default()) else {
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT content_markdown FROM manuscripts")
+        else {
             return;
         };
-        for row in rows {
-            // 读取失败时中止整个清理：宁可保留不删，避免误删仍被该稿件引用的图片。
-            let Ok(Some(record)) = self.get(row.id) else {
-                return;
-            };
+        let Ok(contents) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+            return;
+        };
+        for content in contents.flatten() {
             remaining_refs.extend(
-                crate::images::image_refs(&record.content_markdown)
+                crate::images::image_refs(&content)
                     .into_iter()
                     .map(|src| crate::images::normalize_ref(&src)),
             );
@@ -1206,6 +1212,19 @@ impl ManuscriptStore {
         Ok(raw.and_then(|s| str_to_status(&s)))
     }
 
+    /// 只读取正文，不解码快照。删除与孤儿图片清理只需要正文，一份读不出来的
+    /// 快照不应连带把删除挡住。
+    fn content_of(&self, id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT content_markdown FROM manuscripts WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     fn pdfs_for(&self, manuscript_id: i64) -> Result<Vec<PdfAttachment>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, file_name, bytes, added_at FROM pdf_attachments WHERE manuscript_id=?1 ORDER BY sort_order, id",
@@ -1415,6 +1434,47 @@ mod tests {
         assert!(!dir.join(&orphan_b).exists());
         let _ = fs::remove_file(dir.join(&orphan_a));
         let _ = fs::remove_file(dir.join(&orphan_b));
+    }
+
+    #[test]
+    fn delete_succeeds_when_snapshot_is_unreadable() {
+        let mut store = mem_store();
+        let id = store
+            .create(
+                &new_manuscript(TemplateKind::OfficialLetter, "# 待删稿"),
+                None,
+            )
+            .unwrap();
+        // 模拟快照里出现本版本不认识的 kind（旧版本打开新文种稿件时的情形）：
+        // 读不出来也不该挡住删除。
+        store
+            .conn
+            .execute(
+                "UPDATE manuscripts SET snapshot_json=?1 WHERE id=?2",
+                rusqlite::params![r#"{"kind":"某未来文种"}"#, id],
+            )
+            .unwrap();
+        assert!(store.get(id).is_err(), "损坏快照应该读不出来");
+        store.delete(id).unwrap();
+        assert!(store.get(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_many_succeeds_when_snapshots_are_unreadable() {
+        let mut store = mem_store();
+        let a = store
+            .create(&new_manuscript(TemplateKind::OfficialLetter, "# A"), None)
+            .unwrap();
+        let b = store
+            .create(&new_manuscript(TemplateKind::OfficialLetter, "# B"), None)
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE manuscripts SET snapshot_json='not json'", [])
+            .unwrap();
+        assert!(store.get(a).is_err());
+        store.delete_many(&[a, b]).unwrap();
+        assert!(store.list(&ManuscriptFilter::default()).unwrap().is_empty());
     }
 
     #[test]
