@@ -113,6 +113,11 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   不做通用框架、不拆 crate、不引入 async；检查点那期「挂起即一种检查点、恢复只有一个入口」与
   `StepPath` 路径不能简化，返工代价最大。动 `src/agent/` 的编排代码或提案接受前先读它，并先读三条红线。
 
+- **人机决策模块**（把「问用户」从算子里抽成可组合的决策：决策形态随挂起交给界面、通用清单确认
+  与修订、待决事项、自主步骤提问，分四期）：方案、分期、进度与已知坑见 `docs/decision-modules.md`
+  （单文件，第八节是交接）。决策只改黑板与工作稿，授权类要素不出题；改 `clarify.rs`、
+  `engine::apply_answers`、`ops/confirm.rs` 或侧栏题目卡片前先读它。
+
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 
 > 2026-10-03 按智能体工作台方案修订（`docs/ai-agent-workbench.md` 第二节 D1–D3）。
