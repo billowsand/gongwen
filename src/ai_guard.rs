@@ -138,14 +138,75 @@ fn extract_facts(
     // 贪婪匹配会吞掉前面的普通汉字，见 [`compare_key_facts_precise`] 的说明——
     // 整篇比对容得下这点噪音，逐句闸门容不下。
     if heuristic_units {
-        collect_matches(
-            markdown,
-            r"[\p{Han}]{2,24}(?:委员会|人民政府|办公室|工作组|领导小组|管理局|分局|厅|局|处|科|中心|公司|集团|学院|学校)",
-            FactKind::Unit,
-            &mut out,
-        );
+        collect_heuristic_units(markdown, &mut out);
     }
     out.into_iter().collect()
+}
+
+/// 词库外单位的启发式抽取，用 jieba 词性切分代替正则：
+/// 找到以机构后缀结尾的词（「局」「委员会」等），再向前合并紧挨着的名词类词，
+/// 遇到非名词（「因」「可能」「的」）就停。这样「中华人民共和国财政部」「共和国」
+/// 不会从中间断开，「可能因认知局」只取到「认知局」。
+/// 合并结果不足两个字，或者不是以后缀结尾，都丢弃。
+fn collect_heuristic_units(text: &str, out: &mut BTreeSet<FactToken>) {
+    const UNIT_SUFFIXES: [&str; 17] = [
+        "委员会",
+        "人民政府",
+        "办公室",
+        "工作组",
+        "领导小组",
+        "管理局",
+        "分局",
+        "厅",
+        "局",
+        "处",
+        "科",
+        "中心",
+        "公司",
+        "集团",
+        "学院",
+        "学校",
+        "部",
+    ];
+    // 单位名的最长字数，超过就不是一个单位名，不再向前合并。
+    const MAX_CHARS: usize = 24;
+    let tokens = crate::lexicon::segmenter::tagged(text);
+    for (end, (word, tag)) in tokens.iter().enumerate() {
+        // 后缀词本身必须是名词，「无处」这类副词性的「…处」不算单位。
+        if !tag.starts_with('n') || !UNIT_SUFFIXES.iter().any(|suffix| word.ends_with(suffix)) {
+            continue;
+        }
+        let mut start = end;
+        let mut chars = word.chars().count();
+        while start > 0 {
+            let (prev, tag) = &tokens[start - 1];
+            let prev_chars = prev.chars().count();
+            // 名词、动词（「认知」「管理」）、代词（「某某局」）、区别词（「开放式」）
+            // 可以并进单位名；副词、介词、连词、助词是句子的边界。
+            // jieba 对动词与名词的标注常有出入，所以动词也收。
+            // 单字动词多半是句首的「请」「须」之类，不并入。
+            let joinable = tag.starts_with('n')
+                || (tag.starts_with('v') && prev_chars >= 2)
+                || tag.starts_with('r')
+                || tag.starts_with('b');
+            if !joinable || chars + prev_chars > MAX_CHARS {
+                break;
+            }
+            chars += prev_chars;
+            start -= 1;
+        }
+        let value: String = tokens[start..=end]
+            .iter()
+            .map(|(word, _)| word.as_str())
+            .collect();
+        if value.chars().count() < 2 {
+            continue;
+        }
+        out.insert(FactToken {
+            kind: FactKind::Unit,
+            value,
+        });
+    }
 }
 
 fn collect_matches(text: &str, pattern: &str, kind: FactKind, out: &mut BTreeSet<FactToken>) {
@@ -215,6 +276,35 @@ mod tests {
         assert!(changes.iter().any(|item| item.value == "12万元"));
         assert!(changes.iter().any(|item| item.value == "《测试办法》"));
         assert!(!changes.iter().any(|item| item.value == "某某市教育局"));
+    }
+
+    #[test]
+    fn heuristic_unit_does_not_swallow_sentence_prefix() {
+        let facts = extract_key_facts("人类决策者可能因认知局，并非某某局。", &[]);
+        let units: Vec<_> = facts
+            .iter()
+            .filter(|fact| fact.kind == FactKind::Unit)
+            .map(|fact| fact.value.as_str())
+            .collect();
+        assert_eq!(units, vec!["某某局", "认知局"]);
+        // 「无处」里的「处」只剩一个字，不算单位名。
+        assert!(
+            extract_key_facts("其突出优势在于其无处", &[])
+                .iter()
+                .all(|fact| fact.kind != FactKind::Unit)
+        );
+    }
+
+    #[test]
+    fn heuristic_unit_keeps_names_containing_function_words() {
+        // 「和」「共和国」都是名字的一部分，不能从中间切开。
+        let facts = extract_key_facts("请中华人民共和国财政部牵头办理。", &[]);
+        assert!(
+            facts
+                .iter()
+                .any(|fact| fact.kind == FactKind::Unit && fact.value == "中华人民共和国财政部"),
+            "实际抽取：{facts:?}"
+        );
     }
 
     #[test]
