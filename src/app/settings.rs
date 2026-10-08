@@ -1303,7 +1303,7 @@ impl GongwenApp {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "把本程序的 Markdown 标记与七种文种的格式要求打包成技能（Skill），\
+                "把本程序的 Markdown 标记与八种文种的格式要求打包成技能（Skill），\
                  装进 Claude、Codex、OpenCode、DeerFlow、pi 等工具后，它们写出的 .md \
                  可直接粘贴到起草页排版导出。",
             )

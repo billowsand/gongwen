@@ -84,7 +84,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "02-ui",
         Part::Intro,
         "界面总览",
-        "五区布局、标签模型与十四套主题"
+        "五区布局、标签模型与十套主题"
     ),
     chapter!(
         "03-quickstart",
@@ -102,7 +102,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "05-profiles",
         Part::Writing,
         "立稿与要素填报",
-        "七种文种、版头主体版记与密级规则"
+        "八种文种、版头主体版记与密级规则"
     ),
     chapter!(
         "06-editor",
