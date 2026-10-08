@@ -66,6 +66,8 @@ pub(super) enum CardAction {
     Rerun(u64),
     /// 交上这一轮选择题的回答。
     Answer(u64),
+    /// 按当前框内大纲与修改要求再优化一轮，不进入正文起草。
+    RefineOutline(u64),
     /// 打开审校抽屉（审核类技能把有改法的问题放在那里）。
     OpenDrawer,
     /// 风格学习的结果存成风格档案。
@@ -393,6 +395,7 @@ impl DraftPage<'_> {
                     self.apply_research_answers(id);
                 }
             }
+            Some(CardAction::RefineOutline(id)) => self.refine_outline(id),
             Some(CardAction::Rerun(id)) => {
                 let request = self
                     .doc
@@ -677,6 +680,13 @@ fn turn_card(
     let state = turn.state.clone();
     match &state {
         TurnState::Waiting | TurnState::Streaming | TurnState::Checking => {
+            if turn
+                .replies
+                .first()
+                .is_some_and(|reply| reply.outline_base.is_some())
+            {
+                outline_ui(ui, turn, action);
+            }
             ui.add_space(6.0);
             if ui
                 .add(theme::secondary_icon_button(theme::Icon::Square, "停止"))
@@ -974,6 +984,14 @@ fn questions_ui(
     (heading, submit, skip): (&str, &str, &str),
     action: &mut Option<CardAction>,
 ) {
+    if turn.state == TurnState::Asking
+        && turn.run.as_ref().is_some_and(|run| {
+            crate::agent::outline::step_index(&run.skill, &run.suspension).is_some()
+        })
+    {
+        outline_ui(ui, turn, action);
+        return;
+    }
     use crate::agent::clarify::Action;
     let asking = turn.state == TurnState::Asking;
     let super::AiTurn {
@@ -1133,6 +1151,75 @@ fn questions_ui(
                 "AI 把回答写进所在段落，改完仍是提案；没答的保留待核实，不会替你猜",
             );
         }
+    });
+}
+
+/// 大纲编辑与提示词优化共用同一份当前文本，确认前可反复迭代。
+fn outline_ui(ui: &mut egui::Ui, turn: &mut super::AiTurn, action: &mut Option<CardAction>) {
+    let running = turn.state.running();
+    let Some(reply) = turn.replies.first_mut() else {
+        return;
+    };
+    ui.label(egui::RichText::new("确认大纲").strong());
+    theme::caption(
+        ui,
+        "可直接修改大纲，也可填写修改要求让 AI 优化；满意后再开始写作。",
+    );
+    ui.add_space(6.0);
+    let rows = reply.custom.lines().count().clamp(4, 14);
+    ui.add(
+        egui::TextEdit::multiline(&mut reply.custom)
+            .id_salt(("outline_text", turn.id))
+            .desired_rows(rows)
+            .desired_width(f32::INFINITY)
+            .hint_text("每行一章：章标题：要点"),
+    );
+    ui.add_space(8.0);
+    if !reply.outline_candidate.is_empty() {
+        ui.collapsing("AI 优化结果（未覆盖你的手工修改）", |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut reply.outline_candidate)
+                    .desired_rows(5)
+                    .desired_width(f32::INFINITY),
+            );
+            if ui.button("使用这份优化结果").clicked() {
+                reply.custom = std::mem::take(&mut reply.outline_candidate);
+            }
+        });
+    }
+    if running {
+        theme::caption(
+            ui,
+            "正在优化，可以继续手工修改；返回结果不会覆盖新增的修改。",
+        );
+    }
+    ui.label("修改要求");
+    ui.add(
+        egui::TextEdit::multiline(&mut reply.outline_instruction)
+            .id_salt(("outline_instruction", turn.id))
+            .desired_rows(3)
+            .desired_width(f32::INFINITY)
+            .hint_text("例如：合并前两章，增加国内外做法对比，把对策建议细分为三项"),
+    );
+    ui.add_space(8.0);
+    let has_outline = !reply.custom.trim().is_empty();
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                !running && has_outline && !reply.outline_instruction.trim().is_empty(),
+                theme::secondary_icon_button(theme::Icon::Sparkles, "优化大纲"),
+            )
+            .clicked()
+        {
+            *action = Some(CardAction::RefineOutline(turn.id));
+        }
+        ui.add_enabled_ui(!running && has_outline, |ui| {
+            if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "确认大纲，开始写作")
+                .clicked()
+            {
+                *action = Some(CardAction::Answer(turn.id));
+            }
+        });
     });
 }
 

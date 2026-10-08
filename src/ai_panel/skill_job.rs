@@ -113,6 +113,47 @@ pub(crate) fn unavailable(skill: &Skill, ctx: &RouteContext<'_>) -> Option<Strin
 }
 
 impl DraftPage<'_> {
+    /// 优化大纲也走唯一的技能恢复入口，返回后仍停在大纲确认。
+    pub(crate) fn refine_outline(&mut self, turn_id: u64) {
+        if self.doc.busy || self.doc.read_only() {
+            *self.status = "请等待当前任务结束，并在可编辑稿件中优化大纲。".into();
+            return;
+        }
+        let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) else {
+            return;
+        };
+        if turn.state != TurnState::Asking {
+            return;
+        }
+        let (Some(mut run), Some(request), Some(reply)) =
+            (turn.run.clone(), turn.request.clone(), turn.replies.first())
+        else {
+            return;
+        };
+        if let Err(error) = crate::agent::outline::revise(
+            &run.skill,
+            &mut run.suspension,
+            &reply.custom,
+            &reply.outline_instruction,
+        ) {
+            *self.status = error;
+            return;
+        }
+        turn.notes.push(format!(
+            "大纲修改要求：{}",
+            reply.outline_instruction.trim()
+        ));
+        turn.replies[0].outline_base = Some(turn.replies[0].custom.clone());
+        turn.replies[0].outline_candidate.clear();
+        let original = turn.run.take();
+        if let Err(error) = self.start_skill(request, Some((turn_id, run))) {
+            if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
+                turn.run = original;
+            }
+            *self.status = error;
+        }
+    }
+
     /// 发起一轮技能任务。`resume` 是挂起的那一轮：答完接着跑，不另开一轮。
     ///
     /// 崩溃 / 停止 / 出错后的「接着跑」也进这里（`DraftPage::resume_checkpoint` 取库里最新
@@ -171,8 +212,11 @@ impl DraftPage<'_> {
                 let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) else {
                     return Err("这一轮已不在侧栏里。".into());
                 };
-                turn.questions.clear();
-                turn.replies.clear();
+                // 优化期间仍可手工编辑；返回结果时检测是否新增了修改，防止覆盖。
+                if !board.vars.contains_key(crate::agent::outline::REVISION) {
+                    turn.questions.clear();
+                    turn.replies.clear();
+                }
                 // 恢复第一件事：任务流里插一行「从×××之后接着跑」。
                 let label = suspension.checkpoint.label.clone();
                 turn.notes.push(format!("从「{label}」之后接着跑。"));
@@ -1302,6 +1346,18 @@ fn run_engine(
         secrets,
         ckpt,
     };
+    if board.vars.contains_key(crate::agent::outline::REVISION) {
+        let checkpoint = crate::agent::checkpoint::Checkpoint {
+            at: at.clone(),
+            reason: crate::agent::checkpoint::Reason::Step,
+            label: "待优化大纲（含手工修改与修改要求）".into(),
+            board: board.clone(),
+            partial: false,
+        };
+        if let Err(error) = ckpt.save(&checkpoint) {
+            emit(Event::Note(format!("大纲优化现场没存上：{error}")));
+        }
+    }
     match engine::run(board, &env, &at, emit).map_err(|e| format!("{e:#}"))? {
         Outcome::Suspended(suspension) => Ok(SkillResult::Suspended(Box::new(SkillRun {
             skill,

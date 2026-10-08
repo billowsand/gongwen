@@ -279,6 +279,45 @@ fn plan_list(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec, outline: bool) -> anyho
         (10, "items", "清单")
     };
     let max = param(ctx, step, &["max"], default_max, 1..=20);
+    if outline && let Some(revision) = ctx.board.vars.get(crate::agent::outline::REVISION).cloned()
+    {
+        let current = revision["current"].as_str().unwrap_or_default();
+        let instruction = revision["instruction"].as_str().unwrap_or_default();
+        phase(ctx, "按修改要求优化大纲…");
+        let locals = [
+            ("max", max.to_string()),
+            ("request", ctx.board.request_with_notes()),
+            ("outline", current.to_string()),
+            ("instruction", instruction.to_string()),
+        ];
+        let template = ctx.env.skill.section("优化大纲").unwrap_or(
+            "根据原始写作要求和修改要求优化当前大纲。以当前大纲为基础，保留未要求调整的内容，\
+             只输出大纲，每行一章，格式为“章标题：要点”，不加编号、说明或正文，最多 {max} 章。\n\n\
+             【原始写作要求】\n{request}\n\n【当前大纲】\n{outline}\n\n【修改要求】\n{instruction}",
+        );
+        let text = ctx.board.render_with(template, &locals);
+        let result = assist(ctx, &text).map(|reply| crate::prompt::sanitize_model_markdown(&reply));
+        check_cancel(ctx)?;
+        let items = match result {
+            Ok(reply) if !lines_of(&reply, max).is_empty() => lines_of(&reply, max),
+            result => {
+                let reason = result
+                    .err()
+                    .map_or("模型未返回有效大纲".into(), |e| format!("{e:#}"));
+                note(
+                    ctx,
+                    format!("大纲优化未完成（{reason}），已保留当前大纲，可继续修改或重试。"),
+                );
+                current.lines().map(str::to_string).collect()
+            }
+        };
+        ctx.board.vars.remove(crate::agent::outline::REVISION);
+        let name = step.save_as.as_deref().unwrap_or(default_var).to_string();
+        // 优化后始终再次确认，不能因为某份技能关闭了初次确认而直接开写。
+        let mut step = step.clone();
+        step.params.insert("confirm".into(), Value::Bool(true));
+        return finish_list(ctx, &step, items, name, label, true);
+    }
     phase(ctx, format!("列{label}…"));
     let locals = [
         ("max", max.to_string()),

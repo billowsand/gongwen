@@ -784,6 +784,7 @@ GONGWEN_LIVE_LLM_URL=http://127.0.0.1:12345/v1 GONGWEN_LIVE_LLM_MODEL=qwen/qwen3
 |---|---|
 | `assets/agent-skills/` | 新增 `policy-report`（政策研究报告）、`imitate`（仿写）、`material`（材料成文）、`reply-letter`（复函）、`condense`（精简扩写）、`tone`（语气调整）、`normalize`（规范化）、`review`（全面审校）、`fact-check`（事实核查）、`extract`（要点提炼） |
 | `agent/ops/prepare.rs` | `plan` 支持 `list`（任意清单）、`outline`（大纲，停下让用户在框里改）、`split`（**不调模型**按原文逐行 / 逐句拆要点）、`title`（沿用具体标题提示，空白或通用文种名时按要求拟题，存入 `report_title` 或 `save_as`，不回写文档要素）；`retrieve` 把这次查到的证据编号存进 `found` |
+| `agent/outline.rs`、`ai_panel/ui.rs` | 大纲确认支持反复提示词优化：当前大纲始终可手改，输入修改要求点「优化大纲」后只重跑列大纲一步，返回仍等确认；点「确认大纲，开始写作」才继续。优化期间仍可编辑，新增手改受保护，AI 返回结果存为候选供单独采用；按钮在优化期间禁用，防止重复请求。技能可用 `## 优化大纲` 定制提示词（`{outline}` / `{instruction}` / `{request}` / `{max}`），缺省使用内置写法。失败保留当前大纲，优化前保存含手改文本与修改要求的检查点，续跑沿用原恢复入口；修改要求、候选结果与等待期间的手改文本随会话保存；空大纲不能确认。 |
 | `agent/ops/write.rs` | `generate` 加 `section`（逐章写、接在末尾，只用 `found` 里的证据）、`fill`（替换占位记号，如补摘要）；`new` 分出 `prompt`（总带）与 `evidence_prompt`（有证据才带）；`rewrite` 加 `source: workspace` 与 `fit_length` |
 | `agent/ops/finish.rs` | `cite`：研究报告里 [K#] 落到文献库 `[@key]`（题名对得上的）或脚注，同一份资料一章只挂一次 |
 | `agent/ops/review.rs` | 审核类算子：`review`（要素校验 + 模型诊断，改法过闸门才收）、`fact_check`（逐条检索判有出处 / 无出处 / 矛盾）、`report`（清单变量成问题清单） |

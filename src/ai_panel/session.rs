@@ -407,6 +407,14 @@ fn fingerprint(turn: &AiTurn, has_proposal: bool) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     if turn.state.running() {
         "running".hash(&mut hasher);
+        // 优化大纲时输入框仍可编辑：这些输入即使任务在跑也要触发保存。
+        if turn
+            .replies
+            .first()
+            .is_some_and(|reply| reply.outline_base.is_some())
+        {
+            format!("{:?}", turn.replies).hash(&mut hasher);
+        }
     } else {
         format!("{:?}", turn.state).hash(&mut hasher);
         turn.excluded_hunks.hash(&mut hasher);
@@ -789,6 +797,26 @@ mod tests {
         // 再发一轮，编号接着往后排。
         let next = after.push_turn("x".into(), "y".into(), vec![], None);
         assert_eq!(next, 4);
+    }
+
+    #[test]
+    fn editing_an_outline_during_optimization_triggers_saving_and_survives_restart() {
+        let (mut store, id) = store();
+        let mut panel = saved_panel(&mut store, id);
+        let turn = &mut panel.turns[1];
+        turn.resume();
+        turn.replies[0].outline_base = Some("背景：原大纲".into());
+        turn.replies[0].custom = "背景：原大纲".into();
+        let before = fingerprint(turn, false);
+        turn.replies[0].custom = "背景：等待期间的手工修改".into();
+        turn.replies[0].outline_instruction = "加一章风险分析".into();
+        turn.replies[0].outline_candidate = "风险：AI候选".into();
+        assert_ne!(fingerprint(turn, false), before);
+        let encoded = serde_json::to_string(&SavedTurn::of(turn, None)).unwrap();
+        let saved: SavedTurn = serde_json::from_str(&encoded).unwrap();
+        let (restored, _) = saved.restore(&crate::agent::skill::load_all().0, false);
+        assert_eq!(restored.state, TurnState::Interrupted);
+        assert_eq!(restored.replies, turn.replies);
     }
 
     #[test]

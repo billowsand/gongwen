@@ -253,6 +253,91 @@ fn panel_request(skill: Option<&str>, text: &str) -> crate::ai_panel::TurnReques
     }
 }
 
+#[test]
+fn outline_confirmation_has_editing_and_refinement_controls_and_saves_the_instruction() {
+    let mut harness = Harness::new("原有正文。");
+    harness.doc.ai_panel.open = true;
+    let skill = crate::agent::skill::builtin(crate::agent::skill::POLICY_REPORT).unwrap();
+    let model = crate::agent::testkit::ScriptedModel::new(|_, prompt| {
+        if prompt.contains("列出章的大纲") {
+            "背景：研究问题".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = crate::agent::testkit::KeywordKb::disabled();
+    let board = crate::agent::board::Board {
+        clarified: true,
+        draft: crate::models::DraftInput {
+            kind: crate::models::TemplateKind::ResearchReport,
+            title_hint: "人工智能应用研究".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut driver = crate::agent::testkit::Driver::new(&skill, &model, &kb, board);
+    let suspension = driver.run().unwrap();
+    let request = panel_request(Some(crate::agent::skill::POLICY_REPORT), "研究人工智能应用");
+    let panel = &mut harness.doc.ai_panel;
+    let id = panel.push_turn(
+        "政策研究报告".into(),
+        request.text.clone(),
+        vec![],
+        Some(request),
+    );
+    panel.ask(Box::new(crate::ai_panel::SkillRun {
+        skill,
+        suspension,
+        use_rag: false,
+    }));
+    let reply = &mut panel.turn_mut(id).unwrap().replies[0];
+    reply.custom = "背景：用户手工修改".into();
+    reply.outline_instruction = "增加风险分析".into();
+    let encoded = serde_json::to_string(reply).unwrap();
+    let restored: crate::ai_panel::ReplyDraft = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(restored.custom, "背景：用户手工修改");
+    assert_eq!(restored.outline_instruction, "增加风险分析");
+    let old: crate::ai_panel::ReplyDraft =
+        serde_json::from_str(r#"{"choice":0,"custom":"旧大纲","skip":false}"#).unwrap();
+    assert!(old.outline_instruction.is_empty());
+    let texts = harness.frame_texts();
+    for label in [
+        "确认大纲",
+        "修改要求",
+        "优化大纲",
+        "确认大纲，开始写作",
+        "背景：用户手工修改",
+    ] {
+        assert!(
+            texts.iter().any(|text| text.contains(label)),
+            "{label}: {texts:?}"
+        );
+    }
+    assert_eq!(harness.doc.generated_markdown, "原有正文。");
+    assert!(!harness.doc.busy);
+    let panel = &mut harness.doc.ai_panel;
+    let turn = panel.turn_mut(id).unwrap();
+    let mut run = turn.run.take().unwrap();
+    turn.replies[0].outline_base = Some(turn.replies[0].custom.clone());
+    turn.resume();
+    let texts = harness.frame_texts();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("正在优化，可以继续手工修改"))
+    );
+    let panel = &mut harness.doc.ai_panel;
+    panel.turn_mut(id).unwrap().replies[0].custom = "背景：等待期间的新修改".into();
+    run.suspension.questions[0].prefill = "背景：AI优化结果\n风险：新增风险分析".into();
+    panel.ask(run);
+    let reply = &panel.turn_mut(id).unwrap().replies[0];
+    assert_eq!(reply.custom, "背景：等待期间的新修改");
+    assert!(reply.outline_candidate.contains("新增风险分析"));
+    assert_eq!(reply.outline_instruction, "增加风险分析");
+    let texts = harness.frame_texts();
+    assert!(texts.iter().any(|text| text.contains("未覆盖你的手工修改")));
+}
+
 /// 侧栏里开一轮「研究式起草」，停在动笔前的题上（检查点里的文种是出题时的文种）。
 fn asking_turn(
     harness: &mut Harness,

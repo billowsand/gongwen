@@ -32,6 +32,7 @@ pub(crate) mod evidence;
 pub(crate) mod gap_revise;
 pub(crate) mod gaps;
 pub(crate) mod ops;
+pub(crate) mod outline;
 pub(crate) mod references;
 pub(crate) mod router;
 pub(crate) mod skill;

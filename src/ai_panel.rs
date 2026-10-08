@@ -420,7 +420,25 @@ impl AiPanel {
     pub(crate) fn ask(&mut self, run: Box<SkillRun>) {
         self.cancel = None;
         if let Some(turn) = self.running_turn_mut() {
+            let previous = turn.replies.first().cloned();
             turn.replies = initial_replies(&run.suspension.questions);
+            if crate::agent::outline::step_index(&run.skill, &run.suspension).is_some()
+                && let Some(previous) = previous
+                && let Some(reply) = turn.replies.first_mut()
+            {
+                if previous
+                    .outline_base
+                    .as_ref()
+                    .is_some_and(|base| base != &previous.custom)
+                {
+                    reply.outline_candidate = reply.custom.clone();
+                    reply.custom = previous.custom;
+                    turn.notes.push(
+                        "优化期间你又修改了大纲，已保留手工内容；AI 优化结果可单独采用。".into(),
+                    );
+                }
+                reply.outline_instruction = previous.outline_instruction;
+            }
             turn.questions = run.suspension.questions.clone();
             turn.run = Some(run);
             turn.settle(TurnState::Asking);
@@ -489,6 +507,15 @@ pub(crate) struct ReplyDraft {
     pub(crate) choice: Option<usize>,
     pub(crate) custom: String,
     pub(crate) skip: bool,
+    /// 大纲确认期间的修改要求；与手工编辑的大纲一起保存。
+    #[serde(default)]
+    pub(crate) outline_instruction: String,
+    /// 发起优化时的文本快照，用于保护等待期间新增的手工修改。
+    #[serde(default)]
+    pub(crate) outline_base: Option<String>,
+    /// 等待期间发生手工修改时，AI 返回的大纲先存成候选，不覆盖当前文本。
+    #[serde(default)]
+    pub(crate) outline_candidate: String,
 }
 
 impl ReplyDraft {
