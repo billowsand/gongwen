@@ -3,6 +3,12 @@ param(
     [string]$SourceDir = "",
     [string]$OutputDir = "",
     [string]$CompilerPath = "",
+    # 增量升级包：只携带变化的文件，输出名带 -upgrade-setup，
+    # 且不检查字体等资源是否齐全（那些没变化的文件不在包里）。
+    [switch]$Upgrade,
+    # 升级包安装前要删除的过时文件清单（Inno 的 [InstallDelete] 片段），由
+    # package-upgrade.ps1 生成。
+    [string]$StaleListInclude = "",
     [switch]$Force
 )
 
@@ -45,25 +51,31 @@ if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
     throw "Portable package directory not found: $SourceDir"
 }
 
-$requiredFiles = @(
-    "gongwen-assistant.exe",
-    "runtime\fonts\GWFangSong.ttf",
-    "runtime\fonts\GWKai.ttf",
-    "runtime\fonts\FZHei.ttf",
-    "runtime\fonts\FZShuSong.ttf",
-    "runtime\fonts\XiaoBiaoSong.ttf",
-    "runtime\fonts\GWSimSunLatin.ttf",
-    "runtime\fonts\JetBrainsMono-Regular.ttf",
-    "runtime\fonts\texgyretermes-regular.otf",
-    "runtime\fonts\texgyretermes-bold.otf",
-    "runtime\fonts\texgyretermes-italic.otf",
-    "runtime\fonts\texgyretermes-bolditalic.otf"
-)
-foreach ($relative in $requiredFiles) {
-    $requiredPath = Join-Path $SourceDir $relative
-    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        throw "Missing portable package file: $requiredPath"
+if (-not $Upgrade) {
+    # 升级包只携带变化的文件，"必带字体" 这类检查对它没有意义。
+    $requiredFiles = @(
+        "gongwen-assistant.exe",
+        "runtime\fonts\GWFangSong.ttf",
+        "runtime\fonts\GWKai.ttf",
+        "runtime\fonts\FZHei.ttf",
+        "runtime\fonts\FZShuSong.ttf",
+        "runtime\fonts\XiaoBiaoSong.ttf",
+        "runtime\fonts\GWSimSunLatin.ttf",
+        "runtime\fonts\JetBrainsMono-Regular.ttf",
+        "runtime\fonts\texgyretermes-regular.otf",
+        "runtime\fonts\texgyretermes-bold.otf",
+        "runtime\fonts\texgyretermes-italic.otf",
+        "runtime\fonts\texgyretermes-bolditalic.otf"
+    )
+    foreach ($relative in $requiredFiles) {
+        $requiredPath = Join-Path $SourceDir $relative
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            throw "Missing portable package file: $requiredPath"
+        }
     }
+}
+elseif ([string]::IsNullOrWhiteSpace($StaleListInclude)) {
+    throw "Upgrade packages need -StaleListInclude; run scripts/package-upgrade.ps1 instead."
 }
 
 if ([string]::IsNullOrWhiteSpace($CompilerPath)) {
@@ -96,7 +108,8 @@ if ([string]::IsNullOrWhiteSpace($CompilerPath) -or -not (Test-Path -LiteralPath
 }
 $CompilerPath = [System.IO.Path]::GetFullPath($CompilerPath)
 
-$outputExe = Join-Path $OutputDir "gongwen-assistant-$Version-win-x64-setup.exe"
+$packageKind = if ($Upgrade) { "-win-x64-upgrade-setup" } else { "-win-x64-setup" }
+$outputExe = Join-Path $OutputDir "gongwen-assistant-$Version$packageKind.exe"
 if (Test-Path -LiteralPath $outputExe -PathType Leaf) {
     if (-not $Force) {
         throw "Installer already exists: $outputExe`nPass -Force to overwrite."
@@ -112,6 +125,12 @@ $defines = @(
     "/DMyIconPath=$iconPath",
     "/DMyLanguageFile=$languageFile"
 )
+if ($Upgrade) {
+    # ISPP 的 #include 把反斜杠当转义符，路径一律用正斜杠。
+    $staleInclude = [System.IO.Path]::GetFullPath($StaleListInclude).Replace("\", "/")
+    $defines += "/DMyUpgradeMode=1"
+    $defines += "/DMyStaleListInclude=$staleInclude"
+}
 & $CompilerPath @defines $scriptPath
 if ($LASTEXITCODE -ne 0) {
     throw "ISCC failed with exit code $LASTEXITCODE"

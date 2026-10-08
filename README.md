@@ -268,10 +268,16 @@ assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
 vendor/             随仓库分发的第三方源码（mdx、latex-rust、typst-layout）
-scripts/            版本号更新与便携包构建脚本
+scripts/            版本号更新、完整包与增量升级包构建脚本
 runtime/            随包字体（不进入 Git）
 config.example.json 示例配置
 ```
+
+Windows 打包分两种：`scripts/package-dev.ps1` 打完整安装包（字体等资源全带，约 65 MB）；
+`scripts/package-upgrade.ps1` 打增量升级包——按新旧两份 `SHA256SUMS.txt` 做差，只携带
+真正变化的文件并删除已消失的文件，字体没改动就不进包（几十 KB～几 MB），装在已有
+安装之上，共用同一个卸载器。基线默认取本机已安装目录的清单，给别的机器做包用
+`-BaselineDir` 指向旧包目录。
 
 ```powershell
 cargo fmt --all -- --check

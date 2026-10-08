@@ -150,6 +150,14 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   它构建 release → 组装 `dist\win-x64-full` → 用 Inno Setup 打出
   `dist\gongwen-assistant-<下一补丁号>-dev-win-x64-setup.exe`；只重打包不重编译加
   `-SkipBuild`。脚本含中文，文件头必须有 UTF-8 BOM，否则 PowerShell 5.1 按 GBK 读会解析失败。
+- **增量升级包**：`scripts/package-upgrade.ps1` 按新旧两份 `SHA256SUMS.txt` 做差，只把
+  变化的文件打进安装包（字体没改动就不带，65 MB → 几 MB），安装前按生成的
+  `[InstallDelete]` 片段删掉已消失的文件。它与完整包共用 `scripts/gongwen-assistant.iss`
+  （同一 AppId、同一卸载日志），升级模式由 `/DMyUpgradeMode=1` 打开：不整目录删除
+  `{app}\runtime`、不重建快捷方式、目标目录没有已安装程序就中止。基线默认取
+  `%LOCALAPPDATA%\Programs\GongwenAssistant\SHA256SUMS.txt`，给别人做包传
+  `-BaselineDir`/`-BaselineManifest`。注意 Inno 的 `#include` 与 `#if` 只认字符串，
+  include 路径要正斜杠。
 
 ## 约定
 
