@@ -75,9 +75,13 @@ pub(crate) struct SkillReport {
 
 impl SkillReport {
     pub(crate) fn from_board(board: &Board) -> Self {
+        let workspace = evidence::normalize_citations(
+            &board.workspace,
+            &board.draft.research.bibliography_content,
+        );
         Self {
-            markdown: evidence::strip_citations(&board.workspace),
-            cited_ids: evidence::citation_ids(&board.workspace),
+            markdown: evidence::strip_citations(&workspace),
+            cited_ids: evidence::citation_ids(&workspace),
             generated_at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
             ledger: board.ledger.clone(),
             evidence: board.evidence.clone(),
@@ -108,6 +112,19 @@ fn report_collects_only_workspace_citations_before_stripping() {
     assert_eq!(report.cited_ids, [1, 3]);
     assert_eq!(report.markdown, "一。三。");
     assert_eq!(report.evidence.items().len(), 5);
+}
+
+#[test]
+fn report_removes_miswritten_evidence_even_without_a_cite_step() {
+    let mut board = Board {
+        workspace: "依据[@K1]，另引[@K2; @unknown]，不存在的证据[@K99]。".into(),
+        ..Default::default()
+    };
+    board.draft.research.bibliography_content = "@book{K2, title = {真实文献}}".into();
+    let report = SkillReport::from_board(&board);
+    assert_eq!(report.markdown, "依据，另引[@K2; @unknown]，不存在的证据。");
+    assert_eq!(report.cited_ids, [1, 99]);
+    assert!(board.workspace.contains("[@K1]"), "交付不改原始工作稿");
 }
 
 /// 从 `at` 接着执行技能流程；空路径表示全新开跑。

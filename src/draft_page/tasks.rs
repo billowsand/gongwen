@@ -24,6 +24,8 @@ use std::thread;
 /// 所有 AI 产物（单次起草、润色、研究式起草）都走这一条，不另起一套。
 pub(crate) fn prepare_model_markdown(input: &DraftInput, raw: &str) -> String {
     let cleaned = prompt::sanitize_model_markdown(raw);
+    let cleaned =
+        crate::agent::evidence::delivery_markdown(&cleaned, &input.research.bibliography_content);
     let normalized = prompt::normalize_generated_markdown(input, &cleaned);
     export::finalize_markdown(input, &normalized)
 }
@@ -480,5 +482,51 @@ impl DraftPage<'_> {
         if !self.doc.warnings.is_empty() || !self.doc.revisions.is_empty() {
             self.open_result_drawer();
         }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use crate::models::TemplateKind;
+
+    #[test]
+    fn proposal_delivery_removes_internal_marks_and_preserves_research_syntax() {
+        let mut input = DraftInput {
+            kind: TemplateKind::ResearchReport,
+            ..DraftInput::default()
+        };
+        input.research.bibliography_content = "@book{K2, title = {真实文献}}".into();
+        let body = concat!(
+            "# 研究报告\n\n<!-- [正文] -->\n\n## 背景 {#chap:bg}\n\n",
+            "已有结论，见第{@chap:bg}章[@K2]。补充说明[^n]:(来源说明)。\n\n",
+            "$x^2$，尚需确认【待核实：统计口径】。\n"
+        );
+        let ai = body.replace("已有结论", "已有结论[@K1][K3; K4]【K5；6】");
+        let draft = reviewed_draft(&input, &crate::models::AppConfig::default(), &ai, false);
+        assert_eq!(draft.markdown, prepare_model_markdown(&input, body));
+        assert!(ai.contains("[@K1]"), "AI 原稿保留来源标识");
+        assert!(
+            draft
+                .warnings
+                .iter()
+                .any(|note| note.message.contains("待核实"))
+        );
+        assert!(
+            !draft
+                .warnings
+                .iter()
+                .any(|note| note.message.contains("[@K1]"))
+        );
+    }
+
+    #[test]
+    fn non_research_proposals_also_remove_internal_source_marks() {
+        let input = DraftInput::default();
+        let body = "# 工作通知\n\n各单位加强巡查。";
+        assert_eq!(
+            prepare_model_markdown(&input, "# 工作通知\n\n各单位加强巡查[@K2][K3; K4]。"),
+            prepare_model_markdown(&input, body)
+        );
     }
 }

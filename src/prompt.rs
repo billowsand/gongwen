@@ -720,6 +720,8 @@ fn strip_think_blocks(raw: &str) -> String {
     for (open, close) in [("<think>", "</think>"), ("<thinking>", "</thinking>")] {
         while let Some(start) = text.find(open) {
             let Some(end) = text[start..].find(close).map(|offset| start + offset) else {
+                // 输出中断时，未闭合的思考块后面仍属于推理，不能当作正文交付。
+                text.truncate(start);
                 break;
             };
             text.replace_range(start..end + close.len(), "");
@@ -1288,6 +1290,17 @@ mod tests {
     fn removes_thinking_and_fence() {
         let raw = "<think>secret</think>\n```markdown\n# 标题\n正文\n```";
         assert_eq!(sanitize_model_markdown(raw), "# 标题\n正文");
+    }
+
+    #[test]
+    fn unfinished_thinking_blocks_never_enter_the_body() {
+        for tag in ["<think>", "<thinking>"] {
+            assert_eq!(sanitize_model_markdown(&format!("{tag}内部推理")), "");
+            assert_eq!(
+                sanitize_model_markdown(&format!("# 标题\n\n正文。\n{tag}内部推理")),
+                "# 标题\n\n正文。"
+            );
+        }
     }
 
     #[test]
