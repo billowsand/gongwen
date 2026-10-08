@@ -678,6 +678,34 @@ mod tests {
         );
         assert!(text_rect("请办公室办理。").top() > text_rect("来电通知正文。").bottom());
         assert!(text_rect("承办单位：").top() > text_rect("请办公室办理。").bottom());
+        let mm = |value: f32| value * 72.0 / 25.4 * PT;
+        let footer = text_rect("承办单位：");
+        let suggestion = text_rect("请办公室办理。");
+        assert!(
+            footer.top() - suggestion.bottom() < mm(12.0),
+            "建议应贴近表底，不能下方再追加整段高度"
+        );
+        let title = text_rect("本单位");
+        assert!(
+            (mm(205.0)..mm(235.0)).contains(&(footer.top() - title.top())),
+            "短稿承办栏应位于 A4 页底附近"
+        );
+        let papers: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Rect(shape) if shape.fill == theme::paper::bg() => {
+                    Some(shape.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            papers
+                .iter()
+                .any(|rect| (rect.height() - mm(297.0)).abs() < mm(4.0)),
+            "短稿纸张应为 A4，不能被表格撑成两倍高度"
+        );
     }
 
     #[test]

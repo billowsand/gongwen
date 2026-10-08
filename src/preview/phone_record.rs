@@ -4,23 +4,69 @@ use super::*;
 use crate::{export, models::DraftInput};
 
 fn field(ui: &mut egui::Ui, m: &Metrics, rect: egui::Rect, text: &str, size: f32, title: bool) {
-    // 表格格内绘制不能推进父级光标，否则正文会回退到元数据行。
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink(m.mm(2.0)))
-            .layout(egui::Layout::top_down(egui::Align::Min)),
+    // 格内文字只绘制，不推进父光标；位置与导出的水平 / 垂直对齐一致。
+    let inner = rect.shrink(m.mm(2.0));
+    let galley = ui.fonts_mut(|fonts| {
+        fonts.layout(
+            text.to_owned(),
+            m.font(
+                if title {
+                    theme::FONT_BIAOSONG
+                } else {
+                    theme::FONT_FANGSONG
+                },
+                size,
+            ),
+            theme::paper::ink(),
+            inner.width(),
+        )
+    });
+    let x = if title {
+        inner.center().x - galley.size().x / 2.0
+    } else {
+        inner.left()
+    };
+    ui.painter().galley(
+        egui::pos2(x, inner.center().y - galley.size().y / 2.0),
+        galley,
+        theme::paper::ink(),
     );
-    child.add(
-        egui::Label::new(egui::RichText::new(text).font(m.font(
-            if title {
-                theme::FONT_BIAOSONG
-            } else {
-                theme::FONT_FANGSONG
-            },
-            size,
-        )))
-        .wrap(),
-    );
+}
+
+/// 使用 A4 的物理高度和公文下边距，不能按正文已用高度再次扩展纸张。
+fn record_sheet(ui: &mut egui::Ui, m: &Metrics, contents: impl FnOnce(&mut egui::Ui)) {
+    m.next_page();
+    ui.horizontal(|ui| {
+        ui.add_space(((m.viewport - m.page) / 2.0).max(0.0));
+        let (_, paper) = ui.allocate_space(egui::vec2(m.page, m.page_height));
+        let background = ui.painter().add(egui::Shape::Noop);
+        let origin = paper.min + egui::vec2(m.margin_left, m.margin_top);
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_size(
+                    origin,
+                    egui::vec2(m.content, m.page_height - m.margin_top - m.mm(35.0)),
+                ))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        child.spacing_mut().item_spacing = egui::Vec2::ZERO;
+        child.style_mut().visuals.override_text_color = Some(theme::paper::ink());
+        child.style_mut().interaction.selectable_labels = false;
+        contents(&mut child);
+        let mut paper = paper;
+        paper.max.y = paper.bottom().max(child.min_rect().bottom() + m.mm(35.0));
+        ui.painter().set(
+            background,
+            egui::epaint::RectShape::filled(paper, 3.0, theme::paper::bg()),
+        );
+        ui.painter().rect_stroke(
+            paper,
+            3.0,
+            egui::Stroke::new(1.0, theme::paper::border()),
+            egui::StrokeKind::Inside,
+        );
+        ui.advance_cursor_after_rect(paper);
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -37,8 +83,12 @@ pub(super) fn show(
     let visible = ui
         .clip_rect()
         .intersect(ui.ctx().input(|i| i.content_rect()));
-    let m = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom)
+    let mut m = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom)
         .with_bold_style(ui.ctx());
+    // 通用公文预览的抬头留白为 52pt；记录单采用导出模板的 37mm 上边距。
+    m.margin_top = m.mm(37.0);
+    m.margin_left = m.mm(28.0);
+    m.content = m.mm(156.0);
     let mut clicked = None;
     let mut counters = [0; 4];
     let blocks = export::parse_markdown_located_with_numbering(markdown, numbering);
@@ -51,18 +101,27 @@ pub(super) fn show(
             )
         })
         .unwrap_or(blocks.len());
-    sheet(ui, &m, |ui| {
+    record_sheet(ui, &m, |ui| {
         let page_top = ui.cursor().min.y - m.margin_top;
         let r = &input.phone_record;
-        for title in [&r.institution, "电话记录单"] {
-            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(title)
-                        .font(m.font(theme::FONT_BIAOSONG, 22.0))
-                        .color(theme::paper::red()),
-                );
+        for (title, gap) in [(&r.institution[..], 3.0), ("电话记录单", 5.0)] {
+            let (_, rect) = ui.allocate_space(egui::vec2(m.content, m.mm(16.0 * 25.4 / 72.0)));
+            let galley = ui.fonts_mut(|fonts| {
+                fonts.layout_no_wrap(
+                    title.to_owned(),
+                    m.font(theme::FONT_BIAOSONG, 22.0),
+                    theme::paper::red(),
+                )
             });
-            ui.add_space(m.mm(3.0));
+            ui.painter().galley(
+                egui::pos2(
+                    rect.center().x - galley.size().x / 2.0,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                theme::paper::red(),
+            );
+            ui.add_space(m.mm(gap));
         }
         let (_, header) = ui.allocate_space(egui::vec2(m.content, m.mm(33.0)));
         let xs =
@@ -109,12 +168,14 @@ pub(super) fn show(
             ui.painter()
                 .line_segment([egui::pos2(x, ys[0]), egui::pos2(x, end)], stroke);
         }
-        let top = egui::pos2(header.left(), header.bottom());
+        let top = egui::pos2(header.left() + m.mm(2.0), header.bottom());
         let body_height = (page_top + m.mm(254.0) - top.y).max(m.mm(150.0));
         let mut body_m = Metrics::new(m.viewport, Some(m.scale))
             .with_bold_style(ui.ctx())
             .with_line_numbers(line_numbers);
         body_m.content = xs[4] - xs[0] - m.mm(4.0);
+        body_m.body_pt = 16.0;
+        body_m.line = m.pt(28.98 * 72.0 / 72.27);
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(egui::Rect::from_min_size(
@@ -123,6 +184,9 @@ pub(super) fn show(
                 ))
                 .layout(egui::Layout::top_down(egui::Align::Min)),
             |ui| {
+                // 最小高度必须在排字前设置，egui 会从当前光标扩展高度。
+                // 放在排字后会把整段高度再追加一次，导致纸张接近两页长。
+                ui.set_min_height(body_height);
                 ui.set_width(body_m.content);
                 ui.add_space(m.mm(2.0));
                 for located in &blocks[..attachment] {
@@ -145,11 +209,24 @@ pub(super) fn show(
                         &mut clicked,
                     );
                 }
+                let suggestion = format!("建议：{}", r.suggestion);
+                let suggestion_height = ui
+                    .fonts_mut(|fonts| {
+                        fonts.layout(
+                            suggestion.clone(),
+                            body_m.body_font(),
+                            theme::paper::ink(),
+                            body_m.content,
+                        )
+                    })
+                    .rows
+                    .len() as f32
+                    * body_m.line;
                 ui.add_space(
-                    (body_height - m.mm(18.0) - (ui.cursor().min.y - top.y)).max(m.mm(4.0)),
+                    (body_height - m.mm(2.0) - suggestion_height - (ui.cursor().min.y - top.y))
+                        .max(m.mm(4.0)),
                 );
-                body_block(ui, &body_m, &format!("建议：{}", r.suggestion), false);
-                ui.set_min_height(body_height);
+                body_block(ui, &body_m, &suggestion, false);
             },
         );
         let bottom = ui.cursor().min.y;
