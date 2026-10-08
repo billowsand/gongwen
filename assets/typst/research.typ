@@ -83,11 +83,30 @@
 #let add-mark(c) = h(2pt) + highlight(fill: none, stroke: 0.5pt + add-color, top-edge: 0.96em,
   bottom-edge: -0.24em, extent: 1.5pt, c) + h(2pt)
 
+// 随包方正字体只有 ①～⑩。⑪～⑳ 用数字和圆圈绘制，避免依赖本机补充字体而静默缺字。
+#let generated-list-label(v) = {
+  let extra = ("⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳")
+  let index = extra.position(c => c == v)
+  if index == none { v } else {
+    context box(width: 1em, height: 0.85em, baseline: 0.12em, {
+      place(top + left, circle(radius: 0.425em, fill: none, stroke: 0.04em + text.fill))
+      place(top + left, box(width: 0.85em, height: 0.85em, {
+        set par(first-line-indent: 0pt, justify: false)
+        align(center + horizon, text(font: F.latin, size: 0.52em,
+          top-edge: "cap-height", bottom-edge: "baseline", str(index + 11)))
+      }))
+    })
+  }
+}
+
 #let runs(rs) = {
   for (i, r) in rs.enumerate() {
     let prev = if i > 0 { rs.at(i - 1) } else { none }
     let next = rs.at(i + 1, default: none)
     let piece = if r.t == "s" { r.v }
+    // 生成编号统一留四分之一字间距，并与后文相连，不能孤悬在行尾。
+    // 编号是独立片段，正文里的括注、数字和标题编号不受影响。
+    else if r.t == "list-label" { box(generated-list-label(r.v) + h(0.25em)) + "\u{2060}" }
     else if r.t == "b" { fake-bold-cjk(runs(r.c)) }
     else if r.t == "i" { text(font: kai, style: "italic", runs(r.c)) }
     else if r.t == "code" { text(font: mono, r.v) }

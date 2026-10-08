@@ -37,8 +37,11 @@ fn fonts() -> Result<Value> {
 type Prepared = (String, HashMap<String, Vec<u8>>, Vec<String>);
 
 /// 生成模板数据与公式 SVG。`source` 是 mdx 源码目录里的 Markdown（插图、文献都在旁边）。
-fn document(source: &Path, input: &DraftInput) -> Result<Prepared> {
-    let doc = mdx::typst_research::build(source).context("研究报告转换失败")?;
+fn document(source: &Path, input: &DraftInput, numbering: &NumberingConfig) -> Result<Prepared> {
+    let doc = mdx::typst_research::build_with_body_normalizer(source, |body| {
+        super::research_body::normalize(body, numbering)
+    })
+    .context("研究报告转换失败")?;
     let mut warnings = doc.warnings.clone();
     let mut data = serde_json::to_value(&doc).context("无法序列化研究报告排版数据")?;
     let mut files = HashMap::new();
@@ -78,7 +81,7 @@ pub(crate) fn write_pdf_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, warnings) = document(&bundle.markdown, input)?;
+    let (data, files, warnings) = document(&bundle.markdown, input, numbering)?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     let mut outcome = typst_engine::compile(
         &TypstJob {
@@ -135,7 +138,7 @@ fn page_count_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, _) = document(&bundle.markdown, input)?;
+    let (data, files, _) = document(&bundle.markdown, input, numbering)?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     typst_engine::page_count(
         &TypstJob {
@@ -163,7 +166,7 @@ pub(crate) fn document_json(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    Ok(document(&bundle.markdown, input)?.0)
+    Ok(document(&bundle.markdown, input, numbering)?.0)
 }
 
 #[cfg(test)]
@@ -225,7 +228,8 @@ mod tests {
             base.path(),
         )
         .unwrap();
-        let (data, files, _) = document(&bundle.markdown, &input).unwrap();
+        let (data, files, _) =
+            document(&bundle.markdown, &input, &NumberingConfig::default()).unwrap();
         let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
         let items = typst_engine::text_fonts_for_test(
             &TypstJob {
@@ -337,7 +341,8 @@ mod tests {
             base.path(),
         )
         .unwrap();
-        let (data, files, _) = document(&bundle.markdown, &input).unwrap();
+        let (data, files, _) =
+            document(&bundle.markdown, &input, &NumberingConfig::default()).unwrap();
         let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
         let items = typst_engine::text_fonts_for_test(
             &TypstJob {

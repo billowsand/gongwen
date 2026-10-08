@@ -23,6 +23,11 @@ use crate::common::table_layout::{analyze_table, cell_alignment, ColumnAlignment
 #[path = "research_text.rs"]
 mod research_text;
 
+/// 宿主在临时 PDF 源码里标记程序生成的列表编号；不进入保存的 Markdown。
+/// 排版数据把它变成独立片段，模板只对编号补间距，不误改正文中的括注或数字。
+pub const LIST_LABEL_OPEN: char = '\u{f0000}';
+pub const LIST_LABEL_CLOSE: char = '\u{f0001}';
+
 /// 研究报告中人工书写的可见正文（不含封面元数据和自动生成的目录、编号）。
 /// 与排版共用解析器；引用键、锚点和公式控制命令不算作文字。
 pub fn visible_body_text(markdown: &str) -> String {
@@ -74,6 +79,10 @@ pub struct Cover {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "t", rename_all = "kebab-case")]
 pub enum Run {
+    /// 宿主程序生成的列表编号，不带源码标记和正文格式。
+    ListLabel {
+        v: String,
+    },
     /// 文字。
     S {
         v: String,
@@ -260,6 +269,14 @@ pub struct Figure {
 /// 读一份带 frontmatter 的研究报告 Markdown，整理成排版数据。插图、文献按
 /// 文件所在目录解析，校验（文献键、交叉引用）与 TeX 路径相同，不过就报错。
 pub fn build(input: &Path) -> Result<Doc> {
+    build_with_body_normalizer(input, str::to_owned)
+}
+
+/// 宿主可统一普通段落与列表的源码规则；封面先剥离，研究区段、引用与校验仍由 mdx 处理。
+pub fn build_with_body_normalizer(
+    input: &Path,
+    normalize: impl FnOnce(&str) -> String,
+) -> Result<Doc> {
     let content = std::fs::read_to_string(input)
         .with_context(|| format!("读取文件 {} 失败", input.display()))?;
     let content = content.trim_start_matches('\u{feff}');
@@ -269,7 +286,7 @@ pub fn build(input: &Path) -> Result<Doc> {
     let (cover, markdown) = front_matter::parse(&body);
     let title = cover.title.clone().or(report_title);
 
-    let blocks = crate::parser::parse(&markdown);
+    let blocks = crate::parser::parse(&normalize(&markdown));
     let citations =
         crate::common::citation::validate(&blocks, cover.bibliography.as_deref(), base_dir)?;
     crate::common::crossref::check_or_bail(&blocks, crate::common::crossref::Support::Full)?;
@@ -1123,6 +1140,27 @@ fn sole_image(inlines: &[Inline]) -> Option<(&str, &str, Option<&str>)> {
 fn runs(inlines: &[Inline]) -> Vec<Run> {
     let mut out = Vec::with_capacity(inlines.len());
     for ip in inlines {
+        if let Inline::Text(text) = ip {
+            if !text.contains(LIST_LABEL_OPEN) {
+                out.push(Run::S { v: text.clone() });
+                continue;
+            }
+            let mut rest = text.as_str();
+            while let Some((before, marked)) = rest.split_once(LIST_LABEL_OPEN) {
+                let Some((label, after)) = marked.split_once(LIST_LABEL_CLOSE) else {
+                    break;
+                };
+                if !before.is_empty() {
+                    out.push(Run::S { v: before.into() });
+                }
+                out.push(Run::ListLabel { v: label.into() });
+                rest = after;
+            }
+            if !rest.is_empty() {
+                out.push(Run::S { v: rest.into() });
+            }
+            continue;
+        }
         out.push(match ip {
             Inline::Text(t) => Run::S { v: t.clone() },
             Inline::Bold(children) => Run::B { c: runs(children) },

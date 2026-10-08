@@ -9,6 +9,7 @@ pub(crate) mod data;
 mod frame;
 mod math;
 pub(crate) mod research;
+mod research_body;
 mod research_redline;
 #[cfg(test)]
 mod research_sample_tests;

@@ -358,6 +358,13 @@ fn cases() -> Vec<Case> {
                 input.research.file_type = "专题研究报告".into();
             },
         },
+        Case {
+            name: "research-body-flow",
+            markdown: "# 段落与列表转换验收\n\n<!-- [摘要] -->\n\n摘要第一行\n接在同一段。\n\n<!-- [正文] -->\n\n## 转换规则\n\n短句前半\n接上后半。\n\nEnglish\nwords stay together.\n\n要求如下：\n1. **段内甲**；\n2. 段内乙含公式 $x=1$。\n\n3. 独立列表甲\n1. 独立列表乙\n\n后续段落第一行\n接在同一段。\n\n### 特殊结构\n\n```text\n代码第一行\n代码第二行\n```\n\n$$\nx + y\n= z\n$$\n\n<!-- [居中] -->\n居中第一行\n居中第二行\n\n表：边界检查 {#tbl:boundary}\n\n| 项目 | 结果 |\n| --- | --- |\n| 段内列表 | 同段 |\n| 独立列表 | 分段 |\n\n表{@tbl:boundary}保留交叉引用。\n",
+            tweak: |input| {
+                input.title_hint = "段落与列表转换验收".into();
+            },
+        },
     ]
 }
 
@@ -369,6 +376,37 @@ fn base_input() -> DraftInput {
     input.research.institution = "某某市数据研究中心".into();
     input.research.date = "2026年9月".into();
     input
+}
+
+fn render_pages(bytes: Vec<u8>, dir: &Path) {
+    use hayro::{
+        RenderCache, RenderSettings,
+        hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf},
+    };
+    let pdf = Pdf::new(bytes).unwrap();
+    let cache = RenderCache::new();
+    for (i, page) in pdf.pages().iter().enumerate() {
+        let scale = 1000.0 / page.render_dimensions().0;
+        let pixmap = hayro::render(
+            page,
+            &cache,
+            &InterpreterSettings::default(),
+            &RenderSettings {
+                x_scale: scale,
+                y_scale: scale,
+                width: Some(1000),
+                ..Default::default()
+            },
+        );
+        image::RgbaImage::from_raw(
+            u32::from(pixmap.width()),
+            u32::from(pixmap.height()),
+            pixmap.data_as_u8_slice().to_vec(),
+        )
+        .unwrap()
+        .save(dir.join(format!("page-{}.png", i + 1)))
+        .unwrap();
+    }
 }
 
 fn run() {
@@ -394,6 +432,9 @@ fn run() {
             &base,
         )
         .unwrap();
+        if case.name == "research-body-flow" {
+            render_pages(outcome.pdf.clone(), &dir);
+        }
         for warning in &outcome.warnings {
             eprintln!("{}: {warning}", case.name);
         }
@@ -415,15 +456,102 @@ fn typst_samples_research() {
     run();
 }
 
+/// 四种编号分别覆盖段内、独立列表，以及单数、两位数、圈号上限和长条目折行。
+#[test]
+#[ignore = "依赖本机 runtime，手动运行"]
+fn typst_samples_research_list_numbering() {
+    use crate::models::{ListNumbering, ResearchPalette, ResearchTemplate};
+
+    let base = sample_dir();
+    for style in ListNumbering::ALL {
+        let style_name = match style {
+            ListNumbering::Circled => "circled",
+            ListNumbering::HalfParen => "half-paren",
+            ListNumbering::FullParen => "full-paren",
+            ListNumbering::DecimalDot => "decimal-dot",
+        };
+        let numbering = NumberingConfig {
+            list1: style,
+            list2: style,
+            ..Default::default()
+        };
+        let markdown = format!(
+            "# 列表编号间距验收\n\n## 编号样式：{}\n\n\
+             ### 单位数编号\n\n\
+             段内条目：\n1. 普通中文；\n2. **加粗中文**；\n3. English text；\n4. $x=1$ 的公式开头。\n\n\
+             1. 普通中文独立条目\n2. **加粗中文独立条目**\n3. English text\n4. $x=1$ 的公式开头\n\n\
+             ### 两位数与折行\n\n\
+             段内条目：\n9. 中文九；\n1. **中文十**；\n1. English eleven。\n\n\
+             9. 中文九\n1. **中文十**\n1. 长条目折行检查：研究报告应保留清楚可辨的列表编号，编号与中文正文、加粗正文及英文之间应有适当间距，条目换行后也应保持自然的正文排版。\n\n\
+             ### 圈号上限与回退\n\n\
+             段内条目：\n20. 中文二十；\n1. **中文二十一**。\n\n\
+             20. 中文二十\n1. **中文二十一**\n",
+            style.label()
+        );
+        for (theme, template, palette) in [
+            (
+                "classic",
+                ResearchTemplate::Classic,
+                ResearchPalette::Bright,
+            ),
+            ("dark", ResearchTemplate::Terminal, ResearchPalette::Dark),
+            (
+                "bright",
+                ResearchTemplate::Terminal,
+                ResearchPalette::Bright,
+            ),
+        ] {
+            let dir = base.join(format!("research-lists-{theme}-{style_name}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut input = base_input();
+            input.research.template = template;
+            input.research.palette = palette;
+            let data =
+                super::research::document_json(&input, &markdown, &numbering, &base).unwrap();
+            // 不带公式的同样源码另排一遍检查真实字形；不需要加载公式 SVG。
+            let plain = markdown.replace("$x=1$", "公式");
+            let plain_data =
+                super::research::document_json(&input, &plain, &numbering, &base).unwrap();
+            let set = crate::typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
+            let text = crate::typst_engine::text_fonts_for_test(
+                &crate::typst_engine::TypstJob {
+                    data: plain_data,
+                    base_dir: &base,
+                    template: crate::typst_engine::Template::Research,
+                    files: Default::default(),
+                },
+                &set,
+            )
+            .unwrap();
+            assert!(
+                text.iter().all(|item| item.missing_glyphs == 0),
+                "{theme}/{style_name} 不应缺少编号或文字字形：{text:?}"
+            );
+            std::fs::write(dir.join("doc.json"), &data).unwrap();
+            std::fs::write(dir.join("source.md"), &markdown).unwrap();
+            let outcome = super::research::write_pdf_with_base(
+                &dir.join("typst.pdf"),
+                &input,
+                &markdown,
+                &numbering,
+                &base,
+            )
+            .unwrap();
+            assert!(
+                outcome.warnings.is_empty(),
+                "{theme}/{style_name}: {:?}",
+                outcome.warnings
+            );
+            render_pages(outcome.pdf, &dir);
+        }
+    }
+}
+
 /// 两种配色覆盖同一组完整研究语法与不同文件类型，同时留 PNG 供目视验收。
 #[test]
 #[ignore = "依赖本机 runtime，手动运行"]
 fn typst_samples_research_terminal() {
     use crate::models::{ResearchPalette, ResearchTemplate};
-    use hayro::{
-        RenderCache, RenderSettings,
-        hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf},
-    };
     let base = sample_dir().join("research-terminal-images");
     write_images(&base);
     crate::storage::set_test_config_dir(Some(base.clone()));
@@ -483,30 +611,7 @@ fn typst_samples_research_terminal() {
                 "{name}: {:?}",
                 outcome.warnings
             );
-            let pdf = Pdf::new(outcome.pdf).unwrap();
-            let cache = RenderCache::new();
-            for (i, page) in pdf.pages().iter().enumerate() {
-                let scale = 1000.0 / page.render_dimensions().0;
-                let pixmap = hayro::render(
-                    page,
-                    &cache,
-                    &InterpreterSettings::default(),
-                    &RenderSettings {
-                        x_scale: scale,
-                        y_scale: scale,
-                        width: Some(1000),
-                        ..Default::default()
-                    },
-                );
-                image::RgbaImage::from_raw(
-                    u32::from(pixmap.width()),
-                    u32::from(pixmap.height()),
-                    pixmap.data_as_u8_slice().to_vec(),
-                )
-                .unwrap()
-                .save(dir.join(format!("page-{}.png", i + 1)))
-                .unwrap();
-            }
+            render_pages(outcome.pdf, &dir);
         }
     }
     crate::storage::set_test_config_dir(None);

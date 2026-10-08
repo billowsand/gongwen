@@ -606,6 +606,7 @@ pub(crate) fn text_fonts_for_test(job: &TypstJob, set: &FontSet) -> Result<Vec<T
                         family: info.family.clone(),
                         weight: info.variant.weight.to_number(),
                         page,
+                        missing_glyphs: text.glyphs.iter().filter(|glyph| glyph.id == 0).count(),
                     });
                 }
                 _ => {}
@@ -635,6 +636,7 @@ pub(crate) struct TextFont {
     pub family: String,
     pub weight: u16,
     pub page: usize,
+    pub missing_glyphs: usize,
 }
 
 /// 测试用：用自定义源码代替模板排版（字体同随包），返回 PDF。
