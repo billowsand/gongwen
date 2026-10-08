@@ -610,6 +610,9 @@ pub(crate) fn switch_template_profile(
     markdown: &str,
     old_kind: TemplateKind,
 ) -> Vec<String> {
+    if draft.kind == TemplateKind::PhoneRecord && draft.phone_record.call_time.trim().is_empty() {
+        draft.phone_record.call_time = chrono::Local::now().format("%Y年%-m月%-d日").to_string();
+    }
     let mut previous_profile = draft.profile.clone();
     previous_profile.kind = old_kind;
     config.upsert_profile(previous_profile);
@@ -923,6 +926,23 @@ mod tests {
                 assert_ne!(color, other);
             }
         }
+    }
+
+    #[test]
+    fn phone_record_time_defaults_on_switch_and_preserves_manual_value() {
+        let mut config = AppConfig::default();
+        let mut draft = DraftInput {
+            kind: TemplateKind::PhoneRecord,
+            ..Default::default()
+        };
+        switch_template_profile(&mut config, &mut draft, "", TemplateKind::OfficialLetter);
+        assert_eq!(
+            draft.phone_record.call_time,
+            chrono::Local::now().format("%Y年%-m月%-d日").to_string()
+        );
+        draft.phone_record.call_time = "2025年11月25日 10:30".into();
+        switch_template_profile(&mut config, &mut draft, "", TemplateKind::PhoneNotice);
+        assert_eq!(draft.phone_record.call_time, "2025年11月25日 10:30");
     }
 
     #[test]

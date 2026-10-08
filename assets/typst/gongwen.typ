@@ -97,6 +97,9 @@
 #let probing = state("gw-probing", doc.probe)
 // 份号逐份编制时正文按份重复排版，表格的结束标签要带上份次，否则标签重名。
 #let copy-no = state("gw-copy-no", 0)
+#let flow-probe(kind, line: none) = context if probing.get() {
+  [#metadata((kind: kind, line: line, page: here().position().page))<gw-flow>]
+}
 #let left-edge(page-no) = if doc.duplex and calc.even(page-no) { outer-m } else { inner-m }
 #let probe-head(line) = if line != none {
   context if probing.get() {
@@ -115,7 +118,7 @@
 
 // ---------------- 正文块 ----------------
 #let para(rs, line: none, hsize: text-w, indent: true) = {
-  let body = probe-head(line) + runs(rs) + probe-tail(line, hsize: hsize)
+  let body = flow-probe("body") + probe-head(line) + runs(rs) + probe-tail(line, hsize: hsize)
   if indent { par(body) } else { par(first-line-indent: 0pt, body) }
 }
 
@@ -125,11 +128,12 @@
   let c = text(font: heading-font(level), tracking: 0pt, runs(rs))
   if level >= 4 { fake-bold(c) } else { c }
 }
-#let heading-block(b, hsize: text-w) = par(
-  probe-head(b.line) + heading-content(b.level, b.runs) + probe-tail(b.line, hsize: hsize))
+#let heading-block(b, hsize: text-w) = block(breakable: false,
+  above: pitch - 16pt, below: pitch - 16pt, par(
+    probe-head(b.line) + heading-content(b.level, b.runs) + probe-tail(b.line, hsize: hsize) + flow-probe("heading", line: b.line)))
 // 紧缩：标题（带句号）与紧随正文接成一段。
 #let compact-block(b, hsize: text-w) = par(
-  probe-head(b.line) + heading-content(b.level, b.head) + runs(b.runs) + probe-tail(b.line, hsize: hsize))
+  flow-probe("body") + probe-head(b.line) + heading-content(b.level, b.head) + runs(b.runs) + probe-tail(b.line, hsize: hsize))
 
 #let aligned-block(b) = {
   let a = if b.align == "center" { center } else { right }
@@ -200,6 +204,7 @@
 #let render-blocks(blocks, total: text-w, hsize: text-w) = {
   let prev = none
   for b in blocks {
+    if not ("par", "heading", "compact").contains(b.k) { place(flow-probe("boundary")) }
     if b.k == "par" { para(b.runs, line: b.at("line", default: none), hsize: hsize) } else if b.k == "heading" { heading-block(b, hsize: hsize) } else if b.k == "compact" { compact-block(b, hsize: hsize) } else if b.k == "aligned" { aligned-block(b) } else if b.k == "table" { table-block(b, total: total, after-table: prev == "table") } else if b.k == "image" { image-block(b) }
     prev = b.k
   }
@@ -230,7 +235,8 @@
   tracking: 0pt, overhang: false, cjk-latin-spacing: none,
   // TeX 不罚段末孤字（xeCJK CheckSingle 只管极窄的情形，见 cls 注释）；Typst 默认罚，会为躲
   // 末行单字把前面几行的断点全部挪动。孤行改由探针报到审校面板。
-  costs: (runt: 0%))
+  // 不为段首段尾预留两行，页尾放得下一行就继续排；标题单挂交给实测审校提示。
+  costs: (runt: 0%, orphan: 0%, widow: 0%))
 // 断行与两端对齐按 xeCJK 的规矩：汉字固定一个字宽（三号 16pt，不压字距），行太长时
 // 只压标点（上限见 vendor/typst-layout 的补丁），行太短时字间拉开，上限取 CJKglue 的
 // plus 0.08\baselineskip。
@@ -533,13 +539,13 @@
 #let red-render-first(b) = {
   if b.k == "p-head" {
     // 截断的前半段：末行两端对齐，读起来接着下一页。
-    par(probe-head(b.line) + runs(b.runs) + linebreak(justify: true))
+    par(flow-probe("body") + probe-head(b.line) + runs(b.runs) + linebreak(justify: true))
   } else { render-blocks((b,), hsize: narrow-w) }
 }
 #let red-render-rest(blocks) = {
   for b in blocks {
     if b.k == "p-tail" {
-      par(first-line-indent: 0pt, runs(b.runs) + probe-tail(b.line))
+      par(first-line-indent: 0pt, flow-probe("body") + runs(b.runs) + probe-tail(b.line))
     } else { render-blocks((b,)) }
   }
 }
@@ -679,7 +685,50 @@
   }
 }
 
-#let render-copy(serial) = if doc.kind == "redapproval" { red-approval(serial) } else { letter-like(serial) }
+// 电话记录单：左栏记录来电与拟办建议，右栏整栏留作人工批示。
+#let phone-record() = {
+  set page(margin: (top: 37mm, bottom: 35mm, left: 28mm, right: 26mm), background: none)
+  set par(first-line-indent: 0pt, spacing: 0pt, leading: 6pt)
+  let r = doc.phone_record
+  align(center, text(font: xbs, size: 22pt, fill: red, r.institution))
+  v(3mm)
+  align(center, text(font: xbs, size: 22pt, fill: red, "电话记录单"))
+  v(5mm)
+  let value(c) = text(size: 12pt, c)
+  let body = {
+    set par(first-line-indent: (amount: 2em, all: true), leading: pitch - 16pt, spacing: pitch - 16pt)
+    render-blocks(doc.body, total: 109.1mm, hsize: 109.1mm)
+  }
+  let suggestion = [建议：#for (i, line) in r.suggestion.split("\n").enumerate() {
+    if i > 0 { linebreak() }
+    line
+  }]
+  table(columns: (24.375mm, 40.4625mm, 20.475mm, 27.7875mm, 42.9mm), inset: 2mm,
+    stroke: (x, y) => (left: if x == 0 { none } else { 0.5pt }, top: 0.5pt, right: none, bottom: none),
+    align: left + horizon,
+    [单位], value(r.caller_unit), [电话], value(r.caller_phone),
+    table.cell(rowspan: 2, align: center + horizon, text(font: xbs, size: 22pt, "首长批示")),
+    [谈话人], value(r.caller_person), [密级], value(if doc.security != none { runs(doc.security) }),
+    [时间], table.cell(colspan: 3, value(r.call_time)),
+    table.cell(rowspan: 2, []),
+    table.cell(colspan: 4, align: left + top, context {
+      let h = calc.max(254mm - here().position().y - 4mm, measure(body, width: 109.1mm).height + measure(suggestion, width: 109.1mm).height + 4mm)
+      block(height: h, breakable: true, above: 0pt, below: 0pt, {
+        body
+        v(1fr)
+        suggestion
+      })
+    }),
+    table.hline(stroke: 0.5pt),
+    rows: (12mm, 10.5mm, 10.5mm, auto),
+  )
+  v(2mm)
+  let c = doc.phone_record_contact
+  text(size: 14pt, [承办单位：#c.unit　联系人：#c.contact　电话：#c.phone])
+  for a in doc.attachments { attachment(a) }
+}
+
+#let render-copy(serial) = if doc.kind == "phone-record" { phone-record() } else if doc.kind == "redapproval" { red-approval(serial) } else { letter-like(serial) }
 
 // 份号逐份编制：每份换页、页码归 1；只有第一份带孤行探针。
 #if doc.copies.len() == 0 {

@@ -157,7 +157,7 @@ pub(crate) fn checklist(kind: TemplateKind) -> Vec<Scope> {
             scope(Where, "涉及的地点（没有可不写）", "地点", false),
             scope(How, "拟办意见或建议方案", "拟办意见", true),
         ],
-        TemplateKind::ResearchReport => Vec::new(),
+        TemplateKind::ResearchReport | TemplateKind::PhoneRecord => Vec::new(),
     }
 }
 
@@ -330,7 +330,9 @@ fn unit_role(kind: TemplateKind) -> Option<&'static str> {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => Some("致函对象"),
         TemplateKind::PlainDocument => Some("责任单位"),
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => Some("经办单位"),
-        TemplateKind::MeetingAgenda | TemplateKind::ResearchReport => None,
+        TemplateKind::PhoneRecord | TemplateKind::MeetingAgenda | TemplateKind::ResearchReport => {
+            None
+        }
     }
 }
 

@@ -128,6 +128,7 @@ fn allowed_suffixes(kind: TemplateKind) -> &'static [&'static str] {
     match kind {
         TemplateKind::OfficialLetter => &["函"],
         TemplateKind::PhoneNotice => &["通知"],
+        TemplateKind::PhoneRecord => &["电话记录单"],
         // 呈批件可以是请示、报告、意见、方案等，不好收窄。
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             &["请示", "报告", "意见", "方案", "建议", "说明"]
@@ -940,7 +941,8 @@ fn check_tone_direction(
                 ));
             }
         }
-        TemplateKind::PhoneNotice
+        TemplateKind::PhoneRecord
+        | TemplateKind::PhoneNotice
         | TemplateKind::PlainDocument
         | TemplateKind::MeetingAgenda
         | TemplateKind::ResearchReport => {}

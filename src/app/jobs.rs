@@ -1293,7 +1293,7 @@ impl GongwenApp {
                     )
                 } else if orphans > 0 {
                     format!(
-                        "{prefix}当前审校稿已导出 {} 个文件；实测发现 {orphans} 处孤行，见审校提示{mustfix_tail}。",
+                        "{prefix}当前审校稿已导出 {} 个文件；实测发现 {orphans} 处排版问题，见审校提示{mustfix_tail}。",
                         self.docs[index].output_files.len()
                     )
                 } else {

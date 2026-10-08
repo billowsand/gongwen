@@ -45,7 +45,10 @@ fn security_runs(input: &DraftInput, mark: &FieldMark) -> Option<Runs> {
     if level.is_empty() && !mark.changed() {
         return None;
     }
-    let special = input.kind != TemplateKind::PlainDocument && input.profile.special_handling;
+    let special = !matches!(
+        input.kind,
+        TemplateKind::PlainDocument | TemplateKind::PhoneRecord
+    ) && input.profile.special_handling;
     let mut runs = if mark.changed() {
         marked_runs(&mark.marked())
     } else if period.is_empty() {
@@ -434,6 +437,7 @@ pub(crate) fn document(
         kind: match kind {
             TemplateKind::OfficialLetter => "letter",
             TemplateKind::PhoneNotice => "phone",
+            TemplateKind::PhoneRecord => "phone-record",
             TemplateKind::PlainDocument => "plain",
             TemplateKind::WhitePaper => "whitepaper",
             TemplateKind::RedHeadApproval => "redapproval",
@@ -463,6 +467,12 @@ pub(crate) fn document(
         record: None,
         copies: Vec::new(),
         red: None,
+        phone_record: (kind == TemplateKind::PhoneRecord).then(|| input.phone_record.clone()),
+        phone_record_contact: (kind == TemplateKind::PhoneRecord).then(|| RecordRow {
+            unit: input.profile.responsible_unit.clone(),
+            contact: input.profile.contact_person.clone(),
+            phone: input.profile.contact_phone.clone(),
+        }),
     };
     match kind {
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice => {
@@ -474,7 +484,8 @@ pub(crate) fn document(
             doc.closing = Some(room_closing(input, display, elements));
         }
         TemplateKind::RedHeadApproval => red_frame(input, display, elements, &mut doc),
-        TemplateKind::PlainDocument
+        TemplateKind::PhoneRecord
+        | TemplateKind::PlainDocument
         | TemplateKind::MeetingAgenda
         | TemplateKind::ResearchReport => {}
     }

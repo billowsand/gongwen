@@ -461,6 +461,7 @@ pub(crate) fn document_stem_prefix(input: &DraftInput, title: &str) -> String {
         TemplateKind::RedHeadApproval => format!("红头呈批-{}-{title}", letter_prefix(input)),
         TemplateKind::OfficialLetter => format!("{}-{title}", letter_prefix(input)),
         TemplateKind::PhoneNotice => "电话通知".to_string(),
+        TemplateKind::PhoneRecord => "电话记录单".to_string(),
         TemplateKind::PlainDocument => format!("普通公文-{title}"),
         TemplateKind::ResearchReport => format!("研究报告-{title}"),
     }

@@ -272,6 +272,17 @@ pub fn build(input: &Path) -> Result<Doc> {
     build_with_body_normalizer(input, str::to_owned)
 }
 
+/// 宿主定位排版标题时使用与转换器相同的清理、锚点及公式解析规则。
+pub fn source_heading_runs(source: &str) -> Option<Vec<Run>> {
+    crate::parser::parse(source).into_iter().find_map(|block| {
+        if let Block::Heading { text, .. } = block {
+            Some(heading_runs(&text))
+        } else {
+            None
+        }
+    })
+}
+
 /// 宿主可统一普通段落与列表的源码规则；封面先剥离，研究区段、引用与校验仍由 mdx 处理。
 pub fn build_with_body_normalizer(
     input: &Path,

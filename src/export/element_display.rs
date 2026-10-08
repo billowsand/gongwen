@@ -34,7 +34,8 @@ pub(crate) fn addressee_display(input: &DraftInput, display: &UnitDisplay) -> St
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => {
             display.reporting_leaders(&input.profile.reporting_leaders)
         }
-        TemplateKind::PlainDocument
+        TemplateKind::PhoneRecord
+        | TemplateKind::PlainDocument
         | TemplateKind::MeetingAgenda
         | TemplateKind::ResearchReport => String::new(),
     };

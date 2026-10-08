@@ -1249,6 +1249,7 @@ pub(crate) fn kind_to_str(kind: TemplateKind) -> &'static str {
     match kind {
         TemplateKind::OfficialLetter => "OfficialLetter",
         TemplateKind::PhoneNotice => "PhoneNotice",
+        TemplateKind::PhoneRecord => "PhoneRecord",
         TemplateKind::PlainDocument => "PlainDocument",
         TemplateKind::MeetingAgenda => "MeetingAgenda",
         TemplateKind::WhitePaper => "WhitePaper",
@@ -1261,6 +1262,7 @@ pub(crate) fn str_to_kind(s: &str) -> Option<TemplateKind> {
     match s {
         "OfficialLetter" => Some(TemplateKind::OfficialLetter),
         "PhoneNotice" => Some(TemplateKind::PhoneNotice),
+        "PhoneRecord" => Some(TemplateKind::PhoneRecord),
         "PlainDocument" => Some(TemplateKind::PlainDocument),
         "MeetingAgenda" => Some(TemplateKind::MeetingAgenda),
         "WhitePaper" => Some(TemplateKind::WhitePaper),
@@ -1309,6 +1311,7 @@ mod tests {
                 ..TemplateProfile::for_kind(kind)
             },
             research: Default::default(),
+            phone_record: Default::default(),
         }
     }
 

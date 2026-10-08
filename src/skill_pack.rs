@@ -41,6 +41,7 @@ pub(crate) const FILES: &[(&str, &str)] = &[
     skill_file!("references/writing-style.md"),
     skill_file!("templates/official-letter.md"),
     skill_file!("templates/phone-notice.md"),
+    skill_file!("templates/phone-record.md"),
     skill_file!("templates/plain-document.md"),
     skill_file!("templates/meeting-agenda.md"),
     skill_file!("templates/white-paper.md"),

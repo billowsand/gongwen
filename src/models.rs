@@ -8,6 +8,7 @@ pub enum TemplateKind {
     #[default]
     OfficialLetter,
     PhoneNotice,
+    PhoneRecord,
     PlainDocument,
     MeetingAgenda,
     WhitePaper,
@@ -16,9 +17,10 @@ pub enum TemplateKind {
 }
 
 impl TemplateKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::OfficialLetter,
         Self::PhoneNotice,
+        Self::PhoneRecord,
         Self::PlainDocument,
         Self::MeetingAgenda,
         Self::WhitePaper,
@@ -30,6 +32,7 @@ impl TemplateKind {
         match self {
             Self::OfficialLetter => "公函",
             Self::PhoneNotice => "电话通知",
+            Self::PhoneRecord => "电话记录单",
             Self::PlainDocument => "普通公文",
             Self::MeetingAgenda => "会议议程",
             Self::WhitePaper => "白头件（呈批件）",
@@ -42,6 +45,7 @@ impl TemplateKind {
         match self {
             Self::OfficialLetter => "适用于商洽、征求意见、告知、答复等平行行文",
             Self::PhoneNotice => "沿用函稿版式，但不编函号和底部版记",
+            Self::PhoneRecord => "记录收到的电话通知，含来电信息、首长批示栏和拟办建议",
             Self::PlainDocument => "无红头、发文单位、主送单位、落款和版记的纯正文公文",
             Self::MeetingAgenda => "适用于会议时间地点、参会人员和议程安排",
             Self::WhitePaper => "适用于内部情况报告、请示和领导呈批",
@@ -2960,6 +2964,26 @@ pub struct DraftInput {
     pub attendees: String,
     pub profile: TemplateProfile,
     pub research: ResearchMetadata,
+    #[serde(skip_serializing_if = "PhoneRecordMetadata::is_empty")]
+    pub phone_record: PhoneRecordMetadata,
+}
+
+/// 接听电话的原始记录要素；空值不写入旧稿快照，保持版本校验值兼容。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhoneRecordMetadata {
+    pub institution: String,
+    pub caller_unit: String,
+    pub caller_phone: String,
+    pub caller_person: String,
+    pub call_time: String,
+    pub suggestion: String,
+}
+
+impl PhoneRecordMetadata {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// 研究报告封面元数据。模型只接收正文，不得回写这些字段。
@@ -3068,6 +3092,7 @@ impl Default for DraftInput {
             attendees: String::new(),
             profile: TemplateProfile::default(),
             research: ResearchMetadata::default(),
+            phone_record: PhoneRecordMetadata::default(),
         }
     }
 }
@@ -3870,6 +3895,20 @@ mod tests {
     }
 
     #[test]
+    fn phone_record_snapshot_compatibility() {
+        let old = serde_json::to_value(DraftInput::default()).unwrap();
+        assert!(old.get("phone_record").is_none(), "旧快照校验值不应变化");
+        let mut record: DraftInput = serde_json::from_value(old).unwrap();
+        record.kind = TemplateKind::PhoneRecord;
+        record.phone_record.caller_unit = "市政府办公室".into();
+        record.phone_record.suggestion = "建议参会。".into();
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(serde_json::from_str::<DraftInput>(&json).unwrap(), record);
+        assert!(!record.kind.has_document_number());
+        assert!(!record.kind.has_copy_numbering());
+    }
+
+    #[test]
     fn draft_input_serde_round_trip() {
         let draft = DraftInput {
             kind: TemplateKind::MeetingAgenda,
@@ -3883,6 +3922,7 @@ mod tests {
                 ..TemplateProfile::for_kind(TemplateKind::MeetingAgenda)
             },
             research: Default::default(),
+            phone_record: Default::default(),
         };
         let json = serde_json::to_string(&draft).expect("快照应能序列化");
         let back: DraftInput = serde_json::from_str(&json).expect("快照应能反序列化");

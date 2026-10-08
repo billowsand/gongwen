@@ -36,14 +36,76 @@ fn fonts() -> Result<Value> {
 /// 模板数据（JSON）、只在内存里的文件（公式 SVG）与提示。
 type Prepared = (String, HashMap<String, Vec<u8>>, Vec<String>);
 
+/// 标题按原稿顺序、转换器的实际片段匹配；重复题名分别定位，不靠排版后的行号猜。
+fn attach_heading_lines(data: &mut Value, markdown: &str) {
+    let cover_offset = crate::export::research_report_titles(markdown)
+        .first()
+        .map(|title| title.as_ptr() as usize - markdown.as_ptr() as usize);
+    let mut headings = Vec::new();
+    let mut code = false;
+    let mut math = false;
+    let mut offset = 0;
+    for (index, raw) in markdown.split_inclusive('\n').enumerate() {
+        let range = offset..offset + raw.len();
+        offset = range.end;
+        let line = raw.trim();
+        if line.starts_with("```") {
+            code = !code;
+            continue;
+        }
+        if code {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("$$") {
+            if math || rest.is_empty() || !rest.ends_with("$$") {
+                math = !math;
+            }
+            continue;
+        }
+        if math
+            || !line.starts_with('#')
+            || cover_offset.is_some_and(|offset| range.contains(&offset))
+        {
+            continue;
+        }
+        if let Some(runs) = mdx::typst_research::source_heading_runs(line)
+            && let Ok(runs) = serde_json::to_value(runs)
+        {
+            headings.push((runs, index + 1));
+        }
+    }
+    let mut cursor = 0;
+    if let Some(blocks) = data["blocks"].as_array_mut() {
+        for block in blocks {
+            if !matches!(block["k"].as_str(), Some("chapter" | "section" | "part")) {
+                continue;
+            }
+            if let Some(index) = headings[cursor..]
+                .iter()
+                .position(|(runs, _)| *runs == block["text"])
+            {
+                cursor += index;
+                block["line"] = headings[cursor].1.into();
+                cursor += 1;
+            }
+        }
+    }
+}
+
 /// 生成模板数据与公式 SVG。`source` 是 mdx 源码目录里的 Markdown（插图、文献都在旁边）。
-fn document(source: &Path, input: &DraftInput, numbering: &NumberingConfig) -> Result<Prepared> {
+fn document(
+    source: &Path,
+    input: &DraftInput,
+    numbering: &NumberingConfig,
+    markdown: &str,
+) -> Result<Prepared> {
     let doc = mdx::typst_research::build_with_body_normalizer(source, |body| {
         super::research_body::normalize(body, numbering)
     })
     .context("研究报告转换失败")?;
     let mut warnings = doc.warnings.clone();
     let mut data = serde_json::to_value(&doc).context("无法序列化研究报告排版数据")?;
+    attach_heading_lines(&mut data, markdown);
     let mut files = HashMap::new();
     // 花脸稿的哨兵先换成标注：公式源码里的哨兵剥掉才排得出来。
     super::research_redline::apply(&mut data);
@@ -81,7 +143,7 @@ pub(crate) fn write_pdf_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, warnings) = document(&bundle.markdown, input, numbering)?;
+    let (data, files, warnings) = document(&bundle.markdown, input, numbering, markdown)?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     let mut outcome = typst_engine::compile(
         &TypstJob {
@@ -138,7 +200,7 @@ fn page_count_with_base(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    let (data, files, _) = document(&bundle.markdown, input, numbering)?;
+    let (data, files, _) = document(&bundle.markdown, input, numbering, markdown)?;
     let set = typst_engine::font_set(&crate::models::FontConfig::default())?;
     typst_engine::page_count(
         &TypstJob {
@@ -166,13 +228,37 @@ pub(crate) fn document_json(
         crate::mermaid::Format::Pdf,
         base_dir,
     )?;
-    Ok(document(&bundle.markdown, input, numbering)?.0)
+    Ok(document(&bundle.markdown, input, numbering, markdown)?.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mdx::typst_research::{Doc, Item, build};
+
+    #[test]
+    fn heading_source_lines_survive_cover_repeated_titles_and_code() {
+        let markdown = "# 同名\n\n## 同名\n\n```text\n### 重复\n```\n\n### 重复 {#sec:a}\n\n正文。\n\n### 重复 {#sec:b}\n\n#### 数学 $x=1$";
+        let heading = |source: &str, kind: &str| {
+            serde_json::json!({
+                "k": kind, "text": mdx::typst_research::source_heading_runs(source).unwrap()
+            })
+        };
+        let mut data = serde_json::json!({ "blocks": [
+            heading("## 同名", "chapter"),
+            heading("### 重复", "section"),
+            heading("### 重复", "section"),
+            heading("#### 数学 $x=1$", "section"),
+        ] });
+        attach_heading_lines(&mut data, markdown);
+        let lines: Vec<_> = data["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["line"].as_u64().unwrap())
+            .collect();
+        assert_eq!(lines, [3, 9, 13, 15]);
+    }
 
     /// 西文数字一律 Termes：标题类（章节标题、图表题标签、封面黑体字与大标题、目录章条目）
     /// 用 Bold，正文、页码、列表序号用 Regular。
@@ -228,8 +314,13 @@ mod tests {
             base.path(),
         )
         .unwrap();
-        let (data, files, _) =
-            document(&bundle.markdown, &input, &NumberingConfig::default()).unwrap();
+        let (data, files, _) = document(
+            &bundle.markdown,
+            &input,
+            &NumberingConfig::default(),
+            markdown,
+        )
+        .unwrap();
         let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
         let items = typst_engine::text_fonts_for_test(
             &TypstJob {
@@ -341,8 +432,13 @@ mod tests {
             base.path(),
         )
         .unwrap();
-        let (data, files, _) =
-            document(&bundle.markdown, &input, &NumberingConfig::default()).unwrap();
+        let (data, files, _) = document(
+            &bundle.markdown,
+            &input,
+            &NumberingConfig::default(),
+            markdown,
+        )
+        .unwrap();
         let set = typst_engine::font_set(&crate::models::FontConfig::default()).unwrap();
         let items = typst_engine::text_fonts_for_test(
             &TypstJob {

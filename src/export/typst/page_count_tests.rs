@@ -17,6 +17,7 @@ fn physical_page_count_matches_export_for_all_official_templates() {
     for kind in [
         TemplateKind::OfficialLetter,
         TemplateKind::PhoneNotice,
+        TemplateKind::PhoneRecord,
         TemplateKind::WhitePaper,
         TemplateKind::RedHeadApproval,
         TemplateKind::PlainDocument,

@@ -20,6 +20,7 @@ mod math_flow;
 mod math_render;
 mod memo;
 mod pdf_figure;
+mod phone_record;
 mod red;
 mod render;
 mod research;
@@ -611,6 +612,74 @@ mod tests {
     }
 
     /// 研究报告走自己的版式：有简化封面和"第 N 章"，没有红头、主送和落款。
+    #[test]
+    fn phone_record_preview_draws_incoming_fields_instead_of_letter_elements() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let mut input = draft(TemplateKind::PhoneRecord);
+        input.profile.issuing_unit = "旧发文机关".into();
+        input.profile.recipient = "旧主送单位".into();
+        input.phone_record.institution = "本单位".into();
+        input.phone_record.caller_unit = "来电单位甲".into();
+        input.phone_record.caller_person = "王某主任".into();
+        input.phone_record.call_time = "2026年10月8日14时30分".into();
+        input.phone_record.suggestion = "请办公室办理。".into();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 4000.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                official_preview(
+                    ui,
+                    &input,
+                    &UnitDisplay::new(&[]),
+                    "# 电话记录单\n<!-- [正文] -->\n来电通知正文。",
+                    PreviewScale::zoom(Some(1.0)),
+                    None,
+                    false,
+                    &crate::models::NumberingConfig::default(),
+                    true,
+                    &crate::visual_diff::ElementMarks::default(),
+                );
+            },
+        );
+        let text = text_of(&output);
+        for value in [
+            "电话记录单",
+            "来电单位甲",
+            "王某主任",
+            "首长批示",
+            "请办公室办理。",
+            "来电通知正文。",
+        ] {
+            assert!(text.contains(value), "预览遗漏：{value}");
+        }
+        assert!(!text.contains("旧发文机关"));
+        assert!(!text.contains("旧主送单位"));
+        let text_rect = |needle: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(shape) if shape.galley.text().contains(needle) => {
+                        Some(shape.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("找不到文字：{needle}"))
+        };
+        assert!(
+            text_rect("来电通知正文。").top() > text_rect("2026年10月8日14时30分").bottom(),
+            "正文不能叠在来电信息行上"
+        );
+        assert!(text_rect("请办公室办理。").top() > text_rect("来电通知正文。").bottom());
+        assert!(text_rect("承办单位：").top() > text_rect("请办公室办理。").bottom());
+    }
+
     #[test]
     fn research_preview_draws_its_own_cover_and_chapters_instead_of_official_parts() {
         let ctx = egui::Context::default();

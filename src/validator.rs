@@ -440,6 +440,18 @@ pub fn validate(
                 warnings.push("电话通知缺少发文单位".into());
             }
         }
+        TemplateKind::PhoneRecord => {
+            for (value, label) in [
+                (&input.phone_record.institution, "本单位名称"),
+                (&input.phone_record.caller_unit, "来电单位"),
+                (&input.phone_record.caller_person, "谈话人"),
+                (&input.phone_record.call_time, "通话时间"),
+            ] {
+                if value.trim().is_empty() {
+                    warnings.push(format!("电话记录单缺少{label}"));
+                }
+            }
+        }
         TemplateKind::PlainDocument => {}
         TemplateKind::MeetingAgenda => {
             validate_meeting_agenda_format(text, &mut warnings);
@@ -812,6 +824,7 @@ fn validate_metadata(
                 warnings,
             );
         }
+        TemplateKind::PhoneRecord => {}
         TemplateKind::PlainDocument => {}
         // 会议地点直接填写，不入词库，因此无需校验。
         TemplateKind::MeetingAgenda => {}

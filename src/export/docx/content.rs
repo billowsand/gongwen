@@ -22,23 +22,38 @@ use std::fs::File;
 use std::path::Path;
 
 pub(crate) fn add_smart_table(
-    mut doc: Docx,
+    doc: Docx,
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
     spans: &[TableSpan],
     numbered: bool,
     bold: BoldFont<'_>,
 ) -> Docx {
-    if rows.is_empty() {
-        return doc;
-    }
-    let (grid, alignments) = to_docx_grid(
+    add_smart_table_with_width(
+        doc,
         rows,
         aligns,
         spans,
+        numbered,
+        bold,
         TABLE_CONTENT_WIDTH_TWIPS,
-        TABLE_SIZE * 10,
-    );
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn add_smart_table_with_width(
+    mut doc: Docx,
+    rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
+    spans: &[TableSpan],
+    numbered: bool,
+    bold: BoldFont<'_>,
+    width_twips: usize,
+) -> Docx {
+    if rows.is_empty() {
+        return doc;
+    }
+    let (grid, alignments) = to_docx_grid(rows, aligns, spans, width_twips, TABLE_SIZE * 10);
     if grid.is_empty() {
         return doc;
     }
@@ -175,7 +190,7 @@ pub(crate) fn add_smart_table(
         .set(TableBorder::new(TableBorderPosition::InsideV).size(4));
     let table = Table::new(table_rows)
         .set_grid(grid)
-        .width(TABLE_CONTENT_WIDTH_TWIPS, WidthType::Dxa)
+        .width(width_twips, WidthType::Dxa)
         .layout(TableLayoutType::Fixed)
         .set_borders(borders);
     doc = doc.add_table(table);

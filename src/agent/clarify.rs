@@ -210,8 +210,10 @@ fn echoes_format(question: &str, options: &[String]) -> bool {
 }
 
 /// 要求里写的文种 → 可接受的文种。同一位置上长词优先：「研究报告」不算成「报告」。
-const KIND_WORDS: [(&str, &[TemplateKind]); 12] = [
+const KIND_WORDS: [(&str, &[TemplateKind]); 14] = [
     ("红头呈批件", &[TemplateKind::RedHeadApproval]),
+    ("电话记录单", &[TemplateKind::PhoneRecord]),
+    ("电话记录", &[TemplateKind::PhoneRecord]),
     ("电话通知", &[TemplateKind::PhoneNotice]),
     ("会议议程", &[TemplateKind::MeetingAgenda]),
     ("研究报告", &[TemplateKind::ResearchReport]),

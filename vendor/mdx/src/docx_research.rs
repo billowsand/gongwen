@@ -1499,6 +1499,7 @@ fn heading_part_paragraph(name: &str, text: &str) -> Paragraph {
 /// 节标题：用 Heading2 样式，左缩进 2 字符、三号黑体。
 fn heading_section_paragraph(text: &str) -> Paragraph {
     Paragraph::new()
+        .keep_lines(true)
         .style("Heading2")
         .align(AlignmentType::Left)
         .indent(None, None, None, Some(200))
@@ -1514,6 +1515,7 @@ fn heading_section_paragraph(text: &str) -> Paragraph {
 /// 子节标题：用 Heading3 样式，左缩进 2 字符、四号黑体。
 fn heading_subsection_paragraph(text: &str) -> Paragraph {
     Paragraph::new()
+        .keep_lines(true)
         .style("Heading3")
         .align(AlignmentType::Left)
         .indent(None, None, None, Some(200))
@@ -1534,6 +1536,8 @@ where
     // 首行缩进 2 字符 ≈ 2×14pt = 560 twips（与 ctex 的 \parindent=2em 等效）
     let p = Paragraph::new()
         .align(AlignmentType::Both)
+        // 与 PDF 一致，允许正文只接一行，避免标题和短段整组提前换页。
+        .widow_control(false)
         .indent(Some(0), Some(SpecialIndentType::FirstLine(560)), None, None)
         .line_spacing(
             LineSpacing::new()

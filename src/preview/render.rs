@@ -394,6 +394,18 @@ pub(crate) fn official_preview(
     elements: &ElementMarks,
 ) -> PreviewOutput {
     super::layout::clear_hovered(ui.ctx());
+    if input.kind == TemplateKind::PhoneRecord {
+        return super::phone_record::show(
+            ui,
+            input,
+            markdown,
+            scale,
+            anchor,
+            scroll_to_anchor,
+            numbering,
+            line_numbers,
+        );
+    }
     // 研究报告不是公文：版心、字号、标题层级和封面全都另一套，没有红头、主送、
     // 落款和版记可言，因此整张纸交给专用版式画，不在下面的公文流程里打补丁。
     if input.kind.is_research() {

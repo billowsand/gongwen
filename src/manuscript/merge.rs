@@ -40,9 +40,15 @@ impl MergeProposal {
         local: (&DraftInput, &str, &str),
         incoming: (&DraftInput, &str, &str),
     ) -> Result<Self> {
-        let base_json = serde_json::to_value(base.0)?;
-        let local_json = serde_json::to_value(local.0)?;
-        let incoming_json = serde_json::to_value(incoming.0)?;
+        let fields = |draft: &DraftInput| -> Result<Value> {
+            let mut value = serde_json::to_value(draft)?;
+            // 空来电信息在存盘时省略，但三方合并需要默认字段作共同基线。
+            value["phone_record"] = serde_json::to_value(&draft.phone_record)?;
+            Ok(value)
+        };
+        let base_json = fields(base.0)?;
+        let local_json = fields(local.0)?;
+        let incoming_json = fields(incoming.0)?;
         let mut conflicts = Vec::new();
         let merged_fields = merge_value(
             &base_json,
@@ -490,6 +496,44 @@ mod tests {
         let (merged, _, _) = proposal.resolve(&[true]).unwrap();
         assert_eq!(merged.kind, incoming.kind);
         assert_eq!(merged.profile, incoming.profile);
+    }
+
+    #[test]
+    fn phone_record_new_fields_merge_from_an_empty_old_snapshot() {
+        let base = DraftInput::default();
+        let mut local = base.clone();
+        local.phone_record.caller_unit = "来电单位甲".into();
+        let mut incoming = base.clone();
+        incoming.phone_record.call_time = "2026年10月8日14时30分".into();
+        let proposal = MergeProposal::build(
+            (&base, "正文", ""),
+            (&local, "正文", ""),
+            (&incoming, "正文", ""),
+        )
+        .unwrap();
+        assert!(proposal.field_conflicts.is_empty());
+        let (merged, _, _) = proposal.resolve(&[]).unwrap();
+        assert_eq!(
+            merged.phone_record.caller_unit,
+            local.phone_record.caller_unit
+        );
+        assert_eq!(
+            merged.phone_record.call_time,
+            incoming.phone_record.call_time
+        );
+        incoming.phone_record.caller_unit = "来电单位乙".into();
+        let proposal = MergeProposal::build(
+            (&base, "正文", ""),
+            (&local, "正文", ""),
+            (&incoming, "正文", ""),
+        )
+        .unwrap();
+        assert_eq!(proposal.field_conflicts.len(), 1);
+        let (merged, _, _) = proposal.resolve(&[true]).unwrap();
+        assert_eq!(
+            merged.phone_record.caller_unit,
+            incoming.phone_record.caller_unit
+        );
     }
 
     #[test]

@@ -109,6 +109,64 @@ pub fn find_orphans(report: &str) -> Vec<ParagraphMetric> {
         .collect()
 }
 
+/// 独立标题的末行与紧随正文首行分处两页；只给人工精调提示，不改正文或分页。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HangingHeading {
+    pub source_line: usize,
+    pub page: usize,
+    pub following_page: usize,
+}
+
+pub fn find_hanging_headings(report: &str) -> Vec<HangingHeading> {
+    let mut pending = None;
+    let mut out = Vec::new();
+    for record in report.lines() {
+        let parts: Vec<_> = record.split_whitespace().collect();
+        let ["flow", kind, line, page] = parts.as_slice() else {
+            continue;
+        };
+        let (Ok(line), Ok(page)) = (line.parse::<usize>(), page.parse::<usize>()) else {
+            pending = None;
+            continue;
+        };
+        if *kind == "boundary" || page == 0 {
+            pending = None;
+            continue;
+        }
+        if !matches!(*kind, "body" | "heading") {
+            pending = None;
+            continue;
+        }
+        if let Some((source_line, heading_page)) = pending.take()
+            && page > heading_page
+        {
+            out.push(HangingHeading {
+                source_line,
+                page: heading_page,
+                following_page: page,
+            });
+        }
+        if *kind == "heading" && line > 0 {
+            pending = Some((line, page));
+        }
+    }
+    out.sort_by_key(|metric| metric.source_line);
+    out.dedup_by_key(|metric| metric.source_line);
+    out
+}
+
+pub fn heading_warning(metric: &HangingHeading, markdown: &str) -> crate::models::ReviewNote {
+    let preview = preview_of(markdown, metric.source_line);
+    let message = format!(
+        "PDF 第 {} 页页尾标题单挂（Markdown 第 {} 行）：{}；后文从第 {} 页开始。请人工在适当位置增补或调整文字，精调分页后重新排版检查。",
+        metric.page, metric.source_line, preview, metric.following_page,
+    );
+    match crate::export::block_span_for_line(markdown, metric.source_line) {
+        Some(span) => crate::models::ReviewNote::located(message, span),
+        None => crate::models::ReviewNote::from(message),
+    }
+}
+
 /// 组装审校提示。`markdown` 用来取那一段的开头几个字，让用户一眼认出是哪段。
 pub fn format_warning(metric: &ParagraphMetric, markdown: &str) -> String {
     let preview = preview_of(markdown, metric.source_line);
@@ -143,6 +201,46 @@ struct TailRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_only_headings_separated_from_their_following_text() {
+        let report = "flow heading 3 1\nflow body 0 1\nflow heading 7 1\nflow body 0 2\nflow heading 11 2\nflow heading 13 3\nflow body 0 3\nflow heading 17 3\nflow boundary 0 3\nflow body 0 4\nflow heading 21 4\n";
+        let metrics = find_hanging_headings(report);
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|metric| metric.source_line)
+                .collect::<Vec<_>>(),
+            vec![7, 11]
+        );
+        assert_eq!((metrics[0].page, metrics[0].following_page), (1, 2));
+    }
+
+    #[test]
+    fn hanging_heading_warning_locates_the_source_title() {
+        let markdown = "# 报告\n\n## 方法\n\n### 具体措施\n\n正文。";
+        let note = heading_warning(
+            &HangingHeading {
+                source_line: 5,
+                page: 3,
+                following_page: 4,
+            },
+            markdown,
+        );
+        assert_eq!(&markdown[note.span.unwrap()], "### 具体措施");
+        assert!(note.message.contains("第 3 页"));
+        assert!(note.message.contains("人工"));
+    }
+
+    #[test]
+    fn malformed_flow_does_not_make_a_false_heading_warning() {
+        assert!(
+            find_hanging_headings(
+                "flow heading 0 1\nflow body 0 2\nflow heading 5 2\nflow body 0 nope\nflow body 0 3"
+            )
+            .is_empty()
+        );
+    }
 
     /// 三号字宽 15.75bp ≈ 1036062sp；版心 28 字宽；左边界 28mm ≈ 5203238sp。
     const CCWD: i64 = 1_036_062;

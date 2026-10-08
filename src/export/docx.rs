@@ -21,6 +21,7 @@ use std::path::Path;
 mod content;
 mod header;
 mod paragraphs;
+mod phone_record;
 pub(crate) mod record;
 mod red;
 mod runs;
@@ -173,6 +174,9 @@ pub fn write_docx_with_numbering(
     // 加粗文字的排法：None 交给 Word 合成粗体（字体不变，等同点了加粗按钮），
     // Some 换用专用粗体字面。
     let bold = fonts.bold_family_docx();
+    if input.kind == TemplateKind::PhoneRecord {
+        return phone_record::write(path, input, markdown, fonts, numbering, elements);
+    }
     if input.kind == TemplateKind::MeetingAgenda {
         return write_meeting_agenda_docx(path, input, markdown, fonts, numbering, elements);
     }
@@ -338,7 +342,9 @@ pub fn write_docx_with_numbering(
                     + RED_APPROVAL_NUMBER_AFTER_TWIPS;
             }
         }
-        TemplateKind::MeetingAgenda | TemplateKind::ResearchReport => unreachable!(),
+        TemplateKind::MeetingAgenda | TemplateKind::ResearchReport | TemplateKind::PhoneRecord => {
+            unreachable!()
+        }
     }
     let title_plain = plain_text(title);
     let title_capacity = if input.kind == TemplateKind::RedHeadApproval {
@@ -2197,7 +2203,14 @@ mod tests {
                     assert!(run.contains("w:hAnsi=\"黑体\""), "{kind:?}: {run}");
                     assert!(run.contains("<w:b "), "{kind:?}: {run}");
                     assert!(
-                        run.contains(&format!("w:val=\"{BODY_SIZE}\"")),
+                        run.contains(&format!(
+                            "w:val=\"{}\"",
+                            if kind == TemplateKind::PhoneRecord {
+                                24
+                            } else {
+                                BODY_SIZE
+                            }
+                        )),
                         "{kind:?}: {run}"
                     );
                 }

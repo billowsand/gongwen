@@ -157,6 +157,7 @@ fn direction_of(kind: TemplateKind) -> Direction {
     match kind {
         TemplateKind::OfficialLetter => Direction::Parallel,
         TemplateKind::PhoneNotice => Direction::Downward,
+        TemplateKind::PhoneRecord => Direction::Unknown,
         TemplateKind::WhitePaper | TemplateKind::RedHeadApproval => Direction::Upward,
         TemplateKind::PlainDocument
         | TemplateKind::MeetingAgenda
@@ -219,6 +220,9 @@ pub fn kind_rules(kind: TemplateKind) -> &'static str {
         TemplateKind::OfficialLetter => {
             r#"文种为公函。标题通常为“关于……的函”。正文交代依据、事项和明确请求；不得凭空补齐缺失事实。根据语义选择“特此函告”“特此函复”或“特此函商，请予支持为荷”等规范结语。正文一级标题使用“## 标题”（导出时自动转为“一、二、三……”黑体），正文二级标题使用“### 标题”（自动转为“（一）（二）（三）……”楷体）；标题文本中不要手写编号。用户素材明确要求附带具体附件内容时，每份附件前分别使用独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部继续使用与正文相同的“##”“###”标题层级。程序自动生成“附件”或“附件1、附件2……”标识，不得手写附件编号，也不得把仅在正文中提到的附件、附件说明或报送表名称臆造成附件全文。附件表格使用标准 Markdown 表格。"#
         }
+        TemplateKind::PhoneRecord => {
+            "文种为电话记录单，用于如实记录收到的电话通知。只整理来电内容，不改为本单位下发的通知，不虚构决定或执行要求。首长批示留空供人工填写；拟办建议、来电单位、谈话人、电话和通话时间由界面要素填写。正文用标准 Markdown，不重复要素，不添加发文落款。"
+        }
         TemplateKind::PhoneNotice => {
             r#"文种为电话通知。版式与公函一致，但不设置机关代字、发文字号及底部版记。标题通常为“关于……的通知”。正文应明确通知事项、执行要求和时间节点；不得凭空补齐缺失事实，结尾根据语义使用“特此通知”等规范表述。正文一级标题使用“## 标题”（导出时自动转为“一、二、三……”黑体），正文二级标题使用“### 标题”（自动转为“（一）（二）（三）……”楷体）；标题文本中不要手写编号。用户素材明确要求附带具体附件内容时，每份附件前分别使用独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部继续使用与正文相同的标题层级，附件编号由程序自动生成。附件表格使用标准 Markdown 表格。"#
         }
@@ -274,6 +278,20 @@ pub fn build_draft_prompt(
     reference: &str,
 ) -> String {
     let rules = kind_rules(input.kind);
+    if input.kind == TemplateKind::PhoneRecord {
+        return format!(
+            "{rules}\n{contract}\n【只读来电要素】\n本单位：{}\n来电单位：{}\n来电电话：{}\n谈话人：{}\n通话时间：{}\n密级：{}\n保密期限：{}\n拟办建议（不得代写或更改）：{}\n【用户素材与写作要求】\n{material}\n{reference}",
+            input.phone_record.institution,
+            input.phone_record.caller_unit,
+            input.phone_record.caller_phone,
+            input.phone_record.caller_person,
+            input.phone_record.call_time,
+            input.profile.security_level,
+            input.profile.security_period,
+            input.phone_record.suggestion,
+            contract = output_contract(input.kind)
+        );
+    }
 
     // 公函和白头件的版式要素全部由本地导出器按锁定元数据渲染，
     // 模型再写一遍就会重复；公函仅在素材明确提供附件全文时追加附件区段。
@@ -300,6 +318,7 @@ pub fn build_draft_prompt(
 不要输出版记横线、分隔线、页码、附件清单编号之外的任何版式符号，也不要在正文末尾另起一行写单位名称或日期。"#,
             forbidden = "密级和保密期限、发文机关标识（红头）、发文字号、主送单位抬头、落款单位、成文日期、抄送单位、承办单位、联系人、联系电话"
         ),
+        TemplateKind::PhoneRecord => "\n只输出 # 电话记录单、<!-- [正文] --> 和来电内容正文。界面中的来电信息、密级、拟办建议、承办联系信息由程序排版，不得重复写进正文。不得编造首长批示。".into(),
         TemplateKind::PhoneNotice => format!(
             r#"
 
@@ -585,6 +604,9 @@ const DEFAULT_TASK: &str = "只做格式规整：修正标题层级、编号与�
 /// 各文种的骨架要求。它属于输出标准的一部分，随文种变化。
 fn kind_structure_rules(kind: TemplateKind) -> &'static str {
     match kind {
+        TemplateKind::PhoneRecord => {
+            "标题为 # 电话记录单；正文区段用 <!-- [正文] -->，如实记录来电内容，不重复表单要素、建议和首长批示。"
+        }
         TemplateKind::OfficialLetter | TemplateKind::PhoneNotice | TemplateKind::PlainDocument => {
             r#"正文一级标题使用“## 标题”、二级标题使用“### 标题”，标题文本不要手写编号；
 正文区段用“<!-- [正文] -->”标记；有附件内容时，每份附件前重复独占一行的“<!-- [附件] -->”，下一行用“# 附件正式标题”；附件内部标题与正文使用相同层级，附件编号由程序生成，不要手写。"#

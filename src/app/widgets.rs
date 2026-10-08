@@ -1071,6 +1071,15 @@ pub(crate) fn export_and_compile(
         // 孤行只有排完版才知道：模板在段首段尾留下位置，拼成探针报告。
         if let Some(report) = &outcome.proof {
             proof_measured = true;
+            // 研究报告只量标题分页，段末字数仍沿用原来的粗估提示。
+            if input.kind.is_research() {
+                proof_warnings.extend(crate::validator::estimate_layout_notes(markdown));
+            }
+            proof_warnings.extend(
+                orphan_probe::find_hanging_headings(report)
+                    .iter()
+                    .map(|metric| orphan_probe::heading_warning(metric, markdown)),
+            );
             proof_warnings.extend(orphan_probe::find_orphans(report).iter().map(|metric| {
                 let message = orphan_probe::format_warning(metric, markdown);
                 // 带上这一段的字节范围，审校面板里点一下就能选中它。

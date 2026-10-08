@@ -1,6 +1,6 @@
 ---
 name: gongwen-markdown
-description: 按「公文助手」（gongwen-assistant）桌面程序的 Markdown 公文子集起草或改写中文公文正文，产出可直接粘贴进公文助手起草页、由程序自动排版导出 Word/PDF 的 .md 文件。覆盖七种文种：公函、电话通知、普通公文、会议议程、白头件（呈批件）、红头呈批件、研究报告。凡是用户要写公函、通知、请示、呈批件、会议议程、研究报告、调研报告等党政机关公文并准备放进公文助手，或提到“公文助手”“gongwen”“公文 Markdown”“标题自动编号”“附件标记”“序号表”时使用。Use when drafting Chinese official documents (gongwen) as Markdown for the Gongwen Assistant app.
+description: 按「公文助手」（gongwen-assistant）桌面程序的 Markdown 公文子集起草或改写中文公文正文，产出可直接粘贴进公文助手起草页、由程序自动排版导出 Word/PDF 的 .md 文件。覆盖八种文种：公函、电话通知、电话记录单、普通公文、会议议程、白头件（呈批件）、红头呈批件、研究报告。凡是用户要写公函、通知、请示、呈批件、会议议程、研究报告、调研报告等党政机关公文并准备放进公文助手，或提到“公文助手”“gongwen”“公文 Markdown”“标题自动编号”“附件标记”“序号表”时使用。Use when drafting Chinese official documents (gongwen) as Markdown for the Gongwen Assistant app.
 license: GPL-3.0-or-later
 metadata:
   app: gongwen-assistant
@@ -19,12 +19,13 @@ metadata:
 
 ## 工作流程
 
-1. **确定文种**。用户没说就按内容判断，拿不准时问一句。七种文种的差异见
+1. **确定文种**。用户没说就按内容判断，拿不准时问一句。八种文种的差异见
    [references/document-types.md](references/document-types.md)，这是必读的。
 2. **打开对应模板**，在骨架上写：
    | 文种 | 模板 |
    |---|---|
    | 公函 | [templates/official-letter.md](templates/official-letter.md) |
+   | 电话记录单 | [templates/phone-record.md](templates/phone-record.md) |
    | 电话通知 | [templates/phone-notice.md](templates/phone-notice.md) |
    | 普通公文 | [templates/plain-document.md](templates/plain-document.md) |
    | 会议议程 | [templates/meeting-agenda.md](templates/meeting-agenda.md) |
@@ -40,7 +41,7 @@ metadata:
 6. **交付**：输出纯 Markdown。写文件时用 UTF-8 编码、`.md` 扩展名；在对话里给出时，
    整篇放进一个 ```` ```markdown ```` 代码块便于复制，但**文件内容本身不能带代码围栏**。
 
-## 语法速查（公文六种文种）
+## 语法速查（公文七种文种）
 
 ```markdown
 # 关于××××的函                ← 文档主标题，全文只有一个，放第一行

@@ -29,6 +29,9 @@
 #let top-m = 37mm
 #let inner-m = 28mm
 #let outer-m = 26mm
+#let flow-probe(kind, line: none) = context {
+  [#metadata((kind: kind, line: line, page: here().position().page))<gw-flow>]
+}
 // 页码盒：fancyhdr 的 \headwidth 取的是 geometry 生效前的版心宽，页码因此不在版心正中，
 // 奇数页以版心左缘、偶数页以版心右缘为准（实测）。
 #let number-half = 75.57mm
@@ -230,7 +233,8 @@
   background: if terminal { terminal-paper } else { page-number })
 
 #set text(font: song, fill: ink, size: body-size, lang: "zh", region: "cn", top-edge: top-edge,
-  bottom-edge: -bottom-edge, overhang: false, costs: (runt: 0%))
+  // 正文逐行利用页尾空间；标题单挂交给实测审校提示，供人工精调。
+  bottom-edge: -bottom-edge, overhang: false, costs: (runt: 0%, orphan: 0%, widow: 0%))
 #set par(justify: true, leading: pitch - body-size, spacing: pitch - body-size,
   justification-limits: (tracking: (min: 0pt, max: 0.02 * pitch)),
   first-line-indent: (amount: 2em, all: true))
@@ -304,6 +308,7 @@
     v(10mm, weak: false)
   })
 #let chapter-block(prefix, body, level: 2, pre: none, number: none) = {
+  let pre = { place(flow-probe("boundary")); pre }
   let title = if prefix != none { prefix + h(1em) + body } else { body }
   if terminal {
     return {
@@ -348,23 +353,23 @@
   if b.toc and b.level == 1 { toc-entry("section", b.number, b.text) }
   let num = if b.number != none { b.number + h(0.5em) }
   if terminal {
-    block(sticky: true, above: if prev == "chapter" { 0pt } else { 6mm }, below: 4mm, {
+    block(breakable: false, above: if prev == "chapter" { 0pt } else { 6mm }, below: 4mm, {
       bookmark(b.level + 2, num + runs(b.text))
       set par(first-line-indent: 0pt, justify: false)
       {
         if b.level == 1 and prev != "chapter" { terminal-dash(); v(4mm) }
         grid(columns: (auto, 1fr), column-gutter: 4mm, align: horizon,
           if b.number != none { box(stroke: 0.8pt + accent, inset: (x: 2mm, y: if b.level == 1 { 1.5mm } else { 1mm }), text(font: mono, size: if b.level == 1 { 13pt } else { 11pt }, fill: accent, b.number)) } else { [] },
-          heavy(hei, size: if b.level == 1 { 17pt } else if b.level == 2 { 15pt } else { 14pt }, runs(b.text)))
+          heavy(hei, size: if b.level == 1 { 17pt } else if b.level == 2 { 15pt } else { 14pt }, runs(b.text) + flow-probe("heading", line: b.at("line", default: none))))
       }
     })
     anchor(b.label, b.number)
     return
   }
   let above = if prev == "chapter" { 0pt } else if prev == "table" { 10.47mm - top-edge + 1.83mm } else { pitch - body-size }
-  block(sticky: true, above: above, below: pitch - body-size, {
+  block(breakable: false, above: above, below: pitch - body-size, {
     bookmark(b.level + 2, num + runs(b.text))
-    par(first-line-indent: 0pt, justify: false, if not terminal { h(2em) } + heavy(hei, fill: if terminal { cyan } else { ink }, num + runs(b.text)))
+    par(first-line-indent: 0pt, justify: false, if not terminal { h(2em) } + heavy(hei, fill: if terminal { cyan } else { ink }, num + runs(b.text)) + flow-probe("heading", line: b.at("line", default: none)))
   })
   anchor(b.label, b.number)
 }
@@ -429,7 +434,7 @@
 }
 
 // ---------------- 正文块 ----------------
-#let para(c) = par(runs(c))
+#let para(c) = par(flow-probe("body") + runs(c))
 
 #let aligned(b) = {
   let a = if b.align == "center" { center } else { right }
@@ -444,7 +449,7 @@
 }
 #let list-par(b) = {
   let first = b.items.first()
-  par(b.items.enumerate().map(((i, e)) => {
+  par(flow-probe("body") + b.items.enumerate().map(((i, e)) => {
     if i > 0 { h(0.25em) }
     list-label(e) + runs(e.c)
   }).join())
@@ -840,6 +845,8 @@
   let part-serial = 0
   for (i, b) in blocks.enumerate() {
     let k = b.k
+    // 会主动起页的结构在新页内容里放边界；不能先占住旧页，让弱分页多造空白页。
+    if not ("par", "list", "section", "chapter", "part", "abstract", "toc", "bib", "front").contains(k) { place(flow-probe("boundary")) }
     let after = prev
     prev = k
     if k == "par" { para(b.c) }

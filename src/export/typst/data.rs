@@ -227,4 +227,6 @@ pub(crate) struct Doc {
     /// 份号逐份编制时每份的份号；空表示只排一份（份号印 `01`）。
     pub copies: Vec<String>,
     pub red: Option<Red>,
+    pub phone_record: Option<crate::models::PhoneRecordMetadata>,
+    pub phone_record_contact: Option<RecordRow>,
 }

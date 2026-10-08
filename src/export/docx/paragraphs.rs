@@ -33,7 +33,7 @@ pub(crate) fn body_paragraph(text: &str, bold: BoldFont<'_>) -> Paragraph {
                 .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
-        .widow_control(true);
+        .widow_control(false);
     for run in body_runs(text, bold) {
         paragraph = paragraph.add_run(run);
     }
@@ -52,7 +52,7 @@ pub(crate) fn aligned_paragraph(align: LineAlign, text: &str, bold: BoldFont<'_>
                 .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
-        .widow_control(true);
+        .widow_control(false);
     for run in body_runs(text, bold) {
         paragraph = paragraph.add_run(run);
     }
@@ -240,7 +240,7 @@ pub(crate) fn compact_heading_paragraph(
                 .line(super::BODY_LINE_TWIPS as i32)
                 .line_rule(LineSpacingType::Exact),
         )
-        .widow_control(true);
+        .widow_control(false);
     for body_run in body_runs(body, bold) {
         paragraph = paragraph.add_run(body_run);
     }

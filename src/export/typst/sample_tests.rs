@@ -111,6 +111,17 @@ const LANDSCAPE: &str = "# 关于印发提质改造任务分解表的通知
 | 2 | 西城区 | 月坛站 | 助浴间、适老化卫生间 | 是 | 3人 | 接入 | 区级配套 | 西城区民政局 | 李四 | 2026年8月 |
 ";
 
+fn phone_record_input(input: &mut DraftInput) {
+    input.phone_record = crate::models::PhoneRecordMetadata {
+        institution: "某某市民政局".into(),
+        caller_unit: "市政府办公室".into(),
+        caller_phone: "010-87654321".into(),
+        caller_person: "李四　科长".into(),
+        call_time: "2026年10月8日14时30分".into(),
+        suggestion: "建议由分管负责同志参会。\n请办公室做好会前准备。".into(),
+    };
+}
+
 fn cases() -> Vec<Case> {
     vec![
         Case {
@@ -164,6 +175,18 @@ fn cases() -> Vec<Case> {
             kind: TemplateKind::OfficialLetter,
             markdown: SHORT.replace("请示", "通知").replace("妥否，请批示。", "请遵照执行。"),
             tweak: |input| input.profile.number_copies = true,
+        },
+        Case {
+            name: "phone-record",
+            kind: TemplateKind::PhoneRecord,
+            markdown: "# 电话记录单\n\n<!-- [正文] -->\n\n市政府办公室来电通知：请于10月9日上午9时在市政府第一会议室参加养老服务工作协调会，由分管负责同志参加。\n".into(),
+            tweak: phone_record_input,
+        },
+        Case {
+            name: "phone-record-long",
+            kind: TemplateKind::PhoneRecord,
+            markdown: format!("# 电话记录单\n\n<!-- [正文] -->\n\n{}", "来电强调请认真核对报送材料，逐项确认责任单位、联系人与时间安排，并保留原始记录以供核查。\n\n".repeat(35)),
+            tweak: phone_record_input,
         },
         Case {
             name: "phone",
@@ -275,6 +298,15 @@ fn typst_samples() {
         )
         .unwrap();
         std::fs::write(dir.join("doc.json"), data).unwrap();
+        if case.kind == TemplateKind::PhoneRecord {
+            crate::export::docx::write_docx(
+                &dir.join("record.docx"),
+                &input,
+                &case.markdown,
+                &display,
+            )
+            .unwrap();
+        }
         let outcome = super::write_pdf_with_base(
             &dir.join("typst.pdf"),
             &input,

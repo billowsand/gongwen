@@ -945,6 +945,7 @@ mod tests {
                 ..TemplateProfile::for_kind(kind)
             },
             research: Default::default(),
+            phone_record: Default::default(),
         }
     }
 

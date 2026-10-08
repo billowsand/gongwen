@@ -61,6 +61,9 @@ impl FormSection {
     /// 副标题写这一段在纸上对应哪几样东西，让分组名不必自我解释。
     pub(crate) fn hint(self, kind: TemplateKind) -> &'static str {
         match (self, kind) {
+            (Self::Header, TemplateKind::PhoneRecord) => "密级 · 保密期限",
+            (Self::Body, TemplateKind::PhoneRecord) => "来电单位 · 谈话人 · 通话时间",
+            (Self::Record, TemplateKind::PhoneRecord) => "拟办建议 · 承办联系",
             (Self::Header, TemplateKind::ResearchReport) => "密级 · 类型 · 编号 · 版本",
             (Self::Body, TemplateKind::ResearchReport) => "名称 · 单位 · 时间",
             (Self::Record, TemplateKind::ResearchReport) => "参考文献",
@@ -169,6 +172,20 @@ pub(crate) fn check_form(draft: &DraftInput) -> FormCheck {
     );
 
     match draft.kind {
+        TemplateKind::PhoneRecord => {
+            for (id, value, label) in [
+                (
+                    "record_institution",
+                    &draft.phone_record.institution,
+                    "本单位名称",
+                ),
+                ("record_unit", &draft.phone_record.caller_unit, "来电单位"),
+                ("record_person", &draft.phone_record.caller_person, "谈话人"),
+                ("record_time", &draft.phone_record.call_time, "通话时间"),
+            ] {
+                check.require(FormSection::Body, id, filled(value), label);
+            }
+        }
         TemplateKind::OfficialLetter => {
             let joint = profile.joint_issuance_mode == JointIssuanceMode::Mode1;
             let issuing = if joint {
@@ -851,7 +868,7 @@ impl DraftPage<'_> {
                     // 跟文种并排放在导航区，不占下面三段的行。
                     let versioned = !matches!(
                         self.doc.draft.kind,
-                        TemplateKind::PlainDocument | TemplateKind::ResearchReport
+                        TemplateKind::PhoneRecord | TemplateKind::PlainDocument | TemplateKind::ResearchReport
                     );
                     let version_width = if versioned { 92.0 } else { 0.0 };
                     let kind_width = if versioned {
@@ -884,6 +901,7 @@ impl DraftPage<'_> {
                             // 不能是 unreachable：`versioned` 在文种下拉框渲染之前求值，
                             // 用户点选“普通公文”的那一帧里 kind 已变、versioned 还是旧值 true，
                             // 版本下拉框会残留渲染这一帧，命中这里直接崩溃（曾因 unreachable 崩过）。
+                            TemplateKind::PhoneRecord => "电话记录单按实际通话时间记录，不使用公文落款日期。",
                             TemplateKind::PlainDocument => {
                                 "普通公文无落款成文日期，稿件版本仅用于与其他文种保持一致。"
                             }
@@ -1013,6 +1031,10 @@ impl DraftPage<'_> {
         }
         if self.doc.draft.kind.is_research() {
             self.research_form_ui(ui, available_width);
+            return;
+        }
+        if self.doc.draft.kind == TemplateKind::PhoneRecord {
+            self.phone_record_form_ui(ui, available_width);
             return;
         }
         let free_text = self.config.allow_free_text;
@@ -1426,7 +1448,7 @@ impl DraftPage<'_> {
                                 "red_approval_department_code",
                             );
                         }
-                        TemplateKind::PlainDocument
+                        TemplateKind::PhoneRecord | TemplateKind::PlainDocument
                         | TemplateKind::MeetingAgenda
                         | TemplateKind::WhitePaper
                         | TemplateKind::ResearchReport => {
@@ -1575,7 +1597,7 @@ impl DraftPage<'_> {
                             ui.end_row();
                             field_error(ui, &check, id);
                         }
-                        TemplateKind::PlainDocument | TemplateKind::ResearchReport => {}
+                        TemplateKind::PhoneRecord | TemplateKind::PlainDocument | TemplateKind::ResearchReport => {}
                     }
 
                     row_label_with_info(
@@ -1814,7 +1836,8 @@ impl DraftPage<'_> {
                             ui.weak("电话通知不设抄送、承办联系版记。");
                             ui.end_row();
                         }
-                        TemplateKind::MeetingAgenda
+                        TemplateKind::PhoneRecord
+                        | TemplateKind::MeetingAgenda
                         | TemplateKind::PlainDocument
                         | TemplateKind::ResearchReport => {}
                     }

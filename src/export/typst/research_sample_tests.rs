@@ -456,6 +456,131 @@ fn typst_samples_research() {
     run();
 }
 
+/// 扫过页尾临界位置，必须出现标题接一行正文、剩余两行续到下一页的样张。
+/// 继续扫到只放得下标题的位置，必须报单挂并定位，不能由排版器自动带走标题。
+#[test]
+#[ignore = "依赖本机 runtime，手动运行"]
+fn typst_samples_compact_pagination() {
+    use crate::models::{FontConfig, ResearchTemplate};
+    use crate::typst_engine::{self, Template, TypstJob};
+    use crate::units::UnitDisplay;
+    use crate::visual_diff::ElementMarks;
+
+    assert!(crate::portable_runtime::find_font_dir().is_some());
+    let fonts = FontConfig::default();
+    let set = typst_engine::font_set(&fonts).unwrap();
+    let numbering = NumberingConfig::default();
+    for (kind, template) in [
+        (TemplateKind::ResearchReport, ResearchTemplate::Classic),
+        (TemplateKind::ResearchReport, ResearchTemplate::Terminal),
+        (TemplateKind::OfficialLetter, ResearchTemplate::Classic),
+    ] {
+        let mut found = false;
+        let mut hanging_found = false;
+        for count in 10..45 {
+            let mut input = DraftInput {
+                kind,
+                ..Default::default()
+            };
+            input.research.template = template;
+            let chapter = if kind == TemplateKind::ResearchReport {
+                "## 分页验收\n\n"
+            } else {
+                ""
+            };
+            let markdown = format!(
+                "# 紧致分页验收\n\n<!-- [正文] -->\n\n{chapter}{}### 页尾接排标题\n\n接排正文{}次行起点{}段末标记。\n",
+                "填充一行正文。\n\n".repeat(count),
+                "甲".repeat(if kind == TemplateKind::ResearchReport {
+                    25
+                } else {
+                    22
+                }),
+                "乙".repeat(27),
+            );
+            let dir = sample_dir().join(if template == ResearchTemplate::Terminal {
+                "terminal-compact-pagination"
+            } else if kind == TemplateKind::ResearchReport {
+                "research-compact-pagination"
+            } else {
+                "official-compact-pagination"
+            });
+            std::fs::create_dir_all(&dir).unwrap();
+            let data = if kind == TemplateKind::ResearchReport {
+                super::research::document_json(&input, &markdown, &numbering, &dir).unwrap()
+            } else {
+                super::document_json(
+                    &input,
+                    &markdown,
+                    &UnitDisplay::new(&[]),
+                    &numbering,
+                    &ElementMarks::default(),
+                    set.families.clone(),
+                )
+                .unwrap()
+            };
+            let job = TypstJob {
+                data,
+                base_dir: &dir,
+                template: if kind == TemplateKind::ResearchReport {
+                    Template::Research
+                } else {
+                    Template::Official
+                },
+                files: Default::default(),
+            };
+            let items = typst_engine::text_fonts_for_test(&job, &set).unwrap();
+            let page = |needle: &str| {
+                items
+                    .iter()
+                    .find(|item| item.text.contains(needle))
+                    .map(|item| item.page)
+            };
+            let head = page("页尾接排标题").unwrap();
+            let first = page("接排正文").unwrap();
+            let second = page("次行起点").unwrap();
+            if head != first {
+                let outcome = typst_engine::compile(&job, &set).unwrap();
+                let metrics =
+                    crate::orphan_probe::find_hanging_headings(outcome.proof.as_deref().unwrap());
+                let line = markdown
+                    .lines()
+                    .position(|line| line.starts_with("### 页尾"))
+                    .unwrap()
+                    + 1;
+                let metric = metrics
+                    .iter()
+                    .find(|metric| metric.source_line == line)
+                    .unwrap();
+                assert_eq!((metric.page, metric.following_page), (head, first));
+                let note = crate::orphan_probe::heading_warning(metric, &markdown);
+                assert_eq!(
+                    note.span,
+                    crate::export::block_span_for_line(&markdown, line)
+                );
+                assert!(note.message.contains("人工"));
+                let hanging_dir = dir.join("hanging");
+                std::fs::create_dir_all(&hanging_dir).unwrap();
+                std::fs::write(hanging_dir.join("typst.pdf"), &outcome.pdf).unwrap();
+                render_pages(outcome.pdf, &hanging_dir);
+                hanging_found = true;
+            } else if second == first + 1 && !found {
+                let outcome = typst_engine::compile(&job, &set).unwrap();
+                assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+                std::fs::write(dir.join("doc.json"), &job.data).unwrap();
+                std::fs::write(dir.join("typst.pdf"), &outcome.pdf).unwrap();
+                render_pages(outcome.pdf, &dir);
+                found = true;
+            }
+            if found && hanging_found {
+                break;
+            }
+        }
+        assert!(found, "{kind:?} 应允许标题接一行正文后跨页");
+        assert!(hanging_found, "{kind:?} 应保留并提示标题单挂，供人工精调");
+    }
+}
+
 /// 四种编号分别覆盖段内、独立列表，以及单数、两位数、圈号上限和长条目折行。
 #[test]
 #[ignore = "依赖本机 runtime，手动运行"]

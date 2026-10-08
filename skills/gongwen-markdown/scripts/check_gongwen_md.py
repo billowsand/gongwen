@@ -20,6 +20,7 @@ import sys
 KINDS = {
     "official-letter": "公函",
     "phone-notice": "电话通知",
+    "phone-record": "电话记录单",
     "plain-document": "普通公文",
     "meeting-agenda": "会议议程",
     "white-paper": "白头件",
@@ -31,6 +32,7 @@ ALIASES = {
     "函": "official-letter",
     "letter": "official-letter",
     "电话通知": "phone-notice",
+    "电话记录单": "phone-record",
     "notice": "phone-notice",
     "普通公文": "plain-document",
     "plain": "plain-document",
@@ -331,7 +333,7 @@ def main() -> int:
     parser.add_argument(
         "--kind",
         default="official-letter",
-        help="文种：公函 / 电话通知 / 普通公文 / 会议议程 / 白头件 / 红头呈批件 / 研究报告（也认英文名）",
+        help="文种：公函 / 电话通知 / 电话记录单 / 普通公文 / 会议议程 / 白头件 / 红头呈批件 / 研究报告（也认英文名）",
     )
     args = parser.parse_args()
     kind = ALIASES.get(args.kind, args.kind)

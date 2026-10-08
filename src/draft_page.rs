@@ -37,6 +37,7 @@ mod heading_focus;
 mod markdown;
 mod navigator;
 mod page;
+mod phone_record;
 mod references;
 mod revise;
 mod ribbon;

@@ -510,10 +510,27 @@ fn proof_report(document: &PagedDocument) -> Option<String> {
     };
     let heads = collect("gwa-head");
     let tails = collect("gwa-tail");
-    if tails.is_empty() {
+    let flow = collect("gw-flow");
+    if tails.is_empty() && flow.is_empty() {
         return None;
     }
     let mut out = String::new();
+    for record in flow {
+        let kind = record
+            .get("kind")
+            .ok()
+            .and_then(|value| {
+                if let Value::Str(kind) = value {
+                    Some(kind.as_str())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("boundary");
+        let line = dict_f64(&record, "line").unwrap_or(0.0) as usize;
+        let page = dict_f64(&record, "page").unwrap_or(0.0) as usize;
+        out.push_str(&format!("flow {kind} {line} {page}\n"));
+    }
     for tail in &tails {
         let (Some(line), Some(page), Some(x), Some(y), Some(char_w), Some(hsize), Some(left)) = (
             dict_f64(tail, "line"),
