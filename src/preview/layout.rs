@@ -1848,14 +1848,7 @@ pub(crate) fn sheet(
             ui.set_max_width(metrics.page);
             let frame = egui::Frame::new()
                 .fill(theme::paper::bg())
-                .stroke(Stroke::new(
-                    1.0,
-                    if theme::is_mdex() {
-                        theme::border().gamma_multiply(0.55)
-                    } else {
-                        theme::border()
-                    },
-                ))
+                .stroke(Stroke::new(1.0, theme::paper::border()))
                 .corner_radius(egui::CornerRadius::same(3))
                 .shadow(theme::paper_shadow(theme::paper::shadow_alpha()))
                 .show(ui, |ui| {

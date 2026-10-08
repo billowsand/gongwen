@@ -55,13 +55,13 @@ pub(super) const fn palette() -> Theme {
     }
 }
 
-/// 夜墨与纸墨共用控件形状，使用暖墨纸面与浅绿强调色。
+/// 夜墨与纸墨共用控件形状，使用灰绿墨纸与浅绿强调色。
 pub(super) const fn dark_palette() -> Theme {
     Theme {
         label: DARK_LABEL,
         dark: true,
-        paper_family: PaperFamily::Sandalwood,
-        dark_paper_family: PaperFamily::Sandalwood,
+        paper_family: PaperFamily::GreenInk,
+        dark_paper_family: PaperFamily::GreenInk,
         canvas: Color32::from_rgb(0x19, 0x1C, 0x19),
         surface: Color32::from_rgb(0x22, 0x27, 0x22),
         surface_sunk: Color32::from_rgb(0x2A, 0x30, 0x2A),

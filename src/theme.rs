@@ -97,15 +97,19 @@ enum PaperFamily {
     Original,
     /// 宣纸白：低饱和暖白。
     Parchment,
+    /// 浅米纸：复古浅专用，承接米黄色界面。
+    Rice,
     /// 夜墨蓝：冷深色纸面。
     NightBlue,
     /// 檀黑棕：暖深色纸面。
     Sandalwood,
+    /// 灰绿墨纸：MDEX 夜墨专用。
+    GreenInk,
 }
 
 impl PaperFamily {
     const fn is_dark(self) -> bool {
-        matches!(self, Self::NightBlue | Self::Sandalwood)
+        matches!(self, Self::NightBlue | Self::Sandalwood | Self::GreenInk)
     }
 }
 
@@ -334,7 +338,7 @@ impl Theme {
         Self {
             label: "复古浅",
             dark: false,
-            paper_family: PaperFamily::Parchment,
+            paper_family: PaperFamily::Rice,
             dark_paper_family: PaperFamily::Sandalwood,
             canvas: Color32::from_rgb(0xF4, 0xE8, 0xC1),
             surface: Color32::from_rgb(0xFB, 0xF1, 0xC7),
@@ -628,8 +632,8 @@ pub fn revision() -> u64 {
 /// **只作用于屏幕预览**：导出的 DOCX/PDF 由 `export` 模块另行生成，完全不读
 /// 这里的颜色，因此不论用户把纸面调成什么，落到纸上的永远是白纸黑字红头。
 ///
-/// 「跟随主题」把十套外观主题收束为四种克制的纸面：本色、宣纸白、
-/// 夜墨蓝与檀黑棕。纸面只跟随冷暖和明暗，不复制主题强调色；正文只用黑或白，
+/// 「跟随主题」使用本色、宣纸白、夜墨蓝与檀黑棕，另为复古浅和 MDEX 夜墨
+/// 提供浅米纸与灰绿墨纸。纸面只跟随冷暖和明暗，不复制主题强调色；正文只用黑或白，
 /// 红头、红色反线与份号始终使用同一个规范红。
 pub mod paper {
     use super::{CURRENT_PAPER, Color32, PaperFamily, Theme, current};
@@ -646,6 +650,9 @@ pub mod paper {
         ink_muted: Color32,
         ink_faint: Color32,
         hover: Color32,
+        /// 专属纸边；未指定时沿用主题的原有边框。
+        border: Option<Color32>,
+        shadow_alpha: u8,
     }
 
     /// 本色：标准白纸黑字，既是默认纸面，也是「白纸黑字」的强制结果。
@@ -655,6 +662,8 @@ pub mod paper {
         ink_muted: Color32::from_gray(90),
         ink_faint: Color32::from_gray(150),
         hover: Color32::from_rgb(0xF3, 0xF3, 0xF3),
+        border: None,
+        shadow_alpha: 18,
     };
 
     /// 宣纸白：暖而不黄，仍使用纯黑正文。
@@ -664,6 +673,19 @@ pub mod paper {
         ink_muted: Color32::from_rgb(0x5A, 0x58, 0x53),
         ink_faint: Color32::from_rgb(0x96, 0x92, 0x8A),
         hover: Color32::from_rgb(0xF3, 0xED, 0xE1),
+        border: None,
+        shadow_alpha: 18,
+    };
+
+    /// 浅米纸：比宣纸白更暖，与复古浅的米黄色界面衔接。
+    const RICE_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(0xFA, 0xF0, 0xD8),
+        ink: Color32::BLACK,
+        ink_muted: Color32::from_rgb(0x67, 0x5B, 0x50),
+        ink_faint: Color32::from_rgb(0xA0, 0x90, 0x76),
+        hover: Color32::from_rgb(0xEF, 0xE1, 0xBF),
+        border: Some(Color32::from_rgb(0xD3, 0xC1, 0x9A)),
+        shadow_alpha: 26,
     };
 
     /// 夜墨蓝：冷深色纸，正文严格用白色。
@@ -673,6 +695,8 @@ pub mod paper {
         ink_muted: Color32::from_rgb(0xC6, 0xCD, 0xD4),
         ink_faint: Color32::from_rgb(0x7F, 0x89, 0x94),
         hover: Color32::from_rgb(0x2D, 0x37, 0x42),
+        border: None,
+        shadow_alpha: 90,
     };
 
     /// 檀黑棕：暖深色纸，正文严格用白色。
@@ -682,6 +706,19 @@ pub mod paper {
         ink_muted: Color32::from_rgb(0xD0, 0xC8, 0xBF),
         ink_faint: Color32::from_rgb(0x8A, 0x81, 0x78),
         hover: Color32::from_rgb(0x39, 0x33, 0x2E),
+        border: None,
+        shadow_alpha: 90,
+    };
+
+    /// 灰绿墨纸：去掉檀黑棕的棕调，以细纸边和轻投影融入 MDEX 夜墨。
+    const GREEN_INK_SHEET: Sheet = Sheet {
+        bg: Color32::from_rgb(0x26, 0x2C, 0x27),
+        ink: Color32::WHITE,
+        ink_muted: Color32::from_rgb(0xB5, 0xBC, 0xAE),
+        ink_faint: Color32::from_rgb(0x7F, 0x8B, 0x7A),
+        hover: Color32::from_rgb(0x30, 0x3A, 0x31),
+        border: Some(Color32::from_rgb(0x46, 0x50, 0x44)),
+        shadow_alpha: 64,
     };
 
     /// 给定主题与用户选择，决定纸面家族。不读全局，便于直接测试。
@@ -698,8 +735,10 @@ pub mod paper {
         match family {
             PaperFamily::Original => ORIGINAL_SHEET,
             PaperFamily::Parchment => PARCHMENT_SHEET,
+            PaperFamily::Rice => RICE_SHEET,
             PaperFamily::NightBlue => NIGHT_BLUE_SHEET,
             PaperFamily::Sandalwood => SANDALWOOD_SHEET,
+            PaperFamily::GreenInk => GREEN_INK_SHEET,
         }
     }
 
@@ -729,6 +768,8 @@ pub mod paper {
                 ink_muted: Color32::from_rgb(141, 218, 233),
                 ink_faint: Color32::from_rgb(80, 122, 136),
                 hover: Color32::from_rgb(37, 56, 65),
+                border: None,
+                shadow_alpha: 90,
             }
         } else {
             Sheet {
@@ -791,15 +832,27 @@ pub mod paper {
         sheet().ink_faint
     }
 
-    /// 纸张投影。深色纸压在深色底上，投影要更重才托得起来。
+    /// 纸边与纸底一起取色；没有专属纸边的纸面保留原有主题边框。
+    pub fn border() -> Color32 {
+        sheet().border.unwrap_or_else(|| {
+            if super::is_mdex() {
+                super::border().gamma_multiply(0.55)
+            } else {
+                super::border()
+            }
+        })
+    }
+
+    /// 纸张投影。各纸面按底色和纸边搭配控制离底感。
     pub fn shadow_alpha() -> u8 {
-        if is_dark() { 90 } else { 18 }
+        sheet().shadow_alpha
     }
 
     #[cfg(test)]
     mod tests {
         use super::{
-            NIGHT_BLUE_SHEET, ORIGINAL_SHEET, PARCHMENT_SHEET, SANDALWOOD_SHEET, Sheet, sheet_for,
+            GREEN_INK_SHEET, NIGHT_BLUE_SHEET, ORIGINAL_SHEET, PARCHMENT_SHEET, RICE_SHEET,
+            SANDALWOOD_SHEET, Sheet, sheet_for,
         };
         use crate::models::{PaperMode, ThemeName};
         use crate::theme::by_name;
@@ -815,26 +868,21 @@ pub mod paper {
             }
         }
 
-        /// 跟随主题时，十套外观主题稳定收束为确认过的四种纸面。
+        /// 跟随主题时，通用纸面与两套专属纸面使用各自确认过的配色。
         #[test]
-        fn follow_mode_maps_themes_to_four_paper_families() {
+        fn follow_mode_maps_themes_to_paper_families() {
             assert_follow(&[ThemeName::Claude, ThemeName::Latte], ORIGINAL_SHEET);
             assert_follow(
-                &[
-                    ThemeName::SolarizedLight,
-                    ThemeName::GruvboxLight,
-                    ThemeName::Mdex,
-                ],
+                &[ThemeName::SolarizedLight, ThemeName::Mdex],
                 PARCHMENT_SHEET,
             );
+            assert_follow(&[ThemeName::GruvboxLight], RICE_SHEET);
+            assert_follow(&[ThemeName::MdexDark], GREEN_INK_SHEET);
             assert_follow(
                 &[ThemeName::Dracula, ThemeName::Nord, ThemeName::TokyoNight],
                 NIGHT_BLUE_SHEET,
             );
-            assert_follow(
-                &[ThemeName::GruvboxDark, ThemeName::MdexDark],
-                SANDALWOOD_SHEET,
-            );
+            assert_follow(&[ThemeName::GruvboxDark], SANDALWOOD_SHEET);
         }
 
         /// 「白纸黑字」永远回到本色，与打印稿逐字节一致。
@@ -862,7 +910,6 @@ pub mod paper {
                 ThemeName::GruvboxLight,
                 ThemeName::Mdex,
                 ThemeName::GruvboxDark,
-                ThemeName::MdexDark,
             ];
             for name in cool {
                 assert_eq!(
@@ -878,6 +925,11 @@ pub mod paper {
                     "{name:?} 没有使用檀黑棕"
                 );
             }
+            assert_eq!(
+                sheet_for(by_name(ThemeName::MdexDark), PaperMode::Dark),
+                GREEN_INK_SHEET,
+                "MDEX 夜墨的显式深色纸面应与跟随主题一致"
+            );
         }
 
         /// 正文只允许纯黑或纯白，不能被外观主题的文字色带偏。
