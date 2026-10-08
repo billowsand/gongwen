@@ -481,7 +481,12 @@ src/ai_panel/       侧栏界面：composer、cards、stream_view、outline_card
   （进阶项仍在 config.json 手调）；「用对话大模型重排」继续复用起草模型。
 - 迁移在 `storage::load` 里跑（`migrate_providers`，幂等），迁移结果立即写回；
   迁移与解析器有单元测试（`models::tests`）。
-- 已知边界：预设表里 OpenCode-Go 与 vLLM 的默认地址留空待填；DMXAPI 默认
+- OpenCode-Go 预设补齐（2026-10-09）：默认地址为 `https://opencode.ai/zen/go/v1`，
+  编辑卡片只需填写 Key，名称和地址收进高级设置；点击「刷新模型」获取清单，再按功能
+  选择模型。启动迁移会补齐旧版原名且地址为空的 Go 条目，保留已有密钥、模型与自定义地址。
+  官方端点说明见 <https://docs.opencode.ai/docs/go/#endpoints>；当前调用链使用
+  `chat/completions`，仅适用该协议的模型，其他协议的模型仍需另行接入。
+- 已知边界：vLLM 的默认地址留空待填；DMXAPI 默认
   `https://www.dmxapi.cn/v1`（.com 后缀也常见，可在卡片上改）。提供商的「用途标签」
   只用于选择器排序，不做硬过滤。
 

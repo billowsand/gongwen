@@ -554,9 +554,9 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         id: "opencode-go",
         name: "OpenCode-Go",
-        base_url: "",
+        base_url: "https://opencode.ai/zen/go/v1",
         needs_key: true,
-        note: "OpenAI 兼容聚合服务，地址与密钥以开通时给的为准",
+        note: "地址已预设；填写 Go API Key 后刷新模型清单",
         tags: &["chat"],
     },
     ProviderPreset {
@@ -2447,12 +2447,25 @@ impl AppConfig {
 
     /// 旧配置迁移：把散在四处的地址 / 密钥 / 模型名归并成提供商清单与模型引用。
     ///
-    /// 只在还没有任何提供商时跑；同一个「地址 + 密钥」只建一条。提供商按地址
+    /// 内联字段只在还没有任何提供商时迁移；已有提供商只补旧 Go 模板遗漏的地址。
+    /// 同一个「地址 + 密钥」只建一条。提供商按地址
     /// 匹配预设起名（127.0.0.1:1234 → LM Studio，dmxapi → DMXAPI……），认不出
     /// 的叫「自定义提供商」。迁移后清空旧内联字段，返回是否发生了改动。
     pub fn migrate_providers(&mut self) -> bool {
         if !self.providers.is_empty() {
-            return false;
+            // 旧版 Go 模板漏了地址，只修复原名且地址仍为空的条目，保留自定义连接。
+            let preset = PROVIDER_PRESETS
+                .iter()
+                .find(|p| p.id == "opencode-go")
+                .unwrap();
+            let mut changed = false;
+            for provider in &mut self.providers {
+                if provider.name == preset.name && provider.base_url.trim().is_empty() {
+                    provider.base_url = preset.base_url.into();
+                    changed = true;
+                }
+            }
+            return changed;
         }
         // 先留住旧值：下面边迁边清。
         let draft_url = self.lm_studio.base_url.trim().to_string();
@@ -3439,6 +3452,45 @@ mod tests {
         let legacy = r#"{"id":"p1","name":"x","models":["m"]}"#;
         let parsed: ProviderConfig = serde_json::from_str(legacy).unwrap();
         assert!(parsed.kinds.is_empty());
+    }
+
+    #[test]
+    fn opencode_go_preset_repairs_only_missing_default_address() {
+        let preset = PROVIDER_PRESETS
+            .iter()
+            .find(|p| p.id == "opencode-go")
+            .unwrap();
+        assert_eq!(preset.base_url, "https://opencode.ai/zen/go/v1");
+        assert!(preset.needs_key);
+        assert_eq!(preset_for_url(preset.base_url).unwrap().id, preset.id);
+        let mut config = AppConfig::default();
+        config.providers = vec![
+            ProviderConfig {
+                id: "p1".into(),
+                name: preset.name.into(),
+                api_key: "test-key".into(),
+                models: vec!["deepseek-v4-flash".into()],
+                ..Default::default()
+            },
+            ProviderConfig {
+                id: "p2".into(),
+                name: preset.name.into(),
+                base_url: "https://example.com/v1".into(),
+                ..Default::default()
+            },
+            ProviderConfig {
+                id: "p3".into(),
+                name: "自定义提供商".into(),
+                ..Default::default()
+            },
+        ];
+        assert!(config.migrate_providers());
+        assert_eq!(config.providers[0].base_url, preset.base_url);
+        assert_eq!(config.providers[0].api_key, "test-key");
+        assert_eq!(config.providers[0].models, ["deepseek-v4-flash"]);
+        assert_eq!(config.providers[1].base_url, "https://example.com/v1");
+        assert!(config.providers[2].base_url.is_empty());
+        assert!(!config.migrate_providers());
     }
 
     /// 旧配置（内联地址密钥）迁移成提供商清单与模型引用：同一地址密钥只建一条，

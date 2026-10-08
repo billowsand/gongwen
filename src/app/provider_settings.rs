@@ -230,15 +230,33 @@ fn provider_card_ui(
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);
-                setting_field(ui, "名称", &mut provider.name, "服务商名称");
-                setting_field(ui, "接口地址", &mut provider.base_url, "包含 /v1");
+                let is_go = crate::models::preset_for_url(&provider.base_url)
+                    .is_some_and(|preset| preset.id == "opencode-go");
+                if is_go {
+                    ui.weak(
+                        "只需填写 Go API Key，再点击「刷新模型」；到「模型服务」选择模型后保存。",
+                    );
+                    egui::CollapsingHeader::new("高级设置")
+                        .id_salt("connection_settings")
+                        .show(ui, |ui| {
+                            setting_field(ui, "名称", &mut provider.name, "服务商名称");
+                            setting_field(ui, "接口地址", &mut provider.base_url, "包含 /v1");
+                        });
+                } else {
+                    setting_field(ui, "名称", &mut provider.name, "服务商名称");
+                    setting_field(ui, "接口地址", &mut provider.base_url, "包含 /v1");
+                }
                 // 密钥用密码框显示，免于编辑时明文暴露在界面上。
                 super::settings::setting_row(ui, "API Key", None, |ui| {
                     crate::ime::exempt(
                         ui.add(
                             theme::field(
                                 &mut provider.api_key,
-                                "本地服务通常可留空；只保存在本机",
+                                if is_go {
+                                    "填写 OpenCode Go API Key；只保存在本机"
+                                } else {
+                                    "本地服务通常可留空；只保存在本机"
+                                },
                                 f32::INFINITY,
                             )
                             .password(true),
@@ -364,7 +382,7 @@ impl GongwenApp {
             tags: preset.tags.iter().map(|t| (*t).to_string()).collect(),
             ..ProviderConfig::default()
         });
-        // 地址空（vLLM 内网、OpenCode-Go、自定义）直接展开编辑让人填。
+        // 地址空（vLLM 内网、自定义）或需要密钥时直接展开编辑。
         if preset.base_url.is_empty() || preset.needs_key {
             self.provider_edit.insert(id.clone());
         }
