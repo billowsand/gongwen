@@ -29,6 +29,76 @@ fn board(kind: TemplateKind, title: &str, request: &str) -> Board {
 }
 
 #[test]
+fn policy_report_uses_a_specific_title_without_changing_document_elements() {
+    for hint in ["", "研究报告", "调研报告", "用户指定的报告名称"] {
+        let expected = if hint == "用户指定的报告名称" {
+            hint
+        } else {
+            "人工智能辅助决策的应用与风险研究"
+        };
+        let skill = builtin(POLICY_REPORT);
+        let model = ScriptedModel::new(|_, prompt| {
+            if prompt.contains("拟定这份报告的具体题名") {
+                "# 人工智能辅助决策的应用与风险研究".into()
+            } else if prompt.contains("列出章的大纲") {
+                "研究背景：应用与风险".into()
+            } else if prompt.contains("里的一章：") {
+                "## 研究背景\n\n人工智能辅助决策需要统筹应用与风险。".into()
+            } else if prompt.contains("写一段摘要") {
+                "本报告讨论人工智能辅助决策的应用与风险。".into()
+            } else {
+                "无".into()
+            }
+        });
+        let kb = KeywordKb::new(vec![]);
+        let start = board(
+            TemplateKind::ResearchReport,
+            hint,
+            "研究人工智能辅助决策的应用与风险，写一份研究报告",
+        );
+        let original = start.draft.clone();
+        let mut driver = Driver::new(&skill, &model, &kb, start);
+        let outline = driver.run().expect("确认大纲");
+        driver.answer(&outline, &[(1, Reply::Choice(0))]);
+        assert!(driver.run().is_none());
+        assert!(
+            driver
+                .board
+                .workspace
+                .starts_with(&format!("# {expected}\n")),
+            "标题提示 {hint:?}：{}",
+            driver.board.workspace
+        );
+        assert!(model.prompts("里的一章：")[0].contains(&format!("《{expected}》")));
+        assert_eq!(
+            model.asked("拟定这份报告的具体题名"),
+            usize::from(hint != "用户指定的报告名称")
+        );
+        assert_eq!(driver.board.draft, original, "拟题不能回写文档要素");
+    }
+}
+
+#[test]
+fn policy_report_rejects_generic_or_multiline_generated_titles() {
+    for reply in ["", "# 研究报告", "报告题名", "实际题名\n这是说明"] {
+        let skill = builtin(POLICY_REPORT);
+        let model = ScriptedModel::new(|_, prompt| {
+            if prompt.contains("拟定这份报告的具体题名") {
+                reply.into()
+            } else {
+                "无".into()
+            }
+        });
+        let kb = KeywordKb::new(vec![]);
+        let start = board(TemplateKind::ResearchReport, "", "研究人工智能辅助决策");
+        let mut driver = Driver::new(&skill, &model, &kb, start);
+        let error = driver.try_run().expect_err("无效题名不能进入工作稿");
+        assert!(error.to_string().contains("具体的报告题名"), "{error}");
+        assert!(driver.board.workspace.is_empty());
+    }
+}
+
+#[test]
 fn policy_report_confirms_the_outline_writes_by_chapter_and_cites_into_the_report() {
     let skill = builtin(POLICY_REPORT);
     let model = ScriptedModel::new(|_, prompt| {

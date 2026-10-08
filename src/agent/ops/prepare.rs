@@ -149,16 +149,57 @@ fn ask_kind(ctx: &mut ToolCtx<'_, '_>, question: clarify::Question) -> Flow {
 ///   停下来让用户在框里改，答案存回同一个变量；
 /// - `mode: split`：**不调模型**，把用户原话按行（只有一段时按句）拆成要点，存进 `save_as`
 ///   （默认 `items`）——材料里的事实原样保留，模型没机会在这一步改错；`confirm` 默认是。
+/// - `mode: title`：沿用具体标题提示，否则按要求拟题，存进 `save_as`（默认 `report_title`）；
+///   只供工作稿使用，不回写文档要素。
 pub(super) fn plan(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
     match step.param_str("mode").unwrap_or("queries") {
         "queries" => plan_queries(ctx, step),
         "list" => plan_list(ctx, step, false),
         "outline" => plan_list(ctx, step, true),
         "split" => plan_split(ctx, step),
+        "title" => plan_title(ctx, step),
         other => {
-            anyhow::bail!("plan 不认识 mode「{other}」（可用 queries / list / outline / split）")
+            anyhow::bail!(
+                "plan 不认识 mode「{other}」（可用 queries / list / outline / split / title）"
+            )
         }
     }
+}
+
+/// 文种名与格式占位文字不能作为报告题名。
+fn is_generic_title(title: &str) -> bool {
+    matches!(
+        title.trim(),
+        "" | "研究报告"
+            | "调研报告"
+            | "政策研究报告"
+            | "咨询报告"
+            | "决策参考"
+            | "报告题名"
+            | "报告名称"
+            | "本报告"
+    )
+}
+
+fn plan_title(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
+    let hint = ctx.board.draft.title_hint.trim();
+    let title = if is_generic_title(hint) {
+        phase(ctx, "根据写作要求拟定报告题名…");
+        let locals = [("request", ctx.board.request_with_notes())];
+        let text = prompt(ctx, step, "prompt", "报告题名", &locals)?;
+        let reply = assist(ctx, &text)?;
+        let title = crate::prompt::sanitize_model_markdown(&reply);
+        let title = title.trim().trim_start_matches('#').trim();
+        if title.lines().count() != 1 || is_generic_title(title) {
+            anyhow::bail!("模型没有给出具体的报告题名，请填写报告名称后重试");
+        }
+        title.to_string()
+    } else {
+        hint.to_string()
+    };
+    let name = step.save_as.as_deref().unwrap_or("report_title");
+    ctx.board.vars.insert(name.into(), Value::String(title));
+    Ok(Flow::Next)
 }
 
 /// 模型回复 → 一行一条，去掉编号与空行、「无」。
