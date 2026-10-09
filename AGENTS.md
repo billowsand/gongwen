@@ -92,9 +92,10 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
   `src/element_fields.rs`、统一写值路径 `apply_field`、表单下拉框改调它、红线 2 文档
   修订）、第 2 期（「要素抽取」提示词与摘录核对、`element_fields::plan` 分类、
   `Target::Field` 出题含多选与人员随单位过滤、回答落黑板的 `field_suggestions`
-  建议清单与已确认信息、与六要素去重）已完成**；第 3 期（侧栏要素建议卡：采纳 /
-  撤销 / 过期检测、随会话保存、接 `skill_job`）未开始——建议清单在
-  `board.field_suggestions`，采纳必须走 `element_fields::apply_field`（界面线程）。
+  建议清单与已确认信息、与六要素去重）、第 3 期（侧栏要素建议卡
+  `src/ai_panel/field_card.rs`：`Event::FieldSuggestions` 事件 + 答题合入两路、
+  采纳 / 全部采纳 / 撤销 / 过期检测 / 词库与文种校验、随会话存盘、交付提案提醒）
+  已完成**；第 4 期（真机验收、内置技能加 `fields` 参数可关、使用帮助）未开始。
   红线 2 已按方案第二节修订（描述类扩到发文、落款、呈报、承办；授权类不出题不建议）。
   方案、分期、进度与已知坑见 `docs/element-fill-design.md`（单文件，第六节是交接）；动
   要素表单写值或 AI 要素建议前先读它。
