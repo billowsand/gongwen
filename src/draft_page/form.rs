@@ -10,6 +10,7 @@ use crate::app::{
     switch_template_profile, warn,
 };
 use crate::draft_page::DraftPage;
+use crate::element_fields::{self, FieldId};
 use crate::models::{
     CorrespondenceScope, DraftInput, JointIssuanceMode, LetterVersion, ReviewNote, SecurityLevel,
     StyleMode, TemplateKind, VocabularyCategory, split_units,
@@ -1319,27 +1320,25 @@ impl DraftPage<'_> {
                                     free_text,
                                     field_width,
                                 );
-                            } else {
-                                let changed = single_select(
-                                    ui,
-                                    "issuing_unit",
-                                    &mut self.doc.draft.profile.issuing_unit,
-                                    &units,
-                                    &mut self.doc.manual_fields,
-                                    free_text,
-                                    field_width,
-                                    "使用标准全称",
+                            } else if single_select(
+                                ui,
+                                "issuing_unit",
+                                &mut self.doc.draft.profile.issuing_unit,
+                                &units,
+                                &mut self.doc.manual_fields,
+                                free_text,
+                                field_width,
+                                "使用标准全称",
+                            ) {
+                                // 规格 §2.1 的代字带出与 §2.4 的互斥剔除都在
+                                // apply_field 里，与 AI 建议采纳是同一条写值路径。
+                                let value = self.doc.draft.profile.issuing_unit.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::IssuingUnit,
+                                    &value,
+                                    &self.config.vocabulary,
                                 );
-                                // 规格 §2.1：单位绑定发函代字时自动带出。
-                                if changed
-                                    && self.doc.draft.profile.department_code.trim().is_empty()
-                                {
-                                    let code = UnitDisplay::new(&self.config.vocabulary)
-                                        .department_code_of(&self.doc.draft.profile.issuing_unit);
-                                    if !code.is_empty() {
-                                        self.doc.draft.profile.department_code = code;
-                                    }
-                                }
                             }
                             ui.end_row();
                             field_error(ui, &check, "issuing_unit");
@@ -1398,7 +1397,7 @@ impl DraftPage<'_> {
                                 "发文单位",
                                 Some("电话通知不设置机关代字、发文序号、抄送及承办联系版记。"),
                             );
-                            single_select(
+                            if single_select(
                                 ui,
                                 "phone_notice_issuing_unit",
                                 &mut self.doc.draft.profile.issuing_unit,
@@ -1407,7 +1406,15 @@ impl DraftPage<'_> {
                                 free_text,
                                 field_width,
                                 "使用标准全称",
-                            );
+                            ) {
+                                let value = self.doc.draft.profile.issuing_unit.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::IssuingUnit,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
                             ui.end_row();
                             field_error(ui, &check, "phone_notice_issuing_unit");
                         }
@@ -1417,7 +1424,7 @@ impl DraftPage<'_> {
                                 "发文单位",
                                 Some("用于首页红色发文机关标志；与承办单位、落款单位分别维护。"),
                             );
-                            let changed = single_select(
+                            if single_select(
                                 ui,
                                 "red_approval_issuing_unit",
                                 &mut self.doc.draft.profile.issuing_unit,
@@ -1426,13 +1433,15 @@ impl DraftPage<'_> {
                                 free_text,
                                 field_width,
                                 "使用标准全称",
-                            );
-                            if changed && self.doc.draft.profile.department_code.trim().is_empty() {
-                                let code = UnitDisplay::new(&self.config.vocabulary)
-                                    .approval_department_code_of(&self.doc.draft.profile.issuing_unit);
-                                if !code.is_empty() {
-                                    self.doc.draft.profile.department_code = code;
-                                }
+                            ) {
+                                // 呈批代字的带出与互斥剔除都在 apply_field 里。
+                                let value = self.doc.draft.profile.issuing_unit.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::IssuingUnit,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
                             }
                             ui.end_row();
                             field_error(ui, &check, "red_approval_issuing_unit");
@@ -1503,7 +1512,7 @@ impl DraftPage<'_> {
                                     format!("成文时将显示为：{recipient_preview}")
                                 }),
                             );
-                            multi_select(
+                            if multi_select(
                                 ui,
                                 "recipient",
                                 &mut self.doc.draft.profile.recipient,
@@ -1513,13 +1522,21 @@ impl DraftPage<'_> {
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                            );
+                            ) {
+                                let value = self.doc.draft.profile.recipient.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::Recipient,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
                             ui.end_row();
                             field_error(ui, &check, "recipient");
                         }
                         TemplateKind::PhoneNotice => {
                             required_row_label(ui, "主送单位", None);
-                            multi_select(
+                            if multi_select(
                                 ui,
                                 "phone_notice_recipient",
                                 &mut self.doc.draft.profile.recipient,
@@ -1529,7 +1546,15 @@ impl DraftPage<'_> {
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                            );
+                            ) {
+                                let value = self.doc.draft.profile.recipient.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::Recipient,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
                             ui.end_row();
                             field_error(ui, &check, "phone_notice_recipient");
                         }
@@ -1583,7 +1608,7 @@ impl DraftPage<'_> {
                                 "red_approval_reporting_leaders"
                             };
                             required_row_label(ui, "呈报领导", Some(&leader_tip));
-                            multi_select(
+                            if multi_select(
                                 ui,
                                 id,
                                 &mut self.doc.draft.profile.reporting_leaders,
@@ -1593,7 +1618,15 @@ impl DraftPage<'_> {
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                            );
+                            ) {
+                                let value = self.doc.draft.profile.reporting_leaders.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::ReportingLeaders,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
                             ui.end_row();
                             field_error(ui, &check, id);
                         }
@@ -1672,7 +1705,7 @@ impl DraftPage<'_> {
                                     format!("成文时将显示为：{copies_preview}")
                                 },
                             );
-                            multi_select(
+                            if multi_select(
                                 ui,
                                 "copies_to",
                                 &mut self.doc.draft.profile.copies_to,
@@ -1682,7 +1715,15 @@ impl DraftPage<'_> {
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                            );
+                            ) {
+                                let value = self.doc.draft.profile.copies_to.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::CopiesTo,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
                             ui.end_row();
 
                             row_label(ui, "承办单位");
@@ -1700,16 +1741,22 @@ impl DraftPage<'_> {
                                     field_width,
                                     TemplateKind::OfficialLetter.max_responsible_entries(),
                                 );
-                            } else {
-                                single_select(
-                                    ui,
-                                    "responsible_unit",
-                                    &mut self.doc.draft.profile.responsible_unit,
-                                    &units,
-                                    &mut self.doc.manual_fields,
-                                    free_text,
-                                    field_width,
-                                    "处室/部门标准名称",
+                            } else if single_select(
+                                ui,
+                                "responsible_unit",
+                                &mut self.doc.draft.profile.responsible_unit,
+                                &units,
+                                &mut self.doc.manual_fields,
+                                free_text,
+                                field_width,
+                                "处室/部门标准名称",
+                            ) {
+                                let value = self.doc.draft.profile.responsible_unit.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::ResponsibleUnit,
+                                    &value,
+                                    &self.config.vocabulary,
                                 );
                             }
                             ui.end_row();
@@ -1723,9 +1770,10 @@ impl DraftPage<'_> {
                                 row_label_with_info(ui, "联系人\n及电话", contact_tip);
                                 contact_pair(
                                     ui,
-                                    &mut self.doc.draft.profile.contact_person,
-                                    &mut self.doc.draft.profile.contact_phone,
+                                    &mut self.doc.draft.profile,
+                                    self.doc.draft.kind,
                                     &contacts,
+                                    &self.config.vocabulary,
                                     &mut self.doc.manual_fields,
                                     free_text,
                                     field_width,
@@ -1757,7 +1805,7 @@ impl DraftPage<'_> {
                                 "落款单位",
                                 Some("与发文单位、承办单位相互独立；落款固定从第二页开始。"),
                             );
-                            multi_select(
+                            if multi_select(
                                 ui,
                                 "red_approval_signing_unit",
                                 &mut self.doc.draft.profile.signing_unit,
@@ -1767,7 +1815,15 @@ impl DraftPage<'_> {
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                            );
+                            ) {
+                                let value = self.doc.draft.profile.signing_unit.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::SigningUnit,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
                             ui.end_row();
                             field_error(ui, &check, "red_approval_signing_unit");
 
@@ -1788,7 +1844,7 @@ impl DraftPage<'_> {
                                 "落款单位",
                                 Some("支持多单位：成文时各单位自上而下分行、行间空一行，便于分别签字。"),
                             );
-                            multi_select(
+                            if multi_select(
                                 ui,
                                 "signing_unit",
                                 &mut self.doc.draft.profile.signing_unit,
@@ -1798,7 +1854,15 @@ impl DraftPage<'_> {
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,
-                            );
+                            ) {
+                                let value = self.doc.draft.profile.signing_unit.clone();
+                                element_fields::apply_field(
+                                    &mut self.doc.draft,
+                                    FieldId::SigningUnit,
+                                    &value,
+                                    &self.config.vocabulary,
+                                );
+                            }
                             ui.end_row();
                             field_error(ui, &check, "signing_unit");
 

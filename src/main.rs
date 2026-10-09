@@ -12,6 +12,7 @@ mod diff_view;
 mod doc_import;
 mod document_reference;
 mod draft_page;
+mod element_fields;
 mod export;
 mod file_clipboard;
 mod font_cmap;

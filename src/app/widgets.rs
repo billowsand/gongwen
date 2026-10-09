@@ -861,11 +861,15 @@ pub(crate) fn sort_by_vocabulary(mut units: Vec<String>, options: &[SelectOption
 }
 
 /// 联系人与电话是一组：从词库选人时自动带出绑定电话，电话框只读回显。
+/// 带出电话走的是 `element_fields::apply_profile_field`，与 AI 建议采纳同一条写值路径；
+/// 手填的人名不查词库、不动电话。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn contact_pair(
     ui: &mut egui::Ui,
-    person: &mut String,
-    phone: &mut String,
+    profile: &mut crate::models::TemplateProfile,
+    kind: crate::models::TemplateKind,
     contacts: &[(String, String)],
+    vocabulary: &[VocabularyEntry],
     manual_fields: &mut BTreeSet<String>,
     allow_free_text: bool,
     width: f32,
@@ -881,7 +885,7 @@ pub(crate) fn contact_pair(
         if single_select(
             ui,
             "contact_person",
-            person,
+            &mut profile.contact_person,
             &names,
             manual_fields,
             allow_free_text,
@@ -889,31 +893,34 @@ pub(crate) fn contact_pair(
             "姓名标准写法",
         ) && !manual
         {
-            *phone = contacts
-                .iter()
-                .find(|(name, _)| name == person)
-                .map(|(_, bound)| bound.clone())
-                .unwrap_or_default();
+            let person = profile.contact_person.clone();
+            crate::element_fields::apply_profile_field(
+                profile,
+                kind,
+                crate::element_fields::FieldId::ContactPerson,
+                &person,
+                vocabulary,
+            );
         }
         ui.horizontal(|ui| {
             ui.label("电话");
             if manual {
                 ui.add(
-                    egui::TextEdit::singleline(phone)
+                    egui::TextEdit::singleline(&mut profile.contact_phone)
                         .hint_text("座机或手机")
                         .desired_width((width - 40.0).max(110.0)),
                 );
-            } else if phone.trim().is_empty() {
+            } else if profile.contact_phone.trim().is_empty() {
                 ui.colored_label(
                     warn(),
-                    if person.trim().is_empty() {
+                    if profile.contact_person.trim().is_empty() {
                         "选择联系人后自动带出".to_string()
                     } else {
-                        format!("“{}”在词库中未维护电话", person.trim())
+                        format!("“{}”在词库中未维护电话", profile.contact_person.trim())
                     },
                 );
             } else {
-                ui.label(phone.as_str())
+                ui.label(profile.contact_phone.as_str())
                     .on_hover_text("电话与联系人在标准词库中绑定，改电话请到“标准词库”页");
             }
         });

@@ -173,9 +173,10 @@ impl DraftPage<'_> {
                     .responsible_people_of(&self.doc.draft.profile.responsible_unit);
                 contact_pair(
                     ui,
-                    &mut self.doc.draft.profile.contact_person,
-                    &mut self.doc.draft.profile.contact_phone,
+                    &mut self.doc.draft.profile,
+                    self.doc.draft.kind,
                     &contacts,
+                    &self.config.vocabulary,
                     &mut self.doc.manual_fields,
                     self.config.allow_free_text,
                     field_width,
