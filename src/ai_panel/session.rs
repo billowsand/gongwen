@@ -72,6 +72,9 @@ pub(crate) struct SavedTurn {
     pub(crate) run: Option<SavedRun>,
     #[serde(default)]
     pub(crate) findings: Vec<Finding>,
+    /// 要素建议卡；旧会话没有，读回为空。
+    #[serde(default)]
+    pub(crate) field_cards: Vec<super::field_card::FieldCardRow>,
     #[serde(default)]
     pub(crate) elapsed_ms: u64,
     /// 这一轮交的、还没处理的提案。
@@ -270,6 +273,7 @@ impl SavedTurn {
                 use_rag: run.use_rag,
             }),
             findings: turn.findings.clone(),
+            field_cards: turn.field_cards.clone(),
             elapsed_ms: turn.elapsed().as_millis() as u64,
             proposal,
             style: turn.style.clone(),
@@ -370,6 +374,7 @@ impl SavedTurn {
             // 检查点存在库里：读回后由 `refresh_resumable` 按库里最新一份填。
             resumable: None,
             findings: self.findings,
+            field_cards: self.field_cards,
             style: self.style,
             started: Instant::now(),
             elapsed: Some(Duration::from_millis(self.elapsed_ms)),
@@ -450,6 +455,13 @@ fn fingerprint(turn: &AiTurn, has_proposal: bool) -> u64 {
         turn.questions.len().hash(&mut hasher);
         format!("{:?}", turn.replies).hash(&mut hasher);
         turn.findings.len().hash(&mut hasher);
+        // 建议卡的状态变化（采纳、撤销、过期标记）也要触发落盘。
+        turn.field_cards.len().hash(&mut hasher);
+        turn.field_cards
+            .iter()
+            .map(|row| row.state)
+            .collect::<Vec<_>>()
+            .hash(&mut hasher);
         turn.research.is_some().hash(&mut hasher);
         turn.style.is_some().hash(&mut hasher);
         turn.run.is_some().hash(&mut hasher);
@@ -894,6 +906,67 @@ mod tests {
         assert!(old.provenance.is_empty());
     }
 
+    /// 要素建议卡随会话存盘、读回状态不丢；旧会话没有这个字段，读回为空。
+    #[test]
+    fn field_cards_survive_save_and_old_sessions_read_empty() {
+        use crate::ai_panel::field_card::{FieldCardRow, FieldCardState};
+        use crate::element_fields::{FieldId, FieldSuggestion};
+        let mut panel = AiPanel::default();
+        panel.push_turn("起草".into(), "写稿".into(), vec![], None);
+        panel.turns[0].field_cards = vec![
+            FieldCardRow::new(FieldSuggestion {
+                field: FieldId::Recipient,
+                value: "甲局".into(),
+                previous: String::new(),
+                source: "材料原文：「给甲局发函」".into(),
+                conflict: false,
+            }),
+            FieldCardRow {
+                suggestion: FieldSuggestion {
+                    field: FieldId::ContactPerson,
+                    value: "张三".into(),
+                    previous: String::new(),
+                    source: "起草人从标准词库选定".into(),
+                    conflict: false,
+                },
+                state: FieldCardState::Adopted,
+                before: Some(Box::new(crate::models::TemplateProfile::default())),
+                after: Some(Box::new(crate::models::TemplateProfile {
+                    contact_person: "张三".into(),
+                    ..Default::default()
+                })),
+                note: String::new(),
+            },
+        ];
+        // 运行中的轮次指纹只看「在跑」；结束后卡状态才参与指纹。
+        panel.finish(TurnState::Stopped);
+        let before = fingerprint(&panel.turns[0], false);
+        panel.turns[0].field_cards[0].state = FieldCardState::Adopted;
+        assert_ne!(
+            fingerprint(&panel.turns[0], false),
+            before,
+            "卡片状态变化要触发落盘"
+        );
+        let json = serde_json::to_value(SavedTurn::of(&panel.turns[0], None)).unwrap();
+        let (restored, _) = serde_json::from_value::<SavedTurn>(json.clone())
+            .unwrap()
+            .restore(&[], false);
+        assert_eq!(restored.field_cards.len(), 2);
+        assert_eq!(restored.field_cards[0].state, FieldCardState::Adopted);
+        assert_eq!(restored.field_cards[1].state, FieldCardState::Adopted);
+        assert!(
+            restored.field_cards[1].before.is_some() && restored.field_cards[1].after.is_some(),
+            "撤销用的快照也要跟着存"
+        );
+        // 旧会话：没有 field_cards 字段，读回为空。
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("field_cards");
+        let (restored, _) = serde_json::from_value::<SavedTurn>(old)
+            .unwrap()
+            .restore(&[], false);
+        assert!(restored.field_cards.is_empty());
+    }
+
     #[test]
     fn partial_acceptance_preserves_usage_and_provenance_together() {
         let mut panel = AiPanel::default();
@@ -1112,6 +1185,7 @@ mod tests {
                 use_rag: false,
             }),
             findings: vec![],
+            field_cards: vec![],
             elapsed_ms: 1200,
             proposal: None,
             style: None,

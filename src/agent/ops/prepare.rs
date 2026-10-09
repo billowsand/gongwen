@@ -147,6 +147,13 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
                 ),
             );
         }
+        if !plan.suggestions.is_empty() {
+            // 建议卡立刻出现在这一轮上，不挡起草（流程可能不挂起、一直跑到底，
+            // 不能只靠答题后从黑板取）。
+            (ctx.emit)(crate::agent::engine::Event::FieldSuggestions(
+                plan.suggestions.clone(),
+            ));
+        }
         ctx.board
             .field_suggestions
             .extend(plan.suggestions.iter().cloned());

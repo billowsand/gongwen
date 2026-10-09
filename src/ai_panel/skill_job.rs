@@ -392,6 +392,7 @@ impl DraftPage<'_> {
                                     DocJob::AiWriteBegin { prefix, suffix }
                                 }
                                 Event::Note(note) => DocJob::AiNote(note),
+                                Event::FieldSuggestions(list) => DocJob::AiFieldSuggestions(list),
                                 Event::Content(_) | Event::Reasoning(_) => {
                                     unreachable!("上面已分流")
                                 }
@@ -840,6 +841,12 @@ impl DraftPage<'_> {
             run.suspension.save_as.as_deref(),
             &replies,
         );
+        // 答完题选定的要素建议：从黑板取整份清单合进建议卡（与事件通路的直接建议
+        // 按（字段，值）去重；同一字段的新建议替换待采纳的旧行）。
+        let suggestions = run.suspension.checkpoint.board.field_suggestions.clone();
+        if !suggestions.is_empty() {
+            crate::ai_panel::field_card::merge(&mut turn.field_cards, suggestions);
+        }
         // 「重新生成」沿用这次的回答，不再问一遍。
         request
             .notes
@@ -878,6 +885,10 @@ impl DraftPage<'_> {
             self.doc
                 .ai_panel
                 .note(format!("旧流程的检查点没删掉：{error:#}"));
+        }
+        // 整轮重来：旧前提（旧文种）的要素建议一并清掉，按新前提重出。
+        if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
+            turn.field_cards.clear();
         }
         if let Err(error) = self.reroute_skill(turn_id, request) {
             if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
@@ -1571,5 +1582,130 @@ impl Batch {
             done: false,
         });
         self.last = Some(Instant::now());
+    }
+}
+
+/// —— 要素建议卡（`docs/element-fill-design.md` 3.3）——
+/// 写表单只在这三个方法里发生：界面线程、用户点采纳、`element_fields::apply_field`
+/// 唯一入口（红线 2）。卡片数据与纯逻辑在 `field_card.rs`。
+impl DraftPage<'_> {
+    /// 采纳一条建议；`force` 是过期行上的「仍然采纳」。被拦下时原因写在该行的 `note`。
+    pub(crate) fn adopt_field_suggestion(&mut self, turn_id: u64, row_index: usize, force: bool) {
+        use crate::ai_panel::field_card::{self, FieldCardState};
+        let doc = &mut *self.doc;
+        let done = {
+            let Some(turn) = doc.ai_panel.turn_mut(turn_id) else {
+                return;
+            };
+            let Some(row) = turn.field_cards.get_mut(row_index) else {
+                return;
+            };
+            if !matches!(row.state, FieldCardState::Pending | FieldCardState::Stale) {
+                return;
+            }
+            row.note.clear();
+            let field = row.suggestion.field;
+            if let Some(reason) =
+                field_card::adoption_blocker(row, &doc.draft, &self.config.vocabulary, force)
+            {
+                // 过期检测拦下的标「表单已改动」，下次点「仍然采纳」。
+                if reason.starts_with("表单已改动") {
+                    row.state = FieldCardState::Stale;
+                }
+                row.note = reason;
+                return;
+            }
+            // 多值字段按词库顺序排一遍再写入，与表单下拉框的回写顺序一致。
+            let value = if field.multi() {
+                field_card::sort_by_vocabulary(&row.suggestion.value, &self.config.vocabulary)
+            } else {
+                row.suggestion.value.clone()
+            };
+            // 采纳前后各留一份整表快照：撤销整体还原（连带变化一起撤回），且只在
+            // 表单从那以后没再动过时允许。
+            row.before = Some(Box::new(doc.draft.profile.clone()));
+            crate::element_fields::apply_field(
+                &mut doc.draft,
+                field,
+                &value,
+                &self.config.vocabulary,
+            );
+            row.after = Some(Box::new(doc.draft.profile.clone()));
+            row.state = FieldCardState::Adopted;
+            format!("已采纳：{} → {}", field.label(), value)
+        };
+        let turn = self.doc.ai_panel.turn_mut(turn_id);
+        if let Some(turn) = turn {
+            turn.notes.push(done.clone());
+        }
+        self.revalidate();
+        *self.status = format!("{done}，表单已更新。");
+    }
+
+    /// 全部采纳：只对待采纳且不冲突的行；冲突行与「表单已改动」的行要逐条点。
+    pub(crate) fn adopt_all_field_suggestions(&mut self, turn_id: u64) {
+        use crate::ai_panel::field_card::FieldCardState;
+        let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) else {
+            return;
+        };
+        let indices: Vec<usize> = turn
+            .field_cards
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.state == FieldCardState::Pending && !row.suggestion.conflict)
+            .map(|(index, _)| index)
+            .collect();
+        let before = indices.len();
+        for index in indices {
+            self.adopt_field_suggestion(turn_id, index, false);
+        }
+        let adopted = self
+            .doc
+            .ai_panel
+            .turn_mut(turn_id)
+            .map(|turn| {
+                turn.field_cards
+                    .iter()
+                    .filter(|row| row.state == FieldCardState::Adopted)
+                    .count()
+            })
+            .unwrap_or(0);
+        if before > 0 {
+            *self.status = format!("要素建议：已采纳 {adopted} 条（冲突的要逐条点「替换」）。");
+        }
+    }
+
+    /// 撤销一条已采纳的建议：表单从采纳那一刻起没再动过才允许，动过了提示去表单里改。
+    pub(crate) fn undo_field_suggestion(&mut self, turn_id: u64, row_index: usize) {
+        use crate::ai_panel::field_card::{self, FieldCardState};
+        let doc = &mut *self.doc;
+        let done = {
+            let Some(turn) = doc.ai_panel.turn_mut(turn_id) else {
+                return;
+            };
+            let Some(row) = turn.field_cards.get_mut(row_index) else {
+                return;
+            };
+            if row.state != FieldCardState::Adopted {
+                return;
+            }
+            row.note.clear();
+            if let Some(reason) = field_card::undo_blocker(row, &doc.draft) {
+                row.note = reason;
+                return;
+            }
+            let Some(before) = row.before.take() else {
+                return;
+            };
+            let field = row.suggestion.field;
+            doc.draft.profile = *before;
+            row.state = FieldCardState::Undone;
+            format!("已撤销：{} 恢复采纳前的值", field.label())
+        };
+        if let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) {
+            turn.notes.push(done.clone());
+        }
+        self.revalidate();
+        *self.status = format!("{done}。");
     }
 }

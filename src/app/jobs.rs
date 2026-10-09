@@ -122,6 +122,8 @@ pub(crate) enum DocJob {
     },
     /// 要留在 AI 侧栏卡片上的说明（知识库命中了哪几篇、为什么没命中）。
     AiNote(String),
+    /// 动笔前「要素抽取」直接给出的要素建议：挂到这一轮的建议卡上（不挡起草）。
+    AiFieldSuggestions(Vec<crate::element_fields::FieldSuggestion>),
     /// 技能流程的一次工具调用，侧栏「过程」里一行。
     AiTool(String),
     AiUsage {
@@ -1044,6 +1046,7 @@ impl GongwenApp {
                 report,
             }) => {
                 let report = *report;
+                let mut draft = draft;
                 let before = doc
                     .ai_review_baseline
                     .take()
@@ -1061,6 +1064,20 @@ impl GongwenApp {
                     }
                     turn.id
                 });
+                // 交付时还有待采纳的要素建议：提案提醒里点名（正文是按它们写的，
+                // 表单没采纳就对不上）。按当前表单比对，已填成建议值的不算。
+                if let Some(reminder) =
+                    turn_id
+                        .and_then(|id| doc.ai_panel.turn_mut(id))
+                        .and_then(|turn| {
+                            crate::ai_panel::field_card::proposal_reminder(
+                                &turn.field_cards,
+                                &doc.draft,
+                            )
+                        })
+                {
+                    draft.warnings.push(ReviewNote::from(reminder));
+                }
                 if doc.ai_prompt_last_label.starts_with("自动选择技能") {
                     doc.ai_prompt_last_label =
                         doc.ai_prompt_last_label.replacen("自动选择技能", &skill, 1);
@@ -1135,6 +1152,7 @@ impl GongwenApp {
                 | DocJob::AiWorkspace(_)
                 | DocJob::AiWriteBegin { .. }
                 | DocJob::AiSessionSummary { .. }
+                | DocJob::AiFieldSuggestions(_)
                 | DocJob::StyleUsed(_)
         ) {
             self.docs[index].busy = false;
@@ -1239,6 +1257,9 @@ impl GongwenApp {
             DocJob::AiNote(note) => {
                 self.status = format!("{prefix}{note}");
                 self.docs[index].ai_panel.note(note);
+            }
+            DocJob::AiFieldSuggestions(list) => {
+                self.docs[index].ai_panel.offer_field_suggestions(list);
             }
             DocJob::ExportProgress(message) => {
                 self.docs[index].ai_panel.set_phase(&message);

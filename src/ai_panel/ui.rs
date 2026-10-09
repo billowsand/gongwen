@@ -78,6 +78,12 @@ pub(super) enum CardAction {
     Locate(String),
     /// 撤回 AI 对某处缺口的概括：(轮次, 缺口)。
     Revert(u64, usize),
+    /// 采纳一条要素建议：(轮次, 行, 是否「仍然采纳」——表单已改动后的强制)。
+    AdoptField(u64, usize, bool),
+    /// 全部采纳（只对待采纳且不冲突的行）。
+    AdoptAllFields(u64),
+    /// 撤销一条已采纳的要素建议（表单从那时起到现在没动过才允许）。
+    UndoField(u64, usize),
 }
 
 impl DraftPage<'_> {
@@ -356,6 +362,7 @@ impl DraftPage<'_> {
                         turn_card(
                             ui,
                             turn,
+                            &doc.draft,
                             doc.ai_proposal.as_mut(),
                             checkpoints
                                 .get(&turn.id)
@@ -428,6 +435,11 @@ impl DraftPage<'_> {
                 None => *self.status = "提案已不在了，没法定位。".into(),
             },
             Some(CardAction::Revert(turn_id, gap_id)) => self.revert_generalized(turn_id, gap_id),
+            Some(CardAction::AdoptField(turn_id, row, force)) => {
+                self.adopt_field_suggestion(turn_id, row, force)
+            }
+            Some(CardAction::AdoptAllFields(turn_id)) => self.adopt_all_field_suggestions(turn_id),
+            Some(CardAction::UndoField(turn_id, row)) => self.undo_field_suggestion(turn_id, row),
             Some(CardAction::Answer(id)) => {
                 let state = self
                     .doc
@@ -539,6 +551,7 @@ fn request_bubble(ui: &mut egui::Ui, turn: &super::AiTurn) {
 fn turn_card(
     ui: &mut egui::Ui,
     turn: &mut super::AiTurn,
+    draft: &crate::models::DraftInput,
     proposal: Option<&mut AiProposal>,
     checkpoints: &[crate::manuscript::ai_checkpoints::CheckpointSummary],
     action: &mut Option<CardAction>,
@@ -828,6 +841,13 @@ fn turn_card(
             rerun_button(ui, turn, "重新生成", action);
         }
         _ => {}
+    }
+    // 要素建议卡不挡流程：什么状态下都画（起草跑着也能先采纳）。
+    if !turn.field_cards.is_empty() {
+        ui.add_space(6.0);
+        theme::hairline(ui);
+        ui.add_space(6.0);
+        super::field_card::field_card_ui(ui, turn.id, &turn.field_cards, draft, action);
     }
     if !turn.state.running() {
         ui.add_space(4.0);

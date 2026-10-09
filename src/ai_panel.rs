@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 mod checkpoint;
 mod commit_intent;
 mod composer_ui;
+pub(crate) mod field_card;
 mod history;
 mod mention;
 mod paste;
@@ -197,6 +198,9 @@ pub(crate) struct AiTurn {
     pub(crate) resumable: Option<String>,
     /// 审核类技能的问题清单。
     pub(crate) findings: Vec<crate::agent::board::Finding>,
+    /// 要素建议卡（`docs/element-fill-design.md` 3.3）：动笔前要素抽取的建议，
+    /// 用户点采纳才写表单（红线 2）。随会话存盘。
+    pub(crate) field_cards: Vec<field_card::FieldCardRow>,
     /// 风格学习学出、还没保存的档案。
     pub(crate) style: Option<crate::agent::style::StyleProfile>,
     pub(crate) started: Instant,
@@ -309,6 +313,7 @@ impl AiPanel {
             run: None,
             resumable: None,
             findings: Vec::new(),
+            field_cards: Vec::new(),
             style: None,
             started: Instant::now(),
             elapsed: None,
@@ -342,6 +347,7 @@ impl AiPanel {
         turn.research = None;
         turn.resumable = None;
         turn.findings.clear();
+        turn.field_cards.clear();
         turn.style = None;
         turn.content.clear();
         turn.stream_suffix.clear();
@@ -522,6 +528,17 @@ impl AiPanel {
 
     pub(crate) fn turn_mut(&mut self, id: u64) -> Option<&mut AiTurn> {
         self.turns.iter_mut().find(|turn| turn.id == id)
+    }
+
+    /// 动笔前「要素抽取」的建议到了（事件通路）：合进正在跑的那一轮的建议卡，
+    /// 卡片立刻出现，起草照常往下跑。
+    pub(crate) fn offer_field_suggestions(
+        &mut self,
+        list: Vec<crate::element_fields::FieldSuggestion>,
+    ) {
+        if let Some(turn) = self.running_turn_mut() {
+            field_card::merge(&mut turn.field_cards, list);
+        }
     }
 
     pub(crate) fn note(&mut self, note: String) {

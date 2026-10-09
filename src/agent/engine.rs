@@ -40,6 +40,10 @@ pub(crate) enum Event {
     /// 工作稿整体换新（补全之后）。
     Workspace(String),
     Note(String),
+    /// 动笔前「要素抽取」直接给出的要素建议（不出题的那部分）：界面收到就挂到
+    /// 这一轮的建议卡上，起草照常往下跑（`docs/element-fill-design.md` 3.3）。
+    /// 只携带建议，流程不碰 `DraftInput`（红线 2）。
+    FieldSuggestions(Vec<crate::element_fields::FieldSuggestion>),
 }
 
 /// 流程停下来问用户。挂起就是一种检查点（`Reason::Ask`）。

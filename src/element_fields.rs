@@ -539,8 +539,8 @@ fn resolve<'a>(
     if exact.is_empty() { candidates } else { exact }
 }
 
-/// 多值字段的集合比较：顺序不同、分隔符不同都算一致。
-fn same_value(a: &str, b: &str) -> bool {
+/// 多值字段的集合比较：顺序不同、分隔符不同都算一致。建议卡的提醒也用它。
+pub(crate) fn same_value(a: &str, b: &str) -> bool {
     let mut a = split_units(a);
     let mut b = split_units(b);
     a.sort();
