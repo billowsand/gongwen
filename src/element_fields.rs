@@ -402,7 +402,7 @@ pub(crate) const PROMPT: &str =
 
 只判断原文写没写，拿不准就写「未提」。名称必须摘自原文，不补全、不编造。单位的完整名称
 整个摘（「市数据局信息中心」是一个单位，不要截成「市数据局」）；只有名称后面跟着职务、
-部门尾缀时才截取名称本身（「市应急局办公室负责同志」取「市应急局」，「数据局张科长」取
+部门尾缀时才截取名称本身（「市应急局办公室负责同志」取「市应急局」，「张三科长」取
 「张三」），截取出来的部分也要是原文里有的。
 
 【原文】
@@ -642,6 +642,66 @@ fn person_choices(
     out
 }
 
+/// 对不上词库的摘录里包含了哪些词库名称（规范名、对外名、简称、别名，至少两个字），
+/// 长的在前，最多 3 个。联系人在承办单位已定时只留有承办权限的人（与表单一致）。
+fn contained_choices(
+    field: FieldId,
+    draft: &DraftInput,
+    planned: &FieldPlan,
+    vocabulary: &[VocabularyEntry],
+    unmatched: &[String],
+) -> Vec<Choice> {
+    let allowed: Option<Vec<String>> = (field == FieldId::ContactPerson)
+        .then(|| filter_units_for(field, draft, planned))
+        .filter(|units| !units.is_empty())
+        .map(|units| {
+            let display = UnitDisplay::new(vocabulary);
+            units
+                .iter()
+                .flat_map(|unit| display.responsible_people_of(unit))
+                .map(|(name, _)| name)
+                .collect()
+        });
+    let mut hits: Vec<(usize, String, String)> = Vec::new();
+    for excerpt in unmatched {
+        for entry in vocabulary
+            .iter()
+            .filter(|entry| entry.category == field.category())
+        {
+            let canonical = entry.canonical.trim();
+            if canonical.is_empty()
+                || allowed
+                    .as_ref()
+                    .is_some_and(|names| !names.iter().any(|name| name == canonical))
+            {
+                continue;
+            }
+            let longest = [&entry.canonical, &entry.external_name, &entry.abbr]
+                .into_iter()
+                .chain(&entry.aliases)
+                .map(|name| name.trim())
+                .filter(|name| name.chars().count() >= 2 && excerpt.contains(*name))
+                .map(|name| name.chars().count())
+                .max();
+            if let Some(length) = longest
+                && !hits.iter().any(|(_, name, _)| name == canonical)
+            {
+                hits.push((length, canonical.to_string(), excerpt.clone()));
+            }
+        }
+    }
+    hits.sort_by_key(|(length, _, _)| std::cmp::Reverse(*length));
+    hits.into_iter()
+        .take(3)
+        .map(|(_, name, excerpt)| Choice {
+            label: name.clone(),
+            detail: format!("原文写的「{excerpt}」里含这个名称（标准词库）"),
+            recommended: false,
+            action: Action::Fill(name),
+        })
+        .collect()
+}
+
 /// 一道要素题：选项全部由程序给——原文对上的放前面标推荐，然后是职能 / 简介匹配
 /// （人员随单位过滤），最多再补 3 个。`unmatched` 是词库里对不上的摘录，写进题面。
 fn field_question(
@@ -662,6 +722,15 @@ fn field_question(
             action: Action::Fill(name.clone()),
         })
         .collect();
+    // 对不上词库的摘录（「市应急局办公室」而词库里只有「市应急局」）：摘录里包含的词库名称
+    // 排在职能匹配前面，点一下就行；不标推荐——是不是它要人定。联系人按承办权限过滤。
+    let contained = contained_choices(field, draft, planned, vocabulary, &unmatched);
+    choices.extend(
+        contained
+            .into_iter()
+            .filter(|choice| !choices.iter().any(|seen| seen.action == choice.action))
+            .collect::<Vec<_>>(),
+    );
     let mut extra: Vec<Choice> = match field.category() {
         VocabularyCategory::Unit => crate::agent::clarify::vocabulary_choices(
             vocabulary,
@@ -1332,6 +1401,40 @@ mod tests {
             Some("市数据局")
         );
         assert!(question_of(&planned, FieldId::Recipient).is_none());
+    }
+
+    /// 对不上词库的摘录里含词库名称：排在职能匹配前面当候选，不标推荐；联系人在承办单位
+    /// 已定时只留有承办权限的人。
+    #[test]
+    fn unmatched_excerpts_offer_the_vocabulary_names_they_contain() {
+        let vocabulary = plan_vocabulary();
+        let draft = draft_of(TemplateKind::OfficialLetter);
+        let source = "请市应急局办公室牵头，联系人张三科长。";
+        let planned = plan(
+            &draft,
+            "主送单位｜已给｜市应急局办公室
+联系人｜已给｜张三科长",
+            source,
+            &vocabulary,
+            4,
+        );
+        let recipient = question_of(&planned, FieldId::Recipient).expect("对不上要出题");
+        assert_eq!(recipient.choices[0].label, "市应急局");
+        assert!(!recipient.choices[0].recommended);
+        assert!(recipient.choices[0].detail.contains("市应急局办公室"));
+        let contact = question_of(&planned, FieldId::ContactPerson).expect("对不上要出题");
+        assert_eq!(contact.choices[0].label, "张三");
+
+        // 承办单位定为市应急局：张三（市数据局的人）没有承办权限，不当候选。
+        let mut draft = draft_of(TemplateKind::OfficialLetter);
+        draft.profile.responsible_unit = "市应急局".into();
+        let planned = plan(&draft, "联系人｜已给｜张三科长", source, &vocabulary, 4);
+        let contact = question_of(&planned, FieldId::ContactPerson).expect("对不上要出题");
+        assert!(
+            contact.choices.iter().all(|c| c.label != "张三"),
+            "{:?}",
+            contact.choices.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
     }
 
     /// 公函的联系人表单不强制，但空着也要问（「何人」包括我方联系人）；承办单位没定时
