@@ -1169,14 +1169,15 @@ fn letters_ask_the_six_elements_before_drafting_and_write_the_answers_in() {
         ),
     );
     let asked = driver.run().expect("动笔前要问要素与六要素");
-    // 必填的发文单位、主送没填也没提：先出要素题；主送题覆盖「何人」，六要素不再单问
-    // 何人（要素填写框架第 2 期），同批只剩「何时」。
+    // 必填的发文单位、主送没填也没提，公函的联系人没填：先出要素题；字段题覆盖「何人」，
+    // 六要素不再单问何人（要素填写框架第 2 期），同批只剩「何时」。
     let targets: Vec<_> = asked.questions.iter().map(|q| q.target).collect();
     assert_eq!(
         targets,
         [
             Target::Field(crate::element_fields::FieldId::IssuingUnit),
             Target::Field(crate::element_fields::FieldId::Recipient),
+            Target::Field(crate::element_fields::FieldId::ContactPerson),
             Target::Element(super::elements::Element::When),
         ]
     );
@@ -1185,7 +1186,8 @@ fn letters_ask_the_six_elements_before_drafting_and_write_the_answers_in() {
         &[
             (1, Reply::Skip),
             (2, Reply::Skip),
-            (3, Reply::Custom("10月31日前".into())),
+            (3, Reply::Skip),
+            (4, Reply::Custom("10月31日前".into())),
         ],
     );
     // 正文里的「【待核实：联系人及电话】」不再被「何人」题的跳过提前销账；知识库没启用、
@@ -1200,9 +1202,15 @@ fn letters_ask_the_six_elements_before_drafting_and_write_the_answers_in() {
         draft_prompt.contains("回复时限（请对方办理或回复的时限）：10月31日前（起草人确认）"),
         "{draft_prompt}"
     );
-    // 要素题选了「先不定」：待核实占位写进交给起草的已确认信息。
+    // 表单要素题选了「先不定」：之后在表单里选，正文不写也不留占位（版式从表单渲染）。
     assert!(
-        draft_prompt.contains("【待核实：主送单位】"),
+        draft_prompt.contains(&crate::element_fields::skipped_note(
+            crate::element_fields::FieldId::Recipient
+        )),
+        "{draft_prompt}"
+    );
+    assert!(
+        !draft_prompt.contains("【待核实：主送单位】"),
         "{draft_prompt}"
     );
     let report = SkillReport::from_board(&driver.board);

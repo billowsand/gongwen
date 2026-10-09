@@ -127,6 +127,13 @@ impl FieldId {
         }
     }
 
+    /// 表单空着、原文也没提时动笔前要不要问：必填的要问；公函的联系人表单不强制，
+    /// 但六要素的「何人」本来就要问我方联系人，字段题覆盖「何人」后改由这里问
+    /// （起草人点选，不再手打）。
+    pub(crate) fn asked_when_missing(self, kind: TemplateKind) -> bool {
+        self.required(kind) || (self == Self::ContactPerson && kind == TemplateKind::OfficialLetter)
+    }
+
     /// 候选项来源。
     pub(crate) fn source(self) -> Source {
         match self {
@@ -506,17 +513,30 @@ fn resolve<'a>(
     field: FieldId,
     excerpt: &str,
 ) -> Vec<&'a VocabularyEntry> {
-    if excerpt.trim().is_empty() {
+    let excerpt = excerpt.trim();
+    if excerpt.is_empty() {
         return Vec::new();
     }
-    vocabulary
+    let candidates: Vec<&VocabularyEntry> = vocabulary
         .iter()
         .filter(|entry| {
             entry.category == field.category()
                 && !entry.canonical.trim().is_empty()
-                && vocab::matches(entry, excerpt.trim())
+                && vocab::matches(entry, excerpt)
         })
-        .collect()
+        .collect();
+    // 名称整个对上的优先：「市数据局」不要因为词库里还有「市数据局办公室」就算对上多个。
+    let exact: Vec<&VocabularyEntry> = candidates
+        .iter()
+        .copied()
+        .filter(|entry| {
+            [&entry.canonical, &entry.external_name, &entry.abbr]
+                .into_iter()
+                .chain(&entry.aliases)
+                .any(|name| name.trim() == excerpt)
+        })
+        .collect();
+    if exact.is_empty() { candidates } else { exact }
 }
 
 /// 多值字段的集合比较：顺序不同、分隔符不同都算一致。
@@ -574,7 +594,8 @@ fn filter_units_for(person_field: FieldId, draft: &DraftInput, planned: &FieldPl
 
 /// 人员候选：按单位过滤（人随事走，最多 3 个）；单位没定的按个人简介匹配。
 /// 联系人严格按承办权限过滤，单位下没有候选也不回落（与表单一致）；呈报领导
-/// 过滤不出时按简介匹配兜底（与表单 `filtered_contacts` 的兜底一致）。
+/// 过滤不出时按简介匹配兜底（与表单 `filtered_contacts` 的兜底一致）。单位还没定的
+/// （表单、本批建议、本批推荐项都没有），两类都按简介匹配。
 fn person_choices(
     field: FieldId,
     units: &[String],
@@ -604,7 +625,8 @@ fn person_choices(
             });
         }
     }
-    if out.is_empty() && field != FieldId::ContactPerson {
+    // 单位定了：联系人严格按承办权限，不回落；单位还没定：两类都按简介匹配。
+    if out.is_empty() && (field != FieldId::ContactPerson || units.is_empty()) {
         out.extend(crate::agent::clarify::vocabulary_choices(
             vocabulary,
             VocabularyCategory::Person,
@@ -754,7 +776,7 @@ pub(crate) fn plan(
             continue;
         }
         if excerpts.is_empty() {
-            if field.required(draft.kind) {
+            if field.asked_when_missing(draft.kind) {
                 out.questions.push(field_question(
                     field,
                     draft,
@@ -800,13 +822,22 @@ pub(crate) fn plan(
     out
 }
 
+/// 表单要素题跳过时交给起草的一句话。
+pub(crate) fn skipped_note(field: FieldId) -> String {
+    format!(
+        "{}暂未确定：由起草人之后在要素表单里选，正文不写这一项，也不要留占位或自己编",
+        field.label()
+    )
+}
+
 /// 要素题的回答 → （要素建议，已确认信息）。只读表单快照算「生成时的表单值」，
 /// 绝不回写（红线 2）；建议卡采纳才写表单（第 3 期）。
 ///
 /// - 选中（单选 `Choice` / 多选 `Many`）→ 建议清单，出处「起草人从标准词库选定」，
 ///   同时记一句已确认信息交给起草；
 /// - 自己写 → 只记已确认信息（词库外的值不进表单）；
-/// - 跳过（或多选一个都没勾）→ 正文留「【待核实：…】」占位，同六要素。
+/// - 跳过（或多选一个都没勾）→ 记一句「之后在表单里填」。表单要素由版式从表单渲染，
+///   起草提示词禁止写进正文（`prompt.rs`），所以不留「【待核实】」占位。
 pub(crate) fn resolve_answers(
     draft: &DraftInput,
     questions: &[Question],
@@ -843,11 +874,7 @@ pub(crate) fn resolve_answers(
                     _ => Vec::new(),
                 };
                 if picked.is_empty() {
-                    notes.push(format!(
-                        "{}暂未确定：正文写「{}」，不要自己编",
-                        field.label(),
-                        elements::pending_literal(field.label())
-                    ));
+                    notes.push(skipped_note(field));
                 } else {
                     let value = join_units(&picked);
                     let previous = field.read(draft);
@@ -1278,6 +1305,56 @@ mod tests {
         planned.suggestions.iter().find(|s| s.field == field)
     }
 
+    /// 名称整个对上的优先：词库里还有「市数据局信息中心」，原文写「市数据局」仍算唯一对上。
+    #[test]
+    fn exact_names_win_over_longer_names_that_contain_them() {
+        let mut vocabulary = plan_vocabulary();
+        vocabulary.push(VocabularyEntry {
+            canonical: "市数据局信息中心".into(),
+            code: "000101".into(),
+            parent: "0001".into(),
+            ..Default::default()
+        });
+        let draft = draft_of(TemplateKind::OfficialLetter);
+        let planned = plan(
+            &draft,
+            "主送单位｜已给｜市数据局",
+            PLAN_SOURCE,
+            &vocabulary,
+            4,
+        );
+        assert_eq!(
+            suggestion_of(&planned, FieldId::Recipient).map(|s| s.value.as_str()),
+            Some("市数据局")
+        );
+        assert!(question_of(&planned, FieldId::Recipient).is_none());
+    }
+
+    /// 公函的联系人表单不强制，但空着也要问（「何人」包括我方联系人）；承办单位没定时
+    /// 按个人简介给候选，不是一个选项都没有。
+    #[test]
+    fn letters_ask_the_contact_and_match_profiles_when_no_unit_is_known() {
+        let vocabulary = plan_vocabulary();
+        let draft = draft_of(TemplateKind::OfficialLetter);
+        let planned = plan(
+            &draft,
+            "联系人｜未提",
+            "商请共建数据平台项目建设。",
+            &vocabulary,
+            4,
+        );
+        let question = question_of(&planned, FieldId::ContactPerson).expect("公函联系人要问");
+        let labels: Vec<_> = question.choices.iter().map(|c| c.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|label| label.starts_with("张三")),
+            "{labels:?}"
+        );
+        // 白头件没有联系人字段，红头呈批件本来就必填：只有公函是这条规则新增的。
+        assert!(FieldId::ContactPerson.asked_when_missing(TemplateKind::OfficialLetter));
+        assert!(!FieldId::ContactPerson.required(TemplateKind::OfficialLetter));
+        assert!(!FieldId::CopiesTo.asked_when_missing(TemplateKind::OfficialLetter));
+    }
+
     /// 分类表第 1 行：空 + 给了 + 唯一对上 → 建议（不出题），出处写材料原文。
     #[test]
     fn plan_suggests_when_excerpt_resolves_uniquely() {
@@ -1629,7 +1706,7 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|note| note == "主送单位暂未确定：正文写「【待核实：主送单位】」，不要自己编"),
+                .any(|note| *note == skipped_note(FieldId::Recipient)),
             "{notes:?}"
         );
     }
@@ -1659,7 +1736,7 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|note| note == "主送单位暂未确定：正文写「【待核实：主送单位】」，不要自己编"),
+                .any(|note| *note == skipped_note(FieldId::Recipient)),
             "{notes:?}"
         );
     }

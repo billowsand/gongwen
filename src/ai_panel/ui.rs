@@ -1213,13 +1213,12 @@ fn questions_ui(
                 }
             }
             if question.skippable {
-                // 六要素题与表单要素题跳过不是「按现有信息写」，而是正文留占位、事后不再问。
-                let skip = if matches!(
-                    question.target,
-                    crate::agent::clarify::Target::Element(_)
-                        | crate::agent::clarify::Target::Field(_)
-                ) {
+                // 六要素题跳过不是「按现有信息写」，而是正文留占位、事后不再问；
+                // 表单要素题跳过就是之后自己去表单里选，正文本来就不写它。
+                let skip = if matches!(question.target, crate::agent::clarify::Target::Element(_)) {
                     "先不定，正文留待核实"
+                } else if matches!(question.target, crate::agent::clarify::Target::Field(_)) {
+                    "先不定，之后在表单里选"
                 } else {
                     skip
                 };

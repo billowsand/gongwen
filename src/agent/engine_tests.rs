@@ -1645,8 +1645,8 @@ fn field_flow_model(extraction: &'static str, six: &'static str) -> FakeModel {
 }
 
 /// 公函：原文写明主送（词库唯一对上）不出题、直接进建议清单；发文单位没提（必填）
-/// 出题；已填要素拼进六要素原文，「何人」判为已给不再问。答完发文单位题，建议清单
-/// 与已确认信息都多一条。
+/// 出题，联系人没填也要问（公函的「何人」包括我方联系人）；已填要素拼进六要素原文，
+/// 「何人」判为已给不再问。答完发文单位题，建议清单与已确认信息都多一条。
 #[test]
 fn predraft_field_extraction_suggests_asks_and_lands_on_the_board() {
     let model = field_flow_model(
@@ -1671,11 +1671,14 @@ fn predraft_field_extraction_suggests_asks_and_lands_on_the_board() {
     let Outcome::Suspended(suspension) = outcome.unwrap() else {
         panic!("发文单位没提，动笔前要出题");
     };
-    // 只有发文单位这一道字段题：主送是唯一对上的建议，「何人」被已填要素盖住不出题。
+    // 发文单位与联系人两道字段题：主送是唯一对上的建议，「何人」被字段题盖住不出题。
     let targets: Vec<_> = suspension.questions.iter().map(|q| q.target).collect();
     assert_eq!(
         targets,
-        [Target::Field(crate::element_fields::FieldId::IssuingUnit)],
+        [
+            Target::Field(crate::element_fields::FieldId::IssuingUnit),
+            Target::Field(crate::element_fields::FieldId::ContactPerson),
+        ],
         "题目：{:?}",
         suspension
             .questions
@@ -1737,6 +1740,7 @@ fn predraft_field_extraction_suggests_asks_and_lands_on_the_board() {
 
 /// 红头呈批件：联系人题（必填）只列承办单位的人——承办条目第一条是市数据局，
 /// 张三可选、市应急局的李四不出现；字段题覆盖「何人」，六要素的「何人」题不再出。
+/// 四项必填要素都没填：字段题名额（默认 4）正好装下。
 #[test]
 fn predraft_contact_question_follows_the_responsible_unit() {
     let model = field_flow_model(
@@ -1774,8 +1778,8 @@ fn predraft_contact_question_follows_the_responsible_unit() {
         suspension
             .questions
             .iter()
-            .all(|q| !matches!(q.target, Target::Element(_))),
-        "字段题覆盖「何人」，六要素题一道都不出：{texts:?}"
+            .all(|q| q.target != Target::Element(crate::agent::elements::Element::Who)),
+        "字段题覆盖「何人」，六要素不再出何人题（字段题单独占名额，别的要素照问）：{texts:?}"
     );
     let contact = suspension
         .questions
@@ -1807,12 +1811,10 @@ fn predraft_contact_question_follows_the_responsible_unit() {
         "{:?}",
         board.notes
     );
-    // 没答的必填题（发文单位等）按跳过记了待核实。
+    // 没答的题（发文单位等）按跳过：之后在表单里选，正文不留占位。
     assert!(
-        board
-            .notes
-            .iter()
-            .any(|note| note.contains("【待核实：发文单位】")),
+        board.notes.iter().any(|note| *note
+            == crate::element_fields::skipped_note(crate::element_fields::FieldId::IssuingUnit)),
         "{:?}",
         board.notes
     );

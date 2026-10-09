@@ -41,8 +41,17 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
     } else {
         param(ctx, step, &["element_questions"], 4, 0..=6)
     };
+    let field_max = if step.params.get("elements").and_then(Value::as_bool) == Some(false) {
+        0
+    } else {
+        param(ctx, step, &["field_questions"], 4, 0..=6)
+    };
     let checklist = elements::checklist(kind);
-    if max == 0 && (element_max == 0 || checklist.is_empty()) {
+    let fields = element_fields::prompt_fields(&ctx.board.draft);
+    if max == 0
+        && (element_max == 0 || checklist.is_empty())
+        && (field_max == 0 || fields.is_empty())
+    {
         return Ok(Flow::Next);
     }
     // 第一关：定文种（程序判断，不调模型）。
@@ -76,11 +85,13 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
     ctx.board.premise = Some(kind);
     let mut asked_elements = Vec::new();
     let mut asked_fields: Vec<clarify::Question> = Vec::new();
-    if element_max > 0 {
+    if field_max > 0 {
         // 表单要素（`element_fields`）：先「要素抽取」——它的建议要拼进六要素检查的
-        // 原文（「何人」才算已给），所以放在六要素检查前面；字段题与六要素题共用
-        // `element_max` 名额，必填字段优先。
-        let fields = element_fields::prompt_fields(&ctx.board.draft);
+        // 原文（「何人」才算已给），所以放在六要素检查前面。字段题单独占
+        // `field_questions` 名额（默认 4，红头呈批件的必填要素正好 4 项；必填优先），不挤六要素的名额：点选题答起来快，
+        // 挤掉「何时」「何法」代价更大。
+        // 重新澄清（文种改过）时，以旧文种为前提的建议作废。
+        ctx.board.field_suggestions.clear();
         let mut plan = element_fields::FieldPlan::default();
         if !fields.is_empty() {
             let source = extraction_source(ctx.board);
@@ -108,7 +119,7 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
                     &reply,
                     &source,
                     ctx.env.vocabulary,
-                    element_max,
+                    field_max,
                 );
             }
         }
@@ -165,25 +176,25 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         ];
         let text = ctx.board.render_with(template, &locals);
         let reply = assist(ctx, &text)?;
-        // 字段题覆盖「何人」（主送、承办、联系人、呈报领导任一项出了题）时不再出「何人」题；
-        // 名额先扣掉字段题，剩下的给六要素。
-        let covers_who = asked_fields.iter().any(|q| {
-            matches!(
-                q.target,
-                clarify::Target::Field(
-                    element_fields::FieldId::Recipient
-                        | element_fields::FieldId::ResponsibleUnit
-                        | element_fields::FieldId::ContactPerson
-                        | element_fields::FieldId::ReportingLeaders
+        // 字段题覆盖「何人」（主送、承办、联系人、呈报领导任一项出了题）时不再出「何人」题。
+        // 电话通知例外：它的「何人」还包括联系人，而电话通知表单没有联系人字段。
+        let covers_who = kind != crate::models::TemplateKind::PhoneNotice
+            && asked_fields.iter().any(|q| {
+                matches!(
+                    q.target,
+                    clarify::Target::Field(
+                        element_fields::FieldId::Recipient
+                            | element_fields::FieldId::ResponsibleUnit
+                            | element_fields::FieldId::ContactPerson
+                            | element_fields::FieldId::ReportingLeaders
+                    )
                 )
-            )
-        });
-        let budget = element_max.saturating_sub(asked_fields.len());
+            });
         let asked = elements::questions(
             kind,
             &request,
             &reply,
-            (1, budget),
+            (1, element_max),
             ctx.env.vocabulary,
             covers_who,
         );
