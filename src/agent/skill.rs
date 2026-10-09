@@ -607,7 +607,7 @@ fn agent_problems(skill: &Skill, step: &StepSpec, at: &str, problems: &mut Vec<S
                             || tool.permission() == super::tools::Permission::AskUser
                     }) {
                         problems.push(format!(
-                            "{at}自主步骤不能用「{id}」（模型本身就在跑；问用户请放到后面的 ask 步骤）"
+                            "{at}自主步骤的 tools 里不用写「{id}」（模型本身就在跑；要让它问用户，在技能 tools 里声明 ask.choice，自主步骤自带 ask_user）"
                         ));
                     }
                 }

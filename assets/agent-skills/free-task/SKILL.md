@@ -5,7 +5,7 @@ hint: 直接说要做什么，例如：把文中所有日期列出来，看看�
 triggers: []
 when: { text: any }
 output: auto
-tools: [doc.read, doc.outline, doc.selection, doc.elements, doc.stats, ws.read, ws.write, ws.replace, ws.insert, ws.section, ws.diff, kb.search, kb.read, kb.list, ms.search, ms.read, ms.versions, vocab.units, vocab.normalize, rules.style, rules.lexicon, check.elements, check.proofread, check.facts, check.placeholders, check.references, calc.date, calc.workday, calc.ratio, calc.stats, calc.table, calc.money, calc.number, calc.unit, text.keywords, text.diff, finding.add, note, "http.call:*"]
+tools: [doc.read, doc.outline, doc.selection, doc.elements, doc.stats, ws.read, ws.write, ws.replace, ws.insert, ws.section, ws.diff, kb.search, kb.read, kb.list, ms.search, ms.read, ms.versions, vocab.units, vocab.normalize, rules.style, rules.lexicon, check.elements, check.proofread, check.facts, check.placeholders, check.references, calc.date, calc.workday, calc.ratio, calc.stats, calc.table, calc.money, calc.number, calc.unit, text.keywords, text.diff, finding.add, note, ask.choice, "http.call:*"]
 params:
   max_turns: 12
   max_calls: 24
@@ -19,6 +19,8 @@ flow:
 没有专门的技能对得上时，交给自主步骤：模型看要求，自己决定读正文、检索、计算、写工作稿，
 程序执行每一次工具调用并记在过程里。改了工作稿的交成提案（照样过事实闸门、由你接受）；
 只是回答问题的，交成一份答复清单。
+做到一半遇到只有你知道的事（本次的时间、人员、数额……），模型可以停下来问你，最多问两次；
+答完它从头接着做，已写的工作稿留着。密级、文号、签发人这类授权要素它不会问。
 
 ## 任务
 
@@ -34,4 +36,6 @@ flow:
   不要写文档 id、知识库编号这类内部编号；
 - 要查内网系统里的数据（统计数、名录、办件情况……），用数据接口工具（只查询）；接口多时先用
   api_search 找接口，再用 api_call 调。
+- 只有用户知道、查不到又不能猜的，用 ask_user 一次问清（progress 里写清做到哪）；能写成
+  「【待核实：缺什么】」占位、不影响往下做的不要问。
 全部做完调用 finish。

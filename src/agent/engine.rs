@@ -400,6 +400,7 @@ fn var_present(board: &Board, name: &str) -> bool {
 /// - 动笔前澄清：回答记作已确认信息，标记已澄清；
 /// - 缺口题：按确定性规则改工作稿与台账；
 /// - 选择题：选中项的值存进 `save_as`。
+/// - 自主步骤提的题：回答记作已确认信息（跳过的也记一句），流程回到这一步重做。
 pub(crate) fn apply_answers(
     board: &mut Board,
     questions: &[Question],
@@ -417,6 +418,11 @@ pub(crate) fn apply_answers(
         board.notes.extend(notes);
         board.clarified = true;
         kind = picked;
+    }
+    if questions.iter().any(|q| q.target == Target::Agent) {
+        board
+            .notes
+            .extend(clarify::resolve_agent(questions, replies));
     }
     if questions.iter().any(|q| matches!(q.target, Target::Gap(_))) {
         let workspace = std::mem::take(&mut board.workspace);

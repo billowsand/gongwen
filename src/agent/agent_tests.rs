@@ -326,7 +326,10 @@ fn agent_steps_are_validated() {
     let bad = "---\nname: 坏\ndescription: x\ntools: [doc.read, ask.choice]\nflow:\n  - step: agent\n    tools: [ask.choice, ws.write]\n    require: everything\n---\n";
     let skill = skill::parse("bad", bad, "测试").unwrap();
     let problems = check(&skill).join("\n");
-    assert!(problems.contains("不能用「ask.choice」"), "{problems}");
+    assert!(
+        problems.contains("tools 里不用写「ask.choice」") && problems.contains("自带 ask_user"),
+        "{problems}"
+    );
     assert!(
         problems.contains("「ws.write」不在 tools 白名单里"),
         "{problems}"
@@ -348,12 +351,9 @@ fn the_free_task_skill_is_a_valid_agent_skill_without_triggers() {
     assert_eq!(free.output, OutputKind::Auto);
     assert!(free.uses_knowledge(), "能检索知识库，侧栏显示知识库开关");
     assert!(check(&free).is_empty());
-    assert!(
-        !free
-            .tools
-            .iter()
-            .any(|t| t == "llm.generate" || t == "ask.choice")
-    );
+    assert!(!free.tools.iter().any(|t| t == "llm.generate"));
+    // 声明了 ask.choice：自主步骤做到一半可以用 ask_user 问起草人（决策模块第三期）。
+    assert!(free.allows_tool("ask.choice"));
 }
 
 #[test]
@@ -475,4 +475,126 @@ fn policy_basis_searches_the_knowledge_base_and_checks_brackets_without_a_source
             .iter()
             .any(|f| f.group == "未找到原文")
     );
+}
+
+/// 提问即结束本轮（`docs/decision-modules.md` 第五节）：问了就挂起、回到这一步，答完从头重跑，
+/// 重跑时带着上一轮的进度与回答；做完清掉提问计数。
+#[test]
+fn the_agent_asks_suspends_and_starts_over_with_the_answer() {
+    use super::clarify::{Reply, Target};
+    let skill = agent_skill("ws.read, ws.write, ask.choice", "    require: workspace");
+    let model = ScriptedModel::new(|_, transcript| {
+        if !transcript.contains("【你上一轮已经做了】") {
+            call(
+                "ask_user",
+                r#"{"questions": [{"question": "会议哪天开", "options": ["12月1日", "12月2日"]}], "progress": "读了正文，还差会议日期"}"#,
+            )
+        } else if !transcript.contains("<tool_result name=\"ws_write\"") {
+            assert!(
+                transcript.contains("读了正文，还差会议日期"),
+                "{transcript}"
+            );
+            assert!(transcript.contains("会议哪天开？12月1日"), "{transcript}");
+            call("ws_write", r#"{"text": "会议定于12月1日召开。"}"#)
+        } else {
+            call("finish", r#"{"summary": "补上了会议日期"}"#)
+        }
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(
+        &skill,
+        &model,
+        &kb,
+        board("会议另行通知。", "把会议日期写上"),
+    );
+    let suspension = driver.run().expect("模型问了就挂起");
+    assert_eq!(suspension.questions.len(), 1);
+    assert_eq!(suspension.questions[0].target, Target::Agent);
+    assert_eq!(suspension.questions[0].text, "会议哪天开？");
+    assert_eq!(suspension.checkpoint.at, vec![0], "答完回到这一步重跑");
+    assert_eq!(driver.board.vars["_agent_asks"], 1);
+
+    driver.answer(&suspension, &[(1, Reply::Choice(0))]);
+    assert!(
+        driver
+            .board
+            .notes
+            .iter()
+            .any(|n| n == "会议哪天开？12月1日")
+    );
+    assert!(driver.run().is_none(), "答完接着做完");
+    assert_eq!(driver.board.workspace, "会议定于12月1日召开。");
+    assert!(
+        !driver.board.vars.contains_key("_agent_asks"),
+        "做完清掉计数"
+    );
+    assert!(!driver.board.vars.contains_key("_agent_progress"));
+}
+
+#[test]
+fn questions_about_authorized_elements_are_sent_back_and_skips_are_recorded() {
+    use super::clarify::{Reply, Target};
+    let skill = agent_skill("doc.read, finding.add, ask.choice", "");
+    let model = ScriptedModel::new(|_, transcript| {
+        if !transcript.contains("打回") {
+            call(
+                "ask_user",
+                r#"{"questions": [{"question": "签发人写谁"}], "progress": "还差签发人"}"#,
+            )
+        } else if !transcript.contains("【你上一轮已经做了】") {
+            call(
+                "ask_user",
+                r#"{"questions": ["这次检查覆盖哪些乡镇"], "progress": "列好了提纲"}"#,
+            )
+        } else {
+            assert!(
+                transcript.contains("起草人没有回答，按现有信息处理"),
+                "{transcript}"
+            );
+            call("finish", r#"{"summary": "按现有信息列了提纲"}"#)
+        }
+    });
+    let kb = KeywordKb::disabled();
+    let mut driver = Driver::new(&skill, &model, &kb, board("正文。", "列个提纲"));
+    let suspension = driver.run().expect("第二次问的过了闸门");
+    assert!(
+        notes(&driver)
+            .iter()
+            .any(|n| n.contains("没过闸门") && n.contains("授权要素")),
+        "{:?}",
+        notes(&driver)
+    );
+    let question = &suspension.questions[0];
+    assert_eq!(question.target, Target::Agent);
+    assert!(question.choices.is_empty(), "不给选项就让人自己填");
+    driver.answer(&suspension, &[(1, Reply::Skip)]);
+    assert!(driver.run().is_none());
+}
+
+#[test]
+fn the_agent_cannot_ask_without_permission_or_after_the_limit() {
+    // 技能没声明 ask.choice：工具表里没有 ask_user，调了就是「无此工具」。
+    for (tools, step) in [
+        ("doc.read, finding.add", ""),
+        ("doc.read, finding.add, ask.choice", "    max_asks: 0"),
+    ] {
+        let skill = agent_skill(tools, step);
+        let model = ScriptedModel::new(|_, transcript| {
+            if !transcript.contains("无此工具：ask_user") {
+                call(
+                    "ask_user",
+                    r#"{"questions": ["哪天开"], "progress": "还差日期"}"#,
+                )
+            } else {
+                call("finish", r#"{"summary": "没问成"}"#)
+            }
+        });
+        let kb = KeywordKb::disabled();
+        let mut driver = Driver::new(&skill, &model, &kb, board("正文。", "写日期"));
+        assert!(driver.run().is_none(), "{tools} {step}：不能挂起");
+        assert!(
+            !model.calls.borrow()[0].1.contains("ask_user"),
+            "没有提供 ask_user"
+        );
+    }
 }

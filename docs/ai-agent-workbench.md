@@ -1911,6 +1911,8 @@ flow:
 
 - **能用的工具** = 技能 `tools:` 白名单 ∩ 步骤 `tools:`（不写就是整个白名单），去掉 `llm.generate`（自主步骤本身就是
   模型）和问用户的工具（循环中途挂起要存整段对话，这期不做；拿不准的写「【待核实：…】」，后面的 `ask` 步骤去问）。
+  **2026-10-09 起**：技能声明了 `ask.choice` 的，自主步骤另有程序提供的 `ask_user`，「提问即结束本轮」，
+  见 `docs/decision-modules.md` 第五节。
   另加一个程序提供的 `finish`（参数 `summary`）表示做完了。
 - **工具名**：OpenAI 的函数名不许有点号，`kb.search` 发给模型时写成 `kb_search`，`http.call:stat` 写成 `http_call__stat`，
   回来再换回去；白名单照旧由 `tools::call` 查，模型调未授权的工具得到「无此工具」。

@@ -61,6 +61,9 @@ pub(crate) enum Target {
     Gap(usize),
     /// 流程中途的通用选择题（`ask.choice`），答案存进变量后流程接着跑。
     Pick,
+    /// 自主步骤里模型提的题（`docs/decision-modules.md` 第五节）：答案记作已确认信息，
+    /// 回到这一步重做。
+    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -329,6 +332,130 @@ pub(crate) fn model_kind_question(
             target: Target::Kind,
         })
     })
+}
+
+/// 授权类要素的说法（红线 2）：AI 不写、不给建议，也不就它们出题——这些由起草人在要素区
+/// 填、由签发流程定，不是问一句就能定的。
+const AUTHORIZED_WORDS: [&str; 8] = [
+    "密级",
+    "份号",
+    "签发人",
+    "成文日期",
+    "印发机关",
+    "印发日期",
+    "发文字号",
+    "发文机关",
+];
+
+/// 题目或选项碰到授权类要素没有。「文号」单独看：问引用的《某文件》的文号是核对依据，
+/// 不算；没有书名号时问的就是本文的文号。
+fn touches_authorized(text: &str) -> bool {
+    AUTHORIZED_WORDS.iter().any(|word| text.contains(word))
+        || (text.contains("文号") && !text.contains('《'))
+}
+
+/// 自主步骤一批最多问几题。
+pub(crate) const AGENT_MAX_QUESTIONS: usize = 3;
+
+/// 自主步骤里模型要问用户的题 → 选择题。过闸门（与澄清题同一套：问题不长、选项 2–4 个不重复、
+/// 没照抄格式示例；另外允许不给选项，只让人填），碰到授权类要素、问文种的整批打回，
+/// 返回给模型看的原因。
+pub(crate) fn agent_questions(raw: &[(String, Vec<String>)]) -> Result<Vec<Question>, String> {
+    if raw.is_empty() {
+        return Err("没有题目：questions 里至少写一道".into());
+    }
+    if raw.len() > AGENT_MAX_QUESTIONS {
+        return Err(format!(
+            "一次最多问 {AGENT_MAX_QUESTIONS} 道，只问最要紧的、只有用户知道的"
+        ));
+    }
+    let mut out = Vec::new();
+    for (index, (question, options)) in raw.iter().enumerate() {
+        let question = question.trim().trim_end_matches(['?', '？']).to_string() + "？";
+        let options: Vec<String> = options.iter().map(|o| o.trim().to_string()).collect();
+        let all = std::iter::once(question.as_str())
+            .chain(options.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if touches_authorized(&all) {
+            return Err(format!(
+                "「{question}」问的是密级、文号、签发人、成文日期这类授权要素：它们由起草人在要素区填，\
+                 你不能问也不能建议，不要写进稿子"
+            ));
+        }
+        if question.contains("文种") {
+            return Err("文种在要素区定，不在这里问；按当前文种做".into());
+        }
+        let unique = options
+            .iter()
+            .enumerate()
+            .all(|(i, option)| !options[..i].contains(option));
+        if question.chars().count() > MAX_QUESTION_CHARS + 1 {
+            return Err(format!(
+                "「{question}」太长：问题不超过 {MAX_QUESTION_CHARS} 字，解释放到 progress 里"
+            ));
+        }
+        if options.len() == 1
+            || options.len() > 4
+            || options.iter().any(String::is_empty)
+            || !unique
+            || echoes_format(&question, &options)
+        {
+            return Err(format!(
+                "「{question}」的选项不对：要么不给选项（让用户自己填），要么给 2 到 4 个不重复的选项"
+            ));
+        }
+        out.push(Question {
+            id: index + 1,
+            choices: options
+                .iter()
+                .map(|option| Choice {
+                    label: option.clone(),
+                    detail: String::new(),
+                    recommended: false,
+                    action: Action::Note(format!("{question}{option}")),
+                })
+                .collect(),
+            text: question,
+            custom_hint: Some(if options.is_empty() {
+                "直接写".into()
+            } else {
+                "其他，自己写".into()
+            }),
+            prefill: String::new(),
+            skippable: true,
+            target: Target::Agent,
+        });
+    }
+    Ok(out)
+}
+
+/// 自主步骤提的题的回答 → 已确认信息。跳过的也记一句，免得模型重跑时再问同一件事。
+pub(crate) fn resolve_agent(questions: &[Question], replies: &[(usize, Reply)]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for question in questions.iter().filter(|q| q.target == Target::Agent) {
+        let reply = replies
+            .iter()
+            .find(|(id, _)| *id == question.id)
+            .map_or(&Reply::Skip, |(_, reply)| reply);
+        let note = match reply {
+            Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
+                Some(Action::Note(note)) => Some(note.clone()),
+                _ => None,
+            },
+            Reply::Custom(text) if !text.trim().is_empty() => {
+                Some(format!("{}{}", question.text, text.trim()))
+            }
+            _ => None,
+        };
+        notes.push(note.unwrap_or_else(|| {
+            format!(
+                "{}（起草人没有回答，按现有信息处理，不要再问）",
+                question.text
+            )
+        }));
+    }
+    notes
 }
 
 /// 动笔前的方向题：模型出的澄清题，题号从 1 起，最多 `max` 道。问文种的一律不要——

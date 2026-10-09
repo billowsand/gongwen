@@ -1496,6 +1496,13 @@ pub(crate) fn asking_labels(questions: &[Question]) -> (&'static str, &'static s
         )
     } else if questions.iter().any(|q| q.target == Target::Pick) {
         ("先选一下", "确认，继续", "跳过")
+    } else if questions.iter().any(|q| q.target == Target::Agent) {
+        // 自主步骤做到一半要问的：答完从这一步重做，已做的工作稿留着。
+        (
+            "AI 做到一半，有几件事要问你",
+            "回答，接着做",
+            "跳过，按现有信息做",
+        )
     } else {
         ("这几处要你确认", "确认，继续", "保留待核实")
     }
