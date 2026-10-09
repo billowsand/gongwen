@@ -376,7 +376,7 @@ fn within_window<T>(
 ) -> std::result::Result<T, ChatError> {
     let window = context::peek_window(config);
     let Some(limit) = context::output_limit(window.tokens, input, max_tokens) else {
-        let overflow = context::local_overflow(window, input);
+        let overflow = context::local_overflow(window, input).with_model(&config.model);
         return Err(ChatError::Other(anyhow::Error::new(overflow)));
     };
     match send(limit) {

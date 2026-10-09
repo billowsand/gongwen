@@ -2295,10 +2295,11 @@ impl AppConfig {
                 temperature: 0.0,
                 max_tokens: 512,
                 timeout_seconds: revise.timeout_seconds.max(5),
-                context_window: if revise.enabled {
+                // 复用同一个模型时，自动模式继承起草侧的手工窗口。
+                context_window: if revise.enabled && revise.context_window > 0 {
                     revise.context_window
                 } else {
-                    0
+                    draft.context_window
                 },
                 ..draft
             }
@@ -3519,6 +3520,26 @@ mod tests {
 
         // 幂等：已有提供商时不再迁。
         assert!(!config.migrate_providers());
+    }
+
+    /// 提供商引用模式下，沿用起草与独立复核分别使用对应的窗口配置。
+    #[test]
+    fn referenced_assist_inherits_the_draft_window_only_when_reusing_it() {
+        let mut config = AppConfig::default();
+        config.lm_studio.model = "DeepSeek-V4.1-Flash".into();
+        config.lm_studio.context_window = 1_048_576;
+        config.migrate_providers();
+        assert!(!config.draft_model.is_empty());
+        assert_eq!(config.assist_chat().unwrap().context_window, 1_048_576);
+        config.revise_model.enabled = true;
+        assert_eq!(config.revise_chat(false).unwrap().context_window, 1_048_576);
+        config.revise_model.model_ref = ModelRef {
+            provider_id: config.draft_model.provider_id.clone(),
+            model: "qwen3-4b".into(),
+        };
+        let assist = config.assist_chat().unwrap();
+        assert_eq!(assist.model, "qwen3-4b");
+        assert_eq!(assist.context_window, 0);
     }
 
     /// 迁移后的解析：起草 / 复核 / embedding 都拿到提供商的地址密钥。

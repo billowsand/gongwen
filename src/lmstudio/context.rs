@@ -63,7 +63,11 @@ pub fn tokens_label(tokens: usize) -> String {
 }
 
 /// 模型名里含这些字样时的窗口（取各系列常见部署里偏小的那个）。按顺序匹配，先到先得。
-const MODEL_TABLE: [(&str, usize); 8] = [
+const MODEL_TABLE: [(&str, usize); 10] = [
+    // V4 / V4.1 与新版 Flash 别名支持百万上下文，必须先于系列兜底匹配。
+    // https://api-docs.deepseek.com/quick_start/pricing/
+    ("deepseek-v4", 1_048_576),
+    ("deepseek-flash", 1_048_576),
     ("deepseek", 131_072),
     ("minimax", 196_608),
     ("qwen3", 32_768),
@@ -137,10 +141,15 @@ pub fn peek_window(config: &LmStudioConfig) -> Window {
 }
 
 fn from_model_name(model: &str) -> Option<Window> {
-    let name = model.to_lowercase();
+    // 提供商可能使用空格、下划线或省略连字符；统一后仍按具体版本优先匹配。
+    let name: String = model
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '.')
+        .collect();
     MODEL_TABLE
         .iter()
-        .find(|(pattern, _)| name.contains(pattern))
+        .find(|(pattern, _)| name.contains(&pattern.replace('-', "")))
         .map(|(_, tokens)| Window {
             tokens: *tokens,
             source: WindowSource::ModelTable,
@@ -219,6 +228,14 @@ impl std::fmt::Display for ContextOverflow {
 }
 
 impl std::error::Error for ContextOverflow {}
+
+impl ContextOverflow {
+    /// 错误里写出实际调用的模型，避免把辅助模型的窗口误认为起草模型的窗口。
+    pub(super) fn with_model(mut self, model: &str) -> Self {
+        self.message = format!("模型「{}」：{}", model.trim(), self.message);
+        self
+    }
+}
 
 /// 本地估算就放不下时的报错。
 pub fn local_overflow(window: Window, input: usize) -> ContextOverflow {
@@ -308,7 +325,8 @@ pub(super) fn after_overflow(
         tokens: limit,
         source: WindowSource::Observed,
     };
-    output_limit(limit, input, configured).ok_or_else(|| local_overflow(window, input))
+    output_limit(limit, input, configured)
+        .ok_or_else(|| local_overflow(window, input).with_model(&config.model))
 }
 
 #[cfg(test)]
@@ -358,7 +376,10 @@ mod tests {
                 source: WindowSource::Manual
             }
         );
-        assert_eq!(peek_window(&config("DeepSeek-V4-Flash", 0)).tokens, 131_072);
+        assert_eq!(
+            peek_window(&config("DeepSeek-V4-Flash", 0)).tokens,
+            1_048_576
+        );
         assert_eq!(
             peek_window(&config("MiniMax-M2.7", 0)).source,
             WindowSource::ModelTable
@@ -376,6 +397,44 @@ mod tests {
         record_observed(&unknown, 30_000);
         assert_eq!(peek_window(&unknown).source, WindowSource::Observed);
         assert_eq!(peek_window(&unknown).label(), "29k（服务端报超长时给出）");
+    }
+
+    #[test]
+    fn deepseek_versions_and_provider_spellings_are_recognised() {
+        for model in [
+            "DeepSeek-V4-Flash",
+            "DeepSeek-V4.1-Flash",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
+            "deepseek v4.1 flash",
+            "deepseek_v4.1_flash",
+            "deepseekv4.1flash",
+            "deepseek-flash",
+            "DeepSeek-V4-Pro-0813",
+        ] {
+            let window = peek_window(&config(model, 0));
+            assert_eq!(window.tokens, 1_048_576, "{model}");
+            assert_eq!(window.source, WindowSource::ModelTable);
+            assert_eq!(output_limit(window.tokens, 192_844, 32_000), Some(32_000));
+        }
+        assert_eq!(peek_window(&config("DeepSeek-V3.2", 0)).tokens, 131_072);
+        assert_eq!(peek_window(&config("Qwen3-4B", 0)).tokens, 32_768);
+    }
+
+    #[test]
+    fn manual_and_service_windows_override_the_model_table() {
+        let mut config = config("DeepSeek-V4.1-Flash-priority", 0);
+        record_service(&config.base_url, &[(config.model.clone(), Some(65_536))]);
+        assert_eq!(peek_window(&config).tokens, 65_536);
+        assert_eq!(peek_window(&config).source, WindowSource::Service);
+        config.context_window = 262_144;
+        assert_eq!(peek_window(&config).tokens, 262_144);
+        assert_eq!(peek_window(&config).source, WindowSource::Manual);
+        record_observed(&config, 32_768);
+        assert_eq!(peek_window(&config).tokens, 32_768);
+        assert_eq!(peek_window(&config).source, WindowSource::Observed);
+        let error = local_overflow(peek_window(&config), 192_844).with_model(&config.model);
+        assert!(error.message.contains(&config.model));
+        assert_eq!(error.limit, Some(32_768));
     }
 
     #[test]

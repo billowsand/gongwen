@@ -71,7 +71,7 @@ pub fn converse_stream(
         });
     let window = super::context::peek_window(config);
     let Some(limit) = super::context::output_limit(window.tokens, input, max_tokens) else {
-        let overflow = super::context::local_overflow(window, input);
+        let overflow = super::context::local_overflow(window, input).with_model(&config.model);
         return Err(ConverseError::Other(anyhow::Error::new(overflow)));
     };
     match converse_once(

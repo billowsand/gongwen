@@ -471,7 +471,9 @@ fn context_window_row(
     auto: crate::lmstudio::context::Window,
 ) {
     use crate::lmstudio::context::tokens_label;
-    const PRESETS: [u32; 6] = [8192, 16_384, 32_768, 65_536, 131_072, 204_800];
+    const PRESETS: [u32; 8] = [
+        8192, 16_384, 32_768, 65_536, 131_072, 204_800, 524_288, 1_048_576,
+    ];
     setting_row(
         ui,
         "上下文窗口",
@@ -500,7 +502,9 @@ fn context_window_row(
                         .speed(256)
                         .suffix(" token"),
                 )
-                .on_hover_text("也可以直接填");
+                .on_hover_text("双击数字可直接输入 token 数；按实际服务的窗口填写");
+            } else if ui.button("手工设置").clicked() {
+                *value = (auto.tokens as u32).clamp(2048, 2_000_000);
             }
         },
     );
@@ -664,6 +668,7 @@ impl GongwenApp {
             egui::RichText::new(
                 "逐句检查语病，结果进「修订建议」，逐条确认后才改正文。与起草模型分开配：\
                  起草要发挥，复核只要稳——Qwen3 4B/8B 一类的小模型温度 0 反而更好使，也快得多。\
+                 选技能、澄清等辅助步骤也使用复核模型；未配置时沿用起草模型及其上下文窗口。\
                  复核请求会自动带上关闭思考的开关，服务端不认时会自动去掉重试。",
             )
             .size(theme::font_sizes::SMALL)

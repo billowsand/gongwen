@@ -637,15 +637,24 @@ mod tests {
         let mut config = AppConfig::default();
         config.lm_studio.model = "draft".into();
         config.lm_studio.max_tokens = 32000;
+        config.lm_studio.context_window = 1_048_576;
         let assist = config.assist_chat().unwrap();
         assert_eq!(assist.model, "draft");
         assert_eq!(assist.temperature, 0.0);
         assert_eq!(assist.max_tokens, 32000);
+        assert_eq!(assist.context_window, 1_048_576);
 
         config.revise_model.enabled = true;
+        assert_eq!(config.assist_chat().unwrap().context_window, 1_048_576);
+        config.revise_model.context_window = 262_144;
+        assert_eq!(config.assist_chat().unwrap().context_window, 262_144);
+
         config.revise_model.model = "small".into();
         let assist = config.assist_chat().unwrap();
         assert_eq!(assist.model, "small");
+        assert_eq!(assist.context_window, 262_144, "独立模型用自己的窗口");
+        config.revise_model.context_window = 0;
+        assert_eq!(config.assist_chat().unwrap().context_window, 0);
         assert_eq!(assist.max_tokens, 32000, "不用复核那套 512 的小上限");
     }
 
