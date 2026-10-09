@@ -23,6 +23,11 @@ pub(super) const FOUND: &str = "found";
 /// 动笔前就问，答案写进第一稿。参数 `elements`（为否时不查）、`element_questions`
 /// （最多几道），提示词 `elements_prompt`（默认「要素检查」，技能里没写就用内置的一份）。
 ///
+/// 表单要素（`element_fields`）是另一路：「要素抽取」核对原文写没写主送、发文单位这些，
+/// 写明的进建议卡、拿不准的出题。参数 `fields`（为否时整个关掉：不抽取、不出题、不出
+/// 建议卡）、`field_questions`（最多几道，为 0 时只出建议不出题），提示词 `fields_prompt`
+/// （默认「要素抽取」）。与六要素互不影响：`elements: false` 不关表单要素。
+///
 /// 分两关（`clarify.rs` 开头的分层）：先定文种——要求点名的文种与当前对不上，或模型问的是
 /// 文种，就**只问这一题**，答完回到本步重做（`Flow::SuspendAgain`）；文种定了才按它出方向题
 /// 与六要素题。要素区里改过文种（当前文种 ≠ 定下的文种）时，以旧文种为前提的澄清作废重问。
@@ -36,22 +41,27 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         return Ok(Flow::Next);
     }
     let max = param(ctx, step, &["max", "pre_questions"], 3, 0..=5);
-    let element_max = if step.params.get("elements").and_then(Value::as_bool) == Some(false) {
+    // 布尔开关：步骤上写了以步骤为准，没写看技能 `params:`。
+    let off = |key: &str| {
+        step.params
+            .get(key)
+            .or_else(|| ctx.env.skill.params.get(key))
+            .and_then(Value::as_bool)
+            == Some(false)
+    };
+    // `elements: false` 只关六要素检查；表单要素不受影响。
+    let element_max = if off("elements") {
         0
     } else {
         param(ctx, step, &["element_questions"], 4, 0..=6)
     };
-    let field_max = if step.params.get("elements").and_then(Value::as_bool) == Some(false) {
-        0
-    } else {
-        param(ctx, step, &["field_questions"], 4, 0..=6)
-    };
+    // `fields: false` 关掉整个表单要素：不抽取、不出题、不出建议卡；
+    // `field_questions: 0` 只不出题，原文写明且词库唯一对上的仍直接进建议卡。
+    let fields_off = off("fields");
+    let field_max = param(ctx, step, &["field_questions"], 4, 0..=6);
     let checklist = elements::checklist(kind);
     let fields = element_fields::prompt_fields(&ctx.board.draft);
-    if max == 0
-        && (element_max == 0 || checklist.is_empty())
-        && (field_max == 0 || fields.is_empty())
-    {
+    if max == 0 && (element_max == 0 || checklist.is_empty()) && (fields_off || fields.is_empty()) {
         return Ok(Flow::Next);
     }
     // 第一关：定文种（程序判断，不调模型）。
@@ -85,10 +95,11 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
     ctx.board.premise = Some(kind);
     let mut asked_elements = Vec::new();
     let mut asked_fields: Vec<clarify::Question> = Vec::new();
-    if field_max > 0 {
+    if !fields_off {
         // 表单要素（`element_fields`）：先「要素抽取」——它的建议要拼进六要素检查的
         // 原文（「何人」才算已给），所以放在六要素检查前面。字段题单独占
-        // `field_questions` 名额（默认 4，红头呈批件的必填要素正好 4 项；必填优先），不挤六要素的名额：点选题答起来快，
+        // `field_questions` 名额（默认 4，为 0 时只出建议不出题；红头呈批件的必填
+        // 要素正好 4 项；必填优先），不挤六要素的名额：点选题答起来快，
         // 挤掉「何时」「何法」代价更大。
         // 重新澄清（文种改过）时，以旧文种为前提的建议作废。
         ctx.board.field_suggestions.clear();

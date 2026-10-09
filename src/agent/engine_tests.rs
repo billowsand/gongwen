@@ -1827,3 +1827,186 @@ fn predraft_contact_question_follows_the_responsible_unit() {
         board.notes
     );
 }
+
+// —— 要素填写框架第 4 期：表单要素与六要素的开关拆开 ——
+
+/// 把技能级参数改成给的值（步骤上没写时以技能 `params:` 为准）。
+fn skill_with(skill: &Skill, key: &str, value: serde_json::Value) -> Skill {
+    let mut skill = skill.clone();
+    skill.params.insert(key.into(), value);
+    skill
+}
+
+/// `elements: false` 只关六要素检查：要素抽取照常跑、建议照出，六要素检查不调用模型。
+#[test]
+fn elements_false_only_turns_off_the_six_element_check() {
+    let model = field_flow_model(
+        "发文单位｜未提\n主送单位｜已给｜市数据局\n抄送单位｜未提\n承办单位｜未提\n联系人｜未提",
+        "何事｜缺｜写什么事？",
+    );
+    let skill = skill_with(
+        &builtin_research_draft(),
+        "elements",
+        serde_json::Value::Bool(false),
+    );
+    let mut request = input("给市数据局发函，商请共建公共数据研究平台。", false);
+    request.draft.kind = TemplateKind::OfficialLetter;
+    let (outcome, events, board) = run_board_vocab(
+        board_of(&request),
+        &skill,
+        &field_vocabulary(),
+        &model,
+        &kb(true),
+        &[],
+    );
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("发文单位没提，动笔前要出题");
+    };
+    assert!(
+        model
+            .calls
+            .borrow()
+            .iter()
+            .all(|(_, prompt)| !prompt.contains("逐项检查起草所需的六要素")),
+        "六要素检查不应再调模型"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::FieldSuggestions(_))),
+        "要素建议照常出卡"
+    );
+    assert_eq!(
+        board.field_suggestions.len(),
+        1,
+        "{:?}",
+        board.field_suggestions
+    );
+    assert!(
+        suspension
+            .questions
+            .iter()
+            .all(|q| matches!(q.target, Target::Field(_))),
+        "六要素题不出，只剩字段题：{:?}",
+        suspension
+            .questions
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `fields: false` 关掉整个表单要素：不抽取、不出题、不出建议卡；六要素检查不受影响。
+#[test]
+fn fields_false_turns_off_extraction_questions_and_cards() {
+    let model = field_flow_model(
+        "发文单位｜未提\n主送单位｜已给｜市数据局",
+        "何事｜缺｜写什么事？",
+    );
+    let skill = skill_with(
+        &builtin_research_draft(),
+        "fields",
+        serde_json::Value::Bool(false),
+    );
+    let mut request = input("给市数据局发函，商请共建公共数据研究平台。", false);
+    request.draft.kind = TemplateKind::OfficialLetter;
+    let (outcome, events, board) = run_board_vocab(
+        board_of(&request),
+        &skill,
+        &field_vocabulary(),
+        &model,
+        &kb(true),
+        &[],
+    );
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("何事没讲清，动笔前要出题");
+    };
+    assert!(
+        model
+            .calls
+            .borrow()
+            .iter()
+            .all(|(_, prompt)| !prompt.contains("核对表单要素在原文里写没写")),
+        "要素抽取不应再调模型"
+    );
+    assert!(
+        board.field_suggestions.is_empty(),
+        "{:?}",
+        board.field_suggestions
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::FieldSuggestions(_))),
+        "不出建议卡"
+    );
+    assert!(
+        suspension
+            .questions
+            .iter()
+            .all(|q| !matches!(q.target, Target::Field(_))),
+        "不出字段题：{:?}",
+        suspension
+            .questions
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `field_questions: 0`：只出建议不出题——原文写明、词库唯一对上的仍进建议卡，
+/// 拿不准的（必填字段）也不问；六要素检查照常。
+#[test]
+fn field_questions_zero_suggests_without_asking() {
+    let model = field_flow_model(
+        "发文单位｜未提\n主送单位｜已给｜市数据局\n抄送单位｜未提\n承办单位｜未提\n联系人｜未提",
+        "何事｜缺｜写什么事？",
+    );
+    let skill = skill_with(
+        &builtin_research_draft(),
+        "field_questions",
+        serde_json::json!(0),
+    );
+    let mut request = input("给市数据局发函，商请共建公共数据研究平台。", false);
+    request.draft.kind = TemplateKind::OfficialLetter;
+    let (outcome, events, _board) = run_board_vocab(
+        board_of(&request),
+        &skill,
+        &field_vocabulary(),
+        &model,
+        &kb(true),
+        &[],
+    );
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("何事没讲清，动笔前要出题");
+    };
+    let emitted = events
+        .iter()
+        .find_map(|event| match event {
+            Event::FieldSuggestions(suggestions) => Some(suggestions),
+            _ => None,
+        })
+        .expect("直接建议要发 FieldSuggestions 事件");
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].field, crate::element_fields::FieldId::Recipient);
+    assert!(
+        suspension
+            .questions
+            .iter()
+            .all(|q| !matches!(q.target, Target::Field(_))),
+        "必填字段也不出题：{:?}",
+        suspension
+            .questions
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        model
+            .calls
+            .borrow()
+            .iter()
+            .any(|(_, prompt)| prompt.contains("逐项检查起草所需的六要素")),
+        "六要素检查照常"
+    );
+}
