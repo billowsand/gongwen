@@ -395,11 +395,15 @@ pub(crate) const PROMPT: &str =
 
 {fields}
 
-每个字段输出一行，格式严格如下（全角竖线分隔）：
-字段名｜已给｜从原文里原样摘出的名称（多值字段有几个摘几个，用顿号分隔）
-字段名｜未提
+每个字段输出一行，字段名照上面清单里的名称写（不要把「主送单位」原样抄成每个字段的答案，
+它只是格式示例），格式严格如下（全角竖线分隔）：
+主送单位｜已给｜原文里写的名称（多值字段有几个摘几个，用顿号分隔）
+主送单位｜未提
 
-只判断原文写没写，拿不准就写「未提」。名称必须原样摘抄，不补全、不改写、不编造。
+只判断原文写没写，拿不准就写「未提」。名称必须摘自原文，不补全、不编造。单位的完整名称
+整个摘（「市数据局信息中心」是一个单位，不要截成「市数据局」）；只有名称后面跟着职务、
+部门尾缀时才截取名称本身（「市应急局办公室负责同志」取「市应急局」，「数据局张科长」取
+「张三」），截取出来的部分也要是原文里有的。
 
 【原文】
 {source}";
@@ -1791,5 +1795,362 @@ mod tests {
         assert!(!question.multi, "旧会话读回按单选");
         let board: crate::agent::board::Board = serde_json::from_str("{}").unwrap();
         assert!(board.field_suggestions.is_empty());
+    }
+}
+
+// ================= 第 4 期：联机实测 =================
+
+/// 用真实模型跑「要素抽取」：读 `GONGWEN_LIVE_LLM_URL` / `GONGWEN_LIVE_LLM_MODEL` /
+/// `GONGWEN_LIVE_LLM_KEY`，没设就打印跳过。两个内网同款模型各跑一遍（换 MODEL 环境变量）。
+///
+/// 断言只放确定性的部分：授权类要素不出现（建议与题目的字段都在 `prompt_fields` 里）、
+/// 建议的摘录都能在原文里找到、建议值与题目选项都在标准词库里。模型认得准不准只打印、
+/// 统计（样本表里的期望逐条对），不断言——改提示词的依据看交接文档里的结果表。
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use crate::agent::backend::{LmBackend, ModelBackend, ModelRole};
+
+    /// 一个样本期望模型走到哪一步。
+    enum Expect {
+        /// 直接建议成这个词库规范名。
+        Suggest(&'static str),
+        /// 「替换」建议（表单已填且不一致）。
+        Conflict(&'static str),
+        /// 出题。
+        Ask,
+        /// 不动（不出建议也不出题）。
+        Silent,
+    }
+
+    struct Sample {
+        name: &'static str,
+        kind: TemplateKind,
+        /// 表单已填的字段（字段、值）。
+        filled: &'static [(FieldId, &'static str)],
+        /// 给模型的原文（标题提示 + 要求）。
+        source: &'static str,
+        /// 用复函技能自带的「要素抽取」节，否则用内置的一份。
+        reply_letter: bool,
+        expect: &'static [(FieldId, Expect)],
+    }
+
+    /// 测试词库：含同名前缀的单位（市数据局 / 市数据局信息中心）与带别名的人员（王建国
+    /// 别名王局长）。市财政局当「本单位」。
+    fn live_vocabulary() -> Vec<VocabularyEntry> {
+        let unit = |name: &str, code: &str, duties: &str| VocabularyEntry {
+            canonical: name.into(),
+            code: code.into(),
+            duties: duties.into(),
+            ..VocabularyEntry::default()
+        };
+        let person = |name: &str, unit: &str, phone: &str, position: &str, aliases: &[&str]| {
+            VocabularyEntry {
+                canonical: name.into(),
+                category: VocabularyCategory::Person,
+                unit: unit.into(),
+                phone: phone.into(),
+                position: position.into(),
+                aliases: aliases.iter().map(|a| (*a).into()).collect(),
+                ..VocabularyEntry::default()
+            }
+        };
+        vec![
+            unit("市财政局", "09", "负责财政收支管理与预算执行"),
+            unit(
+                "市数据局",
+                "00",
+                "负责公共数据归集、共享与开放，统筹数据资源平台建设",
+            ),
+            unit("市数据局信息中心", "08", "承担公共数据平台的运行维护"),
+            unit("市应急局", "01", "负责安全生产综合监督管理和应急救援"),
+            unit("市林业局", "02", "负责林业生态建设与森林防火"),
+            person("张三", "00", "12345678", "数据资源科科长", &[]),
+            person("李四", "01", "", "办公室副主任", &[]),
+            person("王建国", "09", "", "局长", &["王局长"]),
+        ]
+    }
+
+    fn samples() -> Vec<Sample> {
+        vec![
+            Sample {
+                name: "公函：主送写明，发文单位与联系人没提",
+                kind: TemplateKind::OfficialLetter,
+                filled: &[],
+                source: "给市数据局发函，商请共建公共数据研究平台。根据市政府会议要求，请于10月底前书面函复。",
+                reply_letter: false,
+                expect: &[
+                    (FieldId::Recipient, Expect::Suggest("市数据局")),
+                    (FieldId::IssuingUnit, Expect::Ask),
+                    (FieldId::ContactPerson, Expect::Ask),
+                    (FieldId::CopiesTo, Expect::Silent),
+                ],
+            },
+            Sample {
+                name: "公函：原文写的是同名前缀里的长名（市数据局信息中心）",
+                kind: TemplateKind::OfficialLetter,
+                filled: &[],
+                source: "给市数据局信息中心发函，商请公共数据平台运维保障事宜，请于10月底前书面函复。",
+                reply_letter: false,
+                expect: &[
+                    (FieldId::Recipient, Expect::Suggest("市数据局信息中心")),
+                    (FieldId::IssuingUnit, Expect::Ask),
+                ],
+            },
+            Sample {
+                name: "公函：原文写的单位词库里没有（市大数据中心）",
+                kind: TemplateKind::OfficialLetter,
+                filled: &[],
+                source: "给市大数据中心发函，商请共建公共数据研究平台，请于10月底前书面函复。",
+                reply_letter: false,
+                expect: &[
+                    (FieldId::Recipient, Expect::Ask),
+                    (FieldId::IssuingUnit, Expect::Ask),
+                ],
+            },
+            Sample {
+                name: "公函：表单已填市应急局，材料写的是市数据局",
+                kind: TemplateKind::OfficialLetter,
+                filled: &[(FieldId::Recipient, "市应急局")],
+                source: "给市数据局发函，商请共建公共数据研究平台，请于10月底前书面函复。",
+                reply_letter: false,
+                expect: &[
+                    (FieldId::Recipient, Expect::Conflict("市数据局")),
+                    (FieldId::IssuingUnit, Expect::Ask),
+                ],
+            },
+            Sample {
+                name: "电话通知：主送写明",
+                kind: TemplateKind::PhoneNotice,
+                filled: &[],
+                source: "请市应急局办公室负责同志于10月15日上午9时到我局三楼会议室，参加森林防火工作会议。",
+                reply_letter: false,
+                expect: &[
+                    (FieldId::Recipient, Expect::Suggest("市应急局")),
+                    (FieldId::IssuingUnit, Expect::Ask),
+                ],
+            },
+            Sample {
+                name: "白头件：呈报领导按别名对上，落款没提",
+                kind: TemplateKind::WhitePaper,
+                filled: &[],
+                source: "关于公共数据平台建设进展的汇报。呈报王局长审定。",
+                reply_letter: false,
+                expect: &[
+                    (FieldId::ReportingLeaders, Expect::Suggest("王建国")),
+                    (FieldId::SigningUnit, Expect::Ask),
+                ],
+            },
+            Sample {
+                name: "红头呈批件：承办单位、联系人、呈报领导都写明",
+                kind: TemplateKind::RedHeadApproval,
+                filled: &[],
+                source: "关于启动公共数据平台二期项目的请示。承办单位：市数据局。联系人：张三。呈报王局长审定。",
+                reply_letter: false,
+                expect: &[
+                    (FieldId::ResponsibleUnit, Expect::Suggest("市数据局")),
+                    (FieldId::ContactPerson, Expect::Suggest("张三")),
+                    (FieldId::ReportingLeaders, Expect::Suggest("王建国")),
+                    (FieldId::SigningUnit, Expect::Ask),
+                ],
+            },
+            Sample {
+                name: "复函：主送是来函的发文机关（此致后的署名）",
+                kind: TemplateKind::OfficialLetter,
+                filled: &[],
+                source: "市财政局：\n\n现将我局公共数据归集情况函告如下，请于10月底前函复。\n\n此致\n\n市数据局\n\n答复要求：同意第一项，第二项暂缓。",
+                reply_letter: true,
+                // 复函技能的提示词写明：来函抬头（通常是本单位）是本复函的发文单位。
+                expect: &[
+                    (FieldId::Recipient, Expect::Suggest("市数据局")),
+                    (FieldId::IssuingUnit, Expect::Suggest("市财政局")),
+                ],
+            },
+        ]
+    }
+
+    #[test]
+    #[ignore = "需要真实模型：设置 GONGWEN_LIVE_LLM_URL / MODEL / KEY 后运行"]
+    fn live_field_extraction_samples() {
+        let env = |key: &str| std::env::var(key).unwrap_or_default();
+        if env("GONGWEN_LIVE_LLM_URL").is_empty() {
+            eprintln!(
+                "未设置 GONGWEN_LIVE_LLM_URL / GONGWEN_LIVE_LLM_MODEL / GONGWEN_LIVE_LLM_KEY，跳过"
+            );
+            return;
+        }
+        let mut config = crate::models::AppConfig::default();
+        config.lm_studio.base_url = env("GONGWEN_LIVE_LLM_URL");
+        config.lm_studio.model = env("GONGWEN_LIVE_LLM_MODEL");
+        config.lm_studio.api_key = env("GONGWEN_LIVE_LLM_KEY");
+        config.lm_studio.timeout_seconds = 300;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let model = LmBackend::new(&config, cancel);
+        let vocabulary = live_vocabulary();
+        let reply_letter_template = crate::agent::skill::builtin(crate::agent::skill::REPLY_LETTER)
+            .and_then(|skill| skill.section("要素抽取").map(str::to_string))
+            .expect("内置复函技能要有「要素抽取」节");
+
+        let mut hits = 0;
+        let mut total = 0;
+        for sample in samples() {
+            let mut draft = DraftInput {
+                kind: sample.kind,
+                ..DraftInput::default()
+            };
+            for (field, value) in sample.filled {
+                apply_field(&mut draft, *field, value, &vocabulary);
+            }
+            let fields = prompt_fields(&draft);
+            let template = if sample.reply_letter {
+                reply_letter_template.as_str()
+            } else {
+                PROMPT
+            };
+            let prompt = template
+                .replace("{kind}", sample.kind.label())
+                .replace("{fields}", &prompt_fields_text(&fields, sample.kind))
+                .replace("{source}", sample.source);
+            let reply = model
+                .complete(ModelRole::Draft, "", &prompt, &mut |_| {})
+                .expect("模型要答")
+                .content;
+            let planned = plan(&draft, &reply, sample.source, &vocabulary, 4);
+
+            // —— 确定性断言（不依赖模型答得准不准）——
+            // 授权类要素不出现：建议与题目的字段都在适用清单里（清单本身全是描述类）。
+            for suggestion in &planned.suggestions {
+                assert!(fields.contains(&suggestion.field), "{}", sample.name);
+                // 建议值在标准词库里（多值顿号分隔，逐个查规范名）。
+                for name in split_units(&suggestion.value) {
+                    assert!(
+                        vocabulary.iter().any(|entry| entry.canonical == name),
+                        "建议值不在词库：{name}（{}）",
+                        sample.name
+                    );
+                }
+                // 摘录在原文里找得到（与 plan 同一套去标点比较）。
+                let excerpt = suggestion
+                    .source
+                    .trim_start_matches("材料原文：")
+                    .trim_matches(['「', '」']);
+                for piece in split_units(excerpt) {
+                    assert!(
+                        elements::squash(sample.source).contains(&elements::squash(&piece)),
+                        "摘录不在原文：{piece}（{}）",
+                        sample.name
+                    );
+                }
+            }
+            for question in &planned.questions {
+                let Target::Field(field) = question.target else {
+                    panic!("要素抽取只出字段题（{}）", sample.name);
+                };
+                assert!(fields.contains(&field), "{}", sample.name);
+                // 题目选项也全部来自标准词库。
+                for choice in &question.choices {
+                    let Action::Fill(value) = &choice.action else {
+                        continue;
+                    };
+                    assert!(
+                        vocabulary.iter().any(|entry| entry.canonical == *value),
+                        "选项不在词库：{value}（{}）",
+                        sample.name
+                    );
+                }
+            }
+
+            // —— 准不准只打印、统计 ——
+            eprintln!("== {} ==", sample.name);
+            eprintln!("模型回复：{}", reply.replace('\n', " ⏎ "));
+            for suggestion in &planned.suggestions {
+                eprintln!(
+                    "  建议：{} = {}{}{}（{}）",
+                    suggestion.field.label(),
+                    suggestion.value,
+                    if suggestion.previous.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（表单已填 {}）", suggestion.previous)
+                    },
+                    if suggestion.conflict {
+                        "［冲突］"
+                    } else {
+                        ""
+                    },
+                    suggestion.source
+                );
+            }
+            for question in &planned.questions {
+                eprintln!(
+                    "  出题：{} 选项 {:?}",
+                    question.text,
+                    question
+                        .choices
+                        .iter()
+                        .map(|c| c.label.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+            for (field, expect) in sample.expect {
+                total += 1;
+                let suggestion = planned.suggestions.iter().find(|s| s.field == *field);
+                let asked = planned
+                    .questions
+                    .iter()
+                    .any(|q| q.target == Target::Field(*field));
+                let (hit, actual) = match expect {
+                    Expect::Suggest(value) => (
+                        suggestion.is_some_and(|s| !s.conflict && s.value == *value),
+                        suggestion.map_or("没建议".into(), |s| format!("建议 {}", s.value)),
+                    ),
+                    Expect::Conflict(value) => (
+                        suggestion.is_some_and(|s| s.conflict && s.value == *value),
+                        suggestion.map_or("没建议".into(), |s| {
+                            format!(
+                                "建议 {}{}",
+                                s.value,
+                                if s.conflict { "（冲突）" } else { "" }
+                            )
+                        }),
+                    ),
+                    Expect::Ask => (
+                        asked,
+                        if asked {
+                            "出题".into()
+                        } else {
+                            "没出题".into()
+                        },
+                    ),
+                    Expect::Silent => (
+                        suggestion.is_none() && !asked,
+                        format!(
+                            "{}{}",
+                            if suggestion.is_some() {
+                                "有建议"
+                            } else {
+                                ""
+                            },
+                            if asked { "有题" } else { "" }
+                        ),
+                    ),
+                };
+                hits += usize::from(hit);
+                eprintln!(
+                    "  {} {}：期望 {:?}，实际 {}——{}",
+                    if hit { "对" } else { "错" },
+                    field.label(),
+                    match expect {
+                        Expect::Suggest(v) => format!("建议 {v}"),
+                        Expect::Conflict(v) => format!("替换建议 {v}"),
+                        Expect::Ask => "出题".into(),
+                        Expect::Silent => "不动".into(),
+                    },
+                    actual,
+                    if hit { "符合" } else { "偏差" }
+                );
+            }
+        }
+        eprintln!("—— 期望命中 {hits}/{total} ——");
     }
 }
