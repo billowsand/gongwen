@@ -150,7 +150,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "13-ai-workbench",
         Part::Ai,
         "AI 侧栏与技能",
-        "一体化输入框、/ 技能、@ 引用与十四个内置技能"
+        "一体化输入框、/ 技能、@ 引用、要素建议卡与十五个内置技能"
     ),
     chapter!(
         "14-ai-polish",
