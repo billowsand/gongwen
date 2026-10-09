@@ -991,7 +991,10 @@ fn reply_state(
     draft: &super::ReplyDraft,
 ) -> (&'static str, egui::Color32, egui::Color32) {
     if draft.skip {
-        let label = if matches!(question.target, crate::agent::clarify::Target::Element(_)) {
+        let label = if matches!(
+            question.target,
+            crate::agent::clarify::Target::Element(_) | crate::agent::clarify::Target::Field(_)
+        ) {
             "先不定"
         } else {
             "保留待核实"
@@ -999,7 +1002,7 @@ fn reply_state(
         (label, theme::text_muted(), theme::surface_sunk())
     } else if !draft.custom.trim().is_empty() {
         ("已填写", theme::success(), theme::success_soft())
-    } else if draft.choice.is_some() {
+    } else if draft.choice.is_some() || (question.multi && !draft.picked.is_empty()) {
         ("已选", theme::success(), theme::success_soft())
     } else if question.skippable {
         ("未答", theme::warn(), theme::warn_soft())
@@ -1064,7 +1067,12 @@ fn questions_ui(
     let total = questions.len();
     let answered = replies
         .iter()
-        .filter(|draft| !draft.skip && (draft.choice.is_some() || !draft.custom.trim().is_empty()))
+        .filter(|draft| {
+            !draft.skip
+                && (draft.choice.is_some()
+                    || !draft.custom.trim().is_empty()
+                    || !draft.picked.is_empty())
+        })
         .count();
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(heading).strong());
@@ -1099,32 +1107,58 @@ fn questions_ui(
                 .collect();
             if !fixed.is_empty() {
                 ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                if question.multi {
+                    // 多选题（主送、抄送等多值要素）：复选框，可勾多个；自己写了就以自己写的为准。
                     for &i in &fixed {
                         let choice = &question.choices[i];
-                        let selected = draft.choice == Some(i)
-                            && draft.custom.trim().is_empty()
-                            && !draft.skip;
+                        let mut on = draft.picked.contains(&i);
                         let label = if choice.recommended {
                             format!("{}（推荐）", choice.label)
                         } else {
                             choice.label.clone()
                         };
-                        let response = option_pill(ui, &label, selected, false);
-                        let response = if choice.detail.is_empty() {
-                            response
-                        } else {
-                            response.on_hover_text(&choice.detail)
-                        };
-                        if response.clicked() {
-                            // 再点一次取消选择。
-                            draft.choice = (!selected).then_some(i);
-                            draft.custom.clear();
+                        let response = ui.checkbox(&mut on, label);
+                        if !choice.detail.is_empty() {
+                            response.clone().on_hover_text(&choice.detail);
+                        }
+                        if response.changed() {
+                            if on {
+                                draft.picked.push(i);
+                                draft.picked.sort_unstable();
+                            } else {
+                                draft.picked.retain(|picked| *picked != i);
+                            }
                             draft.skip = false;
                         }
                     }
-                });
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                        for &i in &fixed {
+                            let choice = &question.choices[i];
+                            let selected = draft.choice == Some(i)
+                                && draft.custom.trim().is_empty()
+                                && !draft.skip;
+                            let label = if choice.recommended {
+                                format!("{}（推荐）", choice.label)
+                            } else {
+                                choice.label.clone()
+                            };
+                            let response = option_pill(ui, &label, selected, false);
+                            let response = if choice.detail.is_empty() {
+                                response
+                            } else {
+                                response.on_hover_text(&choice.detail)
+                            };
+                            if response.clicked() {
+                                // 再点一次取消选择。
+                                draft.choice = (!selected).then_some(i);
+                                draft.custom.clear();
+                                draft.skip = false;
+                            }
+                        }
+                    });
+                }
             }
             if !suggested.is_empty() {
                 ui.add_space(8.0);
@@ -1179,8 +1213,12 @@ fn questions_ui(
                 }
             }
             if question.skippable {
-                // 六要素题跳过不是「按现有信息写」，而是正文留占位、事后不再问。
-                let skip = if matches!(question.target, crate::agent::clarify::Target::Element(_)) {
+                // 六要素题与表单要素题跳过不是「按现有信息写」，而是正文留占位、事后不再问。
+                let skip = if matches!(
+                    question.target,
+                    crate::agent::clarify::Target::Element(_)
+                        | crate::agent::clarify::Target::Field(_)
+                ) {
                     "先不定，正文留待核实"
                 } else {
                     skip

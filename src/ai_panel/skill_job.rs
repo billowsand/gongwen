@@ -69,15 +69,31 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
 const FLUSH_BYTES: usize = 600;
 
 /// 每道题的初始作答：程序有推荐项的先替用户选上，点「确认」就能走。
+/// 多选题把所有推荐项预先勾上（如原文对上的几个主送单位）。
 pub(crate) fn initial_replies(questions: &[Question]) -> Vec<ReplyDraft> {
     questions
         .iter()
         .map(|question| ReplyDraft {
-            choice: question
-                .choices
-                .iter()
-                .position(|choice| choice.recommended),
+            choice: if question.multi {
+                None
+            } else {
+                question
+                    .choices
+                    .iter()
+                    .position(|choice| choice.recommended)
+            },
             custom: question.prefill.clone(),
+            picked: if question.multi {
+                question
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, choice)| choice.recommended)
+                    .map(|(index, _)| index)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             ..ReplyDraft::default()
         })
         .collect()
@@ -87,7 +103,15 @@ fn collect_replies(questions: &[Question], drafts: &[ReplyDraft]) -> Vec<(usize,
     questions
         .iter()
         .zip(drafts)
-        .map(|(question, draft)| (question.id, draft.reply()))
+        .map(|(question, draft)| {
+            // 多选题：自己写了就以自己写的为准，否则交勾中的下标（一条没勾按没答算）。
+            let reply = if question.multi && !draft.skip && draft.custom.trim().is_empty() {
+                Reply::Many(draft.picked.clone())
+            } else {
+                draft.reply()
+            };
+            (question.id, reply)
+        })
         .collect()
 }
 
