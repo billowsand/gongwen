@@ -62,7 +62,7 @@ pub(super) enum Pick {
 }
 
 /// 交付后一批最多问几题（技能参数 `batch_questions` 的兜底值）。
-const BATCH_QUESTIONS: usize = 4;
+pub(crate) const BATCH_QUESTIONS: usize = 4;
 
 /// 流式增量攒批：50 ms 或 600 字节发一次，与第 ① 期的单次起草一致。
 const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
@@ -960,6 +960,60 @@ impl DraftPage<'_> {
             *self.status = "提案已不在了，没法按回答修订；可以重新起草。".into();
             return;
         };
+        self.revise_by_answers(research, before, questions, replies);
+    }
+
+    /// 待决事项答完了：对着现在的正文按回答修订，出一份提案（红线 1：正文仍由用户接受）。
+    /// 列出之后正文又改过，就按现在的正文重新列，这批回答不落地。这张卡片交出去后撤掉——
+    /// 回答记在修订那一轮的说明里，没定的几处仍在正文里，随时可以再列。
+    pub(crate) fn apply_pending_answers(&mut self, turn_id: u64) {
+        if self.doc.busy || self.doc.read_only() {
+            *self.status = "请等当前任务结束，并在可编辑稿件里填写。".into();
+            return;
+        }
+        if self.doc.ai_proposal.is_some() {
+            *self.status = "还有一份提案没处理，先采用或放弃它再填。".into();
+            return;
+        }
+        let Some(turn) = self.doc.ai_panel.turn_mut(turn_id) else {
+            return;
+        };
+        let Some(research) = turn.research.clone() else {
+            return;
+        };
+        let document = self.doc.generated_markdown.clone();
+        if research.raw != document {
+            self.doc.ai_panel.turns.retain(|turn| turn.id != turn_id);
+            let reopened = self
+                .doc
+                .ai_panel
+                .open_pending(&document, &self.config.vocabulary);
+            *self.status = if reopened.is_some() {
+                "正文在列出之后改过，已按现在的正文重新列出待核实的几处，请再看一遍。".into()
+            } else {
+                "正文在列出之后改过，现在已经没有待核实的地方了。".into()
+            };
+            return;
+        }
+        let replies = collect_replies(&turn.questions, &turn.replies);
+        let questions = turn.questions.clone();
+        if replies.iter().all(|(_, reply)| *reply == Reply::Skip) {
+            *self.status = "都还没填，正文不变；想好了再填。".into();
+            return;
+        }
+        self.doc.ai_panel.turns.retain(|turn| turn.id != turn_id);
+        self.revise_by_answers(research, document, questions, replies);
+    }
+
+    /// 按缺口题的回答修订工作稿（`research.raw`），重新定稿成对照 `before` 的提案：只是保留
+    /// 待核实、保留原文的确定性改完就交；要填、要删的交模型写进所在段落、过闸门。
+    fn revise_by_answers(
+        &mut self,
+        research: ResearchSnapshot,
+        before: String,
+        questions: Vec<Question>,
+        replies: Vec<(usize, Reply)>,
+    ) {
         let summary_lines: Vec<String> = questions
             .iter()
             .zip(&replies)

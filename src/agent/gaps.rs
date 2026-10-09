@@ -4,6 +4,9 @@
 //! - 「【待核实：…】」占位——提示词早已统一了写法（`prompt.rs` 有测试锁住前缀）；
 //! - 来源不明的事实——`ai_guard` 抽出的日期、数量、书名号文件名，在材料、已确认的回答、
 //!   证据包与要素里都找不到。
+//!
+//! 来源不明的事实若在材料里「同一处」写着另一个值（同样的上下文、同类事实），就记成冲突候选
+//! （[`Candidate`]），出题时作为程序给的选项（`docs/decision-modules.md` 第八节）。
 
 use super::evidence::{CITATION, strip_citations};
 use crate::ai_guard::{FactKind, FactToken};
@@ -174,6 +177,19 @@ pub(crate) struct Gap {
     pub(crate) queries: Vec<String>,
     /// 检索返回过的资料（证据键）；再搜回来的全是旧资料，就算检索到头了。
     pub(crate) seen_chunks: Vec<String>,
+    /// 来源不明的事实在材料里对应的另一个值（事实冲突的候选）；旧台账没有这一项。
+    #[serde(default)]
+    pub(crate) candidates: Vec<Candidate>,
+}
+
+/// 事实冲突的候选：来源不明的事实在材料或资料里「同一处」写的值。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Candidate {
+    pub(crate) value: String,
+    /// 出处：「材料」或「《题名》」。
+    pub(crate) source: String,
+    /// 出处里前后一小段原文，给人对照。
+    pub(crate) excerpt: String,
 }
 
 /// 「【待核实：X】」该交给知识库还是交给用户。
@@ -413,7 +429,34 @@ impl Ledger {
             attempts: 0,
             queries: Vec::new(),
             seen_chunks: Vec::new(),
+            candidates: Vec::new(),
         });
+    }
+
+    /// 给还要问的来源不明事实找冲突候选。`sources` 是（出处, 原文）：材料在前，资料在后。
+    pub(crate) fn attach_candidates(
+        &mut self,
+        sources: &[(String, String)],
+        vocabulary: &[VocabularyEntry],
+    ) {
+        for gap in &mut self.gaps {
+            if gap.kind == GapKind::Untraced
+                && matches!(gap.status, GapStatus::Open | GapStatus::NoAnswer)
+            {
+                gap.candidates = conflict_candidates(gap, sources, vocabulary);
+            }
+        }
+    }
+
+    /// 正文里现有的「【待核实】」占位，全部记成要问用户的缺口（待决事项）。只认占位，不查来源
+    /// 不明的事实：接受进正文的事实起草人已经过目过。
+    pub(crate) fn from_placeholders(text: &str) -> Self {
+        let mut ledger = Self::default();
+        ledger.sync(text, text, &[]);
+        for gap in &mut ledger.gaps {
+            gap.status = GapStatus::NoAnswer;
+        }
+        ledger
     }
 
     /// 核验时发现引用不支持的事实：直接记为「找不到出处」，交用户确认。
@@ -502,6 +545,131 @@ impl Ledger {
         }
         (resolved, handled, pending)
     }
+}
+
+/// 冲突候选最多给几个。
+const MAX_CANDIDATES: usize = 2;
+/// 上下文取几个字比对。
+const ANCHOR_CHARS: usize = 4;
+/// 上下文至少几个字才算数（太短的「于」「共」谁都对得上）。
+const MIN_ANCHOR: usize = 3;
+/// 摘录时事实前后各带几个字。
+const EXCERPT_CHARS: usize = 14;
+
+/// 事实前后的上下文：去掉空白，碰到换行或句末标点就停，各取 [`ANCHOR_CHARS`] 个字。
+fn context(text: &str, start: usize, end: usize) -> (String, String) {
+    let keep = |ch: &char| !ch.is_whitespace() || *ch == '\n';
+    let stop = |ch: &char| *ch == '\n' || is_sentence_end(*ch);
+    let before: Vec<char> = text[..start]
+        .chars()
+        .rev()
+        .filter(keep)
+        .take_while(|ch| !stop(ch))
+        .take(ANCHOR_CHARS)
+        .collect();
+    let after: String = text[end..]
+        .chars()
+        .filter(keep)
+        .take_while(|ch| !stop(ch))
+        .take(ANCHOR_CHARS)
+        .collect();
+    (before.into_iter().rev().collect(), after)
+}
+
+/// 两段上下文对得上：以缺口那边的长度为准，比材料那边离事实最近的同样多个字。
+fn anchors_match(gap: &str, source: &str, at_end: bool) -> bool {
+    let wanted = gap.chars().count();
+    if wanted < MIN_ANCHOR || source.chars().count() < wanted {
+        return false;
+    }
+    let source: String = if at_end {
+        source
+            .chars()
+            .skip(source.chars().count() - wanted)
+            .collect()
+    } else {
+        source.chars().take(wanted).collect()
+    };
+    source == gap
+}
+
+/// 事实前后各带几个字的原文摘录，不跨行。
+fn excerpt(text: &str, start: usize, end: usize) -> String {
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i);
+    let before: Vec<char> = text[line_start..start]
+        .chars()
+        .rev()
+        .take(EXCERPT_CHARS)
+        .collect();
+    let after: String = text[end..line_end].chars().take(EXCERPT_CHARS).collect();
+    let before: String = before.into_iter().rev().collect();
+    format!(
+        "…{}{}{}…",
+        before.trim_start(),
+        &text[start..end],
+        after.trim_end()
+    )
+}
+
+/// 来源不明的事实在材料里「同一处」写的其它值：同类事实（日期对日期、数量对数量），前文或后文
+/// 的几个字一样。纯字面比对，不调模型；对不准的宁可不给，题照样按「来源不明」问。
+fn conflict_candidates(
+    gap: &Gap,
+    sources: &[(String, String)],
+    vocabulary: &[VocabularyEntry],
+) -> Vec<Candidate> {
+    let sentence = strip_citations(&gap.sentence);
+    let Some(pos) = sentence.find(&gap.literal) else {
+        return Vec::new();
+    };
+    let Some(kind) = crate::ai_guard::extract_key_facts(&gap.literal, vocabulary)
+        .into_iter()
+        .find(|fact| fact.value == gap.literal)
+        .map(|fact| fact.kind)
+    else {
+        return Vec::new();
+    };
+    let (before, after) = context(&sentence, pos, pos + gap.literal.len());
+    let same = equivalent_forms(&gap.literal)
+        .iter()
+        .map(|form| squash(form))
+        .collect::<Vec<_>>();
+    let mut found: Vec<Candidate> = Vec::new();
+    for (source, text) in sources {
+        let facts = crate::ai_guard::extract_key_facts(text, vocabulary);
+        let values: Vec<&str> = facts
+            .iter()
+            .filter(|fact| fact.kind == kind)
+            .map(|fact| fact.value.as_str())
+            .collect();
+        for value in &values {
+            // 「2026年10月23日」里抽出的「23日」这类碎片不单独算。
+            if values
+                .iter()
+                .any(|other| other.len() > value.len() && other.contains(*value))
+                || same.contains(&squash(value))
+                || found.iter().any(|c| squash(&c.value) == squash(value))
+            {
+                continue;
+            }
+            let hit = text.match_indices(*value).find(|(start, _)| {
+                let (b, a) = context(text, *start, start + value.len());
+                anchors_match(&before, &b, true) || anchors_match(&after, &a, false)
+            });
+            if let Some((start, _)) = hit {
+                found.push(Candidate {
+                    value: value.to_string(),
+                    source: source.clone(),
+                    excerpt: excerpt(text, start, start + value.len()),
+                });
+                if found.len() == MAX_CANDIDATES {
+                    return found;
+                }
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -598,6 +766,90 @@ mod tests {
         let facts = untraced_facts("请于2026年10月23日前报送。", "", &[]);
         let values: Vec<_> = facts.iter().map(|fact| fact.value.as_str()).collect();
         assert_eq!(values, ["2026年10月23日"], "{values:?}");
+    }
+
+    fn sources(material: &str) -> Vec<(String, String)> {
+        vec![("材料".to_string(), material.to_string())]
+    }
+
+    #[test]
+    fn an_untraced_fact_gets_the_material_value_said_in_the_same_place() {
+        let draft = "截至9月底，全市共排查火灾隐患12项，均已整改。";
+        let material = "据统计，截至9月底全市共排查火灾隐患15项，出动检查人员300人。";
+        let mut ledger = Ledger::default();
+        ledger.sync(draft, material, &[]);
+        ledger.attach_candidates(&sources(material), &[]);
+        let gap = ledger
+            .gaps
+            .iter()
+            .find(|gap| gap.literal == "12项")
+            .expect("12项来源不明");
+        assert_eq!(gap.candidates.len(), 1, "{:?}", gap.candidates);
+        let candidate = &gap.candidates[0];
+        assert_eq!(candidate.value, "15项");
+        assert_eq!(candidate.source, "材料");
+        assert!(
+            candidate.excerpt.contains("火灾隐患15项"),
+            "{}",
+            candidate.excerpt
+        );
+        // 「300人」也是数量，但上下文对不上，不算候选。
+        assert!(!gap.candidates.iter().any(|c| c.value == "300人"));
+
+        // 出成题：材料里的值是推荐项，带出处摘录；选了就把稿里的值换掉。
+        let question = crate::agent::clarify::gap_question(1, gap, &[]);
+        assert!(
+            question.text.contains("「12项」与材料"),
+            "{}",
+            question.text
+        );
+        let first = &question.choices[0];
+        assert_eq!(first.label, "按材料：15项");
+        assert!(first.recommended);
+        assert!(first.detail.contains("火灾隐患15项"));
+        let mut ledger = ledger.clone();
+        let fixed = crate::agent::clarify::apply_gap_replies(
+            draft,
+            &mut ledger,
+            &[question],
+            &[(1, crate::agent::clarify::Reply::Choice(0))],
+        );
+        assert_eq!(fixed, "截至9月底，全市共排查火灾隐患15项，均已整改。");
+    }
+
+    #[test]
+    fn dates_match_on_the_words_after_them_and_unrelated_facts_are_not_candidates() {
+        let draft = "请各单位于10月23日前报送材料。";
+        let material = "各单位须于11月1日前报送材料。会议定于12月5日召开。";
+        let mut ledger = Ledger::default();
+        ledger.sync(draft, material, &[]);
+        ledger.attach_candidates(&sources(material), &[]);
+        let values: Vec<&str> = ledger.gaps[0]
+            .candidates
+            .iter()
+            .map(|c| c.value.as_str())
+            .collect();
+        assert_eq!(values, ["11月1日"]);
+
+        // 材料里只有毫不相干的数字：不给候选，照旧按「来源不明」问。
+        let mut ledger = Ledger::default();
+        ledger.sync(draft, "会议定于12月5日召开。", &[]);
+        ledger.attach_candidates(&sources("会议定于12月5日召开。"), &[]);
+        assert!(ledger.gaps[0].candidates.is_empty());
+    }
+
+    #[test]
+    fn pending_ledger_lists_every_placeholder_in_the_document_for_the_user() {
+        let text =
+            "一、于【待核实：排查完成时限】前完成。二、依据【待核实：上级文件依据】执行，共12起。";
+        let ledger = Ledger::from_placeholders(text);
+        let hints: Vec<&str> = ledger.gaps.iter().map(|gap| gap.hint.as_str()).collect();
+        assert_eq!(
+            hints,
+            ["排查完成时限", "上级文件依据"],
+            "不查来源不明的事实"
+        );
+        assert_eq!(ledger.needs_user().len(), 2, "可检索的占位也问用户");
     }
 
     #[test]

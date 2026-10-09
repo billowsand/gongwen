@@ -740,6 +740,97 @@ fn research_answers_are_written_in_by_a_background_job_and_fall_back_when_the_mo
     assert_eq!(proposal.before, "");
 }
 
+/// 待决事项（`docs/decision-modules.md` 第八节）：正文里的「【待核实】」在提案接受之后也能
+/// 逐条填；答完出提案，正文不动；列出之后正文改过就重新列。
+#[test]
+fn pending_items_in_the_document_can_be_answered_into_a_proposal_later() {
+    let body = "# 关于冬季防火的通知\n\n## 工作安排\n\n请于【待核实：排查完成时限】前完成排查。\n\n联系人：【待核实：联系人】。\n";
+    let mut harness = Harness::new(body);
+    harness.doc.ai_panel.open = true;
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "正文里还有 2 处待核实"), "{texts:?}");
+    assert!(has(&texts, "逐条填写"), "{texts:?}");
+
+    let id = harness
+        .doc
+        .ai_panel
+        .open_pending(body, &[])
+        .expect("正文里有占位");
+    let texts = harness.frame_texts();
+    assert!(has(&texts, "待决事项"), "{texts:?}");
+    assert!(has(&texts, "正文里这几处还没定"), "{texts:?}");
+    assert!(has(&texts, "「排查完成时限」定到什么时候？"), "{texts:?}");
+    assert!(!has(&texts, "逐条填写"), "已经列着，不再提示");
+    assert_eq!(harness.doc.ai_panel.turns[0].state, TurnState::Pending);
+
+    // 一题没填：正文不变，卡片留着。
+    harness.with_page(|page| page.apply_pending_answers(id));
+    assert!(harness.status.contains("都还没填"), "{}", harness.status);
+    assert_eq!(harness.doc.ai_panel.turns.len(), 1);
+
+    // 列出之后正文改过：这批回答不落地，按现在的正文重新列。
+    harness.doc.ai_panel.turns[0].replies[0].custom = "12月1日".into();
+    harness.doc.generated_markdown = body.replace("联系人：【待核实：联系人】。\n", "");
+    harness.with_page(|page| page.apply_pending_answers(id));
+    assert!(harness.status.contains("改过"), "{}", harness.status);
+    let panel = &harness.doc.ai_panel;
+    assert_eq!(panel.turns.len(), 1);
+    assert_eq!(panel.turns[0].state, TurnState::Pending);
+    assert_eq!(panel.turns[0].questions.len(), 1);
+    assert!(panel.turns[0].replies[0].custom.is_empty());
+    let id = panel.turns[0].id;
+
+    // 填了一处：交后台写进段落（模型连不上，退回直接替换），出提案；待决卡片撤掉。
+    harness.doc.ai_panel.turns[0].replies[0].custom = "12月1日".into();
+    harness.config.lm_studio.base_url = "http://127.0.0.1:9".into();
+    harness.config.lm_studio.timeout_seconds = 5;
+    harness.with_page(|page| page.apply_pending_answers(id));
+    assert!(harness.doc.busy, "要填的回答交后台模型写进段落");
+    loop {
+        let message = harness
+            ._keep
+            .recv_timeout(Duration::from_secs(60))
+            .expect("一分钟内应当有结果");
+        let WorkerResult::Doc { job, .. } = message else {
+            continue;
+        };
+        if let crate::app::DocJob::GapRevised(revision) = job {
+            harness.doc.busy = false;
+            crate::ai_panel::finish_research_revision(
+                &mut harness.doc,
+                &harness.config,
+                "按回答修订",
+                revision.before,
+                revision.research,
+                Some(revision.questions),
+            );
+            break;
+        }
+    }
+    let panel = &harness.doc.ai_panel;
+    assert_eq!(panel.turns.len(), 1, "待决卡片交出去就撤掉");
+    assert!(matches!(panel.turns[0].state, TurnState::Proposed(_)));
+    assert!(panel.turns[0].prompt.contains("12月1日"));
+    let proposal = harness.doc.ai_proposal.as_ref().unwrap();
+    assert!(
+        proposal.result.markdown.contains("请于12月1日前完成排查"),
+        "{}",
+        proposal.result.markdown
+    );
+    assert_eq!(proposal.before, harness.doc.generated_markdown);
+    assert!(
+        harness
+            .doc
+            .generated_markdown
+            .contains("【待核实：排查完成时限】"),
+        "仍然只是提案，正文没动"
+    );
+    // 提案没处理时不提示待决事项（正文还会变）。
+    let texts = harness.frame_texts();
+    assert!(!has(&texts, "处待核实"), "{texts:?}");
+}
+
 #[test]
 fn toggling_with_a_selection_locks_it_for_polish() {
     let mut harness = Harness::new("# 标题\n\n一、总体要求\n");

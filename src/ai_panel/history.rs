@@ -59,6 +59,10 @@ pub(crate) fn digest(index: usize, turn: &AiTurn) -> Option<String> {
             let asked: Vec<&str> = turn.questions.iter().map(|q| q.text.as_str()).collect();
             format!("停下来问你：{}（还没答）", asked.join("；"))
         }
+        TurnState::Pending => {
+            let asked: Vec<&str> = turn.questions.iter().map(|q| q.text.as_str()).collect();
+            format!("列出正文里待核实的几处：{}（还没答）", asked.join("；"))
+        }
         TurnState::Stopped | TurnState::Interrupted => "没有做完".to_string(),
         TurnState::Failed(error) => format!("出错了：{}", short(error, 80)),
         TurnState::Waiting | TurnState::Streaming | TurnState::Checking => return None,

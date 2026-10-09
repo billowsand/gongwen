@@ -343,6 +343,33 @@ mod tests {
     }
 
     #[test]
+    fn ask_offers_the_material_value_for_a_conflicting_fact() {
+        let skill = crate::agent::skill::parse(
+            "conflict-test",
+            "---\nname: 冲突测试\ntools: [ask.choice]\nflow:\n  - step: ask\n---\n",
+            "测试",
+        )
+        .unwrap();
+        let model = ScriptedModel::new(|_, _| "无".into());
+        let kb = KeywordKb::disabled();
+        let workspace = "截至9月底，全市共排查火灾隐患12项。";
+        let mut board = Board {
+            request: "截至9月底全市共排查火灾隐患15项。".into(),
+            workspace: workspace.into(),
+            ..Board::default()
+        };
+        board.ledger.sync(workspace, &board.request.clone(), &[]);
+        for gap in &mut board.ledger.gaps {
+            gap.status = crate::agent::gaps::GapStatus::NoAnswer;
+        }
+        let mut driver = Driver::new(&skill, &model, &kb, board);
+        assert!(driver.run().is_none(), "默认附在提案上，不挂起");
+        let question = &driver.board.questions[0];
+        assert_eq!(question.choices[0].label, "按材料：15项");
+        assert!(question.choices[0].recommended);
+    }
+
+    #[test]
     fn old_saved_outline_confirmations_are_upgraded() {
         let skill = skill();
         let model = ScriptedModel::new(|_, _| "背景：原始大纲".into());

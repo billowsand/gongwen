@@ -146,6 +146,7 @@ impl DraftPage<'_> {
     fn ai_panel_ui(&mut self, ui: &mut egui::Ui) {
         self.ai_panel_header(ui);
         ui.add_space(8.0);
+        self.pending_banner_ui(ui);
         egui::Panel::bottom("ai_panel_composer")
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
@@ -153,6 +154,51 @@ impl DraftPage<'_> {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.ai_turns_ui(ui));
+    }
+
+    /// 正文里还有「【待核实】」时，侧栏顶上提示一行、可以逐条填（待决事项）。有任务在跑、
+    /// 有题挂着或有提案没处理时不提示——那时正文还会变。
+    fn pending_banner_ui(&mut self, ui: &mut egui::Ui) {
+        let doc = &*self.doc;
+        if doc.busy
+            || doc.read_only()
+            || doc.ai_proposal.is_some()
+            || doc.ai_panel.pending_blocked()
+        {
+            return;
+        }
+        let count = crate::agent::gaps::find_placeholders(&doc.generated_markdown).len();
+        if count == 0 {
+            return;
+        }
+        let mut open = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.add(theme::Icon::Braces.image_sized(14.0).tint(theme::warn()));
+            ui.label(
+                egui::RichText::new(format!("正文里还有 {count} 处待核实"))
+                    .small()
+                    .color(theme::text_soft()),
+            );
+            if ui
+                .small_button("逐条填写")
+                .on_hover_text("列成题，填完 AI 把答案写进所在段落，改动仍以提案交你确认")
+                .clicked()
+            {
+                open = true;
+            }
+        });
+        ui.add_space(4.0);
+        if open {
+            let document = self.doc.generated_markdown.clone();
+            if self
+                .doc
+                .ai_panel
+                .open_pending(&document, &self.config.vocabulary)
+                .is_none()
+            {
+                *self.status = "正文里已经没有待核实的地方了。".into();
+            }
+        }
     }
 
     fn ai_panel_header(&mut self, ui: &mut egui::Ui) {
@@ -383,16 +429,17 @@ impl DraftPage<'_> {
             },
             Some(CardAction::Revert(turn_id, gap_id)) => self.revert_generalized(turn_id, gap_id),
             Some(CardAction::Answer(id)) => {
-                let asking = self
+                let state = self
                     .doc
                     .ai_panel
                     .turns
                     .iter()
-                    .any(|turn| turn.id == id && turn.state == TurnState::Asking);
-                if asking {
-                    self.answer_suspended(id);
-                } else {
-                    self.apply_research_answers(id);
+                    .find(|turn| turn.id == id)
+                    .map(|turn| turn.state.clone());
+                match state {
+                    Some(TurnState::Asking) => self.answer_suspended(id),
+                    Some(TurnState::Pending) => self.apply_pending_answers(id),
+                    _ => self.apply_research_answers(id),
                 }
             }
             Some(CardAction::ReviseList(id)) => self.revise_list(id),
@@ -557,6 +604,9 @@ fn turn_card(
                     TurnState::Asking => {
                         theme::chip(ui, "等你回答", theme::warn(), theme::warn_soft());
                     }
+                    TurnState::Pending => {
+                        theme::chip(ui, "待决事项", theme::warn(), theme::warn_soft());
+                    }
                     TurnState::Proposed(_) => {
                         theme::chip(ui, "待确认", theme::accent(), theme::accent_soft());
                     }
@@ -699,6 +749,15 @@ fn turn_card(
             ui.add_space(6.0);
             let labels = asking_labels(&turn.questions);
             questions_ui(ui, turn, labels, action);
+        }
+        TurnState::Pending => {
+            ui.add_space(6.0);
+            questions_ui(
+                ui,
+                turn,
+                ("正文里这几处还没定", "按回答修订", "先不填"),
+                action,
+            );
         }
         TurnState::Proposed(summary) => {
             ui.add_space(6.0);
