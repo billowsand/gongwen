@@ -3284,3 +3284,394 @@ fn long_phase_and_steps_stay_inside_the_panel() {
         "侧栏被内容撑宽：{panel_rects:?}"
     );
 }
+
+// —— 要素建议卡（docs/element-fill-design.md 3.3）——
+
+mod field_card_cases {
+    use super::*;
+    use crate::ai_panel::field_card::{self, FieldCardRow, FieldCardState};
+    use crate::element_fields::{FieldId, FieldSuggestion};
+    use crate::models::{TemplateKind, VocabularyCategory, VocabularyEntry};
+
+    /// 甲局（带发函代字、层级码 00）、乙局（01）、丙局（02）；张三挂在甲局、电话 123。
+    fn vocabulary() -> Vec<VocabularyEntry> {
+        let unit = |name: &str, code: &str| VocabularyEntry {
+            canonical: name.into(),
+            code: code.into(),
+            department_code: (name.to_string() + "函"),
+            ..Default::default()
+        };
+        vec![
+            unit("甲局", "00"),
+            unit("乙局", "01"),
+            unit("丙局", "02"),
+            VocabularyEntry {
+                canonical: "张三".into(),
+                category: VocabularyCategory::Person,
+                unit: "00".into(),
+                phone: "123".into(),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn suggestion(field: FieldId, previous: &str, value: &str, conflict: bool) -> FieldSuggestion {
+        FieldSuggestion {
+            field,
+            value: value.into(),
+            previous: previous.into(),
+            source: "材料原文：「测试」".into(),
+            conflict,
+        }
+    }
+
+    /// 一篇公函 + 一张挂着建议的运行中轮次。
+    fn harness_with_cards(rows: Vec<FieldSuggestion>) -> (Harness, u64) {
+        let mut harness = Harness::new("");
+        harness.config.vocabulary = vocabulary();
+        harness.doc.draft.kind = TemplateKind::OfficialLetter;
+        harness.doc.ai_panel.open = true;
+        let id = harness.doc.ai_panel.push_turn(
+            "测试".into(),
+            "起草一份函".into(),
+            vec![],
+            Some(panel_request(Some(RESEARCH_DRAFT), "起草一份函")),
+        );
+        harness.doc.ai_panel.offer_field_suggestions(rows);
+        (harness, id)
+    }
+
+    /// 直接建议经事件通路立刻出卡，不挡起草（轮次仍在跑）。
+    #[test]
+    fn direct_suggestions_show_up_as_a_card_without_blocking() {
+        let (mut harness, id) = harness_with_cards(vec![
+            suggestion(FieldId::Recipient, "", "甲局", false),
+            suggestion(FieldId::ContactPerson, "", "张三", false),
+        ]);
+        assert!(harness.doc.ai_panel.turn_mut(id).unwrap().state.running());
+        let texts = harness.frame_texts();
+        assert!(has(&texts, "要素建议"), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("甲局")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("张三")), "{texts:?}");
+        assert!(has(&texts, "全部采纳"), "{texts:?}");
+        assert!(has(&texts, "材料原文"), "{texts:?}");
+    }
+
+    /// 答完题选定的建议从黑板合进卡片；与事件通路的按（字段，值）去重。
+    #[test]
+    fn answered_field_questions_merge_into_the_same_card() {
+        use crate::agent::clarify::{Action, Choice, Question, Target};
+        let mut harness = Harness::new("");
+        harness.config.vocabulary = vocabulary();
+        harness.doc.draft.kind = TemplateKind::OfficialLetter;
+        harness.doc.ai_panel.open = true;
+        let question = Question {
+            id: 1,
+            text: "主送单位是哪些？（可多选）".into(),
+            choices: vec![Choice {
+                label: "甲局".into(),
+                detail: "材料原文里写的就是它".into(),
+                recommended: true,
+                action: Action::Fill("甲局".into()),
+            }],
+            custom_hint: None,
+            prefill: String::new(),
+            skippable: true,
+            multi: false,
+            target: Target::Field(FieldId::Recipient),
+        };
+        let request = panel_request(Some(RESEARCH_DRAFT), "起草一份商洽函");
+        let id = asking_turn(&mut harness, request, vec![question], 1);
+        // 程序替用户选好了推荐项，直接交。
+        harness.with_page(|page| page.answer_suspended(id));
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        let rows = &turn.field_cards;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].suggestion.field, FieldId::Recipient);
+        assert_eq!(rows[0].suggestion.value, "甲局");
+        assert_eq!(rows[0].suggestion.source, "起草人从标准词库选定");
+        assert_eq!(rows[0].state, FieldCardState::Pending);
+        // 回答同时记进已确认信息（随这一轮的原话交给续跑的起草）。
+        assert!(
+            turn.request
+                .as_ref()
+                .unwrap()
+                .notes
+                .iter()
+                .any(|n| n == "主送单位：甲局（起草人从标准词库选定）"),
+            "{:?}",
+            turn.request.as_ref().unwrap().notes
+        );
+    }
+
+    /// 采纳写进表单：发文单位带出发函代字、联系人带出电话、多值按词库顺序排。
+    #[test]
+    fn adopting_writes_the_form_through_apply_field() {
+        let (mut harness, id) = harness_with_cards(vec![
+            suggestion(FieldId::IssuingUnit, "", "甲局", false),
+            suggestion(FieldId::Recipient, "", "乙局、甲局", false),
+            suggestion(FieldId::ContactPerson, "", "张三", false),
+        ]);
+        harness.with_page(|page| page.adopt_field_suggestion(id, 0, false));
+        assert_eq!(harness.doc.draft.profile.issuing_unit, "甲局");
+        assert_eq!(
+            harness.doc.draft.profile.department_code, "甲局函",
+            "代字带出"
+        );
+        harness.with_page(|page| page.adopt_field_suggestion(id, 1, false));
+        assert_eq!(
+            harness.doc.draft.profile.recipient, "甲局、乙局",
+            "多值按词库顺序排（甲局 00 在乙局 01 前）"
+        );
+        harness.with_page(|page| page.adopt_field_suggestion(id, 2, false));
+        assert_eq!(harness.doc.draft.profile.contact_person, "张三");
+        assert_eq!(
+            harness.doc.draft.profile.contact_phone, "123",
+            "电话跟联系人带出"
+        );
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert!(
+            turn.field_cards
+                .iter()
+                .all(|row| row.state == FieldCardState::Adopted)
+        );
+        assert!(
+            turn.notes
+                .iter()
+                .any(|n| n == "已采纳：主送单位 → 甲局、乙局"),
+            "{:?}",
+            turn.notes
+        );
+    }
+
+    /// 全部采纳只对待采纳且不冲突的行；冲突行留着逐条点「替换」。
+    #[test]
+    fn adopt_all_skips_conflicts_and_they_are_replaced_one_by_one() {
+        let (mut harness, id) = harness_with_cards(vec![
+            suggestion(FieldId::Recipient, "", "甲局", false),
+            suggestion(FieldId::CopiesTo, "丙局", "乙局", true),
+        ]);
+        // 冲突行的「生成时表单值」是丙局：表单里先填上它。
+        harness.doc.draft.profile.copies_to = "丙局".into();
+        harness.with_page(|page| page.adopt_all_field_suggestions(id));
+        assert_eq!(harness.doc.draft.profile.recipient, "甲局");
+        assert_eq!(
+            harness.doc.draft.profile.copies_to, "丙局",
+            "冲突行不被全部采纳碰到"
+        );
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert_eq!(turn.field_cards[1].state, FieldCardState::Pending);
+        // 冲突行逐条点：替换掉表单里的丙局。
+        harness.with_page(|page| page.adopt_field_suggestion(id, 1, false));
+        assert_eq!(harness.doc.draft.profile.copies_to, "乙局");
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert_eq!(turn.field_cards[1].state, FieldCardState::Adopted);
+    }
+
+    /// 过期检测：表单值和生成建议时不同就标「表单已改动」、不覆盖；再点「仍然采纳」才写。
+    #[test]
+    fn a_stale_row_needs_a_second_confirming_click() {
+        let (mut harness, id) =
+            harness_with_cards(vec![suggestion(FieldId::Recipient, "", "甲局", false)]);
+        // 等待期间用户在表单里填了乙局。
+        harness.doc.draft.profile.recipient = "乙局".into();
+        harness.with_page(|page| page.adopt_field_suggestion(id, 0, false));
+        assert_eq!(harness.doc.draft.profile.recipient, "乙局", "不覆盖");
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert_eq!(turn.field_cards[0].state, FieldCardState::Stale);
+        assert!(turn.field_cards[0].note.contains("表单已改动"));
+        // 再点一次（仍然采纳）才写。
+        harness.with_page(|page| page.adopt_field_suggestion(id, 0, true));
+        assert_eq!(harness.doc.draft.profile.recipient, "甲局");
+    }
+
+    /// 词库校验：建议值已不在词库里不能采纳；文种不适用也不能采纳。
+    #[test]
+    fn adoption_requires_the_value_in_vocabulary_and_the_right_kind() {
+        let (mut harness, id) = harness_with_cards(vec![
+            suggestion(FieldId::Recipient, "", "甲局", false),
+            suggestion(FieldId::CopiesTo, "", "乙局", false),
+        ]);
+        // 甲局从词库里删了。
+        harness
+            .config
+            .vocabulary
+            .retain(|entry| entry.canonical != "甲局");
+        harness.with_page(|page| page.adopt_field_suggestion(id, 0, false));
+        assert!(harness.doc.draft.profile.recipient.is_empty());
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert_eq!(turn.field_cards[0].state, FieldCardState::Pending);
+        assert!(
+            turn.field_cards[0].note.contains("甲局已不在标准词库"),
+            "{}",
+            turn.field_cards[0].note
+        );
+        // 文种改成白头件：主送不适用。
+        harness.doc.draft.kind = TemplateKind::WhitePaper;
+        harness.with_page(|page| page.adopt_field_suggestion(id, 1, false));
+        assert!(harness.doc.draft.profile.copies_to.is_empty());
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert!(turn.field_cards[1].note.contains("不适用"));
+    }
+
+    /// 撤销整体还原采纳前的表单（含互斥剔除的连带变化）；表单动过就不允许撤销。
+    #[test]
+    fn undo_restores_the_whole_profile_only_if_untouched_since() {
+        let (mut harness, id) = harness_with_cards(vec![
+            suggestion(FieldId::IssuingUnit, "", "甲局", false),
+            // 采纳发文甲局会把主送里的甲局剔除——这是要一起撤回的连带变化。
+            suggestion(FieldId::Recipient, "甲局、乙局", "丙局", false),
+        ]);
+        harness.doc.draft.profile.recipient = "甲局、乙局".into();
+        harness.with_page(|page| page.adopt_field_suggestion(id, 1, false));
+        assert_eq!(harness.doc.draft.profile.recipient, "丙局");
+        harness.with_page(|page| page.adopt_field_suggestion(id, 0, false));
+        assert_eq!(
+            harness.doc.draft.profile.recipient, "丙局",
+            "发文与主送不冲突时不动主送"
+        );
+        // 表单从那以后没动过：撤销发文单位，代字等连带一起还原。
+        let before = harness.doc.draft.profile.clone();
+        harness.with_page(|page| page.undo_field_suggestion(id, 0));
+        assert_eq!(harness.doc.draft.profile.issuing_unit, "");
+        assert_eq!(harness.doc.draft.profile.department_code, "");
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert_eq!(turn.field_cards[0].state, FieldCardState::Undone);
+        // 采纳主送（丙局）后又在表单里改过：不允许撤销。
+        // （恢复 `before` 后表单值与建议生成时已不同，这次采纳走「仍然采纳」。）
+        harness.doc.draft.profile = before;
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        turn.field_cards[1].state = FieldCardState::Pending;
+        harness.with_page(|page| page.adopt_field_suggestion(id, 1, true));
+        harness.doc.draft.profile.copies_to = "乙局".into();
+        harness.with_page(|page| page.undo_field_suggestion(id, 1));
+        assert_eq!(
+            harness.doc.draft.profile.recipient, "丙局",
+            "表单动过了不还原"
+        );
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert!(
+            turn.field_cards[1]
+                .note
+                .contains("表单已改动，请在表单里改")
+        );
+    }
+
+    /// 整轮重来（文种变了 reroute）清空这一轮的建议卡。
+    #[test]
+    fn rerouting_clears_the_card() {
+        use crate::agent::clarify::kind_question;
+        let (mut harness, id) =
+            harness_with_cards(vec![suggestion(FieldId::Recipient, "", "甲局", false)]);
+        // 挂上定文种题，选「切换为研究报告」触发整轮重来。
+        let question = kind_question("写一个研究报告", TemplateKind::OfficialLetter).unwrap();
+        let board = crate::agent::board::Board {
+            draft: harness.doc.draft.clone(),
+            ..Default::default()
+        };
+        harness
+            .doc
+            .ai_panel
+            .ask(Box::new(crate::ai_panel::SkillRun {
+                skill: crate::agent::skill::builtin(RESEARCH_DRAFT).unwrap(),
+                suspension: crate::agent::engine::Suspension {
+                    checkpoint: crate::agent::checkpoint::Checkpoint {
+                        at: vec![0],
+                        reason: crate::agent::checkpoint::Reason::Ask,
+                        label: String::new(),
+                        board,
+                        partial: false,
+                    },
+                    questions: vec![question],
+                    save_as: None,
+                    decision: Default::default(),
+                },
+                use_rag: false,
+            }));
+        assert!(
+            !harness
+                .doc
+                .ai_panel
+                .turn_mut(id)
+                .unwrap()
+                .field_cards
+                .is_empty()
+        );
+        harness.with_page(|page| page.answer_suspended(id));
+        assert!(
+            harness
+                .doc
+                .ai_panel
+                .turn_mut(id)
+                .unwrap()
+                .field_cards
+                .is_empty(),
+            "整轮重来清卡"
+        );
+    }
+
+    /// 红线 2：任意建议行采纳、撤销之后，授权类字段一个都没变。
+    #[test]
+    fn adopting_and_undoing_never_touches_authorized_fields() {
+        let (mut harness, id) = harness_with_cards(vec![
+            suggestion(FieldId::IssuingUnit, "", "甲局", false),
+            suggestion(FieldId::Recipient, "", "甲局、乙局", false),
+            suggestion(FieldId::ContactPerson, "", "张三", false),
+        ]);
+        harness.doc.draft.date = "2026年10月10日".into();
+        harness.doc.draft.date_is_auto = false;
+        harness.doc.draft.profile.document_year = "2026".into();
+        harness.doc.draft.profile.document_number = "5".into();
+        harness.doc.draft.profile.number_copies = true;
+        let authorized = |doc: &crate::draft_page::DraftSession| {
+            (
+                doc.draft.profile.security_level.clone(),
+                doc.draft.profile.security_period.clone(),
+                doc.draft.profile.document_year.clone(),
+                doc.draft.profile.document_number.clone(),
+                doc.draft.profile.number_copies,
+                doc.draft.date.clone(),
+                doc.draft.date_is_auto,
+            )
+        };
+        let before = authorized(&harness.doc);
+        for row in 0..3 {
+            harness.with_page(|page| page.adopt_field_suggestion(id, row, false));
+        }
+        assert_eq!(authorized(&harness.doc), before, "采纳不碰授权类");
+        for row in 0..3 {
+            harness.with_page(|page| page.undo_field_suggestion(id, row));
+        }
+        assert_eq!(authorized(&harness.doc), before, "撤销不碰授权类");
+    }
+
+    /// 交付提案时的提醒：列出待采纳的建议；已采纳的、表单已填成建议值的不算。
+    #[test]
+    fn proposal_reminder_lists_pending_suggestions() {
+        let mut draft = crate::models::DraftInput {
+            kind: TemplateKind::OfficialLetter,
+            ..Default::default()
+        };
+        let rows = vec![
+            FieldCardRow::new(suggestion(FieldId::Recipient, "", "甲局", false)),
+            FieldCardRow::new(suggestion(FieldId::CopiesTo, "", "乙局", false)),
+        ];
+        let text = field_card::proposal_reminder(&rows, &draft).expect("有待采纳的");
+        assert!(text.contains("2 条"), "{text}");
+        assert!(text.contains("主送单位：甲局"), "{text}");
+        assert!(text.contains("抄送单位：乙局"), "{text}");
+        // 表单已填成建议值（顺序不同也算）：不再提醒。
+        draft.profile.recipient = "甲局".into();
+        draft.profile.copies_to = "乙局".into();
+        assert!(field_card::proposal_reminder(&rows, &draft).is_none());
+        // 已采纳的不算。
+        let mut adopted = FieldCardRow::new(suggestion(FieldId::Recipient, "", "甲局", false));
+        adopted.state = FieldCardState::Adopted;
+        let rows = vec![
+            adopted,
+            FieldCardRow::new(suggestion(FieldId::CopiesTo, "", "丙局", false)),
+        ];
+        let text = field_card::proposal_reminder(&rows, &draft).expect("还有一条");
+        assert!(text.contains("1 条"), "{text}");
+    }
+}

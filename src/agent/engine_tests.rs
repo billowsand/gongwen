@@ -1660,7 +1660,7 @@ fn predraft_field_extraction_suggests_asks_and_lands_on_the_board() {
         false,
     );
     request.draft.kind = TemplateKind::OfficialLetter;
-    let (outcome, _, board) = run_board_vocab(
+    let (outcome, events, board) = run_board_vocab(
         board_of(&request),
         &skill,
         &field_vocabulary(),
@@ -1671,6 +1671,14 @@ fn predraft_field_extraction_suggests_asks_and_lands_on_the_board() {
     let Outcome::Suspended(suspension) = outcome.unwrap() else {
         panic!("发文单位没提，动笔前要出题");
     };
+    // 不出题的直接建议经事件立刻送出（界面挂到这一轮的建议卡上，起草照常跑）。
+    let emitted = events.iter().find_map(|event| match event {
+        Event::FieldSuggestions(list) => Some(list),
+        _ => None,
+    });
+    let emitted = emitted.expect("直接建议要发 FieldSuggestions 事件");
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].field, crate::element_fields::FieldId::Recipient);
     // 发文单位与联系人两道字段题：主送是唯一对上的建议，「何人」被字段题盖住不出题。
     let targets: Vec<_> = suspension.questions.iter().map(|q| q.target).collect();
     assert_eq!(
