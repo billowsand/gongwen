@@ -400,6 +400,15 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    /// 未入库的新稿也需要稳定的模型会话标识；以后存盘沿用它。
+    pub(crate) fn model_session_id(&mut self) -> String {
+        if self.id.is_empty() {
+            self.id = uuid::Uuid::new_v4().to_string();
+            self.created_at = now();
+        }
+        self.id.clone()
+    }
+
     /// 下一次落盘时重写会话抬头（切过来的会话要标成当前）。
     pub(crate) fn force_meta_write(&mut self) {
         self.saved_meta = Some(0);
@@ -691,6 +700,16 @@ impl AiPanel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_session_id_is_stable_before_and_after_adoption() {
+        let mut panel = super::super::AiPanel::default();
+        let id = panel.session.model_session_id();
+        assert!(!id.is_empty());
+        assert_eq!(panel.session.model_session_id(), id);
+        panel.adopt_session(42);
+        assert_eq!(panel.session.model_session_id(), id);
+    }
+
     use super::*;
     use crate::agent::board::Board;
     use crate::agent::clarify::{Action, Choice, Target};

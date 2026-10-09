@@ -816,6 +816,9 @@ pub enum ReasoningFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LmStudioConfig {
+    /// 运行时会话标识：侧栏用已保存的会话 UUID，独立测试用临时 UUID；不写入配置。
+    #[serde(skip)]
+    pub session_id: String,
     /// 旧字段：新配置写的是 `AppConfig::providers` + `draft_model`，这里只在
     /// 迁移前（或测试直填）承载内联地址；迁移后清空并不再序列化。
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -837,6 +840,7 @@ pub struct LmStudioConfig {
 impl Default for LmStudioConfig {
     fn default() -> Self {
         Self {
+            session_id: uuid::Uuid::new_v4().to_string(),
             base_url: "http://127.0.0.1:1234/v1".into(),
             model: String::new(),
             api_key: String::new(),
@@ -985,6 +989,7 @@ impl ReviseModelConfig {
             }
         };
         LmStudioConfig {
+            session_id: draft_model.session_id.clone(),
             base_url: pick(&self.base_url, &draft_model.base_url),
             model: self.model.trim().to_string(),
             api_key: pick(&self.api_key, &draft_model.api_key),
@@ -2276,6 +2281,7 @@ impl AppConfig {
         let mut config = if revise.enabled && !revise.model_ref.is_empty() {
             let provider = self.require_provider(&revise.model_ref.provider_id, "文字复核")?;
             LmStudioConfig {
+                session_id: draft.session_id.clone(),
                 base_url: provider.base_url.clone(),
                 model: revise.model_ref.model.trim().to_string(),
                 api_key: provider.api_key.clone(),

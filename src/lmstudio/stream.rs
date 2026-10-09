@@ -154,6 +154,7 @@ fn stream_once(
     let mut http = client
         .post(super::endpoint(config, "chat/completions"))
         .json(&payload);
+    http = super::request_headers(http, config);
     if !config.api_key.trim().is_empty() {
         http = http.bearer_auth(config.api_key.trim());
     }

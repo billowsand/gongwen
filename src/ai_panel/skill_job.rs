@@ -307,7 +307,8 @@ impl DraftPage<'_> {
             }
             _ => None,
         };
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        config.lm_studio.session_id = self.doc.ai_panel.session.model_session_id();
         // 接口定义与密钥在界面线程读：测试替换的配置目录只对当前线程有效。
         let (apis, secrets) = match (ApiStore::load(), ApiSecrets::load()) {
             (Ok(apis), Ok(secrets)) => (apis, secrets),
@@ -657,7 +658,8 @@ impl DraftPage<'_> {
         };
         let (key, seq) = self.begin_job();
         *self.status = "正在压缩会话…".into();
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        config.lm_studio.session_id = self.doc.ai_panel.session.model_session_id();
         let tx = self.sender.clone();
         std::thread::spawn(move || {
             let model = LmBackend::new(&config, Arc::new(AtomicBool::new(false)));
@@ -1100,7 +1102,8 @@ impl DraftPage<'_> {
         let (key, seq) = self.begin_job();
         let cancel = Arc::new(AtomicBool::new(false));
         self.doc.ai_panel.cancel = Some(cancel.clone());
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        config.lm_studio.session_id = self.doc.ai_panel.session.model_session_id();
         let tx = self.sender.clone();
         std::thread::spawn(move || {
             let model = LmBackend::new(&config, cancel);

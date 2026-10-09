@@ -103,6 +103,24 @@ fn endpoint(config: &LmStudioConfig, path: &str) -> String {
     format!("{}/{}", config.base_url.trim_end_matches('/'), path)
 }
 
+/// 所有补全共用身份头；重试与工具轮次沿用同一会话，其他服务商不发送 Go 专用头。
+fn request_headers(
+    request: reqwest::blocking::RequestBuilder,
+    config: &LmStudioConfig,
+) -> reqwest::blocking::RequestBuilder {
+    let request = request.header(
+        reqwest::header::USER_AGENT,
+        concat!("gongwen-assistant/", env!("CARGO_PKG_VERSION")),
+    );
+    if crate::models::preset_for_url(&config.base_url)
+        .is_some_and(|preset| preset.id == "opencode-go")
+    {
+        request.header("x-opencode-session", &config.session_id)
+    } else {
+        request
+    }
+}
+
 /// 列出任意 OpenAI 兼容端点已加载的模型。各提供商探测时各用各的地址。
 pub fn list_models_at(base_url: &str, api_key: &str, timeout_seconds: u64) -> Result<Vec<String>> {
     let client = crate::net::client(base_url, timeout_seconds)?;
@@ -416,6 +434,7 @@ fn complete_once(
     let mut request = client
         .post(endpoint(config, "chat/completions"))
         .json(&payload);
+    request = request_headers(request, config);
     if !config.api_key.trim().is_empty() {
         request = request.bearer_auth(config.api_key.trim());
     }
@@ -551,5 +570,58 @@ fn empty_content_text(
         format!("模型输出在 {max_tokens} token 处被截断，且截断前没有正文")
     } else {
         "模型服务未返回正文（choices[0].message.content 为空）".to_string()
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn go_headers_keep_session_across_requests_and_config_clones() {
+        let config = LmStudioConfig {
+            base_url: "https://opencode.ai/zen/go/v1/".into(),
+            ..Default::default()
+        };
+        let client = Client::new();
+        for current in [&config, &config.clone()] {
+            let request =
+                request_headers(client.post(endpoint(current, "chat/completions")), current)
+                    .build()
+                    .unwrap();
+            assert_eq!(request.headers()["x-opencode-session"], config.session_id);
+            assert_eq!(
+                request.headers()[reqwest::header::USER_AGENT],
+                concat!("gongwen-assistant/", env!("CARGO_PKG_VERSION"))
+            );
+        }
+        assert_ne!(config.session_id, LmStudioConfig::default().session_id);
+    }
+
+    #[test]
+    fn other_providers_do_not_receive_go_session() {
+        let config = LmStudioConfig::default();
+        let request = request_headers(
+            Client::new().post(endpoint(&config, "chat/completions")),
+            &config,
+        )
+        .build()
+        .unwrap();
+        assert!(!request.headers().contains_key("x-opencode-session"));
+    }
+
+    #[test]
+    fn runtime_session_is_not_saved_and_roles_share_it() {
+        let mut config = crate::models::AppConfig::default();
+        config.lm_studio.model = "测试模型".into();
+        let draft = config.draft_chat().unwrap();
+        let assist = config.assist_chat().unwrap();
+        assert!(!draft.session_id.is_empty());
+        assert_eq!(draft.session_id, assist.session_id);
+        let value = serde_json::to_value(&draft).unwrap();
+        assert!(value.get("session_id").is_none());
+        let restored: LmStudioConfig = serde_json::from_value(value).unwrap();
+        assert!(!restored.session_id.is_empty());
+        assert_ne!(restored.session_id, draft.session_id);
     }
 }

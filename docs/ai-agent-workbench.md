@@ -486,6 +486,12 @@ src/ai_panel/       侧栏界面：composer、cards、stream_view、outline_card
   选择模型。启动迁移会补齐旧版原名且地址为空的 Go 条目，保留已有密钥、模型与自定义地址。
   官方端点说明见 <https://docs.opencode.ai/docs/go/#endpoints>；当前调用链使用
   `chat/completions`，仅适用该协议的模型，其他协议的模型仍需另行接入。
+  同日补齐 Go 请求身份头：普通补全、流式补全与原生工具调用共用
+  `gongwen-assistant/<版本>` User-Agent 与 `x-opencode-session`。侧栏任务、追问、
+  历史压缩和检查点续跑使用已有会话 UUID，起草、辅助与备用模型共享；独立模型测试
+  使用临时 UUID，标识不写入 config.json。其他提供商不发送 Go 专用头。
+  Go 官方要求典型编程智能体流量，公文用途仍需服务商兼容性验收：
+  <https://opencode.ai/docs/go/#where-can-i-use-it>。
 - 已知边界：vLLM 的默认地址留空待填；DMXAPI 默认
   `https://www.dmxapi.cn/v1`（.com 后缀也常见，可在卡片上改）。提供商的「用途标签」
   只用于选择器排序，不做硬过滤。
