@@ -274,9 +274,8 @@ pub(crate) struct ListConfirm {
 
 ### 第 ② 期（2026-10-09，已完成，待 GUI 真机验收）
 
-在分支 `feat/decision-phase2`（worktree `tmp/decision-phase2`）上做：同期 `main` 的工作区里有
-别人在改 `src/ai_panel/`（粘贴材料），没编译通过，为了不互相踩分开做，合并时留意
-`ai_panel.rs`、`skill_job.rs`、`ui_tests.rs` 的冲突。
+在分支 `feat/decision-phase2` 上做（同期 `main` 在改侧栏粘贴材料），当天合并回 `main`，
+无冲突，合并后 fmt / clippy / 全部测试通过；分支已删。
 
 **改动**
 
