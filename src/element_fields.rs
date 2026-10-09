@@ -208,7 +208,18 @@ fn uses_joint_responsible(profile: &TemplateProfile, kind: TemplateKind) -> bool
 }
 
 /// 词库里某个人员绑定的电话；查不到（或词库里没维护电话）返回空串。
-fn person_phone_of(vocabulary: &[VocabularyEntry], name: &str) -> String {
+///
+/// 先在承办单位可选的人里找（与表单联系人下拉的「人随事走」同一规则），词库里不同单位
+/// 有同名的人时才不会带错电话；承办单位下没有这个人再按全词库第一个同名的取。
+fn person_phone_of(vocabulary: &[VocabularyEntry], unit: &str, name: &str) -> String {
+    if !unit.trim().is_empty()
+        && let Some((_, phone)) = UnitDisplay::new(vocabulary)
+            .responsible_people_of(unit)
+            .into_iter()
+            .find(|(person, _)| person == name)
+    {
+        return phone.trim().to_string();
+    }
     vocabulary
         .iter()
         .find(|entry| {
@@ -296,9 +307,13 @@ pub(crate) fn apply_profile_field(
         }
         FieldId::ContactPerson => {
             // 电话跟联系人从词库带出；词库外的人名不带电话（AI 侧的值必须先过词库校验）。
-            let phone = person_phone_of(vocabulary, value);
             if uses_joint_responsible(profile, kind) {
                 let mut entries = joint_responsible_entries(profile);
+                let unit = entries
+                    .first()
+                    .map(|first| first.unit.clone())
+                    .unwrap_or_default();
+                let phone = person_phone_of(vocabulary, &unit, value);
                 match entries.first_mut() {
                     Some(first) => {
                         first.name = value.to_string();
@@ -313,8 +328,9 @@ pub(crate) fn apply_profile_field(
                 }
                 sync_joint_responsible(profile, &entries);
             } else {
+                profile.contact_phone =
+                    person_phone_of(vocabulary, &profile.responsible_unit, value);
                 profile.contact_person = value.to_string();
-                profile.contact_phone = phone;
             }
         }
         FieldId::ContactPhone => {
@@ -553,6 +569,28 @@ mod tests {
             &vocabulary,
         );
         assert_eq!(draft.profile.contact_phone, "");
+    }
+
+    /// 不同单位有同名的人：电话按承办单位下的那位带，不按词库里第一个同名的。
+    #[test]
+    fn same_name_contacts_take_the_phone_of_the_responsible_unit() {
+        let mut vocabulary = vocabulary();
+        vocabulary.push(VocabularyEntry {
+            canonical: "张三".into(),
+            category: VocabularyCategory::Person,
+            unit: "01".into(),
+            phone: "789".into(),
+            ..Default::default()
+        });
+        let mut draft = draft_of(TemplateKind::OfficialLetter);
+        apply_field(&mut draft, FieldId::ResponsibleUnit, "乙局", &vocabulary);
+        apply_field(&mut draft, FieldId::ContactPerson, "张三", &vocabulary);
+        assert_eq!(draft.profile.contact_phone, "789");
+
+        let mut draft = draft_of(TemplateKind::RedHeadApproval);
+        apply_field(&mut draft, FieldId::ResponsibleUnit, "乙局", &vocabulary);
+        apply_field(&mut draft, FieldId::ContactPerson, "张三", &vocabulary);
+        assert_eq!(FieldId::ContactPhone.read(&draft), "789");
     }
 
     #[test]
