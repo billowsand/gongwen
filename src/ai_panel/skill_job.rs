@@ -1683,6 +1683,7 @@ impl DraftPage<'_> {
             let Some(turn) = doc.ai_panel.turn_mut(turn_id) else {
                 return;
             };
+            let blocker = field_card::undo_blocker(&turn.field_cards, row_index, &doc.draft);
             let Some(row) = turn.field_cards.get_mut(row_index) else {
                 return;
             };
@@ -1690,7 +1691,7 @@ impl DraftPage<'_> {
                 return;
             }
             row.note.clear();
-            if let Some(reason) = field_card::undo_blocker(row, &doc.draft) {
+            if let Some(reason) = blocker {
                 row.note = reason;
                 return;
             }

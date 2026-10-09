@@ -152,18 +152,38 @@ pub(crate) fn adoption_blocker(
 }
 
 /// 撤销是否允许：表单从采纳那一刻起没再动过（当前版式要素与采纳后的快照一致）。
-pub(crate) fn undo_blocker(row: &FieldCardRow, draft: &DraftInput) -> Option<String> {
-    let Some(after) = &row.after else {
+/// 动过表单的是这张卡上后采纳的另一条时，提示先撤那一条（逐条倒着撤就能撤回去），
+/// 别让人以为只能去表单里手改。
+pub(crate) fn undo_blocker(
+    rows: &[FieldCardRow],
+    index: usize,
+    draft: &DraftInput,
+) -> Option<String> {
+    let Some(after) = rows.get(index).and_then(|row| row.after.as_ref()) else {
         return Some("这条没有可撤销的采纳记录。".into());
     };
-    if draft.profile != **after {
-        return Some("表单已改动，请在表单里改。".into());
+    if draft.profile == **after {
+        return None;
     }
-    None
+    let later = rows.iter().enumerate().find(|(other, row)| {
+        *other != index
+            && row.state == FieldCardState::Adopted
+            && row.after.as_deref() == Some(&draft.profile)
+    });
+    Some(match later {
+        Some((_, row)) => format!(
+            "之后又采纳了「{}」：先撤销那一条，再撤这一条。",
+            row.suggestion.field.label()
+        ),
+        None => "表单已改动，请在表单里改。".into(),
+    })
 }
 
 /// 交付提案时的提醒文字；没有待采纳的返回 None。表单已经填成建议值的行
 /// （用户在等待期间自己填了）不算待采纳。
+///
+/// 不冲突的建议交给了起草（正文按它写），冲突的「替换」建议没交（`prepare.rs` 只记
+/// 不冲突的），两类分开说，别把冲突的也说成「正文是按它们写的」。
 pub(crate) fn proposal_reminder(rows: &[FieldCardRow], draft: &DraftInput) -> Option<String> {
     let pending: Vec<&FieldCardRow> = pending_rows(rows)
         .into_iter()
@@ -174,18 +194,30 @@ pub(crate) fn proposal_reminder(rows: &[FieldCardRow], draft: &DraftInput) -> Op
             )
         })
         .collect();
-    if pending.is_empty() {
-        return None;
+    let list = |conflict: bool| {
+        pending
+            .iter()
+            .filter(|row| row.suggestion.conflict == conflict)
+            .map(|row| format!("{}：{}", row.suggestion.field.label(), row.suggestion.value))
+            .collect::<Vec<_>>()
+    };
+    let (written, conflicting) = (list(false), list(true));
+    let mut parts = Vec::new();
+    if !written.is_empty() {
+        parts.push(format!(
+            "要素建议还有 {} 条没采纳（{}），正文是按它们写的",
+            written.len(),
+            written.join("；")
+        ));
     }
-    let list = pending
-        .iter()
-        .map(|row| format!("{}：{}", row.suggestion.field.label(), row.suggestion.value))
-        .collect::<Vec<_>>()
-        .join("；");
-    Some(format!(
-        "要素建议还有 {} 条没采纳（{list}），正文是按它们写的",
-        pending.len()
-    ))
+    if !conflicting.is_empty() {
+        parts.push(format!(
+            "{} 条与表单不一致的建议没处理（{}），正文按表单写",
+            conflicting.len(),
+            conflicting.join("；")
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("；另有 "))
 }
 
 /// 建议卡：每行字段名、当前表单值 → 建议值、出处；冲突行标「与表单不一致」、按钮写

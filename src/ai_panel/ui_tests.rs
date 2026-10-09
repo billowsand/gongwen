@@ -3557,6 +3557,30 @@ mod field_card_cases {
         );
     }
 
+    /// 连续采纳了两条：先采纳的那条要等后采纳的撤了才能撤，提示里点名是哪一条，
+    /// 倒着逐条撤销就能把表单撤回采纳前。
+    #[test]
+    fn undo_in_reverse_order_names_the_later_adoption() {
+        let (mut harness, id) = harness_with_cards(vec![
+            suggestion(FieldId::Recipient, "", "甲局", false),
+            suggestion(FieldId::ContactPerson, "", "张三", false),
+        ]);
+        let original = harness.doc.draft.profile.clone();
+        harness.with_page(|page| page.adopt_all_field_suggestions(id));
+        harness.with_page(|page| page.undo_field_suggestion(id, 0));
+        let turn = harness.doc.ai_panel.turn_mut(id).unwrap();
+        assert_eq!(turn.field_cards[0].state, FieldCardState::Adopted);
+        assert!(
+            turn.field_cards[0].note.contains("先撤销那一条"),
+            "{}",
+            turn.field_cards[0].note
+        );
+        assert!(turn.field_cards[0].note.contains("联系人"));
+        harness.with_page(|page| page.undo_field_suggestion(id, 1));
+        harness.with_page(|page| page.undo_field_suggestion(id, 0));
+        assert_eq!(harness.doc.draft.profile, original, "倒着撤完回到采纳前");
+    }
+
     /// 整轮重来（文种变了 reroute）清空这一轮的建议卡。
     #[test]
     fn rerouting_clears_the_card() {
@@ -3673,5 +3697,15 @@ mod field_card_cases {
         ];
         let text = field_card::proposal_reminder(&rows, &draft).expect("还有一条");
         assert!(text.contains("1 条"), "{text}");
+        // 冲突的「替换」建议没交给起草：单独说，不说成「正文是按它们写的」。
+        let rows = vec![FieldCardRow::new(suggestion(
+            FieldId::Recipient,
+            "甲局",
+            "丁局",
+            true,
+        ))];
+        let text = field_card::proposal_reminder(&rows, &draft).expect("冲突的也要提");
+        assert!(text.contains("与表单不一致"), "{text}");
+        assert!(!text.contains("正文是按它们写的"), "{text}");
     }
 }
