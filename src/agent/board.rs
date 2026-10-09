@@ -236,6 +236,24 @@ impl Board {
         text
     }
 
+    /// 找事实冲突候选用的出处：起草人给的材料与已确认的回答在前，检索到的资料按题名在后。
+    /// 不含要素与日期——那是程序拼的，不是「材料里怎么说」。
+    pub(crate) fn candidate_sources(&self) -> Vec<(String, String)> {
+        let mut material = self.request.clone();
+        for note in &self.notes {
+            material.push('\n');
+            material.push_str(note);
+        }
+        std::iter::once(("材料".to_string(), material))
+            .chain(
+                self.evidence
+                    .items()
+                    .iter()
+                    .map(|item| (format!("《{}》", item.doc_title), item.text.clone())),
+            )
+            .collect()
+    }
+
     /// 恢复前按界面当前值重灌只读区（红线 2：要素与正文快照以用户手上的为准，
     /// 系统提示与合法日期按现在重建——隔天恢复，「今天」得是今天）。
     ///

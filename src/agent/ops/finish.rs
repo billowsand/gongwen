@@ -119,6 +119,9 @@ pub(super) fn ask(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<
     let max = param(ctx, step, &["max", "batch_questions"], 4, 1..=10);
     let board = &mut *ctx.board;
     board.ledger.mark_declined(&board.notes);
+    // 来源不明的事实若在材料里同一处写着别的值，作为选项给出（事实冲突裁决）。
+    let sources = board.candidate_sources();
+    board.ledger.attach_candidates(&sources, ctx.env.vocabulary);
     let mut questions = clarify::gap_questions(&ctx.board.ledger, max, ctx.env.vocabulary);
     if questions.is_empty() {
         return Ok(Flow::Next);

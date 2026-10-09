@@ -115,8 +115,9 @@ Markdown 语法与各文种正文规则，由 `src/skill_pack.rs` 编进二进�
 
 - **人机决策模块**（把「问用户」从算子里抽成可组合的决策：决策形态随挂起交给界面、通用清单确认
   与修订、待决事项、自主步骤提问，分四期）：方案、分期、进度与已知坑见 `docs/decision-modules.md`
-  （单文件，第八节是交接）。决策只改黑板与工作稿，授权类要素不出题；改 `clarify.rs`、
-  `engine::apply_answers`、`ops/confirm.rs` 或侧栏题目卡片前先读它。
+  （单文件，第九节是交接）。**第 ①（决策形态 + 通用清单确认 `confirm`）、②（待决事项 +
+  事实冲突候选）期已完成，待 GUI 真机验收**。决策只改黑板与工作稿，授权类要素不出题；改
+  `clarify.rs`、`engine::apply_answers`、`ops/confirm.rs` 或侧栏题目卡片前先读它。
 
 ## 三条不可逾越的红线（改 AI 相关代码前必读 `docs/ai-architecture.md`）
 

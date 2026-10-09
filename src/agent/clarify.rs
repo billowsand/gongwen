@@ -499,6 +499,47 @@ pub(crate) fn gap_question(id: usize, gap: &Gap, vocabulary: &[VocabularyEntry])
         action,
     };
     let (text, choices, custom_hint) = match gap.kind {
+        // 事实冲突：材料里同一处写的是别的值。候选是程序按字面找出来的，带出处摘录；只有一个
+        // 候选时推荐它（材料是起草人给的），几个候选说不准哪个对，仍推荐先占位。
+        GapKind::Untraced if !gap.candidates.is_empty() => {
+            let single = gap.candidates.len() == 1;
+            let sources: Vec<&str> = gap.candidates.iter().map(|c| c.source.as_str()).collect();
+            let mut choices: Vec<Choice> = gap
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    choice(
+                        &format!("按{}：{}", candidate.source, candidate.value),
+                        &candidate.excerpt,
+                        single,
+                        Action::Fill(candidate.value.clone()),
+                    )
+                })
+                .collect();
+            choices.extend([
+                choice(
+                    "改为待核实",
+                    "先占位，核实后再填",
+                    !single,
+                    Action::MarkPending,
+                ),
+                choice(
+                    "保留原文",
+                    "我确认稿里这个值无误",
+                    false,
+                    Action::KeepOriginal,
+                ),
+            ]);
+            (
+                format!(
+                    "「{}」与{}里的说法对不上，按哪个写？",
+                    gap.hint,
+                    dedup_join(&sources)
+                ),
+                choices,
+                Some("改成……".to_string()),
+            )
+        }
         GapKind::Untraced => (
             format!("「{}」在材料和知识库里都找不到出处，怎么处理？", gap.hint),
             vec![
@@ -562,6 +603,17 @@ pub(crate) fn gap_question(id: usize, gap: &Gap, vocabulary: &[VocabularyEntry])
         skippable: true,
         target: Target::Gap(gap.id),
     }
+}
+
+/// 「材料、《甲》」：去重后用顿号连起来。
+fn dedup_join(items: &[&str]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for item in items {
+        if !seen.contains(item) {
+            seen.push(item);
+        }
+    }
+    seen.join("、")
 }
 
 /// 只有起草人知道、AI 不该猜的：金额、数量、联系方式、编号。这类缺口不出建议。

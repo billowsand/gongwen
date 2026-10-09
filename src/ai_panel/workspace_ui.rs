@@ -41,7 +41,7 @@ impl DraftPage<'_> {
                     TurnState::Waiting | TurnState::Streaming => "生成中",
                     TurnState::Checking => "检查中",
                     TurnState::Proposed(_) => "待采纳",
-                    TurnState::Asking => "等待回答",
+                    TurnState::Asking | TurnState::Pending => "等待回答",
                     TurnState::Stopped => "已停止 · 内容未完成",
                     TurnState::Failed(_) => "生成失败 · 内容未完成",
                     TurnState::Interrupted => "已中断 · 内容未完成",

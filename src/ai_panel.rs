@@ -113,6 +113,9 @@ pub(crate) enum TurnState {
     Checking,
     /// 流程停下来问用户（动笔前澄清、选基准稿……），答完接着跑。
     Asking,
+    /// 待决事项：正文里还没定的「【待核实】」列成题，什么时候答都行；答完按回答修订出提案
+    /// （`docs/decision-modules.md` 第八节）。不挂着流程，题目对着列出时的正文。
+    Pending,
     /// 提案已就绪，等用户采用或放弃。
     Proposed(ProposalSummary),
     /// 审核类技能交了问题清单；`fixes` 条有改法的已放进审校抽屉。
@@ -351,6 +354,46 @@ impl AiPanel {
 
     pub(crate) fn running(&self) -> bool {
         self.turns.iter().any(|turn| turn.state.running())
+    }
+
+    /// 现在不宜列待决事项：有任务在跑，或已经有题挂着等回答（挂起的流程、开着的待决清单）。
+    /// 有没处理的提案由调用方另查（提案不在侧栏里）。
+    pub(crate) fn pending_blocked(&self) -> bool {
+        self.turns.iter().any(|turn| {
+            turn.state.running() || matches!(turn.state, TurnState::Asking | TurnState::Pending)
+        })
+    }
+
+    /// 把正文里还没定的「【待核实】」列成一张待决事项卡片，一批最多问
+    /// [`skill_job::BATCH_QUESTIONS`] 处，其余的答完这批再列。正文里没有占位返回 None。
+    pub(crate) fn open_pending(
+        &mut self,
+        document: &str,
+        vocabulary: &[crate::models::VocabularyEntry],
+    ) -> Option<u64> {
+        let ledger = Ledger::from_placeholders(document);
+        let questions =
+            crate::agent::clarify::gap_questions(&ledger, skill_job::BATCH_QUESTIONS, vocabulary);
+        if questions.is_empty() {
+            return None;
+        }
+        let total = ledger.needs_user().len();
+        let prompt = if total > questions.len() {
+            format!("正文里还有 {total} 处待核实，先填这 {} 处", questions.len())
+        } else {
+            format!("正文里还有 {total} 处待核实")
+        };
+        let id = self.push_turn("待决事项".into(), prompt, Vec::new(), None);
+        let turn = self.turn_mut(id)?;
+        turn.replies = initial_replies(&questions);
+        turn.questions = questions;
+        turn.research = Some(ResearchSnapshot {
+            raw: document.to_string(),
+            ledger,
+            sources: Vec::new(),
+        });
+        turn.settle(TurnState::Pending);
+        Some(id)
     }
 
     /// 收到一批增量。`done` 表示模型已经说完，接下来是程序校验。
