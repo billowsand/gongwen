@@ -1508,3 +1508,52 @@ fn live_checkpoint_resume_after_an_interruption() {
     );
     assert!(!report.markdown.trim().is_empty(), "恢复后照样出稿");
 }
+
+/// 复函（要素填写框架第 4 期）：技能自带「要素抽取」节，说明主送是来函的发文机关、
+/// 摘录照来函原文。脚本模型照它回答时，主送直接进建议清单；摘录核对不放宽。
+#[test]
+fn reply_letter_suggests_the_incoming_letters_sender_as_recipient() {
+    let skill = builtin(REPLY_LETTER);
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("核对表单要素在原文里写没写") {
+            "发文单位｜未提\n主送单位｜已给｜市数据局\n抄送单位｜未提\n承办单位｜未提\n联系人｜未提"
+                .into()
+        } else if prompt.contains("逐项检查起草所需的六要素") {
+            "何事｜缺｜答复什么？".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::new(vec![]);
+    // 来函：抬头是本单位（市财政局），落款署名是来函的发文机关（市数据局）。
+    let start = board(
+        TemplateKind::OfficialLetter,
+        "",
+        "市财政局：\n\n现将我局公共数据归集情况函告如下……请于10月底前函复。\n\n此致\n\n市数据局\n\n答复要求：同意第一项，第二项暂缓。",
+    );
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    driver.vocabulary = vec![crate::models::VocabularyEntry {
+        canonical: "市数据局".into(),
+        ..Default::default()
+    }];
+    let suspended = driver.run().expect("何事没讲清，动笔前要出题");
+    assert!(!suspended.questions.is_empty(), "何事缺了要挂起");
+    // 发给模型的是技能自带的复函版「要素抽取」，不是内置通用的一份。
+    assert!(
+        model.prompts("核对表单要素在原文里写没写")[0].contains("来函的发文机关"),
+        "{:?}",
+        model.prompts("核对表单要素在原文里写没写")
+    );
+    let suggestion = driver
+        .board
+        .field_suggestions
+        .iter()
+        .find(|s| s.field == crate::element_fields::FieldId::Recipient)
+        .expect("主送要进建议清单");
+    assert_eq!(suggestion.value, "市数据局");
+    assert!(
+        suggestion.source.contains("材料原文"),
+        "{}",
+        suggestion.source
+    );
+}
