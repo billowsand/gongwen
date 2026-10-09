@@ -91,6 +91,8 @@ impl Target {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Reply {
     Choice(usize),
+    /// 勾选模式的清单确认：勾中了哪几条（选项下标）。
+    Many(Vec<usize>),
     Custom(String),
     Skip,
 }
@@ -903,7 +905,8 @@ pub(crate) fn resolve_predraft(
                     _ => format!("{}{}", question.text, text.trim()),
                 });
             }
-            Reply::Skip | Reply::Custom(_) => {
+            // 勾选回答只出现在清单确认里，这里按没答算。
+            Reply::Skip | Reply::Many(_) | Reply::Custom(_) => {
                 if let Target::Element(element) = question.target {
                     notes.push(super::elements::note_for(kind, element, None));
                 }
@@ -976,7 +979,7 @@ pub(crate) fn gap_edit(question: &Question, reply: &Reply) -> GapEdit {
             Some(Action::KeepOriginal) => GapEdit::Keep,
             _ => GapEdit::Skip,
         },
-        Reply::Skip | Reply::Custom(_) => GapEdit::Skip,
+        Reply::Skip | Reply::Many(_) | Reply::Custom(_) => GapEdit::Skip,
     }
 }
 

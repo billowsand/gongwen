@@ -51,6 +51,9 @@ pub(crate) struct ListConfirm {
     pub(crate) instruction_hint: String,
     /// 确认按钮。
     pub(crate) submit: String,
+    /// 勾选模式：逐条打勾取舍，勾中的项按原值存回；不能改字，也不能让 AI 重列（9.4）。
+    #[serde(default)]
+    pub(crate) pick: bool,
 }
 
 impl ListConfirm {
@@ -62,6 +65,18 @@ impl ListConfirm {
             hint: "每行一条".into(),
             instruction_hint: "例如：合并相近的几条，补上遗漏的，调整先后顺序".into(),
             submit: format!("确认{label}，继续"),
+            pick: false,
+        }
+    }
+
+    /// 勾选模式：每条一个勾选框、默认全勾。
+    pub(crate) fn picking(label: &str, var: impl Into<String>) -> Self {
+        Self {
+            hint: "勾掉不要的".into(),
+            instruction_hint: String::new(),
+            submit: format!("按勾选的{label}继续"),
+            pick: true,
+            ..Self::new(label, var, false)
         }
     }
 
@@ -398,6 +413,148 @@ mod tests {
         assert!(problems.contains("eq 要和 var 一起写"), "{problems}");
         assert!(problems.contains("in 要写成列表"), "{problems}");
         assert!(problems.contains("eq 只能写一个值"), "{problems}");
+    }
+
+    #[test]
+    fn picking_keeps_the_original_values_of_the_ticked_items() {
+        let skill = crate::agent::skill::parse(
+            "pick-test",
+            "---\nname: 多选测试\ntools: [ws.write]\nflow:\n  - step: confirm\n    over: matters\n    label: 来函事项\n    pick: true\n---\n",
+            "测试",
+        )
+        .unwrap();
+        let model = ScriptedModel::new(|_, _| unreachable!("不调模型"));
+        let kb = KeywordKb::disabled();
+        let mut board = Board::default();
+        board.vars.insert(
+            "matters".into(),
+            json!([{"id": 1, "title": "经费"}, {"id": 2, "title": "场地"}, {"id": 3, "title": "人员"}]),
+        );
+        let mut driver = Driver::new(&skill, &model, &kb, board);
+        let suspension = driver.run().expect("逐条取舍");
+        let list = suspension.decision.list().unwrap();
+        assert!(list.pick && !list.revisable);
+        assert_eq!(list.submit, "按勾选的来函事项继续");
+        let question = &suspension.questions[0];
+        assert_eq!(question.choices.len(), 3);
+        assert!(question.choices.iter().all(|c| c.recommended), "默认全勾");
+        driver.answer(&suspension, &[(1, Reply::Many(vec![0, 2]))]);
+        assert!(driver.run().is_none());
+        assert_eq!(
+            driver.board.vars["matters"],
+            json!([{"id": 1, "title": "经费"}, {"id": 3, "title": "人员"}]),
+            "存的是原值，不是文字"
+        );
+    }
+
+    #[test]
+    fn evidence_is_picked_by_document_and_dropped_documents_stay_out() {
+        use crate::agent::evidence::EvidenceDoc;
+        let doc = |key: &str, title: &str| EvidenceDoc {
+            key: key.into(),
+            title: title.into(),
+            section: String::new(),
+            kind_label: "知识库".into(),
+            text: format!("{title}的内容"),
+        };
+        let skill = crate::agent::skill::parse(
+            "evidence-test",
+            "---\nname: 证据测试\ntools: [ws.write]\nflow:\n  - step: pick_evidence\n  - tool: ws.write\n    args: { text: 写完 }\n---\n",
+            "测试",
+        )
+        .unwrap();
+        let model = ScriptedModel::new(|_, _| unreachable!("不调模型"));
+        let kb = KeywordKb::disabled();
+        let mut board = Board::default();
+        board.evidence.absorb_docs(
+            "检索",
+            &[
+                doc("kb:1", "森林防火条例"),
+                doc("kb:2", "森林防火条例"),
+                doc("kb:3", "2019年旧方案"),
+                doc("kb:4", "应急预案"),
+                doc("ref:9", "我引用的稿子"),
+            ],
+        );
+        board.pinned = vec![5];
+        let mut driver = Driver::new(&skill, &model, &kb, board);
+        let suspension = driver.run().expect("三份文件就问");
+        assert_eq!(suspension.checkpoint.at, vec![0], "答完回到这一步处理");
+        let labels: Vec<&str> = suspension.questions[0]
+            .choices
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "知识库《森林防火条例》（2 段）",
+                "知识库《2019年旧方案》",
+                "知识库《应急预案》"
+            ],
+            "同一份文件归成一条，@ 引用的不列"
+        );
+        driver.answer(&suspension, &[(1, Reply::Many(vec![0, 2]))]);
+        assert!(driver.run().is_none());
+        let titles: Vec<&str> = driver
+            .board
+            .evidence
+            .items()
+            .iter()
+            .map(|e| e.doc_title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            ["森林防火条例", "森林防火条例", "应急预案", "我引用的稿子"]
+        );
+        assert!(
+            driver
+                .tool_lines()
+                .iter()
+                .any(|l| l.contains("去掉 1 份资料"))
+        );
+
+        // 之后再检索到剔掉的文件（别的段落也算）不并入；新资料的编号不和已有的撞。
+        let ids = driver.board.evidence.absorb_docs(
+            "缺口检索",
+            &[doc("kb:30", "2019年旧方案"), doc("kb:31", "新通知")],
+        );
+        assert_eq!(ids, [6]);
+        assert!(
+            !driver
+                .board
+                .evidence
+                .items()
+                .iter()
+                .any(|e| e.doc_title == "2019年旧方案")
+        );
+
+        // 不到三份文件不问。
+        let mut few = Board::default();
+        few.evidence
+            .absorb_docs("检索", &[doc("kb:1", "甲"), doc("kb:2", "乙")]);
+        let mut driver = Driver::new(&skill, &model, &kb, few);
+        assert!(driver.run().is_none());
+    }
+
+    #[test]
+    fn evidence_ids_never_repeat_after_trimming() {
+        use crate::agent::evidence::{EvidenceDoc, EvidencePack};
+        let doc = |key: &str| EvidenceDoc {
+            key: key.into(),
+            title: key.into(),
+            section: String::new(),
+            kind_label: String::new(),
+            text: String::new(),
+        };
+        let mut pack = EvidencePack::default();
+        pack.absorb_docs("q", &[doc("a"), doc("b"), doc("c")]);
+        pack.keep_last(1);
+        assert_eq!(
+            pack.absorb_docs("q", &[doc("d")]),
+            [4],
+            "原来会编成 2，和截掉的撞号"
+        );
     }
 
     #[test]

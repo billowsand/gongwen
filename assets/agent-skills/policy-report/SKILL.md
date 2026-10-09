@@ -26,6 +26,9 @@ flow:
     max: 7
   - tool: ws.write
     args: { text: "# {report_title}\n\n<!-- [摘要] -->\n\n【待写摘要】\n\n<!-- [正文] -->\n" }
+  - step: retrieve
+    from: outline
+  - step: pick_evidence
   - step: for_each
     over: outline
     as: section
@@ -50,7 +53,8 @@ flow:
 
 # 政策研究报告
 
-流程：澄清 → 确定报告题名 → 列大纲（你确认，可直接改）→ 逐章「检索 → 带出处写这一章」→ 补摘要 → 缺口循环
+流程：澄清 → 确定报告题名 → 列大纲（你确认，可直接改）→ 按大纲先检索一轮、资料请你取舍
+（勾掉过时、废止的，之后不再用）→ 逐章「检索 → 带出处写这一章」→ 补摘要 → 缺口循环
 → 核验引用 → 引用落到报告（文献库里有的写成 `[@key]`，没有的写成脚注）→ 出题。
 
 要让某一步也查内网数据接口，在 `retrieve` 与 `gap_loop` 下写 `apis: [接口 id]`，并在 `tools`

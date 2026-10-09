@@ -412,7 +412,11 @@ pub(super) fn cite_check(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::
                 text: source.text.clone(),
             }],
         );
-        let label = format!("[K{}]《{}》（{}）", ids[0], source.title, source.origin);
+        // 证据取舍里剔掉过的不并入、没有编号，照样拿原文比对。
+        let mark = ids
+            .first()
+            .map_or_else(String::new, |id| format!("[K{id}]"));
+        let label = format!("{mark}《{}》（{}）", source.title, source.origin);
         let before = findings.len();
 
         // 名称。

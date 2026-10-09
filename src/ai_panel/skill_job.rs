@@ -777,7 +777,13 @@ impl DraftPage<'_> {
             *self.status = "还有必答的题没选。".into();
             return;
         }
-        let replies = collect_replies(&turn.questions, &turn.replies);
+        let mut replies = collect_replies(&turn.questions, &turn.replies);
+        // 勾选模式的清单确认：交上去的是勾中的下标。
+        if turn.decision.list().is_some_and(|list| list.pick)
+            && let (Some(question), Some(draft)) = (turn.questions.first(), turn.replies.first())
+        {
+            replies = vec![(question.id, Reply::Many(draft.picked.clone()))];
+        }
         let (Some(mut run), Some(mut request)) = (turn.run.take(), turn.request.clone()) else {
             return;
         };
@@ -1028,7 +1034,7 @@ impl DraftPage<'_> {
                             .get(*index)
                             .map_or("", |c| c.label.as_str())
                     ),
-                    Reply::Skip => format!("{target}：保留待核实"),
+                    Reply::Skip | Reply::Many(_) => format!("{target}：保留待核实"),
                 }
             })
             .collect();

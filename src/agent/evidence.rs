@@ -110,6 +110,13 @@ impl EvidenceDoc {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EvidencePack {
     items: Vec<Evidence>,
+    /// 用户在证据取舍里剔掉的资料（按文件题名，同一份文件的各段一起算）：之后再检索到也不
+    /// 并入（`docs/decision-modules.md` 9.5）。
+    #[serde(default)]
+    excluded: Vec<String>,
+    /// 用过的最大编号。编号只增不减：剔掉或截掉之后再并入的不会和已有编号撞上。
+    #[serde(default)]
+    next: usize,
 }
 
 impl EvidencePack {
@@ -119,14 +126,19 @@ impl EvidencePack {
         self.absorb_docs(query, &docs)
     }
 
-    /// 并入任意来源的资料，按原顺序返回编号；同一个键沿用旧编号。
+    /// 并入任意来源的资料，按原顺序返回编号；同一个键沿用旧编号。用户剔掉的文件跳过、不占
+    /// 编号——要按「资料与编号一一对应」用返回值的，先用 [`Self::is_excluded`] 滤掉再并入。
     pub(crate) fn absorb_docs(&mut self, query: &str, docs: &[EvidenceDoc]) -> Vec<usize> {
-        docs.iter()
+        let docs: Vec<&EvidenceDoc> = docs.iter().filter(|doc| !self.is_excluded(doc)).collect();
+        docs.into_iter()
             .map(|doc| {
                 if let Some(existing) = self.items.iter().find(|e| e.key == doc.key) {
                     return existing.id;
                 }
-                let id = self.items.len() + 1;
+                // 旧检查点里没有 `next`：从现有最大编号接着编。
+                let largest = self.items.iter().map(|e| e.id).max().unwrap_or(0);
+                let id = self.next.max(largest) + 1;
+                self.next = id;
                 self.items.push(Evidence {
                     id,
                     key: doc.key.clone(),
@@ -143,6 +155,31 @@ impl EvidencePack {
 
     pub(crate) fn items(&self) -> &[Evidence] {
         &self.items
+    }
+
+    /// 用户在证据取舍里剔掉过这份文件没有。
+    pub(crate) fn is_excluded(&self, doc: &EvidenceDoc) -> bool {
+        self.excluded.contains(&doc.title)
+    }
+
+    /// 证据取舍：只留题名在 `keep` 里的文件（编号在 `pinned` 里的——用户 `@` 引用的——一律留），
+    /// 其余剔出去并记下题名（之后不再并入），返回剔掉几份文件。
+    pub(crate) fn exclude_except(&mut self, keep: &[String], pinned: &[usize]) -> usize {
+        let mut dropped: Vec<String> = Vec::new();
+        self.items.retain(|item| {
+            let kept = keep.contains(&item.doc_title) || pinned.contains(&item.id);
+            if !kept && !dropped.contains(&item.doc_title) {
+                dropped.push(item.doc_title.clone());
+            }
+            kept
+        });
+        let count = dropped.len();
+        for title in dropped {
+            if !self.excluded.contains(&title) {
+                self.excluded.push(title);
+            }
+        }
+        count
     }
 
     pub(crate) fn is_empty(&self) -> bool {

@@ -349,6 +349,7 @@ pub(super) fn step_name(step: &StepSpec) -> String {
         "clarify" => "澄清要求",
         "plan" => "预研",
         "confirm" => "确认清单",
+        "pick_evidence" => "资料取舍",
         "retrieve" => "检索证据",
         "generate" => "起草正文",
         "gap_loop" => "补全缺口",

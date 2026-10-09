@@ -476,6 +476,18 @@ pub(crate) fn apply_answers(
                 Some(Action::Pick(value)) => value.clone(),
                 _ => Value::Null,
             },
+            // 勾选模式：勾中各项的原值（一条不勾就是空列表，表示都不要）。
+            Reply::Many(indices) => Value::Array(
+                indices
+                    .iter()
+                    .filter_map(
+                        |index| match question.choices.get(*index).map(|c| &c.action) {
+                            Some(Action::Pick(value)) => Some(value.clone()),
+                            _ => None,
+                        },
+                    )
+                    .collect(),
+            ),
             Reply::Custom(text) => Value::String(text.clone()),
             Reply::Skip => Value::Null,
         };

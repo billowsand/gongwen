@@ -393,6 +393,55 @@ fn panel_request(skill: Option<&str>, text: &str) -> crate::ai_panel::TurnReques
 }
 
 #[test]
+fn picking_cards_start_fully_ticked_and_show_the_details() {
+    let mut harness = Harness::new("原有正文。");
+    harness.doc.ai_panel.open = true;
+    let skill = crate::agent::skill::parse(
+        "pick-test",
+        "---\nname: 多选测试\ntools: [ws.write]\nflow:\n  - step: confirm\n    over: matters\n    label: 来函事项\n    pick: true\n---\n",
+        "测试",
+    )
+    .unwrap();
+    let model = crate::agent::testkit::ScriptedModel::new(|_, _| String::new());
+    let kb = crate::agent::testkit::KeywordKb::disabled();
+    let mut board = crate::agent::board::Board::default();
+    board.vars.insert(
+        "matters".into(),
+        serde_json::json!(["请协助提供经费", "请确定会议场地"]),
+    );
+    let mut driver = crate::agent::testkit::Driver::new(&skill, &model, &kb, board);
+    let suspension = driver.run().unwrap();
+    let request = panel_request(None, "复函");
+    let panel = &mut harness.doc.ai_panel;
+    let id = panel.push_turn("复函".into(), request.text.clone(), vec![], Some(request));
+    panel.ask(Box::new(crate::ai_panel::SkillRun {
+        skill,
+        suspension,
+        use_rag: false,
+    }));
+    assert_eq!(panel.turn_mut(id).unwrap().replies[0].picked, [0, 1]);
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    for label in [
+        "取舍来函事项",
+        "已勾 2 / 2",
+        "请确定会议场地",
+        "全不选",
+        "按勾选的来函事项继续",
+    ] {
+        assert!(has(&texts, label), "{label}: {texts:?}");
+    }
+    harness.doc.ai_panel.turn_mut(id).unwrap().replies[0]
+        .picked
+        .clear();
+    let texts = harness.frame_texts();
+    assert!(
+        has(&texts, "一条都不勾，就是这些来函事项都不用"),
+        "{texts:?}"
+    );
+}
+
+#[test]
 fn outline_confirmation_has_editing_and_refinement_controls_and_saves_the_instruction() {
     let mut harness = Harness::new("原有正文。");
     harness.doc.ai_panel.open = true;

@@ -1209,6 +1209,77 @@ fn questions_ui(
     });
 }
 
+/// 勾选模式的清单确认（`docs/decision-modules.md` 9.4）：每条一个勾选框、默认全勾，说明（证据
+/// 摘录等）写在下面；不能改字，交上去的是勾中的下标。
+fn pick_ui(
+    ui: &mut egui::Ui,
+    turn: &mut super::AiTurn,
+    list: &crate::agent::decision::ListConfirm,
+    action: &mut Option<CardAction>,
+) {
+    let super::AiTurn {
+        id,
+        questions,
+        replies,
+        ..
+    } = turn;
+    let (Some(question), Some(reply)) = (questions.first(), replies.first_mut()) else {
+        return;
+    };
+    let total = question.choices.len();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("取舍{}", list.label)).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            theme::caption(ui, &format!("已勾 {} / {total}", reply.picked.len()));
+        });
+    });
+    theme::caption(ui, &list.hint);
+    ui.add_space(6.0);
+    for (index, choice) in question.choices.iter().enumerate() {
+        let mut on = reply.picked.contains(&index);
+        if ui
+            .add(egui::Checkbox::new(&mut on, &choice.label))
+            .changed()
+        {
+            if on {
+                reply.picked.push(index);
+                reply.picked.sort_unstable();
+            } else {
+                reply.picked.retain(|picked| *picked != index);
+            }
+        }
+        if !choice.detail.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&choice.detail)
+                            .small()
+                            .color(theme::text_muted()),
+                    )
+                    .wrap(),
+                );
+            });
+        }
+        ui.add_space(4.0);
+    }
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui.small_button("全选").clicked() {
+            reply.picked = (0..total).collect();
+        }
+        if ui.small_button("全不选").clicked() {
+            reply.picked.clear();
+        }
+        if theme::primary_icon_button(ui, theme::Icon::SquareCheck, &list.submit).clicked() {
+            *action = Some(CardAction::Answer(*id));
+        }
+    });
+    if reply.picked.is_empty() {
+        theme::caption(ui, &format!("一条都不勾，就是这些{}都不用", list.label));
+    }
+}
+
 /// 清单确认（大纲、要点、检索问题……）：直接改与让 AI 按要求重列共用同一份当前文本，确认前
 /// 可反复迭代。标题、占位与按钮文字取自决策形态（`decision::ListConfirm`）；不可修订的清单
 /// （按原文拆的要点）只能直接改。
@@ -1217,6 +1288,10 @@ fn list_ui(ui: &mut egui::Ui, turn: &mut super::AiTurn, action: &mut Option<Card
     let Some(list) = turn.decision.list().cloned() else {
         return;
     };
+    if list.pick {
+        pick_ui(ui, turn, &list, action);
+        return;
+    }
     let Some(reply) = turn.replies.first_mut() else {
         return;
     };

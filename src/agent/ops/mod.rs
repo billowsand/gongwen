@@ -2,7 +2,8 @@
 //!
 //! 由第二期的 `research.rs` 拆出，行为不变：
 //! - `prepare`：`clarify`（动笔前澄清）、`plan`（预研列问题）、`retrieve`（多路检索）；
-//! - `confirm`：`confirm`（确认任意清单变量，可让 AI 按要求重列，`docs/decision-modules.md`）；
+//! - `confirm`：`confirm`（确认任意清单变量，可让 AI 按要求重列、可逐条打勾）、`pick_evidence`
+//!   （证据取舍），见 `docs/decision-modules.md`；
 //! - `write`：`generate`（新稿 / 全文或选区改写）；
 //! - `gap_loop`：缺口循环（识别 → 定向检索 → 局部补全 → 闸门）；
 //! - `finish`：`verify`（核验引用）、`cite`（引用落到研究报告的文献与脚注）、`ask`（出题）；
@@ -58,10 +59,11 @@ pub(crate) use style_learn::PROFILE_VAR as STYLE_PROFILE;
 
 pub(crate) type Operator = fn(&mut ToolCtx<'_, '_>, &StepSpec) -> anyhow::Result<Flow>;
 
-const OPERATORS: [(&str, Operator); 15] = [
+const OPERATORS: [(&str, Operator); 16] = [
     ("clarify", prepare::clarify),
     ("plan", prepare::plan),
     ("confirm", confirm::confirm),
+    ("pick_evidence", confirm::pick_evidence),
     ("retrieve", prepare::retrieve),
     ("generate", write::generate),
     ("gap_loop", gap_loop::gap_loop),
@@ -234,6 +236,11 @@ fn search_into(ctx: &mut ToolCtx<'_, '_>, query: &str) -> Vec<(String, usize)> {
     match ctx.env.kb.search(query) {
         Ok((chunks, warnings)) => {
             let pack = &mut ctx.board.evidence;
+            // 证据取舍里剔掉的不再并入；先滤掉，下面按片段与编号一一对应。
+            let chunks: Vec<_> = chunks
+                .into_iter()
+                .filter(|chunk| !pack.is_excluded(&super::evidence::EvidenceDoc::from_chunk(chunk)))
+                .collect();
             let before = pack.items().len();
             let ids = pack.absorb(query, &chunks);
             let added = pack.items().len() - before;
@@ -340,13 +347,13 @@ fn call_api_into(
             if !output.evidence_by_default {
                 return Vec::new();
             }
-            let ids = ctx.board.evidence.absorb_docs(query, &output.evidence);
-            output
+            let docs: Vec<_> = output
                 .evidence
                 .into_iter()
-                .map(|doc| doc.key)
-                .zip(ids)
-                .collect()
+                .filter(|doc| !ctx.board.evidence.is_excluded(doc))
+                .collect();
+            let ids = ctx.board.evidence.absorb_docs(query, &docs);
+            docs.into_iter().map(|doc| doc.key).zip(ids).collect()
         }
         Err(error) => {
             note(ctx, format!("数据接口「{api}」：{error}"));

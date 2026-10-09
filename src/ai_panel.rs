@@ -493,6 +493,15 @@ impl AiPanel {
                 }
                 reply.revise_instruction = previous.revise_instruction;
             }
+            // 勾选模式默认全勾（程序把每条都标成推荐）。
+            if run.suspension.decision.list().is_some_and(|list| list.pick)
+                && let (Some(reply), Some(question)) =
+                    (turn.replies.first_mut(), run.suspension.questions.first())
+            {
+                reply.picked = (0..question.choices.len())
+                    .filter(|index| question.choices[*index].recommended)
+                    .collect();
+            }
             turn.questions = run.suspension.questions.clone();
             turn.decision = run.suspension.decision.clone();
             turn.run = Some(run);
@@ -571,6 +580,9 @@ pub(crate) struct ReplyDraft {
     /// 等待期间发生手工修改时，AI 返回的清单先存成候选，不覆盖当前文本。
     #[serde(default, alias = "outline_candidate")]
     pub(crate) revise_candidate: String,
+    /// 勾选模式的清单确认：勾中了哪几条（选项下标）。
+    #[serde(default)]
+    pub(crate) picked: Vec<usize>,
 }
 
 impl ReplyDraft {
