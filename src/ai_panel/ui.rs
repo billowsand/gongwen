@@ -1047,6 +1047,10 @@ fn questions_ui(
         list_ui(ui, turn, action);
         return;
     }
+    if turn.state == TurnState::Asking && turn.decision.compare().is_some() {
+        compare_ui(ui, turn, action);
+        return;
+    }
     use crate::agent::clarify::Action;
     let asking = turn.state == TurnState::Asking;
     let super::AiTurn {
@@ -1205,6 +1209,74 @@ fn questions_ui(
                 ui,
                 "AI 把回答写进所在段落，改完仍是提案；没答的保留待核实，不会替你猜",
             );
+        }
+    });
+}
+
+/// 方案比选（`docs/decision-modules.md` 9.6）：几个版本整段显示，点一个选中（再点取消），
+/// 也可以自己写；写了自己的就以它为准。没有推荐项。
+fn compare_ui(ui: &mut egui::Ui, turn: &mut super::AiTurn, action: &mut Option<CardAction>) {
+    let Some(spec) = turn.decision.compare().cloned() else {
+        return;
+    };
+    let super::AiTurn {
+        id,
+        questions,
+        replies,
+        ..
+    } = turn;
+    let (Some(question), Some(reply)) = (questions.first(), replies.first_mut()) else {
+        return;
+    };
+    ui.label(egui::RichText::new(format!("挑一个{}", spec.label)).strong());
+    theme::caption(
+        ui,
+        "几个版本都过了闸门（没有材料里找不到的日期、数字）；挑一个，或者自己写。",
+    );
+    for (index, choice) in question.choices.iter().enumerate() {
+        ui.add_space(6.0);
+        let selected = reply.choice == Some(index) && reply.custom.trim().is_empty();
+        let frame = if selected {
+            theme::card().stroke(egui::Stroke::new(1.5, theme::accent()))
+        } else {
+            theme::card()
+        };
+        let response = frame
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    theme::caption(ui, &choice.label);
+                    if selected {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            theme::chip(ui, "已选", theme::accent(), theme::accent_soft());
+                        });
+                    }
+                });
+                ui.add(egui::Label::new(&choice.detail).wrap());
+            })
+            .response
+            .interact(egui::Sense::click());
+        if response.clicked() {
+            reply.choice = (!selected).then_some(index);
+            reply.custom.clear();
+        }
+    }
+    ui.add_space(8.0);
+    if let Some(hint) = &question.custom_hint {
+        ui.add(
+            egui::TextEdit::multiline(&mut reply.custom)
+                .id_salt(("compare_custom", *id))
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text(hint.as_str()),
+        );
+    }
+    ui.add_space(8.0);
+    let ready = reply.choice.is_some() || !reply.custom.trim().is_empty();
+    ui.add_enabled_ui(ready, |ui| {
+        if theme::primary_icon_button(ui, theme::Icon::SquareCheck, "用这个，继续").clicked()
+        {
+            *action = Some(CardAction::Answer(*id));
         }
     });
 }

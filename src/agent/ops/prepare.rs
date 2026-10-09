@@ -184,6 +184,24 @@ fn is_generic_title(title: &str) -> bool {
 
 fn plan_title(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow> {
     let hint = ctx.board.draft.title_hint.trim();
+    let name = step.save_as.as_deref().unwrap_or("report_title");
+    // 写了 `variants`：拟几个题名并排让人挑（方案比选，`docs/decision-modules.md` 9.6）。
+    let variants = step.param_usize("variants").unwrap_or(1).clamp(1, 4);
+    if variants >= 2 && is_generic_title(hint) {
+        phase(ctx, format!("根据写作要求拟 {variants} 个报告题名…"));
+        let locals = [("request", ctx.board.request_with_notes())];
+        let mut text = prompt(ctx, step, "prompt", "报告题名", &locals)?;
+        text.push_str(&format!(
+            "\n\n请给出 {variants} 个不同角度的具体题名，每行一个，不加编号、引号和说明。"
+        ));
+        let reply = assist(ctx, &text)?;
+        let titles = super::compare::split_variants(&reply, true);
+        let titles = super::compare::gate(ctx, titles, variants, |title| !is_generic_title(title));
+        if titles.is_empty() {
+            anyhow::bail!("模型没有给出具体的报告题名，请填写报告名称后重试");
+        }
+        return super::compare::offer(ctx, titles, "报告题名", name);
+    }
     let title = if is_generic_title(hint) {
         phase(ctx, "根据写作要求拟定报告题名…");
         let locals = [("request", ctx.board.request_with_notes())];
@@ -198,7 +216,6 @@ fn plan_title(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Result<Flow
     } else {
         hint.to_string()
     };
-    let name = step.save_as.as_deref().unwrap_or("report_title");
     ctx.board.vars.insert(name.into(), Value::String(title));
     Ok(Flow::Next)
 }

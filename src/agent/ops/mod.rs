@@ -4,6 +4,7 @@
 //! - `prepare`：`clarify`（动笔前澄清）、`plan`（预研列问题）、`retrieve`（多路检索）；
 //! - `confirm`：`confirm`（确认任意清单变量，可让 AI 按要求重列、可逐条打勾）、`pick_evidence`
 //!   （证据取舍），见 `docs/decision-modules.md`；
+//! - `compare`：`compare`（方案比选：几个版本并排挑一个）；
 //! - `write`：`generate`（新稿 / 全文或选区改写）；
 //! - `gap_loop`：缺口循环（识别 → 定向检索 → 局部补全 → 闸门）；
 //! - `finish`：`verify`（核验引用）、`cite`（引用落到研究报告的文献与脚注）、`ask`（出题）；
@@ -18,6 +19,7 @@
 mod agent;
 mod catalog;
 mod cite_check;
+mod compare;
 mod confirm;
 mod finish;
 mod gap_loop;
@@ -59,11 +61,12 @@ pub(crate) use style_learn::PROFILE_VAR as STYLE_PROFILE;
 
 pub(crate) type Operator = fn(&mut ToolCtx<'_, '_>, &StepSpec) -> anyhow::Result<Flow>;
 
-const OPERATORS: [(&str, Operator); 16] = [
+const OPERATORS: [(&str, Operator); 17] = [
     ("clarify", prepare::clarify),
     ("plan", prepare::plan),
     ("confirm", confirm::confirm),
     ("pick_evidence", confirm::pick_evidence),
+    ("compare", compare::compare),
     ("retrieve", prepare::retrieve),
     ("generate", write::generate),
     ("gap_loop", gap_loop::gap_loop),

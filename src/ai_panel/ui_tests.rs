@@ -442,6 +442,53 @@ fn picking_cards_start_fully_ticked_and_show_the_details() {
 }
 
 #[test]
+fn compare_cards_show_each_version_in_full() {
+    let mut harness = Harness::new("原有正文。");
+    harness.doc.ai_panel.open = true;
+    let skill = crate::agent::skill::parse(
+        "compare-test",
+        "---\nname: 比选测试\nflow:\n  - step: compare\n    label: 开头段\n    count: 2\n    save_as: opening\n---\n## 方案\n写开头\n",
+        "测试",
+    )
+    .unwrap();
+    let model = crate::agent::testkit::ScriptedModel::new(|_, _| {
+        "为切实做好森林防火工作，现通知如下。\n===\n入冬以来火险等级偏高，现通知如下。".into()
+    });
+    let kb = crate::agent::testkit::KeywordKb::disabled();
+    let mut driver = crate::agent::testkit::Driver::new(
+        &skill,
+        &model,
+        &kb,
+        crate::agent::board::Board::default(),
+    );
+    let suspension = driver.run().unwrap();
+    let request = panel_request(None, "写开头");
+    let panel = &mut harness.doc.ai_panel;
+    let id = panel.push_turn("起草".into(), request.text.clone(), vec![], Some(request));
+    panel.ask(Box::new(crate::ai_panel::SkillRun {
+        skill,
+        suspension,
+        use_rag: false,
+    }));
+    assert_eq!(
+        panel.turn_mut(id).unwrap().replies[0].choice,
+        None,
+        "不替人挑"
+    );
+    harness.frame_texts();
+    let texts = harness.frame_texts();
+    for label in [
+        "挑一个开头段",
+        "方案一",
+        "为切实做好森林防火工作，现通知如下。",
+        "入冬以来火险等级偏高，现通知如下。",
+        "用这个，继续",
+    ] {
+        assert!(has(&texts, label), "{label}: {texts:?}");
+    }
+}
+
+#[test]
 fn outline_confirmation_has_editing_and_refinement_controls_and_saves_the_instruction() {
     let mut harness = Harness::new("原有正文。");
     harness.doc.ai_panel.open = true;

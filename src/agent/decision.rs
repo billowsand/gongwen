@@ -25,13 +25,30 @@ pub(crate) enum Decision {
     Choose,
     /// 确认一份清单（大纲、要点、检索问题……）：可直接改，可修订的还能让 AI 按要求重列。
     ConfirmList(ListConfirm),
+    /// 方案比选（9.6）：几个版本整段并排，挑一个或自己写。
+    Compare(CompareSpec),
+}
+
+/// 方案比选：卡片上的叫法与挑中后存进的变量。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CompareSpec {
+    /// 「报告题名」「开头段」。
+    pub(crate) label: String,
+    pub(crate) var: String,
 }
 
 impl Decision {
+    pub(crate) fn compare(&self) -> Option<&CompareSpec> {
+        match self {
+            Self::Compare(spec) => Some(spec),
+            _ => None,
+        }
+    }
+
     pub(crate) fn list(&self) -> Option<&ListConfirm> {
         match self {
             Self::ConfirmList(list) => Some(list),
-            Self::Choose => None,
+            Self::Choose | Self::Compare(_) => None,
         }
     }
 }
@@ -554,6 +571,59 @@ mod tests {
             pack.absorb_docs("q", &[doc("d")]),
             [4],
             "原来会编成 2，和截掉的撞号"
+        );
+    }
+
+    #[test]
+    fn compare_offers_whole_paragraphs_and_stores_the_picked_one() {
+        let skill = crate::agent::skill::parse(
+            "compare-test",
+            "---\nname: 比选测试\ntools: [ws.write]\nflow:\n  - step: compare\n    label: 开头段\n    count: 2\n    save_as: opening\n  - tool: ws.write\n    args: { text: '开头：{opening}' }\n---\n## 方案\n给这份通知写 {count} 个开头段：{request}\n",
+            "测试",
+        )
+        .unwrap();
+        let model = ScriptedModel::new(|_, prompt| {
+            assert!(prompt.contains("单独一行「===」"), "{prompt}");
+            "方案一：为切实做好今冬明春森林防火工作，\n现就有关事项通知如下。\n===\n方案二：入冬以来，火险等级持续偏高。\n===\n方案三：多余的一段".into()
+        });
+        let kb = KeywordKb::disabled();
+        let board = Board {
+            request: "冬季森林防火".into(),
+            ..Board::default()
+        };
+        let mut driver = Driver::new(&skill, &model, &kb, board);
+        let suspension = driver.run().expect("挑一个开头");
+        assert_eq!(
+            suspension.decision,
+            Decision::Compare(CompareSpec {
+                label: "开头段".into(),
+                var: "opening".into()
+            })
+        );
+        let choices = &suspension.questions[0].choices;
+        assert_eq!(choices.len(), 2, "只要 count 个");
+        assert_eq!(
+            choices[0].detail,
+            "为切实做好今冬明春森林防火工作，\n现就有关事项通知如下。"
+        );
+        driver.answer(&suspension, &[(1, Reply::Custom("自己写的开头。".into()))]);
+        assert!(driver.run().is_none());
+        assert_eq!(driver.board.workspace, "开头：自己写的开头。");
+
+        let missing = crate::agent::skill::parse(
+            "compare-bad",
+            "---\nname: 坏\nflow:\n  - step: compare\n---\n## 方案\nx\n",
+            "测试",
+        )
+        .unwrap();
+        let problems = crate::agent::skill::validate(
+            &missing,
+            &crate::agent::ops::names(),
+            &crate::agent::tools::ids(),
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("compare 缺少 save_as")),
+            "{problems:?}"
         );
     }
 

@@ -532,6 +532,11 @@ fn validate_steps(
                 if op == "agent" {
                     agent_problems(skill, step, &at, problems);
                 }
+                if op == "compare" && step.save_as.is_none() {
+                    problems.push(format!(
+                        "{at} compare 缺少 save_as（挑中的版本存进哪个变量）"
+                    ));
+                }
                 if op == "confirm" && step.param_str("over").is_none() {
                     problems.push(format!("{at} confirm 缺少 over（要确认的清单变量）"));
                 }

@@ -80,7 +80,8 @@ fn policy_report_uses_a_specific_title_without_changing_document_elements() {
 
 #[test]
 fn policy_report_rejects_generic_or_multiline_generated_titles() {
-    for reply in ["", "# 研究报告", "报告题名", "实际题名\n这是说明"] {
+    // 拟三个题名让人挑（方案比选）：多行不再算错，全是文种名、空话才报错。
+    for reply in ["", "# 研究报告", "报告题名\n研究报告"] {
         let skill = builtin(POLICY_REPORT);
         let model = ScriptedModel::new(|_, prompt| {
             if prompt.contains("拟定这份报告的具体题名") {
@@ -96,6 +97,56 @@ fn policy_report_rejects_generic_or_multiline_generated_titles() {
         assert!(error.to_string().contains("具体的报告题名"), "{error}");
         assert!(driver.board.workspace.is_empty());
     }
+}
+
+#[test]
+fn policy_report_offers_several_titles_and_drops_ones_with_invented_facts() {
+    use crate::agent::clarify::Reply;
+    let skill = builtin(POLICY_REPORT);
+    let model = ScriptedModel::new(|_, prompt| {
+        if prompt.contains("拟定这份报告的具体题名") {
+            assert!(prompt.contains("请给出 3 个不同角度的具体题名"), "{prompt}");
+            "1. 人工智能辅助决策的做法与对策\n方案二：2030年人工智能辅助决策展望\n「智能辅助决策：国外经验与启示」".into()
+        } else {
+            "无".into()
+        }
+    });
+    let kb = KeywordKb::new(vec![]);
+    let start = board(TemplateKind::ResearchReport, "", "研究人工智能辅助决策");
+    let mut driver = Driver::new(&skill, &model, &kb, start);
+    let suspension = driver.run().expect("几个题名请人挑");
+    assert!(suspension.decision.compare().is_some());
+    let options: Vec<&str> = suspension.questions[0]
+        .choices
+        .iter()
+        .map(|choice| choice.detail.as_str())
+        .collect();
+    assert_eq!(
+        options,
+        [
+            "人工智能辅助决策的做法与对策",
+            "智能辅助决策：国外经验与启示"
+        ],
+        "去掉编号与引号；带了材料里没有的年份的丢掉"
+    );
+    assert!(
+        suspension.questions[0]
+            .choices
+            .iter()
+            .all(|c| !c.recommended)
+    );
+    driver.answer(&suspension, &[(1, Reply::Choice(1))]);
+    assert_eq!(
+        driver.board.vars["report_title"],
+        "智能辅助决策：国外经验与启示"
+    );
+    assert!(
+        driver
+            .events
+            .iter()
+            .any(|event| matches!(event, crate::agent::engine::Event::Note(text) if text.contains("2030年"))),
+        "丢掉的说清楚为什么"
+    );
 }
 
 #[test]

@@ -350,6 +350,7 @@ pub(super) fn step_name(step: &StepSpec) -> String {
         "plan" => "预研",
         "confirm" => "确认清单",
         "pick_evidence" => "资料取舍",
+        "compare" => "方案比选",
         "retrieve" => "检索证据",
         "generate" => "起草正文",
         "gap_loop" => "补全缺口",

@@ -1703,6 +1703,7 @@ ACP（Agent Client Protocol）由 Zed 牵头，JetBrains 等编辑器已经采�
 | `plan` | 列要查的问题，或列大纲（大纲可要求用户确认） | `llm.generate`、`ask.choice` |
 | `confirm` | 确认任意清单变量（检索问题、要点……）：可直接改，`revise: true` 时还能让 AI 按修改要求重列，`pick: true` 时逐条打勾取舍（勾中的按原值存回）；`plan` 列出的清单也走它（`docs/decision-modules.md`） | `llm.generate`、`ask.choice` |
 | `pick_evidence` | 证据取舍：证据包里的文件不少于 `min` 份（默认 3）时逐份打勾，没勾的剔出去，之后的检索不再并入（9.5） | `ask.choice` |
+| `compare` | 方案比选：按提示词出 2–4 个版本，过闸门（去重、限长、不许带出处里没有的事实）后整段并排让用户挑或自己写，存进 `save_as`；`plan mode: title` 写 `variants` 也走它（9.6） | `llm.generate`、`ask.choice` |
 | `retrieve` | 多个检索词 × 多个数据源，结果并入证据包 | `kb.search`、`ms.search`、`http.call` |
 | `generate` | 按提示词生成：新稿 / 全文改写 / 选区改写 / 某一节 | `llm.generate`、`ws.write`、`ws.section` |
 | `for_each` | 对列表逐项执行子流程（如大纲每一节：检索 → 生成本节） | 按子流程 |
