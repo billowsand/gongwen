@@ -8,6 +8,7 @@ use crate::agent::decision::ListConfirm;
 use crate::agent::skill::StepSpec;
 use crate::agent::tools::{Permission, ToolCtx};
 use crate::agent::{clarify, elements};
+use crate::element_fields;
 use serde_json::Value;
 
 /// 预研列出的检索词存在这个变量里，`retrieve` 默认从这里取。
@@ -74,10 +75,83 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
     // 第一关过了：后面的题都以这个文种为前提。
     ctx.board.premise = Some(kind);
     let mut asked_elements = Vec::new();
+    let mut asked_fields: Vec<clarify::Question> = Vec::new();
+    if element_max > 0 {
+        // 表单要素（`element_fields`）：先「要素抽取」——它的建议要拼进六要素检查的
+        // 原文（「何人」才算已给），所以放在六要素检查前面；字段题与六要素题共用
+        // `element_max` 名额，必填字段优先。
+        let fields = element_fields::prompt_fields(&ctx.board.draft);
+        let mut plan = element_fields::FieldPlan::default();
+        if !fields.is_empty() {
+            let source = extraction_source(ctx.board);
+            // 所有字段都已填、原文里又一个名称都对不上词库：抽了也产不出建议，不调模型。
+            let all_filled = fields
+                .iter()
+                .all(|field| !field.read(&ctx.board.draft).trim().is_empty());
+            if !(all_filled && !any_vocabulary_name(&source, ctx.env.vocabulary)) {
+                phase(ctx, "动笔前核对表单要素…");
+                let name = step.param_str("fields_prompt").unwrap_or("要素抽取");
+                let template = ctx
+                    .env
+                    .skill
+                    .section(name)
+                    .unwrap_or(element_fields::PROMPT);
+                let locals = [
+                    ("kind", kind.label().to_string()),
+                    ("fields", element_fields::prompt_fields_text(&fields, kind)),
+                    ("source", source.clone()),
+                ];
+                let text = ctx.board.render_with(template, &locals);
+                let reply = assist(ctx, &text)?;
+                plan = element_fields::plan(
+                    &ctx.board.draft,
+                    &reply,
+                    &source,
+                    ctx.env.vocabulary,
+                    element_max,
+                );
+            }
+        }
+        // 不出题直接建议的：立刻进建议清单，不挡起草；同时记一句已确认信息交给起草，
+        // 正文措辞跟着对上（冲突的「替换」建议不记，免得带偏起草）。
+        for suggestion in &plan.suggestions {
+            if !suggestion.conflict {
+                ctx.board.notes.push(format!(
+                    "{}：{}（{}；要素建议，待采纳进表单）",
+                    suggestion.field.label(),
+                    suggestion.value,
+                    suggestion.source
+                ));
+            }
+        }
+        if !plan.suggestions.is_empty() || !plan.questions.is_empty() {
+            tool_line(
+                ctx,
+                "check.fields",
+                Permission::Check,
+                format!(
+                    "表单要素：建议 {} 条，待问 {} 题",
+                    plan.suggestions.len(),
+                    plan.questions.len()
+                ),
+            );
+        }
+        ctx.board
+            .field_suggestions
+            .extend(plan.suggestions.iter().cloned());
+        asked_fields = plan.questions;
+    }
     if element_max > 0 && !checklist.is_empty() {
+        // 已填要素（表单已填 + 本批建议）拼进原文，模型才能把「何人」判为已给。
+        let filled = element_fields::filled_summary(&ctx.board.draft, &ctx.board.field_suggestions);
+        let filled_line = if filled.is_empty() {
+            String::new()
+        } else {
+            format!("{filled}\n")
+        };
         let request = format!(
             "{}
-{}",
+{filled_line}{}",
             ctx.board.draft.title_hint.trim(),
             ctx.board.request_with_notes()
         );
@@ -91,8 +165,28 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         ];
         let text = ctx.board.render_with(template, &locals);
         let reply = assist(ctx, &text)?;
-        let asked =
-            elements::questions(kind, &request, &reply, (1, element_max), ctx.env.vocabulary);
+        // 字段题覆盖「何人」（主送、承办、联系人、呈报领导任一项出了题）时不再出「何人」题；
+        // 名额先扣掉字段题，剩下的给六要素。
+        let covers_who = asked_fields.iter().any(|q| {
+            matches!(
+                q.target,
+                clarify::Target::Field(
+                    element_fields::FieldId::Recipient
+                        | element_fields::FieldId::ResponsibleUnit
+                        | element_fields::FieldId::ContactPerson
+                        | element_fields::FieldId::ReportingLeaders
+                )
+            )
+        });
+        let budget = element_max.saturating_sub(asked_fields.len());
+        let asked = elements::questions(
+            kind,
+            &request,
+            &reply,
+            (1, budget),
+            ctx.env.vocabulary,
+            covers_who,
+        );
         if !asked.is_empty() {
             tool_line(
                 ctx,
@@ -113,7 +207,7 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         }
         asked_elements = asked;
     }
-    let questions = clarify::merge_predraft(direction, asked_elements);
+    let questions = clarify::merge_predraft(direction, [asked_fields, asked_elements].concat());
     if questions.is_empty() {
         return Ok(Flow::Next);
     }
@@ -128,6 +222,40 @@ pub(super) fn clarify(ctx: &mut ToolCtx<'_, '_>, step: &StepSpec) -> anyhow::Res
         ),
     );
     Ok(Flow::Suspend(questions))
+}
+
+/// 要素抽取的原文里，`@` 引用文章（当证据并入的）每篇最多带多少字，防超长。
+/// 按技能声明并进 `request` 的引用材料（references.rs）不截，与六要素检查一致。
+const FIELD_REF_CAP: usize = 1500;
+
+/// 「要素抽取」的原文：标题提示 + 要求与已确认信息 + `@` 引用文章的正文。
+/// 摘录核对（`element_fields::plan`）用的必须正是给模型看的这份。
+fn extraction_source(board: &crate::agent::board::Board) -> String {
+    let mut source = format!(
+        "{}\n{}",
+        board.draft.title_hint.trim(),
+        board.request_with_notes()
+    );
+    for id in &board.pinned {
+        let Some(item) = board.evidence.get(*id) else {
+            continue;
+        };
+        let text: String = item.text.chars().take(FIELD_REF_CAP).collect();
+        source.push_str(&format!("\n【引用材料《{}》】\n{text}", item.doc_title));
+    }
+    source
+}
+
+/// 原文里出没出现过词库里的名称（规范名、对外名、简称、别名）：一个都没有时
+/// 「要素抽取」产不出任何建议，可以不调模型。
+fn any_vocabulary_name(text: &str, vocabulary: &[crate::models::VocabularyEntry]) -> bool {
+    let hit = |name: &str| !name.trim().is_empty() && text.contains(name.trim());
+    vocabulary.iter().any(|entry| {
+        hit(&entry.canonical)
+            || hit(&entry.external_name)
+            || hit(&entry.abbr)
+            || entry.aliases.iter().any(|alias| hit(alias))
+    })
 }
 
 /// 只问定文种这一题，答完回到 `clarify` 重做：其余的题按定下的文种再出。

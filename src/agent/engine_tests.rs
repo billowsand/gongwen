@@ -924,8 +924,37 @@ fn predraft_answers_become_notes_and_the_flow_continues_without_asking_again() {
     );
     // 界面线程切完文种，带着新要素接着跑。
     board.draft.kind = TemplateKind::OfficialLetter;
-    let (outcome, _, board) =
+    let (outcome, _, mut board) =
         run_board(board, &skill, &model, &kb(true), &suspension.checkpoint.at);
+    // 公函的必填表单要素（发文单位、主送）没填也没提：先出要素题（要素填写框架第 2 期）。
+    let Outcome::Suspended(fields) = outcome.unwrap() else {
+        panic!("公函的必填要素题要问");
+    };
+    assert!(
+        fields
+            .questions
+            .iter()
+            .all(|q| matches!(q.target, Target::Field(_))),
+        "{:?}",
+        fields
+            .questions
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect::<Vec<_>>()
+    );
+    // 全部跳过：正文留待核实，流程继续。
+    let replies: Vec<_> = fields
+        .questions
+        .iter()
+        .map(|q| (q.id, crate::agent::clarify::Reply::Skip))
+        .collect();
+    apply_answers(
+        &mut board,
+        &fields.questions,
+        fields.save_as.as_deref(),
+        &replies,
+    );
+    let (outcome, _, board) = run_board(board, &skill, &model, &kb(true), &fields.checkpoint.at);
     assert!(matches!(outcome.unwrap(), Outcome::Done));
     assert_eq!(
         model.asked("会让整篇方向写错"),
@@ -1019,16 +1048,31 @@ fn keeping_the_kind_asks_the_element_questions_of_that_kind_next() {
     assert_eq!(kind, None, "保持公函");
     let (outcome, _, _) = run_board(board, &skill, &model, &kb(true), &first.checkpoint.at);
     let Outcome::Suspended(second) = outcome.unwrap() else {
-        panic!("公函的六要素要问");
+        panic!("公函的要素题与六要素题要问");
     };
     assert!(!second.questions.is_empty());
+    let targets: Vec<_> = second.questions.iter().map(|q| q.target).collect();
+    // 必填的表单要素题（发文单位、主送）与六要素题同批；主送题覆盖「何人」，
+    // 六要素不再出「何人」题（要素填写框架第 2 期）。
     assert!(
-        second
-            .questions
+        targets
             .iter()
-            .all(|q| matches!(q.target, Target::Element(_))),
-        "{:?}",
-        second.questions
+            .all(|t| matches!(t, Target::Field(_) | Target::Element(_))),
+        "{targets:?}"
+    );
+    assert!(
+        targets.contains(&Target::Field(crate::element_fields::FieldId::Recipient)),
+        "{targets:?}"
+    );
+    assert!(
+        targets.contains(&Target::Element(crate::agent::elements::Element::What)),
+        "{targets:?}"
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|t| matches!(t, Target::Element(crate::agent::elements::Element::Who))),
+        "主送题覆盖「何人」：{targets:?}"
     );
     assert_eq!(model.asked("逐项检查起草所需的六要素"), 1);
 }
@@ -1525,5 +1569,251 @@ fn a_failing_checkpoint_sink_only_leaves_a_note() {
     assert!(
         notes(&events).iter().any(|n| n.contains("检查点没存上")),
         "只留一条说明"
+    );
+}
+
+// —— 要素填写框架第 2 期：动笔前的「要素抽取」出题与落地 ——
+
+/// 同 [`run_board`]，但带标准词库（要素抽取要查词库）。
+fn run_board_vocab(
+    board: Board,
+    skill: &Skill,
+    vocabulary: &[VocabularyEntry],
+    model: &FakeModel,
+    kb: &FakeKb,
+    at: &[usize],
+) -> (anyhow::Result<Outcome>, Vec<Event>, Board) {
+    let config = AppConfig::default();
+    let env = Env {
+        config: &config,
+        vocabulary,
+        kb,
+        manuscripts: &FakeManuscripts { docs: Vec::new() },
+        model,
+        skill,
+        apis: &Default::default(),
+        secrets: &Default::default(),
+        ckpt: &NoCheckpoint,
+    };
+    let mut events = Vec::new();
+    let mut board = board;
+    let outcome = super::run(&mut board, &env, at, &mut |event| events.push(event));
+    (outcome, events, board)
+}
+
+/// 流程测试用的词库：市数据局（带数据职能）与它的承办联系人张三；
+/// 市应急局与别单位的人李四。
+fn field_vocabulary() -> Vec<VocabularyEntry> {
+    let unit = |name: &str, code: &str, duties: &str| VocabularyEntry {
+        canonical: name.into(),
+        code: code.into(),
+        duties: duties.into(),
+        ..VocabularyEntry::default()
+    };
+    let person = |name: &str, unit: &str, phone: &str| VocabularyEntry {
+        canonical: name.into(),
+        category: crate::models::VocabularyCategory::Person,
+        unit: unit.into(),
+        phone: phone.into(),
+        ..VocabularyEntry::default()
+    };
+    vec![
+        unit(
+            "市数据局",
+            "00",
+            "负责公共数据归集、共享与开放，统筹数据资源平台建设",
+        ),
+        unit("市应急局", "01", "负责安全生产综合监督管理和应急救援"),
+        person("张三", "00", "12345678"),
+        person("李四", "01", ""),
+    ]
+}
+
+/// 模型怎么答：方向题说「无」，要素抽取与六要素按脚本给。
+fn field_flow_model(extraction: &'static str, six: &'static str) -> FakeModel {
+    FakeModel::new(move |_, prompt| {
+        if prompt.contains("会让整篇方向写错") {
+            "无".into()
+        } else if prompt.contains("核对表单要素在原文里写没写") {
+            extraction.into()
+        } else if prompt.contains("逐项检查起草所需的六要素") {
+            six.into()
+        } else {
+            "无".into()
+        }
+    })
+}
+
+/// 公函：原文写明主送（词库唯一对上）不出题、直接进建议清单；发文单位没提（必填）
+/// 出题；已填要素拼进六要素原文，「何人」判为已给不再问。答完发文单位题，建议清单
+/// 与已确认信息都多一条。
+#[test]
+fn predraft_field_extraction_suggests_asks_and_lands_on_the_board() {
+    let model = field_flow_model(
+        "发文单位｜未提\n主送单位｜已给｜市数据局\n抄送单位｜未提\n承办单位｜未提\n联系人｜未提",
+        "何事｜已给｜商请共建公共数据研究平台\n何因｜已给｜根据市政府会议要求\n\
+         何人｜已给｜市数据局\n何时｜已给｜10月底前\n何地｜不适用\n何法｜已给｜书面函复",
+    );
+    let skill = builtin_research_draft();
+    let mut request = input(
+        "给市数据局发函，商请共建公共数据研究平台。根据市政府会议要求，请于10月底前书面函复。",
+        false,
+    );
+    request.draft.kind = TemplateKind::OfficialLetter;
+    let (outcome, _, board) = run_board_vocab(
+        board_of(&request),
+        &skill,
+        &field_vocabulary(),
+        &model,
+        &kb(true),
+        &[],
+    );
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("发文单位没提，动笔前要出题");
+    };
+    // 只有发文单位这一道字段题：主送是唯一对上的建议，「何人」被已填要素盖住不出题。
+    let targets: Vec<_> = suspension.questions.iter().map(|q| q.target).collect();
+    assert_eq!(
+        targets,
+        [Target::Field(crate::element_fields::FieldId::IssuingUnit)],
+        "题目：{:?}",
+        suspension
+            .questions
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect::<Vec<_>>()
+    );
+    // 建议清单：主送直接进，出处材料原文。
+    assert_eq!(board.field_suggestions.len(), 1);
+    let suggestion = &board.field_suggestions[0];
+    assert_eq!(suggestion.field, crate::element_fields::FieldId::Recipient);
+    assert_eq!(suggestion.value, "市数据局");
+    assert!(
+        suggestion.source.contains("材料原文"),
+        "{}",
+        suggestion.source
+    );
+    // 六要素检查的原文带上了「已填要素」。
+    let six_prompt = model
+        .calls
+        .borrow()
+        .iter()
+        .find(|(_, prompt)| prompt.contains("逐项检查起草所需的六要素"))
+        .map(|(_, prompt)| prompt.clone())
+        .expect("六要素检查要跑");
+    assert!(
+        six_prompt.contains("已填要素：主送单位 市数据局"),
+        "{six_prompt}"
+    );
+
+    // 答发文单位题：选职能对上的市数据局 → 建议清单与已确认信息各多一条。
+    let question = &suspension.questions[0];
+    let picked = question
+        .choices
+        .iter()
+        .position(|c| c.label == "市数据局")
+        .expect("职能对得上的进选项");
+    let mut board = board;
+    apply_answers(
+        &mut board,
+        &suspension.questions,
+        suspension.save_as.as_deref(),
+        &[(question.id, crate::agent::clarify::Reply::Choice(picked))],
+    );
+    assert_eq!(board.field_suggestions.len(), 2);
+    let answered = &board.field_suggestions[1];
+    assert_eq!(answered.field, crate::element_fields::FieldId::IssuingUnit);
+    assert_eq!(answered.value, "市数据局");
+    assert_eq!(answered.source, "起草人从标准词库选定");
+    assert!(
+        board
+            .notes
+            .iter()
+            .any(|note| note == "发文单位：市数据局（起草人从标准词库选定）"),
+        "{:?}",
+        board.notes
+    );
+}
+
+/// 红头呈批件：联系人题（必填）只列承办单位的人——承办条目第一条是市数据局，
+/// 张三可选、市应急局的李四不出现；字段题覆盖「何人」，六要素的「何人」题不再出。
+#[test]
+fn predraft_contact_question_follows_the_responsible_unit() {
+    let model = field_flow_model(
+        "发文单位｜未提\n呈报领导｜未提\n落款单位｜未提\n承办单位｜未提\n联系人｜未提",
+        "何事｜已给｜开展数据平台项目\n何因｜已给｜工作需要\n何人｜缺｜呈报给谁？\n\
+         何时｜不适用\n何地｜不适用\n何法｜已给｜请领导审定",
+    );
+    let skill = builtin_research_draft();
+    let mut request = input("拟开展数据平台项目，请领导审定。", false);
+    request.draft.kind = TemplateKind::RedHeadApproval;
+    // 承办条目第一条：市数据局（联系人按它过滤）。
+    crate::element_fields::apply_field(
+        &mut request.draft,
+        crate::element_fields::FieldId::ResponsibleUnit,
+        "市数据局",
+        &field_vocabulary(),
+    );
+    let (outcome, _, mut board) = run_board_vocab(
+        board_of(&request),
+        &skill,
+        &field_vocabulary(),
+        &model,
+        &kb(true),
+        &[],
+    );
+    let Outcome::Suspended(suspension) = outcome.unwrap() else {
+        panic!("必填要素没填，动笔前要出题");
+    };
+    let texts: Vec<_> = suspension
+        .questions
+        .iter()
+        .map(|q| q.text.as_str())
+        .collect();
+    assert!(
+        suspension
+            .questions
+            .iter()
+            .all(|q| !matches!(q.target, Target::Element(_))),
+        "字段题覆盖「何人」，六要素题一道都不出：{texts:?}"
+    );
+    let contact = suspension
+        .questions
+        .iter()
+        .find(|q| q.target == Target::Field(crate::element_fields::FieldId::ContactPerson))
+        .expect("联系人必填要问");
+    let labels: Vec<_> = contact.choices.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(labels, ["张三"], "只列承办单位的人：{labels:?}");
+
+    // 答联系人题：选张三 → 建议清单有他，已确认信息记一句。
+    apply_answers(
+        &mut board,
+        &suspension.questions,
+        suspension.save_as.as_deref(),
+        &[(contact.id, crate::agent::clarify::Reply::Choice(0))],
+    );
+    assert!(
+        board.field_suggestions.iter().any(|s| {
+            s.field == crate::element_fields::FieldId::ContactPerson && s.value == "张三"
+        }),
+        "{:?}",
+        board.field_suggestions
+    );
+    assert!(
+        board
+            .notes
+            .iter()
+            .any(|note| note == "联系人：张三（起草人从标准词库选定）"),
+        "{:?}",
+        board.notes
+    );
+    // 没答的必填题（发文单位等）按跳过记了待核实。
+    assert!(
+        board
+            .notes
+            .iter()
+            .any(|note| note.contains("【待核实：发文单位】")),
+        "{:?}",
+        board.notes
     );
 }

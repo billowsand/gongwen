@@ -461,6 +461,17 @@ pub(crate) fn apply_answers(
             .notes
             .extend(clarify::resolve_agent(questions, replies));
     }
+    if questions
+        .iter()
+        .any(|q| matches!(q.target, Target::Field(_)))
+    {
+        // 表单要素题：选中的值进要素建议清单（建议卡采纳才写表单，红线 2），
+        // 回答同时记作已确认信息交给起草。只改黑板。
+        let (suggestions, notes) =
+            crate::element_fields::resolve_answers(&board.draft, questions, replies);
+        board.field_suggestions.extend(suggestions);
+        board.notes.extend(notes);
+    }
     if questions.iter().any(|q| matches!(q.target, Target::Gap(_))) {
         let workspace = std::mem::take(&mut board.workspace);
         board.workspace =

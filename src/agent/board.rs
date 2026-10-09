@@ -62,6 +62,10 @@ pub(crate) struct Board {
     pub(crate) refs: Vec<Reference>,
     /// 当证据用的引用在证据包里的编号：逐节检索时也一直带着，不被检索结果冲掉。
     pub(crate) pinned: Vec<usize>,
+    /// 要素建议清单（`element_fields::FieldSuggestion`）：动笔前的「要素抽取」直接建议的，
+    /// 加上要素题答完选定的。只进黑板，写表单要等用户在建议卡上点采纳（第 3 期，红线 2）。
+    #[serde(default)]
+    pub(crate) field_suggestions: Vec<crate::element_fields::FieldSuggestion>,
     /// 本会话之前的往来（会话摘要 + 最近几轮），追问时理解「再短一点」指的是什么（16.15 B.7）。
     /// 起草模型的系统提示自动带上；技能提示词里也可以写 `{history}`。
     pub(crate) history: String,
