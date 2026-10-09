@@ -241,9 +241,15 @@ fn run_step(
             Ok(match operator(ctx, step)? {
                 Flow::Next => None,
                 Flow::Suspend(questions) => Some(Ask::new(questions, None)),
-                Flow::Confirm(questions, list) => Some(Ask {
-                    decision: Decision::ConfirmList(list.clone()),
-                    ..Ask::new(questions, Some(list.var))
+                Flow::Decide {
+                    questions,
+                    decision,
+                    into,
+                    again,
+                } => Some(Ask {
+                    decision,
+                    again,
+                    ..Ask::new(questions, Some(into))
                 }),
                 Flow::SuspendAgain(questions) => Some(Ask {
                     again: true,
@@ -362,12 +368,25 @@ pub(crate) fn condition_holds(board: &Board, env: &Env<'_>, condition: &Value) -
             _ => false,
         },
         Value::Array(all) => all.iter().all(|c| condition_holds(board, env, c)),
-        Value::Object(map) => map.iter().all(|(key, value)| match key.as_str() {
-            "kind" => kind_matches(board.draft.kind, value),
-            "var" => value.as_str().is_some_and(|name| var_present(board, name)),
-            "not" => !condition_holds(board, env, value),
-            _ => false,
-        }),
+        Value::Object(map) => {
+            // `eq` / `in` 跟着 `var` 走：写了就比值，没写 `var` 只看有没有。
+            let expected: Option<Vec<&Value>> = match (map.get("eq"), map.get("in")) {
+                (Some(value), _) => Some(vec![value]),
+                (None, Some(Value::Array(values))) => Some(values.iter().collect()),
+                (None, Some(_)) => Some(Vec::new()),
+                (None, None) => None,
+            };
+            map.iter().all(|(key, value)| match key.as_str() {
+                "kind" => kind_matches(board.draft.kind, value),
+                "var" => value.as_str().is_some_and(|name| match &expected {
+                    Some(expected) => var_equals(board, name, expected),
+                    None => var_present(board, name),
+                }),
+                "eq" | "in" => map.contains_key("var"),
+                "not" => !condition_holds(board, env, value),
+                _ => false,
+            })
+        }
         _ => false,
     }
 }
@@ -382,6 +401,24 @@ fn kind_matches(kind: TemplateKind, value: &Value) -> bool {
         Value::Array(names) => names.iter().filter_map(Value::as_str).any(matches),
         _ => false,
     }
+}
+
+/// 变量等于其中一个值：字符串去首尾空白比，数字、布尔按文字比。
+fn var_equals(board: &Board, name: &str, expected: &[&Value]) -> bool {
+    fn text(value: &Value) -> Option<String> {
+        match value {
+            Value::String(text) => Some(text.trim().to_string()),
+            Value::Number(number) => Some(number.to_string()),
+            Value::Bool(flag) => Some(flag.to_string()),
+            _ => None,
+        }
+    }
+    let Some(actual) = board.vars.get(name).and_then(text) else {
+        return false;
+    };
+    expected
+        .iter()
+        .any(|value| text(value).is_some_and(|value| value == actual))
 }
 
 fn var_present(board: &Board, name: &str) -> bool {

@@ -10,7 +10,7 @@
 use super::prepare::lines_of;
 use super::{Flow, assist, check_cancel, note, param, phase, tool_line};
 use crate::agent::clarify::{Action, Choice, Question, Target};
-use crate::agent::decision::{ListConfirm, REVISION};
+use crate::agent::decision::{Decision, ListConfirm, REVISION};
 use crate::agent::skill::StepSpec;
 use crate::agent::tools::{Permission, ToolCtx};
 use serde_json::Value;
@@ -157,5 +157,10 @@ fn ask(ctx: &mut ToolCtx<'_, '_>, items: &[String], spec: ListConfirm) -> Flow {
         skippable: false,
         target: Target::Pick,
     };
-    Flow::Confirm(vec![question], spec)
+    Flow::Decide {
+        questions: vec![question],
+        into: spec.var.clone(),
+        decision: Decision::ConfirmList(spec),
+        again: false,
+    }
 }

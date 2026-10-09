@@ -650,7 +650,7 @@ fn condition_problems(condition: &Value, at: &str, problems: &mut Vec<String>) {
     match condition {
         Value::String(name) if CONDITIONS.contains(&name.as_str()) => {}
         Value::String(name) => problems.push(format!(
-            "{at}的条件「{name}」不认识（可用 {}，或 kind / var / not）",
+            "{at}的条件「{name}」不认识（可用 {}，或 kind / var（可带 eq / in）/ not）",
             CONDITIONS.join("、")
         )),
         Value::Array(all) => {
@@ -679,6 +679,16 @@ fn condition_problems(condition: &Value, at: &str, problems: &mut Vec<String>) {
                     }
                     "var" if value.is_string() => {}
                     "var" => problems.push(format!("{at}的 var 条件要写变量名")),
+                    "eq" | "in" if !map.contains_key("var") => problems.push(format!(
+                        "{at}的 {key} 要和 var 一起写：{{ var: 变量名, {key}: … }}"
+                    )),
+                    "in" if !value.is_array() => {
+                        problems.push(format!("{at}的 in 要写成列表：in: [值1, 值2]"))
+                    }
+                    "eq" if value.is_array() || value.is_object() => {
+                        problems.push(format!("{at}的 eq 只能写一个值；几个值用 in"))
+                    }
+                    "eq" | "in" => {}
                     "not" => condition_problems(value, at, problems),
                     other => problems.push(format!("{at}的条件「{other}」不认识")),
                 }

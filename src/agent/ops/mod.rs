@@ -27,7 +27,7 @@ mod write;
 
 use super::backend::ModelRole;
 use super::clarify::Question;
-use super::decision::ListConfirm;
+use super::decision::Decision;
 use super::engine::Event;
 use super::skill::StepSpec;
 use super::tools::{ASSIST_SYSTEM, Permission, ToolCtx, ToolUse, short};
@@ -39,8 +39,15 @@ pub(crate) enum Flow {
     Next,
     /// 停下来问用户；选择题的答案存进步骤的 `save_as`。
     Suspend(Vec<Question>),
-    /// 停下来让用户确认一份清单（大纲、要点……），答案存进清单的变量；形态随挂起交给界面。
-    Confirm(Vec<Question>, ListConfirm),
+    /// 停下来让用户做一个有形态的决策（清单确认、多选、方案比选……，`docs/decision-modules.md`
+    /// 9.2）：形态随挂起交给界面，答案存进 `into`；`again` 为真时答完回到这一步，由它处理答案，
+    /// 否则往下走。
+    Decide {
+        questions: Vec<Question>,
+        decision: Decision,
+        into: String,
+        again: bool,
+    },
     /// 停下来问用户，答完**回到这一步重做**：这批是上游决策（定文种），本步其余的题要以
     /// 它的答案为前提再出，不能和它挤在同一批里（`docs/ai-agent-workbench.md` 14.11）。
     SuspendAgain(Vec<Question>),

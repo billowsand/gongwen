@@ -370,6 +370,37 @@ mod tests {
     }
 
     #[test]
+    fn the_answer_decides_which_steps_run() {
+        let text = "---\nname: 分支测试\ntools: [ask.choice, ws.write]\nflow:\n  - tool: ask.choice\n    args: { question: 怎么仿, options: [同类改稿, 结构仿写] }\n    save_as: plan\n  - tool: ws.write\n    args: { text: 改稿 }\n    when: { var: plan, eq: 同类改稿 }\n  - tool: ws.write\n    args: { text: 仿结构 }\n    when: { var: plan, in: [结构仿写, 整篇仿写] }\n---\n";
+        let skill = crate::agent::skill::parse("branch-test", text, "测试").unwrap();
+        let problems = crate::agent::skill::validate(
+            &skill,
+            &crate::agent::ops::names(),
+            &crate::agent::tools::ids(),
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let model = ScriptedModel::new(|_, _| unreachable!("不调模型"));
+        let kb = KeywordKb::disabled();
+        let mut driver = Driver::new(&skill, &model, &kb, Board::default());
+        let suspension = driver.run().expect("先问");
+        driver.answer(&suspension, &[(1, Reply::Choice(1))]);
+        assert!(driver.run().is_none());
+        assert_eq!(driver.board.workspace, "仿结构", "只走了 in 对上的那一步");
+
+        let bad = "---\nname: 坏\ntools: [ws.write]\nflow:\n  - tool: ws.write\n    args: { text: x }\n    when: [{ eq: 甲 }, { var: a, in: 甲 }, { var: b, eq: [甲, 乙] }]\n---\n";
+        let skill = crate::agent::skill::parse("bad", bad, "测试").unwrap();
+        let problems = crate::agent::skill::validate(
+            &skill,
+            &crate::agent::ops::names(),
+            &crate::agent::tools::ids(),
+        )
+        .join("\n");
+        assert!(problems.contains("eq 要和 var 一起写"), "{problems}");
+        assert!(problems.contains("in 要写成列表"), "{problems}");
+        assert!(problems.contains("eq 只能写一个值"), "{problems}");
+    }
+
+    #[test]
     fn old_saved_outline_confirmations_are_upgraded() {
         let skill = skill();
         let model = ScriptedModel::new(|_, _| "背景：原始大纲".into());
