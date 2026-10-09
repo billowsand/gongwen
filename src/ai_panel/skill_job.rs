@@ -481,7 +481,7 @@ impl DraftPage<'_> {
             .preset
             .filter(|_| candidates.iter().any(|skill| skill.uses_preset()))
             .and_then(|id| self.config.ai_prompt(id));
-        if text.trim().is_empty() && preset.is_none() {
+        if text.trim().is_empty() && preset.is_none() && request.materials.is_empty() {
             return Err(if candidates.iter().any(|skill| skill.uses_preset()) {
                 "写下要求，或选一个润色预设。".into()
             } else {
@@ -508,6 +508,9 @@ impl DraftPage<'_> {
         }
         for reference in &request.refs {
             context.push(format!("《{}》", reference.title));
+        }
+        for material in &request.materials {
+            context.push(format!("粘贴材料 {} 字", material.text.chars().count()));
         }
         if let Some(text) = &selected {
             context.push(format!("选区 {} 字", text.chars().count()));
@@ -537,7 +540,7 @@ impl DraftPage<'_> {
         let plan = history::plan(&self.doc.ai_panel, window, false);
         let board = Board {
             draft: self.doc.draft.clone(),
-            request: text.trim().to_string(),
+            request: super::paste::with_materials(&text, &request.materials),
             notes,
             clarified: !request.notes.is_empty(),
             premise: request.premise,

@@ -65,6 +65,7 @@ struct BarActions {
     insert: Option<char>,
     /// 去掉一个引用。
     unlink: Option<String>,
+    remove_material: Option<usize>,
 }
 
 impl DraftPage<'_> {
@@ -86,6 +87,31 @@ impl DraftPage<'_> {
         let had_focus_id = input_id.with("had_focus");
         let had_focus = ctx.data(|data| data.get_temp::<bool>(had_focus_id).unwrap_or(false));
         let mut focused = ctx.memory(|memory| memory.has_focus(input_id));
+        // 只接管本输入框的 Paste；文件写入失败时把事件留给 TextEdit，原文不会丢失。
+        if focused {
+            let composer = &mut self.doc.ai_panel.composer;
+            ui.input_mut(|input| {
+                input.events.retain(|event| {
+                    if let egui::Event::Paste(text) = event
+                        && super::paste::is_large(text)
+                    {
+                        match super::paste::PastedFile::new(text) {
+                            Ok(file) => {
+                                composer.materials.push(file);
+                                composer.error = None;
+                                return false;
+                            }
+                            Err(error) => {
+                                composer.error = Some(format!(
+                                    "临时材料创建失败（{error}），已保留在输入框中。"
+                                ));
+                            }
+                        }
+                    }
+                    true
+                });
+            });
+        }
         // 点弹出层的那一下文本框会失焦；指针在弹出层上时照样当它开着。
         let over_popup = ctx
             .memory(|memory| memory.area_rect(popup_id))
@@ -164,16 +190,25 @@ impl DraftPage<'_> {
             })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                let output = egui::TextEdit::multiline(&mut self.doc.ai_panel.composer.text)
-                    .id(input_id)
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::ZERO)
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(chip.hint.as_str())
-                    // 弹出层开着时 Tab 是「确认」，不能让 egui 拿去切焦点。
-                    .lock_focus(popup_open.is_some())
-                    .show(ui);
+                // TextEdit 的 desired_rows 只是最小高度，长文必须在独立滚动区中绘制。
+                let text_height = (ctx.content_rect().height() * 0.25).clamp(60.0, 180.0);
+                let output = egui::ScrollArea::vertical()
+                    .id_salt(input_id.with("text_scroll"))
+                    .max_height(text_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        egui::TextEdit::multiline(&mut self.doc.ai_panel.composer.text)
+                            .id(input_id)
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .hint_text(chip.hint.as_str())
+                            // 弹出层开着时 Tab 是「确认」，不能让 egui 拿去切焦点。
+                            .lock_focus(popup_open.is_some())
+                            .show(ui)
+                    })
+                    .inner;
                 ui.add_space(4.0);
                 self.composer_bar(
                     ui,
@@ -227,6 +262,9 @@ impl DraftPage<'_> {
             composer.text = mention::unlink(&composer.text, &title);
             composer.refs.retain(|reference| reference.title != title);
         }
+        if let Some(index) = actions.remove_material {
+            self.doc.ai_panel.composer.materials.remove(index);
+        }
         if let Some(symbol) = actions.insert {
             insert_trigger(&ctx, input_id, &mut self.doc.ai_panel.composer.text, symbol);
         }
@@ -257,214 +295,235 @@ impl DraftPage<'_> {
             styles,
             ..
         } = &mut self.doc.ai_panel;
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             let spacing = ui.spacing().item_spacing.x;
             let left_width = (ui.available_width() - SEND_SIZE - spacing).max(80.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(left_width, 0.0),
-                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+                egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let plus = ui
-                        .add(
-                            egui::Button::image(theme::Icon::Plus.image_sized(14.0))
-                                .image_tint_follows_text_color(true)
-                                .corner_radius(egui::CornerRadius::same(255))
-                                .frame_when_inactive(false),
-                        )
-                        .on_hover_text("引用文章、选技能、用当前选区");
-                    egui::Popup::menu(&plus).show(|ui| {
-                        if ui
-                            .add(theme::menu_item(theme::Icon::Quote, "引用文章（@）"))
-                            .clicked()
-                        {
-                            actions.insert = Some('@');
-                        }
-                        if ui
-                            .add(theme::menu_item(theme::Icon::WandSparkles, "选技能（/）"))
-                            .clicked()
-                        {
-                            actions.insert = Some('/');
-                        }
-                        if ui
-                            .add_enabled(
-                                can_pick_selection,
-                                theme::menu_item(theme::Icon::Edit, "用当前选区"),
-                            )
-                            .on_disabled_hover_text("先在编辑器里选中一段")
-                            .clicked()
-                        {
-                            actions.pick_selection = true;
-                        }
-                    });
-
-                    let skill_button = ui
-                        .add(pill(&chip.label, composer.skill.is_some()))
-                        .on_hover_text(&chip.tooltip);
-                    egui::Popup::menu(&skill_button).show(|ui| {
-                        theme::popup_scroll(360.0).show(ui, |ui| {
-                            if ui
-                                .add(theme::menu_selectable_item(
-                                    composer.skill.is_none(),
-                                    "自动",
-                                ))
-                                .on_hover_text(
-                                    "按正文状态与输入内容自动选；分不出时发送后由模型判断",
+                    egui::ScrollArea::vertical()
+                        .id_salt(("ai_composer_chips", self.doc.key))
+                        .max_height(76.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let plus = ui
+                                .add(
+                                    egui::Button::image(theme::Icon::Plus.image_sized(14.0))
+                                        .image_tint_follows_text_color(true)
+                                        .corner_radius(egui::CornerRadius::same(255))
+                                        .frame_when_inactive(false),
                                 )
-                                .clicked()
-                            {
-                                composer.skill = None;
-                                composer.error = None;
-                            }
-                            for skill in skills.iter().filter(|skill| skill.enabled) {
-                                let selected = composer.skill.as_deref() == Some(&skill.id);
+                                .on_hover_text("引用文章、选技能、用当前选区");
+                            egui::Popup::menu(&plus).show(|ui| {
                                 if ui
-                                    .add(theme::menu_selectable_item(selected, &skill.name))
-                                    .on_hover_text(&skill.description)
+                                    .add(theme::menu_item(theme::Icon::Quote, "引用文章（@）"))
                                     .clicked()
                                 {
-                                    composer.skill = Some(skill.id.clone());
-                                    composer.error = None;
+                                    actions.insert = Some('@');
+                                }
+                                if ui
+                                    .add(theme::menu_item(theme::Icon::WandSparkles, "选技能（/）"))
+                                    .clicked()
+                                {
+                                    actions.insert = Some('/');
+                                }
+                                if ui
+                                    .add_enabled(
+                                        can_pick_selection,
+                                        theme::menu_item(theme::Icon::Edit, "用当前选区"),
+                                    )
+                                    .on_disabled_hover_text("先在编辑器里选中一段")
+                                    .clicked()
+                                {
+                                    actions.pick_selection = true;
+                                }
+                            });
+
+                            let skill_button = ui
+                                .add(pill(&chip.label, composer.skill.is_some()))
+                                .on_hover_text(&chip.tooltip);
+                            egui::Popup::menu(&skill_button).show(|ui| {
+                                theme::popup_scroll(360.0).show(ui, |ui| {
+                                    if ui
+                                        .add(theme::menu_selectable_item(
+                                            composer.skill.is_none(),
+                                            "自动",
+                                        ))
+                                        .on_hover_text(
+                                            "按正文状态与输入内容自动选；分不出时发送后由模型判断",
+                                        )
+                                        .clicked()
+                                    {
+                                        composer.skill = None;
+                                        composer.error = None;
+                                    }
+                                    for skill in skills.iter().filter(|skill| skill.enabled) {
+                                        let selected = composer.skill.as_deref() == Some(&skill.id);
+                                        if ui
+                                            .add(theme::menu_selectable_item(selected, &skill.name))
+                                            .on_hover_text(&skill.description)
+                                            .clicked()
+                                        {
+                                            composer.skill = Some(skill.id.clone());
+                                            composer.error = None;
+                                        }
+                                    }
+                                });
+                            });
+
+                            if chip.uses_preset {
+                                let label = composer
+                                    .preset
+                                    .and_then(|id| self.config.ai_prompt(id))
+                                    .map_or("不用预设", |prompt| prompt.name.as_str())
+                                    .to_string();
+                                let preset_button = ui
+                                    .add(pill(&label, composer.preset.is_some()))
+                                    .on_hover_text("润色预设：在 AI 管理页「润色预设」里维护");
+                                egui::Popup::menu(&preset_button).show(|ui| {
+                                    if ui
+                                        .add(theme::menu_selectable_item(
+                                            composer.preset.is_none(),
+                                            "不用预设",
+                                        ))
+                                        .clicked()
+                                    {
+                                        composer.preset = None;
+                                    }
+                                    for prompt in self
+                                        .config
+                                        .ai_prompts
+                                        .iter()
+                                        .filter(|prompt| prompt.applies_to(kind))
+                                    {
+                                        if ui
+                                            .add(theme::menu_selectable_item(
+                                                composer.preset == Some(prompt.id),
+                                                &prompt.name,
+                                            ))
+                                            .clicked()
+                                        {
+                                            composer.preset = Some(prompt.id);
+                                        }
+                                    }
+                                });
+                            }
+
+                            if chip.writes && styles.iter().any(|style| style.enabled) {
+                                style_pill(ui, composer, styles, kind);
+                            }
+
+                            if chip.uses_knowledge {
+                                let toggle = ui
+                                    .add_enabled(
+                                        rag_enabled,
+                                        egui::Button::image_and_text(
+                                            theme::Icon::Library.image_sized(12.0),
+                                            egui::RichText::new("检索知识库").small(),
+                                        )
+                                        .image_tint_follows_text_color(true)
+                                        .selected(composer.use_rag && rag_enabled)
+                                        .corner_radius(egui::CornerRadius::same(255)),
+                                    )
+                                    .on_hover_text("技能用到知识库时检索；点一下切换")
+                                    .on_disabled_hover_text(
+                                        "知识库检索尚未启用，可在 AI 管理页「知识库检索」里配置",
+                                    );
+                                if toggle.clicked() {
+                                    composer.use_rag = !composer.use_rag;
                                 }
                             }
-                        });
-                    });
 
-                    if chip.uses_preset {
-                        let label = composer
-                            .preset
-                            .and_then(|id| self.config.ai_prompt(id))
-                            .map_or("不用预设", |prompt| prompt.name.as_str())
-                            .to_string();
-                        let preset_button = ui
-                            .add(pill(&label, composer.preset.is_some()))
-                            .on_hover_text("润色预设：在 AI 管理页「润色预设」里维护");
-                        egui::Popup::menu(&preset_button).show(|ui| {
-                            if ui
-                                .add(theme::menu_selectable_item(
-                                    composer.preset.is_none(),
-                                    "不用预设",
-                                ))
-                                .clicked()
-                            {
-                                composer.preset = None;
+                            if has_proposal && composer.selection.is_none() {
+                                // 「改提案」（16.15 B.7）：开着时「再短一点」改的是刚交的提案。
+                                let toggle = ui
+                                    .add(
+                                        egui::Button::image_and_text(
+                                            theme::Icon::Edit.image_sized(12.0),
+                                            egui::RichText::new("改提案").small(),
+                                        )
+                                        .image_tint_follows_text_color(true)
+                                        .selected(!composer.skip_proposal)
+                                        .corner_radius(egui::CornerRadius::same(255)),
+                                    )
+                                    .on_hover_text(if composer.skip_proposal {
+                                        "现在改的是正文；点一下改为接着改待确认的提案"
+                                    } else {
+                                        "接着改待确认的提案（如「再短一点」「第二条展开说」），新提案取代旧的；点一下改为改正文"
+                                    });
+                                if toggle.clicked() {
+                                    composer.skip_proposal = !composer.skip_proposal;
+                                }
                             }
-                            for prompt in self
-                                .config
-                                .ai_prompts
-                                .iter()
-                                .filter(|prompt| prompt.applies_to(kind))
-                            {
+
+                            if let Some((_, text)) = &composer.selection {
                                 if ui
-                                    .add(theme::menu_selectable_item(
-                                        composer.preset == Some(prompt.id),
-                                        &prompt.name,
+                                    .add(removable_pill(&format!("选区 {} 字", text.chars().count())))
+                                    .on_hover_text("只改这段，其余逐字保持不变；点 × 改为全文")
+                                    .clicked()
+                                {
+                                    composer.selection = None;
+                                }
+                            } else if chip.edits_text {
+                                if can_pick_selection {
+                                    if ui
+                                        .small_button("用当前选区")
+                                        .on_hover_text("只改编辑器里选中的那段")
+                                        .clicked()
+                                    {
+                                        actions.pick_selection = true;
+                                    }
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new("全文")
+                                            .small()
+                                            .color(theme::text_muted()),
+                                    );
+                                }
+                            }
+
+                            for reference in &composer.refs {
+                                if ui
+                                    .add(removable_pill(&format!("《{}》", reference.title)))
+                                    .on_hover_text(format!(
+                                        "引用{}的这篇；点 × 取消引用",
+                                        reference.source.label()
                                     ))
                                     .clicked()
                                 {
-                                    composer.preset = Some(prompt.id);
+                                    actions.unlink = Some(reference.title.clone());
                                 }
                             }
-                        });
-                    }
-
-                    if chip.writes && styles.iter().any(|style| style.enabled) {
-                        style_pill(ui, composer, styles, kind);
-                    }
-
-                    if chip.uses_knowledge {
-                        let toggle = ui
-                            .add_enabled(
-                                rag_enabled,
-                                egui::Button::image_and_text(
-                                    theme::Icon::Library.image_sized(12.0),
-                                    egui::RichText::new("检索知识库").small(),
-                                )
-                                .image_tint_follows_text_color(true)
-                                .selected(composer.use_rag && rag_enabled)
-                                .corner_radius(egui::CornerRadius::same(255)),
-                            )
-                            .on_hover_text("技能用到知识库时检索；点一下切换")
-                            .on_disabled_hover_text(
-                                "知识库检索尚未启用，可在 AI 管理页「知识库检索」里配置",
-                            );
-                        if toggle.clicked() {
-                            composer.use_rag = !composer.use_rag;
-                        }
-                    }
-
-                    if has_proposal && composer.selection.is_none() {
-                        // 「改提案」（16.15 B.7）：开着时「再短一点」改的是刚交的提案。
-                        let toggle = ui
-                            .add(
-                                egui::Button::image_and_text(
-                                    theme::Icon::Edit.image_sized(12.0),
-                                    egui::RichText::new("改提案").small(),
-                                )
-                                .image_tint_follows_text_color(true)
-                                .selected(!composer.skip_proposal)
-                                .corner_radius(egui::CornerRadius::same(255)),
-                            )
-                            .on_hover_text(if composer.skip_proposal {
-                                "现在改的是正文；点一下改为接着改待确认的提案"
-                            } else {
-                                "接着改待确认的提案（如「再短一点」「第二条展开说」），新提案取代旧的；点一下改为改正文"
-                            });
-                        if toggle.clicked() {
-                            composer.skip_proposal = !composer.skip_proposal;
-                        }
-                    }
-
-                    if let Some((_, text)) = &composer.selection {
-                        if ui
-                            .add(removable_pill(&format!("选区 {} 字", text.chars().count())))
-                            .on_hover_text("只改这段，其余逐字保持不变；点 × 改为全文")
-                            .clicked()
-                        {
-                            composer.selection = None;
-                        }
-                    } else if chip.edits_text {
-                        if can_pick_selection {
-                            if ui
-                                .small_button("用当前选区")
-                                .on_hover_text("只改编辑器里选中的那段")
-                                .clicked()
-                            {
-                                actions.pick_selection = true;
+                            for (index, material) in composer.materials.iter().enumerate() {
+                                if ui
+                                    .add(removable_pill(&format!(
+                                        "粘贴材料 · {} 字",
+                                        material.chars
+                                    )))
+                                    .on_hover_text(format!(
+                                        "{}\n临时文件：{}\n全文作为材料发送；点 × 取消引用",
+                                        material.material.name,
+                                        material.file.path().display()
+                                    ))
+                                    .clicked()
+                                {
+                                    actions.remove_material = Some(index);
+                                }
                             }
-                        } else {
-                            ui.label(
-                                egui::RichText::new("全文")
-                                    .small()
-                                    .color(theme::text_muted()),
-                            );
-                        }
-                    }
-
-                    for reference in &composer.refs {
-                        if ui
-                            .add(removable_pill(&format!("《{}》", reference.title)))
-                            .on_hover_text(format!(
-                                "引用{}的这篇；点 × 取消引用",
-                                reference.source.label()
-                            ))
-                            .clicked()
-                        {
-                            actions.unlink = Some(reference.title.clone());
-                        }
-                    }
+                            });
+                        });
                 },
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
-                let clicked = send_button(ui, running).clicked();
-                if clicked {
-                    if running {
-                        actions.stop = true;
-                    } else {
-                        actions.send = true;
-                    }
+            if send_button(ui, running).clicked() {
+                if running {
+                    actions.stop = true;
+                } else {
+                    actions.send = true;
                 }
-            });
+            }
         });
     }
 
@@ -647,6 +706,11 @@ impl DraftPage<'_> {
             preset: composer.preset,
             use_rag: composer.use_rag,
             refs: mention::live_refs(&composer.text, &composer.refs),
+            materials: composer
+                .materials
+                .iter()
+                .map(|file| file.material.clone())
+                .collect(),
             notes: Vec::new(),
             premise: None,
             on_proposal,
@@ -657,6 +721,7 @@ impl DraftPage<'_> {
             composer.text.clear();
             composer.error = None;
             composer.refs.clear();
+            composer.materials.clear();
             // 选区只管这一轮：改完之后原文已变，留着只会让下一轮报「选区失效」。
             composer.selection = None;
         }

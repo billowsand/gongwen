@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::agent::skill::RESEARCH_DRAFT;
+use crate::ai_panel::{TurnRequest, paste::PastedFile};
 use crate::app::VersionSwitchPrompt;
 use crate::app::WorkerResult;
 use crate::draft_page::{DraftSession, ExportLinks};
@@ -126,6 +127,143 @@ fn has(texts: &[String], needle: &str) -> bool {
     texts.iter().any(|text| text.contains(needle))
 }
 
+/// 真正走 egui 粘贴事件：长文成为材料，短文仍在光标处插入；其它输入框的粘贴不接管。
+#[test]
+fn large_paste_becomes_a_file_only_in_the_focused_composer() {
+    let mut harness = Harness::new("原有正文");
+    harness.doc.ai_panel.open = true;
+    harness.doc.ai_panel.composer.text = "请根据材料整理通知".into();
+    harness.frame_texts();
+    harness.focus_input();
+    let text = "中文材料与🙂\n".repeat(400);
+    harness.frame_with(vec![egui::Event::Paste(text.clone())]);
+    let composer = &harness.doc.ai_panel.composer;
+    assert_eq!(composer.text, "请根据材料整理通知");
+    assert_eq!(composer.materials.len(), 1);
+    let path = composer.materials[0].file.path().to_owned();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(composer.materials[0].material.text, text);
+    harness.frame_with(vec![egui::Event::Paste("短材料".into())]);
+    assert!(harness.doc.ai_panel.composer.text.contains("短材料"));
+    harness.ctx.memory_mut(|memory| {
+        memory.surrender_focus(egui::Id::new(("ai_panel_input", harness.doc.key)))
+    });
+    harness.frame_with(vec![egui::Event::Paste(text)]);
+    assert_eq!(harness.doc.ai_panel.composer.materials.len(), 1);
+    harness.doc.ai_panel.composer.materials.clear();
+    assert!(!path.exists(), "移除引用后清理临时文件");
+}
+
+#[test]
+fn pasted_material_survives_serialization_and_file_cleanup() {
+    let mut harness = Harness::new("原有正文");
+    let file = PastedFile::new(&"材料全文🙂\n".repeat(400)).unwrap();
+    let path = file.file.path().to_owned();
+    let mut request = panel_request(Some(crate::agent::skill::POLISH), "按材料修改");
+    request.materials.push(file.material.clone());
+    let saved = serde_json::to_value(&request).unwrap();
+    drop(file);
+    assert!(!path.exists());
+    let restored: TurnRequest = serde_json::from_value(saved.clone()).unwrap();
+    assert_eq!(restored, request);
+    let time = crate::prompt::TimeContext::now();
+    let (_, board, ..) = harness
+        .with_page(|page| page.prepare_skill(&restored, &time, None))
+        .unwrap();
+    assert!(board.request.contains(&request.materials[0].text));
+    assert!(board.request.ends_with("【要求】\n按材料修改"));
+    assert_eq!(harness.doc.generated_markdown, "原有正文");
+    let mut old = saved;
+    old.as_object_mut().unwrap().remove("materials");
+    assert!(
+        serde_json::from_value::<TurnRequest>(old)
+            .unwrap()
+            .materials
+            .is_empty()
+    );
+}
+
+/// 即使通过连续输入或短段粘贴积累长文，文字区也不能撑高、撑宽整个侧栏。
+#[test]
+fn composer_bounds_long_text_and_many_materials() {
+    let mut harness = Harness::new("原有正文");
+    harness.doc.ai_panel.composer.text = "很长的要求🙂没有空格".repeat(1000);
+    for _ in 0..12 {
+        harness
+            .doc
+            .ai_panel
+            .composer
+            .materials
+            .push(PastedFile::new("材料").unwrap());
+    }
+    let ctx = harness.ctx.clone();
+    for size in [egui::vec2(340.0, 600.0), egui::vec2(640.0, 900.0)] {
+        for _ in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    harness.with_page(|page| page.ai_composer_ui(ui));
+                    assert!(ui.min_rect().height() < 350.0, "{}", ui.min_rect());
+                    assert!(ui.min_rect().width() <= size.x, "{}", ui.min_rect());
+                },
+            );
+            let mut sends = 0;
+            for clipped in &output.shapes {
+                if let egui::epaint::Shape::Circle(circle) = &clipped.shape
+                    && circle.fill == theme::accent()
+                    && (circle.radius - 15.0).abs() < 0.1
+                {
+                    sends += 1;
+                    let rect = egui::Rect::from_center_size(
+                        circle.center,
+                        egui::Vec2::splat(circle.radius * 2.0),
+                    );
+                    assert!(
+                        clipped.clip_rect.contains_rect(rect),
+                        "发送按钮被裁切：{rect}"
+                    );
+                    assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(rect));
+                }
+            }
+            assert_eq!(sends, 1, "发送按钮应始终可见");
+        }
+    }
+    harness.doc.ai_panel.open = true;
+    let size = egui::vec2(340.0, 480.0);
+    // egui 的底部 Panel 按上一帧内容定高；切换布局后先让面板尺寸收敛。
+    for _ in 0..3 {
+        harness.frame_output(Vec::new(), size);
+    }
+    for _ in 0..3 {
+        let output = harness.frame_output(Vec::new(), size);
+        let sends: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| {
+                if let egui::epaint::Shape::Circle(circle) = &clipped.shape
+                    && circle.fill == theme::accent()
+                    && (circle.radius - 15.0).abs() < 0.1
+                {
+                    Some((
+                        clipped.clip_rect,
+                        egui::Rect::from_center_size(circle.center, egui::Vec2::splat(30.0)),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(sends.len(), 1, "真实侧栏里的发送按钮应可见");
+        assert!(
+            sends[0].0.contains_rect(sends[0].1),
+            "发送按钮被侧栏裁切：{sends:?}"
+        );
+    }
+}
+
 #[test]
 fn workspace_is_shown_on_the_left_and_readonly_until_adopted() {
     let mut harness = Harness::new("原有正文");
@@ -246,6 +384,7 @@ fn panel_request(skill: Option<&str>, text: &str) -> crate::ai_panel::TurnReques
         preset: None,
         use_rag: false,
         refs: Vec::new(),
+        materials: Vec::new(),
         notes: Vec::new(),
         premise: None,
         on_proposal: false,
@@ -1776,6 +1915,13 @@ fn composer_samples() {
         };
         theme::configure_style(&harness.ctx);
         harness.ctx.set_pixels_per_point(2.0);
+        if name == "pasted-material-narrow" {
+            let pasted = harness.frame_output(
+                vec![egui::Event::Paste("这是一段很长的中文材料。\n".repeat(500))],
+                size,
+            );
+            canvas.absorb(&pasted.textures_delta);
+        }
         for _ in 0..15 {
             let output = harness.frame_output(Vec::new(), size);
             canvas.absorb(&output.textures_delta);
@@ -1888,6 +2034,18 @@ fn composer_samples() {
         !has(&texts, "仿写"),
         "引用的书名不把技能带偏到仿写：{texts:?}"
     );
+
+    let mut harness = Harness::new("原有正文");
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    harness.doc.ai_panel.composer.text =
+        "根据材料整理通知，保留原文数字和日期，列出待核实事项。\n".repeat(40);
+    shoot(&mut harness, "long-input");
+    shoot(&mut harness, "long-input-narrow");
+    let mut harness = Harness::new("原有正文");
+    harness.with_page(|page| page.toggle_ai_panel(None));
+    harness.doc.ai_panel.composer.text = "请根据粘贴材料整理通知".into();
+    harness.focus_input();
+    shoot(&mut harness, "pasted-material-narrow");
 }
 
 /// 追问（16.15 B.7）：有待确认的提案时「再短一点」改的是提案；本会话答过的题并进已确认；
@@ -1903,6 +2061,7 @@ fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
         preset: None,
         use_rag: false,
         refs: Vec::new(),
+        materials: Vec::new(),
         notes: vec!["会议时间：下周一".into()],
         premise: None,
         on_proposal: false,
@@ -1937,6 +2096,7 @@ fn follow_ups_work_on_the_pending_proposal_and_carry_the_session() {
         preset: None,
         use_rag: false,
         refs: Vec::new(),
+        materials: Vec::new(),
         notes: Vec::new(),
         premise: None,
         on_proposal: true,
@@ -2347,6 +2507,7 @@ fn suspended_draft(harness: &mut Harness, date: &str) -> (u64, crate::ai_panel::
         preset: None,
         use_rag: false,
         refs: Vec::new(),
+        materials: Vec::new(),
         notes: Vec::new(),
         premise: None,
         on_proposal: false,
@@ -2723,6 +2884,7 @@ fn request() -> crate::ai_panel::TurnRequest {
         preset: None,
         use_rag: false,
         refs: Vec::new(),
+        materials: Vec::new(),
         notes: Vec::new(),
         premise: None,
         on_proposal: false,

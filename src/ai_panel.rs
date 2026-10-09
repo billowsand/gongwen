@@ -24,6 +24,7 @@ mod commit_intent;
 mod composer_ui;
 mod history;
 mod mention;
+mod paste;
 mod provenance;
 pub(crate) use provenance::source_line as proposal_source;
 pub(crate) mod session;
@@ -56,6 +57,8 @@ pub(crate) struct Composer {
     pub(crate) primed: bool,
     /// `@` 引用的文章；输入框里对应留着 `@《标题》` 记号，记号删了引用也就没了。
     pub(crate) refs: Vec<Reference>,
+    /// 大段粘贴生成的临时材料，标签可单独移除。
+    pub(crate) materials: Vec<paste::PastedFile>,
     /// `/`、`@` 弹出层的状态。
     pub(crate) popup: mention::PopupState,
     /// 有待确认的提案时，修改类技能改提案而不是改正文（16.15 B.7）。默认是；底栏的「改提案」
@@ -78,6 +81,9 @@ pub(crate) struct TurnRequest {
     pub(crate) use_rag: bool,
     /// `@` 引用的文章。
     pub(crate) refs: Vec<Reference>,
+    /// 粘贴材料的全文快照，随会话保存，旧会话默认没有材料。
+    #[serde(default)]
+    pub(crate) materials: Vec<paste::Material>,
     /// 动笔前澄清的回答（重跑时沿用，不再问一遍）。
     pub(crate) notes: Vec<String>,
     /// 定文种题定下的文种（重跑时沿用，不再问；当前文种与它不符时作废重问）。
