@@ -284,6 +284,7 @@ fn ask(ctx: &mut ToolCtx<'_, '_>, items: Vec<Item>, spec: ListConfirm, again: bo
             custom_hint: None,
             prefill,
             skippable: true,
+            multi: false,
             target: Target::Pick,
         }
     } else {
@@ -299,6 +300,7 @@ fn ask(ctx: &mut ToolCtx<'_, '_>, items: Vec<Item>, spec: ListConfirm, again: bo
             custom_hint: Some(spec.hint.clone()),
             prefill,
             skippable: false,
+            multi: false,
             target: Target::Pick,
         }
     };

@@ -203,6 +203,7 @@ impl Tool for AskChoice {
                 .unwrap_or(true)
                 .then(|| "自己填写".to_string()),
             skippable: arg_bool(args, "skip").unwrap_or(false),
+            multi: false,
             target: Target::Pick,
         }]);
         Ok(output)

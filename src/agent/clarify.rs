@@ -58,6 +58,9 @@ pub(crate) enum Target {
     PreDraft,
     /// 动笔前的六要素题（`elements.rs`）：答案记作已确认信息，跳过就留固定占位。
     Element(super::elements::Element),
+    /// 动笔前的表单要素题（`element_fields.rs`）：选中的值进黑板的要素建议清单
+    /// （第 3 期建议卡采纳才写表单，红线 2），同时记一句已确认信息。
+    Field(crate::element_fields::FieldId),
     Gap(usize),
     /// 流程中途的通用选择题（`ask.choice`），答案存进变量后流程接着跑。
     Pick,
@@ -77,13 +80,20 @@ pub(crate) struct Question {
     pub(crate) prefill: String,
     /// 可以跳过：动笔前的题跳过就按现有信息写；缺口题跳过就保留待核实。
     pub(crate) skippable: bool,
+    /// 多选题（主送、抄送等多值要素字段）：界面画复选框，回答用 `Reply::Many`。
+    /// 旧会话没有这个字段，读回按单选。
+    #[serde(default)]
+    pub(crate) multi: bool,
     pub(crate) target: Target,
 }
 
 impl Target {
-    /// 动笔前问的题（定文种、方向题与六要素题）：答案作为已确认信息交给起草。
+    /// 动笔前问的题（定文种、方向题、六要素题与表单要素题）：答案作为已确认信息交给起草。
     pub(crate) fn is_predraft(self) -> bool {
-        matches!(self, Self::Kind | Self::PreDraft | Self::Element(_))
+        matches!(
+            self,
+            Self::Kind | Self::PreDraft | Self::Element(_) | Self::Field(_)
+        )
     }
 }
 
@@ -294,6 +304,7 @@ pub(crate) fn kind_question(request: &str, current: TemplateKind) -> Option<Ques
         custom_hint: None,
         prefill: String::new(),
         skippable: false,
+        multi: false,
         target: Target::Kind,
     })
 }
@@ -331,6 +342,7 @@ pub(crate) fn model_kind_question(
             custom_hint: None,
             prefill: String::new(),
             skippable: false,
+            multi: false,
             target: Target::Kind,
         })
     })
@@ -426,6 +438,7 @@ pub(crate) fn agent_questions(raw: &[(String, Vec<String>)]) -> Result<Vec<Quest
             }),
             prefill: String::new(),
             skippable: true,
+            multi: false,
             target: Target::Agent,
         });
     }
@@ -490,6 +503,7 @@ pub(crate) fn predraft_questions(
             custom_hint: Some("其他，自己写".into()),
             prefill: String::new(),
             skippable: true,
+            multi: false,
             target: Target::PreDraft,
         });
     }
@@ -498,15 +512,30 @@ pub(crate) fn predraft_questions(
 
 /// 同一批里同一件事只问一遍：方向题与已出的六要素题话题重叠的（模型问「受文对象是谁」，
 /// 要素题也问「何人」），丢掉方向题——要素题的选项来自标准词库，答案按要素记。
-/// 题号重新从 1 排起。
+/// 出了表单要素题（主送、承办、联系人、呈报领导）时「何人」已由字段题覆盖，同样去掉
+/// 与何人重叠的方向题。题号重新从 1 排起。
 pub(crate) fn merge_predraft(direction: Vec<Question>, elements: Vec<Question>) -> Vec<Question> {
-    let asked: Vec<super::elements::Element> = elements
+    let mut asked: Vec<super::elements::Element> = elements
         .iter()
         .filter_map(|q| match q.target {
             Target::Element(element) => Some(element),
             _ => None,
         })
         .collect();
+    use crate::element_fields::FieldId;
+    if elements.iter().any(|q| {
+        matches!(
+            q.target,
+            Target::Field(
+                FieldId::Recipient
+                    | FieldId::ResponsibleUnit
+                    | FieldId::ContactPerson
+                    | FieldId::ReportingLeaders
+            )
+        )
+    }) {
+        asked.push(super::elements::Element::Who);
+    }
     direction
         .into_iter()
         .filter(|q| !asked.iter().any(|element| element.covers(&q.text)))
@@ -730,6 +759,7 @@ pub(crate) fn gap_question(id: usize, gap: &Gap, vocabulary: &[VocabularyEntry])
         custom_hint,
         prefill: String::new(),
         skippable: true,
+        multi: false,
         target: Target::Gap(gap.id),
     }
 }
@@ -885,6 +915,10 @@ pub(crate) fn resolve_predraft(
         let Some(question) = questions.iter().find(|q| q.id == *question_id) else {
             continue;
         };
+        // 表单要素题的回答由 `element_fields::resolve_answers` 落地（建议清单 + 已确认信息）。
+        if matches!(question.target, Target::Field(_)) {
+            continue;
+        }
         match reply {
             Reply::Choice(index) => match question.choices.get(*index).map(|c| &c.action) {
                 Some(Action::SwitchKind(target)) => switch = Some(*target),
@@ -1235,6 +1269,7 @@ mod tests {
             "何人｜缺｜发给谁？\n何时｜缺｜什么时候前回复？",
             (1, 4),
             &[],
+            false,
         );
         let merged = merge_predraft(direction, elements);
         let texts: Vec<_> = merged.iter().map(|q| q.text.as_str()).collect();
@@ -1242,6 +1277,32 @@ mod tests {
         assert_eq!(texts[0], "篇幅多长？");
         let ids: Vec<_> = merged.iter().map(|q| q.id).collect();
         assert_eq!(ids, (1..=merged.len()).collect::<Vec<_>>());
+    }
+
+    /// 出了主送题（Target::Field）时，「何人」已被覆盖：与何人重叠的方向题照样去掉。
+    #[test]
+    fn a_field_question_covers_who_for_direction_dedup() {
+        let direction = predraft_questions(
+            vec![
+                ("受文对象是谁？".to_string(), vec!["甲".into(), "乙".into()]),
+                ("篇幅多长？".to_string(), vec!["短".into(), "长".into()]),
+            ],
+            3,
+        );
+        let field = Question {
+            id: 1,
+            text: "主送单位是哪些？（可多选）".into(),
+            choices: vec![],
+            custom_hint: None,
+            prefill: String::new(),
+            skippable: true,
+            multi: true,
+            target: Target::Field(crate::element_fields::FieldId::Recipient),
+        };
+        let merged = merge_predraft(direction, vec![field]);
+        let texts: Vec<_> = merged.iter().map(|q| q.text.as_str()).collect();
+        assert_eq!(texts, ["篇幅多长？", "主送单位是哪些？（可多选）"]);
+        assert_eq!(merged[1].id, 2);
     }
 
     #[test]

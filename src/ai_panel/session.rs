@@ -727,6 +727,7 @@ mod tests {
             custom_hint: Some("自己填".into()),
             prefill: String::new(),
             skippable: true,
+            multi: false,
             target: Target::PreDraft,
         }
     }

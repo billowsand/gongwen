@@ -243,7 +243,8 @@ fn parse(reply: &str) -> Vec<(Element, Verdict)> {
 }
 
 /// 去掉空白与常见标点再比：模型摘录时常丢个逗号、换个引号。
-fn squash(text: &str) -> String {
+/// 「要素抽取」（`element_fields`）核对摘录用同一套比较。
+pub(crate) fn squash(text: &str) -> String {
     text.chars()
         .filter(|ch| !ch.is_whitespace() && !"，。、；：,.;:“”\"'‘’「」".contains(*ch))
         .collect()
@@ -256,12 +257,15 @@ const MAX_QUESTION_CHARS: usize = 30;
 /// 必备的排在前面。模型的回复一行都解析不出来时不出题——宁可少问，不要按坏输出乱问。
 ///
 /// 「何人」问的是单位时（致函对象、责任单位、经办单位），按标准词库的职能任务给候选。
+/// `skip_who`：同批已经出了表单要素题（主送、承办、联系人、呈报领导）时不再出「何人」题
+/// （`docs/element-fill-design.md` 3.2：字段题与六要素去重）。
 pub(crate) fn questions(
     kind: TemplateKind,
     request: &str,
     reply: &str,
     (first_id, max): (usize, usize),
     vocabulary: &[VocabularyEntry],
+    skip_who: bool,
 ) -> Vec<Question> {
     let parsed = parse(reply);
     if parsed.is_empty() || max == 0 {
@@ -270,6 +274,9 @@ pub(crate) fn questions(
     let haystack = squash(request);
     let mut picked: Vec<(Scope, String, Vec<String>)> = Vec::new();
     for scope in checklist(kind) {
+        if skip_who && scope.element == Element::Who {
+            continue;
+        }
         let verdict = parsed
             .iter()
             .find(|(element, _)| *element == scope.element)
@@ -377,6 +384,7 @@ fn question_for(id: usize, scope: Scope, model_question: &str) -> Question {
         custom_hint: Some(scope.element.example().to_string()),
         prefill: String::new(),
         skippable: true,
+        multi: false,
         target: Target::Element(scope.element),
     }
 }
@@ -420,7 +428,14 @@ mod tests {
                      何时｜缺｜研究方案请对方什么时候前反馈？\n\
                      何地｜不适用\n\
                      何法｜已给｜请贵局书面函复";
-        let questions = questions(TemplateKind::OfficialLetter, REQUEST, reply, (1, 4), &[]);
+        let questions = questions(
+            TemplateKind::OfficialLetter,
+            REQUEST,
+            reply,
+            (1, 4),
+            &[],
+            false,
+        );
         let texts: Vec<_> = questions.iter().map(|q| q.text.as_str()).collect();
         // 「请贵局书面函复」原文里没有：模型说给了不算数，必备项照问。
         assert_eq!(
@@ -436,7 +451,17 @@ mod tests {
 
     #[test]
     fn unparsable_replies_ask_nothing_and_optional_items_need_an_explicit_gap() {
-        assert!(questions(TemplateKind::OfficialLetter, REQUEST, "好的", (1, 4), &[]).is_empty());
+        assert!(
+            questions(
+                TemplateKind::OfficialLetter,
+                REQUEST,
+                "好的",
+                (1, 4),
+                &[],
+                false
+            )
+            .is_empty()
+        );
         // 只提了一项：没提到的必备项照问，没提到的非必备项（何地）不问。
         let questions = questions(
             TemplateKind::OfficialLetter,
@@ -444,6 +469,7 @@ mod tests {
             "何事｜已给｜商请共建",
             (1, 9),
             &[],
+            false,
         );
         assert!(
             questions
@@ -457,7 +483,7 @@ mod tests {
     fn research_reports_have_no_checklist_and_the_cap_keeps_required_first() {
         assert!(checklist(TemplateKind::ResearchReport).is_empty());
         let reply = "何事｜缺｜办什么\n何地｜缺｜在哪里\n何时｜缺｜什么时候";
-        let questions = questions(TemplateKind::MeetingAgenda, "", reply, (3, 2), &[]);
+        let questions = questions(TemplateKind::MeetingAgenda, "", reply, (3, 2), &[], false);
         assert_eq!(questions[0].id, 3);
         assert!(
             questions
@@ -490,6 +516,7 @@ mod tests {
             reply,
             (1, 9),
             &vocabulary,
+            false,
         );
         let who = questions
             .iter()
@@ -508,7 +535,7 @@ mod tests {
     fn missing_items_carry_ai_suggestions_except_for_who() {
         let reply = "何时｜缺｜对方什么时候前反馈？｜收到本函后15个工作日内｜另行通知\n\
                      何人｜缺｜发给谁？｜市数据局";
-        let questions = questions(TemplateKind::OfficialLetter, "", reply, (1, 9), &[]);
+        let questions = questions(TemplateKind::OfficialLetter, "", reply, (1, 9), &[], false);
         let when = questions
             .iter()
             .find(|q| q.target == Target::Element(Element::When))
@@ -525,6 +552,44 @@ mod tests {
             .find(|q| q.target == Target::Element(Element::Who))
             .unwrap();
         assert!(who.choices.is_empty(), "模型建议的单位不要");
+    }
+
+    /// 字段题覆盖「何人」时 skip_who：不出「何人」题，也不从词库挑单位。
+    #[test]
+    fn skip_who_suppresses_the_who_question_and_unit_choices() {
+        use crate::models::VocabularyEntry;
+        let vocabulary = [VocabularyEntry {
+            category: VocabularyCategory::Unit,
+            canonical: "市数据局".into(),
+            duties: "负责公共数据归集、共享与开放".into(),
+            ..VocabularyEntry::default()
+        }];
+        let reply = "何人｜缺｜发给谁？\n何时｜缺｜什么时候前回复？";
+        let request = "给有关部门发函，商请共建公共数据研究平台。";
+        let questions = questions(
+            TemplateKind::OfficialLetter,
+            request,
+            reply,
+            (1, 9),
+            &vocabulary,
+            true,
+        );
+        assert!(
+            questions
+                .iter()
+                .all(|q| q.target != Target::Element(Element::Who)),
+            "字段题覆盖时不再出「何人」：{:?}",
+            questions
+                .iter()
+                .map(|q| q.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            questions
+                .iter()
+                .any(|q| q.target == Target::Element(Element::When)),
+            "别的要素照问"
+        );
     }
 
     #[test]

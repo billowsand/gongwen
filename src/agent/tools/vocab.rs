@@ -11,7 +11,9 @@ pub(super) const TOOLS: [&dyn Tool; 5] = [&Units, &Persons, &Normalize, &Style, 
 /// 一次最多返回多少条词库记录。
 const MAX_ROWS: usize = 30;
 
-fn matches(entry: &VocabularyEntry, query: &str) -> bool {
+/// 名称对词库：规范名、对外名、简称、别名任一包含查询串即算对上。
+/// 「要素抽取」（`element_fields`）把原文摘录解析成词库词条用的也是这一套。
+pub(crate) fn matches(entry: &VocabularyEntry, query: &str) -> bool {
     query.is_empty()
         || entry.canonical.contains(query)
         || entry.external_name.contains(query)

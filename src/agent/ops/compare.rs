@@ -161,6 +161,7 @@ pub(super) fn offer(
                 custom_hint: Some("都不合适，自己写".into()),
                 prefill: String::new(),
                 skippable: false,
+                multi: false,
                 target: Target::Pick,
             };
             Ok(Flow::Decide {
