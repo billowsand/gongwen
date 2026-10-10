@@ -49,10 +49,13 @@ ALIASES = {
 
 # 与程序 export::headings::clean_heading_number 同一组手写编号前缀。
 MANUAL_NUMBER = re.compile(
-    r"^(?:第[一二三四五六七八九十百零\d]+[章节条部分]|[（(][一二三四五六七八九十百零]+[）)]"
+    r"^(?:附录\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s"
+    r"|(?i:appendix)\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s"
+    r"|第[一二三四五六七八九十百零\d]+[章节条部分]|[（(][一二三四五六七八九十百零]+[）)]"
     r"|[一二三四五六七八九十百零]+[、,.．]|[（(]\d+[）)]|\d+(?:\.\d+)+|\d+[.．、]\s|\d+\s)"
 )
-MARKER = re.compile(r"^<!--\s*[\[【]\s*([^\]】]+?)\s*[\]】]\s*-->$")
+COMMENT = re.compile(r"^<!--\s*(.+?)\s*-->$")
+BRACKETED = re.compile(r"^[\[【]\s*([^\]】]+?)\s*[\]】]$")
 OFFICIAL_MARKERS = {
     "正文", "body", "附件", "附录", "attachment", "attachments", "appendix",
     "居中", "center", "居右", "右对齐", "right",
@@ -61,6 +64,7 @@ OFFICIAL_MARKERS = {
 RESEARCH_MARKERS = OFFICIAL_MARKERS | {
     "摘要", "abstract", "目录", "toc", "版本变更记录", "changelog", "version",
     "参考文献", "references", "bibliography",
+    "部分", "part", "不编号", "unnumbered", "nonumber", "no-number", "no_number",
 }
 ELEMENT_LINE = re.compile(
     r"^(?:主送(?:单位)?[：:]|抄送(?:单位)?[：:]|承办(?:单位)?[：:]|联系人[：:]|联系电话[：:]"
@@ -92,8 +96,14 @@ class Report:
 
 
 def marker_name(line: str) -> str | None:
-    match = MARKER.match(line.strip())
-    return match.group(1).strip().lower() if match else None
+    match = COMMENT.match(line.strip())
+    if not match:
+        return None
+    name = match.group(1).strip()
+    bracketed = BRACKETED.match(name)
+    if bracketed:
+        name = bracketed.group(1)
+    return name.strip().lower() or None
 
 
 def table_cells(line: str) -> int:
@@ -131,14 +141,15 @@ def check(text: str, kind: str) -> Report:
     last_level = 1
     has_attachment_summary = None
     in_fence = False
+    in_part = False
     anchors: set[str] = set()
     refs: list[tuple[int, str]] = []
 
     for number, (raw, line) in enumerate(zip(lines, stripped), start=1):
         if line.startswith("```"):
+            if not in_fence and not re.fullmatch(r"```\s*mermaid\s*", line, re.I):
+                report.error(number, "只用 ```mermaid 围栏画图表，其他代码块不要写")
             in_fence = not in_fence
-            if not research:
-                report.error(number, "公文不使用代码块")
             continue
         if in_fence or not line:
             continue
@@ -152,6 +163,14 @@ def check(text: str, kind: str) -> Report:
                 expecting_title = True
                 attachment_count += 1
                 last_level = 1
+            if name in {"部分", "part"}:
+                in_part = True
+            if name in {
+                "附件", "附录", "attachment", "attachments", "appendix",
+                "参考文献", "references", "bibliography",
+                "版本变更记录", "changelog", "version",
+            }:
+                in_part = False
             continue
         if line.startswith("<!--"):
             continue
@@ -163,10 +182,10 @@ def check(text: str, kind: str) -> Report:
             if research:
                 content = re.sub(r"\s*\{#[A-Za-z][\w:.-]*\}\s*$", "", content)
             if level == 1:
-                if not in_attachment:
+                if not in_attachment and not (research and in_part):
                     titles_in_body += 1
                     if titles_in_body > 1:
-                        report.error(number, "正文区出现第二个 `#` 标题：`#` 只给文档标题和附件标题用")
+                        report.error(number, "正文区出现第二个 `#` 标题：`#` 只给文档标题和附件标题用（研究报告“部分”区除外）")
                 elif not expecting_title and not research:
                     report.error(number, "一份附件里只能有一个 `#` 附件标题，下一份附件前要再写 <!-- [附件] -->")
                 expecting_title = False
@@ -224,6 +243,8 @@ def check(text: str, kind: str) -> Report:
                 refs.append((number, match.group(1)))
             if re.search(r"\[\^[^\]]+\](?![:：][(（])", line):
                 report.warn(number, "脚注要写成 `[^id]:(内容)`，只写 `[^id]` 会原样印出")
+        elif re.search(r"\[\^[^\]]+\]", line):
+            report.warn(number, "公文文种不支持脚注，`[^id]` 会原样印出")
 
     # 研究报告里标题、表题行上的锚点也要收进来（上面跳过了标题行）。
     if research:
@@ -245,7 +266,7 @@ def check(text: str, kind: str) -> Report:
     check_tables(stripped, report)
 
     if attachment_count and has_attachment_summary and not research:
-        report.error(has_attachment_summary, "已有附件区段，程序会自动生成“附件：1.……”说明，不要手写")
+        report.error(has_attachment_summary, "已有附件区段，程序会按附件标题自动生成附件说明，不要手写")
     # 呈批件是版式，只在主标题明确为请示时核对结语；不设标点或用词配额。
     section = "正文"
     main_title = None
@@ -270,9 +291,11 @@ def check(text: str, kind: str) -> Report:
     if kind == "meeting-agenda":
         check_agenda(nonblank, report)
 
-    tail = [line for _, line in nonblank[-3:]]
-    if not research and any(DATE_ONLY.match(line) for line in tail):
-        report.error(nonblank[-1][0], "文末不要手写成文日期，由程序按要素生成")
+    tail = nonblank[-3:]
+    if not research:
+        for date_no, date_line in tail:
+            if DATE_ONLY.match(date_line):
+                report.error(date_no, "文末不要手写成文日期，由程序按要素生成")
     return report
 
 
