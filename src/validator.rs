@@ -776,6 +776,16 @@ fn validate_metadata(
                 warnings,
             );
             check_department_code(&profile.department_code, vocabulary, warnings, false);
+            let mut bound = profile.clone();
+            crate::element_fields::sync_letter_department_code(&mut bound, vocabulary);
+            if !bound.department_code.is_empty()
+                && profile.department_code.trim() != bound.department_code
+            {
+                warnings.push(format!(
+                    "发函代字应与发文单位绑定为“{}”，请在文档要素中核对",
+                    bound.department_code
+                ));
+            }
             check_units(
                 &profile.recipient,
                 &[VocabularyCategory::Unit],

@@ -3,7 +3,7 @@
 //! 确保界面上看到的显示结果与最终成品一致。
 //!
 //! 规格 §2.1/2.2/2.3/3.1：
-//! - 选下级单位时自动补全上级单位名称（“中央网信办新闻舆论处”）；
+//! - 单位规范名与对外名各自维护全称，层级仅用于排序、筛选与重复前缀省略；
 //! - 同属一个上级的下级单位用顿号连接且后续不重复上级，跨上级单位用逗号分隔；
 //! - 人员绑定所属单位，按承办单位过滤（“人随事走”）；获授权人员也可承办其上级单位；
 //! - 公函落款用全称、承办单位用简称、电话通知落款用简称且少于 5 字时逐字加空格；
@@ -687,51 +687,17 @@ impl<'a> UnitDisplay<'a> {
         }
     }
 
-    fn full_name_entry(
-        &self,
-        entry: &VocabularyEntry,
-        visited: &mut Vec<String>,
-        external: bool,
-    ) -> String {
-        let code = entry.code.trim();
-        if !code.is_empty() && visited.iter().any(|value| value == code) {
-            return Self::name_entry(entry, external).to_string();
-        }
-        if !code.is_empty() {
-            visited.push(code.to_string());
-        }
-        let own = Self::name_entry(entry, external);
-        let parent = entry.parent.trim();
-        let result = if parent.is_empty() {
-            own.to_string()
-        } else if let Some(parent_entry) = self.find(parent) {
-            let parent_full = self.full_name_entry(parent_entry, visited, external);
-            if parent_full.is_empty() {
-                own.to_string()
-            } else {
-                format!("{parent_full}{own}")
-            }
-        } else {
-            own.to_string()
-        };
-        if !code.is_empty() {
-            visited.pop();
-        }
-        result
-    }
-
-    /// 完整名称：递归上溯上级单位，得到“上级全称 + 本级名称”。
-    /// 顶层单位直接返回规范名称；词库中查不到的按原样返回。
+    /// 全称由词库独立维护，层级关系不参与名称拼接。
     pub fn full_name(&self, key: &str) -> String {
         self.full_name_for(key, false)
     }
 
-    /// 按行文范围展开完整名称。外部模式下每一级优先使用外部名称，未设置则回退正常名称。
+    /// 外部模式优先使用本单位的外部全称，未设置则回退规范全称。
     pub fn full_name_for(&self, key: &str, external: bool) -> String {
         let Some(entry) = self.find(key) else {
             return key.trim().to_string();
         };
-        self.full_name_entry(entry, &mut Vec::new(), external)
+        Self::name_entry(entry, external).to_string()
     }
 
     /// 本级显示名称，不拼接上级。
@@ -771,7 +737,7 @@ impl<'a> UnitDisplay<'a> {
                 let abbr = entry.abbr.trim();
                 (!abbr.is_empty()).then(|| abbr.to_string())
             })
-            .unwrap_or_else(|| key.trim().to_string())
+            .unwrap_or_else(|| self.full_name(key))
     }
 
     /// 电话通知落款用简称：字符数少于 5 时逐字插入半角空格（“网信办” → “网 信 办”）。
@@ -814,130 +780,232 @@ impl<'a> UnitDisplay<'a> {
             .collect()
     }
 
-    /// 规格 §2.2 层级展开显示：
-    /// - 选择下级单位时补全上级全称；
-    /// - 一般并列单位一律用顿号“、”连接；
-    /// - 只有同属一个上级的多个下级并列、后续下级省略上级名称时，才把这一组
-    ///   视为一个复合单位组，并用逗号“，”与其他发文单位/复合组分隔；
-    /// - 顶层单位和只有一个下级入选的单位都按一般并列单位处理。
-    ///
-    /// 分组与组内顺序按词库顺序（调用方传入的 canonicals 已按词库排序）。
+    /// 主送、抄送按输入顺序显示；只有连续单位的共同上级能证明前缀归属时才省略。
     #[cfg(test)]
     pub fn join_hierarchical(&self, canonicals: &[String]) -> String {
         self.join_hierarchical_for(canonicals, false)
     }
 
-    /// 按行文范围展开并合并单位层级；简称逻辑不经过这里，因此不受外部名称影响。
+    /// 名称不拼接。连续同属一个上级范围的单位，首项全称、后项省略共同前缀；
+    /// 复合组与其他单位用逗号分开。不跨越中间单位重组，不猜测无层级依据的简称。
     pub fn join_hierarchical_for(&self, canonicals: &[String], external: bool) -> String {
-        let mut items: Vec<(String, Option<String>, String, String)> = Vec::new();
-        for canonical in canonicals {
-            let canonical = canonical.trim();
-            if canonical.is_empty() {
-                continue;
-            }
-            let entry = self.find(canonical);
-            let has_parent = entry.map(|e| !e.parent.trim().is_empty()).unwrap_or(false);
-            let parent_key = entry
-                .filter(|_| has_parent)
-                .map(|entry| self.code_of(entry.parent.trim()));
-            let own_name = if has_parent {
-                entry
-                    .map(|e| Self::name_entry(e, external).to_string())
-                    .unwrap_or_else(|| canonical.to_string())
-            } else {
-                self.full_name_for(canonical, external)
-            };
-            let full = self.full_name_for(canonical, external);
-            if !items.iter().any(|(key, _, _, _)| key == canonical) {
-                items.push((canonical.to_string(), parent_key, full, own_name));
+        let mut items: Vec<(String, String)> = Vec::new();
+        for key in canonicals
+            .iter()
+            .map(|key| key.trim())
+            .filter(|key| !key.is_empty())
+        {
+            let identity = self.code_of(key);
+            if !items.iter().any(|(seen, _)| seen == &identity) {
+                items.push((identity, self.full_name_for(key, external)));
             }
         }
-
-        let sibling_count = |parent: &str| {
-            items
-                .iter()
-                .filter(|(_, item_parent, _, _)| item_parent.as_deref() == Some(parent))
-                .count()
-        };
-        let has_compound_group = items.iter().any(|(_, parent, _, _)| {
-            parent
-                .as_deref()
-                .is_some_and(|parent| sibling_count(parent) > 1)
-        });
-        if !has_compound_group {
-            return items
-                .iter()
-                .map(|(_, _, full, _)| full.as_str())
-                .collect::<Vec<_>>()
-                .join("、");
-        }
-
-        let mut emitted_parents = Vec::new();
-        let mut groups = Vec::new();
-        for (_, parent, full, _) in &items {
-            let Some(parent) = parent.as_deref() else {
-                groups.push(full.to_string());
-                continue;
-            };
-            if sibling_count(parent) <= 1 {
-                groups.push(full.to_string());
-                continue;
-            }
-            if emitted_parents.iter().any(|seen| seen == parent) {
-                continue;
-            }
-            emitted_parents.push(parent.to_string());
-            let siblings = items
-                .iter()
-                .filter(|(_, item_parent, _, _)| item_parent.as_deref() == Some(parent))
-                .enumerate()
-                .map(|(index, (_, _, full, own))| {
-                    if index == 0 {
-                        full.as_str()
-                    } else {
-                        own.as_str()
+        let mut groups: Vec<(String, bool)> = Vec::new();
+        let mut index = 0;
+        while index < items.len() {
+            let (key, full) = &items[index];
+            let mut group = vec![full.clone()];
+            if let Some((next_key, next_full)) = items.get(index + 1)
+                && let Some((ancestor, prefix)) =
+                    self.shared_prefix(key, next_key, full, next_full, external)
+            {
+                for (candidate, name) in items.iter().skip(index + 1) {
+                    if !self.ancestor_keys(candidate).contains(&ancestor) {
+                        break;
                     }
-                })
-                .collect::<Vec<_>>()
-                .join("、");
-            groups.push(siblings);
+                    let Some(short) = name
+                        .strip_prefix(&prefix)
+                        .filter(|short| !short.is_empty() && Self::can_omit_prefix(name, &prefix))
+                    else {
+                        break;
+                    };
+                    // 同一组不能同时缩写祖先与后代，也不能缩写成两个同名收文对象。
+                    // 跨组同名由各组首项全称和逗号确定归属，不应全局禁止省略。
+                    if items[index..index + group.len()].iter().any(|(seen, _)| {
+                        self.ancestor_keys(candidate).contains(seen)
+                            || self.ancestor_keys(seen).contains(candidate)
+                    }) {
+                        break;
+                    }
+                    if items.iter().filter(|(_, other)| *other == *name).count() > 1 {
+                        break;
+                    }
+                    group.push(short.to_string());
+                }
+            }
+            index += group.len();
+            groups.push((group.join("、"), group.len() > 1));
         }
-        groups.join("，")
+        let separator = if groups.iter().any(|(_, compound)| *compound) {
+            "，"
+        } else {
+            "、"
+        };
+        groups
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
+            .join(separator)
     }
 
-    /// 返回给定单位及其上级链中尚未维护外部名称的单位，按首次出现顺序去重。
-    pub fn missing_external_names(&self, keys: &[String]) -> Vec<String> {
-        let mut missing = Vec::new();
-        let mut seen = Vec::new();
-        for key in keys {
-            let Some(mut entry) = self.find(key) else {
-                continue;
+    /// parent 已由编码最长前缀重建；使用真实祖先链，不能把编码的字符公共前缀当祖先。
+    fn ancestor_keys(&self, key: &str) -> Vec<String> {
+        let mut ancestors = Vec::new();
+        let mut current = self.code_of(key);
+        for _ in 0..MAX_DEPTH {
+            let Some(entry) = self.find(&current) else {
+                break;
             };
-            for _ in 0..MAX_DEPTH {
-                let identity = if entry.code.trim().is_empty() {
-                    entry.canonical.trim()
-                } else {
-                    entry.code.trim()
-                };
-                if !seen.iter().any(|value| value == identity) {
-                    seen.push(identity.to_string());
-                    if entry.external_name.trim().is_empty() {
-                        let key = if entry.code.trim().is_empty() {
-                            entry.canonical.trim()
-                        } else {
-                            entry.code.trim()
-                        };
-                        missing.push(self.full_name(key));
+            if entry.parent.trim().is_empty() {
+                break;
+            }
+            let parent = self.code_of(&entry.parent);
+            if parent == self.code_of(key) || ancestors.contains(&parent) {
+                break;
+            }
+            ancestors.push(parent.clone());
+            current = parent;
+        }
+        ancestors
+    }
+
+    fn shared_prefix(
+        &self,
+        left: &str,
+        right: &str,
+        left_name: &str,
+        right_name: &str,
+        external: bool,
+    ) -> Option<(String, String)> {
+        let right_ancestors = self.ancestor_keys(right);
+        // 祖先与后代同时被主送时，两者都是收文对象，不把后代缩成祖先的内部清单。
+        if right_ancestors.contains(&left.to_string())
+            || self.ancestor_keys(left).contains(&right.to_string())
+        {
+            return None;
+        }
+        for ancestor in self.ancestor_keys(left) {
+            if !right_ancestors.contains(&ancestor) {
+                continue;
+            }
+            let ancestor_name = self.full_name_for(&ancestor, external);
+            let common: String = left_name
+                .chars()
+                .zip(right_name.chars())
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect();
+            let mut prefix: String = ancestor_name
+                .chars()
+                .zip(left_name.chars())
+                .zip(right_name.chars())
+                .take_while(|((a, b), c)| a == b && b == c)
+                .map(|((a, _), _)| a)
+                .collect();
+            // 公共字符前缀可能停在词语中间，例如“甲市人民医院 / 甲市人民检察院”。
+            // 先确认机关或地域边界，不删除“人民”等词的一部分。
+            if prefix == ancestor_name
+                && (!Self::can_omit_prefix(left_name, &prefix)
+                    || !Self::can_omit_prefix(right_name, &prefix))
+            {
+                prefix.clear();
+            } else if prefix != ancestor_name {
+                let boundary = prefix
+                    .char_indices()
+                    .filter(|(_, ch)| "省市县区镇乡盟旗州".contains(*ch))
+                    .map(|(offset, ch)| offset + ch.len_utf8())
+                    .next_back();
+                prefix.truncate(boundary.unwrap_or(0));
+            }
+            // 国家/地域前缀也可能没有“省、市”后缀，例如“美国陆军部、海军部”。
+            // 使用默认词典的地名词边界，避免已接受的单位全称成为用户词典整词后改变结果。
+            static PLACES: std::sync::OnceLock<jieba_rs::Jieba> = std::sync::OnceLock::new();
+            // 默认词典会把“美国国防部”识别成一个机构词，需单独核对公共前缀
+            // 内的完整地名，不能要求全称分词后第一项就是“美国”。
+            for end in common
+                .char_indices()
+                .skip(1)
+                .map(|(offset, ch)| offset + ch.len_utf8())
+            {
+                let candidate = &common[..end];
+                if end <= prefix.len() || !ancestor_name.starts_with(candidate) {
+                    continue;
+                }
+                let tags = PLACES
+                    .get_or_init(jieba_rs::Jieba::new)
+                    .tag(candidate, false);
+                if tags.len() == 1 && tags[0].tag == "ns" {
+                    prefix = candidate.to_string();
+                }
+            }
+            let abbr = self.abbr(&ancestor);
+            // 上级全称不一定包含在下级名称中。维护的简称能确认中间层级被省略后的
+            // 机关边界：“美国联合秘书处…”对应“美国联合参谋部联合秘书处”。
+            if !abbr.is_empty() {
+                for (offset, _) in common.match_indices(&abbr) {
+                    let end = offset + abbr.len();
+                    if end > prefix.len()
+                        && Self::can_omit_prefix(left_name, &common[..end])
+                        && Self::can_omit_prefix(right_name, &common[..end])
+                    {
+                        prefix = common[..end].to_string();
                     }
                 }
-                let parent = entry.parent.trim();
-                if parent.is_empty() {
-                    break;
+            }
+            // 最近共同上级负责分组，前缀边界可由更高一级确认。例如助理部长办公室
+            // 的名称不含政策次长办公室，但完整含有更上级“美国国防部”。
+            for upper in self.ancestor_keys(left) {
+                if right_ancestors.contains(&upper) {
+                    let full = self.full_name_for(&upper, external);
+                    if full.len() > prefix.len()
+                        && common.starts_with(&full)
+                        && Self::can_omit_prefix(left_name, &full)
+                        && Self::can_omit_prefix(right_name, &full)
+                    {
+                        prefix = full;
+                    }
                 }
-                let Some(parent_entry) = self.find(parent) else {
-                    break;
-                };
-                entry = parent_entry;
+            }
+            // 允许“甲市人民政府”下的“甲市教育局、财政局”；不删一个碰巧相同的汉字。
+            if (prefix.chars().count() >= 2 || prefix == ancestor_name)
+                && !prefix.is_empty()
+                && prefix != left_name
+                && prefix != right_name
+            {
+                return Some((ancestor, prefix));
+            }
+        }
+        None
+    }
+
+    /// “国防部”不能从“国防部长”里截走，否则后项会变成“长办公室”。
+    /// 同样保护处置、部队等跨越机关后缀的词语。
+    fn can_omit_prefix(name: &str, prefix: &str) -> bool {
+        let Some(short) = name.strip_prefix(prefix).filter(|short| !short.is_empty()) else {
+            return false;
+        };
+        !matches!(
+            (prefix.chars().last(), short.chars().next()),
+            (Some('部'), Some('长' | '队'))
+                | (Some('厅'), Some('长'))
+                | (Some('局'), Some('长' | '势'))
+                | (Some('处'), Some('长' | '置'))
+                | (Some('科'), Some('长'))
+                | (Some('室'), Some('主'))
+        )
+    }
+
+    /// 外部全称按本单位维护，只提示选中单位自身缺失的名称，不要求上级也维护。
+    pub fn missing_external_names(&self, keys: &[String]) -> Vec<String> {
+        let mut missing = Vec::new();
+        for key in keys {
+            if let Some(entry) = self.find(key)
+                && entry.external_name.trim().is_empty()
+            {
+                let name = entry.canonical.trim().to_string();
+                if !missing.contains(&name) {
+                    missing.push(name);
+                }
             }
         }
         missing
@@ -1173,8 +1241,13 @@ pub fn spread_gap(text: &str) -> Option<f32> {
 }
 
 #[cfg(test)]
+#[path = "units/prefix_tests.rs"]
+mod prefix_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::models::VocabularyEntry;
 
     fn vocab() -> Vec<VocabularyEntry> {
@@ -1185,13 +1258,13 @@ mod tests {
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "新闻舆论处".into(),
+                canonical: "中央网信办新闻舆论处".into(),
                 parent: "中央网信办".into(),
                 abbr: "新舆处".into(),
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "信访接待处".into(),
+                canonical: "中央网信办信访接待处".into(),
                 parent: "中央网信办".into(),
                 ..Default::default()
             },
@@ -1201,7 +1274,7 @@ mod tests {
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "网络信息处".into(),
+                canonical: "中央宣传部网络信息处".into(),
                 parent: "中央宣传部".into(),
                 abbr: "网信处".into(),
                 ..Default::default()
@@ -1209,14 +1282,14 @@ mod tests {
             VocabularyEntry {
                 canonical: "张三".into(),
                 category: VocabularyCategory::Person,
-                unit: "新闻舆论处".into(),
+                unit: "中央网信办新闻舆论处".into(),
                 phone: "010-1".into(),
                 ..Default::default()
             },
             VocabularyEntry {
                 canonical: "李四".into(),
                 category: VocabularyCategory::Person,
-                unit: "信访接待处".into(),
+                unit: "中央网信办信访接待处".into(),
                 phone: "010-2".into(),
                 ..Default::default()
             },
@@ -1224,33 +1297,114 @@ mod tests {
     }
 
     #[test]
-    fn full_name_expands_the_parent_prefix() {
+    fn full_names_and_prefix_omission_follow_hierarchy_and_order() {
+        let mut v = vec![
+            VocabularyEntry {
+                code: "00".into(),
+                canonical: "甲市人民政府".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                code: "0001".into(),
+                parent: "00".into(),
+                canonical: "甲市教育局".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                code: "0002".into(),
+                parent: "00".into(),
+                canonical: "甲市财政局".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                code: "01".into(),
+                canonical: "乙市人民政府".into(),
+                ..Default::default()
+            },
+            VocabularyEntry {
+                code: "0101".into(),
+                parent: "01".into(),
+                canonical: "乙市财政局".into(),
+                ..Default::default()
+            },
+        ];
+        let display = UnitDisplay::new(&v);
+        assert_eq!(display.full_name("0001"), "甲市教育局");
+        assert_eq!(
+            display.join_hierarchical(&["0001".into(), "0002".into()]),
+            "甲市教育局、财政局"
+        );
+        assert_eq!(
+            display.join_hierarchical(&["0001".into(), "01".into(), "0002".into()]),
+            "甲市教育局、乙市人民政府、甲市财政局"
+        );
+        assert_eq!(
+            display.join_hierarchical(&["00".into(), "0001".into()]),
+            "甲市人民政府、甲市教育局"
+        );
+        assert_eq!(
+            display.join_hierarchical(&["0001".into(), "0002".into(), "0101".into()]),
+            "甲市教育局、财政局，乙市财政局"
+        );
+        assert_eq!(
+            display.join_hierarchical(&["0001".into(), "甲市教育局".into(), "0002".into()]),
+            "甲市教育局、财政局"
+        );
+        // 没有共同上级时，即使文本前缀相同也不能缩写。
+        v[2].parent.clear();
+        assert_eq!(
+            UnitDisplay::new(&v).join_hierarchical(&["0001".into(), "0002".into()]),
+            "甲市教育局、甲市财政局"
+        );
+        // 本级外部名称独立维护，不从上级外部名称拼出。
+        v[1].external_name = "甲市教育委员会".into();
+        assert_eq!(
+            UnitDisplay::new(&v).full_name_for("0001", true),
+            "甲市教育委员会"
+        );
+        v[1].canonical = "甲市人民医院".into();
+        v[2].canonical = "甲市人民检察院".into();
+        v[2].parent = "00".into();
+        assert_eq!(
+            UnitDisplay::new(&v).join_hierarchical(&["0001".into(), "0002".into()]),
+            "甲市人民医院、人民检察院"
+        );
+    }
+
+    #[test]
+    fn full_name_uses_independent_canonical() {
         let v = vocab();
         let display = UnitDisplay::new(&v);
-        assert_eq!(display.full_name("新闻舆论处"), "中央网信办新闻舆论处");
+        assert_eq!(
+            display.full_name("中央网信办新闻舆论处"),
+            "中央网信办新闻舆论处"
+        );
         assert_eq!(display.full_name("中央网信办"), "中央网信办");
-        assert_eq!(display.full_name("网络信息处"), "中央宣传部网络信息处");
+        assert_eq!(
+            display.full_name("中央宣传部网络信息处"),
+            "中央宣传部网络信息处"
+        );
         assert_eq!(display.full_name("不在词库的单位"), "不在词库的单位");
     }
 
     #[test]
-    fn external_names_expand_with_fallback_and_do_not_change_abbr() {
+    fn external_full_names_fall_back_to_own_canonical() {
         let mut v = vocab();
         v[0].external_name = "国家互联网信息办公室".into();
-        v[1].external_name = "新闻传播管理处".into();
+        v[1].external_name = "国家互联网信息办公室新闻传播管理处".into();
         let display = UnitDisplay::new(&v);
         assert_eq!(
-            display.full_name_for("新闻舆论处", true),
+            display.full_name_for("中央网信办新闻舆论处", true),
             "国家互联网信息办公室新闻传播管理处"
         );
-        // 本级未维护外部名称时回退正常名称；上级仍使用已维护的外部名称。
+        // 本级未维护外部名称时回退自己的规范全称。
         assert_eq!(
-            display.full_name_for("信访接待处", true),
-            "国家互联网信息办公室信访接待处"
+            display.full_name_for("中央网信办信访接待处", true),
+            "中央网信办信访接待处"
         );
-        assert_eq!(display.abbr("新闻舆论处"), "新舆处");
+        assert_eq!(display.abbr("中央网信办新闻舆论处"), "新舆处");
         assert_eq!(
-            display.missing_external_names(&["信访接待处".into()]),
+            display.missing_external_names(&["中央网信办信访接待处".into()]),
             ["中央网信办信访接待处"]
         );
     }
@@ -1259,8 +1413,8 @@ mod tests {
     fn abbr_falls_back_to_canonical() {
         let v = vocab();
         let display = UnitDisplay::new(&v);
-        assert_eq!(display.abbr("新闻舆论处"), "新舆处");
-        assert_eq!(display.abbr("信访接待处"), "信访接待处");
+        assert_eq!(display.abbr("中央网信办新闻舆论处"), "新舆处");
+        assert_eq!(display.abbr("中央网信办信访接待处"), "中央网信办信访接待处");
         assert_eq!(display.abbr("中央宣传部"), "中宣部");
     }
 
@@ -1271,7 +1425,10 @@ mod tests {
         // 简称“中宣部”3 字，逐字加半角空格。
         assert_eq!(display.abbr_spaced("中央宣传部"), "中 宣 部");
         // 无简称且满 5 字的单位不插空格。
-        assert_eq!(display.abbr_spaced("信访接待处"), "信访接待处");
+        assert_eq!(
+            display.abbr_spaced("中央网信办信访接待处"),
+            "中央网信办信访接待处"
+        );
     }
 
     #[test]
@@ -1290,12 +1447,18 @@ mod tests {
         let v = vocab();
         let display = UnitDisplay::new(&v);
         assert_eq!(
-            display.signature_name("新闻舆论处", false),
+            display.signature_name("中央网信办新闻舆论处", false),
             "中央网信办新闻舆论处"
         );
-        assert_eq!(display.signature_name("新闻舆论处", true), "新舆处");
+        assert_eq!(
+            display.signature_name("中央网信办新闻舆论处", true),
+            "新舆处"
+        );
         // 未维护简称的单位回落规范名称。
-        assert_eq!(display.signature_name("信访接待处", true), "信访接待处");
+        assert_eq!(
+            display.signature_name("中央网信办信访接待处", true),
+            "中央网信办信访接待处"
+        );
     }
 
     #[test]
@@ -1307,7 +1470,7 @@ mod tests {
             kind: crate::models::TemplateKind::WhitePaper,
             ..Default::default()
         };
-        input.profile.signing_unit = "中央宣传部、网络信息处".into();
+        input.profile.signing_unit = "中央宣传部、中央宣传部网络信息处".into();
         assert_eq!(
             display.white_paper_signature_units(&input),
             ["中央宣传部", "中央宣传部网络信息处"]
@@ -1320,7 +1483,7 @@ mod tests {
         // 落款单位留空时回落发文单位（简称开关不影响回落单位）。
         input.profile.use_short_name_for_signature = false;
         input.profile.signing_unit.clear();
-        input.profile.issuing_unit = "新闻舆论处".into();
+        input.profile.issuing_unit = "中央网信办新闻舆论处".into();
         assert_eq!(
             display.white_paper_signature_units(&input),
             ["中央网信办新闻舆论处"]
@@ -1377,7 +1540,10 @@ mod tests {
     fn same_parent_children_join_with_ton() {
         let v = vocab();
         let display = UnitDisplay::new(&v);
-        let selected = vec!["新闻舆论处".to_string(), "信访接待处".to_string()];
+        let selected = vec![
+            "中央网信办新闻舆论处".to_string(),
+            "中央网信办信访接待处".to_string(),
+        ];
         assert_eq!(
             display.join_hierarchical(&selected),
             "中央网信办新闻舆论处、信访接待处"
@@ -1389,9 +1555,9 @@ mod tests {
         let v = vocab();
         let display = UnitDisplay::new(&v);
         let selected = vec![
-            "新闻舆论处".to_string(),
-            "信访接待处".to_string(),
-            "网络信息处".to_string(),
+            "中央网信办新闻舆论处".to_string(),
+            "中央网信办信访接待处".to_string(),
+            "中央宣传部网络信息处".to_string(),
         ];
         assert_eq!(
             display.join_hierarchical(&selected),
@@ -1403,7 +1569,7 @@ mod tests {
     fn ordinary_units_use_ideographic_comma() {
         let v = vocab();
         let display = UnitDisplay::new(&v);
-        let selected = vec!["中央网信办".to_string(), "网络信息处".to_string()];
+        let selected = vec!["中央网信办".to_string(), "中央宣传部网络信息处".to_string()];
         assert_eq!(
             display.join_hierarchical(&selected),
             "中央网信办、中央宣传部网络信息处"
@@ -1415,8 +1581,8 @@ mod tests {
         let v = vocab();
         let display = UnitDisplay::new(&v);
         let selected = vec![
-            "新闻舆论处".to_string(),
-            "信访接待处".to_string(),
+            "中央网信办新闻舆论处".to_string(),
+            "中央网信办信访接待处".to_string(),
             "中央宣传部".to_string(),
         ];
         assert_eq!(
@@ -1430,7 +1596,7 @@ mod tests {
         let v = vocab();
         let display = UnitDisplay::new(&v);
         assert_eq!(
-            display.people_of("新闻舆论处"),
+            display.people_of("中央网信办新闻舆论处"),
             vec![("张三".to_string(), "010-1".to_string())]
         );
         assert!(display.people_of("不存在").is_empty());
@@ -1447,7 +1613,7 @@ mod tests {
         let display = UnitDisplay::new(&v);
 
         assert_eq!(
-            display.responsible_people_of("新闻舆论处"),
+            display.responsible_people_of("中央网信办新闻舆论处"),
             vec![("张三".to_string(), "010-1".to_string())]
         );
         assert_eq!(
@@ -1471,12 +1637,12 @@ mod tests {
             order,
             [
                 "00中央网信办",
-                "0001新闻舆论处",
+                "0001中央网信办新闻舆论处",
                 "01张三",
-                "0002信访接待处",
+                "0002中央网信办信访接待处",
                 "01李四",
                 "01中央宣传部",
-                "0101网络信息处",
+                "0101中央宣传部网络信息处",
             ]
         );
         // 层级编码按字典序排列即得到树形顺序。
@@ -1581,7 +1747,7 @@ mod tests {
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "新闻舆论处".into(),
+                canonical: "中央网信办新闻舆论处".into(),
                 code: "0001".into(),
                 ..Default::default()
             },
@@ -1638,8 +1804,8 @@ mod tests {
         ];
         normalize(&mut list);
         let display = UnitDisplay::new(&list);
-        assert_eq!(display.full_name("000101"), "甲厅办公室综合科");
-        assert_eq!(display.full_name("0101"), "乙厅办公室");
+        assert_eq!(display.full_name("000101"), "综合科");
+        assert_eq!(display.full_name("0101"), "办公室");
         assert_eq!(display.people_of("0101")[0].0, "张三");
         let depths = list
             .iter()
@@ -1663,7 +1829,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["中央网信办", "新闻舆论处", "张三", "信访接待处", "李四"]
+            [
+                "中央网信办",
+                "中央网信办新闻舆论处",
+                "张三",
+                "中央网信办信访接待处",
+                "李四"
+            ]
         );
     }
 
@@ -1684,8 +1856,11 @@ mod tests {
         assert_eq!(department_codes(&list), ["网信函"]);
         assert_eq!(approval_department_codes(&list), ["网信呈", "新舆呈"]);
         let display = UnitDisplay::new(&list);
-        assert_eq!(display.department_code_of("新闻舆论处"), "网信函");
-        assert_eq!(display.approval_department_code_of("新闻舆论处"), "新舆呈");
+        assert_eq!(display.department_code_of("中央网信办新闻舆论处"), "网信函");
+        assert_eq!(
+            display.approval_department_code_of("中央网信办新闻舆论处"),
+            "新舆呈"
+        );
         assert_eq!(display.approval_department_code_of("中央网信办"), "网信呈");
     }
 
@@ -1696,13 +1871,13 @@ mod tests {
         let display = UnitDisplay::new(&list);
         assert_eq!(display.department_code_of("中央网信办"), "X政函");
         // 处室不自编代字，沿用所在机关的。
-        assert_eq!(display.department_code_of("新闻舆论处"), "X政函");
+        assert_eq!(display.department_code_of("中央网信办新闻舆论处"), "X政函");
         // 本级绑定的优先于上级。
         list[1].department_code = "新舆函".into();
         let display = UnitDisplay::new(&list);
-        assert_eq!(display.department_code_of("新闻舆论处"), "新舆函");
+        assert_eq!(display.department_code_of("中央网信办新闻舆论处"), "新舆函");
         // 整条链都没有绑定，或单位不在词库中，返回空串。
-        assert_eq!(display.department_code_of("网络信息处"), "");
+        assert_eq!(display.department_code_of("中央宣传部网络信息处"), "");
         assert_eq!(display.department_code_of("查无此单位"), "");
     }
 
@@ -1718,7 +1893,7 @@ mod tests {
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "新闻舆论处".into(),
+                canonical: "中央网信办新闻舆论处".into(),
                 code: "XHQ-01".into(),
                 parent: "XHQ".into(),
                 ..Default::default()
@@ -1740,7 +1915,7 @@ mod tests {
             pair,
             [
                 ("XHQ".into(), "中央网信办".into()),
-                ("XHQ-01".into(), "新闻舆论处".into()),
+                ("XHQ-01".into(), "中央网信办新闻舆论处".into()),
                 ("XHQ.02".into(), "网信处".into()),
             ]
         );

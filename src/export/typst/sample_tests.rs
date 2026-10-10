@@ -323,6 +323,126 @@ fn typst_samples() {
     }
 }
 
+/// 单位独立全称、地域前缀省略和跨机关同名后缀的样张。
+#[test]
+#[ignore = "依赖本机 runtime 字体，手动运行"]
+fn typst_samples_unit_names() {
+    use crate::models::VocabularyEntry;
+    let unit = |code: &str, parent: &str, name: &str| VocabularyEntry {
+        code: code.into(),
+        parent: parent.into(),
+        canonical: name.into(),
+        ..Default::default()
+    };
+    let mut vocabulary = vec![
+        unit("00", "", "星海市人民政府"),
+        unit("0001", "00", "星海市教育局"),
+        unit("0002", "00", "星海市财政局"),
+        unit("0003", "00", "星海市人民医院"),
+        unit("0004", "00", "星海市人民检察院"),
+        unit("01", "", "明川市人民政府"),
+        unit("0101", "01", "明川市人民检察院"),
+    ];
+    vocabulary[1].department_code = "星教函".into();
+    let display = UnitDisplay::new(&vocabulary);
+    let mut input = base_input(TemplateKind::OfficialLetter);
+    input.profile.issuing_unit = "星海市教育局".into();
+    input.profile.recipient = "0003、0004、0101".into();
+    input.profile.copies_to = "0001、0002".into();
+    crate::element_fields::sync_letter_department_code(&mut input.profile, &vocabulary);
+    let markdown = "# 关于商请支持教育协作工作的函\n\n请结合职责支持有关工作，并反馈办理意见。";
+    let dir = sample_dir().join("unit-names");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_unit_name_sample(&input, markdown, &display, &dir);
+}
+
+/// 真实 XLSX 的层级及名称直接送入 Word/PDF，避免只检验造出的简化词库。
+#[test]
+#[ignore = "依赖本机美国国防部 XLSX 与 runtime 字体，手动运行"]
+fn typst_samples_us_defense() {
+    let imported = crate::vocabulary_xlsx::parse(
+        Path::new("output/us-defense-vocabulary-test/美国国防部标准词库-中文版.xlsx"),
+        &[],
+    )
+    .unwrap();
+    let display = UnitDisplay::new(&imported.entries);
+    let mut input = base_input(TemplateKind::OfficialLetter);
+    input.profile.issuing_unit = "90".into();
+    input.profile.recipient =
+        "90-01-02-02-01-02、90-01-02-02-01-03、90-01-06-01-01、90-01-06-01-02".into();
+    input.profile.copies_to = "90-03、90-04、90-05".into();
+    input.profile.responsible_unit = "90-01-01".into();
+    let contact = imported
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.category == crate::models::VocabularyCategory::Person && entry.unit == "90-01-01"
+        })
+        .unwrap();
+    input.profile.contact_person = contact.canonical.clone();
+    input.profile.contact_phone = contact.phone.clone();
+    crate::element_fields::sync_letter_department_code(&mut input.profile, &imported.entries);
+    let dir = sample_dir().join("us-defense-prefixes");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_unit_name_sample(
+        &input,
+        "# 关于商请协调相关工作的函\n\n请结合职责提出意见，协调安排有关工作。",
+        &display,
+        &dir,
+    );
+}
+
+fn write_unit_name_sample(input: &DraftInput, markdown: &str, display: &UnitDisplay, dir: &Path) {
+    use hayro::hayro_interpret::{InterpreterSettings, hayro_syntax::Pdf};
+    use hayro::{RenderCache, RenderSettings};
+    let fonts = FontConfig::default();
+    let json = super::document_json(
+        input,
+        markdown,
+        display,
+        &NumberingConfig::default(),
+        &ElementMarks::default(),
+        crate::typst_engine::font_set(&fonts).unwrap().families,
+    )
+    .unwrap();
+    std::fs::write(dir.join("doc.json"), json).unwrap();
+    crate::export::docx::write_docx(&dir.join("units.docx"), input, markdown, display).unwrap();
+    let outcome = super::write_pdf_with_base(
+        &dir.join("typst.pdf"),
+        input,
+        markdown,
+        display,
+        &fonts,
+        &NumberingConfig::default(),
+        &ElementMarks::default(),
+        dir,
+    )
+    .unwrap();
+    let pdf = Pdf::new(std::sync::Arc::new(outcome.pdf)).unwrap();
+    let page = &pdf.pages()[0];
+    let scale = 1600.0 / page.render_dimensions().0;
+    let pixmap = hayro::render(
+        page,
+        &RenderCache::new(),
+        &InterpreterSettings::default(),
+        &RenderSettings {
+            x_scale: scale,
+            y_scale: scale,
+            width: Some(1600),
+            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+            ..Default::default()
+        },
+    );
+    image::RgbaImage::from_raw(
+        u32::from(pixmap.width()),
+        u32::from(pixmap.height()),
+        pixmap.data_as_u8_slice().to_vec(),
+    )
+    .unwrap()
+    .save(dir.join("preview.png"))
+    .unwrap();
+}
+
 /// 花脸稿样张：正文增删、标题新增、表格改数、要素（主送、成文日期）变更。
 #[test]
 #[ignore = "依赖本机 runtime 字体，手动运行"]

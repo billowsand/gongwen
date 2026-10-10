@@ -477,16 +477,26 @@ pub(crate) fn document_number_row(
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
-            single_select(
-                ui,
-                code_id,
-                &mut profile.department_code,
-                department_codes,
-                manual_fields,
-                allow_free_text,
-                code_width,
-                code_hint,
-            );
+            if code_id == "department_code" {
+                ui.add_enabled(
+                    false,
+                    egui::TextEdit::singleline(&mut profile.department_code)
+                        .desired_width(code_width)
+                        .hint_text("随发文单位"),
+                )
+                    .on_hover_text("发函代字绑定发文单位（联合发文取主发文单位），请在标准词库维护；年份和序号由人填写。");
+            } else {
+                single_select(
+                    ui,
+                    code_id,
+                    &mut profile.department_code,
+                    department_codes,
+                    manual_fields,
+                    allow_free_text,
+                    code_width,
+                    code_hint,
+                );
+            }
             ui.label("〔");
             ui.add(
                 egui::TextEdit::singleline(&mut profile.document_year)
@@ -1045,8 +1055,6 @@ impl DraftPage<'_> {
         let unit_pool = self.unit_pool(external_names);
         let units = layout_options(&unit_pool, None);
         // 公函与红头呈批件分别使用各自的代字，不混用候选项。
-        let letter_department_codes =
-            plain_options(&units::department_codes(&self.config.vocabulary));
         let approval_department_codes =
             plain_options(&units::approval_department_codes(&self.config.vocabulary));
         // 规格 §2.4：一个单位只能占发文、主送、抄送三者之一，勾选时互相禁用。
@@ -1354,8 +1362,10 @@ impl DraftPage<'_> {
                                     self.doc.draft.profile.main_issuing_unit =
                                         selected_issuing.first().cloned().unwrap_or_default();
                                 }
-                                let issuing_preview = UnitDisplay::new(&self.config.vocabulary)
-                                    .join_hierarchical_for(&selected_issuing, external_names);
+                                let display = UnitDisplay::new(&self.config.vocabulary);
+                                let issuing_preview = selected_issuing.iter()
+                                    .map(|unit| display.full_name_for(unit, external_names))
+                                    .collect::<Vec<_>>().join("、");
                                 required_row_label(
                                     ui,
                                     "主发文\n单位",
@@ -1380,10 +1390,14 @@ impl DraftPage<'_> {
                                 field_error(ui, &check, "main_issuing_unit");
                             }
 
+                            element_fields::sync_letter_department_code(
+                                &mut self.doc.draft.profile,
+                                &self.config.vocabulary,
+                            );
                             document_number_row(
                                 ui,
                                 &mut self.doc.draft.profile,
-                                &letter_department_codes,
+                                &[],
                                 &mut self.doc.manual_fields,
                                 free_text,
                                 field_width,

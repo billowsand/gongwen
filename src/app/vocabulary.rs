@@ -492,7 +492,7 @@ impl GongwenApp {
                 ui.group(|ui| {
                     ui.set_min_width((card_width - 24.0).max(280.0));
                     ui.strong("第一步：您的顶级单位叫什么？");
-                    ui.weak("只填写本级名称，不必把上级机关重复写入。以后可以随时修改。");
+                    ui.weak("请填写单位规范全称，层级关系单独维护；系统不再拼接上级名称。");
                     ui.add_space(8.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.vocabulary_setup_name)
@@ -1115,7 +1115,7 @@ impl GongwenApp {
             self.config.vocabulary[index].canonical.trim().to_string()
         };
         let subtitle = if is_unit {
-            "以上是本单位在公文中展开后的全称。".to_string()
+            "以上是词库维护的本单位全称，不拼接上级名称。".to_string()
         } else {
             let entry = &self.config.vocabulary[index];
             let unit = if entry.unit.trim().is_empty() {
@@ -1397,7 +1397,7 @@ impl GongwenApp {
                 let renamed = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.config.vocabulary[index].canonical)
-                            .hint_text("本级名称，不含上级；如“新闻舆论处”")
+                            .hint_text("单位规范全称，如“中央网信办新闻舆论处”")
                             .desired_width(width),
                     )
                     .changed();

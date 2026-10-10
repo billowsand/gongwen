@@ -1016,9 +1016,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("hierarchy.docx");
         let mut input = DraftInput::default();
-        input.profile.issuing_unit = "新闻舆论处".into();
-        input.profile.recipient = "新闻舆论处、信访接待处".into();
-        input.profile.responsible_unit = "新闻舆论处".into();
+        input.profile.issuing_unit = "中央网信办新闻舆论处".into();
+        input.profile.recipient = "中央网信办新闻舆论处、中央网信办信访接待处".into();
+        input.profile.responsible_unit = "中央网信办新闻舆论处".into();
         input.profile.contact_person = "张三".into();
         input.profile.contact_phone = "010-1".into();
         let vocabulary = vec![
@@ -1028,13 +1028,13 @@ mod tests {
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "新闻舆论处".into(),
+                canonical: "中央网信办新闻舆论处".into(),
                 category: VocabularyCategory::Unit,
                 parent: "中央网信办".into(),
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "信访接待处".into(),
+                canonical: "中央网信办信访接待处".into(),
                 category: VocabularyCategory::Unit,
                 parent: "中央网信办".into(),
                 ..Default::default()
@@ -1043,12 +1043,12 @@ mod tests {
         let display = UnitDisplay::new(&vocabulary);
         write_docx(&path, &input, "# 测试函\n\n正文。", &display).unwrap();
         let xml = zip_text(&path, "word/document.xml");
-        // 规格 §2.2：发文单位红头补全上级全称。
-        assert!(xml.contains("中央网信办新闻舆论处"), "红头应补全上级全称");
+        // 规格 §2.2：发文单位红头使用词库全称。
+        assert!(xml.contains("中央网信办新闻舆论处"), "红头应使用词库全称");
         // 同属一个上级的主送单位：顿号连接且不重复上级。
         assert!(xml.contains("中央网信办新闻舆论处、信访接待处"));
         // 规格 §3.1：版记承办单位显示简称（无简称时回落规范名称）。
-        assert!(xml.contains("承办单位：新闻舆论处"));
+        assert!(xml.contains("承办单位：中央网信办新闻舆论处"));
     }
 
     #[test]
@@ -1057,9 +1057,9 @@ mod tests {
         let path = temp.path().join("external.docx");
         let mut input = DraftInput::default();
         input.profile.correspondence_scope = crate::models::CorrespondenceScope::External;
-        input.profile.issuing_unit = "新闻舆论处".into();
-        input.profile.recipient = "信访接待处".into();
-        input.profile.responsible_unit = "新闻舆论处".into();
+        input.profile.issuing_unit = "中央网信办新闻舆论处".into();
+        input.profile.recipient = "中央网信办信访接待处".into();
+        input.profile.responsible_unit = "中央网信办新闻舆论处".into();
         let vocabulary = vec![
             VocabularyEntry {
                 canonical: "中央网信办".into(),
@@ -1067,15 +1067,15 @@ mod tests {
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "新闻舆论处".into(),
-                external_name: "新闻传播管理处".into(),
+                canonical: "中央网信办新闻舆论处".into(),
+                external_name: "国家互联网信息办公室新闻传播管理处".into(),
                 parent: "中央网信办".into(),
                 abbr: "新舆处".into(),
                 ..Default::default()
             },
             VocabularyEntry {
-                canonical: "信访接待处".into(),
-                external_name: "公众服务处".into(),
+                canonical: "中央网信办信访接待处".into(),
+                external_name: "国家互联网信息办公室公众服务处".into(),
                 parent: "中央网信办".into(),
                 ..Default::default()
             },

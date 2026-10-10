@@ -240,7 +240,7 @@ fn person_phone_of(vocabulary: &[VocabularyEntry], unit: &str, name: &str) -> St
 ///   手填重复、先选主送再选同一发文单位这类边角情形生效）。联合发文模式的
 ///   `joint_issuing_units` 不参与互斥。
 /// - 发文单位按文种带出代字：公函用发函代字、红头呈批件用呈批代字，沿单位层级
-///   继承；只在代字为空时填，电话通知不带代字。
+///   继承；公函代字随发文单位更新，呈批代字只在空值时填，电话通知不带代字。
 /// - 联系人的电话从词库绑定带出；承办三要素在成对条目模式下写条目第一条并同步
 ///   `joint_responsible_units` / `joint_contacts`。
 pub(crate) fn apply_field(
@@ -250,6 +250,26 @@ pub(crate) fn apply_field(
     vocabulary: &[VocabularyEntry],
 ) {
     apply_profile_field(&mut draft.profile, draft.kind, field, value, vocabulary)
+}
+
+/// 公函机关代字始终绑定当前发文单位；联合发文使用主发文单位。
+/// 年份、序号不参与联动。单位未维护代字时清空，不能沿用上一单位的文号。
+pub(crate) fn sync_letter_department_code(
+    profile: &mut TemplateProfile,
+    vocabulary: &[VocabularyEntry],
+) {
+    let issuing = if profile.joint_issuance_mode != crate::models::JointIssuanceMode::Mode1 {
+        profile.issuing_unit.clone()
+    } else {
+        let units = split_units(&profile.joint_issuing_units);
+        units
+            .iter()
+            .find(|unit| **unit == profile.main_issuing_unit)
+            .or_else(|| units.first())
+            .cloned()
+            .unwrap_or_default()
+    };
+    profile.department_code = UnitDisplay::new(vocabulary).department_code_of(&issuing);
 }
 
 /// `apply_field` 的 profile 级版本：表单控件手里只有 `TemplateProfile` 时用它。
@@ -267,14 +287,14 @@ pub(crate) fn apply_profile_field(
             let picked = [value.to_string()];
             exclude_from_multi(&mut profile.recipient, &picked);
             exclude_from_multi(&mut profile.copies_to, &picked);
-            if profile.department_code.trim().is_empty() {
+            if kind == TemplateKind::OfficialLetter || profile.department_code.trim().is_empty() {
                 let display = UnitDisplay::new(vocabulary);
                 let code = match kind {
                     TemplateKind::OfficialLetter => display.department_code_of(value),
                     TemplateKind::RedHeadApproval => display.approval_department_code_of(value),
                     _ => String::new(),
                 };
-                if !code.is_empty() {
+                if kind == TemplateKind::OfficialLetter || !code.is_empty() {
                     profile.department_code = code;
                 }
             }
@@ -348,6 +368,14 @@ pub(crate) fn apply_profile_field(
                 profile.contact_phone = value.to_string();
             }
         }
+    }
+    if kind == TemplateKind::OfficialLetter
+        && matches!(
+            field,
+            FieldId::IssuingUnit | FieldId::Recipient | FieldId::CopiesTo
+        )
+    {
+        sync_letter_department_code(profile, vocabulary);
     }
 }
 
@@ -1101,18 +1129,42 @@ mod tests {
     }
 
     #[test]
-    fn issuing_unit_brings_out_letter_code_only_when_empty() {
+    fn letter_code_tracks_switch_clear_and_joint_main_without_changing_number() {
+        let mut vocabulary = vocabulary();
+        vocabulary[1].department_code = "乙函".into();
+        let mut draft = draft_of(TemplateKind::OfficialLetter);
+        draft.profile.document_year = "2026".into();
+        draft.profile.document_number = "12".into();
+        apply_field(&mut draft, FieldId::IssuingUnit, "甲局", &vocabulary);
+        apply_field(&mut draft, FieldId::IssuingUnit, "乙局", &vocabulary);
+        assert_eq!(draft.profile.department_code, "乙函");
+        apply_field(&mut draft, FieldId::IssuingUnit, "", &vocabulary);
+        assert!(draft.profile.department_code.is_empty());
+        draft.profile.joint_issuance_mode = crate::models::JointIssuanceMode::Mode1;
+        draft.profile.joint_issuing_units = "甲局、乙局".into();
+        draft.profile.main_issuing_unit = "乙局".into();
+        sync_letter_department_code(&mut draft.profile, &vocabulary);
+        assert_eq!(draft.profile.department_code, "乙函");
+        draft.profile.main_issuing_unit = "甲局".into();
+        sync_letter_department_code(&mut draft.profile, &vocabulary);
+        assert_eq!(draft.profile.department_code, "甲函");
+        assert_eq!(draft.profile.document_year, "2026");
+        assert_eq!(draft.profile.document_number, "12");
+    }
+
+    #[test]
+    fn issuing_unit_replaces_letter_code() {
         let vocabulary = vocabulary();
         let mut draft = draft_of(TemplateKind::OfficialLetter);
         apply_field(&mut draft, FieldId::IssuingUnit, "甲局", &vocabulary);
         assert_eq!(draft.profile.issuing_unit, "甲局");
         assert_eq!(draft.profile.department_code, "甲函");
 
-        // 代字已填时不覆盖。
+        // 公函代字已填时也必须随单位替换。
         let mut draft = draft_of(TemplateKind::OfficialLetter);
         draft.profile.department_code = "旧代字".into();
         apply_field(&mut draft, FieldId::IssuingUnit, "甲局", &vocabulary);
-        assert_eq!(draft.profile.department_code, "旧代字");
+        assert_eq!(draft.profile.department_code, "甲函");
 
         // 词库单位没维护代字时不凭空造。
         let mut draft = draft_of(TemplateKind::OfficialLetter);

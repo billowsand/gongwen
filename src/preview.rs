@@ -448,7 +448,7 @@ mod tests {
             },
             VocabularyEntry {
                 code: "0001".into(),
-                canonical: "教师工作处".into(),
+                canonical: "星海省教育厅教师工作处".into(),
                 parent: "00".into(),
                 abbr: "教师处".into(),
                 ..Default::default()
@@ -523,7 +523,7 @@ mod tests {
         // 公函落款用全称；落款单位留空时回落发文单位。
         let mut input = draft(TemplateKind::OfficialLetter);
         assert_eq!(signature_unit(&input, &display), "星海省教育厅");
-        input.profile.signing_unit = "教师工作处".into();
+        input.profile.signing_unit = "星海省教育厅教师工作处".into();
         assert_eq!(signature_unit(&input, &display), "星海省教育厅教师工作处");
 
         // 电话通知落款用简称，少于 5 字逐字加空格。
@@ -965,9 +965,9 @@ mod tests {
         let mut input = draft(TemplateKind::RedHeadApproval);
         input.profile.reporting_leaders = "张三、李四".into();
         input.profile.signing_unit = "星海省教育厅".into();
-        input.profile.joint_responsible_units = "教师工作处".into();
+        input.profile.joint_responsible_units = "星海省教育厅教师工作处".into();
         input.profile.joint_contacts = vec![crate::models::JointContact {
-            unit: "教师工作处".into(),
+            unit: "星海省教育厅教师工作处".into(),
             name: "王五".into(),
             phone: "010-12345678".into(),
         }];
@@ -1514,9 +1514,9 @@ mod tests {
         let mut input = draft(TemplateKind::RedHeadApproval);
         input.profile.reporting_leaders = "张三、李四".into();
         input.profile.signing_unit = "星海省教育厅".into();
-        input.profile.joint_responsible_units = "教师工作处".into();
+        input.profile.joint_responsible_units = "星海省教育厅教师工作处".into();
         input.profile.joint_contacts = vec![crate::models::JointContact {
-            unit: "教师工作处".into(),
+            unit: "星海省教育厅教师工作处".into(),
             name: "王五".into(),
             phone: "010-12345678".into(),
         }];
@@ -1570,7 +1570,7 @@ mod tests {
         let display = UnitDisplay::new(&vocabulary);
         let mut input = draft(TemplateKind::OfficialLetter);
         input.profile.joint_issuance_mode = JointIssuanceMode::Mode1;
-        input.profile.joint_issuing_units = "教师工作处，星海省教育厅".into();
+        input.profile.joint_issuing_units = "星海省教育厅教师工作处，星海省教育厅".into();
 
         // 未指定主办单位时取第一个。
         assert_eq!(header_unit(&input, &display), "星海省教育厅教师工作处");

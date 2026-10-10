@@ -452,10 +452,11 @@ pub fn build_draft_prompt(
     let display = UnitDisplay::new(vocabulary);
     let external_names = input.uses_external_unit_names();
     let issuing_display = if joint_mode {
-        display.join_hierarchical_for(
-            &split_units(&input.profile.joint_issuing_units),
-            external_names,
-        )
+        split_units(&input.profile.joint_issuing_units)
+            .iter()
+            .map(|unit| display.full_name_for(unit, external_names))
+            .collect::<Vec<_>>()
+            .join("、")
     } else {
         display.full_name_for(&input.profile.issuing_unit, external_names)
     };
