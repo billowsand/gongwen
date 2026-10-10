@@ -903,7 +903,15 @@ impl DraftPage<'_> {
         };
 
         // MDEX 外层窗格已描边，正文只保留填色与留白，避免双层边框。
-        let source_frame = if theme::smartisan::active() {
+        let source_frame = if theme::smartisan::active() && source_mode {
+            // 源码模式外层已是一整张稿本，正文不再加第二层纸框和阴影。
+            egui::Frame::NONE.inner_margin(egui::Margin {
+                left: 18,
+                right: 12,
+                top: 18,
+                bottom: 16,
+            })
+        } else if theme::smartisan::active() {
             theme::smartisan::source_frame()
         } else if theme::is_mdex() {
             theme::card().stroke(egui::Stroke::NONE)
@@ -912,10 +920,16 @@ impl DraftPage<'_> {
         };
         let source_scroll = source_frame
             .show(ui, |ui| {
+                if theme::smartisan::active() && source_mode {
+                    ui.spacing_mut().scroll.bar_width = 5.0;
+                }
                 let mut scroll = egui::ScrollArea::vertical()
                     .id_salt("preview_scroll")
                     .auto_shrink([false; 2]);
-                if source_mode && self.doc.source_minimap.visible {
+                if source_mode
+                    && (self.doc.source_minimap.visible
+                        || (theme::smartisan::active() && text.trim().is_empty()))
+                {
                     scroll = scroll.scroll_bar_visibility(
                         egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                     );
@@ -937,6 +951,11 @@ impl DraftPage<'_> {
                             }
                             show_with_glyph_caret(ui, editable, |ui| {
                                 egui::TextEdit::multiline(text)
+                                    .hint_text(if theme::smartisan::active() && source_mode {
+                                        "输入 # 标题后，目录会自动出现"
+                                    } else {
+                                        ""
+                                    })
                                     .id(editor_id())
                                     .interactive(editable)
                                     .frame(egui::Frame::NONE)

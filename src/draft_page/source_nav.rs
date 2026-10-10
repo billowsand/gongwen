@@ -191,6 +191,13 @@ fn outline_row_ui(
     if hovered || current {
         let fill = theme::accent_soft().gamma_multiply(if hovered { 0.8 } else { 0.45 });
         painter.rect_filled(rect.shrink2(egui::vec2(1.0, 0.0)), 4.0, fill);
+        if current && theme::smartisan::active() {
+            painter.vline(
+                rect.left() + 1.0,
+                rect.y_range().shrink(5.0),
+                egui::Stroke::new(2.0, theme::accent().gamma_multiply(0.65)),
+            );
+        }
     }
     let color = if hovered || current {
         theme::accent()
@@ -556,43 +563,92 @@ impl DraftPage<'_> {
         // 外层还可能开着文档要素和审校抽屉。宽度不够时临时收起导航，保住正文
         // 的可编辑宽度；配置不变，窗口放大后自动回来。
         let available = ui.available_width();
-        let show_minimap = self.config.show_source_minimap && available >= 360.0;
+        let smartisan = theme::smartisan::active();
+        let empty_outline = smartisan && self.doc.source_outline.len() == 0;
+        let show_minimap = self.config.show_source_minimap
+            && available >= 360.0
+            && (!smartisan || !self.doc.generated_markdown.trim().is_empty());
         let show_outline = self.config.show_source_outline
             && available >= if show_minimap { 600.0 } else { 450.0 };
         self.doc.source_minimap.visible = show_minimap;
         // 大纲、正文、小地图共用同一张卡片，之间不留缝，像 Sublime 一样贴着正文。
         let pad = theme::PANE_PADDING;
-        let card = theme::pane().inner_margin(egui::Margin {
+        let mut card = theme::pane().inner_margin(egui::Margin {
             left: if show_outline { 0 } else { pad },
             right: if show_minimap { 0 } else { pad },
             top: pad,
             bottom: pad,
         });
+        if smartisan {
+            card = card
+                .fill(egui::Color32::from_rgb(251, 247, 237))
+                .stroke(egui::Stroke::NONE)
+                .shadow(theme::paper_shadow(24))
+                .inner_margin(egui::Margin::ZERO);
+        }
         let panel = egui::CentralPanel::default().frame(card).show(ui, |ui| {
-            theme::smartisan::wood(ui.painter(), ui.max_rect());
             if show_outline {
-                egui::Panel::left("source_outline_v1")
-                    .default_size(OUTLINE_WIDTH)
-                    .size_range(160.0..=300.0)
-                    .frame(egui::Frame::new().inner_margin(egui::Margin {
-                        left: pad,
-                        right: 4,
-                        top: 0,
-                        bottom: 0,
-                    }))
-                    .show(ui, |ui| self.source_outline_ui(ui));
+                egui::Panel::left(if empty_outline {
+                    "source_outline_empty_paper"
+                } else if smartisan {
+                    "source_outline_paper"
+                } else {
+                    "source_outline_v1"
+                })
+                .default_size(if empty_outline {
+                    36.0
+                } else if smartisan {
+                    236.0
+                } else {
+                    OUTLINE_WIDTH
+                })
+                .size_range(if empty_outline {
+                    36.0..=36.0
+                } else {
+                    160.0..=300.0
+                })
+                .resizable(!empty_outline)
+                .show_separator_line(!smartisan)
+                .frame(
+                    egui::Frame::new()
+                        .fill(if smartisan {
+                            egui::Color32::from_rgb(244, 240, 231)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .inner_margin(egui::Margin {
+                            left: if empty_outline { 3 } else { pad },
+                            right: 4,
+                            top: if smartisan { 14 } else { 0 },
+                            bottom: 0,
+                        }),
+                )
+                .show(ui, |ui| {
+                    if smartisan {
+                        ui.painter().vline(
+                            ui.max_rect().right() + 4.0,
+                            ui.max_rect().y_range(),
+                            egui::Stroke::new(0.6, theme::border().gamma_multiply(0.45)),
+                        );
+                    }
+                    self.source_outline_ui(ui);
+                });
             }
             if show_minimap {
-                egui::Panel::right("source_minimap_v1")
-                    .default_size(MINIMAP_WIDTH)
-                    .resizable(false)
-                    .frame(egui::Frame::new())
-                    .show_separator_line(false)
-                    .show(ui, |ui| self.source_minimap_ui(ui));
+                egui::Panel::right(if smartisan {
+                    "source_minimap_paper"
+                } else {
+                    "source_minimap_v1"
+                })
+                .default_size(if smartisan { 64.0 } else { MINIMAP_WIDTH })
+                .resizable(false)
+                .frame(egui::Frame::new())
+                .show_separator_line(false)
+                .show(ui, |ui| self.source_minimap_ui(ui));
             }
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().inner_margin(egui::Margin {
-                    left: if show_outline { pad } else { 0 },
+                    left: if show_outline && !smartisan { pad } else { 0 },
                     ..egui::Margin::ZERO
                 }))
                 .show(ui, |ui| self.markdown_editor(ui));
@@ -604,6 +660,16 @@ impl DraftPage<'_> {
 
     fn source_outline_ui(&mut self, ui: &mut egui::Ui) {
         if self.doc.source_outline.len() == 0 {
+            if theme::smartisan::active() {
+                ui.add(
+                    theme::Icon::List
+                        .image()
+                        .tint(theme::text_muted())
+                        .fit_to_exact_size(egui::vec2(18.0, 18.0)),
+                )
+                .on_hover_text("输入 # 标题后，目录会自动出现");
+                return;
+            }
             ui.add_space(8.0);
             ui.weak("还没有 Markdown 标题");
             ui.weak("用 #、##、### 等标记标题");
@@ -628,28 +694,51 @@ impl DraftPage<'_> {
         let visible = self.doc.source_outline.visible_indices();
         let mut jump = None;
         let mut toggle = None;
-        egui::ScrollArea::vertical()
-            .id_salt("source_outline_scroll")
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                for index in visible {
-                    let entry = &self.doc.source_outline.entries[index];
-                    let node = &self.doc.source_outline.nodes[index];
-                    let (response, arrow_clicked) = outline_row_ui(
-                        ui,
-                        entry,
-                        node,
-                        self.doc.source_outline.collapsed.contains(&node.key),
-                        current == Some(index),
-                    );
-                    if arrow_clicked {
-                        toggle = Some(index);
-                    } else if response.clicked() {
-                        jump = Some(entry.line.start);
+        if theme::smartisan::active() {
+            ui.horizontal(|ui| {
+                ui.label("目录");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::image(theme::Icon::PanelClose.image())
+                                .image_tint_follows_text_color(true)
+                                .frame_when_inactive(false),
+                        )
+                        .on_hover_text("收起目录，可在视图中重新打开")
+                        .clicked()
+                    {
+                        self.config.show_source_outline = false;
                     }
-                }
+                });
             });
+            ui.add_space(12.0);
+        }
+        let mut scroll = egui::ScrollArea::vertical()
+            .id_salt("source_outline_scroll")
+            .auto_shrink([false; 2]);
+        if theme::smartisan::active() {
+            scroll =
+                scroll.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        }
+        scroll.show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for index in visible {
+                let entry = &self.doc.source_outline.entries[index];
+                let node = &self.doc.source_outline.nodes[index];
+                let (response, arrow_clicked) = outline_row_ui(
+                    ui,
+                    entry,
+                    node,
+                    self.doc.source_outline.collapsed.contains(&node.key),
+                    current == Some(index),
+                );
+                if arrow_clicked {
+                    toggle = Some(index);
+                } else if response.clicked() {
+                    jump = Some(entry.line.start);
+                }
+            }
+        });
         if let Some(index) = toggle {
             self.doc.source_outline.toggle(index);
             ui.ctx().request_repaint();
@@ -715,7 +804,16 @@ impl DraftPage<'_> {
             map.last_editor_offset = Some(map.offset);
         }
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::surface());
+        let smartisan = theme::smartisan::active();
+        painter.rect_filled(
+            rect,
+            0.0,
+            if smartisan {
+                egui::Color32::from_rgb(247, 243, 234)
+            } else {
+                theme::surface()
+            },
+        );
         let top = rect.top() + layout.box_top(map.requested_offset.unwrap_or(map.offset))
             - map.mini_scroll;
         let viewport = egui::Rect::from_min_size(
@@ -726,17 +824,22 @@ impl DraftPage<'_> {
         painter.rect_filled(viewport, 0.0, theme::accent_soft().gamma_multiply(0.4));
         let mut mesh = egui::Mesh::default();
         for (block, color) in minimap_blocks(map, layout, rect) {
-            mesh.add_colored_rect(block, color);
+            mesh.add_colored_rect(
+                block,
+                color.gamma_multiply(if smartisan { 0.28 } else { 1.0 }),
+            );
         }
         if !mesh.is_empty() {
             painter.add(mesh);
         }
-        painter.rect_stroke(
-            viewport,
-            0.0,
-            egui::Stroke::new(1.0, theme::accent().gamma_multiply(0.45)),
-            egui::StrokeKind::Inside,
-        );
+        if !smartisan {
+            painter.rect_stroke(
+                viewport,
+                0.0,
+                egui::Stroke::new(1.0, theme::accent().gamma_multiply(0.45)),
+                egui::StrokeKind::Inside,
+            );
+        }
 
         // 右侧细滚动条：对应整篇正文，独立于缩略图自己的滚动。
         let track = egui::Rect::from_min_max(
@@ -775,7 +878,13 @@ impl DraftPage<'_> {
                 egui::vec2(track.width() - 2.0, thumb_height),
             ),
             2.0,
-            theme::text_muted().gamma_multiply(if active { 0.75 } else { 0.45 }),
+            theme::text_muted().gamma_multiply(if active {
+                0.65
+            } else if smartisan {
+                0.28
+            } else {
+                0.45
+            }),
         );
         response.on_hover_text("滚轮浏览全文；点击或拖动定位");
     }

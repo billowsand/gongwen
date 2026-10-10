@@ -36,6 +36,7 @@ pub(super) const fn palette() -> Theme {
     theme.md.code = theme.accent;
     theme.md.quoted = theme.text_soft;
     theme.md.anchor_bg = theme.accent_soft;
+    theme.md.comment_bg = Color32::TRANSPARENT;
     theme
 }
 
@@ -103,23 +104,6 @@ mod tabs;
 pub use tabs::document_tab;
 pub use tabs::{document_tab_to, ribbon_shape, rounded_gradient};
 
-/// 分组只增加一行小标题，不影响各命令原有的启用、提示和点击动作。
-pub fn command_group(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 3.0;
-        let row = ui.horizontal(add);
-        ui.add_sized(
-            egui::vec2(row.response.rect.width(), 14.0),
-            egui::Label::new(
-                egui::RichText::new(label)
-                    .size(11.0)
-                    .color(super::text_muted()),
-            )
-            .halign(egui::Align::Center),
-        );
-    });
-}
-
 pub fn chrome(painter: &egui::Painter, rect: Rect) {
     if !active() {
         return;
@@ -148,15 +132,6 @@ const WOOD_PITCH: f32 = 3.0;
 const WOOD_SEGMENTS: usize = 12;
 /// 纹线左右漂移的幅度（1.1）加半个线宽，判断是否露出时留的余量。
 const WOOD_REACH: f32 = 2.0;
-
-/// 淡桦木底板。固定坐标的细纹只画可见区域，滚动和鼠标移动不会让纹理闪烁。
-pub fn wood(painter: &egui::Painter, rect: Rect) {
-    if !active() || !rect.is_finite() {
-        return;
-    }
-    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    painter.extend(wood_shapes(rect, painter.clip_rect(), None));
-}
 
 /// 把木纹填进先占好的槽位；`cover` 是之后画上去的不透明卡片，被它整片盖住的
 /// 纹线段不再生成。木纹每帧都要重新三角化，一层就有上万个顶点，不能白画。
@@ -268,7 +243,7 @@ pub fn manuscript(
     let mut shapes = Vec::new();
     let clip = painter.clip_rect();
     let margin_x = output.galley_pos.x - if numbered { 8.0 } else { 12.0 };
-    let line = Stroke::new(0.7, Color32::from_rgb(228, 223, 212));
+    let line = Stroke::new(0.6, Color32::from_rgb(238, 233, 222));
     shapes.push(egui::Shape::rect_filled(
         Rect::from_min_max(rect.min, egui::pos2(margin_x, rect.bottom())),
         0,
@@ -279,7 +254,7 @@ pub fn manuscript(
             egui::pos2(margin_x, rect.top()),
             egui::pos2(margin_x, rect.bottom()),
         ],
-        Stroke::new(0.8, Color32::from_rgb(218, 169, 158)),
+        Stroke::new(0.7, Color32::from_rgb(224, 185, 172)),
     ));
     let mut last_y = output.galley_pos.y;
     let mut step = 24.0;

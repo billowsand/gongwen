@@ -218,12 +218,16 @@ const LEXICON_PAGES: [NavPage; 4] = [
 /// 顶栏纯图标按钮：常态只有图标，悬停、按下才铺一枚圆形底色。须放在
 /// [`tool_button_scope`] 里加，否则全局按钮内边距会把它撑成扁块。
 fn tool_button(icon: theme::Icon) -> egui::Button<'static> {
-    egui::Button::image(icon.image())
-        .image_tint_follows_text_color(true)
-        .frame_when_inactive(theme::smartisan::active())
-        .corner_radius(theme::chrome_radius((TOOL_BUTTON_SIZE / 2.0) as u8))
-        .min_size(egui::Vec2::splat(TOOL_BUTTON_SIZE))
-        .small()
+    egui::Button::image(if theme::smartisan::active() {
+        icon.image().tint(theme::smartisan::chrome_ink())
+    } else {
+        icon.image()
+    })
+    .image_tint_follows_text_color(!theme::smartisan::active())
+    .frame_when_inactive(false)
+    .corner_radius(theme::chrome_radius((TOOL_BUTTON_SIZE / 2.0) as u8))
+    .min_size(egui::Vec2::splat(TOOL_BUTTON_SIZE))
+    .small()
 }
 
 /// 收紧图标按钮的内边距与间距。全局 `button_padding` 是 10×5、`item_spacing.x`
@@ -236,8 +240,13 @@ fn tool_button_scope<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R)
         ui.spacing_mut().item_spacing.x = TOOL_BUTTON_GAP;
         if theme::smartisan::active() {
             let widgets = &mut ui.visuals_mut().widgets;
-            widgets.inactive.bg_stroke =
-                egui::Stroke::new(0.7, theme::border_strong().gamma_multiply(0.6));
+            widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            widgets.active.bg_stroke = egui::Stroke::NONE;
+            widgets.hovered.weak_bg_fill = egui::Color32::from_white_alpha(18);
+            widgets.hovered.bg_fill = egui::Color32::from_white_alpha(18);
+            widgets.active.weak_bg_fill = egui::Color32::from_black_alpha(16);
+            widgets.active.bg_fill = egui::Color32::from_black_alpha(16);
             widgets.inactive.corner_radius = egui::CornerRadius::same(5);
             widgets.hovered.corner_radius = egui::CornerRadius::same(5);
             widgets.active.corner_radius = egui::CornerRadius::same(5);
@@ -797,80 +806,92 @@ impl GongwenApp {
     /// 入口本身带文字而非纯图标——过去只有一枚汉堡图标，常驻页面和
     /// 新建公文这些高频入口藏在里面几乎不可见。
     pub(crate) fn app_menu_button(&mut self, ui: &mut egui::Ui) {
-        egui::containers::menu::MenuButton::from_button(
-            egui::Button::image_and_text(
+        let mut button = egui::Button::image_and_text(
+            theme::Icon::Menu
+                .image()
+                .fit_to_exact_size(egui::vec2(18.0, 18.0)),
+            "菜单",
+        )
+        .image_tint_follows_text_color(true);
+        if theme::smartisan::active() {
+            button = egui::Button::image_and_text(
                 theme::Icon::Menu
                     .image()
+                    .tint(theme::smartisan::chrome_ink())
                     .fit_to_exact_size(egui::vec2(18.0, 18.0)),
-                "菜单",
+                egui::RichText::new("菜单").color(theme::smartisan::chrome_ink()),
             )
-            .image_tint_follows_text_color(true),
-        )
-        .ui(ui, |ui| {
-            compact_menu(ui);
-            ui.set_min_width(148.0);
-            self.new_document_items(ui);
-            ui.separator();
-            self.nav_menu_item(ui, NavPage::Manuscript);
-            // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
-            // 子菜单入口也带选中底，顺着高亮就能找到所在位置。
-            let lexicon_active = LEXICON_PAGES
-                .iter()
-                .any(|page| self.tabs.get(self.active_tab) == Some(&TabRef::Page(*page)));
-            egui::containers::menu::SubMenuButton::from_button(
-                theme::menu_item(theme::Icon::Book, "词库")
-                    .selected(lexicon_active)
-                    .frame_when_inactive(lexicon_active)
-                    .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
-            )
+            .frame_when_inactive(false)
+            .fill(egui::Color32::from_white_alpha(18))
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(5);
+        }
+        egui::containers::menu::MenuButton::from_button(button)
             .ui(ui, |ui| {
                 compact_menu(ui);
-                ui.set_min_width(132.0);
-                for page in LEXICON_PAGES {
-                    self.nav_menu_item(ui, page);
-                }
-            });
-            self.nav_menu_item(ui, NavPage::AiPrompts);
-            self.nav_menu_item(ui, NavPage::Knowledge);
-            ui.separator();
-            // 外观主题在顶栏右端的换肤按钮里。图表样式管的是纸面上的图，
-            // 导出也跟着变，留在菜单里挨着设置。
-            egui::containers::menu::SubMenuButton::from_button(
-                theme::menu_item(theme::Icon::GitCommit, "图表样式")
-                    .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
-            )
-            .ui(ui, |ui| {
-                compact_menu(ui);
-                for diagram_theme in DiagramTheme::ALL {
-                    let selected = diagram_theme == self.config.diagram_theme;
-                    if ui
-                        .add(theme::menu_selectable_item(selected, diagram_theme.label()))
-                        .on_hover_text(diagram_theme.hint())
-                        .clicked()
-                        && !selected
-                    {
-                        self.apply_diagram_theme(diagram_theme);
-                        ui.close();
+                ui.set_min_width(148.0);
+                self.new_document_items(ui);
+                ui.separator();
+                self.nav_menu_item(ui, NavPage::Manuscript);
+                // 四张词表同属「词库」，收进一个子菜单；当前页是其中之一时，
+                // 子菜单入口也带选中底，顺着高亮就能找到所在位置。
+                let lexicon_active = LEXICON_PAGES
+                    .iter()
+                    .any(|page| self.tabs.get(self.active_tab) == Some(&TabRef::Page(*page)));
+                egui::containers::menu::SubMenuButton::from_button(
+                    theme::menu_item(theme::Icon::Book, "词库")
+                        .selected(lexicon_active)
+                        .frame_when_inactive(lexicon_active)
+                        .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+                )
+                .ui(ui, |ui| {
+                    compact_menu(ui);
+                    ui.set_min_width(132.0);
+                    for page in LEXICON_PAGES {
+                        self.nav_menu_item(ui, page);
                     }
-                    // 「按文种自动」与四套具体配色分开两段。
-                    if diagram_theme == DiagramTheme::Auto {
-                        ui.separator();
+                });
+                self.nav_menu_item(ui, NavPage::AiPrompts);
+                self.nav_menu_item(ui, NavPage::Knowledge);
+                ui.separator();
+                // 外观主题在顶栏右端的换肤按钮里。图表样式管的是纸面上的图，
+                // 导出也跟着变，留在菜单里挨着设置。
+                egui::containers::menu::SubMenuButton::from_button(
+                    theme::menu_item(theme::Icon::GitCommit, "图表样式")
+                        .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+                )
+                .ui(ui, |ui| {
+                    compact_menu(ui);
+                    for diagram_theme in DiagramTheme::ALL {
+                        let selected = diagram_theme == self.config.diagram_theme;
+                        if ui
+                            .add(theme::menu_selectable_item(selected, diagram_theme.label()))
+                            .on_hover_text(diagram_theme.hint())
+                            .clicked()
+                            && !selected
+                        {
+                            self.apply_diagram_theme(diagram_theme);
+                            ui.close();
+                        }
+                        // 「按文种自动」与四套具体配色分开两段。
+                        if diagram_theme == DiagramTheme::Auto {
+                            ui.separator();
+                        }
                     }
+                });
+                self.nav_menu_item(ui, NavPage::Settings);
+                ui.separator();
+                self.nav_menu_item(ui, NavPage::Help);
+                if ui
+                    .add(theme::menu_item(theme::Icon::BrandMark, "关于公文助手"))
+                    .clicked()
+                {
+                    self.about_window_open = true;
+                    ui.close();
                 }
-            });
-            self.nav_menu_item(ui, NavPage::Settings);
-            ui.separator();
-            self.nav_menu_item(ui, NavPage::Help);
-            if ui
-                .add(theme::menu_item(theme::Icon::BrandMark, "关于公文助手"))
-                .clicked()
-            {
-                self.about_window_open = true;
-                ui.close();
-            }
-        })
-        .0
-        .on_hover_text("新建文档、稿件管理、词库、AI 管理与设置");
+            })
+            .0
+            .on_hover_text("新建文档、稿件管理、词库、AI 管理与设置");
     }
 
     /// 菜单里的一个常驻页面入口。

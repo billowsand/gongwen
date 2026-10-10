@@ -1526,6 +1526,9 @@ mod split_resize_tests {
         for (mode, stem) in [
             (PreviewMode::Split, "smartisan-comparison"),
             (PreviewMode::Source, "smartisan-source"),
+            (PreviewMode::Source, "smartisan-source-outline"),
+            (PreviewMode::Source, "smartisan-source-empty"),
+            (PreviewMode::Source, "smartisan-source-scrolled"),
         ] {
             workspace_theme_samples(
                 mode,
@@ -1562,6 +1565,21 @@ mod split_resize_tests {
                 harness.config.show_editor_line_numbers = true;
                 harness.config.editor_font_size = 16.0;
                 harness.config.ribbon_tab = crate::models::RibbonTab::Output;
+                if stem.contains("outline") || stem.contains("empty") || stem.contains("scrolled") {
+                    harness.config.show_source_outline = true;
+                    harness.config.show_source_minimap = true;
+                    harness.doc.form_collapsed = true;
+                    harness.doc.generated_markdown = "# 研究报告\n\n## 前言\n\n### 测试约定\n\n本文用于检查目录、稿纸和缩略图在同一本稿本中的层次。\n\n## 研究设计\n\n### 样本与指标\n\n请结合实际，认真组织落实各项研究任务。\n\n## 表格组合\n\n## 图表与公式\n\n## 参考文献\n".into();
+                    if stem.contains("empty") {
+                        harness.doc.generated_markdown.clear();
+                    }
+                    if stem.contains("scrolled") {
+                        harness.doc.generated_markdown.push_str(
+                            &"\n正文材料用于检验长稿滚动、行号和缩略图的映射。\n".repeat(100),
+                        );
+                        harness.doc.source_minimap.requested_offset = Some(600.0);
+                    }
+                }
             }
             theme::set_current(name);
             theme::set_current_paper(crate::models::PaperMode::Follow);
