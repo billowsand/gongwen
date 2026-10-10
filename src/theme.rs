@@ -7,6 +7,7 @@
 //! DOCX/PDF 一律仍是白纸黑字红头，不受主题影响。
 
 mod mdex;
+pub mod smartisan;
 
 use crate::models::{EditorFontFace, FontConfig, FontRole, PaperMode, ThemeName};
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
@@ -597,6 +598,7 @@ pub fn by_name(name: ThemeName) -> Theme {
         ThemeName::Latte => Theme::latte(),
         ThemeName::GruvboxLight => Theme::gruvbox_light(),
         ThemeName::Mdex => mdex::palette(),
+        ThemeName::Smartisan => smartisan::palette(),
         ThemeName::MdexDark => mdex::dark_palette(),
         ThemeName::Dracula => Theme::dracula(),
         ThemeName::Nord => Theme::nord(),
@@ -873,7 +875,11 @@ pub mod paper {
         fn follow_mode_maps_themes_to_paper_families() {
             assert_follow(&[ThemeName::Claude, ThemeName::Latte], ORIGINAL_SHEET);
             assert_follow(
-                &[ThemeName::SolarizedLight, ThemeName::Mdex],
+                &[
+                    ThemeName::SolarizedLight,
+                    ThemeName::Mdex,
+                    ThemeName::Smartisan,
+                ],
                 PARCHMENT_SHEET,
             );
             assert_follow(&[ThemeName::GruvboxLight], RICE_SHEET);
@@ -1129,6 +1135,14 @@ pub mod md {
 
 /// 卡片外框：白纸面 + 细描边 + 圆角。
 pub fn card() -> egui::Frame {
+    if smartisan::active() {
+        return egui::Frame::new()
+            .fill(surface())
+            .stroke(Stroke::new(1.0, border()))
+            .corner_radius(3)
+            .shadow(paper_shadow(18))
+            .inner_margin(Margin::same(12));
+    }
     egui::Frame::new()
         .fill(surface())
         .stroke(Stroke::new(1.0, border()))
@@ -1238,6 +1252,9 @@ pub fn paper_shadow(alpha: u8) -> egui::epaint::Shadow {
 
 /// 对照区不叠面板外框，仅用底色区分源码与纸张承托面。
 pub fn comparison_pane(preview: bool) -> egui::Frame {
+    if smartisan::active() {
+        return egui::Frame::new().inner_margin(Margin::same(16));
+    }
     if !is_mdex() {
         return pane();
     }
@@ -1279,6 +1296,9 @@ pub fn panel(fill: Color32, margin: i8) -> egui::Frame {
 
 /// 功能区第二行只负责留出内容边距；底色和轮廓等上下两行完成排版后统一绘制。
 pub fn ribbon_tray_layout() -> egui::Frame {
+    if smartisan::active() {
+        return egui::Frame::new().inner_margin(Margin::symmetric(2, 6));
+    }
     egui::Frame::new()
         .inner_margin(Margin::symmetric(7, 2))
         .outer_margin(Margin::symmetric(2, 2))
@@ -1286,6 +1306,9 @@ pub fn ribbon_tray_layout() -> egui::Frame {
 
 /// MDEX 用淡色工具带、底线与同色短标记关联上下两行；其它主题保持闭合曲线。
 pub fn connected_ribbon_shape(tab_rect: egui::Rect, tray_outer_rect: egui::Rect) -> egui::Shape {
+    if smartisan::active() {
+        return smartisan::ribbon_shape(tab_rect, tray_outer_rect);
+    }
     if is_mdex() {
         let tray = tray_outer_rect.shrink(2.0);
         let fill = mix_color(surface(), accent_soft(), 0.18);
@@ -1852,6 +1875,9 @@ pub fn is_mdex() -> bool {
 }
 
 pub fn chrome_radius(default: u8) -> CornerRadius {
+    if smartisan::active() {
+        return CornerRadius::same(default.min(4));
+    }
     CornerRadius::same(if is_mdex() { 0 } else { default })
 }
 
@@ -1882,7 +1908,9 @@ fn app_icon_png(name: ThemeName) -> &'static [u8] {
             include_bytes!("../assets/app-icon/themes/mdex-dark/app-icon-256.png")
         }
         ThemeName::Mdex => include_bytes!("../assets/app-icon/themes/mdex/app-icon-256.png"),
-        ThemeName::Claude => include_bytes!("../assets/app-icon/themes/claude/app-icon-256.png"),
+        ThemeName::Claude | ThemeName::Smartisan => {
+            include_bytes!("../assets/app-icon/themes/claude/app-icon-256.png")
+        }
         ThemeName::SolarizedLight => {
             include_bytes!("../assets/app-icon/themes/solarized-light/app-icon-256.png")
         }
@@ -2193,6 +2221,14 @@ fn icon_button_impl(
             .min_size(egui::vec2(28.0, 26.0))
             .corner_radius(chrome_radius(6)),
     );
+    if smartisan::active() {
+        smartisan::bevel(
+            ui.painter(),
+            response.rect,
+            response.is_pointer_button_down_on(),
+            false,
+        );
+    }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     response.on_hover_text(label)
 }
@@ -2214,6 +2250,42 @@ pub fn titlebar_icon_button(
     };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 24.0), sense);
     if ui.is_rect_visible(rect) {
+        if smartisan::active() {
+            let pressed = response.is_pointer_button_down_on();
+            let top = if pressed {
+                Color32::from_rgb(116, 103, 90)
+            } else {
+                Color32::from_rgb(146, 133, 117)
+            };
+            let bottom = if pressed {
+                Color32::from_rgb(129, 116, 102)
+            } else {
+                Color32::from_rgb(128, 115, 101)
+            };
+            let hover = enabled && response.hovered() && !pressed;
+            let top = if hover {
+                top.lerp_to_gamma(smartisan::chrome_ink(), 0.06)
+            } else {
+                top
+            };
+            let bottom = if hover {
+                bottom.lerp_to_gamma(smartisan::chrome_ink(), 0.06)
+            } else {
+                bottom
+            };
+            smartisan::rounded_gradient(ui.painter(), rect.shrink(1.0), 4.0, top, bottom);
+            smartisan::chrome_edge(ui.painter(), rect, pressed);
+            icon.image()
+                .tint(smartisan::chrome_ink().gamma_multiply(if enabled { 1.0 } else { 0.4 }))
+                .paint_at(
+                    ui,
+                    egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)),
+                );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+            });
+            return response.on_hover_text(label);
+        }
         let fill = if !enabled {
             Color32::TRANSPARENT
         } else if response.is_pointer_button_down_on() {
@@ -3147,7 +3219,11 @@ pub fn configure_style(ctx: &egui::Context) {
     visuals.menu_corner_radius = chrome_radius(8);
     visuals.faint_bg_color = surface_sunk();
     visuals.extreme_bg_color = surface();
-    visuals.text_edit_bg_color = Some(surface());
+    visuals.text_edit_bg_color = Some(if smartisan::active() {
+        Color32::from_rgb(244, 241, 234)
+    } else {
+        surface()
+    });
     visuals.code_bg_color = surface_sunk();
     visuals.hyperlink_color = accent();
     visuals.warn_fg_color = warn();
@@ -3157,7 +3233,7 @@ pub fn configure_style(ctx: &egui::Context) {
         stroke: Stroke::new(1.0, accent_active()),
     };
     visuals.text_cursor.stroke = Stroke::new(2.0, accent());
-    visuals.striped = true;
+    visuals.striped = !smartisan::active();
     visuals.indent_has_left_vline = false;
     // 深色底上 24/255 的黑几乎看不出来，投影要加重才能把浮窗从背景里托起来。
     visuals.window_shadow = egui::epaint::Shadow {

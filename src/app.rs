@@ -650,6 +650,7 @@ impl eframe::App for GongwenApp {
             )
             .show(ui, |ui| self.window_titlebar(ui));
         egui::Panel::top("app_top")
+            .show_separator_line(!theme::smartisan::active())
             .frame(theme::panel(theme::surface(), 12))
             .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("app_status")
@@ -668,64 +669,86 @@ impl eframe::App for GongwenApp {
             ctx.animate_bool_with_time(egui::Id::new("content_fade"), false, 0.0);
             ctx.animate_value_with_time(egui::Id::new("content_slide"), CONTENT_SLIDE_PX, 0.0);
         }
-        egui::CentralPanel::default().show(ui, |ui| {
-            let fade = ui.ctx().animate_bool_with_time(
-                egui::Id::new("content_fade"),
-                true,
-                CONTENT_FADE_ANIM,
-            );
-            let slide = ui.ctx().animate_value_with_time(
-                egui::Id::new("content_slide"),
-                0.0,
-                CONTENT_FADE_ANIM,
-            );
-            ui.set_opacity(fade);
-            // 轻滑入场靠平移子 Ui 的 max_rect 实现，不另开图层。
-            //
-            // 曾经试过 `LayerId::new(Order::Background, ...)` + `set_transform_layer`：
-            // 自己 new 出来的 LayerId 从没经过 `Area`，egui 的 `Memory::areas()` 里
-            // 既没有它的 AreaState 也不在 order 列表里，后果是三重的——
-            // 1. `compare_order` 用 `order_map` 决胜，未注册层取到 None，`None < Some(_)`，
-            //    这一层被排到根 background 层下面；而 CentralPanel 收尾时会在 background
-            //    层登记一个覆盖整个中央区的 hover 矩形，`hit_test` 的 included_layers
-            //    扫到它就 break，正文区所有控件被整体丢弃 → 点击、拖拽、聚焦全废；
-            // 2. `Areas::layer_id_at` 只遍历注册过的层，`rect_contains_pointer` 恒为 false
-            //    → ScrollArea 不再吃滚轮；
-            // 3. 同理 tooltip、`clicked_elsewhere`、菜单命中判定一并失效。
-            // 平移 max_rect 没有这些问题：内容仍在 CentralPanel 自己的层里，
-            // 裁剪也由 CentralPanel 的 clip_rect 负责。
-            let mut content_ui = ui.new_child(
-                egui::UiBuilder::new().max_rect(
-                    ui.available_rect_before_wrap()
-                        .translate(egui::vec2(slide, 0.0)),
-                ),
-            );
-            match active {
-                TabRef::Doc(_) => self.draft_page().create_ui(&mut content_ui),
-                TabRef::Page(NavPage::Vocabulary) => self.vocabulary_ui(&mut content_ui),
-                TabRef::Page(NavPage::Proofread) => self.proofread_ui(&mut content_ui),
-                TabRef::Page(NavPage::Lexicon) => {
-                    crate::lexicon_ui::lexicon_ui(self, &mut content_ui)
-                }
-                TabRef::Page(NavPage::ImeTable) => {
-                    if let Some(crate::ime::PageAction::SyncLexicon) =
-                        self.ime.page_ui(&mut content_ui)
-                    {
-                        self.sync_lexicon_to_ime(true);
+        egui::CentralPanel::default()
+            .frame(if theme::smartisan::active() {
+                egui::Frame::NONE
+            } else {
+                egui::Frame::central_panel(ui.style())
+            })
+            .show(ui, |ui| {
+                let fade = ui.ctx().animate_bool_with_time(
+                    egui::Id::new("content_fade"),
+                    true,
+                    CONTENT_FADE_ANIM,
+                );
+                let slide = ui.ctx().animate_value_with_time(
+                    egui::Id::new("content_slide"),
+                    0.0,
+                    CONTENT_FADE_ANIM,
+                );
+                ui.set_opacity(fade);
+                // 轻滑入场靠平移子 Ui 的 max_rect 实现，不另开图层。
+                //
+                // 曾经试过 `LayerId::new(Order::Background, ...)` + `set_transform_layer`：
+                // 自己 new 出来的 LayerId 从没经过 `Area`，egui 的 `Memory::areas()` 里
+                // 既没有它的 AreaState 也不在 order 列表里，后果是三重的——
+                // 1. `compare_order` 用 `order_map` 决胜，未注册层取到 None，`None < Some(_)`，
+                //    这一层被排到根 background 层下面；而 CentralPanel 收尾时会在 background
+                //    层登记一个覆盖整个中央区的 hover 矩形，`hit_test` 的 included_layers
+                //    扫到它就 break，正文区所有控件被整体丢弃 → 点击、拖拽、聚焦全废；
+                // 2. `Areas::layer_id_at` 只遍历注册过的层，`rect_contains_pointer` 恒为 false
+                //    → ScrollArea 不再吃滚轮；
+                // 3. 同理 tooltip、`clicked_elsewhere`、菜单命中判定一并失效。
+                // 平移 max_rect 没有这些问题：内容仍在 CentralPanel 自己的层里，
+                // 裁剪也由 CentralPanel 的 clip_rect 负责。
+                let mut content_ui = ui.new_child(
+                    egui::UiBuilder::new().max_rect(
+                        ui.available_rect_before_wrap()
+                            .translate(egui::vec2(slide, 0.0)),
+                    ),
+                );
+                match active {
+                    TabRef::Doc(_) => self.draft_page().create_ui(&mut content_ui),
+                    TabRef::Page(NavPage::Vocabulary) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            self.vocabulary_ui(ui)
+                        })
                     }
+                    TabRef::Page(NavPage::Proofread) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            self.proofread_ui(ui)
+                        })
+                    }
+                    TabRef::Page(NavPage::Lexicon) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            crate::lexicon_ui::lexicon_ui(self, ui)
+                        })
+                    }
+                    TabRef::Page(NavPage::ImeTable) => {
+                        if let Some(crate::ime::PageAction::SyncLexicon) =
+                            self.ime.page_ui(&mut content_ui)
+                        {
+                            self.sync_lexicon_to_ime(true);
+                        }
+                    }
+                    TabRef::Page(NavPage::Manuscript) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            self.manuscript_ui(ui)
+                        })
+                    }
+                    TabRef::Page(NavPage::AiPrompts) => self.ai_manage_ui(&mut content_ui),
+                    TabRef::Page(NavPage::Knowledge) => {
+                        theme::smartisan::management_page(&mut content_ui, |ui| {
+                            crate::knowledge_ui::knowledge_ui(self, ui)
+                        })
+                    }
+                    TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
+                    TabRef::Page(NavPage::Help) => {
+                        crate::help::help_page(&mut content_ui, &mut self.help)
+                    }
+                    TabRef::Pdf(key) => self.pdf_ui(key, &mut content_ui),
                 }
-                TabRef::Page(NavPage::Manuscript) => self.manuscript_ui(&mut content_ui),
-                TabRef::Page(NavPage::AiPrompts) => self.ai_manage_ui(&mut content_ui),
-                TabRef::Page(NavPage::Knowledge) => {
-                    crate::knowledge_ui::knowledge_ui(self, &mut content_ui)
-                }
-                TabRef::Page(NavPage::Settings) => self.settings_ui(&mut content_ui),
-                TabRef::Page(NavPage::Help) => {
-                    crate::help::help_page(&mut content_ui, &mut self.help)
-                }
-                TabRef::Pdf(key) => self.pdf_ui(key, &mut content_ui),
-            }
-        });
+            });
         // 起草页在借出会话的那一帧里做不了的事，到这里统一执行。
         self.apply_draft_actions();
         // 设置页的「打开完整图文手册」只置了个位——它拿不到标签栏，开标签在这儿。
@@ -785,6 +808,7 @@ mod tests {
             .iter()
             .map(|(value, parent)| SelectOption {
                 value: (*value).to_string(),
+                search_terms: String::new(),
                 label: (*value).to_string(),
                 full: full(units, value),
                 parent: (*parent).to_string(),
@@ -971,3 +995,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod management_samples;

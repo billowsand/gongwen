@@ -1541,7 +1541,7 @@ impl TemplateProfile {
 
 /// 界面主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
 ///
-/// 前五项是明色，后五项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
+/// 前六项是明色，后五项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
 /// 公文纸面另由 [`PaperMode`] 决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1558,6 +1558,8 @@ pub enum ThemeName {
     GruvboxLight,
     /// MDEX 纸墨：米白底、墨黑字与终端绿。
     Mdex,
+    /// 锤子稿纸：灰棕拟物工具栏、浅木纹底板与横线稿纸。
+    Smartisan,
     /// Dracula：紫色强调，对比最强。
     Dracula,
     /// Nord：冷灰蓝，饱和度最低。
@@ -1572,12 +1574,13 @@ pub enum ThemeName {
 
 impl ThemeName {
     /// 全部可选主题，顺序与设置页展示一致：先明色后深色。
-    pub const ALL: [ThemeName; 10] = [
+    pub const ALL: [ThemeName; 11] = [
         Self::Claude,
         Self::SolarizedLight,
         Self::Latte,
         Self::GruvboxLight,
         Self::Mdex,
+        Self::Smartisan,
         Self::Dracula,
         Self::Nord,
         Self::GruvboxDark,

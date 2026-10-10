@@ -20,6 +20,7 @@ impl DraftPage<'_> {
         self.sync_candidates(ui.ctx());
         self.sync_ai_session();
         egui::Panel::top("draft_toolbar")
+            .show_separator_line(!theme::smartisan::active())
             .frame(theme::panel(theme::surface(), 10))
             .show(ui, |ui| self.ribbon(ui));
         // AI 侧栏先于审校抽屉声明，贴在最右边。
@@ -43,7 +44,14 @@ impl DraftPage<'_> {
             egui::Panel::left("create_form_compact_v3")
                 .default_size(FORM_PANEL_DEFAULT_WIDTH)
                 .size_range(FORM_PANEL_MIN_WIDTH..=FORM_PANEL_MAX_WIDTH)
-                .frame(theme::panel(theme::canvas(), 12))
+                .frame(theme::panel(
+                    if theme::smartisan::active() {
+                        theme::surface()
+                    } else {
+                        theme::canvas()
+                    },
+                    12,
+                ))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.strong("文档要素");

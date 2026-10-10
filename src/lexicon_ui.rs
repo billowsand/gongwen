@@ -458,7 +458,7 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
 
     TableBuilder::new(ui)
         .id_salt("lexicon_table")
-        .striped(true)
+        .striped(!theme::smartisan::active())
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::initial(160.0).at_least(90.0)) // 词
@@ -472,14 +472,17 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
         .header(ROW_HEIGHT, |mut header| {
             for title in ["词", "篇数", "词频", "省键", "编码", "来源", "状态"] {
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     ui.strong(title);
                 });
             }
             header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
                 ui.strong("操作");
             });
         })
-        .body(|body| {
+        .body(|mut body| {
+            let ledger_painter = body.ui_mut().painter().clone();
             // 整份克隆会在每帧多出上千次分配；借走再放回既不分配也不和表格抢借用。
             let rows = std::mem::take(&mut app.lexicon_terms);
             body.rows(ROW_HEIGHT, rows.len(), |mut row| {
@@ -579,6 +582,7 @@ fn term_table(app: &mut GongwenApp, ui: &mut egui::Ui) {
                         reading = Some((term.id, pinyin, code));
                     }
                 });
+                theme::smartisan::index_row(&ledger_painter, row.response().rect, false);
             });
             app.lexicon_terms = rows;
         });

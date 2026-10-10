@@ -442,6 +442,9 @@ impl GongwenApp {
         list_width: f32,
     ) {
         // 宽度只取自外层分栏，并预留滚动条和边距；不能由行内容反推宽度。
+        if theme::smartisan::active() {
+            ui.spacing_mut().item_spacing.y = 1.0;
+        }
         let row_width = (list_width - 44.0).max(240.0);
         let show_group = list_width >= 430.0;
         let fixed_width = if show_group { 220.0 } else { 152.0 };
@@ -460,7 +463,11 @@ impl GongwenApp {
                 } else {
                     theme::surface()
                 })
-                .corner_radius(egui::CornerRadius::same(6))
+                .corner_radius(egui::CornerRadius::same(if theme::smartisan::active() {
+                    0
+                } else {
+                    6
+                }))
                 .inner_margin(egui::Margin::symmetric(6, 2));
             // 整行可点（复选框除外）：手型指针 + 悬停/按下底色过渡，见 `theme::clickable_card`。
             let row = theme::clickable_card(
@@ -533,10 +540,13 @@ impl GongwenApp {
                     });
                 },
             );
+            theme::smartisan::index_row(ui.painter(), row.response.rect, selected);
             if row.response.clicked() {
                 select = Some(entry.id.clone());
             }
-            ui.add_space(2.0);
+            if !theme::smartisan::active() {
+                ui.add_space(2.0);
+            }
         }
 
         if shown == 0 {

@@ -18,6 +18,9 @@ use eframe::egui;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+mod selection_search;
+use selection_search::search_options;
+
 pub(crate) fn row_label(ui: &mut egui::Ui, label: &str) {
     form_row_label(ui, label);
 }
@@ -367,7 +370,7 @@ pub(crate) fn visible_rows(ui: &egui::Ui) -> usize {
 /// 单位按层级显示：本列表中没有上级的显示全称，有上级的缩进一级、只显示本级名称，
 /// 与成文时“同一上级不重复、跨上级用逗号”的写法对应。
 /// 人员、机关代字等没有层级的字段用 `plain_options` 生成，层级一律为 0。
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SelectOption {
     /// 写入配置的值，即词库中的规范名称。
     pub(crate) value: String,
@@ -375,6 +378,8 @@ pub(crate) struct SelectOption {
     pub(crate) label: String,
     /// 展开后的完整名称，用于收起后的选中项和已选标签。
     pub(crate) full: String,
+    /// 只用于检索的简称、别名与编码，不参与显示或写值。
+    pub(crate) search_terms: String,
     /// 上级单位的规范名称，空串表示顶层；只有单位候选项会用到。
     pub(crate) parent: String,
     /// 缩进层级，只相对本列表中可见的上级计算。
@@ -389,6 +394,7 @@ pub(crate) fn plain_options(values: &[String]) -> Vec<SelectOption> {
             value: value.clone(),
             label: value.clone(),
             full: value.clone(),
+            search_terms: String::new(),
             parent: String::new(),
             depth: 0,
         })
@@ -492,15 +498,18 @@ pub(crate) fn single_select(
             egui::ComboBox::from_id_salt(id)
                 .selected_text(selected_text)
                 .width(width)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show_ui(ui, |ui| {
+                    let filtered = search_options(ui, id, options, width);
                     if ui
                         .selectable_label(value.trim().is_empty(), "（未选择）")
                         .clicked()
                     {
                         value.clear();
                         changed = true;
+                        ui.close();
                     }
-                    for option in options {
+                    for option in &filtered {
                         let response =
                             ui.selectable_label(*value == option.value, indented_label(option));
                         let response = if option.full == option.label {
@@ -511,6 +520,7 @@ pub(crate) fn single_select(
                         if response.clicked() {
                             *value = option.value.clone();
                             changed = true;
+                            ui.close();
                         }
                     }
                     if allow_free_text {
@@ -610,15 +620,18 @@ pub(crate) fn joint_responsible_editor(
                     egui::ComboBox::from_id_salt(&unit_key)
                         .selected_text(selected_text)
                         .width(unit_width)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show_ui(ui, |ui| {
+                            let filtered = search_options(ui, &unit_key, unit_options, unit_width);
                             if ui
                                 .selectable_label(entry.unit.trim().is_empty(), "（未选择）")
                                 .clicked()
                             {
                                 entry.unit.clear();
                                 changed = true;
+                                ui.close();
                             }
-                            for option in unit_options {
+                            for option in &filtered {
                                 let response = ui.selectable_label(
                                     entry.unit == option.value,
                                     indented_label(option),
@@ -631,6 +644,7 @@ pub(crate) fn joint_responsible_editor(
                                 if response.clicked() {
                                     entry.unit = option.value.clone();
                                     changed = true;
+                                    ui.close();
                                 }
                             }
                             if allow_free_text {
@@ -774,7 +788,8 @@ pub(crate) fn multi_select(
                     // 多选需要连续勾选，点一次就收起会很难用。
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show_ui(ui, |ui| {
-                        for option in options {
+                        let filtered = search_options(ui, id, options, width);
+                        for option in &filtered {
                             let label = indented_label(option);
                             let mut checked = selected.contains(&option.value);
                             if !checked && excluded.contains(&option.value) {
@@ -941,6 +956,7 @@ pub(crate) fn manual_entry_item(ui: &mut egui::Ui, id: &str, manual_fields: &mut
         .clicked()
     {
         manual_fields.insert(id.to_string());
+        ui.close();
     }
 }
 

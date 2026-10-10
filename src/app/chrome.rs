@@ -220,7 +220,7 @@ const LEXICON_PAGES: [NavPage; 4] = [
 fn tool_button(icon: theme::Icon) -> egui::Button<'static> {
     egui::Button::image(icon.image())
         .image_tint_follows_text_color(true)
-        .frame_when_inactive(false)
+        .frame_when_inactive(theme::smartisan::active())
         .corner_radius(theme::chrome_radius((TOOL_BUTTON_SIZE / 2.0) as u8))
         .min_size(egui::Vec2::splat(TOOL_BUTTON_SIZE))
         .small()
@@ -234,6 +234,14 @@ fn tool_button_scope<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R)
         let padding = (TOOL_BUTTON_SIZE - 16.0) / 2.0;
         ui.spacing_mut().button_padding = egui::vec2(padding, padding);
         ui.spacing_mut().item_spacing.x = TOOL_BUTTON_GAP;
+        if theme::smartisan::active() {
+            let widgets = &mut ui.visuals_mut().widgets;
+            widgets.inactive.bg_stroke =
+                egui::Stroke::new(0.7, theme::border_strong().gamma_multiply(0.6));
+            widgets.inactive.corner_radius = egui::CornerRadius::same(5);
+            widgets.hovered.corner_radius = egui::CornerRadius::same(5);
+            widgets.active.corner_radius = egui::CornerRadius::same(5);
+        }
         add(ui)
     })
     .inner
@@ -273,7 +281,9 @@ impl GongwenApp {
             .unwrap_or(false);
         // 失焦时标题和图标弱化，提示窗口不在前台。
         let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
-        let title_color = if focused {
+        let title_color = if theme::smartisan::active() {
+            theme::smartisan::chrome_ink().gamma_multiply(if focused { 1.0 } else { 0.75 })
+        } else if focused {
             theme::text_soft()
         } else {
             theme::text_muted()
@@ -283,6 +293,8 @@ impl GongwenApp {
             egui::vec2(ui.available_width(), HEIGHT),
             egui::Sense::hover(),
         );
+
+        theme::smartisan::chrome(ui.painter(), rect);
 
         if let Some(metrics) = self.macos_titlebar_metrics {
             self.macos_titlebar(ui, rect, metrics.reserved_width, title_color);
@@ -312,7 +324,9 @@ impl GongwenApp {
                 title_rect.left_center() + egui::vec2(9.0, 0.0),
                 egui::vec2(18.0, 18.0),
             );
-            let brand_color = if focused {
+            let brand_color = if theme::smartisan::active() {
+                title_color
+            } else if focused {
                 theme::accent()
             } else {
                 title_color
@@ -426,6 +440,8 @@ impl GongwenApp {
             // 关闭键悬停用红底白字（Windows 惯例），其余按钮保持文字色。
             let icon_color = if is_close && hovered {
                 theme::accent_text()
+            } else if hovered && theme::smartisan::active() {
+                theme::text()
             } else {
                 title_color
             };
@@ -734,6 +750,7 @@ impl GongwenApp {
     /// 顶格一整行：左边菜单，中间标签条（末尾是新建按钮），右端贴窗口右沿放
     /// 快捷查找与换肤两枚图标按钮。稿件和导航页共用这一条，界面纵向只让出一行。
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let background = ui.painter().add(egui::Shape::Noop);
         ui.horizontal(|ui| {
             self.app_menu_button(ui);
             toolbar_separator(ui);
@@ -769,6 +786,11 @@ impl GongwenApp {
                 });
             });
         });
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().left() - 12.0, ui.min_rect().top() - 6.0),
+            egui::pos2(ui.max_rect().right() + 12.0, ui.min_rect().bottom() + 6.0),
+        );
+        theme::smartisan::tab_background(ui.painter(), background, rect);
     }
 
     /// 左上角的菜单：应用图标 + 「菜单」文字，点开是新建入口与各个常驻页面。
@@ -1056,9 +1078,22 @@ impl GongwenApp {
         let mut select: Option<usize> = None;
         let mut close: Option<usize> = None;
         ui.spacing_mut().item_spacing.x = 4.0;
-        for &tab in &shown {
+        for (position, &tab) in shown.iter().enumerate() {
             let width = (desired[tab] * scale).max(DOC_TAB_MIN_WIDTH);
-            let (clicked, closed) = self.tab_button(ui, tab, width);
+            let (clicked, closed, rect) = self.tab_button(ui, tab, width);
+            // 短分隔线只出现在相邻的未选中标签之间，纸页两肩保持干净。
+            if theme::smartisan::active()
+                && tab != self.active_tab
+                && shown
+                    .get(position + 1)
+                    .is_some_and(|next| *next != self.active_tab)
+            {
+                ui.painter().vline(
+                    rect.right() + 2.0,
+                    (rect.top() + 8.0)..=(rect.bottom() - 8.0),
+                    egui::Stroke::new(1.0, egui::Color32::from_white_alpha(42)),
+                );
+            }
             if clicked {
                 select = Some(tab);
             }
@@ -1089,11 +1124,20 @@ impl GongwenApp {
         }
         // 加号和浏览器一样单击就新开一篇空白稿；从文件、文件夹新建放在右键菜单
         // 和左上角主菜单里，不让最常用的操作多点一层。
-        let new_tab = tool_button_scope(ui, |ui| ui.add(tool_button(theme::Icon::Plus)))
-            .on_hover_text(format!(
-                "新建空白文档（{}）\n右键可从文件或文件夹新建",
-                theme::primary_shortcut("N")
-            ));
+        let new_tab = tool_button_scope(ui, |ui| {
+            let mut button = tool_button(theme::Icon::Plus);
+            if theme::smartisan::active() {
+                button = button.frame_when_inactive(false).corner_radius(14);
+                ui.visuals_mut().override_text_color = Some(theme::smartisan::chrome_ink());
+                ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
+            }
+            ui.add(button)
+        })
+        .on_hover_text(format!(
+            "新建空白文档（{}）\n右键可从文件或文件夹新建",
+            theme::primary_shortcut("N")
+        ));
         if new_tab.clicked() {
             self.new_blank_manuscript();
         }
@@ -1143,7 +1187,7 @@ impl GongwenApp {
         (text + DOC_TAB_CHROME_WIDTH).clamp(DOC_TAB_MIN_WIDTH, DOC_TAB_MAX_WIDTH)
     }
 
-    /// 画一格标签，返回（是否点了标签体, 是否点了关闭）。
+    /// 画一格标签，返回（是否点了标签体, 是否点了关闭, 实际标签区域）。
     ///
     /// 动效统一在这里，构成一套闭合的交互：
     /// - **悬停**：背景/边框/文字 120ms 变深，关闭按钮从低对比升到实色；
@@ -1153,7 +1197,12 @@ impl GongwenApp {
     ///
     /// 关闭按钮常态低对比常显，悬停它本身时渐变到危险红（选中态为白色）。
     /// 交互状态来自先占位拿到的 response，颜色才能在画背景之前算好。
-    pub(crate) fn tab_button(&mut self, ui: &mut egui::Ui, tab: usize, width: f32) -> (bool, bool) {
+    pub(crate) fn tab_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        tab: usize,
+        width: f32,
+    ) -> (bool, bool, egui::Rect) {
         let selected = tab == self.active_tab;
         let (mark, title) = self.tab_label(tab);
         let (icon, hover, busy) = match self.tabs[tab] {
@@ -1213,8 +1262,10 @@ impl GongwenApp {
         // 未选中从沉色经悬停色到按下的更深色。
         // 导航页标签（词库、设置等）用更浅的 surface 底 + 实色描边，与文档标签的
         // 沉色底区分——一眼看出「这是导航页，不是打开的文档」。
-        let rectangular = theme::is_mdex();
-        let selected_fill = if rectangular {
+        let rectangular = theme::is_mdex() || theme::smartisan::active();
+        let selected_fill = if theme::smartisan::active() {
+            theme::surface()
+        } else if rectangular {
             theme::accent_soft()
         } else {
             theme::accent_active()
@@ -1247,18 +1298,37 @@ impl GongwenApp {
         .lerp_to_gamma(theme::border_strong(), hover_t * (1.0 - sel_t))
         .lerp_to_gamma(selected_border, sel_t);
         // 文字：未选中深色，悬停加深一档；选中按各主题的背景取对比色。
-        let text_color = theme::text_soft()
-            .lerp_to_gamma(theme::text(), hover_t * (1.0 - sel_t))
-            .lerp_to_gamma(selected_text, sel_t);
-        ui.painter().rect(
-            rect,
-            theme::chrome_radius(TOOLBAR_CONTROL_HEIGHT as u8 / 2),
-            bg,
-            egui::Stroke::new(1.0, border),
-            egui::StrokeKind::Inside,
-        );
+        let text_color = if theme::smartisan::active() {
+            if selected {
+                theme::text()
+            } else {
+                theme::smartisan::chrome_ink()
+            }
+        } else {
+            theme::text_soft()
+                .lerp_to_gamma(theme::text(), hover_t * (1.0 - sel_t))
+                .lerp_to_gamma(selected_text, sel_t)
+        };
+        if theme::smartisan::active() {
+            theme::smartisan::document_tab_to(
+                ui.painter(),
+                rect,
+                selected,
+                hovered,
+                pressed,
+                ui.clip_rect().bottom() - 2.0,
+            );
+        } else {
+            ui.painter().rect(
+                rect,
+                theme::chrome_radius(TOOLBAR_CONTROL_HEIGHT as u8 / 2),
+                bg,
+                egui::Stroke::new(1.0, border),
+                egui::StrokeKind::Inside,
+            );
+        }
 
-        if rectangular && sel_t > 0.0 {
+        if theme::is_mdex() && sel_t > 0.0 {
             ui.painter().line_segment(
                 [
                     rect.left_bottom() - egui::vec2(0.0, 1.0),
@@ -1287,7 +1357,14 @@ impl GongwenApp {
             theme::spinner(&mut content, 14.0, text_color);
         } else if !mark.is_empty() {
             // 跟背景/文字同步插值，别用 sel_t > 0.5 那种硬阈值，否则动画中途会跳一下。
-            content.colored_label(theme::accent().lerp_to_gamma(selected_text, sel_t), mark);
+            content.colored_label(
+                if theme::smartisan::active() {
+                    text_color
+                } else {
+                    theme::accent().lerp_to_gamma(selected_text, sel_t)
+                },
+                mark,
+            );
         } else if let Some(icon) = icon {
             // Lucide 图标用 currentColor 描边，这里跟随文字色渐变。
             content.add(
@@ -1297,13 +1374,13 @@ impl GongwenApp {
             );
         }
         let label_width = (content.available_width() - CLOSE_HIT - CLOSE_GAP).max(24.0);
+        let label_text =
+            egui::RichText::new(truncate_middle(&title, DOC_TAB_TITLE_CHARS)).color(text_color);
         let label_response = content.add_sized(
             [label_width, TOOLBAR_CONTROL_HEIGHT - 8.0],
-            egui::Label::new(
-                egui::RichText::new(truncate_middle(&title, DOC_TAB_TITLE_CHARS)).color(text_color),
-            )
-            .truncate()
-            .sense(egui::Sense::click()),
+            egui::Label::new(label_text)
+                .truncate()
+                .sense(egui::Sense::click()),
         );
         // 点击标签空白处也选中；中键关闭是浏览器/编辑器的习惯，任意位置都认。
         if label_response.clicked() || response.clicked() {
@@ -1351,6 +1428,16 @@ impl GongwenApp {
         } else {
             theme::danger().lerp_to_gamma(theme::canvas(), sel_t)
         };
+        let close_base = if theme::smartisan::active() {
+            (if selected {
+                theme::text_muted()
+            } else {
+                theme::smartisan::chrome_ink()
+            })
+            .gamma_multiply(0.65 + 0.25 * hover_t)
+        } else {
+            close_base
+        };
         let close_color = close_base.lerp_to_gamma(close_hover_color, close_hover_t);
         // 悬停时叉底下垫一层同色淡圆，按下再深一档：热区变得看得见，也补上了
         // 「按下去了」的反馈。半透明叠在已画好的标签底上，选中态的主题色胶囊
@@ -1364,7 +1451,11 @@ impl GongwenApp {
             .lerp_to_gamma(theme::accent_text(), sel_t)
             .gamma_multiply((0.16 + 0.12 * close_press) * close_hover_t);
         if rectangular {
-            content.painter().rect_filled(close_rect, 0, close_wash);
+            content.painter().rect_filled(
+                close_rect,
+                if theme::smartisan::active() { 3 } else { 0 },
+                close_wash,
+            );
         } else {
             content
                 .painter()
@@ -1383,7 +1474,7 @@ impl GongwenApp {
             closed = true;
         }
 
-        (clicked, closed)
+        (clicked, closed, rect)
     }
 
     /// 底部状态栏。整条只有一行：左边状态文案，中间模型名，右边仿 Zed 的抽屉入口。

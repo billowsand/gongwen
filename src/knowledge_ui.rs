@@ -354,7 +354,7 @@ fn doc_table(
     let mut action = None;
     TableBuilder::new(ui)
         .id_salt("knowledge_doc_table")
-        .striped(true)
+        .striped(!theme::smartisan::active())
         .auto_shrink([false, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::auto().at_least(28.0)) // 勾选
@@ -367,6 +367,7 @@ fn doc_table(
             let mut all_selected =
                 !visible_ids.is_empty() && visible_ids.iter().all(|id| selected.contains(id));
             header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
                 if ui
                     .checkbox(&mut all_selected, "")
                     .on_hover_text(if all_selected {
@@ -386,22 +387,28 @@ fn doc_table(
                 }
             });
             header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
                 centered_header(ui, "文种");
             });
             header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
                 ui.strong("标题");
             });
             header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
                 centered_header(ui, "块数");
             });
             header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
                 centered_header(ui, "更新");
             });
             header.col(|ui| {
+                theme::smartisan::ledger_header(ui);
                 centered_header(ui, "操作");
             });
         })
-        .body(|body| {
+        .body(|mut body| {
+            let ledger_painter = body.ui_mut().painter().clone();
             body.rows(ROW_HEIGHT, visible.len(), |mut row| {
                 let doc = &docs[visible[row.index()]];
                 let mut checked = selected.contains(&doc.id);
@@ -457,6 +464,7 @@ fn doc_table(
                         action = Some(DocAction::Delete(doc.id));
                     }
                 });
+                theme::smartisan::index_row(&ledger_painter, row.response().rect, checked);
             });
         });
     action

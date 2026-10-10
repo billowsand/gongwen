@@ -1509,12 +1509,40 @@ mod split_resize_tests {
     }
 
     fn mdex_workspace_samples(mode: PreviewMode, stem: &str) {
-        let size = egui::vec2(1280.0, 820.0);
-        for (name, suffix) in [
-            (crate::models::ThemeName::MdexDark, "dark"),
-            (crate::models::ThemeName::Mdex, "light"),
+        workspace_theme_samples(
+            mode,
+            &format!("mdex-{stem}"),
+            &[
+                (crate::models::ThemeName::MdexDark, "dark"),
+                (crate::models::ThemeName::Mdex, "light"),
+            ],
+        );
+    }
+
+    /// 从真实编辑器出图，检查稿纸横线与中文换行、左右纸面的材质层次。
+    #[test]
+    #[ignore = "出锤子稿纸真实界面样张，手动跑"]
+    fn smartisan_workspace_samples() {
+        for (mode, stem) in [
+            (PreviewMode::Split, "smartisan-comparison"),
+            (PreviewMode::Source, "smartisan-source"),
         ] {
-            let path = format!("tmp/mdex-{stem}-{suffix}.png");
+            workspace_theme_samples(
+                mode,
+                stem,
+                &[(crate::models::ThemeName::Smartisan, "light")],
+            );
+        }
+    }
+
+    fn workspace_theme_samples(
+        mode: PreviewMode,
+        stem: &str,
+        names: &[(crate::models::ThemeName, &str)],
+    ) {
+        let size = egui::vec2(1280.0, 820.0);
+        for &(name, suffix) in names {
+            let path = format!("tmp/{stem}-{suffix}.png");
             let mut harness = Harness::new();
             harness.ctx.set_pixels_per_point(1.0);
             harness.doc.generated_markdown =
@@ -1526,17 +1554,29 @@ mod split_resize_tests {
             harness.config.show_source_outline = false;
             harness.config.show_source_minimap = false;
             harness.config.show_editor_line_numbers = false;
+            if name == crate::models::ThemeName::Smartisan {
+                harness.doc.generated_markdown = "# 关于开展年度工作总结的通知\n\n各部门：\n\n为全面总结年度工作，梳理重点任务落实情况，现将有关事项通知如下。\n\n## 一、总体要求\n\n请各部门认真总结工作成效，客观分析存在的问题，提出下一年度工作思路。\n\n## 二、报送安排\n\n请于规定时间前将总结材料报送办公室。\n\n**联系人：张某，电话：12345678。**".into();
+                harness.doc.draft.kind = crate::models::TemplateKind::PlainDocument;
+                harness.doc.form_collapsed = false;
+                harness.config.ribbon_collapsed = false;
+                harness.config.show_editor_line_numbers = true;
+                harness.config.editor_font_size = 16.0;
+                harness.config.ribbon_tab = crate::models::RibbonTab::Output;
+            }
             theme::set_current(name);
             theme::set_current_paper(crate::models::PaperMode::Follow);
             theme::configure_style(&harness.ctx);
             let mut canvas = crate::ui_snapshot::Canvas::default();
-            for _ in 0..3 {
+            for frame in 0..3 {
                 let output = harness.ctx.clone().run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                         ..Default::default()
                     },
                     |ui| {
+                        if name == crate::models::ThemeName::Smartisan {
+                            smartisan_sample_header(ui);
+                        }
                         let mut page = DraftPage {
                             doc: &mut harness.doc,
                             config: &mut harness.config,
@@ -1552,6 +1592,10 @@ mod split_resize_tests {
                         page.create_ui(ui);
                     },
                 );
+                if frame < 2 {
+                    canvas.absorb(&output.textures_delta);
+                    continue;
+                }
                 canvas.render(
                     &harness.ctx,
                     output,
@@ -1563,6 +1607,73 @@ mod split_resize_tests {
         }
         theme::set_current(crate::models::ThemeName::default());
         theme::set_current_paper(crate::models::PaperMode::default());
+    }
+
+    /// 顶栏样张复用正式的底座与标签绘制器，下方功能区仍由真实起草页渲染。
+    fn smartisan_sample_header(ui: &mut egui::Ui) {
+        egui::Panel::top("sample_titlebar")
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 34.0),
+                    egui::Sense::hover(),
+                );
+                theme::smartisan::chrome(ui.painter(), rect);
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(14.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    "公文助手",
+                    egui::FontId::proportional(14.0),
+                    theme::smartisan::chrome_ink(),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "年度工作总结通知",
+                    egui::FontId::proportional(14.0),
+                    theme::smartisan::chrome_ink(),
+                );
+            });
+        egui::Panel::top("sample_tabs")
+            .show_separator_line(false)
+            .frame(theme::panel(theme::surface(), 12))
+            .show(ui, |ui| {
+                let background = ui.painter().add(egui::Shape::Noop);
+                ui.horizontal(|ui| {
+                    let _ = ui.add(theme::icon_text_button(theme::Icon::Menu, "菜单"));
+                    ui.add_space(10.0);
+                    for (title, width, selected) in [
+                        ("稿件管理", 126.0, false),
+                        ("年度工作总结通知", 218.0, true),
+                    ] {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(width, TOOLBAR_CONTROL_HEIGHT),
+                            egui::Sense::click(),
+                        );
+                        theme::smartisan::document_tab(ui.painter(), rect, selected, false, false);
+                        ui.painter().text(
+                            rect.left_center() + egui::vec2(12.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            title,
+                            egui::FontId::proportional(14.0),
+                            theme::text(),
+                        );
+                        ui.painter().text(
+                            rect.right_center() - egui::vec2(12.0, 0.0),
+                            egui::Align2::CENTER_CENTER,
+                            "×",
+                            egui::FontId::proportional(14.0),
+                            theme::text_muted(),
+                        );
+                    }
+                    let _ = theme::icon_button(ui, theme::Icon::Plus, "新建");
+                });
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(ui.max_rect().left() - 12.0, ui.min_rect().top() - 6.0),
+                    egui::pos2(ui.max_rect().right() + 12.0, ui.min_rect().bottom() + 6.0),
+                );
+                theme::smartisan::tab_background(ui.painter(), background, rect);
+            });
     }
 
     impl Harness {

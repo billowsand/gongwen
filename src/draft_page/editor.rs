@@ -617,6 +617,7 @@ impl DraftPage<'_> {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::canvas()))
             .show(ui, |ui| {
+                theme::smartisan::wood(ui.painter(), ui.max_rect());
                 // 候选区挂在编辑区底部，对照模式下横跨源码与版式两栏。
                 // 没有条目时不画：编辑区底缘不再留出空条，状态栏入口也
                 // 一并隐藏；用户移入第一条之后，面板和入口自动出现。
@@ -647,8 +648,11 @@ impl DraftPage<'_> {
                     .default_size(420.0)
                     .size_range(280.0..=900.0)
                     .frame(theme::comparison_pane(false))
-                    .show(ui, |ui| self.markdown_editor(ui));
-                if theme::is_mdex() {
+                    .show(ui, |ui| {
+                        theme::smartisan::wood(ui.painter(), ui.max_rect());
+                        self.markdown_editor(ui);
+                    });
+                if theme::is_mdex() || theme::smartisan::active() {
                     // 面板保留原生分隔线与调宽热区，三个小点仅提示它可以拖动。
                     let center = source.response.rect.right_center();
                     for offset in [-4.0, 0.0, 4.0] {
@@ -662,6 +666,7 @@ impl DraftPage<'_> {
                 egui::CentralPanel::default()
                     .frame(theme::comparison_pane(true))
                     .show(ui, |ui| {
+                        theme::smartisan::wood(ui.painter(), ui.max_rect());
                         let region = ui.max_rect();
                         self.markdown_render(ui);
                         self.navigator_overlay(ui, region);
@@ -896,7 +901,9 @@ impl DraftPage<'_> {
         };
 
         // MDEX 外层窗格已描边，正文只保留填色与留白，避免双层边框。
-        let source_frame = if theme::is_mdex() {
+        let source_frame = if theme::smartisan::active() {
+            theme::smartisan::source_frame()
+        } else if theme::is_mdex() {
             theme::card().stroke(egui::Stroke::NONE)
         } else {
             theme::card()
@@ -915,6 +922,11 @@ impl DraftPage<'_> {
                     scroll = scroll.vertical_scroll_offset(offset);
                 }
                 let scrolled = scroll.show(ui, |ui| {
+                    let paper_slot = ui.painter().add(egui::Shape::Noop);
+                    let paper_rect = egui::Rect::from_min_max(
+                        ui.max_rect().min,
+                        egui::pos2(ui.max_rect().right(), ui.clip_rect().bottom()),
+                    );
                     let mut show_editor = |ui: &mut egui::Ui| {
                         ui.scope(|ui| {
                             if self.doc.preview_mode == PreviewMode::Split {
@@ -935,7 +947,7 @@ impl DraftPage<'_> {
                         })
                         .inner
                     };
-                    let output = if show_line_numbers {
+                    let output = if show_line_numbers || theme::smartisan::manuscript_active() {
                         ui.horizontal_top(|ui| {
                             ui.add_space(38.0);
                             show_editor(ui)
@@ -944,6 +956,13 @@ impl DraftPage<'_> {
                     } else {
                         show_editor(ui)
                     };
+                    theme::smartisan::manuscript(
+                        ui.painter(),
+                        paper_slot,
+                        paper_rect,
+                        &output,
+                        show_line_numbers,
+                    );
                     editor_lost_focus |= output.response.lost_focus();
                     menu_action =
                         candidates::editor_context_menu(ui, &output, selection_before, editable);

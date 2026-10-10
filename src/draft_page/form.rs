@@ -785,6 +785,13 @@ impl DraftPage<'_> {
                 parent: display.parent_of(&entry.canonical),
                 label: display.name_for(&entry.canonical, external),
                 value: entry.canonical.trim().to_string(),
+                search_terms: format!(
+                    "{} {} {} {}",
+                    entry.external_name,
+                    entry.abbr,
+                    entry.code,
+                    entry.aliases.join(" ")
+                ),
                 depth: 0,
             })
             .collect()
@@ -1143,6 +1150,7 @@ impl DraftPage<'_> {
                 };
                 SelectOption {
                     value: name.clone(),
+                    search_terms: String::new(),
                     label,
                     full,
                     parent: String::new(),

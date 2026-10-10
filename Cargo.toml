@@ -54,7 +54,7 @@ merman = { version = "0.7.0", features = ["raster"] }
 # 只为实现 merman 的 TextMeasurer：它的 TextStyle / TextMetrics 没有经 merman 重导出。
 merman-render = "0.7.0"
 nucleo-matcher = "0.3.1"
-pinyin = { version = "0.11", default-features = false, features = ["plain"] }
+pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"] }
 # Mermaid 的 SVG 由本进程自己转 PNG / PDF：随包字体只建一次字体库反复复用，

@@ -960,7 +960,8 @@ impl GongwenApp {
                         } else {
                             egui::RichText::new(&name)
                         };
-                        let response = ui.selectable_label(selected, label);
+                        let response =
+                            ui.selectable_label(selected && !theme::smartisan::active(), label);
                         let response = if orphan {
                             response.on_hover_text("该人员没有所属单位，请在右侧指定")
                         } else {
@@ -1059,8 +1060,18 @@ impl GongwenApp {
                 ui.rect_contains_pointer(row_rect),
                 theme::anim::FAST,
             );
-            if hover_t > 0.01 {
-                let bg = theme::canvas().lerp_to_gamma(theme::surface_hover(), hover_t);
+            theme::smartisan::index_row(ui.painter(), row_rect, selected);
+            if hover_t > 0.01 || (theme::smartisan::active() && selected) {
+                let base = if theme::smartisan::active() {
+                    if selected {
+                        theme::accent_soft()
+                    } else {
+                        theme::surface()
+                    }
+                } else {
+                    theme::canvas()
+                };
+                let bg = base.lerp_to_gamma(theme::surface_hover(), hover_t);
                 ui.painter().set(
                     row_bg,
                     egui::epaint::RectShape::filled(

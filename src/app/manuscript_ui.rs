@@ -1322,7 +1322,11 @@ impl GongwenApp {
                             }
                         });
                 });
-                ui.horizontal(|ui| {
+                // 先为整组日期保留宽度，窄窗时整体换行，避免输入框被挤成几个字。
+                ui.allocate_ui_with_layout(
+                    egui::vec2(330.0, FORM_CONTROL_HEIGHT),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
                     ui.label("成文日期");
                     if ui
                         .add(
@@ -1667,7 +1671,7 @@ impl GongwenApp {
         let ctx = ui.ctx().clone();
         let mut table = TableBuilder::new(ui)
             .id_salt(("manuscript_table", compact))
-            .striped(true)
+            .striped(!theme::smartisan::active())
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         table = if compact {
@@ -1704,6 +1708,7 @@ impl GongwenApp {
                         .iter()
                         .all(|id| self.manuscript_selected.contains(id));
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     if ui
                         .checkbox(&mut all_selected, "")
                         .on_hover_text(if all_selected {
@@ -1723,37 +1728,47 @@ impl GongwenApp {
                     }
                 });
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     centered_header(ui, "状态");
                 });
                 if !compact {
                     header.col(|ui| {
+                        theme::smartisan::ledger_header(ui);
                         centered_header(ui, "文档类型");
                     });
                     header.col(|ui| {
+                        theme::smartisan::ledger_header(ui);
                         centered_header(ui, "密级");
                     });
                 }
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     centered_header(ui, "标题");
                 });
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     centered_header(ui, "文号");
                 });
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     centered_header(ui, "成文日期");
                 });
                 if !compact {
                     header.col(|ui| {
+                        theme::smartisan::ledger_header(ui);
                         centered_header(ui, "更新");
                     });
                     header.col(|ui| {
+                        theme::smartisan::ledger_header(ui);
                         centered_header(ui, "归档");
                     });
                     header.col(|ui| {
+                        theme::smartisan::ledger_header(ui);
                         centered_header(ui, "知识库");
                     });
                 }
                 header.col(|ui| {
+                    theme::smartisan::ledger_header(ui);
                     ui.strong(if compact { "更多" } else { "操作" });
                 });
                 // 表头悬停提示：列宽其实可拖拽调整，但界面上没有任何暗示，
@@ -1762,7 +1777,8 @@ impl GongwenApp {
                     .response()
                     .on_hover_text("拖动列头可调整列宽（操作列除外）");
             })
-            .body(|body| {
+            .body(|mut body| {
+                let ledger_painter = body.ui_mut().painter().clone();
                 body.rows(ROW_HEIGHT, self.manuscript_rows.len(), |mut row| {
                     let index = row.index();
                     let data = &self.manuscript_rows[index];
@@ -2096,6 +2112,7 @@ impl GongwenApp {
                             );
                         }
                     });
+                    theme::smartisan::index_row(&ledger_painter, row.response().rect, row_selected);
                 });
             });
     }

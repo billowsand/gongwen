@@ -147,8 +147,16 @@ impl MarkdownHighlighter {
 /// 更透气，避免看着太挤。
 const LINE_HEIGHT_RATIO: f32 = 1.35;
 
+fn line_height_ratio() -> f32 {
+    if theme::smartisan::active() {
+        1.8
+    } else {
+        LINE_HEIGHT_RATIO
+    }
+}
+
 fn format(font: FontId, color: Color32) -> TextFormat {
-    let line_height = Some(font.size * LINE_HEIGHT_RATIO);
+    let line_height = Some(font.size * line_height_ratio());
     TextFormat {
         font_id: font,
         color,
@@ -158,7 +166,7 @@ fn format(font: FontId, color: Color32) -> TextFormat {
 }
 
 fn filled(font: FontId, color: Color32, background: Color32) -> TextFormat {
-    let line_height = Some(font.size * LINE_HEIGHT_RATIO);
+    let line_height = Some(font.size * line_height_ratio());
     TextFormat {
         font_id: font,
         color,

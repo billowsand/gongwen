@@ -568,6 +568,7 @@ impl DraftPage<'_> {
             bottom: pad,
         });
         egui::CentralPanel::default().frame(card).show(ui, |ui| {
+            theme::smartisan::wood(ui.painter(), ui.max_rect());
             if show_outline {
                 egui::Panel::left("source_outline_v1")
                     .default_size(OUTLINE_WIDTH)

@@ -11,7 +11,7 @@ use crate::draft_page::{
 };
 use crate::export;
 use crate::export::ColumnAlign;
-use crate::models::{ExportSelection, RibbonTab};
+use crate::models::RibbonTab;
 use crate::preview::{self, LabelKind, LabelTarget};
 use crate::storage;
 use crate::theme;
@@ -19,6 +19,7 @@ use eframe::egui;
 use egui::AtomExt;
 
 mod citation;
+mod output;
 
 /// 「研报」分区里选中的插入动作：区段标记、锚点、交叉引用、文献引用、脚注、
 /// 表题、引文与文框。
@@ -1416,84 +1417,6 @@ impl DraftPage<'_> {
             self.config.show_preview_navigator = !navigator;
             self.persist_ribbon();
         }
-    }
-
-    /// 输出：导出与打开成品。格式在设置页统一管理，这里另给三个只出一种
-    /// 格式的快捷入口。
-    pub(crate) fn ribbon_output(&mut self, ui: &mut egui::Ui) {
-        let has_draft = !self.doc.generated_markdown.trim().is_empty();
-        let ready = !self.doc.busy && has_draft;
-        if ui
-            .add_enabled(
-                ready,
-                theme::secondary_icon_button(theme::Icon::FileDown, "导出"),
-            )
-            .on_hover_text("按设置里勾选的格式导出当前审校稿，可反复导出")
-            .clicked()
-        {
-            self.start_export_current();
-        }
-        let overwrite = self.config.export.overwrite;
-        let mut only: Option<(ExportSelection, &'static str)> = None;
-        ui.add_enabled_ui(ready, |ui| {
-            for (icon, label, selection, tip) in [
-                (
-                    theme::Icon::FileTypeDoc,
-                    "仅 Word",
-                    ExportSelection {
-                        markdown: false,
-                        docx: true,
-                        pdf: false,
-                        overwrite,
-                    },
-                    "这一次只出 docx，不改设置里勾好的常用格式",
-                ),
-                (
-                    theme::Icon::FileTypePdf,
-                    "仅 PDF",
-                    ExportSelection {
-                        markdown: false,
-                        docx: false,
-                        pdf: true,
-                        overwrite,
-                    },
-                    "这一次只出 PDF，不改设置里勾好的常用格式",
-                ),
-                (
-                    theme::Icon::PencilLine,
-                    "仅 Markdown",
-                    ExportSelection {
-                        markdown: true,
-                        docx: false,
-                        pdf: false,
-                        overwrite,
-                    },
-                    "这一次只出 Markdown 源码包：md 正文、稿中引用的图片，研究报告另含 references.bib",
-                ),
-            ] {
-                if ui
-                    .add(theme::icon_text_button(icon, label))
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    only = Some((selection, label));
-                }
-            }
-        });
-        if let Some((selection, label)) = only {
-            self.start_export_with(selection);
-            *self.status = format!("正在按「{label}」导出…");
-        }
-        toolbar_separator(ui);
-
-        if ui
-            .add(theme::icon_text_button(theme::Icon::Folder, "输出目录"))
-            .on_hover_text(self.config.output_dir.clone())
-            .clicked()
-        {
-            self.open_output_dir();
-        }
-        self.export_open_buttons(ui);
     }
 }
 
