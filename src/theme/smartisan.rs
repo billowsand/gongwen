@@ -5,26 +5,31 @@ use eframe::egui::{self, Rect, Stroke};
 
 pub(super) const LABEL: &str = "锤子稿纸";
 
+// 按锤子便签原图校准：烟草棕栏、奶油纸、浅蜂蜜桦木与暖棕墨色。
+pub const PAPER: Color32 = Color32::from_rgb(251, 247, 236);
+pub const OUTLINE_PAPER: Color32 = Color32::from_rgb(242, 235, 221);
+pub const MINIMAP_PAPER: Color32 = Color32::from_rgb(248, 242, 230);
+
 pub(super) const fn palette() -> Theme {
     let mut theme = Theme::claude();
     theme.label = LABEL;
     theme.paper_family = PaperFamily::Parchment;
-    theme.canvas = Color32::from_rgb(213, 204, 189);
-    theme.surface = Color32::from_rgb(248, 246, 240);
-    theme.surface_sunk = Color32::from_rgb(237, 233, 225);
-    theme.surface_hover = Color32::from_rgb(235, 231, 222);
-    theme.surface_active = Color32::from_rgb(215, 205, 190);
-    theme.border = Color32::from_rgb(216, 207, 193);
-    theme.border_strong = Color32::from_rgb(172, 157, 139);
-    theme.text = Color32::from_rgb(73, 64, 57);
-    theme.text_soft = Color32::from_rgb(99, 87, 83);
-    theme.text_muted = Color32::from_rgb(145, 129, 110);
-    theme.accent = Color32::from_rgb(112, 96, 81);
-    theme.accent_hover = Color32::from_rgb(124, 108, 92);
-    theme.accent_active = Color32::from_rgb(92, 78, 65);
-    theme.accent_soft = Color32::from_rgb(231, 225, 214);
+    theme.canvas = Color32::from_rgb(233, 221, 206);
+    theme.surface = PAPER;
+    theme.surface_sunk = Color32::from_rgb(240, 232, 219);
+    theme.surface_hover = Color32::from_rgb(239, 230, 216);
+    theme.surface_active = Color32::from_rgb(227, 214, 197);
+    theme.border = Color32::from_rgb(226, 216, 200);
+    theme.border_strong = Color32::from_rgb(177, 157, 136);
+    theme.text = Color32::from_rgb(120, 94, 79);
+    theme.text_soft = Color32::from_rgb(137, 110, 91);
+    theme.text_muted = Color32::from_rgb(157, 137, 118);
+    theme.accent = theme.text;
+    theme.accent_hover = Color32::from_rgb(132, 105, 87);
+    theme.accent_active = Color32::from_rgb(107, 84, 70);
+    theme.accent_soft = Color32::from_rgb(233, 223, 208);
     theme.md.body = theme.text;
-    theme.md.marker = Color32::from_rgb(159, 140, 117);
+    theme.md.marker = Color32::from_rgb(168, 145, 121);
     theme.md.title = theme.text;
     theme.md.heading = theme.text;
     theme.md.strong = theme.accent_active;
@@ -50,7 +55,7 @@ pub fn manuscript_active() -> bool {
 
 /// 顶栏专用的浅字，不把全应用的正文色改成白色。
 pub fn chrome_ink() -> Color32 {
-    Color32::from_rgb(250, 246, 237)
+    PAPER
 }
 
 /// 四顶点渐变保留轻微体积感，不使用逐像素绘图。
@@ -86,8 +91,8 @@ pub fn tab_background(painter: &egui::Painter, slot: egui::layers::ShapeIdx, rec
             egui::Shape::Vec(vec![
                 gradient_shape(
                     Rect::from_min_max(rect.min, egui::pos2(rect.right(), base)),
-                    Color32::from_rgb(163, 153, 139),
-                    Color32::from_rgb(145, 133, 117),
+                    Color32::from_rgb(119, 102, 86),
+                    Color32::from_rgb(115, 98, 82),
                 ),
                 egui::Shape::rect_filled(
                     Rect::from_min_max(egui::pos2(rect.left(), base), rect.max),
@@ -111,18 +116,13 @@ pub fn chrome(painter: &egui::Painter, rect: Rect) {
     gradient(
         painter,
         rect,
-        Color32::from_rgb(139, 128, 114),
-        Color32::from_rgb(120, 108, 95),
+        Color32::from_rgb(123, 106, 89),
+        Color32::from_rgb(119, 102, 86),
     );
     painter.hline(
         rect.x_range(),
         rect.top() + 0.5,
         Stroke::new(1.0, Color32::from_white_alpha(28)),
-    );
-    painter.hline(
-        rect.x_range(),
-        rect.bottom() - 0.5,
-        Stroke::new(1.0, Color32::from_black_alpha(28)),
     );
 }
 
@@ -155,8 +155,8 @@ pub fn wood_around(
 fn wood_shapes(rect: Rect, visible: Rect, cover: Option<Rect>) -> Vec<egui::Shape> {
     let mut shapes = vec![gradient_shape(
         rect,
-        Color32::from_rgb(241, 225, 198),
-        Color32::from_rgb(238, 221, 188),
+        Color32::from_rgb(243, 225, 194),
+        Color32::from_rgb(241, 222, 190),
     )];
     let visible = visible.intersect(rect);
     if visible.width() <= 0.0 || visible.height() <= 0.0 || rect.height() <= 0.0 {
@@ -243,7 +243,7 @@ pub fn manuscript(
     let mut shapes = Vec::new();
     let clip = painter.clip_rect();
     let margin_x = output.galley_pos.x - if numbered { 8.0 } else { 12.0 };
-    let line = Stroke::new(0.6, Color32::from_rgb(238, 233, 222));
+    let line = Stroke::new(0.6, Color32::from_rgb(237, 227, 214));
     shapes.push(egui::Shape::rect_filled(
         Rect::from_min_max(rect.min, egui::pos2(margin_x, rect.bottom())),
         0,
@@ -254,7 +254,7 @@ pub fn manuscript(
             egui::pos2(margin_x, rect.top()),
             egui::pos2(margin_x, rect.bottom()),
         ],
-        Stroke::new(0.7, Color32::from_rgb(224, 185, 172)),
+        Stroke::new(0.7, Color32::from_rgb(223, 204, 188)),
     ));
     let mut last_y = output.galley_pos.y;
     let mut step = 24.0;
@@ -297,7 +297,7 @@ pub fn manuscript(
 pub fn source_frame() -> egui::Frame {
     super::card()
         .fill(if manuscript_active() {
-            Color32::from_rgb(251, 247, 237)
+            PAPER
         } else {
             super::surface()
         })
@@ -320,12 +320,12 @@ pub fn management_page(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     gradient(
         ui.painter(),
         rect,
-        Color32::from_rgb(222, 214, 201),
+        Color32::from_rgb(238, 228, 213),
         super::canvas(),
     );
     egui::Frame::new()
         .fill(super::surface())
-        .stroke(Stroke::new(1.0, Color32::from_rgb(190, 179, 163)))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(202, 182, 160)))
         .corner_radius(3)
         .shadow(super::paper_shadow(28))
         .outer_margin(egui::Margin::same(12))
@@ -359,8 +359,8 @@ pub fn ledger_header(ui: &egui::Ui) {
     gradient(
         ui.painter(),
         rect,
-        Color32::from_rgb(235, 230, 221),
-        Color32::from_rgb(241, 238, 231),
+        Color32::from_rgb(236, 228, 215),
+        Color32::from_rgb(245, 239, 228),
     );
     ui.painter().hline(
         rect.x_range(),

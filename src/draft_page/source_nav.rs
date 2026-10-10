@@ -19,7 +19,7 @@ const MINIMAP_MARGIN: f32 = 5.0;
 /// 拖到缩略图边缘后的自动滚动：速度与越界距离成正比，并有上限，避免长稿飞页。
 const MINIMAP_EDGE_GAIN: f32 = 4.0;
 const MINIMAP_EDGE_MAX_SPEED: f32 = 240.0;
-const OUTLINE_WIDTH: f32 = 268.0;
+const OUTLINE_WIDTH: f32 = 236.0;
 const OUTLINE_ROW_HEIGHT: f32 = 28.0;
 const OUTLINE_INDENT: f32 = 18.0;
 const OUTLINE_ARROW_WIDTH: f32 = 16.0;
@@ -191,7 +191,7 @@ fn outline_row_ui(
     if hovered || current {
         let fill = theme::accent_soft().gamma_multiply(if hovered { 0.8 } else { 0.45 });
         painter.rect_filled(rect.shrink2(egui::vec2(1.0, 0.0)), 4.0, fill);
-        if current && theme::smartisan::active() {
+        if current {
             painter.vline(
                 rect.left() + 1.0,
                 rect.y_range().shrink(5.0),
@@ -564,7 +564,7 @@ impl DraftPage<'_> {
         // 的可编辑宽度；配置不变，窗口放大后自动回来。
         let available = ui.available_width();
         let smartisan = theme::smartisan::active();
-        let empty_outline = smartisan && self.doc.source_outline.len() == 0;
+        let empty_outline = self.doc.source_outline.len() == 0;
         let show_minimap = self.config.show_source_minimap
             && available >= 360.0
             && (!smartisan || !self.doc.generated_markdown.trim().is_empty());
@@ -581,7 +581,7 @@ impl DraftPage<'_> {
         });
         if smartisan {
             card = card
-                .fill(egui::Color32::from_rgb(251, 247, 237))
+                .fill(theme::smartisan::PAPER)
                 .stroke(egui::Stroke::NONE)
                 .shadow(theme::paper_shadow(24))
                 .inner_margin(egui::Margin::ZERO);
@@ -590,47 +590,37 @@ impl DraftPage<'_> {
             if show_outline {
                 egui::Panel::left(if empty_outline {
                     "source_outline_empty_paper"
-                } else if smartisan {
+                } else {
                     "source_outline_paper"
-                } else {
-                    "source_outline_v1"
                 })
-                .default_size(if empty_outline {
-                    36.0
-                } else if smartisan {
-                    236.0
-                } else {
-                    OUTLINE_WIDTH
-                })
+                .default_size(if empty_outline { 36.0 } else { OUTLINE_WIDTH })
                 .size_range(if empty_outline {
                     36.0..=36.0
                 } else {
                     160.0..=300.0
                 })
                 .resizable(!empty_outline)
-                .show_separator_line(!smartisan)
+                .show_separator_line(false)
                 .frame(
                     egui::Frame::new()
                         .fill(if smartisan {
-                            egui::Color32::from_rgb(244, 240, 231)
+                            theme::smartisan::OUTLINE_PAPER
                         } else {
-                            egui::Color32::TRANSPARENT
+                            theme::surface_sunk().lerp_to_gamma(theme::surface(), 0.6)
                         })
                         .inner_margin(egui::Margin {
                             left: if empty_outline { 3 } else { pad },
                             right: 4,
-                            top: if smartisan { 14 } else { 0 },
+                            top: 14,
                             bottom: 0,
                         }),
                 )
                 .show(ui, |ui| {
-                    if smartisan {
-                        ui.painter().vline(
-                            ui.max_rect().right() + 4.0,
-                            ui.max_rect().y_range(),
-                            egui::Stroke::new(0.6, theme::border().gamma_multiply(0.45)),
-                        );
-                    }
+                    ui.painter().vline(
+                        ui.max_rect().right() + 4.0,
+                        ui.max_rect().y_range(),
+                        egui::Stroke::new(0.6, theme::border().gamma_multiply(0.45)),
+                    );
                     self.source_outline_ui(ui);
                 });
             }
@@ -660,19 +650,13 @@ impl DraftPage<'_> {
 
     fn source_outline_ui(&mut self, ui: &mut egui::Ui) {
         if self.doc.source_outline.len() == 0 {
-            if theme::smartisan::active() {
-                ui.add(
-                    theme::Icon::List
-                        .image()
-                        .tint(theme::text_muted())
-                        .fit_to_exact_size(egui::vec2(18.0, 18.0)),
-                )
-                .on_hover_text("输入 # 标题后，目录会自动出现");
-                return;
-            }
-            ui.add_space(8.0);
-            ui.weak("还没有 Markdown 标题");
-            ui.weak("用 #、##、### 等标记标题");
+            ui.add(
+                theme::Icon::List
+                    .image()
+                    .tint(theme::text_muted())
+                    .fit_to_exact_size(egui::vec2(18.0, 18.0)),
+            )
+            .on_hover_text("输入 # 标题后，目录会自动出现");
             return;
         }
         let current_byte = self
@@ -694,32 +678,27 @@ impl DraftPage<'_> {
         let visible = self.doc.source_outline.visible_indices();
         let mut jump = None;
         let mut toggle = None;
-        if theme::smartisan::active() {
-            ui.horizontal(|ui| {
-                ui.label("目录");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::image(theme::Icon::PanelClose.image())
-                                .image_tint_follows_text_color(true)
-                                .frame_when_inactive(false),
-                        )
-                        .on_hover_text("收起目录，可在视图中重新打开")
-                        .clicked()
-                    {
-                        self.config.show_source_outline = false;
-                    }
-                });
+        ui.horizontal(|ui| {
+            ui.label("目录");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(
+                        egui::Button::image(theme::Icon::PanelClose.image())
+                            .image_tint_follows_text_color(true)
+                            .frame_when_inactive(false),
+                    )
+                    .on_hover_text("收起目录，可在视图中重新打开")
+                    .clicked()
+                {
+                    self.config.show_source_outline = false;
+                }
             });
-            ui.add_space(12.0);
-        }
-        let mut scroll = egui::ScrollArea::vertical()
+        });
+        ui.add_space(12.0);
+        let scroll = egui::ScrollArea::vertical()
             .id_salt("source_outline_scroll")
-            .auto_shrink([false; 2]);
-        if theme::smartisan::active() {
-            scroll =
-                scroll.scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
-        }
+            .auto_shrink([false; 2])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
         scroll.show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             for index in visible {
@@ -809,7 +788,7 @@ impl DraftPage<'_> {
             rect,
             0.0,
             if smartisan {
-                egui::Color32::from_rgb(247, 243, 234)
+                theme::smartisan::MINIMAP_PAPER
             } else {
                 theme::surface()
             },

@@ -307,6 +307,7 @@ fn smartisan_management_samples() {
                 },
                 |ui| {
                     egui::Panel::top("sample_title")
+                        .show_separator_line(false)
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| app.window_titlebar(ui));
                     egui::Panel::top("sample_tabs")
@@ -375,6 +376,7 @@ fn smartisan_document_chrome_samples() {
                 },
                 |ui| {
                     egui::Panel::top("chrome_title")
+                        .show_separator_line(false)
                         .frame(egui::Frame::NONE)
                         .show(ui, |ui| app.window_titlebar(ui));
                     egui::Panel::top("chrome_tabs")

@@ -202,7 +202,7 @@ pub fn ribbon_shape(tab: Rect, tray: Rect) -> egui::Shape {
     let mut shapes = vec![super::gradient_shape(
         tray,
         crate::theme::surface(),
-        Color32::from_rgb(247, 244, 237),
+        Color32::from_rgb(248, 242, 230),
     )];
     shapes.extend(attached_tab(tab, base, 0.7));
     let stroke = Stroke::new(0.7, crate::theme::border());

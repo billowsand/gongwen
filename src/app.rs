@@ -643,6 +643,7 @@ impl eframe::App for GongwenApp {
             self.knowledge_retrieval_elapsed = Some(elapsed);
         }
         egui::Panel::top("window_titlebar")
+            .show_separator_line(!theme::smartisan::active())
             .frame(
                 egui::Frame::new()
                     .fill(theme::surface())

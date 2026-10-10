@@ -1538,6 +1538,21 @@ mod split_resize_tests {
         }
     }
 
+    /// 全主题使用同一套目录布局，检查深浅配色与无标题时的窄栏。
+    #[test]
+    #[ignore = "出全主题目录样张，手动跑"]
+    fn source_outline_theme_samples() {
+        for (index, name) in crate::models::ThemeName::ALL.into_iter().enumerate() {
+            for state in ["outline", "empty"] {
+                workspace_theme_samples(
+                    PreviewMode::Source,
+                    &format!("source-themes-{state}-{index}"),
+                    &[(name, "sample")],
+                );
+            }
+        }
+    }
+
     fn workspace_theme_samples(
         mode: PreviewMode,
         stem: &str,
@@ -1580,6 +1595,16 @@ mod split_resize_tests {
                         harness.doc.source_minimap.requested_offset = Some(600.0);
                     }
                 }
+            }
+            if stem.starts_with("source-themes-") {
+                harness.config.show_source_outline = true;
+                harness.config.show_source_minimap = false;
+                harness.doc.form_collapsed = true;
+                harness.doc.generated_markdown = if stem.contains("empty") {
+                    String::new()
+                } else {
+                    "# 年度工作总结\n\n## 总体要求\n\n请结合实际，认真组织落实各项重点任务。\n\n### 重点任务\n\n## 工作安排\n\n### 时间与责任\n\n## 报送要求\n".into()
+                };
             }
             theme::set_current(name);
             theme::set_current_paper(crate::models::PaperMode::Follow);

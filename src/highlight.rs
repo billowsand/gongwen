@@ -132,7 +132,11 @@ impl MarkdownHighlighter {
                     research,
                 )
             },
-            |_| {},
+            |galley| {
+                if theme::smartisan::manuscript_active() {
+                    align_manuscript_text(galley);
+                }
+            },
         )
     }
 
@@ -141,6 +145,34 @@ impl MarkdownHighlighter {
     fn cache_key(&self) -> Option<u64> {
         self.cache.as_ref().map(|cached| cached.key)
     }
+}
+
+/// 加宽行距留在字面上方，字形、下划线与逻辑基线一起贴近稿纸横线。
+fn align_manuscript_text(galley: &mut Arc<egui::Galley>) {
+    let galley = Arc::make_mut(galley);
+    for placed in &mut galley.rows {
+        let row = Arc::make_mut(&mut placed.row);
+        let font_height = row
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.font_height)
+            .fold(0.0, f32::max);
+        if font_height == 0.0 {
+            continue;
+        }
+        let offset = (row.size.y - font_height - 2.0).max(0.0);
+        for glyph in &mut row.glyphs {
+            glyph.pos.y += offset;
+        }
+        // 行底色仍覆盖原行框；只移动字形及其后的下划线。
+        for vertex in &mut row.visuals.mesh.vertices[row.visuals.glyph_vertex_range.start..] {
+            vertex.pos.y += offset;
+        }
+        row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
+    }
+    galley.mesh_bounds = galley.rows.iter().fold(egui::Rect::NOTHING, |bounds, row| {
+        bounds.union(row.visuals.mesh_bounds.translate(row.pos.to_vec2()))
+    });
 }
 
 /// 编辑区默认行高相对字号的倍数：字号拉平后各行高度接近，行距略微放宽一点

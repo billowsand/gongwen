@@ -550,12 +550,14 @@ pub(crate) fn source_line_range_at_char(text: &str, char_index: usize) -> Range<
         })
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(crate) struct EditorLineVisual {
     pub(crate) top: f32,
     pub(crate) bottom: f32,
 }
 
+#[cfg(test)]
 pub(crate) fn editor_line_visuals(
     output: &egui::text_edit::TextEditOutput,
 ) -> Vec<EditorLineVisual> {
@@ -592,14 +594,28 @@ pub(crate) fn paint_editor_line_numbers(
     let x = output.galley_pos.x - 10.0;
     let painter = ui.painter();
     let font = egui::FontId::new(font_size, family);
-    for (index, line) in editor_line_visuals(output).into_iter().enumerate() {
-        painter.text(
-            egui::pos2(x, (line.top + line.bottom) * 0.5),
-            egui::Align2::RIGHT_CENTER,
-            (index + 1).to_string(),
-            font.clone(),
-            theme::text_muted(),
-        );
+    let mut index = 0;
+    let mut first = true;
+    for row in &output.galley.rows {
+        if first {
+            index += 1;
+            let number =
+                painter.layout_no_wrap(index.to_string(), font.clone(), theme::text_muted());
+            let number_baseline = number.rows[0].glyphs[0].pos.y;
+            let baseline = row.glyphs.iter().map(|glyph| glyph.pos.y).reduce(f32::max);
+            let y = output.galley_pos.y
+                + row.pos.y
+                + baseline.map_or_else(
+                    || (row.size.y - number.size().y) * 0.5,
+                    |baseline| baseline - number_baseline,
+                );
+            painter.galley(
+                egui::pos2(x - number.size().x, y),
+                number,
+                theme::text_muted(),
+            );
+        }
+        first = row.ends_with_newline;
     }
 }
 

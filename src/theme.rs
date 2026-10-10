@@ -2253,14 +2253,14 @@ pub fn titlebar_icon_button(
         if smartisan::active() {
             let pressed = response.is_pointer_button_down_on();
             let top = if pressed {
-                Color32::from_rgb(116, 103, 90)
+                Color32::from_rgb(105, 88, 72)
             } else {
-                Color32::from_rgb(146, 133, 117)
+                Color32::from_rgb(132, 114, 96)
             };
             let bottom = if pressed {
-                Color32::from_rgb(129, 116, 102)
+                Color32::from_rgb(118, 99, 82)
             } else {
-                Color32::from_rgb(128, 115, 101)
+                Color32::from_rgb(119, 101, 85)
             };
             let hover = enabled && response.hovered() && !pressed;
             let top = if hover {
@@ -3220,7 +3220,7 @@ pub fn configure_style(ctx: &egui::Context) {
     visuals.faint_bg_color = surface_sunk();
     visuals.extreme_bg_color = surface();
     visuals.text_edit_bg_color = Some(if smartisan::active() {
-        Color32::from_rgb(244, 241, 234)
+        Color32::from_rgb(244, 236, 223)
     } else {
         surface()
     });
