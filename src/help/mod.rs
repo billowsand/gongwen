@@ -20,7 +20,7 @@ use crate::theme;
 use content::{CHAPTERS, Chapter, Part};
 use eframe::egui;
 
-/// 左栏目录的固定宽度。够放下最长的章名「拟稿：源码编辑与五种视图」。
+/// 左栏目录的固定宽度。够放下最长的章名「拟稿：源码编辑与四种视图」。
 const TOC_WIDTH: f32 = 244.0;
 
 /// 帮助页的会话状态。跨帧保留当前章节与滚动目标。
