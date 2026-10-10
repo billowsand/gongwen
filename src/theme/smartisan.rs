@@ -142,34 +142,90 @@ pub fn chrome(painter: &egui::Painter, rect: Rect) {
     );
 }
 
+/// 木纹细线的列距。
+const WOOD_PITCH: f32 = 3.0;
+/// 每条纹线从顶到底的分段数。
+const WOOD_SEGMENTS: usize = 12;
+/// 纹线左右漂移的幅度（1.1）加半个线宽，判断是否露出时留的余量。
+const WOOD_REACH: f32 = 2.0;
+
 /// 淡桦木底板。固定坐标的细纹只画可见区域，滚动和鼠标移动不会让纹理闪烁。
 pub fn wood(painter: &egui::Painter, rect: Rect) {
     if !active() || !rect.is_finite() {
         return;
     }
     let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    gradient(
-        &painter,
+    painter.extend(wood_shapes(rect, painter.clip_rect(), None));
+}
+
+/// 把木纹填进先占好的槽位；`cover` 是之后画上去的不透明卡片，被它整片盖住的
+/// 纹线段不再生成。木纹每帧都要重新三角化，一层就有上万个顶点，不能白画。
+pub fn wood_around(
+    painter: &egui::Painter,
+    slot: egui::layers::ShapeIdx,
+    rect: Rect,
+    cover: Option<Rect>,
+) {
+    if !active() || !rect.is_finite() {
+        return;
+    }
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    painter.set(
+        slot,
+        egui::Shape::Vec(wood_shapes(rect, painter.clip_rect(), cover)),
+    );
+}
+
+/// 采样点只由 `rect` 决定，裁掉的只是看不见的列与段，露出部分与整幅绘制逐点一致。
+fn wood_shapes(rect: Rect, visible: Rect, cover: Option<Rect>) -> Vec<egui::Shape> {
+    let mut shapes = vec![gradient_shape(
         rect,
         Color32::from_rgb(241, 225, 198),
         Color32::from_rgb(238, 221, 188),
-    );
-    let mut x = (rect.left() / 3.0).floor() * 3.0;
-    while x < rect.right() {
+    )];
+    let visible = visible.intersect(rect);
+    if visible.width() <= 0.0 || visible.height() <= 0.0 || rect.height() <= 0.0 {
+        return shapes;
+    }
+    let segments = WOOD_SEGMENTS as f32;
+    let index_at = |y: f32| ((y - rect.top()) / rect.height() * segments).clamp(0.0, segments);
+    let first = index_at(visible.top() - WOOD_REACH).floor() as usize;
+    let last = index_at(visible.bottom() + WOOD_REACH).ceil() as usize;
+    // 整列都落在卡片里时，只留卡片上下两头露出的段；两段相接就合成一条。
+    let hidden = cover.map(|cover| {
+        let cover = cover.shrink(WOOD_REACH);
+        let upper = (index_at(cover.top()).ceil() as usize).min(last);
+        let lower = (index_at(cover.bottom()).floor() as usize).max(first);
+        (cover.x_range(), upper, lower)
+    });
+    let mut x = (rect.left() / WOOD_PITCH).floor() * WOOD_PITCH;
+    x = x.max(((visible.left() - WOOD_REACH) / WOOD_PITCH).floor() * WOOD_PITCH);
+    while x < rect.right() && x <= visible.right() + WOOD_REACH {
         let seed = x * 0.73;
         let alpha = 6 + ((seed.sin().abs() * 12.0) as u8);
-        let mut points = Vec::with_capacity(13);
-        for i in 0..=12 {
-            let y = rect.top() + rect.height() * i as f32 / 12.0;
+        let stroke = Stroke::new(0.7, Color32::from_rgba_unmultiplied(135, 103, 61, alpha));
+        let point = |i: usize| {
+            let y = rect.top() + rect.height() * i as f32 / segments;
             let drift = (y * 0.008 + seed).sin() * 1.1;
-            points.push(egui::pos2(x + drift, y));
+            egui::pos2(x + drift, y)
+        };
+        let runs = match hidden {
+            Some((columns, upper, lower)) if columns.contains(x) && upper < lower => {
+                [(first, upper), (lower, last)]
+            }
+            _ => [(first, last), (0, 0)],
+        };
+        for (start, end) in runs {
+            if start < end {
+                shapes.push(egui::Shape::line(
+                    (start..=end).map(&point).collect(),
+                    stroke,
+                ));
+            }
         }
-        painter.add(egui::Shape::line(
-            points,
-            Stroke::new(0.7, Color32::from_rgba_unmultiplied(135, 103, 61, alpha)),
-        ));
-        x += 3.0;
+        x += WOOD_PITCH;
     }
+    shapes
 }
 
 /// 控件上下压边，保持原控件的点击、禁用、焦点和键盘语义。
@@ -382,4 +438,57 @@ pub fn chrome_edge(painter: &egui::Painter, rect: Rect, pressed: bool) {
         rect.bottom() - 0.6,
         Stroke::new(0.6, Color32::from_black_alpha(20)),
     );
+}
+
+#[cfg(test)]
+mod wood_tests {
+    use super::*;
+
+    fn lines(shapes: &[egui::Shape]) -> Vec<&[egui::Pos2]> {
+        shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Path(path) => Some(path.points.as_slice()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn culled_wood_is_a_subset_of_the_full_sheet_and_skips_the_cover() {
+        let rect = Rect::from_min_max(egui::pos2(10.0, 40.0), egui::pos2(1290.0, 860.0));
+        let full = wood_shapes(rect, rect, None);
+        let full_lines = lines(&full);
+        assert_eq!(full_lines.len(), 427);
+        assert!(
+            full_lines
+                .iter()
+                .all(|line| line.len() == WOOD_SEGMENTS + 1)
+        );
+        let full_points: Vec<_> = full_lines.iter().flat_map(|line| line.iter()).collect();
+
+        let cover = rect.shrink(10.0);
+        let culled = wood_shapes(rect, rect, Some(cover));
+        let culled_lines = lines(&culled);
+        let culled_points: usize = culled_lines.iter().map(|line| line.len()).sum();
+        assert!(culled_points * 3 < full_points.len());
+        for line in &culled_lines {
+            // 露出的纹线与整幅逐点重合，不另起采样。
+            assert!(line.iter().all(|point| full_points.contains(&point)));
+            // 整列落在卡片里时，每一段至少有一头露在卡片外面；贴边的列按余量整条保留。
+            if cover.shrink(WOOD_REACH * 2.0).x_range().contains(line[0].x) {
+                assert!(
+                    line.windows(2)
+                        .all(|pair| !cover.contains(pair[0]) || !cover.contains(pair[1]))
+                );
+            }
+        }
+
+        // 只露出一条窄缝时，只生成那一条附近的列和段。
+        let visible = Rect::from_min_max(egui::pos2(300.0, 400.0), egui::pos2(330.0, 410.0));
+        let slit = wood_shapes(rect, visible, None);
+        let slit_lines = lines(&slit);
+        assert!(slit_lines.len() <= 13);
+        assert!(slit_lines.iter().all(|line| line.len() <= 3));
+    }
 }

@@ -546,7 +546,8 @@ fn minimap_blocks(
 
 impl DraftPage<'_> {
     /// 源码模式自己的两列导航；不会改变预览或对照模式的布局。
-    pub(crate) fn source_editor_ui(&mut self, ui: &mut egui::Ui) {
+    /// 返回卡片不透明的部分（扣掉外边距与圆角），外层木纹不必画在它下面。
+    pub(crate) fn source_editor_ui(&mut self, ui: &mut egui::Ui) -> egui::Rect {
         self.doc.source_outline.refresh(
             &self.doc.generated_markdown,
             &self.config.numbering,
@@ -567,7 +568,7 @@ impl DraftPage<'_> {
             top: pad,
             bottom: pad,
         });
-        egui::CentralPanel::default().frame(card).show(ui, |ui| {
+        let panel = egui::CentralPanel::default().frame(card).show(ui, |ui| {
             theme::smartisan::wood(ui.painter(), ui.max_rect());
             if show_outline {
                 egui::Panel::left("source_outline_v1")
@@ -596,6 +597,9 @@ impl DraftPage<'_> {
                 }))
                 .show(ui, |ui| self.markdown_editor(ui));
         });
+        let inset = f32::from(card.outer_margin.left.max(card.outer_margin.top))
+            + f32::from(card.corner_radius.nw);
+        panel.response.rect.shrink(inset)
     }
 
     fn source_outline_ui(&mut self, ui: &mut egui::Ui) {

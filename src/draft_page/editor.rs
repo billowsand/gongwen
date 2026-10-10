@@ -617,23 +617,27 @@ impl DraftPage<'_> {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::canvas()))
             .show(ui, |ui| {
-                theme::smartisan::wood(ui.painter(), ui.max_rect());
+                // 木纹先占槽位垫在最底下，等正文排完、知道哪块被卡片盖住再填。
+                let wood = ui.painter().add(egui::Shape::Noop);
+                let region = ui.max_rect();
                 // 候选区挂在编辑区底部，对照模式下横跨源码与版式两栏。
                 // 没有条目时不画：编辑区底缘不再留出空条，状态栏入口也
                 // 一并隐藏；用户移入第一条之后，面板和入口自动出现。
                 if self.candidates_available() && !self.doc.candidates.items.is_empty() {
                     self.candidate_panel_ui(ui);
                 }
-                self.preview_body_ui(ui);
+                let cover = self.preview_body_ui(ui);
+                theme::smartisan::wood_around(ui.painter(), wood, region, cover);
             });
     }
 
-    fn preview_body_ui(&mut self, ui: &mut egui::Ui) {
+    /// 返回正文里不透明、会把底板整片盖住的区域。
+    fn preview_body_ui(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
         if self.ai_workspace_ui(ui) {
-            return;
+            return None;
         }
         match self.doc.preview_mode {
-            PreviewMode::Source => self.source_editor_ui(ui),
+            PreviewMode::Source => return Some(self.source_editor_ui(ui)),
             PreviewMode::Rendered => {
                 let region = ui.max_rect();
                 self.markdown_render(ui);
@@ -643,15 +647,13 @@ impl DraftPage<'_> {
             }
             PreviewMode::VersionDiff => self.version_diff_mode_ui(ui),
             PreviewMode::Split => {
+                // 锤子主题下两栏窗格不填底色，透出的就是外层那张木纹，不再各铺一层。
                 theme::configure_comparison_scroll(ui);
                 let source = egui::Panel::left("preview_split")
                     .default_size(420.0)
                     .size_range(280.0..=900.0)
                     .frame(theme::comparison_pane(false))
-                    .show(ui, |ui| {
-                        theme::smartisan::wood(ui.painter(), ui.max_rect());
-                        self.markdown_editor(ui);
-                    });
+                    .show(ui, |ui| self.markdown_editor(ui));
                 if theme::is_mdex() || theme::smartisan::active() {
                     // 面板保留原生分隔线与调宽热区，三个小点仅提示它可以拖动。
                     let center = source.response.rect.right_center();
@@ -666,13 +668,13 @@ impl DraftPage<'_> {
                 egui::CentralPanel::default()
                     .frame(theme::comparison_pane(true))
                     .show(ui, |ui| {
-                        theme::smartisan::wood(ui.painter(), ui.max_rect());
                         let region = ui.max_rect();
                         self.markdown_render(ui);
                         self.navigator_overlay(ui, region);
                     });
             }
         }
+        None
     }
 
     /// 返回是否点了关闭按钮——关闭请求由 `create_ui` 在面板动画之外落地，
