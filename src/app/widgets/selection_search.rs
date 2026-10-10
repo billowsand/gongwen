@@ -3,13 +3,24 @@
 use super::SelectOption;
 use eframe::egui;
 use pinyin::ToPinyinMulti;
+use std::borrow::Cow;
+use std::sync::Arc;
 
+/// egui 的 temp 存取每帧都会把状态整个克隆一遍，下拉框开着就是每帧一次；
+/// 选项、读音索引和命中结果都放在 `Arc` 里，克隆只是加个引用计数。
 #[derive(Clone, Default)]
 struct SearchState {
     query: String,
+    index: Arc<SearchIndex>,
+    /// 上次筛选的关键词与命中下标；关键词和词库都没变就直接复用。
+    hits: Option<(String, Arc<Vec<usize>>)>,
+    last_frame: Option<u64>,
+}
+
+#[derive(Default)]
+struct SearchIndex {
     source: Vec<SelectOption>,
     keys: Vec<Vec<SearchKey>>,
-    last_frame: Option<u64>,
 }
 
 fn compact(text: &str) -> String {
@@ -111,17 +122,20 @@ fn matches(keys: &[SearchKey], query: &str) -> bool {
     })
 }
 
-pub(super) fn search_options(
+pub(super) fn search_options<'a>(
     ui: &mut egui::Ui,
     field: &str,
-    options: &[SelectOption],
+    options: &'a [SelectOption],
     width: f32,
-) -> Vec<SelectOption> {
+) -> Vec<Cow<'a, SelectOption>> {
     let id = ui.make_persistent_id(("selection_search", field));
     let mut state = ui.data_mut(|data| data.get_temp::<SearchState>(id).unwrap_or_default());
-    if state.source != options {
-        state.source = options.to_vec();
-        state.keys = options.iter().map(option_keys).collect();
+    if state.index.source != options {
+        state.index = Arc::new(SearchIndex {
+            source: options.to_vec(),
+            keys: options.iter().map(option_keys).collect(),
+        });
+        state.hits = None;
     }
     let frame = ui.ctx().cumulative_frame_nr();
     let just_opened = state.last_frame.is_none_or(|last| frame > last + 1);
@@ -141,20 +155,36 @@ pub(super) fn search_options(
         }
     });
     let searching = !state.query.trim().is_empty();
-    let filtered = options
+    let hits = match &state.hits {
+        Some((query, hits)) if *query == state.query => hits.clone(),
+        _ => {
+            let hits: Arc<Vec<usize>> = Arc::new(
+                state
+                    .index
+                    .keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, keys)| matches(keys, &state.query))
+                    .map(|(index, _)| index)
+                    .collect(),
+            );
+            state.hits = Some((state.query.clone(), hits.clone()));
+            hits
+        }
+    };
+    let filtered = hits
         .iter()
-        .zip(&state.keys)
-        .filter(|(_, keys)| matches(keys, &state.query))
-        .map(|(option, _)| {
+        .map(|&index| {
+            let option = &options[index];
             if searching {
                 // 搜索后祖先可能不可见，直接给出全称，避免独立的“办公室”等名称歧义。
-                SelectOption {
+                Cow::Owned(SelectOption {
                     label: option.full.clone(),
                     depth: 0,
                     ..option.clone()
-                }
+                })
             } else {
-                option.clone()
+                Cow::Borrowed(option)
             }
         })
         .collect::<Vec<_>>();
@@ -249,7 +279,8 @@ mod tests {
                     .query
                     .clear()
             });
-            assert!(search_options(ui, "units", &options, 300.0) == options);
+            let all = search_options(ui, "units", &options, 300.0);
+            assert!(all.iter().map(|option| &**option).eq(options.iter()));
         });
     }
 
