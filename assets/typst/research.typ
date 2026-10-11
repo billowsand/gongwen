@@ -20,6 +20,10 @@
 
 // ---------------- 版式常量（md2tex.cls） ----------------
 #let texpt = 25.4mm / 72.27
+
+// 插图按文件内容识别格式：Typst 给路径时按扩展名定格式，扩展名写错（PNG 存成 .jpg）
+// 就解码失败；先读成字节再交给 image，格式由文件头决定。
+#let local-image(src, ..args) = image(read(src, encoding: none), ..args)
 #let pitch = 24 * texpt                    // \normalsize 14bp / 24pt
 #let body-size = 14pt
 #let top-edge = 11.59pt                    // 实测：页首第一行基线在版心顶下 4.09mm
@@ -115,7 +119,7 @@
     else if r.t == "code" { text(font: mono, r.v) }
     else if r.t == "link" { link(r.url, text(fill: if terminal { cyan } else { blue }, r.v)) }
     else if r.t == "img" {
-      box(image(r.src, width: text-w, ..if r.page != none { (page: r.page) }))
+      box(local-image(r.src, width: text-w, ..if r.page != none { (page: r.page) }))
     }
     // \ref 的编号紧贴汉字（hyperref 的链接盒挡住了 CJKecglue）。
     else if r.t == "ref" { box(ref-run(r.id)) }
@@ -534,9 +538,9 @@
 #let figure-block(f) = {
   let w = if f.width != none { f.width * text-w } else { text-w }
   let img = if f.width != none {
-    image(f.src, width: w, ..if f.page != none { (page: f.page) })
+    local-image(f.src, width: w, ..if f.page != none { (page: f.page) })
   } else {
-    image(f.src, width: text-w, height: 0.6 * text-h, fit: "contain", ..if f.page != none { (page: f.page) })
+    local-image(f.src, width: text-w, height: 0.6 * text-h, fit: "contain", ..if f.page != none { (page: f.page) })
   }
   block(above: 3.07mm - bottom-edge, below: 13.47mm - 0.17 * 12pt - top-edge, width: 100%, breakable: false, {
     align(center, img)

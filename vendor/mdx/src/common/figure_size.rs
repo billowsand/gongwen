@@ -121,7 +121,13 @@ pub fn probe(path: &Path, page: Option<u32>) -> Option<FigureSource> {
             height: f64::from(height),
         });
     }
-    let (width_px, height_px) = image::image_dimensions(path).ok()?;
+    // 按文件头识别格式：扩展名可能写错（PNG 存成 .jpg）。
+    let (width_px, height_px) = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
     Some(FigureSource::Raster {
         width_px,
         height_px,
@@ -266,5 +272,21 @@ mod tests {
             })
         );
         assert_eq!(probe(&dir.path().join("missing.png"), None), None);
+    }
+
+    #[test]
+    fn probe_trusts_file_header_over_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jpg");
+        image::RgbaImage::new(30, 20)
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(
+            probe(&path, None),
+            Some(FigureSource::Raster {
+                width_px: 30,
+                height_px: 20
+            })
+        );
     }
 }

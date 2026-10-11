@@ -602,6 +602,32 @@ mod tests {
         assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
     }
 
+    /// 扩展名与内容不符的插图（PNG 存成 .jpg）按文件头识别，照常排进 PDF。
+    #[test]
+    fn mislabeled_image_extension_is_typeset_by_content() {
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path().join("images")).unwrap();
+        image::RgbImage::new(60, 40)
+            .save_with_format(base.path().join("images/shot.jpg"), image::ImageFormat::Png)
+            .unwrap();
+        let input = DraftInput {
+            kind: crate::models::TemplateKind::ResearchReport,
+            ..Default::default()
+        };
+        let markdown = "# 插图测试\n\n<!-- [正文] -->\n\n## 章\n\n![截图](images/shot.jpg)\n";
+        write_pdf_with_base(
+            &base.path().join("research.pdf"),
+            &input,
+            markdown,
+            &NumberingConfig::default(),
+            base.path(),
+        )
+        .unwrap();
+    }
+
     /// 整条链：mdx 数据 → 公式 SVG → 模板排版，出得来 PDF，封面、目录、文献都在。
     #[test]
     fn typesets_a_research_report_end_to_end() {

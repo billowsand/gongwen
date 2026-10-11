@@ -142,9 +142,10 @@
 
 // 插图（TeX：\begin{center}\includegraphics[width=\textwidth]）。实测图前距上一行字底
 // 3.75mm、图后距下一行字顶 8.9mm。块之间夹了硬间距 v 时 Typst 不再插段间距，图前直接给。
+// 图先读成字节：格式按文件头识别而不是扩展名，PNG 存成 .jpg 也能排。
 #let image-block(b) = {
   v(3.75mm, weak: false)
-  block(above: 0pt, below: 8.9mm, width: 100%, align(center, image(b.src, width: 100%)))
+  block(above: 0pt, below: 8.9mm, width: 100%, align(center, image(read(b.src, encoding: none), width: 100%)))
 }
 
 // ---------------- 表格（longtblr） ----------------
