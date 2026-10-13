@@ -93,6 +93,12 @@ impl TemplateKind {
         matches!(self, Self::OfficialLetter)
     }
 
+    /// 可以整份改排横页的文种。只有普通公文：它没有红头、版记和落款，横排不牵动
+    /// 这些按竖版心标定过的部件。
+    pub fn supports_landscape(self) -> bool {
+        matches!(self, Self::PlainDocument)
+    }
+
     /// 承办条目数量上限。红头呈批件的承办区在首页底部、每条占一行，条目过多会
     /// 把批示框和正文区压没，因此限定 4 条；其他文种的版记不受此限。
     pub fn max_responsible_entries(self) -> Option<usize> {
@@ -1492,6 +1498,10 @@ pub struct TemplateProfile {
     /// 份数不单独设置——就是版记里那个「共印 N 份」（主送＋抄送＋承办），
     /// 本来就是这份文要印几份，再让人填一遍只会两处对不上。
     pub number_copies: bool,
+    /// 整份横页排版（只对普通公文生效，见 [`TemplateKind::supports_landscape`]）：
+    /// 横向 A4、左侧装订，正文与附件一律横排。关闭时不写入快照，旧稿校验值不变。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub landscape: bool,
 }
 
 impl Default for TemplateProfile {
@@ -1526,6 +1536,7 @@ impl Default for TemplateProfile {
             style_mode: StyleMode::Normal,
             duplex_printing: false,
             number_copies: false,
+            landscape: false,
         }
     }
 }
@@ -3188,6 +3199,11 @@ impl Default for DraftInput {
 }
 
 impl DraftInput {
+    /// 本篇是否整份横排：勾了横页且文种支持。换成别的文种时勾选保留但不生效。
+    pub fn landscape(&self) -> bool {
+        self.kind.supports_landscape() && self.profile.landscape
+    }
+
     /// 本篇的密级与保密期限，不分文档类型。
     ///
     /// 公文的密级在版式要素里，研究报告的在封面元数据里。稿件库的列表、筛选和
@@ -3318,8 +3334,10 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
+        assert!(!legacy.contains("\"landscape\""), "横页没勾不写入快照");
         let restored: DraftInput = serde_json::from_str(&legacy).unwrap();
         assert_eq!(restored.research.template, ResearchTemplate::Classic);
+        assert!(!restored.profile.landscape);
         assert_eq!(
             crate::manuscript::sync::payload_hash(&restored, "正文", "备注").unwrap(),
             expected

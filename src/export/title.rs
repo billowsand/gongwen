@@ -13,6 +13,8 @@ pub const RED_APPROVAL_TITLE_SIZE_PT: usize = 18;
 /// LaTeX 的 156mm 约 443.9 TeX pt，二者对应同一物理宽度，取较小值使压缩结果偏保守，
 /// 两套引擎都放得下。
 pub const TITLE_LINE_WIDTH_PT: f64 = 8_845.0 / 20.0;
+/// 横页版心宽度（225mm = 12755 twip，取整偏保守）。
+pub const LANDSCAPE_TITLE_LINE_WIDTH_PT: f64 = 12_755.0 / 20.0;
 /// 红头呈批件首页左侧正文/标题栏宽度（96mm）：红色竖线在 100mm 处，
 /// 标题与正文一样要给竖线让出 4mm 留白，见 `export::red::RED_APPROVAL_GUTTER_MM`。
 pub const RED_APPROVAL_TITLE_WIDTH_PT: f64 = super::red::RED_APPROVAL_NARROW_MM / 25.4 * 72.0;
@@ -38,18 +40,37 @@ pub fn chars_per_line() -> usize {
     chars_per_line_for(TITLE_LINE_WIDTH_PT, TITLE_BASE_SIZE_PT)
 }
 
+/// 主标题、附件标题的行宽：竖页 156mm，横页 225mm。
+pub fn document_title_width_pt(landscape: bool) -> f64 {
+    if landscape {
+        LANDSCAPE_TITLE_LINE_WIDTH_PT
+    } else {
+        TITLE_LINE_WIDTH_PT
+    }
+}
+
+/// 主标题、附件标题一行（二号）能容纳的汉字数，按页面方向取行宽。
+pub fn document_chars_per_line(landscape: bool) -> usize {
+    chars_per_line_for(document_title_width_pt(landscape), TITLE_BASE_SIZE_PT)
+}
+
+/// 主标题、附件标题压缩单行时的横向缩放百分比：字高不变（仍为二号），仅横向收窄
+/// 字形。100 = 原宽，小于 100 为横向压缩比例；按版心宽度（随页面方向）与显示字宽
+/// 反推并限制在不小于 80%。
+pub fn document_compressed_scale_percent(title: &str, landscape: bool) -> usize {
+    compressed_scale_percent_for(
+        title,
+        document_title_width_pt(landscape),
+        TITLE_BASE_SIZE_PT,
+    )
+}
+
 pub fn chars_per_line_for(width_pt: f64, size_pt: usize) -> usize {
     (width_pt / size_pt as f64).floor() as usize
 }
 
 pub fn red_approval_chars_per_line() -> usize {
     chars_per_line_for(RED_APPROVAL_TITLE_WIDTH_PT, RED_APPROVAL_TITLE_SIZE_PT)
-}
-
-/// 压缩单行时的横向缩放百分比：字高不变（仍为二号），仅横向收窄字形。
-/// 100 = 原宽，小于 100 为横向压缩比例；按版心宽度与显示字宽反推并限制在不小于 80%。
-pub fn compressed_scale_percent(title: &str) -> usize {
-    compressed_scale_percent_for(title, TITLE_LINE_WIDTH_PT, TITLE_BASE_SIZE_PT)
 }
 
 pub fn compressed_scale_percent_for(title: &str, width_pt: f64, size_pt: usize) -> usize {
@@ -445,7 +466,7 @@ mod tests {
         assert_eq!(display_units(title), 44);
         assert_eq!(title_plan(title, 20), TitlePlan::Compressed);
         // 字高不变（字号仍是二号），仅横向收窄字形。
-        let scale = compressed_scale_percent(title);
+        let scale = document_compressed_scale_percent(title, false);
         assert!((80..100).contains(&scale), "横向缩放应小于原宽：{scale}");
     }
 

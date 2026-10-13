@@ -40,19 +40,21 @@ pub(crate) struct Frozen<R> {
 }
 
 /// 在滚动区里画一块预览：`add` 拿到本帧该用的 [`PreviewScale`]，原样交给
-/// `official_preview`。`zoom` 为 None 时按可视宽度自适应。
+/// `official_preview`。`zoom` 为 None 时按可视宽度自适应；`landscape` 表示这篇是
+/// 横页（[`DraftInput::landscape`](crate::models::DraftInput::landscape)），按横放的纸宽自适应。
 ///
 /// 必须在滚动区的内容回调里调用：可视宽度取自 `ui.clip_rect()`。
 pub(crate) fn show_frozen<R>(
     ui: &mut egui::Ui,
     freeze: &mut ScaleFreeze,
     zoom: Option<f32>,
+    landscape: bool,
     add: impl FnOnce(&mut egui::Ui, PreviewScale) -> R,
 ) -> Frozen<R> {
     let visible = ui
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
-    let target = fit_scale(visible.width(), zoom);
+    let target = fit_scale(visible.width(), zoom, landscape);
     // 只有"拖动幅度"的宽度变化才值得冻结版面：分隔条一帧走几个像素，中间那些
     // 帧连起来才是一个连续动作。首帧（滚动区还没量准，可视宽度是无穷大）、切换
     // 显示方式、窗口最大化这类一步到位的跳变没有连续过程可言，直接按精确倍率

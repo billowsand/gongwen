@@ -259,20 +259,26 @@ impl VersionPairViewState {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         // 拖分隔条时沿用落定的版面，只做层变换（见 `preview::freeze`）。
-                        let output = preview::show_frozen(ui, preview_freeze, None, |ui, scale| {
-                            preview::official_preview(
-                                ui,
-                                &new.snapshot,
-                                display,
-                                &redline.markdown,
-                                scale,
-                                anchor.as_ref(),
-                                scroll,
-                                numbering,
-                                false,
-                                &redline.elements,
-                            )
-                        })
+                        let output = preview::show_frozen(
+                            ui,
+                            preview_freeze,
+                            None,
+                            new.snapshot.landscape(),
+                            |ui, scale| {
+                                preview::official_preview(
+                                    ui,
+                                    &new.snapshot,
+                                    display,
+                                    &redline.markdown,
+                                    scale,
+                                    anchor.as_ref(),
+                                    scroll,
+                                    numbering,
+                                    false,
+                                    &redline.elements,
+                                )
+                            },
+                        )
                         .inner;
                         let hovered = preview::hovered_source(ui.ctx());
                         ui.add_space(12.0);

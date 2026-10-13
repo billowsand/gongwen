@@ -607,6 +607,15 @@ pub(crate) fn resolve_cell_alignment(
     }
 }
 
+/// 表格可用的版心宽度（twip）：竖页 156mm，横页 225mm。
+pub(crate) fn content_width_twips(landscape: bool) -> usize {
+    if landscape {
+        super::docx::LANDSCAPE_CONTENT_WIDTH_TWIPS
+    } else {
+        super::docx::TABLE_CONTENT_WIDTH_TWIPS
+    }
+}
+
 /// Typst 模板的表格数据：智能列宽、单元格对齐、姓名列、居中格压缩 / 换行都在
 /// 这里定好，模板只负责排。
 /// 列宽保留 tabularray 的语义（`X` 比例按内容宽分、`Q` 定宽），由模板换算。
@@ -649,6 +658,9 @@ pub(super) fn to_typst_table(
         .map(|column| column.alignment)
         .collect::<Vec<_>>();
     let name_column = name_column(rows);
+    // 居中格的压缩 / 换行一律按竖页网格判定，横页（横向附件、整份横排）也一样：模板
+    // 按 tabularray 的规则分列宽，与 Word 网格在横页宽度下分得不一样，按横页网格判定
+    // 会把实际放不下的格判成单行。竖页网格偏保守，横页上至多多换一行。
     let (grid, _) = to_docx_grid(
         rows,
         aligns,

@@ -1953,6 +1953,16 @@ impl DraftPage<'_> {
                         ui.end_row();
                     }
 
+                    if kind.supports_landscape() {
+                        row_label(ui, "页面方向");
+                        ui.checkbox(&mut self.doc.draft.profile.landscape, "横页排版")
+                            .on_hover_text(
+                                "勾选后整份文件（含附件）排成横向 A4，装订边在左侧；\
+                                 PDF、Word 与预览一致。双面打印请选「短边翻转」",
+                            );
+                        ui.end_row();
+                    }
+
                     // 份号只有公函的版头有位置放，其余文种不显示这一行。
                     if kind.has_copy_numbering() {
                         row_label_with_info(

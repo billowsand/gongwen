@@ -116,6 +116,12 @@ const PAGE_HEIGHT_PT: f32 = 841.89;
 const MARGIN_LEFT_PT: f32 = 79.35;
 const MARGIN_RIGHT_PT: f32 = 73.70;
 const MARGIN_TOP_PT: f32 = 52.0;
+// 横页（普通公文的横页选项）：横向 A4，版心 225mm，左侧订口 37mm，与导出一致。
+// 预览是一整张连续的纸，上下留白沿用竖页的 52pt。
+const LANDSCAPE_PAGE_PT: f32 = PAGE_HEIGHT_PT;
+const LANDSCAPE_PAGE_HEIGHT_PT: f32 = PAGE_PT;
+const LANDSCAPE_MARGIN_LEFT_MM: f32 = 37.0;
+const LANDSCAPE_CONTENT_MM: f32 = 225.0;
 
 // 研究报告版心取自 mdx 的 md2tex.cls：
 // `\geometry{a4paper, left=28mm, top=37mm, width=156mm, height=225mm}`。
@@ -143,6 +149,8 @@ pub(crate) struct Metrics {
     viewport: f32,
     page: f32,
     page_height: f32,
+    /// 横页：纸张横放、版心 225mm。标题断行按横向版心宽算。
+    landscape: bool,
     content: f32,
     margin_left: f32,
     margin_top: f32,
@@ -176,15 +184,21 @@ pub(crate) struct Metrics {
 
 /// 本帧应该显示的缩放倍率：`zoom` 为 None 时按可用宽度自适应，否则按给定倍率。
 /// `available` 必须是调用方在进入滚动区之前量好的宽度：滚动方向上的
-/// `available_width()` 是无穷大，拿进去算会把整页放大到上限。
+/// `available_width()` 是无穷大，拿进去算会把整页放大到上限。`landscape` 时按
+/// 横放的纸宽自适应。
 ///
 /// 单独抽出来是因为调用方要先算出"该显示多大"，才能决定这一帧是重排版面
 /// 还是沿用上一次的版面再做一次层变换（见 `draft_page::markdown_render`）。
-pub fn fit_scale(available: f32, zoom: Option<f32>) -> f32 {
+pub fn fit_scale(available: f32, zoom: Option<f32>, landscape: bool) -> f32 {
+    let page = if landscape {
+        LANDSCAPE_PAGE_PT
+    } else {
+        PAGE_PT
+    };
     match zoom {
         Some(zoom) => zoom,
         // 留出滚动条与外边距，再夹到一个仍然读得清的区间。
-        None => ((available - 24.0) / (PAGE_PT * PT)).clamp(0.3, 1.6),
+        None => ((available - 24.0) / (page * PT)).clamp(0.3, 1.6),
     }
 }
 
@@ -214,14 +228,35 @@ impl PreviewScale {
 
 impl Metrics {
     fn new(available: f32, zoom: Option<f32>) -> Self {
-        let scale = fit_scale(available, zoom);
+        Self::official(available, zoom, false)
+    }
+
+    /// 公文版心；`landscape` 时纸张横放、版心 225mm（普通公文的横页选项）。
+    fn official(available: f32, zoom: Option<f32>, landscape: bool) -> Self {
+        let scale = fit_scale(available, zoom, landscape);
+        let (page, page_height, content, margin_left) = if landscape {
+            (
+                LANDSCAPE_PAGE_PT,
+                LANDSCAPE_PAGE_HEIGHT_PT,
+                LANDSCAPE_CONTENT_MM * MM,
+                LANDSCAPE_MARGIN_LEFT_MM * MM,
+            )
+        } else {
+            (
+                PAGE_PT,
+                PAGE_HEIGHT_PT,
+                PAGE_PT - MARGIN_LEFT_PT - MARGIN_RIGHT_PT,
+                MARGIN_LEFT_PT,
+            )
+        };
         Self {
             scale,
             viewport: available,
-            page: PAGE_PT * PT * scale,
-            page_height: PAGE_HEIGHT_PT * PT * scale,
-            content: (PAGE_PT - MARGIN_LEFT_PT - MARGIN_RIGHT_PT) * PT * scale,
-            margin_left: MARGIN_LEFT_PT * PT * scale,
+            page: page * PT * scale,
+            page_height: page_height * PT * scale,
+            landscape,
+            content: content * PT * scale,
+            margin_left: margin_left * PT * scale,
             margin_top: MARGIN_TOP_PT * PT * scale,
             line: LINE_PT * PT * scale,
             body_family: theme::FONT_FANGSONG,
@@ -242,12 +277,13 @@ impl Metrics {
     /// 研究报告的版心与公文完全不同：页边距、版心宽度、字号和行距都取自
     /// `md2tex.cls`，所以单独构造一份，而不是在公文版心上打补丁。
     fn research(available: f32, zoom: Option<f32>) -> Self {
-        let scale = fit_scale(available, zoom);
+        let scale = fit_scale(available, zoom, false);
         Self {
             scale,
             viewport: available,
             page: PAGE_PT * PT * scale,
             page_height: PAGE_HEIGHT_PT * PT * scale,
+            landscape: false,
             content: RESEARCH_CONTENT_MM * MM * PT * scale,
             margin_left: RESEARCH_MARGIN_LEFT_MM * MM * PT * scale,
             margin_top: RESEARCH_MARGIN_TOP_MM * MM * PT * scale,
@@ -1643,6 +1679,41 @@ mod tests {
                 "标题“{title}”应相对版心居中：实际中心 {center:.1}，期望 {expected:.1}（{bounds:?}）"
             );
         }
+    }
+
+    #[test]
+    fn landscape_sheet_fits_the_pane_and_titles_break_at_the_wider_measure() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let available = 1000.0;
+        let portrait = Metrics::official(available, None, false);
+        let landscape = Metrics::official(available, None, true);
+        // 自适应缩放按横放的纸宽算：两种纸在窗格里一样宽，横页不会撑出横向滚动。
+        assert!((landscape.page - portrait.page).abs() < 1.0);
+        assert!(landscape.page_height < landscape.page);
+        assert!((landscape.content / landscape.page - 225.0 / 297.0).abs() < 1e-3);
+
+        // 26 个字：竖页（一行 20 字）要换行，横页（一行 28 字）放得下，与导出一致。
+        let title = "关于印发全市社区养老服务设施提质改造任务分解表的通知";
+        let rows = |metrics: &Metrics| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(available, 1200.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| fit::title_block(ui, metrics, title))
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(shape) => Some(shape.galley.rows.len()),
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+        assert_eq!(rows(&portrait), 2);
+        assert_eq!(rows(&landscape), 1);
     }
 
     #[test]

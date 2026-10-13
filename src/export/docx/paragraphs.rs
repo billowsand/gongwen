@@ -4,8 +4,8 @@
 //! `export::docx` 根模块的私有可见性（结构体与根模块类型/常量仍在根文件中）。
 
 use crate::export::docx::{
-    BODY_SIZE, BoldFont, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TABLE_CONTENT_WIDTH_TWIPS,
-    TITLE_SIZE, body_run, body_runs, chinese_fonts, marked_runs, security_runs, title_run,
+    BODY_SIZE, BoldFont, CLOSING_GAP_TWIPS, RED_APPROVAL_TITLE_SIZE, TITLE_SIZE, body_run,
+    body_runs, chinese_fonts, marked_runs, security_runs, title_run,
 };
 use crate::export::title;
 use crate::export::title::TitlePlan;
@@ -295,10 +295,13 @@ pub(crate) fn joint_signature_cell_paragraph(value: &str, row_index: usize) -> P
 
 /// 附件正式标题：附件标识占第一行，空一行后第三行才是标题（TeX 在标题前发
 /// `\vspace{\BodyBaselineSkip}`，标题后不再另加间距）。
-pub(crate) fn attachment_document_title_paragraph(text: &str) -> Paragraph {
+pub(crate) fn attachment_document_title_paragraph(text: &str, landscape: bool) -> Paragraph {
     // 与主标题同一套排布：多出 1–2 字横向压缩，再多按分词均衡换行。
-    let plan = title::title_plan(&crate::export::plain_text(text), title::chars_per_line());
-    document_title_paragraph(text, &plan)
+    let plan = title::title_plan(
+        &crate::export::plain_text(text),
+        title::document_chars_per_line(landscape),
+    );
+    document_title_paragraph(text, &plan, landscape)
         .line_spacing(
             LineSpacing::new()
                 .before(super::BODY_LINE_TWIPS)
@@ -311,7 +314,12 @@ pub(crate) fn attachment_document_title_paragraph(text: &str) -> Paragraph {
 /// 公文主标题段，按排布方案渲染：
 /// 单行保持二号；超出 1-2 字横向收窄字形（字高不变）保持单行；超出更多用 jieba
 /// 换行（词不拆开、行长短均衡），各行仍用二号。调用方自行叠加行距与 keep_next。
-pub(crate) fn document_title_paragraph(title: &str, plan: &TitlePlan) -> Paragraph {
+/// `landscape` 决定压缩比按哪个版心宽算（横页 225mm）。
+pub(crate) fn document_title_paragraph(
+    title: &str,
+    plan: &TitlePlan,
+    landscape: bool,
+) -> Paragraph {
     let mut paragraph = Paragraph::new().align(AlignmentType::Center);
     // 花脸稿：排布方案在纯文本上算好，带哨兵的标题按行切开逐行注格式，
     // 换行 break 不会落进标记内部。
@@ -331,7 +339,7 @@ pub(crate) fn document_title_paragraph(title: &str, plan: &TitlePlan) -> Paragra
         }
         TitlePlan::Compressed => {
             // 只横向缩放（w:w 字符缩放），字号保持二号、字高不变。
-            let scale = title::compressed_scale_percent(title) as i32;
+            let scale = title::document_compressed_scale_percent(title, landscape) as i32;
             paragraph = add_marked(paragraph, title, Some(scale));
         }
         TitlePlan::Wrapped(lines) => {
@@ -433,16 +441,16 @@ pub(crate) fn red_record_paragraph(
     paragraph
 }
 
-/// 图片段落：位图嵌入为 Word 图片（宽度=版心 156 mm，等比缩放，小图保持原尺寸）；
-/// PDF 输出附件说明段落——docx-rs 无法把 PDF 作为图片嵌入。
-pub(crate) fn image_paragraph(alt: &str, src: &str) -> Option<Paragraph> {
+/// 图片段落：位图嵌入为 Word 图片（宽度不超过版心 `max_width_twips`，等比缩放，
+/// 小图保持原尺寸）；PDF 输出附件说明段落——docx-rs 无法把 PDF 作为图片嵌入。
+pub(crate) fn image_paragraph(alt: &str, src: &str, max_width_twips: usize) -> Option<Paragraph> {
     let path = images::resolve(src).ok()?;
     let bytes = std::fs::read(&path).ok()?;
     let file_name = src.rsplit('/').next().unwrap_or(src).to_string();
     let is_pdf = path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
-    image_paragraph_from_bytes(alt, &file_name, is_pdf, &bytes)
+    image_paragraph_from_bytes(alt, &file_name, is_pdf, &bytes, max_width_twips)
 }
 
 pub(crate) fn image_paragraph_from_bytes(
@@ -450,6 +458,7 @@ pub(crate) fn image_paragraph_from_bytes(
     file_name: &str,
     is_pdf: bool,
     bytes: &[u8],
+    max_width_twips: usize,
 ) -> Option<Paragraph> {
     if is_pdf {
         let label = if alt.trim().is_empty() {
@@ -472,8 +481,8 @@ pub(crate) fn image_paragraph_from_bytes(
     if width_px == 0 || height_px == 0 {
         return None;
     }
-    // 版心 8844 twips = 156 mm；1 twip = 635 EMU，96 dpi 下 1 px = 9525 EMU。
-    let max_width_emu = (TABLE_CONTENT_WIDTH_TWIPS as u64) * 635;
+    // 竖页版心 8844 twips = 156 mm；1 twip = 635 EMU，96 dpi 下 1 px = 9525 EMU。
+    let max_width_emu = (max_width_twips as u64) * 635;
     let natural_width_emu = (width_px as u64) * 9525;
     let natural_height_emu = (height_px as u64) * 9525;
     let width_emu = natural_width_emu.min(max_width_emu);

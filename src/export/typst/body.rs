@@ -44,13 +44,11 @@ pub(crate) fn title_data(
     }
 }
 
-/// 公文主标题与附件标题（二号、版心宽）。
-pub(crate) fn main_title(text: &str) -> Title {
-    title_data(
-        text,
-        title::chars_per_line(),
-        title::compressed_scale_percent,
-    )
+/// 公文主标题与附件标题（二号、版心宽；横页按横向版心宽）。
+pub(crate) fn main_title(text: &str, landscape: bool) -> Title {
+    title_data(text, title::document_chars_per_line(landscape), |plain| {
+        title::document_compressed_scale_percent(plain, landscape)
+    })
 }
 
 /// 附件说明各行：单个附件「：名称」，多个附件「N：名称」；「附件」二字由模板补。
@@ -83,11 +81,17 @@ pub(crate) fn sections(
     style_mode: StyleMode,
     barrier: bool,
     numbering: &NumberingConfig,
+    landscape_document: bool,
 ) -> Sections {
     let mut body_barrier = barrier;
     let mut body: Vec<Block> = Vec::new();
     let mut attachments: Vec<Attachment> = Vec::new();
-    let landscape = attachment_landscape_flags(blocks);
+    // 整份横排时附件本来就在横页上，不再逐个判定转横。
+    let landscape = if landscape_document {
+        Vec::new()
+    } else {
+        attachment_landscape_flags(blocks)
+    };
     let attachment_count = blocks
         .iter()
         .filter(|block| matches!(block, MarkdownBlock::Marker(MarkdownSection::Attachment)))
@@ -122,7 +126,7 @@ pub(crate) fn sections(
             MarkdownBlock::Title(text) if section == MarkdownSection::Attachment => {
                 counters = [0; 4];
                 if let Some(attachment) = attachments.last_mut() {
-                    attachment.title = main_title(text);
+                    attachment.title = main_title(text, landscape_document);
                 }
             }
             MarkdownBlock::Title(_) => {}

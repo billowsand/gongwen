@@ -420,6 +420,7 @@ pub(crate) fn document(
         input.profile.style_mode,
         red,
         &numbering,
+        input.landscape(),
     );
     let title = if red {
         title_data(&title_text, title::red_approval_chars_per_line(), |plain| {
@@ -430,7 +431,7 @@ pub(crate) fn document(
             )
         })
     } else {
-        main_title(&title_text)
+        main_title(&title_text, input.landscape())
     };
     let agenda = kind == TemplateKind::MeetingAgenda;
     let mut doc = Doc {
@@ -445,6 +446,7 @@ pub(crate) fn document(
             TemplateKind::ResearchReport => "plain",
         },
         duplex: input.profile.duplex_printing,
+        landscape: input.landscape(),
         probe: true,
         fonts,
         security: security_runs(input, elements.security()),

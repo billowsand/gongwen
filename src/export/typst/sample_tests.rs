@@ -207,6 +207,15 @@ fn cases() -> Vec<Case> {
             tweak: |input| input.profile.duplex_printing = true,
         },
         Case {
+            name: "plain-landscape-doc",
+            kind: TemplateKind::PlainDocument,
+            markdown: LANDSCAPE.into(),
+            tweak: |input| {
+                input.profile.landscape = true;
+                input.profile.duplex_printing = true;
+            },
+        },
+        Case {
             name: "whitepaper",
             kind: TemplateKind::WhitePaper,
             markdown: BODY.into(),
@@ -271,6 +280,64 @@ fn every_kind_compiles_with_typst() {
         );
         assert!(outcome.proof.is_some(), "{} 没有探针报告", case.name);
     }
+}
+
+/// 普通公文勾了横页：每一页（含附件）都是横页，按横向附件同一种结构落盘——竖向
+/// 纸张、内容转 90°、`/Rotate 90`；附件不再单独判定转横。没勾时正文仍是竖页。
+#[test]
+fn landscape_plain_document_puts_every_page_on_its_side() {
+    if crate::portable_runtime::find_font_dir().is_none() {
+        return;
+    }
+    let fonts = FontConfig::default();
+    let display = UnitDisplay::new(&[]);
+    let dir = tempfile::tempdir().unwrap();
+    let rotations = |landscape: bool| {
+        let mut input = base_input(TemplateKind::PlainDocument);
+        input.profile.landscape = landscape;
+        let data = super::document_json(
+            &input,
+            LANDSCAPE,
+            &display,
+            &NumberingConfig::default(),
+            &ElementMarks::default(),
+            crate::typst_engine::font_set(&fonts).unwrap().families,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(json["landscape"], landscape);
+        // 整份横排时附件跟着横页走，不再打横向附件的标记。
+        assert_eq!(json["attachments"][0]["landscape"], !landscape);
+        let outcome = super::write_pdf_with_base(
+            &dir.path().join("landscape.pdf"),
+            &input,
+            LANDSCAPE,
+            &display,
+            &fonts,
+            &NumberingConfig::default(),
+            &ElementMarks::default(),
+            dir.path(),
+        )
+        .unwrap();
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        let pdf = lopdf::Document::load_mem(&outcome.pdf).unwrap();
+        pdf.get_pages()
+            .values()
+            .map(|&id| {
+                let page = pdf.get_dictionary(id).unwrap();
+                let rect = page.get(b"MediaBox").unwrap().as_array().unwrap();
+                let num = |i: usize| rect[i].as_float().unwrap();
+                assert!(num(2) - num(0) < num(3) - num(1), "纸张一律竖向");
+                page.get(b"Rotate").and_then(|r| r.as_i64()).unwrap_or(0)
+            })
+            .collect::<Vec<_>>()
+    };
+    let landscape = rotations(true);
+    assert!(landscape.len() >= 2, "正文与附件各占页");
+    assert!(landscape.iter().all(|&r| r == 90), "{landscape:?}");
+    let portrait = rotations(false);
+    assert_eq!(portrait.first(), Some(&0), "没勾横页时正文是竖页");
+    assert_eq!(portrait.last(), Some(&90), "宽表附件仍自动转横");
 }
 
 /// 各文种样张：PDF 与模板数据写到 `tmp/typst-samples/<用例>/`。

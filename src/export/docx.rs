@@ -30,7 +30,9 @@ mod signature;
 #[cfg(test)]
 mod layout_checks;
 
-pub(crate) use content::{add_official_content_block, add_smart_table, write_meeting_agenda_docx};
+pub(crate) use content::{
+    add_official_content_block, add_smart_table_with_width, write_meeting_agenda_docx,
+};
 pub(crate) use header::add_official_page_footers;
 #[cfg(test)]
 pub(crate) use header::issuing_unit_header;
@@ -116,6 +118,16 @@ const RED_APPROVAL_TITLE_TOP_TWIPS: u32 = 2_902;
 /// 正文中完整括号（全角/半角）及其中内容的字号：14 pt，四号，比正文小一号。
 const PAREN_SIZE: usize = 28;
 pub(super) const TABLE_CONTENT_WIDTH_TWIPS: usize = 8_844; // 156 mm 版心
+/// 横页版心宽 225mm（普通公文的横页选项）。
+pub(super) const LANDSCAPE_CONTENT_WIDTH_TWIPS: usize = 12_755;
+/// 横页上下边距 28 / 26mm、左右（订口 / 翻口）37 / 35mm：竖页边距转过来。
+const LANDSCAPE_MARGIN_TOP_TWIPS: i32 = 1_587;
+const LANDSCAPE_BODY_BOTTOM_MARGIN_TWIPS: i32 = 1_474;
+const LANDSCAPE_MARGIN_LEFT_TWIPS: i32 = 2_098;
+const LANDSCAPE_MARGIN_RIGHT_TWIPS: i32 = 1_984;
+/// 横页页脚距边界：页码一字线同样落在版心下 7mm（推导见 [`FOOTER_DISTANCE_TWIPS`]）。
+const LANDSCAPE_FOOTER_DISTANCE_TWIPS: i32 =
+    LANDSCAPE_BODY_BOTTOM_MARGIN_TWIPS - PAGE_NUMBER_GAP_TWIPS - PAGE_NUMBER_LINE_TWIPS;
 /// 版记一个 em 的宽度（twips）：四号 14 pt，1 pt = 20 twips。
 const FOOTER_EM_TWIPS: usize = FOOTER_SIZE * 10;
 /// 联系电话列宽：5 个全角字标签 + 11 位半角数字（5.5em）+ 0.5em 余量。
@@ -193,9 +205,24 @@ pub fn write_docx_with_numbering(
     // 红头呈批件首页抬头（密级、发文机关、文号）排下来的总高度，用来反推标题
     // 的段前间距，见 RED_APPROVAL_TITLE_TOP_TWIPS。
     let mut red_approval_header_twips = 0u32;
-    let mut doc = Docx::new()
-        .page_size(11906, 16838)
-        .page_margin(PageMargin {
+    // 普通公文的横页选项：整份横排，表格、插图、标题都按横向版心宽排。
+    let landscape = input.landscape();
+    let content_width = crate::export::table::content_width_twips(landscape);
+    let doc = if landscape {
+        Docx::new()
+            .page_size(16838, 11906)
+            .page_orient(PageOrientationType::Landscape)
+            .page_margin(PageMargin {
+                top: LANDSCAPE_MARGIN_TOP_TWIPS,
+                bottom: LANDSCAPE_BODY_BOTTOM_MARGIN_TWIPS,
+                left: LANDSCAPE_MARGIN_LEFT_TWIPS,
+                right: LANDSCAPE_MARGIN_RIGHT_TWIPS,
+                header: 567,
+                footer: LANDSCAPE_FOOTER_DISTANCE_TWIPS,
+                gutter: 0,
+            })
+    } else {
+        Docx::new().page_size(11906, 16838).page_margin(PageMargin {
             top: 2098,
             bottom: BODY_BOTTOM_MARGIN_TWIPS,
             left: 1587,
@@ -206,6 +233,8 @@ pub fn write_docx_with_numbering(
             footer: FOOTER_DISTANCE_TWIPS,
             gutter: 0,
         })
+    };
+    let mut doc = doc
         .default_fonts(chinese_fonts("仿宋_GB2312"))
         .default_size(BODY_SIZE)
         .default_line_spacing(
@@ -350,13 +379,13 @@ pub fn write_docx_with_numbering(
     let title_capacity = if input.kind == TemplateKind::RedHeadApproval {
         title::red_approval_chars_per_line()
     } else {
-        title::chars_per_line()
+        title::document_chars_per_line(landscape)
     };
     let plan = title::title_plan(&title_plain, title_capacity);
     let title_paragraph = if input.kind == TemplateKind::RedHeadApproval {
         red_approval_title_paragraph(title, &plan)
     } else {
-        document_title_paragraph(title, &plan)
+        document_title_paragraph(title, &plan, landscape)
     };
     let title_before = if input.kind == TemplateKind::RedHeadApproval {
         // 标题字面顶沿落在红色横线下方 7.4mm，与 TeX 量出来的一致。
@@ -471,8 +500,14 @@ pub fn write_docx_with_numbering(
                                 ),
                             );
                         }
-                        doc =
-                            add_official_content_block(doc, block, &mut counters, numbering, bold);
+                        doc = add_official_content_block(
+                            doc,
+                            block,
+                            &mut counters,
+                            numbering,
+                            bold,
+                            content_width,
+                        );
                     }
                 }
             }
@@ -488,7 +523,7 @@ pub fn write_docx_with_numbering(
                 | MarkdownBlock::Diagram { .. }
                 | MarkdownBlock::Quote { .. } => {}
                 MarkdownBlock::Image { alt, src } => {
-                    if let Some(paragraph) = image_paragraph(alt, src) {
+                    if let Some(paragraph) = image_paragraph(alt, src, content_width) {
                         doc = doc.add_paragraph(paragraph);
                     }
                 }
@@ -517,7 +552,17 @@ pub fn write_docx_with_numbering(
                     aligns,
                     spans,
                     numbered,
-                } => doc = add_smart_table(doc, rows, aligns, spans, *numbered, bold),
+                } => {
+                    doc = add_smart_table_with_width(
+                        doc,
+                        rows,
+                        aligns,
+                        spans,
+                        *numbered,
+                        bold,
+                        content_width,
+                    )
+                }
             }
         }
     }
@@ -655,9 +700,18 @@ pub fn write_docx_with_numbering(
                 }
                 MarkdownBlock::Title(text) => {
                     counters = [0; 4];
-                    doc = doc.add_paragraph(attachment_document_title_paragraph(text));
+                    doc = doc.add_paragraph(attachment_document_title_paragraph(text, landscape));
                 }
-                _ => doc = add_official_content_block(doc, block, &mut counters, numbering, bold),
+                _ => {
+                    doc = add_official_content_block(
+                        doc,
+                        block,
+                        &mut counters,
+                        numbering,
+                        bold,
+                        content_width,
+                    )
+                }
             }
         }
     }
@@ -908,8 +962,14 @@ mod tests {
     #[test]
     fn image_paragraph_embeds_bitmap_and_docx_contains_media() {
         let temp = tempfile::tempdir().unwrap();
-        let paragraph = image_paragraph_from_bytes("示意图", "示意图.png", false, &tiny_png())
-            .expect("有效 PNG 应生成图片段落");
+        let paragraph = image_paragraph_from_bytes(
+            "示意图",
+            "示意图.png",
+            false,
+            &tiny_png(),
+            TABLE_CONTENT_WIDTH_TWIPS,
+        )
+        .expect("有效 PNG 应生成图片段落");
         let mut doc = Docx::new();
         doc = doc.add_paragraph(paragraph);
         let docx_path = temp.path().join("with-image.docx");
@@ -929,8 +989,14 @@ mod tests {
     #[test]
     fn image_paragraph_renders_pdf_as_attachment_note() {
         let temp = tempfile::tempdir().unwrap();
-        let paragraph = image_paragraph_from_bytes("", "扫描件.pdf", true, b"%PDF-1.4")
-            .expect("PDF 应生成附件说明段落");
+        let paragraph = image_paragraph_from_bytes(
+            "",
+            "扫描件.pdf",
+            true,
+            b"%PDF-1.4",
+            TABLE_CONTENT_WIDTH_TWIPS,
+        )
+        .expect("PDF 应生成附件说明段落");
         let mut doc = Docx::new();
         doc = doc.add_paragraph(paragraph);
         let docx_path = temp.path().join("with-pdf.docx");
@@ -951,7 +1017,14 @@ mod tests {
     #[test]
     fn image_paragraph_ignores_undecodable_bytes() {
         assert!(
-            image_paragraph_from_bytes("", "坏图.png", false, b"not an image").is_none(),
+            image_paragraph_from_bytes(
+                "",
+                "坏图.png",
+                false,
+                b"not an image",
+                TABLE_CONTENT_WIDTH_TWIPS
+            )
+            .is_none(),
             "无法解码的字节应跳过而不是 panic"
         );
     }
@@ -959,7 +1032,7 @@ mod tests {
     #[test]
     fn image_paragraph_skips_unresolvable_src() {
         // 非法路径（穿越）解析失败时跳过，不 panic。
-        assert!(image_paragraph("", "../etc/passwd").is_none());
+        assert!(image_paragraph("", "../etc/passwd", TABLE_CONTENT_WIDTH_TWIPS).is_none());
     }
 
     #[test]
@@ -1375,6 +1448,44 @@ mod tests {
         // 落款整体在 TeX 的 11cm 右侧 minipage 内居中，代章与落款单位同段同侧。
         assert!(seal.contains("w:val=\"center\""), "{seal}");
         assert!(seal.contains(r#"w:left="2608""#), "{seal}");
+    }
+
+    #[test]
+    fn landscape_plain_document_turns_the_page_and_widens_tables_and_title() {
+        let temp = tempfile::tempdir().unwrap();
+        let markdown = "# 关于印发全市社区养老服务设施提质改造任务分解表的通知
+<!-- [正文] -->
+            | 序号 | 区域 | 改造内容 |
+| --- | --- | --- |
+| 1 | 东城区 | 无障碍通道 |
+";
+        let grid_total = |xml: &str| -> usize {
+            Regex::new(r#"<w:gridCol w:w="(\d+)""#)
+                .unwrap()
+                .captures_iter(xml)
+                .map(|c| c[1].parse::<usize>().unwrap())
+                .sum()
+        };
+        let mut input = DraftInput::default();
+        input.kind = TemplateKind::PlainDocument;
+        input.profile.landscape = true;
+        let path = temp.path().join("landscape.docx");
+        write_docx_ok(&path, &input, markdown).unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        assert!(xml.contains(r#"w:orient="landscape""#), "{xml}");
+        assert!(xml.contains(r#"w:w="16838""#) && xml.contains(r#"w:h="11906""#));
+        assert!(xml.contains(&format!(r#"w:left="{LANDSCAPE_MARGIN_LEFT_TWIPS}""#)));
+        assert_eq!(grid_total(&xml), LANDSCAPE_CONTENT_WIDTH_TWIPS);
+        // 26 个字的标题在竖页要换行，横页一行放得下（28 字）。
+        assert!(!paragraph_containing(&xml, "关于印发").contains("w:br"));
+
+        // 横页只对普通公文生效：别的文种勾着也照旧竖排。
+        input.kind = TemplateKind::WhitePaper;
+        let path = temp.path().join("portrait.docx");
+        write_docx_ok(&path, &input, markdown).unwrap();
+        let xml = zip_text(&path, "word/document.xml");
+        assert!(!xml.contains("landscape"));
+        assert_eq!(grid_total(&xml), TABLE_CONTENT_WIDTH_TWIPS);
     }
 
     #[test]
@@ -2346,7 +2457,7 @@ mod tests {
             title.contains(&format!(r#"w:sz w:val="{TITLE_SIZE}""#)),
             "字高应保持二号：{title}"
         );
-        let scale = title::compressed_scale_percent(title_text);
+        let scale = title::document_compressed_scale_percent(title_text, false);
         assert!(
             title.contains(&format!(r#"<w:w w:val="{scale}""#)),
             "仅横向缩放 {scale}%：{title}"

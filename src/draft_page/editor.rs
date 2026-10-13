@@ -1268,6 +1268,7 @@ impl DraftPage<'_> {
                     ui,
                     &mut self.doc.preview_freeze,
                     self.doc.preview_zoom,
+                    self.doc.draft.landscape(),
                     |ui, scale| {
                         preview::official_preview(
                             ui,

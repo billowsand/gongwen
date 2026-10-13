@@ -120,6 +120,13 @@ mdx 的 `md2tex.cls`、`texcompile`、随包 Tectonic 与离线 TeX bundle 都�
 - **横向附件**：Typst 先按横页排，`typst_engine::rotate_landscape_pages` 再改成竖向纸张 +
   内容逆时针转 90° + `/Rotate 90`（pdflscape 的结构），双面打印时装订边不因打印机的自动
   旋转方向而错位。页码仍在竖页时的位置（横页左缘，旋转 90°）。
+- **整份横排**（普通公文的「横页排版」，`doc.landscape`）：模板开头按它换整套版式常量——
+  横向 A4，版心 225×156mm，上下 28 / 26mm，订口（左）37mm、翻口 35mm，双面时左右镜像；
+  页码照常在版心下 30texpt（单面居中、双面奇右偶左）。附件直接换页接排，不再逐个判定
+  转横。出 PDF 后同样经 `rotate_landscape_pages` 落成竖向纸张 + `/Rotate 90`，装订边
+  （横页左缘）落在纸张短边，双面打印选「短边翻转」。表格居中格的压缩 / 换行仍按竖页网格
+  判定（与横向附件一致，见 `table::to_typst_table` 的注释）；主标题、附件标题按 225mm 断行。
+  Word 侧横向页面设置 + 225mm 网格，预览 `Metrics::official(.., landscape)`。
 - **份号逐份编制**：每份之前把页码计数器归 0（页码在每页开头自动加一），新一份首页才是 1；
   只有第一份带孤行探针。
 - **孤行探针**：模板在段首段尾放带位置的 metadata，`typst_engine::proof_report` 拼成

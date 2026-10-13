@@ -426,9 +426,13 @@ pub(crate) fn official_preview(
         .clip_rect()
         .intersect(ui.ctx().input(|input| input.content_rect()));
     // 居中用的宽度优先取调用方给的真实宽度（见 `PreviewScale::viewport`）。
-    let metrics = Metrics::new(scale.viewport.unwrap_or(visible.width()), scale.zoom)
-        .with_bold_style(ui.ctx())
-        .with_line_numbers(line_numbers);
+    let metrics = Metrics::official(
+        scale.viewport.unwrap_or(visible.width()),
+        scale.zoom,
+        input.landscape(),
+    )
+    .with_bold_style(ui.ctx())
+    .with_line_numbers(line_numbers);
     // 六个文种的正文都走 export::latex::official_letter_sections_to_tex，标题编号
     // 跟随设置里的编号样式；紧缩风格跟随模板配置。
     let numbered = true;

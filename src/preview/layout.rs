@@ -1861,7 +1861,9 @@ pub(crate) fn sheet(
                         ui.add_space(metrics.margin_left);
                         ui.vertical(|ui| {
                             ui.set_width(metrics.content);
-                            ui.set_min_height((metrics.page - metrics.margin_top * 2.0).max(0.0));
+                            // 竖页取纸宽（短稿不铺出一整张高纸），横页取纸高。
+                            let short_side = metrics.page.min(metrics.page_height);
+                            ui.set_min_height((short_side - metrics.margin_top * 2.0).max(0.0));
                             ui.style_mut().visuals.override_text_color = Some(theme::paper::ink());
                             // 预览是拿来看版式和点回源码的，不做文字选择，
                             // 否则 Label 会把点击当成拖选吃掉。

@@ -12,13 +12,18 @@
 #let F = doc.fonts
 
 // ---------------- 版式常量（gonghan-gwa.cls） ----------------
+// 整份横排（普通公文的横页选项）：横向 A4、左侧装订，版心 225mm × 156mm，即竖页版心
+// 转过来；上下边距 28 / 26mm、订口 37mm、翻口 35mm。页码仍在版心下 30texpt。
+#let landscape = doc.landscape
+#let paper-w = if landscape { 297mm } else { 210mm }
+#let paper-h = if landscape { 210mm } else { 297mm }
 #let texpt = 25.4mm / 72.27
 #let pitch = 28.98 * texpt                 // \BodyBaselineSkip
-#let text-w = 156mm
-#let text-h = 225mm
-#let top-m = 37mm
-#let inner-m = 28mm                        // 订口（单面时即左边距）
-#let outer-m = 210mm - inner-m - text-w    // 26mm
+#let text-w = if landscape { 225mm } else { 156mm }
+#let text-h = if landscape { 156mm } else { 225mm }
+#let top-m = if landscape { 28mm } else { 37mm }
+#let inner-m = if landscape { 37mm } else { 28mm }  // 订口（单面时即左边距）
+#let outer-m = paper-w - inner-m - text-w  // 竖页 26mm，横页 35mm
 #let red = rgb(255, 0, 0)
 #let del-color = rgb("#C00000")
 #let add-color = rgb("#1F4E9E")
@@ -227,8 +232,8 @@
   }
 }
 
-#set page(paper: "a4",
-  margin: if doc.duplex { (inside: inner-m, outside: outer-m, top: top-m, bottom: 297mm - top-m - text-h) } else { (left: inner-m, right: outer-m, top: top-m, bottom: 297mm - top-m - text-h) },
+#set page(paper: "a4", flipped: landscape,
+  margin: if doc.duplex { (inside: inner-m, outside: outer-m, top: top-m, bottom: paper-h - top-m - text-h) } else { (left: inner-m, right: outer-m, top: top-m, bottom: paper-h - top-m - text-h) },
   binding: left,
   background: portrait-number)
 
@@ -435,6 +440,7 @@
 // ---------------- 附件 ----------------
 // 「附件」标识（黑体三号）、空一行、附件标题，标题之后直接接内容。
 // 横向附件用横页：页码仍在竖页时的位置（横页左缘、旋转 90°），与 TeX 的 pdflscape 一致。
+// 整份横排时版面本来就是横的，附件直接换页接着排，不走这里。
 #let landscape-number = context {
   let n = counter(page).get().first()
   let a = if not doc.duplex { horizon } else if calc.odd(n) { bottom } else { top }
@@ -448,7 +454,10 @@
     title-block(a.title)
     render-blocks(a.blocks, total: total)
   }
-  if a.landscape {
+  if landscape {
+    pagebreak()
+    content(text-w)
+  } else if a.landscape {
     // 横页上缘是竖页的左边距：双面印刷时偶数页左边距是外侧 26mm。这个 context 的
     // 位置已经落在新开的横页上，页码直接取当前值（横向附件跨多页时后续页沿用同一组边距）。
     context {

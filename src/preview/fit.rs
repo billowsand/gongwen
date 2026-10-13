@@ -54,13 +54,22 @@ impl Fit {
     }
 }
 
-/// 公文主标题、附件标题：二号字排满版心宽。`marked` 是带哨兵的纯文本
-/// （见 [`marks::plain_keep_marks`]），哨兵不占版面，判定前先滤掉。
-pub(crate) fn document_title(ctx: &egui::Context, marked: &str) -> Fit {
-    cached(ctx, ("title", marked), || {
+/// 公文主标题、附件标题：二号字排满版心宽（横页按横向版心宽）。`marked` 是带
+/// 哨兵的纯文本（见 [`marks::plain_keep_marks`]），哨兵不占版面，判定前先滤掉。
+pub(crate) fn document_title(ctx: &egui::Context, marked: &str, landscape: bool) -> Fit {
+    let key = if landscape {
+        "title-landscape"
+    } else {
+        "title"
+    };
+    cached(ctx, (key, marked), || {
         let plain = export::strip_redline(marked);
-        let plan = title::title_plan(&plain, title::chars_per_line());
-        Fit::from_plan(marked, &plan, title::compressed_scale_percent(&plain))
+        let plan = title::title_plan(&plain, title::document_chars_per_line(landscape));
+        Fit::from_plan(
+            marked,
+            &plan,
+            title::document_compressed_scale_percent(&plain, landscape),
+        )
     })
 }
 
@@ -174,7 +183,7 @@ pub(crate) fn centered_galley(
 
 /// 公文主标题、附件标题：小标宋二号，相对版心居中，排布见 [`document_title`]。
 pub(crate) fn title_block(ui: &mut egui::Ui, metrics: &Metrics, marked: &str) {
-    let fit = document_title(ui.ctx(), marked);
+    let fit = document_title(ui.ctx(), marked, metrics.landscape);
     let format = text_format(
         metrics.font(theme::FONT_BIAOSONG, super::TITLE_PT),
         metrics.line,
@@ -211,7 +220,7 @@ mod tests {
     fn long_titles_break_at_the_same_words_as_the_export() {
         let ctx = egui::Context::default();
         let text = "关于进一步加强全市基层治理体系和治理能力现代化建设的实施方案";
-        let fit = document_title(&ctx, text);
+        let fit = document_title(&ctx, text, false);
         let title::TitlePlan::Wrapped(lines) = title::title_plan(text, title::chars_per_line())
         else {
             panic!("应分行");
@@ -224,11 +233,11 @@ mod tests {
     fn a_small_overflow_is_squeezed_onto_one_line() {
         let ctx = egui::Context::default();
         let text = "一二三四五六七八九十一二三四五六七八九十一";
-        let fit = document_title(&ctx, text);
+        let fit = document_title(&ctx, text, false);
         assert_eq!(fit.text, text);
         assert_eq!(
             fit.scale,
-            title::compressed_scale_percent(text) as f32 / 100.0
+            title::document_compressed_scale_percent(text, false) as f32 / 100.0
         );
         assert!(fit.compressed());
     }
@@ -239,7 +248,7 @@ mod tests {
         let plain = "关于进一步加强全市基层治理体系和治理能力现代化建设的实施方案";
         // 「关于」之后整段是新增：哨兵跨过断行处，各行拼回去仍是原文。
         let marked = format!("关于{}", export::mark_added(&plain["关于".len()..]));
-        let fit = document_title(&ctx, &marked);
+        let fit = document_title(&ctx, &marked, false);
         assert_eq!(export::strip_redline(&fit.text).replace('\n', ""), plain);
         assert!(fit.text.contains('\n'));
     }
@@ -248,7 +257,7 @@ mod tests {
     fn short_titles_and_cells_are_left_alone() {
         let ctx = egui::Context::default();
         assert_eq!(
-            document_title(&ctx, "重点工作通知"),
+            document_title(&ctx, "重点工作通知", false),
             Fit::plain("重点工作通知")
         );
         // 姓名格、加粗格不参与。

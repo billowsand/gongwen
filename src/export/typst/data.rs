@@ -213,6 +213,8 @@ pub(crate) struct Doc {
     /// `letter` / `phone` / `plain` / `whitepaper` / `redapproval` / `agenda`。
     pub kind: &'static str,
     pub duplex: bool,
+    /// 整份横排（普通公文的横页选项）：横向 A4、左侧装订，附件随之横排。
+    pub landscape: bool,
     pub probe: bool,
     pub fonts: FontFamilies,
     pub security: Option<Runs>,

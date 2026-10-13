@@ -486,6 +486,7 @@ impl DraftPage<'_> {
         let mut output = None;
         let mut hovered = None;
         let freeze = &mut state.preview_freeze;
+        let landscape = self.doc.draft.landscape();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -495,20 +496,21 @@ impl DraftPage<'_> {
                     .show(ui, |ui| {
                         // 拖分隔条、收起时间轴时宽度逐帧在变：沿用落定的版面，只做
                         // 层变换，否则长稿每帧都要按新字号整篇重排。
-                        let frozen = preview::show_frozen(ui, freeze, None, |ui, scale| {
-                            preview::official_preview(
-                                ui,
-                                &self.doc.draft,
-                                &display,
-                                &view.doc.markdown,
-                                scale,
-                                anchor.as_ref(),
-                                scroll,
-                                &self.config.numbering,
-                                false,
-                                &view.doc.elements,
-                            )
-                        });
+                        let frozen =
+                            preview::show_frozen(ui, freeze, None, landscape, |ui, scale| {
+                                preview::official_preview(
+                                    ui,
+                                    &self.doc.draft,
+                                    &display,
+                                    &view.doc.markdown,
+                                    scale,
+                                    anchor.as_ref(),
+                                    scroll,
+                                    &self.config.numbering,
+                                    false,
+                                    &view.doc.elements,
+                                )
+                            });
                         output = Some(frozen.inner);
                         hovered = preview::hovered_source(ui.ctx());
                         ui.add_space(12.0);

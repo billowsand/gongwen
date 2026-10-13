@@ -731,6 +731,12 @@ pub fn profile_changes(a: &TemplateProfile, b: &TemplateProfile) -> Vec<FieldCha
         yes_no(a.duplex_printing),
         yes_no(b.duplex_printing),
     );
+    field(
+        &mut out,
+        "横页排版",
+        yes_no(a.landscape),
+        yes_no(b.landscape),
+    );
     out
 }
 

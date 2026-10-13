@@ -21,27 +21,8 @@ use docx_rs::*;
 use std::fs::File;
 use std::path::Path;
 
-pub(crate) fn add_smart_table(
-    doc: Docx,
-    rows: &[Vec<String>],
-    aligns: &[ColumnAlign],
-    spans: &[TableSpan],
-    numbered: bool,
-    bold: BoldFont<'_>,
-) -> Docx {
-    add_smart_table_with_width(
-        doc,
-        rows,
-        aligns,
-        spans,
-        numbered,
-        bold,
-        TABLE_CONTENT_WIDTH_TWIPS,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(super) fn add_smart_table_with_width(
+pub(crate) fn add_smart_table_with_width(
     mut doc: Docx,
     rows: &[Vec<String>],
     aligns: &[ColumnAlign],
@@ -203,6 +184,7 @@ pub(crate) fn add_official_content_block(
     counters: &mut [usize; 4],
     numbering: &NumberingConfig,
     bold: BoldFont<'_>,
+    width_twips: usize,
 ) -> Docx {
     match block {
         MarkdownBlock::Heading(level, text) => {
@@ -229,9 +211,11 @@ pub(crate) fn add_official_content_block(
             aligns,
             spans,
             numbered,
-        } => doc = add_smart_table(doc, rows, aligns, spans, *numbered, bold),
+        } => {
+            doc = add_smart_table_with_width(doc, rows, aligns, spans, *numbered, bold, width_twips)
+        }
         MarkdownBlock::Image { alt, src } => {
-            if let Some(paragraph) = image_paragraph(alt, src) {
+            if let Some(paragraph) = image_paragraph(alt, src, width_twips) {
                 doc = doc.add_paragraph(paragraph);
             }
         }
@@ -337,7 +321,7 @@ pub(crate) fn write_meeting_agenda_docx(
     doc = doc.add_paragraph(agenda_blank_line());
     let plan = title::title_plan(&plain_text(title), title::chars_per_line());
     doc = doc.add_paragraph(
-        document_title_paragraph(title, &plan)
+        document_title_paragraph(title, &plan, false)
             .line_spacing(
                 LineSpacing::new()
                     .line(super::BODY_LINE_TWIPS as i32)
@@ -375,6 +359,7 @@ pub(crate) fn write_meeting_agenda_docx(
                     &mut counters,
                     &agenda_numbering_config,
                     bold,
+                    TABLE_CONTENT_WIDTH_TWIPS,
                 )
             }
         }

@@ -86,6 +86,7 @@ pub(super) fn write(
                     &mut counters,
                     numbering,
                     fonts.bold_family_docx(),
+                    super::TABLE_CONTENT_WIDTH_TWIPS,
                 )
             };
         }
@@ -208,7 +209,11 @@ pub(super) fn write(
             doc = doc.add_paragraph(Paragraph::new().page_break_before(true));
         } else if in_attachment {
             if let MarkdownBlock::Title(t) = block {
-                doc = doc.add_paragraph(document_title_paragraph(t, &title::title_plan(t, 14)));
+                doc = doc.add_paragraph(document_title_paragraph(
+                    t,
+                    &title::title_plan(t, 14),
+                    false,
+                ));
             } else {
                 doc = add_official_content_block(
                     doc,
@@ -216,6 +221,7 @@ pub(super) fn write(
                     &mut counters,
                     numbering,
                     fonts.bold_family_docx(),
+                    super::TABLE_CONTENT_WIDTH_TWIPS,
                 );
             }
         }
