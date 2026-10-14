@@ -21,15 +21,16 @@ pub(super) const fn palette() -> Theme {
     theme.surface_active = Color32::from_rgb(227, 214, 197);
     theme.border = Color32::from_rgb(226, 216, 200);
     theme.border_strong = Color32::from_rgb(177, 157, 136);
-    theme.text = Color32::from_rgb(120, 94, 79);
-    theme.text_soft = Color32::from_rgb(137, 110, 91);
-    theme.text_muted = Color32::from_rgb(157, 137, 118);
+    // 墨色在奶油纸上的对比度：正文约 8.7:1、次要约 6.8:1、弱化约 4.5:1，长时间看稿不费眼。
+    theme.text = Color32::from_rgb(88, 66, 53);
+    theme.text_soft = Color32::from_rgb(105, 82, 67);
+    theme.text_muted = Color32::from_rgb(130, 110, 92);
     theme.accent = theme.text;
-    theme.accent_hover = Color32::from_rgb(132, 105, 87);
-    theme.accent_active = Color32::from_rgb(107, 84, 70);
+    theme.accent_hover = Color32::from_rgb(102, 79, 64);
+    theme.accent_active = Color32::from_rgb(72, 54, 43);
     theme.accent_soft = Color32::from_rgb(233, 223, 208);
     theme.md.body = theme.text;
-    theme.md.marker = Color32::from_rgb(168, 145, 121);
+    theme.md.marker = Color32::from_rgb(148, 125, 103);
     theme.md.title = theme.text;
     theme.md.heading = theme.text;
     theme.md.strong = theme.accent_active;
