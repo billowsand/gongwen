@@ -1720,8 +1720,13 @@ impl GongwenApp {
                                 .truncate()
                                 .sense(egui::Sense::click()),
                             );
-                            if response.on_hover_text(tip).clicked() {
-                                self.docs[active_doc].statistics.retry();
+                            if response
+                                .on_hover_text(tip)
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                // 页数不自动算：点这行才起一次排版。
+                                self.docs[active_doc].statistics.request_pages();
                                 ui.ctx().request_repaint();
                             }
                         }
