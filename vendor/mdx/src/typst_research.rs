@@ -18,7 +18,9 @@ use crate::common::ast::{Block, Inline, LineAlign, MarkerKind, QuoteItem, QuoteK
 use crate::common::figure_size;
 use crate::common::front_matter;
 use crate::common::table::span_at;
-use crate::common::table_layout::{analyze_table, cell_alignment, ColumnAlignment, ColumnWidth};
+use crate::common::table_layout::{
+    analyze_table, cell_alignment, is_group_cell, ColumnAlignment, ColumnWidth,
+};
 
 #[path = "research_text.rs"]
 mod research_text;
@@ -253,6 +255,13 @@ pub struct Cell {
     pub align: char,
     pub colspan: usize,
     pub rowspan: usize,
+    /// 序号表的分组行：整格换楷体，字号不变（公文助手 Typst 模板读这个标记）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub kai: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Serialize)]
@@ -956,6 +965,7 @@ impl Builder {
                             align: align.latex(),
                             colspan: span.map_or(1, |s| s.column_span),
                             rowspan: span.map_or(1, |s| s.row_span),
+                            kai: is_group_cell(spans, columns.len(), numbered, row, column),
                         })
                     })
                     .collect()

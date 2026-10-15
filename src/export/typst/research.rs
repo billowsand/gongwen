@@ -236,6 +236,29 @@ mod tests {
     use super::*;
     use mdx::typst_research::{Doc, Item, build};
 
+    /// 研究报告排版数据里，序号表的分组行带 `kai`（整格换楷体），普通表格的
+    /// 整行合并格不带——模板据此换字面，字号不变。
+    #[test]
+    fn numbered_group_rows_carry_the_kai_mark_for_the_template() {
+        let markdown = "<!-- [正文] -->\n\n## 任务分工\n\n<!-- [序号表] -->\n             | 序号 | 事项 | 单位 |\n| --- | --- | --- |\n\
+             | 重点工作 |  |  |\n|  | 编制计划 | 办公室 |\n\
+             \n普通表格：\n\n| 甲 | 乙 | 丙 |\n| --- | --- | --- |\n\
+             | 合计 |  |  |";
+        let dir = tempfile::tempdir().expect("临时目录");
+        let input = DraftInput {
+            kind: crate::models::TemplateKind::ResearchReport,
+            title_hint: "序号表".into(),
+            ..Default::default()
+        };
+        let json = document_json(&input, markdown, &NumberingConfig::default(), dir.path())
+            .expect("研究报告排版数据");
+        assert_eq!(
+            json.matches(r#""kai":true"#).count(),
+            1,
+            "只有序号表的分组行带 kai：{json}"
+        );
+    }
+
     #[test]
     fn heading_source_lines_survive_cover_repeated_titles_and_code() {
         let markdown = "# 同名\n\n## 同名\n\n```text\n### 重复\n```\n\n### 重复 {#sec:a}\n\n正文。\n\n### 重复 {#sec:b}\n\n#### 数学 $x=1$";

@@ -1307,6 +1307,19 @@ pub(crate) struct MeasuredTable {
     cells: Vec<TableCellLayout>,
 }
 
+/// 表格格子的字面：表头黑体、序号表的分组行楷体、其余表格正文（仿宋 / 宋体）。
+/// 字号一律是表格字号，楷体只换字面不换字号，与 Typst 模板、Word 一致。
+fn table_cell_font(metrics: &Metrics, header: bool, group: bool) -> egui::FontId {
+    let family = if header {
+        metrics.table_header_family
+    } else if group {
+        theme::FONT_KAITI
+    } else {
+        metrics.table_family
+    };
+    metrics.font(family, metrics.table_pt)
+}
+
 /// 表格：字面、字号与格内行距跟着版式走（公文仿宋四号、21 磅；研究报告宋体
 /// 小四、18 磅，见 [`Metrics`]），表头黑体居中，列宽直接取导出器算好的智能列宽，
 /// 因此预览的列宽与导出的 Word 表格一致。`content_width` 是表格占的版心宽度。
@@ -1339,24 +1352,27 @@ pub(crate) fn measure_table(
     let mut row_heights = vec![line; rows.len()];
     for (row_index, row) in rows.iter().enumerate() {
         let header = row_index == 0;
-        let font = metrics.font(
-            if header {
-                metrics.table_header_family
-            } else {
-                metrics.table_family
-            },
-            metrics.table_pt,
-        );
+        let font = table_cell_font(metrics, header, false);
         let bold_font = if metrics.dedicated_bold {
             metrics.font(theme::FONT_BOLD, metrics.table_pt)
         } else {
             font.clone()
         };
+        // 分组行的楷体：字号跟表格正文一致，只换字面。
+        let group_font = table_cell_font(metrics, false, true);
         for column in 0..widths.len() {
             let span = export::table_span_at(spans, row_index, column);
             if span.is_some_and(|span| !span.is_anchor(row_index, column)) {
                 continue;
             }
+            // 序号表的分组行整格换楷体，字号不变；表头仍是黑体优先。
+            let group =
+                export::table::is_group_cell(numbered, spans, widths.len(), row_index, column);
+            let cell_font = if group {
+                group_font.clone()
+            } else {
+                font.clone()
+            };
             // 跨度理应落在网格内（`parse_table_cells` 保证矩形），但 `TableSpan`
             // 是普通结构体，起草页那边也在手改跨度；夹一下，排版错位总好过 panic。
             let row_span = span
@@ -1406,7 +1422,8 @@ pub(crate) fn measure_table(
             }
             // 表头整行黑体，不再认单元格里的加粗；正文格按 `**` 排粗体，
             // 与 DOCX 的 table_runs_sized、TeX 的 \GwBold 一致。括号换楷体那条
-            // 规则只管正文，表格三端都不用。
+            // 规则只管正文，表格三端都不用；序号表的分组行整格换楷体是另一条，
+            // 与 Word、Typst 模板同源（见 `export::table::is_group_cell`）。
             //
             // 研究报告的格子里有行内公式时走 `math_flow`：公式占位、画格子时贴图，
             // 与 PDF 的 longtblr 一样排成公式。
@@ -1418,9 +1435,9 @@ pub(crate) fn measure_table(
                 } else {
                     text.to_string()
                 };
-                let bold = if header { &font } else { &bold_font };
+                let bold = if header { &cell_font } else { &bold_font };
                 let style = math_flow::FlowStyle::block(
-                    (font.clone(), bold.clone()),
+                    (cell_font.clone(), bold.clone()),
                     metrics.table_pt,
                     line,
                     cell_job.wrap.max_width,
@@ -1438,7 +1455,7 @@ pub(crate) fn measure_table(
                     &mut cell_job,
                     &export::plain_text(text),
                     0.0,
-                    text_format(font.clone(), line),
+                    text_format(cell_font.clone(), line),
                 );
             } else {
                 // 与 DOCX 的 `table_runs_sized` 一样先按花脸稿哨兵切块。
@@ -1449,7 +1466,7 @@ pub(crate) fn measure_table(
                         let segment_font = if segment.bold {
                             bold_font.clone()
                         } else {
-                            font.clone()
+                            cell_font.clone()
                         };
                         let range = append_run(
                             &mut cell_job,
@@ -1935,6 +1952,29 @@ mod tests {
         assert!(
             squeezed > 0 && wrapped > 0,
             "压缩 {squeezed} 次、换行 {wrapped} 次"
+        );
+    }
+
+    /// 序号表的分组行在预览里排楷体（表头黑体、数据行表格正文），字号一律照旧。
+    #[test]
+    fn table_cells_pick_kai_for_the_numbered_group_row_only() {
+        let metrics = Metrics::new(1000.0, Some(1.0));
+        assert_eq!(
+            table_cell_font(&metrics, false, true).family,
+            egui::FontFamily::Name(theme::FONT_KAITI.into())
+        );
+        assert_eq!(
+            table_cell_font(&metrics, false, false).family,
+            egui::FontFamily::Name(metrics.table_family.into())
+        );
+        assert_eq!(
+            table_cell_font(&metrics, true, false).family,
+            egui::FontFamily::Name(metrics.table_header_family.into())
+        );
+        // 楷体只换字面，字号与同行的表格正文一致。
+        assert_eq!(
+            table_cell_font(&metrics, false, true).size,
+            table_cell_font(&metrics, false, false).size
         );
     }
 

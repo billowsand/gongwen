@@ -234,6 +234,23 @@ pub fn analyze_table(rows: &[Vec<String>], spans: &[TableSpan]) -> Vec<ColumnLay
         .collect()
 }
 
+/// 序号表的分组行：首格写标题、整行合并的那一行（`（一）大标题`），整格排楷体。
+/// 与公文助手 `export::table::is_group_cell` 同一口径：必须是序号表、首列、
+/// 跨度铺满整行。普通表格的整行合并格（`合计` 之类）不算。
+pub fn is_group_cell(
+    spans: &[TableSpan],
+    columns: usize,
+    numbered: bool,
+    row: usize,
+    column: usize,
+) -> bool {
+    numbered
+        && row > 0
+        && column == 0
+        && span_at(spans, row, column)
+            .is_some_and(|span| span.column_span >= columns && span.column_span > 1)
+}
+
 /// 单元格的水平对齐。表头一律居中；普通格随列；横向合并格跨列统一判定：
 /// 序号表里整行合并的分组行靠左，所跨各列对齐一致就随列，不一致再按格内
 /// 文字判定（数字、无句读的短语居中，句子靠左）。

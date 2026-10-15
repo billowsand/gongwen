@@ -555,6 +555,24 @@ pub(super) fn to_docx_grid(
     (grid, alignments)
 }
 
+/// 序号表的分组行：首格写标题、整行合并的那一行（`（一）大标题`），按公文习惯
+/// 靠左排**楷体**。判定与 [`resolve_cell_alignment`] 里那条靠左规则同一口径：
+/// 必须是序号表、首列、且跨度铺满整行。普通表格的整行合并格（`合计` 之类）
+/// 一律不算，不受影响。
+pub(crate) fn is_group_cell(
+    numbered: bool,
+    spans: &[TableSpan],
+    columns: usize,
+    row: usize,
+    column: usize,
+) -> bool {
+    numbered
+        && row > 0
+        && column == 0
+        && table_span_at(spans, row, column)
+            .is_some_and(|span| span.column_span >= columns && span.column_span > 1)
+}
+
 /// 返回单元格最终的水平对齐。普通/纵向合并单元格沿用所在列；横向合并跨过的
 /// 各列对齐一致时继承该值，否则按合并单元格自身内容判定。
 ///
@@ -581,7 +599,7 @@ pub(crate) fn resolve_cell_alignment(
     if span.column_span <= 1 {
         return fallback;
     }
-    if numbered && span.column == 0 && span.column_span >= column_alignments.len() {
+    if is_group_cell(numbered, spans, column_alignments.len(), row, column) {
         return ColumnAlignment::Left;
     }
     let end = (span.column + span.column_span).min(column_alignments.len());
@@ -733,6 +751,13 @@ pub(super) fn to_typst_table(
                 lines,
                 scale,
                 name: is_name.then_some(cleaned),
+                kai: is_group_cell(
+                    numbered,
+                    spans,
+                    column_alignments.len(),
+                    row_index,
+                    column_index,
+                ),
             });
         }
         out_rows.push(cells);
@@ -867,6 +892,58 @@ mod tests {
         assert_eq!(table.rows[1][0].colspan, 2);
         assert_eq!(table.rows[2][0].rowspan, 2);
         assert_eq!(table.rows[3].len(), 2, "纵向合并的续行少一格");
+    }
+
+    /// 序号表的分组行整格换楷体（`kai`），字号不变；普通表格里同样是整行合并的
+    /// 「合计」行保持原来的字面——这条规则只认序号表的分组行。
+    #[test]
+    fn numbered_group_row_is_kai_but_a_plain_full_row_cell_is_not() {
+        let table = vec![
+            vec!["序号".into(), "标题".into(), "内容".into()],
+            vec!["（一）大标题".into(), String::new(), String::new()],
+            vec![String::new(), "标题甲".into(), "内容甲".into()],
+        ];
+        let spans = [TableSpan {
+            row: 1,
+            column: 0,
+            row_span: 1,
+            column_span: 3,
+        }];
+        let numbered = typst(&table, &[], &spans, true);
+        assert!(numbered.rows[1][0].kai, "分组行应当排楷体");
+        assert!(!numbered.rows[2][0].kai, "数据行不动");
+        assert!(!numbered.rows[0][0].kai, "表头不动");
+
+        let plain = typst(&table, &[], &spans, false);
+        assert!(
+            !plain.rows[1][0].kai,
+            "普通表格的整行合并格不该被当成分组行"
+        );
+        // 序列化的排版数据里只有分组行带这个标记。
+        let json = cell_json(&numbered);
+        assert_eq!(json.matches(r#""kai":true"#).count(), 1, "{json}");
+    }
+
+    #[test]
+    fn group_cell_needs_the_numbered_marker_the_first_column_and_a_full_row_span() {
+        let spans = [
+            TableSpan {
+                row: 1,
+                column: 0,
+                row_span: 1,
+                column_span: 3,
+            },
+            TableSpan {
+                row: 2,
+                column: 1,
+                row_span: 1,
+                column_span: 2,
+            },
+        ];
+        assert!(is_group_cell(true, &spans, 3, 1, 0));
+        assert!(!is_group_cell(false, &spans, 3, 1, 0), "普通表格不算");
+        assert!(!is_group_cell(true, &spans, 3, 2, 1), "没铺满整行不算");
+        assert!(!is_group_cell(true, &spans, 4, 1, 0), "表头行不算");
     }
 
     #[test]

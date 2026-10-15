@@ -80,6 +80,14 @@ pub(crate) fn add_smart_table_with_width(
                     ColumnAlignment::Right => AlignmentType::Right,
                     ColumnAlignment::Left => AlignmentType::Left,
                 };
+                // 序号表的分组行整格换楷体，字号不变：Word、预览与 Typst 模板同源。
+                let kai = crate::export::table::is_group_cell(
+                    numbered,
+                    spans,
+                    grid.len(),
+                    row_index,
+                    column_index,
+                );
                 let runs = if name_column == Some(column_index) && row_index > 0 {
                     let segments = inline_segments(text);
                     let cleaned = segments
@@ -88,13 +96,13 @@ pub(crate) fn add_smart_table_with_width(
                         .collect::<String>();
                     let cell_bold = segments.iter().any(|segment| segment.bold);
                     let (name_text, size) = docx_name(&cleaned, TABLE_SIZE);
-                    let mut run = table_run_sized(&name_text, false, size);
+                    let mut run = table_run_sized(&name_text, false, kai, size);
                     if cell_bold {
                         run = apply_bold(run, bold);
                     }
                     vec![run]
                 } else {
-                    table_runs_sized(text, row_index == 0, TABLE_SIZE, bold)
+                    table_runs_sized(text, row_index == 0, kai, TABLE_SIZE, bold)
                 };
                 let mut paragraph = Paragraph::new();
                 // 居中格与主标题同一套排布：多出 1–2 字横向压缩，再多按分词均衡换行。
@@ -116,14 +124,16 @@ pub(crate) fn add_smart_table_with_width(
                         }
                     }
                     (title::TitlePlan::Compressed, scale) => {
-                        for run in table_runs_sized(text, row_index == 0, TABLE_SIZE, bold) {
+                        for run in table_runs_sized(text, row_index == 0, kai, TABLE_SIZE, bold) {
                             paragraph = paragraph.add_run(run.stretch(scale as i32));
                         }
                     }
                     (title::TitlePlan::Wrapped(lines), _) => {
                         let pieces = redline_slice_lines(text, &lines);
                         for (index, piece) in pieces.iter().enumerate() {
-                            for run in table_runs_sized(piece, row_index == 0, TABLE_SIZE, bold) {
+                            for run in
+                                table_runs_sized(piece, row_index == 0, kai, TABLE_SIZE, bold)
+                            {
                                 paragraph = paragraph.add_run(run);
                             }
                             if index + 1 < pieces.len() {

@@ -1774,7 +1774,8 @@ fn add_table(docx: Docx, rows: &[Vec<String>], spans: &[TableSpan], numbered: bo
             } else {
                 row.get(col_idx).map(String::as_str).unwrap_or("")
             };
-            // 表格一律居中；序号表整行合并的分组行靠左，与 TeX 一致。
+            // 表格一律居中；序号表整行合并的分组行靠左并整格排楷体，与 TeX、
+            // 公文助手预览一致。
             let group_row = numbered
                 && column_span == grid.len()
                 && cell_alignment(rows, spans, &column_layout, numbered, row_idx, col_idx)
@@ -1792,6 +1793,9 @@ fn add_table(docx: Docx, rows: &[Vec<String>], spans: &[TableSpan], numbered: bo
                 let mut run = Run::new().add_text(&text).size(SIZE_BODY);
                 if is_header {
                     run = run.fonts(font_set(FONT_HEAD)).bold();
+                } else if group_row {
+                    // 序号表的分组行整格楷体（正文与 PDF 同一口径）。
+                    run = run.fonts(font_set(FONT_KAI));
                 } else if italic {
                     // 斜体在中文里用楷体表达（与正文 add_inlines 一致）
                     run = run.fonts(font_set(FONT_KAI)).italic();

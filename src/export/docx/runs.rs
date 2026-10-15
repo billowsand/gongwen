@@ -213,32 +213,40 @@ pub(crate) fn title_run(text: &str, size: usize) -> Run {
 }
 
 /// 表格 run。表头对齐 TeX 的 `row{1}={font=\heiti\enheiti}`：只换黑体，不加粗。
-pub(crate) fn table_run_sized(text: &str, header: bool, size: usize) -> Run {
+/// `kai` 是序号表的分组行（`（一）大标题`）：整格换楷体，字号不变。
+pub(crate) fn table_run_sized(text: &str, header: bool, kai: bool, size: usize) -> Run {
     Run::new()
         .add_text(plain_text(text))
-        .fonts(chinese_fonts(if header {
-            "黑体"
-        } else {
-            "仿宋_GB2312"
-        }))
+        .fonts(chinese_fonts(table_family(header, kai)))
         .size(size)
+}
+
+fn table_family(header: bool, kai: bool) -> &'static str {
+    if header {
+        "黑体"
+    } else if kai {
+        "楷体_GB2312"
+    } else {
+        "仿宋_GB2312"
+    }
 }
 
 pub(crate) fn table_runs_sized(
     text: &str,
     header: bool,
+    kai: bool,
     size: usize,
     bold: BoldFont<'_>,
 ) -> Vec<Run> {
     if header {
-        return vec![table_run_sized(text, true, size)];
+        return vec![table_run_sized(text, true, kai, size)];
     }
     // 与正文一样先按花脸稿哨兵切块：表格里改掉的时限、数字，正是最该让人一眼
     // 看见的地方。没有哨兵时只有一块，与从前完全一致。
     let mut runs = Vec::new();
     for chunk in redline_chunks(text) {
         for segment in inline_segments(&chunk.text) {
-            let mut run = table_run_sized(&segment.text, false, size);
+            let mut run = table_run_sized(&segment.text, false, kai, size);
             if segment.bold {
                 run = apply_bold(run, bold);
             }
@@ -246,7 +254,7 @@ pub(crate) fn table_runs_sized(
         }
     }
     if runs.is_empty() {
-        return vec![table_run_sized("", false, size)];
+        return vec![table_run_sized("", false, kai, size)];
     }
     runs
 }

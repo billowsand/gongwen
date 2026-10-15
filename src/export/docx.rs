@@ -821,6 +821,17 @@ mod tests {
         );
         let second = table_cell_containing(&xml, "大标题二");
         assert!(second.contains(r#"<w:gridSpan w:val="4" />"#), "{second}");
+        // 分组行整格排楷体（序号表分组行的规矩），字号仍是表格的四号。
+        assert!(
+            group.contains(r#"w:eastAsia="楷体_GB2312""#),
+            "分组行应当是楷体：{group}"
+        );
+        // 数据格与表头不受这条规矩影响。
+        let data = table_cell_containing(&xml, "标题甲");
+        assert!(
+            data.contains(r#"w:eastAsia="仿宋_GB2312""#),
+            "数据格应当是仿宋：{data}"
+        );
         // 数据行不合并，序号列是解析器填进去的组内位次。
         for needle in ["标题甲", "标题乙"] {
             let cell = table_cell_containing(&xml, needle);

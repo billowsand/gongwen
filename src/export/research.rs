@@ -432,6 +432,14 @@ mod tests {
             group_cell.contains(r#"<w:jc w:val="left" />"#),
             "{group_cell}"
         );
+        // 分组行整格排楷体（Word 用方正楷体 FZKai-Z03，与预览、PDF 同一口径）。
+        assert!(group_cell.contains("FZKai-Z03"), "{group_cell}");
+        let data = xml.find("编制计划").expect("数据行");
+        let data_cell = &xml[xml[..data].rfind("<w:tc>").unwrap()..data];
+        assert!(
+            !data_cell.contains("FZKai-Z03"),
+            "数据行不该换楷体：{data_cell}"
+        );
         assert!(xml.contains(r#"<w:vMerge w:val="restart" />"#), "{xml}");
         assert!(xml.contains(r#"<w:vMerge w:val="continue" />"#), "{xml}");
     }

@@ -168,6 +168,8 @@
 #let cell-content(c, header) = {
   let body = if "name" in c { name-text(c.name) } else if "lines" in c { c.lines.map(runs).join(linebreak()) } else { runs(c.runs) }
   if header { body = text(font: hei, body) }
+  // 序号表的分组行（kai）：只换楷体，字号仍是表格的四号 14pt。
+  else if c.at("kai", default: false) { body = text(font: kai, body) }
   squeeze(c.at("scale", default: 1), body)
 }
 #let continued-note = text(size: 14pt)[下一页继续]

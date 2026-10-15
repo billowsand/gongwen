@@ -118,6 +118,13 @@ pub(crate) struct TableCell {
     /// 姓名格：2 字加空、4 字压缩，由模板排。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// 序号表的分组行（`（一）大标题`）：整格换楷体，字号不变。
+    #[serde(skip_serializing_if = "is_false")]
+    pub kai: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_one(value: &usize) -> bool {

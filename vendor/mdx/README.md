@@ -57,7 +57,10 @@ GitHub 可达、仓库还在且公开、那个 commit 没有被 GC。任何一�
 - `common/markers.rs` 新增 `is_numbered_table`：`<!-- [序号表] -->` 不再原样
   印出，紧随的表格标成序号表（整行合并的分组行靠左）；编号本身由调用方写进
   源码（公文助手见 `export::research::write_numbered_tables`）；
-- `common/table_layout.rs`：`analyze_table` 跳过横向合并格，新增 `cell_alignment`；
+- `common/table_layout.rs`：`analyze_table` 跳过横向合并格，新增 `cell_alignment`、
+  `is_group_cell`（序号表分组行：序号表 + 首列 + 整行跨度，整格排楷体）；
+  `typst_research::Cell` 多了 `kai` 标记交给公文助主的 Typst 模板，
+  `docx_research.rs` 的分组行改用 `FONT_KAI`；
 - `common/table_to_longtblr.rs` 输出 `\SetCell[r=..,c=..]`，整行合并格套
   `\parbox[t]`；`docx_research.rs` / `docx_official.rs` 输出 `gridSpan` / `vMerge`；
 - `parser.rs`：表前已有表题时不再吞掉表后那一行（那是下一张表的表题）。
