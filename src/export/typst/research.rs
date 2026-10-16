@@ -240,6 +240,10 @@ mod tests {
     /// 整行合并格不带——模板据此换字面，字号不变。
     #[test]
     fn numbered_group_rows_carry_the_kai_mark_for_the_template() {
+        // 模板数据要读随包字体拿家族名，本机没有 runtime/fonts（CI）时跳过。
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
         let markdown = "<!-- [正文] -->\n\n## 任务分工\n\n<!-- [序号表] -->\n             | 序号 | 事项 | 单位 |\n| --- | --- | --- |\n\
              | 重点工作 |  |  |\n|  | 编制计划 | 办公室 |\n\
              \n普通表格：\n\n| 甲 | 乙 | 丙 |\n| --- | --- | --- |\n\

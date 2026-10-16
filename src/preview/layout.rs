@@ -1921,6 +1921,10 @@ mod tests {
 
     #[test]
     fn serial_header_keeps_two_characters_on_one_line_like_pdf() {
+        // 序号列宽按真实中文字体度量对齐 PDF，本机没有 runtime/fonts（CI）时跳过。
+        if crate::portable_runtime::find_font_dir().is_none() {
+            return;
+        }
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let markdown = "<!-- [序号表] -->\n| 序号 | 工作内容 | 完成时限 | 完成地点 | 负责人 |\n| --- | --- | --- | --- | --- |\n| 风险排查 | | | | |\n| 1 | 全面开展风险排查，逐项落实整改措施。 | 本月底 | 各单位 | 张三 |";
