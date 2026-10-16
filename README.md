@@ -264,7 +264,7 @@
 ## 项目结构与开发
 
 ```text
-src/                应用代码（约 22.7 万行 Rust，2013 项自动化测试）
+src/                应用代码（约 22.7 万行 Rust，2023 项自动化测试）
 assets/             图标与界面资源
 examples/           示例公文
 skills/             gongwen-markdown 技能包（Agent Skill，随安装包分发）
