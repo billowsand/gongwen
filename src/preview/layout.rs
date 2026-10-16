@@ -1292,6 +1292,7 @@ pub(crate) struct TableCellLayout {
     galley: Arc<egui::Galley>,
     synthetic_bold_chars: Vec<Range<usize>>,
     padding: f32,
+    horizontal_padding: f32,
     align: ColumnAlignment,
     /// 格内的行内公式（只有研究报告版式才排），画格子时贴在 galley 的占位上。
     math: Vec<math_flow::MathSlot>,
@@ -1321,8 +1322,8 @@ fn table_cell_font(metrics: &Metrics, header: bool, group: bool) -> egui::FontId
 }
 
 /// 表格：字面、字号与格内行距跟着版式走（公文仿宋四号、21 磅；研究报告宋体
-/// 小四、18 磅，见 [`Metrics`]），表头黑体居中，列宽直接取导出器算好的智能列宽，
-/// 因此预览的列宽与导出的 Word 表格一致。`content_width` 是表格占的版心宽度。
+/// 小四、18 磅，见 [`Metrics`]），表头黑体居中。公文列宽与左右留白按 PDF 的
+/// 内容宽分配规则换算；研究报告沿用智能网格。`content_width` 是表格占的版心宽度。
 pub(crate) fn measure_table(
     ui: &egui::Ui,
     metrics: &Metrics,
@@ -1336,10 +1337,17 @@ pub(crate) fn measure_table(
     if columns.is_empty() || rows.is_empty() {
         return None;
     }
-    let widths = columns
-        .iter()
-        .map(|column| content_width * column.fraction)
-        .collect::<Vec<_>>();
+    let widths = if metrics.research_fonts {
+        columns
+            .iter()
+            .map(|column| content_width * column.fraction)
+            .collect::<Vec<_>>()
+    } else {
+        export::table::typst_column_widths(rows, aligns, spans, content_width / metrics.pt(1.0))
+            .into_iter()
+            .map(|width| metrics.pt(width))
+            .collect()
+    };
     let column_alignments = columns
         .iter()
         .map(|column| column.alignment)
@@ -1383,8 +1391,16 @@ pub(crate) fn measure_table(
                 .min(widths.len() - column);
             let width = widths[column..column + column_span].iter().sum::<f32>();
             let padding = metrics.pt(3.0).min(width * 0.12);
+            let horizontal_padding = if metrics.research_fonts {
+                padding
+            } else {
+                metrics.pt(6.0 * 72.0 / 72.27)
+            };
             let text = row.get(column).map_or("", String::as_str);
-            let mut cell_job = job((width - 2.0 * padding).max(1.0));
+            // egui 字形前进宽度会对齐像素；恰好两字宽时容许一个物理像素的
+            // 舍入误差，避免缩放后把 PDF 放得下的「序号」误拆成两行。
+            let rounding = 1.0 / ui.ctx().pixels_per_point();
+            let mut cell_job = job((width - 2.0 * horizontal_padding + rounding).max(1.0));
             // 横向合并格跨列统一判定对齐，导出的 Word/TeX 与预览走同一条规则。
             let align = crate::export::table::resolve_cell_alignment(
                 rows,
@@ -1494,6 +1510,7 @@ pub(crate) fn measure_table(
                 galley,
                 synthetic_bold_chars,
                 padding,
+                horizontal_padding,
                 align,
                 math,
             });
@@ -1611,8 +1628,8 @@ impl MeasuredTable {
             painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
             let anchor = match cell.align {
                 ColumnAlignment::Center => rect.center().x,
-                ColumnAlignment::Right => rect.right() - cell.padding,
-                ColumnAlignment::Left => rect.left() + cell.padding,
+                ColumnAlignment::Right => rect.right() - cell.horizontal_padding,
+                ColumnAlignment::Left => rect.left() + cell.horizontal_padding,
             };
             // 按字形框居中，不用 galley 几何居中：行距 21 磅比字高多出来的余量整块
             // 留在字下方，几何居中字会贴着上沿偏上半格。
@@ -1903,6 +1920,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn serial_header_keeps_two_characters_on_one_line_like_pdf() {
+        let ctx = egui::Context::default();
+        theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+        let markdown = "<!-- [序号表] -->\n| 序号 | 工作内容 | 完成时限 | 完成地点 | 负责人 |\n| --- | --- | --- | --- | --- |\n| 风险排查 | | | | |\n| 1 | 全面开展风险排查，逐项落实整改措施。 | 本月底 | 各单位 | 张三 |";
+        let blocks = export::parse_markdown(markdown);
+        let export::MarkdownBlock::Table {
+            rows,
+            aligns,
+            spans,
+            numbered,
+        } = &blocks[1]
+        else {
+            panic!("应解析成序号表");
+        };
+        for zoom in [0.5, 1.0, 1.5, 2.0] {
+            let metrics = Metrics::new(1000.0, Some(zoom));
+            let mut measured = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                measured = measure_table(
+                    ui,
+                    &metrics,
+                    rows,
+                    aligns,
+                    spans,
+                    *numbered,
+                    metrics.content,
+                );
+            });
+            let table = measured.unwrap();
+            let header = &table.cells[0];
+            assert_eq!(header.galley.text(), "序号", "缩放 {zoom}");
+            assert_eq!(header.galley.rows.len(), 1, "缩放 {zoom} 下序号不应折行");
+            let content = table.widths[0] - 2.0 * header.horizontal_padding;
+            assert!(
+                (content - metrics.pt(28.0)).abs() < 0.01,
+                "PDF 序号列内容宽为两字"
+            );
+            assert!((table.width() - metrics.content).abs() < 0.01);
+        }
+    }
+
+    #[test]
     fn centered_table_cells_squeeze_or_wrap_exactly_like_the_export() {
         let ctx = egui::Context::default();
         theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
@@ -1931,7 +1990,7 @@ mod tests {
                 .find(|cell| cell.row == 1 && cell.column == 0)
                 .expect("长格");
             let twips = export::table_columns(&rows, &aligns, &[])[0].twips;
-            let inner = table.widths[0] - 2.0 * cell.padding;
+            let inner = table.widths[0] - 2.0 * cell.horizontal_padding;
             match export::table::centered_cell_plan(long, false, twips) {
                 Some((export::title::TitlePlan::Wrapped(lines), _)) => {
                     wrapped += 1;

@@ -634,6 +634,40 @@ pub(crate) fn content_width_twips(landscape: bool) -> usize {
     }
 }
 
+/// 公文 PDF 的实际列宽（磅，含左右留白），对应 gongwen.typ 的 table-widths。
+/// 定宽列的 em 是内容宽，不能像 Word 网格那样把它当成整格宽。
+pub(crate) fn typst_column_widths(
+    rows: &[Vec<String>],
+    aligns: &[ColumnAlign],
+    spans: &[TableSpan],
+    total_pt: f32,
+) -> Vec<f32> {
+    let columns = analyze_table(rows, aligns, spans);
+    let padding = 2.0 * 6.0 * 72.0 / 72.27;
+    // 与模板数据相同：定宽 em 取整，相对权重保留一位小数。
+    let widths = columns
+        .iter()
+        .map(|column| match column.width {
+            ColumnWidth::FixedEm(em) => (em.round() as f32 * 14.0, 0.0),
+            ColumnWidth::Relative(ratio) => (0.0, (ratio * 10.0).round() as f32 / 10.0),
+        })
+        .collect::<Vec<_>>();
+    let fixed = widths.iter().map(|(fixed, _)| fixed).sum::<f32>();
+    let ratio = widths.iter().map(|(_, ratio)| ratio).sum::<f32>();
+    let available = total_pt - columns.len() as f32 * padding - fixed;
+    widths
+        .iter()
+        .map(|(fixed, weight)| {
+            padding
+                + if *weight > 0.0 {
+                    available * weight / ratio
+                } else {
+                    *fixed
+                }
+        })
+        .collect()
+}
+
 /// Typst 模板的表格数据：智能列宽、单元格对齐、姓名列、居中格压缩 / 换行都在
 /// 这里定好，模板只负责排。
 /// 列宽保留 tabularray 的语义（`X` 比例按内容宽分、`Q` 定宽），由模板换算。
