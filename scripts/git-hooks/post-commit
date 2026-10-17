@@ -26,7 +26,7 @@ if [[ "$(uname -s 2>/dev/null)" == "Linux" ]]; then
 fi
 
 echo "post-commit: cargo build --release --locked ..."
-if cargo build --release --locked "${CARGO_FEATURES[@]}"; then
+if cargo build --release --locked ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"}; then
     echo "post-commit: release 构建完成（target/release/gongwen-assistant[.exe]）。"
     exit 0
 fi
