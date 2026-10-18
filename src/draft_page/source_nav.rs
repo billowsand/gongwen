@@ -1112,91 +1112,161 @@ mod tests {
 
     #[test]
     fn minimap_blocks_follow_glyph_runs_colors_and_only_visible_rows() {
-        let ctx = egui::Context::default();
-        crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
-        let mut galley = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                "## 项目安排
+        // CI 的 Linux 容器里 `font/` 不入库，`configure_fonts` 只能退回 egui
+        // 自带字体：行高、字宽、折行都随之改变。断言不能写死行号与段号，只能
+        // 从排版结果（字形与空白）反推预期，两种字体度量下都必须成立。
+        for with_bundled_fonts in [true, false] {
+            let ctx = egui::Context::default();
+            if with_bundled_fonts {
+                crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
+            }
+            let accent = crate::theme::accent();
+            let mut galley = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    "## 项目安排\n\n",
+                    0.0,
+                    egui::TextFormat::simple(egui::FontId::proportional(20.0), egui::Color32::BLUE),
+                );
+                // 正文行刻意短于折行宽度：这里测的是「按空白断段」，
+                // 不能因为换行多出一行而变成另一件事。
+                job.append(
+                    &"  - 推进工作 保留缩进\n".repeat(100),
+                    0.0,
+                    egui::TextFormat::simple(egui::FontId::proportional(18.0), egui::Color32::GRAY),
+                );
+                job.wrap.max_width = 400.0;
+                galley = Some(ui.painter().layout_job(job));
+            });
+            let galley = galley.unwrap();
+            let map = SourceMinimap {
+                rows: galley
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| SourceMiniRow {
+                        top: row.pos.y + 6.0,
+                        height: row.size.y,
+                        heading: index == 0,
+                        ..Default::default()
+                    })
+                    .collect(),
+                content_height: galley.size().y,
+                viewport_height: 300.0,
+                editor_width: 400.0,
+                galley: Some(galley.clone()),
+                ..Default::default()
+            };
+            let rect = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(132.0, 120.0));
+            let layout = MiniLayout::with_width(&map, rect.height(), rect.width());
+            let blocks = minimap_blocks(&map, layout, rect);
 
-",
-                0.0,
-                egui::TextFormat::simple(egui::FontId::proportional(20.0), egui::Color32::BLUE),
+            // 一行按空白断成若干段，每段从左缘那个非空白字形开始。
+            fn run_lefts(row: &egui::epaint::text::PlacedRow) -> Vec<f32> {
+                let mut lefts = Vec::new();
+                let mut in_run = false;
+                for glyph in &row.glyphs {
+                    if glyph.chr.is_whitespace() {
+                        in_run = false;
+                    } else if !in_run {
+                        lefts.push(row.pos.x + glyph.pos.x);
+                        in_run = true;
+                    }
+                }
+                lefts
+            }
+
+            let heading_runs = run_lefts(&galley.rows[0]);
+            // 「##」与标题文字之间的空格把标题行断成两段。
+            assert_eq!(
+                heading_runs.len(),
+                2,
+                "标题行应断成两段（内置字体：{with_bundled_fonts}）"
             );
-            job.append(
-                &"  - 推进重点工作 保留缩进与词形
-"
-                .repeat(100),
-                0.0,
-                egui::TextFormat::simple(egui::FontId::proportional(18.0), egui::Color32::GRAY),
-            );
-            job.wrap.max_width = 400.0;
-            galley = Some(ui.painter().layout_job(job));
-        });
-        let galley = galley.unwrap();
-        let map = SourceMinimap {
-            rows: galley
+            // 标题下面第一行有字的正文；空行不画块，直接跳过去。
+            let body_row = galley
                 .rows
                 .iter()
-                .enumerate()
-                .map(|(index, row)| SourceMiniRow {
-                    top: row.pos.y + 6.0,
-                    height: row.size.y,
-                    heading: index == 0,
-                    ..Default::default()
-                })
-                .collect(),
-            content_height: galley.size().y,
-            viewport_height: 300.0,
-            editor_width: 400.0,
-            galley: Some(galley.clone()),
-            ..Default::default()
-        };
-        let rect = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(132.0, 120.0));
-        let layout = MiniLayout::with_width(&map, rect.height(), rect.width());
-        let blocks = minimap_blocks(&map, layout, rect);
+                .skip(1)
+                .find(|row| !row.glyphs.is_empty())
+                .expect("标题下面应当有正文行");
+            let body_runs = run_lefts(body_row);
+            // 行首两个空格 + 「- 」 + 「保留缩进」前的空格，一共三段。
+            assert_eq!(
+                body_runs.len(),
+                3,
+                "正文行应断成三段（内置字体：{with_bundled_fonts}）"
+            );
 
-        let (heading, heading_color) = blocks[0];
-        assert_eq!(heading_color, crate::theme::accent(), "标题用强调色");
-        // 「##」与标题文字之间的空格把标题行断成两段。
-        assert_eq!(blocks[1].1, crate::theme::accent());
-        let body = &blocks[2..5];
-        assert!(body.iter().all(|(block, _)| block.top() == body[0].0.top()));
-        assert!(
-            body.iter()
-                .all(|(_, color)| *color == egui::Color32::GRAY.gamma_multiply(0.5)),
-            "正文取语法高亮色"
-        );
-        assert!(heading.height() > body[0].0.height(), "标题比正文粗");
-        let dash_x = galley.rows[2].pos.x + galley.rows[2].glyphs[2].pos.x;
-        assert!(
-            (body[0].0.left() - rect.left() - super::MINIMAP_MARGIN - dash_x * layout.scale).abs()
-                < 0.001
-        );
-        assert!(
-            body[0].0.left() > rect.left() + super::MINIMAP_MARGIN,
-            "保留行首缩进"
-        );
-        assert!(body[0].0.right() < body[1].0.left(), "空格处断开");
-        assert!(blocks.iter().all(|(block, _)| block.top() < rect.bottom()));
-        assert!(
-            blocks.len() < galley.rows.len() * 3,
-            "只画缩略图可见范围内的行"
-        );
+            assert!(
+                blocks.len() >= heading_runs.len() + body_runs.len(),
+                "标题与正文的每一段都该画出块，实际只有 {} 块",
+                blocks.len()
+            );
+            let heading_blocks = &blocks[..heading_runs.len()];
+            let body_blocks = &blocks[heading_runs.len()..heading_runs.len() + body_runs.len()];
 
-        let scrolled = SourceMinimap {
-            mini_scroll: 200.0,
-            ..map
-        };
-        let blocks = minimap_blocks(&scrolled, layout, rect);
-        assert!(!blocks.is_empty());
-        assert!(
-            blocks
-                .iter()
-                .all(|(_, color)| *color != crate::theme::accent())
-        );
-        assert!(blocks.iter().all(|(block, _)| block.bottom() >= rect.top()));
+            // 标题：两段同色，且都是当前主题的强调色。
+            assert_eq!(
+                heading_blocks[0].1, accent,
+                "标题用强调色（内置字体：{with_bundled_fonts}）"
+            );
+            assert!(heading_blocks.iter().all(|(_, color)| *color == accent));
+            // 正文：同一行、同一种语法高亮色。
+            assert!(
+                body_blocks
+                    .iter()
+                    .all(|(block, _)| block.top() == body_blocks[0].0.top())
+            );
+            assert!(
+                body_blocks
+                    .iter()
+                    .all(|(_, color)| *color == egui::Color32::GRAY.gamma_multiply(0.5)),
+                "正文取语法高亮色（内置字体：{with_bundled_fonts}）"
+            );
+            assert!(
+                heading_blocks[0].0.height() > body_blocks[0].0.height(),
+                "标题比正文粗"
+            );
+
+            // 每个块的左缘都落在对应段的第一个字形上，比例与缩略图倍率一致。
+            for ((block, _), left) in heading_blocks.iter().zip(&heading_runs) {
+                assert!(
+                    (block.left() - rect.left() - super::MINIMAP_MARGIN - left * layout.scale)
+                        .abs()
+                        < 0.001
+                );
+            }
+            for ((block, _), left) in body_blocks.iter().zip(&body_runs) {
+                assert!(
+                    (block.left() - rect.left() - super::MINIMAP_MARGIN - left * layout.scale)
+                        .abs()
+                        < 0.001
+                );
+            }
+            assert!(
+                body_blocks[0].0.left() > rect.left() + super::MINIMAP_MARGIN,
+                "保留行首缩进"
+            );
+            for pair in body_blocks.windows(2) {
+                assert!(pair[0].0.right() < pair[1].0.left(), "空格处断开");
+            }
+            assert!(blocks.iter().all(|(block, _)| block.top() < rect.bottom()));
+            assert!(
+                blocks.len() < galley.rows.len() * 3,
+                "只画缩略图可见范围内的行"
+            );
+
+            let scrolled = SourceMinimap {
+                mini_scroll: 200.0,
+                ..map
+            };
+            let blocks = minimap_blocks(&scrolled, layout, rect);
+            assert!(!blocks.is_empty());
+            assert!(blocks.iter().all(|(_, color)| *color != accent));
+            assert!(blocks.iter().all(|(block, _)| block.bottom() >= rect.top()));
+        }
     }
 
     #[test]

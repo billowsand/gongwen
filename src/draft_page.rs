@@ -1475,6 +1475,21 @@ mod split_resize_tests {
     use super::*;
     use std::sync::mpsc::Receiver;
 
+    /// 拖动的起始窗格宽度，预热也停在这个宽度上。
+    const SETTLE_WIDTH: f32 = 700.0;
+
+    /// 本帧是否整份重传了字体图集（含初建、长满重建与扩容）。
+    ///
+    /// 只认 epaint 的字体纹理——`TextureId::Managed(0)`，见 `TextureId::default()`。
+    /// 图片、图标等别的纹理整张上传是后台解码完成的时刻决定的，与拖动无关，
+    /// 不能混进来。
+    fn font_atlas_reuploaded(out: &egui::FullOutput) -> bool {
+        out.textures_delta
+            .set
+            .iter()
+            .any(|(id, delta)| *id == egui::TextureId::default() && delta.pos.is_none())
+    }
+
     /// 把 `markdown_render` 放进一个可控的 egui 上下文里跑若干帧，
     /// 返回逐帧耗时、字体图集整体重建次数，以及每帧实际排版所用的缩放。
     struct Harness {
@@ -2124,12 +2139,28 @@ mod split_resize_tests {
                 page.markdown_render(ui);
             });
             let elapsed = started.elapsed().as_secs_f32() * 1000.0;
-            let rebuilt = out
-                .textures_delta
-                .set
-                .iter()
-                .any(|(_, delta)| delta.pos.is_none() && delta.image.width() > 1000);
-            (elapsed, rebuilt)
+            (elapsed, font_atlas_reuploaded(&out))
+        }
+
+        /// 在同一宽度上反复出帧，直到字体图集连续若干帧不再整份重传。
+        ///
+        /// 预热要“安静下来”而不是数固定帧数：不同平台装进图集的字体不同，
+        /// 图集尺寸与装填节奏也不同。装填超过八成时 epaint 会在下一帧开头
+        /// 整份重建，重建那一帧同样是一次整张上传——若正好落在测量区间里，
+        /// 就会被算成“拖动导致重建”。等图集稳定后再开始计数，测的才是拖动
+        /// 本身的影响。
+        fn settle_font_atlas(&mut self) {
+            const QUIET_FRAMES: usize = 4;
+            const FRAME_LIMIT: usize = 200;
+            let mut quiet = 0;
+            for _ in 0..FRAME_LIMIT {
+                let (_, reuploaded) = self.frame(SETTLE_WIDTH);
+                quiet = if reuploaded { 0 } else { quiet + 1 };
+                if quiet >= QUIET_FRAMES {
+                    return;
+                }
+            }
+            panic!("字体图集在 {FRAME_LIMIT} 帧内没有稳定，无法测量拖动期间的图集行为");
         }
 
         /// 跑若干帧完整的审校区（含右缘导航），鼠标一直停在 `pointer`。
@@ -3016,16 +3047,16 @@ mod split_resize_tests {
     #[test]
     fn dragging_neither_rebuilds_the_atlas_nor_relayouts() {
         let mut harness = Harness::new();
-        for i in 0..40 {
-            harness.frame(700.0 + i as f32);
-        }
+        // 先把图集喂饱并等它稳定：测量区间里不能再出现“前一帧刚好越过八成”
+        // 这种与拖动无关的重建。
+        harness.settle_font_atlas();
         let frozen = harness.doc.preview_freeze.layout_scale;
 
         let mut times = Vec::new();
         let mut rebuilds = 0;
         let mut relayouts = 0;
         for i in 0..120 {
-            let (elapsed, rebuilt) = harness.frame(700.0 + i as f32 * 3.7);
+            let (elapsed, rebuilt) = harness.frame(SETTLE_WIDTH + i as f32 * 3.7);
             times.push(elapsed);
             rebuilds += u32::from(rebuilt);
             if harness.doc.preview_freeze.layout_scale != frozen {
@@ -3036,9 +3067,13 @@ mod split_resize_tests {
         let p50 = percentile(&mut times, 0.5);
         let p95 = percentile(&mut times, 0.95);
         let max = percentile(&mut times, 1.0);
+        let (atlas, fill) = harness
+            .ctx
+            .fonts(|fonts| (fonts.font_image_size(), fonts.font_atlas_fill_ratio()));
         println!(
             "拖动 120 帧：均值 {mean:.2} / 中位 {p50:.2} / p95 {p95:.2} / 最差 {max:.2} ms，\
-             图集重建 {rebuilds} 次，重排 {relayouts} 次"
+             图集重建 {rebuilds} 次，重排 {relayouts} 次，图集 {atlas:?} 填充 {:.0}%",
+            fill * 100.0
         );
 
         assert_eq!(rebuilds, 0, "拖动期间字号恒定，字体图集不应重建");

@@ -538,8 +538,11 @@ mod tests {
 
     #[test]
     fn typing_reuses_the_cached_layout_and_the_shift_is_cheap() {
-        // egui 按 LayoutJob 哈希缓存 galley：文本不变时拿到的是同一个 Arc，
-        // 挪行只是克隆行表（每行一个 Arc<Row>），2000 行也远在 1ms 以内。
+        // egui 按 LayoutJob 哈希缓存 galley：文本不变时拿到的是同一个 Arc。
+        // 在它上面开空隙只克隆行表（每行一个 Arc<Row>），不重新分行、不重新
+        // 塑形、不往字体图集里加字形——这才是「打字便宜」的因果。所以这里断言
+        // 缓存命中与行对象共享，不拿墙钟时间做门槛：机器负载一高就会误报，
+        // 也证明不了这两条之外的东西。真实耗时打出来供人看。
         let ctx = egui::Context::default();
         crate::theme::configure_fonts(&ctx, &crate::models::FontConfig::default());
         let text = (1..=2000)
@@ -567,15 +570,55 @@ mod tests {
                 let shifted = open_gaps(&base, &gaps);
                 elapsed.push(started.elapsed());
                 assert_eq!(shifted.rows.len(), base.rows.len());
+                // 挪过的行仍是原 galley 里的那一份 `Arc<Row>`：行表是克隆的，
+                // 文字本身没有被重新排过。
+                assert!(
+                    shifted
+                        .rows
+                        .iter()
+                        .zip(&base.rows)
+                        .all(|(shifted, base)| Arc::ptr_eq(&shifted.row, &base.row)),
+                    "开空隙不应重新排版文字"
+                );
                 bases.push(base);
             });
         }
         assert!(Arc::ptr_eq(&bases[1], &bases[2]), "文本不变时排版命中缓存");
-        let slowest = elapsed.iter().max().unwrap();
-        assert!(
-            slowest.as_micros() < 5_000,
-            "2000 行开 200 处空隙应远低于 5ms：{slowest:?}"
+
+        // 位移也要对：2000 行一句一行、行宽 500 不会折行，空隙开在第 0、10、
+        // …、1990 行之前；第 r 行应正好下移它前面所有空隙之和。
+        let base = &bases[2];
+        assert_eq!(
+            line_first_rows(base),
+            (0..base.rows.len()).collect::<Vec<_>>(),
+            "每行一句，行宽 500 不应折行"
         );
+        let shifted = open_gaps(base, &gaps);
+        let ppp = base.pixels_per_point;
+        let mut expected = 0.0;
+        let mut next = 0;
+        for (index, row) in base.rows.iter().enumerate() {
+            if let Some(gap) = gaps.get(next).filter(|gap| gap.line == index) {
+                expected += round_to_pixels(gap.height, ppp);
+                next += 1;
+            }
+            assert!(
+                (shifted.rows[index].pos.y - row.pos.y - expected).abs() < 0.001,
+                "第 {index} 行应下移 {expected}，实际 {}",
+                shifted.rows[index].pos.y - row.pos.y
+            );
+        }
+        assert_eq!(next, gaps.len(), "200 处空隙都应落在行表内");
+        let total: f32 = gaps
+            .iter()
+            .map(|gap| round_to_pixels(gap.height, ppp))
+            .sum();
+        assert!(
+            (shifted.rect.max.y - base.rect.max.y - total).abs() < 0.001,
+            "galley 高度应随空隙总量增长"
+        );
+        let slowest = elapsed.iter().max().unwrap();
+        println!("2000 行开 200 处空隙：最慢 {slowest:?}");
     }
 
     #[test]
