@@ -1552,50 +1552,45 @@ impl TemplateProfile {
 
 /// 界面主题。与 `ThemeName::ALL` 的预设一一对应，缺省为默认的 Claude 奶油。
 ///
-/// 前六项是明色，后五项借鉴终端配色方案，是深色。深色主题只影响界面外壳，
+/// 前三项是明色，后三项是深色。深色主题只影响界面外壳，
 /// 公文纸面另由 [`PaperMode`] 决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
     #[default]
     // 已移除的主题兼容旧配置，统一回退奶油主题。
-    #[serde(alias = "sky", alias = "lilac", alias = "green", alias = "everforest")]
+    #[serde(
+        alias = "sky",
+        alias = "lilac",
+        alias = "green",
+        alias = "everforest",
+        alias = "solarized_light",
+        alias = "latte",
+        alias = "gruvbox_light",
+        alias = "dracula",
+        alias = "tokyo_night"
+    )]
     Claude,
-    /// Solarized Light：终端配色里的经典浅色。
-    SolarizedLight,
-    /// Catppuccin Latte：冷白底 + 紫色强调。
-    Latte,
-    /// Gruvbox Light：暖米黄纸面 + 砖红强调。
-    GruvboxLight,
     /// MDEX 纸墨：米白底、墨黑字与终端绿。
     Mdex,
     /// 锤子稿纸：灰棕拟物工具栏、浅木纹底板与横线稿纸。
     Smartisan,
-    /// Dracula：紫色强调，对比最强。
-    Dracula,
     /// Nord：冷灰蓝，饱和度最低。
     Nord,
     /// Gruvbox Dark：暖褐底 + 橙强调，默认主题的深色亲戚。
     GruvboxDark,
-    /// Tokyo Night：近黑底 + 蓝紫强调。
-    TokyoNight,
     /// MDEX 夜墨：纸墨的深色版，暖墨底与鼠尾草绿。
     MdexDark,
 }
 
 impl ThemeName {
     /// 全部可选主题，顺序与设置页展示一致：先明色后深色。
-    pub const ALL: [ThemeName; 11] = [
+    pub const ALL: [ThemeName; 6] = [
         Self::Claude,
-        Self::SolarizedLight,
-        Self::Latte,
-        Self::GruvboxLight,
         Self::Mdex,
         Self::Smartisan,
-        Self::Dracula,
         Self::Nord,
         Self::GruvboxDark,
-        Self::TokyoNight,
         Self::MdexDark,
     ];
 }
@@ -3860,10 +3855,10 @@ mod tests {
     #[test]
     fn theme_name_round_trips_and_old_config_defaults_to_claude() {
         let mut config = AppConfig::default();
-        config.theme = ThemeName::Latte;
+        config.theme = ThemeName::Nord;
         let json = serde_json::to_string(&config).expect("应能序列化");
         let back: AppConfig = serde_json::from_str(&json).expect("应能反序列化");
-        assert_eq!(back.theme, ThemeName::Latte, "round-trip 后主题不变");
+        assert_eq!(back.theme, ThemeName::Nord, "round-trip 后主题不变");
 
         // 去掉 theme 键模拟旧配置：载入后回退默认。
         let mut value: serde_json::Value = serde_json::from_str(&json).expect("应能解析为 JSON 值");
@@ -3872,7 +3867,17 @@ mod tests {
         assert_eq!(old.theme, ThemeName::default(), "旧配置回退默认主题");
 
         // 移除主题后仍能读取完整旧配置，其他设置不受影响。
-        for removed in ["sky", "lilac", "green", "everforest"] {
+        for removed in [
+            "sky",
+            "lilac",
+            "green",
+            "everforest",
+            "solarized_light",
+            "latte",
+            "gruvbox_light",
+            "dracula",
+            "tokyo_night",
+        ] {
             value["theme"] = serde_json::json!(removed);
             let migrated: AppConfig =
                 serde_json::from_value(value.clone()).expect("旧主题配置应能读取");

@@ -98,8 +98,6 @@ enum PaperFamily {
     Original,
     /// 宣纸白：低饱和暖白。
     Parchment,
-    /// 浅米纸：复古浅专用，承接米黄色界面。
-    Rice,
     /// 夜墨蓝：冷深色纸面。
     NightBlue,
     /// 檀黑棕：暖深色纸面。
@@ -232,210 +230,6 @@ impl Theme {
     // ── 以下借鉴终端配色方案：先取一整组互相协调的色相（红绿黄蓝品红青），再把
     // 它们分派到强调、语义与 Markdown 各个角色上，而不是只换掉一个强调色。
 
-    /// 曝光浅：Solarized Light。米黄纸面 + 蓝色强调，六个色相分工清楚。
-    const fn solarized_light() -> Self {
-        Self {
-            label: "曝光浅",
-            dark: false,
-            paper_family: PaperFamily::Parchment,
-            dark_paper_family: PaperFamily::Sandalwood,
-            canvas: Color32::from_rgb(0xEE, 0xE8, 0xD5),
-            surface: Color32::from_rgb(0xFD, 0xF6, 0xE3),
-            surface_sunk: Color32::from_rgb(0xE7, 0xE0, 0xCB),
-            surface_hover: Color32::from_rgb(0xE0, 0xD8, 0xC0),
-            surface_active: Color32::from_rgb(0xD6, 0xCD, 0xB2),
-            border: Color32::from_rgb(0xE0, 0xD9, 0xC4),
-            border_strong: Color32::from_rgb(0xC6, 0xBF, 0xA8),
-            text: Color32::from_rgb(0x07, 0x36, 0x42),
-            text_soft: Color32::from_rgb(0x58, 0x6E, 0x75),
-            text_muted: Color32::from_rgb(0x93, 0xA1, 0xA1),
-            accent: Color32::from_rgb(0x26, 0x8B, 0xD2),
-            accent_hover: Color32::from_rgb(0x3E, 0x9E, 0xE0),
-            accent_active: Color32::from_rgb(0x1B, 0x6F, 0xAC),
-            accent_soft: Color32::from_rgb(0xE9, 0xF2, 0xF9),
-            warn: Color32::from_rgb(0xB5, 0x89, 0x00),
-            warn_soft: Color32::from_rgb(0xF2, 0xEB, 0xD0),
-            danger: Color32::from_rgb(0xDC, 0x32, 0x2F),
-            danger_soft: Color32::from_rgb(0xF7, 0xE2, 0xDE),
-            success: Color32::from_rgb(0x85, 0x99, 0x00),
-            success_soft: Color32::from_rgb(0xE9, 0xEE, 0xDA),
-            info: Color32::from_rgb(0x2A, 0xA1, 0x98),
-            md: MdPalette {
-                body: Color32::from_rgb(0x07, 0x36, 0x42),
-                marker: Color32::from_rgb(0x93, 0xA1, 0xA1),
-                title: Color32::from_rgb(0x26, 0x8B, 0xD2),
-                heading: Color32::from_rgb(0x00, 0x2B, 0x36),
-                strong: Color32::from_rgb(0xCB, 0x4B, 0x16),
-                strong_bg: Color32::from_rgb(0xF7, 0xE7, 0xD8),
-                bullet: Color32::from_rgb(0x85, 0x99, 0x00),
-                table_pipe: Color32::from_rgb(0xB6, 0xAF, 0x97),
-                table_rule: Color32::from_rgb(0x93, 0xA1, 0xA1),
-                table_cell: Color32::from_rgb(0x2A, 0xA1, 0x98),
-                comment: Color32::from_rgb(0x93, 0xA1, 0xA1),
-                comment_bg: Color32::from_rgb(0xE8, 0xE7, 0xD3),
-                todo: Color32::from_rgb(0xDC, 0x32, 0x2F),
-                todo_bg: Color32::from_rgb(0xF7, 0xE2, 0xDE),
-                code: Color32::from_rgb(0x6C, 0x71, 0xC4),
-                quoted: Color32::from_rgb(0xD3, 0x36, 0x82),
-                anchor_bg: Color32::from_rgb(0xE2, 0xEC, 0xF5),
-                search_bg: Color32::from_rgb(0xF5, 0xE7, 0xA8),
-            },
-        }
-    }
-
-    /// 拿铁：Catppuccin Latte。冷白底 + 紫色强调，语义色彼此拉开距离。
-    const fn latte() -> Self {
-        Self {
-            label: "拿铁",
-            dark: false,
-            paper_family: PaperFamily::Original,
-            dark_paper_family: PaperFamily::NightBlue,
-            canvas: Color32::from_rgb(0xEF, 0xF1, 0xF5),
-            surface: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-            surface_sunk: Color32::from_rgb(0xE6, 0xE9, 0xEF),
-            surface_hover: Color32::from_rgb(0xDC, 0xE0, 0xE8),
-            surface_active: Color32::from_rgb(0xCC, 0xD0, 0xDA),
-            border: Color32::from_rgb(0xDC, 0xE0, 0xE8),
-            border_strong: Color32::from_rgb(0xBC, 0xC0, 0xCC),
-            text: Color32::from_rgb(0x45, 0x48, 0x5E),
-            text_soft: Color32::from_rgb(0x5C, 0x5F, 0x77),
-            text_muted: Color32::from_rgb(0x8C, 0x8F, 0xA1),
-            accent: Color32::from_rgb(0x88, 0x39, 0xEF),
-            accent_hover: Color32::from_rgb(0x9B, 0x57, 0xF5),
-            accent_active: Color32::from_rgb(0x6E, 0x2B, 0xC4),
-            accent_soft: Color32::from_rgb(0xED, 0xE2, 0xFC),
-            warn: Color32::from_rgb(0xDF, 0x8E, 0x1D),
-            warn_soft: Color32::from_rgb(0xFA, 0xF0, 0xDC),
-            danger: Color32::from_rgb(0xD2, 0x0F, 0x39),
-            danger_soft: Color32::from_rgb(0xFA, 0xE0, 0xE4),
-            success: Color32::from_rgb(0x40, 0xA0, 0x2B),
-            success_soft: Color32::from_rgb(0xE4, 0xF2, 0xE0),
-            info: Color32::from_rgb(0x1E, 0x66, 0xF5),
-            md: MdPalette {
-                body: Color32::from_rgb(0x4C, 0x4F, 0x69),
-                marker: Color32::from_rgb(0x9C, 0xA0, 0xB0),
-                title: Color32::from_rgb(0x88, 0x39, 0xEF),
-                heading: Color32::from_rgb(0x3B, 0x3E, 0x52),
-                strong: Color32::from_rgb(0xFE, 0x64, 0x0B),
-                strong_bg: Color32::from_rgb(0xFD, 0xEA, 0xDB),
-                bullet: Color32::from_rgb(0x1E, 0x66, 0xF5),
-                table_pipe: Color32::from_rgb(0xBC, 0xC0, 0xCC),
-                table_rule: Color32::from_rgb(0x9C, 0xA0, 0xB0),
-                table_cell: Color32::from_rgb(0x17, 0x92, 0x99),
-                comment: Color32::from_rgb(0x7C, 0x7F, 0x93),
-                comment_bg: Color32::from_rgb(0xE9, 0xEA, 0xF0),
-                todo: Color32::from_rgb(0xD2, 0x0F, 0x39),
-                todo_bg: Color32::from_rgb(0xFA, 0xE0, 0xE4),
-                code: Color32::from_rgb(0x17, 0x92, 0x99),
-                quoted: Color32::from_rgb(0xEA, 0x76, 0xCB),
-                anchor_bg: Color32::from_rgb(0xED, 0xE2, 0xFC),
-                search_bg: Color32::from_rgb(0xFB, 0xEF, 0xC0),
-            },
-        }
-    }
-
-    /// 复古浅：Gruvbox Light。暖米黄纸面 + 砖红强调，与默认主题同一个色温。
-    const fn gruvbox_light() -> Self {
-        Self {
-            label: "复古浅",
-            dark: false,
-            paper_family: PaperFamily::Rice,
-            dark_paper_family: PaperFamily::Sandalwood,
-            canvas: Color32::from_rgb(0xF4, 0xE8, 0xC1),
-            surface: Color32::from_rgb(0xFB, 0xF1, 0xC7),
-            surface_sunk: Color32::from_rgb(0xEB, 0xDB, 0xB2),
-            surface_hover: Color32::from_rgb(0xE5, 0xD5, 0xAB),
-            surface_active: Color32::from_rgb(0xD5, 0xC4, 0xA1),
-            border: Color32::from_rgb(0xE4, 0xD5, 0xAC),
-            border_strong: Color32::from_rgb(0xC8, 0xB9, 0x9A),
-            text: Color32::from_rgb(0x28, 0x28, 0x28),
-            text_soft: Color32::from_rgb(0x3C, 0x38, 0x36),
-            text_muted: Color32::from_rgb(0x7C, 0x6F, 0x64),
-            accent: Color32::from_rgb(0xAF, 0x3A, 0x03),
-            accent_hover: Color32::from_rgb(0xC9, 0x4F, 0x13),
-            accent_active: Color32::from_rgb(0x8C, 0x2D, 0x02),
-            accent_soft: Color32::from_rgb(0xF6, 0xE3, 0xC8),
-            warn: Color32::from_rgb(0xB5, 0x76, 0x14),
-            warn_soft: Color32::from_rgb(0xF5, 0xE7, 0xC4),
-            danger: Color32::from_rgb(0x9D, 0x00, 0x06),
-            danger_soft: Color32::from_rgb(0xF6, 0xDA, 0xD2),
-            success: Color32::from_rgb(0x79, 0x74, 0x0E),
-            success_soft: Color32::from_rgb(0xEA, 0xE8, 0xC4),
-            info: Color32::from_rgb(0x07, 0x66, 0x78),
-            md: MdPalette {
-                body: Color32::from_rgb(0x3C, 0x38, 0x36),
-                marker: Color32::from_rgb(0xA8, 0x99, 0x84),
-                title: Color32::from_rgb(0xAF, 0x3A, 0x03),
-                heading: Color32::from_rgb(0x28, 0x28, 0x28),
-                strong: Color32::from_rgb(0xB5, 0x76, 0x14),
-                strong_bg: Color32::from_rgb(0xF5, 0xE7, 0xC4),
-                bullet: Color32::from_rgb(0x79, 0x74, 0x0E),
-                table_pipe: Color32::from_rgb(0xC8, 0xB9, 0x9A),
-                table_rule: Color32::from_rgb(0xA8, 0x99, 0x84),
-                table_cell: Color32::from_rgb(0x42, 0x7B, 0x58),
-                comment: Color32::from_rgb(0x7C, 0x6F, 0x64),
-                comment_bg: Color32::from_rgb(0xED, 0xE4, 0xC4),
-                todo: Color32::from_rgb(0x9D, 0x00, 0x06),
-                todo_bg: Color32::from_rgb(0xF6, 0xDA, 0xD2),
-                code: Color32::from_rgb(0x8F, 0x3F, 0x71),
-                quoted: Color32::from_rgb(0x07, 0x66, 0x78),
-                anchor_bg: Color32::from_rgb(0xF0, 0xDE, 0xBB),
-                search_bg: Color32::from_rgb(0xF7, 0xE3, 0x9A),
-            },
-        }
-    }
-
-    /// 德古拉：Dracula。紫色强调、粉色列表符、青色表格，对比最强。
-    const fn dracula() -> Self {
-        Self {
-            label: "德古拉",
-            dark: true,
-            paper_family: PaperFamily::NightBlue,
-            dark_paper_family: PaperFamily::NightBlue,
-            canvas: Color32::from_rgb(0x21, 0x22, 0x2C),
-            surface: Color32::from_rgb(0x28, 0x2A, 0x36),
-            surface_sunk: Color32::from_rgb(0x1E, 0x1F, 0x29),
-            surface_hover: Color32::from_rgb(0x34, 0x37, 0x46),
-            surface_active: Color32::from_rgb(0x44, 0x47, 0x5A),
-            border: Color32::from_rgb(0x38, 0x3A, 0x4A),
-            border_strong: Color32::from_rgb(0x4A, 0x4D, 0x62),
-            text: Color32::from_rgb(0xF8, 0xF8, 0xF2),
-            text_soft: Color32::from_rgb(0xC7, 0xC9, 0xD3),
-            text_muted: Color32::from_rgb(0x62, 0x72, 0xA4),
-            accent: Color32::from_rgb(0xBD, 0x93, 0xF9),
-            accent_hover: Color32::from_rgb(0xCD, 0xA9, 0xFF),
-            accent_active: Color32::from_rgb(0x9A, 0x6F, 0xE0),
-            accent_soft: Color32::from_rgb(0x32, 0x2C, 0x46),
-            warn: Color32::from_rgb(0xFF, 0xB8, 0x6C),
-            warn_soft: Color32::from_rgb(0x3A, 0x2F, 0x22),
-            danger: Color32::from_rgb(0xFF, 0x55, 0x55),
-            danger_soft: Color32::from_rgb(0x3B, 0x24, 0x29),
-            success: Color32::from_rgb(0x50, 0xFA, 0x7B),
-            success_soft: Color32::from_rgb(0x1F, 0x33, 0x25),
-            info: Color32::from_rgb(0x8B, 0xE9, 0xFD),
-            md: MdPalette {
-                body: Color32::from_rgb(0xF0, 0xF0, 0xEA),
-                marker: Color32::from_rgb(0x62, 0x72, 0xA4),
-                title: Color32::from_rgb(0xBD, 0x93, 0xF9),
-                heading: Color32::from_rgb(0xF8, 0xF8, 0xF2),
-                strong: Color32::from_rgb(0xFF, 0xB8, 0x6C),
-                strong_bg: Color32::from_rgb(0x3A, 0x2F, 0x22),
-                bullet: Color32::from_rgb(0xFF, 0x79, 0xC6),
-                table_pipe: Color32::from_rgb(0x4A, 0x4D, 0x62),
-                table_rule: Color32::from_rgb(0x62, 0x72, 0xA4),
-                table_cell: Color32::from_rgb(0x8B, 0xE9, 0xFD),
-                comment: Color32::from_rgb(0x62, 0x72, 0xA4),
-                comment_bg: Color32::from_rgb(0x26, 0x2A, 0x3B),
-                todo: Color32::from_rgb(0xFF, 0x55, 0x55),
-                todo_bg: Color32::from_rgb(0x3B, 0x24, 0x29),
-                code: Color32::from_rgb(0x50, 0xFA, 0x7B),
-                quoted: Color32::from_rgb(0xF1, 0xFA, 0x8C),
-                anchor_bg: Color32::from_rgb(0x3B, 0x34, 0x52),
-                search_bg: Color32::from_rgb(0x4A, 0x43, 0x26),
-            },
-        }
-    }
-
     /// 北欧：Nord。冷灰蓝打底，饱和度最低，适合整天开着。
     const fn nord() -> Self {
         Self {
@@ -537,73 +331,17 @@ impl Theme {
             },
         }
     }
-
-    /// 东京夜：Tokyo Night。近黑底 + 蓝紫强调，夜里写材料最护眼。
-    const fn tokyo_night() -> Self {
-        Self {
-            label: "东京夜",
-            dark: true,
-            paper_family: PaperFamily::NightBlue,
-            dark_paper_family: PaperFamily::NightBlue,
-            canvas: Color32::from_rgb(0x16, 0x16, 0x1E),
-            surface: Color32::from_rgb(0x1A, 0x1B, 0x26),
-            surface_sunk: Color32::from_rgb(0x1F, 0x23, 0x35),
-            surface_hover: Color32::from_rgb(0x29, 0x2E, 0x42),
-            surface_active: Color32::from_rgb(0x34, 0x3A, 0x55),
-            border: Color32::from_rgb(0x2A, 0x2E, 0x42),
-            border_strong: Color32::from_rgb(0x3B, 0x42, 0x61),
-            text: Color32::from_rgb(0xC0, 0xCA, 0xF5),
-            text_soft: Color32::from_rgb(0xA9, 0xB1, 0xD6),
-            text_muted: Color32::from_rgb(0x56, 0x5F, 0x89),
-            accent: Color32::from_rgb(0x7A, 0xA2, 0xF7),
-            accent_hover: Color32::from_rgb(0x9B, 0xB8, 0xFA),
-            accent_active: Color32::from_rgb(0x5A, 0x82, 0xD7),
-            accent_soft: Color32::from_rgb(0x23, 0x2B, 0x44),
-            warn: Color32::from_rgb(0xE0, 0xAF, 0x68),
-            warn_soft: Color32::from_rgb(0x37, 0x2F, 0x22),
-            danger: Color32::from_rgb(0xF7, 0x76, 0x8E),
-            danger_soft: Color32::from_rgb(0x38, 0x22, 0x2C),
-            success: Color32::from_rgb(0x9E, 0xCE, 0x6A),
-            success_soft: Color32::from_rgb(0x24, 0x32, 0x1F),
-            info: Color32::from_rgb(0x7D, 0xCF, 0xFF),
-            md: MdPalette {
-                body: Color32::from_rgb(0xC0, 0xCA, 0xF5),
-                marker: Color32::from_rgb(0x56, 0x5F, 0x89),
-                title: Color32::from_rgb(0x7A, 0xA2, 0xF7),
-                heading: Color32::from_rgb(0xC8, 0xD3, 0xF5),
-                strong: Color32::from_rgb(0xE0, 0xAF, 0x68),
-                strong_bg: Color32::from_rgb(0x37, 0x2F, 0x22),
-                bullet: Color32::from_rgb(0xBB, 0x9A, 0xF7),
-                table_pipe: Color32::from_rgb(0x3B, 0x42, 0x61),
-                table_rule: Color32::from_rgb(0x56, 0x5F, 0x89),
-                table_cell: Color32::from_rgb(0x7D, 0xCF, 0xFF),
-                comment: Color32::from_rgb(0x56, 0x5F, 0x89),
-                comment_bg: Color32::from_rgb(0x22, 0x27, 0x3C),
-                todo: Color32::from_rgb(0xF7, 0x76, 0x8E),
-                todo_bg: Color32::from_rgb(0x38, 0x22, 0x2C),
-                code: Color32::from_rgb(0x9E, 0xCE, 0x6A),
-                quoted: Color32::from_rgb(0xFF, 0x9E, 0x64),
-                anchor_bg: Color32::from_rgb(0x2C, 0x33, 0x50),
-                search_bg: Color32::from_rgb(0x42, 0x3A, 0x22),
-            },
-        }
-    }
 }
 
-/// 按配置里的主题名取色板，未知名字回退默认主题。
+/// 按配置里的主题名取色板；旧主题名在配置反序列化时回退默认主题。
 pub fn by_name(name: ThemeName) -> Theme {
     match name {
         ThemeName::Claude => Theme::claude(),
-        ThemeName::SolarizedLight => Theme::solarized_light(),
-        ThemeName::Latte => Theme::latte(),
-        ThemeName::GruvboxLight => Theme::gruvbox_light(),
         ThemeName::Mdex => mdex::palette(),
         ThemeName::Smartisan => smartisan::palette(),
         ThemeName::MdexDark => mdex::dark_palette(),
-        ThemeName::Dracula => Theme::dracula(),
         ThemeName::Nord => Theme::nord(),
         ThemeName::GruvboxDark => Theme::gruvbox_dark(),
-        ThemeName::TokyoNight => Theme::tokyo_night(),
     }
 }
 
@@ -634,8 +372,8 @@ pub fn revision() -> u64 {
 /// **只作用于屏幕预览**：导出的 DOCX/PDF 由 `export` 模块另行生成，完全不读
 /// 这里的颜色，因此不论用户把纸面调成什么，落到纸上的永远是白纸黑字红头。
 ///
-/// 「跟随主题」使用本色、宣纸白、夜墨蓝与檀黑棕，另为复古浅和 MDEX 夜墨
-/// 提供浅米纸与灰绿墨纸。纸面只跟随冷暖和明暗，不复制主题强调色；正文只用黑或白，
+/// 「跟随主题」使用本色、宣纸白、夜墨蓝与檀黑棕，另为 MDEX 夜墨
+/// 提供灰绿墨纸。纸面只跟随冷暖和明暗，不复制主题强调色；正文只用黑或白，
 /// 红头、红色反线与份号始终使用同一个规范红。
 pub mod paper {
     use super::{CURRENT_PAPER, Color32, PaperFamily, Theme, current};
@@ -677,17 +415,6 @@ pub mod paper {
         hover: Color32::from_rgb(0xF3, 0xED, 0xE1),
         border: None,
         shadow_alpha: 18,
-    };
-
-    /// 浅米纸：比宣纸白更暖，与复古浅的米黄色界面衔接。
-    const RICE_SHEET: Sheet = Sheet {
-        bg: Color32::from_rgb(0xFA, 0xF0, 0xD8),
-        ink: Color32::BLACK,
-        ink_muted: Color32::from_rgb(0x67, 0x5B, 0x50),
-        ink_faint: Color32::from_rgb(0xA0, 0x90, 0x76),
-        hover: Color32::from_rgb(0xEF, 0xE1, 0xBF),
-        border: Some(Color32::from_rgb(0xD3, 0xC1, 0x9A)),
-        shadow_alpha: 26,
     };
 
     /// 夜墨蓝：冷深色纸，正文严格用白色。
@@ -737,7 +464,6 @@ pub mod paper {
         match family {
             PaperFamily::Original => ORIGINAL_SHEET,
             PaperFamily::Parchment => PARCHMENT_SHEET,
-            PaperFamily::Rice => RICE_SHEET,
             PaperFamily::NightBlue => NIGHT_BLUE_SHEET,
             PaperFamily::Sandalwood => SANDALWOOD_SHEET,
             PaperFamily::GreenInk => GREEN_INK_SHEET,
@@ -853,8 +579,8 @@ pub mod paper {
     #[cfg(test)]
     mod tests {
         use super::{
-            GREEN_INK_SHEET, NIGHT_BLUE_SHEET, ORIGINAL_SHEET, PARCHMENT_SHEET, RICE_SHEET,
-            SANDALWOOD_SHEET, Sheet, sheet_for,
+            GREEN_INK_SHEET, NIGHT_BLUE_SHEET, ORIGINAL_SHEET, PARCHMENT_SHEET, SANDALWOOD_SHEET,
+            Sheet, sheet_for,
         };
         use crate::models::{PaperMode, ThemeName};
         use crate::theme::by_name;
@@ -870,24 +596,13 @@ pub mod paper {
             }
         }
 
-        /// 跟随主题时，通用纸面与两套专属纸面使用各自确认过的配色。
+        /// 跟随主题时，通用纸面与专属纸面使用各自确认过的配色。
         #[test]
         fn follow_mode_maps_themes_to_paper_families() {
-            assert_follow(&[ThemeName::Claude, ThemeName::Latte], ORIGINAL_SHEET);
-            assert_follow(
-                &[
-                    ThemeName::SolarizedLight,
-                    ThemeName::Mdex,
-                    ThemeName::Smartisan,
-                ],
-                PARCHMENT_SHEET,
-            );
-            assert_follow(&[ThemeName::GruvboxLight], RICE_SHEET);
+            assert_follow(&[ThemeName::Claude], ORIGINAL_SHEET);
+            assert_follow(&[ThemeName::Mdex, ThemeName::Smartisan], PARCHMENT_SHEET);
             assert_follow(&[ThemeName::MdexDark], GREEN_INK_SHEET);
-            assert_follow(
-                &[ThemeName::Dracula, ThemeName::Nord, ThemeName::TokyoNight],
-                NIGHT_BLUE_SHEET,
-            );
+            assert_follow(&[ThemeName::Nord], NIGHT_BLUE_SHEET);
             assert_follow(&[ThemeName::GruvboxDark], SANDALWOOD_SHEET);
         }
 
@@ -904,19 +619,8 @@ pub mod paper {
         /// 显式深色纸面仍按主题冷暖分组，不退回一套无差别的中性黑纸。
         #[test]
         fn forced_dark_paper_keeps_themes_cool_or_warm() {
-            let cool = [
-                ThemeName::Latte,
-                ThemeName::Dracula,
-                ThemeName::Nord,
-                ThemeName::TokyoNight,
-            ];
-            let warm = [
-                ThemeName::Claude,
-                ThemeName::SolarizedLight,
-                ThemeName::GruvboxLight,
-                ThemeName::Mdex,
-                ThemeName::GruvboxDark,
-            ];
+            let cool = [ThemeName::Nord];
+            let warm = [ThemeName::Claude, ThemeName::Mdex, ThemeName::GruvboxDark];
             for name in cool {
                 assert_eq!(
                     sheet_for(by_name(name), PaperMode::Dark),
@@ -1911,20 +1615,9 @@ fn app_icon_png(name: ThemeName) -> &'static [u8] {
         ThemeName::Claude | ThemeName::Smartisan => {
             include_bytes!("../assets/app-icon/themes/claude/app-icon-256.png")
         }
-        ThemeName::SolarizedLight => {
-            include_bytes!("../assets/app-icon/themes/solarized-light/app-icon-256.png")
-        }
-        ThemeName::Latte => include_bytes!("../assets/app-icon/themes/latte/app-icon-256.png"),
-        ThemeName::GruvboxLight => {
-            include_bytes!("../assets/app-icon/themes/gruvbox-light/app-icon-256.png")
-        }
-        ThemeName::Dracula => include_bytes!("../assets/app-icon/themes/dracula/app-icon-256.png"),
         ThemeName::Nord => include_bytes!("../assets/app-icon/themes/nord/app-icon-256.png"),
         ThemeName::GruvboxDark => {
             include_bytes!("../assets/app-icon/themes/gruvbox-dark/app-icon-256.png")
-        }
-        ThemeName::TokyoNight => {
-            include_bytes!("../assets/app-icon/themes/tokyo-night/app-icon-256.png")
         }
     }
 }

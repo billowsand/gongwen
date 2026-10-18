@@ -192,7 +192,7 @@ fn skill_manager_samples() {
     page.select("policy-report");
     shoot(&mut page, "policy-report", egui::vec2(1500.0, 950.0));
     shoot(&mut page, "policy-report-narrow", egui::vec2(600.0, 950.0));
-    theme::set_current(crate::models::ThemeName::Dracula);
+    theme::set_current(crate::models::ThemeName::Nord);
     theme::configure_style(&ctx);
     shoot(&mut page, "policy-report-dark", egui::vec2(1500.0, 1200.0));
     theme::set_current(crate::models::ThemeName::Mdex);

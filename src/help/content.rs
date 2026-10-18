@@ -84,7 +84,7 @@ pub(crate) const CHAPTERS: &[Chapter] = &[
         "02-ui",
         Part::Intro,
         "界面总览",
-        "五区布局、标签模型与十一套主题"
+        "五区布局、标签模型与六套主题"
     ),
     chapter!(
         "03-quickstart",
@@ -247,10 +247,6 @@ pub(crate) const IMAGES: &[HelpImage] = &[
     HelpImage {
         key: "images/ui-lexicon.png",
         bytes: include_bytes!("../../assets/help/images/ui-lexicon.png"),
-    },
-    HelpImage {
-        key: "images/ui-themes.png",
-        bytes: include_bytes!("../../assets/help/images/ui-themes.png"),
     },
     HelpImage {
         key: "images/diag-concept.png",

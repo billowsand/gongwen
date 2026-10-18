@@ -21,30 +21,6 @@ THEMES = {
     },
     # Terminal-inspired schemes. The tile stays dark in every theme so the icon
     # reads at taskbar size; only the accent tracks the theme's accent colour.
-    "solarized-light": {
-        "tile_top": "#073642",
-        "tile_bottom": "#002B36",
-        "accent": "#268BD2",
-        "accent_light": "#3E9EE0",
-    },
-    "latte": {
-        "tile_top": "#45485E",
-        "tile_bottom": "#2A2C3D",
-        "accent": "#8839EF",
-        "accent_light": "#9B57F5",
-    },
-    "gruvbox-light": {
-        "tile_top": "#3C3836",
-        "tile_bottom": "#282828",
-        "accent": "#AF3A03",
-        "accent_light": "#C94F13",
-    },
-    "dracula": {
-        "tile_top": "#282A36",
-        "tile_bottom": "#1E1F29",
-        "accent": "#BD93F9",
-        "accent_light": "#CDA9FF",
-    },
     "nord": {
         "tile_top": "#3B4252",
         "tile_bottom": "#2E3440",
@@ -56,12 +32,6 @@ THEMES = {
         "tile_bottom": "#1D2021",
         "accent": "#FE8019",
         "accent_light": "#FF9645",
-    },
-    "tokyo-night": {
-        "tile_top": "#1A1B26",
-        "tile_bottom": "#16161E",
-        "accent": "#7AA2F7",
-        "accent_light": "#9BB8FA",
     },
 }
 
