@@ -78,7 +78,7 @@ typst = "0.15.1"
 typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
 uuid = { version = "1.24", features = ["v4"] }
-zip = "4.3"
+zip = "8.6"
 
 [target.'cfg(windows)'.dependencies]
 # 应用内打印走原生 GDI：不依赖任何第三方 PDF 软件注册 print 谓词。
