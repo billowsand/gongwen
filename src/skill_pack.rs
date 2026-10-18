@@ -218,6 +218,422 @@ mod tests {
         }
     }
 
+    /// 技能包的**模型实测**验收：技能文档是给外部模型看的，模板测试只证明
+    /// 「我们自己照骨架写」能过解析器，证明不了「模型照文档写」能过。
+    ///
+    /// 这里读 `scripts/gongwen-skill-eval.py` 产出的 `manifest.json`，把每份
+    /// 清洗后的模型产物同时交给解析器与校验器：
+    /// - 结构：第一块是文档标题、正文只有一个 `#`、标题不手写编号、语法不漏成正文、
+    ///   附件标记后有标题且文种允许带附件；
+    /// - 校验器：与同一文种的技能模板逐条对比 `validator::validate` 的告警，
+    ///   只留下模型稿**独有**的那些（要素表单本身的告警两边都有，相减即可）。
+    ///
+    /// 设 `GONGWEN_SKILL_EVAL_MANIFEST` 指向 manifest.json 时运行；没设就跳过，
+    /// 免得默认 `cargo test` 依赖本地评测产物。
+    #[test]
+    #[ignore = "需要模型产物：设置 GONGWEN_SKILL_EVAL_MANIFEST 指向 manifest.json 后运行"]
+    fn model_outputs_survive_the_parser_and_validator() {
+        let Ok(manifest_path) = std::env::var("GONGWEN_SKILL_EVAL_MANIFEST") else {
+            eprintln!("未设置 GONGWEN_SKILL_EVAL_MANIFEST，跳过");
+            return;
+        };
+        let manifest_path = PathBuf::from(manifest_path);
+        assert!(
+            manifest_path.is_file(),
+            "manifest 不存在：{}",
+            manifest_path.display()
+        );
+        let root = manifest_path
+            .parent()
+            .expect("manifest 有父目录")
+            .to_path_buf();
+        // 评测脚本可能是 PowerShell / Python 写的，入口带 BOM 也认。
+        let manifest_text = fs::read_to_string(&manifest_path).expect("读 manifest");
+        let manifest: serde_json::Value =
+            serde_json::from_str(manifest_text.trim_start_matches('\u{feff}'))
+                .expect("manifest 是 JSON");
+        let cases = manifest["cases"].as_array().expect("manifest.cases 是数组");
+        assert!(!cases.is_empty(), "manifest 里没有用例");
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for case in cases {
+            let file = case["file"].as_str().expect("case.file");
+            let kind_name = case["kind"].as_str().expect("case.kind");
+            let label = format!(
+                "{}｜{}｜{}｜{}",
+                case["condition"].as_str().unwrap_or("?"),
+                case["provider"].as_str().unwrap_or("?"),
+                case["model"].as_str().unwrap_or("?"),
+                kind_name
+            );
+            let text = match fs::read_to_string(root.join(file)) {
+                Ok(text) => text,
+                Err(error) => {
+                    failures.push(format!("{label}：读不出 {file}（{error}）"));
+                    continue;
+                }
+            };
+            checked += 1;
+            let mut problems = syntax_problems_in_model_output(kind_name, &text);
+            problems.extend(validator_problems_for_model_output(kind_name, &text));
+            if !problems.is_empty() {
+                failures.push(format!("{label}（{file}）：{}", problems.join("；")));
+            }
+        }
+        eprintln!(
+            "模型实测：共 {} 份产物，{} 份过不了解析器或校验器",
+            checked,
+            failures.len()
+        );
+        assert!(
+            failures.is_empty(),
+            "模型产物不合格（技能文档没让模型写对）：\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// 模型产物独有、技能模板没有的校验器告警。
+    ///
+    /// 同一文种的技能模板当基准，只留模型稿独有的告警——要素表单本身的告警
+    /// （缺主送、缺密级……）两边都有，相减就消掉了。`【待核实：……】` 是技能文档
+    /// 要求的占位写法，不算模型写错，单独放过。
+    fn validator_problems_for_model_output(kind_name: &str, text: &str) -> Vec<String> {
+        use crate::models::SecurityRules;
+        use crate::validator::validate;
+
+        let input = eval_draft(kind_name);
+        let rules = SecurityRules::default();
+        let baseline: BTreeSet<String> = validate(&input, skill_template(kind_name), &[], &rules)
+            .into_iter()
+            .collect();
+        validate(&input, text, &[], &rules)
+            .into_iter()
+            .filter(|warning| !baseline.contains(warning))
+            .filter(|warning| !warning.contains("正文含“待核实”字段"))
+            .map(|warning| format!("校验器：{warning}"))
+            .collect()
+    }
+
+    /// 一份模型产物在解析器层面的问题（不看文采，只看会被程序读错的地方）。
+    fn syntax_problems_in_model_output(kind_name: &str, text: &str) -> Vec<String> {
+        use crate::export::{MarkdownBlock, MarkdownSection, parse_markdown};
+
+        let research = kind_name == "research-report";
+        // 研究报告的附录标题是 `## 附录标题`（见 research-report.md），不是 `#`；
+        // 公文文种的附件才用 `# 附件正式标题`。
+        let hash_title_required = !research;
+        // 这几个文种只能有标题和正文，不该出现附件区段（见 prompt::kind_rules）。
+        let attachments_allowed =
+            !matches!(kind_name, "white-paper" | "meeting-agenda" | "phone-record");
+        let mut problems = Vec::new();
+        let blocks = parse_markdown(text);
+        if !matches!(blocks.first(), Some(MarkdownBlock::Title(_))) {
+            problems.push("第一块不是文档标题（第一行必须是一个 `# 标题`）".into());
+        }
+        let mut section = MarkdownSection::Body;
+        let mut body_titles = 0usize;
+        let mut attachment_markers = 0usize;
+        let mut attachment_needs_title = false;
+        for block in &blocks {
+            match block {
+                MarkdownBlock::Marker(next) => {
+                    if hash_title_required
+                        && section == MarkdownSection::Attachment
+                        && attachment_needs_title
+                    {
+                        problems.push("有一份附件没写 `# 附件标题`".into());
+                    }
+                    section = *next;
+                    if *next == MarkdownSection::Attachment {
+                        attachment_markers += 1;
+                        attachment_needs_title = true;
+                    }
+                }
+                MarkdownBlock::Title(_) => {
+                    if section == MarkdownSection::Body {
+                        body_titles += 1;
+                    } else {
+                        attachment_needs_title = false;
+                    }
+                }
+                MarkdownBlock::Html(raw) => {
+                    // 认不出来的注释标记不印到纸上，不算漏语法；真的 HTML 标签算。
+                    if !raw.trim_start().starts_with("<!--") {
+                        problems.push(format!("HTML 标签会印到纸上：{}", head(raw)));
+                    }
+                }
+                MarkdownBlock::Paragraph(raw) => {
+                    for leak in ["<!--", "```", "|", "#"] {
+                        if raw.starts_with(leak) {
+                            problems.push(format!("语法漏进正文：{}", head(raw)));
+                            break;
+                        }
+                    }
+                }
+                MarkdownBlock::Heading(level, raw) => {
+                    if *level > 5 {
+                        problems.push(format!("标题层级超过五级（{level} 个 #）：{}", head(raw)));
+                    }
+                    if raw.trim().is_empty() {
+                        problems.push("有空标题".into());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if hash_title_required && attachment_needs_title {
+            problems.push("最后一份附件没写 `# 附件标题`".into());
+        }
+        if !attachments_allowed && attachment_markers > 0 {
+            problems.push(format!(
+                "{}不该有附件区段，却写了 {attachment_markers} 个附件标记",
+                kind_name
+            ));
+        }
+        // 研究报告正文的 `#` 是报告题名（「部分」区的 `#` 也归到这里），所以只要求
+        // 至少一个；其余文种正文区只能有一个 `#`。
+        if research {
+            if body_titles == 0 {
+                problems.push("研究报告正文区没有 `# 报告题名`".into());
+            }
+        } else if body_titles != 1 {
+            problems.push(format!(
+                "正文区的 `#` 标题有 {body_titles} 个，应当恰好 1 个"
+            ));
+        }
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+            // 手写编号只对 `##`~`#####` 剥：解析器只对 level > 1 的标题调
+            // `clean_heading_number`（parse.rs:720-726），`#` 文档标题与附件标题不剥，
+            // `######` 正文里本来就不排。
+            if !(2..=5).contains(&hashes)
+                || !trimmed
+                    .as_bytes()
+                    .get(hashes)
+                    .is_some_and(u8::is_ascii_whitespace)
+            {
+                continue;
+            }
+            let heading = trimmed[hashes..].trim();
+            if crate::export::clean_heading_number(heading) != heading {
+                problems.push(format!(
+                    "第{}行标题手写了编号「{}」，程序会剥掉重编",
+                    index + 1,
+                    head(heading)
+                ));
+            }
+        }
+
+        // 表格以分隔行的列数为准整形（`parse_table_cells`）：某一行多出来的单元格会被
+        // 悄悄丢掉，正文里就少了字。解析器自己只认「含 `|` 且至少两格」的表头行与
+        // 「每格至少三个短横」的分隔行，这里照它的判据扫一遍源码。
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let mut index = 0usize;
+        while index < lines.len() {
+            let row_is_table = lines[index].contains('|') && table_cells(lines[index]).len() >= 2;
+            let next_is_separator = lines
+                .get(index + 1)
+                .is_some_and(|line| is_table_separator_line(line));
+            if row_is_table && next_is_separator {
+                let width = table_cells(lines[index + 1]).len();
+                let mut row = index + 2;
+                while row < lines.len()
+                    && lines[row].contains('|')
+                    && table_cells(lines[row]).len() >= 2
+                {
+                    let cells = table_cells(lines[row]).len();
+                    if cells > width {
+                        problems.push(format!(
+                            "第{}行表格有 {cells} 格，多于分隔行的 {width} 列，多出来的格会被丢掉",
+                            row + 1
+                        ));
+                    }
+                    row += 1;
+                }
+                index = row.max(index + 1);
+                continue;
+            }
+            index += 1;
+        }
+        problems
+    }
+
+    /// 与 `export::parse::table_source_cells` 同一口径：剥掉首尾各一根竖线后按 `|` 切。
+    fn table_cells(line: &str) -> Vec<&str> {
+        let mut value = line.trim();
+        if let Some(rest) = value.strip_prefix('|') {
+            value = rest;
+        }
+        if let Some(rest) = value.strip_suffix('|') {
+            value = rest;
+        }
+        value.split('|').collect()
+    }
+
+    /// 与 `export::parse::is_table_separator` 同一口径：至少两格，每格去掉冒号后
+    /// 至少三个短横。
+    fn is_table_separator_line(line: &str) -> bool {
+        let cells = table_cells(line);
+        cells.len() >= 2
+            && cells.iter().all(|cell| {
+                let value = cell.trim().trim_matches(':');
+                value.chars().count() >= 3 && value.chars().all(|ch| ch == '-')
+            })
+    }
+
+    /// 评测用的一份稿件：文种与最低限度的锁定要素。要素本身的告警在模板与模型稿
+    /// 两边都会出现，对比时相减，所以这里不求填全，只求两边取同一个值。
+    fn eval_draft(kind_name: &str) -> crate::models::DraftInput {
+        use crate::models::{DraftInput, TemplateKind, TemplateProfile};
+
+        let kind = match kind_name {
+            "official-letter" => TemplateKind::OfficialLetter,
+            "phone-notice" => TemplateKind::PhoneNotice,
+            "phone-record" => TemplateKind::PhoneRecord,
+            "plain-document" => TemplateKind::PlainDocument,
+            "meeting-agenda" => TemplateKind::MeetingAgenda,
+            "white-paper" => TemplateKind::WhitePaper,
+            "red-head-approval" => TemplateKind::RedHeadApproval,
+            "research-report" => TemplateKind::ResearchReport,
+            other => panic!("manifest 里有不认识的文种：{other}"),
+        };
+        DraftInput {
+            kind,
+            date: "2026年10月18日".into(),
+            profile: TemplateProfile {
+                kind,
+                issuing_unit: "星海省教育厅".into(),
+                department_code: "星教函".into(),
+                document_number: "12".into(),
+                security_level: "秘密".into(),
+                security_period: "10年".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// 该文种的技能模板正文，校验器对比的基准。
+    fn skill_template(kind_name: &str) -> &'static str {
+        let wanted = format!("templates/{kind_name}.md");
+        FILES
+            .iter()
+            .find(|(path, _)| *path == wanted.as_str())
+            .map(|(_, content)| *content)
+            .unwrap_or_else(|| panic!("技能包里没有 {wanted}"))
+    }
+
+    /// 报错信息里只放开头一小段，够定位就行。
+    fn head(text: &str) -> String {
+        let trimmed = text.trim();
+        let mut out: String = trimmed.chars().take(40).collect();
+        if trimmed.chars().count() > 40 {
+            out.push('…');
+        }
+        out
+    }
+
+    /// 验收判据自己也要有测试：故意写坏的稿子必须被挑出来，写对的稿子不能被冤枉。
+    #[test]
+    fn model_output_checks_catch_the_usual_mistakes() {
+        let good = "# 关于××××的函\n\n<!-- [正文] -->\n\n正文一段。\n\n## 总体要求\n\n内容。\n\n特此函告。\n";
+        assert_eq!(
+            syntax_problems_in_model_output("official-letter", good),
+            Vec::<String>::new()
+        );
+
+        let manual_number = "# 关于××××的函\n\n<!-- [正文] -->\n\n## 一、总体要求\n\n内容。\n";
+        assert!(
+            syntax_problems_in_model_output("official-letter", manual_number)
+                .iter()
+                .any(|problem| problem.contains("手写了编号")),
+            "手写编号没被挑出来"
+        );
+
+        let untitled_attachment =
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n正文。\n\n<!-- [附件] -->\n\n没有标题的内容。\n";
+        assert!(
+            syntax_problems_in_model_output("official-letter", untitled_attachment)
+                .iter()
+                .any(|problem| problem.contains("附件没写")),
+            "没有标题的附件没被挑出来"
+        );
+
+        // 白头件只写标题和正文（见 prompt::kind_rules），带附件区段要报出来。
+        let white_with_attachment =
+            "# 关于××××的请示\n\n正文。\n\n<!-- [附件] -->\n\n# 附件标题\n\n内容。\n";
+        assert!(
+            syntax_problems_in_model_output("white-paper", white_with_attachment)
+                .iter()
+                .any(|problem| problem.contains("不该有附件区段")),
+            "白头件的附件区段没被挑出来"
+        );
+
+        // 三份文档里出现两个 `#`：正文区只许一个。
+        let two_titles = "# 标题\n\n正文。\n\n# 又一个标题\n\n内容。\n";
+        assert!(
+            syntax_problems_in_model_output("official-letter", two_titles)
+                .iter()
+                .any(|problem| problem.contains("恰好 1 个")),
+            "第二个文档标题没被挑出来"
+        );
+
+        // 研究报告的附录标题是 `## 附录标题`，不是 `#`，不能按公文附件去要求 `#`。
+        let research_appendix = "# 报告题名\n\n<!-- [正文] -->\n\n## 章标题\n\n<!-- [附录] -->\n\n## 附录一的标题\n\n内容。\n";
+        assert_eq!(
+            syntax_problems_in_model_output("research-report", research_appendix),
+            Vec::<String>::new()
+        );
+
+        // `#` 文档标题与附件标题不剥手写编号（parse.rs:720-726 只剥 level > 1），
+        // 所以「# 2026 年度……」不算错；`### 2026 年第三季度…` 才算。
+        let year_title =
+            "# 2026 年度全市政务数据资源共享开放工作要点\n\n<!-- [正文] -->\n\n内容。\n";
+        assert_eq!(
+            syntax_problems_in_model_output("plain-document", year_title),
+            Vec::<String>::new()
+        );
+        let year_heading =
+            "# ××工作要点\n\n<!-- [正文] -->\n\n### 2026 年第三季度共享数据统计\n\n内容。\n";
+        assert!(
+            syntax_problems_in_model_output("plain-document", year_heading)
+                .iter()
+                .any(|problem| problem.contains("手写了编号")),
+            "「数字 + 空格」开头的标题没被挑出来"
+        );
+
+        // 校验器对比：技能文档要求的 `【待核实：……】` 占位不算写错；
+        // 技能模板里没有的问题（空附件标记）要按校验器的话报出来。
+        let placeholder = "# 关于××××的函\n\n<!-- [正文] -->\n\n请于【待核实：反馈时间】前反馈。\n";
+        assert_eq!(
+            validator_problems_for_model_output("official-letter", placeholder),
+            Vec::<String>::new()
+        );
+        let empty_attachment = "# 关于××××的函\n\n<!-- [正文] -->\n\n正文。\n\n<!-- [附件] -->\n";
+        assert!(
+            validator_problems_for_model_output("official-letter", empty_attachment)
+                .iter()
+                .any(|problem| problem.contains("附件")),
+            "空附件标记没被校验器挑出来"
+        );
+
+        // 表格多出来的格会被解析器悄悄丢掉：四列表里混进五格的行要报出来。
+        let wide_row = "# ××工作要点\n\n<!-- [正文] -->\n\n| 序号 | 事项 | 单位 | 时限 |\n| --- | --- | --- | --- |\n| || 基础支撑组 |||\n";
+        assert!(
+            syntax_problems_in_model_output("plain-document", wide_row)
+                .iter()
+                .any(|problem| problem.contains("多于分隔行")),
+            "多出一格的表格行没被挑出来"
+        );
+        let correct_row = "# ××工作要点\n\n<!-- [正文] -->\n\n| 序号 | 事项 | 单位 | 时限 |\n| --- | --- | --- | --- |\n| 基础支撑组 |||\n";
+        assert_eq!(
+            syntax_problems_in_model_output("plain-document", correct_row),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn directory_export_writes_the_skill_folder() {
         let temp = tempfile::tempdir().expect("临时目录");

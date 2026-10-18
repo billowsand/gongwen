@@ -47,13 +47,22 @@ ALIASES = {
     "research": "research-report",
 }
 
-# 与程序 export::headings::clean_heading_number 同一组手写编号前缀。
-MANUAL_NUMBER = re.compile(
-    r"^(?:附录\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s"
-    r"|(?i:appendix)\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s"
-    r"|第[一二三四五六七八九十百零\d]+[章节条部分]|[（(][一二三四五六七八九十百零]+[）)]"
-    r"|[一二三四五六七八九十百零]+[、,.．]|[（(]\d+[）)]|\d+(?:\.\d+)+|\d+[.．、]\s|\d+\s)"
+# 与程序 export::headings::clean_heading_number 同一组手写编号前缀：逐条照抄
+# src/export/headings.rs:16-27 的 PATTERNS（程序按这个顺序反复剥，这里取并集判断
+# 「会不会被剥」）。注意 `\s*` 不能写成 `\s`：`第三部分部署` 中间没有空格，程序照样剥。
+MANUAL_NUMBER_PATTERNS = (
+    r"^附录\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s*",
+    r"^(?i:appendix)\s*[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*\s*[、.．:：]?\s*",
+    r"^第[一二三四五六七八九十百零\d]+(?:[章节条]|部分)\s*[、.．]?\s*",
+    r"^[（(][一二三四五六七八九十百零]+[）)]\s*[、.．]?\s*",
+    r"^[一二三四五六七八九十百零]+[、,.．]\s*",
+    r"^[（(]\d+[）)]\s*[、.．]?\s*",
+    r"^\(\d+\)\s*[、.．]?\s*",
+    r"^\d+(?:\.\d+)+[.．]?\s*",
+    r"^\d+[.．、]\s+",
+    r"^\d+\s+",
 )
+MANUAL_NUMBER = re.compile("(?:" + "|".join(pattern[1:] for pattern in MANUAL_NUMBER_PATTERNS) + ")")
 COMMENT = re.compile(r"^<!--\s*(.+?)\s*-->$")
 BRACKETED = re.compile(r"^[\[【]\s*([^\]】]+?)\s*[\]】]$")
 OFFICIAL_MARKERS = {
@@ -113,6 +122,29 @@ def table_cells(line: str) -> int:
     if value.endswith("|"):
         value = value[:-1]
     return len(value.split("|"))
+
+
+def is_table_row(line: str) -> bool:
+    """与程序 export::parse::is_table_row 同一判据：含 `|` 且至少两格。
+
+    表格不要求首尾竖线，所以 `甲 | 乙` 也算一行。
+    """
+    return "|" in line and table_cells(line) >= 2
+
+
+def is_table_separator(line: str) -> bool:
+    """与程序 export::parse::is_table_separator 同一判据：每格至少三个短横。"""
+    cells = [cell.strip() for cell in line.split("|")]
+    if line.strip().startswith("|"):
+        cells = cells[1:]
+    if line.strip().endswith("|"):
+        cells = cells[:-1]
+    if len(cells) < 2:
+        return False
+    return all(
+        len(cell.strip().strip(":")) >= 3 and set(cell.strip().strip(":")) <= {"-"}
+        for cell in cells
+    )
 
 
 def check(text: str, kind: str) -> Report:
@@ -299,32 +331,62 @@ def check(text: str, kind: str) -> Report:
     return report
 
 
+def looks_like_separator(line: str) -> bool:
+    """像分隔行但不是合格分隔行的行：只有 `|`、`-`、`:` 和空白。"""
+    value = line.strip()
+    if "-" not in value or "|" not in value:
+        return False
+    return re.fullmatch(r"[|\-:\s]+", value) is not None
+
+
 def check_tables(lines: list[str], report: Report) -> None:
+    """按解析器的判据查表格：一行含 `|` 且紧接分隔行才成表，不要求首尾竖线。
+
+    围栏里的内容不算（Mermaid 里就有 `|`），所以进出 ``` 都要跳过。
+    """
     index = 0
+    in_fence = False
     while index < len(lines):
         line = lines[index]
-        if (
-            line.startswith("|")
-            and index + 1 < len(lines)
-            and re.fullmatch(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?", lines[index + 1])
-        ):
+        if line.startswith("```"):
+            in_fence = not in_fence
+            index += 1
+            continue
+        if in_fence:
+            index += 1
+            continue
+        if not is_table_row(line):
+            index += 1
+            continue
+        if index + 1 < len(lines) and is_table_separator(lines[index + 1]):
             width = table_cells(lines[index + 1])
             if table_cells(line) != width:
                 report.error(index + 1, "表头列数与分隔行不一致")
             index += 2
-            while index < len(lines) and lines[index].startswith("|"):
+            while index < len(lines) and is_table_row(lines[index]):
                 cells = table_cells(lines[index])
                 if cells > width:
                     report.error(index + 1, f"这一行有 {cells} 格，多于表头的 {width} 列")
                 index += 1
             continue
-        if line.startswith("|") and (index == 0 or not lines[index - 1].startswith("|")):
-            nxt = lines[index + 1] if index + 1 < len(lines) else ""
-            if not nxt.startswith("|"):
-                report.warn(index + 1, "以 | 开头的单行不构成表格，会按正文印出")
-            else:
-                report.error(index + 1, "表格缺少分隔行 `| --- | --- |`")
-        index += 1
+        # 含 `|` 却没有合格分隔行：解析器要求分隔行紧跟表头行，否则整组按正文印出。
+        start = index
+        while index < len(lines) and is_table_row(lines[index]):
+            index += 1
+        rows = index - start
+        following = lines[index] if index < len(lines) else ""
+        if rows >= 2 or looks_like_separator(following):
+            report.error(
+                start + 1,
+                "这一组含 `|` 的行不构成合格表格：分隔行必须是紧跟表头下一行的 "
+                "`| --- | --- |`（每格至少 3 个短横、格数与表头一致），否则整张表按正文印出",
+            )
+        else:
+            report.warn(
+                start + 1,
+                "这一行含 `|` 却没有分隔行，不构成表格，会按正文印出；"
+                "正文里要写字面的 `|` 请避开",
+            )
 
 
 def check_agenda(nonblank: list[tuple[int, str]], report: Report) -> None:
@@ -359,15 +421,112 @@ def check_agenda(nonblank: list[tuple[int, str]], report: Report) -> None:
                 report.warn(0, f"非末项议程以分号结尾：{line[:12]}…")
 
 
+def selftest() -> int:
+    """自查判据本身：故意写坏的稿子要报出来，写对的不能被冤枉。
+
+    改过本脚本（尤其是手写编号前缀、表格判据）就跑一次
+    `python check_gongwen_md.py --selftest`。用例与程序行为一一对应，
+    改判据时先在这里体现预期。
+    """
+    # (文种, 稿子, 期望命中的 ERROR 关键词；None 表示不许有 ERROR)
+    cases: list[tuple[str, str, str | None]] = [
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n## 第三部分部署\n\n内容。\n",
+            "手写了编号",
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n## 第三分部署\n\n内容。\n",
+            None,
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n## 一、总体要求\n\n内容。\n",
+            "手写了编号",
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n甲 | 乙\n--- | ---\n1 | 2 | 3\n",
+            "多于表头",
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n",
+            None,
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n| 甲 | 乙 |\n| ---: |\n| 1 | 2 |\n",
+            "不构成合格表格",
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n这一段提到 A | B 的写法。\n",
+            None,
+        ),
+        (
+            "official-letter",
+            "# 关于××××的函\n\n<!-- [正文] -->\n\n```mermaid\nflowchart LR\n  A[收文] -->|是| B[会签]\n```\n\n图：办理流程\n",
+            None,
+        ),
+        (
+            "white-paper",
+            "# 关于××××的请示\n\n正文。\n\n- 第一项\n",
+            "不得使用列表",
+        ),
+        (
+            "meeting-agenda",
+            "# 会议\n\n一、时间地点：2026年10月20日（星期二）14:30，三楼会议室。\n",
+            "会议议程缺少固定行",
+        ),
+        (
+            "research-report",
+            "# 报告题名\n\n<!-- [正文] -->\n\n## 章标题\n\n如 {@sec:none} 所述。\n",
+            "找不到对应的锚点",
+        ),
+        (
+            "research-report",
+            "# 报告题名\n\n<!-- [正文] -->\n\n## 章标题 {#sec:one}\n\n如 {@sec:one} 所述。\n",
+            None,
+        ),
+    ]
+    failed = 0
+    for number, (kind, text, expected) in enumerate(cases, start=1):
+        errors = [message for level, _, message in check(text, kind).items if level == "ERROR"]
+        if expected is None:
+            if errors:
+                failed += 1
+                print(f"用例 {number}（{kind}）：不该报错，却报了 {errors}")
+        elif not any(expected in message for message in errors):
+            failed += 1
+            print(f"用例 {number}（{kind}）：应报「{expected}」，实际报 {errors}")
+    total = len(cases)
+    print(f"自查 {total - failed}/{total} 条通过。", file=sys.stderr)
+    return 1 if failed else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="检查 Markdown 是否符合公文助手的公文子集")
-    parser.add_argument("file", help="Markdown 文件路径，- 表示从标准输入读取")
+    parser.add_argument("file", nargs="?", help="Markdown 文件路径，- 表示从标准输入读取")
     parser.add_argument(
         "--kind",
         default="official-letter",
         help="文种：公函 / 电话通知 / 电话记录单 / 普通公文 / 会议议程 / 白头件 / 红头呈批件 / 研究报告（也认英文名）",
     )
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="不检查稿件，改为自查本脚本的判据（改过脚本就跑一次）",
+    )
     args = parser.parse_args()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    if args.selftest:
+        return selftest()
+    if not args.file:
+        parser.error("要给一个 Markdown 文件，或用 --selftest 自查")
     kind = ALIASES.get(args.kind, args.kind)
     if kind not in KINDS:
         parser.error(f"不认识的文种：{args.kind}")
@@ -376,9 +535,6 @@ def main() -> int:
     else:
         with open(args.file, encoding="utf-8-sig") as handle:
             text = handle.read()
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
     print(f"按「{KINDS[kind]}」检查", file=sys.stderr)
     return check(text, kind).print()
 
